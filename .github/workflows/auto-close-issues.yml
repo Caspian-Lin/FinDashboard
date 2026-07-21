@@ -1,0 +1,101 @@
+# 合并 PR 后自动关闭关联的 issue。
+#
+# 为什么需要这个 workflow:
+# - GitHub 原生的 auto-close 只在 PR 合并到**默认分支**时触发;
+# - 本仓库工作流是 PR → dev / m/<里程碑>,issue 编号常在合到非默认分支时就
+#   期望关闭(详见 AGENTS.md §Git 工作流)。
+# - 因此本 workflow 监听所有 PR 的 closed 事件,只要 merged == true,
+#   扫描 PR body + 所有 commit message 里的 Closes/Fixes/Resolves #N,
+#   把对应 issue 一并关闭。
+#
+# 与 GitHub 原生功能的协同:
+# - 二者并存,不冲突 —— 已关闭的 issue 重复 close 会被跳过(见 close 步骤的 state 检查);
+# - 即便本 workflow 失败,GitHub 原生功能在合到默认分支时仍会兜底。
+#
+# 支持的关键字(大小写不敏感,GitHub 官方约定):
+#   close / closes / closed
+#   fix  / fixes  / fixed
+#   resolve / resolves / resolved
+# 后跟 `#N`(N 为 issue 编号);列表语法 `#1, #2` 暂不支持(P0 不需要)。
+
+name: Auto-close linked issues
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  close-linked-issues:
+    # 仅在 PR 实际合并(非单纯关闭 / 非 reject)时触发
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # issues: write  —— 关 issue 必备
+      issues: write
+      # contents: read —— 读 commit 信息
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Collect PR body + all commit messages
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # 汇总 PR body + PR 内所有 commit message 到一个文件
+          {
+            printf '%s\n\n' "$PR_BODY"
+            gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" \
+              --paginate \
+              --jq '.[].commit.message'
+          } > /tmp/linked-text.txt
+
+      - name: Extract issue numbers
+        id: extract
+        run: |
+          set -euo pipefail
+          # 1) 匹配 Closes/Fixes/Resolves #N,容忍中间的空格 / 冒号
+          # 2) 只保留 #N 中的数字部分
+          # 3) 去重排序,转成空格分隔
+          ISSUES=$(
+            grep -ioE \
+              '(close[sd]?|fix(es|ed)?|resolve[sd]?)[[:space:]:]+#[0-9]+' \
+              /tmp/linked-text.txt \
+              | grep -oE '#[0-9]+' \
+              | tr -d '#' \
+              | sort -un \
+              | tr '\n' ' ' \
+              | xargs
+          )
+          echo "Found linked issues: ${ISSUES:-<none>}"
+          echo "issues=$ISSUES" >> "$GITHUB_OUTPUT"
+
+      - name: Close linked issues
+        if: steps.extract.outputs.issues != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          # 注意:此处不要 set -e —— 某个 issue 已关闭 / 无权限 / 跨 repo 不应让整个 job 失败
+          for n in ${{ steps.extract.outputs.issues }}; do
+            STATE=$(gh issue view "$n" --repo "$REPO" \
+              --json state --jq '.state' 2>/dev/null || echo "MISSING")
+            if [ "$STATE" = "OPEN" ]; then
+              if gh issue close "$n" --repo "$REPO" \
+                  --reason completed \
+                  --comment "由 PR #${PR_NUMBER}(${PR_URL})合并自动关闭(auto-close workflow)"; then
+                echo "::notice::Closed issue #$n"
+              else
+                echo "::warning::Failed to close issue #$n (权限不足或跨 fork?)"
+              fi
+            else
+              echo "::notice::Issue #$n state=$STATE, 跳过"
+            fi
+          done
