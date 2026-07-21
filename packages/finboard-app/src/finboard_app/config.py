@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     log_json: bool = True
 
     # ---- 数据库 ----
-    db_url: str = "postgresql+psycopg://finboard:finboard@127.0.0.1:5432/finboard"
+    db_url: str = "postgresql+psycopg://findashboard:CHANGE_ME@127.0.0.1:5432/findashboard"
     db_pool_size: int = 5
     db_max_overflow: int = 10
 

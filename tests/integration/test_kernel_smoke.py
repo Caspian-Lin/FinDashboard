@@ -43,7 +43,7 @@ from finboard_shared.types import (
 )
 
 DB_URL = os.getenv(
-    "FINBOARD_DB_URL", "postgresql+psycopg://finboard:finboard@127.0.0.1:5432/finboard"
+    "FINBOARD_DB_URL", "postgresql+psycopg://findashboard:CHANGE_ME@127.0.0.1:5432/findashboard"
 )
 
 

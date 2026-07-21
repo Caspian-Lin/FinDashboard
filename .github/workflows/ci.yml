@@ -21,19 +21,19 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: finboard
-          POSTGRES_PASSWORD: finboard
-          POSTGRES_DB: finboard
+          POSTGRES_USER: findashboard
+          POSTGRES_PASSWORD: findashboard
+          POSTGRES_DB: findashboard
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U finboard"
+          --health-cmd "pg_isready -U findashboard"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
 
     env:
       FINBOARD_ENV: ci
-      FINBOARD_DB_URL: postgresql+psycopg://finboard:finboard@127.0.0.1:5432/finboard
+      FINBOARD_DB_URL: postgresql+psycopg://findashboard:findashboard@127.0.0.1:5432/findashboard
       FINBOARD_BROKER: mock
 
     steps:

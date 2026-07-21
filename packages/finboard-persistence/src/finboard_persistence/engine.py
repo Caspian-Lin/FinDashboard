@@ -10,7 +10,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import create_async_engine as _sa_create_async_engine
 
-DEFAULT_DB_URL = "postgresql+psycopg://finboard:finboard@127.0.0.1:5432/finboard"
+DEFAULT_DB_URL = "postgresql+psycopg://findashboard:CHANGE_ME@127.0.0.1:5432/findashboard"
 
 
 def create_async_engine(
