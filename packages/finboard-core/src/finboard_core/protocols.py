@@ -2,6 +2,7 @@
 
 * ``RiskChecker`` 由 :mod:`finboard_risk` 实现,本包通过 Protocol 引用,
   避免对 ``finboard-risk`` 包的硬依赖 —— 这样 ``finboard-core`` 可以独立单测。
+* ``Reconciler`` 由 :mod:`finboard_reconcile` 实现,同理。
 * Protocol 仅描述"必须有什么",实现方可以自由扩展。
 """
 
@@ -26,8 +27,31 @@ class RiskChecker(Protocol):
         * Kill Switch 处于 NO_NEW_ORDERS / REDUCE_ONLY / HALT 时,
           对应场景一律抛 :class:`KillSwitchActiveError`。
         """
+
         ...
 
     async def can_place_new_orders(self) -> bool:
         """Kill Switch 软探测,不下单情况下查询当前是否允许新单。"""
+        ...
+
+
+class ReconciliationResult(Protocol):
+    """核对结果的契约(结构匹配 :class:`finboard_reconcile.ReconciliationReport`)。"""
+
+    @property
+    def ok(self) -> bool:
+        """无任何差异时为 True。"""
+        ...
+
+    def summary(self) -> str:
+        """人类可读的汇总。"""
+        ...
+
+
+@runtime_checkable
+class Reconciler(Protocol):
+    """核对引擎契约。kernel.start 时调用以执行启动核对(交易安全红线)。"""
+
+    async def run(self) -> ReconciliationResult:
+        """执行一次本地 ↔ 券商核对并返回结果。"""
         ...

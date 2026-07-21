@@ -48,9 +48,12 @@ class KernelComponents:
         """在已有的 ``AsyncSession`` 上构造一个 :class:`TradingKernel`。
 
         由调用方负责 session 生命周期与 ``commit``。
+        生产 kernel 会注入 :class:`ReconciliationEngine`,使 ``start`` 执行
+        启动核对(交易安全红线:核对未通过禁止下单)。
         """
         from finboard_core import TradingKernel
 
+        reconciler = self.new_reconciler(session)
         return TradingKernel(
             broker=self.broker,
             account_id=self.account_id,
@@ -61,6 +64,7 @@ class KernelComponents:
             account_repo=AccountRepository(session),
             audit_repo=AuditLogRepository(session),
             risk_checker=self.risk_checker,
+            reconciler=reconciler,
         )
 
     def new_reconciler(self, session: AsyncSession) -> ReconciliationEngine:
