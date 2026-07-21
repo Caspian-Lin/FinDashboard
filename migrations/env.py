@@ -21,6 +21,17 @@ from sqlalchemy import engine_from_config, pool
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packages" / "finboard-persistence" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packages" / "finboard-shared" / "src"))
 
+# 关键修复:alembic 进程本身不读 .env(pydantic-settings 才读),
+# 这里用 python-dotenv 显式加载,让 FINBOARD_DB_URL 等变量进入 os.environ。
+# override=False:已有真实环境变量(如 CI)优先于 .env 文件。
+try:
+    from dotenv import load_dotenv
+
+    _repo_root = Path(__file__).resolve().parent.parent
+    load_dotenv(_repo_root / ".env", override=False)
+except ImportError:  # pragma: no cover - pydantic-settings 间接依赖,缺失说明环境异常
+    pass
+
 from finboard_persistence import models  # noqa: F401  必须导入以注册表
 from finboard_persistence.base import Base
 

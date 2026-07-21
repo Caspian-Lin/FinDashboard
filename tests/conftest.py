@@ -4,9 +4,20 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+
+# pytest 进程本身不读 .env(pydantic-settings 才读),
+# 这里显式加载,让 tests/integration 里的 os.getenv("FINBOARD_DB_URL") 拿到真实值。
+# override=False:CI 中通过真环境变量注入时优先于 .env。
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+except ImportError:  # pragma: no cover
+    pass
 
 from finboard_broker import MockBroker
 from finboard_shared.identifiers import AccountId

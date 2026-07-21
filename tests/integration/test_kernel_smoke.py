@@ -47,6 +47,27 @@ DB_URL = os.getenv(
 )
 
 
+async def _wait_for_status(
+    repo,
+    client_order_id: str,
+    target: OrderStatus,
+    *,
+    wait_seconds: float = 2.0,
+    interval: float = 0.02,
+):
+    """Polling 等待订单达到目标状态;OrderManager 的 broker-event 消费是异步的。"""
+    import asyncio
+
+    async with asyncio.timeout(wait_seconds):
+        last = None
+        while True:
+            last = await repo.get(client_order_id)
+            if last is not None and last.status is target:
+                return last
+            await asyncio.sleep(interval)
+    _ = last  # pragma: no cover
+
+
 @pytest.fixture(scope="module")
 def _db_url() -> str:
     return DB_URL
@@ -123,8 +144,14 @@ async def test_place_limit_and_cancel(
     assert order.client_order_id.startswith("F-")
 
     await kernel.order_manager.cancel_order(str(order.client_order_id))
-    refreshed = await kernel.order_manager._orders.get(
-        str(order.client_order_id)
+
+    # cancel_order 把状态置为 CANCEL_PENDING 后立即返回;真正的 CANCELLED
+    # 要等 OrderManager 的 broker-event 消费 task 处理 ORDER_CANCELLED 事件后才落库。
+    # 这里 polling 等待终态,避免依赖固定 sleep 时长。
+    refreshed = await _wait_for_status(
+        kernel.order_manager._orders,
+        str(order.client_order_id),
+        OrderStatus.CANCELLED,
     )
     assert refreshed is not None
     assert refreshed.status is OrderStatus.CANCELLED
