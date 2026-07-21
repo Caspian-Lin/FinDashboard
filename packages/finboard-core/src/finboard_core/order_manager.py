@@ -1,0 +1,334 @@
+"""``OrderManager`` —— 订单全生命周期的中枢。
+
+职责:
+1. 接收 ``OrderRequest``,生成 ``client_order_id`` 并构造领域 ``Order``;
+2. 调用注入的 :class:`RiskChecker`,通过则进入 ``RISK_CHECKED``;
+3. 持久化(``OrderRepository.add``),DB UNIQUE 是重复下单的最后一道兜底;
+4. 提交 broker(``BrokerAdapter.place_order``);
+5. 处理 broker 推送的回报事件(委托确认 / 成交 / 拒单 / 撤单);
+6. 在每次状态变化后发布对应的 :mod:`finboard_core.events` 给 EventBus。
+
+**红线**(见 AGENTS.md):
+* ``client_order_id`` 由本地生成,不接受外部传入;
+* 下单超时 → 置 ``UNKNOWN`` → 查券商确认不存在后才允许用新 ID 重发;
+* 状态迁移全部经 :class:`OrderStateMachine.check_transition`。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import structlog
+
+from finboard_broker.base import BrokerAdapter, SubmissionResult
+from finboard_broker.events import BrokerEvent, BrokerEventType
+from finboard_core.bus import EventBus
+from finboard_core.events import (
+    OrderCancelled,
+    OrderCreated,
+    OrderFilled,
+    OrderRejected,
+    OrderSubmitted,
+)
+from finboard_core.protocols import RiskChecker
+from finboard_core.state_machine import OrderStateMachine
+from finboard_persistence.repo import (
+    AuditLogRepository,
+    FillRepository,
+    OrderRepository,
+)
+from finboard_shared.exceptions import BrokerTimeoutError
+from finboard_shared.identifiers import AccountId, ClientOrderId, generate_client_order_id
+from finboard_shared.models import Order, OrderRequest
+from finboard_shared.types import (
+    BrokerKind,
+    OrderStatus,
+    OrderType,
+    RejectReason,
+    Side,
+)
+
+logger = structlog.get_logger(__name__)
+
+
+class OrderManager:
+    """订单管理器(单账户 P0 范围)。"""
+
+    def __init__(
+        self,
+        *,
+        broker: BrokerAdapter,
+        order_repo: OrderRepository,
+        fill_repo: FillRepository,
+        audit_repo: AuditLogRepository,
+        risk_checker: RiskChecker,
+        event_bus: EventBus,
+        account_id: AccountId,
+    ) -> None:
+        self._broker = broker
+        self._orders = order_repo
+        self._fills = fill_repo
+        self._audit = audit_repo
+        self._risk = risk_checker
+        self._bus = event_bus
+        self._account_id = account_id
+        # 内存活动订单缓存,减少高频回报时的 DB 查询
+        self._inflight: dict[str, Order] = {}
+        self._consumer_task: asyncio.Task[None] | None = None
+
+    # ------------------------------------------------------------------ 生命周期
+    async def start(self) -> None:
+        if self._consumer_task is not None:
+            return
+        # 把 DB 中的活动订单加载到内存缓存(重启恢复 P0 后期完善)
+        active = await self._orders.list_active(str(self._account_id))
+        for order in active:
+            self._inflight[str(order.client_order_id)] = order
+        self._consumer_task = asyncio.create_task(
+            self._consume_broker_events(), name="broker-event-consumer"
+        )
+        logger.info(
+            "order_manager.started",
+            account_id=str(self._account_id),
+            active_orders=len(self._inflight),
+        )
+
+    async def stop(self) -> None:
+        if self._consumer_task is None:
+            return
+        self._consumer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._consumer_task
+        self._consumer_task = None
+
+    # ------------------------------------------------------------------ 下单
+    async def place_order(self, request: OrderRequest) -> Order:
+        """完整下单链路:风控 → 入库 → 提交 broker → 状态推进。"""
+        if str(request.account_id) != str(self._account_id):
+            raise ValueError(
+                f"OrderRequest.account_id({request.account_id}) 与 OrderManager.account_id"
+                f"({self._account_id}) 不一致"
+            )
+
+        # 1) Kill Switch 软探测 + 风控规则
+        await self._risk.check(request)
+
+        # 2) 生成 client_order_id + 构造 Order
+        client_order_id = generate_client_order_id()
+        order = Order(
+            client_order_id=client_order_id,
+            account_id=self._account_id,
+            broker_kind=self._broker.kind,
+            symbol=request.symbol,
+            side=request.side,
+            order_type=request.order_type,
+            quantity=request.quantity,
+            strategy_id=request.strategy_id,
+            price=request.price,
+            time_in_force=request.time_in_force,
+            position_side=request.position_side,
+            status=OrderStatus.RISK_CHECKED,
+            risk_checked_at=datetime.now(UTC),
+        )
+
+        # 3) DB 落地(UNIQUE 索引兜底防重复)
+        await self._orders.add(order)
+        self._inflight[str(client_order_id)] = order
+        await self._bus.publish(OrderCreated(order=order))
+
+        # 4) 推进到 SUBMITTING
+        await self._transition(order, OrderStatus.SUBMITTING)
+
+        # 5) 提交 broker(超时走 UNKNOWN 红线)
+        submission = await self._submit_to_broker(order)
+        if not submission.accepted:
+            await self._reject(
+                order,
+                reason=submission.reject_reason or RejectReason.BROKER_REJECTED,
+                message="broker 立即拒单",
+            )
+            return order
+
+        # 6) broker 同步 ACK → ACKNOWLEDGED;否则停在 SUBMITTED 等回报
+        if submission.broker_order_id:
+            order.broker_order_id = submission.broker_order_id
+            await self._transition(order, OrderStatus.SUBMITTED)
+            await self._transition(order, OrderStatus.ACKNOWLEDGED)
+        else:
+            await self._transition(order, OrderStatus.SUBMITTED)
+        await self._orders.update_state(order)
+        await self._bus.publish(OrderSubmitted(order=order))
+        return order
+
+    async def cancel_order(self, client_order_id: str) -> None:
+        order = self._inflight.get(client_order_id)
+        if order is None:
+            order = await self._orders.get(client_order_id)
+            if order is None:
+                raise KeyError(f"未找到订单 {client_order_id}")
+            self._inflight[client_order_id] = order
+        if not order.is_active:
+            raise ValueError(f"订单 {client_order_id} 已不可撤,状态 {order.status.value}")
+        await self._transition(order, OrderStatus.CANCEL_PENDING)
+        await self._orders.update_state(order)
+        # 撤单同样适用超时不重试红线;此处由 broker 内部抛 BrokerTimeoutError
+        try:
+            await self._broker.cancel_order(client_order_id)
+        except BrokerTimeoutError:
+            # 不重试,等待回报或人工介入
+            logger.warning(
+                "order_manager.cancel_timeout",
+                client_order_id=client_order_id,
+            )
+            raise
+
+    # ------------------------------------------------------------------ 回报消费
+    async def _consume_broker_events(self) -> None:
+        async for event in self._broker.events():
+            try:
+                await self._handle_broker_event(event)
+            except Exception:
+                logger.exception(
+                    "order_manager.event_handler_failed",
+                    event_type=event.type.value,
+                    client_order_id=str(event.client_order_id),
+                )
+
+    async def _handle_broker_event(self, event: BrokerEvent) -> None:
+        if event.type is BrokerEventType.ORDER_ACCEPTED:
+            await self._on_accepted(event)
+        elif event.type is BrokerEventType.ORDER_FILLED:
+            await self._on_filled(event)
+        elif event.type is BrokerEventType.ORDER_CANCELLED:
+            await self._on_cancelled(event)
+        elif event.type is BrokerEventType.ORDER_REJECTED:
+            await self._on_rejected(event)
+        elif event.type in (
+            BrokerEventType.CONNECTED,
+            BrokerEventType.DISCONNECTED,
+            BrokerEventType.ERROR,
+        ):
+            logger.info(
+                "order_manager.broker_session_event", event_type=event.type.value
+            )
+
+    async def _on_accepted(self, event: BrokerEvent) -> None:
+        if event.client_order_id is None:
+            return
+        order = await self._get_order_inflight(event.client_order_id)
+        if order is None:
+            return
+        if event.broker_order_id and order.broker_order_id is None:
+            order.broker_order_id = event.broker_order_id
+        if order.status in (OrderStatus.SUBMITTING, OrderStatus.SUBMITTED, OrderStatus.UNKNOWN):
+            await self._transition(order, OrderStatus.ACKNOWLEDGED)
+            order.acknowledged_at = datetime.now(UTC)
+            await self._orders.update_state(order)
+
+    async def _on_filled(self, event: BrokerEvent) -> None:
+        if event.fill is None or event.client_order_id is None:
+            return
+        fill = event.fill
+        order = await self._get_order_inflight(event.client_order_id)
+        if order is None:
+            return
+        # 幂等:DB 端按 fill_id UNIQUE 去重
+        await self._fills.add(fill)
+        # 更新订单聚合字段
+        order.filled_quantity += fill.quantity
+        if order.average_fill_price is None:
+            order.average_fill_price = fill.price
+        else:
+            order.average_fill_price = (
+                (order.average_fill_price * (order.filled_quantity - fill.quantity))
+                + (fill.price * fill.quantity)
+            ) / order.filled_quantity
+        target = (
+            OrderStatus.FILLED
+            if order.remaining_quantity <= Decimal("0")
+            else OrderStatus.PARTIALLY_FILLED
+        )
+        await self._transition(order, target)
+        await self._orders.update_state(order)
+        await self._bus.publish(OrderFilled(order=order, fill=fill))
+
+    async def _on_cancelled(self, event: BrokerEvent) -> None:
+        if event.client_order_id is None:
+            return
+        order = await self._get_order_inflight(event.client_order_id)
+        if order is None:
+            return
+        await self._transition(order, OrderStatus.CANCELLED)
+        await self._orders.update_state(order)
+        await self._bus.publish(OrderCancelled(order=order))
+
+    async def _on_rejected(self, event: BrokerEvent) -> None:
+        if event.client_order_id is None:
+            return
+        order = await self._get_order_inflight(event.client_order_id)
+        if order is None:
+            return
+        await self._reject(
+            order,
+            reason=event.reject_reason or RejectReason.BROKER_REJECTED,
+            message=event.message,
+        )
+
+    # ------------------------------------------------------------------ 内部
+    async def _submit_to_broker(self, order: Order) -> SubmissionResult:
+        """调用 broker 下单;严格处理超时红线。"""
+        try:
+            return await self._broker.place_order(order)
+        except BrokerTimeoutError:
+            # **红线**:超时后立即置 UNKNOWN,不重发;等待查询驱动恢复
+            await self._transition(order, OrderStatus.UNKNOWN)
+            order.submitted_at = datetime.now(UTC)
+            await self._orders.update_state(order)
+            await self._audit.add(
+                actor="system",
+                action="submit_timeout",
+                target=str(order.client_order_id),
+                payload=f"broker={order.broker_kind.value}",
+            )
+            logger.error(
+                "order_manager.submit_timeout_unknown",
+                client_order_id=str(order.client_order_id),
+                broker=order.broker_kind.value,
+            )
+            raise
+        except Exception:
+            await self._transition(order, OrderStatus.REJECTED)
+            order.reject_reason = RejectReason.BROKER_REJECTED
+            await self._orders.update_state(order)
+            raise
+
+    async def _transition(self, order: Order, to: OrderStatus) -> None:
+        OrderStateMachine.check_transition(order.status, to)
+        order.status = to
+        order.touch()
+
+    async def _reject(
+        self, order: Order, *, reason: RejectReason, message: str
+    ) -> None:
+        await self._transition(order, OrderStatus.REJECTED)
+        order.reject_reason = reason
+        order.reject_message = message
+        await self._orders.update_state(order)
+        await self._bus.publish(OrderRejected(order=order, reason=reason, message=message))
+
+    async def _get_order_inflight(self, client_order_id: ClientOrderId) -> Order | None:
+        key = str(client_order_id)
+        order = self._inflight.get(key)
+        if order is not None:
+            return order
+        db_order = await self._orders.get(key)
+        if db_order is not None:
+            self._inflight[key] = db_order
+            return db_order
+        return None
+
+    # ------------------------------------------------------------------ 占位
+    _ = (BrokerKind, OrderType, Side)  # 防止未使用告警

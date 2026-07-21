@@ -1,0 +1,64 @@
+name: 功能 / 任务
+description: 所有进入开发的功能、修复、重构事项,必须填写此模板
+labels: ["triage"]
+projects: ["FinDashboard"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本模板与 `AGENTS.md` §Issue 规范一致。字段缺失的 issue 不予开工。
+
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: 为什么做这件事(业务 / 技术 / 风险驱动力)。一句话说清的不要写两段。
+      placeholder: |
+        例:重启后本地订单状态会丢,导致无法判断"哪些活动订单是我发的",存在重复下单风险。
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题 / 需求描述
+      description: |
+        具体要解决什么。现状(现有代码、日志、数据)是什么,期望状态是什么。
+        触及交易安全红线的必须明确标出。
+      placeholder: |
+        现状:
+        期望:
+        红线:
+    validations:
+      required: true
+
+  - type: textarea
+    id: related
+    attributes:
+      label: 相关 issue / PR
+      description: 用 GitHub 关键字关联 `blocked by #N` / `blocks #N` / `related to #N` / `duplicate of #N`
+      placeholder: |
+        - blocked by #12
+        - related to #7
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acceptance
+    attributes:
+      label: 验收标准 (Acceptance Criteria)
+      description: 可勾选清单,pass/fail 明确,覆盖功能 / 测试 / 文档 / 风险
+      options:
+        - label: 功能点已对齐 phase1_doc.md §3.4 相关步骤
+        - label: 单元测试已补充,覆盖关键分支与边界
+        - label: 集成测试 / 故障注入场景已覆盖(若涉及)
+        - label: 文档已更新(AGENTS.md / README / 接口契约)
+        - label: 风险红线已自查:未触及 / 已触及但已与用户书面确认
+  - type: textarea
+    id: acceptance_extra
+    attributes:
+      label: 验收标准补充(自由清单)
+      description: 若上面勾选项不足以描述,在此处以可勾选清单补充(一行一条)。
+      placeholder: |
+        - [ ] 重启后核对通过前禁止发新单
+        - [ ] UNKNOWN 状态订单须先查券商确认不存在后才允许重发

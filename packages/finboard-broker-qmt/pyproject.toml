@@ -1,0 +1,18 @@
+[project]
+name = "finboard-broker-qmt"
+version = "0.1.0"
+description = "QMT (xtquant) broker adapter — A股。当前为 stub,P1 阶段填充。"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = ["finboard-shared", "finboard-broker"]
+
+# xtquant 仅 QMT 客户端提供(Windows only),不声明为依赖;实盘部署时手工安装。
+# 安装方式见 README。
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/finboard_broker_qmt"]

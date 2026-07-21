@@ -1,0 +1,150 @@
+[project]
+name = "findashboard"
+version = "0.1.0"
+description = "Production-grade quantitative trading system (modular monolith)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "FinDashboard Team" }]
+
+# 根包本身不打包发布,仅作为 workspace 元包
+[tool.uv.workspace]
+members = ["packages/*"]
+
+# workspace 内部包间引用始终走本地源
+[tool.uv.sources]
+finboard-shared = { workspace = true }
+finboard-broker = { workspace = true }
+finboard-broker-qmt = { workspace = true }
+finboard-broker-ctp = { workspace = true }
+finboard-persistence = { workspace = true }
+finboard-core = { workspace = true }
+finboard-risk = { workspace = true }
+finboard-reconcile = { workspace = true }
+finboard-app = { workspace = true }
+
+# 开发期统一依赖,改用 PEP 735 dependency-groups(uv 推荐写法)
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=5.0",
+  "anyio>=4.4",
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "types-PyYAML>=6.0",
+  "ipython>=8.27",
+]
+
+# -----------------------------------------------------------------------------
+# Ruff: lint + format
+# -----------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["packages/*/src", "tests", "migrations"]
+extend-exclude = ["packages/*/src/*/py.typed"]
+
+[tool.ruff.lint]
+# 启用的检查集合:
+#   E/W = pycodestyle, F = pyflakes, I = isort, B = bugbear, UP = pyupgrade
+#   N = naming, C4 = comprehensions, SIM = simplifications
+#   TID = tidy-imports, PT = pytest-style, ASYNC = async lint, RUF = ruff 自有
+select = ["E", "W", "F", "I", "B", "UP", "N", "C4", "SIM", "TID", "PT", "ASYNC", "RUF"]
+ignore = [
+  "E501",   # 行长由 formatter 控制
+  "B008",   # FastAPI / typer 默认参数中调用函数(框架约定)
+  "SIM117", # 允许多层 with 嵌套,可读性优先
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "SLF001"]
+"migrations/**" = ["E402", "N999"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+  "finboard_shared",
+  "finboard_broker",
+  "finboard_broker_qmt",
+  "finboard_broker_ctp",
+  "finboard_persistence",
+  "finboard_core",
+  "finboard_risk",
+  "finboard_reconcile",
+  "finboard_app",
+]
+
+# -----------------------------------------------------------------------------
+# mypy: 严格类型检查
+# -----------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+no_implicit_optional = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+show_error_codes = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = [
+  "packages/finboard-shared/src",
+  "packages/finboard-broker/src",
+  "packages/finboard-broker-qmt/src",
+  "packages/finboard-broker-ctp/src",
+  "packages/finboard-persistence/src",
+  "packages/finboard-core/src",
+  "packages/finboard-risk/src",
+  "packages/finboard-reconcile/src",
+  "packages/finboard-app/src",
+]
+exclude = ["migrations/versions/"]
+
+# 第三方券商 SDK(xtquant / CTP)没有类型存根,P1 实盘接入时按需在此添加
+# `[[tool.mypy.overrides]] module = ["xtquant.*"]; ignore_missing_imports = true`。
+
+
+# 测试代码放宽部分严格项
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# -----------------------------------------------------------------------------
+# pytest
+# -----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.3"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  "--cov=finboard_shared",
+  "--cov=finboard_broker",
+  "--cov=finboard_core",
+  "--cov=finboard_risk",
+  "--cov-report=term-missing",
+]
+markers = [
+  "unit: 快速、无 IO 的纯单元测试",
+  "integration: 需要 DB / Mock Broker 的集成测试",
+  "slow: 耗时较长的测试,默认在 CI 中可选跳过",
+]
+
+[tool.coverage.run]
+source = ["packages"]
+branch = true
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+]

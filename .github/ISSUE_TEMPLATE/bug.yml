@@ -1,0 +1,45 @@
+name: Bug
+description: 线上 / 测试中发现的问题
+labels: ["bug", "triage"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: 现象
+      description: 一句话说明发生了什么、在哪个环境(dev / staging / 实盘 / 回测)。
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响 / 风险
+      description: 是否触及交易安全红线?是否已经导致错误订单 / 错误持仓 / 重复下单 / 资金异常?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志 / 回报 / 数据
+      description: 贴出关键日志(脱敏)、client_order_id、券商返回原文等。
+    validations:
+      required: true
+
+  - type: input
+    id: root_cause
+    attributes:
+      label: 初步判断根因(可选)
+    validations:
+      required: false

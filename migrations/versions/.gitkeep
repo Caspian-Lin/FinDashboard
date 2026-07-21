@@ -1,0 +1,1 @@
+# 占位文件,确保 versions 目录被 git 跟踪。新迁移请用 `make migrate-new name=<slug>` 生成。

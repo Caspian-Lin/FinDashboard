@@ -1,0 +1,9 @@
+# 关闭空 issue 创建器,GitHub 仍保留模板按钮
+blank_issues_enabled: false
+contact_links:
+  - name: 设计文档
+    url: https://github.com/anomalyco/FinDashboard/blob/main/phase1_doc.md
+    about: 阶段优先级、交易链路、验收清单见 phase1_doc.md
+  - name: Agent 约束
+    url: https://github.com/anomalyco/FinDashboard/blob/main/AGENTS.md
+    about: 实盘安全红线、Git 工作流、Issue/PR 规范见 AGENTS.md

@@ -1,0 +1,79 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- uv ---
+# 锁文件入库(单仓库唯一可信源);虚拟环境不入库
+.venv/
+venv/
+env/
+.uv-cache/
+
+# --- 测试 / 覆盖率 / 类型 ---
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.coverage_html/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.dmypy.json
+dmypy.json
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# --- 运行时 / 部署 ---
+.env
+.env.local
+.env.*.local
+!.env.example
+*.log
+logs/
+run/
+data/
+docker/data/
+
+# --- 数据库 / Alembic 临时产物 ---
+*.sqlite
+*.sqlite3
+*.db
+
+# --- 前端 ---
+node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+
+# --- 操作系统 ---
+Thumbs.db
+desktop.ini

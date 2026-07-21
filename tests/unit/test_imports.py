@@ -1,0 +1,108 @@
+"""跨包导入 smoke 测试。
+
+确保 uv workspace 安装后,所有包都可以 import 而不缺依赖。
+"""
+
+from __future__ import annotations
+
+
+def test_shared_imports() -> None:
+    from finboard_shared import (
+        BrokerKind,
+        KillSwitchLevel,
+        OrderStatus,
+        generate_client_order_id,
+    )
+
+    assert BrokerKind.MOCK.value == "mock"
+    assert OrderStatus.CREATED.is_active
+    assert OrderStatus.FILLED.is_terminal
+    assert KillSwitchLevel.HALT.value == "halt"
+    cid = generate_client_order_id()
+    assert cid.startswith("F-")
+
+
+def test_broker_imports() -> None:
+    from finboard_broker import BrokerAdapter, MockBroker, create_broker
+    from finboard_broker.events import BrokerEventType
+
+    assert BrokerEventType.ORDER_FILLED.value == "order_filled"
+    broker = create_broker("mock")
+    assert isinstance(broker, MockBroker)
+    assert isinstance(broker, BrokerAdapter)
+
+
+def test_broker_stub_imports() -> None:
+    # QMT / CTP 是 stub,但模块本身必须可导入(动态加载时不能挂)
+    from finboard_broker_ctp import CtpBroker
+    from finboard_broker_qmt import QmtBroker
+
+    assert CtpBroker().kind.value == "ctp"
+    assert QmtBroker().kind.value == "qmt"
+
+
+def test_persistence_imports() -> None:
+    from finboard_persistence import (
+        AccountModel,
+        Base,
+        FillModel,
+        OrderModel,
+        PositionModel,
+        create_async_engine,
+    )
+
+    engine = create_async_engine("postgresql+psycopg://x:x@127.0.0.1/x")
+    assert engine is not None
+    # 所有模型必须注册到同一 metadata
+    table_names = set(Base.metadata.tables)
+    assert {
+        "accounts",
+        "orders",
+        "fills",
+        "positions",
+    } <= table_names
+    assert OrderModel.__tablename__ == "orders"
+    assert FillModel.__tablename__ == "fills"
+    assert PositionModel.__tablename__ == "positions"
+    assert AccountModel.__tablename__ == "accounts"
+
+
+def test_core_imports() -> None:
+    from finboard_core import (
+        EventBus,
+        OrderManager,
+        OrderStateMachine,
+        PositionManager,
+        TradingKernel,
+    )
+
+    assert EventBus is not None
+    assert OrderManager is not None
+    assert PositionManager is not None
+    assert TradingKernel is not None
+    assert OrderStateMachine is not None
+
+
+def test_risk_imports() -> None:
+    from finboard_risk import PreTradeChecker, RiskConfig
+
+    cfg = RiskConfig()
+    assert cfg.max_order_value > 0
+    assert PreTradeChecker(config=cfg) is not None
+
+
+def test_reconcile_imports() -> None:
+    from finboard_reconcile import ReconciliationEngine, ReconciliationReport
+
+    assert ReconciliationReport().ok is True
+    assert ReconciliationEngine is not None
+
+
+def test_app_imports() -> None:
+    from finboard_app import Settings, load_settings
+    from finboard_app.cli import app
+
+    assert app is not None
+    s = load_settings()
+    assert s.broker.value == "mock"
+    assert isinstance(s, Settings)
