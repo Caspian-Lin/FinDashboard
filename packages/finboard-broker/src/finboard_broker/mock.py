@@ -45,6 +45,11 @@ class MockBroker(BrokerAdapter):
         # broker 视角的状态映射 —— **不**通过修改传入 Order.status 来维护
         # (status 是 OrderManager 的职责);本表只供 query_* 返回正确 broker 状态。
         self._broker_status: dict[str, OrderStatus] = {}
+        # broker 视角的成交聚合 —— 同样不污染传入 order.filled_quantity
+        # (否则 OrderManager._on_filled 会再累加一次,导致双写)。query 时通过
+        # _snapshot 覆盖返回。
+        self._broker_filled_qty: dict[str, Decimal] = {}
+        self._broker_avg_price: dict[str, Decimal | None] = {}
         self._fills: list[Fill] = []
         self._commission_rate = commission_rate
         self._next_id: int = 1
@@ -208,8 +213,8 @@ class MockBroker(BrokerAdapter):
         return replace(
             base,
             status=self._broker_status.get(cid, base.status),
-            filled_quantity=base.filled_quantity,
-            average_fill_price=base.average_fill_price,
+            filled_quantity=self._broker_filled_qty.get(cid, Decimal("0")),
+            average_fill_price=self._broker_avg_price.get(cid),
             acknowledged_at=base.acknowledged_at,
         )
 
@@ -231,15 +236,22 @@ class MockBroker(BrokerAdapter):
         )
         self._next_id += 1
 
-        # 成交聚合字段(filled_quantity / average_fill_price)允许在 broker 侧更新,
-        # 因为它们是"券商成交事实";但 status 字段仍然只走 _broker_status,
-        # 不污染 OrderManager 持有的 order.status。
-        order.filled_quantity += qty
-        if order.average_fill_price is None:
-            order.average_fill_price = price
+        # 成交聚合字段只更新 broker 视角映射,**不**修改传入 order —— 否则
+        # OrderManager._on_filled 会再 += 一次 fill.quantity 导致双写。
+        # query_* 返回的值由 _snapshot 从这些映射覆盖。
+        new_filled = self._broker_filled_qty.get(cid, Decimal("0")) + qty
+        self._broker_filled_qty[cid] = new_filled
+        prev_avg = self._broker_avg_price.get(cid)
+        if prev_avg is None:
+            self._broker_avg_price[cid] = price
+        else:
+            prev_qty = new_filled - qty
+            self._broker_avg_price[cid] = (
+                prev_avg * prev_qty + price * qty
+            ) / new_filled
         self._broker_status[cid] = (
             OrderStatus.FILLED
-            if order.remaining_quantity <= 0
+            if order.quantity - new_filled <= 0
             else OrderStatus.PARTIALLY_FILLED
         )
         self._fills.append(fill)

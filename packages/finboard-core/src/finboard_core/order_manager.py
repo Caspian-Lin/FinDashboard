@@ -232,10 +232,16 @@ class OrderManager:
         if event.fill is None or event.client_order_id is None:
             return
         fill = event.fill
+        # 幂等:同一 fill_id 的回报可能被 broker 在重连后重放;若已入库,
+        # 跳过累加(否则 order.filled_quantity 会双写)。
+        if await self._fills.get(fill.fill_id) is not None:
+            logger.info(
+                "order_manager.duplicate_fill_ignored", fill_id=fill.fill_id
+            )
+            return
         order = await self._get_order_inflight(event.client_order_id)
         if order is None:
             return
-        # 幂等:DB 端按 fill_id UNIQUE 去重
         await self._fills.add(fill)
         # 更新订单聚合字段
         order.filled_quantity += fill.quantity

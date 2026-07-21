@@ -8,89 +8,31 @@
 4. 重复 client_order_id 被 DB UNIQUE 拒绝。
 
 需要 PostgreSQL(本地 ``make db-up`` 或 CI service container)。
+``_engine`` / ``db_session`` / ``account_id`` / ``wait_for_status``
+见 :mod:`tests.integration.conftest`。
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from decimal import Decimal
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 
 from finboard_broker import create_broker
 from finboard_core import TradingKernel
 from finboard_persistence import (
     AccountRepository,
     AuditLogRepository,
-    Base,
     FillRepository,
     OrderRepository,
     PositionRepository,
-    create_async_engine,
-    session_factory,
 )
 from finboard_risk import KillSwitch, PreTradeChecker, RiskConfig
 from finboard_shared.identifiers import AccountId, generate_client_order_id
 from finboard_shared.models import Order, OrderRequest, Symbol
-from finboard_shared.types import (
-    Market,
-    OrderStatus,
-    OrderType,
-    Side,
-)
-
-DB_URL = os.getenv(
-    "FINBOARD_DB_URL", "postgresql+psycopg://findashboard:CHANGE_ME@127.0.0.1:5432/findashboard"
-)
-
-
-async def _wait_for_status(
-    repo,
-    client_order_id: str,
-    target: OrderStatus,
-    *,
-    wait_seconds: float = 2.0,
-    interval: float = 0.02,
-):
-    """Polling 等待订单达到目标状态;OrderManager 的 broker-event 消费是异步的。"""
-    import asyncio
-
-    async with asyncio.timeout(wait_seconds):
-        last = None
-        while True:
-            last = await repo.get(client_order_id)
-            if last is not None and last.status is target:
-                return last
-            await asyncio.sleep(interval)
-    _ = last  # pragma: no cover
-
-
-@pytest.fixture(scope="module")
-def _db_url() -> str:
-    return DB_URL
-
-
-@pytest_asyncio.fixture(scope="module")
-async def _engine(_db_url: str):
-    engine = create_async_engine(_db_url)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    async with engine.begin() as conn:
-        # 测试结束后清表,保留 schema 便于调试
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def db_session(_engine):
-    smaker = session_factory(_engine)
-    async with smaker() as session:
-        yield session
+from finboard_shared.types import Market, OrderStatus, OrderType, Side
 
 
 @pytest_asyncio.fixture
@@ -129,6 +71,7 @@ async def test_kernel_initial_snapshot(
 async def test_place_limit_and_cancel(
     kernel: TradingKernel,
     account_id: AccountId,
+    wait_for_status,
 ) -> None:
     request = OrderRequest(
         account_id=account_id,
@@ -148,7 +91,7 @@ async def test_place_limit_and_cancel(
     # cancel_order 把状态置为 CANCEL_PENDING 后立即返回;真正的 CANCELLED
     # 要等 OrderManager 的 broker-event 消费 task 处理 ORDER_CANCELLED 事件后才落库。
     # 这里 polling 等待终态,避免依赖固定 sleep 时长。
-    refreshed = await _wait_for_status(
+    refreshed = await wait_for_status(
         kernel.order_manager._orders,
         str(order.client_order_id),
         OrderStatus.CANCELLED,
@@ -195,12 +138,9 @@ async def test_duplicate_client_order_id_rejected(
 @pytest.mark.integration
 async def test_db_round_trip(db_session) -> None:
     """直接 ping 一下数据库连通性 + 时区设置。"""
+    from sqlalchemy import text
+
     result = await db_session.execute(text("SELECT 1 AS one"))
     row = result.first()
     assert row is not None
     assert row.one == 1
-
-
-@pytest.fixture
-def account_id() -> AccountId:
-    return AccountId("test-account-integration")

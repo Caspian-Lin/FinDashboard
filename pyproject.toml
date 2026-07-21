@@ -120,6 +120,11 @@ disallow_incomplete_defs = false
 minversion = "8.3"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# module-scope async fixture(如 tests/integration 的 _engine)与 event loop
+# 必须同 scope,否则 AsyncSession 内部的 asyncio.Lock 会跨 loop 报错
+# "bound to a different event loop"。这里把 fixture 和测试都统一到 module scope。
+asyncio_default_fixture_loop_scope = "module"
+asyncio_default_test_loop_scope = "module"
 addopts = [
   "-ra",
   "--strict-markers",
