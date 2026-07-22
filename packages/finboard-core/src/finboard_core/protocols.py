@@ -55,3 +55,25 @@ class Reconciler(Protocol):
     async def run(self) -> ReconciliationResult:
         """执行一次本地 ↔ 券商核对并返回结果。"""
         ...
+
+
+class RecoveryResult(Protocol):
+    """恢复结果的契约(结构匹配 :class:`finboard_reconcile.RecoveryReport`)。"""
+
+    @property
+    def ok(self) -> bool:
+        """所有订单均可修复时为 True。"""
+        ...
+
+    def summary(self) -> str:
+        """人类可读的汇总。"""
+        ...
+
+
+@runtime_checkable
+class Recoverer(Protocol):
+    """重启恢复引擎契约。kernel.start 时在 order_manager.start() 之前调用。"""
+
+    async def run(self) -> RecoveryResult:
+        """加载本地活动订单 → 查券商 → 修复状态 → 返回报告。"""
+        ...

@@ -27,7 +27,7 @@ from finboard_persistence import (
     create_async_engine,
     session_factory,
 )
-from finboard_reconcile import ReconciliationEngine
+from finboard_reconcile import ReconciliationEngine, RecoveryEngine
 from finboard_risk import PreTradeChecker, RiskConfig
 from finboard_shared.identifiers import AccountId
 
@@ -64,6 +64,7 @@ class KernelComponents:
         self.risk_checker.bind_context(risk_context)
 
         reconciler = self.new_reconciler(session)
+        recoverer = self.new_recoverer(session)
         return TradingKernel(
             broker=self.broker,
             account_id=self.account_id,
@@ -75,6 +76,7 @@ class KernelComponents:
             audit_repo=AuditLogRepository(session),
             risk_checker=self.risk_checker,
             reconciler=reconciler,
+            recoverer=recoverer,
         )
 
     def new_reconciler(self, session: AsyncSession) -> ReconciliationEngine:
@@ -85,6 +87,14 @@ class KernelComponents:
             position_repo=PositionRepository(session),
             account_repo=AccountRepository(session),
             log_repo=ReconciliationLogRepository(session),
+        )
+
+    def new_recoverer(self, session: AsyncSession) -> RecoveryEngine:
+        return RecoveryEngine(
+            broker=self.broker,
+            account_id=self.account_id,
+            order_repo=OrderRepository(session),
+            audit_repo=AuditLogRepository(session),
         )
 
 

@@ -242,13 +242,24 @@ class QmtBroker(BrokerAdapter):
         ]
 
     async def query_order(self, client_order_id: str) -> Order | None:
-        orders = await self.query_active_orders()
-        for o in orders:
+        """查单笔订单(含已终结),用于 UNKNOWN 恢复流程的兜底查询。
+
+        与 ``query_active_orders`` 不同,本方法搜索**全部当日委托**(含 FILLED /
+        CANCELLED),因为 UNKNOWN 订单可能在券商侧已成交/已撤,此时
+        ``query_active_orders`` 不会返回它。
+        """
+        all_orders = await self._query_all_today_orders()
+        for o in all_orders:
             if str(o.client_order_id) == client_order_id:
                 return o
         return None
 
     async def query_active_orders(self) -> list[Order]:
+        all_orders = await self._query_all_today_orders()
+        return [o for o in all_orders if o.is_active]
+
+    async def _query_all_today_orders(self) -> list[Order]:
+        """查询全部当日委托(含已终结),供 query_order / query_active_orders 复用。"""
         self._require_connected()
         raw = await self._loop.run_in_executor(  # type: ignore[union-attr]
             None,
@@ -259,14 +270,12 @@ class QmtBroker(BrokerAdapter):
         from finboard_broker_qmt._mapping import xt_order_to_order
 
         assert self._account_id is not None
-        orders = [
+        return [
             xt_order_to_order(
                 o, account_id=self._account_id, broker_kind=self.kind
             )
             for o in raw
         ]
-        # 只返回活动订单(query 接口返回全部当日委托)
-        return [o for o in orders if o.is_active]
 
     # ------------------------------------------------------------------ 交易
     async def place_order(self, order: Order) -> SubmissionResult:
