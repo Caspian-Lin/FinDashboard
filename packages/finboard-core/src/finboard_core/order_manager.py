@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -40,7 +41,7 @@ from finboard_persistence.repo import (
     FillRepository,
     OrderRepository,
 )
-from finboard_shared.exceptions import BrokerTimeoutError
+from finboard_shared.exceptions import BrokerTimeoutError, KernelNotReadyError
 from finboard_shared.identifiers import AccountId, ClientOrderId, generate_client_order_id
 from finboard_shared.models import Order, OrderRequest
 from finboard_shared.types import (
@@ -67,6 +68,7 @@ class OrderManager:
         risk_checker: RiskChecker,
         event_bus: EventBus,
         account_id: AccountId,
+        gate: Callable[[], bool] | None = None,
     ) -> None:
         self._broker = broker
         self._orders = order_repo
@@ -75,6 +77,10 @@ class OrderManager:
         self._risk = risk_checker
         self._bus = event_bus
         self._account_id = account_id
+        # 内核就绪 gate —— 核对通过前禁止下单(交易安全红线)。
+        # 由 TradingKernel 注入(lambda 读 kernel._ready);None 时跳过检查
+        # (向后兼容,如独立单测 OrderManager)。
+        self._gate = gate
         # 内存活动订单缓存,减少高频回报时的 DB 查询
         self._inflight: dict[str, Order] = {}
         self._consumer_task: asyncio.Task[None] | None = None
@@ -106,7 +112,12 @@ class OrderManager:
 
     # ------------------------------------------------------------------ 下单
     async def place_order(self, request: OrderRequest) -> Order:
-        """完整下单链路:风控 → 入库 → 提交 broker → 状态推进。"""
+        """完整下单链路:就绪检查 → 风控 → 入库 → 提交 broker → 状态推进。"""
+        # 交易安全红线:核对通过前禁止下单(kernel.start 的 reconcile gate)
+        if self._gate is not None and not self._gate():
+            raise KernelNotReadyError(
+                "交易内核未就绪(核对未通过或未完成),禁止下单"
+            )
         if str(request.account_id) != str(self._account_id):
             raise ValueError(
                 f"OrderRequest.account_id({request.account_id}) 与 OrderManager.account_id"
@@ -232,10 +243,16 @@ class OrderManager:
         if event.fill is None or event.client_order_id is None:
             return
         fill = event.fill
+        # 幂等:同一 fill_id 的回报可能被 broker 在重连后重放;若已入库,
+        # 跳过累加(否则 order.filled_quantity 会双写)。
+        if await self._fills.get(fill.fill_id) is not None:
+            logger.info(
+                "order_manager.duplicate_fill_ignored", fill_id=fill.fill_id
+            )
+            return
         order = await self._get_order_inflight(event.client_order_id)
         if order is None:
             return
-        # 幂等:DB 端按 fill_id UNIQUE 去重
         await self._fills.add(fill)
         # 更新订单聚合字段
         order.filled_quantity += fill.quantity

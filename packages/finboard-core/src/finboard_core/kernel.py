@@ -25,7 +25,7 @@ from finboard_core.account_manager import AccountManager
 from finboard_core.bus import EventBus
 from finboard_core.order_manager import OrderManager
 from finboard_core.position_manager import PositionManager
-from finboard_core.protocols import RiskChecker
+from finboard_core.protocols import Reconciler, RiskChecker
 from finboard_persistence.repo import (
     AccountRepository,
     AuditLogRepository,
@@ -55,13 +55,17 @@ class TradingKernel:
         audit_repo: AuditLogRepository,
         risk_checker: RiskChecker,
         event_bus: EventBus | None = None,
+        reconciler: Reconciler | None = None,
     ) -> None:
         self._broker = broker
         self._account_id = account_id
         self._credentials = credentials
         self._bus = event_bus or EventBus()
         self._risk = risk_checker
+        self._reconciler = reconciler
 
+        self._ready: bool = False
+        # gate 先初始化为 False,OrderManager 通过 lambda 读最新值
         self.order_manager = OrderManager(
             broker=broker,
             order_repo=order_repo,
@@ -70,6 +74,7 @@ class TradingKernel:
             risk_checker=risk_checker,
             event_bus=self._bus,
             account_id=account_id,
+            gate=lambda: self._ready,
         )
         self.position_manager = PositionManager(
             position_repo=position_repo,
@@ -88,11 +93,19 @@ class TradingKernel:
 
         self._bus.subscribe(OrderFilled, self._on_order_filled)
 
-        self._ready: bool = False
         self._kill_switch: KillSwitchLevel = KillSwitchLevel.OFF
 
     # ------------------------------------------------------------------ 生命周期
     async def start(self) -> None:
+        """启动内核(交易安全红线:核对通过前 _ready 保持 False)。
+
+        流程:
+        1. 连接 broker;
+        2. 拉取账户 / 持仓快照;
+        3. 启动 OrderManager 消费回报;
+        4. **启动核对**(若注入 reconciler):本地 ↔ 券商比对,通过才 _ready=True。
+           未注入 reconciler 时跳过核对(向后兼容 / 单测场景),直接 _ready=True。
+        """
         if self._ready:
             return
         logger.info("kernel.starting", account_id=str(self._account_id))
@@ -105,6 +118,28 @@ class TradingKernel:
         except Exception:
             logger.exception("kernel.initial_snapshot_failed", exc_info=True)
         await self.order_manager.start()
+
+        # 启动核对(红线:核对未通过禁止下单)
+        if self._reconciler is not None:
+            try:
+                report = await self._reconciler.run()
+            except Exception:
+                logger.exception("kernel.reconcile_exception", exc_info=True)
+                self._ready = False
+                return
+            if report.ok:
+                logger.info(
+                    "kernel.reconcile_passed", summary=report.summary()
+                )
+            else:
+                # 核对失败:保持 _ready=False,OrderManager.place_order 会被
+                # gate 拒绝(KernelNotReadyError)。需要人工介入或重跑 reconcile。
+                logger.error(
+                    "kernel.reconcile_failed_blocked",
+                    summary=report.summary(),
+                )
+                self._ready = False
+                return
         self._ready = True
         logger.info("kernel.ready", account_id=str(self._account_id))
 

@@ -58,3 +58,7 @@ class OrderNotFoundError(FinboardError):
 
 class ReconcileMismatchError(FinboardError):
     """本地 ↔ 券商状态不一致。需要人工介入或自动修复后再放行交易。"""
+
+
+class KernelNotReadyError(FinboardError):
+    """内核未就绪 —— 核对未通过或未完成,禁止下单(交易安全红线)。"""

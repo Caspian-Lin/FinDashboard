@@ -42,6 +42,14 @@ class MockBroker(BrokerAdapter):
             code: replace(p) for code, p in (initial_positions or {}).items()
         }
         self._orders: dict[str, Order] = {}  # key: client_order_id(string)
+        # broker 视角的状态映射 —— **不**通过修改传入 Order.status 来维护
+        # (status 是 OrderManager 的职责);本表只供 query_* 返回正确 broker 状态。
+        self._broker_status: dict[str, OrderStatus] = {}
+        # broker 视角的成交聚合 —— 同样不污染传入 order.filled_quantity
+        # (否则 OrderManager._on_filled 会再累加一次,导致双写)。query 时通过
+        # _snapshot 覆盖返回。
+        self._broker_filled_qty: dict[str, Decimal] = {}
+        self._broker_avg_price: dict[str, Decimal | None] = {}
         self._fills: list[Fill] = []
         self._commission_rate = commission_rate
         self._next_id: int = 1
@@ -96,17 +104,24 @@ class MockBroker(BrokerAdapter):
 
     async def query_active_orders(self) -> list[Order]:
         self._require_connected()
-        return [o for o in self._orders.values() if o.is_active]
+        # 以 broker 视角状态为准,过滤出仍活动的订单
+        return [
+            self._snapshot(cid)
+            for cid, status in self._broker_status.items()
+            if status.is_active
+        ]
 
     async def query_order(self, client_order_id: str) -> Order | None:
         self._require_connected()
-        order = self._orders.get(client_order_id)
-        return replace(order) if order is not None else None
+        if client_order_id not in self._orders:
+            return None
+        return self._snapshot(client_order_id)
 
     # ------------------------------------------------------------------ 交易
     async def place_order(self, order: Order) -> SubmissionResult:
         self._require_connected()
-        if str(order.client_order_id) in self._orders:
+        cid = str(order.client_order_id)
+        if cid in self._orders:
             return SubmissionResult(
                 client_order_id=order.client_order_id,
                 accepted=False,
@@ -115,12 +130,14 @@ class MockBroker(BrokerAdapter):
 
         broker_order_id = f"M-{self._next_id:08d}"
         self._next_id += 1
+
+        # 关键契约:不修改传入 Order 的 status / acknowledged_at —— 状态推进
+        # 是 OrderManager 的职责,本方法只回 SubmissionResult + 推事件。
+        # 仅允许写 broker_order_id(OrderManager 后续会读它填回 DB)。
         order.broker_order_id = broker_order_id
-        order.status = OrderStatus.ACKNOWLEDGED
-        order.acknowledged_at = datetime.now(UTC)
-        order.touch()
-        # 存引用而非副本,以便 OrderManager 拿到的对象能看到后续 fill 更新
-        self._orders[str(order.client_order_id)] = order
+        self._orders[cid] = order
+        # broker 视角:订单已被接受
+        self._broker_status[cid] = OrderStatus.ACKNOWLEDGED
 
         await self._push(
             BrokerEvent(
@@ -146,24 +163,21 @@ class MockBroker(BrokerAdapter):
 
     async def cancel_order(self, client_order_id: str) -> None:
         self._require_connected()
-        order = self._orders.get(client_order_id)
-        if order is None:
+        cid = str(client_order_id)
+        if cid not in self._orders:
             raise OrderNotFoundError(f"mock broker 找不到订单 {client_order_id}")
-        if not order.is_active:
-            raise BrokerError(
-                f"订单 {client_order_id} 不可撤,当前状态 {order.status.value}"
-            )
-        order.status = OrderStatus.CANCEL_PENDING
-        order.touch()
+        status = self._broker_status.get(cid, OrderStatus.CREATED)
+        if not status.is_active:
+            raise BrokerError(f"订单 {client_order_id} 不可撤,当前状态 {status.value}")
+        self._broker_status[cid] = OrderStatus.CANCEL_PENDING
         await self._push(
             BrokerEvent(
                 type=BrokerEventType.ORDER_CANCELLED,
-                client_order_id=order.client_order_id,
-                broker_order_id=order.broker_order_id,
+                client_order_id=self._orders[cid].client_order_id,
+                broker_order_id=self._orders[cid].broker_order_id,
             )
         )
-        order.status = OrderStatus.CANCELLED
-        order.touch()
+        self._broker_status[cid] = OrderStatus.CANCELLED
 
     # ------------------------------------------------------------------ 事件流
     def events(self) -> AsyncIterator[BrokerEvent]:
@@ -179,16 +193,34 @@ class MockBroker(BrokerAdapter):
         self, client_order_id: str, price: Decimal
     ) -> None:
         """手工撮合一笔挂着的限价单,触发 ``ORDER_FILLED`` 事件。"""
-        order = self._orders.get(client_order_id)
-        if order is None:
+        cid = str(client_order_id)
+        if cid not in self._orders:
             raise OrderNotFoundError(client_order_id)
-        if not order.is_active:
-            raise BrokerError(f"订单 {client_order_id} 已不可撮合,状态 {order.status.value}")
-        await self._fill_order(order, price)
+        status = self._broker_status.get(cid, OrderStatus.CREATED)
+        if not status.is_active:
+            raise BrokerError(f"订单 {client_order_id} 已不可撮合,状态 {status.value}")
+        await self._fill_order(self._orders[cid], price)
 
     # ------------------------------------------------------------------ 内部
+    def _snapshot(self, cid: str) -> Order:
+        """以 broker 视角状态构造一份 Order 副本(query_* 用)。
+
+        强调:返回的是 **replace 后的副本**,调用方修改不会影响内部状态;
+        同时把 broker 视角的 status / filled_quantity / average_fill_price
+        覆盖进去,确保 query 结果反映 broker 侧最新进展。
+        """
+        base = self._orders[cid]
+        return replace(
+            base,
+            status=self._broker_status.get(cid, base.status),
+            filled_quantity=self._broker_filled_qty.get(cid, Decimal("0")),
+            average_fill_price=self._broker_avg_price.get(cid),
+            acknowledged_at=base.acknowledged_at,
+        )
+
     async def _fill_order(self, order: Order, price: Decimal) -> None:
         assert self._account_id is not None
+        cid = str(order.client_order_id)
         qty = order.remaining_quantity
         commission = (qty * price * self._commission_rate).quantize(Decimal("0.01"))
 
@@ -204,15 +236,24 @@ class MockBroker(BrokerAdapter):
         )
         self._next_id += 1
 
-        order.filled_quantity += qty
-        if order.average_fill_price is None:
-            order.average_fill_price = price
-        order.status = (
+        # 成交聚合字段只更新 broker 视角映射,**不**修改传入 order —— 否则
+        # OrderManager._on_filled 会再 += 一次 fill.quantity 导致双写。
+        # query_* 返回的值由 _snapshot 从这些映射覆盖。
+        new_filled = self._broker_filled_qty.get(cid, Decimal("0")) + qty
+        self._broker_filled_qty[cid] = new_filled
+        prev_avg = self._broker_avg_price.get(cid)
+        if prev_avg is None:
+            self._broker_avg_price[cid] = price
+        else:
+            prev_qty = new_filled - qty
+            self._broker_avg_price[cid] = (
+                prev_avg * prev_qty + price * qty
+            ) / new_filled
+        self._broker_status[cid] = (
             OrderStatus.FILLED
-            if order.remaining_quantity <= 0
+            if order.quantity - new_filled <= 0
             else OrderStatus.PARTIALLY_FILLED
         )
-        order.touch()
         self._fills.append(fill)
 
         self._apply_fill_to_account(fill, order.side)
