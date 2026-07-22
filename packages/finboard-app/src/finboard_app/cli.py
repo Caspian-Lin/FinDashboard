@@ -25,6 +25,7 @@ import typer
 from finboard_app.bootstrap import build_kernel_components
 from finboard_app.config import Settings, load_settings
 from finboard_app.logging import setup_logging
+from finboard_shared.identifiers import AccountId
 from finboard_shared.types import KillSwitchLevel
 
 if TYPE_CHECKING:
@@ -51,9 +52,26 @@ def _main(
 
 
 @app.command()
-def run(ctx: typer.Context) -> None:
+def run(
+    ctx: typer.Context,
+    strategies_file: Annotated[
+        str | None,
+        typer.Option(
+            "--strategies",
+            "-s",
+            help="策略配置 YAML 文件路径(不指定则不加载策略)",
+        ),
+    ] = None,
+    timer_interval: Annotated[
+        float,
+        typer.Option(
+            "--timer-interval",
+            help="策略定时回调间隔(秒,默认 60)",
+        ),
+    ] = 60.0,
+) -> None:
     """启动交易内核。"""
-    asyncio.run(_run_kernel(ctx.obj))
+    asyncio.run(_run_kernel(ctx.obj, strategies_file, timer_interval))
 
 
 @app.command()
@@ -98,7 +116,11 @@ def kill_switch(
 
 
 # --------------------------------------------------------------------------- 内部
-async def _run_kernel(settings: Settings) -> None:
+async def _run_kernel(
+    settings: Settings,
+    strategies_file: str | None = None,
+    timer_interval: float = 60.0,
+) -> None:
     setup_logging(settings)
     components = build_kernel_components(settings)
     async with components.session_maker() as session:
@@ -108,6 +130,26 @@ async def _run_kernel(settings: Settings) -> None:
                 settings.kill_switch_initial, reason="initial state from config"
             )
 
+        # 加载策略
+        runner: StrategyRunner | None = None
+        if strategies_file:
+            from finboard_app.strategies import create_strategy
+            from finboard_app.strategies.config import load_strategy_configs
+            from finboard_core import StrategyRunner
+
+            configs = load_strategy_configs(strategies_file)
+            runner = StrategyRunner(
+                event_bus=kernel.event_bus,
+                order_manager=kernel.order_manager,
+                position_manager=kernel.position_manager,
+                account_manager=kernel.account_manager,
+                account_id=AccountId(settings.account_id),
+                timer_interval=timer_interval,
+            )
+            for cfg in configs:
+                strategy = create_strategy(cfg.kind, cfg.id, **cfg.params)
+                runner.register(strategy)
+
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -115,9 +157,13 @@ async def _run_kernel(settings: Settings) -> None:
                 loop.add_signal_handler(sig, stop_event.set)
 
         await kernel.start()
+        if runner is not None:
+            await runner.start()
         try:
             await stop_event.wait()
         finally:
+            if runner is not None:
+                await runner.stop()
             await kernel.stop()
             await session.commit()
             await components.engine.dispose()
