@@ -574,8 +574,7 @@ class QmtBroker(BrokerAdapter):
 def create_broker(**kwargs: Any) -> BrokerAdapter:
     """供 :func:`finboard_broker.factory.create_broker` 调用。
 
-    factory 不传参数,这里用 kwargs 接收 path / session_id(由 bootstrap
-    通过 credentials 注入)。P1 集成(issue #5)会改为从 credentials 读取。
+    由 bootstrap 通过 ``**broker_credentials(settings)`` 注入 path / session_id。
     """
     if not XTQUANT_AVAILABLE:
         raise ImportError(XTQUANT_INSTALL_HINT)

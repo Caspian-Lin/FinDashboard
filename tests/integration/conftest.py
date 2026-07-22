@@ -51,7 +51,12 @@ async def _engine(_db_url: str) -> AsyncIterator[AsyncEngine]:
 async def db_session(_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     smaker = session_factory(_engine)
     async with smaker() as session:
+        # 清除上一轮测试残留数据(module-scope engine 共享连接池,rollback 不完全可靠)
+        for table in reversed(Base.metadata.sorted_tables):
+            await session.execute(table.delete())
+        await session.commit()
         yield session
+        await session.rollback()
 
 
 @pytest.fixture

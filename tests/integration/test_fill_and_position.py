@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from decimal import Decimal
 
@@ -101,6 +102,10 @@ async def test_limit_order_fill_updates_position_and_account(
     # 步骤 9: 接收成交回报 → 等 FILLED
     filled = await wait_for_status(order_repo, cid, OrderStatus.FILLED)
 
+    # _on_filled 先 update_state(FILLED) 再 publish(OrderFilled)→apply_fill,
+    # 二者之间有 await 让出点;需等 event loop 跑完 consumer task 余下部分
+    await asyncio.sleep(0.05)
+
     # ---- 订单聚合字段正确(无双写) ----
     assert filled.filled_quantity == Decimal("100")
     assert filled.average_fill_price == Decimal("3.90")
@@ -155,6 +160,7 @@ async def test_sell_reduces_position(
     buy_cid = str(buy_order.client_order_id)
     await broker.match_limit_order(buy_cid, Decimal("3.85"))
     await wait_for_status(order_repo, buy_cid, OrderStatus.FILLED)
+    await asyncio.sleep(0.05)
 
     positions = await kernel.position_manager.list_local()
     assert any(
@@ -175,6 +181,7 @@ async def test_sell_reduces_position(
     sell_cid = str(sell_order.client_order_id)
     await broker.match_limit_order(sell_cid, Decimal("3.95"))
     await wait_for_status(order_repo, sell_cid, OrderStatus.FILLED)
+    await asyncio.sleep(0.05)
 
     # 3) 持仓恢复到 0
     positions_after = await kernel.position_manager.list_local()
@@ -189,8 +196,6 @@ async def test_fill_idempotent(
     wait_for_status,
 ) -> None:
     """重复 fill_id 不重复入库,不双写 filled_quantity(幂等兜底)。"""
-    import asyncio
-
     from finboard_broker.events import BrokerEvent, BrokerEventType
 
     kernel = kernel_with_mock
