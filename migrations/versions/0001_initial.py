@@ -2,7 +2,7 @@
 
 Revision ID: 0001
 Revises:
-Create Date: 2025-01-01 00:00:00
+Create Date: 2026-07-21 11:28:33.000000
 
 P0 初始 schema:accounts / orders / fills / positions / reconciliation_logs / audit_logs。
 所有金额、数量字段统一 ``NUMERIC(20, 4)``;时间戳统一 ``TIMESTAMPTZ``。
