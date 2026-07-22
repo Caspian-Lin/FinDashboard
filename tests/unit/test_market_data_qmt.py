@@ -73,7 +73,8 @@ class _FakeXtData:
 def _inject_mock_xtdata() -> _FakeXtData:
     """注入 fake xtdata 到 sys.modules;返回 mock 实例。"""
     if "xtquant.xtdata" in sys.modules:
-        return sys.modules["xtquant.xtdata"]._mock  # type: ignore[attr-defined]
+        mock: _FakeXtData = sys.modules["xtquant.xtdata"]._mock
+        return mock
 
     # 确保 xtquant 包已存在(由 test_broker_qmt.py 注入,或这里注入)
     if "xtquant" not in sys.modules:
