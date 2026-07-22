@@ -186,6 +186,37 @@ class OrderRepository:
         result = await self._session.execute(stmt)
         return [order_from_orm(r) for r in result.scalars().all()]
 
+    async def list_all(
+        self,
+        account_id: str,
+        *,
+        status: str | None = None,
+        symbol: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[Order], int]:
+        """分页查询订单(含终态),返回 (orders, total_count)。"""
+        from sqlalchemy import func
+
+        base = select(OrderModel).where(OrderModel.account_id == account_id)
+        count_base = select(func.count()).select_from(OrderModel).where(
+            OrderModel.account_id == account_id
+        )
+        if status is not None:
+            base = base.where(OrderModel.status == status)
+            count_base = count_base.where(OrderModel.status == status)
+        if symbol is not None:
+            base = base.where(OrderModel.symbol == symbol)
+            count_base = count_base.where(OrderModel.symbol == symbol)
+
+        total_result = await self._session.execute(count_base)
+        total = total_result.scalar_one()
+
+        base = base.order_by(OrderModel.created_at.desc()).limit(limit).offset(offset)
+        result = await self._session.execute(base)
+        orders = [order_from_orm(r) for r in result.scalars().all()]
+        return orders, total
+
     async def update_state(self, order: Order) -> None:
         """以领域对象为真值,把状态字段写回 ORM 行。"""
         stmt = select(OrderModel).where(
@@ -249,6 +280,47 @@ class FillRepository:
         )
         result = await self._session.execute(stmt)
         return [fill_from_orm(r) for r in result.scalars().all()]
+
+    async def list_by_account(
+        self,
+        account_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[Fill], int]:
+        """分页查询某账户的所有成交,返回 (fills, total_count)。"""
+        from sqlalchemy import func
+
+        count_stmt = (
+            select(func.count())
+            .select_from(FillModel)
+            .where(
+                FillModel.client_order_id.in_(
+                    select(OrderModel.client_order_id).where(
+                        OrderModel.account_id == account_id
+                    )
+                )
+            )
+        )
+        total_result = await self._session.execute(count_stmt)
+        total = total_result.scalar_one()
+
+        stmt = (
+            select(FillModel)
+            .where(
+                FillModel.client_order_id.in_(
+                    select(OrderModel.client_order_id).where(
+                        OrderModel.account_id == account_id
+                    )
+                )
+            )
+            .order_by(FillModel.filled_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self._session.execute(stmt)
+        fills = [fill_from_orm(r) for r in result.scalars().all()]
+        return fills, total
 
     async def sum_buy_value_since(
         self, account_id: str, since: datetime
@@ -396,6 +468,22 @@ class AuditLogRepository:
             )
         )
         await self._session.flush()
+
+    async def list_recent(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AuditLogModel]:
+        """查询最近的审计日志(按时间倒序)。"""
+        stmt = (
+            select(AuditLogModel)
+            .order_by(AuditLogModel.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
 
 
 # --------------------------------------------------------------------------- Reconcile log

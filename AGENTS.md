@@ -81,7 +81,7 @@ PR 标题遵循提交信息规范（`<分类>: <修改点描述>`），并在描
 
 ## 当前仓库状态
 
-P0/P1 已完成（MockBroker 端到端 + QMT 适配器）。P2 重启恢复完善（issue #9）已完成。行情数据接入（issue #10）已完成。策略运行器（issue #11）进行中。
+P0/P1 已完成（MockBroker 端到端 + QMT 适配器）。P2 重启恢复完善（issue #9）已完成。行情数据接入（issue #10）已完成。策略运行器（issue #11）已完成。人工交易控制台（issue #12）进行中。
 
 ### 构建 / 测试 / lint / typecheck 命令
 
@@ -117,4 +117,5 @@ packages/
   finboard-risk/        — PreTradeChecker / KillSwitch / RiskConfig
   finboard-reconcile/   — ReconciliationEngine（只读核对）+ RecoveryEngine（状态修复）
   finboard-app/         — 组装根 / CLI / 配置
+  finboard-api/         — FastAPI REST + WebSocket API（人工交易控制台后端）
 ```
