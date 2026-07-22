@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib
+from typing import Any
 
 from finboard_broker.base import BrokerAdapter
 from finboard_broker.mock import MockBroker
@@ -27,8 +28,12 @@ _BROKER_MODULES: dict[BrokerKind, str] = {
 _BROKER_FACTORY = "create_broker"
 
 
-def create_broker(kind: BrokerKind | str) -> BrokerAdapter:
-    """按 ``kind`` 实例化一个 ``BrokerAdapter``。"""
+def create_broker(kind: BrokerKind | str, **kwargs: Any) -> BrokerAdapter:
+    """按 ``kind`` 实例化一个 ``BrokerAdapter``。
+
+    ``kwargs`` 透传给实现包的 ``create_broker()`` 工厂函数;
+    MockBroker 不接受参数。
+    """
     resolved = BrokerKind(kind) if not isinstance(kind, BrokerKind) else kind
 
     if resolved is BrokerKind.MOCK:
@@ -51,7 +56,7 @@ def create_broker(kind: BrokerKind | str) -> BrokerAdapter:
         raise RuntimeError(
             f"{module_path} 未暴露 {_BROKER_FACTORY}() 工厂函数"
         )
-    result = factory()
+    result = factory(**kwargs)
     # 实现包返回 Any,这里收敛到 BrokerAdapter 契约
     assert isinstance(result, BrokerAdapter)
     return result

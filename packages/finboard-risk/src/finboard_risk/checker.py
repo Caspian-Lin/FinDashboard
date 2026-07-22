@@ -52,6 +52,10 @@ class PreTradeChecker:
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         _ = (asyncio,)  # 占位:后续速率限制可能切到 asyncio.Lock
 
+    def bind_context(self, context: RiskContext) -> None:
+        """延迟绑定风控上下文(bootstrap 在 async session 创建后调用)。"""
+        self._context = context
+
     # ------------------------------------------------------------------ RiskChecker 接口
     async def check(self, request: OrderRequest) -> None:
         await self._check_kill_switch(request)
@@ -61,6 +65,7 @@ class PreTradeChecker:
         await self._check_daily_buy_value(request)
         self._check_rate_limit()
         await self._check_active_orders()
+        await self._check_sell_available(request)
 
     async def can_place_new_orders(self) -> bool:
         return self._kill_switch.allows_new_orders()
@@ -102,10 +107,6 @@ class PreTradeChecker:
                 RejectReason.RISK_CHECK_FAILED,
                 "当前风控配置禁止市价单(allow_market_order=false)",
             )
-        if request.side is Side.SELL and not self._config.allow_short:
-            # A股不允许卖空;此检查只在"无持仓还卖"时为真正错误,
-            # 真实判断需要 context 提供 available_quantity,这里只兜底配置开关
-            pass
 
     def _check_per_order_value(self, request: OrderRequest) -> None:
         price = request.price or Decimal("0")  # 市价单无法准确估,放过后由 broker 二次校验
@@ -150,4 +151,27 @@ class PreTradeChecker:
             raise RiskCheckError(
                 RejectReason.RISK_CHECK_FAILED,
                 f"活动订单数 {count} 超过上限 {self._config.max_active_orders}",
+            )
+
+    async def _check_sell_available(self, request: OrderRequest) -> None:
+        """卖出时校验持仓可用数量(A股 T+1 / 禁止卖空)。"""
+        if request.side is not Side.SELL:
+            return
+        if self._context is None:
+            return
+        positions = await self._context.list_positions()
+        for p in positions:
+            if p.symbol.code == request.symbol.code:
+                if request.quantity > p.available_quantity:
+                    raise RiskCheckError(
+                        RejectReason.INSUFFICIENT_POSITION,
+                        f"卖出 {request.quantity} 超过可用 {p.available_quantity}"
+                        f"({request.symbol.code})",
+                    )
+                return
+        # 未找到持仓
+        if not self._config.allow_short:
+            raise RiskCheckError(
+                RejectReason.INSUFFICIENT_POSITION,
+                f"无 {request.symbol.code} 持仓,不允许卖出(allow_short=false)",
             )

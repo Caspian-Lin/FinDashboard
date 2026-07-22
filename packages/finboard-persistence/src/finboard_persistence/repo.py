@@ -250,6 +250,27 @@ class FillRepository:
         result = await self._session.execute(stmt)
         return [fill_from_orm(r) for r in result.scalars().all()]
 
+    async def sum_buy_value_since(
+        self, account_id: str, since: datetime
+    ) -> Decimal:
+        """指定时间后该账户所有买入成交的金额合计(price * quantity)。"""
+        from sqlalchemy import func
+
+        stmt = (
+            select(func.coalesce(func.sum(FillModel.price * FillModel.quantity), 0))
+            .where(
+                FillModel.client_order_id.in_(
+                    select(OrderModel.client_order_id).where(
+                        OrderModel.account_id == account_id
+                    )
+                ),
+                FillModel.side == Side.BUY.value,
+                FillModel.filled_at >= since,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return Decimal(str(result.scalar_one()))
+
 
 # --------------------------------------------------------------------------- Position
 class PositionRepository:

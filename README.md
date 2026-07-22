@@ -125,6 +125,53 @@ CLI 入口(`uv run finboard --help`)提供 `run / reconcile / migrate / kill-swi
 
 ---
 
+## QMT(迅投 xtquant)实盘接入
+
+> **仅 Windows + miniQMT 环境**。Linux/macOS/CI 使用 mock broker。
+
+### 前置条件
+
+1. 安装 QMT 客户端(券商提供),启动 **miniQMT** 模式并登录资金账号
+2. 确认 `xtquant` 可导入:QMT 安装目录下的 `userdata_mini` 文件夹包含 `xtquant` 包
+3. 将 `userdata_mini` 路径加入 `PYTHONPATH`,或安装 `xtquant` 到 Python 环境
+
+### 配置
+
+编辑 `.env`:
+
+```ini
+FINBOARD_BROKER=qmt
+FINBOARD_ACCOUNT_ID=12345678        # QMT 资金账号
+FINBOARD_QMT_PATH=C:\QMT\userdata_mini  # userdata_mini 完整路径
+FINBOARD_QMT_SESSION_ID=1            # 会话号,多进程须唯一
+```
+
+### 运行
+
+```bash
+# Windows PowerShell / cmd
+uv run finboard run           # 启动 → 连接 → 查询 → reconcile → 等待 Ctrl-C
+uv run finboard reconcile     # 单独执行一次本地 ↔ 券商核对
+```
+
+### A 股交易规则提醒
+
+- **T+1**:当日买入的股票次日才能卖出;系统通过 `available_quantity`(券商查询)自动校验
+- **最小单位**:买入须为 100 股整数倍;卖出可不足 100 股(零股)
+- **价格变动单位**:A 股 0.01 元;ETF 0.001 元
+- **涨跌停**:超出涨跌停价的订单会被券商拒单
+- **集合竞价**:9:15-9:25 / 14:57-15:00,不支持撤单
+
+### session_id 选取规则
+
+`session_id` 是 xtquant 用来区分不同策略进程的标识:
+
+- 同一台机器上同时运行多个进程时,每个进程用不同的 `session_id`
+- 单进程重启可以复用同一 `session_id`
+- 取值范围:正整数(建议 1-999)
+
+---
+
 ## 交易链路
 
 ```

@@ -51,7 +51,17 @@ class KernelComponents:
         生产 kernel 会注入 :class:`ReconciliationEngine`,使 ``start`` 执行
         启动核对(交易安全红线:核对未通过禁止下单)。
         """
+        from finboard_app.risk_context import SessionRiskContext
         from finboard_core import TradingKernel
+
+        risk_context = SessionRiskContext(
+            position_repo=PositionRepository(session),
+            account_repo=AccountRepository(session),
+            order_repo=OrderRepository(session),
+            fill_repo=FillRepository(session),
+            account_id=self.account_id,
+        )
+        self.risk_checker.bind_context(risk_context)
 
         reconciler = self.new_reconciler(session)
         return TradingKernel(
@@ -86,7 +96,8 @@ def build_kernel_components(settings: Settings) -> KernelComponents:
         max_overflow=settings.db_max_overflow,
     )
     smaker = session_factory(engine)
-    broker = create_broker(settings.broker)
+    creds = broker_credentials(settings)
+    broker = create_broker(settings.broker, **creds)
     risk_checker = PreTradeChecker(config=_build_risk_config(settings))
 
     return KernelComponents(

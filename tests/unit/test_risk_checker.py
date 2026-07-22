@@ -157,3 +157,90 @@ async def test_context_active_orders_limit(
         await checker.check(_make_request(symbol))
     assert exc.value.reason is RejectReason.RISK_CHECK_FAILED
     _ = BrokerKind  # 占位
+
+
+def _stub_context(
+    *,
+    positions: list[Position] | None = None,
+    active_orders: int = 0,
+    daily_buy: Decimal = Decimal("0"),
+) -> RiskContext:
+    class _Ctx:
+        async def list_positions(self) -> list[Position]:
+            return positions or []
+
+        async def get_account(self) -> Account | None:
+            return None
+
+        async def count_active_orders(self) -> int:
+            return active_orders
+
+        async def daily_buy_value(self) -> Decimal:
+            return daily_buy
+
+    return cast(RiskContext, _Ctx())
+
+
+@pytest.mark.unit
+async def test_sell_blocked_without_position(
+    config: RiskConfig, symbol: Symbol
+) -> None:
+    """无持仓时不允许卖出。"""
+    checker = PreTradeChecker(
+        config=config,
+        context=_stub_context(),
+    )
+    with pytest.raises(RiskCheckError) as exc:
+        await checker.check(_make_request(symbol, side=Side.SELL))
+    assert exc.value.reason is RejectReason.INSUFFICIENT_POSITION
+
+
+@pytest.mark.unit
+async def test_sell_exceeds_available(
+    config: RiskConfig, symbol: Symbol
+) -> None:
+    """卖出数量超过可用时被拒。"""
+    pos = Position(
+        account_id=AccountId("test-account"),
+        symbol=symbol,
+        available_quantity=Decimal("100"),
+        total_quantity=Decimal("100"),
+    )
+    checker = PreTradeChecker(
+        config=config,
+        context=_stub_context(positions=[pos]),
+    )
+    with pytest.raises(RiskCheckError) as exc:
+        await checker.check(
+            _make_request(symbol, side=Side.SELL, quantity=Decimal("200"))
+        )
+    assert exc.value.reason is RejectReason.INSUFFICIENT_POSITION
+
+
+@pytest.mark.unit
+async def test_sell_within_available_passes(
+    config: RiskConfig, symbol: Symbol
+) -> None:
+    """卖出数量 <= 可用时通过。"""
+    pos = Position(
+        account_id=AccountId("test-account"),
+        symbol=symbol,
+        available_quantity=Decimal("200"),
+        total_quantity=Decimal("200"),
+    )
+    checker = PreTradeChecker(
+        config=config,
+        context=_stub_context(positions=[pos]),
+    )
+    await checker.check(
+        _make_request(symbol, side=Side.SELL, quantity=Decimal("100"))
+    )
+
+
+@pytest.mark.unit
+async def test_sell_no_context_skips_position_check(
+    config: RiskConfig, symbol: Symbol
+) -> None:
+    """无 context 时卖出检查跳过(向后兼容 / 单测场景)。"""
+    checker = PreTradeChecker(config=config)
+    await checker.check(_make_request(symbol, side=Side.SELL))
