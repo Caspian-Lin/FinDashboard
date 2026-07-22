@@ -13,12 +13,13 @@
 - 模块划分：Broker Adapter / Trading Gateway / Order Manager / Position Manager / Account Manager / Risk Manager / Strategy Runner / Reconciliation
 
 ### 阶段优先级
-- **P0（当前阶段）**：打通端到端真实交易链路 —— 查询账户 / 发单 / 撤单 / 接收回报 / 持仓核对 / 重启恢复。验收清单见 `phase1_doc.md` §3.4（14 步端到端测试）
-- **未完成 P0 前禁止提前开工**：TWAP / VWAP / 冰山单 / 智能拆单、跨账户路由、复杂回测、因子系统、LLM 接入
+- **P0/P1（已完成）**：端到端真实交易链路（MockBroker + QMT 适配器）—— 查询账户 / 发单 / 撤单 / 接收回报 / 持仓核对 / 重启恢复。issue #1-#5 已关闭。
+- **P2（进行中）**：重启恢复完善（UNKNOWN 状态修复 + 本地↔券商订单匹配）—— issue #9。
+- **未完成 P2 前禁止提前开工**：TWAP / VWAP / 冰山单 / 智能拆单、跨账户路由、复杂回测、因子系统、LLM 接入
 
 ### 交易安全红线（改动这些逻辑必须先与用户确认风险）
 - `client_order_id` 必须由本地生成且全局唯一，用于防重复下单 / 关联券商订单 / 状态恢复 / 排查异常
-- **下单请求超时后禁止无条件重试**（这是文档明确指出的最危险场景）：订单须先进入 `UNKNOWN` 状态，查券商委托记录确认原订单不存在后才能重发；查询类请求可重试
+- **下单请求超时后禁止无条件重试**（这是文档明确指出的最危险场景）：订单须先进入 `UNKNOWN` 状态，查券商委托记录确认原订单不存在后才能重发；查询类请求可重试。重启恢复（`RecoveryEngine`）在 `kernel.start()` 中自动执行：逐订单查券商 → 修复状态 → UNKNOWN + 券商无记录 → REJECTED（不自动重发）
 - 订单必须走完整链路：`Strategy → Order Intent → Risk Manager → Order Manager → Broker Adapter → Broker API`。**策略不得直接调用券商接口**
 - 持仓的最终真实来源是**券商查询**；本地持仓仅用于实时响应 / 策略计算 / 风控 / 异常检测。**禁止策略直接修改持仓数量**，持仓只能由成交 / 公司行为 / 交割 / 人工校准等事件驱动
 - 系统重启后必须先完成本地 ↔ 券商核对，核对通过前**禁止发送新订单**（恢复流程见 `phase1_doc.md` §5.4）
@@ -79,4 +80,41 @@ PR 标题遵循提交信息规范（`<分类>: <修改点描述>`），并在描
 - `gh` — 创建 PR、issue、查看 CI 等 GitHub 操作的首选方式
 
 ## 当前仓库状态
-仓库尚处初始化阶段（仅有设计文档 `phase1_doc.md`，无代码、无 CI、无构建配置）。后续在引入具体技术栈时，应在此处补充：构建 / 测试 / lint / typecheck 的确切命令及执行顺序，以及 monorepo 边界与入口。
+
+P0/P1 已完成（MockBroker 端到端 + QMT 适配器）。P2 重启恢复完善（issue #9）进行中。
+
+### 构建 / 测试 / lint / typecheck 命令
+
+```bash
+# 运行全部测试（需 PostgreSQL 运行在 127.0.0.1:5432）
+uv run pytest tests/ -v
+
+# 仅单元测试（不需 DB）
+uv run pytest tests/unit/ -v
+
+# 仅集成测试（需 DB）
+uv run pytest tests/integration/ -v
+
+# Lint
+uv run ruff check packages/ tests/
+
+# Type check
+uv run mypy packages/
+
+# DB 迁移
+uv run alembic upgrade head
+```
+
+### Monorepo 结构
+
+```
+packages/
+  finboard-shared/     — 领域模型 / 类型 / 异常 / ID 生成
+  finboard-persistence/ — SQLAlchemy ORM / Repository / Alembic 迁移
+  finboard-broker/      — BrokerAdapter 抽象 + MockBroker 实现 + factory
+  finboard-broker-qmt/  — QMT (xtquant) 适配器（Windows-only）
+  finboard-core/        — TradingKernel / OrderManager / PositionManager / 状态机 / EventBus
+  finboard-risk/        — PreTradeChecker / KillSwitch / RiskConfig
+  finboard-reconcile/   — ReconciliationEngine（只读核对）+ RecoveryEngine（状态修复）
+  finboard-app/         — 组装根 / CLI / 配置
+```

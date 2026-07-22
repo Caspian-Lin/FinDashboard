@@ -416,6 +416,36 @@ class TestQmtBroker:
         await broker.disconnect()
 
     @pytest.mark.unit
+    async def test_query_order_finds_terminal(self) -> None:
+        """query_order 应搜索全部当日委托(含已终结),用于 UNKNOWN 恢复。"""
+        broker = QmtBroker(path="/fake", session_id=1)
+        await broker.connect(AccountId("A123"), {})
+
+        broker._trader.orders_result = [
+            _FakeOrder(  # 活动(已报)
+                stock_code="510300.SH", order_id=1, order_status=50,
+                order_type=23, price_type=11, order_volume=100, price=3.8,
+                traded_volume=0, traded_price=0, order_remark="F-aaa",
+            ),
+            _FakeOrder(  # 终态(已成)
+                stock_code="600000.SH", order_id=2, order_status=56,
+                order_type=24, price_type=11, order_volume=100, price=10.5,
+                traded_volume=100, traded_price=10.5, order_remark="F-bbb",
+            ),
+        ]
+
+        # query_order 能找到终态订单(用于恢复流程)
+        filled = await broker.query_order("F-bbb")
+        assert filled is not None
+        assert filled.status is OrderStatus.FILLED
+        assert filled.filled_quantity == Decimal("100")
+
+        # query_order 对不存在的 cid 返回 None
+        missing = await broker.query_order("F-nonexistent")
+        assert missing is None
+        await broker.disconnect()
+
+    @pytest.mark.unit
     async def test_not_connected_raises(self) -> None:
         broker = QmtBroker(path="/fake", session_id=1)
         from finboard_shared.exceptions import BrokerError
