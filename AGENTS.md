@@ -81,7 +81,7 @@ PR 标题遵循提交信息规范（`<分类>: <修改点描述>`），并在描
 
 ## 当前仓库状态
 
-P0/P1 已完成（MockBroker 端到端 + QMT 适配器）。P2 重启恢复完善（issue #9）进行中。
+P0/P1 已完成（MockBroker 端到端 + QMT 适配器）。P2 重启恢复完善（issue #9）已完成。行情数据接入（issue #10）进行中。
 
 ### 构建 / 测试 / lint / typecheck 命令
 
@@ -111,8 +111,8 @@ uv run alembic upgrade head
 packages/
   finboard-shared/     — 领域模型 / 类型 / 异常 / ID 生成
   finboard-persistence/ — SQLAlchemy ORM / Repository / Alembic 迁移
-  finboard-broker/      — BrokerAdapter 抽象 + MockBroker 实现 + factory
-  finboard-broker-qmt/  — QMT (xtquant) 适配器（Windows-only）
+  finboard-broker/      — BrokerAdapter / MarketDataAdapter 抽象 + Mock 实现 + factory
+  finboard-broker-qmt/  — QMT (xtquant) 适配器 — 交易 + 行情(xtdata)（Windows-only）
   finboard-core/        — TradingKernel / OrderManager / PositionManager / 状态机 / EventBus
   finboard-risk/        — PreTradeChecker / KillSwitch / RiskConfig
   finboard-reconcile/   — ReconciliationEngine（只读核对）+ RecoveryEngine（状态修复）

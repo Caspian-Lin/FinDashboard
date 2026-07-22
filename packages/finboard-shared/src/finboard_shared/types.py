@@ -121,6 +121,20 @@ class KillSwitchLevel(StrEnum):
     HALT = "halt"  # 全局停止
 
 
+class BarPeriod(StrEnum):
+    """K 线周期。
+
+    值与 xtdata ``period`` 参数对齐,便于直接透传。
+    """
+
+    M1 = "1m"
+    M5 = "5m"
+    M15 = "15m"
+    M30 = "30m"
+    H1 = "1h"
+    D1 = "1d"
+
+
 class TradingPhase(StrEnum):
     """交易日内系统的运行阶段。"""
 
