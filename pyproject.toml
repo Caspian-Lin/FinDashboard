@@ -104,8 +104,10 @@ mypy_path = [
 exclude = ["migrations/versions/"]
 
 # 第三方券商 SDK(xtquant / CTP)没有类型存根,P1 实盘接入时按需在此添加
-# `[[tool.mypy.overrides]] module = ["xtquant.*"]; ignore_missing_imports = true`。
-
+# xtquant 仅 Windows + miniQMT 可用,Linux CI 无法安装;mypy 忽略其缺失。
+[[tool.mypy.overrides]]
+module = ["xtquant.*"]
+ignore_missing_imports = true
 
 # 测试代码放宽部分严格项
 [[tool.mypy.overrides]]
