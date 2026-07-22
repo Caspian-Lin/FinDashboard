@@ -15,8 +15,12 @@
 红线(AGENTS.md):
 
 * ``order_remark``(24 字符)是本地 ``client_order_id`` 关联券商回报的唯一通道;
+  编解码见 :mod:`finboard_broker_qmt._mapping` 的 ``encode/decode_order_remark``。
 * ``order_status == 255 (UNKNOWN)`` 是超时兜底,不重试。
-  (下单/撤单/回报转换在 issue #4 实现,本 issue 只覆盖连接 + 查询。)
+* ``place_order`` / ``cancel_order`` 超时后抛 ``BrokerTimeoutError``,由
+  OrderManager 置 ``UNKNOWN`` —— **禁止无条件重试**。
+* ``place_order`` 不修改传入 Order 的 ``status`` / ``filled_quantity``
+  (与 MockBroker 契约一致);状态推进由 OrderManager 通过回报事件完成。
 """
 
 from __future__ import annotations
@@ -27,16 +31,23 @@ import logging
 from collections.abc import AsyncIterator, Mapping
 from typing import TYPE_CHECKING, Any
 
-from finboard_broker.base import BrokerAdapter
+from finboard_broker.base import BrokerAdapter, SubmissionResult
 from finboard_broker.events import BrokerEvent, BrokerEventType
-from finboard_shared.exceptions import BrokerError
+from finboard_shared.exceptions import BrokerError, BrokerTimeoutError, OrderNotFoundError
 from finboard_shared.identifiers import AccountId
-from finboard_shared.types import BrokerKind
+from finboard_shared.models import Fill
+from finboard_shared.types import BrokerKind, OrderStatus, RejectReason
 
 if TYPE_CHECKING:
     from finboard_shared.models import Account, Order, Position
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- 超时常量(秒)
+#: order_stock 超时 —— 超时后抛 BrokerTimeoutError,订单进 UNKNOWN(红线)
+PLACE_ORDER_TIMEOUT: float = 10.0
+#: cancel_order_stock 超时
+CANCEL_ORDER_TIMEOUT: float = 5.0
 
 # --------------------------------------------------------------------------- xtquant 可选导入
 try:
@@ -124,6 +135,9 @@ class QmtBroker(BrokerAdapter):
         self._consumer_task: asyncio.Task[None] | None = None
         # raw callback → BrokerEvent 转换队列(由 events() 消费)
         self._event_queue: asyncio.Queue[BrokerEvent] = asyncio.Queue()
+        # client_order_id ↔ broker_order_id 双向映射(cancel_order / 回报反查用)
+        self._cid_to_broker_id: dict[str, str] = {}
+        self._broker_id_to_cid: dict[str, str] = {}
 
     @property
     def kind(self) -> BrokerKind:
@@ -254,15 +268,114 @@ class QmtBroker(BrokerAdapter):
         # 只返回活动订单(query 接口返回全部当日委托)
         return [o for o in orders if o.is_active]
 
-    # ------------------------------------------------------------------ 交易(issue #4)
-    async def place_order(self, order: Order) -> Any:
-        raise NotImplementedError(
-            "place_order 将在 issue #4(QMT 交易接口 + 回报流)实现"
+    # ------------------------------------------------------------------ 交易
+    async def place_order(self, order: Order) -> SubmissionResult:
+        """提交订单到 QMT。
+
+        红线:
+        * 超时 → ``BrokerTimeoutError``(不重试,由 OrderManager 置 UNKNOWN);
+        * 不修改 ``order.status`` / ``order.filled_quantity``(契约一致);
+        * ``client_order_id`` 编码进 ``order_remark``(24 字符限制)。
+
+        xtquant ``order_stock`` 签名::
+
+            order_stock(account, stock_code, order_type, order_volume,
+                        price_type, price=0, strategy_name='', order_remark='')
+
+        返回 ``int``: > 0 = order_id(成功), -1 = 失败。
+        """
+        self._require_connected()
+        from finboard_broker_qmt._mapping import (
+            encode_order_remark,
+            order_type_to_xt_price_type,
+            side_to_xt_order_type,
+        )
+
+        assert self._loop is not None
+        assert self._trader is not None
+        assert self._account is not None
+
+        cid = str(order.client_order_id)
+        remark = encode_order_remark(cid)
+        xt_order_type = side_to_xt_order_type(order.side)
+        xt_price_type = order_type_to_xt_price_type(order.order_type)
+        price = float(order.price) if order.price is not None else 0.0
+
+        try:
+            async with asyncio.timeout(PLACE_ORDER_TIMEOUT):
+                order_id = await self._loop.run_in_executor(
+                    None,
+                    self._trader.order_stock,
+                    self._account,
+                    str(order.symbol.code),
+                    xt_order_type,
+                    float(order.quantity),
+                    xt_price_type,
+                    price,
+                    "",  # strategy_name
+                    remark,
+                )
+        except TimeoutError:
+            raise BrokerTimeoutError(
+                f"QMT order_stock 超时({PLACE_ORDER_TIMEOUT}s): {cid}"
+            ) from None
+
+        if order_id is None or order_id < 0:
+            logger.warning("qmt.place_order_rejected", extra={"cid": cid})
+            return SubmissionResult(
+                client_order_id=order.client_order_id,
+                accepted=False,
+                reject_reason=RejectReason.BROKER_REJECTED,
+            )
+
+        broker_order_id = str(order_id)
+        # 契约:只允许写 broker_order_id,不碰 status / filled_quantity
+        order.broker_order_id = broker_order_id
+        self._record_oid_mapping(cid, broker_order_id)
+        logger.info(
+            "qmt.place_order_ok",
+            extra={"cid": cid, "broker_order_id": broker_order_id},
+        )
+        return SubmissionResult(
+            client_order_id=order.client_order_id,
+            broker_order_id=broker_order_id,
+            accepted=True,
         )
 
     async def cancel_order(self, client_order_id: str) -> None:
-        raise NotImplementedError(
-            "cancel_order 将在 issue #4(QMT 交易接口 + 回报流)实现"
+        """撤销订单。超时 → ``BrokerTimeoutError``(不重试)。"""
+        self._require_connected()
+        assert self._loop is not None
+        assert self._trader is not None
+        assert self._account is not None
+
+        broker_order_id = self._cid_to_broker_id.get(client_order_id)
+        if broker_order_id is None:
+            raise OrderNotFoundError(
+                f"无法撤单:找不到 {client_order_id} 对应的 broker_order_id"
+            )
+
+        try:
+            async with asyncio.timeout(CANCEL_ORDER_TIMEOUT):
+                rc = await self._loop.run_in_executor(
+                    None,
+                    self._trader.cancel_order_stock,
+                    self._account,
+                    int(broker_order_id),
+                )
+        except TimeoutError:
+            raise BrokerTimeoutError(
+                f"QMT cancel_order_stock 超时({CANCEL_ORDER_TIMEOUT}s): "
+                f"{client_order_id}"
+            ) from None
+
+        if rc != 0:
+            raise BrokerError(
+                f"QMT cancel_order_stock 返回 {rc}: {client_order_id}"
+            )
+        logger.info(
+            "qmt.cancel_order_ok",
+            extra={"cid": client_order_id, "broker_order_id": broker_order_id},
         )
 
     # ------------------------------------------------------------------ 事件流
@@ -295,15 +408,138 @@ class QmtBroker(BrokerAdapter):
                 )
 
     async def _handle_raw_callback(self, name: str, data: Any) -> None:
-        """单个 raw 回调 → BrokerEvent(连接级;交易回报在 issue #4)。"""
+        """单个 raw 回调 → BrokerEvent。"""
         if name == "on_disconnected":
             self._connected = False
             await self._push_event(BrokerEventType.DISCONNECTED)
             logger.warning("qmt.on_disconnected_marked_offline")
-        # on_stock_order / on_stock_trade / on_order_error → issue #4
-        # 暂时忽略(避免 log noise)
+        elif name == "on_stock_order":
+            await self._on_xt_order(data)
+        elif name == "on_stock_trade":
+            await self._on_xt_trade(data)
+        elif name == "on_order_error":
+            await self._on_xt_order_error(data)
+        elif name == "on_cancel_error":
+            # 撤单错误 — 推 CANCEL_REJECTED,由 OrderManager 决定后续动作
+            await self._on_xt_cancel_error(data)
+
+    async def _on_xt_order(self, data: Any) -> None:
+        """``on_stock_order(XtOrder)`` — 委托状态变化 → BrokerEvent。
+
+        xtquant order_status 映射::
+
+            50(已报)   → ORDER_ACCEPTED
+            53/54(已撤) → ORDER_CANCELLED
+            57(废单)   → ORDER_REJECTED
+            55/56(部成/已成) → 不在这里推(成交明细由 on_stock_trade 驱动)
+        """
+        from finboard_broker_qmt._mapping import (
+            _field,
+            decode_order_remark,
+            xt_order_status_to_finboard,
+        )
+
+        status_code = int(_field(data, "order_status", 255))
+        status = xt_order_status_to_finboard(status_code)
+        broker_order_id = str(_field(data, "order_id", ""))
+        order_remark = str(_field(data, "order_remark", ""))
+        cid_str = decode_order_remark(order_remark) if order_remark else ""
+
+        if cid_str and broker_order_id:
+            self._record_oid_mapping(cid_str, broker_order_id)
+
+        if not cid_str:
+            logger.warning(
+                "qmt.order_callback_no_cid",
+                extra={"broker_order_id": broker_order_id, "status_code": status_code},
+            )
+            return
+
+        if status is OrderStatus.ACKNOWLEDGED:
+            await self._push_event(
+                BrokerEventType.ORDER_ACCEPTED,
+                client_order_id=cid_str,
+                broker_order_id=broker_order_id,
+            )
+        elif status is OrderStatus.CANCELLED:
+            await self._push_event(
+                BrokerEventType.ORDER_CANCELLED,
+                client_order_id=cid_str,
+                broker_order_id=broker_order_id,
+            )
+        elif status is OrderStatus.REJECTED:
+            await self._push_event(
+                BrokerEventType.ORDER_REJECTED,
+                client_order_id=cid_str,
+                broker_order_id=broker_order_id,
+                reject_reason=RejectReason.BROKER_REJECTED,
+                message=f"QMT 废单(order_status={status_code})",
+            )
+        # PARTIALLY_FILLED / FILLED:成交数据由 on_stock_trade 提供,不重复推
+
+    async def _on_xt_trade(self, data: Any) -> None:
+        """``on_stock_trade(XtTrade)`` — 单笔成交 → ORDER_FILLED。"""
+        from finboard_broker_qmt._mapping import xt_trade_to_fill
+
+        fill = xt_trade_to_fill(data, broker_kind=self.kind)
+        if not fill.client_order_id:
+            logger.warning("qmt.trade_callback_no_cid", extra={"fill_id": fill.fill_id})
+            return
+        await self._push_event(
+            BrokerEventType.ORDER_FILLED,
+            client_order_id=str(fill.client_order_id),
+            broker_order_id=fill.broker_order_id,
+            fill=fill,
+        )
+
+    async def _on_xt_order_error(self, data: Any) -> None:
+        """``on_order_error(XtOrderError)`` — 下单/柜台错误 → ORDER_REJECTED。
+
+        XtOrderError 字段:``order_id``、``error_id``、``error_msg``。
+        没有 ``order_remark``,通过 ``order_id`` 反查 ``client_order_id``。
+        """
+        from finboard_broker_qmt._mapping import _field
+
+        broker_order_id = str(_field(data, "order_id", ""))
+        error_msg = str(_field(data, "error_msg", "")) or "未知错误"
+        cid_str = self._broker_id_to_cid.get(broker_order_id)
+
+        if cid_str is None:
+            logger.warning(
+                "qmt.order_error_no_cid",
+                extra={"broker_order_id": broker_order_id, "error_msg": error_msg},
+            )
+            return
+
+        await self._push_event(
+            BrokerEventType.ORDER_REJECTED,
+            client_order_id=cid_str,
+            broker_order_id=broker_order_id,
+            reject_reason=RejectReason.BROKER_REJECTED,
+            message=f"QMT order_error: {error_msg}",
+        )
+
+    async def _on_xt_cancel_error(self, data: Any) -> None:
+        """``on_cancel_error`` — 撤单失败。仅记录日志,不推事件。
+
+        撤单的终态(成功/失败)最终会通过 ``on_stock_order`` 的状态变化体现
+        (53/54 = 已撤,或回到 55/56 = 已成交无法撤)。
+        """
+        from finboard_broker_qmt._mapping import _field
+
+        broker_order_id = str(_field(data, "order_id", ""))
+        error_msg = str(_field(data, "error_msg", ""))
+        logger.warning(
+            "qmt.cancel_error",
+            extra={"broker_order_id": broker_order_id, "error_msg": error_msg},
+        )
 
     # ------------------------------------------------------------------ 内部
+    def _record_oid_mapping(self, cid: str, broker_order_id: str) -> None:
+        """记录 client_order_id ↔ broker_order_id 双向映射。"""
+        self._cid_to_broker_id[cid] = broker_order_id
+        self._broker_id_to_cid[broker_order_id] = cid
+
     async def _push_event(
         self,
         event_type: BrokerEventType,
@@ -311,6 +547,8 @@ class QmtBroker(BrokerAdapter):
         client_order_id: Any = None,
         broker_order_id: str | None = None,
         message: str = "",
+        fill: Fill | None = None,
+        reject_reason: RejectReason | None = None,
     ) -> None:
         from finboard_shared.identifiers import ClientOrderId
 
@@ -322,6 +560,8 @@ class QmtBroker(BrokerAdapter):
                 else None,
                 broker_order_id=broker_order_id,
                 message=message,
+                fill=fill,
+                reject_reason=reject_reason,
             )
         )
 
