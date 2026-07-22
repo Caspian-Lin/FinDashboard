@@ -14,6 +14,7 @@ from typing import Self
 
 from finboard_shared.identifiers import AccountId, ClientOrderId, StrategyId
 from finboard_shared.types import (
+    BarPeriod,
     BrokerKind,
     Market,
     OrderStatus,
@@ -182,3 +183,45 @@ class Account:
     frozen_cash: Decimal = Decimal("0")  # 冻结资金
     margin_used: Decimal = Decimal("0")  # 已用保证金(期货)
     updated_at: datetime = field(default_factory=_utcnow)
+
+
+@dataclass(frozen=True, slots=True)
+class Tick:
+    """Level-1 行情快照(逐笔 / 盘口)。
+
+    A 股 Tick 通常 3 秒推送一次;字段对应 xtdata ``subscribe_quote`` tick 回调。
+    五档买卖盘为可选字段,部分行情源可能不提供。
+    """
+
+    symbol: Symbol
+    last_price: Decimal
+    open: Decimal = Decimal("0")
+    high: Decimal = Decimal("0")
+    low: Decimal = Decimal("0")
+    pre_close: Decimal = Decimal("0")
+    volume: Decimal = Decimal("0")  # 持仓量(合约)或最新成交量(股票累计)
+    amount: Decimal = Decimal("0")  # 成交额
+    last_volume: Decimal = Decimal("0")  # 本笔成交量
+    bid_price: Decimal = Decimal("0")
+    bid_volume: Decimal = Decimal("0")
+    ask_price: Decimal = Decimal("0")
+    ask_volume: Decimal = Decimal("0")
+    timestamp: datetime = field(default_factory=_utcnow)
+
+
+@dataclass(frozen=True, slots=True)
+class Bar:
+    """K 线(OHLCV)。
+
+    ``timestamp`` 为 bar 的起始时间。
+    """
+
+    symbol: Symbol
+    period: BarPeriod
+    timestamp: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal = Decimal("0")
+    amount: Decimal = Decimal("0")
