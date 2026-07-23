@@ -5,7 +5,9 @@
 # CI 工作流中调用同样的命令,保证本地与 CI 一致。
 # =============================================================================
 .PHONY: help install sync lint format typecheck test test-unit test-integration \
-        db-up db-down db-logs migrate migrate-new run reconcile clean
+        db-up db-down db-logs migrate migrate-new run serve \
+        web-install web-dev web-build web-lint \
+        dev clean
 
 PYTHON ?= python3.12
 UV ?= uv
@@ -62,8 +64,35 @@ migrate-new: ## 生成新的迁移文件: make migrate-new name=add_xxx
 run: ## 启动交易核心进程(mock broker 默认)
 	$(UV) run finboard run
 
+serve: ## 启动 FastAPI 后端(--reload 热重载,端口 8000)
+	$(UV) run finboard serve --reload
+
 reconcile: ## 执行一次本地 ↔ 券商核对
 	$(UV) run finboard reconcile
+
+# --------------------------------------------------------------------------- 前端
+WEB_DIR ?= web
+
+web-install: ## 安装前端依赖(npm install)
+	cd $(WEB_DIR) && npm install
+
+web-dev: ## 启动前端 Vite dev server(端口 5173,代理 /api + /ws 到 :8000)
+	cd $(WEB_DIR) && npm run dev
+
+web-build: ## 构建前端生产包到 web/dist
+	cd $(WEB_DIR) && npm run build
+
+web-lint: ## 前端 ESLint
+	cd $(WEB_DIR) && npm run lint
+
+# --------------------------------------------------------------------------- 一键开发
+dev: ## 一键启动前后端开发服务器(后端 :8000 + 前端 :5173,Ctrl-C 同时退出)
+	@echo "\033[36m启动后端(FastAPI :8000) + 前端(Vite :5173)...\033[0m"
+	@echo "\033[33m确保 PostgreSQL 已启动且已执行 make migrate\033[0m"
+	@trap 'kill $$BACKEND_PID $$FRONTEND_PID 2>/dev/null; wait 2>/dev/null' INT TERM; \
+	$(UV) run finboard serve --reload & BACKEND_PID=$$!; \
+	cd $(WEB_DIR) && npm run dev & FRONTEND_PID=$$!; \
+	wait
 
 clean: ## 清理缓存与构建产物
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov
