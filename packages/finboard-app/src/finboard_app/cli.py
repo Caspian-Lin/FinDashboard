@@ -89,6 +89,31 @@ def migrate() -> None:
     raise typer.Exit(subprocess.call(["alembic", "upgrade", "head"]))
 
 
+@app.command()
+def serve(
+    ctx: typer.Context,
+    host: Annotated[str, typer.Option("--host", "-h", help="监听地址")] = "0.0.0.0",
+    port: Annotated[int, typer.Option("--port", "-p", help="监听端口")] = 8000,
+    reload: Annotated[bool, typer.Option("--reload", help="热重载(开发)")] = False,
+) -> None:
+    """启动 FastAPI 交易控制台后端(含 WebSocket)。"""
+    import uvicorn
+
+    if reload:
+        uvicorn.run(
+            "finboard_api.app:create_app",
+            factory=True,
+            host=host,
+            port=port,
+            reload=True,
+        )
+    else:
+        from finboard_api.app import create_app
+
+        app = create_app(ctx.obj)
+        uvicorn.run(app, host=host, port=port)
+
+
 @app.command(name="kill-switch")
 def kill_switch(
     ctx: typer.Context,
