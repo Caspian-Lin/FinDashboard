@@ -5,7 +5,8 @@
 * ``run``          —— 启动交易内核,运行直至 Ctrl-C;
 * ``reconcile``    —— 执行一次本地 ↔ 券商核对并打印报告;
 * ``migrate``      —— 应用 alembic 迁移(``alembic upgrade head``);
-* ``kill-switch``  —— 激活 Kill Switch(off / no_new_orders / reduce_only / cancel_all / halt)。
+* ``kill-switch``  —— 激活 Kill Switch(off / no_new_orders / reduce_only / cancel_all / halt);
+* ``scheduler``    —— 列出 / 手动触发定时任务。
 
 注意:进程内的 TradingKernel 在整个生命周期内复用同一个 AsyncSession。
 若日后改为多账户/多策略,需要替换为 session-per-operation。
@@ -29,7 +30,9 @@ from finboard_shared.identifiers import AccountId
 from finboard_shared.types import KillSwitchLevel
 
 if TYPE_CHECKING:
+    from finboard_app.bootstrap import KernelComponents
     from finboard_reconcile import ReconciliationReport
+    from finboard_scheduler import Scheduler
 
 app = typer.Typer(
     name="finboard",
@@ -69,9 +72,16 @@ def run(
             help="策略定时回调间隔(秒,默认 60)",
         ),
     ] = 60.0,
+    no_scheduler: Annotated[
+        bool,
+        typer.Option(
+            "--no-scheduler",
+            help="禁用定时任务调度(盘前检查/收盘撤单/日终核对/心跳)",
+        ),
+    ] = False,
 ) -> None:
     """启动交易内核。"""
-    asyncio.run(_run_kernel(ctx.obj, strategies_file, timer_interval))
+    asyncio.run(_run_kernel(ctx.obj, strategies_file, timer_interval, no_scheduler))
 
 
 @app.command()
@@ -140,11 +150,108 @@ def kill_switch(
     )
 
 
+scheduler_app = typer.Typer(
+    name="scheduler",
+    help="定时任务管理(列出 / 手动触发)。",
+    no_args_is_help=True,
+)
+
+
+@scheduler_app.command(name="list")
+def scheduler_list(ctx: typer.Context) -> None:
+    """列出已注册的定时任务。"""
+    asyncio.run(_scheduler_list(ctx.obj))
+
+
+async def _scheduler_list(settings: Settings) -> None:
+    from finboard_persistence import AuditLogRepository
+    from finboard_scheduler import Scheduler, TradingCalendar, create_default_tasks
+
+    components = build_kernel_components(settings)
+    async with components.session_maker() as session:
+        kernel = components.new_kernel(session)
+        reconciler = components.new_reconciler(session)
+        audit_repo = AuditLogRepository(session)
+        tasks = create_default_tasks(
+            kernel=kernel,
+            order_manager=kernel.order_manager,
+            reconciler=reconciler,
+            audit_repo=audit_repo,
+            account_id=AccountId(settings.account_id),
+        )
+        cal = TradingCalendar()
+        sched = Scheduler(cal)
+        for t in tasks:
+            sched.schedule(t)
+
+        for t in sched.list_tasks():
+            if t.interval is not None:
+                trigger = f"interval={t.interval}s"
+            else:
+                assert t.time is not None
+                trigger = f"time={t.time.strftime('%H:%M')}"
+            typer.echo(
+                f"  {t.name:<25s} {trigger:<20s} trading_days_only={t.trading_days_only}"
+            )
+
+
+@scheduler_app.command(name="trigger")
+def scheduler_trigger(
+    ctx: typer.Context,
+    task_name: Annotated[
+        str,
+        typer.Argument(help="任务名称(如 heartbeat / close_cancel / end_of_day_reconcile)"),
+    ],
+) -> None:
+    """手动触发一次定时任务。"""
+    settings = ctx.obj
+    components = build_kernel_components(settings)
+    asyncio.run(_trigger_task(components, settings, task_name))
+
+
+async def _trigger_task(
+    components: KernelComponents,
+    settings: Settings,
+    task_name: str,
+) -> None:
+    from finboard_persistence import AuditLogRepository
+    from finboard_scheduler import Scheduler, TradingCalendar, create_default_tasks
+
+    async with components.session_maker() as session:
+        kernel = components.new_kernel(session)
+        reconciler = components.new_reconciler(session)
+        audit_repo = AuditLogRepository(session)
+        tasks = create_default_tasks(
+            kernel=kernel,
+            order_manager=kernel.order_manager,
+            reconciler=reconciler,
+            audit_repo=audit_repo,
+            account_id=AccountId(settings.account_id),
+        )
+        cal = TradingCalendar()
+        sched = Scheduler(cal)
+        for t in tasks:
+            sched.schedule(t)
+
+        task = sched.get_task(task_name)
+        if task is None:
+            typer.echo(f"未知任务: {task_name}", err=True)
+            sys.exit(1)
+
+        typer.echo(f"触发任务: {task_name}")
+        await sched.trigger(task_name)
+        typer.echo(f"完成: {task_name}")
+
+
+app.add_typer(scheduler_app, name="scheduler")
+
+
 # --------------------------------------------------------------------------- 内部
 async def _run_kernel(
     settings: Settings,
     strategies_file: str | None = None,
     timer_interval: float = 60.0,
+    no_scheduler: bool = False,
 ) -> None:
     setup_logging(settings)
     components = build_kernel_components(settings)
@@ -175,6 +282,24 @@ async def _run_kernel(
                 strategy = create_strategy(cfg.kind, cfg.id, **cfg.params)
                 runner.register(strategy)
 
+        # 加载定时任务调度器
+        scheduler_obj: Scheduler | None = None
+        if not no_scheduler:
+            from finboard_persistence import AuditLogRepository
+            from finboard_scheduler import Scheduler, TradingCalendar, create_default_tasks
+
+            reconciler = components.new_reconciler(session)
+            audit_repo = AuditLogRepository(session)
+            scheduler_obj = Scheduler(TradingCalendar())
+            for task in create_default_tasks(
+                kernel=kernel,
+                order_manager=kernel.order_manager,
+                reconciler=reconciler,
+                audit_repo=audit_repo,
+                account_id=AccountId(settings.account_id),
+            ):
+                scheduler_obj.schedule(task)
+
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -184,9 +309,13 @@ async def _run_kernel(
         await kernel.start()
         if runner is not None:
             await runner.start()
+        if scheduler_obj is not None:
+            await scheduler_obj.start()
         try:
             await stop_event.wait()
         finally:
+            if scheduler_obj is not None:
+                await scheduler_obj.stop()
             if runner is not None:
                 await runner.stop()
             await kernel.stop()
