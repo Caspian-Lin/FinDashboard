@@ -3,8 +3,9 @@
 可实盘交易的模块化单体量化交易系统。设计目标见 [`phase1_doc.md`](./phase1_doc.md),
 agent 必读约束见 [`AGENTS.md`](./AGENTS.md)。
 
-> **当前阶段:P0 — 打通端到端真实交易链路。** 任何超出 P0 范围(TWAP/VWAP、因子系统、
-> LLM 接入等)的功能都暂不开发,详见 `phase1_doc.md` §13 阶段优先级。
+> **当前阶段:P2 — 重启恢复 + 行情接入 + 策略运行器 + 人工交易控制台已完成。**
+> 端到端真实交易链路(MockBroker + QMT)、行情数据接入、策略 ABC 框架、
+> FastAPI REST + WebSocket API + React 前端控制台均已就绪。
 
 ---
 
@@ -18,8 +19,8 @@ agent 必读约束见 [`AGENTS.md`](./AGENTS.md)。
 | 持久化 | PostgreSQL 16 + SQLAlchemy 2.0 + Alembic |
 | 日志 / 可观测性 | structlog(JSON) |
 | Broker 接口 | QMT(A股 / xtquant)、CTP(期货)、Mock(本地/CI) |
-| API 后端 | FastAPI(P3 启用,目录 `packages/finboard-api/`) |
-| 前端 | React + Vite + TypeScript(P3 启用,目录 `web/`)<br/>UI: shadcn/ui + Tailwind;状态: TanStack Query + Zustand;实时: WebSocket |
+| API 后端 | FastAPI + WebSocket(目录 `packages/finboard-api/`) |
+| 前端 | React 19 + Vite + TypeScript + Tailwind CSS + TanStack Query(目录 `web/`) |
 | 测试 | pytest + pytest-asyncio |
 | 静态检查 | ruff(lint+format)、mypy(strict) |
 | CI | GitHub Actions(lint + typecheck + unit test) |
@@ -32,14 +33,16 @@ agent 必读约束见 [`AGENTS.md`](./AGENTS.md)。
 FinDashboard/
 ├── packages/                      # uv workspace 成员
 │   ├── finboard-shared/           # 跨模块的枚举、数据模型、ID 类型
-│   ├── finboard-broker/           # BrokerAdapter 抽象 + Mock 实现
-│   ├── finboard-broker-qmt/       # QMT (xtquant) 实现
+│   ├── finboard-broker/           # BrokerAdapter / MarketDataAdapter 抽象 + Mock 实现
+│   ├── finboard-broker-qmt/       # QMT (xtquant) 交易 + 行情实现
 │   ├── finboard-broker-ctp/       # CTP (期货) 实现
 │   ├── finboard-persistence/      # SQLAlchemy ORM + Repository
-│   ├── finboard-core/             # 事件总线 / 订单 / 持仓 / 账户 / 状态机
+│   ├── finboard-core/             # 事件总线 / 订单 / 持仓 / 账户 / 状态机 / 策略运行器
 │   ├── finboard-risk/             # 下单前检查 / Kill Switch
-│   ├── finboard-reconcile/        # 本地 ↔ 券商核对
-│   └── finboard-app/              # 进程入口 + CLI + 配置
+│   ├── finboard-reconcile/        # 本地 ↔ 券商核对 + 重启恢复
+│   ├── finboard-app/              # 进程入口 + CLI + 配置 + 策略工厂
+│   └── finboard-api/             # FastAPI REST + WebSocket API(人工交易控制台后端)
+├── web/                           # React 前端(Vite + Tailwind + TanStack Query)
 ├── migrations/                    # Alembic 迁移脚本
 ├── tests/                         # 跨包测试(unit / integration)
 ├── docker/                        # 构建镜像
@@ -58,6 +61,7 @@ FinDashboard/
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- Node.js 18+(前端开发)
 - PostgreSQL 16+(任选其一):
   - 本机已装 PostgreSQL(推荐,启动快)
   - Docker / Docker Desktop(`make db-up` 用)
@@ -65,7 +69,8 @@ FinDashboard/
 ### 1. 安装依赖
 
 ```bash
-make install          # 等同于 uv sync --all-packages
+make install          # 后端: uv sync --all-packages
+make web-install      # 前端: cd web && npm install
 ```
 
 ### 2. 准备数据库
@@ -115,13 +120,29 @@ make test             # unit + smoke(默认跳过 integration)
 make test-integration # 需要 PostgreSQL 已就绪
 ```
 
-### 4. 启动交易核心(默认 Mock Broker)
+### 4. 一键启动前后端开发服务器
+
+```bash
+make dev              # 后端 FastAPI(:8000) + 前端 Vite(:5173),Ctrl-C 同时退出
+```
+
+打开浏览器访问 `http://localhost:5173` 即可使用交易控制台。
+Vite dev server 自动代理 `/api` 和 `/ws` 到后端。
+
+也可以分别启动:
+
+```bash
+make serve            # 仅后端(带 --reload 热重载)
+make web-dev          # 仅前端
+```
+
+### 5. 启动交易核心(CLI 模式,不带 API)
 
 ```bash
 make run              # 等同于 uv run finboard run
 ```
 
-CLI 入口(`uv run finboard --help`)提供 `run / reconcile / migrate / kill-switch` 等子命令。
+CLI 入口(`uv run finboard --help`)提供 `run / serve / reconcile / migrate / kill-switch` 等子命令。
 
 ---
 
