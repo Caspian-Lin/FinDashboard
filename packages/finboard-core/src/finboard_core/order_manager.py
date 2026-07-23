@@ -171,6 +171,12 @@ class OrderManager:
         else:
             await self._transition(order, OrderStatus.SUBMITTED)
         await self._orders.update_state(order)
+        await self._audit.add(
+            actor=request.strategy_id or "manual",
+            action="place_order",
+            target=str(order.client_order_id),
+            payload=f"{order.side.value} {order.quantity} {order.symbol.code}@{order.price or 'mkt'} -> {order.status.value}",
+        )
         await self._bus.publish(OrderSubmitted(order=order))
         return order
 
@@ -185,11 +191,23 @@ class OrderManager:
             raise ValueError(f"订单 {client_order_id} 已不可撤,状态 {order.status.value}")
         await self._transition(order, OrderStatus.CANCEL_PENDING)
         await self._orders.update_state(order)
+        await self._audit.add(
+            actor="system",
+            action="cancel_order",
+            target=client_order_id,
+            payload=f"status={order.status.value}",
+        )
         # 撤单同样适用超时不重试红线;此处由 broker 内部抛 BrokerTimeoutError
         try:
             await self._broker.cancel_order(client_order_id)
         except BrokerTimeoutError:
             # 不重试,等待回报或人工介入
+            await self._audit.add(
+                actor="system",
+                action="cancel_timeout",
+                target=client_order_id,
+                payload=f"status={order.status.value}",
+            )
             logger.warning(
                 "order_manager.cancel_timeout",
                 client_order_id=client_order_id,
@@ -270,6 +288,12 @@ class OrderManager:
         )
         await self._transition(order, target)
         await self._orders.update_state(order)
+        await self._audit.add(
+            actor="system",
+            action="order_filled",
+            target=str(fill.client_order_id),
+            payload=f"fill_id={fill.fill_id} qty={fill.quantity} price={fill.price} status={order.status.value}",
+        )
         await self._bus.publish(OrderFilled(order=order, fill=fill))
 
     async def _on_cancelled(self, event: BrokerEvent) -> None:
@@ -334,6 +358,12 @@ class OrderManager:
         order.reject_reason = reason
         order.reject_message = message
         await self._orders.update_state(order)
+        await self._audit.add(
+            actor="system",
+            action="order_rejected",
+            target=str(order.client_order_id),
+            payload=f"reason={reason.value} msg={message}",
+        )
         await self._bus.publish(OrderRejected(order=order, reason=reason, message=message))
 
     async def _get_order_inflight(self, client_order_id: ClientOrderId) -> Order | None:

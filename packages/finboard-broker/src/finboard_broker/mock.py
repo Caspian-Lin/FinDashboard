@@ -71,6 +71,7 @@ class MockBroker(BrokerAdapter):
             return
         self._account_id = account_id
         self._connected = True
+        self._closed = False  # 重置:支持断连后重连,事件流恢复
         await self._push(BrokerEvent(type=BrokerEventType.CONNECTED, message=str(account_id)))
 
     async def disconnect(self) -> None:
@@ -201,6 +202,18 @@ class MockBroker(BrokerAdapter):
             raise BrokerError(f"订单 {client_order_id} 已不可撮合,状态 {status.value}")
         await self._fill_order(self._orders[cid], price)
 
+    async def match_limit_order_partial(
+        self, client_order_id: str, price: Decimal, quantity: Decimal
+    ) -> None:
+        """部分撮合一笔限价单(用于部分成交测试)。"""
+        cid = str(client_order_id)
+        if cid not in self._orders:
+            raise OrderNotFoundError(client_order_id)
+        status = self._broker_status.get(cid, OrderStatus.CREATED)
+        if not status.is_active:
+            raise BrokerError(f"订单 {client_order_id} 已不可撮合,状态 {status.value}")
+        await self._fill_order(self._orders[cid], price, quantity=quantity)
+
     # ------------------------------------------------------------------ 内部
     def _snapshot(self, cid: str) -> Order:
         """以 broker 视角状态构造一份 Order 副本(query_* 用)。
@@ -218,10 +231,13 @@ class MockBroker(BrokerAdapter):
             acknowledged_at=base.acknowledged_at,
         )
 
-    async def _fill_order(self, order: Order, price: Decimal) -> None:
+    async def _fill_order(
+        self, order: Order, price: Decimal, *, quantity: Decimal | None = None
+    ) -> None:
         assert self._account_id is not None
         cid = str(order.client_order_id)
-        qty = order.remaining_quantity
+        # quantity=None 时全部成交剩余量;否则只成交指定数量(部分成交)
+        qty = quantity if quantity is not None else order.remaining_quantity
         commission = (qty * price * self._commission_rate).quantize(Decimal("0.01"))
 
         fill = Fill(
