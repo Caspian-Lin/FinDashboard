@@ -467,7 +467,9 @@ class AuditLogRepository:
                 payload=payload,
             )
         )
-        await self._session.flush()
+        # 审计日志不单独 flush —— 随下一次业务 flush / commit 一并写入。
+        # 单独 flush 会在 event-loop 让出时与 broker-event 消费者竞争
+        # ("Session is already flushing")。
 
     async def list_recent(
         self,

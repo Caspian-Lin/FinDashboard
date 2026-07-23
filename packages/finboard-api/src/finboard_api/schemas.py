@@ -125,6 +125,10 @@ class HealthOut(BaseSchema):
     status: str
     kernel_ready: bool
     kill_switch_level: str
+    broker_connected: bool = False
+    broker_kind: str = ""
+    active_orders: int = 0
+    started_at: datetime | None = None
 
 
 # --------------------------------------------------------------------------- Risk Config

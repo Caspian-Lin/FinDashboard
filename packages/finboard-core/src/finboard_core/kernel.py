@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from datetime import UTC, datetime
 
 import structlog
 
@@ -68,8 +69,10 @@ class TradingKernel:
         self._risk = risk_checker
         self._reconciler = reconciler
         self._recoverer = recoverer
+        self._audit = audit_repo
 
         self._ready: bool = False
+        self._started_at: datetime | None = None
         # gate 先初始化为 False,OrderManager 通过 lambda 读最新值
         self.order_manager = OrderManager(
             broker=broker,
@@ -116,6 +119,7 @@ class TradingKernel:
         if self._ready:
             return
         logger.info("kernel.starting", account_id=str(self._account_id))
+        self._started_at = datetime.now(UTC)
         await self._broker.connect(self._account_id, self._credentials)
         # 拉一次券商侧快照,触发 audit / position 落地
         try:
@@ -152,11 +156,21 @@ class TradingKernel:
                 report = await self._reconciler.run()
             except Exception:
                 logger.exception("kernel.reconcile_exception", exc_info=True)
+                await self._audit.add(
+                    actor="system",
+                    action="reconcile",
+                    payload="exception during reconciliation",
+                )
                 self._ready = False
                 return
             if report.ok:
                 logger.info(
                     "kernel.reconcile_passed", summary=report.summary()
+                )
+                await self._audit.add(
+                    actor="system",
+                    action="reconcile",
+                    payload=f"ok=True {report.summary()}",
                 )
             else:
                 # 核对失败:保持 _ready=False,OrderManager.place_order 会被
@@ -164,6 +178,11 @@ class TradingKernel:
                 logger.error(
                     "kernel.reconcile_failed_blocked",
                     summary=report.summary(),
+                )
+                await self._audit.add(
+                    actor="system",
+                    action="reconcile",
+                    payload=f"ok=False {report.summary()}",
                 )
                 self._ready = False
                 return
@@ -181,6 +200,14 @@ class TradingKernel:
     @property
     def ready(self) -> bool:
         return self._ready
+
+    @property
+    def started_at(self) -> datetime | None:
+        return self._started_at
+
+    @property
+    def broker(self) -> BrokerAdapter:
+        return self._broker
 
     @property
     def event_bus(self) -> EventBus:
@@ -203,6 +230,11 @@ class TradingKernel:
         checker = self._risk
         if hasattr(checker, "set_kill_switch_level"):
             await checker.set_kill_switch_level(level)
+        await self._audit.add(
+            actor="system",
+            action="kill_switch",
+            payload=f"level={level.value} reason={reason}",
+        )
         from finboard_core.events import KillSwitchActivated
 
         await self._bus.publish(
