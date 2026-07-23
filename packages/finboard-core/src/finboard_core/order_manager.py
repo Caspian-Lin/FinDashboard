@@ -214,6 +214,78 @@ class OrderManager:
             )
             raise
 
+    # ------------------------------------------------------------------ 批量撤单
+    async def cancel_all_active(self) -> list[str]:
+        """撤销所有活动订单(收盘撤单 / Kill Switch CANCEL_ALL 调用)。
+
+        采用两阶段撤单避免 "Session is already flushing" 竞争:
+        1. 阶段一:把所有活动订单 transition 到 CANCEL_PENDING + 单次 flush
+        2. 阶段二:逐个调用 broker.cancel_order(事件由 consumer 异步处理)
+
+        这样 consumer 处理 CANCELLED 事件时的 flush 不会与我们的 flush 竞争,
+        因为阶段一 flush 完成后才进入阶段二。
+
+        Returns:
+            成功提交撤单请求的 ``client_order_id`` 列表。
+        """
+        active = await self._orders.list_active(str(self._account_id))
+        candidates: list[tuple[str, Order]] = []
+        for order in active:
+            if not order.is_active:
+                continue
+            candidates.append((str(order.client_order_id), order))
+
+        if not candidates:
+            return []
+
+        # 阶段一:批量状态转换(单次 flush,避免与 consumer 竞争)
+        for cid, order in candidates:
+            await self._transition(order, OrderStatus.CANCEL_PENDING)
+            await self._orders.update_state(order)
+            await self._audit.add(
+                actor="system",
+                action="cancel_order",
+                target=cid,
+                payload=f"status={order.status.value}",
+            )
+
+        cancelled: list[str] = []
+        # 阶段二:逐个发 broker 撤单请求
+        for cid, order in candidates:
+            try:
+                await self._broker.cancel_order(cid)
+                cancelled.append(cid)
+            except BrokerTimeoutError:
+                await self._audit.add(
+                    actor="system",
+                    action="cancel_timeout",
+                    target=cid,
+                    payload=f"status={order.status.value}",
+                )
+                logger.warning(
+                    "order_manager.cancel_all_active_timeout",
+                    client_order_id=cid,
+                )
+            except Exception:
+                logger.exception(
+                    "order_manager.cancel_all_active_failed",
+                    client_order_id=cid,
+                    status=order.status.value,
+                )
+
+        if cancelled:
+            await self._audit.add(
+                actor="system",
+                action="cancel_all_active",
+                payload=f"cancelled={len(cancelled)} ids={','.join(cancelled)}",
+            )
+        logger.info(
+            "order_manager.cancel_all_active_done",
+            total_active=len(active),
+            cancelled=len(cancelled),
+        )
+        return cancelled
+
     # ------------------------------------------------------------------ 回报消费
     async def _consume_broker_events(self) -> None:
         async for event in self._broker.events():

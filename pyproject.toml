@@ -23,6 +23,7 @@ finboard-risk = { workspace = true }
 finboard-reconcile = { workspace = true }
 finboard-app = { workspace = true }
 finboard-api = { workspace = true }
+finboard-scheduler = { workspace = true }
 
 # 开发期统一依赖,改用 PEP 735 dependency-groups(uv 推荐写法)
 [dependency-groups]
@@ -75,6 +76,7 @@ known-first-party = [
   "finboard_reconcile",
   "finboard_app",
   "finboard_api",
+  "finboard_scheduler",
 ]
 
 # -----------------------------------------------------------------------------
@@ -104,6 +106,7 @@ mypy_path = [
   "packages/finboard-reconcile/src",
   "packages/finboard-app/src",
   "packages/finboard-api/src",
+  "packages/finboard-scheduler/src",
 ]
 exclude = ["migrations/versions/"]
 
@@ -140,6 +143,7 @@ addopts = [
   "--cov=finboard_core",
   "--cov=finboard_risk",
   "--cov=finboard_api",
+  "--cov=finboard_scheduler",
   "--cov-report=term-missing",
 ]
 markers = [

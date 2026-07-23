@@ -17,6 +17,7 @@ members = [
     "finboard-persistence",
     "finboard-reconcile",
     "finboard-risk",
+    "finboard-scheduler",
     "finboard-shared",
     "findashboard",
 ]
@@ -288,6 +289,7 @@ dependencies = [
     { name = "finboard-persistence" },
     { name = "finboard-reconcile" },
     { name = "finboard-risk" },
+    { name = "finboard-scheduler" },
     { name = "finboard-shared" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
@@ -302,6 +304,7 @@ requires-dist = [
     { name = "finboard-persistence", editable = "packages/finboard-persistence" },
     { name = "finboard-reconcile", editable = "packages/finboard-reconcile" },
     { name = "finboard-risk", editable = "packages/finboard-risk" },
+    { name = "finboard-scheduler", editable = "packages/finboard-scheduler" },
     { name = "finboard-shared", editable = "packages/finboard-shared" },
     { name = "pydantic-settings", specifier = ">=2.4" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -418,6 +421,27 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "finboard-shared", editable = "packages/finboard-shared" },
+    { name = "structlog", specifier = ">=24.1" },
+]
+
+[[package]]
+name = "finboard-scheduler"
+version = "0.1.0"
+source = { editable = "packages/finboard-scheduler" }
+dependencies = [
+    { name = "finboard-core" },
+    { name = "finboard-persistence" },
+    { name = "finboard-reconcile" },
+    { name = "finboard-shared" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "finboard-core", editable = "packages/finboard-core" },
+    { name = "finboard-persistence", editable = "packages/finboard-persistence" },
+    { name = "finboard-reconcile", editable = "packages/finboard-reconcile" },
     { name = "finboard-shared", editable = "packages/finboard-shared" },
     { name = "structlog", specifier = ">=24.1" },
 ]
