@@ -13,9 +13,14 @@
 - 模块划分：Broker Adapter / Trading Gateway / Order Manager / Position Manager / Account Manager / Risk Manager / Strategy Runner / Reconciliation
 
 ### 阶段优先级
-- **P0/P1（已完成）**：端到端真实交易链路（MockBroker + QMT 适配器）—— 查询账户 / 发单 / 撤单 / 接收回报 / 持仓核对 / 重启恢复。issue #1-#5 已关闭。
-- **P2（进行中）**：重启恢复完善（UNKNOWN 状态修复 + 本地↔券商订单匹配）—— issue #9。
-- **未完成 P2 前禁止提前开工**：TWAP / VWAP / 冰山单 / 智能拆单、跨账户路由、复杂回测、因子系统、LLM 接入
+- **P0/P1（已完成）**：端到端真实交易链路（MockBroker + QMT 适配器）—— 查询账户 / 发单 / 撤单 / 接收回报 / 持仓核对 / 重启恢复。issue #1-#5。
+- **P2（已完成）**：重启恢复完善（UNKNOWN 状态修复 + 本地↔券商订单匹配）—— issue #9。
+- **P3（已完成）**：基础风控 + 人工交易控制台（PreTradeChecker / KillSwitch / FastAPI + React）—— issue #12。
+- **P4（已完成）**：连续实盘运行基础设施 —— 故障注入测试 + 可观测性增强（#13）、定时任务调度（#14）。
+- **P5（大部分完成）**：策略框架 + 行情事件 —— 策略运行器（#11）、行情数据接入（#10）已实现；策略状态持久化待验证。
+- **当前方向：回测 + 策略开发** —— QMT 权限受阻,实盘验证暂缓（#22/#24/#26）。转向历史数据源（#27 akshare/tushare）、回测引擎（#28 行情回放 + 纸面撮合 + 绩效分析）、第一个信号驱动策略（#29 均线交叉）。
+- **实盘恢复条件**：QMT 权限解决 → #22 真机验证 → #23 标的元数据 → #24 连续运行 → 小资金实盘。
+- **P6 及以后禁止提前开工**：TWAP / VWAP / 冰山单 / 智能拆单、跨账户路由、复杂回测、因子系统、LLM 接入。
 
 ### 交易安全红线（改动这些逻辑必须先与用户确认风险）
 - `client_order_id` 必须由本地生成且全局唯一，用于防重复下单 / 关联券商订单 / 状态恢复 / 排查异常
@@ -81,7 +86,7 @@ PR 标题遵循提交信息规范（`<分类>: <修改点描述>`），并在描
 
 ## 当前仓库状态
 
-P0/P1 已完成（MockBroker 端到端 + QMT 适配器）。P2 重启恢复完善（issue #9）已完成。行情数据接入（issue #10）已完成。策略运行器（issue #11）已完成。人工交易控制台（issue #12）进行中。
+P0-P4 已完成（issue #1-#14 全部关闭）。P5 大部分完成（策略框架 + 行情事件已实现，策略状态持久化待验证）。当前进入**实盘环境验证**阶段：QMT 真机调试 + 标的元数据 + 连续运行验证 → 第一个真实策略 → 小资金实盘。
 
 ### 构建 / 测试 / lint / typecheck 命令
 
@@ -99,7 +104,7 @@ uv run pytest tests/integration/ -v
 uv run ruff check packages/ tests/
 
 # Type check
-uv run mypy packages/
+uv run mypy .
 
 # DB 迁移
 uv run alembic upgrade head
@@ -116,6 +121,7 @@ packages/
   finboard-core/        — TradingKernel / OrderManager / PositionManager / 状态机 / EventBus
   finboard-risk/        — PreTradeChecker / KillSwitch / RiskConfig
   finboard-reconcile/   — ReconciliationEngine（只读核对）+ RecoveryEngine（状态修复）
+  finboard-scheduler/   — asyncio 定时任务调度（盘前检查 / 收盘撤单 / 日终核对 / 连接心跳）
   finboard-app/         — 组装根 / CLI / 配置
   finboard-api/         — FastAPI REST + WebSocket API（人工交易控制台后端）
 ```
