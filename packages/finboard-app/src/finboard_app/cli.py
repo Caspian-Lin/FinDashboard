@@ -133,9 +133,7 @@ def kill_switch(
     level: Annotated[
         KillSwitchLevel,
         typer.Argument(
-            help=(
-                "Kill Switch 级别: off / no_new_orders / reduce_only / cancel_all / halt"
-            ),
+            help=("Kill Switch 级别: off / no_new_orders / reduce_only / cancel_all / halt"),
             case_sensitive=False,
         ),
     ],
@@ -193,9 +191,7 @@ async def _scheduler_list(settings: Settings) -> None:
             else:
                 assert t.time is not None
                 trigger = f"time={t.time.strftime('%H:%M')}"
-            typer.echo(
-                f"  {t.name:<25s} {trigger:<20s} trading_days_only={t.trading_days_only}"
-            )
+            typer.echo(f"  {t.name:<25s} {trigger:<20s} trading_days_only={t.trading_days_only}")
 
 
 @scheduler_app.command(name="trigger")
@@ -475,8 +471,7 @@ async def _fetch_all_data(*, config_file: str) -> None:
     sym_objs = [make_symbol(s.code) for s in config.symbols]
 
     typer.echo(
-        f"批量拉取 {len(sym_objs)} 个标的 "
-        f"({start} ~ {end}) {period.value} {config.fetch_adjust}"
+        f"批量拉取 {len(sym_objs)} 个标的 ({start} ~ {end}) {period.value} {config.fetch_adjust}"
     )
 
     def on_progress(code: str, done: int, total: int) -> None:
@@ -492,10 +487,7 @@ async def _fetch_all_data(*, config_file: str) -> None:
     )
 
     success = sum(1 for v in results.values() if v)
-    typer.echo(
-        f"\n完成: {success}/{len(sym_objs)} 成功, "
-        f"{len(sym_objs) - success} 失败"
-    )
+    typer.echo(f"\n完成: {success}/{len(sym_objs)} 成功, {len(sym_objs) - success} 失败")
 
 
 async def _data_status(*, symbol: str | None, cache_dir: str) -> None:
@@ -654,7 +646,9 @@ async def _bulk_download(
 
     provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
     if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider(max_concurrency=2, request_interval=0.5)
+        provider: AkShareProvider | YFinanceProvider = AkShareProvider(
+            max_concurrency=2, request_interval=0.5
+        )
     else:
         provider = YFinanceProvider(max_concurrency=3, request_interval=0.3)
 
@@ -670,7 +664,7 @@ async def _bulk_download(
         if d % 100 == 0 or d == t:
             typer.echo(f"  进度: {d}/{t} ({d * 100 // t}%)")
 
-    results = await provider.fetch_bars_batch(
+    results = await provider.update_cache_batch(
         sym_objs,
         BarPeriod.D1,
         start_date,
@@ -678,7 +672,7 @@ async def _bulk_download(
         on_progress=on_progress,
     )
 
-    success = sum(1 for v in results.values() if v)
+    success = sum(results.values())
     typer.echo(f"\n完成: {success}/{len(sym_objs)} 成功, {len(sym_objs) - success} 失败")
 
 

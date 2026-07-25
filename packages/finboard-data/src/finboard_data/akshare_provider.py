@@ -12,13 +12,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import structlog
 
-from finboard_data.cache import ParquetCache
+from finboard_data.cache import (
+    ParquetCache,
+    expected_last_bar_date,
+    incremental_fetch_start,
+)
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod
 
@@ -72,13 +76,18 @@ class AkShareProvider:
         request_interval: float = 0.5,
         max_retries: int = 3,
         retry_backoff: float = 2.0,
+        max_cache_io_concurrency: int = 1,
     ) -> None:
         if use_cache:
             dir_path = str(cache_dir) if cache_dir else "data_cache"
-            self._cache: ParquetCache | None = ParquetCache(dir_path)
+            self._cache: ParquetCache | None = ParquetCache(
+                dir_path,
+                max_io_concurrency=max_cache_io_concurrency,
+            )
         else:
             self._cache = None
 
+        self._max_concurrency = max_concurrency
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._request_interval = request_interval
         self._max_retries = max_retries
@@ -117,15 +126,66 @@ class AkShareProvider:
             end=str(end),
             cached=len(cached),
         )
-        fresh = await self._fetch_from_akshare(
-            symbol, period, start, end, adjust
-        )
+        fetch_start = incremental_fetch_start(cached, start)
+        fresh = await self._fetch_from_akshare(symbol, period, fetch_start, end, adjust)
         if self._cache is not None and fresh:
-            all_bars = await self._cache.merge(symbol, period, adjust, fresh)
+            all_bars = await self._cache.merge(
+                symbol,
+                period,
+                adjust,
+                fresh,
+                existing_bars=cached,
+            )
         else:
-            all_bars = fresh
+            all_bars = cached or fresh
 
         return ParquetCache.filter_by_date(all_bars, start, end)
+
+    async def update_cache(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+        *,
+        adjust: str = "qfq",
+    ) -> bool:
+        """仅更新本地缓存;完整缓存只读 footer,不解码历史行情。"""
+        if self._cache is None:
+            return bool(await self.fetch_bars(symbol, period, start, end, adjust=adjust))
+
+        metadata = await self._cache.metadata_for(symbol, period, adjust)
+        expected_end = expected_last_bar_date(end)
+        if (
+            metadata is not None
+            and metadata.bar_count > 0
+            and metadata.last_date is not None
+            and metadata.last_date >= expected_end
+        ):
+            return True
+
+        fetch_start = start
+        if metadata is not None and metadata.last_date is not None:
+            fetch_start = max(start, metadata.last_date - timedelta(days=7))
+        fresh = await self._fetch_from_akshare(symbol, period, fetch_start, end, adjust)
+        if not fresh:
+            return metadata is not None and metadata.bar_count > 0
+        if (
+            metadata is not None
+            and metadata.last_date is not None
+            and fresh[-1].timestamp.date() <= metadata.last_date
+        ):
+            return True
+
+        existing = await self._cache.read(symbol, period, adjust) if metadata is not None else []
+        await self._cache.merge(
+            symbol,
+            period,
+            adjust,
+            fresh,
+            existing_bars=existing,
+        )
+        return True
 
     # ------------------------------------------------------------------ 批量
     async def fetch_bars_batch(
@@ -144,32 +204,106 @@ class AkShareProvider:
         :returns: ``{symbol_code: [Bar, ...]}``;拉取失败的标的值为空列表
         """
         total = len(symbols)
+        if total == 0:
+            return {}
         results: dict[str, list[Bar]] = {}
         done_count = 0
-        lock = asyncio.Lock()
+        queue: asyncio.Queue[Symbol] = asyncio.Queue()
+        for symbol in symbols:
+            queue.put_nowait(symbol)
 
-        async def _fetch_one(sym: Symbol) -> None:
+        before = self._cache.io_stats() if self._cache is not None else None
+
+        async def _worker() -> None:
             nonlocal done_count
-            try:
-                bars = await self.fetch_bars(
-                    sym, period, start, end, adjust=adjust
-                )
-            except Exception:
-                logger.exception("akshare.batch_failed", symbol=sym.code)
-                bars = []
-            async with lock:
+            while True:
+                try:
+                    sym = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    bars = await self.fetch_bars(sym, period, start, end, adjust=adjust)
+                except Exception:
+                    logger.exception("akshare.batch_failed", symbol=sym.code)
+                    bars = []
                 results[sym.code] = bars
                 done_count += 1
                 if on_progress is not None:
                     on_progress(sym.code, done_count, total)
 
-        await asyncio.gather(*[_fetch_one(s) for s in symbols])
+        worker_count = min(self._max_concurrency, total)
+        await asyncio.gather(*[asyncio.create_task(_worker()) for _ in range(worker_count)])
+
+        if self._cache is not None and before is not None:
+            after = self._cache.io_stats()
+            logger.info(
+                "akshare.batch_cache_io",
+                symbols=total,
+                workers=worker_count,
+                read_ops=after.read_ops - before.read_ops,
+                read_bytes=after.read_bytes - before.read_bytes,
+                write_ops=after.write_ops - before.write_ops,
+                write_bytes=after.write_bytes - before.write_bytes,
+            )
+        return results
+
+    async def update_cache_batch(
+        self,
+        symbols: list[Symbol],
+        period: BarPeriod,
+        start: date,
+        end: date,
+        *,
+        adjust: str = "qfq",
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> dict[str, bool]:
+        """有界并发批量更新缓存,不在内存中保留历史 bars。"""
+        total = len(symbols)
+        if total == 0:
+            return {}
+        results: dict[str, bool] = {}
+        done_count = 0
+        queue: asyncio.Queue[Symbol] = asyncio.Queue()
+        for symbol in symbols:
+            queue.put_nowait(symbol)
+
+        before = self._cache.io_stats() if self._cache is not None else None
+
+        async def _worker() -> None:
+            nonlocal done_count
+            while True:
+                try:
+                    sym = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    ok = await self.update_cache(sym, period, start, end, adjust=adjust)
+                except Exception:
+                    logger.exception("akshare.cache_update_failed", symbol=sym.code)
+                    ok = False
+                results[sym.code] = ok
+                done_count += 1
+                if on_progress is not None:
+                    on_progress(sym.code, done_count, total)
+
+        worker_count = min(self._max_concurrency, total)
+        await asyncio.gather(*[asyncio.create_task(_worker()) for _ in range(worker_count)])
+
+        if self._cache is not None and before is not None:
+            after = self._cache.io_stats()
+            logger.info(
+                "akshare.cache_update_io",
+                symbols=total,
+                workers=worker_count,
+                read_ops=after.read_ops - before.read_ops,
+                read_bytes=after.read_bytes - before.read_bytes,
+                write_ops=after.write_ops - before.write_ops,
+                write_bytes=after.write_bytes - before.write_bytes,
+            )
         return results
 
     @staticmethod
-    def _is_cache_complete(
-        cached: list[Bar], start: date, end: date
-    ) -> bool:
+    def _is_cache_complete(cached: list[Bar], start: date, end: date) -> bool:
         """简化判断:缓存非空且最后一条 >= end 即视为完整。
 
         精确的交易日对齐由 TradingCalendar 负责,这里用宽松判断避免
@@ -178,7 +312,7 @@ class AkShareProvider:
         if not cached:
             return False
         last = cached[-1].timestamp.date()
-        return last >= end
+        return last >= expected_last_bar_date(end)
 
     async def _fetch_from_akshare(
         self,
@@ -191,9 +325,7 @@ class AkShareProvider:
         """带信号量限流 + 请求间隔 + 重试退避的 akshare 调用。"""
         async with self._semaphore:
             await self._enforce_interval()
-            return await self._fetch_with_retry(
-                symbol, period, start, end, adjust
-            )
+            return await self._fetch_with_retry(symbol, period, start, end, adjust)
 
     async def _enforce_interval(self) -> None:
         """保证两次 akshare 请求之间至少间隔 ``_request_interval`` 秒。"""
@@ -217,9 +349,7 @@ class AkShareProvider:
         last_error: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
-                return await asyncio.to_thread(
-                    self._fetch_sync, symbol, period, start, end, adjust
-                )
+                return await asyncio.to_thread(self._fetch_sync, symbol, period, start, end, adjust)
             except Exception as exc:
                 last_error = exc
                 if attempt < self._max_retries:
@@ -285,9 +415,7 @@ class AkShareProvider:
                     close=Decimal(str(row[col_map["close"]])),
                     volume=Decimal(str(row[col_map["volume"]])),
                     amount=Decimal(
-                        str(row[col_map["amount"]])
-                        if col_map["amount"] in df.columns
-                        else 0
+                        str(row[col_map["amount"]]) if col_map["amount"] in df.columns else 0
                     ),
                 )
             )

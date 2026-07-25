@@ -55,10 +55,8 @@ def _get_provider() -> AkShareProvider | YFinanceProvider:
 
 @router.get("/status", response_model=list[DataStatusOut])
 async def list_cache_status() -> list[DataStatusOut]:
-    """列出所有已缓存标的的状态。"""
+    """列出缓存状态;只读 Parquet footer,不扫描行情列。"""
     from finboard_data.cache import ParquetCache
-    from finboard_shared.models import Symbol as Sym
-    from finboard_shared.types import BarPeriod, Market
 
     cache = ParquetCache(_CACHE_DIR)
     cache_path = Path(_CACHE_DIR)
@@ -70,20 +68,16 @@ async def list_cache_status() -> list[DataStatusOut]:
         if len(parts) != 3:
             continue
         code, period_str, adjust = parts
-        bars = await cache.read(
-            Sym(code=code, market=Market.A_SHARE),
-            BarPeriod(period_str),
-            adjust,
-        )
+        metadata = await cache.metadata(f)
         result.append(
             DataStatusOut(
                 symbol=code,
                 period=period_str,
                 adjust=adjust,
-                bar_count=len(bars),
-                first_date=str(bars[0].timestamp.date()) if bars else None,
-                last_date=str(bars[-1].timestamp.date()) if bars else None,
-                last_close=bars[-1].close if bars else None,
+                bar_count=metadata.bar_count,
+                first_date=(str(metadata.first_date) if metadata.first_date else None),
+                last_date=str(metadata.last_date) if metadata.last_date else None,
+                last_close=None,
             )
         )
     return result
@@ -91,21 +85,21 @@ async def list_cache_status() -> list[DataStatusOut]:
 
 @router.get("/status/{symbol}", response_model=DataStatusOut)
 async def get_cache_status(symbol: str) -> DataStatusOut:
-    """查看单标的缓存详情。"""
+    """查看单标的缓存详情;只读 Parquet footer。"""
     from finboard_data.cache import ParquetCache, make_symbol
     from finboard_shared.types import BarPeriod
 
     cache = ParquetCache(_CACHE_DIR)
     sym = make_symbol(symbol)
-    bars = await cache.read(sym, BarPeriod.D1, "qfq")
+    metadata = await cache.metadata_for(sym, BarPeriod.D1, "qfq")
     return DataStatusOut(
         symbol=symbol,
         period="D1",
         adjust="qfq",
-        bar_count=len(bars),
-        first_date=str(bars[0].timestamp.date()) if bars else None,
-        last_date=str(bars[-1].timestamp.date()) if bars else None,
-        last_close=bars[-1].close if bars else None,
+        bar_count=metadata.bar_count if metadata else 0,
+        first_date=(str(metadata.first_date) if metadata and metadata.first_date else None),
+        last_date=str(metadata.last_date) if metadata and metadata.last_date else None,
+        last_close=None,
     )
 
 
@@ -195,9 +189,7 @@ async def get_symbol_pool() -> SymbolPoolOut:
 
     config = load_symbol_pool(_SYMBOLS_FILE)
     return SymbolPoolOut(
-        symbols=[
-            SymbolEntrySchema(code=s.code, name=s.name) for s in config.symbols
-        ],
+        symbols=[SymbolEntrySchema(code=s.code, name=s.name) for s in config.symbols],
         fetch_period=config.fetch_period,
         fetch_lookback_days=config.fetch_lookback_days,
         fetch_adjust=config.fetch_adjust,
@@ -210,18 +202,14 @@ async def update_symbol_pool(req: SymbolPoolUpdate) -> SymbolPoolOut:
     from finboard_data import SymbolEntry, SymbolPoolConfig, save_symbol_pool
 
     config = SymbolPoolConfig(
-        symbols=[
-            SymbolEntry(code=s.code, name=s.name) for s in req.symbols
-        ],
+        symbols=[SymbolEntry(code=s.code, name=s.name) for s in req.symbols],
         fetch_period=req.fetch_period,
         fetch_lookback_days=req.fetch_lookback_days,
         fetch_adjust=req.fetch_adjust,
     )
     save_symbol_pool(config, _SYMBOLS_FILE)
     return SymbolPoolOut(
-        symbols=[
-            SymbolEntrySchema(code=s.code, name=s.name) for s in config.symbols
-        ],
+        symbols=[SymbolEntrySchema(code=s.code, name=s.name) for s in config.symbols],
         fetch_period=config.fetch_period,
         fetch_lookback_days=config.fetch_lookback_days,
         fetch_adjust=config.fetch_adjust,
@@ -358,14 +346,15 @@ async def start_bulk_download(
         instrument_type=req.instrument_type,
         limit=999999,
     )
-    await session.close()
 
     if not instruments:
         raise HTTPException(status_code=400, detail="未找到匹配的标的(请先同步)")
 
     provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
     if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider(max_concurrency=2, request_interval=0.5)
+        provider: AkShareProvider | YFinanceProvider = AkShareProvider(
+            max_concurrency=2, request_interval=0.5
+        )
     else:
         provider = YFinanceProvider(max_concurrency=3, request_interval=0.3)
 
@@ -377,14 +366,15 @@ async def start_bulk_download(
 
     async def _run_download() -> None:
         try:
+
             def on_progress(code: str, done: int, total: int) -> None:
                 state["done"] = done
                 state["total"] = total
 
-            results = await provider.fetch_bars_batch(
+            results = await provider.update_cache_batch(
                 sym_objs, BarPeriod.D1, start_date, end_date, on_progress=on_progress
             )
-            state["success"] = sum(1 for v in results.values() if v)
+            state["success"] = sum(results.values())
             state["failed"] = len(sym_objs) - state["success"]
             state["status"] = "done"
         except Exception as exc:
@@ -418,9 +408,7 @@ def _save_config(cfg: dict[str, Any]) -> None:
     import json
     from pathlib import Path
 
-    Path(_CONFIG_FILE).write_text(
-        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    Path(_CONFIG_FILE).write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 @router.get("/config", response_model=SchedulerConfigOut)

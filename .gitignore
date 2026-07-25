@@ -60,8 +60,8 @@ dmypy.json
 *.log
 logs/
 run/
-data/
-docker/data/
+/data/
+/docker/data/
 
 # --- 数据库 / Alembic 临时产物 ---
 *.sqlite
@@ -77,4 +77,4 @@ web/.vite/
 # --- 操作系统 ---
 Thumbs.db
 desktop.ini
-data_cache/
+/data_cache/

@@ -61,7 +61,7 @@ def data_fetch_task(
             start=str(start),
             end=str(end),
         )
-        results = await provider.fetch_bars_batch(
+        results = await provider.update_cache_batch(
             sym_objs,
             period_enum,
             start,
@@ -69,7 +69,7 @@ def data_fetch_task(
             adjust=adjust,
             on_progress=on_progress,
         )
-        success = sum(1 for v in results.values() if v)
+        success = sum(results.values())
         logger.info(
             "data_fetch.done",
             total=len(symbols),
