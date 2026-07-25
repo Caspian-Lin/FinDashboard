@@ -101,10 +101,11 @@ class BrokerKind(StrEnum):
     MOCK = "mock"
     QMT = "qmt"
     CTP = "ctp"
+    BACKTEST = "backtest"
 
     @property
     def market(self) -> Market:
-        return Market.A_SHARE if self is BrokerKind.QMT else Market.FUTURE
+        return Market.A_SHARE if self in (BrokerKind.QMT, BrokerKind.BACKTEST) else Market.FUTURE
 
 
 class KillSwitchLevel(StrEnum):

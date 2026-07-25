@@ -24,6 +24,8 @@ finboard-reconcile = { workspace = true }
 finboard-app = { workspace = true }
 finboard-api = { workspace = true }
 finboard-scheduler = { workspace = true }
+finboard-data = { workspace = true }
+finboard-backtest = { workspace = true }
 
 # 开发期统一依赖,改用 PEP 735 dependency-groups(uv 推荐写法)
 [dependency-groups]
@@ -37,6 +39,7 @@ dev = [
   "types-PyYAML>=6.0",
   "ipython>=8.27",
   "httpx>=0.27",
+  "pyarrow>=15.0",
 ]
 
 # -----------------------------------------------------------------------------
@@ -77,6 +80,8 @@ known-first-party = [
   "finboard_app",
   "finboard_api",
   "finboard_scheduler",
+  "finboard_data",
+  "finboard_backtest",
 ]
 
 # -----------------------------------------------------------------------------
@@ -107,13 +112,16 @@ mypy_path = [
   "packages/finboard-app/src",
   "packages/finboard-api/src",
   "packages/finboard-scheduler/src",
+  "packages/finboard-data/src",
+  "packages/finboard-backtest/src",
 ]
 exclude = ["migrations/versions/"]
 
 # 第三方券商 SDK(xtquant / CTP)没有类型存根,P1 实盘接入时按需在此添加
 # xtquant 仅 Windows + miniQMT 可用,Linux CI 无法安装;mypy 忽略其缺失。
+# pyarrow / akshare 缺少 py.typed,mypy 忽略其缺失。
 [[tool.mypy.overrides]]
-module = ["xtquant.*"]
+module = ["xtquant.*", "pyarrow.*", "akshare.*"]
 ignore_missing_imports = true
 
 # 测试代码放宽部分严格项
@@ -144,6 +152,8 @@ addopts = [
   "--cov=finboard_risk",
   "--cov=finboard_api",
   "--cov=finboard_scheduler",
+  "--cov=finboard_data",
+  "--cov=finboard_backtest",
   "--cov-report=term-missing",
 ]
 markers = [

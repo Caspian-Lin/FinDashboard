@@ -19,6 +19,8 @@ import contextlib
 import signal
 import subprocess
 import sys
+from datetime import date
+from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated
 
 import typer
@@ -244,6 +246,177 @@ async def _trigger_task(
 
 
 app.add_typer(scheduler_app, name="scheduler")
+
+
+# ---------------------------------------------------------------------------
+# backtest 子命令
+# ---------------------------------------------------------------------------
+backtest_app = typer.Typer(
+    name="backtest",
+    help="回测引擎 — 历史数据回放 + 纸面撮合 + 绩效分析",
+    no_args_is_help=True,
+)
+
+
+@backtest_app.command(name="run")
+def backtest_run(
+    strategy: Annotated[
+        str,
+        typer.Option("--strategy", "-s", help="策略类型(如 ma_cross)"),
+    ],
+    symbols: Annotated[
+        str,
+        typer.Option("--symbols", help="标的代码,逗号分隔(如 510300.SH)"),
+    ],
+    start: Annotated[
+        str,
+        typer.Option("--start", help="开始日期 YYYY-MM-DD"),
+    ],
+    end: Annotated[
+        str,
+        typer.Option("--end", help="结束日期 YYYY-MM-DD"),
+    ],
+    capital: Annotated[
+        str,
+        typer.Option("--capital", help="初始资金(默认 100000)"),
+    ] = "100000",
+    short_window: Annotated[
+        int,
+        typer.Option("--short", help="短期均线周期(ma_cross)"),
+    ] = 5,
+    long_window: Annotated[
+        int,
+        typer.Option("--long", help="长期均线周期(ma_cross)"),
+    ] = 20,
+    adjust: Annotated[
+        str,
+        typer.Option("--adjust", help="复权方式(qfq/hqfq/none)"),
+    ] = "qfq",
+) -> None:
+    """运行回测并打印绩效报告。"""
+    from datetime import date as parse_date
+    from decimal import Decimal
+
+    asyncio.run(
+        _run_backtest(
+            strategy=strategy,
+            symbols=[s.strip() for s in symbols.split(",")],
+            start=parse_date.fromisoformat(start),
+            end=parse_date.fromisoformat(end),
+            capital=Decimal(capital),
+            short_window=short_window,
+            long_window=long_window,
+            adjust=adjust,
+        )
+    )
+
+
+async def _run_backtest(
+    *,
+    strategy: str,
+    symbols: list[str],
+    start: date,
+    end: date,
+    capital: Decimal,
+    short_window: int,
+    long_window: int,
+    adjust: str,
+) -> None:
+    from finboard_app.strategies import create_strategy
+    from finboard_backtest import BacktestConfig, BacktestEngine
+    from finboard_data import AkShareProvider
+
+    strat = create_strategy(
+        strategy,
+        f"{strategy}_backtest",
+        symbol_code=symbols[0],
+        short_window=short_window,
+        long_window=long_window,
+    )
+    provider = AkShareProvider()
+    config = BacktestConfig(
+        symbols=symbols,
+        start=start,
+        end=end,
+        initial_capital=capital,
+        adjust=adjust,
+    )
+    engine = BacktestEngine(strategy=strat, data_provider=provider, config=config)
+    result = await engine.run()
+    typer.echo(result.summary())
+
+
+app.add_typer(backtest_app, name="backtest")
+
+
+# ---------------------------------------------------------------------------
+# data 子命令
+# ---------------------------------------------------------------------------
+data_app = typer.Typer(
+    name="data",
+    help="历史行情数据拉取与管理",
+    no_args_is_help=True,
+)
+
+
+@data_app.command(name="fetch")
+def data_fetch(
+    symbol: Annotated[
+        str,
+        typer.Argument(help="标的代码(如 510300.SH)"),
+    ],
+    start: Annotated[
+        str,
+        typer.Option("--start", help="开始日期 YYYY-MM-DD"),
+    ],
+    end: Annotated[
+        str,
+        typer.Option("--end", help="结束日期 YYYY-MM-DD"),
+    ],
+    adjust: Annotated[
+        str,
+        typer.Option("--adjust", help="复权方式(qfq/hqfq/none)"),
+    ] = "qfq",
+) -> None:
+    """拉取并缓存历史行情数据。"""
+    from datetime import date as parse_date
+
+    asyncio.run(
+        _fetch_data(
+            symbol=symbol,
+            start=parse_date.fromisoformat(start),
+            end=parse_date.fromisoformat(end),
+            adjust=adjust,
+        )
+    )
+
+
+async def _fetch_data(
+    *,
+    symbol: str,
+    start: date,
+    end: date,
+    adjust: str,
+) -> None:
+    from finboard_data import AkShareProvider
+    from finboard_shared.models import Symbol as Sym
+    from finboard_shared.types import BarPeriod, Market
+
+    provider = AkShareProvider()
+    bars = await provider.fetch_bars(
+        Sym(code=symbol, market=Market.A_SHARE),
+        BarPeriod.D1,
+        start,
+        end,
+        adjust=adjust,
+    )
+    typer.echo(f"已获取 {len(bars)} 根日线")
+    if bars:
+        typer.echo(f"  起始: {bars[0].timestamp.date()} close={bars[0].close}")
+        typer.echo(f"  结束: {bars[-1].timestamp.date()} close={bars[-1].close}")
+
+
+app.add_typer(data_app, name="data")
 
 
 # --------------------------------------------------------------------------- 内部
