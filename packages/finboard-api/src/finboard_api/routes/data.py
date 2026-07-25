@@ -235,6 +235,7 @@ async def list_instruments(
         limit=limit,
         offset=offset,
     )
+    await session.commit()
     return InstrumentListOut(
         items=[
             InstrumentOut(
@@ -264,6 +265,7 @@ async def search_instruments(
 
     repo = InstrumentRepository(session)
     rows = await repo.search(q, limit=limit)
+    await session.commit()
     return [
         InstrumentOut(
             code=r.code,
@@ -346,6 +348,7 @@ async def start_bulk_download(
         instrument_type=req.instrument_type,
         limit=999999,
     )
+    await session.commit()
 
     if not instruments:
         raise HTTPException(status_code=400, detail="未找到匹配的标的(请先同步)")
