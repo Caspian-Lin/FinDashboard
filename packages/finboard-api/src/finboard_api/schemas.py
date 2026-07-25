@@ -217,6 +217,23 @@ class SymbolPoolUpdate(BaseSchema):
     fetch_adjust: str = "qfq"
 
 
+# --------------------------------------------------------------------------- Instrument
+class InstrumentOut(BaseSchema):
+    code: str
+    name: str = ""
+    market: str
+    instrument_type: str
+    exchange: str | None = None
+    status: str = "active"
+
+
+class InstrumentListOut(BaseSchema):
+    items: list[InstrumentOut]
+    total: int
+    limit: int
+    offset: int
+
+
 # --------------------------------------------------------------------------- Backtest
 class BacktestRunRequest(BaseSchema):
     strategy: str

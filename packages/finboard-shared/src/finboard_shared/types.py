@@ -11,7 +11,16 @@ from enum import StrEnum
 
 class Market(StrEnum):
     A_SHARE = "a_share"
+    HK = "hk"
+    US = "us"
     FUTURE = "future"
+
+
+class InstrumentType(StrEnum):
+    STOCK = "stock"
+    ETF = "etf"
+    INDEX = "index"
+    FUTURES = "futures"
 
 
 class Side(StrEnum):

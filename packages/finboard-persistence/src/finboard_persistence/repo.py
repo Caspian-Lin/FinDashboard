@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +19,7 @@ from finboard_persistence.models import (
     AccountModel,
     AuditLogModel,
     FillModel,
+    InstrumentModel,
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
@@ -33,6 +35,8 @@ from finboard_shared.types import (
     Side,
     TimeInForce,
 )
+
+logger = structlog.get_logger(__name__)
 
 _POSITION_SOURCE_LOCAL = "local"
 _POSITION_SOURCE_BROKER = "broker"
@@ -518,6 +522,110 @@ class ReconciliationLogRepository:
         self._session.add(row)
         await self._session.flush()
         return row
+
+
+class InstrumentRepository:
+    """标的元数据仓储(instruments 表)。
+
+    由 UniverseDiscovery 调用 ``upsert_many`` 做批量同步。
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def upsert_many(
+        self,
+        instruments: list[dict[str, object]],
+    ) -> int:
+        """批量 upsert(按 code 去重;存在则更新 name/status/exchange)。
+
+        :param instruments: dict 列表,每个含 code/name/market/instrument_type/exchange
+        :returns: 影响行数
+        """
+        if not instruments:
+            return 0
+        codes = [ins["code"] for ins in instruments]
+        stmt = select(InstrumentModel).where(InstrumentModel.code.in_(codes))
+        existing = {
+            row.code: row
+            for row in (await self._session.execute(stmt)).scalars().all()
+        }
+
+        new_count = 0
+        for ins in instruments:
+            row = existing.get(str(ins["code"]))
+            if row is None:
+                row = InstrumentModel(
+                    code=str(ins["code"]),
+                    name=str(ins.get("name", "")),
+                    market=str(ins.get("market", "a_share")),
+                    instrument_type=str(ins.get("instrument_type", "stock")),
+                    exchange=ins.get("exchange"),
+                    status=str(ins.get("status", "active")),
+                )
+                self._session.add(row)
+                new_count += 1
+            else:
+                row.name = str(ins.get("name", row.name))
+                row.exchange = ins.get("exchange", row.exchange)  # type: ignore[assignment]
+                if "status" in ins:
+                    row.status = str(ins["status"])
+
+        await self._session.flush()
+        logger.info(
+            "instrument.upsert_done",
+            total=len(instruments),
+            new=new_count,
+            updated=len(instruments) - new_count,
+        )
+        return len(instruments)
+
+    async def list_active(
+        self,
+        *,
+        market: str | None = None,
+        instrument_type: str | None = None,
+        limit: int = 5000,
+        offset: int = 0,
+    ) -> tuple[list[InstrumentModel], int]:
+        """查询活跃标的(分页)。"""
+        conditions = [InstrumentModel.status == "active"]
+        if market:
+            conditions.append(InstrumentModel.market == market)
+        if instrument_type:
+            conditions.append(InstrumentModel.instrument_type == instrument_type)
+
+        count_stmt = select(InstrumentModel).where(*conditions)
+        total = len((await self._session.execute(count_stmt)).scalars().all())
+
+        stmt = (
+            select(InstrumentModel)
+            .where(*conditions)
+            .order_by(InstrumentModel.code)
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows), total
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 50,
+    ) -> list[InstrumentModel]:
+        """按代码或名称模糊搜索。"""
+        pattern = f"%{query}%"
+        stmt = (
+            select(InstrumentModel)
+            .where(
+                (InstrumentModel.code.ilike(pattern))
+                | (InstrumentModel.name.ilike(pattern))
+            )
+            .filter(InstrumentModel.status == "active")
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
 
 
 # --------------------------------------------------------------------------- 占位避免 Decimal import 警告

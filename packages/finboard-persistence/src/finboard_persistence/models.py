@@ -9,11 +9,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -185,4 +186,31 @@ class AuditLogModel(Base, IdMixin):
     payload: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class InstrumentModel(Base, IdMixin):
+    """标的元数据 —— 全市场标的字典(A 股 / ETF / 港股 / 美股 ...)。
+
+    由 :mod:`finboard_data.discovery` 自动发现并 upsert,替代手工 symbols.yaml。
+    """
+
+    __tablename__ = "instruments"
+
+    code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), default="")
+    market: Mapped[str] = mapped_column(String(16), index=True)  # a_share / hk / us
+    instrument_type: Mapped[str] = mapped_column(String(16), index=True)  # stock / etf
+    exchange: Mapped[str | None] = mapped_column(String(16), nullable=True)  # SSE / SZSE
+    list_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    delist_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    sector: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    industry: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_instruments_market_type", "market", "instrument_type"),
     )

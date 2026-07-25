@@ -7,13 +7,17 @@ from datetime import date as parse_date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_api.deps import get_session
 from finboard_api.schemas import (
     BatchFetchResultOut,
     DataFetchRequest,
     DataStatusOut,
     FetchResultOut,
+    InstrumentListOut,
+    InstrumentOut,
     SymbolEntrySchema,
     SymbolPoolOut,
     SymbolPoolUpdate,
@@ -216,3 +220,64 @@ async def update_symbol_pool(req: SymbolPoolUpdate) -> SymbolPoolOut:
         fetch_lookback_days=config.fetch_lookback_days,
         fetch_adjust=config.fetch_adjust,
     )
+
+
+# ------------------------------------------------------------------ Instruments (DB)
+@router.get("/instruments", response_model=InstrumentListOut)
+async def list_instruments(
+    market: str | None = None,
+    instrument_type: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+    session: AsyncSession = Depends(get_session),
+) -> InstrumentListOut:
+    """列出数据库中的标的(分页)。"""
+    from finboard_persistence import InstrumentRepository
+
+    repo = InstrumentRepository(session)
+    rows, total = await repo.list_active(
+        market=market,
+        instrument_type=instrument_type,
+        limit=limit,
+        offset=offset,
+    )
+    return InstrumentListOut(
+        items=[
+            InstrumentOut(
+                code=r.code,
+                name=r.name,
+                market=r.market,
+                instrument_type=r.instrument_type,
+                exchange=r.exchange,
+                status=r.status,
+            )
+            for r in rows
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/instruments/search", response_model=list[InstrumentOut])
+async def search_instruments(
+    q: str,
+    limit: int = 50,
+    session: AsyncSession = Depends(get_session),
+) -> list[InstrumentOut]:
+    """按代码或名称模糊搜索标的。"""
+    from finboard_persistence import InstrumentRepository
+
+    repo = InstrumentRepository(session)
+    rows = await repo.search(q, limit=limit)
+    return [
+        InstrumentOut(
+            code=r.code,
+            name=r.name,
+            market=r.market,
+            instrument_type=r.instrument_type,
+            exchange=r.exchange,
+            status=r.status,
+        )
+        for r in rows
+    ]
