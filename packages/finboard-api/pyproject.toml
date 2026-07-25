@@ -12,6 +12,8 @@ dependencies = [
   "finboard-risk",
   "finboard-reconcile",
   "finboard-app",
+  "finboard-data",
+  "finboard-backtest",
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
 ]

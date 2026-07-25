@@ -4,11 +4,14 @@ akshare 免费、无需 token,覆盖 A 股日线 / 分钟线,是个人量化的�
 
 akshare 为同步库,所有调用通过 ``asyncio.to_thread`` 在线程池执行,
 避免阻塞事件循环。
+
+内置限流(信号量 + 请求间隔 + 重试退避),防止被 akshare 封 IP。
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -38,13 +41,26 @@ _ADJUST_MAP: dict[str, str] = {
 
 
 class AkShareProvider:
-    """akshare 历史数据提供者,带本地 parquet 缓存。
+    """akshare 历史数据提供者,带本地 parquet 缓存 + 限流。
 
     用法::
 
         provider = AkShareProvider(cache_dir="data_cache")
         bars = await provider.fetch_bars(symbol, BarPeriod.D1,
                                          start, end, adjust="qfq")
+
+    批量拉取::
+
+        results = await provider.fetch_bars_batch(
+            [sym1, sym2, sym3], BarPeriod.D1, start, end,
+            on_progress=lambda code, done, total: print(f"{done}/{total} {code}"),
+        )
+
+    限流参数:
+
+    * ``max_concurrency``: 信号量,同时最多 N 个 akshare 请求在途
+    * ``request_interval``: 两次请求间的最小间隔(秒),防封 IP
+    * ``max_retries`` / ``retry_backoff``: 网络错误时指数退避重试
     """
 
     def __init__(
@@ -52,6 +68,10 @@ class AkShareProvider:
         *,
         cache_dir: str | Path | None = None,
         use_cache: bool = True,
+        max_concurrency: int = 3,
+        request_interval: float = 0.5,
+        max_retries: int = 3,
+        retry_backoff: float = 2.0,
     ) -> None:
         if use_cache:
             dir_path = str(cache_dir) if cache_dir else "data_cache"
@@ -59,6 +79,14 @@ class AkShareProvider:
         else:
             self._cache = None
 
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._request_interval = request_interval
+        self._max_retries = max_retries
+        self._retry_backoff = retry_backoff
+        self._interval_lock = asyncio.Lock()
+        self._last_request_time: float = 0.0
+
+    # ------------------------------------------------------------------ 单标的
     async def fetch_bars(
         self,
         symbol: Symbol,
@@ -99,6 +127,45 @@ class AkShareProvider:
 
         return ParquetCache.filter_by_date(all_bars, start, end)
 
+    # ------------------------------------------------------------------ 批量
+    async def fetch_bars_batch(
+        self,
+        symbols: list[Symbol],
+        period: BarPeriod,
+        start: date,
+        end: date,
+        *,
+        adjust: str = "qfq",
+        on_progress: Callable[[str, int, int], None] | None = None,
+    ) -> dict[str, list[Bar]]:
+        """批量拉取多标的数据,带限流 + 进度回调。
+
+        :param on_progress: 回调 ``on_progress(symbol_code, done, total)``
+        :returns: ``{symbol_code: [Bar, ...]}``;拉取失败的标的值为空列表
+        """
+        total = len(symbols)
+        results: dict[str, list[Bar]] = {}
+        done_count = 0
+        lock = asyncio.Lock()
+
+        async def _fetch_one(sym: Symbol) -> None:
+            nonlocal done_count
+            try:
+                bars = await self.fetch_bars(
+                    sym, period, start, end, adjust=adjust
+                )
+            except Exception:
+                logger.exception("akshare.batch_failed", symbol=sym.code)
+                bars = []
+            async with lock:
+                results[sym.code] = bars
+                done_count += 1
+                if on_progress is not None:
+                    on_progress(sym.code, done_count, total)
+
+        await asyncio.gather(*[_fetch_one(s) for s in symbols])
+        return results
+
     @staticmethod
     def _is_cache_complete(
         cached: list[Bar], start: date, end: date
@@ -121,9 +188,53 @@ class AkShareProvider:
         end: date,
         adjust: str,
     ) -> list[Bar]:
-        return await asyncio.to_thread(
-            self._fetch_sync, symbol, period, start, end, adjust
-        )
+        """带信号量限流 + 请求间隔 + 重试退避的 akshare 调用。"""
+        async with self._semaphore:
+            await self._enforce_interval()
+            return await self._fetch_with_retry(
+                symbol, period, start, end, adjust
+            )
+
+    async def _enforce_interval(self) -> None:
+        """保证两次 akshare 请求之间至少间隔 ``_request_interval`` 秒。"""
+        async with self._interval_lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            elapsed = now - self._last_request_time
+            if elapsed < self._request_interval:
+                await asyncio.sleep(self._request_interval - elapsed)
+            self._last_request_time = loop.time()
+
+    async def _fetch_with_retry(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+        adjust: str,
+    ) -> list[Bar]:
+        """指数退避重试。"""
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                return await asyncio.to_thread(
+                    self._fetch_sync, symbol, period, start, end, adjust
+                )
+            except Exception as exc:
+                last_error = exc
+                if attempt < self._max_retries:
+                    wait = self._retry_backoff**attempt
+                    logger.warning(
+                        "akshare.fetch_retry",
+                        symbol=symbol.code,
+                        attempt=attempt + 1,
+                        max_retries=self._max_retries,
+                        wait=f"{wait:.1f}s",
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(wait)
+        assert last_error is not None
+        raise last_error
 
     def _fetch_sync(
         self,

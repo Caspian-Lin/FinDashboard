@@ -19,6 +19,8 @@ from finboard_api.errors import finboard_error_handler
 from finboard_api.routes import (
     account_router,
     audit_router,
+    backtest_router,
+    data_router,
     fills_router,
     health_router,
     kill_switch_router,
@@ -108,6 +110,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(kill_switch_router)
     app.include_router(reconcile_router)
     app.include_router(audit_router)
+    app.include_router(data_router)
+    app.include_router(backtest_router)
 
     # WebSocket
     @app.websocket("/ws/events")
