@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date as parse_date
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from finboard_api.schemas import (
     BacktestFillOut,
@@ -63,10 +63,16 @@ async def run_backtest(req: BacktestRunRequest) -> BacktestResultOut:
     """
     from finboard_app.strategies import create_strategy
     from finboard_backtest import BacktestConfig, BacktestEngine
-    from finboard_data import AkShareProvider
+    from finboard_data import AkShareProvider, YFinanceProvider
 
     strategy = create_strategy(req.strategy, "backtest", **req.params)
-    provider = AkShareProvider()
+
+    import os
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    if provider_name == "akshare":
+        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
+    else:
+        provider = YFinanceProvider()
     config = BacktestConfig(
         symbols=req.symbols,
         start=parse_date.fromisoformat(req.start),
@@ -80,7 +86,16 @@ async def run_backtest(req: BacktestRunRequest) -> BacktestResultOut:
         data_provider=provider,
         config=config,
     )
-    result = await engine.run()
+    try:
+        result = await engine.run()
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).exception("backtest.run_failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"回测执行失败(通常是数据源连接错误): {exc}",
+        ) from exc
 
     equity_curve = [
         EquityPointOut(

@@ -1,11 +1,10 @@
-"""``AkShareProvider`` —— 基于 akshare 的 A 股历史数据提供者。
+"""``YFinanceProvider`` —— 基于 yfinance 的历史数据提供者。
 
-akshare 免费、无需 token,覆盖 A 股日线 / 分钟线,是个人量化的首选数据源。
+yfinance 使用 Yahoo Finance 数据源,网络稳定性优于 akshare(东方财富)。
 
-akshare 为同步库,所有调用通过 ``asyncio.to_thread`` 在线程池执行,
-避免阻塞事件循环。
-
-内置限流(信号量 + 请求间隔 + 重试退避),防止被 akshare 封 IP。
+符号映射:
+* A 股上海(``.SH``)→ Yahoo ``.SS``
+* A 股深圳(``.SZ``)→ Yahoo ``.SZ`` (不变)
 """
 
 from __future__ import annotations
@@ -29,42 +28,36 @@ from finboard_shared.types import BarPeriod
 logger = structlog.get_logger(__name__)
 
 _PERIOD_MAP: dict[BarPeriod, str] = {
-    BarPeriod.D1: "daily",
-    BarPeriod.M1: "1",
-    BarPeriod.M5: "5",
-    BarPeriod.M15: "15",
-    BarPeriod.M30: "30",
-    BarPeriod.H1: "60",
+    BarPeriod.D1: "1d",
+    BarPeriod.M1: "1m",
+    BarPeriod.M5: "5m",
+    BarPeriod.M15: "15m",
+    BarPeriod.M30: "30m",
+    BarPeriod.H1: "60m",
 }
 
 _ADJUST_MAP: dict[str, str] = {
-    "qfq": "qfq",
-    "hqfq": "hfq",
-    "none": "",
+    "qfq": "adjust",
+    "hqfq": "auto",
+    "none": "raw",
 }
 
 
-class AkShareProvider:
-    """akshare 历史数据提供者,带本地 parquet 缓存 + 限流。
+def _to_yahoo_symbol(code: str) -> str:
+    """``510300.SH`` → ``510300.SS``;``159915.SZ`` → ``159915.SZ``。"""
+    if code.endswith(".SH"):
+        return code[:-3] + ".SS"
+    return code
+
+
+class YFinanceProvider:
+    """yfinance 历史数据提供者,带本地 parquet 缓存 + 限流。
 
     用法::
 
-        provider = AkShareProvider(cache_dir="data_cache")
+        provider = YFinanceProvider()
         bars = await provider.fetch_bars(symbol, BarPeriod.D1,
                                          start, end, adjust="qfq")
-
-    批量拉取::
-
-        results = await provider.fetch_bars_batch(
-            [sym1, sym2, sym3], BarPeriod.D1, start, end,
-            on_progress=lambda code, done, total: print(f"{done}/{total} {code}"),
-        )
-
-    限流参数:
-
-    * ``max_concurrency``: 信号量,同时最多 N 个 akshare 请求在途
-    * ``request_interval``: 两次请求间的最小间隔(秒),防封 IP
-    * ``max_retries`` / ``retry_backoff``: 网络错误时指数退避重试
     """
 
     def __init__(
@@ -73,7 +66,7 @@ class AkShareProvider:
         cache_dir: str | Path | None = None,
         use_cache: bool = True,
         max_concurrency: int = 3,
-        request_interval: float = 0.5,
+        request_interval: float = 0.3,
         max_retries: int = 3,
         retry_backoff: float = 2.0,
         max_cache_io_concurrency: int = 1,
@@ -111,15 +104,11 @@ class AkShareProvider:
             cached = await self._cache.read(symbol, period, adjust)
 
         if self._is_cache_complete(cached, start, end):
-            logger.debug(
-                "akshare.cache_hit",
-                symbol=symbol.code,
-                count=len(cached),
-            )
+            logger.debug("yfinance.cache_hit", symbol=symbol.code, count=len(cached))
             return ParquetCache.filter_by_date(cached, start, end)
 
         logger.info(
-            "akshare.fetching",
+            "yfinance.fetching",
             symbol=symbol.code,
             period=period.value,
             start=str(start),
@@ -127,7 +116,7 @@ class AkShareProvider:
             cached=len(cached),
         )
         fetch_start = incremental_fetch_start(cached, start)
-        fresh = await self._fetch_from_akshare(symbol, period, fetch_start, end, adjust)
+        fresh = await self._fetch_from_yfinance(symbol, period, fetch_start, end, adjust)
         if self._cache is not None and fresh:
             all_bars = await self._cache.merge(
                 symbol,
@@ -167,7 +156,7 @@ class AkShareProvider:
         fetch_start = start
         if metadata is not None and metadata.last_date is not None:
             fetch_start = max(start, metadata.last_date - timedelta(days=7))
-        fresh = await self._fetch_from_akshare(symbol, period, fetch_start, end, adjust)
+        fresh = await self._fetch_from_yfinance(symbol, period, fetch_start, end, adjust)
         if not fresh:
             return metadata is not None and metadata.bar_count > 0
         if (
@@ -198,11 +187,7 @@ class AkShareProvider:
         adjust: str = "qfq",
         on_progress: Callable[[str, int, int], None] | None = None,
     ) -> dict[str, list[Bar]]:
-        """批量拉取多标的数据,带限流 + 进度回调。
-
-        :param on_progress: 回调 ``on_progress(symbol_code, done, total)``
-        :returns: ``{symbol_code: [Bar, ...]}``;拉取失败的标的值为空列表
-        """
+        """批量拉取多标的数据,带限流 + 进度回调。"""
         total = len(symbols)
         if total == 0:
             return {}
@@ -224,7 +209,7 @@ class AkShareProvider:
                 try:
                     bars = await self.fetch_bars(sym, period, start, end, adjust=adjust)
                 except Exception:
-                    logger.exception("akshare.batch_failed", symbol=sym.code)
+                    logger.exception("yfinance.batch_failed", symbol=sym.code)
                     bars = []
                 results[sym.code] = bars
                 done_count += 1
@@ -237,7 +222,7 @@ class AkShareProvider:
         if self._cache is not None and before is not None:
             after = self._cache.io_stats()
             logger.info(
-                "akshare.batch_cache_io",
+                "yfinance.batch_cache_io",
                 symbols=total,
                 workers=worker_count,
                 read_ops=after.read_ops - before.read_ops,
@@ -279,7 +264,7 @@ class AkShareProvider:
                 try:
                     ok = await self.update_cache(sym, period, start, end, adjust=adjust)
                 except Exception:
-                    logger.exception("akshare.cache_update_failed", symbol=sym.code)
+                    logger.exception("yfinance.cache_update_failed", symbol=sym.code)
                     ok = False
                 results[sym.code] = ok
                 done_count += 1
@@ -292,7 +277,7 @@ class AkShareProvider:
         if self._cache is not None and before is not None:
             after = self._cache.io_stats()
             logger.info(
-                "akshare.cache_update_io",
+                "yfinance.cache_update_io",
                 symbols=total,
                 workers=worker_count,
                 read_ops=after.read_ops - before.read_ops,
@@ -302,19 +287,14 @@ class AkShareProvider:
             )
         return results
 
+    # ------------------------------------------------------------------ 限流
     @staticmethod
     def _is_cache_complete(cached: list[Bar], start: date, end: date) -> bool:
-        """简化判断:缓存非空且最后一条 >= end 即视为完整。
-
-        精确的交易日对齐由 TradingCalendar 负责,这里用宽松判断避免
-        引入 scheduler 依赖。回测引擎会在拿到数据后做进一步处理。
-        """
         if not cached:
             return False
-        last = cached[-1].timestamp.date()
-        return last >= expected_last_bar_date(end)
+        return cached[-1].timestamp.date() >= expected_last_bar_date(end)
 
-    async def _fetch_from_akshare(
+    async def _fetch_from_yfinance(
         self,
         symbol: Symbol,
         period: BarPeriod,
@@ -322,13 +302,11 @@ class AkShareProvider:
         end: date,
         adjust: str,
     ) -> list[Bar]:
-        """带信号量限流 + 请求间隔 + 重试退避的 akshare 调用。"""
         async with self._semaphore:
             await self._enforce_interval()
             return await self._fetch_with_retry(symbol, period, start, end, adjust)
 
     async def _enforce_interval(self) -> None:
-        """保证两次 akshare 请求之间至少间隔 ``_request_interval`` 秒。"""
         async with self._interval_lock:
             loop = asyncio.get_running_loop()
             now = loop.time()
@@ -345,7 +323,6 @@ class AkShareProvider:
         end: date,
         adjust: str,
     ) -> list[Bar]:
-        """指数退避重试。"""
         last_error: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
@@ -355,7 +332,7 @@ class AkShareProvider:
                 if attempt < self._max_retries:
                     wait = self._retry_backoff**attempt
                     logger.warning(
-                        "akshare.fetch_retry",
+                        "yfinance.fetch_retry",
                         symbol=symbol.code,
                         attempt=attempt + 1,
                         max_retries=self._max_retries,
@@ -374,87 +351,64 @@ class AkShareProvider:
         end: date,
         adjust: str,
     ) -> list[Bar]:
-        import akshare as ak
+        import yfinance as yf
 
-        code = symbol.code.split(".")[0]
-        ak_period = _PERIOD_MAP.get(period)
-        if ak_period is None:
-            raise ValueError(f"akshare 不支持周期: {period}")
-        ak_adjust = _ADJUST_MAP.get(adjust, "")
+        yahoo_symbol = _to_yahoo_symbol(symbol.code)
+        yf_period = _PERIOD_MAP.get(period)
+        if yf_period is None:
+            raise ValueError(f"yfinance 不支持周期: {period}")
 
-        if period == BarPeriod.D1:
-            df = ak.stock_zh_a_hist(
-                symbol=code,
-                period=ak_period,
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-                adjust=ak_adjust,
-            )
-        else:
-            df = ak.stock_zh_a_hist_min_em(
-                symbol=code,
-                period=ak_period,
-                start_date=f"{start.strftime('%Y-%m-%d')} 09:30:00",
-                end_date=f"{end.strftime('%Y-%m-%d')} 15:00:00",
-                adjust=ak_adjust,
-            )
+        # yfinance 的 end 是 exclusive,加一天
+        end_str = (end + timedelta(days=1)).strftime("%Y-%m-%d")
+        start_str = start.strftime("%Y-%m-%d")
+
+        yf_adjust = adjust != "none"
+
+        ticker = yf.Ticker(yahoo_symbol)
+        df = ticker.history(
+            start=start_str,
+            end=end_str,
+            interval=yf_period,
+            auto_adjust=yf_adjust,
+        )
+
+        if df is None or df.empty:
+            logger.warning("yfinance.no_data", symbol=symbol.code, yahoo=yahoo_symbol)
+            return []
 
         bars: list[Bar] = []
-        col_map = self._column_map(period)
+        for ts, row in df.iterrows():
+            dt = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+            if isinstance(dt, datetime):
+                if period == BarPeriod.D1:
+                    # 日线 timestamp 表示交易日,统一为 UTC 零点,避免时区换算减一天。
+                    dt = datetime.combine(dt.date(), datetime.min.time(), tzinfo=UTC)
+                elif dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                else:
+                    dt = dt.astimezone(UTC)
+            else:
+                dt = datetime.combine(dt, datetime.min.time(), tzinfo=UTC)
 
-        for _, row in df.iterrows():
-            ts = self._parse_timestamp(row[col_map["datetime"]], period)
             bars.append(
                 Bar(
                     symbol=symbol,
                     period=period,
-                    timestamp=ts,
-                    open=Decimal(str(row[col_map["open"]])),
-                    high=Decimal(str(row[col_map["high"]])),
-                    low=Decimal(str(row[col_map["low"]])),
-                    close=Decimal(str(row[col_map["close"]])),
-                    volume=Decimal(str(row[col_map["volume"]])),
-                    amount=Decimal(
-                        str(row[col_map["amount"]]) if col_map["amount"] in df.columns else 0
-                    ),
+                    timestamp=dt,
+                    open=Decimal(str(row["Open"])),
+                    high=Decimal(str(row["High"])),
+                    low=Decimal(str(row["Low"])),
+                    close=Decimal(str(row["Close"])),
+                    volume=Decimal(str(row.get("Volume", 0))),
+                    amount=Decimal("0"),
                 )
             )
         bars.sort(key=lambda b: b.timestamp)
         logger.info(
-            "akshare.fetched",
+            "yfinance.fetched",
             symbol=symbol.code,
+            yahoo=yahoo_symbol,
             period=period.value,
             count=len(bars),
         )
         return bars
-
-    @staticmethod
-    def _column_map(period: BarPeriod) -> dict[str, str]:
-        """akshare 返回的中文列名映射。
-
-        日线: 日期 / 开盘 / 最高 / 最低 / 收盘 / 成交量 / 成交额
-        分钟: 时间 / 开盘 / 最高 / 最低 / 收盘 / 成交量 / 成交额
-        """
-        datetime_col = "日期" if period == BarPeriod.D1 else "时间"
-        return {
-            "datetime": datetime_col,
-            "open": "开盘",
-            "high": "最高",
-            "low": "最低",
-            "close": "收盘",
-            "volume": "成交量",
-            "amount": "成交额",
-        }
-
-    @staticmethod
-    def _parse_timestamp(raw: object, period: BarPeriod) -> datetime:
-        if isinstance(raw, str):
-            if period == BarPeriod.D1:
-                dt = datetime.strptime(raw, "%Y-%m-%d")
-            else:
-                dt = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
-        elif isinstance(raw, datetime):
-            dt = raw
-        else:
-            dt = datetime.strptime(str(raw), "%Y-%m-%d")
-        return dt.replace(tzinfo=UTC)

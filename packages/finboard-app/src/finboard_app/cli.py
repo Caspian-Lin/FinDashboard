@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 from datetime import date, timedelta
+from datetime import date as parse_date
 from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated
 
@@ -132,9 +133,7 @@ def kill_switch(
     level: Annotated[
         KillSwitchLevel,
         typer.Argument(
-            help=(
-                "Kill Switch 级别: off / no_new_orders / reduce_only / cancel_all / halt"
-            ),
+            help=("Kill Switch 级别: off / no_new_orders / reduce_only / cancel_all / halt"),
             case_sensitive=False,
         ),
     ],
@@ -192,9 +191,7 @@ async def _scheduler_list(settings: Settings) -> None:
             else:
                 assert t.time is not None
                 trigger = f"time={t.time.strftime('%H:%M')}"
-            typer.echo(
-                f"  {t.name:<25s} {trigger:<20s} trading_days_only={t.trading_days_only}"
-            )
+            typer.echo(f"  {t.name:<25s} {trigger:<20s} trading_days_only={t.trading_days_only}")
 
 
 @scheduler_app.command(name="trigger")
@@ -427,11 +424,17 @@ async def _fetch_data(
     end: date,
     adjust: str,
 ) -> None:
-    from finboard_data import AkShareProvider
+    import os
+
+    from finboard_data import AkShareProvider, YFinanceProvider
     from finboard_shared.models import Symbol as Sym
     from finboard_shared.types import BarPeriod, Market
 
-    provider = AkShareProvider()
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    if provider_name == "akshare":
+        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
+    else:
+        provider = YFinanceProvider()
     bars = await provider.fetch_bars(
         Sym(code=symbol, market=Market.A_SHARE),
         BarPeriod.D1,
@@ -446,7 +449,9 @@ async def _fetch_data(
 
 
 async def _fetch_all_data(*, config_file: str) -> None:
-    from finboard_data import AkShareProvider, load_symbol_pool
+    import os
+
+    from finboard_data import AkShareProvider, YFinanceProvider, load_symbol_pool
     from finboard_data.cache import make_symbol
     from finboard_shared.types import BarPeriod
 
@@ -458,12 +463,15 @@ async def _fetch_all_data(*, config_file: str) -> None:
     end = date.today()
     start = end - timedelta(days=config.fetch_lookback_days)
     period = BarPeriod(config.fetch_period)
-    provider = AkShareProvider()
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    if provider_name == "akshare":
+        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
+    else:
+        provider = YFinanceProvider()
     sym_objs = [make_symbol(s.code) for s in config.symbols]
 
     typer.echo(
-        f"批量拉取 {len(sym_objs)} 个标的 "
-        f"({start} ~ {end}) {period.value} {config.fetch_adjust}"
+        f"批量拉取 {len(sym_objs)} 个标的 ({start} ~ {end}) {period.value} {config.fetch_adjust}"
     )
 
     def on_progress(code: str, done: int, total: int) -> None:
@@ -479,10 +487,7 @@ async def _fetch_all_data(*, config_file: str) -> None:
     )
 
     success = sum(1 for v in results.values() if v)
-    typer.echo(
-        f"\n完成: {success}/{len(sym_objs)} 成功, "
-        f"{len(sym_objs) - success} 失败"
-    )
+    typer.echo(f"\n完成: {success}/{len(sym_objs)} 成功, {len(sym_objs) - success} 失败")
 
 
 async def _data_status(*, symbol: str | None, cache_dir: str) -> None:
@@ -534,7 +539,141 @@ async def _data_status(*, symbol: str | None, cache_dir: str) -> None:
             typer.echo(f"{code:<15} {period_str:<6} {adjust:<6} {'(空)':>8}")
 
 
+@data_app.command(name="sync")
+def data_sync() -> None:
+    """同步全市场标的元数据到数据库(akshare 自动发现 A 股 + ETF)。"""
+    asyncio.run(_sync_universe())
+
+
+@data_app.command(name="bulk-download")
+def data_bulk_download(
+    market: Annotated[
+        str,
+        typer.Option("--market", help="市场过滤(a_share/hk/us,默认 a_share)"),
+    ] = "a_share",
+    instrument_type: Annotated[
+        str,
+        typer.Option("--type", help="类型过滤(stock/etf,空=全部)"),
+    ] = "",
+    start: Annotated[
+        str,
+        typer.Option("--start", help="起始日期 YYYY-MM-DD(默认 2015-01-01)"),
+    ] = "2015-01-01",
+) -> None:
+    """批量拉取数据库中所有标的的历史数据到 parquet 缓存。"""
+    asyncio.run(
+        _bulk_download(
+            market=market,
+            instrument_type=instrument_type or None,
+            start_date=parse_date.fromisoformat(start),
+        )
+    )
+
+
 app.add_typer(data_app, name="data")
+
+
+# ---------------------------------------------------------------------------
+# data sync / bulk-download 内部实现
+# ---------------------------------------------------------------------------
+async def _sync_universe() -> None:
+    """从 akshare 发现全市场标的,写入 instruments 表。"""
+    from finboard_app.config import load_settings
+    from finboard_data.discovery import UniverseDiscovery
+    from finboard_persistence import InstrumentRepository, create_async_engine, session_factory
+
+    settings = load_settings()
+    engine = create_async_engine(settings.db_url)
+    discovery = UniverseDiscovery()
+
+    typer.echo("正在发现 A 股 + ETF 标的...")
+    instruments = await discovery.discover_all()
+    typer.echo(f"发现 {len(instruments)} 个标的")
+
+    dicts: list[dict[str, object]] = [
+        {
+            "code": ins.code,
+            "name": ins.name,
+            "market": ins.market.value,
+            "instrument_type": ins.instrument_type.value,
+            "exchange": ins.exchange,
+        }
+        for ins in instruments
+    ]
+
+    async with session_factory(engine)() as session:
+        repo = InstrumentRepository(session)
+        count = await repo.upsert_many(dicts)
+        await session.commit()
+
+    typer.echo(f"已同步 {count} 条标的到 instruments 表")
+    await engine.dispose()
+
+
+async def _bulk_download(
+    *,
+    market: str,
+    instrument_type: str | None,
+    start_date: date,
+) -> None:
+    """从数据库读取标的列表,批量拉取历史数据到 parquet。"""
+    import os
+
+    from finboard_app.config import load_settings
+    from finboard_data import AkShareProvider, YFinanceProvider
+    from finboard_data.cache import make_symbol
+    from finboard_persistence import InstrumentRepository, create_async_engine, session_factory
+    from finboard_shared.types import BarPeriod
+
+    settings = load_settings()
+    engine = create_async_engine(settings.db_url)
+
+    async with session_factory(engine)() as session:
+        repo = InstrumentRepository(session)
+        instruments, _total = await repo.list_active(
+            market=market,
+            instrument_type=instrument_type,
+            limit=99999,
+        )
+
+    await engine.dispose()
+
+    if not instruments:
+        typer.echo("未找到匹配的标的(请先运行 finboard data sync)", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"开始批量拉取 {len(instruments)} 个标的 ({start_date} ~ today)")
+
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    if provider_name == "akshare":
+        provider: AkShareProvider | YFinanceProvider = AkShareProvider(
+            max_concurrency=2, request_interval=0.5
+        )
+    else:
+        provider = YFinanceProvider(max_concurrency=3, request_interval=0.3)
+
+    end = date.today()
+    sym_objs = [make_symbol(ins.code) for ins in instruments]
+
+    done = 0
+    success = 0
+
+    def on_progress(code: str, d: int, t: int) -> None:
+        nonlocal done, success
+        done = d
+        if d % 100 == 0 or d == t:
+            typer.echo(f"  进度: {d}/{t} ({d * 100 // t}%)")
+
+    results = await provider.update_cache_batch(
+        sym_objs,
+        BarPeriod.D1,
+        start_date,
+        end,
+        on_progress=on_progress,
+    )
+
+    success = sum(results.values())
+    typer.echo(f"\n完成: {success}/{len(sym_objs)} 成功, {len(sym_objs) - success} 失败")
 
 
 # --------------------------------------------------------------------------- 内部

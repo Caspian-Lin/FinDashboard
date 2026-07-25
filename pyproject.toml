@@ -121,7 +121,7 @@ exclude = ["migrations/versions/"]
 # xtquant 仅 Windows + miniQMT 可用,Linux CI 无法安装;mypy 忽略其缺失。
 # pyarrow / akshare 缺少 py.typed,mypy 忽略其缺失。
 [[tool.mypy.overrides]]
-module = ["xtquant.*", "pyarrow.*", "akshare.*"]
+module = ["xtquant.*", "pyarrow.*", "akshare.*", "yfinance.*"]
 ignore_missing_imports = true
 
 # 测试代码放宽部分严格项
