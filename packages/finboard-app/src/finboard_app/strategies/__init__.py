@@ -10,12 +10,14 @@ from collections.abc import Callable
 from typing import Any
 
 from finboard_app.strategies.etf_dca import EtfDcaStrategy
+from finboard_app.strategies.ma_cross import MaCrossStrategy
 from finboard_app.strategies.periodic_query import PeriodicQueryStrategy
 from finboard_core.strategy import Strategy
 
 _REGISTRY: dict[str, Callable[..., Strategy]] = {
     "periodic_query": PeriodicQueryStrategy,
     "etf_dca": EtfDcaStrategy,
+    "ma_cross": MaCrossStrategy,
 }
 
 

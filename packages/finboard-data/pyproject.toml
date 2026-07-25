@@ -1,0 +1,22 @@
+[project]
+name = "finboard-data"
+version = "0.1.0"
+description = "历史行情数据源(akshare / tushare)+ 本地缓存。"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+  "finboard-shared",
+  "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+akshare = ["akshare>=1.12"]
+cache = ["pyarrow>=15.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/finboard_data"]
