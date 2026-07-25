@@ -5,22 +5,27 @@ from __future__ import annotations
 import asyncio
 from datetime import date as parse_date
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_session
 from finboard_api.schemas import (
     BatchFetchResultOut,
+    BulkDownloadRequest,
+    BulkDownloadStatusOut,
     DataFetchRequest,
     DataStatusOut,
     FetchResultOut,
     InstrumentListOut,
     InstrumentOut,
+    SchedulerConfigOut,
+    SchedulerConfigUpdate,
     SymbolEntrySchema,
     SymbolPoolOut,
     SymbolPoolUpdate,
+    SyncResultOut,
 )
 
 if TYPE_CHECKING:
@@ -30,6 +35,7 @@ router = APIRouter(prefix="/api/data", tags=["data"])
 
 _CACHE_DIR = "data_cache"
 _SYMBOLS_FILE = "symbols.yaml"
+_CONFIG_FILE = "data_config.json"
 
 _PROVIDER: str | None = None
 
@@ -281,3 +287,177 @@ async def search_instruments(
         )
         for r in rows
     ]
+
+
+# ------------------------------------------------------------------ Sync (DB)
+def _get_bulk_state(request: Request) -> dict[str, Any]:
+    if not hasattr(request.app.state, "_bulk_download"):
+        request.app.state._bulk_download = {
+            "status": "idle",
+            "done": 0,
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "error": None,
+        }
+    return request.app.state._bulk_download  # type: ignore[no-any-return]
+
+
+@router.post("/sync", response_model=SyncResultOut)
+async def sync_universe(
+    session: AsyncSession = Depends(get_session),
+) -> SyncResultOut:
+    """从 akshare 发现全市场标的,写入 instruments 表。"""
+    from finboard_data.discovery import UniverseDiscovery
+    from finboard_persistence import InstrumentRepository
+
+    discovery = UniverseDiscovery()
+    instruments = await discovery.discover_all()
+
+    dicts: list[dict[str, object]] = [
+        {
+            "code": ins.code,
+            "name": ins.name,
+            "market": ins.market.value,
+            "instrument_type": ins.instrument_type.value,
+            "exchange": ins.exchange,
+        }
+        for ins in instruments
+    ]
+
+    repo = InstrumentRepository(session)
+    count = await repo.upsert_many(dicts)
+    await session.commit()
+
+    return SyncResultOut(total=count, new=len(dicts), updated=0)
+
+
+@router.post("/bulk-download", response_model=BulkDownloadStatusOut)
+async def start_bulk_download(
+    request: Request,
+    req: BulkDownloadRequest,
+    session: AsyncSession = Depends(get_session),
+) -> BulkDownloadStatusOut:
+    """启动批量历史数据拉取(后台异步任务)。"""
+    import asyncio
+    import os
+    from datetime import date as parse_d
+
+    state = _get_bulk_state(request)
+    if state["status"] == "running":
+        raise HTTPException(status_code=409, detail="批量拉取正在运行中")
+
+    from finboard_data import AkShareProvider, YFinanceProvider
+    from finboard_data.cache import make_symbol
+    from finboard_persistence import InstrumentRepository
+    from finboard_shared.types import BarPeriod
+
+    repo = InstrumentRepository(session)
+    instruments, _total = await repo.list_active(
+        market=req.market,
+        instrument_type=req.instrument_type,
+        limit=999999,
+    )
+    await session.close()
+
+    if not instruments:
+        raise HTTPException(status_code=400, detail="未找到匹配的标的(请先同步)")
+
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    if provider_name == "akshare":
+        provider: AkShareProvider | YFinanceProvider = AkShareProvider(max_concurrency=2, request_interval=0.5)
+    else:
+        provider = YFinanceProvider(max_concurrency=3, request_interval=0.3)
+
+    sym_objs = [make_symbol(ins.code) for ins in instruments]
+    start_date = parse_d.fromisoformat(req.start)
+    end_date = parse_d.today()
+
+    state.update(status="running", done=0, total=len(sym_objs), success=0, failed=0, error=None)
+
+    async def _run_download() -> None:
+        try:
+            def on_progress(code: str, done: int, total: int) -> None:
+                state["done"] = done
+                state["total"] = total
+
+            results = await provider.fetch_bars_batch(
+                sym_objs, BarPeriod.D1, start_date, end_date, on_progress=on_progress
+            )
+            state["success"] = sum(1 for v in results.values() if v)
+            state["failed"] = len(sym_objs) - state["success"]
+            state["status"] = "done"
+        except Exception as exc:
+            state["status"] = "error"
+            state["error"] = str(exc)
+
+    request.app.state._bulk_task = asyncio.create_task(_run_download())
+    return BulkDownloadStatusOut(**state)
+
+
+@router.get("/bulk-download/status", response_model=BulkDownloadStatusOut)
+async def get_bulk_download_status(request: Request) -> BulkDownloadStatusOut:
+    """查询批量拉取进度。"""
+    state = _get_bulk_state(request)
+    return BulkDownloadStatusOut(**state)
+
+
+# ------------------------------------------------------------------ Scheduler Config
+def _load_config() -> dict[str, Any]:
+    import json
+    from pathlib import Path
+
+    p = Path(_CONFIG_FILE)
+    if p.exists():
+        data: dict[str, Any] = json.loads(p.read_text(encoding="utf-8"))
+        return data
+    return {}
+
+
+def _save_config(cfg: dict[str, Any]) -> None:
+    import json
+    from pathlib import Path
+
+    Path(_CONFIG_FILE).write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+@router.get("/config", response_model=SchedulerConfigOut)
+async def get_scheduler_config() -> SchedulerConfigOut:
+    """获取定时任务配置。"""
+    import os
+
+    cfg = _load_config()
+    return SchedulerConfigOut(
+        sync_enabled=cfg.get("sync_enabled", True),
+        sync_time=cfg.get("sync_time", "15:35"),
+        download_enabled=cfg.get("download_enabled", True),
+        download_time=cfg.get("download_time", "15:45"),
+        download_lookback_days=cfg.get("download_lookback_days", 5),
+        download_markets=cfg.get("download_markets", ["a_share"]),
+        download_types=cfg.get("download_types", ["stock", "etf"]),
+        data_provider=os.getenv("FINBOARD_DATA_PROVIDER", "yfinance"),
+    )
+
+
+@router.put("/config", response_model=SchedulerConfigOut)
+async def update_scheduler_config(req: SchedulerConfigUpdate) -> SchedulerConfigOut:
+    """更新定时任务配置。"""
+    import os
+
+    cfg = _load_config()
+    updates = req.model_dump(exclude_none=True)
+    cfg.update(updates)
+    _save_config(cfg)
+
+    return SchedulerConfigOut(
+        sync_enabled=cfg.get("sync_enabled", True),
+        sync_time=cfg.get("sync_time", "15:35"),
+        download_enabled=cfg.get("download_enabled", True),
+        download_time=cfg.get("download_time", "15:45"),
+        download_lookback_days=cfg.get("download_lookback_days", 5),
+        download_markets=cfg.get("download_markets", ["a_share"]),
+        download_types=cfg.get("download_types", ["stock", "etf"]),
+        data_provider=os.getenv("FINBOARD_DATA_PROVIDER", "yfinance"),
+    )

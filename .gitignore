@@ -77,3 +77,4 @@ web/.vite/
 # --- 操作系统 ---
 Thumbs.db
 desktop.ini
+data_cache/

@@ -234,6 +234,48 @@ class InstrumentListOut(BaseSchema):
     offset: int
 
 
+class SyncResultOut(BaseSchema):
+    total: int
+    new: int
+    updated: int
+
+
+class BulkDownloadRequest(BaseSchema):
+    market: str = "a_share"
+    instrument_type: str | None = None
+    start: str = "2015-01-01"
+
+
+class BulkDownloadStatusOut(BaseSchema):
+    status: str = "idle"  # idle / running / done / error
+    done: int = 0
+    total: int = 0
+    success: int = 0
+    failed: int = 0
+    error: str | None = None
+
+
+class SchedulerConfigOut(BaseSchema):
+    sync_enabled: bool = True
+    sync_time: str = "15:35"
+    download_enabled: bool = True
+    download_time: str = "15:45"
+    download_lookback_days: int = 5
+    download_markets: list[str] = ["a_share"]
+    download_types: list[str] = ["stock", "etf"]
+    data_provider: str = "yfinance"
+
+
+class SchedulerConfigUpdate(BaseSchema):
+    sync_enabled: bool | None = None
+    sync_time: str | None = None
+    download_enabled: bool | None = None
+    download_time: str | None = None
+    download_lookback_days: int | None = None
+    download_markets: list[str] | None = None
+    download_types: list[str] | None = None
+
+
 # --------------------------------------------------------------------------- Backtest
 class BacktestRunRequest(BaseSchema):
     strategy: str
