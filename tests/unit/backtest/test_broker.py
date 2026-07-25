@@ -220,7 +220,7 @@ class TestBacktestBrokerLimitOrder:
             )
         )
 
-        assert order.status == OrderStatus.FILLED
+        assert order.status == OrderStatus.FILLED  # type: ignore[comparison-overlap]
 
 
 class TestBacktestBrokerTPlus1:

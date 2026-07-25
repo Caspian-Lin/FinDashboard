@@ -169,7 +169,7 @@ class TestEndToEndBacktest:
 
         engine = BacktestEngine(
             strategy=strategy,
-            data_provider=SyntheticProvider(),  # type: ignore[arg-type]
+            data_provider=SyntheticProvider(),
             config=config,
         )
         result = await engine.run()
@@ -237,7 +237,7 @@ class TestEndToEndBacktest:
 
         engine = BacktestEngine(
             strategy=strategy,
-            data_provider=FlatProvider(),  # type: ignore[arg-type]
+            data_provider=FlatProvider(),
             config=config,
         )
         result = await engine.run()
