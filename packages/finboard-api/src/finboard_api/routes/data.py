@@ -7,7 +7,7 @@ from datetime import date as parse_date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from finboard_api.schemas import (
     BatchFetchResultOut,
@@ -20,18 +20,27 @@ from finboard_api.schemas import (
 )
 
 if TYPE_CHECKING:
-    from finboard_data import AkShareProvider
+    from finboard_data import AkShareProvider, YFinanceProvider
 
 router = APIRouter(prefix="/api/data", tags=["data"])
 
 _CACHE_DIR = "data_cache"
 _SYMBOLS_FILE = "symbols.yaml"
 
+_PROVIDER: str | None = None
 
-def _get_provider() -> AkShareProvider:
-    from finboard_data import AkShareProvider
 
-    return AkShareProvider()
+def _get_provider() -> AkShareProvider | YFinanceProvider:
+    import os
+
+    from finboard_data import AkShareProvider, YFinanceProvider
+
+    global _PROVIDER
+    provider_name = _PROVIDER or os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    _PROVIDER = provider_name
+    if provider_name == "akshare":
+        return AkShareProvider()
+    return YFinanceProvider()
 
 
 @router.get("/status", response_model=list[DataStatusOut])
@@ -98,13 +107,19 @@ async def fetch_data(req: DataFetchRequest) -> FetchResultOut:
 
     provider = _get_provider()
     sym = make_symbol(req.symbol)
-    bars = await provider.fetch_bars(
-        sym,
-        BarPeriod.D1,
-        parse_date.fromisoformat(req.start),
-        parse_date.fromisoformat(req.end),
-        adjust=req.adjust,
-    )
+    try:
+        bars = await provider.fetch_bars(
+            sym,
+            BarPeriod.D1,
+            parse_date.fromisoformat(req.start),
+            parse_date.fromisoformat(req.end),
+            adjust=req.adjust,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"数据拉取失败(网络/数据源错误): {exc}",
+        ) from exc
     return FetchResultOut(
         symbol=req.symbol,
         bar_count=len(bars),

@@ -427,11 +427,17 @@ async def _fetch_data(
     end: date,
     adjust: str,
 ) -> None:
-    from finboard_data import AkShareProvider
+    import os
+
+    from finboard_data import AkShareProvider, YFinanceProvider
     from finboard_shared.models import Symbol as Sym
     from finboard_shared.types import BarPeriod, Market
 
-    provider = AkShareProvider()
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    if provider_name == "akshare":
+        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
+    else:
+        provider = YFinanceProvider()
     bars = await provider.fetch_bars(
         Sym(code=symbol, market=Market.A_SHARE),
         BarPeriod.D1,
@@ -446,7 +452,9 @@ async def _fetch_data(
 
 
 async def _fetch_all_data(*, config_file: str) -> None:
-    from finboard_data import AkShareProvider, load_symbol_pool
+    import os
+
+    from finboard_data import AkShareProvider, YFinanceProvider, load_symbol_pool
     from finboard_data.cache import make_symbol
     from finboard_shared.types import BarPeriod
 
@@ -458,7 +466,11 @@ async def _fetch_all_data(*, config_file: str) -> None:
     end = date.today()
     start = end - timedelta(days=config.fetch_lookback_days)
     period = BarPeriod(config.fetch_period)
-    provider = AkShareProvider()
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    if provider_name == "akshare":
+        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
+    else:
+        provider = YFinanceProvider()
     sym_objs = [make_symbol(s.code) for s in config.symbols]
 
     typer.echo(
