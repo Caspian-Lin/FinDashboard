@@ -1,0 +1,148 @@
+"""Data + Backtest API 路由单元测试。
+
+不需要 PostgreSQL / kernel —— data 和 backtest 路由不依赖交易内核。
+使用 fastapi.TestClient 直接测试路由处理器。
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from finboard_api.routes import backtest_router, data_router
+
+
+@pytest.fixture
+def app() -> FastAPI:
+    """最小化 app:只挂 data + backtest 路由。"""
+    a = FastAPI()
+    a.include_router(data_router)
+    a.include_router(backtest_router)
+    return a
+
+
+@pytest.fixture
+def client(app: FastAPI) -> TestClient:
+    return TestClient(app)
+
+
+class TestDataRoutes:
+    """Data 路由测试。"""
+
+    def test_list_cache_status_empty(self, client: TestClient) -> None:
+        """空缓存目录返回空列表。"""
+        with patch("finboard_api.routes.data.Path") as mock_path_cls:
+            mock_path_inst = mock_path_cls.return_value
+            mock_path_inst.glob.return_value = []
+            resp = client.get("/api/data/status")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_get_symbol_pool_empty(self, client: TestClient) -> None:
+        """标的池不存在时返回默认配置。"""
+        from finboard_data.symbols import SymbolPoolConfig
+
+        with patch("finboard_data.load_symbol_pool") as mock_load:
+            mock_load.return_value = SymbolPoolConfig()
+            resp = client.get("/api/data/symbols")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["symbols"] == []
+        assert data["fetch_period"] == "D1"
+
+    def test_update_symbol_pool(self, client: TestClient) -> None:
+        """更新标的池配置。"""
+        with patch("finboard_data.save_symbol_pool") as mock_save:
+            resp = client.put(
+                "/api/data/symbols",
+                json={
+                    "symbols": [
+                        {"code": "510300.SH", "name": "沪深300ETF"},
+                    ],
+                    "fetch_period": "D1",
+                    "fetch_lookback_days": 10,
+                    "fetch_adjust": "qfq",
+                },
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["symbols"]) == 1
+        assert data["symbols"][0]["code"] == "510300.SH"
+        assert data["fetch_lookback_days"] == 10
+        mock_save.assert_called_once()
+
+
+class TestBacktestRoutes:
+    """Backtest 路由测试。"""
+
+    def test_list_strategies(self, client: TestClient) -> None:
+        resp = client.get("/api/backtest/strategies")
+        assert resp.status_code == 200
+        strategies = resp.json()
+        kinds = [s["kind"] for s in strategies]
+        assert "ma_cross" in kinds
+        assert "periodic_query" in kinds
+
+        # 验证 ma_cross 参数信息
+        ma = next(s for s in strategies if s["kind"] == "ma_cross")
+        param_names = [p["name"] for p in ma["params"]]
+        assert "short_window" in param_names
+        assert "long_window" in param_names
+
+    def test_run_backtest_with_mock(self, client: TestClient) -> None:
+        """使用 mock BacktestEngine 验证响应结构。"""
+        from finboard_backtest.result import BacktestResult
+
+        mock_result = BacktestResult(
+            equity_curve=[(date(2024, 1, 1), Decimal("100000"))],
+            benchmark_curve=[(date(2024, 1, 1), Decimal("100000"))],
+            total_return=0.05,
+            annualized_return=0.12,
+            sharpe_ratio=1.5,
+            max_drawdown=0.03,
+            win_rate=0.6,
+            trade_count=5,
+            turnover=1.2,
+            commission_paid=Decimal("15"),
+            stamp_tax_paid=Decimal("10"),
+            benchmark_return=0.03,
+            excess_return=0.02,
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 6, 1),
+            initial_capital=Decimal("100000"),
+            final_equity=Decimal("105000"),
+        )
+
+        mock_engine = AsyncMock()
+        mock_engine.run.return_value = mock_result
+
+        with (
+            patch("finboard_backtest.BacktestEngine", return_value=mock_engine),
+            patch("finboard_app.strategies.create_strategy"),
+            patch("finboard_data.AkShareProvider"),
+        ):
+            resp = client.post(
+                "/api/backtest/run",
+                json={
+                    "strategy": "ma_cross",
+                    "symbols": ["510300.SH"],
+                    "start": "2024-01-01",
+                    "end": "2024-06-01",
+                    "capital": "100000",
+                    "params": {"short_window": 5, "long_window": 20},
+                },
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["metrics"]["total_return"] == 0.05
+        assert data["metrics"]["sharpe_ratio"] == 1.5
+        assert len(data["equity_curve"]) == 1
+        assert data["equity_curve"][0]["equity"] == 100000.0
+        assert data["equity_curve"][0]["benchmark"] == 100000.0
+        assert "回测报告" in data["summary"]

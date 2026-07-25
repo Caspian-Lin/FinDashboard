@@ -503,8 +503,10 @@ source = { editable = "packages/finboard-api" }
 dependencies = [
     { name = "fastapi" },
     { name = "finboard-app" },
+    { name = "finboard-backtest" },
     { name = "finboard-broker" },
     { name = "finboard-core" },
+    { name = "finboard-data" },
     { name = "finboard-persistence" },
     { name = "finboard-reconcile" },
     { name = "finboard-risk" },
@@ -516,8 +518,10 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "finboard-app", editable = "packages/finboard-app" },
+    { name = "finboard-backtest", editable = "packages/finboard-backtest" },
     { name = "finboard-broker", editable = "packages/finboard-broker" },
     { name = "finboard-core", editable = "packages/finboard-core" },
+    { name = "finboard-data", editable = "packages/finboard-data" },
     { name = "finboard-persistence", editable = "packages/finboard-persistence" },
     { name = "finboard-reconcile", editable = "packages/finboard-reconcile" },
     { name = "finboard-risk", editable = "packages/finboard-risk" },

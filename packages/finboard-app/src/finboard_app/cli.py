@@ -19,7 +19,7 @@ import contextlib
 import signal
 import subprocess
 import sys
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated
 
@@ -391,6 +391,35 @@ def data_fetch(
     )
 
 
+@data_app.command(name="fetch-all")
+def data_fetch_all(
+    config_file: Annotated[
+        str,
+        typer.Option(
+            "--config",
+            help="标的池配置文件路径(YAML/JSON,默认 symbols.yaml)",
+        ),
+    ] = "symbols.yaml",
+) -> None:
+    """批量拉取标的池中所有标的的行情数据(带限流)。"""
+    asyncio.run(_fetch_all_data(config_file=config_file))
+
+
+@data_app.command(name="status")
+def data_status(
+    symbol: Annotated[
+        str | None,
+        typer.Argument(help="标的代码;省略时列出全部缓存"),
+    ] = None,
+    cache_dir: Annotated[
+        str,
+        typer.Option("--cache-dir", help="缓存目录"),
+    ] = "data_cache",
+) -> None:
+    """查看本地缓存状态。"""
+    asyncio.run(_data_status(symbol=symbol, cache_dir=cache_dir))
+
+
 async def _fetch_data(
     *,
     symbol: str,
@@ -414,6 +443,95 @@ async def _fetch_data(
     if bars:
         typer.echo(f"  起始: {bars[0].timestamp.date()} close={bars[0].close}")
         typer.echo(f"  结束: {bars[-1].timestamp.date()} close={bars[-1].close}")
+
+
+async def _fetch_all_data(*, config_file: str) -> None:
+    from finboard_data import AkShareProvider, load_symbol_pool
+    from finboard_data.cache import make_symbol
+    from finboard_shared.types import BarPeriod
+
+    config = load_symbol_pool(config_file)
+    if not config.symbols:
+        typer.echo(f"标的池为空: {config_file}", err=True)
+        raise typer.Exit(1)
+
+    end = date.today()
+    start = end - timedelta(days=config.fetch_lookback_days)
+    period = BarPeriod(config.fetch_period)
+    provider = AkShareProvider()
+    sym_objs = [make_symbol(s.code) for s in config.symbols]
+
+    typer.echo(
+        f"批量拉取 {len(sym_objs)} 个标的 "
+        f"({start} ~ {end}) {period.value} {config.fetch_adjust}"
+    )
+
+    def on_progress(code: str, done: int, total: int) -> None:
+        typer.echo(f"  [{done}/{total}] {code}")
+
+    results = await provider.fetch_bars_batch(
+        sym_objs,
+        period,
+        start,
+        end,
+        adjust=config.fetch_adjust,
+        on_progress=on_progress,
+    )
+
+    success = sum(1 for v in results.values() if v)
+    typer.echo(
+        f"\n完成: {success}/{len(sym_objs)} 成功, "
+        f"{len(sym_objs) - success} 失败"
+    )
+
+
+async def _data_status(*, symbol: str | None, cache_dir: str) -> None:
+    from pathlib import Path
+
+    from finboard_data.cache import ParquetCache, make_symbol
+    from finboard_shared.types import BarPeriod
+
+    cache = ParquetCache(cache_dir)
+    cache_path = Path(cache_dir)
+
+    if symbol is not None:
+        sym = make_symbol(symbol)
+        bars = await cache.read(sym, BarPeriod.D1, "qfq")
+        if not bars:
+            typer.echo(f"无缓存: {symbol}")
+            return
+        typer.echo(f"{symbol}: {len(bars)} 根日线")
+        typer.echo(f"  范围: {bars[0].timestamp.date()} ~ {bars[-1].timestamp.date()}")
+        typer.echo(f"  最新收盘: {bars[-1].close}")
+        return
+
+    parquet_files = sorted(await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet"))))
+    if not parquet_files:
+        typer.echo("缓存为空")
+        return
+
+    typer.echo(f"{'标的':<15} {'周期':<6} {'复权':<6} {'bar数':>8}  日期范围")
+    typer.echo("-" * 70)
+    for f in parquet_files:
+        parts = f.stem.rsplit("_", 2)
+        if len(parts) != 3:
+            continue
+        code, period_str, adjust = parts
+        from finboard_shared.models import Symbol as Sym
+        from finboard_shared.types import Market
+
+        bars = await cache.read(
+            Sym(code=code, market=Market.A_SHARE),
+            BarPeriod(period_str),
+            adjust,
+        )
+        if bars:
+            typer.echo(
+                f"{code:<15} {period_str:<6} {adjust:<6} {len(bars):>8}  "
+                f"{bars[0].timestamp.date()} ~ {bars[-1].timestamp.date()}"
+            )
+        else:
+            typer.echo(f"{code:<15} {period_str:<6} {adjust:<6} {'(空)':>8}")
 
 
 app.add_typer(data_app, name="data")

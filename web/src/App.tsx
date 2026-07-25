@@ -6,6 +6,8 @@ import {
   ListOrdered,
   ScrollText,
   ShieldAlert,
+  Database,
+  TrendingUp,
 } from "lucide-react";
 import { api } from "./lib/api";
 import { useWebSocket } from "./lib/ws";
@@ -14,6 +16,8 @@ import Orders from "./pages/Orders";
 import Positions from "./pages/Positions";
 import Fills from "./pages/Fills";
 import Control from "./pages/Control";
+import Data from "./pages/Data";
+import Backtest from "./pages/Backtest";
 
 const navItems = [
   { to: "/", label: "仪表盘", icon: LayoutDashboard },
@@ -21,6 +25,8 @@ const navItems = [
   { to: "/orders", label: "订单", icon: ListOrdered },
   { to: "/fills", label: "成交", icon: ScrollText },
   { to: "/control", label: "控制", icon: ShieldAlert },
+  { to: "/data", label: "数据", icon: Database },
+  { to: "/backtest", label: "回测", icon: TrendingUp },
 ];
 
 export default function App() {
@@ -92,6 +98,8 @@ export default function App() {
           <Route path="/orders" element={<Orders />} />
           <Route path="/fills" element={<Fills />} />
           <Route path="/control" element={<Control />} />
+          <Route path="/data" element={<Data />} />
+          <Route path="/backtest" element={<Backtest />} />
         </Routes>
       </main>
     </div>

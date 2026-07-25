@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -163,3 +164,116 @@ class PageResponse[T](BaseSchema):
 # --------------------------------------------------------------------------- WebSocket
 class WsError(BaseSchema):
     detail: str
+
+
+# --------------------------------------------------------------------------- Data
+class DataFetchRequest(BaseSchema):
+    symbol: str
+    start: str
+    end: str
+    adjust: str = "qfq"
+
+
+class DataStatusOut(BaseSchema):
+    symbol: str
+    period: str
+    adjust: str
+    bar_count: int
+    first_date: str | None = None
+    last_date: str | None = None
+    last_close: Decimal | None = None
+
+
+class FetchResultOut(BaseSchema):
+    symbol: str
+    bar_count: int
+    first_date: str | None = None
+    last_date: str | None = None
+
+
+class BatchFetchResultOut(BaseSchema):
+    total: int
+    success: int
+    failed: int
+    details: list[FetchResultOut]
+
+
+class SymbolEntrySchema(BaseSchema):
+    code: str
+    name: str = ""
+
+
+class SymbolPoolOut(BaseSchema):
+    symbols: list[SymbolEntrySchema]
+    fetch_period: str = "D1"
+    fetch_lookback_days: int = 5
+    fetch_adjust: str = "qfq"
+
+
+class SymbolPoolUpdate(BaseSchema):
+    symbols: list[SymbolEntrySchema]
+    fetch_period: str = "D1"
+    fetch_lookback_days: int = 5
+    fetch_adjust: str = "qfq"
+
+
+# --------------------------------------------------------------------------- Backtest
+class BacktestRunRequest(BaseSchema):
+    strategy: str
+    symbols: list[str]
+    start: str
+    end: str
+    capital: Decimal = Decimal("100000")
+    adjust: str = "qfq"
+    params: dict[str, Any] = {}
+
+
+class StrategyParamInfo(BaseSchema):
+    name: str
+    type: str
+    default: Any
+    description: str = ""
+
+
+class StrategyInfoOut(BaseSchema):
+    kind: str
+    name: str
+    params: list[StrategyParamInfo]
+
+
+class EquityPointOut(BaseSchema):
+    date: str
+    equity: float
+    benchmark: float | None = None
+
+
+class BacktestMetricsOut(BaseSchema):
+    total_return: float = 0.0
+    annualized_return: float = 0.0
+    sharpe_ratio: float = 0.0
+    max_drawdown: float = 0.0
+    win_rate: float = 0.0
+    trade_count: int = 0
+    turnover: float = 0.0
+    commission_paid: Decimal = Decimal("0")
+    stamp_tax_paid: Decimal = Decimal("0")
+    benchmark_return: float = 0.0
+    excess_return: float = 0.0
+    initial_capital: Decimal = Decimal("0")
+    final_equity: Decimal = Decimal("0")
+
+
+class BacktestFillOut(BaseSchema):
+    date: str
+    symbol: str
+    side: str
+    quantity: Decimal
+    price: Decimal
+    commission: Decimal
+
+
+class BacktestResultOut(BaseSchema):
+    metrics: BacktestMetricsOut
+    equity_curve: list[EquityPointOut]
+    fills: list[BacktestFillOut]
+    summary: str
