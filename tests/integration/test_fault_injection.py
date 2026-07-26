@@ -44,6 +44,7 @@ from finboard_shared.exceptions import BrokerTimeoutError
 from finboard_shared.identifiers import AccountId
 from finboard_shared.models import OrderRequest, Symbol
 from finboard_shared.types import Market, OrderStatus, OrderType, Side
+from tests.integration.conftest import clean_tables
 
 pytestmark = pytest.mark.integration
 
@@ -323,8 +324,7 @@ async def test_partial_fill_restart_recovery(account_id: AccountId) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with engine.begin() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
+        await clean_tables(conn)
 
     smaker = session_factory(engine)
     try:
@@ -405,6 +405,5 @@ async def test_partial_fill_restart_recovery(account_id: AccountId) -> None:
             await session.rollback()
     finally:
         async with engine.begin() as conn:
-            for table in reversed(Base.metadata.sorted_tables):
-                await conn.execute(table.delete())
+            await clean_tables(conn)
         await engine.dispose()

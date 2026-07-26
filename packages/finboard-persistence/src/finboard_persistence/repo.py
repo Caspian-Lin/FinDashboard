@@ -722,7 +722,7 @@ class BacktestRunRepository:
     ) -> list[BacktestRunModel]:
         stmt = (
             select(BacktestRunModel)
-            .order_by(BacktestRunModel.created_at.desc())
+            .order_by(BacktestRunModel.created_at.desc(), BacktestRunModel.id.desc())
             .limit(limit)
         )
         return list((await self._session.execute(stmt)).scalars().all())
