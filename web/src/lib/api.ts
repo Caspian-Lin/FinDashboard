@@ -189,6 +189,12 @@ export const api = {
   },
   searchInstruments: (query: string) =>
     fetchJSON<InstrumentItem[]>(`/data/instruments/search?q=${encodeURIComponent(query)}`),
+  getInstrumentCodes: (params?: { market?: string; instrument_type?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.market) q.set("market", params.market);
+    if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    return fetchJSON<string[]>(`/data/instruments/codes?${q}`);
+  },
 
   // ---- Data Sync & Bulk Download ----
   syncUniverse: () =>

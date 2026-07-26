@@ -630,6 +630,23 @@ class InstrumentRepository:
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def list_codes(
+        self,
+        *,
+        market: str | None = None,
+        instrument_type: str | None = None,
+    ) -> list[str]:
+        """返回匹配条件的全部标的代码(不分页,轻量)。"""
+        conditions = [InstrumentModel.status == "active"]
+        if market:
+            conditions.append(InstrumentModel.market == market)
+        if instrument_type:
+            conditions.append(InstrumentModel.instrument_type == instrument_type)
+        stmt = (
+            select(InstrumentModel.code).where(*conditions).order_by(InstrumentModel.code)
+        )
+        return [row[0] for row in (await self._session.execute(stmt)).all()]
+
 
 class WatchlistRepository:
     """标的组(watchlist)仓储。"""

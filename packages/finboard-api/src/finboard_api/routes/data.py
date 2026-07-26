@@ -299,6 +299,21 @@ async def list_instruments(
     )
 
 
+@router.get("/instruments/codes", response_model=list[str])
+async def list_instrument_codes(
+    market: str | None = None,
+    instrument_type: str | None = None,
+    session: AsyncSession = Depends(get_db_session),
+) -> list[str]:
+    """返回匹配条件的全部标的代码(不分页,供前端"全选"使用)。"""
+    from finboard_persistence import InstrumentRepository
+
+    repo = InstrumentRepository(session)
+    codes = await repo.list_codes(market=market, instrument_type=instrument_type)
+    await session.commit()
+    return codes
+
+
 @router.get("/instruments/search", response_model=list[InstrumentOut])
 async def search_instruments(
     q: str,
