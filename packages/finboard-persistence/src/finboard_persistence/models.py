@@ -14,6 +14,8 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
+    BigInteger,
     Date,
     DateTime,
     ForeignKey,
@@ -213,4 +215,60 @@ class InstrumentModel(Base, IdMixin):
 
     __table_args__ = (
         Index("ix_instruments_market_type", "market", "instrument_type"),
+    )
+
+
+class WatchlistModel(Base, IdMixin):
+    """用户标的组(watchlist)——保存常用回测标的集合。"""
+
+    __tablename__ = "watchlists"
+
+    name: Mapped[str] = mapped_column(String(100), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class WatchlistItemModel(Base, IdMixin):
+    """标的组内的成员。"""
+
+    __tablename__ = "watchlist_items"
+
+    watchlist_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("watchlists.id", ondelete="CASCADE"),
+        index=True,
+    )
+    symbol_code: Mapped[str] = mapped_column(String(20), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("watchlist_id", "symbol_code", name="uq_watchlist_item"),
+    )
+
+
+class BacktestRunModel(Base, IdMixin):
+    """回测运行记录——保存参数 + 完整结果,支持历史切换查看。"""
+
+    __tablename__ = "backtest_runs"
+
+    strategy: Mapped[str] = mapped_column(String(64), index=True)
+    symbols: Mapped[list] = mapped_column(JSON)  # type: ignore[type-arg]
+    start: Mapped[str] = mapped_column(String(16))
+    end: Mapped[str] = mapped_column(String(16))
+    capital: Mapped[Decimal] = mapped_column(_numeric())
+    adjust: Mapped[str] = mapped_column(String(8), default="qfq")
+    params: Mapped[dict] = mapped_column(JSON)  # type: ignore[type-arg]
+    metrics: Mapped[dict] = mapped_column(JSON)  # type: ignore[type-arg]
+    equity_curve: Mapped[list] = mapped_column(JSON)  # type: ignore[type-arg]
+    fills: Mapped[list] = mapped_column(JSON)  # type: ignore[type-arg]
+    summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
     )

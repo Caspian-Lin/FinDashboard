@@ -136,8 +136,9 @@ class TestBacktestRoutes:
         assert "short_window" in param_names
         assert "long_window" in param_names
 
-    def test_run_backtest_with_mock(self, client: TestClient) -> None:
+    def test_run_backtest_with_mock(self, client: TestClient, app: FastAPI) -> None:
         """使用 mock BacktestEngine 验证响应结构。"""
+        from finboard_api.deps import get_session
         from finboard_backtest.result import BacktestResult
 
         mock_result = BacktestResult(
@@ -162,6 +163,15 @@ class TestBacktestRoutes:
 
         mock_engine = AsyncMock()
         mock_engine.run.return_value = mock_result
+
+        # mock DB session —— 回测运行后落库,单元测试不依赖真实 PG
+        from unittest.mock import MagicMock
+
+        mock_session = AsyncMock()
+        mock_session.add = MagicMock()  # add 是同步方法
+        mock_session.flush = AsyncMock()
+        mock_session.commit = AsyncMock()
+        app.dependency_overrides[get_session] = lambda: mock_session
 
         with (
             patch("finboard_backtest.BacktestEngine", return_value=mock_engine),
@@ -188,3 +198,7 @@ class TestBacktestRoutes:
         assert data["equity_curve"][0]["equity"] == 100000.0
         assert data["equity_curve"][0]["benchmark"] == 100000.0
         assert "回测报告" in data["summary"]
+        # 落库被调用
+        mock_session.add.assert_called_once()
+        mock_session.commit.assert_awaited_once()
+        app.dependency_overrides.clear()
