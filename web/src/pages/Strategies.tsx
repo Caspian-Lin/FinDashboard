@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
+import InfoHint, { HintLabel } from "../components/InfoHint";
 import StrategyParamForm from "../components/StrategyParamForm";
 import {
   defaultStrategyParams,
@@ -19,6 +20,7 @@ import {
   validateStrategyParams,
 } from "../lib/strategyParams";
 import { api, type StrategyPresetInput } from "../lib/api";
+import { INFO_HINTS } from "../lib/infoHints";
 
 export default function Strategies() {
   const navigate = useNavigate();
@@ -174,7 +176,10 @@ export default function Strategies() {
 
       <div className="grid overflow-hidden rounded-xl border border-slate-200 bg-white lg:grid-cols-[15rem_minmax(0,1fr)_18rem]">
         <aside className="border-b border-slate-200 bg-slate-50 p-3 lg:border-b-0 lg:border-r">
-          <div className="mb-2 px-2 text-xs font-semibold text-slate-500">内置策略</div>
+          <div className="mb-2 flex items-center gap-1 px-2 text-xs font-semibold text-slate-500">
+            <span>内置策略</span>
+            <InfoHint content={INFO_HINTS.strategies.builtinStrategies} />
+          </div>
           <div className="space-y-1">
             {strategiesQuery.data?.map((strategy) => (
               <button
@@ -203,7 +208,10 @@ export default function Strategies() {
         <section className="min-w-0 p-5 sm:p-6">
           <div className="mb-5 flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 pb-5">
             <div>
-              <h2 className="text-lg font-semibold text-slate-900">{definition.name}</h2>
+              <div className="flex items-center gap-1">
+                <h2 className="text-lg font-semibold text-slate-900">{definition.name}</h2>
+                <InfoHint content={INFO_HINTS.strategies.backtestCapability} />
+              </div>
               <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
                 {definition.description}
               </p>
@@ -214,9 +222,13 @@ export default function Strategies() {
           </div>
 
           <div className="mb-5">
-            <label htmlFor="preset-name" className="mb-1 block text-sm font-medium text-slate-700">
+            <HintLabel
+              htmlFor="preset-name"
+              hint={INFO_HINTS.strategies.presetName}
+              labelClassName="text-sm font-medium text-slate-700"
+            >
               预设名称 <span className="text-red-600">*</span>
-            </label>
+            </HintLabel>
             <input
               id="preset-name"
               value={name}
@@ -301,7 +313,10 @@ export default function Strategies() {
 
         <aside className="border-t border-slate-200 bg-slate-50 p-4 lg:border-l lg:border-t-0">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-800">已保存预设</h2>
+            <div className="flex items-center gap-1">
+              <h2 className="text-sm font-semibold text-slate-800">已保存预设</h2>
+              <InfoHint content={INFO_HINTS.strategies.savedPresets} />
+            </div>
             <span className="text-xs text-slate-500">{presetsQuery.data?.length ?? 0} 个</span>
           </div>
 

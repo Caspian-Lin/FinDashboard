@@ -2,15 +2,39 @@ import {
   type StrategyInfo,
   type StrategyParamInfo,
 } from "../lib/api";
+import type { InfoHintDefinition } from "../lib/infoHints";
 import type {
   StrategyFieldErrors,
   StrategyParams,
 } from "../lib/strategyParams";
+import { HintLabel } from "./InfoHint";
 
 function inputBounds(param: StrategyParamInfo) {
   return {
     min: param.minimum ?? param.exclusive_minimum ?? undefined,
     max: param.maximum ?? param.exclusive_maximum ?? undefined,
+  };
+}
+
+function paramHint(param: StrategyParamInfo): InfoHintDefinition {
+  const constraints: string[] = [];
+  if (param.enum) constraints.push(`可选值：${param.enum.join("、")}`);
+  if (param.minimum !== null) constraints.push(`最小值 ${param.minimum}`);
+  if (param.exclusive_minimum !== null) {
+    constraints.push(`必须大于 ${param.exclusive_minimum}`);
+  }
+  if (param.maximum !== null) constraints.push(`最大值 ${param.maximum}`);
+  if (param.exclusive_maximum !== null) {
+    constraints.push(`必须小于 ${param.exclusive_maximum}`);
+  }
+  if (param.min_length !== null) constraints.push(`至少 ${param.min_length} 个字符`);
+  if (param.max_length !== null) constraints.push(`最多 ${param.max_length} 个字符`);
+  constraints.push(param.required ? "必填" : "可选");
+
+  return {
+    title: param.label,
+    description: param.description || "该字段由策略参数 schema 定义并在后端校验。",
+    detail: constraints.join("；"),
   };
 }
 
@@ -48,10 +72,14 @@ export default function StrategyParamForm({
 
         return (
           <div key={param.name}>
-            <label htmlFor={id} className="mb-1 block text-sm font-medium text-slate-700">
+            <HintLabel
+              htmlFor={id}
+              hint={paramHint(param)}
+              labelClassName="text-sm font-medium text-slate-700"
+            >
               {param.label}
               {param.required && <span className="ml-1 text-red-600" aria-hidden="true">*</span>}
-            </label>
+            </HintLabel>
 
             {param.enum ? (
               <select

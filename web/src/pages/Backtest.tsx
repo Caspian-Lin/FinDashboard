@@ -11,6 +11,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
+import InfoHint, { HintLabel } from "../components/InfoHint";
 import StrategyParamForm from "../components/StrategyParamForm";
 import {
   defaultStrategyParams,
@@ -21,6 +22,7 @@ import {
   validateStrategyParams,
 } from "../lib/strategyParams";
 import { api, type BacktestResult, type BacktestHistoryItem } from "../lib/api";
+import { INFO_HINTS } from "../lib/infoHints";
 
 const MARKETS = [
   { value: "", label: "全部市场" },
@@ -274,10 +276,13 @@ export default function Backtest() {
         {/* Config form */}
         <div className="bg-white rounded-lg shadow p-5 mb-6">
           <h2 className="text-lg font-semibold mb-4">回测配置</h2>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             <div>
-              <label className="block text-sm text-gray-600 mb-1">策略</label>
+              <HintLabel htmlFor="backtest-strategy" hint={INFO_HINTS.backtest.strategy}>
+                策略
+              </HintLabel>
               <select
+                id="backtest-strategy"
                 value={strategy}
                 onChange={(e) => changeStrategy(e.target.value)}
                 className="w-full border rounded px-3 py-2 text-sm"
@@ -290,8 +295,11 @@ export default function Backtest() {
               </select>
             </div>
             <div>
-              <label className="block text-sm text-gray-600 mb-1">开始</label>
+              <HintLabel htmlFor="backtest-start" hint={INFO_HINTS.backtest.startDate}>
+                开始
+              </HintLabel>
               <input
+                id="backtest-start"
                 type="date"
                 value={start}
                 onChange={(e) => setStart(e.target.value)}
@@ -299,8 +307,11 @@ export default function Backtest() {
               />
             </div>
             <div>
-              <label className="block text-sm text-gray-600 mb-1">结束</label>
+              <HintLabel htmlFor="backtest-end" hint={INFO_HINTS.backtest.endDate}>
+                结束
+              </HintLabel>
               <input
+                id="backtest-end"
                 type="date"
                 value={end}
                 onChange={(e) => setEnd(e.target.value)}
@@ -308,8 +319,14 @@ export default function Backtest() {
               />
             </div>
             <div>
-              <label className="block text-sm text-gray-600 mb-1">初始资金(¥)</label>
+              <HintLabel
+                htmlFor="backtest-capital"
+                hint={INFO_HINTS.backtest.initialCapital}
+              >
+                初始资金(¥)
+              </HintLabel>
               <input
+                id="backtest-capital"
                 type="number"
                 value={capital}
                 onChange={(e) => setCapital(e.target.value)}
@@ -334,7 +351,10 @@ export default function Backtest() {
 
           {strategyDefinition && (
             <div className="mt-4 border-t border-gray-200 pt-4">
-              <h3 className="mb-3 text-sm font-semibold text-gray-700">策略参数</h3>
+              <div className="mb-3 flex items-center gap-1">
+                <h3 className="text-sm font-semibold text-gray-700">策略参数</h3>
+                <InfoHint content={INFO_HINTS.backtest.strategyParams} />
+              </div>
               <StrategyParamForm
                 definition={strategyDefinition}
                 values={strategyParams}
@@ -354,10 +374,17 @@ export default function Backtest() {
             <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
               费用参数(佣金 / 印花税 / 滑点)
             </summary>
-            <div className="grid grid-cols-4 gap-3 mt-2">
+            <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div>
-                <label className="block text-xs text-gray-500 mb-1">佣金率(万N)</label>
+                <HintLabel
+                  htmlFor="backtest-commission-rate"
+                  hint={INFO_HINTS.backtest.commissionRate}
+                  labelClassName="text-xs text-gray-500"
+                >
+                  佣金率(万N)
+                </HintLabel>
                 <input
+                  id="backtest-commission-rate"
                   type="number"
                   step="0.0001"
                   value={commissionRate}
@@ -367,8 +394,15 @@ export default function Backtest() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-500 mb-1">最低佣金(¥)</label>
+                <HintLabel
+                  htmlFor="backtest-minimum-commission"
+                  hint={INFO_HINTS.backtest.minimumCommission}
+                  labelClassName="text-xs text-gray-500"
+                >
+                  最低佣金(¥)
+                </HintLabel>
                 <input
+                  id="backtest-minimum-commission"
                   type="number"
                   value={commissionMin}
                   onChange={(e) => setCommissionMin(e.target.value)}
@@ -377,8 +411,15 @@ export default function Backtest() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-500 mb-1">印花税(万N,卖出)</label>
+                <HintLabel
+                  htmlFor="backtest-stamp-tax"
+                  hint={INFO_HINTS.backtest.stampTax}
+                  labelClassName="text-xs text-gray-500"
+                >
+                  印花税(万N,卖出)
+                </HintLabel>
                 <input
+                  id="backtest-stamp-tax"
                   type="number"
                   step="0.0001"
                   value={stampTaxRate}
@@ -388,8 +429,15 @@ export default function Backtest() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-500 mb-1">滑点(bps)</label>
+                <HintLabel
+                  htmlFor="backtest-slippage"
+                  hint={INFO_HINTS.backtest.slippage}
+                  labelClassName="text-xs text-gray-500"
+                >
+                  滑点(bps)
+                </HintLabel>
                 <input
+                  id="backtest-slippage"
                   type="number"
                   value={slippageBps}
                   onChange={(e) => setSlippageBps(e.target.value)}
@@ -609,9 +657,13 @@ function SymbolSelector({
   return (
     <div className="mt-4 border rounded-lg p-4 bg-gray-50">
       <div className="flex items-center justify-between mb-3">
-        <label className="text-sm font-medium text-gray-700">
-          标的选择 <span className="text-gray-400 font-normal">({selectedSymbols.length} 个)</span>
-        </label>
+        <div className="flex items-center gap-1 text-sm font-medium text-gray-700">
+          <span>
+            标的选择{" "}
+            <span className="font-normal text-gray-400">({selectedSymbols.length} 个)</span>
+          </span>
+          <InfoHint content={INFO_HINTS.backtest.symbols} />
+        </div>
         <div className="flex gap-2">
           <button
             onClick={() => selectAllCandidates.mutate()}
