@@ -49,6 +49,8 @@ def test_persistence_imports() -> None:
         FillModel,
         OrderModel,
         PositionModel,
+        ResearchDataSyncService,
+        ResearchSyncBatchModel,
         create_async_engine,
     )
 
@@ -61,11 +63,19 @@ def test_persistence_imports() -> None:
         "orders",
         "fills",
         "positions",
+        "research_sync_batches",
+        "research_daily_metrics",
+        "research_financial_indicators",
+        "research_industry_classifications",
+        "research_industry_memberships",
+        "research_instrument_profiles",
     } <= table_names
     assert OrderModel.__tablename__ == "orders"
     assert FillModel.__tablename__ == "fills"
     assert PositionModel.__tablename__ == "positions"
     assert AccountModel.__tablename__ == "accounts"
+    assert ResearchSyncBatchModel.__tablename__ == "research_sync_batches"
+    assert ResearchDataSyncService is not None
 
 
 def test_core_imports() -> None:

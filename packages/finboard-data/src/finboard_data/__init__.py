@@ -5,6 +5,13 @@ akshare / yfinance / tushare / pyarrow 均为 lazy import,Linux CI 环境无需�
 
 from finboard_data.akshare_provider import AkShareProvider
 from finboard_data.base import HistoricalDataProvider
+from finboard_data.quality import (
+    QualityIssue,
+    QualityReport,
+    QualitySeverity,
+    QualityStatus,
+    ResearchDataQualityValidator,
+)
 from finboard_data.research import (
     DailySecurityMetrics,
     FinancialIndicator,
@@ -33,11 +40,16 @@ __all__ = [
     "HistoricalDataProvider",
     "IndustryMembership",
     "InstrumentProfile",
+    "QualityIssue",
+    "QualityReport",
+    "QualitySeverity",
+    "QualityStatus",
     "ResearchDataConfigurationError",
     "ResearchDataContractError",
     "ResearchDataDependencyError",
     "ResearchDataError",
     "ResearchDataProvider",
+    "ResearchDataQualityValidator",
     "ResearchDataUpstreamError",
     "SymbolEntry",
     "SymbolPoolConfig",

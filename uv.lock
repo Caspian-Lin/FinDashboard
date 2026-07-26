@@ -695,6 +695,7 @@ version = "0.1.0"
 source = { editable = "packages/finboard-persistence" }
 dependencies = [
     { name = "alembic" },
+    { name = "finboard-data" },
     { name = "finboard-shared" },
     { name = "psycopg", extra = ["binary"] },
     { name = "sqlalchemy" },
@@ -703,6 +704,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
+    { name = "finboard-data", editable = "packages/finboard-data" },
     { name = "finboard-shared", editable = "packages/finboard-shared" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "sqlalchemy", specifier = ">=2.0" },

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
 dependencies = [
+  "finboard-data",
   "finboard-shared",
   "sqlalchemy>=2.0",
   "psycopg[binary]>=3.2",
