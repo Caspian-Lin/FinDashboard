@@ -146,6 +146,41 @@ CLI 入口(`uv run finboard --help`)提供 `run / serve / reconcile / migrate / 
 
 ---
 
+## 策略参数与预设
+
+控制台的“策略配置”页面只管理随应用发布、经过测试的内置策略。它不会上传或执行
+Python 代码,保存预设也不会启动策略或修改实盘运行配置。
+
+策略参数的单一真值来源位于
+`packages/finboard-app/src/finboard_app/strategies/schema.py`:
+
+1. 每个内置策略使用 Pydantic 模型声明参数类型、默认值、必填项、范围/枚举和跨字段约束。
+2. `strategies/__init__.py` 的 `StrategyDefinition` 将策略类与参数模型、展示信息和
+   `supports_backtest` 能力关联。
+3. `GET /api/backtest/strategies` 自动把模型 JSON Schema 转换成前端表单契约;
+   策略实例化、回测运行和预设保存复用同一模型校验。
+
+新增内置策略时,只需新增参数模型并登记 `StrategyDefinition`,不要在 API 或 React
+页面中按策略名称添加条件分支。未知字段、类型/范围错误和跨字段错误会以结构化
+HTTP 422 返回。
+
+策略预设保存在 PostgreSQL `strategy_presets` 表中,应用 `0004_strategy_presets`
+迁移后可使用以下 API:
+
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| `GET` | `/api/strategy-presets` | 列出预设 |
+| `POST` | `/api/strategy-presets` | 校验并创建预设 |
+| `GET` | `/api/strategy-presets/{id}` | 获取单个预设 |
+| `PUT` | `/api/strategy-presets/{id}` | 校验并更新预设 |
+| `DELETE` | `/api/strategy-presets/{id}` | 删除预设 |
+
+在线代码编辑、动态模块导入和运行时执行用户代码不在当前能力范围内。此类能力必须
+另行设计隔离与审批,并经过研究、回测、样本外、行情回放、模拟/影子交易和小资金
+实盘验证,不能从网页直接进入实盘进程。
+
+---
+
 ## QMT(迅投 xtquant)实盘接入
 
 > **仅 Windows + miniQMT 环境**。Linux/macOS/CI 使用 mock broker。

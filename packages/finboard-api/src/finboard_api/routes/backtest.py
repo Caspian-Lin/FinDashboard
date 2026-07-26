@@ -17,8 +17,8 @@ from finboard_api.schemas import (
     BacktestRunRequest,
     EquityPointOut,
     StrategyInfoOut,
-    StrategyParamInfo,
 )
+from finboard_api.strategy_validation import strategy_info, validate_strategy_params_for_api
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -26,36 +26,9 @@ router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 @router.get("/strategies", response_model=list[StrategyInfoOut])
 async def list_strategies() -> list[StrategyInfoOut]:
     """列出可用策略及其参数 schema。"""
-    from finboard_app.strategies import _REGISTRY
-    from finboard_app.strategies.ma_cross import MaCrossStrategy
+    from finboard_app.strategies import list_strategy_definitions
 
-    strategies: list[StrategyInfoOut] = []
-    for kind, cls in _REGISTRY.items():
-        params: list[StrategyParamInfo] = []
-        if kind == "ma_cross":
-            params = [
-                StrategyParamInfo(
-                    name="short_window",
-                    type="int",
-                    default=5,
-                    description="短期均线周期",
-                ),
-                StrategyParamInfo(
-                    name="long_window",
-                    type="int",
-                    default=20,
-                    description="长期均线周期",
-                ),
-            ]
-        strategies.append(
-            StrategyInfoOut(
-                kind=kind,
-                name=cls.__name__,
-                params=params,
-            )
-        )
-    _ = MaCrossStrategy  # 避免未使用 import 警告
-    return strategies
+    return [strategy_info(definition) for definition in list_strategy_definitions()]
 
 
 @router.post("/run", response_model=BacktestResultOut)
@@ -72,7 +45,12 @@ async def run_backtest(
     from finboard_backtest import BacktestConfig, BacktestEngine
     from finboard_data import AkShareProvider, YFinanceProvider
 
-    strategy = create_strategy(req.strategy, "backtest", **req.params)
+    params = validate_strategy_params_for_api(
+        req.strategy,
+        req.params,
+        require_backtest=True,
+    )
+    strategy = create_strategy(req.strategy, "backtest", **params)
 
     import os
     provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
@@ -86,7 +64,7 @@ async def run_backtest(
         end=parse_date.fromisoformat(req.end),
         initial_capital=req.capital,
         adjust=req.adjust,
-        strategy_params=req.params,
+        strategy_params=params,
         commission_rate=req.commission_rate,
         commission_min=req.commission_min,
         stamp_tax_rate=req.stamp_tax_rate,
@@ -162,7 +140,7 @@ async def run_backtest(
         end=req.end,
         capital=req.capital,
         adjust=req.adjust,
-        params=req.params,
+        params=params,
         metrics=json.loads(metrics.model_dump_json()),
         equity_curve=[p.model_dump(mode="json") for p in equity_curve],
         fills=[f.model_dump(mode="json") for f in fills],

@@ -135,6 +135,58 @@ class TestBacktestRoutes:
         param_names = [p["name"] for p in ma["params"]]
         assert "short_window" in param_names
         assert "long_window" in param_names
+        short_window = next(p for p in ma["params"] if p["name"] == "short_window")
+        assert short_window["type"] == "integer"
+        assert short_window["minimum"] == 1
+        assert short_window["maximum"] == 250
+        assert short_window["label"] == "短期均线"
+        assert ma["supports_backtest"] is True
+
+        periodic = next(s for s in strategies if s["kind"] == "periodic_query")
+        assert periodic["supports_backtest"] is False
+
+    @pytest.mark.parametrize(
+        ("strategy", "params", "expected_type"),
+        [
+            (
+                "ma_cross",
+                {"short_window": 20, "long_window": 5},
+                "value_error",
+            ),
+            (
+                "ma_cross",
+                {"short_window": 5, "long_window": 20, "unknown": True},
+                "extra_forbidden",
+            ),
+            ("periodic_query", {}, "value_error.unsupported_backtest"),
+        ],
+    )
+    def test_run_backtest_rejects_invalid_strategy_params(
+        self,
+        client: TestClient,
+        app: FastAPI,
+        strategy: str,
+        params: dict[str, object],
+        expected_type: str,
+    ) -> None:
+        from finboard_api.deps import get_db_session
+
+        app.dependency_overrides[get_db_session] = lambda: AsyncMock()
+        resp = client.post(
+            "/api/backtest/run",
+            json={
+                "strategy": strategy,
+                "symbols": ["510300.SH"],
+                "start": "2024-01-01",
+                "end": "2024-06-01",
+                "params": params,
+            },
+        )
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert any(expected_type in item["type"] for item in detail)
 
     def test_run_backtest_with_mock(self, client: TestClient, app: FastAPI) -> None:
         """使用 mock BacktestEngine 验证响应结构。"""

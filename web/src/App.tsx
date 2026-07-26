@@ -8,6 +8,7 @@ import {
   ShieldAlert,
   Database,
   TrendingUp,
+  SlidersHorizontal,
   Settings as SettingsIcon,
 } from "lucide-react";
 import { api } from "./lib/api";
@@ -19,6 +20,7 @@ import Fills from "./pages/Fills";
 import Control from "./pages/Control";
 import Data from "./pages/Data";
 import Backtest from "./pages/Backtest";
+import Strategies from "./pages/Strategies";
 import Settings from "./pages/Settings";
 
 const navItems = [
@@ -29,6 +31,7 @@ const navItems = [
   { to: "/control", label: "控制", icon: ShieldAlert },
   { to: "/data", label: "数据", icon: Database },
   { to: "/backtest", label: "回测", icon: TrendingUp },
+  { to: "/strategies", label: "策略配置", icon: SlidersHorizontal },
   { to: "/settings", label: "设置", icon: SettingsIcon },
 ];
 
@@ -103,6 +106,7 @@ export default function App() {
           <Route path="/control" element={<Control />} />
           <Route path="/data" element={<Data />} />
           <Route path="/backtest" element={<Backtest />} />
+          <Route path="/strategies" element={<Strategies />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

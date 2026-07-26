@@ -25,6 +25,7 @@ from finboard_persistence.models import (
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
+    StrategyPresetModel,
     WatchlistItemModel,
     WatchlistModel,
 )
@@ -765,6 +766,66 @@ class BacktestRunRepository:
 
     async def delete(self, run_id: int) -> bool:
         row = await self.get(run_id)
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+
+class StrategyPresetRepository:
+    """内置策略参数预设仓储。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        name: str,
+        strategy: str,
+        params: dict[str, Any],
+    ) -> StrategyPresetModel:
+        row = StrategyPresetModel(name=name, strategy=strategy, params=params)
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def list_all(self) -> list[StrategyPresetModel]:
+        stmt = select(StrategyPresetModel).order_by(
+            StrategyPresetModel.updated_at.desc(),
+            StrategyPresetModel.id.desc(),
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def get(self, preset_id: int) -> StrategyPresetModel | None:
+        stmt = select(StrategyPresetModel).where(StrategyPresetModel.id == preset_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_by_name(self, name: str) -> StrategyPresetModel | None:
+        stmt = select(StrategyPresetModel).where(StrategyPresetModel.name == name)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def update(
+        self,
+        preset_id: int,
+        *,
+        name: str,
+        strategy: str,
+        params: dict[str, Any],
+    ) -> StrategyPresetModel | None:
+        row = await self.get(preset_id)
+        if row is None:
+            return None
+        row.name = name
+        row.strategy = strategy
+        row.params = params
+        row.updated_at = datetime.now(UTC)
+        await self._session.flush()
+        return row
+
+    async def delete(self, preset_id: int) -> bool:
+        row = await self.get(preset_id)
         if row is None:
             return False
         await self._session.delete(row)

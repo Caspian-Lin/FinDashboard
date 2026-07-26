@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export interface WsEvent {
   type: string;
@@ -7,6 +7,11 @@ export interface WsEvent {
 
 export function useWebSocket(onEvent?: (e: WsEvent) => void) {
   const [connected, setConnected] = useState(false);
+  const onEventRef = useRef(onEvent);
+
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
 
   useEffect(() => {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -17,7 +22,7 @@ export function useWebSocket(onEvent?: (e: WsEvent) => void) {
     ws.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data) as WsEvent;
-        onEvent?.(data);
+        onEventRef.current?.(data);
       } catch {
         // ignore
       }

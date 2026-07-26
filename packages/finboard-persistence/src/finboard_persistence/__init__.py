@@ -11,6 +11,7 @@ from finboard_persistence.models import (
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
+    StrategyPresetModel,
     WatchlistItemModel,
     WatchlistModel,
 )
@@ -23,6 +24,7 @@ from finboard_persistence.repo import (
     OrderRepository,
     PositionRepository,
     ReconciliationLogRepository,
+    StrategyPresetRepository,
     WatchlistRepository,
 )
 from finboard_persistence.session import session_factory
@@ -45,6 +47,8 @@ __all__ = [
     "PositionRepository",
     "ReconciliationLogModel",
     "ReconciliationLogRepository",
+    "StrategyPresetModel",
+    "StrategyPresetRepository",
     "WatchlistItemModel",
     "WatchlistModel",
     "WatchlistRepository",

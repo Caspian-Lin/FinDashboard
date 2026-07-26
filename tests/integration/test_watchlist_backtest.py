@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from finboard_persistence import (
     BacktestRunModel,
     BacktestRunRepository,
+    StrategyPresetRepository,
     WatchlistRepository,
 )
 
@@ -178,3 +179,45 @@ class TestBacktestRunRepository:
         assert ok is True
         await db_session.commit()
         assert await repo.get(rid) is None
+
+
+@pytest.mark.asyncio
+class TestStrategyPresetRepository:
+    """策略参数预设仓储集成测试。"""
+
+    async def test_crud_and_unique_name(self, db_session: AsyncSession) -> None:
+        repo = StrategyPresetRepository(db_session)
+        preset = await repo.create(
+            name="中期趋势",
+            strategy="ma_cross",
+            params={"short_window": 10, "long_window": 30},
+        )
+        await db_session.commit()
+
+        fetched = await repo.get(preset.id)
+        assert fetched is not None
+        assert fetched.name == "中期趋势"
+        assert fetched.params["long_window"] == 30
+        assert await repo.get_by_name("中期趋势") is not None
+
+        updated = await repo.update(
+            preset.id,
+            name="中期趋势增强",
+            strategy="ma_cross",
+            params={
+                "short_window": 8,
+                "long_window": 34,
+                "max_position_pct": 0.8,
+            },
+        )
+        await db_session.commit()
+        assert updated is not None
+        assert updated.name == "中期趋势增强"
+        assert updated.params["short_window"] == 8
+
+        rows = await repo.list_all()
+        assert [row.id for row in rows] == [preset.id]
+
+        assert await repo.delete(preset.id) is True
+        await db_session.commit()
+        assert await repo.get(preset.id) is None
