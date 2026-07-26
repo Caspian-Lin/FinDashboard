@@ -19,6 +19,7 @@ import pytest
 
 from finboard_data.akshare_provider import AkShareProvider
 from finboard_data.cache import CacheIOStats, CacheMetadata
+from finboard_data.yfinance_provider import YFinanceProvider
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
 
@@ -173,6 +174,26 @@ class TestFetchBatch:
         assert set(results.keys()) == {"510300.SH", "510050.SH", "159915.SZ"}
         for bars in results.values():
             assert len(bars) == 2
+
+    @pytest.mark.parametrize("provider_class", [AkShareProvider, YFinanceProvider])
+    @pytest.mark.asyncio
+    async def test_materialized_batch_rejects_all_market_size(
+        self,
+        provider_class: type[AkShareProvider] | type[YFinanceProvider],
+    ) -> None:
+        """禁止把全市场 Bars 全部保留在结果字典中导致 OOM。"""
+        provider = provider_class(use_cache=False, request_interval=0.0)
+        symbols = [
+            Symbol(code=f"{index:06d}.SZ", market=Market.A_SHARE) for index in range(201)
+        ]
+
+        with pytest.raises(ValueError, match="最多支持 200 个标的"):
+            await provider.fetch_bars_batch(
+                symbols,
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 2),
+            )
 
     @pytest.mark.asyncio
     async def test_batch_progress_callback(self) -> None:

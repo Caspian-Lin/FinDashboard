@@ -16,6 +16,7 @@ from finboard_api.schemas import (
     BulkDownloadRequest,
     BulkDownloadStatusOut,
     DataFetchRequest,
+    DataStatusListOut,
     DataStatusOut,
     FetchResultOut,
     InstrumentListOut,
@@ -83,6 +84,43 @@ async def list_cache_status() -> list[DataStatusOut]:
     return result
 
 
+@router.get("/status-page", response_model=DataStatusListOut)
+async def list_cache_status_page(limit: int = 200, offset: int = 0) -> DataStatusListOut:
+    """分页列出缓存状态,避免一次扫描并返回全市场缓存。"""
+    from finboard_data.cache import ParquetCache
+
+    safe_limit = min(max(limit, 1), 500)
+    safe_offset = max(offset, 0)
+    cache = ParquetCache(_CACHE_DIR)
+    cache_path = Path(_CACHE_DIR)
+    parquet_files = sorted(await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet"))))
+
+    items: list[DataStatusOut] = []
+    for path in parquet_files[safe_offset : safe_offset + safe_limit]:
+        parts = path.stem.rsplit("_", 2)
+        if len(parts) != 3:
+            continue
+        code, period_str, adjust = parts
+        metadata = await cache.metadata(path)
+        items.append(
+            DataStatusOut(
+                symbol=code,
+                period=period_str,
+                adjust=adjust,
+                bar_count=metadata.bar_count,
+                first_date=str(metadata.first_date) if metadata.first_date else None,
+                last_date=str(metadata.last_date) if metadata.last_date else None,
+                last_close=None,
+            )
+        )
+    return DataStatusListOut(
+        items=items,
+        total=len(parquet_files),
+        limit=safe_limit,
+        offset=safe_offset,
+    )
+
+
 @router.get("/status/{symbol}", response_model=DataStatusOut)
 async def get_cache_status(symbol: str) -> DataStatusOut:
     """查看单标的缓存详情;只读 Parquet footer。"""
@@ -134,11 +172,11 @@ async def fetch_data(req: DataFetchRequest) -> FetchResultOut:
 
 @router.post("/fetch-all", response_model=BatchFetchResultOut)
 async def fetch_all_data() -> BatchFetchResultOut:
-    """批量拉取标的池中所有标的的行情数据。"""
+    """批量更新标的池缓存,不在内存中保留所有历史 Bars。"""
     from datetime import timedelta
 
     from finboard_data import load_symbol_pool
-    from finboard_data.cache import make_symbol
+    from finboard_data.cache import ParquetCache, make_symbol
     from finboard_shared.types import BarPeriod
 
     config = load_symbol_pool(_SYMBOLS_FILE)
@@ -147,11 +185,15 @@ async def fetch_all_data() -> BatchFetchResultOut:
 
     end = parse_date.today()
     start = end - timedelta(days=config.fetch_lookback_days)
-    period = BarPeriod(config.fetch_period)
+    period = (
+        BarPeriod[config.fetch_period]
+        if config.fetch_period in BarPeriod.__members__
+        else BarPeriod(config.fetch_period)
+    )
     provider = _get_provider()
     sym_objs = [make_symbol(s.code) for s in config.symbols]
 
-    results = await provider.fetch_bars_batch(
+    results = await provider.update_cache_batch(
         sym_objs,
         period,
         start,
@@ -160,20 +202,23 @@ async def fetch_all_data() -> BatchFetchResultOut:
     )
 
     details: list[FetchResultOut] = []
-    success = 0
+    cache = ParquetCache(_CACHE_DIR)
     for entry in config.symbols:
-        bars = results.get(entry.code, [])
-        if bars:
-            success += 1
+        metadata = await cache.metadata_for(
+            make_symbol(entry.code),
+            period,
+            config.fetch_adjust,
+        )
         details.append(
             FetchResultOut(
                 symbol=entry.code,
-                bar_count=len(bars),
-                first_date=str(bars[0].timestamp.date()) if bars else None,
-                last_date=str(bars[-1].timestamp.date()) if bars else None,
+                bar_count=metadata.bar_count if metadata else 0,
+                first_date=(str(metadata.first_date) if metadata and metadata.first_date else None),
+                last_date=str(metadata.last_date) if metadata and metadata.last_date else None,
             )
         )
 
+    success = sum(results.values())
     return BatchFetchResultOut(
         total=len(config.symbols),
         success=success,
@@ -288,6 +333,8 @@ def _get_bulk_state(request: Request) -> dict[str, Any]:
             "total": 0,
             "success": 0,
             "failed": 0,
+            "current_symbol": None,
+            "phase": None,
             "error": None,
         }
     return request.app.state._bulk_download  # type: ignore[no-any-return]
@@ -365,7 +412,16 @@ async def start_bulk_download(
     start_date = parse_d.fromisoformat(req.start)
     end_date = parse_d.today()
 
-    state.update(status="running", done=0, total=len(sym_objs), success=0, failed=0, error=None)
+    state.update(
+        status="running",
+        done=0,
+        total=len(sym_objs),
+        success=0,
+        failed=0,
+        current_symbol=None,
+        phase="starting",
+        error=None,
+    )
 
     async def _run_download() -> None:
         try:
@@ -374,14 +430,26 @@ async def start_bulk_download(
                 state["done"] = done
                 state["total"] = total
 
+            def on_status(code: str, phase: str) -> None:
+                state["current_symbol"] = code
+                state["phase"] = phase
+
             results = await provider.update_cache_batch(
-                sym_objs, BarPeriod.D1, start_date, end_date, on_progress=on_progress
+                sym_objs,
+                BarPeriod.D1,
+                start_date,
+                end_date,
+                on_progress=on_progress,
+                on_status=on_status,
             )
             state["success"] = sum(results.values())
             state["failed"] = len(sym_objs) - state["success"]
             state["status"] = "done"
+            state["current_symbol"] = None
+            state["phase"] = None
         except Exception as exc:
             state["status"] = "error"
+            state["phase"] = None
             state["error"] = str(exc)
 
     request.app.state._bulk_task = asyncio.create_task(_run_download())
