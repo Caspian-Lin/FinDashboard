@@ -10,7 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BaseSchema(BaseModel):
@@ -303,14 +303,27 @@ class BacktestRunRequest(BaseSchema):
 
 class StrategyParamInfo(BaseSchema):
     name: str
+    label: str
     type: str
-    default: Any
+    default: Any = None
+    required: bool = False
     description: str = ""
+    enum: list[Any] | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+    exclusive_minimum: float | None = None
+    exclusive_maximum: float | None = None
+    min_length: int | None = None
+    max_length: int | None = None
+    nullable: bool = False
+    ui_hidden: bool = False
 
 
 class StrategyInfoOut(BaseSchema):
     kind: str
     name: str
+    description: str
+    supports_backtest: bool
     params: list[StrategyParamInfo]
 
 
@@ -380,6 +393,28 @@ class BacktestHistoryDetailOut(BaseSchema):
     fills: list[BacktestFillOut]
     summary: str
     created_at: datetime
+
+
+# --------------------------------------------------------------------------- Strategy Preset
+class StrategyPresetCreate(BaseSchema):
+    name: str = Field(min_length=1, max_length=100)
+    strategy: str
+    params: dict[str, Any] = {}
+
+
+class StrategyPresetUpdate(BaseSchema):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    strategy: str | None = None
+    params: dict[str, Any] | None = None
+
+
+class StrategyPresetOut(BaseSchema):
+    id: int
+    name: str
+    strategy: str
+    params: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
 
 
 # --------------------------------------------------------------------------- Watchlist

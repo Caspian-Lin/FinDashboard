@@ -1,5 +1,6 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation, useSearchParams } from "react-router-dom";
 import {
   LineChart,
   Line,
@@ -10,6 +11,15 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
+import StrategyParamForm from "../components/StrategyParamForm";
+import {
+  defaultStrategyParams,
+  normalizeStrategyParams,
+  strategyFieldErrorsFrom,
+  type StrategyFieldErrors,
+  type StrategyParams,
+  validateStrategyParams,
+} from "../lib/strategyParams";
 import { api, type BacktestResult, type BacktestHistoryItem } from "../lib/api";
 
 const MARKETS = [
@@ -26,13 +36,15 @@ const TYPES = [
 
 export default function Backtest() {
   const qc = useQueryClient();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
   const [strategy, setStrategy] = useState("ma_cross");
+  const [strategyParams, setStrategyParams] = useState<StrategyParams>({});
+  const [strategyErrors, setStrategyErrors] = useState<StrategyFieldErrors>({});
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>(["510300.SH"]);
   const [start, setStart] = useState("2024-01-01");
   const [end, setEnd] = useState(new Date().toISOString().slice(0, 10));
   const [capital, setCapital] = useState("100000");
-  const [shortWindow, setShortWindow] = useState("5");
-  const [longWindow, setLongWindow] = useState("20");
 
   // 费用参数
   const [commissionRate, setCommissionRate] = useState("0.0003");
@@ -60,6 +72,77 @@ export default function Backtest() {
     queryKey: ["strategies"],
     queryFn: api.getStrategies,
   });
+  const backtestStrategies = useMemo(
+    () => strategies?.filter((item) => item.supports_backtest) ?? [],
+    [strategies],
+  );
+  const strategyDefinition = useMemo(
+    () => backtestStrategies.find((item) => item.kind === strategy),
+    [backtestStrategies, strategy],
+  );
+
+  const presetParam = searchParams.get("preset");
+  const presetId = presetParam && /^\d+$/.test(presetParam) ? Number(presetParam) : null;
+  const { data: requestedPreset } = useQuery({
+    queryKey: ["strategy-preset", presetId],
+    queryFn: () => api.getStrategyPreset(presetId as number),
+    enabled: presetId !== null,
+  });
+  const requestedPresetDefinition = requestedPreset
+    ? backtestStrategies.find((item) => item.kind === requestedPreset.strategy)
+    : undefined;
+  const appliedConfig = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (backtestStrategies.length === 0) return;
+
+    if (requestedPreset) {
+      const definition = requestedPresetDefinition;
+      const key = `preset:${requestedPreset.id}`;
+      if (definition && appliedConfig.current !== key) {
+        setStrategy(definition.kind);
+        setStrategyParams({
+          ...defaultStrategyParams(definition),
+          ...requestedPreset.params,
+        });
+        setStrategyErrors({});
+        appliedConfig.current = key;
+      }
+      return;
+    }
+
+    const draft = (
+      location.state as
+        | { strategyDraft?: { strategy: string; params: StrategyParams } }
+        | null
+    )?.strategyDraft;
+    if (draft) {
+      const definition = backtestStrategies.find((item) => item.kind === draft.strategy);
+      const key = `draft:${draft.strategy}`;
+      if (definition && appliedConfig.current !== key) {
+        setStrategy(definition.kind);
+        setStrategyParams({
+          ...defaultStrategyParams(definition),
+          ...draft.params,
+        });
+        setStrategyErrors({});
+        appliedConfig.current = key;
+      }
+      return;
+    }
+
+    if (Object.keys(strategyParams).length === 0 && strategyDefinition) {
+      setStrategyParams(defaultStrategyParams(strategyDefinition));
+      appliedConfig.current = `default:${strategyDefinition.kind}`;
+    }
+  }, [
+    backtestStrategies,
+    location.state,
+    requestedPreset,
+    requestedPresetDefinition,
+    strategyDefinition,
+    strategyParams,
+  ]);
 
   const { data: history } = useQuery({
     queryKey: ["backtest-history"],
@@ -86,27 +169,26 @@ export default function Backtest() {
   const candidateList = useMemo(() => listData?.items ?? [], [listData]);
 
   const runBacktest = useMutation({
-    mutationFn: () =>
+    mutationFn: (normalizedParams: StrategyParams) =>
       api.runBacktest({
         strategy,
         symbols: selectedSymbols,
         start,
         end,
         capital,
-        params:
-          strategy === "ma_cross"
-            ? { short_window: Number(shortWindow), long_window: Number(longWindow) }
-            : {},
+        params: normalizedParams,
         commission_rate: commissionRate,
         commission_min: commissionMin,
         stamp_tax_rate: stampTaxRate,
         slippage_bps: slippageBps,
       }),
     onSuccess: (data) => {
+      setStrategyErrors({});
       setActiveResult(data);
       setActiveHistoryId(data.run_id);
       qc.invalidateQueries({ queryKey: ["backtest-history"] });
     },
+    onError: (error) => setStrategyErrors(strategyFieldErrorsFrom(error)),
   });
 
   const loadHistory = useMutation({
@@ -121,6 +203,15 @@ export default function Backtest() {
       });
       setActiveHistoryId(detail.id);
       setStrategy(detail.strategy);
+      const definition = backtestStrategies.find(
+        (item) => item.kind === detail.strategy,
+      );
+      setStrategyParams(
+        definition
+          ? { ...defaultStrategyParams(definition), ...detail.params }
+          : detail.params,
+      );
+      setStrategyErrors({});
       setSelectedSymbols(detail.symbols);
       setStart(detail.start);
       setEnd(detail.end);
@@ -155,6 +246,25 @@ export default function Backtest() {
   const result = activeResult;
   const m = result?.metrics;
 
+  const changeStrategy = (kind: string) => {
+    const definition = backtestStrategies.find((item) => item.kind === kind);
+    setStrategy(kind);
+    setStrategyParams(definition ? defaultStrategyParams(definition) : {});
+    setStrategyErrors({});
+    runBacktest.reset();
+    appliedConfig.current = `manual:${kind}`;
+  };
+
+  const startBacktest = () => {
+    if (!strategyDefinition) return;
+    const errors = validateStrategyParams(strategyDefinition, strategyParams);
+    setStrategyErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+    runBacktest.mutate(
+      normalizeStrategyParams(strategyDefinition, strategyParams),
+    );
+  };
+
   return (
     <div className="flex gap-6">
       {/* Main column */}
@@ -169,10 +279,10 @@ export default function Backtest() {
               <label className="block text-sm text-gray-600 mb-1">策略</label>
               <select
                 value={strategy}
-                onChange={(e) => setStrategy(e.target.value)}
+                onChange={(e) => changeStrategy(e.target.value)}
                 className="w-full border rounded px-3 py-2 text-sm"
               >
-                {strategies?.map((s) => (
+                {backtestStrategies.map((s) => (
                   <option key={s.kind} value={s.kind}>
                     {s.name}
                   </option>
@@ -206,29 +316,38 @@ export default function Backtest() {
                 className="w-full border rounded px-3 py-2 text-sm"
               />
             </div>
-            {strategy === "ma_cross" && (
-              <>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">短期均线</label>
-                  <input
-                    type="number"
-                    value={shortWindow}
-                    onChange={(e) => setShortWindow(e.target.value)}
-                    className="w-full border rounded px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">长期均线</label>
-                  <input
-                    type="number"
-                    value={longWindow}
-                    onChange={(e) => setLongWindow(e.target.value)}
-                    className="w-full border rounded px-3 py-2 text-sm"
-                  />
-                </div>
-              </>
-            )}
           </div>
+
+          {requestedPreset && requestedPresetDefinition && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-800">
+              <span>
+                已载入策略预设：<strong>{requestedPreset.name}</strong>
+              </span>
+              <span className="text-xs text-blue-700">仅用于本次回测配置</span>
+            </div>
+          )}
+          {requestedPreset && !requestedPresetDefinition && (
+            <p className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              预设“{requestedPreset.name}”依赖实时时钟事件，当前回测引擎无法运行。
+            </p>
+          )}
+
+          {strategyDefinition && (
+            <div className="mt-4 border-t border-gray-200 pt-4">
+              <h3 className="mb-3 text-sm font-semibold text-gray-700">策略参数</h3>
+              <StrategyParamForm
+                definition={strategyDefinition}
+                values={strategyParams}
+                onChange={(next) => {
+                  setStrategyParams(next);
+                  setStrategyErrors({});
+                  runBacktest.reset();
+                }}
+                errors={strategyErrors}
+                disabled={runBacktest.isPending}
+              />
+            </div>
+          )}
 
           {/* Fee params */}
           <details className="mt-3">
@@ -305,7 +424,7 @@ export default function Backtest() {
           />
 
           <button
-            onClick={() => runBacktest.mutate()}
+            onClick={startBacktest}
             disabled={runBacktest.isPending || selectedSymbols.length === 0}
             className="mt-4 bg-blue-600 text-white rounded px-6 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
           >

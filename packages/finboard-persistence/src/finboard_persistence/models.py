@@ -272,3 +272,19 @@ class BacktestRunModel(Base, IdMixin):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
+
+
+class StrategyPresetModel(Base, IdMixin):
+    """经过 schema 校验的内置策略参数预设。"""
+
+    __tablename__ = "strategy_presets"
+
+    name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    strategy: Mapped[str] = mapped_column(String(64), index=True)
+    params: Mapped[dict] = mapped_column(JSON)  # type: ignore[type-arg]
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

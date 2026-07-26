@@ -1,5 +1,31 @@
 const BASE = "/api";
 
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+
+  constructor(status: number, detail: unknown, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+function errorMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) =>
+        typeof item === "object" && item !== null && "msg" in item
+          ? String(item.msg)
+          : String(item),
+      )
+      .join("；");
+  }
+  return fallback;
+}
+
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
@@ -7,8 +33,13 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({ detail: resp.statusText }));
-    throw new Error(body.detail || `${resp.status}`);
+    throw new ApiError(
+      resp.status,
+      body.detail,
+      errorMessage(body.detail, resp.statusText || `${resp.status}`),
+    );
   }
+  if (resp.status === 204) return undefined as T;
   return resp.json();
 }
 
@@ -156,6 +187,23 @@ export const api = {
   deleteBacktestHistory: (id: number) =>
     fetch(`${BASE}/backtest/history/${id}`, { method: "DELETE" }),
 
+  // ---- Strategy presets ----
+  getStrategyPresets: () => fetchJSON<StrategyPreset[]>("/strategy-presets"),
+  getStrategyPreset: (id: number) =>
+    fetchJSON<StrategyPreset>(`/strategy-presets/${id}`),
+  createStrategyPreset: (body: StrategyPresetInput) =>
+    fetchJSON<StrategyPreset>("/strategy-presets", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateStrategyPreset: (id: number, body: Partial<StrategyPresetInput>) =>
+    fetchJSON<StrategyPreset>(`/strategy-presets/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  deleteStrategyPreset: (id: number) =>
+    fetchJSON<void>(`/strategy-presets/${id}`, { method: "DELETE" }),
+
   // ---- Watchlists ----
   getWatchlists: () => fetchJSON<Watchlist[]>("/watchlists"),
   createWatchlist: (body: { name: string; description?: string }) =>
@@ -281,15 +329,42 @@ export interface SymbolPoolUpdate {
 // ---- Backtest types ----
 export interface StrategyParamInfo {
   name: string;
+  label: string;
   type: string;
-  default: string | number | boolean;
+  default: StrategyParamValue;
+  required: boolean;
   description: string;
+  enum: StrategyParamValue[] | null;
+  minimum: number | null;
+  maximum: number | null;
+  exclusive_minimum: number | null;
+  exclusive_maximum: number | null;
+  min_length: number | null;
+  max_length: number | null;
+  nullable: boolean;
+  ui_hidden: boolean;
 }
 
 export interface StrategyInfo {
   kind: string;
   name: string;
+  description: string;
+  supports_backtest: boolean;
   params: StrategyParamInfo[];
+}
+
+export type StrategyParamValue = string | number | boolean | null;
+
+export interface StrategyPresetInput {
+  name: string;
+  strategy: string;
+  params: Record<string, StrategyParamValue>;
+}
+
+export interface StrategyPreset extends StrategyPresetInput {
+  id: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface BacktestRunRequest {
@@ -299,7 +374,7 @@ export interface BacktestRunRequest {
   end: string;
   capital: string;
   adjust?: string;
-  params: Record<string, string | number>;
+  params: Record<string, StrategyParamValue>;
   commission_rate?: string;
   commission_min?: string;
   stamp_tax_rate?: string;
@@ -365,7 +440,7 @@ export interface BacktestHistoryDetail {
   end: string;
   capital: string;
   adjust: string;
-  params: Record<string, string | number>;
+  params: Record<string, StrategyParamValue>;
   metrics: BacktestMetrics;
   equity_curve: EquityPoint[];
   fills: BacktestFill[];

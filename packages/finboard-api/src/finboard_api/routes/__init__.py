@@ -10,6 +10,7 @@ from finboard_api.routes.kill_switch import router as kill_switch_router
 from finboard_api.routes.orders import router as orders_router
 from finboard_api.routes.positions import router as positions_router
 from finboard_api.routes.reconcile import router as reconcile_router
+from finboard_api.routes.strategy_presets import router as strategy_presets_router
 from finboard_api.routes.watchlist import router as watchlist_router
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "orders_router",
     "positions_router",
     "reconcile_router",
+    "strategy_presets_router",
     "watchlist_router",
 ]
