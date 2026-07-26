@@ -11,7 +11,16 @@ from enum import StrEnum
 
 class Market(StrEnum):
     A_SHARE = "a_share"
+    HK = "hk"
+    US = "us"
     FUTURE = "future"
+
+
+class InstrumentType(StrEnum):
+    STOCK = "stock"
+    ETF = "etf"
+    INDEX = "index"
+    FUTURES = "futures"
 
 
 class Side(StrEnum):
@@ -101,10 +110,11 @@ class BrokerKind(StrEnum):
     MOCK = "mock"
     QMT = "qmt"
     CTP = "ctp"
+    BACKTEST = "backtest"
 
     @property
     def market(self) -> Market:
-        return Market.A_SHARE if self is BrokerKind.QMT else Market.FUTURE
+        return Market.A_SHARE if self in (BrokerKind.QMT, BrokerKind.BACKTEST) else Market.FUTURE
 
 
 class KillSwitchLevel(StrEnum):
@@ -119,6 +129,20 @@ class KillSwitchLevel(StrEnum):
     REDUCE_ONLY = "reduce_only"  # 仅允许减仓
     CANCEL_ALL = "cancel_all"  # 撤销全部活动订单
     HALT = "halt"  # 全局停止
+
+
+class BarPeriod(StrEnum):
+    """K 线周期。
+
+    值与 xtdata ``period`` 参数对齐,便于直接透传。
+    """
+
+    M1 = "1m"
+    M5 = "5m"
+    M15 = "15m"
+    M30 = "30m"
+    H1 = "1h"
+    D1 = "1d"
 
 
 class TradingPhase(StrEnum):

@@ -27,7 +27,7 @@ from finboard_persistence import (
     create_async_engine,
     session_factory,
 )
-from finboard_reconcile import ReconciliationEngine
+from finboard_reconcile import ReconciliationEngine, RecoveryEngine
 from finboard_risk import PreTradeChecker, RiskConfig
 from finboard_shared.identifiers import AccountId
 
@@ -48,9 +48,23 @@ class KernelComponents:
         """在已有的 ``AsyncSession`` 上构造一个 :class:`TradingKernel`。
 
         由调用方负责 session 生命周期与 ``commit``。
+        生产 kernel 会注入 :class:`ReconciliationEngine`,使 ``start`` 执行
+        启动核对(交易安全红线:核对未通过禁止下单)。
         """
+        from finboard_app.risk_context import SessionRiskContext
         from finboard_core import TradingKernel
 
+        risk_context = SessionRiskContext(
+            position_repo=PositionRepository(session),
+            account_repo=AccountRepository(session),
+            order_repo=OrderRepository(session),
+            fill_repo=FillRepository(session),
+            account_id=self.account_id,
+        )
+        self.risk_checker.bind_context(risk_context)
+
+        reconciler = self.new_reconciler(session)
+        recoverer = self.new_recoverer(session)
         return TradingKernel(
             broker=self.broker,
             account_id=self.account_id,
@@ -61,6 +75,8 @@ class KernelComponents:
             account_repo=AccountRepository(session),
             audit_repo=AuditLogRepository(session),
             risk_checker=self.risk_checker,
+            reconciler=reconciler,
+            recoverer=recoverer,
         )
 
     def new_reconciler(self, session: AsyncSession) -> ReconciliationEngine:
@@ -73,6 +89,14 @@ class KernelComponents:
             log_repo=ReconciliationLogRepository(session),
         )
 
+    def new_recoverer(self, session: AsyncSession) -> RecoveryEngine:
+        return RecoveryEngine(
+            broker=self.broker,
+            account_id=self.account_id,
+            order_repo=OrderRepository(session),
+            audit_repo=AuditLogRepository(session),
+        )
+
 
 def build_kernel_components(settings: Settings) -> KernelComponents:
     """同步组装:不创建任何 session,只准备依赖工厂。"""
@@ -82,7 +106,8 @@ def build_kernel_components(settings: Settings) -> KernelComponents:
         max_overflow=settings.db_max_overflow,
     )
     smaker = session_factory(engine)
-    broker = create_broker(settings.broker)
+    creds = broker_credentials(settings)
+    broker = create_broker(settings.broker, **creds)
     risk_checker = PreTradeChecker(config=_build_risk_config(settings))
 
     return KernelComponents(

@@ -2,22 +2,47 @@
 
 from finboard_persistence.base import Base
 from finboard_persistence.engine import create_async_engine
+from finboard_persistence.factor_repo import FactorSnapshotRepository
 from finboard_persistence.models import (
     AccountModel,
     AuditLogModel,
+    BacktestRunModel,
+    FactorSnapshotModel,
+    FactorValueModel,
     FillModel,
+    InstrumentModel,
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
+    ResearchDailyMetricModel,
+    ResearchFinancialIndicatorModel,
+    ResearchIndustryClassificationModel,
+    ResearchIndustryMembershipModel,
+    ResearchInstrumentProfileModel,
+    ResearchSyncBatchModel,
+    StrategyPresetModel,
+    WatchlistItemModel,
+    WatchlistModel,
 )
 from finboard_persistence.repo import (
     AccountRepository,
     AuditLogRepository,
+    BacktestRunRepository,
     FillRepository,
+    InstrumentRepository,
     OrderRepository,
     PositionRepository,
     ReconciliationLogRepository,
+    StrategyPresetRepository,
+    WatchlistRepository,
 )
+from finboard_persistence.research_repo import (
+    ResearchDataset,
+    ResearchDatasetRepository,
+    ResearchSyncBatchRepository,
+    SyncBatchStatus,
+)
+from finboard_persistence.research_sync import ResearchDataSyncService
 from finboard_persistence.session import session_factory
 
 __all__ = [
@@ -25,15 +50,38 @@ __all__ = [
     "AccountRepository",
     "AuditLogModel",
     "AuditLogRepository",
+    "BacktestRunModel",
+    "BacktestRunRepository",
     "Base",
+    "FactorSnapshotModel",
+    "FactorSnapshotRepository",
+    "FactorValueModel",
     "FillModel",
     "FillRepository",
+    "InstrumentModel",
+    "InstrumentRepository",
     "OrderModel",
     "OrderRepository",
     "PositionModel",
     "PositionRepository",
     "ReconciliationLogModel",
     "ReconciliationLogRepository",
+    "ResearchDailyMetricModel",
+    "ResearchDataSyncService",
+    "ResearchDataset",
+    "ResearchDatasetRepository",
+    "ResearchFinancialIndicatorModel",
+    "ResearchIndustryClassificationModel",
+    "ResearchIndustryMembershipModel",
+    "ResearchInstrumentProfileModel",
+    "ResearchSyncBatchModel",
+    "ResearchSyncBatchRepository",
+    "StrategyPresetModel",
+    "StrategyPresetRepository",
+    "SyncBatchStatus",
+    "WatchlistItemModel",
+    "WatchlistModel",
+    "WatchlistRepository",
     "create_async_engine",
     "session_factory",
 ]

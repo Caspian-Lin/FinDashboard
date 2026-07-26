@@ -22,6 +22,10 @@ finboard-core = { workspace = true }
 finboard-risk = { workspace = true }
 finboard-reconcile = { workspace = true }
 finboard-app = { workspace = true }
+finboard-api = { workspace = true }
+finboard-scheduler = { workspace = true }
+finboard-data = { workspace = true }
+finboard-backtest = { workspace = true }
 
 # 开发期统一依赖,改用 PEP 735 dependency-groups(uv 推荐写法)
 [dependency-groups]
@@ -34,6 +38,8 @@ dev = [
   "mypy>=1.11",
   "types-PyYAML>=6.0",
   "ipython>=8.27",
+  "httpx>=0.27",
+  "pyarrow>=15.0",
 ]
 
 # -----------------------------------------------------------------------------
@@ -72,6 +78,10 @@ known-first-party = [
   "finboard_risk",
   "finboard_reconcile",
   "finboard_app",
+  "finboard_api",
+  "finboard_scheduler",
+  "finboard_data",
+  "finboard_backtest",
 ]
 
 # -----------------------------------------------------------------------------
@@ -100,12 +110,19 @@ mypy_path = [
   "packages/finboard-risk/src",
   "packages/finboard-reconcile/src",
   "packages/finboard-app/src",
+  "packages/finboard-api/src",
+  "packages/finboard-scheduler/src",
+  "packages/finboard-data/src",
+  "packages/finboard-backtest/src",
 ]
 exclude = ["migrations/versions/"]
 
 # 第三方券商 SDK(xtquant / CTP)没有类型存根,P1 实盘接入时按需在此添加
-# `[[tool.mypy.overrides]] module = ["xtquant.*"]; ignore_missing_imports = true`。
-
+# xtquant 仅 Windows + miniQMT 可用,Linux CI 无法安装;mypy 忽略其缺失。
+# pyarrow / akshare 缺少 py.typed,mypy 忽略其缺失。
+[[tool.mypy.overrides]]
+module = ["xtquant.*", "pyarrow.*", "akshare.*", "yfinance.*", "tushare.*"]
+ignore_missing_imports = true
 
 # 测试代码放宽部分严格项
 [[tool.mypy.overrides]]
@@ -120,6 +137,11 @@ disallow_incomplete_defs = false
 minversion = "8.3"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# module-scope async fixture(如 tests/integration 的 _engine)与 event loop
+# 必须同 scope,否则 AsyncSession 内部的 asyncio.Lock 会跨 loop 报错
+# "bound to a different event loop"。这里把 fixture 和测试都统一到 module scope。
+asyncio_default_fixture_loop_scope = "module"
+asyncio_default_test_loop_scope = "module"
 addopts = [
   "-ra",
   "--strict-markers",
@@ -128,6 +150,10 @@ addopts = [
   "--cov=finboard_broker",
   "--cov=finboard_core",
   "--cov=finboard_risk",
+  "--cov=finboard_api",
+  "--cov=finboard_scheduler",
+  "--cov=finboard_data",
+  "--cov=finboard_backtest",
   "--cov-report=term-missing",
 ]
 markers = [

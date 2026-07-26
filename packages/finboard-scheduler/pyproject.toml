@@ -1,0 +1,21 @@
+[project]
+name = "finboard-scheduler"
+version = "0.1.0"
+description = "进程内定时任务调度(盘前检查 / 收盘撤单 / 日终核对 / 连接心跳)。"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+  "finboard-shared",
+  "finboard-core",
+  "finboard-persistence",
+  "finboard-reconcile",
+  "structlog>=24.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/finboard_scheduler"]

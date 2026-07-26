@@ -1,0 +1,20 @@
+# 标的池配置 —— 定时批量拉取行情的目标标的
+# 用法:
+#   finboard data fetch-all --config symbols.yaml   # 批量拉取
+#   finboard data status                             # 查看缓存
+
+fetch_symbols:
+  - code: "510300.SH"
+    name: "沪深300ETF"
+  - code: "510050.SH"
+    name: "上证50ETF"
+  - code: "159915.SZ"
+    name: "创业板ETF"
+  - code: "512000.SH"
+    name: "中证500ETF"
+  - code: "588000.SH"
+    name: "科创50ETF"
+
+fetch_period: "D1"           # K 线周期(D1 日线 / M1 / M5 / M15 / M30 / H1)
+fetch_lookback_days: 5        # 增量拉取天数(从今天往前)
+fetch_adjust: "qfq"           # 复权方式(qfq 前复权 / hqfq 后复权 / none 不复权)

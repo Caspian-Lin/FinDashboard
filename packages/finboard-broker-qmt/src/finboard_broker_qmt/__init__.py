@@ -1,4 +1,4 @@
-"""finboard-broker-qmt:QMT 适配器(占位实现)。"""
+"""finboard-broker-qmt:QMT 券商适配器 + 行情适配器。"""
 
 from finboard_broker_qmt.adapter import QmtBroker, create_broker
 

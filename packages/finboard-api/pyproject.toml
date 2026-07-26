@@ -1,0 +1,26 @@
+[project]
+name = "finboard-api"
+version = "0.1.0"
+description = "FastAPI REST + WebSocket API — 人工交易控制台后端。"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+  "finboard-shared",
+  "finboard-broker",
+  "finboard-persistence",
+  "finboard-core",
+  "finboard-risk",
+  "finboard-reconcile",
+  "finboard-app",
+  "finboard-data",
+  "finboard-backtest",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/finboard_api"]

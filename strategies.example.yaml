@@ -1,0 +1,14 @@
+# 策略配置示例 —— 复制为 strategies.yaml 并按需修改
+# 用法: finboard run --strategies strategies.yaml
+
+strategies:
+  - kind: periodic_query
+    id: query-01
+
+  - kind: etf_dca
+    id: dca-510300
+    params:
+      symbol_code: "510300.SH"
+      quantity: 100
+      order_type: market        # market | limit
+      # price: 4.50             # 限价单需指定

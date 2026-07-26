@@ -33,12 +33,13 @@ def test_broker_imports() -> None:
 
 
 def test_broker_stub_imports() -> None:
-    # QMT / CTP 是 stub,但模块本身必须可导入(动态加载时不能挂)
+    # CTP 仍是 stub;QMT 需要 path/session_id 参数且依赖 xtquant,
+    # 此处只验证模块可导入 + BrokerKind 枚举值,不实例化。
     from finboard_broker_ctp import CtpBroker
-    from finboard_broker_qmt import QmtBroker
+    from finboard_shared.types import BrokerKind
 
     assert CtpBroker().kind.value == "ctp"
-    assert QmtBroker().kind.value == "qmt"
+    assert BrokerKind.QMT.value == "qmt"
 
 
 def test_persistence_imports() -> None:
@@ -48,6 +49,8 @@ def test_persistence_imports() -> None:
         FillModel,
         OrderModel,
         PositionModel,
+        ResearchDataSyncService,
+        ResearchSyncBatchModel,
         create_async_engine,
     )
 
@@ -60,11 +63,19 @@ def test_persistence_imports() -> None:
         "orders",
         "fills",
         "positions",
+        "research_sync_batches",
+        "research_daily_metrics",
+        "research_financial_indicators",
+        "research_industry_classifications",
+        "research_industry_memberships",
+        "research_instrument_profiles",
     } <= table_names
     assert OrderModel.__tablename__ == "orders"
     assert FillModel.__tablename__ == "fills"
     assert PositionModel.__tablename__ == "positions"
     assert AccountModel.__tablename__ == "accounts"
+    assert ResearchSyncBatchModel.__tablename__ == "research_sync_batches"
+    assert ResearchDataSyncService is not None
 
 
 def test_core_imports() -> None:
