@@ -13,6 +13,7 @@ dependencies = [
 [project.optional-dependencies]
 akshare = ["akshare>=1.12"]
 yfinance = ["yfinance>=1.5"]
+tushare = ["tushare>=1.4.29"]
 cache = ["pyarrow>=15.0"]
 
 [build-system]
