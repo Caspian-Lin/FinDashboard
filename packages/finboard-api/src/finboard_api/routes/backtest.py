@@ -87,6 +87,10 @@ async def run_backtest(
         initial_capital=req.capital,
         adjust=req.adjust,
         strategy_params=req.params,
+        commission_rate=req.commission_rate,
+        commission_min=req.commission_min,
+        stamp_tax_rate=req.stamp_tax_rate,
+        slippage_bps=req.slippage_bps,
     )
     engine = BacktestEngine(
         strategy=strategy,

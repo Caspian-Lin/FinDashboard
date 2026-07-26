@@ -25,7 +25,7 @@ class BacktestConfig:
 
     # 费用
     commission_rate: Decimal = Decimal("0.0003")    # 万 3
-    commission_min: Decimal = Decimal("5")           # ¥5/笔
+    commission_min: Decimal = Decimal("1")           # ¥1/笔(线上券商)
     stamp_tax_rate: Decimal = Decimal("0.0005")      # 万 5(卖出)
     slippage_bps: Decimal = Decimal("0")             # 滑点(bps,1bp=0.01%)
 

@@ -300,6 +300,10 @@ export interface BacktestRunRequest {
   capital: string;
   adjust?: string;
   params: Record<string, string | number>;
+  commission_rate?: string;
+  commission_min?: string;
+  stamp_tax_rate?: string;
+  slippage_bps?: string;
 }
 
 export interface BacktestMetrics {

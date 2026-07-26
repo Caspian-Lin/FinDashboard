@@ -34,6 +34,12 @@ export default function Backtest() {
   const [shortWindow, setShortWindow] = useState("5");
   const [longWindow, setLongWindow] = useState("20");
 
+  // 费用参数
+  const [commissionRate, setCommissionRate] = useState("0.0003");
+  const [commissionMin, setCommissionMin] = useState("1");
+  const [stampTaxRate, setStampTaxRate] = useState("0.0005");
+  const [slippageBps, setSlippageBps] = useState("0");
+
   // 标的搜索
   const [searchQuery, setSearchQuery] = useState("");
   const [marketFilter, setMarketFilter] = useState("");
@@ -91,6 +97,10 @@ export default function Backtest() {
           strategy === "ma_cross"
             ? { short_window: Number(shortWindow), long_window: Number(longWindow) }
             : {},
+        commission_rate: commissionRate,
+        commission_min: commissionMin,
+        stamp_tax_rate: stampTaxRate,
+        slippage_bps: slippageBps,
       }),
     onSuccess: (data) => {
       setActiveResult(data);
@@ -219,6 +229,60 @@ export default function Backtest() {
               </>
             )}
           </div>
+
+          {/* Fee params */}
+          <details className="mt-3">
+            <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
+              费用参数(佣金 / 印花税 / 滑点)
+            </summary>
+            <div className="grid grid-cols-4 gap-3 mt-2">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">佣金率(万N)</label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  value={commissionRate}
+                  onChange={(e) => setCommissionRate(e.target.value)}
+                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  placeholder="0.0003 = 万3"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">最低佣金(¥)</label>
+                <input
+                  type="number"
+                  value={commissionMin}
+                  onChange={(e) => setCommissionMin(e.target.value)}
+                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  placeholder="1"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">印花税(万N,卖出)</label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  value={stampTaxRate}
+                  onChange={(e) => setStampTaxRate(e.target.value)}
+                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  placeholder="0.0005 = 万5, ETF 填 0"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">滑点(bps)</label>
+                <input
+                  type="number"
+                  value={slippageBps}
+                  onChange={(e) => setSlippageBps(e.target.value)}
+                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  placeholder="0"
+                />
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 mt-1">
+              ETF 免印花税(填 0);股票卖出收万5。佣金 = max(成交额 × 佣金率, 最低佣金)。
+            </p>
+          </details>
 
           {/* Symbol selector */}
           <SymbolSelector
