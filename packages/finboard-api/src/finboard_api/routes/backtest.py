@@ -7,7 +7,7 @@ from datetime import date as parse_date
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from finboard_api.deps import get_session
+from finboard_api.deps import get_db_session
 from finboard_api.schemas import (
     BacktestFillOut,
     BacktestHistoryDetailOut,
@@ -61,7 +61,7 @@ async def list_strategies() -> list[StrategyInfoOut]:
 @router.post("/run", response_model=BacktestResultOut)
 async def run_backtest(
     req: BacktestRunRequest,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> BacktestResultOut:
     """运行回测,返回完整绩效报告。
 
@@ -182,7 +182,7 @@ async def run_backtest(
 @router.get("/history", response_model=list[BacktestHistoryItemOut])
 async def list_history(
     limit: int = 50,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> list[BacktestHistoryItemOut]:
     """列出最近回测记录(摘要)。"""
     from finboard_persistence import BacktestRunRepository
@@ -209,7 +209,7 @@ async def list_history(
 @router.get("/history/{run_id}", response_model=BacktestHistoryDetailOut)
 async def get_history(
     run_id: int,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> BacktestHistoryDetailOut:
     """获取单次回测的完整详情。"""
     from finboard_persistence import BacktestRunRepository
@@ -239,7 +239,7 @@ async def get_history(
 @router.delete("/history/{run_id}", status_code=204)
 async def delete_history(
     run_id: int,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> None:
     """删除单次回测记录。"""
     from finboard_persistence import BacktestRunRepository

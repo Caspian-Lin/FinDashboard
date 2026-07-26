@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from finboard_api.deps import get_session
+from finboard_api.deps import get_db_session
 from finboard_api.schemas import (
     WatchlistAddSymbols,
     WatchlistCreate,
@@ -24,7 +24,7 @@ def _require(session: AsyncSession) -> WatchlistRepository:
 
 @router.get("", response_model=list[WatchlistOut])
 async def list_watchlists(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> list[WatchlistOut]:
     """列出全部标的组(含成员数)。"""
     repo = _require(session)
@@ -48,7 +48,7 @@ async def list_watchlists(
 @router.post("", response_model=WatchlistOut, status_code=201)
 async def create_watchlist(
     body: WatchlistCreate,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> WatchlistOut:
     """创建标的组。"""
     repo = _require(session)
@@ -66,7 +66,7 @@ async def create_watchlist(
 @router.get("/{watchlist_id}", response_model=WatchlistDetailOut)
 async def get_watchlist(
     watchlist_id: int,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> WatchlistDetailOut:
     """获取标的组详情(含成员列表)。"""
     repo = _require(session)
@@ -89,7 +89,7 @@ async def get_watchlist(
 async def update_watchlist(
     watchlist_id: int,
     body: WatchlistUpdate,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> WatchlistOut:
     """重命名 / 更新描述。"""
     repo = _require(session)
@@ -112,7 +112,7 @@ async def update_watchlist(
 @router.delete("/{watchlist_id}", status_code=204)
 async def delete_watchlist(
     watchlist_id: int,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> None:
     """删除标的组(级联删除成员)。"""
     repo = _require(session)
@@ -126,7 +126,7 @@ async def delete_watchlist(
 async def add_symbols(
     watchlist_id: int,
     body: WatchlistAddSymbols,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> WatchlistDetailOut:
     """向标的组添加标的(自动去重)。"""
     repo = _require(session)
@@ -151,7 +151,7 @@ async def add_symbols(
 async def remove_symbol(
     watchlist_id: int,
     symbol_code: str,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> WatchlistDetailOut:
     """从标的组移除单个标的。"""
     repo = _require(session)

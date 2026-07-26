@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from finboard_api.deps import get_session
+from finboard_api.deps import get_db_session
 from finboard_api.schemas import (
     BatchFetchResultOut,
     BulkDownloadRequest,
@@ -268,7 +268,7 @@ async def list_instruments(
     instrument_type: str | None = None,
     limit: int = 200,
     offset: int = 0,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> InstrumentListOut:
     """列出数据库中的标的(分页)。"""
     from finboard_persistence import InstrumentRepository
@@ -303,7 +303,7 @@ async def list_instruments(
 async def search_instruments(
     q: str,
     limit: int = 50,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> list[InstrumentOut]:
     """按代码或名称模糊搜索标的。"""
     from finboard_persistence import InstrumentRepository
@@ -342,7 +342,7 @@ def _get_bulk_state(request: Request) -> dict[str, Any]:
 
 @router.post("/sync", response_model=SyncResultOut)
 async def sync_universe(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> SyncResultOut:
     """从 akshare 发现全市场标的,写入 instruments 表。"""
     from finboard_data.discovery import UniverseDiscovery
@@ -373,7 +373,7 @@ async def sync_universe(
 async def start_bulk_download(
     request: Request,
     req: BulkDownloadRequest,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> BulkDownloadStatusOut:
     """启动批量历史数据拉取(后台异步任务)。"""
     import asyncio

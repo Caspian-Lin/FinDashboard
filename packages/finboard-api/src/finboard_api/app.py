@@ -59,7 +59,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         app.state.components = components
         app.state.kernel = kernel
-        app.state.session = session
+        app.state.session = session  # kernel 专用长生命周期 session
+        app.state.session_maker = components.session_maker  # HTTP 请求每请求独立 session
         app.state.account_id = components.account_id
         app.state.ws_manager = manager
 
