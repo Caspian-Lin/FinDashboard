@@ -61,34 +61,23 @@ export default function Backtest() {
     refetchInterval: false,
   });
 
-  // 搜索标的
-  const { data: searchResults } = useQuery({
-    queryKey: ["instrument-search", searchQuery],
-    queryFn: () => api.searchInstruments(searchQuery),
-    enabled: searchQuery.length >= 2,
-  });
-
-  // 筛选标的(无搜索时按市场/类型分页拉取)
-  const { data: filterData } = useQuery({
-    queryKey: ["instruments-filter", marketFilter, typeFilter, page],
+  // 标的列表(搜索 + 筛选统一走分页端点)
+  const hasSearch = searchQuery.length >= 2;
+  const { data: listData } = useQuery({
+    queryKey: ["instruments-list", hasSearch ? searchQuery : "", marketFilter, typeFilter, page],
     queryFn: () =>
       api.getInstruments({
+        q: hasSearch ? searchQuery : undefined,
         market: marketFilter || undefined,
         instrument_type: typeFilter || undefined,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       }),
-    enabled: searchQuery.length < 2,
   });
 
-  const totalCount = searchQuery.length >= 2
-    ? (searchResults?.length ?? 0)
-    : (filterData?.total ?? 0);
+  const totalCount = listData?.total ?? 0;
 
-  const candidateList = useMemo(() => {
-    if (searchQuery.length >= 2) return searchResults ?? [];
-    return filterData?.items ?? [];
-  }, [searchQuery.length, searchResults, filterData]);
+  const candidateList = useMemo(() => listData?.items ?? [], [listData]);
 
   const runBacktest = useMutation({
     mutationFn: () =>
@@ -142,12 +131,8 @@ export default function Backtest() {
 
   const selectAllCandidates = useMutation({
     mutationFn: async () => {
-      if (searchQuery.length >= 2) {
-        // 搜索模式:搜索结果已全量加载
-        return (searchResults ?? []).map((c) => c.code);
-      }
-      // 筛选模式:拉取全部匹配 code(不分页)
       return api.getInstrumentCodes({
+        q: hasSearch ? searchQuery : undefined,
         market: marketFilter || undefined,
         instrument_type: typeFilter || undefined,
       });

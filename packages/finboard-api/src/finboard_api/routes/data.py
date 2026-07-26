@@ -266,17 +266,19 @@ async def update_symbol_pool(req: SymbolPoolUpdate) -> SymbolPoolOut:
 async def list_instruments(
     market: str | None = None,
     instrument_type: str | None = None,
+    q: str | None = None,
     limit: int = 200,
     offset: int = 0,
     session: AsyncSession = Depends(get_db_session),
 ) -> InstrumentListOut:
-    """列出数据库中的标的(分页)。"""
+    """列出数据库中的标的(分页,可选模糊搜索)。"""
     from finboard_persistence import InstrumentRepository
 
     repo = InstrumentRepository(session)
     rows, total = await repo.list_active(
         market=market,
         instrument_type=instrument_type,
+        q=q,
         limit=limit,
         offset=offset,
     )
@@ -303,13 +305,14 @@ async def list_instruments(
 async def list_instrument_codes(
     market: str | None = None,
     instrument_type: str | None = None,
+    q: str | None = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> list[str]:
     """返回匹配条件的全部标的代码(不分页,供前端"全选"使用)。"""
     from finboard_persistence import InstrumentRepository
 
     repo = InstrumentRepository(session)
-    codes = await repo.list_codes(market=market, instrument_type=instrument_type)
+    codes = await repo.list_codes(market=market, instrument_type=instrument_type, q=q)
     await session.commit()
     return codes
 
