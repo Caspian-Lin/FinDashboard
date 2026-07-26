@@ -21,6 +21,7 @@ from finboard_app.config import Settings
 from finboard_broker import BrokerAdapter
 from finboard_persistence import Base, create_async_engine, session_factory
 from finboard_shared.types import BrokerKind
+from tests.integration.conftest import clean_tables
 
 DB_URL = os.getenv(
     "FINBOARD_DB_URL",
@@ -35,8 +36,7 @@ async def _api_engine() -> AsyncIterator[object]:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
+        await clean_tables(conn)
     await engine.dispose()
 
 
@@ -53,8 +53,7 @@ async def api(_api_engine: object) -> AsyncIterator[ApiTestApp]:
     engine = _api_engine
     smaker = session_factory(engine)  # type: ignore[arg-type]
     async with smaker() as clean:
-        for table in reversed(Base.metadata.sorted_tables):
-            await clean.execute(table.delete())
+        await clean_tables(clean)
         await clean.commit()
 
     settings = Settings(

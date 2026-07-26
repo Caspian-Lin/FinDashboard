@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from finboard_api.deps import get_session
+from finboard_api.deps import get_db_session
 from finboard_api.schemas import (
     BatchFetchResultOut,
     BulkDownloadRequest,
@@ -266,17 +266,19 @@ async def update_symbol_pool(req: SymbolPoolUpdate) -> SymbolPoolOut:
 async def list_instruments(
     market: str | None = None,
     instrument_type: str | None = None,
+    q: str | None = None,
     limit: int = 200,
     offset: int = 0,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> InstrumentListOut:
-    """列出数据库中的标的(分页)。"""
+    """列出数据库中的标的(分页,可选模糊搜索)。"""
     from finboard_persistence import InstrumentRepository
 
     repo = InstrumentRepository(session)
     rows, total = await repo.list_active(
         market=market,
         instrument_type=instrument_type,
+        q=q,
         limit=limit,
         offset=offset,
     )
@@ -299,11 +301,27 @@ async def list_instruments(
     )
 
 
+@router.get("/instruments/codes", response_model=list[str])
+async def list_instrument_codes(
+    market: str | None = None,
+    instrument_type: str | None = None,
+    q: str | None = None,
+    session: AsyncSession = Depends(get_db_session),
+) -> list[str]:
+    """返回匹配条件的全部标的代码(不分页,供前端"全选"使用)。"""
+    from finboard_persistence import InstrumentRepository
+
+    repo = InstrumentRepository(session)
+    codes = await repo.list_codes(market=market, instrument_type=instrument_type, q=q)
+    await session.commit()
+    return codes
+
+
 @router.get("/instruments/search", response_model=list[InstrumentOut])
 async def search_instruments(
     q: str,
     limit: int = 50,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> list[InstrumentOut]:
     """按代码或名称模糊搜索标的。"""
     from finboard_persistence import InstrumentRepository
@@ -342,7 +360,7 @@ def _get_bulk_state(request: Request) -> dict[str, Any]:
 
 @router.post("/sync", response_model=SyncResultOut)
 async def sync_universe(
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> SyncResultOut:
     """从 akshare 发现全市场标的,写入 instruments 表。"""
     from finboard_data.discovery import UniverseDiscovery
@@ -373,7 +391,7 @@ async def sync_universe(
 async def start_bulk_download(
     request: Request,
     req: BulkDownloadRequest,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> BulkDownloadStatusOut:
     """启动批量历史数据拉取(后台异步任务)。"""
     import asyncio

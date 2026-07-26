@@ -294,6 +294,11 @@ class BacktestRunRequest(BaseSchema):
     capital: Decimal = Decimal("100000")
     adjust: str = "qfq"
     params: dict[str, Any] = {}
+    # 费用参数(可覆盖默认值)
+    commission_rate: Decimal = Decimal("0.0003")   # 万 3
+    commission_min: Decimal = Decimal("1")          # 最低 ¥1/笔
+    stamp_tax_rate: Decimal = Decimal("0.0005")     # 万 5(卖出)
+    slippage_bps: Decimal = Decimal("0")            # 滑点 bps
 
 
 class StrategyParamInfo(BaseSchema):

@@ -177,18 +177,27 @@ export const api = {
   getInstruments: (params?: {
     market?: string;
     instrument_type?: string;
+    q?: string;
     limit?: number;
     offset?: number;
   }) => {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.q) q.set("q", params.q);
     q.set("limit", String(params?.limit ?? 200));
     q.set("offset", String(params?.offset ?? 0));
     return fetchJSON<InstrumentList>(`/data/instruments?${q}`);
   },
   searchInstruments: (query: string) =>
     fetchJSON<InstrumentItem[]>(`/data/instruments/search?q=${encodeURIComponent(query)}`),
+  getInstrumentCodes: (params?: { market?: string; instrument_type?: string; q?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.market) q.set("market", params.market);
+    if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.q) q.set("q", params.q);
+    return fetchJSON<string[]>(`/data/instruments/codes?${q}`);
+  },
 
   // ---- Data Sync & Bulk Download ----
   syncUniverse: () =>
@@ -291,6 +300,10 @@ export interface BacktestRunRequest {
   capital: string;
   adjust?: string;
   params: Record<string, string | number>;
+  commission_rate?: string;
+  commission_min?: string;
+  stamp_tax_rate?: string;
+  slippage_bps?: string;
 }
 
 export interface BacktestMetrics {

@@ -138,7 +138,7 @@ class TestBacktestRoutes:
 
     def test_run_backtest_with_mock(self, client: TestClient, app: FastAPI) -> None:
         """使用 mock BacktestEngine 验证响应结构。"""
-        from finboard_api.deps import get_session
+        from finboard_api.deps import get_db_session
         from finboard_backtest.result import BacktestResult
 
         mock_result = BacktestResult(
@@ -171,7 +171,7 @@ class TestBacktestRoutes:
         mock_session.add = MagicMock()  # add 是同步方法
         mock_session.flush = AsyncMock()
         mock_session.commit = AsyncMock()
-        app.dependency_overrides[get_session] = lambda: mock_session
+        app.dependency_overrides[get_db_session] = lambda: mock_session
 
         with (
             patch("finboard_backtest.BacktestEngine", return_value=mock_engine),

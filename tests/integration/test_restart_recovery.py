@@ -47,6 +47,7 @@ from finboard_shared.types import (
     Side,
     TimeInForce,
 )
+from tests.integration.conftest import clean_tables
 
 pytestmark = pytest.mark.integration
 
@@ -87,12 +88,10 @@ async def restart_engine():
         await conn.run_sync(Base.metadata.create_all)
     # 清表(防止前次遗留)
     async with engine.begin() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
+        await clean_tables(conn)
     yield engine
     async with engine.begin() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
+        await clean_tables(conn)
     await engine.dispose()
 
 

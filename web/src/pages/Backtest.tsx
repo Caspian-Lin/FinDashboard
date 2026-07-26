@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   LineChart,
@@ -34,10 +34,23 @@ export default function Backtest() {
   const [shortWindow, setShortWindow] = useState("5");
   const [longWindow, setLongWindow] = useState("20");
 
+  // 费用参数
+  const [commissionRate, setCommissionRate] = useState("0.0003");
+  const [commissionMin, setCommissionMin] = useState("1");
+  const [stampTaxRate, setStampTaxRate] = useState("0.0005");
+  const [slippageBps, setSlippageBps] = useState("0");
+
   // 标的搜索
   const [searchQuery, setSearchQuery] = useState("");
   const [marketFilter, setMarketFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 200;
+
+  const resetPage = useCallback(() => setPage(0), []);
+  const handleSearch = useCallback((v: string) => { setSearchQuery(v); resetPage(); }, [resetPage]);
+  const handleMarket = useCallback((v: string) => { setMarketFilter(v); resetPage(); }, [resetPage]);
+  const handleType = useCallback((v: string) => { setTypeFilter(v); resetPage(); }, [resetPage]);
 
   // 结果视图: 当前结果或历史记录
   const [activeResult, setActiveResult] = useState<BacktestResult | null>(null);
@@ -54,29 +67,23 @@ export default function Backtest() {
     refetchInterval: false,
   });
 
-  // 搜索标的
-  const { data: searchResults } = useQuery({
-    queryKey: ["instrument-search", searchQuery],
-    queryFn: () => api.searchInstruments(searchQuery),
-    enabled: searchQuery.length >= 2,
-  });
-
-  // 筛选标的(无搜索时按市场/类型拉取)
-  const { data: filterData } = useQuery({
-    queryKey: ["instruments-filter", marketFilter, typeFilter],
+  // 标的列表(搜索 + 筛选统一走分页端点)
+  const hasSearch = searchQuery.length >= 2;
+  const { data: listData } = useQuery({
+    queryKey: ["instruments-list", hasSearch ? searchQuery : "", marketFilter, typeFilter, page],
     queryFn: () =>
       api.getInstruments({
+        q: hasSearch ? searchQuery : undefined,
         market: marketFilter || undefined,
         instrument_type: typeFilter || undefined,
-        limit: 500,
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
       }),
-    enabled: searchQuery.length < 2,
   });
 
-  const candidateList = useMemo(() => {
-    if (searchQuery.length >= 2) return searchResults ?? [];
-    return filterData?.items ?? [];
-  }, [searchQuery.length, searchResults, filterData]);
+  const totalCount = listData?.total ?? 0;
+
+  const candidateList = useMemo(() => listData?.items ?? [], [listData]);
 
   const runBacktest = useMutation({
     mutationFn: () =>
@@ -90,6 +97,10 @@ export default function Backtest() {
           strategy === "ma_cross"
             ? { short_window: Number(shortWindow), long_window: Number(longWindow) }
             : {},
+        commission_rate: commissionRate,
+        commission_min: commissionMin,
+        stamp_tax_rate: stampTaxRate,
+        slippage_bps: slippageBps,
       }),
     onSuccess: (data) => {
       setActiveResult(data);
@@ -128,10 +139,18 @@ export default function Backtest() {
     );
   };
 
-  const selectAllCandidates = () => {
-    const codes = candidateList.map((c) => c.code);
-    setSelectedSymbols((prev) => Array.from(new Set([...prev, ...codes])));
-  };
+  const selectAllCandidates = useMutation({
+    mutationFn: async () => {
+      return api.getInstrumentCodes({
+        q: hasSearch ? searchQuery : undefined,
+        market: marketFilter || undefined,
+        instrument_type: typeFilter || undefined,
+      });
+    },
+    onSuccess: (codes) => {
+      setSelectedSymbols((prev) => Array.from(new Set([...prev, ...codes])));
+    },
+  });
 
   const result = activeResult;
   const m = result?.metrics;
@@ -211,15 +230,73 @@ export default function Backtest() {
             )}
           </div>
 
+          {/* Fee params */}
+          <details className="mt-3">
+            <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
+              费用参数(佣金 / 印花税 / 滑点)
+            </summary>
+            <div className="grid grid-cols-4 gap-3 mt-2">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">佣金率(万N)</label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  value={commissionRate}
+                  onChange={(e) => setCommissionRate(e.target.value)}
+                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  placeholder="0.0003 = 万3"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">最低佣金(¥)</label>
+                <input
+                  type="number"
+                  value={commissionMin}
+                  onChange={(e) => setCommissionMin(e.target.value)}
+                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  placeholder="1"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">印花税(万N,卖出)</label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  value={stampTaxRate}
+                  onChange={(e) => setStampTaxRate(e.target.value)}
+                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  placeholder="0.0005 = 万5, ETF 填 0"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">滑点(bps)</label>
+                <input
+                  type="number"
+                  value={slippageBps}
+                  onChange={(e) => setSlippageBps(e.target.value)}
+                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  placeholder="0"
+                />
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 mt-1">
+              ETF 免印花税(填 0);股票卖出收万5。佣金 = max(成交额 × 佣金率, 最低佣金)。
+            </p>
+          </details>
+
           {/* Symbol selector */}
           <SymbolSelector
             searchQuery={searchQuery}
-            setSearchQuery={setSearchQuery}
+            setSearchQuery={handleSearch}
             marketFilter={marketFilter}
-            setMarketFilter={setMarketFilter}
+            setMarketFilter={handleMarket}
             typeFilter={typeFilter}
-            setTypeFilter={setTypeFilter}
+            setTypeFilter={handleType}
             candidates={candidateList}
+            totalCount={totalCount}
+            page={page}
+            pageSize={PAGE_SIZE}
+            onPageChange={setPage}
             selectedSymbols={selectedSymbols}
             toggleSymbol={toggleSymbol}
             selectAllCandidates={selectAllCandidates}
@@ -347,6 +424,10 @@ function SymbolSelector({
   typeFilter,
   setTypeFilter,
   candidates,
+  totalCount,
+  page,
+  pageSize,
+  onPageChange,
   selectedSymbols,
   toggleSymbol,
   selectAllCandidates,
@@ -360,9 +441,13 @@ function SymbolSelector({
   typeFilter: string;
   setTypeFilter: (v: string) => void;
   candidates: { code: string; name: string; market: string; instrument_type: string }[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  onPageChange: (p: number) => void;
   selectedSymbols: string[];
   toggleSymbol: (code: string) => void;
-  selectAllCandidates: () => void;
+  selectAllCandidates: { mutate: () => void; isPending: boolean };
   clearSelection: () => void;
   onSymbolsLoaded: (codes: string[]) => void;
 }) {
@@ -377,8 +462,7 @@ function SymbolSelector({
   });
 
   const createWl = useMutation({
-    mutationFn: (name: string) =>
-      api.createWatchlist({ name }),
+    mutationFn: (name: string) => api.createWatchlist({ name }),
     onSuccess: (wl) => {
       if (selectedSymbols.length > 0) {
         return api.addWatchlistSymbols(wl.id, selectedSymbols);
@@ -390,16 +474,18 @@ function SymbolSelector({
     },
   });
 
-  const addToWl = useMutation({
-    mutationFn: ({ id, codes }: { id: number; codes: string[] }) =>
-      api.addWatchlistSymbols(id, codes),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlists"] }),
-  });
-
   const loadWl = useMutation({
     mutationFn: (id: number) => api.getWatchlist(id),
     onSuccess: (detail) => onSymbolsLoaded(detail.symbols),
   });
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const rangeStart = totalCount > 0 ? page * pageSize + 1 : 0;
+  const rangeEnd = Math.min((page + 1) * pageSize, totalCount);
+
+  // 选中的标的中,当前页有几个
+  const currentPageCodes = new Set(candidates.map((c) => c.code));
+  const selectedOnPage = selectedSymbols.filter((c) => currentPageCodes.has(c)).length;
 
   return (
     <div className="mt-4 border rounded-lg p-4 bg-gray-50">
@@ -409,20 +495,18 @@ function SymbolSelector({
         </label>
         <div className="flex gap-2">
           <button
-            onClick={selectAllCandidates}
-            className="text-xs text-blue-600 hover:underline"
+            onClick={() => selectAllCandidates.mutate()}
+            disabled={selectAllCandidates.isPending || totalCount === 0}
+            className="text-xs text-blue-600 hover:underline disabled:opacity-50"
           >
-            全选结果
+            {selectAllCandidates.isPending ? "全选中..." : `全选结果(${totalCount})`}
           </button>
           {selectedSymbols.length > 0 && (
             <button onClick={clearSelection} className="text-xs text-gray-500 hover:underline">
               清空
             </button>
           )}
-          <button
-            onClick={() => setShowWatchlist((v) => !v)}
-            className="text-xs text-blue-600 hover:underline"
-          >
+          <button onClick={() => setShowWatchlist((v) => !v)} className="text-xs text-blue-600 hover:underline">
             标的组
           </button>
         </div>
@@ -436,40 +520,25 @@ function SymbolSelector({
           onChange={(e) => setSearchQuery(e.target.value)}
           className="flex-1 border rounded px-3 py-1.5 text-sm"
         />
-        <select
-          value={marketFilter}
-          onChange={(e) => setMarketFilter(e.target.value)}
-          className="border rounded px-2 py-1.5 text-sm"
-        >
-          {MARKETS.map((m) => (
-            <option key={m.value} value={m.value}>{m.label}</option>
-          ))}
+        <select value={marketFilter} onChange={(e) => setMarketFilter(e.target.value)} className="border rounded px-2 py-1.5 text-sm">
+          {MARKETS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
         </select>
-        <select
-          value={typeFilter}
-          onChange={(e) => setTypeFilter(e.target.value)}
-          className="border rounded px-2 py-1.5 text-sm"
-        >
-          {TYPES.map((t) => (
-            <option key={t.value} value={t.value}>{t.label}</option>
-          ))}
+        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="border rounded px-2 py-1.5 text-sm">
+          {TYPES.map((t) => (<option key={t.value} value={t.value}>{t.label}</option>))}
         </select>
       </div>
 
       {/* Candidate list */}
-      <div className="max-h-40 overflow-y-auto border rounded bg-white">
+      <div className="max-h-48 overflow-y-auto border rounded bg-white">
         {candidates.length === 0 && (
           <p className="text-xs text-gray-400 p-3 text-center">
             {searchQuery.length >= 2 ? "无匹配结果" : "输入搜索或选择筛选条件"}
           </p>
         )}
-        {candidates.slice(0, 200).map((c) => {
+        {candidates.map((c) => {
           const checked = selectedSymbols.includes(c.code);
           return (
-            <label
-              key={c.code}
-              className="flex items-center gap-2 px-3 py-1.5 hover:bg-blue-50 cursor-pointer text-sm"
-            >
+            <label key={c.code} className="flex items-center gap-2 px-3 py-1.5 hover:bg-blue-50 cursor-pointer text-sm">
               <input type="checkbox" checked={checked} onChange={() => toggleSymbol(c.code)} />
               <span className="font-mono text-xs">{c.code}</span>
               <span className="text-gray-500 text-xs truncate">{c.name}</span>
@@ -478,20 +547,54 @@ function SymbolSelector({
         })}
       </div>
 
-      {/* Selected symbols chips */}
-      {selectedSymbols.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-2">
-          {selectedSymbols.map((code) => (
-            <span
-              key={code}
-              className="inline-flex items-center gap-1 bg-blue-100 text-blue-700 rounded px-2 py-0.5 text-xs font-mono"
+      {/* Pagination */}
+      {totalCount > pageSize && (
+        <div className="flex items-center justify-between mt-2 text-xs text-gray-500">
+          <span>
+            第 {rangeStart}-{rangeEnd} 条 / 共 {totalCount} 条
+            {selectedOnPage > 0 && <span className="ml-2 text-blue-500">本页已选 {selectedOnPage}</span>}
+          </span>
+          <div className="flex gap-1">
+            <button
+              onClick={() => onPageChange(page - 1)}
+              disabled={page === 0}
+              className="px-2 py-0.5 border rounded hover:bg-gray-100 disabled:opacity-30"
             >
-              {code}
-              <button onClick={() => toggleSymbol(code)} className="text-blue-400 hover:text-blue-600">
-                ×
-              </button>
-            </span>
-          ))}
+              上一页
+            </button>
+            <span className="px-1 py-0.5">{page + 1}/{totalPages}</span>
+            <button
+              onClick={() => onPageChange(page + 1)}
+              disabled={page + 1 >= totalPages}
+              className="px-2 py-0.5 border rounded hover:bg-gray-100 disabled:opacity-30"
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+      )}
+      {totalCount > 0 && totalCount <= pageSize && (
+        <div className="mt-2 text-xs text-gray-400">共 {totalCount} 条{selectedOnPage > 0 && ` · 已选 ${selectedSymbols.length}`}</div>
+      )}
+
+      {/* Selected symbols summary */}
+      {selectedSymbols.length > 0 && (
+        <div className="mt-2">
+          {selectedSymbols.length <= 50 ? (
+            <div className="flex flex-wrap gap-1">
+              {selectedSymbols.map((code) => (
+                <span key={code} className="inline-flex items-center gap-1 bg-blue-100 text-blue-700 rounded px-2 py-0.5 text-xs font-mono">
+                  {code}
+                  <button onClick={() => toggleSymbol(code)} className="text-blue-400 hover:text-blue-600">×</button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500">
+              已选 {selectedSymbols.length} 个标的
+              <button onClick={clearSelection} className="ml-2 text-red-500 hover:underline">清空</button>
+            </div>
+          )}
         </div>
       )}
 
@@ -519,22 +622,7 @@ function SymbolSelector({
                 {wl.name} <span className="text-gray-400">({wl.item_count})</span>
               </span>
               <div className="flex gap-2 shrink-0">
-                <button
-                  onClick={() => loadWl.mutate(wl.id)}
-                  className="text-xs text-blue-600 hover:underline"
-                >
-                  载入
-                </button>
-                <button
-                  onClick={() =>
-                    selectedSymbols.length > 0 &&
-                    addToWl.mutate({ id: wl.id, codes: selectedSymbols })
-                  }
-                  disabled={selectedSymbols.length === 0}
-                  className="text-xs text-green-600 hover:underline disabled:opacity-30"
-                >
-                  追加
-                </button>
+                <button onClick={() => loadWl.mutate(wl.id)} className="text-xs text-blue-600 hover:underline">载入</button>
               </div>
             </div>
           ))}

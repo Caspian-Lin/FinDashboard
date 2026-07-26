@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import structlog
 from sqlalchemy import select
@@ -588,15 +589,22 @@ class InstrumentRepository:
         *,
         market: str | None = None,
         instrument_type: str | None = None,
+        q: str | None = None,
         limit: int = 5000,
         offset: int = 0,
     ) -> tuple[list[InstrumentModel], int]:
-        """查询活跃标的(分页)。"""
-        conditions = [InstrumentModel.status == "active"]
+        """查询活跃标的(分页,可选模糊搜索)。"""
+        conditions: list[Any] = [InstrumentModel.status == "active"]
         if market:
             conditions.append(InstrumentModel.market == market)
         if instrument_type:
             conditions.append(InstrumentModel.instrument_type == instrument_type)
+        if q:
+            pattern = f"%{q}%"
+            conditions.append(
+                (InstrumentModel.code.ilike(pattern))
+                | (InstrumentModel.name.ilike(pattern))
+            )
 
         count_stmt = select(InstrumentModel).where(*conditions)
         total = len((await self._session.execute(count_stmt)).scalars().all())
@@ -629,6 +637,30 @@ class InstrumentRepository:
             .limit(limit)
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_codes(
+        self,
+        *,
+        market: str | None = None,
+        instrument_type: str | None = None,
+        q: str | None = None,
+    ) -> list[str]:
+        """返回匹配条件的全部标的代码(不分页,轻量)。"""
+        conditions: list[Any] = [InstrumentModel.status == "active"]
+        if market:
+            conditions.append(InstrumentModel.market == market)
+        if instrument_type:
+            conditions.append(InstrumentModel.instrument_type == instrument_type)
+        if q:
+            pattern = f"%{q}%"
+            conditions.append(
+                (InstrumentModel.code.ilike(pattern))
+                | (InstrumentModel.name.ilike(pattern))
+            )
+        stmt = (
+            select(InstrumentModel.code).where(*conditions).order_by(InstrumentModel.code)
+        )
+        return [row[0] for row in (await self._session.execute(stmt)).all()]
 
 
 class WatchlistRepository:
@@ -722,7 +754,7 @@ class BacktestRunRepository:
     ) -> list[BacktestRunModel]:
         stmt = (
             select(BacktestRunModel)
-            .order_by(BacktestRunModel.created_at.desc())
+            .order_by(BacktestRunModel.created_at.desc(), BacktestRunModel.id.desc())
             .limit(limit)
         )
         return list((await self._session.execute(stmt)).scalars().all())

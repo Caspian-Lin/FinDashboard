@@ -34,6 +34,7 @@ from finboard_risk import KillSwitch, PreTradeChecker, RiskConfig
 from finboard_shared.identifiers import AccountId
 from finboard_shared.models import OrderRequest, Symbol
 from finboard_shared.types import Market, OrderStatus, OrderType, Side
+from tests.integration.conftest import clean_tables
 
 pytestmark = pytest.mark.integration
 
@@ -96,8 +97,7 @@ async def test_multi_day_simulation(account_id: AccountId) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with engine.begin() as conn:
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
+        await clean_tables(conn)
 
     smaker = session_factory(engine)
     total_filled = 0
@@ -164,6 +164,5 @@ async def test_multi_day_simulation(account_id: AccountId) -> None:
             await session.rollback()
     finally:
         async with engine.begin() as conn:
-            for table in reversed(Base.metadata.sorted_tables):
-                await conn.execute(table.delete())
+            await clean_tables(conn)
         await engine.dispose()

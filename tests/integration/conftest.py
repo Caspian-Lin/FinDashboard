@@ -34,6 +34,19 @@ def _db_url() -> str:
     return DB_URL
 
 
+_PRESERVE_TABLES = {"instruments"}
+
+
+async def clean_tables(conn: Any) -> None:
+    """清空全部业务表(跳过 instruments —— 由 akshare 同步,属持久化用户数据)。
+
+    供所有集成测试的 fixture 调用,避免每个文件各自维护清表逻辑。
+    """
+    for table in reversed(Base.metadata.sorted_tables):
+        if table.name not in _PRESERVE_TABLES:
+            await conn.execute(table.delete())
+
+
 @pytest_asyncio.fixture(scope="module")
 async def _engine(_db_url: str) -> AsyncIterator[AsyncEngine]:
     engine = create_async_engine(_db_url)
@@ -41,9 +54,7 @@ async def _engine(_db_url: str) -> AsyncIterator[AsyncEngine]:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:
-        # 测试结束后清表,保留 schema 便于调试
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(table.delete())
+        await clean_tables(conn)
     await engine.dispose()
 
 
@@ -51,9 +62,7 @@ async def _engine(_db_url: str) -> AsyncIterator[AsyncEngine]:
 async def db_session(_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     smaker = session_factory(_engine)
     async with smaker() as session:
-        # 清除上一轮测试残留数据(module-scope engine 共享连接池,rollback 不完全可靠)
-        for table in reversed(Base.metadata.sorted_tables):
-            await session.execute(table.delete())
+        await clean_tables(session)
         await session.commit()
         yield session
         await session.rollback()
