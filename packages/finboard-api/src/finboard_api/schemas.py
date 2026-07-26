@@ -345,3 +345,60 @@ class BacktestResultOut(BaseSchema):
     equity_curve: list[EquityPointOut]
     fills: list[BacktestFillOut]
     summary: str
+    run_id: int | None = None
+
+
+# --------------------------------------------------------------------------- Backtest History
+class BacktestHistoryItemOut(BaseSchema):
+    id: int
+    strategy: str
+    symbols: list[str]
+    start: str
+    end: str
+    capital: Decimal
+    adjust: str
+    metrics: dict[str, Any]
+    created_at: datetime
+
+
+class BacktestHistoryDetailOut(BaseSchema):
+    id: int
+    strategy: str
+    symbols: list[str]
+    start: str
+    end: str
+    capital: Decimal
+    adjust: str
+    params: dict[str, Any]
+    metrics: dict[str, Any]
+    equity_curve: list[EquityPointOut]
+    fills: list[BacktestFillOut]
+    summary: str
+    created_at: datetime
+
+
+# --------------------------------------------------------------------------- Watchlist
+class WatchlistCreate(BaseSchema):
+    name: str
+    description: str | None = None
+
+
+class WatchlistUpdate(BaseSchema):
+    name: str | None = None
+    description: str | None = None
+
+
+class WatchlistOut(BaseSchema):
+    id: int
+    name: str
+    description: str | None = None
+    item_count: int = 0
+    created_at: datetime
+
+
+class WatchlistDetailOut(WatchlistOut):
+    symbols: list[str]
+
+
+class WatchlistAddSymbols(BaseSchema):
+    symbols: list[str]

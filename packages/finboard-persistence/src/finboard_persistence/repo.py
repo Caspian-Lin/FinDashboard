@@ -18,11 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from finboard_persistence.models import (
     AccountModel,
     AuditLogModel,
+    BacktestRunModel,
     FillModel,
     InstrumentModel,
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
+    WatchlistItemModel,
+    WatchlistModel,
 )
 from finboard_shared.identifiers import AccountId, ClientOrderId, StrategyId
 from finboard_shared.models import Account, Fill, Order, Position, Symbol
@@ -626,6 +629,115 @@ class InstrumentRepository:
             .limit(limit)
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+
+class WatchlistRepository:
+    """标的组(watchlist)仓储。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(self, name: str, description: str | None = None) -> WatchlistModel:
+        row = WatchlistModel(name=name, description=description)
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def list_all(self) -> list[WatchlistModel]:
+        stmt = select(WatchlistModel).order_by(WatchlistModel.created_at.desc())
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def get(self, watchlist_id: int) -> WatchlistModel | None:
+        stmt = select(WatchlistModel).where(WatchlistModel.id == watchlist_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def rename(
+        self, watchlist_id: int, name: str, description: str | None = None
+    ) -> WatchlistModel | None:
+        row = await self.get(watchlist_id)
+        if row is None:
+            return None
+        row.name = name
+        if description is not None:
+            row.description = description
+        await self._session.flush()
+        return row
+
+    async def delete(self, watchlist_id: int) -> bool:
+        row = await self.get(watchlist_id)
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+    async def items(self, watchlist_id: int) -> list[WatchlistItemModel]:
+        stmt = (
+            select(WatchlistItemModel)
+            .where(WatchlistItemModel.watchlist_id == watchlist_id)
+            .order_by(WatchlistItemModel.created_at)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def add_symbols(
+        self, watchlist_id: int, codes: list[str]
+    ) -> list[WatchlistItemModel]:
+        existing = {it.symbol_code for it in await self.items(watchlist_id)}
+        added: list[WatchlistItemModel] = []
+        for code in codes:
+            if code in existing:
+                continue
+            row = WatchlistItemModel(watchlist_id=watchlist_id, symbol_code=code)
+            self._session.add(row)
+            added.append(row)
+        await self._session.flush()
+        return added
+
+    async def remove_symbol(self, watchlist_id: int, code: str) -> bool:
+        stmt = select(WatchlistItemModel).where(
+            WatchlistItemModel.watchlist_id == watchlist_id,
+            WatchlistItemModel.symbol_code == code,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+
+class BacktestRunRepository:
+    """回测运行历史仓储。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def save(self, run: BacktestRunModel) -> BacktestRunModel:
+        self._session.add(run)
+        await self._session.flush()
+        return run
+
+    async def list_recent(
+        self, *, limit: int = 50
+    ) -> list[BacktestRunModel]:
+        stmt = (
+            select(BacktestRunModel)
+            .order_by(BacktestRunModel.created_at.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def get(self, run_id: int) -> BacktestRunModel | None:
+        stmt = select(BacktestRunModel).where(BacktestRunModel.id == run_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def delete(self, run_id: int) -> bool:
+        row = await self.get(run_id)
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
 
 
 # --------------------------------------------------------------------------- 占位避免 Decimal import 警告

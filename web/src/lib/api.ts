@@ -149,6 +149,29 @@ export const api = {
   getStrategies: () => fetchJSON<StrategyInfo[]>("/backtest/strategies"),
   runBacktest: (body: BacktestRunRequest) =>
     fetchJSON<BacktestResult>("/backtest/run", { method: "POST", body: JSON.stringify(body) }),
+  getBacktestHistory: (limit = 50) =>
+    fetchJSON<BacktestHistoryItem[]>(`/backtest/history?limit=${limit}`),
+  getBacktestHistoryDetail: (id: number) =>
+    fetchJSON<BacktestHistoryDetail>(`/backtest/history/${id}`),
+  deleteBacktestHistory: (id: number) =>
+    fetch(`${BASE}/backtest/history/${id}`, { method: "DELETE" }),
+
+  // ---- Watchlists ----
+  getWatchlists: () => fetchJSON<Watchlist[]>("/watchlists"),
+  createWatchlist: (body: { name: string; description?: string }) =>
+    fetchJSON<Watchlist>("/watchlists", { method: "POST", body: JSON.stringify(body) }),
+  getWatchlist: (id: number) => fetchJSON<WatchlistDetail>(`/watchlists/${id}`),
+  updateWatchlist: (id: number, body: { name?: string; description?: string }) =>
+    fetchJSON<Watchlist>(`/watchlists/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteWatchlist: (id: number) =>
+    fetch(`${BASE}/watchlists/${id}`, { method: "DELETE" }),
+  addWatchlistSymbols: (id: number, symbols: string[]) =>
+    fetchJSON<WatchlistDetail>(`/watchlists/${id}/symbols`, {
+      method: "POST",
+      body: JSON.stringify({ symbols }),
+    }),
+  removeWatchlistSymbol: (id: number, code: string) =>
+    fetchJSON<WatchlistDetail>(`/watchlists/${id}/symbols/${code}`, { method: "DELETE" }),
 
   // ---- Instruments ----
   getInstruments: (params?: {
@@ -306,6 +329,48 @@ export interface BacktestResult {
   equity_curve: EquityPoint[];
   fills: BacktestFill[];
   summary: string;
+  run_id: number | null;
+}
+
+export interface BacktestHistoryItem {
+  id: number;
+  strategy: string;
+  symbols: string[];
+  start: string;
+  end: string;
+  capital: string;
+  adjust: string;
+  metrics: Partial<BacktestMetrics>;
+  created_at: string;
+}
+
+export interface BacktestHistoryDetail {
+  id: number;
+  strategy: string;
+  symbols: string[];
+  start: string;
+  end: string;
+  capital: string;
+  adjust: string;
+  params: Record<string, string | number>;
+  metrics: BacktestMetrics;
+  equity_curve: EquityPoint[];
+  fills: BacktestFill[];
+  summary: string;
+  created_at: string;
+}
+
+// ---- Watchlist types ----
+export interface Watchlist {
+  id: number;
+  name: string;
+  description: string | null;
+  item_count: number;
+  created_at: string;
+}
+
+export interface WatchlistDetail extends Watchlist {
+  symbols: string[];
 }
 
 // ---- Instrument types ----

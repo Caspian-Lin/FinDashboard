@@ -5,20 +5,25 @@ from finboard_persistence.engine import create_async_engine
 from finboard_persistence.models import (
     AccountModel,
     AuditLogModel,
+    BacktestRunModel,
     FillModel,
     InstrumentModel,
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
+    WatchlistItemModel,
+    WatchlistModel,
 )
 from finboard_persistence.repo import (
     AccountRepository,
     AuditLogRepository,
+    BacktestRunRepository,
     FillRepository,
     InstrumentRepository,
     OrderRepository,
     PositionRepository,
     ReconciliationLogRepository,
+    WatchlistRepository,
 )
 from finboard_persistence.session import session_factory
 
@@ -27,6 +32,8 @@ __all__ = [
     "AccountRepository",
     "AuditLogModel",
     "AuditLogRepository",
+    "BacktestRunModel",
+    "BacktestRunRepository",
     "Base",
     "FillModel",
     "FillRepository",
@@ -38,6 +45,9 @@ __all__ = [
     "PositionRepository",
     "ReconciliationLogModel",
     "ReconciliationLogRepository",
+    "WatchlistItemModel",
+    "WatchlistModel",
+    "WatchlistRepository",
     "create_async_engine",
     "session_factory",
 ]
