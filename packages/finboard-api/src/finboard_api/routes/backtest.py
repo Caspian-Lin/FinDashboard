@@ -160,8 +160,8 @@ async def run_backtest(
         adjust=req.adjust,
         params=req.params,
         metrics=json.loads(metrics.model_dump_json()),
-        equity_curve=[p.model_dump() for p in equity_curve],
-        fills=[f.model_dump() for f in fills],
+        equity_curve=[p.model_dump(mode="json") for p in equity_curve],
+        fills=[f.model_dump(mode="json") for f in fills],
         summary=result.summary(),
     )
     repo = BacktestRunRepository(session)

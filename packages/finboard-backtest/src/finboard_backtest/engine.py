@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -47,6 +48,8 @@ from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
 
 logger = structlog.get_logger(__name__)
+
+_LOAD_CHUNK = 500  # 每批并发加载的标的数
 
 _KIND_MAP: dict[BrokerEventType, str] = {
     BrokerEventType.ORDER_ACCEPTED: "accepted",
@@ -126,7 +129,8 @@ class BacktestEngine:
         await self._strategy.on_start(ctx)  # type: ignore[arg-type]
 
         # 5. 逐 Bar 回放
-        equity_curve: list[tuple[date, Decimal]] = []
+        # equity 按日去重:同一天多个标的的 bar 只保留最后一条权益
+        equity_by_date: dict[date, Decimal] = {}
         for bar in all_bars:
             clock.advance_to(bar.timestamp)
             broker.on_new_bar(bar)
@@ -155,8 +159,11 @@ class BacktestEngine:
                     except Exception:
                         logger.exception("backtest.on_order_update_error")
 
-            # 记录每日权益
-            equity_curve.append((bar.timestamp.date(), broker.total_equity()))
+            # 记录每日权益(按日覆盖,只保留当日最后一根 bar 的权益)
+            equity_by_date[bar.timestamp.date()] = broker.total_equity()
+
+        # dict → 按日期排序的 list
+        equity_curve = sorted(equity_by_date.items())
 
         logger.info("backtest.completed", bars=len(all_bars))
 
@@ -168,20 +175,46 @@ class BacktestEngine:
         )
 
     async def _load_data(self) -> dict[str, list[Bar]]:
-        """加载所有标的的历史 Bar 数据。"""
+        """并发加载所有标的的历史 Bar 数据。
+
+        分 chunk 并发拉取(每 chunk 最多 ``_LOAD_CHUNK`` 个标的),
+        AkShareProvider 内部的信号量负责网络限流,缓存命中时全并发。
+        """
         cfg = self._config
+        symbols = [self._parse_symbol(code) for code in cfg.symbols]
         result: dict[str, list[Bar]] = {}
-        for code in cfg.symbols:
-            symbol = self._parse_symbol(code)
-            bars = await self._provider.fetch_bars(
-                symbol,
-                BarPeriod.D1,
-                cfg.start,
-                cfg.end,
-                adjust=cfg.adjust,
+
+        chunk_size = _LOAD_CHUNK
+        for i in range(0, len(symbols), chunk_size):
+            chunk = symbols[i : i + chunk_size]
+            tasks = [
+                self._provider.fetch_bars(
+                    sym,
+                    BarPeriod.D1,
+                    cfg.start,
+                    cfg.end,
+                    adjust=cfg.adjust,
+                )
+                for sym in chunk
+            ]
+            batch = await asyncio.gather(*tasks, return_exceptions=True)
+            for sym, bars in zip(chunk, batch, strict=True):
+                if isinstance(bars, BaseException):
+                    logger.error(
+                        "backtest.data_load_failed",
+                        symbol=sym.code,
+                        error=str(bars),
+                    )
+                    result[sym.code] = []
+                else:
+                    result[sym.code] = bars
+            loaded = sum(1 for v in result.values() if v)
+            logger.info(
+                "backtest.data_progress",
+                loaded=loaded,
+                total=len(symbols),
             )
-            result[code] = bars
-            logger.info("backtest.data_loaded", symbol=code, bars=len(bars))
+
         return result
 
     @staticmethod
