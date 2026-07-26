@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date as parse_date
+from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,9 +17,11 @@ from finboard_api.schemas import (
     BacktestResultOut,
     BacktestRunRequest,
     EquityPointOut,
+    FactorSnapshotOut,
     StrategyInfoOut,
 )
 from finboard_api.strategy_validation import strategy_info, validate_strategy_params_for_api
+from finboard_app.selection_schema import FactorSelectionParams
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -42,8 +45,16 @@ async def run_backtest(
     数据量大时可能需要数秒到数十秒。
     """
     from finboard_app.strategies import create_strategy
-    from finboard_backtest import BacktestConfig, BacktestEngine
+    from finboard_backtest import (
+        BacktestConfig,
+        BacktestEngine,
+        PointInTimeFactorSelector,
+    )
     from finboard_data import AkShareProvider, YFinanceProvider
+    from finboard_persistence import (
+        FactorSnapshotRepository,
+        ResearchDatasetRepository,
+    )
 
     params = validate_strategy_params_for_api(
         req.strategy,
@@ -53,6 +64,7 @@ async def run_backtest(
     strategy = create_strategy(req.strategy, "backtest", **params)
 
     import os
+
     provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider()
@@ -69,11 +81,21 @@ async def run_backtest(
         commission_min=req.commission_min,
         stamp_tax_rate=req.stamp_tax_rate,
         slippage_bps=req.slippage_bps,
+        selection=req.selection.to_domain(),
+    )
+    factor_selector = (
+        PointInTimeFactorSelector(
+            reader=ResearchDatasetRepository(session),
+            writer=FactorSnapshotRepository(session),
+        )
+        if req.selection.enabled
+        else None
     )
     engine = BacktestEngine(
         strategy=strategy,
         data_provider=provider,
         config=config,
+        factor_selector=factor_selector,
     )
     try:
         result = await engine.run()
@@ -127,6 +149,21 @@ async def run_backtest(
         initial_capital=result.initial_capital,
         final_equity=result.final_equity,
     )
+    selection_snapshots = [
+        FactorSnapshotOut(
+            id=snapshot.snapshot_id,
+            decision_at=snapshot.decision_at,
+            business_date=str(snapshot.business_date),
+            effective_date=str(snapshot.effective_date),
+            selected_symbols=list(snapshot.selected_symbols),
+            status=snapshot.status.value,
+            skip_reason=snapshot.skip_reason,
+            dataset_versions=snapshot.dataset_versions,
+            factor_version=snapshot.factor_version,
+            checksum=snapshot.checksum,
+        )
+        for snapshot in result.selection_snapshots
+    ]
 
     # 落库 —— 保存参数 + 完整结果,供历史切换查看
     import json
@@ -141,10 +178,14 @@ async def run_backtest(
         capital=req.capital,
         adjust=req.adjust,
         params=params,
+        selection=req.selection.model_dump(mode="json"),
         metrics=json.loads(metrics.model_dump_json()),
         equity_curve=[p.model_dump(mode="json") for p in equity_curve],
         fills=[f.model_dump(mode="json") for f in fills],
         summary=result.summary(),
+        dataset_versions=result.dataset_versions,
+        factor_version=result.factor_version,
+        selection_snapshots=[snapshot.model_dump(mode="json") for snapshot in selection_snapshots],
     )
     repo = BacktestRunRepository(session)
     await repo.save(run_row)
@@ -157,6 +198,9 @@ async def run_backtest(
         fills=fills,
         summary=result.summary(),
         run_id=run_id,
+        selection_snapshots=selection_snapshots,
+        dataset_versions=result.dataset_versions,
+        factor_version=result.factor_version,
     )
 
 
@@ -182,6 +226,7 @@ async def list_history(
             capital=r.capital,
             adjust=r.adjust,
             metrics=r.metrics,
+            factor_version=r.factor_version,
             created_at=r.created_at,
         )
         for r in rows
@@ -210,10 +255,16 @@ async def get_history(
         capital=r.capital,
         adjust=r.adjust,
         params=r.params,
+        selection=FactorSelectionParams.model_validate(r.selection),
         metrics=r.metrics,
         equity_curve=[EquityPointOut(**p) for p in r.equity_curve],
         fills=[BacktestFillOut(**f) for f in r.fills],
         summary=r.summary,
+        selection_snapshots=[
+            FactorSnapshotOut.model_validate(snapshot) for snapshot in r.selection_snapshots
+        ],
+        dataset_versions=cast(dict[str, list[str]], r.dataset_versions),
+        factor_version=r.factor_version,
         created_at=r.created_at,
     )
 

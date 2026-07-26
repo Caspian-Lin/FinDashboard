@@ -23,6 +23,7 @@ from finboard_core.strategy import (
     StrategyContext,
     StrategyRunner,
     TimerEvent,
+    UniverseSelectionEvent,
 )
 
 __all__ = [
@@ -47,4 +48,5 @@ __all__ = [
     "StrategyRunner",
     "TimerEvent",
     "TradingKernel",
+    "UniverseSelectionEvent",
 ]

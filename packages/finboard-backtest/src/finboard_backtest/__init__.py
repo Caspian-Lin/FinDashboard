@@ -9,6 +9,7 @@ from finboard_backtest.config import BacktestConfig
 from finboard_backtest.context import BacktestContext
 from finboard_backtest.engine import BacktestEngine
 from finboard_backtest.result import BacktestResult
+from finboard_backtest.selection import PointInTimeFactorSelector
 
 __all__ = [
     "BacktestBroker",
@@ -16,5 +17,6 @@ __all__ = [
     "BacktestContext",
     "BacktestEngine",
     "BacktestResult",
+    "PointInTimeFactorSelector",
     "SimulatedClock",
 ]

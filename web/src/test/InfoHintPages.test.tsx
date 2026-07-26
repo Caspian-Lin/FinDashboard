@@ -35,7 +35,36 @@ const apiMock = vi.hoisted(() => ({
   updateConfig: vi.fn(),
 }));
 
-vi.mock("../lib/api", () => ({ api: apiMock }));
+const defaultFactorSelection = vi.hoisted(() => ({
+  enabled: false,
+  source: "tushare",
+  factor_version: "v1",
+  max_symbols: 20,
+  ranking_factor: "market_cap",
+  ranking_scope: "global",
+  ranking_ascending: false,
+  max_per_industry: null,
+  min_listing_days: 60,
+  exclude_st: true,
+  exclude_suspended: true,
+  momentum_lookback: 20,
+  min_market_cap: null,
+  max_market_cap: null,
+  min_pb: null,
+  max_pb: null,
+  min_turnover_rate: null,
+  max_turnover_rate: null,
+  min_momentum: null,
+  min_roe: null,
+  min_gross_profit_margin: null,
+  min_revenue_yoy: null,
+  dataset_versions: {},
+}));
+
+vi.mock("../lib/api", () => ({
+  api: apiMock,
+  DEFAULT_FACTOR_SELECTION: defaultFactorSelection,
+}));
 
 const strategy = {
   kind: "ma_cross",

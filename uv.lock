@@ -548,6 +548,7 @@ source = { editable = "packages/finboard-app" }
 dependencies = [
     { name = "finboard-broker" },
     { name = "finboard-core" },
+    { name = "finboard-data" },
     { name = "finboard-persistence" },
     { name = "finboard-reconcile" },
     { name = "finboard-risk" },
@@ -563,6 +564,7 @@ dependencies = [
 requires-dist = [
     { name = "finboard-broker", editable = "packages/finboard-broker" },
     { name = "finboard-core", editable = "packages/finboard-core" },
+    { name = "finboard-data", editable = "packages/finboard-data" },
     { name = "finboard-persistence", editable = "packages/finboard-persistence" },
     { name = "finboard-reconcile", editable = "packages/finboard-reconcile" },
     { name = "finboard-risk", editable = "packages/finboard-risk" },

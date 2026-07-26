@@ -2,10 +2,13 @@
 
 from finboard_persistence.base import Base
 from finboard_persistence.engine import create_async_engine
+from finboard_persistence.factor_repo import FactorSnapshotRepository
 from finboard_persistence.models import (
     AccountModel,
     AuditLogModel,
     BacktestRunModel,
+    FactorSnapshotModel,
+    FactorValueModel,
     FillModel,
     InstrumentModel,
     OrderModel,
@@ -50,6 +53,9 @@ __all__ = [
     "BacktestRunModel",
     "BacktestRunRepository",
     "Base",
+    "FactorSnapshotModel",
+    "FactorSnapshotRepository",
+    "FactorValueModel",
     "FillModel",
     "FillRepository",
     "InstrumentModel",

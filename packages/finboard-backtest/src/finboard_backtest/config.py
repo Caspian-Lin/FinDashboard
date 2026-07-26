@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+
+from finboard_data.factors import FactorSelectionConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,3 +42,6 @@ class BacktestConfig:
 
     # 策略参数(传入 strategy kwargs)
     strategy_params: dict[str, object] | None = None
+
+    # 因子选股(默认关闭,保持旧回测行为)
+    selection: FactorSelectionConfig = field(default_factory=FactorSelectionConfig)

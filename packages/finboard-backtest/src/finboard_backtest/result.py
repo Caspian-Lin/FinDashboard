@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
+from finboard_data.factors import FactorSnapshot
 from finboard_shared.models import Fill, Order
 
 
@@ -18,6 +19,7 @@ class BacktestResult:
     benchmark_curve: list[tuple[date, Decimal]] = field(default_factory=list)
     fills: list[Fill] = field(default_factory=list)
     orders: list[Order] = field(default_factory=list)
+    selection_snapshots: list[FactorSnapshot] = field(default_factory=list)
 
     # 绩效指标
     total_return: float = 0.0
@@ -39,6 +41,8 @@ class BacktestResult:
     end_date: date | None = None
     initial_capital: Decimal = Decimal("0")
     final_equity: Decimal = Decimal("0")
+    dataset_versions: dict[str, list[str]] = field(default_factory=dict)
+    factor_version: str | None = None
 
     def summary(self) -> str:
         """生成文本绩效摘要。"""

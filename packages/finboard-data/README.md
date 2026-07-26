@@ -82,6 +82,20 @@ uv pip install -e ".[akshare,yfinance,tushare,cache]"
 质量门不会自动修补、填充或删除坏行。原始响应归档、幂等重试和发布状态由
 `finboard-persistence` 的 `ResearchDataSyncService` 管理。
 
+## 因子目录与快照契约
+
+`finboard_data.factors` 定义版本化 `FACTOR_CATALOG`。每项因子声明名称、版本、
+更新频率、规范单位、依赖字段和 `strict` 时点安全级别。`FactorSelectionConfig`
+定义过滤、全局/行业排名、行业上限和数据版本钉住规则;默认关闭。
+
+读取边界 `FactorResearchReader` 必须一次批量返回同一来源和一组已发布
+`dataset_versions`,且每条输入满足 `available_at <= decision_at`。输出
+`FactorSnapshot` 记录 T 日决策时点、T+1 生效日、静态池、入选标的、因子值、
+排名、配置和内容校验和。该契约只服务研究/回测候选集,不定义或执行交易动作。
+
+新增因子时须同时登记目录元数据、依赖数据集和缺失值策略,提升
+`factor_version`,并补充未来数据、修订公告、输入顺序和质量失败测试。
+
 ### Tushare Provider
 
 安装可选依赖并通过环境变量注入 token:

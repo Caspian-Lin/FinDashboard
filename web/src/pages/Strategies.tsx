@@ -10,6 +10,7 @@ import {
   Trash2,
 } from "lucide-react";
 import InfoHint, { HintLabel } from "../components/InfoHint";
+import FactorSelectionForm from "../components/FactorSelectionForm";
 import StrategyParamForm from "../components/StrategyParamForm";
 import {
   defaultStrategyParams,
@@ -19,7 +20,12 @@ import {
   type StrategyParams,
   validateStrategyParams,
 } from "../lib/strategyParams";
-import { api, type StrategyPresetInput } from "../lib/api";
+import {
+  api,
+  DEFAULT_FACTOR_SELECTION,
+  type FactorSelectionInput,
+  type StrategyPresetInput,
+} from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
 
 export default function Strategies() {
@@ -29,6 +35,9 @@ export default function Strategies() {
   const [selectedPresetId, setSelectedPresetId] = useState<number | null>(null);
   const [name, setName] = useState("");
   const [params, setParams] = useState<StrategyParams>({});
+  const [selection, setSelection] = useState<FactorSelectionInput>({
+    ...DEFAULT_FACTOR_SELECTION,
+  });
   const [fieldErrors, setFieldErrors] = useState<StrategyFieldErrors>({});
   const [notice, setNotice] = useState("");
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
@@ -62,6 +71,7 @@ export default function Strategies() {
       setSelectedPresetId(preset.id);
       setName(preset.name);
       setParams(preset.params);
+      setSelection(preset.selection);
       setFieldErrors({});
       setNotice("预设已保存。它不会启动策略或改变实盘配置。");
       queryClient.invalidateQueries({ queryKey: ["strategy-presets"] });
@@ -86,6 +96,7 @@ export default function Strategies() {
     setSelectedPresetId(null);
     setName("");
     setParams(nextDefinition ? defaultStrategyParams(nextDefinition) : {});
+    setSelection({ ...DEFAULT_FACTOR_SELECTION });
     setFieldErrors({});
     setNotice("");
   }
@@ -106,6 +117,7 @@ export default function Strategies() {
     setSelectedPresetId(preset.id);
     setName(preset.name);
     setParams({ ...defaultStrategyParams(presetDefinition), ...preset.params });
+    setSelection(preset.selection);
     setFieldErrors({});
     setNotice("");
     savePreset.reset();
@@ -123,6 +135,7 @@ export default function Strategies() {
       name: name.trim(),
       strategy: definition.kind,
       params: normalizeStrategyParams(definition, params),
+      selection,
     });
   }
 
@@ -137,6 +150,7 @@ export default function Strategies() {
             strategyDraft: {
               strategy: definition.kind,
               params: normalizeStrategyParams(definition, params),
+              selection,
             },
           }
         : undefined,
@@ -261,6 +275,17 @@ export default function Strategies() {
             errors={fieldErrors}
             disabled={savePreset.isPending}
           />
+
+          {definition.supports_backtest && (
+            <FactorSelectionForm
+              value={selection}
+              onChange={(next) => {
+                setSelection(next);
+                setNotice("");
+                savePreset.reset();
+              }}
+            />
+          )}
 
           {savePreset.error && (
             <p className="mt-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">

@@ -12,6 +12,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from finboard_app.selection_schema import FactorSelectionParams
+
 
 class BaseSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -294,11 +296,12 @@ class BacktestRunRequest(BaseSchema):
     capital: Decimal = Decimal("100000")
     adjust: str = "qfq"
     params: dict[str, Any] = {}
+    selection: FactorSelectionParams = Field(default_factory=FactorSelectionParams)
     # 费用参数(可覆盖默认值)
-    commission_rate: Decimal = Decimal("0.0003")   # 万 3
-    commission_min: Decimal = Decimal("1")          # 最低 ¥1/笔
-    stamp_tax_rate: Decimal = Decimal("0.0005")     # 万 5(卖出)
-    slippage_bps: Decimal = Decimal("0")            # 滑点 bps
+    commission_rate: Decimal = Decimal("0.0003")  # 万 3
+    commission_min: Decimal = Decimal("1")  # 最低 ¥1/笔
+    stamp_tax_rate: Decimal = Decimal("0.0005")  # 万 5(卖出)
+    slippage_bps: Decimal = Decimal("0")  # 滑点 bps
 
 
 class StrategyParamInfo(BaseSchema):
@@ -358,12 +361,28 @@ class BacktestFillOut(BaseSchema):
     commission: Decimal
 
 
+class FactorSnapshotOut(BaseSchema):
+    id: int | None = None
+    decision_at: datetime
+    business_date: str
+    effective_date: str
+    selected_symbols: list[str]
+    status: str
+    skip_reason: str | None = None
+    dataset_versions: dict[str, str]
+    factor_version: str
+    checksum: str
+
+
 class BacktestResultOut(BaseSchema):
     metrics: BacktestMetricsOut
     equity_curve: list[EquityPointOut]
     fills: list[BacktestFillOut]
     summary: str
     run_id: int | None = None
+    selection_snapshots: list[FactorSnapshotOut] = Field(default_factory=list)
+    dataset_versions: dict[str, list[str]] = Field(default_factory=dict)
+    factor_version: str | None = None
 
 
 # --------------------------------------------------------------------------- Backtest History
@@ -376,6 +395,7 @@ class BacktestHistoryItemOut(BaseSchema):
     capital: Decimal
     adjust: str
     metrics: dict[str, Any]
+    factor_version: str | None = None
     created_at: datetime
 
 
@@ -388,10 +408,14 @@ class BacktestHistoryDetailOut(BaseSchema):
     capital: Decimal
     adjust: str
     params: dict[str, Any]
+    selection: FactorSelectionParams = Field(default_factory=FactorSelectionParams)
     metrics: dict[str, Any]
     equity_curve: list[EquityPointOut]
     fills: list[BacktestFillOut]
     summary: str
+    selection_snapshots: list[FactorSnapshotOut] = Field(default_factory=list)
+    dataset_versions: dict[str, list[str]] = Field(default_factory=dict)
+    factor_version: str | None = None
     created_at: datetime
 
 
@@ -400,12 +424,14 @@ class StrategyPresetCreate(BaseSchema):
     name: str = Field(min_length=1, max_length=100)
     strategy: str
     params: dict[str, Any] = {}
+    selection: FactorSelectionParams = Field(default_factory=FactorSelectionParams)
 
 
 class StrategyPresetUpdate(BaseSchema):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     strategy: str | None = None
     params: dict[str, Any] | None = None
+    selection: FactorSelectionParams | None = None
 
 
 class StrategyPresetOut(BaseSchema):
@@ -413,6 +439,7 @@ class StrategyPresetOut(BaseSchema):
     name: str
     strategy: str
     params: dict[str, Any]
+    selection: FactorSelectionParams
     created_at: datetime
     updated_at: datetime
 

@@ -12,6 +12,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import InfoHint, { HintLabel } from "../components/InfoHint";
+import FactorSelectionForm from "../components/FactorSelectionForm";
 import StrategyParamForm from "../components/StrategyParamForm";
 import {
   defaultStrategyParams,
@@ -21,7 +22,13 @@ import {
   type StrategyParams,
   validateStrategyParams,
 } from "../lib/strategyParams";
-import { api, type BacktestResult, type BacktestHistoryItem } from "../lib/api";
+import {
+  api,
+  DEFAULT_FACTOR_SELECTION,
+  type BacktestHistoryItem,
+  type BacktestResult,
+  type FactorSelectionInput,
+} from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
 
 const MARKETS = [
@@ -47,6 +54,9 @@ export default function Backtest() {
   const [start, setStart] = useState("2024-01-01");
   const [end, setEnd] = useState(new Date().toISOString().slice(0, 10));
   const [capital, setCapital] = useState("100000");
+  const [selection, setSelection] = useState<FactorSelectionInput>({
+    ...DEFAULT_FACTOR_SELECTION,
+  });
 
   // 费用参数
   const [commissionRate, setCommissionRate] = useState("0.0003");
@@ -108,6 +118,7 @@ export default function Backtest() {
           ...requestedPreset.params,
         });
         setStrategyErrors({});
+        setSelection(requestedPreset.selection);
         appliedConfig.current = key;
       }
       return;
@@ -115,7 +126,13 @@ export default function Backtest() {
 
     const draft = (
       location.state as
-        | { strategyDraft?: { strategy: string; params: StrategyParams } }
+        | {
+            strategyDraft?: {
+              strategy: string;
+              params: StrategyParams;
+              selection?: FactorSelectionInput;
+            };
+          }
         | null
     )?.strategyDraft;
     if (draft) {
@@ -128,6 +145,7 @@ export default function Backtest() {
           ...draft.params,
         });
         setStrategyErrors({});
+        setSelection(draft.selection ?? { ...DEFAULT_FACTOR_SELECTION });
         appliedConfig.current = key;
       }
       return;
@@ -179,6 +197,7 @@ export default function Backtest() {
         end,
         capital,
         params: normalizedParams,
+        selection,
         commission_rate: commissionRate,
         commission_min: commissionMin,
         stamp_tax_rate: stampTaxRate,
@@ -202,6 +221,9 @@ export default function Backtest() {
         fills: detail.fills,
         summary: detail.summary,
         run_id: detail.id,
+        selection_snapshots: detail.selection_snapshots,
+        dataset_versions: detail.dataset_versions,
+        factor_version: detail.factor_version,
       });
       setActiveHistoryId(detail.id);
       setStrategy(detail.strategy);
@@ -218,6 +240,7 @@ export default function Backtest() {
       setStart(detail.start);
       setEnd(detail.end);
       setCapital(detail.capital);
+      setSelection(detail.selection);
     },
   });
 
@@ -369,6 +392,14 @@ export default function Backtest() {
             </div>
           )}
 
+          <FactorSelectionForm
+            value={selection}
+            onChange={(next) => {
+              setSelection(next);
+              runBacktest.reset();
+            }}
+          />
+
           {/* Fee params */}
           <details className="mt-3">
             <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
@@ -498,6 +529,48 @@ export default function Backtest() {
               <MetricCard label="换手率" value={m.turnover.toFixed(2)} />
               <MetricCard label="超额收益" value={`${(m.excess_return * 100).toFixed(2)}%`} positive={m.excess_return >= 0} />
             </div>
+
+            {result.selection_snapshots.length > 0 && (
+              <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-900">候选池审计</h2>
+                    <p className="mt-1 text-xs text-slate-500">
+                      因子版本 {result.factor_version} · {result.selection_snapshots.length} 个日快照
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">
+                    数据版本已归档
+                  </span>
+                </div>
+                <div className="mt-4 max-h-56 divide-y divide-slate-100 overflow-y-auto">
+                  {result.selection_snapshots.map((snapshot) => (
+                    <div
+                      key={snapshot.checksum}
+                      className="grid gap-1 py-2 text-sm sm:grid-cols-[7rem_7rem_1fr]"
+                    >
+                      <span className="font-mono text-xs text-slate-500">
+                        {snapshot.effective_date}
+                      </span>
+                      <span
+                        className={
+                          snapshot.status === "published"
+                            ? "text-emerald-700"
+                            : "text-amber-700"
+                        }
+                      >
+                        {snapshot.status === "published" ? "已发布" : "跳过调仓"}
+                      </span>
+                      <span className="text-slate-700">
+                        {snapshot.status === "published"
+                          ? `${snapshot.selected_symbols.length} 个标的`
+                          : snapshot.skip_reason}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {result.equity_curve.length > 0 && (
               <div className="bg-white rounded-lg shadow p-5 mb-6">

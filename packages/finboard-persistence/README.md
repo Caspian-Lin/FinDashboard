@@ -24,6 +24,8 @@ SQLAlchemy 2.0 ORM 模型 + Repository + Alembic 迁移。
 | ``research_financial_indicators`` | 按公告日和修订标识保留的财务指标 | 外部数据源 |
 | ``research_industry_classifications`` | 版本化行业分类字典 | 外部数据源 |
 | ``research_industry_memberships`` | 含三级编码和有效区间的行业成员历史 | 外部数据源 |
+| ``factor_snapshots`` | T 日决策、T+1 生效的版本化候选池和质量状态 | 本地研究计算 |
+| ``factor_values`` | 快照内规范化因子值及全局/行业排名 | 本地研究计算 |
 
 ## 关键索引
 
@@ -62,6 +64,11 @@ metric = await repo.get_daily_metric_as_of(
     source="tushare",
 )
 ```
+
+`ResearchDatasetRepository.load_factor_inputs()` 用于横截面批量读取。日指标按
+业务日解析包含该日期的已发布批次,其他数据集按显式版本或最近发布版本解析;不会
+逐标的选择不同版本。`FactorSnapshotRepository` 以 SHA-256 内容校验和幂等保存
+快照及因子值,相同输入重复运行会复用原快照。
 
 ## 使用
 
