@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import structlog
@@ -66,6 +66,21 @@ class TimerEvent:
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
+@dataclass(frozen=True, slots=True)
+class UniverseSelectionEvent:
+    """策略可见的冻结候选集;只缩小外部授权的静态标的池。"""
+
+    decision_at: datetime
+    effective_date: date
+    static_universe: tuple[str, ...]
+    selected_symbols: tuple[str, ...]
+    dataset_versions: dict[str, str]
+    factor_version: str
+    status: str
+    skip_reason: str | None = None
+    snapshot_id: int | None = None
+
+
 # --------------------------------------------------------------------------- Strategy ABC
 
 
@@ -95,6 +110,13 @@ class Strategy:
 
     async def on_timer(self, event: TimerEvent, ctx: StrategyContext) -> None:
         """定时回调(由 ``StrategyRunner`` 按 ``timer_interval`` 周期触发)。"""
+
+    async def on_universe_selection(
+        self,
+        event: UniverseSelectionEvent,
+        ctx: StrategyContext,
+    ) -> None:
+        """候选集在生效日开盘前更新;默认不改变现有策略。"""
 
 
 # --------------------------------------------------------------------------- StrategyContext

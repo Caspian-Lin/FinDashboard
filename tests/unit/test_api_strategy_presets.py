@@ -28,6 +28,7 @@ class FakeStrategyPresetRepository:
         name: str,
         strategy: str,
         params: dict[str, Any],
+        selection: dict[str, Any],
     ) -> SimpleNamespace:
         now = datetime.now(UTC)
         row = SimpleNamespace(
@@ -35,6 +36,7 @@ class FakeStrategyPresetRepository:
             name=name,
             strategy=strategy,
             params=params,
+            selection=selection,
             created_at=now,
             updated_at=now,
         )
@@ -58,6 +60,7 @@ class FakeStrategyPresetRepository:
         name: str,
         strategy: str,
         params: dict[str, Any],
+        selection: dict[str, Any],
     ) -> SimpleNamespace | None:
         row = self.rows.get(preset_id)
         if row is None:
@@ -65,6 +68,7 @@ class FakeStrategyPresetRepository:
         row.name = name
         row.strategy = strategy
         row.params = params
+        row.selection = selection
         row.updated_at = datetime.now(UTC)
         return row
 
@@ -105,6 +109,7 @@ def test_strategy_preset_crud_and_schema_validation(client: TestClient) -> None:
             "max_position_pct": 0.95,
             "symbol_code": None,
         }
+        assert body["selection"]["enabled"] is False
         preset_id = body["id"]
 
         listed = client.get("/api/strategy-presets")
@@ -127,11 +132,19 @@ def test_strategy_preset_crud_and_schema_validation(client: TestClient) -> None:
             json={
                 "name": "长期趋势",
                 "params": {"short_window": 20, "long_window": 60},
+                "selection": {
+                    "enabled": True,
+                    "max_symbols": 8,
+                    "ranking_factor": "pb",
+                    "ranking_ascending": True,
+                },
             },
         )
         assert updated.status_code == 200
         assert updated.json()["name"] == "长期趋势"
         assert updated.json()["params"]["long_window"] == 60
+        assert updated.json()["selection"]["enabled"] is True
+        assert updated.json()["selection"]["ranking_factor"] == "pb"
 
         deleted = client.delete(f"/api/strategy-presets/{preset_id}")
         assert deleted.status_code == 204

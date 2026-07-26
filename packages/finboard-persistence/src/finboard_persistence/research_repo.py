@@ -13,6 +13,7 @@ from enum import StrEnum
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_data.factors import FactorInputBatch, FactorInputRecord
 from finboard_data.research import (
     DailySecurityMetrics,
     FinancialIndicator,
@@ -241,6 +242,78 @@ class ResearchDatasetRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._batches = ResearchSyncBatchRepository(session)
+
+    async def load_factor_inputs(
+        self,
+        *,
+        symbols: tuple[str, ...],
+        business_date: date,
+        decision_at: datetime,
+        source: str,
+        required_datasets: frozenset[str],
+        dataset_versions: dict[str, str],
+    ) -> FactorInputBatch:
+        """批量读取单一来源、单一发布版本且决策时点可见的因子输入。"""
+        _require_aware_datetime(decision_at, "decision_at")
+        batches: dict[str, ResearchSyncBatchModel] = {}
+        issues: list[str] = []
+        for dataset_name in sorted(required_datasets):
+            try:
+                dataset = ResearchDataset(dataset_name)
+            except ValueError:
+                issues.append(f"unknown_dataset:{dataset_name}")
+                continue
+            batch = await self._resolve_factor_batch(
+                dataset=dataset,
+                source=source,
+                dataset_version=dataset_versions.get(dataset_name),
+                business_date=business_date,
+                decision_at=decision_at,
+            )
+            if batch is None:
+                issues.append(f"dataset_unpublished:{dataset_name}")
+            else:
+                batches[dataset_name] = batch
+
+        profiles = await self._factor_profiles(
+            batches.get(ResearchDataset.INSTRUMENT_PROFILES.value),
+            symbols=symbols,
+            decision_at=decision_at,
+        )
+        daily = await self._factor_daily_metrics(
+            batches.get(ResearchDataset.DAILY_METRICS.value),
+            symbols=symbols,
+            business_date=business_date,
+            decision_at=decision_at,
+        )
+        financial = await self._factor_financials(
+            batches.get(ResearchDataset.FINANCIAL_INDICATORS.value),
+            symbols=symbols,
+            decision_at=decision_at,
+        )
+        industry = await self._factor_industries(
+            batches.get(ResearchDataset.INDUSTRY_MEMBERSHIPS.value),
+            symbols=symbols,
+            business_date=business_date,
+            decision_at=decision_at,
+        )
+        return FactorInputBatch(
+            records=tuple(
+                FactorInputRecord(
+                    symbol=symbol,
+                    profile=profiles.get(symbol),
+                    daily=daily.get(symbol),
+                    financial=financial.get(symbol),
+                    industry=industry.get(symbol),
+                )
+                for symbol in symbols
+            ),
+            source=source,
+            dataset_versions={
+                name: batch.dataset_version for name, batch in sorted(batches.items())
+            },
+            issues=tuple(issues),
+        )
 
     async def upsert_instrument_profiles(
         self,
@@ -586,6 +659,147 @@ class ResearchDatasetRepository:
                 dataset_version=dataset_version,
             )
         return await self._batches.latest_published(dataset=dataset, source=source)
+
+    async def _resolve_factor_batch(
+        self,
+        *,
+        dataset: ResearchDataset,
+        source: str,
+        dataset_version: str | None,
+        business_date: date,
+        decision_at: datetime,
+    ) -> ResearchSyncBatchModel | None:
+        if dataset_version is not None:
+            return await self._batches.published_version(
+                dataset=dataset,
+                source=source,
+                dataset_version=dataset_version,
+            )
+        if dataset is not ResearchDataset.DAILY_METRICS:
+            return await self._batches.latest_published(
+                dataset=dataset,
+                source=source,
+            )
+        stmt = (
+            select(ResearchSyncBatchModel)
+            .join(
+                ResearchDailyMetricModel,
+                ResearchDailyMetricModel.batch_id == ResearchSyncBatchModel.id,
+            )
+            .where(
+                ResearchSyncBatchModel.dataset == dataset.value,
+                ResearchSyncBatchModel.source == source,
+                ResearchSyncBatchModel.status == SyncBatchStatus.PUBLISHED.value,
+                ResearchDailyMetricModel.trade_date == business_date,
+                ResearchDailyMetricModel.available_at <= decision_at,
+            )
+            .order_by(
+                ResearchSyncBatchModel.published_at.desc(),
+                ResearchSyncBatchModel.id.desc(),
+            )
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def _factor_profiles(
+        self,
+        batch: ResearchSyncBatchModel | None,
+        *,
+        symbols: tuple[str, ...],
+        decision_at: datetime,
+    ) -> dict[str, InstrumentProfile]:
+        if batch is None:
+            return {}
+        stmt = select(ResearchInstrumentProfileModel).where(
+            ResearchInstrumentProfileModel.batch_id == batch.id,
+            ResearchInstrumentProfileModel.symbol.in_(symbols),
+            ResearchInstrumentProfileModel.available_at <= decision_at,
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {row.symbol: _profile_from_orm(row) for row in rows}
+
+    async def _factor_daily_metrics(
+        self,
+        batch: ResearchSyncBatchModel | None,
+        *,
+        symbols: tuple[str, ...],
+        business_date: date,
+        decision_at: datetime,
+    ) -> dict[str, DailySecurityMetrics]:
+        if batch is None:
+            return {}
+        stmt = select(ResearchDailyMetricModel).where(
+            ResearchDailyMetricModel.batch_id == batch.id,
+            ResearchDailyMetricModel.symbol.in_(symbols),
+            ResearchDailyMetricModel.trade_date == business_date,
+            ResearchDailyMetricModel.available_at <= decision_at,
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {row.symbol: _daily_from_orm(row) for row in rows}
+
+    async def _factor_financials(
+        self,
+        batch: ResearchSyncBatchModel | None,
+        *,
+        symbols: tuple[str, ...],
+        decision_at: datetime,
+    ) -> dict[str, FinancialIndicator]:
+        if batch is None:
+            return {}
+        stmt = (
+            select(ResearchFinancialIndicatorModel)
+            .where(
+                ResearchFinancialIndicatorModel.batch_id == batch.id,
+                ResearchFinancialIndicatorModel.symbol.in_(symbols),
+                ResearchFinancialIndicatorModel.available_at <= decision_at,
+            )
+            .order_by(
+                ResearchFinancialIndicatorModel.symbol,
+                ResearchFinancialIndicatorModel.report_period.desc(),
+                ResearchFinancialIndicatorModel.announcement_date.desc(),
+                ResearchFinancialIndicatorModel.update_flag.desc(),
+            )
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        result: dict[str, FinancialIndicator] = {}
+        for row in rows:
+            result.setdefault(row.symbol, _financial_from_orm(row))
+        return result
+
+    async def _factor_industries(
+        self,
+        batch: ResearchSyncBatchModel | None,
+        *,
+        symbols: tuple[str, ...],
+        business_date: date,
+        decision_at: datetime,
+    ) -> dict[str, IndustryMembership]:
+        if batch is None:
+            return {}
+        stmt = (
+            select(ResearchIndustryMembershipModel)
+            .where(
+                ResearchIndustryMembershipModel.batch_id == batch.id,
+                ResearchIndustryMembershipModel.symbol.in_(symbols),
+                ResearchIndustryMembershipModel.valid_from <= business_date,
+                or_(
+                    ResearchIndustryMembershipModel.valid_to.is_(None),
+                    ResearchIndustryMembershipModel.valid_to >= business_date,
+                ),
+                ResearchIndustryMembershipModel.available_at <= decision_at,
+            )
+            .order_by(
+                ResearchIndustryMembershipModel.symbol,
+                ResearchIndustryMembershipModel.taxonomy,
+                ResearchIndustryMembershipModel.level3_code,
+            )
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        names = await self._classification_lookup(batch.id)
+        result: dict[str, IndustryMembership] = {}
+        for row in rows:
+            result.setdefault(row.symbol, _industry_from_orm(row, names))
+        return result
 
     async def _upsert_industry_classifications(
         self,

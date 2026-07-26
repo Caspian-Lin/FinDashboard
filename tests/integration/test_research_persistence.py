@@ -15,6 +15,7 @@ from finboard_data import (
     DailySecurityMetrics,
     FinancialIndicator,
     IndustryMembership,
+    InstrumentProfile,
     ResearchDataQualityValidator,
 )
 from finboard_persistence import (
@@ -58,6 +59,22 @@ def _daily(
         circulating_market_cap=Decimal("987200000"),
         limit_status=0,
         source=source,
+        observed_at=NOW,
+        available_at=NOW,
+    )
+
+
+def _profile() -> InstrumentProfile:
+    return InstrumentProfile(
+        symbol="000001.SZ",
+        name="平安银行",
+        exchange="SZSE",
+        market="主板",
+        list_status="L",
+        list_date=date(1991, 4, 3),
+        delist_date=None,
+        industry="银行",
+        source="tushare",
         observed_at=NOW,
         available_at=NOW,
     )
@@ -229,9 +246,26 @@ async def test_financial_revisions_and_industry_history_round_trip(
         records=[_industry()],
         expected_symbols={"000001.SZ"},
     )
+    profile_batch = await service.sync_instrument_profiles(
+        source="tushare",
+        dataset_version="profiles-v1",
+        code_version="git-test",
+        parameters={"list_status": "L"},
+        raw_payload={"rows": 1},
+        records=[_profile()],
+        expected_symbols={"000001.SZ"},
+    )
+    daily_batch = await _sync_daily(
+        service,
+        version="daily-factor-v1",
+        records=[_daily()],
+        expected_symbols={"000001.SZ"},
+    )
 
     assert financial_batch.status == SyncBatchStatus.PUBLISHED.value
     assert industry_batch.status == SyncBatchStatus.PUBLISHED.value
+    assert profile_batch.status == SyncBatchStatus.PUBLISHED.value
+    assert daily_batch.status == SyncBatchStatus.PUBLISHED.value
 
     maker = session_factory(_engine)
     async with maker() as session:
@@ -252,6 +286,21 @@ async def test_financial_revisions_and_industry_history_round_trip(
             decision_at=NOW,
             source="tushare",
         )
+        factor_inputs = await repo.load_factor_inputs(
+            symbols=("000001.SZ",),
+            business_date=TRADE_DATE,
+            decision_at=NOW,
+            source="tushare",
+            required_datasets=frozenset(
+                {
+                    "instrument_profiles",
+                    "daily_metrics",
+                    "financial_indicators",
+                    "industry_memberships",
+                }
+            ),
+            dataset_versions={},
+        )
 
     assert [item.eps for item in before_revision] == [Decimal("0.45000000")]
     assert [item.eps for item in after_revision] == [
@@ -262,6 +311,15 @@ async def test_financial_revisions_and_industry_history_round_trip(
     assert memberships[0].level1_code == "460000"
     assert memberships[0].level2_name == "股份制银行Ⅱ"
     assert memberships[0].level3_code == "461101"
+    assert factor_inputs.issues == ()
+    assert factor_inputs.dataset_versions == {
+        "daily_metrics": "daily-factor-v1",
+        "financial_indicators": "finance-v1",
+        "industry_memberships": "industry-v1",
+        "instrument_profiles": "profiles-v1",
+    }
+    assert factor_inputs.records[0].financial is not None
+    assert factor_inputs.records[0].financial.eps == Decimal("0.47000000")
 
 
 @pytest.mark.asyncio

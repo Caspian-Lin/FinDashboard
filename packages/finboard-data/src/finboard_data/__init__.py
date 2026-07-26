@@ -5,6 +5,25 @@ akshare / yfinance / tushare / pyarrow 均为 lazy import,Linux CI 环境无需�
 
 from finboard_data.akshare_provider import AkShareProvider
 from finboard_data.base import HistoricalDataProvider
+from finboard_data.factors import (
+    FACTOR_CATALOG,
+    FACTOR_VERSION,
+    FactorDefinition,
+    FactorFrequency,
+    FactorInputBatch,
+    FactorInputRecord,
+    FactorName,
+    FactorResearchReader,
+    FactorSelectionConfig,
+    FactorSnapshot,
+    FactorSnapshotStatus,
+    FactorSnapshotWriter,
+    FactorUnit,
+    FactorValue,
+    PointInTimeSafety,
+    RankingScope,
+    factor_catalog,
+)
 from finboard_data.quality import (
     QualityIssue,
     QualityReport,
@@ -34,16 +53,32 @@ from finboard_data.tushare_provider import TushareResearchDataProvider
 from finboard_data.yfinance_provider import YFinanceProvider
 
 __all__ = [
+    "FACTOR_CATALOG",
+    "FACTOR_VERSION",
     "AkShareProvider",
     "DailySecurityMetrics",
+    "FactorDefinition",
+    "FactorFrequency",
+    "FactorInputBatch",
+    "FactorInputRecord",
+    "FactorName",
+    "FactorResearchReader",
+    "FactorSelectionConfig",
+    "FactorSnapshot",
+    "FactorSnapshotStatus",
+    "FactorSnapshotWriter",
+    "FactorUnit",
+    "FactorValue",
     "FinancialIndicator",
     "HistoricalDataProvider",
     "IndustryMembership",
     "InstrumentProfile",
+    "PointInTimeSafety",
     "QualityIssue",
     "QualityReport",
     "QualitySeverity",
     "QualityStatus",
+    "RankingScope",
     "ResearchDataConfigurationError",
     "ResearchDataContractError",
     "ResearchDataDependencyError",
@@ -55,6 +90,7 @@ __all__ = [
     "SymbolPoolConfig",
     "TushareResearchDataProvider",
     "YFinanceProvider",
+    "factor_catalog",
     "load_symbol_pool",
     "save_symbol_pool",
 ]

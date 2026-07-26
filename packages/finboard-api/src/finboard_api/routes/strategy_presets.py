@@ -50,7 +50,12 @@ async def create_preset(
     await _ensure_name_available(repo, name)
     params = validate_strategy_params_for_api(req.strategy, req.params)
     try:
-        row = await repo.create(name=name, strategy=req.strategy, params=params)
+        row = await repo.create(
+            name=name,
+            strategy=req.strategy,
+            params=params,
+            selection=req.selection.model_dump(mode="json"),
+        )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -91,6 +96,9 @@ async def update_preset(
     name = _clean_name(req.name) if req.name is not None else current.name
     strategy = req.strategy if req.strategy is not None else current.strategy
     raw_params = req.params if req.params is not None else current.params
+    selection = (
+        req.selection.model_dump(mode="json") if req.selection is not None else current.selection
+    )
     await _ensure_name_available(repo, name, exclude_id=preset_id)
     params = validate_strategy_params_for_api(strategy, raw_params)
 
@@ -100,6 +108,7 @@ async def update_preset(
             name=name,
             strategy=strategy,
             params=params,
+            selection=selection,
         )
         assert row is not None
         await session.commit()

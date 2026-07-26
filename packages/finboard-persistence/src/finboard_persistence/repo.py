@@ -785,8 +785,14 @@ class StrategyPresetRepository:
         name: str,
         strategy: str,
         params: dict[str, Any],
+        selection: dict[str, Any] | None = None,
     ) -> StrategyPresetModel:
-        row = StrategyPresetModel(name=name, strategy=strategy, params=params)
+        row = StrategyPresetModel(
+            name=name,
+            strategy=strategy,
+            params=params,
+            selection=selection or {},
+        )
         self._session.add(row)
         await self._session.flush()
         return row
@@ -813,6 +819,7 @@ class StrategyPresetRepository:
         name: str,
         strategy: str,
         params: dict[str, Any],
+        selection: dict[str, Any] | None = None,
     ) -> StrategyPresetModel | None:
         row = await self.get(preset_id)
         if row is None:
@@ -820,6 +827,8 @@ class StrategyPresetRepository:
         row.name = name
         row.strategy = strategy
         row.params = params
+        if selection is not None:
+            row.selection = selection
         row.updated_at = datetime.now(UTC)
         await self._session.flush()
         return row

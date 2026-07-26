@@ -355,10 +355,70 @@ export interface StrategyInfo {
 
 export type StrategyParamValue = string | number | boolean | null;
 
+export interface FactorSelectionInput {
+  enabled: boolean;
+  source: string;
+  factor_version: string;
+  max_symbols: number;
+  ranking_factor:
+    | "market_cap"
+    | "pb"
+    | "turnover_rate"
+    | "momentum"
+    | "roe"
+    | "gross_profit_margin"
+    | "revenue_yoy";
+  ranking_scope: "global" | "industry";
+  ranking_ascending: boolean;
+  max_per_industry: number | null;
+  min_listing_days: number;
+  exclude_st: boolean;
+  exclude_suspended: boolean;
+  momentum_lookback: number;
+  min_market_cap: string | null;
+  max_market_cap: string | null;
+  min_pb: string | null;
+  max_pb: string | null;
+  min_turnover_rate: string | null;
+  max_turnover_rate: string | null;
+  min_momentum: string | null;
+  min_roe: string | null;
+  min_gross_profit_margin: string | null;
+  min_revenue_yoy: string | null;
+  dataset_versions: Record<string, string>;
+}
+
+export const DEFAULT_FACTOR_SELECTION: FactorSelectionInput = {
+  enabled: false,
+  source: "tushare",
+  factor_version: "v1",
+  max_symbols: 20,
+  ranking_factor: "market_cap",
+  ranking_scope: "global",
+  ranking_ascending: false,
+  max_per_industry: null,
+  min_listing_days: 60,
+  exclude_st: true,
+  exclude_suspended: true,
+  momentum_lookback: 20,
+  min_market_cap: null,
+  max_market_cap: null,
+  min_pb: null,
+  max_pb: null,
+  min_turnover_rate: null,
+  max_turnover_rate: null,
+  min_momentum: null,
+  min_roe: null,
+  min_gross_profit_margin: null,
+  min_revenue_yoy: null,
+  dataset_versions: {},
+};
+
 export interface StrategyPresetInput {
   name: string;
   strategy: string;
   params: Record<string, StrategyParamValue>;
+  selection: FactorSelectionInput;
 }
 
 export interface StrategyPreset extends StrategyPresetInput {
@@ -375,6 +435,7 @@ export interface BacktestRunRequest {
   capital: string;
   adjust?: string;
   params: Record<string, StrategyParamValue>;
+  selection: FactorSelectionInput;
   commission_rate?: string;
   commission_min?: string;
   stamp_tax_rate?: string;
@@ -418,6 +479,22 @@ export interface BacktestResult {
   fills: BacktestFill[];
   summary: string;
   run_id: number | null;
+  selection_snapshots: FactorSnapshot[];
+  dataset_versions: Record<string, string[]>;
+  factor_version: string | null;
+}
+
+export interface FactorSnapshot {
+  id: number | null;
+  decision_at: string;
+  business_date: string;
+  effective_date: string;
+  selected_symbols: string[];
+  status: "published" | "skipped";
+  skip_reason: string | null;
+  dataset_versions: Record<string, string>;
+  factor_version: string;
+  checksum: string;
 }
 
 export interface BacktestHistoryItem {
@@ -429,6 +506,7 @@ export interface BacktestHistoryItem {
   capital: string;
   adjust: string;
   metrics: Partial<BacktestMetrics>;
+  factor_version: string | null;
   created_at: string;
 }
 
@@ -441,10 +519,14 @@ export interface BacktestHistoryDetail {
   capital: string;
   adjust: string;
   params: Record<string, StrategyParamValue>;
+  selection: FactorSelectionInput;
   metrics: BacktestMetrics;
   equity_curve: EquityPoint[];
   fills: BacktestFill[];
   summary: string;
+  selection_snapshots: FactorSnapshot[];
+  dataset_versions: Record<string, string[]>;
+  factor_version: string | null;
   created_at: string;
 }
 

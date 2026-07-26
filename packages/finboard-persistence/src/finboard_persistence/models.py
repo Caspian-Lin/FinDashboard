@@ -28,6 +28,9 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy import (
+    text as sql_text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from finboard_persistence.base import Base, IdMixin
@@ -272,6 +275,16 @@ class BacktestRunModel(Base, IdMixin):
     capital: Mapped[Decimal] = mapped_column(_numeric())
     adjust: Mapped[str] = mapped_column(String(8), default="qfq")
     params: Mapped[dict] = mapped_column(JSON)  # type: ignore[type-arg]
+    selection: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    dataset_versions: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    factor_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    selection_snapshots: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
     metrics: Mapped[dict] = mapped_column(JSON)  # type: ignore[type-arg]
     equity_curve: Mapped[list] = mapped_column(JSON)  # type: ignore[type-arg]
     fills: Mapped[list] = mapped_column(JSON)  # type: ignore[type-arg]
@@ -289,6 +302,9 @@ class StrategyPresetModel(Base, IdMixin):
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     strategy: Mapped[str] = mapped_column(String(64), index=True)
     params: Mapped[dict] = mapped_column(JSON)  # type: ignore[type-arg]
+    selection: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -582,4 +598,74 @@ class ResearchIndustryMembershipModel(Base, IdMixin):
             "valid_to",
             "symbol",
         ),
+    )
+
+
+class FactorSnapshotModel(Base, IdMixin):
+    """冻结的 T 日决策、T+1 生效因子快照。"""
+
+    __tablename__ = "factor_snapshots"
+
+    decision_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    business_date: Mapped[date] = mapped_column(Date)
+    effective_date: Mapped[date] = mapped_column(Date, index=True)
+    source: Mapped[str] = mapped_column(String(32), index=True)
+    dataset_versions: Mapped[dict[str, str]] = mapped_column(JSON)
+    factor_version: Mapped[str] = mapped_column(String(32))
+    static_universe: Mapped[list[str]] = mapped_column(JSON)
+    selected_symbols: Mapped[list[str]] = mapped_column(JSON)
+    config: Mapped[dict[str, object]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checksum: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_factor_snapshot_decision_effective",
+            "decision_at",
+            "effective_date",
+        ),
+        Index(
+            "ix_factor_snapshot_effective_decision",
+            "effective_date",
+            "decision_at",
+        ),
+    )
+
+
+class FactorValueModel(Base, IdMixin):
+    """快照内的规范化因子值与全市场/行业排名。"""
+
+    __tablename__ = "factor_values"
+
+    snapshot_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("factor_snapshots.id", ondelete="CASCADE"),
+        index=True,
+    )
+    symbol: Mapped[str] = mapped_column(String(20))
+    factor_name: Mapped[str] = mapped_column(String(64))
+    factor_version: Mapped[str] = mapped_column(String(32))
+    value: Mapped[Decimal] = mapped_column(_research_numeric())
+    global_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    industry_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    industry_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id",
+            "symbol",
+            "factor_name",
+            name="uq_factor_value_snapshot_symbol_factor",
+        ),
+        Index("ix_factor_value_symbol_factor", "symbol", "factor_name"),
+        Index("ix_factor_value_factor_symbol", "factor_name", "symbol"),
     )
