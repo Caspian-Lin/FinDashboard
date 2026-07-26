@@ -43,6 +43,48 @@ class TestDataRoutes:
         assert resp.status_code == 200
         assert resp.json() == []
 
+    def test_list_cache_status_page_empty(self, client: TestClient) -> None:
+        """分页状态接口应返回总数,避免前端请求全部缓存详情。"""
+        with patch("finboard_api.routes.data.Path") as mock_path_cls:
+            mock_path_cls.return_value.glob.return_value = []
+            resp = client.get("/api/data/status-page")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"items": [], "total": 0, "limit": 200, "offset": 0}
+
+    def test_fetch_all_updates_cache_without_materializing_bars(
+        self, client: TestClient
+    ) -> None:
+        """旧 fetch-all 入口也必须走仅返回 bool 的缓存更新路径。"""
+        from finboard_data import SymbolEntry, SymbolPoolConfig
+        from finboard_data.cache import CacheMetadata
+
+        config = SymbolPoolConfig(symbols=[SymbolEntry(code="510300.SH")])
+        provider = AsyncMock()
+        provider.update_cache_batch.return_value = {"510300.SH": True}
+        metadata = CacheMetadata(
+            bar_count=2,
+            first_date=date(2024, 1, 2),
+            last_date=date(2024, 1, 3),
+            file_size=1024,
+        )
+
+        with (
+            patch("finboard_data.load_symbol_pool", return_value=config),
+            patch("finboard_api.routes.data._get_provider", return_value=provider),
+            patch(
+                "finboard_data.cache.ParquetCache.metadata_for",
+                new=AsyncMock(return_value=metadata),
+            ),
+        ):
+            resp = client.post("/api/data/fetch-all")
+
+        assert resp.status_code == 200
+        assert resp.json()["success"] == 1
+        assert resp.json()["details"][0]["bar_count"] == 2
+        provider.update_cache_batch.assert_awaited_once()
+        provider.fetch_bars_batch.assert_not_awaited()
+
     def test_get_symbol_pool_empty(self, client: TestClient) -> None:
         """标的池不存在时返回默认配置。"""
         from finboard_data.symbols import SymbolPoolConfig

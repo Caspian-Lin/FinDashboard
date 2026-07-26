@@ -462,7 +462,11 @@ async def _fetch_all_data(*, config_file: str) -> None:
 
     end = date.today()
     start = end - timedelta(days=config.fetch_lookback_days)
-    period = BarPeriod(config.fetch_period)
+    period = (
+        BarPeriod[config.fetch_period]
+        if config.fetch_period in BarPeriod.__members__
+        else BarPeriod(config.fetch_period)
+    )
     provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider()
@@ -477,7 +481,7 @@ async def _fetch_all_data(*, config_file: str) -> None:
     def on_progress(code: str, done: int, total: int) -> None:
         typer.echo(f"  [{done}/{total}] {code}")
 
-    results = await provider.fetch_bars_batch(
+    results = await provider.update_cache_batch(
         sym_objs,
         period,
         start,
@@ -486,7 +490,7 @@ async def _fetch_all_data(*, config_file: str) -> None:
         on_progress=on_progress,
     )
 
-    success = sum(1 for v in results.values() if v)
+    success = sum(results.values())
     typer.echo(f"\n完成: {success}/{len(sym_objs)} 成功, {len(sym_objs) - success} 失败")
 
 
@@ -522,18 +526,11 @@ async def _data_status(*, symbol: str | None, cache_dir: str) -> None:
         if len(parts) != 3:
             continue
         code, period_str, adjust = parts
-        from finboard_shared.models import Symbol as Sym
-        from finboard_shared.types import Market
-
-        bars = await cache.read(
-            Sym(code=code, market=Market.A_SHARE),
-            BarPeriod(period_str),
-            adjust,
-        )
-        if bars:
+        metadata = await cache.metadata(f)
+        if metadata.bar_count:
             typer.echo(
-                f"{code:<15} {period_str:<6} {adjust:<6} {len(bars):>8}  "
-                f"{bars[0].timestamp.date()} ~ {bars[-1].timestamp.date()}"
+                f"{code:<15} {period_str:<6} {adjust:<6} {metadata.bar_count:>8}  "
+                f"{metadata.first_date} ~ {metadata.last_date}"
             )
         else:
             typer.echo(f"{code:<15} {period_str:<6} {adjust:<6} {'(空)':>8}")
@@ -661,8 +658,7 @@ async def _bulk_download(
     def on_progress(code: str, d: int, t: int) -> None:
         nonlocal done, success
         done = d
-        if d % 100 == 0 or d == t:
-            typer.echo(f"  进度: {d}/{t} ({d * 100 // t}%)")
+        typer.echo(f"\r  进度: {d}/{t} ({d * 100 // t}%) {code:<16}", nl=False)
 
     results = await provider.update_cache_batch(
         sym_objs,

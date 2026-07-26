@@ -184,6 +184,13 @@ class DataStatusOut(BaseSchema):
     last_close: Decimal | None = None
 
 
+class DataStatusListOut(BaseSchema):
+    items: list[DataStatusOut]
+    total: int
+    limit: int
+    offset: int
+
+
 class FetchResultOut(BaseSchema):
     symbol: str
     bar_count: int
@@ -252,6 +259,8 @@ class BulkDownloadStatusOut(BaseSchema):
     total: int = 0
     success: int = 0
     failed: int = 0
+    current_symbol: str | None = None
+    phase: str | None = None
     error: str | None = None
 
 

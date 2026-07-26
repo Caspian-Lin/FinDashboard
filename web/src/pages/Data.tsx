@@ -2,6 +2,14 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 
+const BULK_PHASE_LABELS: Record<string, string> = {
+  starting: "准备任务",
+  checking_cache: "检查缓存",
+  fetching: "请求行情",
+  reading_cache: "读取缓存",
+  writing_cache: "写入缓存",
+};
+
 export default function Data() {
   const queryClient = useQueryClient();
   const [fetchSymbol, setFetchSymbol] = useState("510300.SH");
@@ -20,7 +28,7 @@ export default function Data() {
 
   const { data: status } = useQuery({
     queryKey: ["data-status"],
-    queryFn: api.getDataStatus,
+    queryFn: () => api.getDataStatusPage(),
   });
 
   const { data: instruments } = useQuery({
@@ -42,8 +50,7 @@ export default function Data() {
   const { data: bulkStatus } = useQuery({
     queryKey: ["bulk-download-status"],
     queryFn: api.getBulkDownloadStatus,
-    refetchInterval: (query) =>
-      query.state.data?.status === "running" ? 2000 : false,
+    refetchInterval: 2000,
   });
 
   const sync = useMutation({
@@ -70,12 +77,14 @@ export default function Data() {
         instrument_type: dlType || undefined,
         start: dlStart,
       }),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["bulk-download-status"] }),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["bulk-download-status"], data);
+    },
   });
 
   const totalInstruments = instruments?.total ?? 0;
-  const isDownloading = bulkStatus?.status === "running";
+  const isDownloading = startDownload.isPending || bulkStatus?.status === "running";
+  const phaseLabel = BULK_PHASE_LABELS[bulkStatus?.phase ?? ""];
 
   return (
     <div>
@@ -84,7 +93,7 @@ export default function Data() {
       {/* Stats row */}
       <div className="grid grid-cols-4 gap-4 mb-6">
         <StatCard label="数据库标的数" value={String(totalInstruments)} />
-        <StatCard label="缓存标的数" value={String(status?.length ?? 0)} />
+        <StatCard label="缓存标的数" value={String(status?.total ?? 0)} />
         <StatCard
           label="A股"
           value={String(
@@ -244,12 +253,19 @@ export default function Data() {
 
         {/* Progress bar */}
         {isDownloading && bulkStatus && (
-          <div className="mt-4">
+          <div className="mt-4" aria-live="polite">
             <div className="flex justify-between text-sm text-gray-600 mb-1">
               <span>进度: {bulkStatus.done} / {bulkStatus.total}</span>
               <span>{bulkStatus.total > 0 ? `${(bulkStatus.done * 100 / bulkStatus.total).toFixed(1)}%` : ""}</span>
             </div>
-            <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+            <div
+              className="w-full bg-gray-200 rounded-full h-3 overflow-hidden"
+              role="progressbar"
+              aria-label="批量行情拉取进度"
+              aria-valuemin={0}
+              aria-valuemax={bulkStatus.total}
+              aria-valuenow={bulkStatus.done}
+            >
               <div
                 className="bg-green-500 h-full rounded-full transition-all duration-500"
                 style={{
@@ -257,6 +273,12 @@ export default function Data() {
                 }}
               />
             </div>
+            {(phaseLabel || bulkStatus.current_symbol) && (
+              <p className="mt-2 text-xs text-gray-500 font-mono">
+                {phaseLabel ?? "处理中"}
+                {bulkStatus.current_symbol ? ` · ${bulkStatus.current_symbol}` : ""}
+              </p>
+            )}
           </div>
         )}
 
@@ -349,9 +371,9 @@ export default function Data() {
       {/* Cache status table */}
       <div className="bg-white rounded-lg shadow">
         <div className="px-5 py-3 border-b">
-          <h2 className="text-lg font-semibold">已缓存数据 ({status?.length ?? 0})</h2>
+          <h2 className="text-lg font-semibold">已缓存数据 ({status?.total ?? 0})</h2>
         </div>
-        {!status || status.length === 0 ? (
+        {!status || status.items.length === 0 ? (
           <div className="p-8 text-center text-gray-400">缓存为空</div>
         ) : (
           <table className="w-full text-sm">
@@ -364,7 +386,7 @@ export default function Data() {
               </tr>
             </thead>
             <tbody>
-              {status.map((s) => (
+              {status.items.map((s) => (
                 <tr key={`${s.symbol}-${s.period}-${s.adjust}`} className="border-t">
                   <td className="px-4 py-2 font-mono">{s.symbol}</td>
                   <td className="px-4 py-2 text-right">{s.bar_count}</td>
@@ -378,6 +400,11 @@ export default function Data() {
               ))}
             </tbody>
           </table>
+        )}
+        {status && status.total > status.items.length && (
+          <p className="px-5 py-3 border-t text-xs text-gray-500">
+            当前显示前 {status.items.length} 条，共 {status.total} 条缓存记录
+          </p>
         )}
       </div>
     </div>

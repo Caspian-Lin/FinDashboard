@@ -14,6 +14,7 @@ import asyncio
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 
 import structlog
@@ -149,11 +150,14 @@ class AkShareProvider:
         end: date,
         *,
         adjust: str = "qfq",
+        on_status: Callable[[str], None] | None = None,
     ) -> bool:
         """仅更新本地缓存;完整缓存只读 footer,不解码历史行情。"""
         if self._cache is None:
             return bool(await self.fetch_bars(symbol, period, start, end, adjust=adjust))
 
+        if on_status is not None:
+            on_status("checking_cache")
         metadata = await self._cache.metadata_for(symbol, period, adjust)
         expected_end = expected_last_bar_date(end)
         if (
@@ -167,6 +171,8 @@ class AkShareProvider:
         fetch_start = start
         if metadata is not None and metadata.last_date is not None:
             fetch_start = max(start, metadata.last_date - timedelta(days=7))
+        if on_status is not None:
+            on_status("fetching")
         fresh = await self._fetch_from_akshare(symbol, period, fetch_start, end, adjust)
         if not fresh:
             return metadata is not None and metadata.bar_count > 0
@@ -177,7 +183,11 @@ class AkShareProvider:
         ):
             return True
 
+        if on_status is not None:
+            on_status("reading_cache")
         existing = await self._cache.read(symbol, period, adjust) if metadata is not None else []
+        if on_status is not None:
+            on_status("writing_cache")
         await self._cache.merge(
             symbol,
             period,
@@ -204,6 +214,10 @@ class AkShareProvider:
         :returns: ``{symbol_code: [Bar, ...]}``;拉取失败的标的值为空列表
         """
         total = len(symbols)
+        if total > 200:
+            raise ValueError(
+                "fetch_bars_batch 最多支持 200 个标的;全市场落盘请使用 update_cache_batch"
+            )
         if total == 0:
             return {}
         results: dict[str, list[Bar]] = {}
@@ -256,6 +270,7 @@ class AkShareProvider:
         *,
         adjust: str = "qfq",
         on_progress: Callable[[str, int, int], None] | None = None,
+        on_status: Callable[[str, str], None] | None = None,
     ) -> dict[str, bool]:
         """有界并发批量更新缓存,不在内存中保留历史 bars。"""
         total = len(symbols)
@@ -277,7 +292,18 @@ class AkShareProvider:
                 except asyncio.QueueEmpty:
                     return
                 try:
-                    ok = await self.update_cache(sym, period, start, end, adjust=adjust)
+                    ok = await self.update_cache(
+                        sym,
+                        period,
+                        start,
+                        end,
+                        adjust=adjust,
+                        on_status=(
+                            partial(on_status, sym.code)
+                            if on_status is not None
+                            else None
+                        ),
+                    )
                 except Exception:
                     logger.exception("akshare.cache_update_failed", symbol=sym.code)
                     ok = False
