@@ -68,6 +68,20 @@ uv pip install -e ".[akshare,yfinance,tushare,cache]"
 这些约束用于防止回测未来函数。Provider 只读取外部研究数据,不会访问券商、
 产生订单、修改持仓或自动注入实时策略。
 
+### 质量契约
+
+`ResearchDataQualityValidator` 是无数据库、无网络访问的发布前质量门。同步方需
+提供期望来源,日指标还需提供期望交易日;全市场/股票池任务应同时提供
+`expected_symbols` 来检查覆盖率。
+
+- `passed`: 数据可进入规范化存储并发布。
+- `partial`: 只存在覆盖范围缺失/越界,保留批次用于补拉但不发布。
+- `failed`: 空集、重复业务键、来源混入、无时区时间、陈旧数据、日期矛盾或数值
+  范围异常,整批拒绝。
+
+质量门不会自动修补、填充或删除坏行。原始响应归档、幂等重试和发布状态由
+`finboard-persistence` 的 `ResearchDataSyncService` 管理。
+
 ### Tushare Provider
 
 安装可选依赖并通过环境变量注入 token:

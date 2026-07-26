@@ -16,10 +16,12 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -33,6 +35,11 @@ from finboard_persistence.base import Base, IdMixin
 
 def _numeric() -> Any:
     return Numeric(20, 4, decimal_return_scale=4)
+
+
+def _research_numeric() -> Any:
+    """研究数据保留换算后的 8 位小数与更大的市值范围。"""
+    return Numeric(28, 8, decimal_return_scale=8)
 
 
 class AccountModel(Base, IdMixin):
@@ -287,4 +294,292 @@ class StrategyPresetModel(Base, IdMixin):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ResearchSyncBatchModel(Base, IdMixin):
+    """一次研究数据摄取、质量检查和发布批次。"""
+
+    __tablename__ = "research_sync_batches"
+
+    dataset: Mapped[str] = mapped_column(String(32), index=True)
+    source: Mapped[str] = mapped_column(String(32), index=True)
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    code_version: Mapped[str] = mapped_column(String(64))
+    parameters: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    raw_payload: Mapped[object | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    quality_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    expected_rows: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    received_rows: Mapped[int] = mapped_column(Integer, default=0)
+    accepted_rows: Mapped[int] = mapped_column(Integer, default=0)
+    rejected_rows: Mapped[int] = mapped_column(Integer, default=0)
+    quality_report: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset",
+            "source",
+            "dataset_version",
+            name="uq_research_batch_dataset_source_version",
+        ),
+        Index(
+            "ix_research_batch_lookup",
+            "dataset",
+            "source",
+            "status",
+            "published_at",
+        ),
+    )
+
+
+class ResearchInstrumentProfileModel(Base, IdMixin):
+    """带来源和版本的标的档案快照。"""
+
+    __tablename__ = "research_instrument_profiles"
+
+    batch_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("research_sync_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(32))
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(20))
+    name: Mapped[str] = mapped_column(String(100))
+    exchange: Mapped[str] = mapped_column(String(16))
+    market: Mapped[str] = mapped_column(String(32))
+    list_status: Mapped[str] = mapped_column(String(8))
+    list_date: Mapped[date] = mapped_column(Date)
+    delist_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    industry: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "symbol",
+            name="uq_research_profile_source_version_symbol",
+        ),
+        Index("ix_research_profile_symbol_date", "symbol", "list_date"),
+        Index("ix_research_profile_date_symbol", "list_date", "symbol"),
+    )
+
+
+class ResearchDailyMetricModel(Base, IdMixin):
+    """版本化的单日证券估值、流动性、股本和市值指标。"""
+
+    __tablename__ = "research_daily_metrics"
+
+    batch_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("research_sync_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(32))
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(20))
+    trade_date: Mapped[date] = mapped_column(Date)
+    close: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    turnover_rate: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    turnover_rate_free: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    volume_ratio: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    pe: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    pe_ttm: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    pb: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    ps: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    ps_ttm: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    dividend_yield: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    dividend_yield_ttm: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    total_shares: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    float_shares: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    free_shares: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    total_market_cap: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    circulating_market_cap: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    limit_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "symbol",
+            "trade_date",
+            name="uq_research_daily_source_version_symbol_date",
+        ),
+        Index("ix_research_daily_symbol_date", "symbol", "trade_date"),
+        Index("ix_research_daily_date_symbol", "trade_date", "symbol"),
+    )
+
+
+class ResearchFinancialIndicatorModel(Base, IdMixin):
+    """财务指标公告版本;同一报告期的修订不会相互覆盖。"""
+
+    __tablename__ = "research_financial_indicators"
+
+    batch_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("research_sync_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(32))
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(20))
+    announcement_date: Mapped[date] = mapped_column(Date)
+    report_period: Mapped[date] = mapped_column(Date)
+    update_flag: Mapped[str] = mapped_column(String(16), default="")
+    eps: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    diluted_eps: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    book_value_per_share: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    operating_cash_flow_per_share: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    return_on_equity: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    weighted_return_on_equity: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    gross_profit_margin: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    net_profit_margin: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    debt_to_assets: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    revenue_yoy: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    net_profit_yoy: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    operating_cash_flow_yoy: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "symbol",
+            "report_period",
+            "announcement_date",
+            "update_flag",
+            name="uq_research_financial_revision",
+        ),
+        Index(
+            "ix_research_financial_symbol_period",
+            "symbol",
+            "report_period",
+        ),
+        Index(
+            "ix_research_financial_period_symbol",
+            "report_period",
+            "symbol",
+        ),
+    )
+
+
+class ResearchIndustryClassificationModel(Base, IdMixin):
+    """一个版本内的行业分类字典。"""
+
+    __tablename__ = "research_industry_classifications"
+
+    batch_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("research_sync_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(32))
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    taxonomy: Mapped[str] = mapped_column(String(32))
+    level: Mapped[int] = mapped_column(Integer)
+    industry_code: Mapped[str] = mapped_column(String(32))
+    industry_name: Mapped[str] = mapped_column(String(100))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "taxonomy",
+            "level",
+            "industry_code",
+            name="uq_research_industry_classification",
+        ),
+        Index(
+            "ix_research_industry_taxonomy_level",
+            "taxonomy",
+            "level",
+            "industry_code",
+        ),
+    )
+
+
+class ResearchIndustryMembershipModel(Base, IdMixin):
+    """版本化的行业成员历史区间。"""
+
+    __tablename__ = "research_industry_memberships"
+
+    batch_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("research_sync_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(32))
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    taxonomy: Mapped[str] = mapped_column(String(32))
+    symbol: Mapped[str] = mapped_column(String(20))
+    security_name: Mapped[str] = mapped_column(String(100))
+    level1_code: Mapped[str] = mapped_column(String(32))
+    level2_code: Mapped[str] = mapped_column(String(32))
+    level3_code: Mapped[str] = mapped_column(String(32))
+    valid_from: Mapped[date] = mapped_column(Date)
+    valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "taxonomy",
+            "symbol",
+            "level3_code",
+            "valid_from",
+            name="uq_research_industry_membership",
+        ),
+        Index(
+            "ix_research_membership_symbol_valid",
+            "symbol",
+            "valid_from",
+            "valid_to",
+        ),
+        Index(
+            "ix_research_membership_valid_symbol",
+            "valid_from",
+            "valid_to",
+            "symbol",
+        ),
     )
