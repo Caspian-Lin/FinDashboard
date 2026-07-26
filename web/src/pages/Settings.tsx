@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api, type SchedulerConfig } from "../lib/api";
+import { INFO_HINTS } from "../lib/infoHints";
 
 export default function Settings() {
   const queryClient = useQueryClient();
@@ -42,8 +44,11 @@ export default function Settings() {
       {/* Data Source */}
       <div className="bg-white rounded-lg shadow p-5 mb-6">
         <h2 className="text-lg font-semibold mb-3">数据源</h2>
-        <div className="flex items-center gap-4">
-          <label className="text-sm text-gray-600">当前数据源</label>
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-1 text-sm text-gray-600">
+            <span>当前数据源</span>
+            <InfoHint content={INFO_HINTS.settings.dataProvider} />
+          </div>
           <span
             className={`px-3 py-1 rounded text-sm font-medium ${
               form.data_provider === "yfinance"
@@ -84,9 +89,16 @@ export default function Settings() {
               <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
             </label>
           </div>
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-gray-600">触发时间</label>
+          <div className="flex flex-wrap items-center gap-3">
+            <HintLabel
+              htmlFor="settings-sync-time"
+              hint={INFO_HINTS.settings.syncTime}
+              className=""
+            >
+              触发时间
+            </HintLabel>
             <input
+              id="settings-sync-time"
               type="time"
               value={form.sync_time}
               onChange={(e) => setForm({ ...form, sync_time: e.target.value })}
@@ -118,10 +130,16 @@ export default function Settings() {
             </label>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             <div>
-              <label className="block text-sm text-gray-600 mb-1">触发时间</label>
+              <HintLabel
+                htmlFor="settings-download-time"
+                hint={INFO_HINTS.settings.downloadTime}
+              >
+                触发时间
+              </HintLabel>
               <input
+                id="settings-download-time"
                 type="time"
                 value={form.download_time}
                 onChange={(e) =>
@@ -131,10 +149,14 @@ export default function Settings() {
               />
             </div>
             <div>
-              <label className="block text-sm text-gray-600 mb-1">
+              <HintLabel
+                htmlFor="settings-lookback-days"
+                hint={INFO_HINTS.settings.lookbackDays}
+              >
                 回溯天数
-              </label>
+              </HintLabel>
               <input
+                id="settings-lookback-days"
                 type="number"
                 value={form.download_lookback_days}
                 onChange={(e) =>
@@ -153,7 +175,10 @@ export default function Settings() {
           </div>
 
           <div className="mt-3">
-            <label className="block text-sm text-gray-600 mb-1">拉取市场</label>
+            <div className="mb-1 flex items-center gap-1 text-sm text-gray-600">
+              <span>拉取市场</span>
+              <InfoHint content={INFO_HINTS.settings.downloadMarkets} />
+            </div>
             <div className="flex gap-4">
               {marketOptions.map((opt) => (
                 <label
@@ -177,7 +202,10 @@ export default function Settings() {
           </div>
 
           <div className="mt-3">
-            <label className="block text-sm text-gray-600 mb-1">拉取类型</label>
+            <div className="mb-1 flex items-center gap-1 text-sm text-gray-600">
+              <span>拉取类型</span>
+              <InfoHint content={INFO_HINTS.settings.downloadTypes} />
+            </div>
             <div className="flex gap-4">
               {typeOptions.map((opt) => (
                 <label

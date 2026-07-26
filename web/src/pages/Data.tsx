@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
+import { INFO_HINTS } from "../lib/infoHints";
 
 const BULK_PHASE_LABELS: Record<string, string> = {
   starting: "准备任务",
@@ -91,7 +93,7 @@ export default function Data() {
       <h1 className="text-2xl font-bold mb-6">行情数据</h1>
 
       {/* Stats row */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="mb-6 grid grid-cols-2 gap-4 xl:grid-cols-4">
         <StatCard label="数据库标的数" value={String(totalInstruments)} />
         <StatCard label="缓存标的数" value={String(status?.total ?? 0)} />
         <StatCard
@@ -112,7 +114,7 @@ export default function Data() {
       </div>
 
       {/* Sync + Single fetch */}
-      <div className="grid grid-cols-2 gap-6 mb-6">
+      <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
         {/* Universe Sync */}
         <div className="bg-white rounded-lg shadow p-5">
           <div className="flex items-center justify-between mb-3">
@@ -148,8 +150,11 @@ export default function Data() {
           <h2 className="text-lg font-semibold mb-3">单标的拉取</h2>
           <div className="space-y-3">
             <div>
-              <label className="block text-sm text-gray-600 mb-1">标的</label>
+              <HintLabel htmlFor="data-symbol" hint={INFO_HINTS.data.symbol}>
+                标的
+              </HintLabel>
               <input
+                id="data-symbol"
                 value={fetchSymbol}
                 onChange={(e) => setFetchSymbol(e.target.value)}
                 className="w-full border rounded px-3 py-2 text-sm font-mono"
@@ -158,8 +163,11 @@ export default function Data() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-sm text-gray-600 mb-1">开始</label>
+                <HintLabel htmlFor="data-fetch-start" hint={INFO_HINTS.data.dateRange}>
+                  开始
+                </HintLabel>
                 <input
+                  id="data-fetch-start"
                   type="date"
                   value={fetchStart}
                   onChange={(e) => setFetchStart(e.target.value)}
@@ -167,8 +175,11 @@ export default function Data() {
                 />
               </div>
               <div>
-                <label className="block text-sm text-gray-600 mb-1">结束</label>
+                <HintLabel htmlFor="data-fetch-end" hint={INFO_HINTS.data.dateRange}>
+                  结束
+                </HintLabel>
                 <input
+                  id="data-fetch-end"
                   type="date"
                   value={fetchEnd}
                   onChange={(e) => setFetchEnd(e.target.value)}
@@ -202,10 +213,13 @@ export default function Data() {
       {/* Bulk Download */}
       <div className="bg-white rounded-lg shadow p-5 mb-6">
         <h2 className="text-lg font-semibold mb-4">批量拉取</h2>
-        <div className="grid grid-cols-4 gap-4 mb-4">
+        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <div>
-            <label className="block text-sm text-gray-600 mb-1">市场</label>
+            <HintLabel htmlFor="data-bulk-market" hint={INFO_HINTS.data.market}>
+              市场
+            </HintLabel>
             <select
+              id="data-bulk-market"
               value={dlMarket}
               onChange={(e) => setDlMarket(e.target.value)}
               disabled={isDownloading}
@@ -217,8 +231,14 @@ export default function Data() {
             </select>
           </div>
           <div>
-            <label className="block text-sm text-gray-600 mb-1">类型</label>
+            <HintLabel
+              htmlFor="data-bulk-type"
+              hint={INFO_HINTS.data.instrumentType}
+            >
+              类型
+            </HintLabel>
             <select
+              id="data-bulk-type"
               value={dlType}
               onChange={(e) => setDlType(e.target.value)}
               disabled={isDownloading}
@@ -231,8 +251,14 @@ export default function Data() {
             </select>
           </div>
           <div>
-            <label className="block text-sm text-gray-600 mb-1">起始日期</label>
+            <HintLabel
+              htmlFor="data-bulk-start"
+              hint={INFO_HINTS.data.bulkStartDate}
+            >
+              起始日期
+            </HintLabel>
             <input
+              id="data-bulk-start"
               type="date"
               value={dlStart}
               onChange={(e) => setDlStart(e.target.value)}
@@ -370,8 +396,9 @@ export default function Data() {
 
       {/* Cache status table */}
       <div className="bg-white rounded-lg shadow">
-        <div className="px-5 py-3 border-b">
+        <div className="flex items-center gap-1 border-b px-5 py-3">
           <h2 className="text-lg font-semibold">已缓存数据 ({status?.total ?? 0})</h2>
+          <InfoHint content={INFO_HINTS.data.cachedData} />
         </div>
         {!status || status.items.length === 0 ? (
           <div className="p-8 text-center text-gray-400">缓存为空</div>
