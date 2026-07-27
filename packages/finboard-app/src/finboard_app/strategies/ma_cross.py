@@ -10,6 +10,9 @@
 
 策略通过 ``on_market_data`` 消费 Bar,使用 ``ctx.submit_order`` 下单。
 
+issue #56:策略内部持仓不再乐观修改;``_positions`` 由 ``on_order_update``
+接收的成交回报驱动。拒单 / 部分成交 / 撤单不会让内部状态漂移。
+
 可选的动态选股(``universe_mode``):策略在每根 Bar 上调用
 :class:`~finboard_backtest.bar_universe.BarUniverseSelector` 更新入选状态,
 **仅对当前入选标的执行金叉买入**。``universe_exit_clear=True`` 时,标的发生
@@ -30,7 +33,7 @@ from finboard_backtest.bar_universe import (
     BarUniverseSelector,
 )
 from finboard_broker.market_base import MarketDataEvent, MarketDataEventType
-from finboard_core.strategy import Strategy, StrategyContext
+from finboard_core.strategy import OrderEvent, Strategy, StrategyContext
 from finboard_shared.identifiers import StrategyId
 from finboard_shared.models import Symbol
 from finboard_shared.types import OrderType, Side
@@ -127,7 +130,8 @@ class MaCrossStrategy(Strategy):
         selected = self._universe.update(bar)
         transitioned_out = self._universe.transitioned_out(code)
 
-        # 退出清仓:只对内部已记录持仓通过 ctx 卖出,不修改持仓数量(由成交驱动)
+        # 退出清仓:对内部已记录持仓通过 ctx 卖出,但**不**在这里修改 _positions;
+        # 实际成交回报在 on_order_update 中驱动 _positions。
         if transitioned_out and self._exit_clear:
             await self._force_exit(ctx, code, bar.close)
 
@@ -159,6 +163,29 @@ class MaCrossStrategy(Strategy):
 
         self._prev_mas[code] = (short_ma, long_ma)
 
+    async def on_order_update(self, event: OrderEvent, ctx: StrategyContext) -> None:
+        """持仓由成交回报驱动;拒单 / 撤单不会让 _positions 漂移。"""
+        order = event.order
+        if order.strategy_id != self._id:
+            return
+        code = order.symbol.code
+        if event.kind == "filled" and event.fill is not None:
+            fill = event.fill
+            current = self._positions.get(code, Decimal("0"))
+            if fill.side is Side.BUY:
+                self._positions[code] = current + fill.quantity
+            else:
+                self._positions[code] = max(current - fill.quantity, Decimal("0"))
+        elif event.kind == "rejected":
+            # 拒单:不修改 _positions,只记录日志
+            logger.info(
+                "ma_cross.order_rejected",
+                strategy_id=str(self._id),
+                symbol=code,
+                reason=order.reject_reason.value if order.reject_reason else "unknown",
+                message=order.reject_message,
+            )
+
     @staticmethod
     def _sma(prices: deque[Decimal], period: int) -> Decimal:
         """计算简单移动平均(取 deque 最后 period 个值)。"""
@@ -166,7 +193,7 @@ class MaCrossStrategy(Strategy):
         return sum(values) / Decimal(len(values))
 
     async def _go_long(self, ctx: StrategyContext, code: str, price: Decimal) -> None:
-        """金叉 → 等权买入。"""
+        """金叉 → 等权买入。持仓由 ``on_order_update`` 驱动,这里只提交订单。"""
         account = await ctx.get_account()
         if account is None:
             return
@@ -197,12 +224,12 @@ class MaCrossStrategy(Strategy):
                 buy_qty,
                 order_type=OrderType.MARKET,
             )
-            self._positions[code] = current + buy_qty
+            # 不再乐观修改 _positions —— 等待 on_order_update 中的 fill
         except Exception:
             logger.exception("ma_cross.buy_failed", symbol=code)
 
     async def _go_short(self, ctx: StrategyContext, code: str, price: Decimal) -> None:
-        """死叉 → 全部卖出。"""
+        """死叉 → 全部卖出。持仓由 ``on_order_update`` 驱动。"""
         current = self._positions.get(code, Decimal("0"))
         if current <= 0:
             return
@@ -225,7 +252,7 @@ class MaCrossStrategy(Strategy):
                 sell_qty,
                 order_type=OrderType.MARKET,
             )
-            self._positions[code] = current - sell_qty
+            # 不再乐观修改 _positions —— 等待 fill
         except Exception:
             logger.exception("ma_cross.sell_failed", symbol=code)
 
@@ -234,9 +261,8 @@ class MaCrossStrategy(Strategy):
     ) -> None:
         """标的发生 入选→退出 转换时清仓内部持仓。
 
-        通过 ``ctx.submit_order`` 走完整风控链路,不直接修改持仓数量;
-        本地 ``_positions`` 由后续成交回报更新(实际成交)或保持乐观记账
-        (与既有死叉卖出一致)。
+        通过 ``ctx.submit_order`` 走完整风控链路。**不再乐观修改 _positions**;
+        持仓由 ``on_order_update`` 中的 fill 实际驱动。
         """
         current = self._positions.get(code, Decimal("0"))
         if current <= 0:
@@ -260,7 +286,6 @@ class MaCrossStrategy(Strategy):
                 sell_qty,
                 order_type=OrderType.MARKET,
             )
-            self._positions[code] = current - sell_qty
         except Exception:
             logger.exception("ma_cross.universe_exit_failed", symbol=code)
 

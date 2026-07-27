@@ -2,6 +2,78 @@
 
 事件驱动历史回放、纸面撮合、绩效分析、按日因子选股与策略层 Bar 规则选股。
 
+## 研究级成交语义(issue #56)
+
+`BacktestBroker` 自 issue #56 起采用**研究级成交语义**,消除"同 Bar 收盘穿越"
+导致的乐观偏差,并按资产类型分发真实撮合规则。**任何依赖 v1 行为的旧回测都
+不可与 v2 结果横向比较** —— `BacktestResult.matching_model.matching_model_version`
+显式标记版本,旧 run 自动归类为 `v1 / unvalidated`。
+
+### 信号 → 成交时间线
+
+| 时刻       | 事件                                              |
+|------------|---------------------------------------------------|
+| T 日收盘   | 策略 `on_market_data` 收到 Bar,生成信号          |
+| T 日收盘   | 策略调用 `ctx.submit_order` → broker 收单 → SUBMITTED |
+| T+1 Bar    | broker 在新 Bar 的 `open` / `close` / `vwap_proxy` 成交 |
+| T+1 Bar    | fill 推送到 `on_order_update`,**策略内部持仓由 fill 更新** |
+
+约束:
+
+* 同 Bar 收单 → 同 Bar 不成交(`MatchingModel.next_bar_only=True`)。
+* 拒单 / 部分成交 / 撤单都不会让策略 `_positions` 漂移 —— 持仓**只能**由
+  `on_order_update` 中的 fill 驱动。
+* `allow_short=false` 时,卖出前严格校验可用持仓,不足则按 `available` 截断
+  或 `INSUFFICIENT_POSITION` 拒单,现金 / 持仓都不变。
+
+### 资产规则矩阵
+
+`AssetRuleTable` 按 `(Market, InstrumentType)` 解析规则,未注册的类型 raise
+`AssetRuleResolutionError`(**fail closed**)。默认目录覆盖 A 股股票 / 股票 ETF /
+指数;新增资产类型必须显式注册,不再回退到 A 股默认值。
+
+| 资产类型       | 手数 | T+N   | 印花税 | 涨跌停 | 价格步长 |
+|----------------|------|-------|--------|--------|----------|
+| A 股股票       | 100  | T+1   | 万 5(卖) | ±10%   | 0.01     |
+| 股票 ETF       | 100  | T+1   | 万 5(卖) | ±10%   | 0.001    |
+| 债券 ETF       | 10   | T+1   | 免     | 无     | 0.001    |
+| 货币 ETF       | 100  | T+0   | 免     | 无     | 0.001    |
+| 跨境 ETF       | 100  | T+0   | 免     | ±10%   | 0.001    |
+| 可转债         | 10   | T+0   | 万 5(卖) | ±20%   | 0.001    |
+| 期货           | 1 手 | T+0   | 按合约 | 按合约 | 按合约   |
+
+每次规则变更必须 bump `ASSET_RULES_VERSION`;历史回测结果归档在
+`BacktestResult.asset_rules.rule_version`,使旧 run 不可直接横向比较。
+
+### 撮合 / 费用 / 滑点假设归档
+
+`BacktestResult` 同时归档:
+
+* `matching_model` —— 撮合模型版本、fill timing、参与率上限、是否允许部分成交等;
+* `asset_rules` —— 完整的资产规则目录(含费率、印花税、手数、价格步长);
+* `fee_assumptions` —— 回测请求显式覆盖的费用 / 滑点;
+* `benchmark_config` —— 基准选择(单标的 / 等权候选池)。
+
+这些字段都写入数据库 `backtest_runs.matching_model / asset_rules / fee_assumptions /
+benchmark_config`,历史 run 可完整复现。
+
+### 多标的基准
+
+issue #56 起,多标的回测的默认基准**不再只取请求中的第一个标的**,而是使用
+`BenchmarkConfig`:
+
+* `symbol` 显式指定基准(如 `000300.SH`);
+* `equal_weight_universe=True`(默认)使用等权候选池基准;
+* 单标的回测保持原行为(等于买入持有基准)。
+
+### 已知局限
+
+* 期货合约的多空 / 开平 / 保证金 / 每日盯市由 issue #64 的期货子模块实现,
+  当前 `BacktestBroker` 仅消费 `AssetRule`(lot_size / T+N / 印花税 / 涨跌停)。
+* 公司行为(分红 / 除息 / 拆股)目前依赖前复权(`adjust="qfq"`)数据源,
+  未独立建模;`BacktestConfig.adjust` 是当前唯一可控入口。
+* 因子选股(`selection`)与撮合模型正交,可独立启用 / 关闭。
+
 ## 因子快照时序
 
 `BacktestConfig.selection` 默认 `enabled=false`,因此旧回测继续把静态
@@ -49,4 +121,5 @@
 2. 在 `BarUniverseSelector.update` 增加分支判定;
 3. 在策略 schema(`MaCrossParams` 或新策略)以 Pydantic Field 暴露参数;
 4. 不需要修改前端 —— schema-driven 表单会自动渲染新字段。
+
 
