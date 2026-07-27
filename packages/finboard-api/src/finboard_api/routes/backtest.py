@@ -186,6 +186,10 @@ async def run_backtest(
         dataset_versions=result.dataset_versions,
         factor_version=result.factor_version,
         selection_snapshots=[snapshot.model_dump(mode="json") for snapshot in selection_snapshots],
+        matching_model=result.matching_model,
+        asset_rules=result.asset_rules,
+        fee_assumptions=result.fee_assumptions,
+        benchmark_config=result.benchmark_config,
     )
     repo = BacktestRunRepository(session)
     await repo.save(run_row)
@@ -201,6 +205,10 @@ async def run_backtest(
         selection_snapshots=selection_snapshots,
         dataset_versions=result.dataset_versions,
         factor_version=result.factor_version,
+        matching_model=result.matching_model,
+        asset_rules=result.asset_rules,
+        fee_assumptions=result.fee_assumptions,
+        benchmark_config=result.benchmark_config,
     )
 
 
@@ -265,6 +273,10 @@ async def get_history(
         ],
         dataset_versions=cast(dict[str, list[str]], r.dataset_versions),
         factor_version=r.factor_version,
+        matching_model=r.matching_model if r.matching_model is not None else {},
+        asset_rules=r.asset_rules,
+        fee_assumptions=r.fee_assumptions if r.fee_assumptions is not None else {},
+        benchmark_config=r.benchmark_config if r.benchmark_config is not None else {},
         created_at=r.created_at,
     )
 

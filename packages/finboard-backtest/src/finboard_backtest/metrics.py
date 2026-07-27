@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
 
-from finboard_shared.models import Fill
+from finboard_shared.models import Bar, Fill
 
 
 def total_return(equity_curve: Sequence[tuple[date, Decimal]]) -> float:
@@ -157,6 +158,63 @@ def buy_and_hold_return(
     first_price = bars[0][1]
     shares = (initial_capital / first_price).quantize(Decimal("1"))
     return [(d, shares * p) for d, p in bars]
+
+
+def equal_weight_universe_return(
+    bars_by_symbol: Mapping[str, Sequence[Bar]],
+    initial_capital: Decimal,
+) -> list[tuple[date, Decimal]]:
+    """等权多标的买入持有基准。
+
+    每个标的分配 ``initial_capital / N``;每条 Bar 上对齐所有标的的日期,
+    在每个共同日期上求和得到基准权益。空候选池返回空曲线。
+
+    issue #56:多标的回测的默认基准不再只取第一个标的。
+    """
+    symbols = [code for code, bars in bars_by_symbol.items() if bars]
+    if not symbols:
+        return []
+
+    per_symbol_capital = initial_capital / Decimal(len(symbols))
+
+    # 把每个 symbol 的(date, close)按日期索引
+    price_by_date: dict[date, dict[str, Decimal]] = defaultdict(dict)
+    shares_by_symbol: dict[str, Decimal] = {}
+    for code in symbols:
+        bars = bars_by_symbol[code]
+        if not bars:
+            continue
+        first_close = bars[0].close
+        if first_close <= 0:
+            continue
+        shares = (per_symbol_capital / first_close).quantize(Decimal("1"))
+        shares_by_symbol[code] = shares
+        for bar in bars:
+            price_by_date[bar.timestamp.date()][code] = bar.close
+
+    if not shares_by_symbol:
+        return []
+
+    common_dates = sorted(
+        {
+            d
+            for d, codes in price_by_date.items()
+            if set(codes) >= set(shares_by_symbol)
+        }
+    )
+    curve: list[tuple[date, Decimal]] = []
+    for d in common_dates:
+        total = Decimal("0")
+        for code, shares in shares_by_symbol.items():
+            price = price_by_date[d].get(code)
+            if price is None:
+                # 缺数据时沿用上一根 bar 的市值(简化)
+                if curve:
+                    total += curve[-1][1] / Decimal(len(shares_by_symbol))
+                continue
+            total += shares * price
+        curve.append((d, total))
+    return curve
 
 
 def trading_days_between(start: date, end: date) -> int:

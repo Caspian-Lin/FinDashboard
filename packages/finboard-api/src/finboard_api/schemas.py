@@ -383,6 +383,10 @@ class BacktestResultOut(BaseSchema):
     selection_snapshots: list[FactorSnapshotOut] = Field(default_factory=list)
     dataset_versions: dict[str, list[str]] = Field(default_factory=dict)
     factor_version: str | None = None
+    matching_model: dict[str, Any] = Field(default_factory=dict)
+    asset_rules: dict[str, Any] | None = None
+    fee_assumptions: dict[str, Any] = Field(default_factory=dict)
+    benchmark_config: dict[str, Any] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- Backtest History
@@ -416,6 +420,10 @@ class BacktestHistoryDetailOut(BaseSchema):
     selection_snapshots: list[FactorSnapshotOut] = Field(default_factory=list)
     dataset_versions: dict[str, list[str]] = Field(default_factory=dict)
     factor_version: str | None = None
+    matching_model: dict[str, Any] = Field(default_factory=dict)
+    asset_rules: dict[str, Any] | None = None
+    fee_assumptions: dict[str, Any] = Field(default_factory=dict)
+    benchmark_config: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
 

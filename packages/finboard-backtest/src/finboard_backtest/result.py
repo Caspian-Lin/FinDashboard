@@ -1,4 +1,7 @@
-"""回测结果。"""
+"""回测结果。
+
+issue #56 起归档撮合模型 / 资产规则 / 费用假设 / 基准选择,使历史 run 可复现。
+"""
 
 from __future__ import annotations
 
@@ -44,6 +47,12 @@ class BacktestResult:
     dataset_versions: dict[str, list[str]] = field(default_factory=dict)
     factor_version: str | None = None
 
+    # 研究级成交语义归档(issue #56)
+    matching_model: dict[str, object] = field(default_factory=dict)
+    asset_rules: dict[str, object] | None = None
+    fee_assumptions: dict[str, object] = field(default_factory=dict)
+    benchmark_config: dict[str, object] = field(default_factory=dict)
+
     def summary(self) -> str:
         """生成文本绩效摘要。"""
         lines = [
@@ -68,5 +77,12 @@ class BacktestResult:
                 "",
                 f"基准收益:   {self.benchmark_return:+.2%}",
                 f"超额收益:   {self.excess_return:+.2%}",
+            ]
+        if self.matching_model:
+            lines += [
+                "",
+                f"撮合模型:   {self.matching_model.get('matching_model_version', '?')}"
+                f" / fill={self.matching_model.get('fill_timing', '?')}",
+                f"规则版本:   {self.matching_model.get('asset_rules_version', '?')}",
             ]
         return "\n".join(lines)

@@ -32,6 +32,7 @@ from finboard_backtest.context import BacktestContext
 from finboard_backtest.metrics import (
     annualized_return,
     buy_and_hold_return,
+    equal_weight_universe_return,
     max_drawdown,
     sharpe_ratio,
     total_commission,
@@ -113,13 +114,13 @@ class BacktestEngine:
         cfg = self._config
         broker = BacktestBroker(
             initial_capital=cfg.initial_capital,
-            commission_rate=cfg.commission_rate,
-            commission_min=cfg.commission_min,
-            stamp_tax_rate=cfg.stamp_tax_rate,
-            slippage_bps=cfg.slippage_bps,
-            lot_size=cfg.lot_size,
+            matching_model=cfg.matching_model,
+            asset_rules=cfg.asset_rules,
+            commission_rate=cfg.resolved_fees().commission_rate,
+            commission_min=cfg.resolved_fees().commission_min,
+            stamp_tax_rate=cfg.resolved_fees().stamp_tax_rate,
+            slippage_bps=cfg.resolved_fees().slippage_bps,
             allow_short=cfg.allow_short,
-            enforce_t_plus_1=cfg.enforce_t_plus_1,
         )
         await broker.connect(AccountId("backtest"), {})
 
@@ -362,12 +363,27 @@ class BacktestEngine:
         fills = broker.fills
         orders = broker.all_orders
 
-        # 买入持有基准(用第一个标的)
+        # 基准:显式选择 > 等权候选池 > 第一个标的(向后兼容)
         benchmark_curve: list[tuple[date, Decimal]] = []
-        first_symbol_bars = next(iter(bars_by_symbol.values()), [])
-        if first_symbol_bars:
-            bar_prices = [(b.timestamp.date(), b.close) for b in first_symbol_bars]
-            benchmark_curve = buy_and_hold_return(bar_prices, self._config.initial_capital)
+        bench_cfg = self._config.benchmark
+        if bench_cfg.symbol is not None:
+            bench_bars = bars_by_symbol.get(bench_cfg.symbol, [])
+            if bench_bars:
+                bar_prices = [(b.timestamp.date(), b.close) for b in bench_bars]
+                benchmark_curve = buy_and_hold_return(
+                    bar_prices, self._config.initial_capital
+                )
+        elif bench_cfg.equal_weight_universe and len(bars_by_symbol) > 1:
+            benchmark_curve = equal_weight_universe_return(
+                bars_by_symbol, self._config.initial_capital
+            )
+        else:
+            first_symbol_bars = next(iter(bars_by_symbol.values()), [])
+            if first_symbol_bars:
+                bar_prices = [(b.timestamp.date(), b.close) for b in first_symbol_bars]
+                benchmark_curve = buy_and_hold_return(
+                    bar_prices, self._config.initial_capital
+                )
 
         # 绩效指标
         ret = total_return(equity_curve)
@@ -406,11 +422,20 @@ class BacktestEngine:
             initial_capital=self._config.initial_capital,
             final_equity=equity_curve[-1][1] if equity_curve else self._config.initial_capital,
             dataset_versions={
-                dataset: sorted(versions) for dataset, versions in sorted(dataset_versions.items())
+                dataset: sorted(versions)
+                for dataset, versions in sorted(dataset_versions.items())
             },
             factor_version=self._config.selection.factor_version
             if self._config.selection.enabled
             else None,
+            matching_model=self._config.matching_model.as_dict(),
+            asset_rules=(
+                self._config.asset_rules.as_dict()
+                if self._config.asset_rules is not None
+                else None
+            ),
+            fee_assumptions=self._config.resolved_fees().as_dict(),
+            benchmark_config=self._config.benchmark.as_dict(),
         )
 
 

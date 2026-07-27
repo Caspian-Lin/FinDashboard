@@ -285,6 +285,19 @@ class BacktestRunModel(Base, IdMixin):
     selection_snapshots: Mapped[list[dict[str, object]]] = mapped_column(
         JSON, default=list, server_default=sql_text("'[]'::json")
     )
+    # issue #56: 研究级成交语义归档
+    matching_model: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    asset_rules: Mapped[dict[str, object] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    fee_assumptions: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    benchmark_config: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
     metrics: Mapped[dict] = mapped_column(JSON)  # type: ignore[type-arg]
     equity_curve: Mapped[list] = mapped_column(JSON)  # type: ignore[type-arg]
     fills: Mapped[list] = mapped_column(JSON)  # type: ignore[type-arg]
