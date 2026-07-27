@@ -226,3 +226,338 @@ def trading_days_between(start: date, end: date) -> int:
             days += 1
         current += timedelta(days=1)
     return days
+
+
+# ---------------------------------------------------------------------------
+# 研究级指标(issue #57) —— 用于样本外验证与多重试验修正
+# ---------------------------------------------------------------------------
+
+_ANNUALIZATION = 252  # 年化因子(交易日)
+
+
+def daily_returns(
+    equity_curve: Sequence[tuple[date, Decimal]],
+) -> list[float]:
+    """从权益曲线计算日收益率序列(长度 = len-1)。"""
+    out: list[float] = []
+    for i in range(1, len(equity_curve)):
+        prev = float(equity_curve[i - 1][1])
+        curr = float(equity_curve[i][1])
+        if prev > 0:
+            out.append((curr - prev) / prev)
+        else:
+            out.append(0.0)
+    return out
+
+
+def sortino_ratio(
+    equity_curve: Sequence[tuple[date, Decimal]],
+    risk_free_annual: float = 0.03,
+    target_daily_return: float = 0.0,
+) -> float:
+    """Sortino 比率 —— 仅对下行波动率惩罚。
+
+    与 Sharpe 的差异:Sortino 不惩罚上行波动,因此对"上涨快、回撤小"的策略
+    给出更高评分。研究流水线应同时报告 Sharpe 与 Sortino。
+    """
+    if len(equity_curve) < 3:
+        return 0.0
+    returns = daily_returns(equity_curve)
+    rf_daily = risk_free_annual / _ANNUALIZATION
+    excess = [r - rf_daily for r in returns]
+    downside = [(r - target_daily_return) ** 2 for r in excess if r < target_daily_return]
+    if not downside:
+        return 0.0
+    downside_dev = math.sqrt(sum(downside) / len(downside))
+    if downside_dev == 0:
+        return 0.0
+    mean_excess = sum(excess) / len(excess)
+    return mean_excess / downside_dev * math.sqrt(_ANNUALIZATION)
+
+
+def calmar_ratio(equity_curve: Sequence[tuple[date, Decimal]]) -> float:
+    """Calmar 比率 = 年化收益率 / |最大回撤|。
+
+    高 Calmar 表示策略在控制下行风险的前提下仍能产生收益。无回撤时返回 ``inf``;
+    研究门应在阈值中使用 ``min(...)`` 处理 ``inf``。
+    """
+    if len(equity_curve) < 3:
+        return 0.0
+    ann = annualized_return(equity_curve)
+    mdd = abs(max_drawdown(equity_curve))
+    if mdd == 0:
+        return float("inf") if ann > 0 else 0.0
+    return ann / mdd
+
+
+def monthly_returns(equity_curve: Sequence[tuple[date, Decimal]]) -> list[tuple[int, int, float]]:
+    """按月聚合的收益率序列,返回 ``[(year, month, return), ...]``。
+
+    用于检验月度胜率、长期稳定性和季节性。空曲线或单点曲线返回空列表。
+    """
+    if len(equity_curve) < 2:
+        return []
+
+    by_month: dict[tuple[int, int], Decimal] = {}
+    for d, v in equity_curve:
+        key = (d.year, d.month)
+        if key not in by_month:
+            by_month[key] = v
+        # 月内最后一个值覆盖(用 close-to-close 而不是 open-to-close)
+        by_month[key] = v
+
+    sorted_months = sorted(by_month.items())
+    out: list[tuple[int, int, float]] = []
+    for i in range(1, len(sorted_months)):
+        (y, m), last = sorted_months[i]
+        _, prev = sorted_months[i - 1]
+        prev_f = float(prev)
+        last_f = float(last)
+        if prev_f > 0:
+            out.append((y, m, (last_f - prev_f) / prev_f))
+        else:
+            out.append((y, m, 0.0))
+    return out
+
+
+def monthly_win_rate(equity_curve: Sequence[tuple[date, Decimal]]) -> float:
+    """月度胜率 = 正收益月份占比。"""
+    months = monthly_returns(equity_curve)
+    if not months:
+        return 0.0
+    positive = sum(1 for _, _, r in months if r > 0)
+    return positive / len(months)
+
+
+def drawdown_durations(equity_curve: Sequence[tuple[date, Decimal]]) -> list[int]:
+    """每次回撤的持续交易日数(从 peak 到 recover 到 new peak)。
+
+    持续期长的策略即使总回撤不大也可能在心理上难以承受。研究门应同时
+    检查最大回撤幅度与最长持续期。
+    """
+    if len(equity_curve) < 2:
+        return []
+    peak = float(equity_curve[0][1])
+    durations: list[int] = []
+    cur_duration = 0
+    in_drawdown = False
+    for _, val in equity_curve[1:]:
+        v = float(val)
+        if v >= peak:
+            if in_drawdown:
+                durations.append(cur_duration)
+                cur_duration = 0
+                in_drawdown = False
+            peak = v
+        else:
+            in_drawdown = True
+            cur_duration += 1
+    if in_drawdown:
+        durations.append(cur_duration)
+    return durations
+
+
+def max_drawdown_duration(equity_curve: Sequence[tuple[date, Decimal]]) -> int:
+    """最大回撤持续期(交易日数)。"""
+    durations = drawdown_durations(equity_curve)
+    return max(durations) if durations else 0
+
+
+def value_at_risk(
+    equity_curve: Sequence[tuple[date, Decimal]],
+    confidence: float = 0.95,
+) -> float:
+    """历史 VaR(Value at Risk)。
+
+    返回收益分布的 ``confidence`` 分位数(返回负数,如 -0.02 表示在 95% 置信度下
+    单日最大损失约 2%)。历史法不依赖分布假设,但对尾部不敏感。
+    """
+    if len(equity_curve) < 3:
+        return 0.0
+    returns = sorted(daily_returns(equity_curve))
+    if not returns:
+        return 0.0
+    # 经验分位数(线性插值)
+    idx = (1 - confidence) * (len(returns) - 1)
+    lower = int(idx)
+    frac = idx - lower
+    if lower + 1 < len(returns):
+        return returns[lower] * (1 - frac) + returns[lower + 1] * frac
+    return returns[lower]
+
+
+def conditional_value_at_risk(
+    equity_curve: Sequence[tuple[date, Decimal]],
+    confidence: float = 0.95,
+) -> float:
+    """条件 VaR(CVaR / Expected Shortfall)。
+
+    返回 ``confidence`` 分位数以下所有收益的平均值(返回负数)。比 VaR 更
+    好地捕捉尾部风险。
+    """
+    if len(equity_curve) < 3:
+        return 0.0
+    returns = sorted(daily_returns(equity_curve))
+    if not returns:
+        return 0.0
+    cutoff = int((1 - confidence) * len(returns))
+    if cutoff < 1:
+        cutoff = 1
+    tail = returns[:cutoff]
+    return sum(tail) / len(tail)
+
+
+def beta(
+    equity_curve: Sequence[tuple[date, Decimal]],
+    benchmark_curve: Sequence[tuple[date, Decimal]],
+) -> float:
+    """策略相对基准的 Beta。
+
+    基准曲线通过 ``date`` 对齐。Beta=1 表示策略与基准同向同幅度;Beta<1
+    表示策略波动小于基准;Beta<0 表示反向。
+    """
+    strat_returns, bench_returns = _aligned_returns(equity_curve, benchmark_curve)
+    if len(strat_returns) < 3:
+        return 0.0
+    var_b = _variance(bench_returns)
+    if var_b == 0:
+        return 0.0
+    cov = _covariance(strat_returns, bench_returns)
+    return cov / var_b
+
+
+def alpha(
+    equity_curve: Sequence[tuple[date, Decimal]],
+    benchmark_curve: Sequence[tuple[date, Decimal]],
+    risk_free_annual: float = 0.03,
+) -> float:
+    """Jensen's Alpha —— CAPM 超额收益(年化)。
+
+    Beta 与 Alpha 一起衡量策略是否在承担同等系统性风险的前提下跑赢基准。
+    """
+    strat_returns, bench_returns = _aligned_returns(equity_curve, benchmark_curve)
+    if len(strat_returns) < 3:
+        return 0.0
+    var_b = _variance(bench_returns)
+    if var_b == 0:
+        return 0.0
+    cov = _covariance(strat_returns, bench_returns)
+    b = cov / var_b
+    rf_daily = risk_free_annual / _ANNUALIZATION
+    mean_strat = sum(strat_returns) / len(strat_returns)
+    mean_bench = sum(bench_returns) / len(bench_returns)
+    excess_strat = mean_strat - rf_daily
+    excess_bench = mean_bench - rf_daily
+    daily_alpha = excess_strat - b * excess_bench
+    return daily_alpha * _ANNUALIZATION
+
+
+def information_ratio(
+    equity_curve: Sequence[tuple[date, Decimal]],
+    benchmark_curve: Sequence[tuple[date, Decimal]],
+) -> float:
+    """信息比率 = 平均超额收益 / 跟踪误差(年化)。
+
+    衡量策略相对基准的稳定超额收益能力。``tracking_error`` 越小、alpha 越稳定,
+    IR 越高。
+    """
+    strat_returns, bench_returns = _aligned_returns(equity_curve, benchmark_curve)
+    if len(strat_returns) < 3:
+        return 0.0
+    excess = [s - b for s, b in zip(strat_returns, bench_returns, strict=True)]
+    mean_excess = sum(excess) / len(excess)
+    tracking_error = math.sqrt(_variance(excess))
+    if tracking_error == 0:
+        return 0.0
+    return mean_excess / tracking_error * math.sqrt(_ANNUALIZATION)
+
+
+def rolling_sharpe(
+    equity_curve: Sequence[tuple[date, Decimal]],
+    window: int = 63,
+    risk_free_annual: float = 0.03,
+) -> list[tuple[date, float]]:
+    """滚动窗口 Sharpe —— 用于检测策略稳定性。
+
+    返回 ``[(date, sharpe), ...]``。window 单位为交易日(默认 63 ≈ 季度)。
+    若窗口内波动为 0 返回 0,持续多个 0 提示策略可能极少交易或异常。
+    """
+    if window < 3 or len(equity_curve) < window + 1:
+        return []
+    returns = daily_returns(equity_curve)
+    rf_daily = risk_free_annual / _ANNUALIZATION
+    out: list[tuple[date, float]] = []
+    # returns[i] 对应 equity_curve[i+1] 的日期
+    for i in range(window, len(returns) + 1):
+        window_returns = returns[i - window : i]
+        if not window_returns:
+            continue
+        mean_r = sum(window_returns) / len(window_returns)
+        var_r = sum((r - mean_r) ** 2 for r in window_returns) / len(window_returns)
+        std_r = math.sqrt(var_r)
+        sharpe = (
+            0.0
+            if std_r == 0
+            else (mean_r - rf_daily) / std_r * math.sqrt(_ANNUALIZATION)
+        )
+        out.append((equity_curve[i][0], sharpe))
+    return out
+
+
+def downside_deviation_annual(
+    equity_curve: Sequence[tuple[date, Decimal]],
+    target_daily_return: float = 0.0,
+) -> float:
+    """年化下行偏差(用于 Sortino/Robustness 报告)。"""
+    if len(equity_curve) < 3:
+        return 0.0
+    returns = daily_returns(equity_curve)
+    downside = [(r - target_daily_return) ** 2 for r in returns if r < target_daily_return]
+    if not downside:
+        return 0.0
+    return math.sqrt(sum(downside) / len(downside)) * math.sqrt(_ANNUALIZATION)
+
+
+# ---------------------------------------------------------------------------
+# 内部统计工具
+# ---------------------------------------------------------------------------
+
+
+def _variance(xs: Sequence[float]) -> float:
+    if len(xs) < 2:
+        return 0.0
+    mean = sum(xs) / len(xs)
+    return sum((x - mean) ** 2 for x in xs) / len(xs)
+
+
+def _covariance(xs: Sequence[float], ys: Sequence[float]) -> float:
+    if len(xs) != len(ys) or len(xs) < 2:
+        return 0.0
+    mean_x = sum(xs) / len(xs)
+    mean_y = sum(ys) / len(ys)
+    return sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True)) / len(xs)
+
+
+def _aligned_returns(
+    equity_curve: Sequence[tuple[date, Decimal]],
+    benchmark_curve: Sequence[tuple[date, Decimal]],
+) -> tuple[list[float], list[float]]:
+    """按 ``date`` 对齐两条权益曲线,返回对应的日收益率序列。"""
+    if len(equity_curve) < 2 or len(benchmark_curve) < 2:
+        return [], []
+    strat_index = dict(equity_curve)
+    bench_index = dict(benchmark_curve)
+    common = sorted(set(strat_index) & set(bench_index))
+    if len(common) < 2:
+        return [], []
+    strat_out: list[float] = []
+    bench_out: list[float] = []
+    for i in range(1, len(common)):
+        sp = float(strat_index[common[i - 1]])
+        sc = float(strat_index[common[i]])
+        bp = float(bench_index[common[i - 1]])
+        bc = float(bench_index[common[i]])
+        if sp > 0 and bp > 0:
+            strat_out.append((sc - sp) / sp)
+            bench_out.append((bc - bp) / bp)
+    return strat_out, bench_out

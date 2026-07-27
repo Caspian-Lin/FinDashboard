@@ -682,3 +682,95 @@ class FactorValueModel(Base, IdMixin):
         Index("ix_factor_value_symbol_factor", "symbol", "factor_name"),
         Index("ix_factor_value_factor_symbol", "factor_name", "symbol"),
     )
+
+
+# ---------------------------------------------------------------------------
+# 样本外验证(issue #57)
+# ---------------------------------------------------------------------------
+
+
+class ResearchExperimentModel(Base, IdMixin):
+    """研究实验登记 —— 假设、计划、门、揭盲状态。
+
+    生命周期:HYPOTHESIS → IN_SAMPLE → VALIDATED_OOS / REJECTED → SUPERSEDED。
+    假设冻结后不可修改;新建实验必须 ``supersedes_id`` 关联旧版本。
+    """
+
+    __tablename__ = "research_experiments"
+
+    experiment_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    hypothesis: Mapped[str] = mapped_column(Text)
+    version_stamp: Mapped[dict[str, object]] = mapped_column(JSON)
+    version_checksum: Mapped[str] = mapped_column(String(64), index=True)
+    plan: Mapped[dict[str, object]] = mapped_column(JSON)
+    thresholds: Mapped[dict[str, object]] = mapped_column(JSON)
+    robustness: Mapped[dict[str, object]] = mapped_column(JSON)
+    strategy_params_space: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    frozen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    trials_used: Mapped[int] = mapped_column(Integer, default=0)
+    final_test_unsealed: Mapped[bool] = mapped_column(Boolean, default=False)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supersedes_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+    __table_args__ = (
+        Index("ix_research_experiment_status_created", "status", "created_at"),
+    )
+
+
+class ResearchTrialModel(Base, IdMixin):
+    """研究试验记录 —— 包括赢家 + 输家 + 失败。
+
+    ``status`` ∈ {candidate, running, selected, rejected, failed, skipped}。
+    失败 trial 必须入库,多重试验修正需要真实试验总数。
+    """
+
+    __tablename__ = "research_trials"
+
+    trial_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    experiment_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("research_experiments.experiment_id", ondelete="CASCADE"),
+        index=True,
+    )
+    trial_index: Mapped[int] = mapped_column(Integer)
+    parameters: Mapped[dict[str, object]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    in_sample_metrics: Mapped[dict[str, object] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    oos_metrics: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    walk_forward_windows: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    robustness_probes: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    statistical_report: Mapped[dict[str, object] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "experiment_id",
+            "trial_index",
+            name="uq_research_trial_experiment_index",
+        ),
+        Index("ix_research_trial_experiment_status", "experiment_id", "status"),
+    )

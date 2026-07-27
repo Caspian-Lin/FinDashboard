@@ -477,3 +477,129 @@ class WatchlistDetailOut(WatchlistOut):
 
 class WatchlistAddSymbols(BaseSchema):
     symbols: list[str]
+
+
+# --------------------------------------------------------------------------- Research Experiment (issue #57)
+class VersionStampSchema(BaseSchema):
+    matching_model_version: str
+    asset_rules_version: str
+    factor_version: str | None = None
+    dataset_versions: dict[str, str] = Field(default_factory=dict)
+    selection_config: dict[str, Any] = Field(default_factory=dict)
+    strategy_kind: str
+
+
+class ValidationPlanSchema(BaseSchema):
+    mode: str  # rolling / expanding
+    train_start: str
+    train_end: str
+    validation_start: str
+    validation_end: str
+    test_start: str
+    test_end: str
+    train_window_days: int = 504
+    test_window_days: int = 63
+    step_days: int = 63
+    trial_budget: int = 50
+    random_seed: int = 0
+    benchmark_symbol: str | None = None
+
+
+class AcceptanceThresholdsSchema(BaseSchema):
+    min_in_sample_sharpe: float = 1.0
+    min_oos_sharpe: float = 0.5
+    max_oos_drawdown: float = 0.25
+    min_oos_calmar: float = 0.5
+    min_oos_information_ratio: float = 0.0
+    max_param_sensitivity_sharpe_drop: float = 0.5
+    min_pbo_pass: bool = True
+    max_pbo: float = 0.5
+    min_deflated_sharpe: float = 0.0
+    min_probabilistic_sharpe: float = 0.95
+
+
+class RobustnessPlanSchema(BaseSchema):
+    neighbourhood_steps: int = 5
+    neighbourhood_relative_step: float = 0.1
+    cost_multipliers: list[float] = Field(default_factory=lambda: [1.0, 2.0, 3.0])
+    slippage_stress_bps: list[float] = Field(default_factory=lambda: [0.0, 5.0, 10.0, 20.0])
+    execution_delay_bars: list[int] = Field(default_factory=lambda: [1, 2])
+    stress_phases: list[str] = Field(
+        default_factory=lambda: [
+            "2018-Q4",
+            "2020-Q1",
+            "2022-Q1",
+            "2024-Q1",
+        ]
+    )
+
+
+class ExperimentCreate(BaseSchema):
+    """创建研究实验 —— 假设 / 计划 / 门必须一次性冻结。
+
+    创建后 ``hypothesis`` 不可修改;若需要重新假设,创建新 experiment
+    并设 ``supersedes_id`` 指向旧版本。
+    """
+
+    hypothesis: str = Field(min_length=10, max_length=2000)
+    version_stamp: VersionStampSchema
+    plan: ValidationPlanSchema
+    thresholds: AcceptanceThresholdsSchema = Field(default_factory=AcceptanceThresholdsSchema)
+    robustness: RobustnessPlanSchema = Field(default_factory=RobustnessPlanSchema)
+    strategy_params_space: dict[str, Any] = Field(default_factory=dict)
+    supersedes_id: str | None = None
+    notes: str = ""
+
+
+class ExperimentOut(BaseSchema):
+    experiment_id: str
+    hypothesis: str
+    version_stamp: dict[str, Any]
+    version_checksum: str
+    plan: dict[str, Any]
+    thresholds: dict[str, Any]
+    robustness: dict[str, Any]
+    strategy_params_space: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    created_at: datetime
+    frozen_at: datetime
+    finalized_at: datetime | None = None
+    trials_used: int = 0
+    final_test_unsealed: bool = False
+    rejection_reason: str | None = None
+    supersedes_id: str | None = None
+    notes: str = ""
+
+
+class TrialOut(BaseSchema):
+    trial_id: str
+    experiment_id: str
+    trial_index: int
+    parameters: dict[str, Any]
+    status: str
+    in_sample_metrics: dict[str, Any] | None = None
+    oos_metrics: dict[str, Any] | None = None
+    walk_forward_windows: list[dict[str, Any]] = Field(default_factory=list)
+    robustness_probes: list[dict[str, Any]] = Field(default_factory=list)
+    statistical_report: dict[str, Any] | None = None
+    failure_reason: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class ExperimentDetailOut(ExperimentOut):
+    """实验详情 + 全部 trial(包括失败)。"""
+
+    trials: list[TrialOut] = Field(default_factory=list)
+
+
+class TrialCreate(BaseSchema):
+    """手动登记一次 trial(不通过 runner 自动跑)。"""
+
+    parameters: dict[str, Any]
+    status: str = "candidate"
+    failure_reason: str | None = None
+
+
+class ExperimentRejectIn(BaseSchema):
+    reason: str = Field(min_length=1)

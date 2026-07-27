@@ -1,6 +1,71 @@
 # finboard-backtest
 
-事件驱动历史回放、纸面撮合、绩效分析、按日因子选股与策略层 Bar 规则选股。
+事件驱动历史回放、纸面撮合、绩效分析、按日因子选股、策略层 Bar 规则选股与
+样本外验证流水线。
+
+## 样本外验证流水线(issue #57)
+
+`finboard_backtest.validation` 子包提供研究级**防过拟合**验证流水线,所有新增
+收益策略进入模拟 / 影子交易前必须通过此流水线。
+
+### 从假设到揭盲的标准流程
+
+```
+[1] 登记实验 ──→ [2] IS 参数搜索 ──→ [3] Walk-forward OOS
+       │                                   │
+       │                                   ↓
+       │                            [4] 稳健性 / 压力测试
+       │                                   │
+       │                                   ↓
+       │                            [5] 统计修正报告
+       │                                   │
+       ↓                                   ↓
+[6] 门判定(Pass / Reject) ←─────────────┘
+       │
+       ↓
+[7] 一次性揭盲最终冻结测试集 ──→ [8] VALIDATED_OOS 或 REJECTED
+```
+
+**核心原则**:
+
+* **假设先行冻结**:``ResearchExperiment.hypothesis`` 创建后不可修改,
+  修改假设必须新建 superseding experiment;
+* **试验预算预先声明**:``trial_budget`` 限制候选总数,失败也算试验;
+* **最终揭盲只允许一次**:``final_test_unsealed`` 一旦 True 不可撤销;
+* **门在实验前冻结**:``AcceptanceThresholds`` 在创建时确定;
+* **统计门只降低虚假发现概率,不承诺未来收益**。
+
+### 数据契约
+
+* `ResearchExperiment` —— 假设、计划、门、揭盲状态;
+* `ValidationPlan` —— rolling / expanding walk-forward 时间切分;
+* `AcceptanceThresholds` —— IS / OOS / DSR / PSR / PBO 阈值;
+* `TrialRecord` —— 单次试验完整记录(包括 FAILED / REJECTED);
+* `WindowMetrics` —— 训练 / 验证 / 测试单窗口绩效;
+* `RobustnessProbe` —— 邻域 / 成本 / 延迟 / 市场阶段压力测试结果;
+* `StatisticalReport` —— DSR / PSR / PBO / bootstrap CI。
+
+### 统计方法来源与局限
+
+| 方法 | 来源 | 适用条件 | 局限 |
+|------|------|----------|------|
+| Stationary bootstrap CI | Politis & Romano 1994 | 平稳时序 | 对结构性断点不敏感 |
+| Deflated Sharpe Ratio | Bailey & López de Prado 2014 | 多重试验修正 | 假设 SR 近似正态 |
+| Probabilistic Sharpe | López de Prado 2012 | 单 trial 显著性 | 依赖偏度 / 峰度估计 |
+| PBO via CSCV | Bailey et al. 2017 | N ≥ 4 trial + 长样本 | 对 IS/OOS 切分敏感 |
+
+**关键警告**:统计门**不承诺未来收益**。即使 PBO < 0.5 且 DSR > 0.95,策略
+仍可能在样本外失败。所有阈值必须在实验前声明,不得事后调整。
+
+### 已知局限
+
+* 当前 ``TrialRunner`` 是抽象接口,实际执行由 CLI / 后台 worker 注入;
+  API 端点只持久化实验结构,不直接触发回测。
+* ``PBO`` 在样本较短时(n_obs < n_partitions × 2)返回保守估计 0.5;
+  应确保每次试验至少 200+ 观测点。
+* ``robustness.py`` 中的成本 / 滑点 / 延迟压力配置在 ``RobustnessPlan`` 中
+  声明,但实际执行需要 runner 阶段注入对应的回测配置覆盖。
+* 该流水线**不触及交易红线**:不连接券商、不发订单、不修改持仓 / 风控。
 
 ## 研究级成交语义(issue #56)
 
