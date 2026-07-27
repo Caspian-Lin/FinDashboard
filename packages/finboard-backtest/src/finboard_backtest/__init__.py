@@ -3,6 +3,11 @@
 策略代码在回测和实盘中完全一致,无需感知运行环境。
 """
 
+from finboard_backtest.bar_universe import (
+    BarUniverseConfig,
+    BarUniverseMode,
+    BarUniverseSelector,
+)
 from finboard_backtest.broker import BacktestBroker
 from finboard_backtest.clock import SimulatedClock
 from finboard_backtest.config import BacktestConfig
@@ -17,6 +22,9 @@ __all__ = [
     "BacktestContext",
     "BacktestEngine",
     "BacktestResult",
+    "BarUniverseConfig",
+    "BarUniverseMode",
+    "BarUniverseSelector",
     "PointInTimeFactorSelector",
     "SimulatedClock",
 ]

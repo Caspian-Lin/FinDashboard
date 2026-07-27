@@ -142,6 +142,17 @@ class TestBacktestRoutes:
         assert short_window["label"] == "短期均线"
         assert ma["supports_backtest"] is True
 
+        # issue #43: universe_* 字段随 schema 暴露给前端表单
+        assert "universe_mode" in param_names
+        assert "universe_lookback" in param_names
+        assert "universe_min_avg_amount" in param_names
+        assert "universe_min_momentum" in param_names
+        assert "universe_exit_clear" in param_names
+        universe_mode = next(p for p in ma["params"] if p["name"] == "universe_mode")
+        assert universe_mode["type"] == "string"
+        assert universe_mode["default"] == "all"
+        assert set(universe_mode["enum"]) == {"all", "liquidity_momentum"}
+
         periodic = next(s for s in strategies if s["kind"] == "periodic_query")
         assert periodic["supports_backtest"] is False
 

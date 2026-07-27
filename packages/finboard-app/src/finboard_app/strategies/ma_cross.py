@@ -9,6 +9,12 @@
 当目标股数不足 1 手(100 股)时自动跳过。
 
 策略通过 ``on_market_data`` 消费 Bar,使用 ``ctx.submit_order`` 下单。
+
+可选的动态选股(``universe_mode``):策略在每根 Bar 上调用
+:class:`~finboard_backtest.bar_universe.BarUniverseSelector` 更新入选状态,
+**仅对当前入选标的执行金叉买入**。``universe_exit_clear=True`` 时,标的发生
+入选 → 退出转换会通过 ``ctx.submit_order`` 提交清仓卖出意图,卖出仍走完整
+风控链路。默认 ``universe_mode="all"`` 保持现有策略行为,既有回测语义不变。
 """
 
 from __future__ import annotations
@@ -18,6 +24,11 @@ from decimal import Decimal
 
 import structlog
 
+from finboard_backtest.bar_universe import (
+    BarUniverseConfig,
+    BarUniverseMode,
+    BarUniverseSelector,
+)
 from finboard_broker.market_base import MarketDataEvent, MarketDataEventType
 from finboard_core.strategy import Strategy, StrategyContext
 from finboard_shared.identifiers import StrategyId
@@ -33,6 +44,11 @@ class MaCrossStrategy(Strategy):
     :param short_window: 短期均线周期(如 5)
     :param long_window:  长期均线周期(如 20),必须 > short_window
     :param max_position_pct: 最大总仓位比例(如 0.95 = 留 5% 现金)
+    :param universe_mode: 动态选股模式,``all``(默认)/``liquidity_momentum``
+    :param universe_lookback: 选股回溯窗口(仅 ``liquidity_momentum`` 生效)
+    :param universe_min_avg_amount: 选股最低平均成交额;留空不校验
+    :param universe_min_momentum: 选股最低区间动量;留空不校验
+    :param universe_exit_clear: 退出时是否清仓内部持仓
     """
 
     def __init__(
@@ -43,6 +59,11 @@ class MaCrossStrategy(Strategy):
         long_window: int = 20,
         max_position_pct: float = 0.95,
         symbol_code: str | None = None,  # 向后兼容,忽略
+        universe_mode: str = "all",
+        universe_lookback: int = 20,
+        universe_min_avg_amount: Decimal | None = None,
+        universe_min_momentum: Decimal | None = None,
+        universe_exit_clear: bool = False,
     ) -> None:
         self._id = StrategyId(strategy_id)
         self._short_window = short_window
@@ -59,6 +80,22 @@ class MaCrossStrategy(Strategy):
         self._symbol_objs: dict[str, Symbol] = {}
         self._symbols_seen: set[str] = set()
 
+        # 动态选股器(纯函数,无 I/O,实盘启用前需走样本外/影子/小资金验证)
+        try:
+            mode = BarUniverseMode(universe_mode)
+        except ValueError as exc:
+            raise ValueError(f"未知 universe_mode: {universe_mode}") from exc
+        self._universe = BarUniverseSelector(
+            BarUniverseConfig(
+                mode=mode,
+                lookback=universe_lookback,
+                min_avg_amount=universe_min_avg_amount,
+                min_momentum=universe_min_momentum,
+                exit_clear=universe_exit_clear,
+            )
+        )
+        self._exit_clear = universe_exit_clear
+
     @property
     def strategy_id(self) -> StrategyId:
         return self._id
@@ -69,6 +106,7 @@ class MaCrossStrategy(Strategy):
             strategy_id=str(self._id),
             short=self._short_window,
             long=self._long_window,
+            universe_mode=self._universe.config.mode.value,
         )
 
     async def on_market_data(
@@ -84,6 +122,21 @@ class MaCrossStrategy(Strategy):
             self._prices[code] = deque(maxlen=self._long_window)
             self._symbol_objs[code] = bar.symbol
         self._symbols_seen.add(code)
+
+        # 先更新选股器,保证它只看到按时间到达的当前/历史 Bar
+        selected = self._universe.update(bar)
+        transitioned_out = self._universe.transitioned_out(code)
+
+        # 退出清仓:只对内部已记录持仓通过 ctx 卖出,不修改持仓数量(由成交驱动)
+        if transitioned_out and self._exit_clear:
+            await self._force_exit(ctx, code, bar.close)
+
+        # 未入选标的不参与金叉/死叉信号生成
+        if not selected:
+            # 仍维护价格窗口,便于入选后立即给出均线状态
+            self._prices[code].append(bar.close)
+            return
+
         self._prices[code].append(bar.close)
 
         prices = self._prices[code]
@@ -175,6 +228,41 @@ class MaCrossStrategy(Strategy):
             self._positions[code] = current - sell_qty
         except Exception:
             logger.exception("ma_cross.sell_failed", symbol=code)
+
+    async def _force_exit(
+        self, ctx: StrategyContext, code: str, price: Decimal
+    ) -> None:
+        """标的发生 入选→退出 转换时清仓内部持仓。
+
+        通过 ``ctx.submit_order`` 走完整风控链路,不直接修改持仓数量;
+        本地 ``_positions`` 由后续成交回报更新(实际成交)或保持乐观记账
+        (与既有死叉卖出一致)。
+        """
+        current = self._positions.get(code, Decimal("0"))
+        if current <= 0:
+            return
+
+        sell_qty = self._round_lot(current)
+        if sell_qty <= 0:
+            return
+
+        logger.info(
+            "ma_cross.universe_exit",
+            strategy_id=str(self._id),
+            symbol=code,
+            price=str(price),
+            sell_qty=str(sell_qty),
+        )
+        try:
+            await ctx.submit_order(
+                self._symbol_objs[code],
+                Side.SELL,
+                sell_qty,
+                order_type=OrderType.MARKET,
+            )
+            self._positions[code] = current - sell_qty
+        except Exception:
+            logger.exception("ma_cross.universe_exit_failed", symbol=code)
 
     @staticmethod
     def _calc_quantity(value: Decimal, price: Decimal) -> Decimal:
