@@ -15,11 +15,13 @@ from finboard_persistence.models import (
     PositionModel,
     ReconciliationLogModel,
     ResearchDailyMetricModel,
+    ResearchExperimentModel,
     ResearchFinancialIndicatorModel,
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
     ResearchSyncBatchModel,
+    ResearchTrialModel,
     StrategyPresetModel,
     WatchlistItemModel,
     WatchlistModel,
@@ -44,6 +46,10 @@ from finboard_persistence.research_repo import (
 )
 from finboard_persistence.research_sync import ResearchDataSyncService
 from finboard_persistence.session import session_factory
+from finboard_persistence.validation_repo import (
+    ResearchExperimentRepository,
+    ResearchTrialRepository,
+)
 
 __all__ = [
     "AccountModel",
@@ -70,12 +76,16 @@ __all__ = [
     "ResearchDataSyncService",
     "ResearchDataset",
     "ResearchDatasetRepository",
+    "ResearchExperimentModel",
+    "ResearchExperimentRepository",
     "ResearchFinancialIndicatorModel",
     "ResearchIndustryClassificationModel",
     "ResearchIndustryMembershipModel",
     "ResearchInstrumentProfileModel",
     "ResearchSyncBatchModel",
     "ResearchSyncBatchRepository",
+    "ResearchTrialModel",
+    "ResearchTrialRepository",
     "StrategyPresetModel",
     "StrategyPresetRepository",
     "SyncBatchStatus",
