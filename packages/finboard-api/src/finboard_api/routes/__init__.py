@@ -9,6 +9,7 @@ from finboard_api.routes.health import router as health_router
 from finboard_api.routes.instruments import router as instruments_router
 from finboard_api.routes.kill_switch import router as kill_switch_router
 from finboard_api.routes.orders import router as orders_router
+from finboard_api.routes.portfolio import router as portfolio_router
 from finboard_api.routes.positions import router as positions_router
 from finboard_api.routes.reconcile import router as reconcile_router
 from finboard_api.routes.research import router as research_router
@@ -25,6 +26,7 @@ __all__ = [
     "instruments_router",
     "kill_switch_router",
     "orders_router",
+    "portfolio_router",
     "positions_router",
     "reconcile_router",
     "research_router",

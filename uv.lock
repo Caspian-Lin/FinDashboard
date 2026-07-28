@@ -587,6 +587,7 @@ dependencies = [
     { name = "finboard-core" },
     { name = "finboard-data" },
     { name = "finboard-shared" },
+    { name = "numpy" },
     { name = "structlog" },
 ]
 
@@ -596,6 +597,7 @@ requires-dist = [
     { name = "finboard-core", editable = "packages/finboard-core" },
     { name = "finboard-data", editable = "packages/finboard-data" },
     { name = "finboard-shared", editable = "packages/finboard-shared" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "structlog", specifier = ">=24.1" },
 ]
 
