@@ -4,7 +4,6 @@
 """
 
 from finboard_shared.exceptions import (
-    BrokerError,
     BrokerTimeoutError,
     FinboardError,
     KillSwitchActiveError,
@@ -18,6 +17,19 @@ from finboard_shared.identifiers import (
     StrategyId,
     generate_client_order_id,
 )
+from finboard_shared.instruments import (
+    ASSET_METADATA_VERSION,
+    BondMetadata,
+    ContinuousFuturesPoint,
+    ContinuousFuturesRule,
+    ContinuousFuturesSeries,
+    ConvertibleMetadata,
+    DatasetManifest,
+    EtfMetadata,
+    FuturesContract,
+    Instrument,
+    LifecycleEvent,
+)
 from finboard_shared.models import (
     Account,
     Fill,
@@ -27,33 +39,58 @@ from finboard_shared.models import (
     Symbol,
 )
 from finboard_shared.types import (
+    AdjustmentMethod,
+    AssetClass,
     BrokerKind,
+    CouponFrequency,
+    DatasetQualityStatus,
+    EtfCategory,
+    FuturesEventType,
+    InstrumentType,
     KillSwitchLevel,
+    LifecycleEventType,
+    ListingStatus,
     Market,
     OrderStatus,
     OrderType,
     PositionSide,
     RejectReason,
+    RollMethod,
     Side,
     TimeInForce,
     TradingPhase,
 )
 
 __all__ = [
-    # 数据模型
+    "ASSET_METADATA_VERSION",
     "Account",
-    # 强类型 ID
     "AccountId",
-    # 异常
-    "BrokerError",
-    # 枚举
+    "AdjustmentMethod",
+    "AssetClass",
+    "BondMetadata",
     "BrokerKind",
     "BrokerTimeoutError",
     "ClientOrderId",
+    "ContinuousFuturesPoint",
+    "ContinuousFuturesRule",
+    "ContinuousFuturesSeries",
+    "ConvertibleMetadata",
+    "CouponFrequency",
+    "DatasetManifest",
+    "DatasetQualityStatus",
+    "EtfCategory",
+    "EtfMetadata",
     "Fill",
     "FinboardError",
+    "FuturesContract",
+    "FuturesEventType",
+    "Instrument",
+    "InstrumentType",
     "KillSwitchActiveError",
     "KillSwitchLevel",
+    "LifecycleEvent",
+    "LifecycleEventType",
+    "ListingStatus",
     "Market",
     "Order",
     "OrderNotFoundError",
@@ -65,6 +102,7 @@ __all__ = [
     "ReconcileMismatchError",
     "RejectReason",
     "RiskCheckError",
+    "RollMethod",
     "Side",
     "StrategyId",
     "Symbol",

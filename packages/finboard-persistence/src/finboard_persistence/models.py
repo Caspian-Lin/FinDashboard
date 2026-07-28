@@ -122,6 +122,7 @@ class FillModel(Base, IdMixin):
     )
     broker_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     symbol: Mapped[str] = mapped_column(String(32), index=True)
+    market: Mapped[str | None] = mapped_column(String(16), index=True, nullable=True)  # issue #58
     side: Mapped[str] = mapped_column(String(8))
     position_side: Mapped[str] = mapped_column(String(8))
     quantity: Mapped[Decimal] = mapped_column(_numeric())
@@ -146,6 +147,7 @@ class PositionModel(Base, IdMixin):
 
     account_id: Mapped[str] = mapped_column(String(64), index=True)
     symbol: Mapped[str] = mapped_column(String(32), index=True)
+    market: Mapped[str | None] = mapped_column(String(16), index=True, nullable=True)  # issue #58
     position_side: Mapped[str] = mapped_column(String(8))
     source: Mapped[str] = mapped_column(String(8))  # local / broker
     total_quantity: Mapped[Decimal] = mapped_column(_numeric(), default=Decimal("0"))
@@ -773,4 +775,207 @@ class ResearchTrialModel(Base, IdMixin):
             name="uq_research_trial_experiment_index",
         ),
         Index("ix_research_trial_experiment_status", "experiment_id", "status"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 多资产元数据(issue #58)
+# ---------------------------------------------------------------------------
+
+
+class EtfMetadataModel(Base, IdMixin):
+    """ETF 子描述 —— 跟踪指数 / 类别 / 费率 / 是否 T+0。"""
+
+    __tablename__ = "etf_metadata"
+
+    code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    fund_code: Mapped[str] = mapped_column(String(20), index=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)  # equity/cross_border/bond/...
+    underlying_index: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    underlying_asset_class: Mapped[str] = mapped_column(String(16), default="equity")
+    management_fee_rate: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    custody_fee_rate: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    tracking_error: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    inception_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    listing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    delisting_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    iopv_available: Mapped[bool] = mapped_column(Boolean, default=False)
+    allows_t_plus_0: Mapped[bool] = mapped_column(Boolean, default=False)
+    dividend_policy: Mapped[str] = mapped_column(String(16), default="cash")
+    source: Mapped[str] = mapped_column(String(32), default="manual")
+    dataset_version: Mapped[str] = mapped_column(String(128), default="v1")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class BondMetadataModel(Base, IdMixin):
+    """交易所债券子描述 —— 票息 / 到期日 / 久期 / 信用主体。"""
+
+    __tablename__ = "bond_metadata"
+
+    code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    face_value: Mapped[Decimal] = mapped_column(_numeric(), default=Decimal("100"))
+    coupon_rate: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    coupon_frequency: Mapped[str] = mapped_column(String(16), default="annual")
+    issue_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    maturity_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    issuer: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    credit_rating: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    credit_entity_type: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    duration_years: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    yield_to_maturity: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    source: Mapped[str] = mapped_column(String(32), default="manual")
+    dataset_version: Mapped[str] = mapped_column(String(128), default="v1")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ConvertibleMetadataModel(Base, IdMixin):
+    """可转债子描述 —— 转股价 / 强赎 / 回售 / 下修条件。"""
+
+    __tablename__ = "convertible_metadata"
+
+    code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    underlying_stock_code: Mapped[str] = mapped_column(String(20), index=True)
+    conversion_price: Mapped[Decimal] = mapped_column(_numeric())
+    conversion_ratio: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    conversion_premium: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    issue_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    maturity_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    coupon_schedule: Mapped[list[object]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    redemption_yield: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    forced_redeem_trigger: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    put_back_trigger: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    downward_revision_trigger: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    source: Mapped[str] = mapped_column(String(32), default="manual")
+    dataset_version: Mapped[str] = mapped_column(String(128), default="v1")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class FuturesContractModel(Base, IdMixin):
+    """期货合约链 —— 每条记录对应一份具体月份合约。"""
+
+    __tablename__ = "futures_contracts"
+
+    contract_code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    series_id: Mapped[str] = mapped_column(String(16), index=True)  # IF / T / CU ...
+    underlying_symbol: Mapped[str] = mapped_column(String(32))
+    exchange: Mapped[str] = mapped_column(String(16), index=True)
+    multiplier: Mapped[Decimal] = mapped_column(_numeric())
+    margin_rate: Mapped[Decimal] = mapped_column(_research_numeric())
+    price_limit_pct: Mapped[Decimal] = mapped_column(_research_numeric())
+    price_tick: Mapped[Decimal] = mapped_column(_numeric())
+    listing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_trade_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    delivery_method: Mapped[str] = mapped_column(String(16), default="cash")
+    settle_price: Mapped[Decimal | None] = mapped_column(_numeric(), nullable=True)
+    open_interest: Mapped[Decimal | None] = mapped_column(_numeric(), nullable=True)
+    source: Mapped[str] = mapped_column(String(32), default="manual")
+    dataset_version: Mapped[str] = mapped_column(String(128), default="v1")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_futures_series_exchange", "series_id", "exchange"),
+    )
+
+
+class ContinuousFuturesRuleModel(Base, IdMixin):
+    """连续期货拼接规则。"""
+
+    __tablename__ = "continuous_futures_rules"
+
+    series_id: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    roll_method: Mapped[str] = mapped_column(String(16))
+    adjustment_method: Mapped[str] = mapped_column(String(16))
+    roll_day_offset: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    rule_version: Mapped[str] = mapped_column(String(16), default="v1")
+    description: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class InstrumentLifecycleEventModel(Base, IdMixin):
+    """时点化的公司行为 / 合约事件(issue #58)。
+
+    ``available_at`` 严格 >= ``effective_date`` 开盘,防止未来信息泄漏。
+    """
+
+    __tablename__ = "instrument_lifecycle_events"
+
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    effective_date: Mapped[date] = mapped_column(Date, index=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source: Mapped[str] = mapped_column(String(32))
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    details: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "event_type",
+            "effective_date",
+            "source",
+            "dataset_version",
+            name="uq_instrument_lifecycle_event",
+        ),
+        Index("ix_lifecycle_symbol_effective", "symbol", "effective_date"),
+        Index("ix_lifecycle_effective_symbol", "effective_date", "symbol"),
+    )
+
+
+class DatasetManifestModel(Base, IdMixin):
+    """数据集发布清单 —— 覆盖率 / 校验和 / 质量状态。"""
+
+    __tablename__ = "dataset_manifests"
+
+    dataset_name: Mapped[str] = mapped_column(String(64), index=True)
+    source: Mapped[str] = mapped_column(String(32))
+    version: Mapped[str] = mapped_column(String(128))
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    symbol_count: Mapped[int] = mapped_column(Integer, default=0)
+    coverage_pct: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    gaps: Mapped[list[object]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    quality_status: Mapped[str] = mapped_column(String(16), default="unknown", index=True)
+    quality_report: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    code_version: Mapped[str] = mapped_column(String(64), default="")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_name",
+            "source",
+            "version",
+            name="uq_dataset_manifest",
+        ),
     )

@@ -85,7 +85,10 @@ def fill_from_orm(row: FillModel) -> Fill:
     return Fill(
         fill_id=row.fill_id,
         client_order_id=ClientOrderId(row.client_order_id),
-        symbol=Symbol(code=row.symbol, market=Market.A_SHARE),  # FIXME: 加列后回填
+        symbol=Symbol(
+            code=row.symbol,
+            market=Market(row.market) if row.market else Market.A_SHARE,
+        ),
         side=Side(row.side),
         quantity=row.quantity,
         price=row.price,
@@ -100,7 +103,10 @@ def fill_from_orm(row: FillModel) -> Fill:
 def position_from_orm(row: PositionModel) -> Position:
     return Position(
         account_id=AccountId(row.account_id),
-        symbol=Symbol(code=row.symbol, market=Market.A_SHARE),  # FIXME: 加列后回填
+        symbol=Symbol(
+            code=row.symbol,
+            market=Market(row.market) if row.market else Market.A_SHARE,
+        ),
         position_side=PositionSide(row.position_side),
         total_quantity=row.total_quantity,
         available_quantity=row.available_quantity,
@@ -264,6 +270,7 @@ class FillRepository:
             client_order_id=str(fill.client_order_id),
             broker_order_id=fill.broker_order_id,
             symbol=fill.symbol.code,
+            market=fill.symbol.market.value,  # issue #58
             side=fill.side.value,
             position_side=fill.position_side.value,
             quantity=fill.quantity,
@@ -385,6 +392,7 @@ class PositionRepository:
             row = PositionModel(
                 account_id=str(position.account_id),
                 symbol=position.symbol.code,
+                market=position.symbol.market.value,  # issue #58
                 position_side=position.position_side.value,
                 source=source,
             )

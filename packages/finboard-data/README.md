@@ -1,6 +1,7 @@
 # finboard-data
 
-历史行情数据源(akshare / yfinance)、时点化研究数据契约和本地 parquet 缓存。
+历史行情数据源(akshare / yfinance)、时点化研究数据契约、本地 parquet 缓存
+和多资产元数据契约(issue #58)。
 
 ## 使用
 
@@ -127,3 +128,73 @@ Provider 只在显式构造且未注入 client 时加载 Tushare SDK。token 不
 为避免 Tushare 行数上限造成静默截断,财务指标必须提供起止报告期,行业成员
 必须按股票代码读取。任一接口返回行数达到官方上限时 Provider 会拒绝结果,
 调用方应缩小日期或标的范围后重试。
+
+## 多资产元数据契约(issue #58)
+
+`finboard_data.assets` 子包提供跨资产的元数据契约,支持股票、ETF、债券、
+可转债、期货和指数,以及时点化的生命周期事件和连续期货拼接。
+
+### 资产支持矩阵
+
+| InstrumentType | AssetClass      | 示例代码       | 关键字段                         |
+|----------------|-----------------|---------------|----------------------------------|
+| `STOCK`        | EQUITY          | 600519.SH     | lot_size=100, T+1, 印花税万 5    |
+| `ETF`          | EQUITY          | 510300.SH     | category: equity/bond/cross_border/... |
+| `BOND`         | FIXED_INCOME    | 019547.SH     | coupon/maturity/duration/ytm     |
+| `CONVERTIBLE`  | CONVERTIBLE     | 113001.SH     | conversion_price/forced_redeem/put_back |
+| `FUTURES`      | DERIVATIVE      | IF2406.CFFEX  | multiplier/margin/price_limit    |
+| `INDEX`        | EQUITY          | 000300.SH     | (不可交易,仅研究/基准)            |
+
+### Fail-closed 解析
+
+`InstrumentRegistry.resolve(code)` 不再默认回退到 A 股 —— 未知代码会 raise
+`InstrumentResolutionError`,强制调用方显式注册:
+
+```python
+from finboard_data import InstrumentRegistry
+from finboard_shared import Instrument, Market, InstrumentType, AssetClass
+
+reg = InstrumentRegistry([
+    Instrument(
+        code="600519.SH", name="贵州茅台",
+        market=Market.A_SHARE, instrument_type=InstrumentType.STOCK,
+        asset_class=AssetClass.EQUITY,
+    ),
+])
+inst = reg.resolve("600519.SH")  # OK
+reg.resolve("UNKNOWN.XXX")       # raises InstrumentResolutionError
+```
+
+带后缀的常见代码可自动推断市场 + 类型(如 `510300.SH` → ETF,
+`113001.SH` → CONVERTIBLE,`IF2406.CFFEX` → FUTURES),无需显式注册。
+
+### 时点化生命周期事件
+
+`LifecycleEvent` 强制 `available_at >= effective_date` 当日开盘,
+防止未来信息泄漏:
+
+```python
+from datetime import date, datetime, timezone
+from finboard_data.assets.provider import InstrumentMetadataProvider
+```
+
+### 连续期货序列
+
+`build_continuous_series()` 按 `ContinuousFuturesRule` 把多个月份合约拼成
+连续序列,支持 NONE / RATIO / DIFFERENCE 三种调整方法,每个点同时保留
+`raw_price` 和 `contract_code`,可随时还原未拼接价格。
+
+### 数据集覆盖率审计
+
+`audit_dataset_coverage()` 根据每标的的实际起止日 / bar 数生成
+`CoverageReport`,区分 full / short_history / gaps / delisted / missing,
+质量不合格的数据集 `quality_status=FAILED`,回测引擎拒绝加载。
+
+### 已知局限
+
+* 本子包只定义契约,**不**实现具体的 akshare/tushare 抓取逻辑;
+* 10万-50万元组合优先通过 **债券 ETF** 获取固收暴露,直接现券单列能力边界;
+* 期货合约链的换月判定(`RollMethod=VOLUME`)由调用方提前按成交量排序,
+  本子包只做拼接;
+* 多资产能力属于研究 / 回测阶段,**不**授权多市场实盘或 CTP 实盘接入
+  (见 AGENTS.md 阶段顺序)。

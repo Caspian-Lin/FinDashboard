@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -233,7 +233,11 @@ class InstrumentOut(BaseSchema):
     market: str
     instrument_type: str
     exchange: str | None = None
+    list_date: date | None = None
+    delist_date: date | None = None
     status: str = "active"
+    sector: str | None = None
+    industry: str | None = None
 
 
 class InstrumentListOut(BaseSchema):
@@ -603,3 +607,98 @@ class TrialCreate(BaseSchema):
 
 class ExperimentRejectIn(BaseSchema):
     reason: str = Field(min_length=1)
+
+
+# --------------------------------------------------------------------------- 多资产元数据(issue #58)
+
+
+class EtfMetadataOut(BaseSchema):
+    code: str
+    fund_code: str
+    category: str
+    underlying_index: str | None = None
+    underlying_asset_class: str = "equity"
+    management_fee_rate: Decimal | None = None
+    custody_fee_rate: Decimal | None = None
+    tracking_error: Decimal | None = None
+    inception_date: date | None = None
+    listing_date: date | None = None
+    delisting_date: date | None = None
+    iopv_available: bool = False
+    allows_t_plus_0: bool = False
+    dividend_policy: str = "cash"
+
+
+class BondMetadataOut(BaseSchema):
+    code: str
+    face_value: Decimal = Decimal("100")
+    coupon_rate: Decimal | None = None
+    coupon_frequency: str = "annual"
+    issue_date: date | None = None
+    maturity_date: date | None = None
+    issuer: str | None = None
+    credit_rating: str | None = None
+    credit_entity_type: str | None = None
+    duration_years: Decimal | None = None
+    yield_to_maturity: Decimal | None = None
+
+
+class ConvertibleMetadataOut(BaseSchema):
+    code: str
+    underlying_stock_code: str
+    conversion_price: Decimal
+    conversion_ratio: Decimal | None = None
+    conversion_premium: Decimal | None = None
+    issue_date: date | None = None
+    maturity_date: date | None = None
+    coupon_schedule: list[Any] = Field(default_factory=list)
+    redemption_yield: Decimal | None = None
+    forced_redeem_trigger: Decimal | None = None
+    put_back_trigger: Decimal | None = None
+    downward_revision_trigger: Decimal | None = None
+
+
+class FuturesContractOut(BaseSchema):
+    contract_code: str
+    series_id: str
+    underlying_symbol: str
+    exchange: str
+    multiplier: Decimal
+    margin_rate: Decimal
+    price_limit_pct: Decimal
+    price_tick: Decimal
+    listing_date: date | None = None
+    last_trade_date: date | None = None
+    delivery_date: date | None = None
+    delivery_method: str = "cash"
+    settle_price: Decimal | None = None
+    open_interest: Decimal | None = None
+
+
+class LifecycleEventOut(BaseSchema):
+    id: int
+    symbol: str
+    event_type: str
+    effective_date: date
+    available_at: datetime
+    source: str
+    dataset_version: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class DatasetManifestOut(BaseSchema):
+    id: int
+    dataset_name: str
+    source: str
+    version: str
+    start_date: date | None = None
+    end_date: date | None = None
+    row_count: int = 0
+    symbol_count: int = 0
+    coverage_pct: Decimal = Decimal("0")
+    gaps: list[Any] = Field(default_factory=list)
+    checksum: str = ""
+    quality_status: str = "unknown"
+    quality_report: dict[str, Any] = Field(default_factory=dict)
+    published_at: datetime
+    code_version: str = ""
