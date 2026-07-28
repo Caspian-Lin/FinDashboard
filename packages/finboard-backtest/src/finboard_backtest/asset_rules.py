@@ -5,10 +5,10 @@ issue #56 的核心目标之一:**消除 A 股默认规则被错误地套用到 
 
 * 手数(最小交易单位):A 股 / 股票 ETF = 100 股;债券 / 货币 ETF = 10 张;
   可转债 = 10 张(深市)/ 10 张(沪市);期货 = 1 手。
-* ``T+0/T+1``:A 股 / 股票 ETF / 债券 ETF / 可转债 = T+1(可显式关闭);
-  货币 ETF / 跨境 ETF / 期货 = T+0。
-* 印花税:A 股股票 / 股票 ETF / 可转债卖出收万 5;债券 ETF / 货币 ETF /
-  国债 ETF 免印花税;期货按合约设定(股指期货万分之 0.23 卖出,本所收)。
+* ``T+0/T+1``:A 股 / 股票 ETF / 债券 ETF = T+1(可显式关闭);
+  可转债 = T+0(当日回转);货币 ETF / 跨境 ETF / 期货 = T+0。
+* 印花税:A 股股票 / 股票 ETF 卖出收万 5;债券 ETF / 货币 ETF /
+  国债 ETF / 可转债免印花税;期货按合约设定(股指期货万分之 0.23 卖出,本所收)。
 * 佣金费率与最低佣金:全部按 ``commission_rate / commission_min`` 复用配置。
 * 涨跌停:仅在 ``price_limit`` 显式配置时启用;A 股主板默认 ±10%(亏损/退市
   风险警示 *ST、*ST/* ST 为 ±5%),创业 / 科创板 ±20%,可转债盘中 ±20%。
@@ -30,7 +30,7 @@ from decimal import Decimal
 from finboard_shared.models import Bar
 from finboard_shared.types import InstrumentType, Market, Side
 
-ASSET_RULES_VERSION = "v1"
+ASSET_RULES_VERSION = "v2"
 """本撮合规则目录的版本号;每次手数 / T+N / 税率 / tick 变更必须递增。
 
 回测结果在 ``BacktestResult`` 中归档此版本,使历史 run 不可直接横向比较。
@@ -297,16 +297,30 @@ INDEX_RULE = AssetRule(
     description="指数本身不可交易;仅在研究 / 基准中使用。",
 )
 
+CONVERTIBLE_BOND = AssetRule(
+    instrument_type=InstrumentType.CONVERTIBLE,
+    lot_size=Decimal("10"),
+    enforce_t_plus_1=False,
+    stamp_tax_rate=Decimal("0"),
+    commission_rate=Decimal("0.0002"),
+    commission_min=Decimal("1"),
+    price_limit_pct=Decimal("0.20"),
+    price_tick=Decimal("0.001"),
+    allow_short=False,
+    description="可转债:10 张/手、T+0 当日回转、免印花税、盘中涨跌停 ±20%、tick 0.001。",
+)
+
 DEFAULT_TABLE = AssetRuleTable(
     rules=(
         (Market.A_SHARE, InstrumentType.STOCK, A_SHARE_STOCK),
         (Market.A_SHARE, InstrumentType.ETF, EQUITY_ETF),
         (Market.A_SHARE, InstrumentType.INDEX, INDEX_RULE),
+        (Market.A_SHARE, InstrumentType.CONVERTIBLE, CONVERTIBLE_BOND),
     ),
     futures_rules=(),
     rule_version=ASSET_RULES_VERSION,
 )
-"""默认目录覆盖 A 股股票 / 股票 ETF / 指数。
+"""默认目录覆盖 A 股股票 / 股票 ETF / 指数 / 可转债。
 
 研究 / 回测域接入新资产类(issue #58、#64)时,调用方在
 ``AssetRuleTable`` 中显式注册对应规则,**不**自动回退到 A 股股票规则 ——
@@ -430,6 +444,7 @@ __all__ = [
     "ASSET_RULES_VERSION",
     "A_SHARE_STOCK",
     "BOND_ETF",
+    "CONVERTIBLE_BOND",
     "CROSS_BORDER_ETF",
     "DEFAULT_TABLE",
     "EQUITY_ETF",
