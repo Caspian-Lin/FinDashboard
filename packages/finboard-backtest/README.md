@@ -576,3 +576,91 @@ equity-oriented 的纸面撮合引擎,不支持做空、保证金、乘数和每
 * 仅用于离线研究 / 回测。
 
 
+## LLM 辅助因子假设登记与离线审阅流程(issue #65)
+
+`finboard_backtest.factor_research` 子包提供受控、可审计的 LLM 辅助研究循环。
+
+### LLM 能做 / 不能做
+
+| 能做 | 不能做 |
+|------|--------|
+| 输出结构化 `FactorHypothesis` | 生成可执行 Python 代码 |
+| 引用白名单字段与算子 | 调用 `exec` / `eval` / `import` / `open` |
+| 提出有限参数预算 | 连接 Broker / OrderManager / 实盘配置 |
+| 记录参考文献与失效场景 | 把单次高收益描述成有效策略 |
+| 标记预期方向(long_high / long_low) | 绕过风控 / Kill Switch |
+| 提示词经 `sanitize_prompt` 脱敏 | 在提示词中包含 API key / 密码 / 账户 |
+
+### 状态机
+
+```
+proposed -> approved_for_research -> in_sample -> validated_oos / rejected
+```
+
+- `proposed`: LLM 提出, 等待人工审阅
+- `approved_for_research`: 人工批准, 可以进入实验
+- `in_sample`: 实验进行中
+- `validated_oos`: 样本外验证通过(只能由 #57 walk-forward 产生)
+- `rejected`: 被拒绝(验证失败 / 人工拒绝 / OOS 未通过)
+- `superseded`: 被新版本取代
+
+### 人工审批 gate
+
+```python
+wf = ResearchWorkflow()
+h = wf.submit(hypothesis, actor="llm@gpt-4")  # 自动验证
+wf.approve(h.hypothesis_id, approver="alice")  # 显式人工批准
+reg = wf.register_experiment(
+    h.hypothesis_id,
+    model_version="gpt-4-0613",
+    prompt_version="v3",
+    dataset_version="ak-2024-01",
+    code_version="abc1234",
+    registered_by="alice",
+)
+wf.complete_experiment(
+    reg.experiment_id,
+    passed_oos=True,      # 只能由 #57 walk-forward 产生
+    completed_by="alice",
+)
+```
+
+### 白名单
+
+输入字段: `close`, `open`, `high`, `low`, `volume`, `vwap`, `turnover`,
+`market_cap`, `pe_ratio`, `pb_ratio`, `returns_1d`, `adv20` 等。
+
+算子: `rank`, `zscore`, `ts_mean`, `ts_std`, `ts_rank`, `ts_corr`,
+`delta`, `delay`, `sigmoid`, `log`, `add`, `multiply` 等。
+
+禁止: `import`, `exec`, `eval`, `open`, `subprocess`, `socket`, `requests`,
+`SELECT`/`INSERT`/`DROP`/`DELETE`(SQL), `broker`, `order_manager`, `kill_switch`。
+
+### 试验预算
+
+每个假设的参数搜索空间 = 所有 `ParameterSpec.grid_size` 的乘积。
+默认上限 1000 组合。超过上限自动拒绝。
+试验次数达到预算上限后不能再登记新实验。
+
+### 审计追踪
+
+所有状态变更(提交/验证/审批/拒绝/实验登记/完成/取代/中断)都记录到
+`AuditTrail`, 包含时间戳、事件类型、操作人和详情。
+失败实验和反例同样保留,用于审计。
+
+### 敏感数据脱敏
+
+`sanitize_prompt()` 自动替换提示词中的:
+- API key (OpenAI / Anthropic / AWS)
+- 密码 / token / credential 赋值
+- Bearer token
+- 手机号 / 邮箱 / 银行卡号 / 身份证号
+
+### 已知局限
+
+* FakeLLMProvider 是测试 stub,不调用公网 LLM。
+* 真实 LLM provider 的实现不在本 issue 范围内。
+* 不连接 Broker / OrderManager / 实盘策略配置。
+* validated_oos 只能由 #57 walk-forward 的机器验证结果产生,不能由 LLM 或人工主观判断。
+
+
