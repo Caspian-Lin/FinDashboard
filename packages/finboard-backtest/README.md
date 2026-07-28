@@ -374,3 +374,70 @@ closes → compute_absolute_trend (SMA200 or lookback return > 0)
 * 本子包仅用于离线研究 / 回测。
 
 
+## 高流动性 ETF 短周期均值回归策略(issue #62)
+
+`finboard_backtest.mean_reversion` 子包提供 long-only、严格成本约束的短周期
+均值回归研究基线。该策略优先级**低于** ETF 趋势/组合构建,因为均值回归
+高度依赖高换手和收盘可成交假设,在实盘中冲击成本难以预估。
+
+### 为什么优先级低
+
+* 均值回归在趋势行情中持续失效(单边运动导致"抄底"不断亏损)。
+* 高换手率放大佣金/滑点/冲击成本的影响,成本 x2 后可能直接失效。
+* 负偏度分布:高胜率但尾部损失集中,不能以胜率替代回撤/尾部风险评估。
+* 仅作为严格成本约束的研究 sleeve,不能与趋势策略共用未经验证的撮合结论。
+
+### 信号族(预注册)
+
+| 族 | 计算 | 入场 | 出场 |
+|----|------|------|------|
+| Z_SCORE | (close - SMA) / std | z < -entry | z > -exit |
+| BOLLINGER | %B = (close - lower) / (upper - lower) | %B < entry | %B > exit |
+| RSI | Wilder RSI(period) | RSI < entry | RSI > exit |
+| REVERSAL | N 日收益率 | ret < -entry | ret > -exit |
+
+`ParameterGrid` 在实验前冻结所有信号族和参数组合,`total_candidates` 是
+试验预算的硬上限。
+
+### 执行模型
+
+* **T 日收盘信号 -> T+1 开盘成交**,禁止同 Bar 成交。
+* 成本拆分:佣金(万三) + 印花税(卖出千一) + 滑点(bps)。
+* 成交参与率约束:单标的成交量 / 当日成交量 <= `max_participation`。
+
+### 状态过滤
+
+* SMA(N) 趋势过滤:close > SMA -> BULL/NEUTRAL(允许入场),close < SMA -> BEAR(禁止)。
+* 波动率过滤:当前波动 / 历史波动 > `regime_vol_max_ratio` -> HIGH_VOL(禁止入场)。
+* **未知状态不交易**:数据不足以计算时标记 UNKNOWN -> 禁止入场。
+
+### 硬约束(不可绕过)
+
+| 约束 | 说明 |
+|------|------|
+| `max_positions` | 最大同时持仓数 |
+| `max_weight_per_position` | 单标的权重上限 |
+| `max_holding_days` | 最长持有期,到期强制平仓 |
+| `cooldown_days` | 平仓后冷却期,不允许重新入场 |
+| `max_daily_turnover` | 单日换手率上限 |
+| `max_participation` | 单标的成交量参与率上限 |
+| `no_averaging_down` | 禁止对浮亏头寸加仓 |
+
+### 绩效分析
+
+`analyze_mean_reversion()` 输出:
+* 毛/净收益及成本归因(佣金/印花税/滑点分解)。
+* 成本 x2 敏感性:翻倍成本后净收益仍为正 -> survives。
+* 趋势 sleeve 相关性:与 ETF 轮动收益序列的相关系数。
+* 危机期表现:最大回撤区间的交易数和入场数。
+* 资金档位可行性(10万/20万/50万元)。
+* rejected 判定:成本 x2 失效 或 Sharpe < 0。
+
+### 已知局限
+
+* 均值回归在 A 股 ETF 上的有效性需要样本外验证,学术证据不能替代实证。
+* 高换手率使该策略对成本假设极度敏感;成本 x2 失效应直接拒绝。
+* 负偏度分布意味着尾部风险被均值/Sharpe 低估。
+* 本子包仅用于离线研究 / 回测。
+
+
