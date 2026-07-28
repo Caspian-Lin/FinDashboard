@@ -4,6 +4,18 @@ akshare / yfinance / tushare / pyarrow 均为 lazy import,Linux CI 环境无需�
 """
 
 from finboard_data.akshare_provider import AkShareProvider
+from finboard_data.assets import (
+    ContinuousFuturesBuildError,
+    CoverageEntry,
+    CoverageReport,
+    InstrumentMetadataProvider,
+    InstrumentMetadataProviderError,
+    InstrumentRegistry,
+    InstrumentResolutionError,
+    audit_dataset_coverage,
+    build_continuous_series,
+    resolve_market_by_code,
+)
 from finboard_data.base import HistoricalDataProvider
 from finboard_data.factors import (
     FACTOR_CATALOG,
@@ -56,6 +68,9 @@ __all__ = [
     "FACTOR_CATALOG",
     "FACTOR_VERSION",
     "AkShareProvider",
+    "ContinuousFuturesBuildError",
+    "CoverageEntry",
+    "CoverageReport",
     "DailySecurityMetrics",
     "FactorDefinition",
     "FactorFrequency",
@@ -72,7 +87,11 @@ __all__ = [
     "FinancialIndicator",
     "HistoricalDataProvider",
     "IndustryMembership",
+    "InstrumentMetadataProvider",
+    "InstrumentMetadataProviderError",
     "InstrumentProfile",
+    "InstrumentRegistry",
+    "InstrumentResolutionError",
     "PointInTimeSafety",
     "QualityIssue",
     "QualityReport",
@@ -90,7 +109,10 @@ __all__ = [
     "SymbolPoolConfig",
     "TushareResearchDataProvider",
     "YFinanceProvider",
+    "audit_dataset_coverage",
+    "build_continuous_series",
     "factor_catalog",
     "load_symbol_pool",
+    "resolve_market_by_code",
     "save_symbol_pool",
 ]
