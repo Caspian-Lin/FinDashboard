@@ -30,7 +30,7 @@ from decimal import Decimal
 from finboard_shared.models import Bar
 from finboard_shared.types import InstrumentType, Market, Side
 
-ASSET_RULES_VERSION = "v2"
+ASSET_RULES_VERSION = "v3"
 """本撮合规则目录的版本号;每次手数 / T+N / 税率 / tick 变更必须递增。
 
 回测结果在 ``BacktestResult`` 中归档此版本,使历史 run 不可直接横向比较。
@@ -317,14 +317,25 @@ DEFAULT_TABLE = AssetRuleTable(
         (Market.A_SHARE, InstrumentType.INDEX, INDEX_RULE),
         (Market.A_SHARE, InstrumentType.CONVERTIBLE, CONVERTIBLE_BOND),
     ),
-    futures_rules=(),
+    futures_rules=(
+        ("IF", FuturesRule(multiplier=Decimal("300"), margin_rate=Decimal("0.12"))),
+        ("IC", FuturesRule(multiplier=Decimal("200"), margin_rate=Decimal("0.14"))),
+        ("IH", FuturesRule(multiplier=Decimal("300"), margin_rate=Decimal("0.12"))),
+        ("IM", FuturesRule(multiplier=Decimal("200"), margin_rate=Decimal("0.14"))),
+        ("T", FuturesRule(multiplier=Decimal("10000"), margin_rate=Decimal("0.02"))),
+        ("TF", FuturesRule(multiplier=Decimal("10000"), margin_rate=Decimal("0.012"))),
+        ("TS", FuturesRule(multiplier=Decimal("20000"), margin_rate=Decimal("0.005"))),
+    ),
     rule_version=ASSET_RULES_VERSION,
 )
-"""默认目录覆盖 A 股股票 / 股票 ETF / 指数 / 可转债。
+"""默认目录覆盖 A 股股票 / 股票 ETF / 指数 / 可转债 + 股指 / 国债期货。
 
-研究 / 回测域接入新资产类(issue #58、#64)时,调用方在
+研究 / 回测域接入新资产类(issue #58、#63、#64)时,调用方在
 ``AssetRuleTable`` 中显式注册对应规则,**不**自动回退到 A 股股票规则 ——
 未注册的 (market, type) 解析时 raise,保证 fail closed。
+
+期货合约的多空 / 保证金 / 每日盯市由 ``futures_tsmom`` 子包的独立
+模拟器消费 ``FuturesRule``;``BacktestBroker`` 暂不处理期货撮合。
 """
 
 
