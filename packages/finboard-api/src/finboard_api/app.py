@@ -26,6 +26,7 @@ from finboard_api.routes import (
     instruments_router,
     kill_switch_router,
     orders_router,
+    portfolio_router,
     positions_router,
     reconcile_router,
     research_router,
@@ -121,6 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(strategy_presets_router)
     app.include_router(research_router)
     app.include_router(instruments_router)
+    app.include_router(portfolio_router)
 
     # WebSocket
     @app.websocket("/ws/events")
