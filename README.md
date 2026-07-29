@@ -243,6 +243,31 @@ SHA-256。发布清单会登记到 PostgreSQL `research_dataset_releases`,API
 也不提供 Python 策略编辑器。方法、接口和局限详见
 [`packages/finboard-backtest/README.md`](./packages/finboard-backtest/README.md#因子实验室风险模型与跨市场特征issue-78)。
 
+### 统一研究回测生命周期
+
+`ResearchRun` 将冻结数据、因子快照、无代码策略规格、标准化信号、约束前后目标
+仓位、离散调仓计划、研究订单/成交、成交驱动持仓/盈亏和绩效报告保存为一条可递归
+查询的血缘。#29 与 #60-#64 通过同一个适配器和结果契约进入编排器;同版本重放会
+比较与 run ID 无关的结果 checksum。
+
+运行状态覆盖 `queued / running / completed / failed / interrupted / rejected /
+cancelled`。逐阶段 PostgreSQL checkpoint 支持重启恢复，run/decision/trace ID
+可从成交回溯到候选池和冻结输入。研究表与实盘账户、订单、成交、持仓完全隔离，
+持仓只能由研究成交推导。
+
+API 只提供排队、历史、血缘、取消和重放登记，没有同步 `/run` 或 `/execute`
+端点;LLM actor 在 API 和领域层都被拒绝。网页仍只编辑结构化策略，不提供 Python
+策略代码。完整架构、状态机、artifact/API 契约、错误语义、复现步骤和
+`phase1_doc.md` §3.4 映射见
+[统一研究回测生命周期](docs/research_run_lifecycle.md)。
+
+固定样本复现:
+
+```bash
+uv run pytest tests/unit/research_run tests/unit/test_api_research_runs.py -v
+uv run pytest tests/integration/test_research_run_persistence.py -v
+```
+
 ### 配置项说明（InfoHint）
 
 回测、行情数据、设置和策略配置页使用

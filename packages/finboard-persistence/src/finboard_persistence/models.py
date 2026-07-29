@@ -395,6 +395,82 @@ class ResearchStrategySpecModel(Base, IdMixin):
     )
 
 
+class ResearchRunModel(Base, IdMixin):
+    """离线研究运行;与实盘账户/订单/成交/持仓表完全隔离(issue #80)。"""
+
+    __tablename__ = "research_runs"
+
+    run_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
+    replay_of_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    strategy_id: Mapped[str] = mapped_column(String(64), index=True)
+    strategy_kind: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    schema_version: Mapped[str] = mapped_column(String(16))
+    manifest_checksum: Mapped[str] = mapped_column(String(64), index=True)
+    manifest: Mapped[dict[str, object]] = mapped_column(JSON)
+    result: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    result_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ResearchRunArtifactModel(Base, IdMixin):
+    """ResearchRun 各阶段的追加式血缘 artifact。"""
+
+    __tablename__ = "research_run_artifacts"
+
+    run_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("research_runs.run_id", ondelete="CASCADE"),
+        index=True,
+    )
+    artifact_id: Mapped[str] = mapped_column(String(160))
+    decision_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    stage: Mapped[str] = mapped_column(String(48), index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    parent_trace_ids: Mapped[list[str]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    checksum: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "artifact_id", name="uq_research_run_artifact_id"
+        ),
+        UniqueConstraint(
+            "run_id", "sequence", name="uq_research_run_artifact_sequence"
+        ),
+        UniqueConstraint(
+            "run_id", "trace_id", name="uq_research_run_trace_id"
+        ),
+        Index(
+            "ix_research_run_artifact_history",
+            "run_id",
+            "decision_id",
+            "sequence",
+        ),
+    )
+
+
 class ResearchSyncBatchModel(Base, IdMixin):
     """一次研究数据摄取、质量检查和发布批次。"""
 

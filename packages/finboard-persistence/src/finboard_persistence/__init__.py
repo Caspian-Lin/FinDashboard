@@ -43,6 +43,8 @@ from finboard_persistence.models import (
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
+    ResearchRunArtifactModel,
+    ResearchRunModel,
     ResearchStrategySpecModel,
     ResearchSyncBatchModel,
     ResearchTrialModel,
@@ -68,6 +70,10 @@ from finboard_persistence.research_repo import (
     ResearchDatasetRepository,
     ResearchSyncBatchRepository,
     SyncBatchStatus,
+)
+from finboard_persistence.research_run_repo import (
+    ResearchRunPersistenceConflictError,
+    ResearchRunRepository,
 )
 from finboard_persistence.research_sync import ResearchDataSyncService
 from finboard_persistence.session import session_factory
@@ -134,6 +140,10 @@ __all__ = [
     "ResearchIndustryClassificationModel",
     "ResearchIndustryMembershipModel",
     "ResearchInstrumentProfileModel",
+    "ResearchRunArtifactModel",
+    "ResearchRunModel",
+    "ResearchRunPersistenceConflictError",
+    "ResearchRunRepository",
     "ResearchStrategySpecModel",
     "ResearchStrategySpecRepository",
     "ResearchSyncBatchModel",
