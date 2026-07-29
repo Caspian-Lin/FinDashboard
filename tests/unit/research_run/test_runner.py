@@ -19,7 +19,7 @@ from finboard_backtest.research_run import (
     registered_adapter_kinds,
 )
 
-from .conftest import fixed_report
+from .conftest import fixed_report, replace_pipeline_evidence
 
 
 @pytest.mark.asyncio
@@ -33,7 +33,7 @@ async def test_all_six_strategies_share_complete_lifecycle(
         if kind == "futures_tsmom"
         else ResearchFillAction.OPEN_LONG
     )
-    decision = decision_factory(action=action)
+    decision = decision_factory(manifest=manifest, action=action)
     adapter = DecisionSequenceAdapter(
         strategy_kind=kind,
         decisions=(decision,),
@@ -44,10 +44,10 @@ async def test_all_six_strategies_share_complete_lifecycle(
 
     record = await coordinator.execute(manifest, adapter)
 
-    assert record.status is ResearchRunStatus.COMPLETED
+    assert record.status is ResearchRunStatus.COMPLETED, record.error_summary
     assert record.result is not None
     artifacts = await store.list_artifacts(manifest.run_id)
-    assert len(artifacts) == 11
+    assert len(artifacts) == 14
     assert [item.stage.value for item in artifacts] == [
         "universe",
         "features",
@@ -55,13 +55,16 @@ async def test_all_six_strategies_share_complete_lifecycle(
         "targets_before_constraints",
         "constraints",
         "targets_after_constraints",
+        "risk_exits",
+        "targets_after_risk",
+        "capital_feasibility",
         "rebalance_plan",
         "orders",
         "fills",
         "ledger",
         "report",
     ]
-    fill_lineage = await coordinator.lineage(manifest.run_id, artifacts[8].trace_id)
+    fill_lineage = await coordinator.lineage(manifest.run_id, artifacts[11].trace_id)
     assert [item.stage.value for item in fill_lineage] == [
         "universe",
         "features",
@@ -69,6 +72,9 @@ async def test_all_six_strategies_share_complete_lifecycle(
         "targets_before_constraints",
         "constraints",
         "targets_after_constraints",
+        "risk_exits",
+        "targets_after_risk",
+        "capital_feasibility",
         "rebalance_plan",
         "orders",
         "fills",
@@ -93,7 +99,7 @@ async def test_idempotent_retry_does_not_duplicate_artifacts(
     second = await coordinator.execute(manifest, adapter)
 
     assert second is first
-    assert len(await store.list_artifacts(manifest.run_id)) == 11
+    assert len(await store.list_artifacts(manifest.run_id)) == 14
 
 
 @pytest.mark.asyncio
@@ -213,6 +219,7 @@ async def test_partial_fill_is_reflected_in_position_and_shortfall(
     decision = decision_factory(
         quantity=Decimal("50"),
         order_quantity=Decimal("100"),
+        order_status=ResearchOrderStatus.PARTIALLY_FILLED,
         cash=Decimal("95000"),
         market_value=Decimal("5000"),
     )
@@ -220,9 +227,12 @@ async def test_partial_fill_is_reflected_in_position_and_shortfall(
         fixed_report("ma_cross", decision),
         fill_shortfall=Decimal("5000"),
     )
-    decision = replace(
-        decision,
-        ledger=replace(decision.ledger, fill_shortfall=Decimal("5000")),
+    decision = replace_pipeline_evidence(
+        replace(
+            decision,
+            ledger=replace(decision.ledger, fill_shortfall=Decimal("5000")),
+        ),
+        manifest=manifest_factory(),
     )
     adapter = DecisionSequenceAdapter(
         strategy_kind="ma_cross",
@@ -234,7 +244,7 @@ async def test_partial_fill_is_reflected_in_position_and_shortfall(
         InMemoryResearchRunStore()
     ).execute(manifest_factory(), adapter)
 
-    assert record.status is ResearchRunStatus.COMPLETED
+    assert record.status is ResearchRunStatus.COMPLETED, record.error_summary
     assert record.result is not None
     assert record.result.fill_shortfall == Decimal("5000")
 
@@ -243,17 +253,36 @@ async def test_partial_fill_is_reflected_in_position_and_shortfall(
 async def test_strategy_cannot_mutate_position_without_fill(
     manifest_factory, decision_factory
 ) -> None:
-    decision = decision_factory()
-    mutated = replace(decision, fills=())
+    manifest = manifest_factory()
+    decision = decision_factory(manifest=manifest)
+    mutated = replace_pipeline_evidence(
+        replace(
+            decision,
+            positions=(
+                replace(
+                    decision.positions[0],
+                    quantity=Decimal("200"),
+                    market_value=Decimal("20000"),
+                ),
+            ),
+            ledger=replace(
+                decision.ledger,
+                cash=Decimal("80000"),
+                market_value=Decimal("20000"),
+                equity=Decimal("100000"),
+            ),
+        ),
+        manifest=manifest,
+    )
     adapter = DecisionSequenceAdapter(
         strategy_kind="ma_cross",
         decisions=(mutated,),
-        report=replace(fixed_report("ma_cross", mutated), fill_count=0),
+        report=fixed_report("ma_cross", mutated),
     )
 
     record = await ResearchRunCoordinator(
         InMemoryResearchRunStore()
-    ).execute(manifest_factory(), adapter)
+    ).execute(manifest, adapter)
 
     assert record.status is ResearchRunStatus.FAILED
     assert "持仓必须由成交驱动" in (record.error_summary or "")
@@ -342,61 +371,53 @@ async def test_duplicate_worker_does_not_fail_active_run(
 
 
 @pytest.mark.asyncio
-async def test_risk_rejection_remains_order_evidence_without_position(
+async def test_hard_constraint_rejects_run_before_order_persistence(
     manifest_factory, decision_factory
 ) -> None:
-    original = decision_factory()
-    rejected_order = replace(
-        original.orders[0],
-        status=ResearchOrderStatus.REJECTED,
-        reject_reason="risk: cash buffer",
-    )
-    rejected = replace(
-        original,
-        constraints=(
-            ConstraintOutcome(
-                constraint="cash_buffer",
-                passed=False,
-                before_value=0.0,
-                after_value=1.0,
-                limit=0.05,
-                reason="现金缓冲不足,目标仓位归零",
+    manifest = manifest_factory()
+    original = decision_factory(manifest=manifest)
+    rejected = replace_pipeline_evidence(
+        replace(
+            original,
+            constraints=(
+                ConstraintOutcome(
+                    constraint="cash_buffer",
+                    passed=False,
+                    before_value=0.0,
+                    after_value=1.0,
+                    limit=0.05,
+                    reason="现金缓冲不足,目标仓位归零",
+                ),
+            ),
+            targets_after_constraints=(),
+            targets_after_risk=(),
+            rebalance_plan=(),
+            orders=(),
+            fills=(),
+            positions=(),
+            ledger=replace(
+                original.ledger,
+                cash=Decimal("100000"),
+                market_value=Decimal("0"),
+                equity=Decimal("100000"),
             ),
         ),
-        targets_after_constraints=(),
-        orders=(rejected_order,),
-        fills=(),
-        positions=(),
-        ledger=replace(
-            original.ledger,
-            cash=Decimal("100000"),
-            market_value=Decimal("0"),
-            equity=Decimal("100000"),
-        ),
-    )
-    report = replace(
-        fixed_report("ma_cross", rejected),
-        fill_count=0,
-        constraint_impact={"cash_buffer": -0.1},
+        manifest=manifest,
     )
 
     store = InMemoryResearchRunStore()
     record = await ResearchRunCoordinator(store).execute(
-        manifest_factory(),
+        manifest,
         DecisionSequenceAdapter(
             strategy_kind="ma_cross",
             decisions=(rejected,),
-            report=report,
+            report=fixed_report("ma_cross", rejected),
         ),
     )
 
-    assert record.status is ResearchRunStatus.COMPLETED
-    order_artifact = (await store.list_artifacts(record.manifest.run_id))[7]
-    orders = order_artifact.payload["orders"]
-    assert isinstance(orders, list)
-    first_order = orders[0]
-    assert isinstance(first_order, dict)
-    assert first_order["reject_reason"] == "risk: cash buffer"
+    assert record.status is ResearchRunStatus.REJECTED
+    assert record.error_code == "hard_constraint_rejected"
+    assert await store.list_artifacts(record.manifest.run_id) == []
 
 
 @pytest.mark.asyncio
@@ -451,7 +472,7 @@ async def test_timeout_interrupts_after_checkpoint_and_resume_is_idempotent(
     coordinator = ResearchRunCoordinator(store)
     interrupted = await coordinator.execute(manifest, TimeoutAdapter())
     assert interrupted.status is ResearchRunStatus.INTERRUPTED
-    assert len(await store.list_artifacts(manifest.run_id)) == 10
+    assert len(await store.list_artifacts(manifest.run_id)) == 13
 
     resumed = await coordinator.execute(
         manifest,
@@ -462,7 +483,7 @@ async def test_timeout_interrupts_after_checkpoint_and_resume_is_idempotent(
         ),
     )
     assert resumed.status is ResearchRunStatus.COMPLETED
-    assert len(await store.list_artifacts(manifest.run_id)) == 11
+    assert len(await store.list_artifacts(manifest.run_id)) == 14
 
 
 @pytest.mark.asyncio

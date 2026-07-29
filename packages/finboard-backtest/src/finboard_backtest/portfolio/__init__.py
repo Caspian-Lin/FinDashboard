@@ -78,6 +78,9 @@ from finboard_backtest.portfolio.feasibility import (
 )
 from finboard_backtest.portfolio.risk_budget import (
     ConcentrationCheck,
+    RiskBudgetError,
+    RiskContributionProjection,
+    enforce_risk_contribution_cap,
     needs_rebalance,
     portfolio_volatility,
     risk_concentration_check,
@@ -124,6 +127,8 @@ __all__ = [
     "PositionSnapshot",
     "RebalancePlan",
     "RebalanceTrade",
+    "RiskBudgetError",
+    "RiskContributionProjection",
     "RiskExitResult",
     "Signal",
     "SignalConflictPolicy",
@@ -138,6 +143,7 @@ __all__ = [
     "build_portfolio",
     "compute_attribution",
     "constraint_impact_summary",
+    "enforce_risk_contribution_cap",
     "estimate_covariance",
     "evaluate_capital_tiers",
     "execute_risk_exit_policy",

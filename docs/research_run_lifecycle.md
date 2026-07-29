@@ -5,7 +5,8 @@
 
 ```text
 冻结数据 → 候选池 → 因子/特征 → 标准化信号 → 约束前目标仓位
-        → 风险/组合约束 → 约束后目标仓位 → 离散调仓计划
+        → 风险/组合约束 → 约束后目标仓位 → 止盈止损/冷却/组合降险
+        → 风险后目标仓位 → 10/20/50 万可行性 → 离散调仓计划
         → 研究订单 → 研究成交 → 持仓/现金/盈亏 → 报告
 ```
 
@@ -18,7 +19,8 @@
 | 组件 | 职责 | 明确不做 |
 |---|---|---|
 | `ResearchRunManifest` | 冻结所有可复现输入并计算 checksum | 不接受源码或可执行引用 |
-| 策略适配器 | 把 #29/#60-#64 的既有研究结果归一为 `DecisionBundle` | 不写数据库、不调用 Broker |
+| `PortfolioPipelineAdapter` | 从冻结候选池/特征/信号强制生成目标、约束、退出、sizing、研究成交与账本 | 不接受外部预拼装目标/订单/持仓，不调用 Broker |
+| 专用策略适配器 | 把通用 long-only 无法表达的既有模拟器结果归一为完整 `DecisionBundle` | 不写数据库、不调用 Broker |
 | `ResearchRunCoordinator` | 状态机、逐阶段血缘、恒等式、幂等、恢复、重放 | 不解释策略逻辑、不生成实盘订单 |
 | `ResearchRunStore` | 存储端口;内存和 PostgreSQL 两种实现 | 不复用实盘 Repository |
 | ResearchRun API | 排队、历史、artifact、血缘、取消、重放登记 | 没有 `/run` 或 `/execute` |
@@ -76,23 +78,45 @@ queued ──→ running ──→ completed
 但沿用全部冻结输入，并比较与源 run 无关的结果 checksum;不同即标记
 `non_deterministic_replay`。
 
+## 正式组合流水线与硬约束
+
+long-only 研究 worker 必须使用 `PortfolioPipelineAdapter`。它只接收冻结的
+`PortfolioDecisionInput`，调用方不能提交目标仓位、订单、成交或持仓。每个决策
+生成 `ResearchPipelineEvidence`，绑定与 run 身份无关的 manifest 输入 checksum、
+冻结决策输入 checksum、组合流水线版本和全部关键输出 checksum。
+
+`ResearchRunCoordinator` 在写 artifact 前强制检查：
+
+- 候选池 → 信号 → 约束前/后目标的标的集合关系；
+- 风险退出后的目标、三档资金可行性必须来自同一冻结输入；
+- 每条调仓指令只对应一条研究订单，订单/成交方向、数量和状态一致；
+- 任一 `hard=True` 约束失败、缺少流水线证据或输出 checksum 漂移都以
+  `hard_constraint_rejected` 失败关闭，且不写入该决策的订单/成交 artifact；
+- 单资产风险贡献上限小于 `1.0` 时必须有完整可用协方差，求解后仍超限则拒绝。
+
+风险贡献投影只减小超限资产权重，不通过增加其它资产敞口“美化”指标。数学不可行、
+方差异常或不收敛都不会降级成告警。
+
 ## 决策 artifact 和血缘
 
-每个决策期按固定顺序写 10 个 artifact:
+每个决策期按固定顺序写 13 个 artifact:
 
 1. `universe`:候选标的、纳入/排除原因、市场和资产类别。
 2. `features`:特征值、冻结来源和 `available_at`。
 3. `signals`:标准化分数、动作、规则、理由和因子快照。
 4. `targets_before_constraints`:信号映射的原始目标仓位。
 5. `constraints`:每项风险/组合约束的前值、后值、上限和理由。
-6. `targets_after_constraints`:最终目标仓位。
-7. `rebalance_plan`:手数离散后的目标/当前/差量和预计金额。
-8. `orders`:研究订单状态，包括拒绝原因。
-9. `fills`:实际成交、费用、税、滑点和时间。
-10. `ledger`:成交驱动持仓、现金、保证金、已实现/未实现盈亏和权益。
+6. `targets_after_constraints`:组合硬约束后的目标仓位。
+7. `risk_exits`:止损、止盈、持有期、回撤降险、冷却结果与可恢复状态。
+8. `targets_after_risk`:风险退出后的最终目标仓位。
+9. `capital_feasibility`:同一冻结输入下 10/20/50 万三档可执行性。
+10. `rebalance_plan`:手数离散后的目标/当前/差量和预计金额。
+11. `orders`:研究订单状态，包括拒绝原因。
+12. `fills`:实际成交、费用、税、滑点和时间。
+13. `ledger`:成交驱动持仓、现金、保证金、已实现/未实现盈亏、权益和流水线证据。
 
 每个 artifact 有 `trace_id` 和 `parent_trace_ids`。从 fill artifact 调用血缘接口会
-递归返回候选池到成交的完整上游链。报告是第 11 类 artifact，包含策略收益、正确
+递归返回候选池到成交的完整上游链。报告是第 14 类 artifact，包含策略收益、正确
 基准、现金、佣金、税、滑点、未成交缺口和约束影响。
 
 强制恒等式包括:
@@ -125,6 +149,7 @@ API 刻意没有同步执行端点。受控离线 worker/CLI 通过
 | 错误码 | 含义 | 状态 |
 |---|---|---|
 | `unsupported_capability` | 数据/事件/适配器能力不完整 | `rejected` |
+| `hard_constraint_rejected` | 流水线证据缺失/漂移或研究硬约束不可满足 | `rejected` |
 | `interrupted` / `process_restart` | 可从 checkpoint 恢复 | `interrupted` |
 | `non_deterministic_replay` | 相同冻结输入重放结果漂移 | `failed` |
 | 异常类名 | 数据、策略、约束、记账或持久化异常 | `failed` |
@@ -135,7 +160,8 @@ API 刻意没有同步执行端点。受控离线 worker/CLI 通过
 2. 用 `finboard data release-verify` 验证 manifest 和文件 SHA-256。
 3. 创建并发布无代码策略规格;因子策略先发布 `FeatureSnapshot`。
 4. `POST /api/research/runs` 冻结精确版本并排队。
-5. 受控离线 worker 用注册适配器执行。
+5. 受控离线 worker 的 long-only 研究用 `PortfolioPipelineAdapter` 执行；期货
+   多空等场景使用能输出等价完整证据的专用适配器。
 6. 用 run 详情、artifact 和 lineage API 审计报告。
 7. 用 replay API 登记同版本重放，执行后比较 `result_checksum`。
 
@@ -146,9 +172,9 @@ uv run pytest tests/unit/research_run tests/unit/test_api_research_runs.py -v
 uv run pytest tests/integration/test_research_run_persistence.py -v
 ```
 
-第一条覆盖六类策略统一入口、阶段契约、血缘、幂等、能力失败关闭、部分成交和
-持仓/会计不变量。第二条用 PostgreSQL 覆盖完整运行、历史读取、重启恢复、
-同版本重放和多策略隔离。
+第一条覆盖六类策略统一入口、正式组合流水线、风险贡献硬上限、风险退出状态、
+阶段契约、血缘、幂等、能力失败关闭、部分成交和持仓/会计不变量。第二条用
+PostgreSQL 覆盖正式流水线完整运行、历史读取、重启恢复、同版本重放和多策略隔离。
 
 ## 与 `phase1_doc.md` §3.4 的映射
 

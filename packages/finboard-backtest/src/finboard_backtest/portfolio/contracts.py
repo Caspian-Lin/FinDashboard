@@ -82,7 +82,7 @@ class PortfolioConstraints:
     max_volatility: float | None = None
     rebalance_threshold: float = 0.05
     min_weight_to_trade: float = 0.001
-    max_risk_contribution: float = 0.35
+    max_risk_contribution: float = 1.0
     long_only: bool = True
     covariance_failure_mode: CovarianceFailureMode = CovarianceFailureMode.FAIL_CLOSED
 

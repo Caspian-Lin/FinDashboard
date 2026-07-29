@@ -60,11 +60,12 @@ class ResearchStrategyAdapter(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class DecisionSequenceAdapter:
-    """已注册策略的规范化适配器参考实现。
+    """预计算决策的兼容/测试适配器。
 
-    现有各策略继续负责因子/信号/目标/撮合计算;它们只需把每个决策时点转换成
-    ``DecisionBundle``。该类统一六种策略的入口和结果契约,适合批处理、测试和
-    后续专用适配器逐步迁移。
+    仅用于回归样本和通用流水线尚不能表达的专用模拟器迁移。每个
+    ``DecisionBundle`` 仍必须携带可校验的正式流水线证据, 否则 Coordinator 会
+    失败关闭。long-only 生产研究应使用 ``PortfolioPipelineAdapter``, 不能由
+    调用方预拼装目标、订单、成交或持仓。
     """
 
     strategy_kind: str

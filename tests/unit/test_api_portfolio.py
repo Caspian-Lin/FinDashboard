@@ -63,6 +63,25 @@ class TestAllocateEndpoint:
         })
         assert resp.status_code == 400
 
+    def test_risk_contribution_cap_without_covariance_fails_closed(
+        self, client: TestClient
+    ) -> None:
+        resp = client.post(
+            "/api/portfolio/allocate",
+            json={
+                "signals": [
+                    {"symbol": "A", "score": 1.0},
+                    {"symbol": "B", "score": 1.0},
+                    {"symbol": "C", "score": 1.0},
+                ],
+                "method": "equal_weight",
+                "as_of": "2024-06-28",
+                "max_risk_contribution": 0.40,
+            },
+        )
+        assert resp.status_code == 400
+        assert "风险贡献硬约束缺少" in resp.json()["detail"]
+
     def test_erc_with_returns(self, client: TestClient) -> None:
         import numpy as np
         rng = np.random.default_rng(42)
