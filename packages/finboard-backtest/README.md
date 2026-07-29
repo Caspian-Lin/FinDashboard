@@ -159,6 +159,25 @@ issue #56 起,多标的回测的默认基准**不再只取请求中的第一个�
 `factor_version`,用于复现与审计。需要回滚时关闭 `selection.enabled` 即可恢复
 旧行为。
 
+## 统一 ResearchRun 编排(issue #80)
+
+`finboard_backtest.research_run` 提供纯离线状态机和统一适配器端口。六类注册策略把
+既有研究结果归一为 `DecisionBundle`;编排器依次持久化候选池、特征、信号、
+约束前后目标、离散计划、研究订单、研究成交和账本，并强制成交驱动持仓及现金/
+市值/权益恒等式。
+
+核心入口:
+
+- `ResearchRunManifest`:冻结策略、数据/因子、参数、成本、基准和代码版本。
+- `DecisionSequenceAdapter`:#29/#60-#64 的统一规范化入口。
+- `ResearchRunCoordinator`:执行、取消、重启恢复、幂等 checkpoint、重放和血缘。
+- `InMemoryResearchRunStore`:单元测试/纯离线任务。
+- `SqlAlchemyResearchRunStore`(`finboard_app`):PostgreSQL 持久化实现。
+
+该包不依赖 Broker 或实盘 Repository。研究订单/成交使用 `RR-` ID，任何未成交目标
+都不能进入持仓。详见
+[`docs/research_run_lifecycle.md`](../../docs/research_run_lifecycle.md)。
+
 ## 策略层 Bar 规则选股 (`bar_universe`)
 
 `BarUniverseSelector` 是不依赖因子系统的研究级选股器,只消费策略已经收到的
