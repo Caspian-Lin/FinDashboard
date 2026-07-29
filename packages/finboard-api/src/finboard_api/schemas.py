@@ -613,6 +613,122 @@ class ExperimentRejectIn(BaseSchema):
     reason: str = Field(min_length=1)
 
 
+# --------------------------------------------------------------------------- Factor Lab (issue #78)
+class FactorDefinitionOut(BaseSchema):
+    name: str
+    version: str
+    role: str
+    preference: str
+    frequency: str
+    unit: str
+    source_fields: list[str]
+    calculation_window: int | None = None
+    default_transform: str
+    default_neutralization: list[str]
+    available_at_rule: str
+    missing_policy: str
+    economic_hypothesis: str
+    expected_failure: str
+    implementation: str
+    signal_eligible: bool
+    checksum: str
+
+
+class FeatureObservationOut(BaseSchema):
+    symbol: str
+    feature_name: str
+    value: float
+    observed_at: datetime
+    available_at: datetime
+    source: str
+    source_version: str
+    market: str | None = None
+    asset_class: str | None = None
+    industry: str | None = None
+
+
+class FeatureSnapshotOut(BaseSchema):
+    snapshot_id: str
+    dataset_release_id: str
+    dataset_release_checksum: str
+    decision_at: datetime
+    published_at: datetime
+    framework_version: str
+    calculation_windows: dict[str, int]
+    transformations: dict[str, str]
+    neutralization: dict[str, list[str]]
+    code_version: str
+    observations: list[FeatureObservationOut]
+    checksum: str
+    issues: list[str] = Field(default_factory=list)
+
+
+class FactorSignalItemOut(BaseSchema):
+    symbol: str
+    direction: str
+    score: float
+    confidence: float
+    valid_from: datetime
+    valid_until: datetime
+    reason: str
+
+
+class FactorSignalOut(BaseSchema):
+    signal_id: str
+    factor_name: str
+    factor_version: str
+    feature_snapshot_id: str
+    feature_snapshot_checksum: str
+    candidate_universe_version: str
+    research_status: str
+    validation_experiment_id: str | None = None
+    created_at: datetime
+    items: list[FactorSignalItemOut]
+    checksum: str
+
+
+class FactorExperimentPlanSchema(BaseSchema):
+    in_sample_start: date
+    in_sample_end: date
+    oos_start: date
+    oos_end: date
+    trial_budget: int = Field(gt=0, le=10000)
+    benchmark_symbol: str = Field(min_length=1, max_length=32)
+    transaction_cost_bps: float = Field(ge=0)
+    quantiles: int = Field(default=5, ge=2, le=20)
+
+
+class FactorExperimentCreate(BaseSchema):
+    """只登记冻结实验;不会启动回测或任何交易。"""
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    hypothesis: str = Field(min_length=10, max_length=2000)
+    factor_names: list[str] = Field(min_length=1)
+    dataset_release_id: str = Field(min_length=1, max_length=128)
+    feature_snapshot_id: str = Field(min_length=1, max_length=64)
+    plan: FactorExperimentPlanSchema
+    comparison_group: str = Field(min_length=1, max_length=64)
+    validation_experiment_id: str | None = Field(default=None, max_length=32)
+
+
+class FactorExperimentOut(BaseSchema):
+    experiment_id: str
+    hypothesis: str
+    factor_names: list[str]
+    dataset_release_id: str
+    dataset_release_checksum: str
+    feature_snapshot_id: str
+    plan: dict[str, Any]
+    comparison_group: str
+    status: str
+    validation_experiment_id: str | None = None
+    result: dict[str, Any] | None = None
+    failure_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 # --------------------------------------------------------------------------- 多资产元数据(issue #58)
 
 

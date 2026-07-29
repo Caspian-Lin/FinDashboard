@@ -1056,3 +1056,122 @@ class ResearchDatasetReleaseModel(Base, IdMixin):
             "published_at",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# 因子实验室(issue #78)
+# ---------------------------------------------------------------------------
+
+
+class FactorFeatureSnapshotModel(Base, IdMixin):
+    """不可变 FeatureSnapshot;逐条数据保存在完整 payload 中。"""
+
+    __tablename__ = "factor_feature_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    dataset_release_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("research_dataset_releases.release_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    dataset_release_checksum: Mapped[str] = mapped_column(String(64), index=True)
+    decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    framework_version: Mapped[str] = mapped_column(String(32))
+    feature_names: Mapped[list[str]] = mapped_column(JSON)
+    symbol_count: Mapped[int] = mapped_column(Integer)
+    observation_count: Mapped[int] = mapped_column(Integer)
+    code_version: Mapped[str] = mapped_column(String(64))
+    checksum: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_factor_feature_release_decision",
+            "dataset_release_id",
+            "decision_at",
+        ),
+    )
+
+
+class FactorSignalModel(Base, IdMixin):
+    """不可变 FactorSignal;不包含订单或交易执行字段。"""
+
+    __tablename__ = "factor_signals"
+
+    signal_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    factor_name: Mapped[str] = mapped_column(String(64), index=True)
+    factor_version: Mapped[str] = mapped_column(String(32))
+    feature_snapshot_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("factor_feature_snapshots.snapshot_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    feature_snapshot_checksum: Mapped[str] = mapped_column(String(64))
+    candidate_universe_version: Mapped[str] = mapped_column(String(128))
+    research_status: Mapped[str] = mapped_column(String(24), index=True)
+    validation_experiment_id: Mapped[str | None] = mapped_column(
+        String(32),
+        ForeignKey("research_experiments.experiment_id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    symbol_count: Mapped[int] = mapped_column(Integer)
+    checksum: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+    __table_args__ = (
+        Index(
+            "ix_factor_signal_factor_status_created",
+            "factor_name",
+            "research_status",
+            "created_at",
+        ),
+    )
+
+
+class FactorExperimentModel(Base, IdMixin):
+    """因子研究实验;失败、拒绝和中断记录不得删除或只保留赢家。"""
+
+    __tablename__ = "factor_experiments"
+
+    experiment_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    hypothesis: Mapped[str] = mapped_column(Text)
+    factor_names: Mapped[list[str]] = mapped_column(JSON)
+    dataset_release_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("research_dataset_releases.release_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    dataset_release_checksum: Mapped[str] = mapped_column(String(64))
+    feature_snapshot_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("factor_feature_snapshots.snapshot_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    plan: Mapped[dict[str, object]] = mapped_column(JSON)
+    comparison_group: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    validation_experiment_id: Mapped[str | None] = mapped_column(
+        String(32),
+        ForeignKey("research_experiments.experiment_id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    result: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index(
+            "ix_factor_experiment_group_status_created",
+            "comparison_group",
+            "status",
+            "created_at",
+        ),
+    )

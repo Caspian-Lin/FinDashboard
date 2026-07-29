@@ -218,6 +218,20 @@ SHA-256。发布清单会登记到 PostgreSQL `research_dataset_releases`,API
 合约元数据与生命周期事件完整时才允许发布。详见
 [`packages/finboard-data/README.md`](./packages/finboard-data/README.md#不可变研究数据发布issue-77)。
 
+### 因子实验室与风险模型
+
+研究 API 现在提供版本化因子目录、不可变 `FeatureSnapshot`、alpha
+`FactorSignal` 和可追溯实验记录。分析覆盖 Rank/Pearson IC、ICIR、分位收益、
+显著性、衰减、换手/成本、参数邻域和市场状态;风险模型独立提供 beta、行业、
+资产类别、规模、波动率、流动性、收缩协方差与风险贡献。利率/债券、汇率、黄金、
+市场宽度和波动状态以 PIT 市场输入参与分层,不会直接成为买卖信号。
+
+只有与 #57 样本外实验的真实持久化结果一致时,研究信号才可标为
+`validated_oos`;网页或 API 不能靠声明 `passed_oos` 绕过验证。所有因子实验室
+端点均为离线研究边界,不访问 Broker、账户、订单、持仓或实盘 Risk Manager,
+也不提供 Python 策略编辑器。方法、接口和局限详见
+[`packages/finboard-backtest/README.md`](./packages/finboard-backtest/README.md#因子实验室风险模型与跨市场特征issue-78)。
+
 ### 配置项说明（InfoHint）
 
 回测、行情数据、设置和策略配置页使用

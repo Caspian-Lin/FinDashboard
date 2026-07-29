@@ -28,6 +28,11 @@ from finboard_api.schemas import (
     ExperimentDetailOut,
     ExperimentOut,
     ExperimentRejectIn,
+    FactorDefinitionOut,
+    FactorExperimentCreate,
+    FactorExperimentOut,
+    FactorSignalOut,
+    FeatureSnapshotOut,
     RobustnessPlanSchema,
     TrialCreate,
     TrialOut,
@@ -44,6 +49,24 @@ from finboard_backtest.validation.contracts import (
     VersionStamp,
     new_experiment,
     transition_status,
+)
+from finboard_data.factor_lab import (
+    ArtifactIntegrityError,
+    FactorExperimentPlan,
+    FactorExperimentStatus,
+    FactorRole,
+    ResearchArtifactStatus,
+    factor_lab_catalog,
+    new_factor_experiment,
+)
+from finboard_persistence.dataset_release_repo import (
+    ResearchDatasetReleaseRepository,
+)
+from finboard_persistence.factor_lab_repo import (
+    FactorExperimentRepository,
+    FactorExperimentValidationService,
+    FactorSignalRepository,
+    FeatureSnapshotRepository,
 )
 from finboard_persistence.validation_repo import (
     ResearchExperimentRepository as ExpRepo,
@@ -243,3 +266,192 @@ async def delete_experiment(
     if not deleted:
         raise HTTPException(status_code=404, detail="experiment not found")
     await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# 因子实验室(issue #78)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/factors/catalog", response_model=list[FactorDefinitionOut])
+async def get_factor_catalog(
+    role: FactorRole | None = Query(default=None),
+) -> list[FactorDefinitionOut]:
+    """返回有真实实现的版本化目录;未实现因子不会出现在列表中。"""
+
+    return [
+        FactorDefinitionOut.model_validate(definition.as_dict())
+        for definition in factor_lab_catalog(role)
+    ]
+
+
+@router.get(
+    "/factors/features",
+    response_model=list[FeatureSnapshotOut],
+)
+async def list_feature_snapshots(
+    dataset_release_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[FeatureSnapshotOut]:
+    snapshots = await FeatureSnapshotRepository(session).list(
+        dataset_release_id=dataset_release_id,
+        limit=limit,
+    )
+    return [
+        FeatureSnapshotOut.model_validate(item.as_dict()) for item in snapshots
+    ]
+
+
+@router.get(
+    "/factors/features/{snapshot_id}",
+    response_model=FeatureSnapshotOut,
+)
+async def get_feature_snapshot(
+    snapshot_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> FeatureSnapshotOut:
+    snapshot = await FeatureSnapshotRepository(session).get(snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="feature snapshot not found")
+    return FeatureSnapshotOut.model_validate(snapshot.as_dict())
+
+
+@router.get("/factors/signals", response_model=list[FactorSignalOut])
+async def list_factor_signals(
+    factor_name: str | None = Query(default=None),
+    research_status: ResearchArtifactStatus | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[FactorSignalOut]:
+    signals = await FactorSignalRepository(session).list(
+        factor_name=factor_name,
+        research_status=research_status,
+        limit=limit,
+    )
+    return [FactorSignalOut.model_validate(item.as_dict()) for item in signals]
+
+
+@router.get(
+    "/factors/signals/{signal_id}",
+    response_model=FactorSignalOut,
+)
+async def get_factor_signal(
+    signal_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> FactorSignalOut:
+    signal = await FactorSignalRepository(session).get(signal_id)
+    if signal is None:
+        raise HTTPException(status_code=404, detail="factor signal not found")
+    return FactorSignalOut.model_validate(signal.as_dict())
+
+
+@router.post(
+    "/factors/experiments",
+    response_model=FactorExperimentOut,
+    status_code=201,
+)
+async def create_factor_experiment(
+    body: FactorExperimentCreate,
+    session: AsyncSession = Depends(get_db_session),
+) -> FactorExperimentOut:
+    """冻结因子实验登记;保存不会启动回测、模拟盘或实盘。"""
+
+    release = await ResearchDatasetReleaseRepository(session).require_usable(
+        body.dataset_release_id
+    )
+    snapshot = await FeatureSnapshotRepository(session).get(
+        body.feature_snapshot_id
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="feature snapshot not found")
+    if snapshot.dataset_release_id != release.release_id:
+        raise HTTPException(
+            status_code=409,
+            detail="feature snapshot and dataset release do not match",
+        )
+    plan = FactorExperimentPlan(
+        in_sample_start=body.plan.in_sample_start,
+        in_sample_end=body.plan.in_sample_end,
+        oos_start=body.plan.oos_start,
+        oos_end=body.plan.oos_end,
+        trial_budget=body.plan.trial_budget,
+        benchmark_symbol=body.plan.benchmark_symbol,
+        transaction_cost_bps=body.plan.transaction_cost_bps,
+        quantiles=body.plan.quantiles,
+    )
+    try:
+        experiment = new_factor_experiment(
+            hypothesis=body.hypothesis,
+            factor_names=tuple(body.factor_names),
+            dataset_release_id=release.release_id,
+            dataset_release_checksum=release.release_checksum,
+            feature_snapshot_id=snapshot.snapshot_id,
+            plan=plan,
+            comparison_group=body.comparison_group,
+            validation_experiment_id=body.validation_experiment_id,
+        )
+        await FactorExperimentRepository(session).save(experiment)
+        await session.commit()
+    except (ArtifactIntegrityError, ValueError) as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FactorExperimentOut.model_validate(experiment.as_dict())
+
+
+@router.get(
+    "/factors/experiments",
+    response_model=list[FactorExperimentOut],
+)
+async def list_factor_experiments(
+    status: FactorExperimentStatus | None = Query(default=None),
+    comparison_group: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[FactorExperimentOut]:
+    experiments = await FactorExperimentRepository(session).list(
+        status=status,
+        comparison_group=comparison_group,
+        limit=limit,
+    )
+    return [
+        FactorExperimentOut.model_validate(item.as_dict())
+        for item in experiments
+    ]
+
+
+@router.get(
+    "/factors/experiments/{factor_experiment_id}",
+    response_model=FactorExperimentOut,
+)
+async def get_factor_experiment(
+    factor_experiment_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> FactorExperimentOut:
+    experiment = await FactorExperimentRepository(session).get(
+        factor_experiment_id
+    )
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="factor experiment not found")
+    return FactorExperimentOut.model_validate(experiment.as_dict())
+
+
+@router.post(
+    "/factors/experiments/{factor_experiment_id}/sync-validation",
+    response_model=FactorExperimentOut,
+)
+async def sync_factor_experiment_validation(
+    factor_experiment_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> FactorExperimentOut:
+    """读取 #57 机器结果同步终态;不接受调用者传入 passed_oos。"""
+
+    try:
+        experiment = await FactorExperimentValidationService(session).sync(
+            factor_experiment_id
+        )
+        await session.commit()
+    except (ArtifactIntegrityError, ValueError) as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FactorExperimentOut.model_validate(experiment.as_dict())

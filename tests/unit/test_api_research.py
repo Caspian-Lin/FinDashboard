@@ -12,9 +12,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from finboard_api.deps import get_db_session
 from finboard_api.routes import research_router
+from finboard_api.schemas import FactorExperimentCreate
 from finboard_backtest.validation.contracts import (
     AcceptanceThresholds,
     ExperimentStatus,
@@ -228,3 +230,67 @@ class TestDelete:
     def test_delete_missing_returns_404(self, client: TestClient) -> None:
         resp = client.delete("/api/research/experiments/nope")
         assert resp.status_code == 404
+
+
+class TestFactorLaboratory:
+    def test_catalog_distinguishes_roles_and_hides_unimplemented(
+        self,
+        client: TestClient,
+    ) -> None:
+        response = client.get("/api/research/factors/catalog")
+        assert response.status_code == 200
+        body = response.json()
+        assert {"alpha", "risk", "market_input"} <= {
+            item["role"] for item in body
+        }
+        assert "residual_momentum" not in {
+            item["name"] for item in body
+        }
+        assert all(len(item["checksum"]) == 64 for item in body)
+
+        alpha = client.get("/api/research/factors/catalog?role=alpha")
+        assert alpha.status_code == 200
+        assert all(item["role"] == "alpha" for item in alpha.json())
+
+    def test_factor_experiment_rejects_caller_claimed_oos_result(
+        self,
+    ) -> None:
+        payload = {
+            "hypothesis": "价值因子在冻结候选池上具有稳定的样本外收益关系",
+            "factor_names": ["pb"],
+            "dataset_release_id": "release-v1",
+            "feature_snapshot_id": "snapshot-v1",
+            "plan": {
+                "in_sample_start": "2020-01-01",
+                "in_sample_end": "2021-12-31",
+                "oos_start": "2022-01-01",
+                "oos_end": "2022-12-31",
+                "trial_budget": 20,
+                "benchmark_symbol": "000300.SH",
+                "transaction_cost_bps": 10,
+                "quantiles": 5,
+            },
+            "comparison_group": "value-v1",
+            "passed_oos": True,
+        }
+        with pytest.raises(ValidationError, match="passed_oos"):
+            FactorExperimentCreate.model_validate(payload)
+
+    def test_missing_feature_signal_and_factor_experiment_are_404(
+        self,
+        client: TestClient,
+    ) -> None:
+        assert (
+            client.get("/api/research/factors/features/missing").status_code
+            == 404
+        )
+        assert (
+            client.get("/api/research/factors/signals/missing").status_code
+            == 404
+        )
+        assert (
+            client.get(
+                "/api/research/factors/experiments/missing"
+            ).status_code
+            == 404
+        )

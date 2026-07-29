@@ -200,18 +200,6 @@ RESEARCH_FACTOR_CATALOG: dict[str, FactorMeta] = {
         winsorize_lower_pct=0.01,
         winsorize_upper_pct=0.99,
     ),
-    "residual_momentum": FactorMeta(
-        name="residual_momentum",
-        category=FactorCategory.MOMENTUM,
-        direction=FactorDirection.LONG,
-        source_field="derived:residual_return_60d",
-        economic_hypothesis="剥离风格暴露后的残差动量,比原始动量更稳健(Blitz-Huij)。",
-        expected_failure="残差动量需要准确的因子模型,模型设定偏误导致信号失效。",
-        unit="ratio",
-        available_at_rule="T-day bars + factor model",
-        winsorize_lower_pct=0.01,
-        winsorize_upper_pct=0.99,
-    ),
     # ── 增长 ──
     "revenue_yoy": FactorMeta(
         name="revenue_yoy",
