@@ -8,12 +8,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_persistence.models import (
@@ -22,6 +23,7 @@ from finboard_persistence.models import (
     BacktestRunModel,
     FillModel,
     InstrumentModel,
+    InstrumentNameModel,
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
@@ -33,6 +35,7 @@ from finboard_shared.identifiers import AccountId, ClientOrderId, StrategyId
 from finboard_shared.models import Account, Fill, Order, Position, Symbol
 from finboard_shared.types import (
     BrokerKind,
+    ListingStatus,
     Market,
     OrderStatus,
     OrderType,
@@ -537,6 +540,22 @@ class ReconciliationLogRepository:
         return row
 
 
+@dataclass
+class InstrumentSyncResult:
+    """``sync_with_diff`` 的变更摘要(issue #35 生命周期检测)。"""
+
+    new: int = 0
+    updated: int = 0
+    renamed: list[tuple[str, str, str]] = field(default_factory=list)
+    pending_delist: list[str] = field(default_factory=list)
+    delisted: list[str] = field(default_factory=list)
+    reactivated: list[str] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return self.new + self.updated
+
+
 class InstrumentRepository:
     """标的元数据仓储(instruments 表)。
 
@@ -670,6 +689,196 @@ class InstrumentRepository:
             select(InstrumentModel.code).where(*conditions).order_by(InstrumentModel.code)
         )
         return [row[0] for row in (await self._session.execute(stmt)).all()]
+
+    # ----------------------------------------------------------------- 生命周期 (#35)
+
+    async def sync_with_diff(
+        self,
+        instruments: list[dict[str, object]],
+        *,
+        as_of: date,
+        delist_confirm_runs: int = 2,
+    ) -> InstrumentSyncResult:
+        """带反向 diff 的标的同步(issue #35)。
+
+        正向:新标的 INSERT;已有标的更新 name/exchange,检测改名。
+        反向:DB 有但本次发现列表中消失的标的,``missing_runs`` 累加;
+        连续 ``delist_confirm_runs`` 次消失才标记 ``status=delisted`` + ``delist_date``。
+
+        反向 diff 仅在本次入参覆盖的 ``(market, instrument_type)`` 组合范围内做,
+        避免只拉 A 股时误把 ETF / 港股标记为退市。改名同时写入
+        ``instrument_names`` 历史区间表。
+
+        :param as_of:               本次同步的基准日期(用于 valid_from/delist_date)
+        :param delist_confirm_runs: 连续消失多少次才确认退市(默认 2,二次确认)
+        """
+        result = InstrumentSyncResult()
+        if not instruments:
+            return result
+        if delist_confirm_runs < 1:
+            raise ValueError("delist_confirm_runs 必须 >= 1")
+
+        by_code: dict[str, dict[str, object]] = {}
+        discovered_keys: set[tuple[str, str]] = set()
+        for ins in instruments:
+            code = str(ins["code"])
+            by_code[code] = ins
+            discovered_keys.add(
+                (
+                    str(ins.get("market", "a_share")),
+                    str(ins.get("instrument_type", "stock")),
+                )
+            )
+
+        # 仅查本次发现覆盖的 (market, type) 组合,缩小反向 diff 范围
+        scope_conds = [
+            and_(
+                InstrumentModel.market == mk,
+                InstrumentModel.instrument_type == ty,
+            )
+            for mk, ty in discovered_keys
+        ]
+        db_rows = {
+            row.code: row
+            for row in (
+                await self._session.execute(select(InstrumentModel).where(or_(*scope_conds)))
+            ).scalars().all()
+        }
+
+        # ---- 正向:新增 / 更新 / 改名 / 复活计数归零 ----
+        for code, ins in by_code.items():
+            name = str(ins.get("name", ""))
+            row = db_rows.get(code)
+            if row is None:
+                row = InstrumentModel(
+                    code=code,
+                    name=name,
+                    market=str(ins.get("market", "a_share")),
+                    instrument_type=str(ins.get("instrument_type", "stock")),
+                    exchange=ins.get("exchange"),
+                    status=ListingStatus.ACTIVE.value,
+                    missing_runs=0,
+                )
+                self._session.add(row)
+                db_rows[code] = row
+                result.new += 1
+                await self._open_name_record(code, name, as_of)
+            else:
+                result.updated += 1
+                if name and row.name != name:
+                    result.renamed.append((code, row.name, name))
+                    await self._close_name_record(code, as_of)
+                    await self._open_name_record(code, name, as_of)
+                    row.name = name
+                exchange = ins.get("exchange")
+                if exchange is not None:
+                    row.exchange = exchange  # type: ignore[assignment]
+                # 重新出现:未退市的归零计数并提示复活
+                if row.missing_runs > 0 and row.status != ListingStatus.DELISTED.value:
+                    result.reactivated.append(code)
+                row.missing_runs = 0
+
+        # ---- 反向:退市二次确认(仅当前 scope 内未发现的标的) ----
+        discovered_by_key: dict[tuple[str, str], set[str]] = {}
+        for code, ins in by_code.items():
+            key = (
+                str(ins.get("market", "a_share")),
+                str(ins.get("instrument_type", "stock")),
+            )
+            discovered_by_key.setdefault(key, set()).add(code)
+
+        for code, row in db_rows.items():
+            key = (row.market, row.instrument_type)
+            if code in discovered_by_key.get(key, set()):
+                continue
+            if row.status == ListingStatus.DELISTED.value:
+                continue
+            row.missing_runs += 1
+            if row.missing_runs >= delist_confirm_runs:
+                row.status = ListingStatus.DELISTED.value
+                row.delist_date = as_of
+                result.delisted.append(code)
+            else:
+                result.pending_delist.append(code)
+
+        await self._session.flush()
+        logger.info(
+            "instrument.sync_with_diff",
+            new=result.new,
+            updated=result.updated,
+            renamed=len(result.renamed),
+            pending_delist=len(result.pending_delist),
+            delisted=len(result.delisted),
+            reactivated=len(result.reactivated),
+        )
+        return result
+
+    async def update_listing_status(
+        self,
+        code: str,
+        status: ListingStatus,
+        *,
+        delist_date: date | None = None,
+        reset_missing_runs: bool = False,
+    ) -> bool:
+        """更新单个标的的上市状态(停牌检测 / 人工校准用)。
+
+        :returns: 标的是否存在
+        """
+        row = await self._get_by_code(code)
+        if row is None:
+            return False
+        row.status = status.value
+        if delist_date is not None:
+            row.delist_date = delist_date
+        if reset_missing_runs:
+            row.missing_runs = 0
+        await self._session.flush()
+        return True
+
+    async def get_by_code(self, code: str) -> InstrumentModel | None:
+        """按 code 查询单个标的(公开)。"""
+        return await self._get_by_code(code)
+
+    async def name_history(self, code: str) -> list[InstrumentNameModel]:
+        """查询某标的的名称变更历史(按 valid_from 升序)。"""
+        stmt = (
+            select(InstrumentNameModel)
+            .where(InstrumentNameModel.instrument_code == code)
+            .order_by(InstrumentNameModel.valid_from)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def get_status_map(self, codes: set[str]) -> dict[str, str]:
+        """批量返回 ``{code: status}``(停牌检测 / 同步 diff 用)。"""
+        if not codes:
+            return {}
+        stmt = select(InstrumentModel.code, InstrumentModel.status).where(
+            InstrumentModel.code.in_(codes)
+        )
+        return {str(c): str(s) for c, s in (await self._session.execute(stmt)).all()}
+
+    async def _get_by_code(self, code: str) -> InstrumentModel | None:
+        stmt = select(InstrumentModel).where(InstrumentModel.code == code)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def _close_name_record(self, code: str, as_of: date) -> None:
+        stmt = select(InstrumentNameModel).where(
+            InstrumentNameModel.instrument_code == code,
+            InstrumentNameModel.valid_to.is_(None),
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is not None:
+            row.valid_to = as_of
+
+    async def _open_name_record(self, code: str, name: str, as_of: date) -> None:
+        self._session.add(
+            InstrumentNameModel(
+                instrument_code=code,
+                name=name,
+                valid_from=as_of,
+            )
+        )
 
 
 class WatchlistRepository:

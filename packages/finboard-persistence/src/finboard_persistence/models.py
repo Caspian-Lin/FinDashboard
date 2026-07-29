@@ -219,6 +219,9 @@ class InstrumentModel(Base, IdMixin):
     list_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     delist_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    # 连续未在发现列表中出现的次数(issue #35 退市二次确认)。
+    # 达到阈值后 status -> delisted;再次出现时归零并回退。
+    missing_runs: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     sector: Mapped[str | None] = mapped_column(String(50), nullable=True)
     industry: Mapped[str | None] = mapped_column(String(50), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
@@ -227,6 +230,30 @@ class InstrumentModel(Base, IdMixin):
 
     __table_args__ = (
         Index("ix_instruments_market_type", "market", "instrument_type"),
+    )
+
+
+class InstrumentNameModel(Base, IdMixin):
+    """标的名称历史(issue #35 改名追踪)。
+
+    每次 ``sync_with_diff`` 检测到名称变化时:
+    * 旧名称记录的 ``valid_to`` 置为当天;
+    * 插入新名称记录(``valid_from`` = 当天, ``valid_to`` = NULL)。
+    ``instruments.name`` 始终保存最新名称用于查询。
+    """
+
+    __tablename__ = "instrument_names"
+
+    instrument_code: Mapped[str] = mapped_column(String(20), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    valid_from: Mapped[date] = mapped_column(Date)
+    valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_instrument_names_code_valid", "instrument_code", "valid_from"),
     )
 
 

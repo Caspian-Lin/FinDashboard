@@ -288,4 +288,5 @@ class LifecycleEventType(StrEnum):
     DELIVERY = "delivery"
     SUSPENSION = "suspension"  # 停牌
     RESUMPTION = "resumption"  # 复牌
+    NAME_CHANGE = "name_change"  # 改名(issue #35)
     OTHER = "other"

@@ -362,7 +362,9 @@ def _get_bulk_state(request: Request) -> dict[str, Any]:
 async def sync_universe(
     session: AsyncSession = Depends(get_db_session),
 ) -> SyncResultOut:
-    """从 akshare 发现全市场标的,写入 instruments 表。"""
+    """从 akshare 发现全市场标的,写入 instruments 表(带生命周期 diff)。"""
+    from datetime import date
+
     from finboard_data.discovery import UniverseDiscovery
     from finboard_persistence import InstrumentRepository
 
@@ -381,10 +383,18 @@ async def sync_universe(
     ]
 
     repo = InstrumentRepository(session)
-    count = await repo.upsert_many(dicts)
+    result = await repo.sync_with_diff(dicts, as_of=date.today())
     await session.commit()
 
-    return SyncResultOut(total=count, new=len(dicts), updated=0)
+    return SyncResultOut(
+        total=result.total,
+        new=result.new,
+        updated=result.updated,
+        renamed=len(result.renamed),
+        pending_delist=len(result.pending_delist),
+        delisted=len(result.delisted),
+        reactivated=len(result.reactivated),
+    )
 
 
 @router.post("/bulk-download", response_model=BulkDownloadStatusOut)

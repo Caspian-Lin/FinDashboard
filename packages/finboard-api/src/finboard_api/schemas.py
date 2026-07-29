@@ -251,6 +251,10 @@ class SyncResultOut(BaseSchema):
     total: int
     new: int
     updated: int
+    renamed: int = 0
+    pending_delist: int = 0
+    delisted: int = 0
+    reactivated: int = 0
 
 
 class BulkDownloadRequest(BaseSchema):
