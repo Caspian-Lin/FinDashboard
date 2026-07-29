@@ -1,6 +1,11 @@
 """finboard-persistence:SQLAlchemy 2.0 ORM + Repository + Alembic。"""
 
 from finboard_persistence.base import Base
+from finboard_persistence.dataset_release_repo import (
+    ReleaseInstrumentCatalogRepository,
+    ResearchDatasetReleaseRepository,
+    ResearchDatasetReleaseService,
+)
 from finboard_persistence.engine import create_async_engine
 from finboard_persistence.factor_repo import FactorSnapshotRepository
 from finboard_persistence.models import (
@@ -23,6 +28,7 @@ from finboard_persistence.models import (
     PositionModel,
     ReconciliationLogModel,
     ResearchDailyMetricModel,
+    ResearchDatasetReleaseModel,
     ResearchExperimentModel,
     ResearchFinancialIndicatorModel,
     ResearchIndustryClassificationModel,
@@ -90,9 +96,13 @@ __all__ = [
     "PositionRepository",
     "ReconciliationLogModel",
     "ReconciliationLogRepository",
+    "ReleaseInstrumentCatalogRepository",
     "ResearchDailyMetricModel",
     "ResearchDataSyncService",
     "ResearchDataset",
+    "ResearchDatasetReleaseModel",
+    "ResearchDatasetReleaseRepository",
+    "ResearchDatasetReleaseService",
     "ResearchDatasetRepository",
     "ResearchExperimentModel",
     "ResearchExperimentRepository",

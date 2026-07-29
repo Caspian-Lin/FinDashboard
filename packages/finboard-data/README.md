@@ -198,3 +198,80 @@ from finboard_data.assets.provider import InstrumentMetadataProvider
   本子包只做拼接;
 * 多资产能力属于研究 / 回测阶段,**不**授权多市场实盘或 CTP 实盘接入
   (见 AGENTS.md 阶段顺序)。
+
+## 不可变研究数据发布(issue #77)
+
+`FrozenDatasetReleaseBuilder` 将可变的 `data_cache` 冻结为版本目录:
+
+```text
+data_releases/<release_id>/
+├── manifest.json
+└── bars/<symbol>_<period>_<adjust>.parquet
+```
+
+`manifest.json` 包含来源、资产类别/市场、日期范围、字段、复权方式、发布时间、
+代码/元数据版本、已知局限和 SHA-256。每个标的还固定 `available_at`、上市/退市/
+名称历史、生命周期事件覆盖和以下研究执行假设:
+
+- `lot_size`、`price_tick`、交易日历和 `settlement_days`;
+- 印花税/佣金假设;
+- 期货 `multiplier`、`margin_rate` 与多空能力。
+
+发布过程先写同一文件系统的隐藏 staging 目录,所有必需能力和逐标的质量门通过后
+再原子改名。已有 `release_id` 永不覆盖;同一 schema 下字段漂移、缺文件、重复/
+异常 Bar、低覆盖、源文件发布中变化、checksum 不一致、ETF 分类未知、可转债/
+期货元数据或事件覆盖不足都会 fail closed。失败不会删除或替换之前的可用发布。
+
+当前覆盖审计报告实际起止日、预计/缺失交易日、停牌代理 Bar、异常数、上市/
+退市和短历史分类。首期交易日历使用工作日近似,中国节假日缺口以 warning 报告;
+停牌以“成交量为零且 OHLC 不变”识别。这两点会写入发布的
+`known_limitations`,不会静默伪装成完整交易所日历。
+
+### 发布与校验
+
+先应用迁移并确保 `instruments` 已同步、所选标的已在 `data_cache`:
+
+```bash
+uv run alembic upgrade head
+uv run finboard data release \
+  --release-id multiasset-2024-v1 \
+  --version 2024-v1 \
+  --symbols 600519.SH,510300.SH,513100.SH,518880.SH,511010.SH \
+  --start 2024-01-01 \
+  --end 2024-12-31
+
+uv run finboard data release-verify multiasset-2024-v1
+```
+
+默认质量门要求股票、宽基/指数、跨境、商品和债券 ETF 能力。只有显式修改
+`--required-capabilities` 才能发布较窄的数据集。首期内置的代表 ETF 目录包含
+`510300.SH`、`159915.SZ`、`513100.SH`、`513500.SH`、`518880.SH`、
+`511010.SH` 和 `511260.SH`;未知 ETF 不猜测分类。
+
+PostgreSQL 的 `research_dataset_releases` 保存完整 manifest 和常用查询列:
+
+| 方法 | 路径 | 内容 |
+|---|---|---|
+| `GET` | `/api/instruments/datasets/releases` | 版本、质量、能力与覆盖列表 |
+| `GET` | `/api/instruments/datasets/releases/{release_id}` | 完整逐标的审计和资产规则 |
+
+`FrozenReleaseProvider` 只读取调用方指定的 `release_id`,并在首次读取每个标的时
+复核文件 checksum。标的不在发布中、周期/复权/市场不符或日期越界时直接拒绝,
+绝不会回退到可变缓存或联网 Provider。
+
+该功能只读研究数据,不访问 Broker、账户、订单、持仓或实盘 Risk Manager。
+
+### 来源、许可与更新频率
+
+发布器只冻结本地已有数据,不改变上游许可:
+
+| 数据 | `source` 示例 | 建议更新频率 | 许可/使用边界 |
+|---|---|---|---|
+| A 股/ETF 日线 | `akshare` / `yfinance` | 每个交易日收盘后 | 遵守对应上游接口与原始数据提供方条款;仓库不附带再分发授权 |
+| 标的/上市状态/改名 | #35 `instruments` / `instrument_names` | 每日发现任务 | AkShare 聚合数据仅用于获授权的内部研究 |
+| ETF/债券/可转债/期货合约 | #58 元数据表 | 合约或产品变更后 | `source`、`dataset_version` 必须随记录保留;人工数据需记录出处 |
+| 生命周期事件 | `instrument_lifecycle_events` | 公告后尽快 | Tushare/交易所/人工来源遵守各自许可,并保留 `available_at` |
+
+操作者有责任在发布前确认账户套餐、下载频率、内部使用和再分发权限。未经许可不要
+把 `data_releases` 上传到仓库或对外分发;目录已加入 `.gitignore`。来源许可变化
+不修改历史发布,应新建版本并在 `known_limitations` 中记录。

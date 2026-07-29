@@ -204,6 +204,20 @@ HTTP 422 返回。
 另行设计隔离与审批,并经过研究、回测、样本外、行情回放、模拟/影子交易和小资金
 实盘验证,不能从网页直接进入实盘进程。
 
+### 版本化研究数据发布
+
+回测可先用 `finboard data release` 把可变 Parquet 缓存冻结为指定
+`release_id`,再用 `finboard data release-verify` 校验 manifest 与全部文件
+SHA-256。发布清单会登记到 PostgreSQL `research_dataset_releases`,API
+`GET /api/instruments/datasets/releases` 及其详情端点提供多资产能力、逐标的
+覆盖、`available_at` 和手数/T+N/税费/期货乘数与保证金快照。
+
+发布采用 fail-closed 语义:必需资产能力、元数据、事件、覆盖或 checksum 任一
+不完整就不登记可用版本,之前的发布保持不变;冻结 Provider 不会回退到可变缓存或
+联网数据源。当前正式覆盖股票以及宽基/跨境/黄金/债券 ETF;可转债和期货只有在
+合约元数据与生命周期事件完整时才允许发布。详见
+[`packages/finboard-data/README.md`](./packages/finboard-data/README.md#不可变研究数据发布issue-77)。
+
 ### 配置项说明（InfoHint）
 
 回测、行情数据、设置和策略配置页使用

@@ -1006,3 +1006,53 @@ class DatasetManifestModel(Base, IdMixin):
             name="uq_dataset_manifest",
         ),
     )
+
+
+class ResearchDatasetReleaseModel(Base, IdMixin):
+    """不可变研究数据集发布登记(issue #77)。
+
+    ``manifest`` 保存完整逐标的资产规则、覆盖审计和文件校验和。关系型列保留
+    常用筛选与唯一性闸门;Repository 禁止更新已发布行。
+    """
+
+    __tablename__ = "research_dataset_releases"
+
+    release_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    dataset_name: Mapped[str] = mapped_column(String(64), index=True)
+    source: Mapped[str] = mapped_column(String(32), index=True)
+    version: Mapped[str] = mapped_column(String(128))
+    schema_version: Mapped[str] = mapped_column(String(32))
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    period: Mapped[str] = mapped_column(String(8))
+    adjustment: Mapped[str] = mapped_column(String(8))
+    code_version: Mapped[str] = mapped_column(String(64))
+    metadata_version: Mapped[str] = mapped_column(String(32))
+    symbol_count: Mapped[int] = mapped_column(Integer)
+    row_count: Mapped[int] = mapped_column(BigInteger)
+    coverage_pct: Mapped[Decimal] = mapped_column(_research_numeric())
+    quality_status: Mapped[str] = mapped_column(String(16), index=True)
+    capabilities: Mapped[list[dict[str, object]]] = mapped_column(JSON)
+    quality_report: Mapped[dict[str, object]] = mapped_column(JSON)
+    known_limitations: Mapped[list[str]] = mapped_column(JSON)
+    storage_uri: Mapped[str] = mapped_column(Text)
+    release_checksum: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    manifest: Mapped[dict[str, object]] = mapped_column(JSON)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_name",
+            "source",
+            "version",
+            name="uq_research_dataset_release_version",
+        ),
+        Index(
+            "ix_research_dataset_release_lookup",
+            "dataset_name",
+            "source",
+            "quality_status",
+            "published_at",
+        ),
+    )

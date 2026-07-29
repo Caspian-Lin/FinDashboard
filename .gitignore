@@ -78,3 +78,4 @@ web/.vite/
 Thumbs.db
 desktop.ini
 /data_cache/
+/data_releases/

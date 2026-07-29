@@ -706,3 +706,92 @@ class DatasetManifestOut(BaseSchema):
     quality_report: dict[str, Any] = Field(default_factory=dict)
     published_at: datetime
     code_version: str = ""
+
+
+class DatasetReleaseCapabilityOut(BaseSchema):
+    key: str
+    status: str
+    symbol_count: int
+    ready_count: int
+    missing_requirements: list[str] = Field(default_factory=list)
+
+
+class DatasetReleaseInstrumentOut(BaseSchema):
+    code: str
+    name: str
+    market: str
+    instrument_type: str
+    asset_class: str
+    available_at: datetime
+    execution: dict[str, Any]
+    artifact_path: str
+    artifact_checksum: str
+    artifact_size: int
+    row_count: int
+    start_date: date
+    end_date: date
+    expected_sessions: int
+    missing_sessions: int
+    suspended_sessions: int
+    anomaly_count: int
+    coverage_pct: Decimal
+    category: str
+    ready: bool
+    issues: list[str] = Field(default_factory=list)
+    exchange: str | None = None
+    currency: str = "CNY"
+    etf_category: str | None = None
+    list_date: date | None = None
+    delist_date: date | None = None
+    status: str
+    metadata_complete: bool
+    lifecycle_events: list[dict[str, Any]] = Field(default_factory=list)
+    present_event_types: list[str] = Field(default_factory=list)
+    required_event_types: list[str] = Field(default_factory=list)
+    name_history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ResearchDatasetReleaseOut(BaseSchema):
+    release_id: str
+    dataset_name: str
+    source: str
+    version: str
+    schema_version: str
+    start_date: date
+    end_date: date
+    period: str
+    adjustment: str
+    fields: list[str]
+    availability_rules: list[dict[str, str]]
+    code_version: str
+    published_at: datetime
+    instruments: list[DatasetReleaseInstrumentOut]
+    capabilities: list[DatasetReleaseCapabilityOut]
+    quality_status: str
+    quality_report: dict[str, Any]
+    known_limitations: list[str] = Field(default_factory=list)
+    storage_uri: str
+    metadata_version: str
+    release_checksum: str
+
+
+class ResearchDatasetReleaseSummaryOut(BaseSchema):
+    release_id: str
+    dataset_name: str
+    source: str
+    version: str
+    schema_version: str
+    start_date: date
+    end_date: date
+    period: str
+    adjustment: str
+    code_version: str
+    published_at: datetime
+    symbol_count: int
+    row_count: int
+    coverage_pct: Decimal
+    capabilities: list[DatasetReleaseCapabilityOut]
+    quality_status: str
+    known_limitations: list[str] = Field(default_factory=list)
+    metadata_version: str
+    release_checksum: str
