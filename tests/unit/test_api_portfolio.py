@@ -32,6 +32,28 @@ class TestAllocateEndpoint:
         data = resp.json()
         assert data["n_assets"] == 2
         assert len(data["weights"]) == 2
+        assert data["configured_max_leverage"] == 1.0
+        assert data["gross_weight"] >= abs(data["net_weight"])
+        assert data["adjustments"]
+        assert "constraint_impact" in data["risk"]
+
+    def test_sleeve_and_covariance_fail_safe(self, client: TestClient) -> None:
+        resp = client.post("/api/portfolio/allocate", json={
+            "signals": [
+                {"symbol": "A", "score": 1.0},
+                {"symbol": "B", "score": 1.0},
+            ],
+            "method": "inverse_volatility",
+            "as_of": "2024-06-28",
+            "sleeve_map": {"A": "equity", "B": "equity"},
+            "max_weight_per_asset": 0.8,
+            "max_weight_per_sleeve": 0.3,
+            "covariance_failure_mode": "fallback_equal_weight",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["covariance_fallback_used"]
+        assert sum(item["weight"] for item in data["weights"]) <= 0.3 + 1e-9
 
     def test_empty_signals(self, client: TestClient) -> None:
         resp = client.post("/api/portfolio/allocate", json={
@@ -119,3 +141,25 @@ class TestAttributionEndpoint:
             "returns_by_ticker": {},
         })
         assert resp.status_code == 400
+
+
+class TestFeasibilityEndpoint:
+    def test_three_capital_tiers(self, client: TestClient) -> None:
+        resp = client.post("/api/portfolio/feasibility", json={
+            "weights": {"ETF": 0.5},
+            "as_of": "2024-06-28",
+            "lot_info": [{
+                "code": "ETF",
+                "lot_size": 100,
+                "commission_min": 0,
+                "slippage_bps": 5,
+                "max_participation": 0.1,
+                "available_volume": 1000,
+            }],
+            "prices": {"ETF": 10.0},
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [item["tier"] for item in data] == ["100k", "200k", "500k"]
+        assert all("tracking_error" in item for item in data)
+        assert all(item["unfillable_symbols"] == ["ETF"] for item in data)

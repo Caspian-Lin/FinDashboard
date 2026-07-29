@@ -73,9 +73,13 @@ class TestPortfolioConstraints:
         c = PortfolioConstraints(max_leverage=2.0, min_cash_buffer=0.0)
         assert c.max_investable_weight == pytest.approx(2.0)
 
-    def test_asset_exceeds_sleeve_raises(self) -> None:
-        with pytest.raises(ValueError, match="max_weight_per_asset"):
-            PortfolioConstraints(max_weight_per_asset=0.50, max_weight_per_sleeve=0.30)
+    def test_asset_and_sleeve_caps_are_independent(self) -> None:
+        constraints = PortfolioConstraints(
+            max_weight_per_asset=0.50,
+            max_weight_per_sleeve=0.30,
+        )
+        assert constraints.max_weight_per_asset == 0.50
+        assert constraints.max_weight_per_sleeve == 0.30
 
     def test_leverage_below_1_raises(self) -> None:
         with pytest.raises(ValueError, match="max_leverage"):

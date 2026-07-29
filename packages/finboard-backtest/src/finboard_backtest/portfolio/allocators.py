@@ -4,16 +4,16 @@ issue #59 要求所有方法支持权重上限、sleeve 上限、现金缓冲和
 三种方法在相同输入下确定性产出,权重 / 现金 / 杠杆和集中度约束始终成立。
 
 核心安全约束:
-1. 权重总和 + cash_buffer <= max_leverage(默认 1.0 = 无杠杆)。
+1. 实际 gross exposure <= 配置 max_leverage(默认 1.0 = 无杠杆),现金独立保留。
 2. 单标的权重 <= max_weight_per_asset。
 3. 同 sleeve 标的权重之和 <= max_weight_per_sleeve。
-4. 缺数标的权重 → 0(不放大其他标的)。
-5. 协方差矩阵不可用时回退到等权(fail-safe,非 fail-closed)。
+4. 禁用/缺数标的权重 → 0(不放大其他标的)。
+5. 协方差失败策略由统一 builder 显式选择 fail-safe 或 fail-closed。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -35,6 +35,35 @@ class AllocationError(RuntimeError):
     """分配失败 —— 无可用标的、约束不可行或数值异常。"""
 
 
+@dataclass(frozen=True, slots=True)
+class AllocationContext:
+    """标的分组与可投资状态;缺失映射时每个标的单独归入 unclassified sleeve。"""
+
+    sleeve_map: dict[str, str] = field(default_factory=dict)
+    disabled_symbols: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class ConstraintAdjustment:
+    """单次约束投影的审计差异。"""
+
+    constraint: str
+    symbol: str | None
+    before_value: float
+    after_value: float
+    limit: float | None
+    passed: bool
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConstraintApplication:
+    """约束投影结果及逐项 before/after。"""
+
+    weights: dict[str, float]
+    adjustments: tuple[ConstraintAdjustment, ...]
+
+
 class Allocator(Protocol):
     """组合分配协议。
 
@@ -47,50 +76,155 @@ class Allocator(Protocol):
         signals: list[Signal],
         covariance: CovarianceEstimate | None,
         constraints: PortfolioConstraints,
+        *,
+        context: AllocationContext | None = None,
     ) -> TargetWeight: ...
 
 
 def _candidate_tickers(
     signals: list[Signal],
     covariance: CovarianceEstimate | None,
+    constraints: PortfolioConstraints,
+    context: AllocationContext,
 ) -> list[str]:
     """确定参与分配的标的列表。
 
     有协方差时取交集(信号 ∩ 协方差覆盖标的),确保波动率已知。
     无协方差时取信号涉及的标的。
     """
-    signal_tickers = {s.symbol for s in signals if abs(s.score) > MAX_WEIGHT_EPSILON}
+    signal_tickers = {
+        signal.symbol
+        for signal in signals
+        if abs(signal.score * signal.confidence) > MAX_WEIGHT_EPSILON
+        and signal.symbol not in context.disabled_symbols
+        and (signal.score > 0 or not constraints.long_only)
+    }
     if covariance is not None:
         return sorted(signal_tickers & set(covariance.tickers))
     return sorted(signal_tickers)
 
 
-def _apply_constraints(
+def apply_portfolio_constraints(
     weights: dict[str, float],
     constraints: PortfolioConstraints,
-) -> dict[str, float]:
-    """逐层施加约束:cap → sleeve cap → leverage cap → cash。
+    *,
+    context: AllocationContext | None = None,
+) -> ConstraintApplication:
+    """依次执行禁用、long-only、单资产、sleeve 与 gross 上限。
 
-    约束施加顺序:
-    1. 截断单标的上限 → 归一化。
-    2. 截断 sleeve 上限 → 归一化。
-    3. 截断总杠杆上限。
-    4. 计算剩余现金。
+    每层只会维持或降低绝对权重,不会在 cap 后重新放大其它标的。
     """
+    context = context or AllocationContext()
     if not weights:
-        return {}
+        return ConstraintApplication(weights={}, adjustments=())
 
-    capped: dict[str, float] = {}
-    for code, w in weights.items():
-        capped[code] = min(w, constraints.max_weight_per_asset)
+    adjusted = dict(weights)
+    audit: list[ConstraintAdjustment] = []
 
-    total = sum(capped.values())
-    if total > MAX_WEIGHT_EPSILON:
-        scale = constraints.max_investable_weight / total
-        if scale < 1.0:
-            capped = {c: w * scale for c, w in capped.items()}
+    for code in sorted(adjusted):
+        before = adjusted[code]
+        after = before
+        reason = "标的可参与组合决策"
+        if code in context.disabled_symbols:
+            after = 0.0
+            reason = "标的已禁用"
+        elif constraints.long_only and before < 0:
+            after = 0.0
+            reason = "long_only 禁止负目标权重"
+        adjusted[code] = after
+        audit.append(
+            ConstraintAdjustment(
+                constraint="investable_universe",
+                symbol=code,
+                before_value=before,
+                after_value=after,
+                limit=0.0 if after == 0 and before != 0 else None,
+                passed=abs(before - after) <= MAX_WEIGHT_EPSILON,
+                reason=reason,
+            )
+        )
 
-    return capped
+    for code in sorted(adjusted):
+        before = adjusted[code]
+        after = float(np.sign(before)) * min(abs(before), constraints.max_weight_per_asset)
+        adjusted[code] = after
+        audit.append(
+            ConstraintAdjustment(
+                constraint="max_weight_per_asset",
+                symbol=code,
+                before_value=abs(before),
+                after_value=abs(after),
+                limit=constraints.max_weight_per_asset,
+                passed=abs(before) <= constraints.max_weight_per_asset + MAX_WEIGHT_EPSILON,
+                reason="单标的绝对权重截断",
+            )
+        )
+
+    sleeve_for = {code: context.sleeve_map.get(code, f"unclassified:{code}") for code in adjusted}
+    sleeve_names = set(sleeve_for.values())
+    for sleeve in sorted(sleeve_names):
+        members = [code for code in sorted(adjusted) if sleeve_for[code] == sleeve]
+        before = sum(abs(adjusted[code]) for code in members)
+        after = before
+        if before > constraints.max_weight_per_sleeve + MAX_WEIGHT_EPSILON:
+            scale = constraints.max_weight_per_sleeve / before
+            for code in members:
+                adjusted[code] *= scale
+            after = constraints.max_weight_per_sleeve
+        audit.append(
+            ConstraintAdjustment(
+                constraint="max_weight_per_sleeve",
+                symbol=sleeve,
+                before_value=before,
+                after_value=after,
+                limit=constraints.max_weight_per_sleeve,
+                passed=before <= constraints.max_weight_per_sleeve + MAX_WEIGHT_EPSILON,
+                reason=f"sleeve={sleeve} 绝对权重合计",
+            )
+        )
+
+    gross_before = sum(abs(weight) for weight in adjusted.values())
+    gross_after = gross_before
+    gross_limit = constraints.max_investable_weight
+    if gross_before > gross_limit + MAX_WEIGHT_EPSILON:
+        scale = gross_limit / gross_before
+        adjusted = {code: weight * scale for code, weight in adjusted.items()}
+        gross_after = gross_limit
+    audit.append(
+        ConstraintAdjustment(
+            constraint="gross_leverage",
+            symbol=None,
+            before_value=gross_before,
+            after_value=gross_after,
+            limit=gross_limit,
+            passed=gross_before <= gross_limit + MAX_WEIGHT_EPSILON,
+            reason="实际 gross exposure 不得超过杠杆/现金共同上限",
+        )
+    )
+
+    return ConstraintApplication(
+        weights={
+            code: float(weight)
+            for code, weight in adjusted.items()
+            if abs(weight) > MAX_WEIGHT_EPSILON
+        },
+        adjustments=tuple(audit),
+    )
+
+
+def _signal_strengths(signals: list[Signal], tickers: list[str]) -> dict[str, float]:
+    """按 score*confidence 聚合重复信号并做绝对值归一化。"""
+    combined = dict.fromkeys(tickers, 0.0)
+    for signal in signals:
+        if signal.symbol in combined:
+            combined[signal.symbol] += signal.score * signal.confidence
+    return combined
+
+
+def _cash_weight(weights: dict[str, float], constraints: PortfolioConstraints) -> float:
+    if constraints.long_only and constraints.max_leverage <= 1 + MAX_WEIGHT_EPSILON:
+        return max(constraints.min_cash_buffer, 1.0 - sum(weights.values()))
+    return constraints.min_cash_buffer
 
 
 # --------------------------------------------------------------------------- 等权
@@ -110,23 +244,32 @@ class EqualWeightAllocator:
         signals: list[Signal],
         covariance: CovarianceEstimate | None,
         constraints: PortfolioConstraints,
+        *,
+        context: AllocationContext | None = None,
     ) -> TargetWeight:
-        tickers = _candidate_tickers(signals, covariance)
+        allocation_context = context or AllocationContext()
+        tickers = _candidate_tickers(signals, None, constraints, allocation_context)
         if not tickers:
             raise AllocationError("无可用标的(信号为空或与协方差无交集)")
 
-        n = len(tickers)
-        raw = dict.fromkeys(tickers, 1.0 / n)
-        capped = _apply_constraints(raw, constraints)
-
-        gross = sum(capped.values())
-        cash = max(0.0, constraints.max_leverage - gross)
+        strengths = _signal_strengths(signals, tickers)
+        magnitude_total = sum(abs(strengths[ticker]) for ticker in tickers)
+        if magnitude_total <= MAX_WEIGHT_EPSILON:
+            raise AllocationError("信号在冲突合并后为中性")
+        raw = {
+            ticker: float(strengths[ticker] / magnitude_total) for ticker in tickers
+        }
+        application = apply_portfolio_constraints(raw, constraints, context=allocation_context)
+        capped = application.weights
+        cash = _cash_weight(capped, constraints)
 
         return TargetWeight(
             weights=capped,
             as_of=signals[0].timestamp,
             strategy_id=signals[0].strategy_id,
             cash_buffer=cash,
+            max_leverage=constraints.max_leverage,
+            long_only=constraints.long_only,
         )
 
 
@@ -147,8 +290,11 @@ class InverseVolatilityAllocator:
         signals: list[Signal],
         covariance: CovarianceEstimate | None,
         constraints: PortfolioConstraints,
+        *,
+        context: AllocationContext | None = None,
     ) -> TargetWeight:
-        tickers = _candidate_tickers(signals, covariance)
+        allocation_context = context or AllocationContext()
+        tickers = _candidate_tickers(signals, covariance, constraints, allocation_context)
         if not tickers:
             raise AllocationError("无可用标的")
 
@@ -158,11 +304,12 @@ class InverseVolatilityAllocator:
         vols = covariance.volatilities
         vol_map = dict(zip(covariance.tickers, vols, strict=True))
 
+        strengths = _signal_strengths(signals, tickers)
         inv_vols: dict[str, float] = {}
         for t in tickers:
             vol = vol_map.get(t, 0.0)
             if vol > MAX_WEIGHT_EPSILON:
-                inv_vols[t] = 1.0 / vol
+                inv_vols[t] = abs(strengths[t]) / vol
             else:
                 inv_vols[t] = 0.0
 
@@ -170,17 +317,23 @@ class InverseVolatilityAllocator:
         if total <= MAX_WEIGHT_EPSILON:
             raise AllocationError("所有标的波动率为零,无法逆波动率分配")
 
-        raw = {t: iv / total for t, iv in inv_vols.items()}
-        capped = _apply_constraints(raw, constraints)
-
-        gross = sum(capped.values())
-        cash = max(0.0, constraints.max_leverage - gross)
+        raw = {
+            ticker: float(
+                float(np.sign(strengths[ticker])) * inv_vols[ticker] / total
+            )
+            for ticker in tickers
+        }
+        application = apply_portfolio_constraints(raw, constraints, context=allocation_context)
+        capped = application.weights
+        cash = _cash_weight(capped, constraints)
 
         return TargetWeight(
             weights=capped,
             as_of=signals[0].timestamp,
             strategy_id=signals[0].strategy_id,
             cash_buffer=cash,
+            max_leverage=constraints.max_leverage,
+            long_only=constraints.long_only,
         )
 
 
@@ -254,7 +407,7 @@ def _solve_erc(
 
     vols = np.sqrt(np.diag(cov))
     vols_safe = np.where(vols > MAX_WEIGHT_EPSILON, vols, 1.0)
-    w = (1.0 / vols_safe)
+    w = 1.0 / vols_safe
     w[w < 0] = 0.0
     total = w.sum()
     w = np.full(n, 1.0 / n) if total <= MAX_WEIGHT_EPSILON else w / total
@@ -269,7 +422,9 @@ def _solve_erc(
             break
 
         target_rc = rc_sum / n
-        ratios = np.where(rc > MAX_WEIGHT_EPSILON, target_rc / np.maximum(rc, MAX_WEIGHT_EPSILON), 1.0)
+        ratios = np.where(
+            rc > MAX_WEIGHT_EPSILON, target_rc / np.maximum(rc, MAX_WEIGHT_EPSILON), 1.0
+        )
         ratios = np.clip(ratios, 0.5, 2.0)
 
         new_w = w * (1.0 - step + step * ratios)
@@ -324,8 +479,11 @@ class ErcAllocator:
         signals: list[Signal],
         covariance: CovarianceEstimate | None,
         constraints: PortfolioConstraints,
+        *,
+        context: AllocationContext | None = None,
     ) -> TargetWeight:
-        tickers = _candidate_tickers(signals, covariance)
+        allocation_context = context or AllocationContext()
+        tickers = _candidate_tickers(signals, covariance, constraints, allocation_context)
         if not tickers:
             raise AllocationError("无可用标的")
 
@@ -343,21 +501,35 @@ class ErcAllocator:
         )
 
         if not state.converged and state.dispersion > 1e-4:
-            raise AllocationError(
-                f"ERC 迭代未收敛: dispersion={state.dispersion:.2e} > 1e-4"
+            raise AllocationError(f"ERC 迭代未收敛: dispersion={state.dispersion:.2e} > 1e-4")
+
+        strengths = _signal_strengths(signals, tickers)
+        raw_magnitudes = {
+            ticker: weight * abs(strengths[ticker])
+            for ticker, weight in zip(tickers, state.weights.tolist(), strict=True)
+        }
+        magnitude_total = sum(raw_magnitudes.values())
+        if magnitude_total <= MAX_WEIGHT_EPSILON:
+            raise AllocationError("信号在冲突合并后为中性")
+        raw = {
+            ticker: float(
+                float(np.sign(strengths[ticker]))
+                * raw_magnitudes[ticker]
+                / magnitude_total
             )
-
-        raw = dict(zip(tickers, state.weights.tolist(), strict=True))
-        capped = _apply_constraints(raw, constraints)
-
-        gross = sum(capped.values())
-        cash = max(0.0, constraints.max_leverage - gross)
+            for ticker in tickers
+        }
+        application = apply_portfolio_constraints(raw, constraints, context=allocation_context)
+        capped = application.weights
+        cash = _cash_weight(capped, constraints)
 
         return TargetWeight(
             weights=capped,
             as_of=signals[0].timestamp,
             strategy_id=signals[0].strategy_id,
             cash_buffer=cash,
+            max_leverage=constraints.max_leverage,
+            long_only=constraints.long_only,
             covariance_version=f"lw_delta{covariance.shrinkage:.4f}",
         )
 
@@ -365,7 +537,9 @@ class ErcAllocator:
 # --------------------------------------------------------------------------- 工厂
 
 
-_ALLOCATOR_REGISTRY: dict[str, type[EqualWeightAllocator] | type[InverseVolatilityAllocator] | type[ErcAllocator]] = {
+_ALLOCATOR_REGISTRY: dict[
+    str, type[EqualWeightAllocator] | type[InverseVolatilityAllocator] | type[ErcAllocator]
+] = {
     "equal_weight": EqualWeightAllocator,
     "inverse_volatility": InverseVolatilityAllocator,
     "erc": ErcAllocator,
@@ -380,17 +554,19 @@ def make_allocator(method: str) -> Allocator:
     """
     cls = _ALLOCATOR_REGISTRY.get(method)
     if cls is None:
-        raise AllocationError(
-            f"未知分配方法: {method};可选: {', '.join(_ALLOCATOR_REGISTRY)}"
-        )
+        raise AllocationError(f"未知分配方法: {method};可选: {', '.join(_ALLOCATOR_REGISTRY)}")
     return cls()
 
 
 __all__ = [
+    "AllocationContext",
     "AllocationError",
     "Allocator",
+    "ConstraintAdjustment",
+    "ConstraintApplication",
     "EqualWeightAllocator",
     "ErcAllocator",
     "InverseVolatilityAllocator",
+    "apply_portfolio_constraints",
     "make_allocator",
 ]

@@ -13,10 +13,12 @@ issue #59 的核心目标:策略输出标准化 ``Signal``/``TargetWeight``,组�
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from enum import StrEnum
 
-PORTFOLIO_CONTRACT_VERSION = "v1"
+PORTFOLIO_CONTRACT_VERSION = "v2"
 """组合契约版本号;Signal / TargetWeight / PortfolioPlan 结构变更时递增。"""
 
 MAX_WEIGHT_EPSILON = 1e-9
@@ -50,6 +52,13 @@ class Signal:
             raise ValueError("score 数值异常")
 
 
+class CovarianceFailureMode(StrEnum):
+    """协方差缺失或不可用时的确定性处理方式。"""
+
+    FAIL_CLOSED = "fail_closed"
+    FALLBACK_EQUAL_WEIGHT = "fallback_equal_weight"
+
+
 @dataclass(frozen=True, slots=True)
 class PortfolioConstraints:
     """组合层硬约束 —— 所有分配方法都必须满足。
@@ -73,6 +82,9 @@ class PortfolioConstraints:
     max_volatility: float | None = None
     rebalance_threshold: float = 0.05
     min_weight_to_trade: float = 0.001
+    max_risk_contribution: float = 0.35
+    long_only: bool = True
+    covariance_failure_mode: CovarianceFailureMode = CovarianceFailureMode.FAIL_CLOSED
 
     def __post_init__(self) -> None:
         if not (0 < self.max_weight_per_asset <= 1.0):
@@ -83,70 +95,96 @@ class PortfolioConstraints:
             raise ValueError("min_cash_buffer 必须落在 [0, 1)")
         if self.max_leverage < 1.0:
             raise ValueError("max_leverage 不能小于 1.0(默认无杠杆)")
-        if self.max_weight_per_asset > self.max_weight_per_sleeve:
-            raise ValueError(
-                "max_weight_per_asset 不能超过 max_weight_per_sleeve"
-            )
         if self.target_volatility is not None and self.target_volatility <= 0:
             raise ValueError("target_volatility 必须为正")
         if self.max_volatility is not None and self.max_volatility <= 0:
             raise ValueError("max_volatility 必须为正")
+        if (
+            self.target_volatility is not None
+            and self.max_volatility is not None
+            and self.target_volatility > self.max_volatility
+        ):
+            raise ValueError("target_volatility 不能超过 max_volatility")
         if not (0 <= self.rebalance_threshold <= 0.5):
             raise ValueError("rebalance_threshold 必须落在 [0, 0.5]")
         if self.min_weight_to_trade < 0:
             raise ValueError("min_weight_to_trade 不能为负")
+        if not (0 < self.max_risk_contribution <= 1):
+            raise ValueError("max_risk_contribution 必须落在 (0, 1]")
 
     @property
     def max_investable_weight(self) -> float:
-        """扣除最小现金缓冲后可投资的最大权重。"""
-        return self.max_leverage * (1.0 - self.min_cash_buffer)
+        """现金与 gross exposure 分开约束后的最大可投资权重。
+
+        无杠杆时现金来自本金,因此 ``gross <= 1 - cash``。显式开启杠杆后,
+        ``max_leverage`` 独立限制名义 gross exposure,现金缓冲仍须保留。
+        """
+        if self.max_leverage <= 1.0 + MAX_WEIGHT_EPSILON:
+            return max(0.0, 1.0 - self.min_cash_buffer)
+        return self.max_leverage
 
 
 @dataclass(frozen=True, slots=True)
 class TargetWeight:
     """目标权重向量。
 
-    ``weights`` 为 ``{code: weight}``,weight ∈ [0, max_leverage]。
-    权重总和 + cash_buffer = max_leverage。版本化用于回溯审计。
+    ``max_leverage`` 是配置上限,``gross_exposure`` / ``net_exposure`` 是
+    实际敞口,二者不可混用。默认 ``long_only=True`` 且 ``max_leverage=1``。
     """
 
     weights: dict[str, float]
     as_of: date
     strategy_id: str
     cash_buffer: float = 0.0
+    max_leverage: float = 1.0
+    long_only: bool = True
     contract_version: str = PORTFOLIO_CONTRACT_VERSION
     factor_snapshot_id: str | None = None
     covariance_version: str | None = None
 
     def __post_init__(self) -> None:
-        if self.cash_buffer < 0:
-            raise ValueError("cash_buffer 不能为负")
+        if not math.isfinite(self.cash_buffer) or not 0 <= self.cash_buffer <= 1:
+            raise ValueError("cash_buffer 必须落在 [0, 1]")
+        if not math.isfinite(self.max_leverage) or self.max_leverage < 1:
+            raise ValueError("max_leverage 不能小于 1")
         for code, w in self.weights.items():
             if not code:
                 raise ValueError("权重 key 不能为空字符串")
-            if w < 0:
+            if not math.isfinite(w):
+                raise ValueError(f"权重必须为有限数: {code}={w}")
+            if self.long_only and w < 0:
                 raise ValueError(f"权重不能为负: {code}={w}")
-        total = sum(self.weights.values()) + self.cash_buffer
-        if total > self.max_leverage + MAX_WEIGHT_EPSILON:
+        if self.gross_exposure > self.max_leverage + MAX_WEIGHT_EPSILON:
             raise ValueError(
-                f"权重总和 {total:.6f} 超过 max_leverage "
-                f"(={(self.weights and max(self.weights.values())) or 0:.6f})"
+                f"实际 gross exposure {self.gross_exposure:.6f} 超过配置的 "
+                f"max_leverage={self.max_leverage:.6f}"
             )
-
-    @property
-    def max_leverage(self) -> float:
-        """实际使用的杠杆倍数 = 权重总和 + 现金缓冲。"""
-        return sum(self.weights.values()) + self.cash_buffer
+        if (
+            self.long_only
+            and self.max_leverage <= 1 + MAX_WEIGHT_EPSILON
+            and self.net_exposure + self.cash_buffer > 1 + MAX_WEIGHT_EPSILON
+        ):
+            raise ValueError("默认无杠杆组合的净权重与现金之和不能超过 1")
 
     @property
     def gross_weight(self) -> float:
-        """不含现金的投资权重。"""
+        """兼容旧调用的实际 gross exposure 别名。"""
+        return self.gross_exposure
+
+    @property
+    def gross_exposure(self) -> float:
+        """实际 gross exposure = sum(abs(weight))。"""
+        return sum(abs(weight) for weight in self.weights.values())
+
+    @property
+    def net_exposure(self) -> float:
+        """实际 net exposure = sum(weight)。"""
         return sum(self.weights.values())
 
     @property
     def n_assets(self) -> int:
         """持仓标的数(非零权重)。"""
-        return sum(1 for w in self.weights.values() if w > MAX_WEIGHT_EPSILON)
+        return sum(1 for w in self.weights.values() if abs(w) > MAX_WEIGHT_EPSILON)
 
     def weight_of(self, code: str) -> float:
         """安全取权重;未包含的标的返回 0。"""
@@ -187,12 +225,21 @@ class RebalanceTrade:
     target_value: float
     current_value: float
     delta_value: float
+    requested_target_shares: int | None = None
+    unfilled_shares: int = 0
+    reject_reason: str | None = None
+    estimated_slippage: float = 0.0
+    margin_required: float = 0.0
 
     def __post_init__(self) -> None:
         if self.target_shares < 0:
             raise ValueError("target_shares 不能为负")
         if self.current_shares < 0:
             raise ValueError("current_shares 不能为负")
+        if self.unfilled_shares < 0:
+            raise ValueError("unfilled_shares 不能为负")
+        if self.estimated_slippage < 0 or self.margin_required < 0:
+            raise ValueError("滑点和保证金不能为负")
 
     @property
     def is_buy(self) -> bool:
@@ -226,6 +273,8 @@ class RebalancePlan:
     total_turnover: float
     as_of: date
     strategy_id: str
+    est_slippage: float = 0.0
+    margin_required: float = 0.0
     contract_version: str = PORTFOLIO_CONTRACT_VERSION
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -240,6 +289,8 @@ class RebalancePlan:
             raise ValueError("est_commission 不能为负")
         if self.est_tax < 0:
             raise ValueError("est_tax 不能为负")
+        if self.est_slippage < 0 or self.margin_required < 0:
+            raise ValueError("滑点和保证金不能为负")
 
     @property
     def buy_turnover(self) -> float:
@@ -290,6 +341,15 @@ class AssetLotInfo:
     code: str
     lot_size: int = 100
     multiplier: float = 1.0
+    margin_rate: float | None = None
+    commission_rate: float | None = None
+    commission_min: float | None = None
+    stamp_tax_rate: float | None = None
+    slippage_bps: float = 0.0
+    max_participation: float | None = None
+    available_volume: int | None = None
+    tradable: bool = True
+    unavailable_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not self.code:
@@ -298,6 +358,23 @@ class AssetLotInfo:
             raise ValueError("lot_size 必须为正")
         if self.multiplier <= 0:
             raise ValueError("multiplier 必须为正")
+        if self.margin_rate is not None and not (0 < self.margin_rate <= 1):
+            raise ValueError("margin_rate 必须落在 (0, 1]")
+        for name, value in (
+            ("commission_rate", self.commission_rate),
+            ("commission_min", self.commission_min),
+            ("stamp_tax_rate", self.stamp_tax_rate),
+        ):
+            if value is not None and value < 0:
+                raise ValueError(f"{name} 不能为负")
+        if self.slippage_bps < 0:
+            raise ValueError("slippage_bps 不能为负")
+        if self.max_participation is not None and not (0 < self.max_participation <= 1):
+            raise ValueError("max_participation 必须落在 (0, 1]")
+        if self.available_volume is not None and self.available_volume < 0:
+            raise ValueError("available_volume 不能为负")
+        if not self.tradable and not self.unavailable_reason:
+            raise ValueError("不可交易标的必须提供 unavailable_reason")
 
     @property
     def unit_factor(self) -> float:
@@ -323,6 +400,7 @@ __all__ = [
     "PORTFOLIO_CONTRACT_VERSION",
     "AssetLotInfo",
     "CapitalTier",
+    "CovarianceFailureMode",
     "PortfolioConstraints",
     "RebalancePlan",
     "RebalanceTrade",
