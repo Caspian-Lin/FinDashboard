@@ -43,6 +43,7 @@ from finboard_persistence.models import (
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
+    ResearchStrategySpecModel,
     ResearchSyncBatchModel,
     ResearchTrialModel,
     StrategyPresetModel,
@@ -70,6 +71,13 @@ from finboard_persistence.research_repo import (
 )
 from finboard_persistence.research_sync import ResearchDataSyncService
 from finboard_persistence.session import session_factory
+from finboard_persistence.strategy_spec_repo import (
+    ResearchStrategySpecRepository,
+    StrategySpecChangeType,
+    StrategySpecStatus,
+    StrategySpecTransitionError,
+    StrategySpecVersionConflictError,
+)
 from finboard_persistence.validation_repo import (
     ResearchExperimentRepository,
     ResearchTrialRepository,
@@ -126,12 +134,18 @@ __all__ = [
     "ResearchIndustryClassificationModel",
     "ResearchIndustryMembershipModel",
     "ResearchInstrumentProfileModel",
+    "ResearchStrategySpecModel",
+    "ResearchStrategySpecRepository",
     "ResearchSyncBatchModel",
     "ResearchSyncBatchRepository",
     "ResearchTrialModel",
     "ResearchTrialRepository",
     "StrategyPresetModel",
     "StrategyPresetRepository",
+    "StrategySpecChangeType",
+    "StrategySpecStatus",
+    "StrategySpecTransitionError",
+    "StrategySpecVersionConflictError",
     "SyncBatchStatus",
     "WatchlistItemModel",
     "WatchlistModel",

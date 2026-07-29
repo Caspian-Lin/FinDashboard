@@ -392,8 +392,22 @@ A股传统价格动量证据分歧大,因此动量作为**待检验补充**,而�
 4. 运行 alpha / 风险 / regime 分析,保存失败和中断结果,不要只保留胜者。
 5. 通过 #57 完成样本内、样本外、稳健性与最终测试,再同步实验状态并发布信号。
 
-当前实现不提供在线 Python 编辑器,也不把研究信号转换为目标仓位。收益、Sharpe、
-IC 或显著性均为历史研究指标,不是收益承诺或投资建议。
+当前实现不提供在线 Python 编辑器;策略规格可以声明信号到目标仓位的映射,但不会
+执行目标仓位或生成订单。收益、Sharpe、IC 或显著性均为历史研究指标,不是收益
+承诺或投资建议。
+
+## 无代码研究策略规格(issue #79)
+
+`finboard_backtest.strategy_spec` 使用固定结构表达
+`候选池 → 特征图 → 信号 → 目标权重 → 退出风控 → 成交假设 → 验证计划`。
+统一注册表为 #60-#64 和 `ma_cross` 提供兼容模板;API 与 runner 复用同一个
+`compile_registered_strategy_spec()` 解析器。
+
+解析结果 `can_execute=false`,保存/发布不会触发回测或交易。schema 使用白名单枚举
+和强类型参数,拒绝 Python 源码、模块路径、通用表达式、循环依赖、停用因子和缺失
+数据发布。版本持久化支持 draft/publish/supersede/rollback、乐观并发保护和结构化
+diff。完整接口、迁移规则和示例见
+[`docs/research_strategy_spec.md`](../../docs/research_strategy_spec.md)。
 
 
 ## ETF 绝对趋势 x 相对动量轮动策略(issue #61)
