@@ -8,9 +8,12 @@ from decimal import Decimal
 
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.contracts import (
+    RESEARCH_PORTFOLIO_PIPELINE_VERSION,
     DecisionBundle,
     ResearchArtifact,
+    ResearchConstraintViolationError,
     ResearchFillAction,
+    ResearchOrderStatus,
     ResearchPositionSide,
     ResearchRunConflictError,
     ResearchRunInterruptedError,
@@ -19,6 +22,7 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunStage,
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
+    pipeline_output_checksum,
     stable_checksum,
     to_json_value,
 )
@@ -37,6 +41,7 @@ _TRANSITIONS: dict[ResearchRunStatus, frozenset[ResearchRunStatus]] = {
             ResearchRunStatus.COMPLETED,
             ResearchRunStatus.FAILED,
             ResearchRunStatus.INTERRUPTED,
+            ResearchRunStatus.REJECTED,
             ResearchRunStatus.CANCELLED,
         }
     ),
@@ -58,6 +63,9 @@ _DECISION_STAGES = (
     ResearchRunStage.TARGETS_BEFORE_CONSTRAINTS,
     ResearchRunStage.CONSTRAINTS,
     ResearchRunStage.TARGETS_AFTER_CONSTRAINTS,
+    ResearchRunStage.RISK_EXITS,
+    ResearchRunStage.TARGETS_AFTER_RISK,
+    ResearchRunStage.CAPITAL_FEASIBILITY,
     ResearchRunStage.REBALANCE_PLAN,
     ResearchRunStage.ORDERS,
     ResearchRunStage.FILLS,
@@ -132,6 +140,7 @@ class ResearchRunCoordinator:
                 )
                 self._validate_decision(
                     decision,
+                    manifest=manifest,
                     position_quantities=position_quantities,
                     seen_fill_ids=seen_fill_ids,
                 )
@@ -185,6 +194,13 @@ class ResearchRunCoordinator:
                 manifest.run_id,
                 target=ResearchRunStatus.REJECTED,
                 error_code="unsupported_capability",
+                error_summary=str(exc),
+            )
+        except ResearchConstraintViolationError as exc:
+            return await self._safe_terminal_transition(
+                manifest.run_id,
+                target=ResearchRunStatus.REJECTED,
+                error_code="hard_constraint_rejected",
                 error_summary=str(exc),
             )
         except ResearchRunInterruptedError as exc:
@@ -297,12 +313,23 @@ class ResearchRunCoordinator:
             ResearchRunStage.TARGETS_AFTER_CONSTRAINTS: {
                 "targets": decision.targets_after_constraints
             },
+            ResearchRunStage.RISK_EXITS: {
+                "outcomes": decision.risk_exits,
+                "state": decision.risk_state,
+            },
+            ResearchRunStage.TARGETS_AFTER_RISK: {
+                "targets": decision.targets_after_risk
+            },
+            ResearchRunStage.CAPITAL_FEASIBILITY: {
+                "tiers": decision.capital_feasibility
+            },
             ResearchRunStage.REBALANCE_PLAN: {"instructions": decision.rebalance_plan},
             ResearchRunStage.ORDERS: {"orders": decision.orders},
             ResearchRunStage.FILLS: {"fills": decision.fills},
             ResearchRunStage.LEDGER: {
                 "positions": decision.positions,
                 "ledger": decision.ledger,
+                "pipeline_evidence": decision.pipeline_evidence,
             },
         }
         parent: tuple[str, ...] = ()
@@ -366,23 +393,114 @@ class ResearchRunCoordinator:
     def _validate_decision(
         decision: DecisionBundle,
         *,
+        manifest: ResearchRunManifest,
         position_quantities: dict[tuple[str, ResearchPositionSide], Decimal],
         seen_fill_ids: set[str],
     ) -> None:
+        evidence = decision.pipeline_evidence
+        if evidence is None:
+            raise ResearchConstraintViolationError(
+                "缺少正式组合流水线证据,禁止跳过目标/约束/退出/sizing 阶段"
+            )
+        if evidence.pipeline_version != RESEARCH_PORTFOLIO_PIPELINE_VERSION:
+            raise ResearchConstraintViolationError(
+                f"不支持的组合流水线版本: {evidence.pipeline_version}"
+            )
+        if evidence.manifest_input_checksum != manifest.input_checksum:
+            raise ResearchConstraintViolationError(
+                "组合流水线证据未绑定当前冻结 manifest"
+            )
+        if evidence.output_checksum != pipeline_output_checksum(decision):
+            raise ResearchConstraintViolationError("组合流水线产物校验和不一致")
+        if not decision.constraints:
+            raise ResearchConstraintViolationError("缺少组合约束阶段")
+        failed_hard = [
+            item.constraint
+            for item in decision.constraints
+            if item.hard and not item.passed
+        ]
+        if evidence.hard_constraints_passed != (not failed_hard):
+            raise ResearchConstraintViolationError(
+                "流水线证据的硬约束状态与约束产物不一致"
+            )
+        if failed_hard:
+            raise ResearchConstraintViolationError(
+                f"硬约束未通过,禁止生成研究订单或晋级: {failed_hard}"
+            )
+        tiers = {item.tier for item in decision.capital_feasibility}
+        if tiers != {"100k", "200k", "500k"}:
+            raise ResearchConstraintViolationError(
+                f"资金可行性必须覆盖 100k/200k/500k,实际为 {sorted(tiers)}"
+            )
+        feasibility_checksums = {
+            item.input_checksum for item in decision.capital_feasibility
+        }
+        if len(feasibility_checksums) != 1:
+            raise ResearchConstraintViolationError(
+                "三个资金档位必须引用同一冻结可行性输入"
+            )
+        candidate_symbols = {
+            item.symbol for item in decision.candidates if item.included
+        }
+        signal_symbols = {item.symbol for item in decision.signals}
+        if not signal_symbols <= candidate_symbols:
+            raise ResearchConstraintViolationError(
+                "信号包含未通过候选池筛选的标的"
+            )
+        target_symbols = {
+            item.symbol
+            for item in (
+                *decision.targets_before_constraints,
+                *decision.targets_after_constraints,
+                *decision.targets_after_risk,
+            )
+        }
+        if not target_symbols <= signal_symbols:
+            raise ResearchConstraintViolationError(
+                "目标仓位包含没有标准化信号的标的"
+            )
+
+        instruction_by_id = {
+            item.instruction_id: item for item in decision.rebalance_plan
+        }
+        if len(instruction_by_id) != len(decision.rebalance_plan):
+            raise ResearchRunConflictError("研究调仓指令不允许重复")
         order_by_id = {item.research_order_id: item for item in decision.orders}
+        orders_by_instruction: dict[str, list[object]] = defaultdict(list)
+        for order in decision.orders:
+            instruction = instruction_by_id.get(order.instruction_id)
+            if instruction is None:
+                raise ResearchRunConflictError(
+                    f"研究订单 {order.research_order_id} 找不到调仓指令"
+                )
+            if order.symbol != instruction.symbol or order.action is not instruction.action:
+                raise ResearchRunConflictError("研究订单与调仓指令方向/标的不一致")
+            if order.quantity > abs(instruction.delta_quantity):
+                raise ResearchRunConflictError("研究订单数量超过调仓指令数量")
+            orders_by_instruction[order.instruction_id].append(order)
+        missing_orders = sorted(set(instruction_by_id) - set(orders_by_instruction))
+        if missing_orders:
+            raise ResearchRunConflictError(
+                f"调仓指令缺少研究订单证据: {missing_orders}"
+            )
+        if any(len(items) != 1 for items in orders_by_instruction.values()):
+            raise ResearchRunConflictError("第一阶段每条调仓指令必须对应唯一研究订单")
         fill_quantities: dict[str, Decimal] = defaultdict(Decimal)
         for fill in decision.fills:
             if fill.research_fill_id in seen_fill_ids:
                 raise ResearchRunConflictError(f"重复成交: {fill.research_fill_id}")
             seen_fill_ids.add(fill.research_fill_id)
-            order = order_by_id.get(fill.research_order_id)
-            if order is None:
+            matched_order = order_by_id.get(fill.research_order_id)
+            if matched_order is None:
                 raise ResearchRunConflictError(
                     f"成交 {fill.research_fill_id} 找不到研究订单"
                 )
-            if fill.action is not order.action or fill.symbol != order.symbol:
+            if (
+                fill.action is not matched_order.action
+                or fill.symbol != matched_order.symbol
+            ):
                 raise ResearchRunConflictError("成交与订单方向/标的不一致")
-            fill_quantities[order.research_order_id] += fill.quantity
+            fill_quantities[matched_order.research_order_id] += fill.quantity
             side, delta = _position_delta(fill.action, fill.quantity)
             key = (fill.symbol, side)
             position_quantities[key] += delta
@@ -391,6 +509,18 @@ class ResearchRunCoordinator:
         for order_id, quantity in fill_quantities.items():
             if quantity > order_by_id[order_id].quantity:
                 raise ResearchRunConflictError(f"订单 {order_id} 超量成交")
+        for order in decision.orders:
+            filled = fill_quantities.get(order.research_order_id, Decimal())
+            if order.status is ResearchOrderStatus.FILLED and filled != order.quantity:
+                raise ResearchRunConflictError("FILLED 研究订单的成交数量必须等于委托数量")
+            if order.status is ResearchOrderStatus.PARTIALLY_FILLED and not (
+                Decimal() < filled < order.quantity
+            ):
+                raise ResearchRunConflictError(
+                    "PARTIALLY_FILLED 研究订单必须存在小于委托量的正成交"
+                )
+            if order.status is ResearchOrderStatus.REJECTED and filled != 0:
+                raise ResearchRunConflictError("REJECTED 研究订单不能存在成交")
 
         reported = {
             (item.symbol, item.position_side): item.quantity

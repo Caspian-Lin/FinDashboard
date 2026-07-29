@@ -6,7 +6,7 @@ issue #81 将 `finboard_backtest.portfolio` 升级为 v2 离线研究契约，�
 标准化 Signal
   → score/confidence 冲突聚合与可投资标的判定
   → 约束前 TargetWeight
-  → 单标的/sleeve/现金/gross/波动率/再平衡约束
+  → 单标的/sleeve/现金/gross/波动率/再平衡/风险贡献硬约束
   → 约束后 TargetWeight
   → 退出策略调整目标
   → 整数手、费用、滑点、参与率、保证金求解
@@ -50,7 +50,8 @@ v2 会直接拒绝 `gross_exposure > max_leverage`。默认配置仍是 long-onl
 4. gross leverage 与无杠杆现金缓冲；
 5. 目标/最大年化波动率；
 6. 基于当前实际权重的再平衡带和最小交易权重；
-7. 再次投影硬约束并核验现金。
+7. 单资产风险贡献硬上限；
+8. 再次核验现金。
 
 每个 `ConstraintAdjustment` 都包含约束名、标的或 sleeve、before、after、limit、
 pass/fail 和原因。`PortfolioRiskReport` 输出预计波动率、beta、资产/sleeve 风险
@@ -64,6 +65,14 @@ pass/fail 和原因。`PortfolioRiskReport` 输出预计波动率、beta、资�
 
 协方差缺少任一候选标的、包含非有限值、不对称或奇异时同样走上述分支，不能通过
 先删除缺数标的、再归一化其余权重来静默放大剩余资产。
+
+`max_risk_contribution < 1` 会启用硬约束。求解器按确定顺序只降低超限资产权重，
+不把释放的风险预算重新分给其它资产；约束后的最大风险贡献必须小于等于上限。
+缺少协方差、组合方差非正/非有限、阈值低于活跃资产数对应的理论下界 `1/N`，或
+迭代不收敛时一律 fail closed，禁止继续生成研究订单。HTTP 纯计算接口为兼容无
+协方差的旧请求，默认值为 `1.0`（不启用）；显式配置更低上限时必须同时提供可用
+收益序列。正式 `PortfolioPipelineAdapter` 的 ResearchRun 默认上限为 `0.35`，
+因此其冻结输入必须包含足以覆盖目标标的的协方差估计。
 
 ## 退出策略
 
@@ -103,7 +112,14 @@ pass/fail 和原因。`PortfolioRiskReport` 输出预计波动率、beta、资�
 
 ## ResearchRun 与 API
 
-组合结果可通过以下适配函数写入 #80 的逐阶段 artifact：
+`PortfolioPipelineAdapter` 是 long-only 研究组合进入 #80 的正式入口。调用方只
+能提供冻结候选池、特征、标准化信号、价格、协方差、交易单位和成交假设；适配器
+内部依次执行组合构建、硬约束、风险退出、三档资金可行性、整数手 sizing、研究
+订单/成交和成交驱动记账，并生成绑定 manifest 输入与阶段输出 checksum 的证据。
+`ResearchRunCoordinator` 缺少证据、证据漂移或任一硬约束失败时将 run 标记为
+`rejected`，不会持久化订单 artifact。
+
+底层转换函数包括：
 
 - `to_research_targets()` → `targets_before_constraints` /
   `targets_after_constraints`
@@ -111,8 +127,8 @@ pass/fail 和原因。`PortfolioRiskReport` 输出预计波动率、beta、资�
 - `to_research_rebalance_instructions()` → `rebalance_plan`
 - `constraint_impact_summary()` → `ResearchRunReport.constraint_impact`
 
-研究订单、成交、持仓和盈亏仍由 ResearchRun 适配器与研究撮合生成，ID 保持
-`RR-` 命名空间。组合层不允许越过撮合直接写持仓。
+研究订单、成交、持仓和盈亏由正式适配器与研究撮合生成，ID 保持 `RR-` 命名空间。
+同一冻结输入的重放使用稳定研究 ID；组合层不允许越过撮合直接写持仓。
 
 HTTP 纯计算接口：
 
@@ -138,9 +154,9 @@ HTTP 纯计算接口：
 ## 实盘风险边界与回滚
 
 本变更没有修改 `PreTradeChecker`、`KillSwitch`、`OrderManager`、
-`PositionManager`、`RecoveryEngine` 或券商适配器。已知实盘缺口
-`RiskConfig.max_symbol_position_value` 尚未由 `PreTradeChecker` 执行；它涉及真实
-资金安全，必须另建 issue、与用户确认风险后处理，不能把本离线约束当成实盘保护。
+`PositionManager`、`RecoveryEngine` 或券商适配器。实盘资金/仓位预占、并发下单
+和失败关闭缺口已单独登记为 issue #92；按用户要求本轮不实施，不能把本离线约束
+当成实盘保护。
 
 v2 没有数据库迁移。回滚只需恢复 portfolio v1 代码和旧 API response；已持久化
 ResearchRun artifact 是 JSON 快照，不会被代码回滚改写。

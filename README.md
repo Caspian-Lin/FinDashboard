@@ -246,9 +246,14 @@ SHA-256。发布清单会登记到 PostgreSQL `research_dataset_releases`,API
 ### 统一研究回测生命周期
 
 `ResearchRun` 将冻结数据、因子快照、无代码策略规格、标准化信号、约束前后目标
-仓位、离散调仓计划、研究订单/成交、成交驱动持仓/盈亏和绩效报告保存为一条可递归
-查询的血缘。#29 与 #60-#64 通过同一个适配器和结果契约进入编排器;同版本重放会
-比较与 run ID 无关的结果 checksum。
+仓位、风险退出状态、10/20/50 万可行性、离散调仓计划、研究订单/成交、成交驱动
+持仓/盈亏和绩效报告保存为一条可递归查询的血缘。long-only 研究通过正式
+`PortfolioPipelineAdapter` 生成这些阶段，不能由调用方预拼装目标/订单/持仓；
+同版本重放会比较与 run ID 无关的结果 checksum。
+
+单资产风险贡献上限现在是硬约束：只减小超限资产敞口，不重新放大其它资产；缺少
+协方差、数学不可行或求解不收敛时，ResearchRun 以
+`hard_constraint_rejected` 失败关闭且不生成研究订单 artifact。
 
 运行状态覆盖 `queued / running / completed / failed / interrupted / rejected /
 cancelled`。逐阶段 PostgreSQL checkpoint 支持重启恢复，run/decision/trace ID

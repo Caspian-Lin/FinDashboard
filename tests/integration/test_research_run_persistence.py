@@ -2,24 +2,38 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+import numpy as np
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+from finboard_backtest.portfolio import AssetLotInfo, CovarianceEstimate
 from finboard_backtest.research_run import (
+    CapitalTierOutcome,
+    ConstraintOutcome,
     DecisionBundle,
     DecisionSequenceAdapter,
+    FeatureValue,
     FrozenArtifactRef,
     LedgerSnapshot,
+    NormalizedSignal,
+    ResearchPipelineEvidence,
+    ResearchRiskState,
     ResearchRunCoordinator,
     ResearchRunManifest,
     ResearchRunReport,
     ResearchRunStatus,
     UniverseCandidate,
+    pipeline_output_checksum,
     stable_checksum,
+)
+from finboard_backtest.research_run.portfolio_pipeline import (
+    PortfolioDecisionInput,
+    PortfolioPipelineAdapter,
 )
 from finboard_backtest.strategy_spec import build_strategy_template
 from finboard_persistence import ResearchRunRepository, session_factory
@@ -56,8 +70,9 @@ def _manifest(kind: str, suffix: str) -> ResearchRunManifest:
     )
 
 
-def _decision() -> DecisionBundle:
-    return DecisionBundle(
+def _decision(manifest: ResearchRunManifest) -> DecisionBundle:
+    input_checksum = stable_checksum({"fixture": "integration-empty-decision"})
+    decision = DecisionBundle(
         business_date=date(2024, 1, 2),
         decision_at=datetime(2024, 1, 2, 15, tzinfo=UTC),
         candidates=(
@@ -72,8 +87,47 @@ def _decision() -> DecisionBundle:
         features=(),
         signals=(),
         targets_before_constraints=(),
-        constraints=(),
+        constraints=(
+            ConstraintOutcome(
+                constraint="max_risk_contribution",
+                passed=True,
+                before_value=0.0,
+                after_value=0.0,
+                limit=0.35,
+                reason="空组合无风险贡献",
+            ),
+        ),
         targets_after_constraints=(),
+        risk_exits=(),
+        targets_after_risk=(),
+        risk_state=ResearchRiskState(
+            cooldown_until={},
+            opened_on={},
+            high_water_prices={},
+            portfolio_equity_high_water=Decimal("200000"),
+            portfolio_drawdown=0.0,
+            portfolio_paused=False,
+        ),
+        capital_feasibility=tuple(
+            CapitalTierOutcome(
+                tier=tier,
+                capital=capital,
+                feasible=True,
+                cash_utilization=0.0,
+                tracking_error=0.0,
+                unfillable_symbols=(),
+                capacity_pressure=0.0,
+                margin_required=Decimal("0"),
+                estimated_costs=Decimal("0"),
+                reasons=("空组合可执行",),
+                input_checksum=input_checksum,
+            )
+            for tier, capital in (
+                ("100k", Decimal("100000")),
+                ("200k", Decimal("200000")),
+                ("500k", Decimal("500000")),
+            )
+        ),
         rebalance_plan=(),
         orders=(),
         fills=(),
@@ -90,10 +144,21 @@ def _decision() -> DecisionBundle:
             slippage_paid=Decimal("0"),
         ),
     )
+    return replace(
+        decision,
+        pipeline_evidence=ResearchPipelineEvidence(
+            manifest_input_checksum=manifest.input_checksum,
+            input_checksum=input_checksum,
+            output_checksum=pipeline_output_checksum(decision),
+            hard_constraints_passed=True,
+        ),
+    )
 
 
-def _adapter(kind: str) -> DecisionSequenceAdapter:
-    decision = _decision()
+def _adapter(
+    kind: str, manifest: ResearchRunManifest
+) -> DecisionSequenceAdapter:
+    decision = _decision(manifest)
     return DecisionSequenceAdapter(
         strategy_kind=kind,
         decisions=(decision,),
@@ -119,6 +184,65 @@ def _adapter(kind: str) -> DecisionSequenceAdapter:
     )
 
 
+def _portfolio_adapter() -> PortfolioPipelineAdapter:
+    symbols = ("A.SH", "B.SH", "C.SH")
+    decision_at = datetime(2024, 1, 2, 15, tzinfo=UTC)
+    return PortfolioPipelineAdapter(
+        strategy_kind="ma_cross",
+        decision_inputs=(
+            PortfolioDecisionInput(
+                business_date=date(2024, 1, 2),
+                decision_at=decision_at,
+                execution_at=datetime(2024, 1, 3, 9, 30, tzinfo=UTC),
+                candidates=tuple(
+                    UniverseCandidate(
+                        symbol=symbol,
+                        included=True,
+                        reasons=("集成测试候选池通过",),
+                        asset_class="equity",
+                        market="a_share",
+                    )
+                    for symbol in symbols
+                ),
+                features=tuple(
+                    FeatureValue(
+                        symbol=symbol,
+                        feature_id="close",
+                        value=10.0,
+                        source_artifact_ids=("frozen-release-v1",),
+                        available_at=decision_at,
+                    )
+                    for symbol in symbols
+                ),
+                signals=tuple(
+                    NormalizedSignal(
+                        symbol=symbol,
+                        score=1.0,
+                        action="buy",
+                        rule_id="integration-signal",
+                        rationale="集成测试冻结信号",
+                    )
+                    for symbol in symbols
+                ),
+                prices=dict.fromkeys(symbols, 10.0),
+                execution_prices=dict.fromkeys(symbols, 10.0),
+                lot_info={
+                    symbol: AssetLotInfo(code=symbol, lot_size=100)
+                    for symbol in symbols
+                },
+                input_artifact_ids=("frozen-release-v1",),
+                covariance=CovarianceEstimate(
+                    matrix=np.diag([0.01, 0.01, 0.01]),
+                    tickers=list(symbols),
+                    shrinkage=0.0,
+                    n_observations=252,
+                ),
+                sleeve_map=dict.fromkeys(symbols, "equity"),
+            ),
+        ),
+    )
+
+
 async def test_full_run_history_restart_replay_and_strategy_isolation(
     _engine: AsyncEngine,  # noqa: PT019
     db_session: AsyncSession,
@@ -126,9 +250,11 @@ async def test_full_run_history_restart_replay_and_strategy_isolation(
     store = SqlAlchemyResearchRunStore(ResearchRunRepository(db_session))
     coordinator = ResearchRunCoordinator(store)
     source_manifest = _manifest("ma_cross", "source")
-    source = await coordinator.execute(source_manifest, _adapter("ma_cross"))
+    source = await coordinator.execute(source_manifest, _portfolio_adapter())
     second_manifest = _manifest("etf_rotation", "etf")
-    second = await coordinator.execute(second_manifest, _adapter("etf_rotation"))
+    second = await coordinator.execute(
+        second_manifest, _adapter("etf_rotation", second_manifest)
+    )
 
     assert source.status is ResearchRunStatus.COMPLETED
     assert second.status is ResearchRunStatus.COMPLETED
@@ -141,7 +267,8 @@ async def test_full_run_history_restart_replay_and_strategy_isolation(
         restored = await restarted_store.get(source_manifest.run_id)
         assert restored is not None
         assert restored.status is ResearchRunStatus.COMPLETED
-        assert len(await restarted_store.list_artifacts(source_manifest.run_id)) == 11
+        assert restored.manifest.input_checksum == source_manifest.input_checksum
+        assert len(await restarted_store.list_artifacts(source_manifest.run_id)) == 14
         rows = await ResearchRunRepository(restarted).list_recent(limit=10)
         assert {row.strategy_kind for row in rows} == {"ma_cross", "etf_rotation"}
 
@@ -150,9 +277,9 @@ async def test_full_run_history_restart_replay_and_strategy_isolation(
             new_run_id="RR-integration-replay",
             idempotency_key="integration-idempotency-replay",
             requested_by="integration-test",
-            adapter=_adapter("ma_cross"),
+            adapter=_portfolio_adapter(),
         )
-        assert replayed.status is ResearchRunStatus.COMPLETED
+        assert replayed.status is ResearchRunStatus.COMPLETED, replayed.error_summary
         assert replayed.result_checksum == restored.result_checksum
 
 
@@ -173,8 +300,8 @@ async def test_running_checkpoint_is_recovered_after_new_session(
 
     coordinator = ResearchRunCoordinator(store)
     interrupted = await coordinator.mark_stale_running_as_interrupted()
-    resumed = await coordinator.execute(manifest, _adapter("ma_cross"))
+    resumed = await coordinator.execute(manifest, _adapter("ma_cross", manifest))
 
     assert interrupted
     assert resumed.status is ResearchRunStatus.COMPLETED
-    assert len(await store.list_artifacts(manifest.run_id)) == 11
+    assert len(await store.list_artifacts(manifest.run_id)) == 14

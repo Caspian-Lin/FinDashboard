@@ -8,6 +8,7 @@ from decimal import Decimal
 import pytest
 
 from finboard_backtest.research_run import (
+    CapitalTierOutcome,
     ConstraintOutcome,
     DecisionBundle,
     FeatureValue,
@@ -20,12 +21,15 @@ from finboard_backtest.research_run import (
     ResearchFillAction,
     ResearchOrder,
     ResearchOrderStatus,
+    ResearchPipelineEvidence,
     ResearchPosition,
     ResearchPositionSide,
+    ResearchRiskState,
     ResearchRunManifest,
     ResearchRunReport,
     TargetPosition,
     UniverseCandidate,
+    pipeline_output_checksum,
     stable_checksum,
 )
 from finboard_backtest.strategy_spec import build_strategy_template
@@ -84,9 +88,10 @@ def manifest_factory():
 
 
 @pytest.fixture
-def decision_factory():
+def decision_factory(manifest_factory):
     def build(
         *,
+        manifest: ResearchRunManifest | None = None,
         index: int = 0,
         action: ResearchFillAction = ResearchFillAction.OPEN_LONG,
         quantity: Decimal = Decimal("100"),
@@ -125,7 +130,15 @@ def decision_factory():
                     unrealized_pnl=Decimal("0"),
                 ),
             )
-        return DecisionBundle(
+        frozen_manifest = manifest or manifest_factory()
+        pipeline_input_checksum = stable_checksum(
+            {
+                "fixture": "decision_factory",
+                "business_date": decision_date,
+                "index": index,
+            }
+        )
+        decision = DecisionBundle(
             business_date=decision_date,
             decision_at=timestamp,
             candidates=(
@@ -187,14 +200,50 @@ def decision_factory():
                     position_side=side,
                 ),
             ),
+            risk_exits=(),
+            targets_after_risk=(
+                TargetPosition(
+                    symbol="510300.SH",
+                    weight=signed_weight,
+                    position_side=side,
+                ),
+            ),
+            risk_state=ResearchRiskState(
+                cooldown_until={},
+                opened_on={"510300.SH": decision_date},
+                high_water_prices={"510300.SH": 100.0},
+                portfolio_equity_high_water=cash + market_value,
+                portfolio_drawdown=0.0,
+                portfolio_paused=False,
+            ),
+            capital_feasibility=tuple(
+                CapitalTierOutcome(
+                    tier=tier,
+                    capital=capital,
+                    feasible=True,
+                    cash_utilization=0.1,
+                    tracking_error=0.0,
+                    unfillable_symbols=(),
+                    capacity_pressure=0.0,
+                    margin_required=Decimal("0"),
+                    estimated_costs=Decimal("0"),
+                    reasons=("固定样本可执行",),
+                    input_checksum=pipeline_input_checksum,
+                )
+                for tier, capital in (
+                    ("100k", Decimal("100000")),
+                    ("200k", Decimal("200000")),
+                    ("500k", Decimal("500000")),
+                )
+            ),
             rebalance_plan=(
                 RebalanceInstruction(
                     instruction_id=instruction_id,
                     symbol="510300.SH",
                     action=action,
-                    target_quantity=quantity,
+                    target_quantity=order_quantity or quantity,
                     current_quantity=Decimal("0"),
-                    delta_quantity=quantity,
+                    delta_quantity=order_quantity or quantity,
                     lot_size=1,
                     estimated_value=market_value,
                     reason="目标权重离散化",
@@ -234,8 +283,56 @@ def decision_factory():
                 slippage_paid=Decimal("0"),
             ),
         )
+        return replace_pipeline_evidence(
+            decision,
+            manifest=frozen_manifest,
+            input_checksum=pipeline_input_checksum,
+        )
 
     return build
+
+
+def replace_pipeline_evidence(
+    decision: DecisionBundle,
+    *,
+    manifest: ResearchRunManifest,
+    input_checksum: str | None = None,
+) -> DecisionBundle:
+    """测试辅助:在修改固定决策后重建正式流水线证据。"""
+    evidence = ResearchPipelineEvidence(
+        manifest_input_checksum=manifest.input_checksum,
+        input_checksum=input_checksum
+        or (
+            decision.pipeline_evidence.input_checksum
+            if decision.pipeline_evidence is not None
+            else stable_checksum({"fixture": "decision"})
+        ),
+        output_checksum=pipeline_output_checksum(decision),
+        hard_constraints_passed=all(
+            item.passed for item in decision.constraints if item.hard
+        ),
+    )
+    return DecisionBundle(
+        business_date=decision.business_date,
+        decision_at=decision.decision_at,
+        candidates=decision.candidates,
+        features=decision.features,
+        signals=decision.signals,
+        targets_before_constraints=decision.targets_before_constraints,
+        constraints=decision.constraints,
+        targets_after_constraints=decision.targets_after_constraints,
+        risk_exits=decision.risk_exits,
+        targets_after_risk=decision.targets_after_risk,
+        risk_state=decision.risk_state,
+        capital_feasibility=decision.capital_feasibility,
+        rebalance_plan=decision.rebalance_plan,
+        orders=decision.orders,
+        fills=decision.fills,
+        positions=decision.positions,
+        ledger=decision.ledger,
+        pipeline_evidence=evidence,
+        decision_id=decision.decision_id,
+    )
 
 
 def fixed_report(kind: str, decision: DecisionBundle) -> ResearchRunReport:

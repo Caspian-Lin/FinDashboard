@@ -20,16 +20,17 @@ from finboard_backtest.portfolio import (
     to_research_targets,
 )
 from finboard_backtest.research_run import (
-    ResearchFillAction,
-    ResearchOrder,
     ResearchOrderStatus,
     ResearchRunCoordinator,
 )
 
+from .conftest import replace_pipeline_evidence
 
-def test_signal_to_partial_fill_rejected_order_and_actual_position(
-    decision_factory,
+
+def test_signal_to_partial_fill_and_actual_position(
+    decision_factory, manifest_factory
 ) -> None:
+    manifest = manifest_factory()
     result = build_portfolio(
         PortfolioBuildInput(
             signals=(
@@ -65,40 +66,42 @@ def test_signal_to_partial_fill_rejected_order_and_actual_position(
     )
 
     base = decision_factory(
+        manifest=manifest,
         quantity=Decimal("50"),
         order_quantity=Decimal("100"),
         order_status=ResearchOrderStatus.PARTIALLY_FILLED,
         cash=Decimal("95000"),
         market_value=Decimal("5000"),
     )
-    rejected = ResearchOrder(
-        research_order_id="RR-rejected-issue-81",
-        instruction_id=instructions[0].instruction_id,
-        symbol="510300.SH",
-        action=ResearchFillAction.OPEN_LONG,
-        quantity=Decimal("100"),
-        status=ResearchOrderStatus.REJECTED,
-        reject_reason="参与率/可用资金约束",
+    targets_after_constraints = to_research_targets(
+        result.target_after_constraints
     )
-    decision = replace(
-        base,
-        targets_before_constraints=to_research_targets(
-            result.target_before_constraints
+    decision = replace_pipeline_evidence(
+        replace(
+            base,
+            targets_before_constraints=to_research_targets(
+                result.target_before_constraints
+            ),
+            constraints=to_research_constraint_outcomes(result),
+            targets_after_constraints=targets_after_constraints,
+            targets_after_risk=targets_after_constraints,
+            rebalance_plan=instructions,
+            orders=(
+                replace(
+                    base.orders[0],
+                    instruction_id=instructions[0].instruction_id,
+                ),
+            ),
         ),
-        constraints=to_research_constraint_outcomes(result),
-        targets_after_constraints=to_research_targets(
-            result.target_after_constraints
-        ),
-        rebalance_plan=instructions,
-        orders=(*base.orders, rejected),
+        manifest=manifest,
     )
 
     ResearchRunCoordinator._validate_decision(
         decision,
+        manifest=manifest,
         position_quantities=defaultdict(Decimal),
         seen_fill_ids=set(),
     )
     assert decision.orders[0].status is ResearchOrderStatus.PARTIALLY_FILLED
-    assert decision.orders[1].status is ResearchOrderStatus.REJECTED
     assert decision.positions[0].quantity == Decimal("50")
     assert decision.ledger.equity == Decimal("100000")

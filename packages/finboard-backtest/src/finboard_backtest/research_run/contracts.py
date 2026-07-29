@@ -21,7 +21,8 @@ from finboard_backtest.strategy_spec.contracts import (
     reject_executable_payload,
 )
 
-RESEARCH_RUN_SCHEMA_VERSION = "v1"
+RESEARCH_RUN_SCHEMA_VERSION = "v2"
+RESEARCH_PORTFOLIO_PIPELINE_VERSION = "v1"
 MIN_RESEARCH_CAPITAL = Decimal("100000")
 MAX_RESEARCH_CAPITAL = Decimal("500000")
 MONEY_EPSILON = Decimal("0.01")
@@ -53,6 +54,10 @@ class ResearchRunInterruptedError(ResearchRunError):
     """可恢复的研究运行中断。"""
 
 
+class ResearchConstraintViolationError(ResearchRunError):
+    """正式组合流水线的硬约束或阶段完整性不成立。"""
+
+
 class ResearchRunStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -70,6 +75,9 @@ class ResearchRunStage(StrEnum):
     TARGETS_BEFORE_CONSTRAINTS = "targets_before_constraints"
     CONSTRAINTS = "constraints"
     TARGETS_AFTER_CONSTRAINTS = "targets_after_constraints"
+    RISK_EXITS = "risk_exits"
+    TARGETS_AFTER_RISK = "targets_after_risk"
+    CAPITAL_FEASIBILITY = "capital_feasibility"
     REBALANCE_PLAN = "rebalance_plan"
     ORDERS = "orders"
     FILLS = "fills"
@@ -186,6 +194,28 @@ class ResearchRunManifest:
         return stable_checksum(self)
 
     @property
+    def input_checksum(self) -> str:
+        """计算与运行身份无关、可跨确定性重放复用的冻结输入校验和。"""
+        return stable_checksum(
+            {
+                "strategy_spec": self.strategy_spec,
+                "strategy_spec_checksum": self.strategy_spec_checksum,
+                "dataset_releases": self.dataset_releases,
+                "factor_snapshots": self.factor_snapshots,
+                "parameters": self.parameters,
+                "validation_config": self.validation_config,
+                "portfolio_config": self.portfolio_config,
+                "risk_config": self.risk_config,
+                "execution_config": self.execution_config,
+                "fee_config": self.fee_config,
+                "benchmark_config": self.benchmark_config,
+                "code_version": self.code_version,
+                "initial_capital": self.initial_capital,
+                "schema_version": self.schema_version,
+            }
+        )
+
+    @property
     def strategy_kind(self) -> str:
         return self.strategy_spec.strategy_kind
 
@@ -258,10 +288,112 @@ class ConstraintOutcome:
     after_value: float | None
     limit: float | None
     reason: str
+    hard: bool = True
 
     def __post_init__(self) -> None:
         if not self.constraint or not self.reason:
             raise ValueError("约束结果必须可解释")
+
+
+@dataclass(frozen=True, slots=True)
+class RiskExitOutcome:
+    """风险退出规则在单个研究决策时点的可审计结果。"""
+
+    rule_type: str
+    symbol: str | None
+    triggered: bool
+    metric: float | None
+    threshold: float | None
+    before_weight: float
+    after_weight: float
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.rule_type or not self.reason:
+            raise ValueError("风险退出结果必须包含规则类型和原因")
+        values = (
+            self.metric,
+            self.threshold,
+            self.before_weight,
+            self.after_weight,
+        )
+        if not all(value is None or math.isfinite(value) for value in values):
+            raise ValueError("风险退出指标必须为有限数或 None")
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchRiskState:
+    """可由 artifact 恢复的版本化研究退出状态。"""
+
+    cooldown_until: dict[str, date]
+    opened_on: dict[str, date]
+    high_water_prices: dict[str, float]
+    portfolio_equity_high_water: Decimal
+    portfolio_drawdown: float
+    portfolio_paused: bool
+    state_version: str = "v1"
+
+    def __post_init__(self) -> None:
+        if not self.state_version:
+            raise ValueError("risk state_version 不能为空")
+        if self.portfolio_equity_high_water < 0:
+            raise ValueError("组合权益高水位不能为负")
+        if not 0 <= self.portfolio_drawdown <= 1:
+            raise ValueError("组合回撤必须落在 [0, 1]")
+        if any(value <= 0 or not math.isfinite(value) for value in self.high_water_prices.values()):
+            raise ValueError("持仓价格高水位必须为正且有限")
+
+
+@dataclass(frozen=True, slots=True)
+class CapitalTierOutcome:
+    """同一冻结输入下单个资金档位的可执行性摘要。"""
+
+    tier: str
+    capital: Decimal
+    feasible: bool
+    cash_utilization: float
+    tracking_error: float
+    unfillable_symbols: tuple[str, ...]
+    capacity_pressure: float
+    margin_required: Decimal
+    estimated_costs: Decimal
+    reasons: tuple[str, ...]
+    input_checksum: str
+
+    def __post_init__(self) -> None:
+        if not self.tier or not self.input_checksum or not self.reasons:
+            raise ValueError("资金档位结果缺少 tier/input_checksum/reasons")
+        if self.capital <= 0:
+            raise ValueError("资金档位 capital 必须为正")
+        if min(self.margin_required, self.estimated_costs) < 0:
+            raise ValueError("保证金和预计成本不能为负")
+        metrics = (
+            self.cash_utilization,
+            self.tracking_error,
+            self.capacity_pressure,
+        )
+        if not all(math.isfinite(value) and value >= 0 for value in metrics):
+            raise ValueError("资金档位指标必须为非负有限数")
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchPipelineEvidence:
+    """证明关键阶段由正式组合流水线生成且未被事后改写。"""
+
+    manifest_input_checksum: str
+    input_checksum: str
+    output_checksum: str
+    hard_constraints_passed: bool
+    pipeline_version: str = RESEARCH_PORTFOLIO_PIPELINE_VERSION
+
+    def __post_init__(self) -> None:
+        if (
+            not self.manifest_input_checksum
+            or not self.input_checksum
+            or not self.output_checksum
+            or not self.pipeline_version
+        ):
+            raise ValueError("组合流水线证据字段不能为空")
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,11 +522,16 @@ class DecisionBundle:
     targets_before_constraints: tuple[TargetPosition, ...]
     constraints: tuple[ConstraintOutcome, ...]
     targets_after_constraints: tuple[TargetPosition, ...]
+    risk_exits: tuple[RiskExitOutcome, ...]
+    targets_after_risk: tuple[TargetPosition, ...]
+    risk_state: ResearchRiskState
+    capital_feasibility: tuple[CapitalTierOutcome, ...]
     rebalance_plan: tuple[RebalanceInstruction, ...]
     orders: tuple[ResearchOrder, ...]
     fills: tuple[ResearchFill, ...]
     positions: tuple[ResearchPosition, ...]
     ledger: LedgerSnapshot
+    pipeline_evidence: ResearchPipelineEvidence | None = None
     decision_id: str = ""
 
     def __post_init__(self) -> None:
@@ -410,6 +547,28 @@ class DecisionBundle:
             (f"{item.symbol}:{item.position_side.value}" for item in self.positions),
             "持仓",
         )
+        _assert_unique((item.tier for item in self.capital_feasibility), "资金档位")
+
+
+def pipeline_output_checksum(decision: DecisionBundle) -> str:
+    """对组合流水线的关键输出计算稳定校验和,排除自身证据和 decision_id。"""
+    return stable_checksum(
+        {
+            "signals": decision.signals,
+            "targets_before_constraints": decision.targets_before_constraints,
+            "constraints": decision.constraints,
+            "targets_after_constraints": decision.targets_after_constraints,
+            "risk_exits": decision.risk_exits,
+            "targets_after_risk": decision.targets_after_risk,
+            "risk_state": decision.risk_state,
+            "capital_feasibility": decision.capital_feasibility,
+            "rebalance_plan": decision.rebalance_plan,
+            "orders": decision.orders,
+            "fills": decision.fills,
+            "positions": decision.positions,
+            "ledger": decision.ledger,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,7 +786,9 @@ def _require_aware(value: datetime, name: str) -> None:
 __all__ = [
     "MAX_RESEARCH_CAPITAL",
     "MIN_RESEARCH_CAPITAL",
+    "RESEARCH_PORTFOLIO_PIPELINE_VERSION",
     "RESEARCH_RUN_SCHEMA_VERSION",
+    "CapitalTierOutcome",
     "ConstraintOutcome",
     "DecisionBundle",
     "FeatureValue",
@@ -638,12 +799,15 @@ __all__ = [
     "RebalanceInstruction",
     "ResearchActorType",
     "ResearchArtifact",
+    "ResearchConstraintViolationError",
     "ResearchFill",
     "ResearchFillAction",
     "ResearchOrder",
     "ResearchOrderStatus",
+    "ResearchPipelineEvidence",
     "ResearchPosition",
     "ResearchPositionSide",
+    "ResearchRiskState",
     "ResearchRunConflictError",
     "ResearchRunError",
     "ResearchRunInterruptedError",
@@ -652,11 +816,13 @@ __all__ = [
     "ResearchRunReport",
     "ResearchRunStage",
     "ResearchRunStatus",
+    "RiskExitOutcome",
     "TargetPosition",
     "UniverseCandidate",
     "UnsupportedResearchCapabilityError",
     "canonical_json",
     "manifest_from_json",
+    "pipeline_output_checksum",
     "report_from_json",
     "stable_checksum",
     "to_json_value",

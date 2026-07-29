@@ -61,7 +61,12 @@ class AllocateRequest(BaseModel):
     target_gross_exposure: float | None = None
     betas: dict[str, float] = Field(default_factory=dict)
     max_drawdown: float = Field(default=0.0, ge=0, le=1)
-    max_risk_contribution: float = Field(default=0.35, gt=0, le=1)
+    max_risk_contribution: float = Field(
+        default=1.0,
+        gt=0,
+        le=1,
+        description="小于 1 时启用硬上限并要求提供可用协方差输入",
+    )
     conflict_policy: Literal["net", "neutralize"] = "net"
     covariance_failure_mode: Literal["fail_closed", "fallback_equal_weight"] = "fail_closed"
 

@@ -5,8 +5,8 @@ issue #59 要求:
    补充/释放现金,**只用回看窗口已知数据**。
 2. 波动率上限:超限时截断权重到安全水平。
 3. 再平衡带(hysteresis):权重微小变化不触发交易,避免高频调仓。
-4. 相关性集中度:单一资产/ sleeve 的风险贡献超限时告警(不自动修正,
-   由上层决定是否收紧约束)。
+4. 相关性集中度:单一资产风险贡献可执行硬上限;投影只会降低权重,
+   不会为了满足风险贡献指标而暗中增加其它资产敞口。
 """
 
 from __future__ import annotations
@@ -47,6 +47,19 @@ class VolScalingResult:
 
 class RiskBudgetError(RuntimeError):
     """风险预算计算失败。"""
+
+
+@dataclass(frozen=True, slots=True)
+class RiskContributionProjection:
+    """单资产风险贡献硬上限的确定性投影结果。"""
+
+    weights: dict[str, float]
+    before_max_contribution: float
+    after_max_contribution: float
+    before_argmax: str
+    after_argmax: str
+    iterations: int
+    converged: bool
 
 
 def portfolio_volatility(
@@ -246,11 +259,154 @@ def risk_concentration_check(
     )
 
 
+def enforce_risk_contribution_cap(
+    weights: dict[str, float],
+    covariance: CovarianceEstimate,
+    *,
+    threshold: float,
+    max_iterations: int = 1000,
+    tolerance: float = 1e-8,
+) -> RiskContributionProjection:
+    """把单资产风险贡献投影到硬上限内。
+
+    该求解器面向通用 long-only 组合。每轮只降低风险贡献超限资产的权重,
+    不把释放权重重新分配给其它资产;因此资产/sleeve/gross 上限仍保持成立。
+    风险贡献占比对统一缩放不敏感,不收敛或理论上不可行时必须失败关闭。
+    """
+    if not 0 < threshold <= 1:
+        raise RiskBudgetError("风险贡献阈值必须落在 (0, 1]")
+    if max_iterations <= 0:
+        raise RiskBudgetError("max_iterations 必须为正")
+    if tolerance <= 0:
+        raise RiskBudgetError("tolerance 必须为正")
+    if not weights:
+        return RiskContributionProjection(
+            weights={},
+            before_max_contribution=0.0,
+            after_max_contribution=0.0,
+            before_argmax="",
+            after_argmax="",
+            iterations=0,
+            converged=True,
+        )
+    if any(weight < -MAX_WEIGHT_EPSILON for weight in weights.values()):
+        raise RiskBudgetError("风险贡献硬约束当前仅支持 long-only 目标")
+
+    missing = sorted(set(weights) - set(covariance.tickers))
+    if missing:
+        raise RiskBudgetError(f"协方差缺少目标标的: {missing}")
+    active = {
+        symbol: float(weight)
+        for symbol, weight in weights.items()
+        if weight > MAX_WEIGHT_EPSILON
+    }
+    if not active:
+        return RiskContributionProjection(
+            weights={},
+            before_max_contribution=0.0,
+            after_max_contribution=0.0,
+            before_argmax="",
+            after_argmax="",
+            iterations=0,
+            converged=True,
+        )
+    if threshold + tolerance < 1.0 / len(active):
+        raise RiskBudgetError(
+            "风险贡献上限不可行:"
+            f" threshold={threshold:.6f} < 1/n={1.0 / len(active):.6f}"
+        )
+
+    index = {ticker: idx for idx, ticker in enumerate(covariance.tickers)}
+
+    def concentration(
+        candidate: dict[str, float],
+    ) -> tuple[float, str, npt.NDArray[np.float64]]:
+        vector = np.zeros(len(covariance.tickers), dtype=np.float64)
+        for symbol, weight in candidate.items():
+            vector[index[symbol]] = weight
+        variance = float(vector @ covariance.matrix @ vector)
+        if not np.isfinite(variance) or variance <= MAX_WEIGHT_EPSILON:
+            raise RiskBudgetError(
+                f"组合方差必须为正且有限,实际为 {variance}"
+            )
+        raw = vector * (covariance.matrix @ vector)
+        ratios = np.asarray(raw / variance, dtype=np.float64)
+        if not np.isfinite(ratios).all():
+            raise RiskBudgetError("风险贡献包含非有限值")
+        active_symbols = sorted(candidate)
+        argmax = max(active_symbols, key=lambda symbol: float(ratios[index[symbol]]))
+        return float(ratios[index[argmax]]), argmax, ratios
+
+    before_max, before_argmax, ratios = concentration(active)
+    if before_max <= threshold + tolerance:
+        return RiskContributionProjection(
+            weights=active,
+            before_max_contribution=before_max,
+            after_max_contribution=before_max,
+            before_argmax=before_argmax,
+            after_argmax=before_argmax,
+            iterations=0,
+            converged=True,
+        )
+
+    projected = dict(active)
+    for iteration in range(1, max_iterations + 1):
+        over_limit = [
+            symbol
+            for symbol in sorted(projected)
+            if float(ratios[index[symbol]]) > threshold + tolerance
+        ]
+        if not over_limit:
+            after_max, after_argmax, _ = concentration(projected)
+            return RiskContributionProjection(
+                weights=projected,
+                before_max_contribution=before_max,
+                after_max_contribution=after_max,
+                before_argmax=before_argmax,
+                after_argmax=after_argmax,
+                iterations=iteration - 1,
+                converged=True,
+            )
+        for symbol in over_limit:
+            contribution = float(ratios[index[symbol]])
+            factor = float(np.sqrt(threshold / contribution))
+            # 保证每轮有确定性进展,同时避免一步把资产权重压到数值零。
+            projected[symbol] *= min(0.99, max(0.10, factor))
+        projected = {
+            symbol: weight
+            for symbol, weight in projected.items()
+            if weight > MAX_WEIGHT_EPSILON
+        }
+        if not projected:
+            raise RiskBudgetError("风险贡献投影把全部目标压缩为零")
+        after_max, after_argmax, ratios = concentration(projected)
+        if after_max <= threshold + tolerance:
+            return RiskContributionProjection(
+                weights=projected,
+                before_max_contribution=before_max,
+                after_max_contribution=after_max,
+                before_argmax=before_argmax,
+                after_argmax=after_argmax,
+                iterations=iteration,
+                converged=True,
+            )
+
+    after_max, after_argmax, _ = concentration(projected)
+    raise RiskBudgetError(
+        "风险贡献硬约束未收敛:"
+        f" before={before_max:.6f}, after={after_max:.6f},"
+        f" limit={threshold:.6f}, iterations={max_iterations},"
+        f" argmax={after_argmax}"
+    )
+
+
 __all__ = [
     "ANNUALIZATION_FACTOR",
     "ConcentrationCheck",
     "RiskBudgetError",
+    "RiskContributionProjection",
     "VolScalingResult",
+    "enforce_risk_contribution_cap",
     "needs_rebalance",
     "portfolio_volatility",
     "risk_concentration_check",

@@ -28,6 +28,8 @@ from finboard_backtest.portfolio.contracts import (
 )
 from finboard_backtest.portfolio.covariance import CovarianceEstimate
 from finboard_backtest.portfolio.risk_budget import (
+    RiskBudgetError,
+    enforce_risk_contribution_cap,
     portfolio_volatility,
     scale_to_target_volatility,
 )
@@ -454,6 +456,58 @@ def build_portfolio(build_input: PortfolioBuildInput) -> PortfolioBuildResult:
         adjustments.extend(final_application.adjustments)
         after = _target_from_weights(final_application.weights, before, build_input.constraints)
 
+    if build_input.constraints.max_risk_contribution < 1.0 - MAX_WEIGHT_EPSILON:
+        if covariance is None:
+            raise AllocationError(
+                "风险贡献硬约束缺少可用协方差矩阵,无法验证且按 fail_closed 拒绝"
+            )
+        try:
+            projection = enforce_risk_contribution_cap(
+                after.weights,
+                covariance,
+                threshold=build_input.constraints.max_risk_contribution,
+            )
+        except RiskBudgetError as exc:
+            raise AllocationError(
+                f"风险贡献硬约束不可满足,按 fail_closed 拒绝: {exc}"
+            ) from exc
+        after = _target_from_weights(
+            projection.weights,
+            after,
+            build_input.constraints,
+        )
+        adjustments.append(
+            ConstraintAdjustment(
+                constraint="max_risk_contribution",
+                symbol=projection.after_argmax or None,
+                before_value=projection.before_max_contribution,
+                after_value=projection.after_max_contribution,
+                limit=build_input.constraints.max_risk_contribution,
+                passed=projection.converged
+                and projection.after_max_contribution
+                <= build_input.constraints.max_risk_contribution
+                + MAX_WEIGHT_EPSILON,
+                reason=(
+                    "单资产风险贡献硬上限采用只减仓投影;"
+                    f"iterations={projection.iterations},"
+                    f"before_argmax={projection.before_argmax or 'none'},"
+                    f"after_argmax={projection.after_argmax or 'none'}"
+                ),
+            )
+        )
+    elif after.weights:
+        adjustments.append(
+            ConstraintAdjustment(
+                constraint="max_risk_contribution",
+                symbol=None,
+                before_value=0.0,
+                after_value=0.0,
+                limit=build_input.constraints.max_risk_contribution,
+                passed=True,
+                reason="风险贡献上限为 1.0,对单资产贡献不构成约束",
+            )
+        )
+
     cash_passed = after.cash_buffer + MAX_WEIGHT_EPSILON >= (
         build_input.constraints.min_cash_buffer
     )
@@ -468,24 +522,6 @@ def build_portfolio(build_input: PortfolioBuildInput) -> PortfolioBuildResult:
             reason="约束后保留最小现金缓冲",
         )
     )
-    preliminary_risk = _risk_report(after, covariance, build_input, tuple(adjustments))
-    if preliminary_risk.max_asset_risk_contribution is not None:
-        max_rc = preliminary_risk.max_asset_risk_contribution
-        adjustments.append(
-            ConstraintAdjustment(
-                constraint="max_risk_contribution",
-                symbol=None,
-                before_value=max_rc,
-                after_value=max_rc,
-                limit=build_input.constraints.max_risk_contribution,
-                passed=(
-                    max_rc
-                    <= build_input.constraints.max_risk_contribution
-                    + MAX_WEIGHT_EPSILON
-                ),
-                reason="输出最大单资产风险贡献供研究验收;不静默重写目标",
-            )
-        )
     adjustment_tuple = tuple(adjustments)
     return PortfolioBuildResult(
         resolutions=resolutions,
@@ -501,17 +537,39 @@ def to_research_constraint_outcomes(
     result: PortfolioBuildResult,
 ) -> tuple[ConstraintOutcome, ...]:
     """把约束审计转换为 #80 ``DecisionBundle`` 可直接消费的契约。"""
-    return tuple(
-        ConstraintOutcome(
-            constraint=item.constraint,
-            passed=item.passed,
-            before_value=item.before_value,
-            after_value=item.after_value,
-            limit=item.limit,
-            reason=item.reason,
+    outcomes: list[ConstraintOutcome] = []
+    max_constraints = {
+        "investable_universe",
+        "max_weight_per_asset",
+        "max_weight_per_sleeve",
+        "gross_leverage",
+        "volatility",
+        "max_risk_contribution",
+    }
+    for item in result.adjustments:
+        hard = item.constraint != "rebalance_band"
+        passed = item.passed
+        changed = abs(item.before_value - item.after_value) > MAX_WEIGHT_EPSILON
+        if (
+            hard
+            and not passed
+            and changed
+            and item.limit is not None
+            and item.constraint in max_constraints
+        ):
+            passed = abs(item.after_value) <= item.limit + MAX_WEIGHT_EPSILON
+        outcomes.append(
+            ConstraintOutcome(
+                constraint=item.constraint,
+                passed=passed,
+                before_value=item.before_value,
+                after_value=item.after_value,
+                limit=item.limit,
+                reason=item.reason,
+                hard=hard,
+            )
         )
-        for item in result.adjustments
-    )
+    return tuple(outcomes)
 
 
 def to_research_targets(target: TargetWeight) -> tuple[TargetPosition, ...]:
