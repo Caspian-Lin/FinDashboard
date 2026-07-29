@@ -3,9 +3,9 @@
 可实盘交易的模块化单体量化交易系统。设计目标见 [`phase1_doc.md`](./phase1_doc.md),
 agent 必读约束见 [`AGENTS.md`](./AGENTS.md)。
 
-> **当前阶段:P2 — 重启恢复 + 行情接入 + 策略运行器 + 人工交易控制台已完成。**
-> 端到端真实交易链路(MockBroker + QMT)、行情数据接入、策略 ABC 框架、
-> FastAPI REST + WebSocket API + React 前端控制台均已就绪。
+> **当前阶段：研究回测里程碑收尾，QMT 真机验证暂缓。**
+> 端到端实盘链路、研究数据/因子/无代码策略/统一 ResearchRun 和与实盘隔离的
+> 持久化模拟盘均已建立；恢复实盘前仍须完成 QMT 权限和真机验证。
 
 ---
 
@@ -40,6 +40,7 @@ FinDashboard/
 │   ├── finboard-core/             # 事件总线 / 订单 / 持仓 / 账户 / 状态机 / 策略运行器
 │   ├── finboard-risk/             # 下单前检查 / Kill Switch
 │   ├── finboard-reconcile/        # 本地 ↔ 券商核对 + 重启恢复
+│   ├── finboard-simulation/       # 持久化隔离模拟账户 / 撮合 / 账本 / 恢复
 │   ├── finboard-app/              # 进程入口 + CLI + 配置 + 策略工厂
 │   └── finboard-api/             # FastAPI REST + WebSocket API(人工交易控制台后端)
 ├── web/                           # React 前端(Vite + Tailwind + TanStack Query)
@@ -272,6 +273,22 @@ API 只提供排队、历史、血缘、取消和重放登记，没有同步 `/r
 uv run pytest tests/unit/research_run tests/unit/test_api_research_runs.py -v
 uv run pytest tests/integration/test_research_run_persistence.py -v
 ```
+
+### 持久化产品模拟盘
+
+已发布且完成机器验证的无代码策略可以进入独立产品模拟盘。模拟账户、会话、决策、
+订单、成交、持仓、账本、行情事件和审计均使用 `SIM-*` ID 与 `simulation_*` 表；
+后端不导入 Broker/QMT/CTP，也不提供直接创建订单端点。目标仓位必须引用会话批准
+的 `ResearchRun` 和真实 signal trace，再经过模拟风险预占、next-bar 撮合和
+成交驱动记账。
+
+它与 `MockBroker` 的用途不同：MockBroker 用于开发/CI 验证实盘内核接口，状态以
+测试场景为中心；产品模拟盘面向可恢复的长期会话，冻结策略/数据版本，持久化市场
+时钟、资金、持仓和审计，并提供独立 REST/WebSocket 查询。模拟结果不代表未来收益，
+`eligible` 只是一条审计状态，不会自动启动影子盘或实盘。
+
+架构、撮合与资产假设、换月规则、恢复流程、API 契约和操作步骤见
+[持久化模拟交易环境](docs/simulation_trading.md)。
 
 ### 配置项说明（InfoHint）
 

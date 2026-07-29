@@ -471,6 +471,424 @@ class ResearchRunArtifactModel(Base, IdMixin):
     )
 
 
+class SimulationAccountModel(Base, IdMixin):
+    """与实盘账户表完全隔离的模拟资金账户(issue #83)。"""
+
+    __tablename__ = "simulation_accounts"
+
+    simulation_account_id: Mapped[str] = mapped_column(
+        String(96), unique=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    mode: Mapped[str] = mapped_column(String(16), default="simulation")
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    currency: Mapped[str] = mapped_column(String(8), default="CNY")
+    initial_cash: Mapped[Decimal] = mapped_column(_research_numeric())
+    cash: Mapped[Decimal] = mapped_column(_research_numeric())
+    frozen_cash: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    margin_used: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    equity: Mapped[Decimal] = mapped_column(_research_numeric())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SimulationSessionModel(Base, IdMixin):
+    """持久化模拟会话与可恢复市场时钟。"""
+
+    __tablename__ = "simulation_sessions"
+
+    simulation_session_id: Mapped[str] = mapped_column(
+        String(96), unique=True, index=True
+    )
+    simulation_account_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey(
+            "simulation_accounts.simulation_account_id", ondelete="RESTRICT"
+        ),
+        index=True,
+    )
+    mode: Mapped[str] = mapped_column(String(16), default="simulation")
+    source_mode: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    strategy_id: Mapped[str] = mapped_column(String(64), index=True)
+    strategy_version: Mapped[int] = mapped_column(Integer)
+    strategy_checksum: Mapped[str] = mapped_column(String(64))
+    validation_run_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("research_runs.run_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    data_release_id: Mapped[str] = mapped_column(String(128), index=True)
+    config: Mapped[dict[str, object]] = mapped_column(JSON)
+    clock: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    promotion_status: Mapped[str] = mapped_column(
+        String(24), default="not_evaluated", index=True
+    )
+    reset_of_session_id: Mapped[str | None] = mapped_column(
+        String(96), nullable=True, index=True
+    )
+    recovery_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    last_sequence: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    stopped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_simulation_sessions_account_status",
+            "simulation_account_id",
+            "status",
+        ),
+    )
+
+
+class SimulationDecisionModel(Base, IdMixin):
+    """从机器验证产物进入模拟 runner 的结构化目标仓位决策。"""
+
+    __tablename__ = "simulation_decisions"
+
+    simulation_session_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("simulation_sessions.simulation_session_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    decision_id: Mapped[str] = mapped_column(String(128))
+    source_run_id: Mapped[str] = mapped_column(String(96), index=True)
+    source_decision_id: Mapped[str] = mapped_column(String(128), index=True)
+    source_signal_trace_ids: Mapped[list[str]] = mapped_column(JSON)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    checksum: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_session_id",
+            "decision_id",
+            name="uq_simulation_decision",
+        ),
+    )
+
+
+class SimulationOrderModel(Base, IdMixin):
+    """模拟订单; 不引用实盘 ``orders`` 表。"""
+
+    __tablename__ = "simulation_orders"
+
+    simulation_order_id: Mapped[str] = mapped_column(
+        String(96), unique=True, index=True
+    )
+    intent_key: Mapped[str] = mapped_column(String(160), unique=True)
+    simulation_account_id: Mapped[str] = mapped_column(String(96), index=True)
+    simulation_session_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("simulation_sessions.simulation_session_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    decision_id: Mapped[str] = mapped_column(String(128), index=True)
+    strategy_id: Mapped[str] = mapped_column(String(64), index=True)
+    signal_trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    market: Mapped[str] = mapped_column(String(16))
+    instrument_type: Mapped[str] = mapped_column(String(24))
+    asset_rule_key: Mapped[str] = mapped_column(String(32))
+    position_side: Mapped[str] = mapped_column(String(8))
+    position_effect: Mapped[str] = mapped_column(String(8))
+    side: Mapped[str] = mapped_column(String(8))
+    order_type: Mapped[str] = mapped_column(String(8))
+    time_in_force: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[Decimal] = mapped_column(_research_numeric())
+    price: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    filled_quantity: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    average_fill_price: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reject_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rule_snapshot: Mapped[dict[str, object]] = mapped_column(JSON)
+    reserved_cash: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    reserved_quantity: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    submitted_market_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    eligible_after: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_simulation_orders_session_status",
+            "simulation_session_id",
+            "status",
+        ),
+    )
+
+
+class SimulationFillModel(Base, IdMixin):
+    """模拟成交明细; 事件键和成交 ID 双重幂等。"""
+
+    __tablename__ = "simulation_fills"
+
+    simulation_fill_id: Mapped[str] = mapped_column(
+        String(96), unique=True, index=True
+    )
+    fill_event_key: Mapped[str] = mapped_column(String(192), unique=True)
+    simulation_order_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("simulation_orders.simulation_order_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    simulation_account_id: Mapped[str] = mapped_column(String(96), index=True)
+    simulation_session_id: Mapped[str] = mapped_column(String(96), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    market: Mapped[str] = mapped_column(String(16))
+    position_side: Mapped[str] = mapped_column(String(8))
+    position_effect: Mapped[str] = mapped_column(String(8))
+    side: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[Decimal] = mapped_column(_research_numeric())
+    price: Mapped[Decimal] = mapped_column(_research_numeric())
+    commission: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    tax: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    slippage_cost: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    filled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class SimulationPositionModel(Base, IdMixin):
+    """模拟持仓; 数量只能由 ``SimulationFill`` 驱动。"""
+
+    __tablename__ = "simulation_positions"
+
+    simulation_account_id: Mapped[str] = mapped_column(String(96), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    market: Mapped[str] = mapped_column(String(16))
+    instrument_type: Mapped[str] = mapped_column(String(24))
+    asset_rule_key: Mapped[str] = mapped_column(String(32))
+    position_side: Mapped[str] = mapped_column(String(8))
+    total_quantity: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    available_quantity: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    frozen_quantity: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    average_price: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    market_value: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    realized_pnl: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    unrealized_pnl: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    margin_used: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    last_price: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    last_settlement_price: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    last_settlement_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True
+    )
+    lots: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_account_id",
+            "symbol",
+            "position_side",
+            name="uq_simulation_position",
+        ),
+    )
+
+
+class SimulationLedgerModel(Base, IdMixin):
+    """追加式模拟现金、权益和费用账本。"""
+
+    __tablename__ = "simulation_ledger"
+
+    ledger_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    simulation_account_id: Mapped[str] = mapped_column(String(96), index=True)
+    simulation_session_id: Mapped[str] = mapped_column(String(96), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    reference_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    cash_delta: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    margin_delta: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    realized_pnl: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    commission: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    tax: Mapped[Decimal] = mapped_column(
+        _research_numeric(), default=Decimal("0")
+    )
+    cash_after: Mapped[Decimal] = mapped_column(_research_numeric())
+    frozen_cash_after: Mapped[Decimal] = mapped_column(_research_numeric())
+    margin_used_after: Mapped[Decimal] = mapped_column(_research_numeric())
+    equity_after: Mapped[Decimal] = mapped_column(_research_numeric())
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_session_id",
+            "sequence",
+            name="uq_simulation_ledger_sequence",
+        ),
+    )
+
+
+class SimulationMarketEventModel(Base, IdMixin):
+    """可重放且幂等的模拟行情输入。"""
+
+    __tablename__ = "simulation_market_events"
+
+    simulation_session_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("simulation_sessions.simulation_session_id", ondelete="RESTRICT"),
+        index=True,
+    )
+    source_event_id: Mapped[str] = mapped_column(String(160))
+    checksum: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    market: Mapped[str] = mapped_column(String(16))
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "simulation_session_id",
+            "source_event_id",
+            name="uq_simulation_market_event",
+        ),
+        Index(
+            "ix_simulation_market_symbol_time",
+            "simulation_session_id",
+            "symbol",
+            "timestamp",
+        ),
+    )
+
+
+class SimulationAuditModel(Base, IdMixin):
+    """模拟域独立审计, 不写入实盘 ``audit_logs``。"""
+
+    __tablename__ = "simulation_audit"
+
+    audit_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    event_key: Mapped[str] = mapped_column(String(192), unique=True)
+    simulation_account_id: Mapped[str] = mapped_column(String(96), index=True)
+    simulation_session_id: Mapped[str | None] = mapped_column(
+        String(96), nullable=True, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    actor: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(48), index=True)
+    target: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    checksum: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
 class ResearchSyncBatchModel(Base, IdMixin):
     """一次研究数据摄取、质量检查和发布批次。"""
 

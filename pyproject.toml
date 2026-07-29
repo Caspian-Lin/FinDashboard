@@ -26,6 +26,7 @@ finboard-api = { workspace = true }
 finboard-scheduler = { workspace = true }
 finboard-data = { workspace = true }
 finboard-backtest = { workspace = true }
+finboard-simulation = { workspace = true }
 
 # 开发期统一依赖,改用 PEP 735 dependency-groups(uv 推荐写法)
 [dependency-groups]
@@ -82,6 +83,7 @@ known-first-party = [
   "finboard_scheduler",
   "finboard_data",
   "finboard_backtest",
+  "finboard_simulation",
 ]
 
 # -----------------------------------------------------------------------------
@@ -114,6 +116,7 @@ mypy_path = [
   "packages/finboard-scheduler/src",
   "packages/finboard-data/src",
   "packages/finboard-backtest/src",
+  "packages/finboard-simulation/src",
 ]
 exclude = ["migrations/versions/"]
 
@@ -154,6 +157,7 @@ addopts = [
   "--cov=finboard_scheduler",
   "--cov=finboard_data",
   "--cov=finboard_backtest",
+  "--cov=finboard_simulation",
   "--cov-report=term-missing",
 ]
 markers = [

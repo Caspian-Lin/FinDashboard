@@ -31,16 +31,19 @@ from finboard_api.routes import (
     reconcile_router,
     research_router,
     research_runs_router,
+    simulation_router,
     strategy_presets_router,
     strategy_specs_router,
     watchlist_router,
 )
+from finboard_api.simulation_ws import SimulationConnectionManager
 from finboard_api.ws import ConnectionManager, setup_event_bridge, teardown_event_bridge
 from finboard_app.bootstrap import build_kernel_components
 from finboard_app.config import Settings
 from finboard_app.logging import setup_logging
 from finboard_shared.exceptions import FinboardError
 from finboard_shared.types import KillSwitchLevel
+from finboard_simulation import SimulationRepository, SimulationService
 
 logger = structlog.get_logger(__name__)
 
@@ -69,9 +72,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.session_maker = components.session_maker  # HTTP 请求每请求独立 session
         app.state.account_id = components.account_id
         app.state.ws_manager = manager
+        app.state.simulation_ws_manager = SimulationConnectionManager()
 
         await kernel.start()
         logger.info("api.kernel_started", ready=kernel.ready)
+        async with components.session_maker() as simulation_session:
+            recovered = await SimulationService(
+                SimulationRepository(simulation_session)
+            ).recover_active_sessions()
+            await simulation_session.commit()
+        logger.info(
+            "api.simulation_recovered",
+            recovered_sessions=len(recovered),
+        )
 
         try:
             yield
@@ -127,6 +140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_runs_router)
     app.include_router(instruments_router)
     app.include_router(portfolio_router)
+    app.include_router(simulation_router)
 
     # WebSocket
     @app.websocket("/ws/events")
@@ -138,5 +152,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await websocket.receive_text()
         except WebSocketDisconnect:
             manager.disconnect(websocket)
+
+    @app.websocket("/ws/simulation/{session_id}")
+    async def ws_simulation(websocket: WebSocket, session_id: str) -> None:
+        if not session_id.startswith("SIM-S-"):
+            await websocket.close(code=1008, reason="simulation session id required")
+            return
+        simulation_manager: SimulationConnectionManager = (
+            app.state.simulation_ws_manager
+        )
+        await simulation_manager.connect(session_id, websocket)
+        try:
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            await simulation_manager.disconnect(session_id, websocket)
 
     return app
