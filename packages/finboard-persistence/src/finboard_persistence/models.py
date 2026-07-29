@@ -355,6 +355,46 @@ class StrategyPresetModel(Base, IdMixin):
     )
 
 
+class ResearchStrategySpecModel(Base, IdMixin):
+    """无代码研究策略的追加式版本记录(issue #79)。"""
+
+    __tablename__ = "research_strategy_specs"
+
+    strategy_id: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    schema_version: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(100))
+    strategy_kind: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    change_type: Mapped[str] = mapped_column(String(24))
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    validation_errors: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    parent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rollback_of_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "strategy_id",
+            "version",
+            name="uq_research_strategy_spec_version",
+        ),
+        Index(
+            "ix_research_strategy_spec_history",
+            "strategy_id",
+            "version",
+        ),
+    )
+
+
 class ResearchSyncBatchModel(Base, IdMixin):
     """一次研究数据摄取、质量检查和发布批次。"""
 

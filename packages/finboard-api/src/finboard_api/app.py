@@ -31,6 +31,7 @@ from finboard_api.routes import (
     reconcile_router,
     research_router,
     strategy_presets_router,
+    strategy_specs_router,
     watchlist_router,
 )
 from finboard_api.ws import ConnectionManager, setup_event_bridge, teardown_event_bridge
@@ -120,6 +121,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(backtest_router)
     app.include_router(watchlist_router)
     app.include_router(strategy_presets_router)
+    app.include_router(strategy_specs_router)
     app.include_router(research_router)
     app.include_router(instruments_router)
     app.include_router(portfolio_router)
