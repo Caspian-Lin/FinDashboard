@@ -17,10 +17,13 @@ from finboard_api.schemas import (
     BondMetadataOut,
     ConvertibleMetadataOut,
     DatasetManifestOut,
+    DatasetReleaseCapabilityOut,
     EtfMetadataOut,
     FuturesContractOut,
     InstrumentOut,
     LifecycleEventOut,
+    ResearchDatasetReleaseOut,
+    ResearchDatasetReleaseSummaryOut,
 )
 from finboard_persistence import (
     BondMetadataModel,
@@ -30,6 +33,7 @@ from finboard_persistence import (
     FuturesContractModel,
     InstrumentLifecycleEventModel,
     InstrumentModel,
+    ResearchDatasetReleaseRepository,
 )
 
 router = APIRouter(prefix="/api/instruments", tags=["instruments"])
@@ -155,6 +159,76 @@ async def list_dataset_manifests(
     stmt = stmt.order_by(DatasetManifestModel.published_at.desc()).limit(limit)
     result = await session.execute(stmt)
     return [_manifest_to_out(r) for r in result.scalars().all()]
+
+
+@router.get(
+    "/datasets/releases",
+    response_model=list[ResearchDatasetReleaseSummaryOut],
+)
+async def list_dataset_releases(
+    dataset_name: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    quality_status: Literal["passed", "warnings"] | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+) -> list[ResearchDatasetReleaseSummaryOut]:
+    """列出版本化、时点安全的不可变研究数据发布。"""
+
+    releases = await ResearchDatasetReleaseRepository(session).list(
+        dataset_name=dataset_name,
+        source=source,
+        quality_status=quality_status,
+        limit=limit,
+    )
+    return [
+        ResearchDatasetReleaseSummaryOut(
+            release_id=release.release_id,
+            dataset_name=release.dataset_name,
+            source=release.source,
+            version=release.version,
+            schema_version=release.schema_version,
+            start_date=release.start_date,
+            end_date=release.end_date,
+            period=release.period.value,
+            adjustment=release.adjustment,
+            code_version=release.code_version,
+            published_at=release.published_at,
+            symbol_count=release.symbol_count,
+            row_count=release.row_count,
+            coverage_pct=release.coverage_pct,
+            capabilities=[
+                DatasetReleaseCapabilityOut(
+                    key=item.key,
+                    status=item.status.value,
+                    symbol_count=item.symbol_count,
+                    ready_count=item.ready_count,
+                    missing_requirements=list(item.missing_requirements),
+                )
+                for item in release.capabilities
+            ],
+            quality_status=release.quality_status.value,
+            known_limitations=list(release.known_limitations),
+            metadata_version=release.metadata_version,
+            release_checksum=release.release_checksum,
+        )
+        for release in releases
+    ]
+
+
+@router.get(
+    "/datasets/releases/{release_id}",
+    response_model=ResearchDatasetReleaseOut,
+)
+async def get_dataset_release(
+    release_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ResearchDatasetReleaseOut:
+    """读取发布清单、逐标的覆盖、资产规则及能力缺口。"""
+
+    release = await ResearchDatasetReleaseRepository(session).get(release_id)
+    if release is None:
+        raise HTTPException(status_code=404, detail=f"未找到研究数据发布: {release_id}")
+    return ResearchDatasetReleaseOut.model_validate(release.as_dict())
 
 
 def _instrument_to_out(row: InstrumentModel) -> InstrumentOut:

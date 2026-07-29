@@ -34,6 +34,7 @@ from finboard_shared.types import KillSwitchLevel
 
 if TYPE_CHECKING:
     from finboard_app.bootstrap import KernelComponents
+    from finboard_data import ResearchDatasetRelease
     from finboard_reconcile import ReconciliationReport
     from finboard_scheduler import Scheduler
 
@@ -567,12 +568,203 @@ def data_bulk_download(
     )
 
 
+@data_app.command(name="release")
+def data_release(
+    release_id: Annotated[
+        str,
+        typer.Option("--release-id", help="不可变发布 ID(已存在时只允许相同规格幂等读取)"),
+    ],
+    version: Annotated[
+        str,
+        typer.Option("--version", help="数据版本(同 dataset/source 下唯一)"),
+    ],
+    symbols: Annotated[
+        str,
+        typer.Option("--symbols", help="发布标的代码,逗号分隔"),
+    ],
+    start: Annotated[
+        str,
+        typer.Option("--start", help="发布开始日期 YYYY-MM-DD"),
+    ],
+    end: Annotated[
+        str,
+        typer.Option("--end", help="发布结束日期 YYYY-MM-DD"),
+    ],
+    dataset_name: Annotated[
+        str,
+        typer.Option("--dataset-name", help="数据集名称"),
+    ] = "multi_asset_daily_bars",
+    source: Annotated[
+        str,
+        typer.Option("--source", help="原始行情来源"),
+    ] = "akshare",
+    cache_dir: Annotated[
+        str,
+        typer.Option("--cache-dir", help="可变 Parquet 缓存目录"),
+    ] = "data_cache",
+    release_root: Annotated[
+        str,
+        typer.Option("--release-root", help="不可变发布根目录"),
+    ] = "data_releases",
+    adjust: Annotated[
+        str,
+        typer.Option("--adjust", help="复权方式(qfq/hqfq/none)"),
+    ] = "qfq",
+    required_capabilities: Annotated[
+        str,
+        typer.Option(
+            "--required-capabilities",
+            help="质量门必需能力,逗号分隔",
+        ),
+    ] = "stock,etf:index,etf:cross_border,etf:commodity,etf:bond",
+    code_version: Annotated[
+        str | None,
+        typer.Option("--code-version", help="生成代码版本;默认当前 git commit"),
+    ] = None,
+) -> None:
+    """冻结、校验并登记一个可复现的多资产研究数据发布。"""
+
+    normalized_symbols = [item.strip().upper() for item in symbols.split(",") if item.strip()]
+    capabilities = tuple(
+        item.strip() for item in required_capabilities.split(",") if item.strip()
+    )
+    try:
+        release = asyncio.run(
+            _publish_dataset_release(
+                release_id=release_id,
+                version=version,
+                dataset_name=dataset_name,
+                source=source,
+                symbols=normalized_symbols,
+                start_date=parse_date.fromisoformat(start),
+                end_date=parse_date.fromisoformat(end),
+                cache_dir=cache_dir,
+                release_root=release_root,
+                adjust=adjust,
+                required_capabilities=capabilities,
+                code_version=code_version or _current_code_version(),
+            )
+        )
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(f"发布失败: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        f"发布成功: {release.release_id} quality={release.quality_status.value} "
+        f"symbols={release.symbol_count} rows={release.row_count} "
+        f"coverage={release.coverage_pct} checksum={release.release_checksum}"
+    )
+
+
+@data_app.command(name="release-verify")
+def data_release_verify(
+    release_id: Annotated[
+        str,
+        typer.Argument(help="待校验的发布 ID"),
+    ],
+    release_root: Annotated[
+        str,
+        typer.Option("--release-root", help="不可变发布根目录"),
+    ] = "data_releases",
+) -> None:
+    """离线校验发布 manifest 与全部 Parquet 文件 checksum。"""
+
+    from pathlib import Path
+
+    from finboard_data import DatasetReleaseError, verify_dataset_release
+
+    try:
+        release = verify_dataset_release(Path(release_root) / release_id)
+    except DatasetReleaseError as exc:
+        typer.echo(f"校验失败: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        f"校验通过: {release.release_id} symbols={release.symbol_count} "
+        f"rows={release.row_count} checksum={release.release_checksum}"
+    )
+
+
 app.add_typer(data_app, name="data")
 
 
 # ---------------------------------------------------------------------------
 # data sync / bulk-download 内部实现
 # ---------------------------------------------------------------------------
+def _current_code_version() -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "--short=12", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        return "unknown"
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return f"{value}-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else value
+
+
+async def _publish_dataset_release(
+    *,
+    release_id: str,
+    version: str,
+    dataset_name: str,
+    source: str,
+    symbols: list[str],
+    start_date: date,
+    end_date: date,
+    cache_dir: str,
+    release_root: str,
+    adjust: str,
+    required_capabilities: tuple[str, ...],
+    code_version: str,
+) -> ResearchDatasetRelease:
+    from finboard_app.config import load_settings
+    from finboard_data import DatasetReleaseSpec
+    from finboard_persistence import (
+        ResearchDatasetReleaseService,
+        create_async_engine,
+        session_factory,
+    )
+
+    settings = load_settings()
+    engine = create_async_engine(settings.db_url)
+    try:
+        async with session_factory(engine)() as session:
+            service = ResearchDatasetReleaseService(
+                session,
+                cache_dir=cache_dir,
+                release_root=release_root,
+            )
+            release = await service.publish(
+                DatasetReleaseSpec(
+                    release_id=release_id,
+                    dataset_name=dataset_name,
+                    source=source,
+                    version=version,
+                    start_date=start_date,
+                    end_date=end_date,
+                    code_version=code_version,
+                    adjustment=adjust,
+                    required_capabilities=required_capabilities,
+                    known_limitations=(
+                        "交易日覆盖使用工作日近似;节假日缺口作为 warning 报告",
+                        "停牌由零成交且 OHLC 不变的日线代理识别",
+                        "首期仅发布本地缓存已有字段,不回退到联网数据源",
+                    ),
+                ),
+                symbols,
+            )
+            await session.commit()
+            return release
+    finally:
+        await engine.dispose()
+
+
 async def _sync_universe() -> None:
     """从 akshare 发现全市场标的,写入 instruments 表(带生命周期 diff)。"""
     from datetime import date

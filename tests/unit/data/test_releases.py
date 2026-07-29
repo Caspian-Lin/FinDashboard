@@ -1,0 +1,499 @@
+"""不可变多资产研究数据发布单元/故障注入测试(issue #77)。"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from finboard_data import (
+    DatasetReleaseQualityError,
+    DatasetReleaseSpec,
+    ExecutionMetadata,
+    FrozenDatasetReleaseBuilder,
+    FrozenReleaseProvider,
+    ImmutableReleaseError,
+    ReleaseCapabilityError,
+    ReleaseInstrumentSpec,
+    ReleaseIntegrityError,
+    ReleaseLifecycleEvent,
+    default_execution_metadata,
+    verify_dataset_release,
+)
+from finboard_data.cache import ParquetCache
+from finboard_shared.models import Bar, Symbol
+from finboard_shared.types import (
+    AssetClass,
+    BarPeriod,
+    EtfCategory,
+    InstrumentType,
+    ListingStatus,
+    Market,
+)
+
+_START = date(2024, 1, 2)
+_END = date(2024, 1, 5)
+
+# 固定真实回归样本:从项目本地 yfinance qfq 缓存提取的 2024-01-02~05
+# close/volume。amount 在该来源中不可用(为 0),作为发布已知限制保留。
+_REAL_CLOSE_VOLUME = {
+    "600519.SH": (
+        ("1531.145630", "3215644"),
+        ("1539.314697", "2022929"),
+        ("1516.597534", "2155107"),
+        ("1511.472534", "2024286"),
+    ),
+    "510300.SH": (
+        ("3.222358", "942930578"),
+        ("3.213026", "1061750273"),
+        ("3.185030", "1666152481"),
+        ("3.169165", "1699669666"),
+    ),
+    "513100.SH": (
+        ("1.210000", "330084796"),
+        ("1.191000", "682674776"),
+        ("1.185000", "430004153"),
+        ("1.176000", "429344300"),
+    ),
+    "518880.SH": (
+        ("4.666000", "206278439"),
+        ("4.663000", "111196216"),
+        ("4.651000", "114966300"),
+        ("4.664000", "126749700"),
+    ),
+    "511010.SH": (
+        ("129.988083", "3166400"),
+        ("129.953964", "4173900"),
+        ("130.054459", "400500"),
+        ("130.188080", "330700"),
+    ),
+}
+
+
+def _bars(code: str, market: Market = Market.A_SHARE) -> list[Bar]:
+    symbol = Symbol(code=code, market=market)
+    samples = _REAL_CLOSE_VOLUME.get(
+        code,
+        (("10.5", "1000"),) * 4,
+    )
+    return [
+        Bar(
+            symbol=symbol,
+            period=BarPeriod.D1,
+            timestamp=datetime.combine(
+                _START + timedelta(days=offset),
+                datetime.min.time(),
+                tzinfo=UTC,
+            ),
+            open=Decimal(close),
+            high=Decimal(close) * Decimal("1.01"),
+            low=Decimal(close) * Decimal("0.99"),
+            close=Decimal(close),
+            volume=Decimal(volume),
+            amount=Decimal("0"),
+        )
+        for offset, (close, volume) in enumerate(samples)
+    ]
+
+
+def _stock(code: str = "600519.SH") -> ReleaseInstrumentSpec:
+    lifecycle_events = (
+        ReleaseLifecycleEvent(
+            event_type="dividend",
+            effective_date=date(2023, 12, 29),
+            available_at=datetime(2024, 1, 1, 8, tzinfo=UTC),
+            source="fixed_sample",
+            dataset_version="events-v1",
+            details={"cash_per_share": "1"},
+        ),
+    )
+    return ReleaseInstrumentSpec(
+        code=code,
+        name="固定股票样本",
+        market=Market.A_SHARE,
+        instrument_type=InstrumentType.STOCK,
+        asset_class=AssetClass.EQUITY,
+        available_at=datetime(2001, 8, 27, tzinfo=UTC),
+        execution=default_execution_metadata(
+            market=Market.A_SHARE,
+            instrument_type=InstrumentType.STOCK,
+        ),
+        exchange="SSE",
+        list_date=date(2001, 8, 27),
+        status=ListingStatus.ACTIVE,
+        lifecycle_events=lifecycle_events,
+        present_event_types=("dividend",),
+        name_history=(("固定股票样本", date(2001, 8, 27), None),),
+    )
+
+
+def _etf(
+    code: str,
+    category: EtfCategory,
+    asset_class: AssetClass,
+) -> ReleaseInstrumentSpec:
+    return ReleaseInstrumentSpec(
+        code=code,
+        name=f"{category.value} ETF",
+        market=Market.A_SHARE,
+        instrument_type=InstrumentType.ETF,
+        asset_class=asset_class,
+        available_at=datetime(2013, 1, 1, tzinfo=UTC),
+        execution=default_execution_metadata(
+            market=Market.A_SHARE,
+            instrument_type=InstrumentType.ETF,
+            etf_category=category,
+        ),
+        exchange="SSE",
+        etf_category=category,
+        list_date=date(2013, 1, 1),
+        status=ListingStatus.ACTIVE,
+    )
+
+
+def _multi_asset_instruments() -> list[ReleaseInstrumentSpec]:
+    return [
+        _stock(),
+        _etf("510300.SH", EtfCategory.INDEX, AssetClass.EQUITY),
+        _etf("513100.SH", EtfCategory.CROSS_BORDER, AssetClass.EQUITY),
+        _etf("518880.SH", EtfCategory.COMMODITY, AssetClass.COMMODITY),
+        _etf("511010.SH", EtfCategory.BOND, AssetClass.FIXED_INCOME),
+    ]
+
+
+def _spec(
+    release_id: str = "fixed-r1",
+    *,
+    version: str = "2024.01",
+    fields: tuple[str, ...] | None = None,
+) -> DatasetReleaseSpec:
+    if fields is None:
+        return DatasetReleaseSpec(
+            release_id=release_id,
+            dataset_name="multi_asset_daily_bars",
+            source="fixed_sample",
+            version=version,
+            start_date=_START,
+            end_date=_END,
+            code_version="deadbeef",
+        )
+    return DatasetReleaseSpec(
+        release_id=release_id,
+        dataset_name="multi_asset_daily_bars",
+        source="fixed_sample",
+        version=version,
+        start_date=_START,
+        end_date=_END,
+        code_version="deadbeef",
+        fields=fields,
+    )
+
+
+async def _seed(cache_dir: Path, instruments: list[ReleaseInstrumentSpec]) -> None:
+    cache = ParquetCache(cache_dir)
+    for instrument in instruments:
+        await cache.write(
+            Symbol(code=instrument.code, market=instrument.market),
+            BarPeriod.D1,
+            "qfq",
+            _bars(instrument.code, instrument.market),
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_multi_asset_release_and_read_only_provider(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    release_root = tmp_path / "releases"
+    instruments = _multi_asset_instruments()
+    await _seed(cache_dir, instruments)
+
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=cache_dir,
+        release_root=release_root,
+    ).publish(_spec(), instruments)
+
+    assert release.symbol_count == 5
+    assert release.row_count == 20
+    assert release.coverage_pct == Decimal("1")
+    assert release.quality_report["adjustment"] == "qfq"
+    assert release.quality_report["coverage"] == {
+        "categories": {"full": 5},
+        "asset_classes": {
+            "fixed_income": 1,
+            "equity": 3,
+            "commodity": 1,
+        },
+        "markets": {"a_share": 5},
+        "missing_sessions": 0,
+        "suspended_sessions": 0,
+        "anomaly_count": 0,
+        "name_history_records": 1,
+        "lifecycle_event_records": 1,
+    }
+    assert release.instrument("513100.SH").execution.settlement_days == 0
+    assert release.instrument("511010.SH").execution.lot_size == Decimal("10")
+    assert release.instrument("600519.SH").execution.stamp_tax_rate == Decimal("0.0005")
+    assert release.instrument("600519.SH").available_at == datetime(2001, 8, 27, tzinfo=UTC)
+    assert release.instrument("600519.SH").lifecycle_events[0].available_at == datetime(
+        2024, 1, 1, 8, tzinfo=UTC
+    )
+    for capability in (
+        "stock",
+        "etf:index",
+        "etf:cross_border",
+        "etf:commodity",
+        "etf:bond",
+    ):
+        assert release.require_capability(capability).ready
+    assert not next(item for item in release.capabilities if item.key == "futures").ready
+    assert verify_dataset_release(release_root / "fixed-r1") == release
+
+    provider = FrozenReleaseProvider(
+        release_root=release_root,
+        release_id="fixed-r1",
+    )
+    bars = await provider.fetch_bars(
+        Symbol("518880.SH", Market.A_SHARE),
+        BarPeriod.D1,
+        _START,
+        _END,
+    )
+    assert len(bars) == 4
+    point_in_time = await provider.fetch_point_in_time_bars(
+        Symbol("518880.SH", Market.A_SHARE),
+        BarPeriod.D1,
+        _START,
+        _END,
+        decision_at=datetime(2024, 1, 4, 7, 29, tzinfo=UTC),
+    )
+    assert [item.bar.timestamp.date() for item in point_in_time] == [
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+    ]
+    assert point_in_time[-1].available_at == datetime(2024, 1, 3, 7, 30, tzinfo=UTC)
+    with pytest.raises(ReleaseCapabilityError, match="禁止回退"):
+        await provider.fetch_bars(
+            Symbol("000001.SH", Market.A_SHARE),
+            BarPeriod.D1,
+            _START,
+            _END,
+        )
+    with pytest.raises(ReleaseCapabilityError, match="超出发布范围"):
+        await provider.fetch_bars(
+            Symbol("518880.SH", Market.A_SHARE),
+            BarPeriod.D1,
+            _START - timedelta(days=1),
+            _END,
+        )
+
+
+@pytest.mark.asyncio
+async def test_checksum_corruption_is_fail_closed(tmp_path: Path) -> None:
+    instruments = _multi_asset_instruments()
+    await _seed(tmp_path / "cache", instruments)
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    ).publish(_spec(), instruments)
+    item = release.instrument("510300.SH")
+    artifact = tmp_path / "releases" / release.release_id / item.artifact_path
+    artifact.write_bytes(artifact.read_bytes() + b"corrupt")
+
+    with pytest.raises(ReleaseIntegrityError, match="校验和不一致"):
+        verify_dataset_release(tmp_path / "releases" / release.release_id)
+    with pytest.raises(ReleaseIntegrityError, match="校验和不一致"):
+        await FrozenDatasetReleaseBuilder(
+            cache_dir=tmp_path / "cache",
+            release_root=tmp_path / "releases",
+        ).publish(_spec(), instruments)
+    provider = FrozenReleaseProvider(
+        release_root=tmp_path / "releases",
+        release_id=release.release_id,
+    )
+    with pytest.raises(ReleaseIntegrityError, match="校验和不一致"):
+        await provider.fetch_bars(
+            Symbol("510300.SH", Market.A_SHARE),
+            BarPeriod.D1,
+            _START,
+            _END,
+        )
+
+
+@pytest.mark.asyncio
+async def test_failed_release_preserves_previous_and_cleans_staging(tmp_path: Path) -> None:
+    instruments = _multi_asset_instruments()
+    cache_dir = tmp_path / "cache"
+    release_root = tmp_path / "releases"
+    await _seed(cache_dir, instruments)
+    builder = FrozenDatasetReleaseBuilder(
+        cache_dir=cache_dir,
+        release_root=release_root,
+    )
+    previous = await builder.publish(_spec(), instruments)
+    missing = _stock("000001.SZ")
+
+    with pytest.raises(DatasetReleaseQualityError, match="source_artifact_missing"):
+        await builder.publish(
+            _spec("fixed-r2", version="2024.02"),
+            [*instruments, missing],
+            previous_release=previous,
+        )
+
+    assert verify_dataset_release(release_root / previous.release_id) == previous
+    assert not (release_root / "fixed-r2").exists()
+    assert not list(release_root.glob(".fixed-r2-*"))
+
+
+@pytest.mark.asyncio
+async def test_release_identity_and_schema_are_immutable(tmp_path: Path) -> None:
+    instruments = _multi_asset_instruments()
+    await _seed(tmp_path / "cache", instruments)
+    builder = FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    )
+    previous = await builder.publish(_spec(), instruments)
+    assert await builder.publish(_spec(), instruments) == previous
+
+    with pytest.raises(ImmutableReleaseError, match="禁止覆盖"):
+        await builder.publish(
+            DatasetReleaseSpec(
+                release_id="fixed-r1",
+                dataset_name="multi_asset_daily_bars",
+                source="fixed_sample",
+                version="different",
+                start_date=_START,
+                end_date=_END,
+                code_version="deadbeef",
+            ),
+            instruments,
+        )
+    with pytest.raises(DatasetReleaseQualityError, match="schema_version 未递增"):
+        await builder.publish(
+            _spec(
+                "fixed-r2",
+                version="2024.02",
+                fields=("timestamp", "close"),
+            ),
+            instruments,
+            previous_release=previous,
+        )
+
+
+@pytest.mark.asyncio
+async def test_convertible_missing_metadata_events_cannot_publish(tmp_path: Path) -> None:
+    convertible = ReleaseInstrumentSpec(
+        code="110000.SH",
+        name="不完整可转债样本",
+        market=Market.A_SHARE,
+        instrument_type=InstrumentType.CONVERTIBLE,
+        asset_class=AssetClass.CONVERTIBLE,
+        available_at=datetime(2024, 1, 1, tzinfo=UTC),
+        execution=default_execution_metadata(
+            market=Market.A_SHARE,
+            instrument_type=InstrumentType.CONVERTIBLE,
+        ),
+        metadata_complete=False,
+        required_event_types=(
+            "forced_redemption",
+            "sell_back",
+            "downward_revision",
+            "conversion_price_adjust",
+        ),
+    )
+    await _seed(tmp_path / "cache", [convertible])
+    spec = DatasetReleaseSpec(
+        release_id="convertible-r1",
+        dataset_name="convertible_bars",
+        source="fixed_sample",
+        version="2024.01",
+        start_date=_START,
+        end_date=_END,
+        code_version="deadbeef",
+        required_capabilities=("convertible",),
+    )
+    with pytest.raises(DatasetReleaseQualityError) as exc_info:
+        await FrozenDatasetReleaseBuilder(
+            cache_dir=tmp_path / "cache",
+            release_root=tmp_path / "releases",
+        ).publish(spec, [convertible])
+    message = str(exc_info.value)
+    assert "metadata_incomplete" in message
+    assert "missing_events" in message
+    assert not (tmp_path / "releases" / "convertible-r1").exists()
+
+
+@pytest.mark.asyncio
+async def test_futures_missing_contract_events_cannot_publish(tmp_path: Path) -> None:
+    future = ReleaseInstrumentSpec(
+        code="IF2406.CFFEX",
+        name="沪深300期货固定样本",
+        market=Market.FUTURE,
+        instrument_type=InstrumentType.FUTURES,
+        asset_class=AssetClass.DERIVATIVE,
+        available_at=datetime(2024, 1, 1, tzinfo=UTC),
+        execution=ExecutionMetadata(
+            lot_size=Decimal("1"),
+            price_tick=Decimal("0.2"),
+            settlement_days=0,
+            multiplier=Decimal("300"),
+            margin_rate=Decimal("0.12"),
+            commission_min=Decimal("0"),
+            trading_calendar="CFFEX",
+            allows_short=True,
+        ),
+        exchange="CFFEX",
+        required_event_types=("roll", "expiration", "delivery"),
+    )
+    await _seed(tmp_path / "cache", [future])
+    spec = DatasetReleaseSpec(
+        release_id="futures-r1",
+        dataset_name="futures_bars",
+        source="fixed_sample",
+        version="2024.01",
+        start_date=_START,
+        end_date=_END,
+        code_version="deadbeef",
+        required_capabilities=("futures",),
+    )
+    with pytest.raises(DatasetReleaseQualityError, match="missing_events"):
+        await FrozenDatasetReleaseBuilder(
+            cache_dir=tmp_path / "cache",
+            release_root=tmp_path / "releases",
+        ).publish(spec, [future])
+    assert future.execution.multiplier == Decimal("300")
+    assert future.execution.margin_rate == Decimal("0.12")
+    assert not (tmp_path / "releases" / "futures-r1").exists()
+
+
+@pytest.mark.asyncio
+async def test_source_interruption_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instruments = _multi_asset_instruments()
+    cache_dir = tmp_path / "cache"
+    release_root = tmp_path / "releases"
+    await _seed(cache_dir, instruments)
+    builder = FrozenDatasetReleaseBuilder(
+        cache_dir=cache_dir,
+        release_root=release_root,
+    )
+    previous = await builder.publish(_spec(), instruments)
+
+    async def interrupted_read(*args: object, **kwargs: object) -> list[Bar]:
+        del args, kwargs
+        raise ConnectionError("simulated rate limit/network interruption")
+
+    monkeypatch.setattr(ParquetCache, "read", interrupted_read)
+    with pytest.raises(DatasetReleaseQualityError, match="source_read_failed"):
+        await builder.publish(
+            _spec("fixed-r2", version="2024.02"),
+            instruments,
+            previous_release=previous,
+        )
+    assert (release_root / previous.release_id / "manifest.json").is_file()
+    assert not (release_root / "fixed-r2").exists()
+    assert not list(release_root.glob(".fixed-r2-*"))
