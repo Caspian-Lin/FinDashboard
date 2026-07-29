@@ -97,6 +97,27 @@ uv pip install -e ".[akshare,yfinance,tushare,cache]"
 新增因子时须同时登记目录元数据、依赖数据集和缺失值策略,提升
 `factor_version`,并补充未来数据、修订公告、输入顺序和质量失败测试。
 
+### 因子实验室快照与信号契约(issue #78)
+
+`finboard_data.factor_lab` 在既有候选集契约之上定义通用研究产物:
+
+- `FactorDefinition`: 版本化区分 alpha、risk 和 market input,固定频率、窗口、
+  偏好方向、转换、中性化、缺失策略、发布时间规则、代码版本和校验和。
+- `FeatureSnapshot`: 只接收 `available_at <= decision_at` 的观测,并固定
+  `release_id`、候选池版本、字段/窗口、构建版本和内容 checksum。
+- `FactorSignal`: 仅允许 alpha 定义生成,逐标的记录方向、score、confidence、
+  有效期、候选池版本和来源快照;风险因子与市场输入不能生成信号。
+- `FactorExperiment`: 冻结样本内/样本外窗口、试验预算、基准、成本假设、数据/
+  代码/因子版本,并显式记录失败或中断状态。
+
+目录只暴露已有计算实现且能复现的因子。例如 `residual_momentum` 当前缺少残差
+回归实现,不会出现在目录中。对同一 ID 重放不一致的 payload、让未来发布时间的
+数据进入快照、数据发布 checksum 不匹配、跨版本混用或伪造样本外通过都会
+fail closed。
+
+这组对象都是研究契约。信号不是目标仓位或订单,也没有访问 Broker、账户和持仓的
+能力;策略如何把已经验证的信号转换为仓位属于后续独立 issue。
+
 ### Tushare Provider
 
 安装可选依赖并通过环境变量注入 token:

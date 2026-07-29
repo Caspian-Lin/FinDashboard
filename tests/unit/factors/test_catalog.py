@@ -65,7 +65,8 @@ class TestCatalog:
     def test_momentum_category_factors(self) -> None:
         momentum = list_factors_by_category(FactorCategory.MOMENTUM)
         assert "momentum" in momentum
-        assert "residual_momentum" in momentum
+        # residual_momentum 尚无提取器/风险模型实现,不得暴露为可选因子。
+        assert "residual_momentum" not in momentum
 
     def test_growth_category_factors(self) -> None:
         growth = list_factors_by_category(FactorCategory.GROWTH)
@@ -81,4 +82,4 @@ class TestCatalog:
             assert meta.direction is FactorDirection.SHORT
 
     def test_factor_count(self) -> None:
-        assert len(RESEARCH_FACTOR_CATALOG) >= 14
+        assert len(RESEARCH_FACTOR_CATALOG) >= 13

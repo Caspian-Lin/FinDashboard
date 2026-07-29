@@ -1,0 +1,1066 @@
+"""统一因子实验室的离线计算实现(issue #78)。
+
+流程为 frozen release -> FeatureSnapshot -> alpha/risk/input analysis ->
+FactorSignal。模块只读历史研究数据,不导入 Broker、OrderManager、PositionManager
+或实盘 RiskManager。
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import date, datetime
+from itertools import pairwise
+
+import numpy as np
+import numpy.typing as npt
+
+from finboard_backtest.factors.extract import extract_factor_matrix
+from finboard_backtest.factors.standardize import zscore
+from finboard_backtest.portfolio.covariance import (
+    CovarianceError,
+    estimate_covariance,
+)
+from finboard_data.factor_lab import (
+    FactorRole,
+    FeatureMissingPolicy,
+    FeatureObservation,
+    FeatureSnapshot,
+    build_feature_snapshot,
+    get_factor_definition,
+)
+from finboard_data.factors import FactorInputBatch
+from finboard_data.releases import (
+    FrozenReleaseProvider,
+    ResearchDatasetRelease,
+)
+from finboard_shared.models import Symbol
+
+_EPS = 1e-12
+_TRADING_DAYS = 252
+_MARKET_SYMBOL = "__market__"
+
+
+class FactorAnalysisError(RuntimeError):
+    """Alpha 分析输入不满足最小样本或时点约束。"""
+
+
+class RiskModelError(RuntimeError):
+    """风险模型缺少必要数据或无法得到稳定估计。"""
+
+
+class MarketInputError(RuntimeError):
+    """跨市场输入缺失、过期或包含未来数据。"""
+
+
+@dataclass(frozen=True, slots=True)
+class FactorPeriod:
+    """一个横截面评估期。
+
+    ``forward_returns`` 按持有期组织,键为交易日数。例如 ``{1: {...}, 5:
+    {...}}``。这些收益只用于事后评价,不会写入 FeatureSnapshot。
+    """
+
+    period: date
+    scores: dict[str, float]
+    forward_returns: dict[int, dict[str, float]]
+    transaction_costs: dict[str, float]
+    market_regime: str
+
+    def __post_init__(self) -> None:
+        if not self.scores:
+            raise ValueError("FactorPeriod.scores 不能为空")
+        if 1 not in self.forward_returns:
+            raise ValueError("forward_returns 必须包含 1 日收益")
+        if not self.market_regime:
+            raise ValueError("market_regime 不能为空")
+
+
+@dataclass(frozen=True, slots=True)
+class QuantileReturn:
+    quantile: int
+    gross_return: float
+    cost: float
+    net_return: float
+    average_members: float
+
+
+@dataclass(frozen=True, slots=True)
+class DecayPoint:
+    horizon: int
+    rank_ic: float
+    pearson_ic: float
+    observations: int
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeAnalysis:
+    regime: str
+    rank_ic: float
+    pearson_ic: float
+    net_long_short_return: float
+    periods: int
+
+
+@dataclass(frozen=True, slots=True)
+class AlphaAnalysisReport:
+    """单 alpha 因子的完整收益相关与稳健性报告。"""
+
+    factor_name: str
+    rank_ic: float
+    pearson_ic: float
+    rank_ic_ir: float
+    pearson_ic_ir: float
+    rank_ic_t_stat: float
+    rank_ic_p_value: float
+    quantile_returns: tuple[QuantileReturn, ...]
+    gross_long_short_return: float
+    net_long_short_return: float
+    average_turnover: float
+    decay: tuple[DecayPoint, ...]
+    neighbourhood_rank_ic: dict[str, float]
+    neighbourhood_worst_rank_ic: float | None
+    neighbourhood_drop: float | None
+    regimes: tuple[RegimeAnalysis, ...]
+    n_periods: int
+    issues: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "factor_name": self.factor_name,
+            "rank_ic": self.rank_ic,
+            "pearson_ic": self.pearson_ic,
+            "rank_ic_ir": self.rank_ic_ir,
+            "pearson_ic_ir": self.pearson_ic_ir,
+            "rank_ic_t_stat": self.rank_ic_t_stat,
+            "rank_ic_p_value": self.rank_ic_p_value,
+            "quantile_returns": [
+                {
+                    "quantile": item.quantile,
+                    "gross_return": item.gross_return,
+                    "cost": item.cost,
+                    "net_return": item.net_return,
+                    "average_members": item.average_members,
+                }
+                for item in self.quantile_returns
+            ],
+            "gross_long_short_return": self.gross_long_short_return,
+            "net_long_short_return": self.net_long_short_return,
+            "average_turnover": self.average_turnover,
+            "decay": [
+                {
+                    "horizon": item.horizon,
+                    "rank_ic": item.rank_ic,
+                    "pearson_ic": item.pearson_ic,
+                    "observations": item.observations,
+                }
+                for item in self.decay
+            ],
+            "neighbourhood_rank_ic": dict(
+                sorted(self.neighbourhood_rank_ic.items())
+            ),
+            "neighbourhood_worst_rank_ic": self.neighbourhood_worst_rank_ic,
+            "neighbourhood_drop": self.neighbourhood_drop,
+            "regimes": [
+                {
+                    "regime": item.regime,
+                    "rank_ic": item.rank_ic,
+                    "pearson_ic": item.pearson_ic,
+                    "net_long_short_return": item.net_long_short_return,
+                    "periods": item.periods,
+                }
+                for item in self.regimes
+            ],
+            "n_periods": self.n_periods,
+            "issues": list(self.issues),
+        }
+
+
+def analyze_alpha_factor(
+    factor_name: str,
+    periods: list[FactorPeriod],
+    *,
+    quantiles: int = 5,
+    neighbourhood_scores: dict[str, list[dict[str, float]]] | None = None,
+    min_cross_section: int = 5,
+) -> AlphaAnalysisReport:
+    """计算 IC、分位收益、成本、衰减、参数邻域和市场状态分层。"""
+
+    definition = get_factor_definition(factor_name)
+    if definition.role is not FactorRole.ALPHA:
+        raise FactorAnalysisError(f"{factor_name} 不是 alpha 因子")
+    if quantiles < 2:
+        raise ValueError("quantiles 至少为 2")
+    if not periods:
+        raise FactorAnalysisError("periods 不能为空")
+
+    rank_ics: list[float] = []
+    pearson_ics: list[float] = []
+    quantile_gross: dict[int, list[float]] = {
+        index: [] for index in range(1, quantiles + 1)
+    }
+    quantile_cost: dict[int, list[float]] = {
+        index: [] for index in range(1, quantiles + 1)
+    }
+    quantile_size: dict[int, list[int]] = {
+        index: [] for index in range(1, quantiles + 1)
+    }
+    decay_rank: dict[int, list[float]] = {}
+    decay_pearson: dict[int, list[float]] = {}
+    regime_periods: dict[str, list[FactorPeriod]] = {}
+    top_members: list[set[str]] = []
+    issues: list[str] = []
+
+    for period in periods:
+        one_day = period.forward_returns[1]
+        rank = _correlation(period.scores, one_day, rank=True, minimum=min_cross_section)
+        pearson = _correlation(
+            period.scores, one_day, rank=False, minimum=min_cross_section
+        )
+        if rank is not None:
+            rank_ics.append(rank)
+        if pearson is not None:
+            pearson_ics.append(pearson)
+        buckets = _quantile_members(
+            period.scores,
+            one_day,
+            quantiles=quantiles,
+            minimum=min_cross_section,
+        )
+        if buckets is None:
+            issues.append(f"{period.period.isoformat()}:insufficient_cross_section")
+        else:
+            for index, symbols in buckets.items():
+                bucket_returns = [one_day[symbol] for symbol in symbols]
+                costs = [
+                    period.transaction_costs.get(symbol, 0.0)
+                    for symbol in symbols
+                ]
+                quantile_gross[index].append(float(np.mean(bucket_returns)))
+                quantile_cost[index].append(float(np.mean(costs)))
+                quantile_size[index].append(len(symbols))
+            top_members.append(set(buckets[quantiles]))
+        for horizon, horizon_returns in sorted(period.forward_returns.items()):
+            rank_decay = _correlation(
+                period.scores,
+                horizon_returns,
+                rank=True,
+                minimum=min_cross_section,
+            )
+            pearson_decay = _correlation(
+                period.scores,
+                horizon_returns,
+                rank=False,
+                minimum=min_cross_section,
+            )
+            if rank_decay is not None:
+                decay_rank.setdefault(horizon, []).append(rank_decay)
+            if pearson_decay is not None:
+                decay_pearson.setdefault(horizon, []).append(pearson_decay)
+        regime_periods.setdefault(period.market_regime, []).append(period)
+
+    if not rank_ics or not pearson_ics:
+        raise FactorAnalysisError("没有足够横截面计算 IC")
+
+    quantile_results = tuple(
+        QuantileReturn(
+            quantile=index,
+            gross_return=_mean_or_zero(quantile_gross[index]),
+            cost=_mean_or_zero(quantile_cost[index]),
+            net_return=(
+                _mean_or_zero(quantile_gross[index])
+                - _mean_or_zero(quantile_cost[index])
+            ),
+            average_members=_mean_or_zero(quantile_size[index]),
+        )
+        for index in range(1, quantiles + 1)
+    )
+    bottom = quantile_results[0]
+    top = quantile_results[-1]
+    gross_long_short = top.gross_return - bottom.gross_return
+    # 多空组合两端都发生交易成本。
+    net_long_short = gross_long_short - top.cost - bottom.cost
+    mean_rank = float(np.mean(rank_ics))
+    rank_std = float(np.std(rank_ics, ddof=1)) if len(rank_ics) > 1 else 0.0
+    mean_pearson = float(np.mean(pearson_ics))
+    pearson_std = (
+        float(np.std(pearson_ics, ddof=1)) if len(pearson_ics) > 1 else 0.0
+    )
+    t_stat = (
+        mean_rank / (rank_std / math.sqrt(len(rank_ics)))
+        if rank_std > _EPS
+        else 0.0
+    )
+    # 无 scipy 依赖时使用大样本正态近似,方法在报告文档中显式披露。
+    p_value = math.erfc(abs(t_stat) / math.sqrt(2.0))
+
+    neighbourhood = _analyse_neighbourhood(
+        periods,
+        neighbourhood_scores or {},
+        minimum=min_cross_section,
+    )
+    worst_neighbourhood = min(neighbourhood.values()) if neighbourhood else None
+    neighbourhood_drop = (
+        mean_rank - worst_neighbourhood
+        if worst_neighbourhood is not None
+        else None
+    )
+    regimes = tuple(
+        _analyse_regime(
+            regime,
+            grouped,
+            quantiles=quantiles,
+            minimum=min_cross_section,
+        )
+        for regime, grouped in sorted(regime_periods.items())
+    )
+    decay = tuple(
+        DecayPoint(
+            horizon=horizon,
+            rank_ic=_mean_or_zero(decay_rank.get(horizon, [])),
+            pearson_ic=_mean_or_zero(decay_pearson.get(horizon, [])),
+            observations=len(decay_rank.get(horizon, [])),
+        )
+        for horizon in sorted(set(decay_rank) | set(decay_pearson))
+    )
+    return AlphaAnalysisReport(
+        factor_name=factor_name,
+        rank_ic=mean_rank,
+        pearson_ic=mean_pearson,
+        rank_ic_ir=mean_rank / rank_std if rank_std > _EPS else 0.0,
+        pearson_ic_ir=(
+            mean_pearson / pearson_std if pearson_std > _EPS else 0.0
+        ),
+        rank_ic_t_stat=t_stat,
+        rank_ic_p_value=p_value,
+        quantile_returns=quantile_results,
+        gross_long_short_return=gross_long_short,
+        net_long_short_return=net_long_short,
+        average_turnover=_average_membership_turnover(top_members),
+        decay=decay,
+        neighbourhood_rank_ic=neighbourhood,
+        neighbourhood_worst_rank_ic=worst_neighbourhood,
+        neighbourhood_drop=neighbourhood_drop,
+        regimes=regimes,
+        n_periods=len(periods),
+        issues=tuple(issues),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RiskExposure:
+    symbol: str
+    market_beta: float
+    industry: str
+    asset_class: str
+    size: float
+    volatility: float
+    liquidity: float
+
+
+@dataclass(frozen=True, slots=True)
+class BasicRiskModel:
+    """与 alpha 分数分离的风险暴露、协方差和风险贡献。"""
+
+    as_of: datetime
+    symbols: tuple[str, ...]
+    exposures: tuple[RiskExposure, ...]
+    covariance: tuple[tuple[float, ...], ...]
+    covariance_method: str
+    covariance_shrinkage: float
+    observations: int
+    portfolio_volatility: float
+    marginal_risk_contribution: dict[str, float]
+    component_risk_contribution: dict[str, float]
+    issues: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "as_of": self.as_of.isoformat(),
+            "symbols": list(self.symbols),
+            "exposures": [
+                {
+                    "symbol": item.symbol,
+                    "market_beta": item.market_beta,
+                    "industry": item.industry,
+                    "asset_class": item.asset_class,
+                    "size": item.size,
+                    "volatility": item.volatility,
+                    "liquidity": item.liquidity,
+                }
+                for item in self.exposures
+            ],
+            "covariance": [list(row) for row in self.covariance],
+            "covariance_method": self.covariance_method,
+            "covariance_shrinkage": self.covariance_shrinkage,
+            "observations": self.observations,
+            "portfolio_volatility": self.portfolio_volatility,
+            "marginal_risk_contribution": dict(
+                sorted(self.marginal_risk_contribution.items())
+            ),
+            "component_risk_contribution": dict(
+                sorted(self.component_risk_contribution.items())
+            ),
+            "issues": list(self.issues),
+        }
+
+
+def estimate_basic_risk_model(
+    *,
+    as_of: datetime,
+    returns_by_symbol: dict[str, npt.NDArray[np.float64]],
+    benchmark_returns: npt.NDArray[np.float64],
+    industries: dict[str, str],
+    asset_classes: dict[str, str],
+    market_caps: dict[str, float],
+    liquidity: dict[str, float],
+    portfolio_weights: dict[str, float] | None = None,
+    min_observations: int = 30,
+) -> BasicRiskModel:
+    """估计 beta、行业/资产类别、规模、波动率、流动性和协方差。
+
+    任何必要元数据缺失都 fail closed,不会把未知行业或资产类别静默归为
+    ``other``。
+    """
+
+    _require_aware(as_of, "as_of")
+    if len(benchmark_returns) < min_observations:
+        raise RiskModelError("基准收益观测不足")
+    symbols = tuple(sorted(returns_by_symbol))
+    if not symbols:
+        raise RiskModelError("returns_by_symbol 不能为空")
+    for name, values in (
+        ("industry", industries),
+        ("asset_class", asset_classes),
+        ("market_cap", market_caps),
+        ("liquidity", liquidity),
+    ):
+        missing = set(symbols) - set(values)
+        if missing:
+            raise RiskModelError(f"{name} 元数据缺失: {sorted(missing)}")
+    for symbol in symbols:
+        if not industries[symbol] or not asset_classes[symbol]:
+            raise RiskModelError(f"{symbol} 行业/资产类别为空")
+        if (
+            not math.isfinite(market_caps[symbol])
+            or not math.isfinite(liquidity[symbol])
+            or market_caps[symbol] <= 0
+            or liquidity[symbol] <= 0
+        ):
+            raise RiskModelError(f"{symbol} 市值/流动性必须为正且有限")
+    try:
+        estimate = estimate_covariance(
+            returns_by_symbol,
+            min_observations=min_observations,
+        )
+    except CovarianceError as exc:
+        raise RiskModelError(str(exc)) from exc
+    if tuple(estimate.tickers) != symbols:
+        missing_returns = set(symbols) - set(estimate.tickers)
+        raise RiskModelError(f"协方差排除了标的: {sorted(missing_returns)}")
+
+    size_z = zscore(
+        {symbol: math.log(market_caps[symbol]) for symbol in symbols}
+    )
+    liquidity_z = zscore(
+        {symbol: math.log(liquidity[symbol]) for symbol in symbols}
+    )
+    exposures: list[RiskExposure] = []
+    for symbol in symbols:
+        returns = np.asarray(returns_by_symbol[symbol], dtype=np.float64)
+        aligned = min(len(returns), len(benchmark_returns))
+        if aligned < min_observations:
+            raise RiskModelError(f"{symbol} 与基准重叠观测不足")
+        asset_returns = returns[-aligned:]
+        benchmark = np.asarray(benchmark_returns[-aligned:], dtype=np.float64)
+        mask = np.isfinite(asset_returns) & np.isfinite(benchmark)
+        if int(mask.sum()) < min_observations:
+            raise RiskModelError(f"{symbol} 与基准有效观测不足")
+        benchmark_var = float(np.var(benchmark[mask], ddof=1))
+        if benchmark_var <= _EPS:
+            raise RiskModelError("基准方差为零,无法估计 beta")
+        beta = float(np.cov(asset_returns[mask], benchmark[mask], ddof=1)[0, 1])
+        beta /= benchmark_var
+        volatility = float(np.std(asset_returns[mask], ddof=1))
+        volatility *= math.sqrt(_TRADING_DAYS)
+        exposures.append(
+            RiskExposure(
+                symbol=symbol,
+                market_beta=beta,
+                industry=industries[symbol],
+                asset_class=asset_classes[symbol],
+                size=size_z[symbol],
+                volatility=volatility,
+                liquidity=liquidity_z[symbol],
+            )
+        )
+
+    (
+        portfolio_volatility,
+        marginal_risk_contribution,
+        component_risk_contribution,
+    ) = _risk_contributions(
+        symbols,
+        estimate.matrix,
+        portfolio_weights or {},
+    )
+    return BasicRiskModel(
+        as_of=as_of,
+        symbols=symbols,
+        exposures=tuple(exposures),
+        covariance=tuple(
+            tuple(float(value) for value in row) for row in estimate.matrix
+        ),
+        covariance_method=estimate.method,
+        covariance_shrinkage=estimate.shrinkage,
+        observations=estimate.n_observations,
+        portfolio_volatility=portfolio_volatility,
+        marginal_risk_contribution=marginal_risk_contribution,
+        component_risk_contribution=component_risk_contribution,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MarketInputObservation:
+    feature_name: str
+    value: float
+    observed_at: datetime
+    available_at: datetime
+    source: str
+    source_version: str
+
+    def __post_init__(self) -> None:
+        definition = get_factor_definition(self.feature_name)
+        if definition.role is not FactorRole.MARKET_INPUT:
+            raise ValueError(f"{self.feature_name} 不是 market input")
+        if not math.isfinite(self.value):
+            raise ValueError("market input value 必须为有限数")
+        _require_aware(self.observed_at, "observed_at")
+        _require_aware(self.available_at, "available_at")
+        if not self.source or not self.source_version:
+            raise ValueError("market input source/version 必填")
+
+
+@dataclass(frozen=True, slots=True)
+class CrossMarketSnapshot:
+    decision_at: datetime
+    features: tuple[FeatureObservation, ...]
+    staleness_days: dict[str, int]
+    missing_policies: dict[str, str]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "decision_at": self.decision_at.isoformat(),
+            "features": [item.as_dict() for item in self.features],
+            "staleness_days": dict(sorted(self.staleness_days.items())),
+            "missing_policies": dict(sorted(self.missing_policies.items())),
+        }
+
+
+def build_cross_market_snapshot(
+    *,
+    decision_at: datetime,
+    observations: list[MarketInputObservation],
+    required_features: tuple[str, ...] = (
+        "risk_free_rate",
+        "government_bond_return",
+        "fx_usdcny_return",
+        "gold_return",
+        "market_breadth",
+        "volatility_regime",
+    ),
+    max_staleness_days: dict[str, int] | None = None,
+) -> CrossMarketSnapshot:
+    """选择 decision_at 前最后可见值并执行缺失/陈旧数据门。"""
+
+    _require_aware(decision_at, "decision_at")
+    staleness_limit = max_staleness_days or {}
+    grouped: dict[str, list[MarketInputObservation]] = {}
+    for observation in observations:
+        if observation.available_at <= decision_at:
+            grouped.setdefault(observation.feature_name, []).append(observation)
+    features: list[FeatureObservation] = []
+    staleness: dict[str, int] = {}
+    policies: dict[str, str] = {}
+    for name in required_features:
+        definition = get_factor_definition(name)
+        if definition.role is not FactorRole.MARKET_INPUT:
+            raise MarketInputError(f"{name} 不是跨市场输入")
+        policies[name] = definition.missing_policy.value
+        candidates = grouped.get(name, [])
+        if not candidates:
+            if definition.missing_policy is FeatureMissingPolicy.FAIL_CLOSED:
+                raise MarketInputError(f"缺少必要跨市场输入: {name}")
+            continue
+        latest = max(candidates, key=lambda item: item.available_at)
+        age = max(0, (decision_at.date() - latest.available_at.date()).days)
+        limit = staleness_limit.get(name, 5)
+        if age > limit:
+            raise MarketInputError(
+                f"{name} 已过期: age={age} days limit={limit}"
+            )
+        staleness[name] = age
+        features.append(
+            FeatureObservation(
+                symbol=_MARKET_SYMBOL,
+                feature_name=name,
+                value=latest.value,
+                observed_at=latest.observed_at,
+                available_at=latest.available_at,
+                source=latest.source,
+                source_version=latest.source_version,
+                market="cross_market",
+                asset_class="macro",
+            )
+        )
+    return CrossMarketSnapshot(
+        decision_at=decision_at,
+        features=tuple(sorted(features, key=lambda item: item.feature_name)),
+        staleness_days=staleness,
+        missing_policies=policies,
+    )
+
+
+def build_cross_section_feature_snapshot(
+    *,
+    release: ResearchDatasetRelease,
+    batch: FactorInputBatch,
+    decision_at: datetime,
+    code_version: str,
+    price_history: dict[str, list[float]] | None = None,
+    price_available_at: dict[str, datetime] | None = None,
+    momentum_lookback: int = 20,
+    volatility_windows: tuple[int, ...] = (20, 60, 120),
+) -> FeatureSnapshot:
+    """把 A 股时点化横截面输入转换为统一 FeatureSnapshot。"""
+
+    if not release.is_usable:
+        raise FactorAnalysisError(f"数据发布不可用: {release.release_id}")
+    matrix = extract_factor_matrix(
+        batch,
+        price_history=price_history,
+        momentum_lookback=momentum_lookback,
+        volatility_windows=volatility_windows,
+    )
+    record_by_symbol = {record.symbol: record for record in batch.records}
+    observations: list[FeatureObservation] = []
+    for factor_name, values in sorted(matrix.items()):
+        if factor_name not in {
+            definition.name
+            for definition in (
+                get_factor_definition(name)
+                for name in (
+                    "pb",
+                    "earnings_yield",
+                    "dividend_yield",
+                    "roe",
+                    "gross_profit_margin",
+                    "debt_to_assets",
+                    "revenue_yoy",
+                    "momentum",
+                    "volatility_20d",
+                    "volatility_60d",
+                    "volatility_120d",
+                    "downside_volatility",
+                    "turnover_rate",
+                )
+            )
+        }:
+            continue
+        for symbol, value in sorted(values.items()):
+            record = record_by_symbol.get(symbol)
+            if record is None:
+                continue
+            if factor_name in {
+                "pb",
+                "earnings_yield",
+                "dividend_yield",
+                "turnover_rate",
+            }:
+                if record.daily is None:
+                    continue
+                observed_at = record.daily.observed_at
+                available_at = record.daily.available_at
+                source = record.daily.source
+            elif factor_name in {
+                "roe",
+                "gross_profit_margin",
+                "debt_to_assets",
+                "revenue_yoy",
+            }:
+                if record.financial is None:
+                    continue
+                observed_at = record.financial.observed_at
+                available_at = record.financial.available_at
+                source = record.financial.source
+            else:
+                if price_available_at is None or symbol not in price_available_at:
+                    raise FactorAnalysisError(
+                        f"{symbol}/{factor_name} 缺少 price_available_at"
+                    )
+                observed_at = price_available_at[symbol]
+                available_at = price_available_at[symbol]
+                source = release.source
+            industry = (
+                record.industry.level1_code if record.industry is not None else None
+            )
+            observations.append(
+                FeatureObservation(
+                    symbol=symbol,
+                    feature_name=factor_name,
+                    value=value,
+                    observed_at=observed_at,
+                    available_at=available_at,
+                    source=source,
+                    source_version=release.version,
+                    market="a_share",
+                    asset_class="equity",
+                    industry=industry,
+                )
+            )
+    windows = {"momentum": momentum_lookback}
+    windows.update(
+        {f"volatility_{window}d": window for window in volatility_windows}
+    )
+    windows["downside_volatility"] = 60
+    return build_feature_snapshot(
+        dataset_release_id=release.release_id,
+        dataset_release_checksum=release.release_checksum,
+        decision_at=decision_at,
+        code_version=code_version,
+        observations=observations,
+        calculation_windows={
+            name: value
+            for name, value in windows.items()
+            if any(item.feature_name == name for item in observations)
+        },
+        transformations={
+            item.feature_name: get_factor_definition(
+                item.feature_name
+            ).default_transform
+            for item in observations
+        },
+        neutralization={
+            item.feature_name: get_factor_definition(
+                item.feature_name
+            ).default_neutralization
+            for item in observations
+        },
+        issues=tuple(batch.issues),
+    )
+
+
+async def build_price_feature_snapshot(
+    *,
+    provider: FrozenReleaseProvider,
+    decision_at: datetime,
+    code_version: str,
+    momentum_lookback: int = 20,
+    volatility_windows: tuple[int, ...] = (20, 60, 120),
+) -> FeatureSnapshot:
+    """从 #77 冻结发布构建 ETF/多资产价格特征快照。"""
+
+    _require_aware(decision_at, "decision_at")
+    release = provider.release
+    end = min(decision_at.date(), release.end_date)
+    observations: list[FeatureObservation] = []
+    for instrument in release.instruments:
+        point_in_time = await provider.fetch_point_in_time_bars(
+            Symbol(instrument.code, instrument.market),
+            release.period,
+            release.start_date,
+            end,
+            decision_at=decision_at,
+            adjust=release.adjustment,
+        )
+        if not point_in_time:
+            continue
+        closes = np.asarray(
+            [float(item.bar.close) for item in point_in_time],
+            dtype=np.float64,
+        )
+        returns = np.diff(closes) / closes[:-1]
+        last = point_in_time[-1]
+        common = {
+            "symbol": instrument.code,
+            "observed_at": last.bar.timestamp,
+            "available_at": last.available_at,
+            "source": release.source,
+            "source_version": release.version,
+            "market": instrument.market.value,
+            "asset_class": instrument.asset_class.value,
+        }
+        if len(closes) >= momentum_lookback + 1:
+            observations.append(
+                FeatureObservation(
+                    feature_name="momentum",
+                    value=float(
+                        closes[-1] / closes[-momentum_lookback - 1] - 1.0
+                    ),
+                    **common,  # type: ignore[arg-type]
+                )
+            )
+        for window in volatility_windows:
+            if len(returns) >= window:
+                observations.append(
+                    FeatureObservation(
+                        feature_name=f"volatility_{window}d",
+                        value=float(np.std(returns[-window:], ddof=1)),
+                        **common,  # type: ignore[arg-type]
+                    )
+                )
+        downside_window = min(60, len(returns))
+        if downside_window >= 10:
+            downside = returns[-downside_window:]
+            downside = downside[downside < 0]
+            if len(downside) >= 3:
+                observations.append(
+                    FeatureObservation(
+                        feature_name="downside_volatility",
+                        value=float(np.std(downside, ddof=1)),
+                        **common,  # type: ignore[arg-type]
+                    )
+                )
+    if not observations:
+        raise FactorAnalysisError("冻结发布在决策时点没有足够数据计算价格特征")
+    windows = {"momentum": momentum_lookback, "downside_volatility": 60}
+    windows.update(
+        {f"volatility_{window}d": window for window in volatility_windows}
+    )
+    return build_feature_snapshot(
+        dataset_release_id=release.release_id,
+        dataset_release_checksum=release.release_checksum,
+        decision_at=decision_at,
+        code_version=code_version,
+        observations=observations,
+        calculation_windows={
+            name: window
+            for name, window in windows.items()
+            if any(item.feature_name == name for item in observations)
+        },
+        transformations={
+            item.feature_name: get_factor_definition(
+                item.feature_name
+            ).default_transform
+            for item in observations
+        },
+        neutralization={
+            item.feature_name: get_factor_definition(
+                item.feature_name
+            ).default_neutralization
+            for item in observations
+        },
+    )
+
+
+def _correlation(
+    scores: dict[str, float],
+    returns: dict[str, float],
+    *,
+    rank: bool,
+    minimum: int,
+) -> float | None:
+    common = sorted(set(scores) & set(returns))
+    if len(common) < minimum:
+        return None
+    x = np.asarray([scores[symbol] for symbol in common], dtype=np.float64)
+    y = np.asarray([returns[symbol] for symbol in common], dtype=np.float64)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if int(mask.sum()) < minimum:
+        return None
+    x = x[mask]
+    y = y[mask]
+    if rank:
+        x = _average_rank(x)
+        y = _average_rank(y)
+    if float(np.std(x)) <= _EPS or float(np.std(y)) <= _EPS:
+        return 0.0
+    correlation = float(np.corrcoef(x, y)[0, 1])
+    return correlation if math.isfinite(correlation) else 0.0
+
+
+def _average_rank(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    order = np.argsort(values, kind="mergesort")
+    sorted_values = values[order]
+    ranks = np.empty(len(values), dtype=np.float64)
+    start = 0
+    while start < len(values):
+        end = start + 1
+        while end < len(values) and sorted_values[end] == sorted_values[start]:
+            end += 1
+        average = (start + 1 + end) / 2.0
+        ranks[order[start:end]] = average
+        start = end
+    return ranks
+
+
+def _quantile_members(
+    scores: dict[str, float],
+    returns: dict[str, float],
+    *,
+    quantiles: int,
+    minimum: int,
+) -> dict[int, tuple[str, ...]] | None:
+    common = [
+        symbol
+        for symbol in sorted(set(scores) & set(returns))
+        if math.isfinite(scores[symbol]) and math.isfinite(returns[symbol])
+    ]
+    if len(common) < max(minimum, quantiles):
+        return None
+    ranked = sorted(common, key=lambda symbol: (scores[symbol], symbol))
+    indexes = np.array_split(np.asarray(ranked, dtype=object), quantiles)
+    return {
+        index + 1: tuple(str(symbol) for symbol in bucket.tolist())
+        for index, bucket in enumerate(indexes)
+    }
+
+
+def _average_membership_turnover(members: list[set[str]]) -> float:
+    if len(members) < 2:
+        return 0.0
+    turnover: list[float] = []
+    for previous, current in pairwise(members):
+        denominator = max(len(previous), len(current), 1)
+        turnover.append(len(current - previous) / denominator)
+    return float(np.mean(turnover))
+
+
+def _analyse_neighbourhood(
+    periods: list[FactorPeriod],
+    neighbourhood: dict[str, list[dict[str, float]]],
+    *,
+    minimum: int,
+) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for label, scores_history in sorted(neighbourhood.items()):
+        if len(scores_history) != len(periods):
+            raise FactorAnalysisError(
+                f"参数邻域 {label} 期数与基础实验不一致"
+            )
+        values: list[float] = []
+        for period, scores in zip(periods, scores_history, strict=True):
+            value = _correlation(
+                scores,
+                period.forward_returns[1],
+                rank=True,
+                minimum=minimum,
+            )
+            if value is not None:
+                values.append(value)
+        if values:
+            result[label] = float(np.mean(values))
+    return result
+
+
+def _analyse_regime(
+    regime: str,
+    periods: list[FactorPeriod],
+    *,
+    quantiles: int,
+    minimum: int,
+) -> RegimeAnalysis:
+    ranks: list[float] = []
+    pearsons: list[float] = []
+    net_returns: list[float] = []
+    for period in periods:
+        returns = period.forward_returns[1]
+        rank = _correlation(period.scores, returns, rank=True, minimum=minimum)
+        pearson = _correlation(
+            period.scores, returns, rank=False, minimum=minimum
+        )
+        if rank is not None:
+            ranks.append(rank)
+        if pearson is not None:
+            pearsons.append(pearson)
+        buckets = _quantile_members(
+            period.scores,
+            returns,
+            quantiles=quantiles,
+            minimum=minimum,
+        )
+        if buckets is None:
+            continue
+        top = buckets[quantiles]
+        bottom = buckets[1]
+        gross = _mean_or_zero([returns[symbol] for symbol in top])
+        gross -= _mean_or_zero([returns[symbol] for symbol in bottom])
+        costs = _mean_or_zero(
+            [period.transaction_costs.get(symbol, 0.0) for symbol in top]
+        )
+        costs += _mean_or_zero(
+            [period.transaction_costs.get(symbol, 0.0) for symbol in bottom]
+        )
+        net_returns.append(gross - costs)
+    return RegimeAnalysis(
+        regime=regime,
+        rank_ic=_mean_or_zero(ranks),
+        pearson_ic=_mean_or_zero(pearsons),
+        net_long_short_return=_mean_or_zero(net_returns),
+        periods=len(periods),
+    )
+
+
+def _risk_contributions(
+    symbols: tuple[str, ...],
+    covariance: npt.NDArray[np.float64],
+    weights: dict[str, float],
+) -> tuple[float, dict[str, float], dict[str, float]]:
+    if not weights:
+        zeros = dict.fromkeys(symbols, 0.0)
+        return 0.0, zeros, dict(zeros)
+    unknown = set(weights) - set(symbols)
+    if unknown:
+        raise RiskModelError(f"组合权重包含风险模型外标的: {sorted(unknown)}")
+    if any(not math.isfinite(value) for value in weights.values()):
+        raise RiskModelError("组合权重必须为有限数")
+    vector = np.asarray([weights.get(symbol, 0.0) for symbol in symbols])
+    variance = float(vector @ covariance @ vector)
+    if variance <= _EPS:
+        zeros = dict.fromkeys(symbols, 0.0)
+        return 0.0, zeros, dict(zeros)
+    daily_volatility = math.sqrt(variance)
+    annualization = math.sqrt(_TRADING_DAYS)
+    marginal = covariance @ vector / daily_volatility * annualization
+    component = vector * marginal
+    return (
+        daily_volatility * annualization,
+        {
+            symbol: float(marginal[index])
+            for index, symbol in enumerate(symbols)
+        },
+        {
+            symbol: float(component[index])
+            for index, symbol in enumerate(symbols)
+        },
+    )
+
+
+def _mean_or_zero(values: list[float] | list[int]) -> float:
+    return float(np.mean(values)) if values else 0.0
+
+
+def _require_aware(value: datetime, name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} 必须带时区")
+
+
+__all__ = [
+    "AlphaAnalysisReport",
+    "BasicRiskModel",
+    "CrossMarketSnapshot",
+    "DecayPoint",
+    "FactorAnalysisError",
+    "FactorPeriod",
+    "MarketInputError",
+    "MarketInputObservation",
+    "QuantileReturn",
+    "RegimeAnalysis",
+    "RiskExposure",
+    "RiskModelError",
+    "analyze_alpha_factor",
+    "build_cross_market_snapshot",
+    "build_cross_section_feature_snapshot",
+    "build_price_feature_snapshot",
+    "estimate_basic_risk_model",
+]

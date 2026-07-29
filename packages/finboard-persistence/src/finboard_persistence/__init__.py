@@ -7,6 +7,12 @@ from finboard_persistence.dataset_release_repo import (
     ResearchDatasetReleaseService,
 )
 from finboard_persistence.engine import create_async_engine
+from finboard_persistence.factor_lab_repo import (
+    FactorExperimentRepository,
+    FactorExperimentValidationService,
+    FactorSignalRepository,
+    FeatureSnapshotRepository,
+)
 from finboard_persistence.factor_repo import FactorSnapshotRepository
 from finboard_persistence.models import (
     AccountModel,
@@ -17,6 +23,9 @@ from finboard_persistence.models import (
     ConvertibleMetadataModel,
     DatasetManifestModel,
     EtfMetadataModel,
+    FactorExperimentModel,
+    FactorFeatureSnapshotModel,
+    FactorSignalModel,
     FactorSnapshotModel,
     FactorValueModel,
     FillModel,
@@ -79,9 +88,16 @@ __all__ = [
     "ConvertibleMetadataModel",
     "DatasetManifestModel",
     "EtfMetadataModel",
+    "FactorExperimentModel",
+    "FactorExperimentRepository",
+    "FactorExperimentValidationService",
+    "FactorFeatureSnapshotModel",
+    "FactorSignalModel",
+    "FactorSignalRepository",
     "FactorSnapshotModel",
     "FactorSnapshotRepository",
     "FactorValueModel",
+    "FeatureSnapshotRepository",
     "FillModel",
     "FillRepository",
     "FuturesContractModel",

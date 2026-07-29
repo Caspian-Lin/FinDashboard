@@ -24,6 +24,18 @@ from finboard_shared.types import BarPeriod, Market
 logger = structlog.get_logger(__name__)
 
 
+def _initialize_pyarrow() -> None:
+    """在提交线程任务前初始化 PyArrow 原生模块。
+
+    PyArrow 仍然只在实际访问 Parquet 时加载。初始化与其他 Python 扩展模块
+    同样留在调用线程,避免长生命周期进程第一次在 asyncio executor 中导入
+    原生模块时发生不稳定;真正的文件 I/O 继续在线程中执行。
+    """
+
+    __import__("pyarrow")
+    __import__("pyarrow.parquet")
+
+
 def expected_last_bar_date(end: date, *, today: date | None = None) -> date:
     """周末请求回退到最近工作日,避免缓存永远差一天。"""
     current = today or date.today()
@@ -104,6 +116,7 @@ class ParquetCache:
         path = self._path(symbol, period, adjust)
         if not path.exists():
             return []
+        _initialize_pyarrow()
         size = path.stat().st_size
         started = time.monotonic()
         async with self._io_semaphore:
@@ -170,6 +183,7 @@ class ParquetCache:
         """全量写入(覆盖已有文件)。"""
         if not bars:
             return
+        _initialize_pyarrow()
         path = self._path(symbol, period, adjust)
         started = time.monotonic()
         async with self._io_semaphore:
@@ -235,6 +249,7 @@ class ParquetCache:
 
     async def metadata(self, path: Path) -> CacheMetadata:
         """只读取 Parquet footer,不解码 OHLCV 行情列。"""
+        _initialize_pyarrow()
         size = await asyncio.to_thread(lambda: path.stat().st_size)
         started = time.monotonic()
         async with self._io_semaphore:

@@ -252,7 +252,8 @@ issue #56 起,多标的回测的默认基准**不再只取请求中的第一个�
 
 ### 因子目录
 
-15 个因子覆盖 6 个类别,每个声明经济假设、方向、极值处理和缺失策略:
+13 个已有计算实现的因子覆盖 6 个类别,每个声明经济假设、方向、极值处理和
+缺失策略。目录采用 fail-closed 语义,没有可复现计算实现的因子不会暴露:
 
 | 类别   | 因子                                                         |
 |--------|--------------------------------------------------------------|
@@ -260,7 +261,7 @@ issue #56 起,多标的回测的默认基准**不再只取请求中的第一个�
 | 质量   | `roe`, `gross_profit_margin`, `debt_to_assets`              |
 | 低风险 | `volatility_20d`, `volatility_60d`, `volatility_120d`, `downside_volatility` |
 | 流动性 | `turnover_rate`                                              |
-| 动量   | `momentum`, `residual_momentum`                             |
+| 动量   | `momentum`                                                  |
 | 增长   | `revenue_yoy`                                                |
 
 A股传统价格动量证据分歧大,因此动量作为**待检验补充**,而非预设有效。
@@ -300,11 +301,99 @@ A股传统价格动量证据分歧大,因此动量作为**待检验补充**,而�
 
 ### 已知局限
 
-* 残差动量 `residual_momentum` 的计算需要因子模型,当前框架仅声明因子定义,
-  实际计算需外部回归。
+* 残差动量 `residual_momentum` 尚无可复现的残差回归实现,因此不在公开目录中;
+  实现计算、PIT 数据依赖和测试后才能登记。
 * `downside_volatility` 在牛市中系统性偏低,需要结合全样本波动率使用。
 * 因子分析中的 IC 计算需要前瞻收益,仅用于回测后分析,不能用于实盘信号。
 * 本子包仅用于离线研究 / 回测。
+
+## 因子实验室、风险模型与跨市场特征(issue #78)
+
+`finboard_data.factor_lab` 和 `finboard_backtest.factor_lab` 把研究链路拆成三个不可
+混淆的产物:
+
+```text
+冻结数据发布 → FeatureSnapshot → alpha 分析 → FactorSignal
+                              ↘ 风险暴露 / 市场输入(不产生信号)
+```
+
+- `FeatureSnapshot` 是某一决策时点的不可变输入切片,记录发布版本、窗口、
+  `available_at`、转换、中性化、缺失处理、代码版本和内容校验和。
+- `FactorSignal` 是 alpha 因子的横截面研究输出,逐标的记录方向、分数、置信度、
+  有效期、候选池版本和来源快照。它不是目标仓位、订单或成交指令。
+- 风险因子和其他市场输入只能用于解释、约束或状态分层,不能伪装成 alpha 信号。
+
+### 版本化目录与数据字典
+
+目录 `FACTOR_LAB_CATALOG` 按角色明确分组:
+
+| 角色 | 已登记输入 | 使用边界 |
+|---|---|---|
+| alpha | 估值、质量、增长、20/60/120 日波动率、下行波动率、换手率、动量 | 经过样本外验证后才可发布为 validated signal |
+| risk | 市场 beta、行业、资产类别、规模、波动率、流动性 | 只解释组合风险与集中度 |
+| market_input | 无风险利率、国债收益、美元兑人民币、黄金、市场宽度、波动状态 | 只做状态分层和条件分析 |
+
+每个定义固定 `name/version/role/frequency/window/direction/preference/unit`、
+输入字段、转换、中性化、缺失策略、经济假设、发布时间规则、代码版本和校验和。
+调用方应持久化目录版本与快照 checksum,不能用同名的新实现静默覆盖历史实验。
+
+### Alpha 分析方法
+
+`analyze_alpha_factor()` 在冻结的周期和候选池上计算:
+
+- Spearman Rank IC、Pearson IC、ICIR、t 统计量和近似双侧显著性;
+- 分位数组合、毛/净多空收益、逐期换手和交易成本;
+- 多持有期衰减、参数邻域稳定性、牛熊/波动状态分层。
+
+前瞻收益只允许出现在离线标签与评估阶段。报告不声称统计相关必然可交易;多重
+检验、幸存者偏差、容量、滑点、税费和样本选择仍须由 #57 的实验协议覆盖。
+
+### 风险模型
+
+`estimate_basic_risk_model()` 独立估计市场 beta、行业/资产类别哑变量、对数规模、
+年化波动率和流动性暴露,并使用 Ledoit-Wolf 收缩协方差计算组合波动率、边际和
+总风险贡献。标的元数据缺失、基准无效或协方差不可用时 fail closed,不会把风险
+因子分数混入 alpha 排名。该模型是研究级基础模型,不是实盘 Risk Manager。
+
+### 跨市场输入与 PIT 规则
+
+`build_cross_market_snapshot()` 只让
+`available_at <= decision_at` 的观察值进入快照,并逐项保留来源、数据版本、
+业务日期、发布时间、缺失/陈旧状态。同一输入流中的未来发布值会被隔离;若过滤后
+没有决策时点可见值则按目录策略拒绝,不做无来源的隐式填充。当前覆盖利率/债券、
+汇率、黄金、市场宽度和波动状态,主要用于 regime 分层,不直接产生买卖方向。
+
+### 实验与 API
+
+因子实验冻结数据发布、候选池、训练/验证/测试窗口、试验预算、基准、因子版本、
+代码版本和成本假设。状态包含失败与中断,可持久化比较历史;只有关联的 #57
+实验确实达到 `validated_oos` 且选中 trial 含完整 OOS 统计报告时,持久化层才允许
+发布 `validated_oos` signal。验证实验的 `candidate_universe_version`、数据发布和
+因子版本也必须与信号一致;客户端提交 `passed_oos=true` 之类声明不会生效。
+
+| 方法 | 路径 | 内容 |
+|---|---|---|
+| `GET` | `/api/research/factors/catalog` | 版本化因子、风险因子和市场输入目录 |
+| `GET` | `/api/research/factors/features` | 快照列表;支持 release 筛选 |
+| `GET` | `/api/research/factors/features/{snapshot_id}` | 快照、观测值和完整 lineage |
+| `GET` | `/api/research/factors/signals` | 信号列表;支持 factor/status 筛选 |
+| `GET` | `/api/research/factors/signals/{signal_id}` | 逐标的分数、置信度、有效期与来源 |
+| `POST` | `/api/research/factors/experiments` | 登记冻结实验计划 |
+| `POST` | `/api/research/factors/experiments/{id}/sync-validation` | 从 #57 实验状态同步结论 |
+
+这些端点只登记或读取研究产物,不会启动策略、生成目标仓位、访问 Broker 或执行
+订单。LLM 可以解释目录和辅助形成假设,但不能声明样本外通过或把信号送入实盘。
+
+### 可复现实验最小流程
+
+1. 用 #77 创建并校验不可变 `release_id`,固定候选池版本和决策时点。
+2. 从冻结发布构建 `FeatureSnapshot`,核验版本和 checksum 后发布。
+3. 预先登记经济假设、窗口、成本、基准、参数邻域和试验预算。
+4. 运行 alpha / 风险 / regime 分析,保存失败和中断结果,不要只保留胜者。
+5. 通过 #57 完成样本内、样本外、稳健性与最终测试,再同步实验状态并发布信号。
+
+当前实现不提供在线 Python 编辑器,也不把研究信号转换为目标仓位。收益、Sharpe、
+IC 或显著性均为历史研究指标,不是收益承诺或投资建议。
 
 
 ## ETF 绝对趋势 x 相对动量轮动策略(issue #61)
@@ -662,5 +751,3 @@ wf.complete_experiment(
 * 真实 LLM provider 的实现不在本 issue 范围内。
 * 不连接 Broker / OrderManager / 实盘策略配置。
 * validated_oos 只能由 #57 walk-forward 的机器验证结果产生,不能由 LLM 或人工主观判断。
-
-
