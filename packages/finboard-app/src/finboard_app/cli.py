@@ -574,7 +574,9 @@ app.add_typer(data_app, name="data")
 # data sync / bulk-download 内部实现
 # ---------------------------------------------------------------------------
 async def _sync_universe() -> None:
-    """从 akshare 发现全市场标的,写入 instruments 表。"""
+    """从 akshare 发现全市场标的,写入 instruments 表(带生命周期 diff)。"""
+    from datetime import date
+
     from finboard_app.config import load_settings
     from finboard_data.discovery import UniverseDiscovery
     from finboard_persistence import InstrumentRepository, create_async_engine, session_factory
@@ -600,10 +602,16 @@ async def _sync_universe() -> None:
 
     async with session_factory(engine)() as session:
         repo = InstrumentRepository(session)
-        count = await repo.upsert_many(dicts)
+        result = await repo.sync_with_diff(dicts, as_of=date.today())
         await session.commit()
 
-    typer.echo(f"已同步 {count} 条标的到 instruments 表")
+    typer.echo(
+        f"已同步 {result.total} 条标的"
+        f"(新增 {result.new}, 更新 {result.updated},"
+        f" 改名 {len(result.renamed)},"
+        f" 待退市确认 {len(result.pending_delist)},"
+        f" 退市 {len(result.delisted)})"
+    )
     await engine.dispose()
 
 

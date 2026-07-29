@@ -36,6 +36,12 @@ from finboard_data.factors import (
     RankingScope,
     factor_catalog,
 )
+from finboard_data.lifecycle import (
+    SuspendDecision,
+    SuspendDetector,
+    apply_suspend_decision,
+    compute_has_new,
+)
 from finboard_data.quality import (
     QualityIssue,
     QualityReport,
@@ -105,12 +111,16 @@ __all__ = [
     "ResearchDataProvider",
     "ResearchDataQualityValidator",
     "ResearchDataUpstreamError",
+    "SuspendDecision",
+    "SuspendDetector",
     "SymbolEntry",
     "SymbolPoolConfig",
     "TushareResearchDataProvider",
     "YFinanceProvider",
+    "apply_suspend_decision",
     "audit_dataset_coverage",
     "build_continuous_series",
+    "compute_has_new",
     "factor_catalog",
     "load_symbol_pool",
     "resolve_market_by_code",

@@ -197,6 +197,21 @@ class AkShareProvider:
         )
         return True
 
+    async def last_cached_date(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        adjust: str = "qfq",
+    ) -> date | None:
+        """返回该标的缓存中最新 bar 的日期(``None`` 表示无缓存)。
+
+        供停牌检测(issue #35)比较拉取前后是否有新数据。只读 parquet footer。
+        """
+        if self._cache is None:
+            return None
+        metadata = await self._cache.metadata_for(symbol, period, adjust)
+        return metadata.last_date if metadata is not None else None
+
     # ------------------------------------------------------------------ 批量
     async def fetch_bars_batch(
         self,
