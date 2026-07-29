@@ -23,7 +23,7 @@ from finboard_backtest.portfolio.contracts import (
 )
 from finboard_backtest.portfolio.covariance import CovarianceEstimate
 
-ANNUALIZATION_FACTOR = 252 ** 0.5
+ANNUALIZATION_FACTOR = 252**0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,13 +67,13 @@ def portfolio_volatility(
 
     w_vec = np.zeros(len(tickers))
     for code, weight in weights.items():
-        if code in idx_map and weight > 0:
+        if code in idx_map:
             w_vec[idx_map[code]] = weight
 
     var = float(w_vec @ covariance.matrix @ w_vec)
     if var < 0:
         var = 0.0
-    vol = float(var ** 0.5)
+    vol = float(var**0.5)
     if annualized:
         vol *= ANNUALIZATION_FACTOR
     return vol
@@ -91,8 +91,9 @@ def scale_to_target_volatility(
     缩放逻辑:
     1. 计算当前组合年化波动率 sigma_p。
     2. 缩放系数 k = target_vol / sigma_p。
-    3. 若 k > 1 但 max_leverage=1.0,无法加杠杆 → 权重不变,现金不变。
-    4. 若 k < 1,减仓释放现金 → 权重 *= k,cash += (1-k)*gross。
+    3. 若 k > 1,最多使用现有现金加仓到 gross/现金共同上限;显式杠杆组合
+       最多加到 ``max_leverage``。
+    4. 若 k < 1,减仓释放现金。
     5. 若实际波动率 > max_volatility,强制截断到 max。
     """
     if constraints.target_volatility is None and constraints.max_volatility is None:
@@ -117,25 +118,30 @@ def scale_to_target_volatility(
     scaling = effective_target / realized
 
     max_gross = constraints.max_investable_weight
-    current_gross = sum(target.weights.values())
+    current_gross = sum(abs(weight) for weight in target.weights.values())
     if current_gross <= MAX_WEIGHT_EPSILON:
         return target
 
     max_scaling = max_gross / current_gross if max_gross > 0 else 1.0
     scaling = min(scaling, max_scaling)
 
-    if scaling >= 1.0 - MAX_WEIGHT_EPSILON:
+    if abs(scaling - 1.0) <= MAX_WEIGHT_EPSILON:
         return target
 
     scaled_weights = {c: w * scaling for c, w in target.weights.items()}
-    scaled_gross = sum(scaled_weights.values())
-    new_cash = target.cash_buffer + (current_gross - scaled_gross)
+    scaled_gross = sum(abs(weight) for weight in scaled_weights.values())
+    if constraints.long_only and constraints.max_leverage <= 1 + MAX_WEIGHT_EPSILON:
+        new_cash = max(constraints.min_cash_buffer, 1.0 - scaled_gross)
+    else:
+        new_cash = max(constraints.min_cash_buffer, target.cash_buffer)
 
     return TargetWeight(
         weights=scaled_weights,
         as_of=target.as_of,
         strategy_id=target.strategy_id,
         cash_buffer=new_cash,
+        max_leverage=constraints.max_leverage,
+        long_only=constraints.long_only,
         contract_version=target.contract_version,
         factor_snapshot_id=target.factor_snapshot_id,
         covariance_version=target.covariance_version,

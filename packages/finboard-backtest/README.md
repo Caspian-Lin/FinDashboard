@@ -207,7 +207,7 @@ issue #56 起,多标的回测的默认基准**不再只取请求中的第一个�
 4. 不需要修改前端 —— schema-driven 表单会自动渲染新字段。
 
 
-## 组合构建层(issue #59)
+## 组合构建层(issue #59/#81)
 
 `finboard_backtest.portfolio` 子包提供独立的组合构建层:策略输出标准化
 `Signal` / `TargetWeight`,组合层统一生成调仓订单意图。
@@ -229,6 +229,11 @@ issue #56 起,多标的回测的默认基准**不再只取请求中的第一个�
 * `target_volatility` / `max_volatility`:年化波动率目标 / 上限。
 * `rebalance_threshold`(默认 0.05):再平衡带(权重偏离 < 5% 不调仓)。
 
+issue #81 的 v2 契约已将 `max_leverage` 配置上限与实际
+`gross_exposure` / `net_exposure` 分开，并让 sleeve 映射、禁用标的、信号冲突、
+目标/最大波动率、当前持仓再平衡带真正进入统一 `build_portfolio()` 入口。每项
+约束都会输出 before/after/limit/reason，可直接转换成 ResearchRun artifact。
+
 ### 协方差估计
 
 `estimate_covariance()` 使用 Ledoit-Wolf 收缩估计,避免样本协方差矩阵
@@ -239,10 +244,15 @@ issue #56 起,多标的回测的默认基准**不再只取请求中的第一个�
 
 `solve_sizing()` 把目标权重转换为可成交手数,支持:
 
-* 10万 / 20万 / 50万元三档资金(`CAPITAL_TIERS`)。
+* 10万 / 20万 / 50万元三档资金(`evaluate_capital_tiers`)。
 * A 股 100 股 / 手、ETF 100 或 10 份 / 手、可转债 10 张 / 手、期货乘数。
-* 最小佣金、印花税和剩余现金非负约束。
+* 期货保证金、最低佣金、印花税、滑点、参与率和剩余现金非负约束。
 * 负现金时贪心减手(从偏离最大的标的开始减)。
+
+退出策略执行器消费无代码 `RiskExitPolicy`，支持价格止损、波动率/ATR、止盈、
+最大持有期、组合回撤降风险/暂停和冷却期。它只调整目标仓位，实际持仓仍只能由
+研究成交驱动。完整接口、失败关闭语义和安全边界见
+[`docs/portfolio_risk_capital.md`](../../docs/portfolio_risk_capital.md)。
 
 ### 绩效归因
 
@@ -262,6 +272,8 @@ issue #56 起,多标的回测的默认基准**不再只取请求中的第一个�
 * 绩效归因中的回撤贡献是近似分解(不考虑标的间相关性对回撤的影响)。
 * 本子包仅用于离线研究 / 回测,**不**修改实盘 Risk Manager / Position
   Manager / 下单链路。
+* 实盘 `RiskConfig.max_symbol_position_value` 尚未由 `PreTradeChecker` 执行；
+  这是独立的真实资金安全事项，本离线组合约束不能替代它。
 
 
 ## 多因子研究框架(issue #60)
