@@ -511,7 +511,7 @@ function CreateExperimentDialog({
       setForm(DEFAULT_FORM);
       mutation.reset();
     }
-  }, [open, mutation]);
+  }, [open]);
 
   const toggleFactor = (name: string) => {
     setForm((prev) => ({
