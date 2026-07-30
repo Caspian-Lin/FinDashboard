@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useState, lazy, Suspense } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Database,
@@ -7,9 +7,7 @@ import {
   Search,
   ChevronRight,
   Layers,
-  BarChart3,
-  CalendarDays,
-  Activity,
+  HardDriveDownload,
 } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,6 +41,9 @@ import {
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import { datasetApi, type LifecycleEvent } from "@/lib/research";
 import { cn, formatDateTime, formatNumber, formatPercent } from "@/lib/utils";
+import { WorkflowIndicator, NextStepCTA } from "@/components/research/ResearchHint";
+
+const MarketDataTab = lazy(() => import("@/pages/Data"));
 
 function coverageColor(pct: number): string {
   if (pct >= 95) return "bg-success";
@@ -451,65 +452,26 @@ export default function ResearchData() {
     <div>
       <PageHeader
         title="数据与标的"
-        description="研究数据发布、数据集清单与标的元数据"
-        breadcrumbs={[
-          { label: "研究", href: "/research" },
-          { label: "数据与标的" },
-        ]}
+        description="行情数据拉取、研究数据发布、数据集清单与标的元数据"
       />
+      <WorkflowIndicator currentPath="/research/data" />
 
-      <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <Card>
-          <CardContent className="flex items-center gap-3 p-4">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <Database className="h-5 w-5" />
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">数据发布</p>
-              <p className="flex items-center gap-1 text-sm font-medium">
-                <BarChart3 className="h-3.5 w-3.5 text-muted-foreground" />
-                版本化发布记录
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="flex items-center gap-3 p-4">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <Package className="h-5 w-5" />
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">数据集清单</p>
-              <p className="flex items-center gap-1 text-sm font-medium">
-                <Layers className="h-3.5 w-3.5 text-muted-foreground" />
-                覆盖率与质量监控
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="flex items-center gap-3 p-4">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <CalendarDays className="h-5 w-5" />
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">标的元数据</p>
-              <p className="flex items-center gap-1 text-sm font-medium">
-                <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                代码 / 生命周期
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Tabs defaultValue="releases">
+      <Tabs defaultValue="fetch">
         <TabsList>
+          <TabsTrigger value="fetch">
+            <HardDriveDownload className="mr-1.5 h-4 w-4" />
+            行情拉取
+          </TabsTrigger>
           <TabsTrigger value="releases">数据发布</TabsTrigger>
           <TabsTrigger value="manifests">数据集清单</TabsTrigger>
           <TabsTrigger value="instruments">标的元数据</TabsTrigger>
         </TabsList>
 
+        <TabsContent value="fetch">
+          <Suspense fallback={<LoadingState rows={5} />}>
+            <MarketDataTab />
+          </Suspense>
+        </TabsContent>
         <TabsContent value="releases">
           <ReleasesTab />
         </TabsContent>
@@ -520,6 +482,12 @@ export default function ResearchData() {
           <InstrumentsTab />
         </TabsContent>
       </Tabs>
+
+      <NextStepCTA
+        nextPath="/research/factors"
+        nextLabel="因子实验室"
+        description="基于已拉取的数据探索因子、创建因子实验"
+      />
     </div>
   );
 }

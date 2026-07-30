@@ -1,3 +1,4 @@
+import { WorkflowIndicator, NextStepCTA } from "@/components/research/ResearchHint";
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
@@ -1106,6 +1107,7 @@ export default function PortfolioRisk() {
           { label: "组合与风险" },
         ]}
       />
+      <WorkflowIndicator currentPath="/research/portfolio" />
 
       <Tabs defaultValue="allocate">
         <TabsList>
@@ -1142,6 +1144,11 @@ export default function PortfolioRisk() {
           />
         </TabsContent>
       </Tabs>
+      <NextStepCTA
+        nextPath="/research/simulation"
+        nextLabel="模拟盘"
+        description="用纸面撮合验证策略在真实交易环境下的表现"
+      />
     </div>
   );
 }

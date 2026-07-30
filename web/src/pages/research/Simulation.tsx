@@ -1,3 +1,4 @@
+import { WorkflowIndicator, NextStepCTA } from "@/components/research/ResearchHint";
 import { type ReactNode, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -1146,6 +1147,7 @@ export default function Simulation() {
           </Button>
         }
       />
+      <WorkflowIndicator currentPath="/research/simulation" />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
         <div className="space-y-4 lg:col-span-1">
@@ -1346,6 +1348,11 @@ export default function Simulation() {
         onOpenChange={setSessionDialogOpen}
         accounts={accounts}
         defaultAccountId={selectedAccountId}
+      />
+      <NextStepCTA
+        nextPath="/research/reports"
+        nextLabel="研究报告"
+        description="查看模拟交易的完整绩效报告和归因分析"
       />
     </div>
   );

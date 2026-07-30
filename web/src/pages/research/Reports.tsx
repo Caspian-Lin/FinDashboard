@@ -1,3 +1,4 @@
+import { WorkflowIndicator } from "@/components/research/ResearchHint";
 import { type ReactNode, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -841,6 +842,7 @@ export default function Reports() {
           { label: "研究报告" },
         ]}
       />
+      <WorkflowIndicator currentPath="/research/reports" />
 
       <Card className="mb-4">
         <CardHeader className="pb-3">

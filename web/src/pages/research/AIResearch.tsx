@@ -1,4 +1,5 @@
 import * as React from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Sparkles,
@@ -12,7 +13,14 @@ import {
   ShieldCheck,
   AlertCircle,
   ExternalLink,
+  Workflow,
+  Database,
+  Atom,
+  SlidersHorizontal,
+  TestTube,
+  PlayCircle,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -63,6 +71,7 @@ export default function AIResearch() {
 
       <Tabs defaultValue="ask">
         <TabsList>
+          <TabsTrigger value="orchestrate"><Workflow className="mr-1.5 h-4 w-4" />研究编排</TabsTrigger>
           <TabsTrigger value="ask"><MessageSquare className="mr-1.5 h-4 w-4" />金融问答</TabsTrigger>
           <TabsTrigger value="drafts"><Sparkles className="mr-1.5 h-4 w-4" />AI 草案</TabsTrigger>
           <TabsTrigger value="hypotheses"><FileText className="mr-1.5 h-4 w-4" />假设管理</TabsTrigger>
@@ -73,7 +82,229 @@ export default function AIResearch() {
         <TabsContent value="drafts"><DraftsTab /></TabsContent>
         <TabsContent value="hypotheses"><HypothesesTab /></TabsContent>
         <TabsContent value="audit"><AuditTab /></TabsContent>
+        <TabsContent value="orchestrate"><OrchestrateTab /></TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+/* ============================================================ */
+/* Orchestrate Tab                                              */
+/* ============================================================ */
+
+const orchestrateTemplates = [
+  {
+    label: "动量因子研究",
+    prompt:
+      "我想研究动量因子在 A 股大盘 ETF 上的有效性。请帮我设计一个完整的研究方案：选择数据、构建动量因子、定义信号规则、设置验证计划。",
+  },
+  {
+    label: "多因子选股策略",
+    prompt:
+      "帮我设计一个多因子选股策略，结合价值、动量和低波动因子。目标是构建一个 A 股市场的 long-only 组合。",
+  },
+  {
+    label: "ETF 轮动策略",
+    prompt:
+      "我想研究一个基于动量和趋势的 ETF 轮动策略，在股票、债券和商品 ETF 之间切换。",
+  },
+];
+
+const workflowCards: { to: string; icon: LucideIcon; title: string; desc: string }[] = [
+  { to: "/research/data", icon: Database, title: "数据准备", desc: "拉取行情数据并发布研究数据集" },
+  { to: "/research/factors", icon: Atom, title: "因子选择", desc: "浏览因子目录、创建因子实验" },
+  { to: "/research/strategy", icon: SlidersHorizontal, title: "策略配置", desc: "用无代码组件构建策略规格" },
+  { to: "/research/experiments", icon: TestTube, title: "实验验证", desc: "OOS 检验排除过拟合" },
+  { to: "/research/simulation", icon: PlayCircle, title: "模拟交易", desc: "纸面撮合验证实际表现" },
+];
+
+function OrchestrateTab() {
+  const [prompt, setPrompt] = React.useState("");
+  const [answer, setAnswer] = React.useState<AnswerOut | null>(null);
+
+  const askMutation = useMutation({
+    mutationFn: (q: string) => aiResearchApi.ask(q),
+    onSuccess: setAnswer,
+  });
+
+  const handleSubmit = () => {
+    if (!prompt.trim()) return;
+    askMutation.mutate(prompt.trim());
+  };
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Workflow className="h-4 w-4" />
+            研究编排
+          </CardTitle>
+          <CardDescription>描述研究目标，AI 引导完成完整研究流程</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            {orchestrateTemplates.map((t) => (
+              <Button
+                key={t.label}
+                size="sm"
+                variant="outline"
+                onClick={() => setPrompt(t.prompt)}
+              >
+                {t.label}
+              </Button>
+            ))}
+          </div>
+          <div>
+            <Label htmlFor="orchestrate-prompt">研究目标</Label>
+            <Textarea
+              id="orchestrate-prompt"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="描述你想研究的策略或因子..."
+              className="min-h-[120px]"
+              aria-label="研究目标输入"
+            />
+          </div>
+          <Button onClick={handleSubmit} disabled={!prompt.trim() || askMutation.isPending}>
+            <Sparkles className="mr-2 h-4 w-4" />
+            开始研究
+          </Button>
+          {askMutation.isError && (
+            <Alert variant="destructive">
+              <AlertTitle>请求失败</AlertTitle>
+              <AlertDescription className="text-xs">
+                {askMutation.error instanceof Error ? askMutation.error.message : "AI 服务不可用，请稍后重试"}
+              </AlertDescription>
+            </Alert>
+          )}
+        </CardContent>
+      </Card>
+
+      {askMutation.isPending && (
+        <Card>
+          <CardContent className="py-12">
+            <div className="flex flex-col items-center text-center">
+              <Workflow className="mb-3 h-10 w-10 animate-pulse text-primary/50" />
+              <p className="text-sm text-muted-foreground">AI 正在分析你的研究目标...</p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {answer && (
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Sparkles className="h-4 w-4" />
+                AI 引导
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ScrollArea className="max-h-[500px]">
+                <div className="space-y-4">
+                  <div>
+                    <div className="mb-1 text-xs font-medium text-muted-foreground">回答</div>
+                    <p className="text-sm leading-relaxed">{answer.answer}</p>
+                  </div>
+
+                  {answer.technical_detail && (
+                    <div>
+                      <div className="mb-1 text-xs font-medium text-muted-foreground">技术细节</div>
+                      <p className="font-mono text-xs leading-relaxed text-muted-foreground">
+                        {answer.technical_detail}
+                      </p>
+                    </div>
+                  )}
+
+                  {!answer.data_sufficient && answer.disclaimer && (
+                    <Alert variant="warning">
+                      <AlertCircle className="h-4 w-4" />
+                      <AlertDescription>{answer.disclaimer}</AlertDescription>
+                    </Alert>
+                  )}
+
+                  {answer.uncertainty && (
+                    <div>
+                      <div className="mb-1 text-xs font-medium text-muted-foreground">不确定性</div>
+                      <p className="text-xs italic text-muted-foreground">{answer.uncertainty}</p>
+                    </div>
+                  )}
+
+                  {answer.citations.length > 0 && (
+                    <div>
+                      <div className="mb-2 text-xs font-medium text-muted-foreground">引用来源</div>
+                      <div className="space-y-1">
+                        {answer.citations.map((c, i) => (
+                          <div key={i} className="flex items-start gap-2 text-xs">
+                            <Badge variant="secondary" className="shrink-0 text-[10px]">
+                              {c.source}
+                            </Badge>
+                            <span className="text-foreground/80">{c.reference}</span>
+                            {c.url && (
+                              <a
+                                href={c.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary hover:underline"
+                              >
+                                <ExternalLink className="h-3 w-3" />
+                              </a>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <Separator />
+                  <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                    <Badge variant="outline" className="text-[10px]">
+                      {answer.provenance.provider}
+                    </Badge>
+                    <span>{answer.provenance.model_version}</span>
+                    <span>·</span>
+                    <span>{answer.provenance.latency_ms}ms</span>
+                  </div>
+                </div>
+              </ScrollArea>
+            </CardContent>
+          </Card>
+
+          <div>
+            <div className="mb-2 flex items-center gap-2">
+              <Workflow className="h-4 w-4 text-primary" />
+              <span className="text-sm font-medium">研究工作流</span>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {workflowCards.map((card, idx) => {
+                const Icon = card.icon;
+                return (
+                  <Link key={card.to} to={card.to}>
+                    <Card className="transition-colors hover:border-primary/50 hover:bg-accent">
+                      <CardContent className="flex items-start gap-3 p-4">
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                          <Icon className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-muted-foreground">
+                              {String(idx + 1).padStart(2, "0")}
+                            </span>
+                            <span className="text-sm font-medium">{card.title}</span>
+                          </div>
+                          <p className="mt-0.5 text-xs text-muted-foreground">{card.desc}</p>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

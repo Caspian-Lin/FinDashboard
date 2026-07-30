@@ -1,3 +1,4 @@
+import { WorkflowIndicator, NextStepCTA } from "@/components/research/ResearchHint";
 import { type ReactNode, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -207,6 +208,7 @@ export default function ResearchRuns() {
           </Button>
         }
       />
+      <WorkflowIndicator currentPath="/research/runs" />
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
@@ -788,6 +790,11 @@ export default function ResearchRuns() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <NextStepCTA
+        nextPath="/research/portfolio"
+        nextLabel="组合与风险"
+        description="将冻结的策略转化为目标权重和离散交易计划"
+      />
     </div>
   );
 }
