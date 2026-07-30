@@ -8,6 +8,7 @@ from finboard_backtest.factor_research import (
     AuditEventType,
     FactorHypothesis,
     HypothesisStatus,
+    MachineValidationOutcome,
     ParameterSpec,
     Reference,
     ResearchWorkflow,
@@ -29,6 +30,28 @@ def _make_hypothesis(**overrides: object) -> FactorHypothesis:
     }
     defaults.update(overrides)
     return FactorHypothesis(**defaults)  # type: ignore[arg-type]
+
+
+def _passed_outcome(*, validation_experiment_id: str = "exp-57-ok") -> MachineValidationOutcome:
+    """构造一个通过的 #57 机器验证终态(由系统从持久化实验读取)。"""
+    return MachineValidationOutcome(
+        validation_experiment_id=validation_experiment_id,
+        status="validated_oos",
+        trials_used=3,
+    )
+
+
+def _failed_outcome(
+    *,
+    validation_experiment_id: str = "exp-57-fail",
+    rejection_reason: str = "Sharpe < threshold",
+) -> MachineValidationOutcome:
+    return MachineValidationOutcome(
+        validation_experiment_id=validation_experiment_id,
+        status="rejected",
+        trials_used=3,
+        rejection_reason=rejection_reason,
+    )
 
 
 class TestSubmit:
@@ -199,7 +222,7 @@ class TestCompleteExperiment:
         )
         result = wf.complete_experiment(
             reg.experiment_id,
-            passed_oos=True,
+            validation=_passed_outcome(),
             completed_by="alice",
         )
         assert result.status == HypothesisStatus.VALIDATED_OOS
@@ -219,9 +242,8 @@ class TestCompleteExperiment:
         )
         result = wf.complete_experiment(
             reg.experiment_id,
-            passed_oos=False,
+            validation=_failed_outcome(),
             completed_by="alice",
-            rejection_reason="Sharpe < threshold",
         )
         assert result.status == HypothesisStatus.REJECTED
         assert "Sharpe" in (result.rejection_reason or "")
@@ -231,7 +253,7 @@ class TestCompleteExperiment:
         with pytest.raises(WorkflowError, match="未知实验"):
             wf.complete_experiment(
                 "exp-nonexistent",
-                passed_oos=True,
+                validation=_passed_outcome(),
                 completed_by="alice",
             )
 
@@ -314,7 +336,7 @@ class TestFullWorkflow:
 
         h = wf.complete_experiment(
             reg.experiment_id,
-            passed_oos=True,
+            validation=_passed_outcome(),
             completed_by="alice",
         )
         assert h.status == HypothesisStatus.VALIDATED_OOS
@@ -341,7 +363,7 @@ class TestFullWorkflow:
         )
         h = wf.complete_experiment(
             reg.experiment_id,
-            passed_oos=False,
+            validation=_failed_outcome(),
             completed_by="alice",
         )
         assert h.status == HypothesisStatus.REJECTED

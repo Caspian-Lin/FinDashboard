@@ -1,5 +1,13 @@
 """finboard-persistence:SQLAlchemy 2.0 ORM + Repository + Alembic。"""
 
+from finboard_persistence.ai_research_repo import (
+    AIAuditEventRepository,
+    AIDraftRepository,
+    FactorHypothesisExperimentRepository,
+    FactorHypothesisRepository,
+    HypothesisPersistenceError,
+    HypothesisWorkflowService,
+)
 from finboard_persistence.base import Base
 from finboard_persistence.dataset_release_repo import (
     ReleaseInstrumentCatalogRepository,
@@ -16,6 +24,8 @@ from finboard_persistence.factor_lab_repo import (
 from finboard_persistence.factor_repo import FactorSnapshotRepository
 from finboard_persistence.models import (
     AccountModel,
+    AIAuditEventModel,
+    AIDraftModel,
     AuditLogModel,
     BacktestRunModel,
     BondMetadataModel,
@@ -25,6 +35,8 @@ from finboard_persistence.models import (
     EtfMetadataModel,
     FactorExperimentModel,
     FactorFeatureSnapshotModel,
+    FactorHypothesisExperimentModel,
+    FactorHypothesisModel,
     FactorSignalModel,
     FactorSnapshotModel,
     FactorValueModel,
@@ -99,6 +111,10 @@ from finboard_persistence.validation_repo import (
 )
 
 __all__ = [
+    "AIAuditEventModel",
+    "AIAuditEventRepository",
+    "AIDraftModel",
+    "AIDraftRepository",
     "AccountModel",
     "AccountRepository",
     "AuditLogModel",
@@ -115,6 +131,10 @@ __all__ = [
     "FactorExperimentRepository",
     "FactorExperimentValidationService",
     "FactorFeatureSnapshotModel",
+    "FactorHypothesisExperimentModel",
+    "FactorHypothesisExperimentRepository",
+    "FactorHypothesisModel",
+    "FactorHypothesisRepository",
     "FactorSignalModel",
     "FactorSignalRepository",
     "FactorSnapshotModel",
@@ -124,6 +144,8 @@ __all__ = [
     "FillModel",
     "FillRepository",
     "FuturesContractModel",
+    "HypothesisPersistenceError",
+    "HypothesisWorkflowService",
     "InstrumentLifecycleEventModel",
     "InstrumentModel",
     "InstrumentNameModel",

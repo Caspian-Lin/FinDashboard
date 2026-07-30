@@ -12,6 +12,7 @@ from finboard_backtest.factor_research import (
     FakeLLMProvider,
     HypothesisStatus,
     LLMUnavailableError,
+    MachineValidationOutcome,
     ParameterSpec,
     Reference,
     ResearchWorkflow,
@@ -142,7 +143,11 @@ class TestExperimentInterrupted:
         )
         wf.complete_experiment(
             reg.experiment_id,
-            passed_oos=True,
+            validation=MachineValidationOutcome(
+                validation_experiment_id="exp-57-ok",
+                status="validated_oos",
+                trials_used=3,
+            ),
             completed_by="alice",
         )
         with pytest.raises(WorkflowError, match="不能中断"):
