@@ -8,6 +8,7 @@ from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_app.bootstrap import KernelComponents
+from finboard_backtest.factor_research import ResearchAssistant
 from finboard_core import TradingKernel
 from finboard_shared.identifiers import AccountId
 
@@ -36,6 +37,11 @@ async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 def get_account_id(request: Request) -> AccountId:
     return request.app.state.account_id  # type: ignore[no-any-return]
+
+
+def get_research_assistant(request: Request) -> ResearchAssistant:
+    """AI 研究助手(issue #84)——lifespan 构建的 ResearchAssistant 单例。"""
+    return request.app.state.research_assistant  # type: ignore[no-any-return]
 
 
 def get_components(request: Request) -> KernelComponents:

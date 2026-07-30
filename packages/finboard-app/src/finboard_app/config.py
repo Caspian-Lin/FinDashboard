@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     # ---- Kill Switch 初始态 ----
     kill_switch_initial: KillSwitchLevel = KillSwitchLevel.OFF
 
+    # ---- AI 研究助手(issue #84) ----
+    # 只服务研究与教育;不连接实盘账户 / 订单 / 持仓。
+    # api_key 属于敏感字段,禁止进入日志 / 审计 / Provenance。
+    llm_provider: Literal["fake", "openai_compatible"] = "fake"
+    llm_base_url: str = ""
+    llm_api_key: str = Field(default="", repr=False)
+    llm_model: str = "gpt-4o-mini"
+    llm_timeout_seconds: float = 30.0
+    llm_max_retries: int = 3
+
 
 def load_settings(env_file: str | None = None) -> Settings:
     """加载配置;测试中可指定独立 env_file。"""

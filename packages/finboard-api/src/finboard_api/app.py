@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from finboard_api.errors import finboard_error_handler
 from finboard_api.routes import (
     account_router,
+    ai_research_router,
     audit_router,
     backtest_router,
     data_router,
@@ -40,7 +41,9 @@ from finboard_api.simulation_ws import SimulationConnectionManager
 from finboard_api.ws import ConnectionManager, setup_event_bridge, teardown_event_bridge
 from finboard_app.bootstrap import build_kernel_components
 from finboard_app.config import Settings
+from finboard_app.llm_factory import build_llm_provider
 from finboard_app.logging import setup_logging
+from finboard_backtest.factor_research import ResearchAssistant
 from finboard_shared.exceptions import FinboardError
 from finboard_shared.types import KillSwitchLevel
 from finboard_simulation import SimulationRepository, SimulationService
@@ -74,6 +77,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.ws_manager = manager
         app.state.simulation_ws_manager = SimulationConnectionManager()
 
+        # AI 研究助手(issue #84):构建 provider 单例;配置不全时降级到 fake。
+        try:
+            llm_provider = build_llm_provider(settings)
+        except ValueError as exc:
+            logger.warning("api.llm_provider_fallback", error=str(exc))
+            from finboard_backtest.factor_research import FakeLLMProvider
+
+            llm_provider = FakeLLMProvider()
+        app.state.llm_provider = llm_provider
+        app.state.research_assistant = ResearchAssistant(llm_provider)
+
         await kernel.start()
         logger.info("api.kernel_started", ready=kernel.ready)
         async with components.session_maker() as simulation_session:
@@ -93,6 +107,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await kernel.stop()
             await session.commit()
             await components.engine.dispose()
+            cached_provider = getattr(app.state, "llm_provider", None)
+            if cached_provider is not None and hasattr(cached_provider, "close"):
+                cached_provider.close()
             logger.info("api.kernel_stopped")
 
 
@@ -138,6 +155,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(strategy_specs_router)
     app.include_router(research_router)
     app.include_router(research_runs_router)
+    app.include_router(ai_research_router)
     app.include_router(instruments_router)
     app.include_router(portfolio_router)
     app.include_router(simulation_router)

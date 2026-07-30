@@ -1,4 +1,4 @@
-"""因子假设审批与研究工作流(Issue #65)。
+"""因子假设审批与研究工作流(Issue #65 / #84)。
 
 状态机::
 
@@ -18,7 +18,8 @@
 - 假设必须通过白名单验证才能提交
 - 人工批准是进入实验的显式 gate(approver / 时间 / 版本可审计)
 - 试验次数不能超过参数预算
-- validated_oos 只能由 #57 walk-forward 机器验证产生
+- validated_oos 只能由 #57 持久化的机器验证实验决定(complete_experiment
+  绑定 MachineValidationOutcome,不接受 passed_oos: bool)
 - 不连接 Broker / OrderManager / 实盘策略配置 / 动态代码执行
 """
 
@@ -66,10 +67,50 @@ class ExperimentRegistration:
     registered_by: str
     references: tuple[Reference, ...] = ()
     status: str = "registered"
+    validation_experiment_id: str | None = None
 
     @property
     def reference_count(self) -> int:
         return len(self.references)
+
+
+# #57 机器验证终态(与 validation.contracts.ExperimentStatus 的终态对应)。
+_VALID_MACHINE_STATUSES: frozenset[str] = frozenset({"validated_oos", "rejected"})
+
+
+@dataclass(frozen=True, slots=True)
+class MachineValidationOutcome:
+    """#57 持久化机器验证的终态结果(只读值对象)。
+
+    由系统从已完成的 #57 ``ResearchExperiment`` 读取后传入
+    :meth:`ResearchWorkflow.complete_experiment`。
+
+    红线:
+    * ``status`` 必须是终态(validated_oos / rejected),不接受中间态;
+    * 该对象只能由持久化 service 从 DB 构造,不能由 API 请求体 / LLM 直接伪造;
+    * ``validation_experiment_id`` 必须指向持久化的 #57 实验。
+    """
+
+    validation_experiment_id: str
+    status: str
+    trials_used: int
+    rejection_reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.validation_experiment_id.strip():
+            raise ValueError("MachineValidationOutcome.validation_experiment_id 不能为空")
+        if self.status not in _VALID_MACHINE_STATUSES:
+            raise ValueError(
+                f"MachineValidationOutcome.status 必须是终态 "
+                f"{sorted(_VALID_MACHINE_STATUSES)}, 得到 '{self.status}'"
+            )
+        if self.trials_used < 0:
+            raise ValueError("MachineValidationOutcome.trials_used 不能为负")
+
+    @property
+    def passed_oos(self) -> bool:
+        """由 #57 机器结果决定(非人工 / LLM 判断)。"""
+        return self.status == "validated_oos"
 
 
 def _utcnow() -> datetime:
@@ -100,7 +141,11 @@ class ResearchWorkflow:
         )
         wf.complete_experiment(
             reg.experiment_id,
-            passed_oos=True,
+            validation=MachineValidationOutcome(
+                validation_experiment_id="exp-57-xxxx",
+                status="validated_oos",
+                trials_used=3,
+            ),
             completed_by="alice",
         )
     """
@@ -110,6 +155,28 @@ class ResearchWorkflow:
     _hypotheses: dict[str, FactorHypothesis] = field(default_factory=dict)
     _experiments: dict[str, ExperimentRegistration] = field(default_factory=dict)
     _validations: dict[str, HypothesisValidationResult] = field(default_factory=dict)
+
+    @classmethod
+    def restore(
+        cls,
+        hypotheses: list[FactorHypothesis],
+        experiments: list[ExperimentRegistration],
+        *,
+        validator: HypothesisValidator | None = None,
+    ) -> ResearchWorkflow:
+        """从持久化存储重建内存工作流(用于重启恢复)。
+
+        重新对每个假设跑白名单验证,重建 ``_validations`` 快照。
+        审计轨迹(:class:`AuditTrail`)不在此重建 —— 审计事件由持久化层
+        独立保存(``ai_audit_events`` 表),重启后从 DB 读取。
+        """
+        wf = cls(validator=validator or HypothesisValidator())
+        for h in hypotheses:
+            wf._hypotheses[h.hypothesis_id] = h
+            wf._validations[h.hypothesis_id] = wf.validator.validate(h)
+        for e in experiments:
+            wf._experiments[e.experiment_id] = e
+        return wf
 
     # ------------------------------------------------------------------
     # 提交 / 验证
@@ -221,10 +288,15 @@ class ResearchWorkflow:
         dataset_version: str,
         code_version: str,
         registered_by: str,
+        validation_experiment_id: str | None = None,
     ) -> ExperimentRegistration:
         """登记实验(假设必须已 APPROVED 或已在 IN_SAMPLE 中)。
 
         检查试验预算:试验次数不能超过 ``parameter_budget``。
+
+        ``validation_experiment_id`` 可选,用于预绑定关联的 #57 机器验证实验;
+        最终结论由 :meth:`complete_experiment` 的
+        :class:`MachineValidationOutcome` 决定。
         """
         current = self._require(hypothesis_id)
         if current.status not in (
@@ -253,6 +325,7 @@ class ResearchWorkflow:
             registered_at=_utcnow(),
             registered_by=registered_by,
             references=current.references,
+            validation_experiment_id=validation_experiment_id,
         )
         self._experiments[reg.experiment_id] = reg
 
@@ -284,17 +357,20 @@ class ResearchWorkflow:
         self,
         experiment_id: str,
         *,
-        passed_oos: bool,
+        validation: MachineValidationOutcome,
         completed_by: str,
-        rejection_reason: str = "",
     ) -> FactorHypothesis:
-        """完成实验并更新假设状态。
+        """完成实验并更新假设状态(Issue #84 重构)。
 
-        ``passed_oos=True`` 时假设进入 ``VALIDATED_OOS``。
-        ``passed_oos=False`` 时假设进入 ``REJECTED``。
+        不再接受 ``passed_oos: bool`` —— 必须传入
+        :class:`MachineValidationOutcome`(由系统从已完成的 #57
+        持久化机器验证实验读取):
 
-        注意: ``passed_oos`` 只能由 #57 walk-forward 的机器验证结果产生,
-        不能由 LLM 或人工主观判断。
+        * ``validation.status == "validated_oos"`` → 假设进入 ``VALIDATED_OOS``;
+        * ``validation.status == "rejected"`` → 假设进入 ``REJECTED``。
+
+        红线: ``validation`` 只能由持久化 service 从 DB 构造,
+        不能由 LLM / 人工主观判断或 API 请求体直接伪造。
         """
         reg = self._experiments.get(experiment_id)
         if reg is None:
@@ -302,10 +378,14 @@ class ResearchWorkflow:
 
         current = self._require(reg.hypothesis_id)
 
-        completed_reg = dataclasses.replace(reg, status="completed")
+        completed_reg = dataclasses.replace(
+            reg,
+            status="completed",
+            validation_experiment_id=validation.validation_experiment_id,
+        )
         self._experiments[experiment_id] = completed_reg
 
-        if passed_oos:
+        if validation.passed_oos:
             validated = current.with_status(HypothesisStatus.VALIDATED_OOS)
             self._hypotheses[reg.hypothesis_id] = validated
             self.audit.log(
@@ -313,10 +393,12 @@ class ResearchWorkflow:
                 reg.hypothesis_id,
                 completed_by,
                 experiment_id=experiment_id,
+                validation_experiment_id=validation.validation_experiment_id,
+                trials_used=str(validation.trials_used),
             )
             return validated
 
-        reason = rejection_reason or "OOS 验证未通过"
+        reason = validation.rejection_reason or "机器 OOS 验证未通过"
         rejected = current.with_status(
             HypothesisStatus.REJECTED,
             rejection_reason=reason,
@@ -327,6 +409,7 @@ class ResearchWorkflow:
             reg.hypothesis_id,
             completed_by,
             experiment_id=experiment_id,
+            validation_experiment_id=validation.validation_experiment_id,
             result="failed_oos",
             reason=reason,
         )

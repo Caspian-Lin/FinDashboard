@@ -23,6 +23,7 @@
 - **正式研究组合入口（#91）**：long-only `ResearchRun` 必须由 `PortfolioPipelineAdapter` 从冻结候选池/特征/信号生成目标、硬约束、风险退出、三档资金可行性、研究订单/成交和账本；风险贡献上限启用后缺少协方差、数学不可行或不收敛必须在生成研究订单前失败关闭。
 - **产品模拟盘边界（#83）**：`finboard-simulation` 只接受已发布策略和 completed `ResearchRun` 的结构化目标仓位，订单、成交、持仓、资金、时钟与审计全部持久化在独立模拟表。禁止导入/配置 Broker 或 QMT/CTP、禁止直接创建订单或修改持仓、禁止自动晋级影子盘/实盘。
 - **研究策略配置边界**：允许用版本化无代码规格组合后端白名单候选池 / 因子 / 信号 / 目标仓位 / 研究风控 / 成交假设 / 验证计划；禁止网页提交 Python、模块路径或可执行表达式，保存 / 发布配置不得自动启动任何运行。
+- **AI 研究助手边界（#84）**：`ResearchAssistant` 只读研究上下文，写入草案/解释/因子假设（持久化在 `factor_hypotheses` / `factor_hypothesis_experiments` / `ai_drafts` / `ai_audit_events` 独立表，不写入实盘 `orders`/`fills`/`positions`/`audit_logs`）。`complete_experiment` 必须绑定持久化的 #57 机器验证终态（`MachineValidationOutcome`），不再接受 `passed_oos: bool`。AI 生成策略组件/diff 受 #79 schema 与白名单约束，禁止生成 Python/模块路径/可执行表达式。OpenAI 兼容 provider（`OpenAICompatibleLLMProvider`）api_key 属敏感字段，不进入日志/审计/`Provenance`；超时/限流/5xx 有限退避后降级为 `LLMUnavailableError`。AI 不能调用实盘账户/订单/撤单/持仓校准/Kill Switch，不能直接启动回测或模拟会话。
 - **实盘恢复条件**：QMT 权限解决 → #22 真机验证 → #23 标的元数据 → #24 连续运行 → 小资金实盘。
 - **P6 及以后禁止提前开工**：TWAP / VWAP / 冰山单 / 智能拆单、跨账户路由、复杂回测、因子系统、LLM 接入。
 
@@ -37,6 +38,8 @@
 
 ### LLM / Agent 边界
 LLM（包括本 agent 自身）**不允许**：直接连接实盘账户、直接发送订单、修改账户持仓、绕过风控、在实盘运行时动态生成代码并立即执行。LLM 的产出必须经过完整流程才可上实盘：`研究 → 回测 → 样本外 → 行情回放 → 模拟交易 → 影子交易 → 小资金实盘 → 扩大资金`。
+
+`ResearchAssistant`（`packages/finboard-backtest/src/finboard_backtest/factor_research/assistant.py`）是 AI 助手的唯一入口，强制权限矩阵（`assert_research_only_request`）拒绝下单/撤单/持仓校准/Kill Switch/凭证探测/启动回测等越权请求与提示词注入。AI 输出统一为受白名单/schema 约束的结构化对象（`FactorHypothesis` / `StrategyDraftPayload` / `StrategyDiffPayload` / `AnswerResult`），并以 `DraftArtifact` 形式持久化，显示来源（`Provenance`：provider/model_version/prompt_version）、不确定性和审批状态（`DraftStatus`：proposed→approved→consumed/rejected）。金融问答必须引用项目来源，数据不足时明确声明，不编造。API 端点在 `/api/research/ai`（假设审批/实验登记/AI 草案/问答/审计），不提供 Python 编辑或执行入口。
 
 ## Git 工作流
 
