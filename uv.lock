@@ -28,6 +28,7 @@ members = [
     "finboard-risk",
     "finboard-scheduler",
     "finboard-shared",
+    "finboard-simulation",
     "findashboard",
 ]
 
@@ -523,6 +524,7 @@ dependencies = [
     { name = "finboard-reconcile" },
     { name = "finboard-risk" },
     { name = "finboard-shared" },
+    { name = "finboard-simulation" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -538,6 +540,7 @@ requires-dist = [
     { name = "finboard-reconcile", editable = "packages/finboard-reconcile" },
     { name = "finboard-risk", editable = "packages/finboard-risk" },
     { name = "finboard-shared", editable = "packages/finboard-shared" },
+    { name = "finboard-simulation", editable = "packages/finboard-simulation" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 
@@ -777,6 +780,27 @@ requires-dist = [
 name = "finboard-shared"
 version = "0.1.0"
 source = { editable = "packages/finboard-shared" }
+
+[[package]]
+name = "finboard-simulation"
+version = "0.1.0"
+source = { editable = "packages/finboard-simulation" }
+dependencies = [
+    { name = "finboard-backtest" },
+    { name = "finboard-persistence" },
+    { name = "finboard-shared" },
+    { name = "sqlalchemy" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "finboard-backtest", editable = "packages/finboard-backtest" },
+    { name = "finboard-persistence", editable = "packages/finboard-persistence" },
+    { name = "finboard-shared", editable = "packages/finboard-shared" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "structlog", specifier = ">=24.1" },
+]
 
 [[package]]
 name = "findashboard"

@@ -14,6 +14,7 @@ from finboard_api.routes.positions import router as positions_router
 from finboard_api.routes.reconcile import router as reconcile_router
 from finboard_api.routes.research import router as research_router
 from finboard_api.routes.research_runs import router as research_runs_router
+from finboard_api.routes.simulation import router as simulation_router
 from finboard_api.routes.strategy_presets import router as strategy_presets_router
 from finboard_api.routes.strategy_specs import router as strategy_specs_router
 from finboard_api.routes.watchlist import router as watchlist_router
@@ -33,6 +34,7 @@ __all__ = [
     "reconcile_router",
     "research_router",
     "research_runs_router",
+    "simulation_router",
     "strategy_presets_router",
     "strategy_specs_router",
     "watchlist_router",
