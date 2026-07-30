@@ -26,7 +26,7 @@ function errorMessage(detail: unknown, fallback: string): string {
   return fallback;
 }
 
-async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
+export async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,

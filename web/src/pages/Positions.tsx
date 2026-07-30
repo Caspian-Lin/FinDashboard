@@ -19,7 +19,7 @@ export default function Positions() {
           <button
             onClick={() => setSource("local")}
             className={`px-3 py-1.5 rounded text-sm ${
-              source === "local" ? "bg-slate-800 text-white" : "bg-white border"
+              source === "local" ? "bg-accent text-white" : "bg-card border"
             }`}
           >
             本地持仓
@@ -27,7 +27,7 @@ export default function Positions() {
           <button
             onClick={() => setSource("broker")}
             className={`px-3 py-1.5 rounded text-sm ${
-              source === "broker" ? "bg-slate-800 text-white" : "bg-white border"
+              source === "broker" ? "bg-accent text-white" : "bg-card border"
             }`}
           >
             券商持仓
@@ -36,10 +36,10 @@ export default function Positions() {
       </div>
 
       {positions.length === 0 ? (
-        <div className="text-gray-400 text-center py-12">无持仓数据</div>
+        <div className="text-muted-foreground/70 text-center py-12">无持仓数据</div>
       ) : (
-        <table className="w-full bg-white rounded-lg shadow text-sm">
-          <thead className="bg-gray-100 text-gray-600">
+        <table className="w-full bg-card rounded-lg shadow text-sm">
+          <thead className="bg-secondary text-muted-foreground">
             <tr>
               <th className="px-4 py-2 text-left">标的</th>
               <th className="px-4 py-2 text-left">方向</th>

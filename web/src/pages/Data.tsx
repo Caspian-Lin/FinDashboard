@@ -116,14 +116,14 @@ export default function Data() {
       {/* Sync + Single fetch */}
       <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
         {/* Universe Sync */}
-        <div className="bg-white rounded-lg shadow p-5">
+        <div className="bg-card rounded-lg shadow p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-semibold">标的池同步</h2>
             {totalInstruments > 0 && (
-              <span className="text-sm text-gray-400">已同步 {totalInstruments} 条</span>
+              <span className="text-sm text-muted-foreground/70">已同步 {totalInstruments} 条</span>
             )}
           </div>
-          <p className="text-sm text-gray-500 mb-3">
+          <p className="text-sm text-muted-foreground mb-3">
             从 akshare 自动发现全市场 A 股(~5500) + ETF(~1600),写入数据库。
           </p>
           <button
@@ -134,19 +134,19 @@ export default function Data() {
             {sync.isPending ? "同步中..." : totalInstruments === 0 ? "同步标的池" : "刷新标的池"}
           </button>
           {sync.data && (
-            <p className="text-sm text-green-600 mt-2">
+            <p className="text-sm text-success mt-2">
               同步完成: {sync.data.total} 条标的
             </p>
           )}
           {sync.error && (
-            <p className="text-sm text-red-600 mt-2">
+            <p className="text-sm text-destructive mt-2">
               {(sync.error as Error).message}
             </p>
           )}
         </div>
 
         {/* Single fetch */}
-        <div className="bg-white rounded-lg shadow p-5">
+        <div className="bg-card rounded-lg shadow p-5">
           <h2 className="text-lg font-semibold mb-3">单标的拉取</h2>
           <div className="space-y-3">
             <div>
@@ -192,17 +192,17 @@ export default function Data() {
                 fetchOne.mutate({ symbol: fetchSymbol, start: fetchStart, end: fetchEnd })
               }
               disabled={fetchOne.isPending}
-              className="w-full bg-blue-600 text-white rounded py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+              className="w-full bg-primary text-white rounded py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
             >
               {fetchOne.isPending ? "拉取中..." : "拉取"}
             </button>
             {fetchOne.data && (
-              <p className="text-sm text-green-600">
+              <p className="text-sm text-success">
                 已获取 {fetchOne.data.bar_count} 根日线
               </p>
             )}
             {fetchOne.error && (
-              <p className="text-sm text-red-600">
+              <p className="text-sm text-destructive">
                 {(fetchOne.error as Error).message}
               </p>
             )}
@@ -211,7 +211,7 @@ export default function Data() {
       </div>
 
       {/* Bulk Download */}
-      <div className="bg-white rounded-lg shadow p-5 mb-6">
+      <div className="bg-card rounded-lg shadow p-5 mb-6">
         <h2 className="text-lg font-semibold mb-4">批量拉取</h2>
         <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <div>
@@ -280,7 +280,7 @@ export default function Data() {
         {/* Progress bar */}
         {isDownloading && bulkStatus && (
           <div className="mt-4" aria-live="polite">
-            <div className="flex justify-between text-sm text-gray-600 mb-1">
+            <div className="flex justify-between text-sm text-muted-foreground mb-1">
               <span>进度: {bulkStatus.done} / {bulkStatus.total}</span>
               <span>{bulkStatus.total > 0 ? `${(bulkStatus.done * 100 / bulkStatus.total).toFixed(1)}%` : ""}</span>
             </div>
@@ -300,7 +300,7 @@ export default function Data() {
               />
             </div>
             {(phaseLabel || bulkStatus.current_symbol) && (
-              <p className="mt-2 text-xs text-gray-500 font-mono">
+              <p className="mt-2 text-xs text-muted-foreground font-mono">
                 {phaseLabel ?? "处理中"}
                 {bulkStatus.current_symbol ? ` · ${bulkStatus.current_symbol}` : ""}
               </p>
@@ -310,22 +310,22 @@ export default function Data() {
 
         {/* Download result */}
         {bulkStatus?.status === "done" && (
-          <p className="mt-3 text-sm text-green-600">
+          <p className="mt-3 text-sm text-success">
             完成: 成功 {bulkStatus.success} / {bulkStatus.total}, 失败 {bulkStatus.failed}
           </p>
         )}
         {bulkStatus?.status === "error" && (
-          <p className="mt-3 text-sm text-red-600">错误: {bulkStatus.error}</p>
+          <p className="mt-3 text-sm text-destructive">错误: {bulkStatus.error}</p>
         )}
         {startDownload.error && (
-          <p className="mt-3 text-sm text-red-600">
+          <p className="mt-3 text-sm text-destructive">
             {(startDownload.error as Error).message}
           </p>
         )}
       </div>
 
       {/* Instruments table */}
-      <div className="bg-white rounded-lg shadow mb-6">
+      <div className="bg-card rounded-lg shadow mb-6">
         <div className="flex items-center justify-between px-5 py-3 border-b">
           <h2 className="text-lg font-semibold">标的列表 ({totalInstruments})</h2>
           <div className="flex gap-3">
@@ -357,7 +357,7 @@ export default function Data() {
           </div>
         </div>
         <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-gray-600">
+          <thead className="bg-background text-muted-foreground">
             <tr>
               <th className="px-4 py-2 text-left">代码</th>
               <th className="px-4 py-2 text-left">名称</th>
@@ -382,29 +382,29 @@ export default function Data() {
                   <td className="px-4 py-2">{ins.name}</td>
                   <td className="px-4 py-2">{ins.market}</td>
                   <td className="px-4 py-2">{ins.instrument_type}</td>
-                  <td className="px-4 py-2 text-gray-500">{ins.exchange ?? "—"}</td>
+                  <td className="px-4 py-2 text-muted-foreground">{ins.exchange ?? "—"}</td>
                 </tr>
               ))}
           </tbody>
         </table>
         {totalInstruments === 0 && searchQuery.length < 2 && (
-          <div className="p-8 text-center text-gray-400">
+          <div className="p-8 text-center text-muted-foreground/70">
             标的池为空 — 点击上方"同步标的池"按钮自动发现
           </div>
         )}
       </div>
 
       {/* Cache status table */}
-      <div className="bg-white rounded-lg shadow">
+      <div className="bg-card rounded-lg shadow">
         <div className="flex items-center gap-1 border-b px-5 py-3">
           <h2 className="text-lg font-semibold">已缓存数据 ({status?.total ?? 0})</h2>
           <InfoHint content={INFO_HINTS.data.cachedData} />
         </div>
         {!status || status.items.length === 0 ? (
-          <div className="p-8 text-center text-gray-400">缓存为空</div>
+          <div className="p-8 text-center text-muted-foreground/70">缓存为空</div>
         ) : (
           <table className="w-full text-sm">
-            <thead className="bg-gray-50 text-gray-600">
+            <thead className="bg-background text-muted-foreground">
               <tr>
                 <th className="px-4 py-2 text-left">标的</th>
                 <th className="px-4 py-2 text-right">Bar 数</th>
@@ -417,7 +417,7 @@ export default function Data() {
                 <tr key={`${s.symbol}-${s.period}-${s.adjust}`} className="border-t">
                   <td className="px-4 py-2 font-mono">{s.symbol}</td>
                   <td className="px-4 py-2 text-right">{s.bar_count}</td>
-                  <td className="px-4 py-2 text-gray-500">
+                  <td className="px-4 py-2 text-muted-foreground">
                     {s.first_date ?? "—"} ~ {s.last_date ?? "—"}
                   </td>
                   <td className="px-4 py-2 text-right font-mono">
@@ -429,7 +429,7 @@ export default function Data() {
           </table>
         )}
         {status && status.total > status.items.length && (
-          <p className="px-5 py-3 border-t text-xs text-gray-500">
+          <p className="px-5 py-3 border-t text-xs text-muted-foreground">
             当前显示前 {status.items.length} 条，共 {status.total} 条缓存记录
           </p>
         )}
@@ -440,8 +440,8 @@ export default function Data() {
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-white rounded-lg shadow p-4">
-      <div className="text-gray-500 text-sm">{label}</div>
+    <div className="bg-card rounded-lg shadow p-4">
+      <div className="text-muted-foreground text-sm">{label}</div>
       <div className="text-xl font-bold mt-1">{value}</div>
     </div>
   );

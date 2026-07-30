@@ -28,8 +28,8 @@ export default function Dashboard() {
       {activeOrders.length > 0 && (
         <div className="mt-8">
           <h2 className="text-lg font-semibold mb-3">活动订单</h2>
-          <table className="w-full bg-white rounded-lg shadow text-sm">
-            <thead className="bg-gray-100 text-gray-600">
+          <table className="w-full bg-card rounded-lg shadow text-sm">
+            <thead className="bg-secondary text-muted-foreground">
               <tr>
                 <th className="px-4 py-2 text-left">标的</th>
                 <th className="px-4 py-2 text-left">方向</th>
@@ -49,7 +49,7 @@ export default function Dashboard() {
                   <td className="px-4 py-2 text-right">{o.quantity}</td>
                   <td className="px-4 py-2 text-right">{o.price ?? "—"}</td>
                   <td className="px-4 py-2">{o.status}</td>
-                  <td className="px-4 py-2 text-gray-500">{new Date(o.created_at).toLocaleTimeString()}</td>
+                  <td className="px-4 py-2 text-muted-foreground">{new Date(o.created_at).toLocaleTimeString()}</td>
                 </tr>
               ))}
             </tbody>
@@ -62,9 +62,9 @@ export default function Dashboard() {
 
 function StatCard({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div className="bg-white rounded-lg shadow p-4">
-      <div className="text-gray-500 text-sm">{label}</div>
-      <div className={`text-xl font-bold mt-1 ${color === "green" ? "text-green-600" : color === "red" ? "text-red-600" : ""}`}>
+    <div className="bg-card rounded-lg shadow p-4">
+      <div className="text-muted-foreground text-sm">{label}</div>
+      <div className={`text-xl font-bold mt-1 ${color === "green" ? "text-success" : color === "red" ? "text-destructive" : ""}`}>
         {value}
       </div>
     </div>

@@ -297,7 +297,7 @@ export default function Backtest() {
         <h1 className="text-2xl font-bold mb-6">回测</h1>
 
         {/* Config form */}
-        <div className="bg-white rounded-lg shadow p-5 mb-6">
+        <div className="bg-card rounded-lg shadow p-5 mb-6">
           <h2 className="text-lg font-semibold mb-4">回测配置</h2>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             <div>
@@ -367,13 +367,13 @@ export default function Backtest() {
             </div>
           )}
           {requestedPreset && !requestedPresetDefinition && (
-            <p className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            <p className="mt-4 rounded-lg bg-warning/10 px-3 py-2 text-sm text-amber-800">
               预设“{requestedPreset.name}”依赖实时时钟事件，当前回测引擎无法运行。
             </p>
           )}
 
           {strategyDefinition && (
-            <div className="mt-4 border-t border-gray-200 pt-4">
+            <div className="mt-4 border-t border-border pt-4">
               <div className="mb-3 flex items-center gap-1">
                 <h3 className="text-sm font-semibold text-gray-700">策略参数</h3>
                 <InfoHint content={INFO_HINTS.backtest.strategyParams} />
@@ -402,7 +402,7 @@ export default function Backtest() {
 
           {/* Fee params */}
           <details className="mt-3">
-            <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
+            <summary className="text-sm text-muted-foreground cursor-pointer hover:text-gray-700">
               费用参数(佣金 / 印花税 / 滑点)
             </summary>
             <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -410,7 +410,7 @@ export default function Backtest() {
                 <HintLabel
                   htmlFor="backtest-commission-rate"
                   hint={INFO_HINTS.backtest.commissionRate}
-                  labelClassName="text-xs text-gray-500"
+                  labelClassName="text-xs text-muted-foreground"
                 >
                   佣金率(万N)
                 </HintLabel>
@@ -428,7 +428,7 @@ export default function Backtest() {
                 <HintLabel
                   htmlFor="backtest-minimum-commission"
                   hint={INFO_HINTS.backtest.minimumCommission}
-                  labelClassName="text-xs text-gray-500"
+                  labelClassName="text-xs text-muted-foreground"
                 >
                   最低佣金(¥)
                 </HintLabel>
@@ -445,7 +445,7 @@ export default function Backtest() {
                 <HintLabel
                   htmlFor="backtest-stamp-tax"
                   hint={INFO_HINTS.backtest.stampTax}
-                  labelClassName="text-xs text-gray-500"
+                  labelClassName="text-xs text-muted-foreground"
                 >
                   印花税(万N,卖出)
                 </HintLabel>
@@ -463,7 +463,7 @@ export default function Backtest() {
                 <HintLabel
                   htmlFor="backtest-slippage"
                   hint={INFO_HINTS.backtest.slippage}
-                  labelClassName="text-xs text-gray-500"
+                  labelClassName="text-xs text-muted-foreground"
                 >
                   滑点(bps)
                 </HintLabel>
@@ -477,7 +477,7 @@ export default function Backtest() {
                 />
               </div>
             </div>
-            <p className="text-xs text-gray-400 mt-1">
+            <p className="text-xs text-muted-foreground/70 mt-1">
               ETF 免印花税(填 0);股票卖出收万5。佣金 = max(成交额 × 佣金率, 最低佣金)。
             </p>
           </details>
@@ -505,12 +505,12 @@ export default function Backtest() {
           <button
             onClick={startBacktest}
             disabled={runBacktest.isPending || selectedSymbols.length === 0}
-            className="mt-4 bg-blue-600 text-white rounded px-6 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+            className="mt-4 bg-primary text-white rounded px-6 py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
           >
             {runBacktest.isPending ? "回测中..." : "运行回测"}
           </button>
           {runBacktest.error && (
-            <p className="mt-2 text-sm text-red-600">
+            <p className="mt-2 text-sm text-destructive">
               {(runBacktest.error as Error).message}
             </p>
           )}
@@ -531,15 +531,15 @@ export default function Backtest() {
             </div>
 
             {result.selection_snapshots.length > 0 && (
-              <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="mb-6 rounded-lg border border-border bg-card p-5 shadow-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <h2 className="text-lg font-semibold text-slate-900">候选池审计</h2>
+                    <h2 className="text-lg font-semibold text-foreground">候选池审计</h2>
                     <p className="mt-1 text-xs text-slate-500">
                       因子版本 {result.factor_version} · {result.selection_snapshots.length} 个日快照
                     </p>
                   </div>
-                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">
+                  <span className="rounded-full bg-secondary px-2.5 py-1 text-xs text-slate-600">
                     数据版本已归档
                   </span>
                 </div>
@@ -561,7 +561,7 @@ export default function Backtest() {
                       >
                         {snapshot.status === "published" ? "已发布" : "跳过调仓"}
                       </span>
-                      <span className="text-slate-700">
+                      <span className="text-foreground">
                         {snapshot.status === "published"
                           ? `${snapshot.selected_symbols.length} 个标的`
                           : snapshot.skip_reason}
@@ -573,7 +573,7 @@ export default function Backtest() {
             )}
 
             {result.equity_curve.length > 0 && (
-              <div className="bg-white rounded-lg shadow p-5 mb-6">
+              <div className="bg-card rounded-lg shadow p-5 mb-6">
                 <h2 className="text-lg font-semibold mb-4">权益曲线</h2>
                 <ResponsiveContainer width="100%" height={350}>
                   <LineChart data={result.equity_curve}>
@@ -596,12 +596,12 @@ export default function Backtest() {
             )}
 
             {result.fills.length > 0 && (
-              <div className="bg-white rounded-lg shadow">
+              <div className="bg-card rounded-lg shadow">
                 <div className="px-5 py-3 border-b">
                   <h2 className="text-lg font-semibold">交易明细 ({result.fills.length})</h2>
                 </div>
                 <table className="w-full text-sm">
-                  <thead className="bg-gray-50 text-gray-600">
+                  <thead className="bg-background text-muted-foreground">
                     <tr>
                       <th className="px-4 py-2 text-left">日期</th>
                       <th className="px-4 py-2 text-left">标的</th>
@@ -614,14 +614,14 @@ export default function Backtest() {
                   <tbody>
                     {result.fills.map((f, i) => (
                       <tr key={i} className="border-t">
-                        <td className="px-4 py-2 text-gray-500">{f.date}</td>
+                        <td className="px-4 py-2 text-muted-foreground">{f.date}</td>
                         <td className="px-4 py-2 font-mono">{f.symbol}</td>
                         <td className={`px-4 py-2 ${f.side === "buy" ? "text-red-500" : "text-green-500"}`}>
                           {f.side === "buy" ? "买入" : "卖出"}
                         </td>
                         <td className="px-4 py-2 text-right">{f.quantity}</td>
                         <td className="px-4 py-2 text-right font-mono">{Number(f.price).toFixed(2)}</td>
-                        <td className="px-4 py-2 text-right text-gray-500">{Number(f.commission).toFixed(2)}</td>
+                        <td className="px-4 py-2 text-right text-muted-foreground">{Number(f.commission).toFixed(2)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -637,7 +637,7 @@ export default function Backtest() {
         <h2 className="text-sm font-semibold text-gray-700 mb-3">回测历史</h2>
         <div className="space-y-2">
           {history && history.length === 0 && (
-            <p className="text-xs text-gray-400">暂无历史记录</p>
+            <p className="text-xs text-muted-foreground/70">暂无历史记录</p>
           )}
           {history?.map((h) => (
             <HistoryCard
@@ -728,12 +728,12 @@ function SymbolSelector({
   const selectedOnPage = selectedSymbols.filter((c) => currentPageCodes.has(c)).length;
 
   return (
-    <div className="mt-4 border rounded-lg p-4 bg-gray-50">
+    <div className="mt-4 border rounded-lg p-4 bg-background">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-1 text-sm font-medium text-gray-700">
           <span>
             标的选择{" "}
-            <span className="font-normal text-gray-400">({selectedSymbols.length} 个)</span>
+            <span className="font-normal text-muted-foreground/70">({selectedSymbols.length} 个)</span>
           </span>
           <InfoHint content={INFO_HINTS.backtest.symbols} />
         </div>
@@ -741,16 +741,16 @@ function SymbolSelector({
           <button
             onClick={() => selectAllCandidates.mutate()}
             disabled={selectAllCandidates.isPending || totalCount === 0}
-            className="text-xs text-blue-600 hover:underline disabled:opacity-50"
+            className="text-xs text-primary hover:underline disabled:opacity-50"
           >
             {selectAllCandidates.isPending ? "全选中..." : `全选结果(${totalCount})`}
           </button>
           {selectedSymbols.length > 0 && (
-            <button onClick={clearSelection} className="text-xs text-gray-500 hover:underline">
+            <button onClick={clearSelection} className="text-xs text-muted-foreground hover:underline">
               清空
             </button>
           )}
-          <button onClick={() => setShowWatchlist((v) => !v)} className="text-xs text-blue-600 hover:underline">
+          <button onClick={() => setShowWatchlist((v) => !v)} className="text-xs text-primary hover:underline">
             标的组
           </button>
         </div>
@@ -773,9 +773,9 @@ function SymbolSelector({
       </div>
 
       {/* Candidate list */}
-      <div className="max-h-48 overflow-y-auto border rounded bg-white">
+      <div className="max-h-48 overflow-y-auto border rounded bg-card">
         {candidates.length === 0 && (
-          <p className="text-xs text-gray-400 p-3 text-center">
+          <p className="text-xs text-muted-foreground/70 p-3 text-center">
             {searchQuery.length >= 2 ? "无匹配结果" : "输入搜索或选择筛选条件"}
           </p>
         )}
@@ -785,7 +785,7 @@ function SymbolSelector({
             <label key={c.code} className="flex items-center gap-2 px-3 py-1.5 hover:bg-blue-50 cursor-pointer text-sm">
               <input type="checkbox" checked={checked} onChange={() => toggleSymbol(c.code)} />
               <span className="font-mono text-xs">{c.code}</span>
-              <span className="text-gray-500 text-xs truncate">{c.name}</span>
+              <span className="text-muted-foreground text-xs truncate">{c.name}</span>
             </label>
           );
         })}
@@ -793,7 +793,7 @@ function SymbolSelector({
 
       {/* Pagination */}
       {totalCount > pageSize && (
-        <div className="flex items-center justify-between mt-2 text-xs text-gray-500">
+        <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
           <span>
             第 {rangeStart}-{rangeEnd} 条 / 共 {totalCount} 条
             {selectedOnPage > 0 && <span className="ml-2 text-blue-500">本页已选 {selectedOnPage}</span>}
@@ -802,7 +802,7 @@ function SymbolSelector({
             <button
               onClick={() => onPageChange(page - 1)}
               disabled={page === 0}
-              className="px-2 py-0.5 border rounded hover:bg-gray-100 disabled:opacity-30"
+              className="px-2 py-0.5 border rounded hover:bg-secondary disabled:opacity-30"
             >
               上一页
             </button>
@@ -810,7 +810,7 @@ function SymbolSelector({
             <button
               onClick={() => onPageChange(page + 1)}
               disabled={page + 1 >= totalPages}
-              className="px-2 py-0.5 border rounded hover:bg-gray-100 disabled:opacity-30"
+              className="px-2 py-0.5 border rounded hover:bg-secondary disabled:opacity-30"
             >
               下一页
             </button>
@@ -818,7 +818,7 @@ function SymbolSelector({
         </div>
       )}
       {totalCount > 0 && totalCount <= pageSize && (
-        <div className="mt-2 text-xs text-gray-400">共 {totalCount} 条{selectedOnPage > 0 && ` · 已选 ${selectedSymbols.length}`}</div>
+        <div className="mt-2 text-xs text-muted-foreground/70">共 {totalCount} 条{selectedOnPage > 0 && ` · 已选 ${selectedSymbols.length}`}</div>
       )}
 
       {/* Selected symbols summary */}
@@ -829,12 +829,12 @@ function SymbolSelector({
               {selectedSymbols.map((code) => (
                 <span key={code} className="inline-flex items-center gap-1 bg-blue-100 text-blue-700 rounded px-2 py-0.5 text-xs font-mono">
                   {code}
-                  <button onClick={() => toggleSymbol(code)} className="text-blue-400 hover:text-blue-600">×</button>
+                  <button onClick={() => toggleSymbol(code)} className="text-blue-400 hover:text-primary">×</button>
                 </span>
               ))}
             </div>
           ) : (
-            <div className="text-xs text-gray-500">
+            <div className="text-xs text-muted-foreground">
               已选 {selectedSymbols.length} 个标的
               <button onClick={clearSelection} className="ml-2 text-red-500 hover:underline">清空</button>
             </div>
@@ -861,12 +861,12 @@ function SymbolSelector({
             </button>
           </div>
           {watchlists?.map((wl) => (
-            <div key={wl.id} className="flex items-center justify-between text-sm bg-white border rounded px-2 py-1">
+            <div key={wl.id} className="flex items-center justify-between text-sm bg-card border rounded px-2 py-1">
               <span className="truncate">
-                {wl.name} <span className="text-gray-400">({wl.item_count})</span>
+                {wl.name} <span className="text-muted-foreground/70">({wl.item_count})</span>
               </span>
               <div className="flex gap-2 shrink-0">
-                <button onClick={() => loadWl.mutate(wl.id)} className="text-xs text-blue-600 hover:underline">载入</button>
+                <button onClick={() => loadWl.mutate(wl.id)} className="text-xs text-primary hover:underline">载入</button>
               </div>
             </div>
           ))}
@@ -894,18 +894,18 @@ function HistoryCard({
   return (
     <div
       className={`border rounded-lg p-3 cursor-pointer transition ${
-        active ? "border-blue-500 bg-blue-50" : "bg-white hover:border-gray-400"
+        active ? "border-blue-500 bg-blue-50" : "bg-card hover:border-gray-400"
       }`}
       onClick={onClick}
     >
       <div className="flex items-start justify-between">
         <div className="min-w-0">
           <div className="text-xs font-mono text-gray-700 truncate">{item.strategy}</div>
-          <div className="text-xs text-gray-400 mt-0.5">
+          <div className="text-xs text-muted-foreground/70 mt-0.5">
             {item.symbols.length} 标的 · {item.start.slice(0, 10)} ~ {item.end.slice(0, 10)}
           </div>
           {ret !== undefined && (
-            <div className={`text-sm font-bold mt-1 ${ret >= 0 ? "text-green-600" : "text-red-600"}`}>
+            <div className={`text-sm font-bold mt-1 ${ret >= 0 ? "text-success" : "text-destructive"}`}>
               {(ret * 100).toFixed(2)}%
             </div>
           )}
@@ -940,10 +940,10 @@ function MetricCard({
   positive?: boolean;
 }) {
   const color =
-    positive === undefined ? "" : positive ? "text-green-600" : "text-red-600";
+    positive === undefined ? "" : positive ? "text-success" : "text-destructive";
   return (
-    <div className="bg-white rounded-lg shadow p-4">
-      <div className="text-gray-500 text-sm">{label}</div>
+    <div className="bg-card rounded-lg shadow p-4">
+      <div className="text-muted-foreground text-sm">{label}</div>
       <div className={`text-xl font-bold mt-1 ${color}`}>{value}</div>
     </div>
   );

@@ -128,7 +128,7 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
       <button
         ref={triggerRef}
         type="button"
-        className="inline-flex size-6 items-center justify-center rounded-full text-slate-400 transition-colors duration-150 hover:bg-blue-50 hover:text-blue-700 focus:outline-none focus-visible:bg-blue-50 focus-visible:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-300 motion-reduce:transition-none"
+        className="inline-flex size-6 items-center justify-center rounded-full text-muted-foreground/70 transition-colors duration-150 hover:bg-primary/10 hover:text-primary focus:outline-none focus-visible:bg-primary/10 focus-visible:text-primary focus-visible:ring-2 focus-visible:ring-primary/30 motion-reduce:transition-none"
         aria-label={`查看“${content.title}”说明`}
         aria-describedby={open ? tooltipId : undefined}
         aria-expanded={open}
@@ -165,7 +165,7 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
             ref={tooltipRef}
             id={tooltipId}
             role="tooltip"
-            className="fixed z-50 max-h-[calc(100vh-1.5rem)] w-[min(20rem,calc(100vw-1.5rem))] overflow-y-auto rounded-lg bg-slate-900 px-3.5 py-3 text-left text-slate-100 shadow-lg"
+            className="fixed z-50 max-h-[calc(100vh-1.5rem)] w-[min(20rem,calc(100vw-1.5rem))] overflow-y-auto rounded-lg bg-popover px-3.5 py-3 text-left text-popover-foreground shadow-lg"
             style={{ visibility: "hidden" }}
             onPointerEnter={() => {
               clearCloseTimer();
@@ -177,11 +177,11 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
             }}
           >
             <div className="text-sm font-semibold">{content.title}</div>
-            <p className="mt-1 text-xs leading-5 text-slate-200">
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
               {content.description}
             </p>
             {content.detail && (
-              <p className="mt-1.5 border-t border-slate-700 pt-1.5 text-xs leading-5 text-slate-300">
+              <p className="mt-1.5 border-t border-border pt-1.5 text-xs leading-5 text-muted-foreground">
                 {content.detail}
               </p>
             )}
@@ -197,7 +197,7 @@ export function HintLabel({
   children,
   hint,
   className = "mb-1",
-  labelClassName = "text-sm text-gray-600",
+  labelClassName = "text-sm text-muted-foreground",
 }: {
   htmlFor?: string;
   children: ReactNode;

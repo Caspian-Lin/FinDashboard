@@ -40,29 +40,29 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
     set(key, raw.trim() === "" ? null : raw);
 
   return (
-    <section className="mt-4 border-t border-slate-200 pt-4" aria-labelledby="factor-selection-title">
+    <section className="mt-4 border-t border-border pt-4" aria-labelledby="factor-selection-title">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 id="factor-selection-title" className="text-sm font-semibold text-slate-800">
+          <h3 id="factor-selection-title" className="text-sm font-semibold text-foreground">
             因子候选池
           </h3>
-          <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
+          <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">
             每个交易日收盘后冻结横截面数据，次一交易日生效。候选池只约束策略可见标的，不直接下单。
           </p>
         </div>
-        <label className="inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700">
+        <label className="inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-foreground">
           <input
             type="checkbox"
             checked={value.enabled}
             onChange={(event) => set("enabled", event.target.checked)}
-            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+            className="h-4 w-4 rounded border-border text-primary focus:ring-ring"
           />
           启用按日选股
         </label>
       </div>
 
       {!value.enabled ? (
-        <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
+        <p className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
           当前沿用静态标的列表，旧回测行为保持不变。
         </p>
       ) : (
@@ -122,7 +122,7 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
             </Field>
           </div>
 
-          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-700">
+          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm text-foreground">
             <Check
               label="从小到大排序"
               checked={value.ranking_ascending}
@@ -140,11 +140,11 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
             />
           </div>
 
-          <details className="mt-4 rounded-lg border border-slate-200">
-            <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-slate-700">
+          <details className="mt-4 rounded-lg border border-border">
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-foreground">
               高级过滤与行业约束
             </summary>
-            <div className="grid grid-cols-1 gap-4 border-t border-slate-200 p-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 border-t border-border p-3 sm:grid-cols-2 xl:grid-cols-4">
               <NumberField
                 label="最少上市天数"
                 value={value.min_listing_days}
@@ -176,7 +176,7 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
             </div>
           </details>
 
-          <p className="mt-3 text-xs text-slate-500">
+          <p className="mt-3 text-xs text-muted-foreground">
             数据不完整、过期或存在未来时点记录时，本日调仓会整体跳过，并保留上一候选池。
           </p>
         </>
@@ -186,11 +186,11 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
 }
 
 const controlClass =
-  "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500";
+  "mt-1 w-full rounded-md border border-border px-3 py-2 text-sm text-foreground focus:border-ring focus:outline-none focus:ring-1 focus:ring-ring";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="text-xs font-medium text-slate-600">
+    <label className="text-xs font-medium text-muted-foreground">
       {label}
       {children}
     </label>
@@ -212,7 +212,7 @@ function Check({
         type="checkbox"
         checked={checked}
         onChange={(event) => onChange(event.target.checked)}
-        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+        className="h-4 w-4 rounded border-border text-primary focus:ring-ring"
       />
       {label}
     </label>

@@ -23,7 +23,7 @@ export default function Settings() {
       queryClient.invalidateQueries({ queryKey: ["scheduler-config"] }),
   });
 
-  if (!form) return <div className="text-gray-400">加载中...</div>;
+  if (!form) return <div className="text-muted-foreground/70">加载中...</div>;
 
   const marketOptions = [
     { value: "a_share", label: "A股" },
@@ -42,10 +42,10 @@ export default function Settings() {
       <h1 className="text-2xl font-bold mb-6">设置</h1>
 
       {/* Data Source */}
-      <div className="bg-white rounded-lg shadow p-5 mb-6">
+      <div className="bg-card rounded-lg shadow p-5 mb-6">
         <h2 className="text-lg font-semibold mb-3">数据源</h2>
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-1 text-sm text-gray-600">
+          <div className="flex items-center gap-1 text-sm text-muted-foreground">
             <span>当前数据源</span>
             <InfoHint content={INFO_HINTS.settings.dataProvider} />
           </div>
@@ -58,14 +58,14 @@ export default function Settings() {
           >
             {form.data_provider}
           </span>
-          <span className="text-sm text-gray-400">
+          <span className="text-sm text-muted-foreground/70">
             切换: FINBOARD_DATA_PROVIDER=akshare / yfinance 环境变量
           </span>
         </div>
       </div>
 
       {/* Scheduled Tasks */}
-      <div className="bg-white rounded-lg shadow p-5 mb-6">
+      <div className="bg-card rounded-lg shadow p-5 mb-6">
         <h2 className="text-lg font-semibold mb-4">定时任务</h2>
 
         {/* Universe Sync Task */}
@@ -73,7 +73,7 @@ export default function Settings() {
           <div className="flex items-center justify-between mb-3">
             <div>
               <h3 className="font-medium">标的池同步</h3>
-              <p className="text-sm text-gray-500 mt-0.5">
+              <p className="text-sm text-muted-foreground mt-0.5">
                 每日自动从 akshare 发现新上市/退市标的,更新 instruments 表
               </p>
             </div>
@@ -86,7 +86,7 @@ export default function Settings() {
                   setForm({ ...form, sync_enabled: e.target.checked })
                 }
               />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
+              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-card after:border-border after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
             </label>
           </div>
           <div className="flex flex-wrap items-center gap-3">
@@ -104,7 +104,7 @@ export default function Settings() {
               onChange={(e) => setForm({ ...form, sync_time: e.target.value })}
               className="border rounded px-3 py-1.5 text-sm"
             />
-            <span className="text-sm text-gray-400">(Asia/Shanghai, 仅交易日)</span>
+            <span className="text-sm text-muted-foreground/70">(Asia/Shanghai, 仅交易日)</span>
           </div>
         </div>
 
@@ -113,7 +113,7 @@ export default function Settings() {
           <div className="flex items-center justify-between mb-3">
             <div>
               <h3 className="font-medium">增量数据拉取</h3>
-              <p className="text-sm text-gray-500 mt-0.5">
+              <p className="text-sm text-muted-foreground mt-0.5">
                 每日盘后增量拉取所有活跃标的的最新行情数据到 parquet 缓存
               </p>
             </div>
@@ -126,7 +126,7 @@ export default function Settings() {
                   setForm({ ...form, download_enabled: e.target.checked })
                 }
               />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
+              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-card after:border-border after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
             </label>
           </div>
 
@@ -169,13 +169,13 @@ export default function Settings() {
               />
             </div>
             <div>
-              <label className="block text-sm text-gray-600 mb-1">&nbsp;</label>
-              <span className="text-sm text-gray-400">天 (增量拉取)</span>
+              <label className="block text-sm text-muted-foreground mb-1">&nbsp;</label>
+              <span className="text-sm text-muted-foreground/70">天 (增量拉取)</span>
             </div>
           </div>
 
           <div className="mt-3">
-            <div className="mb-1 flex items-center gap-1 text-sm text-gray-600">
+            <div className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
               <span>拉取市场</span>
               <InfoHint content={INFO_HINTS.settings.downloadMarkets} />
             </div>
@@ -202,7 +202,7 @@ export default function Settings() {
           </div>
 
           <div className="mt-3">
-            <div className="mb-1 flex items-center gap-1 text-sm text-gray-600">
+            <div className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
               <span>拉取类型</span>
               <InfoHint content={INFO_HINTS.settings.downloadTypes} />
             </div>
@@ -235,15 +235,15 @@ export default function Settings() {
         <button
           onClick={() => save.mutate(form)}
           disabled={save.isPending}
-          className="bg-blue-600 text-white rounded px-6 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+          className="bg-primary text-white rounded px-6 py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
         >
           {save.isPending ? "保存中..." : "保存配置"}
         </button>
         {save.isSuccess && (
-          <span className="text-sm text-green-600">已保存</span>
+          <span className="text-sm text-success">已保存</span>
         )}
         {save.isError && (
-          <span className="text-sm text-red-600">
+          <span className="text-sm text-destructive">
             {(save.error as Error).message}
           </span>
         )}
