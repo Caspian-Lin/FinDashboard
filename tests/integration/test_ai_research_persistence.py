@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_backtest.factor_research import (
     DraftArtifact,
@@ -42,7 +43,7 @@ from finboard_persistence import (
 from finboard_persistence.validation_repo import ResearchExperimentRepository
 
 
-async def _persist_validation_experiment(session, target_status: str) -> str:  # type: ignore[no-untyped-def]
+async def _persist_validation_experiment(session: AsyncSession, target_status: str) -> str:
     """创建并持久化一个终态 #57 机器验证实验,返回 experiment_id。"""
     exp = new_experiment(
         hypothesis="#57 机器验证(测试)",
@@ -103,7 +104,7 @@ def _hypothesis(name: str = "momentum", **overrides: object) -> FactorHypothesis
 
 @pytest.mark.asyncio
 class TestHypothesisPersistence:
-    async def test_submit_persists_and_reloads(self, db_session) -> None:  # type: ignore[no-untyped-def]
+    async def test_submit_persists_and_reloads(self, db_session: AsyncSession) -> None:
         service = HypothesisWorkflowService(db_session)
         h = await service.submit(_hypothesis(), actor="llm")
         await db_session.commit()
@@ -115,7 +116,7 @@ class TestHypothesisPersistence:
         assert restored.status == HypothesisStatus.PROPOSED
         assert restored.name == "momentum"
 
-    async def test_full_approve_experiment_complete_flow(self, db_session) -> None:  # type: ignore[no-untyped-def]
+    async def test_full_approve_experiment_complete_flow(self, db_session: AsyncSession) -> None:
         # 先创建一个真实持久化的 #57 VALIDATED_OOS 实验(满足外键约束)
         vexp_id = await _persist_validation_experiment(db_session, "validated_oos")
         await db_session.commit()
@@ -159,7 +160,7 @@ class TestHypothesisPersistence:
         assert len(experiments) == 1
         assert experiments[0].validation_experiment_id == vexp_id
 
-    async def test_rejected_outcome_persists(self, db_session) -> None:  # type: ignore[no-untyped-def]
+    async def test_rejected_outcome_persists(self, db_session: AsyncSession) -> None:
         vexp_id = await _persist_validation_experiment(db_session, "rejected")
         await db_session.commit()
 
@@ -194,7 +195,7 @@ class TestHypothesisPersistence:
         assert restored.status == HypothesisStatus.REJECTED
         assert "Sharpe" in (restored.rejection_reason or "")
 
-    async def test_failed_validation_hypothesis_retained(self, db_session) -> None:  # type: ignore[no-untyped-def]
+    async def test_failed_validation_hypothesis_retained(self, db_session: AsyncSession) -> None:
         """白名单验证失败的假设同样保留(不丢失)。"""
         service = HypothesisWorkflowService(db_session)
         bad = _hypothesis(input_fields=("unknown_field",))
@@ -207,7 +208,7 @@ class TestHypothesisPersistence:
         assert restored is not None
         assert restored.status == HypothesisStatus.REJECTED
 
-    async def test_audit_events_persist(self, db_session) -> None:  # type: ignore[no-untyped-def]
+    async def test_audit_events_persist(self, db_session: AsyncSession) -> None:
         service = HypothesisWorkflowService(db_session)
         h = await service.submit(_hypothesis(), actor="llm")
         await service.approve(h.hypothesis_id, approver="alice")
@@ -219,7 +220,7 @@ class TestHypothesisPersistence:
         assert "validation_passed" in event_types
         assert "approved" in event_types
 
-    async def test_supersede_persists(self, db_session) -> None:  # type: ignore[no-untyped-def]
+    async def test_supersede_persists(self, db_session: AsyncSession) -> None:
         service = HypothesisWorkflowService(db_session)
         old = await service.submit(_hypothesis(name="v1"), actor="llm")
         await db_session.commit()
@@ -251,7 +252,7 @@ class TestDraftPersistence:
             uncertainty=UncertaintyLevel.LOW,
         )
 
-    async def test_save_get_list(self, db_session) -> None:  # type: ignore[no-untyped-def]
+    async def test_save_get_list(self, db_session: AsyncSession) -> None:
         repo = AIDraftRepository(db_session)
         await repo.save(self._draft())
         await db_session.commit()
@@ -263,7 +264,7 @@ class TestDraftPersistence:
         items = await repo.list_by_kind_status(DraftKind.ANSWER, DraftStatus.PROPOSED)
         assert len(items) >= 1
 
-    async def test_approve_flow_persists(self, db_session) -> None:  # type: ignore[no-untyped-def]
+    async def test_approve_flow_persists(self, db_session: AsyncSession) -> None:
         repo = AIDraftRepository(db_session)
         draft = self._draft()
         await repo.save(draft)
