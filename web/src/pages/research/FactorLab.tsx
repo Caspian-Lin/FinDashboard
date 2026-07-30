@@ -88,8 +88,8 @@ function CatalogTab() {
                   {factor.description}
                 </p>
                 <div className="flex flex-wrap gap-1">
-                  {factor.dependencies.length > 0 ? (
-                    factor.dependencies.map((dep) => (
+                  {(factor.dependencies ?? []).length > 0 ? (
+                    (factor.dependencies ?? []).map((dep) => (
                       <Badge key={dep} variant="secondary" className="font-mono">
                         {dep}
                       </Badge>
