@@ -27,6 +27,7 @@ const Control = React.lazy(() => import("@/pages/Control"));
 const Backtest = React.lazy(() => import("@/pages/Backtest"));
 const Strategies = React.lazy(() => import("@/pages/Strategies"));
 const Settings = React.lazy(() => import("@/pages/Settings"));
+const Data = React.lazy(() => import("@/pages/Data"));
 const NotFound = React.lazy(() => import("@/pages/NotFound"));
 
 function PageLoader() {
@@ -69,6 +70,7 @@ export default function App() {
             <Route path="/control" element={<Control />} />
 
             {/* Tools */}
+            <Route path="/data" element={<Data />} />
             <Route path="/backtest" element={<Backtest />} />
             <Route path="/strategies" element={<Strategies />} />
             <Route path="/settings" element={<Settings />} />
