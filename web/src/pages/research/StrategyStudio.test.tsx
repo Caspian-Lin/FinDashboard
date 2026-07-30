@@ -13,10 +13,14 @@ vi.mock("@/lib/research", () => ({
         strategies: [
           {
             kind: "ma_cross",
-            display_name: "均线交叉",
+            name: "均线交叉",
             description: "test",
-            factor_sources: [],
-            lifecycle_stages: [],
+            issue: 29,
+            asset_classes: ["equity"],
+            supports_short: false,
+            supports_no_code_template: true,
+            produces_target_weights: true,
+            can_execute_on_publish: false,
           },
         ],
         feature_sources: [],

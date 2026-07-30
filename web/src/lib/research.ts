@@ -105,9 +105,16 @@ export const researchRunApi = {
 export interface FactorCatalogEntry {
   name: string;
   role: string;
-  description: string;
+  description?: string;
   version: string;
-  dependencies: string[];
+  dependencies?: string[];
+  preference?: string;
+  frequency?: string;
+  unit?: string;
+  source_fields?: string[];
+  economic_hypothesis?: string;
+  expected_failure?: string;
+  signal_eligible?: boolean;
 }
 
 export interface FeatureSnapshot {
@@ -267,10 +274,14 @@ export const experimentApi = {
 export interface StrategySpecRegistry {
   strategies: {
     kind: string;
-    display_name: string;
+    name: string;
     description: string;
-    factor_sources: string[];
-    lifecycle_stages: string[];
+    issue: number;
+    asset_classes: string[];
+    supports_short: boolean;
+    supports_no_code_template: boolean;
+    produces_target_weights: boolean;
+    can_execute_on_publish: boolean;
   }[];
   feature_sources: string[];
   operators: string[];

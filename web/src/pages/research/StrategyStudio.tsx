@@ -209,7 +209,7 @@ export default function StrategyStudio() {
                   <div className="space-y-1">
                     {registry?.strategies.map((s) => {
                       const kind = s.kind as string;
-                      const name = (s.display_name ?? kind) as string;
+                      const name = (s.name ?? kind) as string;
                       const desc = (s.description ?? "") as string;
                       return (
                         <button
