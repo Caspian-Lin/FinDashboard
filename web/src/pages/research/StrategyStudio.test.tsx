@@ -1,6 +1,8 @@
 import type { ReactElement } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { describe, expect, it, vi } from "vitest";
 import StrategyStudio from "./StrategyStudio";
 
@@ -45,6 +47,14 @@ vi.mock("@/lib/research", () => ({
     version: vi.fn(),
     diff: vi.fn(),
   },
+  datasetApi: {
+    releases: vi.fn(() => Promise.resolve([])),
+    manifests: vi.fn(() => Promise.resolve([])),
+    instruments: vi.fn(() => Promise.resolve([])),
+    releaseDetail: vi.fn(),
+    instrumentDetail: vi.fn(),
+    lifecycle: vi.fn(),
+  },
 }));
 
 vi.mock("@tanstack/react-query", async () => {
@@ -57,17 +67,19 @@ function renderWithProviders(ui: ReactElement) {
     defaultOptions: { queries: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>
+        <TooltipProvider>{ui}</TooltipProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
 describe("StrategyStudio 安全边界", () => {
-  it("渲染后显示安全边界警告（Python 禁用 / 不支持 Python）", async () => {
+  it("渲染后显示安全边界提示（不支持 Python）", async () => {
     renderWithProviders(<StrategyStudio />);
     await waitFor(() => {
-      expect(
-        screen.getByText(/Python 禁用|不支持 Python/),
-      ).toBeInTheDocument();
+      expect(screen.getByText(/不支持 Python/)).toBeInTheDocument();
     });
   });
 

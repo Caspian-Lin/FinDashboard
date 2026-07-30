@@ -18,7 +18,6 @@ import {
   TrendingUp,
   Bookmark,
   Settings,
-  HardDriveDownload,
 } from "lucide-react";
 
 export interface NavItem {
@@ -64,7 +63,6 @@ export const navGroups: NavGroup[] = [
   {
     label: "工具",
     items: [
-      { to: "/data", label: "行情数据", icon: HardDriveDownload },
       { to: "/backtest", label: "回测", icon: TrendingUp },
       { to: "/strategies", label: "策略预设", icon: Bookmark },
       { to: "/settings", label: "设置", icon: Settings },
