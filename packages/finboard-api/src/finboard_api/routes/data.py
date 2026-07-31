@@ -7,11 +7,13 @@ from datetime import date as parse_date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
 from finboard_api.schemas import (
+    BarAnomalyOut,
     BatchFetchResultOut,
     BulkDownloadRequest,
     BulkDownloadStatusOut,
@@ -22,6 +24,7 @@ from finboard_api.schemas import (
     FetchResultOut,
     InstrumentListOut,
     InstrumentOut,
+    QualityReportOut,
     SchedulerConfigOut,
     SchedulerConfigUpdate,
     SymbolEntrySchema,
@@ -29,6 +32,8 @@ from finboard_api.schemas import (
     SymbolPoolUpdate,
     SyncResultOut,
 )
+
+logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from finboard_data import AkShareProvider, YFinanceProvider
@@ -261,6 +266,67 @@ async def fetch_data(req: DataFetchRequest) -> FetchResultOut:
         first_date=str(bars[0].timestamp.date()) if bars else None,
         last_date=str(bars[-1].timestamp.date()) if bars else None,
     )
+
+
+@router.get("/quality", response_model=list[QualityReportOut])
+async def check_cache_quality(
+    symbols: str | None = None,
+    adjust: str = "qfq",
+) -> list[QualityReportOut]:
+    """检查已缓存行情数据的质量,无需重新拉取。
+
+    :param symbols: 逗号分隔的标的代码;不传则检查所有缓存文件
+    :param adjust:   复权方式
+    """
+    from finboard_data.cache import ParquetCache, make_symbol
+    from finboard_data.quality import BarQualityChecker
+    from finboard_shared.types import BarPeriod
+
+    cache = ParquetCache(_CACHE_DIR)
+    checker = BarQualityChecker()
+
+    if symbols:
+        codes = [c.strip() for c in symbols.split(",") if c.strip()]
+    else:
+        import os
+
+        cache_dir = _CACHE_DIR
+        all_files = os.listdir(cache_dir)
+        codes = sorted(
+            f.rsplit("_", 2)[0]
+            for f in all_files
+            if f.endswith(f"_{BarPeriod.D1.value}_{adjust}.parquet")
+        )
+
+    results: list[QualityReportOut] = []
+    for code in codes:
+        try:
+            sym = make_symbol(code)
+            bars = await cache.read(sym, BarPeriod.D1, adjust)
+            qr = checker.check(bars, symbol=code)
+            results.append(
+                QualityReportOut(
+                    symbol=code,
+                    total_bars=qr.total_bars,
+                    anomaly_count=qr.anomaly_count,
+                    duplicate_count=qr.duplicate_count,
+                    sources=list(qr.sources),
+                    anomalies=[
+                        BarAnomalyOut(
+                            date=str(a.date),
+                            source=a.source,
+                            reasons=list(a.reasons),
+                        )
+                        for a in qr.anomalies[:20]
+                    ],
+                    passed=qr.passed,
+                    primary_source=qr.sources[0] if qr.sources else "",
+                )
+            )
+        except Exception:
+            logger.exception("quality_check_failed", symbol=code)
+
+    return results
 
 
 @router.post("/fetch-all", response_model=BatchFetchResultOut)
@@ -534,11 +600,15 @@ async def start_bulk_download(
 
     provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider(
+        primary: AkShareProvider | YFinanceProvider = AkShareProvider(
             max_concurrency=2, request_interval=0.5
         )
+        fallback: AkShareProvider | YFinanceProvider | None = YFinanceProvider(
+            max_concurrency=3, request_interval=0.3
+        )
     else:
-        provider = YFinanceProvider(max_concurrency=3, request_interval=0.3)
+        primary = YFinanceProvider(max_concurrency=3, request_interval=0.3)
+        fallback = AkShareProvider(max_concurrency=2, request_interval=0.5)
 
     sym_objs = [make_symbol(ins.code) for ins in instruments]
     start_date = parse_d.fromisoformat(req.start)
@@ -553,6 +623,10 @@ async def start_bulk_download(
         current_symbol=None,
         phase="starting",
         error=None,
+        quality_passed=0,
+        quality_failed=0,
+        fallback_used=0,
+        quality_reports=[],
     )
 
     async def _run_download() -> None:
@@ -566,7 +640,7 @@ async def start_bulk_download(
                 state["current_symbol"] = code
                 state["phase"] = phase
 
-            results = await provider.update_cache_batch(
+            results = await primary.update_cache_batch(
                 sym_objs,
                 BarPeriod.D1,
                 start_date,
@@ -576,6 +650,102 @@ async def start_bulk_download(
             )
             state["success"] = sum(results.values())
             state["failed"] = len(sym_objs) - state["success"]
+
+            # Phase 2: quality check + fallback repair
+            from finboard_data.cache import ParquetCache
+            from finboard_data.quality import BarQualityChecker
+            from finboard_shared.models import Bar
+
+            cache = ParquetCache(_CACHE_DIR)
+            checker = BarQualityChecker()
+            quality_reports: list[QualityReportOut] = []
+            q_passed = 0
+            q_failed = 0
+            fb_used = 0
+
+            for sym in sym_objs:
+                try:
+                    bars = await cache.read(sym, BarPeriod.D1, "qfq")
+                    qr = checker.check(bars, symbol=sym.code)
+
+                    corrected_dates: list[str] = []
+                    fallback_source: str | None = None
+
+                    if not qr.passed and qr.anomaly_count > 0 and fallback:
+                        state["phase"] = f"quality_repair:{sym.code}"
+                        try:
+                            alt_bars = await fallback.fetch_bars(
+                                sym, BarPeriod.D1,
+                                start_date, end_date,
+                                adjust="qfq",
+                            )
+                            alt_map = {b.timestamp.date(): b for b in alt_bars}
+                            merged = list(bars)
+                            for anomaly in qr.anomalies:
+                                alt = alt_map.get(anomaly.date)
+                                if alt and not checker._check_bar(alt):
+                                    idx = next(
+                                        (i for i, b in enumerate(merged)
+                                         if b.timestamp.date() == anomaly.date),
+                                        None,
+                                    )
+                                    if idx is not None:
+                                        merged[idx] = Bar(
+                                            symbol=alt.symbol,
+                                            period=alt.period,
+                                            timestamp=alt.timestamp,
+                                            open=alt.open,
+                                            high=alt.high,
+                                            low=alt.low,
+                                            close=alt.close,
+                                            volume=alt.volume,
+                                            amount=alt.amount,
+                                            source="fallback",
+                                        )
+                                        corrected_dates.append(str(anomaly.date))
+
+                            if corrected_dates:
+                                await cache.write(sym, BarPeriod.D1, "qfq", merged)
+                                qr = checker.check(merged, symbol=sym.code)
+                                fb_used += 1
+                                fallback_source = "yfinance" if provider_name == "akshare" else "akshare"
+                        except Exception:
+                            logger.warning("bulk_download.fallback_failed", symbol=sym.code)
+
+                    if qr.passed:
+                        q_passed += 1
+                    else:
+                        q_failed += 1
+
+                    quality_reports.append(
+                        QualityReportOut(
+                            symbol=sym.code,
+                            total_bars=qr.total_bars,
+                            anomaly_count=qr.anomaly_count,
+                            duplicate_count=qr.duplicate_count,
+                            sources=list(qr.sources),
+                            anomalies=[
+                                BarAnomalyOut(
+                                    date=str(a.date),
+                                    source=a.source,
+                                    reasons=list(a.reasons),
+                                )
+                                for a in qr.anomalies[:20]
+                            ],
+                            passed=qr.passed,
+                            primary_source=provider_name,
+                            fallback_used=bool(corrected_dates),
+                            fallback_source=fallback_source,
+                            corrected_dates=corrected_dates,
+                        )
+                    )
+                except Exception:
+                    logger.exception("bulk_download.quality_check_failed", symbol=sym.code)
+
+            state["quality_passed"] = q_passed
+            state["quality_failed"] = q_failed
+            state["fallback_used"] = fb_used
+            state["quality_reports"] = quality_reports
             state["status"] = "done"
             state["current_symbol"] = None
             state["phase"] = None

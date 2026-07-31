@@ -427,6 +427,7 @@ class YFinanceProvider:
                     close=Decimal(str(row["Close"])),
                     volume=Decimal(str(row.get("Volume", 0))),
                     amount=Decimal("0"),
+                    source="yfinance",
                 )
             )
         bars.sort(key=lambda b: b.timestamp)

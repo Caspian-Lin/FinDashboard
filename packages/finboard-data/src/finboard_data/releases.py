@@ -30,6 +30,7 @@ from typing import cast
 from zoneinfo import ZoneInfo
 
 from finboard_data.cache import ParquetCache
+from finboard_data.quality import BarQualityChecker
 from finboard_data.trading_calendar import trading_days as _trading_days
 from finboard_shared.instruments import ASSET_METADATA_VERSION, DatasetManifest
 from finboard_shared.models import Bar, Symbol
@@ -1220,34 +1221,25 @@ def _audit_bars(
     instrument: ReleaseInstrumentSpec,
     spec: DatasetReleaseSpec,
 ) -> _BarAudit:
-    dates = [bar.timestamp.date() for bar in bars]
-    unique_dates = set(dates)
-    anomaly_count = 0
+    checker = BarQualityChecker()
+    qr = checker.check(bars, symbol=instrument.code)
+
+    unique_dates = {bar.timestamp.date() for bar in bars}
     suspended_bar_dates: set[date] = set()
-    previous_timestamp: datetime | None = None
+    for bar in bars:
+        if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
+            suspended_bar_dates.add(bar.timestamp.date())
+
+    # bars before list_date / after delist_date
+    lifecycle_anomalies = 0
     for bar in bars:
         bar_date = bar.timestamp.date()
-        if previous_timestamp is not None and bar.timestamp <= previous_timestamp:
-            anomaly_count += 1
-        previous_timestamp = bar.timestamp
         if instrument.list_date is not None and bar_date < instrument.list_date:
-            anomaly_count += 1
+            lifecycle_anomalies += 1
         if instrument.delist_date is not None and bar_date > instrument.delist_date:
-            anomaly_count += 1
-        if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
-            suspended_bar_dates.add(bar_date)
-        elif (
-            bar.open.is_nan() or bar.open <= 0
-            or bar.high.is_nan() or bar.high <= 0
-            or bar.low.is_nan() or bar.low <= 0
-            or bar.close.is_nan() or bar.close <= 0
-            or bar.high < max(bar.open, bar.low, bar.close) * Decimal("0.99")
-            or bar.low > min(bar.open, bar.high, bar.close) * Decimal("1.01")
-            or bar.volume < 0
-            or bar.amount < 0
-        ):
-            anomaly_count += 1
-    anomaly_count += len(dates) - len(unique_dates)
+            lifecycle_anomalies += 1
+
+    anomaly_count = qr.anomaly_count + lifecycle_anomalies + qr.duplicate_count
 
     first_bar_date = min(unique_dates)
     last_bar_date = max(unique_dates)

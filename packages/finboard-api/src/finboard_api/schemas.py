@@ -209,6 +209,27 @@ class FetchResultOut(BaseSchema):
     last_date: str | None = None
 
 
+class BarAnomalyOut(BaseSchema):
+    date: str
+    source: str
+    reasons: list[str]
+
+
+class QualityReportOut(BaseSchema):
+    symbol: str
+    total_bars: int
+    anomaly_count: int
+    duplicate_count: int = 0
+    sources: list[str] = []
+    anomalies: list[BarAnomalyOut] = []
+    passed: bool = True
+    primary_source: str = ""
+    fallback_used: bool = False
+    fallback_source: str | None = None
+    corrected_dates: list[str] = []
+    error: str | None = None
+
+
 class BatchFetchResultOut(BaseSchema):
     total: int
     success: int
@@ -281,6 +302,10 @@ class BulkDownloadStatusOut(BaseSchema):
     current_symbol: str | None = None
     phase: str | None = None
     error: str | None = None
+    quality_passed: int = 0
+    quality_failed: int = 0
+    fallback_used: int = 0
+    quality_reports: list[QualityReportOut] = []
 
 
 class SchedulerConfigOut(BaseSchema):

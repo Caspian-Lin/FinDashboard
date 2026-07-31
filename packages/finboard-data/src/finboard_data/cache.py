@@ -137,6 +137,7 @@ class ParquetCache:
 
         # 外层已经限制并发;禁止 Arrow 再启动内部 I/O 线程池放大磁盘压力。
         table = pq.read_table(path, use_threads=False, pre_buffer=False)
+        col_names = set(table.column_names)
         bars: list[Bar] = []
         for row in table.to_pylist():
             ts = row["timestamp"]
@@ -153,7 +154,6 @@ class ParquetCache:
                 and symbol.code.endswith((".SH", ".SZ", ".BJ"))
                 and dt.hour == 16
             ):
-                # 兼容旧版 yfinance 缓存:上海零点被 Parquet 转为前一日 16:00 UTC。
                 dt += timedelta(hours=8)
             if period == BarPeriod.D1:
                 dt = datetime.combine(dt.date(), datetime.min.time(), tzinfo=UTC)
@@ -168,6 +168,7 @@ class ParquetCache:
                     close=Decimal(str(row["close"])),
                     volume=Decimal(str(row.get("volume", 0))),
                     amount=Decimal(str(row.get("amount", 0))),
+                    source=str(row.get("source", "")) if "source" in col_names else "",
                 )
             )
         bars.sort(key=lambda b: b.timestamp)
@@ -211,6 +212,7 @@ class ParquetCache:
             "close": [float(b.close) for b in bars],
             "volume": [float(b.volume) for b in bars],
             "amount": [float(b.amount) for b in bars],
+            "source": [b.source for b in bars],
         }
         table = pa.table(data)
         pq.write_table(table, path)

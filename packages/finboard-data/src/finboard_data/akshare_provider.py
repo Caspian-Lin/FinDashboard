@@ -458,6 +458,7 @@ class AkShareProvider:
                     amount=Decimal(
                         str(row[col_map["amount"]]) if col_map["amount"] in df.columns else 0
                     ),
+                    source="akshare",
                 )
             )
         bars.sort(key=lambda b: b.timestamp)
