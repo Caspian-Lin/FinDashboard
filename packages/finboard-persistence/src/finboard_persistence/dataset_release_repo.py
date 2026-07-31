@@ -36,10 +36,13 @@ from finboard_shared.types import (
     ConvertibleEventType,
     DatasetQualityStatus,
     EtfCategory,
+    EtfExecutionProfile,
     FuturesEventType,
     InstrumentType,
     ListingStatus,
     Market,
+    ReviewStatus,
+    etf_category_from_execution_profile,
 )
 
 _CONVERTIBLE_REQUIRED_EVENTS = (
@@ -456,11 +459,7 @@ def _etf_candidate(
         asset_class = catalog.asset_class
         list_date = row.list_date or catalog.list_date
     elif metadata is not None:
-        try:
-            category = EtfCategory(metadata.category)
-            asset_class = AssetClass(metadata.underlying_asset_class)
-        except ValueError as exc:
-            raise ReleaseCapabilityError(f"{row.code}: ETF 分类/资产类别无效") from exc
+        category, asset_class = _resolve_etf_classification(row.code, metadata)
         list_date = row.list_date or metadata.listing_date
     else:
         raise ReleaseCapabilityError(f"{row.code}: ETF 缺少分类元数据")
@@ -487,6 +486,37 @@ def _etf_candidate(
         ),
         name_history=name_history,
     )
+
+
+def _resolve_etf_classification(
+    code: str,
+    metadata: EtfMetadataModel,
+) -> tuple[EtfCategory, AssetClass]:
+    """从 ``execution_profile``(优先)或旧 ``category`` 派生发布用分类。
+
+    fail-closed:``review_status=needs_review`` 的记录禁止通过发布质量门,
+    防止低置信度分类静默影响成交规则(issue #97)。
+    """
+    review = metadata.review_status or ReviewStatus.NEEDS_REVIEW.value
+    if review == ReviewStatus.NEEDS_REVIEW.value:
+        raise ReleaseCapabilityError(
+            f"{code}: ETF 分类待复核(review_status=needs_review),"
+            "请先在元数据页确认或修正后发布"
+        )
+    try:
+        asset_class = AssetClass(metadata.underlying_asset_class)
+    except ValueError as exc:
+        raise ReleaseCapabilityError(f"{code}: ETF 资产类别无效") from exc
+    if metadata.execution_profile:
+        try:
+            profile = EtfExecutionProfile(metadata.execution_profile)
+        except ValueError as exc:
+            raise ReleaseCapabilityError(f"{code}: ETF execution_profile 无效") from exc
+        return etf_category_from_execution_profile(profile), asset_class
+    try:
+        return EtfCategory(metadata.category), asset_class
+    except ValueError as exc:
+        raise ReleaseCapabilityError(f"{code}: ETF 分类无效") from exc
 
 
 def _catalog_etf_candidate(

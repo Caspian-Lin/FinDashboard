@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -22,8 +21,13 @@ from finboard_api.schemas import (
     ConvertibleMetadataOut,
     DatasetManifestOut,
     DatasetReleaseCapabilityOut,
+    EtfAuditOut,
+    EtfBatchConfirmRequest,
     EtfClassificationUpdate,
     EtfMetadataOut,
+    EtfMetadataSummaryOut,
+    EtfSyncPreviewOut,
+    EtfSyncRequest,
     FuturesContractOut,
     InstrumentOut,
     LifecycleEventOut,
@@ -35,12 +39,15 @@ from finboard_persistence import (
     BondMetadataModel,
     ConvertibleMetadataModel,
     DatasetManifestModel,
+    EtfMetadataAuditModel,
     EtfMetadataModel,
+    EtfMetadataRepository,
     FuturesContractModel,
     InstrumentLifecycleEventModel,
     InstrumentModel,
     ResearchDatasetReleaseRepository,
 )
+from finboard_shared.types import EtfExecutionProfile
 
 router = APIRouter(prefix="/api/instruments", tags=["instruments"])
 
@@ -116,23 +123,17 @@ async def get_etf_metadata(
     return _etf_to_out(row)
 
 
-_ETF_CLASSIFICATION_DEFAULTS: dict[str, tuple[str, bool]] = {
-    "equity": ("equity", False),
-    "index": ("equity", False),
-    "cross_border": ("equity", True),
-    "bond": ("fixed_income", False),
-    "money_market": ("cash", True),
-    "commodity": ("commodity", True),
-}
-
-
 @router.put("/etf/{code}", response_model=EtfMetadataOut)
 async def update_etf_classification(
     code: str,
     request: EtfClassificationUpdate,
     session: AsyncSession = Depends(get_session),
 ) -> EtfMetadataOut:
-    """补齐或修正研究用 ETF 分类,不修改实盘交易配置。"""
+    """人工修正研究用 ETF 多维分类(issue #97)。
+
+    写审计流水(操作者/时间/理由/前后值),设 ``manual_override=True``,
+    后续自动同步不再覆盖。
+    """
 
     normalized = code.strip().upper()
     instrument = (
@@ -148,37 +149,161 @@ async def update_etf_classification(
             detail=f"{normalized} 不是 ETF,不能写入 ETF 分类",
         )
 
-    row = (
-        await session.execute(
-            select(EtfMetadataModel).where(EtfMetadataModel.code == normalized)
-        )
-    ).scalar_one_or_none()
-    asset_class, allows_t_plus_0 = _ETF_CLASSIFICATION_DEFAULTS[request.category]
-    if row is None:
-        row = EtfMetadataModel(
-            code=normalized,
-            fund_code=normalized.split(".", 1)[0],
-            category=request.category,
-            underlying_index=request.underlying_index,
-            underlying_asset_class=asset_class,
-            iopv_available=False,
-            allows_t_plus_0=allows_t_plus_0,
-            dividend_policy="cash",
-            source="manual",
-            dataset_version=f"manual-{date.today().isoformat()}",
-        )
-        session.add(row)
-    else:
-        row.category = request.category
-        row.underlying_index = request.underlying_index
-        row.underlying_asset_class = asset_class
-        row.allows_t_plus_0 = allows_t_plus_0
-        row.source = "manual"
-        row.dataset_version = f"manual-{date.today().isoformat()}"
-
-    await session.flush()
+    repo = EtfMetadataRepository(session)
+    profile: EtfExecutionProfile | None = None
+    if request.execution_profile is not None:
+        profile = EtfExecutionProfile(request.execution_profile)
+    row = await repo.apply_manual_override(
+        normalized,
+        execution_profile=profile,
+        underlying_market=request.underlying_market,
+        strategy_type=request.strategy_type,
+        underlying_index=request.underlying_index,
+        reason=request.reason,
+    )
     await session.commit()
     return _etf_to_out(row)
+
+
+@router.get("/etf-summary", response_model=EtfMetadataSummaryOut)
+async def etf_metadata_summary(
+    session: AsyncSession = Depends(get_session),
+) -> EtfMetadataSummaryOut:
+    """ETF 元数据分类统计(各 review_status 数量 + 缺失数)。"""
+    count_stmt = select(InstrumentModel).where(
+        InstrumentModel.instrument_type == "etf"
+    )
+    total_etf = len(
+        (await session.execute(count_stmt)).scalars().all()
+    )
+    summary = await EtfMetadataRepository(session).summary(total_etf)
+    return EtfMetadataSummaryOut(
+        total=summary.total,
+        auto_adopted=summary.auto_adopted,
+        needs_review=summary.needs_review,
+        manually_confirmed=summary.manually_confirmed,
+        manually_overridden=summary.manually_overridden,
+        missing_metadata=summary.missing_metadata,
+    )
+
+
+@router.get("/etf-review", response_model=list[EtfMetadataOut])
+async def etf_review_queue(
+    review_status: str | None = Query(default="needs_review"),
+    limit: int = Query(default=200, ge=1, le=2000),
+    session: AsyncSession = Depends(get_session),
+) -> list[EtfMetadataOut]:
+    """ETF 元数据待复核队列(默认查 needs_review)。"""
+    from finboard_shared.types import ReviewStatus
+
+    status = ReviewStatus(review_status) if review_status else None
+    rows = await EtfMetadataRepository(session).list_by_review_status(
+        status, limit=limit
+    )
+    return [_etf_to_out(r) for r in rows]
+
+
+@router.post("/etf-sync", response_model=EtfSyncPreviewOut)
+async def etf_metadata_sync(
+    request: EtfSyncRequest,
+    session: AsyncSession = Depends(get_session),
+) -> EtfSyncPreviewOut:
+    """批量同步 ETF 元数据(akshare → 分类 → 写库)。
+
+    ``dry_run=True`` 只预览不写入;``enrich_codes`` 指定的标的会额外
+    拉取单基金档案补充跟踪标的 / 费率。
+    """
+
+    from finboard_data.assets import (
+        AkShareEtfMetadataSource,
+        EtfClassifier,
+        EtfMetadataSync,
+    )
+
+    try:
+        sync = EtfMetadataSync(AkShareEtfMetadataSource(), EtfClassifier())
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"数据源依赖未安装,无法同步 ETF 元数据: {exc}",
+        ) from exc
+    try:
+        classifications = await sync.discover_and_classify(
+            enrich_codes=request.enrich_codes or None,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"ETF 元数据同步失败: {exc}",
+        ) from exc
+
+    repo = EtfMetadataRepository(session)
+    if request.dry_run:
+        preview = await repo.preview_upsert(classifications)
+        return EtfSyncPreviewOut(
+            total=preview.total,
+            to_insert=preview.to_insert,
+            to_update=preview.to_update,
+            skipped_override=preview.skipped_override,
+            needs_review=preview.needs_review,
+            auto_adopted=preview.auto_adopted,
+        )
+    inserted, updated, skipped = await repo.upsert_batch(classifications)
+    await session.commit()
+    return EtfSyncPreviewOut(
+        total=len(classifications),
+        to_insert=inserted,
+        to_update=updated,
+        skipped_override=skipped,
+        needs_review=sum(
+            1 for c in classifications if c.review_status.value == "needs_review"
+        ),
+        auto_adopted=sum(
+            1 for c in classifications if c.review_status.value == "auto_adopted"
+        ),
+    )
+
+
+@router.post("/etf-batch-confirm", response_model=int)
+async def etf_batch_confirm(
+    request: EtfBatchConfirmRequest,
+    session: AsyncSession = Depends(get_session),
+) -> int:
+    """批量确认待复核 ETF(needs_review → manually_confirmed)。"""
+    confirmed = await EtfMetadataRepository(session).batch_confirm(
+        request.codes, reason=request.reason
+    )
+    await session.commit()
+    return confirmed
+
+
+@router.get("/etf-audits/{code}", response_model=list[EtfAuditOut])
+async def etf_audits(
+    code: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+) -> list[EtfAuditOut]:
+    """查看 ETF 分类的审计流水(人工覆盖历史)。"""
+    stmt = (
+        select(EtfMetadataAuditModel)
+        .where(EtfMetadataAuditModel.code == code.strip().upper())
+        .order_by(EtfMetadataAuditModel.changed_at.desc())
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        EtfAuditOut(
+            id=r.id,
+            code=r.code,
+            field_name=r.field_name,
+            old_value=r.old_value,
+            new_value=r.new_value,
+            changed_by=r.changed_by,
+            reason=r.reason,
+            changed_at=r.changed_at,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/bond/{code}", response_model=BondMetadataOut | None)
@@ -414,6 +539,9 @@ def _etf_to_out(row: EtfMetadataModel) -> EtfMetadataOut:
         code=row.code,
         fund_code=row.fund_code,
         category=row.category,
+        execution_profile=row.execution_profile,
+        underlying_market=row.underlying_market,
+        strategy_type=row.strategy_type,
         underlying_index=row.underlying_index,
         underlying_asset_class=row.underlying_asset_class,
         management_fee_rate=row.management_fee_rate,
@@ -425,6 +553,12 @@ def _etf_to_out(row: EtfMetadataModel) -> EtfMetadataOut:
         iopv_available=row.iopv_available,
         allows_t_plus_0=row.allows_t_plus_0,
         dividend_policy=row.dividend_policy,
+        source=row.source,
+        rule_version=row.rule_version,
+        confidence=row.confidence,
+        review_status=row.review_status,
+        evidence=[str(e) for e in (row.evidence or [])],
+        manual_override=row.manual_override,
     )
 
 

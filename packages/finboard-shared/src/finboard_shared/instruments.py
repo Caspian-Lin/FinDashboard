@@ -21,11 +21,15 @@ from finboard_shared.types import (
     CouponFrequency,
     DatasetQualityStatus,
     EtfCategory,
+    EtfExecutionProfile,
+    EtfStrategyType,
     InstrumentType,
     LifecycleEventType,
     ListingStatus,
     Market,
+    ReviewStatus,
     RollMethod,
+    UnderlyingMarket,
 )
 
 ASSET_METADATA_VERSION = "v1"
@@ -102,10 +106,28 @@ class Instrument:
 
 @dataclass(frozen=True, slots=True)
 class EtfMetadata:
-    """ETF 子描述(issue #58)。"""
+    """ETF 子描述(issue #58 契约层,#97 多维分类扩展)。
+
+    issue #97 引入正交多维分类:
+
+    * ``execution_profile`` —— 交易规则权威维度(T+N / 印花税 / 手数);
+    * ``underlying_market`` —— 标的地理范围(domestic / hk / overseas / global);
+    * ``strategy_type`` —— 被动指数 vs 主动管理。
+
+    旧 ``category``(:class:`EtfCategory`)降级为兼容派生值,由
+    :func:`~finboard_shared.types.etf_category_from_execution_profile` 生成,
+    仅为不破坏既有发布链路而保留。
+
+    溯源字段(``source`` / ``source_updated_at`` / ``rule_version`` /
+    ``confidence`` / ``review_status`` / ``evidence``)用于区分自动推导与
+    人工覆盖,并支持 fail-closed 审核流程。
+    """
 
     fund_code: str  # 基金代码(可能与交易代码不同)
-    category: EtfCategory
+    category: EtfCategory  # 兼容旧分类;由 execution_profile 派生
+    execution_profile: EtfExecutionProfile | None = None  # #97 执行档位(权威)
+    underlying_market: UnderlyingMarket = UnderlyingMarket.DOMESTIC  # #97 标的市场
+    strategy_type: EtfStrategyType = EtfStrategyType.INDEX  # #97 策略类型
     underlying_index: str | None = None  # 跟踪指数代码,如 "000300.SH"
     management_fee_rate: Decimal | None = None  # 年管理费率
     custody_fee_rate: Decimal | None = None  # 年托管费率
@@ -114,9 +136,17 @@ class EtfMetadata:
     delisting_date: date | None = None
     tracking_error: Decimal | None = None  # 年化跟踪误差
     iopv_available: bool = False  # 是否提供 IOPV 参考价
-    allows_t_plus_0: bool = False  # 跨境 / 货币 ETF 允许 T+0
+    allows_t_plus_0: bool = False  # 跨境 / 货币 / 商品 / 债券 ETF 允许 T+0
     dividend_policy: str = "cash"  # cash / reinvest
     underlying_asset_class: AssetClass = AssetClass.EQUITY
+    # -- 溯源与审核(issue #97)--
+    source: str = "manual"  # akshare / manual / catalog
+    source_updated_at: datetime | None = None  # 上游事实观测时间
+    rule_version: str = ""  # 分类器规则版本(自动推导时填)
+    confidence: Decimal = Decimal("0")  # 置信度 0~1
+    review_status: ReviewStatus = ReviewStatus.NEEDS_REVIEW
+    evidence: tuple[str, ...] = ()  # 规则证据摘要(可读)
+    manual_override: bool = False  # 是否被人工覆盖
 
 
 @dataclass(frozen=True, slots=True)
