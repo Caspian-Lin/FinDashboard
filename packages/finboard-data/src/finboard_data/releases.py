@@ -1249,14 +1249,12 @@ def _audit_bars(
             anomaly_count += 1
     anomaly_count += len(dates) - len(unique_dates)
 
-    expected_start = max(
-        spec.start_date,
-        instrument.list_date or spec.start_date,
-    )
-    expected_end = min(
-        spec.end_date,
-        instrument.delist_date or spec.end_date,
-    )
+    first_bar_date = min(unique_dates)
+    last_bar_date = max(unique_dates)
+    effective_list = instrument.list_date or first_bar_date
+    effective_delist = instrument.delist_date or last_bar_date
+    expected_start = max(spec.start_date, effective_list)
+    expected_end = min(spec.end_date, effective_delist)
     lifecycle_dates = _known_suspension_dates(
         instrument,
         start=expected_start,
@@ -1282,8 +1280,8 @@ def _audit_bars(
     if suspended_dates:
         issues.append(f"suspended_sessions:{len(suspended_dates)}")
 
-    actual_start = min(unique_dates)
-    actual_end = max(unique_dates)
+    actual_start = first_bar_date
+    actual_end = last_bar_date
     if instrument.delist_date is not None and instrument.delist_date <= spec.end_date:
         category = "delisted"
     elif instrument.list_date is not None and instrument.list_date > spec.start_date:
