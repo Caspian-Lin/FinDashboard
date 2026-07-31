@@ -117,7 +117,7 @@ async def get_etf_metadata(
 ) -> EtfMetadataOut | None:
     stmt = select(EtfMetadataModel).where(EtfMetadataModel.fund_code == fund_code)
     result = await session.execute(stmt)
-    row = result.scalar_one_or_none()
+    row = result.scalars().first()
     if row is None:
         return None
     return _etf_to_out(row)
