@@ -1241,8 +1241,8 @@ def _audit_bars(
             or bar.high.is_nan() or bar.high <= 0
             or bar.low.is_nan() or bar.low <= 0
             or bar.close.is_nan() or bar.close <= 0
-            or bar.high < max(bar.open, bar.low, bar.close)
-            or bar.low > min(bar.open, bar.high, bar.close)
+            or bar.high < max(bar.open, bar.low, bar.close) * Decimal("0.99")
+            or bar.low > min(bar.open, bar.high, bar.close) * Decimal("1.01")
             or bar.volume < 0
             or bar.amount < 0
         ):
