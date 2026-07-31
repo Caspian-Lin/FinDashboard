@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
+import type { QualityReport } from "../lib/api";
 import { INFO_HINTS, type InfoHintDefinition } from "../lib/infoHints";
 
 const BULK_PHASE_LABELS: Record<string, string> = {
@@ -29,6 +30,7 @@ export default function Data() {
   const [dlMarket, setDlMarket] = useState("a_share");
   const [dlType, setDlType] = useState("");
   const [dlStart, setDlStart] = useState("2015-01-01");
+  const [showQualityDetail, setShowQuality] = useState(false);
 
   const PAGE_SIZE = 50;
   const isSearching = searchQuery.length >= 2;
@@ -83,6 +85,12 @@ export default function Data() {
     queryKey: ["bulk-download-status"],
     queryFn: api.getBulkDownloadStatus,
     refetchInterval: 2000,
+  });
+
+  const { data: qualityReports, refetch: refetchQuality } = useQuery({
+    queryKey: ["quality-reports"],
+    queryFn: () => api.checkQuality(),
+    enabled: false,
   });
 
   const sync = useMutation({
@@ -360,9 +368,17 @@ export default function Data() {
 
         {/* Download result */}
         {bulkStatus?.status === "done" && (
-          <p className="mt-3 text-sm text-success">
-            完成: 成功 {bulkStatus.success} / {bulkStatus.total}, 失败 {bulkStatus.failed}
-          </p>
+          <div className="mt-3 space-y-1 text-sm">
+            <p className="text-success">
+              拉取完成: 成功 {bulkStatus.success} / {bulkStatus.total}, 失败 {bulkStatus.failed}
+            </p>
+            {bulkStatus.quality_reports && bulkStatus.quality_reports.length > 0 && (
+              <p className="text-muted-foreground">
+                质量校验: 通过 {bulkStatus.quality_passed ?? 0}, 失败 {bulkStatus.quality_failed ?? 0},
+                换源修复 {bulkStatus.fallback_used ?? 0}
+              </p>
+            )}
+          </div>
         )}
         {bulkStatus?.status === "error" && (
           <p className="mt-3 text-sm text-destructive">错误: {bulkStatus.error}</p>
@@ -371,6 +387,91 @@ export default function Data() {
           <p className="mt-3 text-sm text-destructive">
             {(startDownload.error as Error).message}
           </p>
+        )}
+
+        {/* Quality check button */}
+        <div className="mt-4 flex items-center gap-3 border-t pt-3">
+          <button
+            onClick={() => refetchQuality()}
+            className="bg-blue-600 text-white rounded px-4 py-1.5 text-sm font-medium hover:bg-blue-700"
+          >
+            质量检查
+          </button>
+          {qualityReports && qualityReports.length > 0 && (
+            <span className="text-sm text-muted-foreground">
+              {qualityReports.filter((r) => r.passed).length} 通过,{" "}
+              <span className="text-destructive">
+                {qualityReports.filter((r) => !r.passed).length} 异常
+              </span>
+              , 共 {qualityReports.length} 标的
+            </span>
+          )}
+        </div>
+
+        {/* Quality report table */}
+        {qualityReports && qualityReports.some((r) => !r.passed) && (
+          <div className="mt-3">
+            <button
+              onClick={() => setShowQuality(!showQualityDetail)}
+              className="text-sm text-blue-400 hover:underline"
+            >
+              {showQualityDetail ? "收起" : "展开"}异常详情
+            </button>
+            {showQualityDetail && (
+              <div className="mt-2 max-h-80 overflow-auto rounded border">
+                <table className="w-full text-xs">
+                  <thead className="bg-muted sticky top-0">
+                    <tr>
+                      <th className="px-3 py-2 text-left">标的</th>
+                      <th className="px-3 py-2 text-right">异常数</th>
+                      <th className="px-3 py-2 text-right">重复</th>
+                      <th className="px-3 py-2 text-left">数据源</th>
+                      <th className="px-3 py-2 text-left">异常日期 / 原因</th>
+                      <th className="px-3 py-2 text-left">换源修复</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {qualityReports
+                      .filter((r: QualityReport) => !r.passed)
+                      .map((r: QualityReport) => (
+                        <tr key={r.symbol} className="border-t">
+                          <td className="px-3 py-1.5 font-mono">{r.symbol}</td>
+                          <td className="px-3 py-1.5 text-right text-destructive font-semibold">
+                            {r.anomaly_count}
+                          </td>
+                          <td className="px-3 py-1.5 text-right">
+                            {r.duplicate_count || "-"}
+                          </td>
+                          <td className="px-3 py-1.5">
+                            {r.sources.join(",") || "-"}
+                          </td>
+                          <td className="px-3 py-1.5">
+                            {r.anomalies
+                              .slice(0, 3)
+                              .map(
+                                (a) =>
+                                  `${a.date}(${a.reasons.join(",")})`,
+                              )
+                              .join("; ")}
+                            {r.anomalies.length > 3 &&
+                              ` +${r.anomalies.length - 3}`}
+                          </td>
+                          <td className="px-3 py-1.5">
+                            {r.fallback_used ? (
+                              <span className="text-blue-400">
+                                {r.fallback_source} ({r.corrected_dates.length}日)
+                              </span>
+                            ) : (
+                              "-"
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         )}
       </div>
 

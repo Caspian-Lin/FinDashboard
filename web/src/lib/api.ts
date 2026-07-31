@@ -261,6 +261,13 @@ export const api = {
     }),
   getBulkDownloadStatus: () =>
     fetchJSON<BulkDownloadStatus>("/data/bulk-download/status"),
+  checkQuality: (symbols?: string, adjust?: string) => {
+    const q = new URLSearchParams();
+    if (symbols) q.set("symbols", symbols);
+    if (adjust) q.set("adjust", adjust);
+    const qs = q.toString();
+    return fetchJSON<QualityReport[]>(`/data/quality${qs ? `?${qs}` : ""}`);
+  },
 
   // ---- Scheduler Config ----
   getConfig: () => fetchJSON<SchedulerConfig>("/data/config"),
@@ -560,6 +567,27 @@ export interface InstrumentList {
   offset: number;
 }
 
+export interface BarAnomaly {
+  date: string;
+  source: string;
+  reasons: string[];
+}
+
+export interface QualityReport {
+  symbol: string;
+  total_bars: number;
+  anomaly_count: number;
+  duplicate_count: number;
+  sources: string[];
+  anomalies: BarAnomaly[];
+  passed: boolean;
+  primary_source: string;
+  fallback_used: boolean;
+  fallback_source: string | null;
+  corrected_dates: string[];
+  error: string | null;
+}
+
 export interface BulkDownloadStatus {
   status: string;  // idle / running / done / error
   done: number;
@@ -569,6 +597,10 @@ export interface BulkDownloadStatus {
   current_symbol: string | null;
   phase: string | null;
   error: string | null;
+  quality_passed?: number;
+  quality_failed?: number;
+  fallback_used?: number;
+  quality_reports?: QualityReport[];
 }
 
 export interface SchedulerConfig {
