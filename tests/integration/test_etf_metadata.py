@@ -37,16 +37,25 @@ def _make_classification(
     code: str = "159010.SZ",
     *,
     profile: EtfExecutionProfile = EtfExecutionProfile.CROSS_BORDER_ETF,
+    category: EtfCategory | None = None,
     confidence: Decimal = Decimal("0.9"),
     review: ReviewStatus = ReviewStatus.AUTO_ADOPTED,
 ) -> EtfClassification:
+    if category is None:
+        category = {
+            EtfExecutionProfile.DOMESTIC_EQUITY_ETF: EtfCategory.EQUITY,
+            EtfExecutionProfile.CROSS_BORDER_ETF: EtfCategory.CROSS_BORDER,
+            EtfExecutionProfile.BOND_ETF: EtfCategory.BOND,
+            EtfExecutionProfile.MONEY_MARKET_ETF: EtfCategory.MONEY_MARKET,
+            EtfExecutionProfile.COMMODITY_ETF: EtfCategory.COMMODITY,
+        }[profile]
     return EtfClassification(
         code=code,
         execution_profile=profile,
         underlying_asset_class=AssetClass.EQUITY,
         underlying_market=UnderlyingMarket.HK,
         strategy_type=EtfStrategyType.INDEX,
-        category=EtfCategory.CROSS_BORDER,
+        category=category,
         confidence=confidence,
         review_status=review,
         rule_version=ETF_CLASSIFIER_VERSION,
@@ -58,7 +67,11 @@ def _make_classification(
 @pytest.mark.asyncio
 async def test_upsert_inserts_new_classification(db_session: AsyncSession) -> None:
     repo = EtfMetadataRepository(db_session)
-    cls = _make_classification("510300.SH", profile=EtfExecutionProfile.DOMESTIC_EQUITY_ETF)
+    cls = _make_classification(
+        "510300.SH",
+        profile=EtfExecutionProfile.DOMESTIC_EQUITY_ETF,
+        category=EtfCategory.EQUITY,
+    )
 
     inserted, updated, skipped = await repo.upsert_batch([cls])
 
