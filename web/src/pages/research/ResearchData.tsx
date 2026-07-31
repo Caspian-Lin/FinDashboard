@@ -446,14 +446,29 @@ function EtfReviewQueue({ onFixed }: { onFixed?: () => void }) {
     <div className="space-y-2 px-4 py-4">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold">ETF 待复核队列（{data.length}）</h3>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => confirm.mutate([...selected])}
-          disabled={selected.size === 0 || confirm.isPending}
-        >
-          批量确认（{selected.size}）
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() =>
+              setSelected((prev) =>
+                prev.size === data.length
+                  ? new Set()
+                  : new Set(data.map((item) => item.code)),
+              )
+            }
+          >
+            {selected.size === data.length ? "取消全选" : "全选"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => confirm.mutate([...selected])}
+            disabled={selected.size === 0 || confirm.isPending}
+          >
+            批量确认（{selected.size}）
+          </Button>
+        </div>
       </div>
       <div className="max-h-80 space-y-1 overflow-y-auto">
         {data.map((item) => (
