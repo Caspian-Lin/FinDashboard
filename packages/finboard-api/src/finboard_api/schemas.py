@@ -745,6 +745,9 @@ class EtfMetadataOut(BaseSchema):
     code: str
     fund_code: str
     category: str
+    execution_profile: str | None = None
+    underlying_market: str = "domestic"
+    strategy_type: str = "index"
     underlying_index: str | None = None
     underlying_asset_class: str = "equity"
     management_fee_rate: Decimal | None = None
@@ -756,20 +759,31 @@ class EtfMetadataOut(BaseSchema):
     iopv_available: bool = False
     allows_t_plus_0: bool = False
     dividend_policy: str = "cash"
+    source: str = "manual"
+    rule_version: str = ""
+    confidence: Decimal = Decimal("0")
+    review_status: str = "needs_review"
+    evidence: list[str] = []
+    manual_override: bool = False
 
 
 class EtfClassificationUpdate(BaseSchema):
-    """人工补齐研究用 ETF 分类;执行属性由服务端按分类派生。"""
+    """人工补齐或修正研究用 ETF 分类(issue #97 多维分类)。"""
 
-    category: Literal[
-        "equity",
-        "index",
-        "cross_border",
-        "bond",
-        "money_market",
-        "commodity",
-    ]
+    execution_profile: (
+        Literal[
+            "domestic_equity_etf",
+            "cross_border_etf",
+            "bond_etf",
+            "money_market_etf",
+            "commodity_etf",
+        ]
+        | None
+    ) = None
+    underlying_market: Literal["domestic", "hk", "overseas", "global"] | None = None
+    strategy_type: Literal["index", "active"] | None = None
     underlying_index: str | None = Field(default=None, max_length=32)
+    reason: str = Field(default="", max_length=500)
 
     @field_validator("underlying_index")
     @classmethod
@@ -778,6 +792,47 @@ class EtfClassificationUpdate(BaseSchema):
             return None
         normalized = value.strip().upper()
         return normalized or None
+
+
+class EtfSyncPreviewOut(BaseSchema):
+    total: int
+    to_insert: int
+    to_update: int
+    skipped_override: int
+    needs_review: int
+    auto_adopted: int
+
+
+class EtfSyncRequest(BaseSchema):
+    """触发 ETF 元数据批量同步(dry-run 预览或实际写入)。"""
+
+    dry_run: bool = True
+    enrich_codes: list[str] = Field(default_factory=list)
+
+
+class EtfBatchConfirmRequest(BaseSchema):
+    codes: list[str] = Field(min_length=1, max_length=2000)
+    reason: str = Field(default="", max_length=500)
+
+
+class EtfMetadataSummaryOut(BaseSchema):
+    total: int
+    auto_adopted: int
+    needs_review: int
+    manually_confirmed: int
+    manually_overridden: int
+    missing_metadata: int
+
+
+class EtfAuditOut(BaseSchema):
+    id: int
+    code: str
+    field_name: str
+    old_value: str | None = None
+    new_value: str | None = None
+    changed_by: str = "system"
+    reason: str = ""
+    changed_at: datetime
 
 
 class BondMetadataOut(BaseSchema):

@@ -105,7 +105,6 @@ class TestEtfClassification:
     ) -> None:
         from finboard_api.routes.instruments import update_etf_classification
         from finboard_api.schemas import EtfClassificationUpdate
-        from finboard_persistence import EtfMetadataModel
 
         instrument = MagicMock()
         instrument.instrument_type = "etf"
@@ -121,20 +120,16 @@ class TestEtfClassification:
 
         result = await update_etf_classification(
             "159001.sz",
-            EtfClassificationUpdate(category="money_market"),
+            EtfClassificationUpdate(execution_profile="money_market_etf"),
             session=mock_session,
         )
 
-        created = mock_session.add.call_args.args[0]
-        assert isinstance(created, EtfMetadataModel)
-        assert created.code == "159001.SZ"
-        assert created.fund_code == "159001"
-        assert created.category == "money_market"
-        assert created.underlying_asset_class == "cash"
-        assert created.allows_t_plus_0 is True
-        assert created.source == "manual"
+        assert result.execution_profile == "money_market_etf"
         assert result.category == "money_market"
-        mock_session.flush.assert_awaited_once()
+        assert result.underlying_asset_class == "cash"
+        assert result.allows_t_plus_0 is True
+        assert result.manual_override is True
+        assert result.review_status == "manually_overridden"
         mock_session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -156,7 +151,7 @@ class TestEtfClassification:
         with pytest.raises(HTTPException) as exc_info:
             await update_etf_classification(
                 "600519.SH",
-                EtfClassificationUpdate(category="index"),
+                EtfClassificationUpdate(execution_profile="domestic_equity_etf"),
                 session=mock_session,
             )
 

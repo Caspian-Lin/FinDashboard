@@ -49,7 +49,7 @@ import {
   datasetApi,
   type CachedDataStatus,
   type DatasetReleaseCreate,
-  type EtfCategory,
+  type EtfExecutionProfile,
   type LifecycleEvent,
 } from "@/lib/research";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
@@ -79,18 +79,36 @@ const MULTI_ASSET_CAPABILITIES = [
   "etf:bond",
 ];
 
-const ETF_CATEGORIES: {
-  value: EtfCategory;
+const ETF_EXECUTION_PROFILES: {
+  value: EtfExecutionProfile;
   label: string;
   execution: string;
 }[] = [
-  { value: "index", label: "指数 ETF", execution: "A 股宽基/行业指数，T+1" },
-  { value: "equity", label: "股票 ETF", execution: "主动或非指数股票组合，T+1" },
-  { value: "cross_border", label: "跨境 ETF", execution: "境外资产，T+0" },
-  { value: "bond", label: "债券 ETF", execution: "固定收益资产，10 份/手" },
-  { value: "money_market", label: "货币 ETF", execution: "现金管理类，T+0" },
-  { value: "commodity", label: "商品 ETF", execution: "黄金/商品资产，T+0" },
+  { value: "domestic_equity_etf", label: "国内股票 ETF", execution: "T+1 交收" },
+  { value: "cross_border_etf", label: "跨境 ETF", execution: "境外资产，T+0、免印花税" },
+  { value: "bond_etf", label: "债券 ETF", execution: "固定收益，10 份/手、免印花税" },
+  { value: "money_market_etf", label: "货币 ETF", execution: "现金管理，T+0、无佣金" },
+  { value: "commodity_etf", label: "商品 ETF", execution: "黄金/商品，T+0" },
 ];
+
+const ETF_MARKETS = [
+  { value: "domestic", label: "国内（A 股）" },
+  { value: "hk", label: "港股通" },
+  { value: "overseas", label: "海外" },
+  { value: "global", label: "全球" },
+] as const;
+
+const ETF_STRATEGIES = [
+  { value: "index", label: "被动指数" },
+  { value: "active", label: "主动管理" },
+] as const;
+
+const REVIEW_STATUS_LABELS: Record<string, string> = {
+  auto_adopted: "自动采用",
+  needs_review: "待复核",
+  manually_confirmed: "已确认",
+  manually_overridden: "已覆盖",
+};
 
 function EtfMetadataEditor({
   symbol,
@@ -100,44 +118,55 @@ function EtfMetadataEditor({
   onSaved?: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [category, setCategory] = useState<EtfCategory | "">("");
+  const [executionProfile, setExecutionProfile] = useState<EtfExecutionProfile | "">("");
+  const [underlyingMarket, setUnderlyingMarket] = useState("");
+  const [strategyType, setStrategyType] = useState("");
   const [underlyingIndex, setUnderlyingIndex] = useState("");
+  const [reason, setReason] = useState("");
   const { data, isLoading, isError } = useQuery({
     queryKey: ["etf-metadata", symbol],
     queryFn: () => datasetApi.etfMetadata(symbol),
   });
 
   useEffect(() => {
-    setCategory(data?.category ?? "");
+    setExecutionProfile((data?.execution_profile as EtfExecutionProfile) ?? "");
+    setUnderlyingMarket(data?.underlying_market ?? "domestic");
+    setStrategyType(data?.strategy_type ?? "index");
     setUnderlyingIndex(data?.underlying_index ?? "");
   }, [data, symbol]);
 
   const save = useMutation({
     mutationFn: () => {
-      if (!category) {
-        throw new Error("请选择 ETF 分类");
+      if (!executionProfile) {
+        throw new Error("请选择执行档位");
       }
       return datasetApi.updateEtfClassification(symbol, {
-        category,
+        execution_profile: executionProfile,
+        underlying_market: underlyingMarket as "domestic" | "hk" | "overseas" | "global",
+        strategy_type: strategyType as "index" | "active",
         underlying_index: underlyingIndex.trim() || null,
+        reason: reason.trim() || undefined,
       });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["etf-metadata", symbol] });
       queryClient.invalidateQueries({ queryKey: ["research-instruments"] });
+      queryClient.invalidateQueries({ queryKey: ["etf-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["etf-review"] });
       onSaved?.();
     },
   });
 
-  const selectedCategory = ETF_CATEGORIES.find((item) => item.value === category);
+  const selectedProfile = ETF_EXECUTION_PROFILES.find((item) => item.value === executionProfile);
+  const reviewLabel = data ? REVIEW_STATUS_LABELS[data.review_status] ?? data.review_status : null;
 
   return (
     <div className="space-y-3 px-4 py-4">
       <div>
         <h3 className="text-sm font-semibold">ETF 研究分类</h3>
         <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-          分类决定回测中的资产大类、交收周期和手数规则。请根据基金合同或交易所资料确认，
-          保存不会启动研究运行，也不会修改实盘配置。
+          多维分类决定回测中的资产大类、交收周期和手数规则。执行档位是权威维度，
+          标的市场与策略类型用于组合分析与风控。修改后设为「已覆盖」，自动同步不再覆盖。
         </p>
       </div>
       {isLoading ? (
@@ -146,18 +175,75 @@ function EtfMetadataEditor({
         <p className="text-sm text-destructive">ETF 元数据加载失败，请重试。</p>
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(220px,0.8fr)_minmax(240px,1fr)_auto] md:items-end">
-            <div className="space-y-2">
-              <Label htmlFor={`etf-category-${symbol}`}>ETF 分类</Label>
-              <Select
-                value={category}
-                onValueChange={(value) => setCategory(value as EtfCategory)}
+          {data && reviewLabel && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span
+                className={cn(
+                  "rounded px-2 py-0.5 font-medium",
+                  data.review_status === "needs_review"
+                    ? "bg-warning/15 text-warning"
+                    : data.review_status === "manually_overridden"
+                      ? "bg-primary/15 text-primary"
+                      : "bg-success/15 text-success",
+                )}
               >
-                <SelectTrigger id={`etf-category-${symbol}`}>
-                  <SelectValue placeholder="请选择分类" />
+                {reviewLabel}
+              </span>
+              {data.manual_override && (
+                <span className="text-muted-foreground">人工覆盖（自动同步跳过）</span>
+              )}
+              {data.confidence && Number(data.confidence) > 0 && (
+                <span className="text-muted-foreground">
+                  置信度 {formatPercent(Number(data.confidence))}
+                </span>
+              )}
+              {data.source && (
+                <span className="text-muted-foreground">来源 {data.source}</span>
+              )}
+            </div>
+          )}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4 md:items-end">
+            <div className="space-y-2">
+              <Label htmlFor={`etf-profile-${symbol}`}>执行档位</Label>
+              <Select
+                value={executionProfile}
+                onValueChange={(value) => setExecutionProfile(value as EtfExecutionProfile)}
+              >
+                <SelectTrigger id={`etf-profile-${symbol}`}>
+                  <SelectValue placeholder="请选择" />
                 </SelectTrigger>
                 <SelectContent>
-                  {ETF_CATEGORIES.map((item) => (
+                  {ETF_EXECUTION_PROFILES.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor={`etf-market-${symbol}`}>标的市场</Label>
+              <Select value={underlyingMarket} onValueChange={setUnderlyingMarket}>
+                <SelectTrigger id={`etf-market-${symbol}`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ETF_MARKETS.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor={`etf-strategy-${symbol}`}>策略类型</Label>
+              <Select value={strategyType} onValueChange={setStrategyType}>
+                <SelectTrigger id={`etf-strategy-${symbol}`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {ETF_STRATEGIES.map((item) => (
                     <SelectItem key={item.value} value={item.value}>
                       {item.label}
                     </SelectItem>
@@ -175,24 +261,45 @@ function EtfMetadataEditor({
                 spellCheck={false}
               />
             </div>
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto] md:items-end">
+            <div className="space-y-2">
+              <Label htmlFor={`etf-reason-${symbol}`}>修改理由（可选，记录到审计）</Label>
+              <Input
+                id={`etf-reason-${symbol}`}
+                value={reason}
+                onChange={(event) => setReason(event.target.value)}
+                placeholder="例如：根据基金合同第 X 条修正为跨境 ETF"
+              />
+            </div>
             <Button
               type="button"
               onClick={() => save.mutate()}
-              disabled={!category || save.isPending}
+              disabled={!executionProfile || save.isPending}
             >
-              {save.isPending ? "保存中…" : data ? "保存修改" : "补齐元数据"}
+              {save.isPending ? "保存中…" : data?.execution_profile ? "保存修改" : "补齐元数据"}
             </Button>
           </div>
-          {selectedCategory && (
+          {selectedProfile && (
             <p className="text-xs text-muted-foreground">
-              将按“{selectedCategory.label}”处理：{selectedCategory.execution}。
+              将按「{selectedProfile.label}」处理：{selectedProfile.execution}。
             </p>
+          )}
+          {data?.evidence && data.evidence.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-muted-foreground">分类证据</p>
+              <ul className="list-inside list-disc space-y-0.5 text-xs text-muted-foreground">
+                {data.evidence.map((item, index) => (
+                  <li key={index}>{item}</li>
+                ))}
+              </ul>
+            </div>
           )}
           {save.isSuccess && (
             <Alert variant="success" aria-live="polite">
               <AlertTitle>ETF 元数据已保存</AlertTitle>
               <AlertDescription>
-                {symbol} 已归类为 {selectedCategory?.label}，现在可以重新校验数据发布。
+                {symbol} 分类已更新并标记为人工覆盖，现在可以重新校验数据发布。
               </AlertDescription>
             </Alert>
           )}
@@ -205,6 +312,175 @@ function EtfMetadataEditor({
             </Alert>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+function EtfSyncPanel({ onDone }: { onDone?: () => void }) {
+  const queryClient = useQueryClient();
+  const [dryRunResult, setDryRunResult] = useState<Record<string, number> | null>(null);
+  const sync = useMutation({
+    mutationFn: (dryRun: boolean) => datasetApi.etfSync({ dry_run: dryRun }),
+    onSuccess: (result, dryRun) => {
+      setDryRunResult({
+        total: result.total,
+        insert: result.to_insert,
+        update: result.to_update,
+        skip: result.skipped_override,
+        review: result.needs_review,
+        adopt: result.auto_adopted,
+      });
+      if (!dryRun) {
+        queryClient.invalidateQueries({ queryKey: ["etf-summary"] });
+        queryClient.invalidateQueries({ queryKey: ["etf-review"] });
+        onDone?.();
+      }
+    },
+  });
+  const summary = useQuery({
+    queryKey: ["etf-summary"],
+    queryFn: () => datasetApi.etfSummary(),
+  });
+
+  return (
+    <div className="space-y-3 px-4 py-4">
+      <div>
+        <h3 className="text-sm font-semibold">ETF 元数据批量同步</h3>
+        <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+          从 akshare 拉取全市场 ETF 基金类型并自动分类。高置信度结果自动采用，
+          低置信度进入待复核队列。人工覆盖的记录不会被覆盖。
+        </p>
+      </div>
+      {summary.data && (
+        <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
+          {[
+            { label: "总计", value: summary.data.total },
+            { label: "自动采用", value: summary.data.auto_adopted },
+            { label: "待复核", value: summary.data.needs_review },
+            { label: "已确认", value: summary.data.manually_confirmed },
+            { label: "缺失", value: summary.data.missing_metadata },
+          ].map((item) => (
+            <div key={item.label} className="rounded border p-2 text-center">
+              <div className="text-lg font-semibold">{item.value}</div>
+              <div className="text-muted-foreground">{item.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => sync.mutate(true)}
+          disabled={sync.isPending}
+        >
+          {sync.isPending ? "同步中…" : "预览（dry-run）"}
+        </Button>
+        <Button
+          size="sm"
+          onClick={() => sync.mutate(false)}
+          disabled={sync.isPending}
+        >
+          执行同步
+        </Button>
+      </div>
+      {dryRunResult && (
+        <div className="rounded border p-3 text-xs">
+          <p className="font-medium">同步预览结果</p>
+          <ul className="mt-1 space-y-0.5 text-muted-foreground">
+            <li>共 {dryRunResult.total} 只 ETF</li>
+            <li>新增 {dryRunResult.insert}，更新 {dryRunResult.update}，跳过（人工覆盖）{dryRunResult.skip}</li>
+            <li>自动采用 {dryRunResult.adopt}，待复核 {dryRunResult.review}</li>
+          </ul>
+        </div>
+      )}
+      {sync.isError && (
+        <Alert variant="destructive">
+          <AlertTitle>同步失败</AlertTitle>
+          <AlertDescription>
+            {sync.error instanceof Error ? sync.error.message : "请稍后重试"}
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
+  );
+}
+
+function EtfReviewQueue({ onFixed }: { onFixed?: () => void }) {
+  const queryClient = useQueryClient();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const { data, isLoading } = useQuery({
+    queryKey: ["etf-review"],
+    queryFn: () => datasetApi.etfReview({ limit: 200 }),
+  });
+  const confirm = useMutation({
+    mutationFn: (codes: string[]) => datasetApi.etfBatchConfirm({ codes }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["etf-review"] });
+      queryClient.invalidateQueries({ queryKey: ["etf-summary"] });
+      setSelected(new Set());
+      onFixed?.();
+    },
+  });
+
+  const toggle = (code: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
+      return next;
+    });
+  };
+
+  if (isLoading) return <LoadingState rows={3} />;
+  if (!data || data.length === 0) {
+    return (
+      <p className="px-4 py-4 text-sm text-muted-foreground">
+        没有待复核的 ETF 分类。
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-2 px-4 py-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold">ETF 待复核队列（{data.length}）</h3>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => confirm.mutate([...selected])}
+          disabled={selected.size === 0 || confirm.isPending}
+        >
+          批量确认（{selected.size}）
+        </Button>
+      </div>
+      <div className="max-h-80 space-y-1 overflow-y-auto">
+        {data.map((item) => (
+          <label
+            key={item.code}
+            className="flex cursor-pointer items-center gap-2 rounded border p-2 text-xs hover:bg-muted/50"
+          >
+            <input
+              type="checkbox"
+              checked={selected.has(item.code)}
+              onChange={() => toggle(item.code)}
+            />
+            <span className="font-mono font-medium">{item.code}</span>
+            <span className="text-muted-foreground">
+              {item.execution_profile ?? item.category}
+              {item.underlying_market !== "domestic" && ` · ${item.underlying_market}`}
+            </span>
+            <span className="text-muted-foreground">
+              置信度 {formatPercent(Number(item.confidence))}
+            </span>
+          </label>
+        ))}
+      </div>
+      {confirm.isError && (
+        <p className="text-sm text-destructive">
+          批量确认失败：{confirm.error instanceof Error ? confirm.error.message : "请重试"}
+        </p>
       )}
     </div>
   );
@@ -1051,6 +1327,13 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
           {data ? `显示 ${items.length} / ${data.total} 只活跃标的` : ""}
         </span>
       </div>
+
+      {(market === "all" || market === "a_share") && (
+        <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <EtfSyncPanel />
+          <EtfReviewQueue />
+        </div>
+      )}
 
       {metadataBehindCache && (
         <Alert variant="warning" className="mb-4">

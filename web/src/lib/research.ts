@@ -456,10 +456,20 @@ export type EtfCategory =
   | "money_market"
   | "commodity";
 
+export type EtfExecutionProfile =
+  | "domestic_equity_etf"
+  | "cross_border_etf"
+  | "bond_etf"
+  | "money_market_etf"
+  | "commodity_etf";
+
 export interface EtfMetadata {
   code: string;
   fund_code: string;
   category: EtfCategory;
+  execution_profile: EtfExecutionProfile | null;
+  underlying_market: string;
+  strategy_type: string;
   underlying_index: string | null;
   underlying_asset_class: string;
   management_fee_rate: string | null;
@@ -471,11 +481,49 @@ export interface EtfMetadata {
   iopv_available: boolean;
   allows_t_plus_0: boolean;
   dividend_policy: string;
+  source: string;
+  rule_version: string;
+  confidence: string;
+  review_status: string;
+  evidence: string[];
+  manual_override: boolean;
 }
 
 export interface EtfClassificationUpdate {
-  category: EtfCategory;
+  execution_profile?: EtfExecutionProfile;
+  underlying_market?: "domestic" | "hk" | "overseas" | "global";
+  strategy_type?: "index" | "active";
   underlying_index?: string | null;
+  reason?: string;
+}
+
+export interface EtfSyncPreview {
+  total: number;
+  to_insert: number;
+  to_update: number;
+  skipped_override: number;
+  needs_review: number;
+  auto_adopted: number;
+}
+
+export interface EtfMetadataSummary {
+  total: number;
+  auto_adopted: number;
+  needs_review: number;
+  manually_confirmed: number;
+  manually_overridden: number;
+  missing_metadata: number;
+}
+
+export interface EtfAuditEntry {
+  id: number;
+  code: string;
+  field_name: string;
+  old_value: string | null;
+  new_value: string | null;
+  changed_by: string;
+  reason: string;
+  changed_at: string;
 }
 
 export interface InstrumentMetadataPage {
@@ -598,6 +646,31 @@ export const datasetApi = {
       `/instruments/etf/${encodeURIComponent(code)}`,
       { method: "PUT", body: JSON.stringify(body) },
     ),
+  etfSummary: () => fetchJSON<EtfMetadataSummary>("/instruments/etf-summary"),
+  etfReview: (params?: { review_status?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.review_status) q.set("review_status", params.review_status);
+    else q.set("review_status", "needs_review");
+    q.set("limit", String(params?.limit ?? 200));
+    return fetchJSON<EtfMetadata[]>(`/instruments/etf-review?${q.toString()}`);
+  },
+  etfSync: (body: { dry_run: boolean; enrich_codes?: string[] }) =>
+    fetchJSON<EtfSyncPreview>("/instruments/etf-sync", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  etfBatchConfirm: (body: { codes: string[]; reason?: string }) =>
+    fetchJSON<number>("/instruments/etf-batch-confirm", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  etfAudits: (code: string, limit?: number) => {
+    const q = new URLSearchParams();
+    q.set("limit", String(limit ?? 100));
+    return fetchJSON<EtfAuditEntry[]>(
+      `/instruments/etf-audits/${encodeURIComponent(code)}?${q.toString()}`,
+    );
+  },
   lifecycle: (symbol: string, params?: { event_type?: string; limit?: number }) => {
     const q = new URLSearchParams();
     if (params?.event_type) q.set("event_type", params.event_type);
