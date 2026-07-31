@@ -254,6 +254,7 @@ export const api = {
     market?: string;
     instrument_type?: string;
     start?: string;
+    source?: string;
   }) =>
     fetchJSON<BulkDownloadStatus>("/data/bulk-download", {
       method: "POST",
@@ -298,6 +299,7 @@ export interface DataFetchRequest {
   start: string;
   end: string;
   adjust?: string;
+  source?: string;
 }
 
 export interface FetchResult {

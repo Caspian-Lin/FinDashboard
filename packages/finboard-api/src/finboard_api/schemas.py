@@ -174,6 +174,7 @@ class DataFetchRequest(BaseSchema):
     start: str
     end: str
     adjust: str = "qfq"
+    source: str | None = None  # akshare / yfinance; None = 用环境变量默认
 
 
 class DataStatusOut(BaseSchema):
@@ -291,6 +292,7 @@ class BulkDownloadRequest(BaseSchema):
     market: str = "a_share"
     instrument_type: str | None = None
     start: str = "2015-01-01"
+    source: str | None = None
 
 
 class BulkDownloadStatusOut(BaseSchema):

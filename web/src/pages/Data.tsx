@@ -20,6 +20,7 @@ export default function Data() {
   const [fetchEnd, setFetchEnd] = useState(
     new Date().toISOString().slice(0, 10),
   );
+  const [fetchSource, setFetchSource] = useState("");
   const [marketFilter, setMarketFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -30,6 +31,7 @@ export default function Data() {
   const [dlMarket, setDlMarket] = useState("a_share");
   const [dlType, setDlType] = useState("");
   const [dlStart, setDlStart] = useState("2015-01-01");
+  const [dlSource, setDlSource] = useState("");
   const [showQualityDetail, setShowQuality] = useState(false);
 
   const PAGE_SIZE = 50;
@@ -93,6 +95,12 @@ export default function Data() {
     enabled: false,
   });
 
+  const { data: config } = useQuery({
+    queryKey: ["scheduler-config"],
+    queryFn: api.getConfig,
+  });
+  const defaultProvider = config?.data_provider ?? "akshare";
+
   const sync = useMutation({
     mutationFn: () => api.syncUniverse(),
     onSuccess: () => {
@@ -108,16 +116,18 @@ export default function Data() {
       start: string;
       end: string;
       adjust?: string;
+      source?: string;
     }) => api.fetchData(body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["data-status"] }),
   });
 
   const startDownload = useMutation({
-    mutationFn: () =>
+    mutationFn: (params?: { source?: string }) =>
       api.startBulkDownload({
         market: dlMarket,
         instrument_type: dlType || undefined,
         start: dlStart,
+        source: params?.source,
       }),
     onSuccess: (data) => {
       queryClient.setQueryData(["bulk-download-status"], data);
@@ -172,6 +182,9 @@ export default function Data() {
             <h2 className="flex items-center gap-1 text-lg font-semibold">
               标的池同步
               <InfoHint content={INFO_HINTS.data.universeSync} />
+              <span className="ml-2 rounded bg-blue-600/20 px-2 py-0.5 text-xs font-medium text-blue-400">
+                akshare
+              </span>
             </h2>
             {totalInstruments > 0 && (
               <span className="text-sm text-muted-foreground/70">已同步 {totalInstruments} 条</span>
@@ -242,9 +255,29 @@ export default function Data() {
                 />
               </div>
             </div>
+            <div>
+              <label htmlFor="data-fetch-source" className="block text-sm font-medium text-foreground mb-1">
+                数据源
+              </label>
+              <select
+                id="data-fetch-source"
+                value={fetchSource}
+                onChange={(e) => setFetchSource(e.target.value)}
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
+              >
+                <option value="">默认 ({defaultProvider})</option>
+                <option value="akshare">akshare</option>
+                <option value="yfinance">yfinance</option>
+              </select>
+            </div>
             <button
               onClick={() =>
-                fetchOne.mutate({ symbol: fetchSymbol, start: fetchStart, end: fetchEnd })
+                fetchOne.mutate({
+                  symbol: fetchSymbol,
+                  start: fetchStart,
+                  end: fetchEnd,
+                  source: fetchSource || undefined,
+                })
               }
               disabled={fetchOne.isPending}
               className="w-full bg-primary text-white rounded py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
@@ -271,7 +304,7 @@ export default function Data() {
           批量拉取
           <InfoHint content={INFO_HINTS.data.bulkDownload} />
         </h2>
-        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
           <div>
             <HintLabel htmlFor="data-bulk-market" hint={INFO_HINTS.data.market}>
               市场
@@ -324,9 +357,27 @@ export default function Data() {
               className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
             />
           </div>
+          <div>
+            <label htmlFor="data-bulk-source" className="block text-sm font-medium text-foreground mb-1">
+              数据源
+            </label>
+            <select
+              id="data-bulk-source"
+              value={dlSource}
+              onChange={(e) => setDlSource(e.target.value)}
+              disabled={isDownloading}
+              className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
+            >
+              <option value="">默认 ({defaultProvider})</option>
+              <option value="akshare">akshare</option>
+              <option value="yfinance">yfinance</option>
+            </select>
+          </div>
           <div className="flex items-end">
             <button
-              onClick={() => startDownload.mutate()}
+              onClick={() =>
+                startDownload.mutate({ source: dlSource || undefined })
+              }
               disabled={isDownloading || startDownload.isPending}
               className="w-full bg-primary text-primary-foreground rounded py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
             >

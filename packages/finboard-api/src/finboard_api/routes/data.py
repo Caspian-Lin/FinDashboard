@@ -44,17 +44,13 @@ _CACHE_DIR = "data_cache"
 _SYMBOLS_FILE = "symbols.yaml"
 _CONFIG_FILE = "data_config.json"
 
-_PROVIDER: str | None = None
 
-
-def _get_provider() -> AkShareProvider | YFinanceProvider:
+def _get_provider(source: str | None = None) -> AkShareProvider | YFinanceProvider:
     import os
 
     from finboard_data import AkShareProvider, YFinanceProvider
 
-    global _PROVIDER
-    provider_name = _PROVIDER or os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    _PROVIDER = provider_name
+    provider_name = source or os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         return AkShareProvider()
     return YFinanceProvider()
@@ -245,7 +241,7 @@ async def fetch_data(req: DataFetchRequest) -> FetchResultOut:
     from finboard_data.cache import make_symbol
     from finboard_shared.types import BarPeriod
 
-    provider = _get_provider()
+    provider = _get_provider(req.source)
     sym = make_symbol(req.symbol)
     try:
         bars = await provider.fetch_bars(
@@ -351,7 +347,6 @@ async def fetch_all_data() -> BatchFetchResultOut:
     )
     provider = _get_provider()
     sym_objs = [make_symbol(s.code) for s in config.symbols]
-
     results = await provider.update_cache_batch(
         sym_objs,
         period,
@@ -598,7 +593,7 @@ async def start_bulk_download(
     if not instruments:
         raise HTTPException(status_code=400, detail="未找到匹配的标的(请先同步)")
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
+    provider_name = req.source or os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         primary: AkShareProvider | YFinanceProvider = AkShareProvider(
             max_concurrency=2, request_interval=0.5
