@@ -147,15 +147,18 @@ class EtfMetadataRepository:
     ) -> tuple[int, int, int]:
         """批量写入分类结果。
 
-        ``manual_override=True`` 的人工记录被跳过(不被自动同步覆盖)。
-        返回 ``(inserted, updated, skipped)``。
+        ``manual_override=True`` 或已人工确认(``manually_confirmed``)的记录被跳过
+        (不被自动同步覆盖)。返回 ``(inserted, updated, skipped)``。
         """
         observed_at = source_updated_at or datetime.now(UTC)
         existing = await self._existing_map([c.code for c in classifications])
         inserted = updated = skipped = 0
         for cls in classifications:
             row = existing.get(cls.code)
-            if row is not None and row.manual_override:
+            if row is not None and (
+                row.manual_override
+                or row.review_status == ReviewStatus.MANUALLY_CONFIRMED.value
+            ):
                 skipped += 1
                 continue
             if row is None:
