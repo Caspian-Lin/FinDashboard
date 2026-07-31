@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+from pathlib import Path
+from datetime import date
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,10 +22,12 @@ from finboard_api.schemas import (
     ConvertibleMetadataOut,
     DatasetManifestOut,
     DatasetReleaseCapabilityOut,
+    EtfClassificationUpdate,
     EtfMetadataOut,
     FuturesContractOut,
     InstrumentOut,
     LifecycleEventOut,
+    ResearchDatasetReleaseCreate,
     ResearchDatasetReleaseOut,
     ResearchDatasetReleaseSummaryOut,
 )
@@ -37,6 +43,33 @@ from finboard_persistence import (
 )
 
 router = APIRouter(prefix="/api/instruments", tags=["instruments"])
+
+_DEFAULT_CACHE_DIR = "data_cache"
+_DEFAULT_RELEASE_ROOT = "data_releases"
+
+
+def _current_code_version() -> str:
+    """返回服务端代码版本,不接受网页传入的可伪造版本。"""
+
+    configured = os.getenv("FINBOARD_CODE_VERSION")
+    if configured:
+        return configured
+    result = subprocess.run(
+        ["git", "rev-parse", "--short=12", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        return "unknown"
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return f"{value}-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else value
 
 
 @router.get("", response_model=list[InstrumentOut])
@@ -80,6 +113,71 @@ async def get_etf_metadata(
     row = result.scalar_one_or_none()
     if row is None:
         return None
+    return _etf_to_out(row)
+
+
+_ETF_CLASSIFICATION_DEFAULTS: dict[str, tuple[str, bool]] = {
+    "equity": ("equity", False),
+    "index": ("equity", False),
+    "cross_border": ("equity", True),
+    "bond": ("fixed_income", False),
+    "money_market": ("cash", True),
+    "commodity": ("commodity", True),
+}
+
+
+@router.put("/etf/{code}", response_model=EtfMetadataOut)
+async def update_etf_classification(
+    code: str,
+    request: EtfClassificationUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> EtfMetadataOut:
+    """补齐或修正研究用 ETF 分类,不修改实盘交易配置。"""
+
+    normalized = code.strip().upper()
+    instrument = (
+        await session.execute(
+            select(InstrumentModel).where(InstrumentModel.code == normalized)
+        )
+    ).scalar_one_or_none()
+    if instrument is None:
+        raise HTTPException(status_code=404, detail=f"未找到标的: {normalized}")
+    if instrument.instrument_type != "etf":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{normalized} 不是 ETF,不能写入 ETF 分类",
+        )
+
+    row = (
+        await session.execute(
+            select(EtfMetadataModel).where(EtfMetadataModel.code == normalized)
+        )
+    ).scalar_one_or_none()
+    asset_class, allows_t_plus_0 = _ETF_CLASSIFICATION_DEFAULTS[request.category]
+    if row is None:
+        row = EtfMetadataModel(
+            code=normalized,
+            fund_code=normalized.split(".", 1)[0],
+            category=request.category,
+            underlying_index=request.underlying_index,
+            underlying_asset_class=asset_class,
+            iopv_available=False,
+            allows_t_plus_0=allows_t_plus_0,
+            dividend_policy="cash",
+            source="manual",
+            dataset_version=f"manual-{date.today().isoformat()}",
+        )
+        session.add(row)
+    else:
+        row.category = request.category
+        row.underlying_index = request.underlying_index
+        row.underlying_asset_class = asset_class
+        row.allows_t_plus_0 = allows_t_plus_0
+        row.source = "manual"
+        row.dataset_version = f"manual-{date.today().isoformat()}"
+
+    await session.flush()
+    await session.commit()
     return _etf_to_out(row)
 
 
@@ -213,6 +311,71 @@ async def list_dataset_releases(
         )
         for release in releases
     ]
+
+
+@router.post(
+    "/datasets/releases",
+    response_model=ResearchDatasetReleaseOut,
+    status_code=201,
+)
+async def create_dataset_release(
+    request: ResearchDatasetReleaseCreate,
+    session: AsyncSession = Depends(get_session),
+) -> ResearchDatasetReleaseOut:
+    """把选定范围的本地 Parquet 缓存冻结为不可变研究数据版本。"""
+
+    from finboard_data import (
+        DatasetReleaseError,
+        DatasetReleaseSpec,
+        ImmutableReleaseError,
+    )
+    from finboard_persistence import ResearchDatasetReleaseService
+
+    cache_dir = Path(os.getenv("FINBOARD_DATA_CACHE_DIR", _DEFAULT_CACHE_DIR))
+    release_root = Path(
+        os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT)
+    )
+    source = request.source or os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
+    if source not in {"akshare", "yfinance", "tushare", "manual"}:
+        raise HTTPException(
+            status_code=422,
+            detail=f"不支持的数据来源: {source}",
+        )
+
+    service = ResearchDatasetReleaseService(
+        session,
+        cache_dir=cache_dir,
+        release_root=release_root,
+    )
+    try:
+        release = await service.publish(
+            DatasetReleaseSpec(
+                release_id=request.release_id,
+                dataset_name=request.dataset_name,
+                source=source,
+                version=request.version,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                code_version=_current_code_version(),
+                adjustment=request.adjustment,
+                required_capabilities=tuple(request.required_capabilities),
+                known_limitations=(
+                    "交易日覆盖使用工作日近似;节假日缺口作为 warning 报告",
+                    "停牌优先使用停复牌生命周期事件;缺少事件时仅能由零成交且 OHLC 不变的日线代理识别",
+                    "只冻结本地缓存已有字段,不会回退到联网数据源",
+                ),
+            ),
+            request.symbols,
+        )
+        await session.commit()
+    except ImmutableReleaseError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=f"发布身份冲突: {exc}") from exc
+    except (DatasetReleaseError, ValueError) as exc:
+        await session.rollback()
+        raise HTTPException(status_code=422, detail=f"数据质量门未通过: {exc}") from exc
+
+    return ResearchDatasetReleaseOut.model_validate(release.as_dict())
 
 
 @router.get(

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from finboard_app.selection_schema import FactorSelectionParams
 
@@ -191,6 +191,15 @@ class DataStatusListOut(BaseSchema):
     total: int
     limit: int
     offset: int
+
+
+class DataStatusSelectionOut(BaseSchema):
+    """匹配缓存筛选条件的完整选择快照。"""
+
+    items: list[DataStatusOut]
+    total: int
+    first_date: str | None = None
+    last_date: str | None = None
 
 
 class FetchResultOut(BaseSchema):
@@ -749,6 +758,28 @@ class EtfMetadataOut(BaseSchema):
     dividend_policy: str = "cash"
 
 
+class EtfClassificationUpdate(BaseSchema):
+    """人工补齐研究用 ETF 分类；执行属性由服务端按分类派生。"""
+
+    category: Literal[
+        "equity",
+        "index",
+        "cross_border",
+        "bond",
+        "money_market",
+        "commodity",
+    ]
+    underlying_index: str | None = Field(default=None, max_length=32)
+
+    @field_validator("underlying_index")
+    @classmethod
+    def normalize_underlying_index(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        return normalized or None
+
+
 class BondMetadataOut(BaseSchema):
     code: str
     face_value: Decimal = Decimal("100")
@@ -830,6 +861,64 @@ class DatasetReleaseCapabilityOut(BaseSchema):
     symbol_count: int
     ready_count: int
     missing_requirements: list[str] = Field(default_factory=list)
+
+
+class ResearchDatasetReleaseCreate(BaseSchema):
+    """从本地行情缓存创建不可变研究数据发布。
+
+    缓存目录、发布目录和代码版本均由服务端决定,网页不能提交文件路径或
+    可执行内容。
+    """
+
+    release_id: str = Field(
+        min_length=3,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    dataset_name: str = Field(
+        default="multi_asset_daily_bars",
+        min_length=3,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    source: Literal["akshare", "yfinance", "tushare", "manual"] | None = None
+    version: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    symbols: list[str] = Field(min_length=1, max_length=10_000)
+    start_date: date
+    end_date: date
+    adjustment: Literal["qfq", "hqfq", "none"] = "qfq"
+    required_capabilities: list[
+        Literal[
+            "stock",
+            "bond",
+            "convertible",
+            "futures",
+            "etf:index",
+            "etf:cross_border",
+            "etf:commodity",
+            "etf:bond",
+        ]
+    ] = Field(default_factory=list, max_length=8)
+
+    @field_validator("symbols")
+    @classmethod
+    def normalize_symbols(cls, value: list[str]) -> list[str]:
+        normalized = [symbol.strip().upper() for symbol in value if symbol.strip()]
+        if not normalized:
+            raise ValueError("至少选择一个已缓存标的")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("发布标的不能重复")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> ResearchDatasetReleaseCreate:
+        if self.start_date > self.end_date:
+            raise ValueError("开始日期不能晚于结束日期")
+        return self
 
 
 class DatasetReleaseInstrumentOut(BaseSchema):

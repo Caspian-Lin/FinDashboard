@@ -203,7 +203,7 @@ export default function Strategies() {
                 className={`w-full rounded-md px-3 py-2.5 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-blue-300 ${
                   strategy.kind === selectedKind
                     ? "bg-card text-white"
-                    : "text-foreground hover:bg-slate-200"
+                    : "text-foreground hover:bg-muted/50"
                 }`}
               >
                 <span className="block text-sm font-medium">{strategy.name}</span>
@@ -254,8 +254,8 @@ export default function Strategies() {
               maxLength={100}
               placeholder="例如：沪深 300 中期趋势"
               aria-invalid={Boolean(fieldErrors.name)}
-              className={`w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-200 ${
-                fieldErrors.name ? "border-red-400" : "border-slate-300 focus:border-blue-500"
+              className={`w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/30 ${
+                fieldErrors.name ? "border-destructive" : "border-input focus:border-primary"
               }`}
             />
             {fieldErrors.name && (
@@ -316,7 +316,7 @@ export default function Strategies() {
               <button
                 type="button"
                 onClick={() => resetEditor()}
-                className="inline-flex items-center gap-2 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-foreground hover:bg-background"
+                className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-background"
               >
                 <Plus size={16} aria-hidden="true" />
                 另存新预设
@@ -326,7 +326,7 @@ export default function Strategies() {
               <button
                 type="button"
                 onClick={openBacktest}
-                className="ml-auto inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+                className="ml-auto inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-primary hover:bg-accent"
               >
                 <FlaskConical size={16} aria-hidden="true" />
                 带入回测
@@ -352,7 +352,7 @@ export default function Strategies() {
             </p>
           )}
           {presetsQuery.data?.length === 0 && (
-            <div className="rounded-lg border border-dashed border-slate-300 p-4 text-center">
+            <div className="rounded-lg border border-dashed border-input p-4 text-center">
               <p className="text-sm font-medium text-foreground">还没有策略预设</p>
               <p className="mt-1 text-xs leading-5 text-slate-500">
                 在左侧选择策略，填写参数后保存；以后可以直接载入回测。
@@ -365,7 +365,7 @@ export default function Strategies() {
               <div
                 key={preset.id}
                 className={`rounded-lg border bg-card p-3 ${
-                  preset.id === selectedPresetId ? "border-blue-500" : "border-border"
+                  preset.id === selectedPresetId ? "border-primary" : "border-border"
                 }`}
               >
                 <button

@@ -56,6 +56,26 @@ export const INFO_HINTS = {
     },
   },
   data: {
+    databaseUniverse: {
+      title: "数据库标的元数据",
+      description: "已同步到 PostgreSQL 且当前状态为 active 的标的数量。",
+      detail: "它与行情缓存数量不同；运行集成测试、同步失败或尚未同步时，可能只有少量测试/历史记录。",
+    },
+    universeSync: {
+      title: "标的池同步",
+      description: "从 akshare 获取 A 股和 ETF 的代码、名称、市场、类型与交易所，并更新数据库。",
+      detail: "这里只同步元数据，不拉取历史行情。上游异常时原有标的不会被空列表覆盖。",
+    },
+    bulkDownload: {
+      title: "批量行情拉取",
+      description: "按数据库中当前活跃标的批量下载日线，并写入本地 Parquet 缓存。",
+      detail: "任务依赖标的池元数据；如果数据库只有两只标的，批量任务也只会处理这两只。",
+    },
+    instrumentList: {
+      title: "活跃标的列表",
+      description: "来自 PostgreSQL 标的元数据表，点击一行可带入单标的拉取。",
+      detail: "这里不是缓存文件列表；缓存覆盖请查看页面底部“已缓存数据”。",
+    },
     symbol: {
       title: "证券标的代码",
       description: "采用“代码.交易所”格式，例如 510300.SH 或 000001.SZ。",

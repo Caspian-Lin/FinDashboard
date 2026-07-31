@@ -431,7 +431,7 @@ async def _fetch_data(
     from finboard_shared.models import Symbol as Sym
     from finboard_shared.types import BarPeriod, Market
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider()
     else:
@@ -468,7 +468,7 @@ async def _fetch_all_data(*, config_file: str) -> None:
         if config.fetch_period in BarPeriod.__members__
         else BarPeriod(config.fetch_period)
     )
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider()
     else:
@@ -841,7 +841,7 @@ async def _bulk_download(
 
     typer.echo(f"开始批量拉取 {len(instruments)} 个标的 ({start_date} ~ today)")
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider(
             max_concurrency=2, request_interval=0.5

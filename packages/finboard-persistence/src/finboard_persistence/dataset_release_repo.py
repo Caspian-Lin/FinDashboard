@@ -243,6 +243,7 @@ class ReleaseInstrumentCatalogRepository:
                     _etf_candidate(
                         row,
                         etf_rows.get(code),
+                        lifecycle_events=events.get(code, ()),
                         name_history=names.get(code, ()),
                     )
                 )
@@ -261,6 +262,7 @@ class ReleaseInstrumentCatalogRepository:
                     _plain_candidate(
                         row,
                         instrument_type=instrument_type,
+                        lifecycle_events=events.get(code, ()),
                         name_history=names.get(code, ()),
                     )
                 )
@@ -407,6 +409,7 @@ def _plain_candidate(
     row: InstrumentModel,
     *,
     instrument_type: InstrumentType,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
     name_history: tuple[tuple[str, date, date | None], ...],
 ) -> ReleaseInstrumentSpec:
     market = Market(row.market)
@@ -431,6 +434,10 @@ def _plain_candidate(
         list_date=row.list_date,
         delist_date=row.delist_date,
         status=_status(row.status),
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(
+            sorted({event.event_type for event in lifecycle_events})
+        ),
         name_history=name_history,
     )
 
@@ -439,6 +446,7 @@ def _etf_candidate(
     row: InstrumentModel,
     metadata: EtfMetadataModel | None,
     *,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
     name_history: tuple[tuple[str, date, date | None], ...],
 ) -> ReleaseInstrumentSpec:
     catalog = research_etf_catalog_entry(row.code)
@@ -473,6 +481,10 @@ def _etf_candidate(
         list_date=list_date,
         delist_date=row.delist_date,
         status=_status(row.status),
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(
+            sorted({event.event_type for event in lifecycle_events})
+        ),
         name_history=name_history,
     )
 

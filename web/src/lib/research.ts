@@ -382,6 +382,7 @@ export const strategySpecApi = {
 export interface DatasetReleaseSummary {
   release_id: string;
   dataset_name: string;
+  source: string;
   version: string;
   schema_version: string;
   start_date: string;
@@ -391,22 +392,47 @@ export interface DatasetReleaseSummary {
   symbol_count: number;
   row_count: number;
   coverage_pct: number;
-  capabilities: string[];
+  capabilities: DatasetReleaseCapability[];
   quality_status: string;
+  known_limitations: string[];
+  published_at: string;
   release_checksum: string;
+}
+
+export interface DatasetReleaseCapability {
+  key: string;
+  status: string;
+  symbol_count: number;
+  ready_count: number;
+  missing_requirements: string[];
+}
+
+export interface DatasetReleaseCreate {
+  release_id: string;
+  dataset_name: string;
+  source?: "akshare" | "yfinance" | "tushare" | "manual";
+  version: string;
+  symbols: string[];
+  start_date: string;
+  end_date: string;
+  adjustment: "qfq" | "hqfq" | "none";
+  required_capabilities: string[];
 }
 
 export interface DatasetManifest {
   dataset_name: string;
   source: string;
   version: string;
+  start_date?: string;
+  end_date?: string;
   row_count: number;
   symbol_count: number;
   coverage_pct: number;
-  gaps: number;
+  gaps: unknown[];
   checksum: string;
   quality_status: string;
   quality_report: Record<string, unknown>;
+  published_at: string;
 }
 
 export interface InstrumentMetadata {
@@ -414,19 +440,83 @@ export interface InstrumentMetadata {
   name: string;
   market: string;
   instrument_type: string;
-  listed_date?: string;
-  delisted_date?: string;
-  is_st?: boolean;
-  is_suspended?: boolean;
+  exchange?: string;
+  list_date?: string;
+  delist_date?: string;
+  status: string;
+  sector?: string;
+  industry?: string;
+}
+
+export type EtfCategory =
+  | "equity"
+  | "index"
+  | "cross_border"
+  | "bond"
+  | "money_market"
+  | "commodity";
+
+export interface EtfMetadata {
+  code: string;
+  fund_code: string;
+  category: EtfCategory;
+  underlying_index: string | null;
+  underlying_asset_class: string;
+  management_fee_rate: string | null;
+  custody_fee_rate: string | null;
+  tracking_error: string | null;
+  inception_date: string | null;
+  listing_date: string | null;
+  delisting_date: string | null;
+  iopv_available: boolean;
+  allows_t_plus_0: boolean;
+  dividend_policy: string;
+}
+
+export interface EtfClassificationUpdate {
+  category: EtfCategory;
+  underlying_index?: string | null;
+}
+
+export interface InstrumentMetadataPage {
+  items: InstrumentMetadata[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface LifecycleEvent {
-  event_id: string;
+  id: number;
   symbol: string;
   event_type: string;
-  event_date: string;
-  description: string;
+  effective_date: string;
+  available_at: string;
+  source: string;
+  dataset_version: string;
   details: Record<string, unknown>;
+}
+
+export interface CachedDataStatus {
+  symbol: string;
+  period: string;
+  adjust: string;
+  bar_count: number;
+  first_date?: string;
+  last_date?: string;
+}
+
+export interface CachedDataStatusPage {
+  items: CachedDataStatus[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface CachedDataStatusSelection {
+  items: CachedDataStatus[];
+  total: number;
+  first_date: string | null;
+  last_date: string | null;
 }
 
 export const datasetApi = {
@@ -449,15 +539,65 @@ export const datasetApi = {
   },
   releaseDetail: (releaseId: string) =>
     fetchJSON<Record<string, unknown>>(`/instruments/datasets/releases/${releaseId}`),
-  instruments: (params?: { market?: string; instrument_type?: string; limit?: number }) => {
+  createRelease: (body: DatasetReleaseCreate) =>
+    fetchJSON<DatasetReleaseSummary>("/instruments/datasets/releases", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  cachedData: (params?: {
+    q?: string;
+    period?: string;
+    adjust?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.q) q.set("q", params.q);
+    if (params?.period) q.set("period", params.period);
+    if (params?.adjust) q.set("adjust", params.adjust);
+    q.set("limit", String(params?.limit ?? 500));
+    q.set("offset", String(params?.offset ?? 0));
+    return fetchJSON<CachedDataStatusPage>(`/data/status-page?${q.toString()}`);
+  },
+  cachedDataSelection: (params?: {
+    q?: string;
+    period?: string;
+    adjust?: string;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.q) q.set("q", params.q);
+    if (params?.period) q.set("period", params.period);
+    if (params?.adjust) q.set("adjust", params.adjust);
+    return fetchJSON<CachedDataStatusSelection>(
+      `/data/status-selection?${q.toString()}`,
+    );
+  },
+  instruments: (params?: {
+    market?: string;
+    instrument_type?: string;
+    q?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.q) q.set("q", params.q);
     q.set("limit", String(params?.limit ?? 100));
-    return fetchJSON<InstrumentMetadata[]>(`/instruments${q.toString() ? "?" + q : ""}`);
+    q.set("offset", String(params?.offset ?? 0));
+    return fetchJSON<InstrumentMetadataPage>(`/data/instruments?${q.toString()}`);
   },
   instrumentDetail: (code: string) =>
     fetchJSON<InstrumentMetadata>(`/instruments/${code}`),
+  etfMetadata: (code: string) =>
+    fetchJSON<EtfMetadata | null>(
+      `/instruments/etf/${encodeURIComponent(code.split(".", 1)[0])}`,
+    ),
+  updateEtfClassification: (code: string, body: EtfClassificationUpdate) =>
+    fetchJSON<EtfMetadata>(
+      `/instruments/etf/${encodeURIComponent(code)}`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
   lifecycle: (symbol: string, params?: { event_type?: string; limit?: number }) => {
     const q = new URLSearchParams();
     if (params?.event_type) q.set("event_type", params.event_type);

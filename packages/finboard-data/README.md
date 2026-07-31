@@ -30,11 +30,11 @@ finboard data fetch 510300.SH --period D1 --start 2023-01-01 --end 2024-12-31 --
 
 ## 依赖
 
-`akshare`、`yfinance`、`tushare` 和 `pyarrow` 均为可选依赖(lazy import),
-Linux CI 无需安装:
+`akshare` 是标的池发现的基础依赖,会随 `finboard-data` 默认安装。
+`yfinance`、`tushare` 和 `pyarrow` 仍按实际数据源/缓存能力选装:
 
 ```bash
-uv pip install -e ".[akshare,yfinance,tushare,cache]"
+uv pip install -e ".[yfinance,tushare,cache]"
 ```
 
 ## 研究数据契约
@@ -273,8 +273,15 @@ PostgreSQL 的 `research_dataset_releases` 保存完整 manifest 和常用查询
 
 | 方法 | 路径 | 内容 |
 |---|---|---|
+| `POST` | `/api/instruments/datasets/releases` | 从服务端本地缓存选择标的/日期并冻结发布 |
 | `GET` | `/api/instruments/datasets/releases` | 版本、质量、能力与覆盖列表 |
 | `GET` | `/api/instruments/datasets/releases/{release_id}` | 完整逐标的审计和资产规则 |
+
+研究工作台的“数据与标的 → 数据发布”提供同一入口。发布请求只能提交结构化
+标识、来源、日期、复权方式、标的和质量门;不能提交文件路径或代码。服务端固定
+读取 `FINBOARD_DATA_CACHE_DIR`(默认 `data_cache`)并写入
+`FINBOARD_DATA_RELEASE_ROOT`(默认 `data_releases`)。发布不会联网补数据,
+不会自动启动因子计算、回测、模拟盘或实盘流程。
 
 `FrozenReleaseProvider` 只读取调用方指定的 `release_id`,并在首次读取每个标的时
 复核文件 checksum。标的不在发布中、周期/复权/市场不符或日期越界时直接拒绝,

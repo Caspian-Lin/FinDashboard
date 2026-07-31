@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
-import { INFO_HINTS } from "../lib/infoHints";
+import { INFO_HINTS, type InfoHintDefinition } from "../lib/infoHints";
 
 const BULK_PHASE_LABELS: Record<string, string> = {
   starting: "准备任务",
@@ -42,6 +42,28 @@ export default function Data() {
         limit: 500,
       }),
   });
+  const { data: databaseUniverse } = useQuery({
+    queryKey: ["instrument-count", "all"],
+    queryFn: () => api.getInstruments({ limit: 1 }),
+  });
+  const { data: aShareStocks } = useQuery({
+    queryKey: ["instrument-count", "a_share", "stock"],
+    queryFn: () =>
+      api.getInstruments({
+        market: "a_share",
+        instrument_type: "stock",
+        limit: 1,
+      }),
+  });
+  const { data: etfs } = useQuery({
+    queryKey: ["instrument-count", "a_share", "etf"],
+    queryFn: () =>
+      api.getInstruments({
+        market: "a_share",
+        instrument_type: "etf",
+        limit: 1,
+      }),
+  });
 
   const { data: searchResults } = useQuery({
     queryKey: ["instrument-search", searchQuery],
@@ -59,6 +81,8 @@ export default function Data() {
     mutationFn: () => api.syncUniverse(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["instruments"] });
+      queryClient.invalidateQueries({ queryKey: ["instrument-count"] });
+      queryClient.invalidateQueries({ queryKey: ["research-instruments"] });
     },
   });
 
@@ -84,9 +108,13 @@ export default function Data() {
     },
   });
 
-  const totalInstruments = instruments?.total ?? 0;
+  const totalInstruments = databaseUniverse?.total ?? 0;
+  const listedInstrumentTotal = instruments?.total ?? 0;
   const isDownloading = startDownload.isPending || bulkStatus?.status === "running";
   const phaseLabel = BULK_PHASE_LABELS[bulkStatus?.phase ?? ""];
+  const visibleInstruments = (
+    searchQuery.length >= 2 ? (searchResults ?? []) : (instruments?.items ?? [])
+  ).slice(0, 200);
 
   return (
     <div>
@@ -94,23 +122,14 @@ export default function Data() {
 
       {/* Stats row */}
       <div className="mb-6 grid grid-cols-2 gap-4 xl:grid-cols-4">
-        <StatCard label="数据库标的数" value={String(totalInstruments)} />
+        <StatCard
+          label="数据库标的数"
+          value={String(totalInstruments)}
+          hint={INFO_HINTS.data.databaseUniverse}
+        />
         <StatCard label="缓存标的数" value={String(status?.total ?? 0)} />
-        <StatCard
-          label="A股"
-          value={String(
-            instruments?.items.filter(
-              (i) => i.market === "a_share" && i.instrument_type === "stock",
-            ).length ?? 0,
-          )}
-        />
-        <StatCard
-          label="ETF"
-          value={String(
-            instruments?.items.filter((i) => i.instrument_type === "etf")
-              .length ?? 0,
-          )}
-        />
+        <StatCard label="A股" value={String(aShareStocks?.total ?? 0)} />
+        <StatCard label="ETF" value={String(etfs?.total ?? 0)} />
       </div>
 
       {/* Sync + Single fetch */}
@@ -118,7 +137,10 @@ export default function Data() {
         {/* Universe Sync */}
         <div className="bg-card rounded-lg shadow p-5">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-semibold">标的池同步</h2>
+            <h2 className="flex items-center gap-1 text-lg font-semibold">
+              标的池同步
+              <InfoHint content={INFO_HINTS.data.universeSync} />
+            </h2>
             {totalInstruments > 0 && (
               <span className="text-sm text-muted-foreground/70">已同步 {totalInstruments} 条</span>
             )}
@@ -127,6 +149,7 @@ export default function Data() {
             从 akshare 自动发现全市场 A 股(~5500) + ETF(~1600),写入数据库。
           </p>
           <button
+            type="button"
             onClick={() => sync.mutate()}
             disabled={sync.isPending}
             className="w-full bg-indigo-600 text-white rounded py-2 text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
@@ -157,7 +180,7 @@ export default function Data() {
                 id="data-symbol"
                 value={fetchSymbol}
                 onChange={(e) => setFetchSymbol(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm font-mono"
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm font-mono"
                 placeholder="510300.SH"
               />
             </div>
@@ -171,7 +194,7 @@ export default function Data() {
                   type="date"
                   value={fetchStart}
                   onChange={(e) => setFetchStart(e.target.value)}
-                  className="w-full border rounded px-3 py-2 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
                 />
               </div>
               <div>
@@ -183,7 +206,7 @@ export default function Data() {
                   type="date"
                   value={fetchEnd}
                   onChange={(e) => setFetchEnd(e.target.value)}
-                  className="w-full border rounded px-3 py-2 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
                 />
               </div>
             </div>
@@ -212,7 +235,10 @@ export default function Data() {
 
       {/* Bulk Download */}
       <div className="bg-card rounded-lg shadow p-5 mb-6">
-        <h2 className="text-lg font-semibold mb-4">批量拉取</h2>
+        <h2 className="mb-4 flex items-center gap-1 text-lg font-semibold">
+          批量拉取
+          <InfoHint content={INFO_HINTS.data.bulkDownload} />
+        </h2>
         <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <div>
             <HintLabel htmlFor="data-bulk-market" hint={INFO_HINTS.data.market}>
@@ -223,7 +249,7 @@ export default function Data() {
               value={dlMarket}
               onChange={(e) => setDlMarket(e.target.value)}
               disabled={isDownloading}
-              className="w-full border rounded px-3 py-2 text-sm"
+              className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
             >
               <option value="a_share">A股</option>
               <option value="hk">港股</option>
@@ -242,7 +268,7 @@ export default function Data() {
               value={dlType}
               onChange={(e) => setDlType(e.target.value)}
               disabled={isDownloading}
-              className="w-full border rounded px-3 py-2 text-sm"
+              className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
             >
               <option value="">全部</option>
               <option value="stock">股票</option>
@@ -263,14 +289,14 @@ export default function Data() {
               value={dlStart}
               onChange={(e) => setDlStart(e.target.value)}
               disabled={isDownloading}
-              className="w-full border rounded px-3 py-2 text-sm"
+              className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
             />
           </div>
           <div className="flex items-end">
             <button
               onClick={() => startDownload.mutate()}
               disabled={isDownloading || startDownload.isPending}
-              className="w-full bg-green-600 text-white rounded py-2 text-sm font-medium hover:bg-green-700 disabled:opacity-50"
+              className="w-full bg-primary text-primary-foreground rounded py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
             >
               {isDownloading ? "拉取中..." : "开始批量拉取"}
             </button>
@@ -327,18 +353,21 @@ export default function Data() {
       {/* Instruments table */}
       <div className="bg-card rounded-lg shadow mb-6">
         <div className="flex items-center justify-between px-5 py-3 border-b">
-          <h2 className="text-lg font-semibold">标的列表 ({totalInstruments})</h2>
+          <h2 className="flex items-center gap-1 text-lg font-semibold">
+            标的列表 ({listedInstrumentTotal})
+            <InfoHint content={INFO_HINTS.data.instrumentList} />
+          </h2>
           <div className="flex gap-3">
             <input
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="搜索代码/名称"
-              className="border rounded px-3 py-1 text-sm w-40"
+              className="border border-input bg-card text-foreground rounded px-3 py-1 text-sm w-40"
             />
             <select
               value={marketFilter}
               onChange={(e) => setMarketFilter(e.target.value)}
-              className="border rounded px-2 py-1 text-sm"
+              className="border border-input bg-card text-foreground rounded px-2 py-1 text-sm"
             >
               <option value="">全部市场</option>
               <option value="a_share">A股</option>
@@ -348,7 +377,7 @@ export default function Data() {
             <select
               value={typeFilter}
               onChange={(e) => setTypeFilter(e.target.value)}
-              className="border rounded px-2 py-1 text-sm"
+              className="border border-input bg-card text-foreground rounded px-2 py-1 text-sm"
             >
               <option value="">全部类型</option>
               <option value="stock">股票</option>
@@ -367,15 +396,10 @@ export default function Data() {
             </tr>
           </thead>
           <tbody>
-            {(searchQuery.length >= 2
-              ? (searchResults ?? [])
-              : (instruments?.items ?? [])
-            )
-              .slice(0, 200)
-              .map((ins) => (
+            {visibleInstruments.map((ins) => (
                 <tr
                   key={ins.code}
-                  className="border-t hover:bg-blue-50 cursor-pointer"
+                  className="cursor-pointer border-t hover:bg-accent"
                   onClick={() => setFetchSymbol(ins.code)}
                 >
                   <td className="px-4 py-2 font-mono">{ins.code}</td>
@@ -387,9 +411,11 @@ export default function Data() {
               ))}
           </tbody>
         </table>
-        {totalInstruments === 0 && searchQuery.length < 2 && (
+        {visibleInstruments.length === 0 && (
           <div className="p-8 text-center text-muted-foreground/70">
-            标的池为空 — 点击上方"同步标的池"按钮自动发现
+            {totalInstruments === 0
+              ? '标的池为空 — 点击上方“同步标的池”自动发现'
+              : "没有匹配当前搜索或筛选条件的活跃标的"}
           </div>
         )}
       </div>
@@ -438,10 +464,21 @@ export default function Data() {
   );
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
+function StatCard({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: InfoHintDefinition;
+}) {
   return (
     <div className="bg-card rounded-lg shadow p-4">
-      <div className="text-muted-foreground text-sm">{label}</div>
+      <div className="flex items-center gap-1 text-sm text-muted-foreground">
+        {label}
+        {hint && <InfoHint content={hint} />}
+      </div>
       <div className="text-xl font-bold mt-1">{value}</div>
     </div>
   );

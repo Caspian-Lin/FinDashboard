@@ -671,14 +671,12 @@ name = "finboard-data"
 version = "0.1.0"
 source = { editable = "packages/finboard-data" }
 dependencies = [
+    { name = "akshare" },
     { name = "finboard-shared" },
     { name = "structlog" },
 ]
 
 [package.optional-dependencies]
-akshare = [
-    { name = "akshare" },
-]
 cache = [
     { name = "pyarrow" },
 ]
@@ -691,14 +689,14 @@ yfinance = [
 
 [package.metadata]
 requires-dist = [
-    { name = "akshare", marker = "extra == 'akshare'", specifier = ">=1.12" },
+    { name = "akshare", specifier = ">=1.12" },
     { name = "finboard-shared", editable = "packages/finboard-shared" },
     { name = "pyarrow", marker = "extra == 'cache'", specifier = ">=15.0" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "tushare", marker = "extra == 'tushare'", specifier = ">=1.4.29" },
     { name = "yfinance", marker = "extra == 'yfinance'", specifier = ">=1.5" },
 ]
-provides-extras = ["akshare", "yfinance", "tushare", "cache"]
+provides-extras = ["yfinance", "tushare", "cache"]
 
 [[package]]
 name = "finboard-persistence"

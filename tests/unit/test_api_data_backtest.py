@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -51,6 +52,76 @@ class TestDataRoutes:
 
         assert resp.status_code == 200
         assert resp.json() == {"items": [], "total": 0, "limit": 200, "offset": 0}
+
+    def test_cache_status_selection_returns_all_filtered_items_and_union_range(
+        self,
+        client: TestClient,
+        tmp_path: Path,
+    ) -> None:
+        """全选端点不受分页限制,并返回上市/退市友好的整体日期范围。"""
+        from finboard_data.cache import CacheMetadata
+
+        first = tmp_path / "510300.SH_1d_qfq.parquet"
+        second = tmp_path / "600519.SH_1d_qfq.parquet"
+        ignored = tmp_path / "510300.SH_1d_hqfq.parquet"
+        for path in (first, second, ignored):
+            path.touch()
+
+        metadata = {
+            first.name: CacheMetadata(
+                bar_count=200,
+                first_date=date(2020, 1, 2),
+                last_date=date(2024, 12, 31),
+                file_size=1,
+            ),
+            second.name: CacheMetadata(
+                bar_count=100,
+                first_date=date(2022, 3, 1),
+                last_date=date(2023, 6, 30),
+                file_size=1,
+            ),
+        }
+
+        async def metadata_for_path(path: Path) -> CacheMetadata:
+            return metadata[path.name]
+
+        with (
+            patch("finboard_api.routes.data._CACHE_DIR", str(tmp_path)),
+            patch(
+                "finboard_data.cache.ParquetCache.metadata",
+                new=AsyncMock(side_effect=metadata_for_path),
+            ),
+        ):
+            resp = client.get("/api/data/status-selection?period=1d&adjust=qfq")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["total"] == 2
+        assert [item["symbol"] for item in payload["items"]] == [
+            "510300.SH",
+            "600519.SH",
+        ]
+        assert payload["first_date"] == "2020-01-02"
+        assert payload["last_date"] == "2024-12-31"
+
+    def test_sync_universe_reports_missing_akshare_as_service_unavailable(
+        self,
+        client: TestClient,
+        app: FastAPI,
+    ) -> None:
+        """安装损坏时返回可操作错误,不能泄漏为 ASGI 500。"""
+        from finboard_api.deps import get_db_session
+
+        app.dependency_overrides[get_db_session] = lambda: AsyncMock()
+        with patch(
+            "finboard_data.discovery.UniverseDiscovery.discover_all",
+            new=AsyncMock(side_effect=ModuleNotFoundError("akshare")),
+        ):
+            resp = client.post("/api/data/sync")
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 503
+        assert "uv sync --all-packages" in resp.json()["detail"]
 
     def test_fetch_all_updates_cache_without_materializing_bars(
         self, client: TestClient

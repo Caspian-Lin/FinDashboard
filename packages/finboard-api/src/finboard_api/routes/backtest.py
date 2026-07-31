@@ -65,7 +65,7 @@ async def run_backtest(
 
     import os
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider()
     else:

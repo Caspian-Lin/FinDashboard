@@ -14,6 +14,7 @@ import {
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import FactorSelectionForm from "../components/FactorSelectionForm";
 import StrategyParamForm from "../components/StrategyParamForm";
+import { SelectAllResultsButton } from "../components/selection/SelectAllResultsButton";
 import {
   defaultStrategyParams,
   normalizeStrategyParams,
@@ -308,7 +309,7 @@ export default function Backtest() {
                 id="backtest-strategy"
                 value={strategy}
                 onChange={(e) => changeStrategy(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm"
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               >
                 {backtestStrategies.map((s) => (
                   <option key={s.kind} value={s.kind}>
@@ -326,7 +327,7 @@ export default function Backtest() {
                 type="date"
                 value={start}
                 onChange={(e) => setStart(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm"
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               />
             </div>
             <div>
@@ -338,7 +339,7 @@ export default function Backtest() {
                 type="date"
                 value={end}
                 onChange={(e) => setEnd(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm"
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               />
             </div>
             <div>
@@ -353,7 +354,7 @@ export default function Backtest() {
                 type="number"
                 value={capital}
                 onChange={(e) => setCapital(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm"
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               />
             </div>
           </div>
@@ -420,7 +421,7 @@ export default function Backtest() {
                   step="0.0001"
                   value={commissionRate}
                   onChange={(e) => setCommissionRate(e.target.value)}
-                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
                   placeholder="0.0003 = 万3"
                 />
               </div>
@@ -437,7 +438,7 @@ export default function Backtest() {
                   type="number"
                   value={commissionMin}
                   onChange={(e) => setCommissionMin(e.target.value)}
-                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
                   placeholder="1"
                 />
               </div>
@@ -455,7 +456,7 @@ export default function Backtest() {
                   step="0.0001"
                   value={stampTaxRate}
                   onChange={(e) => setStampTaxRate(e.target.value)}
-                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
                   placeholder="0.0005 = 万5, ETF 填 0"
                 />
               </div>
@@ -472,7 +473,7 @@ export default function Backtest() {
                   type="number"
                   value={slippageBps}
                   onChange={(e) => setSlippageBps(e.target.value)}
-                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
                   placeholder="0"
                 />
               </div>
@@ -738,13 +739,11 @@ function SymbolSelector({
           <InfoHint content={INFO_HINTS.backtest.symbols} />
         </div>
         <div className="flex gap-2">
-          <button
-            onClick={() => selectAllCandidates.mutate()}
-            disabled={selectAllCandidates.isPending || totalCount === 0}
-            className="text-xs text-primary hover:underline disabled:opacity-50"
-          >
-            {selectAllCandidates.isPending ? "全选中..." : `全选结果(${totalCount})`}
-          </button>
+          <SelectAllResultsButton
+            totalCount={totalCount}
+            isPending={selectAllCandidates.isPending}
+            onSelectAll={() => selectAllCandidates.mutate()}
+          />
           {selectedSymbols.length > 0 && (
             <button onClick={clearSelection} className="text-xs text-muted-foreground hover:underline">
               清空
@@ -764,10 +763,10 @@ function SymbolSelector({
           onChange={(e) => setSearchQuery(e.target.value)}
           className="flex-1 border rounded px-3 py-1.5 text-sm"
         />
-        <select value={marketFilter} onChange={(e) => setMarketFilter(e.target.value)} className="border rounded px-2 py-1.5 text-sm">
+        <select value={marketFilter} onChange={(e) => setMarketFilter(e.target.value)} className="border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm">
           {MARKETS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
         </select>
-        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="border rounded px-2 py-1.5 text-sm">
+        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm">
           {TYPES.map((t) => (<option key={t.value} value={t.value}>{t.label}</option>))}
         </select>
       </div>
@@ -782,7 +781,7 @@ function SymbolSelector({
         {candidates.map((c) => {
           const checked = selectedSymbols.includes(c.code);
           return (
-            <label key={c.code} className="flex items-center gap-2 px-3 py-1.5 hover:bg-blue-50 cursor-pointer text-sm">
+            <label key={c.code} className="flex items-center gap-2 px-3 py-1.5 hover:bg-accent cursor-pointer text-sm">
               <input type="checkbox" checked={checked} onChange={() => toggleSymbol(c.code)} />
               <span className="font-mono text-xs">{c.code}</span>
               <span className="text-muted-foreground text-xs truncate">{c.name}</span>
@@ -855,7 +854,7 @@ function SymbolSelector({
             <button
               onClick={() => newWlName.trim() && createWl.mutate(newWlName.trim())}
               disabled={!newWlName.trim() || createWl.isPending}
-              className="text-xs bg-green-600 text-white rounded px-3 py-1 hover:bg-green-700 disabled:opacity-50"
+              className="text-xs bg-primary text-primary-foreground rounded px-3 py-1 hover:bg-primary/90 disabled:opacity-50"
             >
               存当前选择
             </button>

@@ -173,6 +173,66 @@ class TestResearchDatasetReleases:
             await get_dataset_release("missing", session=mock_session)
         assert exc_info.value.status_code == 404
 
+    @pytest.mark.asyncio
+    async def test_create_release_uses_server_paths_and_commits(
+        self,
+        mock_session: MagicMock,
+    ) -> None:
+        import os
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from finboard_api.routes.instruments import create_dataset_release
+        from finboard_api.schemas import ResearchDatasetReleaseCreate
+
+        mock_session.commit = AsyncMock()
+        mock_session.rollback = AsyncMock()
+        service = MagicMock()
+        service.publish = AsyncMock(return_value=_dataset_release())
+        request = ResearchDatasetReleaseCreate(
+            release_id="api-r77-v1",
+            dataset_name="multi_asset_daily_bars",
+            source="yfinance",
+            version="2026-07-31-v1",
+            symbols=["510300.sh"],
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 5),
+            adjustment="qfq",
+            required_capabilities=[],
+        )
+
+        with (
+            patch(
+                "finboard_persistence.ResearchDatasetReleaseService",
+                return_value=service,
+            ) as service_cls,
+            patch(
+                "finboard_api.routes.instruments._current_code_version",
+                return_value="deadbeef",
+            ),
+            patch.dict(
+                os.environ,
+                {
+                    "FINBOARD_DATA_CACHE_DIR": "test-cache",
+                    "FINBOARD_DATA_RELEASE_ROOT": "test-releases",
+                },
+            ),
+        ):
+            result = await create_dataset_release(request, session=mock_session)
+
+        assert result.release_id == "api-r77-v1"
+        service_cls.assert_called_once_with(
+            mock_session,
+            cache_dir=Path("test-cache"),
+            release_root=Path("test-releases"),
+        )
+        spec, symbols = service.publish.await_args.args
+        assert symbols == ["510300.SH"]
+        assert spec.code_version == "deadbeef"
+        assert spec.required_capabilities == ()
+        mock_session.commit.assert_awaited_once()
+        mock_session.rollback.assert_not_awaited()
+
 
 class TestLifecycleEvents:
     @pytest.mark.asyncio

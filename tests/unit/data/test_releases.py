@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -287,6 +288,135 @@ async def test_publish_multi_asset_release_and_read_only_provider(tmp_path: Path
             _START - timedelta(days=1),
             _END,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "list_date", "delist_date", "bar_slice", "category"),
+    [
+        ("600001.SH", date(2024, 1, 4), None, slice(2, None), "short_history"),
+        ("600002.SH", date(2000, 1, 1), date(2024, 1, 3), slice(None, 2), "delisted"),
+    ],
+)
+async def test_release_coverage_is_clipped_to_listing_lifecycle(
+    tmp_path: Path,
+    code: str,
+    list_date: date,
+    delist_date: date | None,
+    bar_slice: slice,
+    category: str,
+) -> None:
+    """发布周期可跨越上市/退市边界,边界外不计为缺失。"""
+    instrument = replace(
+        _stock(code),
+        list_date=list_date,
+        delist_date=delist_date,
+        status=ListingStatus.DELISTED if delist_date else ListingStatus.ACTIVE,
+    )
+    cache = ParquetCache(tmp_path / "cache")
+    await cache.write(
+        Symbol(code=code, market=Market.A_SHARE),
+        BarPeriod.D1,
+        "qfq",
+        _bars(code)[bar_slice],
+    )
+    spec = replace(
+        _spec(f"lifecycle-{code.replace('.', '-')}"),
+        required_capabilities=(),
+    )
+
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    ).publish(spec, [instrument])
+
+    item = release.instrument(code)
+    assert item.coverage_pct == Decimal("1")
+    assert item.missing_sessions == 0
+    assert item.category == category
+
+
+@pytest.mark.asyncio
+async def test_suspended_zero_volume_bar_is_preserved_as_warning(tmp_path: Path) -> None:
+    """有停牌代理 Bar 时保留真实时间线,不把停牌当数据异常。"""
+    instrument = _stock("600003.SH")
+    bars = _bars(instrument.code)
+    bars[1] = replace(
+        bars[1],
+        open=bars[1].close,
+        high=bars[1].close,
+        low=bars[1].close,
+        volume=Decimal("0"),
+    )
+    cache = ParquetCache(tmp_path / "cache")
+    await cache.write(
+        Symbol(code=instrument.code, market=instrument.market),
+        BarPeriod.D1,
+        "qfq",
+        bars,
+    )
+    spec = replace(_spec("suspended-r1"), required_capabilities=())
+
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    ).publish(spec, [instrument])
+
+    item = release.instrument(instrument.code)
+    assert item.ready
+    assert item.suspended_sessions == 1
+    assert item.coverage_pct == Decimal("1")
+    assert item.issues == ("suspended_sessions:1",)
+
+
+@pytest.mark.asyncio
+async def test_missing_bar_in_authoritative_suspension_window_is_not_a_gap(
+    tmp_path: Path,
+) -> None:
+    """有停复牌事件时,数据源省略停牌 Bar 也不降低有效交易日覆盖率。"""
+    code = "600004.SH"
+    events = (
+        ReleaseLifecycleEvent(
+            event_type="suspension",
+            effective_date=date(2024, 1, 3),
+            available_at=datetime(2024, 1, 3, tzinfo=UTC),
+            source="exchange",
+            dataset_version="events-v1",
+        ),
+        ReleaseLifecycleEvent(
+            event_type="resumption",
+            effective_date=date(2024, 1, 4),
+            available_at=datetime(2024, 1, 4, tzinfo=UTC),
+            source="exchange",
+            dataset_version="events-v1",
+        ),
+    )
+    instrument = replace(
+        _stock(code),
+        lifecycle_events=events,
+        present_event_types=("resumption", "suspension"),
+    )
+    bars = [bar for bar in _bars(code) if bar.timestamp.date() != date(2024, 1, 3)]
+    cache = ParquetCache(tmp_path / "cache")
+    await cache.write(
+        Symbol(code=code, market=Market.A_SHARE),
+        BarPeriod.D1,
+        "qfq",
+        bars,
+    )
+    spec = replace(_spec("suspension-events-r1"), required_capabilities=())
+
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    ).publish(spec, [instrument])
+
+    item = release.instrument(code)
+    assert item.ready
+    assert item.expected_sessions == 3
+    assert item.missing_sessions == 0
+    assert item.suspended_sessions == 1
+    assert item.coverage_pct == Decimal("1")
 
 
 @pytest.mark.asyncio

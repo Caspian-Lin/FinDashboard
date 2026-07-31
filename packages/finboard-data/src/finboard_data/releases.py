@@ -1209,7 +1209,7 @@ def _audit_bars(
     dates = [bar.timestamp.date() for bar in bars]
     unique_dates = set(dates)
     anomaly_count = 0
-    suspended = 0
+    suspended_bar_dates: set[date] = set()
     previous_timestamp: datetime | None = None
     for bar in bars:
         bar_date = bar.timestamp.date()
@@ -1232,7 +1232,7 @@ def _audit_bars(
         ):
             anomaly_count += 1
         if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
-            suspended += 1
+            suspended_bar_dates.add(bar_date)
     anomaly_count += len(dates) - len(unique_dates)
 
     expected_start = max(
@@ -1243,24 +1243,32 @@ def _audit_bars(
         spec.end_date,
         instrument.delist_date or spec.end_date,
     )
+    lifecycle_dates = _known_suspension_dates(
+        instrument,
+        start=expected_start,
+        end=expected_end,
+    )
     expected_dates = _weekdays(expected_start, expected_end)
-    expected_sessions = len(expected_dates)
+    required_dates = expected_dates - lifecycle_dates
+    expected_sessions = len(required_dates)
     unexpected_sessions = unique_dates - expected_dates
     anomaly_count += len(unexpected_sessions)
-    missing_sessions = len(expected_dates - unique_dates)
+    missing_sessions = len(required_dates - unique_dates)
+    covered_sessions = len(required_dates & unique_dates)
     coverage = (
-        min(Decimal(len(unique_dates)) / Decimal(expected_sessions), Decimal("1"))
+        Decimal(covered_sessions) / Decimal(expected_sessions)
         if expected_sessions > 0
-        else Decimal("0")
+        else Decimal("1")
     )
+    suspended_dates = lifecycle_dates | (suspended_bar_dates & expected_dates)
     issues: list[str] = []
     if anomaly_count:
         issues.append(f"anomalies:{anomaly_count}")
     # 中国节假日不在工作日粗略日历中,小量缺口仅记警告;连续大缺口由覆盖率拦截。
     if missing_sessions:
         issues.append(f"missing_weekdays:{missing_sessions}")
-    if suspended:
-        issues.append(f"suspended_bars:{suspended}")
+    if suspended_dates:
+        issues.append(f"suspended_sessions:{len(suspended_dates)}")
 
     actual_start = min(unique_dates)
     actual_end = max(unique_dates)
@@ -1277,12 +1285,45 @@ def _audit_bars(
         end_date=actual_end,
         expected_sessions=expected_sessions,
         missing_sessions=missing_sessions,
-        suspended_sessions=suspended,
+        suspended_sessions=len(suspended_dates),
         anomaly_count=anomaly_count,
         coverage_pct=coverage,
         category=category,
         issues=tuple(issues),
     )
+
+
+def _known_suspension_dates(
+    instrument: ReleaseInstrumentSpec,
+    *,
+    start: date,
+    end: date,
+) -> set[date]:
+    """从权威生命周期事件提取停牌窗口;复牌日恢复为必需交易日。"""
+
+    events = sorted(
+        instrument.lifecycle_events,
+        key=lambda item: (item.effective_date, item.available_at),
+    )
+    suspended_from: date | None = None
+    result: set[date] = set()
+    for event in events:
+        if event.event_type == "suspension":
+            suspended_from = event.effective_date
+        elif event.event_type == "resumption" and suspended_from is not None:
+            result.update(
+                _weekdays(
+                    max(start, suspended_from),
+                    min(end, event.effective_date - timedelta(days=1)),
+                )
+            )
+            suspended_from = None
+    if suspended_from is not None and instrument.status in (
+        ListingStatus.SUSPENDED,
+        ListingStatus.DELISTED,
+    ):
+        result.update(_weekdays(max(start, suspended_from), end))
+    return result
 
 
 def _bar_available_at(bar: Bar, instrument: ReleasedInstrument) -> datetime:

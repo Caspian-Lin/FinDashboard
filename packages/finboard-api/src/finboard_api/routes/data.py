@@ -18,6 +18,7 @@ from finboard_api.schemas import (
     DataFetchRequest,
     DataStatusListOut,
     DataStatusOut,
+    DataStatusSelectionOut,
     FetchResultOut,
     InstrumentListOut,
     InstrumentOut,
@@ -47,7 +48,7 @@ def _get_provider() -> AkShareProvider | YFinanceProvider:
     from finboard_data import AkShareProvider, YFinanceProvider
 
     global _PROVIDER
-    provider_name = _PROVIDER or os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = _PROVIDER or os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     _PROVIDER = provider_name
     if provider_name == "akshare":
         return AkShareProvider()
@@ -59,7 +60,7 @@ async def list_cache_status() -> list[DataStatusOut]:
     """列出缓存状态;只读 Parquet footer,不扫描行情列。"""
     from finboard_data.cache import ParquetCache
 
-    cache = ParquetCache(_CACHE_DIR)
+    cache = ParquetCache(_CACHE_DIR, max_io_concurrency=8)
     cache_path = Path(_CACHE_DIR)
     parquet_files = await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet")))
 
@@ -85,18 +86,40 @@ async def list_cache_status() -> list[DataStatusOut]:
 
 
 @router.get("/status-page", response_model=DataStatusListOut)
-async def list_cache_status_page(limit: int = 200, offset: int = 0) -> DataStatusListOut:
+async def list_cache_status_page(
+    limit: int = 200,
+    offset: int = 0,
+    q: str | None = None,
+    period: str | None = None,
+    adjust: str | None = None,
+) -> DataStatusListOut:
     """分页列出缓存状态,避免一次扫描并返回全市场缓存。"""
     from finboard_data.cache import ParquetCache
 
     safe_limit = min(max(limit, 1), 500)
     safe_offset = max(offset, 0)
-    cache = ParquetCache(_CACHE_DIR)
+    cache = ParquetCache(_CACHE_DIR, max_io_concurrency=8)
     cache_path = Path(_CACHE_DIR)
-    parquet_files = sorted(await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet"))))
+    parquet_files = sorted(
+        await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet")))
+    )
+    query = q.strip().upper() if q else None
+
+    def matches(path: Path) -> bool:
+        parts = path.stem.rsplit("_", 2)
+        if len(parts) != 3:
+            return False
+        code, period_str, adjustment = parts
+        return (
+            (query is None or query in code.upper())
+            and (period is None or period_str == period)
+            and (adjust is None or adjustment == adjust)
+        )
+
+    matching_files = [path for path in parquet_files if matches(path)]
 
     items: list[DataStatusOut] = []
-    for path in parquet_files[safe_offset : safe_offset + safe_limit]:
+    for path in matching_files[safe_offset : safe_offset + safe_limit]:
         parts = path.stem.rsplit("_", 2)
         if len(parts) != 3:
             continue
@@ -115,9 +138,79 @@ async def list_cache_status_page(limit: int = 200, offset: int = 0) -> DataStatu
         )
     return DataStatusListOut(
         items=items,
-        total=len(parquet_files),
+        total=len(matching_files),
         limit=safe_limit,
         offset=safe_offset,
+    )
+
+
+@router.get("/status-selection", response_model=DataStatusSelectionOut)
+async def select_cache_status(
+    q: str | None = None,
+    period: str | None = None,
+    adjust: str | None = None,
+) -> DataStatusSelectionOut:
+    """返回匹配筛选条件的全部缓存项,供发布页一键全选。
+
+    该端点冻结一次筛选结果及其整体日期范围,避免前端逐页请求后漏选。
+    """
+    from finboard_data.cache import ParquetCache
+
+    cache = ParquetCache(_CACHE_DIR, max_io_concurrency=8)
+    cache_path = Path(_CACHE_DIR)
+    parquet_files = sorted(
+        await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet")))
+    )
+    query = q.strip().upper() if q else None
+    selected_paths: list[tuple[Path, str, str, str]] = []
+    for path in parquet_files:
+        parts = path.stem.rsplit("_", 2)
+        if len(parts) != 3:
+            continue
+        code, period_str, adjustment = parts
+        if (
+            (query is not None and query not in code.upper())
+            or (period is not None and period_str != period)
+            or (adjust is not None and adjustment != adjust)
+        ):
+            continue
+        selected_paths.append((path, code, period_str, adjustment))
+
+    items: list[DataStatusOut] = []
+    first_dates: list[str] = []
+    last_dates: list[str] = []
+    for offset in range(0, len(selected_paths), 256):
+        batch = selected_paths[offset : offset + 256]
+        metadata_batch = await asyncio.gather(
+            *(cache.metadata(path) for path, *_ in batch)
+        )
+        for (_, code, period_str, adjustment), metadata in zip(
+            batch,
+            metadata_batch,
+            strict=True,
+        ):
+            first_date = str(metadata.first_date) if metadata.first_date else None
+            last_date = str(metadata.last_date) if metadata.last_date else None
+            if first_date is not None:
+                first_dates.append(first_date)
+            if last_date is not None:
+                last_dates.append(last_date)
+            items.append(
+                DataStatusOut(
+                    symbol=code,
+                    period=period_str,
+                    adjust=adjustment,
+                    bar_count=metadata.bar_count,
+                    first_date=first_date,
+                    last_date=last_date,
+                    last_close=None,
+                )
+            )
+    return DataStatusSelectionOut(
+        items=items,
+        total=len(items),
+        first_date=min(first_dates, default=None),
+        last_date=max(last_dates, default=None),
     )
 
 
@@ -369,7 +462,18 @@ async def sync_universe(
     from finboard_persistence import InstrumentRepository
 
     discovery = UniverseDiscovery()
-    instruments = await discovery.discover_all()
+    try:
+        instruments = await discovery.discover_all()
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="标的池同步依赖 akshare,请执行 uv sync --all-packages 后重启 API",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"标的池同步失败(上游数据源暂不可用): {exc}",
+        ) from exc
 
     dicts: list[dict[str, object]] = [
         {
@@ -428,7 +532,7 @@ async def start_bulk_download(
     if not instruments:
         raise HTTPException(status_code=400, detail="未找到匹配的标的(请先同步)")
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider(
             max_concurrency=2, request_interval=0.5
@@ -524,7 +628,7 @@ async def get_scheduler_config() -> SchedulerConfigOut:
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=os.getenv("FINBOARD_DATA_PROVIDER", "yfinance"),
+        data_provider=os.getenv("FINBOARD_DATA_PROVIDER", "akshare"),
     )
 
 
@@ -546,5 +650,5 @@ async def update_scheduler_config(req: SchedulerConfigUpdate) -> SchedulerConfig
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=os.getenv("FINBOARD_DATA_PROVIDER", "yfinance"),
+        data_provider=os.getenv("FINBOARD_DATA_PROVIDER", "akshare"),
     )
