@@ -439,7 +439,7 @@ class DatasetReleaseSpec:
     known_limitations: tuple[str, ...] = ()
     minimum_symbol_coverage: Decimal = Decimal("0.80")
     minimum_release_coverage: Decimal = Decimal("0.85")
-    max_anomaly_ratio: Decimal = Decimal("0.05")
+    max_anomaly_ratio: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         for value, name in (

@@ -3,6 +3,9 @@
 从 akshare ``tool_trade_date_hist_sina`` 获取历史交易日,
 进程内缓存避免重复网络请求。发布预检用真实交易日替代朴素 Mon-Fri,
 避免中国法定节假日被误报为 ``missing_weekdays``。
+
+**无 fallback**: akshare 不可用时 ``trading_days`` 抛异常,
+而非用朴素工作日伪装正常 -- 后者会导致覆盖率计算失真。
 """
 
 from __future__ import annotations
@@ -14,6 +17,10 @@ from functools import lru_cache
 logger = logging.getLogger(__name__)
 
 _CACHE: set[date] | None = None
+
+
+class TradingCalendarError(Exception):
+    """交易日历未加载(akshare 不可用或网络失败)。"""
 
 
 def _fetch_trade_dates() -> set[date]:
@@ -28,7 +35,8 @@ def _fetch_trade_dates() -> set[date]:
 def load_trading_calendar() -> set[date]:
     """加载交易日历(进程内缓存,首次调用联网拉取)。
 
-    如果 akshare 不可用或网络异常,回退到空集合 —— 调用方应处理此情况。
+    加载失败时缓存空集合并记录警告。
+    调用方应通过 :class:`TradingCalendarError` 处理缺失场景。
     """
     global _CACHE
     if _CACHE is not None:
@@ -37,7 +45,7 @@ def load_trading_calendar() -> set[date]:
         _CACHE = _fetch_trade_dates()
         logger.info("trading_calendar.loaded dates=%d", len(_CACHE))
     except Exception:
-        logger.warning("trading_calendar.fetch_failed fallback=empty")
+        logger.warning("trading_calendar.fetch_failed")
         _CACHE = set()
     return _CACHE
 
@@ -50,24 +58,17 @@ def is_trading_day(d: date) -> bool:
 def trading_days(start: date, end: date) -> set[date]:
     """返回 ``[start, end]`` 区间内的所有 A 股交易日。
 
-    如果交易日历不可用(akshare 未安装 / 网络失败),
-    回退到朴素 Mon-Fri 工作日。
+    无 fallback -- 日历未加载时抛 :class:`TradingCalendarError`。
     """
     if start > end:
         return set()
     calendar = load_trading_calendar()
-    if calendar:
-        return {d for d in calendar if start <= d <= end}
-    # fallback: naive weekdays
-    from datetime import timedelta
-
-    result: set[date] = set()
-    current = start
-    while current <= end:
-        if current.weekday() < 5:
-            result.add(current)
-        current += timedelta(days=1)
-    return result
+    if not calendar:
+        raise TradingCalendarError(
+            "A 股交易日历未加载, 无法计算期望交易日"
+            "(请检查 akshare 是否可用)"
+        )
+    return {d for d in calendar if start <= d <= end}
 
 
 @lru_cache(maxsize=1)
