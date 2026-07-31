@@ -89,7 +89,7 @@ export default function Data() {
     refetchInterval: 2000,
   });
 
-  const { data: qualityReports, refetch: refetchQuality } = useQuery({
+  const { data: qualityReports, refetch: refetchQuality, isFetching: qualityFetching } = useQuery({
     queryKey: ["quality-reports"],
     queryFn: () => api.checkQuality(),
     enabled: false,
@@ -439,90 +439,117 @@ export default function Data() {
             {(startDownload.error as Error).message}
           </p>
         )}
+      </div>
 
-        {/* Quality check button */}
-        <div className="mt-4 flex items-center gap-3 border-t pt-3">
+      {/* Quality Check — standalone panel for existing cache data */}
+      <div className="bg-card rounded-lg shadow p-5 mb-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="flex items-center gap-1 text-lg font-semibold">
+            缓存质量检查
+          </h2>
           <button
             onClick={() => refetchQuality()}
-            className="bg-blue-600 text-white rounded px-4 py-1.5 text-sm font-medium hover:bg-blue-700"
+            disabled={qualityFetching}
+            className="bg-blue-600 text-white rounded px-4 py-1.5 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
           >
-            质量检查
+            {qualityFetching ? "检查中..." : "检查全部缓存"}
           </button>
-          {qualityReports && qualityReports.length > 0 && (
-            <span className="text-sm text-muted-foreground">
-              {qualityReports.filter((r) => r.passed).length} 通过,{" "}
-              <span className="text-destructive">
-                {qualityReports.filter((r) => !r.passed).length} 异常
-              </span>
-              , 共 {qualityReports.length} 标的
-            </span>
-          )}
         </div>
 
-        {/* Quality report table */}
-        {qualityReports && qualityReports.some((r) => !r.passed) && (
-          <div className="mt-3">
-            <button
-              onClick={() => setShowQuality(!showQualityDetail)}
-              className="text-sm text-blue-400 hover:underline"
-            >
-              {showQualityDetail ? "收起" : "展开"}异常详情
-            </button>
-            {showQualityDetail && (
-              <div className="mt-2 max-h-80 overflow-auto rounded border">
-                <table className="w-full text-xs">
-                  <thead className="bg-muted sticky top-0">
-                    <tr>
-                      <th className="px-3 py-2 text-left">标的</th>
-                      <th className="px-3 py-2 text-right">异常数</th>
-                      <th className="px-3 py-2 text-right">重复</th>
-                      <th className="px-3 py-2 text-left">数据源</th>
-                      <th className="px-3 py-2 text-left">异常日期 / 原因</th>
-                      <th className="px-3 py-2 text-left">换源修复</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {qualityReports
-                      .filter((r: QualityReport) => !r.passed)
-                      .map((r: QualityReport) => (
-                        <tr key={r.symbol} className="border-t">
-                          <td className="px-3 py-1.5 font-mono">{r.symbol}</td>
-                          <td className="px-3 py-1.5 text-right text-destructive font-semibold">
-                            {r.anomaly_count}
-                          </td>
-                          <td className="px-3 py-1.5 text-right">
-                            {r.duplicate_count || "-"}
-                          </td>
-                          <td className="px-3 py-1.5">
-                            {r.sources.join(",") || "-"}
-                          </td>
-                          <td className="px-3 py-1.5">
-                            {r.anomalies
-                              .slice(0, 3)
-                              .map(
-                                (a) =>
-                                  `${a.date}(${a.reasons.join(",")})`,
-                              )
-                              .join("; ")}
-                            {r.anomalies.length > 3 &&
-                              ` +${r.anomalies.length - 3}`}
-                          </td>
-                          <td className="px-3 py-1.5">
-                            {r.fallback_used ? (
-                              <span className="text-blue-400">
-                                {r.fallback_source} ({r.corrected_dates.length}日)
-                              </span>
-                            ) : (
-                              "-"
-                            )}
-                          </td>
+        {qualityReports && qualityReports.length > 0 && (
+          <>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div className="text-center">
+                <div className="text-2xl font-bold text-success">
+                  {qualityReports.filter((r) => r.passed).length}
+                </div>
+                <div className="text-xs text-muted-foreground">通过</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-destructive">
+                  {qualityReports.filter((r) => !r.passed).length}
+                </div>
+                <div className="text-xs text-muted-foreground">异常</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-muted-foreground">
+                  {qualityReports.length}
+                </div>
+                <div className="text-xs text-muted-foreground">总计</div>
+              </div>
+            </div>
+
+            {qualityReports.some((r) => !r.passed) && (
+              <div>
+                <button
+                  onClick={() => setShowQuality(!showQualityDetail)}
+                  className="text-sm text-blue-400 hover:underline mb-2"
+                >
+                  {showQualityDetail ? "收起" : "展开"}异常标的详情 ({qualityReports.filter((r) => !r.passed).length})
+                </button>
+                {showQualityDetail && (
+                  <div className="max-h-80 overflow-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="bg-muted sticky top-0">
+                        <tr>
+                          <th className="px-3 py-2 text-left">标的</th>
+                          <th className="px-3 py-2 text-right">异常数</th>
+                          <th className="px-3 py-2 text-right">重复</th>
+                          <th className="px-3 py-2 text-left">数据源</th>
+                          <th className="px-3 py-2 text-left">异常日期 / 原因</th>
+                          <th className="px-3 py-2 text-left">换源修复</th>
                         </tr>
-                      ))}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody>
+                        {qualityReports
+                          .filter((r: QualityReport) => !r.passed)
+                          .map((r: QualityReport) => (
+                            <tr key={r.symbol} className="border-t">
+                              <td className="px-3 py-1.5 font-mono">{r.symbol}</td>
+                              <td className="px-3 py-1.5 text-right text-destructive font-semibold">
+                                {r.anomaly_count}
+                              </td>
+                              <td className="px-3 py-1.5 text-right">
+                                {r.duplicate_count || "-"}
+                              </td>
+                              <td className="px-3 py-1.5">
+                                {r.sources.join(",") || "-"}
+                              </td>
+                              <td className="px-3 py-1.5">
+                                {r.anomalies
+                                  .slice(0, 3)
+                                  .map(
+                                    (a) =>
+                                      `${a.date}(${a.reasons.join(",")})`,
+                                  )
+                                  .join("; ")}
+                                {r.anomalies.length > 3 &&
+                                  ` +${r.anomalies.length - 3}`}
+                              </td>
+                              <td className="px-3 py-1.5">
+                                {r.fallback_used ? (
+                                  <span className="text-blue-400">
+                                    {r.fallback_source} ({r.corrected_dates.length}日)
+                                  </span>
+                                ) : (
+                                  "-"
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
-          </div>
+          </>
+        )}
+
+        {qualityReports && qualityReports.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            无缓存数据,请先拉取行情。
+          </p>
         )}
       </div>
 
