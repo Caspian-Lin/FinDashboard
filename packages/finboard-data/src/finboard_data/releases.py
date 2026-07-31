@@ -1221,10 +1221,10 @@ def _audit_bars(
         if instrument.delist_date is not None and bar_date > instrument.delist_date:
             anomaly_count += 1
         if (
-            bar.open <= 0
-            or bar.high <= 0
-            or bar.low <= 0
-            or bar.close <= 0
+            bar.open.is_nan() or bar.open <= 0
+            or bar.high.is_nan() or bar.high <= 0
+            or bar.low.is_nan() or bar.low <= 0
+            or bar.close.is_nan() or bar.close <= 0
             or bar.high < max(bar.open, bar.low, bar.close)
             or bar.low > min(bar.open, bar.high, bar.close)
             or bar.volume < 0
