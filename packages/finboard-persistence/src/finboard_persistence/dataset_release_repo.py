@@ -242,10 +242,11 @@ class ReleaseInstrumentCatalogRepository:
 
             instrument_type = InstrumentType(row.instrument_type)
             if instrument_type is InstrumentType.ETF:
+                bare = code.split(".", 1)[0] if "." in code else code
                 result.append(
                     _etf_candidate(
                         row,
-                        etf_rows.get(code),
+                        etf_rows.get(code) or etf_rows.get(bare),
                         lifecycle_events=events.get(code, ()),
                         name_history=names.get(code, ()),
                     )
@@ -281,9 +282,17 @@ class ReleaseInstrumentCatalogRepository:
         return {row.code: row for row in rows}
 
     async def _etf_map(self, symbols: list[str]) -> dict[str, EtfMetadataModel]:
-        stmt = select(EtfMetadataModel).where(EtfMetadataModel.code.in_(symbols))
+        lookup = set(symbols)
+        lookup.update({s.split(".", 1)[0] for s in symbols if "." in s})
+        stmt = select(EtfMetadataModel).where(EtfMetadataModel.code.in_(lookup))
         rows = (await self._session.execute(stmt)).scalars().all()
-        return {row.code: row for row in rows}
+        result: dict[str, EtfMetadataModel] = {}
+        for row in rows:
+            result[row.code] = row
+            bare = row.code.split(".", 1)[0]
+            if bare != row.code:
+                result[bare] = row
+        return result
 
     async def _convertible_map(
         self,

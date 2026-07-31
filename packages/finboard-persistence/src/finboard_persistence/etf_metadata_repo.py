@@ -75,7 +75,14 @@ class EtfMetadataRepository:
 
     async def get(self, code: str) -> EtfMetadataModel | None:
         stmt = select(EtfMetadataModel).where(EtfMetadataModel.code == code)
-        return (await self._session.execute(stmt)).scalar_one_or_none()
+        row = (await self._session.execute(stmt)).scalars().first()
+        if row is not None:
+            return row
+        bare = code.split(".", 1)[0] if "." in code else code
+        if bare != code:
+            stmt = select(EtfMetadataModel).where(EtfMetadataModel.code == bare)
+            return (await self._session.execute(stmt)).scalars().first()
+        return None
 
     async def list_by_review_status(
         self,
@@ -243,8 +250,10 @@ class EtfMetadataRepository:
         """批量确认:将 ``needs_review`` 转为 ``manually_confirmed``。"""
         if not codes:
             return 0
+        lookup = set(codes)
+        lookup.update({c.split(".", 1)[0] for c in codes if "." in c})
         stmt = select(EtfMetadataModel).where(
-            EtfMetadataModel.code.in_(codes),
+            EtfMetadataModel.code.in_(lookup),
             EtfMetadataModel.review_status == ReviewStatus.NEEDS_REVIEW.value,
         )
         rows = list((await self._session.execute(stmt)).scalars().all())
