@@ -89,9 +89,12 @@ beforeEach(() => {
   datasetApiMock.updateEtfClassification.mockResolvedValue({
     code: "159001.SZ",
     fund_code: "159001",
+    execution_profile: "money_market_etf",
     category: "money_market",
-    underlying_index: null,
     underlying_asset_class: "cash",
+    underlying_market: "domestic",
+    strategy_type: "index",
+    underlying_index: null,
     management_fee_rate: null,
     custody_fee_rate: null,
     tracking_error: null,
@@ -299,14 +302,17 @@ describe("ResearchData 数据发布闭环", () => {
     expect(
       await screen.findByText("需要补齐 ETF 元数据"),
     ).toBeInTheDocument();
-    await user.click(screen.getByLabelText("ETF 分类"));
+    await user.click(screen.getByLabelText("执行档位"));
     await user.click(screen.getByRole("option", { name: "货币 ETF" }));
     await user.click(screen.getByRole("button", { name: "补齐元数据" }));
 
     await waitFor(() =>
       expect(datasetApiMock.updateEtfClassification).toHaveBeenCalledWith(
         "159001.SZ",
-        { category: "money_market", underlying_index: null },
+        expect.objectContaining({
+          execution_profile: "money_market_etf",
+          underlying_index: null,
+        }),
       ),
     );
     await user.click(

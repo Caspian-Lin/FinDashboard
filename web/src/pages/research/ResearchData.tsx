@@ -506,7 +506,13 @@ function releaseDateRange(items: CachedDataStatus[]) {
   return start && end && start <= end ? { start, end } : null;
 }
 
-function ReleasePublisher({ onGoToFetch }: { onGoToFetch: () => void }) {
+function ReleasePublisher({
+  onGoToFetch,
+  onGoToInstruments,
+}: {
+  onGoToFetch: () => void;
+  onGoToInstruments: () => void;
+}) {
   const queryClient = useQueryClient();
   const defaults = initialReleaseNames();
   const [isOpen, setIsOpen] = useState(false);
@@ -988,6 +994,17 @@ function ReleasePublisher({ onGoToFetch }: { onGoToFetch: () => void }) {
                   重新校验并发布
                 </Button>
               )}
+              {missingEtfSymbol && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={onGoToInstruments}
+                >
+                  前往标的元数据批量同步 ETF 分类
+                </Button>
+              )}
             </AlertDescription>
           </Alert>
         )}
@@ -1007,7 +1024,13 @@ function ReleasePublisher({ onGoToFetch }: { onGoToFetch: () => void }) {
   );
 }
 
-function ReleasesTab({ onGoToFetch }: { onGoToFetch: () => void }) {
+function ReleasesTab({
+  onGoToFetch,
+  onGoToInstruments,
+}: {
+  onGoToFetch: () => void;
+  onGoToInstruments: () => void;
+}) {
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dataset-releases", { limit: 50 }],
     queryFn: () => datasetApi.releases({ limit: 50 }),
@@ -1015,7 +1038,10 @@ function ReleasesTab({ onGoToFetch }: { onGoToFetch: () => void }) {
 
   return (
     <div>
-      <ReleasePublisher onGoToFetch={onGoToFetch} />
+      <ReleasePublisher
+        onGoToFetch={onGoToFetch}
+        onGoToInstruments={onGoToInstruments}
+      />
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-1.5">
           <p className="text-sm text-muted-foreground">
@@ -1264,14 +1290,20 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
   const [search, setSearch] = useState("");
   const [market, setMarket] = useState<string>("all");
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+  const pageSize = 50;
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["research-instruments", { search, market, limit: 200 }],
+    queryKey: [
+      "research-instruments",
+      { search, market, limit: pageSize, offset: page * pageSize },
+    ],
     queryFn: () =>
       datasetApi.instruments({
         q: search.trim() || undefined,
         market: market === "all" ? undefined : market,
-        limit: 200,
+        limit: pageSize,
+        offset: page * pageSize,
       }),
   });
   const { data: cacheStats } = useQuery({
@@ -1298,11 +1330,20 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
           <Input
             placeholder="搜索代码或名称…"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(0);
+            }}
             className="pl-9"
           />
         </div>
-        <Select value={market} onValueChange={setMarket}>
+        <Select
+          value={market}
+          onValueChange={(v) => {
+            setMarket(v);
+            setPage(0);
+          }}
+        >
           <SelectTrigger className="w-[140px]">
             <SelectValue placeholder="市场" />
           </SelectTrigger>
@@ -1324,7 +1365,9 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
           刷新
         </Button>
         <span className="text-sm text-muted-foreground">
-          {data ? `显示 ${items.length} / ${data.total} 只活跃标的` : ""}
+          {data
+            ? `显示 ${page * pageSize + 1}-${Math.min((page + 1) * pageSize, data.total)} / ${data.total} 只活跃标的`
+            : ""}
         </span>
       </div>
 
@@ -1461,6 +1504,32 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
           }
         />
       )}
+
+      {data && data.total > pageSize && (
+        <div className="mt-3 flex items-center justify-center gap-4">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page === 0 || isFetching}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+          >
+            上一页
+          </Button>
+          <span className="text-sm text-muted-foreground tabular-nums">
+            第 {page + 1} / {Math.ceil(data.total / pageSize)} 页
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={
+              (page + 1) * pageSize >= data.total || isFetching
+            }
+            onClick={() => setPage((p) => p + 1)}
+          >
+            下一页
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1505,7 +1574,10 @@ export default function ResearchData() {
           </Suspense>
         </TabsContent>
         <TabsContent value="releases">
-          <ReleasesTab onGoToFetch={() => setActiveTab("fetch")} />
+          <ReleasesTab
+            onGoToFetch={() => setActiveTab("fetch")}
+            onGoToInstruments={() => setActiveTab("instruments")}
+          />
         </TabsContent>
         <TabsContent value="manifests">
           <ManifestsTab />
