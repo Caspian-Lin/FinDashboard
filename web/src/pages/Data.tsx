@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
@@ -22,25 +22,33 @@ export default function Data() {
   const [marketFilter, setMarketFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [instPage, setInstPage] = useState(1);
+  const [cachePage, setCachePage] = useState(1);
 
   // bulk download form
   const [dlMarket, setDlMarket] = useState("a_share");
   const [dlType, setDlType] = useState("");
   const [dlStart, setDlStart] = useState("2015-01-01");
 
+  const PAGE_SIZE = 50;
+  const isSearching = searchQuery.length >= 2;
+
   const { data: status } = useQuery({
-    queryKey: ["data-status"],
-    queryFn: () => api.getDataStatusPage(),
+    queryKey: ["data-status", cachePage],
+    queryFn: () =>
+      api.getDataStatusPage(PAGE_SIZE, (cachePage - 1) * PAGE_SIZE),
   });
 
   const { data: instruments } = useQuery({
-    queryKey: ["instruments", marketFilter, typeFilter],
+    queryKey: ["instruments", marketFilter, typeFilter, instPage],
     queryFn: () =>
       api.getInstruments({
         market: marketFilter || undefined,
         instrument_type: typeFilter || undefined,
-        limit: 500,
+        limit: PAGE_SIZE,
+        offset: (instPage - 1) * PAGE_SIZE,
       }),
+    enabled: !isSearching,
   });
   const { data: databaseUniverse } = useQuery({
     queryKey: ["instrument-count", "all"],
@@ -68,7 +76,7 @@ export default function Data() {
   const { data: searchResults } = useQuery({
     queryKey: ["instrument-search", searchQuery],
     queryFn: () => api.searchInstruments(searchQuery),
-    enabled: searchQuery.length >= 2,
+    enabled: isSearching,
   });
 
   const { data: bulkStatus } = useQuery({
@@ -109,12 +117,28 @@ export default function Data() {
   });
 
   const totalInstruments = databaseUniverse?.total ?? 0;
-  const listedInstrumentTotal = instruments?.total ?? 0;
   const isDownloading = startDownload.isPending || bulkStatus?.status === "running";
   const phaseLabel = BULK_PHASE_LABELS[bulkStatus?.phase ?? ""];
-  const visibleInstruments = (
-    searchQuery.length >= 2 ? (searchResults ?? []) : (instruments?.items ?? [])
-  ).slice(0, 200);
+
+  useEffect(() => {
+    setInstPage(1);
+  }, [searchQuery, marketFilter, typeFilter]);
+
+  // 搜索模式:前端分页搜索结果;非搜索模式:直接用服务端返回的当前页
+  const searchAll = searchResults ?? [];
+  const searchTotalPages = Math.max(1, Math.ceil(searchAll.length / PAGE_SIZE));
+  const pagedInstruments = isSearching
+    ? searchAll.slice((instPage - 1) * PAGE_SIZE, instPage * PAGE_SIZE)
+    : (instruments?.items ?? []);
+  const listedInstrumentTotal = isSearching
+    ? searchAll.length
+    : (instruments?.total ?? 0);
+  const instTotalPages = isSearching
+    ? searchTotalPages
+    : Math.max(1, Math.ceil(listedInstrumentTotal / PAGE_SIZE));
+
+  const cacheTotal = status?.total ?? 0;
+  const cacheTotalPages = Math.max(1, Math.ceil(cacheTotal / PAGE_SIZE));
 
   return (
     <div>
@@ -396,7 +420,7 @@ export default function Data() {
             </tr>
           </thead>
           <tbody>
-            {visibleInstruments.map((ins) => (
+            {pagedInstruments.map((ins) => (
                 <tr
                   key={ins.code}
                   className="cursor-pointer border-t hover:bg-accent"
@@ -411,11 +435,34 @@ export default function Data() {
               ))}
           </tbody>
         </table>
-        {visibleInstruments.length === 0 && (
+        {pagedInstruments.length === 0 && (
           <div className="p-8 text-center text-muted-foreground/70">
             {totalInstruments === 0
-              ? '标的池为空 — 点击上方“同步标的池”自动发现'
+              ? '标的池为空 — 点击上方"同步标的池"自动发现'
               : "没有匹配当前搜索或筛选条件的活跃标的"}
+          </div>
+        )}
+        {listedInstrumentTotal > PAGE_SIZE && (
+          <div className="flex items-center justify-between border-t px-5 py-3 text-sm">
+            <span className="text-muted-foreground">
+              第 {instPage}/{instTotalPages} 页 · 共 {listedInstrumentTotal} 条
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setInstPage((p) => Math.max(1, p - 1))}
+                disabled={instPage <= 1}
+                className="rounded border border-input px-3 py-1 hover:bg-accent disabled:opacity-40"
+              >
+                上一页
+              </button>
+              <button
+                onClick={() => setInstPage((p) => Math.min(instTotalPages, p + 1))}
+                disabled={instPage >= instTotalPages}
+                className="rounded border border-input px-3 py-1 hover:bg-accent disabled:opacity-40"
+              >
+                下一页
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -454,10 +501,28 @@ export default function Data() {
             </tbody>
           </table>
         )}
-        {status && status.total > status.items.length && (
-          <p className="px-5 py-3 border-t text-xs text-muted-foreground">
-            当前显示前 {status.items.length} 条，共 {status.total} 条缓存记录
-          </p>
+        {cacheTotal > PAGE_SIZE && (
+          <div className="flex items-center justify-between border-t px-5 py-3 text-sm">
+            <span className="text-muted-foreground">
+              第 {cachePage}/{cacheTotalPages} 页 · 共 {cacheTotal} 条
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setCachePage((p) => Math.max(1, p - 1))}
+                disabled={cachePage <= 1}
+                className="rounded border border-input px-3 py-1 hover:bg-accent disabled:opacity-40"
+              >
+                上一页
+              </button>
+              <button
+                onClick={() => setCachePage((p) => Math.min(cacheTotalPages, p + 1))}
+                disabled={cachePage >= cacheTotalPages}
+                className="rounded border border-input px-3 py-1 hover:bg-accent disabled:opacity-40"
+              >
+                下一页
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>
