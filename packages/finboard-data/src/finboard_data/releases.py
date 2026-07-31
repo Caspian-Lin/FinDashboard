@@ -30,6 +30,7 @@ from typing import cast
 from zoneinfo import ZoneInfo
 
 from finboard_data.cache import ParquetCache
+from finboard_data.trading_calendar import trading_days as _trading_days
 from finboard_shared.instruments import ASSET_METADATA_VERSION, DatasetManifest
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import (
@@ -1248,7 +1249,7 @@ def _audit_bars(
         start=expected_start,
         end=expected_end,
     )
-    expected_dates = _weekdays(expected_start, expected_end)
+    expected_dates = _trading_days(expected_start, expected_end)
     required_dates = expected_dates - lifecycle_dates
     expected_sessions = len(required_dates)
     unexpected_sessions = unique_dates - expected_dates
@@ -1264,9 +1265,9 @@ def _audit_bars(
     issues: list[str] = []
     if anomaly_count:
         issues.append(f"anomalies:{anomaly_count}")
-    # 中国节假日不在工作日粗略日历中,小量缺口仅记警告;连续大缺口由覆盖率拦截。
+    # 使用真实 A 股交易日历后,missing_sessions 只反映真正的数据缺口。
     if missing_sessions:
-        issues.append(f"missing_weekdays:{missing_sessions}")
+        issues.append(f"missing_sessions:{missing_sessions}")
     if suspended_dates:
         issues.append(f"suspended_sessions:{len(suspended_dates)}")
 
@@ -1312,7 +1313,7 @@ def _known_suspension_dates(
             suspended_from = event.effective_date
         elif event.event_type == "resumption" and suspended_from is not None:
             result.update(
-                _weekdays(
+                _trading_days(
                     max(start, suspended_from),
                     min(end, event.effective_date - timedelta(days=1)),
                 )
@@ -1322,7 +1323,7 @@ def _known_suspension_dates(
         ListingStatus.SUSPENDED,
         ListingStatus.DELISTED,
     ):
-        result.update(_weekdays(max(start, suspended_from), end))
+        result.update(_trading_days(max(start, suspended_from), end))
     return result
 
 

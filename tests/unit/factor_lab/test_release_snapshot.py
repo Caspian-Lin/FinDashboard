@@ -64,8 +64,18 @@ def _instrument(
 @pytest.mark.asyncio
 async def test_frozen_release_to_feature_snapshot_has_no_future_data(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dates = _weekdays(date(2024, 1, 2), 35)
+    date_set = set(dates)
+
+    def _mock_trading_days(start: date, end: date) -> set[date]:
+        return {d for d in date_set if start <= d <= end}
+
+    monkeypatch.setattr(
+        "finboard_data.releases._trading_days",
+        _mock_trading_days,
+    )
     instruments = [
         _instrument("510300.SH", EtfCategory.INDEX, AssetClass.EQUITY),
         _instrument(
