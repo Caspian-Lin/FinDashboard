@@ -759,7 +759,7 @@ class EtfMetadataOut(BaseSchema):
 
 
 class EtfClassificationUpdate(BaseSchema):
-    """人工补齐研究用 ETF 分类；执行属性由服务端按分类派生。"""
+    """人工补齐研究用 ETF 分类;执行属性由服务端按分类派生。"""
 
     category: Literal[
         "equity",

@@ -97,6 +97,73 @@ class TestInstrumentsList:
         assert exc_info.value.status_code == 404
 
 
+class TestEtfClassification:
+    @pytest.mark.asyncio
+    async def test_create_manual_etf_classification(
+        self,
+        mock_session: MagicMock,
+    ) -> None:
+        from finboard_api.routes.instruments import update_etf_classification
+        from finboard_api.schemas import EtfClassificationUpdate
+        from finboard_persistence import EtfMetadataModel
+
+        instrument = MagicMock()
+        instrument.instrument_type = "etf"
+        instrument_result = MagicMock()
+        instrument_result.scalar_one_or_none.return_value = instrument
+        metadata_result = MagicMock()
+        metadata_result.scalar_one_or_none.return_value = None
+        mock_session.execute = AsyncMock(
+            side_effect=[instrument_result, metadata_result]
+        )
+        mock_session.flush = AsyncMock()
+        mock_session.commit = AsyncMock()
+
+        result = await update_etf_classification(
+            "159001.sz",
+            EtfClassificationUpdate(category="money_market"),
+            session=mock_session,
+        )
+
+        created = mock_session.add.call_args.args[0]
+        assert isinstance(created, EtfMetadataModel)
+        assert created.code == "159001.SZ"
+        assert created.fund_code == "159001"
+        assert created.category == "money_market"
+        assert created.underlying_asset_class == "cash"
+        assert created.allows_t_plus_0 is True
+        assert created.source == "manual"
+        assert result.category == "money_market"
+        mock_session.flush.assert_awaited_once()
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rejects_classification_for_non_etf(
+        self,
+        mock_session: MagicMock,
+    ) -> None:
+        from fastapi import HTTPException
+
+        from finboard_api.routes.instruments import update_etf_classification
+        from finboard_api.schemas import EtfClassificationUpdate
+
+        instrument = MagicMock()
+        instrument.instrument_type = "stock"
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = instrument
+        mock_session.execute = AsyncMock(return_value=result)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_etf_classification(
+                "600519.SH",
+                EtfClassificationUpdate(category="index"),
+                session=mock_session,
+            )
+
+        assert exc_info.value.status_code == 409
+        mock_session.add.assert_not_called()
+
+
 class TestDatasetManifestList:
     @pytest.mark.asyncio
     async def test_list_manifests(self, mock_session: MagicMock) -> None:

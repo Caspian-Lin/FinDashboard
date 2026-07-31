@@ -311,7 +311,7 @@ export default function Data() {
               <span>{bulkStatus.total > 0 ? `${(bulkStatus.done * 100 / bulkStatus.total).toFixed(1)}%` : ""}</span>
             </div>
             <div
-              className="w-full bg-gray-200 rounded-full h-3 overflow-hidden"
+              className="w-full bg-muted rounded-full h-3 overflow-hidden"
               role="progressbar"
               aria-label="批量行情拉取进度"
               aria-valuemin={0}

@@ -360,11 +360,11 @@ export default function Backtest() {
           </div>
 
           {requestedPreset && requestedPresetDefinition && (
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-800">
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-primary/10 px-3 py-2 text-sm text-primary">
               <span>
                 已载入策略预设：<strong>{requestedPreset.name}</strong>
               </span>
-              <span className="text-xs text-blue-700">仅用于本次回测配置</span>
+              <span className="text-xs text-primary">仅用于本次回测配置</span>
             </div>
           )}
           {requestedPreset && !requestedPresetDefinition && (
@@ -376,7 +376,7 @@ export default function Backtest() {
           {strategyDefinition && (
             <div className="mt-4 border-t border-border pt-4">
               <div className="mb-3 flex items-center gap-1">
-                <h3 className="text-sm font-semibold text-gray-700">策略参数</h3>
+                <h3 className="text-sm font-semibold text-muted-foreground">策略参数</h3>
                 <InfoHint content={INFO_HINTS.backtest.strategyParams} />
               </div>
               <StrategyParamForm
@@ -403,7 +403,7 @@ export default function Backtest() {
 
           {/* Fee params */}
           <details className="mt-3">
-            <summary className="text-sm text-muted-foreground cursor-pointer hover:text-gray-700">
+            <summary className="text-sm text-muted-foreground cursor-pointer hover:text-muted-foreground">
               费用参数(佣金 / 印花税 / 滑点)
             </summary>
             <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -536,11 +536,11 @@ export default function Backtest() {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <h2 className="text-lg font-semibold text-foreground">候选池审计</h2>
-                    <p className="mt-1 text-xs text-slate-500">
+                    <p className="mt-1 text-xs text-muted-foreground">
                       因子版本 {result.factor_version} · {result.selection_snapshots.length} 个日快照
                     </p>
                   </div>
-                  <span className="rounded-full bg-secondary px-2.5 py-1 text-xs text-slate-600">
+                  <span className="rounded-full bg-secondary px-2.5 py-1 text-xs text-muted-foreground">
                     数据版本已归档
                   </span>
                 </div>
@@ -550,7 +550,7 @@ export default function Backtest() {
                       key={snapshot.checksum}
                       className="grid gap-1 py-2 text-sm sm:grid-cols-[7rem_7rem_1fr]"
                     >
-                      <span className="font-mono text-xs text-slate-500">
+                      <span className="font-mono text-xs text-muted-foreground">
                         {snapshot.effective_date}
                       </span>
                       <span
@@ -635,7 +635,7 @@ export default function Backtest() {
 
       {/* History sidebar */}
       <div className="w-72 shrink-0">
-        <h2 className="text-sm font-semibold text-gray-700 mb-3">回测历史</h2>
+        <h2 className="text-sm font-semibold text-muted-foreground mb-3">回测历史</h2>
         <div className="space-y-2">
           {history && history.length === 0 && (
             <p className="text-xs text-muted-foreground/70">暂无历史记录</p>
@@ -731,7 +731,7 @@ function SymbolSelector({
   return (
     <div className="mt-4 border rounded-lg p-4 bg-background">
       <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-1 text-sm font-medium text-gray-700">
+        <div className="flex items-center gap-1 text-sm font-medium text-muted-foreground">
           <span>
             标的选择{" "}
             <span className="font-normal text-muted-foreground/70">({selectedSymbols.length} 个)</span>
@@ -761,7 +761,7 @@ function SymbolSelector({
           placeholder="搜索代码/名称(至少2字符)..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="flex-1 border rounded px-3 py-1.5 text-sm"
+          className="flex-1 border border-input bg-card text-foreground rounded px-3 py-1.5 text-sm placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring outline-none"
         />
         <select value={marketFilter} onChange={(e) => setMarketFilter(e.target.value)} className="border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm">
           {MARKETS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
@@ -795,7 +795,7 @@ function SymbolSelector({
         <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
           <span>
             第 {rangeStart}-{rangeEnd} 条 / 共 {totalCount} 条
-            {selectedOnPage > 0 && <span className="ml-2 text-blue-500">本页已选 {selectedOnPage}</span>}
+            {selectedOnPage > 0 && <span className="ml-2 text-primary">本页已选 {selectedOnPage}</span>}
           </span>
           <div className="flex gap-1">
             <button
@@ -826,9 +826,9 @@ function SymbolSelector({
           {selectedSymbols.length <= 50 ? (
             <div className="flex flex-wrap gap-1">
               {selectedSymbols.map((code) => (
-                <span key={code} className="inline-flex items-center gap-1 bg-blue-100 text-blue-700 rounded px-2 py-0.5 text-xs font-mono">
+                <span key={code} className="inline-flex items-center gap-1 bg-blue-100 text-primary rounded px-2 py-0.5 text-xs font-mono">
                   {code}
-                  <button onClick={() => toggleSymbol(code)} className="text-blue-400 hover:text-primary">×</button>
+                  <button onClick={() => toggleSymbol(code)} className="text-primary hover:text-primary">×</button>
                 </span>
               ))}
             </div>
@@ -849,7 +849,7 @@ function SymbolSelector({
               placeholder="新标的组名称..."
               value={newWlName}
               onChange={(e) => setNewWlName(e.target.value)}
-              className="flex-1 border rounded px-2 py-1 text-sm"
+              className="flex-1 border border-input bg-card text-foreground rounded px-2 py-1 text-sm placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring outline-none"
             />
             <button
               onClick={() => newWlName.trim() && createWl.mutate(newWlName.trim())}
@@ -893,13 +893,13 @@ function HistoryCard({
   return (
     <div
       className={`border rounded-lg p-3 cursor-pointer transition ${
-        active ? "border-blue-500 bg-blue-50" : "bg-card hover:border-gray-400"
+        active ? "border-primary bg-primary/10" : "bg-card hover:border-primary/50"
       }`}
       onClick={onClick}
     >
       <div className="flex items-start justify-between">
         <div className="min-w-0">
-          <div className="text-xs font-mono text-gray-700 truncate">{item.strategy}</div>
+          <div className="text-xs font-mono text-muted-foreground truncate">{item.strategy}</div>
           <div className="text-xs text-muted-foreground/70 mt-0.5">
             {item.symbols.length} 标的 · {item.start.slice(0, 10)} ~ {item.end.slice(0, 10)}
           </div>
@@ -910,7 +910,7 @@ function HistoryCard({
           )}
         </div>
         <div className="flex flex-col items-end gap-1 shrink-0">
-          <span className="text-xs text-gray-300">
+          <span className="text-xs text-muted-foreground">
             {new Date(item.created_at).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
           </span>
           <button
@@ -918,13 +918,13 @@ function HistoryCard({
               e.stopPropagation();
               onDelete();
             }}
-            className="text-xs text-gray-300 hover:text-red-500"
+            className="text-xs text-muted-foreground hover:text-destructive"
           >
             删除
           </button>
         </div>
       </div>
-      {loading && <div className="text-xs text-blue-400 mt-1">加载中...</div>}
+      {loading && <div className="text-xs text-primary mt-1">加载中...</div>}
     </div>
   );
 }

@@ -52,7 +52,7 @@ export default function Settings() {
           <span
             className={`px-3 py-1 rounded text-sm font-medium ${
               form.data_provider === "yfinance"
-                ? "bg-blue-100 text-blue-700"
+                ? "bg-primary/10 text-primary"
                 : "bg-orange-100 text-orange-700"
             }`}
           >
@@ -86,7 +86,7 @@ export default function Settings() {
                   setForm({ ...form, sync_enabled: e.target.checked })
                 }
               />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-card after:border-border after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
+              <div className="w-11 h-6 bg-muted peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-card after:border-border after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
             </label>
           </div>
           <div className="flex flex-wrap items-center gap-3">
@@ -126,7 +126,7 @@ export default function Settings() {
                   setForm({ ...form, download_enabled: e.target.checked })
                 }
               />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-card after:border-border after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
+              <div className="w-11 h-6 bg-muted peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-card after:border-border after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
             </label>
           </div>
 

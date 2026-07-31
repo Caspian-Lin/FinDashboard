@@ -14,6 +14,8 @@ const datasetApiMock = vi.hoisted(() => ({
   cachedDataSelection: vi.fn(),
   createRelease: vi.fn(),
   instruments: vi.fn(),
+  etfMetadata: vi.fn(),
+  updateEtfClassification: vi.fn(),
   lifecycle: vi.fn(),
   releaseDetail: vi.fn(),
   instrumentDetail: vi.fn(),
@@ -82,6 +84,23 @@ beforeEach(() => {
     total: 0,
     limit: 200,
     offset: 0,
+  });
+  datasetApiMock.etfMetadata.mockResolvedValue(null);
+  datasetApiMock.updateEtfClassification.mockResolvedValue({
+    code: "159001.SZ",
+    fund_code: "159001",
+    category: "money_market",
+    underlying_index: null,
+    underlying_asset_class: "cash",
+    management_fee_rate: null,
+    custody_fee_rate: null,
+    tracking_error: null,
+    inception_date: null,
+    listing_date: null,
+    delisting_date: null,
+    iopv_available: false,
+    allows_t_plus_0: true,
+    dividend_policy: "cash",
   });
   datasetApiMock.createRelease.mockResolvedValue({
     release_id: "daily-bars-20260731-v1",
@@ -228,5 +247,72 @@ describe("ResearchData 数据发布闭环", () => {
     expect(screen.getByText("已选 2 只")).toBeInTheDocument();
     expect(screen.getByLabelText("开始日期")).toHaveValue("2020-01-02");
     expect(screen.getByLabelText("结束日期")).toHaveValue("2024-12-31");
+  });
+
+  it("发布缺少 ETF 分类时可原地补齐并重试", async () => {
+    const user = userEvent.setup();
+    datasetApiMock.cachedData.mockResolvedValue({
+      items: [
+        {
+          symbol: "159001.SZ",
+          period: "1d",
+          adjust: "qfq",
+          bar_count: 242,
+          first_date: "2024-01-02",
+          last_date: "2024-12-31",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    datasetApiMock.createRelease
+      .mockRejectedValueOnce(
+        new Error("数据质量门未通过: 159001.SZ: ETF 缺少分类元数据"),
+      )
+      .mockResolvedValueOnce({
+        release_id: "daily-bars-20260731-v1",
+        dataset_name: "multi_asset_daily_bars",
+        source: "akshare",
+        version: "2026-07-31-v1",
+        schema_version: "v1",
+        start_date: "2024-01-02",
+        end_date: "2024-12-31",
+        period: "1d",
+        adjustment: "qfq",
+        symbol_count: 1,
+        row_count: 242,
+        coverage_pct: 100,
+        capabilities: [],
+        quality_status: "passed",
+        known_limitations: [],
+        published_at: "2026-07-31T00:00:00Z",
+        release_checksum: "b".repeat(64),
+      });
+
+    renderWithProviders(<ResearchData />);
+    await user.click(screen.getByRole("tab", { name: "数据发布" }));
+    await user.click(screen.getByRole("button", { name: "创建数据发布" }));
+    await user.click(await screen.findByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "冻结并发布" }));
+
+    expect(
+      await screen.findByText("需要补齐 ETF 元数据"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByLabelText("ETF 分类"));
+    await user.click(screen.getByRole("option", { name: "货币 ETF" }));
+    await user.click(screen.getByRole("button", { name: "补齐元数据" }));
+
+    await waitFor(() =>
+      expect(datasetApiMock.updateEtfClassification).toHaveBeenCalledWith(
+        "159001.SZ",
+        { category: "money_market", underlying_index: null },
+      ),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "重新校验并发布" }),
+    );
+    expect(await screen.findByText("数据发布成功")).toBeInTheDocument();
+    expect(datasetApiMock.createRelease).toHaveBeenCalledTimes(2);
   });
 });

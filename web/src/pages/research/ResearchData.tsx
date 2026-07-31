@@ -108,10 +108,9 @@ function EtfMetadataEditor({
   });
 
   useEffect(() => {
-    if (!data) return;
-    setCategory(data.category);
-    setUnderlyingIndex(data.underlying_index ?? "");
-  }, [data]);
+    setCategory(data?.category ?? "");
+    setUnderlyingIndex(data?.underlying_index ?? "");
+  }, [data, symbol]);
 
   const save = useMutation({
     mutationFn: () => {

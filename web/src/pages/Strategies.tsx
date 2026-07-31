@@ -177,7 +177,7 @@ export default function Strategies() {
       <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-foreground">策略配置</h1>
-          <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
             配置经过测试的内置策略参数，并保存为可复用预设。参数由后端 schema
             自动生成，页面不接收或执行策略代码。
           </p>
@@ -190,7 +190,7 @@ export default function Strategies() {
 
       <div className="grid overflow-hidden rounded-xl border border-border bg-card lg:grid-cols-[15rem_minmax(0,1fr)_18rem]">
         <aside className="border-b border-border bg-background p-3 lg:border-b-0 lg:border-r">
-          <div className="mb-2 flex items-center gap-1 px-2 text-xs font-semibold text-slate-500">
+          <div className="mb-2 flex items-center gap-1 px-2 text-xs font-semibold text-muted-foreground">
             <span>内置策略</span>
             <InfoHint content={INFO_HINTS.strategies.builtinStrategies} />
           </div>
@@ -209,7 +209,7 @@ export default function Strategies() {
                 <span className="block text-sm font-medium">{strategy.name}</span>
                 <span
                   className={`mt-0.5 block text-xs ${
-                    strategy.kind === selectedKind ? "text-muted-foreground" : "text-slate-500"
+                    strategy.kind === selectedKind ? "text-muted-foreground" : "text-muted-foreground"
                   }`}
                 >
                   {strategy.supports_backtest ? "可用于回测" : "实时时钟策略"}
@@ -226,11 +226,11 @@ export default function Strategies() {
                 <h2 className="text-lg font-semibold text-foreground">{definition.name}</h2>
                 <InfoHint content={INFO_HINTS.strategies.backtestCapability} />
               </div>
-              <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-600">
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
                 {definition.description}
               </p>
             </div>
-            <code className="rounded bg-secondary px-2 py-1 text-xs text-slate-600">
+            <code className="rounded bg-secondary px-2 py-1 text-xs text-muted-foreground">
               {definition.kind}
             </code>
           </div>
@@ -339,10 +339,10 @@ export default function Strategies() {
         <aside className="border-t border-border bg-background p-4 lg:border-l lg:border-t-0">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-1">
-              <h2 className="text-sm font-semibold text-slate-800">已保存预设</h2>
+              <h2 className="text-sm font-semibold text-foreground">已保存预设</h2>
               <InfoHint content={INFO_HINTS.strategies.savedPresets} />
             </div>
-            <span className="text-xs text-slate-500">{presetsQuery.data?.length ?? 0} 个</span>
+            <span className="text-xs text-muted-foreground">{presetsQuery.data?.length ?? 0} 个</span>
           </div>
 
           {presetsQuery.isPending && <PresetListSkeleton />}
@@ -354,7 +354,7 @@ export default function Strategies() {
           {presetsQuery.data?.length === 0 && (
             <div className="rounded-lg border border-dashed border-input p-4 text-center">
               <p className="text-sm font-medium text-foreground">还没有策略预设</p>
-              <p className="mt-1 text-xs leading-5 text-slate-500">
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
                 在左侧选择策略，填写参数后保存；以后可以直接载入回测。
               </p>
             </div>
@@ -373,10 +373,10 @@ export default function Strategies() {
                   onClick={() => loadPreset(preset.id)}
                   className="w-full text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
                 >
-                  <span className="block truncate text-sm font-medium text-slate-800">
+                  <span className="block truncate text-sm font-medium text-foreground">
                     {preset.name}
                   </span>
-                  <span className="mt-1 block text-xs text-slate-500">
+                  <span className="mt-1 block text-xs text-muted-foreground">
                     {strategiesQuery.data?.find((item) => item.kind === preset.strategy)?.name ??
                       preset.strategy}
                   </span>
@@ -389,7 +389,7 @@ export default function Strategies() {
                       <button
                         type="button"
                         onClick={() => setDeleteConfirmId(null)}
-                        className="text-xs text-slate-600 hover:text-foreground"
+                        className="text-xs text-muted-foreground hover:text-foreground"
                       >
                         取消
                       </button>
@@ -397,7 +397,7 @@ export default function Strategies() {
                         type="button"
                         onClick={() => deletePreset.mutate(preset.id)}
                         disabled={deletePreset.isPending}
-                        className="text-xs font-medium text-destructive hover:text-red-900"
+                        className="text-xs font-medium text-destructive hover:text-destructive"
                       >
                         删除
                       </button>
@@ -407,7 +407,7 @@ export default function Strategies() {
                   <button
                     type="button"
                     onClick={() => setDeleteConfirmId(preset.id)}
-                    className="mt-2 inline-flex items-center gap-1 text-xs text-slate-400 hover:text-destructive"
+                    className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-destructive"
                   >
                     <Trash2 size={13} aria-hidden="true" />
                     删除
@@ -419,7 +419,7 @@ export default function Strategies() {
         </aside>
       </div>
 
-      <p className="mt-4 text-xs leading-5 text-slate-500">
+      <p className="mt-4 text-xs leading-5 text-muted-foreground">
         安全边界：本页面不上传、导入或执行 Python 代码，也不会修改正在运行的实盘策略。
         在线策略代码能力不在本阶段范围内。
       </p>
@@ -430,9 +430,9 @@ export default function Strategies() {
 function StrategiesSkeleton() {
   return (
     <div className="mx-auto max-w-7xl animate-pulse" aria-label="正在加载策略配置">
-      <div className="h-8 w-36 rounded bg-slate-200" />
-      <div className="mt-3 h-4 w-full max-w-xl rounded bg-slate-200" />
-      <div className="mt-6 h-[30rem] rounded-xl bg-slate-200" />
+      <div className="h-8 w-36 rounded bg-muted" />
+      <div className="mt-3 h-4 w-full max-w-xl rounded bg-muted" />
+      <div className="mt-6 h-[30rem] rounded-xl bg-muted" />
     </div>
   );
 }
@@ -440,8 +440,8 @@ function StrategiesSkeleton() {
 function PresetListSkeleton() {
   return (
     <div className="space-y-2 animate-pulse" aria-label="正在加载策略预设">
-      <div className="h-16 rounded-lg bg-slate-200" />
-      <div className="h-16 rounded-lg bg-slate-200" />
+      <div className="h-16 rounded-lg bg-muted" />
+      <div className="h-16 rounded-lg bg-muted" />
     </div>
   );
 }

@@ -346,7 +346,7 @@ function AllocationTab({
             </CardHeader>
             <CardContent className="space-y-4">
               {pieData.length > 0 ? (
-                <div className="rounded-md bg-slate-900 p-3">
+                <div className="rounded-md bg-muted p-3">
                   <ResponsiveContainer width="100%" height={260}>
                     <PieChart>
                       <Pie
