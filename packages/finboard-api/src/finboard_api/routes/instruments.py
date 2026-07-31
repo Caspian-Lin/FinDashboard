@@ -97,6 +97,44 @@ async def list_instruments(
     return [_instrument_to_out(r) for r in result.scalars().all()]
 
 
+@router.get("/etf-summary", response_model=EtfMetadataSummaryOut)
+async def etf_metadata_summary(
+    session: AsyncSession = Depends(get_session),
+) -> EtfMetadataSummaryOut:
+    """ETF 元数据分类统计(各 review_status 数量 + 缺失数)。"""
+    count_stmt = select(InstrumentModel).where(
+        InstrumentModel.instrument_type == "etf"
+    )
+    total_etf = len(
+        (await session.execute(count_stmt)).scalars().all()
+    )
+    summary = await EtfMetadataRepository(session).summary(total_etf)
+    return EtfMetadataSummaryOut(
+        total=summary.total,
+        auto_adopted=summary.auto_adopted,
+        needs_review=summary.needs_review,
+        manually_confirmed=summary.manually_confirmed,
+        manually_overridden=summary.manually_overridden,
+        missing_metadata=summary.missing_metadata,
+    )
+
+
+@router.get("/etf-review", response_model=list[EtfMetadataOut])
+async def etf_review_queue(
+    review_status: str | None = Query(default="needs_review"),
+    limit: int = Query(default=200, ge=1, le=2000),
+    session: AsyncSession = Depends(get_session),
+) -> list[EtfMetadataOut]:
+    """ETF 元数据待复核队列(默认查 needs_review)。"""
+    from finboard_shared.types import ReviewStatus
+
+    status = ReviewStatus(review_status) if review_status else None
+    rows = await EtfMetadataRepository(session).list_by_review_status(
+        status, limit=limit
+    )
+    return [_etf_to_out(r) for r in rows]
+
+
 @router.get("/{code}", response_model=InstrumentOut)
 async def get_instrument(
     code: str,
@@ -163,44 +201,6 @@ async def update_etf_classification(
     )
     await session.commit()
     return _etf_to_out(row)
-
-
-@router.get("/etf-summary", response_model=EtfMetadataSummaryOut)
-async def etf_metadata_summary(
-    session: AsyncSession = Depends(get_session),
-) -> EtfMetadataSummaryOut:
-    """ETF 元数据分类统计(各 review_status 数量 + 缺失数)。"""
-    count_stmt = select(InstrumentModel).where(
-        InstrumentModel.instrument_type == "etf"
-    )
-    total_etf = len(
-        (await session.execute(count_stmt)).scalars().all()
-    )
-    summary = await EtfMetadataRepository(session).summary(total_etf)
-    return EtfMetadataSummaryOut(
-        total=summary.total,
-        auto_adopted=summary.auto_adopted,
-        needs_review=summary.needs_review,
-        manually_confirmed=summary.manually_confirmed,
-        manually_overridden=summary.manually_overridden,
-        missing_metadata=summary.missing_metadata,
-    )
-
-
-@router.get("/etf-review", response_model=list[EtfMetadataOut])
-async def etf_review_queue(
-    review_status: str | None = Query(default="needs_review"),
-    limit: int = Query(default=200, ge=1, le=2000),
-    session: AsyncSession = Depends(get_session),
-) -> list[EtfMetadataOut]:
-    """ETF 元数据待复核队列(默认查 needs_review)。"""
-    from finboard_shared.types import ReviewStatus
-
-    status = ReviewStatus(review_status) if review_status else None
-    rows = await EtfMetadataRepository(session).list_by_review_status(
-        status, limit=limit
-    )
-    return [_etf_to_out(r) for r in rows]
 
 
 @router.post("/etf-sync", response_model=EtfSyncPreviewOut)
