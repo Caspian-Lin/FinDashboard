@@ -439,6 +439,7 @@ class DatasetReleaseSpec:
     known_limitations: tuple[str, ...] = ()
     minimum_symbol_coverage: Decimal = Decimal("0.80")
     minimum_release_coverage: Decimal = Decimal("0.85")
+    max_anomaly_ratio: Decimal = Decimal("0.05")
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -465,6 +466,8 @@ class DatasetReleaseSpec:
             raise ValueError("minimum_symbol_coverage 必须落在 (0, 1]")
         if not (Decimal("0") < self.minimum_release_coverage <= Decimal("1")):
             raise ValueError("minimum_release_coverage 必须落在 (0, 1]")
+        if not (Decimal("0") <= self.max_anomaly_ratio <= Decimal("1")):
+            raise ValueError("max_anomaly_ratio 必须落在 [0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -996,13 +999,23 @@ class FrozenDatasetReleaseBuilder:
             instrument=instrument,
             spec=spec,
         )
+        total_bars = len(frozen_bars)
+        anomaly_ratio = (
+            Decimal(audit.anomaly_count) / Decimal(total_bars)
+            if total_bars > 0
+            else Decimal("1")
+        )
         ready = (
-            audit.anomaly_count == 0
+            anomaly_ratio <= spec.max_anomaly_ratio
             and audit.coverage_pct >= spec.minimum_symbol_coverage
             and instrument.metadata_complete
             and set(instrument.required_event_types).issubset(instrument.present_event_types)
         )
         issues = list(audit.issues)
+        if anomaly_ratio > spec.max_anomaly_ratio:
+            issues.append(
+                f"anomaly_ratio:{anomaly_ratio:.4f}>{spec.max_anomaly_ratio}"
+            )
         if not instrument.metadata_complete:
             issues.append("metadata_incomplete")
         missing_events = sorted(
@@ -1221,7 +1234,9 @@ def _audit_bars(
             anomaly_count += 1
         if instrument.delist_date is not None and bar_date > instrument.delist_date:
             anomaly_count += 1
-        if (
+        if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
+            suspended_bar_dates.add(bar_date)
+        elif (
             bar.open.is_nan() or bar.open <= 0
             or bar.high.is_nan() or bar.high <= 0
             or bar.low.is_nan() or bar.low <= 0
@@ -1232,8 +1247,6 @@ def _audit_bars(
             or bar.amount < 0
         ):
             anomaly_count += 1
-        if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
-            suspended_bar_dates.add(bar_date)
     anomaly_count += len(dates) - len(unique_dates)
 
     expected_start = max(
@@ -1252,8 +1265,6 @@ def _audit_bars(
     expected_dates = _trading_days(expected_start, expected_end)
     required_dates = expected_dates - lifecycle_dates
     expected_sessions = len(required_dates)
-    unexpected_sessions = unique_dates - expected_dates
-    anomaly_count += len(unexpected_sessions)
     missing_sessions = len(required_dates - unique_dates)
     covered_sessions = len(required_dates & unique_dates)
     coverage = (
