@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
-import type { QualityReport } from "../lib/api";
+import type { QualityRepairResult, QualityReport } from "../lib/api";
 import { INFO_HINTS, type InfoHintDefinition } from "../lib/infoHints";
 
 const BULK_PHASE_LABELS: Record<string, string> = {
@@ -33,8 +33,9 @@ export default function Data() {
   const [dlStart, setDlStart] = useState("2015-01-01");
   const [dlSource, setDlSource] = useState("");
   const [showQualityDetail, setShowQuality] = useState(false);
+  const [repairSource, setRepairSource] = useState<"akshare" | "yfinance">("akshare");
 
-  const PAGE_SIZE = 50;
+  const PAGE_SIZE = 10;
   const isSearching = searchQuery.length >= 2;
 
   const { data: status } = useQuery({
@@ -131,6 +132,18 @@ export default function Data() {
       }),
     onSuccess: (data) => {
       queryClient.setQueryData(["bulk-download-status"], data);
+    },
+  });
+
+  const repairQuality = useMutation({
+    mutationFn: () =>
+      api.repairQuality({
+        symbols: (qualityReports ?? []).filter((report) => !report.passed).map((report) => report.symbol),
+        source: repairSource,
+      }),
+    onSuccess: async () => {
+      await refetchQuality();
+      await queryClient.invalidateQueries({ queryKey: ["data-status"] });
     },
   });
 
@@ -441,118 +454,6 @@ export default function Data() {
         )}
       </div>
 
-      {/* Quality Check — standalone panel for existing cache data */}
-      <div className="bg-card rounded-lg shadow p-5 mb-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="flex items-center gap-1 text-lg font-semibold">
-            缓存质量检查
-          </h2>
-          <button
-            onClick={() => refetchQuality()}
-            disabled={qualityFetching}
-            className="bg-blue-600 text-white rounded px-4 py-1.5 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
-          >
-            {qualityFetching ? "检查中..." : "检查全部缓存"}
-          </button>
-        </div>
-
-        {qualityReports && qualityReports.length > 0 && (
-          <>
-            <div className="grid grid-cols-3 gap-4 mb-4">
-              <div className="text-center">
-                <div className="text-2xl font-bold text-success">
-                  {qualityReports.filter((r) => r.passed).length}
-                </div>
-                <div className="text-xs text-muted-foreground">通过</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-destructive">
-                  {qualityReports.filter((r) => !r.passed).length}
-                </div>
-                <div className="text-xs text-muted-foreground">异常</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-muted-foreground">
-                  {qualityReports.length}
-                </div>
-                <div className="text-xs text-muted-foreground">总计</div>
-              </div>
-            </div>
-
-            {qualityReports.some((r) => !r.passed) && (
-              <div>
-                <button
-                  onClick={() => setShowQuality(!showQualityDetail)}
-                  className="text-sm text-blue-400 hover:underline mb-2"
-                >
-                  {showQualityDetail ? "收起" : "展开"}异常标的详情 ({qualityReports.filter((r) => !r.passed).length})
-                </button>
-                {showQualityDetail && (
-                  <div className="max-h-80 overflow-auto rounded border">
-                    <table className="w-full text-xs">
-                      <thead className="bg-muted sticky top-0">
-                        <tr>
-                          <th className="px-3 py-2 text-left">标的</th>
-                          <th className="px-3 py-2 text-right">异常数</th>
-                          <th className="px-3 py-2 text-right">重复</th>
-                          <th className="px-3 py-2 text-left">数据源</th>
-                          <th className="px-3 py-2 text-left">异常日期 / 原因</th>
-                          <th className="px-3 py-2 text-left">换源修复</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {qualityReports
-                          .filter((r: QualityReport) => !r.passed)
-                          .map((r: QualityReport) => (
-                            <tr key={r.symbol} className="border-t">
-                              <td className="px-3 py-1.5 font-mono">{r.symbol}</td>
-                              <td className="px-3 py-1.5 text-right text-destructive font-semibold">
-                                {r.anomaly_count}
-                              </td>
-                              <td className="px-3 py-1.5 text-right">
-                                {r.duplicate_count || "-"}
-                              </td>
-                              <td className="px-3 py-1.5">
-                                {r.sources.join(",") || "-"}
-                              </td>
-                              <td className="px-3 py-1.5">
-                                {r.anomalies
-                                  .slice(0, 3)
-                                  .map(
-                                    (a) =>
-                                      `${a.date}(${a.reasons.join(",")})`,
-                                  )
-                                  .join("; ")}
-                                {r.anomalies.length > 3 &&
-                                  ` +${r.anomalies.length - 3}`}
-                              </td>
-                              <td className="px-3 py-1.5">
-                                {r.fallback_used ? (
-                                  <span className="text-blue-400">
-                                    {r.fallback_source} ({r.corrected_dates.length}日)
-                                  </span>
-                                ) : (
-                                  "-"
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            )}
-          </>
-        )}
-
-        {qualityReports && qualityReports.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            无缓存数据,请先拉取行情。
-          </p>
-        )}
-      </div>
-
       {/* Instruments table */}
       <div className="bg-card rounded-lg shadow mb-6">
         <div className="flex items-center justify-between px-5 py-3 border-b">
@@ -648,10 +549,49 @@ export default function Data() {
 
       {/* Cache status table */}
       <div className="bg-card rounded-lg shadow">
-        <div className="flex items-center gap-1 border-b px-5 py-3">
-          <h2 className="text-lg font-semibold">已缓存数据 ({status?.total ?? 0})</h2>
-          <InfoHint content={INFO_HINTS.data.cachedData} />
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3">
+          <div className="flex items-center gap-1">
+            <h2 className="text-lg font-semibold">已缓存数据 ({status?.total ?? 0})</h2>
+            <InfoHint content={INFO_HINTS.data.cachedData} />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={repairSource}
+              onChange={(event) => setRepairSource(event.target.value as "akshare" | "yfinance")}
+              className="rounded border border-input bg-card px-2 py-1.5 text-sm text-foreground"
+              aria-label="批量换源修复数据源"
+            >
+              <option value="akshare">备用源: akshare</option>
+              <option value="yfinance">备用源: yfinance</option>
+            </select>
+            <button
+              onClick={() => refetchQuality()}
+              disabled={qualityFetching || repairQuality.isPending}
+              className="rounded border border-input px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50"
+            >
+              {qualityFetching ? "检查中..." : "检查全部缓存"}
+            </button>
+            <button
+              onClick={() => repairQuality.mutate()}
+              disabled={
+                repairQuality.isPending ||
+                !qualityReports?.some((report) => !report.passed)
+              }
+              className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {repairQuality.isPending
+                ? "批量修复中..."
+                : `批量换源修复 (${qualityReports?.filter((report) => !report.passed).length ?? 0})`}
+            </button>
+          </div>
         </div>
+        <CacheQualitySummary
+          reports={qualityReports}
+          expanded={showQualityDetail}
+          onToggle={() => setShowQuality((current) => !current)}
+          repairResult={repairQuality.data}
+          repairError={repairQuality.error as Error | null}
+        />
         {!status || status.items.length === 0 ? (
           <div className="p-8 text-center text-muted-foreground/70">缓存为空</div>
         ) : (
@@ -704,6 +644,93 @@ export default function Data() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function CacheQualitySummary({
+  reports,
+  expanded,
+  onToggle,
+  repairResult,
+  repairError,
+}: {
+  reports: QualityReport[] | undefined;
+  expanded: boolean;
+  onToggle: () => void;
+  repairResult: QualityRepairResult | undefined;
+  repairError: Error | null;
+}) {
+  if (!reports) {
+    return (
+      <div className="border-b px-5 py-3 text-sm text-muted-foreground">
+        点击“检查全部缓存”后显示存量数据质量结果。
+      </div>
+    );
+  }
+  if (reports.length === 0) {
+    return <div className="border-b px-5 py-3 text-sm text-muted-foreground">无缓存数据。</div>;
+  }
+
+  const failed = reports.filter((report) => !report.passed);
+  return (
+    <div className="border-b px-5 py-3">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+        <span>
+          已检查 <strong>{reports.length}</strong> 个缓存标的
+        </span>
+        <span className="text-success">通过 {reports.length - failed.length}</span>
+        <span className={failed.length ? "text-destructive" : "text-muted-foreground"}>
+          异常 {failed.length}
+        </span>
+        {failed.length > 0 && (
+          <button onClick={onToggle} className="text-blue-400 hover:underline">
+            {expanded ? "收起" : "展开"}异常详情
+          </button>
+        )}
+      </div>
+      {repairResult && (
+        <p className="mt-2 text-sm text-muted-foreground">
+          最近批量修复: 成功 {repairResult.repaired}/{repairResult.total}, 修正 {repairResult.corrected_bars} 根 bar
+        </p>
+      )}
+      {repairError && (
+        <p className="mt-2 text-sm text-destructive">批量修复失败: {repairError.message}</p>
+      )}
+      {expanded && failed.length > 0 && (
+        <div className="mt-3 max-h-80 overflow-auto rounded border">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-muted">
+              <tr>
+                <th className="px-3 py-2 text-left">标的</th>
+                <th className="px-3 py-2 text-right">异常数</th>
+                <th className="px-3 py-2 text-right">重复</th>
+                <th className="px-3 py-2 text-left">数据源</th>
+                <th className="px-3 py-2 text-left">异常日期 / 原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              {failed.map((report) => (
+                <tr key={report.symbol} className="border-t">
+                  <td className="px-3 py-1.5 font-mono">{report.symbol}</td>
+                  <td className="px-3 py-1.5 text-right font-semibold text-destructive">
+                    {report.anomaly_count}
+                  </td>
+                  <td className="px-3 py-1.5 text-right">{report.duplicate_count || "-"}</td>
+                  <td className="px-3 py-1.5">{report.sources.join(",") || "未记录"}</td>
+                  <td className="px-3 py-1.5">
+                    {report.anomalies
+                      .slice(0, 3)
+                      .map((anomaly) => `${anomaly.date}(${anomaly.reasons.join(",")})`)
+                      .join("; ")}
+                    {report.anomalies.length > 3 && ` +${report.anomalies.length - 3}`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

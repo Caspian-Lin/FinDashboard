@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -155,6 +155,61 @@ class TestDataRoutes:
         assert resp.json()["details"][0]["bar_count"] == 2
         provider.update_cache_batch.assert_awaited_once()
         provider.fetch_bars_batch.assert_not_awaited()
+
+    def test_quality_repair_batches_anomalous_symbols_with_uncached_source(
+        self, client: TestClient
+    ) -> None:
+        """批量换源必须绕过共享缓存,并只替换通过校验的异常日期。"""
+        from finboard_shared.models import Bar, Symbol
+        from finboard_shared.types import BarPeriod, Market
+
+        symbol = Symbol(code="510600.SH", market=Market.A_SHARE)
+        bad = Bar(
+            symbol=symbol,
+            period=BarPeriod.D1,
+            timestamp=datetime(2019, 1, 7, tzinfo=UTC),
+            open=Decimal("2.269"),
+            high=Decimal("2.310"),
+            low=Decimal("2.297"),
+            close=Decimal("2.307"),
+            volume=Decimal("227972"),
+            source="yfinance",
+        )
+        repaired = Bar(
+            symbol=symbol,
+            period=BarPeriod.D1,
+            timestamp=bad.timestamp,
+            open=Decimal("2.308"),
+            high=Decimal("2.315"),
+            low=Decimal("2.297"),
+            close=Decimal("2.307"),
+            volume=Decimal("227972"),
+            source="akshare",
+        )
+        provider = AsyncMock()
+        provider.fetch_bars.return_value = [repaired]
+        cache_read = AsyncMock(return_value=[bad])
+        cache_write = AsyncMock()
+
+        with (
+            patch("finboard_api.routes.data._get_provider", return_value=provider) as factory,
+            patch("finboard_data.cache.ParquetCache.read", new=cache_read),
+            patch("finboard_data.cache.ParquetCache.write", new=cache_write),
+        ):
+            resp = client.post(
+                "/api/data/quality/repair",
+                json={"symbols": ["510600.SH"], "source": "akshare"},
+            )
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["repaired"] == 1
+        assert payload["corrected_bars"] == 1
+        assert payload["reports"][0]["corrected_dates"] == ["2019-01-07"]
+        factory.assert_called_once_with("akshare", use_cache=False)
+        written = cache_write.await_args.args[3]
+        assert written[0].open == Decimal("2.308")
+        assert written[0].source == "akshare"
 
     def test_get_symbol_pool_empty(self, client: TestClient) -> None:
         """标的池不存在时返回默认配置。"""

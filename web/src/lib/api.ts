@@ -269,6 +269,11 @@ export const api = {
     const qs = q.toString();
     return fetchJSON<QualityReport[]>(`/data/quality${qs ? `?${qs}` : ""}`);
   },
+  repairQuality: (body: { symbols: string[]; source: "akshare" | "yfinance"; adjust?: string }) =>
+    fetchJSON<QualityRepairResult>("/data/quality/repair", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   // ---- Scheduler Config ----
   getConfig: () => fetchJSON<SchedulerConfig>("/data/config"),
@@ -588,6 +593,14 @@ export interface QualityReport {
   fallback_source: string | null;
   corrected_dates: string[];
   error: string | null;
+}
+
+export interface QualityRepairResult {
+  total: number;
+  repaired: number;
+  failed: number;
+  corrected_bars: number;
+  reports: QualityReport[];
 }
 
 export interface BulkDownloadStatus {

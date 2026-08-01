@@ -496,6 +496,9 @@ class BarQualityChecker:
     @classmethod
     def _check_bar(cls, bar: Bar) -> list[str]:
         """返回单根 bar 的异常原因列表(空列表 = 正常)。"""
+        if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
+            return []
+
         reasons: list[str] = []
         tol = cls.OHLC_TOLERANCE
         upper = Decimal("1") + tol

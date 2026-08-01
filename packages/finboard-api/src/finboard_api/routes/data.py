@@ -24,6 +24,8 @@ from finboard_api.schemas import (
     FetchResultOut,
     InstrumentListOut,
     InstrumentOut,
+    QualityRepairRequest,
+    QualityRepairResultOut,
     QualityReportOut,
     SchedulerConfigOut,
     SchedulerConfigUpdate,
@@ -45,15 +47,19 @@ _SYMBOLS_FILE = "symbols.yaml"
 _CONFIG_FILE = "data_config.json"
 
 
-def _get_provider(source: str | None = None) -> AkShareProvider | YFinanceProvider:
+def _get_provider(
+    source: str | None = None,
+    *,
+    use_cache: bool = True,
+) -> AkShareProvider | YFinanceProvider:
     import os
 
     from finboard_data import AkShareProvider, YFinanceProvider
 
     provider_name = source or os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
-        return AkShareProvider()
-    return YFinanceProvider()
+        return AkShareProvider(use_cache=use_cache)
+    return YFinanceProvider(use_cache=use_cache)
 
 
 @router.get("/status", response_model=list[DataStatusOut])
@@ -325,6 +331,120 @@ async def check_cache_quality(
     return results
 
 
+@router.post("/quality/repair", response_model=QualityRepairResultOut)
+async def repair_cache_quality(req: QualityRepairRequest) -> QualityRepairResultOut:
+    """批量使用指定备用源修复存量缓存中的异常 bar。"""
+    from dataclasses import replace
+
+    from finboard_data.cache import ParquetCache, make_symbol
+    from finboard_data.quality import BarQualityChecker
+    from finboard_shared.types import BarPeriod
+
+    cache = ParquetCache(_CACHE_DIR)
+    checker = BarQualityChecker()
+    # 强制绕过共享缓存,确保备用源真正重新请求远端数据。
+    provider = _get_provider(req.source, use_cache=False)
+    semaphore = asyncio.Semaphore(3)
+
+    async def _repair(code: str) -> tuple[QualityReportOut, int, bool]:
+        sym = make_symbol(code)
+        try:
+            bars = await cache.read(sym, BarPeriod.D1, req.adjust)
+            before = checker.check(bars, symbol=code)
+            if not bars:
+                return (
+                    QualityReportOut(
+                        symbol=code,
+                        total_bars=0,
+                        anomaly_count=0,
+                        passed=False,
+                        fallback_used=True,
+                        fallback_source=req.source,
+                        error="缓存为空",
+                    ),
+                    0,
+                    False,
+                )
+
+            corrected_dates: list[str] = []
+            by_date = {bar.timestamp.date(): bar for bar in bars}
+            anomaly_dates = set(before.anomaly_dates)
+            if anomaly_dates:
+                async with semaphore:
+                    alternatives = await provider.fetch_bars(
+                        sym,
+                        BarPeriod.D1,
+                        min(anomaly_dates),
+                        max(anomaly_dates),
+                        adjust=req.adjust,
+                    )
+                for alternative in alternatives:
+                    bar_date = alternative.timestamp.date()
+                    if bar_date not in anomaly_dates:
+                        continue
+                    if checker.check([alternative], symbol=code).passed:
+                        by_date[bar_date] = replace(alternative, source=req.source)
+                        corrected_dates.append(str(bar_date))
+
+            repaired_bars = sorted(by_date.values(), key=lambda bar: bar.timestamp)
+            if corrected_dates or before.duplicate_count:
+                await cache.write(sym, BarPeriod.D1, req.adjust, repaired_bars)
+            after = checker.check(repaired_bars, symbol=code)
+            passed = after.passed
+            return (
+                QualityReportOut(
+                    symbol=code,
+                    total_bars=after.total_bars,
+                    anomaly_count=after.anomaly_count,
+                    duplicate_count=after.duplicate_count,
+                    sources=list(after.sources),
+                    anomalies=[
+                        BarAnomalyOut(
+                            date=str(anomaly.date),
+                            source=anomaly.source,
+                            reasons=list(anomaly.reasons),
+                        )
+                        for anomaly in after.anomalies[:20]
+                    ],
+                    passed=passed,
+                    primary_source=before.sources[0] if before.sources else "",
+                    fallback_used=True,
+                    fallback_source=req.source,
+                    corrected_dates=corrected_dates,
+                    error=None if passed else "备用源未覆盖全部异常日期",
+                ),
+                len(corrected_dates),
+                passed,
+            )
+        except Exception as exc:
+            logger.exception("quality_repair_failed", symbol=code, source=req.source)
+            return (
+                QualityReportOut(
+                    symbol=code,
+                    total_bars=0,
+                    anomaly_count=0,
+                    passed=False,
+                    fallback_used=True,
+                    fallback_source=req.source,
+                    error=str(exc),
+                ),
+                0,
+                False,
+            )
+
+    unique_codes = list(dict.fromkeys(req.symbols))
+    repaired_results = await asyncio.gather(*[_repair(code) for code in unique_codes])
+    reports = [item[0] for item in repaired_results]
+    repaired = sum(1 for _, _, passed in repaired_results if passed)
+    return QualityRepairResultOut(
+        total=len(unique_codes),
+        repaired=repaired,
+        failed=len(unique_codes) - repaired,
+        corrected_bars=sum(item[1] for item in repaired_results),
+        reports=reports,
+    )
+
+
 @router.post("/fetch-all", response_model=BatchFetchResultOut)
 async def fetch_all_data() -> BatchFetchResultOut:
     """批量更新标的池缓存,不在内存中保留所有历史 Bars。"""
@@ -593,17 +713,19 @@ async def start_bulk_download(
     if not instruments:
         raise HTTPException(status_code=400, detail="未找到匹配的标的(请先同步)")
 
-    provider_name = req.source or os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
+    provider_name = req.source or os.getenv("FINBOARD_DATA_PROVIDER") or "akshare"
     if provider_name == "akshare":
         primary: AkShareProvider | YFinanceProvider = AkShareProvider(
             max_concurrency=2, request_interval=0.5
         )
         fallback: AkShareProvider | YFinanceProvider | None = YFinanceProvider(
-            max_concurrency=3, request_interval=0.3
+            use_cache=False, max_concurrency=3, request_interval=0.3
         )
     else:
         primary = YFinanceProvider(max_concurrency=3, request_interval=0.3)
-        fallback = AkShareProvider(max_concurrency=2, request_interval=0.5)
+        fallback = AkShareProvider(
+            use_cache=False, max_concurrency=2, request_interval=0.5
+        )
 
     sym_objs = [make_symbol(ins.code) for ins in instruments]
     start_date = parse_d.fromisoformat(req.start)
@@ -695,7 +817,11 @@ async def start_bulk_download(
                                             close=alt.close,
                                             volume=alt.volume,
                                             amount=alt.amount,
-                                            source="fallback",
+                                            source=(
+                                                "yfinance"
+                                                if provider_name == "akshare"
+                                                else "akshare"
+                                            ),
                                         )
                                         corrected_dates.append(str(anomaly.date))
 

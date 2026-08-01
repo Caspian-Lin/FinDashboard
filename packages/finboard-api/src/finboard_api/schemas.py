@@ -231,6 +231,20 @@ class QualityReportOut(BaseSchema):
     error: str | None = None
 
 
+class QualityRepairRequest(BaseSchema):
+    symbols: list[str]
+    source: Literal["akshare", "yfinance"]
+    adjust: str = "qfq"
+
+
+class QualityRepairResultOut(BaseSchema):
+    total: int
+    repaired: int
+    failed: int
+    corrected_bars: int
+    reports: list[QualityReportOut]
+
+
 class BatchFetchResultOut(BaseSchema):
     total: int
     success: int
