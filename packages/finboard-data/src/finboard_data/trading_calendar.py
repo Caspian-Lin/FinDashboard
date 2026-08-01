@@ -1,10 +1,11 @@
 """A 股交易日历(issue #99 前置)。
 
-从 akshare ``tool_trade_date_hist_sina`` 获取历史交易日,
-进程内缓存避免重复网络请求。发布预检用真实交易日替代朴素 Mon-Fri,
+优先从 akshare ``tool_trade_date_hist_sina`` 获取历史交易日,
+失败时使用随包安装的 ``exchange_calendars`` XSHG 日历,
+进程内缓存避免重复请求。发布预检用真实交易日替代朴素 Mon-Fri,
 避免中国法定节假日被误报为 ``missing_weekdays``。
 
-**无 fallback**: akshare 不可用时 ``trading_days`` 抛异常,
+两个可靠来源都不可用时 ``trading_days`` 仍然抛异常,
 而非用朴素工作日伪装正常 -- 后者会导致覆盖率计算失真。
 """
 
@@ -32,6 +33,14 @@ def _fetch_trade_dates() -> set[date]:
     return set(pd.to_datetime(df["trade_date"]).dt.date)
 
 
+def _fetch_trade_dates_from_exchange_calendars() -> set[date]:
+    """从本地交易所日历包读取 XSHG 交易日,不依赖外部网络。"""
+    import exchange_calendars as xcals  # type: ignore[import-untyped]
+
+    calendar = xcals.get_calendar("XSHG")
+    return {session.date() for session in calendar.sessions}
+
+
 def load_trading_calendar() -> set[date]:
     """加载交易日历(进程内缓存,首次调用联网拉取)。
 
@@ -43,10 +52,18 @@ def load_trading_calendar() -> set[date]:
         return _CACHE
     try:
         _CACHE = _fetch_trade_dates()
-        logger.info("trading_calendar.loaded dates=%d", len(_CACHE))
+        logger.info("trading_calendar.loaded source=akshare dates=%d", len(_CACHE))
     except Exception:
-        logger.warning("trading_calendar.fetch_failed")
-        _CACHE = set()
+        logger.warning("trading_calendar.akshare_failed")
+        try:
+            _CACHE = _fetch_trade_dates_from_exchange_calendars()
+            logger.info(
+                "trading_calendar.loaded source=exchange_calendars dates=%d",
+                len(_CACHE),
+            )
+        except Exception:
+            logger.warning("trading_calendar.exchange_calendars_failed")
+            _CACHE = set()
     return _CACHE
 
 

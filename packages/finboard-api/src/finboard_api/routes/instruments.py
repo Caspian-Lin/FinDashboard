@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -77,6 +77,21 @@ def _current_code_version() -> str:
         text=True,
     )
     return f"{value}-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else value
+
+
+def _release_detail_payload(release: Any) -> dict[str, object]:
+    """把领域对象转换成详情响应,同时补齐列表摘要字段。"""
+    # 这里不把摘要字段写入 manifest,避免改变已有发布的 checksum 契约。
+    dataset_release = release
+    payload = cast(dict[str, object], dataset_release.as_dict())
+    payload.update(
+        {
+            "symbol_count": dataset_release.symbol_count,
+            "row_count": dataset_release.row_count,
+            "coverage_pct": dataset_release.coverage_pct,
+        }
+    )
+    return payload
 
 
 @router.get("", response_model=list[InstrumentOut])
@@ -460,12 +475,47 @@ async def create_dataset_release(
     release_root = Path(
         os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT)
     )
-    source = request.source or os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if source not in {"akshare", "yfinance", "tushare", "manual"}:
+    source = (
+        "tushare"
+        if request.release_kind == "a_share_tushare"
+        else "mixed"
+    )
+    rows = await session.execute(
+        select(InstrumentModel).where(InstrumentModel.code.in_(request.symbols))
+    )
+    selected_instruments = list(rows.scalars().all())
+    selected_codes = {item.code for item in selected_instruments}
+    missing_codes = sorted(set(request.symbols) - selected_codes)
+    if missing_codes:
         raise HTTPException(
             status_code=422,
-            detail=f"不支持的数据来源: {source}",
+            detail=f"发布标的未登记到元数据表: {', '.join(missing_codes[:20])}",
         )
+    if request.release_kind == "a_share_tushare":
+        invalid = sorted(
+            item.code
+            for item in selected_instruments
+            if item.market != "a_share" or item.instrument_type != "stock"
+        )
+        if invalid:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A股 Tushare 单源发布只能包含 A 股股票,不能包含 ETF 或其他资产: "
+                    + ", ".join(invalid[:20])
+                ),
+            )
+    else:
+        selected_types = {item.instrument_type for item in selected_instruments}
+        missing_types = {"stock", "etf"} - selected_types
+        if missing_types:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "多资产混合源发布必须同时包含股票和 ETF,缺少: "
+                    + ", ".join(sorted(missing_types))
+                ),
+            )
 
     service = ResearchDatasetReleaseService(
         session,
@@ -483,11 +533,20 @@ async def create_dataset_release(
                 end_date=request.end_date,
                 code_version=_current_code_version(),
                 adjustment=request.adjustment,
-                required_capabilities=tuple(request.required_capabilities),
+                required_capabilities=(
+                    ("stock",)
+                    if request.release_kind == "a_share_tushare"
+                    else tuple(request.required_capabilities)
+                ),
                 known_limitations=(
                     "交易日覆盖使用工作日近似;节假日缺口作为 warning 报告",
                     "停牌优先使用停复牌生命周期事件;缺少事件时仅能由零成交且 OHLC 不变的日线代理识别",
                     "只冻结本地缓存已有字段,不会回退到联网数据源",
+                    (
+                        "A股单源发布严格要求所有 Bar 来源为 tushare"
+                        if request.release_kind == "a_share_tushare"
+                        else "多资产发布允许按标的混合来源,实际来源写入质量报告"
+                    ),
                 ),
             ),
             request.symbols,
@@ -500,7 +559,7 @@ async def create_dataset_release(
         await session.rollback()
         raise HTTPException(status_code=422, detail=f"数据质量门未通过: {exc}") from exc
 
-    return ResearchDatasetReleaseOut.model_validate(release.as_dict())
+    return ResearchDatasetReleaseOut.model_validate(_release_detail_payload(release))
 
 
 @router.get(
@@ -516,7 +575,7 @@ async def get_dataset_release(
     release = await ResearchDatasetReleaseRepository(session).get(release_id)
     if release is None:
         raise HTTPException(status_code=404, detail=f"未找到研究数据发布: {release_id}")
-    return ResearchDatasetReleaseOut.model_validate(release.as_dict())
+    return ResearchDatasetReleaseOut.model_validate(_release_detail_payload(release))
 
 
 def _instrument_to_out(row: InstrumentModel) -> InstrumentOut:

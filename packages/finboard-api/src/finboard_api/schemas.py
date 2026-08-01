@@ -174,7 +174,7 @@ class DataFetchRequest(BaseSchema):
     start: str
     end: str
     adjust: str = "qfq"
-    source: str | None = None  # akshare / yfinance; None = 用环境变量默认
+    source: str | None = None  # akshare / yfinance / tushare; None = 用服务端默认
 
 
 class DataStatusOut(BaseSchema):
@@ -185,6 +185,7 @@ class DataStatusOut(BaseSchema):
     first_date: str | None = None
     last_date: str | None = None
     last_close: Decimal | None = None
+    source: str | None = None
 
 
 class DataStatusListOut(BaseSchema):
@@ -208,6 +209,12 @@ class FetchResultOut(BaseSchema):
     bar_count: int
     first_date: str | None = None
     last_date: str | None = None
+    source: str | None = None
+    fallback_used: bool = False
+    fallback_source: str | None = None
+    lifecycle_events: int = 0
+    lifecycle_sync_failed: bool = False
+    lifecycle_sync_error: str | None = None
 
 
 class BarAnomalyOut(BaseSchema):
@@ -233,7 +240,7 @@ class QualityReportOut(BaseSchema):
 
 class QualityRepairRequest(BaseSchema):
     symbols: list[str]
-    source: Literal["akshare", "yfinance"]
+    source: Literal["akshare", "yfinance", "tushare"]
     adjust: str = "qfq"
 
 
@@ -292,6 +299,17 @@ class InstrumentListOut(BaseSchema):
     offset: int
 
 
+class InstrumentSummaryOut(BaseSchema):
+    """标的字典的全量分布,用于元数据页解释数量口径。"""
+
+    total: int
+    active_total: int
+    active_etf_total: int
+    by_status: dict[str, int] = Field(default_factory=dict)
+    by_market: dict[str, int] = Field(default_factory=dict)
+    by_instrument_type: dict[str, int] = Field(default_factory=dict)
+
+
 class SyncResultOut(BaseSchema):
     total: int
     new: int
@@ -321,6 +339,8 @@ class BulkDownloadStatusOut(BaseSchema):
     quality_passed: int = 0
     quality_failed: int = 0
     fallback_used: int = 0
+    lifecycle_events: int = 0
+    lifecycle_sync_failed: int = 0
     quality_reports: list[QualityReportOut] = []
 
 
@@ -343,6 +363,29 @@ class SchedulerConfigUpdate(BaseSchema):
     download_lookback_days: int | None = None
     download_markets: list[str] | None = None
     download_types: list[str] | None = None
+
+
+# --------------------------------------------------------------------------- LLM Provider
+# 设置页可直接编辑并持久化到 .env(见 routes/data.py)。
+# api_key 属敏感字段:GET 返回固定掩码 "********" + api_key_set 标记,
+# PUT 时 api_key == "********" 视为哨兵,不修改原值;传其它值(含空串)则覆盖。
+class LLMConfigOut(BaseSchema):
+    provider: Literal["fake", "openai_compatible"] = "fake"
+    base_url: str = ""
+    api_key: str = ""
+    api_key_set: bool = False
+    model: str = "gpt-4o-mini"
+    timeout_seconds: float = 30.0
+    max_retries: int = 3
+
+
+class LLMConfigUpdate(BaseSchema):
+    provider: Literal["fake", "openai_compatible"] | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+    timeout_seconds: float | None = None
+    max_retries: int | None = None
 
 
 # --------------------------------------------------------------------------- Backtest
@@ -977,7 +1020,10 @@ class ResearchDatasetReleaseCreate(BaseSchema):
         max_length=100,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
-    source: Literal["akshare", "yfinance", "tushare", "manual"] | None = None
+    release_kind: Literal["a_share_tushare", "multi_asset_mixed"] = (
+        "a_share_tushare"
+    )
+    source: Literal["akshare", "yfinance", "tushare", "mixed", "manual"] | None = None
     version: str = Field(
         min_length=1,
         max_length=64,
@@ -1014,6 +1060,13 @@ class ResearchDatasetReleaseCreate(BaseSchema):
     def validate_date_range(self) -> ResearchDatasetReleaseCreate:
         if self.start_date > self.end_date:
             raise ValueError("开始日期不能晚于结束日期")
+        expected_source = (
+            "tushare" if self.release_kind == "a_share_tushare" else "mixed"
+        )
+        if self.source is not None and self.source != expected_source:
+            raise ValueError(
+                f"{self.release_kind} 发布的数据来源必须是 {expected_source}"
+            )
         return self
 
 
@@ -1039,6 +1092,7 @@ class DatasetReleaseInstrumentOut(BaseSchema):
     category: str
     ready: bool
     issues: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
     exchange: str | None = None
     currency: str = "CNY"
     etf_category: str | None = None
@@ -1070,6 +1124,9 @@ class ResearchDatasetReleaseOut(BaseSchema):
     capabilities: list[DatasetReleaseCapabilityOut]
     quality_status: str
     quality_report: dict[str, Any]
+    symbol_count: int
+    row_count: int
+    coverage_pct: Decimal
     known_limitations: list[str] = Field(default_factory=list)
     storage_uri: str
     metadata_version: str

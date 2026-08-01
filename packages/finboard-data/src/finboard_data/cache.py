@@ -68,6 +68,7 @@ class CacheMetadata:
     first_date: date | None
     last_date: date | None
     file_size: int
+    source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +216,14 @@ class ParquetCache:
             "source": [b.source for b in bars],
         }
         table = pa.table(data)
+        source_names = {bar.source for bar in bars if bar.source}
+        source = (
+            next(iter(source_names))
+            if len(source_names) == 1
+            else ("mixed" if source_names else None)
+        )
+        if source is not None:
+            table = table.replace_schema_metadata({b"finboard.source": source.encode()})
         pq.write_table(table, path)
         self._write_metadata_sidecar(
             path,
@@ -223,6 +232,7 @@ class ParquetCache:
                 first_date=bars[0].timestamp.date(),
                 last_date=bars[-1].timestamp.date(),
                 file_size=path.stat().st_size,
+                source=source,
             ),
         )
 
@@ -284,10 +294,60 @@ class ParquetCache:
 
         sidecar = ParquetCache._read_metadata_sidecar(path, size)
         if sidecar is not None:
-            return sidecar
+            if sidecar.source is not None:
+                return sidecar
+            try:
+                source_column = pq.read_table(
+                    path,
+                    columns=["source"],
+                    use_threads=False,
+                    pre_buffer=False,
+                ).column("source")
+                source_names = {
+                    str(value)
+                    for value in source_column.to_pylist()
+                    if value
+                }
+                sidecar_source = (
+                    next(iter(source_names))
+                    if len(source_names) == 1
+                    else ("mixed" if source_names else None)
+                )
+                enriched = CacheMetadata(
+                    bar_count=sidecar.bar_count,
+                    first_date=sidecar.first_date,
+                    last_date=sidecar.last_date,
+                    file_size=sidecar.file_size,
+                    source=sidecar_source,
+                )
+                ParquetCache._write_metadata_sidecar(path, enriched)
+                return enriched
+            except (KeyError, OSError, ValueError):
+                return sidecar
 
         parquet = pq.ParquetFile(path)
         file_metadata = parquet.metadata
+        source: str | None = None
+        raw_source = (parquet.schema_arrow.metadata or {}).get(b"finboard.source")
+        if raw_source:
+            source = raw_source.decode("utf-8", errors="replace")
+        if source is None and "source" in parquet.schema.names:
+            source_column = pq.read_table(
+                path,
+                columns=["source"],
+                use_threads=False,
+                pre_buffer=False,
+            ).column("source")
+            source_names = {
+                str(value)
+                for value in source_column.to_pylist()
+                if value
+            }
+            source = (
+                next(iter(source_names))
+                if len(source_names) == 1
+                else ("mixed" if source_names else None)
+            )
         first: datetime | None = None
         last: datetime | None = None
 
@@ -320,6 +380,7 @@ class ParquetCache:
             first_date=first.date() if first is not None else None,
             last_date=last.date() if last is not None else None,
             file_size=size,
+            source=source,
         )
         ParquetCache._write_metadata_sidecar(path, metadata)
         return metadata
@@ -354,6 +415,7 @@ class ParquetCache:
                     else None
                 ),
                 file_size=size,
+                source=(str(payload["source"]) if payload.get("source") else None),
             )
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
             return None
@@ -371,6 +433,7 @@ class ParquetCache:
                 metadata.first_date.isoformat() if metadata.first_date else None
             ),
             "last_date": metadata.last_date.isoformat() if metadata.last_date else None,
+            "source": metadata.source,
         }
         temporary.write_text(
             json.dumps(payload, ensure_ascii=True, separators=(",", ":")),

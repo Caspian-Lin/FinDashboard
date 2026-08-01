@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
 from collections.abc import AsyncIterator
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
+
+# psycopg 的异步驱动在 Windows 不支持 ProactorEventLoop。测试进程也必须与
+# finboard_app.cli 的运行时入口保持一致,否则仅 DB 集成用例会在连接阶段失败。
+if sys.platform == "win32" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # pytest 进程本身不读 .env(pydantic-settings 才读),
 # 这里显式加载,让 tests/integration 里的 os.getenv("FINBOARD_DB_URL") 拿到真实值。

@@ -12,6 +12,14 @@
 PYTHON ?= python3.12
 UV ?= uv
 
+# Windows 上 Node 可能通过安装器安装但未加入 PATH;允许命令行用 NPM=... 覆盖。
+ifeq ($(OS),Windows_NT)
+WIN_NODE_BIN ?= $(subst \,/,$(USERPROFILE))/AppData/Local/Programs/nodejs
+NPM ?= $(WIN_NODE_BIN)/npm.cmd
+else
+NPM ?= npm
+endif
+
 help: ## 显示所有可用目标
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
@@ -74,16 +82,16 @@ reconcile: ## 执行一次本地 ↔ 券商核对
 WEB_DIR ?= web
 
 web-install: ## 安装前端依赖(npm install)
-	cd $(WEB_DIR) && npm install
+	cd $(WEB_DIR) && $(NPM) install
 
 web-dev: ## 启动前端 Vite dev server(端口 5173,代理 /api + /ws 到 :8000)
-	cd $(WEB_DIR) && npm run dev
+	cd $(WEB_DIR) && $(NPM) run dev
 
 web-build: ## 构建前端生产包到 web/dist
-	cd $(WEB_DIR) && npm run build
+	cd $(WEB_DIR) && $(NPM) run build
 
 web-lint: ## 前端 ESLint
-	cd $(WEB_DIR) && npm run lint
+	cd $(WEB_DIR) && $(NPM) run lint
 
 # --------------------------------------------------------------------------- 一键开发
 dev: ## 一键启动前后端开发服务器(后端 :8000 + 前端 :5173,Ctrl-C 同时退出)
@@ -91,7 +99,7 @@ dev: ## 一键启动前后端开发服务器(后端 :8000 + 前端 :5173,Ctrl-C 
 	@echo "\033[33m确保 PostgreSQL 已启动且已执行 make migrate\033[0m"
 	@trap 'kill $$BACKEND_PID $$FRONTEND_PID 2>/dev/null; wait 2>/dev/null' INT TERM; \
 	$(UV) run finboard serve --reload & BACKEND_PID=$$!; \
-	cd $(WEB_DIR) && npm run dev & FRONTEND_PID=$$!; \
+	cd $(WEB_DIR) && $(NPM) run dev & FRONTEND_PID=$$!; \
 	wait
 
 clean: ## 清理缓存与构建产物

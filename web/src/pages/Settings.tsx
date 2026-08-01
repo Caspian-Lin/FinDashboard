@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import InfoHint, { HintLabel } from "../components/InfoHint";
-import { api, type SchedulerConfig } from "../lib/api";
+import { api, type LLMConfig, type LLMConfigUpdate, type SchedulerConfig } from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
 
 export default function Settings() {
@@ -59,10 +59,13 @@ export default function Settings() {
             {form.data_provider}
           </span>
           <span className="text-sm text-muted-foreground/70">
-            切换: FINBOARD_DATA_PROVIDER=akshare / yfinance 环境变量
+            切换: FINBOARD_DATA_PROVIDER=tushare / akshare / yfinance 环境变量
           </span>
         </div>
       </div>
+
+      {/* LLM Provider */}
+      <LLMProviderSection />
 
       {/* Scheduled Tasks */}
       <div className="bg-card rounded-lg shadow p-5 mb-6">
@@ -242,6 +245,145 @@ export default function Settings() {
         {save.isSuccess && (
           <span className="text-sm text-success">已保存</span>
         )}
+        {save.isError && (
+          <span className="text-sm text-destructive">
+            {(save.error as Error).message}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LLMProviderSection() {
+  const queryClient = useQueryClient();
+  const { data } = useQuery({
+    queryKey: ["llm-config"],
+    queryFn: api.getLlmConfig,
+  });
+
+  const [form, setForm] = useState<LLMConfig | null>(null);
+
+  useEffect(() => {
+    if (data) setForm(data);
+  }, [data]);
+
+  const save = useMutation({
+    mutationFn: (body: Partial<LLMConfigUpdate>) => api.updateLlmConfig(body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llm-config"] }),
+  });
+
+  if (!form) return null;
+
+  const onSave = () => {
+    const body: Partial<LLMConfigUpdate> = {
+      provider: form.provider,
+      base_url: form.base_url,
+      model: form.model,
+      timeout_seconds: form.timeout_seconds,
+      max_retries: form.max_retries,
+    };
+    // api_key 哨兵:保留掩码 "********" 不传,后端保持原值;其它值(含空串)覆盖。
+    if (form.api_key !== "********") {
+      body.api_key = form.api_key;
+    }
+    save.mutate(body);
+  };
+
+  const isHttp = form.provider === "openai_compatible";
+
+  return (
+    <div className="bg-card rounded-lg shadow p-5 mb-6">
+      <h2 className="text-lg font-semibold mb-1">LLM Provider</h2>
+      <p className="text-sm text-muted-foreground/80 mb-4">
+        AI 研究助手使用 OpenAI 兼容 provider 生成因子假设、策略草案与问答。仅服务研究,
+        不连接实盘账户 / 订单 / 持仓。修改后立即保存到 .env 并热重建 provider。
+      </p>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div>
+          <label className="block text-sm text-muted-foreground mb-1">Provider</label>
+          <select
+            value={form.provider}
+            onChange={(e) =>
+              setForm({ ...form, provider: e.target.value as LLMConfig["provider"] })
+            }
+            className="w-full border rounded px-3 py-1.5 text-sm bg-card"
+          >
+            <option value="fake">fake（不调用公网,默认）</option>
+            <option value="openai_compatible">openai_compatible（真实 HTTP）</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm text-muted-foreground mb-1">模型</label>
+          <input
+            type="text"
+            value={form.model}
+            onChange={(e) => setForm({ ...form, model: e.target.value })}
+            className="w-full border rounded px-3 py-1.5 text-sm"
+            placeholder="gpt-4o-mini"
+          />
+        </div>
+        <div className="sm:col-span-2">
+          <label className="block text-sm text-muted-foreground mb-1">Base URL</label>
+          <input
+            type="text"
+            value={form.base_url}
+            onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+            className="w-full border rounded px-3 py-1.5 text-sm"
+            placeholder="https://api.openai.com/v1"
+            disabled={!isHttp}
+          />
+        </div>
+        <div className="sm:col-span-2">
+          <label className="block text-sm text-muted-foreground mb-1">
+            API Key
+            {form.api_key_set
+              ? "（已设置;保留掩码不变,输入新值覆盖）"
+              : "（未设置）"}
+          </label>
+          <input
+            type="password"
+            value={form.api_key}
+            onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+            className="w-full border rounded px-3 py-1.5 text-sm"
+            placeholder="sk-..."
+            disabled={!isHttp}
+          />
+        </div>
+        <div>
+          <label className="block text-sm text-muted-foreground mb-1">超时(秒)</label>
+          <input
+            type="number"
+            value={form.timeout_seconds}
+            onChange={(e) =>
+              setForm({ ...form, timeout_seconds: Number(e.target.value) })
+            }
+            className="w-full border rounded px-3 py-1.5 text-sm"
+          />
+        </div>
+        <div>
+          <label className="block text-sm text-muted-foreground mb-1">最大重试</label>
+          <input
+            type="number"
+            value={form.max_retries}
+            onChange={(e) =>
+              setForm({ ...form, max_retries: Number(e.target.value) })
+            }
+            className="w-full border rounded px-3 py-1.5 text-sm"
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 mt-4">
+        <button
+          onClick={onSave}
+          disabled={save.isPending}
+          className="bg-primary text-white rounded px-6 py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+        >
+          {save.isPending ? "保存中..." : "保存 LLM 配置"}
+        </button>
+        {save.isSuccess && <span className="text-sm text-success">已保存</span>}
         {save.isError && (
           <span className="text-sm text-destructive">
             {(save.error as Error).message}

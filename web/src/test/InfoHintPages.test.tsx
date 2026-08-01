@@ -33,6 +33,8 @@ const apiMock = vi.hoisted(() => ({
   startBulkDownload: vi.fn(),
   getConfig: vi.fn(),
   updateConfig: vi.fn(),
+  getLlmConfig: vi.fn(),
+  updateLlmConfig: vi.fn(),
 }));
 
 const defaultFactorSelection = vi.hoisted(() => ({
@@ -143,6 +145,15 @@ beforeEach(() => {
     download_markets: ["a_share"],
     download_types: ["stock", "etf"],
     data_provider: "akshare",
+  });
+  apiMock.getLlmConfig.mockResolvedValue({
+    provider: "fake",
+    base_url: "",
+    api_key: "",
+    api_key_set: false,
+    model: "gpt-4o-mini",
+    timeout_seconds: 30,
+    max_retries: 3,
   });
 });
 

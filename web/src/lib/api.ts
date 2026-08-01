@@ -269,7 +269,7 @@ export const api = {
     const qs = q.toString();
     return fetchJSON<QualityReport[]>(`/data/quality${qs ? `?${qs}` : ""}`);
   },
-  repairQuality: (body: { symbols: string[]; source: "akshare" | "yfinance"; adjust?: string }) =>
+  repairQuality: (body: { symbols: string[]; source: "akshare" | "yfinance" | "tushare"; adjust?: string }) =>
     fetchJSON<QualityRepairResult>("/data/quality/repair", {
       method: "POST",
       body: JSON.stringify(body),
@@ -279,6 +279,11 @@ export const api = {
   getConfig: () => fetchJSON<SchedulerConfig>("/data/config"),
   updateConfig: (body: Partial<SchedulerConfig>) =>
     fetchJSON<SchedulerConfig>("/data/config", { method: "PUT", body: JSON.stringify(body) }),
+
+  // ---- LLM Provider Config (persisted to .env) ----
+  getLlmConfig: () => fetchJSON<LLMConfig>("/data/llm-config"),
+  updateLlmConfig: (body: Partial<LLMConfigUpdate>) =>
+    fetchJSON<LLMConfig>("/data/llm-config", { method: "PUT", body: JSON.stringify(body) }),
 };
 
 // ---- Data types ----
@@ -290,6 +295,7 @@ export interface DataStatus {
   first_date: string | null;
   last_date: string | null;
   last_close: string | null;
+  source: string | null;
 }
 
 export interface DataStatusList {
@@ -312,6 +318,12 @@ export interface FetchResult {
   bar_count: number;
   first_date: string | null;
   last_date: string | null;
+  source: string | null;
+  fallback_used: boolean;
+  fallback_source: string | null;
+  lifecycle_events: number;
+  lifecycle_sync_failed: boolean;
+  lifecycle_sync_error: string | null;
 }
 
 export interface BatchFetchResult {
@@ -615,6 +627,8 @@ export interface BulkDownloadStatus {
   quality_passed?: number;
   quality_failed?: number;
   fallback_used?: number;
+  lifecycle_events?: number;
+  lifecycle_sync_failed?: number;
   quality_reports?: QualityReport[];
 }
 
@@ -627,4 +641,25 @@ export interface SchedulerConfig {
   download_markets: string[];
   download_types: string[];
   data_provider: string;
+}
+
+// ---- LLM Provider types ----
+// api_key: GET 返回固定掩码 "********"(已设置时);PUT 回传 "********" 表示不改。
+export interface LLMConfig {
+  provider: "fake" | "openai_compatible";
+  base_url: string;
+  api_key: string;
+  api_key_set: boolean;
+  model: string;
+  timeout_seconds: number;
+  max_retries: number;
+}
+
+export interface LLMConfigUpdate {
+  provider?: "fake" | "openai_compatible";
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  timeout_seconds?: number;
+  max_retries?: number;
 }

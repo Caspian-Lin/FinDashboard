@@ -8,11 +8,12 @@ license = { text = "Proprietary" }
 dependencies = [
   "finboard-shared",
   "akshare>=1.12",
+  "exchange-calendars>=4.5",
+  "yfinance>=1.5",
   "structlog>=24.1",
 ]
 
 [project.optional-dependencies]
-yfinance = ["yfinance>=1.5"]
 tushare = ["tushare>=1.4.29"]
 cache = ["pyarrow>=15.0"]
 

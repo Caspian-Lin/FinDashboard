@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from datetime import date as parse_date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
@@ -24,6 +26,9 @@ from finboard_api.schemas import (
     FetchResultOut,
     InstrumentListOut,
     InstrumentOut,
+    InstrumentSummaryOut,
+    LLMConfigOut,
+    LLMConfigUpdate,
     QualityRepairRequest,
     QualityRepairResultOut,
     QualityReportOut,
@@ -38,28 +43,181 @@ from finboard_api.schemas import (
 logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
-    from finboard_data import AkShareProvider, YFinanceProvider
+    from finboard_app.config import Settings
+    from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
 
 router = APIRouter(prefix="/api/data", tags=["data"])
 
 _CACHE_DIR = "data_cache"
 _SYMBOLS_FILE = "symbols.yaml"
 _CONFIG_FILE = "data_config.json"
+_SUPPORTED_BAR_PROVIDERS = {"akshare", "tushare", "yfinance"}
+
+# .env 作为 LLM provider 配置的真相源(由设置页 GET/PUT 维护)。
+_ENV_FILE = ".env"
+_API_KEY_MASK = "********"
+# .env 变量名 ↔ schema 字段名。
+_LLM_KEYS: dict[str, str] = {
+    "FINBOARD_LLM_PROVIDER": "provider",
+    "FINBOARD_LLM_BASE_URL": "base_url",
+    "FINBOARD_LLM_API_KEY": "api_key",
+    "FINBOARD_LLM_MODEL": "model",
+    "FINBOARD_LLM_TIMEOUT_SECONDS": "timeout_seconds",
+    "FINBOARD_LLM_MAX_RETRIES": "max_retries",
+}
+
+
+def _request_settings(request: Request) -> Settings | None:
+    """完整应用有 settings;最小化路由测试允许缺省。"""
+    return getattr(request.app.state, "settings", None)
 
 
 def _get_provider(
     source: str | None = None,
     *,
     use_cache: bool = True,
-) -> AkShareProvider | YFinanceProvider:
-    import os
+    settings: Settings | None = None,
+) -> AkShareProvider | TushareBarProvider | YFinanceProvider:
+    from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
 
-    from finboard_data import AkShareProvider, YFinanceProvider
-
-    provider_name = source or os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
+    provider_name = _resolve_provider_name(source, settings=settings)
     if provider_name == "akshare":
         return AkShareProvider(use_cache=use_cache)
+    if provider_name == "tushare":
+        return TushareBarProvider(
+            token=settings.tushare_token if settings is not None else None,
+            use_cache=use_cache,
+            requests_per_minute=(
+                settings.tushare_requests_per_minute if settings is not None else 200
+            ),
+            daily_request_limit=(
+                settings.tushare_daily_request_limit if settings is not None else 100_000
+            ),
+            usage_file=(
+                settings.tushare_usage_file
+                if settings is not None
+                else "data_cache/tushare_usage.json"
+            ),
+        )
     return YFinanceProvider(use_cache=use_cache)
+
+
+def _resolve_provider_name(
+    source: str | None = None,
+    *,
+    settings: Settings | None = None,
+) -> str:
+    """解析并校验行情源,避免未知值静默落到 yfinance。"""
+    import os
+
+    configured = settings.data_provider if settings is not None else None
+    provider_name = (source or configured or os.getenv("FINBOARD_DATA_PROVIDER") or "akshare").strip().lower()
+    if provider_name not in _SUPPORTED_BAR_PROVIDERS:
+        supported = ", ".join(sorted(_SUPPORTED_BAR_PROVIDERS))
+        raise ValueError(f"不支持的行情源: {provider_name}; 可用: {supported}")
+    return provider_name
+
+
+def _fallback_provider_name(
+    primary: str,
+    *,
+    settings: Settings | None = None,
+) -> str | None:
+    """选择备用行情源;可用环境变量 FINBOARD_DATA_FALLBACK_PROVIDER 覆盖。"""
+    import os
+
+    configured = (
+        settings.data_fallback_provider
+        if settings is not None
+        else os.getenv("FINBOARD_DATA_FALLBACK_PROVIDER", "").strip().lower()
+    )
+    fallback = configured or ("yfinance" if primary == "akshare" else "akshare")
+    if fallback not in _SUPPORTED_BAR_PROVIDERS or fallback == primary:
+        return None
+    return fallback
+
+
+def _validate_bulk_provider_scope(provider_name: str, instruments: list[Any]) -> None:
+    """批量任务按资产类型隔离, 避免 Tushare 股票接口误吞 ETF。"""
+    if provider_name != "tushare":
+        return
+
+    incompatible = [
+        instrument.code
+        for instrument in instruments
+        if getattr(instrument.market, "value", instrument.market) != "a_share"
+        or getattr(instrument.instrument_type, "value", instrument.instrument_type) != "stock"
+    ]
+    if incompatible:
+        raise ValueError(
+            "Tushare 批量任务仅支持 A 股股票; 请将类型设为“股票”。"
+            "ETF 请另建任务并选择 akshare 或 yfinance, 之后可发布多资产混合来源数据集。"
+        )
+
+
+async def _store_fetched_bars(
+    cache: Any,
+    symbol: Any,
+    period: Any,
+    adjust: str,
+    bars: list[Any],
+    source: str,
+) -> None:
+    """写入行情并避免把不同数据源静默混进同一个可发布缓存。"""
+    if not bars:
+        return
+    existing = await cache.read(symbol, period, adjust)
+    known_sources = {bar.source for bar in existing if bar.source}
+    if known_sources and known_sources != {source}:
+        await cache.write(symbol, period, adjust, bars)
+        return
+    await cache.merge(
+        symbol,
+        period,
+        adjust,
+        bars,
+        existing_bars=existing,
+    )
+
+
+async def _persist_tushare_lifecycle_events(
+    session: AsyncSession,
+    events: list[Any],
+) -> int:
+    """幂等写入 Tushare 停复牌事件,返回本次新增数量。"""
+    if not events:
+        return 0
+
+    from sqlalchemy.dialects.postgresql import insert
+
+    from finboard_persistence import InstrumentLifecycleEventModel
+
+    observed_at = datetime.now(UTC)
+    values = [
+        {
+            "symbol": event.symbol,
+            "event_type": event.event_type,
+            "effective_date": event.effective_date,
+            # 历史事件是现在从 API 观测到的,不能倒填成当时已知。
+            "available_at": observed_at,
+            "source": "tushare",
+            "dataset_version": "suspend_d-v1",
+            "details": {
+                "suspend_type": "R" if event.event_type == "resumption" else "S",
+                "suspend_timing": event.suspend_timing,
+            },
+            "observed_at": observed_at,
+        }
+        for event in events
+    ]
+    statement = (
+        insert(InstrumentLifecycleEventModel)
+        .values(values)
+        .on_conflict_do_nothing(constraint="uq_instrument_lifecycle_event")
+        .returning(InstrumentLifecycleEventModel.id)
+    )
+    result = await session.execute(statement)
+    return len(result.scalars().all())
 
 
 @router.get("/status", response_model=list[DataStatusOut])
@@ -87,6 +245,7 @@ async def list_cache_status() -> list[DataStatusOut]:
                 first_date=(str(metadata.first_date) if metadata.first_date else None),
                 last_date=str(metadata.last_date) if metadata.last_date else None,
                 last_close=None,
+                source=metadata.source,
             )
         )
     return result
@@ -141,6 +300,7 @@ async def list_cache_status_page(
                 first_date=str(metadata.first_date) if metadata.first_date else None,
                 last_date=str(metadata.last_date) if metadata.last_date else None,
                 last_close=None,
+                source=metadata.source,
             )
         )
     return DataStatusListOut(
@@ -211,6 +371,7 @@ async def select_cache_status(
                     first_date=first_date,
                     last_date=last_date,
                     last_close=None,
+                    source=metadata.source,
                 )
             )
     return DataStatusSelectionOut(
@@ -238,35 +399,111 @@ async def get_cache_status(symbol: str) -> DataStatusOut:
         first_date=(str(metadata.first_date) if metadata and metadata.first_date else None),
         last_date=str(metadata.last_date) if metadata and metadata.last_date else None,
         last_close=None,
+        source=metadata.source if metadata else None,
     )
 
 
 @router.post("/fetch", response_model=FetchResultOut)
-async def fetch_data(req: DataFetchRequest) -> FetchResultOut:
-    """触发单个标的的数据拉取。"""
-    from finboard_data.cache import make_symbol
+async def fetch_data(
+    req: DataFetchRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> FetchResultOut:
+    """触发单个标的的数据拉取,主源失败时自动用备用源重试。"""
+    from finboard_data.cache import ParquetCache, make_symbol
     from finboard_shared.types import BarPeriod
 
-    provider = _get_provider(req.source)
-    sym = make_symbol(req.symbol)
     try:
-        bars = await provider.fetch_bars(
-            sym,
-            BarPeriod.D1,
-            parse_date.fromisoformat(req.start),
-            parse_date.fromisoformat(req.end),
-            adjust=req.adjust,
-        )
-    except Exception as exc:
+        settings = _request_settings(request)
+        primary_name = _resolve_provider_name(req.source, settings=settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    fallback_name = _fallback_provider_name(primary_name, settings=settings)
+    sym = make_symbol(req.symbol)
+    start_date = parse_date.fromisoformat(req.start)
+    end_date = parse_date.fromisoformat(req.end)
+    cache = ParquetCache(_CACHE_DIR)
+    errors: list[str] = []
+    actual_source: str | None = None
+    actual_provider: Any | None = None
+    bars: list[Any] = []
+
+    for source_name in (primary_name, fallback_name):
+        if source_name is None:
+            continue
+        provider = _get_provider(source_name, use_cache=False, settings=settings)
+        try:
+            candidate = await provider.fetch_bars(
+                sym,
+                BarPeriod.D1,
+                start_date,
+                end_date,
+                adjust=req.adjust,
+            )
+            if candidate:
+                bars = candidate
+                actual_source = source_name
+                actual_provider = provider
+                break
+            errors.append(f"{source_name}: 返回空数据")
+        except Exception as exc:
+            errors.append(f"{source_name}: {exc}")
+            logger.warning(
+                "data.fetch_source_failed",
+                symbol=req.symbol,
+                source=source_name,
+                error=str(exc),
+            )
+
+    if not bars or actual_source is None:
+        detail = "; ".join(errors) or "所有行情源均未返回数据"
         raise HTTPException(
             status_code=502,
-            detail=f"数据拉取失败(网络/数据源错误): {exc}",
-        ) from exc
+            detail=f"数据拉取失败(主源及备用源均不可用): {detail}",
+        )
+
+    await _store_fetched_bars(
+        cache,
+        sym,
+        BarPeriod.D1,
+        req.adjust,
+        bars,
+        actual_source,
+    )
+    lifecycle_events = 0
+    lifecycle_sync_failed = False
+    lifecycle_sync_error: str | None = None
+    if actual_source == "tushare" and actual_provider is not None:
+        try:
+            events = await actual_provider.fetch_suspension_events(
+                sym,
+                start_date,
+                end_date,
+            )
+            lifecycle_events = await _persist_tushare_lifecycle_events(session, events)
+            await session.commit()
+        except Exception as exc:
+            await session.rollback()
+            lifecycle_sync_failed = True
+            lifecycle_sync_error = type(exc).__name__
+            logger.warning(
+                "data.lifecycle_sync_failed",
+                symbol=req.symbol,
+                source=actual_source,
+                error_type=type(exc).__name__,
+            )
+    used_fallback = actual_source != primary_name
     return FetchResultOut(
         symbol=req.symbol,
         bar_count=len(bars),
         first_date=str(bars[0].timestamp.date()) if bars else None,
         last_date=str(bars[-1].timestamp.date()) if bars else None,
+        source=actual_source,
+        fallback_used=used_fallback,
+        fallback_source=actual_source if used_fallback else None,
+        lifecycle_events=lifecycle_events,
+        lifecycle_sync_failed=lifecycle_sync_failed,
+        lifecycle_sync_error=lifecycle_sync_error,
     )
 
 
@@ -321,18 +558,31 @@ async def check_cache_quality(
                         )
                         for a in qr.anomalies[:20]
                     ],
-                    passed=qr.passed,
+                    passed=bool(bars) and qr.passed,
                     primary_source=qr.sources[0] if qr.sources else "",
                 )
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("quality_check_failed", symbol=code)
+            results.append(
+                QualityReportOut(
+                    symbol=code,
+                    total_bars=0,
+                    anomaly_count=0,
+                    duplicate_count=0,
+                    passed=False,
+                    error=str(exc),
+                )
+            )
 
     return results
 
 
 @router.post("/quality/repair", response_model=QualityRepairResultOut)
-async def repair_cache_quality(req: QualityRepairRequest) -> QualityRepairResultOut:
+async def repair_cache_quality(
+    req: QualityRepairRequest,
+    request: Request,
+) -> QualityRepairResultOut:
     """批量使用指定备用源修复存量缓存中的异常 bar。"""
     from dataclasses import replace
 
@@ -343,7 +593,11 @@ async def repair_cache_quality(req: QualityRepairRequest) -> QualityRepairResult
     cache = ParquetCache(_CACHE_DIR)
     checker = BarQualityChecker()
     # 强制绕过共享缓存,确保备用源真正重新请求远端数据。
-    provider = _get_provider(req.source, use_cache=False)
+    provider = _get_provider(
+        req.source,
+        use_cache=False,
+        settings=_request_settings(request),
+    )
     semaphore = asyncio.Semaphore(3)
 
     async def _repair(code: str) -> tuple[QualityReportOut, int, bool]:
@@ -369,28 +623,30 @@ async def repair_cache_quality(req: QualityRepairRequest) -> QualityRepairResult
             corrected_dates: list[str] = []
             by_date = {bar.timestamp.date(): bar for bar in bars}
             anomaly_dates = set(before.anomaly_dates)
-            if anomaly_dates:
-                async with semaphore:
-                    alternatives = await provider.fetch_bars(
-                        sym,
-                        BarPeriod.D1,
-                        min(anomaly_dates),
-                        max(anomaly_dates),
-                        adjust=req.adjust,
-                    )
-                for alternative in alternatives:
-                    bar_date = alternative.timestamp.date()
-                    if bar_date not in anomaly_dates:
-                        continue
-                    if checker.check([alternative], symbol=code).passed:
-                        by_date[bar_date] = replace(alternative, source=req.source)
+            # 重新拉取整个已有日期窗口,这样不仅能修 OHLC 异常,也能补上主源漏掉的日期。
+            async with semaphore:
+                alternatives = await provider.fetch_bars(
+                    sym,
+                    BarPeriod.D1,
+                    min(bar.timestamp.date() for bar in bars),
+                    max(bar.timestamp.date() for bar in bars),
+                    adjust=req.adjust,
+                )
+            for alternative in alternatives:
+                bar_date = alternative.timestamp.date()
+                current = by_date.get(bar_date)
+                if current is not None and bar_date not in anomaly_dates:
+                    continue
+                if checker.check([alternative], symbol=code).passed:
+                    by_date[bar_date] = replace(alternative, source=req.source)
+                    if current is None or bar_date in anomaly_dates:
                         corrected_dates.append(str(bar_date))
 
             repaired_bars = sorted(by_date.values(), key=lambda bar: bar.timestamp)
             if corrected_dates or before.duplicate_count:
                 await cache.write(sym, BarPeriod.D1, req.adjust, repaired_bars)
             after = checker.check(repaired_bars, symbol=code)
-            passed = after.passed
+            passed = bool(repaired_bars) and after.passed
             return (
                 QualityReportOut(
                     symbol=code,
@@ -411,7 +667,7 @@ async def repair_cache_quality(req: QualityRepairRequest) -> QualityRepairResult
                     fallback_used=True,
                     fallback_source=req.source,
                     corrected_dates=corrected_dates,
-                    error=None if passed else "备用源未覆盖全部异常日期",
+                    error=None if passed else "备用源未覆盖全部异常或缺失日期",
                 ),
                 len(corrected_dates),
                 passed,
@@ -446,7 +702,7 @@ async def repair_cache_quality(req: QualityRepairRequest) -> QualityRepairResult
 
 
 @router.post("/fetch-all", response_model=BatchFetchResultOut)
-async def fetch_all_data() -> BatchFetchResultOut:
+async def fetch_all_data(request: Request) -> BatchFetchResultOut:
     """批量更新标的池缓存,不在内存中保留所有历史 Bars。"""
     from datetime import timedelta
 
@@ -465,7 +721,7 @@ async def fetch_all_data() -> BatchFetchResultOut:
         if config.fetch_period in BarPeriod.__members__
         else BarPeriod(config.fetch_period)
     )
-    provider = _get_provider()
+    provider = _get_provider(settings=_request_settings(request))
     sym_objs = [make_symbol(s.code) for s in config.symbols]
     results = await provider.update_cache_batch(
         sym_objs,
@@ -489,6 +745,7 @@ async def fetch_all_data() -> BatchFetchResultOut:
                 bar_count=metadata.bar_count if metadata else 0,
                 first_date=(str(metadata.first_date) if metadata and metadata.first_date else None),
                 last_date=str(metadata.last_date) if metadata and metadata.last_date else None,
+                source=metadata.source if metadata else None,
             )
         )
 
@@ -536,10 +793,48 @@ async def update_symbol_pool(req: SymbolPoolUpdate) -> SymbolPoolOut:
 
 
 # ------------------------------------------------------------------ Instruments (DB)
+@router.get("/instruments/summary", response_model=InstrumentSummaryOut)
+async def summarize_instruments(
+    session: AsyncSession = Depends(get_db_session),
+) -> InstrumentSummaryOut:
+    """返回标的字典的状态、市场和类型分布。"""
+    from finboard_persistence import InstrumentModel
+
+    async def grouped_counts(column: Any) -> dict[str, int]:
+        result = await session.execute(
+            select(column, func.count(InstrumentModel.id))
+            .group_by(column)
+            .order_by(column)
+        )
+        return {
+            str(key or "unknown"): int(count)
+            for key, count in result.all()
+        }
+
+    by_status = await grouped_counts(InstrumentModel.status)
+    by_market = await grouped_counts(InstrumentModel.market)
+    by_instrument_type = await grouped_counts(InstrumentModel.instrument_type)
+    active_etf_result = await session.execute(
+        select(func.count(InstrumentModel.id)).where(
+            InstrumentModel.status == "active",
+            InstrumentModel.instrument_type == "etf",
+        )
+    )
+    return InstrumentSummaryOut(
+        total=sum(by_status.values()),
+        active_total=by_status.get("active", 0),
+        active_etf_total=int(active_etf_result.scalar_one() or 0),
+        by_status=by_status,
+        by_market=by_market,
+        by_instrument_type=by_instrument_type,
+    )
+
+
 @router.get("/instruments", response_model=InstrumentListOut)
 async def list_instruments(
     market: str | None = None,
     instrument_type: str | None = None,
+    status: str | None = "active",
     q: str | None = None,
     limit: int = 200,
     offset: int = 0,
@@ -549,9 +844,11 @@ async def list_instruments(
     from finboard_persistence import InstrumentRepository
 
     repo = InstrumentRepository(session)
-    rows, total = await repo.list_active(
+    status_filter = None if status in (None, "", "all") else status
+    rows, total = await repo.list_page(
         market=market,
         instrument_type=instrument_type,
+        status=status_filter,
         q=q,
         limit=limit,
         offset=offset,
@@ -565,7 +862,11 @@ async def list_instruments(
                 market=r.market,
                 instrument_type=r.instrument_type,
                 exchange=r.exchange,
+                list_date=r.list_date,
+                delist_date=r.delist_date,
                 status=r.status,
+                sector=r.sector,
+                industry=r.industry,
             )
             for r in rows
         ],
@@ -690,14 +991,14 @@ async def start_bulk_download(
 ) -> BulkDownloadStatusOut:
     """启动批量历史数据拉取(后台异步任务)。"""
     import asyncio
-    import os
     from datetime import date as parse_d
 
     state = _get_bulk_state(request)
     if state["status"] == "running":
         raise HTTPException(status_code=409, detail="批量拉取正在运行中")
+    session_maker = getattr(request.app.state, "session_maker", None)
 
-    from finboard_data import AkShareProvider, YFinanceProvider
+    from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
     from finboard_data.cache import make_symbol
     from finboard_persistence import InstrumentRepository
     from finboard_shared.types import BarPeriod
@@ -713,18 +1014,66 @@ async def start_bulk_download(
     if not instruments:
         raise HTTPException(status_code=400, detail="未找到匹配的标的(请先同步)")
 
-    provider_name = req.source or os.getenv("FINBOARD_DATA_PROVIDER") or "akshare"
+    try:
+        settings = _request_settings(request)
+        provider_name = _resolve_provider_name(req.source, settings=settings)
+        _validate_bulk_provider_scope(provider_name, instruments)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    fallback_name = _fallback_provider_name(provider_name, settings=settings)
     if provider_name == "akshare":
-        primary: AkShareProvider | YFinanceProvider = AkShareProvider(
+        primary: AkShareProvider | TushareBarProvider | YFinanceProvider = AkShareProvider(
             max_concurrency=2, request_interval=0.5
         )
-        fallback: AkShareProvider | YFinanceProvider | None = YFinanceProvider(
-            use_cache=False, max_concurrency=3, request_interval=0.3
+        fallback: AkShareProvider | TushareBarProvider | YFinanceProvider | None = (
+            YFinanceProvider(use_cache=False, max_concurrency=3, request_interval=0.3)
+            if fallback_name == "yfinance"
+            else TushareBarProvider(
+                token=settings.tushare_token if settings is not None else None,
+                use_cache=False,
+                max_concurrency=4,
+                requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
+                daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
+                usage_file=(settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"),
+            )
+            if fallback_name == "tushare"
+            else None
         )
+    elif provider_name == "tushare":
+        primary = TushareBarProvider(
+            token=settings.tushare_token if settings is not None else None,
+            max_concurrency=4,
+            requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
+            daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
+            usage_file=(settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"),
+        )
+        # A 股发布是 Tushare 单源契约。失败标的保留为失败并允许重跑,
+        # 不用备用源静默覆盖缓存, 否则无法证明发布数据的单一来源。
+        fallback = None
     else:
         primary = YFinanceProvider(max_concurrency=3, request_interval=0.3)
-        fallback = AkShareProvider(
-            use_cache=False, max_concurrency=2, request_interval=0.5
+        fallback = (
+            # 批量质量修补是 best-effort:主源已经成功时,备用源失败不应
+            # 为每个异常标的重复指数退避,从而把整批任务拖成不可控的长任务。
+            # 单标的拉取仍使用默认重试策略;这里只关闭批量备用源重试。
+            AkShareProvider(
+                use_cache=False,
+                max_concurrency=2,
+                request_interval=0.5,
+                max_retries=0,
+            )
+            if fallback_name == "akshare"
+            else TushareBarProvider(
+                token=settings.tushare_token if settings is not None else None,
+                use_cache=False,
+                max_concurrency=4,
+                max_retries=0,
+                requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
+                daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
+                usage_file=(settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"),
+            )
+            if fallback_name == "tushare"
+            else None
         )
 
     sym_objs = [make_symbol(ins.code) for ins in instruments]
@@ -743,6 +1092,8 @@ async def start_bulk_download(
         quality_passed=0,
         quality_failed=0,
         fallback_used=0,
+        lifecycle_events=0,
+        lifecycle_sync_failed=0,
         quality_reports=[],
     )
 
@@ -768,7 +1119,42 @@ async def start_bulk_download(
             state["success"] = sum(results.values())
             state["failed"] = len(sym_objs) - state["success"]
 
-            # Phase 2: quality check + fallback repair
+            # Phase 2: Tushare 停复牌事件。单独事务、逐标的提交,失败不丢弃
+            # 已成功写入的行情,但会在任务结果中明确暴露。
+            if isinstance(primary, TushareBarProvider):
+                successful_symbols = [
+                    sym for sym in sym_objs if results.get(sym.code, False)
+                ]
+                if session_maker is None:
+                    state["lifecycle_sync_failed"] = len(successful_symbols)
+                    logger.error("bulk_download.lifecycle_session_maker_missing")
+                else:
+                    async with session_maker() as lifecycle_session:
+                        for sym in successful_symbols:
+                            state["current_symbol"] = sym.code
+                            state["phase"] = "lifecycle_sync"
+                            try:
+                                events = await primary.fetch_suspension_events(
+                                    sym,
+                                    start_date,
+                                    end_date,
+                                )
+                                added = await _persist_tushare_lifecycle_events(
+                                    lifecycle_session,
+                                    events,
+                                )
+                                await lifecycle_session.commit()
+                                state["lifecycle_events"] += added
+                            except Exception as exc:
+                                await lifecycle_session.rollback()
+                                state["lifecycle_sync_failed"] += 1
+                                logger.warning(
+                                    "bulk_download.lifecycle_sync_failed",
+                                    symbol=sym.code,
+                                    error_type=type(exc).__name__,
+                                )
+
+            # Phase 3: quality check + fallback repair
             from finboard_data.cache import ParquetCache
             from finboard_data.quality import BarQualityChecker
             from finboard_shared.models import Bar
@@ -788,7 +1174,8 @@ async def start_bulk_download(
                     corrected_dates: list[str] = []
                     fallback_source: str | None = None
 
-                    if not qr.passed and qr.anomaly_count > 0 and fallback:
+                    primary_failed = not results.get(sym.code, False)
+                    if fallback and (primary_failed or not bars):
                         state["phase"] = f"quality_repair:{sym.code}"
                         try:
                             alt_bars = await fallback.fetch_bars(
@@ -796,14 +1183,36 @@ async def start_bulk_download(
                                 start_date, end_date,
                                 adjust="qfq",
                             )
+                            if alt_bars:
+                                await cache.write(sym, BarPeriod.D1, "qfq", alt_bars)
+                                bars = alt_bars
+                                fb_used += 1
+                                fallback_source = fallback_name
+                                corrected_dates = [
+                                    str(bar.timestamp.date()) for bar in alt_bars
+                                ]
+                                results[sym.code] = True
+                                qr = checker.check(bars, symbol=sym.code)
+                        except Exception:
+                            logger.warning("bulk_download.fallback_failed", symbol=sym.code)
+
+                    if fallback and not primary_failed and qr.anomaly_count > 0:
+                        state["phase"] = f"quality_repair:{sym.code}"
+                        try:
+                            alt_bars = await fallback.fetch_bars(
+                                sym, BarPeriod.D1, start_date, end_date, adjust="qfq"
+                            )
                             alt_map = {b.timestamp.date(): b for b in alt_bars}
                             merged = list(bars)
                             for anomaly in qr.anomalies:
                                 alt = alt_map.get(anomaly.date)
                                 if alt and not checker._check_bar(alt):
                                     idx = next(
-                                        (i for i, b in enumerate(merged)
-                                         if b.timestamp.date() == anomaly.date),
+                                        (
+                                            i
+                                            for i, b in enumerate(merged)
+                                            if b.timestamp.date() == anomaly.date
+                                        ),
                                         None,
                                     )
                                     if idx is not None:
@@ -817,23 +1226,25 @@ async def start_bulk_download(
                                             close=alt.close,
                                             volume=alt.volume,
                                             amount=alt.amount,
-                                            source=(
-                                                "yfinance"
-                                                if provider_name == "akshare"
-                                                else "akshare"
-                                            ),
+                                            source=alt.source or fallback_name or "",
                                         )
                                         corrected_dates.append(str(anomaly.date))
 
                             if corrected_dates:
                                 await cache.write(sym, BarPeriod.D1, "qfq", merged)
+                                bars = merged
                                 qr = checker.check(merged, symbol=sym.code)
                                 fb_used += 1
-                                fallback_source = "yfinance" if provider_name == "akshare" else "akshare"
+                                fallback_source = fallback_name
                         except Exception:
-                            logger.warning("bulk_download.fallback_failed", symbol=sym.code)
+                            logger.warning("bulk_download.anomaly_repair_failed", symbol=sym.code)
 
-                    if qr.passed:
+                    report_passed = (
+                        bool(bars)
+                        and qr.passed
+                        and not (primary_failed and fallback_source is None)
+                    )
+                    if report_passed:
                         q_passed += 1
                     else:
                         q_failed += 1
@@ -853,11 +1264,16 @@ async def start_bulk_download(
                                 )
                                 for a in qr.anomalies[:20]
                             ],
-                            passed=qr.passed,
+                            passed=report_passed,
                             primary_source=provider_name,
                             fallback_used=bool(corrected_dates),
                             fallback_source=fallback_source,
                             corrected_dates=corrected_dates,
+                            error=(
+                                None
+                                if bars and not (primary_failed and fallback_source is None)
+                                else "主源及备用源均未返回数据或主源更新失败"
+                            ),
                         )
                     )
                 except Exception:
@@ -866,6 +1282,8 @@ async def start_bulk_download(
             state["quality_passed"] = q_passed
             state["quality_failed"] = q_failed
             state["fallback_used"] = fb_used
+            state["success"] = sum(results.values())
+            state["failed"] = len(sym_objs) - state["success"]
             state["quality_reports"] = quality_reports
             state["status"] = "done"
             state["current_symbol"] = None
@@ -906,11 +1324,10 @@ def _save_config(cfg: dict[str, Any]) -> None:
 
 
 @router.get("/config", response_model=SchedulerConfigOut)
-async def get_scheduler_config() -> SchedulerConfigOut:
+async def get_scheduler_config(request: Request) -> SchedulerConfigOut:
     """获取定时任务配置。"""
-    import os
-
     cfg = _load_config()
+    settings = _request_settings(request)
     return SchedulerConfigOut(
         sync_enabled=cfg.get("sync_enabled", True),
         sync_time=cfg.get("sync_time", "15:35"),
@@ -919,19 +1336,21 @@ async def get_scheduler_config() -> SchedulerConfigOut:
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=os.getenv("FINBOARD_DATA_PROVIDER", "akshare"),
+        data_provider=settings.data_provider if settings is not None else "akshare",
     )
 
 
 @router.put("/config", response_model=SchedulerConfigOut)
-async def update_scheduler_config(req: SchedulerConfigUpdate) -> SchedulerConfigOut:
+async def update_scheduler_config(
+    req: SchedulerConfigUpdate,
+    request: Request,
+) -> SchedulerConfigOut:
     """更新定时任务配置。"""
-    import os
-
     cfg = _load_config()
     updates = req.model_dump(exclude_none=True)
     cfg.update(updates)
     _save_config(cfg)
+    settings = _request_settings(request)
 
     return SchedulerConfigOut(
         sync_enabled=cfg.get("sync_enabled", True),
@@ -941,5 +1360,169 @@ async def update_scheduler_config(req: SchedulerConfigUpdate) -> SchedulerConfig
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=os.getenv("FINBOARD_DATA_PROVIDER", "akshare"),
+        data_provider=settings.data_provider if settings is not None else "akshare",
     )
+
+
+# ------------------------------------------------------------------ LLM Provider Config
+def _read_env_llm() -> dict[str, str]:
+    """从 .env 文件读取 LLM 字段(裸值);文件不存在则返回空值集合。"""
+    result: dict[str, str] = dict.fromkeys(_LLM_KEYS.values(), "")
+    path = Path(_ENV_FILE)
+    if not path.exists():
+        return result
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+            val = val[1:-1]
+        if key in _LLM_KEYS:
+            result[_LLM_KEYS[key]] = val
+    return result
+
+
+def _quote_env_value(val: str) -> str:
+    """值含空格 / # / 引号 / 反斜杠时用双引号包裹并转义。"""
+    if val == "":
+        return ""
+    if any(c in val for c in (" ", "#", '"', "'", "\\")):
+        escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return val
+
+
+def _write_env_llm(merged: dict[str, str]) -> None:
+    """把 LLM 字段写回 .env(临时文件 + 原子替换,保留其余行与注释)。
+
+    已存在的 FINBOARD_LLM_* 行就地替换;不存在的在文件末尾追加一段。
+    """
+    path = Path(_ENV_FILE)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    remaining = dict(merged)
+    new_lines: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        replaced = False
+        if line and not line.startswith("#") and "=" in line:
+            key = line.partition("=")[0].strip()
+            py_key = _LLM_KEYS.get(key)
+            if py_key is not None and py_key in remaining:
+                new_lines.append(f"{key}={_quote_env_value(remaining[py_key])}")
+                remaining.pop(py_key)
+                replaced = True
+        if not replaced:
+            new_lines.append(raw)
+    if remaining:
+        new_lines.append("")
+        new_lines.append("# ====== AI 研究助手 LLM Provider(由设置页维护)======")
+        for env_key, py_key in _LLM_KEYS.items():
+            if py_key in remaining:
+                new_lines.append(f"{env_key}={_quote_env_value(remaining[py_key])}")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _llm_out_from_env(values: dict[str, str]) -> LLMConfigOut:
+    """把 .env 字符串值转换为对外 schema(api_key 掩码)。"""
+    provider = values["provider"] or "fake"
+    if provider not in ("fake", "openai_compatible"):
+        provider = "fake"
+    try:
+        timeout_f = float(values["timeout_seconds"]) if values["timeout_seconds"] else 30.0
+    except ValueError:
+        timeout_f = 30.0
+    try:
+        retries_i = int(values["max_retries"]) if values["max_retries"] else 3
+    except ValueError:
+        retries_i = 3
+    api_key_raw = values["api_key"]
+    return LLMConfigOut(
+        provider=provider,  # type: ignore[arg-type]
+        base_url=values["base_url"],
+        api_key=_API_KEY_MASK if api_key_raw else "",
+        api_key_set=bool(api_key_raw),
+        model=values["model"] or "gpt-4o-mini",
+        timeout_seconds=timeout_f,
+        max_retries=retries_i,
+    )
+
+
+def _rebuild_llm_provider(request: Request, merged: dict[str, str]) -> None:
+    """写完 .env 后热重建 app.state 的 provider / research_assistant。
+
+    不抛错:配置不全时降级 fake(与 lifespan 行为一致)。
+    """
+    settings = _request_settings(request)
+    if settings is None:
+        return
+    out = _llm_out_from_env(merged)
+    new_settings = settings.model_copy(
+        update={
+            "llm_provider": out.provider,
+            "llm_base_url": out.base_url,
+            "llm_api_key": merged["api_key"],
+            "llm_model": out.model,
+            "llm_timeout_seconds": out.timeout_seconds,
+            "llm_max_retries": out.max_retries,
+        }
+    )
+    from finboard_app.llm_factory import build_llm_provider
+    from finboard_backtest.factor_research import FakeLLMProvider, ResearchAssistant
+
+    try:
+        new_provider = build_llm_provider(new_settings)
+    except ValueError as exc:
+        logger.warning("api.llm_provider_fallback", error=str(exc))
+        new_provider = FakeLLMProvider()
+    old = getattr(request.app.state, "llm_provider", None)
+    if old is not None and hasattr(old, "close"):
+        try:
+            old.close()
+        except Exception as exc:
+            logger.warning("api.llm_provider_close_failed", error=str(exc))
+    request.app.state.settings = new_settings
+    request.app.state.llm_provider = new_provider
+    request.app.state.research_assistant = ResearchAssistant(new_provider)
+
+
+@router.get("/llm-config", response_model=LLMConfigOut)
+async def get_llm_config() -> LLMConfigOut:
+    """获取 LLM provider 配置(读 .env,api_key 掩码)。"""
+    return _llm_out_from_env(_read_env_llm())
+
+
+@router.put("/llm-config", response_model=LLMConfigOut)
+async def update_llm_config(
+    req: LLMConfigUpdate,
+    request: Request,
+) -> LLMConfigOut:
+    """更新 LLM provider 配置并持久化到 .env,热重建 provider。
+
+    api_key 哨兵:传入 "********" 或 None 表示保留原值;传其它值(含空串)则覆盖。
+    """
+    cur = _read_env_llm()
+    api_key = cur["api_key"]
+    if req.api_key is not None and req.api_key != _API_KEY_MASK:
+        api_key = req.api_key
+    merged: dict[str, str] = {
+        "provider": req.provider if req.provider is not None else cur["provider"],
+        "base_url": req.base_url if req.base_url is not None else cur["base_url"],
+        "api_key": api_key,
+        "model": req.model if req.model is not None else cur["model"],
+        "timeout_seconds": (
+            str(req.timeout_seconds)
+            if req.timeout_seconds is not None
+            else cur["timeout_seconds"]
+        ),
+        "max_retries": (
+            str(req.max_retries) if req.max_retries is not None else cur["max_retries"]
+        ),
+    }
+    _write_env_llm(merged)
+    _rebuild_llm_provider(request, merged)
+    return _llm_out_from_env(merged)

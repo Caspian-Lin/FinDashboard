@@ -15,7 +15,7 @@ const BULK_PHASE_LABELS: Record<string, string> = {
 
 export default function Data() {
   const queryClient = useQueryClient();
-  const [fetchSymbol, setFetchSymbol] = useState("510300.SH");
+  const [fetchSymbol, setFetchSymbol] = useState("000001.SZ");
   const [fetchStart, setFetchStart] = useState("2024-01-01");
   const [fetchEnd, setFetchEnd] = useState(
     new Date().toISOString().slice(0, 10),
@@ -29,11 +29,11 @@ export default function Data() {
 
   // bulk download form
   const [dlMarket, setDlMarket] = useState("a_share");
-  const [dlType, setDlType] = useState("");
+  const [dlType, setDlType] = useState("stock");
   const [dlStart, setDlStart] = useState("2015-01-01");
   const [dlSource, setDlSource] = useState("");
   const [showQualityDetail, setShowQuality] = useState(false);
-  const [repairSource, setRepairSource] = useState<"akshare" | "yfinance">("akshare");
+  const [repairSource, setRepairSource] = useState<"akshare" | "yfinance" | "tushare">("tushare");
 
   const PAGE_SIZE = 10;
   const isSearching = searchQuery.length >= 2;
@@ -101,6 +101,8 @@ export default function Data() {
     queryFn: api.getConfig,
   });
   const defaultProvider = config?.data_provider ?? "akshare";
+  const effectiveBulkProvider = dlSource || defaultProvider;
+  const tushareBulk = effectiveBulkProvider === "tushare";
 
   const sync = useMutation({
     mutationFn: () => api.syncUniverse(),
@@ -279,6 +281,7 @@ export default function Data() {
                 className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               >
                 <option value="">默认 ({defaultProvider})</option>
+                <option value="tushare">tushare（A股股票）</option>
                 <option value="akshare">akshare</option>
                 <option value="yfinance">yfinance</option>
               </select>
@@ -299,7 +302,13 @@ export default function Data() {
             </button>
             {fetchOne.data && (
               <p className="text-sm text-success">
-                已获取 {fetchOne.data.bar_count} 根日线
+                已获取 {fetchOne.data.bar_count} 根日线（来源 {fetchOne.data.source ?? "未记录"}
+                {fetchOne.data.fallback_used
+                  ? `，主源失败，已切换 ${fetchOne.data.fallback_source}`
+                  : ""}；停复牌事件新增 {fetchOne.data.lifecycle_events}
+                {fetchOne.data.lifecycle_sync_failed
+                  ? `，事件同步失败（${fetchOne.data.lifecycle_sync_error ?? "未知错误"}）`
+                  : ""}）
               </p>
             )}
             {fetchOne.error && (
@@ -348,10 +357,10 @@ export default function Data() {
               disabled={isDownloading}
               className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
             >
-              <option value="">全部</option>
+              <option value="" disabled={tushareBulk}>全部</option>
               <option value="stock">股票</option>
-              <option value="etf">ETF</option>
-              <option value="index">指数</option>
+              <option value="etf" disabled={tushareBulk}>ETF</option>
+              <option value="index" disabled={tushareBulk}>指数</option>
             </select>
           </div>
           <div>
@@ -377,11 +386,18 @@ export default function Data() {
             <select
               id="data-bulk-source"
               value={dlSource}
-              onChange={(e) => setDlSource(e.target.value)}
+              onChange={(e) => {
+                const nextSource = e.target.value;
+                setDlSource(nextSource);
+                if ((nextSource || defaultProvider) === "tushare") {
+                  setDlType("stock");
+                }
+              }}
               disabled={isDownloading}
               className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
             >
               <option value="">默认 ({defaultProvider})</option>
+              <option value="tushare">tushare（A股股票）</option>
               <option value="akshare">akshare</option>
               <option value="yfinance">yfinance</option>
             </select>
@@ -398,6 +414,12 @@ export default function Data() {
             </button>
           </div>
         </div>
+
+        <p className="mb-4 text-sm text-muted-foreground">
+          {tushareBulk
+            ? "Tushare 任务只拉取 A 股股票，并保持缓存为单一来源；失败标的可重跑，不会自动换源。"
+            : "ETF 与其他资产请单独拉取。发布时可与 Tushare 股票缓存组合为多资产混合来源数据集。"}
+        </p>
 
         {/* Progress bar */}
         {isDownloading && bulkStatus && (
@@ -442,6 +464,9 @@ export default function Data() {
                 换源修复 {bulkStatus.fallback_used ?? 0}
               </p>
             )}
+            <p className="text-muted-foreground">
+              停复牌事件新增 {bulkStatus.lifecycle_events ?? 0}，同步失败标的 {bulkStatus.lifecycle_sync_failed ?? 0}
+            </p>
           </div>
         )}
         {bulkStatus?.status === "error" && (
@@ -557,10 +582,11 @@ export default function Data() {
           <div className="flex flex-wrap items-center gap-2">
             <select
               value={repairSource}
-              onChange={(event) => setRepairSource(event.target.value as "akshare" | "yfinance")}
+              onChange={(event) => setRepairSource(event.target.value as "akshare" | "yfinance" | "tushare")}
               className="rounded border border-input bg-card px-2 py-1.5 text-sm text-foreground"
               aria-label="批量换源修复数据源"
             >
+              <option value="tushare">备用源: tushare（仅A股股票）</option>
               <option value="akshare">备用源: akshare</option>
               <option value="yfinance">备用源: yfinance</option>
             </select>
@@ -601,6 +627,7 @@ export default function Data() {
                 <th className="px-4 py-2 text-left">标的</th>
                 <th className="px-4 py-2 text-right">Bar 数</th>
                 <th className="px-4 py-2 text-left">范围</th>
+                <th className="px-4 py-2 text-left">来源</th>
                 <th className="px-4 py-2 text-right">最新收盘</th>
               </tr>
             </thead>
@@ -612,6 +639,7 @@ export default function Data() {
                   <td className="px-4 py-2 text-muted-foreground">
                     {s.first_date ?? "—"} ~ {s.last_date ?? "—"}
                   </td>
+                  <td className="px-4 py-2 text-muted-foreground">{s.source ?? "未记录"}</td>
                   <td className="px-4 py-2 text-right font-mono">
                     {s.last_close ? Number(s.last_close).toFixed(2) : "—"}
                   </td>

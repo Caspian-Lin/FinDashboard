@@ -46,6 +46,12 @@ app = typer.Typer(
 )
 
 
+def _configure_windows_asyncio() -> None:
+    """为 Windows 上的 psycopg 异步连接选择兼容的事件循环。"""
+    if sys.platform == "win32" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
 @app.callback()
 def _main(
     ctx: typer.Context,
@@ -54,6 +60,7 @@ def _main(
         typer.Option("--env-file", help="指定 .env 文件路径(默认 ./.env)"),
     ] = None,
 ) -> None:
+    _configure_windows_asyncio()
     settings = load_settings(env_file=env_file)
     ctx.obj = settings
 
@@ -113,6 +120,14 @@ def serve(
     """启动 FastAPI 交易控制台后端(含 WebSocket)。"""
     import uvicorn
 
+    # Uvicorn 0.36+ 在 Windows 默认显式创建 ProactorEventLoop,而 psycopg
+    # 的异步连接要求 SelectorEventLoop。reload 子进程必须显式使用
+    # ``asyncio``:Uvicorn 会在 use_subprocess=True 时返回 SelectorEventLoop;
+    # 非 reload 模式继续用 ``none`` 继承上面设置的 Selector policy。
+    if sys.platform == "win32":
+        uvicorn_loop = "asyncio" if reload else "none"
+    else:
+        uvicorn_loop = "auto"
     if reload:
         uvicorn.run(
             "finboard_api.app:create_app",
@@ -120,12 +135,13 @@ def serve(
             host=host,
             port=port,
             reload=True,
+            loop=uvicorn_loop,
         )
     else:
         from finboard_api.app import create_app
 
         app = create_app(ctx.obj)
-        uvicorn.run(app, host=host, port=port)
+        uvicorn.run(app, host=host, port=port, loop=uvicorn_loop)
 
 
 @app.command(name="kill-switch")

@@ -21,6 +21,7 @@ import json
 import re
 import shutil
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -496,6 +497,7 @@ class ReleasedInstrument:
     category: str
     ready: bool
     issues: tuple[str, ...] = ()
+    sources: tuple[str, ...] = ()
     exchange: str | None = None
     currency: str = "CNY"
     etf_category: EtfCategory | None = None
@@ -538,6 +540,7 @@ class ReleasedInstrument:
             "category": self.category,
             "ready": self.ready,
             "issues": list(self.issues),
+            **({"sources": list(self.sources)} if self.sources else {}),
             "exchange": self.exchange,
             "currency": self.currency,
             "etf_category": self.etf_category.value if self.etf_category else None,
@@ -591,6 +594,7 @@ class ReleasedInstrument:
             category=str(raw["category"]),
             ready=bool(raw["ready"]),
             issues=tuple(str(item) for item in cast(list[object], raw.get("issues", []))),
+            sources=tuple(str(item) for item in cast(list[object], raw.get("sources", []))),
             exchange=str(raw["exchange"]) if raw.get("exchange") is not None else None,
             currency=str(raw.get("currency", "CNY")),
             etf_category=EtfCategory(str(etf_raw)) if etf_raw is not None else None,
@@ -897,6 +901,14 @@ class FrozenDatasetReleaseBuilder:
                 start=Decimal("0"),
             ) / Decimal(len(released))
             not_ready = [item for item in released if not item.ready]
+            release_sources = sorted(
+                {source for item in released for source in item.sources}
+            )
+            if spec.source == "mixed" and len(release_sources) < 2:
+                raise DatasetReleaseQualityError(
+                    "mixed_source_requires_multiple_sources:"
+                    f"actual={','.join(release_sources) or 'unknown'}"
+                )
             if missing_required or not_ready or release_coverage < spec.minimum_release_coverage:
                 reasons = [
                     *(
@@ -943,6 +955,20 @@ class FrozenDatasetReleaseBuilder:
                     "minimum_release_coverage": str(spec.minimum_release_coverage),
                     "release_coverage": str(release_coverage),
                     "coverage": _coverage_summary(released),
+                    "source_policy": "mixed" if spec.source == "mixed" else "single",
+                    "sources": release_sources,
+                    "source_symbol_counts": dict(
+                        sorted(
+                            Counter(
+                                source
+                                for item in released
+                                for source in item.sources
+                            ).items()
+                        )
+                    ),
+                    "source_by_instrument": {
+                        item.code: list(item.sources) for item in released
+                    },
                     "warnings": warnings,
                 },
                 known_limitations=spec.known_limitations,
@@ -995,6 +1021,16 @@ class FrozenDatasetReleaseBuilder:
         ]
         if not frozen_bars:
             raise DatasetReleaseQualityError(f"{instrument.code}:no_bars_in_release_range")
+        known_sources = {bar.source for bar in frozen_bars if bar.source}
+        if not known_sources:
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:source_metadata_missing"
+            )
+        if spec.source != "mixed" and known_sources != {spec.source}:
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:source_mismatch:"
+                f"cache={','.join(sorted(known_sources))},release={spec.source}"
+            )
         audit = _audit_bars(
             frozen_bars,
             instrument=instrument,
@@ -1063,6 +1099,7 @@ class FrozenDatasetReleaseBuilder:
             category=audit.category,
             ready=ready,
             issues=tuple(issues),
+            sources=tuple(sorted(known_sources)),
             exchange=instrument.exchange,
             currency=instrument.currency,
             etf_category=instrument.etf_category,
@@ -1310,7 +1347,10 @@ def _known_suspension_dates(
     suspended_from: date | None = None
     result: set[date] = set()
     for event in events:
-        if event.event_type == "suspension":
+        if event.event_type == "suspension_day":
+            if start <= event.effective_date <= end:
+                result.add(event.effective_date)
+        elif event.event_type == "suspension":
             suspended_from = event.effective_date
         elif event.event_type == "resumption" and suspended_from is not None:
             result.update(

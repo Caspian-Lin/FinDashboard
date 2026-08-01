@@ -410,7 +410,8 @@ export interface DatasetReleaseCapability {
 export interface DatasetReleaseCreate {
   release_id: string;
   dataset_name: string;
-  source?: "akshare" | "yfinance" | "tushare" | "manual";
+  release_kind: "a_share_tushare" | "multi_asset_mixed";
+  source?: "akshare" | "yfinance" | "tushare" | "mixed" | "manual";
   version: string;
   symbols: string[];
   start_date: string;
@@ -446,6 +447,15 @@ export interface InstrumentMetadata {
   status: string;
   sector?: string;
   industry?: string;
+}
+
+export interface InstrumentSummary {
+  total: number;
+  active_total: number;
+  active_etf_total: number;
+  by_status: Record<string, number>;
+  by_market: Record<string, number>;
+  by_instrument_type: Record<string, number>;
 }
 
 export type EtfCategory =
@@ -551,6 +561,7 @@ export interface CachedDataStatus {
   bar_count: number;
   first_date?: string;
   last_date?: string;
+  source?: string | null;
 }
 
 export interface CachedDataStatusPage {
@@ -623,6 +634,7 @@ export const datasetApi = {
   instruments: (params?: {
     market?: string;
     instrument_type?: string;
+    status?: string;
     q?: string;
     limit?: number;
     offset?: number;
@@ -630,11 +642,14 @@ export const datasetApi = {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.status) q.set("status", params.status);
     if (params?.q) q.set("q", params.q);
     q.set("limit", String(params?.limit ?? 100));
     q.set("offset", String(params?.offset ?? 0));
     return fetchJSON<InstrumentMetadataPage>(`/data/instruments?${q.toString()}`);
   },
+  instrumentSummary: () =>
+    fetchJSON<InstrumentSummary>("/data/instruments/summary"),
   instrumentDetail: (code: string) =>
     fetchJSON<InstrumentMetadata>(`/instruments/${code}`),
   etfMetadata: (code: string) =>

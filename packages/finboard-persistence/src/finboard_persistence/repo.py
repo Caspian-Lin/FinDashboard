@@ -622,7 +622,29 @@ class InstrumentRepository:
         offset: int = 0,
     ) -> tuple[list[InstrumentModel], int]:
         """查询活跃标的(分页,可选模糊搜索)。"""
-        conditions: list[Any] = [InstrumentModel.status == "active"]
+        return await self.list_page(
+            market=market,
+            instrument_type=instrument_type,
+            q=q,
+            limit=limit,
+            offset=offset,
+            status="active",
+        )
+
+    async def list_page(
+        self,
+        *,
+        market: str | None = None,
+        instrument_type: str | None = None,
+        status: str | None = "active",
+        q: str | None = None,
+        limit: int = 5000,
+        offset: int = 0,
+    ) -> tuple[list[InstrumentModel], int]:
+        """分页查询标的, ``status=None`` 时包含全部生命周期状态。"""
+        conditions: list[Any] = []
+        if status:
+            conditions.append(InstrumentModel.status == status)
         if market:
             conditions.append(InstrumentModel.market == market)
         if instrument_type:

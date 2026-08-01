@@ -14,6 +14,8 @@ const datasetApiMock = vi.hoisted(() => ({
   cachedDataSelection: vi.fn(),
   createRelease: vi.fn(),
   instruments: vi.fn(),
+  instrumentSummary: vi.fn(),
+  etfSummary: vi.fn(),
   etfMetadata: vi.fn(),
   updateEtfClassification: vi.fn(),
   lifecycle: vi.fn(),
@@ -52,12 +54,13 @@ beforeEach(() => {
   datasetApiMock.cachedData.mockResolvedValue({
     items: [
       {
-        symbol: "510300.SH",
+        symbol: "000001.SZ",
         period: "1d",
         adjust: "qfq",
         bar_count: 242,
         first_date: "2024-01-02",
         last_date: "2024-12-31",
+        source: "tushare",
       },
     ],
     total: 1,
@@ -67,12 +70,13 @@ beforeEach(() => {
   datasetApiMock.cachedDataSelection.mockResolvedValue({
     items: [
       {
-        symbol: "510300.SH",
+        symbol: "000001.SZ",
         period: "1d",
         adjust: "qfq",
         bar_count: 242,
         first_date: "2024-01-02",
         last_date: "2024-12-31",
+        source: "tushare",
       },
     ],
     total: 1,
@@ -84,6 +88,22 @@ beforeEach(() => {
     total: 0,
     limit: 200,
     offset: 0,
+  });
+  datasetApiMock.instrumentSummary.mockResolvedValue({
+    total: 0,
+    active_total: 0,
+    active_etf_total: 0,
+    by_status: {},
+    by_market: {},
+    by_instrument_type: {},
+  });
+  datasetApiMock.etfSummary.mockResolvedValue({
+    total: 0,
+    auto_adopted: 0,
+    needs_review: 0,
+    manually_confirmed: 0,
+    manually_overridden: 0,
+    missing_metadata: 0,
   });
   datasetApiMock.etfMetadata.mockResolvedValue(null);
   datasetApiMock.updateEtfClassification.mockResolvedValue({
@@ -107,8 +127,8 @@ beforeEach(() => {
   });
   datasetApiMock.createRelease.mockResolvedValue({
     release_id: "daily-bars-20260731-v1",
-    dataset_name: "multi_asset_daily_bars",
-    source: "yfinance",
+    dataset_name: "a_share_daily_bars",
+    source: "tushare",
     version: "2026-07-31-v1",
     schema_version: "v1",
     start_date: "2024-01-02",
@@ -146,11 +166,13 @@ describe("ResearchData 数据发布闭环", () => {
     await waitFor(() => expect(datasetApiMock.createRelease).toHaveBeenCalledOnce());
     expect(datasetApiMock.createRelease).toHaveBeenCalledWith(
       expect.objectContaining({
-        symbols: ["510300.SH"],
+        release_kind: "a_share_tushare",
+        source: "tushare",
+        symbols: ["000001.SZ"],
         start_date: "2024-01-02",
         end_date: "2024-12-31",
         adjustment: "qfq",
-        required_capabilities: [],
+        required_capabilities: ["stock"],
       }),
     );
     expect(await screen.findByText("数据发布成功")).toBeInTheDocument();
@@ -195,12 +217,13 @@ describe("ResearchData 数据发布闭环", () => {
     datasetApiMock.cachedData.mockResolvedValue({
       items: [
         {
-          symbol: "510300.SH",
+          symbol: "000001.SZ",
           period: "1d",
           adjust: "qfq",
           bar_count: 100,
           first_date: "2020-01-02",
           last_date: "2021-12-31",
+          source: "tushare",
         },
       ],
       total: 2,
@@ -210,12 +233,13 @@ describe("ResearchData 数据发布闭环", () => {
     datasetApiMock.cachedDataSelection.mockResolvedValue({
       items: [
         {
-          symbol: "510300.SH",
+          symbol: "000001.SZ",
           period: "1d",
           adjust: "qfq",
           bar_count: 100,
           first_date: "2020-01-02",
           last_date: "2021-12-31",
+          source: "tushare",
         },
         {
           symbol: "600519.SH",
@@ -224,6 +248,7 @@ describe("ResearchData 数据发布闭环", () => {
           bar_count: 100,
           first_date: "2022-01-04",
           last_date: "2024-12-31",
+          source: "tushare",
         },
       ],
       total: 2,
@@ -263,9 +288,19 @@ describe("ResearchData 数据发布闭环", () => {
           bar_count: 242,
           first_date: "2024-01-02",
           last_date: "2024-12-31",
+          source: "akshare",
+        },
+        {
+          symbol: "000001.SZ",
+          period: "1d",
+          adjust: "qfq",
+          bar_count: 242,
+          first_date: "2024-01-02",
+          last_date: "2024-12-31",
+          source: "tushare",
         },
       ],
-      total: 1,
+      total: 2,
       limit: 50,
       offset: 0,
     });
@@ -296,7 +331,11 @@ describe("ResearchData 数据发布闭环", () => {
     renderWithProviders(<ResearchData />);
     await user.click(screen.getByRole("tab", { name: "数据发布" }));
     await user.click(screen.getByRole("button", { name: "创建数据发布" }));
-    await user.click(await screen.findByRole("checkbox"));
+    await user.click(screen.getByLabelText("发布类型"));
+    await user.click(screen.getByRole("option", { name: "多资产混合来源" }));
+    const symbols = await screen.findAllByRole("checkbox");
+    await user.click(symbols[0]);
+    await user.click(symbols[1]);
     await user.click(screen.getByRole("button", { name: "冻结并发布" }));
 
     expect(

@@ -60,6 +60,11 @@ export const RESEARCH_HINTS = {
       description: "数据库中的名称、市场、类型、上市状态和生命周期资料。",
       detail: "行情缓存与标的元数据独立存储；已有缓存不会自动补齐元数据，需要执行标的池同步。",
     },
+    instrumentCounts: {
+      title: "为什么 ETF 数量不一致？",
+      description: "标的字典统计 instruments 表，ETF 分类统计 etf_metadata 表，两者不是同一份清单。",
+      detail: "分类目录会保留历史或暂未进入当前标的池的基金记录；发布和行情拉取应以当前标的字典中的活跃标的为准。",
+    },
     lifecycle: {
       title: "标的生命周期",
       description: "标的的上市/退市、分红送股、ST 摘帽、停牌等事件。影响回测的可用于性。",

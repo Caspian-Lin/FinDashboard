@@ -111,9 +111,11 @@ class TestEtfClassification:
         instrument_result = MagicMock()
         instrument_result.scalar_one_or_none.return_value = instrument
         metadata_result = MagicMock()
-        metadata_result.scalar_one_or_none.return_value = None
+        metadata_result.scalars.return_value.first.return_value = None
+        bare_metadata_result = MagicMock()
+        bare_metadata_result.scalars.return_value.first.return_value = None
         mock_session.execute = AsyncMock(
-            side_effect=[instrument_result, metadata_result]
+            side_effect=[instrument_result, metadata_result, bare_metadata_result]
         )
         mock_session.flush = AsyncMock()
         mock_session.commit = AsyncMock()
@@ -251,12 +253,20 @@ class TestResearchDatasetReleases:
         mock_session.rollback = AsyncMock()
         service = MagicMock()
         service.publish = AsyncMock(return_value=_dataset_release())
+        instrument = MagicMock()
+        instrument.code = "600519.SH"
+        instrument.market = "a_share"
+        instrument.instrument_type = "stock"
+        instrument_result = MagicMock()
+        instrument_result.scalars.return_value.all.return_value = [instrument]
+        mock_session.execute = AsyncMock(return_value=instrument_result)
         request = ResearchDatasetReleaseCreate(
             release_id="api-r77-v1",
-            dataset_name="multi_asset_daily_bars",
-            source="yfinance",
+            dataset_name="a_share_daily_bars",
+            release_kind="a_share_tushare",
+            source="tushare",
             version="2026-07-31-v1",
-            symbols=["510300.sh"],
+            symbols=["600519.sh"],
             start_date=date(2024, 1, 2),
             end_date=date(2024, 1, 5),
             adjustment="qfq",
@@ -289,9 +299,10 @@ class TestResearchDatasetReleases:
             release_root=Path("test-releases"),
         )
         spec, symbols = service.publish.await_args.args
-        assert symbols == ["510300.SH"]
+        assert symbols == ["600519.SH"]
         assert spec.code_version == "deadbeef"
-        assert spec.required_capabilities == ()
+        assert spec.source == "tushare"
+        assert spec.required_capabilities == ("stock",)
         mock_session.commit.assert_awaited_once()
         mock_session.rollback.assert_not_awaited()
 

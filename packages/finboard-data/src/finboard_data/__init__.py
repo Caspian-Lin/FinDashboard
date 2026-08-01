@@ -124,6 +124,8 @@ from finboard_data.symbols import (
     load_symbol_pool,
     save_symbol_pool,
 )
+from finboard_data.tushare_bar_provider import TushareBarProvider, TushareLifecycleEvent
+from finboard_data.tushare_budget import TushareRequestBudget, TushareRequestLimitError
 from finboard_data.tushare_provider import TushareResearchDataProvider
 from finboard_data.yfinance_provider import YFinanceProvider
 
@@ -213,6 +215,10 @@ __all__ = [
     "SuspendDetector",
     "SymbolEntry",
     "SymbolPoolConfig",
+    "TushareBarProvider",
+    "TushareLifecycleEvent",
+    "TushareRequestBudget",
+    "TushareRequestLimitError",
     "TushareResearchDataProvider",
     "YFinanceProvider",
     "apply_suspend_decision",

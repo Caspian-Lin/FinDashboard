@@ -49,6 +49,7 @@ import {
   datasetApi,
   type CachedDataStatus,
   type DatasetReleaseCreate,
+  type DatasetReleaseSummary,
   type EtfExecutionProfile,
   type LifecycleEvent,
 } from "@/lib/research";
@@ -109,6 +110,27 @@ const REVIEW_STATUS_LABELS: Record<string, string> = {
   manually_confirmed: "已确认",
   manually_overridden: "已覆盖",
 };
+
+const INSTRUMENT_TYPE_LABELS: Record<string, string> = {
+  stock: "股票",
+  etf: "ETF",
+};
+
+const MARKET_LABELS: Record<string, string> = {
+  a_share: "A 股",
+  hk: "港股",
+  us: "美股",
+  future: "期货",
+};
+
+const INSTRUMENT_STATUS_LABELS: Record<string, string> = {
+  active: "正常",
+  suspended: "停牌",
+  pending_delist: "待确认退市",
+  delisted: "已退市",
+};
+
+const STATUS_ORDER = ["active", "suspended", "pending_delist", "delisted"];
 
 function EtfMetadataEditor({
   symbol,
@@ -353,12 +375,13 @@ function EtfSyncPanel({ onDone }: { onDone?: () => void }) {
         </p>
       </div>
       {summary.data && (
-        <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
+        <div className="grid grid-cols-2 gap-2 text-xs md:grid-cols-4 lg:grid-cols-7">
           {[
             { label: "总计", value: summary.data.total },
             { label: "自动采用", value: summary.data.auto_adopted },
             { label: "待复核", value: summary.data.needs_review },
             { label: "已确认", value: summary.data.manually_confirmed },
+            { label: "人工覆盖", value: summary.data.manually_overridden },
             { label: "缺失", value: summary.data.missing_metadata },
           ].map((item) => (
             <div key={item.label} className="rounded border p-2 text-center">
@@ -501,12 +524,24 @@ function EtfReviewQueue({ onFixed }: { onFixed?: () => void }) {
   );
 }
 
-function initialReleaseNames() {
+function nextReleaseNames(
+  releases: DatasetReleaseSummary[],
+  releaseKind: DatasetReleaseCreate["release_kind"],
+) {
   const stamp = new Date().toISOString().slice(0, 10);
   const compact = stamp.replaceAll("-", "");
+  const prefix =
+    releaseKind === "a_share_tushare" ? "a-share-bars" : "multi-asset-bars";
+  const releasePrefix = `${prefix}-${compact}-v`;
+  const existingVersions = releases.flatMap((release) => {
+    if (!release.release_id.startsWith(releasePrefix)) return [];
+    const parsed = Number(release.release_id.slice(releasePrefix.length));
+    return Number.isInteger(parsed) && parsed > 0 ? [parsed] : [];
+  });
+  const nextVersion = Math.max(0, ...existingVersions) + 1;
   return {
-    version: `${stamp}-v1`,
-    releaseId: `daily-bars-${compact}-v1`,
+    version: `${stamp}-v${nextVersion}`,
+    releaseId: `${releasePrefix}${nextVersion}`,
   };
 }
 
@@ -521,24 +556,59 @@ function releaseDateRange(items: CachedDataStatus[]) {
   return start && end && start <= end ? { start, end } : null;
 }
 
+function summarizePublishError(error: unknown): {
+  summary: string;
+  details?: string;
+} {
+  const message =
+    error instanceof Error ? error.message : "请检查缓存范围与质量门配置";
+  if (message.length <= 600 || !message.includes("数据质量门未通过")) {
+    return { summary: message };
+  }
+
+  const reasons = message
+    .slice(message.indexOf("数据质量门未通过") + "数据质量门未通过".length)
+    .replace(/^\s*:\s*/, "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const capabilityCount = reasons.filter((item) =>
+    item.startsWith("capability:"),
+  ).length;
+  const instrumentCount = reasons.filter((item) =>
+    item.startsWith("instrument:"),
+  ).length;
+  const preview = reasons.slice(0, 5).join("；");
+
+  return {
+    summary: `质量门发现 ${reasons.length} 项阻塞（能力类别 ${capabilityCount} 项，标的 ${instrumentCount} 项）。${preview}${reasons.length > 5 ? "……" : ""}`,
+    details: message,
+  };
+}
+
 function ReleasePublisher({
   onGoToFetch,
   onGoToInstruments,
+  existingReleases,
+  releaseNamesReady,
 }: {
   onGoToFetch: () => void;
   onGoToInstruments: () => void;
+  existingReleases: DatasetReleaseSummary[];
+  releaseNamesReady: boolean;
 }) {
   const queryClient = useQueryClient();
-  const defaults = initialReleaseNames();
+  const defaults = nextReleaseNames([], "a_share_tushare");
   const [isOpen, setIsOpen] = useState(false);
   const [cacheSearch, setCacheSearch] = useState("");
-  const [datasetName, setDatasetName] = useState("multi_asset_daily_bars");
+  const [datasetName, setDatasetName] = useState("a_share_daily_bars");
   const [releaseId, setReleaseId] = useState(defaults.releaseId);
   const [version, setVersion] = useState(defaults.version);
-  const [source, setSource] = useState<DatasetReleaseCreate["source"]>("akshare");
+  const [releaseKind, setReleaseKind] = useState<DatasetReleaseCreate["release_kind"]>(
+    "a_share_tushare",
+  );
   const [adjustment, setAdjustment] =
     useState<DatasetReleaseCreate["adjustment"]>("qfq");
-  const [scope, setScope] = useState<"focused" | "multi_asset">("focused");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [selected, setSelected] = useState<Record<string, CachedDataStatus>>({});
@@ -565,7 +635,19 @@ function ReleasePublisher({
 
   const selectedItems = Object.values(selected);
   const [repairedEtf, setRepairedEtf] = useState<string | null>(null);
+  const source = releaseKind === "a_share_tushare" ? "tushare" : "mixed";
+  const setNextReleaseNames = (
+    nextKind: DatasetReleaseCreate["release_kind"],
+    releases = existingReleases,
+  ) => {
+    const next = nextReleaseNames(releases, nextKind);
+    setVersion(next.version);
+    setReleaseId(next.releaseId);
+  };
   const toggleSymbol = (item: CachedDataStatus) => {
+    if (releaseKind === "a_share_tushare" && item.source !== "tushare") {
+      return;
+    }
     setSelected((previous) => {
       const next = { ...previous };
       if (next[item.symbol]) {
@@ -591,6 +673,9 @@ function ReleasePublisher({
       setSelected((previous) => {
         const next = { ...previous };
         for (const item of selection.items) {
+          if (releaseKind === "a_share_tushare" && item.source !== "tushare") {
+            continue;
+          }
           next[item.symbol] = item;
         }
         const range = releaseDateRange(Object.values(next));
@@ -612,6 +697,7 @@ function ReleasePublisher({
       datasetApi.createRelease({
         release_id: releaseId.trim(),
         dataset_name: datasetName.trim(),
+        release_kind: releaseKind,
         source,
         version: version.trim(),
         symbols: selectedItems.map((item) => item.symbol),
@@ -619,14 +705,24 @@ function ReleasePublisher({
         end_date: endDate,
         adjustment,
         required_capabilities:
-          scope === "multi_asset" ? MULTI_ASSET_CAPABILITIES : [],
+          releaseKind === "multi_asset_mixed" ? MULTI_ASSET_CAPABILITIES : ["stock"],
       }),
-    onSuccess: () => {
+    onSuccess: (created) => {
       queryClient.invalidateQueries({ queryKey: ["dataset-releases"] });
       queryClient.invalidateQueries({ queryKey: ["dataset-manifests"] });
+      setNextReleaseNames(releaseKind, [...existingReleases, created]);
     },
   });
 
+  const selectedSources = new Set(
+    selectedItems
+      .map((item) => item.source)
+      .filter((item): item is string => Boolean(item)),
+  );
+  const sourcePolicySatisfied =
+    releaseKind === "a_share_tushare"
+      ? selectedItems.every((item) => item.source === "tushare")
+      : selectedSources.size >= 2;
   const canPublish =
     releaseId.trim().length >= 3 &&
     datasetName.trim().length >= 3 &&
@@ -634,13 +730,15 @@ function ReleasePublisher({
     selectedItems.length > 0 &&
     startDate !== "" &&
     endDate !== "" &&
-    startDate <= endDate;
+    startDate <= endDate &&
+    sourcePolicySatisfied;
   const missingEtfSymbol =
     publish.isError && publish.error instanceof Error
       ? publish.error.message.match(
           /([A-Z0-9]+(?:\.[A-Z]+)?): ETF 缺少分类元数据/,
         )?.[1]
       : undefined;
+  const publishError = summarizePublishError(publish.error);
 
   if (!isOpen) {
     return (
@@ -658,7 +756,11 @@ function ReleasePublisher({
             type="button"
             size="sm"
             className="shrink-0"
-            onClick={() => setIsOpen(true)}
+            disabled={!releaseNamesReady}
+            onClick={() => {
+              setNextReleaseNames(releaseKind);
+              setIsOpen(true);
+            }}
           >
             <Plus />
             创建数据发布
@@ -692,7 +794,32 @@ function ReleasePublisher({
       </div>
 
       <div className="space-y-5 p-4">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="space-y-2">
+            <Label htmlFor="release-kind">发布类型</Label>
+            <Select
+              value={releaseKind}
+              onValueChange={(value) => {
+                const next = value as DatasetReleaseCreate["release_kind"];
+                setReleaseKind(next);
+                setNextReleaseNames(next);
+                setDatasetName(
+                  next === "a_share_tushare"
+                    ? "a_share_daily_bars"
+                    : "multi_asset_daily_bars",
+                );
+                clearSelection();
+              }}
+            >
+              <SelectTrigger id="release-kind">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="a_share_tushare">A股 Tushare 单源</SelectItem>
+                <SelectItem value="multi_asset_mixed">多资产混合来源</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <div className="space-y-2">
             <Label htmlFor="release-dataset-name">
               <HintLabel hint={RESEARCH_HINTS.data.datasetName}>数据集名称</HintLabel>
@@ -727,25 +854,12 @@ function ReleasePublisher({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="release-source">
-              <HintLabel hint={RESEARCH_HINTS.data.source}>数据来源</HintLabel>
-            </Label>
-            <Select
-              value={source}
-              onValueChange={(value) =>
-                setSource(value as DatasetReleaseCreate["source"])
-              }
-            >
-              <SelectTrigger id="release-source">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="akshare">akshare</SelectItem>
-                <SelectItem value="yfinance">yfinance</SelectItem>
-                <SelectItem value="tushare">tushare</SelectItem>
-                <SelectItem value="manual">人工导入</SelectItem>
-              </SelectContent>
-            </Select>
+            <Label>来源策略</Label>
+            <div className="flex min-h-10 items-center rounded-md border border-input bg-muted/40 px-3 text-sm">
+              {releaseKind === "a_share_tushare"
+                ? "严格单源：tushare"
+                : "混合来源：逐标的记录实际来源"}
+            </div>
           </div>
           <div className="space-y-2">
             <Label htmlFor="release-adjustment">
@@ -770,33 +884,22 @@ function ReleasePublisher({
               </SelectContent>
             </Select>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="release-scope">
-              <HintLabel hint={RESEARCH_HINTS.data.releaseScope}>质量门范围</HintLabel>
-            </Label>
-            <Select
-              value={scope}
-              onValueChange={(value) =>
-                setScope(value as "focused" | "multi_asset")
-              }
-            >
-              <SelectTrigger id="release-scope">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="focused">选定标的研究</SelectItem>
-                <SelectItem value="multi_asset">正式多资产研究</SelectItem>
-              </SelectContent>
-            </Select>
           </div>
-        </div>
 
-        {scope === "multi_asset" && (
+        {releaseKind === "multi_asset_mixed" ? (
           <Alert variant="warning">
-            <AlertTitle>多资产质量门会严格失败关闭</AlertTitle>
+            <AlertTitle>多资产混合源发布会保留来源血缘</AlertTitle>
             <AlertDescription>
               必须同时包含股票、宽基/指数、跨境、商品和债券 ETF，且每个标的的元数据、
-              可交易生命周期内的日期覆盖和质量检查均通过，否则不会生成发布记录。
+              日期覆盖和质量检查均通过。实际来源少于两种时不会生成发布记录。
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <Alert variant="info">
+            <AlertTitle>A股单源发布严格失败关闭</AlertTitle>
+            <AlertDescription>
+              只能发布 A 股股票，所选缓存的每根 Bar 都必须来自 tushare；任何 ETF、
+              未记录来源或备用源修补数据都会阻止发布。
             </AlertDescription>
           </Alert>
         )}
@@ -910,15 +1013,23 @@ function ReleasePublisher({
               <div className="divide-y divide-border">
                 {cached.items.map((item) => {
                   const checkboxId = `release-symbol-${item.symbol.replaceAll(".", "-")}`;
+                  const sourceCompatible =
+                    releaseKind === "multi_asset_mixed" || item.source === "tushare";
                   return (
                     <label
                       key={`${item.symbol}-${item.period}-${item.adjust}`}
                       htmlFor={checkboxId}
-                      className="flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2 hover:bg-accent"
+                      className={cn(
+                        "flex min-h-11 items-center gap-3 px-3 py-2",
+                        sourceCompatible
+                          ? "cursor-pointer hover:bg-accent"
+                          : "cursor-not-allowed opacity-50",
+                      )}
                     >
                       <Checkbox
                         id={checkboxId}
                         checked={Boolean(selected[item.symbol])}
+                        disabled={!sourceCompatible}
                         onCheckedChange={() => toggleSymbol(item)}
                       />
                       <span className="min-w-0 flex-1">
@@ -928,6 +1039,7 @@ function ReleasePublisher({
                         <span className="ml-3 text-xs text-muted-foreground">
                           {formatNumber(item.bar_count, 0)} 根 ·{" "}
                           {item.first_date ?? "—"} 至 {item.last_date ?? "—"}
+                          {item.source ? ` · ${item.source}` : " · 来源未记录"}
                         </span>
                       </span>
                     </label>
@@ -969,6 +1081,16 @@ function ReleasePublisher({
               </AlertDescription>
             </Alert>
           )}
+          {selectedItems.length > 0 && !sourcePolicySatisfied && (
+            <Alert variant="warning">
+              <AlertTitle>来源策略尚未满足</AlertTitle>
+              <AlertDescription>
+                {releaseKind === "a_share_tushare"
+                  ? "A股单源发布只能选择来源为 tushare 的缓存。"
+                  : "多资产混合源发布至少需要两种实际数据来源。"}
+              </AlertDescription>
+            </Alert>
+          )}
         </div>
 
         {publish.isSuccess && (
@@ -986,11 +1108,17 @@ function ReleasePublisher({
               {missingEtfSymbol ? "需要补齐 ETF 元数据" : "数据发布失败"}
             </AlertTitle>
             <AlertDescription>
-              <p>
-                {publish.error instanceof Error
-                  ? publish.error.message
-                  : "请检查缓存范围与质量门配置"}
-              </p>
+              <p>{publishError.summary}</p>
+              {publishError.details && (
+                <details className="mt-3 rounded-md border border-destructive/30 bg-background/70 p-3 text-foreground">
+                  <summary className="cursor-pointer font-medium">
+                    查看完整失败明细
+                  </summary>
+                  <p className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-xs">
+                    {publishError.details}
+                  </p>
+                </details>
+              )}
               {missingEtfSymbol && (
                 <div className="mt-3 rounded-md border border-destructive/30 bg-background text-foreground">
                   <EtfMetadataEditor
@@ -1056,6 +1184,8 @@ function ReleasesTab({
       <ReleasePublisher
         onGoToFetch={onGoToFetch}
         onGoToInstruments={onGoToInstruments}
+        existingReleases={data ?? []}
+        releaseNamesReady={!isLoading && !isError}
       />
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-1.5">
@@ -1119,7 +1249,7 @@ function ReleasesTab({
                     {formatNumber(rel.symbol_count, 0)}
                   </TableCell>
                   <TableCell className="tabular-nums text-right">
-                    {formatPercent(rel.coverage_pct / 100, 1)}
+                    {formatPercent(rel.coverage_pct, 1)}
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={rel.quality_status} />
@@ -1147,15 +1277,17 @@ function ReleasesTab({
 
 function ManifestsTab() {
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["dataset-manifests", { limit: 50 }],
-    queryFn: () => datasetApi.manifests({ limit: 50 }),
+    // 新版不可变发布登记写入 research_dataset_releases;旧 manifests
+    // 表是历史同步管线遗留,在当前发布流程中不会产生记录。
+    queryKey: ["dataset-releases", { limit: 50 }],
+    queryFn: () => datasetApi.releases({ limit: 50 }),
   });
 
   return (
     <div>
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          {data ? `共 ${data.length} 个数据集` : "加载中…"}
+          {data ? `共 ${data.length} 个已发布数据版本` : "加载中…"}
         </p>
         <Button
           variant="outline"
@@ -1177,60 +1309,65 @@ function ManifestsTab() {
         />
       ) : data && data.length > 0 ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {data.map((m) => (
-            <Card key={`${m.dataset_name}-${m.version}`}>
+          {data.map((rel) => (
+            <Card key={rel.release_id}>
               <CardHeader className="pb-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <CardTitle className="truncate text-base">
-                      {m.dataset_name}
+                      {rel.dataset_name}
                     </CardTitle>
                     <p className="mt-1 font-mono text-xs text-muted-foreground">
-                      {m.checksum.slice(0, 12)}
+                      {rel.release_id}
                     </p>
                   </div>
-                  <Badge variant="outline">{m.version}</Badge>
+                  <Badge variant="outline">{rel.version}</Badge>
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
                 <div className="flex items-center justify-between">
                   <Badge variant="info" className="font-mono">
-                    {m.source}
+                    {rel.source}
                   </Badge>
-                  <StatusBadge status={m.quality_status} />
+                  <StatusBadge status={rel.quality_status} />
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 text-sm">
                   <div>
                     <p className="text-xs text-muted-foreground">标的数</p>
                     <p className="tabular-nums font-medium">
-                      {formatNumber(m.symbol_count, 0)}
+                      {formatNumber(rel.symbol_count, 0)}
                     </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">行数</p>
                     <p className="tabular-nums font-medium">
-                      {formatNumber(m.row_count, 0)}
+                      {formatNumber(rel.row_count, 0)}
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground">数据缺口</p>
-                    <p className="tabular-nums font-medium">{m.gaps.length}</p>
+                    <p className="text-xs text-muted-foreground">数据范围</p>
+                    <p className="truncate tabular-nums font-medium">
+                      {rel.start_date} 至 {rel.end_date}
+                    </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">覆盖率</p>
                     <p className="tabular-nums font-medium">
-                      {formatPercent(m.coverage_pct / 100, 1)}
+                      {formatPercent(rel.coverage_pct, 1)}
                     </p>
                   </div>
                 </div>
 
                 <div>
                   <Progress
-                    value={m.coverage_pct}
-                    indicatorClassName={coverageColor(m.coverage_pct)}
+                    value={rel.coverage_pct * 100}
+                    indicatorClassName={coverageColor(rel.coverage_pct * 100)}
                   />
                 </div>
+                <p className="font-mono text-xs text-muted-foreground">
+                  checksum {rel.release_checksum.slice(0, 12)}
+                </p>
               </CardContent>
             </Card>
           ))}
@@ -1304,6 +1441,8 @@ function LifecyclePanel({ symbol }: { symbol: string }) {
 function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
   const [search, setSearch] = useState("");
   const [market, setMarket] = useState<string>("all");
+  const [instrumentType, setInstrumentType] = useState<string>("all");
+  const [status, setStatus] = useState<string>("all");
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const pageSize = 50;
@@ -1311,15 +1450,32 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: [
       "research-instruments",
-      { search, market, limit: pageSize, offset: page * pageSize },
+      {
+        search,
+        market,
+        instrumentType,
+        status,
+        limit: pageSize,
+        offset: page * pageSize,
+      },
     ],
     queryFn: () =>
       datasetApi.instruments({
         q: search.trim() || undefined,
         market: market === "all" ? undefined : market,
+        instrument_type: instrumentType === "all" ? undefined : instrumentType,
+        status,
         limit: pageSize,
         offset: page * pageSize,
       }),
+  });
+  const { data: instrumentSummary } = useQuery({
+    queryKey: ["research-instrument-summary"],
+    queryFn: () => datasetApi.instrumentSummary(),
+  });
+  const { data: etfSummary } = useQuery({
+    queryKey: ["etf-summary"],
+    queryFn: () => datasetApi.etfSummary(),
   });
   const { data: cacheStats } = useQuery({
     queryKey: ["research-cache-count"],
@@ -1370,6 +1526,40 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
             <SelectItem value="future">期货</SelectItem>
           </SelectContent>
         </Select>
+        <Select
+          value={instrumentType}
+          onValueChange={(v) => {
+            setInstrumentType(v);
+            setPage(0);
+          }}
+        >
+          <SelectTrigger className="w-[120px]">
+            <SelectValue placeholder="类型" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部类型</SelectItem>
+            <SelectItem value="stock">股票</SelectItem>
+            <SelectItem value="etf">ETF</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select
+          value={status}
+          onValueChange={(v) => {
+            setStatus(v);
+            setPage(0);
+          }}
+        >
+          <SelectTrigger className="w-[140px]">
+            <SelectValue placeholder="状态" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部状态</SelectItem>
+            <SelectItem value="active">正常</SelectItem>
+            <SelectItem value="suspended">停牌</SelectItem>
+            <SelectItem value="pending_delist">待确认退市</SelectItem>
+            <SelectItem value="delisted">已退市</SelectItem>
+          </SelectContent>
+        </Select>
         <Button
           variant="outline"
           size="sm"
@@ -1381,12 +1571,82 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
         </Button>
         <span className="text-sm text-muted-foreground">
           {data
-            ? `显示 ${page * pageSize + 1}-${Math.min((page + 1) * pageSize, data.total)} / ${data.total} 只活跃标的`
+            ? `显示 ${page * pageSize + 1}-${Math.min((page + 1) * pageSize, data.total)} / ${data.total} 只标的`
             : ""}
         </span>
       </div>
 
-      {(market === "all" || market === "a_share") && (
+      {instrumentSummary && (
+        <div className="mb-4 space-y-3 rounded-lg border border-border bg-card p-4">
+          <div className="flex items-center gap-1.5">
+            <h3 className="text-sm font-semibold">标的字典概览</h3>
+            <ResearchHint hint={RESEARCH_HINTS.data.instrumentMetadata} />
+          </div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
+            <div>
+              <span className="text-muted-foreground">全部标的</span>
+              <span className="ml-2 font-semibold tabular-nums">{instrumentSummary.total}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">当前活跃</span>
+              <span className="ml-2 font-semibold tabular-nums">{instrumentSummary.active_total}</span>
+            </div>
+            {Object.entries(instrumentSummary.by_instrument_type).map(([key, count]) => (
+              <div key={key}>
+                <span className="text-muted-foreground">{INSTRUMENT_TYPE_LABELS[key] ?? key}</span>
+                <span className="ml-2 font-semibold tabular-nums">{count}</span>
+              </div>
+            ))}
+          </div>
+          <div className="grid gap-3 border-t border-border pt-3 text-xs sm:grid-cols-3">
+            <div>
+              <p className="mb-1 font-medium text-muted-foreground">按状态</p>
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {Object.entries(instrumentSummary.by_status)
+                  .sort(([a], [b]) => {
+                    const ai = STATUS_ORDER.indexOf(a);
+                    const bi = STATUS_ORDER.indexOf(b);
+                    return (ai === -1 ? STATUS_ORDER.length : ai) - (bi === -1 ? STATUS_ORDER.length : bi);
+                  })
+                  .map(([key, count]) => (
+                    <span key={key} className="text-muted-foreground">
+                      {INSTRUMENT_STATUS_LABELS[key] ?? key} <span className="font-medium tabular-nums text-foreground">{count}</span>
+                    </span>
+                  ))}
+              </div>
+            </div>
+            <div>
+              <p className="mb-1 font-medium text-muted-foreground">按市场</p>
+              <div className="flex flex-wrap gap-x-3 gap-y-1">
+                {Object.entries(instrumentSummary.by_market).map(([key, count]) => (
+                  <span key={key} className="text-muted-foreground">
+                    {MARKET_LABELS[key] ?? key} <span className="font-medium tabular-nums text-foreground">{count}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div>
+              <p className="mb-1 font-medium text-muted-foreground">ETF 口径</p>
+              <p className="text-muted-foreground">
+                当前活跃 ETF <span className="font-medium tabular-nums text-foreground">{instrumentSummary.active_etf_total}</span> 只
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {instrumentSummary && etfSummary && (
+        <Alert className="mb-4 border-primary/25 bg-primary/5">
+          <ResearchHint hint={RESEARCH_HINTS.data.instrumentCounts} className="mt-0.5 text-primary" />
+          <AlertTitle>ETF 数量有两套统计口径</AlertTitle>
+          <AlertDescription>
+            当前活跃标的池有 {instrumentSummary.active_etf_total} 只 ETF，ETF 分类元数据目录有 {etfSummary.total} 条记录。
+            后者来自基金目录同步，会保留历史、已退市或暂未进入当前标的池的记录；行情拉取和数据发布以标的字典中的活跃标的为准。
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {(market === "all" || market === "a_share") && instrumentType !== "stock" && (
         <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
           <EtfSyncPanel />
           <EtfReviewQueue />
@@ -1434,7 +1694,7 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
                   <TableHead>市场</TableHead>
                   <TableHead>类型</TableHead>
                   <TableHead>上市日期</TableHead>
-                  <TableHead>标记</TableHead>
+                  <TableHead>状态</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1459,34 +1719,51 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
                         </TableCell>
                         <TableCell>{inst.name}</TableCell>
                         <TableCell className="text-muted-foreground">
-                          {inst.market}
+                          {MARKET_LABELS[inst.market] ?? inst.market}
                         </TableCell>
                         <TableCell className="text-muted-foreground">
-                          {inst.instrument_type}
+                          {INSTRUMENT_TYPE_LABELS[inst.instrument_type] ?? inst.instrument_type}
                         </TableCell>
                         <TableCell className="tabular-nums text-muted-foreground">
                           {inst.list_date ?? "—"}
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1">
-                            {inst.status === "suspended" && (
+                            {inst.status === "suspended" ? (
                               <Badge variant="destructive">停牌</Badge>
-                            )}
-                            {inst.status === "pending_delist" && (
+                            ) : inst.status === "pending_delist" ? (
                               <Badge variant="warning">待确认退市</Badge>
-                            )}
-                            {inst.status === "active" && (
+                            ) : inst.status === "active" ? (
                               <Badge variant="success">正常</Badge>
+                            ) : (
+                              <StatusBadge status={INSTRUMENT_STATUS_LABELS[inst.status] ?? inst.status} />
                             )}
-                            {!["active", "suspended", "pending_delist"].includes(
-                              inst.status,
-                            ) && <StatusBadge status={inst.status} />}
                           </div>
                         </TableCell>
                       </TableRow>
                       {isOpen && (
                         <TableRow key={`${inst.code}-detail`}>
                           <TableCell colSpan={7} className="bg-muted/30 p-0">
+                            <div className="grid grid-cols-2 gap-x-6 gap-y-2 border-b border-border px-4 py-3 text-xs md:grid-cols-4">
+                              <div>
+                                <span className="text-muted-foreground">市场 / 类型</span>
+                                <p className="mt-0.5 font-medium">
+                                  {MARKET_LABELS[inst.market] ?? inst.market} · {INSTRUMENT_TYPE_LABELS[inst.instrument_type] ?? inst.instrument_type}
+                                </p>
+                              </div>
+                              <div>
+                                <span className="text-muted-foreground">状态</span>
+                                <p className="mt-0.5 font-medium">{INSTRUMENT_STATUS_LABELS[inst.status] ?? inst.status}</p>
+                              </div>
+                              <div>
+                                <span className="text-muted-foreground">交易所</span>
+                                <p className="mt-0.5 font-medium">{inst.exchange ?? "—"}</p>
+                              </div>
+                              <div>
+                                <span className="text-muted-foreground">行业 / 板块</span>
+                                <p className="mt-0.5 font-medium">{[inst.industry, inst.sector].filter(Boolean).join(" / ") || "—"}</p>
+                              </div>
+                            </div>
                             {inst.instrument_type === "etf" && (
                               <EtfMetadataEditor symbol={inst.code} />
                             )}
@@ -1504,14 +1781,14 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
       ) : (
         <EmptyState
           icon={<Layers className="h-8 w-8" />}
-          title={search || market !== "all" ? "无匹配标的" : "暂无标的元数据"}
+          title={search || market !== "all" || instrumentType !== "all" || status !== "all" ? "无匹配标的" : "暂无标的元数据"}
           description={
-            search || market !== "all"
+            search || market !== "all" || instrumentType !== "all" || status !== "all"
               ? "尝试调整搜索关键词或市场筛选条件。"
               : "先在行情拉取页同步标的池，名称、市场、类型和上市状态才会写入数据库。"
           }
           action={
-            !search && market === "all" ? (
+            !search && market === "all" && instrumentType === "all" && status === "all" ? (
               <Button type="button" variant="outline" onClick={onGoToFetch}>
                 前往同步标的池
               </Button>

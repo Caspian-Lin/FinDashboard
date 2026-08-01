@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -34,6 +34,96 @@ def client(app: FastAPI) -> TestClient:
 
 class TestDataRoutes:
     """Data 路由测试。"""
+
+    @pytest.mark.asyncio
+    async def test_tushare_lifecycle_events_use_idempotent_insert(self) -> None:
+        """停复牌事件按数据库唯一键幂等写入并返回实际新增数。"""
+        from types import SimpleNamespace
+
+        from sqlalchemy.dialects import postgresql
+
+        from finboard_api.routes.data import _persist_tushare_lifecycle_events
+
+        event = SimpleNamespace(
+            symbol="000001.SZ",
+            event_type="suspension_day",
+            effective_date=date(2024, 1, 3),
+            suspend_timing=None,
+        )
+        scalar_result = MagicMock()
+        scalar_result.all.return_value = [123]
+        execute_result = MagicMock()
+        execute_result.scalars.return_value = scalar_result
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock(return_value=execute_result)
+
+        inserted = await _persist_tushare_lifecycle_events(mock_session, [event])
+
+        assert inserted == 1
+        statement = mock_session.execute.await_args.args[0]
+        compiled = str(statement.compile(dialect=postgresql.dialect()))
+        assert "ON CONFLICT ON CONSTRAINT uq_instrument_lifecycle_event DO NOTHING" in compiled
+        mock_session.execute.assert_awaited_once()
+
+    def test_tushare_bulk_scope_rejects_etf(self) -> None:
+        """Tushare 股票批量任务不能静默包含 ETF。"""
+        from types import SimpleNamespace
+
+        from finboard_api.routes.data import _validate_bulk_provider_scope
+
+        instruments = [
+            SimpleNamespace(
+                code="510300.SH",
+                market="a_share",
+                instrument_type="etf",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="仅支持 A 股股票"):
+            _validate_bulk_provider_scope("tushare", instruments)
+
+    def test_tushare_bulk_scope_accepts_a_share_stock(self) -> None:
+        """Tushare 股票批量任务接受纯 A 股股票集合。"""
+        from types import SimpleNamespace
+
+        from finboard_api.routes.data import _validate_bulk_provider_scope
+
+        instruments = [
+            SimpleNamespace(
+                code="000001.SZ",
+                market="a_share",
+                instrument_type="stock",
+            )
+        ]
+
+        _validate_bulk_provider_scope("tushare", instruments)
+
+    @pytest.mark.asyncio
+    async def test_instrument_summary_groups_status_market_and_type(self) -> None:
+        """标的汇总接口返回数量口径所需的三组分布。"""
+        from finboard_api.routes.data import summarize_instruments
+
+        status_result = MagicMock()
+        status_result.all.return_value = [("active", 3), ("delisted", 1)]
+        market_result = MagicMock()
+        market_result.all.return_value = [("a_share", 4)]
+        type_result = MagicMock()
+        type_result.all.return_value = [("stock", 3), ("etf", 1)]
+        active_etf_result = MagicMock()
+        active_etf_result.scalar_one.return_value = 1
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock(
+            side_effect=[status_result, market_result, type_result, active_etf_result]
+        )
+
+        result = await summarize_instruments(session=mock_session)
+
+        assert result.total == 4
+        assert result.active_total == 3
+        assert result.active_etf_total == 1
+        assert result.by_status == {"active": 3, "delisted": 1}
+        assert result.by_market == {"a_share": 4}
+        assert result.by_instrument_type == {"stock": 3, "etf": 1}
 
     def test_list_cache_status_empty(self, client: TestClient) -> None:
         """空缓存目录返回空列表。"""
@@ -206,7 +296,7 @@ class TestDataRoutes:
         assert payload["repaired"] == 1
         assert payload["corrected_bars"] == 1
         assert payload["reports"][0]["corrected_dates"] == ["2019-01-07"]
-        factory.assert_called_once_with("akshare", use_cache=False)
+        factory.assert_called_once_with("akshare", use_cache=False, settings=None)
         written = cache_write.await_args.args[3]
         assert written[0].open == Decimal("2.308")
         assert written[0].source == "akshare"
