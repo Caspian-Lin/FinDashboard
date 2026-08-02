@@ -72,8 +72,8 @@ migrate-new: ## 生成新的迁移文件: make migrate-new name=add_xxx
 run: ## 启动交易核心进程(mock broker 默认)
 	$(UV) run finboard run
 
-serve: ## 启动 FastAPI 后端(--reload 热重载,端口 8000)
-	$(UV) run finboard serve --reload
+serve: ## 启动 FastAPI 后端(端口 8000)
+	$(UV) run finboard serve
 
 reconcile: ## 执行一次本地 ↔ 券商核对
 	$(UV) run finboard reconcile
@@ -96,11 +96,8 @@ web-lint: ## 前端 ESLint
 # --------------------------------------------------------------------------- 一键开发
 dev: ## 一键启动前后端开发服务器(后端 :8000 + 前端 :5173,Ctrl-C 同时退出)
 	@echo "\033[36m启动后端(FastAPI :8000) + 前端(Vite :5173)...\033[0m"
-	@echo "\033[33m确保 PostgreSQL 已启动且已执行 make migrate\033[0m"
-	@trap 'kill $$BACKEND_PID $$FRONTEND_PID 2>/dev/null; wait 2>/dev/null' INT TERM; \
-	$(UV) run finboard serve --reload & BACKEND_PID=$$!; \
-	cd $(WEB_DIR) && $(NPM) run dev & FRONTEND_PID=$$!; \
-	wait
+	@echo "\033[33m本机数据库不可达时会自动唤醒 WSL PostgreSQL;请确保已执行 make migrate\033[0m"
+	$(UV) run finboard dev --web-dir $(WEB_DIR)
 
 clean: ## 清理缓存与构建产物
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov

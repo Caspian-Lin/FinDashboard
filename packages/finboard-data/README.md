@@ -150,6 +150,13 @@ Provider 只在显式构造且未注入 client 时加载 Tushare SDK。token 不
 必须按股票代码读取。任一接口返回行数达到官方上限时 Provider 会拒绝结果,
 调用方应缩小日期或标的范围后重试。
 
+`TushareBarProvider` 的批量日线更新默认使用 16 个有界 worker 和专用线程池;
+所有远端 endpoint 仍由共享预算按配置 RPM 逐次放行,并在每个请求前把用量写入
+`tushare_usage.json`。Parquet 对应的 `.meta.json` 会记录 `covered_ranges`,表示
+已经成功查询的闭区间(包括停牌、上市前等合法无 Bar 日期)。进程中断后重新运行
+时会用该覆盖信息与 Parquet 首尾日期计算剩余区间,完整覆盖则直接 `cache_hit`,
+不会维护或执行一份独立的持久化任务队列。
+
 ## 多资产元数据契约(issue #58)
 
 `finboard_data.assets` 子包提供跨资产的元数据契约,支持股票、ETF、债券、

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -34,6 +35,75 @@ def client(app: FastAPI) -> TestClient:
 
 class TestDataRoutes:
     """Data 路由测试。"""
+
+    def test_bulk_download_log_records_and_updates_cache_miss_reason(self) -> None:
+        """拉取日志可异步补充未命中原因,并保持稳定事件序号。"""
+        from finboard_api.routes.data import (
+            _append_bulk_download_log,
+            _set_bulk_download_log_reason,
+        )
+
+        state: dict[str, object] = {"logs": []}
+        seq = _append_bulk_download_log(
+            state,
+            event="fetching",
+            code="000001.SZ",
+        )
+        _set_bulk_download_log_reason(
+            state,
+            seq=seq,
+            reason="缺少日期段 2026-08-01~2026-08-03",
+        )
+        _append_bulk_download_log(
+            state,
+            event="completed",
+            code="000001.SZ",
+        )
+
+        logs = state["logs"]
+        assert isinstance(logs, list)
+        assert logs[0]["seq"] == 1
+        assert logs[0]["reason"] == "缺少日期段 2026-08-01~2026-08-03"
+        assert logs[1]["seq"] == 2
+        assert logs[1]["event"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_app_shutdown_cancels_bulk_download_task(self) -> None:
+        """关闭后端必须取消批量任务,重启后由缓存重新规划。"""
+        from finboard_api.app import _cancel_bulk_download_task
+
+        test_app = FastAPI()
+        started = asyncio.Event()
+        finalized = asyncio.Event()
+
+        async def _download() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalized.set()
+
+        task = asyncio.create_task(_download())
+        await started.wait()
+        test_app.state._bulk_task = task
+        test_app.state._bulk_download = {
+            "status": "running",
+            "current_symbol": "000001.SZ",
+            "phase": "fetching",
+            "active_symbols": [{"code": "000001.SZ", "reason": "无缓存"}],
+        }
+
+        await _cancel_bulk_download_task(test_app)
+
+        assert task.cancelled()
+        assert finalized.is_set()
+        assert test_app.state._bulk_task is None
+        assert test_app.state._bulk_download == {
+            "status": "cancelled",
+            "current_symbol": None,
+            "phase": None,
+            "active_symbols": [],
+        }
 
     @pytest.mark.asyncio
     async def test_tushare_lifecycle_events_use_idempotent_insert(self) -> None:

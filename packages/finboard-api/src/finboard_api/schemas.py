@@ -337,8 +337,21 @@ class BulkDownloadRequest(BaseSchema):
     source: str | None = None
 
 
+class ActiveSymbolOut(BaseSchema):
+    code: str
+    reason: str = ""
+
+
+class BulkDownloadLogOut(BaseSchema):
+    seq: int
+    timestamp: str
+    event: str
+    code: str
+    reason: str | None = None
+
+
 class BulkDownloadStatusOut(BaseSchema):
-    status: str = "idle"  # idle / running / done / error
+    status: str = "idle"  # idle / running / done / error / cancelled
     done: int = 0
     total: int = 0
     success: int = 0
@@ -353,6 +366,9 @@ class BulkDownloadStatusOut(BaseSchema):
     lifecycle_sync_failed: int = 0
     cache_hits: int = 0
     cache_misses: int = 0
+    started_at: str | None = None
+    active_symbols: list[ActiveSymbolOut] = []
+    logs: list[BulkDownloadLogOut] = []
     quality_reports: list[QualityReportOut] = []
 
 

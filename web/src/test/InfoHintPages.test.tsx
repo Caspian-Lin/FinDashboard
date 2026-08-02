@@ -180,9 +180,60 @@ describe("目标页面 InfoHint 接入", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("代码.交易所");
 
     await user.click(
+      screen.getByRole("button", { name: "查看“批量行情数据源”说明" }),
+    );
+    expect(screen.getByRole("tooltip")).toHaveTextContent("系统默认配置");
+
+    await user.click(
       screen.getByRole("button", { name: "查看“缓存行情”说明" }),
     );
     expect(screen.getByRole("tooltip")).toHaveTextContent("qfq");
+  });
+
+  it("数据页用可折叠日志展示拉取、完成与缓存跳过事件", async () => {
+    const user = userEvent.setup();
+    apiMock.getBulkDownloadStatus.mockResolvedValue({
+      status: "running",
+      done: 2,
+      total: 3,
+      success: 2,
+      failed: 0,
+      current_symbol: "000002.SZ",
+      phase: "fetching",
+      error: null,
+      logs: [
+        {
+          seq: 1,
+          timestamp: "2026-08-03T01:02:03+00:00",
+          event: "cache_hit",
+          code: "000001.SZ",
+          reason: "请求日期范围已覆盖",
+        },
+        {
+          seq: 2,
+          timestamp: "2026-08-03T01:02:04+00:00",
+          event: "fetching",
+          code: "000002.SZ",
+          reason: "缺少日期段 2026-08-01~2026-08-03",
+        },
+        {
+          seq: 3,
+          timestamp: "2026-08-03T01:02:05+00:00",
+          event: "completed",
+          code: "000002.SZ",
+          reason: null,
+        },
+      ],
+    });
+
+    renderPage(<Data />);
+
+    const toggle = await screen.findByRole("button", { name: /拉取日志/ });
+    expect(screen.getByRole("log")).toHaveTextContent("命中跳过");
+    expect(screen.getByRole("log")).toHaveTextContent("缺少日期段");
+    expect(screen.getByRole("log")).toHaveTextContent("拉取完成");
+    await user.click(toggle);
+    expect(screen.queryByRole("log")).not.toBeInTheDocument();
   });
 
   it("设置页展示数据源与定时任务说明", async () => {

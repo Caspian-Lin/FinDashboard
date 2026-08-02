@@ -98,6 +98,11 @@ export const INFO_HINTS = {
       description: "每个标的首次拉取时使用的最早日期；已有缓存会按增量方式补齐。",
       detail: "更早的日期会增加下载时间和本地缓存体积。",
     },
+    bulkSource: {
+      title: "批量行情数据源",
+      description: "选择本次批量任务使用的行情提供方；留空时使用系统默认配置。",
+      detail: "Tushare 批量任务仅处理 A 股股票，并保持缓存为单一来源。",
+    },
     cachedData: {
       title: "缓存行情",
       description: "本地 Parquet 行情缓存，按标的、周期和复权方式分别保存。",

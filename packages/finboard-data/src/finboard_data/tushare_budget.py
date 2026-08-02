@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -67,6 +68,7 @@ class TushareRequestBudget:
         self._now = now or (lambda: datetime.now(_SHANGHAI))
         self._lock = asyncio.Lock()
         self._last_request_at = 0.0
+        self._recent_requests: deque[float] = deque(maxlen=500)
 
     async def acquire(self) -> None:
         """等待频率窗口并在调用远端前持久化预占一次额度。"""
@@ -76,6 +78,12 @@ class TushareRequestBudget:
             if elapsed < self._minimum_interval:
                 await asyncio.sleep(self._minimum_interval - elapsed)
 
+            # 从时隙预留时刻计算下一次间隔,把预算文件 I/O 包含在 0.3 秒
+            # (200 RPM)窗口内。远端调用仍发生在持久化成功之后;I/O 超过
+            # 最小间隔时锁本身会串行化请求,不会导致突破配置上限。
+            reserved_at = loop.time()
+            self._last_request_at = reserved_at
+
             today = self._now().astimezone(_SHANGHAI).date().isoformat()
             used = await asyncio.to_thread(self._read_usage, today)
             if used >= self._daily_request_limit:
@@ -83,7 +91,16 @@ class TushareRequestBudget:
                     f"Tushare 每日请求预算已耗尽: {used}/{self._daily_request_limit}"
                 )
             await asyncio.to_thread(self._write_usage, today, used + 1)
-            self._last_request_at = loop.time()
+            now = loop.time()
+            self._recent_requests.append(now)
+            cutoff = now - 60.0
+            while self._recent_requests and self._recent_requests[0] < cutoff:
+                self._recent_requests.popleft()
+
+    @property
+    def current_rpm(self) -> int:
+        """最近 60 秒窗口内的实际请求数。"""
+        return len(self._recent_requests)
 
     async def snapshot(self) -> TushareBudgetSnapshot:
         """读取当前日期的本地预算用量,不占用请求额度。"""

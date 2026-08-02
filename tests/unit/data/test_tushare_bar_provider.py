@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, Lock
 
 import pytest
 
@@ -269,6 +271,103 @@ async def test_daily_budget_persists_and_fails_before_overrun(tmp_path: Path) ->
 
 
 @pytest.mark.unit
+async def test_budget_current_rpm_tracks_sliding_window(tmp_path: Path) -> None:
+    budget = TushareRequestBudget(
+        requests_per_minute=60_000_000,
+        daily_request_limit=100_000,
+        usage_file=tmp_path / "usage.json",
+        now=lambda: datetime(2026, 8, 2, tzinfo=UTC),
+    )
+    assert budget.current_rpm == 0
+    for _ in range(3):
+        await budget.acquire()
+    assert budget.current_rpm == 3
+
+
+@pytest.mark.unit
+async def test_budget_persists_before_every_remote_request(tmp_path: Path) -> None:
+    """每个请求均单独写入预算文件,不使用批量额度预占。"""
+    from unittest.mock import patch
+
+    usage_file = tmp_path / "usage.json"
+    budget = TushareRequestBudget(
+        requests_per_minute=60_000_000,
+        daily_request_limit=100,
+        usage_file=usage_file,
+        now=lambda: datetime(2026, 8, 3, tzinfo=UTC),
+    )
+
+    with patch.object(budget, "_write_usage", wraps=budget._write_usage) as write:
+        await budget.acquire()
+        await budget.acquire()
+
+    assert write.call_count == 2
+    assert json.loads(usage_file.read_text(encoding="utf-8"))["requests"] == 2
+
+
+@pytest.mark.unit
+async def test_batch_uses_sixteen_workers_for_200_slow_symbols() -> None:
+    class SlowTushareBarClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.active = 0
+            self.maximum = 0
+            self.lock = Lock()
+            self.saturated = Event()
+
+        def daily(self, **kwargs: str) -> object:
+            with self.lock:
+                self.calls += 1
+                self.active += 1
+                self.maximum = max(self.maximum, self.active)
+                if self.active == 16:
+                    self.saturated.set()
+            assert self.saturated.wait(timeout=5)
+            with self.lock:
+                self.active -= 1
+            return [
+                {
+                    "ts_code": kwargs["ts_code"],
+                    "trade_date": "20240102",
+                    "open": 10,
+                    "high": 11,
+                    "low": 9,
+                    "close": 10.5,
+                    "vol": 10,
+                    "amount": 20,
+                }
+            ]
+
+        def adj_factor(self, **kwargs: str) -> object:
+            raise AssertionError("none 复权不应请求 adj_factor")
+
+        def suspend_d(self, **kwargs: str) -> object:
+            return []
+
+    client = SlowTushareBarClient()
+    provider = TushareBarProvider(
+        client=client,
+        use_cache=False,
+        budget=NoopBudget(),
+        max_concurrency=16,
+        max_retries=0,
+    )
+    symbols = [make_symbol(f"{index:06d}.SZ") for index in range(1, 201)]
+    results = await provider.update_cache_batch(
+        symbols,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 2),
+        adjust="none",
+    )
+
+    assert len(results) == 200
+    assert all(results.values())
+    assert client.calls == 200
+    assert client.maximum == 16
+
+
+@pytest.mark.unit
 async def test_cache_hit_does_not_call_tushare_for_same_source(tmp_path: Path) -> None:
     provider = TushareBarProvider(
         client=FakeTushareBarClient(),
@@ -335,7 +434,7 @@ async def test_incremental_cache_fetch_starts_after_last_cached_date(tmp_path: P
 
 
 @pytest.mark.unit
-async def test_quality_anomaly_only_refetches_its_date(tmp_path: Path) -> None:
+async def test_successful_empty_tail_is_cached_as_covered(tmp_path: Path) -> None:
     provider = TushareBarProvider(
         client=FakeTushareBarClient(),
         cache_dir=tmp_path,
@@ -349,24 +448,115 @@ async def test_quality_anomaly_only_refetches_its_date(tmp_path: Path) -> None:
         "none",
         [
             _cached_bar(date(2024, 1, 2)),
-            _cached_bar(date(2024, 1, 3), high="8"),
-            _cached_bar(date(2024, 1, 4)),
+            _cached_bar(date(2024, 1, 3)),
         ],
     )
 
     from unittest.mock import AsyncMock
 
-    fetch = AsyncMock(return_value=[_cached_bar(date(2024, 1, 3))])
+    fetch = AsyncMock(return_value=[])
+    provider._fetch_from_akshare = fetch  # type: ignore[method-assign]
+    statuses: list[str] = []
+    first = await provider.update_cache(
+        symbol, BarPeriod.D1, date(2024, 1, 2), date(2024, 1, 5), adjust="none"
+    )
+    second = await provider.update_cache(
+        symbol,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 5),
+        adjust="none",
+        on_status=statuses.append,
+    )
+
+    assert first is True
+    assert second is True
+    fetch.assert_awaited_once()
+    assert fetch.await_args is not None
+    assert fetch.await_args.args[2:] == (date(2024, 1, 4), date(2024, 1, 5), "none")
+    assert statuses == ["checking_cache", "cache_hit"]
+    sidecar = tmp_path / "000001.SZ_1d_none.parquet.meta.json"
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["covered_ranges"] == [["2024-01-04", "2024-01-05"]]
+
+
+@pytest.mark.unit
+async def test_internal_no_bar_day_does_not_cause_permanent_cache_miss(
+    tmp_path: Path,
+) -> None:
+    """停牌等合法无 Bar 日期不能仅凭交易日历被反复重拉。"""
+    provider = TushareBarProvider(
+        client=FakeTushareBarClient(),
+        cache_dir=tmp_path,
+        max_retries=0,
+    )
+    assert provider._cache is not None
+    symbol = make_symbol("000001.SZ")
+    await provider._cache.write(
+        symbol,
+        BarPeriod.D1,
+        "none",
+        [
+            _cached_bar(date(2024, 1, 2)),
+            _cached_bar(date(2024, 1, 3)),
+            _cached_bar(date(2024, 1, 5)),
+        ],
+    )
+
+    from unittest.mock import AsyncMock
+
+    fetch = AsyncMock()
     provider._fetch_from_akshare = fetch  # type: ignore[method-assign]
     result = await provider.update_cache(
         symbol,
         BarPeriod.D1,
         date(2024, 1, 2),
-        date(2024, 1, 4),
+        date(2024, 1, 5),
         adjust="none",
     )
 
     assert result is True
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_leading_pre_listing_range_is_only_queried_once(tmp_path: Path) -> None:
+    """上市前无数据区间成功查询后,第二次必须直接命中缓存。"""
+    provider = TushareBarProvider(
+        client=FakeTushareBarClient(),
+        cache_dir=tmp_path,
+        max_retries=0,
+    )
+    assert provider._cache is not None
+    symbol = make_symbol("000001.SZ")
+
+    await provider._cache.write(
+        symbol,
+        BarPeriod.D1,
+        "none",
+        [_cached_bar(date(2024, 1, 4)), _cached_bar(date(2024, 1, 5))],
+    )
+    from unittest.mock import AsyncMock
+
+    fetch = AsyncMock(return_value=[])
+    provider._fetch_from_akshare = fetch  # type: ignore[method-assign]
+    first = await provider.update_cache(
+        symbol,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 5),
+        adjust="none",
+    )
+    second = await provider.update_cache(
+        symbol,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 5),
+        adjust="none",
+    )
+
+    assert first is True
+    assert second is True
     fetch.assert_awaited_once()
     assert fetch.await_args is not None
-    assert fetch.await_args.args[2:] == (date(2024, 1, 3), date(2024, 1, 3), "none")
+    assert fetch.await_args.args[2:] == (date(2024, 1, 2), date(2024, 1, 3), "none")

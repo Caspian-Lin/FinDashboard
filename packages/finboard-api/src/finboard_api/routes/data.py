@@ -43,6 +43,45 @@ from finboard_api.schemas import (
 
 logger = structlog.get_logger(__name__)
 
+_BULK_LOG_LIMIT = 1_000
+
+
+def _append_bulk_download_log(
+    state: dict[str, Any],
+    *,
+    event: str,
+    code: str,
+    reason: str | None = None,
+) -> int:
+    """追加有限长度的批量拉取事件,返回可用于补充原因的序号。"""
+    logs = state.setdefault("logs", [])
+    seq = logs[-1]["seq"] + 1 if logs else 1
+    logs.append(
+        {
+            "seq": seq,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "event": event,
+            "code": code,
+            "reason": reason,
+        }
+    )
+    if len(logs) > _BULK_LOG_LIMIT:
+        del logs[: len(logs) - _BULK_LOG_LIMIT]
+    return seq
+
+
+def _set_bulk_download_log_reason(
+    state: dict[str, Any],
+    *,
+    seq: int,
+    reason: str,
+) -> None:
+    """异步缓存检查完成后,补充对应“正在拉取”事件的未命中原因。"""
+    for entry in reversed(state.get("logs", [])):
+        if entry["seq"] == seq:
+            entry["reason"] = reason
+            return
+
 if TYPE_CHECKING:
     from finboard_app.config import Settings
     from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
@@ -112,7 +151,9 @@ def _resolve_provider_name(
     import os
 
     configured = settings.data_provider if settings is not None else None
-    provider_name = (source or configured or os.getenv("FINBOARD_DATA_PROVIDER") or "akshare").strip().lower()
+    provider_name = (
+        (source or configured or os.getenv("FINBOARD_DATA_PROVIDER") or "akshare").strip().lower()
+    )
     if provider_name not in _SUPPORTED_BAR_PROVIDERS:
         supported = ", ".join(sorted(_SUPPORTED_BAR_PROVIDERS))
         raise ValueError(f"不支持的行情源: {provider_name}; 可用: {supported}")
@@ -267,9 +308,7 @@ async def list_cache_status_page(
     safe_offset = max(offset, 0)
     cache = ParquetCache(_CACHE_DIR, max_io_concurrency=8)
     cache_path = Path(_CACHE_DIR)
-    parquet_files = sorted(
-        await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet")))
-    )
+    parquet_files = sorted(await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet"))))
     query = q.strip().upper() if q else None
 
     def matches(path: Path) -> bool:
@@ -326,9 +365,7 @@ async def select_cache_status(
 
     cache = ParquetCache(_CACHE_DIR, max_io_concurrency=8)
     cache_path = Path(_CACHE_DIR)
-    parquet_files = sorted(
-        await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet")))
-    )
+    parquet_files = sorted(await asyncio.to_thread(lambda: list(cache_path.glob("*.parquet"))))
     query = q.strip().upper() if q else None
     selected_paths: list[tuple[Path, str, str, str]] = []
     for path in parquet_files:
@@ -349,9 +386,7 @@ async def select_cache_status(
     last_dates: list[str] = []
     for offset in range(0, len(selected_paths), 256):
         batch = selected_paths[offset : offset + 256]
-        metadata_batch = await asyncio.gather(
-            *(cache.metadata(path) for path, *_ in batch)
-        )
+        metadata_batch = await asyncio.gather(*(cache.metadata(path) for path, *_ in batch))
         for (_, code, period_str, adjustment), metadata in zip(
             batch,
             metadata_batch,
@@ -824,14 +859,9 @@ async def summarize_instruments(
 
     async def grouped_counts(column: Any) -> dict[str, int]:
         result = await session.execute(
-            select(column, func.count(InstrumentModel.id))
-            .group_by(column)
-            .order_by(column)
+            select(column, func.count(InstrumentModel.id)).group_by(column).order_by(column)
         )
-        return {
-            str(key or "unknown"): int(count)
-            for key, count in result.all()
-        }
+        return {str(key or "unknown"): int(count) for key, count in result.all()}
 
     by_status = await grouped_counts(InstrumentModel.status)
     by_market = await grouped_counts(InstrumentModel.market)
@@ -953,6 +983,9 @@ def _get_bulk_state(request: Request) -> dict[str, Any]:
             "error": None,
             "cache_hits": 0,
             "cache_misses": 0,
+            "started_at": None,
+            "active_symbols": [],
+            "logs": [],
         }
     return request.app.state._bulk_download  # type: ignore[no-any-return]
 
@@ -1016,6 +1049,7 @@ async def start_bulk_download(
     """启动批量历史数据拉取(后台异步任务)。"""
     import asyncio
     from datetime import date as parse_d
+    from datetime import datetime as parse_dt
 
     state = _get_bulk_state(request)
     if state["status"] == "running":
@@ -1055,10 +1089,12 @@ async def start_bulk_download(
             else TushareBarProvider(
                 token=settings.tushare_token if settings is not None else None,
                 use_cache=False,
-                max_concurrency=4,
+                max_concurrency=16,
                 requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
                 daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
-                usage_file=(settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"),
+                usage_file=(
+                    settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"
+                ),
             )
             if fallback_name == "tushare"
             else None
@@ -1066,10 +1102,12 @@ async def start_bulk_download(
     elif provider_name == "tushare":
         primary = TushareBarProvider(
             token=settings.tushare_token if settings is not None else None,
-            max_concurrency=4,
+            max_concurrency=16,
             requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
             daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
-            usage_file=(settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"),
+            usage_file=(
+                settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"
+            ),
         )
         # A 股发布是 Tushare 单源契约。失败标的保留为失败并允许重跑,
         # 不用备用源静默覆盖缓存, 否则无法证明发布数据的单一来源。
@@ -1094,7 +1132,9 @@ async def start_bulk_download(
                 max_retries=0,
                 requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
                 daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
-                usage_file=(settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"),
+                usage_file=(
+                    settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"
+                ),
             )
             if fallback_name == "tushare"
             else None
@@ -1120,15 +1160,64 @@ async def start_bulk_download(
         lifecycle_sync_failed=0,
         cache_hits=0,
         cache_misses=0,
+        started_at=parse_dt.now().isoformat(),
+        active_symbols=[],
+        logs=[],
         quality_reports=[],
     )
 
     async def _run_download() -> None:
+        _bg_tasks: set[asyncio.Task[None]] = set()
         try:
+            from finboard_data.cache import ParquetCache, expected_last_bar_date
+
+            _reason_cache = ParquetCache(_CACHE_DIR)
+            _reason_effective_end = expected_last_bar_date(end_date)
+            active_reasons: dict[str, str] = {}
+
+            def _sync_active() -> None:
+                state["active_symbols"] = [
+                    {"code": c, "reason": r} for c, r in active_reasons.items()
+                ]
+
+            async def _cache_miss_reason(code: str) -> str:
+                sym = make_symbol(code)
+                metadata = await _reason_cache.metadata_for(sym, BarPeriod.D1, "qfq")
+                if metadata is None:
+                    return "无缓存"
+                if metadata.source != provider_name:
+                    return (
+                        f"缓存来源 {metadata.source or '未知'}, 请求源为 {provider_name}"
+                    )
+                if provider_name == "tushare":
+                    ranges = TushareBarProvider._cache_fetch_ranges(
+                        metadata,
+                        start_date,
+                        _reason_effective_end,
+                    )
+                    if ranges:
+                        missing = "、".join(f"{left}~{right}" for left, right in ranges)
+                        return f"缺少日期段 {missing}"
+                    return "缓存覆盖信息需要刷新"
+                if metadata.last_date is None:
+                    return "缓存没有有效日线"
+                return f"缓存仅到 {metadata.last_date}, 需更新至 {_reason_effective_end}"
+
+            async def _fill_cache_reason(code: str, log_seq: int) -> None:
+                try:
+                    reason = await _cache_miss_reason(code)
+                except Exception:
+                    reason = "缓存检查失败, 按未命中处理"
+                _set_bulk_download_log_reason(state, seq=log_seq, reason=reason)
+                if code in active_reasons:
+                    active_reasons[code] = reason
+                    _sync_active()
 
             def on_progress(code: str, done: int, total: int) -> None:
+                active_reasons.pop(code, None)
                 state["done"] = done
                 state["total"] = total
+                _sync_active()
 
             cache_hit_symbols: set[str] = set()
             cache_miss_symbols: set[str] = set()
@@ -1138,10 +1227,43 @@ async def start_bulk_download(
                 state["phase"] = phase
                 if phase == "cache_hit":
                     cache_hit_symbols.add(code)
+                    active_reasons.pop(code, None)
+                    _append_bulk_download_log(
+                        state,
+                        event="cache_hit",
+                        code=code,
+                        reason="请求日期范围已覆盖",
+                    )
                 elif phase == "fetching":
                     cache_miss_symbols.add(code)
+                    active_reasons[code] = ""
+                    log_seq = _append_bulk_download_log(
+                        state,
+                        event="fetching",
+                        code=code,
+                    )
+                    _t = asyncio.create_task(_fill_cache_reason(code, log_seq))
+                    _bg_tasks.add(_t)
+                    _t.add_done_callback(_bg_tasks.discard)
+                elif phase == "completed":
+                    active_reasons.pop(code, None)
+                    if code not in cache_hit_symbols:
+                        _append_bulk_download_log(
+                            state,
+                            event="completed",
+                            code=code,
+                        )
+                elif phase == "failed":
+                    active_reasons.pop(code, None)
+                    _append_bulk_download_log(
+                        state,
+                        event="failed",
+                        code=code,
+                        reason="行情更新失败, 可重新运行以重试",
+                    )
                 state["cache_hits"] = len(cache_hit_symbols)
                 state["cache_misses"] = len(cache_miss_symbols)
+                _sync_active()
 
             results = await primary.update_cache_batch(
                 sym_objs,
@@ -1157,9 +1279,7 @@ async def start_bulk_download(
             # Phase 2: Tushare 停复牌事件。单独事务、逐标的提交,失败不丢弃
             # 已成功写入的行情,但会在任务结果中明确暴露。
             if isinstance(primary, TushareBarProvider):
-                successful_symbols = [
-                    sym for sym in sym_objs if results.get(sym.code, False)
-                ]
+                successful_symbols = [sym for sym in sym_objs if results.get(sym.code, False)]
                 if session_maker is None:
                     state["lifecycle_sync_failed"] = len(successful_symbols)
                     logger.error("bulk_download.lifecycle_session_maker_missing")
@@ -1214,8 +1334,10 @@ async def start_bulk_download(
                         state["phase"] = f"quality_repair:{sym.code}"
                         try:
                             alt_bars = await fallback.fetch_bars(
-                                sym, BarPeriod.D1,
-                                start_date, end_date,
+                                sym,
+                                BarPeriod.D1,
+                                start_date,
+                                end_date,
                                 adjust="qfq",
                             )
                             if alt_bars:
@@ -1223,9 +1345,7 @@ async def start_bulk_download(
                                 bars = alt_bars
                                 fb_used += 1
                                 fallback_source = fallback_name
-                                corrected_dates = [
-                                    str(bar.timestamp.date()) for bar in alt_bars
-                                ]
+                                corrected_dates = [str(bar.timestamp.date()) for bar in alt_bars]
                                 results[sym.code] = True
                                 qr = checker.check(bars, symbol=sym.code)
                         except Exception:
@@ -1323,10 +1443,23 @@ async def start_bulk_download(
             state["status"] = "done"
             state["current_symbol"] = None
             state["phase"] = None
+        except asyncio.CancelledError:
+            state.update(
+                status="cancelled",
+                current_symbol=None,
+                phase=None,
+                active_symbols=[],
+            )
+            raise
         except Exception as exc:
             state["status"] = "error"
             state["phase"] = None
             state["error"] = str(exc)
+        finally:
+            for background_task in _bg_tasks:
+                background_task.cancel()
+            if _bg_tasks:
+                await asyncio.gather(*_bg_tasks, return_exceptions=True)
 
     request.app.state._bulk_task = asyncio.create_task(_run_download())
     return BulkDownloadStatusOut(**state)
@@ -1550,9 +1683,7 @@ async def update_llm_config(
         "api_key": api_key,
         "model": req.model if req.model is not None else cur["model"],
         "timeout_seconds": (
-            str(req.timeout_seconds)
-            if req.timeout_seconds is not None
-            else cur["timeout_seconds"]
+            str(req.timeout_seconds) if req.timeout_seconds is not None else cur["timeout_seconds"]
         ),
         "max_retries": (
             str(req.max_retries) if req.max_retries is not None else cur["max_retries"]

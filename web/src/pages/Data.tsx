@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { ChevronDown } from "lucide-react";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
 import type { QualityRepairResult, QualityReport } from "../lib/api";
@@ -14,6 +15,28 @@ const BULK_PHASE_LABELS: Record<string, string> = {
   reading_cache: "读取缓存",
   writing_cache: "写入缓存",
 };
+
+const BULK_LOG_LABELS: Record<string, string> = {
+  fetching: "正在拉取",
+  completed: "拉取完成",
+  cache_hit: "命中跳过",
+  failed: "拉取失败",
+};
+
+function formatLogTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "--:--:--";
+  return new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function formatDuration(sec: number): string {
+  if (!isFinite(sec) || sec <= 0) return "—";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
 
 export default function Data() {
   const queryClient = useQueryClient();
@@ -35,7 +58,9 @@ export default function Data() {
   const [dlStart, setDlStart] = useState("2015-01-01");
   const [dlSource, setDlSource] = useState("");
   const [showQualityDetail, setShowQuality] = useState(false);
+  const [showBulkLog, setShowBulkLog] = useState(true);
   const [repairSource, setRepairSource] = useState<"akshare" | "yfinance" | "tushare">("tushare");
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   const PAGE_SIZE = 10;
   const isSearching = searchQuery.length >= 2;
@@ -142,6 +167,7 @@ export default function Data() {
         source: params?.source,
       }),
     onSuccess: (data) => {
+      setShowBulkLog(true);
       queryClient.setQueryData(["bulk-download-status"], data);
       if (tushareBulk) {
         queryClient.invalidateQueries({ queryKey: ["tushare-quota"] });
@@ -164,6 +190,19 @@ export default function Data() {
   const totalInstruments = databaseUniverse?.total ?? 0;
   const isDownloading = startDownload.isPending || bulkStatus?.status === "running";
   const phaseLabel = BULK_PHASE_LABELS[bulkStatus?.phase ?? ""];
+
+  useEffect(() => {
+    if (!isDownloading) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isDownloading]);
+
+  const startedAtMs = bulkStatus?.started_at ? Date.parse(bulkStatus.started_at) : 0;
+  const elapsedSec = startedAtMs > 0 ? Math.max(1, (nowTick - startedAtMs) / 1000) : 0;
+  const bulkDone = bulkStatus?.done ?? 0;
+  const bulkTotal = bulkStatus?.total ?? 0;
+  const bulkSpeed = elapsedSec > 0 ? (bulkDone / elapsedSec) * 60 : 0;
+  const bulkEtaSec = bulkSpeed > 0 ? ((bulkTotal - bulkDone) / bulkSpeed) * 60 : 0;
 
   useEffect(() => {
     setInstPage(1);
@@ -351,7 +390,7 @@ export default function Data() {
               value={dlMarket}
               onChange={(e) => setDlMarket(e.target.value)}
               disabled={isDownloading}
-              className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
+              className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             >
               <option value="a_share">A股</option>
               <option value="hk">港股</option>
@@ -370,7 +409,7 @@ export default function Data() {
               value={dlType}
               onChange={(e) => setDlType(e.target.value)}
               disabled={isDownloading}
-              className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
+              className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             >
               <option value="" disabled={tushareBulk}>全部</option>
               <option value="stock">股票</option>
@@ -391,13 +430,16 @@ export default function Data() {
               value={dlStart}
               onChange={(e) => setDlStart(e.target.value)}
               disabled={isDownloading}
-              className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
+              className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             />
           </div>
           <div>
-            <label htmlFor="data-bulk-source" className="block text-sm font-medium text-foreground mb-1">
+            <HintLabel
+              htmlFor="data-bulk-source"
+              hint={INFO_HINTS.data.bulkSource}
+            >
               数据源
-            </label>
+            </HintLabel>
             <select
               id="data-bulk-source"
               value={dlSource}
@@ -409,7 +451,7 @@ export default function Data() {
                 }
               }}
               disabled={isDownloading}
-              className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
+              className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             >
               <option value="">默认 ({defaultProvider})</option>
               <option value="tushare">tushare（A股股票）</option>
@@ -423,7 +465,7 @@ export default function Data() {
                 startDownload.mutate({ source: dlSource || undefined })
               }
               disabled={isDownloading || startDownload.isPending}
-              className="w-full bg-primary text-primary-foreground rounded py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+              className="h-10 w-full rounded bg-primary text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
               {isDownloading ? "拉取中..." : "开始批量拉取"}
             </button>
@@ -526,11 +568,81 @@ export default function Data() {
                 }}
               />
             </div>
-            {(phaseLabel || bulkStatus.current_symbol) && (
+            {startedAtMs > 0 && bulkDone > 0 && (
+              <div className="mt-1 flex justify-between text-xs text-muted-foreground tabular-nums">
+                <span>速度: {bulkSpeed.toFixed(1)} 标的/分</span>
+                <span>预计剩余: {formatDuration(bulkEtaSec)}</span>
+              </div>
+            )}
+            {(!bulkStatus.logs || bulkStatus.logs.length === 0) && phaseLabel ? (
               <p className="mt-2 text-xs text-muted-foreground font-mono">
-                {phaseLabel ?? "处理中"}
-                {bulkStatus.current_symbol ? ` · ${bulkStatus.current_symbol}` : ""}
+                {phaseLabel}
               </p>
+            ) : null}
+          </div>
+        )}
+
+        {bulkStatus && bulkStatus.status !== "idle" && (
+          <div className="mt-3 overflow-hidden rounded-lg border border-border bg-muted/20">
+            <button
+              type="button"
+              onClick={() => setShowBulkLog((value) => !value)}
+              className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/50"
+              aria-expanded={showBulkLog}
+              aria-controls="bulk-download-log"
+            >
+              <span className="font-medium">
+                拉取日志
+                <span className="ml-2 font-normal text-muted-foreground">
+                  {bulkStatus.logs?.length ?? 0} 条（最多保留最近 1000 条）
+                </span>
+              </span>
+              <ChevronDown
+                className={cn(
+                  "h-4 w-4 shrink-0 text-muted-foreground transition-transform",
+                  showBulkLog && "rotate-180",
+                )}
+                aria-hidden="true"
+              />
+            </button>
+            {showBulkLog && (
+              <div
+                id="bulk-download-log"
+                role="log"
+                aria-live="polite"
+                className="max-h-64 overflow-y-auto border-t border-border px-3 py-2 font-mono text-xs"
+              >
+                {bulkStatus.logs && bulkStatus.logs.length > 0 ? (
+                  <div className="space-y-1">
+                    {[...bulkStatus.logs].reverse().map((entry) => (
+                      <div key={entry.seq} className="flex gap-2 leading-5">
+                        <span className="shrink-0 text-muted-foreground">
+                          {formatLogTime(entry.timestamp)}
+                        </span>
+                        <span
+                          className={cn(
+                            "w-16 shrink-0",
+                            entry.event === "cache_hit" && "text-success",
+                            entry.event === "fetching" && "text-primary",
+                            entry.event === "completed" && "text-foreground",
+                            entry.event === "failed" && "text-destructive",
+                          )}
+                        >
+                          {BULK_LOG_LABELS[entry.event] ?? entry.event}
+                        </span>
+                        <span className="shrink-0 text-foreground">{entry.code}</span>
+                        {entry.reason && (
+                          <span className="min-w-0 break-words text-muted-foreground">
+                            · {entry.reason}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground">等待首个标的检查结果…</p>
+                )}
+              </div>
             )}
           </div>
         )}

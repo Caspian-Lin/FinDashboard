@@ -626,8 +626,21 @@ export interface QualityRepairResult {
   reports: QualityReport[];
 }
 
+export interface ActiveSymbol {
+  code: string;
+  reason: string;
+}
+
+export interface BulkDownloadLog {
+  seq: number;
+  timestamp: string;
+  event: "fetching" | "completed" | "cache_hit" | "failed";
+  code: string;
+  reason: string | null;
+}
+
 export interface BulkDownloadStatus {
-  status: string;  // idle / running / done / error
+  status: string;  // idle / running / done / error / cancelled
   done: number;
   total: number;
   success: number;
@@ -642,6 +655,9 @@ export interface BulkDownloadStatus {
   lifecycle_sync_failed?: number;
   cache_hits?: number;
   cache_misses?: number;
+  started_at?: string | null;
+  active_symbols?: ActiveSymbol[];
+  logs?: BulkDownloadLog[];
   quality_reports?: QualityReport[];
 }
 

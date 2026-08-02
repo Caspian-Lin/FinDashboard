@@ -325,6 +325,8 @@ class AkShareProvider:
                     logger.exception("akshare.cache_update_failed", symbol=sym.code)
                     ok = False
                 results[sym.code] = ok
+                if on_status is not None:
+                    on_status(sym.code, "completed" if ok else "failed")
                 done_count += 1
                 if on_progress is not None:
                     on_progress(sym.code, done_count, total)

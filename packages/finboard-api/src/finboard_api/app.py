@@ -8,8 +8,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import structlog
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -49,6 +50,29 @@ from finboard_shared.types import KillSwitchLevel
 from finboard_simulation import SimulationRepository, SimulationService
 
 logger = structlog.get_logger(__name__)
+
+
+async def _cancel_bulk_download_task(app: FastAPI) -> None:
+    """应用关闭时停止批量行情任务,下次启动由缓存重新规划缺口。"""
+    task = getattr(app.state, "_bulk_task", None)
+    if not isinstance(task, asyncio.Task):
+        return
+
+    if not task.done():
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+        logger.info("api.bulk_download_cancelled")
+
+    app.state._bulk_task = None
+    state = getattr(app.state, "_bulk_download", None)
+    if isinstance(state, dict) and state.get("status") == "running":
+        state.update(
+            status="cancelled",
+            current_symbol=None,
+            phase=None,
+            active_symbols=[],
+        )
 
 
 @asynccontextmanager
@@ -103,6 +127,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
+            await _cancel_bulk_download_task(app)
             teardown_event_bridge(kernel.event_bus, handlers)
             await kernel.stop()
             await session.commit()

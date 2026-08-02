@@ -10,19 +10,19 @@ import asyncio
 import importlib
 import math
 import os
-from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
 import structlog
 
 from finboard_data.akshare_provider import AkShareProvider
-from finboard_data.cache import ParquetCache, expected_last_bar_date
-from finboard_data.quality import BarQualityChecker
+from finboard_data.cache import CacheMetadata, ParquetCache, expected_last_bar_date
 from finboard_data.tushare_budget import TushareBudget, shared_tushare_budget
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod
@@ -34,6 +34,10 @@ _DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,vol,amount"
 _ADJ_FIELDS = "ts_code,trade_date,adj_factor"
 _SUSPEND_FIELDS = "ts_code,trade_date,suspend_timing,suspend_type"
 _MAX_CHUNK_DAYS = 15 * 366
+_REQUEST_EXECUTOR = ThreadPoolExecutor(
+    max_workers=32,
+    thread_name_prefix="finboard-tushare",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +75,7 @@ class TushareBarProvider(AkShareProvider):
         budget: TushareBudget | None = None,
         cache_dir: str | Path | None = None,
         use_cache: bool = True,
-        max_concurrency: int = 4,
+        max_concurrency: int = 16,
         max_retries: int = 2,
         retry_backoff: float = 2.0,
         requests_per_minute: int = 200,
@@ -107,7 +111,7 @@ class TushareBarProvider(AkShareProvider):
         *,
         adjust: str = "qfq",
     ) -> list[Bar]:
-        """读取同源健康缓存,只请求覆盖之外或异常日期。"""
+        """读取同源缓存,仅请求尚未成功查询过的覆盖区间。"""
         if self._cache is None:
             return await super().fetch_bars(
                 symbol,
@@ -117,27 +121,15 @@ class TushareBarProvider(AkShareProvider):
                 adjust=adjust,
             )
 
-        cached = await self._cache.read(symbol, period, adjust)
-        ranges = self._cache_fetch_ranges(cached, start, end)
+        effective_end = expected_last_bar_date(end)
+        metadata = await self._cache.metadata_for(symbol, period, adjust)
+        ranges = self._cache_fetch_ranges(metadata, start, effective_end)
+        cached = await self._cache.read(symbol, period, adjust) if metadata is not None else []
         if not ranges:
             logger.debug("tushare.cache_hit", symbol=symbol.code, count=len(cached))
             return ParquetCache.filter_by_date(cached, start, end)
 
-        fresh = await self._fetch_ranges(symbol, period, adjust, ranges)
-        if fresh:
-            if cached and {bar.source for bar in cached} == {"tushare"}:
-                all_bars = await self._cache.merge(
-                    symbol,
-                    period,
-                    adjust,
-                    fresh,
-                    existing_bars=cached,
-                )
-            else:
-                await self._cache.write(symbol, period, adjust, fresh)
-                all_bars = fresh
-        else:
-            all_bars = cached
+        all_bars = await self._fetch_and_persist_ranges(symbol, period, adjust, ranges, cached)
         return ParquetCache.filter_by_date(all_bars, start, end)
 
     async def update_cache(
@@ -150,7 +142,12 @@ class TushareBarProvider(AkShareProvider):
         adjust: str = "qfq",
         on_status: Callable[[str], None] | None = None,
     ) -> bool:
-        """只更新 Tushare 缓存缺口,来源切换时替换为单一来源。"""
+        """按已查询覆盖区间判定缺口,逐段拉取并即时增量落盘。
+
+        断点安全:每个 range 拉完立即 merge 进 parquet,中断后重跑时已落盘
+        的查询区间会被 :meth:`_cache_fetch_ranges` 判定为已覆盖而跳过。
+        覆盖区间与 Bar 日期分开记录,因此停牌日和上市前日期不会永久 miss。
+        """
         if self._cache is None:
             return await super().update_cache(
                 symbol,
@@ -163,8 +160,9 @@ class TushareBarProvider(AkShareProvider):
 
         if on_status is not None:
             on_status("checking_cache")
-        cached = await self._cache.read(symbol, period, adjust)
-        ranges = self._cache_fetch_ranges(cached, start, end)
+        effective_end = expected_last_bar_date(end)
+        metadata = await self._cache.metadata_for(symbol, period, adjust)
+        ranges = self._cache_fetch_ranges(metadata, start, effective_end)
         if not ranges:
             if on_status is not None:
                 on_status("cache_hit")
@@ -172,98 +170,83 @@ class TushareBarProvider(AkShareProvider):
 
         if on_status is not None:
             on_status("fetching")
-        fresh = await self._fetch_ranges(symbol, period, adjust, ranges)
-        if not fresh:
-            # 停牌区间可能合法地返回空数据;已有缓存仍可继续使用。
-            return bool(cached)
-
+        cached = await self._cache.read(symbol, period, adjust) if metadata is not None else []
+        current = await self._fetch_and_persist_ranges(symbol, period, adjust, ranges, cached)
         if on_status is not None:
-            on_status("writing_cache")
-        if cached and {bar.source for bar in cached} == {"tushare"}:
-            await self._cache.merge(
-                symbol,
-                period,
-                adjust,
-                fresh,
-                existing_bars=cached,
-            )
-        else:
-            # AkShare/yfinance 或未记录来源的历史缓存不能与 Tushare 混写。
-            await self._cache.write(symbol, period, adjust, fresh)
-        return True
+            on_status("done")
+        return bool(current)
 
-    async def _fetch_ranges(
+    async def _fetch_and_persist_ranges(
         self,
         symbol: Symbol,
         period: BarPeriod,
         adjust: str,
         ranges: tuple[tuple[date, date], ...],
+        cached: list[Bar],
     ) -> list[Bar]:
-        fresh: list[Bar] = []
+        """逐段拉取,每段拉完立即增量 merge 进 parquet(断点安全)。
+
+        来源切换时丢弃旧源历史、从空开始合并,避免 akshare/yfinance 与
+        tushare 混写。返回合并后的完整 Bar 列表(升序)。
+        """
+        sources = {bar.source for bar in cached}
+        current: list[Bar] = [] if sources and sources != {"tushare"} else list(cached)
         for range_start, range_end in ranges:
-            fresh.extend(
-                await self._fetch_from_akshare(
+            bars = await self._fetch_from_akshare(symbol, period, range_start, range_end, adjust)
+            if bars and self._cache is not None:
+                current = await self._cache.merge(
                     symbol,
                     period,
+                    adjust,
+                    bars,
+                    existing_bars=current,
+                    covered_ranges=((range_start, range_end),),
+                )
+            elif current and self._cache is not None:
+                await self._cache.mark_covered(
+                    symbol,
+                    period,
+                    adjust,
                     range_start,
                     range_end,
-                    adjust,
+                    source="tushare",
                 )
-            )
-        return fresh
+        return current
 
     @staticmethod
     def _cache_fetch_ranges(
-        cached: list[Bar],
+        metadata: CacheMetadata | None,
         start: date,
-        end: date,
+        effective_end: date,
     ) -> tuple[tuple[date, date], ...]:
-        """规划不重复请求的日期段,并把请求区间内坏日期视作缺口。"""
-        effective_end = expected_last_bar_date(end)
+        """返回尚未查询过的日期段;不把合法无 Bar 日期误判为缺口。"""
         if start > effective_end:
             return ()
-        if not cached:
+        if metadata is None or metadata.source != "tushare":
             return ((start, effective_end),)
-        if {bar.source for bar in cached} != {"tushare"}:
-            return ((start, effective_end),)
-
-        window = ParquetCache.filter_by_date(cached, start, effective_end)
-        checker = BarQualityChecker()
-        quality = checker.check(window)
-        counts = Counter(bar.timestamp.date() for bar in window)
-        bad_dates = set(quality.anomaly_dates)
-        bad_dates.update(
-            bar_date for bar_date, count in counts.items() if count > 1
-        )
-
-        all_dates = [bar.timestamp.date() for bar in cached]
-        first_date = min(all_dates)
-        last_date = max(all_dates)
-        ranges: list[tuple[date, date]] = []
-        if start < first_date:
-            ranges.append((start, min(effective_end, first_date - timedelta(days=1))))
-        if effective_end > last_date:
-            ranges.append((max(start, last_date + timedelta(days=1)), effective_end))
-        ranges.extend((bad_date, bad_date) for bad_date in sorted(bad_dates))
-        return TushareBarProvider._coalesce_ranges(
-            [item for item in ranges if item[0] <= item[1]]
-        )
-
-    @staticmethod
-    def _coalesce_ranges(
-        ranges: list[tuple[date, date]],
-    ) -> tuple[tuple[date, date], ...]:
-        if not ranges:
+        if metadata.covers(start, effective_end):
             return ()
-        ordered = sorted(ranges)
-        merged: list[tuple[date, date]] = [ordered[0]]
-        for range_start, range_end in ordered[1:]:
-            previous_start, previous_end = merged[-1]
-            if range_start <= previous_end + timedelta(days=1):
-                merged[-1] = (previous_start, max(previous_end, range_end))
-            else:
-                merged.append((range_start, range_end))
-        return tuple(merged)
+
+        covered = list(metadata.covered_ranges)
+        if metadata.first_date is not None and metadata.last_date is not None:
+            covered.append((metadata.first_date, metadata.last_date))
+        covered.sort()
+
+        missing: list[tuple[date, date]] = []
+        cursor = start
+        for range_start, range_end in covered:
+            if range_end < cursor:
+                continue
+            if range_start > effective_end:
+                break
+            if range_start > cursor:
+                missing.append((cursor, min(effective_end, range_start - timedelta(days=1))))
+            cursor = max(cursor, range_end + timedelta(days=1))
+            if cursor > effective_end:
+                break
+        if cursor <= effective_end:
+            missing.append((cursor, effective_end))
+        return tuple(item for item in missing if item[0] <= item[1])
 
     async def _fetch_from_akshare(
         self,
@@ -310,9 +293,7 @@ class TushareBarProvider(AkShareProvider):
             }
             daily_rows.extend(await self._call("daily", fields=_DAILY_FIELDS, **params))
             if adjust != "none":
-                factor_rows.extend(
-                    await self._call("adj_factor", fields=_ADJ_FIELDS, **params)
-                )
+                factor_rows.extend(await self._call("adj_factor", fields=_ADJ_FIELDS, **params))
             cursor = chunk_end + timedelta(days=1)
         return _build_bars(symbol, daily_rows, factor_rows, adjust)
 
@@ -345,24 +326,16 @@ class TushareBarProvider(AkShareProvider):
             effective_date = _trade_date(row, "suspend_d")
             suspend_type = str(row.get("suspend_type", "")).strip().upper()
             suspend_timing = _optional_text(row.get("suspend_timing"))
-            event_type: Literal[
-                "suspension_day", "intraday_suspension", "resumption"
-            ]
+            event_type: Literal["suspension_day", "intraday_suspension", "resumption"]
             if suspend_type == "S":
-                event_type = (
-                    "intraday_suspension" if suspend_timing else "suspension_day"
-                )
+                event_type = "intraday_suspension" if suspend_timing else "suspension_day"
             elif suspend_type == "R":
                 event_type = "resumption"
             else:
-                raise ValueError(
-                    f"Tushare suspend_d {effective_date} suspend_type 无效"
-                )
+                raise ValueError(f"Tushare suspend_d {effective_date} suspend_type 无效")
             key = (effective_date, event_type)
             if key in seen:
-                raise ValueError(
-                    f"Tushare suspend_d 返回重复事件: {effective_date} {event_type}"
-                )
+                raise ValueError(f"Tushare suspend_d 返回重复事件: {effective_date} {event_type}")
             seen.add(key)
             events.append(
                 TushareLifecycleEvent(
@@ -389,7 +362,11 @@ class TushareBarProvider(AkShareProvider):
         for attempt in range(self._max_retries + 1):
             await self._budget.acquire()
             try:
-                payload = await asyncio.to_thread(method, **kwargs)
+                loop = asyncio.get_running_loop()
+                payload = await loop.run_in_executor(
+                    _REQUEST_EXECUTOR,
+                    partial(method, **kwargs),
+                )
                 return _records(payload, endpoint)
             except Exception as exc:
                 last_error_type = type(exc).__name__
@@ -404,13 +381,13 @@ class TushareBarProvider(AkShareProvider):
                         error_type=last_error_type,
                     )
                     await asyncio.sleep(wait)
-        raise RuntimeError(
-            f"Tushare {endpoint} 调用失败({last_error_type});凭据与上游错误已脱敏"
-        )
+        raise RuntimeError(f"Tushare {endpoint} 调用失败({last_error_type});凭据与上游错误已脱敏")
 
     @staticmethod
     def _create_client(explicit_token: str | None) -> TushareBarClient:
-        token = explicit_token if explicit_token is not None else os.getenv("FINBOARD_TUSHARE_TOKEN")
+        token = (
+            explicit_token if explicit_token is not None else os.getenv("FINBOARD_TUSHARE_TOKEN")
+        )
         if token is None or not token.strip():
             raise ValueError("未配置 Tushare token;请设置 FINBOARD_TUSHARE_TOKEN")
         try:
