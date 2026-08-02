@@ -35,9 +35,17 @@ jobs:
       FINBOARD_ENV: ci
       FINBOARD_DB_URL: postgresql+psycopg://findashboard:findashboard@127.0.0.1:5432/findashboard
       FINBOARD_BROKER: mock
+      # 强制 uv 使用 actions/setup-python 提供的解释器,避免 uv python install
+      # 去外部 python-build-standalone 源下载(该源偶发 404/超时导致 CI 卡在 setup)
+      UV_PYTHON_PREFERENCE: only-system
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -45,9 +53,6 @@ jobs:
           version: "latest"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --all-packages
