@@ -60,8 +60,9 @@ class TestDataRoutes:
         inserted = await _persist_tushare_lifecycle_events(mock_session, [event])
 
         assert inserted == 1
+        assert mock_session.execute.await_args is not None
         statement = mock_session.execute.await_args.args[0]
-        compiled = str(statement.compile(dialect=postgresql.dialect()))
+        compiled = str(statement.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
         assert "ON CONFLICT ON CONSTRAINT uq_instrument_lifecycle_event DO NOTHING" in compiled
         mock_session.execute.assert_awaited_once()
 
@@ -297,6 +298,7 @@ class TestDataRoutes:
         assert payload["corrected_bars"] == 1
         assert payload["reports"][0]["corrected_dates"] == ["2019-01-07"]
         factory.assert_called_once_with("akshare", use_cache=False, settings=None)
+        assert cache_write.await_args is not None
         written = cache_write.await_args.args[3]
         assert written[0].open == Decimal("2.308")
         assert written[0].source == "akshare"
