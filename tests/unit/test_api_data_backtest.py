@@ -180,11 +180,19 @@ class TestDataRoutes:
         market_result.all.return_value = [("a_share", 4)]
         type_result = MagicMock()
         type_result.all.return_value = [("stock", 3), ("etf", 1)]
+        board_result = MagicMock()
+        board_result.all.return_value = [("sse_main", 2), ("chinext", 1), ("unknown", 1)]
         active_etf_result = MagicMock()
         active_etf_result.scalar_one.return_value = 1
         mock_session = MagicMock()
         mock_session.execute = AsyncMock(
-            side_effect=[status_result, market_result, type_result, active_etf_result]
+            side_effect=[
+                status_result,
+                market_result,
+                type_result,
+                board_result,
+                active_etf_result,
+            ]
         )
 
         result = await summarize_instruments(session=mock_session)
@@ -195,6 +203,7 @@ class TestDataRoutes:
         assert result.by_status == {"active": 3, "delisted": 1}
         assert result.by_market == {"a_share": 4}
         assert result.by_instrument_type == {"stock": 3, "etf": 1}
+        assert result.by_listing_board == {"sse_main": 2, "chinext": 1, "unknown": 1}
 
     def test_list_cache_status_empty(self, client: TestClient) -> None:
         """空缓存目录返回空列表。"""
@@ -264,6 +273,19 @@ class TestDataRoutes:
         ]
         assert payload["first_date"] == "2020-01-02"
         assert payload["last_date"] == "2024-12-31"
+
+        with (
+            patch("finboard_api.routes.data._CACHE_DIR", str(tmp_path)),
+            patch(
+                "finboard_data.cache.ParquetCache.metadata",
+                new=AsyncMock(side_effect=metadata_for_path),
+            ),
+        ):
+            filtered = client.get(
+                "/api/data/status-selection?period=1d&adjust=qfq&listing_board=sse_main"
+            )
+        assert filtered.status_code == 200
+        assert [item["symbol"] for item in filtered.json()["items"]] == ["600519.SH"]
 
     def test_sync_universe_reports_missing_akshare_as_service_unavailable(
         self,

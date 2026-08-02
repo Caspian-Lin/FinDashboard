@@ -236,6 +236,8 @@ export const api = {
   getInstruments: (params?: {
     market?: string;
     instrument_type?: string;
+    exchange?: string;
+    listing_boards?: string[];
     q?: string;
     limit?: number;
     offset?: number;
@@ -243,6 +245,8 @@ export const api = {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.exchange) q.set("exchange", params.exchange);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     if (params?.q) q.set("q", params.q);
     q.set("limit", String(params?.limit ?? 200));
     q.set("offset", String(params?.offset ?? 0));
@@ -250,10 +254,12 @@ export const api = {
   },
   searchInstruments: (query: string) =>
     fetchJSON<InstrumentItem[]>(`/data/instruments/search?q=${encodeURIComponent(query)}`),
-  getInstrumentCodes: (params?: { market?: string; instrument_type?: string; q?: string }) => {
+  getInstrumentCodes: (params?: { market?: string; instrument_type?: string; exchange?: string; listing_boards?: string[]; q?: string }) => {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.exchange) q.set("exchange", params.exchange);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     if (params?.q) q.set("q", params.q);
     return fetchJSON<string[]>(`/data/instruments/codes?${q}`);
   },
@@ -264,6 +270,8 @@ export const api = {
   startBulkDownload: (body: {
     market?: string;
     instrument_type?: string;
+    exchange?: string;
+    listing_boards?: string[];
     start?: string;
     source?: string;
   }) =>
@@ -587,6 +595,7 @@ export interface InstrumentItem {
   market: string;
   instrument_type: string;
   exchange: string | null;
+  listing_board: string;
   status: string;
 }
 

@@ -179,6 +179,7 @@ class DataFetchRequest(BaseSchema):
 
 class DataStatusOut(BaseSchema):
     symbol: str
+    listing_board: str = "unknown"
     period: str
     adjust: str
     bar_count: int
@@ -295,6 +296,7 @@ class InstrumentOut(BaseSchema):
     market: str
     instrument_type: str
     exchange: str | None = None
+    listing_board: str = "unknown"
     list_date: date | None = None
     delist_date: date | None = None
     status: str = "active"
@@ -318,6 +320,7 @@ class InstrumentSummaryOut(BaseSchema):
     by_status: dict[str, int] = Field(default_factory=dict)
     by_market: dict[str, int] = Field(default_factory=dict)
     by_instrument_type: dict[str, int] = Field(default_factory=dict)
+    by_listing_board: dict[str, int] = Field(default_factory=dict)
 
 
 class SyncResultOut(BaseSchema):
@@ -333,6 +336,8 @@ class SyncResultOut(BaseSchema):
 class BulkDownloadRequest(BaseSchema):
     market: str = "a_share"
     instrument_type: str | None = None
+    exchange: str | None = None
+    listing_boards: list[str] = Field(default_factory=list)
     start: str = "2015-01-01"
     source: str | None = None
 
@@ -1138,6 +1143,7 @@ class DatasetReleaseInstrumentOut(BaseSchema):
     issues: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
     exchange: str | None = None
+    listing_board: str = "unknown"
     currency: str = "CNY"
     etf_category: str | None = None
     list_date: date | None = None

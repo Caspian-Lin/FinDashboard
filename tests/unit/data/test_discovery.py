@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from finboard_data.discovery import normalize_a_share_code
-from finboard_shared.types import InstrumentType, Market
+from finboard_data.discovery import infer_a_share_listing_board, normalize_a_share_code
+from finboard_shared.types import InstrumentType, ListingBoard, Market
 
 
 class TestNormalizeCode:
@@ -19,6 +19,7 @@ class TestNormalizeCode:
             ("300001", "300001.SZ"),  # 创业板
             ("600000", "600000.SH"),  # 上交所主板
             ("688001", "688001.SH"),  # 科创板
+            ("920000", "920000.BJ"),  # 北交所新代码
             ("sh510300", "510300.SH"),
             ("sz159998", "159998.SZ"),
             ("510300.SH", "510300.SH"),  # 已归一化
@@ -32,6 +33,22 @@ class TestNormalizeCode:
         assert normalize_a_share_code("ABCDEF") is None
         assert normalize_a_share_code("") is None
         assert normalize_a_share_code("12345") is None
+
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            ("600000.SH", ListingBoard.SSE_MAIN),
+            ("000001.SZ", ListingBoard.SZSE_MAIN),
+            ("300001.SZ", ListingBoard.CHINEXT),
+            ("688001.SH", ListingBoard.STAR),
+            ("689001.SH", ListingBoard.CDR),
+            ("001100.SZ", ListingBoard.CDR),
+            ("309900.SZ", ListingBoard.CDR),
+            ("920000.BJ", ListingBoard.BSE),
+        ],
+    )
+    def test_infer_listing_board(self, code: str, expected: ListingBoard) -> None:
+        assert infer_a_share_listing_board(code) is expected
 
 
 class TestDiscoveryIntegration:
@@ -49,6 +66,7 @@ class TestDiscoveryIntegration:
         )
         assert info.code == "510300.SH"
         assert info.instrument_type == InstrumentType.ETF
+        assert info.listing_board is ListingBoard.UNKNOWN
 
     def test_universe_discovery_class_exists(self) -> None:
         from finboard_data.discovery import UniverseDiscovery

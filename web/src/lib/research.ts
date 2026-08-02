@@ -643,6 +643,7 @@ export interface LifecycleEvent {
 
 export interface CachedDataStatus {
   symbol: string;
+  listing_board: string;
   period: string;
   adjust: string;
   bar_count: number;
@@ -696,11 +697,13 @@ export const datasetApi = {
     adjust?: string;
     limit?: number;
     offset?: number;
+    listing_boards?: string[];
   }) => {
     const q = new URLSearchParams();
     if (params?.q) q.set("q", params.q);
     if (params?.period) q.set("period", params.period);
     if (params?.adjust) q.set("adjust", params.adjust);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     q.set("limit", String(params?.limit ?? 500));
     q.set("offset", String(params?.offset ?? 0));
     return fetchJSON<CachedDataStatusPage>(`/data/status-page?${q.toString()}`);
@@ -709,11 +712,13 @@ export const datasetApi = {
     q?: string;
     period?: string;
     adjust?: string;
+    listing_boards?: string[];
   }) => {
     const q = new URLSearchParams();
     if (params?.q) q.set("q", params.q);
     if (params?.period) q.set("period", params.period);
     if (params?.adjust) q.set("adjust", params.adjust);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     return fetchJSON<CachedDataStatusSelection>(
       `/data/status-selection?${q.toString()}`,
     );

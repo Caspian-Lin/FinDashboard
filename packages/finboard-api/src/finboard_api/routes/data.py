@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -300,9 +300,11 @@ async def list_cache_status_page(
     q: str | None = None,
     period: str | None = None,
     adjust: str | None = None,
+    listing_board: list[str] | None = Query(default=None),
 ) -> DataStatusListOut:
     """分页列出缓存状态,避免一次扫描并返回全市场缓存。"""
     from finboard_data.cache import ParquetCache
+    from finboard_data.discovery import infer_a_share_listing_board
 
     safe_limit = min(max(limit, 1), 500)
     safe_offset = max(offset, 0)
@@ -316,10 +318,12 @@ async def list_cache_status_page(
         if len(parts) != 3:
             return False
         code, period_str, adjustment = parts
+        board = infer_a_share_listing_board(code).value
         return (
             (query is None or query in code.upper())
             and (period is None or period_str == period)
             and (adjust is None or adjustment == adjust)
+            and (not listing_board or board in listing_board)
         )
 
     matching_files = [path for path in parquet_files if matches(path)]
@@ -334,6 +338,7 @@ async def list_cache_status_page(
         items.append(
             DataStatusOut(
                 symbol=code,
+                listing_board=infer_a_share_listing_board(code).value,
                 period=period_str,
                 adjust=adjust,
                 bar_count=metadata.bar_count,
@@ -356,12 +361,14 @@ async def select_cache_status(
     q: str | None = None,
     period: str | None = None,
     adjust: str | None = None,
+    listing_board: list[str] | None = Query(default=None),
 ) -> DataStatusSelectionOut:
     """返回匹配筛选条件的全部缓存项,供发布页一键全选。
 
     该端点冻结一次筛选结果及其整体日期范围,避免前端逐页请求后漏选。
     """
     from finboard_data.cache import ParquetCache
+    from finboard_data.discovery import infer_a_share_listing_board
 
     cache = ParquetCache(_CACHE_DIR, max_io_concurrency=8)
     cache_path = Path(_CACHE_DIR)
@@ -377,6 +384,10 @@ async def select_cache_status(
             (query is not None and query not in code.upper())
             or (period is not None and period_str != period)
             or (adjust is not None and adjustment != adjust)
+            or (
+                listing_board
+                and infer_a_share_listing_board(code).value not in listing_board
+            )
         ):
             continue
         selected_paths.append((path, code, period_str, adjustment))
@@ -401,6 +412,7 @@ async def select_cache_status(
             items.append(
                 DataStatusOut(
                     symbol=code,
+                    listing_board=infer_a_share_listing_board(code).value,
                     period=period_str,
                     adjust=adjustment,
                     bar_count=metadata.bar_count,
@@ -866,6 +878,7 @@ async def summarize_instruments(
     by_status = await grouped_counts(InstrumentModel.status)
     by_market = await grouped_counts(InstrumentModel.market)
     by_instrument_type = await grouped_counts(InstrumentModel.instrument_type)
+    by_listing_board = await grouped_counts(InstrumentModel.listing_board)
     active_etf_result = await session.execute(
         select(func.count(InstrumentModel.id)).where(
             InstrumentModel.status == "active",
@@ -879,6 +892,7 @@ async def summarize_instruments(
         by_status=by_status,
         by_market=by_market,
         by_instrument_type=by_instrument_type,
+        by_listing_board=by_listing_board,
     )
 
 
@@ -886,6 +900,8 @@ async def summarize_instruments(
 async def list_instruments(
     market: str | None = None,
     instrument_type: str | None = None,
+    exchange: str | None = None,
+    listing_board: list[str] | None = Query(default=None),
     status: str | None = "active",
     q: str | None = None,
     limit: int = 200,
@@ -900,6 +916,8 @@ async def list_instruments(
     rows, total = await repo.list_page(
         market=market,
         instrument_type=instrument_type,
+        exchange=exchange,
+        listing_boards=listing_board,
         status=status_filter,
         q=q,
         limit=limit,
@@ -914,6 +932,7 @@ async def list_instruments(
                 market=r.market,
                 instrument_type=r.instrument_type,
                 exchange=r.exchange,
+                listing_board=r.listing_board,
                 list_date=r.list_date,
                 delist_date=r.delist_date,
                 status=r.status,
@@ -932,6 +951,8 @@ async def list_instruments(
 async def list_instrument_codes(
     market: str | None = None,
     instrument_type: str | None = None,
+    exchange: str | None = None,
+    listing_board: list[str] | None = Query(default=None),
     q: str | None = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> list[str]:
@@ -939,7 +960,13 @@ async def list_instrument_codes(
     from finboard_persistence import InstrumentRepository
 
     repo = InstrumentRepository(session)
-    codes = await repo.list_codes(market=market, instrument_type=instrument_type, q=q)
+    codes = await repo.list_codes(
+        market=market,
+        instrument_type=instrument_type,
+        exchange=exchange,
+        listing_boards=listing_board,
+        q=q,
+    )
     await session.commit()
     return codes
 
@@ -963,6 +990,7 @@ async def search_instruments(
             market=r.market,
             instrument_type=r.instrument_type,
             exchange=r.exchange,
+            listing_board=r.listing_board,
             status=r.status,
         )
         for r in rows
@@ -1021,6 +1049,7 @@ async def sync_universe(
             "market": ins.market.value,
             "instrument_type": ins.instrument_type.value,
             "exchange": ins.exchange,
+            "listing_board": ins.listing_board.value,
         }
         for ins in instruments
     ]
@@ -1054,8 +1083,6 @@ async def start_bulk_download(
     state = _get_bulk_state(request)
     if state["status"] == "running":
         raise HTTPException(status_code=409, detail="批量拉取正在运行中")
-    session_maker = getattr(request.app.state, "session_maker", None)
-
     from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
     from finboard_data.cache import make_symbol
     from finboard_persistence import InstrumentRepository
@@ -1065,6 +1092,8 @@ async def start_bulk_download(
     instruments, _total = await repo.list_active(
         market=req.market,
         instrument_type=req.instrument_type,
+        exchange=req.exchange,
+        listing_boards=req.listing_boards or None,
         limit=999999,
     )
     await session.commit()
@@ -1078,26 +1107,9 @@ async def start_bulk_download(
         _validate_bulk_provider_scope(provider_name, instruments)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    fallback_name = _fallback_provider_name(provider_name, settings=settings)
     if provider_name == "akshare":
         primary: AkShareProvider | TushareBarProvider | YFinanceProvider = AkShareProvider(
             max_concurrency=2, request_interval=0.5
-        )
-        fallback: AkShareProvider | TushareBarProvider | YFinanceProvider | None = (
-            YFinanceProvider(use_cache=False, max_concurrency=3, request_interval=0.3)
-            if fallback_name == "yfinance"
-            else TushareBarProvider(
-                token=settings.tushare_token if settings is not None else None,
-                use_cache=False,
-                max_concurrency=16,
-                requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
-                daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
-                usage_file=(
-                    settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"
-                ),
-            )
-            if fallback_name == "tushare"
-            else None
         )
     elif provider_name == "tushare":
         primary = TushareBarProvider(
@@ -1109,36 +1121,8 @@ async def start_bulk_download(
                 settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"
             ),
         )
-        # A 股发布是 Tushare 单源契约。失败标的保留为失败并允许重跑,
-        # 不用备用源静默覆盖缓存, 否则无法证明发布数据的单一来源。
-        fallback = None
     else:
         primary = YFinanceProvider(max_concurrency=3, request_interval=0.3)
-        fallback = (
-            # 批量质量修补是 best-effort:主源已经成功时,备用源失败不应
-            # 为每个异常标的重复指数退避,从而把整批任务拖成不可控的长任务。
-            # 单标的拉取仍使用默认重试策略;这里只关闭批量备用源重试。
-            AkShareProvider(
-                use_cache=False,
-                max_concurrency=2,
-                request_interval=0.5,
-                max_retries=0,
-            )
-            if fallback_name == "akshare"
-            else TushareBarProvider(
-                token=settings.tushare_token if settings is not None else None,
-                use_cache=False,
-                max_concurrency=4,
-                max_retries=0,
-                requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
-                daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
-                usage_file=(
-                    settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"
-                ),
-            )
-            if fallback_name == "tushare"
-            else None
-        )
 
     sym_objs = [make_symbol(ins.code) for ins in instruments]
     start_date = parse_d.fromisoformat(req.start)
@@ -1276,173 +1260,15 @@ async def start_bulk_download(
             state["success"] = sum(results.values())
             state["failed"] = len(sym_objs) - state["success"]
 
-            # Phase 2: Tushare 停复牌事件。单独事务、逐标的提交,失败不丢弃
-            # 已成功写入的行情,但会在任务结果中明确暴露。
-            if isinstance(primary, TushareBarProvider):
-                successful_symbols = [sym for sym in sym_objs if results.get(sym.code, False)]
-                if session_maker is None:
-                    state["lifecycle_sync_failed"] = len(successful_symbols)
-                    logger.error("bulk_download.lifecycle_session_maker_missing")
-                else:
-                    async with session_maker() as lifecycle_session:
-                        for sym in successful_symbols:
-                            state["current_symbol"] = sym.code
-                            state["phase"] = "lifecycle_sync"
-                            try:
-                                events = await primary.fetch_suspension_events(
-                                    sym,
-                                    start_date,
-                                    end_date,
-                                )
-                                added = await _persist_tushare_lifecycle_events(
-                                    lifecycle_session,
-                                    events,
-                                )
-                                await lifecycle_session.commit()
-                                state["lifecycle_events"] += added
-                            except Exception as exc:
-                                await lifecycle_session.rollback()
-                                state["lifecycle_sync_failed"] += 1
-                                logger.warning(
-                                    "bulk_download.lifecycle_sync_failed",
-                                    symbol=sym.code,
-                                    error_type=type(exc).__name__,
-                                )
-
-            # Phase 3: quality check + fallback repair
-            from finboard_data.cache import ParquetCache
-            from finboard_data.quality import BarQualityChecker
-            from finboard_shared.models import Bar
-
-            cache = ParquetCache(_CACHE_DIR)
-            checker = BarQualityChecker()
-            quality_reports: list[QualityReportOut] = []
-            q_passed = 0
-            q_failed = 0
-            fb_used = 0
-
-            for sym in sym_objs:
-                try:
-                    bars = await cache.read(sym, BarPeriod.D1, "qfq")
-                    qr = checker.check(bars, symbol=sym.code)
-
-                    corrected_dates: list[str] = []
-                    fallback_source: str | None = None
-
-                    primary_failed = not results.get(sym.code, False)
-                    if fallback and (primary_failed or not bars):
-                        state["phase"] = f"quality_repair:{sym.code}"
-                        try:
-                            alt_bars = await fallback.fetch_bars(
-                                sym,
-                                BarPeriod.D1,
-                                start_date,
-                                end_date,
-                                adjust="qfq",
-                            )
-                            if alt_bars:
-                                await cache.write(sym, BarPeriod.D1, "qfq", alt_bars)
-                                bars = alt_bars
-                                fb_used += 1
-                                fallback_source = fallback_name
-                                corrected_dates = [str(bar.timestamp.date()) for bar in alt_bars]
-                                results[sym.code] = True
-                                qr = checker.check(bars, symbol=sym.code)
-                        except Exception:
-                            logger.warning("bulk_download.fallback_failed", symbol=sym.code)
-
-                    if fallback and not primary_failed and qr.anomaly_count > 0:
-                        state["phase"] = f"quality_repair:{sym.code}"
-                        try:
-                            alt_bars = await fallback.fetch_bars(
-                                sym, BarPeriod.D1, start_date, end_date, adjust="qfq"
-                            )
-                            alt_map = {b.timestamp.date(): b for b in alt_bars}
-                            merged = list(bars)
-                            for anomaly in qr.anomalies:
-                                alt = alt_map.get(anomaly.date)
-                                if alt and not checker._check_bar(alt):
-                                    idx = next(
-                                        (
-                                            i
-                                            for i, b in enumerate(merged)
-                                            if b.timestamp.date() == anomaly.date
-                                        ),
-                                        None,
-                                    )
-                                    if idx is not None:
-                                        merged[idx] = Bar(
-                                            symbol=alt.symbol,
-                                            period=alt.period,
-                                            timestamp=alt.timestamp,
-                                            open=alt.open,
-                                            high=alt.high,
-                                            low=alt.low,
-                                            close=alt.close,
-                                            volume=alt.volume,
-                                            amount=alt.amount,
-                                            source=alt.source or fallback_name or "",
-                                        )
-                                        corrected_dates.append(str(anomaly.date))
-
-                            if corrected_dates:
-                                await cache.write(sym, BarPeriod.D1, "qfq", merged)
-                                bars = merged
-                                qr = checker.check(merged, symbol=sym.code)
-                                fb_used += 1
-                                fallback_source = fallback_name
-                        except Exception:
-                            logger.warning("bulk_download.anomaly_repair_failed", symbol=sym.code)
-
-                    report_passed = (
-                        bool(bars)
-                        and qr.passed
-                        and not (primary_failed and fallback_source is None)
-                    )
-                    if report_passed:
-                        q_passed += 1
-                    else:
-                        q_failed += 1
-
-                    quality_reports.append(
-                        QualityReportOut(
-                            symbol=sym.code,
-                            total_bars=qr.total_bars,
-                            anomaly_count=qr.anomaly_count,
-                            duplicate_count=qr.duplicate_count,
-                            sources=list(qr.sources),
-                            anomalies=[
-                                BarAnomalyOut(
-                                    date=str(a.date),
-                                    source=a.source,
-                                    reasons=list(a.reasons),
-                                )
-                                for a in qr.anomalies[:20]
-                            ],
-                            passed=report_passed,
-                            primary_source=provider_name,
-                            fallback_used=bool(corrected_dates),
-                            fallback_source=fallback_source,
-                            corrected_dates=corrected_dates,
-                            error=(
-                                None
-                                if bars and not (primary_failed and fallback_source is None)
-                                else "主源及备用源均未返回数据或主源更新失败"
-                            ),
-                        )
-                    )
-                except Exception:
-                    logger.exception("bulk_download.quality_check_failed", symbol=sym.code)
-
-            state["quality_passed"] = q_passed
-            state["quality_failed"] = q_failed
-            state["fallback_used"] = fb_used
-            state["success"] = sum(results.values())
-            state["failed"] = len(sym_objs) - state["success"]
-            state["quality_reports"] = quality_reports
+            # 批量日线任务只负责缓存更新。停复牌事件和质量检查是独立数据产品,
+            # 不应在日线进度达到 100% 后继续串行占用数千次请求并阻塞终态。
+            # 质量检查仍可通过 /api/data/quality 显式触发;生命周期同步将由
+            # 独立任务按日期增量维护。
             state["status"] = "done"
             state["current_symbol"] = None
             state["phase"] = None
+            state["active_symbols"] = []
+            return
         except asyncio.CancelledError:
             state.update(
                 status="cancelled",

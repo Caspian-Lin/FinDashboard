@@ -216,6 +216,9 @@ class InstrumentModel(Base, IdMixin):
     market: Mapped[str] = mapped_column(String(16), index=True)  # a_share / hk / us
     instrument_type: Mapped[str] = mapped_column(String(16), index=True)  # stock / etf
     exchange: Mapped[str | None] = mapped_column(String(16), nullable=True)  # SSE / SZSE
+    listing_board: Mapped[str] = mapped_column(
+        String(16), default="unknown", server_default="unknown", index=True
+    )
     list_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     delist_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)

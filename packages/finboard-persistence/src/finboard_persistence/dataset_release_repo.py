@@ -443,6 +443,7 @@ def _plain_candidate(
             instrument_type=instrument_type,
         ),
         exchange=row.exchange,
+        listing_board=row.listing_board,
         list_date=row.list_date,
         delist_date=row.delist_date,
         status=_status(row.status),

@@ -379,6 +379,7 @@ class ReleaseInstrumentSpec:
     available_at: datetime
     execution: ExecutionMetadata
     exchange: str | None = None
+    listing_board: str = "unknown"
     currency: str = "CNY"
     etf_category: EtfCategory | None = None
     list_date: date | None = None
@@ -499,6 +500,7 @@ class ReleasedInstrument:
     issues: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
     exchange: str | None = None
+    listing_board: str = "unknown"
     currency: str = "CNY"
     etf_category: EtfCategory | None = None
     list_date: date | None = None
@@ -542,6 +544,7 @@ class ReleasedInstrument:
             "issues": list(self.issues),
             **({"sources": list(self.sources)} if self.sources else {}),
             "exchange": self.exchange,
+            "listing_board": self.listing_board,
             "currency": self.currency,
             "etf_category": self.etf_category.value if self.etf_category else None,
             "list_date": self.list_date.isoformat() if self.list_date else None,
@@ -596,6 +599,7 @@ class ReleasedInstrument:
             issues=tuple(str(item) for item in cast(list[object], raw.get("issues", []))),
             sources=tuple(str(item) for item in cast(list[object], raw.get("sources", []))),
             exchange=str(raw["exchange"]) if raw.get("exchange") is not None else None,
+            listing_board=str(raw.get("listing_board", "unknown")),
             currency=str(raw.get("currency", "CNY")),
             etf_category=EtfCategory(str(etf_raw)) if etf_raw is not None else None,
             list_date=date.fromisoformat(str(list_raw)) if list_raw is not None else None,
@@ -1101,6 +1105,7 @@ class FrozenDatasetReleaseBuilder:
             issues=tuple(issues),
             sources=tuple(sorted(known_sources)),
             exchange=instrument.exchange,
+            listing_board=instrument.listing_board,
             currency=instrument.currency,
             etf_category=instrument.etf_category,
             list_date=instrument.list_date,
@@ -1442,14 +1447,17 @@ def _coverage_summary(instruments: list[ReleasedInstrument]) -> dict[str, object
     categories: dict[str, int] = {}
     asset_classes: dict[str, int] = {}
     markets: dict[str, int] = {}
+    listing_boards: dict[str, int] = {}
     for item in instruments:
         categories[item.category] = categories.get(item.category, 0) + 1
         asset_classes[item.asset_class.value] = asset_classes.get(item.asset_class.value, 0) + 1
         markets[item.market.value] = markets.get(item.market.value, 0) + 1
+        listing_boards[item.listing_board] = listing_boards.get(item.listing_board, 0) + 1
     return {
         "categories": categories,
         "asset_classes": asset_classes,
         "markets": markets,
+        "listing_boards": listing_boards,
         "missing_sessions": sum(item.missing_sessions for item in instruments),
         "suspended_sessions": sum(item.suspended_sessions for item in instruments),
         "anomaly_count": sum(item.anomaly_count for item in instruments),

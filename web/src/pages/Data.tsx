@@ -55,6 +55,7 @@ export default function Data() {
   // bulk download form
   const [dlMarket, setDlMarket] = useState("a_share");
   const [dlType, setDlType] = useState("stock");
+  const [dlBoard, setDlBoard] = useState("");
   const [dlStart, setDlStart] = useState("2015-01-01");
   const [dlSource, setDlSource] = useState("");
   const [showQualityDetail, setShowQuality] = useState(false);
@@ -163,6 +164,7 @@ export default function Data() {
       api.startBulkDownload({
         market: dlMarket,
         instrument_type: dlType || undefined,
+        listing_boards: dlBoard ? [dlBoard] : undefined,
         start: dlStart,
         source: params?.source,
       }),
@@ -380,7 +382,7 @@ export default function Data() {
           批量拉取
           <InfoHint content={INFO_HINTS.data.bulkDownload} />
         </h2>
-        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
           <div>
             <HintLabel htmlFor="data-bulk-market" hint={INFO_HINTS.data.market}>
               市场
@@ -457,6 +459,26 @@ export default function Data() {
               <option value="tushare">tushare（A股股票）</option>
               <option value="akshare">akshare</option>
               <option value="yfinance">yfinance</option>
+            </select>
+          </div>
+          <div>
+            <label htmlFor="data-bulk-board" className="mb-1 block text-sm text-muted-foreground">
+              上市板块
+            </label>
+            <select
+              id="data-bulk-board"
+              value={dlBoard}
+              onChange={(e) => setDlBoard(e.target.value)}
+              disabled={isDownloading || dlMarket !== "a_share" || dlType !== "stock"}
+              className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
+            >
+              <option value="">全部板块</option>
+              <option value="sse_main">沪市主板</option>
+              <option value="szse_main">深市主板</option>
+              <option value="chinext">创业板</option>
+              <option value="star">科创板</option>
+              <option value="bse">北交所</option>
+              <option value="cdr">CDR</option>
             </select>
           </div>
           <div className="flex items-end">

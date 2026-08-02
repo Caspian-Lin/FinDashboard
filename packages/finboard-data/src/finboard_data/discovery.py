@@ -6,9 +6,9 @@
 代码归一化规则:
 
 * 纯 6 位数字 A 股代码 → 根据 prefix 判断交易所:
-  - ``6x`` / ``68`` → ``.SH`` (上交所:主板 + 科创板)
-  - ``0x`` / ``30`` → ``.SZ`` (深交所:主板 + 创业板)
-  - ``8x`` / ``43`` / ``87`` → ``.BJ`` (北交所)
+  - ``6x`` / ``9x`` → ``.SH`` (上交所:主板 + 科创板/CDR)
+  - ``0x`` / ``3x`` → ``.SZ`` (深交所:主板 + 创业板/CDR)
+  - ``92`` / ``8x`` / ``4x`` → ``.BJ`` (北交所)
 * 带 prefix 的 ETF 代码(``sz159998`` / ``sh510300``)→ 去掉 prefix + 大写后缀
 """
 
@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from finboard_shared.types import InstrumentType, Market
+from finboard_shared.types import InstrumentType, ListingBoard, Market
 
 if TYPE_CHECKING:
     pass
@@ -37,6 +37,30 @@ class InstrumentInfo:
     market: Market          # a_share / hk / us
     instrument_type: InstrumentType  # stock / etf
     exchange: str | None = None      # SSE / SZSE / BSE
+    listing_board: ListingBoard = ListingBoard.UNKNOWN
+
+
+def infer_a_share_listing_board(code: str) -> ListingBoard:
+    """由已规范化代码推导上市板块;权威主数据可覆盖该回退值。"""
+    normalized = code.strip().upper()
+    bare, _, suffix = normalized.partition(".")
+    if suffix == "BJ" or bare.startswith(("92", "8", "4")):
+        return ListingBoard.BSE
+    if suffix == "SH" and bare.startswith("689"):
+        return ListingBoard.CDR
+    if suffix == "SZ" and (
+        "001001" <= bare <= "001199" or "309800" <= bare <= "309999"
+    ):
+        return ListingBoard.CDR
+    if suffix == "SH" and bare.startswith("688"):
+        return ListingBoard.STAR
+    if suffix == "SZ" and bare.startswith("30"):
+        return ListingBoard.CHINEXT
+    if suffix == "SH" and bare.startswith(("600", "601", "603", "605")):
+        return ListingBoard.SSE_MAIN
+    if suffix == "SZ" and bare.startswith(("000", "001", "002", "003")):
+        return ListingBoard.SZSE_MAIN
+    return ListingBoard.UNKNOWN
 
 
 def normalize_a_share_code(raw: str) -> str | None:
@@ -71,12 +95,12 @@ def normalize_a_share_code(raw: str) -> str | None:
 
     # 纯 6 位数字
     if len(raw) == 6 and raw.isdigit():
+        if raw.startswith("92") or raw[0] in ("8", "4"):
+            return f"{raw}.BJ"
         if raw[0] in ("6", "9"):
             return f"{raw}.SH"
         if raw[0] in ("0", "3"):
             return f"{raw}.SZ"
-        if raw[0] in ("8", "4"):
-            return f"{raw}.BJ"
 
     return None
 
@@ -106,6 +130,7 @@ class UniverseDiscovery:
                     market=Market.A_SHARE,
                     instrument_type=InstrumentType.STOCK,
                     exchange=exchange,
+                    listing_board=infer_a_share_listing_board(code),
                 )
             )
         logger.info("discovery.a_shares", count=len(result))
@@ -130,6 +155,7 @@ class UniverseDiscovery:
                     market=Market.A_SHARE,
                     instrument_type=InstrumentType.ETF,
                     exchange=exchange,
+                    listing_board=ListingBoard.UNKNOWN,
                 )
             )
         logger.info("discovery.etfs", count=len(result))

@@ -593,6 +593,7 @@ class InstrumentRepository:
                     market=str(ins.get("market", "a_share")),
                     instrument_type=str(ins.get("instrument_type", "stock")),
                     exchange=ins.get("exchange"),
+                    listing_board=str(ins.get("listing_board", "unknown")),
                     status=str(ins.get("status", "active")),
                 )
                 self._session.add(row)
@@ -600,6 +601,7 @@ class InstrumentRepository:
             else:
                 row.name = str(ins.get("name", row.name))
                 row.exchange = ins.get("exchange", row.exchange)  # type: ignore[assignment]
+                row.listing_board = str(ins.get("listing_board", row.listing_board))
                 if "status" in ins:
                     row.status = str(ins["status"])
 
@@ -617,6 +619,8 @@ class InstrumentRepository:
         *,
         market: str | None = None,
         instrument_type: str | None = None,
+        exchange: str | None = None,
+        listing_boards: list[str] | None = None,
         q: str | None = None,
         limit: int = 5000,
         offset: int = 0,
@@ -625,6 +629,8 @@ class InstrumentRepository:
         return await self.list_page(
             market=market,
             instrument_type=instrument_type,
+            exchange=exchange,
+            listing_boards=listing_boards,
             q=q,
             limit=limit,
             offset=offset,
@@ -636,6 +642,8 @@ class InstrumentRepository:
         *,
         market: str | None = None,
         instrument_type: str | None = None,
+        exchange: str | None = None,
+        listing_boards: list[str] | None = None,
         status: str | None = "active",
         q: str | None = None,
         limit: int = 5000,
@@ -649,6 +657,10 @@ class InstrumentRepository:
             conditions.append(InstrumentModel.market == market)
         if instrument_type:
             conditions.append(InstrumentModel.instrument_type == instrument_type)
+        if exchange:
+            conditions.append(InstrumentModel.exchange == exchange)
+        if listing_boards:
+            conditions.append(InstrumentModel.listing_board.in_(listing_boards))
         if q:
             pattern = f"%{q}%"
             conditions.append(
@@ -693,6 +705,8 @@ class InstrumentRepository:
         *,
         market: str | None = None,
         instrument_type: str | None = None,
+        exchange: str | None = None,
+        listing_boards: list[str] | None = None,
         q: str | None = None,
     ) -> list[str]:
         """返回匹配条件的全部标的代码(不分页,轻量)。"""
@@ -701,6 +715,10 @@ class InstrumentRepository:
             conditions.append(InstrumentModel.market == market)
         if instrument_type:
             conditions.append(InstrumentModel.instrument_type == instrument_type)
+        if exchange:
+            conditions.append(InstrumentModel.exchange == exchange)
+        if listing_boards:
+            conditions.append(InstrumentModel.listing_board.in_(listing_boards))
         if q:
             pattern = f"%{q}%"
             conditions.append(
@@ -778,6 +796,7 @@ class InstrumentRepository:
                     market=str(ins.get("market", "a_share")),
                     instrument_type=str(ins.get("instrument_type", "stock")),
                     exchange=ins.get("exchange"),
+                    listing_board=str(ins.get("listing_board", "unknown")),
                     status=ListingStatus.ACTIVE.value,
                     missing_runs=0,
                 )
@@ -795,6 +814,8 @@ class InstrumentRepository:
                 exchange = ins.get("exchange")
                 if exchange is not None:
                     row.exchange = exchange  # type: ignore[assignment]
+                if "listing_board" in ins:
+                    row.listing_board = str(ins["listing_board"])
                 # 重新出现:未退市的归零计数并提示复活
                 if row.missing_runs > 0 and row.status != ListingStatus.DELISTED.value:
                     result.reactivated.append(code)

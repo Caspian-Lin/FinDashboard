@@ -609,6 +609,7 @@ function ReleasePublisher({
   );
   const [adjustment, setAdjustment] =
     useState<DatasetReleaseCreate["adjustment"]>("qfq");
+  const [listingBoard, setListingBoard] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [selected, setSelected] = useState<Record<string, CachedDataStatus>>({});
@@ -621,13 +622,14 @@ function ReleasePublisher({
   } = useQuery({
     queryKey: [
       "release-cache-candidates",
-      { q: cacheSearch, period: "1d", adjustment },
+      { q: cacheSearch, period: "1d", adjustment, listingBoard },
     ],
     queryFn: () =>
       datasetApi.cachedData({
         q: cacheSearch || undefined,
         period: "1d",
         adjust: adjustment,
+        listing_boards: listingBoard ? [listingBoard] : undefined,
         limit: 50,
       }),
     enabled: isOpen,
@@ -682,6 +684,7 @@ function ReleasePublisher({
         q: cacheSearch || undefined,
         period: "1d",
         adjust: adjustment,
+        listing_boards: listingBoard ? [listingBoard] : undefined,
       }),
     onSuccess: (selection) => {
       setSelected((previous) => {
@@ -874,6 +877,29 @@ function ReleasePublisher({
                 ? "严格单源：tushare"
                 : "混合来源：逐标的记录实际来源"}
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="release-listing-board">上市板块</Label>
+            <Select
+              value={listingBoard || "all"}
+              onValueChange={(value) => {
+                setListingBoard(value === "all" ? "" : value);
+                clearSelection();
+              }}
+            >
+              <SelectTrigger id="release-listing-board">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部板块</SelectItem>
+                <SelectItem value="sse_main">沪市主板</SelectItem>
+                <SelectItem value="szse_main">深市主板</SelectItem>
+                <SelectItem value="chinext">创业板</SelectItem>
+                <SelectItem value="star">科创板</SelectItem>
+                <SelectItem value="bse">北交所</SelectItem>
+                <SelectItem value="cdr">CDR</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="release-adjustment">

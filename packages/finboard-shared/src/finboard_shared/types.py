@@ -32,6 +32,18 @@ class InstrumentType(StrEnum):
     CONVERTIBLE = "convertible"  # 可转债,#58
 
 
+class ListingBoard(StrEnum):
+    """证券上市板块,与市场、交易所和行业分类正交。"""
+
+    SSE_MAIN = "sse_main"
+    SZSE_MAIN = "szse_main"
+    CHINEXT = "chinext"
+    STAR = "star"
+    BSE = "bse"
+    CDR = "cdr"
+    UNKNOWN = "unknown"
+
+
 class AssetClass(StrEnum):
     """跨资产大类 —— 用于组合层风险预算和资产配置(issue #59 消费)。
 

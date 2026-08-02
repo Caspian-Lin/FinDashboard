@@ -30,6 +30,7 @@ from finboard_shared.types import (
     BarPeriod,
     EtfCategory,
     InstrumentType,
+    ListingBoard,
     ListingStatus,
     Market,
 )
@@ -117,6 +118,7 @@ def _stock(code: str = "600519.SH") -> ReleaseInstrumentSpec:
         market=Market.A_SHARE,
         instrument_type=InstrumentType.STOCK,
         asset_class=AssetClass.EQUITY,
+        listing_board=ListingBoard.SSE_MAIN,
         available_at=datetime(2001, 8, 27, tzinfo=UTC),
         execution=default_execution_metadata(
             market=Market.A_SHARE,
@@ -228,6 +230,7 @@ async def test_publish_multi_asset_release_and_read_only_provider(tmp_path: Path
             "commodity": 1,
         },
         "markets": {"a_share": 5},
+        "listing_boards": {"sse_main": 1, "unknown": 4},
         "missing_sessions": 0,
         "suspended_sessions": 0,
         "anomaly_count": 0,
@@ -237,6 +240,7 @@ async def test_publish_multi_asset_release_and_read_only_provider(tmp_path: Path
     assert release.instrument("513100.SH").execution.settlement_days == 0
     assert release.instrument("511010.SH").execution.lot_size == Decimal("10")
     assert release.instrument("600519.SH").execution.stamp_tax_rate == Decimal("0.0005")
+    assert release.instrument("600519.SH").listing_board == "sse_main"
     assert release.instrument("600519.SH").available_at == datetime(2001, 8, 27, tzinfo=UTC)
     assert release.instrument("600519.SH").lifecycle_events[0].available_at == datetime(
         2024, 1, 1, 8, tzinfo=UTC
