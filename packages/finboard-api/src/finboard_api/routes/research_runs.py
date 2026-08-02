@@ -144,6 +144,7 @@ async def queue_research_run(
                 )
                 for release in releases
             ),
+            strategy_version=body.strategy_version,
             factor_snapshots=tuple(
                 FrozenArtifactRef(
                     artifact_id=snapshot.snapshot_id,

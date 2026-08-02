@@ -64,6 +64,10 @@ const SECTIONS = [
   { key: "validation_plan", label: "验证计划", hint: "样本外验证的时间窗口划分：训练集、验证集、测试集(OOS)的日期范围" },
 ] as const;
 
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error ? err.message : fallback;
+}
+
 export default function StrategyStudio() {
   const qc = useQueryClient();
   const [selectedKind, setSelectedKind] = React.useState<string | null>(null);
@@ -73,27 +77,31 @@ export default function StrategyStudio() {
   const [specText, setSpecText] = React.useState("");
   const [showPublishDialog, setShowPublishDialog] = React.useState(false);
   const [showRollbackDialog, setShowRollbackDialog] = React.useState(false);
+  const [templateError, setTemplateError] = React.useState<string | null>(null);
 
   const { data: registry, isLoading: registryLoading } = useQuery({
     queryKey: ["spec-registry"],
     queryFn: strategySpecApi.registry,
   });
 
-  const { data: releases } = useQuery({
+  const releasesQuery = useQuery({
     queryKey: ["dataset-releases", "studio"],
     queryFn: () => datasetApi.releases({ limit: 50 }),
   });
 
-  const { data: strategies } = useQuery({
+  const strategiesQuery = useQuery({
     queryKey: ["spec-list"],
     queryFn: () => strategySpecApi.list(50),
   });
+  const strategies = strategiesQuery.data;
 
-  const { data: history } = useQuery({
+  const historyQuery = useQuery({
     queryKey: ["spec-history", selectedKind],
     queryFn: () => strategySpecApi.history(selectedKind!),
     enabled: !!selectedKind,
   });
+  const history = historyQuery.data;
+  const releases = releasesQuery.data;
 
   const validateMutation = useMutation({
     mutationFn: (s: Record<string, unknown>) => strategySpecApi.validate(s),
@@ -101,7 +109,7 @@ export default function StrategyStudio() {
 
   const draftMutation = useMutation({
     mutationFn: (s: Record<string, unknown>) =>
-      strategySpecApi.createDraft(s, (s.expected_version as number) ?? 0),
+      strategySpecApi.createDraft(s, history?.[0]?.version),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["spec-list"] }),
   });
 
@@ -216,6 +224,7 @@ export default function StrategyStudio() {
                           key={kind}
                           onClick={() => {
                             setSelectedKind(kind);
+                            setTemplateError(null);
                             setShowSetup(true);
                           }}
                           className={cn(
@@ -276,6 +285,84 @@ export default function StrategyStudio() {
 
         {/* Center+Right: Editor */}
         <div className="lg:col-span-3">
+          {templateError && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertTitle>模板加载失败</AlertTitle>
+              <AlertDescription>
+                {templateError}。策略规格没有被创建或启动；请检查数据发布版本后重试。
+              </AlertDescription>
+            </Alert>
+          )}
+          {validateMutation.isError && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertTitle>规格校验失败</AlertTitle>
+              <AlertDescription>
+                {validateMutation.error instanceof Error
+                  ? validateMutation.error.message
+                  : "服务端无法完成策略规格校验，请检查数据发布和特征依赖。"}
+              </AlertDescription>
+            </Alert>
+          )}
+          {draftMutation.isError && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertTitle>草稿保存失败</AlertTitle>
+              <AlertDescription>
+                {draftMutation.error instanceof Error
+                  ? draftMutation.error.message
+                  : "策略规格没有保存，请检查校验结果后重试。"}
+              </AlertDescription>
+            </Alert>
+          )}
+          {draftMutation.isSuccess && (
+            <Alert variant="success" className="mb-4">
+              <AlertTitle>策略草稿已保存</AlertTitle>
+              <AlertDescription>
+                已生成版本记录。保存不会自动发布，也不会启动研究运行；请先完成校验，再按审批流程发布。
+              </AlertDescription>
+            </Alert>
+          )}
+          {publishMutation.isError && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertTitle>策略发布失败</AlertTitle>
+              <AlertDescription>
+                {publishMutation.error instanceof Error
+                  ? publishMutation.error.message
+                  : "策略版本没有发布，请检查当前版本和校验状态。"}
+              </AlertDescription>
+            </Alert>
+          )}
+          {publishMutation.isSuccess && (
+            <Alert variant="success" className="mb-4">
+              <AlertTitle>策略版本已发布</AlertTitle>
+              <AlertDescription>
+                已发布当前策略版本。发布不会自动启动研究运行，请前往研究运行页面显式排队。
+              </AlertDescription>
+            </Alert>
+          )}
+          {strategiesQuery.isError && (
+            <Alert variant="warning" className="mb-4">
+              <AlertTitle>已保存策略列表暂时不可用</AlertTitle>
+              <AlertDescription>
+                {errorMessage(strategiesQuery.error, "无法读取策略版本历史")}；新模板仍可编辑，但保存后的版本可能需要刷新或后端恢复后才能显示。
+              </AlertDescription>
+            </Alert>
+          )}
+          {releasesQuery.isError && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertTitle>数据发布列表加载失败</AlertTitle>
+              <AlertDescription>
+                {errorMessage(releasesQuery.error, "无法读取数据发布版本")}；模板必须绑定可用数据发布后才能校验或保存。
+              </AlertDescription>
+            </Alert>
+          )}
+          {historyQuery.isError && selectedKind && (
+            <Alert variant="warning" className="mb-4">
+              <AlertTitle>版本历史加载失败</AlertTitle>
+              <AlertDescription>
+                {errorMessage(historyQuery.error, "无法读取当前策略的版本历史")}；请刷新后再发布或回滚。
+              </AlertDescription>
+            </Alert>
+          )}
           {!spec ? (
             <Card>
               <CardContent className="py-16">
@@ -294,7 +381,11 @@ export default function StrategyStudio() {
                   <h2 className="text-lg font-bold">
                     {String(spec.strategy_id ?? selectedKind ?? "")}
                   </h2>
-                  <Badge variant="secondary">v{String(spec.schema_version ?? "v1")}</Badge>
+                  <Badge variant="secondary">
+                    {String(spec.schema_version ?? "v1").startsWith("v")
+                      ? String(spec.schema_version ?? "v1")
+                      : `v${String(spec.schema_version)}`}
+                  </Badge>
                   {editMode ? (
                     <Badge variant="warning">JSON 编辑模式</Badge>
                   ) : (
@@ -358,7 +449,7 @@ export default function StrategyStudio() {
                             可执行
                           </Badge>
                         ) : (
-                          <Badge variant="destructive">不可执行</Badge>
+                          <Badge variant="warning">执行权关闭</Badge>
                         )}
                         <code className="text-xs text-muted-foreground">{validation.checksum}</code>
                       </div>
@@ -374,6 +465,14 @@ export default function StrategyStudio() {
                           ))}
                         </div>
                       )}
+                      {!validation.can_execute &&
+                        (!validation.errors || validation.errors.length === 0) && (
+                          <Alert variant="info">
+                            <AlertDescription>
+                              规格解析已完成，但执行权默认关闭。保存/发布不会自动启动回测或模拟；后续必须由受控 worker/CLI 消费 queued 研究运行。
+                            </AlertDescription>
+                          </Alert>
+                        )}
                       {validation.feature_order.length > 0 && (
                         <div>
                           <div className="mb-1 text-xs text-muted-foreground">特征顺序</div>
@@ -410,10 +509,22 @@ export default function StrategyStudio() {
                     <div className="flex items-center justify-between">
                       <CardTitle className="text-sm">版本历史</CardTitle>
                       <div className="flex gap-1">
-                        <Button size="sm" variant="ghost" onClick={() => setShowPublishDialog(true)}>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label="发布策略版本"
+                          title="发布策略版本"
+                          onClick={() => setShowPublishDialog(true)}
+                        >
                           <Send className="h-3.5 w-3.5" />
                         </Button>
-                        <Button size="sm" variant="ghost" onClick={() => setShowRollbackDialog(true)}>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label="回滚策略版本"
+                          title="回滚策略版本"
+                          onClick={() => setShowRollbackDialog(true)}
+                        >
                           <Undo2 className="h-3.5 w-3.5" />
                         </Button>
                       </div>
@@ -506,14 +617,16 @@ export default function StrategyStudio() {
   );
 
   async function loadTemplate(strategyId: string, kind: string, releaseIds: string[]) {
+    setTemplateError(null);
     try {
       const tmpl = await strategySpecApi.template(kind, {
         strategy_id: strategyId,
         dataset_release_ids: releaseIds,
       });
-      setSpec(tmpl.spec);
-    } catch {
+      setSpec(tmpl);
+    } catch (err) {
       setSpec(null);
+      setTemplateError(err instanceof Error ? err.message : "接口未返回有效模板");
     }
   }
 }
@@ -805,7 +918,18 @@ function SetupDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   kind: string | null;
-  releases: { release_id: string; dataset_name: string; version: string }[];
+  releases: {
+    release_id: string;
+    dataset_name: string;
+    version: string;
+    source?: string;
+    start_date?: string;
+    end_date?: string;
+    symbol_count?: number;
+    coverage_pct?: number;
+    quality_status?: string;
+    capabilities?: { key: string; status: string; ready_count?: number }[];
+  }[];
   onConfirm: (strategyId: string, releaseIds: string[]) => void;
 }) {
   const [strategyId, setStrategyId] = React.useState("");
@@ -833,7 +957,7 @@ function SetupDialog({
         <DialogHeader>
           <DialogTitle>创建策略规格</DialogTitle>
           <DialogDescription>
-            选择数据发布版本。模板将自动填充默认配置，你可以在编辑器中修改。
+            选择数据发布版本。模板将自动填充默认配置，你可以在编辑器中修改。建议优先选择质量为「通过」且包含策略所需能力的数据发布。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
@@ -858,7 +982,7 @@ function SetupDialog({
                 {releases.map((r) => (
                   <label
                     key={r.release_id}
-                    className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent"
+                    className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-2 text-sm hover:bg-accent"
                   >
                     <input
                       type="checkbox"
@@ -866,12 +990,35 @@ function SetupDialog({
                       onChange={() => toggleRelease(r.release_id)}
                       className="rounded"
                     />
-                    <span className="font-mono text-xs">{r.dataset_name}</span>
-                    <Badge variant="secondary" className="text-[10px]">
-                      v{r.version}
-                    </Badge>
-                    <span className="ml-auto truncate font-mono text-[10px] text-muted-foreground">
-                      {r.release_id}
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-center gap-1">
+                        <span className="font-mono text-xs">{r.dataset_name}</span>
+                        <Badge variant="secondary" className="text-[10px]">
+                          v{r.version}
+                        </Badge>
+                        {r.quality_status && (
+                          <Badge
+                            variant={r.quality_status === "passed" ? "success" : "warning"}
+                            className="text-[10px]"
+                          >
+                            {r.quality_status === "passed" ? "质量通过" : "质量告警"}
+                          </Badge>
+                        )}
+                        {r.quality_status === "passed" && (
+                          <Badge variant="info" className="text-[10px]">推荐</Badge>
+                        )}
+                      </span>
+                      <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">
+                        {r.release_id}
+                      </span>
+                      <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                        {r.start_date ?? "—"} ~ {r.end_date ?? "—"} · {r.symbol_count ?? "—"} 标的 · 覆盖 {r.coverage_pct ?? "—"}
+                      </span>
+                      {r.capabilities && r.capabilities.length > 0 && (
+                        <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+                          能力：{r.capabilities.filter((c) => c.status === "ready").map((c) => c.key).join("、") || "暂无可用能力"}
+                        </span>
+                      )}
                     </span>
                   </label>
                 ))}

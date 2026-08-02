@@ -135,6 +135,9 @@ class ResearchRunManifest:
     strategy_spec: ResearchStrategySpec
     strategy_spec_checksum: str
     dataset_releases: tuple[FrozenArtifactRef, ...]
+    # 策略版本不是策略 payload 的一部分,必须单独冻结,便于 UI/worker 追踪.
+    # 本次运行实际引用的已发布版本. None 兼容历史 manifest.
+    strategy_version: int | None = None
     factor_snapshots: tuple[FrozenArtifactRef, ...] = ()
     parameters: dict[str, JsonValue] = field(default_factory=dict)
     validation_config: dict[str, JsonValue] = field(default_factory=dict)
@@ -157,6 +160,8 @@ class ResearchRunManifest:
             raise ValueError("idempotency_key 不能为空")
         if not self.dataset_releases:
             raise ValueError("必须冻结至少一个数据发布")
+        if self.strategy_version is not None and self.strategy_version < 1:
+            raise ValueError("strategy_version 必须大于等于 1")
         if self.strategy_spec_checksum != stable_checksum(
             self.strategy_spec.canonical_payload()
         ):
@@ -191,29 +196,35 @@ class ResearchRunManifest:
 
     @property
     def checksum(self) -> str:
-        return stable_checksum(self)
+        payload = asdict(self)
+        # 旧 manifest 没有 strategy_version; 保持其历史 checksum 可被 worker
+        # 校验. 新 manifest 在提供版本时把版本纳入冻结清单 checksum.
+        if self.strategy_version is None:
+            payload.pop("strategy_version", None)
+        return stable_checksum(payload)
 
     @property
     def input_checksum(self) -> str:
         """计算与运行身份无关、可跨确定性重放复用的冻结输入校验和。"""
-        return stable_checksum(
-            {
-                "strategy_spec": self.strategy_spec,
-                "strategy_spec_checksum": self.strategy_spec_checksum,
-                "dataset_releases": self.dataset_releases,
-                "factor_snapshots": self.factor_snapshots,
-                "parameters": self.parameters,
-                "validation_config": self.validation_config,
-                "portfolio_config": self.portfolio_config,
-                "risk_config": self.risk_config,
-                "execution_config": self.execution_config,
-                "fee_config": self.fee_config,
-                "benchmark_config": self.benchmark_config,
-                "code_version": self.code_version,
-                "initial_capital": self.initial_capital,
-                "schema_version": self.schema_version,
-            }
-        )
+        payload: dict[str, object] = {
+            "strategy_spec": self.strategy_spec,
+            "strategy_spec_checksum": self.strategy_spec_checksum,
+            "dataset_releases": self.dataset_releases,
+            "factor_snapshots": self.factor_snapshots,
+            "parameters": self.parameters,
+            "validation_config": self.validation_config,
+            "portfolio_config": self.portfolio_config,
+            "risk_config": self.risk_config,
+            "execution_config": self.execution_config,
+            "fee_config": self.fee_config,
+            "benchmark_config": self.benchmark_config,
+            "code_version": self.code_version,
+            "initial_capital": self.initial_capital,
+            "schema_version": self.schema_version,
+        }
+        if self.strategy_version is not None:
+            payload["strategy_version"] = self.strategy_version
+        return stable_checksum(payload)
 
     @property
     def strategy_kind(self) -> str:
@@ -693,6 +704,11 @@ def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
         strategy_spec=ResearchStrategySpec.model_validate(payload["strategy_spec"]),
         strategy_spec_checksum=str(payload["strategy_spec_checksum"]),
         dataset_releases=refs,
+        strategy_version=(
+            int(str(payload["strategy_version"]))
+            if payload.get("strategy_version") is not None
+            else None
+        ),
         factor_snapshots=factor_refs,
         parameters=cast(dict[str, JsonValue], payload.get("parameters", {})),
         validation_config=cast(

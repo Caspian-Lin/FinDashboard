@@ -38,6 +38,7 @@ from finboard_api.schemas import (
     SymbolPoolOut,
     SymbolPoolUpdate,
     SyncResultOut,
+    TushareQuotaOut,
 )
 
 logger = structlog.get_logger(__name__)
@@ -400,6 +401,27 @@ async def get_cache_status(symbol: str) -> DataStatusOut:
         last_date=str(metadata.last_date) if metadata and metadata.last_date else None,
         last_close=None,
         source=metadata.source if metadata else None,
+    )
+
+
+@router.get("/tushare-quota", response_model=TushareQuotaOut)
+async def get_tushare_quota(request: Request) -> TushareQuotaOut:
+    """返回本应用对 Tushare 的 RPM 与每日预占预算。"""
+    from finboard_data.tushare_budget import shared_tushare_budget
+
+    settings = _request_settings(request)
+    budget = shared_tushare_budget(
+        requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
+        daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
+        usage_file=(settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"),
+    )
+    snapshot = await budget.snapshot()
+    return TushareQuotaOut(
+        date=snapshot.date,
+        requests_per_minute=snapshot.requests_per_minute,
+        daily_limit=snapshot.daily_limit,
+        used=snapshot.used,
+        remaining=snapshot.remaining,
     )
 
 
@@ -929,6 +951,8 @@ def _get_bulk_state(request: Request) -> dict[str, Any]:
             "current_symbol": None,
             "phase": None,
             "error": None,
+            "cache_hits": 0,
+            "cache_misses": 0,
         }
     return request.app.state._bulk_download  # type: ignore[no-any-return]
 
@@ -1094,6 +1118,8 @@ async def start_bulk_download(
         fallback_used=0,
         lifecycle_events=0,
         lifecycle_sync_failed=0,
+        cache_hits=0,
+        cache_misses=0,
         quality_reports=[],
     )
 
@@ -1104,9 +1130,18 @@ async def start_bulk_download(
                 state["done"] = done
                 state["total"] = total
 
+            cache_hit_symbols: set[str] = set()
+            cache_miss_symbols: set[str] = set()
+
             def on_status(code: str, phase: str) -> None:
                 state["current_symbol"] = code
                 state["phase"] = phase
+                if phase == "cache_hit":
+                    cache_hit_symbols.add(code)
+                elif phase == "fetching":
+                    cache_miss_symbols.add(code)
+                state["cache_hits"] = len(cache_hit_symbols)
+                state["cache_misses"] = len(cache_miss_symbols)
 
             results = await primary.update_cache_batch(
                 sym_objs,

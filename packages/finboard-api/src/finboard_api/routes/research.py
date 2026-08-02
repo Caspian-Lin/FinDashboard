@@ -15,8 +15,12 @@
 
 from __future__ import annotations
 
-from datetime import UTC
+import logging
+import os
+import subprocess
+from datetime import UTC, datetime
 from datetime import date as _date
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,12 +36,17 @@ from finboard_api.schemas import (
     FactorExperimentCreate,
     FactorExperimentOut,
     FactorSignalOut,
+    FeatureSnapshotCreate,
     FeatureSnapshotOut,
     RobustnessPlanSchema,
     TrialCreate,
     TrialOut,
     ValidationPlanSchema,
     VersionStampSchema,
+)
+from finboard_backtest.factor_lab import (
+    FactorAnalysisError,
+    build_price_feature_snapshot,
 )
 from finboard_backtest.validation.contracts import (
     AcceptanceThresholds,
@@ -59,6 +68,7 @@ from finboard_data.factor_lab import (
     factor_lab_catalog,
     new_factor_experiment,
 )
+from finboard_data.releases import DatasetReleaseError, FrozenReleaseProvider
 from finboard_persistence.dataset_release_repo import (
     ResearchDatasetReleaseRepository,
 )
@@ -76,6 +86,33 @@ from finboard_persistence.validation_repo import (
 )
 
 router = APIRouter(prefix="/api/research", tags=["research"])
+logger = logging.getLogger(__name__)
+
+_DEFAULT_RELEASE_ROOT = "data_releases"
+
+
+def _factor_code_version() -> str:
+    """给快照记录服务端因子计算代码版本,不接受网页伪造。"""
+
+    configured = os.getenv("FINBOARD_CODE_VERSION")
+    if configured:
+        return configured
+    result = subprocess.run(
+        ["git", "rev-parse", "--short=12", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        return "unknown"
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return f"{value}-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else value
 
 
 def _to_plan(p: ValidationPlanSchema) -> ValidationPlan:
@@ -283,6 +320,77 @@ async def get_factor_catalog(
         FactorDefinitionOut.model_validate(definition.as_dict())
         for definition in factor_lab_catalog(role)
     ]
+
+
+@router.post(
+    "/factors/features",
+    response_model=FeatureSnapshotOut,
+    status_code=201,
+)
+async def create_feature_snapshot(
+    body: FeatureSnapshotCreate,
+    session: AsyncSession = Depends(get_db_session),
+) -> FeatureSnapshotOut:
+    """从冻结数据发布显式生成并发布价格特征快照。
+
+    这是研究计算入口,只读冻结发布并写入 ``factor_feature_snapshots``;
+    不启动回测、模拟盘或任何实盘动作。
+    """
+
+    release_repo = ResearchDatasetReleaseRepository(session)
+    try:
+        release = await release_repo.require_usable(body.dataset_release_id)
+    except (ValueError, DatasetReleaseError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    decision_at = body.decision_at.astimezone(UTC)
+    if not release.start_date <= decision_at.date() <= release.end_date:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"decision_at 日期必须在数据发布范围内: "
+                f"{release.start_date}~{release.end_date}"
+            ),
+        )
+    if decision_at > datetime.now(UTC):
+        raise HTTPException(status_code=422, detail="decision_at 不能晚于当前时间")
+
+    release_root = Path(
+        os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT)
+    )
+    try:
+        provider = FrozenReleaseProvider(
+            release_root=release_root,
+            release_id=release.release_id,
+        )
+        snapshot = await build_price_feature_snapshot(
+            provider=provider,
+            decision_at=decision_at,
+            code_version=_factor_code_version(),
+        )
+        await FeatureSnapshotRepository(session).publish(snapshot)
+        await session.commit()
+    except (DatasetReleaseError, FactorAnalysisError, ValueError) as exc:
+        await session.rollback()
+        raise HTTPException(status_code=422, detail=f"特征快照生成失败: {exc}") from exc
+    except OSError as exc:
+        await session.rollback()
+        logger.exception(
+            "research.feature_snapshot_release_read_failed",
+            extra={"release_id": release.release_id, "release_root": str(release_root)},
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "特征快照生成失败: 服务端无法读取冻结发布文件,"
+                "请检查 FINBOARD_DATA_RELEASE_ROOT 目录和文件权限"
+            ),
+        ) from exc
+    except Exception:
+        await session.rollback()
+        raise
+
+    return FeatureSnapshotOut.model_validate(snapshot.as_dict())
 
 
 @router.get(

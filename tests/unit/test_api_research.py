@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +16,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from finboard_api.deps import get_db_session
+from finboard_api.routes import research as research_routes
 from finboard_api.routes import research_router
 from finboard_api.schemas import FactorExperimentCreate
 from finboard_backtest.validation.contracts import (
@@ -26,6 +28,13 @@ from finboard_backtest.validation.contracts import (
     ValidationPlan,
     VersionStamp,
     new_experiment,
+)
+from finboard_data.factor_lab import (
+    FeatureObservation,
+    build_feature_snapshot,
+)
+from finboard_persistence.dataset_release_repo import (
+    ResearchDatasetReleaseRepository,
 )
 from finboard_persistence.models import (
     ResearchExperimentModel,
@@ -251,6 +260,70 @@ class TestFactorLaboratory:
         alpha = client.get("/api/research/factors/catalog?role=alpha")
         assert alpha.status_code == 200
         assert all(item["role"] == "alpha" for item in alpha.json())
+
+    def test_feature_snapshot_generation_persists_pit_snapshot(
+        self,
+        client: TestClient,
+        mock_session: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        decision_at = datetime(2026, 7, 31, 15, 59, 59, tzinfo=UTC)
+        release = SimpleNamespace(
+            release_id="release-v1",
+            release_checksum="release-checksum",
+            start_date=date(2020, 1, 1),
+            end_date=date(2026, 7, 31),
+        )
+        snapshot = build_feature_snapshot(
+            dataset_release_id=release.release_id,
+            dataset_release_checksum=release.release_checksum,
+            decision_at=decision_at,
+            code_version="test-code",
+            observations=(
+                FeatureObservation(
+                    symbol="000001.SZ",
+                    feature_name="momentum",
+                    value=0.1,
+                    observed_at=decision_at,
+                    available_at=decision_at,
+                    source="frozen-release",
+                    source_version=release.release_id,
+                    market="a_share",
+                    asset_class="equity",
+                ),
+            ),
+            calculation_windows={"momentum": 20},
+        )
+        monkeypatch.setattr(
+            ResearchDatasetReleaseRepository,
+            "require_usable",
+            AsyncMock(return_value=release),
+        )
+        monkeypatch.setattr(
+            research_routes,
+            "FrozenReleaseProvider",
+            MagicMock(),
+        )
+        monkeypatch.setattr(
+            research_routes,
+            "build_price_feature_snapshot",
+            AsyncMock(return_value=snapshot),
+        )
+        mock_session.execute.return_value.scalars.return_value.first.return_value = None
+
+        response = client.post(
+            "/api/research/factors/features",
+            json={
+                "dataset_release_id": release.release_id,
+                "decision_at": "2026-07-31T23:59:59+08:00",
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["snapshot_id"] == snapshot.snapshot_id
+        assert body["observations"][0]["feature_name"] == "momentum"
+        mock_session.commit.assert_awaited_once()
 
     def test_factor_experiment_rejects_caller_claimed_oos_result(
         self,

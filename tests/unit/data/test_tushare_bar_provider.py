@@ -15,6 +15,7 @@ from finboard_data import (
     TushareRequestLimitError,
 )
 from finboard_data.cache import make_symbol
+from finboard_shared.models import Bar
 from finboard_shared.types import BarPeriod
 
 
@@ -68,6 +69,27 @@ class FakeTushareBarClient:
     def suspend_d(self, **kwargs: str) -> object:
         self.calls.append(("suspend_d", kwargs))
         return self.suspend_rows
+
+
+def _cached_bar(
+    day: date,
+    *,
+    source: str = "tushare",
+    high: str = "11",
+) -> Bar:
+    symbol = make_symbol("000001.SZ")
+    return Bar(
+        symbol=symbol,
+        period=BarPeriod.D1,
+        timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+        open=Decimal("10"),
+        high=Decimal(high),
+        low=Decimal("9"),
+        close=Decimal("10"),
+        volume=Decimal("100"),
+        amount=Decimal("1000"),
+        source=source,
+    )
 
 
 def _provider(
@@ -244,3 +266,107 @@ async def test_daily_budget_persists_and_fails_before_overrun(tmp_path: Path) ->
     assert '"requests": 1' in usage_file.read_text(encoding="utf-8")
     with pytest.raises(TushareRequestLimitError, match="1/1"):
         await budget.acquire()
+
+
+@pytest.mark.unit
+async def test_cache_hit_does_not_call_tushare_for_same_source(tmp_path: Path) -> None:
+    provider = TushareBarProvider(
+        client=FakeTushareBarClient(),
+        cache_dir=tmp_path,
+        max_retries=0,
+    )
+    assert provider._cache is not None
+    symbol = make_symbol("000001.SZ")
+    await provider._cache.write(
+        symbol,
+        BarPeriod.D1,
+        "none",
+        [_cached_bar(date(2024, 1, 2)), _cached_bar(date(2024, 1, 3))],
+    )
+
+    from unittest.mock import AsyncMock
+
+    fetch = AsyncMock()
+    provider._fetch_from_akshare = fetch  # type: ignore[method-assign]
+    result = await provider.update_cache(
+        symbol,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        adjust="none",
+    )
+
+    assert result is True
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_incremental_cache_fetch_starts_after_last_cached_date(tmp_path: Path) -> None:
+    provider = TushareBarProvider(
+        client=FakeTushareBarClient(),
+        cache_dir=tmp_path,
+        max_retries=0,
+    )
+    assert provider._cache is not None
+    symbol = make_symbol("000001.SZ")
+    await provider._cache.write(
+        symbol,
+        BarPeriod.D1,
+        "none",
+        [_cached_bar(date(2024, 1, 2)), _cached_bar(date(2024, 1, 3))],
+    )
+
+    from unittest.mock import AsyncMock
+
+    fetch = AsyncMock(return_value=[_cached_bar(date(2024, 1, 4)), _cached_bar(date(2024, 1, 5))])
+    provider._fetch_from_akshare = fetch  # type: ignore[method-assign]
+    result = await provider.update_cache(
+        symbol,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 5),
+        adjust="none",
+    )
+
+    assert result is True
+    fetch.assert_awaited_once()
+    assert fetch.await_args is not None
+    assert fetch.await_args.args[2:] == (date(2024, 1, 4), date(2024, 1, 5), "none")
+
+
+@pytest.mark.unit
+async def test_quality_anomaly_only_refetches_its_date(tmp_path: Path) -> None:
+    provider = TushareBarProvider(
+        client=FakeTushareBarClient(),
+        cache_dir=tmp_path,
+        max_retries=0,
+    )
+    assert provider._cache is not None
+    symbol = make_symbol("000001.SZ")
+    await provider._cache.write(
+        symbol,
+        BarPeriod.D1,
+        "none",
+        [
+            _cached_bar(date(2024, 1, 2)),
+            _cached_bar(date(2024, 1, 3), high="8"),
+            _cached_bar(date(2024, 1, 4)),
+        ],
+    )
+
+    from unittest.mock import AsyncMock
+
+    fetch = AsyncMock(return_value=[_cached_bar(date(2024, 1, 3))])
+    provider._fetch_from_akshare = fetch  # type: ignore[method-assign]
+    result = await provider.update_cache(
+        symbol,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 4),
+        adjust="none",
+    )
+
+    assert result is True
+    fetch.assert_awaited_once()
+    assert fetch.await_args is not None
+    assert fetch.await_args.args[2:] == (date(2024, 1, 3), date(2024, 1, 3), "none")

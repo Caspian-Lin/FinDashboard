@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -19,6 +20,21 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 class TushareRequestLimitError(RuntimeError):
     """Tushare 本地请求预算已耗尽。"""
+
+
+@dataclass(frozen=True, slots=True)
+class TushareBudgetSnapshot:
+    """当前进程配置的 Tushare 请求预算快照。"""
+
+    date: str
+    requests_per_minute: int
+    daily_limit: int
+    used: int
+
+    @property
+    def remaining(self) -> int:
+        """今日尚可预占的请求数。"""
+        return max(0, self.daily_limit - self.used)
 
 
 class TushareBudget(Protocol):
@@ -44,6 +60,7 @@ class TushareRequestBudget:
             raise ValueError("requests_per_minute 必须 >= 1")
         if daily_request_limit < 1:
             raise ValueError("daily_request_limit 必须 >= 1")
+        self._requests_per_minute = requests_per_minute
         self._minimum_interval = 60.0 / requests_per_minute
         self._daily_request_limit = daily_request_limit
         self._usage_file = Path(usage_file)
@@ -67,6 +84,17 @@ class TushareRequestBudget:
                 )
             await asyncio.to_thread(self._write_usage, today, used + 1)
             self._last_request_at = loop.time()
+
+    async def snapshot(self) -> TushareBudgetSnapshot:
+        """读取当前日期的本地预算用量,不占用请求额度。"""
+        today = self._now().astimezone(_SHANGHAI).date().isoformat()
+        used = await asyncio.to_thread(self._read_usage, today)
+        return TushareBudgetSnapshot(
+            date=today,
+            requests_per_minute=self._requests_per_minute,
+            daily_limit=self._daily_request_limit,
+            used=used,
+        )
 
     def _read_usage(self, today: str) -> int:
         try:

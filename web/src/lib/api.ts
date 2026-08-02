@@ -23,6 +23,16 @@ function errorMessage(detail: unknown, fallback: string): string {
       )
       .join("；");
   }
+  if (detail && typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    if (typeof record.message === "string") return record.message;
+    if (typeof record.msg === "string") return record.msg;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return fallback;
+    }
+  }
   return fallback;
 }
 
@@ -168,6 +178,7 @@ export const api = {
   getDataStatus: () => fetchJSON<DataStatus[]>("/data/status"),
   getDataStatusPage: (limit = 200, offset = 0) =>
     fetchJSON<DataStatusList>(`/data/status-page?limit=${limit}&offset=${offset}`),
+  getTushareQuota: () => fetchJSON<TushareQuota>("/data/tushare-quota"),
   fetchData: (body: DataFetchRequest) =>
     fetchJSON<FetchResult>("/data/fetch", { method: "POST", body: JSON.stringify(body) }),
   fetchAllData: () =>
@@ -629,7 +640,17 @@ export interface BulkDownloadStatus {
   fallback_used?: number;
   lifecycle_events?: number;
   lifecycle_sync_failed?: number;
+  cache_hits?: number;
+  cache_misses?: number;
   quality_reports?: QualityReport[];
+}
+
+export interface TushareQuota {
+  date: string;
+  requests_per_minute: number;
+  daily_limit: number;
+  used: number;
+  remaining: number;
 }
 
 export interface SchedulerConfig {

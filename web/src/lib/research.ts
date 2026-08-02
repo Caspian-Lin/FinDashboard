@@ -9,19 +9,48 @@ export type ResearchRunStatus =
   | "running"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "interrupted"
+  | "rejected";
 
 export interface ResearchRunSummary {
   run_id: string;
+  idempotency_key?: string;
+  replay_of_run_id?: string | null;
   strategy_id: string;
-  strategy_version: number;
   status: ResearchRunStatus;
   strategy_kind: string;
+  /** 研究运行 API 将版本冻结在 manifest.strategy_version 中。 */
+  strategy_version?: number;
   requested_by: string;
   created_at: string;
   started_at?: string;
   completed_at?: string;
+  updated_at?: string;
+  initial_capital?: number;
+  manifest?: Record<string, unknown>;
+  result?: Record<string, unknown> | null;
+  result_checksum?: string | null;
+  error_code?: string | null;
+  error_summary?: string | null;
+}
+
+export interface ResearchRunQueueIn {
+  idempotency_key: string;
+  strategy_id: string;
+  strategy_version: number;
+  dataset_release_ids: string[];
+  factor_snapshot_ids: string[];
+  parameters: Record<string, unknown>;
+  validation_config: Record<string, unknown>;
+  portfolio_config: Record<string, unknown>;
+  risk_config: Record<string, unknown>;
+  execution_config: Record<string, unknown>;
+  fee_config: Record<string, unknown>;
+  benchmark_config: Record<string, unknown>;
+  code_version: string;
   initial_capital: number;
+  requested_by: string;
 }
 
 export interface ResearchArtifact {
@@ -55,25 +84,12 @@ export interface ResearchRunDetail extends ResearchRunSummary {
   error_code?: string;
 }
 
-export interface ResearchRunQueueIn {
-  idempotency_key: string;
-  strategy_id: string;
-  strategy_version: number;
-  dataset_release_ids: string[];
-  factor_snapshot_ids: string[];
-  parameters: Record<string, unknown>;
-  validation_config: Record<string, unknown>;
-  portfolio_config: Record<string, unknown>;
-  risk_config: Record<string, unknown>;
-  execution_config: Record<string, unknown>;
-  fee_config: Record<string, unknown>;
-  benchmark_config: Record<string, unknown>;
-  code_version: string;
-  initial_capital: number;
-  requested_by: string;
-}
-
 export const researchRunApi = {
+  queue: (body: ResearchRunQueueIn) =>
+    fetchJSON<ResearchRunSummary>(`/research/runs`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   list: (params?: { status?: string[]; strategy_kind?: string; limit?: number }) => {
     const q = new URLSearchParams();
     if (params?.limit) q.set("limit", String(params.limit));
@@ -105,27 +121,61 @@ export const researchRunApi = {
 export interface FactorCatalogEntry {
   name: string;
   role: string;
-  description?: string;
   version: string;
-  dependencies?: string[];
-  preference?: string;
-  frequency?: string;
-  unit?: string;
-  source_fields?: string[];
-  economic_hypothesis?: string;
-  expected_failure?: string;
-  signal_eligible?: boolean;
+  preference: string;
+  frequency: string;
+  unit: string;
+  source_fields: string[];
+  calculation_window: number | null;
+  default_transform: string;
+  default_neutralization: string[];
+  available_at_rule: string;
+  missing_policy: string;
+  economic_hypothesis: string;
+  expected_failure: string;
+  implementation: string;
+  signal_eligible: boolean;
+  checksum: string;
+}
+
+export interface FeatureObservation {
+  symbol: string;
+  feature_name: string;
+  value: number;
+  observed_at: string;
+  available_at: string;
+  source: string;
+  source_version: string;
+  market?: string | null;
+  asset_class?: string | null;
+  industry?: string | null;
 }
 
 export interface FeatureSnapshot {
   snapshot_id: string;
   dataset_release_id: string;
-  factor_names: string[];
-  row_count: number;
-  symbol_count: number;
-  created_at: string;
-  research_status: string;
+  dataset_release_checksum: string;
+  decision_at: string;
+  published_at: string;
+  framework_version: string;
+  calculation_windows: Record<string, number>;
+  transformations: Record<string, string>;
+  neutralization: Record<string, string[]>;
+  code_version: string;
+  observations: FeatureObservation[];
   checksum: string;
+  issues: string[];
+  /** 兼容旧 API fixture,真实后端以 observations 为准。 */
+  factor_names?: string[];
+  row_count?: number;
+  symbol_count?: number;
+  created_at?: string;
+  research_status?: string;
+}
+
+export interface FeatureSnapshotCreate {
+  dataset_release_id: string;
+  decision_at: string;
 }
 
 export interface FactorSignal {
@@ -167,6 +217,11 @@ export const factorLabApi = {
       `/research/factors/catalog${q.toString() ? "?" + q : ""}`,
     );
   },
+  createFeatureSnapshot: (body: FeatureSnapshotCreate) =>
+    fetchJSON<FeatureSnapshot>(`/research/factors/features`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   features: (datasetReleaseId?: string, limit?: number) => {
     const q = new URLSearchParams();
     if (datasetReleaseId) q.set("dataset_release_id", datasetReleaseId);
@@ -232,8 +287,8 @@ export interface ValidationTrial {
 export interface ValidationExperiment {
   experiment_id: string;
   hypothesis: string;
-  version_stamp: string;
-  status: ExperimentStatus;
+  version_stamp: string | Record<string, unknown>;
+  status: ExperimentStatus | "hypothesis";
   plan: Record<string, unknown>;
   thresholds: Record<string, unknown>;
   robustness: Record<string, unknown>;
@@ -295,9 +350,34 @@ export interface ResearchStrategySpec {
   version: number;
   spec: Record<string, unknown>;
   checksum: string;
+  /** 前端兼容字段：后端以 status="published" 表示已发布。 */
   published: boolean;
+  status?: string;
+  schema_version?: string;
+  name?: string;
+  strategy_kind?: string;
+  change_type?: string;
+  validation_errors?: Record<string, unknown>[];
+  parent_version?: number | null;
+  rollback_of_version?: number | null;
   created_at: string;
-  created_by: string;
+  created_by?: string;
+  published_at?: string | null;
+}
+
+/** 模板接口直接返回策略规格对象，不包裹在保存版本接口的 spec 字段中。 */
+export type StrategySpecTemplate = Record<string, unknown>;
+
+type StrategySpecWire = Record<string, unknown>;
+
+function normalizeStrategySpec(value: StrategySpecWire): ResearchStrategySpec {
+  const status = typeof value.status === "string" ? value.status : undefined;
+  return {
+    ...(value as unknown as ResearchStrategySpec),
+    published:
+      typeof value.published === "boolean" ? value.published : status === "published",
+    status,
+  };
 }
 
 export interface StrategySpecValidation {
@@ -330,7 +410,7 @@ export const strategySpecApi = {
     if (params?.strategy_id) q.set("strategy_id", params.strategy_id);
     if (params?.dataset_release_ids)
       params.dataset_release_ids.forEach((id) => q.append("dataset_release_ids", id));
-    return fetchJSON<ResearchStrategySpec>(
+    return fetchJSON<StrategySpecTemplate>(
       `/research/strategy-specs/templates/${kind}${q.toString() ? "?" + q : ""}`,
     );
   },
@@ -339,36 +419,43 @@ export const strategySpecApi = {
       method: "POST",
       body: JSON.stringify({ spec, disabled_factors: disabledFactors ?? [] }),
     }),
-  createDraft: (spec: Record<string, unknown>, expectedVersion: number) =>
-    fetchJSON<ResearchStrategySpec>(`/research/strategy-specs/drafts`, {
+  createDraft: (spec: Record<string, unknown>, expectedVersion?: number) => {
+    const body: Record<string, unknown> = { spec };
+    if (expectedVersion !== undefined) body.expected_version = expectedVersion;
+    return fetchJSON<StrategySpecWire>(`/research/strategy-specs/drafts`, {
       method: "POST",
-      body: JSON.stringify({ spec, expected_version: expectedVersion }),
-    }),
+      body: JSON.stringify(body),
+    }).then(normalizeStrategySpec);
+  },
   supersede: (strategyId: string, spec: Record<string, unknown>, expectedVersion: number) =>
-    fetchJSON<ResearchStrategySpec>(
+    fetchJSON<StrategySpecWire>(
       `/research/strategy-specs/${strategyId}/supersede`,
       { method: "POST", body: JSON.stringify({ spec, expected_version: expectedVersion }) },
-    ),
+    ).then(normalizeStrategySpec),
   publish: (strategyId: string, version: number, expectedVersion: number) =>
-    fetchJSON<ResearchStrategySpec>(
+    fetchJSON<StrategySpecWire>(
       `/research/strategy-specs/${strategyId}/publish`,
       { method: "POST", body: JSON.stringify({ version, expected_version: expectedVersion }) },
-    ),
+    ).then(normalizeStrategySpec),
   rollback: (strategyId: string, targetVersion: number, expectedVersion: number) =>
-    fetchJSON<ResearchStrategySpec>(
+    fetchJSON<StrategySpecWire>(
       `/research/strategy-specs/${strategyId}/rollback`,
       { method: "POST", body: JSON.stringify({ target_version: targetVersion, expected_version: expectedVersion }) },
-    ),
+    ).then(normalizeStrategySpec),
   list: (limit?: number) => {
     const q = limit ? `?limit=${limit}` : "";
-    return fetchJSON<ResearchStrategySpec[]>(`/research/strategy-specs${q}`);
+    return fetchJSON<StrategySpecWire[]>(`/research/strategy-specs${q}`).then((items) =>
+      items.map(normalizeStrategySpec),
+    );
   },
   history: (strategyId: string) =>
-    fetchJSON<ResearchStrategySpec[]>(`/research/strategy-specs/${strategyId}/history`),
-  version: (strategyId: string, version: number) =>
-    fetchJSON<ResearchStrategySpec>(
-      `/research/strategy-specs/${strategyId}/versions/${version}`,
+    fetchJSON<StrategySpecWire[]>(`/research/strategy-specs/${strategyId}/history`).then((items) =>
+      items.map(normalizeStrategySpec),
     ),
+  version: (strategyId: string, version: number) =>
+    fetchJSON<StrategySpecWire>(
+      `/research/strategy-specs/${strategyId}/versions/${version}`,
+    ).then(normalizeStrategySpec),
   diff: (strategyId: string, fromVersion: number, toVersion: number) =>
     fetchJSON<StrategySpecDiff>(
       `/research/strategy-specs/${strategyId}/diff?from_version=${fromVersion}&to_version=${toVersion}`,
@@ -693,5 +780,32 @@ export const datasetApi = {
     return fetchJSON<LifecycleEvent[]>(`/instruments/lifecycle/${symbol}${q.toString() ? "?" + q : ""}`);
   },
 };
+
+export function featureSnapshotNames(snapshot: FeatureSnapshot): string[] {
+  if (snapshot.factor_names && snapshot.factor_names.length > 0) {
+    return snapshot.factor_names;
+  }
+  return Array.from(
+    new Set(snapshot.observations.map((item) => item.feature_name)),
+  ).sort();
+}
+
+export function featureSnapshotSymbolCount(snapshot: FeatureSnapshot): number {
+  if (typeof snapshot.symbol_count === "number") return snapshot.symbol_count;
+  return new Set(snapshot.observations.map((item) => item.symbol)).size;
+}
+
+export function featureSnapshotObservationCount(snapshot: FeatureSnapshot): number {
+  if (typeof snapshot.row_count === "number") return snapshot.row_count;
+  return snapshot.observations.length;
+}
+
+export function featureSnapshotStatus(snapshot: FeatureSnapshot): string {
+  return snapshot.research_status ?? "published";
+}
+
+export function featureSnapshotCreatedAt(snapshot: FeatureSnapshot): string {
+  return snapshot.created_at ?? snapshot.published_at;
+}
 
 export type { ApiError };

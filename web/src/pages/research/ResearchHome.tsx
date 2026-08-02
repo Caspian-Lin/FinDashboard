@@ -20,6 +20,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { StatCard } from "@/components/ui/stat-card";
 import { LoadingState } from "@/components/ui/states";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { researchRunApi } from "@/lib/research";
 import { experimentApi } from "@/lib/research";
 import { aiResearchApi } from "@/lib/ai";
@@ -40,31 +41,32 @@ const workflowSteps = [
 ];
 
 export default function ResearchHome() {
-  const { data: runs, isLoading: runsLoading } = useQuery({
+  const { data: runs, isLoading: runsLoading, isError: runsError } = useQuery({
     queryKey: ["research-runs", "home"],
     queryFn: () => researchRunApi.list({ limit: 5 }),
   });
-  const { data: experiments } = useQuery({
+  const { data: experiments, isError: experimentsError } = useQuery({
     queryKey: ["experiments", "home"],
     queryFn: () => experimentApi.list({ limit: 5 }),
   });
-  const { data: drafts } = useQuery({
+  const { data: drafts, isError: draftsError } = useQuery({
     queryKey: ["ai-drafts", "home"],
     queryFn: () => aiResearchApi.listDrafts({ status: "proposed" }),
   });
-  const { data: releases } = useQuery({
+  const { data: releases, isError: releasesError } = useQuery({
     queryKey: ["dataset-releases", "home"],
     queryFn: () => datasetApi.releases({ limit: 5 }),
   });
-  const { data: simSessions } = useQuery({
+  const { data: simSessions, isError: simSessionsError } = useQuery({
     queryKey: ["sim-sessions", "home"],
     queryFn: () => simulationApi.listSessions({ limit: 5 }),
   });
 
-  const completedRuns = runs?.filter((r) => r.status === "completed").length ?? 0;
-  const runningRuns = runs?.filter((r) => r.status === "running" || r.status === "queued").length ?? 0;
-  const completedExps = experiments?.filter((e) => e.status === "completed").length ?? 0;
-  const activeSims = simSessions?.filter((s) => s.status === "running").length ?? 0;
+  const completedRuns = runsError ? null : runs?.filter((r) => r.status === "completed").length ?? 0;
+  const runningRuns = runsError ? null : runs?.filter((r) => r.status === "running" || r.status === "queued").length ?? 0;
+  const completedExps = experimentsError ? null : experiments?.filter((e) => e.status === "completed").length ?? 0;
+  const activeSims = simSessionsError ? null : simSessions?.filter((s) => s.status === "running").length ?? 0;
+  const hasQueryError = runsError || experimentsError || draftsError || releasesError || simSessionsError;
 
   return (
     <div>
@@ -73,12 +75,21 @@ export default function ResearchHome() {
         description="从数据到模拟盘的完整研究工作流"
       />
 
+      {hasQueryError && (
+        <Alert variant="warning" className="mb-4">
+          <AlertTitle>研究首页有数据未加载</AlertTitle>
+          <AlertDescription>
+            “—”表示接口暂时不可用，不代表数量为 0。请进入对应工作流页面重试；已加载的数据不会被覆盖。
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Stats */}
       <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="已完成研究运行" value={completedRuns} icon={CheckCircle2} hint={runningRuns > 0 ? `${runningRuns} 个进行中` : "全部完成"} />
-        <StatCard label="已完成实验" value={completedExps ?? 0} icon={TestTube} />
-        <StatCard label="待审批草案" value={drafts?.length ?? 0} icon={Sparkles} />
-        <StatCard label="活动模拟会话" value={activeSims} icon={PlayCircle} />
+        <StatCard label="已完成研究运行" value={completedRuns ?? "—"} icon={CheckCircle2} hint={runningRuns === null ? "加载失败" : runningRuns > 0 ? `${runningRuns} 个进行中` : "全部完成"} />
+        <StatCard label="已完成实验" value={completedExps ?? "—"} icon={TestTube} hint={experimentsError ? "加载失败" : undefined} />
+        <StatCard label="待审批草案" value={draftsError ? "—" : drafts?.length ?? 0} icon={Sparkles} hint={draftsError ? "加载失败" : undefined} />
+        <StatCard label="活动模拟会话" value={activeSims ?? "—"} icon={PlayCircle} hint={simSessionsError ? "加载失败" : undefined} />
       </div>
 
       {/* Workflow quick access */}
@@ -118,6 +129,8 @@ export default function ResearchHome() {
           <CardContent>
             {runsLoading ? (
               <LoadingState rows={3} />
+            ) : runsError ? (
+              <p className="py-4 text-center text-sm text-destructive">研究运行加载失败，请进入「研究运行」重试。</p>
             ) : runs && runs.length > 0 ? (
               <div className="space-y-2">
                 {runs.slice(0, 5).map((run) => (
@@ -149,7 +162,9 @@ export default function ResearchHome() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {releases && releases.length > 0 ? (
+            {releasesError ? (
+              <p className="py-4 text-center text-sm text-destructive">数据发布加载失败，请进入「数据与标的」重试。</p>
+            ) : releases && releases.length > 0 ? (
               <div className="space-y-2">
                 {releases.slice(0, 5).map((rel) => (
                   <Link
@@ -180,7 +195,9 @@ export default function ResearchHome() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {drafts && drafts.length > 0 ? (
+            {draftsError ? (
+              <p className="py-4 text-center text-sm text-destructive">AI 草案加载失败，请进入「AI 助手」重试。</p>
+            ) : drafts && drafts.length > 0 ? (
               <div className="space-y-2">
                 {drafts.slice(0, 5).map((draft) => (
                   <Link
@@ -211,7 +228,9 @@ export default function ResearchHome() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {simSessions && simSessions.length > 0 ? (
+            {simSessionsError ? (
+              <p className="py-4 text-center text-sm text-destructive">模拟会话加载失败，请进入「模拟盘」重试。</p>
+            ) : simSessions && simSessions.length > 0 ? (
               <div className="space-y-2">
                 {simSessions.slice(0, 5).map((sess) => (
                   <Link

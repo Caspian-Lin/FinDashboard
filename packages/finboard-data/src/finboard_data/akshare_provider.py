@@ -166,6 +166,8 @@ class AkShareProvider:
             and metadata.last_date is not None
             and metadata.last_date >= expected_end
         ):
+            if on_status is not None:
+                on_status("cache_hit")
             return True
 
         fetch_start = start

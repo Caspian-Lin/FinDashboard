@@ -180,6 +180,41 @@ function strField(
   return String(v);
 }
 
+function versionStampText(value: string | Record<string, unknown>): string {
+  if (typeof value === "string") return value;
+  const labels: Record<string, string> = {
+    matching_model_version: "撮合",
+    asset_rules_version: "资产规则",
+    factor_version: "因子",
+    strategy_kind: "策略",
+  };
+  const valueText = (item: unknown): string => {
+    if (item && typeof item === "object") {
+      const size = Object.keys(item as Record<string, unknown>).length;
+      return `${size} 项已冻结`;
+    }
+    return String(item);
+  };
+  const parts = Object.entries(value)
+    .filter(([, item]) => item !== null && item !== undefined && item !== "")
+    .map(([key, item]) => `${labels[key] ?? key} ${valueText(item)}`);
+  return parts.length > 0 ? parts.join(" · ") : "版本信息待补充";
+}
+
+function experimentStatusLabel(status: string): string {
+  return (
+    {
+      hypothesis: "假设已冻结",
+      draft: "草稿",
+      registered: "已注册",
+      running: "运行中",
+      completed: "已完成",
+      failed: "失败",
+      rejected: "已拒绝",
+    } as Record<string, string>
+  )[status] ?? status;
+}
+
 function daysBetween(start: string, end: string): number {
   const s = new Date(start).getTime();
   const e = new Date(end).getTime();
@@ -852,7 +887,9 @@ export default function Experiments() {
                       )}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <StatusBadge status={exp.status} />
+                        <StatusBadge status={exp.status}>
+                          {experimentStatusLabel(exp.status)}
+                        </StatusBadge>
                         <span className="font-mono text-xs text-muted-foreground">
                           {exp.experiment_id}
                         </span>
@@ -866,7 +903,7 @@ export default function Experiments() {
                         </span>
                         {exp.version_stamp && (
                           <Badge variant="outline" className="font-mono text-[10px]">
-                            {exp.version_stamp}
+                            {versionStampText(exp.version_stamp)}
                           </Badge>
                         )}
                       </div>
@@ -900,13 +937,17 @@ export default function Experiments() {
                       <span className="font-mono text-sm">
                         {selectedId}
                       </span>
-                      {detail && <StatusBadge status={detail.status} />}
+                      {detail && (
+                        <StatusBadge status={detail.status}>
+                          {experimentStatusLabel(detail.status)}
+                        </StatusBadge>
+                      )}
                     </CardTitle>
                     {detail && (
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         {detail.version_stamp && (
                           <Badge variant="outline" className="font-mono">
-                            {detail.version_stamp}
+                            {versionStampText(detail.version_stamp)}
                           </Badge>
                         )}
                         <span>·</span>

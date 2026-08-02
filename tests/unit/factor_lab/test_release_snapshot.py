@@ -112,6 +112,7 @@ async def test_frozen_release_to_feature_snapshot_has_no_future_data(
                     close=close,
                     volume=Decimal("1000000"),
                     amount=close * Decimal("1000000"),
+                    source="fixed_sample",
                 )
             )
         await cache.write(

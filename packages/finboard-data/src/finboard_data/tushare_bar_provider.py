@@ -10,6 +10,7 @@ import asyncio
 import importlib
 import math
 import os
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -20,6 +21,8 @@ from typing import Literal, Protocol, cast
 import structlog
 
 from finboard_data.akshare_provider import AkShareProvider
+from finboard_data.cache import ParquetCache, expected_last_bar_date
+from finboard_data.quality import BarQualityChecker
 from finboard_data.tushare_budget import TushareBudget, shared_tushare_budget
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod
@@ -95,10 +98,47 @@ class TushareBarProvider(AkShareProvider):
     def __repr__(self) -> str:
         return "TushareBarProvider(source='tushare', asset='stock', period='1d')"
 
-    @staticmethod
-    def _is_cache_complete(cached: list[Bar], start: date, end: date) -> bool:
-        """旧来源缓存不能冒充 Tushare 命中。"""
-        return bool(cached) and {bar.source for bar in cached} == {"tushare"} and AkShareProvider._is_cache_complete(cached, start, end)
+    async def fetch_bars(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+        *,
+        adjust: str = "qfq",
+    ) -> list[Bar]:
+        """读取同源健康缓存,只请求覆盖之外或异常日期。"""
+        if self._cache is None:
+            return await super().fetch_bars(
+                symbol,
+                period,
+                start,
+                end,
+                adjust=adjust,
+            )
+
+        cached = await self._cache.read(symbol, period, adjust)
+        ranges = self._cache_fetch_ranges(cached, start, end)
+        if not ranges:
+            logger.debug("tushare.cache_hit", symbol=symbol.code, count=len(cached))
+            return ParquetCache.filter_by_date(cached, start, end)
+
+        fresh = await self._fetch_ranges(symbol, period, adjust, ranges)
+        if fresh:
+            if cached and {bar.source for bar in cached} == {"tushare"}:
+                all_bars = await self._cache.merge(
+                    symbol,
+                    period,
+                    adjust,
+                    fresh,
+                    existing_bars=cached,
+                )
+            else:
+                await self._cache.write(symbol, period, adjust, fresh)
+                all_bars = fresh
+        else:
+            all_bars = cached
+        return ParquetCache.filter_by_date(all_bars, start, end)
 
     async def update_cache(
         self,
@@ -110,27 +150,120 @@ class TushareBarProvider(AkShareProvider):
         adjust: str = "qfq",
         on_status: Callable[[str], None] | None = None,
     ) -> bool:
-        """来源切换时全量替换,避免与旧 akshare/yfinance 缓存混合。"""
-        if self._cache is not None:
-            metadata = await self._cache.metadata_for(symbol, period, adjust)
-            if metadata is not None and metadata.source != "tushare":
-                if on_status is not None:
-                    on_status("fetching")
-                fresh = await self._fetch_from_akshare(symbol, period, start, end, adjust)
-                if not fresh:
-                    return False
-                if on_status is not None:
-                    on_status("writing_cache")
-                await self._cache.write(symbol, period, adjust, fresh)
-                return True
-        return await super().update_cache(
-            symbol,
-            period,
-            start,
-            end,
-            adjust=adjust,
-            on_status=on_status,
+        """只更新 Tushare 缓存缺口,来源切换时替换为单一来源。"""
+        if self._cache is None:
+            return await super().update_cache(
+                symbol,
+                period,
+                start,
+                end,
+                adjust=adjust,
+                on_status=on_status,
+            )
+
+        if on_status is not None:
+            on_status("checking_cache")
+        cached = await self._cache.read(symbol, period, adjust)
+        ranges = self._cache_fetch_ranges(cached, start, end)
+        if not ranges:
+            if on_status is not None:
+                on_status("cache_hit")
+            return True
+
+        if on_status is not None:
+            on_status("fetching")
+        fresh = await self._fetch_ranges(symbol, period, adjust, ranges)
+        if not fresh:
+            # 停牌区间可能合法地返回空数据;已有缓存仍可继续使用。
+            return bool(cached)
+
+        if on_status is not None:
+            on_status("writing_cache")
+        if cached and {bar.source for bar in cached} == {"tushare"}:
+            await self._cache.merge(
+                symbol,
+                period,
+                adjust,
+                fresh,
+                existing_bars=cached,
+            )
+        else:
+            # AkShare/yfinance 或未记录来源的历史缓存不能与 Tushare 混写。
+            await self._cache.write(symbol, period, adjust, fresh)
+        return True
+
+    async def _fetch_ranges(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        adjust: str,
+        ranges: tuple[tuple[date, date], ...],
+    ) -> list[Bar]:
+        fresh: list[Bar] = []
+        for range_start, range_end in ranges:
+            fresh.extend(
+                await self._fetch_from_akshare(
+                    symbol,
+                    period,
+                    range_start,
+                    range_end,
+                    adjust,
+                )
+            )
+        return fresh
+
+    @staticmethod
+    def _cache_fetch_ranges(
+        cached: list[Bar],
+        start: date,
+        end: date,
+    ) -> tuple[tuple[date, date], ...]:
+        """规划不重复请求的日期段,并把请求区间内坏日期视作缺口。"""
+        effective_end = expected_last_bar_date(end)
+        if start > effective_end:
+            return ()
+        if not cached:
+            return ((start, effective_end),)
+        if {bar.source for bar in cached} != {"tushare"}:
+            return ((start, effective_end),)
+
+        window = ParquetCache.filter_by_date(cached, start, effective_end)
+        checker = BarQualityChecker()
+        quality = checker.check(window)
+        counts = Counter(bar.timestamp.date() for bar in window)
+        bad_dates = set(quality.anomaly_dates)
+        bad_dates.update(
+            bar_date for bar_date, count in counts.items() if count > 1
         )
+
+        all_dates = [bar.timestamp.date() for bar in cached]
+        first_date = min(all_dates)
+        last_date = max(all_dates)
+        ranges: list[tuple[date, date]] = []
+        if start < first_date:
+            ranges.append((start, min(effective_end, first_date - timedelta(days=1))))
+        if effective_end > last_date:
+            ranges.append((max(start, last_date + timedelta(days=1)), effective_end))
+        ranges.extend((bad_date, bad_date) for bad_date in sorted(bad_dates))
+        return TushareBarProvider._coalesce_ranges(
+            [item for item in ranges if item[0] <= item[1]]
+        )
+
+    @staticmethod
+    def _coalesce_ranges(
+        ranges: list[tuple[date, date]],
+    ) -> tuple[tuple[date, date], ...]:
+        if not ranges:
+            return ()
+        ordered = sorted(ranges)
+        merged: list[tuple[date, date]] = [ordered[0]]
+        for range_start, range_end in ordered[1:]:
+            previous_start, previous_end = merged[-1]
+            if range_start <= previous_end + timedelta(days=1):
+                merged[-1] = (previous_start, max(previous_end, range_end))
+            else:
+                merged.append((range_start, range_end))
+        return tuple(merged)
 
     async def _fetch_from_akshare(
         self,

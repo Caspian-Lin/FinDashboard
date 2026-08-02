@@ -4,10 +4,12 @@ import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
 import type { QualityRepairResult, QualityReport } from "../lib/api";
 import { INFO_HINTS, type InfoHintDefinition } from "../lib/infoHints";
+import { cn } from "../lib/utils";
 
 const BULK_PHASE_LABELS: Record<string, string> = {
   starting: "准备任务",
   checking_cache: "检查缓存",
+  cache_hit: "缓存命中",
   fetching: "请求行情",
   reading_cache: "读取缓存",
   writing_cache: "写入缓存",
@@ -104,6 +106,13 @@ export default function Data() {
   const effectiveBulkProvider = dlSource || defaultProvider;
   const tushareBulk = effectiveBulkProvider === "tushare";
 
+  const { data: tushareQuota, isLoading: tushareQuotaLoading } = useQuery({
+    queryKey: ["tushare-quota"],
+    queryFn: api.getTushareQuota,
+    enabled: tushareBulk,
+    refetchInterval: tushareBulk ? 5000 : false,
+  });
+
   const sync = useMutation({
     mutationFn: () => api.syncUniverse(),
     onSuccess: () => {
@@ -134,6 +143,9 @@ export default function Data() {
       }),
     onSuccess: (data) => {
       queryClient.setQueryData(["bulk-download-status"], data);
+      if (tushareBulk) {
+        queryClient.invalidateQueries({ queryKey: ["tushare-quota"] });
+      }
     },
   });
 
@@ -172,6 +184,9 @@ export default function Data() {
 
   const cacheTotal = status?.total ?? 0;
   const cacheTotalPages = Math.max(1, Math.ceil(cacheTotal / PAGE_SIZE));
+  const tushareQuotaPercent = tushareQuota
+    ? Math.min(100, (tushareQuota.used / Math.max(1, tushareQuota.daily_limit)) * 100)
+    : 0;
 
   return (
     <div>
@@ -421,6 +436,74 @@ export default function Data() {
             : "ETF 与其他资产请单独拉取。发布时可与 Tushare 股票缓存组合为多资产混合来源数据集。"}
         </p>
 
+        {tushareBulk && (
+          <div
+            className="mb-4 rounded-lg border border-primary/25 bg-primary/5 p-4"
+            aria-live="polite"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">Tushare 请求预算</h3>
+                <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
+                  每次 daily、adj_factor、停复牌请求及重试都会计入本地保护预算。每日上限按北京时间每天 00:00 自动重置，100,000 次是单日额度，不是累计总额度。这里显示的是本应用配置和本地用量，不是 Tushare 账户后台的实时权限。
+                </p>
+              </div>
+              <span className="rounded bg-primary/15 px-2 py-1 text-xs font-medium text-primary">
+                RPM {tushareQuota?.requests_per_minute ?? "…"}
+              </span>
+            </div>
+            {tushareQuotaLoading && !tushareQuota ? (
+              <p className="mt-3 text-sm text-muted-foreground">正在读取今日预算…</p>
+            ) : tushareQuota ? (
+              <>
+                <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                  <div>
+                    <span className="text-muted-foreground">统计日期（北京时间）</span>
+                    <p className="mt-1 font-medium tabular-nums">{tushareQuota.date}</p>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">今日已用</span>
+                    <p className="mt-1 font-medium tabular-nums">
+                      {tushareQuota.used.toLocaleString()} 次
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">每日上限（00:00刷新）</span>
+                    <p className="mt-1 font-medium tabular-nums">
+                      {tushareQuota.daily_limit.toLocaleString()} 次
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">剩余预算</span>
+                    <p className={cn(
+                      "mt-1 font-medium tabular-nums",
+                      tushareQuota.remaining === 0 ? "text-destructive" : "text-success",
+                    )}>
+                      {tushareQuota.remaining.toLocaleString()} 次
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={cn(
+                      "h-full rounded-full transition-[width] duration-300",
+                      tushareQuotaPercent >= 90 ? "bg-destructive" : tushareQuotaPercent >= 75 ? "bg-warning" : "bg-primary",
+                    )}
+                    style={{ width: `${tushareQuotaPercent}%` }}
+                  />
+                </div>
+                {tushareQuotaPercent >= 75 && (
+                  <p className="mt-2 text-xs text-warning">
+                    今日本地预算已使用 {tushareQuotaPercent.toFixed(1)}%，继续批量拉取可能提前触发保护阈值。
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="mt-3 text-sm text-destructive">预算读取失败，请检查 API 服务和配置文件。</p>
+            )}
+          </div>
+        )}
+
         {/* Progress bar */}
         {isDownloading && bulkStatus && (
           <div className="mt-4" aria-live="polite">
@@ -457,6 +540,9 @@ export default function Data() {
           <div className="mt-3 space-y-1 text-sm">
             <p className="text-success">
               拉取完成: 成功 {bulkStatus.success} / {bulkStatus.total}, 失败 {bulkStatus.failed}
+            </p>
+            <p className="text-muted-foreground">
+              缓存命中 {bulkStatus.cache_hits ?? 0} 个，需联网更新 {bulkStatus.cache_misses ?? 0} 个；已有日期不会因普通增量更新重复请求。
             </p>
             {bulkStatus.quality_reports && bulkStatus.quality_reports.length > 0 && (
               <p className="text-muted-foreground">

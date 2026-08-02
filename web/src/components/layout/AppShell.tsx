@@ -82,15 +82,23 @@ function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavig
 
 function SystemStatus() {
   const wsConnected = useWebSocket();
-  const { data: health } = useQuery({ queryKey: ["health"], queryFn: api.health });
+  const healthQuery = useQuery({ queryKey: ["health"], queryFn: api.health });
+  const health = healthQuery.data;
   const kernelOk = health?.kernel_ready ?? false;
   const ksLevel = health?.kill_switch_level ?? "off";
+  const kernelLabel = healthQuery.isError
+    ? "API 不可用"
+    : kernelOk
+      ? "内核就绪"
+      : "内核未就绪（研究可用，实盘受阻）";
 
   return (
     <div className="flex items-center gap-4 px-4 py-2 border-t border-border">
       <div className="flex items-center gap-1.5 text-xs">
         <StatusDot status={kernelOk ? "online" : "offline"} />
-        <span className="text-muted-foreground">{kernelOk ? "内核就绪" : "内核未就绪"}</span>
+        <span className="text-muted-foreground" title={healthQuery.isError ? "无法连接后端健康检查，请重试或检查 API 服务" : undefined}>
+          {kernelLabel}
+        </span>
       </div>
       <div className="flex items-center gap-1.5 text-xs">
         <StatusDot status={wsConnected ? "online" : "idle"} />

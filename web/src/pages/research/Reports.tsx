@@ -78,11 +78,11 @@ interface EquityPoint {
 }
 
 interface ReportMetrics {
-  total_return: number;
-  annual_return: number;
-  sharpe_ratio: number;
-  max_drawdown: number;
-  win_rate: number;
+  total_return: number | null;
+  annual_return: number | null;
+  sharpe_ratio: number | null;
+  max_drawdown: number | null;
+  win_rate: number | null;
   total_trades: number;
 }
 
@@ -119,10 +119,23 @@ function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
 }
 
-function pnlColor(v: number): string {
+function pnlColor(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "text-muted-foreground";
   if (v > 0) return "text-success";
   if (v < 0) return "text-destructive";
   return "text-muted-foreground";
+}
+
+function runVersion(run: ResearchRunSummary): number | null {
+  if (typeof run.strategy_version === "number") return run.strategy_version;
+  const value = run.manifest?.strategy_spec_version;
+  return typeof value === "number" ? value : null;
+}
+
+function runCapital(run: ResearchRunSummary): number | null {
+  if (typeof run.initial_capital === "number") return run.initial_capital;
+  const value = Number(run.manifest?.initial_capital);
+  return Number.isFinite(value) ? value : null;
 }
 
 function shortDate(iso: string): string {
@@ -409,10 +422,10 @@ function MetricsGrid({ metrics }: { metrics: ReportMetrics }) {
         icon={TrendingDown}
         value={
           <span className="font-mono tabular-nums text-destructive">
-            {formatPercent(-metrics.max_drawdown)}
+            {formatPercent(metrics.max_drawdown === null ? null : -metrics.max_drawdown)}
           </span>
         }
-        hint={metrics.max_drawdown > 0 ? "峰值至谷值" : undefined}
+        hint={metrics.max_drawdown !== null && metrics.max_drawdown > 0 ? "峰值至谷值" : undefined}
       />
       <StatCard
         label="胜率"
@@ -610,7 +623,7 @@ function ReportContent({
             <div className="text-right">
               <p className="text-xs text-muted-foreground">最大回撤</p>
               <p className="font-mono text-sm tabular-nums text-destructive">
-                {formatPercent(-realizedMaxDrawdown)}
+                {formatPercent(realizedMaxDrawdown === null ? null : -realizedMaxDrawdown)}
               </p>
             </div>
           </div>
@@ -693,11 +706,11 @@ function RunReportView({ runId }: { runId: string }) {
           <span className="font-mono">{detail.strategy_kind}</span>
           <span>·</span>
           <span className="font-mono">
-            {detail.strategy_id}@v{detail.strategy_version}
+            {detail.strategy_id}@v{runVersion(detail) ?? "—"}
           </span>
           <span>·</span>
           <span className="tabular-nums">
-            初始资金 ¥{formatCurrency(detail.initial_capital, 0)}
+            初始资金 ¥{formatCurrency(runCapital(detail), 0)}
           </span>
           {detail.completed_at && (
             <>
@@ -890,7 +903,7 @@ export default function Reports() {
                         <SelectItem key={r.run_id} value={r.run_id}>
                           <span className="font-mono">{r.strategy_id}</span>
                           <span className="text-muted-foreground">
-                            · v{r.strategy_version} · {r.run_id.slice(0, 10)}…
+                            · v{runVersion(r) ?? "—"} · {r.run_id.slice(0, 10)}…
                           </span>
                         </SelectItem>
                       ))
@@ -951,7 +964,10 @@ export default function Reports() {
           <EmptyState
             icon={<FileText className="h-8 w-8" />}
             title="请选择一个已完成的研究运行"
-            description="选中后将展示绩效指标、权益曲线、回撤分析与交易明细摘要。"
+            description={completedRuns.length === 0
+              ? "还没有已完成运行。先在「研究运行」登记任务，并由离线 worker 完成后再生成报告。"
+              : "选中后将展示绩效指标、权益曲线、回撤分析与交易明细摘要。"}
+            action={completedRuns.length === 0 ? <Button asChild variant="outline" size="sm"><Link to="/research/runs">去研究运行</Link></Button> : undefined}
           />
         )
       ) : selectedSession ? (
@@ -960,7 +976,10 @@ export default function Reports() {
         <EmptyState
           icon={<Activity className="h-8 w-8" />}
           title="请选择一个模拟会话"
-          description="仅展示已停止或已归档的会话报告，选中后可查看绩效、权益曲线与持仓快照。"
+          description={reportableSessions.length === 0
+            ? "还没有已停止或已归档会话。先完成模拟会话，再停止或归档后生成报告。"
+            : "仅展示已停止或已归档的会话报告，选中后可查看绩效、权益曲线与持仓快照。"}
+          action={reportableSessions.length === 0 ? <Button asChild variant="outline" size="sm"><Link to="/research/simulation">去模拟盘</Link></Button> : undefined}
         />
       )}
     </div>

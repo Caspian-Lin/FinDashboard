@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, lazy, Suspense } from "react";
+import { Fragment, useEffect, useMemo, useState, lazy, Suspense } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive,
@@ -634,6 +634,20 @@ function ReleasePublisher({
   });
 
   const selectedItems = Object.values(selected);
+  const candidateItems = useMemo(() => {
+    const bySymbol = new Map<string, CachedDataStatus>();
+    for (const item of cached?.items ?? []) {
+      const current = bySymbol.get(item.symbol);
+      if (!current || item.bar_count > current.bar_count) {
+        bySymbol.set(item.symbol, item);
+      }
+    }
+    return [...bySymbol.values()];
+  }, [cached?.items]);
+  const duplicateCacheCount = Math.max(
+    0,
+    (cached?.items.length ?? 0) - candidateItems.length,
+  );
   const [repairedEtf, setRepairedEtf] = useState<string | null>(null);
   const source = releaseKind === "a_share_tushare" ? "tushare" : "mixed";
   const setNextReleaseNames = (
@@ -1009,9 +1023,9 @@ function ReleasePublisher({
                 }
                 className="m-3"
               />
-            ) : cached && cached.items.length > 0 ? (
+            ) : candidateItems.length > 0 ? (
               <div className="divide-y divide-border">
-                {cached.items.map((item) => {
+                {candidateItems.map((item) => {
                   const checkboxId = `release-symbol-${item.symbol.replaceAll(".", "-")}`;
                   const sourceCompatible =
                     releaseKind === "multi_asset_mixed" || item.source === "tushare";
@@ -1066,6 +1080,15 @@ function ReleasePublisher({
               />
             )}
           </div>
+          {duplicateCacheCount > 0 && (
+            <Alert variant="warning">
+              <AlertTitle>发现重复缓存记录，已按标的去重</AlertTitle>
+              <AlertDescription>
+                当前接口返回 {duplicateCacheCount} 条重复记录；发布接口只接收标的代码，
+                页面已为每个标的保留覆盖更多日期的一条，避免同一标的被重复发布。若需指定来源、周期或复权方式，请先在上方筛选后再选择。
+              </AlertDescription>
+            </Alert>
+          )}
           {cached && cached.total > cached.items.length && (
             <p className="text-xs text-muted-foreground">
               当前显示 {cached.items.length} / {cached.total} 条匹配缓存；“全选筛选结果”

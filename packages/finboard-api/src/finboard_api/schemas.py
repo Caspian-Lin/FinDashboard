@@ -204,6 +204,16 @@ class DataStatusSelectionOut(BaseSchema):
     last_date: str | None = None
 
 
+class TushareQuotaOut(BaseSchema):
+    """Tushare 本地请求预算,不冒充账户侧实时权限。"""
+
+    date: str
+    requests_per_minute: int
+    daily_limit: int
+    used: int
+    remaining: int
+
+
 class FetchResultOut(BaseSchema):
     symbol: str
     bar_count: int
@@ -341,6 +351,8 @@ class BulkDownloadStatusOut(BaseSchema):
     fallback_used: int = 0
     lifecycle_events: int = 0
     lifecycle_sync_failed: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
     quality_reports: list[QualityReportOut] = []
 
 
@@ -725,6 +737,22 @@ class FactorDefinitionOut(BaseSchema):
     implementation: str
     signal_eligible: bool
     checksum: str
+
+
+class FeatureSnapshotCreate(BaseSchema):
+    """从一个已发布数据版本显式生成价格特征快照。"""
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    dataset_release_id: str = Field(min_length=1, max_length=128)
+    decision_at: datetime
+
+    @field_validator("decision_at")
+    @classmethod
+    def validate_decision_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("decision_at 必须带时区,例如 2026-07-31T23:59:59+08:00")
+        return value
 
 
 class FeatureObservationOut(BaseSchema):

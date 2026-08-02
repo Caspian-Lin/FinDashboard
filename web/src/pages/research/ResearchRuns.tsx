@@ -1,11 +1,12 @@
 import { WorkflowIndicator, NextStepCTA } from "@/components/research/ResearchHint";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   Activity,
   ArrowLeft,
   GitBranch,
+  Plus,
   Play,
   RefreshCw,
   XCircle,
@@ -55,7 +56,13 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import {
+  factorLabApi,
   researchRunApi,
+  strategySpecApi,
+  featureSnapshotNames,
+  featureSnapshotSymbolCount,
+  type ResearchStrategySpec,
+  type ResearchRunQueueIn,
   type ResearchRunSummary,
 } from "@/lib/research";
 import { cn, formatCurrency, formatDateTime, timeAgo } from "@/lib/utils";
@@ -66,13 +73,62 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "running", label: "运行中" },
   { value: "completed", label: "已完成" },
   { value: "failed", label: "失败" },
+  { value: "interrupted", label: "已中断" },
+  { value: "rejected", label: "已拒绝" },
   { value: "cancelled", label: "已取消" },
 ];
 
-const TERMINAL_STATUSES = ["completed", "failed", "cancelled"];
+const TERMINAL_STATUSES = ["completed", "failed", "interrupted", "rejected", "cancelled"];
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
+}
+
+function manifestRecord(
+  manifest: Record<string, unknown> | undefined,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = manifest?.[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function strategyVersion(run: ResearchRunSummary): number | null {
+  if (typeof run.strategy_version === "number") return run.strategy_version;
+  const frozenVersion = run.manifest?.strategy_version;
+  if (typeof frozenVersion === "number") return frozenVersion;
+  const value = run.manifest?.strategy_spec_version;
+  return typeof value === "number" ? value : null;
+}
+
+function strategyVersionLabel(run: ResearchRunSummary): string {
+  const version = strategyVersion(run);
+  return version === null ? "版本未记录" : `v${version}`;
+}
+
+function initialCapital(run: ResearchRunSummary): number | null {
+  if (typeof run.initial_capital === "number") return run.initial_capital;
+  const value = run.manifest?.initial_capital;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function specReleaseIds(strategy: ResearchStrategySpec | undefined): string[] {
+  const plan = manifestRecord(strategy?.spec, "validation_plan");
+  const ids = plan?.dataset_release_ids;
+  return Array.isArray(ids) ? ids.filter((item): item is string => typeof item === "string") : [];
+}
+
+function specNeedsFactorSnapshot(strategy: ResearchStrategySpec | undefined): boolean {
+  const graph = manifestRecord(strategy?.spec, "feature_graph");
+  const nodes = graph?.nodes;
+  if (!Array.isArray(nodes)) return false;
+  return nodes.some((node) => {
+    if (!node || typeof node !== "object") return false;
+    const item = node as Record<string, unknown>;
+    return item.kind === "factor" || item.kind === "risk_factor";
+  });
 }
 
 function JsonBlock({
@@ -101,12 +157,230 @@ function InfoItem({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function CreateResearchRunDialog({
+  open,
+  onOpenChange,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onCreated: (run: ResearchRunSummary) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [strategyId, setStrategyId] = useState("");
+  const [factorSnapshotIds, setFactorSnapshotIds] = useState<string[]>([]);
+  const [initialCapital, setInitialCapital] = useState("100000");
+  const [requestedBy, setRequestedBy] = useState("console");
+  const [idempotencyKey, setIdempotencyKey] = useState("");
+
+  const strategiesQuery = useQuery({
+    queryKey: ["spec-list", "queue"],
+    queryFn: () => strategySpecApi.list(100),
+    enabled: open,
+  });
+  const selectedStrategy = strategiesQuery.data?.find(
+    (item) => `${item.strategy_id}@${item.version}` === strategyId,
+  );
+  const releaseIds = specReleaseIds(selectedStrategy);
+  const needsFactorSnapshot = specNeedsFactorSnapshot(selectedStrategy);
+  const snapshotsQuery = useQuery({
+    queryKey: ["feature-snapshots", "queue", releaseIds[0]],
+    queryFn: () => factorLabApi.features(releaseIds[0], 100),
+    enabled: open && releaseIds.length > 0 && needsFactorSnapshot,
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    setStrategyId("");
+    setFactorSnapshotIds([]);
+    setInitialCapital("100000");
+    setRequestedBy("console");
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      setIdempotencyKey(`research-${crypto.randomUUID()}`);
+    } else {
+      setIdempotencyKey(`research-${Date.now()}`);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    setFactorSnapshotIds([]);
+  }, [strategyId]);
+
+  const queueMutation = useMutation({
+    mutationFn: (body: ResearchRunQueueIn) => researchRunApi.queue(body),
+    onSuccess: (run) => {
+      void queryClient.invalidateQueries({ queryKey: ["research-runs"] });
+      onOpenChange(false);
+      onCreated(run);
+    },
+  });
+
+  const factorSnapshotReady = !needsFactorSnapshot || factorSnapshotIds.length > 0;
+  const capital = Number(initialCapital);
+  const valid =
+    !!selectedStrategy &&
+    selectedStrategy.published &&
+    releaseIds.length > 0 &&
+    factorSnapshotReady &&
+    capital >= 100000 &&
+    capital <= 500000 &&
+    requestedBy.trim() !== "" &&
+    idempotencyKey.trim().length >= 8;
+
+  const submit = () => {
+    if (!selectedStrategy || !valid) return;
+    queueMutation.mutate({
+      idempotency_key: idempotencyKey.trim(),
+      strategy_id: selectedStrategy.strategy_id,
+      strategy_version: selectedStrategy.version,
+      dataset_release_ids: releaseIds,
+      factor_snapshot_ids: factorSnapshotIds,
+      parameters: {},
+      validation_config: {},
+      portfolio_config: {},
+      risk_config: {},
+      execution_config: {},
+      fee_config: {},
+      benchmark_config: {},
+      code_version: "web-ui-v1",
+      initial_capital: capital,
+      requested_by: requestedBy.trim(),
+    });
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>排队研究运行</DialogTitle>
+          <DialogDescription>
+            冻结已发布策略、数据发布和因子快照。此操作只登记 queued 任务，不会在网页请求中执行回测。
+          </DialogDescription>
+        </DialogHeader>
+
+        <Alert variant="info">
+          <AlertTitle>执行边界</AlertTitle>
+          <AlertDescription>
+            提交后需要受控的离线 worker/CLI 消费 queued 任务。运行完成后才可进入组合、模拟盘和研究报告；页面不会自动启动任何运行。
+          </AlertDescription>
+        </Alert>
+
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="research-run-strategy">已发布策略规格</Label>
+            <Select value={strategyId} onValueChange={setStrategyId}>
+              <SelectTrigger id="research-run-strategy">
+                <SelectValue placeholder="选择已发布策略" />
+              </SelectTrigger>
+              <SelectContent>
+                {(strategiesQuery.data ?? [])
+                  .filter((item) => item.published)
+                  .map((item) => (
+                    <SelectItem
+                      key={`${item.strategy_id}@${item.version}`}
+                      value={`${item.strategy_id}@${item.version}`}
+                    >
+                      <span className="font-mono">{item.strategy_id}@v{item.version}</span>
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+            {strategiesQuery.isError && (
+              <p className="text-xs text-destructive">策略规格加载失败，请关闭后重试。</p>
+            )}
+            {!strategiesQuery.isLoading && (strategiesQuery.data ?? []).filter((item) => item.published).length === 0 && (
+              <p className="text-xs text-warning">
+                暂无已发布策略。请先到 <Link className="underline" to="/research/strategy">策略 Studio</Link> 保存并发布版本。
+              </p>
+            )}
+          </div>
+
+          <div className="rounded-md border border-border bg-muted/20 p-3 text-xs">
+            <p className="font-medium text-foreground">冻结数据发布</p>
+            {releaseIds.length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {releaseIds.map((id) => (
+                  <Badge key={id} variant="info" className="font-mono text-[10px]">{id}</Badge>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-1 text-muted-foreground">选择策略后显示其验证计划要求。</p>
+            )}
+          </div>
+
+          {needsFactorSnapshot && (
+            <div className="space-y-2 rounded-md border border-warning/30 bg-warning/5 p-3">
+              <Label>冻结因子快照（至少 1 个）</Label>
+              {snapshotsQuery.isLoading ? (
+                <p className="text-xs text-muted-foreground">正在加载与数据发布匹配的快照…</p>
+              ) : snapshotsQuery.data && snapshotsQuery.data.length > 0 ? (
+                <div className="space-y-1">
+                  {snapshotsQuery.data.map((snapshot) => {
+                    const checked = factorSnapshotIds.includes(snapshot.snapshot_id);
+                    return (
+                      <label key={snapshot.snapshot_id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => setFactorSnapshotIds((current) => checked ? current.filter((id) => id !== snapshot.snapshot_id) : [...current, snapshot.snapshot_id])}
+                        />
+                        <span className="font-mono">{snapshot.snapshot_id}</span>
+                        <span className="text-muted-foreground">{featureSnapshotSymbolCount(snapshot)} 标的 · {featureSnapshotNames(snapshot).length} 个因子</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs text-warning">
+                  暂无匹配快照。请先在 <Link className="underline" to="/research/factors">因子实验室</Link> 生成并发布特征快照。
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="research-run-capital">初始资金</Label>
+              <Input id="research-run-capital" type="number" min={100000} max={500000} value={initialCapital} onChange={(event) => setInitialCapital(event.target.value)} />
+              <p className="text-[11px] text-muted-foreground">研究运行允许 ¥100,000–¥500,000。</p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="research-run-requested-by">发起人</Label>
+              <Input id="research-run-requested-by" value={requestedBy} onChange={(event) => setRequestedBy(event.target.value)} placeholder="analyst@finboard" />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="research-run-idempotency">幂等键</Label>
+            <Input id="research-run-idempotency" value={idempotencyKey} onChange={(event) => setIdempotencyKey(event.target.value)} className="font-mono text-xs" />
+            <p className="text-[11px] text-muted-foreground">相同幂等键重复提交不会生成第二个研究运行。</p>
+          </div>
+        </div>
+
+        {queueMutation.isError && (
+          <Alert variant="destructive">
+            <AlertTitle>排队失败</AlertTitle>
+            <AlertDescription>{errorMessage(queueMutation.error, "研究运行未登记，请检查策略、数据和因子快照")}</AlertDescription>
+          </Alert>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={queueMutation.isPending}>取消</Button>
+          <Button onClick={submit} disabled={!valid || queueMutation.isPending}>
+            <Plus className="mr-2 h-4 w-4" />
+            {queueMutation.isPending ? "登记中…" : "登记 queued 运行"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function ResearchRuns() {
   const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [idempotencyKey, setIdempotencyKey] = useState("");
   const [requestedBy, setRequestedBy] = useState("");
   const [lineageOpen, setLineageOpen] = useState(false);
@@ -200,12 +474,18 @@ export default function ResearchRuns() {
           { label: "研究运行" },
         ]}
         actions={
-          <Button asChild variant="outline" size="sm">
-            <Link to="/research">
-              <ArrowLeft className="h-4 w-4" />
-              返回研究
-            </Link>
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus className="h-4 w-4" />
+              排队研究运行
+            </Button>
+            <Button asChild variant="outline" size="sm">
+              <Link to="/research">
+                <ArrowLeft className="h-4 w-4" />
+                返回研究
+              </Link>
+            </Button>
+          </div>
         }
       />
       <WorkflowIndicator currentPath="/research/runs" />
@@ -282,12 +562,12 @@ export default function ResearchRuns() {
                           {run.strategy_id}
                         </span>
                         <Badge variant="secondary" className="font-mono">
-                          v{run.strategy_version}
+                          {strategyVersionLabel(run)}
                         </Badge>
                       </div>
                       <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
                         <span className="tabular-nums">
-                          ¥{formatCurrency(run.initial_capital, 0)}
+                          ¥{formatCurrency(initialCapital(run), 0)}
                         </span>
                         <span>{timeAgo(run.created_at)}</span>
                       </div>
@@ -320,7 +600,7 @@ export default function ResearchRuns() {
                         <span className="font-mono">{detail.strategy_kind}</span>
                         <span>·</span>
                         <span className="font-mono">
-                          {detail.strategy_id}@v{detail.strategy_version}
+                          {detail.strategy_id}@{strategyVersionLabel(detail)}
                         </span>
                       </div>
                     )}
@@ -361,7 +641,7 @@ export default function ResearchRuns() {
                           </span>
                         </InfoItem>
                         <InfoItem label="版本">
-                          <span className="font-mono">v{detail.strategy_version}</span>
+                          <span className="font-mono">{strategyVersionLabel(detail)}</span>
                         </InfoItem>
                         <InfoItem label="状态">
                           <StatusBadge status={detail.status} />
@@ -373,7 +653,7 @@ export default function ResearchRuns() {
                         </InfoItem>
                         <InfoItem label="初始资金">
                           <span className="tabular-nums font-medium">
-                            ¥{formatCurrency(detail.initial_capital, 0)}
+                            ¥{formatCurrency(initialCapital(detail), 0)}
                           </span>
                         </InfoItem>
                         <InfoItem label="创建时间">
@@ -790,6 +1070,11 @@ export default function ResearchRuns() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <CreateResearchRunDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onCreated={(run) => setSelectedId(run.run_id)}
+      />
       <NextStepCTA
         nextPath="/research/portfolio"
         nextLabel="组合与风险"
