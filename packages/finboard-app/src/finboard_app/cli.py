@@ -954,8 +954,8 @@ async def _publish_dataset_release(
                     adjustment=adjust,
                     required_capabilities=required_capabilities,
                     known_limitations=(
-                        "交易日覆盖使用工作日近似;节假日缺口作为 warning 报告",
-                        "停牌由零成交且 OHLC 不变的日线代理识别",
+                        "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
+                        "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
                         "首期仅发布本地缓存已有字段,不回退到联网数据源",
                     ),
                 ),
