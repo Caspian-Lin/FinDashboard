@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import cast
 from zoneinfo import ZoneInfo
 
-from finboard_data.cache import ParquetCache
+from finboard_data.cache import CacheMetadata, ParquetCache
 from finboard_data.quality import BarQualityChecker
 from finboard_data.trading_calendar import trading_days as _trading_days
 from finboard_shared.instruments import ASSET_METADATA_VERSION, DatasetManifest
@@ -440,8 +440,8 @@ class DatasetReleaseSpec:
         ("lifecycle_events", "available_at <= decision_at"),
     )
     known_limitations: tuple[str, ...] = ()
-    minimum_symbol_coverage: Decimal = Decimal("0.80")
-    minimum_release_coverage: Decimal = Decimal("0.85")
+    minimum_symbol_coverage: Decimal = Decimal("0.98")
+    minimum_release_coverage: Decimal = Decimal("0.98")
     max_anomaly_ratio: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
@@ -848,10 +848,14 @@ class FrozenDatasetReleaseBuilder:
         *,
         cache_dir: str | Path,
         release_root: str | Path,
+        max_concurrency: int = 8,
     ) -> None:
         self._cache_dir = Path(cache_dir).resolve()
         self._release_root = Path(release_root).resolve()
         self._release_root.mkdir(parents=True, exist_ok=True)
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency 必须 >= 1")
+        self._max_concurrency = max_concurrency
 
     async def publish(
         self,
@@ -882,17 +886,32 @@ class FrozenDatasetReleaseBuilder:
             )
         )
         try:
-            target_cache = ParquetCache(staging / "bars")
-            released: list[ReleasedInstrument] = []
-            for instrument in sorted(instruments, key=lambda item: item.code):
-                released.append(
-                    await self._freeze_instrument(
+            target_cache = ParquetCache(
+                staging / "bars",
+                max_io_concurrency=self._max_concurrency,
+            )
+            source_cache = ParquetCache(
+                self._cache_dir,
+                max_io_concurrency=self._max_concurrency,
+            )
+            semaphore = asyncio.Semaphore(self._max_concurrency)
+
+            async def _freeze_one(instrument: ReleaseInstrumentSpec) -> ReleasedInstrument:
+                async with semaphore:
+                    return await self._freeze_instrument(
                         spec=spec,
                         instrument=instrument,
                         staging=staging,
                         target_cache=target_cache,
+                        source_cache=source_cache,
                     )
-                )
+
+            # 按代码排序保证输入顺序确定;并行执行后再次排序保证 manifest 稳定。
+            sorted_instruments = sorted(instruments, key=lambda item: item.code)
+            released_unordered = await asyncio.gather(
+                *(_freeze_one(item) for item in sorted_instruments)
+            )
+            released = sorted(released_unordered, key=lambda item: item.code)
 
             capabilities = _build_capabilities(released, spec.required_capabilities)
             missing_required = [
@@ -996,6 +1015,7 @@ class FrozenDatasetReleaseBuilder:
         instrument: ReleaseInstrumentSpec,
         staging: Path,
         target_cache: ParquetCache,
+        source_cache: ParquetCache,
     ) -> ReleasedInstrument:
         source_path = _cache_path(
             self._cache_dir,
@@ -1006,7 +1026,6 @@ class FrozenDatasetReleaseBuilder:
         if not source_path.exists() or source_path.is_symlink():
             raise DatasetReleaseQualityError(f"{instrument.code}:source_artifact_missing")
         before = source_path.stat()
-        source_cache = ParquetCache(self._cache_dir)
         try:
             bars = await source_cache.read(
                 Symbol(code=instrument.code, market=instrument.market),
@@ -1016,6 +1035,20 @@ class FrozenDatasetReleaseBuilder:
         except Exception as exc:
             raise DatasetReleaseQualityError(
                 f"{instrument.code}:source_read_failed:{type(exc).__name__}"
+            ) from exc
+        # 读取缓存元数据(包含已查询过的合法无 Bar 区间,如停牌/上市前)。
+        # 与批量拉取的日期命中逻辑一致(issue #99):只要某交易日落在
+        # covered_ranges 或 Bar 首尾区间内,就算"已成功查询过",不重复
+        # 请求也不在发布审计中计为 missing。
+        try:
+            metadata = await source_cache.metadata_for(
+                Symbol(code=instrument.code, market=instrument.market),
+                spec.period,
+                spec.adjustment,
+            )
+        except Exception as exc:
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:source_metadata_failed:{type(exc).__name__}"
             ) from exc
         after = source_path.stat()
         if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
@@ -1039,6 +1072,7 @@ class FrozenDatasetReleaseBuilder:
             frozen_bars,
             instrument=instrument,
             spec=spec,
+            metadata=metadata,
         )
         total_bars = len(frozen_bars)
         anomaly_ratio = (
@@ -1262,6 +1296,7 @@ def _audit_bars(
     *,
     instrument: ReleaseInstrumentSpec,
     spec: DatasetReleaseSpec,
+    metadata: CacheMetadata | None = None,
 ) -> _BarAudit:
     checker = BarQualityChecker()
     qr = checker.check(bars, symbol=instrument.code)
@@ -1297,8 +1332,20 @@ def _audit_bars(
     expected_dates = _trading_days(expected_start, expected_end)
     required_dates = expected_dates - lifecycle_dates
     expected_sessions = len(required_dates)
-    missing_sessions = len(required_dates - unique_dates)
-    covered_sessions = len(required_dates & unique_dates)
+
+    # 与批量拉取的日期命中逻辑(issue #99)对齐:CacheMetadata.covered_ranges
+    # 记录的是"已成功向远端查询过"的合法无 Bar 区间(停牌、上市前、节假日
+    # 等),与 Bar 首尾区间共同决定是否需要重新请求。覆盖率审计沿用同一口径:
+    # 这些区间内落在 expected_window 的交易日视为已覆盖,不计为 missing,
+    # 否则会把所有数据源省略的停牌 Bar 误判为数据缺口。
+    queried_dates = _covered_trading_dates(
+        metadata,
+        expected_start,
+        expected_end,
+    )
+    covered_dates = unique_dates | queried_dates
+    missing_sessions = len(required_dates - covered_dates)
+    covered_sessions = len(required_dates & covered_dates)
     coverage = (
         Decimal(covered_sessions) / Decimal(expected_sessions)
         if expected_sessions > 0
@@ -1371,6 +1418,45 @@ def _known_suspension_dates(
     ):
         result.update(_trading_days(max(start, suspended_from), end))
     return result
+
+
+def _covered_trading_dates(
+    metadata: CacheMetadata | None,
+    start: date,
+    end: date,
+) -> set[date]:
+    """从缓存元数据提取落在 ``[start, end]`` 内的"已成功查询过"交易日。
+
+    与 :meth:`finboard_data.cache.CacheMetadata.covers` / 批量拉取的
+    ``_cache_fetch_ranges`` 共用同一口径:``covered_ranges`` 加上 Bar 首尾
+    天然区间都属于"已成功查询过"的日期,数据源在这些区间内合法地不返回
+    Bar(停牌、上市前、退市后等)不会在覆盖率审计中被误判为缺口。
+    """
+
+    if metadata is None or start > end:
+        return set()
+    ranges = list(metadata.covered_ranges)
+    if metadata.first_date is not None and metadata.last_date is not None:
+        ranges.append((metadata.first_date, metadata.last_date))
+    if not ranges:
+        return set()
+    covered: set[date] = set()
+    for range_start, range_end in ranges:
+        lo = max(start, range_start)
+        hi = min(end, range_end)
+        if lo > hi:
+            continue
+        try:
+            covered.update(_trading_days(lo, hi))
+        except Exception:
+            # 日历不可用时退化为朴素日期枚举(包含周末),覆盖率会偏宽松;
+            # 与 trading_days 抛 TradingCalendarError 不同,这里是审计侧
+            # best-effort,不阻断发布流程。
+            cursor = lo
+            while cursor <= hi:
+                covered.add(cursor)
+                cursor += timedelta(days=1)
+    return covered
 
 
 def _bar_available_at(bar: Bar, instrument: ReleasedInstrument) -> datetime:

@@ -539,8 +539,8 @@ async def create_dataset_release(
                     else tuple(request.required_capabilities)
                 ),
                 known_limitations=(
-                    "交易日覆盖使用工作日近似;节假日缺口作为 warning 报告",
-                    "停牌优先使用停复牌生命周期事件;缺少事件时仅能由零成交且 OHLC 不变的日线代理识别",
+                    "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
+                    "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
                     "只冻结本地缓存已有字段,不会回退到联网数据源",
                     (
                         "A股单源发布严格要求所有 Bar 来源为 tushare"

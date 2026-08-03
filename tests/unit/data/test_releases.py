@@ -720,3 +720,84 @@ async def test_source_interruption_is_fail_closed(
     assert (release_root / previous.release_id / "manifest.json").is_file()
     assert not (release_root / "fixed-r2").exists()
     assert not list(release_root.glob(".fixed-r2-*"))
+
+
+@pytest.mark.asyncio
+async def test_covered_ranges_marks_queried_no_bar_days_as_covered(
+    tmp_path: Path,
+) -> None:
+    """批量拉取已成功查询过的合法无 Bar 日(停牌/上市前)不计入 missing。
+
+    覆盖率口径必须与 :meth:`CacheMetadata.covers` / 批量拉取的
+    ``_cache_fetch_ranges`` 一致(issue #99),否则会重复把数据源省略的
+    停牌 Bar 误判为数据缺口。
+    """
+    code = "600005.SH"
+    instrument = _stock(code)
+    # 缺 2024-01-03 和 2024-01-04 两条 Bar,模拟数据源对停牌日不返回 Bar。
+    bars = [
+        bar
+        for bar in _bars(code)
+        if bar.timestamp.date() not in {date(2024, 1, 3), date(2024, 1, 4)}
+    ]
+    cache = ParquetCache(tmp_path / "cache")
+    await cache.write(
+        Symbol(code=code, market=Market.A_SHARE),
+        BarPeriod.D1,
+        "qfq",
+        bars,
+        covered_ranges=((date(2024, 1, 2), date(2024, 1, 5)),),
+    )
+
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    ).publish(replace(_spec("covered-ranges-r1"), required_capabilities=()), [instrument])
+
+    item = release.instrument(code)
+    assert item.ready
+    # 4 个交易日全部视为已覆盖,即使只有 2 条 Bar。
+    assert item.expected_sessions == 4
+    assert item.missing_sessions == 0
+    assert item.coverage_pct == Decimal("1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_concurrency", [1, 4])
+async def test_parallel_publish_is_deterministic_and_equal_to_serial(
+    tmp_path: Path,
+    max_concurrency: int,
+) -> None:
+    """并行冻结的产物(逐标的 artifact checksum / row_count / instrument 顺序)
+    必须与串行一致(可复现)。``published_at`` 时间戳不纳入比较。"""
+    instruments = _multi_asset_instruments()
+    cache_dir = tmp_path / "cache"
+    await _seed(cache_dir, instruments)
+
+    serial = await FrozenDatasetReleaseBuilder(
+        cache_dir=cache_dir,
+        release_root=tmp_path / "releases-serial",
+        max_concurrency=1,
+    ).publish(_spec("parallel-serial"), instruments)
+
+    parallel = await FrozenDatasetReleaseBuilder(
+        cache_dir=cache_dir,
+        release_root=tmp_path / "releases-parallel",
+        max_concurrency=max_concurrency,
+    ).publish(_spec(f"parallel-n{max_concurrency}"), instruments)
+
+    # 发布顺序按 code 排序,确保并行结果与串行一致。
+    assert [item.code for item in parallel.instruments] == [
+        item.code for item in serial.instruments
+    ]
+    assert parallel.row_count == serial.row_count
+    assert parallel.symbol_count == serial.symbol_count
+    assert parallel.coverage_pct == serial.coverage_pct
+    for serial_item, parallel_item in zip(serial.instruments, parallel.instruments, strict=True):
+        assert parallel_item.code == serial_item.code
+        assert parallel_item.artifact_checksum == serial_item.artifact_checksum
+        assert parallel_item.row_count == serial_item.row_count
+        assert parallel_item.coverage_pct == serial_item.coverage_pct
+        assert parallel_item.missing_sessions == serial_item.missing_sessions
+        assert parallel_item.suspended_sessions == serial_item.suspended_sessions
+        assert parallel_item.expected_sessions == serial_item.expected_sessions
