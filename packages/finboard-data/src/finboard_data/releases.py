@@ -21,6 +21,7 @@ import json
 import re
 import shutil
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -30,6 +31,8 @@ from typing import cast
 from zoneinfo import ZoneInfo
 
 from finboard_data.cache import ParquetCache
+from finboard_data.quality import BarQualityChecker
+from finboard_data.trading_calendar import trading_days as _trading_days
 from finboard_shared.instruments import ASSET_METADATA_VERSION, DatasetManifest
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import (
@@ -376,6 +379,7 @@ class ReleaseInstrumentSpec:
     available_at: datetime
     execution: ExecutionMetadata
     exchange: str | None = None
+    listing_board: str = "unknown"
     currency: str = "CNY"
     etf_category: EtfCategory | None = None
     list_date: date | None = None
@@ -438,6 +442,7 @@ class DatasetReleaseSpec:
     known_limitations: tuple[str, ...] = ()
     minimum_symbol_coverage: Decimal = Decimal("0.80")
     minimum_release_coverage: Decimal = Decimal("0.85")
+    max_anomaly_ratio: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -464,6 +469,8 @@ class DatasetReleaseSpec:
             raise ValueError("minimum_symbol_coverage 必须落在 (0, 1]")
         if not (Decimal("0") < self.minimum_release_coverage <= Decimal("1")):
             raise ValueError("minimum_release_coverage 必须落在 (0, 1]")
+        if not (Decimal("0") <= self.max_anomaly_ratio <= Decimal("1")):
+            raise ValueError("max_anomaly_ratio 必须落在 [0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,7 +498,9 @@ class ReleasedInstrument:
     category: str
     ready: bool
     issues: tuple[str, ...] = ()
+    sources: tuple[str, ...] = ()
     exchange: str | None = None
+    listing_board: str = "unknown"
     currency: str = "CNY"
     etf_category: EtfCategory | None = None
     list_date: date | None = None
@@ -533,7 +542,9 @@ class ReleasedInstrument:
             "category": self.category,
             "ready": self.ready,
             "issues": list(self.issues),
+            **({"sources": list(self.sources)} if self.sources else {}),
             "exchange": self.exchange,
+            "listing_board": self.listing_board,
             "currency": self.currency,
             "etf_category": self.etf_category.value if self.etf_category else None,
             "list_date": self.list_date.isoformat() if self.list_date else None,
@@ -586,7 +597,9 @@ class ReleasedInstrument:
             category=str(raw["category"]),
             ready=bool(raw["ready"]),
             issues=tuple(str(item) for item in cast(list[object], raw.get("issues", []))),
+            sources=tuple(str(item) for item in cast(list[object], raw.get("sources", []))),
             exchange=str(raw["exchange"]) if raw.get("exchange") is not None else None,
+            listing_board=str(raw.get("listing_board", "unknown")),
             currency=str(raw.get("currency", "CNY")),
             etf_category=EtfCategory(str(etf_raw)) if etf_raw is not None else None,
             list_date=date.fromisoformat(str(list_raw)) if list_raw is not None else None,
@@ -892,6 +905,14 @@ class FrozenDatasetReleaseBuilder:
                 start=Decimal("0"),
             ) / Decimal(len(released))
             not_ready = [item for item in released if not item.ready]
+            release_sources = sorted(
+                {source for item in released for source in item.sources}
+            )
+            if spec.source == "mixed" and len(release_sources) < 2:
+                raise DatasetReleaseQualityError(
+                    "mixed_source_requires_multiple_sources:"
+                    f"actual={','.join(release_sources) or 'unknown'}"
+                )
             if missing_required or not_ready or release_coverage < spec.minimum_release_coverage:
                 reasons = [
                     *(
@@ -938,6 +959,20 @@ class FrozenDatasetReleaseBuilder:
                     "minimum_release_coverage": str(spec.minimum_release_coverage),
                     "release_coverage": str(release_coverage),
                     "coverage": _coverage_summary(released),
+                    "source_policy": "mixed" if spec.source == "mixed" else "single",
+                    "sources": release_sources,
+                    "source_symbol_counts": dict(
+                        sorted(
+                            Counter(
+                                source
+                                for item in released
+                                for source in item.sources
+                            ).items()
+                        )
+                    ),
+                    "source_by_instrument": {
+                        item.code: list(item.sources) for item in released
+                    },
                     "warnings": warnings,
                 },
                 known_limitations=spec.known_limitations,
@@ -990,18 +1025,38 @@ class FrozenDatasetReleaseBuilder:
         ]
         if not frozen_bars:
             raise DatasetReleaseQualityError(f"{instrument.code}:no_bars_in_release_range")
+        known_sources = {bar.source for bar in frozen_bars if bar.source}
+        if not known_sources:
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:source_metadata_missing"
+            )
+        if spec.source != "mixed" and known_sources != {spec.source}:
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:source_mismatch:"
+                f"cache={','.join(sorted(known_sources))},release={spec.source}"
+            )
         audit = _audit_bars(
             frozen_bars,
             instrument=instrument,
             spec=spec,
         )
+        total_bars = len(frozen_bars)
+        anomaly_ratio = (
+            Decimal(audit.anomaly_count) / Decimal(total_bars)
+            if total_bars > 0
+            else Decimal("1")
+        )
         ready = (
-            audit.anomaly_count == 0
+            anomaly_ratio <= spec.max_anomaly_ratio
             and audit.coverage_pct >= spec.minimum_symbol_coverage
             and instrument.metadata_complete
             and set(instrument.required_event_types).issubset(instrument.present_event_types)
         )
         issues = list(audit.issues)
+        if anomaly_ratio > spec.max_anomaly_ratio:
+            issues.append(
+                f"anomaly_ratio:{anomaly_ratio:.4f}>{spec.max_anomaly_ratio}"
+            )
         if not instrument.metadata_complete:
             issues.append("metadata_incomplete")
         missing_events = sorted(
@@ -1048,7 +1103,9 @@ class FrozenDatasetReleaseBuilder:
             category=audit.category,
             ready=ready,
             issues=tuple(issues),
+            sources=tuple(sorted(known_sources)),
             exchange=instrument.exchange,
+            listing_board=instrument.listing_board,
             currency=instrument.currency,
             etf_category=instrument.etf_category,
             list_date=instrument.list_date,
@@ -1206,64 +1263,59 @@ def _audit_bars(
     instrument: ReleaseInstrumentSpec,
     spec: DatasetReleaseSpec,
 ) -> _BarAudit:
-    dates = [bar.timestamp.date() for bar in bars]
-    unique_dates = set(dates)
-    anomaly_count = 0
-    suspended = 0
-    previous_timestamp: datetime | None = None
+    checker = BarQualityChecker()
+    qr = checker.check(bars, symbol=instrument.code)
+
+    unique_dates = {bar.timestamp.date() for bar in bars}
+    suspended_bar_dates: set[date] = set()
+    for bar in bars:
+        if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
+            suspended_bar_dates.add(bar.timestamp.date())
+
+    # bars before list_date / after delist_date
+    lifecycle_anomalies = 0
     for bar in bars:
         bar_date = bar.timestamp.date()
-        if previous_timestamp is not None and bar.timestamp <= previous_timestamp:
-            anomaly_count += 1
-        previous_timestamp = bar.timestamp
         if instrument.list_date is not None and bar_date < instrument.list_date:
-            anomaly_count += 1
+            lifecycle_anomalies += 1
         if instrument.delist_date is not None and bar_date > instrument.delist_date:
-            anomaly_count += 1
-        if (
-            bar.open <= 0
-            or bar.high <= 0
-            or bar.low <= 0
-            or bar.close <= 0
-            or bar.high < max(bar.open, bar.low, bar.close)
-            or bar.low > min(bar.open, bar.high, bar.close)
-            or bar.volume < 0
-            or bar.amount < 0
-        ):
-            anomaly_count += 1
-        if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
-            suspended += 1
-    anomaly_count += len(dates) - len(unique_dates)
+            lifecycle_anomalies += 1
 
-    expected_start = max(
-        spec.start_date,
-        instrument.list_date or spec.start_date,
+    anomaly_count = qr.anomaly_count + lifecycle_anomalies + qr.duplicate_count
+
+    first_bar_date = min(unique_dates)
+    last_bar_date = max(unique_dates)
+    effective_list = instrument.list_date or first_bar_date
+    effective_delist = instrument.delist_date or last_bar_date
+    expected_start = max(spec.start_date, effective_list)
+    expected_end = min(spec.end_date, effective_delist)
+    lifecycle_dates = _known_suspension_dates(
+        instrument,
+        start=expected_start,
+        end=expected_end,
     )
-    expected_end = min(
-        spec.end_date,
-        instrument.delist_date or spec.end_date,
-    )
-    expected_dates = _weekdays(expected_start, expected_end)
-    expected_sessions = len(expected_dates)
-    unexpected_sessions = unique_dates - expected_dates
-    anomaly_count += len(unexpected_sessions)
-    missing_sessions = len(expected_dates - unique_dates)
+    expected_dates = _trading_days(expected_start, expected_end)
+    required_dates = expected_dates - lifecycle_dates
+    expected_sessions = len(required_dates)
+    missing_sessions = len(required_dates - unique_dates)
+    covered_sessions = len(required_dates & unique_dates)
     coverage = (
-        min(Decimal(len(unique_dates)) / Decimal(expected_sessions), Decimal("1"))
+        Decimal(covered_sessions) / Decimal(expected_sessions)
         if expected_sessions > 0
-        else Decimal("0")
+        else Decimal("1")
     )
+    suspended_dates = lifecycle_dates | (suspended_bar_dates & expected_dates)
     issues: list[str] = []
     if anomaly_count:
         issues.append(f"anomalies:{anomaly_count}")
-    # 中国节假日不在工作日粗略日历中,小量缺口仅记警告;连续大缺口由覆盖率拦截。
+    # 使用真实 A 股交易日历后,missing_sessions 只反映真正的数据缺口。
     if missing_sessions:
-        issues.append(f"missing_weekdays:{missing_sessions}")
-    if suspended:
-        issues.append(f"suspended_bars:{suspended}")
+        issues.append(f"missing_sessions:{missing_sessions}")
+    if suspended_dates:
+        issues.append(f"suspended_sessions:{len(suspended_dates)}")
 
-    actual_start = min(unique_dates)
-    actual_end = max(unique_dates)
+    actual_start = first_bar_date
+    actual_end = last_bar_date
     if instrument.delist_date is not None and instrument.delist_date <= spec.end_date:
         category = "delisted"
     elif instrument.list_date is not None and instrument.list_date > spec.start_date:
@@ -1277,12 +1329,48 @@ def _audit_bars(
         end_date=actual_end,
         expected_sessions=expected_sessions,
         missing_sessions=missing_sessions,
-        suspended_sessions=suspended,
+        suspended_sessions=len(suspended_dates),
         anomaly_count=anomaly_count,
         coverage_pct=coverage,
         category=category,
         issues=tuple(issues),
     )
+
+
+def _known_suspension_dates(
+    instrument: ReleaseInstrumentSpec,
+    *,
+    start: date,
+    end: date,
+) -> set[date]:
+    """从权威生命周期事件提取停牌窗口;复牌日恢复为必需交易日。"""
+
+    events = sorted(
+        instrument.lifecycle_events,
+        key=lambda item: (item.effective_date, item.available_at),
+    )
+    suspended_from: date | None = None
+    result: set[date] = set()
+    for event in events:
+        if event.event_type == "suspension_day":
+            if start <= event.effective_date <= end:
+                result.add(event.effective_date)
+        elif event.event_type == "suspension":
+            suspended_from = event.effective_date
+        elif event.event_type == "resumption" and suspended_from is not None:
+            result.update(
+                _trading_days(
+                    max(start, suspended_from),
+                    min(end, event.effective_date - timedelta(days=1)),
+                )
+            )
+            suspended_from = None
+    if suspended_from is not None and instrument.status in (
+        ListingStatus.SUSPENDED,
+        ListingStatus.DELISTED,
+    ):
+        result.update(_trading_days(max(start, suspended_from), end))
+    return result
 
 
 def _bar_available_at(bar: Bar, instrument: ReleasedInstrument) -> datetime:
@@ -1359,14 +1447,17 @@ def _coverage_summary(instruments: list[ReleasedInstrument]) -> dict[str, object
     categories: dict[str, int] = {}
     asset_classes: dict[str, int] = {}
     markets: dict[str, int] = {}
+    listing_boards: dict[str, int] = {}
     for item in instruments:
         categories[item.category] = categories.get(item.category, 0) + 1
         asset_classes[item.asset_class.value] = asset_classes.get(item.asset_class.value, 0) + 1
         markets[item.market.value] = markets.get(item.market.value, 0) + 1
+        listing_boards[item.listing_board] = listing_boards.get(item.listing_board, 0) + 1
     return {
         "categories": categories,
         "asset_classes": asset_classes,
         "markets": markets,
+        "listing_boards": listing_boards,
         "missing_sessions": sum(item.missing_sessions for item in instruments),
         "suspended_sessions": sum(item.suspended_sessions for item in instruments),
         "anomaly_count": sum(item.anomaly_count for item in instruments),

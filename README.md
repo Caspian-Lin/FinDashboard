@@ -218,11 +218,12 @@ API、迁移和三个示例见 [无代码研究策略规格](docs/research_strat
 
 ### 版本化研究数据发布
 
-回测可先用 `finboard data release` 把可变 Parquet 缓存冻结为指定
-`release_id`,再用 `finboard data release-verify` 校验 manifest 与全部文件
+回测可用 `finboard data release`，也可在研究工作台“数据与标的 → 数据发布”
+中选择本地缓存的标的和日期范围，把可变 Parquet 缓存冻结为指定
+`release_id`;`finboard data release-verify` 可复核 manifest 与全部文件
 SHA-256。发布清单会登记到 PostgreSQL `research_dataset_releases`,API
-`GET /api/instruments/datasets/releases` 及其详情端点提供多资产能力、逐标的
-覆盖、`available_at` 和手数/T+N/税费/期货乘数与保证金快照。
+`POST/GET /api/instruments/datasets/releases` 及详情端点提供多资产能力、
+逐标的覆盖、`available_at` 和手数/T+N/税费/期货乘数与保证金快照。
 
 发布采用 fail-closed 语义:必需资产能力、元数据、事件、覆盖或 checksum 任一
 不完整就不登记可用版本,之前的发布保持不变;冻结 Provider 不会回退到可变缓存或

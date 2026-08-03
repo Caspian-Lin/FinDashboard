@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import os
+import subprocess
+from pathlib import Path
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -18,10 +21,17 @@ from finboard_api.schemas import (
     ConvertibleMetadataOut,
     DatasetManifestOut,
     DatasetReleaseCapabilityOut,
+    EtfAuditOut,
+    EtfBatchConfirmRequest,
+    EtfClassificationUpdate,
     EtfMetadataOut,
+    EtfMetadataSummaryOut,
+    EtfSyncPreviewOut,
+    EtfSyncRequest,
     FuturesContractOut,
     InstrumentOut,
     LifecycleEventOut,
+    ResearchDatasetReleaseCreate,
     ResearchDatasetReleaseOut,
     ResearchDatasetReleaseSummaryOut,
 )
@@ -29,14 +39,59 @@ from finboard_persistence import (
     BondMetadataModel,
     ConvertibleMetadataModel,
     DatasetManifestModel,
+    EtfMetadataAuditModel,
     EtfMetadataModel,
+    EtfMetadataRepository,
     FuturesContractModel,
     InstrumentLifecycleEventModel,
     InstrumentModel,
     ResearchDatasetReleaseRepository,
 )
+from finboard_shared.types import EtfExecutionProfile
 
 router = APIRouter(prefix="/api/instruments", tags=["instruments"])
+
+_DEFAULT_CACHE_DIR = "data_cache"
+_DEFAULT_RELEASE_ROOT = "data_releases"
+
+
+def _current_code_version() -> str:
+    """返回服务端代码版本,不接受网页传入的可伪造版本。"""
+
+    configured = os.getenv("FINBOARD_CODE_VERSION")
+    if configured:
+        return configured
+    result = subprocess.run(
+        ["git", "rev-parse", "--short=12", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        return "unknown"
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return f"{value}-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else value
+
+
+def _release_detail_payload(release: Any) -> dict[str, object]:
+    """把领域对象转换成详情响应,同时补齐列表摘要字段。"""
+    # 这里不把摘要字段写入 manifest,避免改变已有发布的 checksum 契约。
+    dataset_release = release
+    payload = cast(dict[str, object], dataset_release.as_dict())
+    payload.update(
+        {
+            "symbol_count": dataset_release.symbol_count,
+            "row_count": dataset_release.row_count,
+            "coverage_pct": dataset_release.coverage_pct,
+        }
+    )
+    return payload
 
 
 @router.get("", response_model=list[InstrumentOut])
@@ -55,6 +110,44 @@ async def list_instruments(
     stmt = stmt.limit(limit)
     result = await session.execute(stmt)
     return [_instrument_to_out(r) for r in result.scalars().all()]
+
+
+@router.get("/etf-summary", response_model=EtfMetadataSummaryOut)
+async def etf_metadata_summary(
+    session: AsyncSession = Depends(get_session),
+) -> EtfMetadataSummaryOut:
+    """ETF 元数据分类统计(各 review_status 数量 + 缺失数)。"""
+    count_stmt = select(InstrumentModel).where(
+        InstrumentModel.instrument_type == "etf"
+    )
+    total_etf = len(
+        (await session.execute(count_stmt)).scalars().all()
+    )
+    summary = await EtfMetadataRepository(session).summary(total_etf)
+    return EtfMetadataSummaryOut(
+        total=summary.total,
+        auto_adopted=summary.auto_adopted,
+        needs_review=summary.needs_review,
+        manually_confirmed=summary.manually_confirmed,
+        manually_overridden=summary.manually_overridden,
+        missing_metadata=summary.missing_metadata,
+    )
+
+
+@router.get("/etf-review", response_model=list[EtfMetadataOut])
+async def etf_review_queue(
+    review_status: str | None = Query(default="needs_review"),
+    limit: int = Query(default=200, ge=1, le=2000),
+    session: AsyncSession = Depends(get_session),
+) -> list[EtfMetadataOut]:
+    """ETF 元数据待复核队列(默认查 needs_review)。"""
+    from finboard_shared.types import ReviewStatus
+
+    status = ReviewStatus(review_status) if review_status else None
+    rows = await EtfMetadataRepository(session).list_by_review_status(
+        status, limit=limit
+    )
+    return [_etf_to_out(r) for r in rows]
 
 
 @router.get("/{code}", response_model=InstrumentOut)
@@ -77,10 +170,155 @@ async def get_etf_metadata(
 ) -> EtfMetadataOut | None:
     stmt = select(EtfMetadataModel).where(EtfMetadataModel.fund_code == fund_code)
     result = await session.execute(stmt)
-    row = result.scalar_one_or_none()
+    row = result.scalars().first()
     if row is None:
         return None
     return _etf_to_out(row)
+
+
+@router.put("/etf/{code}", response_model=EtfMetadataOut)
+async def update_etf_classification(
+    code: str,
+    request: EtfClassificationUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> EtfMetadataOut:
+    """人工修正研究用 ETF 多维分类(issue #97)。
+
+    写审计流水(操作者/时间/理由/前后值),设 ``manual_override=True``,
+    后续自动同步不再覆盖。
+    """
+
+    normalized = code.strip().upper()
+    instrument = (
+        await session.execute(
+            select(InstrumentModel).where(InstrumentModel.code == normalized)
+        )
+    ).scalar_one_or_none()
+    if instrument is None:
+        raise HTTPException(status_code=404, detail=f"未找到标的: {normalized}")
+    if instrument.instrument_type != "etf":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{normalized} 不是 ETF,不能写入 ETF 分类",
+        )
+
+    repo = EtfMetadataRepository(session)
+    profile: EtfExecutionProfile | None = None
+    if request.execution_profile is not None:
+        profile = EtfExecutionProfile(request.execution_profile)
+    row = await repo.apply_manual_override(
+        normalized,
+        execution_profile=profile,
+        underlying_market=request.underlying_market,
+        strategy_type=request.strategy_type,
+        underlying_index=request.underlying_index,
+        reason=request.reason,
+    )
+    await session.commit()
+    return _etf_to_out(row)
+
+
+@router.post("/etf-sync", response_model=EtfSyncPreviewOut)
+async def etf_metadata_sync(
+    request: EtfSyncRequest,
+    session: AsyncSession = Depends(get_session),
+) -> EtfSyncPreviewOut:
+    """批量同步 ETF 元数据(akshare → 分类 → 写库)。
+
+    ``dry_run=True`` 只预览不写入;``enrich_codes`` 指定的标的会额外
+    拉取单基金档案补充跟踪标的 / 费率。
+    """
+
+    from finboard_data.assets import (
+        AkShareEtfMetadataSource,
+        EtfClassifier,
+        EtfMetadataSync,
+    )
+
+    try:
+        sync = EtfMetadataSync(AkShareEtfMetadataSource(), EtfClassifier())
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"数据源依赖未安装,无法同步 ETF 元数据: {exc}",
+        ) from exc
+    try:
+        classifications = await sync.discover_and_classify(
+            enrich_codes=request.enrich_codes or None,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"ETF 元数据同步失败: {exc}",
+        ) from exc
+
+    repo = EtfMetadataRepository(session)
+    if request.dry_run:
+        preview = await repo.preview_upsert(classifications)
+        return EtfSyncPreviewOut(
+            total=preview.total,
+            to_insert=preview.to_insert,
+            to_update=preview.to_update,
+            skipped_override=preview.skipped_override,
+            needs_review=preview.needs_review,
+            auto_adopted=preview.auto_adopted,
+        )
+    inserted, updated, skipped = await repo.upsert_batch(classifications)
+    await session.commit()
+    return EtfSyncPreviewOut(
+        total=len(classifications),
+        to_insert=inserted,
+        to_update=updated,
+        skipped_override=skipped,
+        needs_review=sum(
+            1 for c in classifications if c.review_status.value == "needs_review"
+        ),
+        auto_adopted=sum(
+            1 for c in classifications if c.review_status.value == "auto_adopted"
+        ),
+    )
+
+
+@router.post("/etf-batch-confirm", response_model=int)
+async def etf_batch_confirm(
+    request: EtfBatchConfirmRequest,
+    session: AsyncSession = Depends(get_session),
+) -> int:
+    """批量确认待复核 ETF(needs_review → manually_confirmed)。"""
+    confirmed = await EtfMetadataRepository(session).batch_confirm(
+        request.codes, reason=request.reason
+    )
+    await session.commit()
+    return confirmed
+
+
+@router.get("/etf-audits/{code}", response_model=list[EtfAuditOut])
+async def etf_audits(
+    code: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+) -> list[EtfAuditOut]:
+    """查看 ETF 分类的审计流水(人工覆盖历史)。"""
+    stmt = (
+        select(EtfMetadataAuditModel)
+        .where(EtfMetadataAuditModel.code == code.strip().upper())
+        .order_by(EtfMetadataAuditModel.changed_at.desc())
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        EtfAuditOut(
+            id=r.id,
+            code=r.code,
+            field_name=r.field_name,
+            old_value=r.old_value,
+            new_value=r.new_value,
+            changed_by=r.changed_by,
+            reason=r.reason,
+            changed_at=r.changed_at,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/bond/{code}", response_model=BondMetadataOut | None)
@@ -215,6 +453,115 @@ async def list_dataset_releases(
     ]
 
 
+@router.post(
+    "/datasets/releases",
+    response_model=ResearchDatasetReleaseOut,
+    status_code=201,
+)
+async def create_dataset_release(
+    request: ResearchDatasetReleaseCreate,
+    session: AsyncSession = Depends(get_session),
+) -> ResearchDatasetReleaseOut:
+    """把选定范围的本地 Parquet 缓存冻结为不可变研究数据版本。"""
+
+    from finboard_data import (
+        DatasetReleaseError,
+        DatasetReleaseSpec,
+        ImmutableReleaseError,
+    )
+    from finboard_persistence import ResearchDatasetReleaseService
+
+    cache_dir = Path(os.getenv("FINBOARD_DATA_CACHE_DIR", _DEFAULT_CACHE_DIR))
+    release_root = Path(
+        os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT)
+    )
+    source = (
+        "tushare"
+        if request.release_kind == "a_share_tushare"
+        else "mixed"
+    )
+    rows = await session.execute(
+        select(InstrumentModel).where(InstrumentModel.code.in_(request.symbols))
+    )
+    selected_instruments = list(rows.scalars().all())
+    selected_codes = {item.code for item in selected_instruments}
+    missing_codes = sorted(set(request.symbols) - selected_codes)
+    if missing_codes:
+        raise HTTPException(
+            status_code=422,
+            detail=f"发布标的未登记到元数据表: {', '.join(missing_codes[:20])}",
+        )
+    if request.release_kind == "a_share_tushare":
+        invalid = sorted(
+            item.code
+            for item in selected_instruments
+            if item.market != "a_share" or item.instrument_type != "stock"
+        )
+        if invalid:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A股 Tushare 单源发布只能包含 A 股股票,不能包含 ETF 或其他资产: "
+                    + ", ".join(invalid[:20])
+                ),
+            )
+    else:
+        selected_types = {item.instrument_type for item in selected_instruments}
+        missing_types = {"stock", "etf"} - selected_types
+        if missing_types:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "多资产混合源发布必须同时包含股票和 ETF,缺少: "
+                    + ", ".join(sorted(missing_types))
+                ),
+            )
+
+    service = ResearchDatasetReleaseService(
+        session,
+        cache_dir=cache_dir,
+        release_root=release_root,
+    )
+    try:
+        release = await service.publish(
+            DatasetReleaseSpec(
+                release_id=request.release_id,
+                dataset_name=request.dataset_name,
+                source=source,
+                version=request.version,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                code_version=_current_code_version(),
+                adjustment=request.adjustment,
+                required_capabilities=(
+                    ("stock",)
+                    if request.release_kind == "a_share_tushare"
+                    else tuple(request.required_capabilities)
+                ),
+                known_limitations=(
+                    "交易日覆盖使用工作日近似;节假日缺口作为 warning 报告",
+                    "停牌优先使用停复牌生命周期事件;缺少事件时仅能由零成交且 OHLC 不变的日线代理识别",
+                    "只冻结本地缓存已有字段,不会回退到联网数据源",
+                    (
+                        "A股单源发布严格要求所有 Bar 来源为 tushare"
+                        if request.release_kind == "a_share_tushare"
+                        else "多资产发布允许按标的混合来源,实际来源写入质量报告"
+                    ),
+                ),
+            ),
+            request.symbols,
+        )
+        await session.commit()
+    except ImmutableReleaseError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=f"发布身份冲突: {exc}") from exc
+    except (DatasetReleaseError, ValueError) as exc:
+        await session.rollback()
+        raise HTTPException(status_code=422, detail=f"数据质量门未通过: {exc}") from exc
+
+    return ResearchDatasetReleaseOut.model_validate(_release_detail_payload(release))
+
+
 @router.get(
     "/datasets/releases/{release_id}",
     response_model=ResearchDatasetReleaseOut,
@@ -228,7 +575,7 @@ async def get_dataset_release(
     release = await ResearchDatasetReleaseRepository(session).get(release_id)
     if release is None:
         raise HTTPException(status_code=404, detail=f"未找到研究数据发布: {release_id}")
-    return ResearchDatasetReleaseOut.model_validate(release.as_dict())
+    return ResearchDatasetReleaseOut.model_validate(_release_detail_payload(release))
 
 
 def _instrument_to_out(row: InstrumentModel) -> InstrumentOut:
@@ -251,6 +598,9 @@ def _etf_to_out(row: EtfMetadataModel) -> EtfMetadataOut:
         code=row.code,
         fund_code=row.fund_code,
         category=row.category,
+        execution_profile=row.execution_profile,
+        underlying_market=row.underlying_market,
+        strategy_type=row.strategy_type,
         underlying_index=row.underlying_index,
         underlying_asset_class=row.underlying_asset_class,
         management_fee_rate=row.management_fee_rate,
@@ -262,6 +612,12 @@ def _etf_to_out(row: EtfMetadataModel) -> EtfMetadataOut:
         iopv_available=row.iopv_available,
         allows_t_plus_0=row.allows_t_plus_0,
         dividend_policy=row.dividend_policy,
+        source=row.source,
+        rule_version=row.rule_version,
+        confidence=row.confidence,
+        review_status=row.review_status,
+        evidence=[str(e) for e in (row.evidence or [])],
+        manual_override=row.manual_override,
     )
 
 

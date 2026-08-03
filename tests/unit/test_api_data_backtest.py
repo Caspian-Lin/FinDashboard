@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
-from datetime import date
+import asyncio
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -34,6 +36,175 @@ def client(app: FastAPI) -> TestClient:
 class TestDataRoutes:
     """Data 路由测试。"""
 
+    def test_bulk_download_log_records_and_updates_cache_miss_reason(self) -> None:
+        """拉取日志可异步补充未命中原因,并保持稳定事件序号。"""
+        from finboard_api.routes.data import (
+            _append_bulk_download_log,
+            _set_bulk_download_log_reason,
+        )
+
+        state: dict[str, object] = {"logs": []}
+        seq = _append_bulk_download_log(
+            state,
+            event="fetching",
+            code="000001.SZ",
+        )
+        _set_bulk_download_log_reason(
+            state,
+            seq=seq,
+            reason="缺少日期段 2026-08-01~2026-08-03",
+        )
+        _append_bulk_download_log(
+            state,
+            event="completed",
+            code="000001.SZ",
+        )
+
+        logs = state["logs"]
+        assert isinstance(logs, list)
+        assert logs[0]["seq"] == 1
+        assert logs[0]["reason"] == "缺少日期段 2026-08-01~2026-08-03"
+        assert logs[1]["seq"] == 2
+        assert logs[1]["event"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_app_shutdown_cancels_bulk_download_task(self) -> None:
+        """关闭后端必须取消批量任务,重启后由缓存重新规划。"""
+        from finboard_api.app import _cancel_bulk_download_task
+
+        test_app = FastAPI()
+        started = asyncio.Event()
+        finalized = asyncio.Event()
+
+        async def _download() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalized.set()
+
+        task = asyncio.create_task(_download())
+        await started.wait()
+        test_app.state._bulk_task = task
+        test_app.state._bulk_download = {
+            "status": "running",
+            "current_symbol": "000001.SZ",
+            "phase": "fetching",
+            "active_symbols": [{"code": "000001.SZ", "reason": "无缓存"}],
+        }
+
+        await _cancel_bulk_download_task(test_app)
+
+        assert task.cancelled()
+        assert finalized.is_set()
+        assert test_app.state._bulk_task is None
+        assert test_app.state._bulk_download == {
+            "status": "cancelled",
+            "current_symbol": None,
+            "phase": None,
+            "active_symbols": [],
+        }
+
+    @pytest.mark.asyncio
+    async def test_tushare_lifecycle_events_use_idempotent_insert(self) -> None:
+        """停复牌事件按数据库唯一键幂等写入并返回实际新增数。"""
+        from types import SimpleNamespace
+
+        from sqlalchemy.dialects import postgresql
+
+        from finboard_api.routes.data import _persist_tushare_lifecycle_events
+
+        event = SimpleNamespace(
+            symbol="000001.SZ",
+            event_type="suspension_day",
+            effective_date=date(2024, 1, 3),
+            suspend_timing=None,
+        )
+        scalar_result = MagicMock()
+        scalar_result.all.return_value = [123]
+        execute_result = MagicMock()
+        execute_result.scalars.return_value = scalar_result
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock(return_value=execute_result)
+
+        inserted = await _persist_tushare_lifecycle_events(mock_session, [event])
+
+        assert inserted == 1
+        assert mock_session.execute.await_args is not None
+        statement = mock_session.execute.await_args.args[0]
+        compiled = str(statement.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
+        assert "ON CONFLICT ON CONSTRAINT uq_instrument_lifecycle_event DO NOTHING" in compiled
+        mock_session.execute.assert_awaited_once()
+
+    def test_tushare_bulk_scope_rejects_etf(self) -> None:
+        """Tushare 股票批量任务不能静默包含 ETF。"""
+        from types import SimpleNamespace
+
+        from finboard_api.routes.data import _validate_bulk_provider_scope
+
+        instruments = [
+            SimpleNamespace(
+                code="510300.SH",
+                market="a_share",
+                instrument_type="etf",
+            )
+        ]
+
+        with pytest.raises(ValueError, match="仅支持 A 股股票"):
+            _validate_bulk_provider_scope("tushare", instruments)
+
+    def test_tushare_bulk_scope_accepts_a_share_stock(self) -> None:
+        """Tushare 股票批量任务接受纯 A 股股票集合。"""
+        from types import SimpleNamespace
+
+        from finboard_api.routes.data import _validate_bulk_provider_scope
+
+        instruments = [
+            SimpleNamespace(
+                code="000001.SZ",
+                market="a_share",
+                instrument_type="stock",
+            )
+        ]
+
+        _validate_bulk_provider_scope("tushare", instruments)
+
+    @pytest.mark.asyncio
+    async def test_instrument_summary_groups_status_market_and_type(self) -> None:
+        """标的汇总接口返回数量口径所需的三组分布。"""
+        from finboard_api.routes.data import summarize_instruments
+
+        status_result = MagicMock()
+        status_result.all.return_value = [("active", 3), ("delisted", 1)]
+        market_result = MagicMock()
+        market_result.all.return_value = [("a_share", 4)]
+        type_result = MagicMock()
+        type_result.all.return_value = [("stock", 3), ("etf", 1)]
+        board_result = MagicMock()
+        board_result.all.return_value = [("sse_main", 2), ("chinext", 1), ("unknown", 1)]
+        active_etf_result = MagicMock()
+        active_etf_result.scalar_one.return_value = 1
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock(
+            side_effect=[
+                status_result,
+                market_result,
+                type_result,
+                board_result,
+                active_etf_result,
+            ]
+        )
+
+        result = await summarize_instruments(session=mock_session)
+
+        assert result.total == 4
+        assert result.active_total == 3
+        assert result.active_etf_total == 1
+        assert result.by_status == {"active": 3, "delisted": 1}
+        assert result.by_market == {"a_share": 4}
+        assert result.by_instrument_type == {"stock": 3, "etf": 1}
+        assert result.by_listing_board == {"sse_main": 2, "chinext": 1, "unknown": 1}
+
     def test_list_cache_status_empty(self, client: TestClient) -> None:
         """空缓存目录返回空列表。"""
         with patch("finboard_api.routes.data.Path") as mock_path_cls:
@@ -51,6 +222,89 @@ class TestDataRoutes:
 
         assert resp.status_code == 200
         assert resp.json() == {"items": [], "total": 0, "limit": 200, "offset": 0}
+
+    def test_cache_status_selection_returns_all_filtered_items_and_union_range(
+        self,
+        client: TestClient,
+        tmp_path: Path,
+    ) -> None:
+        """全选端点不受分页限制,并返回上市/退市友好的整体日期范围。"""
+        from finboard_data.cache import CacheMetadata
+
+        first = tmp_path / "510300.SH_1d_qfq.parquet"
+        second = tmp_path / "600519.SH_1d_qfq.parquet"
+        ignored = tmp_path / "510300.SH_1d_hqfq.parquet"
+        for path in (first, second, ignored):
+            path.touch()
+
+        metadata = {
+            first.name: CacheMetadata(
+                bar_count=200,
+                first_date=date(2020, 1, 2),
+                last_date=date(2024, 12, 31),
+                file_size=1,
+            ),
+            second.name: CacheMetadata(
+                bar_count=100,
+                first_date=date(2022, 3, 1),
+                last_date=date(2023, 6, 30),
+                file_size=1,
+            ),
+        }
+
+        async def metadata_for_path(path: Path) -> CacheMetadata:
+            return metadata[path.name]
+
+        with (
+            patch("finboard_api.routes.data._CACHE_DIR", str(tmp_path)),
+            patch(
+                "finboard_data.cache.ParquetCache.metadata",
+                new=AsyncMock(side_effect=metadata_for_path),
+            ),
+        ):
+            resp = client.get("/api/data/status-selection?period=1d&adjust=qfq")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["total"] == 2
+        assert [item["symbol"] for item in payload["items"]] == [
+            "510300.SH",
+            "600519.SH",
+        ]
+        assert payload["first_date"] == "2020-01-02"
+        assert payload["last_date"] == "2024-12-31"
+
+        with (
+            patch("finboard_api.routes.data._CACHE_DIR", str(tmp_path)),
+            patch(
+                "finboard_data.cache.ParquetCache.metadata",
+                new=AsyncMock(side_effect=metadata_for_path),
+            ),
+        ):
+            filtered = client.get(
+                "/api/data/status-selection?period=1d&adjust=qfq&listing_board=sse_main"
+            )
+        assert filtered.status_code == 200
+        assert [item["symbol"] for item in filtered.json()["items"]] == ["600519.SH"]
+
+    def test_sync_universe_reports_missing_akshare_as_service_unavailable(
+        self,
+        client: TestClient,
+        app: FastAPI,
+    ) -> None:
+        """安装损坏时返回可操作错误,不能泄漏为 ASGI 500。"""
+        from finboard_api.deps import get_db_session
+
+        app.dependency_overrides[get_db_session] = lambda: AsyncMock()
+        with patch(
+            "finboard_data.discovery.UniverseDiscovery.discover_all",
+            new=AsyncMock(side_effect=ModuleNotFoundError("akshare")),
+        ):
+            resp = client.post("/api/data/sync")
+        app.dependency_overrides.clear()
+
+        assert resp.status_code == 503
+        assert "uv sync --all-packages" in resp.json()["detail"]
 
     def test_fetch_all_updates_cache_without_materializing_bars(
         self, client: TestClient
@@ -84,6 +338,62 @@ class TestDataRoutes:
         assert resp.json()["details"][0]["bar_count"] == 2
         provider.update_cache_batch.assert_awaited_once()
         provider.fetch_bars_batch.assert_not_awaited()
+
+    def test_quality_repair_batches_anomalous_symbols_with_uncached_source(
+        self, client: TestClient
+    ) -> None:
+        """批量换源必须绕过共享缓存,并只替换通过校验的异常日期。"""
+        from finboard_shared.models import Bar, Symbol
+        from finboard_shared.types import BarPeriod, Market
+
+        symbol = Symbol(code="510600.SH", market=Market.A_SHARE)
+        bad = Bar(
+            symbol=symbol,
+            period=BarPeriod.D1,
+            timestamp=datetime(2019, 1, 7, tzinfo=UTC),
+            open=Decimal("2.269"),
+            high=Decimal("2.310"),
+            low=Decimal("2.297"),
+            close=Decimal("2.307"),
+            volume=Decimal("227972"),
+            source="yfinance",
+        )
+        repaired = Bar(
+            symbol=symbol,
+            period=BarPeriod.D1,
+            timestamp=bad.timestamp,
+            open=Decimal("2.308"),
+            high=Decimal("2.315"),
+            low=Decimal("2.297"),
+            close=Decimal("2.307"),
+            volume=Decimal("227972"),
+            source="akshare",
+        )
+        provider = AsyncMock()
+        provider.fetch_bars.return_value = [repaired]
+        cache_read = AsyncMock(return_value=[bad])
+        cache_write = AsyncMock()
+
+        with (
+            patch("finboard_api.routes.data._get_provider", return_value=provider) as factory,
+            patch("finboard_data.cache.ParquetCache.read", new=cache_read),
+            patch("finboard_data.cache.ParquetCache.write", new=cache_write),
+        ):
+            resp = client.post(
+                "/api/data/quality/repair",
+                json={"symbols": ["510600.SH"], "source": "akshare"},
+            )
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["repaired"] == 1
+        assert payload["corrected_bars"] == 1
+        assert payload["reports"][0]["corrected_dates"] == ["2019-01-07"]
+        factory.assert_called_once_with("akshare", use_cache=False, settings=None)
+        assert cache_write.await_args is not None
+        written = cache_write.await_args.args[3]
+        assert written[0].open == Decimal("2.308")
+        assert written[0].source == "akshare"
 
     def test_get_symbol_pool_empty(self, client: TestClient) -> None:
         """标的池不存在时返回默认配置。"""

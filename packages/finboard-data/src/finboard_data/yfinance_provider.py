@@ -155,6 +155,8 @@ class YFinanceProvider:
             and metadata.last_date is not None
             and metadata.last_date >= expected_end
         ):
+            if on_status is not None:
+                on_status("cache_hit")
             return True
 
         fetch_start = start
@@ -293,6 +295,8 @@ class YFinanceProvider:
                     logger.exception("yfinance.cache_update_failed", symbol=sym.code)
                     ok = False
                 results[sym.code] = ok
+                if on_status is not None:
+                    on_status(sym.code, "completed" if ok else "failed")
                 done_count += 1
                 if on_progress is not None:
                     on_progress(sym.code, done_count, total)
@@ -427,6 +431,7 @@ class YFinanceProvider:
                     close=Decimal(str(row["Close"])),
                     volume=Decimal(str(row.get("Volume", 0))),
                     amount=Decimal("0"),
+                    source="yfinance",
                 )
             )
         bars.sort(key=lambda b: b.timestamp)

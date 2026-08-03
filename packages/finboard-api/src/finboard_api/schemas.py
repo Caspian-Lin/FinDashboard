@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from finboard_app.selection_schema import FactorSelectionParams
 
@@ -174,16 +174,19 @@ class DataFetchRequest(BaseSchema):
     start: str
     end: str
     adjust: str = "qfq"
+    source: str | None = None  # akshare / yfinance / tushare; None = 用服务端默认
 
 
 class DataStatusOut(BaseSchema):
     symbol: str
+    listing_board: str = "unknown"
     period: str
     adjust: str
     bar_count: int
     first_date: str | None = None
     last_date: str | None = None
     last_close: Decimal | None = None
+    source: str | None = None
 
 
 class DataStatusListOut(BaseSchema):
@@ -193,11 +196,71 @@ class DataStatusListOut(BaseSchema):
     offset: int
 
 
+class DataStatusSelectionOut(BaseSchema):
+    """匹配缓存筛选条件的完整选择快照。"""
+
+    items: list[DataStatusOut]
+    total: int
+    first_date: str | None = None
+    last_date: str | None = None
+
+
+class TushareQuotaOut(BaseSchema):
+    """Tushare 本地请求预算,不冒充账户侧实时权限。"""
+
+    date: str
+    requests_per_minute: int
+    daily_limit: int
+    used: int
+    remaining: int
+
+
 class FetchResultOut(BaseSchema):
     symbol: str
     bar_count: int
     first_date: str | None = None
     last_date: str | None = None
+    source: str | None = None
+    fallback_used: bool = False
+    fallback_source: str | None = None
+    lifecycle_events: int = 0
+    lifecycle_sync_failed: bool = False
+    lifecycle_sync_error: str | None = None
+
+
+class BarAnomalyOut(BaseSchema):
+    date: str
+    source: str
+    reasons: list[str]
+
+
+class QualityReportOut(BaseSchema):
+    symbol: str
+    total_bars: int
+    anomaly_count: int
+    duplicate_count: int = 0
+    sources: list[str] = []
+    anomalies: list[BarAnomalyOut] = []
+    passed: bool = True
+    primary_source: str = ""
+    fallback_used: bool = False
+    fallback_source: str | None = None
+    corrected_dates: list[str] = []
+    error: str | None = None
+
+
+class QualityRepairRequest(BaseSchema):
+    symbols: list[str]
+    source: Literal["akshare", "yfinance", "tushare"]
+    adjust: str = "qfq"
+
+
+class QualityRepairResultOut(BaseSchema):
+    total: int
+    repaired: int
+    failed: int
+    corrected_bars: int
+    reports: list[QualityReportOut]
 
 
 class BatchFetchResultOut(BaseSchema):
@@ -233,6 +296,7 @@ class InstrumentOut(BaseSchema):
     market: str
     instrument_type: str
     exchange: str | None = None
+    listing_board: str = "unknown"
     list_date: date | None = None
     delist_date: date | None = None
     status: str = "active"
@@ -245,6 +309,18 @@ class InstrumentListOut(BaseSchema):
     total: int
     limit: int
     offset: int
+
+
+class InstrumentSummaryOut(BaseSchema):
+    """标的字典的全量分布,用于元数据页解释数量口径。"""
+
+    total: int
+    active_total: int
+    active_etf_total: int
+    by_status: dict[str, int] = Field(default_factory=dict)
+    by_market: dict[str, int] = Field(default_factory=dict)
+    by_instrument_type: dict[str, int] = Field(default_factory=dict)
+    by_listing_board: dict[str, int] = Field(default_factory=dict)
 
 
 class SyncResultOut(BaseSchema):
@@ -260,11 +336,27 @@ class SyncResultOut(BaseSchema):
 class BulkDownloadRequest(BaseSchema):
     market: str = "a_share"
     instrument_type: str | None = None
+    exchange: str | None = None
+    listing_boards: list[str] = Field(default_factory=list)
     start: str = "2015-01-01"
+    source: str | None = None
+
+
+class ActiveSymbolOut(BaseSchema):
+    code: str
+    reason: str = ""
+
+
+class BulkDownloadLogOut(BaseSchema):
+    seq: int
+    timestamp: str
+    event: str
+    code: str
+    reason: str | None = None
 
 
 class BulkDownloadStatusOut(BaseSchema):
-    status: str = "idle"  # idle / running / done / error
+    status: str = "idle"  # idle / running / done / error / cancelled
     done: int = 0
     total: int = 0
     success: int = 0
@@ -272,6 +364,17 @@ class BulkDownloadStatusOut(BaseSchema):
     current_symbol: str | None = None
     phase: str | None = None
     error: str | None = None
+    quality_passed: int = 0
+    quality_failed: int = 0
+    fallback_used: int = 0
+    lifecycle_events: int = 0
+    lifecycle_sync_failed: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    started_at: str | None = None
+    active_symbols: list[ActiveSymbolOut] = []
+    logs: list[BulkDownloadLogOut] = []
+    quality_reports: list[QualityReportOut] = []
 
 
 class SchedulerConfigOut(BaseSchema):
@@ -293,6 +396,29 @@ class SchedulerConfigUpdate(BaseSchema):
     download_lookback_days: int | None = None
     download_markets: list[str] | None = None
     download_types: list[str] | None = None
+
+
+# --------------------------------------------------------------------------- LLM Provider
+# 设置页可直接编辑并持久化到 .env(见 routes/data.py)。
+# api_key 属敏感字段:GET 返回固定掩码 "********" + api_key_set 标记,
+# PUT 时 api_key == "********" 视为哨兵,不修改原值;传其它值(含空串)则覆盖。
+class LLMConfigOut(BaseSchema):
+    provider: Literal["fake", "openai_compatible"] = "fake"
+    base_url: str = ""
+    api_key: str = ""
+    api_key_set: bool = False
+    model: str = "gpt-4o-mini"
+    timeout_seconds: float = 30.0
+    max_retries: int = 3
+
+
+class LLMConfigUpdate(BaseSchema):
+    provider: Literal["fake", "openai_compatible"] | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+    timeout_seconds: float | None = None
+    max_retries: int | None = None
 
 
 # --------------------------------------------------------------------------- Backtest
@@ -634,6 +760,22 @@ class FactorDefinitionOut(BaseSchema):
     checksum: str
 
 
+class FeatureSnapshotCreate(BaseSchema):
+    """从一个已发布数据版本显式生成价格特征快照。"""
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    dataset_release_id: str = Field(min_length=1, max_length=128)
+    decision_at: datetime
+
+    @field_validator("decision_at")
+    @classmethod
+    def validate_decision_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("decision_at 必须带时区,例如 2026-07-31T23:59:59+08:00")
+        return value
+
+
 class FeatureObservationOut(BaseSchema):
     symbol: str
     feature_name: str
@@ -736,6 +878,9 @@ class EtfMetadataOut(BaseSchema):
     code: str
     fund_code: str
     category: str
+    execution_profile: str | None = None
+    underlying_market: str = "domestic"
+    strategy_type: str = "index"
     underlying_index: str | None = None
     underlying_asset_class: str = "equity"
     management_fee_rate: Decimal | None = None
@@ -747,6 +892,80 @@ class EtfMetadataOut(BaseSchema):
     iopv_available: bool = False
     allows_t_plus_0: bool = False
     dividend_policy: str = "cash"
+    source: str = "manual"
+    rule_version: str = ""
+    confidence: Decimal = Decimal("0")
+    review_status: str = "needs_review"
+    evidence: list[str] = []
+    manual_override: bool = False
+
+
+class EtfClassificationUpdate(BaseSchema):
+    """人工补齐或修正研究用 ETF 分类(issue #97 多维分类)。"""
+
+    execution_profile: (
+        Literal[
+            "domestic_equity_etf",
+            "cross_border_etf",
+            "bond_etf",
+            "money_market_etf",
+            "commodity_etf",
+        ]
+        | None
+    ) = None
+    underlying_market: Literal["domestic", "hk", "overseas", "global"] | None = None
+    strategy_type: Literal["index", "active"] | None = None
+    underlying_index: str | None = Field(default=None, max_length=32)
+    reason: str = Field(default="", max_length=500)
+
+    @field_validator("underlying_index")
+    @classmethod
+    def normalize_underlying_index(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        return normalized or None
+
+
+class EtfSyncPreviewOut(BaseSchema):
+    total: int
+    to_insert: int
+    to_update: int
+    skipped_override: int
+    needs_review: int
+    auto_adopted: int
+
+
+class EtfSyncRequest(BaseSchema):
+    """触发 ETF 元数据批量同步(dry-run 预览或实际写入)。"""
+
+    dry_run: bool = True
+    enrich_codes: list[str] = Field(default_factory=list)
+
+
+class EtfBatchConfirmRequest(BaseSchema):
+    codes: list[str] = Field(min_length=1, max_length=2000)
+    reason: str = Field(default="", max_length=500)
+
+
+class EtfMetadataSummaryOut(BaseSchema):
+    total: int
+    auto_adopted: int
+    needs_review: int
+    manually_confirmed: int
+    manually_overridden: int
+    missing_metadata: int
+
+
+class EtfAuditOut(BaseSchema):
+    id: int
+    code: str
+    field_name: str
+    old_value: str | None = None
+    new_value: str | None = None
+    changed_by: str = "system"
+    reason: str = ""
+    changed_at: datetime
 
 
 class BondMetadataOut(BaseSchema):
@@ -832,6 +1051,74 @@ class DatasetReleaseCapabilityOut(BaseSchema):
     missing_requirements: list[str] = Field(default_factory=list)
 
 
+class ResearchDatasetReleaseCreate(BaseSchema):
+    """从本地行情缓存创建不可变研究数据发布。
+
+    缓存目录、发布目录和代码版本均由服务端决定,网页不能提交文件路径或
+    可执行内容。
+    """
+
+    release_id: str = Field(
+        min_length=3,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    dataset_name: str = Field(
+        default="multi_asset_daily_bars",
+        min_length=3,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    release_kind: Literal["a_share_tushare", "multi_asset_mixed"] = (
+        "a_share_tushare"
+    )
+    source: Literal["akshare", "yfinance", "tushare", "mixed", "manual"] | None = None
+    version: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    symbols: list[str] = Field(min_length=1, max_length=10_000)
+    start_date: date
+    end_date: date
+    adjustment: Literal["qfq", "hqfq", "none"] = "qfq"
+    required_capabilities: list[
+        Literal[
+            "stock",
+            "bond",
+            "convertible",
+            "futures",
+            "etf:index",
+            "etf:cross_border",
+            "etf:commodity",
+            "etf:bond",
+        ]
+    ] = Field(default_factory=list, max_length=8)
+
+    @field_validator("symbols")
+    @classmethod
+    def normalize_symbols(cls, value: list[str]) -> list[str]:
+        normalized = [symbol.strip().upper() for symbol in value if symbol.strip()]
+        if not normalized:
+            raise ValueError("至少选择一个已缓存标的")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("发布标的不能重复")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> ResearchDatasetReleaseCreate:
+        if self.start_date > self.end_date:
+            raise ValueError("开始日期不能晚于结束日期")
+        expected_source = (
+            "tushare" if self.release_kind == "a_share_tushare" else "mixed"
+        )
+        if self.source is not None and self.source != expected_source:
+            raise ValueError(
+                f"{self.release_kind} 发布的数据来源必须是 {expected_source}"
+            )
+        return self
+
+
 class DatasetReleaseInstrumentOut(BaseSchema):
     code: str
     name: str
@@ -854,7 +1141,9 @@ class DatasetReleaseInstrumentOut(BaseSchema):
     category: str
     ready: bool
     issues: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
     exchange: str | None = None
+    listing_board: str = "unknown"
     currency: str = "CNY"
     etf_category: str | None = None
     list_date: date | None = None
@@ -885,6 +1174,9 @@ class ResearchDatasetReleaseOut(BaseSchema):
     capabilities: list[DatasetReleaseCapabilityOut]
     quality_status: str
     quality_report: dict[str, Any]
+    symbol_count: int
+    row_count: int
+    coverage_pct: Decimal
     known_limitations: list[str] = Field(default_factory=list)
     storage_uri: str
     metadata_version: str

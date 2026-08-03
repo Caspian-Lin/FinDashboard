@@ -216,6 +216,9 @@ class InstrumentModel(Base, IdMixin):
     market: Mapped[str] = mapped_column(String(16), index=True)  # a_share / hk / us
     instrument_type: Mapped[str] = mapped_column(String(16), index=True)  # stock / etf
     exchange: Mapped[str | None] = mapped_column(String(16), nullable=True)  # SSE / SZSE
+    listing_board: Mapped[str] = mapped_column(
+        String(16), default="unknown", server_default="unknown", index=True
+    )
     list_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     delist_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
@@ -1345,13 +1348,21 @@ class ResearchTrialModel(Base, IdMixin):
 
 
 class EtfMetadataModel(Base, IdMixin):
-    """ETF 子描述 —— 跟踪指数 / 类别 / 费率 / 是否 T+0。"""
+    """ETF 子描述 —— 多维分类 / 跟踪指数 / 费率 / T+N 规则(issue #97 扩展)。
+
+    ``category`` 保留为兼容旧版单维度分类;新增 ``execution_profile`` /
+    ``underlying_market`` / ``strategy_type`` 正交维度 + 溯源 + 审核状态。
+    ``manual_override=True`` 的记录不会被自动同步覆盖。
+    """
 
     __tablename__ = "etf_metadata"
 
     code: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     fund_code: Mapped[str] = mapped_column(String(20), index=True)
-    category: Mapped[str] = mapped_column(String(32), index=True)  # equity/cross_border/bond/...
+    category: Mapped[str] = mapped_column(String(32), index=True)  # 兼容旧 EtfCategory
+    execution_profile: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    underlying_market: Mapped[str] = mapped_column(String(16), default="domestic")
+    strategy_type: Mapped[str] = mapped_column(String(16), default="index")
     underlying_index: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     underlying_asset_class: Mapped[str] = mapped_column(String(16), default="equity")
     management_fee_rate: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
@@ -1364,9 +1375,46 @@ class EtfMetadataModel(Base, IdMixin):
     allows_t_plus_0: Mapped[bool] = mapped_column(Boolean, default=False)
     dividend_policy: Mapped[str] = mapped_column(String(16), default="cash")
     source: Mapped[str] = mapped_column(String(32), default="manual")
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rule_version: Mapped[str] = mapped_column(String(32), default="")
+    confidence: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    review_status: Mapped[str] = mapped_column(String(32), default="needs_review", index=True)
+    evidence: Mapped[list[object]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    manual_override: Mapped[bool] = mapped_column(Boolean, default=False)
+    raw_payload: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
     dataset_version: Mapped[str] = mapped_column(String(128), default="v1")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class EtfMetadataAuditModel(Base, IdMixin):
+    """ETF 分类人工覆盖审计流水(issue #97)。
+
+    每次人工修改记录一条变更:操作者 / 时间 / 理由 / 前后值,
+    使自动同步不会静默回滚已确认的分类。
+    """
+
+    __tablename__ = "etf_metadata_audits"
+
+    code: Mapped[str] = mapped_column(String(20), index=True)
+    field_name: Mapped[str] = mapped_column(String(32))
+    old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[str] = mapped_column(String(64), default="system")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_etf_audit_code_changed", "code", "changed_at"),
     )
 
 

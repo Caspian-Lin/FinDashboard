@@ -27,6 +27,7 @@ from finboard_data.research import (
     ResearchDataDependencyError,
     ResearchDataUpstreamError,
 )
+from finboard_data.tushare_budget import TushareBudget, shared_tushare_budget
 
 _SOURCE = "tushare"
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -84,9 +85,18 @@ class TushareResearchDataProvider:
         token: str | None = None,
         client: TushareClient | None = None,
         now: Callable[[], datetime] | None = None,
+        budget: TushareBudget | None = None,
+        requests_per_minute: int = 200,
+        daily_request_limit: int = 100_000,
+        usage_file: str = "data_cache/tushare_usage.json",
     ) -> None:
         self._now = now or (lambda: datetime.now(UTC))
         self._client = client if client is not None else self._create_client(token)
+        self._budget = budget or shared_tushare_budget(
+            requests_per_minute=requests_per_minute,
+            daily_request_limit=daily_request_limit,
+            usage_file=usage_file,
+        )
 
     def __repr__(self) -> str:
         """返回不含凭据的稳定表示。"""
@@ -232,6 +242,7 @@ class TushareResearchDataProvider:
         if not callable(method_object):
             raise ResearchDataDependencyError(f"Tushare client 不支持 {endpoint}")
         method = cast(Callable[..., object], method_object)
+        await self._budget.acquire()
         try:
             payload = await asyncio.to_thread(method, **kwargs)
         except Exception:

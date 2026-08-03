@@ -84,6 +84,7 @@ async def _publish_release(
                 close=Decimal(str(3 + symbol_index + index * 0.01)),
                 volume=Decimal("1000000"),
                 amount=Decimal("3000000"),
+                source="fixed_sample",
             )
             for index in range(4)
         ]

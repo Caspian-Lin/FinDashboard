@@ -15,6 +15,11 @@ from finboard_persistence.dataset_release_repo import (
     ResearchDatasetReleaseService,
 )
 from finboard_persistence.engine import create_async_engine
+from finboard_persistence.etf_metadata_repo import (
+    EtfMetadataRepository,
+    EtfMetadataSummary,
+    EtfSyncPreview,
+)
 from finboard_persistence.factor_lab_repo import (
     FactorExperimentRepository,
     FactorExperimentValidationService,
@@ -32,6 +37,7 @@ from finboard_persistence.models import (
     ContinuousFuturesRuleModel,
     ConvertibleMetadataModel,
     DatasetManifestModel,
+    EtfMetadataAuditModel,
     EtfMetadataModel,
     FactorExperimentModel,
     FactorFeatureSnapshotModel,
@@ -126,7 +132,11 @@ __all__ = [
     "ContinuousFuturesRuleModel",
     "ConvertibleMetadataModel",
     "DatasetManifestModel",
+    "EtfMetadataAuditModel",
     "EtfMetadataModel",
+    "EtfMetadataRepository",
+    "EtfMetadataSummary",
+    "EtfSyncPreview",
     "FactorExperimentModel",
     "FactorExperimentRepository",
     "FactorExperimentValidationService",

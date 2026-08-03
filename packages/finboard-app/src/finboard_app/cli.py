@@ -16,12 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import shutil
 import signal
+import socket
 import subprocess
 import sys
+import threading
 from datetime import date, timedelta
 from datetime import date as parse_date
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import typer
@@ -46,6 +51,12 @@ app = typer.Typer(
 )
 
 
+def _configure_windows_asyncio() -> None:
+    """为 Windows 上的 psycopg 异步连接选择兼容的事件循环。"""
+    if sys.platform == "win32" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
 @app.callback()
 def _main(
     ctx: typer.Context,
@@ -54,6 +65,7 @@ def _main(
         typer.Option("--env-file", help="指定 .env 文件路径(默认 ./.env)"),
     ] = None,
 ) -> None:
+    _configure_windows_asyncio()
     settings = load_settings(env_file=env_file)
     ctx.obj = settings
 
@@ -113,6 +125,14 @@ def serve(
     """启动 FastAPI 交易控制台后端(含 WebSocket)。"""
     import uvicorn
 
+    # Uvicorn 0.36+ 在 Windows 默认显式创建 ProactorEventLoop,而 psycopg
+    # 的异步连接要求 SelectorEventLoop。reload 子进程必须显式使用
+    # ``asyncio``:Uvicorn 会在 use_subprocess=True 时返回 SelectorEventLoop;
+    # 非 reload 模式继续用 ``none`` 继承上面设置的 Selector policy。
+    if sys.platform == "win32":
+        uvicorn_loop = "asyncio" if reload else "none"
+    else:
+        uvicorn_loop = "auto"
     if reload:
         uvicorn.run(
             "finboard_api.app:create_app",
@@ -120,12 +140,194 @@ def serve(
             host=host,
             port=port,
             reload=True,
+            loop=uvicorn_loop,
         )
     else:
         from finboard_api.app import create_app
 
         app = create_app(ctx.obj)
-        uvicorn.run(app, host=host, port=port)
+        uvicorn.run(app, host=host, port=port, loop=uvicorn_loop)
+
+
+def _stop_dev_process(process: subprocess.Popen[bytes], *, timeout: float = 5.0) -> None:
+    """回收 Vite 进程组;Windows 按精确根 PID 清理整棵子进程树。"""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+        )
+        return
+
+    if process.poll() is not None:
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
+        process.wait(timeout=timeout)
+
+
+async def _check_dev_database(settings: Settings) -> None:
+    """在启动 Vite 前验证数据库,避免前端对未就绪 API 持续代理报错。"""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(
+        settings.db_url,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 3},
+    )
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    finally:
+        await engine.dispose()
+
+
+def _wake_wsl_postgresql(settings: Settings) -> bool:
+    """Windows 本机数据库不可达时,唤醒默认 WSL 发行版的 PostgreSQL。"""
+    if sys.platform != "win32":
+        return False
+
+    from sqlalchemy.engine import make_url
+
+    database_url = make_url(settings.db_url)
+    if database_url.host not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    port = database_url.port or 5432
+    command = (
+        "if command -v systemctl >/dev/null 2>&1; then "
+        "systemctl start postgresql; "
+        "else service postgresql start; fi && "
+        f"pg_isready -h 127.0.0.1 -p {port}"
+    )
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-u", "root", "-e", "sh", "-lc", command],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _ensure_dev_database(settings: Settings) -> bool:
+    """检查数据库;必要时唤醒 WSL PostgreSQL 并重试。"""
+    try:
+        asyncio.run(_check_dev_database(settings))
+        return False
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        if not _wake_wsl_postgresql(settings):
+            raise
+    asyncio.run(_check_dev_database(settings))
+    return True
+
+
+def _start_dev_frontend(npm_executable: str, web_dir: Path) -> subprocess.Popen[bytes]:
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            [npm_executable, "run", "dev"],
+            cwd=web_dir,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    return subprocess.Popen(
+        [npm_executable, "run", "dev"],
+        cwd=web_dir,
+        start_new_session=True,
+    )
+
+
+def _start_frontend_when_api_ready(
+    *,
+    npm_executable: str,
+    web_dir: Path,
+    host: str,
+    port: int,
+    stop_event: threading.Event,
+    frontend_holder: list[subprocess.Popen[bytes]],
+) -> None:
+    """等待 Uvicorn 完成 lifespan 并开始监听后再启动 Vite。"""
+    connect_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    while not stop_event.wait(0.1):
+        try:
+            with socket.create_connection((connect_host, port), timeout=0.2):
+                break
+        except OSError:
+            continue
+    if stop_event.is_set():
+        return
+    frontend_holder.append(_start_dev_frontend(npm_executable, web_dir))
+
+
+@app.command()
+def dev(
+    ctx: typer.Context,
+    host: Annotated[str, typer.Option("--host", help="后端监听地址")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", "-p", help="后端监听端口")] = 8000,
+    web_dir: Annotated[Path, typer.Option("--web-dir", help="前端目录")] = Path("web"),
+) -> None:
+    """前台运行 API 并托管 Vite,确保 Ctrl-C 触发 FastAPI shutdown。"""
+    resolved_web_dir = web_dir.resolve()
+    if not resolved_web_dir.is_dir():
+        raise typer.BadParameter(f"前端目录不存在: {resolved_web_dir}", param_hint="--web-dir")
+
+    npm_name = "npm.cmd" if sys.platform == "win32" else "npm"
+    npm_executable = shutil.which(npm_name)
+    if npm_executable is None:
+        raise typer.BadParameter(f"找不到 {npm_name},请先安装 Node.js/npm")
+
+    settings: Settings = ctx.obj
+    try:
+        wsl_started = _ensure_dev_database(settings)
+    except KeyboardInterrupt as exc:
+        raise typer.Exit(code=130) from exc
+    except Exception as exc:
+        typer.echo(
+            "PostgreSQL 连接失败,已尝试唤醒 WSL 服务但仍不可用;"
+            "请检查 WSL PostgreSQL 和 .env。",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    if wsl_started:
+        typer.echo("已自动唤醒 WSL PostgreSQL。")
+
+    stop_event = threading.Event()
+    frontend_holder: list[subprocess.Popen[bytes]] = []
+    frontend_thread = threading.Thread(
+        target=_start_frontend_when_api_ready,
+        kwargs={
+            "npm_executable": npm_executable,
+            "web_dir": resolved_web_dir,
+            "host": host,
+            "port": port,
+            "stop_event": stop_event,
+            "frontend_holder": frontend_holder,
+        },
+        name="finboard-vite-launcher",
+        daemon=True,
+    )
+    frontend_thread.start()
+    try:
+        # Uvicorn 留在当前前台进程中,Ctrl-C 会进入其优雅关闭和 FastAPI lifespan。
+        serve(ctx, host=host, port=port, reload=False)
+    finally:
+        stop_event.set()
+        frontend_thread.join(timeout=1.0)
+        for frontend in frontend_holder:
+            _stop_dev_process(frontend)
 
 
 @app.command(name="kill-switch")
@@ -431,7 +633,7 @@ async def _fetch_data(
     from finboard_shared.models import Symbol as Sym
     from finboard_shared.types import BarPeriod, Market
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider()
     else:
@@ -468,7 +670,7 @@ async def _fetch_all_data(*, config_file: str) -> None:
         if config.fetch_period in BarPeriod.__members__
         else BarPeriod(config.fetch_period)
     )
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider()
     else:
@@ -841,7 +1043,7 @@ async def _bulk_download(
 
     typer.echo(f"开始批量拉取 {len(instruments)} 个标的 ({start_date} ~ today)")
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider(
             max_concurrency=2, request_interval=0.5

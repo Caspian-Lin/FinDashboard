@@ -85,9 +85,7 @@ class TestParquetCache:
         assert metadata.last_date == date(2024, 1, 3)
 
         with patch("pyarrow.parquet.ParquetFile") as parquet_file:
-            cached_metadata = await cache.metadata_for(
-                SYMBOL, BarPeriod.D1, "qfq"
-            )
+            cached_metadata = await cache.metadata_for(SYMBOL, BarPeriod.D1, "qfq")
         parquet_file.assert_not_called()
         assert cached_metadata == metadata
 
@@ -227,6 +225,42 @@ class TestAkShareProvider:
         )
 
     @pytest.mark.unit
+    def test_pre_market_falls_back_to_previous_weekday(self) -> None:
+        # 周一盘前(10:00,A 股尚未收盘)应回退到上周五
+        assert expected_last_bar_date(
+            date(2026, 8, 3),
+            today=date(2026, 8, 3),
+            now=datetime(2026, 8, 3, 10, 0),
+        ) == date(2026, 7, 31)
+
+    @pytest.mark.unit
+    def test_post_market_threshold_keeps_today(self) -> None:
+        # 21:00(收盘+6h)后视为今天数据已发布
+        assert expected_last_bar_date(
+            date(2026, 8, 3),
+            today=date(2026, 8, 3),
+            now=datetime(2026, 8, 3, 21, 0),
+        ) == date(2026, 8, 3)
+
+    @pytest.mark.unit
+    def test_before_threshold_falls_back(self) -> None:
+        # 20:59 仍触发回退
+        assert expected_last_bar_date(
+            date(2026, 8, 3),
+            today=date(2026, 8, 3),
+            now=datetime(2026, 8, 3, 20, 59),
+        ) == date(2026, 7, 31)
+
+    @pytest.mark.unit
+    def test_past_end_unaffected_by_market_hours(self) -> None:
+        # end 在过去时,盘前回退不应触发
+        assert expected_last_bar_date(
+            date(2026, 7, 1),
+            today=date(2026, 8, 3),
+            now=datetime(2026, 8, 3, 10, 0),
+        ) == date(2026, 7, 1)
+
+    @pytest.mark.unit
     def test_parse_timestamp_daily(self) -> None:
         ts = AkShareProvider._parse_timestamp("2024-03-15", BarPeriod.D1)
         assert ts.year == 2024
@@ -248,13 +282,16 @@ class TestYFinanceProvider:
             empty = False
 
             def iterrows(self):
-                yield datetime.fromisoformat("2024-01-02T00:00:00+08:00"), {
-                    "Open": 1,
-                    "High": 2,
-                    "Low": 0.5,
-                    "Close": 1.5,
-                    "Volume": 100,
-                }
+                yield (
+                    datetime.fromisoformat("2024-01-02T00:00:00+08:00"),
+                    {
+                        "Open": 1,
+                        "High": 2,
+                        "Low": 0.5,
+                        "Close": 1.5,
+                        "Volume": 100,
+                    },
+                )
 
         ticker = SimpleNamespace(history=lambda **kwargs: Frame())
         module = SimpleNamespace(Ticker=lambda symbol: ticker)

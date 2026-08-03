@@ -31,11 +31,11 @@ export default function Control() {
       <h1 className="text-2xl font-bold mb-6">控制台</h1>
 
       {/* Kill Switch */}
-      <div className="bg-white rounded-lg shadow p-5 mb-6">
+      <div className="bg-card rounded-lg shadow p-5 mb-6">
         <h2 className="font-semibold mb-4">Kill Switch</h2>
         <div className="mb-4">
-          <span className="text-gray-500 text-sm">当前状态: </span>
-          <span className={`font-bold ${ks?.level === "off" ? "text-green-600" : "text-red-600"}`}>
+          <span className="text-muted-foreground text-sm">当前状态: </span>
+          <span className={`font-bold ${ks?.level === "off" ? "text-success" : "text-destructive"}`}>
             {ks?.level ?? "—"}
           </span>
         </div>
@@ -52,10 +52,10 @@ export default function Control() {
               onClick={() => ksMut.mutate({ level: lvl.value, reason })}
               className={`px-3 py-1.5 rounded text-sm border ${
                 lvl.color === "green"
-                  ? "border-green-500 text-green-600 hover:bg-green-50"
+                  ? "border-green-500 text-success hover:bg-success/10"
                   : lvl.color === "red"
-                    ? "border-red-500 text-red-600 hover:bg-red-50"
-                    : "border-yellow-500 text-yellow-600 hover:bg-yellow-50"
+                    ? "border-red-500 text-destructive hover:bg-destructive/10"
+                    : "border-yellow-500 text-warning hover:bg-warning/10"
               }`}
             >
               {lvl.label}
@@ -68,7 +68,7 @@ export default function Control() {
       </div>
 
       {/* Reconcile */}
-      <div className="bg-white rounded-lg shadow p-5 mb-6">
+      <div className="bg-card rounded-lg shadow p-5 mb-6">
         <h2 className="font-semibold mb-4">核对</h2>
         <button
           onClick={() => reconMut.mutate()}
@@ -78,7 +78,7 @@ export default function Control() {
           {reconMut.isPending ? "核对中..." : "触发核对"}
         </button>
         {reconMut.data && (
-          <div className={`mt-3 text-sm ${reconMut.data.ok ? "text-green-600" : "text-red-600"}`}>
+          <div className={`mt-3 text-sm ${reconMut.data.ok ? "text-success" : "text-destructive"}`}>
             {reconMut.data.ok ? "✓ " : "✗ "}
             {reconMut.data.summary}
           </div>
@@ -86,13 +86,13 @@ export default function Control() {
       </div>
 
       {/* Audit Logs */}
-      <div className="bg-white rounded-lg shadow p-5">
+      <div className="bg-card rounded-lg shadow p-5">
         <h2 className="font-semibold mb-4">审计日志</h2>
         {(logs?.items ?? []).length === 0 ? (
-          <div className="text-gray-400 text-sm">无日志</div>
+          <div className="text-muted-foreground/70 text-sm">无日志</div>
         ) : (
           <table className="w-full text-sm">
-            <thead className="text-gray-500">
+            <thead className="text-muted-foreground">
               <tr>
                 <th className="px-2 py-1 text-left">时间</th>
                 <th className="px-2 py-1 text-left">操作者</th>
@@ -103,10 +103,10 @@ export default function Control() {
             <tbody>
               {(logs?.items ?? []).map((log) => (
                 <tr key={log.id} className="border-t">
-                  <td className="px-2 py-1 text-gray-500">{new Date(log.created_at).toLocaleTimeString()}</td>
+                  <td className="px-2 py-1 text-muted-foreground">{new Date(log.created_at).toLocaleTimeString()}</td>
                   <td className="px-2 py-1">{log.actor}</td>
                   <td className="px-2 py-1 font-mono">{log.action}</td>
-                  <td className="px-2 py-1 font-mono text-gray-500">{log.target ?? "—"}</td>
+                  <td className="px-2 py-1 font-mono text-muted-foreground">{log.target ?? "—"}</td>
                 </tr>
               ))}
             </tbody>

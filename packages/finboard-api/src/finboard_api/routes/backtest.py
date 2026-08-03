@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date as parse_date
 from typing import cast
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
@@ -37,6 +37,7 @@ async def list_strategies() -> list[StrategyInfoOut]:
 @router.post("/run", response_model=BacktestResultOut)
 async def run_backtest(
     req: BacktestRunRequest,
+    request: Request,
     session: AsyncSession = Depends(get_db_session),
 ) -> BacktestResultOut:
     """运行回测,返回完整绩效报告。
@@ -50,7 +51,7 @@ async def run_backtest(
         BacktestEngine,
         PointInTimeFactorSelector,
     )
-    from finboard_data import AkShareProvider, YFinanceProvider
+    from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
     from finboard_persistence import (
         FactorSnapshotRepository,
         ResearchDatasetRepository,
@@ -65,9 +66,29 @@ async def run_backtest(
 
     import os
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    settings = getattr(request.app.state, "settings", None)
+    provider_name = (
+        settings.data_provider
+        if settings is not None
+        else os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
+    )
     if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
+        provider: AkShareProvider | TushareBarProvider | YFinanceProvider = AkShareProvider()
+    elif provider_name == "tushare":
+        provider = TushareBarProvider(
+            token=settings.tushare_token if settings is not None else None,
+            requests_per_minute=(
+                settings.tushare_requests_per_minute if settings is not None else 200
+            ),
+            daily_request_limit=(
+                settings.tushare_daily_request_limit if settings is not None else 100_000
+            ),
+            usage_file=(
+                settings.tushare_usage_file
+                if settings is not None
+                else "data_cache/tushare_usage.json"
+            ),
+        )
     else:
         provider = YFinanceProvider()
     config = BacktestConfig(

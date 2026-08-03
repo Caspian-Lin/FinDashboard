@@ -36,10 +36,13 @@ from finboard_shared.types import (
     ConvertibleEventType,
     DatasetQualityStatus,
     EtfCategory,
+    EtfExecutionProfile,
     FuturesEventType,
     InstrumentType,
     ListingStatus,
     Market,
+    ReviewStatus,
+    etf_category_from_execution_profile,
 )
 
 _CONVERTIBLE_REQUIRED_EVENTS = (
@@ -239,10 +242,12 @@ class ReleaseInstrumentCatalogRepository:
 
             instrument_type = InstrumentType(row.instrument_type)
             if instrument_type is InstrumentType.ETF:
+                bare = code.split(".", 1)[0] if "." in code else code
                 result.append(
                     _etf_candidate(
                         row,
-                        etf_rows.get(code),
+                        etf_rows.get(code) or etf_rows.get(bare),
+                        lifecycle_events=events.get(code, ()),
                         name_history=names.get(code, ()),
                     )
                 )
@@ -261,6 +266,7 @@ class ReleaseInstrumentCatalogRepository:
                     _plain_candidate(
                         row,
                         instrument_type=instrument_type,
+                        lifecycle_events=events.get(code, ()),
                         name_history=names.get(code, ()),
                     )
                 )
@@ -276,9 +282,17 @@ class ReleaseInstrumentCatalogRepository:
         return {row.code: row for row in rows}
 
     async def _etf_map(self, symbols: list[str]) -> dict[str, EtfMetadataModel]:
-        stmt = select(EtfMetadataModel).where(EtfMetadataModel.code.in_(symbols))
+        lookup = set(symbols)
+        lookup.update({s.split(".", 1)[0] for s in symbols if "." in s})
+        stmt = select(EtfMetadataModel).where(EtfMetadataModel.code.in_(lookup))
         rows = (await self._session.execute(stmt)).scalars().all()
-        return {row.code: row for row in rows}
+        result: dict[str, EtfMetadataModel] = {}
+        for row in rows:
+            result[row.code] = row
+            bare = row.code.split(".", 1)[0]
+            if bare != row.code:
+                result[bare] = row
+        return result
 
     async def _convertible_map(
         self,
@@ -407,6 +421,7 @@ def _plain_candidate(
     row: InstrumentModel,
     *,
     instrument_type: InstrumentType,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
     name_history: tuple[tuple[str, date, date | None], ...],
 ) -> ReleaseInstrumentSpec:
     market = Market(row.market)
@@ -428,9 +443,14 @@ def _plain_candidate(
             instrument_type=instrument_type,
         ),
         exchange=row.exchange,
+        listing_board=row.listing_board,
         list_date=row.list_date,
         delist_date=row.delist_date,
         status=_status(row.status),
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(
+            sorted({event.event_type for event in lifecycle_events})
+        ),
         name_history=name_history,
     )
 
@@ -439,6 +459,7 @@ def _etf_candidate(
     row: InstrumentModel,
     metadata: EtfMetadataModel | None,
     *,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
     name_history: tuple[tuple[str, date, date | None], ...],
 ) -> ReleaseInstrumentSpec:
     catalog = research_etf_catalog_entry(row.code)
@@ -448,11 +469,7 @@ def _etf_candidate(
         asset_class = catalog.asset_class
         list_date = row.list_date or catalog.list_date
     elif metadata is not None:
-        try:
-            category = EtfCategory(metadata.category)
-            asset_class = AssetClass(metadata.underlying_asset_class)
-        except ValueError as exc:
-            raise ReleaseCapabilityError(f"{row.code}: ETF 分类/资产类别无效") from exc
+        category, asset_class = _resolve_etf_classification(row.code, metadata)
         list_date = row.list_date or metadata.listing_date
     else:
         raise ReleaseCapabilityError(f"{row.code}: ETF 缺少分类元数据")
@@ -473,8 +490,43 @@ def _etf_candidate(
         list_date=list_date,
         delist_date=row.delist_date,
         status=_status(row.status),
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(
+            sorted({event.event_type for event in lifecycle_events})
+        ),
         name_history=name_history,
     )
+
+
+def _resolve_etf_classification(
+    code: str,
+    metadata: EtfMetadataModel,
+) -> tuple[EtfCategory, AssetClass]:
+    """从 ``execution_profile``(优先)或旧 ``category`` 派生发布用分类。
+
+    fail-closed:``review_status=needs_review`` 的记录禁止通过发布质量门,
+    防止低置信度分类静默影响成交规则(issue #97)。
+    """
+    review = metadata.review_status or ReviewStatus.NEEDS_REVIEW.value
+    if review == ReviewStatus.NEEDS_REVIEW.value:
+        raise ReleaseCapabilityError(
+            f"{code}: ETF 分类待复核(review_status=needs_review),"
+            "请先在元数据页确认或修正后发布"
+        )
+    try:
+        asset_class = AssetClass(metadata.underlying_asset_class)
+    except ValueError as exc:
+        raise ReleaseCapabilityError(f"{code}: ETF 资产类别无效") from exc
+    if metadata.execution_profile:
+        try:
+            profile = EtfExecutionProfile(metadata.execution_profile)
+        except ValueError as exc:
+            raise ReleaseCapabilityError(f"{code}: ETF execution_profile 无效") from exc
+        return etf_category_from_execution_profile(profile), asset_class
+    try:
+        return EtfCategory(metadata.category), asset_class
+    except ValueError as exc:
+        raise ReleaseCapabilityError(f"{code}: ETF 分类无效") from exc
 
 
 def _catalog_etf_candidate(

@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 10
 
+    # ---- 历史行情数据源 ----
+    data_provider: Literal["akshare", "yfinance", "tushare"] = "akshare"
+    data_fallback_provider: Literal["akshare", "yfinance", "tushare"] | None = None
+    tushare_token: str = Field(default="", repr=False)
+    tushare_requests_per_minute: int = 200
+    tushare_daily_request_limit: int = 100_000
+    tushare_usage_file: str = "data_cache/tushare_usage.json"
+
     # ---- Broker ----
     broker: BrokerKind = BrokerKind.MOCK
     account_id: str = "test-account"

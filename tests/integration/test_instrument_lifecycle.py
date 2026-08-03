@@ -6,15 +6,57 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import date
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from finboard_persistence import InstrumentModel, InstrumentNameModel, InstrumentRepository
+from finboard_persistence import (
+    Base,
+    InstrumentModel,
+    InstrumentNameModel,
+    InstrumentRepository,
+    create_async_engine,
+)
 from finboard_shared.types import ListingStatus
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest_asyncio.fixture(scope="module")
+async def _engine(_db_url: str) -> AsyncIterator[AsyncEngine]:
+    """本模块只做事务内标的测试,不运行共享的全业务表清理。"""
+
+    engine = create_async_engine(_db_url)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_session(_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    """允许测试内 commit,但结束时回滚外层事务以保护真实标的表。
+
+    ``instruments`` 是共享夹具明确保留的用户数据;本模块会全表 purge,因此必须
+    用外层事务包住每个用例,不能把两条测试标的留在开发数据库。
+    """
+
+    async with _engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        try:
+            yield session
+        finally:
+            await session.close()
+            await transaction.rollback()
 
 
 @pytest.fixture

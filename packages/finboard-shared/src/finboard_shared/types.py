@@ -32,6 +32,18 @@ class InstrumentType(StrEnum):
     CONVERTIBLE = "convertible"  # 可转债,#58
 
 
+class ListingBoard(StrEnum):
+    """证券上市板块,与市场、交易所和行业分类正交。"""
+
+    SSE_MAIN = "sse_main"
+    SZSE_MAIN = "szse_main"
+    CHINEXT = "chinext"
+    STAR = "star"
+    BSE = "bse"
+    CDR = "cdr"
+    UNKNOWN = "unknown"
+
+
 class AssetClass(StrEnum):
     """跨资产大类 —— 用于组合层风险预算和资产配置(issue #59 消费)。
 
@@ -60,6 +72,89 @@ class EtfCategory(StrEnum):
     MONEY_MARKET = "money_market"  # 货币 ETF:T+0、无佣金
     COMMODITY = "commodity"  # 黄金 / 商品 ETF
     INDEX = "index"  # 指数 ETF(宽基 / 行业)
+
+
+class EtfExecutionProfile(StrEnum):
+    """ETF 执行档位(issue #97)—— 决定 T+N / 印花税 / 手数的权威维度。
+
+    与旧 :class:`EtfCategory` 的关键区别:``execution_profile`` 只描述**交易规则**,
+    不混入投资策略(指数/主动)或标的地理范围;多维分类由
+    :class:`UnderlyingMarket` / :class:`EtfStrategyType` 正交表达。
+    例如 159010(恒生港股通科技 ETF)执行档位为 ``cross_border_etf``,
+    策略为 ``index``,标的市场为 ``hk``。
+    """
+
+    DOMESTIC_EQUITY_ETF = "domestic_equity_etf"  # 国内股票 ETF:T+1
+    CROSS_BORDER_ETF = "cross_border_etf"  # 跨境 ETF:T+0、免印花税
+    BOND_ETF = "bond_etf"  # 债券 ETF:T+0、10 份/手、免印花税
+    MONEY_MARKET_ETF = "money_market_etf"  # 货币 ETF:T+0、无佣金
+    COMMODITY_ETF = "commodity_etf"  # 黄金 / 商品 ETF:T+0
+
+
+class UnderlyingMarket(StrEnum):
+    """ETF 标的地理范围(issue #97)。"""
+
+    DOMESTIC = "domestic"  # 国内(A 股)
+    HK = "hk"  # 港股通
+    OVERSEAS = "overseas"  # 海外(美股 / 日股 / 欧股)
+    GLOBAL = "global"  # 全球多市场
+
+
+class EtfStrategyType(StrEnum):
+    """ETF 策略类型(issue #97)—— 被动指数 vs 主动管理。"""
+
+    INDEX = "index"  # 指数型(被动跟踪)
+    ACTIVE = "active"  # 主动管理型
+
+
+class ReviewStatus(StrEnum):
+    """ETF 元数据分类审核状态(issue #97)。
+
+    只有 ``auto_adopted`` / ``manually_confirmed`` 的记录可参与研究发布;
+    ``needs_review`` 必须人工确认后才能采用,防止弱证据静默影响成交规则。
+    """
+
+    AUTO_ADOPTED = "auto_adopted"  # 高置信度自动采用
+    NEEDS_REVIEW = "needs_review"  # 低置信度 / 证据冲突,待人工复核
+    MANUALLY_CONFIRMED = "manually_confirmed"  # 人工确认(原自动结果正确)
+    MANUALLY_OVERRIDDEN = "manually_overridden"  # 人工覆盖(修正了自动结果)
+
+    @property
+    def is_adopted(self) -> bool:
+        """是否已可采用(可用于研究发布)。"""
+        return self in (
+            ReviewStatus.AUTO_ADOPTED,
+            ReviewStatus.MANUALLY_CONFIRMED,
+            ReviewStatus.MANUALLY_OVERRIDDEN,
+        )
+
+
+def etf_category_from_execution_profile(profile: EtfExecutionProfile) -> EtfCategory:
+    """从执行档位派生兼容旧版 :class:`EtfCategory`(issue #97 兼容迁移)。
+
+    旧发布链路(``default_execution_metadata`` / ``_etf_candidate``)仍消费
+    ``EtfCategory``,此函数保证多维分类落地后旧路径行为不变。
+    """
+    mapping = {
+        EtfExecutionProfile.DOMESTIC_EQUITY_ETF: EtfCategory.EQUITY,
+        EtfExecutionProfile.CROSS_BORDER_ETF: EtfCategory.CROSS_BORDER,
+        EtfExecutionProfile.BOND_ETF: EtfCategory.BOND,
+        EtfExecutionProfile.MONEY_MARKET_ETF: EtfCategory.MONEY_MARKET,
+        EtfExecutionProfile.COMMODITY_ETF: EtfCategory.COMMODITY,
+    }
+    return mapping[profile]
+
+
+def asset_class_from_execution_profile(profile: EtfExecutionProfile) -> AssetClass:
+    """从执行档位派生底层资产大类(issue #97)。"""
+    mapping = {
+        EtfExecutionProfile.DOMESTIC_EQUITY_ETF: AssetClass.EQUITY,
+        EtfExecutionProfile.CROSS_BORDER_ETF: AssetClass.EQUITY,
+        EtfExecutionProfile.BOND_ETF: AssetClass.FIXED_INCOME,
+        EtfExecutionProfile.MONEY_MARKET_ETF: AssetClass.CASH,
+        EtfExecutionProfile.COMMODITY_ETF: AssetClass.COMMODITY,
+    }
+    return mapping[profile]
 
 
 class ListingStatus(StrEnum):

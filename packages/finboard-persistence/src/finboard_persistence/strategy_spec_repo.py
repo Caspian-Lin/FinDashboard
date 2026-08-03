@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_persistence.models import ResearchStrategySpecModel
@@ -202,7 +202,7 @@ class ResearchStrategySpecRepository:
         latest_versions = (
             select(
                 ResearchStrategySpecModel.strategy_id,
-                ResearchStrategySpecModel.version.label("max_version"),
+                func.max(ResearchStrategySpecModel.version).label("max_version"),
             )
             .group_by(ResearchStrategySpecModel.strategy_id)
             .subquery()

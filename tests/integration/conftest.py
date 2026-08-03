@@ -34,7 +34,13 @@ def _db_url() -> str:
     return DB_URL
 
 
-_PRESERVE_TABLES = {"instruments"}
+_PRESERVE_TABLES = {
+    "instruments",
+    # 研究数据发布是用户生成的不可变资产。集成测试只清理自己使用的
+    # integration-* 记录,不能因为测试连接了开发库就抹掉真实发布清单。
+    "research_dataset_releases",
+    "dataset_manifests",
+}
 
 
 async def clean_tables(conn: Any) -> None:

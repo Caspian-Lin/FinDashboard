@@ -166,6 +166,8 @@ class AkShareProvider:
             and metadata.last_date is not None
             and metadata.last_date >= expected_end
         ):
+            if on_status is not None:
+                on_status("cache_hit")
             return True
 
         fetch_start = start
@@ -323,6 +325,8 @@ class AkShareProvider:
                     logger.exception("akshare.cache_update_failed", symbol=sym.code)
                     ok = False
                 results[sym.code] = ok
+                if on_status is not None:
+                    on_status(sym.code, "completed" if ok else "failed")
                 done_count += 1
                 if on_progress is not None:
                     on_progress(sym.code, done_count, total)
@@ -458,6 +462,7 @@ class AkShareProvider:
                     amount=Decimal(
                         str(row[col_map["amount"]]) if col_map["amount"] in df.columns else 0
                     ),
+                    source="akshare",
                 )
             )
         bars.sort(key=lambda b: b.timestamp)

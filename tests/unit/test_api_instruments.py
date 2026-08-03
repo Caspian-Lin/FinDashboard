@@ -97,6 +97,70 @@ class TestInstrumentsList:
         assert exc_info.value.status_code == 404
 
 
+class TestEtfClassification:
+    @pytest.mark.asyncio
+    async def test_create_manual_etf_classification(
+        self,
+        mock_session: MagicMock,
+    ) -> None:
+        from finboard_api.routes.instruments import update_etf_classification
+        from finboard_api.schemas import EtfClassificationUpdate
+
+        instrument = MagicMock()
+        instrument.instrument_type = "etf"
+        instrument_result = MagicMock()
+        instrument_result.scalar_one_or_none.return_value = instrument
+        metadata_result = MagicMock()
+        metadata_result.scalars.return_value.first.return_value = None
+        bare_metadata_result = MagicMock()
+        bare_metadata_result.scalars.return_value.first.return_value = None
+        mock_session.execute = AsyncMock(
+            side_effect=[instrument_result, metadata_result, bare_metadata_result]
+        )
+        mock_session.flush = AsyncMock()
+        mock_session.commit = AsyncMock()
+
+        result = await update_etf_classification(
+            "159001.sz",
+            EtfClassificationUpdate(execution_profile="money_market_etf"),
+            session=mock_session,
+        )
+
+        assert result.execution_profile == "money_market_etf"
+        assert result.category == "money_market"
+        assert result.underlying_asset_class == "cash"
+        assert result.allows_t_plus_0 is True
+        assert result.manual_override is True
+        assert result.review_status == "manually_overridden"
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rejects_classification_for_non_etf(
+        self,
+        mock_session: MagicMock,
+    ) -> None:
+        from fastapi import HTTPException
+
+        from finboard_api.routes.instruments import update_etf_classification
+        from finboard_api.schemas import EtfClassificationUpdate
+
+        instrument = MagicMock()
+        instrument.instrument_type = "stock"
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = instrument
+        mock_session.execute = AsyncMock(return_value=result)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_etf_classification(
+                "600519.SH",
+                EtfClassificationUpdate(execution_profile="domestic_equity_etf"),
+                session=mock_session,
+            )
+
+        assert exc_info.value.status_code == 409
+        mock_session.add.assert_not_called()
+
+
 class TestDatasetManifestList:
     @pytest.mark.asyncio
     async def test_list_manifests(self, mock_session: MagicMock) -> None:
@@ -172,6 +236,75 @@ class TestResearchDatasetReleases:
         with pytest.raises(HTTPException) as exc_info:
             await get_dataset_release("missing", session=mock_session)
         assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_create_release_uses_server_paths_and_commits(
+        self,
+        mock_session: MagicMock,
+    ) -> None:
+        import os
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from finboard_api.routes.instruments import create_dataset_release
+        from finboard_api.schemas import ResearchDatasetReleaseCreate
+
+        mock_session.commit = AsyncMock()
+        mock_session.rollback = AsyncMock()
+        service = MagicMock()
+        service.publish = AsyncMock(return_value=_dataset_release())
+        instrument = MagicMock()
+        instrument.code = "600519.SH"
+        instrument.market = "a_share"
+        instrument.instrument_type = "stock"
+        instrument_result = MagicMock()
+        instrument_result.scalars.return_value.all.return_value = [instrument]
+        mock_session.execute = AsyncMock(return_value=instrument_result)
+        request = ResearchDatasetReleaseCreate(
+            release_id="api-r77-v1",
+            dataset_name="a_share_daily_bars",
+            release_kind="a_share_tushare",
+            source="tushare",
+            version="2026-07-31-v1",
+            symbols=["600519.sh"],
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 5),
+            adjustment="qfq",
+            required_capabilities=[],
+        )
+
+        with (
+            patch(
+                "finboard_persistence.ResearchDatasetReleaseService",
+                return_value=service,
+            ) as service_cls,
+            patch(
+                "finboard_api.routes.instruments._current_code_version",
+                return_value="deadbeef",
+            ),
+            patch.dict(
+                os.environ,
+                {
+                    "FINBOARD_DATA_CACHE_DIR": "test-cache",
+                    "FINBOARD_DATA_RELEASE_ROOT": "test-releases",
+                },
+            ),
+        ):
+            result = await create_dataset_release(request, session=mock_session)
+
+        assert result.release_id == "api-r77-v1"
+        service_cls.assert_called_once_with(
+            mock_session,
+            cache_dir=Path("test-cache"),
+            release_root=Path("test-releases"),
+        )
+        spec, symbols = service.publish.await_args.args
+        assert symbols == ["600519.SH"]
+        assert spec.code_version == "deadbeef"
+        assert spec.source == "tushare"
+        assert spec.required_capabilities == ("stock",)
+        mock_session.commit.assert_awaited_once()
+        mock_session.rollback.assert_not_awaited()
 
 
 class TestLifecycleEvents:

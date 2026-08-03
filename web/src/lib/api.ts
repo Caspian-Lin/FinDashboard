@@ -23,10 +23,20 @@ function errorMessage(detail: unknown, fallback: string): string {
       )
       .join("；");
   }
+  if (detail && typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    if (typeof record.message === "string") return record.message;
+    if (typeof record.msg === "string") return record.msg;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return fallback;
+    }
+  }
   return fallback;
 }
 
-async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
+export async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
@@ -168,6 +178,7 @@ export const api = {
   getDataStatus: () => fetchJSON<DataStatus[]>("/data/status"),
   getDataStatusPage: (limit = 200, offset = 0) =>
     fetchJSON<DataStatusList>(`/data/status-page?limit=${limit}&offset=${offset}`),
+  getTushareQuota: () => fetchJSON<TushareQuota>("/data/tushare-quota"),
   fetchData: (body: DataFetchRequest) =>
     fetchJSON<FetchResult>("/data/fetch", { method: "POST", body: JSON.stringify(body) }),
   fetchAllData: () =>
@@ -225,6 +236,8 @@ export const api = {
   getInstruments: (params?: {
     market?: string;
     instrument_type?: string;
+    exchange?: string;
+    listing_boards?: string[];
     q?: string;
     limit?: number;
     offset?: number;
@@ -232,6 +245,8 @@ export const api = {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.exchange) q.set("exchange", params.exchange);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     if (params?.q) q.set("q", params.q);
     q.set("limit", String(params?.limit ?? 200));
     q.set("offset", String(params?.offset ?? 0));
@@ -239,10 +254,12 @@ export const api = {
   },
   searchInstruments: (query: string) =>
     fetchJSON<InstrumentItem[]>(`/data/instruments/search?q=${encodeURIComponent(query)}`),
-  getInstrumentCodes: (params?: { market?: string; instrument_type?: string; q?: string }) => {
+  getInstrumentCodes: (params?: { market?: string; instrument_type?: string; exchange?: string; listing_boards?: string[]; q?: string }) => {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.exchange) q.set("exchange", params.exchange);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     if (params?.q) q.set("q", params.q);
     return fetchJSON<string[]>(`/data/instruments/codes?${q}`);
   },
@@ -253,7 +270,10 @@ export const api = {
   startBulkDownload: (body: {
     market?: string;
     instrument_type?: string;
+    exchange?: string;
+    listing_boards?: string[];
     start?: string;
+    source?: string;
   }) =>
     fetchJSON<BulkDownloadStatus>("/data/bulk-download", {
       method: "POST",
@@ -261,11 +281,28 @@ export const api = {
     }),
   getBulkDownloadStatus: () =>
     fetchJSON<BulkDownloadStatus>("/data/bulk-download/status"),
+  checkQuality: (symbols?: string, adjust?: string) => {
+    const q = new URLSearchParams();
+    if (symbols) q.set("symbols", symbols);
+    if (adjust) q.set("adjust", adjust);
+    const qs = q.toString();
+    return fetchJSON<QualityReport[]>(`/data/quality${qs ? `?${qs}` : ""}`);
+  },
+  repairQuality: (body: { symbols: string[]; source: "akshare" | "yfinance" | "tushare"; adjust?: string }) =>
+    fetchJSON<QualityRepairResult>("/data/quality/repair", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   // ---- Scheduler Config ----
   getConfig: () => fetchJSON<SchedulerConfig>("/data/config"),
   updateConfig: (body: Partial<SchedulerConfig>) =>
     fetchJSON<SchedulerConfig>("/data/config", { method: "PUT", body: JSON.stringify(body) }),
+
+  // ---- LLM Provider Config (persisted to .env) ----
+  getLlmConfig: () => fetchJSON<LLMConfig>("/data/llm-config"),
+  updateLlmConfig: (body: Partial<LLMConfigUpdate>) =>
+    fetchJSON<LLMConfig>("/data/llm-config", { method: "PUT", body: JSON.stringify(body) }),
 };
 
 // ---- Data types ----
@@ -277,6 +314,7 @@ export interface DataStatus {
   first_date: string | null;
   last_date: string | null;
   last_close: string | null;
+  source: string | null;
 }
 
 export interface DataStatusList {
@@ -291,6 +329,7 @@ export interface DataFetchRequest {
   start: string;
   end: string;
   adjust?: string;
+  source?: string;
 }
 
 export interface FetchResult {
@@ -298,6 +337,12 @@ export interface FetchResult {
   bar_count: number;
   first_date: string | null;
   last_date: string | null;
+  source: string | null;
+  fallback_used: boolean;
+  fallback_source: string | null;
+  lifecycle_events: number;
+  lifecycle_sync_failed: boolean;
+  lifecycle_sync_error: string | null;
 }
 
 export interface BatchFetchResult {
@@ -550,6 +595,7 @@ export interface InstrumentItem {
   market: string;
   instrument_type: string;
   exchange: string | null;
+  listing_board: string;
   status: string;
 }
 
@@ -560,8 +606,50 @@ export interface InstrumentList {
   offset: number;
 }
 
+export interface BarAnomaly {
+  date: string;
+  source: string;
+  reasons: string[];
+}
+
+export interface QualityReport {
+  symbol: string;
+  total_bars: number;
+  anomaly_count: number;
+  duplicate_count: number;
+  sources: string[];
+  anomalies: BarAnomaly[];
+  passed: boolean;
+  primary_source: string;
+  fallback_used: boolean;
+  fallback_source: string | null;
+  corrected_dates: string[];
+  error: string | null;
+}
+
+export interface QualityRepairResult {
+  total: number;
+  repaired: number;
+  failed: number;
+  corrected_bars: number;
+  reports: QualityReport[];
+}
+
+export interface ActiveSymbol {
+  code: string;
+  reason: string;
+}
+
+export interface BulkDownloadLog {
+  seq: number;
+  timestamp: string;
+  event: "fetching" | "completed" | "cache_hit" | "failed";
+  code: string;
+  reason: string | null;
+}
+
 export interface BulkDownloadStatus {
-  status: string;  // idle / running / done / error
+  status: string;  // idle / running / done / error / cancelled
   done: number;
   total: number;
   success: number;
@@ -569,6 +657,25 @@ export interface BulkDownloadStatus {
   current_symbol: string | null;
   phase: string | null;
   error: string | null;
+  quality_passed?: number;
+  quality_failed?: number;
+  fallback_used?: number;
+  lifecycle_events?: number;
+  lifecycle_sync_failed?: number;
+  cache_hits?: number;
+  cache_misses?: number;
+  started_at?: string | null;
+  active_symbols?: ActiveSymbol[];
+  logs?: BulkDownloadLog[];
+  quality_reports?: QualityReport[];
+}
+
+export interface TushareQuota {
+  date: string;
+  requests_per_minute: number;
+  daily_limit: number;
+  used: number;
+  remaining: number;
 }
 
 export interface SchedulerConfig {
@@ -580,4 +687,25 @@ export interface SchedulerConfig {
   download_markets: string[];
   download_types: string[];
   data_provider: string;
+}
+
+// ---- LLM Provider types ----
+// api_key: GET 返回固定掩码 "********"(已设置时);PUT 回传 "********" 表示不改。
+export interface LLMConfig {
+  provider: "fake" | "openai_compatible";
+  base_url: string;
+  api_key: string;
+  api_key_set: boolean;
+  model: string;
+  timeout_seconds: number;
+  max_retries: number;
+}
+
+export interface LLMConfigUpdate {
+  provider?: "fake" | "openai_compatible";
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  timeout_seconds?: number;
+  max_retries?: number;
 }

@@ -83,6 +83,7 @@ async def _seed_bars(cache_dir: Path) -> None:
                 close=Decimal("10.5"),
                 volume=Decimal("1000"),
                 amount=Decimal("10500"),
+                source="fixed_sample",
             )
             for offset in range(4)
         ]
@@ -133,7 +134,10 @@ async def test_service_publishes_files_and_queryable_immutable_record(
         2020, 1, 1, tzinfo=UTC
     )
     assert (tmp_path / "releases" / release.release_id / "manifest.json").is_file()
-    listed = await repo.list(dataset_name="multi_asset_daily_bars")
+    listed = await repo.list(
+        dataset_name="multi_asset_daily_bars",
+        source="fixed_sample",
+    )
     assert [item.release_id for item in listed] == [release.release_id]
 
     with pytest.raises(ImmutableReleaseError, match="checksum 不同"):
@@ -159,7 +163,8 @@ async def test_service_publishes_files_and_queryable_immutable_record(
         assert await restarted_repo.get(release.release_id) == release
         assert await restarted_repo.get(historical.release_id) == historical
         restarted_list = await restarted_repo.list(
-            dataset_name="multi_asset_daily_bars"
+            dataset_name="multi_asset_daily_bars",
+            source="fixed_sample",
         )
         assert {item.release_id for item in restarted_list} == {
             release.release_id,
@@ -168,7 +173,9 @@ async def test_service_publishes_files_and_queryable_immutable_record(
 
     row_count = (
         await db_session.execute(
-            select(func.count()).select_from(ResearchDatasetReleaseModel)
+            select(func.count())
+            .select_from(ResearchDatasetReleaseModel)
+            .where(ResearchDatasetReleaseModel.source == "fixed_sample")
         )
     ).scalar_one()
     assert row_count == 2
@@ -180,4 +187,4 @@ async def test_service_publishes_files_and_queryable_immutable_record(
             )
         )
     )
-    await db_session.flush()
+    await db_session.commit()
