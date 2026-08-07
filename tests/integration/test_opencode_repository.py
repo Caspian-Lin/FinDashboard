@@ -154,17 +154,16 @@ async def test_event_unique_constraint(db_session: AsyncSession) -> None:
     )
     await db_session.flush()
 
-    # 重复 seq 应触发唯一约束
+    # 重复 seq 应触发唯一约束(repository.append 内部 flush 时抛出)
     event_repo_duplicate = AgentEventRepository(db_session)
-    await event_repo_duplicate.append(
-        AgentEvent(
-            conversation_id="CONV-test-1",
-            event_seq=1,
-            event_type="message",
-            role=None,
-            payload={},
-            timestamp=datetime.now(UTC),
-        )
-    )
     with pytest.raises(Exception):  # noqa: B017, PT011
-        await db_session.flush()
+        await event_repo_duplicate.append(
+            AgentEvent(
+                conversation_id="CONV-test-1",
+                event_seq=1,
+                event_type="message",
+                role=None,
+                payload={},
+                timestamp=datetime.now(UTC),
+            )
+        )
