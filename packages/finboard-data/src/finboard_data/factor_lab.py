@@ -15,7 +15,7 @@ import hashlib
 import json
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import cast
@@ -570,6 +570,12 @@ class FeatureSnapshot:
     observations: tuple[FeatureObservation, ...]
     checksum: str
     issues: tuple[str, ...] = ()
+    _payload_cache: dict[str, object] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not self.snapshot_id or not self.dataset_release_id:
@@ -597,7 +603,10 @@ class FeatureSnapshot:
                 raise ValueError("calculation window 必须大于 0")
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        cached = self._payload_cache
+        if cached is not None:
+            return cached
+        payload: dict[str, object] = {
             "snapshot_id": self.snapshot_id,
             "dataset_release_id": self.dataset_release_id,
             "dataset_release_checksum": self.dataset_release_checksum,
@@ -615,6 +624,8 @@ class FeatureSnapshot:
             "checksum": self.checksum,
             "issues": list(self.issues),
         }
+        object.__setattr__(self, "_payload_cache", payload)
+        return payload
 
     @classmethod
     def from_dict(
@@ -720,11 +731,15 @@ def build_feature_snapshot(
         issues=issues,
     )
     checksum = _feature_snapshot_checksum(provisional)
-    return replace(
+    result = replace(
         provisional,
         snapshot_id=f"feature-{checksum[:16]}",
         checksum=checksum,
     )
+    # 快照通常会在发布和 API 序列化阶段重复调用 as_dict;缓存这份不可变
+    # 研究 payload,避免 5k 标的再次在 API 事件循环中构造/序列化大列表。
+    result.as_dict()
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -1192,7 +1207,7 @@ def update_factor_experiment(
 
 
 def _feature_snapshot_checksum(snapshot: FeatureSnapshot) -> str:
-    payload = snapshot.as_dict()
+    payload = dict(snapshot.as_dict())
     payload["snapshot_id"] = ""
     payload["checksum"] = ""
     return _checksum(payload)

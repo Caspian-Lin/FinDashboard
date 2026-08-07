@@ -36,6 +36,38 @@ def _initialize_pyarrow() -> None:
     __import__("pyarrow.parquet")
 
 
+def _normalise_timestamp(
+    value: object,
+    symbol: Symbol,
+    period: BarPeriod,
+) -> datetime:
+    """把 Arrow/Pandas/字符串时间统一为领域层 timestamp。"""
+
+    if isinstance(value, str):
+        timestamp = datetime.fromisoformat(value)
+    elif isinstance(value, datetime):
+        timestamp = value
+    elif hasattr(value, "to_pydatetime"):
+        timestamp = value.to_pydatetime()
+    else:
+        raise TypeError(f"Parquet timestamp 类型无效: {type(value).__name__}")
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    elif period == BarPeriod.D1:
+        timestamp = timestamp.astimezone(UTC)
+    if (
+        period == BarPeriod.D1
+        and symbol.code.endswith((".SH", ".SZ", ".BJ"))
+        and timestamp.hour == 16
+    ):
+        timestamp += timedelta(hours=8)
+    if period == BarPeriod.D1:
+        timestamp = datetime.combine(
+            timestamp.date(), datetime.min.time(), tzinfo=UTC
+        )
+    return timestamp
+
+
 def expected_last_bar_date(
     end: date, *, today: date | None = None, now: datetime | None = None
 ) -> date:
@@ -163,7 +195,57 @@ class ParquetCache:
         )
         return bars
 
+    async def read_close_points(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        adjust: str,
+        *,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> list[tuple[datetime, Decimal]]:
+        """只读取 timestamp/close 列,供价格特征计算使用。
+
+        特征快照不需要 OHLCV 的其余字段。保留独立读取入口可以避免为每条
+        历史行情创建完整 ``Bar``/``Decimal`` 对象,同时不改变通用 ``read``
+        的返回契约。
+        """
+
+        path = self._path(symbol, period, adjust)
+        if not path.exists():
+            return []
+        _initialize_pyarrow()
+        size = path.stat().st_size
+        started = time.monotonic()
+        async with self._io_semaphore:
+            points = await asyncio.to_thread(
+                self._read_close_points_sync,
+                path,
+                symbol,
+                period,
+                start,
+                end,
+            )
+        self._read_ops += 1
+        self._read_bytes += size
+        logger.debug(
+            "parquet_cache.read_close_points",
+            path=str(path),
+            bytes=size,
+            points=len(points),
+            elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+        )
+        return points
+
     def _read_sync(self, path: Path, symbol: Symbol, period: BarPeriod) -> list[Bar]:
+        """兼容旧的线程读取入口。"""
+
+        return self.read_bars_sync(path, symbol, period)
+
+    @staticmethod
+    def read_bars_sync(path: Path, symbol: Symbol, period: BarPeriod) -> list[Bar]:
+        """同步读取完整 Bar,供线程/进程 worker 复用。"""
+
         import pyarrow.parquet as pq
 
         # 外层已经限制并发;禁止 Arrow 再启动内部 I/O 线程池放大磁盘压力。
@@ -171,23 +253,7 @@ class ParquetCache:
         col_names = set(table.column_names)
         bars: list[Bar] = []
         for row in table.to_pylist():
-            ts = row["timestamp"]
-            if isinstance(ts, str):
-                dt = datetime.fromisoformat(ts)
-            else:
-                dt = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            elif period == BarPeriod.D1:
-                dt = dt.astimezone(UTC)
-            if (
-                period == BarPeriod.D1
-                and symbol.code.endswith((".SH", ".SZ", ".BJ"))
-                and dt.hour == 16
-            ):
-                dt += timedelta(hours=8)
-            if period == BarPeriod.D1:
-                dt = datetime.combine(dt.date(), datetime.min.time(), tzinfo=UTC)
+            dt = _normalise_timestamp(row["timestamp"], symbol, period)
             bars.append(
                 Bar(
                     symbol=symbol,
@@ -204,6 +270,57 @@ class ParquetCache:
             )
         bars.sort(key=lambda b: b.timestamp)
         return bars
+
+    @staticmethod
+    def _read_close_points_sync(
+        path: Path,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date | None,
+        end: date | None,
+    ) -> list[tuple[datetime, Decimal]]:
+        """兼容旧的线程读取入口。"""
+
+        return ParquetCache.read_close_points_sync(
+            path,
+            symbol,
+            period,
+            start,
+            end,
+        )
+
+    @staticmethod
+    def read_close_points_sync(
+        path: Path,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date | None,
+        end: date | None,
+    ) -> list[tuple[datetime, Decimal]]:
+        """同步读取 timestamp/close,供独立进程 worker 复用。"""
+
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(
+            path,
+            columns=["timestamp", "close"],
+            use_threads=False,
+            pre_buffer=False,
+        )
+        points: list[tuple[datetime, Decimal]] = []
+        for row in table.to_pylist():
+            timestamp = _normalise_timestamp(row["timestamp"], symbol, period)
+            business_date = timestamp.date()
+            if start is not None and business_date < start:
+                continue
+            if end is not None and business_date > end:
+                continue
+            close = row.get("close")
+            if close is None:
+                continue
+            points.append((timestamp, Decimal(str(close))))
+        points.sort(key=lambda item: item[0])
+        return points
 
     async def write(
         self,

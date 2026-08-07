@@ -405,6 +405,8 @@ A股传统价格动量证据分歧大,因此动量作为**待检验补充**,而�
 | 方法 | 路径 | 内容 |
 |---|---|---|
 | `GET` | `/api/research/factors/catalog` | 版本化因子、风险因子和市场输入目录 |
+| `POST` | `/api/research/factors/features/jobs` | 异步启动特征快照计算,返回 job 状态 |
+| `GET` | `/api/research/factors/features/jobs/{job_id}` | 查询计算进度、已耗时和预计剩余时间 |
 | `GET` | `/api/research/factors/features` | 快照列表;支持 release 筛选 |
 | `GET` | `/api/research/factors/features/{snapshot_id}` | 快照、观测值和完整 lineage |
 | `GET` | `/api/research/factors/signals` | 信号列表;支持 factor/status 筛选 |
@@ -414,6 +416,17 @@ A股传统价格动量证据分歧大,因此动量作为**待检验补充**,而�
 
 这些端点只登记或读取研究产物,不会启动策略、生成目标仓位、访问 Broker 或执行
 订单。LLM 可以解释目录和辅助形成假设,但不能声明样本外通过或把信号送入实盘。
+
+特征快照页面默认使用异步 job 入口:服务端按
+`FINBOARD_FEATURE_SNAPSHOT_PROCESS_WORKERS`(默认 8)启动独立 spawn 计算进程,每个进程
+读取并校验一个冻结标的,主 API 进程只负责调度、收集结果和更新进度。进程内仍按
+`FINBOARD_FEATURE_SNAPSHOT_MAX_CONCURRENCY`保留兼容的线程 worker 路径,价格特征只读取
+`timestamp`/`close` 两列,并按发布中的标的顺序合并结果。任务状态为
+`queued/running/succeeded/failed`,前端显示真实完成标的数、已耗时和完成速率推算的 ETA;
+尚未完成首个标的时不显示伪造的预计时间。同步 `POST /api/research/factors/features`
+保留用于兼容已有调用方,同样使用独立进程计算。该设计不引入 Go/C++ 或微服务,同时
+避免大量 Parquet 解码和 Decimal 转换阻塞 API 事件循环,并保持研究产物的 PIT/checksum
+不变性。
 
 ### 可复现实验最小流程
 
