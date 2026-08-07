@@ -16,8 +16,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
+from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,6 +44,7 @@ from finboard_backtest.factor_research.hypothesis import (
 )
 from finboard_backtest.factor_research.provider import (
     PROMPT_VERSION,
+    LLMStreamEvent,
     LLMUnavailableError,
 )
 from finboard_backtest.factor_research.sanitizer import sanitize_prompt
@@ -165,6 +169,12 @@ class OpenAICompatibleConfig:
     model: str = "gpt-4o-mini"
     timeout_seconds: float = 30.0
     max_retries: int = 3
+    connect_timeout_seconds: float = 10.0
+    total_timeout_seconds: float = 600.0
+    token_idle_timeout_seconds: float | None = None
+    max_tokens: int | None = None
+    thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
     # 可选:透传给 chat completions 的额外字段(如 temperature)。
     extra_body: dict[str, Any] = field(default_factory=dict)
 
@@ -191,12 +201,18 @@ class OpenAICompatibleLLMProvider:
         config: OpenAICompatibleConfig,
         *,
         client: httpx.Client | None = None,
+        async_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._config = config
         self._owns_client = client is None
+        self._async_client = async_client
         self._client = client or httpx.Client(
             base_url=config.base_url.rstrip("/"),
-            timeout=httpx.Timeout(config.timeout_seconds),
+            # 非流式兼容接口没有 token 级时钟,使用连接 + 总时限。
+            timeout=httpx.Timeout(
+                config.total_timeout_seconds,
+                connect=config.connect_timeout_seconds,
+            ),
             headers={
                 "Authorization": f"Bearer {config.api_key}",
                 "Content-Type": "application/json",
@@ -233,6 +249,24 @@ class OpenAICompatibleLLMProvider:
         data = self._complete_json(build_answer_messages(prompt))
         return _parse_answer(data, question=prompt)
 
+    async def stream_answer(self, prompt: str) -> AsyncIterator[LLMStreamEvent]:
+        """以 DeepSeek thinking 模式通过 SSE 流式回答问题。
+
+        连接层 read timeout 关闭,由 token 级空闲计时器负责超时。这样 DeepSeek
+        的 SSE keep-alive 不会被误认为模型 token,也不会阻止 30 秒 token 空闲策略。
+        """
+        payload = self._build_payload(build_answer_messages(prompt), stream=True)
+        if self._async_client is not None:
+            async for event in self._stream_answer_with_client(
+                self._async_client, payload, prompt
+            ):
+                yield event
+            return
+
+        async with self._new_async_client() as client:
+            async for event in self._stream_answer_with_client(client, payload, prompt):
+                yield event
+
     def provider_name(self) -> str:
         return "openai-compatible"
 
@@ -247,13 +281,7 @@ class OpenAICompatibleLLMProvider:
     # ------------------------------------------------------------------
 
     def _complete_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "model": self._config.model,
-            "messages": messages,
-            "response_format": {"type": "json_object"},
-        }
-        if self._config.extra_body:
-            payload.update(self._config.extra_body)
+        payload = self._build_payload(messages, stream=False)
 
         last_exc: Exception | None = None
         for attempt in range(self._config.max_retries + 1):
@@ -263,7 +291,7 @@ class OpenAICompatibleLLMProvider:
                 # 超时:不重试(下单类操作的"最危险场景"同源原则),
                 # 直接降级,避免不可观测的重复请求。
                 raise LLMUnavailableError(
-                    f"LLM 请求超时({self._config.timeout_seconds}s)"
+                    f"LLM 请求超时({self._config.total_timeout_seconds}s)"
                 ) from exc
             except httpx.HTTPError as exc:
                 last_exc = exc
@@ -291,6 +319,210 @@ class OpenAICompatibleLLMProvider:
             f"LLM 请求失败,已耗尽重试: {last_exc}"
         )
 
+    def _build_payload(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        stream: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self._config.model,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+        }
+        if self._config.thinking_enabled is not None:
+            payload["thinking"] = {
+                "type": "enabled" if self._config.thinking_enabled else "disabled"
+            }
+            if self._config.thinking_enabled and self._config.reasoning_effort:
+                payload["reasoning_effort"] = self._config.reasoning_effort
+        if self._config.max_tokens is not None:
+            payload["max_tokens"] = self._config.max_tokens
+        if self._config.extra_body:
+            payload.update(self._config.extra_body)
+        payload["stream"] = stream
+        if stream:
+            payload.setdefault("stream_options", {"include_usage": True})
+        return payload
+
+    def _new_async_client(self) -> httpx.AsyncClient:
+        # read=None 是必要的:DeepSeek 会发送 keep-alive,真正的 token idle timeout
+        # 在 _iter_sse_events 中按 token 语义计算。
+        timeout = httpx.Timeout(
+            None,
+            connect=self._config.connect_timeout_seconds,
+        )
+        return httpx.AsyncClient(
+            base_url=self._config.base_url.rstrip("/"),
+            timeout=timeout,
+            headers={
+                "Authorization": f"Bearer {self._config.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+
+    async def _stream_answer_with_client(
+        self,
+        client: httpx.AsyncClient,
+        payload: dict[str, Any],
+        prompt: str,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        last_exc: Exception | None = None
+        for attempt in range(self._config.max_retries + 1):
+            response_started = False
+            try:
+                async with client.stream(
+                    "POST", "/chat/completions", json=payload
+                ) as response:
+                    if response.status_code == 429 or response.status_code >= 500:
+                        last_exc = LLMUnavailableError(
+                            f"LLM 服务返回 {response.status_code}"
+                        )
+                        if attempt < self._config.max_retries:
+                            await asyncio.sleep(min(8.0, 2.0**attempt))
+                            continue
+                        raise last_exc
+
+                    if response.status_code >= 400:
+                        body = (await response.aread()).decode("utf-8", errors="replace")
+                        raise LLMUnavailableError(
+                            f"LLM 服务返回 {response.status_code}: {body[:200]}"
+                        )
+
+                    response_started = True
+                    content_parts: list[str] = []
+                    async for envelope in self._iter_sse_events(response):
+                        for choice in envelope.get("choices", []):
+                            if not isinstance(choice, dict):
+                                continue
+                            delta = choice.get("delta")
+                            if not isinstance(delta, dict):
+                                continue
+                            reasoning = delta.get("reasoning_content")
+                            if isinstance(reasoning, str) and reasoning:
+                                yield LLMStreamEvent(
+                                    kind="reasoning_delta", text=reasoning
+                                )
+                            content = delta.get("content")
+                            if isinstance(content, str) and content:
+                                content_parts.append(content)
+                                yield LLMStreamEvent(
+                                    kind="content_delta", text=content
+                                )
+                            tool_calls = delta.get("tool_calls")
+                            if isinstance(tool_calls, list) and tool_calls:
+                                yield LLMStreamEvent(
+                                    kind="tool_call_delta",
+                                    text=json.dumps(
+                                        tool_calls, ensure_ascii=False, separators=(",", ":")
+                                    ),
+                                )
+
+                    content = "".join(content_parts)
+                    if not content.strip():
+                        raise LLMUnavailableError(
+                            "LLM 流结束但没有返回可解析的 content"
+                        )
+                    answer = _parse_answer(
+                        _parse_json_content(content), question=prompt
+                    )
+                    yield LLMStreamEvent(kind="completed", answer=answer)
+                    return
+            except LLMUnavailableError:
+                raise
+            except httpx.TimeoutException as exc:
+                raise LLMUnavailableError("LLM 流式连接超时") from exc
+            except httpx.HTTPError as exc:
+                # 收到 200 并开始读取后禁止重试,避免把已开始的模型轮次重复提交。
+                if response_started or attempt >= self._config.max_retries:
+                    raise LLMUnavailableError(
+                        f"LLM 流式请求失败: {exc}"
+                    ) from exc
+                last_exc = exc
+                await asyncio.sleep(min(8.0, 2.0**attempt))
+
+        raise LLMUnavailableError(
+            f"LLM 流式请求失败,已耗尽重试: {last_exc}"
+        )
+
+    async def _iter_sse_events(
+        self,
+        response: httpx.Response,
+    ) -> AsyncIterator[dict[str, Any]]:
+        data_lines: list[str] = []
+        line_iterator = response.aiter_lines()
+        last_token_at = time.monotonic()
+        started_at = last_token_at
+        idle_timeout = self._config.token_idle_timeout_seconds
+        if idle_timeout is None:
+            idle_timeout = self._config.timeout_seconds
+        total_timeout = self._config.total_timeout_seconds
+
+        while True:
+            now = time.monotonic()
+            idle_remaining = idle_timeout - (now - last_token_at)
+            total_remaining = total_timeout - (now - started_at)
+            remaining = min(idle_remaining, total_remaining)
+            if remaining <= 0:
+                if total_remaining <= idle_remaining:
+                    raise LLMUnavailableError(
+                        f"LLM 流式请求达到总时限({total_timeout}s)"
+                    )
+                raise LLMUnavailableError(
+                    f"LLM token 空闲超时({idle_timeout}s)"
+                )
+
+            next_line: asyncio.Future[str] = asyncio.ensure_future(
+                line_iterator.__anext__()
+            )
+            try:
+                line = await asyncio.wait_for(next_line, timeout=remaining)
+            except StopAsyncIteration:
+                break
+            except TimeoutError as exc:
+                next_line.cancel()
+                with suppress(asyncio.CancelledError):
+                    await next_line
+                raise LLMUnavailableError(
+                    f"LLM token 空闲超时({idle_timeout}s)"
+                ) from exc
+
+            if line.startswith(":"):
+                # DeepSeek keep-alive 不算 token,也不重置 last_token_at。
+                continue
+            if line.startswith("data:"):
+                value = line[5:].lstrip()
+                if value == "[DONE]":
+                    return
+                data_lines.append(value)
+                continue
+            if line != "" or not data_lines:
+                continue
+
+            raw = "\n".join(data_lines)
+            data_lines.clear()
+            if not raw:
+                continue
+            try:
+                envelope = json.loads(raw)
+            except ValueError as exc:
+                raise LLMUnavailableError("LLM SSE 数据不是合法 JSON") from exc
+            if not isinstance(envelope, dict):
+                raise LLMUnavailableError("LLM SSE 数据不是 JSON 对象")
+            if _sse_envelope_has_token(envelope):
+                last_token_at = time.monotonic()
+            yield envelope
+
+        if data_lines:
+            raw = "\n".join(data_lines)
+            if raw and raw != "[DONE]":
+                try:
+                    envelope = json.loads(raw)
+                except ValueError as exc:
+                    raise LLMUnavailableError("LLM SSE 数据不是合法 JSON") from exc
+                if isinstance(envelope, dict):
+                    yield envelope
+
     def _extract_json(self, response: httpx.Response) -> dict[str, Any]:
         try:
             envelope = response.json()
@@ -313,6 +545,35 @@ class OpenAICompatibleLLMProvider:
         # 指数退避: 1s, 2s, 4s ... (上限 8s)
         delay = min(8.0, 2.0**attempt)
         time.sleep(delay)
+
+
+def _sse_envelope_has_token(envelope: dict[str, Any]) -> bool:
+    """判断 SSE chunk 是否包含真实生成 token,忽略 keep-alive/usage/role chunk。"""
+    choices = envelope.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        for key in ("reasoning_content", "content"):
+            value = delta.get(key)
+            if isinstance(value, str) and value:
+                return True
+        tool_calls = delta.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                if isinstance(function, dict) and any(
+                    isinstance(function.get(key), str) and function.get(key)
+                    for key in ("name", "arguments")
+                ):
+                    return True
+    return False
 
 
 def _parse_json_content(content: str) -> dict[str, Any]:

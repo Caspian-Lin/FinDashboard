@@ -118,14 +118,48 @@ const workflowCards: { to: string; icon: LucideIcon; title: string; desc: string
   { to: "/research/simulation", icon: PlayCircle, title: "模拟交易", desc: "纸面撮合验证实际表现" },
 ];
 
-function OrchestrateTab() {
-  const [prompt, setPrompt] = React.useState("");
+function useAIAnswerStream() {
   const [answer, setAnswer] = React.useState<AnswerOut | null>(null);
+  const [reasoning, setReasoning] = React.useState("");
+  const [status, setStatus] = React.useState("AI 正在思考");
 
   const askMutation = useMutation({
-    mutationFn: (q: string) => aiResearchApi.ask(q),
+    mutationFn: (question: string) => {
+      setAnswer(null);
+      setReasoning("");
+      setStatus("AI 正在思考");
+      return aiResearchApi.askStream(question, {
+        onStatus: setStatus,
+        onReasoning: (text) => setReasoning((current) => current + text),
+        onToolCall: () => setStatus("AI 正在处理研究工具结果"),
+      });
+    },
     onSuccess: setAnswer,
+    onError: () => setStatus("AI 请求失败"),
   });
+
+  return { answer, reasoning, status, askMutation };
+}
+
+function ReasoningPanel({ reasoning, status }: { reasoning: string; status: string }) {
+  if (!reasoning && !status) return null;
+  return (
+    <div className="rounded-md border border-primary/20 bg-primary/5 p-3">
+      <div className="mb-1 flex items-center gap-2 text-xs font-medium text-primary">
+        <Sparkles className="h-3.5 w-3.5" />
+        思考过程
+        <span className="font-normal text-muted-foreground">{status}</span>
+      </div>
+      <p className="max-h-56 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
+        {reasoning || "等待模型输出思考 token..."}
+      </p>
+    </div>
+  );
+}
+
+function OrchestrateTab() {
+  const [prompt, setPrompt] = React.useState("");
+  const { answer, reasoning, status, askMutation } = useAIAnswerStream();
 
   const handleSubmit = () => {
     if (!prompt.trim()) return;
@@ -186,7 +220,10 @@ function OrchestrateTab() {
           <CardContent className="py-12">
             <div className="flex flex-col items-center text-center">
               <Workflow className="mb-3 h-10 w-10 animate-pulse text-primary/50" />
-              <p className="text-sm text-muted-foreground">AI 正在分析你的研究目标...</p>
+              <p className="mb-4 text-sm text-muted-foreground">{status}</p>
+              <div className="w-full max-w-2xl text-left">
+                <ReasoningPanel reasoning={reasoning} status={status} />
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -204,6 +241,7 @@ function OrchestrateTab() {
             <CardContent>
               <ScrollArea className="max-h-[500px]">
                 <div className="space-y-4">
+                  <ReasoningPanel reasoning={reasoning} status={status} />
                   <div>
                     <div className="mb-1 text-xs font-medium text-muted-foreground">回答</div>
                     <p className="text-sm leading-relaxed">{answer.answer}</p>
@@ -315,12 +353,7 @@ function OrchestrateTab() {
 
 function AskTab() {
   const [question, setQuestion] = React.useState("");
-  const [answer, setAnswer] = React.useState<AnswerOut | null>(null);
-
-  const askMutation = useMutation({
-    mutationFn: (q: string) => aiResearchApi.ask(q),
-    onSuccess: setAnswer,
-  });
+  const { answer, reasoning, status, askMutation } = useAIAnswerStream();
 
   const handleSubmit = () => {
     if (!question.trim()) return;
@@ -381,11 +414,18 @@ function AskTab() {
           {!answer ? (
             <div className="flex flex-col items-center py-12 text-center">
               <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/30" />
-              <p className="text-sm text-muted-foreground">提出问题后，AI 将基于项目上下文回答</p>
+              {askMutation.isPending ? (
+                <div className="w-full text-left">
+                  <ReasoningPanel reasoning={reasoning} status={status} />
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">提出问题后，AI 将基于项目上下文回答</p>
+              )}
             </div>
           ) : (
             <ScrollArea className="max-h-[600px]">
               <div className="space-y-4">
+                <ReasoningPanel reasoning={reasoning} status={status} />
                 <div>
                   <div className="mb-1 text-xs font-medium text-muted-foreground">回答</div>
                   <p className="text-sm leading-relaxed">{answer.answer}</p>

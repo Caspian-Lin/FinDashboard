@@ -36,6 +36,39 @@ def client(app: FastAPI) -> TestClient:
 class TestDataRoutes:
     """Data 路由测试。"""
 
+    def test_llm_config_reads_streaming_thinking_options(self) -> None:
+        """设置页保存的流式 / thinking 参数应正确转换为对外配置。"""
+        from finboard_api.routes.data import _LLM_KEYS, _llm_out_from_env
+
+        values = dict.fromkeys(_LLM_KEYS.values(), "")
+        values.update(
+            {
+                "provider": "openai_compatible",
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": "secret-not-returned",
+                "model": "deepseek-v4-flash",
+                "timeout_seconds": "30",
+                "max_retries": "2",
+                "connect_timeout_seconds": "8",
+                "total_timeout_seconds": "900",
+                "max_tokens": "8192",
+                "thinking_enabled": "true",
+                "reasoning_effort": "max",
+            }
+        )
+
+        out = _llm_out_from_env(values)
+
+        assert out.provider == "openai_compatible"
+        assert out.api_key == "********"
+        assert out.api_key_set is True
+        assert out.timeout_seconds == 30
+        assert out.connect_timeout_seconds == 8
+        assert out.total_timeout_seconds == 900
+        assert out.max_tokens == 8192
+        assert out.thinking_enabled is True
+        assert out.reasoning_effort == "max"
+
     def test_bulk_download_log_records_and_updates_cache_miss_reason(self) -> None:
         """拉取日志可异步补充未命中原因,并保持稳定事件序号。"""
         from finboard_api.routes.data import (

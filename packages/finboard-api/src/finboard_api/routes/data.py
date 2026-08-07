@@ -104,6 +104,11 @@ _LLM_KEYS: dict[str, str] = {
     "FINBOARD_LLM_MODEL": "model",
     "FINBOARD_LLM_TIMEOUT_SECONDS": "timeout_seconds",
     "FINBOARD_LLM_MAX_RETRIES": "max_retries",
+    "FINBOARD_LLM_CONNECT_TIMEOUT_SECONDS": "connect_timeout_seconds",
+    "FINBOARD_LLM_TOTAL_TIMEOUT_SECONDS": "total_timeout_seconds",
+    "FINBOARD_LLM_MAX_TOKENS": "max_tokens",
+    "FINBOARD_LLM_THINKING_ENABLED": "thinking_enabled",
+    "FINBOARD_LLM_REASONING_EFFORT": "reasoning_effort",
 }
 
 
@@ -1426,14 +1431,27 @@ def _llm_out_from_env(values: dict[str, str]) -> LLMConfigOut:
     provider = values["provider"] or "fake"
     if provider not in ("fake", "openai_compatible"):
         provider = "fake"
-    try:
-        timeout_f = float(values["timeout_seconds"]) if values["timeout_seconds"] else 30.0
-    except ValueError:
-        timeout_f = 30.0
-    try:
-        retries_i = int(values["max_retries"]) if values["max_retries"] else 3
-    except ValueError:
-        retries_i = 3
+    def _float_value(name: str, default: float) -> float:
+        try:
+            return float(values[name]) if values[name] else default
+        except (KeyError, ValueError):
+            return default
+
+    def _int_value(name: str, default: int) -> int:
+        try:
+            return int(values[name]) if values[name] else default
+        except (KeyError, ValueError):
+            return default
+
+    def _bool_value(name: str, default: bool) -> bool:
+        raw = values.get(name, "").strip().lower()
+        if not raw:
+            return default
+        return raw in {"1", "true", "yes", "on"}
+
+    reasoning_effort = values.get("reasoning_effort", "") or "high"
+    if reasoning_effort not in ("high", "max"):
+        reasoning_effort = "high"
     api_key_raw = values["api_key"]
     return LLMConfigOut(
         provider=provider,  # type: ignore[arg-type]
@@ -1441,8 +1459,13 @@ def _llm_out_from_env(values: dict[str, str]) -> LLMConfigOut:
         api_key=_API_KEY_MASK if api_key_raw else "",
         api_key_set=bool(api_key_raw),
         model=values["model"] or "gpt-4o-mini",
-        timeout_seconds=timeout_f,
-        max_retries=retries_i,
+        timeout_seconds=_float_value("timeout_seconds", 30.0),
+        max_retries=_int_value("max_retries", 3),
+        connect_timeout_seconds=_float_value("connect_timeout_seconds", 10.0),
+        total_timeout_seconds=_float_value("total_timeout_seconds", 600.0),
+        max_tokens=_int_value("max_tokens", 4096),
+        thinking_enabled=_bool_value("thinking_enabled", True),
+        reasoning_effort=reasoning_effort,  # type: ignore[arg-type]
     )
 
 
@@ -1463,6 +1486,11 @@ def _rebuild_llm_provider(request: Request, merged: dict[str, str]) -> None:
             "llm_model": out.model,
             "llm_timeout_seconds": out.timeout_seconds,
             "llm_max_retries": out.max_retries,
+            "llm_connect_timeout_seconds": out.connect_timeout_seconds,
+            "llm_total_timeout_seconds": out.total_timeout_seconds,
+            "llm_max_tokens": out.max_tokens,
+            "llm_thinking_enabled": out.thinking_enabled,
+            "llm_reasoning_effort": out.reasoning_effort,
         }
     )
     from finboard_app.llm_factory import build_llm_provider
@@ -1513,6 +1541,27 @@ async def update_llm_config(
         ),
         "max_retries": (
             str(req.max_retries) if req.max_retries is not None else cur["max_retries"]
+        ),
+        "connect_timeout_seconds": (
+            str(req.connect_timeout_seconds)
+            if req.connect_timeout_seconds is not None
+            else cur["connect_timeout_seconds"]
+        ),
+        "total_timeout_seconds": (
+            str(req.total_timeout_seconds)
+            if req.total_timeout_seconds is not None
+            else cur["total_timeout_seconds"]
+        ),
+        "max_tokens": str(req.max_tokens) if req.max_tokens is not None else cur["max_tokens"],
+        "thinking_enabled": (
+            str(req.thinking_enabled).lower()
+            if req.thinking_enabled is not None
+            else cur["thinking_enabled"]
+        ),
+        "reasoning_effort": (
+            req.reasoning_effort
+            if req.reasoning_effort is not None
+            else cur["reasoning_effort"]
         ),
     }
     _write_env_llm(merged)

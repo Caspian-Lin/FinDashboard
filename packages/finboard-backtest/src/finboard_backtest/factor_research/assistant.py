@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -120,6 +121,18 @@ class AIResponse[T]:
         return self.result, self.provenance
 
 
+@dataclass(frozen=True, slots=True)
+class AIStreamEvent:
+    """ResearchAssistant 层的增量事件。
+
+    thinking 内容只在当前请求中向用户展示,不进入普通消息历史或审计持久化。
+    """
+
+    kind: str
+    text: str = ""
+    response: AIResponse[AnswerResult] | None = None
+
+
 class ResearchAssistant:
     """AI 研究助手门面(权限边界 + 脱敏 + 来源组装 + 降级)。
 
@@ -169,6 +182,40 @@ class ResearchAssistant:
             prompt, self._provider.answer_question, "answer_question"
         )
 
+    async def stream_answer(self, prompt: str) -> AsyncIterator[AIStreamEvent]:
+        """流式回答研究问题,保留权限校验、脱敏和最终 Provenance。"""
+        assert_research_only_request(prompt)
+        _ = sanitize_prompt(prompt)
+        started = time.monotonic()
+        try:
+            async for event in self._provider.stream_answer(prompt):
+                if event.kind != "completed":
+                    yield AIStreamEvent(kind=event.kind, text=event.text)
+                    continue
+                if event.answer is None:
+                    raise AIDegradedError("LLM 流结束但缺少经过校验的回答")
+                latency_ms = int((time.monotonic() - started) * 1000)
+                provenance = Provenance(
+                    provider=self._provider.provider_name(),
+                    model_version=self._provider.model_version(),
+                    prompt_version=self._provider.prompt_version(),
+                    latency_ms=latency_ms,
+                    request_checksum=_request_checksum(prompt),
+                )
+                yield AIStreamEvent(
+                    kind="completed",
+                    response=AIResponse(
+                        result=event.answer,
+                        provenance=provenance,
+                    ),
+                )
+        except AIDegradedError:
+            raise
+        except Exception as exc:
+            raise AIDegradedError(
+                f"AI 助手 stream_answer 不可用: {exc}"
+            ) from exc
+
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
@@ -202,6 +249,7 @@ class ResearchAssistant:
 __all__ = [
     "AIDegradedError",
     "AIResponse",
+    "AIStreamEvent",
     "PermissionDeniedError",
     "ResearchAssistant",
     "assert_research_only_request",

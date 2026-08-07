@@ -843,6 +843,12 @@ wf.complete_experiment(
 
 * `FakeLLMProvider` 是默认 provider,不调用公网 LLM。
 * 真实 LLM 需配置 `FINBOARD_LLM_PROVIDER=openai_compatible` + base_url + api_key。
+* DeepSeek thinking 问答通过 `/api/research/ai/ask/stream` 使用 SSE；
+  `FINBOARD_LLM_TIMEOUT_SECONDS` 表示连续没有真实 token 的空闲超时(默认 30 秒),
+  keep-alive 不会重置计时器；思考 token 仅在当前页面展示,不写入普通历史消息或审计。
+* thinking 可由 `FINBOARD_LLM_THINKING_ENABLED` 与
+  `FINBOARD_LLM_REASONING_EFFORT` 控制；总请求时限和连接时限分别由
+  `FINBOARD_LLM_TOTAL_TIMEOUT_SECONDS` 与 `FINBOARD_LLM_CONNECT_TIMEOUT_SECONDS` 控制。
 * 不连接 Broker / OrderManager / 实盘策略配置。
 * validated_oos 只能由 #57 持久化的机器验证终态决定,不能由 LLM 或人工主观判断。
 * AI 草案需人工审批后才可采纳到正式研究流水线,不自动晋级。

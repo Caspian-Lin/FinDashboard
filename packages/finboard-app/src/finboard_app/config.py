@@ -78,8 +78,15 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = Field(default="", repr=False)
     llm_model: str = "gpt-4o-mini"
+    # 流式请求连续没有真实 token 的空闲超时(兼容旧变量名)。
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 3
+    llm_connect_timeout_seconds: float = 10.0
+    llm_total_timeout_seconds: float = 600.0
+    llm_max_tokens: int = 4096
+    # OpenAI-compatible provider 中,DeepSeek 使用 thinking;其它 provider 可关闭。
+    llm_thinking_enabled: bool = True
+    llm_reasoning_effort: Literal["high", "max"] = "high"
 
 
 def load_settings(env_file: str | None = None) -> Settings:

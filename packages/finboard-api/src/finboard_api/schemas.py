@@ -408,8 +408,14 @@ class LLMConfigOut(BaseSchema):
     api_key: str = ""
     api_key_set: bool = False
     model: str = "gpt-4o-mini"
+    # timeout_seconds 保留旧字段名,语义为“连续没有真实 token 的空闲超时”。
     timeout_seconds: float = 30.0
     max_retries: int = 3
+    connect_timeout_seconds: float = 10.0
+    total_timeout_seconds: float = 600.0
+    max_tokens: int = 4096
+    thinking_enabled: bool = True
+    reasoning_effort: Literal["high", "max"] = "high"
 
 
 class LLMConfigUpdate(BaseSchema):
@@ -419,6 +425,11 @@ class LLMConfigUpdate(BaseSchema):
     model: str | None = None
     timeout_seconds: float | None = None
     max_retries: int | None = None
+    connect_timeout_seconds: float | None = None
+    total_timeout_seconds: float | None = None
+    max_tokens: int | None = None
+    thinking_enabled: bool | None = None
+    reasoning_effort: Literal["high", "max"] | None = None
 
 
 # --------------------------------------------------------------------------- Backtest
