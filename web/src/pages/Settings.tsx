@@ -282,6 +282,11 @@ function LLMProviderSection() {
       model: form.model,
       timeout_seconds: form.timeout_seconds,
       max_retries: form.max_retries,
+      connect_timeout_seconds: form.connect_timeout_seconds,
+      total_timeout_seconds: form.total_timeout_seconds,
+      max_tokens: form.max_tokens,
+      thinking_enabled: form.thinking_enabled,
+      reasoning_effort: form.reasoning_effort,
     };
     // api_key 哨兵:保留掩码 "********" 不传,后端保持原值;其它值(含空串)覆盖。
     if (form.api_key !== "********") {
@@ -352,13 +357,50 @@ function LLMProviderSection() {
           />
         </div>
         <div>
-          <label className="block text-sm text-muted-foreground mb-1">超时(秒)</label>
+          <label className="block text-sm text-muted-foreground mb-1">
+            Token 空闲超时(秒)
+          </label>
           <input
             type="number"
             value={form.timeout_seconds}
             onChange={(e) =>
               setForm({ ...form, timeout_seconds: Number(e.target.value) })
             }
+            className="w-full border rounded px-3 py-1.5 text-sm"
+          />
+        </div>
+        <div>
+          <label className="block text-sm text-muted-foreground mb-1">
+            连接超时(秒)
+          </label>
+          <input
+            type="number"
+            value={form.connect_timeout_seconds}
+            onChange={(e) =>
+              setForm({ ...form, connect_timeout_seconds: Number(e.target.value) })
+            }
+            className="w-full border rounded px-3 py-1.5 text-sm"
+          />
+        </div>
+        <div>
+          <label className="block text-sm text-muted-foreground mb-1">
+            总请求超时(秒)
+          </label>
+          <input
+            type="number"
+            value={form.total_timeout_seconds}
+            onChange={(e) =>
+              setForm({ ...form, total_timeout_seconds: Number(e.target.value) })
+            }
+            className="w-full border rounded px-3 py-1.5 text-sm"
+          />
+        </div>
+        <div>
+          <label className="block text-sm text-muted-foreground mb-1">最大输出 token</label>
+          <input
+            type="number"
+            value={form.max_tokens}
+            onChange={(e) => setForm({ ...form, max_tokens: Number(e.target.value) })}
             className="w-full border rounded px-3 py-1.5 text-sm"
           />
         </div>
@@ -373,6 +415,29 @@ function LLMProviderSection() {
             className="w-full border rounded px-3 py-1.5 text-sm"
           />
         </div>
+        <div>
+          <label className="block text-sm text-muted-foreground mb-1">思考强度</label>
+          <select
+            value={form.reasoning_effort}
+            onChange={(e) =>
+              setForm({ ...form, reasoning_effort: e.target.value as "high" | "max" })
+            }
+            className="w-full border rounded px-3 py-1.5 text-sm bg-card"
+            disabled={!isHttp || !form.thinking_enabled}
+          >
+            <option value="high">high</option>
+            <option value="max">max</option>
+          </select>
+        </div>
+        <label className="flex items-center gap-2 text-sm text-muted-foreground sm:col-span-2">
+          <input
+            type="checkbox"
+            checked={form.thinking_enabled}
+            onChange={(e) => setForm({ ...form, thinking_enabled: e.target.checked })}
+            disabled={!isHttp}
+          />
+          开启 DeepSeek 思考模式，并在研究助手页面展示思考过程
+        </label>
       </div>
 
       <div className="flex items-center gap-4 mt-4">

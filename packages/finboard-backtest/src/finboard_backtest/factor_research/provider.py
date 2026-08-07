@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -57,6 +58,10 @@ class LLMProvider(Protocol):
         """回答金融研究问题(通俗解释 + 引用 + 不确定性)。"""
         ...
 
+    def stream_answer(self, prompt: str) -> AsyncIterator[LLMStreamEvent]:
+        """以增量事件回答问题,同时保留最终 schema 校验。"""
+        ...
+
     def provider_name(self) -> str:
         """返回 provider 标识(用于审计)。"""
         ...
@@ -75,6 +80,20 @@ class LLMUnavailableError(RuntimeError):
 
     调用方应降级处理,不得自动重试下单类操作或错误晋级研究状态。
     """
+
+
+@dataclass(frozen=True, slots=True)
+class LLMStreamEvent:
+    """Provider 层的安全增量事件。
+
+    reasoning_delta 只用于当前请求的前端展示和 thinking 模式下的临时上下文,
+    不应写入普通 AI 历史消息或审计记录。completed 携带的结果已经通过 schema
+    校验,调用方可以安全持久化为 DraftArtifact。
+    """
+
+    kind: str
+    text: str = ""
+    answer: AnswerResult | None = None
 
 
 @dataclass
@@ -141,6 +160,19 @@ class FakeLLMProvider:
         self._index_a += 1
         return answer
 
+    async def stream_answer(self, prompt: str) -> AsyncIterator[LLMStreamEvent]:
+        _ = sanitize_prompt(prompt)
+        self._check_fail("stream_answer")
+        if self._index_a >= len(self.answers):
+            raise LLMUnavailableError("FakeLLMProvider: 已耗尽预设回答")
+        answer = self.answers[self._index_a]
+        self._index_a += 1
+        yield LLMStreamEvent(
+            kind="content_delta",
+            text=answer.answer,
+        )
+        yield LLMStreamEvent(kind="completed", answer=answer)
+
     def provider_name(self) -> str:
         return "fake"
 
@@ -167,5 +199,6 @@ __all__ = [
     "PROMPT_VERSION",
     "FakeLLMProvider",
     "LLMProvider",
+    "LLMStreamEvent",
     "LLMUnavailableError",
 ]

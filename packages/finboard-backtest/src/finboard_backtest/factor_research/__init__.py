@@ -33,6 +33,7 @@ from finboard_backtest.factor_research.ai_contracts import (
 from finboard_backtest.factor_research.assistant import (
     AIDegradedError,
     AIResponse,
+    AIStreamEvent,
     PermissionDeniedError,
     ResearchAssistant,
     assert_research_only_request,
@@ -56,6 +57,7 @@ from finboard_backtest.factor_research.provider import (
     PROMPT_VERSION,
     FakeLLMProvider,
     LLMProvider,
+    LLMStreamEvent,
     LLMUnavailableError,
 )
 from finboard_backtest.factor_research.sanitizer import (
@@ -84,6 +86,7 @@ __all__ = [
     "PROMPT_VERSION",
     "AIDegradedError",
     "AIResponse",
+    "AIStreamEvent",
     "AnswerResult",
     "AuditEntry",
     "AuditEventType",
@@ -100,6 +103,7 @@ __all__ = [
     "HypothesisValidationResult",
     "HypothesisValidator",
     "LLMProvider",
+    "LLMStreamEvent",
     "LLMUnavailableError",
     "MachineValidationOutcome",
     "OpenAICompatibleConfig",

@@ -697,8 +697,14 @@ export interface LLMConfig {
   api_key: string;
   api_key_set: boolean;
   model: string;
+  /** 连续没有真实 token 的空闲超时(秒),keep-alive 不重置。 */
   timeout_seconds: number;
   max_retries: number;
+  connect_timeout_seconds: number;
+  total_timeout_seconds: number;
+  max_tokens: number;
+  thinking_enabled: boolean;
+  reasoning_effort: "high" | "max";
 }
 
 export interface LLMConfigUpdate {
@@ -708,4 +714,9 @@ export interface LLMConfigUpdate {
   model?: string;
   timeout_seconds?: number;
   max_retries?: number;
+  connect_timeout_seconds?: number;
+  total_timeout_seconds?: number;
+  max_tokens?: number;
+  thinking_enabled?: boolean;
+  reasoning_effort?: "high" | "max";
 }

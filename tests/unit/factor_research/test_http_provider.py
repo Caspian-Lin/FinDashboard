@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -45,6 +46,23 @@ def _chat_response(content: str, status: int = 200) -> httpx.Response:
     return httpx.Response(
         status,
         json={"choices": [{"message": {"role": "assistant", "content": content}}]},
+    )
+
+
+def _sse_chunk(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _async_provider(
+    handler: Any,
+    *,
+    config: OpenAICompatibleConfig | None = None,
+) -> tuple[OpenAICompatibleLLMProvider, httpx.AsyncClient]:
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(base_url="http://localhost", transport=transport)
+    return (
+        OpenAICompatibleLLMProvider(config or _config(), async_client=client),
+        client,
     )
 
 
@@ -270,6 +288,97 @@ class TestFaultInjection:
             assert a.answer == "ok"
             assert calls["n"] == 2
         finally:
+            provider.close()
+
+
+class TestStreaming:
+    async def test_streams_reasoning_and_validates_final_answer(self) -> None:
+        answer_payload = {
+            "answer": "夏普比率衡量风险调整后收益",
+            "technical_detail": "mean/std",
+            "citations": [
+                {"source_type": "project_doc", "title": "metrics.py"}
+            ],
+            "uncertainty": "low",
+            "data_sufficient": True,
+        }
+        captured: dict[str, Any] = {}
+
+        async def handler(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            stream = "".join(
+                [
+                    ": keep-alive\n\n",
+                    _sse_chunk(
+                        {"choices": [{"delta": {"role": "assistant"}}]}
+                    ),
+                    _sse_chunk(
+                        {"choices": [{"delta": {"reasoning_content": "先检查引用。"}}]}
+                    ),
+                    _sse_chunk(
+                        {"choices": [{"delta": {"content": json.dumps(answer_payload)}}]}
+                    ),
+                    _sse_chunk({"choices": [], "usage": {"total_tokens": 20}}),
+                    "data: [DONE]\n\n",
+                ]
+            )
+            return httpx.Response(
+                200,
+                content=stream.encode("utf-8"),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        config = _config(
+            thinking_enabled=True,
+            reasoning_effort="high",
+            max_tokens=4096,
+            token_idle_timeout_seconds=0.5,
+            total_timeout_seconds=2.0,
+        )
+        provider, async_client = _async_provider(handler, config=config)
+        try:
+            events = [event async for event in provider.stream_answer("什么是夏普比率")]
+        finally:
+            await async_client.aclose()
+            provider.close()
+
+        assert [event.kind for event in events] == [
+            "reasoning_delta",
+            "content_delta",
+            "completed",
+        ]
+        assert events[0].text == "先检查引用。"
+        assert events[-1].answer is not None
+        assert events[-1].answer.answer == "夏普比率衡量风险调整后收益"
+        assert captured["stream"] is True
+        assert captured["thinking"] == {"type": "enabled"}
+        assert captured["reasoning_effort"] == "high"
+        assert captured["max_tokens"] == 4096
+
+    async def test_keep_alive_without_token_hits_idle_timeout(self) -> None:
+        class DelayedStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b": keep-alive\n\n"
+                await asyncio.sleep(0.05)
+                yield b"data: [DONE]\n\n"
+
+        async def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                stream=DelayedStream(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        config = _config(
+            token_idle_timeout_seconds=0.01,
+            total_timeout_seconds=1.0,
+        )
+        provider, async_client = _async_provider(handler, config=config)
+        try:
+            with pytest.raises(LLMUnavailableError, match="token 空闲超时"):
+                _ = [event async for event in provider.stream_answer("q")]
+        finally:
+            await async_client.aclose()
             provider.close()
 
 

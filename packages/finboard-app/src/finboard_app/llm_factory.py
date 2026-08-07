@@ -44,6 +44,12 @@ def build_llm_provider(settings: Settings) -> LLMProvider:
             model=settings.llm_model,
             timeout_seconds=settings.llm_timeout_seconds,
             max_retries=settings.llm_max_retries,
+            connect_timeout_seconds=settings.llm_connect_timeout_seconds,
+            total_timeout_seconds=settings.llm_total_timeout_seconds,
+            token_idle_timeout_seconds=settings.llm_timeout_seconds,
+            max_tokens=settings.llm_max_tokens,
+            thinking_enabled=settings.llm_thinking_enabled,
+            reasoning_effort=settings.llm_reasoning_effort,
         )
         return OpenAICompatibleLLMProvider(config)
     return FakeLLMProvider()

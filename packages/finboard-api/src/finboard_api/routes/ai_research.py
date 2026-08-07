@@ -17,10 +17,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +47,7 @@ from finboard_backtest.factor_research import (
     StrategyDiffPayload,
     StrategyDraftPayload,
     UncertaintyLevel,
+    assert_research_only_request,
     hypothesis_to_draft_payload,
 )
 from finboard_backtest.validation.contracts import ExperimentStatus
@@ -519,6 +524,53 @@ def _assistant_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=str(exc))
 
 
+def _answer_out(
+    answer: AnswerResult,
+    provenance: Provenance,
+    draft: DraftArtifact,
+) -> AnswerOut:
+    return AnswerOut(
+        question=answer.question,
+        answer=answer.answer,
+        technical_detail=answer.technical_detail,
+        citations=[
+            CitationOut(
+                source_type=c.source_type.value,
+                title=c.title,
+                locator=c.locator,
+                snippet=c.snippet,
+            )
+            for c in answer.citations
+        ],
+        uncertainty=answer.uncertainty.value,
+        data_sufficient=answer.data_sufficient,
+        disclaimer=answer.disclaimer,
+        provenance=_provenance_out(provenance),
+        draft_id=draft.draft_id,
+    )
+
+
+def _sse(event: str, payload: dict[str, Any]) -> str:
+    return (
+        f"event: {event}\n"
+        f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+    )
+
+
+async def _collect_stream_answer(
+    assistant: ResearchAssistant,
+    question: str,
+) -> tuple[AnswerResult, Provenance]:
+    """兼容旧 JSON 端点,但底层仍使用同一条流式 provider 链路。"""
+    completed: tuple[AnswerResult, Provenance] | None = None
+    async for event in assistant.stream_answer(question):
+        if event.kind == "completed" and event.response is not None:
+            completed = event.response.as_tuple()
+    if completed is None:
+        raise AIDegradedError("AI 流结束但缺少最终回答")
+    return completed
+
+
 @router.post("/drafts/hypothesis", response_model=DraftOut, status_code=201)
 async def generate_hypothesis_draft(
     body: AskIn,
@@ -607,11 +659,9 @@ async def ask_question(
     assistant: ResearchAssistant = Depends(get_research_assistant),
 ) -> AnswerOut:
     try:
-        response = await asyncio.to_thread(assistant.ask, body.question)
+        answer, provenance = await _collect_stream_answer(assistant, body.question)
     except (PermissionDeniedError, AIDegradedError) as exc:
         raise _assistant_error(exc) from exc
-    answer: AnswerResult
-    answer, provenance = response.as_tuple()
     draft = DraftArtifact(
         draft_id=f"ai-draft-answer-{provenance.request_checksum or 'x'}",
         kind=DraftKind.ANSWER,
@@ -622,24 +672,79 @@ async def ask_question(
     )
     await AIDraftRepository(session).save(draft)
     await session.commit()
-    return AnswerOut(
-        question=answer.question,
-        answer=answer.answer,
-        technical_detail=answer.technical_detail,
-        citations=[
-            CitationOut(
-                source_type=c.source_type.value,
-                title=c.title,
-                locator=c.locator,
-                snippet=c.snippet,
+    return _answer_out(answer, provenance, draft)
+
+
+@router.post("/ask/stream")
+async def ask_question_stream(
+    body: AskIn,
+    session: AsyncSession = Depends(get_db_session),
+    assistant: ResearchAssistant = Depends(get_research_assistant),
+) -> StreamingResponse:
+    """通过 SSE 展示 DeepSeek thinking 与最终结构化回答。"""
+    try:
+        # 在发送响应头之前完成权限校验,越权请求仍返回明确的 403。
+        assert_research_only_request(body.question)
+    except PermissionDeniedError as exc:
+        raise _assistant_error(exc) from exc
+
+    async def event_stream() -> AsyncIterator[str]:
+        yield _sse("started", {"message": "AI 正在思考"})
+        try:
+            async for event in assistant.stream_answer(body.question):
+                if event.kind == "reasoning_delta":
+                    yield _sse("reasoning.delta", {"text": event.text})
+                elif event.kind == "content_delta":
+                    # 当前 answer contract 是 JSON,前端只在 completed 时展示 schema
+                    # 校验后的正文,但仍保留 content 事件供后续 Agent UI 使用。
+                    yield _sse("content.delta", {"text": event.text})
+                elif event.kind == "tool_call_delta":
+                    yield _sse("tool_call.delta", {"text": event.text})
+                elif event.kind == "completed":
+                    if event.response is None:
+                        raise AIDegradedError("AI 流结束但缺少最终回答")
+                    answer, provenance = event.response.as_tuple()
+                    draft = DraftArtifact(
+                        draft_id=f"ai-draft-answer-{provenance.request_checksum or 'x'}",
+                        kind=DraftKind.ANSWER,
+                        provenance=provenance,
+                        status=DraftStatus.PROPOSED,
+                        payload=answer.as_dict(),
+                        uncertainty=answer.uncertainty,
+                    )
+                    await AIDraftRepository(session).save(draft)
+                    await session.commit()
+                    output = _answer_out(answer, provenance, draft)
+                    yield _sse(
+                        "completed",
+                        jsonable_encoder(output),
+                    )
+        except (PermissionDeniedError, AIDegradedError) as exc:
+            yield _sse(
+                "error",
+                {
+                    "code": (
+                        "permission_denied"
+                        if isinstance(exc, PermissionDeniedError)
+                        else "ai_unavailable"
+                    ),
+                    "message": str(exc),
+                },
             )
-            for c in answer.citations
-        ],
-        uncertainty=answer.uncertainty.value,
-        data_sufficient=answer.data_sufficient,
-        disclaimer=answer.disclaimer,
-        provenance=_provenance_out(provenance),
-        draft_id=draft.draft_id,
+        except Exception as exc:
+            yield _sse(
+                "error",
+                {"code": "internal_error", "message": str(exc)},
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
