@@ -816,6 +816,23 @@ class FeatureSnapshotOut(BaseSchema):
     issues: list[str] = Field(default_factory=list)
 
 
+class FeatureSnapshotJobStatusOut(BaseSchema):
+    """特征快照后台计算任务的轮询状态。"""
+
+    job_id: str
+    status: Literal["queued", "running", "succeeded", "failed"]
+    total_symbols: int
+    completed_symbols: int
+    progress_pct: float
+    elapsed_seconds: float
+    estimated_remaining_seconds: float | None = None
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    snapshot_id: str | None = None
+    error: str | None = None
+
+
 class FactorSignalItemOut(BaseSchema):
     symbol: str
     direction: str

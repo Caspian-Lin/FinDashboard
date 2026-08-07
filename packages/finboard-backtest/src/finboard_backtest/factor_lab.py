@@ -7,10 +7,15 @@ FactorSignal。模块只读历史研究数据,不导入 Broker、OrderManager、
 
 from __future__ import annotations
 
+import asyncio
 import math
+import multiprocessing
+from collections.abc import Callable
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import pairwise
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
@@ -21,6 +26,7 @@ from finboard_backtest.portfolio.covariance import (
     CovarianceError,
     estimate_covariance,
 )
+from finboard_data.cache import ParquetCache
 from finboard_data.factor_lab import (
     FactorRole,
     FeatureMissingPolicy,
@@ -32,9 +38,17 @@ from finboard_data.factor_lab import (
 from finboard_data.factors import FactorInputBatch
 from finboard_data.releases import (
     FrozenReleaseProvider,
+    PointInTimePrice,
+    ReleasedInstrument,
+    ReleaseIntegrityError,
     ResearchDatasetRelease,
+    _safe_release_artifact,
+    _sha256_file,
+    _timestamp_available_at,
+    load_dataset_release,
 )
 from finboard_shared.models import Symbol
+from finboard_shared.types import AssetClass, BarPeriod, Market
 
 _EPS = 1e-12
 _TRADING_DAYS = 252
@@ -51,6 +65,57 @@ class RiskModelError(RuntimeError):
 
 class MarketInputError(RuntimeError):
     """跨市场输入缺失、过期或包含未来数据。"""
+
+
+@dataclass(frozen=True, slots=True)
+class _PriceFeatureProcessInstrument:
+    """进程 worker 所需的最小标的上下文,避免重复传递整个 release。"""
+
+    code: str
+    market: Market
+    asset_class: AssetClass
+    artifact_path: str
+    artifact_checksum: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PriceFeatureProcessTask:
+    """一个独立、可 pickle 的标的特征计算任务。"""
+
+    code: str
+    start: date
+    end: date
+    decision_at: datetime
+    momentum_lookback: int
+    volatility_windows: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PriceFeatureProcessContext:
+    release_dir: Path
+    source: str
+    source_version: str
+    period: BarPeriod
+    adjustment: str
+    verify_files: bool
+    instruments: dict[str, _PriceFeatureProcessInstrument]
+
+
+@dataclass(frozen=True, slots=True)
+class _PriceFeatureSnapshotAssembly:
+    """子进程中完成最终排序、PIT 校验和 checksum 的输入。"""
+
+    dataset_release_id: str
+    dataset_release_checksum: str
+    decision_at: datetime
+    code_version: str
+    observations: tuple[FeatureObservation, ...]
+    calculation_windows: dict[str, int]
+    transformations: dict[str, str]
+    neutralization: dict[str, tuple[str, ...]]
+
+
+_PRICE_FEATURE_PROCESS_CONTEXT: _PriceFeatureProcessContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -750,6 +815,338 @@ def build_cross_section_feature_snapshot(
     )
 
 
+def _build_price_observations(
+    *,
+    source: str,
+    source_version: str,
+    symbol: str,
+    market: Market,
+    asset_class: AssetClass,
+    points: list[PointInTimePrice],
+    momentum_lookback: int,
+    volatility_windows: tuple[int, ...],
+) -> list[FeatureObservation]:
+    """把单个标的的 PIT 收盘价转换为价格特征观测。"""
+
+    if not points:
+        return []
+    closes = np.asarray([float(item.close) for item in points], dtype=np.float64)
+    returns = np.diff(closes) / closes[:-1]
+    last = points[-1]
+
+    def _observation(feature_name: str, value: float) -> FeatureObservation:
+        return FeatureObservation(
+            symbol=symbol,
+            feature_name=feature_name,
+            value=value,
+            observed_at=last.timestamp,
+            available_at=last.available_at,
+            source=source,
+            source_version=source_version,
+            market=market.value,
+            asset_class=asset_class.value,
+        )
+
+    observations: list[FeatureObservation] = []
+    if len(closes) >= momentum_lookback + 1:
+        observations.append(
+            _observation(
+                "momentum",
+                float(closes[-1] / closes[-momentum_lookback - 1] - 1.0),
+            )
+        )
+    for window in volatility_windows:
+        if len(returns) >= window:
+            observations.append(
+                _observation(
+                    f"volatility_{window}d",
+                    float(np.std(returns[-window:], ddof=1)),
+                )
+            )
+    downside_window = min(60, len(returns))
+    if downside_window >= 10:
+        downside = returns[-downside_window:]
+        downside = downside[downside < 0]
+        if len(downside) >= 3:
+            observations.append(
+                _observation(
+                    "downside_volatility",
+                    float(np.std(downside, ddof=1)),
+                )
+            )
+    return observations
+
+
+def _init_price_feature_process(
+    release_dir: str,
+    release_id: str,
+    verify_files: bool,
+) -> None:
+    """初始化独立进程的只读研究上下文。"""
+
+    global _PRICE_FEATURE_PROCESS_CONTEXT
+    release = load_dataset_release(Path(release_dir))
+    if release.release_id != release_id:
+        raise RuntimeError("特征计算进程的 release_id 不一致")
+    if not release.is_usable:
+        raise RuntimeError(
+            f"特征计算进程的发布不可用: {release_id}"
+        )
+    _PRICE_FEATURE_PROCESS_CONTEXT = _PriceFeatureProcessContext(
+        release_dir=Path(release_dir),
+        source=release.source,
+        source_version=release.version,
+        period=release.period,
+        adjustment=release.adjustment,
+        verify_files=verify_files,
+        instruments={
+            item.code: _PriceFeatureProcessInstrument(
+                code=item.code,
+                market=item.market,
+                asset_class=item.asset_class,
+                artifact_path=item.artifact_path,
+                artifact_checksum=item.artifact_checksum,
+            )
+            for item in release.instruments
+        },
+    )
+
+
+def _compute_price_feature_process_task(
+    task: _PriceFeatureProcessTask,
+) -> tuple[str, list[FeatureObservation]]:
+    """在子进程中读取一个标的并完成全部价格特征计算。"""
+
+    context = _PRICE_FEATURE_PROCESS_CONTEXT
+    if context is None:
+        raise RuntimeError("特征计算进程未初始化")
+    item = context.instruments.get(task.code)
+    if item is None:
+        raise FactorAnalysisError(f"进程 worker 找不到标的: {task.code}")
+
+    artifact = _safe_release_artifact(context.release_dir, item.artifact_path)
+    if context.verify_files:
+        actual = _sha256_file(artifact)
+        if actual != item.artifact_checksum:
+            raise ReleaseIntegrityError(
+                f"{task.code} 文件校验和不一致: expected={item.artifact_checksum} "
+                f"actual={actual}"
+            )
+
+    symbol = Symbol(task.code, item.market)
+    if context.period is BarPeriod.D1:
+        raw_points = ParquetCache.read_close_points_sync(
+            artifact,
+            symbol,
+            context.period,
+            task.start,
+            task.end,
+        )
+        points = [
+            PointInTimePrice(
+                timestamp=timestamp,
+                close=close,
+                available_at=_timestamp_available_at(
+                    timestamp,
+                    context.period,
+                    item.market,
+                ),
+            )
+            for timestamp, close in raw_points
+        ]
+    else:
+        bars = ParquetCache.read_bars_sync(artifact, symbol, context.period)
+        points = [
+            PointInTimePrice(
+                timestamp=bar.timestamp,
+                close=bar.close,
+                available_at=_timestamp_available_at(
+                    bar.timestamp,
+                    context.period,
+                    item.market,
+                ),
+            )
+            for bar in bars
+            if task.start <= bar.timestamp.date() <= task.end
+        ]
+
+    points = [point for point in points if point.available_at <= task.decision_at]
+    observations = _build_price_observations(
+        source=context.source,
+        source_version=context.source_version,
+        symbol=item.code,
+        market=item.market,
+        asset_class=item.asset_class,
+        points=points,
+        momentum_lookback=task.momentum_lookback,
+        volatility_windows=task.volatility_windows,
+    )
+    return task.code, observations
+
+
+def _price_feature_process_warmup() -> None:
+    """让进程池完成 import/initializer 预热;不执行研究计算。"""
+
+
+def _assemble_price_feature_snapshot(
+    assembly: _PriceFeatureSnapshotAssembly,
+) -> FeatureSnapshot:
+    """在计算进程中完成最终快照构建,避免 API 进程执行大段 JSON/hash。"""
+
+    return build_feature_snapshot(
+        dataset_release_id=assembly.dataset_release_id,
+        dataset_release_checksum=assembly.dataset_release_checksum,
+        decision_at=assembly.decision_at,
+        code_version=assembly.code_version,
+        observations=assembly.observations,
+        calculation_windows=assembly.calculation_windows,
+        transformations=assembly.transformations,
+        neutralization=assembly.neutralization,
+    )
+
+
+def _create_price_feature_process_executor(
+    *,
+    worker_count: int,
+    provider: FrozenReleaseProvider,
+) -> tuple[ProcessPoolExecutor, tuple[Future[None], ...]]:
+    """创建并提交预热任务;调用方应在线程中执行本函数。"""
+
+    release = provider.release
+    executor = ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_init_price_feature_process,
+        initargs=(
+            str(provider.release_dir),
+            release.release_id,
+            provider.verify_files,
+        ),
+    )
+    warmups = tuple(
+        executor.submit(_price_feature_process_warmup)
+        for _ in range(worker_count)
+    )
+    return executor, warmups
+
+
+async def _build_price_feature_snapshot_in_processes(
+    *,
+    provider: FrozenReleaseProvider,
+    decision_at: datetime,
+    code_version: str,
+    momentum_lookback: int,
+    volatility_windows: tuple[int, ...],
+    process_workers: int,
+    on_progress: Callable[[str, int, int], None] | None,
+) -> FeatureSnapshot:
+    """使用独立 spawn 进程计算价格特征,不占用 API 进程的 GIL。"""
+
+    release = provider.release
+    total = len(release.instruments)
+    worker_count = min(process_workers, total)
+    tasks = asyncio.Queue[_PriceFeatureProcessTask]()
+    for item in release.instruments:
+        tasks.put_nowait(
+            _PriceFeatureProcessTask(
+                code=item.code,
+                start=release.start_date,
+                end=min(decision_at.date(), release.end_date),
+                decision_at=decision_at,
+                momentum_lookback=momentum_lookback,
+                volatility_windows=volatility_windows,
+            )
+        )
+
+    executor, warmups = await asyncio.to_thread(
+        _create_price_feature_process_executor,
+        worker_count=worker_count,
+        provider=provider,
+    )
+    loop = asyncio.get_running_loop()
+    observations_by_symbol: dict[str, list[FeatureObservation]] = {}
+    done_count = 0
+
+    async def _worker() -> None:
+        nonlocal done_count
+        while True:
+            try:
+                task = tasks.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            code, observations = await loop.run_in_executor(
+                executor,
+                _compute_price_feature_process_task,
+                task,
+            )
+            observations_by_symbol[code] = observations
+            done_count += 1
+            if on_progress is not None:
+                on_progress(code, done_count, total)
+
+    workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
+    snapshot: FeatureSnapshot | None = None
+    try:
+        try:
+            await asyncio.gather(
+                *(asyncio.wrap_future(warmup) for warmup in warmups)
+            )
+            await asyncio.gather(*workers)
+        except BaseException:
+            for worker in workers:
+                if not worker.done():
+                    worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            raise
+
+        observations = [
+            observation
+            for instrument in release.instruments
+            for observation in observations_by_symbol[instrument.code]
+        ]
+        if not observations:
+            raise FactorAnalysisError("冻结发布在决策时点没有足够数据计算价格特征")
+        windows = {"momentum": momentum_lookback, "downside_volatility": 60}
+        windows.update(
+            {f"volatility_{window}d": window for window in volatility_windows}
+        )
+        feature_names = {item.feature_name for item in observations}
+        assembly = _PriceFeatureSnapshotAssembly(
+            dataset_release_id=release.release_id,
+            dataset_release_checksum=release.release_checksum,
+            decision_at=decision_at,
+            code_version=code_version,
+            observations=tuple(observations),
+            calculation_windows={
+                name: window
+                for name, window in windows.items()
+                if name in feature_names
+            },
+            transformations={
+                name: get_factor_definition(name).default_transform
+                for name in feature_names
+            },
+            neutralization={
+                name: get_factor_definition(name).default_neutralization
+                for name in feature_names
+            },
+        )
+        snapshot = await loop.run_in_executor(
+            executor,
+            _assemble_price_feature_snapshot,
+            assembly,
+        )
+    finally:
+        # shutdown 是同步 API,放到线程中避免应用关闭/任务失败时再次卡住事件循环。
+        await asyncio.to_thread(
+            executor.shutdown,
+            wait=True,
+            cancel_futures=True,
+        )
+    assert snapshot is not None
+    return snapshot
+
+
 async def build_price_feature_snapshot(
     *,
     provider: FrozenReleaseProvider,
@@ -757,70 +1154,89 @@ async def build_price_feature_snapshot(
     code_version: str,
     momentum_lookback: int = 20,
     volatility_windows: tuple[int, ...] = (20, 60, 120),
+    max_concurrency: int = 8,
+    process_workers: int = 0,
+    on_progress: Callable[[str, int, int], None] | None = None,
 ) -> FeatureSnapshot:
-    """从 #77 冻结发布构建 ETF/多资产价格特征快照。"""
+    """从 #77 冻结发布构建 ETF/多资产价格特征快照。
+
+    每个标的只返回价格特征所需的轻量数据,跨标的读取使用有界 worker;
+    ``process_workers`` 大于 0 时使用独立 spawn 进程,避免大量 Parquet
+    解码和 Decimal 转换阻塞 API 进程;结果仍按冻结发布顺序汇总。
+    """
 
     _require_aware(decision_at, "decision_at")
+    if max_concurrency < 1:
+        raise ValueError("max_concurrency 必须 >= 1")
+    if process_workers < 0:
+        raise ValueError("process_workers 必须 >= 0")
     release = provider.release
     end = min(decision_at.date(), release.end_date)
-    observations: list[FeatureObservation] = []
-    for instrument in release.instruments:
-        point_in_time = await provider.fetch_point_in_time_bars(
-            Symbol(instrument.code, instrument.market),
-            release.period,
-            release.start_date,
-            end,
+    total = len(release.instruments)
+    if total == 0:
+        raise FactorAnalysisError("冻结发布没有可计算的标的")
+    if process_workers > 0:
+        return await _build_price_feature_snapshot_in_processes(
+            provider=provider,
             decision_at=decision_at,
-            adjust=release.adjustment,
+            code_version=code_version,
+            momentum_lookback=momentum_lookback,
+            volatility_windows=volatility_windows,
+            process_workers=process_workers,
+            on_progress=on_progress,
         )
-        if not point_in_time:
-            continue
-        closes = np.asarray(
-            [float(item.bar.close) for item in point_in_time],
-            dtype=np.float64,
-        )
-        returns = np.diff(closes) / closes[:-1]
-        last = point_in_time[-1]
-        common = {
-            "symbol": instrument.code,
-            "observed_at": last.bar.timestamp,
-            "available_at": last.available_at,
-            "source": release.source,
-            "source_version": release.version,
-            "market": instrument.market.value,
-            "asset_class": instrument.asset_class.value,
-        }
-        if len(closes) >= momentum_lookback + 1:
-            observations.append(
-                FeatureObservation(
-                    feature_name="momentum",
-                    value=float(
-                        closes[-1] / closes[-momentum_lookback - 1] - 1.0
-                    ),
-                    **common,  # type: ignore[arg-type]
-                )
+
+    queue: asyncio.Queue[ReleasedInstrument] = asyncio.Queue()
+    for instrument in release.instruments:
+        queue.put_nowait(instrument)
+    observations_by_symbol: dict[str, list[FeatureObservation]] = {}
+    done_count = 0
+
+    async def _worker() -> None:
+        nonlocal done_count
+        while True:
+            try:
+                instrument = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            points = await provider.fetch_point_in_time_prices(
+                Symbol(instrument.code, instrument.market),
+                release.period,
+                release.start_date,
+                end,
+                decision_at=decision_at,
+                adjust=release.adjustment,
             )
-        for window in volatility_windows:
-            if len(returns) >= window:
-                observations.append(
-                    FeatureObservation(
-                        feature_name=f"volatility_{window}d",
-                        value=float(np.std(returns[-window:], ddof=1)),
-                        **common,  # type: ignore[arg-type]
-                    )
-                )
-        downside_window = min(60, len(returns))
-        if downside_window >= 10:
-            downside = returns[-downside_window:]
-            downside = downside[downside < 0]
-            if len(downside) >= 3:
-                observations.append(
-                    FeatureObservation(
-                        feature_name="downside_volatility",
-                        value=float(np.std(downside, ddof=1)),
-                        **common,  # type: ignore[arg-type]
-                    )
-                )
+            observations_by_symbol[instrument.code] = _build_price_observations(
+                source=release.source,
+                source_version=release.version,
+                symbol=instrument.code,
+                market=instrument.market,
+                asset_class=instrument.asset_class,
+                points=points,
+                momentum_lookback=momentum_lookback,
+                volatility_windows=volatility_windows,
+            )
+            done_count += 1
+            if on_progress is not None:
+                on_progress(instrument.code, done_count, total)
+
+    worker_count = min(max_concurrency, total)
+    workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
+    try:
+        await asyncio.gather(*workers)
+    except BaseException:
+        for worker in workers:
+            if not worker.done():
+                worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
+
+    observations = [
+        observation
+        for instrument in release.instruments
+        for observation in observations_by_symbol[instrument.code]
+    ]
     if not observations:
         raise FactorAnalysisError("冻结发布在决策时点没有足够数据计算价格特征")
     windows = {"momentum": momentum_lookback, "downside_volatility": 60}

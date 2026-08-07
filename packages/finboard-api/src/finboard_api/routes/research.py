@@ -22,10 +22,15 @@ from datetime import UTC, datetime
 from datetime import date as _date
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
+from finboard_api.feature_snapshot_jobs import (
+    FeatureSnapshotJob,
+    FeatureSnapshotJobConflictError,
+    FeatureSnapshotJobManager,
+)
 from finboard_api.schemas import (
     AcceptanceThresholdsSchema,
     ExperimentCreate,
@@ -37,6 +42,7 @@ from finboard_api.schemas import (
     FactorExperimentOut,
     FactorSignalOut,
     FeatureSnapshotCreate,
+    FeatureSnapshotJobStatusOut,
     FeatureSnapshotOut,
     RobustnessPlanSchema,
     TrialCreate,
@@ -68,7 +74,11 @@ from finboard_data.factor_lab import (
     factor_lab_catalog,
     new_factor_experiment,
 )
-from finboard_data.releases import DatasetReleaseError, FrozenReleaseProvider
+from finboard_data.releases import (
+    DatasetReleaseError,
+    FrozenReleaseProvider,
+    ResearchDatasetRelease,
+)
 from finboard_persistence.dataset_release_repo import (
     ResearchDatasetReleaseRepository,
 )
@@ -113,6 +123,52 @@ def _factor_code_version() -> str:
         text=True,
     )
     return f"{value}-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else value
+
+
+def _feature_snapshot_max_concurrency(request: Request) -> int:
+    settings = getattr(request.app.state, "settings", None)
+    configured = getattr(settings, "feature_snapshot_max_concurrency", 8)
+    return max(1, min(64, int(configured)))
+
+
+def _feature_snapshot_process_workers(request: Request) -> int:
+    settings = getattr(request.app.state, "settings", None)
+    configured = getattr(settings, "feature_snapshot_process_workers", 8)
+    return max(0, min(64, int(configured)))
+
+
+async def _load_feature_snapshot_input(
+    body: FeatureSnapshotCreate,
+    session: AsyncSession,
+) -> tuple[ResearchDatasetRelease, datetime]:
+    """校验发布与决策时点,供同步和后台入口共用。"""
+
+    release_repo = ResearchDatasetReleaseRepository(session)
+    try:
+        release = await release_repo.require_usable(body.dataset_release_id)
+    except (ValueError, DatasetReleaseError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    decision_at = body.decision_at.astimezone(UTC)
+    if not release.start_date <= decision_at.date() <= release.end_date:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"decision_at 日期必须在数据发布范围内: "
+                f"{release.start_date}~{release.end_date}"
+            ),
+        )
+    if decision_at > datetime.now(UTC):
+        raise HTTPException(status_code=422, detail="decision_at 不能晚于当前时间")
+    return release, decision_at
+
+
+def _get_feature_snapshot_job_manager(request: Request) -> FeatureSnapshotJobManager:
+    manager = getattr(request.app.state, "feature_snapshot_jobs", None)
+    if manager is None:
+        manager = FeatureSnapshotJobManager()
+        request.app.state.feature_snapshot_jobs = manager
+    return manager
 
 
 def _to_plan(p: ValidationPlanSchema) -> ValidationPlan:
@@ -329,6 +385,7 @@ async def get_factor_catalog(
 )
 async def create_feature_snapshot(
     body: FeatureSnapshotCreate,
+    request: Request,
     session: AsyncSession = Depends(get_db_session),
 ) -> FeatureSnapshotOut:
     """从冻结数据发布显式生成并发布价格特征快照。
@@ -337,23 +394,9 @@ async def create_feature_snapshot(
     不启动回测、模拟盘或任何实盘动作。
     """
 
-    release_repo = ResearchDatasetReleaseRepository(session)
-    try:
-        release = await release_repo.require_usable(body.dataset_release_id)
-    except (ValueError, DatasetReleaseError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    decision_at = body.decision_at.astimezone(UTC)
-    if not release.start_date <= decision_at.date() <= release.end_date:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"decision_at 日期必须在数据发布范围内: "
-                f"{release.start_date}~{release.end_date}"
-            ),
-        )
-    if decision_at > datetime.now(UTC):
-        raise HTTPException(status_code=422, detail="decision_at 不能晚于当前时间")
+    release, decision_at = await _load_feature_snapshot_input(body, session)
+    max_concurrency = _feature_snapshot_max_concurrency(request)
+    process_workers = _feature_snapshot_process_workers(request)
 
     release_root = Path(
         os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT)
@@ -362,11 +405,14 @@ async def create_feature_snapshot(
         provider = FrozenReleaseProvider(
             release_root=release_root,
             release_id=release.release_id,
+            max_concurrency=max_concurrency,
         )
         snapshot = await build_price_feature_snapshot(
             provider=provider,
             decision_at=decision_at,
             code_version=_factor_code_version(),
+            max_concurrency=max_concurrency,
+            process_workers=process_workers,
         )
         await FeatureSnapshotRepository(session).publish(snapshot)
         await session.commit()
@@ -391,6 +437,104 @@ async def create_feature_snapshot(
         raise
 
     return FeatureSnapshotOut.model_validate(snapshot.as_dict())
+
+
+@router.post(
+    "/factors/features/jobs",
+    response_model=FeatureSnapshotJobStatusOut,
+    status_code=202,
+)
+async def start_feature_snapshot_job(
+    body: FeatureSnapshotCreate,
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+) -> FeatureSnapshotJobStatusOut:
+    """异步启动特征快照计算,返回可轮询的研究任务状态。"""
+
+    release, decision_at = await _load_feature_snapshot_input(body, session)
+    manager = _get_feature_snapshot_job_manager(request)
+    max_concurrency = _feature_snapshot_max_concurrency(request)
+    process_workers = _feature_snapshot_process_workers(request)
+    release_root = Path(
+        os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT)
+    )
+
+    async def _run(job: FeatureSnapshotJob) -> str:
+        try:
+            provider = FrozenReleaseProvider(
+                release_root=release_root,
+                release_id=release.release_id,
+                max_concurrency=max_concurrency,
+            )
+            snapshot = await build_price_feature_snapshot(
+                provider=provider,
+                decision_at=decision_at,
+                code_version=_factor_code_version(),
+                max_concurrency=max_concurrency,
+                process_workers=process_workers,
+                on_progress=lambda _code, completed, _total: job.update_progress(
+                    completed
+                ),
+            )
+            session_maker = getattr(request.app.state, "session_maker", None)
+            if session_maker is None:
+                raise RuntimeError("研究任务数据库会话未初始化")
+            async with session_maker() as job_session:
+                try:
+                    await FeatureSnapshotRepository(job_session).publish(snapshot)
+                    await job_session.commit()
+                except Exception:
+                    await job_session.rollback()
+                    raise
+            return snapshot.snapshot_id
+        except (DatasetReleaseError, FactorAnalysisError, ValueError) as exc:
+            raise RuntimeError(f"特征快照生成失败: {exc}") from exc
+        except OSError as exc:
+            logger.exception(
+                "research.feature_snapshot_job_release_read_failed",
+                extra={
+                    "job_id": job.job_id,
+                    "release_id": release.release_id,
+                    "release_root": str(release_root),
+                },
+            )
+            raise RuntimeError(
+                "特征快照生成失败: 服务端无法读取冻结发布文件,"
+                "请检查 FINBOARD_DATA_RELEASE_ROOT 目录和文件权限"
+            ) from exc
+        except Exception as exc:
+            logger.exception(
+                "research.feature_snapshot_job_unexpected_error",
+                extra={"job_id": job.job_id, "release_id": release.release_id},
+            )
+            raise RuntimeError("特征快照生成失败: 服务端内部错误") from exc
+
+    try:
+        job = manager.start(
+            total_symbols=len(release.instruments),
+            runner=_run,
+        )
+    except FeatureSnapshotJobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return FeatureSnapshotJobStatusOut.model_validate(job.as_dict())
+
+
+@router.get(
+    "/factors/features/jobs/{job_id}",
+    response_model=FeatureSnapshotJobStatusOut,
+)
+async def get_feature_snapshot_job(
+    job_id: str,
+    request: Request,
+) -> FeatureSnapshotJobStatusOut:
+    """返回特征快照后台任务最新进度。"""
+
+    job = _get_feature_snapshot_job_manager(request).get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="feature snapshot job not found")
+    return FeatureSnapshotJobStatusOut.model_validate(job.as_dict())
 
 
 @router.get(

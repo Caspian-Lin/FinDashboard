@@ -141,6 +141,7 @@ async def test_frozen_release_to_feature_snapshot_has_no_future_data(
         datetime.min.time(),
         tzinfo=UTC,
     ) + timedelta(hours=8)
+    parallel_progress: list[tuple[str, int, int]] = []
     snapshot = await build_price_feature_snapshot(
         provider=FrozenReleaseProvider(
             release_root=release_root,
@@ -150,6 +151,32 @@ async def test_frozen_release_to_feature_snapshot_has_no_future_data(
         code_version="deadbeef",
         momentum_lookback=20,
         volatility_windows=(20,),
+        max_concurrency=2,
+        on_progress=lambda code, done, total: parallel_progress.append(
+            (code, done, total)
+        ),
+    )
+    serial_snapshot = await build_price_feature_snapshot(
+        provider=FrozenReleaseProvider(
+            release_root=release_root,
+            release_id=release.release_id,
+        ),
+        decision_at=decision_at,
+        code_version="deadbeef",
+        momentum_lookback=20,
+        volatility_windows=(20,),
+        max_concurrency=1,
+    )
+    process_snapshot = await build_price_feature_snapshot(
+        provider=FrozenReleaseProvider(
+            release_root=release_root,
+            release_id=release.release_id,
+        ),
+        decision_at=decision_at,
+        code_version="deadbeef",
+        momentum_lookback=20,
+        volatility_windows=(20,),
+        process_workers=1,
     )
     assert snapshot.dataset_release_id == release.release_id
     assert snapshot.dataset_release_checksum == release.release_checksum
@@ -165,3 +192,11 @@ async def test_frozen_release_to_feature_snapshot_has_no_future_data(
         item.available_at <= snapshot.decision_at
         for item in snapshot.observations
     )
+    assert {item[0] for item in parallel_progress} == {
+        instrument.code for instrument in instruments
+    }
+    assert {item[1] for item in parallel_progress} == {1, 2}
+    assert all(item[2] == len(instruments) for item in parallel_progress)
+    assert snapshot.observations == serial_snapshot.observations
+    assert snapshot.observations == process_snapshot.observations
+    assert snapshot.calculation_windows == serial_snapshot.calculation_windows

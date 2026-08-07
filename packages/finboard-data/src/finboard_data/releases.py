@@ -840,6 +840,15 @@ class PointInTimeBar:
     available_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class PointInTimePrice:
+    """价格特征计算所需的轻量 PIT 收盘价视图。"""
+
+    timestamp: datetime
+    close: Decimal
+    available_at: datetime
+
+
 class FrozenDatasetReleaseBuilder:
     """把可变 Parquet 缓存原子冻结为不可变研究发布。"""
 
@@ -1162,7 +1171,10 @@ class FrozenReleaseProvider:
         release_root: str | Path,
         release_id: str,
         verify_files: bool = True,
+        max_concurrency: int = 8,
     ) -> None:
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency 必须 >= 1")
         self._release_dir = Path(release_root).resolve() / release_id
         self._release = load_dataset_release(self._release_dir)
         if self._release.release_id != release_id:
@@ -1173,10 +1185,26 @@ class FrozenReleaseProvider:
             )
         self._verified: set[str] = set()
         self._verify_files = verify_files
+        self._cache = ParquetCache(
+            self._release_dir / "bars",
+            max_io_concurrency=max_concurrency,
+        )
 
     @property
     def release(self) -> ResearchDatasetRelease:
         return self._release
+
+    @property
+    def release_dir(self) -> Path:
+        """返回已通过 manifest 校验的冻结发布目录。"""
+
+        return self._release_dir
+
+    @property
+    def verify_files(self) -> bool:
+        """是否要求读取前校验逐文件 checksum。"""
+
+        return self._verify_files
 
     async def fetch_bars(
         self,
@@ -1187,6 +1215,19 @@ class FrozenReleaseProvider:
         *,
         adjust: str = "qfq",
     ) -> list[Bar]:
+        item = self._validate_fetch_request(symbol, period, start, end, adjust)
+        await self._verified_artifact(item)
+        bars = await self._cache.read(symbol, period, adjust)
+        return ParquetCache.filter_by_date(bars, start, end)
+
+    def _validate_fetch_request(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+        adjust: str,
+    ) -> ReleasedInstrument:
         if period is not self._release.period:
             raise ReleaseCapabilityError(
                 f"发布周期为 {self._release.period.value},请求 {period.value}"
@@ -1203,6 +1244,9 @@ class FrozenReleaseProvider:
             raise ReleaseCapabilityError(
                 f"{symbol.code} 市场应为 {item.market.value},请求 {symbol.market.value}"
             )
+        return item
+
+    async def _verified_artifact(self, item: ReleasedInstrument) -> Path:
         artifact = _safe_release_artifact(self._release_dir, item.artifact_path)
         if self._verify_files and item.code not in self._verified:
             actual = await asyncio.to_thread(_sha256_file, artifact)
@@ -1212,9 +1256,7 @@ class FrozenReleaseProvider:
                     f"{item.artifact_checksum} actual={actual}"
                 )
             self._verified.add(item.code)
-        cache = ParquetCache(artifact.parent)
-        bars = await cache.read(symbol, period, adjust)
-        return ParquetCache.filter_by_date(bars, start, end)
+        return artifact
 
     async def fetch_point_in_time_bars(
         self,
@@ -1250,6 +1292,65 @@ class FrozenReleaseProvider:
             for bar in bars
         ]
         return [item for item in result if item.available_at <= decision_at]
+
+    async def fetch_point_in_time_prices(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+        *,
+        decision_at: datetime,
+        adjust: str = "qfq",
+    ) -> list[PointInTimePrice]:
+        """读取价格特征所需的轻量 PIT 视图。
+
+        日线只解码 Parquet 的 ``timestamp``/``close`` 两列;其它周期回退到
+        通用 Bar 读取,保持原有 PIT 语义。
+        """
+
+        if decision_at.tzinfo is None:
+            raise ValueError("decision_at 必须带时区")
+        item = self._validate_fetch_request(symbol, period, start, end, adjust)
+        if period is BarPeriod.D1:
+            await self._verified_artifact(item)
+            points = await self._cache.read_close_points(
+                symbol,
+                period,
+                adjust,
+                start=start,
+                end=end,
+            )
+            result = [
+                PointInTimePrice(
+                    timestamp=timestamp,
+                    close=close,
+                    available_at=_timestamp_available_at(
+                        timestamp,
+                        period,
+                        item,
+                    ),
+                )
+                for timestamp, close in points
+            ]
+            return [point for point in result if point.available_at <= decision_at]
+
+        bars = await self.fetch_point_in_time_bars(
+            symbol,
+            period,
+            start,
+            end,
+            decision_at=decision_at,
+            adjust=adjust,
+        )
+        return [
+            PointInTimePrice(
+                timestamp=point.bar.timestamp,
+                close=point.bar.close,
+                available_at=point.available_at,
+            )
+            for point in bars
+        ]
 
 
 def load_dataset_release(release_dir: str | Path) -> ResearchDatasetRelease:
@@ -1460,22 +1561,31 @@ def _covered_trading_dates(
 
 
 def _bar_available_at(bar: Bar, instrument: ReleasedInstrument) -> datetime:
-    if bar.period is not BarPeriod.D1:
-        if bar.timestamp.tzinfo is None:
+    return _timestamp_available_at(bar.timestamp, bar.period, instrument)
+
+
+def _timestamp_available_at(
+    timestamp: datetime,
+    period: BarPeriod,
+    instrument: ReleasedInstrument | Market,
+) -> datetime:
+    market = instrument.market if isinstance(instrument, ReleasedInstrument) else instrument
+    if period is not BarPeriod.D1:
+        if timestamp.tzinfo is None:
             raise ReleaseIntegrityError("冻结 Bar timestamp 必须带时区")
-        return bar.timestamp
-    if instrument.market in (Market.A_SHARE, Market.FUTURE):
+        return timestamp
+    if market in (Market.A_SHARE, Market.FUTURE):
         local_time = time(15, 30)
         timezone = ZoneInfo("Asia/Shanghai")
-    elif instrument.market is Market.HK:
+    elif market is Market.HK:
         local_time = time(16, 30)
         timezone = ZoneInfo("Asia/Hong_Kong")
-    elif instrument.market is Market.US:
+    elif market is Market.US:
         local_time = time(16, 30)
         timezone = ZoneInfo("America/New_York")
     else:  # pragma: no cover - Market 是封闭枚举
-        raise ReleaseCapabilityError(f"没有 {instrument.market.value} 的日线 available_at 规则")
-    return datetime.combine(bar.timestamp.date(), local_time, tzinfo=timezone).astimezone(UTC)
+        raise ReleaseCapabilityError(f"没有 {market.value} 的日线 available_at 规则")
+    return datetime.combine(timestamp.date(), local_time, tzinfo=timezone).astimezone(UTC)
 
 
 def _weekdays(start: date, end: date) -> set[date]:
@@ -1689,6 +1799,7 @@ __all__ = [
     "FrozenReleaseProvider",
     "ImmutableReleaseError",
     "PointInTimeBar",
+    "PointInTimePrice",
     "ReleaseCapabilityError",
     "ReleaseInstrumentSpec",
     "ReleaseIntegrityError",

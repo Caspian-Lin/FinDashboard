@@ -59,12 +59,14 @@ import {
   WorkflowIndicator,
   NextStepCTA,
 } from "@/components/research/ResearchHint";
+import { FeatureSnapshotProgress } from "@/components/research/FeatureSnapshotProgress";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
 import {
   factorLabApi,
   datasetApi,
   type FactorCatalogEntry,
   type FeatureSnapshot,
+  type FeatureSnapshotJobStatus,
   type FactorSignal,
   type FactorExperiment,
   type FactorExperimentCreate,
@@ -368,6 +370,8 @@ function GenerateFeatureSnapshotDialog({
 }) {
   const [releaseId, setReleaseId] = React.useState("");
   const [decisionDate, setDecisionDate] = React.useState("");
+  const [jobId, setJobId] = React.useState<string | null>(null);
+  const handledSnapshotId = React.useRef<string | null>(null);
   const releasesQuery = useQuery({
     queryKey: ["dataset-releases", "feature-snapshot-generator"],
     queryFn: () => datasetApi.releases({ limit: 100 }),
@@ -379,22 +383,59 @@ function GenerateFeatureSnapshotDialog({
       if (!releaseId || !decisionDate) {
         throw new Error("请选择数据发布和决策日");
       }
-      return factorLabApi.createFeatureSnapshot({
+      return factorLabApi.startFeatureSnapshotJob({
         dataset_release_id: releaseId,
         decision_at: `${decisionDate}T23:59:59+08:00`,
       });
     },
-    onSuccess: (snapshot) => {
-      onGenerated(snapshot);
-      onOpenChange(false);
+    onSuccess: (job) => setJobId(job.job_id),
+  });
+  const jobQuery = useQuery<FeatureSnapshotJobStatus>({
+    queryKey: ["feature-snapshot-job", jobId],
+    queryFn: () => factorLabApi.featureSnapshotJob(jobId as string),
+    enabled: Boolean(jobId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return !status || status === "queued" || status === "running"
+        ? 1000
+        : false;
     },
   });
+  const completedSnapshotId =
+    jobQuery.data?.status === "succeeded"
+      ? jobQuery.data.snapshot_id
+      : null;
+  const snapshotQuery = useQuery({
+    queryKey: ["feature-snapshot-detail", completedSnapshotId],
+    queryFn: () => factorLabApi.featureDetail(completedSnapshotId as string),
+    enabled: Boolean(completedSnapshotId),
+  });
+  const jobActive =
+    Boolean(jobId) &&
+    (!jobQuery.data ||
+      jobQuery.data.status === "queued" ||
+      jobQuery.data.status === "running");
+  const busy = mutation.isPending || jobActive;
+
+  React.useEffect(() => {
+    if (
+      snapshotQuery.data &&
+      handledSnapshotId.current !== snapshotQuery.data.snapshot_id
+    ) {
+      handledSnapshotId.current = snapshotQuery.data.snapshot_id;
+      onGenerated(snapshotQuery.data);
+      onOpenChange(false);
+    }
+  }, [onGenerated, onOpenChange, snapshotQuery.data]);
+
   const resetMutation = mutation.reset;
 
   React.useEffect(() => {
     if (!open) {
       setReleaseId("");
       setDecisionDate("");
+      setJobId(null);
+      handledSnapshotId.current = null;
       resetMutation();
       return;
     }
@@ -413,7 +454,13 @@ function GenerateFeatureSnapshotDialog({
     decisionDate <= selectedRelease.end_date;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && busy) return;
+        onOpenChange(nextOpen);
+      }}
+    >
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>生成特征快照</DialogTitle>
@@ -495,13 +542,20 @@ function GenerateFeatureSnapshotDialog({
             <AlertDescription>{errorMessage(mutation.error, "请检查数据发布和历史数据覆盖")}</AlertDescription>
           </Alert>
         )}
+        {jobQuery.isError && (
+          <Alert variant="destructive">
+            <AlertTitle>进度查询失败</AlertTitle>
+            <AlertDescription>{errorMessage(jobQuery.error, "暂时无法读取任务状态")}</AlertDescription>
+          </Alert>
+        )}
+        {jobQuery.data && <FeatureSnapshotProgress job={jobQuery.data} />}
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={mutation.isPending}>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
             取消
           </Button>
-          <Button onClick={() => mutation.mutate()} disabled={!valid || mutation.isPending}>
+          <Button onClick={() => mutation.mutate()} disabled={!valid || busy}>
             <Sparkles className="mr-2 h-4 w-4" />
-            {mutation.isPending ? "计算并发布中…" : "计算并发布快照"}
+            {busy ? "计算并发布中…" : "计算并发布快照"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -17,6 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from finboard_api.errors import finboard_error_handler
+from finboard_api.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_api.routes import (
     account_router,
     ai_research_router,
@@ -128,6 +129,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             yield
         finally:
             await _cancel_bulk_download_task(app)
+            feature_snapshot_jobs = getattr(app.state, "feature_snapshot_jobs", None)
+            if isinstance(feature_snapshot_jobs, FeatureSnapshotJobManager):
+                await feature_snapshot_jobs.close()
             teardown_event_bridge(kernel.event_bus, handlers)
             await kernel.stop()
             await session.commit()
@@ -151,6 +155,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.state.settings = settings
+    app.state.feature_snapshot_jobs = FeatureSnapshotJobManager()
 
     # CORS — 开发期允许前端 dev server 跨域
     app.add_middleware(

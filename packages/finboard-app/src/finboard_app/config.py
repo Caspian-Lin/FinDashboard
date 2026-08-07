@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     tushare_requests_per_minute: int = 200
     tushare_daily_request_limit: int = 100_000
     tushare_usage_file: str = "data_cache/tushare_usage.json"
+    # 研究特征快照的跨标的读取并发;不影响实盘交易线程。
+    feature_snapshot_max_concurrency: int = Field(default=8, ge=1, le=64)
+    # 特征快照使用的独立计算进程数;0 表示只使用旧的进程内 worker。
+    feature_snapshot_process_workers: int = Field(default=8, ge=0, le=64)
 
     # ---- Broker ----
     broker: BrokerKind = BrokerKind.MOCK
