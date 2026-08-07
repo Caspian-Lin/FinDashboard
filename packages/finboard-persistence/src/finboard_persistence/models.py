@@ -1970,3 +1970,52 @@ class AgentEventModel(Base, IdMixin):
         UniqueConstraint("conversation_id", "event_seq", name="uq_agent_event_conv_seq"),
         Index("ix_agent_event_conv_type_seq", "conversation_id", "event_type", "event_seq"),
     )
+
+
+class ResearchMemoryModel(Base, IdMixin):
+    """研究长期记忆 / 研究笔记持久化(issue #110)。
+
+    让 OpenCode 研究 Agent 跨会话积累结构化研究上下文,记忆通过
+    ``source_refs`` 关联数据集 / 策略 / 实验 / ResearchRun / Simulation 产物。
+
+    生命周期:``active`` → ``forgotten``(软删除)/ ``archived``(归档);
+    ``correct`` 创建新 active 记忆并经 ``supersedes_id`` 链接被纠正的旧记忆。
+
+    红线:不写入实盘 orders/fills/positions/audit_logs;``source_refs`` 只是
+    引用,不修改被引用产物本身。
+    """
+
+    __tablename__ = "research_memories"
+
+    memory_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    memory_type: Mapped[str] = mapped_column(String(24), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    source_refs: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_by: Mapped[str] = mapped_column(String(128))
+    conversation_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+    confirmed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    supersedes_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_research_memory_status_type_created",
+            "status",
+            "memory_type",
+            "created_at",
+        ),
+    )
