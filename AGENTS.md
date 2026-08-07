@@ -42,6 +42,7 @@ LLM（包括本 agent 自身）**不允许**：直接连接实盘账户、直接
 `ResearchAssistant`（`packages/finboard-backtest/src/finboard_backtest/factor_research/assistant.py`）是 AI 助手的唯一入口，强制权限矩阵（`assert_research_only_request`）拒绝下单/撤单/持仓校准/Kill Switch/凭证探测/启动回测等越权请求与提示词注入。AI 输出统一为受白名单/schema 约束的结构化对象（`FactorHypothesis` / `StrategyDraftPayload` / `StrategyDiffPayload` / `AnswerResult`），并以 `DraftArtifact` 形式持久化，显示来源（`Provenance`：provider/model_version/prompt_version）、不确定性和审批状态（`DraftStatus`：proposed→approved→consumed/rejected）。金融问答必须引用项目来源，数据不足时明确声明，不编造。API 端点在 `/api/research/ai`（假设审批/实验登记/AI 草案/问答/审计），不提供 Python 编辑或执行入口。
 
 - **FinBoard MCP Server 边界（#108，OpenCode 外置研究 Agent）**：`finboard-mcp` 包把研究能力以受控 MCP 工具形式暴露给外置 Agent 运行时（OpenCode），FinDashboard 仍是唯一事实来源。MCP 工具复用现有 service/repository/`ResearchAssistant`，不直接连接数据库做裸 SQL。权限矩阵：只读工具（数据/因子/ResearchRun/模拟盘查询/AI 问答）自动允许；写操作（创建 ResearchRun/回测/模拟盘/定时任务）走「草案+人工审批」，AI 无法自主执行；实盘能力（下单/撤单/改持仓/Kill Switch/连接 broker/凭证探测）**永久不注册**为工具。每次工具调用统一记录审计事件（structlog 结构化日志 + 内存副本），不记录 API Key/原始凭证/未脱敏思考内容，入参经 `sanitize_prompt` 脱敏。工具返回统一信封 `ToolEnvelope`（operation_id/status/data/error/provenance/idempotency_key）。回滚方案：关闭 MCP 入口（不启动 server）即可，不影响现有 ResearchAssistant/REST 入口与研究产物/审计。OpenCode 接入（#109）、Skill 与记忆（#110）、前端增强（#111）为后续 sub-issue。
+- **OpenCode 研究运行时边界（#109）**：`finboard-opencode` 包把 OpenCode（`opencode serve`）作为受控研究 Agent 运行时接入 FinDashboard。会话关联（`conversation_id` ↔ OpenCode `session_id` ↔ 可选 `agent_run_id`）、SSE durable 事件订阅（`/api/session/:id/event?after=seq` 断线续传）、关键事件投影持久化（`agent_conversations` / `agent_events` 独立表，不写实盘 `orders`/`fills`/`positions`/`audit_logs`）与中断/中止/孤儿恢复均由 `ConversationService` 编排。token 级增量不落库，只推进 `last_event_seq` 游标；完整历史回放走 OpenCode `/api/session/:id/history`。`finboard-researcher` agent 在 `.opencode/agent/` 定义，`permission` 默认拒绝内置 `bash`/`edit`/`write` 工具，只通过 `finboard.*` MCP 工具访问研究能力。OpenCode 运行时**不连接**实盘 broker/账户/订单/持仓/Kill Switch；`opencode_enabled` 默认关闭，回滚方案为关闭入口回到现有 ResearchAssistant/REST 入口。
 
 ## Git 工作流
 
@@ -135,4 +136,5 @@ packages/
   finboard-app/         — 组装根 / CLI / 配置
   finboard-api/         — FastAPI REST + WebSocket API（人工交易控制台后端）
   finboard-mcp/         — FinBoard MCP Server（向 OpenCode 等外置 Agent 暴露受控研究工具，issue #108）
+  finboard-opencode/    — OpenCode 研究运行时集成（会话关联/SSE 事件/中断恢复，issue #109）
 ```

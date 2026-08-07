@@ -385,6 +385,60 @@ Broker Adapter (QMT / CTP / Mock)
 
 ---
 
+## OpenCode 研究运行时(issue #108 / #109)
+
+FinBoard 把 [OpenCode](https://opencode.ai) 作为受控研究 Agent 运行时,通过
+`finboard-mcp` 受控工具层访问研究能力。OpenCode 是**只读研究**入口,不连接实盘
+broker / 账户 / 订单 / 持仓 / Kill Switch。
+
+### 架构
+
+```
+研究用户
+  ↓
+opencode serve (HTTP + SSE)
+  ↓ finboard-researcher agent (内置 bash/edit/write 默认拒绝)
+finboard-mcp (受控 MCP 工具,只读自动允许 / 写操作走审批)
+  ↓
+FinDashboard service / repository (唯一事实来源)
+```
+
+### 启动与接入
+
+1. **固定版本**:OpenCode 通过官方安装脚本安装,建议固定到受支持版本。
+
+2. **配置已内置**:项目根 `.opencode/opencode.json` 注册了 `finboard` MCP server
+   并定义 `finboard-researcher` agent(默认拒绝 `bash`/`edit`/`write`)。
+
+3. **启动 MCP server**(开发期,与 FinDashboard 同进程或独立):
+   ```bash
+   FINBOARD_MCP_ENABLED=true uv run python -m finboard_mcp
+   ```
+
+4. **启动 OpenCode**:
+   ```bash
+   opencode serve  # 默认 http://127.0.0.1:4096
+   ```
+   或 `opencode web` 启动带 Web UI 的实例。
+
+5. **启用 FinBoard 会话关联**(可选,用于把 OpenCode session 关联到
+   `conversation_id` / `agent_run_id` 并持久化事件):
+   ```bash
+   FINBOARD_OPENCODE_ENABLED=true \
+   FINBOARD_OPENCODE_BASE_URL=http://127.0.0.1:4096 \
+   uv run uvicorn finboard_api.app:app
+   ```
+   启用后 `/api/agent/conversations` 提供 CRUD、SSE 事件流
+   (`/events`,从 `last_event_seq` 断线续传)、中断与历史回放。
+
+### 回滚
+
+- 关闭 MCP 入口:`FINBOARD_MCP_ENABLED=false`(默认)
+- 关闭会话关联:`FINBOARD_OPENCODE_ENABLED=false`(默认)
+- 两者均不影响现有 ResearchAssistant / REST 入口与研究产物。
+
+---
+
 ## Git 工作流
 
 详见 `AGENTS.md` 的 *Git 工作流* 与 *Issue / PR 规范* 章节。简要:

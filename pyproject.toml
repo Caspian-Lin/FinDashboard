@@ -28,6 +28,7 @@ finboard-data = { workspace = true }
 finboard-backtest = { workspace = true }
 finboard-simulation = { workspace = true }
 finboard-mcp = { workspace = true }
+finboard-opencode = { workspace = true }
 
 # 开发期统一依赖,改用 PEP 735 dependency-groups(uv 推荐写法)
 [dependency-groups]
@@ -86,6 +87,7 @@ known-first-party = [
   "finboard_backtest",
   "finboard_simulation",
   "finboard_mcp",
+  "finboard_opencode",
 ]
 
 # -----------------------------------------------------------------------------
@@ -120,6 +122,7 @@ mypy_path = [
   "packages/finboard-backtest/src",
   "packages/finboard-simulation/src",
   "packages/finboard-mcp/src",
+  "packages/finboard-opencode/src",
 ]
 exclude = ["migrations/versions/"]
 
@@ -162,6 +165,7 @@ addopts = [
   "--cov=finboard_backtest",
   "--cov=finboard_simulation",
   "--cov=finboard_mcp",
+  "--cov=finboard_opencode",
   "--cov-report=term-missing",
 ]
 markers = [

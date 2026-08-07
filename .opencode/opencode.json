@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "finboard": {
+      "type": "local",
+      "command": ["uv", "run", "python", "-m", "finboard_mcp"],
+      "enabled": true,
+      "environment": {}
+    }
+  },
+  "agent": {
+    "finboard-researcher": {
+      "description": "FinBoard 研究助手 —— 通过 finboard MCP 工具进行只读量化研究与因子分析。仅在涉及研究数据/因子/回测/模拟盘分析时使用。",
+      "mode": "primary",
+      "permission": {
+        "edit": "deny",
+        "bash": "deny",
+        "write": "deny"
+      }
+    }
+  }
+}
