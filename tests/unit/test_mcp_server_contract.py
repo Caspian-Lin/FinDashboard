@@ -71,9 +71,14 @@ class TestCallToolContract:
             result = await client.call_tool("finboard_run_list", {"limit": 1})
         content = result.structured_content
         assert content is not None
-        assert content["status"] == "error"  # 无 DB 连接 → 不可用
+        # 信封结构恒定;status 取决于运行环境是否可达 DB(CI 有 PostgreSQL → ok,
+        # 本机 Windows psycopg 事件循环 → error),两种均合法。
+        assert content["status"] in {"ok", "error"}
         assert str(content["operation_id"]).startswith("OP-")
-        assert content["error"]["kind"] in {"unavailable", "timeout", "degraded"}
+        if content["status"] == "ok":
+            assert isinstance(content["data"], list)
+        else:
+            assert content["error"]["kind"] in {"unavailable", "timeout", "degraded"}
 
     async def test_ai_ask_permission_denied_via_client(self) -> None:
         mcp = build_mcp_server()
