@@ -88,6 +88,18 @@ class Settings(BaseSettings):
     llm_thinking_enabled: bool = True
     llm_reasoning_effort: Literal["high", "max"] = "high"
 
+    # ---- FinBoard MCP Server(issue #108)----
+    # 向外置研究 Agent(OpenCode)暴露受控研究工具的 MCP 服务。默认关闭,显式启用。
+    # 不连接实盘账户 / 订单 / 持仓;实盘能力永久不注册为工具。
+    mcp_enabled: bool = False
+    mcp_transport: Literal["stdio", "streamable-http", "sse"] = "stdio"
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 8765
+    # 只读模式:禁用所有写工具(审批门也不开放),只暴露查询与 AI 问答。
+    mcp_readonly_only: bool = False
+    # 审计是否额外持久化到研究审计表(默认仅结构化日志 + 内存副本)。
+    mcp_audit_persist: bool = False
+
 
 def load_settings(env_file: str | None = None) -> Settings:
     """加载配置;测试中可指定独立 env_file。"""
