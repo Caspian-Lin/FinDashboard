@@ -20,6 +20,7 @@ from finboard_api.errors import finboard_error_handler
 from finboard_api.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_api.routes import (
     account_router,
+    agent_router,
     ai_research_router,
     audit_router,
     backtest_router,
@@ -46,6 +47,7 @@ from finboard_app.config import Settings
 from finboard_app.llm_factory import build_llm_provider
 from finboard_app.logging import setup_logging
 from finboard_backtest.factor_research import ResearchAssistant
+from finboard_opencode import OpenCodeRuntimeClient
 from finboard_shared.exceptions import FinboardError
 from finboard_shared.types import KillSwitchLevel
 from finboard_simulation import SimulationRepository, SimulationService
@@ -113,6 +115,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.llm_provider = llm_provider
         app.state.research_assistant = ResearchAssistant(llm_provider)
 
+        # OpenCode 研究运行时(issue #109):按需构建 runtime 单例。
+        opencode_runtime: OpenCodeRuntimeClient | None = None
+        if settings.opencode_enabled:
+            opencode_runtime = OpenCodeRuntimeClient(
+                base_url=settings.opencode_base_url,
+                api_prefix=settings.opencode_api_prefix,
+                timeout=settings.opencode_request_timeout_seconds,
+            )
+            app.state.opencode_runtime = opencode_runtime
+            app.state.opencode_default_agent = settings.opencode_default_agent
+            logger.info(
+                "api.opencode_runtime_started",
+                base_url=settings.opencode_base_url,
+                agent=settings.opencode_default_agent,
+            )
+        else:
+            app.state.opencode_runtime = None
+
         await kernel.start()
         logger.info("api.kernel_started", ready=kernel.ready)
         async with components.session_maker() as simulation_session:
@@ -139,6 +159,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             cached_provider = getattr(app.state, "llm_provider", None)
             if cached_provider is not None and hasattr(cached_provider, "close"):
                 cached_provider.close()
+            opencode_runtime = getattr(app.state, "opencode_runtime", None)
+            if opencode_runtime is not None:
+                await opencode_runtime.aclose()
             logger.info("api.kernel_stopped")
 
 
@@ -186,6 +209,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_router)
     app.include_router(research_runs_router)
     app.include_router(ai_research_router)
+    app.include_router(agent_router)
     app.include_router(instruments_router)
     app.include_router(portfolio_router)
     app.include_router(simulation_router)

@@ -24,6 +24,7 @@ members = [
     "finboard-core",
     "finboard-data",
     "finboard-mcp",
+    "finboard-opencode",
     "finboard-persistence",
     "finboard-reconcile",
     "finboard-risk",
@@ -597,6 +598,7 @@ dependencies = [
     { name = "finboard-broker" },
     { name = "finboard-core" },
     { name = "finboard-data" },
+    { name = "finboard-opencode" },
     { name = "finboard-persistence" },
     { name = "finboard-reconcile" },
     { name = "finboard-risk" },
@@ -613,6 +615,7 @@ requires-dist = [
     { name = "finboard-broker", editable = "packages/finboard-broker" },
     { name = "finboard-core", editable = "packages/finboard-core" },
     { name = "finboard-data", editable = "packages/finboard-data" },
+    { name = "finboard-opencode", editable = "packages/finboard-opencode" },
     { name = "finboard-persistence", editable = "packages/finboard-persistence" },
     { name = "finboard-reconcile", editable = "packages/finboard-reconcile" },
     { name = "finboard-risk", editable = "packages/finboard-risk" },
@@ -797,6 +800,25 @@ requires-dist = [
     { name = "finboard-shared", editable = "packages/finboard-shared" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=2.0" },
+    { name = "structlog", specifier = ">=24.1" },
+]
+
+[[package]]
+name = "finboard-opencode"
+version = "0.1.0"
+source = { editable = "packages/finboard-opencode" }
+dependencies = [
+    { name = "finboard-persistence" },
+    { name = "finboard-shared" },
+    { name = "httpx" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "finboard-persistence", editable = "packages/finboard-persistence" },
+    { name = "finboard-shared", editable = "packages/finboard-shared" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "structlog", specifier = ">=24.1" },
 ]
 

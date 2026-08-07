@@ -1913,3 +1913,60 @@ class AIAuditEventModel(Base, IdMixin):
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
+
+
+class AgentConversationModel(Base, IdMixin):
+    """OpenCode 研究会话关联(issue #109)。
+
+    把 OpenCode session 关联到 FinBoard ``conversation_id`` 与可选的
+    ``agent_run_id``(研究运行)。``last_event_seq`` 作为 SSE 断线续传游标,
+    重启后从该序列继续订阅 OpenCode durable 事件。
+
+    红线:不写入实盘 orders/fills/positions/audit_logs;OpenCode 是受控研究运行时。
+    """
+
+    __tablename__ = "agent_conversations"
+
+    conversation_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    opencode_session_id: Mapped[str] = mapped_column(String(64), index=True)
+    agent_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    title: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    agent_name: Mapped[str] = mapped_column(String(64))
+    model_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_event_seq: Mapped[int] = mapped_column(BigInteger, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_agent_conv_status_created", "status", "created_at"),
+    )
+
+
+class AgentEventModel(Base, IdMixin):
+    """OpenCode 会话事件持久化(issue #109)。
+
+    只持久化关键事件(消息完成 / 工具调用 / 工具结果 / 错误 / 状态变更),
+    用于审计与前端回放。完整的 token 流不落库 —— 历史回放走 OpenCode
+    ``/api/session/:id/history``。事件按 ``event_seq`` 单调递增。
+    """
+
+    __tablename__ = "agent_events"
+
+    conversation_id: Mapped[str] = mapped_column(String(32), index=True)
+    event_seq: Mapped[int] = mapped_column(BigInteger)
+    event_type: Mapped[str] = mapped_column(String(48), index=True)
+    role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "event_seq", name="uq_agent_event_conv_seq"),
+        Index("ix_agent_event_conv_type_seq", "conversation_id", "event_type", "event_seq"),
+    )

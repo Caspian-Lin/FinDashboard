@@ -104,6 +104,16 @@ class Settings(BaseSettings):
     # 审计是否额外持久化到研究审计表(默认仅结构化日志 + 内存副本)。
     mcp_audit_persist: bool = False
 
+    # ---- OpenCode 研究运行时接入(issue #109)----
+    # OpenCode 作为外置研究 Agent 运行时,通过 finboard-mcp 受控工具访问研究能力。
+    # 默认关闭;启用时需要先 ``opencode serve`` 并配置 base_url。
+    # 不连接实盘账户 / 订单 / 持仓;内置 bash/edit/write 工具默认拒绝。
+    opencode_enabled: bool = False
+    opencode_base_url: str = "http://127.0.0.1:4096"
+    opencode_api_prefix: str = "/api"
+    opencode_default_agent: str = "finboard-researcher"
+    opencode_request_timeout_seconds: float = 30.0
+
 
 def load_settings(env_file: str | None = None) -> Settings:
     """加载配置;测试中可指定独立 env_file。"""
