@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -141,20 +142,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             app.state.opencode_runtime = None
 
-        # OpenCode Web 研究工作台(issue #118):进程级隔离实例 + 控制面网关。
+        # OpenCode Web 研究工作台(issue #118 / #xxx Docker 隔离):
+        # 容器级隔离实例 + 控制面网关。容器内 opencode 连宿主机 finboard_mcp(跨容器)。
         app.state.opencode_process_manager = None
         app.state.opencode_access_issuer = None
         if settings.opencode_web_enabled:
             web_config = OpenCodeProcessConfig(
-                binary=settings.opencode_binary,
+                image=settings.opencode_image,
+                container_name=settings.opencode_container_name,
                 port=settings.opencode_web_port,
                 hostname=settings.opencode_web_hostname,
                 cors_origins=settings.opencode_web_cors_origin_list(),
                 username=settings.opencode_web_username,
                 password=settings.opencode_web_password,
-                workdir=settings.opencode_workdir,
+                # workdir = 仓库根(含 .opencode / .agents),bind mount 进容器。
+                # 默认相对 CWD(make dev 在仓库根运行),解析成绝对路径给 docker -v。
+                workdir=await asyncio.to_thread(
+                    lambda: str(Path(settings.opencode_workdir).resolve())
+                ),
                 log_path=settings.opencode_log_path,
                 env_overrides=settings.opencode_env_override_map(),
+                mcp_auth_token=settings.mcp_auth_token,
             )
             process_manager = OpenCodeProcessManager(
                 web_config, manage_process=settings.opencode_manage_process

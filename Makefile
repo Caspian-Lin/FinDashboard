@@ -109,6 +109,9 @@ opencode-web: ## 启动 opencode web(带 Web UI,端口 $(OPENCODE_PORT));FinBoar
 mcp-serve: ## 启动 finboard-mcp(stdio 传输,供 OpenCode 子进程接入)
 	FINBOARD_MCP_ENABLED=true $(UV) run python -m finboard_mcp
 
+mcp-serve-http: ## 启动 finboard-mcp(HTTP 传输,Docker 隔离前置;容器内 opencode 通过 host.docker.internal:8765 接入)
+	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_PORT=8765 $(UV) run python -m finboard_mcp
+
 # --------------------------------------------------------------------------- 一键开发
 dev: ## 一键启动前后端开发服务器(后端 :8000 + 前端 :5173,Ctrl-C 同时退出)
 	@echo "\033[36m启动后端(FastAPI :8000) + 前端(Vite :5173)...\033[0m"

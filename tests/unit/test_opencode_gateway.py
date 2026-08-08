@@ -49,7 +49,7 @@ class StubProcessManager(OpenCodeProcessManager):
         return ProcessStatus(
             running=True,
             managed=False,
-            pid=None,
+            container_id=None,
             base_url=self.base_url,
             healthy=self._stub_healthy,
             version=self._version,

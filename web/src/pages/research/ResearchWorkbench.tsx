@@ -240,10 +240,10 @@ export default function ResearchWorkbench() {
                 <span>健康探测</span>
                 <span>{status?.healthy == null ? "未知" : status.healthy ? "健康" : "异常"}</span>
               </div>
-              {status?.managed && status.pid != null && (
+              {status?.managed && status.container_id != null && (
                 <div className="flex justify-between">
-                  <span>进程 PID</span>
-                  <span className="font-mono">{status.pid}</span>
+                  <span>容器 ID</span>
+                  <span className="font-mono">{status.container_id}</span>
                 </div>
               )}
               {status?.started_at && (

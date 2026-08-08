@@ -77,7 +77,7 @@ export const conversationApi = {
 export interface OpenCodeStatusOut {
   running: boolean;
   managed: boolean;
-  pid: number | null;
+  container_id: string | null;
   base_url: string;
   healthy: boolean | null;
   version: string | null;

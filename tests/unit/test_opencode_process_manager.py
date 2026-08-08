@@ -1,17 +1,18 @@
-"""OpenCodeProcessManager / OpenCodeProcessConfig 单元测试(issue #118)。
+"""OpenCodeProcessManager / OpenCodeProcessConfig 单元测试(issue #xxx Docker 隔离)。
 
 重点验证:
-* 启动命令构造(port/hostname/cors);
-* 子进程环境变量严格白名单 —— FinBoard 的 DB 密码 / broker 凭证 / API Key 不泄露;
+* ``docker run`` 命令构造(image/container_name/port/hostname/cors/mounts/env);
+* docker CLI 子进程环境变量严格白名单 —— FinBoard 的 DB 密码 / broker 凭证不泄露;
 * 凭证生成(空密码自动生成强随机);
-* 健康探测 / 状态快照(用 httpx MockTransport,不启动真实进程)。
+* 健康探测 / 状态快照(用 httpx MockTransport,不启动真实容器);
+* docker CLI 不可用时 start() 报 OpenCodeProcessError(降级,不炸 lifespan)。
 """
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -20,8 +21,10 @@ from finboard_opencode.process_manager import (
     OpenCodeProcessConfig,
     OpenCodeProcessError,
     OpenCodeProcessManager,
+    _docker_container_running,
     _extract_version,
     _generate_password,
+    _resolve_docker_binary,
     which_opencode,
 )
 
@@ -35,35 +38,72 @@ def work_tmp() -> Path:
     _TMP_ROOT.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(prefix="oc-pm-", dir=str(_TMP_ROOT)))
 
+
 # ---------------------------------------------------------------------------
-# OpenCodeProcessConfig
+# OpenCodeProcessConfig — docker run 命令构造
 # ---------------------------------------------------------------------------
 
 
-def test_build_command_includes_port_hostname_cors() -> None:
+def test_build_docker_run_command_basic() -> None:
     config = OpenCodeProcessConfig(
-        binary="/usr/local/bin/opencode",
+        image="ghcr.io/anomalyco/opencode:latest",
+        container_name="test-oc",
         port=4097,
-        hostname="127.0.0.1",
-        cors_origins=["http://localhost:5173", "http://localhost:8000"],
+        cors_origins=["http://localhost:5173"],
+        username="opencode",
+        password="cfg-pwd",
+        mcp_auth_token="mcp-token",
+        env_overrides={"DEEPSEEK_API_KEY": "sk-123"},
+        workdir=".",
     )
-    cmd = config.build_command()
-    assert cmd[0] == "/usr/local/bin/opencode"
-    assert cmd[1] == "web"
+    cmd = config.build_docker_run_command(effective_password="cfg-pwd")
+    assert cmd[0] == "docker"
+    assert "run" in cmd
+    assert "-d" in cmd
+    assert "--name" in cmd
+    assert "test-oc" in cmd
+    assert "--add-host=host.docker.internal:host-gateway" in cmd
+    # 端口映射:宿主机侧 127.0.0.1 锁 loopback。
+    assert "-p" in cmd
+    assert "127.0.0.1:4097:4097" in cmd
+    # 镜像 + 子命令。
+    assert "ghcr.io/anomalyco/opencode:latest" in cmd
+    assert "web" in cmd
+    # 容器内绑 0.0.0.0(端口映射要求),宿主机侧由 -p 锁 loopback。
+    assert "0.0.0.0" in cmd
     assert "--port" in cmd
     assert "4097" in cmd
-    assert "--hostname" in cmd
-    assert "127.0.0.1" in cmd
-    assert "--cors" in cmd
+    # bind mount .opencode / .agents。
+    assert any("/workspace/.opencode" in p for p in cmd)
+    assert any("/workspace/.agents" in p for p in cmd)
+    # basic auth 凭证 -e。
+    assert any(p == "OPENCODE_SERVER_USERNAME=opencode" for p in cmd)
+    assert any(p == "OPENCODE_SERVER_PASSWORD=cfg-pwd" for p in cmd)
+    # MCP token。
+    assert any(p == "FINBOARD_MCP_TOKEN=mcp-token" for p in cmd)
+    # env_overrides。
+    assert any(p == "DEEPSEEK_API_KEY=sk-123" for p in cmd)
+    # CORS。
     cors_idx = cmd.index("--cors")
     assert cmd[cors_idx + 1] == "http://localhost:5173"
-    assert cmd[cors_idx + 2] == "http://localhost:8000"
 
 
-def test_build_command_omits_empty_cors() -> None:
+def test_build_docker_run_command_omits_empty_cors() -> None:
     config = OpenCodeProcessConfig(cors_origins=[])
-    cmd = config.build_command()
+    cmd = config.build_docker_run_command(effective_password="p")
     assert "--cors" not in cmd
+
+
+def test_build_docker_run_command_omits_mcp_token_when_empty() -> None:
+    config = OpenCodeProcessConfig(mcp_auth_token="")
+    cmd = config.build_docker_run_command(effective_password="p")
+    assert not any(p.startswith("FINBOARD_MCP_TOKEN=") for p in cmd)
+
+
+def test_build_docker_stop_command() -> None:
+    config = OpenCodeProcessConfig(container_name="my-oc")
+    cmd = config.build_docker_stop_command()
+    assert cmd == ["docker", "rm", "-f", "my-oc"]
 
 
 def test_base_url() -> None:
@@ -71,8 +111,19 @@ def test_base_url() -> None:
     assert config.base_url == "http://127.0.0.1:4097"
 
 
+def test_resolved_password_placeholder_when_empty() -> None:
+    config = OpenCodeProcessConfig(password="")
+    # 配置层只暴露占位符;真实密码由 ProcessManager.__init__ 生成。
+    assert config.resolved_password
+
+
+# ---------------------------------------------------------------------------
+# OpenCodeProcessConfig — 环境变量白名单
+# ---------------------------------------------------------------------------
+
+
 def test_build_environment_strict_whitelist_no_leak() -> None:
-    """严格白名单:FinBoard 的 DB 密码 / broker 凭证 / API Key 不得进入子进程。"""
+    """严格白名单:FinBoard 的 DB 密码 / broker 凭证 / API Key 不进 docker CLI 子进程。"""
     parent_env = {
         "PATH": "/usr/bin",
         "HOME": "/home/user",
@@ -81,16 +132,11 @@ def test_build_environment_strict_whitelist_no_leak() -> None:
         "FINBOARD_LLM_API_KEY": "sk-super-secret",
         "OPENAI_API_KEY": "sk-leak",
     }
-    config = OpenCodeProcessConfig(
-        username="opencode", password="cfg-password"
-    )
+    config = OpenCodeProcessConfig()
     env = config.build_environment(parent_env=parent_env)
     # 继承白名单。
     assert env["PATH"] == "/usr/bin"
     assert env["HOME"] == "/home/user"
-    # OpenCode basic auth 注入。
-    assert env["OPENCODE_SERVER_USERNAME"] == "opencode"
-    assert env["OPENCODE_SERVER_PASSWORD"] == "cfg-password"
     # 敏感字段绝不泄露。
     assert "FINBOARD_DB_URL" not in env
     assert "FINBOARD_QMT_PASSWORD" not in env
@@ -98,30 +144,28 @@ def test_build_environment_strict_whitelist_no_leak() -> None:
     assert "OPENAI_API_KEY" not in env
 
 
-def test_build_environment_env_overrides_win_whitelist() -> None:
-    """显式 env_overrides 优先级高于继承,用于注入 LLM provider Key。"""
-    config = OpenCodeProcessConfig(
-        env_overrides={"ANTHROPIC_API_KEY": "sk-llm-key"},
+def test_build_environment_includes_docker_cli_extras() -> None:
+    """docker CLI 在 Windows 上需要 COMSPEC / ProgramFiles(Docker Desktop 路径)。"""
+    config = OpenCodeProcessConfig()
+    env = config.build_environment(
+        parent_env={
+            "PATH": "/usr/bin",
+            "COMSPEC": r"C:\Windows\system32\cmd.exe",
+            "ProgramFiles": r"C:\Program Files",
+        }
     )
-    env = config.build_environment(parent_env={"PATH": "/usr/bin"})
-    assert env["ANTHROPIC_API_KEY"] == "sk-llm-key"
-    assert env["OPENCODE_SERVER_PASSWORD"]  # 自动生成占位符
-
-
-def test_resolved_password_placeholder_when_empty() -> None:
-    config = OpenCodeProcessConfig(password="")
-    # 配置层只暴露占位符;真实密码由 ProcessManager.start 生成。
-    assert config.resolved_password
+    assert env["COMSPEC"] == r"C:\Windows\system32\cmd.exe"
+    assert env["ProgramFiles"] == r"C:\Program Files"
 
 
 # ---------------------------------------------------------------------------
-# OpenCodeProcessManager
+# OpenCodeProcessManager — 健康探测 / 状态(非托管模式,无真实容器)
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def unmanaged_manager() -> OpenCodeProcessManager:
-    """非托管管理器(不启动子进程,用于测试健康探测 / 状态)。"""
+    """非托管管理器(不启动容器,用于测试健康探测 / 状态)。"""
     config = OpenCodeProcessConfig(
         port=4097, hostname="127.0.0.1", password="test-pass"
     )
@@ -183,7 +227,7 @@ async def test_status_snapshot_unmanaged(unmanaged_manager) -> None:
     status = await unmanaged_manager.status()
     assert status.running is True
     assert status.managed is False
-    assert status.pid is None
+    assert status.container_id is None
     assert status.base_url == "http://127.0.0.1:4097"
     assert status.healthy is True
     assert status.version == "1.18.15"
@@ -200,102 +244,46 @@ async def test_status_healthy_false_when_down(unmanaged_manager) -> None:
 
 
 async def test_unmanaged_start_is_noop(unmanaged_manager) -> None:
-    # 非托管模式 start 不启动子进程。
+    # 非托管模式 start 不启动容器。
     await unmanaged_manager.start()
-    assert unmanaged_manager._proc is None
+    assert unmanaged_manager.container_id is None
 
 
-async def test_managed_start_requires_binary(work_tmp, monkeypatch) -> None:
-    """托管模式 binary 不存在时报 OpenCodeProcessError(用 mock,避免真实子进程)。"""
+# ---------------------------------------------------------------------------
+# OpenCodeProcessManager — 托管模式 docker CLI 不可用
+# ---------------------------------------------------------------------------
+
+
+async def test_managed_start_requires_docker(work_tmp, monkeypatch) -> None:
+    """托管模式 docker CLI 不存在时报 OpenCodeProcessError(降级,不炸 lifespan)。"""
     config = OpenCodeProcessConfig(
-        binary="/nonexistent/opencode-binary-xyz",
-        workdir=str(work_tmp / "ws"),
+        workdir=str(work_tmp),
         log_path=str(work_tmp / "log" / "oc.log"),
         password="p",
     )
     manager = OpenCodeProcessManager(config, manage_process=True)
-
-    async def _raise_fnf(*args: object, **kwargs: object) -> None:
-        raise FileNotFoundError("not found")
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _raise_fnf)
-    with pytest.raises(OpenCodeProcessError, match="binary not found"):
+    # docker CLI 解析失败。
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._resolve_docker_binary", lambda: None
+    )
+    with pytest.raises(OpenCodeProcessError, match="docker CLI not found"):
         await manager.start()
 
 
-class _FakeRunningProc:
-    """伪造运行中进程(returncode=None),用于测试 is_running / 双重启动守卫。"""
-
-    pid = 99999
-    returncode: int | None = None
-
-
-async def test_managed_double_start_raises(work_tmp) -> None:
+async def test_managed_double_start_raises(work_tmp, monkeypatch) -> None:
     config = OpenCodeProcessConfig(
-        workdir=str(work_tmp / "ws"),
+        workdir=str(work_tmp),
         log_path=str(work_tmp / "log" / "oc.log"),
         password="p",
     )
     manager = OpenCodeProcessManager(config, manage_process=True)
-    manager._proc = _FakeRunningProc()  # type: ignore[assignment]
+    # 模拟容器已在运行(is_running 返回 True)。
+    manager._container_id = "abc123def456"
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._docker_container_running", lambda name: True
+    )
     with pytest.raises(OpenCodeProcessError, match="already running"):
         await manager.start()
-
-
-class _FakeStoppableProc:
-    """伪造可终止的进程:terminate() 改 returncode,wait() 立即返回。"""
-
-    def __init__(self) -> None:
-        self.pid = 12345
-        self.returncode: int | None = None
-        self.terminated = False
-        self.killed = False
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self.returncode = 0
-
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = 1
-
-    async def wait(self) -> int:
-        return self.returncode or 0
-
-
-async def test_managed_stop_terminates_process(work_tmp) -> None:
-    config = OpenCodeProcessConfig(
-        workdir=str(work_tmp / "ws"),
-        log_path=str(work_tmp / "log" / "oc.log"),
-        password="p",
-    )
-    manager = OpenCodeProcessManager(config, manage_process=True)
-    fake_proc = _FakeStoppableProc()
-    manager._proc = fake_proc  # type: ignore[assignment]
-    await manager.stop(grace_seconds=3.0)
-    assert manager._proc is None
-    assert fake_proc.terminated is True
-
-
-async def test_managed_stop_force_kills_on_timeout(work_tmp, monkeypatch) -> None:
-    """grace 超时后升级为 SIGKILL。"""
-    config = OpenCodeProcessConfig(
-        workdir=str(work_tmp / "ws"),
-        log_path=str(work_tmp / "log" / "oc.log"),
-        password="p",
-    )
-    manager = OpenCodeProcessManager(config, manage_process=True)
-    fake_proc = _FakeStoppableProc()
-
-    async def _never_returns() -> int:
-        await asyncio.sleep(100)
-        return 0
-
-    monkeypatch.setattr(fake_proc, "wait", _never_returns)
-    manager._proc = fake_proc  # type: ignore[assignment]
-    await manager.stop(grace_seconds=0.1)
-    assert manager._proc is None
-    assert fake_proc.killed is True
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +309,15 @@ def test_which_opencode_returns_none_for_missing() -> None:
     assert which_opencode("definitely-not-a-real-binary-xyz123") is None
 
 
-def test_which_opencode_finds_python() -> None:
-    # python 几乎一定在 PATH 里。
-    assert which_opencode("python") is not None or which_opencode("python3") is not None
+def test_resolve_docker_binary_returns_str_or_none() -> None:
+    # docker 可能装了也可能没装;只要不抛异常即可。
+    result = _resolve_docker_binary()
+    assert result is None or isinstance(result, str)
+
+
+def test_docker_container_running_returns_bool() -> None:
+    # 对不存在的容器名应返回 False(保守判定)。
+    with patch(
+        "finboard_opencode.process_manager._resolve_docker_binary", lambda: None
+    ):
+        assert _docker_container_running("nonexistent-xyz-12345") is False

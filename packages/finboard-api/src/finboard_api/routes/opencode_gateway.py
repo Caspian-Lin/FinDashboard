@@ -56,7 +56,7 @@ class AccessOut(BaseModel):
 class StatusOut(BaseModel):
     running: bool
     managed: bool
-    pid: int | None
+    container_id: str | None
     base_url: str
     healthy: bool | None
     version: str | None
@@ -92,7 +92,7 @@ async def opencode_status(
     return StatusOut(
         running=status.running,
         managed=status.managed,
-        pid=status.pid,
+        container_id=status.container_id,
         base_url=status.base_url,
         healthy=status.healthy,
         version=status.version,
