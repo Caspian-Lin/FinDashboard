@@ -63,6 +63,7 @@ from finboard_persistence.models import (
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
+    ResearchMemoryModel,
     ResearchRunArtifactModel,
     ResearchRunModel,
     ResearchStrategySpecModel,
@@ -93,6 +94,11 @@ from finboard_persistence.repo import (
     ReconciliationLogRepository,
     StrategyPresetRepository,
     WatchlistRepository,
+)
+from finboard_persistence.research_memory_repo import (
+    ResearchMemory,
+    ResearchMemoryRepository,
+    SourceRef,
 )
 from finboard_persistence.research_repo import (
     ResearchDataset,
@@ -185,6 +191,9 @@ __all__ = [
     "ResearchIndustryClassificationModel",
     "ResearchIndustryMembershipModel",
     "ResearchInstrumentProfileModel",
+    "ResearchMemory",
+    "ResearchMemoryModel",
+    "ResearchMemoryRepository",
     "ResearchRunArtifactModel",
     "ResearchRunModel",
     "ResearchRunPersistenceConflictError",
@@ -204,6 +213,7 @@ __all__ = [
     "SimulationOrderModel",
     "SimulationPositionModel",
     "SimulationSessionModel",
+    "SourceRef",
     "StrategyPresetModel",
     "StrategyPresetRepository",
     "StrategySpecChangeType",
