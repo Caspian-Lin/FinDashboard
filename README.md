@@ -431,11 +431,40 @@ FinDashboard service / repository (唯一事实来源)
    启用后 `/api/agent/conversations` 提供 CRUD、SSE 事件流
    (`/events`,从 `last_event_seq` 断线续传)、中断与历史回放。
 
+### OpenCode Web 研究工作台(issue #118)
+
+FinBoard 网关可托管一个**进程级隔离**的 `opencode web` 实例,前端通过 iframe 跨源
+嵌入(OpenCode v1.18.15 不支持 `--base-path` 子路径部署,故采用跨源嵌入而非子路径反代)。
+
+```bash
+# FinBoard 托管子进程(开发推荐):
+FINBOARD_OPENCODE_WEB_ENABLED=true \
+FINBOARD_OPENCODE_MANAGE_PROCESS=true \
+FINBOARD_OPENCODE_WEB_CORS_ORIGINS=http://localhost:5173 \
+uv run uvicorn finboard_api.app:app
+```
+
+隔离保证:
+- **工作目录**:`.opencode/workspace` 沙箱,与 FinBoard 仓库分离;
+- **环境变量严格白名单**:子进程只继承 `PATH`/`HOME` 等系统必需变量,**绝不**继承
+  DB 密码 / broker 凭证 / API Key;LLM provider Key 通过 `FINBOARD_OPENCODE_ENV_OVERRIDES`
+  显式注入;
+- **网络**:强制 `127.0.0.1` 绑定,不暴露公网;
+- **basic auth**:`OPENCODE_SERVER_PASSWORD`(配置空则启动时自动生成)。
+
+网关端点(`/api/opencode`):
+- `GET /status` —— 进程运行状态(脱敏,不含密码);
+- `GET /health` —— 代理健康探测;
+- `POST /access` —— 为已授权 `conversation_id`(必须 `ACTIVE`)签发访问凭证
+  (Web URL + basic auth),前端 iframe 据此嵌入。
+
 ### 回滚
 
 - 关闭 MCP 入口:`FINBOARD_MCP_ENABLED=false`(默认)
 - 关闭会话关联:`FINBOARD_OPENCODE_ENABLED=false`(默认)
-- 两者均不影响现有 ResearchAssistant / REST 入口与研究产物。
+- 关闭 Web 工作台网关:`FINBOARD_OPENCODE_WEB_ENABLED=false`(默认),网关端点返回
+  503、不启动子进程
+- 三者均不影响现有 ResearchAssistant / REST 入口与研究产物。
 
 ---
 

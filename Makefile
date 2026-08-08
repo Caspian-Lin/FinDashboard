@@ -7,6 +7,7 @@
 .PHONY: help install sync lint format typecheck test test-unit test-integration \
         db-up db-down db-logs migrate migrate-new run serve \
         web-install web-dev web-build web-lint \
+        opencode-serve opencode-web mcp-serve \
         dev clean
 
 PYTHON ?= python3.12
@@ -92,6 +93,21 @@ web-build: ## 构建前端生产包到 web/dist
 
 web-lint: ## 前端 ESLint
 	cd $(WEB_DIR) && $(NPM) run lint
+
+# --------------------------------------------------------------------------- OpenCode 研究运行时(#108/#109/#118)
+OPENCODE_PORT ?= 4097
+OPENCODE_SERVE_PORT ?= 4096
+# iframe 跨源嵌入必须允许 FinBoard 前端源
+OPENCODE_CORS ?= http://localhost:5173
+
+opencode-serve: ## 启动 opencode serve(headless HTTP API,端口 $(OPENCODE_SERVE_PORT))
+	opencode serve --port $(OPENCODE_SERVE_PORT) --hostname 127.0.0.1 --cors $(OPENCODE_CORS)
+
+opencode-web: ## 启动 opencode web(带 Web UI,端口 $(OPENCODE_PORT));FinBoard 托管时无需手动启动
+	opencode web --port $(OPENCODE_PORT) --hostname 127.0.0.1 --cors $(OPENCODE_CORS)
+
+mcp-serve: ## 启动 finboard-mcp(stdio 传输,供 OpenCode 子进程接入)
+	FINBOARD_MCP_ENABLED=true $(UV) run python -m finboard_mcp
 
 # --------------------------------------------------------------------------- 一键开发
 dev: ## 一键启动前后端开发服务器(后端 :8000 + 前端 :5173,Ctrl-C 同时退出)
