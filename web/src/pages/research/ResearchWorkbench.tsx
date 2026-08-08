@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   MessageSquare,
@@ -12,7 +11,10 @@ import {
   ShieldCheck,
   AlertTriangle,
   Terminal,
+  Sparkles,
+  FileText,
   History,
+  MonitorSmartphone,
 } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,6 +28,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cn, timeAgo } from "@/lib/utils";
 import {
   conversationApi,
@@ -35,6 +38,9 @@ import {
   type AgentEventOut,
 } from "@/lib/opencode";
 import { buildWorkbenchUrl, redactedWorkbenchUrl } from "@/lib/opencode-url";
+import { DraftsTab } from "@/pages/research/approval/DraftsTab";
+import { HypothesesTab } from "@/pages/research/approval/HypothesesTab";
+import { AuditTab } from "@/pages/research/approval/AuditTab";
 
 /* ============================================================ */
 /* OpenCode 研究工作台(issue #111)                              */
@@ -48,7 +54,7 @@ import { buildWorkbenchUrl, redactedWorkbenchUrl } from "@/lib/opencode-url";
 //   - 只能打开 FinBoard 授权绑定的 ACTIVE conversation_id(后端 /access 校验);
 //   - 不展示未脱敏原始思考内容(token 级 delta 不落库,只展示关键事件摘要);
 //   - 写操作仍经 FinBoard MCP 草案 + 人工审批,前端不绕过;
-//   - opencode_web_enabled=false(网关 503)时降级到 /research/ai。
+//   - opencode_web_enabled=false(网关 503)时「工作台」Tab 显示降级提示,「审批中心」Tab 仍可用。
 
 /** 工作台关键事件类型分组(对齐后端 KEY_EVENT_TYPES)。 */
 const EVENT_LABELS: Record<string, string> = {
@@ -167,60 +173,58 @@ export default function ResearchWorkbench() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["opencode-conversations"] }),
   });
 
-  /* ---------- 降级态:网关未启用 ---------- */
-  if (!gatewayEnabled && !statusLoading) {
-    return (
-      <div>
-        <PageHeader
-          title="研究工作台"
-          description="OpenCode Web 研究交互工作台(FinBoard 控制面 + OpenCode Web 交互面)"
-        />
-        <Alert variant="warning">
-          <AlertTriangle className="h-4 w-4" />
-          <AlertTitle>OpenCode Web 工作台未启用</AlertTitle>
-          <AlertDescription>
-            网关返回 503,OpenCode Web 工作台入口已隐藏。可使用现有 AI 助手作为兼容/降级入口。
-            <div className="mt-3">
-              <Button asChild variant="outline" size="sm">
-                <Link to="/research/ai">
-                  <MessageSquare className="h-4 w-4" />
-                  前往 AI 助手(降级)
-                </Link>
-              </Button>
-            </div>
-          </AlertDescription>
-        </Alert>
-      </div>
-    );
-  }
-
   const workbenchUrl =
     access && selectedId ? buildWorkbenchUrl(access, selectedId) : null;
+
+  const showWorkbenchDowngrade = !gatewayEnabled && !statusLoading;
 
   return (
     <div>
       <PageHeader
         title="研究工作台"
-        description="OpenCode Web 研究交互工作台(FinBoard 控制面 + OpenCode Web 交互面)"
+        description="OpenCode Web 研究交互 + AI 草案/假设审批闭环(不连实盘)"
       />
 
-      {/* 边界提示 */}
-      <Alert className="mb-4">
-        <ShieldCheck className="h-4 w-4" />
-        <AlertTitle>研究边界</AlertTitle>
-        <AlertDescription>
-          OpenCode Web 是研究交互层,FinBoard API/MCP 是事实来源与权限/审批边界。
-          写操作(创建 ResearchRun/回测/模拟盘)仍经 MCP 草案 + 人工审批,前端不绕过。
-          工作台不连接实盘 broker/账户/订单/持仓。
-        </AlertDescription>
-      </Alert>
+      <Tabs defaultValue="workbench" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="workbench">
+            <MonitorSmartphone className="mr-1.5 h-4 w-4" />
+            工作台
+          </TabsTrigger>
+          <TabsTrigger value="approval">
+            <ShieldCheck className="mr-1.5 h-4 w-4" />
+            审批中心
+          </TabsTrigger>
+        </TabsList>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[360px_1fr]">
-        {/* ============ Part 1:FinBoard 控制面 ============ */}
-        <div className="space-y-3">
-          {/* 网关状态 */}
-          <Card>
-            <CardHeader className="pb-3">
+        {/* ============ Tab:工作台(OpenCode Web 交互) ============ */}
+        <TabsContent value="workbench" className="space-y-4">
+          {/* 边界提示 */}
+          <Alert>
+            <ShieldCheck className="h-4 w-4" />
+            <AlertTitle>研究边界</AlertTitle>
+            <AlertDescription>
+              OpenCode Web 是研究交互层,FinBoard API/MCP 是事实来源与权限/审批边界。
+              写操作(创建 ResearchRun/回测/模拟盘)仍经 MCP 草案 + 人工审批,前端不绕过。
+              工作台不连接实盘 broker/账户/订单/持仓。
+            </AlertDescription>
+          </Alert>
+
+          {showWorkbenchDowngrade ? (
+            <Alert variant="warning">
+              <AlertTriangle className="h-4 w-4" />
+              <AlertTitle>OpenCode Web 网关未启用</AlertTitle>
+              <AlertDescription>
+                网关返回 503,OpenCode Web 工作台不可用。可切换到「审批中心」Tab 管理 AI 草案与因子假设。
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[360px_1fr]">
+              {/* ============ Part 1:FinBoard 控制面 ============ */}
+              <div className="space-y-3">
+                {/* 网关状态 */}
+                <Card>
+                  <CardHeader className="pb-3">
               <CardTitle className="flex items-center justify-between text-sm">
                 <span className="flex items-center gap-2">
                   <StatusDot status={status?.healthy ? "online" : status?.running ? "warning" : "offline"} />
@@ -368,6 +372,40 @@ export default function ResearchWorkbench() {
           )}
         </div>
       </div>
+          )}
+        </TabsContent>
+
+        {/* ============ Tab:审批中心(AI 草案/假设/审计) ============ */}
+        <TabsContent value="approval" className="space-y-4">
+          <Alert>
+            <ShieldCheck className="h-4 w-4" />
+            <AlertTitle>审批边界</AlertTitle>
+            <AlertDescription>
+              AI 输出(草案/假设)必须经过人工审批后才可消费。审批走 REST API,不依赖 OpenCode Web 网关。
+              AI 只读研究上下文,不连接实盘账户、不发送订单、不修改持仓。
+            </AlertDescription>
+          </Alert>
+          <Tabs defaultValue="drafts">
+            <TabsList>
+              <TabsTrigger value="drafts">
+                <Sparkles className="mr-1.5 h-4 w-4" />
+                AI 草案
+              </TabsTrigger>
+              <TabsTrigger value="hypotheses">
+                <FileText className="mr-1.5 h-4 w-4" />
+                假设管理
+              </TabsTrigger>
+              <TabsTrigger value="audit">
+                <History className="mr-1.5 h-4 w-4" />
+                审计
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="drafts" className="mt-4"><DraftsTab /></TabsContent>
+            <TabsContent value="hypotheses" className="mt-4"><HypothesesTab /></TabsContent>
+            <TabsContent value="audit" className="mt-4"><AuditTab /></TabsContent>
+          </Tabs>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

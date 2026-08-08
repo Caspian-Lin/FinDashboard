@@ -47,7 +47,7 @@ const INTERRUPTED_CONV: ConversationOut = {
 const STATUS_ON: OpenCodeStatusOut = {
   running: true,
   managed: true,
-  pid: 12345,
+  container_id: "abc123def456",
   base_url: "http://127.0.0.1:4097",
   healthy: true,
   version: "1.18.15",
@@ -146,13 +146,14 @@ beforeEach(() => {
 /* ============================================================ */
 
 describe("ResearchWorkbench 降级开关", () => {
-  it("网关 503(未启用)时显示降级 Alert 与跳转链接,不渲染 iframe", async () => {
+  it("网关 503(未启用)时工作台 Tab 显示降级提示,审批中心 Tab 仍可用", async () => {
     mocks.status.mockRejectedValue(new ApiError(503, "opencode web gateway disabled", "disabled"));
     renderWithProviders(<ResearchWorkbench />);
     await waitFor(() => {
-      expect(screen.getByText(/OpenCode Web 工作台未启用/)).toBeInTheDocument();
+      expect(screen.getByText(/OpenCode Web 网关未启用/)).toBeInTheDocument();
     });
-    expect(screen.getByText(/前往 AI 助手/)).toBeInTheDocument();
+    // 降级提示文案提到审批中心 Tab(TabsTrigger 也有「审批中心」,故用 getAllByText)
+    expect(screen.getAllByText(/审批中心/).length).toBeGreaterThanOrEqual(1);
     // iframe 不应渲染
     expect(document.querySelector("iframe")).toBeNull();
     // 会话列表不应被请求

@@ -14,7 +14,6 @@ const ResearchRuns = React.lazy(() => import("@/pages/research/ResearchRuns"));
 const PortfolioRisk = React.lazy(() => import("@/pages/research/PortfolioRisk"));
 const Simulation = React.lazy(() => import("@/pages/research/Simulation"));
 const ResearchWorkbench = React.lazy(() => import("@/pages/research/ResearchWorkbench"));
-const AIResearch = React.lazy(() => import("@/pages/research/AIResearch"));
 const Reports = React.lazy(() => import("@/pages/research/Reports"));
 
 /* Live trading domain (lazy) */
@@ -61,7 +60,6 @@ export default function App() {
             <Route path="/research/portfolio" element={<PortfolioRisk />} />
             <Route path="/research/simulation" element={<Simulation />} />
             <Route path="/research/workbench" element={<ResearchWorkbench />} />
-            <Route path="/research/ai" element={<AIResearch />} />
             <Route path="/research/reports" element={<Reports />} />
 
             {/* Live Trading */}
