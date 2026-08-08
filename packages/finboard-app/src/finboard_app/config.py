@@ -114,6 +114,57 @@ class Settings(BaseSettings):
     opencode_default_agent: str = "finboard-researcher"
     opencode_request_timeout_seconds: float = 30.0
 
+    # ---- OpenCode Web 研究工作台(issue #118)----
+    # FinBoard 网关托管一个进程级隔离的 ``opencode web`` 实例,前端 iframe 跨源嵌入。
+    # 这是控制面网关:只签发访问凭证 + 管理进程生命周期,不透传 OpenCode 流量、不
+    # 连接实盘。``opencode_web_enabled`` 是总开关(默认关闭 → 网关返回 503,前端隐藏入口)。
+    opencode_web_enabled: bool = False
+    # FinBoard 是否托管子进程(True=自动启动/停止 opencode web;False=外部已启动,仅连接)。
+    opencode_manage_process: bool = False
+    # OpenCode 可执行文件路径(版本锁定;CI / 生产可指向固定版本二进制)。
+    opencode_binary: str = "opencode"
+    # Web 实例端口(默认 4097,与 ``opencode serve`` 的 4096 区分)。
+    opencode_web_port: int = 4097
+    # 监听地址:进程级隔离强制 127.0.0.1,不暴露公网。
+    opencode_web_hostname: str = "127.0.0.1"
+    # 允许跨源访问的浏览器源(逗号分隔);iframe 嵌入必须显式允许 FinBoard 源。
+    # 例:"http://localhost:5173,http://localhost:8000"
+    opencode_web_cors_origins: str = ""
+    # basic auth 用户名(OpenCode 默认 ``opencode``)。
+    opencode_web_username: str = "opencode"
+    # basic auth 密码;留空则启动时自动生成强随机密码并记入启动日志。
+    opencode_web_password: str = ""
+    # 研究沙箱工作目录(OpenCode 在此运行,与 FinBoard 仓库隔离)。
+    opencode_workdir: str = ".opencode/workspace"
+    # 子进程日志路径。
+    opencode_log_path: str = ".opencode/logs/opencode-web.log"
+    # 额外注入子进程的环境变量(LLM provider Key 等;逗号分隔 KEY=VAL)。
+    # 严格白名单继承:FinBoard 的 DB 密码 / broker 凭证永不传入 OpenCode 子进程。
+    opencode_env_overrides: str = ""
+
+    def opencode_web_cors_origin_list(self) -> list[str]:
+        """解析逗号分隔的 CORS 源列表。"""
+        if not self.opencode_web_cors_origins.strip():
+            return []
+        return [
+            origin.strip()
+            for origin in self.opencode_web_cors_origins.split(",")
+            if origin.strip()
+        ]
+
+    def opencode_env_override_map(self) -> dict[str, str]:
+        """解析逗号分隔的 KEY=VAL 环境变量覆盖。"""
+        result: dict[str, str] = {}
+        for item in self.opencode_env_overrides.split(","):
+            item = item.strip()
+            if not item or "=" not in item:
+                continue
+            key, _, value = item.partition("=")
+            key = key.strip()
+            if key:
+                result[key] = value
+        return result
+
 
 def load_settings(env_file: str | None = None) -> Settings:
     """加载配置;测试中可指定独立 env_file。"""

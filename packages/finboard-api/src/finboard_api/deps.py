@@ -11,9 +11,11 @@ from finboard_app.bootstrap import KernelComponents
 from finboard_backtest.factor_research import ResearchAssistant
 from finboard_core import TradingKernel
 from finboard_opencode import (
+    AccessCredentialIssuer,
     AgentConversationRepository,
     AgentEventRepository,
     ConversationService,
+    OpenCodeProcessManager,
     OpenCodeRuntimeClient,
 )
 from finboard_shared.identifiers import AccountId
@@ -86,3 +88,19 @@ async def get_conversation_service(
             default_agent=default_agent,
         )
         await session.commit()
+
+
+def get_opencode_process_manager(request: Request) -> OpenCodeProcessManager | None:
+    """OpenCode Web 进程管理器(issue #118)——lifespan 构建的单例。
+
+    未启用时返回 ``None``(网关路由据此返回 503)。
+    """
+    return getattr(request.app.state, "opencode_process_manager", None)
+
+
+def get_opencode_access_issuer(request: Request) -> AccessCredentialIssuer | None:
+    """OpenCode Web 访问凭证签发器(issue #118)——lifespan 构建的单例。
+
+    依赖 :func:`get_opencode_process_manager`;未启用时返回 ``None``。
+    """
+    return getattr(request.app.state, "opencode_access_issuer", None)

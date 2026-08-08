@@ -29,6 +29,7 @@ from finboard_api.routes import (
     health_router,
     instruments_router,
     kill_switch_router,
+    opencode_gateway_router,
     orders_router,
     portfolio_router,
     positions_router,
@@ -48,7 +49,13 @@ from finboard_app.config import Settings
 from finboard_app.llm_factory import build_llm_provider
 from finboard_app.logging import setup_logging
 from finboard_backtest.factor_research import ResearchAssistant
-from finboard_opencode import OpenCodeRuntimeClient
+from finboard_opencode import (
+    AccessCredentialIssuer,
+    OpenCodeProcessConfig,
+    OpenCodeProcessError,
+    OpenCodeProcessManager,
+    OpenCodeRuntimeClient,
+)
 from finboard_shared.exceptions import FinboardError
 from finboard_shared.types import KillSwitchLevel
 from finboard_simulation import SimulationRepository, SimulationService
@@ -134,6 +141,50 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             app.state.opencode_runtime = None
 
+        # OpenCode Web 研究工作台(issue #118):进程级隔离实例 + 控制面网关。
+        app.state.opencode_process_manager = None
+        app.state.opencode_access_issuer = None
+        if settings.opencode_web_enabled:
+            web_config = OpenCodeProcessConfig(
+                binary=settings.opencode_binary,
+                port=settings.opencode_web_port,
+                hostname=settings.opencode_web_hostname,
+                cors_origins=settings.opencode_web_cors_origin_list(),
+                username=settings.opencode_web_username,
+                password=settings.opencode_web_password,
+                workdir=settings.opencode_workdir,
+                log_path=settings.opencode_log_path,
+                env_overrides=settings.opencode_env_override_map(),
+            )
+            process_manager = OpenCodeProcessManager(
+                web_config, manage_process=settings.opencode_manage_process
+            )
+            ready = True
+            if settings.opencode_manage_process:
+                try:
+                    await process_manager.start()
+                    await process_manager.wait_ready()
+                except OpenCodeProcessError as exc:
+                    logger.error(
+                        "api.opencode_web_start_failed", error=str(exc)
+                    )
+                    await process_manager.stop()
+                    ready = False
+            else:
+                logger.info(
+                    "api.opencode_web_unmanaged", base_url=web_config.base_url
+                )
+            if ready:
+                app.state.opencode_process_manager = process_manager
+                app.state.opencode_access_issuer = AccessCredentialIssuer(
+                    process_manager, agent_name=settings.opencode_default_agent
+                )
+                logger.info(
+                    "api.opencode_web_ready",
+                    base_url=web_config.base_url,
+                    managed=settings.opencode_manage_process,
+                )
+
         await kernel.start()
         logger.info("api.kernel_started", ready=kernel.ready)
         async with components.session_maker() as simulation_session:
@@ -163,6 +214,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             opencode_runtime = getattr(app.state, "opencode_runtime", None)
             if opencode_runtime is not None:
                 await opencode_runtime.aclose()
+            oc_process_manager = getattr(app.state, "opencode_process_manager", None)
+            if oc_process_manager is not None:
+                await oc_process_manager.stop()
             logger.info("api.kernel_stopped")
 
 
@@ -212,6 +266,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_runs_router)
     app.include_router(ai_research_router)
     app.include_router(agent_router)
+    app.include_router(opencode_gateway_router)
     app.include_router(instruments_router)
     app.include_router(portfolio_router)
     app.include_router(simulation_router)
