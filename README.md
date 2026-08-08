@@ -458,6 +458,29 @@ uv run uvicorn finboard_api.app:app
 - `POST /access` —— 为已授权 `conversation_id`(必须 `ACTIVE`)签发访问凭证
   (Web URL + basic auth),前端 iframe 据此嵌入。
 
+### OpenCode Web 前端研究工作台(issue #111)
+
+前端「研究工作台」页面(`/research/workbench`)是 OpenCode Web 与 FinBoard 研究
+页面的产品整合入口,**不在 FinBoard 内复制实现一套并行的 Agent 聊天工作流**:
+
+- **Part 1 —— FinBoard 控制面**(左侧):展示研究会话列表、状态徽章、网关健康指示、
+  「新建研究会话」入口(不会启动 ResearchRun / 回测 / 模拟盘)、关键事件摘要
+  (折叠面板,只展示 #109 持久化的 `KEY_EVENT_TYPES` —— message / tool / error /
+  session 等,token 级增量不落库、不展示)。
+- **Part 2 —— OpenCode Web 交互面**(右侧):iframe 跨源嵌入隔离实例,复用 #118 签发
+  的 `web_url` + basic auth 凭证构造嵌入 URL;提供刷新 / 中断 / 中止工具条。消息编排、
+  token 级聊天、工具调用可视化全部交给 OpenCode Web,完整历史由 OpenCode 运行时提供。
+
+**会话绑定与边界**:只能从 `/api/agent/conversations` 列表选择 FinBoard 授权绑定的
+会话,不能手动输入任意 `session_id`;凭证只在内存中构造 iframe URL,不写入 localStorage、
+不打印控制台、不渲染为可见文本;写操作(创建 ResearchRun / 回测 / 模拟盘)仍经 FinBoard
+MCP 草案 + 人工审批,前端不绕过;OpenCode Web 是研究交互层,FinBoard API/MCP 是事实来源
+与权限/审批边界;工作台不连接实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
+
+**降级**:`opencode_web_enabled=false`(网关返回 503)时,前端隐藏工作台入口,显示降级
+提示并引导到现有「AI 助手」(`/research/ai`)作为兼容入口。前端代码改动可完整回滚
+(删除新增页面与路由即恢复原状)。
+
 ### 回滚
 
 - 关闭 MCP 入口:`FINBOARD_MCP_ENABLED=false`(默认)

@@ -8,6 +8,7 @@ import {
   GitBranch,
   Scale,
   PlayCircle,
+  MonitorSmartphone,
   Sparkles,
   FileText,
   ArrowRight,
@@ -36,7 +37,8 @@ const workflowSteps = [
   { to: "/research/runs", label: "研究运行", icon: GitBranch, desc: "冻结输入、血缘追踪与运行重放" },
   { to: "/research/portfolio", label: "组合与风险", icon: Scale, desc: "目标权重分配、离散交易与资金可行性" },
   { to: "/research/simulation", label: "模拟盘", icon: PlayCircle, desc: "纸面撮合、目标仓位决策与绩效报告" },
-  { to: "/research/ai", label: "AI 助手", icon: Sparkles, desc: "因子假设草案、策略 diff 与金融问答" },
+  { to: "/research/workbench", label: "研究工作台", icon: MonitorSmartphone, desc: "OpenCode Web 研究交互工作台(默认入口)" },
+  { to: "/research/ai", label: "AI 助手", icon: Sparkles, desc: "因子假设草案、策略 diff 与金融问答(兼容入口)" },
   { to: "/research/reports", label: "研究报告", icon: FileText, desc: "聚合展示运行结果、绩效归因与风险" },
 ];
 
