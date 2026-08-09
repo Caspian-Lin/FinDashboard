@@ -24,14 +24,14 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-当前已实现 14 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+当前已实现 23 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
 | 查询 ResearchRun | `finboard.run.list` / `.get` / `.artifacts` | ✅ | 只读 |
 | 金融问答 / 因子假设 / 策略草案 | `finboard.ai.ask` / `.propose_*` | ✅ | 草案(可追溯) |
 | 记住 / 查询 / 纠正研究记忆 | `finboard.memory.*`(7 个) | ✅ | 直接执行 |
-| 数据查询(instruments/datasets/releases/cache/quality) | 🔒 #124 | 🔒 | 自主执行 |
+| 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额 | `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`(9 个) | ✅ #124 | 只读 |
 | 因子(catalog/snapshot/signal/experiment) | 🔒 #125 | 🔒 | 自主执行 |
 | 策略规格(registry/template/validate/draft/publish) | 🔒 #126 | 🔒 | 自主执行 |
 | 回测 + 模拟盘 + 研究运行 | 🔒 #127 | 🔒 | 自主执行 |

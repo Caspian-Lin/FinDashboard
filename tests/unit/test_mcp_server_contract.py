@@ -22,6 +22,16 @@ _EXPECTED_TOOLS = {
     "finboard_run_list",
     "finboard_run_get",
     "finboard_run_artifacts",
+    # #124 数据查询工具
+    "finboard_instrument_list",
+    "finboard_instrument_get",
+    "finboard_instrument_search",
+    "finboard_dataset_release_list",
+    "finboard_dataset_release_get",
+    "finboard_dataset_manifest_list",
+    "finboard_data_cache_status",
+    "finboard_data_quality_check",
+    "finboard_tushare_quota",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。

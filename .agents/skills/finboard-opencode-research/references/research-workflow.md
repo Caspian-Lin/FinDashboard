@@ -15,9 +15,11 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 | MCP 工具 | 状态 |
 |----------|------|
-| `finboard.data.instruments` / `.datasets` / `.releases` / `.cache_status` / `.quality` | 🔒 #124 |
-
-**当前可用的替代**:用 `finboard.ai.ask` 提问(引用项目来源,不编造数字)。
+| `finboard_instrument_list` / `_get` / `_search` | ✅ #124 |
+| `finboard_dataset_release_list` / `_get` | ✅ #124 |
+| `finboard_dataset_manifest_list` | ✅ #124 |
+| `finboard_data_cache_status` / `_quality_check` | ✅ #124 |
+| `finboard_tushare_quota` | ✅ #124 |
 
 ## 步骤 2:因子分析
 
@@ -91,15 +93,17 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 ## 当前 agent 能做什么
 
-在 #124-#128 实现前,agent 的闭环能力:
+agent 的闭环能力(截至 #124):
 
-1. **查询**:ResearchRun 列表 / 详情 / artifact(✅ `finboard.run.*`)
-2. **生成草案**:因子假设 / 策略草案 / 策略 diff(✅ `finboard.ai.propose_*`)
-3. **问答**:金融 / 研究问题,引用项目来源(✅ `finboard.ai.ask`)
-4. **记忆**:跨会话积累研究上下文(✅ `finboard.memory.*`)
+1. **数据查询**:标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额
+   (✅ `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`)
+2. **查询**:ResearchRun 列表 / 详情 / artifact(✅ `finboard.run.*`)
+3. **生成草案**:因子假设 / 策略草案 / 策略 diff(✅ `finboard.ai.propose_*`)
+4. **问答**:金融 / 研究问题,引用项目来源(✅ `finboard.ai.ask`)
+5. **记忆**:跨会话积累研究上下文(✅ `finboard.memory.*`)
 
 **不能直接做**(需告知用户限制):
-- 查询原始行情 / 因子值 / 策略注册表 / 模拟盘状态(🔒 #124-#127)
+- 查询因子值 / 策略注册表 / 模拟盘状态(🔒 #125-#127)
 - 创建 / 启动回测 / 模拟盘 / ResearchRun(🔒 #127)
 - portfolio 计算(🔒 #128)
 
