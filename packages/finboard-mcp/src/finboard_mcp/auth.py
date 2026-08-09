@@ -11,7 +11,7 @@
 - **健康探针放行** —— ``/global/health`` 等 ping 端点不要求 token(否则 FinBoard 的
   ``OpenCodeProcessManager.wait_ready`` 健康探测会被 401 挡住)。
 
-红线:本模块只做传输层鉴权,不改变工具权限矩阵(只读 / 草案审批 / 实盘能力永久不注册)。
+红线:本模块只做传输层鉴权,不改变工具权限矩阵(研究写操作自主执行 / 实盘能力永久不注册)。
 """
 
 from __future__ import annotations

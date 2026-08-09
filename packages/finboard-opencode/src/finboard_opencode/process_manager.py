@@ -328,7 +328,7 @@ class OpenCodeProcessManager:
     """托管 ``opencode web`` Docker 容器的生命周期。
 
     单实例 + 容器级隔离:全局一个 OpenCode 容器服务所有研究会话,会话级隔离由
-    OpenCode session + FinBoard conversation 授权共同保证。
+    OpenCode session 管理(#121 重构后 FinBoard 不再维护独立 conversation 授权层)。
 
     生命周期由 FinBoard API lifespan 管理(见 ``app.py``);``stop`` 必须在 shutdown
     时调用以回收容器(``docker rm -f``)。``start`` 执行 ``docker run -d``,从 stdout

@@ -1,10 +1,10 @@
-"""OpenCode Web 研究工作台网关路由(issue #118)。
+"""OpenCode Web 研究工作台网关路由(issue #118 / 重构 #121)。
 
 FinBoard 网关是 OpenCode Web 的**控制面**:
 - ``GET /status``:隔离实例运行状态(脱敏,不含密码);
 - ``GET /health``:代理健康探测;
-- ``POST /access``:为已授权会话签发访问凭证(OpenCode Web URL + basic auth),
-  前端 iframe 跨源嵌入时使用。
+- ``POST /access``:签发访问凭证(OpenCode Web URL + basic auth),前端 iframe
+  跨源嵌入时使用。重构 #121 后不再绑定 conversation_id —— OpenCode 自身管理会话。
 
 未启用(``opencode_web_enabled=false``)时所有端点返回 503,前端据此隐藏入口。
 红线:不透传 OpenCode 流量、不连接实盘、不暴露未授权端口。
@@ -16,18 +16,14 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from finboard_api.deps import (
-    get_conversation_service,
     get_opencode_access_issuer,
     get_opencode_process_manager,
 )
 from finboard_opencode import (
     AccessCredentialIssuer,
-    AccessNotAuthorizedError,
-    ConversationNotFoundError,
-    ConversationService,
     OpenCodeProcessManager,
     ProcessStatus,
 )
@@ -40,13 +36,7 @@ router = APIRouter(prefix="/api/opencode", tags=["opencode-gateway"])
 # ---------------------------------------------------------------------------
 
 
-class AccessRequest(BaseModel):
-    conversation_id: str = Field(..., min_length=1, max_length=32)
-
-
 class AccessOut(BaseModel):
-    conversation_id: str
-    opencode_session_id: str
     web_url: str
     username: str
     password: str
@@ -121,28 +111,17 @@ async def opencode_health(
 
 @router.post("/access", response_model=AccessOut)
 async def opencode_access(
-    body: AccessRequest,
     issuer: AccessCredentialIssuer | None = Depends(get_opencode_access_issuer),
-    service: ConversationService = Depends(get_conversation_service),
 ) -> AccessOut:
-    """为已授权会话签发 OpenCode Web 访问凭证。
+    """签发 OpenCode Web 访问凭证(网关启用即可,#121 重构后无 conversation 绑定)。
 
-    流程:查 conversation → 授权校验(存在 + ACTIVE) → 签发凭证。
-    单用户场景下"归属"退化为存在性 + 状态;多用户需叠加 owner 校验。
+    OpenCode 自身管理会话/历史/恢复;FinBoard 只负责隔离实例的进程托管与
+    访问凭证签发。前端拿到凭证后用 iframe 跨源嵌入 OpenCode Web。
     """
     if issuer is None:
         raise HTTPException(status_code=503, detail="opencode web gateway disabled")
-    try:
-        record = await service.get_conversation(body.conversation_id)
-    except ConversationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    try:
-        info = issuer.issue(record, conversation_id=body.conversation_id)
-    except AccessNotAuthorizedError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    info = issuer.issue_default()
     return AccessOut(
-        conversation_id=info.conversation_id,
-        opencode_session_id=info.opencode_session_id,
         web_url=info.web_url,
         username=info.username,
         password=info.password,

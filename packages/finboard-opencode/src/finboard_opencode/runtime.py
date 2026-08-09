@@ -4,7 +4,8 @@
 SSE 事件订阅(支持 ``after`` 断线续传)与中断。
 
 端点基于 OpenCode v2 API(experimental,``/api`` 前缀);真机验证时若端点形状
-有偏差,调整 ``api_prefix`` 或对应路径即可,不影响上层 ConversationService。
+有偏差,调整 ``api_prefix`` 或对应路径即可(#121 重构后本客户端直接供
+FinBoard 网关与 access 签发使用,不再有上层 ConversationService)。
 
 红线:本客户端只与 OpenCode 研究运行时交互,不连接实盘 broker / 账户 / 订单。
 """

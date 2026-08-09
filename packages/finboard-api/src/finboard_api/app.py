@@ -23,7 +23,6 @@ from finboard_api.errors import finboard_error_handler
 from finboard_api.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_api.routes import (
     account_router,
-    agent_router,
     ai_research_router,
     audit_router,
     backtest_router,
@@ -191,7 +190,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         #   (B) 外部 serve 模式(仅 opencode_enabled,向后兼容):连接外部已启动的
         #       ``opencode serve``(默认 4096,无 auth)。
         app.state.opencode_runtime = None
-        app.state.opencode_default_agent = settings.opencode_default_agent
         app.state.opencode_process_manager = None
         app.state.opencode_access_issuer = None
 
@@ -378,7 +376,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_memories_router)
     app.include_router(research_runs_router)
     app.include_router(ai_research_router)
-    app.include_router(agent_router)
     app.include_router(opencode_gateway_router)
     app.include_router(instruments_router)
     app.include_router(portfolio_router)
