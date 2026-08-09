@@ -103,6 +103,8 @@ describe("ResearchWorkbench iframe 直连", () => {
     expect(iframe.src).toContain("127.0.0.1:4097");
     expect(iframe.src).toContain(encodeURIComponent("opencode"));
     expect(iframe.src).toContain(encodeURIComponent("s3cret-pw-abc"));
+    // 强制传 directory=/workspace(避免 SPA localStorage 缓存的宿主机路径导致 ENOENT)
+    expect(iframe.src).toContain("directory=%2Fworkspace");
   });
 
   it("凭证(密码)不出现在可见 DOM 文本中", async () => {
