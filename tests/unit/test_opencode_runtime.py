@@ -171,3 +171,46 @@ async def test_list_messages(make_client) -> None:
     messages = await client.list_messages("sess-1")
     assert len(messages) == 2
     await client.aclose()
+
+
+async def test_auth_param_sends_basic_auth_header() -> None:
+    """构造时传 auth=httpx.BasicAuth,请求应带 Authorization: Basic 头。
+
+    覆盖 web 容器模式(issue #118 Docker 隔离):runtime client 连 basic auth
+    保护的 opencode web 容器(4097),不带凭证会被 401 拦截。
+    """
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("authorization", "")
+        return httpx.Response(200, json={"data": {"id": "sess-1"}})
+
+    client = OpenCodeRuntimeClient(
+        base_url="http://test",
+        auth=httpx.BasicAuth("opencode", "secret123"),
+    )
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://test",
+        auth=httpx.BasicAuth("opencode", "secret123"),
+    )
+    await client.create_session()
+    assert captured["authorization"].startswith("Basic ")
+    await client.aclose()
+
+
+async def test_no_auth_by_default() -> None:
+    """默认不传 auth 时,请求不带 Authorization 头(外部 serve 场景)。"""
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("authorization", "")
+        return httpx.Response(200, json={"data": {"id": "sess-1"}})
+
+    client = OpenCodeRuntimeClient(base_url="http://test")
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    )
+    await client.create_session()
+    assert captured["authorization"] == ""
+    await client.aclose()

@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
+import httpx
 import structlog
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -124,28 +125,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.llm_provider = llm_provider
         app.state.research_assistant = ResearchAssistant(llm_provider)
 
-        # OpenCode 研究运行时(issue #109):按需构建 runtime 单例。
-        opencode_runtime: OpenCodeRuntimeClient | None = None
-        if settings.opencode_enabled:
-            opencode_runtime = OpenCodeRuntimeClient(
-                base_url=settings.opencode_base_url,
-                api_prefix=settings.opencode_api_prefix,
-                timeout=settings.opencode_request_timeout_seconds,
-            )
-            app.state.opencode_runtime = opencode_runtime
-            app.state.opencode_default_agent = settings.opencode_default_agent
-            logger.info(
-                "api.opencode_runtime_started",
-                base_url=settings.opencode_base_url,
-                agent=settings.opencode_default_agent,
-            )
-        else:
-            app.state.opencode_runtime = None
-
-        # OpenCode Web 研究工作台(issue #118 / #xxx Docker 隔离):
-        # 容器级隔离实例 + 控制面网关。容器内 opencode 连宿主机 finboard_mcp(跨容器)。
+        # OpenCode 研究运行时(issue #109 / #118 / Docker 隔离)。
+        # 两种部署形态:
+        #   (A) web 容器模式(opencode_web_enabled):FinBoard 托管一个 Docker 化的
+        #       ``opencode web`` 容器(4097),它**同时**暴露 iframe UI 和 /api/* API。
+        #       runtime client 复用该容器(连 4097 + basic auth),不再需要独立的
+        #       ``opencode serve``(4096)。一个容器服务 iframe 嵌入 + 会话关联 API。
+        #   (B) 外部 serve 模式(仅 opencode_enabled,向后兼容):连接外部已启动的
+        #       ``opencode serve``(默认 4096,无 auth)。
+        app.state.opencode_runtime = None
+        app.state.opencode_default_agent = settings.opencode_default_agent
         app.state.opencode_process_manager = None
         app.state.opencode_access_issuer = None
+
         if settings.opencode_web_enabled:
             web_config = OpenCodeProcessConfig(
                 image=settings.opencode_image,
@@ -167,7 +159,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             process_manager = OpenCodeProcessManager(
                 web_config, manage_process=settings.opencode_manage_process
             )
-            ready = True
+            web_ready = True
             if settings.opencode_manage_process:
                 try:
                     await process_manager.start()
@@ -177,21 +169,58 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         "api.opencode_web_start_failed", error=str(exc)
                     )
                     await process_manager.stop()
-                    ready = False
+                    web_ready = False
             else:
                 logger.info(
                     "api.opencode_web_unmanaged", base_url=web_config.base_url
                 )
-            if ready:
+            if web_ready:
                 app.state.opencode_process_manager = process_manager
                 app.state.opencode_access_issuer = AccessCredentialIssuer(
                     process_manager, agent_name=settings.opencode_default_agent
+                )
+                # runtime client 复用 web 容器:base_url=4097,basic auth 用
+                # process_manager 实际生效凭证(password 可能是启动时随机生成的,
+                # 必须从运行中的 process_manager 读,不能从 settings 读空串)。
+                app.state.opencode_runtime = OpenCodeRuntimeClient(
+                    base_url=process_manager.base_url,
+                    api_prefix=settings.opencode_api_prefix,
+                    timeout=settings.opencode_request_timeout_seconds,
+                    auth=httpx.BasicAuth(
+                        process_manager.config.username,
+                        process_manager.effective_password,
+                    ),
                 )
                 logger.info(
                     "api.opencode_web_ready",
                     base_url=web_config.base_url,
                     managed=settings.opencode_manage_process,
                 )
+                logger.info(
+                    "api.opencode_runtime_started",
+                    base_url=process_manager.base_url,
+                    agent=settings.opencode_default_agent,
+                    mode="web_container",
+                    auth=True,
+                )
+            else:
+                logger.warning(
+                    "api.opencode_runtime_skipped", reason="web_container_not_ready"
+                )
+        elif settings.opencode_enabled:
+            # 形态 (B):外部 opencode serve(4096,无 auth),向后兼容。
+            app.state.opencode_runtime = OpenCodeRuntimeClient(
+                base_url=settings.opencode_base_url,
+                api_prefix=settings.opencode_api_prefix,
+                timeout=settings.opencode_request_timeout_seconds,
+            )
+            logger.info(
+                "api.opencode_runtime_started",
+                base_url=settings.opencode_base_url,
+                agent=settings.opencode_default_agent,
+                mode="external_serve",
+                auth=False,
+            )
 
         await kernel.start()
         logger.info("api.kernel_started", ready=kernel.ready)

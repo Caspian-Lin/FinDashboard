@@ -47,13 +47,19 @@ class OpenCodeRuntimeClient:
         api_prefix: str = "/api",
         timeout: float = 30.0,
         headers: dict[str, str] | None = None,
+        auth: httpx.Auth | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._prefix = api_prefix.rstrip("/")
+        # ``auth`` 用于连 basic auth 保护的 opencode web 容器(issue #118/#xxx
+        # Docker 隔离):web 容器同时暴露 iframe UI(浏览器带凭证)和 /api/*(本
+        # 客户端带 auth),两者共用同一套 OPENCODE_SERVER_USERNAME/PASSWORD。
+        # 纯 ``opencode serve``(4096,无 auth)场景传 None,行为不变。
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=timeout,
             headers=headers or {},
+            auth=auth,
         )
 
     async def aclose(self) -> None:
