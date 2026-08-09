@@ -63,12 +63,44 @@ async def test_start_embedded_mcp_server_starts_uvicorn() -> None:
     assert call_kwargs.kwargs["loop"] == "none"
     assert call_kwargs.kwargs["log_level"] == "warning"
     server_cls.assert_called_once_with(config_cls.return_value)
+    # install_signal_handlers 被禁用(防止 sys.exit 炸 API)。
+    assert callable(fake_server.install_signal_handlers)
+    fake_server.install_signal_handlers()
     # server 挂到 app.state,serve() 作为后台任务派发。
     assert app.state.opencode_mcp_server is fake_server
     assert isinstance(app.state.opencode_mcp_task, asyncio.Task)
     fake_mcp.streamable_http_app.assert_called_once_with(host="0.0.0.0")
     # 清理后台任务(serve 是 mock,会立即完成)。
     await app.state.opencode_mcp_task
+
+
+@pytest.mark.asyncio
+async def test_start_embedded_mcp_server_survives_bind_failure() -> None:
+    """端口 bind 失败时(SystemExit/OSError),后台任务捕获不炸 API。"""
+    app = FastAPI()
+    settings = _make_settings()
+
+    fake_mcp = MagicMock()
+    fake_mcp.streamable_http_app.return_value = MagicMock(name="starlette_app")
+
+    fake_server = MagicMock()
+    # 模拟 uvicorn bind 失败 → sys.exit(STARTUP_FAILURE) = SystemExit(3)。
+    fake_server.serve = AsyncMock(side_effect=SystemExit(3))
+
+    with patch(
+        "finboard_mcp.server.build_mcp_server", return_value=fake_mcp
+    ), patch(
+        "finboard_mcp.auth.wrap_with_bearer_auth",
+        return_value=MagicMock(name="wrapped"),
+    ), patch("uvicorn.Config"), patch(
+        "uvicorn.Server", return_value=fake_server
+    ):
+        await _start_embedded_mcp_server(app, settings)
+        # 后台任务应捕获 SystemExit,正常完成(不抛)。
+        await app.state.opencode_mcp_task  # 不应 raise
+
+    # server 仍挂到 app.state(shutdown 清理逻辑会处理 None 检查)。
+    assert app.state.opencode_mcp_server is fake_server
 
 
 @pytest.mark.asyncio

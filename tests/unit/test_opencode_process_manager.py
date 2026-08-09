@@ -79,6 +79,9 @@ def test_build_docker_run_command_basic() -> None:
     # bind mount .opencode / .agents。
     assert any("/workspace/.opencode" in p for p in cmd)
     assert any("/workspace/.agents" in p for p in cmd)
+    # named volume 持久化会话 DB / auth(容器删除后保留)。
+    assert "opencode-data:/root/.local/share/opencode" in cmd
+    assert "opencode-config:/root/.config/opencode" in cmd
     # basic auth 凭证 -e。
     assert any(p == "OPENCODE_SERVER_USERNAME=opencode" for p in cmd)
     assert any(p == "OPENCODE_SERVER_PASSWORD=cfg-pwd" for p in cmd)
@@ -287,6 +290,69 @@ async def test_managed_double_start_raises(work_tmp, monkeypatch) -> None:
     )
     with pytest.raises(OpenCodeProcessError, match="already running"):
         await manager.start()
+
+
+async def test_remove_stale_container_calls_docker_rm(
+    work_tmp, monkeypatch
+) -> None:
+    """``_remove_stale_container`` 用 ``docker rm -f`` 清理同名容器(幂等)。"""
+    config = OpenCodeProcessConfig(
+        workdir=str(work_tmp),
+        log_path=str(work_tmp / "log" / "oc.log"),
+        password="p",
+        container_name="test-stale-oc",
+    )
+    manager = OpenCodeProcessManager(config, manage_process=True)
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._resolve_docker_binary",
+        lambda: "/fake/docker",
+    )
+    # 拦截整个 subprocess 执行,直接返回成功(stdout = 容器名,表示已移除)。
+    captured_cmds: list[list[str]] = []
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (b"test-stale-oc\n", b"")
+
+    async def _fake_create_exec(*args: str, **kwargs: object) -> _FakeProc:
+        captured_cmds.append(list(args))
+        return _FakeProc()
+
+    # 非托管 _executor 线程:直接在当前循环跑 coro_factory。
+    async def _fake_executor_run(coro_factory):
+        return await coro_factory()
+
+    monkeypatch.setattr(manager._executor, "run", _fake_executor_run)
+    # _remove_stale_container 内部用 create_subprocess_exec;patch asyncio 模块级。
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager.asyncio.create_subprocess_exec",
+        _fake_create_exec,
+    )
+    await manager._remove_stale_container()
+    assert len(captured_cmds) == 1
+    assert captured_cmds[0][0] == "/fake/docker"
+    assert "rm" in captured_cmds[0]
+    assert "-f" in captured_cmds[0]
+    assert "test-stale-oc" in captured_cmds[0]
+
+
+async def test_remove_stale_container_noop_without_docker(
+    work_tmp, monkeypatch
+) -> None:
+    """docker CLI 不可用时 ``_remove_stale_container`` 静默跳过。"""
+    config = OpenCodeProcessConfig(
+        workdir=str(work_tmp),
+        log_path=str(work_tmp / "log" / "oc.log"),
+        password="p",
+    )
+    manager = OpenCodeProcessManager(config, manage_process=True)
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._resolve_docker_binary", lambda: None
+    )
+    # 不应抛异常。
+    await manager._remove_stale_container()
 
 
 # ---------------------------------------------------------------------------

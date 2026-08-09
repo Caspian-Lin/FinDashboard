@@ -82,6 +82,15 @@ _CONTAINER_MOUNTS: tuple[tuple[str, str], ...] = (
     (".agents", f"{_CONTAINER_WORKDIR}/.agents"),
 )
 
+#: 容器内 OpenCode 运行时数据(会话 DB / auth),用 named volume 持久化。
+#: 容器删除(``docker rm -f``)不影响 named volume,重启后会话历史保留。
+#: 容器内 opencode 以 root 运行,数据目录在 ``/root/.local/share/opencode``
+#: (XDG_DATA_HOME)和 ``/root/.config/opencode``(XDG_CONFIG_HOME)。
+_RUNTIME_VOLUME_MOUNTS: tuple[tuple[str, str], ...] = (
+    ("opencode-data", "/root/.local/share/opencode"),
+    ("opencode-config", "/root/.config/opencode"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class OpenCodeProcessConfig:
@@ -130,6 +139,8 @@ class OpenCodeProcessConfig:
         - 容器内 opencode 绑 ``0.0.0.0``(否则端口映射进不来),由 ``--hostname`` 指定。
         - bind mount ``.opencode`` / ``.agents`` —— agent 定义 / skill / opencode.json
           持久化在宿主机仓库内,容器只读这些项目级配置。
+        - named volume ``opencode-data`` / ``opencode-config`` —— 会话 DB(opencode.db)
+          和 auth 持久化,容器删除后保留,重启可恢复历史。
         - ``-e`` 注入:basic auth 凭证 + MCP token + env_overrides(LLM key 等)。
           FinBoard 自身 DB 密码 / broker 凭证**永不**进入 ``-e`` 列表。
         """
@@ -144,6 +155,9 @@ class OpenCodeProcessConfig:
         for host_rel, container_abs in _CONTAINER_MOUNTS:
             host_abs = workdir / host_rel
             cmd += ["-v", f"{host_abs}:{container_abs}"]
+        # named volume 持久化会话 DB / auth:容器删除后数据保留,重启可恢复历史。
+        for volume_name, container_abs in _RUNTIME_VOLUME_MOUNTS:
+            cmd += ["-v", f"{volume_name}:{container_abs}"]
         # basic auth 凭证(OpenCode Web 自带 basic auth 中间件)。
         if self.username:
             cmd += ["-e", f"OPENCODE_SERVER_USERNAME={self.username}"]
@@ -401,6 +415,11 @@ class OpenCodeProcessManager:
         self._log_file = await asyncio.to_thread(
             _prepare_runtime_dirs, workdir, log_path
         )
+        # 清理同名残留容器:上次 FinBoard 进程异常退出(SIGKILL / 崩溃 / Ctrl-C)
+        # 时 docker 不知道宿主进程已死,容器仍 Up,新 ``docker run`` 会 exit 125
+        # (name conflict)。``docker rm -f`` 幂等 —— 不存在时 no-op;会话数据由
+        # named volume(``opencode-data``)保护,不受容器删除影响。
+        await self._remove_stale_container()
         # 解析 docker CLI 完整路径(Windows 上是 docker.exe,同样需要 which)。
         docker_bin = _resolve_docker_binary()
         if docker_bin is None:
@@ -528,6 +547,49 @@ class OpenCodeProcessManager:
             await asyncio.to_thread(self._close_log_file)
             self._executor.shutdown()
             self._log.info("opencode.container.stopped", container_name=container_name)
+
+    async def _remove_stale_container(self) -> None:
+        """``start()`` 前清理同名残留容器(``docker rm -f``,幂等)。
+
+        FinBoard 进程异常退出(SIGKILL / 崩溃 / Ctrl-C)时,``stop()`` 不会被调用,
+        docker 不知道宿主进程已死,容器仍 Up。下次 ``docker run`` 遇同名容器 exit 125
+        (name conflict)。本方法在 ``start()`` 内无条件执行 ``docker rm -f``:
+
+        - 容器不存在 → no-op(stdout 空,exit 0)
+        - 容器存在(Up/Exited) → 强制移除(会话 DB / auth 由 named volume 保护,
+          不随容器删除丢失)
+
+        失败不抛(只记 warning)—— 容器清理失败会在后续 ``docker run`` 报 exit 125,
+        那里有完整的错误处理。
+        """
+        docker_bin = _resolve_docker_binary()
+        if docker_bin is None:
+            return  # docker 不可用,start() 稍后会抛完整错误
+        cmd = self._config.build_docker_stop_command()
+        cmd[0] = docker_bin
+        env = self._config.build_environment()
+        try:
+            proc = await self._executor.run(
+                lambda: asyncio.create_subprocess_exec(
+                    *cmd,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            )
+            stdout_data = await self._read_docker_output(proc)
+            if stdout_data.strip():
+                self._log.info(
+                    "opencode.container.stale_removed",
+                    container_name=self._config.container_name,
+                    output=stdout_data.strip()[:200],
+                )
+        except Exception as exc:
+            self._log.warning(
+                "opencode.container.stale_remove_failed",
+                container_name=self._config.container_name,
+                error=str(exc),
+            )
 
     async def wait_ready(
         self,

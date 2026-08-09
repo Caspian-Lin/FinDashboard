@@ -96,7 +96,9 @@ async def _start_embedded_mcp_server(app: FastAPI, settings: Settings) -> None:
     复用 ``build_mcp_server()``(研究域独立 lifespan + 独立 AsyncEngine,与
     TradingKernel 无 session 冲突)+ Bearer 鉴权(``mcp_auth_token``)。
 
-    失败降级:无 ``mcp_auth_token`` → 跳过(HTTP 传输强制鉴权,空 token 拒绝启动)。
+    失败降级:无 ``mcp_auth_token`` → 跳过(HTTP 传输强制鉴权,空 token 拒绝启动);
+    端口已被占用(上次进程残留)→ 后台任务捕获 ``SystemExit``/异常,记 warning,
+    不炸 API(容器内 opencode 连不上 MCP 会降级为内置工具)。
     """
     if not settings.mcp_auth_token:
         logger.warning("api.opencode_mcp_skipped", reason="no_mcp_auth_token")
@@ -115,9 +117,27 @@ async def _start_embedded_mcp_server(app: FastAPI, settings: Settings) -> None:
         loop="none",  # 复用当前 SelectorEventLoop(避免 Windows Proactor 冲突)
     )
     server = uvicorn.Server(config)
-    # ``serve()`` 是长驻协程,后台任务托管;shutdown 时设置 should_exit 回收。
+    # 阻止 uvicorn 安装信号处理器(它会 sys.exit,在后台任务里会炸 API)。
+    server.install_signal_handlers = lambda: None  # type: ignore[attr-defined]
+
+    async def _serve_with_guard() -> None:
+        """``serve()`` 的安全包装:捕获 bind 失败的 SystemExit/OSError。
+
+        uvicorn ``Server.startup()`` 在端口 bind 失败时调 ``sys.exit(STARTUP_FAILURE)``
+        (= ``SystemExit(3)``)。在后台任务里未捕获会变成「Task exception was never
+        retrieved」+ 可能影响事件循环。这里捕获后记 warning,API 继续运行。
+        """
+        try:
+            await server.serve()
+        except (SystemExit, OSError) as exc:
+            logger.warning(
+                "api.opencode_mcp_bind_failed",
+                port=settings.mcp_port,
+                error=str(exc),
+            )
+
     app.state.opencode_mcp_server = server
-    app.state.opencode_mcp_task = asyncio.create_task(server.serve())
+    app.state.opencode_mcp_task = asyncio.create_task(_serve_with_guard())
     logger.info(
         "api.opencode_mcp_started",
         host=settings.mcp_host,
