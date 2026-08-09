@@ -20,8 +20,11 @@
   ├─ 记住 / 纠正 / 查询研究上下文?              ✅ 已实现
   │    → finboard.memory.* (直接执行)
   │
-  ├─ 查询数据 / 因子 / 策略 / 回测 / 模拟 / portfolio?  🔒 planned
-  │    → 当前 MCP 工具尚未覆盖(#124-#128)。
+  ├─ 查询标的 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额?  ✅ 已实现
+  │    → finboard.instrument.* / .dataset.* / .data.* / .tushare.* (#124 只读)
+  │
+  ├─ 查询因子 / 策略 / 回测 / 模拟 / portfolio?  🔒 planned
+  │    → 当前 MCP 工具尚未覆盖(#125-#128)。
   │      告知用户「该能力尚未通过 MCP 暴露」,不要编造结果。
   │      可通过 finboard.ai.ask 以 AI 问答形式回答(引用来源)。
   │

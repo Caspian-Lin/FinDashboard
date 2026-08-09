@@ -5,26 +5,22 @@
 
 ## 当前状态(2026-08)
 
-**已实现 14 个工具**(issue #108 / #110):
+**已实现 23 个工具**(issue #108 / #110 / #124):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
 | `finboard.run.*` | 3 | list / get / artifacts | ResearchRun 只读查询 |
 | `finboard.ai.*` | 4 | ask / propose_hypothesis / propose_strategy_draft / propose_strategy_diff | AI 草案(问答 / 因子假设 / 策略) |
 | `finboard.memory.*` | 7 | remember / list / get / forget / correct / confirm / archive | 研究长期记忆 |
+| 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |
 
-## Planned 阶段(#124-#128)
+## Planned 阶段(#125-#128)
 
-### #124 数据查询工具 `finboard.data.*`
-- **优先级**:高(研究流程的输入,其他阶段依赖)
-- **工具**:
-  - `finboard_data_instruments` —— 标的元数据(代码 / 名称 / 市场)
-  - `finboard_data_datasets` —— 已发布数据集(版本 / 状态 / checksum)
-  - `finboard_data_releases` —— 数据发布版本
-  - `finboard_data_cache_status` —— 行情缓存覆盖度
-  - `finboard_data_quality` —— 数据质量报告(缺失 / 异常)
-- **复用**:`finboard-data` 包 + `finboard-api` data routes
-- **权限**:只读,自动允许
+### ✅ #124 数据查询工具(已完成)
+9 个只读工具:instrument list/get/search、dataset_release list/get、
+dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota。
+复用 `InstrumentRepository` / `ResearchDatasetReleaseRepository` /
+`ParquetCache` / `BarQualityChecker` / `shared_tushare_budget`。
 
 ### #125 因子工具 `finboard.factor.*`
 - **优先级**:高(策略构建的前置)

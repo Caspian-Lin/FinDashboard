@@ -5,17 +5,17 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 14 个工具(✅);planned 工具(🔒 #124-#128)尚未实现,
+当前已实现 23 个工具(✅);planned 工具(🔒 #125-#128)尚未实现,
 列出契约供 agent 知晓未来能力边界。
 
 ## 权限矩阵(#122:研究写操作自主执行)
 
 | 类别 | 只读/自主 | 永久不可用 |
 |------|----------|-----------|
-| 只读查询(run.*) | ✅ | |
+| 只读查询(run.* / instrument.* / dataset.* / data.* / tushare.*) | ✅ | |
 | 研究记忆(memory.*) | ✅ | |
 | AI 草案(ai.*:假设/策略) | ✅(产出草案,可追溯) | |
-| 数据查询 / 因子 / 策略规格 / 回测 / 模拟 / portfolio | 🔒 #124-#128(扩展中) | |
+| 因子 / 策略规格 / 回测 / 模拟 / portfolio | 🔒 #125-#128(扩展中) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读)
@@ -103,17 +103,68 @@ AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不
 归档(status=archived)。
 - 参数:`memory_id: str`
 
+## finboard.instrument.* / finboard.dataset.* / finboard.data.* / finboard.tushare.*(✅ #124 只读)
+
+数据查询工具,复用现有 repository / domain 类。只读,自动允许。
+
+### finboard_instrument_list
+列出标的元数据(分页 / 搜索)。
+- 参数:`market?` / `instrument_type?` / `exchange?` / `listing_board?: list[str]` /
+  `status?: str = "active"`(传 None 查全部)/ `q?`(代码或名称模糊)/
+  `limit?: int = 200` / `offset?: int = 0`
+- 返回:`{items: list[{code, name, market, instrument_type, exchange, listing_board,
+  list_date, delist_date, status, sector, industry}], total, limit, offset}`
+
+### finboard_instrument_get
+查询单个标的详情(按代码)。
+- 参数:`code: str`
+- 返回:标的 dict(同上 item 结构);未找到 → `not_found`
+
+### finboard_instrument_search
+模糊搜索标的(按代码或名称,仅 active)。
+- 参数:`q: str` / `limit?: int = 50`
+- 返回:`list[标的 dict]`
+
+### finboard_dataset_release_list
+列出已发布的研究数据集版本(版本化、时点安全、不可变)。
+- 参数:`dataset_name?` / `source?` / `quality_status?("passed"|"warnings")` /
+  `limit?: int = 50`
+- 返回:`list[{release_id, dataset_name, source, version, period, symbol_count,
+  row_count, coverage_pct, capabilities, quality_status, ...}]`
+
+### finboard_dataset_release_get
+查询数据集发布详情(含逐标的覆盖、资产规则、能力缺口)。
+- 参数:`release_id: str`
+- 返回:完整 release manifest + symbol_count/row_count/coverage_pct;未找到 → `not_found`
+
+### finboard_dataset_manifest_list
+列出数据集发布清单(dataset manifests)。
+- 参数:`dataset_name?` / `quality_status?` / `limit?: int = 50`
+- 返回:`list[{id, dataset_name, source, version, start_date, end_date, row_count,
+  symbol_count, coverage_pct, quality_status, quality_report, published_at, ...}]`
+
+### finboard_data_cache_status
+查询行情缓存状态(分页)。扫描 `data_cache/*.parquet`,只读 Parquet footer。
+- 参数:`limit?: int = 200` / `offset?: int = 0` / `q?` / `period?` / `adjust?` /
+  `listing_board?: list[str]`
+- 返回:`{items: list[{symbol, listing_board, period, adjust, bar_count, first_date,
+  last_date, last_close, source}], total, limit, offset}`
+
+### finboard_data_quality_check
+检查已缓存行情数据的质量(缺失 / 异常 / 重复)。
+- 参数:`symbols?: str`(逗号分隔,不传则检查全部)/ `adjust?: str = "qfq"`
+- 返回:`list[{symbol, total_bars, anomaly_count, duplicate_count, sources,
+  anomalies, passed, primary_source, error?}]`(逐 code 容错)
+
+### finboard_tushare_quota
+查询 Tushare API 配额状态。
+- 参数:无
+- 返回:`{date, requests_per_minute, daily_limit, used, remaining}`
+
 ## Planned 工具(🔒 尚未实现,对应 issue)
 
 以下工具尚未实现,列出契约供 agent 知晓未来能力边界。扩展顺序见
 `packages/finboard-mcp/ROADMAP.md`。
-
-### 🔒 #124 数据查询工具 `finboard.data.*`
-- `finboard_data_instruments` —— 列出/搜索标的元数据(代码 / 名称 / 市场)
-- `finboard_data_datasets` —— 列出已发布数据集(版本 / 状态 / checksum)
-- `finboard_data_releases` —— 查询数据发布版本
-- `finboard_data_cache_status` —— 行情缓存覆盖度与质量
-- `finboard_data_quality` —— 数据质量报告(缺失 / 异常)
 
 ### 🔒 #125 因子工具 `finboard.factor.*`
 - `finboard_factor_catalog` —— 因子目录(白名单候选池)
