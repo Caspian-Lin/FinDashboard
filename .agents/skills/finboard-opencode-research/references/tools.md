@@ -2,17 +2,20 @@
 
 本文件列出 `finboard-researcher` agent 可用的全部 `finboard.*` MCP 工具。
 所有工具返回统一信封 `ToolEnvelope`:
-`operation_id` / `status`(ok|denied|error|pending_approval) / `data` /
+`operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-## 权限矩阵(#122 更新:研究写操作自主执行)
+当前已实现 14 个工具(✅);planned 工具(🔒 #124-#128)尚未实现,
+列出契约供 agent 知晓未来能力边界。
+
+## 权限矩阵(#122:研究写操作自主执行)
 
 | 类别 | 只读/自主 | 永久不可用 |
 |------|----------|-----------|
-| 只读查询 | ✓ | |
-| 研究记忆 | ✓ | |
-| AI 草案(假设/策略) | ✓(产出草案,可追溯) | |
-| 创建 Run/回测/模拟盘/因子/策略 | ✓(后续 issue #124-#128 扩展) | |
+| 只读查询(run.*) | ✅ | |
+| 研究记忆(memory.*) | ✅ | |
+| AI 草案(ai.*:假设/策略) | ✅(产出草案,可追溯) | |
+| 数据查询 / 因子 / 策略规格 / 回测 / 模拟 / portfolio | 🔒 #124-#128(扩展中) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读)
@@ -99,3 +102,42 @@ AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不
 ### finboard_memory_archive
 归档(status=archived)。
 - 参数:`memory_id: str`
+
+## Planned 工具(🔒 尚未实现,对应 issue)
+
+以下工具尚未实现,列出契约供 agent 知晓未来能力边界。扩展顺序见
+`packages/finboard-mcp/ROADMAP.md`。
+
+### 🔒 #124 数据查询工具 `finboard.data.*`
+- `finboard_data_instruments` —— 列出/搜索标的元数据(代码 / 名称 / 市场)
+- `finboard_data_datasets` —— 列出已发布数据集(版本 / 状态 / checksum)
+- `finboard_data_releases` —— 查询数据发布版本
+- `finboard_data_cache_status` —— 行情缓存覆盖度与质量
+- `finboard_data_quality` —— 数据质量报告(缺失 / 异常)
+
+### 🔒 #125 因子工具 `finboard.factor.*`
+- `finboard_factor_catalog` —— 因子目录(白名单候选池)
+- `finboard_factor_snapshot` —— 因子快照(版本化,可追溯)
+- `finboard_factor_signal` —— 信号计算(无代码规格驱动)
+- `finboard_factor_experiment` —— 因子实验(登记 / 机器验证终态绑定)
+
+### 🔒 #126 策略规格工具 `finboard.strategy.*`
+- `finboard_strategy_registry` —— 策略注册表
+- `finboard_strategy_template` —— 无代码策略模板
+- `finboard_strategy_validate` —— 策略规格校验(schema / 白名单)
+- `finboard_strategy_draft` —— 策略草案(agent 可自主生成)
+- `finboard_strategy_publish` —— 发布策略版本(版本化,不可变)
+
+### 🔒 #127 回测 + 模拟盘 + 研究运行工具
+- `finboard_backtest_*` —— 回测(行情回放 + 纸面撮合 + 绩效分析)
+- `finboard_simulation_*` —— 模拟盘(独立 simulation_* 表,持久化)
+- `finboard_run_create` —— 创建 ResearchRun(agent 可自主执行)
+
+### 🔒 #128 portfolio 计算工具 `finboard.portfolio.*`
+- `finboard_portfolio_allocate` —— 目标仓位生成
+- `finboard_portfolio_sizing` —— 资金分配 / 三档可行性
+- `finboard_portfolio_feasibility` —— 硬约束 + 风险贡献上限
+- `finboard_portfolio_attribution` —— 归因分析
+
+> 所有 planned 工具同样遵守权限边界:研究写操作 agent 自主执行,
+> 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
