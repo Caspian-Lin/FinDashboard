@@ -1,20 +1,16 @@
-"""finboard-opencode:OpenCode 研究运行时集成(issue #109 / #118)。
+"""finboard-opencode:OpenCode 研究运行时集成(issue #109 / #118 / 重构 #121)。
 
-会话关联(``conversation_id`` ↔ OpenCode ``session_id`` ↔ ``agent_run_id``)、
-SSE 事件订阅与断线恢复、关键事件持久化;以及 Web 工作台进程托管与访问凭证签发。
+OpenCode 自身管理会话 / 历史 / 恢复;FinBoard 负责:
+* Docker 容器级隔离的 ``opencode web`` 进程托管(:mod:`process_manager`);
+* OpenCode 运行时 HTTP/SSE 客户端(:mod:`runtime`);
+* Web 访问凭证签发(:mod:`access`)。
 
 红线:OpenCode 是受控研究运行时,不连接实盘 broker / 账户 / 订单 / 持仓 / 风控。
 """
 
 from finboard_opencode.access import (
     AccessCredentialIssuer,
-    AccessNotAuthorizedError,
     OpenCodeAccessInfo,
-)
-from finboard_opencode.conversation import (
-    KEY_EVENT_TYPES,
-    ConversationNotFoundError,
-    ConversationService,
 )
 from finboard_opencode.process_manager import (
     OpenCodeProcessConfig,
@@ -23,33 +19,14 @@ from finboard_opencode.process_manager import (
     ProcessStatus,
     which_opencode,
 )
-from finboard_opencode.repository import (
-    AgentConversationRepository,
-    AgentEventRepository,
-)
 from finboard_opencode.runtime import (
     OpenCodeRuntimeClient,
     OpenCodeRuntimeError,
     OpenCodeUnavailableError,
 )
-from finboard_opencode.schemas import (
-    AgentEvent,
-    ConversationRecord,
-    ConversationStatus,
-    generate_conversation_id,
-)
 
 __all__ = [
-    "KEY_EVENT_TYPES",
     "AccessCredentialIssuer",
-    "AccessNotAuthorizedError",
-    "AgentConversationRepository",
-    "AgentEvent",
-    "AgentEventRepository",
-    "ConversationNotFoundError",
-    "ConversationRecord",
-    "ConversationService",
-    "ConversationStatus",
     "OpenCodeAccessInfo",
     "OpenCodeProcessConfig",
     "OpenCodeProcessError",
@@ -58,6 +35,5 @@ __all__ = [
     "OpenCodeRuntimeError",
     "OpenCodeUnavailableError",
     "ProcessStatus",
-    "generate_conversation_id",
     "which_opencode",
 ]

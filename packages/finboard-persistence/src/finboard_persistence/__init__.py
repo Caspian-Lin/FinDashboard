@@ -29,8 +29,6 @@ from finboard_persistence.factor_lab_repo import (
 from finboard_persistence.factor_repo import FactorSnapshotRepository
 from finboard_persistence.models import (
     AccountModel,
-    AgentConversationModel,
-    AgentEventModel,
     AIAuditEventModel,
     AIDraftModel,
     AuditLogModel,
@@ -131,8 +129,6 @@ __all__ = [
     "AIDraftRepository",
     "AccountModel",
     "AccountRepository",
-    "AgentConversationModel",
-    "AgentEventModel",
     "AuditLogModel",
     "AuditLogRepository",
     "BacktestRunModel",

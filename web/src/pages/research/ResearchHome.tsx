@@ -8,6 +8,7 @@ import {
   GitBranch,
   Scale,
   PlayCircle,
+  MonitorSmartphone,
   Sparkles,
   FileText,
   ArrowRight,
@@ -36,7 +37,7 @@ const workflowSteps = [
   { to: "/research/runs", label: "研究运行", icon: GitBranch, desc: "冻结输入、血缘追踪与运行重放" },
   { to: "/research/portfolio", label: "组合与风险", icon: Scale, desc: "目标权重分配、离散交易与资金可行性" },
   { to: "/research/simulation", label: "模拟盘", icon: PlayCircle, desc: "纸面撮合、目标仓位决策与绩效报告" },
-  { to: "/research/ai", label: "AI 助手", icon: Sparkles, desc: "因子假设草案、策略 diff 与金融问答" },
+  { to: "/research/workbench", label: "研究工作台", icon: MonitorSmartphone, desc: "OpenCode Web 研究交互 + AI 草案/假设审批闭环" },
   { to: "/research/reports", label: "研究报告", icon: FileText, desc: "聚合展示运行结果、绩效归因与风险" },
 ];
 
@@ -196,13 +197,13 @@ export default function ResearchHome() {
           </CardHeader>
           <CardContent>
             {draftsError ? (
-              <p className="py-4 text-center text-sm text-destructive">AI 草案加载失败，请进入「AI 助手」重试。</p>
+              <p className="py-4 text-center text-sm text-destructive">AI 草案加载失败，请进入「研究工作台 → 审批中心」重试。</p>
             ) : drafts && drafts.length > 0 ? (
               <div className="space-y-2">
                 {drafts.slice(0, 5).map((draft) => (
                   <Link
                     key={draft.draft_id}
-                    to="/research/ai"
+                    to="/research/workbench"
                     className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent"
                   >
                     <div className="flex items-center gap-2">

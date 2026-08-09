@@ -79,3 +79,12 @@ Thumbs.db
 desktop.ini
 /data_cache/
 /data_releases/
+
+.zcode/
+
+# --- OpenCode 运行时产物 ---
+# agent 配置 / opencode.json 入库,运行时 PID / 会话状态文件不入库
+.opencode/last-pid.txt
+.opencode/running-pid.txt
+.opencode/server.json
+.opencode/auth.json

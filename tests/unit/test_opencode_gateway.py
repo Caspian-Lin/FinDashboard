@@ -1,10 +1,10 @@
-"""OpenCode Web 网关路由单元测试(issue #118)。
+"""OpenCode Web 网关路由单元测试(issue #118 / 重构 #121)。
 
 用 FastAPI TestClient + dependency_overrides 注入桩对象,验证:
 * ``/status`` / ``/health`` / ``/access`` 在网关关闭时返回 503;
 * ``/status`` 返回脱敏状态快照(不含密码);
 * ``/health`` 代理探测;
-* ``/access`` 成功签发凭证 + 授权失败 403 + 会话不存在 404。
+* ``/access`` 成功签发凭证(#121 重构后不绑定 conversation)。
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from finboard_api.deps import (
-    get_conversation_service,
     get_opencode_access_issuer,
     get_opencode_process_manager,
 )
@@ -27,7 +26,6 @@ from finboard_opencode import (
     OpenCodeProcessManager,
     ProcessStatus,
 )
-from finboard_opencode.schemas import ConversationRecord, ConversationStatus
 
 # ---------------------------------------------------------------------------
 # 桩对象
@@ -49,7 +47,7 @@ class StubProcessManager(OpenCodeProcessManager):
         return ProcessStatus(
             running=True,
             managed=False,
-            pid=None,
+            container_id=None,
             base_url=self.base_url,
             healthy=self._stub_healthy,
             version=self._version,
@@ -62,46 +60,16 @@ class StubProcessManager(OpenCodeProcessManager):
         return {"healthy": True, "version": self._version}
 
 
-class StubConversationService:
-    """桩:返回预设的 conversation record。"""
-
-    def __init__(self, record: ConversationRecord | None) -> None:
-        self._record = record
-
-    async def get_conversation(self, conversation_id: str) -> ConversationRecord | None:
-        return self._record
-
-
-def _make_record(
-    *, status: ConversationStatus = ConversationStatus.ACTIVE
-) -> ConversationRecord:
-    now = datetime.now(UTC)
-    return ConversationRecord(
-        conversation_id="CONV-20260101-deadbeefdeadbeef",
-        opencode_session_id="sess-xyz",
-        agent_run_id=None,
-        title="t",
-        status=status,
-        agent_name="finboard-researcher",
-        model_ref=None,
-        last_event_seq=0,
-        created_at=now,
-        updated_at=now,
-    )
-
-
 def _build_app(
     *,
     manager: OpenCodeProcessManager | None,
     issuer: AccessCredentialIssuer | None,
-    service: Any,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(opencode_gateway_router)
 
     app.dependency_overrides[get_opencode_process_manager] = lambda: manager
     app.dependency_overrides[get_opencode_access_issuer] = lambda: issuer
-    app.dependency_overrides[get_conversation_service] = lambda: service
     return app
 
 
@@ -111,23 +79,23 @@ def _build_app(
 
 
 def test_status_returns_503_when_disabled() -> None:
-    app = _build_app(manager=None, issuer=None, service=StubConversationService(None))
+    app = _build_app(manager=None, issuer=None)
     with TestClient(app) as client:
         resp = client.get("/api/opencode/status")
     assert resp.status_code == 503
 
 
 def test_health_returns_503_when_disabled() -> None:
-    app = _build_app(manager=None, issuer=None, service=StubConversationService(None))
+    app = _build_app(manager=None, issuer=None)
     with TestClient(app) as client:
         resp = client.get("/api/opencode/health")
     assert resp.status_code == 503
 
 
 def test_access_returns_503_when_disabled() -> None:
-    app = _build_app(manager=None, issuer=None, service=StubConversationService(None))
+    app = _build_app(manager=None, issuer=None)
     with TestClient(app) as client:
-        resp = client.post("/api/opencode/access", json={"conversation_id": "CONV-x"})
+        resp = client.post("/api/opencode/access")
     assert resp.status_code == 503
 
 
@@ -139,9 +107,7 @@ def test_access_returns_503_when_disabled() -> None:
 def test_status_returns_snapshot_without_password() -> None:
     manager = StubProcessManager(healthy=True)
     issuer = AccessCredentialIssuer(manager)
-    app = _build_app(
-        manager=manager, issuer=issuer, service=StubConversationService(None)
-    )
+    app = _build_app(manager=manager, issuer=issuer)
     with TestClient(app) as client:
         resp = client.get("/api/opencode/status")
     assert resp.status_code == 200
@@ -156,9 +122,7 @@ def test_status_returns_snapshot_without_password() -> None:
 
 def test_health_probes_upstream() -> None:
     manager = StubProcessManager(healthy=True)
-    app = _build_app(
-        manager=manager, issuer=None, service=StubConversationService(None)
-    )
+    app = _build_app(manager=manager, issuer=None)
     with TestClient(app) as client:
         resp = client.get("/api/opencode/health")
     assert resp.status_code == 200
@@ -169,9 +133,7 @@ def test_health_probes_upstream() -> None:
 
 def test_health_reports_unhealthy_when_down() -> None:
     manager = StubProcessManager(healthy=False)
-    app = _build_app(
-        manager=manager, issuer=None, service=StubConversationService(None)
-    )
+    app = _build_app(manager=manager, issuer=None)
     with TestClient(app) as client:
         resp = client.get("/api/opencode/health")
     assert resp.status_code == 200
@@ -179,68 +141,33 @@ def test_health_reports_unhealthy_when_down() -> None:
 
 
 # ---------------------------------------------------------------------------
-# access(凭证签发)
+# access(凭证签发 —— #121 重构后不绑定 conversation)
 # ---------------------------------------------------------------------------
 
 
-def test_access_issues_credential_for_active_conversation() -> None:
+def test_access_issues_credential_when_gateway_enabled() -> None:
     manager = StubProcessManager()
     issuer = AccessCredentialIssuer(manager)
-    record = _make_record()
-    app = _build_app(
-        manager=manager, issuer=issuer, service=StubConversationService(record)
-    )
+    app = _build_app(manager=manager, issuer=issuer)
     with TestClient(app) as client:
-        resp = client.post(
-            "/api/opencode/access",
-            json={"conversation_id": record.conversation_id},
-        )
+        resp = client.post("/api/opencode/access")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["conversation_id"] == record.conversation_id
-    assert body["opencode_session_id"] == "sess-xyz"
     assert body["web_url"] == "http://127.0.0.1:4097"
     assert body["username"] == "opencode"
     assert body["password"] == "stub-secret"
     assert body["agent_name"] == "finboard-researcher"
+    # #121 重构后 AccessOut 不再有 conversation_id / opencode_session_id
+    assert "conversation_id" not in body
+    assert "opencode_session_id" not in body
 
 
-def test_access_rejects_non_active_conversation() -> None:
+def test_access_does_not_require_request_body() -> None:
+    """#121 重构后 /access 不再需要 conversation_id,空 body 即可。"""
     manager = StubProcessManager()
     issuer = AccessCredentialIssuer(manager)
-    record = _make_record(status=ConversationStatus.COMPLETED)
-    app = _build_app(
-        manager=manager, issuer=issuer, service=StubConversationService(record)
-    )
+    app = _build_app(manager=manager, issuer=issuer)
     with TestClient(app) as client:
-        resp = client.post(
-            "/api/opencode/access",
-            json={"conversation_id": record.conversation_id},
-        )
-    assert resp.status_code == 403
-
-
-def test_access_rejects_missing_conversation() -> None:
-    manager = StubProcessManager()
-    issuer = AccessCredentialIssuer(manager)
-    app = _build_app(
-        manager=manager, issuer=issuer, service=StubConversationService(None)
-    )
-    with TestClient(app) as client:
-        resp = client.post(
-            "/api/opencode/access",
-            json={"conversation_id": "CONV-missing"},
-        )
-    # service.get_conversation 返回 None → issuer 抛 AccessNotAuthorizedError → 403
-    assert resp.status_code == 403
-
-
-def test_access_validates_request_body() -> None:
-    manager = StubProcessManager()
-    issuer = AccessCredentialIssuer(manager)
-    app = _build_app(
-        manager=manager, issuer=issuer, service=StubConversationService(None)
-    )
-    with TestClient(app) as client:
-        resp = client.post("/api/opencode/access", json={})
-    assert resp.status_code == 422
+        # 不传 body 也能签发
+        resp = client.post("/api/opencode/access")
+    assert resp.status_code == 200

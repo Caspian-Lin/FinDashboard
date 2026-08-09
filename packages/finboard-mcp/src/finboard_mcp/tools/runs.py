@@ -1,7 +1,7 @@
 """``finboard.run.*`` 工具 —— ResearchRun 只读查询(复用 ``ResearchRunRepository``)。
 
-只读工具自动允许;不暴露任何写能力(创建 Run / 启动回测属于审批门写工具,
-见 ``finboard_mcp.tools.write``)。
+只读工具自动允许。研究写工具(创建 Run / 启动回测)在后续 issue(#124-#128)
+中扩展,agent 可自主执行(#122 放开审批门)。
 """
 
 from __future__ import annotations

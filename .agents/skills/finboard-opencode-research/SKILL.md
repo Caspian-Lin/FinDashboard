@@ -1,5 +1,5 @@
 ---
-description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作流、工具选择、审批门与来源引用。用于量化研究、因子分析、回测/模拟盘分析、研究记忆。不用于实盘交易或代码编辑。
+description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作流、工具选择、权限边界与来源引用。用于量化研究、因子分析、回测/模拟盘分析、研究记忆。不用于实盘交易或代码编辑。
 ---
 
 # FinBoard 研究 Skill
@@ -13,9 +13,10 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 核心原则(HARD RULES)
 
-1. **只读为主** —— 数据 / 因子 / ResearchRun / 模拟盘查询 / AI 问答可直接调用。
-2. **写操作走审批** —— 创建 ResearchRun / 回测 / 模拟盘 / 定时任务产出*草案*,
-   需人工审批,AI 无法自主执行。
+1. **只读直接调用** —— 数据 / 因子 / ResearchRun / 模拟盘查询 / AI 问答可直接调用。
+2. **研究写操作可自主执行**(#122) —— 创建因子 / 快照 / 策略 / 运行回测 / 发布数据 /
+   启动模拟盘等研究写操作 agent 可通过 MCP **自主执行**,无需人工审批。
+   不触及交易安全红线(不连 broker / 账户 / 订单 / 持仓)。
 3. **实盘能力永久不可用** —— 下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker /
    凭证探测不在工具集中。需要它们 = 走错了路。
 4. **不生成代码** —— 策略是无代码版本化规格,禁止生成 Python / 模块路径 /
@@ -26,9 +27,9 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | 场景 | 工具 | 权限 |
 |------|------|------|
 | 查询 ResearchRun | `finboard.run.list` / `finboard.run.get` / `finboard.run.artifacts` | 只读 |
-| 金融问答 / 因子假设 / 策略草案 | `finboard.ai.ask` / `finboard.ai.propose_*` | 草案(需审批) |
+| 金融问答 / 因子假设 / 策略草案 | `finboard.ai.ask` / `finboard.ai.propose_*` | 草案(可追溯) |
 | 记住 / 查询研究记忆 | `finboard.memory.*` | 直接执行 |
-| 创建回测 / 模拟盘 | 审批门 | 需人工确认 |
+| 创建回测 / 模拟盘 / 因子 / 策略 | 后续 issue 扩展的写工具(#124-#128) | 自主执行 |
 
 > 详细工具契约见 `references/tools.md`。
 

@@ -11,8 +11,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
+import httpx
 import structlog
+import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,7 +23,6 @@ from finboard_api.errors import finboard_error_handler
 from finboard_api.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_api.routes import (
     account_router,
-    agent_router,
     ai_research_router,
     audit_router,
     backtest_router,
@@ -86,6 +88,62 @@ async def _cancel_bulk_download_task(app: FastAPI) -> None:
         )
 
 
+async def _start_embedded_mcp_server(app: FastAPI, settings: Settings) -> None:
+    """在当前事件循环后台启动 finboard-mcp HTTP server(uvicorn 后台任务)。
+
+    容器内 opencode 通过 ``host.docker.internal:{mcp_port}`` 访问该 server。
+    复用 ``build_mcp_server()``(研究域独立 lifespan + 独立 AsyncEngine,与
+    TradingKernel 无 session 冲突)+ Bearer 鉴权(``mcp_auth_token``)。
+
+    失败降级:无 ``mcp_auth_token`` → 跳过(HTTP 传输强制鉴权,空 token 拒绝启动);
+    端口已被占用(上次进程残留)→ 后台任务捕获 ``SystemExit``/异常,记 warning,
+    不炸 API(容器内 opencode 连不上 MCP 会降级为内置工具)。
+    """
+    if not settings.mcp_auth_token:
+        logger.warning("api.opencode_mcp_skipped", reason="no_mcp_auth_token")
+        return
+    from finboard_mcp.auth import wrap_with_bearer_auth
+    from finboard_mcp.server import build_mcp_server
+
+    mcp = build_mcp_server()
+    starlette_app = mcp.streamable_http_app(host=settings.mcp_host)
+    wrapped = wrap_with_bearer_auth(starlette_app, token=settings.mcp_auth_token)
+    config = uvicorn.Config(
+        wrapped,
+        host=settings.mcp_host,
+        port=settings.mcp_port,
+        log_level="warning",
+        loop="none",  # 复用当前 SelectorEventLoop(避免 Windows Proactor 冲突)
+    )
+    server = uvicorn.Server(config)
+    # 阻止 uvicorn 安装信号处理器(它会 sys.exit,在后台任务里会炸 API)。
+    server.install_signal_handlers = lambda: None  # type: ignore[attr-defined]
+
+    async def _serve_with_guard() -> None:
+        """``serve()`` 的安全包装:捕获 bind 失败的 SystemExit/OSError。
+
+        uvicorn ``Server.startup()`` 在端口 bind 失败时调 ``sys.exit(STARTUP_FAILURE)``
+        (= ``SystemExit(3)``)。在后台任务里未捕获会变成「Task exception was never
+        retrieved」+ 可能影响事件循环。这里捕获后记 warning,API 继续运行。
+        """
+        try:
+            await server.serve()
+        except (SystemExit, OSError) as exc:
+            logger.warning(
+                "api.opencode_mcp_bind_failed",
+                port=settings.mcp_port,
+                error=str(exc),
+            )
+
+    app.state.opencode_mcp_server = server
+    app.state.opencode_mcp_task = asyncio.create_task(_serve_with_guard())
+    logger.info(
+        "api.opencode_mcp_started",
+        host=settings.mcp_host,
+        port=settings.mcp_port,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
@@ -123,43 +181,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.llm_provider = llm_provider
         app.state.research_assistant = ResearchAssistant(llm_provider)
 
-        # OpenCode 研究运行时(issue #109):按需构建 runtime 单例。
-        opencode_runtime: OpenCodeRuntimeClient | None = None
-        if settings.opencode_enabled:
-            opencode_runtime = OpenCodeRuntimeClient(
-                base_url=settings.opencode_base_url,
-                api_prefix=settings.opencode_api_prefix,
-                timeout=settings.opencode_request_timeout_seconds,
-            )
-            app.state.opencode_runtime = opencode_runtime
-            app.state.opencode_default_agent = settings.opencode_default_agent
-            logger.info(
-                "api.opencode_runtime_started",
-                base_url=settings.opencode_base_url,
-                agent=settings.opencode_default_agent,
-            )
-        else:
-            app.state.opencode_runtime = None
-
-        # OpenCode Web 研究工作台(issue #118):进程级隔离实例 + 控制面网关。
+        # OpenCode 研究运行时(issue #109 / #118 / Docker 隔离)。
+        # 两种部署形态:
+        #   (A) web 容器模式(opencode_web_enabled):FinBoard 托管一个 Docker 化的
+        #       ``opencode web`` 容器(4097),它**同时**暴露 iframe UI 和 /api/* API。
+        #       runtime client 复用该容器(连 4097 + basic auth),不再需要独立的
+        #       ``opencode serve``(4096)。一个容器服务 iframe 嵌入 + 会话关联 API。
+        #   (B) 外部 serve 模式(仅 opencode_enabled,向后兼容):连接外部已启动的
+        #       ``opencode serve``(默认 4096,无 auth)。
+        app.state.opencode_runtime = None
         app.state.opencode_process_manager = None
         app.state.opencode_access_issuer = None
+
         if settings.opencode_web_enabled:
             web_config = OpenCodeProcessConfig(
-                binary=settings.opencode_binary,
+                image=settings.opencode_image,
+                container_name=settings.opencode_container_name,
                 port=settings.opencode_web_port,
                 hostname=settings.opencode_web_hostname,
                 cors_origins=settings.opencode_web_cors_origin_list(),
                 username=settings.opencode_web_username,
                 password=settings.opencode_web_password,
-                workdir=settings.opencode_workdir,
+                # workdir = 仓库根(含 .opencode / .agents),bind mount 进容器。
+                # 默认相对 CWD(make dev 在仓库根运行),解析成绝对路径给 docker -v。
+                workdir=await asyncio.to_thread(
+                    lambda: str(Path(settings.opencode_workdir).resolve())
+                ),
                 log_path=settings.opencode_log_path,
                 env_overrides=settings.opencode_env_override_map(),
+                mcp_auth_token=settings.mcp_auth_token,
             )
             process_manager = OpenCodeProcessManager(
                 web_config, manage_process=settings.opencode_manage_process
             )
-            ready = True
+            web_ready = True
             if settings.opencode_manage_process:
                 try:
                     await process_manager.start()
@@ -169,21 +224,65 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         "api.opencode_web_start_failed", error=str(exc)
                     )
                     await process_manager.stop()
-                    ready = False
+                    web_ready = False
             else:
                 logger.info(
                     "api.opencode_web_unmanaged", base_url=web_config.base_url
                 )
-            if ready:
+            if web_ready:
                 app.state.opencode_process_manager = process_manager
                 app.state.opencode_access_issuer = AccessCredentialIssuer(
                     process_manager, agent_name=settings.opencode_default_agent
+                )
+                # runtime client 复用 web 容器:base_url=4097,basic auth 用
+                # process_manager 实际生效凭证(password 可能是启动时随机生成的,
+                # 必须从运行中的 process_manager 读,不能从 settings 读空串)。
+                app.state.opencode_runtime = OpenCodeRuntimeClient(
+                    base_url=process_manager.base_url,
+                    api_prefix=settings.opencode_api_prefix,
+                    timeout=settings.opencode_request_timeout_seconds,
+                    auth=httpx.BasicAuth(
+                        process_manager.config.username,
+                        process_manager.effective_password,
+                    ),
                 )
                 logger.info(
                     "api.opencode_web_ready",
                     base_url=web_config.base_url,
                     managed=settings.opencode_manage_process,
                 )
+                logger.info(
+                    "api.opencode_runtime_started",
+                    base_url=process_manager.base_url,
+                    agent=settings.opencode_default_agent,
+                    mode="web_container",
+                    auth=True,
+                )
+            else:
+                logger.warning(
+                    "api.opencode_runtime_skipped", reason="web_container_not_ready"
+                )
+            # 内嵌启动 finboard-mcp HTTP server:容器内 opencode 通过
+            # ``host.docker.internal:{mcp_port}`` 访问它。复用 ``build_mcp_server()``
+            # + Bearer 鉴权(``mcp_auth_token``),以 uvicorn 后台任务跑在当前事件循环。
+            # 这样用户无需单独跑 ``python -m finboard_mcp``;设 ``opencode_embed_mcp``
+            # =False 可回退到独立进程模式。
+            if settings.opencode_embed_mcp:
+                await _start_embedded_mcp_server(app, settings)
+        elif settings.opencode_enabled:
+            # 形态 (B):外部 opencode serve(4096,无 auth),向后兼容。
+            app.state.opencode_runtime = OpenCodeRuntimeClient(
+                base_url=settings.opencode_base_url,
+                api_prefix=settings.opencode_api_prefix,
+                timeout=settings.opencode_request_timeout_seconds,
+            )
+            logger.info(
+                "api.opencode_runtime_started",
+                base_url=settings.opencode_base_url,
+                agent=settings.opencode_default_agent,
+                mode="external_serve",
+                auth=False,
+            )
 
         await kernel.start()
         logger.info("api.kernel_started", ready=kernel.ready)
@@ -217,6 +316,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             oc_process_manager = getattr(app.state, "opencode_process_manager", None)
             if oc_process_manager is not None:
                 await oc_process_manager.stop()
+            # 回收内嵌 finboard-mcp HTTP server(uvicorn 后台任务)。
+            mcp_server = getattr(app.state, "opencode_mcp_server", None)
+            if mcp_server is not None:
+                mcp_server.should_exit = True
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(mcp_server.shutdown(), timeout=5.0)
+                mcp_task = getattr(app.state, "opencode_mcp_task", None)
+                if isinstance(mcp_task, asyncio.Task) and not mcp_task.done():
+                    mcp_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await mcp_task
+                logger.info("api.opencode_mcp_stopped")
             logger.info("api.kernel_stopped")
 
 
@@ -265,7 +376,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_memories_router)
     app.include_router(research_runs_router)
     app.include_router(ai_research_router)
-    app.include_router(agent_router)
     app.include_router(opencode_gateway_router)
     app.include_router(instruments_router)
     app.include_router(portfolio_router)

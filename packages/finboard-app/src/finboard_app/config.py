@@ -8,12 +8,25 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from finboard_shared.types import BrokerKind, KillSwitchLevel
+
+
+def _strip_empty_values(data: Any) -> Any:
+    """把空字符串值视为「未设置」,从输入中删除,使其回落到字段默认值。
+
+    pydantic-settings 默认会把 ``FOO=`` 解析为 ``""`` 并作为显式值覆盖默认值,导致
+    int/float 字段(如 ``llm_total_timeout_seconds`` / ``llm_max_tokens``)抛
+    ``ValidationError``。前端设置页或手动编辑把某数值字段清空保存时会触发此问题。
+    删除键后,pydantic 会使用字段声明里的默认值。
+    """
+    if isinstance(data, dict):
+        return {k: v for k, v in data.items() if not (isinstance(v, str) and v.strip() == "")}
+    return data
 
 
 class Settings(BaseSettings):
@@ -99,6 +112,10 @@ class Settings(BaseSettings):
     mcp_transport: Literal["stdio", "streamable-http", "sse"] = "stdio"
     mcp_host: str = "127.0.0.1"
     mcp_port: int = 8765
+    # HTTP 传输(``streamable-http``/``sse``)的 Bearer token 鉴权。
+    # stdio 模式忽略(本机子进程接入无需鉴权);HTTP 模式必须设置,空值拒绝启动(防裸奔)。
+    # 敏感字段:不进入日志 / 审计 / Provenance(AGENTS.md 红线)。
+    mcp_auth_token: str = ""
     # 只读模式:禁用所有写工具(审批门也不开放),只暴露查询与 AI 问答。
     mcp_readonly_only: bool = False
     # 审计是否额外持久化到研究审计表(默认仅结构化日志 + 内存副本)。
@@ -134,13 +151,28 @@ class Settings(BaseSettings):
     opencode_web_username: str = "opencode"
     # basic auth 密码;留空则启动时自动生成强随机密码并记入启动日志。
     opencode_web_password: str = ""
-    # 研究沙箱工作目录(OpenCode 在此运行,与 FinBoard 仓库隔离)。
-    opencode_workdir: str = ".opencode/workspace"
+    # 宿主机侧工作目录(仓库根;含 ``.opencode`` / ``.agents``,bind mount 进容器)。
+    opencode_workdir: str = "."
     # 子进程日志路径。
     opencode_log_path: str = ".opencode/logs/opencode-web.log"
     # 额外注入子进程的环境变量(LLM provider Key 等;逗号分隔 KEY=VAL)。
     # 严格白名单继承:FinBoard 的 DB 密码 / broker 凭证永不传入 OpenCode 子进程。
     opencode_env_overrides: str = ""
+
+    # ---- OpenCode Web Docker 隔离(issue #xxx,基于 #118)----
+    # OpenCodeProcessManager 托管一个进程级隔离的 Docker 容器(而非宿主机子进程),
+    # 实现与会话 / auth.json / 版本彻底隔离。需要 Docker Desktop 运行。
+    # Docker 镜像(官方 ``ghcr.io/anomalyco/opencode``;旧 ``ghcr.io/sst/opencode`` 已废弃)。
+    opencode_image: str = "ghcr.io/anomalyco/opencode:latest"
+    # 固定容器名(便于 stop / logs / inspect)。
+    opencode_container_name: str = "finboard-opencode-web"
+    # 容器内 opencode 连接宿主机 finboard_mcp 的 URL(跨容器 → host.docker.internal)。
+    opencode_mcp_remote_url: str = "http://host.docker.internal:8765/mcp"
+    # 是否在 ``opencode_web_enabled`` 时由 API lifespan 内嵌启动 finboard-mcp HTTP
+    # server(复用 ``mcp_host``/``mcp_port``/``mcp_auth_token``,uvicorn 后台任务)。
+    # 默认开启:容器内 opencode 连 ``host.docker.internal:8765`` 时无需用户手动跑
+    # ``python -m finboard_mcp``。设 False 回退到独立进程模式(向后兼容)。
+    opencode_embed_mcp: bool = True
 
     def opencode_web_cors_origin_list(self) -> list[str]:
         """解析逗号分隔的 CORS 源列表。"""
@@ -164,6 +196,12 @@ class Settings(BaseSettings):
             if key:
                 result[key] = value
         return result
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_empty_str_fields(cls, data: Any) -> Any:
+        """空字符串视为未设置,从输入删除后回落到字段默认值(见模块级说明)。"""
+        return _strip_empty_values(data)
 
 
 def load_settings(env_file: str | None = None) -> Settings:

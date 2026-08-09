@@ -5,15 +5,15 @@
 `operation_id` / `status`(ok|denied|error|pending_approval) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-## 权限矩阵
+## 权限矩阵(#122 更新:研究写操作自主执行)
 
-| 类别 | 自动允许 | 审批门 | 永久不可用 |
-|------|---------|--------|-----------|
-| 只读查询 | ✓ | | |
-| 研究记忆 | ✓ | | |
-| AI 草案(假设/策略) | | ✓(产出草案,需人工审批) | |
-| 创建 Run/回测/模拟盘 | | ✓(pending_approval) | |
-| 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | | ✗ |
+| 类别 | 只读/自主 | 永久不可用 |
+|------|----------|-----------|
+| 只读查询 | ✓ | |
+| 研究记忆 | ✓ | |
+| AI 草案(假设/策略) | ✓(产出草案,可追溯) | |
+| 创建 Run/回测/模拟盘/因子/策略 | ✓(后续 issue #124-#128 扩展) | |
+| 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读)
 
@@ -32,10 +32,11 @@
 - 参数:`run_id: str`
 - 返回:`list[{artifact_id, sequence, stage, trace_id, payload}]`
 
-## finboard.ai.*(草案,需人工审批)
+## finboard.ai.*(AI 草案,可追溯)
 
-底层 `ResearchAssistant` 已强制 `assert_research_only_request`(拒绝越权与注入)
+底层 `ResearchAssistant` 已强制 `assert_research_only_request`(拒绝实盘越权与注入)
 与 `sanitize_prompt`(抹掉凭证)。MCP 层 `prompt` 参数脱敏后入审计。
+AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不再 block 写操作。
 
 ### finboard_ai_ask
 金融问答(引用来源 / 声明不确定性)。
@@ -43,16 +44,16 @@
 - 返回:`data`(AnswerResult)+ `provenance`
 
 ### finboard_ai_propose_hypothesis
-生成因子假设草案(需人工审批后登记)。
+生成因子假设草案(可追溯,无需审批即可登记)。
 - 参数:`prompt: str`
 - 返回:`data`(FactorHypothesis 草案)+ `provenance`
 
 ### finboard_ai_propose_strategy_draft
-生成无代码策略组件草案(受白名单约束,需人工审批)。
+生成无代码策略组件草案(受白名单约束,可追溯)。
 - 参数:`prompt: str`
 
 ### finboard_ai_propose_strategy_diff
-生成策略版本 diff 草案(需审批后通过策略规格 API 正式化)。
+生成策略版本 diff 草案(可通过策略规格 API 正式化)。
 - 参数:`prompt: str`
 
 ## finboard.memory.*(研究记忆,自动允许)
