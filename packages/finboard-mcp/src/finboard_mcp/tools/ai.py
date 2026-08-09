@@ -113,21 +113,21 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_ai_propose_hypothesis",
-        description="生成因子假设草案(需人工审批后登记)。",
+        description="生成因子假设草案(可追溯,无需审批即可登记)。",
     )
     async def _hypo(prompt: str, ctx: Context) -> ToolEnvelope:
         return await propose_hypothesis(app_context(ctx), prompt)
 
     @mcp.tool(
         name="finboard_ai_propose_strategy_draft",
-        description="生成无代码策略组件草案(受白名单约束,需人工审批)。",
+        description="生成无代码策略组件草案(受白名单约束,可追溯)。",
     )
     async def _draft(prompt: str, ctx: Context) -> ToolEnvelope:
         return await propose_strategy_draft(app_context(ctx), prompt)
 
     @mcp.tool(
         name="finboard_ai_propose_strategy_diff",
-        description="生成策略版本 diff 草案(需人工审批后通过策略规格 API 正式化)。",
+        description="生成策略版本 diff 草案(可追溯,可通过策略规格 API 正式化)。",
     )
     async def _diff(prompt: str, ctx: Context) -> ToolEnvelope:
         return await propose_strategy_diff(app_context(ctx), prompt)

@@ -24,14 +24,21 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-| 场景 | 工具 | 权限 |
-|------|------|------|
-| 查询 ResearchRun | `finboard.run.list` / `finboard.run.get` / `finboard.run.artifacts` | 只读 |
-| 金融问答 / 因子假设 / 策略草案 | `finboard.ai.ask` / `finboard.ai.propose_*` | 草案(可追溯) |
-| 记住 / 查询研究记忆 | `finboard.memory.*` | 直接执行 |
-| 创建回测 / 模拟盘 / 因子 / 策略 | 后续 issue 扩展的写工具(#124-#128) | 自主执行 |
+当前已实现 14 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
-> 详细工具契约见 `references/tools.md`。
+| 场景 | 工具 | 状态 | 权限 |
+|------|------|------|------|
+| 查询 ResearchRun | `finboard.run.list` / `.get` / `.artifacts` | ✅ | 只读 |
+| 金融问答 / 因子假设 / 策略草案 | `finboard.ai.ask` / `.propose_*` | ✅ | 草案(可追溯) |
+| 记住 / 查询 / 纠正研究记忆 | `finboard.memory.*`(7 个) | ✅ | 直接执行 |
+| 数据查询(instruments/datasets/releases/cache/quality) | 🔒 #124 | 🔒 | 自主执行 |
+| 因子(catalog/snapshot/signal/experiment) | 🔒 #125 | 🔒 | 自主执行 |
+| 策略规格(registry/template/validate/draft/publish) | 🔒 #126 | 🔒 | 自主执行 |
+| 回测 + 模拟盘 + 研究运行 | 🔒 #127 | 🔒 | 自主执行 |
+| portfolio 计算(allocate/sizing/feasibility/attribution) | 🔒 #128 | 🔒 | 自主执行 |
+
+> 详细工具契约见 `references/tools.md`;扩展计划见
+> `packages/finboard-mcp/ROADMAP.md`。
 
 ## 研究工作流(简版)
 
@@ -40,7 +47,8 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 3. **记忆上下文** —— 用 `finboard.memory.remember` 记住关键发现,关联研究产物。
 4. **引用来源** —— 所有结论引用 ResearchRun / 数据集 / 模拟盘产物 ID。
 
-> 详细工作流与决策树见 `references/workflow.md`。
+> 详细工作流与决策树见 `references/workflow.md`;
+> 完整研究流程(数据→因子→策略→回测→模拟→评估)见 `references/research-workflow.md`。
 
 ## 来源引用规则
 
@@ -57,3 +65,13 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
   `finboard.memory.forget`(软删除,保留审计)。
 
 > 详细记忆规则与生命周期见 `references/memory.md`。
+
+## 参考文档索引
+
+| 文档 | 内容 |
+|------|------|
+| `references/tools.md` | 14 个 MCP 工具完整契约(参数 / 返回 / 场景) |
+| `references/workflow.md` | 研究工作流决策树 + 标准研究循环 |
+| `references/research-workflow.md` | 完整研究流程详解(数据→因子→策略→回测→模拟→评估) |
+| `references/memory.md` | 研究记忆使用规则与生命周期 |
+| `references/system-overview.md` | FinBoard 系统架构概览(包结构 / 模块职责 / 研究 vs 实盘隔离) |
