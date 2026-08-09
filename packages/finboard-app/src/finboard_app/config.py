@@ -168,6 +168,11 @@ class Settings(BaseSettings):
     opencode_container_name: str = "finboard-opencode-web"
     # 容器内 opencode 连接宿主机 finboard_mcp 的 URL(跨容器 → host.docker.internal)。
     opencode_mcp_remote_url: str = "http://host.docker.internal:8765/mcp"
+    # 是否在 ``opencode_web_enabled`` 时由 API lifespan 内嵌启动 finboard-mcp HTTP
+    # server(复用 ``mcp_host``/``mcp_port``/``mcp_auth_token``,uvicorn 后台任务)。
+    # 默认开启:容器内 opencode 连 ``host.docker.internal:8765`` 时无需用户手动跑
+    # ``python -m finboard_mcp``。设 False 回退到独立进程模式(向后兼容)。
+    opencode_embed_mcp: bool = True
 
     def opencode_web_cors_origin_list(self) -> list[str]:
         """解析逗号分隔的 CORS 源列表。"""

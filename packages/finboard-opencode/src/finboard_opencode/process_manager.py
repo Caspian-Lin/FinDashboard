@@ -660,13 +660,53 @@ def _prepare_runtime_dirs(workdir: Path, log_path: Path) -> Any:
     return log_path.open("a", encoding="utf-8")
 
 
+#: Windows Docker Desktop 常见安装路径模板(按 ``%VAR%`` 展开)。
+#: 探测顺序:标准全用户安装 → 当前用户安装 → 版本绑定 bin。Docker Desktop 安装器
+#: 通常会把 ``resources\bin`` 加进系统 PATH,但从 IDE / 服务 / 非交互 shell 启动
+#: FinBoard 时该目录可能不在 PATH 中(``shutil.which`` 返回 None),需要回退探测。
+_WINDOWS_DOCKER_PATHS: tuple[str, ...] = (
+    r"${ProgramFiles}\Docker\Docker\resources\bin\docker.exe",
+    r"${ProgramFiles(x86)}\Docker\Docker\resources\bin\docker.exe",
+    r"${LOCALAPPDATA}\Docker\Docker\resources\bin\docker.exe",
+    r"${ProgramData}\DockerDesktop\version-bin\docker.exe",
+)
+
+
+def _windows_docker_binary_candidates() -> list[str]:
+    """展开 Windows Docker Desktop 安装路径模板为具体候选路径。
+
+    模板中的 ``${VAR}`` 用 ``os.environ`` 展开;未设置的环境变量展开为空串,
+    对应候选被跳过。重复路径去重(不同变量可能指向同一目录)。
+    """
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for template in _WINDOWS_DOCKER_PATHS:
+        # 简单的 ``${VAR}`` 展开(避免引入 string.Template 对 ``$VAR`` 的歧义)。
+        path = os.path.expandvars(template)
+        if path and path not in seen:
+            seen.add(path)
+            candidates.append(path)
+    return candidates
+
+
 def _resolve_docker_binary() -> str | None:
     """解析 docker CLI 完整路径;不存在返回 ``None``。
 
-    Windows 上 docker 安装为 ``docker.exe``,``create_subprocess_exec`` 不走 shell、
-    不按 PATHEXT 自动补扩展名,故用 ``shutil.which`` 解析含扩展名的完整路径。
+    优先 ``shutil.which("docker")``(走 PATH);Windows 上 docker 安装为
+    ``docker.exe``,``create_subprocess_exec`` 不走 shell、不按 PATHEXT 自动补
+    扩展名,故 ``which`` 会返回含扩展名的完整路径。
+
+    当 ``which`` 失败时(IDE / 服务 / 非交互 shell 启动 FinBoard,Docker Desktop
+    的 bin 目录不在 PATH 中),回退探测 Windows Docker Desktop 标准安装路径。
     """
-    return shutil.which("docker")
+    found = shutil.which("docker")
+    if found:
+        return found
+    if sys.platform == "win32":
+        for path in _windows_docker_binary_candidates():
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+    return None
 
 
 def _docker_container_running(container_name: str) -> bool:

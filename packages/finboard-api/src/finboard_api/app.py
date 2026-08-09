@@ -15,6 +15,7 @@ from pathlib import Path
 
 import httpx
 import structlog
+import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -86,6 +87,42 @@ async def _cancel_bulk_download_task(app: FastAPI) -> None:
             phase=None,
             active_symbols=[],
         )
+
+
+async def _start_embedded_mcp_server(app: FastAPI, settings: Settings) -> None:
+    """在当前事件循环后台启动 finboard-mcp HTTP server(uvicorn 后台任务)。
+
+    容器内 opencode 通过 ``host.docker.internal:{mcp_port}`` 访问该 server。
+    复用 ``build_mcp_server()``(研究域独立 lifespan + 独立 AsyncEngine,与
+    TradingKernel 无 session 冲突)+ Bearer 鉴权(``mcp_auth_token``)。
+
+    失败降级:无 ``mcp_auth_token`` → 跳过(HTTP 传输强制鉴权,空 token 拒绝启动)。
+    """
+    if not settings.mcp_auth_token:
+        logger.warning("api.opencode_mcp_skipped", reason="no_mcp_auth_token")
+        return
+    from finboard_mcp.auth import wrap_with_bearer_auth
+    from finboard_mcp.server import build_mcp_server
+
+    mcp = build_mcp_server()
+    starlette_app = mcp.streamable_http_app(host=settings.mcp_host)
+    wrapped = wrap_with_bearer_auth(starlette_app, token=settings.mcp_auth_token)
+    config = uvicorn.Config(
+        wrapped,
+        host=settings.mcp_host,
+        port=settings.mcp_port,
+        log_level="warning",
+        loop="none",  # 复用当前 SelectorEventLoop(避免 Windows Proactor 冲突)
+    )
+    server = uvicorn.Server(config)
+    # ``serve()`` 是长驻协程,后台任务托管;shutdown 时设置 should_exit 回收。
+    app.state.opencode_mcp_server = server
+    app.state.opencode_mcp_task = asyncio.create_task(server.serve())
+    logger.info(
+        "api.opencode_mcp_started",
+        host=settings.mcp_host,
+        port=settings.mcp_port,
+    )
 
 
 @asynccontextmanager
@@ -207,6 +244,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.warning(
                     "api.opencode_runtime_skipped", reason="web_container_not_ready"
                 )
+            # 内嵌启动 finboard-mcp HTTP server:容器内 opencode 通过
+            # ``host.docker.internal:{mcp_port}`` 访问它。复用 ``build_mcp_server()``
+            # + Bearer 鉴权(``mcp_auth_token``),以 uvicorn 后台任务跑在当前事件循环。
+            # 这样用户无需单独跑 ``python -m finboard_mcp``;设 ``opencode_embed_mcp``
+            # =False 可回退到独立进程模式。
+            if settings.opencode_embed_mcp:
+                await _start_embedded_mcp_server(app, settings)
         elif settings.opencode_enabled:
             # 形态 (B):外部 opencode serve(4096,无 auth),向后兼容。
             app.state.opencode_runtime = OpenCodeRuntimeClient(
@@ -254,6 +298,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             oc_process_manager = getattr(app.state, "opencode_process_manager", None)
             if oc_process_manager is not None:
                 await oc_process_manager.stop()
+            # 回收内嵌 finboard-mcp HTTP server(uvicorn 后台任务)。
+            mcp_server = getattr(app.state, "opencode_mcp_server", None)
+            if mcp_server is not None:
+                mcp_server.should_exit = True
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(mcp_server.shutdown(), timeout=5.0)
+                mcp_task = getattr(app.state, "opencode_mcp_task", None)
+                if isinstance(mcp_task, asyncio.Task) and not mcp_task.done():
+                    mcp_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await mcp_task
+                logger.info("api.opencode_mcp_stopped")
             logger.info("api.kernel_stopped")
 
 

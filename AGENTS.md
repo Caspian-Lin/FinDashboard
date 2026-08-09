@@ -2,6 +2,17 @@
 
 可实盘交易的量化系统。实盘交易涉及真实资金，改动须谨慎，不要在未确认风险的情况下改动下单 / 持仓 / 风控相关逻辑。
 
+## 命名约定
+
+- **全名**:`FinDashboard`(大写 F、D、S)—— 用于文档标题、对外说明、正式表述。
+- **缩写**:`finboard`(全小写)—— 用于包目录名(`packages/finboard-*`)、Python 模块名(`finboard_*`)、CLI 命令(`finboard`)、内部叙述。
+- **禁止变体**:`Findashboard`、`FINBOARD`(全大写,除非是环境变量前缀 `FINBOARD_`)、`Finboard`(仅首字母大写)等。
+- **历史遗留标识符(保持不变,不视作违规)**:
+  - `pyproject.toml` 的 `name = "findashboard"`(分发包名,改影响大);
+  - PostgreSQL 默认库名 / 用户名 `findashboard`(用户已按此建库,见 `README.md` 数据库初始化);
+  - 前端 `web/package.json` 的 `name = "findashboard-web"`、localStorage key `findashboard-theme`(已发布的标识符)。
+  这些是技术标识符,不是叙述用词;新代码 / 新文档应遵循上方的全名 / 缩写约定。
+
 ## 项目设计
 
 完整设计文档见 `phase1_doc.md`（生产级量化交易系统开发计划）。以下为对 agent 最关键的红线与约束。

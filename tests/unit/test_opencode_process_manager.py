@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +27,7 @@ from finboard_opencode.process_manager import (
     _extract_version,
     _generate_password,
     _resolve_docker_binary,
+    _windows_docker_binary_candidates,
     which_opencode,
 )
 
@@ -313,6 +316,62 @@ def test_resolve_docker_binary_returns_str_or_none() -> None:
     # docker 可能装了也可能没装;只要不抛异常即可。
     result = _resolve_docker_binary()
     assert result is None or isinstance(result, str)
+
+
+def test_resolve_docker_binary_falls_back_to_windows_install_path() -> None:
+    """``shutil.which`` 失败时,回退探测 Windows Docker Desktop 标准安装路径。
+
+    场景:FinBoard 从 IDE / 服务 / 非交互 shell 启动,Docker 的 bin 不在 PATH。
+    构造一个假的 docker.exe 在 ProgramFiles 候选路径下,验证回退命中。
+    """
+    if sys.platform != "win32":
+        pytest.skip("Windows 安装路径回退仅在 win32 生效")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_program_files = Path(tmp) / "ProgramFiles"
+        docker_bin = fake_program_files / "Docker" / "Docker" / "resources" / "bin"
+        docker_bin.mkdir(parents=True)
+        fake_docker = docker_bin / "docker.exe"
+        fake_docker.write_bytes(b"fake")
+
+        with patch.dict(
+            os.environ,
+            {"ProgramFiles": str(fake_program_files), "ProgramData": str(tmp)},
+        ), patch("finboard_opencode.process_manager.shutil.which", lambda _: None):
+            result = _resolve_docker_binary()
+        assert result == str(fake_docker)
+
+
+def test_resolve_docker_binary_returns_none_when_nowhere() -> None:
+    """``which`` 失败且 Windows 候选路径都不存在时返回 None。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch(
+            "finboard_opencode.process_manager.shutil.which", lambda _: None
+        ), patch.dict(
+            os.environ,
+            {
+                "ProgramFiles": str(Path(tmp) / "nope"),
+                "ProgramFiles(x86)": str(Path(tmp) / "nope86"),
+                "LOCALAPPDATA": str(Path(tmp) / "nope-local"),
+                "ProgramData": str(Path(tmp) / "nope-data"),
+            },
+        ):
+            assert _resolve_docker_binary() is None
+
+
+def test_windows_docker_candidates_dedup() -> None:
+    """候选路径去重(不同 env var 可能指向同一目录)。"""
+    if sys.platform != "win32":
+        pytest.skip("Windows 候选路径仅在 win32 展开")
+    same = "C:\\Same"
+    with patch.dict(
+        os.environ,
+        {"ProgramFiles": same, "ProgramFiles(x86)": same, "LOCALAPPDATA": ""},
+        clear=False,
+    ):
+        candidates = _windows_docker_binary_candidates()
+    # ProgramFiles 与 ProgramFiles(x86) 展开相同路径,去重后只保留一个。
+    assert len({p for p in candidates if p.startswith(same)}) == 1
 
 
 def test_docker_container_running_returns_bool() -> None:
