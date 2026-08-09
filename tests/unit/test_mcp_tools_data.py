@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -117,7 +117,7 @@ def _release_domain() -> SimpleNamespace:
 
 
 def _session_maker_from_execute(
-    execute_results: list,
+    execute_results: list[Any],
 ) -> async_sessionmaker[AsyncSession]:
     """构造 mock session_maker,execute 按调用顺序返回 execute_results。
 
