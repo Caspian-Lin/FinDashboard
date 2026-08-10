@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 34 个工具**(issue #108 / #110 / #124 / #125):
+**已实现 50 个工具**(issue #108 / #110 / #124 / #125 / #126):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -14,8 +14,9 @@
 | `finboard.memory.*` | 7 | remember / list / get / forget / correct / confirm / archive | 研究长期记忆 |
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |
 | 因子实验室 | 11 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(7 只读 + 4 写,✅ #125) |
+| 策略规格 | 16 | strategy registry/template/list/history/version_get/diff、preset list/get(只读);strategy validate/draft_create/supersede/publish/rollback、preset create/update/delete(写) | 无代码版本化生命周期(8 只读 + 8 写,✅ #126) |
 
-## Planned 阶段(#126-#128)
+## Planned 阶段(#127-#128)
 
 ### ✅ #124 数据查询工具(已完成)
 9 个只读工具:instrument list/get/search、dataset_release list/get、
@@ -36,16 +37,20 @@ dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota�
 `FeatureSnapshotJobManager`。`FeatureSnapshotJobManager` 从 `finboard-api`
 迁移到 `finboard-backtest`(纯标准库实现,API 与 MCP 共享,避免循环依赖)。
 
-### #126 策略规格工具 `finboard.strategy.*`
-- **优先级**:中
-- **工具**:
-  - `finboard_strategy_registry` —— 策略注册表
-  - `finboard_strategy_template` —— 无代码策略模板
-  - `finboard_strategy_validate` —— 策略规格校验
-  - `finboard_strategy_draft` —— 策略草案(agent 可自主生成)
-  - `finboard_strategy_publish` —— 发布策略版本
-- **复用**:`finboard_backtest.strategy_spec`
-- **权限**:只读 + 研究写(draft / publish),自主执行
+### ✅ #126 策略规格工具(已完成)
+16 个工具(8 只读 + 8 写):
+- 只读:strategy registry/template/list/history/version_get/diff、
+  preset list/get
+- 写:strategy validate(纯计算,不持久化)/ draft_create / supersede /
+  publish / rollback、preset create/update/delete
+
+复用 `compile_registered_strategy_spec` / `build_strategy_template` /
+`list_strategy_capabilities` / `structured_diff` /
+`ResearchStrategySpecRepository` / `StrategyPresetRepository` /
+`get_strategy_definition`。MCP 层直接调用 repository + 编译函数(无 FastAPI
+依赖);preset 参数校验复用 `get_strategy_definition(kind).params_model`,
+绕开 API 路由的 `validate_strategy_params_for_api`(HTTPException 耦合)。
+版本生命周期完整:draft → publish → supersede → rollback。
 
 ### #127 回测 + 模拟盘 + 研究运行工具
 - **优先级**:中

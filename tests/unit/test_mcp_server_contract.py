@@ -45,6 +45,23 @@ _EXPECTED_TOOLS = {
     "finboard_factor_experiment_get",
     "finboard_factor_experiment_create",
     "finboard_factor_experiment_sync_validation",
+    # #126 策略规格工具(8 只读 + 8 写)
+    "finboard_strategy_registry",
+    "finboard_strategy_template",
+    "finboard_strategy_list",
+    "finboard_strategy_history",
+    "finboard_strategy_version_get",
+    "finboard_strategy_diff",
+    "finboard_preset_list",
+    "finboard_preset_get",
+    "finboard_strategy_validate",
+    "finboard_strategy_draft_create",
+    "finboard_strategy_supersede",
+    "finboard_strategy_publish",
+    "finboard_strategy_rollback",
+    "finboard_preset_create",
+    "finboard_preset_update",
+    "finboard_preset_delete",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。

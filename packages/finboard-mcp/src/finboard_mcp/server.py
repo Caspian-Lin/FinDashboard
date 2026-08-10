@@ -13,7 +13,10 @@
   ``finboard.data.*`` / ``finboard.tushare.*``,#124)—— 标的元数据 /
   数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(只读);
 * ``finboard.factor.*`` / ``finboard.feature_snapshot.*``(#125)——
-  因子目录 / 特征快照 / 因子信号 / 因子实验(含异步快照任务)。
+  因子目录 / 特征快照 / 因子信号 / 因子实验(含异步快照任务);
+* ``finboard.strategy.*`` / ``finboard.preset.*``(#126)——
+  策略规格注册表 / 模板 / 校验 / 草稿 / 发布 / 回滚 / diff + 预设 CRUD
+  (无代码版本化生命周期)。
 
 安全:实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)
 **永久不注册**为工具。研究写操作(创建 Run / 启动回测 / 模拟盘)由 agent 自主执行
@@ -31,6 +34,7 @@ from finboard_mcp.tools import (
     register_factor_tools,
     register_memory_tools,
     register_run_tools,
+    register_strategy_tools,
 )
 
 _INSTRUCTIONS = """\
@@ -45,7 +49,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(34 个,已实现) ==
+== 当前可用工具(50 个,已实现) ==
 - finboard.run.*(3) —— ResearchRun 只读:list / get / artifacts
 - finboard.ai.*(4) —— AI 草案:ask / propose_hypothesis / propose_strategy_draft
   / propose_strategy_diff(底层 ResearchAssistant 强制 assert_research_only_request
@@ -58,9 +62,12 @@ FinBoard 研究 MCP —— 量化研究工具集
 - 因子实验室(11,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)
+- 策略规格(16,✅ #126):strategy registry/template/list/history/version_get/
+  diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
+  supersede/publish/rollback、preset create/update/delete(写操作)。
+  无代码版本化生命周期,反复 validate 预览 → draft → publish。
 
 == 路线图(planned,对应 issue,尚未实现) ==
-- 策略规格工具(registry/template/validate/draft/publish)—— #126
 - 回测 + 模拟盘 + 研究运行工具 —— #127
 - portfolio 计算工具(allocate/sizing/feasibility/attribution)—— #128
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
@@ -93,6 +100,7 @@ def build_mcp_server() -> MCPServer:
     register_memory_tools(mcp)
     register_data_tools(mcp)
     register_factor_tools(mcp)
+    register_strategy_tools(mcp)
     return mcp
 
 
