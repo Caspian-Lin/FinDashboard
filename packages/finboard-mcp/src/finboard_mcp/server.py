@@ -22,6 +22,8 @@
 * ``finboard.sim.*``(#127)—— 模拟盘(账户 / 会话生命周期 / 决策提交 /
   订单 / 成交 / 持仓 / 账本 / 审计 / 报告);
 * ``finboard.run.*`` 写工具(queue / cancel / replay / lineage,#127)。
+* ``finboard.portfolio.*``(#128)—— 组合计算(目标权重分配 /
+  离散手数 sizing / 资金档位可行性 / 绩效归因,纯计算无 DB 写入)。
 
 安全:实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)
 **永久不注册**为工具。研究写操作(创建 Run / 启动回测 / 模拟盘)由 agent 自主执行
@@ -39,6 +41,7 @@ from finboard_mcp.tools import (
     register_data_tools,
     register_factor_tools,
     register_memory_tools,
+    register_portfolio_tools,
     register_run_tools,
     register_simulation_tools,
     register_strategy_tools,
@@ -56,7 +59,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(76 个,已实现) ==
+== 当前可用工具(82 个,已实现) ==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127)
 - finboard.ai.*(4) —— AI 草案:ask / propose_hypothesis / propose_strategy_draft
@@ -67,7 +70,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 - 数据查询(9,✅ #124):instrument list/get/search、dataset_release list/get、
   dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota
   (标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额,只读)
-- 因子实验室(11,✅ #125):factor_catalog、feature_snapshot list/get/create/
+- 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)
 - 策略规格(16,✅ #126):strategy registry/template/list/history/version_get/
@@ -77,13 +80,14 @@ FinBoard 研究 MCP —— 量化研究工具集
 - 回测(5,✅ #127):backtest_strategy_list(可用策略+参数 schema)、
   backtest_run(同步运行,返回 metrics/equity/fills)、
   backtest_history_list/get、backtest_history_delete(写)。
-- 模拟盘(17,✅ #127):sim_account list/get/create(写)、
+- 模拟盘(18,✅ #127):sim_account list/get/create(写)、
   sim_session list/get/create(写)/start/pause/stop/reset(写)、
   sim_decision_submit(写,结构化目标仓位 → 生成订单,不直接创建订单)、
   sim_order_cancel(写)、sim_orders/fills/positions/ledger/audit/report(只读)。
+- portfolio(4,✅ #128):portfolio_allocate(目标权重分配,纯计算)、
+  portfolio_sizing(离散手数 + 费用/保证金)、portfolio_feasibility(10万/20万/50万
+  档位可行性)、portfolio_attribution(绩效归因分解,纯计算,无 DB 写入)。
 
-== 路线图(planned,对应 issue,尚未实现) ==
-- portfolio 计算工具(allocate/sizing/feasibility/attribution)—— #128
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
 == 权限边界 ==
@@ -117,6 +121,7 @@ def build_mcp_server() -> MCPServer:
     register_strategy_tools(mcp)
     register_backtest_tools(mcp)
     register_simulation_tools(mcp)
+    register_portfolio_tools(mcp)
     return mcp
 
 

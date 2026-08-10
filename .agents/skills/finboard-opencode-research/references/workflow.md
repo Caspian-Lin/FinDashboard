@@ -49,8 +49,10 @@
   │      order_cancel 写;orders/fills/positions/ledger/audit/report 只读)
   │      decision_submit 提交结构化目标仓位 → 生成订单(agent 不直接创建订单)
   │
-  └─ portfolio 计算(allocate/sizing/feasibility)?  🔒 #128
-       → 尚未实现。告知用户当前限制,可通过 finboard.ai.ask 问答。
+  └─ portfolio 计算(allocate/sizing/feasibility/attribution)?  ✅ #128
+       → finboard.portfolio.*(4:allocate 目标权重分配 + 约束 + 风险报告、
+         sizing 离散手数 + 费用/保证金、feasibility 10万/20万/50万档位可行性、
+         attribution 绩效归因分解)。纯计算,无 DB 写入,agent 自主执行
 ```
 
 ## 标准研究循环
@@ -80,7 +82,8 @@
 - ❌ 把 `proposed` 草案当结论 —— 草案需机器验证后才可视为结论。
 - ❌ 直接修改研究产物 —— 记忆 `source_refs` 只引用,不改产物。
 - ❌ 跨域操作 —— 研究工具不触碰实盘订单 / 持仓 / Kill Switch。
-- ❌ 假装 planned 工具可用 —— #128 portfolio 尚未实现,如实告知用户限制。
+- ❌ 把 portfolio 纯计算结果当实盘可执行 —— sizing/feasibility 输出是研究
+  估算,不是实盘下单信号;需经完整研究流程才可上实盘。
 
 > 完整研究流程(数据→因子→策略→回测→模拟→评估)详解见
 > `references/research-workflow.md`。

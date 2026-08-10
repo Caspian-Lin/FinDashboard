@@ -5,8 +5,8 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 76 个工具(✅);planned 工具(🔒 #128)尚未实现,
-列出契约供 agent 知晓未来能力边界。
+当前已实现 82 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
 
@@ -20,7 +20,7 @@
 | 回测(backtest.*,✅ #127) | ✅(含同步运行 / 历史 CRUD) | |
 | 模拟盘(sim.*,✅ #127) | ✅(账户/会话/决策/订单/报告) | |
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
-| portfolio(portfolio.*,🔒 #128) | 🔒(扩展中) | |
+| portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读 + ✅ #127 写)
@@ -502,16 +502,68 @@ AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不
   order_count/fill_count/`simulation_is_not_return_proof=true`/
   `automatic_live_promotion=false`)
 
-## Planned 工具(🔒 尚未实现,对应 issue)
+## finboard.portfolio.*(✅ #128)
 
-以下工具尚未实现,列出契约供 agent 知晓未来能力边界。扩展顺序见
-`packages/finboard-mcp/ROADMAP.md`。
+组合计算(纯计算,无 DB 写入,无副作用)。复用 `finboard_backtest.portfolio`
+(`build_portfolio` / `solve_sizing` / `evaluate_capital_tiers` /
+`compute_attribution`)。输入参数与 REST `POST /api/portfolio/*` 一致。
+归为研究写(经 `mcp_readonly_only` 门控),agent 可自主执行。
 
-### 🔒 #128 portfolio 计算工具 `finboard.portfolio.*`
-- `finboard_portfolio_allocate` —— 目标仓位生成
-- `finboard_portfolio_sizing` —— 资金分配 / 三档可行性
-- `finboard_portfolio_feasibility` —— 硬约束 + 风险贡献上限
-- `finboard_portfolio_attribution` —— 归因分析
+### finboard_portfolio_allocate **[写·纯计算]**
+目标权重分配(equal_weight / inverse_volatility / erc)+ 约束 + 风险报告。
+对应 `POST /api/portfolio/allocate`,调 `build_portfolio`。
+- 参数:`signals: list[{symbol, score, confidence?}]`、`as_of: str`(ISO 日期)、
+  `method: str = "equal_weight"`、`strategy_id? = "mcp"`、
+  `max_weight_per_asset? = 0.25`、`max_weight_per_sleeve? = 0.40`、
+  `min_cash_buffer? = 0.05`、`max_leverage? = 1.0`、`long_only? = true`、
+  `target_volatility?`、`max_volatility?`、`rebalance_threshold? = 0.05`、
+  `min_weight_to_trade? = 0.001`、`returns_by_ticker?: dict[str, list[float]]`、
+  `sleeve_map?: dict[str,str]`、`disabled_symbols?: list[str]`、
+  `current_weights?: dict[str,float]`、`target_gross_exposure?`、
+  `betas?: dict[str,float]`、`max_drawdown? = 0.0`、
+  `max_risk_contribution? = 1.0`、`conflict_policy? = "net"`、
+  `covariance_failure_mode? = "fail_closed"`
+- 返回:`{weights, weights_before_constraints, cash_buffer, gross_weight,
+  net_weight, configured_max_leverage, n_assets, contract_version,
+  covariance_shrinkage, covariance_fallback_used, adjustments, risk}`
+- 错误:`invalid_argument`(signals 为空 / 日期非法 / 约束非法 /
+  AllocationError / 协方差失败 fail_closed)、`permission_denied`(只读模式)
 
-> 所有 planned 工具同样遵守权限边界:研究写操作 agent 自主执行,
-> 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
+### finboard_portfolio_sizing **[写·纯计算]**
+离散手数 sizing(目标权重 → 可执行手数 + 费用 / 保证金 / 滑点)。
+对应 `POST /api/portfolio/sizing`,调 `solve_sizing`。
+- 参数:`weights: dict[str,float]`、`as_of: str`、`capital: float`、
+  `lot_info: list[{code, lot_size?, multiplier?, margin_rate?,
+  commission_rate?, commission_min?, stamp_tax_rate?, slippage_bps?,
+  max_participation?, available_volume?, tradable?, unavailable_reason?}]`、
+  `prices: dict[str,float]`、`strategy_id? = "mcp"`、`max_leverage? = 1.0`、
+  `long_only? = true`、`commission_rate? = 0.0003`、`commission_min? = 5.0`、
+  `stamp_tax_rate? = 0.0005`
+- 返回:`{trades, total_capital, cash_before, cash_after, est_commission,
+  est_tax, total_turnover, n_active_trades, est_slippage, margin_required}`
+- 错误:`invalid_argument`(TargetWeight / SizingError,如权重非法 / 标的缺价格)、
+  `permission_denied`(只读模式)
+
+### finboard_portfolio_feasibility **[写·纯计算]**
+固定资金档位(10万/20万/50万)可行性评估。
+对应 `POST /api/portfolio/feasibility`,调 `evaluate_capital_tiers`。
+- 参数:`weights: dict[str,float]`、`as_of: str`、
+  `lot_info: list[{...}]`(同 sizing)、`prices: dict[str,float]`、
+  `strategy_id? = "mcp"`、`max_leverage? = 1.0`、`long_only? = true`
+- 返回:`list[{tier, capital, feasible, cash_utilization, tracking_error,
+  unfillable_symbols, capacity_pressure, margin_required, estimated_costs,
+  reasons}]`(每档一项)
+- 错误:`invalid_argument`(TargetWeight / SizingError)、
+  `permission_denied`(只读模式)
+
+### finboard_portfolio_attribution **[写·纯计算]**
+绩效归因分解(需协方差)。
+对应 `POST /api/portfolio/attribution`,调 `compute_attribution`。
+- 参数:`weights_history: list[dict[str,float]]`、
+  `returns_by_ticker: dict[str, list[float]]`(需 ≥30 观测值)、
+  `sleeve_map?: dict[str,str]`
+- 返回:`{by_asset, by_sleeve, total_return, total_risk, total_turnover,
+  max_drawdown, cash_utilization, leverage_ratio}`
+- 错误:`invalid_argument`(weights_history 为空 / 协方差估计失败)、
+  `permission_denied`(只读模式)
+

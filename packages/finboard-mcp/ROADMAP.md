@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 76 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127):
+**已实现 82 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -13,10 +13,11 @@
 | `finboard.ai.*` | 4 | ask / propose_hypothesis / propose_strategy_draft / propose_strategy_diff | AI 草案(问答 / 因子假设 / 策略) |
 | `finboard.memory.*` | 7 | remember / list / get / forget / correct / confirm / archive | 研究长期记忆 |
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |
-| 因子实验室 | 11 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(7 只读 + 4 写,✅ #125) |
+| 因子实验室 | 12 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(8 只读 + 4 写,✅ #125) |
 | 策略规格 | 16 | strategy registry/template/list/history/version_get/diff、preset list/get(只读);strategy validate/draft_create/supersede/publish/rollback、preset create/update/delete(写) | 无代码版本化生命周期(8 只读 + 8 写,✅ #126) |
 | 回测 | 5 | backtest_strategy_list、backtest_history_list/get(只读);backtest_run(同步)、backtest_history_delete(写) | 行情回放 + 纸面撮合(3 只读 + 2 写,✅ #127) |
-| 模拟盘 | 17 | sim_account list/get/create、sim_session list/get/create/start/pause/stop/reset、sim_orders/fills/positions/ledger/audit/report(只读);sim_decision_submit、sim_order_cancel(写) | 持久化隔离模拟盘(9 只读 + 8 写,✅ #127) |
+| 模拟盘 | 18 | sim_account list/get/create、sim_session list/get/create/start/pause/stop/reset、sim_orders/fills/positions/ledger/audit/report(只读);sim_decision_submit、sim_order_cancel(写) | 持久化隔离模拟盘(10 只读 + 8 写,✅ #127) |
+| portfolio | 4 | portfolio_allocate / sizing / feasibility / attribution | 组合计算(纯计算,无 DB 写入,✅ #128) |
 
 ## Planned 阶段(#128)
 
@@ -78,15 +79,22 @@ ResearchRun 写工具(queue/cancel/replay/lineage)复用与 API 路由相同的
 manifest 冻结 + coordinator 模式,不在 HTTP/MCP 请求内执行回测本身(由
 离线 worker 调 ``ResearchRunCoordinator.execute`` 完成)。
 
-### #128 portfolio 计算工具 `finboard.portfolio.*`
-- **优先级**:低
-- **工具**:
-  - `finboard_portfolio_allocate` —— 目标仓位生成
-  - `finboard_portfolio_sizing` —— 资金分配 / 三档可行性
-  - `finboard_portfolio_feasibility` —— 硬约束 + 风险贡献上限
-  - `finboard_portfolio_attribution` —— 归因分析
-- **复用**:`finboard_backtest.portfolio` + `PortfolioPipelineAdapter`
-- **权限**:研究写,自主执行
+### #128 portfolio 计算工具(已完成)
+4 个纯计算工具(无 DB 写入,无副作用):
+- `finboard_portfolio_allocate` —— 目标权重分配(equal_weight /
+  inverse_volatility / erc)+ 约束 + 风险报告
+- `finboard_portfolio_sizing` —— 离散手数 sizing(目标权重 → 可执行手数 +
+  费用 / 保证金 / 滑点)
+- `finboard_portfolio_feasibility` —— 固定资金档位(10万/20万/50万)可行性评估
+- `finboard_portfolio_attribution` —— 绩效归因分解(需协方差,≥30 观测)
+
+复用 `finboard_backtest.portfolio`(`build_portfolio` / `solve_sizing` /
+`evaluate_capital_tiers` / `compute_attribution`),输入参数与 REST
+`POST /api/portfolio/*` 一致。归为研究写(经 `mcp_readonly_only` 门控,
+与 `strategy_validate` 同级——纯计算但不属于只读查询类)。异常映射:
+`AllocationError` / `SizingError` / 协方差失败 / `ValueError` →
+`invalid_argument`;`permission_denied`(只读模式)。`to_jsonable` 对嵌套
+dataclass 列表逐元素序列化(顶层是 list 时 `dataclasses.asdict` 不递归)。
 
 ## 扩展原则(适用于所有阶段)
 
