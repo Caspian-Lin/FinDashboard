@@ -19,6 +19,14 @@ _EXPECTED_TOOLS = {
     "finboard_ai_propose_hypothesis",
     "finboard_ai_propose_strategy_draft",
     "finboard_ai_propose_strategy_diff",
+    # #110 研究记忆工具
+    "finboard_memory_remember",
+    "finboard_memory_list",
+    "finboard_memory_get",
+    "finboard_memory_forget",
+    "finboard_memory_correct",
+    "finboard_memory_confirm",
+    "finboard_memory_archive",
     "finboard_run_list",
     "finboard_run_get",
     "finboard_run_artifacts",
@@ -91,6 +99,11 @@ _EXPECTED_TOOLS = {
     "finboard_sim_ledger",
     "finboard_sim_audit",
     "finboard_sim_report",
+    # #128 portfolio 计算工具(4 个纯计算)
+    "finboard_portfolio_allocate",
+    "finboard_portfolio_sizing",
+    "finboard_portfolio_feasibility",
+    "finboard_portfolio_attribution",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。
