@@ -1,7 +1,11 @@
-"""``finboard.run.*`` 工具 —— ResearchRun 只读查询(复用 ``ResearchRunRepository``)。
+"""``finboard.run.*`` 工具 —— ResearchRun 查询与写操作(复用 ``ResearchRunRepository``)。
 
-只读工具自动允许。研究写工具(创建 Run / 启动回测)在后续 issue(#124-#128)
-中扩展,agent 可自主执行(#122 放开审批门)。
+只读(3):list / get / artifacts —— 自动允许。
+写(4,issue #127):queue(冻结 + 登记 queued)/ cancel / replay(复制 completed)/
+lineage(artifact 血缘)。
+
+写工具在 ``mcp_readonly_only=false`` 时由 agent 自主执行(#122),不执行回测本身
+(回测执行由离线 worker 调 ``ResearchRunCoordinator`` 完成)。
 """
 
 from __future__ import annotations
@@ -130,8 +134,421 @@ async def list_artifacts(app: McpAppContext, run_id: str) -> ToolEnvelope:
     )
 
 
+# --------------------------------------------------------------------------- #
+# 写工具(issue #127):queue / cancel / replay / lineage
+# --------------------------------------------------------------------------- #
+async def _require_write_enabled(app: McpAppContext) -> None:
+    if not app.write_tools_enabled:
+        raise McpToolError(
+            "permission_denied",
+            "MCP server 处于只读模式(mcp_readonly_only=true),写操作不可用",
+        )
+
+
+async def _build_queued_manifest(
+    body: Any,
+    session: Any,
+) -> tuple[Any, Any]:
+    """复用 API 路由 ``queue_research_run`` 的冻结 + manifest 构建逻辑。
+
+    返回 ``(manifest, strategy_row)``。校验失败抛 ``McpToolError``。
+    """
+    import hashlib
+    from typing import cast as _cast
+
+    from finboard_backtest.research_run import (
+        FrozenArtifactRef,
+        ResearchActorType,
+        ResearchRunManifest,
+        UnsupportedResearchCapabilityError,
+        validate_strategy_dataset_capabilities,
+    )
+    from finboard_backtest.research_run.contracts import JsonValue
+    from finboard_backtest.strategy_spec import ResearchStrategySpec
+    from finboard_backtest.strategy_spec.contracts import FeatureKind
+    from finboard_data.releases import ReleaseCapabilityError
+    from finboard_persistence import (
+        FeatureSnapshotRepository,
+        ResearchDatasetReleaseRepository,
+        ResearchStrategySpecRepository,
+    )
+
+    spec_repo = ResearchStrategySpecRepository(session)
+    strategy_row = await spec_repo.get_version(body.strategy_id, body.strategy_version)
+    if strategy_row is None:
+        raise McpToolError("not_found", "策略规格版本不存在")
+    if strategy_row.status != "published":
+        raise McpToolError("conflict", "仅已发布策略规格可以进入研究运行")
+    spec = ResearchStrategySpec.model_validate(strategy_row.payload)
+    if sorted(body.dataset_release_ids) != sorted(
+        spec.validation_plan.dataset_release_ids
+    ):
+        raise McpToolError(
+            "invalid_argument",
+            "运行数据发布必须与策略验证计划完全一致",
+        )
+    try:
+        releases = [
+            await ResearchDatasetReleaseRepository(session).require_usable(rid)
+            for rid in body.dataset_release_ids
+        ]
+    except ReleaseCapabilityError as exc:
+        raise McpToolError("invalid_argument", str(exc)) from exc
+    try:
+        validate_strategy_dataset_capabilities(
+            spec.strategy_kind,
+            {
+                item.key
+                for release in releases
+                for item in release.capabilities
+                if item.ready
+            },
+        )
+    except UnsupportedResearchCapabilityError as exc:
+        raise McpToolError("invalid_argument", str(exc)) from exc
+
+    feature_repo = FeatureSnapshotRepository(session)
+    snapshots: list[Any] = []
+    for snapshot_id in body.factor_snapshot_ids:
+        snapshot = await feature_repo.get(snapshot_id)
+        if snapshot is None:
+            raise McpToolError(
+                "invalid_argument", f"因子快照不存在: {snapshot_id}"
+            )
+        snapshots.append(snapshot)
+    required_factor_sources = {
+        node.source
+        for node in spec.feature_graph.nodes
+        if node.source is not None
+        and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
+    }
+    if required_factor_sources and not snapshots:
+        raise McpToolError(
+            "invalid_argument",
+            f"策略依赖因子输入但未冻结 factor_snapshot_ids: {sorted(required_factor_sources)}",
+        )
+    release_ids = {release.release_id for release in releases}
+    for snapshot in snapshots:
+        if snapshot.dataset_release_id not in release_ids:
+            raise McpToolError(
+                "invalid_argument",
+                f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中",
+            )
+
+    run_id = "RR-" + hashlib.sha256(
+        body.idempotency_key.encode("utf-8")
+    ).hexdigest()[:24]
+    manifest = ResearchRunManifest(
+        run_id=run_id,
+        idempotency_key=body.idempotency_key,
+        strategy_spec=spec,
+        strategy_spec_checksum=strategy_row.checksum,
+        dataset_releases=tuple(
+            FrozenArtifactRef(
+                artifact_id=release.release_id,
+                version=release.version,
+                checksum=release.release_checksum,
+                capabilities=tuple(
+                    item.key for item in release.capabilities if item.ready
+                ),
+            )
+            for release in releases
+        ),
+        strategy_version=body.strategy_version,
+        factor_snapshots=tuple(
+            FrozenArtifactRef(
+                artifact_id=snapshot.snapshot_id,
+                version=snapshot.framework_version,
+                checksum=snapshot.checksum,
+                capabilities=tuple(
+                    sorted(
+                        {
+                            f"factor:{item.feature_name}"
+                            for item in snapshot.observations
+                        }
+                    )
+                ),
+            )
+            for snapshot in snapshots
+        ),
+        parameters=_cast(dict[str, JsonValue], body.parameters),
+        validation_config=_cast(
+            dict[str, JsonValue],
+            {
+                "strategy_spec": spec.validation_plan.model_dump(mode="json"),
+                "overrides": body.validation_config,
+            },
+        ),
+        portfolio_config=_cast(
+            dict[str, JsonValue],
+            {
+                "strategy_spec": spec.portfolio_policy.model_dump(mode="json"),
+                "overrides": body.portfolio_config,
+            },
+        ),
+        risk_config=_cast(
+            dict[str, JsonValue],
+            {
+                "strategy_spec": spec.risk_exit_policy.model_dump(mode="json"),
+                "overrides": body.risk_config,
+            },
+        ),
+        execution_config=_cast(
+            dict[str, JsonValue],
+            {
+                "strategy_spec": spec.execution_model.model_dump(mode="json"),
+                "overrides": body.execution_config,
+            },
+        ),
+        fee_config=_cast(
+            dict[str, JsonValue],
+            {
+                "commission_rate": spec.execution_model.commission_rate,
+                "minimum_commission": spec.execution_model.minimum_commission,
+                "sell_tax_rate": spec.execution_model.sell_tax_rate,
+                "slippage_bps": spec.execution_model.slippage_bps,
+                "overrides": body.fee_config,
+            },
+        ),
+        benchmark_config=_cast(
+            dict[str, JsonValue],
+            {
+                "symbol": spec.validation_plan.benchmark_symbol,
+                "overrides": body.benchmark_config,
+            },
+        ),
+        code_version=body.code_version,
+        initial_capital=body.initial_capital,
+        requested_by=body.requested_by,
+        actor_type=ResearchActorType.HUMAN,
+    )
+    return manifest, strategy_row
+
+
+async def queue_run(
+    app: McpAppContext,
+    *,
+    payload: dict[str, Any],
+) -> ToolEnvelope:
+    """冻结输入 + 登记 queued ResearchRun(写,不执行回测)。"""
+
+    async def _do() -> dict[str, Any]:
+        await _require_write_enabled(app)
+        from decimal import Decimal
+
+        from sqlalchemy.exc import IntegrityError
+
+        from finboard_api.research_run_schemas import ResearchRunQueueIn
+        from finboard_backtest.research_run import (
+            ResearchRunStatus,
+            to_json_value,
+        )
+        from finboard_persistence import (
+            ResearchRunPersistenceConflictError,
+            ResearchRunRepository,
+        )
+
+        # 规范化 Decimal 字段(从 JSON str / number 构造)
+        payload_copy = dict(payload)
+        if "initial_capital" in payload_copy and not isinstance(
+            payload_copy["initial_capital"], Decimal
+        ):
+            payload_copy["initial_capital"] = Decimal(
+                str(payload_copy["initial_capital"])
+            )
+        try:
+            body = ResearchRunQueueIn.model_validate(payload_copy)
+        except Exception as exc:
+            raise McpToolError("invalid_argument", str(exc)) from exc
+
+        async with app.session_maker() as session:
+            manifest, _ = await _build_queued_manifest(body, session)
+            try:
+                row, _ = await ResearchRunRepository(session).create_or_get(
+                    run_id=manifest.run_id,
+                    idempotency_key=manifest.idempotency_key,
+                    replay_of_run_id=None,
+                    strategy_id=manifest.strategy_spec.strategy_id,
+                    strategy_kind=manifest.strategy_kind,
+                    status=ResearchRunStatus.QUEUED.value,
+                    schema_version=manifest.schema_version,
+                    manifest_checksum=manifest.checksum,
+                    manifest=cast(dict[str, object], to_json_value(manifest)),
+                    requested_by=manifest.requested_by,
+                )
+                await session.commit()
+            except (
+                ResearchRunPersistenceConflictError,
+                IntegrityError,
+            ) as exc:
+                await session.rollback()
+                raise McpToolError("conflict", str(exc)) from exc
+            return _run_detail(row)
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.run.queue",
+        arguments={"strategy_id": payload.get("strategy_id"),
+                   "strategy_version": payload.get("strategy_version")},
+        handler=_do,
+    )
+
+
+async def cancel_run(app: McpAppContext, run_id: str) -> ToolEnvelope:
+    async def _do() -> dict[str, Any]:
+        await _require_write_enabled(app)
+        from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+        from finboard_backtest.research_run import (
+            ResearchRunConflictError,
+            ResearchRunCoordinator,
+        )
+        from finboard_persistence import (
+            ResearchRunPersistenceConflictError,
+            ResearchRunRepository,
+        )
+
+        async with app.session_maker() as session:
+            store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            coordinator = ResearchRunCoordinator(store)
+            try:
+                record = await coordinator.cancel(run_id)
+                await session.commit()
+            except (
+                ResearchRunConflictError,
+                ResearchRunPersistenceConflictError,
+            ) as exc:
+                await session.rollback()
+                raise McpToolError("conflict", str(exc)) from exc
+            row = await ResearchRunRepository(session).get(record.manifest.run_id)
+            if row is None:
+                raise McpToolError("not_found", f"研究运行不存在: {run_id}")
+            return _run_detail(row)
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.run.cancel",
+        arguments={"run_id": run_id},
+        handler=_do,
+    )
+
+
+async def replay_run(
+    app: McpAppContext,
+    run_id: str,
+    *,
+    idempotency_key: str,
+    requested_by: str,
+) -> ToolEnvelope:
+    """复制 completed ResearchRun 为新 queued 运行(写,不执行)。"""
+
+    async def _do() -> dict[str, Any]:
+        await _require_write_enabled(app)
+        import hashlib
+        from dataclasses import replace
+
+        from sqlalchemy.exc import IntegrityError
+
+        from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+        from finboard_backtest.research_run import (
+            ResearchActorType,
+            ResearchRunStatus,
+        )
+        from finboard_persistence import (
+            ResearchRunPersistenceConflictError,
+            ResearchRunRepository,
+        )
+
+        async with app.session_maker() as session:
+            store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            source = await store.get(run_id)
+            if source is None:
+                raise McpToolError("not_found", f"源研究运行不存在: {run_id}")
+            if source.status is not ResearchRunStatus.COMPLETED:
+                raise McpToolError("conflict", "仅允许重放已完成运行")
+            new_run_id = "RR-" + hashlib.sha256(
+                idempotency_key.encode("utf-8")
+            ).hexdigest()[:24]
+            manifest = replace(
+                source.manifest,
+                run_id=new_run_id,
+                idempotency_key=idempotency_key,
+                requested_by=requested_by,
+                actor_type=ResearchActorType.HUMAN,
+                replay_of_run_id=run_id,
+            )
+            try:
+                record, _ = await store.create_or_get(manifest)
+                await session.commit()
+            except (
+                ResearchRunPersistenceConflictError,
+                IntegrityError,
+            ) as exc:
+                await session.rollback()
+                raise McpToolError("conflict", str(exc)) from exc
+            row = await ResearchRunRepository(session).get(record.manifest.run_id)
+            if row is None:
+                raise McpToolError("not_found", f"研究运行不存在: {new_run_id}")
+            return _run_detail(row)
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.run.replay",
+        arguments={"run_id": run_id, "idempotency_key": idempotency_key,
+                   "requested_by": requested_by},
+        handler=_do,
+    )
+
+
+async def lineage_run(
+    app: McpAppContext,
+    run_id: str,
+    trace_id: str,
+) -> ToolEnvelope:
+    async def _do() -> dict[str, Any]:
+        from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+        from finboard_backtest.research_run import ResearchRunCoordinator
+
+        async with app.session_maker() as session:
+            store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            coordinator = ResearchRunCoordinator(store)
+            artifacts = await coordinator.lineage(run_id, trace_id)
+            if not artifacts:
+                raise McpToolError("not_found", f"血缘 trace 不存在: {trace_id}")
+            return cast(
+                dict[str, Any],
+                to_jsonable(
+                    {
+                        "run_id": run_id,
+                        "leaf_trace_id": trace_id,
+                        "artifacts": [
+                            {
+                                "artifact_id": item.artifact_id,
+                                "run_id": item.run_id,
+                                "decision_id": item.decision_id,
+                                "sequence": item.sequence,
+                                "stage": item.stage.value,
+                                "trace_id": item.trace_id,
+                                "parent_trace_ids": list(item.parent_trace_ids),
+                                "payload": item.payload,
+                                "checksum": item.checksum,
+                                "created_at": to_jsonable(item.created_at),
+                            }
+                            for item in artifacts
+                        ],
+                    }
+                ),
+            )
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.run.lineage",
+        arguments={"run_id": run_id, "trace_id": trace_id},
+        handler=_do,
+    )
+
+
 def register(mcp: MCPServer) -> None:
-    """把 ResearchRun 只读工具注册到 MCP server。"""
+    """把 ResearchRun 工具注册到 MCP server(3 只读 + 4 写)。"""
 
     @mcp.tool(
         name="finboard_run_list",
@@ -164,5 +581,72 @@ def register(mcp: MCPServer) -> None:
     async def _artifacts(run_id: str, ctx: Context = None) -> ToolEnvelope:  # type: ignore[assignment]
         return await list_artifacts(app_context(ctx), run_id)
 
+    @mcp.tool(
+        name="finboard_run_queue",
+        description=(
+            "冻结输入 + 登记 queued ResearchRun(写,不执行回测)。"
+            "payload 字段:idempotency_key / strategy_id / strategy_version / "
+            "dataset_release_ids / factor_snapshot_ids / parameters / "
+            "validation_config / portfolio_config / risk_config / "
+            "execution_config / fee_config / benchmark_config / code_version / "
+            "initial_capital / requested_by。复用 ResearchRunQueueIn schema 校验。"
+        ),
+    )
+    async def _queue(
+        payload: dict[str, Any],
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await queue_run(app_context(ctx), payload=payload)
 
-__all__ = ["get_run", "list_artifacts", "list_runs", "register"]
+    @mcp.tool(
+        name="finboard_run_cancel",
+        description="取消 ResearchRun(queued/running/interrupted/failed → cancelled,写)。",
+    )
+    async def _cancel(
+        run_id: str,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await cancel_run(app_context(ctx), run_id)
+
+    @mcp.tool(
+        name="finboard_run_replay",
+        description=(
+            "复制 completed ResearchRun 为新 queued 运行(写,不执行)。"
+            "需要新 idempotency_key + requested_by。"
+        ),
+    )
+    async def _replay(
+        run_id: str,
+        idempotency_key: str,
+        requested_by: str,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await replay_run(
+            app_context(ctx),
+            run_id,
+            idempotency_key=idempotency_key,
+            requested_by=requested_by,
+        )
+
+    @mcp.tool(
+        name="finboard_run_lineage",
+        description="查询某 ResearchRun 内指定 trace_id 的 artifact 血缘(只读,BFS 向上)。",
+    )
+    async def _lineage(
+        run_id: str,
+        trace_id: str,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await lineage_run(app_context(ctx), run_id, trace_id)
+
+
+__all__ = [
+    "cancel_run",
+    "get_run",
+    "lineage_run",
+    "list_artifacts",
+    "list_runs",
+    "queue_run",
+    "register",
+    "replay_run",
+]

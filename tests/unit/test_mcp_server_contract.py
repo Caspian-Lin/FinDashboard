@@ -22,6 +22,10 @@ _EXPECTED_TOOLS = {
     "finboard_run_list",
     "finboard_run_get",
     "finboard_run_artifacts",
+    "finboard_run_queue",
+    "finboard_run_cancel",
+    "finboard_run_replay",
+    "finboard_run_lineage",
     # #124 数据查询工具
     "finboard_instrument_list",
     "finboard_instrument_get",
@@ -62,25 +66,47 @@ _EXPECTED_TOOLS = {
     "finboard_preset_create",
     "finboard_preset_update",
     "finboard_preset_delete",
+    # #127 回测工具(3 只读 + 2 写)
+    "finboard_backtest_strategy_list",
+    "finboard_backtest_run",
+    "finboard_backtest_history_list",
+    "finboard_backtest_history_get",
+    "finboard_backtest_history_delete",
+    # #127 模拟盘工具(9 只读 + 8 写)
+    "finboard_sim_account_list",
+    "finboard_sim_account_get",
+    "finboard_sim_account_create",
+    "finboard_sim_session_list",
+    "finboard_sim_session_get",
+    "finboard_sim_session_create",
+    "finboard_sim_session_start",
+    "finboard_sim_session_pause",
+    "finboard_sim_session_stop",
+    "finboard_sim_session_reset",
+    "finboard_sim_decision_submit",
+    "finboard_sim_order_cancel",
+    "finboard_sim_orders",
+    "finboard_sim_fills",
+    "finboard_sim_positions",
+    "finboard_sim_ledger",
+    "finboard_sim_audit",
+    "finboard_sim_report",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。
+# 注意:``finboard_sim_*`` 工具操作模拟盘(simulation_* 表,SIM-* ID),其名称含
+# order/fill/position/cancel/trade 等词是模拟域语义,不是实盘能力,因此豁免。
 _FORBIDDEN_KEYWORDS = (
-    "order",
     "kill_switch",
     "killswitch",
-    "position",
     "broker",
-    "fill",
-    "cancel",
-    "buy",
-    "sell",
-    "trade",
     "qmt",
     "ctp",
     "credential",
     "api_key",
 )
+# 对非 sim_ 工具额外检查的实盘交易动词(模拟盘工具豁免)。
+_LIVE_TRADING_VERBS = ("order", "fill", "cancel", "buy", "sell", "trade", "position")
 
 
 async def _tool_names() -> set[str]:
@@ -98,9 +124,24 @@ class TestToolExposure:
         names = await _tool_names()
         for name in names:
             lowered = name.lower()
+            # 绝对禁止的关键字(broker / kill_switch / 凭证 / QMT / CTP)——任何工具
+            # 都不得含。
             for keyword in _FORBIDDEN_KEYWORDS:
                 assert keyword not in lowered, (
                     f"工具 {name} 暴露了禁止能力 {keyword}"
+                )
+            # 实盘交易动词(order/fill/cancel/buy/sell/trade/position)——模拟盘
+            # (``finboard_sim_*``,操作 simulation_* 表与 SIM-* ID)与 ResearchRun
+            # (``finboard_run_*``,操作 research_runs 表与 RR- ID)豁免,因为它们的
+            # cancel/order/position 语义属于研究 / 模拟域,不触及实盘订单;其他工具
+            # 不得暴露这些动词。
+            if lowered.startswith("finboard_sim_") or lowered.startswith(
+                "finboard_run_"
+            ):
+                continue
+            for verb in _LIVE_TRADING_VERBS:
+                assert verb not in lowered, (
+                    f"工具 {name} 暴露了实盘交易动词 {verb}(非研究/模拟域工具)"
                 )
 
 
