@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 34 个工具(✅);planned 工具(🔒 #126-#128)尚未实现,
+当前已实现 50 个工具(✅);planned 工具(🔒 #127-#128)尚未实现,
 列出契约供 agent 知晓未来能力边界。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -16,7 +16,8 @@
 | 研究记忆(memory.*) | ✅ | |
 | AI 草案(ai.*:假设/策略) | ✅(产出草案,可追溯) | |
 | 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅ | |
-| 策略规格 / 回测 / 模拟 / portfolio | 🔒 #126-#128(扩展中) | |
+| 策略规格(strategy.* / preset.*,✅ #126) | ✅(含 validate/draft/publish/rollback) | |
+| 回测 / 模拟 / portfolio | 🔒 #127-#128(扩展中) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读)
@@ -232,17 +233,107 @@ AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不
 - 读取绑定的 validation_experiment_id 的 trial 结果,推进状态机。
 - 返回:`{experiment_id, ..., status, result?}`;冲突返回 `conflict`。
 
+### finboard_factor_experiment_sync_validation **[写]**
+同步因子实验的 #57 机器验证终态(不接受调用者传入 passed_oos)。
+- 参数:`experiment_id: str`
+- 读取绑定的 validation_experiment_id 的 trial 结果,推进状态机。
+- 返回:`{experiment_id, ..., status, result?}`;冲突返回 `conflict`。
+
+## finboard.strategy.* / finboard.preset.*(✅ #126)
+
+策略规格工具(8 只读 + 8 写)。无代码版本化规格生命周期,写操作尊重
+`mcp_readonly_only` 开关。**不接受 Python 源码 / 模块路径 / 可执行表达式**——
+规格由白名单组件组合而成,经 Pydantic schema 与编译器双重校验。
+
+### finboard_strategy_registry
+查询策略规格注册表(可用策略 kind / 特征源 / 算子 / 生命周期阶段)。
+- 参数:无
+- 返回:`{strategies, feature_sources, operators, lifecycle_stages,
+  publication_starts_run: false, accepts_python: false}`
+- 无 DB 依赖。
+
+### finboard_strategy_template
+生成指定 kind 的策略规格模板(无代码起点)。
+- 参数:`kind: str`、`strategy_id: str`、`dataset_release_ids: list[str]`
+- 返回:完整 `ResearchStrategySpec` payload;未知 kind → `invalid_argument`
+
+### finboard_strategy_list
+列出策略规格(每个 strategy_id 的最新版本)。
+- 参数:`limit?: int = 100`
+- 返回:`list[{strategy_id, version, status, checksum, spec, ...}]`
+
+### finboard_strategy_history
+查询指定策略的全部版本历史。
+- 参数:`strategy_id: str`
+- 返回:`list[版本]`;策略不存在 → `not_found`
+
+### finboard_strategy_version_get
+查询单个版本详情。
+- 参数:`strategy_id: str`、`version: int`
+- 返回:`{strategy_id, version, ..., spec, checksum}`;未找到 → `not_found`
+
+### finboard_strategy_diff
+计算两个版本间的结构化 diff。
+- 参数:`strategy_id: str`、`from_version: int`、`to_version: int`
+- 返回:`{strategy_id, from_version, to_version, changes: [{path, before, after}]}`;
+  版本不存在 → `not_found`
+
+### finboard_preset_list
+列出全部策略参数预设(内置策略 kind 的已保存参数组合)。
+- 参数:无
+- 返回:`list[{id, name, strategy, params, selection, created_at, updated_at}]`
+
+### finboard_preset_get
+查询单个策略参数预设。
+- 参数:`preset_id: int`
+- 返回:预设 dict;未找到 → `not_found`
+
+### finboard_strategy_validate **[写]**
+纯计算:编译/校验策略规格,**不持久化**。agent 反复修改规格 → validate 预览 →
+满意后 `draft_create`。
+- 参数:`spec: dict`、`disabled_factors?: list[str]`
+- 返回:`{valid, checksum, feature_order, required_factor_sources,
+  required_datasets, dataset_release_ids, lifecycle_stages, can_execute}`
+
+### finboard_strategy_draft_create **[写]**
+保存策略规格草稿版本(change_type=create,首版本)。
+- 参数:`spec: dict`、`expected_version?: int`
+- 先 validate 再持久化;版本冲突 → `conflict`
+
+### finboard_strategy_supersede **[写]**
+为已存在的策略创建后继草稿(change_type=supersede)。
+- 参数:`strategy_id: str`、`spec: dict`、`expected_version: int`
+- path strategy_id 必须与 spec.strategy_id 一致,否则 `invalid_argument`
+
+### finboard_strategy_publish **[写]**
+发布策略规格的指定版本(draft→published)。
+- 参数:`strategy_id: str`、`version: int`、`expected_version: int`
+- 发布前重新编译校验;版本不存在 → `not_found`,状态转换非法 → `conflict`
+
+### finboard_strategy_rollback **[写]**
+回滚策略规格到指定目标版本(change_type=rollback)。
+- 参数:`strategy_id: str`、`target_version: int`、`expected_version: int`
+- 回滚前重新编译校验目标;目标不存在 → `not_found`
+
+### finboard_preset_create **[写]**
+创建策略参数预设(参数经对应策略 params_model 校验)。
+- 参数:`name: str`、`strategy: str`、`params?: dict`、`selection?: dict`
+- 名称唯一;冲突 → `conflict`;未知 kind / 参数非法 → `invalid_argument`
+
+### finboard_preset_update **[写]**
+更新策略参数预设(仅传入字段更新)。
+- 参数:`preset_id: int`、`name?`、`strategy?`、`params?`、`selection?`
+- 预设不存在 → `not_found`;名称冲突 → `conflict`
+
+### finboard_preset_delete **[写]**
+删除策略参数预设。
+- 参数:`preset_id: int`
+- 返回:`{deleted: true, preset_id}`;未找到 → `not_found`
+
 ## Planned 工具(🔒 尚未实现,对应 issue)
 
 以下工具尚未实现,列出契约供 agent 知晓未来能力边界。扩展顺序见
 `packages/finboard-mcp/ROADMAP.md`。
-
-### 🔒 #126 策略规格工具 `finboard.strategy.*`
-- `finboard_strategy_registry` —— 策略注册表
-- `finboard_strategy_template` —— 无代码策略模板
-- `finboard_strategy_validate` —— 策略规格校验(schema / 白名单)
-- `finboard_strategy_draft` —— 策略草案(agent 可自主生成)
-- `finboard_strategy_publish` —— 发布策略版本(版本化,不可变)
 
 ### 🔒 #127 回测 + 模拟盘 + 研究运行工具
 - `finboard_backtest_*` —— 回测(行情回放 + 纸面撮合 + 绩效分析)
