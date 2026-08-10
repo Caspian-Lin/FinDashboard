@@ -11,7 +11,9 @@
   列表 / 详情),让 Agent 跨会话积累研究上下文;
 * 数据查询(``finboard.instrument.*`` / ``finboard.dataset.*`` /
   ``finboard.data.*`` / ``finboard.tushare.*``,#124)—— 标的元数据 /
-  数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(只读)。
+  数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(只读);
+* ``finboard.factor.*`` / ``finboard.feature_snapshot.*``(#125)——
+  因子目录 / 特征快照 / 因子信号 / 因子实验(含异步快照任务)。
 
 安全:实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)
 **永久不注册**为工具。研究写操作(创建 Run / 启动回测 / 模拟盘)由 agent 自主执行
@@ -26,6 +28,7 @@ from finboard_mcp.context import app_lifespan
 from finboard_mcp.tools import (
     register_ai_tools,
     register_data_tools,
+    register_factor_tools,
     register_memory_tools,
     register_run_tools,
 )
@@ -42,7 +45,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(23 个,已实现) ==
+== 当前可用工具(34 个,已实现) ==
 - finboard.run.*(3) —— ResearchRun 只读:list / get / artifacts
 - finboard.ai.*(4) —— AI 草案:ask / propose_hypothesis / propose_strategy_draft
   / propose_strategy_diff(底层 ResearchAssistant 强制 assert_research_only_request
@@ -52,9 +55,11 @@ FinBoard 研究 MCP —— 量化研究工具集
 - 数据查询(9,✅ #124):instrument list/get/search、dataset_release list/get、
   dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota
   (标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额,只读)
+- 因子实验室(11,✅ #125):factor_catalog、feature_snapshot list/get/create/
+  job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
+  sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)
 
 == 路线图(planned,对应 issue,尚未实现) ==
-- 因子工具(catalog/snapshot/signal/experiment)—— #125
 - 策略规格工具(registry/template/validate/draft/publish)—— #126
 - 回测 + 模拟盘 + 研究运行工具 —— #127
 - portfolio 计算工具(allocate/sizing/feasibility/attribution)—— #128
@@ -87,6 +92,7 @@ def build_mcp_server() -> MCPServer:
     register_run_tools(mcp)
     register_memory_tools(mcp)
     register_data_tools(mcp)
+    register_factor_tools(mcp)
     return mcp
 
 

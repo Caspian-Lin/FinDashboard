@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_app.config import Settings
 from finboard_backtest.factor_research import FakeLLMProvider, ResearchAssistant
+from finboard_backtest.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_mcp.audit import AuditRecorder
 from finboard_mcp.context import McpAppContext
 from finboard_mcp.tools import memories
@@ -67,6 +68,7 @@ def _make_app(session_maker: async_sessionmaker[AsyncSession]) -> McpAppContext:
         write_tools_enabled=True,
         engine=MagicMock(),
         provider=provider,
+        feature_snapshot_jobs=FeatureSnapshotJobManager(),
     )
 
 

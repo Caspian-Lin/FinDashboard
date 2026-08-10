@@ -139,6 +139,13 @@ from finboard_backtest.factors import (
     list_factors_by_category,
     select_portfolio,
 )
+from finboard_backtest.feature_snapshot_jobs import (
+    FeatureSnapshotJob,
+    FeatureSnapshotJobConflictError,
+    FeatureSnapshotJobManager,
+    FeatureSnapshotJobRunner,
+    FeatureSnapshotJobStatus,
+)
 from finboard_backtest.futures_tsmom import (
     DEFAULT_CONTRACT_SPECS,
     FUTURES_TSMOM_VERSION,
@@ -381,6 +388,11 @@ __all__ = [
     "FactorWeight",
     "FakeLLMProvider",
     "FeasiblePosition",
+    "FeatureSnapshotJob",
+    "FeatureSnapshotJobConflictError",
+    "FeatureSnapshotJobManager",
+    "FeatureSnapshotJobRunner",
+    "FeatureSnapshotJobStatus",
     "FeeOverrides",
     "FillTiming",
     "FuturesMarket",

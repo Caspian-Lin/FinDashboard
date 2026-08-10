@@ -23,8 +23,13 @@
   ├─ 查询标的 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额?  ✅ 已实现
   │    → finboard.instrument.* / .dataset.* / .data.* / .tushare.* (#124 只读)
   │
-  ├─ 查询因子 / 策略 / 回测 / 模拟 / portfolio?  🔒 planned
-  │    → 当前 MCP 工具尚未覆盖(#125-#128)。
+  ├─ 查询 / 构建因子目录 / 特征快照 / 因子信号 / 因子实验?  ✅ 已实现
+  │    → finboard.factor.* / .feature_snapshot.* (#125,7 只读 + 4 写)
+  │      catalog / snapshot list/get/create/job_start/job_status /
+  │      signal list/get / experiment list/get/create/sync_validation
+  │
+  ├─ 查询策略 / 回测 / 模拟 / portfolio?  🔒 planned
+  │    → 当前 MCP 工具尚未覆盖(#126-#128)。
   │      告知用户「该能力尚未通过 MCP 暴露」,不要编造结果。
   │      可通过 finboard.ai.ask 以 AI 问答形式回答(引用来源)。
   │
@@ -59,7 +64,7 @@
 - ❌ 把 `proposed` 草案当结论 —— 草案需机器验证后才可视为结论。
 - ❌ 直接修改研究产物 —— 记忆 `source_refs` 只引用,不改产物。
 - ❌ 跨域操作 —— 研究工具不触碰实盘订单 / 持仓 / Kill Switch。
-- ❌ 假装 planned 工具可用 —— #124-#128 尚未实现,如实告知用户限制。
+- ❌ 假装 planned 工具可用 —— #126-#128 尚未实现,如实告知用户限制。
 
 > 完整研究流程(数据→因子→策略→回测→模拟→评估)详解见
 > `references/research-workflow.md`。
