@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_app.config import Settings
@@ -24,6 +25,10 @@ from finboard_mcp.audit import AuditRecorder
 from finboard_mcp.context import McpAppContext
 from finboard_mcp.tools import runs
 from finboard_persistence.models import ResearchRunArtifactModel, ResearchRunModel
+
+
+async def _async_return(value: object) -> object:
+    return value
 
 
 def _run_model(run_id: str = "RR-1") -> ResearchRunModel:
@@ -152,6 +157,97 @@ class TestListArtifacts:
     async def test_not_found(self) -> None:
         app = _make_app(_session_maker(get_row=None))
         env = await runs.list_artifacts(app, "RR-missing")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# 写工具(issue #127):queue / cancel / replay / lineage
+# ---------------------------------------------------------------------------
+
+
+def _write_disabled_app() -> McpAppContext:
+    provider = FakeLLMProvider()
+    session = AsyncMock()
+    cm = MagicMock()
+    cm.return_value.__aenter__ = AsyncMock(return_value=session)
+    cm.return_value.__aexit__ = AsyncMock(return_value=None)
+    return McpAppContext(
+        settings=Settings(),
+        session_maker=cast("async_sessionmaker[AsyncSession]", cm),
+        research_assistant=ResearchAssistant(provider),
+        audit=AuditRecorder(),
+        write_tools_enabled=False,
+        engine=MagicMock(),
+        provider=provider,
+        feature_snapshot_jobs=FeatureSnapshotJobManager(),
+    )
+
+
+class TestQueueRun:
+    async def test_write_disabled(self) -> None:
+        app = _write_disabled_app()
+        env = await runs.queue_run(app, payload={"idempotency_key": "x"})
+        assert env.status == "denied"
+        assert env.error is not None
+        assert env.error.kind == "permission_denied"
+
+    async def test_invalid_payload(self) -> None:
+        app = _make_app(_session_maker())
+        # ResearchRunQueueIn 要求 idempotency_key 8-128 / initial_capital 范围等
+        env = await runs.queue_run(app, payload={"idempotency_key": "x"})
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+
+class TestCancelRun:
+    async def test_write_disabled(self) -> None:
+        app = _write_disabled_app()
+        env = await runs.cancel_run(app, "RR-1")
+        assert env.status == "denied"
+
+    async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from finboard_backtest.research_run import (
+            ResearchRunConflictError,
+            ResearchRunCoordinator,
+        )
+
+        app = _make_app(_session_maker(get_row=_run_model()))
+        # coordinator.cancel 抛 conflict -> 映射 conflict
+        async def _boom(self, run_id):
+            raise ResearchRunConflictError("illegal transition")
+
+        monkeypatch.setattr(ResearchRunCoordinator, "cancel", _boom)
+        env = await runs.cancel_run(app, "RR-1")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "conflict"
+
+
+class TestReplayRun:
+    async def test_write_disabled(self) -> None:
+        app = _write_disabled_app()
+        env = await runs.replay_run(
+            app, "RR-1", idempotency_key="newkey12345", requested_by="u"
+        )
+        assert env.status == "denied"
+
+
+class TestLineageRun:
+    async def test_empty_artifacts_returns_not_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from finboard_backtest.research_run import ResearchRunCoordinator
+
+        app = _make_app(_session_maker())
+        monkeypatch.setattr(
+            ResearchRunCoordinator,
+            "lineage",
+            lambda self, run_id, trace_id: _async_return([]),
+        )
+        env = await runs.lineage_run(app, "RR-1", "T-missing")
         assert env.status == "error"
         assert env.error is not None
         assert env.error.kind == "not_found"

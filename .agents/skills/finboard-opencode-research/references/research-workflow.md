@@ -67,7 +67,8 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 | MCP 工具 | 状态 |
 |----------|------|
 | `finboard.run.list` / `.get` / `.artifacts`(查询 ResearchRun) | ✅ 已实现 |
-| `finboard.backtest.*` / `finboard.run.create`(创建 + 启动回测) | 🔒 #127 |
+| `finboard.run.queue` / `.cancel` / `.replay` / `.lineage`(生命周期) | ✅ #127 |
+| `finboard.backtest.strategy_list` / `.run` / `.history_list` / `.history_get` / `.history_delete` | ✅ #127 |
 
 ## 步骤 5:模拟盘
 
@@ -81,7 +82,10 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 | MCP 工具 | 状态 |
 |----------|------|
-| `finboard.simulation.*`(查询 / 启动模拟盘) | 🔒 #127 |
+| `finboard.sim.account_list` / `.account_get` / `.account_create`(账户) | ✅ #127 |
+| `finboard.sim.session_list` / `.session_get` / `.session_create` / `.start` / `.pause` / `.stop` / `.reset`(会话生命周期) | ✅ #127 |
+| `finboard.sim.decision_submit`(结构化目标仓位 → 生成订单,不直接创建订单) | ✅ #127 |
+| `finboard.sim.order_cancel` / `.orders` / `.fills` / `.positions` / `.ledger` / `.audit` / `.report`(订单 / 成交 / 持仓 / 账本 / 审计 / 报告) | ✅ #127 |
 
 ## 步骤 6:评估
 
@@ -101,7 +105,7 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 ## 当前 agent 能做什么
 
-agent 的闭环能力(截至 #126):
+agent 的闭环能力(截至 #127):
 
 1. **数据查询**:标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额
    (✅ `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`)
@@ -110,15 +114,18 @@ agent 的闭环能力(截至 #126):
 3. **策略规格**:注册表 / 模板 / validate 预览 / draft / supersede / publish /
    rollback / diff / 预设 CRUD(✅ `finboard.strategy.*` / `.preset.*`,
    无代码版本化生命周期)
-4. **查询**:ResearchRun 列表 / 详情 / artifact(✅ `finboard.run.*`)
-5. **生成草案**:因子假设 / 策略草案 / 策略 diff(✅ `finboard.ai.propose_*`)
-6. **问答**:金融 / 研究问题,引用项目来源(✅ `finboard.ai.ask`)
-7. **记忆**:跨会话积累研究上下文(✅ `finboard.memory.*`)
+4. **ResearchRun 生命周期**:查询 list/get/artifacts + 冻结 queue / cancel /
+   replay / lineage(✅ `finboard.run.*`)
+5. **回测**:可用策略 schema / 同步运行回测(返回 metrics/equity/fills)/
+   历史查询 / 删除(✅ `finboard.backtest.*`)
+6. **模拟盘**:账户 / 会话生命周期 / 结构化决策提交(→ 生成订单)/
+   订单 / 成交 / 持仓 / 账本 / 审计 / 报告(✅ `finboard.sim.*`)
+7. **生成草案**:因子假设 / 策略草案 / 策略 diff(✅ `finboard.ai.propose_*`)
+8. **问答**:金融 / 研究问题,引用项目来源(✅ `finboard.ai.ask`)
+9. **记忆**:跨会话积累研究上下文(✅ `finboard.memory.*`)
 
 **不能直接做**(需告知用户限制):
-- 查询模拟盘状态(🔒 #127)
-- 创建 / 启动回测 / 模拟盘 / ResearchRun(🔒 #127)
-- portfolio 计算(🔒 #128)
+- portfolio 计算(allocate/sizing/feasibility/attribution)(🔒 #128)
 
 **替代路径**:用 `finboard.ai.ask` 回答研究问题(底层 ResearchAssistant 可读研究
 上下文),但结果以 AI 草案形式呈现,需人工核对。

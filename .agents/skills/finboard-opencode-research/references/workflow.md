@@ -35,13 +35,22 @@
   │      publish / rollback、preset create/update/delete(写)
   │      反复 validate 预览 → draft → publish 闭环
   │
-  ├─ 查询回测 / 模拟 / portfolio?  🔒 planned
-  │    → 当前 MCP 工具尚未覆盖(#127-#128)。
-  │      告知用户「该能力尚未通过 MCP 暴露」,不要编造结果。
-  │      可通过 finboard.ai.ask 以 AI 问答形式回答(引用来源)。
+  ├─ 查询 / 管理 ResearchRun 生命周期?           ✅ #127
+  │    → finboard.run.*(7:list/get/artifacts 只读 + queue/cancel/replay/lineage 写)
+  │      queue 冻结输入 + 登记 queued(不执行,由离线 worker 完成);
+  │      cancel / replay / lineage 覆盖生命周期
   │
-  └─ 创建回测 / 模拟盘 / ResearchRun?           🔒 planned
-       → 研究写工具尚未实现(扩展中)。告知用户当前限制。
+  ├─ 运行回测(行情回放 + 纸面撮合)?            ✅ #127
+  │    → finboard.backtest.*(5:strategy_list 只读、run 写、history_list/get 只读、
+  │      history_delete 写)。同步运行返回 metrics/equity/fills/snapshots
+  │
+  ├─ 查询 / 启动模拟盘?                          ✅ #127
+  │    → finboard.sim.*(17:account/session 生命周期、decision_submit、
+  │      order_cancel 写;orders/fills/positions/ledger/audit/report 只读)
+  │      decision_submit 提交结构化目标仓位 → 生成订单(agent 不直接创建订单)
+  │
+  └─ portfolio 计算(allocate/sizing/feasibility)?  🔒 #128
+       → 尚未实现。告知用户当前限制,可通过 finboard.ai.ask 问答。
 ```
 
 ## 标准研究循环
@@ -71,7 +80,7 @@
 - ❌ 把 `proposed` 草案当结论 —— 草案需机器验证后才可视为结论。
 - ❌ 直接修改研究产物 —— 记忆 `source_refs` 只引用,不改产物。
 - ❌ 跨域操作 —— 研究工具不触碰实盘订单 / 持仓 / Kill Switch。
-- ❌ 假装 planned 工具可用 —— #127-#128 尚未实现,如实告知用户限制。
+- ❌ 假装 planned 工具可用 —— #128 portfolio 尚未实现,如实告知用户限制。
 
 > 完整研究流程(数据→因子→策略→回测→模拟→评估)详解见
 > `references/research-workflow.md`。

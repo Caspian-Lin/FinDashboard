@@ -24,17 +24,18 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-当前已实现 50 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+当前已实现 76 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
-| 查询 ResearchRun | `finboard.run.list` / `.get` / `.artifacts` | ✅ | 只读 |
+| 查询 / 管理 ResearchRun | `finboard.run.*`(list/get/artifacts 只读 + queue/cancel/replay/lineage 写,7 个) | ✅ #127 | 3 只读 + 4 自主执行 |
 | 金融问答 / 因子假设 / 策略草案 | `finboard.ai.ask` / `.propose_*` | ✅ | 草案(可追溯) |
 | 记住 / 查询 / 纠正研究记忆 | `finboard.memory.*`(7 个) | ✅ | 直接执行 |
 | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额 | `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`(9 个) | ✅ #124 | 只读 |
 | 因子目录 / 特征快照 / 因子信号 / 因子实验 | `finboard.factor.*` / `.feature_snapshot.*`(11 个) | ✅ #125 | 7 只读 + 4 自主执行 |
 | 策略规格 / 预设(registry/template/validate/draft/publish/rollback/diff/preset CRUD) | `finboard.strategy.*` / `.preset.*`(16 个) | ✅ #126 | 8 只读 + 8 自主执行 |
-| 回测 + 模拟盘 + 研究运行 | 🔒 #127 | 🔒 | 自主执行 |
+| 回测(strategy_list/run/history CRUD) | `finboard.backtest.*`(5 个) | ✅ #127 | 3 只读 + 2 自主执行 |
+| 模拟盘(账户/会话生命周期/决策/订单/成交/持仓/账本/审计/报告) | `finboard.sim.*`(17 个) | ✅ #127 | 9 只读 + 8 自主执行 |
 | portfolio 计算(allocate/sizing/feasibility/attribution) | 🔒 #128 | 🔒 | 自主执行 |
 
 > 详细工具契约见 `references/tools.md`;扩展计划见
@@ -70,7 +71,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 | 文档 | 内容 |
 |------|------|
-| `references/tools.md` | 50 个 MCP 工具完整契约(参数 / 返回 / 场景) |
+| `references/tools.md` | 76 个 MCP 工具完整契约(参数 / 返回 / 场景) |
 | `references/workflow.md` | 研究工作流决策树 + 标准研究循环 |
 | `references/research-workflow.md` | 完整研究流程详解(数据→因子→策略→回测→模拟→评估) |
 | `references/memory.md` | 研究记忆使用规则与生命周期 |

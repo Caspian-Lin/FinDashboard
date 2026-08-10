@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 50 个工具(✅);planned 工具(🔒 #127-#128)尚未实现,
+当前已实现 76 个工具(✅);planned 工具(🔒 #128)尚未实现,
 列出契约供 agent 知晓未来能力边界。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -17,10 +17,13 @@
 | AI 草案(ai.*:假设/策略) | ✅(产出草案,可追溯) | |
 | 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅ | |
 | 策略规格(strategy.* / preset.*,✅ #126) | ✅(含 validate/draft/publish/rollback) | |
-| 回测 / 模拟 / portfolio | 🔒 #127-#128(扩展中) | |
+| 回测(backtest.*,✅ #127) | ✅(含同步运行 / 历史 CRUD) | |
+| 模拟盘(sim.*,✅ #127) | ✅(账户/会话/决策/订单/报告) | |
+| ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
+| portfolio(portfolio.*,🔒 #128) | 🔒(扩展中) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
-## finboard.run.*(只读)
+## finboard.run.*(只读 + ✅ #127 写)
 
 ### finboard_run_list
 列出 ResearchRun。
@@ -36,6 +39,34 @@
 列出某 ResearchRun 的逐阶段 artifact。
 - 参数:`run_id: str`
 - 返回:`list[{artifact_id, sequence, stage, trace_id, payload}]`
+
+### finboard_run_queue(✅ #127,写)
+冻结输入 + 登记 queued ResearchRun(**不执行回测**,执行由离线 worker 完成)。
+- 参数:`payload: dict`(字段:idempotency_key / strategy_id / strategy_version /
+  dataset_release_ids / factor_snapshot_ids / parameters / validation_config /
+  portfolio_config / risk_config / execution_config / fee_config /
+  benchmark_config / code_version / initial_capital / requested_by)
+- 返回:ResearchRun 详情(含 manifest)
+- 错误:`invalid_argument`(schema 校验 / 数据发布不匹配)、`not_found`(策略规格
+  版本不存在)、`conflict`(策略未发布 / 幂等冲突)
+
+### finboard_run_cancel(✅ #127,写)
+取消 ResearchRun(queued/running/interrupted/failed → cancelled)。
+- 参数:`run_id: str`
+- 返回:更新后的 ResearchRun 详情
+- 错误:`conflict`(非法状态转换)
+
+### finboard_run_replay(✅ #127,写)
+复制 completed ResearchRun 为新 queued 运行(**不执行**)。
+- 参数:`run_id: str`、`idempotency_key: str`、`requested_by: str`
+- 返回:新 ResearchRun 详情(`replay_of_run_id` 指向源)
+- 错误:`not_found`(源不存在)、`conflict`(源未 completed / 幂等冲突)
+
+### finboard_run_lineage
+查询某 ResearchRun 内指定 trace_id 的 artifact 血缘(BFS 向上遍历 parent)。
+- 参数:`run_id: str`、`trace_id: str`
+- 返回:`{run_id, leaf_trace_id, artifacts: [{artifact_id, stage, trace_id, parent_trace_ids, payload, ...}]}`
+- 错误:`not_found`(trace 不存在)
 
 ## finboard.ai.*(AI 草案,可追溯)
 
@@ -330,15 +361,151 @@ AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不
 - 参数:`preset_id: int`
 - 返回:`{deleted: true, preset_id}`;未找到 → `not_found`
 
+## finboard.backtest.*(✅ #127)
+
+回测引擎(行情回放 + 纸面撮合)。复用 `BacktestEngine` +
+`BacktestRunRepository` + `list_strategy_definitions`。
+
+### finboard_backtest_strategy_list(只读)
+列出支持回测的内置策略及参数 schema(`supports_backtest=true`)。
+- 参数:无
+- 返回:`list[{kind, name, description, supports_backtest, params: [...]}]`
+- 仅 `ma_cross` 支持回测
+
+### finboard_backtest_run **[写]**
+同步运行回测,返回完整 metrics/equity/fills 并落库。纸面撮合,**不发真实订单**。
+- 参数:`strategy: str`、`symbols: list[str]`、`start: str`、`end: str`、
+  `capital: str = "100000"`、`adjust: str = "qfq"`、`params: dict`、
+  `selection: dict`、`commission_rate: str`、`commission_min: str`、
+  `stamp_tax_rate: str`、`slippage_bps: str`
+- 返回:`{run_id, metrics, equity_curve, fills, summary, selection_snapshots, ...}`
+- 错误:`invalid_argument`(策略不支持回测 / 参数校验失败)、
+  `permission_denied`(只读模式)、`unavailable`(数据源连接错误)
+
+### finboard_backtest_history_list(只读)
+列出最近回测历史记录(摘要,不含完整 equity/fills)。
+- 参数:`limit?: int = 50`
+- 返回:`list[{id, strategy, symbols, start, end, capital, metrics, ...}]`
+
+### finboard_backtest_history_get(只读)
+查询单条回测历史详情(含完整 equity_curve/fills/summary)。
+- 参数:`run_id: int`
+- 返回:`{id, ..., equity_curve, fills, summary, selection_snapshots, ...}`
+- 错误:`not_found`
+
+### finboard_backtest_history_delete **[写]**
+删除一条回测历史记录。
+- 参数:`run_id: int`
+- 返回:`{run_id, deleted: true}`
+- 错误:`permission_denied`(只读模式)、`not_found`
+
+## finboard.sim.*(✅ #127)
+
+持久化模拟盘(独立 `simulation_*` 表,`SIM-` ID)。复用 `SimulationService` +
+`SimulationRepository` + `simulation_schemas`。
+**边界(#83)不变**:只接受结构化目标仓位(→ 生成订单),不直接创建订单 /
+修改持仓;不连 broker;不自动晋级实盘。模拟域异常映射:
+`SimulationNotFoundError`→`not_found`、`SimulationConflictError`/
+`SimulationTransitionError`→`conflict`、`SimulationRiskError`→`invalid_argument`。
+
+### finboard_sim_account_list(只读)
+列出模拟账户。
+- 参数:`limit?: int = 100`
+- 返回:`list[{simulation_account_id, name, status, currency, cash, equity, ...}]`
+
+### finboard_sim_account_get(只读)
+查询单个模拟账户详情。ID 须以 `SIM-A-` 开头。
+- 参数:`account_id: str`
+- 错误:`invalid_argument`(ID 前缀)、`not_found`
+
+### finboard_sim_account_create **[写]**
+创建模拟账户。
+- 参数:`name: str`、`initial_cash: str`(>0)、`actor: str`、`currency: str = "CNY"`
+- 返回:`SimulationAccountOut`
+- 错误:`invalid_argument`(校验失败)
+
+### finboard_sim_session_list(只读)
+列出模拟会话。
+- 参数:`account_id?: str`、`status?: list[str]`、`limit?: int = 100`
+- 返回:`list[SimulationSessionOut]`
+- 错误:`invalid_argument`(未知 status)
+
+### finboard_sim_session_get(只读)
+查询单个模拟会话详情。ID 须以 `SIM-S-` 开头。
+- 参数:`session_id: str`
+- 错误:`invalid_argument`、`not_found`
+
+### finboard_sim_session_create **[写]**
+创建模拟会话(绑定已发布策略版本 + completed ResearchRun + 数据发布)。
+- 参数:`simulation_account_id: str`(SIM-A-)、`strategy_id: str`、
+  `strategy_version: int`、`validation_run_id: str`(RR-)、`data_release_id: str`、
+  `source_mode: str`、`actor: str`、`matching?: dict`、`risk?: dict`、`clock_speed: str = "1"`
+- 返回:`SimulationSessionOut`
+- 错误:`invalid_argument`、`conflict`(账户非 active / 已有活动会话 / 策略未发布)
+
+### finboard_sim_session_start **[写]**
+启动模拟会话(created/paused → running)。
+- 参数:`session_id: str`、`actor: str`
+- 错误:`conflict`(非法状态转换)
+
+### finboard_sim_session_pause **[写]**
+暂停模拟会话(running → paused)。
+- 参数:`session_id: str`、`actor: str`
+
+### finboard_sim_session_stop **[写]**
+停止模拟会话(→ stopped,撤全部活动单 + 重估)。
+- 参数:`session_id: str`、`actor: str`
+
+### finboard_sim_session_reset **[写]**
+重置模拟会话(stopped/archived → 新账户 + 新会话,原会话不动,经
+`reset_of_session_id` 关联)。
+- 参数:`session_id: str`、`actor: str`、`initial_cash?: str`
+- 返回:`{account: SimulationAccountOut, session: SimulationSessionOut}`
+
+### finboard_sim_decision_submit **[写]** ⭐
+提交结构化目标仓位决策(→ 模拟 runner 生成订单)。**agent 不直接创建订单**。
+- 参数:`session_id: str`、`decision: dict`(字段:decision_id / source_run_id(RR-)/
+  source_decision_id / targets[{symbol, target_quantity(期望总仓位,非增量),
+  signal_trace_id, reason, ...}] / actor)
+- 返回:`{decision: SimulationDecisionOut, orders: list[SimulationOrderOut], duplicate: bool}`
+- 幂等:相同 decision_id + checksum 返回已有 + 其订单(duplicate=true)
+
+### finboard_sim_order_cancel **[写]**
+撤销模拟订单(running/paused 会话内的活动单)。
+- 参数:`session_id: str`、`order_id: str`、`actor: str`
+- 返回:`SimulationOrderOut`
+
+### finboard_sim_orders(只读)
+列出模拟会话的订单。
+- 参数:`session_id: str`、`status?: list[str]`、`symbol?: str`、`limit?: int = 1000`
+
+### finboard_sim_fills(只读)
+列出模拟会话的成交。
+- 参数:`session_id: str`、`limit?: int = 1000`
+
+### finboard_sim_positions(只读)
+列出模拟会话(账户)的持仓。
+- 参数:`session_id: str`
+
+### finboard_sim_ledger(只读)
+列出模拟会话的账本流水。
+- 参数:`session_id: str`、`limit?: int = 1000`
+
+### finboard_sim_audit(只读)
+列出模拟会话的审计事件。
+- 参数:`session_id: str`、`limit?: int = 1000`
+
+### finboard_sim_report(只读)
+生成模拟会话绩效报告。
+- 参数:`session_id: str`
+- 返回:`dict`(含 initial_cash/final_equity/simulation_return/max_drawdown/
+  order_count/fill_count/`simulation_is_not_return_proof=true`/
+  `automatic_live_promotion=false`)
+
 ## Planned 工具(🔒 尚未实现,对应 issue)
 
 以下工具尚未实现,列出契约供 agent 知晓未来能力边界。扩展顺序见
 `packages/finboard-mcp/ROADMAP.md`。
-
-### 🔒 #127 回测 + 模拟盘 + 研究运行工具
-- `finboard_backtest_*` —— 回测(行情回放 + 纸面撮合 + 绩效分析)
-- `finboard_simulation_*` —— 模拟盘(独立 simulation_* 表,持久化)
-- `finboard_run_create` —— 创建 ResearchRun(agent 可自主执行)
 
 ### 🔒 #128 portfolio 计算工具 `finboard.portfolio.*`
 - `finboard_portfolio_allocate` —— 目标仓位生成
