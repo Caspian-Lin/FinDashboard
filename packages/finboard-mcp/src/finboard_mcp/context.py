@@ -23,6 +23,7 @@ from finboard_app.config import Settings, load_settings
 from finboard_app.llm_factory import build_llm_provider
 from finboard_backtest.factor_research import FakeLLMProvider, ResearchAssistant
 from finboard_backtest.factor_research.provider import LLMProvider
+from finboard_backtest.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_mcp.audit import AuditRecorder
 from finboard_persistence import create_async_engine, session_factory
 
@@ -42,6 +43,7 @@ class McpAppContext:
     write_tools_enabled: bool
     engine: AsyncEngine
     provider: LLMProvider
+    feature_snapshot_jobs: FeatureSnapshotJobManager
 
 
 def app_context(ctx: Context) -> McpAppContext:
@@ -75,6 +77,7 @@ async def app_lifespan(_server: MCPServer) -> AsyncIterator[McpAppContext]:
         write_tools_enabled=not settings.mcp_readonly_only,
         engine=engine,
         provider=provider,
+        feature_snapshot_jobs=FeatureSnapshotJobManager(),
     )
 
     log.info(

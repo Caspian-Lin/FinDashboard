@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 23 个工具(✅);planned 工具(🔒 #125-#128)尚未实现,
+当前已实现 34 个工具(✅);planned 工具(🔒 #126-#128)尚未实现,
 列出契约供 agent 知晓未来能力边界。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -15,7 +15,8 @@
 | 只读查询(run.* / instrument.* / dataset.* / data.* / tushare.*) | ✅ | |
 | 研究记忆(memory.*) | ✅ | |
 | AI 草案(ai.*:假设/策略) | ✅(产出草案,可追溯) | |
-| 因子 / 策略规格 / 回测 / 模拟 / portfolio | 🔒 #125-#128(扩展中) | |
+| 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅ | |
+| 策略规格 / 回测 / 模拟 / portfolio | 🔒 #126-#128(扩展中) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读)
@@ -161,16 +162,80 @@ AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不
 - 参数:无
 - 返回:`{date, requests_per_minute, daily_limit, used, remaining}`
 
+## finboard.factor.* / finboard.feature_snapshot.*(✅ #125)
+
+因子实验室工具(7 只读 + 4 写)。写操作尊重 `mcp_readonly_only` 开关。
+
+### finboard_factor_catalog
+查询因子目录(版本化实现清单,26 个 alpha/risk/market_input 因子)。
+- 参数:`role?: str`(alpha|risk|market_input)
+- 返回:`list[{name, version, role, preference, frequency, source_fields, economic_hypothesis, checksum, ...}]`
+- 无 DB 依赖,直接返回内存目录。
+
+### finboard_feature_snapshot_list
+列出已发布的特征快照(版本化、时点化、不可变)。
+- 参数:`dataset_release_id?: str`、`limit?: int = 100`
+- 返回:`list[{snapshot_id, dataset_release_id, decision_at, checksum, observations, ...}]`
+
+### finboard_feature_snapshot_get
+查询单个特征快照详情(含完整 observations 因子值)。
+- 参数:`snapshot_id: str`
+- 返回:`{snapshot_id, ..., observations, checksum}`;未找到返回 `not_found`。
+
+### finboard_feature_snapshot_create **[写]**
+同步构建并发布价格特征快照(从冻结数据发布计算因子值)。
+- 参数:`dataset_release_id: str`、`decision_at: str`(ISO datetime,必须在发布范围内)
+- 写操作,`mcp_readonly_only=true` 时拒绝。大发布建议用异步 `job_start`。
+- 返回:`{snapshot_id, ..., observations, checksum}`
+
+### finboard_feature_snapshot_job_start **[写]**
+异步启动特征快照计算任务。
+- 参数:同 `feature_snapshot_create`
+- 返回:`{job_id, status, progress_pct, ...}`(初始 status 为 queued/running)
+- 轮询模式:调用后用 `job_status` 查询,直到 succeeded(含 snapshot_id)或 failed(含 error)。
+- 同一时刻只允许一个任务排队/运行,冲突返回 `conflict`。
+
+### finboard_feature_snapshot_job_status
+查询异步特征快照任务进度。
+- 参数:`job_id: str`
+- 返回:`{job_id, status(queued|running|succeeded|failed), progress_pct, elapsed_seconds, estimated_remaining_seconds, snapshot_id, error}`;未找到返回 `not_found`。
+
+### finboard_factor_signal_list
+列出因子信号(版本化、带研究状态)。
+- 参数:`factor_name?: str`、`research_status?: str`(hypothesis|validated_oos|rejected)、`limit?: int = 100`
+- 返回:`list[{signal_id, factor_name, factor_version, feature_snapshot_id, research_status, items, validation_experiment_id, ...}]`
+
+### finboard_factor_signal_get
+查询单个因子信号详情(含完整 items 逐标的信号)。
+- 参数:`signal_id: str`
+- 返回:`{signal_id, ..., items, checksum}`;未找到返回 `not_found`。
+
+### finboard_factor_experiment_list
+列出因子实验(冻结、带状态机和验证终态)。
+- 参数:`status?: str`、`comparison_group?: str`、`limit?: int = 100`
+- 返回:`list[{experiment_id, hypothesis, factor_names, plan, status, validation_experiment_id, result, failure_reason, ...}]`
+
+### finboard_factor_experiment_get
+查询单个因子实验详情(含 plan/result/failure_reason)。
+- 参数:`experiment_id: str`
+- 返回:`{experiment_id, ..., plan, result}`;未找到返回 `not_found`。
+
+### finboard_factor_experiment_create **[写]**
+冻结因子实验注册(不启动回测/模拟盘)。
+- 参数:`hypothesis: str`、`factor_names: list[str]`、`dataset_release_id: str`、`feature_snapshot_id: str`、`plan: {in_sample_start, in_sample_end, oos_start, oos_end, trial_budget, benchmark_symbol, transaction_cost_bps, quantiles?}`、`comparison_group: str`、`validation_experiment_id?: str`
+- snapshot 与 release 必须匹配,否则 `conflict`。
+- 返回:`{experiment_id, ..., status: hypothesis}`
+
+### finboard_factor_experiment_sync_validation **[写]**
+同步因子实验的 #57 机器验证终态(不接受调用者传入 passed_oos)。
+- 参数:`experiment_id: str`
+- 读取绑定的 validation_experiment_id 的 trial 结果,推进状态机。
+- 返回:`{experiment_id, ..., status, result?}`;冲突返回 `conflict`。
+
 ## Planned 工具(🔒 尚未实现,对应 issue)
 
 以下工具尚未实现,列出契约供 agent 知晓未来能力边界。扩展顺序见
 `packages/finboard-mcp/ROADMAP.md`。
-
-### 🔒 #125 因子工具 `finboard.factor.*`
-- `finboard_factor_catalog` —— 因子目录(白名单候选池)
-- `finboard_factor_snapshot` —— 因子快照(版本化,可追溯)
-- `finboard_factor_signal` —— 信号计算(无代码规格驱动)
-- `finboard_factor_experiment` —— 因子实验(登记 / 机器验证终态绑定)
 
 ### 🔒 #126 策略规格工具 `finboard.strategy.*`
 - `finboard_strategy_registry` —— 策略注册表

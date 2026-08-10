@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 23 个工具**(issue #108 / #110 / #124):
+**已实现 34 个工具**(issue #108 / #110 / #124 / #125):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -13,8 +13,9 @@
 | `finboard.ai.*` | 4 | ask / propose_hypothesis / propose_strategy_draft / propose_strategy_diff | AI 草案(问答 / 因子假设 / 策略) |
 | `finboard.memory.*` | 7 | remember / list / get / forget / correct / confirm / archive | 研究长期记忆 |
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |
+| 因子实验室 | 11 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(7 只读 + 4 写,✅ #125) |
 
-## Planned 阶段(#125-#128)
+## Planned 阶段(#126-#128)
 
 ### ✅ #124 数据查询工具(已完成)
 9 个只读工具:instrument list/get/search、dataset_release list/get、
@@ -22,15 +23,18 @@ dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota�
 复用 `InstrumentRepository` / `ResearchDatasetReleaseRepository` /
 `ParquetCache` / `BarQualityChecker` / `shared_tushare_budget`。
 
-### #125 因子工具 `finboard.factor.*`
-- **优先级**:高(策略构建的前置)
-- **工具**:
-  - `finboard_factor_catalog` —— 因子目录(白名单候选池)
-  - `finboard_factor_snapshot` —— 因子快照(版本化)
-  - `finboard_factor_signal` —— 信号计算(无代码规格驱动)
-  - `finboard_factor_experiment` —— 因子实验(机器验证终态绑定)
-- **复用**:`finboard_backtest.factor_lab` + `factor_research`
-- **权限**:只读 + 研究写(快照 / 实验登记),自主执行
+### ✅ #125 因子工具(已完成)
+11 个工具(7 只读 + 4 写):
+- 只读:factor_catalog、feature_snapshot list/get、job_status、
+  factor_signal list/get、factor_experiment list/get
+- 写:feature_snapshot create(同步构建)/ job_start(异步任务)、
+  factor_experiment create(冻结实验)/ sync_validation(同步 #57 终态)
+
+复用 `factor_lab_catalog` / `FeatureSnapshotRepository` /
+`FactorSignalRepository` / `FactorExperimentRepository` /
+`FactorExperimentValidationService` / `build_price_feature_snapshot` /
+`FeatureSnapshotJobManager`。`FeatureSnapshotJobManager` 从 `finboard-api`
+迁移到 `finboard-backtest`(纯标准库实现,API 与 MCP 共享,避免循环依赖)。
 
 ### #126 策略规格工具 `finboard.strategy.*`
 - **优先级**:中

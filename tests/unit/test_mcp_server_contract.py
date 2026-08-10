@@ -32,6 +32,19 @@ _EXPECTED_TOOLS = {
     "finboard_data_cache_status",
     "finboard_data_quality_check",
     "finboard_tushare_quota",
+    # #125 因子实验室工具
+    "finboard_factor_catalog",
+    "finboard_feature_snapshot_list",
+    "finboard_feature_snapshot_get",
+    "finboard_feature_snapshot_create",
+    "finboard_feature_snapshot_job_start",
+    "finboard_feature_snapshot_job_status",
+    "finboard_factor_signal_list",
+    "finboard_factor_signal_get",
+    "finboard_factor_experiment_list",
+    "finboard_factor_experiment_get",
+    "finboard_factor_experiment_create",
+    "finboard_factor_experiment_sync_validation",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。
