@@ -550,6 +550,116 @@ app.add_typer(backtest_app, name="backtest")
 
 
 # ---------------------------------------------------------------------------
+# worker 子命令(统一后台任务队列,issue #117 / #142)
+# ---------------------------------------------------------------------------
+worker_app = typer.Typer(
+    name="worker",
+    help="统一后台任务队列 worker(研究/数据域耗时任务,不触及实盘交易)",
+    no_args_is_help=True,
+)
+
+
+@worker_app.command(name="run")
+def worker_run(
+    ctx: typer.Context,
+    poll_interval: Annotated[
+        float | None,
+        typer.Option("--poll-interval", help="轮询队列的间隔秒数"),
+    ] = None,
+    max_concurrent: Annotated[
+        int | None,
+        typer.Option("--max-concurrent", help="最大并发任务数"),
+    ] = None,
+    queues: Annotated[
+        str | None,
+        typer.Option(
+            "--queues",
+            help="逗号分隔的逻辑队列白名单;留空表示消费全部队列",
+        ),
+    ] = None,
+) -> None:
+    """启动后台 worker 进程,从 PostgreSQL 队列领取任务直到 Ctrl-C。"""
+
+    settings = ctx.obj
+    if poll_interval is not None:
+        settings = settings.model_copy(
+            update={"worker_poll_interval_seconds": poll_interval}
+        )
+    if max_concurrent is not None:
+        settings = settings.model_copy(
+            update={"worker_max_concurrent": max_concurrent}
+        )
+    if queues is not None:
+        settings = settings.model_copy(update={"worker_queues": queues})
+    asyncio.run(_run_worker(settings))
+
+
+@worker_app.command(name="recover")
+def worker_recover(ctx: typer.Context) -> None:
+    """回收过期 lease(running → interrupted),不启动常驻循环。
+
+    适用于:worker 崩溃后只想清理脏状态、不想立刻起常驻进程的场景。
+    """
+
+    asyncio.run(_recover_stale(ctx.obj))
+
+
+async def _run_worker(settings: Settings) -> None:
+    setup_logging(settings)
+    components = build_kernel_components(settings)
+    from finboard_backtest.background_jobs import JobExecutorRegistry
+    from finboard_backtest.background_jobs.executors import EchoExecutor
+    from finboard_backtest.background_jobs.worker import (
+        WorkerConfig,
+        default_worker_id,
+    )
+    from finboard_backtest.background_jobs.worker import (
+        run_worker as run_bg_worker,
+    )
+
+    registry = JobExecutorRegistry()
+    # 本期只注册 echo 执行器验证端到端;业务执行器由 #143/#144 注册。
+    registry.register("echo", EchoExecutor())
+    queue_list = [
+        q.strip() for q in settings.worker_queues.split(",") if q.strip()
+    ] or None
+    config = WorkerConfig(
+        worker_id=default_worker_id(),
+        poll_interval_seconds=settings.worker_poll_interval_seconds,
+        max_concurrent=settings.worker_max_concurrent,
+        lease_timeout_seconds=settings.worker_lease_timeout_seconds,
+        heartbeat_interval_seconds=settings.worker_heartbeat_interval_seconds,
+        queues=queue_list,
+    )
+    await run_bg_worker(
+        engine=components.engine,
+        session_maker=components.session_maker,
+        registry=registry,
+        config=config,
+    )
+
+
+async def _recover_stale(settings: Settings) -> None:
+    from datetime import UTC, datetime
+
+    from finboard_persistence import BackgroundJobRepository
+
+    setup_logging(settings)
+    components = build_kernel_components(settings)
+    async with components.session_maker() as session:
+        repo = BackgroundJobRepository(session)
+        rows = await repo.reclaim_stale(datetime.now(UTC))
+        await repo.checkpoint()
+        await components.engine.dispose()
+    typer.echo(f"回收过期 lease 任务: {len(rows)}")
+    for row in rows:
+        typer.echo(f"  {row.job_id} kind={row.kind} -> interrupted")
+
+
+app.add_typer(worker_app, name="worker")
+
+
+# ---------------------------------------------------------------------------
 # data 子命令
 # ---------------------------------------------------------------------------
 data_app = typer.Typer(

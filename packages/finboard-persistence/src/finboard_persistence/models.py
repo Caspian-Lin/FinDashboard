@@ -1962,3 +1962,80 @@ class ResearchMemoryModel(Base, IdMixin):
             "created_at",
         ),
     )
+
+
+class BackgroundJobModel(Base, IdMixin):
+    """统一持久化后台任务队列(issue #117 / #142)。
+
+    与实盘 orders/fills/positions 完全隔离 —— 是独立调度表,不建任何外键:
+    ``result_ref`` 只以字符串形式引用产物(run_id / snapshot_id 等)。
+    Worker 用 PostgreSQL ``FOR UPDATE SKIP LOCKED`` 领取 queued 任务;
+    status 列存 ``BackgroundJobStatus.value`` 字符串(对齐现有约定,不用 sa.Enum)。
+    """
+
+    __tablename__ = "background_jobs"
+
+    job_id: Mapped[str] = mapped_column(String(48), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    queue: Mapped[str] = mapped_column(
+        String(32), index=True, default="default", server_default="default"
+    )
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    payload_checksum: Mapped[str] = mapped_column(String(64), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
+    progress_total: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    progress_done: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    phase: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
+    worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    requested_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_background_jobs_kind_status_created",
+            "kind",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_background_jobs_status_lease",
+            "status",
+            "lease_until",
+        ),
+        Index(
+            "ix_background_jobs_queue_priority_created",
+            "queue",
+            "priority",
+            "created_at",
+        ),
+    )
