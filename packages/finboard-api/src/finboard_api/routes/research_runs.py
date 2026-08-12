@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from typing import cast
 
@@ -40,11 +41,17 @@ from finboard_backtest.strategy_spec import ResearchStrategySpec
 from finboard_backtest.strategy_spec.contracts import FeatureKind
 from finboard_data.releases import ReleaseCapabilityError
 from finboard_persistence import (
+    BackgroundJobPersistenceConflictError,
+    BackgroundJobRepository,
     FeatureSnapshotRepository,
     ResearchDatasetReleaseRepository,
     ResearchRunPersistenceConflictError,
     ResearchRunRepository,
     ResearchStrategySpecRepository,
+)
+from finboard_shared.background_jobs import (
+    BackgroundJobStatus,
+    generate_background_job_id,
 )
 
 router = APIRouter(prefix="/api/research/runs", tags=["research-runs"])
@@ -224,11 +231,21 @@ async def queue_research_run(
             manifest=cast(dict[str, object], to_json_value(manifest)),
             requested_by=manifest.requested_by,
         )
+        # issue #143:同事务双写 background_jobs,共用 idempotency_key 保证幂等。
+        # 已存在的 research_run(幂等命中)若已有 job_id 则保留,否则补建。
+        if not row.job_id:
+            row.job_id = await _enqueue_research_run_job(
+                session, manifest=manifest
+            )
         await session.commit()
     except (ValueError, ValidationError) as exc:
         await session.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (ResearchRunPersistenceConflictError, IntegrityError) as exc:
+    except (
+        ResearchRunPersistenceConflictError,
+        BackgroundJobPersistenceConflictError,
+        IntegrityError,
+    ) as exc:
         await session.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ResearchRunOut.model_validate(row)
@@ -316,6 +333,8 @@ async def cancel_research_run(
     run_id: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> ResearchRunOut:
+    import contextlib
+
     from finboard_backtest.research_run import ResearchRunCoordinator
 
     coordinator = ResearchRunCoordinator(
@@ -323,6 +342,12 @@ async def cancel_research_run(
     )
     try:
         record = await coordinator.cancel(run_id)
+        # issue #143:协作式取消联动 background_jobs(running → cancel_requested,
+        # worker 下次 checkpoint 时 research_run CANCELLED 退出,job 收口 cancelled)。
+        # 已终态的 job request_cancel 抛 ConflictError,幂等 suppress。
+        if record.job_id:
+            with contextlib.suppress(BackgroundJobPersistenceConflictError):
+                await BackgroundJobRepository(session).request_cancel(record.job_id)
         await session.commit()
     except (ResearchRunConflictError, ResearchRunPersistenceConflictError) as exc:
         await session.rollback()
@@ -355,9 +380,21 @@ async def queue_research_replay(
         replay_of_run_id=run_id,
     )
     try:
-        record, _ = await store.create_or_get(manifest)
+        record, created = await store.create_or_get(manifest)
+        # issue #143:重放也走双写;background_jobs 用重放后的新 idempotency_key。
+        if created:
+            row = await ResearchRunRepository(session).get(record.manifest.run_id)
+            assert row is not None
+            if not row.job_id:
+                row.job_id = await _enqueue_research_run_job(
+                    session, manifest=manifest
+                )
         await session.commit()
-    except (ResearchRunPersistenceConflictError, IntegrityError) as exc:
+    except (
+        ResearchRunPersistenceConflictError,
+        BackgroundJobPersistenceConflictError,
+        IntegrityError,
+    ) as exc:
         await session.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     row = await ResearchRunRepository(session).get(record.manifest.run_id)
@@ -368,6 +405,43 @@ async def queue_research_replay(
 def _run_id(idempotency_key: str) -> str:
     digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
     return f"RR-{digest}"
+
+
+def _payload_checksum(payload: dict[str, object]) -> str:
+    """计算 background_jobs payload checksum(与 jobs.py 路由保持一致)。"""
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+async def _enqueue_research_run_job(
+    session: AsyncSession,
+    *,
+    manifest: ResearchRunManifest,
+) -> str:
+    """在同事务内为研究运行创建 background_jobs 行,返回 job_id(issue #143)。
+
+    与 research_run 共用 idempotency_key,保证两系统幂等一致:任一系统命中即
+    不重复创建。调用方负责把返回的 job_id 回填到 research_runs.job_id。
+    """
+    payload: dict[str, object] = {
+        "run_id": manifest.run_id,
+        "strategy_kind": manifest.strategy_kind,
+    }
+    job_repo = BackgroundJobRepository(session)
+    job_row, _ = await job_repo.create_or_get(
+        job_id=generate_background_job_id(),
+        idempotency_key=manifest.idempotency_key,
+        kind="research_run",
+        queue="research",
+        status=BackgroundJobStatus.QUEUED.value,
+        priority=0,
+        payload=payload,
+        payload_checksum=_payload_checksum(payload),
+        max_attempts=3,
+        requested_by=manifest.requested_by,
+    )
+    return job_row.job_id
 
 
 __all__ = ["router"]

@@ -653,6 +653,8 @@ class ResearchRunRecord:
     result_checksum: str | None = None
     error_code: str | None = None
     error_summary: str | None = None
+    # issue #143:关联 background_jobs.job_id(字符串引用);None 表示尚未接入统一队列。
+    job_id: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
     completed_at: datetime | None = None

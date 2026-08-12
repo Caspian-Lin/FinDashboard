@@ -157,6 +157,7 @@ def _record_from_model(row: object) -> ResearchRunRecord:
         result_checksum=row.result_checksum,
         error_code=row.error_code,
         error_summary=row.error_summary,
+        job_id=getattr(row, "job_id", None),
         created_at=row.created_at,
         started_at=row.started_at,
         completed_at=row.completed_at,
