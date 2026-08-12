@@ -417,6 +417,9 @@ class ResearchRunModel(Base, IdMixin):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     requested_by: Mapped[str] = mapped_column(String(128))
+    # issue #143:关联 background_jobs.job_id(字符串引用,不加外键,遵循
+    # background_jobs 独立调度表约定)。queue 路由同事务双写时回填。
+    job_id: Mapped[str | None] = mapped_column(String(48), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )

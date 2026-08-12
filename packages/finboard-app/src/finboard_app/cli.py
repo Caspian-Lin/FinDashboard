@@ -38,7 +38,11 @@ from finboard_shared.identifiers import AccountId
 from finboard_shared.types import KillSwitchLevel
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
     from finboard_app.bootstrap import KernelComponents
+    from finboard_backtest.research_run import ResearchRunManifest
+    from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
     from finboard_data import ResearchDatasetRelease
     from finboard_reconcile import ReconciliationReport
     from finboard_scheduler import Scheduler
@@ -608,7 +612,13 @@ async def _run_worker(settings: Settings) -> None:
     setup_logging(settings)
     components = build_kernel_components(settings)
     from finboard_backtest.background_jobs import JobExecutorRegistry
-    from finboard_backtest.background_jobs.executors import EchoExecutor
+    from finboard_backtest.background_jobs.executors import (
+        EchoExecutor,
+        ResearchRunExecutor,
+    )
+    from finboard_backtest.background_jobs.executors.research_run import (
+        default_store_factory,
+    )
     from finboard_backtest.background_jobs.worker import (
         WorkerConfig,
         default_worker_id,
@@ -617,9 +627,23 @@ async def _run_worker(settings: Settings) -> None:
         run_worker as run_bg_worker,
     )
 
+    # 启动恢复:把崩溃前 research_runs 残留的 RUNNING 收敛成可续跑的 INTERRUPTED
+    # (background_jobs 的过期 lease 由 worker.run() 内部 _recover_stale 处理)。
+    await _recover_research_runs(components.session_maker)
+
     registry = JobExecutorRegistry()
-    # 本期只注册 echo 执行器验证端到端;业务执行器由 #143/#144 注册。
     registry.register("echo", EchoExecutor())
+    # issue #143:research_run 执行器接入统一队列。adapter_factory 用占位实现
+    # (真实「冻结产物 → PortfolioPipelineAdapter」信号引擎留后续 issue);
+    # 端到端验证通过注入 DecisionSequenceAdapter 的测试覆盖(见集成测试)。
+    registry.register(
+        "research_run",
+        ResearchRunExecutor(
+            session_maker=components.session_maker,
+            store_factory=default_store_factory,
+            adapter_factory=_placeholder_adapter_factory,
+        ),
+    )
     queue_list = [
         q.strip() for q in settings.worker_queues.split(",") if q.strip()
     ] or None
@@ -636,6 +660,42 @@ async def _run_worker(settings: Settings) -> None:
         session_maker=components.session_maker,
         registry=registry,
         config=config,
+    )
+
+
+async def _recover_research_runs(
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """worker 启动时把残留 RUNNING 研究运行收敛为 INTERRUPTED(issue #143)。"""
+    from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+    from finboard_backtest.research_run import ResearchRunCoordinator
+    from finboard_persistence import ResearchRunRepository
+
+    async with session_maker() as session:
+        store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+        await ResearchRunCoordinator(store).mark_stale_running_as_interrupted()
+        await store.checkpoint()
+
+
+def _placeholder_adapter_factory(
+    manifest: ResearchRunManifest,
+) -> ResearchStrategyAdapter:
+    """占位适配器工厂:真实策略信号引擎尚未接入时,任务以不可重试失败收口。
+
+    真实工厂应:用 ``FrozenInputLoader`` 加载机械字段 → 调策略信号引擎生成
+    ``NormalizedSignal`` → 构造 ``PortfolioPipelineAdapter``。端到端验证通过
+    集成测试注入 ``DecisionSequenceAdapter`` 固定样本覆盖。
+    """
+    from finboard_backtest.background_jobs.contracts import ExecutorError
+
+    del manifest
+    raise ExecutorError(
+        code="signal_engine_not_implemented",
+        summary=(
+            "真实策略信号引擎尚未接入;research_run 执行器当前只支持注入固定样本"
+            "适配器的测试路径。请通过后续 issue 实现「冻结产物 → 信号」加载器。"
+        ),
+        retryable=False,
     )
 
 

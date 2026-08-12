@@ -10,6 +10,8 @@ lineage(artifact 血缘)。
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import TYPE_CHECKING, Any, cast
 
 from mcp.server import MCPServer
@@ -19,9 +21,19 @@ from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
 from finboard_mcp.tools._serde import to_jsonable
+from finboard_persistence.background_job_repo import (
+    BackgroundJobPersistenceConflictError,
+    BackgroundJobRepository,
+)
 from finboard_persistence.research_run_repo import ResearchRunRepository
+from finboard_shared.background_jobs import (
+    BackgroundJobStatus,
+    generate_background_job_id,
+)
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from finboard_persistence.models import ResearchRunArtifactModel, ResearchRunModel
 
 
@@ -51,6 +63,8 @@ def _run_detail(row: ResearchRunModel) -> dict[str, Any]:
             "manifest": row.manifest,
             "result": row.result,
             "error_summary": row.error_summary,
+            # issue #143:关联 background_jobs.job_id,agent 可用 finboard_job_* 轮询。
+            "job_id": getattr(row, "job_id", None),
         }
     )
     return cast(dict[str, Any], to_jsonable(detail))
@@ -68,6 +82,42 @@ def _artifact_summary(row: ResearchRunArtifactModel) -> dict[str, Any]:
             "payload": row.payload,
         }
     ))
+
+
+def _payload_checksum(payload: dict[str, object]) -> str:
+    """计算 background_jobs payload checksum(与 routes/research_runs.py 一致)。"""
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+async def _enqueue_research_run_job(
+    session: AsyncSession,
+    *,
+    run_id: str,
+    strategy_kind: str,
+    idempotency_key: str,
+    requested_by: str,
+) -> str:
+    """同事务为研究运行创建 background_jobs 行,返回 job_id(issue #143)。"""
+    payload: dict[str, object] = {
+        "run_id": run_id,
+        "strategy_kind": strategy_kind,
+    }
+    job_repo = BackgroundJobRepository(session)
+    job_row, _ = await job_repo.create_or_get(
+        job_id=generate_background_job_id(),
+        idempotency_key=idempotency_key,
+        kind="research_run",
+        queue="research",
+        status=BackgroundJobStatus.QUEUED.value,
+        priority=0,
+        payload=payload,
+        payload_checksum=_payload_checksum(payload),
+        max_attempts=3,
+        requested_by=requested_by,
+    )
+    return job_row.job_id
 
 
 async def list_runs(
@@ -376,9 +426,19 @@ async def queue_run(
                     manifest=cast(dict[str, object], to_json_value(manifest)),
                     requested_by=manifest.requested_by,
                 )
+                # issue #143:同事务双写 background_jobs(共用 idempotency_key)。
+                if not getattr(row, "job_id", None):
+                    row.job_id = await _enqueue_research_run_job(
+                        session,
+                        run_id=manifest.run_id,
+                        strategy_kind=manifest.strategy_kind,
+                        idempotency_key=manifest.idempotency_key,
+                        requested_by=manifest.requested_by,
+                    )
                 await session.commit()
             except (
                 ResearchRunPersistenceConflictError,
+                BackgroundJobPersistenceConflictError,
                 IntegrityError,
             ) as exc:
                 await session.rollback()
@@ -412,6 +472,14 @@ async def cancel_run(app: McpAppContext, run_id: str) -> ToolEnvelope:
             coordinator = ResearchRunCoordinator(store)
             try:
                 record = await coordinator.cancel(run_id)
+                # issue #143:协作式取消联动 background_jobs(已终态 job 幂等 suppress)。
+                if getattr(record, "job_id", None):
+                    import contextlib
+
+                    with contextlib.suppress(BackgroundJobPersistenceConflictError):
+                        await BackgroundJobRepository(session).request_cancel(
+                            record.job_id  # type: ignore[arg-type]
+                        )
                 await session.commit()
             except (
                 ResearchRunConflictError,
@@ -477,10 +545,26 @@ async def replay_run(
                 replay_of_run_id=run_id,
             )
             try:
-                record, _ = await store.create_or_get(manifest)
+                record, created = await store.create_or_get(manifest)
+                # issue #143:重放也走双写;background_jobs 用重放后的新 idempotency_key。
+                if created:
+                    row_created = await ResearchRunRepository(session).get(
+                        record.manifest.run_id
+                    )
+                    if row_created is not None and not getattr(
+                        row_created, "job_id", None
+                    ):
+                        row_created.job_id = await _enqueue_research_run_job(
+                            session,
+                            run_id=manifest.run_id,
+                            strategy_kind=manifest.strategy_kind,
+                            idempotency_key=manifest.idempotency_key,
+                            requested_by=manifest.requested_by,
+                        )
                 await session.commit()
             except (
                 ResearchRunPersistenceConflictError,
+                BackgroundJobPersistenceConflictError,
                 IntegrityError,
             ) as exc:
                 await session.rollback()

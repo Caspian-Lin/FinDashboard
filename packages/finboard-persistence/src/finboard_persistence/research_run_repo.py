@@ -40,6 +40,7 @@ class ResearchRunRepository:
         manifest_checksum: str,
         manifest: dict[str, object],
         requested_by: str,
+        job_id: str | None = None,
     ) -> tuple[ResearchRunModel, bool]:
         existing = await self.get_by_idempotency_key(idempotency_key)
         if existing is None:
@@ -61,6 +62,7 @@ class ResearchRunRepository:
             manifest_checksum=manifest_checksum,
             manifest=manifest,
             requested_by=requested_by,
+            job_id=job_id,
         )
         try:
             async with self._session.begin_nested():
@@ -224,6 +226,7 @@ class ResearchRunRepository:
             "result_checksum": row.result_checksum,
             "error_code": row.error_code,
             "error_summary": row.error_summary,
+            "job_id": row.job_id,
         }
 
 

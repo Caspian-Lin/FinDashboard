@@ -1,0 +1,440 @@
+"""ResearchRun worker 集成测试(issue #143)。
+
+验证 research_run 迁移到统一队列后的端到端链路:
+
+* queue(双写 research_runs + background_jobs) → worker 消费 → 两表同步推进到
+  completed/succeeded;
+* 双写幂等(同 idempotency_key 不重复创建);
+* 取消链路(cancel research_run → background_job cancel_requested/cancelled);
+* worker 中断 → 恢复 → 续跑。
+
+依赖 PostgreSQL(``FINBOARD_DB_URL``)。不连 broker / 不下实盘单。
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from typing import cast
+
+import numpy as np
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+from finboard_backtest.background_jobs import JobExecutorRegistry
+from finboard_backtest.background_jobs.executors import ResearchRunExecutor
+from finboard_backtest.background_jobs.executors.research_run import (
+    default_store_factory,
+)
+from finboard_backtest.background_jobs.worker import (
+    BackgroundWorker,
+    WorkerConfig,
+)
+from finboard_backtest.portfolio import AssetLotInfo, CovarianceEstimate
+from finboard_backtest.research_run import (
+    FeatureValue,
+    FrozenArtifactRef,
+    NormalizedSignal,
+    ResearchRunCoordinator,
+    ResearchRunManifest,
+    ResearchRunStatus,
+    UniverseCandidate,
+    stable_checksum,
+    to_json_value,
+)
+from finboard_backtest.research_run.portfolio_pipeline import (
+    PortfolioDecisionInput,
+    PortfolioPipelineAdapter,
+)
+from finboard_backtest.strategy_spec import build_strategy_template
+from finboard_persistence import (
+    BackgroundJobRepository,
+    ResearchRunRepository,
+    create_async_engine,
+    session_factory,
+)
+from finboard_shared.background_jobs import (
+    BackgroundJobStatus,
+    generate_background_job_id,
+)
+
+pytestmark = pytest.mark.asyncio
+
+
+# ---- engine fixture(与 test_background_job_persistence.py 一致) -------------
+
+
+@pytest_asyncio.fixture(scope="module")
+async def engine() -> AsyncIterator[AsyncEngine]:
+    import os
+
+    from finboard_persistence import Base
+
+    db_url = os.getenv(
+        "FINBOARD_DB_URL",
+        "postgresql+psycopg://findashboard:CHANGE_ME@127.0.0.1:5432/findashboard",
+    )
+    eng = create_async_engine(db_url)
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield eng
+    await eng.dispose()
+
+
+@pytest.fixture(autouse=True)
+async def _clean(engine: AsyncEngine) -> None:
+    """每个测试前清空 background_jobs + research_runs(+ artifacts)。"""
+    from sqlalchemy import text
+
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM research_run_artifacts"))
+        await conn.execute(text("DELETE FROM research_runs"))
+        await conn.execute(text("DELETE FROM background_jobs"))
+
+
+# ---- manifest / adapter builders -------------------------------------------
+
+
+def _run_id(idempotency_key: str) -> str:
+    digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
+    return f"RR-{digest}"
+
+
+def _manifest(suffix: str) -> ResearchRunManifest:
+    spec = build_strategy_template(
+        "ma_cross",
+        strategy_id=f"ma_cross_worker_{suffix}",
+        dataset_release_ids=("frozen-release-v1",),
+    )
+    return ResearchRunManifest(
+        run_id=_run_id(f"worker-test-{suffix}"),
+        idempotency_key=f"worker-test-{suffix}",
+        strategy_spec=spec,
+        strategy_spec_checksum=stable_checksum(spec.canonical_payload()),
+        dataset_releases=(
+            FrozenArtifactRef(
+                artifact_id="frozen-release-v1",
+                version="v1",
+                checksum="a" * 64,
+                capabilities=("stock",),
+            ),
+        ),
+        code_version="abcdef0123456789",
+        initial_capital=Decimal("200000"),
+        requested_by="worker-test",
+    )
+
+
+def _portfolio_adapter() -> PortfolioPipelineAdapter:
+    symbols = ("A.SH", "B.SH", "C.SH")
+    decision_at = datetime(2024, 1, 2, 15, tzinfo=UTC)
+    return PortfolioPipelineAdapter(
+        strategy_kind="ma_cross",
+        decision_inputs=(
+            PortfolioDecisionInput(
+                business_date=date(2024, 1, 2),
+                decision_at=decision_at,
+                execution_at=datetime(2024, 1, 3, 9, 30, tzinfo=UTC),
+                candidates=tuple(
+                    UniverseCandidate(
+                        symbol=symbol,
+                        included=True,
+                        reasons=("集成测试候选池通过",),
+                        asset_class="equity",
+                        market="a_share",
+                    )
+                    for symbol in symbols
+                ),
+                features=tuple(
+                    FeatureValue(
+                        symbol=symbol,
+                        feature_id="close",
+                        value=10.0,
+                        source_artifact_ids=("frozen-release-v1",),
+                        available_at=decision_at,
+                    )
+                    for symbol in symbols
+                ),
+                signals=tuple(
+                    NormalizedSignal(
+                        symbol=symbol,
+                        score=1.0,
+                        action="buy",
+                        rule_id="integration-signal",
+                        rationale="集成测试冻结信号",
+                    )
+                    for symbol in symbols
+                ),
+                prices=dict.fromkeys(symbols, 10.0),
+                execution_prices=dict.fromkeys(symbols, 10.0),
+                lot_info={
+                    symbol: AssetLotInfo(code=symbol, lot_size=100)
+                    for symbol in symbols
+                },
+                input_artifact_ids=("frozen-release-v1",),
+                covariance=CovarianceEstimate(
+                    matrix=np.diag([0.01, 0.01, 0.01]),
+                    tickers=list(symbols),
+                    shrinkage=0.0,
+                    n_observations=252,
+                ),
+                sleeve_map=dict.fromkeys(symbols, "equity"),
+            ),
+        ),
+    )
+
+
+def _make_adapter_factory() -> Callable[[ResearchRunManifest], PortfolioPipelineAdapter]:
+    """固定样本 adapter 工厂(注入到 ResearchRunExecutor)。"""
+
+    def factory(manifest: ResearchRunManifest) -> PortfolioPipelineAdapter:
+        del manifest  # 固定样本,不依赖 manifest 内容
+        return _portfolio_adapter()
+
+    return factory
+
+
+# ---- helpers ----------------------------------------------------------------
+
+
+async def _queue_double_write(
+    engine: AsyncEngine,
+    manifest: ResearchRunManifest,
+) -> str:
+    """模拟 queue_research_run 路由的双写,返回 run_id。
+
+    research_runs 与 background_jobs 共用 idempotency_key,同事务提交。
+    """
+    import json
+
+    async with session_factory(engine)() as session:
+        repo = ResearchRunRepository(session)
+        row, _ = await repo.create_or_get(
+            run_id=manifest.run_id,
+            idempotency_key=manifest.idempotency_key,
+            replay_of_run_id=None,
+            strategy_id=manifest.strategy_spec.strategy_id,
+            strategy_kind=manifest.strategy_kind,
+            status=ResearchRunStatus.QUEUED.value,
+            schema_version=manifest.schema_version,
+            manifest_checksum=manifest.checksum,
+            manifest=cast(dict[str, object], to_json_value(manifest)),
+            requested_by=manifest.requested_by,
+        )
+        job_repo = BackgroundJobRepository(session)
+        payload: dict[str, object] = {
+            "run_id": manifest.run_id,
+            "strategy_kind": manifest.strategy_kind,
+        }
+        checksum = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        job_row, _ = await job_repo.create_or_get(
+            job_id=generate_background_job_id(),
+            idempotency_key=manifest.idempotency_key,
+            kind="research_run",
+            queue="research",
+            status=BackgroundJobStatus.QUEUED.value,
+            priority=0,
+            payload=payload,
+            payload_checksum=checksum,
+            max_attempts=3,
+            requested_by=manifest.requested_by,
+        )
+        row.job_id = job_row.job_id
+        await repo.checkpoint()
+    return manifest.run_id
+
+
+def _build_worker(engine: AsyncEngine) -> BackgroundWorker:
+    registry = JobExecutorRegistry()
+    registry.register(
+        "research_run",
+        ResearchRunExecutor(
+            session_maker=session_factory(engine),
+            store_factory=default_store_factory,
+            adapter_factory=_make_adapter_factory(),
+        ),
+    )
+    return BackgroundWorker(
+        engine=engine,
+        session_maker=session_factory(engine),
+        registry=registry,
+        config=WorkerConfig(
+            worker_id="w-test",
+            poll_interval_seconds=0.05,
+            max_concurrent=2,
+            lease_timeout_seconds=60,
+            heartbeat_interval_seconds=10.0,
+        ),
+    )
+
+
+async def _drain_worker(worker: BackgroundWorker) -> None:
+    import asyncio
+
+    await worker._fill_concurrency()
+    for _ in range(400):
+        if not worker._inflight:
+            break
+        await asyncio.sleep(0.02)
+    assert not worker._inflight
+
+
+# ---- tests ------------------------------------------------------------------
+
+
+class TestResearchRunWorkerEndToEnd:
+    async def test_queue_then_worker_completes_double_write(
+        self, engine: AsyncEngine
+    ) -> None:
+        manifest = _manifest("e2e")
+        run_id = await _queue_double_write(engine, manifest)
+        worker = _build_worker(engine)
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.COMPLETED.value
+            assert run_row.job_id is not None
+            job_row = await BackgroundJobRepository(session).get(run_row.job_id)
+            assert job_row is not None
+            assert job_row.status == BackgroundJobStatus.SUCCEEDED.value
+            assert job_row.result_ref == run_id
+
+    async def test_double_write_idempotent(self, engine: AsyncEngine) -> None:
+        manifest = _manifest("idem")
+        await _queue_double_write(engine, manifest)
+        # 同 idempotency_key 再次 queue:两表均命中,不重复创建。
+        await _queue_double_write(engine, manifest)
+
+        async with session_factory(engine)() as session:
+            from sqlalchemy import func, select
+
+            from finboard_persistence import BackgroundJobModel, ResearchRunModel
+
+            run_count = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ResearchRunModel)
+                    .where(ResearchRunModel.idempotency_key == manifest.idempotency_key)
+                )
+            ).scalar_one()
+            job_count = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(BackgroundJobModel)
+                    .where(BackgroundJobModel.idempotency_key == manifest.idempotency_key)
+                )
+            ).scalar_one()
+        assert run_count == 1
+        assert job_count == 1
+
+    async def test_cancel_propagates_to_running_job(
+        self, engine: AsyncEngine
+    ) -> None:
+        """cancel research_run(RUNNING 态)→ job cancel_requested → 协作式收口。
+
+        研究运行进入 RUNNING 后,coordinator.cancel 把它置 CANCELLED;同时调
+        background_jobs.request_cancel(running → cancel_requested)。worker 下次
+        checkpoint 时 coordinator 重读 status 发现 CANCELLED 优雅退出,job 收口。
+        本测试覆盖 RUNNING 态取消链路(QUEUED 态 cancel 时 job 无人 claim,
+        request_cancel 因非 running 被 suppress,job 保持 queued —— 这是预期行为)。
+        """
+        import contextlib
+
+        manifest = _manifest("cancel")
+        run_id = await _queue_double_write(engine, manifest)
+
+        # 把 research_run 推进到 RUNNING(模拟 worker 已开始消费),
+        # 同时让 background_job 进入 RUNNING(lease 持有)。
+        async with session_factory(engine)() as session:
+            store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            await store.transition(
+                run_id,
+                expected=frozenset({ResearchRunStatus.QUEUED}),
+                target=ResearchRunStatus.RUNNING,
+            )
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.job_id is not None
+            await BackgroundJobRepository(session).transition(
+                run_row.job_id,
+                expected=frozenset({BackgroundJobStatus.QUEUED.value}),
+                target=BackgroundJobStatus.RUNNING.value,
+            )
+            await store.checkpoint()
+
+        # 取消链路:cancel research_run + request_cancel(job)。
+        async with session_factory(engine)() as session:
+            coordinator = ResearchRunCoordinator(
+                SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            )
+            record = await coordinator.cancel(run_id)
+            if record.job_id:
+                with contextlib.suppress(Exception):
+                    await BackgroundJobRepository(session).request_cancel(
+                        record.job_id
+                    )
+            await session.commit()
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.CANCELLED.value
+            assert run_row.job_id is not None
+            job_row = await BackgroundJobRepository(session).get(run_row.job_id)
+            assert job_row is not None
+            # job 从 RUNNING → cancel_requested(协作式取消信号已写入)。
+            assert job_row.status == BackgroundJobStatus.CANCEL_REQUESTED.value
+
+    async def test_worker_recovers_interrupted_run(
+        self, engine: AsyncEngine
+    ) -> None:
+        """worker 启动恢复:把残留 RUNNING research_run 收敛成 INTERRUPTED,可续跑。
+
+        模拟:queue → 手动置 RUNNING(模拟 worker 崩溃前状态)→ 启动恢复
+        (mark_stale_running_as_interrupted)→ 再次 queue background_job → worker
+        消费 → research_run 从 INTERRUPTED 续跑到 COMPLETED。
+        """
+        manifest = _manifest("recover")
+        run_id = await _queue_double_write(engine, manifest)
+
+        # 模拟 worker 崩溃:把 research_run 置 RUNNING(无人推进)。
+        async with session_factory(engine)() as session:
+            store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            await store.transition(
+                run_id,
+                expected=frozenset({ResearchRunStatus.QUEUED}),
+                target=ResearchRunStatus.RUNNING,
+            )
+            await store.checkpoint()
+
+        # 启动恢复:mark_stale_running_as_interrupted。
+        async with session_factory(engine)() as session:
+            store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            await ResearchRunCoordinator(store).mark_stale_running_as_interrupted()
+            await store.checkpoint()
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.INTERRUPTED.value
+
+        # worker 消费:research_run 从 INTERRUPTED 续跑(COMPLETED)。
+        worker = _build_worker(engine)
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.COMPLETED.value
+            assert run_row.job_id is not None
+            job_row = await BackgroundJobRepository(session).get(run_row.job_id)
+            assert job_row is not None
+            assert job_row.status == BackgroundJobStatus.SUCCEEDED.value

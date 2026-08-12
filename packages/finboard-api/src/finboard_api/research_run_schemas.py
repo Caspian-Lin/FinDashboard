@@ -54,6 +54,7 @@ class ResearchRunOut(BaseModel):
     error_code: str | None
     error_summary: str | None
     requested_by: str
+    job_id: str | None = None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
