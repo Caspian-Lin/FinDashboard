@@ -3,6 +3,11 @@
 只暴露稳定契约,不包含任何 IO / 业务逻辑。
 """
 
+from finboard_shared.background_jobs import (
+    TERMINAL_STATUSES,
+    BackgroundJobStatus,
+    generate_background_job_id,
+)
 from finboard_shared.exceptions import (
     BrokerTimeoutError,
     FinboardError,
@@ -64,10 +69,12 @@ from finboard_shared.types import (
 
 __all__ = [
     "ASSET_METADATA_VERSION",
+    "TERMINAL_STATUSES",
     "Account",
     "AccountId",
     "AdjustmentMethod",
     "AssetClass",
+    "BackgroundJobStatus",
     "BondMetadata",
     "BrokerKind",
     "BrokerTimeoutError",
@@ -110,5 +117,6 @@ __all__ = [
     "Symbol",
     "TimeInForce",
     "TradingPhase",
+    "generate_background_job_id",
     "generate_client_order_id",
 ]

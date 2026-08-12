@@ -60,6 +60,18 @@ class Settings(BaseSettings):
     # 特征快照使用的独立计算进程数;0 表示只使用旧的进程内 worker。
     feature_snapshot_process_workers: int = Field(default=8, ge=0, le=64)
 
+    # ---- 统一后台任务队列 worker(issue #117 / #142) ----
+    # 独立进程 ``finboard worker`` 用 FOR UPDATE SKIP LOCKED 领取任务。
+    # 不影响实盘交易线程,仅服务研究/数据域耗时任务。
+    worker_poll_interval_seconds: float = Field(default=2.0, gt=0)
+    worker_max_concurrent: int = Field(default=4, ge=1, le=32)
+    worker_lease_timeout_seconds: float = Field(default=600.0, gt=0)
+    worker_heartbeat_interval_seconds: float = Field(default=30.0, gt=0)
+    worker_queues: str = Field(
+        default="",
+        description="逗号分隔的逻辑队列白名单;空字符串表示消费全部队列",
+    )
+
     # ---- Broker ----
     broker: BrokerKind = BrokerKind.MOCK
     account_id: str = "test-account"

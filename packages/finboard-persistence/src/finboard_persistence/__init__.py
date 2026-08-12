@@ -8,6 +8,10 @@ from finboard_persistence.ai_research_repo import (
     HypothesisPersistenceError,
     HypothesisWorkflowService,
 )
+from finboard_persistence.background_job_repo import (
+    BackgroundJobPersistenceConflictError,
+    BackgroundJobRepository,
+)
 from finboard_persistence.base import Base
 from finboard_persistence.dataset_release_repo import (
     ReleaseInstrumentCatalogRepository,
@@ -32,6 +36,7 @@ from finboard_persistence.models import (
     AIAuditEventModel,
     AIDraftModel,
     AuditLogModel,
+    BackgroundJobModel,
     BacktestRunModel,
     BondMetadataModel,
     ContinuousFuturesRuleModel,
@@ -131,6 +136,9 @@ __all__ = [
     "AccountRepository",
     "AuditLogModel",
     "AuditLogRepository",
+    "BackgroundJobModel",
+    "BackgroundJobPersistenceConflictError",
+    "BackgroundJobRepository",
     "BacktestRunModel",
     "BacktestRunRepository",
     "Base",
