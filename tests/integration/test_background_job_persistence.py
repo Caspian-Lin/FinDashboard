@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -84,7 +85,7 @@ def _fresh_lease() -> datetime:
 
 
 @pytest.fixture(scope="module")
-async def engine(_db_url: str):  # type: ignore[no-untyped-def]
+async def engine(_db_url: str) -> AsyncIterator[AsyncEngine]:
     """module 级 engine:建表 → 测试 → 清表。
 
     本 module 不复用 conftest 的 db_session,因为 claim_next 并发 / reclaim /
@@ -101,7 +102,7 @@ async def engine(_db_url: str):  # type: ignore[no-untyped-def]
 
 
 @pytest.fixture(autouse=True)
-async def _clean(engine: AsyncEngine) -> None:  # type: ignore[no-untyped-def]
+async def _clean(engine: AsyncEngine) -> None:
     """每个用例开始前清空 background_jobs,保证用例间隔离。"""
 
     async with engine.begin() as conn:
@@ -115,7 +116,7 @@ class TestRepositoryStateMachine:
     async def test_create_or_get_is_idempotent(self, engine: AsyncEngine) -> None:
         repo_make = BackgroundJobRepository  # 便于阅读
         job_id = generate_background_job_id()
-        payload = {"x": 1}
+        payload: dict[str, object] = {"x": 1}
         async with session_factory(engine)() as session:
             repo = repo_make(session)
             row1, created1 = await repo.create_or_get(
@@ -154,6 +155,7 @@ class TestRepositoryStateMachine:
         self, engine: AsyncEngine
     ) -> None:
         job_id = generate_background_job_id()
+        initial_payload: dict[str, object] = {"x": 1}
         async with session_factory(engine)() as session:
             repo = BackgroundJobRepository(session)
             await repo.create_or_get(
@@ -163,14 +165,15 @@ class TestRepositoryStateMachine:
                 queue="default",
                 status=BackgroundJobStatus.QUEUED.value,
                 priority=0,
-                payload={"x": 1},
-                payload_checksum=_checksum({"x": 1}),
+                payload=initial_payload,
+                payload_checksum=_checksum(initial_payload),
                 max_attempts=3,
                 requested_by="tester",
             )
             await repo.checkpoint()
         async with session_factory(engine)() as session:
             repo = BackgroundJobRepository(session)
+            mismatch_payload: dict[str, object] = {"x": 2}
             with pytest.raises(BackgroundJobPersistenceConflictError):
                 await repo.create_or_get(
                     job_id=generate_background_job_id(),
@@ -179,8 +182,8 @@ class TestRepositoryStateMachine:
                     queue="default",
                     status=BackgroundJobStatus.QUEUED.value,
                     priority=0,
-                    payload={"x": 2},
-                    payload_checksum=_checksum({"x": 2}),
+                    payload=mismatch_payload,
+                    payload_checksum=_checksum(mismatch_payload),
                     max_attempts=3,
                     requested_by="tester",
                 )
@@ -381,7 +384,8 @@ class TestUpdateProgress:
 
 class TestBackgroundWorkerEndToEnd:
     async def test_echo_job_succeeds_end_to_end(self, engine: AsyncEngine) -> None:
-        job_id = await _enqueue(engine, payload={"steps": 2})
+        echo_payload: dict[str, object] = {"steps": 2}
+        job_id = await _enqueue(engine, payload=echo_payload)
         registry = JobExecutorRegistry()
         registry.register("echo", EchoExecutor())
         worker = BackgroundWorker(
