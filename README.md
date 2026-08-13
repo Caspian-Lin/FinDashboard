@@ -143,7 +143,93 @@ make web-dev          # 仅前端
 make run              # 等同于 uv run finboard run
 ```
 
-CLI 入口(`uv run finboard --help`)提供 `run / serve / reconcile / migrate / kill-switch` 等子命令。
+CLI 入口(`uv run finboard --help`)提供 `run / serve / reconcile / migrate / kill-switch / worker` 等子命令。
+
+### 6. 启动后台 Worker(统一任务队列,issue #117)
+
+API 进程只做参数校验、创建任务和查询状态,所有研究/数据/回测域的耗时任务
+(批量行情拉取、数据集发布、特征快照、回测、数据同步、ResearchRun 等)都由
+独立的 **Worker 进程**从 PostgreSQL 持久化队列领取执行。开发期需另起一个终端:
+
+```bash
+uv run finboard worker run                # 默认:轮询全部队列,2s 间隔,最多 4 并发
+uv run finboard worker run \
+    --poll-interval 1.0 \
+    --max-concurrent 8 \
+    --queues research,data                # 只消费 research / data 队列
+uv run finboard worker recover            # 仅回收过期 lease(running→interrupted),不常驻
+```
+
+不启动 Worker 时,提交端点仍会返回 `202 + job_id`,但任务会停留在 `queued`
+直到 Worker 上线。Worker 崩溃后,过期租约由下次启动时的 `reclaim_stale` 自动
+回收为 `interrupted`,可重新排队重放。Worker 不触及实盘下单/撤单/持仓/Kill Switch
+——这些由交易内核专用 `finboard-scheduler` 执行,不进入统一队列。
+
+---
+
+## 统一后台任务队列(issue #117)
+
+研究/数据/回测域的所有耗时任务统一走持久化 `background_jobs` 表(`BJ-` ID),
+与实盘 `orders`/`fills`/`positions`/`audit_logs` 完全隔离、无外键。API 只
+负责登记任务并立即返回,Worker 用 PostgreSQL `FOR UPDATE SKIP LOCKED` + 租约
++ 心跳从队列安全领取,支持多 Worker、API 重启、Worker 重启和进程恢复。
+
+### 提交契约(202 + job_id)
+
+以下端点提交后立即返回 **`202` + `JobOut`**(不在 HTTP 请求内等待计算):
+
+| 端点 | kind | `result_ref` |
+|------|------|--------------|
+| `POST /api/data/bulk-download` | `bulk_download` | — |
+| `POST /api/data/fetch-all` | `fetch_all` | — |
+| `POST /api/data/sync` | `data_sync` | — |
+| `POST /api/data/quality/repair` | `quality_repair` | — |
+| `POST /api/instruments/datasets/releases` | `dataset_publish` | `release_id` |
+| `POST /api/backtest/run` | `backtest_run` | `str(run_id)` |
+| `POST /api/research/factors/features/jobs` | `feature_snapshot` | `snapshot_id` |
+| `POST /api/research/runs` | `research_run` | `run_id` |
+
+通用入口 `POST /api/jobs`(`kind=echo` 自检)同样返回 `202 + JobOut`;重复
+`idempotency_key` 返回 `200` + 已有任务(幂等)。
+
+### 查询与取消
+
+```http
+GET  /api/jobs?kind=bulk_download&status=running&queue=data&limit=100   # 列表(可重复参)
+GET  /api/jobs/{job_id}                                                  # 单任务详情
+POST /api/jobs/{job_id}/cancel                                           # 协作式取消
+```
+
+取消是**协作式**:`running → cancel_requested`,executor 在下一个 checkpoint
+退出后置 `cancelled`;任务已在终态时返回当前状态不报错。Worker 崩溃/lease
+过期时 `running → interrupted`,可重新排队重放。
+
+### 任务状态机(8 态)
+
+```
+queued ─▶ running ─▶ succeeded
+                  └▶ failed
+                  └▶ retry_waiting ─▶ queued(重新入队)
+running ─▶ cancel_requested ─▶ cancelled(协作式取消)
+running ─▶ interrupted(worker 崩溃 / lease 过期)
+```
+
+`progress_done`/`progress_total`/`phase` 反映执行进度,`result_ref` 按上表
+引用产物 ID(前端/Agent 终态后据此查详情),`error_code`/`error_summary` 记录
+失败分类与摘要。同 `idempotency_key` 不会创建重复任务。
+
+前端 / OpenCode Agent 拿到 `job_id` 后,用 `GET /api/jobs/{job_id}` 轮询直到
+终态(`succeeded`/`failed`/`cancelled`/`interrupted`),再按 `result_ref`
+取产物详情——刷新、切页或关闭浏览器后仍可凭 `job_id` 重新定位任务。
+
+### 边界
+
+- 统一队列只服务**研究/数据/回测**任务;实盘交易内核(盘前检查、收盘撤单、
+  日终核对、Broker 心跳、Kill Switch)由专用 `finboard-scheduler` asyncio 调度
+  执行,**不进入**统一队列、不暴露为 MCP 工具。
+- Worker payload 不含 Tushare token、LLM API key 等敏感凭据。
+- 回滚:关闭 Worker 进程即回退到不执行;`background_jobs` 表迁移可 downgrade。
+
 
 ---
 
