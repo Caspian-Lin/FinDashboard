@@ -141,6 +141,10 @@ _EXPECTED_TOOLS = {
     "finboard_watchlist_delete",
     "finboard_watchlist_add_symbols",
     "finboard_watchlist_remove_symbol",
+    # #141 报告聚合与导出工具(3 只读)
+    "finboard_report_run",
+    "finboard_report_backtest",
+    "finboard_report_export",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。

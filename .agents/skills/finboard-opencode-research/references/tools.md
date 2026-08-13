@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 114 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 117 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -25,6 +25,7 @@
 | 数据写操作(data_write.* / etf.*,✅ #137) | ✅(拉取/同步/发布/修复/ETF/配置) | |
 | #57 验证实验(validation_experiment.*,✅ #138) | ✅(create/reject/add_trial/delete 写) | |
 | 自选股(watchlist.*,✅ #140) | ✅(create/update/delete/add_symbols/remove_symbol 写) | |
+| 报告聚合与导出(report.*,✅ #141) | ✅(3 只读:聚合 run/backtest + 导出 CSV/Markdown 文件) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读 + ✅ #127 写)
@@ -869,3 +870,39 @@ REST PUT 是全量语义,这里更安全)。
 - 参数:`watchlist_id: int`、`symbol_code: str`
 - 返回:`WatchlistDetailOut`(含最新 symbols)
 - 错误:`permission_denied`(只读模式)、`not_found`
+
+## finboard.report.*(✅ #141)
+
+报告聚合与导出(3 只读)。聚合逻辑复用 `ResearchRunRepository` /
+`BacktestRunRepository`,渲染在 `finboard_mcp/reporting.py`(纯标准库 csv +
+字符串模板,零新依赖;PDF 留后续 issue)。导出文件写入 `FINBOARD_EXPORT_DIR`
+(缺省系统临时目录下 `finboard_exports`),返回绝对路径,不持久化到 DB。
+模拟盘报告生成已有 `finboard_sim_report`,导出暂不覆盖。
+
+### finboard_report_run(只读)
+聚合单个 ResearchRun 报告:run 元信息 + result 指标(ResearchRunReport 扁平
+字段)+ 全部 artifacts(含 report / equity / decisions 各阶段 payload)。
+- 参数:`run_id: str`(RR-)
+- 返回:`{run_id, status, strategy_id, strategy_kind, created_at,
+  completed_at, metrics, artifact_count, artifacts: [{artifact_id, sequence,
+  stage, decision_id, trace_id, checksum, payload}]}`
+- 错误:`not_found`(研究运行不存在)
+
+### finboard_report_backtest(只读)
+聚合单条回测历史报告:运行元信息 + metrics + equity_curve + fills + summary
+(标准化结构)。
+- 参数:`run_id: int`
+- 返回:`{run_id, strategy, symbols, start, end, capital, adjust, created_at,
+  metrics, equity_curve: [{date, equity, benchmark?}], fills: [{date, symbol,
+  side, quantity, price, commission}], summary}`
+- 错误:`not_found`(回测记录不存在)
+
+### finboard_report_export(只读)
+把报告聚合后导出为文件,返回绝对路径 + 元信息。
+- 参数:`kind: str`(run|backtest)、`id: str`(run_id 或回测记录 id)、
+  `format: str`(csv|markdown)
+- 返回:`{path(绝对路径), kind, id, format, size_bytes, lines}`
+- CSV:UTF-8 BOM(Excel 打开中文不乱码),每节 `# 标题` 注释行 + 表头 + 行,
+  节间空行;Markdown:`#` 标题 + `##` 分节表格
+- 错误:`invalid_argument`(未知 kind / format / 非整数回测 id)、
+  `not_found`(run/backtest 不存在)

@@ -24,7 +24,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-当前已实现 114 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+当前已实现 117 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
@@ -41,6 +41,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | 后台任务队列监控与提交 | `finboard.job.*`(list/get 只读 + enqueue/cancel 写,4 个) | ✅ #136 | 2 只读 + 2 自主执行 |
 | #57 验证实验(创建/列表/详情/拒绝/登记 trial/删除) | `finboard.validation_experiment.*`(6 个) | ✅ #138 | 2 只读 + 4 自主执行 |
 | 自选股(创建/查询标的组、增删标的) | `finboard.watchlist.*`(7 个) | ✅ #140 | 2 只读 + 5 自主执行 |
+| 报告聚合与导出(ResearchRun/回测报告、导出 CSV/Markdown 文件) | `finboard.report.*`(3 个) | ✅ #141 | 3 只读 |
 
 > 详细工具契约见 `references/tools.md`;扩展计划见
 > `packages/finboard-mcp/ROADMAP.md`。
@@ -75,7 +76,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 | 文档 | 内容 |
 |------|------|
-| `references/tools.md` | 114 个 MCP 工具完整契约(参数 / 返回 / 场景) |
+| `references/tools.md` | 117 个 MCP 工具完整契约(参数 / 返回 / 场景) |
 | `references/workflow.md` | 研究工作流决策树 + 标准研究循环 |
 | `references/research-workflow.md` | 完整研究流程详解(数据→因子→策略→回测→模拟→评估) |
 | `references/memory.md` | 研究记忆使用规则与生命周期 |
