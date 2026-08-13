@@ -109,6 +109,19 @@ _EXPECTED_TOOLS = {
     "finboard_job_get",
     "finboard_job_enqueue",
     "finboard_job_cancel",
+    # #137 数据写操作工具(10 写 + 2 只读)
+    "finboard_data_fetch",
+    "finboard_data_fetch_all",
+    "finboard_data_sync_universe",
+    "finboard_data_bulk_download_start",
+    "finboard_data_quality_repair",
+    "finboard_dataset_release_publish",
+    "finboard_data_config_get",
+    "finboard_data_config_update",
+    "finboard_etf_sync",
+    "finboard_etf_batch_confirm",
+    "finboard_etf_update",
+    "finboard_etf_review_queue",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。

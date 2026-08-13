@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 86 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136):
+**已实现 98 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -19,6 +19,7 @@
 | 模拟盘 | 18 | sim_account list/get/create、sim_session list/get/create/start/pause/stop/reset、sim_orders/fills/positions/ledger/audit/report(只读);sim_decision_submit、sim_order_cancel(写) | 持久化隔离模拟盘(10 只读 + 8 写,✅ #127) |
 | portfolio | 4 | portfolio_allocate / sizing / feasibility / attribution | 组合计算(纯计算,无 DB 写入,✅ #128) |
 | `finboard.job.*` | 4 | job list/get(只读);job enqueue/cancel(写) | 统一后台任务队列监控与提交(2 只读 + 2 写,✅ #136) |
+| 数据写操作 | 12 | data_fetch(同步)、fetch_all/sync_universe/bulk_download_start/quality_repair/dataset_release_publish(任务化)、data_config_get/update、etf_sync/batch_confirm/update/review_queue | 数据准备闭环:拉取/批量下载/同步/质量修复/数据集发布/调度配置/ETF 元数据(2 只读 + 10 写,✅ #137) |
 
 ## Planned 阶段(#128)
 
@@ -118,6 +119,37 @@ dataclass 列表逐元素序列化(顶层是 list 时 `dataclasses.asdict` 不�
 日终核对/Broker 心跳/Kill Switch)由专用 `finboard-scheduler` asyncio 调度
 执行,不进入统一队列。回滚:移除 4 个 `finboard_job_*` 工具即可,不影响
 #142/#143/#144 的 worker/任务表/REST 接口。
+
+### ✅ #137 数据写操作工具(已完成)
+12 个工具(2 只读 + 10 写),补全 #124 只读数据查询之外的数据准备能力,
+打通「数据→因子→策略」闭环第一步:
+
+- **任务化长耗时(5,写)**:`data_fetch_all` / `data_sync_universe` /
+  `data_bulk_download_start` / `data_quality_repair` /
+  `dataset_release_publish` —— 复用 `BackgroundJobRepository.create_or_get`
+  登记 `queued` 任务并立即返回 202 + `job_id`,与 REST 语义端点口径一致
+  (idempotency_key 公式相同 → agent 与 REST 提交同一任务命中同一 job_id)。
+  进度/状态/取消统一走 `finboard_job_get` / `finboard_job_cancel`(#136)。
+- **同步短任务(1,写)**:`data_fetch` 拉单个标的(主源失败 fallback),直接写
+  `ParquetCache`,不进队列(与 REST 一致)。
+- **配置读写(2)**:`data_config_get`(只读,读 `data_config.json`)/
+  `data_config_update`(写,合并字段)。
+- **ETF 元数据闭环(4)**:`etf_sync`(默认 `dry_run=True` 预览)/
+  `etf_batch_confirm` / `etf_update`(人工覆盖,写审计流水)/
+  `etf_review_queue`(只读)。
+
+复用 `EtfMetadataRepository` / `ParquetCache` / provider /
+`ResearchDatasetReleaseCreate`(schema 校验)。`data_config_*` 复刻 REST 的
+`_load_config` / `_save_config`(在 `asyncio.to_thread` 内执行避免阻塞事件循环)。
+不实现 `bulk_download_status` —— #117 已合并,REST 状态端点已下线,状态查询走
+`finboard_job_get`。
+
+边界:写工具受 `_require_write_enabled`(`mcp_readonly_only`)守卫;
+`config_get` / `etf_review_queue` 只读自动允许。`requested_by` 统一用
+`mcp:<kind>` 前缀(审计区分入口,REST=`api:`,MCP=`mcp:`)。不连 broker /
+账户 / 订单 / 持仓。回滚:移除 `register_data_write_tools(mcp)` 调用 +
+`data_write.py` 即可,不影响 REST / ResearchAssistant / 现有只读 MCP 工具 /
+#117 队列。
 
 ## 扩展原则(适用于所有阶段)
 
