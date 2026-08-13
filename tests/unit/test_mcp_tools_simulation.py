@@ -2,12 +2,13 @@
 
 覆盖:
 
-* 只读(9):account_list / account_get / session_list / session_get /
+* 只读(10):account_list / account_get / session_list / session_get /
   orders / fills / positions / ledger / audit / report —— monkeypatch
   ``SimulationRepository`` 方法返回 duck-typed ORM 行;
-* 写(8):account_create / session_create / start / pause / stop / reset /
-  decision_submit / order_cancel —— monkeypatch ``SimulationService`` 方法,
-  验证 ``write_tools_enabled=False`` 时拒绝、ID 前缀校验、conflict 映射。
+* 写(11):account_create / session_create / start / pause / stop / archive /
+  reset / decision_submit / market_event / session_evaluate / order_cancel ——
+  monkeypatch ``SimulationService`` 方法,验证 ``write_tools_enabled=False``
+  时拒绝、ID 前缀校验、conflict 映射。
 """
 
 from __future__ import annotations
@@ -35,6 +36,10 @@ from finboard_mcp.tools import simulation as sim_tools
 
 async def _async_return(value: object) -> object:
     return value
+
+
+async def _async_raise(exc: Exception) -> object:
+    raise exc
 
 
 def _make_app(
@@ -490,3 +495,279 @@ class TestSimReport:
         assert env.status == "ok"
         assert env.data["session_id"] == "SIM-S-xyz"
         assert env.data["automatic_live_promotion"] is False
+# ---------------------------------------------------------------------------
+# #139:session_archive / market_event / session_evaluate
+# ---------------------------------------------------------------------------
+
+
+class TestSimSessionArchive:
+    async def test_write_disabled(self) -> None:
+        app = _make_app(write_enabled=False)
+        env = await sim_tools.sim_session_archive(app, "SIM-S-1", actor="u")
+        assert env.status == "denied"
+
+    async def test_archive_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from finboard_simulation import SimulationService
+
+        app = _make_app()
+        session = _get_session(app)
+        archived = _session_row()
+        archived.status = "archived"
+        archived.archived_at = datetime(2026, 1, 20, tzinfo=UTC)
+        monkeypatch.setattr(
+            SimulationService,
+            "transition_session",
+            lambda self, sid, **kw: _async_return(archived),
+        )
+        env = await sim_tools.sim_session_archive(app, "SIM-S-1", actor="u")
+        assert env.status == "ok"
+        assert env.data["status"] == "archived"
+        session.commit.assert_awaited()
+
+    async def test_archive_invalid_prefix(self) -> None:
+        app = _make_app()
+        env = await sim_tools.sim_session_archive(app, "BAD", actor="u")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_archive_conflict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from finboard_simulation import SimulationService, SimulationTransitionError
+
+        app = _make_app()
+        monkeypatch.setattr(
+            SimulationService,
+            "transition_session",
+            lambda self, sid, **kw: _async_raise(
+                SimulationTransitionError("模拟会话不能从 created 转为 archived"),
+            ),
+        )
+        env = await sim_tools.sim_session_archive(app, "SIM-S-1", actor="u")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "conflict"
+
+
+def _valid_bar_payload() -> dict[str, Any]:
+    return {
+        "source_event_id": "evt-1",
+        "symbol": "510300.SH",
+        "market": "a_share",
+        "period": "1d",
+        "timestamp": "2026-01-15T09:30:00+08:00",
+        "open": "10",
+        "high": "10.5",
+        "low": "9.8",
+        "close": "10.2",
+        "volume": "10000",
+        "amount": "100000",
+        "actor": "market-data",
+    }
+
+
+def _process_result(
+    *,
+    duplicate: bool = False,
+    fill_ids: tuple[str, ...] = (),
+) -> Any:
+    from finboard_simulation import SimulationProcessResult
+
+    return SimulationProcessResult(
+        source_event_id="evt-1",
+        duplicate=duplicate,
+        fill_ids=fill_ids,
+        rejected_order_ids=(),
+        equity=Decimal("100200"),
+        clock_at=datetime(2026, 1, 15, 9, 30, tzinfo=UTC),
+    )
+
+
+class TestSimMarketEvent:
+    async def test_write_disabled(self) -> None:
+        app = _make_app(write_enabled=False)
+        env = await sim_tools.sim_market_event(app, "SIM-S-1", bar={})
+        assert env.status == "denied"
+
+    async def test_invalid_bar_payload(self) -> None:
+        app = _make_app()
+        env = await sim_tools.sim_market_event(
+            app, "SIM-S-1", bar={"source_event_id": "evt-1"}  # 缺 OHLC
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_invalid_prefix(self) -> None:
+        app = _make_app()
+        env = await sim_tools.sim_market_event(app, "BAD", bar=_valid_bar_payload())
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_process_success_with_fills(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from finboard_simulation import SimulationService
+
+        app = _make_app()
+        session = _get_session(app)
+        result = _process_result(fill_ids=("SIM-F-1", "SIM-F-2"))
+        monkeypatch.setattr(
+            SimulationService,
+            "process_bar",
+            lambda self, sid, event: _async_return(result),
+        )
+        env = await sim_tools.sim_market_event(
+            app, "SIM-S-1", bar=_valid_bar_payload()
+        )
+        assert env.status == "ok"
+        assert env.data["source_event_id"] == "evt-1"
+        assert env.data["duplicate"] is False
+        assert env.data["fill_ids"] == ["SIM-F-1", "SIM-F-2"]
+        assert env.data["rejected_order_ids"] == []
+        assert env.data["equity"] == "100200"
+        assert env.data["clock_at"] == "2026-01-15T09:30:00Z"
+        session.commit.assert_awaited()
+
+    async def test_duplicate_passthrough(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from finboard_simulation import SimulationService
+
+        app = _make_app()
+        result = _process_result(duplicate=True)
+        monkeypatch.setattr(
+            SimulationService,
+            "process_bar",
+            lambda self, sid, event: _async_return(result),
+        )
+        env = await sim_tools.sim_market_event(
+            app, "SIM-S-1", bar=_valid_bar_payload()
+        )
+        assert env.status == "ok"
+        assert env.data["duplicate"] is True
+
+    async def test_not_running_conflict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from finboard_simulation import SimulationService, SimulationTransitionError
+
+        app = _make_app()
+        monkeypatch.setattr(
+            SimulationService,
+            "process_bar",
+            lambda self, sid, event: _async_raise(
+                SimulationTransitionError("只有 running 模拟会话可以推进行情"),
+            ),
+        )
+        env = await sim_tools.sim_market_event(
+            app, "SIM-S-1", bar=_valid_bar_payload()
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "conflict"
+
+    async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from finboard_simulation import SimulationNotFoundError, SimulationService
+
+        app = _make_app()
+        monkeypatch.setattr(
+            SimulationService,
+            "process_bar",
+            lambda self, sid, event: _async_raise(
+                SimulationNotFoundError("模拟会话不存在"),
+            ),
+        )
+        env = await sim_tools.sim_market_event(
+            app, "SIM-S-1", bar=_valid_bar_payload()
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "not_found"
+
+    async def test_clock_backwards_conflict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from finboard_simulation import SimulationConflictError, SimulationService
+
+        app = _make_app()
+        monkeypatch.setattr(
+            SimulationService,
+            "process_bar",
+            lambda self, sid, event: _async_raise(
+                SimulationConflictError("模拟市场时钟禁止倒退"),
+            ),
+        )
+        env = await sim_tools.sim_market_event(
+            app, "SIM-S-1", bar=_valid_bar_payload()
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "conflict"
+
+
+class TestSimSessionEvaluate:
+    async def test_write_disabled(self) -> None:
+        app = _make_app(write_enabled=False)
+        env = await sim_tools.sim_session_evaluate(app, "SIM-S-1", actor="u")
+        assert env.status == "denied"
+
+    async def test_invalid_minimum_trading_days(self) -> None:
+        app = _make_app()
+        env = await sim_tools.sim_session_evaluate(
+            app, "SIM-S-1", actor="u", minimum_trading_days=1
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_eligible(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from finboard_simulation import SimulationService
+
+        app = _make_app()
+        session = _get_session(app)
+        result = {
+            "mode": "simulation",
+            "session_id": "SIM-S-1",
+            "promotion_status": "eligible",
+            "trading_days": 3,
+            "max_drawdown": "0.01",
+            "minimum_trading_days": 2,
+            "automatic_live_promotion": False,
+        }
+        monkeypatch.setattr(
+            SimulationService,
+            "evaluate_session",
+            lambda self, sid, **kw: _async_return(result),
+        )
+        env = await sim_tools.sim_session_evaluate(app, "SIM-S-1", actor="u")
+        assert env.status == "ok"
+        assert env.data["promotion_status"] == "eligible"
+        assert env.data["trading_days"] == 3
+        assert env.data["automatic_live_promotion"] is False
+        session.commit.assert_awaited()
+
+    async def test_not_stopped_conflict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from finboard_simulation import SimulationService, SimulationTransitionError
+
+        app = _make_app()
+        monkeypatch.setattr(
+            SimulationService,
+            "evaluate_session",
+            lambda self, sid, **kw: _async_raise(
+                SimulationTransitionError("只有 stopped 会话可以评估模拟晋级"),
+            ),
+        )
+        env = await sim_tools.sim_session_evaluate(app, "SIM-S-1", actor="u")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "conflict"
+
+    async def test_invalid_prefix(self) -> None:
+        app = _make_app()
+        env = await sim_tools.sim_session_evaluate(app, "BAD", actor="u")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"

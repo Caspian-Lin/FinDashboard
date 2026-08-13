@@ -80,7 +80,7 @@ _EXPECTED_TOOLS = {
     "finboard_backtest_history_list",
     "finboard_backtest_history_get",
     "finboard_backtest_history_delete",
-    # #127 模拟盘工具(9 只读 + 8 写)
+    # #127 模拟盘工具(10 只读 + 8 写)
     "finboard_sim_account_list",
     "finboard_sim_account_get",
     "finboard_sim_account_create",
@@ -99,6 +99,10 @@ _EXPECTED_TOOLS = {
     "finboard_sim_ledger",
     "finboard_sim_audit",
     "finboard_sim_report",
+    # #139 模拟盘补全工具(3 写:archive / market_event / evaluate)
+    "finboard_sim_session_archive",
+    "finboard_sim_market_event",
+    "finboard_sim_session_evaluate",
     # #128 portfolio 计算工具(4 个纯计算)
     "finboard_portfolio_allocate",
     "finboard_portfolio_sizing",

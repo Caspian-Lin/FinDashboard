@@ -19,8 +19,8 @@
   (无代码版本化生命周期);
 * ``finboard.backtest.*``(#127)—— 回测引擎(可用策略 schema / 同步运行 /
   历史列表 / 详情 / 删除);
-* ``finboard.sim.*``(#127)—— 模拟盘(账户 / 会话生命周期 / 决策提交 /
-  订单 / 成交 / 持仓 / 账本 / 审计 / 报告);
+* ``finboard.sim.*``(#127 + #139)—— 模拟盘(账户 / 会话生命周期 / 决策提交 /
+  行情投递 / 晋级评估 / 归档 / 订单 / 成交 / 持仓 / 账本 / 审计 / 报告);
 * ``finboard.run.*`` 写工具(queue / cancel / replay / lineage,#127)。
 * ``finboard.portfolio.*``(#128)—— 组合计算(目标权重分配 /
   离散手数 sizing / 资金档位可行性 / 绩效归因,纯计算无 DB 写入);
@@ -74,7 +74,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(104 个,已实现) ==
+== 当前可用工具(107 个,已实现) ==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127)
 - finboard.ai.*(4) —— AI 草案:ask / propose_hypothesis / propose_strategy_draft
@@ -95,10 +95,15 @@ FinBoard 研究 MCP —— 量化研究工具集
 - 回测(5,✅ #127):backtest_strategy_list(可用策略+参数 schema)、
   backtest_run(同步运行,返回 metrics/equity/fills)、
   backtest_history_list/get、backtest_history_delete(写)。
-- 模拟盘(18,✅ #127):sim_account list/get/create(写)、
-  sim_session list/get/create(写)/start/pause/stop/reset(写)、
+- 模拟盘(21,✅ #127+#139):sim_account list/get/create(写)、
+  sim_session list/get/create(写)/start/pause/stop/archive(写)/reset(写)、
   sim_decision_submit(写,结构化目标仓位 → 生成订单,不直接创建订单)、
-  sim_order_cancel(写)、sim_orders/fills/positions/ledger/audit/report(只读)。
+  sim_market_event(写,投递 OHLCV K 线驱动撮合,仅 running 会话,source_event_id
+  幂等)、sim_session_evaluate(写,晋级评估,仅 stopped 会话,automatic_live_promotion
+  恒 false)、sim_order_cancel(写)、sim_orders/fills/positions/ledger/audit/report
+  (只读)。
+  完整生命周期:创建账户+会话 → start → 投 K 线撮合 → 提交决策 → stop →
+  evaluate(eligible/failed)→ archive。
 - portfolio(4,✅ #128):portfolio_allocate(目标权重分配,纯计算)、
   portfolio_sizing(离散手数 + 费用/保证金)、portfolio_feasibility(10万/20万/50万
   档位可行性)、portfolio_attribution(绩效归因分解,纯计算,无 DB 写入)。

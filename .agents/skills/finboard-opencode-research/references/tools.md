@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 104 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 107 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -18,7 +18,7 @@
 | 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅ | |
 | 策略规格(strategy.* / preset.*,✅ #126) | ✅(含 validate/draft/publish/rollback) | |
 | 回测(backtest.*,✅ #127) | ✅(含同步运行 / 历史 CRUD) | |
-| 模拟盘(sim.*,✅ #127) | ✅(账户/会话/决策/订单/报告) | |
+| 模拟盘(sim.*,✅ #127+#139) | ✅(账户/会话/决策/行情投递/评估/归档/订单/报告) | |
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
 | 后台任务队列(job.*,✅ #136) | ✅(list/get 只读 + enqueue/cancel 写) | |
@@ -573,7 +573,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 返回:`{run_id, deleted: true}`
 - 错误:`permission_denied`(只读模式)、`not_found`
 
-## finboard.sim.*(✅ #127)
+## finboard.sim.*(✅ #127 + #139)
 
 持久化模拟盘(独立 `simulation_*` 表,`SIM-` ID)。复用 `SimulationService` +
 `SimulationRepository` + `simulation_schemas`。
@@ -630,6 +630,11 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 停止模拟会话(→ stopped,撤全部活动单 + 重估)。
 - 参数:`session_id: str`、`actor: str`
 
+### finboard_sim_session_archive **[写]**
+归档模拟会话(stopped → archived,账户同步归档,记 `session_archived` 审计)。
+- 参数:`session_id: str`、`actor: str`
+- 错误:`conflict`(非 stopped 状态转换);归档后仅 reset 可用
+
 ### finboard_sim_session_reset **[写]**
 重置模拟会话(stopped/archived → 新账户 + 新会话,原会话不动,经
 `reset_of_session_id` 关联)。
@@ -643,6 +648,24 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   signal_trace_id, reason, ...}] / actor)
 - 返回:`{decision: SimulationDecisionOut, orders: list[SimulationOrderOut], duplicate: bool}`
 - 幂等:相同 decision_id + checksum 返回已有 + 其订单(duplicate=true)
+
+### finboard_sim_market_event **[写]** ⭐
+投递单条 OHLCV K 线驱动撮合(仅 running 会话接受)——**agent 推进模拟盘撮合
+的唯一入口**。对应 `POST /api/simulation/sessions/:id/market-events`。
+- 参数:`session_id: str`、`bar: dict`(字段:source_event_id(幂等)/symbol/market/
+  period(`1d`)/timestamp(ISO 带时区)/open/high/low/close/volume/amount/
+  actor/contract_id(期货必填))
+- 返回:`SimulationProcessOut`:`{source_event_id, duplicate, fill_ids,
+  rejected_order_ids, equity, clock_at}`
+- 幂等:同 source_event_id + 同内容 → duplicate=true;同 id 不同内容 → conflict
+- 错误:`conflict`(非 running 会话 / 市场时钟倒退 / checksum 冲突)、`invalid_argument`(bar 校验失败)
+
+### finboard_sim_session_evaluate **[写]**
+模拟晋级评估(仅 stopped 会话)。对应 `POST /api/simulation/sessions/:id/evaluate`。
+- 参数:`session_id: str`、`actor: str`、`minimum_trading_days: int = 2`(≥2)
+- 返回:`dict`:promotion_status(eligible/failed)、trading_days、max_drawdown、
+  minimum_trading_days、automatic_live_promotion(**恒 false**,不自动晋级实盘/影子盘)
+- 错误:`conflict`(非 stopped 会话)
 
 ### finboard_sim_order_cancel **[写]**
 撤销模拟订单(running/paused 会话内的活动单)。
