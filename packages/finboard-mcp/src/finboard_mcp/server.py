@@ -26,6 +26,11 @@
   离散手数 sizing / 资金档位可行性 / 绩效归因,纯计算无 DB 写入);
 * ``finboard.job.*``(#136)—— 统一后台任务队列监控与提交
   (list / get 只读 + enqueue / cancel 写,复用 ``background_jobs`` 表)。
+* 数据写操作(#137)—— ``finboard.data_write.*`` / ``finboard.etf.*``:
+  data_fetch(同步单标的)/ fetch_all / sync_universe / bulk_download_start /
+  quality_repair / dataset_release_publish(任务化,返回 job_id,用
+  ``finboard_job_get`` 轮询)、config_get/update、etf_sync/batch_confirm/update/
+  review_queue。补全「数据→因子→策略」闭环的数据准备第一步。
 
 安全:实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)
 **永久不注册**为工具。研究写操作(创建 Run / 启动回测 / 模拟盘)由 agent 自主执行
@@ -42,6 +47,7 @@ from finboard_mcp.tools import (
     register_ai_tools,
     register_backtest_tools,
     register_data_tools,
+    register_data_write_tools,
     register_factor_tools,
     register_jobs_tools,
     register_memory_tools,
@@ -63,7 +69,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(86 个,已实现) ==
+== 当前可用工具(98 个,已实现) ==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127)
 - finboard.ai.*(4) —— AI 草案:ask / propose_hypothesis / propose_strategy_draft
@@ -97,6 +103,13 @@ FinBoard 研究 MCP —— 量化研究工具集
   bulk_download/dataset_publish/backtest_run/data_sync/fetch_all/quality_repair);
   实盘交易内核任务不进入队列。feature_snapshot/bulk_download 等异步任务的进度
   统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id)。
+- 数据写操作(12,✅ #137):data_fetch(同步单标的拉取)、fetch_all /
+  sync_universe / bulk_download_start / quality_repair / dataset_release_publish
+  (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询)、
+  data_config_get/update(调度器配置)、etf_sync(默认 dry_run)/
+  etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
+  补全「数据→因子→策略」闭环的数据准备第一步:agent 能拉 K 线、发布数据集、
+  修复质量缺陷、同步 ETF 元数据。不连 broker / 账户 / 订单 / 持仓。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
@@ -127,6 +140,7 @@ def build_mcp_server() -> MCPServer:
     register_run_tools(mcp)
     register_memory_tools(mcp)
     register_data_tools(mcp)
+    register_data_write_tools(mcp)
     register_factor_tools(mcp)
     register_strategy_tools(mcp)
     register_backtest_tools(mcp)

@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 86 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 98 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -22,6 +22,7 @@
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
 | 后台任务队列(job.*,✅ #136) | ✅(list/get 只读 + enqueue/cancel 写) | |
+| 数据写操作(data_write.* / etf.*,✅ #137) | ✅(拉取/同步/发布/修复/ETF/配置) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读 + ✅ #127 写)
@@ -194,6 +195,107 @@ AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不
 查询 Tushare API 配额状态。
 - 参数:无
 - 返回:`{date, requests_per_minute, daily_limit, used, remaining}`
+
+## finboard.data_write.* / finboard.etf.*(✅ #137,数据准备闭环)
+
+数据写操作工具(2 只读 + 10 写)。补全 #124 只读数据查询之外的数据准备能力,
+打通「数据→因子→策略」闭环第一步:agent 能拉 K 线、发布数据集、修复质量缺陷、
+同步 ETF 元数据、读写调度器配置。写操作尊重 `mcp_readonly_only` 开关。
+不连 broker / 账户 / 订单 / 持仓。
+
+任务化工具(fetch_all / sync_universe / bulk_download_start / quality_repair /
+dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 worker 消费;
+进度 / 状态 / 取消统一用 `finboard_job_get(job_id)` / `finboard_job_cancel(job_id)`
+轮询(#136)。idempotency_key 与 REST 语义端点完全一致,因此 agent 与 REST 提交
+同一任务会命中同一 job_id。
+
+### finboard_data_fetch **[写,同步]**
+拉取单个标的的日 K 线并写入缓存(主源失败自动用备用源重试)。不进队列。
+- 参数:`symbol` / `start` / `end`(ISO 日期)/ `adjust?`(默认 qfq)/ `source?`
+- 返回:`{symbol, bar_count, first_date, last_date, source, fallback_used,
+  fallback_source, lifecycle_events, lifecycle_sync_failed, lifecycle_sync_error}`
+- 错误:`invalid_argument`(未知行情源)/ `unavailable`(主源及备用源均不可用)
+
+### finboard_data_fetch_all **[写,任务化]**
+登记标的池批量缓存更新任务(symbols.yaml),返回 202 + `job_id`(不等待执行)。
+- 参数:无
+- 返回:`JobOut`(`kind=fetch_all`,`queue=data`)+ `created`(首次提交 true / 幂等命中 false)
+- 进度:用 `finboard_job_get(job_id)` 轮询
+
+### finboard_data_sync_universe **[写,任务化]**
+登记全市场标的同步任务(akshare 发现 → 写 instruments 表),返回 202 + `job_id`。
+- 参数:无
+- 返回:`JobOut`(`kind=data_sync`)
+- 进度:用 `finboard_job_get(job_id)` 轮询
+
+### finboard_data_bulk_download_start **[写,任务化]**
+登记批量历史数据拉取任务(按市场/类型/交易所筛选),返回 202 + `job_id`。
+- 参数:`market?`(默认 a_share)/ `instrument_type?` / `exchange?` /
+  `listing_boards?` / `start?`(默认 2015-01-01)/ `source?`
+- 返回:`JobOut`(`kind=bulk_download`)
+- 进度:用 `finboard_job_get(job_id)` 轮询(阶段如 `bulk_download:fetching`)
+
+### finboard_data_quality_repair **[写,任务化]**
+登记批量缓存异常 bar 修复任务(读缓存→质量检查→拉取修复→重写),返回 202 + `job_id`。
+- 参数:`symbols`(标的代码列表,必填)/ `source?`(默认 akshare)/ `adjust?`(默认 qfq)
+- 返回:`JobOut`(`kind=quality_repair`)
+- 错误:`invalid_argument`(symbols 为空)
+- 进度:用 `finboard_job_get(job_id)` 轮询
+
+### finboard_dataset_release_publish **[写,任务化 ⭐ 研究闭环关键节点]**
+登记数据集冻结发布任务(原子 rename + DB 登记 + 标的资产类型校验),返回 202 + `job_id`。
+成功后 `result_ref=release_id`,用 `finboard_job_get` 拿到 release_id 后再
+`finboard_dataset_release_get` 查发布详情。**这是研究闭环关键节点——agent 不发布
+数据集就无法排队研究运行。**
+- 参数:`release_id` / `symbols`(列表)/ `version` / `start_date` / `end_date` /
+  `dataset_name?`(默认 multi_asset_daily_bars)/ `release_kind?`
+  (a_share_tushare|multi_asset_mixed,默认 a_share_tushare)/ `source?` /
+  `adjustment?`(qfq|hqfq|none,默认 qfq)/ `required_capabilities?`
+  (stock|bond|convertible|futures|etf:index|etf:cross_border|etf:commodity|etf:bond)
+- 返回:`JobOut`(`kind=dataset_publish`)
+- 错误:`invalid_argument`(schema 校验:release_id/version pattern、symbols 非空不重复、
+  日期顺序)/ `conflict`(幂等冲突)
+
+### finboard_data_config_get(只读)
+查询定时任务调度器配置(读 `data_config.json`)。
+- 参数:无
+- 返回:`{sync_enabled, sync_time, download_enabled, download_time,
+  download_lookback_days, download_markets, download_types, data_provider}`
+
+### finboard_data_config_update **[写]**
+更新定时任务调度器配置(合并写入 `data_config.json`,只更新非空字段)。
+- 参数:`sync_enabled?` / `sync_time?` / `download_enabled?` / `download_time?` /
+  `download_lookback_days?` / `download_markets?` / `download_types?`(均可选)
+- 返回:更新后的完整配置(同 `config_get` 结构)
+
+### finboard_etf_sync **[写]**
+批量同步 ETF 元数据(akshare → 分类 → 写库 / 预览)。默认 `dry_run=True` 只预览。
+- 参数:`dry_run?`(默认 True 只预览不写入,显式 False 才写库)/ `enrich_codes?`
+  (额外拉单基金档案补充的标的列表)
+- 返回:`{total, to_insert, to_update, skipped_override, needs_review,
+  auto_adopted, dry_run}`
+- 错误:`unavailable`(数据源依赖未安装 / 同步失败)
+
+### finboard_etf_batch_confirm **[写]**
+批量确认待复核 ETF(needs_review → manually_confirmed)。
+- 参数:`codes`(ETF 代码列表,1-2000)/ `reason?`
+- 返回:`{confirmed: 确认数量}`
+- 错误:`invalid_argument`(codes 为空)
+
+### finboard_etf_update **[写]**
+人工修正研究用 ETF 多维分类(写审计流水,设 `manual_override=True`,后续自动同步不再覆盖)。
+- 参数:`code` / `reason`(必填,变更理由)/ `execution_profile?`
+  (domestic_equity_etf|cross_border_etf|bond_etf|money_market_etf|commodity_etf)/
+  `underlying_market?`(domestic|hk|overseas|global)/ `strategy_type?`(index|active)/
+  `underlying_index?`
+- 返回:更新后的 ETF 元数据 dict(22 字段)
+- 错误:`not_found`(instrument 不存在)/ `conflict`(非 ETF)
+
+### finboard_etf_review_queue(只读)
+查询 ETF 元数据待复核队列(默认查 needs_review)。
+- 参数:`review_status?`(auto_adopted|needs_review|manually_confirmed|
+  manually_overridden,默认 needs_review,传 None 查全部)/ `limit?`(1-2000,默认 200)
+- 返回:`list[ETF 元数据 dict]`
 
 ## finboard.factor.* / finboard.feature_snapshot.*(✅ #125)
 
