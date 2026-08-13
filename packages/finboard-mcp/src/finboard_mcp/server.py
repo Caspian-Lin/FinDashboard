@@ -38,6 +38,9 @@
 * 自选股(#140)—— ``finboard.watchlist.*``:list / get 只读 + create / update /
   delete / add_symbols / remove_symbol 写,暴露 REST ``/api/watchlists`` 的 7 个
   端点(用户标的组 —— 保存常用回测标的集合,为回测 / 研究准备标的池)。
+* 报告聚合与导出(#141)—— ``finboard.report.*``:report_run / report_backtest
+  只读聚合(ResearchRun result + artifacts;回测 metrics + equity_curve + fills),
+  report_export 导出 CSV / Markdown 文件(纯标准库,返回绝对路径)。
 
 安全:实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)
 **永久不注册**为工具。研究写操作(创建 Run / 启动回测 / 模拟盘)由 agent 自主执行
@@ -59,6 +62,7 @@ from finboard_mcp.tools import (
     register_jobs_tools,
     register_memory_tools,
     register_portfolio_tools,
+    register_report_tools,
     register_run_tools,
     register_simulation_tools,
     register_strategy_tools,
@@ -78,7 +82,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(114 个,已实现) ==
+== 当前可用工具(117 个,已实现) ==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127)
 - finboard.ai.*(4) —— AI 草案:ask / propose_hypothesis / propose_strategy_draft
@@ -133,6 +137,11 @@ FinBoard 研究 MCP —— 量化研究工具集
   add_symbols/remove_symbol(写,受 mcp_readonly_only 守卫)。标的组管理:
   创建标的集合(如回测候选池)→ 加 symbols(自动去重)→ 回测/研究复用,
   与 strategies/simulation 无关联(独立用户查找列表)。
+- 报告聚合与导出(3,✅ #141):report_run(聚合 ResearchRun:result 指标 +
+  全部 artifacts,含 report/equity/decisions 各阶段 payload)、report_backtest
+  (聚合回测:metrics + equity_curve + fills + summary)、report_export
+  (导出 CSV/Markdown 文件,写入 FINBOARD_EXPORT_DIR 或系统临时目录,
+  返回绝对路径;纯标准库,零新依赖;只读不写 DB)。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
@@ -169,6 +178,7 @@ def build_mcp_server() -> MCPServer:
     register_backtest_tools(mcp)
     register_simulation_tools(mcp)
     register_portfolio_tools(mcp)
+    register_report_tools(mcp)
     register_jobs_tools(mcp)
     register_validation_experiment_tools(mcp)
     register_watchlist_tools(mcp)

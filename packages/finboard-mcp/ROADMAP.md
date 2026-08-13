@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 114 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140):
+**已实现 117 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -22,6 +22,7 @@
 | 数据写操作 | 12 | data_fetch(同步)、fetch_all/sync_universe/bulk_download_start/quality_repair/dataset_release_publish(任务化)、data_config_get/update、etf_sync/batch_confirm/update/review_queue | 数据准备闭环:拉取/批量下载/同步/质量修复/数据集发布/调度配置/ETF 元数据(2 只读 + 10 写,✅ #137) |
 | #57 验证实验 | 6 | validation_experiment create/list/get/reject/add_trial/delete | OOS 样本外验证实验元数据 CRUD(2 只读 + 4 写,✅ #138),给因子实验的 validation_experiment_id 提供源头 |
 | 自选股 | 7 | watchlist list/get(只读);create/update/delete/add_symbols/remove_symbol(写) | 用户标的组管理:保存常用回测标的集合(2 只读 + 5 写,✅ #140) |
+| 报告聚合与导出 | 3 | report_run / report_backtest(只读聚合);report_export(导出 CSV/Markdown 文件) | 可交付报告:聚合 ResearchRun/回测报告并导出文件(3 只读,✅ #141) |
 
 ## Planned 阶段(#128)
 
@@ -225,6 +226,27 @@ MCP 与 REST 同层同行为);404 语义 → `not_found`;`symbol_code` 是普通
 simulation 无关联,是独立用户管理查找列表,不触及交易安全红线。回滚:
 移除 `register_watchlist_tools(mcp)` 调用 + `watchlists.py` 即可,不影响
 REST 端点 / 既有工具。
+
+### ✅ #141 报告聚合与导出工具(已完成)
+3 个只读工具,让 agent 能「生成可交付报告」—— 聚合研究运行 / 回测报告并导出
+为文件(全仓此前无任何 PDF/CSV/Excel 导出能力):
+
+- `finboard_report_run` —— 聚合单个 ResearchRun:run 元信息 + `result` 指标
+  (ResearchRunReport 扁平字段)+ 全部 artifacts(含 report / equity / decisions
+  各阶段 payload),结构化为 envelope.data
+- `finboard_report_backtest` —— 聚合单条回测历史:运行元信息 + metrics +
+  equity_curve + fills + summary(标准化结构)
+- `finboard_report_export` —— 把聚合报告导出为 **CSV / Markdown** 文件,写入
+  `FINBOARD_EXPORT_DIR`(缺省系统临时目录下 `finboard_exports`),返回绝对路径
+  与文件元信息;只读(不写 DB)
+
+聚合与渲染在 `finboard_mcp/reporting.py`(纯标准库 `csv` + 字符串模板,**零新
+依赖**,PDF 留后续 issue);复用 `ResearchRunRepository` / `BacktestRunRepository`。
+CSV 带 UTF-8 BOM(Excel 打开中文不乱码)、每节 `# 标题` 注释行 + 表头 + 行、
+节间空行;Markdown 为 `##` 分节表格。模拟盘报告导出不在本批(`finboard_sim_report`
+已覆盖生成,导出可后续扩展 `kind=sim`)。与 #117/#136 协同:报告生成若长耗时
+(如含归因重算)可后续任务化。不触及交易安全红线。回滚:移除
+`register_report_tools(mcp)` 调用 + `reports.py` / `reporting.py` 即可。
 
 ## 扩展原则(适用于所有阶段)
 
