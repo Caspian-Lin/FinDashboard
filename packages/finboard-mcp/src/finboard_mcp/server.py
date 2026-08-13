@@ -31,6 +31,10 @@
   quality_repair / dataset_release_publish(任务化,返回 job_id,用
   ``finboard_job_get`` 轮询)、config_get/update、etf_sync/batch_confirm/update/
   review_queue。补全「数据→因子→策略」闭环的数据准备第一步。
+* #57 验证实验(#138)—— ``finboard.validation_experiment.*``:create / list /
+  get / reject / add_trial / delete,暴露 REST ``/api/research/experiments``
+  的 6 个端点(OOS 样本外验证实验元数据 CRUD,不触发 ValidationRunner 执行),
+  给因子实验的 ``validation_experiment_id`` 提供源头,补齐 OOS 验证闭环。
 
 安全:实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)
 **永久不注册**为工具。研究写操作(创建 Run / 启动回测 / 模拟盘)由 agent 自主执行
@@ -55,6 +59,7 @@ from finboard_mcp.tools import (
     register_run_tools,
     register_simulation_tools,
     register_strategy_tools,
+    register_validation_experiment_tools,
 )
 
 _INSTRUCTIONS = """\
@@ -69,7 +74,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(98 个,已实现) ==
+== 当前可用工具(104 个,已实现) ==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127)
 - finboard.ai.*(4) —— AI 草案:ask / propose_hypothesis / propose_strategy_draft
@@ -110,6 +115,11 @@ FinBoard 研究 MCP —— 量化研究工具集
   etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
   补全「数据→因子→策略」闭环的数据准备第一步:agent 能拉 K 线、发布数据集、
   修复质量缺陷、同步 ETF 元数据。不连 broker / 账户 / 订单 / 持仓。
+- 验证实验(6,✅ #138):validation_experiment create/list/get/reject/add_trial/
+  delete(#57 OOS 机器验证实验元数据 CRUD:冻结假设+计划+门 → 登记 trial →
+  因子实验用 validation_experiment_id 引用 → factor_experiment_sync_validation
+  同步终态,补齐 OOS 过拟合控制闭环;实验实际执行由离线 ValidationRunner 完成,
+  揭盲端点不在 MCP 内)。与因子实验(登记簿)是两套独立但耦合的系统。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
@@ -147,6 +157,7 @@ def build_mcp_server() -> MCPServer:
     register_simulation_tools(mcp)
     register_portfolio_tools(mcp)
     register_jobs_tools(mcp)
+    register_validation_experiment_tools(mcp)
     return mcp
 
 

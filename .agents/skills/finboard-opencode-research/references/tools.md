@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 98 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 104 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -23,6 +23,7 @@
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
 | 后台任务队列(job.*,✅ #136) | ✅(list/get 只读 + enqueue/cancel 写) | |
 | 数据写操作(data_write.* / etf.*,✅ #137) | ✅(拉取/同步/发布/修复/ETF/配置) | |
+| #57 验证实验(validation_experiment.*,✅ #138) | ✅(create/reject/add_trial/delete 写) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读 + ✅ #127 写)
@@ -372,11 +373,76 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 读取绑定的 validation_experiment_id 的 trial 结果,推进状态机。
 - 返回:`{experiment_id, ..., status, result?}`;冲突返回 `conflict`。
 
-### finboard_factor_experiment_sync_validation **[写]**
-同步因子实验的 #57 机器验证终态(不接受调用者传入 passed_oos)。
+## finboard.validation_experiment.*(✅ #138)
+
+#57 机器验证实验(OOS 样本外验证)元数据 CRUD,暴露 REST
+`/api/research/experiments` 的 6 个端点。与因子实验(登记簿)是**两套独立但
+耦合的系统**:因子实验通过 `validation_experiment_id` 引用本批工具创建的 #57
+实验,再经 `finboard_factor_experiment_sync_validation` 同步终态,补齐 OOS
+过拟合控制闭环。实验执行由离线 ValidationRunner 完成(不在 MCP 内触发);
+揭盲端点(`unseal-final`)未实现。写操作尊重 `mcp_readonly_only` 开关。
+
+### finboard_validation_experiment_create **[写]**
+创建 #57 机器验证实验 —— 假设 / 计划 / 门一次性冻结(创建后 hypothesis
+不可修改,变更需新建实验并设 `supersedes_id`)。
+- 参数:
+  - `hypothesis: str`(≥10 字符)
+  - `version_stamp: {matching_model_version, asset_rules_version,
+    strategy_kind}`(必填);`factor_version?`、`dataset_versions?`、
+    `selection_config?`
+  - `plan: {mode(rolling|expanding), train_start, train_end,
+    validation_start, validation_end, test_start, test_end}`(必填);
+    `train_window_days?=504`、`test_window_days?=63`、`step_days?=63`、
+    `trial_budget?=50`、`random_seed?=0`、`benchmark_symbol?`
+  - `thresholds?: {min_in_sample_sharpe?=1.0, min_oos_sharpe?=0.5,
+    max_oos_drawdown?=0.25, min_oos_calmar?=0.5,
+    min_oos_information_ratio?=0.0, max_param_sensitivity_sharpe_drop?=0.5,
+    min_pbo_pass?=True, max_pbo?=0.5, min_deflated_sharpe?=0.0,
+    min_probabilistic_sharpe?=0.95}`
+  - `robustness?: {neighbourhood_steps?=5, neighbourhood_relative_step?=0.1,
+    cost_multipliers?=[1.0,2.0,3.0], slippage_stress_bps?=[0,5,10,20],
+    execution_delay_bars?=[1,2],
+    stress_phases?=[2018-Q4,2020-Q1,2022-Q1,2024-Q1]}`
+  - `strategy_params_space?: dict`、`supersedes_id?: str`、`notes?: str`
+- 返回:`{experiment_id, hypothesis, version_checksum, plan, thresholds,
+  robustness, status: hypothesis, trials_used: 0, ...}`
+- 错误:`invalid_argument`(schema 不完整 / 计划日期非法 / 假设过短)
+
+### finboard_validation_experiment_list
+列出 #57 机器验证实验(可选按状态过滤)。
+- 参数:`status?: str`(hypothesis|in_sample|validated_oos|rejected|superseded)、
+  `limit?: int = 100`
+- 返回:`list[{experiment_id, hypothesis, version_checksum, plan, thresholds,
+  robustness, status, trials_used, final_test_unsealed, ...}]`
+- 错误:`invalid_argument`(非法状态)
+
+### finboard_validation_experiment_get
+查询单个 #57 验证实验详情 + **全部 trial(包括 FAILED / REJECTED —— 多重试验
+修正需要真实试验总数)**。
 - 参数:`experiment_id: str`
-- 读取绑定的 validation_experiment_id 的 trial 结果,推进状态机。
-- 返回:`{experiment_id, ..., status, result?}`;冲突返回 `conflict`。
+- 返回:`{experiment_id, ..., trials: [{trial_id, trial_index, parameters,
+  status, failure_reason, ...}]}`;未找到返回 `not_found`。
+
+### finboard_validation_experiment_reject **[写]**
+主动拒绝 #57 实验(设置 REJECTED + 原因,不可回退)。
+- 参数:`experiment_id: str`、`reason: str`(不能为空)
+- 返回:更新后的实验;`validated_oos` / `superseded` 终态不可拒绝 →
+  `conflict`(409 语义);未找到 → `not_found`。
+
+### finboard_validation_experiment_add_trial **[写]**
+手动登记一次 trial(不通过 runner 自动跑;外部 worker / CLI 跑完回测后回写
+结果,失败也算试验)。
+- 参数:`experiment_id: str`、`parameters: dict`、
+  `status?: str = "candidate"`(candidate|running|selected|rejected|failed|
+  skipped)、`failure_reason?: str`
+- 返回:`{trial_id(前缀 {experiment_id}-mcp-), trial_index, parameters,
+  status, ...}`;预算耗尽或终态实验 → `conflict`(409 语义);未找到 →
+  `not_found`。
+
+### finboard_validation_experiment_delete **[写]**
+删除 #57 实验(级联删除全部 trial,不可恢复)。
+- 参数:`experiment_id: str`
+- 返回:`{deleted: true, experiment_id}`;未找到返回 `not_found`。
 
 ## finboard.strategy.* / finboard.preset.*(✅ #126)
 

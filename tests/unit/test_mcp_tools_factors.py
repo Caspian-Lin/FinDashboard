@@ -583,6 +583,111 @@ class TestFactorExperimentCreate:
         assert env.error is not None
         assert env.error.kind == "not_found"
 
+    async def test_plan_dates_normalized_to_date(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """plan 日期字符串必须归一为 date,否则与 #57 验证计划一致性校验失败(#138)。"""
+
+        app = _make_app()
+        captured: dict[str, Any] = {}
+
+        from finboard_persistence import (
+            FactorExperimentRepository,
+            FeatureSnapshotRepository,
+            ResearchDatasetReleaseRepository,
+        )
+
+        _release = SimpleNamespace(
+            release_id="REL-1",
+            release_checksum="abc123",
+        )
+        monkeypatch.setattr(
+            ResearchDatasetReleaseRepository,
+            "require_usable",
+            lambda self, rid: _async_return(_release),
+        )
+        monkeypatch.setattr(
+            FeatureSnapshotRepository,
+            "get",
+            lambda self, sid: _async_return(_snapshot_domain(sid)),
+        )
+
+        async def _capture_save(self: Any, experiment: Any) -> Any:
+            captured["plan"] = experiment.plan
+            return None
+
+        monkeypatch.setattr(
+            FactorExperimentRepository, "save", _capture_save
+        )
+        env = await factor_tools.factor_experiment_create(
+            app,
+            hypothesis="momentum predicts returns",
+            factor_names=["momentum"],
+            dataset_release_id="REL-1",
+            feature_snapshot_id="FSS-1",
+            plan={
+                "in_sample_start": "2024-01-01",
+                "in_sample_end": "2024-06-30",
+                "oos_start": "2024-07-01",
+                "oos_end": "2024-12-31",
+                "trial_budget": 10,
+                "benchmark_symbol": "000300",
+                "transaction_cost_bps": 3.0,
+            },
+            comparison_group="baseline",
+            validation_experiment_id="EXP-9",
+        )
+        assert env.status == "ok", env.error
+        plan = captured["plan"]
+        assert plan.in_sample_start == date(2024, 1, 1)
+        assert plan.in_sample_end == date(2024, 6, 30)
+        assert plan.oos_start == date(2024, 7, 1)
+        assert plan.oos_end == date(2024, 12, 31)
+
+    async def test_invalid_plan_date_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _make_app()
+        from finboard_persistence import (
+            FeatureSnapshotRepository,
+            ResearchDatasetReleaseRepository,
+        )
+
+        _release = SimpleNamespace(
+            release_id="REL-1",
+            release_checksum="abc123",
+        )
+        monkeypatch.setattr(
+            ResearchDatasetReleaseRepository,
+            "require_usable",
+            lambda self, rid: _async_return(_release),
+        )
+        monkeypatch.setattr(
+            FeatureSnapshotRepository,
+            "get",
+            lambda self, sid: _async_return(_snapshot_domain(sid)),
+        )
+        env = await factor_tools.factor_experiment_create(
+            app,
+            hypothesis="momentum predicts returns",
+            factor_names=["momentum"],
+            dataset_release_id="REL-1",
+            feature_snapshot_id="FSS-1",
+            plan={
+                "in_sample_start": "not-a-date",
+                "in_sample_end": "2024-06-30",
+                "oos_start": "2024-07-01",
+                "oos_end": "2024-12-31",
+                "trial_budget": 10,
+                "benchmark_symbol": "000300",
+                "transaction_cost_bps": 3.0,
+            },
+            comparison_group="baseline",
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
 
 class TestFactorExperimentSyncValidation:
     async def test_write_disabled_rejects(self) -> None:

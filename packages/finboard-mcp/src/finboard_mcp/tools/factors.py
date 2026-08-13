@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -100,6 +100,16 @@ async def _require_write_enabled(app: McpAppContext) -> None:
             "permission_denied",
             "MCP server 处于只读模式(mcp_readonly_only=true),写操作不可用",
         )
+
+
+def _plan_date(value: object) -> date:
+    """把 agent 传入的 ISO 日期字符串归一为 ``date``(兼容已是 date 的输入)。"""
+
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        raise TypeError(f"日期必须是 ISO 字符串或 date,收到 {type(value).__name__}")
+    return date.fromisoformat(value)
 
 
 async def _validate_snapshot_input(
@@ -558,16 +568,24 @@ async def factor_experiment_create(
                     "feature snapshot and dataset release do not match",
                 )
             try:
+                # plan 日期字段必须以 date 构造 —— 直接传 ISO 字符串会让
+                # 与 #57 验证计划的一致性校验(ArtifactIntegrityError)失败,
+                # 且 ``plan.as_dict()`` 调用 isoformat() 会崩。
                 experiment_plan = FactorExperimentPlan(
-                    in_sample_start=plan["in_sample_start"],
-                    in_sample_end=plan["in_sample_end"],
-                    oos_start=plan["oos_start"],
-                    oos_end=plan["oos_end"],
+                    in_sample_start=_plan_date(plan["in_sample_start"]),
+                    in_sample_end=_plan_date(plan["in_sample_end"]),
+                    oos_start=_plan_date(plan["oos_start"]),
+                    oos_end=_plan_date(plan["oos_end"]),
                     trial_budget=plan["trial_budget"],
                     benchmark_symbol=plan["benchmark_symbol"],
                     transaction_cost_bps=plan["transaction_cost_bps"],
                     quantiles=plan.get("quantiles", 5),
                 )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise McpToolError(
+                    "invalid_argument", f"plan 参数非法: {exc}"
+                ) from exc
+            try:
                 experiment = new_factor_experiment(
                     hypothesis=hypothesis,
                     factor_names=tuple(factor_names),
