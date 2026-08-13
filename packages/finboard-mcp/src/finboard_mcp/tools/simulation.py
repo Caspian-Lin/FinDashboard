@@ -1,11 +1,11 @@
 """``finboard.sim.*`` 工具 —— 持久化模拟盘(issue #127,边界 #83)。
 
-- 只读(9):sim_account_list / sim_account_get / sim_session_list /
+- 只读(10):sim_account_list / sim_account_get / sim_session_list /
   sim_session_get / sim_orders / sim_fills / sim_positions / sim_ledger /
   sim_audit / sim_report
-- 写(8):sim_account_create / sim_session_create / sim_session_start /
-  sim_session_pause / sim_session_stop / sim_session_reset /
-  sim_decision_submit / sim_order_cancel
+- 写(11):sim_account_create / sim_session_create / sim_session_start /
+  sim_session_pause / sim_session_stop / sim_session_archive / sim_session_reset /
+  sim_decision_submit / sim_market_event / sim_session_evaluate / sim_order_cancel
 
 复用现有 ``SimulationService`` / ``SimulationRepository`` +
 ``simulation_schemas`` 的 Pydantic 模型(复用 ``to_domain()`` /
@@ -326,8 +326,10 @@ async def _session_transition(
     session_id: str,
     target: str,
     actor: str,
+    *,
+    tool_name: str | None = None,
 ) -> ToolEnvelope:
-    """会话状态转换的共享实现(start / pause / stop 共用)。"""
+    """会话状态转换的共享实现(start / pause / stop / archive 共用)。"""
     from finboard_api.simulation_schemas import SimulationSessionOut
     from finboard_simulation import (
         SimulationRepository,
@@ -353,7 +355,7 @@ async def _session_transition(
 
     return await run_tool(
         audit=app.audit,
-        tool_name=f"finboard.sim.session_{target}",
+        tool_name=tool_name or f"finboard.sim.session_{target}",
         arguments={"session_id": session_id, "actor": actor},
         handler=_do,
     )
@@ -375,6 +377,15 @@ async def sim_session_stop(
     app: McpAppContext, session_id: str, *, actor: str
 ) -> ToolEnvelope:
     return await _session_transition(app, session_id, "stopped", actor)
+
+
+async def sim_session_archive(
+    app: McpAppContext, session_id: str, *, actor: str
+) -> ToolEnvelope:
+    """归档模拟会话(stopped → archived,账户同步归档)。"""
+    return await _session_transition(
+        app, session_id, "archived", actor, tool_name="finboard.sim.session_archive"
+    )
 
 
 async def sim_session_reset(
@@ -473,6 +484,93 @@ async def sim_decision_submit(
         audit=app.audit,
         tool_name="finboard.sim.decision_submit",
         arguments={"session_id": session_id, "decision": decision},
+        handler=_do,
+    )
+
+
+async def sim_market_event(
+    app: McpAppContext,
+    session_id: str,
+    *,
+    bar: dict[str, Any],
+) -> ToolEnvelope:
+    """投递单条 OHLCV K 线驱动撮合(#139,仅 running 会话接受)。"""
+    async def _do() -> dict[str, Any]:
+        await _require_write_enabled(app)
+        from finboard_api.simulation_schemas import SimulationBarIn, SimulationProcessOut
+        from finboard_simulation import SimulationRepository, SimulationService
+
+        _validate_id("session", session_id)
+        try:
+            body = SimulationBarIn.model_validate(bar)
+        except Exception as exc:
+            raise _map_sim_error(exc) from exc
+        async with app.session_maker() as session:
+            try:
+                result = await SimulationService(
+                    SimulationRepository(session)
+                ).process_bar(session_id, body.to_domain())
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                raise _map_sim_error(exc) from exc
+            out = SimulationProcessOut.model_validate(result, from_attributes=True)
+            return cast(
+                dict[str, Any],
+                to_jsonable(out.model_dump(mode="json")),
+            )
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.sim.market_event",
+        arguments={"session_id": session_id, "bar": bar},
+        handler=_do,
+    )
+
+
+async def sim_session_evaluate(
+    app: McpAppContext,
+    session_id: str,
+    *,
+    actor: str,
+    minimum_trading_days: int = 2,
+) -> ToolEnvelope:
+    """模拟晋级评估(#139,仅 stopped 会话,automatic_live_promotion 恒 False)。"""
+    async def _do() -> dict[str, Any]:
+        await _require_write_enabled(app)
+        from finboard_api.simulation_schemas import SimulationEvaluateIn
+        from finboard_simulation import SimulationRepository, SimulationService
+
+        _validate_id("session", session_id)
+        try:
+            body = SimulationEvaluateIn(
+                actor=actor, minimum_trading_days=minimum_trading_days
+            )
+        except Exception as exc:
+            raise _map_sim_error(exc) from exc
+        async with app.session_maker() as session:
+            try:
+                result = await SimulationService(
+                    SimulationRepository(session)
+                ).evaluate_session(
+                    session_id,
+                    actor=body.actor,
+                    minimum_trading_days=body.minimum_trading_days,
+                )
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                raise _map_sim_error(exc) from exc
+            return cast(dict[str, Any], to_jsonable(result))
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.sim.session_evaluate",
+        arguments={
+            "session_id": session_id,
+            "actor": actor,
+            "minimum_trading_days": minimum_trading_days,
+        },
         handler=_do,
     )
 
@@ -675,7 +773,7 @@ async def sim_report(app: McpAppContext, session_id: str) -> ToolEnvelope:
 # 注册
 # --------------------------------------------------------------------------- #
 def register(mcp: MCPServer) -> None:
-    """把模拟盘工具注册到 MCP server(9 只读 + 8 写 = 17 个)。"""
+    """把模拟盘工具注册到 MCP server(10 只读 + 11 写 = 21 个)。"""
 
     @mcp.tool(
         name="finboard_sim_account_list",
@@ -750,7 +848,7 @@ def register(mcp: MCPServer) -> None:
         name="finboard_sim_session_create",
         description=(
             "创建模拟会话(写)。绑定已发布策略版本 + completed ResearchRun(RR- 前缀)"
-            "+ 数据发布。源模式 source_mode(bar_replay / event_driven)。"
+            "+ 数据发布。源模式 source_mode(historical_replay / readonly_market)。"
             "matching/risk 为撮合与风控配置(省略用默认)。"
         ),
     )
@@ -815,6 +913,18 @@ def register(mcp: MCPServer) -> None:
         return await sim_session_stop(app_context(ctx), session_id, actor=actor)
 
     @mcp.tool(
+        name="finboard_sim_session_archive",
+        description="归档模拟会话(stopped → archived,账户同步归档,写)。"
+        "归档后仅 reset 可用(基于归档源创建新账户+会话)。",
+    )
+    async def _session_archive(
+        session_id: str,
+        actor: str,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await sim_session_archive(app_context(ctx), session_id, actor=actor)
+
+    @mcp.tool(
         name="finboard_sim_session_reset",
         description=(
             "重置模拟会话(stopped/archived → 新账户+新会话,原会话不动,"
@@ -850,6 +960,46 @@ def register(mcp: MCPServer) -> None:
     ) -> ToolEnvelope:
         return await sim_decision_submit(
             app_context(ctx), session_id, decision=decision
+        )
+
+    @mcp.tool(
+        name="finboard_sim_market_event",
+        description=(
+            "投递单条 OHLCV K 线驱动撮合(写,仅 running 会话接受)——agent 推进"
+            "模拟盘撮合的唯一入口。bar 字段:source_event_id(幂等)/symbol/market/"
+            "period(D1)/timestamp(ISO 带时区)/open/high/low/close/volume/amount/"
+            "actor/contract_id(期货必填)。返回 source_event_id/duplicate/fill_ids/"
+            "rejected_order_ids/equity/clock_at;同 source_event_id+同内容 → "
+            "duplicate=true,不同内容 → conflict;市场时钟禁止倒退。"
+        ),
+    )
+    async def _market_event(
+        session_id: str,
+        bar: dict[str, Any],
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await sim_market_event(app_context(ctx), session_id, bar=bar)
+
+    @mcp.tool(
+        name="finboard_sim_session_evaluate",
+        description=(
+            "模拟晋级评估(写,仅 stopped 会话)。计算交易日数 + failed 事件 + "
+            "回撤,设 promotion_status(eligible/failed);minimum_trading_days 默认 2。"
+            "返回 promotion_status/trading_days/max_drawdown/minimum_trading_days/"
+            "automatic_live_promotion(恒 false,不自动晋级实盘/影子盘)。"
+        ),
+    )
+    async def _session_evaluate(
+        session_id: str,
+        actor: str,
+        minimum_trading_days: int = 2,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await sim_session_evaluate(
+            app_context(ctx),
+            session_id,
+            actor=actor,
+            minimum_trading_days=minimum_trading_days,
         )
 
     @mcp.tool(

@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 104 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138):
+**已实现 107 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -16,7 +16,7 @@
 | 因子实验室 | 12 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(8 只读 + 4 写,✅ #125;job_start/status 在 #136 迁移到持久化队列) |
 | 策略规格 | 16 | strategy registry/template/list/history/version_get/diff、preset list/get(只读);strategy validate/draft_create/supersede/publish/rollback、preset create/update/delete(写) | 无代码版本化生命周期(8 只读 + 8 写,✅ #126) |
 | 回测 | 5 | backtest_strategy_list、backtest_history_list/get(只读);backtest_run(同步)、backtest_history_delete(写) | 行情回放 + 纸面撮合(3 只读 + 2 写,✅ #127) |
-| 模拟盘 | 18 | sim_account list/get/create、sim_session list/get/create/start/pause/stop/reset、sim_orders/fills/positions/ledger/audit/report(只读);sim_decision_submit、sim_order_cancel(写) | 持久化隔离模拟盘(10 只读 + 8 写,✅ #127) |
+| 模拟盘 | 21 | sim_account list/get/create、sim_session list/get/create/start/pause/stop/archive/reset、sim_orders/fills/positions/ledger/audit/report(只读);sim_decision_submit、sim_market_event、sim_session_evaluate、sim_order_cancel(写) | 持久化隔离模拟盘(10 只读 + 11 写,✅ #127 + #139) |
 | portfolio | 4 | portfolio_allocate / sizing / feasibility / attribution | 组合计算(纯计算,无 DB 写入,✅ #128) |
 | `finboard.job.*` | 4 | job list/get(只读);job enqueue/cancel(写) | 统一后台任务队列监控与提交(2 只读 + 2 写,✅ #136) |
 | 数据写操作 | 12 | data_fetch(同步)、fetch_all/sync_universe/bulk_download_start/quality_repair/dataset_release_publish(任务化)、data_config_get/update、etf_sync/batch_confirm/update/review_queue | 数据准备闭环:拉取/批量下载/同步/质量修复/数据集发布/调度配置/ETF 元数据(2 只读 + 10 写,✅ #137) |
@@ -63,7 +63,7 @@ dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota�
 - **回测**(5,3 只读 + 2 写):backtest_strategy_list(可用策略 + 参数 schema)、
   backtest_run(同步运行,返回 metrics/equity/fills/snapshots)、
   backtest_history_list/get、backtest_history_delete
-- **模拟盘**(17,9 只读 + 8 写):sim_account list/get/create、
+- **模拟盘**(18,10 只读 + 8 写):sim_account list/get/create、
   sim_session list/get/create/start/pause/stop/reset、
   sim_orders/fills/positions/ledger/audit/report(只读);
   sim_decision_submit(结构化目标仓位 → 生成订单,不直接创建订单)、
@@ -176,6 +176,32 @@ dataclass 列表逐元素序列化(顶层是 list 时 `dataclasses.asdict` 不�
 (审计区分入口)。不触及交易安全红线。回滚:移除
 `register_validation_experiment_tools(mcp)` 调用 + `validation_experiments.py`
 即可,不影响 REST 端点 / 因子实验工具 / 研究产物。
+
+### ✅ #139 模拟盘补全工具(已完成)
+3 个写工具(2 写生命周期 + 1 行情投递),补全 #127 之后的模拟盘生命周期缺口,
+agent 现在能跑通完整生命周期:创建账户+会话 → start → 投 K 线撮合 → 提交
+决策 → stop → evaluate → archive:
+
+- `finboard_sim_session_archive` —— `POST /api/simulation/sessions/:id/archive`:
+  stopped → archived,账户同步归档(`account.status=ARCHIVED`),记
+  `session_archived` 审计;归档后仅 reset 可用。
+- `finboard_sim_market_event`(⭐)—— `POST /api/simulation/sessions/:id/
+  market-events`:投递单条 OHLCV K 线(`SimulationBarIn`)驱动撮合引擎,
+  仅 running 会话接受;按 `source_event_id` 幂等(同 id + 同 checksum →
+  `duplicate=true`,同 id 不同内容 → conflict),市场时钟禁止倒退;返回
+  `SimulationProcessOut`(duplicate/fill_ids/rejected_order_ids/equity/
+  clock_at)。**这是 agent 推进模拟盘撮合的唯一入口。**
+- `finboard_sim_session_evaluate` —— `POST /api/simulation/sessions/:id/
+  evaluate`:仅 stopped 会话,计算交易日数 + failed 事件 + max_drawdown,
+  设 `promotion_status=ELIGIBLE/FAILED`;`minimum_trading_days` 默认 2;
+  `automatic_live_promotion` 恒 False(遵守 #83 边界,不自动晋级实盘/影子盘)。
+
+复用 `SimulationService.process_bar / evaluate_session / transition_session`
++ `simulation_schemas` 的 `SimulationBarIn / SimulationProcessOut /
+`SimulationEvaluateIn`。写工具受 `_require_write_enabled` 守卫。批量行情
+回放(如回测数据驱动模拟)不在本批,后续可扩展批量工具或接入 #117 任务化。
+不触及交易安全红线。回滚:移除 `sim_session_archive` / `sim_market_event` /
+`sim_session_evaluate` 三个工具即可,不影响 REST 端点 / 领域服务 / 既有工具。
 
 ## 扩展原则(适用于所有阶段)
 
