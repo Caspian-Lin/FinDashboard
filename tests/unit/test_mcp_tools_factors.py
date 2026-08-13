@@ -235,23 +235,91 @@ class TestFeatureSnapshotGet:
 
 
 # ---------------------------------------------------------------------------
-# finboard.feature_snapshot.job_status
+# finboard.feature_snapshot.job_status / job_start(持久化队列,#136 适配)
 # ---------------------------------------------------------------------------
 
 
 class TestFeatureSnapshotJobStatus:
-    async def test_not_found(self) -> None:
+    async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """job_status 读 background_jobs 表,未找到返回 not_found。"""
+
         app = _make_app()
-        env = await factor_tools.feature_snapshot_job_status(app, "FSJ-NOPE")
+        from finboard_persistence.background_job_repo import BackgroundJobRepository
+
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "get",
+            lambda self, jid: _async_return(None),
+        )
+        env = await factor_tools.feature_snapshot_job_status(app, "BJ-NOPE")
         assert env.status == "error"
         assert env.error is not None
         assert env.error is not None
         assert env.error.kind == "not_found"
 
-    async def test_returns_status_after_start(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """job_start + job_status 闭环:启动一个快速完成的任务后查询。"""
+    async def test_returns_jobout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """job_status 返回 JobOut 结构(result_ref=snapshot_id)。"""
+
+        app = _make_app()
+        now = datetime(2026, 1, 15, tzinfo=UTC)
+        _row = SimpleNamespace(
+            job_id="BJ-1",
+            kind="feature_snapshot",
+            queue="research",
+            status="succeeded",
+            priority=0,
+            payload={},
+            payload_checksum="abc",
+            idempotency_key="idem-key-1",
+            progress_total=100,
+            progress_done=100,
+            phase="feature_snapshot:done",
+            result_ref="FSS-1",
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="mcp",
+            created_at=now,
+            started_at=now,
+            finished_at=now,
+            updated_at=now,
+        )
+        from finboard_persistence.background_job_repo import BackgroundJobRepository
+
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "get",
+            lambda self, jid: _async_return(_row),
+        )
+        env = await factor_tools.feature_snapshot_job_status(app, "BJ-1")
+        assert env.status == "ok"
+        assert env.data["job_id"] == "BJ-1"
+        assert env.data["status"] == "succeeded"
+        assert env.data["result_ref"] == "FSS-1"
+
+
+class TestFeatureSnapshotJobStart:
+    """job_start 登记任务到统一队列(复用 enqueue_job),不再进程内执行(#136)。"""
+
+    async def test_write_disabled_rejects(self) -> None:
+        app = _make_app(write_enabled=False)
+        env = await factor_tools.feature_snapshot_job_start(
+            app,
+            dataset_release_id="REL-1",
+            decision_at=datetime(2026, 1, 15, tzinfo=UTC),
+        )
+        assert env.status == "denied"
+        assert env.error is not None
+        assert env.error is not None
+        assert env.error.kind == "permission_denied"
+
+    async def test_enqueues_job(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """job_start 校验发布后 enqueue,返回 JobOut(status=queued)。"""
+
         app = _make_app()
         _release = SimpleNamespace(
             release_id="REL-1",
@@ -259,44 +327,59 @@ class TestFeatureSnapshotJobStatus:
             start_date=date(2026, 1, 1),
             end_date=date(2026, 1, 31),
         )
-        from finboard_persistence import (
-            FeatureSnapshotRepository,
-            ResearchDatasetReleaseRepository,
-        )
+        from finboard_persistence import ResearchDatasetReleaseRepository
 
         monkeypatch.setattr(
             ResearchDatasetReleaseRepository,
             "require_usable",
             lambda self, rid: _async_return(_release),
         )
-        monkeypatch.setattr(
-            FeatureSnapshotRepository, "publish", lambda self, s: _async_return(None)
-        )
-        # patch build to return a duck-typed snapshot immediately
-        async def _fake_build(**kw: Any) -> Any:
-            return _snapshot_domain()
+
+        # patch enqueue_job 返回一个 duck-typed JobOut
+        async def _fake_enqueue(session: Any, response: Any, **kw: Any) -> Any:
+            from finboard_api.job_schemas import JobOut
+
+            return JobOut.model_validate(
+                SimpleNamespace(
+                    job_id="BJ-NEW",
+                    kind="feature_snapshot",
+                    queue="research",
+                    status="queued",
+                    priority=0,
+                    payload=kw.get("payload", {}),
+                    payload_checksum="abc",
+                    idempotency_key=kw["idempotency_key"],
+                    progress_total=0,
+                    progress_done=0,
+                    phase=None,
+                    result_ref=None,
+                    error_code=None,
+                    error_summary=None,
+                    attempt=0,
+                    max_attempts=3,
+                    worker_id=None,
+                    heartbeat_at=None,
+                    lease_until=None,
+                    requested_by=kw["requested_by"],
+                    created_at=datetime(2026, 1, 15, tzinfo=UTC),
+                    started_at=None,
+                    finished_at=None,
+                    updated_at=datetime(2026, 1, 15, tzinfo=UTC),
+                )
+            )
 
         monkeypatch.setattr(
-            "finboard_backtest.factor_lab.build_price_feature_snapshot", _fake_build
+            "finboard_api.job_helpers.enqueue_job", _fake_enqueue
         )
-        monkeypatch.setattr(
-            "finboard_data.releases.FrozenReleaseProvider",
-            lambda **kw: MagicMock(),
-        )
-
         env = await factor_tools.feature_snapshot_job_start(
             app,
             dataset_release_id="REL-1",
             decision_at=datetime(2026, 1, 15, tzinfo=UTC),
         )
         assert env.status == "ok"
-        job_id = env.data["job_id"]
-        assert env.data["status"] in {"queued", "running", "succeeded"}
-
-        # 查询状态
-        env2 = await factor_tools.feature_snapshot_job_status(app, job_id)
-        assert env2.status == "ok"
-        assert env2.data["job_id"] == job_id
+        assert env.data["job_id"] == "BJ-NEW"
+        assert env.data["status"] == "queued"
+        assert env.data["kind"] == "feature_snapshot"
 
 
 # ---------------------------------------------------------------------------

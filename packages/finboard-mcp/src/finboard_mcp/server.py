@@ -23,11 +23,14 @@
   订单 / 成交 / 持仓 / 账本 / 审计 / 报告);
 * ``finboard.run.*`` 写工具(queue / cancel / replay / lineage,#127)。
 * ``finboard.portfolio.*``(#128)—— 组合计算(目标权重分配 /
-  离散手数 sizing / 资金档位可行性 / 绩效归因,纯计算无 DB 写入)。
+  离散手数 sizing / 资金档位可行性 / 绩效归因,纯计算无 DB 写入);
+* ``finboard.job.*``(#136)—— 统一后台任务队列监控与提交
+  (list / get 只读 + enqueue / cancel 写,复用 ``background_jobs`` 表)。
 
 安全:实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)
 **永久不注册**为工具。研究写操作(创建 Run / 启动回测 / 模拟盘)由 agent 自主执行
-(issue #122),不触及交易安全红线。
+(issue #122),不触及交易安全红线。交易内核(盘前检查 / 收盘撤单 / 日终核对 /
+Broker 心跳 / Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ from finboard_mcp.tools import (
     register_backtest_tools,
     register_data_tools,
     register_factor_tools,
+    register_jobs_tools,
     register_memory_tools,
     register_portfolio_tools,
     register_run_tools,
@@ -59,7 +63,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(82 个,已实现) ==
+== 当前可用工具(86 个,已实现) ==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127)
 - finboard.ai.*(4) —— AI 草案:ask / propose_hypothesis / propose_strategy_draft
@@ -87,6 +91,12 @@ FinBoard 研究 MCP —— 量化研究工具集
 - portfolio(4,✅ #128):portfolio_allocate(目标权重分配,纯计算)、
   portfolio_sizing(离散手数 + 费用/保证金)、portfolio_feasibility(10万/20万/50万
   档位可行性)、portfolio_attribution(绩效归因分解,纯计算,无 DB 写入)。
+- finboard.job.*(4,✅ #136)—— 统一后台任务队列监控与提交:
+  job list/get(只读)、job enqueue/cancel(写)。复用 background_jobs 表,
+  enqueue kind 白名单全是研究/数据/回测域(echo/research_run/feature_snapshot/
+  bulk_download/dataset_publish/backtest_run/data_sync/fetch_all/quality_repair);
+  实盘交易内核任务不进入队列。feature_snapshot/bulk_download 等异步任务的进度
+  统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id)。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
@@ -122,6 +132,7 @@ def build_mcp_server() -> MCPServer:
     register_backtest_tools(mcp)
     register_simulation_tools(mcp)
     register_portfolio_tools(mcp)
+    register_jobs_tools(mcp)
     return mcp
 
 
