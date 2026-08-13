@@ -16,6 +16,7 @@ from finboard_mcp.tools.strategies import register as register_strategy_tools
 from finboard_mcp.tools.validation_experiments import (
     register as register_validation_experiment_tools,
 )
+from finboard_mcp.tools.watchlists import register as register_watchlist_tools
 
 __all__ = [
     "register_ai_tools",
@@ -30,4 +31,5 @@ __all__ = [
     "register_simulation_tools",
     "register_strategy_tools",
     "register_validation_experiment_tools",
+    "register_watchlist_tools",
 ]

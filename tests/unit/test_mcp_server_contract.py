@@ -133,6 +133,14 @@ _EXPECTED_TOOLS = {
     "finboard_validation_experiment_reject",
     "finboard_validation_experiment_add_trial",
     "finboard_validation_experiment_delete",
+    # #140 自选股工具(2 只读 + 5 写)
+    "finboard_watchlist_list",
+    "finboard_watchlist_get",
+    "finboard_watchlist_create",
+    "finboard_watchlist_update",
+    "finboard_watchlist_delete",
+    "finboard_watchlist_add_symbols",
+    "finboard_watchlist_remove_symbol",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。

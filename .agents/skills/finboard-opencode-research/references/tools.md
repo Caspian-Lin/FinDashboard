@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 107 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 114 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -24,6 +24,7 @@
 | 后台任务队列(job.*,✅ #136) | ✅(list/get 只读 + enqueue/cancel 写) | |
 | 数据写操作(data_write.* / etf.*,✅ #137) | ✅(拉取/同步/发布/修复/ETF/配置) | |
 | #57 验证实验(validation_experiment.*,✅ #138) | ✅(create/reject/add_trial/delete 写) | |
+| 自选股(watchlist.*,✅ #140) | ✅(create/update/delete/add_symbols/remove_symbol 写) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读 + ✅ #127 写)
@@ -816,3 +817,55 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 - 已在终态(succeeded/failed/cancelled/interrupted)的任务返回当前状态不报错。
 - 错误:`permission_denied`(只读模式)、`not_found`
 
+## finboard.watchlist.*(✅ #140)
+
+自选股标的组(watchlist)—— 用户标的组:保存常用回测标的集合,为回测 / 研究
+准备标的池(前端 Backtest.tsx 已用 watchlist 作为回测标的选择器,#39)。
+复用 `WatchlistRepository`(REST `routes/watchlist.py` 直接调用 repository,
+无独立 service 层,MCP 与 REST 同层同行为)。`symbol_code` 是普通
+`String(20)` 代码(如 `000001.SZ`),无外键约束指向 instruments;删除级联
+(DB 外键 `ondelete=CASCADE`)。与 strategies / simulation 无关联,独立用户
+管理查找列表。写操作尊重 `mcp_readonly_only` 开关。
+
+### finboard_watchlist_list(只读)
+列出全部标的组(含成员数)。
+- 参数:无
+- 返回:`list[{id, name, description, item_count, created_at}]`
+
+### finboard_watchlist_get(只读)
+获取标的组详情(含成员列表)。
+- 参数:`watchlist_id: int`
+- 返回:`{id, name, description, item_count, created_at, symbols: list[str]}`
+- 错误:`not_found`(标的组不存在)
+
+### finboard_watchlist_create **[写]**
+创建标的组。
+- 参数:`name: str`、`description?: str`
+- 返回:`WatchlistOut`(item_count=0)
+- 错误:`permission_denied`(只读模式)
+
+### finboard_watchlist_update **[写]**
+更新标的组名称 / 描述(**partial:只更新提供的字段,不传的字段保持原值**;
+REST PUT 是全量语义,这里更安全)。
+- 参数:`watchlist_id: int`、`name?: str`、`description?: str`(均可选)
+- 返回:`WatchlistOut`
+- 错误:`permission_denied`(只读模式)、`not_found`
+
+### finboard_watchlist_delete **[写]**
+删除标的组(DB 外键级联删除成员)。
+- 参数:`watchlist_id: int`
+- 返回:`{deleted: true, watchlist_id}`
+- 错误:`permission_denied`(只读模式)、`not_found`
+
+### finboard_watchlist_add_symbols **[写]**
+向标的组添加标的(**输入按序自动去重 + 已存在自动跳过**,不触发
+`(watchlist_id, symbol_code)` 唯一约束冲突)。
+- 参数:`watchlist_id: int`、`symbols: list[str]`(如 `["000001.SZ", "510300.SH"]`)
+- 返回:`WatchlistDetailOut`(含最新 symbols)
+- 错误:`permission_denied`(只读模式)、`not_found`
+
+### finboard_watchlist_remove_symbol **[写]**
+从标的组移除单个标的(不存在时为空操作,与 REST 一致)。
+- 参数:`watchlist_id: int`、`symbol_code: str`
+- 返回:`WatchlistDetailOut`(含最新 symbols)
+- 错误:`permission_denied`(只读模式)、`not_found`
