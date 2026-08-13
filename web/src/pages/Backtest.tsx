@@ -29,6 +29,7 @@ import {
   type BacktestHistoryItem,
   type BacktestResult,
   type FactorSelectionInput,
+  isJobRunning,
 } from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
 
@@ -80,6 +81,9 @@ export default function Backtest() {
   // 结果视图: 当前结果或历史记录
   const [activeResult, setActiveResult] = useState<BacktestResult | null>(null);
   const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null);
+  // 回测已迁移到统一任务队列(#144):POST /backtest/run 返回 JobOut,前端轮询
+  // /api/jobs/{job_id},succeeded 后用 result_ref(run_id) 查历史详情拿 BacktestResult。
+  const [backtestJobId, setBacktestJobId] = useState<string | null>(null);
 
   const { data: strategies } = useQuery({
     queryKey: ["strategies"],
@@ -204,14 +208,54 @@ export default function Backtest() {
         stamp_tax_rate: stampTaxRate,
         slippage_bps: slippageBps,
       }),
-    onSuccess: (data) => {
+    onSuccess: (job) => {
       setStrategyErrors({});
-      setActiveResult(data);
-      setActiveHistoryId(data.run_id);
-      qc.invalidateQueries({ queryKey: ["backtest-history"] });
+      // 清空旧结果,进入"运行中"态;真正的 BacktestResult 在任务完成后由 detailQuery 注入。
+      setActiveResult(null);
+      setActiveHistoryId(null);
+      setBacktestJobId(job.job_id);
     },
     onError: (error) => setStrategyErrors(strategyFieldErrorsFrom(error)),
   });
+
+  // 轮询回测任务直到终态。result_ref 是 run_id(数字字符串)。
+  const { data: backtestJob } = useQuery({
+    queryKey: ["job", backtestJobId],
+    queryFn: () => api.getJob(backtestJobId as string),
+    enabled: Boolean(backtestJobId),
+    refetchInterval: (query) => (isJobRunning(query.state.data) ? 1500 : false),
+  });
+
+  const backtestRunId =
+    backtestJob && !isJobRunning(backtestJob) && backtestJob.status === "succeeded" && backtestJob.result_ref
+      ? Number(backtestJob.result_ref)
+      : null;
+
+  // 任务完成后,用 run_id 拉历史详情,重构成 BacktestResult 注入 activeResult。
+  const { data: backtestDetail } = useQuery({
+    queryKey: ["backtest-history", backtestRunId],
+    queryFn: () => api.getBacktestHistoryDetail(backtestRunId as number),
+    enabled: backtestRunId !== null,
+    staleTime: Infinity,
+  });
+
+  const appliedJobRunId = useRef<number | null>(null);
+  useEffect(() => {
+    if (!backtestDetail || appliedJobRunId.current === backtestDetail.id) return;
+    appliedJobRunId.current = backtestDetail.id;
+    setActiveResult({
+      metrics: backtestDetail.metrics,
+      equity_curve: backtestDetail.equity_curve,
+      fills: backtestDetail.fills,
+      summary: backtestDetail.summary,
+      run_id: backtestDetail.id,
+      selection_snapshots: backtestDetail.selection_snapshots,
+      dataset_versions: backtestDetail.dataset_versions,
+      factor_version: backtestDetail.factor_version,
+    });
+    setActiveHistoryId(backtestDetail.id);
+    qc.invalidateQueries({ queryKey: ["backtest-history"] });
+  }, [backtestDetail, qc]);
 
   const loadHistory = useMutation({
     mutationFn: (id: number) => api.getBacktestHistoryDetail(id),
@@ -271,6 +315,11 @@ export default function Backtest() {
 
   const result = activeResult;
   const m = result?.metrics;
+  const backtestRunning = runBacktest.isPending || isJobRunning(backtestJob);
+  const backtestFailed =
+    backtestJob && !isJobRunning(backtestJob) && backtestJob.status !== "succeeded"
+      ? backtestJob
+      : null;
 
   const changeStrategy = (kind: string) => {
     const definition = backtestStrategies.find((item) => item.kind === kind);
@@ -278,6 +327,8 @@ export default function Backtest() {
     setStrategyParams(definition ? defaultStrategyParams(definition) : {});
     setStrategyErrors({});
     runBacktest.reset();
+    setBacktestJobId(null);
+    appliedJobRunId.current = null;
     appliedConfig.current = `manual:${kind}`;
   };
 
@@ -388,7 +439,7 @@ export default function Backtest() {
                   runBacktest.reset();
                 }}
                 errors={strategyErrors}
-                disabled={runBacktest.isPending}
+                disabled={backtestRunning}
               />
             </div>
           )}
@@ -505,14 +556,21 @@ export default function Backtest() {
 
           <button
             onClick={startBacktest}
-            disabled={runBacktest.isPending || selectedSymbols.length === 0}
+            disabled={backtestRunning || selectedSymbols.length === 0}
             className="mt-4 bg-primary text-white rounded px-6 py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
           >
-            {runBacktest.isPending ? "回测中..." : "运行回测"}
+            {backtestRunning
+              ? `回测中…${backtestJob?.phase ? `（${backtestJob.phase}）` : ""}`
+              : "运行回测"}
           </button>
           {runBacktest.error && (
             <p className="mt-2 text-sm text-destructive">
               {(runBacktest.error as Error).message}
+            </p>
+          )}
+          {backtestFailed && (
+            <p className="mt-2 text-sm text-destructive">
+              回测任务失败: {backtestFailed.error_summary ?? backtestFailed.status}
             </p>
           )}
         </div>

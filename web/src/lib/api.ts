@@ -1,5 +1,61 @@
 const BASE = "/api";
 
+// ---- 统一后台任务队列(background_jobs, BJ- ID) ----
+// 与后端 JobOut(job_schemas.py)逐字段对齐;POST 提交端点统一返回 202 + JobOut,
+// 前端拿到 job_id 后用 getJob 轮询 /api/jobs/{job_id} 直到终态再按 result_ref 取详情。
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "retry_waiting"
+  | "succeeded"
+  | "failed"
+  | "cancel_requested"
+  | "cancelled"
+  | "interrupted";
+
+export const TERMINAL_JOB_STATUSES: ReadonlySet<JobStatus> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+export interface JobOut {
+  job_id: string;
+  kind: string;
+  queue: string;
+  status: JobStatus;
+  priority: number;
+  payload: Record<string, unknown>;
+  payload_checksum: string;
+  idempotency_key: string;
+  progress_total: number;
+  progress_done: number;
+  phase: string | null;
+  result_ref: string | null;
+  error_code: string | null;
+  error_summary: string | null;
+  attempt: number;
+  max_attempts: number;
+  worker_id: string | null;
+  heartbeat_at: string | null;
+  lease_until: string | null;
+  requested_by: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+}
+
+export function isJobRunning(job: Pick<JobOut, "status"> | undefined | null): boolean {
+  if (!job) return false;
+  return job.status === "queued" || job.status === "running" || job.status === "retry_waiting" || job.status === "cancel_requested";
+}
+
+export function isJobTerminal(job: Pick<JobOut, "status"> | undefined | null): boolean {
+  return Boolean(job && TERMINAL_JOB_STATUSES.has(job.status));
+}
+
 export class ApiError extends Error {
   status: number;
   detail: unknown;
@@ -182,7 +238,7 @@ export const api = {
   fetchData: (body: DataFetchRequest) =>
     fetchJSON<FetchResult>("/data/fetch", { method: "POST", body: JSON.stringify(body) }),
   fetchAllData: () =>
-    fetchJSON<BatchFetchResult>("/data/fetch-all", { method: "POST" }),
+    fetchJSON<JobOut>("/data/fetch-all", { method: "POST" }),
   getSymbolPool: () => fetchJSON<SymbolPool>("/data/symbols"),
   updateSymbolPool: (body: SymbolPoolUpdate) =>
     fetchJSON<SymbolPool>("/data/symbols", { method: "PUT", body: JSON.stringify(body) }),
@@ -190,7 +246,7 @@ export const api = {
   // ---- Backtest ----
   getStrategies: () => fetchJSON<StrategyInfo[]>("/backtest/strategies"),
   runBacktest: (body: BacktestRunRequest) =>
-    fetchJSON<BacktestResult>("/backtest/run", { method: "POST", body: JSON.stringify(body) }),
+    fetchJSON<JobOut>("/backtest/run", { method: "POST", body: JSON.stringify(body) }),
   getBacktestHistory: (limit = 50) =>
     fetchJSON<BacktestHistoryItem[]>(`/backtest/history?limit=${limit}`),
   getBacktestHistoryDetail: (id: number) =>
@@ -266,7 +322,7 @@ export const api = {
 
   // ---- Data Sync & Bulk Download ----
   syncUniverse: () =>
-    fetchJSON<{ total: number; new: number; updated: number }>("/data/sync", { method: "POST" }),
+    fetchJSON<JobOut>("/data/sync", { method: "POST" }),
   startBulkDownload: (body: {
     market?: string;
     instrument_type?: string;
@@ -275,12 +331,11 @@ export const api = {
     start?: string;
     source?: string;
   }) =>
-    fetchJSON<BulkDownloadStatus>("/data/bulk-download", {
+    fetchJSON<JobOut>("/data/bulk-download", {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  getBulkDownloadStatus: () =>
-    fetchJSON<BulkDownloadStatus>("/data/bulk-download/status"),
+  // GET /data/bulk-download/status 已随 #144 删除;前端统一用 getJob 轮询 /api/jobs/{job_id}。
   checkQuality: (symbols?: string, adjust?: string) => {
     const q = new URLSearchParams();
     if (symbols) q.set("symbols", symbols);
@@ -289,10 +344,26 @@ export const api = {
     return fetchJSON<QualityReport[]>(`/data/quality${qs ? `?${qs}` : ""}`);
   },
   repairQuality: (body: { symbols: string[]; source: "akshare" | "yfinance" | "tushare"; adjust?: string }) =>
-    fetchJSON<QualityRepairResult>("/data/quality/repair", {
+    fetchJSON<JobOut>("/data/quality/repair", {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  // ---- Unified Job Queue (background_jobs) ----
+  getJob: (jobId: string) => fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}`),
+  listJobs: (params?: {
+    kind?: string[];
+    status?: JobStatus[];
+    queue?: string[];
+    limit?: number;
+  }) => {
+    const q = new URLSearchParams();
+    params?.kind?.forEach((k) => q.append("kind", k));
+    params?.status?.forEach((s) => q.append("status", s));
+    params?.queue?.forEach((qq) => q.append("queue", qq));
+    if (params?.limit) q.set("limit", String(params.limit));
+    return fetchJSON<JobOut[]>(`/jobs${q.toString() ? "?" + q : ""}`);
+  },
 
   // ---- Scheduler Config ----
   getConfig: () => fetchJSON<SchedulerConfig>("/data/config"),

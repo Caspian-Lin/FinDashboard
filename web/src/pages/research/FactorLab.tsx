@@ -66,7 +66,6 @@ import {
   datasetApi,
   type FactorCatalogEntry,
   type FeatureSnapshot,
-  type FeatureSnapshotJobStatus,
   type FactorSignal,
   type FactorExperiment,
   type FactorExperimentCreate,
@@ -77,6 +76,7 @@ import {
   featureSnapshotStatus,
   featureSnapshotSymbolCount,
 } from "@/lib/research";
+import { api, isJobRunning } from "@/lib/api";
 import { cn, formatDateTime, formatNumber } from "@/lib/utils";
 
 function errorMessage(err: unknown, fallback: string): string {
@@ -390,31 +390,23 @@ function GenerateFeatureSnapshotDialog({
     },
     onSuccess: (job) => setJobId(job.job_id),
   });
-  const jobQuery = useQuery<FeatureSnapshotJobStatus>({
-    queryKey: ["feature-snapshot-job", jobId],
-    queryFn: () => factorLabApi.featureSnapshotJob(jobId as string),
+  const jobQuery = useQuery({
+    queryKey: ["job", jobId],
+    queryFn: () => api.getJob(jobId as string),
     enabled: Boolean(jobId),
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      return !status || status === "queued" || status === "running"
-        ? 1000
-        : false;
-    },
+    refetchInterval: (query) => (isJobRunning(query.state.data) ? 1000 : false),
   });
+  // 任务成功后 result_ref 是 snapshot_id(FeatureSnapshot.snapshot_id 字符串)。
   const completedSnapshotId =
-    jobQuery.data?.status === "succeeded"
-      ? jobQuery.data.snapshot_id
+    jobQuery.data && !isJobRunning(jobQuery.data) && jobQuery.data.status === "succeeded"
+      ? jobQuery.data.result_ref
       : null;
   const snapshotQuery = useQuery({
     queryKey: ["feature-snapshot-detail", completedSnapshotId],
     queryFn: () => factorLabApi.featureDetail(completedSnapshotId as string),
     enabled: Boolean(completedSnapshotId),
   });
-  const jobActive =
-    Boolean(jobId) &&
-    (!jobQuery.data ||
-      jobQuery.data.status === "queued" ||
-      jobQuery.data.status === "running");
+  const jobActive = Boolean(jobId) && isJobRunning(jobQuery.data);
   const busy = mutation.isPending || jobActive;
 
   React.useEffect(() => {

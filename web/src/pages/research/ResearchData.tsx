@@ -53,6 +53,7 @@ import {
   type EtfExecutionProfile,
   type LifecycleEvent,
 } from "@/lib/research";
+import { api, isJobRunning } from "@/lib/api";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
 import { cn, formatDateTime, formatNumber, formatPercent } from "@/lib/utils";
 import {
@@ -724,12 +725,49 @@ function ReleasePublisher({
         required_capabilities:
           releaseKind === "multi_asset_mixed" ? MULTI_ASSET_CAPABILITIES : ["stock"],
       }),
-    onSuccess: (created) => {
-      queryClient.invalidateQueries({ queryKey: ["dataset-releases"] });
-      queryClient.invalidateQueries({ queryKey: ["dataset-manifests"] });
-      setNextReleaseNames(releaseKind, [...existingReleases, created]);
+    onSuccess: (job) => {
+      // #144:createRelease 返回 JobOut,前端轮询 /api/jobs/{job_id};
+      // succeeded 后 result_ref = release_id,再查发布详情补全 symbol_count。
+      setPublishJobId(job.job_id);
     },
   });
+
+  const [publishJobId, setPublishJobId] = useState<string | null>(null);
+  const { data: publishJob } = useQuery({
+    queryKey: ["job", publishJobId],
+    queryFn: () => api.getJob(publishJobId as string),
+    enabled: Boolean(publishJobId),
+    refetchInterval: (query) => (isJobRunning(query.state.data) ? 1500 : false),
+  });
+
+  // 任务完成后,刷新发布列表并失效相关缓存,同时推进下一个版本号。
+  const publishedReleaseId =
+    publishJob && !isJobRunning(publishJob) && publishJob.status === "succeeded"
+      ? publishJob.result_ref
+      : null;
+  const publishedReleaseQuery = useQuery({
+    queryKey: ["dataset-releases", "published", publishedReleaseId],
+    queryFn: () => datasetApi.releases({ limit: 50 }),
+    enabled: publishedReleaseId !== null,
+    staleTime: Infinity,
+  });
+  const publishedSummary = publishedReleaseId
+    ? (publishedReleaseQuery.data ?? existingReleases).find(
+        (item) => item.release_id === publishedReleaseId,
+      )
+    : undefined;
+
+  useEffect(() => {
+    if (!publishJob || isJobRunning(publishJob)) return;
+    queryClient.invalidateQueries({ queryKey: ["dataset-releases"] });
+    queryClient.invalidateQueries({ queryKey: ["dataset-manifests"] });
+    if (publishJob.status === "succeeded" && publishedSummary) {
+      setNextReleaseNames(releaseKind, [...existingReleases, publishedSummary]);
+    }
+    // setNextReleaseNames 是组件内闭包,仅依赖已在数组中的 existingReleases 与稳定 setter,
+    // 显式省略以避免每次渲染重建导致的无效重跑。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publishJob, publishedSummary, queryClient, releaseKind, existingReleases]);
 
   const selectedSources = new Set(
     selectedItems
@@ -1142,15 +1180,37 @@ function ReleasePublisher({
           )}
         </div>
 
-        {publish.isSuccess && (
-          <Alert variant="success" aria-live="polite">
-            <AlertTitle>数据发布成功</AlertTitle>
+        {publish.isPending && (
+          <Alert variant="info" aria-live="polite">
+            <AlertTitle>已提交发布任务</AlertTitle>
             <AlertDescription>
-              {publish.data.release_id} 已冻结 {publish.data.symbol_count} 只标的，
-              可在下方列表及后续因子/策略页面中引用。
+              发布任务已进入统一队列,完成后会显示结果。
+              {publishJob?.phase ? `（当前阶段: ${publishJob.phase}）` : ""}
             </AlertDescription>
           </Alert>
         )}
+        {publishJob &&
+          !isJobRunning(publishJob) &&
+          publishJob.status === "succeeded" &&
+          publishedSummary && (
+            <Alert variant="success" aria-live="polite">
+              <AlertTitle>数据发布成功</AlertTitle>
+              <AlertDescription>
+                {publishedSummary.release_id} 已冻结 {publishedSummary.symbol_count} 只标的，
+                可在下方列表及后续因子/策略页面中引用。
+              </AlertDescription>
+            </Alert>
+          )}
+        {publishJob &&
+          !isJobRunning(publishJob) &&
+          publishJob.status !== "succeeded" && (
+            <Alert variant="destructive" aria-live="assertive">
+              <AlertTitle>数据发布失败</AlertTitle>
+              <AlertDescription>
+                {publishJob.error_summary ?? publishJob.status}
+              </AlertDescription>
+            </Alert>
+          )}
         {publish.isError && (
           <Alert variant="destructive" aria-live="assertive">
             <AlertTitle>
@@ -1181,7 +1241,7 @@ function ReleasePublisher({
                   type="button"
                   className="mt-3"
                   onClick={() => publish.mutate()}
-                  disabled={publish.isPending}
+                  disabled={publish.isPending || isJobRunning(publishJob)}
                 >
                   重新校验并发布
                 </Button>
@@ -1205,10 +1265,12 @@ function ReleasePublisher({
           <Button
             type="button"
             onClick={() => publish.mutate()}
-            disabled={!canPublish || publish.isPending}
+            disabled={!canPublish || publish.isPending || isJobRunning(publishJob)}
           >
             <Archive />
-            {publish.isPending ? "正在冻结并校验…" : "冻结并发布"}
+            {publish.isPending || isJobRunning(publishJob)
+              ? "正在冻结并校验…"
+              : "冻结并发布"}
           </Button>
         </div>
       </div>

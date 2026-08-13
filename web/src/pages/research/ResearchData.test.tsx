@@ -23,9 +23,21 @@ const datasetApiMock = vi.hoisted(() => ({
   instrumentDetail: vi.fn(),
 }));
 
+const apiMock = vi.hoisted(() => ({
+  getJob: vi.fn(),
+}));
+
 vi.mock("@/lib/research", () => ({
   datasetApi: datasetApiMock,
 }));
+
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    api: { ...actual.api, getJob: apiMock.getJob },
+  };
+});
 
 vi.mock("@/pages/Data", () => ({
   default: () => <div>行情拉取面板</div>,
@@ -49,7 +61,7 @@ function renderWithProviders(ui: ReactElement) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  datasetApiMock.releases.mockResolvedValue([]);
+  datasetApiMock.releases.mockResolvedValue([publishedSummary]);
   datasetApiMock.manifests.mockResolvedValue([]);
   datasetApiMock.cachedData.mockResolvedValue({
     items: [
@@ -126,25 +138,79 @@ beforeEach(() => {
     dividend_policy: "cash",
   });
   datasetApiMock.createRelease.mockResolvedValue({
-    release_id: "daily-bars-20260731-v1",
-    dataset_name: "a_share_daily_bars",
-    source: "tushare",
-    version: "2026-07-31-v1",
-    schema_version: "v1",
-    start_date: "2024-01-02",
-    end_date: "2024-12-31",
-    period: "1d",
-    adjustment: "qfq",
-    symbol_count: 1,
-    row_count: 242,
-    coverage_pct: 100,
-    capabilities: [],
-    quality_status: "passed",
-    known_limitations: [],
-    published_at: "2026-07-31T00:00:00Z",
-    release_checksum: "a".repeat(64),
+    job_id: "BJ-PUB",
+    kind: "dataset_publish",
+    queue: "data",
+    status: "queued",
+    priority: 0,
+    payload: {},
+    payload_checksum: "x",
+    idempotency_key: "publish:daily-bars-20260731-v1",
+    progress_total: 0,
+    progress_done: 0,
+    phase: null,
+    result_ref: "daily-bars-20260731-v1",
+    error_code: null,
+    error_summary: null,
+    attempt: 0,
+    max_attempts: 3,
+    worker_id: null,
+    heartbeat_at: null,
+    lease_until: null,
+    requested_by: "test",
+    created_at: "2026-07-31T00:00:00+00:00",
+    started_at: null,
+    finished_at: null,
+    updated_at: "2026-07-31T00:00:00+00:00",
+  });
+  // 轮询 /api/jobs/{job_id} 立即返回 succeeded,前端据此查发布详情。
+  apiMock.getJob.mockResolvedValue({
+    job_id: "BJ-PUB",
+    kind: "dataset_publish",
+    queue: "data",
+    status: "succeeded",
+    priority: 0,
+    payload: {},
+    payload_checksum: "x",
+    idempotency_key: "publish:daily-bars-20260731-v1",
+    progress_total: 0,
+    progress_done: 0,
+    phase: null,
+    result_ref: "daily-bars-20260731-v1",
+    error_code: null,
+    error_summary: null,
+    attempt: 0,
+    max_attempts: 3,
+    worker_id: null,
+    heartbeat_at: null,
+    lease_until: null,
+    requested_by: "test",
+    created_at: "2026-07-31T00:00:00+00:00",
+    started_at: "2026-07-31T00:00:01+00:00",
+    finished_at: "2026-07-31T00:00:02+00:00",
+    updated_at: "2026-07-31T00:00:02+00:00",
   });
 });
+
+const publishedSummary = {
+  release_id: "daily-bars-20260731-v1",
+  dataset_name: "a_share_daily_bars",
+  source: "tushare",
+  version: "2026-07-31-v1",
+  schema_version: "v1",
+  start_date: "2024-01-02",
+  end_date: "2024-12-31",
+  period: "1d",
+  adjustment: "qfq",
+  symbol_count: 1,
+  row_count: 242,
+  coverage_pct: 100,
+  capabilities: [],
+  quality_status: "passed",
+  known_limitations: [],
+  published_at: "2026-07-31T00:00:00Z",
+  release_checksum: "a".repeat(64),
+};
 
 describe("ResearchData 数据发布闭环", () => {
   it("从缓存选择范围并创建不可变发布", async () => {
@@ -309,23 +375,30 @@ describe("ResearchData 数据发布闭环", () => {
         new Error("数据质量门未通过: 159001.SZ: ETF 缺少分类元数据"),
       )
       .mockResolvedValueOnce({
-        release_id: "daily-bars-20260731-v1",
-        dataset_name: "multi_asset_daily_bars",
-        source: "akshare",
-        version: "2026-07-31-v1",
-        schema_version: "v1",
-        start_date: "2024-01-02",
-        end_date: "2024-12-31",
-        period: "1d",
-        adjustment: "qfq",
-        symbol_count: 1,
-        row_count: 242,
-        coverage_pct: 100,
-        capabilities: [],
-        quality_status: "passed",
-        known_limitations: [],
-        published_at: "2026-07-31T00:00:00Z",
-        release_checksum: "b".repeat(64),
+        job_id: "BJ-PUB",
+        kind: "dataset_publish",
+        queue: "data",
+        status: "queued",
+        priority: 0,
+        payload: {},
+        payload_checksum: "x",
+        idempotency_key: "publish:daily-bars-20260731-v1",
+        progress_total: 0,
+        progress_done: 0,
+        phase: null,
+        result_ref: "daily-bars-20260731-v1",
+        error_code: null,
+        error_summary: null,
+        attempt: 0,
+        max_attempts: 3,
+        worker_id: null,
+        heartbeat_at: null,
+        lease_until: null,
+        requested_by: "test",
+        created_at: "2026-07-31T00:00:00+00:00",
+        started_at: null,
+        finished_at: null,
+        updated_at: "2026-07-31T00:00:00+00:00",
       });
 
     renderWithProviders(<ResearchData />);
