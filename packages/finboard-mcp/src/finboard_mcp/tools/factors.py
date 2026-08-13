@@ -7,12 +7,17 @@
   job status)—— 调 ``factor_lab_catalog`` /
   :class:`~finboard_persistence.FeatureSnapshotRepository` /
   :class:`~finboard_persistence.FactorSignalRepository` /
-  :class:`~finboard_persistence.FactorExperimentRepository` /
-  :class:`~finboard_backtest.FeatureSnapshotJobManager`;
+  :class:`~finboard_persistence.FactorExperimentRepository`;
 * 写操作(同步构建快照 / 异步快照任务 / 冻结实验 / 同步终态)—— 调
   ``build_price_feature_snapshot`` /
   ``new_factor_experiment`` /
   :class:`~finboard_persistence.FactorExperimentValidationService`。
+
+feature_snapshot 异步任务(issue #136 / #144):``job_start`` 登记一个
+``kind=feature_snapshot`` 任务到统一 ``background_jobs`` 队列(复用
+``finboard_api.job_helpers.enqueue_job``),由独立 worker 消费执行;
+``job_status`` 读持久化 ``background_jobs`` 行返回 ``JobOut``。
+不再使用进程内 :class:`~finboard_backtest.FeatureSnapshotJobManager`(已下线)。
 
 权限:写操作依赖 #122 放开审批门(agent 可自主执行),但尊重
 ``settings.mcp_readonly_only`` / ``app.write_tools_enabled`` 开关;只读工具自动
@@ -282,92 +287,54 @@ async def feature_snapshot_job_start(
     dataset_release_id: str,
     decision_at: datetime,
 ) -> ToolEnvelope:
-    """异步启动特征快照计算任务,返回可轮询的 job 状态。"""
+    """异步登记特征快照计算任务到统一队列,返回可轮询的 JobOut(issue #136)。
+
+    复用 REST ``POST /factors/features/jobs`` 的口径(已迁移到持久化队列,
+    issue #144):同步校验发布可用 + decision_at 范围(早失败),然后 enqueue
+    一个 ``kind=feature_snapshot`` 任务,由独立 worker 消费执行
+    (``FrozenReleaseProvider`` + ``build_price_feature_snapshot`` + 发布)。
+    单并发约束由 worker ``kind_concurrency`` 保证。
+    """
 
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
-        from finboard_backtest.factor_lab import (
-            FactorAnalysisError,
-            build_price_feature_snapshot,
+        from finboard_api.job_helpers import enqueue_job
+        from finboard_persistence.background_job_repo import (
+            BackgroundJobPersistenceConflictError,
         )
-        from finboard_backtest.feature_snapshot_jobs import (
-            FeatureSnapshotJob,
-            FeatureSnapshotJobConflictError,
-        )
-        from finboard_data.releases import (
-            DatasetReleaseError,
-            FrozenReleaseProvider,
-        )
-        from finboard_persistence import FeatureSnapshotRepository
-
-        max_concurrency = _max_concurrency(app)
-        process_workers = _process_workers(app)
-        release_root = _release_root()
-        session_maker = app.session_maker
 
         async with app.session_maker() as session:
             release, normalized_dt = await _validate_snapshot_input(
                 session, dataset_release_id, decision_at
             )
+            await session.rollback()  # 校验只读,释放行锁;executor 会重读
 
-        total_symbols = len(release.instruments)
-        manager = app.feature_snapshot_jobs
-
-        async def _run(job: FeatureSnapshotJob) -> str:
-            try:
-                provider = FrozenReleaseProvider(
-                    release_root=release_root,
-                    release_id=release.release_id,
-                    max_concurrency=max_concurrency,
-                )
-                snapshot = await build_price_feature_snapshot(
-                    provider=provider,
-                    decision_at=normalized_dt,
-                    code_version=_factor_code_version(),
-                    max_concurrency=max_concurrency,
-                    process_workers=process_workers,
-                    on_progress=lambda _code, completed, _total: (
-                        job.update_progress(completed)
-                    ),
-                )
-                async with session_maker() as job_session:
-                    try:
-                        await FeatureSnapshotRepository(
-                            job_session
-                        ).publish(snapshot)
-                        await job_session.commit()
-                    except Exception:
-                        await job_session.rollback()
-                        raise
-                return snapshot.snapshot_id
-            except (
-                DatasetReleaseError,
-                FactorAnalysisError,
-                ValueError,
-            ) as exc:
-                raise RuntimeError(
-                    f"特征快照生成失败: {exc}"
-                ) from exc
-            except OSError as exc:
-                raise RuntimeError(
-                    "特征快照生成失败: 服务端无法读取冻结发布文件,"
-                    "请检查 FINBOARD_DATA_RELEASE_ROOT 目录和文件权限"
-                ) from exc
-            except Exception as exc:
-                raise RuntimeError(
-                    f"特征快照生成失败: {exc}"
-                ) from exc
-
-        try:
-            job = manager.start(
-                total_symbols=total_symbols,
-                runner=_run,
+            payload: dict[str, Any] = {
+                "dataset_release_id": release.release_id,
+                "decision_at": normalized_dt.isoformat(),
+            }
+            idempotency_key = (
+                f"feature_snapshot:{release.release_id}:"
+                f"{normalized_dt.date().isoformat()}"
             )
-        except FeatureSnapshotJobConflictError as exc:
-            raise McpToolError("conflict", str(exc)) from exc
-        except ValueError as exc:
-            raise McpToolError("invalid_argument", str(exc)) from exc
-        return cast(dict[str, Any], to_jsonable(job.as_dict()))
+            try:
+                job = await enqueue_job(
+                    session,
+                    None,
+                    kind="feature_snapshot",
+                    queue="research",
+                    idempotency_key=idempotency_key,
+                    payload=payload,
+                    requested_by="mcp:feature_snapshot",
+                )
+                await session.commit()
+            except BackgroundJobPersistenceConflictError as exc:
+                await session.rollback()
+                raise McpToolError("conflict", str(exc)) from exc
+            return cast(
+                dict[str, Any],
+                to_jsonable(job.model_dump(mode="json")),
+            )
 
     return await run_tool(
         audit=app.audit,
@@ -377,19 +344,39 @@ async def feature_snapshot_job_start(
             "decision_at": decision_at.isoformat(),
         },
         handler=_do,
+        idempotency_key=(
+            f"feature_snapshot:{dataset_release_id}:"
+            f"{decision_at.astimezone(UTC).date().isoformat()}"
+        ),
     )
 
 
 async def feature_snapshot_job_status(
     app: McpAppContext, job_id: str
 ) -> ToolEnvelope:
+    """查询特征快照任务进度(读持久化 background_jobs 表,issue #136)。
+
+    返回 JobOut:status / progress_done / progress_total / phase /
+    result_ref(成功后为 snapshot_id)/ error_code / error_summary。
+    等价于 ``finboard_job_get(job_id)``,保留语义化命名便于 agent 选择。
+    """
+
     async def _do() -> dict[str, Any]:
-        job = app.feature_snapshot_jobs.get(job_id)
-        if job is None:
-            raise McpToolError(
-                "not_found", f"未找到特征快照任务: {job_id}"
+        from finboard_api.job_schemas import JobOut
+        from finboard_persistence.background_job_repo import (
+            BackgroundJobRepository,
+        )
+
+        async with app.session_maker() as session:
+            row = await BackgroundJobRepository(session).get(job_id)
+            if row is None:
+                raise McpToolError(
+                    "not_found", f"未找到特征快照任务: {job_id}"
+                )
+            return cast(
+                dict[str, Any],
+                to_jsonable(JobOut.model_validate(row).model_dump(mode="json")),
             )
-        return cast(dict[str, Any], to_jsonable(job.as_dict()))
 
     return await run_tool(
         audit=app.audit,
@@ -722,12 +709,15 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_feature_snapshot_job_start",
         description=(
-            "[写] 异步启动特征快照计算任务。返回 job_id + 初始进度。"
+            "[写] 异步登记特征快照计算任务到统一队列,立即返回 202 + job_id"
+            "(不等待执行,由独立 worker 消费)。"
             "参数同 finboard_feature_snapshot_create。"
+            "返回 JobOut(job_id/status=queued/progress_*/result_ref/...)。"
             "轮询模式:调用后用 finboard_feature_snapshot_job_status(job_id) "
-            "定期查询,直到 status 为 succeeded(含 snapshot_id)或 failed(含 error)。"
-            "同一时刻只允许一个任务排队/运行,冲突返回 conflict。"
-            "写操作,mcp_readonly_only=true 时拒绝。"
+            "或 finboard_job_get(job_id) 定期查询,直到 status 为 succeeded"
+            "(result_ref=snapshot_id)或 failed(含 error_*)。"
+            "同一时刻只允许一个 feature_snapshot 任务(worker 单并发),"
+            "幂等冲突返回 conflict。写操作,mcp_readonly_only=true 时拒绝。"
         ),
     )
     async def _feature_snapshot_job_start(
@@ -744,11 +734,11 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_feature_snapshot_job_status",
         description=(
-            "查询异步特征快照任务进度。返回 job_id/status(queued|running|"
-            "succeeded|failed)/progress_pct/elapsed_seconds/"
-            "estimated_remaining_seconds/snapshot_id/error。"
-            "status 为 succeeded 时 snapshot_id 为发布的快照 ID。"
-            "未找到返回 not_found。"
+            "查询特征快照任务进度(读持久化 background_jobs 表)。"
+            "返回 JobOut:job_id/status(queued|running|succeeded|failed|...)/"
+            "progress_done/progress_total/phase/result_ref(成功后为 snapshot_id)/"
+            "error_code/error_summary。"
+            "等价于 finboard_job_get(job_id),保留语义化命名。未找到返回 not_found。"
         ),
     )
     async def _feature_snapshot_job_status(

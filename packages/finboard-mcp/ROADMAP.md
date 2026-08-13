@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 82 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128):
+**已实现 86 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -13,11 +13,12 @@
 | `finboard.ai.*` | 4 | ask / propose_hypothesis / propose_strategy_draft / propose_strategy_diff | AI 草案(问答 / 因子假设 / 策略) |
 | `finboard.memory.*` | 7 | remember / list / get / forget / correct / confirm / archive | 研究长期记忆 |
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |
-| 因子实验室 | 12 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(8 只读 + 4 写,✅ #125) |
+| 因子实验室 | 12 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(8 只读 + 4 写,✅ #125;job_start/status 在 #136 迁移到持久化队列) |
 | 策略规格 | 16 | strategy registry/template/list/history/version_get/diff、preset list/get(只读);strategy validate/draft_create/supersede/publish/rollback、preset create/update/delete(写) | 无代码版本化生命周期(8 只读 + 8 写,✅ #126) |
 | 回测 | 5 | backtest_strategy_list、backtest_history_list/get(只读);backtest_run(同步)、backtest_history_delete(写) | 行情回放 + 纸面撮合(3 只读 + 2 写,✅ #127) |
 | 模拟盘 | 18 | sim_account list/get/create、sim_session list/get/create/start/pause/stop/reset、sim_orders/fills/positions/ledger/audit/report(只读);sim_decision_submit、sim_order_cancel(写) | 持久化隔离模拟盘(10 只读 + 8 写,✅ #127) |
 | portfolio | 4 | portfolio_allocate / sizing / feasibility / attribution | 组合计算(纯计算,无 DB 写入,✅ #128) |
+| `finboard.job.*` | 4 | job list/get(只读);job enqueue/cancel(写) | 统一后台任务队列监控与提交(2 只读 + 2 写,✅ #136) |
 
 ## Planned 阶段(#128)
 
@@ -95,6 +96,28 @@ manifest 冻结 + coordinator 模式,不在 HTTP/MCP 请求内执行回测本身
 `AllocationError` / `SizingError` / 协方差失败 / `ValueError` →
 `invalid_argument`;`permission_denied`(只读模式)。`to_jsonable` 对嵌套
 dataclass 列表逐元素序列化(顶层是 list 时 `dataclasses.asdict` 不递归)。
+
+### ✅ #136 任务队列工具(已完成)
+4 个工具(2 只读 + 2 写),把 #117/#142/#143/#144 建立的持久化
+`background_jobs` 队列以受控 MCP 工具暴露:
+- 只读:`finboard_job_list`(list_recent,可选 kind/status/queue 过滤)、
+  `finboard_job_get`(查单个任务详情,含 result_ref 产物引用)
+- 写:`finboard_job_enqueue`(登记 queued 任务,kind 白名单全是研究/数据域)、
+  `finboard_job_cancel`(协作式取消,终态幂等返回当前状态)
+
+复用 `BackgroundJobRepository` + `JobOut` schema + `generate_background_job_id`,
+不裸 SQL。`enqueue` 的 `_ALLOWED_KINDS` 白名单:`echo` / `research_run` /
+`feature_snapshot` / `bulk_download` / `dataset_publish` / `backtest_run` /
+`data_sync` / `fetch_all` / `quality_repair`(全是研究/数据域,不含实盘能力)。
+
+同时把 `feature_snapshot_job_start/status`(#125)从已弃用的进程内
+`FeatureSnapshotJobManager` 迁移到持久化队列(复用 `enqueue_job` +
+`BackgroundJobRepository.get`),与 #144 落地的 REST 口径一致。
+
+边界:任务队列只服务研究/数据/回测类任务;交易内核(盘前检查/收盘撤单/
+日终核对/Broker 心跳/Kill Switch)由专用 `finboard-scheduler` asyncio 调度
+执行,不进入统一队列。回滚:移除 4 个 `finboard_job_*` 工具即可,不影响
+#142/#143/#144 的 worker/任务表/REST 接口。
 
 ## 扩展原则(适用于所有阶段)
 

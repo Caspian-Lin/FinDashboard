@@ -104,6 +104,11 @@ _EXPECTED_TOOLS = {
     "finboard_portfolio_sizing",
     "finboard_portfolio_feasibility",
     "finboard_portfolio_attribution",
+    # #136 任务队列工具(2 只读 + 2 写)
+    "finboard_job_list",
+    "finboard_job_get",
+    "finboard_job_enqueue",
+    "finboard_job_cancel",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。
@@ -119,6 +124,8 @@ _FORBIDDEN_KEYWORDS = (
     "api_key",
 )
 # 对非 sim_ 工具额外检查的实盘交易动词(模拟盘工具豁免)。
+# 注意:``finboard_job_*``(#136)操作 background_jobs 表(研究/数据域任务队列),
+# 其 ``cancel`` 属研究域协作式取消(非实盘撤单),与 ``finboard_run_*`` 同理豁免。
 _LIVE_TRADING_VERBS = ("order", "fill", "cancel", "buy", "sell", "trade", "position")
 
 
@@ -150,7 +157,7 @@ class TestToolExposure:
             # 不得暴露这些动词。
             if lowered.startswith("finboard_sim_") or lowered.startswith(
                 "finboard_run_"
-            ):
+            ) or lowered.startswith("finboard_job_"):
                 continue
             for verb in _LIVE_TRADING_VERBS:
                 assert verb not in lowered, (

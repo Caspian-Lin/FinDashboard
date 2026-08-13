@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 82 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 86 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -21,6 +21,7 @@
 | 模拟盘(sim.*,✅ #127) | ✅(账户/会话/决策/订单/报告) | |
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
+| 后台任务队列(job.*,✅ #136) | ✅(list/get 只读 + enqueue/cancel 写) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
 
 ## finboard.run.*(只读 + ✅ #127 写)
@@ -221,16 +222,21 @@ AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不
 - 返回:`{snapshot_id, ..., observations, checksum}`
 
 ### finboard_feature_snapshot_job_start **[写]**
-异步启动特征快照计算任务。
+异步登记特征快照计算任务到统一 `background_jobs` 队列(issue #136/#144 适配,
+由独立 worker 消费,不再进程内执行)。
 - 参数:同 `feature_snapshot_create`
-- 返回:`{job_id, status, progress_pct, ...}`(初始 status 为 queued/running)
-- 轮询模式:调用后用 `job_status` 查询,直到 succeeded(含 snapshot_id)或 failed(含 error)。
-- 同一时刻只允许一个任务排队/运行,冲突返回 `conflict`。
+- 返回:`JobOut`(`job_id, status=queued, progress_done/total, phase, result_ref, ...`)
+- 轮询模式:调用后用 `feature_snapshot_job_status(job_id)` 或
+  `finboard_job_get(job_id)` 查询,直到 succeeded(`result_ref=snapshot_id`)
+  或 failed(含 `error_*`)。
+- worker 单并发保证同一时刻只一个 feature_snapshot 任务;幂等冲突返回 `conflict`。
 
 ### finboard_feature_snapshot_job_status
-查询异步特征快照任务进度。
+查询特征快照任务进度(读持久化 `background_jobs` 表)。
 - 参数:`job_id: str`
-- 返回:`{job_id, status(queued|running|succeeded|failed), progress_pct, elapsed_seconds, estimated_remaining_seconds, snapshot_id, error}`;未找到返回 `not_found`。
+- 返回:`JobOut`(`status/progress_done/progress_total/phase/result_ref(=snapshot_id)/
+  error_code/error_summary`);未找到返回 `not_found`。
+- 等价于 `finboard_job_get(job_id)`,保留语义化命名。
 
 ### finboard_factor_signal_list
 列出因子信号(版本化、带研究状态)。
@@ -566,4 +572,56 @@ AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不
   max_drawdown, cash_utilization, leverage_ratio}`
 - 错误:`invalid_argument`(weights_history 为空 / 协方差估计失败)、
   `permission_denied`(只读模式)
+
+## finboard.job.*(✅ #136)
+
+统一后台任务队列监控与提交。复用 `BackgroundJobRepository` + `background_jobs`
+表(`BJ-` ID,与实盘 orders/fills/positions 完全隔离)。**任务队列只服务
+研究/数据/回测类任务**;实盘交易内核(盘前检查/收盘撤单/日终核对/Broker 心跳/
+Kill Switch)由专用 Scheduler 执行,不进入统一队列。
+
+`enqueue` 的 kind 白名单:`echo` / `research_run` / `feature_snapshot` /
+`bulk_download` / `dataset_publish` / `backtest_run` / `data_sync` /
+`fetch_all` / `quality_repair`(全是研究/数据域,不含实盘能力)。
+
+写操作尊重 `mcp_readonly_only` 开关。
+
+### finboard_job_list(只读)
+列出后台任务(最近优先)。
+- 参数:`kind?: list[str]`、`status?: list[str]`
+  (queued|running|retry_waiting|succeeded|failed|cancel_requested|cancelled|
+  interrupted)、`queue?: list[str]`、`limit?: int = 100`(1-500)
+- 返回:`list[JobOut]`(`job_id/kind/queue/status/priority/payload/
+  progress_done/progress_total/phase/result_ref/error_*/attempt/max_attempts/
+  worker_id/heartbeat_at/lease_until/requested_by/created_at/started_at/
+  finished_at/updated_at`)
+- 错误:`invalid_argument`(未知 status)
+
+### finboard_job_get(只读)
+查询单个后台任务详情。
+- 参数:`job_id: str`
+- 返回:`JobOut`(成功后 `result_ref` 携带产物引用,如特征快照的 snapshot_id)
+- 错误:`not_found`
+
+### finboard_job_enqueue **[写]**
+登记一个 queued 后台任务并立即返回 202 + job_id(不等待执行,由独立 worker 消费)。
+- 参数:`kind: str`(白名单)、`idempotency_key: str`(8-128 字符)、
+  `requested_by: str`、`queue?: str = "default"`、`payload?: dict`(任务参数,
+  结构取决于 kind)、`priority?: int = 0`(-1000..1000)、`max_attempts?: int = 3`(1..10)
+- 返回:`JobOut + created`(首次提交 true / 幂等命中 false)
+- 错误:`permission_denied`(只读模式)、`invalid_argument`(kind 不在白名单 /
+  schema 校验失败)、`conflict`(幂等冲突 / 重复 idempotency_key)
+- kind payload 契约示例:
+  - `feature_snapshot`:`{dataset_release_id, decision_at}` → `result_ref=snapshot_id`
+  - `research_run`:`{run_id, strategy_kind}` → 与 `finboard_run_queue` 双写
+  - `bulk_download`:`{market, source, start, instrument_type}`
+  - `dataset_publish`:`{release_id, release_kind, symbols, version, start_date, end_date}`
+  - `backtest_run`:`{request, provider_name}` → `result_ref=str(run_id)`
+
+### finboard_job_cancel **[写]**
+请求协作式取消后台任务(running → cancel_requested,executor checkpoint 时退出)。
+- 参数:`job_id: str`
+- 返回:更新后的 `JobOut`
+- 已在终态(succeeded/failed/cancelled/interrupted)的任务返回当前状态不报错。
+- 错误:`permission_denied`(只读模式)、`not_found`
 
