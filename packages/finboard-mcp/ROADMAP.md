@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 107 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139):
+**已实现 114 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -21,6 +21,7 @@
 | `finboard.job.*` | 4 | job list/get(只读);job enqueue/cancel(写) | 统一后台任务队列监控与提交(2 只读 + 2 写,✅ #136) |
 | 数据写操作 | 12 | data_fetch(同步)、fetch_all/sync_universe/bulk_download_start/quality_repair/dataset_release_publish(任务化)、data_config_get/update、etf_sync/batch_confirm/update/review_queue | 数据准备闭环:拉取/批量下载/同步/质量修复/数据集发布/调度配置/ETF 元数据(2 只读 + 10 写,✅ #137) |
 | #57 验证实验 | 6 | validation_experiment create/list/get/reject/add_trial/delete | OOS 样本外验证实验元数据 CRUD(2 只读 + 4 写,✅ #138),给因子实验的 validation_experiment_id 提供源头 |
+| 自选股 | 7 | watchlist list/get(只读);create/update/delete/add_symbols/remove_symbol(写) | 用户标的组管理:保存常用回测标的集合(2 只读 + 5 写,✅ #140) |
 
 ## Planned 阶段(#128)
 
@@ -202,6 +203,28 @@ agent 现在能跑通完整生命周期:创建账户+会话 → start → 投 K 
 回放(如回测数据驱动模拟)不在本批,后续可扩展批量工具或接入 #117 任务化。
 不触及交易安全红线。回滚:移除 `sim_session_archive` / `sim_market_event` /
 `sim_session_evaluate` 三个工具即可,不影响 REST 端点 / 领域服务 / 既有工具。
+
+### ✅ #140 自选股工具(已完成)
+7 个工具(2 只读 + 5 写),把 REST `/api/watchlists`(routes/watchlist.py)的 7 个
+端点暴露为 MCP 工具,agent 可管理「用户标的组」—— 保存常用回测标的集合,
+为回测 / 研究准备标的池(前端 Backtest.tsx 已用 watchlist 作为回测标的
+选择器,#39):
+
+- 只读:`finboard_watchlist_list`(全部标的组 + 成员数)、
+  `finboard_watchlist_get`(详情 + 成员列表 symbols)
+- 写:`finboard_watchlist_create`(name + description?)、`update`(partial:只更新
+  提供的字段,不传保持原值 —— 比 REST PUT 全量语义更安全)、`delete`(DB
+  外键 `ondelete=CASCADE` 级联删除成员)、`add_symbols`(输入按序去重 +
+  已存在跳过,不触发 `(watchlist_id, symbol_code)` 唯一约束冲突)、
+  `remove_symbol`(不存在时为空操作,与 REST 一致)
+
+复用 `WatchlistRepository`(REST 路由直接调用 repository,无独立 service 层,
+MCP 与 REST 同层同行为);404 语义 → `not_found`;`symbol_code` 是普通
+`String(20)` 代码(如 `000001.SZ`),无外键约束指向 instruments。写工具受
+`_require_write_enabled`(`mcp_readonly_only`)守卫。自选股与 strategies /
+simulation 无关联,是独立用户管理查找列表,不触及交易安全红线。回滚:
+移除 `register_watchlist_tools(mcp)` 调用 + `watchlists.py` 即可,不影响
+REST 端点 / 既有工具。
 
 ## 扩展原则(适用于所有阶段)
 
