@@ -21,16 +21,13 @@ import subprocess
 from datetime import UTC, datetime
 from datetime import date as _date
 from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
-from finboard_api.feature_snapshot_jobs import (
-    FeatureSnapshotJob,
-    FeatureSnapshotJobConflictError,
-    FeatureSnapshotJobManager,
-)
+from finboard_api.job_schemas import JobOut
 from finboard_api.schemas import (
     AcceptanceThresholdsSchema,
     ExperimentCreate,
@@ -42,7 +39,6 @@ from finboard_api.schemas import (
     FactorExperimentOut,
     FactorSignalOut,
     FeatureSnapshotCreate,
-    FeatureSnapshotJobStatusOut,
     FeatureSnapshotOut,
     RobustnessPlanSchema,
     TrialCreate,
@@ -79,6 +75,7 @@ from finboard_data.releases import (
     FrozenReleaseProvider,
     ResearchDatasetRelease,
 )
+from finboard_persistence import BackgroundJobPersistenceConflictError
 from finboard_persistence.dataset_release_repo import (
     ResearchDatasetReleaseRepository,
 )
@@ -162,13 +159,6 @@ async def _load_feature_snapshot_input(
         raise HTTPException(status_code=422, detail="decision_at 不能晚于当前时间")
     return release, decision_at
 
-
-def _get_feature_snapshot_job_manager(request: Request) -> FeatureSnapshotJobManager:
-    manager = getattr(request.app.state, "feature_snapshot_jobs", None)
-    if manager is None:
-        manager = FeatureSnapshotJobManager()
-        request.app.state.feature_snapshot_jobs = manager
-    return manager
 
 
 def _to_plan(p: ValidationPlanSchema) -> ValidationPlan:
@@ -441,100 +431,54 @@ async def create_feature_snapshot(
 
 @router.post(
     "/factors/features/jobs",
-    response_model=FeatureSnapshotJobStatusOut,
+    response_model=JobOut,
     status_code=202,
 )
 async def start_feature_snapshot_job(
     body: FeatureSnapshotCreate,
-    request: Request,
+    response: Response,
     session: AsyncSession = Depends(get_db_session),
-) -> FeatureSnapshotJobStatusOut:
-    """异步启动特征快照计算,返回可轮询的研究任务状态。"""
+) -> JobOut:
+    """登记特征快照计算任务,立即返回 202 + job_id(issue #144)。
 
+    实际执行(``FrozenReleaseProvider`` + ``build_price_feature_snapshot`` + 发布)
+    由 worker 消费 ``kind=feature_snapshot`` 任务。单并发约束由 worker
+    ``kind_concurrency={"feature_snapshot": 1}`` 保证(取代旧
+    FeatureSnapshotJobManager 单 job gate)。快照计算完成后
+    ``JobOut.result_ref = snapshot_id``;进度 / 状态 / 取消统一通过
+    ``/api/jobs/{job_id}`` 轮询。
+
+    ``GET /factors/features/jobs/{job_id}`` 已删除——前端统一用 ``/api/jobs/{job_id}``。
+    """
+
+    from finboard_api.job_helpers import enqueue_job
+
+    # 仍同步校验发布可用 + 决策时点范围(早失败,避免入队后才在 worker 端失败)。
     release, decision_at = await _load_feature_snapshot_input(body, session)
-    manager = _get_feature_snapshot_job_manager(request)
-    max_concurrency = _feature_snapshot_max_concurrency(request)
-    process_workers = _feature_snapshot_process_workers(request)
-    release_root = Path(
-        os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT)
+    await session.rollback()  # 校验只读,释放行锁;executor 会重读
+
+    payload: dict[str, Any] = {
+        "dataset_release_id": release.release_id,
+        "decision_at": decision_at.isoformat(),
+    }
+    idempotency_key = (
+        f"feature_snapshot:{release.release_id}:{decision_at.date().isoformat()}"
     )
-
-    async def _run(job: FeatureSnapshotJob) -> str:
-        try:
-            provider = FrozenReleaseProvider(
-                release_root=release_root,
-                release_id=release.release_id,
-                max_concurrency=max_concurrency,
-            )
-            snapshot = await build_price_feature_snapshot(
-                provider=provider,
-                decision_at=decision_at,
-                code_version=_factor_code_version(),
-                max_concurrency=max_concurrency,
-                process_workers=process_workers,
-                on_progress=lambda _code, completed, _total: job.update_progress(
-                    completed
-                ),
-            )
-            session_maker = getattr(request.app.state, "session_maker", None)
-            if session_maker is None:
-                raise RuntimeError("研究任务数据库会话未初始化")
-            async with session_maker() as job_session:
-                try:
-                    await FeatureSnapshotRepository(job_session).publish(snapshot)
-                    await job_session.commit()
-                except Exception:
-                    await job_session.rollback()
-                    raise
-            return snapshot.snapshot_id
-        except (DatasetReleaseError, FactorAnalysisError, ValueError) as exc:
-            raise RuntimeError(f"特征快照生成失败: {exc}") from exc
-        except OSError as exc:
-            logger.exception(
-                "research.feature_snapshot_job_release_read_failed",
-                extra={
-                    "job_id": job.job_id,
-                    "release_id": release.release_id,
-                    "release_root": str(release_root),
-                },
-            )
-            raise RuntimeError(
-                "特征快照生成失败: 服务端无法读取冻结发布文件,"
-                "请检查 FINBOARD_DATA_RELEASE_ROOT 目录和文件权限"
-            ) from exc
-        except Exception as exc:
-            logger.exception(
-                "research.feature_snapshot_job_unexpected_error",
-                extra={"job_id": job.job_id, "release_id": release.release_id},
-            )
-            raise RuntimeError("特征快照生成失败: 服务端内部错误") from exc
-
     try:
-        job = manager.start(
-            total_symbols=len(release.instruments),
-            runner=_run,
+        job = await enqueue_job(
+            session,
+            response,
+            kind="feature_snapshot",
+            queue="research",
+            idempotency_key=idempotency_key,
+            payload=payload,
+            requested_by="api:feature_snapshot",
         )
-    except FeatureSnapshotJobConflictError as exc:
+        await session.commit()
+    except BackgroundJobPersistenceConflictError as exc:
+        await session.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return FeatureSnapshotJobStatusOut.model_validate(job.as_dict())
-
-
-@router.get(
-    "/factors/features/jobs/{job_id}",
-    response_model=FeatureSnapshotJobStatusOut,
-)
-async def get_feature_snapshot_job(
-    job_id: str,
-    request: Request,
-) -> FeatureSnapshotJobStatusOut:
-    """返回特征快照后台任务最新进度。"""
-
-    job = _get_feature_snapshot_job_manager(request).get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="feature snapshot job not found")
-    return FeatureSnapshotJobStatusOut.model_validate(job.as_dict())
+    return job
 
 
 @router.get(

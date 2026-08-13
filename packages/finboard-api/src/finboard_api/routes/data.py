@@ -9,16 +9,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
+from finboard_api.job_schemas import JobOut
 from finboard_api.schemas import (
     BarAnomalyOut,
-    BatchFetchResultOut,
     BulkDownloadRequest,
-    BulkDownloadStatusOut,
     DataFetchRequest,
     DataStatusListOut,
     DataStatusOut,
@@ -30,57 +29,18 @@ from finboard_api.schemas import (
     LLMConfigOut,
     LLMConfigUpdate,
     QualityRepairRequest,
-    QualityRepairResultOut,
     QualityReportOut,
     SchedulerConfigOut,
     SchedulerConfigUpdate,
     SymbolEntrySchema,
     SymbolPoolOut,
     SymbolPoolUpdate,
-    SyncResultOut,
     TushareQuotaOut,
 )
+from finboard_persistence import BackgroundJobPersistenceConflictError
 
 logger = structlog.get_logger(__name__)
 
-_BULK_LOG_LIMIT = 1_000
-
-
-def _append_bulk_download_log(
-    state: dict[str, Any],
-    *,
-    event: str,
-    code: str,
-    reason: str | None = None,
-) -> int:
-    """追加有限长度的批量拉取事件,返回可用于补充原因的序号。"""
-    logs = state.setdefault("logs", [])
-    seq = logs[-1]["seq"] + 1 if logs else 1
-    logs.append(
-        {
-            "seq": seq,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "event": event,
-            "code": code,
-            "reason": reason,
-        }
-    )
-    if len(logs) > _BULK_LOG_LIMIT:
-        del logs[: len(logs) - _BULK_LOG_LIMIT]
-    return seq
-
-
-def _set_bulk_download_log_reason(
-    state: dict[str, Any],
-    *,
-    seq: int,
-    reason: str,
-) -> None:
-    """异步缓存检查完成后,补充对应“正在拉取”事件的未命中原因。"""
-    for entry in reversed(state.get("logs", [])):
-        if entry["seq"] == seq:
-            entry["reason"] = reason
-            return
 
 if TYPE_CHECKING:
     from finboard_app.config import Settings
@@ -184,22 +144,6 @@ def _fallback_provider_name(
     return fallback
 
 
-def _validate_bulk_provider_scope(provider_name: str, instruments: list[Any]) -> None:
-    """批量任务按资产类型隔离, 避免 Tushare 股票接口误吞 ETF。"""
-    if provider_name != "tushare":
-        return
-
-    incompatible = [
-        instrument.code
-        for instrument in instruments
-        if getattr(instrument.market, "value", instrument.market) != "a_share"
-        or getattr(instrument.instrument_type, "value", instrument.instrument_type) != "stock"
-    ]
-    if incompatible:
-        raise ValueError(
-            "Tushare 批量任务仅支持 A 股股票; 请将类型设为“股票”。"
-            "ETF 请另建任务并选择 akshare 或 yfinance, 之后可发布多资产混合来源数据集。"
-        )
 
 
 async def _store_fetched_bars(
@@ -652,184 +596,101 @@ async def check_cache_quality(
     return results
 
 
-@router.post("/quality/repair", response_model=QualityRepairResultOut)
+@router.post("/quality/repair", response_model=JobOut, status_code=202)
 async def repair_cache_quality(
     req: QualityRepairRequest,
+    response: Response,
     request: Request,
-) -> QualityRepairResultOut:
-    """批量使用指定备用源修复存量缓存中的异常 bar。"""
-    from dataclasses import replace
+) -> JobOut:
+    """登记批量缓存异常 bar 修复任务,立即返回 202 + job_id(issue #144)。
 
-    from finboard_data.cache import ParquetCache, make_symbol
-    from finboard_data.quality import BarQualityChecker
-    from finboard_shared.types import BarPeriod
+    实际执行由 worker 消费 ``kind=quality_repair`` 任务(保留 Semaphore(3) 并发);
+    精细的逐标的修复报告在迁移后降级为 ``JobOut`` 进度,不再返回。进度 / 状态 /
+    取消统一通过 ``/api/jobs/{job_id}`` 轮询。
+    """
+    import hashlib
 
-    cache = ParquetCache(_CACHE_DIR)
-    checker = BarQualityChecker()
-    # 强制绕过共享缓存,确保备用源真正重新请求远端数据。
-    provider = _get_provider(
-        req.source,
-        use_cache=False,
-        settings=_request_settings(request),
-    )
-    semaphore = asyncio.Semaphore(3)
+    from finboard_api.job_helpers import enqueue_job
 
-    async def _repair(code: str) -> tuple[QualityReportOut, int, bool]:
-        sym = make_symbol(code)
-        try:
-            bars = await cache.read(sym, BarPeriod.D1, req.adjust)
-            before = checker.check(bars, symbol=code)
-            if not bars:
-                return (
-                    QualityReportOut(
-                        symbol=code,
-                        total_bars=0,
-                        anomaly_count=0,
-                        passed=False,
-                        fallback_used=True,
-                        fallback_source=req.source,
-                        error="缓存为空",
-                    ),
-                    0,
-                    False,
-                )
-
-            corrected_dates: list[str] = []
-            by_date = {bar.timestamp.date(): bar for bar in bars}
-            anomaly_dates = set(before.anomaly_dates)
-            # 重新拉取整个已有日期窗口,这样不仅能修 OHLC 异常,也能补上主源漏掉的日期。
-            async with semaphore:
-                alternatives = await provider.fetch_bars(
-                    sym,
-                    BarPeriod.D1,
-                    min(bar.timestamp.date() for bar in bars),
-                    max(bar.timestamp.date() for bar in bars),
-                    adjust=req.adjust,
-                )
-            for alternative in alternatives:
-                bar_date = alternative.timestamp.date()
-                current = by_date.get(bar_date)
-                if current is not None and bar_date not in anomaly_dates:
-                    continue
-                if checker.check([alternative], symbol=code).passed:
-                    by_date[bar_date] = replace(alternative, source=req.source)
-                    if current is None or bar_date in anomaly_dates:
-                        corrected_dates.append(str(bar_date))
-
-            repaired_bars = sorted(by_date.values(), key=lambda bar: bar.timestamp)
-            if corrected_dates or before.duplicate_count:
-                await cache.write(sym, BarPeriod.D1, req.adjust, repaired_bars)
-            after = checker.check(repaired_bars, symbol=code)
-            passed = bool(repaired_bars) and after.passed
-            return (
-                QualityReportOut(
-                    symbol=code,
-                    total_bars=after.total_bars,
-                    anomaly_count=after.anomaly_count,
-                    duplicate_count=after.duplicate_count,
-                    sources=list(after.sources),
-                    anomalies=[
-                        BarAnomalyOut(
-                            date=str(anomaly.date),
-                            source=anomaly.source,
-                            reasons=list(anomaly.reasons),
-                        )
-                        for anomaly in after.anomalies[:20]
-                    ],
-                    passed=passed,
-                    primary_source=before.sources[0] if before.sources else "",
-                    fallback_used=True,
-                    fallback_source=req.source,
-                    corrected_dates=corrected_dates,
-                    error=None if passed else "备用源未覆盖全部异常或缺失日期",
-                ),
-                len(corrected_dates),
-                passed,
+    payload: dict[str, Any] = {
+        "symbols": list(dict.fromkeys(req.symbols)),
+        "source": req.source,
+        "adjust": req.adjust,
+    }
+    symbols_digest = hashlib.sha256(
+        ",".join(payload["symbols"]).encode("utf-8")
+    ).hexdigest()[:16]
+    idempotency_key = f"quality_repair:{symbols_digest}:{req.source}:{req.adjust}"
+    session_maker = getattr(request.app.state, "session_maker", None)
+    if session_maker is None:
+        raise HTTPException(
+            status_code=503,
+            detail="数据库会话未初始化,无法登记任务",
+        )
+    try:
+        async with session_maker() as session:
+            job = await enqueue_job(
+                session,
+                response,
+                kind="quality_repair",
+                queue="data",
+                idempotency_key=idempotency_key,
+                payload=payload,
+                requested_by="api:quality_repair",
             )
-        except Exception as exc:
-            logger.exception("quality_repair_failed", symbol=code, source=req.source)
-            return (
-                QualityReportOut(
-                    symbol=code,
-                    total_bars=0,
-                    anomaly_count=0,
-                    passed=False,
-                    fallback_used=True,
-                    fallback_source=req.source,
-                    error=str(exc),
-                ),
-                0,
-                False,
-            )
-
-    unique_codes = list(dict.fromkeys(req.symbols))
-    repaired_results = await asyncio.gather(*[_repair(code) for code in unique_codes])
-    reports = [item[0] for item in repaired_results]
-    repaired = sum(1 for _, _, passed in repaired_results if passed)
-    return QualityRepairResultOut(
-        total=len(unique_codes),
-        repaired=repaired,
-        failed=len(unique_codes) - repaired,
-        corrected_bars=sum(item[1] for item in repaired_results),
-        reports=reports,
-    )
+            await session.commit()
+    except BackgroundJobPersistenceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return job
 
 
-@router.post("/fetch-all", response_model=BatchFetchResultOut)
-async def fetch_all_data(request: Request) -> BatchFetchResultOut:
-    """批量更新标的池缓存,不在内存中保留所有历史 Bars。"""
-    from datetime import timedelta
+@router.post("/fetch-all", response_model=JobOut, status_code=202)
+async def fetch_all_data(
+    response: Response,
+    request: Request,
+) -> JobOut:
+    """登记标的池批量缓存更新任务,立即返回 202 + job_id(issue #144)。
 
+    实际执行由 worker 消费 ``kind=fetch_all`` 任务。进度 / 状态 / 取消统一通过
+    ``/api/jobs/{job_id}`` 轮询。
+    """
+    import hashlib
+
+    from finboard_api.job_helpers import enqueue_job
     from finboard_data import load_symbol_pool
-    from finboard_data.cache import ParquetCache, make_symbol
-    from finboard_shared.types import BarPeriod
 
     config = load_symbol_pool(_SYMBOLS_FILE)
-    if not config.symbols:
-        return BatchFetchResultOut(total=0, success=0, failed=0, details=[])
-
-    end = parse_date.today()
-    start = end - timedelta(days=config.fetch_lookback_days)
-    period = (
-        BarPeriod[config.fetch_period]
-        if config.fetch_period in BarPeriod.__members__
-        else BarPeriod(config.fetch_period)
-    )
-    provider = _get_provider(settings=_request_settings(request))
-    sym_objs = [make_symbol(s.code) for s in config.symbols]
-    results = await provider.update_cache_batch(
-        sym_objs,
-        period,
-        start,
-        end,
-        adjust=config.fetch_adjust,
-    )
-
-    details: list[FetchResultOut] = []
-    cache = ParquetCache(_CACHE_DIR)
-    for entry in config.symbols:
-        metadata = await cache.metadata_for(
-            make_symbol(entry.code),
-            period,
-            config.fetch_adjust,
+    lookback = config.fetch_lookback_days if config.symbols else 0
+    pool_digest = hashlib.sha256(
+        ",".join(s.code for s in config.symbols).encode("utf-8")
+    ).hexdigest()[:16]
+    payload: dict[str, Any] = {
+        "lookback_days": lookback,
+        "symbol_pool_file": _SYMBOLS_FILE,
+    }
+    idempotency_key = f"fetch_all:{pool_digest}:{lookback}"
+    # fetch_all 不需要 DB session,但 enqueue_job 需要;用 request 上的 session_maker。
+    session_maker = getattr(request.app.state, "session_maker", None)
+    if session_maker is None:
+        raise HTTPException(
+            status_code=503,
+            detail="数据库会话未初始化,无法登记任务",
         )
-        details.append(
-            FetchResultOut(
-                symbol=entry.code,
-                bar_count=metadata.bar_count if metadata else 0,
-                first_date=(str(metadata.first_date) if metadata and metadata.first_date else None),
-                last_date=str(metadata.last_date) if metadata and metadata.last_date else None,
-                source=metadata.source if metadata else None,
+    try:
+        async with session_maker() as session:
+            job = await enqueue_job(
+                session,
+                response,
+                kind="fetch_all",
+                queue="data",
+                idempotency_key=idempotency_key,
+                payload=payload,
+                requested_by="api:fetch_all",
             )
-        )
-
-    success = sum(results.values())
-    return BatchFetchResultOut(
-        total=len(config.symbols),
-        success=success,
-        failed=len(config.symbols) - success,
-        details=details,
-    )
+            await session.commit()
+    except BackgroundJobPersistenceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return job
 
 
 @router.get("/symbols", response_model=SymbolPoolOut)
@@ -1003,304 +864,82 @@ async def search_instruments(
 
 
 # ------------------------------------------------------------------ Sync (DB)
-def _get_bulk_state(request: Request) -> dict[str, Any]:
-    if not hasattr(request.app.state, "_bulk_download"):
-        request.app.state._bulk_download = {
-            "status": "idle",
-            "done": 0,
-            "total": 0,
-            "success": 0,
-            "failed": 0,
-            "current_symbol": None,
-            "phase": None,
-            "error": None,
-            "cache_hits": 0,
-            "cache_misses": 0,
-            "started_at": None,
-            "active_symbols": [],
-            "logs": [],
-        }
-    return request.app.state._bulk_download  # type: ignore[no-any-return]
 
-
-@router.post("/sync", response_model=SyncResultOut)
+@router.post("/sync", response_model=JobOut, status_code=202)
 async def sync_universe(
+    response: Response,
     session: AsyncSession = Depends(get_db_session),
-) -> SyncResultOut:
-    """从 akshare 发现全市场标的,写入 instruments 表(带生命周期 diff)。"""
+) -> JobOut:
+    """登记全市场标的同步任务,立即返回 202 + job_id(issue #144)。
+
+    实际执行由 worker 消费 ``kind=data_sync`` 任务;上游 akshare 不可用会在 worker
+    端映射为 ``failed(data_source_unavailable)``。进度 / 状态 / 取消统一通过
+    ``/api/jobs/{job_id}`` 轮询。
+    """
     from datetime import date
 
-    from finboard_data.discovery import UniverseDiscovery
-    from finboard_persistence import InstrumentRepository
+    from finboard_api.job_helpers import enqueue_job
 
-    discovery = UniverseDiscovery()
+    payload: dict[str, Any] = {"as_of": date.today().isoformat()}
+    idempotency_key = f"data_sync:{date.today().isoformat()}"
     try:
-        instruments = await discovery.discover_all()
-    except ModuleNotFoundError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="标的池同步依赖 akshare,请执行 uv sync --all-packages 后重启 API",
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"标的池同步失败(上游数据源暂不可用): {exc}",
-        ) from exc
-
-    dicts: list[dict[str, object]] = [
-        {
-            "code": ins.code,
-            "name": ins.name,
-            "market": ins.market.value,
-            "instrument_type": ins.instrument_type.value,
-            "exchange": ins.exchange,
-            "listing_board": ins.listing_board.value,
-        }
-        for ins in instruments
-    ]
-
-    repo = InstrumentRepository(session)
-    result = await repo.sync_with_diff(dicts, as_of=date.today())
-    await session.commit()
-
-    return SyncResultOut(
-        total=result.total,
-        new=result.new,
-        updated=result.updated,
-        renamed=len(result.renamed),
-        pending_delist=len(result.pending_delist),
-        delisted=len(result.delisted),
-        reactivated=len(result.reactivated),
-    )
+        job = await enqueue_job(
+            session,
+            response,
+            kind="data_sync",
+            queue="data",
+            idempotency_key=idempotency_key,
+            payload=payload,
+            requested_by="api:sync",
+        )
+        await session.commit()
+    except BackgroundJobPersistenceConflictError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return job
 
 
-@router.post("/bulk-download", response_model=BulkDownloadStatusOut)
+@router.post("/bulk-download", response_model=JobOut, status_code=202)
 async def start_bulk_download(
     request: Request,
+    response: Response,
     req: BulkDownloadRequest,
     session: AsyncSession = Depends(get_db_session),
-) -> BulkDownloadStatusOut:
-    """启动批量历史数据拉取(后台异步任务)。"""
-    import asyncio
-    from datetime import date as parse_d
-    from datetime import datetime as parse_dt
+) -> JobOut:
+    """登记批量历史数据拉取任务,立即返回 202 + job_id(issue #144)。
 
-    state = _get_bulk_state(request)
-    if state["status"] == "running":
-        raise HTTPException(status_code=409, detail="批量拉取正在运行中")
-    from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
-    from finboard_data.cache import make_symbol
-    from finboard_persistence import InstrumentRepository
-    from finboard_shared.types import BarPeriod
+    实际执行由独立 worker 进程(``finboard worker run``)消费 ``kind=bulk_download``
+    任务。进度 / 状态 / 取消统一通过 ``/api/jobs/{job_id}`` 轮询。
+    """
+    from finboard_api.job_helpers import enqueue_job
 
-    repo = InstrumentRepository(session)
-    instruments, _total = await repo.list_active(
-        market=req.market,
-        instrument_type=req.instrument_type,
-        exchange=req.exchange,
-        listing_boards=req.listing_boards or None,
-        limit=999999,
+    payload: dict[str, Any] = {
+        "market": req.market,
+        "source": req.source or "",
+        "start": req.start,
+        "instrument_type": req.instrument_type,
+        "exchange": req.exchange,
+        "listing_boards": list(req.listing_boards),
+    }
+    idempotency_key = (
+        f"bulk_download:{req.market}:{req.source or 'auto'}:{req.start}:"
+        f"{req.instrument_type or 'all'}"
     )
-    await session.commit()
-
-    if not instruments:
-        raise HTTPException(status_code=400, detail="未找到匹配的标的(请先同步)")
-
     try:
-        settings = _request_settings(request)
-        provider_name = _resolve_provider_name(req.source, settings=settings)
-        _validate_bulk_provider_scope(provider_name, instruments)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if provider_name == "akshare":
-        primary: AkShareProvider | TushareBarProvider | YFinanceProvider = AkShareProvider(
-            max_concurrency=2, request_interval=0.5
+        job = await enqueue_job(
+            session,
+            response,
+            kind="bulk_download",
+            queue="data",
+            idempotency_key=idempotency_key,
+            payload=payload,
+            requested_by="api:bulk_download",
         )
-    elif provider_name == "tushare":
-        primary = TushareBarProvider(
-            token=settings.tushare_token if settings is not None else None,
-            max_concurrency=16,
-            requests_per_minute=(settings.tushare_requests_per_minute if settings else 200),
-            daily_request_limit=(settings.tushare_daily_request_limit if settings else 100_000),
-            usage_file=(
-                settings.tushare_usage_file if settings else "data_cache/tushare_usage.json"
-            ),
-        )
-    else:
-        primary = YFinanceProvider(max_concurrency=3, request_interval=0.3)
-
-    sym_objs = [make_symbol(ins.code) for ins in instruments]
-    start_date = parse_d.fromisoformat(req.start)
-    end_date = parse_d.today()
-
-    state.update(
-        status="running",
-        done=0,
-        total=len(sym_objs),
-        success=0,
-        failed=0,
-        current_symbol=None,
-        phase="starting",
-        error=None,
-        quality_passed=0,
-        quality_failed=0,
-        fallback_used=0,
-        lifecycle_events=0,
-        lifecycle_sync_failed=0,
-        cache_hits=0,
-        cache_misses=0,
-        started_at=parse_dt.now().isoformat(),
-        active_symbols=[],
-        logs=[],
-        quality_reports=[],
-    )
-
-    async def _run_download() -> None:
-        _bg_tasks: set[asyncio.Task[None]] = set()
-        try:
-            from finboard_data.cache import ParquetCache, expected_last_bar_date
-
-            _reason_cache = ParquetCache(_CACHE_DIR)
-            _reason_effective_end = expected_last_bar_date(end_date)
-            active_reasons: dict[str, str] = {}
-
-            def _sync_active() -> None:
-                state["active_symbols"] = [
-                    {"code": c, "reason": r} for c, r in active_reasons.items()
-                ]
-
-            async def _cache_miss_reason(code: str) -> str:
-                sym = make_symbol(code)
-                metadata = await _reason_cache.metadata_for(sym, BarPeriod.D1, "qfq")
-                if metadata is None:
-                    return "无缓存"
-                if metadata.source != provider_name:
-                    return (
-                        f"缓存来源 {metadata.source or '未知'}, 请求源为 {provider_name}"
-                    )
-                if provider_name == "tushare":
-                    ranges = TushareBarProvider._cache_fetch_ranges(
-                        metadata,
-                        start_date,
-                        _reason_effective_end,
-                    )
-                    if ranges:
-                        missing = "、".join(f"{left}~{right}" for left, right in ranges)
-                        return f"缺少日期段 {missing}"
-                    return "缓存覆盖信息需要刷新"
-                if metadata.last_date is None:
-                    return "缓存没有有效日线"
-                return f"缓存仅到 {metadata.last_date}, 需更新至 {_reason_effective_end}"
-
-            async def _fill_cache_reason(code: str, log_seq: int) -> None:
-                try:
-                    reason = await _cache_miss_reason(code)
-                except Exception:
-                    reason = "缓存检查失败, 按未命中处理"
-                _set_bulk_download_log_reason(state, seq=log_seq, reason=reason)
-                if code in active_reasons:
-                    active_reasons[code] = reason
-                    _sync_active()
-
-            def on_progress(code: str, done: int, total: int) -> None:
-                active_reasons.pop(code, None)
-                state["done"] = done
-                state["total"] = total
-                _sync_active()
-
-            cache_hit_symbols: set[str] = set()
-            cache_miss_symbols: set[str] = set()
-
-            def on_status(code: str, phase: str) -> None:
-                state["current_symbol"] = code
-                state["phase"] = phase
-                if phase == "cache_hit":
-                    cache_hit_symbols.add(code)
-                    active_reasons.pop(code, None)
-                    _append_bulk_download_log(
-                        state,
-                        event="cache_hit",
-                        code=code,
-                        reason="请求日期范围已覆盖",
-                    )
-                elif phase == "fetching":
-                    cache_miss_symbols.add(code)
-                    active_reasons[code] = ""
-                    log_seq = _append_bulk_download_log(
-                        state,
-                        event="fetching",
-                        code=code,
-                    )
-                    _t = asyncio.create_task(_fill_cache_reason(code, log_seq))
-                    _bg_tasks.add(_t)
-                    _t.add_done_callback(_bg_tasks.discard)
-                elif phase == "completed":
-                    active_reasons.pop(code, None)
-                    if code not in cache_hit_symbols:
-                        _append_bulk_download_log(
-                            state,
-                            event="completed",
-                            code=code,
-                        )
-                elif phase == "failed":
-                    active_reasons.pop(code, None)
-                    _append_bulk_download_log(
-                        state,
-                        event="failed",
-                        code=code,
-                        reason="行情更新失败, 可重新运行以重试",
-                    )
-                state["cache_hits"] = len(cache_hit_symbols)
-                state["cache_misses"] = len(cache_miss_symbols)
-                _sync_active()
-
-            results = await primary.update_cache_batch(
-                sym_objs,
-                BarPeriod.D1,
-                start_date,
-                end_date,
-                on_progress=on_progress,
-                on_status=on_status,
-            )
-            state["success"] = sum(results.values())
-            state["failed"] = len(sym_objs) - state["success"]
-
-            # 批量日线任务只负责缓存更新。停复牌事件和质量检查是独立数据产品,
-            # 不应在日线进度达到 100% 后继续串行占用数千次请求并阻塞终态。
-            # 质量检查仍可通过 /api/data/quality 显式触发;生命周期同步将由
-            # 独立任务按日期增量维护。
-            state["status"] = "done"
-            state["current_symbol"] = None
-            state["phase"] = None
-            state["active_symbols"] = []
-            return
-        except asyncio.CancelledError:
-            state.update(
-                status="cancelled",
-                current_symbol=None,
-                phase=None,
-                active_symbols=[],
-            )
-            raise
-        except Exception as exc:
-            state["status"] = "error"
-            state["phase"] = None
-            state["error"] = str(exc)
-        finally:
-            for background_task in _bg_tasks:
-                background_task.cancel()
-            if _bg_tasks:
-                await asyncio.gather(*_bg_tasks, return_exceptions=True)
-
-    request.app.state._bulk_task = asyncio.create_task(_run_download())
-    return BulkDownloadStatusOut(**state)
-
-
-@router.get("/bulk-download/status", response_model=BulkDownloadStatusOut)
-async def get_bulk_download_status(request: Request) -> BulkDownloadStatusOut:
-    """查询批量拉取进度。"""
-    state = _get_bulk_state(request)
-    return BulkDownloadStatusOut(**state)
+        await session.commit()
+    except BackgroundJobPersistenceConflictError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return job
 
 
 # ------------------------------------------------------------------ Scheduler Config

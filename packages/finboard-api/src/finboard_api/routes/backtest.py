@@ -2,26 +2,26 @@
 
 from __future__ import annotations
 
-from datetime import date as parse_date
-from typing import cast
+import json
+from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
+from finboard_api.job_schemas import JobOut
 from finboard_api.schemas import (
     BacktestFillOut,
     BacktestHistoryDetailOut,
     BacktestHistoryItemOut,
-    BacktestMetricsOut,
-    BacktestResultOut,
     BacktestRunRequest,
     EquityPointOut,
     FactorSnapshotOut,
     StrategyInfoOut,
 )
-from finboard_api.strategy_validation import strategy_info, validate_strategy_params_for_api
+from finboard_api.strategy_validation import strategy_info
 from finboard_app.selection_schema import FactorSelectionParams
+from finboard_persistence import BackgroundJobPersistenceConflictError
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -34,37 +34,23 @@ async def list_strategies() -> list[StrategyInfoOut]:
     return [strategy_info(definition) for definition in list_strategy_definitions()]
 
 
-@router.post("/run", response_model=BacktestResultOut)
+@router.post("/run", response_model=JobOut, status_code=202)
 async def run_backtest(
     req: BacktestRunRequest,
+    response: Response,
     request: Request,
     session: AsyncSession = Depends(get_db_session),
-) -> BacktestResultOut:
-    """运行回测,返回完整绩效报告。
+) -> JobOut:
+    """登记回测任务,立即返回 202 + job_id(issue #144)。
 
-    注意:回测在请求线程中同步执行(BacktestEngine 是 async,不阻塞事件循环)。
-    数据量大时可能需要数秒到数十秒。
+    实际执行(策略构造 + BacktestEngine.run + 完整结果落库)由 worker 消费
+    kind=backtest_run 任务。回测完成后 JobOut.result_ref = str(run_id);
+    前端轮询 /api/jobs/{job_id} 拿到 run_id 后查 /api/backtest/history/{run_id}。
     """
-    from finboard_app.strategies import create_strategy
-    from finboard_backtest import (
-        BacktestConfig,
-        BacktestEngine,
-        PointInTimeFactorSelector,
-    )
-    from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
-    from finboard_persistence import (
-        FactorSnapshotRepository,
-        ResearchDatasetRepository,
-    )
-
-    params = validate_strategy_params_for_api(
-        req.strategy,
-        req.params,
-        require_backtest=True,
-    )
-    strategy = create_strategy(req.strategy, "backtest", **params)
-
+    import hashlib
     import os
+
+    from finboard_api.job_helpers import enqueue_job
 
     settings = getattr(request.app.state, "settings", None)
     provider_name = (
@@ -72,165 +58,31 @@ async def run_backtest(
         if settings is not None
         else os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     )
-    if provider_name == "akshare":
-        provider: AkShareProvider | TushareBarProvider | YFinanceProvider = AkShareProvider()
-    elif provider_name == "tushare":
-        provider = TushareBarProvider(
-            token=settings.tushare_token if settings is not None else None,
-            requests_per_minute=(
-                settings.tushare_requests_per_minute if settings is not None else 200
-            ),
-            daily_request_limit=(
-                settings.tushare_daily_request_limit if settings is not None else 100_000
-            ),
-            usage_file=(
-                settings.tushare_usage_file
-                if settings is not None
-                else "data_cache/tushare_usage.json"
-            ),
-        )
-    else:
-        provider = YFinanceProvider()
-    config = BacktestConfig(
-        symbols=req.symbols,
-        start=parse_date.fromisoformat(req.start),
-        end=parse_date.fromisoformat(req.end),
-        initial_capital=req.capital,
-        adjust=req.adjust,
-        strategy_params=params,
-        commission_rate=req.commission_rate,
-        commission_min=req.commission_min,
-        stamp_tax_rate=req.stamp_tax_rate,
-        slippage_bps=req.slippage_bps,
-        selection=req.selection.to_domain(),
-    )
-    factor_selector = (
-        PointInTimeFactorSelector(
-            reader=ResearchDatasetRepository(session),
-            writer=FactorSnapshotRepository(session),
-        )
-        if req.selection.enabled
-        else None
-    )
-    engine = BacktestEngine(
-        strategy=strategy,
-        data_provider=provider,
-        config=config,
-        factor_selector=factor_selector,
-    )
+    request_dict = req.model_dump(mode="json")
+    payload: dict[str, Any] = {
+        "request": request_dict,
+        "provider_name": provider_name,
+    }
+    params_digest = hashlib.sha256(
+        json.dumps(request_dict, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:24]
+    idempotency_key = f"backtest:{req.strategy}:{params_digest}"
     try:
-        result = await engine.run()
-    except Exception as exc:
-        import logging
-
-        logging.getLogger(__name__).exception("backtest.run_failed")
-        raise HTTPException(
-            status_code=502,
-            detail=f"回测执行失败(通常是数据源连接错误): {exc}",
-        ) from exc
-
-    equity_curve = [
-        EquityPointOut(
-            date=str(d),
-            equity=float(e),
+        job = await enqueue_job(
+            session,
+            response,
+            kind="backtest_run",
+            queue="data",
+            idempotency_key=idempotency_key,
+            payload=payload,
+            requested_by="api:backtest_run",
         )
-        for d, e in result.equity_curve
-    ]
+        await session.commit()
+    except BackgroundJobPersistenceConflictError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return job
 
-    # 补充 benchmark
-    if result.benchmark_curve:
-        bench_map = {str(d): float(b) for d, b in result.benchmark_curve}
-        for point in equity_curve:
-            point.benchmark = bench_map.get(point.date)
-
-    fills = [
-        BacktestFillOut(
-            date=str(f.filled_at.date()) if f.filled_at else "",
-            symbol=f.symbol.code,
-            side=f.side,
-            quantity=f.quantity,
-            price=f.price,
-            commission=f.commission,
-        )
-        for f in result.fills
-    ]
-
-    metrics = BacktestMetricsOut(
-        total_return=result.total_return,
-        annualized_return=result.annualized_return,
-        sharpe_ratio=result.sharpe_ratio,
-        max_drawdown=result.max_drawdown,
-        win_rate=result.win_rate,
-        trade_count=result.trade_count,
-        turnover=result.turnover,
-        commission_paid=result.commission_paid,
-        stamp_tax_paid=result.stamp_tax_paid,
-        benchmark_return=result.benchmark_return,
-        excess_return=result.excess_return,
-        initial_capital=result.initial_capital,
-        final_equity=result.final_equity,
-    )
-    selection_snapshots = [
-        FactorSnapshotOut(
-            id=snapshot.snapshot_id,
-            decision_at=snapshot.decision_at,
-            business_date=str(snapshot.business_date),
-            effective_date=str(snapshot.effective_date),
-            selected_symbols=list(snapshot.selected_symbols),
-            status=snapshot.status.value,
-            skip_reason=snapshot.skip_reason,
-            dataset_versions=snapshot.dataset_versions,
-            factor_version=snapshot.factor_version,
-            checksum=snapshot.checksum,
-        )
-        for snapshot in result.selection_snapshots
-    ]
-
-    # 落库 —— 保存参数 + 完整结果,供历史切换查看
-    import json
-
-    from finboard_persistence import BacktestRunModel, BacktestRunRepository
-
-    run_row = BacktestRunModel(
-        strategy=req.strategy,
-        symbols=req.symbols,
-        start=req.start,
-        end=req.end,
-        capital=req.capital,
-        adjust=req.adjust,
-        params=params,
-        selection=req.selection.model_dump(mode="json"),
-        metrics=json.loads(metrics.model_dump_json()),
-        equity_curve=[p.model_dump(mode="json") for p in equity_curve],
-        fills=[f.model_dump(mode="json") for f in fills],
-        summary=result.summary(),
-        dataset_versions=result.dataset_versions,
-        factor_version=result.factor_version,
-        selection_snapshots=[snapshot.model_dump(mode="json") for snapshot in selection_snapshots],
-        matching_model=result.matching_model,
-        asset_rules=result.asset_rules,
-        fee_assumptions=result.fee_assumptions,
-        benchmark_config=result.benchmark_config,
-    )
-    repo = BacktestRunRepository(session)
-    await repo.save(run_row)
-    await session.commit()
-    run_id = run_row.id
-
-    return BacktestResultOut(
-        metrics=metrics,
-        equity_curve=equity_curve,
-        fills=fills,
-        summary=result.summary(),
-        run_id=run_id,
-        selection_snapshots=selection_snapshots,
-        dataset_versions=result.dataset_versions,
-        factor_version=result.factor_version,
-        matching_model=result.matching_model,
-        asset_rules=result.asset_rules,
-        fee_assumptions=result.fee_assumptions,
-        benchmark_config=result.benchmark_config,
-    )
 
 
 # --------------------------------------------------------------------------- History

@@ -6,10 +6,9 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, date, datetime
-from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -69,74 +68,44 @@ class TestDataRoutes:
         assert out.thinking_enabled is True
         assert out.reasoning_effort == "max"
 
-    def test_bulk_download_log_records_and_updates_cache_miss_reason(self) -> None:
-        """拉取日志可异步补充未命中原因,并保持稳定事件序号。"""
-        from finboard_api.routes.data import (
-            _append_bulk_download_log,
-            _set_bulk_download_log_reason,
+    def test_tushare_bulk_scope_rejects_etf(self) -> None:
+        """Tushare 股票批量任务不能静默包含 ETF(scope 校验迁移到 executor, #144)。"""
+        from types import SimpleNamespace
+
+        from finboard_backtest.background_jobs.contracts import ExecutorError
+        from finboard_backtest.background_jobs.executors.bulk_download import (
+            _validate_tushare_scope,
         )
 
-        state: dict[str, object] = {"logs": []}
-        seq = _append_bulk_download_log(
-            state,
-            event="fetching",
-            code="000001.SZ",
+        instruments = [
+            SimpleNamespace(
+                code="510300.SH",
+                market="a_share",
+                instrument_type="etf",
+            )
+        ]
+
+        with pytest.raises(ExecutorError) as exc_info:
+            _validate_tushare_scope("tushare", instruments)
+        assert "仅支持 A 股股票" in exc_info.value.summary
+
+    def test_tushare_bulk_scope_accepts_a_share_stock(self) -> None:
+        """Tushare 股票批量任务接受纯 A 股股票集合(scope 校验迁移到 executor, #144)。"""
+        from types import SimpleNamespace
+
+        from finboard_backtest.background_jobs.executors.bulk_download import (
+            _validate_tushare_scope,
         )
-        _set_bulk_download_log_reason(
-            state,
-            seq=seq,
-            reason="缺少日期段 2026-08-01~2026-08-03",
-        )
-        _append_bulk_download_log(
-            state,
-            event="completed",
-            code="000001.SZ",
-        )
 
-        logs = state["logs"]
-        assert isinstance(logs, list)
-        assert logs[0]["seq"] == 1
-        assert logs[0]["reason"] == "缺少日期段 2026-08-01~2026-08-03"
-        assert logs[1]["seq"] == 2
-        assert logs[1]["event"] == "completed"
+        instruments = [
+            SimpleNamespace(
+                code="000001.SZ",
+                market="a_share",
+                instrument_type="stock",
+            )
+        ]
 
-    @pytest.mark.asyncio
-    async def test_app_shutdown_cancels_bulk_download_task(self) -> None:
-        """关闭后端必须取消批量任务,重启后由缓存重新规划。"""
-        from finboard_api.app import _cancel_bulk_download_task
-
-        test_app = FastAPI()
-        started = asyncio.Event()
-        finalized = asyncio.Event()
-
-        async def _download() -> None:
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                finalized.set()
-
-        task = asyncio.create_task(_download())
-        await started.wait()
-        test_app.state._bulk_task = task
-        test_app.state._bulk_download = {
-            "status": "running",
-            "current_symbol": "000001.SZ",
-            "phase": "fetching",
-            "active_symbols": [{"code": "000001.SZ", "reason": "无缓存"}],
-        }
-
-        await _cancel_bulk_download_task(test_app)
-
-        assert task.cancelled()
-        assert finalized.is_set()
-        assert test_app.state._bulk_task is None
-        assert test_app.state._bulk_download == {
-            "status": "cancelled",
-            "current_symbol": None,
-            "phase": None,
-            "active_symbols": [],
-        }
+        _validate_tushare_scope("tushare", instruments)
 
     @pytest.mark.asyncio
     async def test_tushare_lifecycle_events_use_idempotent_insert(self) -> None:
@@ -168,39 +137,6 @@ class TestDataRoutes:
         compiled = str(statement.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
         assert "ON CONFLICT ON CONSTRAINT uq_instrument_lifecycle_event DO NOTHING" in compiled
         mock_session.execute.assert_awaited_once()
-
-    def test_tushare_bulk_scope_rejects_etf(self) -> None:
-        """Tushare 股票批量任务不能静默包含 ETF。"""
-        from types import SimpleNamespace
-
-        from finboard_api.routes.data import _validate_bulk_provider_scope
-
-        instruments = [
-            SimpleNamespace(
-                code="510300.SH",
-                market="a_share",
-                instrument_type="etf",
-            )
-        ]
-
-        with pytest.raises(ValueError, match="仅支持 A 股股票"):
-            _validate_bulk_provider_scope("tushare", instruments)
-
-    def test_tushare_bulk_scope_accepts_a_share_stock(self) -> None:
-        """Tushare 股票批量任务接受纯 A 股股票集合。"""
-        from types import SimpleNamespace
-
-        from finboard_api.routes.data import _validate_bulk_provider_scope
-
-        instruments = [
-            SimpleNamespace(
-                code="000001.SZ",
-                market="a_share",
-                instrument_type="stock",
-            )
-        ]
-
-        _validate_bulk_provider_scope("tushare", instruments)
 
     @pytest.mark.asyncio
     async def test_instrument_summary_groups_status_market_and_type(self) -> None:
@@ -320,113 +256,165 @@ class TestDataRoutes:
         assert filtered.status_code == 200
         assert [item["symbol"] for item in filtered.json()["items"]] == ["600519.SH"]
 
-    def test_sync_universe_reports_missing_akshare_as_service_unavailable(
+    def test_sync_enqueues_data_sync_job(
         self,
         client: TestClient,
         app: FastAPI,
     ) -> None:
-        """安装损坏时返回可操作错误,不能泄漏为 ASGI 500。"""
+        """sync 端点迁移到统一队列:返回 202 + job_id(#144)。"""
+        from datetime import date as _d
+
         from finboard_api.deps import get_db_session
 
         app.dependency_overrides[get_db_session] = lambda: AsyncMock()
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTSYNC1",
+            kind="data_sync",
+            queue="data",
+            status="queued",
+            priority=0,
+            payload={"as_of": _d(2026, 8, 13).isoformat()},
+            payload_checksum="x" * 64,
+            idempotency_key="data_sync:2026-08-13",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:sync",
+            created_at=datetime(2026, 8, 13, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 8, 13, tzinfo=UTC),
+        )
         with patch(
-            "finboard_data.discovery.UniverseDiscovery.discover_all",
-            new=AsyncMock(side_effect=ModuleNotFoundError("akshare")),
+            "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+            new=AsyncMock(return_value=(fake_row, True)),
         ):
             resp = client.post("/api/data/sync")
-        app.dependency_overrides.clear()
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["job_id"] == "BJ-TESTSYNC1"
+        assert body["kind"] == "data_sync"
 
-        assert resp.status_code == 503
-        assert "uv sync --all-packages" in resp.json()["detail"]
-
-    def test_fetch_all_updates_cache_without_materializing_bars(
-        self, client: TestClient
+    def test_fetch_all_enqueues_fetch_all_job(
+        self, client: TestClient, app: FastAPI
     ) -> None:
-        """旧 fetch-all 入口也必须走仅返回 bool 的缓存更新路径。"""
+        """fetch-all 端点迁移到统一队列:返回 202 + job_id(#144)。"""
         from finboard_data import SymbolEntry, SymbolPoolConfig
-        from finboard_data.cache import CacheMetadata
 
         config = SymbolPoolConfig(symbols=[SymbolEntry(code="510300.SH")])
-        provider = AsyncMock()
-        provider.update_cache_batch.return_value = {"510300.SH": True}
-        metadata = CacheMetadata(
-            bar_count=2,
-            first_date=date(2024, 1, 2),
-            last_date=date(2024, 1, 3),
-            file_size=1024,
-        )
 
+        class _FakeSession:
+            async def __aenter__(self) -> _FakeSession:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                pass
+
+            async def commit(self) -> None:
+                pass
+
+        app.state.session_maker = lambda: _FakeSession()
+
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTFETCH1",
+            kind="fetch_all",
+            queue="data",
+            status="queued",
+            priority=0,
+            payload={},
+            payload_checksum="x" * 64,
+            idempotency_key="fetch_all:abc:5",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:fetch_all",
+            created_at=datetime(2026, 8, 13, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 8, 13, tzinfo=UTC),
+        )
         with (
             patch("finboard_data.load_symbol_pool", return_value=config),
-            patch("finboard_api.routes.data._get_provider", return_value=provider),
             patch(
-                "finboard_data.cache.ParquetCache.metadata_for",
-                new=AsyncMock(return_value=metadata),
+                "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+                new=AsyncMock(return_value=(fake_row, True)),
             ),
         ):
             resp = client.post("/api/data/fetch-all")
 
-        assert resp.status_code == 200
-        assert resp.json()["success"] == 1
-        assert resp.json()["details"][0]["bar_count"] == 2
-        provider.update_cache_batch.assert_awaited_once()
-        provider.fetch_bars_batch.assert_not_awaited()
+        assert resp.status_code == 202
+        assert resp.json()["kind"] == "fetch_all"
 
-    def test_quality_repair_batches_anomalous_symbols_with_uncached_source(
-        self, client: TestClient
+    def test_quality_repair_enqueues_quality_repair_job(
+        self, client: TestClient, app: FastAPI
     ) -> None:
-        """批量换源必须绕过共享缓存,并只替换通过校验的异常日期。"""
-        from finboard_shared.models import Bar, Symbol
-        from finboard_shared.types import BarPeriod, Market
+        """quality/repair 端点迁移到统一队列:返回 202 + job_id(#144)。"""
 
-        symbol = Symbol(code="510600.SH", market=Market.A_SHARE)
-        bad = Bar(
-            symbol=symbol,
-            period=BarPeriod.D1,
-            timestamp=datetime(2019, 1, 7, tzinfo=UTC),
-            open=Decimal("2.269"),
-            high=Decimal("2.310"),
-            low=Decimal("2.297"),
-            close=Decimal("2.307"),
-            volume=Decimal("227972"),
-            source="yfinance",
-        )
-        repaired = Bar(
-            symbol=symbol,
-            period=BarPeriod.D1,
-            timestamp=bad.timestamp,
-            open=Decimal("2.308"),
-            high=Decimal("2.315"),
-            low=Decimal("2.297"),
-            close=Decimal("2.307"),
-            volume=Decimal("227972"),
-            source="akshare",
-        )
-        provider = AsyncMock()
-        provider.fetch_bars.return_value = [repaired]
-        cache_read = AsyncMock(return_value=[bad])
-        cache_write = AsyncMock()
+        class _FakeSession:
+            async def __aenter__(self) -> _FakeSession:
+                return self
 
-        with (
-            patch("finboard_api.routes.data._get_provider", return_value=provider) as factory,
-            patch("finboard_data.cache.ParquetCache.read", new=cache_read),
-            patch("finboard_data.cache.ParquetCache.write", new=cache_write),
+            async def __aexit__(self, *args: object) -> None:
+                pass
+
+            async def commit(self) -> None:
+                pass
+
+        app.state.session_maker = lambda: _FakeSession()
+
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTREPAIR1",
+            kind="quality_repair",
+            queue="data",
+            status="queued",
+            priority=0,
+            payload={},
+            payload_checksum="x" * 64,
+            idempotency_key="quality_repair:abc:akshare:qfq",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:quality_repair",
+            created_at=datetime(2026, 8, 13, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 8, 13, tzinfo=UTC),
+        )
+        with patch(
+            "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+            new=AsyncMock(return_value=(fake_row, True)),
         ):
             resp = client.post(
                 "/api/data/quality/repair",
                 json={"symbols": ["510600.SH"], "source": "akshare"},
             )
 
-        assert resp.status_code == 200
-        payload = resp.json()
-        assert payload["repaired"] == 1
-        assert payload["corrected_bars"] == 1
-        assert payload["reports"][0]["corrected_dates"] == ["2019-01-07"]
-        factory.assert_called_once_with("akshare", use_cache=False, settings=None)
-        assert cache_write.await_args is not None
-        written = cache_write.await_args.args[3]
-        assert written[0].open == Decimal("2.308")
-        assert written[0].source == "akshare"
+        assert resp.status_code == 202
+        assert resp.json()["kind"] == "quality_repair"
 
     def test_get_symbol_pool_empty(self, client: TestClient) -> None:
         """标的池不存在时返回默认配置。"""
@@ -499,90 +487,56 @@ class TestBacktestRoutes:
         periodic = next(s for s in strategies if s["kind"] == "periodic_query")
         assert periodic["supports_backtest"] is False
 
-    @pytest.mark.parametrize(
-        ("strategy", "params", "expected_type"),
-        [
-            (
-                "ma_cross",
-                {"short_window": 20, "long_window": 5},
-                "value_error",
-            ),
-            (
-                "ma_cross",
-                {"short_window": 5, "long_window": 20, "unknown": True},
-                "extra_forbidden",
-            ),
-            ("periodic_query", {}, "value_error.unsupported_backtest"),
-        ],
-    )
-    def test_run_backtest_rejects_invalid_strategy_params(
+    def test_run_backtest_rejects_missing_required_fields(
         self,
         client: TestClient,
         app: FastAPI,
-        strategy: str,
-        params: dict[str, object],
-        expected_type: str,
     ) -> None:
+        """请求体层面 Pydantic 校验(缺 strategy 等),策略语义校验已迁移到 executor(#144)。"""
         from finboard_api.deps import get_db_session
 
         app.dependency_overrides[get_db_session] = lambda: AsyncMock()
-        resp = client.post(
-            "/api/backtest/run",
-            json={
-                "strategy": strategy,
-                "symbols": ["510300.SH"],
-                "start": "2024-01-01",
-                "end": "2024-06-01",
-                "params": params,
-            },
-        )
+        resp = client.post("/api/backtest/run", json={})
         app.dependency_overrides.clear()
-
         assert resp.status_code == 422
         detail = resp.json()["detail"]
-        assert any(expected_type in item["type"] for item in detail)
+        assert any("strategy" in item.get("loc", []) for item in detail)
 
-    def test_run_backtest_with_mock(self, client: TestClient, app: FastAPI) -> None:
-        """使用 mock BacktestEngine 验证响应结构。"""
+    def test_run_backtest_enqueues_job(self, client: TestClient, app: FastAPI) -> None:
+        """backtest/run 端点迁移到统一队列:返回 202 + job_id(#144)。"""
         from finboard_api.deps import get_db_session
-        from finboard_backtest.result import BacktestResult
 
-        mock_result = BacktestResult(
-            equity_curve=[(date(2024, 1, 1), Decimal("100000"))],
-            benchmark_curve=[(date(2024, 1, 1), Decimal("100000"))],
-            total_return=0.05,
-            annualized_return=0.12,
-            sharpe_ratio=1.5,
-            max_drawdown=0.03,
-            win_rate=0.6,
-            trade_count=5,
-            turnover=1.2,
-            commission_paid=Decimal("15"),
-            stamp_tax_paid=Decimal("10"),
-            benchmark_return=0.03,
-            excess_return=0.02,
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 6, 1),
-            initial_capital=Decimal("100000"),
-            final_equity=Decimal("105000"),
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTBT1",
+            kind="backtest_run",
+            queue="data",
+            status="queued",
+            priority=0,
+            payload={},
+            payload_checksum="x" * 64,
+            idempotency_key="backtest:ma_cross:abc",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:backtest_run",
+            created_at=datetime(2026, 8, 13, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 8, 13, tzinfo=UTC),
         )
-
-        mock_engine = AsyncMock()
-        mock_engine.run.return_value = mock_result
-
-        # mock DB session —— 回测运行后落库,单元测试不依赖真实 PG
-        from unittest.mock import MagicMock
-
         mock_session = AsyncMock()
-        mock_session.add = MagicMock()  # add 是同步方法
-        mock_session.flush = AsyncMock()
-        mock_session.commit = AsyncMock()
         app.dependency_overrides[get_db_session] = lambda: mock_session
-
-        with (
-            patch("finboard_backtest.BacktestEngine", return_value=mock_engine),
-            patch("finboard_app.strategies.create_strategy"),
-            patch("finboard_data.AkShareProvider"),
+        with patch(
+            "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+            new=AsyncMock(return_value=(fake_row, True)),
         ):
             resp = client.post(
                 "/api/backtest/run",
@@ -596,15 +550,8 @@ class TestBacktestRoutes:
                 },
             )
 
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["metrics"]["total_return"] == 0.05
-        assert data["metrics"]["sharpe_ratio"] == 1.5
-        assert len(data["equity_curve"]) == 1
-        assert data["equity_curve"][0]["equity"] == 100000.0
-        assert data["equity_curve"][0]["benchmark"] == 100000.0
-        assert "回测报告" in data["summary"]
-        # 落库被调用
-        mock_session.add.assert_called_once()
-        mock_session.commit.assert_awaited_once()
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["kind"] == "backtest_run"
+        assert body["job_id"] == "BJ-TESTBT1"
         app.dependency_overrides.clear()

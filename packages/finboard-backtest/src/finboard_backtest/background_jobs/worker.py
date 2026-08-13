@@ -17,7 +17,7 @@ import contextlib
 import logging
 import signal
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -52,6 +52,9 @@ class WorkerConfig:
     lease_timeout_seconds: float
     heartbeat_interval_seconds: float
     queues: Sequence[str] | None = None
+    #: 按 ``kind`` 限制全局并发(issue #144)。key=kind, value=最大同时 running 数。
+    #: 仅对列出的 kind 生效;未列出的 kind 不限制。空 / None 表示不限制。
+    kind_concurrency: Mapping[str, int] | None = None
 
 
 def default_worker_id() -> str:
@@ -124,6 +127,7 @@ class BackgroundWorker:
                 + timedelta(seconds=self._config.lease_timeout_seconds),
                 queues=self._config.queues,
                 limit=free,
+                max_per_kind=self._config.kind_concurrency,
             )
             if rows:
                 await repo.checkpoint()

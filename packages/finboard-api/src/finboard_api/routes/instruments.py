@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import os
 import subprocess
-from pathlib import Path
 from typing import Any, Literal, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_session
+from finboard_api.job_schemas import JobOut
 from finboard_api.schemas import (
     BondMetadataOut,
     ConvertibleMetadataOut,
@@ -36,6 +36,7 @@ from finboard_api.schemas import (
     ResearchDatasetReleaseSummaryOut,
 )
 from finboard_persistence import (
+    BackgroundJobPersistenceConflictError,
     BondMetadataModel,
     ConvertibleMetadataModel,
     DatasetManifestModel,
@@ -455,111 +456,50 @@ async def list_dataset_releases(
 
 @router.post(
     "/datasets/releases",
-    response_model=ResearchDatasetReleaseOut,
-    status_code=201,
+    response_model=JobOut,
+    status_code=202,
 )
 async def create_dataset_release(
     request: ResearchDatasetReleaseCreate,
+    response: Response,
     session: AsyncSession = Depends(get_session),
-) -> ResearchDatasetReleaseOut:
-    """把选定范围的本地 Parquet 缓存冻结为不可变研究数据版本。"""
+) -> JobOut:
+    """登记数据集冻结发布任务,立即返回 202 + job_id(issue #144)。
 
-    from finboard_data import (
-        DatasetReleaseError,
-        DatasetReleaseSpec,
-        ImmutableReleaseError,
-    )
-    from finboard_persistence import ResearchDatasetReleaseService
+    实际执行(原子 rename + DB 登记 + 标的资产类型校验)由 worker 消费
+    ``kind=dataset_publish`` 任务。发布成功后 ``JobOut.result_ref = release_id``;
+    前端需轮询 ``/api/jobs/{job_id}`` 拿到 release_id 后再查发布详情。
+    """
 
-    cache_dir = Path(os.getenv("FINBOARD_DATA_CACHE_DIR", _DEFAULT_CACHE_DIR))
-    release_root = Path(
-        os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT)
-    )
-    source = (
-        "tushare"
-        if request.release_kind == "a_share_tushare"
-        else "mixed"
-    )
-    rows = await session.execute(
-        select(InstrumentModel).where(InstrumentModel.code.in_(request.symbols))
-    )
-    selected_instruments = list(rows.scalars().all())
-    selected_codes = {item.code for item in selected_instruments}
-    missing_codes = sorted(set(request.symbols) - selected_codes)
-    if missing_codes:
-        raise HTTPException(
-            status_code=422,
-            detail=f"发布标的未登记到元数据表: {', '.join(missing_codes[:20])}",
-        )
-    if request.release_kind == "a_share_tushare":
-        invalid = sorted(
-            item.code
-            for item in selected_instruments
-            if item.market != "a_share" or item.instrument_type != "stock"
-        )
-        if invalid:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "A股 Tushare 单源发布只能包含 A 股股票,不能包含 ETF 或其他资产: "
-                    + ", ".join(invalid[:20])
-                ),
-            )
-    else:
-        selected_types = {item.instrument_type for item in selected_instruments}
-        missing_types = {"stock", "etf"} - selected_types
-        if missing_types:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "多资产混合源发布必须同时包含股票和 ETF,缺少: "
-                    + ", ".join(sorted(missing_types))
-                ),
-            )
+    from finboard_api.job_helpers import enqueue_job
 
-    service = ResearchDatasetReleaseService(
-        session,
-        cache_dir=cache_dir,
-        release_root=release_root,
-    )
+    payload: dict[str, Any] = {
+        "release_id": request.release_id,
+        "dataset_name": request.dataset_name,
+        "release_kind": request.release_kind,
+        "version": request.version,
+        "start_date": request.start_date.isoformat(),
+        "end_date": request.end_date.isoformat(),
+        "adjustment": request.adjustment,
+        "symbols": list(request.symbols),
+        "required_capabilities": list(request.required_capabilities),
+    }
+    idempotency_key = f"publish:{request.release_id}"
     try:
-        release = await service.publish(
-            DatasetReleaseSpec(
-                release_id=request.release_id,
-                dataset_name=request.dataset_name,
-                source=source,
-                version=request.version,
-                start_date=request.start_date,
-                end_date=request.end_date,
-                code_version=_current_code_version(),
-                adjustment=request.adjustment,
-                required_capabilities=(
-                    ("stock",)
-                    if request.release_kind == "a_share_tushare"
-                    else tuple(request.required_capabilities)
-                ),
-                known_limitations=(
-                    "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
-                    "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
-                    "只冻结本地缓存已有字段,不会回退到联网数据源",
-                    (
-                        "A股单源发布严格要求所有 Bar 来源为 tushare"
-                        if request.release_kind == "a_share_tushare"
-                        else "多资产发布允许按标的混合来源,实际来源写入质量报告"
-                    ),
-                ),
-            ),
-            request.symbols,
+        job = await enqueue_job(
+            session,
+            response,
+            kind="dataset_publish",
+            queue="data",
+            idempotency_key=idempotency_key,
+            payload=payload,
+            requested_by="api:dataset_publish",
         )
         await session.commit()
-    except ImmutableReleaseError as exc:
+    except BackgroundJobPersistenceConflictError as exc:
         await session.rollback()
-        raise HTTPException(status_code=409, detail=f"发布身份冲突: {exc}") from exc
-    except (DatasetReleaseError, ValueError) as exc:
-        await session.rollback()
-        raise HTTPException(status_code=422, detail=f"数据质量门未通过: {exc}") from exc
-
-    return ResearchDatasetReleaseOut.model_validate(_release_detail_payload(release))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return job
 
 
 @router.get(

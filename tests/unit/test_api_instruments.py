@@ -238,28 +238,26 @@ class TestResearchDatasetReleases:
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_create_release_uses_server_paths_and_commits(
+    async def test_create_release_enqueues_dataset_publish_job(
         self,
         mock_session: MagicMock,
     ) -> None:
-        import os
-        from pathlib import Path
+        """create_dataset_release 迁移到统一队列:返回 202 + job_id(#144)。
+
+        实际发布编排(标的校验 + DatasetReleaseSpec 构造 + service.publish)迁移到
+        ``DatasetPublishExecutor``,本测试只验证路由 enqueue 行为。
+        """
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
         from unittest.mock import patch
+
+        from fastapi import Response
 
         from finboard_api.routes.instruments import create_dataset_release
         from finboard_api.schemas import ResearchDatasetReleaseCreate
 
         mock_session.commit = AsyncMock()
         mock_session.rollback = AsyncMock()
-        service = MagicMock()
-        service.publish = AsyncMock(return_value=_dataset_release())
-        instrument = MagicMock()
-        instrument.code = "600519.SH"
-        instrument.market = "a_share"
-        instrument.instrument_type = "stock"
-        instrument_result = MagicMock()
-        instrument_result.scalars.return_value.all.return_value = [instrument]
-        mock_session.execute = AsyncMock(return_value=instrument_result)
         request = ResearchDatasetReleaseCreate(
             release_id="api-r77-v1",
             dataset_name="a_share_daily_bars",
@@ -272,37 +270,43 @@ class TestResearchDatasetReleases:
             adjustment="qfq",
             required_capabilities=[],
         )
-
-        with (
-            patch(
-                "finboard_persistence.ResearchDatasetReleaseService",
-                return_value=service,
-            ) as service_cls,
-            patch(
-                "finboard_api.routes.instruments._current_code_version",
-                return_value="deadbeef",
-            ),
-            patch.dict(
-                os.environ,
-                {
-                    "FINBOARD_DATA_CACHE_DIR": "test-cache",
-                    "FINBOARD_DATA_RELEASE_ROOT": "test-releases",
-                },
-            ),
-        ):
-            result = await create_dataset_release(request, session=mock_session)
-
-        assert result.release_id == "api-r77-v1"
-        service_cls.assert_called_once_with(
-            mock_session,
-            cache_dir=Path("test-cache"),
-            release_root=Path("test-releases"),
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTPUB1",
+            kind="dataset_publish",
+            queue="data",
+            status="queued",
+            priority=0,
+            payload={"release_id": "api-r77-v1"},
+            payload_checksum="x" * 64,
+            idempotency_key="publish:api-r77-v1",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:dataset_publish",
+            created_at=datetime(2026, 8, 13, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 8, 13, tzinfo=UTC),
         )
-        spec, symbols = service.publish.await_args.args
-        assert symbols == ["600519.SH"]
-        assert spec.code_version == "deadbeef"
-        assert spec.source == "tushare"
-        assert spec.required_capabilities == ("stock",)
+
+        with patch(
+            "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+            new=AsyncMock(return_value=(fake_row, True)),
+        ):
+            result = await create_dataset_release(
+                request, Response(status_code=202), session=mock_session
+            )
+
+        assert result.kind == "dataset_publish"
+        assert result.job_id == "BJ-TESTPUB1"
         mock_session.commit.assert_awaited_once()
         mock_session.rollback.assert_not_awaited()
 
