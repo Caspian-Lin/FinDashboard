@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 98 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137):
+**已实现 104 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -20,6 +20,7 @@
 | portfolio | 4 | portfolio_allocate / sizing / feasibility / attribution | 组合计算(纯计算,无 DB 写入,✅ #128) |
 | `finboard.job.*` | 4 | job list/get(只读);job enqueue/cancel(写) | 统一后台任务队列监控与提交(2 只读 + 2 写,✅ #136) |
 | 数据写操作 | 12 | data_fetch(同步)、fetch_all/sync_universe/bulk_download_start/quality_repair/dataset_release_publish(任务化)、data_config_get/update、etf_sync/batch_confirm/update/review_queue | 数据准备闭环:拉取/批量下载/同步/质量修复/数据集发布/调度配置/ETF 元数据(2 只读 + 10 写,✅ #137) |
+| #57 验证实验 | 6 | validation_experiment create/list/get/reject/add_trial/delete | OOS 样本外验证实验元数据 CRUD(2 只读 + 4 写,✅ #138),给因子实验的 validation_experiment_id 提供源头 |
 
 ## Planned 阶段(#128)
 
@@ -150,6 +151,31 @@ dataclass 列表逐元素序列化(顶层是 list 时 `dataclasses.asdict` 不�
 账户 / 订单 / 持仓。回滚:移除 `register_data_write_tools(mcp)` 调用 +
 `data_write.py` 即可,不影响 REST / ResearchAssistant / 现有只读 MCP 工具 /
 #117 队列。
+
+### ✅ #138 验证实验工具(已完成)
+6 个工具(2 只读 + 4 写),把 REST `/api/research/experiments`(#57 OOS
+样本外验证实验系统)的 6 个端点暴露为 MCP 工具,补齐 OOS 过拟合控制闭环:
+
+- 只读:`finboard_validation_experiment_list`(可选 status 过滤)、
+  `finboard_validation_experiment_get`(详情 + 全部 trial,含 FAILED/REJECTED)
+- 写:`finboard_validation_experiment_create`(假设/计划/门一次性冻结,
+  thresholds/robustness 全部有默认值)、`reject`(REJECTED + 原因,
+  终态冲突 → conflict)、`add_trial`(登记 trial,预算/终态冲突 → conflict)、
+  `delete`(级联删除 trial)
+
+复用 `ResearchExperimentRepository` / `ResearchTrialRepository` /
+`new_experiment` / `transition_status` / `increment_trials_used`。
+与因子实验(`finboard.factor.experiment.*`,#78/#125)是**两套独立但耦合的
+系统**:因子实验通过 `validation_experiment_id` 引用本批工具创建的 #57 实验,
+再经 `factor_experiment_sync_validation` 同步终态 —— agent 现在能跑通
+「创建验证实验 → 登记 trial → 因子实验引用 → sync 终态」完整链路。
+
+边界:本批只做实验元数据 CRUD,不触发 `ValidationRunner` 执行(长耗时执行
+任务化见 #117/#136);揭盲端点(`unseal-final`)未实现,不在本批覆盖(需后续
+单独补路由 + MCP 工具)。trial_id 用 `{experiment_id}-mcp-{uuid}` 前缀
+(审计区分入口)。不触及交易安全红线。回滚:移除
+`register_validation_experiment_tools(mcp)` 调用 + `validation_experiments.py`
+即可,不影响 REST 端点 / 因子实验工具 / 研究产物。
 
 ## 扩展原则(适用于所有阶段)
 
