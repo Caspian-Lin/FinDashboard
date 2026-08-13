@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown } from "lucide-react";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
-import type { QualityRepairResult, QualityReport } from "../lib/api";
+import type { JobOut, QualityReport } from "../lib/api";
+import { isJobRunning } from "../lib/api";
 import { INFO_HINTS, type InfoHintDefinition } from "../lib/infoHints";
 import { cn } from "../lib/utils";
 
@@ -15,19 +15,6 @@ const BULK_PHASE_LABELS: Record<string, string> = {
   reading_cache: "读取缓存",
   writing_cache: "写入缓存",
 };
-
-const BULK_LOG_LABELS: Record<string, string> = {
-  fetching: "正在拉取",
-  completed: "拉取完成",
-  cache_hit: "命中跳过",
-  failed: "拉取失败",
-};
-
-function formatLogTime(value: string): string {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return "--:--:--";
-  return new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false });
-}
 
 function formatDuration(sec: number): string {
   if (!isFinite(sec) || sec <= 0) return "—";
@@ -59,9 +46,14 @@ export default function Data() {
   const [dlStart, setDlStart] = useState("2015-01-01");
   const [dlSource, setDlSource] = useState("");
   const [showQualityDetail, setShowQuality] = useState(false);
-  const [showBulkLog, setShowBulkLog] = useState(true);
   const [repairSource, setRepairSource] = useState<"akshare" | "yfinance" | "tushare">("tushare");
   const [nowTick, setNowTick] = useState(() => Date.now());
+
+  // 统一任务队列(#144):批量拉取/同步/修复都 enqueue 一个 BJ- 任务,
+  // 前端轮询 /api/jobs/{job_id} 直到终态再读 progress_done/total/phase/result_ref。
+  const [bulkJobId, setBulkJobId] = useState<string | null>(null);
+  const [syncJobId, setSyncJobId] = useState<string | null>(null);
+  const [repairJobId, setRepairJobId] = useState<string | null>(null);
 
   const PAGE_SIZE = 10;
   const isSearching = searchQuery.length >= 2;
@@ -112,10 +104,25 @@ export default function Data() {
     enabled: isSearching,
   });
 
-  const { data: bulkStatus } = useQuery({
-    queryKey: ["bulk-download-status"],
-    queryFn: api.getBulkDownloadStatus,
-    refetchInterval: 2000,
+  const { data: bulkJob } = useQuery({
+    queryKey: ["job", bulkJobId],
+    queryFn: () => api.getJob(bulkJobId as string),
+    enabled: Boolean(bulkJobId),
+    refetchInterval: (query) => (isJobRunning(query.state.data) ? 2000 : false),
+  });
+
+  const { data: syncJob } = useQuery({
+    queryKey: ["job", syncJobId],
+    queryFn: () => api.getJob(syncJobId as string),
+    enabled: Boolean(syncJobId),
+    refetchInterval: (query) => (isJobRunning(query.state.data) ? 2000 : false),
+  });
+
+  const { data: repairJob } = useQuery({
+    queryKey: ["job", repairJobId],
+    queryFn: () => api.getJob(repairJobId as string),
+    enabled: Boolean(repairJobId),
+    refetchInterval: (query) => (isJobRunning(query.state.data) ? 2000 : false),
   });
 
   const { data: qualityReports, refetch: refetchQuality, isFetching: qualityFetching } = useQuery({
@@ -123,6 +130,22 @@ export default function Data() {
     queryFn: () => api.checkQuality(),
     enabled: false,
   });
+
+  // 同步 / 修复任务到达终态后失效相关缓存查询,使列表刷新。
+  useEffect(() => {
+    if (syncJob && !isJobRunning(syncJob) && syncJob.status !== undefined) {
+      queryClient.invalidateQueries({ queryKey: ["instruments"] });
+      queryClient.invalidateQueries({ queryKey: ["instrument-count"] });
+      queryClient.invalidateQueries({ queryKey: ["research-instruments"] });
+    }
+  }, [syncJob, queryClient]);
+
+  useEffect(() => {
+    if (repairJob && !isJobRunning(repairJob) && repairJob.status !== undefined) {
+      refetchQuality();
+      queryClient.invalidateQueries({ queryKey: ["data-status"] });
+    }
+  }, [repairJob, queryClient, refetchQuality]);
 
   const { data: config } = useQuery({
     queryKey: ["scheduler-config"],
@@ -141,11 +164,7 @@ export default function Data() {
 
   const sync = useMutation({
     mutationFn: () => api.syncUniverse(),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["instruments"] });
-      queryClient.invalidateQueries({ queryKey: ["instrument-count"] });
-      queryClient.invalidateQueries({ queryKey: ["research-instruments"] });
-    },
+    onSuccess: (job) => setSyncJobId(job.job_id),
   });
 
   const fetchOne = useMutation({
@@ -168,9 +187,8 @@ export default function Data() {
         start: dlStart,
         source: params?.source,
       }),
-    onSuccess: (data) => {
-      setShowBulkLog(true);
-      queryClient.setQueryData(["bulk-download-status"], data);
+    onSuccess: (job) => {
+      setBulkJobId(job.job_id);
       if (tushareBulk) {
         queryClient.invalidateQueries({ queryKey: ["tushare-quota"] });
       }
@@ -183,15 +201,12 @@ export default function Data() {
         symbols: (qualityReports ?? []).filter((report) => !report.passed).map((report) => report.symbol),
         source: repairSource,
       }),
-    onSuccess: async () => {
-      await refetchQuality();
-      await queryClient.invalidateQueries({ queryKey: ["data-status"] });
-    },
+    onSuccess: (job) => setRepairJobId(job.job_id),
   });
 
   const totalInstruments = databaseUniverse?.total ?? 0;
-  const isDownloading = startDownload.isPending || bulkStatus?.status === "running";
-  const phaseLabel = BULK_PHASE_LABELS[bulkStatus?.phase ?? ""];
+  const isDownloading = startDownload.isPending || isJobRunning(bulkJob);
+  const phaseLabel = bulkJob?.phase ? BULK_PHASE_LABELS[bulkJob.phase] ?? bulkJob.phase : undefined;
 
   useEffect(() => {
     if (!isDownloading) return;
@@ -199,10 +214,10 @@ export default function Data() {
     return () => clearInterval(id);
   }, [isDownloading]);
 
-  const startedAtMs = bulkStatus?.started_at ? Date.parse(bulkStatus.started_at) : 0;
+  const startedAtMs = bulkJob?.started_at ? Date.parse(bulkJob.started_at) : 0;
   const elapsedSec = startedAtMs > 0 ? Math.max(1, (nowTick - startedAtMs) / 1000) : 0;
-  const bulkDone = bulkStatus?.done ?? 0;
-  const bulkTotal = bulkStatus?.total ?? 0;
+  const bulkDone = bulkJob?.progress_done ?? 0;
+  const bulkTotal = bulkJob?.progress_total ?? 0;
   const bulkSpeed = elapsedSec > 0 ? (bulkDone / elapsedSec) * 60 : 0;
   const bulkEtaSec = bulkSpeed > 0 ? ((bulkTotal - bulkDone) / bulkSpeed) * 60 : 0;
 
@@ -272,9 +287,15 @@ export default function Data() {
           >
             {sync.isPending ? "同步中..." : totalInstruments === 0 ? "同步标的池" : "刷新标的池"}
           </button>
-          {sync.data && (
-            <p className="text-sm text-success mt-2">
-              同步完成: {sync.data.total} 条标的
+          {sync.isPending && (
+            <p className="text-sm text-muted-foreground mt-2">已提交同步任务,等待队列调度…</p>
+          )}
+          {syncJob && !isJobRunning(syncJob) && syncJob.status === "succeeded" && (
+            <p className="text-sm text-success mt-2">标的池同步完成</p>
+          )}
+          {syncJob && !isJobRunning(syncJob) && syncJob.status !== "succeeded" && (
+            <p className="text-sm text-destructive mt-2">
+              同步失败: {syncJob.error_summary ?? syncJob.status}
             </p>
           )}
           {sync.error && (
@@ -569,24 +590,24 @@ export default function Data() {
         )}
 
         {/* Progress bar */}
-        {isDownloading && bulkStatus && (
+        {isDownloading && bulkJob && (
           <div className="mt-4" aria-live="polite">
             <div className="flex justify-between text-sm text-muted-foreground mb-1">
-              <span>进度: {bulkStatus.done} / {bulkStatus.total}</span>
-              <span>{bulkStatus.total > 0 ? `${(bulkStatus.done * 100 / bulkStatus.total).toFixed(1)}%` : ""}</span>
+              <span>进度: {bulkDone} / {bulkTotal}</span>
+              <span>{bulkTotal > 0 ? `${(bulkDone * 100 / bulkTotal).toFixed(1)}%` : ""}</span>
             </div>
             <div
               className="w-full bg-muted rounded-full h-3 overflow-hidden"
               role="progressbar"
               aria-label="批量行情拉取进度"
               aria-valuemin={0}
-              aria-valuemax={bulkStatus.total}
-              aria-valuenow={bulkStatus.done}
+              aria-valuemax={bulkTotal}
+              aria-valuenow={bulkDone}
             >
               <div
                 className="bg-green-500 h-full rounded-full transition-all duration-500"
                 style={{
-                  width: `${bulkStatus.total > 0 ? (bulkStatus.done * 100 / bulkStatus.total) : 0}%`,
+                  width: `${bulkTotal > 0 ? (bulkDone * 100 / bulkTotal) : 0}%`,
                 }}
               />
             </div>
@@ -596,101 +617,27 @@ export default function Data() {
                 <span>预计剩余: {formatDuration(bulkEtaSec)}</span>
               </div>
             )}
-            {(!bulkStatus.logs || bulkStatus.logs.length === 0) && phaseLabel ? (
+            {phaseLabel && (
               <p className="mt-2 text-xs text-muted-foreground font-mono">
                 {phaseLabel}
               </p>
-            ) : null}
-          </div>
-        )}
-
-        {bulkStatus && bulkStatus.status !== "idle" && (
-          <div className="mt-3 overflow-hidden rounded-lg border border-border bg-muted/20">
-            <button
-              type="button"
-              onClick={() => setShowBulkLog((value) => !value)}
-              className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted/50"
-              aria-expanded={showBulkLog}
-              aria-controls="bulk-download-log"
-            >
-              <span className="font-medium">
-                拉取日志
-                <span className="ml-2 font-normal text-muted-foreground">
-                  {bulkStatus.logs?.length ?? 0} 条（最多保留最近 1000 条）
-                </span>
-              </span>
-              <ChevronDown
-                className={cn(
-                  "h-4 w-4 shrink-0 text-muted-foreground transition-transform",
-                  showBulkLog && "rotate-180",
-                )}
-                aria-hidden="true"
-              />
-            </button>
-            {showBulkLog && (
-              <div
-                id="bulk-download-log"
-                role="log"
-                aria-live="polite"
-                className="max-h-64 overflow-y-auto border-t border-border px-3 py-2 font-mono text-xs"
-              >
-                {bulkStatus.logs && bulkStatus.logs.length > 0 ? (
-                  <div className="space-y-1">
-                    {[...bulkStatus.logs].reverse().map((entry) => (
-                      <div key={entry.seq} className="flex gap-2 leading-5">
-                        <span className="shrink-0 text-muted-foreground">
-                          {formatLogTime(entry.timestamp)}
-                        </span>
-                        <span
-                          className={cn(
-                            "w-16 shrink-0",
-                            entry.event === "cache_hit" && "text-success",
-                            entry.event === "fetching" && "text-primary",
-                            entry.event === "completed" && "text-foreground",
-                            entry.event === "failed" && "text-destructive",
-                          )}
-                        >
-                          {BULK_LOG_LABELS[entry.event] ?? entry.event}
-                        </span>
-                        <span className="shrink-0 text-foreground">{entry.code}</span>
-                        {entry.reason && (
-                          <span className="min-w-0 break-words text-muted-foreground">
-                            · {entry.reason}
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-muted-foreground">等待首个标的检查结果…</p>
-                )}
-              </div>
             )}
+            <p className="mt-1 text-xs text-muted-foreground">
+              统一任务队列已合并逐标的日志/质量报告(#144),完成后再检查缓存质量查看明细。
+            </p>
           </div>
         )}
 
         {/* Download result */}
-        {bulkStatus?.status === "done" && (
-          <div className="mt-3 space-y-1 text-sm">
-            <p className="text-success">
-              拉取完成: 成功 {bulkStatus.success} / {bulkStatus.total}, 失败 {bulkStatus.failed}
-            </p>
-            <p className="text-muted-foreground">
-              缓存命中 {bulkStatus.cache_hits ?? 0} 个，需联网更新 {bulkStatus.cache_misses ?? 0} 个；已有日期不会因普通增量更新重复请求。
-            </p>
-            {bulkStatus.quality_reports && bulkStatus.quality_reports.length > 0 && (
-              <p className="text-muted-foreground">
-                质量校验: 通过 {bulkStatus.quality_passed ?? 0}, 失败 {bulkStatus.quality_failed ?? 0},
-                换源修复 {bulkStatus.fallback_used ?? 0}
-              </p>
-            )}
-            <p className="text-muted-foreground">
-              停复牌事件新增 {bulkStatus.lifecycle_events ?? 0}，同步失败标的 {bulkStatus.lifecycle_sync_failed ?? 0}
-            </p>
-          </div>
+        {bulkJob && !isJobRunning(bulkJob) && bulkJob.status === "succeeded" && (
+          <p className="mt-3 text-sm text-success">
+            拉取完成: {bulkDone} / {bulkTotal}。
+          </p>
         )}
-        {bulkStatus?.status === "error" && (
-          <p className="mt-3 text-sm text-destructive">错误: {bulkStatus.error}</p>
+        {bulkJob && !isJobRunning(bulkJob) && bulkJob.status !== "succeeded" && (
+          <p className="mt-3 text-sm text-destructive">
+            错误: {bulkJob.error_summary ?? bulkJob.status}
+          </p>
         )}
         {startDownload.error && (
           <p className="mt-3 text-sm text-destructive">
@@ -835,7 +782,8 @@ export default function Data() {
           reports={qualityReports}
           expanded={showQualityDetail}
           onToggle={() => setShowQuality((current) => !current)}
-          repairResult={repairQuality.data}
+          repairJob={repairJob}
+          repairPending={repairQuality.isPending}
           repairError={repairQuality.error as Error | null}
         />
         {!status || status.items.length === 0 ? (
@@ -900,13 +848,15 @@ function CacheQualitySummary({
   reports,
   expanded,
   onToggle,
-  repairResult,
+  repairJob,
+  repairPending,
   repairError,
 }: {
   reports: QualityReport[] | undefined;
   expanded: boolean;
   onToggle: () => void;
-  repairResult: QualityRepairResult | undefined;
+  repairJob: JobOut | undefined;
+  repairPending: boolean;
   repairError: Error | null;
 }) {
   if (!reports) {
@@ -937,9 +887,25 @@ function CacheQualitySummary({
           </button>
         )}
       </div>
-      {repairResult && (
+      {repairPending && (
         <p className="mt-2 text-sm text-muted-foreground">
-          最近批量修复: 成功 {repairResult.repaired}/{repairResult.total}, 修正 {repairResult.corrected_bars} 根 bar
+          批量修复任务已提交,等待队列调度…
+        </p>
+      )}
+      {repairJob && isJobRunning(repairJob) && (
+        <p className="mt-2 text-sm text-muted-foreground">
+          批量修复进行中: {repairJob.progress_done} / {repairJob.progress_total}
+          {repairJob.phase ? ` · ${repairJob.phase}` : ""}
+        </p>
+      )}
+      {repairJob && !isJobRunning(repairJob) && repairJob.status === "succeeded" && (
+        <p className="mt-2 text-sm text-success">
+          批量修复完成(逐标的报告已随 #144 降级,请重新检查缓存查看明细)。
+        </p>
+      )}
+      {repairJob && !isJobRunning(repairJob) && repairJob.status !== "succeeded" && (
+        <p className="mt-2 text-sm text-destructive">
+          批量修复失败: {repairJob.error_summary ?? repairJob.status}
         </p>
       )}
       {repairError && (

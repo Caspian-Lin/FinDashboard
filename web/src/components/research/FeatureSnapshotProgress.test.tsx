@@ -2,30 +2,40 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { FeatureSnapshotProgress } from "./FeatureSnapshotProgress";
 import { formatDuration } from "./FeatureSnapshotProgress.utils";
-import type { FeatureSnapshotJobStatus } from "@/lib/research";
+import type { JobOut } from "@/lib/api";
 
-function makeJob(
-  overrides: Partial<FeatureSnapshotJobStatus> = {},
-): FeatureSnapshotJobStatus {
+function makeJob(overrides: Partial<JobOut> = {}): JobOut {
   return {
-    job_id: "FSJ-TEST",
+    job_id: "BJ-TEST",
+    kind: "feature_snapshot",
+    queue: "research",
     status: "running",
-    total_symbols: 100,
-    completed_symbols: 25,
-    progress_pct: 25,
-    elapsed_seconds: 65,
-    estimated_remaining_seconds: 195,
+    priority: 0,
+    payload: {},
+    payload_checksum: "abc",
+    idempotency_key: "feature_snapshot:test",
+    progress_total: 100,
+    progress_done: 25,
+    phase: null,
+    result_ref: null,
+    error_code: null,
+    error_summary: null,
+    attempt: 0,
+    max_attempts: 3,
+    worker_id: null,
+    heartbeat_at: null,
+    lease_until: null,
+    requested_by: "test",
     created_at: "2026-08-08T00:00:00+00:00",
     started_at: "2026-08-08T00:00:01+00:00",
     finished_at: null,
-    snapshot_id: null,
-    error: null,
+    updated_at: "2026-08-08T00:00:01+00:00",
     ...overrides,
   };
 }
 
 describe("FeatureSnapshotProgress", () => {
-  it("显示标的进度、已耗时和预计剩余时间", () => {
+  it("显示标的进度与状态标签", () => {
     render(<FeatureSnapshotProgress job={makeJob()} />);
 
     expect(screen.getByRole("progressbar")).toHaveAttribute(
@@ -33,23 +43,22 @@ describe("FeatureSnapshotProgress", () => {
       "25",
     );
     expect(screen.getByText("25 / 100 · 25.0%")).toBeInTheDocument();
-    expect(screen.getByText("1 分 5 秒")).toBeInTheDocument();
-    expect(screen.getByText("3 分 15 秒")).toBeInTheDocument();
     expect(screen.getByText("计算中")).toBeInTheDocument();
   });
 
-  it("失败时显示服务端错误,不伪造预计时间", () => {
+  it("失败时显示服务端错误,不显示预计剩余时间", () => {
     render(
       <FeatureSnapshotProgress
         job={makeJob({
           status: "failed",
-          estimated_remaining_seconds: null,
-          error: "冻结发布文件读取失败",
+          finished_at: "2026-08-08T00:01:06+00:00",
+          error_summary: "冻结发布文件读取失败",
         })}
       />,
     );
 
     expect(screen.getByText("冻结发布文件读取失败")).toBeInTheDocument();
+    // 终态时预计剩余显示为 "—"
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 });

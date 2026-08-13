@@ -1,4 +1,4 @@
-import { fetchJSON, type ApiError } from "./api";
+import { fetchJSON, type ApiError, type JobOut } from "./api";
 
 /* ============================================================ */
 /* Research Runs                                                */
@@ -178,27 +178,6 @@ export interface FeatureSnapshotCreate {
   decision_at: string;
 }
 
-export type FeatureSnapshotJobStatusValue =
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "failed";
-
-export interface FeatureSnapshotJobStatus {
-  job_id: string;
-  status: FeatureSnapshotJobStatusValue;
-  total_symbols: number;
-  completed_symbols: number;
-  progress_pct: number;
-  elapsed_seconds: number;
-  estimated_remaining_seconds: number | null;
-  created_at: string;
-  started_at: string | null;
-  finished_at: string | null;
-  snapshot_id: string | null;
-  error: string | null;
-}
-
 export interface FactorSignal {
   signal_id: string;
   factor_name: string;
@@ -244,14 +223,10 @@ export const factorLabApi = {
       body: JSON.stringify(body),
     }),
   startFeatureSnapshotJob: (body: FeatureSnapshotCreate) =>
-    fetchJSON<FeatureSnapshotJobStatus>(`/research/factors/features/jobs`, {
+    fetchJSON<JobOut>(`/research/factors/features/jobs`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  featureSnapshotJob: (jobId: string) =>
-    fetchJSON<FeatureSnapshotJobStatus>(
-      `/research/factors/features/jobs/${encodeURIComponent(jobId)}`,
-    ),
   features: (datasetReleaseId?: string, limit?: number) => {
     const q = new URLSearchParams();
     if (datasetReleaseId) q.set("dataset_release_id", datasetReleaseId);
@@ -717,7 +692,7 @@ export const datasetApi = {
   releaseDetail: (releaseId: string) =>
     fetchJSON<Record<string, unknown>>(`/instruments/datasets/releases/${releaseId}`),
   createRelease: (body: DatasetReleaseCreate) =>
-    fetchJSON<DatasetReleaseSummary>("/instruments/datasets/releases", {
+    fetchJSON<JobOut>("/instruments/datasets/releases", {
       method: "POST",
       body: JSON.stringify(body),
     }),
