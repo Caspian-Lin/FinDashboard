@@ -263,13 +263,6 @@ class QualityRepairResultOut(BaseSchema):
     reports: list[QualityReportOut]
 
 
-class BatchFetchResultOut(BaseSchema):
-    total: int
-    success: int
-    failed: int
-    details: list[FetchResultOut]
-
-
 class SymbolEntrySchema(BaseSchema):
     code: str
     name: str = ""
@@ -323,16 +316,6 @@ class InstrumentSummaryOut(BaseSchema):
     by_listing_board: dict[str, int] = Field(default_factory=dict)
 
 
-class SyncResultOut(BaseSchema):
-    total: int
-    new: int
-    updated: int
-    renamed: int = 0
-    pending_delist: int = 0
-    delisted: int = 0
-    reactivated: int = 0
-
-
 class BulkDownloadRequest(BaseSchema):
     market: str = "a_share"
     instrument_type: str | None = None
@@ -340,41 +323,6 @@ class BulkDownloadRequest(BaseSchema):
     listing_boards: list[str] = Field(default_factory=list)
     start: str = "2015-01-01"
     source: str | None = None
-
-
-class ActiveSymbolOut(BaseSchema):
-    code: str
-    reason: str = ""
-
-
-class BulkDownloadLogOut(BaseSchema):
-    seq: int
-    timestamp: str
-    event: str
-    code: str
-    reason: str | None = None
-
-
-class BulkDownloadStatusOut(BaseSchema):
-    status: str = "idle"  # idle / running / done / error / cancelled
-    done: int = 0
-    total: int = 0
-    success: int = 0
-    failed: int = 0
-    current_symbol: str | None = None
-    phase: str | None = None
-    error: str | None = None
-    quality_passed: int = 0
-    quality_failed: int = 0
-    fallback_used: int = 0
-    lifecycle_events: int = 0
-    lifecycle_sync_failed: int = 0
-    cache_hits: int = 0
-    cache_misses: int = 0
-    started_at: str | None = None
-    active_symbols: list[ActiveSymbolOut] = []
-    logs: list[BulkDownloadLogOut] = []
-    quality_reports: list[QualityReportOut] = []
 
 
 class SchedulerConfigOut(BaseSchema):
@@ -814,23 +762,6 @@ class FeatureSnapshotOut(BaseSchema):
     observations: list[FeatureObservationOut]
     checksum: str
     issues: list[str] = Field(default_factory=list)
-
-
-class FeatureSnapshotJobStatusOut(BaseSchema):
-    """特征快照后台计算任务的轮询状态。"""
-
-    job_id: str
-    status: Literal["queued", "running", "succeeded", "failed"]
-    total_symbols: int
-    completed_symbols: int
-    progress_pct: float
-    elapsed_seconds: float
-    estimated_remaining_seconds: float | None = None
-    created_at: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    snapshot_id: str | None = None
-    error: str | None = None
 
 
 class FactorSignalItemOut(BaseSchema):

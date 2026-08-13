@@ -10,11 +10,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -180,12 +180,18 @@ class BackgroundJobRepository:
         lease_until: datetime,
         queues: Sequence[str] | None = None,
         limit: int = 1,
+        max_per_kind: Mapping[str, int] | None = None,
     ) -> list[BackgroundJobModel]:
         """用 ``FOR UPDATE SKIP LOCKED`` 领取 queued 任务,置 running + 写租约。
 
         多 worker 并发调用时,被其他事务锁住的行会被 ``SKIP LOCKED`` 跳过,
         因此同一任务不会被两个 worker 同时领取。``limit`` 允许一次领取多个
         以摊薄轮询成本(单 worker 主循环目前用 limit=1)。
+
+        ``max_per_kind``(issue #144)按 ``kind`` 限制全局并发:先统计当前
+        ``running`` 任务按 kind 分组的计数,已达到或超过上限的 kind 会被
+        ``NOT IN`` 排除,本次不领取。空映射或 ``None`` 表示不限制。该限额
+        在 SQL 层实现,多 worker 全局一致(不依赖内存信号量)。
         """
 
         stmt = (
@@ -196,11 +202,14 @@ class BackgroundJobRepository:
                 BackgroundJobModel.created_at.asc(),
                 BackgroundJobModel.id.asc(),
             )
-            .limit(limit)
             .with_for_update(skip_locked=True)
         )
         if queues:
             stmt = stmt.where(BackgroundJobModel.queue.in_(tuple(queues)))
+        over_limit_kinds = await self._over_limit_kinds(max_per_kind)
+        if over_limit_kinds:
+            stmt = stmt.where(BackgroundJobModel.kind.not_in(over_limit_kinds))
+        stmt = stmt.limit(limit)
         rows = list((await self._session.execute(stmt)).scalars().all())
         now = datetime.now(UTC)
         for row in rows:
@@ -214,6 +223,37 @@ class BackgroundJobRepository:
                 row.started_at = now
         await self._session.flush()
         return rows
+
+    async def _over_limit_kinds(
+        self, max_per_kind: Mapping[str, int] | None
+    ) -> tuple[str, ...]:
+        """返回当前 running 计数已达 / 超过 ``max_per_kind`` 上限的 kind 集合。
+
+        只统计 ``max_per_kind`` 显式声明的 kind(未声明的 kind 不限制)。
+        用一条 ``GROUP BY kind`` 聚合查询,避免逐 kind 轮询。
+        """
+
+        if not max_per_kind:
+            return ()
+        capped = {k: cap for k, cap in max_per_kind.items() if cap > 0}
+        if not capped:
+            return ()
+        count_stmt = (
+            select(
+                BackgroundJobModel.kind,
+                func.count(BackgroundJobModel.id),
+            )
+            .where(BackgroundJobModel.status == BackgroundJobStatus.RUNNING.value)
+            .where(BackgroundJobModel.kind.in_(tuple(capped)))
+            .group_by(BackgroundJobModel.kind)
+        )
+        count_rows = (await self._session.execute(count_stmt)).all()
+        counts: dict[str, int] = {row[0]: int(row[1]) for row in count_rows}
+        return tuple(
+            kind
+            for kind, cap in capped.items()
+            if counts.get(kind, 0) >= cap
+        )
 
     # ---------------------------------------------------------------- progress
     async def update_progress(

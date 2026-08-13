@@ -16,7 +16,6 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from finboard_api.deps import get_db_session
-from finboard_api.feature_snapshot_jobs import FeatureSnapshotJob
 from finboard_api.routes import research as research_routes
 from finboard_api.routes import research_router
 from finboard_api.schemas import FactorExperimentCreate
@@ -326,11 +325,15 @@ class TestFactorLaboratory:
         assert body["observations"][0]["feature_name"] == "momentum"
         mock_session.commit.assert_awaited_once()
 
-    def test_feature_snapshot_job_returns_progress_and_can_be_polled(
+    def test_feature_snapshot_job_enqueues_unified_job(
         self,
         client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """factors/features/jobs 迁移到统一队列:返回 202 + JobOut(#144)。
+
+        GET /factors/features/jobs/{id} 已删除,前端改用 /api/jobs/{id}。
+        """
         release = SimpleNamespace(
             release_id="release-v1",
             release_checksum="release-checksum",
@@ -338,33 +341,40 @@ class TestFactorLaboratory:
             end_date=date(2026, 7, 31),
             instruments=[object(), object(), object()],
         )
-
-        class FakeManager:
-            def __init__(self) -> None:
-                self.job: FeatureSnapshotJob | None = None
-
-            def start(self, *, total_symbols: int, runner) -> FeatureSnapshotJob:
-                self.job = FeatureSnapshotJob(
-                    job_id="FSJ-TEST",
-                    total_symbols=total_symbols,
-                )
-                return self.job
-
-            def get(self, job_id: str) -> FeatureSnapshotJob | None:
-                if self.job is not None and self.job.job_id == job_id:
-                    return self.job
-                return None
-
-        manager = FakeManager()
         monkeypatch.setattr(
             ResearchDatasetReleaseRepository,
             "require_usable",
             AsyncMock(return_value=release),
         )
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTFS1",
+            kind="feature_snapshot",
+            queue="research",
+            status="queued",
+            priority=0,
+            payload={"dataset_release_id": "release-v1"},
+            payload_checksum="x" * 64,
+            idempotency_key="feature_snapshot:release-v1:2026-07-31",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:feature_snapshot",
+            created_at=datetime(2026, 8, 13, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 8, 13, tzinfo=UTC),
+        )
         monkeypatch.setattr(
-            research_routes,
-            "_get_feature_snapshot_job_manager",
-            lambda _request: manager,
+            "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+            AsyncMock(return_value=(fake_row, True)),
         )
 
         response = client.post(
@@ -377,14 +387,8 @@ class TestFactorLaboratory:
 
         assert response.status_code == 202, response.text
         body = response.json()
-        assert body["job_id"] == "FSJ-TEST"
-        assert body["status"] == "queued"
-        assert body["total_symbols"] == 3
-        assert body["completed_symbols"] == 0
-
-        status = client.get("/api/research/factors/features/jobs/FSJ-TEST")
-        assert status.status_code == 200
-        assert status.json()["job_id"] == "FSJ-TEST"
+        assert body["kind"] == "feature_snapshot"
+        assert body["job_id"] == "BJ-TESTFS1"
 
     def test_factor_experiment_rejects_caller_claimed_oos_result(
         self,

@@ -40,6 +40,7 @@ from finboard_shared.types import KillSwitchLevel
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from finboard_api.schemas import BacktestRunRequest
     from finboard_app.bootstrap import KernelComponents
     from finboard_backtest.research_run import ResearchRunManifest
     from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
@@ -613,8 +614,18 @@ async def _run_worker(settings: Settings) -> None:
     components = build_kernel_components(settings)
     from finboard_backtest.background_jobs import JobExecutorRegistry
     from finboard_backtest.background_jobs.executors import (
+        BacktestRunExecutor,
+        BulkDownloadExecutor,
+        DataFetchAllExecutor,
+        DatasetPublishExecutor,
+        DataSyncExecutor,
         EchoExecutor,
+        FeatureSnapshotExecutor,
+        QualityRepairExecutor,
         ResearchRunExecutor,
+    )
+    from finboard_backtest.background_jobs.executors._providers import (
+        default_settings_factory,
     )
     from finboard_backtest.background_jobs.executors.research_run import (
         default_store_factory,
@@ -631,6 +642,7 @@ async def _run_worker(settings: Settings) -> None:
     # (background_jobs 的过期 lease 由 worker.run() 内部 _recover_stale 处理)。
     await _recover_research_runs(components.session_maker)
 
+    settings_factory = default_settings_factory
     registry = JobExecutorRegistry()
     registry.register("echo", EchoExecutor())
     # issue #143:research_run 执行器接入统一队列。adapter_factory 用占位实现
@@ -644,6 +656,51 @@ async def _run_worker(settings: Settings) -> None:
             adapter_factory=_placeholder_adapter_factory,
         ),
     )
+    # issue #144:7 类数据域任务迁移到统一队列。
+    registry.register(
+        "bulk_download",
+        BulkDownloadExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    registry.register(
+        "feature_snapshot",
+        FeatureSnapshotExecutor(
+            session_maker=components.session_maker,
+            max_concurrency=getattr(settings, "feature_snapshot_max_concurrency", 8),
+            process_workers=getattr(settings, "feature_snapshot_process_workers", 0),
+        ),
+    )
+    registry.register(
+        "dataset_publish",
+        DatasetPublishExecutor(session_maker=components.session_maker),
+    )
+    registry.register(
+        "backtest_run",
+        BacktestRunExecutor(
+            session_maker=components.session_maker,
+            runner=_backtest_runner,
+        ),
+    )
+    registry.register(
+        "data_sync",
+        DataSyncExecutor(session_maker=components.session_maker),
+    )
+    registry.register(
+        "fetch_all",
+        DataFetchAllExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    registry.register(
+        "quality_repair",
+        QualityRepairExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
     queue_list = [
         q.strip() for q in settings.worker_queues.split(",") if q.strip()
     ] or None
@@ -654,6 +711,15 @@ async def _run_worker(settings: Settings) -> None:
         lease_timeout_seconds=settings.worker_lease_timeout_seconds,
         heartbeat_interval_seconds=settings.worker_heartbeat_interval_seconds,
         queues=queue_list,
+        # issue #144:per-kind 全局并发上限(SQL 层 claim_next max_per_kind 实现)。
+        # 数据源压力敏感的 kind 限制为单并发;dataset_publish / backtest_run 不限。
+        kind_concurrency={
+            "feature_snapshot": 1,
+            "bulk_download": 1,
+            "data_sync": 1,
+            "fetch_all": 1,
+            "quality_repair": 1,
+        },
     )
     await run_bg_worker(
         engine=components.engine,
@@ -661,6 +727,17 @@ async def _run_worker(settings: Settings) -> None:
         registry=registry,
         config=config,
     )
+
+
+async def _backtest_runner(
+    session: AsyncSession,
+    request: BacktestRunRequest,
+    provider_name: str,
+) -> int:
+    """注入给 ``BacktestRunExecutor`` 的回测编排(延迟导入 ``finboard_api``)。"""
+    from finboard_api.backtest_service import run_backtest_and_persist
+
+    return await run_backtest_and_persist(session, request, provider_name=provider_name)
 
 
 async def _recover_research_runs(
