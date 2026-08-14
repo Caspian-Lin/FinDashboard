@@ -65,6 +65,7 @@ import {
   type ResearchRunQueueIn,
   type ResearchRunSummary,
 } from "@/lib/research";
+import { api, isJobRunning, isJobTerminal } from "@/lib/api";
 import { cn, formatCurrency, formatDateTime, timeAgo } from "@/lib/utils";
 
 const STATUS_OPTIONS: { value: string; label: string }[] = [
@@ -385,9 +386,21 @@ export default function ResearchRuns() {
   const [requestedBy, setRequestedBy] = useState("");
   const [lineageOpen, setLineageOpen] = useState(false);
 
+  // 状态过滤走服务端(status 多值查询参数);"all" 不传,由后端返回全部。
   const listQuery = useQuery({
-    queryKey: ["research-runs", "list", { limit: 50 }],
-    queryFn: () => researchRunApi.list({ limit: 50 }),
+    queryKey: ["research-runs", "list", { status: statusFilter, limit: 50 }],
+    queryFn: () =>
+      researchRunApi.list({
+        status: statusFilter === "all" ? undefined : [statusFilter],
+        limit: 50,
+      }),
+    // 存在非终态运行(queued/running)时自动轮询,worker 推进后列表自动刷新。
+    refetchInterval: (query) => {
+      const runs = query.state.data ?? [];
+      return runs.some((r) => !TERMINAL_STATUSES.includes(r.status))
+        ? 10_000
+        : false;
+    },
   });
 
   const detailQuery = useQuery({
@@ -402,11 +415,30 @@ export default function ResearchRuns() {
     enabled: selectedId !== null,
   });
 
-  const filteredRuns = useMemo(() => {
-    if (!listQuery.data) return [];
-    if (statusFilter === "all") return listQuery.data;
-    return listQuery.data.filter((r) => r.status === statusFilter);
-  }, [listQuery.data, statusFilter]);
+  const detail = detailQuery.data;
+
+  // 统一任务队列 job 状态(#157):queued/running 运行轮询 /api/jobs/{job_id},
+  // 展示 phase / progress / worker / 失败原因 / result_ref;job 终态后刷新运行。
+  const detailJobId = detail?.job_id ?? null;
+  const jobQuery = useQuery({
+    queryKey: ["research-runs", "job", detailJobId],
+    queryFn: () => api.getJob(detailJobId as string),
+    enabled:
+      detailJobId != null &&
+      detail != null &&
+      !TERMINAL_STATUSES.includes(detail.status),
+    refetchInterval: (query) =>
+      query.state.data && isJobRunning(query.state.data) ? 5_000 : false,
+  });
+
+  const jobData = jobQuery.data;
+  useEffect(() => {
+    if (jobData && isJobTerminal(jobData)) {
+      void queryClient.invalidateQueries({ queryKey: ["research-runs"] });
+    }
+  }, [jobData, queryClient]);
+
+  const filteredRuns = useMemo(() => listQuery.data ?? [], [listQuery.data]);
 
   const leafTraceId = useMemo(() => {
     if (!artifactsQuery.data || artifactsQuery.data.length === 0) return null;
@@ -462,8 +494,6 @@ export default function ResearchRuns() {
     setReplayOpen(true);
   };
 
-  const detail = detailQuery.data;
-
   return (
     <div>
       <PageHeader
@@ -508,7 +538,7 @@ export default function ResearchRuns() {
         </div>
         <p className="text-sm text-muted-foreground">
           {listQuery.data
-            ? `共 ${listQuery.data.length} 个运行（当前显示 ${filteredRuns.length}）`
+            ? `筛选结果共 ${listQuery.data.length} 个运行(服务端按状态过滤)`
             : "加载中…"}
         </p>
         <Button
@@ -671,7 +701,130 @@ export default function ResearchRuns() {
                             {formatDateTime(detail.completed_at)}
                           </span>
                         </InfoItem>
+                        {detail.job_id && (
+                          <InfoItem label="后台任务">
+                            <span className="font-mono text-xs">
+                              {detail.job_id}
+                            </span>
+                          </InfoItem>
+                        )}
                       </div>
+
+                      {/* 统一任务队列 job 状态(#157):queued/running 时轮询展示阶段/进度/worker */}
+                      {detail.job_id && (
+                        <Card>
+                          <CardHeader className="pb-3">
+                            <CardTitle className="flex items-center justify-between text-sm">
+                              <span className="flex items-center gap-2">
+                                <Activity className="h-4 w-4 text-primary" />
+                                后台任务进度
+                              </span>
+                              {jobQuery.data && (
+                                <StatusBadge status={jobQuery.data.status} />
+                              )}
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="space-y-3 text-xs">
+                            {jobQuery.isLoading ? (
+                              <p className="text-muted-foreground">
+                                正在加载任务状态…
+                              </p>
+                            ) : jobQuery.isError ? (
+                              <p className="text-destructive">
+                                任务状态加载失败:
+                                {errorMessage(jobQuery.error, "无法连接任务队列")}
+                              </p>
+                            ) : jobQuery.data ? (
+                              <>
+                                <div className="grid grid-cols-2 gap-x-4 gap-y-1 md:grid-cols-3">
+                                  <span>
+                                    任务:
+                                    <span className="ml-1 font-mono text-foreground">
+                                      {jobQuery.data.job_id}
+                                    </span>
+                                  </span>
+                                  <span>
+                                    阶段:
+                                    <span className="ml-1 font-mono text-foreground">
+                                      {jobQuery.data.phase ?? "—"}
+                                    </span>
+                                  </span>
+                                  <span>
+                                    进度:
+                                    <span className="ml-1 tabular-nums text-foreground">
+                                      {jobQuery.data.progress_done}/
+                                      {jobQuery.data.progress_total}
+                                    </span>
+                                  </span>
+                                  <span>
+                                    尝试:
+                                    <span className="ml-1 tabular-nums text-foreground">
+                                      {jobQuery.data.attempt}/
+                                      {jobQuery.data.max_attempts}
+                                    </span>
+                                  </span>
+                                  <span>
+                                    Worker:
+                                    <span className="ml-1 font-mono text-foreground">
+                                      {jobQuery.data.worker_id ?? "—"}
+                                    </span>
+                                  </span>
+                                  {jobQuery.data.heartbeat_at && (
+                                    <span>
+                                      心跳:
+                                      <span className="ml-1 text-foreground">
+                                        {timeAgo(jobQuery.data.heartbeat_at)}
+                                      </span>
+                                    </span>
+                                  )}
+                                </div>
+                                {jobQuery.data.progress_total > 0 && (
+                                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                                    <div
+                                      className="h-full rounded-full bg-primary transition-all"
+                                      style={{
+                                        width: `${Math.min(
+                                          100,
+                                          Math.round(
+                                            (jobQuery.data.progress_done /
+                                              jobQuery.data.progress_total) *
+                                              100,
+                                          ),
+                                        )}%`,
+                                      }}
+                                    />
+                                  </div>
+                                )}
+                                {jobQuery.data.error_code && (
+                                  <Alert variant="destructive">
+                                    <AlertTitle>
+                                      任务失败:
+                                      <span className="ml-1 font-mono">
+                                        {jobQuery.data.error_code}
+                                      </span>
+                                    </AlertTitle>
+                                    <AlertDescription>
+                                      {jobQuery.data.error_summary ?? "无详细信息"}
+                                    </AlertDescription>
+                                  </Alert>
+                                )}
+                                {jobQuery.data.result_ref && (
+                                  <p className="text-muted-foreground">
+                                    结果引用:
+                                    <span className="ml-1 font-mono text-foreground">
+                                      {jobQuery.data.result_ref}
+                                    </span>
+                                  </p>
+                                )}
+                              </>
+                            ) : (
+                              <p className="text-muted-foreground">
+                                任务已结束(运行已进入终态,无活跃 job)。
+                              </p>
+                            )}
+                          </CardContent>
+                        </Card>
+                      )}
 
                       {detail.result_checksum && (
                         <div className="flex items-center gap-2 text-xs text-muted-foreground">

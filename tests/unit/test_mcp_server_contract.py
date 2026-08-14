@@ -174,7 +174,8 @@ async def _tool_names() -> set[str]:
 
 class TestToolExposure:
     async def test_expected_tools_registered(self) -> None:
-        assert await _tool_names() >= _EXPECTED_TOOLS
+        # #157:精确相等 —— 新增/删除工具必须同步本清单与文档(#123 同步规范)。
+        assert await _tool_names() == _EXPECTED_TOOLS
 
     async def test_no_live_trading_tools_exposed(self) -> None:
         names = await _tool_names()

@@ -12,8 +12,8 @@
 ├── 研究运行      /research/runs       — 冻结输入、血缘追踪、运行重放
 ├── 组合与风险    /research/portfolio  — 目标权重分配、离散交易、资金可行性
 ├── 模拟盘        /research/simulation — 纸面撮合、目标仓位决策、绩效报告
-├── AI 助手       /research/ai         — 因子假设草案、策略 diff、金融问答
-└── 研究报告      /research/reports     — 聚合展示运行结果与绩效归因
+├── 研究工作台    /research/workbench  — OpenCode Web 研究交互（iframe 直连）+ 审批中心（AI 草案/假设/审计）
+└── 研究报告      /research/reports     — 聚合展示运行结果与绩效归因、CSV/Markdown 导出
 
 实盘交易（受控区域）
 ├── 仪表盘        /                    — 内核状态、账户资金、活动订单
@@ -48,8 +48,14 @@
 ### AI 辅助流程
 
 ```
-AI 草案生成 → 人工审批 → 消费 → 关联实验 → 机器验证
+OpenCode Agent 研究交互（工作台 iframe 直连）
+研究写操作（ResearchRun/回测/模拟盘）由 agent 经 MCP 自主执行（#122）
+AI 草案生成 → 审批中心查阅 → 消费 → 关联实验 → 机器验证
 ```
+
+「研究工作台」页面顶部 banner 展示 OpenCode Web 与 FinBoard MCP 运行状态;
+`opencode_web_enabled=false` 时工作台 Tab 降级,审批中心 Tab 走 REST 仍可用。
+Agent 行为审计可查 `GET /api/mcp/audit`（`mcp_audit_persist` 开启时持久化）。
 
 ## 三区边界
 

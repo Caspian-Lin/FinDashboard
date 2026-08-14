@@ -6,6 +6,7 @@ import {
   Activity,
   ArrowLeft,
   BarChart3,
+  Download,
   FileText,
   Gauge,
   Layers,
@@ -559,6 +560,8 @@ interface ReportContentProps {
   sourceId: string;
   meta?: ReactNode;
   extra?: ReactNode;
+  /** 报告导出下载基础路径(#157;仅 run/backtest 报告提供,模拟盘无导出)。 */
+  exportBasePath?: string;
 }
 
 function ReportContent({
@@ -570,6 +573,7 @@ function ReportContent({
   sourceId,
   meta,
   extra,
+  exportBasePath,
 }: ReportContentProps) {
   const { series, maxDrawdown } = useMemo(
     () => computeDrawdownSeries(equityCurve),
@@ -590,12 +594,38 @@ function ReportContent({
               </CardTitle>
               {meta}
             </div>
-            <Button asChild variant="outline" size="sm">
-              <Link to={sourceHref}>
-                <ArrowLeft className="h-4 w-4" />
-                查看原始{sourceLabel}
-              </Link>
-            </Button>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {exportBasePath && (
+                <>
+                  <Button asChild variant="outline" size="sm">
+                    <a
+                      href={`${exportBasePath}?format=csv`}
+                      download
+                      title="导出 CSV(元信息 + 指标 + 权益曲线 + 成交,Excel 兼容)"
+                    >
+                      <Download className="h-4 w-4" />
+                      CSV
+                    </a>
+                  </Button>
+                  <Button asChild variant="outline" size="sm">
+                    <a
+                      href={`${exportBasePath}?format=markdown`}
+                      download
+                      title="导出 Markdown 报告"
+                    >
+                      <Download className="h-4 w-4" />
+                      Markdown
+                    </a>
+                  </Button>
+                </>
+              )}
+              <Button asChild variant="outline" size="sm">
+                <Link to={sourceHref}>
+                  <ArrowLeft className="h-4 w-4" />
+                  查看原始{sourceLabel}
+                </Link>
+              </Button>
+            </div>
           </div>
         </CardHeader>
       </Card>
@@ -700,6 +730,7 @@ function RunReportView({ runId }: { runId: string }) {
       sourceHref="/research/runs"
       sourceLabel="研究运行"
       sourceId={detail.run_id}
+      exportBasePath={`/api/research/runs/${encodeURIComponent(detail.run_id)}/report/export`}
       meta={
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <StatusBadge status={detail.status} />

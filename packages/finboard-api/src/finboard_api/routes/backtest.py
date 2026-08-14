@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
@@ -151,6 +151,39 @@ async def get_history(
         fee_assumptions=r.fee_assumptions if r.fee_assumptions is not None else {},
         benchmark_config=r.benchmark_config if r.benchmark_config is not None else {},
         created_at=r.created_at,
+    )
+
+
+@router.get("/history/{run_id}/report/export")
+async def export_history_report(
+    run_id: int,
+    format: str = Query(default="csv", pattern="^(csv|markdown)$"),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """把回测历史报告导出为 CSV / Markdown 下载(#157,#141 的 Web 闭环)。
+
+    复用 ``finboard_mcp.reporting`` 的聚合与渲染(MCP ``finboard_report_export``
+    同一逻辑);与 MCP 不同,这里直接以 HTTP 响应返回内容,不落盘。
+    """
+    import asyncio
+
+    from finboard_mcp import reporting
+    from finboard_persistence import BacktestRunRepository
+
+    repo = BacktestRunRepository(session)
+    r = await repo.get(run_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="回测记录不存在")
+    report = reporting.aggregate_backtest_report(r)
+    content = await asyncio.to_thread(reporting.render_report, "backtest", report, format)
+    filename = f"finboard_backtest_{run_id}.{ 'md' if format == 'markdown' else format }"
+    media_type = "text/csv; charset=utf-8" if format == "csv" else "text/markdown; charset=utf-8"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
     )
 
 

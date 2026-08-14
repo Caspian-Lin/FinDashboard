@@ -11,7 +11,7 @@ from finboard_app.bootstrap import KernelComponents
 from finboard_backtest.factor_research import ResearchAssistant
 from finboard_core import TradingKernel
 from finboard_opencode import (
-    AccessCredentialIssuer,
+    AccessIssuer,
     OpenCodeProcessManager,
     OpenCodeRuntimeClient,
 )
@@ -69,8 +69,8 @@ def get_opencode_process_manager(request: Request) -> OpenCodeProcessManager | N
     return getattr(request.app.state, "opencode_process_manager", None)
 
 
-def get_opencode_access_issuer(request: Request) -> AccessCredentialIssuer | None:
-    """OpenCode Web 访问凭证签发器(issue #118)——lifespan 构建的单例。
+def get_opencode_access_issuer(request: Request) -> AccessIssuer | None:
+    """OpenCode Web 访问信息签发器(issue #118;#157 无凭证)——lifespan 构建的单例。
 
     依赖 :func:`get_opencode_process_manager`;未启用时返回 ``None``。
     """

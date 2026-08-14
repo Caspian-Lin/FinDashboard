@@ -1,13 +1,14 @@
-"""OpenCode Web 研究工作台网关路由(issue #118 / 重构 #121)。
+"""OpenCode Web 研究工作台网关路由(issue #118 / 重构 #121 / #157)。
 
 FinBoard 网关是 OpenCode Web 的**控制面**:
-- ``GET /status``:隔离实例运行状态(脱敏,不含密码);
+- ``GET /status``:隔离实例运行状态 + 内嵌 FinBoard MCP server 运行状态(#157);
 - ``GET /health``:代理健康探测;
-- ``POST /access``:签发访问凭证(OpenCode Web URL + basic auth),前端 iframe
-  跨源嵌入时使用。重构 #121 后不再绑定 conversation_id —— OpenCode 自身管理会话。
+- ``POST /access``:签发访问信息(#157 移除 basic auth 后只有明文 ``web_url``,
+  单用户模型,无凭证字段),前端 iframe 跨源嵌入时使用。#121 重构后不绑定
+  conversation_id —— OpenCode 自身管理会话。
 
 未启用(``opencode_web_enabled=false``)时所有端点返回 503,前端据此隐藏入口。
-红线:不透传 OpenCode 流量、不连接实盘、不暴露未授权端口。
+红线:不透传 OpenCode 流量、不连接实盘、不暴露未授权端口(127.0.0.1 绑定)。
 """
 
 from __future__ import annotations
@@ -15,15 +16,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from finboard_api.deps import (
     get_opencode_access_issuer,
     get_opencode_process_manager,
 )
+from finboard_app.config import Settings
 from finboard_opencode import (
-    AccessCredentialIssuer,
+    AccessIssuer,
     OpenCodeProcessManager,
     ProcessStatus,
 )
@@ -37,10 +39,26 @@ router = APIRouter(prefix="/api/opencode", tags=["opencode-gateway"])
 
 
 class AccessOut(BaseModel):
+    """#157 移除 basic auth 后不再有 username/password 字段(明文 URL 直连)。"""
+
     web_url: str
-    username: str
-    password: str
     agent_name: str
+
+
+class McpStatusOut(BaseModel):
+    """内嵌 FinBoard MCP server 状态(#157:前端据此显示 MCP 是否已连接)。"""
+
+    #: 是否配置了内嵌启动(opencode_embed_mcp)。
+    embedded_configured: bool
+    #: 内嵌 server 是否已在运行(lifespan 已启动 uvicorn 后台任务)。
+    embedded_running: bool
+    #: 实际绑定地址(127.0.0.1 或容器模式自动放宽的 0.0.0.0)。
+    host: str | None
+    port: int | None
+    #: 容器内 opencode 使用的 MCP URL(opencode_mcp_remote_url 渲染进容器配置)。
+    remote_url: str
+    #: 是否配置了 Bearer token(HTTP 传输强制鉴权)。
+    auth: bool
 
 
 class StatusOut(BaseModel):
@@ -51,6 +69,7 @@ class StatusOut(BaseModel):
     healthy: bool | None
     version: str | None
     started_at: datetime | None
+    mcp: McpStatusOut | None = None
 
 
 class HealthOut(BaseModel):
@@ -67,6 +86,20 @@ def _require_manager(
     return manager
 
 
+def _mcp_status(request: Request, settings: Settings) -> McpStatusOut:
+    """从 app.state / settings 构造内嵌 MCP server 状态快照。"""
+    server = getattr(request.app.state, "opencode_mcp_server", None)
+    bound_host = getattr(request.app.state, "opencode_mcp_host", None)
+    return McpStatusOut(
+        embedded_configured=settings.opencode_embed_mcp,
+        embedded_running=server is not None,
+        host=bound_host,
+        port=settings.mcp_port,
+        remote_url=settings.opencode_mcp_remote_url,
+        auth=bool(settings.mcp_auth_token),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
@@ -74,11 +107,13 @@ def _require_manager(
 
 @router.get("/status", response_model=StatusOut)
 async def opencode_status(
+    request: Request,
     manager: OpenCodeProcessManager | None = Depends(get_opencode_process_manager),
 ) -> StatusOut:
-    """隔离实例运行状态(脱敏:不含密码)。"""
+    """隔离实例运行状态 + 内嵌 FinBoard MCP 状态(#157,无敏感字段)。"""
     mgr = _require_manager(manager)
     status: ProcessStatus = await mgr.status()
+    settings: Settings = request.app.state.settings
     return StatusOut(
         running=status.running,
         managed=status.managed,
@@ -87,6 +122,7 @@ async def opencode_status(
         healthy=status.healthy,
         version=status.version,
         started_at=status.started_at,
+        mcp=_mcp_status(request, settings),
     )
 
 
@@ -111,19 +147,17 @@ async def opencode_health(
 
 @router.post("/access", response_model=AccessOut)
 async def opencode_access(
-    issuer: AccessCredentialIssuer | None = Depends(get_opencode_access_issuer),
+    issuer: AccessIssuer | None = Depends(get_opencode_access_issuer),
 ) -> AccessOut:
-    """签发 OpenCode Web 访问凭证(网关启用即可,#121 重构后无 conversation 绑定)。
+    """签发 OpenCode Web 访问信息(明文 URL,#157 无凭证;#121 后无 conversation 绑定)。
 
     OpenCode 自身管理会话/历史/恢复;FinBoard 只负责隔离实例的进程托管与
-    访问凭证签发。前端拿到凭证后用 iframe 跨源嵌入 OpenCode Web。
+    访问信息签发。前端 iframe 与「新窗口打开」共用同一 ``web_url``。
     """
     if issuer is None:
         raise HTTPException(status_code=503, detail="opencode web gateway disabled")
     info = issuer.issue_default()
     return AccessOut(
         web_url=info.web_url,
-        username=info.username,
-        password=info.password,
         agent_name=info.agent_name,
     )

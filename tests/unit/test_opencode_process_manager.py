@@ -1,15 +1,16 @@
-"""OpenCodeProcessManager / OpenCodeProcessConfig 单元测试(issue #xxx Docker 隔离)。
+"""OpenCodeProcessManager / OpenCodeProcessConfig 单元测试(issue #xxx Docker 隔离;#157)。
 
 重点验证:
 * ``docker run`` 命令构造(image/container_name/port/hostname/cors/mounts/env);
 * docker CLI 子进程环境变量严格白名单 —— FinBoard 的 DB 密码 / broker 凭证不泄露;
-* 凭证生成(空密码自动生成强随机);
+* #157:容器不注入 basic auth 凭证;运行时 opencode.json 渲染(mcp_remote_url 接线);
 * 健康探测 / 状态快照(用 httpx MockTransport,不启动真实容器);
 * docker CLI 不可用时 start() 报 OpenCodeProcessError(降级,不炸 lifespan)。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -25,7 +26,6 @@ from finboard_opencode.process_manager import (
     OpenCodeProcessManager,
     _docker_container_running,
     _extract_version,
-    _generate_password,
     _resolve_docker_binary,
     _windows_docker_binary_candidates,
     which_opencode,
@@ -42,24 +42,45 @@ def work_tmp() -> Path:
     return Path(tempfile.mkdtemp(prefix="oc-pm-", dir=str(_TMP_ROOT)))
 
 
+def _write_repo_opencode_json(workdir: Path) -> None:
+    """在临时 workdir 下构造仓库形态的 .opencode/opencode.json。"""
+    config_dir = workdir / ".opencode"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "opencode.json").write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "finboard": {
+                        "type": "remote",
+                        "url": "http://host.docker.internal:8765/mcp",
+                        "headers": {"Authorization": "Bearer {env:FINBOARD_MCP_TOKEN}"},
+                    }
+                },
+                "agent": {"finboard-researcher": {"mode": "primary"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 # ---------------------------------------------------------------------------
 # OpenCodeProcessConfig — docker run 命令构造
 # ---------------------------------------------------------------------------
 
 
-def test_build_docker_run_command_basic() -> None:
+def test_build_docker_run_command_basic(work_tmp) -> None:
+    _write_repo_opencode_json(work_tmp)
     config = OpenCodeProcessConfig(
         image="ghcr.io/anomalyco/opencode:latest",
         container_name="test-oc",
         port=4097,
         cors_origins=["http://localhost:5173"],
-        username="opencode",
-        password="cfg-pwd",
         mcp_auth_token="mcp-token",
         env_overrides={"DEEPSEEK_API_KEY": "sk-123"},
-        workdir=".",
+        workdir=str(work_tmp),
     )
-    cmd = config.build_docker_run_command(effective_password="cfg-pwd")
+    runtime_config = config.render_runtime_config()
+    cmd = config.build_docker_run_command(runtime_config_path=runtime_config)
     assert cmd[0] == "docker"
     assert "run" in cmd
     assert "-d" in cmd
@@ -79,12 +100,19 @@ def test_build_docker_run_command_basic() -> None:
     # bind mount .opencode / .agents。
     assert any("/workspace/.opencode" in p for p in cmd)
     assert any("/workspace/.agents" in p for p in cmd)
+    # #157:运行时 opencode.json 以单文件 mount 覆盖容器内同名文件。
+    file_mounts = [
+        p for p in cmd if p.endswith(":/workspace/.opencode/opencode.json")
+    ]
+    assert len(file_mounts) == 1
+    # Windows 路径含盘符冒号,用 startswith 判定而不是 split(":")。
+    assert file_mounts[0].startswith(f"{runtime_config}:")
     # named volume 持久化会话 DB / auth(容器删除后保留)。
     assert "opencode-data:/root/.local/share/opencode" in cmd
     assert "opencode-config:/root/.config/opencode" in cmd
-    # basic auth 凭证 -e。
-    assert any(p == "OPENCODE_SERVER_USERNAME=opencode" for p in cmd)
-    assert any(p == "OPENCODE_SERVER_PASSWORD=cfg-pwd" for p in cmd)
+    # #157:不再注入 basic auth 凭证。
+    assert not any(p.startswith("OPENCODE_SERVER_USERNAME=") for p in cmd)
+    assert not any(p.startswith("OPENCODE_SERVER_PASSWORD=") for p in cmd)
     # MCP token。
     assert any(p == "FINBOARD_MCP_TOKEN=mcp-token" for p in cmd)
     # env_overrides。
@@ -94,16 +122,29 @@ def test_build_docker_run_command_basic() -> None:
     assert cmd[cors_idx + 1] == "http://localhost:5173"
 
 
-def test_build_docker_run_command_omits_empty_cors() -> None:
-    config = OpenCodeProcessConfig(cors_origins=[])
-    cmd = config.build_docker_run_command(effective_password="p")
+def test_build_docker_run_command_omits_empty_cors(work_tmp) -> None:
+    _write_repo_opencode_json(work_tmp)
+    config = OpenCodeProcessConfig(workdir=str(work_tmp))
+    cmd = config.build_docker_run_command(
+        runtime_config_path=config.render_runtime_config()
+    )
     assert "--cors" not in cmd
 
 
-def test_build_docker_run_command_omits_mcp_token_when_empty() -> None:
-    config = OpenCodeProcessConfig(mcp_auth_token="")
-    cmd = config.build_docker_run_command(effective_password="p")
+def test_build_docker_run_command_omits_mcp_token_when_empty(work_tmp) -> None:
+    _write_repo_opencode_json(work_tmp)
+    config = OpenCodeProcessConfig(workdir=str(work_tmp), mcp_auth_token="")
+    cmd = config.build_docker_run_command(
+        runtime_config_path=config.render_runtime_config()
+    )
     assert not any(p.startswith("FINBOARD_MCP_TOKEN=") for p in cmd)
+
+
+def test_build_docker_run_command_without_runtime_config() -> None:
+    """不传 runtime_config_path 时不生成单文件 mount(向后兼容)。"""
+    config = OpenCodeProcessConfig(cors_origins=[])
+    cmd = config.build_docker_run_command()
+    assert not any(p.endswith(":/workspace/.opencode/opencode.json") for p in cmd)
 
 
 def test_build_docker_stop_command() -> None:
@@ -117,10 +158,46 @@ def test_base_url() -> None:
     assert config.base_url == "http://127.0.0.1:4097"
 
 
-def test_resolved_password_placeholder_when_empty() -> None:
-    config = OpenCodeProcessConfig(password="")
-    # 配置层只暴露占位符;真实密码由 ProcessManager.__init__ 生成。
-    assert config.resolved_password
+# ---------------------------------------------------------------------------
+# OpenCodeProcessConfig — 运行时 opencode.json 渲染(#157:mcp_remote_url 接线)
+# ---------------------------------------------------------------------------
+
+
+def test_render_runtime_config_patches_mcp_url(work_tmp) -> None:
+    """渲染产物只替换 mcp.finboard.url,其余键原样保留。"""
+    _write_repo_opencode_json(work_tmp)
+    config = OpenCodeProcessConfig(
+        workdir=str(work_tmp),
+        mcp_remote_url="http://10.0.0.8:9000/mcp",
+    )
+    target = config.render_runtime_config()
+    assert target == work_tmp / ".opencode" / "runtime" / "opencode.json"
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data["mcp"]["finboard"]["url"] == "http://10.0.0.8:9000/mcp"
+    # 其余键原样保留。
+    assert data["mcp"]["finboard"]["headers"] == {
+        "Authorization": "Bearer {env:FINBOARD_MCP_TOKEN}"
+    }
+    assert data["agent"]["finboard-researcher"]["mode"] == "primary"
+
+
+def test_render_runtime_config_default_url(work_tmp) -> None:
+    """默认 mcp_remote_url = host.docker.internal:8765/mcp(与仓库文件一致)。"""
+    _write_repo_opencode_json(work_tmp)
+    config = OpenCodeProcessConfig(workdir=str(work_tmp))
+    target = config.render_runtime_config()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert (
+        data["mcp"]["finboard"]["url"]
+        == "http://host.docker.internal:8765/mcp"
+    )
+
+
+def test_render_runtime_config_missing_source_raises(work_tmp) -> None:
+    """仓库缺 .opencode/opencode.json 时渲染失败(fail-fast,由 start 转 ProcessError)。"""
+    config = OpenCodeProcessConfig(workdir=str(work_tmp))
+    with pytest.raises((OSError, ValueError)):
+        config.render_runtime_config()
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +249,7 @@ def test_build_environment_includes_docker_cli_extras() -> None:
 @pytest.fixture
 def unmanaged_manager() -> OpenCodeProcessManager:
     """非托管管理器(不启动容器,用于测试健康探测 / 状态)。"""
-    config = OpenCodeProcessConfig(
-        port=4097, hostname="127.0.0.1", password="test-pass"
-    )
+    config = OpenCodeProcessConfig(port=4097, hostname="127.0.0.1")
     return OpenCodeProcessManager(config, manage_process=False)
 
 
@@ -185,17 +260,6 @@ def _inject_mock_transport(
         transport=httpx.MockTransport(handler),
         base_url=manager.base_url,
     )
-
-
-async def test_effective_password_uses_config(unmanaged_manager) -> None:
-    assert unmanaged_manager.effective_password == "test-pass"
-
-
-async def test_effective_password_autogenerate_when_empty() -> None:
-    config = OpenCodeProcessConfig(password="")
-    manager = OpenCodeProcessManager(config, manage_process=False)
-    assert manager.effective_password
-    assert manager.effective_password != ""
 
 
 async def test_health_returns_dict_when_ok(unmanaged_manager) -> None:
@@ -265,7 +329,6 @@ async def test_managed_start_requires_docker(work_tmp, monkeypatch) -> None:
     config = OpenCodeProcessConfig(
         workdir=str(work_tmp),
         log_path=str(work_tmp / "log" / "oc.log"),
-        password="p",
     )
     manager = OpenCodeProcessManager(config, manage_process=True)
     # docker CLI 解析失败。
@@ -280,7 +343,6 @@ async def test_managed_double_start_raises(work_tmp, monkeypatch) -> None:
     config = OpenCodeProcessConfig(
         workdir=str(work_tmp),
         log_path=str(work_tmp / "log" / "oc.log"),
-        password="p",
     )
     manager = OpenCodeProcessManager(config, manage_process=True)
     # 模拟容器已在运行(is_running 返回 True)。
@@ -292,6 +354,23 @@ async def test_managed_double_start_raises(work_tmp, monkeypatch) -> None:
         await manager.start()
 
 
+async def test_managed_start_fails_fast_when_repo_config_missing(
+    work_tmp, monkeypatch
+) -> None:
+    """#157:start() 前渲染运行时 opencode.json;仓库缺配置时 fail-fast 报错。"""
+    config = OpenCodeProcessConfig(
+        workdir=str(work_tmp),
+        log_path=str(work_tmp / "log" / "oc.log"),
+    )
+    manager = OpenCodeProcessManager(config, manage_process=True)
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._resolve_docker_binary",
+        lambda: "/fake/docker",
+    )
+    with pytest.raises(OpenCodeProcessError, match=r"render runtime opencode\.json"):
+        await manager.start()
+
+
 async def test_remove_stale_container_calls_docker_rm(
     work_tmp, monkeypatch
 ) -> None:
@@ -299,7 +378,6 @@ async def test_remove_stale_container_calls_docker_rm(
     config = OpenCodeProcessConfig(
         workdir=str(work_tmp),
         log_path=str(work_tmp / "log" / "oc.log"),
-        password="p",
         container_name="test-stale-oc",
     )
     manager = OpenCodeProcessManager(config, manage_process=True)
@@ -345,7 +423,6 @@ async def test_remove_stale_container_noop_without_docker(
     config = OpenCodeProcessConfig(
         workdir=str(work_tmp),
         log_path=str(work_tmp / "log" / "oc.log"),
-        password="p",
     )
     manager = OpenCodeProcessManager(config, manage_process=True)
     monkeypatch.setattr(
@@ -366,12 +443,6 @@ def test_extract_version_various_keys() -> None:
     assert _extract_version({"server_version": "3"}) == "3"
     assert _extract_version({"other": "x"}) is None
     assert _extract_version("not-a-dict") is None
-
-
-def test_generate_password_is_strong() -> None:
-    pw = _generate_password()
-    assert len(pw) >= 16
-    assert pw != _generate_password()  # 随机性
 
 
 def test_which_opencode_returns_none_for_missing() -> None:

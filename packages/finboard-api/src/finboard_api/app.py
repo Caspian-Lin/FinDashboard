@@ -13,7 +13,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
-import httpx
 import structlog
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -31,6 +30,7 @@ from finboard_api.routes import (
     instruments_router,
     jobs_router,
     kill_switch_router,
+    mcp_audit_router,
     opencode_gateway_router,
     orders_router,
     portfolio_router,
@@ -52,7 +52,7 @@ from finboard_app.llm_factory import build_llm_provider
 from finboard_app.logging import setup_logging
 from finboard_backtest.factor_research import ResearchAssistant
 from finboard_opencode import (
-    AccessCredentialIssuer,
+    AccessIssuer,
     OpenCodeProcessConfig,
     OpenCodeProcessError,
     OpenCodeProcessManager,
@@ -65,17 +65,24 @@ from finboard_simulation import SimulationRepository, SimulationService
 logger = structlog.get_logger(__name__)
 
 
-async def _start_embedded_mcp_server(app: FastAPI, settings: Settings) -> None:
+async def _start_embedded_mcp_server(
+    app: FastAPI, settings: Settings, *, host: str | None = None
+) -> None:
     """在当前事件循环后台启动 finboard-mcp HTTP server(uvicorn 后台任务)。
 
     容器内 opencode 通过 ``host.docker.internal:{mcp_port}`` 访问该 server。
     复用 ``build_mcp_server()``(研究域独立 lifespan + 独立 AsyncEngine,与
     TradingKernel 无 session 冲突)+ Bearer 鉴权(``mcp_auth_token``)。
 
+    ``host`` 显式覆盖 ``settings.mcp_host``(#157):web 容器模式下容器经
+    host.docker.internal 访问宿主机,服务绑 127.0.0.1 时不可达,调用方会在
+    默认值时自动改绑 0.0.0.0(Bearer token 保护)。
+
     失败降级:无 ``mcp_auth_token`` → 跳过(HTTP 传输强制鉴权,空 token 拒绝启动);
     端口已被占用(上次进程残留)→ 后台任务捕获 ``SystemExit``/异常,记 warning,
     不炸 API(容器内 opencode 连不上 MCP 会降级为内置工具)。
     """
+    bind_host = host if host is not None else settings.mcp_host
     if not settings.mcp_auth_token:
         logger.warning("api.opencode_mcp_skipped", reason="no_mcp_auth_token")
         return
@@ -83,11 +90,11 @@ async def _start_embedded_mcp_server(app: FastAPI, settings: Settings) -> None:
     from finboard_mcp.server import build_mcp_server
 
     mcp = build_mcp_server()
-    starlette_app = mcp.streamable_http_app(host=settings.mcp_host)
+    starlette_app = mcp.streamable_http_app(host=bind_host)
     wrapped = wrap_with_bearer_auth(starlette_app, token=settings.mcp_auth_token)
     config = uvicorn.Config(
         wrapped,
-        host=settings.mcp_host,
+        host=bind_host,
         port=settings.mcp_port,
         log_level="warning",
         loop="none",  # 复用当前 SelectorEventLoop(避免 Windows Proactor 冲突)
@@ -113,10 +120,11 @@ async def _start_embedded_mcp_server(app: FastAPI, settings: Settings) -> None:
             )
 
     app.state.opencode_mcp_server = server
+    app.state.opencode_mcp_host = bind_host
     app.state.opencode_mcp_task = asyncio.create_task(_serve_with_guard())
     logger.info(
         "api.opencode_mcp_started",
-        host=settings.mcp_host,
+        host=bind_host,
         port=settings.mcp_port,
     )
 
@@ -158,14 +166,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.llm_provider = llm_provider
         app.state.research_assistant = ResearchAssistant(llm_provider)
 
-        # OpenCode 研究运行时(issue #109 / #118 / Docker 隔离)。
+        # OpenCode 研究运行时(issue #109 / #118 / Docker 隔离;#157 移除 basic auth)。
         # 两种部署形态:
         #   (A) web 容器模式(opencode_web_enabled):FinBoard 托管一个 Docker 化的
         #       ``opencode web`` 容器(4097),它**同时**暴露 iframe UI 和 /api/* API。
-        #       runtime client 复用该容器(连 4097 + basic auth),不再需要独立的
+        #       runtime client 复用该容器(连 4097,无 auth),不再需要独立的
         #       ``opencode serve``(4096)。一个容器服务 iframe 嵌入 + 会话关联 API。
         #   (B) 外部 serve 模式(仅 opencode_enabled,向后兼容):连接外部已启动的
         #       ``opencode serve``(默认 4096,无 auth)。
+        # 单用户模型下 OpenCode Web 不做 basic auth(用户决策 #157),127.0.0.1
+        # 宿主机侧绑定是唯一网络边界。
         app.state.opencode_runtime = None
         app.state.opencode_process_manager = None
         app.state.opencode_access_issuer = None
@@ -177,8 +187,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 port=settings.opencode_web_port,
                 hostname=settings.opencode_web_hostname,
                 cors_origins=settings.opencode_web_cors_origin_list(),
-                username=settings.opencode_web_username,
-                password=settings.opencode_web_password,
                 # workdir = 仓库根(含 .opencode / .agents),bind mount 进容器。
                 # 默认相对 CWD(make dev 在仓库根运行),解析成绝对路径给 docker -v。
                 workdir=await asyncio.to_thread(
@@ -187,6 +195,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 log_path=settings.opencode_log_path,
                 env_overrides=settings.opencode_env_override_map(),
                 mcp_auth_token=settings.mcp_auth_token,
+                # #157:容器内 MCP 地址由该配置渲染进运行时 opencode.json。
+                mcp_remote_url=settings.opencode_mcp_remote_url,
             )
             process_manager = OpenCodeProcessManager(
                 web_config, manage_process=settings.opencode_manage_process
@@ -208,20 +218,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
             if web_ready:
                 app.state.opencode_process_manager = process_manager
-                app.state.opencode_access_issuer = AccessCredentialIssuer(
+                app.state.opencode_access_issuer = AccessIssuer(
                     process_manager, agent_name=settings.opencode_default_agent
                 )
-                # runtime client 复用 web 容器:base_url=4097,basic auth 用
-                # process_manager 实际生效凭证(password 可能是启动时随机生成的,
-                # 必须从运行中的 process_manager 读,不能从 settings 读空串)。
+                # runtime client 复用 web 容器:base_url=4097,无 auth(#157)。
                 app.state.opencode_runtime = OpenCodeRuntimeClient(
                     base_url=process_manager.base_url,
                     api_prefix=settings.opencode_api_prefix,
                     timeout=settings.opencode_request_timeout_seconds,
-                    auth=httpx.BasicAuth(
-                        process_manager.config.username,
-                        process_manager.effective_password,
-                    ),
                 )
                 logger.info(
                     "api.opencode_web_ready",
@@ -233,7 +237,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     base_url=process_manager.base_url,
                     agent=settings.opencode_default_agent,
                     mode="web_container",
-                    auth=True,
+                    auth=False,
                 )
             else:
                 logger.warning(
@@ -244,8 +248,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # + Bearer 鉴权(``mcp_auth_token``),以 uvicorn 后台任务跑在当前事件循环。
             # 这样用户无需单独跑 ``python -m finboard_mcp``;设 ``opencode_embed_mcp``
             # =False 可回退到独立进程模式。
+            # #157:容器经 host.docker.internal 跨网络访问宿主机,MCP 服务绑 127.0.0.1
+            # 时不可达 —— ``mcp_host`` 为默认值时自动改绑 0.0.0.0(Bearer token 保护);
+            # 用户显式配置了其它地址则尊重配置。
             if settings.opencode_embed_mcp:
-                await _start_embedded_mcp_server(app, settings)
+                mcp_bind_host = settings.mcp_host
+                if settings.opencode_web_enabled and mcp_bind_host == "127.0.0.1":
+                    mcp_bind_host = "0.0.0.0"
+                    logger.info(
+                        "api.opencode_mcp_host_widened",
+                        reason="container_needs_host_docker_internal",
+                        host=mcp_bind_host,
+                        port=settings.mcp_port,
+                    )
+                await _start_embedded_mcp_server(app, settings, host=mcp_bind_host)
         elif settings.opencode_enabled:
             # 形态 (B):外部 opencode serve(4096,无 auth),向后兼容。
             app.state.opencode_runtime = OpenCodeRuntimeClient(
@@ -348,6 +364,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_memories_router)
     app.include_router(research_runs_router)
     app.include_router(jobs_router)
+    app.include_router(mcp_audit_router)
     app.include_router(ai_research_router)
     app.include_router(opencode_gateway_router)
     app.include_router(instruments_router)

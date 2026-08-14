@@ -289,6 +289,27 @@ def _report_id(report: dict[str, Any]) -> str:
     return "" if value is None else str(value)
 
 
+def render_report(kind: str, report: dict[str, Any], fmt: str) -> str:
+    """把聚合报告渲染为字符串(#157:REST 下载端点复用,不写文件)。
+
+    与 :func:`export_report` 共用同一套表格构造 / 渲染逻辑,保证 MCP 导出文件
+    与 Web 下载内容一致。kind ∈ run|backtest,fmt ∈ csv|markdown;未知值抛
+    ``ValueError``(由调用方映射为 4xx)。
+    """
+    if kind not in REPORT_KINDS:
+        raise ValueError(f"未知报告类型: {kind}")
+    if fmt not in EXPORT_FORMATS:
+        raise ValueError(f"未知导出格式: {fmt}")
+    tables = _tables_for_report(kind, report)
+    rid = _report_id(report)
+    title = f"FinBoard {kind} 报告({rid})"
+    return (
+        render_csv(tables)
+        if fmt == "csv"
+        else render_markdown(title, tables)
+    )
+
+
 def export_report(
     kind: str,
     report: dict[str, Any],
@@ -301,18 +322,8 @@ def export_report(
     fmt 只支持 csv / markdown;未知 kind / fmt 抛 ValueError(由调用方
     映射为 invalid_argument)。
     """
-    if kind not in REPORT_KINDS:
-        raise ValueError(f"未知报告类型: {kind}")
-    if fmt not in EXPORT_FORMATS:
-        raise ValueError(f"未知导出格式: {fmt}")
-    tables = _tables_for_report(kind, report)
+    content = render_report(kind, report, fmt)
     rid = _report_id(report)
-    title = f"FinBoard {kind} 报告({rid})"
-    content = (
-        render_csv(tables)
-        if fmt == "csv"
-        else render_markdown(title, tables)
-    )
     safe_id = re.sub(r"[^A-Za-z0-9]+", "_", rid) or "unknown"
     stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     filename = f"finboard_{kind}_{safe_id}_{stamp}_{uuid.uuid4().hex[:8]}.{fmt}"
@@ -338,4 +349,5 @@ __all__ = [
     "export_report",
     "render_csv",
     "render_markdown",
+    "render_report",
 ]

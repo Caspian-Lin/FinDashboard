@@ -302,7 +302,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 
 ## finboard.factor.* / finboard.feature_snapshot.*(✅ #125)
 
-因子实验室工具(7 只读 + 4 写)。写操作尊重 `mcp_readonly_only` 开关。
+因子实验室工具(8 只读 + 4 写,共 12 个)。写操作尊重 `mcp_readonly_only` 开关。
 
 ### finboard_factor_catalog
 查询因子目录(版本化实现清单,26 个 alpha/risk/market_input 因子)。

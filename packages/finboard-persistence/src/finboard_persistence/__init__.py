@@ -31,6 +31,7 @@ from finboard_persistence.factor_lab_repo import (
     FeatureSnapshotRepository,
 )
 from finboard_persistence.factor_repo import FactorSnapshotRepository
+from finboard_persistence.mcp_audit_repo import McpAuditRepository
 from finboard_persistence.models import (
     AccountModel,
     AIAuditEventModel,
@@ -56,6 +57,7 @@ from finboard_persistence.models import (
     InstrumentLifecycleEventModel,
     InstrumentModel,
     InstrumentNameModel,
+    McpAuditEventModel,
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
@@ -175,6 +177,8 @@ __all__ = [
     "InstrumentNameModel",
     "InstrumentRepository",
     "InstrumentSyncResult",
+    "McpAuditEventModel",
+    "McpAuditRepository",
     "OrderModel",
     "OrderRepository",
     "PositionModel",

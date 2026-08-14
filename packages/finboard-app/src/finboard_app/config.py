@@ -143,10 +143,12 @@ class Settings(BaseSettings):
     opencode_default_agent: str = "finboard-researcher"
     opencode_request_timeout_seconds: float = 30.0
 
-    # ---- OpenCode Web 研究工作台(issue #118)----
-    # FinBoard 网关托管一个进程级隔离的 ``opencode web`` 实例,前端 iframe 跨源嵌入。
-    # 这是控制面网关:只签发访问凭证 + 管理进程生命周期,不透传 OpenCode 流量、不
+    # ---- OpenCode Web 研究工作台(issue #118;#157 移除 basic auth)----
+    # FinBoard 网关托管一个容器级隔离的 ``opencode web`` 实例,前端 iframe 跨源嵌入。
+    # 这是控制面网关:只签发访问信息 + 管理容器生命周期,不透传 OpenCode 流量、不
     # 连接实盘。``opencode_web_enabled`` 是总开关(默认关闭 → 网关返回 503,前端隐藏入口)。
+    # #157 用户决策:单用户模型下 OpenCode Web 不启用 basic auth,直接使用明文
+    # ``http://127.0.0.1:{port}`` URL;127.0.0.1 绑定是唯一网络边界。
     opencode_web_enabled: bool = False
     # FinBoard 是否托管子进程(True=自动启动/停止 opencode web;False=外部已启动,仅连接)。
     opencode_manage_process: bool = False
@@ -159,10 +161,6 @@ class Settings(BaseSettings):
     # 允许跨源访问的浏览器源(逗号分隔);iframe 嵌入必须显式允许 FinBoard 源。
     # 例:"http://localhost:5173,http://localhost:8000"
     opencode_web_cors_origins: str = ""
-    # basic auth 用户名(OpenCode 默认 ``opencode``)。
-    opencode_web_username: str = "opencode"
-    # basic auth 密码;留空则启动时自动生成强随机密码并记入启动日志。
-    opencode_web_password: str = ""
     # 宿主机侧工作目录(仓库根;含 ``.opencode`` / ``.agents``,bind mount 进容器)。
     opencode_workdir: str = "."
     # 子进程日志路径。
@@ -179,11 +177,16 @@ class Settings(BaseSettings):
     # 固定容器名(便于 stop / logs / inspect)。
     opencode_container_name: str = "finboard-opencode-web"
     # 容器内 opencode 连接宿主机 finboard_mcp 的 URL(跨容器 → host.docker.internal)。
+    # #157:该配置在容器启动时渲染进 ``.opencode/runtime/opencode.json`` 并以单文件
+    # bind mount 覆盖容器内 opencode.json —— 修改它即改变容器实际连接的 MCP 地址。
     opencode_mcp_remote_url: str = "http://host.docker.internal:8765/mcp"
     # 是否在 ``opencode_web_enabled`` 时由 API lifespan 内嵌启动 finboard-mcp HTTP
     # server(复用 ``mcp_host``/``mcp_port``/``mcp_auth_token``,uvicorn 后台任务)。
     # 默认开启:容器内 opencode 连 ``host.docker.internal:8765`` 时无需用户手动跑
     # ``python -m finboard_mcp``。设 False 回退到独立进程模式(向后兼容)。
+    # 注意:容器经 host.docker.internal 访问宿主机,要求 MCP 绑 0.0.0.0 —— web
+    # 容器模式下若 ``mcp_host`` 仍为默认 127.0.0.1,lifespan 会自动改绑 0.0.0.0
+    # (显式配置了其它地址则尊重用户配置)。
     opencode_embed_mcp: bool = True
 
     def opencode_web_cors_origin_list(self) -> list[str]:
