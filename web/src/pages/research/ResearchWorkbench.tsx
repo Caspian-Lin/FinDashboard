@@ -41,6 +41,10 @@ import { AuditTab } from "@/pages/research/approval/AuditTab";
 
 export default function ResearchWorkbench() {
   const [workbenchNonce, setWorkbenchNonce] = useState(0);
+  // 首次使用引导(opencode web 项目列表在浏览器本地存储,首次打开为空)。
+  const [guideDismissed, setGuideDismissed] = useState(
+    () => localStorage.getItem("finboard-wb-guide-dismissed") === "1",
+  );
 
   /* ---------- 探测 OpenCode Web 网关是否启用 ---------- */
   const {
@@ -236,6 +240,35 @@ export default function ResearchWorkbench() {
                       刷新
                     </Button>
                   </CardHeader>
+
+                  {/* 首次使用引导:opencode web 项目列表在浏览器本地(IndexedDB),
+                      全新分区(iframe 嵌入/新窗口)首次打开不显示历史会话 */}
+                  {workbenchUrl && !guideDismissed && (
+                    <Alert className="items-start">
+                      <Sparkles className="mt-0.5 h-4 w-4" />
+                      <div className="flex-1 space-y-1">
+                        <AlertTitle>首次使用:打开历史会话</AlertTitle>
+                        <AlertDescription>
+                          OpenCode Web 的项目列表保存在浏览器本地,首次打开(iframe
+                          或新窗口各自独立)会显示空白。点击左侧「添加项目」→
+                          搜索框输入 <code className="rounded bg-muted px-1 font-mono text-xs">/</code>
+                          → 点击 <code className="rounded bg-muted px-1 font-mono text-xs">~</code>
+                          (主目录,即容器内 /workspace)即可恢复历史会话;打开一次后
+                          该浏览器会自动记住。
+                        </AlertDescription>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          localStorage.setItem("finboard-wb-guide-dismissed", "1");
+                          setGuideDismissed(true);
+                        }}
+                      >
+                        我知道了
+                      </Button>
+                    </Alert>
+                  )}
 
                   {/* iframe(#157 明文 URL,无凭证;直连 OpenCode Web) */}
                   <div className="relative min-h-0 flex-1">

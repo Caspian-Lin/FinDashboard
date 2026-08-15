@@ -100,6 +100,24 @@ _RUNTIME_VOLUME_MOUNTS: tuple[tuple[str, str], ...] = (
     ("opencode-config", "/root/.config/opencode"),
 )
 
+#: 容器内 opencode 的环境目录语义(HOME / XDG),与 volume 挂载并列的硬性约束。
+#:
+#: - ``HOME=/workspace``:opencode web 的文件选择器 / homedir 默认从 HOME 开始。
+#:   容器默认 HOME=/root,文件选择器从 /root 开始搜索 —— 而 /workspace 是独立
+#:   挂载点(不在 /root 下),用户因此「搜不到 workspace」。改为 /workspace 后,
+#:   打开项目对话框直接落在工作目录,历史会话目录立即可见。
+#: - ``XDG_*_HOME`` 的取值是**数据根**,opencode 会在其下追加 ``opencode/``
+#:   子目录(实测 v1.18.15:``XDG_DATA_HOME=/tmp/x`` → 数据在 ``/tmp/x/opencode/``)。
+#:   因此必须指向 volume 挂载点的**父目录**,让最终落点(``.../opencode``)正好是
+#:   named volume 挂载点 —— 否则 HOME 变化会把会话 DB / auth 带到容器层(重启即丢)
+#:   或写进嵌套目录(旧数据读不到)。
+_CONTAINER_ENV_DIRS: tuple[tuple[str, str], ...] = (
+    ("HOME", "/workspace"),
+    ("XDG_DATA_HOME", "/root/.local/share"),
+    ("XDG_CONFIG_HOME", "/root/.config"),
+    ("XDG_STATE_HOME", "/root/.local/state"),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class OpenCodeProcessConfig:
@@ -151,7 +169,8 @@ class OpenCodeProcessConfig:
           ``mcp_remote_url``)以单文件 bind mount 覆盖容器内同名文件(#157)。单文件
           mount 必须排在目录 mount 之后(Docker 按精确路径优先)。
         - ``-e`` 注入:MCP token + env_overrides(LLM key 等)。FinBoard 自身
-          DB 密码 / broker 凭证**永不**进入 ``-e`` 列表。
+          DB 密码 / broker 凭证**永不**进入 ``-e`` 列表。HOME / XDG 目录语义
+          也以 ``-e`` 注入(见 ``_CONTAINER_ENV_DIRS``),钉死数据落点。
         """
         cmd: list[str] = [
             "docker", "run", "-d",
@@ -170,6 +189,10 @@ class OpenCodeProcessConfig:
         # named volume 持久化会话 DB / auth:容器删除后数据保留,重启可恢复历史。
         for volume_name, container_abs in _RUNTIME_VOLUME_MOUNTS:
             cmd += ["-v", f"{volume_name}:{container_abs}"]
+        # HOME / XDG 钉死(与 volume 挂载配套):文件选择器从 /workspace 开始,
+        # 会话 DB / auth 仍落 named volume(不随 HOME 漂移到容器层)。
+        for key, value in _CONTAINER_ENV_DIRS:
+            cmd += ["-e", f"{key}={value}"]
         # MCP token:容器内 opencode 通过 finboard MCP remote type 访问宿主机。
         if self.mcp_auth_token:
             cmd += ["-e", f"FINBOARD_MCP_TOKEN={self.mcp_auth_token}"]
