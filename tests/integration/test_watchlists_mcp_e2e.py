@@ -15,7 +15,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from finboard_backtest.factor_research import FakeLLMProvider, ResearchAssistant
 from finboard_backtest.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_mcp.audit import AuditRecorder
 from finboard_mcp.context import McpAppContext
@@ -26,17 +25,14 @@ pytestmark = pytest.mark.asyncio
 
 
 def _make_app(_engine: AsyncEngine) -> McpAppContext:
-    provider = FakeLLMProvider()
     from finboard_app.config import Settings
 
     return McpAppContext(
         settings=Settings(),
         session_maker=session_factory(_engine),
-        research_assistant=ResearchAssistant(provider),
         audit=AuditRecorder(),
         write_tools_enabled=True,
         engine=_engine,
-        provider=provider,
         feature_snapshot_jobs=FeatureSnapshotJobManager(),
     )
 
@@ -170,11 +166,9 @@ async def test_watchlist_mcp_full_lifecycle(
     readonly_app = _McpAppContext(
         settings=app.settings,
         session_maker=app.session_maker,
-        research_assistant=app.research_assistant,
         audit=AuditRecorder(),
         write_tools_enabled=False,
         engine=_engine,
-        provider=app.provider,
         feature_snapshot_jobs=app.feature_snapshot_jobs,
     )
     denied = await wl_tools.watchlist_create(readonly_app, name="x")

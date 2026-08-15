@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from finboard_mcp.tools.ai import register as register_ai_tools
 from finboard_mcp.tools.backtest import register as register_backtest_tools
 from finboard_mcp.tools.data import register as register_data_tools
 from finboard_mcp.tools.data_write import register as register_data_write_tools
@@ -20,7 +19,6 @@ from finboard_mcp.tools.validation_experiments import (
 from finboard_mcp.tools.watchlists import register as register_watchlist_tools
 
 __all__ = [
-    "register_ai_tools",
     "register_backtest_tools",
     "register_data_tools",
     "register_data_write_tools",

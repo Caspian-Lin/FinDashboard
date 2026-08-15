@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_app.config import Settings
-from finboard_backtest.factor_research import FakeLLMProvider, ResearchAssistant
 from finboard_backtest.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_mcp.audit import AuditRecorder
 from finboard_mcp.context import McpAppContext
@@ -59,15 +58,12 @@ def _mock_sm(
 
 
 def _make_app(session_maker: async_sessionmaker[AsyncSession]) -> McpAppContext:
-    provider = FakeLLMProvider()
     return McpAppContext(
         settings=Settings(),
         session_maker=session_maker,
-        research_assistant=ResearchAssistant(provider),
         audit=AuditRecorder(),
         write_tools_enabled=True,
         engine=MagicMock(),
-        provider=provider,
         feature_snapshot_jobs=FeatureSnapshotJobManager(),
     )
 

@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from finboard_backtest.factor_research import FakeLLMProvider, ResearchAssistant
 from finboard_backtest.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_mcp.audit import AuditRecorder
 from finboard_mcp.context import McpAppContext
@@ -36,17 +35,14 @@ _RUN_ID = "RR-e2e-report-141"
 
 
 def _make_app(_engine: AsyncEngine) -> McpAppContext:
-    provider = FakeLLMProvider()
     from finboard_app.config import Settings
 
     return McpAppContext(
         settings=Settings(),
         session_maker=session_factory(_engine),
-        research_assistant=ResearchAssistant(provider),
         audit=AuditRecorder(),
         write_tools_enabled=True,
         engine=_engine,
-        provider=provider,
         feature_snapshot_jobs=FeatureSnapshotJobManager(),
     )
 

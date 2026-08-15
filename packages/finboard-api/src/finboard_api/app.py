@@ -21,7 +21,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from finboard_api.errors import finboard_error_handler
 from finboard_api.routes import (
     account_router,
-    ai_research_router,
     audit_router,
     backtest_router,
     data_router,
@@ -48,9 +47,7 @@ from finboard_api.simulation_ws import SimulationConnectionManager
 from finboard_api.ws import ConnectionManager, setup_event_bridge, teardown_event_bridge
 from finboard_app.bootstrap import build_kernel_components
 from finboard_app.config import Settings
-from finboard_app.llm_factory import build_llm_provider
 from finboard_app.logging import setup_logging
-from finboard_backtest.factor_research import ResearchAssistant
 from finboard_opencode import (
     AccessIssuer,
     OpenCodeProcessConfig,
@@ -154,17 +151,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.account_id = components.account_id
         app.state.ws_manager = manager
         app.state.simulation_ws_manager = SimulationConnectionManager()
-
-        # AI 研究助手(issue #84):构建 provider 单例;配置不全时降级到 fake。
-        try:
-            llm_provider = build_llm_provider(settings)
-        except ValueError as exc:
-            logger.warning("api.llm_provider_fallback", error=str(exc))
-            from finboard_backtest.factor_research import FakeLLMProvider
-
-            llm_provider = FakeLLMProvider()
-        app.state.llm_provider = llm_provider
-        app.state.research_assistant = ResearchAssistant(llm_provider)
 
         # OpenCode 研究运行时(issue #109 / #118 / Docker 隔离;#157 移除 basic auth)。
         # 两种部署形态:
@@ -296,9 +282,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await kernel.stop()
             await session.commit()
             await components.engine.dispose()
-            cached_provider = getattr(app.state, "llm_provider", None)
-            if cached_provider is not None and hasattr(cached_provider, "close"):
-                cached_provider.close()
             opencode_runtime = getattr(app.state, "opencode_runtime", None)
             if opencode_runtime is not None:
                 await opencode_runtime.aclose()
@@ -309,8 +292,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             mcp_server = getattr(app.state, "opencode_mcp_server", None)
             if mcp_server is not None:
                 mcp_server.should_exit = True
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(mcp_server.shutdown(), timeout=5.0)
+                # bind 失败(端口被占)的 server 未完成 startup,无 servers 属性,
+                # shutdown() 会 AttributeError —— 只对真正启动过的 server 收尾。
+                if getattr(mcp_server, "started", False):
+                    with suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(mcp_server.shutdown(), timeout=5.0)
                 mcp_task = getattr(app.state, "opencode_mcp_task", None)
                 if isinstance(mcp_task, asyncio.Task) and not mcp_task.done():
                     mcp_task.cancel()
@@ -365,7 +351,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_runs_router)
     app.include_router(jobs_router)
     app.include_router(mcp_audit_router)
-    app.include_router(ai_research_router)
     app.include_router(opencode_gateway_router)
     app.include_router(instruments_router)
     app.include_router(portfolio_router)

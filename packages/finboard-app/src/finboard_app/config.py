@@ -20,9 +20,8 @@ def _strip_empty_values(data: Any) -> Any:
     """把空字符串值视为「未设置」,从输入中删除,使其回落到字段默认值。
 
     pydantic-settings 默认会把 ``FOO=`` 解析为 ``""`` 并作为显式值覆盖默认值,导致
-    int/float 字段(如 ``llm_total_timeout_seconds`` / ``llm_max_tokens``)抛
-    ``ValidationError``。前端设置页或手动编辑把某数值字段清空保存时会触发此问题。
-    删除键后,pydantic 会使用字段声明里的默认值。
+    int/float 字段抛 ``ValidationError``。前端设置页或手动编辑把某数值字段清空保存时
+    会触发此问题。删除键后,pydantic 会使用字段声明里的默认值。
     """
     if isinstance(data, dict):
         return {k: v for k, v in data.items() if not (isinstance(v, str) and v.strip() == "")}
@@ -99,23 +98,6 @@ class Settings(BaseSettings):
 
     # ---- Kill Switch 初始态 ----
     kill_switch_initial: KillSwitchLevel = KillSwitchLevel.OFF
-
-    # ---- AI 研究助手(issue #84) ----
-    # 只服务研究与教育;不连接实盘账户 / 订单 / 持仓。
-    # api_key 属于敏感字段,禁止进入日志 / 审计 / Provenance。
-    llm_provider: Literal["fake", "openai_compatible"] = "fake"
-    llm_base_url: str = ""
-    llm_api_key: str = Field(default="", repr=False)
-    llm_model: str = "gpt-4o-mini"
-    # 流式请求连续没有真实 token 的空闲超时(兼容旧变量名)。
-    llm_timeout_seconds: float = 30.0
-    llm_max_retries: int = 3
-    llm_connect_timeout_seconds: float = 10.0
-    llm_total_timeout_seconds: float = 600.0
-    llm_max_tokens: int = 4096
-    # OpenAI-compatible provider 中,DeepSeek 使用 thinking;其它 provider 可关闭。
-    llm_thinking_enabled: bool = True
-    llm_reasoning_effort: Literal["high", "max"] = "high"
 
     # ---- FinBoard MCP Server(issue #108)----
     # 向外置研究 Agent(OpenCode)暴露受控研究工具的 MCP 服务。默认关闭,显式启用。

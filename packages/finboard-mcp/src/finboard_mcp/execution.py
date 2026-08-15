@@ -6,8 +6,6 @@
 异常映射策略:
 
 * :class:`McpToolError` —— 工具自行精确声明的业务错误,直接采用其字段;
-* :class:`PermissionDeniedError` —— 越权 / 注入 → ``denied`` (不可重试);
-* :class:`AIDegradedError` —— provider 不可用 → ``error(degraded, retryable=True)``;
 * :class:`asyncio.TimeoutError` → ``error(timeout, retryable=True)``;
 * :class:`LookupError` / :class:`KeyError` → ``error(not_found)``;
 * :class:`ValueError` → ``error(invalid_argument)``;
@@ -21,10 +19,6 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from finboard_backtest.factor_research.assistant import (
-    AIDegradedError,
-    PermissionDeniedError,
-)
 from finboard_mcp.audit import AuditRecord, AuditRecorder, now_iso, summarize_arguments
 from finboard_mcp.envelope import (
     ErrorKind,
@@ -130,10 +124,6 @@ def _map_exception(exc: BaseException) -> tuple[str, ErrorKind, str, bool]:
     if isinstance(exc, McpToolError):
         status = "denied" if exc.kind == "permission_denied" else "error"
         return status, exc.kind, exc.message, exc.retryable
-    if isinstance(exc, PermissionDeniedError):
-        return "denied", "permission_denied", str(exc), False
-    if isinstance(exc, AIDegradedError):
-        return "error", "degraded", str(exc), True
     if isinstance(exc, asyncio.TimeoutError):
         return "error", "timeout", "工具执行超时", True
     if isinstance(exc, LookupError | KeyError):

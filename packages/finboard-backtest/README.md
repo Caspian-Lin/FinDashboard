@@ -723,145 +723,19 @@ equity-oriented 的纸面撮合引擎,不支持做空、保证金、乘数和每
 * 仅用于离线研究 / 回测。
 
 
-## LLM 辅助因子假设登记与离线审阅流程(issue #65 / #84)
+## AI 能力边界(issue #160:已全面迁移 OpenCode)
 
-`finboard_backtest.factor_research` 子包提供受控、可审计的 LLM 辅助研究循环。
-issue #84 扩展为完整的 AI 研究助手:真实 OpenAI 兼容 HTTP provider、PostgreSQL
-持久化、上下文式金融问答、策略组件/diff 草案、权限矩阵与重启恢复。
+`finboard_backtest.factor_research` 子包的 LLM 辅助研究循环(`ResearchAssistant` /
+`OpenAICompatibleLLMProvider` / 假设审批工作流 / `factor_hypotheses` 等四张表)
+已随 issue #160 整体移除:FinBoard 自身零内置 LLM 调用,AI 问答、假设与策略
+草案由 OpenCode 研究运行时的外层 LLM 承担,FinBoard 只提供研究/数据域 MCP
+工具(`finboard-mcp`)。该子包仅保留 `sanitizer.py`(提示词脱敏,MCP 入参
+统一脱敏仍在使用)。
 
-> **免责声明**:AI 研究助手只服务研究与教育,**不是投资顾问,不保证收益,
-> 不能下单**。AI 的建议必须经过人工审批和正式研究流水线(研究→回测→样本外→
-> 模拟→小资金实盘)验证后才可使用。AI 永远不位于订单执行链路中。
+> **免责声明**(边界不变):AI 只服务研究与教育,**不是投资顾问,不保证收益,
+> 不能下单**。AI 的产出必须经过正式研究流水线(研究→回测→样本外→模拟→
+> 小资金实盘)验证后才可使用,AI 永远不位于订单执行链路中。
 
-### LLM 能做 / 不能做
-
-| 能做 | 不能做 |
-|------|--------|
-| 输出结构化 `FactorHypothesis` / 策略草案 / diff / 问答 | 生成可执行 Python 代码 / 模块路径 |
-| 引用白名单字段与算子(#79 schema 约束) | 调用 `exec` / `eval` / `import` / `open` |
-| 提出有限参数预算 | 连接 Broker / OrderManager / 实盘配置 |
-| 记录参考文献与失效场景 | 把单次高收益描述成有效策略 |
-| 标记预期方向(long_high / long_low) | 绕过风控 / Kill Switch |
-| 提示词经 `sanitize_prompt` 脱敏 | 在提示词中包含 API key / 密码 / 账户 |
-| 金融问答引用项目来源,数据不足时声明 | 编造市场数据 / 收益 / 监管结论 |
-| 以 `DraftArtifact` 持久化草案(含来源/审批状态) | 自动审批 / 自动采纳 / 直接启动回测 |
-
-### 状态机
-
-```
-proposed -> approved_for_research -> in_sample -> validated_oos / rejected
-```
-
-- `proposed`: LLM 提出, 等待人工审阅
-- `approved_for_research`: 人工批准, 可以进入实验
-- `in_sample`: 实验进行中
-- `validated_oos`: 样本外验证通过(只能由 #57 持久化机器验证产生)
-- `rejected`: 被拒绝(验证失败 / 人工拒绝 / OOS 未通过)
-- `superseded`: 被新版本取代
-
-### 人工审批 gate
-
-```python
-wf = ResearchWorkflow()
-h = wf.submit(hypothesis, actor="llm@gpt-4")  # 自动验证
-wf.approve(h.hypothesis_id, approver="alice")  # 显式人工批准
-reg = wf.register_experiment(
-    h.hypothesis_id,
-    model_version="gpt-4-0613",
-    prompt_version="v3",
-    dataset_version="akshare-2024-01",
-    code_version="abc1234",
-    registered_by="alice",
-)
-# issue #84: complete_experiment 不再接受 passed_oos: bool,
-# 必须绑定持久化的 #57 机器验证终态(MachineValidationOutcome)
-wf.complete_experiment(
-    reg.experiment_id,
-    validation=MachineValidationOutcome(
-        validation_experiment_id="exp-57-xxxx",  # 来自持久化的 #57 实验
-        status="validated_oos",
-        trials_used=3,
-    ),
-    completed_by="alice",
-)
-```
-
-### 白名单
-
-输入字段: `close`, `open`, `high`, `low`, `volume`, `vwap`, `turnover`,
-`market_cap`, `pe_ratio`, `pb_ratio`, `returns_1d`, `adv20` 等。
-
-算子: `rank`, `zscore`, `ts_mean`, `ts_std`, `ts_rank`, `ts_corr`,
-`delta`, `delay`, `sigmoid`, `log`, `add`, `multiply` 等。
-
-禁止: `import`, `exec`, `eval`, `open`, `subprocess`, `socket`, `requests`,
-`SELECT`/`INSERT`/`DROP`/`DELETE`(SQL), `broker`, `order_manager`, `kill_switch`。
-
-### 试验预算
-
-每个假设的参数搜索空间 = 所有 `ParameterSpec.grid_size` 的乘积。
-默认上限 1000 组合。超过上限自动拒绝。
-试验次数达到预算上限后不能再登记新实验。
-
-### 审计追踪
-
-所有状态变更(提交/验证/审批/拒绝/实验登记/完成/取代/中断)都记录到
-`AuditTrail`(内存)与 `ai_audit_events` 表(持久化), 包含时间戳、事件类型、
-操作人和详情。失败实验和反例同样保留,用于审计。
-
-### 敏感数据脱敏
-
-`sanitize_prompt()` 自动替换提示词中的:
-- API key (OpenAI / Anthropic / AWS)
-- 密码 / token / credential 赋值
-- Bearer token
-- 手机号 / 邮箱 / 银行卡号 / 身份证号
-
-### LLM Provider(issue #84)
-
-| Provider | 用途 |
-|----------|------|
-| `FakeLLMProvider` | 测试 stub,不调用公网,按队列返回预设输出(默认) |
-| `OpenAICompatibleLLMProvider` | 真实 HTTP provider,兼容 OpenAI / DeepSeek / 通义 / 智谱 GLM / 本地 vLLM |
-
-`OpenAICompatibleLLMProvider` 通过 `httpx` 调用 `/v1/chat/completions`,
-强制 `response_format=json_object` 结构化输出。超时不重试(同源原则),
-429/5xx 有限指数退避后降级为 `LLMUnavailableError`。api_key 不进入
-日志 / 审计 / `Provenance`。配置见 `Settings.llm_*` 字段与
-`finboard_app.llm_factory.build_llm_provider`。
-
-### 权限矩阵(issue #84)
-
-`ResearchAssistant`(`factor_research/assistant.py`)是 AI 助手唯一入口,
-`assert_research_only_request` 在调用 provider 前拒绝越权请求与提示词注入:
-
-| 能力 | AI 可读 | AI 可写 | 审批门 |
-|------|---------|---------|--------|
-| 研究上下文 | 是 | 否 | - |
-| 因子假设 | - | 草案 | 人工 |
-| 策略规格 | - | 草案/diff | 人工(#79 API) |
-| 金融问答 | - | 解释 | - |
-| 实盘账户 / 订单 / 持仓 / Kill Switch | 否 | 否 | 完全禁止 |
-| 启动回测 / 模拟 | 否 | 否 | 完全禁止 |
-
-### 持久化与重启恢复(issue #84)
-
-假设 / 实验 / AI 草案 / 审计事件持久化在独立表(`factor_hypotheses` /
-`factor_hypothesis_experiments` / `ai_drafts` / `ai_audit_events`),
-不写入实盘 `orders`/`fills`/`positions`/`audit_logs`。`HypothesisWorkflowService`
-以 PostgreSQL 为真实来源,每次操作从 DB 重建内存 `ResearchWorkflow`,
-进程重启后状态自动恢复,失败/被拒绝记录不丢失。
-
-### 已知局限
-
-* `FakeLLMProvider` 是默认 provider,不调用公网 LLM。
-* 真实 LLM 需配置 `FINBOARD_LLM_PROVIDER=openai_compatible` + base_url + api_key。
-* DeepSeek thinking 问答通过 `/api/research/ai/ask/stream` 使用 SSE；
-  `FINBOARD_LLM_TIMEOUT_SECONDS` 表示连续没有真实 token 的空闲超时(默认 30 秒),
-  keep-alive 不会重置计时器；思考 token 仅在当前页面展示,不写入普通历史消息或审计。
-* thinking 可由 `FINBOARD_LLM_THINKING_ENABLED` 与
-  `FINBOARD_LLM_REASONING_EFFORT` 控制；总请求时限和连接时限分别由
-  `FINBOARD_LLM_TOTAL_TIMEOUT_SECONDS` 与 `FINBOARD_LLM_CONNECT_TIMEOUT_SECONDS` 控制。
-* 不连接 Broker / OrderManager / 实盘策略配置。
-* validated_oos 只能由 #57 持久化的机器验证终态决定,不能由 LLM 或人工主观判断。
-* AI 草案需人工审批后才可采纳到正式研究流水线,不自动晋级。
+#57 机器验证实验(`research_experiments` 表、REST `/api/research/experiments`、
+MCP `finboard.validation_experiment.*`)与因子实验(`validation_experiment_id`
+引用)不受影响,OOS 样本外验证闭环完整保留。

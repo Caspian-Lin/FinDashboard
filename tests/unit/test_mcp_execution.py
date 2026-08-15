@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from finboard_backtest.factor_research import AIDegradedError, PermissionDeniedError
 from finboard_mcp.audit import AuditRecorder
 from finboard_mcp.envelope import ToolData, ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
@@ -49,20 +48,6 @@ class TestSuccessPath:
 
 
 class TestExceptionMapping:
-    async def test_permission_denied(self) -> None:
-        env = await _run(_raising(PermissionDeniedError("越权")))
-        assert env.status == "denied"
-        assert env.error is not None
-        assert env.error.kind == "permission_denied"
-        assert env.error.retryable is False
-
-    async def test_ai_degraded_is_retryable(self) -> None:
-        env = await _run(_raising(AIDegradedError("不可用")))
-        assert env.status == "error"
-        assert env.error is not None
-        assert env.error.kind == "degraded"
-        assert env.error.retryable is True
-
     async def test_timeout_is_retryable(self) -> None:
         env = await _run(_raising(TimeoutError()))
         assert env.status == "error"
@@ -120,7 +105,7 @@ class TestAuditIntegration:
             audit=audit,
             tool_name="finboard.ai.ask",
             arguments={"prompt": f"我的 key 是 {secret}"},
-            handler=_raising(PermissionDeniedError("x")),
+            handler=_raising(McpToolError("permission_denied", "x")),
             sensitive=("prompt",),
         )
         recorded_prompt = audit.records[0].arguments_summary["prompt"]

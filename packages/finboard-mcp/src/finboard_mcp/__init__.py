@@ -2,7 +2,7 @@
 
 把 FinDashboard 的研究能力以受控 MCP 工具的形式暴露给外置 Agent 运行时
 (OpenCode)。FinDashboard 仍是业务工具 / 权限 / 任务 / 数据 / 审计 / 产物的
-唯一事实来源,MCP 工具复用现有 service / repository / ``ResearchAssistant``,
+唯一事实来源,MCP 工具复用现有 service / repository,
 不直接连接数据库做裸 SQL,不暴露实盘能力。
 
 安全红线(详见 ``AGENTS.md``):

@@ -2,7 +2,7 @@
 
 FinBoard MCP Server —— 把 FinDashboard 的研究能力以受控 MCP 工具的形式暴露给外置
 Agent 运行时(OpenCode)。FinDashboard 仍是业务工具 / 权限 / 任务 / 数据 / 审计 / 产物的
-唯一事实来源;MCP 工具复用现有 service / repository / `ResearchAssistant`,不直接连接
+唯一事实来源;MCP 工具复用现有 service / repository,不直接连接
 数据库做裸 SQL,不暴露实盘能力。
 
 ## 安全边界(#122 审批门语义)
@@ -13,7 +13,7 @@ Agent 运行时(OpenCode)。FinDashboard 仍是业务工具 / 权限 / 任务 / 
 - **实盘能力**(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)永久不注册;
 - 每次工具调用统一记录审计事件,不记录 API Key / 原始凭证 / 未脱敏思考内容。
 
-## 工具集(117 个,分阶段扩展中)
+## 工具集(113 个,分阶段扩展中;#160 移除 finboard.ai.* 后 FinBoard 零内置 LLM)
 
 完整清单与契约见 server `_INSTRUCTIONS` 与 Skill
 `.agents/skills/finboard-opencode-research/references/tools.md`;扩展路线图见
@@ -22,7 +22,6 @@ Agent 运行时(OpenCode)。FinDashboard 仍是业务工具 / 权限 / 任务 / 
 | 命名空间 | 数量 | 说明 |
 | --- | --- | --- |
 | `finboard.run.*` | 7 | ResearchRun 查询 + queue/cancel/replay/lineage |
-| `finboard.ai.*` | 4 | AI 研究助手(复用 `ResearchAssistant`,权限矩阵 + 脱敏) |
 | `finboard.memory.*` | 7 | 研究长期记忆(`research_memories` 表) |
 | 数据查询 | 9 | 标的元数据 / 数据集发布 / 缓存 / 质量 / Tushare 配额 |
 | `finboard.factor.*` / `.feature_snapshot.*` | 12 | 因子实验室(8 只读 + 4 写) |
@@ -63,4 +62,4 @@ FINBOARD_MCP_AUTH_TOKEN=<token> \
 ## 回滚
 
 关闭 MCP 入口(不启动 server)即可;审计持久化回滚为关闭配置 + 迁移 downgrade。
-不影响现有 `ResearchAssistant` / REST 入口与研究产物 / 审计历史。
+不影响现有 REST 入口与研究产物 / 审计历史。

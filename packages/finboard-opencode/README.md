@@ -65,7 +65,7 @@ FinBoard 网关是 OpenCode Web 的**控制面**:
 ### 回滚
 
 `opencode_web_enabled = false`(默认)→ 网关端点返回 503、不启动容器、前端(#111)
-隐藏入口。现有 `ResearchAssistant` / REST 入口与研究产物 / 审计不受影响。
+隐藏入口。现有 REST 入口与研究产物 / 审计不受影响。
 
 ### 上游版本约束
 
