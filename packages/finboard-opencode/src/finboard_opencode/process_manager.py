@@ -1,13 +1,22 @@
-"""OpenCode 进程管理器(issue #xxx Docker 隔离,基于 #118)。
+"""OpenCode 进程管理器(issue #xxx Docker 隔离,基于 #118;#157 移除 basic auth)。
 
 由 FinBoard 网关层托管一个**容器级隔离**的 ``opencode web`` Docker 容器:独立工作目录、
 独立 ``~/.local/share/opencode``(auth.json / 会话 DB,与宿主机全局 opencode 彻底隔离)、
 版本锁定镜像、仅必要环境变量(绝不继承 FinBoard 的 DB 密码 / broker 凭证 / API Key)、
-宿主机侧网络绑定 127.0.0.1。提供启动 / 停止 / 健康探测 / 就绪轮询。
+宿主机侧网络绑定 127.0.0.1。
+
+鉴权决策(#157,用户确认):当前为**单一用户模型**,OpenCode Web 不启用 basic auth,
+直接使用明文 ``http://127.0.0.1:{port}`` URL;宿主机侧 127.0.0.1 绑定是唯一网络边界。
+后续多用户时需恢复网关鉴权层。
 
 OpenCode v1.18.15 不支持 ``--base-path`` 子路径部署(上游 PR #28326 未合并),因此
 FinBoard 前端通过 **iframe 跨源嵌入** OpenCode Web 根 URL,FinBoard 网关只做控制面
-(会话授权 + 凭证签发 + 容器生命周期),不透传 OpenCode 流量。
+(容器生命周期 + 访问信息签发),不透传 OpenCode 流量。
+
+MCP 接线(#157):``mcp_remote_url`` 生效方式 —— ``start()`` 前把仓库 ``.opencode/opencode.json``
+渲染为 ``.opencode/runtime/opencode.json``(仅替换 ``mcp.finboard.url``),再以单文件
+bind mount 覆盖容器内 ``/workspace/.opencode/opencode.json``。仓库文件保持事实来源,
+运行时产物不入库(.gitignore)。
 
 红线:本模块只管理研究运行时容器,不连接实盘 broker / 账户 / 订单 / 持仓 / 风控。
 
@@ -16,7 +25,7 @@ Windows 事件循环冲突
 FinBoard 主事件循环是 ``WindowsSelectorEventLoopPolicy`` —— psycopg 异步连接在
 Windows 上硬性拒绝 ``ProactorEventLoop``。但 ``asyncio.create_subprocess_exec`` /
 ``Process.terminate()`` / ``Process.wait()`` 只在 ``ProactorEventLoop`` 上可用,
-SelectorEventLoop 会抛 ``NotImplementedError``。
+``SelectorEventLoop`` 会抛 ``NotImplementedError``。
 
 ``start`` / ``stop`` 会 spawn ``docker`` CLI 子进程(``docker run`` / ``docker stop``),
 故仍需要派发到专用守护线程里的 ``ProactorEventLoop``(:class:`_SubprocessExecutor`)。
@@ -29,8 +38,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
-import secrets
 import shutil
 import subprocess
 import sys
@@ -103,13 +112,10 @@ class OpenCodeProcessConfig:
     #: 宿主机侧监听端口(默认 4097,区别于 ``opencode serve`` 的 4096)。
     port: int = 4097
     #: 宿主机侧监听地址(隔离:强制 127.0.0.1,不暴露公网);容器内 opencode 绑 0.0.0.0。
+    #: #157 移除 basic auth 后,这是 OpenCode Web 的唯一网络边界(单用户模型)。
     hostname: str = "127.0.0.1"
     #: 允许跨源访问的浏览器源(iframe 跨源嵌入必须显式允许 FinBoard 源)。
     cors_origins: list[str] = field(default_factory=list)
-    #: basic auth 用户名(OpenCode 默认 ``opencode``)。
-    username: str = "opencode"
-    #: basic auth 密码;留空则启动时自动生成强随机密码并回填到 :attr:`resolved_password`。
-    password: str = ""
     #: 宿主机侧工作目录(包含 ``.opencode`` / ``.agents``,bind mount 进容器)。
     workdir: str = "."
     #: docker CLI 日志文件路径(``docker run`` / ``docker stop`` 的 stdout/stderr)。
@@ -119,17 +125,17 @@ class OpenCodeProcessConfig:
     env_overrides: dict[str, str] = field(default_factory=dict)
     #: MCP Bearer token:容器内 opencode 用它访问宿主机 finboard_mcp(跨容器鉴权)。
     mcp_auth_token: str = ""
+    #: 容器内 opencode 连接宿主机 finboard_mcp 的 URL(#157:由本配置渲染进容器
+    #: opencode.json,使 ``opencode_mcp_remote_url`` 设置实际生效)。
+    mcp_remote_url: str = "http://host.docker.internal:8765/mcp"
 
     @property
     def base_url(self) -> str:
         return f"http://{self.hostname}:{self.port}"
 
-    @property
-    def resolved_password(self) -> str:
-        """返回实际生效的密码(配置为空时用占位符,真实密码由 ProcessManager 生成)。"""
-        return self.password or _BOOTSTRAP_PASSWORD_PLACEHOLDER
-
-    def build_docker_run_command(self, *, effective_password: str) -> list[str]:
+    def build_docker_run_command(
+        self, *, runtime_config_path: Path | None = None
+    ) -> list[str]:
         """构造 ``docker run -d`` 参数列表(detach 模式,stdout 输出容器 ID)。
 
         关键决策:
@@ -141,8 +147,11 @@ class OpenCodeProcessConfig:
           持久化在宿主机仓库内,容器只读这些项目级配置。
         - named volume ``opencode-data`` / ``opencode-config`` —— 会话 DB(opencode.db)
           和 auth 持久化,容器删除后保留,重启可恢复历史。
-        - ``-e`` 注入:basic auth 凭证 + MCP token + env_overrides(LLM key 等)。
-          FinBoard 自身 DB 密码 / broker 凭证**永不**进入 ``-e`` 列表。
+        - ``runtime_config_path`` —— 渲染后的 opencode.json(mcp.finboard.url 已替换为
+          ``mcp_remote_url``)以单文件 bind mount 覆盖容器内同名文件(#157)。单文件
+          mount 必须排在目录 mount 之后(Docker 按精确路径优先)。
+        - ``-e`` 注入:MCP token + env_overrides(LLM key 等)。FinBoard 自身
+          DB 密码 / broker 凭证**永不**进入 ``-e`` 列表。
         """
         cmd: list[str] = [
             "docker", "run", "-d",
@@ -155,13 +164,12 @@ class OpenCodeProcessConfig:
         for host_rel, container_abs in _CONTAINER_MOUNTS:
             host_abs = workdir / host_rel
             cmd += ["-v", f"{host_abs}:{container_abs}"]
+        # 渲染后的运行时配置覆盖容器内 opencode.json(MCP 地址可配置,#157)。
+        if runtime_config_path is not None:
+            cmd += ["-v", f"{runtime_config_path}:{_CONTAINER_WORKDIR}/.opencode/opencode.json"]
         # named volume 持久化会话 DB / auth:容器删除后数据保留,重启可恢复历史。
         for volume_name, container_abs in _RUNTIME_VOLUME_MOUNTS:
             cmd += ["-v", f"{volume_name}:{container_abs}"]
-        # basic auth 凭证(OpenCode Web 自带 basic auth 中间件)。
-        if self.username:
-            cmd += ["-e", f"OPENCODE_SERVER_USERNAME={self.username}"]
-        cmd += ["-e", f"OPENCODE_SERVER_PASSWORD={effective_password}"]
         # MCP token:容器内 opencode 通过 finboard MCP remote type 访问宿主机。
         if self.mcp_auth_token:
             cmd += ["-e", f"FINBOARD_MCP_TOKEN={self.mcp_auth_token}"]
@@ -178,6 +186,26 @@ class OpenCodeProcessConfig:
     def build_docker_stop_command(self) -> list[str]:
         """构造 ``docker stop`` + ``rm`` 序列(容器名固定,幂等)。"""
         return ["docker", "rm", "-f", self.container_name]
+
+    def render_runtime_config(self) -> Path:
+        """渲染容器用的运行时 opencode.json(#157,同步 IO,调用方搬到线程)。
+
+        读取 ``{workdir}/.opencode/opencode.json``(仓库事实来源),把
+        ``mcp.finboard.url`` 替换为 ``mcp_remote_url``,写入
+        ``{workdir}/.opencode/runtime/opencode.json``(gitignore 的运行时产物)。
+        其余键原样保留(provider / agent / permission 等)。
+        """
+        source = Path(self.workdir).resolve() / ".opencode" / "opencode.json"
+        target = source.parent / "runtime" / "opencode.json"
+        data = json.loads(source.read_text(encoding="utf-8"))
+        mcp = data.get("mcp")
+        if isinstance(mcp, dict) and isinstance(mcp.get("finboard"), dict):
+            mcp["finboard"]["url"] = self.mcp_remote_url
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        return target
 
     def build_environment(
         self, *, parent_env: dict[str, str] | None = None
@@ -201,11 +229,6 @@ class OpenCodeProcessConfig:
                 env[extra] = value
         env.update(self.env_overrides)
         return env
-
-
-#: 配置为空、尚未 :meth:`OpenCodeProcessManager.start` 时的占位符。
-#: ``start`` 会用真实随机密码替换它。
-_BOOTSTRAP_PASSWORD_PLACEHOLDER = "__AUTO_GENERATE__"
 
 
 @dataclass(slots=True)
@@ -319,11 +342,6 @@ class _SubprocessExecutor:
         self._thread = None
 
 
-def _generate_password() -> str:
-    """生成 24 字节强随机密码(basic auth)。"""
-    return secrets.token_urlsafe(18)
-
-
 class OpenCodeProcessManager:
     """托管 ``opencode web`` Docker 容器的生命周期。
 
@@ -348,7 +366,6 @@ class OpenCodeProcessManager:
         self._container_id: str | None = None
         self._log_file: Any = None
         self._started_at: datetime | None = None
-        self._effective_password: str = config.password or _generate_password()
         self._health_client: httpx.AsyncClient | None = None
         self._version: str | None = None
         # docker CLI 子进程派发到专用 ProactorEventLoop(Windows;见类文档)。
@@ -357,11 +374,6 @@ class OpenCodeProcessManager:
     @property
     def config(self) -> OpenCodeProcessConfig:
         return self._config
-
-    @property
-    def effective_password(self) -> str:
-        """实际生效的 basic auth 密码(配置空则启动时生成的随机值)。"""
-        return self._effective_password
 
     @property
     def base_url(self) -> str:
@@ -426,8 +438,19 @@ class OpenCodeProcessManager:
             raise OpenCodeProcessError(
                 "docker CLI not found on PATH;请确认 Docker Desktop 已安装并启动"
             )
+        # 渲染运行时 opencode.json(mcp.finboard.url ← mcp_remote_url,#157),
+        # 单文件 bind mount 覆盖容器内同名文件。同步 IO 搬到线程;渲染失败
+        # (仓库缺 .opencode/opencode.json 等)视为启动配置错误,fail-fast。
+        try:
+            runtime_config_path = await asyncio.to_thread(
+                self._config.render_runtime_config
+            )
+        except (OSError, ValueError) as exc:
+            raise OpenCodeProcessError(
+                f"failed to render runtime opencode.json: {exc}"
+            ) from exc
         cmd = self._config.build_docker_run_command(
-            effective_password=self._effective_password
+            runtime_config_path=runtime_config_path
         )
         cmd[0] = docker_bin  # 用解析出的完整路径替换 "docker"
         env = self._config.build_environment()
@@ -677,20 +700,10 @@ class OpenCodeProcessManager:
 
     def _ensure_health_client(self) -> httpx.AsyncClient:
         if self._health_client is None:
-            # 托管模式由 start() 注入 OPENCODE_SERVER_USERNAME/PASSWORD,OpenCode Web
-            # 因此启用 basic auth —— 健康探测不带凭证会被 401 拦截、wait_ready 永远
-            # 超时,误判为启动失败。这里带上实际生效凭证。非托管模式仅在配置里显式
-            # 给了密码时才带(外部实例可能未开 auth 或用别处密码,强塞会触发 401)。
-            if self._manage_process:
-                auth: httpx.BasicAuth | None = httpx.BasicAuth(
-                    self._config.username, self._effective_password
-                )
-            elif self._config.password:
-                auth = httpx.BasicAuth(self._config.username, self._config.password)
-            else:
-                auth = None
+            # #157 移除 basic auth(单用户明文 URL 决策):OpenCode Web 无鉴权,
+            # 健康探测直接 GET;宿主机侧 127.0.0.1 绑定是唯一网络边界。
             self._health_client = httpx.AsyncClient(
-                base_url=self._config.base_url, timeout=10.0, auth=auth
+                base_url=self._config.base_url, timeout=10.0
             )
         return self._health_client
 

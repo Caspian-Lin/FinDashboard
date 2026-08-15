@@ -1918,6 +1918,29 @@ class AIAuditEventModel(Base, IdMixin):
     )
 
 
+class McpAuditEventModel(Base, IdMixin):
+    """MCP 工具调用审计事件持久化(issue #157,``mcp_audit_persist`` 接线)。
+
+    只追加,不修改,不删除。``FINBOARD_MCP_AUDIT_PERSIST=true`` 时由
+    ``finboard_mcp.audit.AuditRecorder`` 写入;默认关闭(仅 structlog + 内存副本)。
+    入参必须先经 ``summarize_arguments`` 脱敏 / 截断(不记录 API Key / 原始凭证 /
+    未脱敏思考内容)。不写入实盘 ``audit_logs`` 表。
+    """
+
+    __tablename__ = "mcp_audit_events"
+
+    operation_id: Mapped[str] = mapped_column(String(64), index=True)
+    tool_name: Mapped[str] = mapped_column(String(128), index=True)
+    status: Mapped[str] = mapped_column(String(24))
+    latency_ms: Mapped[int] = mapped_column(Integer)
+    error_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    caller: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    arguments_summary: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
 class ResearchMemoryModel(Base, IdMixin):
     """研究长期记忆 / 研究笔记持久化(issue #110)。
 

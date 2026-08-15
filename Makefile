@@ -99,6 +99,8 @@ OPENCODE_PORT ?= 4097
 OPENCODE_SERVE_PORT ?= 4096
 # iframe 跨源嵌入必须允许 FinBoard 前端源
 OPENCODE_CORS ?= http://localhost:5173
+# HTTP 传输强制 Bearer 鉴权(空 token 拒绝启动);用 make mcp-serve-http MCP_AUTH_TOKEN=xxx 覆盖
+MCP_AUTH_TOKEN ?= change-me
 
 opencode-serve: ## 启动 opencode serve(headless HTTP API,端口 $(OPENCODE_SERVE_PORT))
 	opencode serve --port $(OPENCODE_SERVE_PORT) --hostname 127.0.0.1 --cors $(OPENCODE_CORS)
@@ -109,8 +111,8 @@ opencode-web: ## 启动 opencode web(带 Web UI,端口 $(OPENCODE_PORT));FinBoar
 mcp-serve: ## 启动 finboard-mcp(stdio 传输,供 OpenCode 子进程接入)
 	FINBOARD_MCP_ENABLED=true $(UV) run python -m finboard_mcp
 
-mcp-serve-http: ## 启动 finboard-mcp(HTTP 传输,Docker 隔离前置;容器内 opencode 通过 host.docker.internal:8765 接入)
-	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_PORT=8765 $(UV) run python -m finboard_mcp
+mcp-serve-http: ## 启动 finboard-mcp(HTTP 传输,Docker 隔离前置;容器内 opencode 通过 host.docker.internal:8765 接入;须设 MCP_AUTH_TOKEN)
+	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN=$(MCP_AUTH_TOKEN) $(UV) run python -m finboard_mcp
 
 # --------------------------------------------------------------------------- 一键开发
 dev: ## 一键启动前后端开发服务器(后端 :8000 + 前端 :5173,Ctrl-C 同时退出)

@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import re
 from dataclasses import replace
 from typing import cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -442,6 +444,46 @@ async def _enqueue_research_run_job(
         requested_by=manifest.requested_by,
     )
     return job_row.job_id
+
+
+@router.get("/{run_id}/report/export")
+async def export_research_run_report(
+    run_id: str,
+    format: str = Query(default="csv", pattern="^(csv|markdown)$"),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """把 ResearchRun 报告导出为 CSV / Markdown 下载(#157,#141 的 Web 闭环)。
+
+    复用 ``finboard_mcp.reporting`` 的聚合与渲染(MCP ``finboard_report_export``
+    同一逻辑,不复制实现);与 MCP 不同,这里直接以 HTTP 响应返回内容,不落盘。
+    """
+    from finboard_mcp import reporting
+
+    repo = ResearchRunRepository(session)
+    row = await repo.get(run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="研究运行不存在")
+    artifacts = await repo.list_artifacts(run_id)
+    report = reporting.aggregate_run_report(row, artifacts)
+    content = await asyncio.to_thread(reporting.render_report, "run", report, format)
+    filename = f"finboard_run_{_safe_filename(run_id)}.{_report_extension(format)}"
+    media_type = "text/csv; charset=utf-8" if format == "csv" else "text/markdown; charset=utf-8"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+def _safe_filename(value: str) -> str:
+    """把 run_id 清理为安全的文件名片段(RR- 前缀本身安全,防御性处理)。"""
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", value) or "unknown"
+
+
+def _report_extension(fmt: str) -> str:
+    return "md" if fmt == "markdown" else fmt
 
 
 __all__ = ["router"]

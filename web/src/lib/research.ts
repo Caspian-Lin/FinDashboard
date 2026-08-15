@@ -33,6 +33,8 @@ export interface ResearchRunSummary {
   result_checksum?: string | null;
   error_code?: string | null;
   error_summary?: string | null;
+  /** 统一后台任务队列 job(background_jobs,BJ- ID);queued/running 时轮询 /api/jobs/{job_id} 看进度。 */
+  job_id?: string | null;
 }
 
 export interface ResearchRunQueueIn {
@@ -92,6 +94,9 @@ export const researchRunApi = {
     }),
   list: (params?: { status?: string[]; strategy_kind?: string; limit?: number }) => {
     const q = new URLSearchParams();
+    // status 是多值查询参数,用 append 逐个拼接(后端 list[str] Query)。
+    params?.status?.forEach((s) => q.append("status", s));
+    if (params?.strategy_kind) q.set("strategy_kind", params.strategy_kind);
     if (params?.limit) q.set("limit", String(params.limit));
     return fetchJSON<ResearchRunSummary[]>(
       `/research/runs${q.toString() ? "?" + q : ""}`,

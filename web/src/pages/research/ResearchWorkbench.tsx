@@ -19,21 +19,23 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { timeAgo } from "@/lib/utils";
 import { opencodeGatewayApi } from "@/lib/opencode";
-import { buildWorkbenchUrl, redactedWorkbenchUrl } from "@/lib/opencode-url";
+import { buildWorkbenchUrl } from "@/lib/opencode-url";
 import { DraftsTab } from "@/pages/research/approval/DraftsTab";
 import { HypothesesTab } from "@/pages/research/approval/HypothesesTab";
 import { AuditTab } from "@/pages/research/approval/AuditTab";
 
 /* ============================================================ */
-/* OpenCode 研究工作台(issue #111 / 重构 #121)                   */
+/* OpenCode 研究工作台(issue #111 / 重构 #121 / #157)             */
 /* ============================================================ */
 //
 // 重构 #121:OpenCode 自身管理会话/历史/恢复;FinBoard 不再维护独立 conversation
 // 投影层。前端工作台 Tab 简化为 iframe 直连 OpenCode Web + 顶部 gateway 状态 banner。
 //
 // 边界:
-//   - iframe 直连 OpenCode Web(凭证由 /api/opencode/access 签发,前端不缓存/不展示明文);
+//   - iframe 直连 OpenCode Web(#157 移除 basic auth:明文 URL,单用户模型,
+//     127.0.0.1 绑定是唯一网络边界;iframe 与「新窗口打开」共用同一 URL);
 //   - 写操作(创建 ResearchRun/回测/模拟盘)由 agent 通过 MCP 自主执行(#122);
+//   - banner 显示 OpenCode Web 与内嵌 FinBoard MCP server 的运行状态(#157);
 //   - opencode_web_enabled=false(网关 503)时「工作台」Tab 显示降级提示,
 //     「审批中心」Tab 仍可用(审批走 REST 不依赖网关)。
 
@@ -54,7 +56,7 @@ export default function ResearchWorkbench() {
 
   const gatewayEnabled = !statusError && status != null;
 
-  /* ---------- 签发工作台访问凭证(网关启用即签发) ---------- */
+  /* ---------- 获取工作台访问信息(明文 web_url,网关启用即签发) ---------- */
   const {
     data: access,
     isError: accessError,
@@ -138,19 +140,37 @@ export default function ResearchWorkbench() {
                   <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
                     <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                       <span>
-                      实例状态:
+                        实例状态:
                         <span className="ml-1 font-medium text-foreground">
                           {status?.running ? "运行中" : "未运行"}
                         </span>
                       </span>
                       <span>
-                      健康探测:
+                        健康探测:
                         <span className="ml-1 font-medium text-foreground">
                           {status?.healthy == null
                             ? "未知"
                             : status.healthy
                               ? "健康"
                               : "异常"}
+                        </span>
+                      </span>
+                      {/* #157:内嵌 FinBoard MCP 状态(agent 的工具通道) */}
+                      <span className="flex items-center gap-1">
+                        FinBoard MCP:
+                        <StatusDot
+                          status={
+                            status?.mcp?.embedded_running ? "online" : "offline"
+                          }
+                        />
+                        <span className="font-medium text-foreground">
+                          {status?.mcp == null
+                            ? "未知"
+                            : status.mcp.embedded_running
+                              ? `内嵌运行中(${status.mcp.host ?? "?"}:${status.mcp.port ?? "?"})`
+                              : status.mcp.embedded_configured
+                                ? "已配置未运行(检查 MCP_AUTH_TOKEN)"
+                                : "未启用内嵌(独立进程模式)"}
                         </span>
                       </span>
                       {status?.managed && status.container_id != null && (
@@ -170,9 +190,9 @@ export default function ResearchWorkbench() {
                         </span>
                       )}
                     </div>
-                    {access && (
+                    {workbenchUrl && (
                       <a
-                        href={redactedWorkbenchUrl(access)}
+                        href={workbenchUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="inline-flex items-center gap-1 text-primary hover:underline"
@@ -189,8 +209,8 @@ export default function ResearchWorkbench() {
               {accessError ? (
                 <Card className="flex min-h-[520px] items-center justify-center">
                   <ErrorState
-                    title="工作台访问未授权"
-                    message={String(accessErr?.message ?? "凭证签发失败")}
+                    title="工作台访问信息获取失败"
+                    message={String(accessErr?.message ?? "访问信息签发失败")}
                   />
                 </Card>
               ) : !workbenchUrl ? (
@@ -217,7 +237,7 @@ export default function ResearchWorkbench() {
                     </Button>
                   </CardHeader>
 
-                  {/* iframe(凭证在 URL 中,不渲染为可见文本) */}
+                  {/* iframe(#157 明文 URL,无凭证;直连 OpenCode Web) */}
                   <div className="relative min-h-0 flex-1">
                     <iframe
                       key={workbenchNonce}
@@ -225,8 +245,6 @@ export default function ResearchWorkbench() {
                       title="OpenCode Web 研究工作台"
                       className="absolute inset-0 h-full w-full border-0"
                       sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                      // 凭证由浏览器在 iframe src 中持有,不展示给用户;redactedUrl 仅用于无障碍/审计
-                      data-redacted-url={redactedWorkbenchUrl(access!)}
                     />
                   </div>
                 </Card>

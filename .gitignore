@@ -88,3 +88,5 @@ desktop.ini
 .opencode/running-pid.txt
 .opencode/server.json
 .opencode/auth.json
+# #157:容器启动时渲染的运行时 opencode.json(mcp.finboard.url ← opencode_mcp_remote_url)
+.opencode/runtime/

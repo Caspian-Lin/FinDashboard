@@ -73,7 +73,11 @@ async def app_lifespan(_server: MCPServer) -> AsyncIterator[McpAppContext]:
         settings=settings,
         session_maker=smaker,
         research_assistant=ResearchAssistant(provider),
-        audit=AuditRecorder(),
+        # #157:mcp_audit_persist=true 时审计记录追加到 mcp_audit_events 表
+        #(独立 session + commit,失败只记 warning);默认仅 structlog + 内存副本。
+        audit=AuditRecorder(
+            session_maker=smaker if settings.mcp_audit_persist else None
+        ),
         write_tools_enabled=not settings.mcp_readonly_only,
         engine=engine,
         provider=provider,
@@ -83,6 +87,7 @@ async def app_lifespan(_server: MCPServer) -> AsyncIterator[McpAppContext]:
     log.info(
         "mcp.starting",
         readonly_only=settings.mcp_readonly_only,
+        audit_persist=settings.mcp_audit_persist,
         provider=provider.provider_name(),
     )
     try:

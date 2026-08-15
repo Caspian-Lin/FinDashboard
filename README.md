@@ -471,109 +471,97 @@ Broker Adapter (QMT / CTP / Mock)
 
 ---
 
-## OpenCode 研究运行时(issue #108 / #109)
+## OpenCode 研究运行时(issue #108 / #109 / #118 / #122 / #157)
 
 FinBoard 把 [OpenCode](https://opencode.ai) 作为受控研究 Agent 运行时,通过
-`finboard-mcp` 受控工具层访问研究能力。OpenCode 是**只读研究**入口,不连接实盘
-broker / 账户 / 订单 / 持仓 / Kill Switch。
+`finboard-mcp` 受控工具层访问研究能力。OpenCode 是**研究域**入口(查询 + 研究
+写操作自主执行),不连接实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ### 架构
 
 ```
-研究用户
-  ↓
-opencode serve (HTTP + SSE)
-  ↓ finboard-researcher agent (内置 bash/edit/write 默认拒绝)
-finboard-mcp (受控 MCP 工具,只读自动允许 / 写操作走审批)
-  ↓
-FinDashboard service / repository (唯一事实来源)
+研究用户(单一用户模型,无鉴权)
+  ↓ http://127.0.0.1:4097
+opencode web Docker 容器(宿主机侧锁 loopback)
+  ↓ finboard-researcher agent(内置 bash/edit/write/webfetch 等默认拒绝,
+    只放行 read/glob/grep/skill + finboard_* MCP 工具)
+finboard-mcp(受控 MCP 工具,117 个;研究写操作自主执行 #122)
+  ↓ Bearer token(streamable-http)
+FinDashboard service / repository(唯一事实来源)
 ```
 
-### 启动与接入
-
-1. **固定版本**:OpenCode 通过官方安装脚本安装,建议固定到受支持版本。
-
-2. **配置已内置**:项目根 `.opencode/opencode.json` 注册了 `finboard` MCP server
-   并定义 `finboard-researcher` agent(默认拒绝 `bash`/`edit`/`write`)。
-
-3. **启动 MCP server**(开发期,与 FinDashboard 同进程或独立):
-   ```bash
-   FINBOARD_MCP_ENABLED=true uv run python -m finboard_mcp
-   ```
-
-4. **启动 OpenCode**:
-   ```bash
-   opencode serve  # 默认 http://127.0.0.1:4096
-   ```
-   或 `opencode web` 启动带 Web UI 的实例。
-
-5. **启用 FinBoard 会话关联**(可选,用于把 OpenCode session 关联到
-   `conversation_id` / `agent_run_id` 并持久化事件):
-   ```bash
-   FINBOARD_OPENCODE_ENABLED=true \
-   FINBOARD_OPENCODE_BASE_URL=http://127.0.0.1:4096 \
-   uv run uvicorn finboard_api.app:app
-   ```
-   启用后 `/api/agent/conversations` 提供 CRUD、SSE 事件流
-   (`/events`,从 `last_event_seq` 断线续传)、中断与历史回放。
-
-### OpenCode Web 研究工作台(issue #118)
-
-FinBoard 网关可托管一个**进程级隔离**的 `opencode web` 实例,前端通过 iframe 跨源
-嵌入(OpenCode v1.18.15 不支持 `--base-path` 子路径部署,故采用跨源嵌入而非子路径反代)。
+### 启动与接入(推荐:Web 容器模式)
 
 ```bash
-# FinBoard 托管子进程(开发推荐):
+# FinBoard 托管 opencode web Docker 容器(默认 4097)+ 内嵌 finboard-mcp HTTP server(8765):
 FINBOARD_OPENCODE_WEB_ENABLED=true \
 FINBOARD_OPENCODE_MANAGE_PROCESS=true \
 FINBOARD_OPENCODE_WEB_CORS_ORIGINS=http://localhost:5173 \
+FINBOARD_MCP_AUTH_TOKEN=<token> \
+FINBOARD_LLM_API_KEY=<key> \
+FINBOARD_OPENCODE_ENV_OVERRIDES=DEEPSEEK_API_KEY=<key> \
 uv run uvicorn finboard_api.app:app
 ```
 
-隔离保证:
-- **工作目录**:`.opencode/workspace` 沙箱,与 FinBoard 仓库分离;
-- **环境变量严格白名单**:子进程只继承 `PATH`/`HOME` 等系统必需变量,**绝不**继承
-  DB 密码 / broker 凭证 / API Key;LLM provider Key 通过 `FINBOARD_OPENCODE_ENV_OVERRIDES`
-  显式注入;
-- **网络**:强制 `127.0.0.1` 绑定,不暴露公网;
-- **basic auth**:`OPENCODE_SERVER_PASSWORD`(配置空则启动时自动生成)。
+要点(#157):
+- **无 basic auth**:单用户模型下 OpenCode Web 直接使用明文
+  `http://127.0.0.1:4097`,`/api/opencode/access` 只签发 `web_url`;
+  宿主机侧 `127.0.0.1` 绑定是唯一网络边界。
+- **MCP 地址可配置**:`FINBOARD_OPENCODE_MCP_REMOTE_URL` 在容器启动时渲染进
+  `.opencode/runtime/opencode.json` 并以单文件 bind mount 覆盖容器内配置;
+  内嵌 MCP 在容器模式下默认绑 `0.0.0.0`(Bearer token 保护)。
+- 也可用 Makefile 独立跑 MCP HTTP server:`make mcp-serve-http MCP_AUTH_TOKEN=<token>`。
 
-网关端点(`/api/opencode`):
-- `GET /status` —— 进程运行状态(脱敏,不含密码);
+外部 serve 模式(向后兼容,`opencode serve` 4096 + `FINBOARD_OPENCODE_ENABLED=true`)
+仍可用,见 `packages/finboard-opencode` 文档。
+
+### 隔离保证(Docker 容器)
+
+- **容器隔离**:版本锁定镜像 + 独立命名卷(`opencode-data` 会话 DB / auth,
+  容器删除后保留),与宿主机全局 opencode 彻底分离;
+- **环境变量严格白名单**:容器只注入 LLM Key / MCP token / basic auth 凭证,
+  **绝不**继承 FinBoard 的 DB 密码 / broker 凭证 / API Key;
+- **网络**:宿主机侧强制 `127.0.0.1` 绑定,不暴露公网;容器经
+  `host.docker.internal` 访问宿主机 finboard-mcp;
+- **项目配置 bind mount**:`.opencode`(agent 定义 / opencode.json)与
+  `.agents`(研究 Skill)只读挂载进容器。
+
+### 网关端点(`/api/opencode`)
+
+- `GET /status` —— 容器运行状态 + 内嵌 finboard-mcp server 运行状态(#157);
 - `GET /health` —— 代理健康探测;
-- `POST /access` —— 为已授权 `conversation_id`(必须 `ACTIVE`)签发访问凭证
-  (Web URL + basic auth),前端 iframe 据此嵌入。
+- `POST /access` —— 签发明文 `web_url`(#157 后无凭证字段;#121 后不绑定
+  conversation),前端 iframe 与「新窗口打开」共用同一 URL。
 
-### OpenCode Web 前端研究工作台(issue #111)
+### 前端研究工作台(issue #111 / #121 / #122)
 
-前端「研究工作台」页面(`/research/workbench`)是 OpenCode Web 与 FinBoard 研究
-页面的产品整合入口,**不在 FinBoard 内复制实现一套并行的 Agent 聊天工作流**:
+`/research/workbench` 两个 Tab:
 
-- **Part 1 —— FinBoard 控制面**(左侧):展示研究会话列表、状态徽章、网关健康指示、
-  「新建研究会话」入口(不会启动 ResearchRun / 回测 / 模拟盘)、关键事件摘要
-  (折叠面板,只展示 #109 持久化的 `KEY_EVENT_TYPES` —— message / tool / error /
-  session 等,token 级增量不落库、不展示)。
-- **Part 2 —— OpenCode Web 交互面**(右侧):iframe 跨源嵌入隔离实例,复用 #118 签发
-  的 `web_url` + basic auth 凭证构造嵌入 URL;提供刷新 / 中断 / 中止工具条。消息编排、
-  token 级聊天、工具调用可视化全部交给 OpenCode Web,完整历史由 OpenCode 运行时提供。
+- **工作台**:iframe 直连 OpenCode Web(OpenCode 自身管理会话 / 历史 / 恢复,
+  FinBoard 不再维护独立会话投影层);顶部 banner 显示 OpenCode Web 与 FinBoard MCP
+  运行状态;**研究写操作(创建 ResearchRun / 回测 / 模拟盘)由 agent 通过 MCP
+  自主执行(#122)**,不设网页审批硬门。
+- **审批中心**:AI 草案 / 因子假设 / 审计日志的审计与历史查看入口(走 REST
+  `/api/research/ai/*`,不依赖 OpenCode Web 网关)。
 
-**会话绑定与边界**:只能从 `/api/agent/conversations` 列表选择 FinBoard 授权绑定的
-会话,不能手动输入任意 `session_id`;凭证只在内存中构造 iframe URL,不写入 localStorage、
-不打印控制台、不渲染为可见文本;写操作(创建 ResearchRun / 回测 / 模拟盘)仍经 FinBoard
-MCP 草案 + 人工审批,前端不绕过;OpenCode Web 是研究交互层,FinBoard API/MCP 是事实来源
-与权限/审批边界;工作台不连接实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
+**降级**:`opencode_web_enabled=false`(网关返回 503)时「工作台」Tab 显示降级
+提示,「审批中心」Tab 仍可用。
 
-**降级**:`opencode_web_enabled=false`(网关返回 503)时,前端隐藏工作台入口,显示降级
-提示并引导到现有「AI 助手」(`/research/ai`)作为兼容入口。前端代码改动可完整回滚
-(删除新增页面与路由即恢复原状)。
+### MCP 审计与工具契约
+
+- 每次 MCP 工具调用记录审计事件(structlog + 内存副本;`FINBOARD_MCP_AUDIT_PERSIST=true`
+  时追加到独立 `mcp_audit_events` 表,`GET /api/mcp/audit` 可查询,#157);
+- 工具清单与边界同步规范见 #123:`_INSTRUCTIONS` / Skill `SKILL.md` /
+  `references/tools.md` / `ROADMAP.md` 必须与注册表同步,契约测试锁定工具总数。
 
 ### 回滚
 
 - 关闭 MCP 入口:`FINBOARD_MCP_ENABLED=false`(默认)
-- 关闭会话关联:`FINBOARD_OPENCODE_ENABLED=false`(默认)
-- 关闭 Web 工作台网关:`FINBOARD_OPENCODE_WEB_ENABLED=false`(默认),网关端点返回
-  503、不启动子进程
-- 三者均不影响现有 ResearchAssistant / REST 入口与研究产物。
+- 关闭外部 serve 接入:`FINBOARD_OPENCODE_ENABLED=false`(默认)
+- 关闭 Web 工作台网关:`FINBOARD_OPENCODE_WEB_ENABLED=false`(默认),网关端点
+  返回 503、不启动容器
+- 审计持久化:`FINBOARD_MCP_AUDIT_PERSIST=false`(默认)+ 迁移 downgrade
+- 均不影响现有 ResearchAssistant / REST 入口与研究产物。
 
 ---
 

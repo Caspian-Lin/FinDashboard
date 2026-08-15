@@ -31,13 +31,16 @@
   },
   "agent": {
     "finboard-researcher": {
-      "description": "FinBoard 研究助手 —— 通过 finboard MCP 工具进行只读量化研究与因子分析。仅在涉及研究数据/因子/回测/模拟盘分析时使用。",
+      "description": "FinBoard 研究助手 —— 通过 finboard MCP 工具进行量化研究与因子分析：查询 + 研究写操作自主执行(#122)。仅在涉及研究数据/因子/回测/模拟盘时使用。",
       "mode": "primary",
       "model": "deepseek/deepseek-v4-flash",
       "permission": {
-        "edit": "deny",
-        "bash": "deny",
-        "write": "deny"
+        "*": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "skill": "allow",
+        "finboard_*": "allow"
       }
     }
   }
