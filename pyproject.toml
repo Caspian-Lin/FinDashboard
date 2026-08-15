@@ -124,7 +124,7 @@ mypy_path = [
   "packages/finboard-mcp/src",
   "packages/finboard-opencode/src",
 ]
-exclude = ["migrations/versions/"]
+exclude = ["migrations/versions/", "data_releases/"]  # data_releases 为 gitignored 本地研究数据(容器 root 写入,Windows ACL 拒绝遍历)
 
 # 第三方券商 SDK(xtquant / CTP)没有类型存根,P1 实盘接入时按需在此添加
 # xtquant 仅 Windows + miniQMT 可用,Linux CI 无法安装;mypy 忽略其缺失。

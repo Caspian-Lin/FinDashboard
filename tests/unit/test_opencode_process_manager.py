@@ -110,6 +110,12 @@ def test_build_docker_run_command_basic(work_tmp) -> None:
     # named volume 持久化会话 DB / auth(容器删除后保留)。
     assert "opencode-data:/root/.local/share/opencode" in cmd
     assert "opencode-config:/root/.config/opencode" in cmd
+    # HOME / XDG 目录语义钉死:文件选择器从 /workspace 开始,会话 DB / auth
+    # 仍落 named volume(XDG 追加 opencode/ 子目录后正好是挂载点)。
+    assert "HOME=/workspace" in cmd
+    assert "XDG_DATA_HOME=/root/.local/share" in cmd
+    assert "XDG_CONFIG_HOME=/root/.config" in cmd
+    assert "XDG_STATE_HOME=/root/.local/state" in cmd
     # #157:不再注入 basic auth 凭证。
     assert not any(p.startswith("OPENCODE_SERVER_USERNAME=") for p in cmd)
     assert not any(p.startswith("OPENCODE_SERVER_PASSWORD=") for p in cmd)

@@ -547,6 +547,12 @@ uv run uvicorn finboard_api.app:app
 **降级**:`opencode_web_enabled=false`(网关返回 503)时「工作台」Tab 显示降级
 提示,「审批中心」Tab 仍可用。
 
+**首次使用恢复历史会话**(#112):OpenCode Web 的项目列表 / 最近会话保存在浏览器
+IndexedDB(iframe 与新窗口各自独立),服务端无法预置 —— 首次打开显示空白属正常。
+点击「添加项目」→ 搜索框输入 `/` → 点击 `~`(主目录,即容器内 `/workspace`)即可
+恢复历史会话,打开一次后浏览器自动记住。容器注入 `HOME=/workspace` 使文件选择器
+直接从工作目录开始;会话 DB 持久化在命名卷 `opencode-data`,容器重建不丢历史。
+
 ### MCP 审计与工具契约
 
 - 每次 MCP 工具调用记录审计事件(structlog + 内存副本;`FINBOARD_MCP_AUDIT_PERSIST=true`
