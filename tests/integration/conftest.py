@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from finboard_persistence import Base, create_async_engine, session_factory
+from finboard_persistence import Base, session_factory
 from finboard_shared.identifiers import AccountId
 from finboard_shared.types import OrderStatus
 
