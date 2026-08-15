@@ -243,8 +243,9 @@ async def test_acknowledged_consistent_no_repair(
 @pytest_asyncio.fixture
 async def restart_engine():
     """独立 engine + 建表,跨 session 持久化(测重启恢复必须 commit)。"""
-    from tests.integration.conftest import DB_URL
+    from tests.integration.conftest import DB_URL, ensure_test_db
 
+    await ensure_test_db(DB_URL)
     engine = create_async_engine(DB_URL)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

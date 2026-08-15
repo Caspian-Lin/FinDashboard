@@ -116,7 +116,11 @@ class TestScheduler:
             ScheduledTask(name="flaky", func=_sometimes_fail, interval=0.05)
         )
         await sched.start()
-        await asyncio.sleep(0.25)
+        # 条件等待而不是固定 sleep:全量测试(coverage 负载)下固定 0.25s
+        # 窗口内可能只跑到 1 次(issue #167 时序脆弱修复)。
+        async with asyncio.timeout(2.0):
+            while success_count < 2:
+                await asyncio.sleep(0.01)
         await sched.stop()
         # Even though first run threw, subsequent runs should continue
         assert success_count >= 2

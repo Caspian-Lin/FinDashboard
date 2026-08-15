@@ -315,11 +315,12 @@ async def test_network_jitter_tolerated(
 # ============================================================================
 async def test_partial_fill_restart_recovery(account_id: AccountId) -> None:
     """部分成交 → 重启 → RecoveryEngine 匹配券商状态修复。"""
-    from tests.integration.conftest import DB_URL
+    from tests.integration.conftest import DB_URL, ensure_test_db
 
     mock = MockBroker()
     risk = PreTradeChecker(config=RiskConfig(), kill_switch=KillSwitch())
 
+    await ensure_test_db(DB_URL)
     engine = create_async_engine(DB_URL)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
