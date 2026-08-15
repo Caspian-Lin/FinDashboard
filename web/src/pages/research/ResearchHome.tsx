@@ -9,7 +9,6 @@ import {
   Scale,
   PlayCircle,
   MonitorSmartphone,
-  Sparkles,
   FileText,
   ArrowRight,
   Activity,
@@ -24,7 +23,6 @@ import { LoadingState } from "@/components/ui/states";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { researchRunApi } from "@/lib/research";
 import { experimentApi } from "@/lib/research";
-import { aiResearchApi } from "@/lib/ai";
 import { datasetApi } from "@/lib/research";
 import { simulationApi } from "@/lib/simulation";
 import { timeAgo } from "@/lib/utils";
@@ -37,7 +35,7 @@ const workflowSteps = [
   { to: "/research/runs", label: "研究运行", icon: GitBranch, desc: "冻结输入、血缘追踪与运行重放" },
   { to: "/research/portfolio", label: "组合与风险", icon: Scale, desc: "目标权重分配、离散交易与资金可行性" },
   { to: "/research/simulation", label: "模拟盘", icon: PlayCircle, desc: "纸面撮合、目标仓位决策与绩效报告" },
-  { to: "/research/workbench", label: "研究工作台", icon: MonitorSmartphone, desc: "OpenCode Web 研究交互 + AI 草案/假设审批闭环" },
+  { to: "/research/workbench", label: "研究工作台", icon: MonitorSmartphone, desc: "OpenCode Web 研究交互(AI 能力由 OpenCode 承担)" },
   { to: "/research/reports", label: "研究报告", icon: FileText, desc: "聚合展示运行结果、绩效归因与风险" },
 ];
 
@@ -49,10 +47,6 @@ export default function ResearchHome() {
   const { data: experiments, isError: experimentsError } = useQuery({
     queryKey: ["experiments", "home"],
     queryFn: () => experimentApi.list({ limit: 5 }),
-  });
-  const { data: drafts, isError: draftsError } = useQuery({
-    queryKey: ["ai-drafts", "home"],
-    queryFn: () => aiResearchApi.listDrafts({ status: "proposed" }),
   });
   const { data: releases, isError: releasesError } = useQuery({
     queryKey: ["dataset-releases", "home"],
@@ -67,7 +61,7 @@ export default function ResearchHome() {
   const runningRuns = runsError ? null : runs?.filter((r) => r.status === "running" || r.status === "queued").length ?? 0;
   const completedExps = experimentsError ? null : experiments?.filter((e) => e.status === "completed").length ?? 0;
   const activeSims = simSessionsError ? null : simSessions?.filter((s) => s.status === "running").length ?? 0;
-  const hasQueryError = runsError || experimentsError || draftsError || releasesError || simSessionsError;
+  const hasQueryError = runsError || experimentsError || releasesError || simSessionsError;
 
   return (
     <div>
@@ -89,7 +83,7 @@ export default function ResearchHome() {
       <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label="已完成研究运行" value={completedRuns ?? "—"} icon={CheckCircle2} hint={runningRuns === null ? "加载失败" : runningRuns > 0 ? `${runningRuns} 个进行中` : "全部完成"} />
         <StatCard label="已完成实验" value={completedExps ?? "—"} icon={TestTube} hint={experimentsError ? "加载失败" : undefined} />
-        <StatCard label="待审批草案" value={draftsError ? "—" : drafts?.length ?? 0} icon={Sparkles} hint={draftsError ? "加载失败" : undefined} />
+        <StatCard label="最近数据发布" value={releasesError ? "—" : releases?.length ?? 0} icon={Database} hint={releasesError ? "加载失败" : undefined} />
         <StatCard label="活动模拟会话" value={activeSims ?? "—"} icon={PlayCircle} hint={simSessionsError ? "加载失败" : undefined} />
       </div>
 
@@ -183,39 +177,6 @@ export default function ResearchHome() {
               </div>
             ) : (
               <p className="py-4 text-center text-sm text-muted-foreground">暂无数据发布</p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* AI drafts */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Sparkles className="h-4 w-4 text-muted-foreground" />
-              待审批 AI 草案
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {draftsError ? (
-              <p className="py-4 text-center text-sm text-destructive">AI 草案加载失败，请进入「研究工作台 → 审批中心」重试。</p>
-            ) : drafts && drafts.length > 0 ? (
-              <div className="space-y-2">
-                {drafts.slice(0, 5).map((draft) => (
-                  <Link
-                    key={draft.draft_id}
-                    to="/research/workbench"
-                    className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent"
-                  >
-                    <div className="flex items-center gap-2">
-                      <StatusBadge status={draft.status} />
-                      <span className="text-xs">{draft.kind}</span>
-                    </div>
-                    <span className="text-xs text-muted-foreground">{draft.provenance.model_version}</span>
-                  </Link>
-                ))}
-              </div>
-            ) : (
-              <p className="py-4 text-center text-sm text-muted-foreground">暂无待审批草案</p>
             )}
           </CardContent>
         </Card>

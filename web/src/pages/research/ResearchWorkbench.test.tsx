@@ -73,7 +73,7 @@ beforeEach(() => {
 /* ============================================================ */
 
 describe("ResearchWorkbench 降级开关", () => {
-  it("网关 503(未启用)时工作台 Tab 显示降级提示,审批中心 Tab 仍可用", async () => {
+  it("网关 503(未启用)时工作台显示降级提示(#160 后无审批中心 Tab)", async () => {
     mocks.status.mockRejectedValue(
       new ApiError(503, "opencode web gateway disabled", "disabled"),
     );
@@ -81,7 +81,6 @@ describe("ResearchWorkbench 降级开关", () => {
     await waitFor(() => {
       expect(screen.getByText(/OpenCode Web 网关未启用/)).toBeInTheDocument();
     });
-    expect(screen.getAllByText(/审批中心/).length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector("iframe")).toBeNull();
   });
 
