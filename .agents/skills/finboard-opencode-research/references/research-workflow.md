@@ -37,7 +37,6 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 | `finboard.feature_snapshot.create` / `.job_start` / `.job_status`(构建快照,含异步轮询) | ✅ #125 |
 | `finboard.factor.signal.list` / `.get`(查询因子信号) | ✅ #125 |
 | `finboard.factor.experiment.list` / `.get` / `.create` / `.sync_validation`(因子实验闭环) | ✅ #125 |
-| `finboard.ai.propose_hypothesis`(生成因子假设草案) | ✅ 已实现 |
 
 ## 步骤 3:策略规格
 
@@ -54,7 +53,6 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 | `finboard.strategy.draft_create` / `.supersede` / `.publish` / `.rollback`(版本生命周期) | ✅ #126 |
 | `finboard.strategy.list` / `.history` / `.version_get` / `.diff`(查询 / diff) | ✅ #126 |
 | `finboard.preset.list` / `.get` / `.create` / `.update` / `.delete`(预设 CRUD) | ✅ #126 |
-| `finboard.ai.propose_strategy_draft` / `.propose_strategy_diff` | ✅ 已实现 |
 
 ## 步骤 4:回测
 
@@ -125,12 +123,11 @@ agent 的闭环能力(截至 #128):
    订单 / 成交 / 持仓 / 账本 / 审计 / 报告(✅ `finboard.sim.*`)
 7. **portfolio 计算**:目标权重分配 / 离散手数 sizing / 资金档位可行性 /
    绩效归因(✅ `finboard.portfolio.*`,纯计算无 DB 写入)
-8. **生成草案**:因子假设 / 策略草案 / 策略 diff(✅ `finboard.ai.propose_*`)
-9. **问答**:金融 / 研究问题,引用项目来源(✅ `finboard.ai.ask`)
-10. **记忆**:跨会话积累研究上下文(✅ `finboard.memory.*`)
+8. **问答 / 假设**:研究问题与因子假设由 agent 自身(OpenCode LLM)直接分析,
+   引用项目来源;机器验证走 #57 验证实验 / 因子实验(✅ 不再内置 LLM 工具)
+9. **记忆**:跨会话积累研究上下文(✅ `finboard.memory.*`)
 
 **不能直接做**(触及实盘交易安全红线,永久不注册为 MCP 工具):
 - 下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测
 
-**替代路径**:用 `finboard.ai.ask` 回答研究问题(底层 ResearchAssistant 可读研究
-上下文),但结果以 AI 草案形式呈现,需人工核对。
+

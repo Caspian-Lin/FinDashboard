@@ -1,11 +1,10 @@
 """FinBoard MCP Server 组装。
 
 构建一个 :class:`MCPServer`,挂载研究域 lifespan(``AsyncEngine`` +
-``ResearchAssistant`` + ``AuditRecorder``),并注册受控研究工具集。
+``AuditRecorder``),并注册受控研究工具集。
 
 当前工具集(随 sub-issue 增量扩展):
 
-* ``finboard.ai.*`` —— AI 研究助手(问答 / 因子假设 / 策略草案 / 策略 diff);
 * ``finboard.run.*`` —— ResearchRun 只读查询(列表 / 详情 / artifact);
 * ``finboard.memory.*`` —— 研究长期记忆(记住 / 忘记 / 纠正 / 确认 / 归档 /
   列表 / 详情),让 Agent 跨会话积累研究上下文;
@@ -54,7 +53,6 @@ from mcp.server import MCPServer
 
 from finboard_mcp.context import app_lifespan
 from finboard_mcp.tools import (
-    register_ai_tools,
     register_backtest_tools,
     register_data_tools,
     register_data_write_tools,
@@ -82,12 +80,9 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(117 个,已实现) ==
+== 当前可用工具(113 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127)
-- finboard.ai.*(4) —— AI 草案:ask / propose_hypothesis / propose_strategy_draft
-  / propose_strategy_diff(底层 ResearchAssistant 强制 assert_research_only_request
-  拒绝越权 + sanitize_prompt 抹掉凭证)
 - finboard.memory.*(7) —— 研究记忆:remember / list / get / forget / correct
   / confirm / archive(跨会话长期上下文,操作 research_memories 独立表)
 - 数据查询(9,✅ #124):instrument list/get/search、dataset_release list/get、
@@ -157,7 +152,6 @@ FinBoard 研究 MCP —— 量化研究工具集
   provenance / idempotency_key)。
 - 金融答案必须引用项目来源(ResearchRun ID / 数据集版本 / 模拟盘 ID)。
 - 数据不足时明确声明「数据不足」,绝不编造数字。
-- AI 草案(DraftStatus: proposed→approved→consumed/rejected)是评审起点,不是结论。\
 """
 
 
@@ -168,7 +162,6 @@ def build_mcp_server() -> MCPServer:
         instructions=_INSTRUCTIONS,
         lifespan=app_lifespan,
     )
-    register_ai_tools(mcp)
     register_run_tools(mcp)
     register_memory_tools(mcp)
     register_data_tools(mcp)

@@ -151,7 +151,7 @@ dataclass 列表逐元素序列化(顶层是 list 时 `dataclasses.asdict` 不�
 `config_get` / `etf_review_queue` 只读自动允许。`requested_by` 统一用
 `mcp:<kind>` 前缀(审计区分入口,REST=`api:`,MCP=`mcp:`)。不连 broker /
 账户 / 订单 / 持仓。回滚:移除 `register_data_write_tools(mcp)` 调用 +
-`data_write.py` 即可,不影响 REST / ResearchAssistant / 现有只读 MCP 工具 /
+`data_write.py` 即可,不影响 REST / 现有只读 MCP 工具 /
 #117 队列。
 
 ### ✅ #138 验证实验工具(已完成)
@@ -265,4 +265,4 @@ CSV 带 UTF-8 BOM(Excel 打开中文不乱码)、每节 `# 标题` 注释行 + �
 ## 回滚方案
 
 MCP 是受控入口,回滚方案为**关闭 MCP 入口**(不启动 server),不影响现有
-ResearchAssistant / REST 入口与研究产物 / 审计。
+REST 入口与研究产物 / 审计。

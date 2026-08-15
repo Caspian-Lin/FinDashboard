@@ -13,7 +13,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 核心原则(HARD RULES)
 
-1. **只读直接调用** —— 数据 / 因子 / ResearchRun / 模拟盘查询 / AI 问答可直接调用。
+1. **只读直接调用** —— 数据 / 因子 / ResearchRun / 模拟盘查询可直接调用。
 2. **研究写操作可自主执行**(#122) —— 创建因子 / 快照 / 策略 / 运行回测 / 发布数据 /
    启动模拟盘等研究写操作 agent 可通过 MCP **自主执行**,无需人工审批。
    不触及交易安全红线(不连 broker / 账户 / 订单 / 持仓)。
@@ -24,12 +24,11 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-当前已实现 117 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+当前已实现 113 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
 | 查询 / 管理 ResearchRun | `finboard.run.*`(list/get/artifacts 只读 + queue/cancel/replay/lineage 写,7 个) | ✅ #127 | 3 只读 + 4 自主执行 |
-| 金融问答 / 因子假设 / 策略草案 | `finboard.ai.ask` / `.propose_*` | ✅ | 草案(可追溯) |
 | 记住 / 查询 / 纠正研究记忆 | `finboard.memory.*`(7 个) | ✅ | 直接执行 |
 | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额 | `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`(9 个) | ✅ #124 | 只读 |
 | 数据准备(拉取/同步/发布/修复/ETF/配置) | `finboard.data_write.*` / `.etf.*`(12 个) | ✅ #137 | 2 只读 + 10 自主执行 |
@@ -49,7 +48,8 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 ## 研究工作流(简版)
 
 1. **理解问题** —— 查询相关数据 / ResearchRun / 模拟盘。
-2. **形成假设** —— 用 `finboard.ai.propose_hypothesis` 生成结构化因子假设草案。
+2. **形成假设** —— 你自己(OpenCode LLM)直接分析并给出可检验的研究假设;
+   需要机器验证时创建 #57 验证实验(`finboard.validation_experiment.*`)。
 3. **记忆上下文** —— 用 `finboard.memory.remember` 记住关键发现,关联研究产物。
 4. **引用来源** —— 所有结论引用 ResearchRun / 数据集 / 模拟盘产物 ID。
 
@@ -60,7 +60,6 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 - 金融答案**必须引用项目来源**(ResearchRun ID / 数据集版本 / 模拟盘 ID)。
 - 数据不足时明确声明「数据不足」,**绝不编造数字**。
-- 区分 `DraftStatus`:`proposed` 是人工评审起点,**不是结论**。
 
 ## 记忆使用规则(简版)
 
@@ -76,7 +75,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 | 文档 | 内容 |
 |------|------|
-| `references/tools.md` | 117 个 MCP 工具完整契约(参数 / 返回 / 场景) |
+| `references/tools.md` | 113 个 MCP 工具完整契约(参数 / 返回 / 场景) |
 | `references/workflow.md` | 研究工作流决策树 + 标准研究循环 |
 | `references/research-workflow.md` | 完整研究流程详解(数据→因子→策略→回测→模拟→评估) |
 | `references/memory.md` | 研究记忆使用规则与生命周期 |

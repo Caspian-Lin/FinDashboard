@@ -14,9 +14,6 @@
   ├─ 查询现有 ResearchRun / artifact?          ✅ 已实现
   │    → finboard.run.list / .get / .artifacts (只读,直接调用)
   │
-  ├─ 金融问答 / 因子假设 / 策略草案?            ✅ 已实现
-  │    → finboard.ai.* (产出草案,标注 proposed,可追溯)
-  │
   ├─ 记住 / 纠正 / 查询研究上下文?              ✅ 已实现
   │    → finboard.memory.* (直接执行)
   │
@@ -61,11 +58,13 @@
    不要猜测。
 2. **检索** —— 用 `finboard.run.list` / `finboard.run.get` 查询相关 ResearchRun;
    用 `finboard.memory.list` 查询是否已有相关研究记忆。
-3. **假设** —— 用 `finboard.ai.propose_hypothesis` 生成结构化因子假设草案
-   (经济机制 / 输入字段 / 预期失败场景 / 方向 / 参考文献)。
+3. **假设** —— 你自己(OpenCode LLM)直接给出结构化研究假设(经济机制 /
+   输入字段 / 预期失败场景 / 方向 / 参考文献);需要机器验证时创建 #57
+   验证实验(`finboard.validation_experiment.*`)或因子实验
+   (`finboard.factor.experiment_*`)走 OOS 闭环。
 4. **记忆** —— 用 `finboard.memory.remember` 记住关键发现,`source_refs` 关联
    具体产物(ResearchRun ID / 数据集版本 / 模拟盘 ID)。
-5. **回答** —— 引用来源,区分 `proposed`(草案)与已验证结论。
+5. **回答** —— 引用来源,区分个人假设与机器验证结论(OOS 终态)。
 
 ## 因子假设的结构化要求
 

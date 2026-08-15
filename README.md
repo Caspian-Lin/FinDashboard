@@ -349,7 +349,7 @@ cancelled`。逐阶段 PostgreSQL checkpoint 支持重启恢复，run/decision/t
 持仓只能由研究成交推导。
 
 API 只提供排队、历史、血缘、取消和重放登记，没有同步 `/run` 或 `/execute`
-端点;LLM actor 在 API 和领域层都被拒绝。网页仍只编辑结构化策略，不提供 Python
+端点。网页仍只编辑结构化策略，不提供 Python
 策略代码。完整架构、状态机、artifact/API 契约、错误语义、复现步骤和
 `phase1_doc.md` §3.4 映射见
 [统一研究回测生命周期](docs/research_run_lifecycle.md)。
@@ -485,7 +485,7 @@ FinBoard 把 [OpenCode](https://opencode.ai) 作为受控研究 Agent 运行时,
 opencode web Docker 容器(宿主机侧锁 loopback)
   ↓ finboard-researcher agent(内置 bash/edit/write/webfetch 等默认拒绝,
     只放行 read/glob/grep/skill + finboard_* MCP 工具)
-finboard-mcp(受控 MCP 工具,117 个;研究写操作自主执行 #122)
+finboard-mcp(受控 MCP 工具,113 个;研究写操作自主执行 #122;#160 后零内置 LLM)
   ↓ Bearer token(streamable-http)
 FinDashboard service / repository(唯一事实来源)
 ```
@@ -498,7 +498,6 @@ FINBOARD_OPENCODE_WEB_ENABLED=true \
 FINBOARD_OPENCODE_MANAGE_PROCESS=true \
 FINBOARD_OPENCODE_WEB_CORS_ORIGINS=http://localhost:5173 \
 FINBOARD_MCP_AUTH_TOKEN=<token> \
-FINBOARD_LLM_API_KEY=<key> \
 FINBOARD_OPENCODE_ENV_OVERRIDES=DEEPSEEK_API_KEY=<key> \
 uv run uvicorn finboard_api.app:app
 ```
@@ -567,7 +566,7 @@ IndexedDB(iframe 与新窗口各自独立),服务端无法预置 —— 首次�
 - 关闭 Web 工作台网关:`FINBOARD_OPENCODE_WEB_ENABLED=false`(默认),网关端点
   返回 503、不启动容器
 - 审计持久化:`FINBOARD_MCP_AUDIT_PERSIST=false`(默认)+ 迁移 downgrade
-- 均不影响现有 ResearchAssistant / REST 入口与研究产物。
+- 均不影响现有 REST 入口与研究产物。
 
 ---
 

@@ -50,7 +50,6 @@ def test_tools_contract_lists_all_tool_families() -> None:
     content = (_SKILL_DIR / "references" / "tools.md").read_text(encoding="utf-8")
     for name in [
         "finboard_run_list",
-        "finboard_ai_ask",
         "finboard_memory_remember",
         "finboard_memory_correct",
         "finboard_memory_confirm",

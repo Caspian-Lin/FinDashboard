@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from finboard_persistence import Base, create_async_engine, session_factory
+from finboard_persistence import Base, session_factory
 from finboard_shared.identifiers import AccountId
 from finboard_shared.types import OrderStatus
 
@@ -55,7 +55,18 @@ async def clean_tables(conn: Any) -> None:
 
 @pytest_asyncio.fixture(scope="module")
 async def _engine(_db_url: str) -> AsyncIterator[AsyncEngine]:
-    engine = create_async_engine(_db_url)
+    # lock_timeout:等行/表锁超过 10s 直接报错而不是无限挂起。本地开发库可能
+    # 有残留的 idle-in-transaction 会话(或与 finboard dev 并存),没有它一个
+    # 僵尸事务就能把整个测试运行卡死在 clean_tables 的 DELETE 上。
+    # 注:finboard_persistence.create_async_engine 是固定参数的包装,不透传
+    # connect_args,这里直接用 SQLAlchemy 原生构造。
+    from sqlalchemy.ext.asyncio import create_async_engine as _sa_create_async_engine
+
+    engine = _sa_create_async_engine(
+        _db_url,
+        pool_pre_ping=True,
+        connect_args={"options": "-c lock_timeout=10000"},
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine

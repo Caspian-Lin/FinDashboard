@@ -22,7 +22,6 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from finboard_backtest.factor_research import FakeLLMProvider, ResearchAssistant
 from finboard_backtest.feature_snapshot_jobs import FeatureSnapshotJobManager
 from finboard_backtest.validation.contracts import (
     ExperimentStatus,
@@ -113,16 +112,13 @@ async def _publish_release(session: AsyncSession, tmp_path: Path) -> Any:
 
 
 def _make_app(_engine: AsyncEngine) -> McpAppContext:
-    provider = FakeLLMProvider()
     from finboard_app.config import Settings
     return McpAppContext(
         settings=Settings(),
         session_maker=session_factory(_engine),
-        research_assistant=ResearchAssistant(provider),
         audit=AuditRecorder(),
         write_tools_enabled=True,
         engine=_engine,
-        provider=provider,
         feature_snapshot_jobs=FeatureSnapshotJobManager(),
     )
 

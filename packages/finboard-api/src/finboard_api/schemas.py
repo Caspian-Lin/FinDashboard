@@ -346,40 +346,6 @@ class SchedulerConfigUpdate(BaseSchema):
     download_types: list[str] | None = None
 
 
-# --------------------------------------------------------------------------- LLM Provider
-# 设置页可直接编辑并持久化到 .env(见 routes/data.py)。
-# api_key 属敏感字段:GET 返回固定掩码 "********" + api_key_set 标记,
-# PUT 时 api_key == "********" 视为哨兵,不修改原值;传其它值(含空串)则覆盖。
-class LLMConfigOut(BaseSchema):
-    provider: Literal["fake", "openai_compatible"] = "fake"
-    base_url: str = ""
-    api_key: str = ""
-    api_key_set: bool = False
-    model: str = "gpt-4o-mini"
-    # timeout_seconds 保留旧字段名,语义为“连续没有真实 token 的空闲超时”。
-    timeout_seconds: float = 30.0
-    max_retries: int = 3
-    connect_timeout_seconds: float = 10.0
-    total_timeout_seconds: float = 600.0
-    max_tokens: int = 4096
-    thinking_enabled: bool = True
-    reasoning_effort: Literal["high", "max"] = "high"
-
-
-class LLMConfigUpdate(BaseSchema):
-    provider: Literal["fake", "openai_compatible"] | None = None
-    base_url: str | None = None
-    api_key: str | None = None
-    model: str | None = None
-    timeout_seconds: float | None = None
-    max_retries: int | None = None
-    connect_timeout_seconds: float | None = None
-    total_timeout_seconds: float | None = None
-    max_tokens: int | None = None
-    thinking_enabled: bool | None = None
-    reasoning_effort: Literal["high", "max"] | None = None
-
-
 # --------------------------------------------------------------------------- Backtest
 class BacktestRunRequest(BaseSchema):
     strategy: str

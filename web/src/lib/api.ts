@@ -371,9 +371,6 @@ export const api = {
     fetchJSON<SchedulerConfig>("/data/config", { method: "PUT", body: JSON.stringify(body) }),
 
   // ---- LLM Provider Config (persisted to .env) ----
-  getLlmConfig: () => fetchJSON<LLMConfig>("/data/llm-config"),
-  updateLlmConfig: (body: Partial<LLMConfigUpdate>) =>
-    fetchJSON<LLMConfig>("/data/llm-config", { method: "PUT", body: JSON.stringify(body) }),
 };
 
 // ---- Data types ----
@@ -762,32 +759,3 @@ export interface SchedulerConfig {
 
 // ---- LLM Provider types ----
 // api_key: GET 返回固定掩码 "********"(已设置时);PUT 回传 "********" 表示不改。
-export interface LLMConfig {
-  provider: "fake" | "openai_compatible";
-  base_url: string;
-  api_key: string;
-  api_key_set: boolean;
-  model: string;
-  /** 连续没有真实 token 的空闲超时(秒),keep-alive 不重置。 */
-  timeout_seconds: number;
-  max_retries: number;
-  connect_timeout_seconds: number;
-  total_timeout_seconds: number;
-  max_tokens: number;
-  thinking_enabled: boolean;
-  reasoning_effort: "high" | "max";
-}
-
-export interface LLMConfigUpdate {
-  provider?: "fake" | "openai_compatible";
-  base_url?: string;
-  api_key?: string;
-  model?: string;
-  timeout_seconds?: number;
-  max_retries?: number;
-  connect_timeout_seconds?: number;
-  total_timeout_seconds?: number;
-  max_tokens?: number;
-  thinking_enabled?: boolean;
-  reasoning_effort?: "high" | "max";
-}
