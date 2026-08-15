@@ -221,7 +221,7 @@ interface ChartTooltipProps {
 function EquityTooltip({ active, payload, label }: ChartTooltipProps) {
   if (!active || !payload || payload.length === 0) return null;
   return (
-    <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs shadow-md">
+    <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs">
       <p className="text-muted-foreground">
         {typeof label === "string" ? shortDate(label) : label}
       </p>
@@ -245,7 +245,7 @@ function EquityTooltip({ active, payload, label }: ChartTooltipProps) {
 function DrawdownTooltip({ active, payload, label }: ChartTooltipProps) {
   if (!active || !payload || payload.length === 0) return null;
   return (
-    <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs shadow-md">
+    <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs">
       <p className="text-muted-foreground">
         {typeof label === "string" ? shortDate(label) : label}
       </p>

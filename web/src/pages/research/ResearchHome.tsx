@@ -94,7 +94,7 @@ export default function ResearchHome() {
           <Link
             key={step.to}
             to={step.to}
-            className="group rounded-lg border border-border bg-card p-4 shadow-sm transition-all hover:border-primary/50 hover:shadow-md"
+            className="group rounded-lg border border-border bg-card p-4 transition-all hover:border-primary/50"
           >
             <div className="flex items-start justify-between">
               <div className="flex items-center gap-3">

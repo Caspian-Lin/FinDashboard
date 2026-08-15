@@ -71,17 +71,16 @@ import { cn, formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
 type SignalRow = { symbol: string; score: string; direction: "long" | "short" };
 type LotRow = { symbol: string; lot_size: string; price: string };
 
+// 图表调色板统一走主题 token(--chart-1..8),随深浅主题切换
 const PALETTE = [
-  "#60a5fa",
-  "#34d399",
-  "#fbbf24",
-  "#f87171",
-  "#a78bfa",
-  "#22d3ee",
-  "#fb923c",
-  "#e879f9",
-  "#4ade80",
-  "#facc15",
+  "hsl(var(--chart-1))",
+  "hsl(var(--chart-2))",
+  "hsl(var(--chart-3))",
+  "hsl(var(--chart-4))",
+  "hsl(var(--chart-5))",
+  "hsl(var(--chart-6))",
+  "hsl(var(--chart-7))",
+  "hsl(var(--chart-8))",
 ];
 
 const fmtPct = (v: number | null | undefined, digits = 2): string =>
@@ -358,7 +357,7 @@ function AllocationTab({
                         outerRadius={92}
                         innerRadius={48}
                         paddingAngle={2}
-                        stroke="#0f172a"
+                        stroke="hsl(var(--background))"
                         strokeWidth={1}
                       >
                         {pieData.map((entry, idx) => (
@@ -370,23 +369,23 @@ function AllocationTab({
                       </Pie>
                       <RechartsTooltip
                         contentStyle={{
-                          backgroundColor: "#1e293b",
-                          border: "1px solid #334155",
+                          backgroundColor: "hsl(var(--popover))",
+                          border: "1px solid hsl(var(--border))",
                           borderRadius: 8,
-                          color: "#e2e8f0",
+                          color: "hsl(var(--popover-foreground))",
                           fontSize: 12,
                         }}
-                        itemStyle={{ color: "#e2e8f0" }}
-                        labelStyle={{ color: "#94a3b8" }}
+                        itemStyle={{ color: "hsl(var(--popover-foreground))" }}
+                        labelStyle={{ color: "hsl(var(--muted-foreground))" }}
                         formatter={(value, name) => [
                           fmtPct(Number(value)),
                           String(name),
                         ]}
                       />
                       <Legend
-                        wrapperStyle={{ fontSize: 12, color: "#94a3b8" }}
+                        wrapperStyle={{ fontSize: 12, color: "hsl(var(--muted-foreground))" }}
                         formatter={(value) => (
-                          <span style={{ color: "#cbd5e1" }}>
+                          <span style={{ color: "hsl(var(--foreground))" }}>
                             {String(value)}
                           </span>
                         )}
