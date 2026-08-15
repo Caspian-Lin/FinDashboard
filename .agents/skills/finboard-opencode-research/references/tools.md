@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 117 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 113 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -14,7 +14,6 @@
 |------|----------|-----------|
 | 只读查询(run.* / instrument.* / dataset.* / data.* / tushare.*) | ✅ | |
 | 研究记忆(memory.*) | ✅ | |
-| AI 草案(ai.*:假设/策略) | ✅(产出草案,可追溯) | |
 | 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅ | |
 | 策略规格(strategy.* / preset.*,✅ #126) | ✅(含 validate/draft/publish/rollback) | |
 | 回测(backtest.*,✅ #127) | ✅(含同步运行 / 历史 CRUD) | |
@@ -72,30 +71,6 @@
 - 参数:`run_id: str`、`trace_id: str`
 - 返回:`{run_id, leaf_trace_id, artifacts: [{artifact_id, stage, trace_id, parent_trace_ids, payload, ...}]}`
 - 错误:`not_found`(trace 不存在)
-
-## finboard.ai.*(AI 草案,可追溯)
-
-底层 `ResearchAssistant` 已强制 `assert_research_only_request`(拒绝实盘越权与注入)
-与 `sanitize_prompt`(抹掉凭证)。MCP 层 `prompt` 参数脱敏后入审计。
-AI 草案(`DraftStatus: proposed→approved→consumed/rejected`)可追溯但不再 block 写操作。
-
-### finboard_ai_ask
-金融问答(引用来源 / 声明不确定性)。
-- 参数:`prompt: str`
-- 返回:`data`(AnswerResult)+ `provenance`
-
-### finboard_ai_propose_hypothesis
-生成因子假设草案(可追溯,无需审批即可登记)。
-- 参数:`prompt: str`
-- 返回:`data`(FactorHypothesis 草案)+ `provenance`
-
-### finboard_ai_propose_strategy_draft
-生成无代码策略组件草案(受白名单约束,可追溯)。
-- 参数:`prompt: str`
-
-### finboard_ai_propose_strategy_diff
-生成策略版本 diff 草案(可通过策略规格 API 正式化)。
-- 参数:`prompt: str`
 
 ## finboard.memory.*(研究记忆,自动允许)
 
