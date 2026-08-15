@@ -17,6 +17,7 @@ import {
   ShieldAlert,
   TrendingUp,
   Bookmark,
+  ListTodo,
   Settings,
 } from "lucide-react";
 
@@ -65,6 +66,7 @@ export const navGroups: NavGroup[] = [
     items: [
       { to: "/backtest", label: "回测", icon: TrendingUp },
       { to: "/strategies", label: "策略预设", icon: Bookmark },
+      { to: "/jobs", label: "任务中心", icon: ListTodo },
       { to: "/settings", label: "设置", icon: Settings },
     ],
   },

@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -336,12 +336,38 @@ class BackgroundJobRepository:
         return rows
 
     async def request_cancel(self, job_id: str) -> BackgroundJobModel:
-        """协作式取消请求:running → cancel_requested,由 executor checkpoint 时退出。"""
+        """协作式取消请求。
 
-        return await self.transition(
-            job_id,
-            expected=frozenset({BackgroundJobStatus.RUNNING.value}),
-            target=BackgroundJobStatus.CANCEL_REQUESTED.value,
+        - running → cancel_requested(executor checkpoint 时退出);
+        - queued / retry_waiting → cancelled(还没被 worker 领取,直接置终态);
+        - 其余状态(终态 / interrupted)拒绝。
+        """
+
+        row = await self.get(job_id, for_update=True)
+        if row is None:
+            raise BackgroundJobPersistenceConflictError(f"后台任务不存在: {job_id}")
+        if row.status == BackgroundJobStatus.RUNNING.value:
+            return await self.transition(
+                job_id,
+                expected=frozenset({BackgroundJobStatus.RUNNING.value}),
+                target=BackgroundJobStatus.CANCEL_REQUESTED.value,
+            )
+        if row.status in {
+            BackgroundJobStatus.QUEUED.value,
+            BackgroundJobStatus.RETRY_WAITING.value,
+        }:
+            return await self.transition(
+                job_id,
+                expected=frozenset(
+                    {
+                        BackgroundJobStatus.QUEUED.value,
+                        BackgroundJobStatus.RETRY_WAITING.value,
+                    }
+                ),
+                target=BackgroundJobStatus.CANCELLED.value,
+            )
+        raise BackgroundJobPersistenceConflictError(
+            f"任务 {job_id} 当前状态 {row.status} 不支持取消"
         )
 
     async def finish(
@@ -385,6 +411,58 @@ class BackgroundJobRepository:
             ),
             target=BackgroundJobStatus.QUEUED.value,
         )
+
+    async def requeue_due(
+        self,
+        now: datetime,
+        *,
+        backoff_seconds: float,
+        limit: int = 50,
+    ) -> tuple[list[BackgroundJobModel], list[BackgroundJobModel]]:
+        """自动重排进入重试态已超过退避窗口的任务(issue #161)。
+
+        - ``interrupted`` / ``retry_waiting`` 且 ``updated_at <= now - backoff``
+          (即进入该状态已超过退避窗口)参与本轮;``updated_at`` 在进入这两个
+          状态时由 ``transition`` 更新,天然就是状态进入时间;
+        - 还有剩余 attempt 的 → ``queued`` 重新入队(attempt 在下次领取时递增);
+        - attempt 已耗尽 → ``failed``(终态,error_code=max_retries_exceeded)。
+
+        ``FOR UPDATE SKIP LOCKED`` 保证多 worker 并发维护时同一行只被处理一次。
+        返回 ``(requeued, exhausted)`` 两批行;调用方负责 commit。
+        """
+
+        cutoff = now - timedelta(seconds=max(backoff_seconds, 0.0))
+        stmt = (
+            select(BackgroundJobModel)
+            .where(
+                BackgroundJobModel.status.in_(
+                    (
+                        BackgroundJobStatus.INTERRUPTED.value,
+                        BackgroundJobStatus.RETRY_WAITING.value,
+                    )
+                ),
+                BackgroundJobModel.updated_at <= cutoff,
+            )
+            .order_by(BackgroundJobModel.updated_at.asc())
+            .with_for_update(skip_locked=True)
+            .limit(limit)
+        )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        requeued: list[BackgroundJobModel] = []
+        exhausted: list[BackgroundJobModel] = []
+        for row in rows:
+            row.updated_at = now
+            if row.attempt >= row.max_attempts:
+                row.status = BackgroundJobStatus.FAILED.value
+                row.error_code = "max_retries_exceeded"
+                row.error_summary = f"重试次数已达上限({row.max_attempts})"
+                row.finished_at = now
+                exhausted.append(row)
+            else:
+                row.status = BackgroundJobStatus.QUEUED.value
+                requeued.append(row)
+        await self._session.flush()
+        return requeued, exhausted
 
     @staticmethod
     def model_payload(row: BackgroundJobModel) -> dict[str, Any]:

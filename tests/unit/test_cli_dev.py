@@ -21,6 +21,8 @@ def test_dev_keeps_api_in_foreground_and_always_stops_frontend(tmp_path: Path) -
     with (
         patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
         patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._spawn_dev_worker") as spawn_worker,
+        patch("finboard_app.cli._stop_dev_process"),
         patch("finboard_app.cli.threading.Thread", return_value=thread),
         patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt) as serve,
         pytest.raises(KeyboardInterrupt),
@@ -30,6 +32,92 @@ def test_dev_keeps_api_in_foreground_and_always_stops_frontend(tmp_path: Path) -
     thread.start.assert_called_once_with()
     thread.join.assert_called_once_with(timeout=1.0)
     serve.assert_called_once_with(ctx, host="127.0.0.1", port=8000, reload=False)
+    spawn_worker.assert_called_once_with()
+
+
+@pytest.mark.unit
+def test_dev_no_worker_skips_spawn(tmp_path: Path) -> None:
+    """--no-worker 逃生开关:dev 不启动后台 worker(生产独立部署形态)。"""
+    from finboard_app.cli import dev
+
+    ctx = MagicMock()
+    ctx.obj = MagicMock()
+    thread = MagicMock()
+
+    with (
+        patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
+        patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._spawn_dev_worker") as spawn_worker,
+        patch("finboard_app.cli.threading.Thread", return_value=thread),
+        patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        dev(ctx, host="127.0.0.1", port=8000, web_dir=tmp_path, no_worker=True)
+
+    spawn_worker.assert_not_called()
+
+
+@pytest.mark.unit
+def test_dev_worker_process_is_stopped_on_exit(tmp_path: Path) -> None:
+    """dev 退出时必须与 Vite 一样回收 worker 子进程(不留孤儿进程)。"""
+    from finboard_app.cli import dev
+
+    ctx = MagicMock()
+    ctx.obj = MagicMock()
+    thread = MagicMock()
+    worker_process = MagicMock(spec=subprocess.Popen)
+
+    with (
+        patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
+        patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._spawn_dev_worker", return_value=worker_process),
+        patch("finboard_app.cli.threading.Thread", return_value=thread),
+        patch("finboard_app.cli._stop_dev_process") as stop_process,
+        patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        dev(ctx, host="127.0.0.1", port=8000, web_dir=tmp_path)
+
+    stop_process.assert_any_call(worker_process)
+
+
+@pytest.mark.unit
+def test_dev_worker_command_uses_module_entry() -> None:
+    """dev 托管的 worker 用同一 venv python 跑 finboard_app.cli,与 CLI 行为一致。"""
+    import sys
+
+    from finboard_app.cli import _dev_worker_command
+
+    cmd = _dev_worker_command()
+    assert cmd[0] == sys.executable
+    assert cmd[-4:] == ["-m", "finboard_app.cli", "worker", "run"]
+
+
+@pytest.mark.unit
+def test_stop_dev_process_kills_real_child() -> None:
+    """真实子进程验证:stop 后进程树退出,不留下孤儿进程(Windows + Unix)。
+
+    用无害的 sleep 子进程验证回收逻辑,避免在测试期间拉起真实 worker
+    连接开发数据库。
+    """
+    import sys
+    import time
+
+    from finboard_app.cli import _stop_dev_process
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"]
+    )
+    try:
+        _stop_dev_process(process, timeout=3.0)
+    finally:
+        if process.poll() is None:
+            process.kill()
+    for _ in range(100):
+        if process.poll() is not None:
+            break
+        time.sleep(0.05)
+    assert process.poll() is not None
 
 
 @pytest.mark.unit

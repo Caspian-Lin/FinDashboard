@@ -121,20 +121,26 @@ make test             # unit + smoke(默认跳过 integration)
 make test-integration # 需要 PostgreSQL 已就绪
 ```
 
-### 4. 一键启动前后端开发服务器
+### 4. 一键启动开发环境
 
 ```bash
-make dev              # 后端 FastAPI(:8000) + 前端 Vite(:5173),Ctrl-C 同时退出
+make dev              # 后端 FastAPI(:8000) + 前端 Vite(:5173) + 后台 Worker,Ctrl-C 同时退出
 ```
 
 打开浏览器访问 `http://localhost:5173` 即可使用交易控制台。
 Vite dev server 自动代理 `/api` 和 `/ws` 到后端。
+
+`make dev` 默认同时托管一个后台 **Worker 子进程**,研究/数据 job 无需再
+另开终端即可被消费;退出 dev 时 Worker 与 Vite 一起回收,不留孤儿进程。
+如不需要(例如本机已另跑独立 Worker),用 `uv run finboard dev --no-worker`
+关闭。前端「任务中心」页(`/jobs`)可查看全部任务、过滤、详情与取消。
 
 也可以分别启动:
 
 ```bash
 make serve            # 仅后端(带 --reload 热重载)
 make web-dev          # 仅前端
+make worker           # 仅后台任务 Worker(独立部署形态)
 ```
 
 ### 5. 启动交易核心(CLI 模式,不带 API)
@@ -149,21 +155,28 @@ CLI 入口(`uv run finboard --help`)提供 `run / serve / reconcile / migrate / 
 
 API 进程只做参数校验、创建任务和查询状态,所有研究/数据/回测域的耗时任务
 (批量行情拉取、数据集发布、特征快照、回测、数据同步、ResearchRun 等)都由
-独立的 **Worker 进程**从 PostgreSQL 持久化队列领取执行。开发期需另起一个终端:
+独立的 **Worker 进程**从 PostgreSQL 持久化队列领取执行。开发期 `make dev`
+已默认附带 Worker;独立部署时另起终端:
 
 ```bash
+make worker                               # 等同于 uv run finboard worker run
 uv run finboard worker run                # 默认:轮询全部队列,2s 间隔,最多 4 并发
 uv run finboard worker run \
     --poll-interval 1.0 \
     --max-concurrent 8 \
     --queues research,data                # 只消费 research / data 队列
+uv run finboard worker run \
+    --maintenance-interval 5 \
+    --retry-backoff 60                    # 调周期维护 / 重试退避秒数
 uv run finboard worker recover            # 仅回收过期 lease(running→interrupted),不常驻
 ```
 
 不启动 Worker 时,提交端点仍会返回 `202 + job_id`,但任务会停留在 `queued`
-直到 Worker 上线。Worker 崩溃后,过期租约由下次启动时的 `reclaim_stale` 自动
-回收为 `interrupted`,可重新排队重放。Worker 不触及实盘下单/撤单/持仓/Kill Switch
-——这些由交易内核专用 `finboard-scheduler` 执行,不进入统一队列。
+直到 Worker 上线。Worker 崩溃后,过期租约由 Worker 启动与**周期性维护**
+(默认每 10s)自动回收为 `interrupted`,并在退避窗口(默认 30s)过后自动
+重排回 `queued` 重新消费;重试次数(`max_attempts`,默认 3)耗尽的任务置为
+`failed`(`error_code=max_retries_exceeded`)。Worker 不触及实盘下单/撤单/
+持仓/Kill Switch ——这些由交易内核专用 `finboard-scheduler` 执行,不进入统一队列。
 
 ---
 
@@ -197,21 +210,26 @@ uv run finboard worker recover            # 仅回收过期 lease(running→inte
 ```http
 GET  /api/jobs?kind=bulk_download&status=running&queue=data&limit=100   # 列表(可重复参)
 GET  /api/jobs/{job_id}                                                  # 单任务详情
-POST /api/jobs/{job_id}/cancel                                           # 协作式取消
+POST /api/jobs/{job_id}/cancel                                           # 取消(协作式)
 ```
 
 取消是**协作式**:`running → cancel_requested`,executor 在下一个 checkpoint
-退出后置 `cancelled`;任务已在终态时返回当前状态不报错。Worker 崩溃/lease
-过期时 `running → interrupted`,可重新排队重放。
+退出后置 `cancelled`;还没被 Worker 领取的 `queued` / `retry_waiting` 任务
+直接置 `cancelled`(终态);任务已在终态时返回当前状态不报错。Worker 崩溃/
+lease 过期时 `running → interrupted`,由 Worker 周期性维护在退避后自动重排。
+
+前端「任务中心」页(`/jobs`)基于以上 REST 实现全量列表、状态/kind 过滤、
+详情与取消,刷新后自动从服务端恢复(不依赖页面内存)。
 
 ### 任务状态机(8 态)
 
 ```
 queued ─▶ running ─▶ succeeded
                   └▶ failed
-                  └▶ retry_waiting ─▶ queued(重新入队)
+                  └▶ retry_waiting ─▶ queued(退避后自动重排;attempt 耗尽 → failed)
 running ─▶ cancel_requested ─▶ cancelled(协作式取消)
-running ─▶ interrupted(worker 崩溃 / lease 过期)
+running ─▶ interrupted ─▶ queued(lease 过期回收后自动重排)
+queued / retry_waiting ─▶ cancelled(取消还没被领取的任务)
 ```
 
 `progress_done`/`progress_total`/`phase` 反映执行进度,`result_ref` 按上表

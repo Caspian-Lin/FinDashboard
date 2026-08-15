@@ -5,6 +5,7 @@ import {
   ShieldCheck,
   AlertTriangle,
   ExternalLink,
+  Sparkles,
 } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -263,22 +264,6 @@ export default function ResearchWorkbench() {
               )}
             </div>
           )}
-        </TabsContent>
-
-                {/* iframe(#157 明文 URL,无凭证;直连 OpenCode Web) */}
-                <div className="relative min-h-0 flex-1">
-                  <iframe
-                    key={workbenchNonce}
-                    src={workbenchUrl}
-                    title="OpenCode Web 研究工作台"
-                    className="absolute inset-0 h-full w-full border-0"
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                  />
-                </div>
-              </Card>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );

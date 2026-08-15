@@ -23,10 +23,10 @@ function ThemeToggle() {
 function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
   return (
     <div className="flex h-full flex-col">
-      {/* Logo */}
-      <div className={cn("flex items-center border-b border-border px-4 py-4", collapsed && "justify-center px-2")}>
+      {/* Logo:与顶栏同高(56px),图标/文字在同一对齐线上 */}
+      <div className={cn("flex h-14 items-center border-b border-border px-4", collapsed && "justify-center px-2")}>
         <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold text-sm">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary text-sm font-bold text-primary-foreground">
             FD
           </div>
           {!collapsed && (
@@ -82,7 +82,11 @@ function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavig
 
 function SystemStatus() {
   const wsConnected = useWebSocket();
-  const healthQuery = useQuery({ queryKey: ["health"], queryFn: api.health });
+  const healthQuery = useQuery({
+    queryKey: ["health"],
+    queryFn: api.health,
+    refetchInterval: 5000,
+  });
   const health = healthQuery.data;
   const kernelOk = health?.kernel_ready ?? false;
   const ksLevel = health?.kill_switch_level ?? "off";
@@ -179,8 +183,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               {pageTitle.group && (
                 <span className="hidden text-xs text-muted-foreground sm:inline">{pageTitle.group}</span>
               )}
-              <span className="hidden text-xs text-muted-foreground sm:inline">/</span>
-              <h1 className="text-sm font-semibold text-foreground">{pageTitle.title}</h1>
+              {pageTitle.group && <span className="hidden text-xs text-muted-foreground sm:inline">/</span>}
+              {/* 顶栏只承载全局导航上下文,不渲染页面主标题;唯一 h1 由页面 PageHeader 提供 */}
+              <span className="text-sm font-semibold text-foreground" aria-hidden="true">
+                {pageTitle.title}
+              </span>
               {pageTitle.restricted && (
                 <span className="hidden items-center gap-1 rounded bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning sm:inline-flex">
                   <AlertTriangle className="h-2.5 w-2.5" />

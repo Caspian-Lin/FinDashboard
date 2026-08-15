@@ -19,7 +19,7 @@ export function ResearchHint({ hint, className }: { hint: HintData; className?: 
         <button
           type="button"
           className={cn(
-            "inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            "inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring -m-2.5 p-2.5",
             className,
           )}
           aria-label={hint.title}

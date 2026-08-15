@@ -277,14 +277,36 @@ def _start_frontend_when_api_ready(
     frontend_holder.append(_start_dev_frontend(npm_executable, web_dir))
 
 
+def _dev_worker_command() -> list[str]:
+    """dev 托管 worker 子进程的命令;独立进程让队列消费与 API 互不影响。"""
+    return [sys.executable, "-m", "finboard_app.cli", "worker", "run"]
+
+
+def _spawn_dev_worker() -> subprocess.Popen[bytes]:
+    """启动 worker 子进程(与前端一样按进程组托管,退出时整树回收)。"""
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            _dev_worker_command(),
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    return subprocess.Popen(_dev_worker_command(), start_new_session=True)
+
+
 @app.command()
 def dev(
     ctx: typer.Context,
     host: Annotated[str, typer.Option("--host", help="后端监听地址")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p", help="后端监听端口")] = 8000,
     web_dir: Annotated[Path, typer.Option("--web-dir", help="前端目录")] = Path("web"),
+    no_worker: Annotated[
+        bool,
+        typer.Option(
+            "--no-worker",
+            help="不随 dev 启动后台任务 worker(默认启动,研究/数据 job 才能被消费)",
+        ),
+    ] = False,
 ) -> None:
-    """前台运行 API 并托管 Vite,确保 Ctrl-C 触发 FastAPI shutdown。"""
+    """前台运行 API 并托管 Vite 与后台 worker,确保 Ctrl-C 触发 FastAPI shutdown。"""
     resolved_web_dir = web_dir.resolve()
     if not resolved_web_dir.is_dir():
         raise typer.BadParameter(f"前端目录不存在: {resolved_web_dir}", param_hint="--web-dir")
@@ -325,6 +347,21 @@ def dev(
         daemon=True,
     )
     frontend_thread.start()
+
+    worker_process: subprocess.Popen[bytes] | None = None
+    if not no_worker:
+        # 研究/数据 job 默认由随 dev 托管的 worker 子进程消费;
+        # 生产部署用独立 `finboard worker run`(见 README),--no-worker 关闭。
+        try:
+            worker_process = _spawn_dev_worker()
+        except OSError as exc:
+            typer.echo(f"警告: 后台 worker 启动失败,任务将停留在 queued: {exc}", err=True)
+        else:
+            typer.echo(
+                "已同步启动后台 worker(消费研究/数据任务队列);"
+                "如需关闭请用 --no-worker"
+            )
+
     try:
         # Uvicorn 留在当前前台进程中,Ctrl-C 会进入其优雅关闭和 FastAPI lifespan。
         serve(ctx, host=host, port=port, reload=False)
@@ -333,6 +370,8 @@ def dev(
         frontend_thread.join(timeout=1.0)
         for frontend in frontend_holder:
             _stop_dev_process(frontend)
+        if worker_process is not None:
+            _stop_dev_process(worker_process)
 
 
 @app.command(name="kill-switch")
@@ -582,6 +621,20 @@ def worker_run(
             help="逗号分隔的逻辑队列白名单;留空表示消费全部队列",
         ),
     ] = None,
+    maintenance_interval: Annotated[
+        float | None,
+        typer.Option(
+            "--maintenance-interval",
+            help="周期性维护(回收过期租约/重试重排)间隔秒数",
+        ),
+    ] = None,
+    retry_backoff: Annotated[
+        float | None,
+        typer.Option(
+            "--retry-backoff",
+            help="retry_waiting/interrupted 自动重排前的退避秒数",
+        ),
+    ] = None,
 ) -> None:
     """启动后台 worker 进程,从 PostgreSQL 队列领取任务直到 Ctrl-C。"""
 
@@ -596,6 +649,14 @@ def worker_run(
         )
     if queues is not None:
         settings = settings.model_copy(update={"worker_queues": queues})
+    if maintenance_interval is not None:
+        settings = settings.model_copy(
+            update={"worker_maintenance_interval_seconds": maintenance_interval}
+        )
+    if retry_backoff is not None:
+        settings = settings.model_copy(
+            update={"worker_retry_backoff_seconds": retry_backoff}
+        )
     asyncio.run(_run_worker(settings))
 
 
@@ -711,6 +772,8 @@ async def _run_worker(settings: Settings) -> None:
         lease_timeout_seconds=settings.worker_lease_timeout_seconds,
         heartbeat_interval_seconds=settings.worker_heartbeat_interval_seconds,
         queues=queue_list,
+        maintenance_interval_seconds=settings.worker_maintenance_interval_seconds,
+        retry_backoff_seconds=settings.worker_retry_backoff_seconds,
         # issue #144:per-kind 全局并发上限(SQL 层 claim_next max_per_kind 实现)。
         # 数据源压力敏感的 kind 限制为单并发;dataset_publish / backtest_run 不限。
         kind_concurrency={

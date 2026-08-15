@@ -8,7 +8,7 @@
         db-up db-down db-logs migrate migrate-new run serve \
         web-install web-dev web-build web-lint \
         opencode-serve opencode-web mcp-serve \
-        dev clean
+        worker dev clean
 
 PYTHON ?= python3.12
 UV ?= uv
@@ -114,10 +114,15 @@ mcp-serve: ## 启动 finboard-mcp(stdio 传输,供 OpenCode 子进程接入)
 mcp-serve-http: ## 启动 finboard-mcp(HTTP 传输,Docker 隔离前置;容器内 opencode 通过 host.docker.internal:8765 接入;须设 MCP_AUTH_TOKEN)
 	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN=$(MCP_AUTH_TOKEN) $(UV) run python -m finboard_mcp
 
+# --------------------------------------------------------------------------- 后台任务队列
+worker: ## 启动后台任务 worker(消费研究/数据 job 队列;make dev 已默认附带)
+	$(UV) run finboard worker run
+
 # --------------------------------------------------------------------------- 一键开发
-dev: ## 一键启动前后端开发服务器(后端 :8000 + 前端 :5173,Ctrl-C 同时退出)
-	@echo "\033[36m启动后端(FastAPI :8000) + 前端(Vite :5173)...\033[0m"
+dev: ## 一键启动开发环境(后端 :8000 + 前端 :5173 + 后台 worker,Ctrl-C 同时退出)
+	@echo "\033[36m启动后端(FastAPI :8000) + 前端(Vite :5173) + 后台 worker...\033[0m"
 	@echo "\033[33m本机数据库不可达时会自动唤醒 WSL PostgreSQL;请确保已执行 make migrate\033[0m"
+	@echo "\033[33m研究/数据 job 由随 dev 启动的 worker 消费;独立部署请用 make worker\033[0m"
 	$(UV) run finboard dev --web-dir $(WEB_DIR)
 
 clean: ## 清理缓存与构建产物

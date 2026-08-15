@@ -28,6 +28,7 @@ const Backtest = React.lazy(() => import("@/pages/Backtest"));
 const Strategies = React.lazy(() => import("@/pages/Strategies"));
 const Settings = React.lazy(() => import("@/pages/Settings"));
 const Data = React.lazy(() => import("@/pages/Data"));
+const Jobs = React.lazy(() => import("@/pages/Jobs"));
 const NotFound = React.lazy(() => import("@/pages/NotFound"));
 
 function PageLoader() {
@@ -74,6 +75,7 @@ export default function App() {
             <Route path="/backtest" element={<Backtest />} />
             <Route path="/strategies" element={<Strategies />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/jobs" element={<Jobs />} />
 
             {/* 404 */}
             <Route path="*" element={<NotFound />} />

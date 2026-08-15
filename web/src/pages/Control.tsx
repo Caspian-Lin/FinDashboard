@@ -1,20 +1,43 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { PageHeader } from "../components/ui/page-header";
+import { PageContainer } from "../components/ui/page-container";
+import { Label } from "../components/ui/label";
+import { Input } from "../components/ui/input";
+import { Button } from "../components/ui/button";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { EmptyState } from "../components/ui/states";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table";
 
 const KS_LEVELS = [
-  { value: "off", label: "恢复正常", color: "green" },
-  { value: "no_new_orders", label: "暂停新单", color: "yellow" },
-  { value: "reduce_only", label: "仅减仓", color: "orange" },
-  { value: "cancel_all", label: "撤全部", color: "red" },
-  { value: "halt", label: "全局停止", color: "red" },
+  { value: "off", label: "恢复正常", variant: "success" as const },
+  { value: "no_new_orders", label: "暂停新单", variant: "warning" as const },
+  { value: "reduce_only", label: "仅减仓", variant: "warning" as const },
+  { value: "cancel_all", label: "撤全部", variant: "destructive" as const },
+  { value: "halt", label: "全局停止", variant: "destructive" as const },
 ];
 
 export default function Control() {
   const qc = useQueryClient();
   const [reason, setReason] = useState("manual");
-  const { data: ks } = useQuery({ queryKey: ["kill-switch"], queryFn: api.getKillSwitch });
-  const { data: logs } = useQuery({ queryKey: ["audit-logs"], queryFn: () => api.getAuditLogs(50) });
+  const { data: ks } = useQuery({
+    queryKey: ["kill-switch"],
+    queryFn: api.getKillSwitch,
+    refetchInterval: 5000,
+  });
+  const { data: logs } = useQuery({
+    queryKey: ["audit-logs"],
+    queryFn: () => api.getAuditLogs(50),
+    refetchInterval: 10000,
+  });
 
   const ksMut = useMutation({
     mutationFn: ({ level, reason }: { level: string; reason: string }) =>
@@ -27,92 +50,104 @@ export default function Control() {
   });
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">控制台</h1>
+    <PageContainer>
+      <PageHeader
+        title="控制台"
+        description="Kill Switch 由交易内核执行;页面只提交指令,不绕过内核。"
+      />
 
       {/* Kill Switch */}
-      <div className="bg-card rounded-lg shadow p-5 mb-6">
-        <h2 className="font-semibold mb-4">Kill Switch</h2>
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-4 font-semibold">Kill Switch</h2>
         <div className="mb-4">
-          <span className="text-muted-foreground text-sm">当前状态: </span>
+          <span className="text-sm text-muted-foreground">当前状态: </span>
           <span className={`font-bold ${ks?.level === "off" ? "text-success" : "text-destructive"}`}>
             {ks?.level ?? "—"}
           </span>
         </div>
-        <input
-          className="border rounded px-3 py-1.5 text-sm mb-3 w-full"
-          placeholder="原因"
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-        />
-        <div className="flex gap-2">
+        <div className="mb-3 w-full space-y-1.5">
+          <Label htmlFor="ks-reason">触发原因</Label>
+          <Input
+            id="ks-reason"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="记录本次操作原因(必填,写入审计)"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Kill Switch 级别">
           {KS_LEVELS.map((lvl) => (
-            <button
+            <Button
               key={lvl.value}
+              variant="outline"
+              size="sm"
               onClick={() => ksMut.mutate({ level: lvl.value, reason })}
-              className={`px-3 py-1.5 rounded text-sm border ${
-                lvl.color === "green"
-                  ? "border-green-500 text-success hover:bg-success/10"
-                  : lvl.color === "red"
-                    ? "border-red-500 text-destructive hover:bg-destructive/10"
-                    : "border-yellow-500 text-warning hover:bg-warning/10"
-              }`}
+              disabled={ksMut.isPending}
+              className={
+                lvl.variant === "success"
+                  ? "border-success text-success hover:bg-success/10"
+                  : lvl.variant === "destructive"
+                    ? "border-destructive text-destructive hover:bg-destructive/10"
+                    : "border-warning text-warning hover:bg-warning/10"
+              }
             >
               {lvl.label}
-            </button>
+            </Button>
           ))}
         </div>
         {ksMut.isError && (
-          <div className="mt-2 text-red-500 text-sm">{ksMut.error?.message}</div>
+          <Alert variant="destructive" className="mt-3">
+            <AlertDescription>{ksMut.error?.message}</AlertDescription>
+          </Alert>
         )}
-      </div>
+      </section>
 
       {/* Reconcile */}
-      <div className="bg-card rounded-lg shadow p-5 mb-6">
-        <h2 className="font-semibold mb-4">核对</h2>
-        <button
-          onClick={() => reconMut.mutate()}
-          disabled={reconMut.isPending}
-          className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-50"
-        >
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-4 font-semibold">核对</h2>
+        <Button onClick={() => reconMut.mutate()} disabled={reconMut.isPending}>
           {reconMut.isPending ? "核对中..." : "触发核对"}
-        </button>
+        </Button>
         {reconMut.data && (
-          <div className={`mt-3 text-sm ${reconMut.data.ok ? "text-success" : "text-destructive"}`}>
+          <p
+            className={`mt-3 text-sm ${reconMut.data.ok ? "text-success" : "text-destructive"}`}
+            role="status"
+          >
             {reconMut.data.ok ? "✓ " : "✗ "}
             {reconMut.data.summary}
-          </div>
+          </p>
         )}
-      </div>
+      </section>
 
       {/* Audit Logs */}
-      <div className="bg-card rounded-lg shadow p-5">
-        <h2 className="font-semibold mb-4">审计日志</h2>
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-4 font-semibold">审计日志</h2>
         {(logs?.items ?? []).length === 0 ? (
-          <div className="text-muted-foreground/70 text-sm">无日志</div>
+          <EmptyState title="无日志" />
         ) : (
-          <table className="w-full text-sm">
-            <thead className="text-muted-foreground">
-              <tr>
-                <th className="px-2 py-1 text-left">时间</th>
-                <th className="px-2 py-1 text-left">操作者</th>
-                <th className="px-2 py-1 text-left">动作</th>
-                <th className="px-2 py-1 text-left">目标</th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>时间</TableHead>
+                <TableHead>操作者</TableHead>
+                <TableHead>动作</TableHead>
+                <TableHead>目标</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {(logs?.items ?? []).map((log) => (
-                <tr key={log.id} className="border-t">
-                  <td className="px-2 py-1 text-muted-foreground">{new Date(log.created_at).toLocaleTimeString()}</td>
-                  <td className="px-2 py-1">{log.actor}</td>
-                  <td className="px-2 py-1 font-mono">{log.action}</td>
-                  <td className="px-2 py-1 font-mono text-muted-foreground">{log.target ?? "—"}</td>
-                </tr>
+                <TableRow key={log.id}>
+                  <TableCell className="text-muted-foreground">
+                    {new Date(log.created_at).toLocaleTimeString()}
+                  </TableCell>
+                  <TableCell>{log.actor}</TableCell>
+                  <TableCell className="font-mono">{log.action}</TableCell>
+                  <TableCell className="font-mono text-muted-foreground">{log.target ?? "—"}</TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
-      </div>
-    </div>
+      </section>
+    </PageContainer>
   );
 }
