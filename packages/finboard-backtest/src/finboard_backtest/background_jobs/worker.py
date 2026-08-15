@@ -55,6 +55,10 @@ class WorkerConfig:
     #: 按 ``kind`` 限制全局并发(issue #144)。key=kind, value=最大同时 running 数。
     #: 仅对列出的 kind 生效;未列出的 kind 不限制。空 / None 表示不限制。
     kind_concurrency: Mapping[str, int] | None = None
+    #: 周期性维护(回收过期租约 + 重试任务自动重排)的间隔(issue #161)。
+    maintenance_interval_seconds: float = 10.0
+    #: retry_waiting / interrupted 自动重排前必须等待的退避秒数。
+    retry_backoff_seconds: float = 30.0
 
 
 def default_worker_id() -> str:
@@ -90,8 +94,15 @@ class BackgroundWorker:
             self._config.max_concurrent,
         )
         await self._recover_stale()
+        next_maintenance = asyncio.get_running_loop().time() + (
+            self._config.maintenance_interval_seconds
+        )
         while not self._stop_event.is_set():
             await self._fill_concurrency()
+            now = asyncio.get_running_loop().time()
+            if now >= next_maintenance:
+                await self._maintenance()
+                next_maintenance = now + self._config.maintenance_interval_seconds
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(
                     self._stop_event.wait(),
@@ -102,7 +113,11 @@ class BackgroundWorker:
 
     # ------------------------------------------------------------- 内部流程
     async def _recover_stale(self) -> None:
-        """启动时回收上一次进程崩溃遗留的过期 lease。"""
+        """回收 lease 已过期的 running / cancel_requested 任务(interrupted)。
+
+        启动时与周期性维护都会调用 —— 长期存活的 worker 不再依赖崩溃后重启
+        才回收,僵尸 running 不会永久占用 per-kind 并发额度(issue #161)。
+        """
 
         async with self._session_maker() as session:
             repo = BackgroundJobRepository(session)
@@ -111,6 +126,24 @@ class BackgroundWorker:
                 await repo.checkpoint()
                 logger.info(
                     "background_worker.reclaim count=%d", len(reclaimed)
+                )
+
+    async def _maintenance(self) -> None:
+        """周期性维护:回收过期租约 + 自动重排进入重试态的任务(issue #161)。"""
+
+        await self._recover_stale()
+        async with self._session_maker() as session:
+            repo = BackgroundJobRepository(session)
+            requeued, exhausted = await repo.requeue_due(
+                datetime.now(UTC),
+                backoff_seconds=self._config.retry_backoff_seconds,
+            )
+            if requeued or exhausted:
+                await repo.checkpoint()
+                logger.info(
+                    "background_worker.requeue requeued=%d exhausted=%d",
+                    len(requeued),
+                    len(exhausted),
                 )
 
     async def _fill_concurrency(self) -> None:

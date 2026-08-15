@@ -364,6 +364,11 @@ export const api = {
     if (params?.limit) q.set("limit", String(params.limit));
     return fetchJSON<JobOut[]>(`/jobs${q.toString() ? "?" + q : ""}`);
   },
+  cancelJob: (jobId: string, reason?: string) =>
+    fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason ?? null }),
+    }),
 
   // ---- Scheduler Config ----
   getConfig: () => fetchJSON<SchedulerConfig>("/data/config"),

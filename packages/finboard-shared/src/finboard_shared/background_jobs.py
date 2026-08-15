@@ -12,15 +12,20 @@ from enum import StrEnum
 
 
 class BackgroundJobStatus(StrEnum):
-    """后台任务状态机(issue #117)。
+    """后台任务状态机(issue #117;#161 补自动重排路径)。
 
     状态流转::
 
         queued ─▶ running ─▶ succeeded
                           └▶ failed
-                          └▶ retry_waiting ─▶ queued(重新入队)
+                          └▶ retry_waiting ─▶ queued(worker 周期维护自动重排)
         running ─▶ cancel_requested ─▶ cancelled(协作式取消)
-        running ─▶ interrupted(worker 崩溃 / lease 过期,reclaim_stale 回收)
+        running ─▶ interrupted ─▶ queued(lease 过期回收后自动重排)
+        queued / retry_waiting ─▶ cancelled(取消还没被领取的任务)
+
+    ``retry_waiting`` / ``interrupted`` 由 worker 周期性维护
+    (``requeue_due``)在退避窗口过后自动重排为 ``queued``;
+    attempt 耗尽则置 ``failed``(error_code=max_retries_exceeded)。
     """
 
     QUEUED = "queued"

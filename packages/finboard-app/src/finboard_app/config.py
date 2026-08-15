@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     worker_max_concurrent: int = Field(default=4, ge=1, le=32)
     worker_lease_timeout_seconds: float = Field(default=600.0, gt=0)
     worker_heartbeat_interval_seconds: float = Field(default=30.0, gt=0)
+    # 周期性维护间隔:回收过期租约 + 重试任务自动重排(issue #161)。
+    worker_maintenance_interval_seconds: float = Field(default=10.0, gt=0)
+    # retry_waiting / interrupted 自动重排前的退避秒数(issue #161)。
+    worker_retry_backoff_seconds: float = Field(default=30.0, gt=0)
     worker_queues: str = Field(
         default="",
         description="逗号分隔的逻辑队列白名单;空字符串表示消费全部队列",

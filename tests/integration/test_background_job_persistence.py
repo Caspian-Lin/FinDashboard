@@ -353,6 +353,165 @@ class TestRequestCancel:
             with pytest.raises(BackgroundJobPersistenceConflictError):
                 await repo.request_cancel("BJ-NONEXISTENT-CANCEL")
 
+    async def test_cancel_queued_marks_cancelled(self, engine: AsyncEngine) -> None:
+        """还没被 worker 领取的任务直接置终态 cancelled(issue #161)。"""
+        job_id = await _enqueue(engine)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            row = await repo.request_cancel(job_id)
+            await repo.checkpoint()
+        assert row.status == BackgroundJobStatus.CANCELLED.value
+        assert row.finished_at is not None
+
+    async def test_cancel_retry_waiting_marks_cancelled(self, engine: AsyncEngine) -> None:
+        job_id = await _enqueue(engine)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            await repo.transition(
+                job_id,
+                expected=frozenset({BackgroundJobStatus.QUEUED.value}),
+                target=BackgroundJobStatus.RETRY_WAITING.value,
+            )
+            await repo.checkpoint()
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            row = await repo.request_cancel(job_id)
+            await repo.checkpoint()
+        assert row.status == BackgroundJobStatus.CANCELLED.value
+
+    async def test_cancel_terminal_raises(self, engine: AsyncEngine) -> None:
+        job_id = await _enqueue(engine)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            await repo.transition(
+                job_id,
+                expected=frozenset({BackgroundJobStatus.QUEUED.value}),
+                target=BackgroundJobStatus.SUCCEEDED.value,
+            )
+            await repo.checkpoint()
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            with pytest.raises(BackgroundJobPersistenceConflictError):
+                await repo.request_cancel(job_id)
+
+
+async def _age_status_entry(engine: AsyncEngine, job_id: str, seconds: int = 60) -> None:
+    """把任务进入当前状态的时间(updated_at)改到过去,模拟已等待 seconds 秒。"""
+    async with session_factory(engine)() as session:
+        await session.execute(
+            text(
+                "update background_jobs set updated_at = now() - make_interval(secs => :s) "
+                "where job_id = :jid"
+            ),
+            {"s": seconds, "jid": job_id},
+        )
+        await session.commit()
+
+
+# ---------------------------------------------------------------- requeue_due
+
+
+class TestRequeueDue:
+    """retry_waiting / interrupted 自动重排(issue #161)。"""
+
+    async def test_requeue_interrupted_after_backoff(self, engine: AsyncEngine) -> None:
+        job_id = await _enqueue(engine)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            # lease 设到过去,模拟 worker 崩溃后留下的僵尸 running
+            await repo.claim_next(
+                worker_id="w-dead",
+                lease_until=datetime.now(UTC) - timedelta(seconds=1),
+            )
+            await repo.checkpoint()
+            await repo.reclaim_stale(datetime.now(UTC))
+            await repo.checkpoint()
+        await _age_status_entry(engine, job_id)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            requeued, exhausted = await repo.requeue_due(
+                datetime.now(UTC), backoff_seconds=30
+            )
+            await repo.checkpoint()
+        assert [r.job_id for r in requeued] == [job_id]
+        assert exhausted == []
+        async with session_factory(engine)() as session:
+            row = await BackgroundJobRepository(session).get(job_id)
+        assert row is not None
+        assert row.status == BackgroundJobStatus.QUEUED.value
+
+    async def test_requeue_retry_waiting_after_backoff(self, engine: AsyncEngine) -> None:
+        job_id = await _enqueue(engine)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            await repo.transition(
+                job_id,
+                expected=frozenset({BackgroundJobStatus.QUEUED.value}),
+                target=BackgroundJobStatus.RETRY_WAITING.value,
+            )
+            await repo.checkpoint()
+        await _age_status_entry(engine, job_id)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            requeued, _ = await repo.requeue_due(
+                datetime.now(UTC), backoff_seconds=30
+            )
+            await repo.checkpoint()
+        assert [r.job_id for r in requeued] == [job_id]
+
+    async def test_fresh_retry_waiting_stays_put(self, engine: AsyncEngine) -> None:
+        """进入重试态还没超过退避窗口的任务不参与本轮。"""
+        job_id = await _enqueue(engine)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            await repo.transition(
+                job_id,
+                expected=frozenset({BackgroundJobStatus.QUEUED.value}),
+                target=BackgroundJobStatus.RETRY_WAITING.value,
+            )
+            await repo.checkpoint()
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            requeued, exhausted = await repo.requeue_due(
+                datetime.now(UTC), backoff_seconds=30
+            )
+            await repo.checkpoint()
+        assert requeued == []
+        assert exhausted == []
+        async with session_factory(engine)() as session:
+            row = await BackgroundJobRepository(session).get(job_id)
+        assert row is not None
+        assert row.status == BackgroundJobStatus.RETRY_WAITING.value
+
+    async def test_exhausted_attempts_marks_failed(self, engine: AsyncEngine) -> None:
+        job_id = await _enqueue(engine)
+        async with session_factory(engine)() as session:
+            await session.execute(
+                text(
+                    "update background_jobs set attempt = max_attempts, "
+                    "status = :s, updated_at = now() - interval '60 seconds' "
+                    "where job_id = :jid"
+                ),
+                {
+                    "s": BackgroundJobStatus.RETRY_WAITING.value,
+                    "jid": job_id,
+                },
+            )
+            await BackgroundJobRepository(session).checkpoint()
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            requeued, exhausted = await repo.requeue_due(
+                datetime.now(UTC), backoff_seconds=30
+            )
+            await repo.checkpoint()
+        assert requeued == []
+        assert [r.job_id for r in exhausted] == [job_id]
+        async with session_factory(engine)() as session:
+            row = await BackgroundJobRepository(session).get(job_id)
+        assert row is not None
+        assert row.status == BackgroundJobStatus.FAILED.value
+        assert row.error_code == "max_retries_exceeded"
+
 
 class TestUpdateProgress:
     async def test_monotonic_and_clamped(self, engine: AsyncEngine) -> None:
@@ -457,6 +616,67 @@ class TestBackgroundWorkerEndToEnd:
         assert row is not None
         assert row.status == BackgroundJobStatus.FAILED.value
         assert row.error_code == "unknown_kind"
+
+    async def test_periodic_maintenance_unblocks_saturated_kind(
+        self, engine: AsyncEngine
+    ) -> None:
+        """僵尸 running 不再永久堵死 per-kind 并发(issue #161)。
+
+        流程:job A 以过期 lease 的 running 残留(模拟崩溃 worker)占用 echo
+        单并发 → job B queued 被堵住;worker 周期维护回收 A 为 interrupted →
+        退避后自动重排 → A/B 都被消费为 succeeded。
+        """
+
+        a_id = await _enqueue(engine)
+        b_id = await _enqueue(engine)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            await repo.claim_next(
+                worker_id="w-zombie",
+                lease_until=datetime.now(UTC) - timedelta(seconds=1),
+            )
+            await repo.checkpoint()
+        registry = JobExecutorRegistry()
+        registry.register("echo", EchoExecutor())
+        worker = BackgroundWorker(
+            engine=engine,
+            session_maker=session_factory(engine),
+            registry=registry,
+            config=WorkerConfig(
+                worker_id="w-maint",
+                poll_interval_seconds=0.05,
+                max_concurrent=2,
+                lease_timeout_seconds=60,
+                heartbeat_interval_seconds=10.0,
+                kind_concurrency={"echo": 1},
+                maintenance_interval_seconds=0.05,
+                retry_backoff_seconds=0.01,
+            ),
+        )
+        run_task = asyncio.create_task(worker.run())
+        try:
+            for _ in range(2000):
+                async with session_factory(engine)() as session:
+                    rows = await BackgroundJobRepository(session).list_recent(
+                        limit=10
+                    )
+                if len(rows) >= 2 and all(
+                    r.status == BackgroundJobStatus.SUCCEEDED.value for r in rows
+                ):
+                    break
+                await asyncio.sleep(0.02)
+        finally:
+            worker.request_stop()
+            await run_task
+        async with session_factory(engine)() as session:
+            final_rows = {
+                r.job_id: r.status
+                for r in await BackgroundJobRepository(session).list_recent(
+                    limit=10
+                )
+            }
+        assert final_rows.get(a_id) == BackgroundJobStatus.SUCCEEDED.value
+        assert final_rows.get(b_id) == BackgroundJobStatus.SUCCEEDED.value
 
 
 async def _drain_worker(worker: BackgroundWorker) -> None:
