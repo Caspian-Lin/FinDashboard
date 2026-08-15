@@ -173,6 +173,57 @@ async def test_list_messages(make_client) -> None:
     await client.aclose()
 
 
+async def test_get_session(make_client) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/session/sess-1"
+        return httpx.Response(200, json={"data": {"id": "sess-1", "title": "t"}})
+
+    client = make_client(handler)
+    session = await client.get_session("sess-1")
+    assert session["id"] == "sess-1"
+    await client.aclose()
+
+
+async def test_session_history_with_replay_cursor(make_client) -> None:
+    """#112:Agent Run 回放 —— 从 after 游标续取会话历史(断点重放)。
+
+    #121 重构后 OpenCode 自身管理会话/历史,FinBoard 不再维护会话投影表;
+    ``session_history(after=...)`` 与 SSE 事件流(``after_seq`` 游标)是回放原语。
+    """
+    captured_params = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/session/sess-1/history"
+        captured_params["after"] = request.url.params.get("after")
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "session_id": "sess-1",
+                    "events": [{"seq": 3, "type": "message", "role": "user"}],
+                    "cursor": 3,
+                }
+            },
+        )
+
+    client = make_client(handler)
+    history = await client.session_history("sess-1", after=3)
+    assert captured_params["after"] == "3"
+    assert history["data"]["events"][0]["seq"] == 3
+    await client.aclose()
+
+
+async def test_session_history_without_cursor(make_client) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "after" not in request.url.params
+        return httpx.Response(200, json={"data": {"events": []}})
+
+    client = make_client(handler)
+    history = await client.session_history("sess-1")
+    assert history["data"]["events"] == []
+    await client.aclose()
+
+
 async def test_no_auth_by_default() -> None:
     """#157 移除 basic auth 后,请求不带 Authorization 头(单用户明文 URL 场景)。
 
