@@ -36,7 +36,7 @@ describe("Orders 二次确认安全机制", () => {
     renderWithProviders(<Orders />);
     await user.click(screen.getByRole("button", { name: "手工下单" }));
     expect(
-      screen.getByPlaceholderText("标的 (如 510300.SH)"),
+      screen.getByLabelText("标的"),
     ).toBeInTheDocument();
   });
 
@@ -45,7 +45,7 @@ describe("Orders 二次确认安全机制", () => {
     renderWithProviders(<Orders />);
     await user.click(screen.getByRole("button", { name: "手工下单" }));
     await user.type(
-      screen.getByPlaceholderText("标的 (如 510300.SH)"),
+      screen.getByLabelText("标的"),
       "510300.SH",
     );
     await user.click(screen.getByRole("button", { name: "提交" }));
@@ -59,7 +59,7 @@ describe("Orders 二次确认安全机制", () => {
     renderWithProviders(<Orders />);
     await user.click(screen.getByRole("button", { name: "手工下单" }));
     await user.type(
-      screen.getByPlaceholderText("标的 (如 510300.SH)"),
+      screen.getByLabelText("标的"),
       "510300.SH",
     );
     await user.click(screen.getByRole("button", { name: "提交" }));
@@ -72,7 +72,7 @@ describe("Orders 二次确认安全机制", () => {
     renderWithProviders(<Orders />);
     await user.click(screen.getByRole("button", { name: "手工下单" }));
     await user.type(
-      screen.getByPlaceholderText("标的 (如 510300.SH)"),
+      screen.getByLabelText("标的"),
       "510300.SH",
     );
     await user.click(screen.getByRole("button", { name: "提交" }));

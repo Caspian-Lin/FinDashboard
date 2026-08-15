@@ -245,11 +245,18 @@ export default function Data() {
     : 0;
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">行情数据</h1>
+    <div className="mx-auto w-full max-w-7xl space-y-6">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">行情数据</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            标的池、单标的拉取与缓存管理;耗时任务进入统一队列,可在「任务中心」跟踪。
+          </p>
+        </div>
+      </div>
 
       {/* Stats row */}
-      <div className="mb-6 grid grid-cols-2 gap-4 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="数据库标的数"
           value={String(totalInstruments)}
@@ -261,14 +268,14 @@ export default function Data() {
       </div>
 
       {/* Sync + Single fetch */}
-      <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         {/* Universe Sync */}
-        <div className="bg-card rounded-lg shadow p-5">
+        <div className="rounded-lg border border-border bg-card p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="flex items-center gap-1 text-lg font-semibold">
               标的池同步
               <InfoHint content={INFO_HINTS.data.universeSync} />
-              <span className="ml-2 rounded bg-blue-600/20 px-2 py-0.5 text-xs font-medium text-blue-400">
+              <span className="ml-2 rounded-md bg-primary/15 px-2 py-0.5 text-xs font-medium text-primary">
                 akshare
               </span>
             </h2>
@@ -283,7 +290,7 @@ export default function Data() {
             type="button"
             onClick={() => sync.mutate()}
             disabled={sync.isPending}
-            className="w-full bg-indigo-600 text-white rounded py-2 text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
+            className="w-full rounded-md bg-primary text-primary-foreground py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
           >
             {sync.isPending ? "同步中..." : totalInstruments === 0 ? "同步标的池" : "刷新标的池"}
           </button>
@@ -306,7 +313,7 @@ export default function Data() {
         </div>
 
         {/* Single fetch */}
-        <div className="bg-card rounded-lg shadow p-5">
+        <div className="rounded-lg border border-border bg-card p-5">
           <h2 className="text-lg font-semibold mb-3">单标的拉取</h2>
           <div className="space-y-3">
             <div>
@@ -373,7 +380,7 @@ export default function Data() {
                 })
               }
               disabled={fetchOne.isPending}
-              className="w-full bg-primary text-white rounded py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+              className="w-full bg-primary text-primary-foreground rounded-md py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
             >
               {fetchOne.isPending ? "拉取中..." : "拉取"}
             </button>
@@ -398,7 +405,7 @@ export default function Data() {
       </div>
 
       {/* Bulk Download */}
-      <div className="bg-card rounded-lg shadow p-5 mb-6">
+      <div className="rounded-lg border border-border bg-card p-5">
         <h2 className="mb-4 flex items-center gap-1 text-lg font-semibold">
           批量拉取
           <InfoHint content={INFO_HINTS.data.bulkDownload} />
@@ -605,7 +612,7 @@ export default function Data() {
               aria-valuenow={bulkDone}
             >
               <div
-                className="bg-green-500 h-full rounded-full transition-all duration-500"
+                className="bg-success h-full rounded-full transition-all duration-500"
                 style={{
                   width: `${bulkTotal > 0 ? (bulkDone * 100 / bulkTotal) : 0}%`,
                 }}
@@ -647,66 +654,96 @@ export default function Data() {
       </div>
 
       {/* Instruments table */}
-      <div className="bg-card rounded-lg shadow mb-6">
-        <div className="flex items-center justify-between px-5 py-3 border-b">
+      <div className="rounded-lg border border-border bg-card">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3">
           <h2 className="flex items-center gap-1 text-lg font-semibold">
             标的列表 ({listedInstrumentTotal})
             <InfoHint content={INFO_HINTS.data.instrumentList} />
           </h2>
-          <div className="flex gap-3">
-            <input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索代码/名称"
-              className="border border-input bg-card text-foreground rounded px-3 py-1 text-sm w-40"
-            />
-            <select
-              value={marketFilter}
-              onChange={(e) => setMarketFilter(e.target.value)}
-              className="border border-input bg-card text-foreground rounded px-2 py-1 text-sm"
-            >
-              <option value="">全部市场</option>
-              <option value="a_share">A股</option>
-              <option value="hk">港股</option>
-              <option value="us">美股</option>
-            </select>
-            <select
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value)}
-              className="border border-input bg-card text-foreground rounded px-2 py-1 text-sm"
-            >
-              <option value="">全部类型</option>
-              <option value="stock">股票</option>
-              <option value="etf">ETF</option>
-            </select>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="space-y-1">
+              <label htmlFor="data-instrument-search" className="text-xs text-muted-foreground">
+                搜索代码/名称
+              </label>
+              <input
+                id="data-instrument-search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="如 510300"
+                className="w-40 rounded-md border border-input bg-card px-3 py-1 text-sm text-foreground placeholder:text-muted-foreground"
+              />
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="data-instrument-market" className="text-xs text-muted-foreground">
+                市场
+              </label>
+              <select
+                id="data-instrument-market"
+                value={marketFilter}
+                onChange={(e) => setMarketFilter(e.target.value)}
+                className="rounded-md border border-input bg-card px-2 py-1 text-sm text-foreground"
+              >
+                <option value="">全部市场</option>
+                <option value="a_share">A股</option>
+                <option value="hk">港股</option>
+                <option value="us">美股</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="data-instrument-type" className="text-xs text-muted-foreground">
+                类型
+              </label>
+              <select
+                id="data-instrument-type"
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value)}
+                className="rounded-md border border-input bg-card px-2 py-1 text-sm text-foreground"
+              >
+                <option value="">全部类型</option>
+                <option value="stock">股票</option>
+                <option value="etf">ETF</option>
+              </select>
+            </div>
           </div>
         </div>
-        <table className="w-full text-sm">
-          <thead className="bg-background text-muted-foreground">
-            <tr>
-              <th className="px-4 py-2 text-left">代码</th>
-              <th className="px-4 py-2 text-left">名称</th>
-              <th className="px-4 py-2 text-left">市场</th>
-              <th className="px-4 py-2 text-left">类型</th>
-              <th className="px-4 py-2 text-left">交易所</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pagedInstruments.map((ins) => (
-                <tr
-                  key={ins.code}
-                  className="cursor-pointer border-t hover:bg-accent"
-                  onClick={() => setFetchSymbol(ins.code)}
-                >
-                  <td className="px-4 py-2 font-mono">{ins.code}</td>
-                  <td className="px-4 py-2">{ins.name}</td>
-                  <td className="px-4 py-2">{ins.market}</td>
-                  <td className="px-4 py-2">{ins.instrument_type}</td>
-                  <td className="px-4 py-2 text-muted-foreground">{ins.exchange ?? "—"}</td>
-                </tr>
-              ))}
-          </tbody>
-        </table>
+        <div className="overflow-x-auto scrollbar-thin">
+          <table className="w-full text-sm">
+            <thead className="bg-background text-muted-foreground">
+              <tr>
+                <th className="px-4 py-2 text-left">代码</th>
+                <th className="px-4 py-2 text-left">名称</th>
+                <th className="px-4 py-2 text-left">市场</th>
+                <th className="px-4 py-2 text-left">类型</th>
+                <th className="px-4 py-2 text-left">交易所</th>
+                <th className="px-4 py-2 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pagedInstruments.map((ins) => (
+                  <tr
+                    key={ins.code}
+                    className="border-t hover:bg-accent"
+                  >
+                    <td className="px-4 py-2 font-mono">{ins.code}</td>
+                    <td className="px-4 py-2">{ins.name}</td>
+                    <td className="px-4 py-2">{ins.market}</td>
+                    <td className="px-4 py-2">{ins.instrument_type}</td>
+                    <td className="px-4 py-2 text-muted-foreground">{ins.exchange ?? "—"}</td>
+                    <td className="px-4 py-2 text-right">
+                      <button
+                        type="button"
+                        onClick={() => setFetchSymbol(ins.code)}
+                        className="rounded-md border border-input px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+                        aria-label={`选择 ${ins.code} 到单标的拉取`}
+                      >
+                        选择
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
         {pagedInstruments.length === 0 && (
           <div className="p-8 text-center text-muted-foreground/70">
             {totalInstruments === 0
@@ -740,7 +777,7 @@ export default function Data() {
       </div>
 
       {/* Cache status table */}
-      <div className="bg-card rounded-lg shadow">
+      <div className="rounded-lg border border-border bg-card">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3">
           <div className="flex items-center gap-1">
             <h2 className="text-lg font-semibold">已缓存数据 ({status?.total ?? 0})</h2>
@@ -770,7 +807,7 @@ export default function Data() {
                 repairQuality.isPending ||
                 !qualityReports?.some((report) => !report.passed)
               }
-              className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
               {repairQuality.isPending
                 ? "批量修复中..."
@@ -789,6 +826,7 @@ export default function Data() {
         {!status || status.items.length === 0 ? (
           <div className="p-8 text-center text-muted-foreground/70">缓存为空</div>
         ) : (
+          <div className="overflow-x-auto scrollbar-thin">
           <table className="w-full text-sm">
             <thead className="bg-background text-muted-foreground">
               <tr>
@@ -815,6 +853,7 @@ export default function Data() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
         {cacheTotal > PAGE_SIZE && (
           <div className="flex items-center justify-between border-t px-5 py-3 text-sm">
@@ -882,7 +921,7 @@ function CacheQualitySummary({
           异常 {failed.length}
         </span>
         {failed.length > 0 && (
-          <button onClick={onToggle} className="text-blue-400 hover:underline">
+          <button onClick={onToggle} className="text-primary hover:underline">
             {expanded ? "收起" : "展开"}异常详情
           </button>
         )}
@@ -959,7 +998,7 @@ function StatCard({
   hint?: InfoHintDefinition;
 }) {
   return (
-    <div className="bg-card rounded-lg shadow p-4">
+    <div className="rounded-lg border border-border bg-card p-4">
       <div className="flex items-center gap-1 text-sm text-muted-foreground">
         {label}
         {hint && <InfoHint content={hint} />}

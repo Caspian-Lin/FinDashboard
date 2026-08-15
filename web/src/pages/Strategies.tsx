@@ -163,7 +163,7 @@ export default function Strategies() {
 
   if (strategiesQuery.error || !definition) {
     return (
-      <div className="max-w-3xl">
+      <div className="mx-auto max-w-7xl">
         <h1 className="text-2xl font-bold text-foreground">策略配置</h1>
         <p className="mt-3 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
           无法加载内置策略：{(strategiesQuery.error as Error | null)?.message ?? "没有可用策略"}
@@ -173,22 +173,22 @@ export default function Strategies() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl">
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+    <div className="mx-auto w-full max-w-7xl space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-foreground">策略配置</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">策略配置</h1>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
             配置经过测试的内置策略参数，并保存为可复用预设。参数由后端 schema
             自动生成，页面不接收或执行策略代码。
           </p>
         </div>
-        <div className="flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">
+        <div className="flex items-center gap-2 rounded-md bg-success/10 px-3 py-2 text-xs font-medium text-success">
           <ShieldCheck size={16} aria-hidden="true" />
           保存预设不会启动策略
         </div>
       </div>
 
-      <div className="grid overflow-hidden rounded-xl border border-border bg-card lg:grid-cols-[15rem_minmax(0,1fr)_18rem]">
+      <div className="grid overflow-hidden rounded-lg border border-border bg-card lg:grid-cols-[15rem_minmax(0,1fr)_18rem]">
         <aside className="border-b border-border bg-background p-3 lg:border-b-0 lg:border-r">
           <div className="mb-2 flex items-center gap-1 px-2 text-xs font-semibold text-muted-foreground">
             <span>内置策略</span>
@@ -200,9 +200,9 @@ export default function Strategies() {
                 key={strategy.kind}
                 type="button"
                 onClick={() => selectStrategy(strategy.kind)}
-                className={`w-full rounded-md px-3 py-2.5 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-blue-300 ${
+                className={`w-full rounded-md px-3 py-2.5 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-ring ${
                   strategy.kind === selectedKind
-                    ? "bg-card text-white"
+                    ? "bg-card text-foreground"
                     : "text-foreground hover:bg-muted/50"
                 }`}
               >
@@ -293,7 +293,7 @@ export default function Strategies() {
             </p>
           )}
           {notice && (
-            <p className="mt-4 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+            <p className="mt-4 rounded-md bg-success/10 px-3 py-2 text-sm text-success">
               {notice}
             </p>
           )}
@@ -303,7 +303,7 @@ export default function Strategies() {
               type="button"
               onClick={submit}
               disabled={savePreset.isPending}
-              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-blue-300 disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
             >
               <Save size={16} aria-hidden="true" />
               {savePreset.isPending
@@ -371,7 +371,7 @@ export default function Strategies() {
                 <button
                   type="button"
                   onClick={() => loadPreset(preset.id)}
-                  className="w-full text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+                  className="w-full text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <span className="block truncate text-sm font-medium text-foreground">
                     {preset.name}
@@ -432,7 +432,7 @@ function StrategiesSkeleton() {
     <div className="mx-auto max-w-7xl animate-pulse" aria-label="正在加载策略配置">
       <div className="h-8 w-36 rounded bg-muted" />
       <div className="mt-3 h-4 w-full max-w-xl rounded bg-muted" />
-      <div className="mt-6 h-[30rem] rounded-xl bg-muted" />
+      <div className="mt-6 h-[30rem] rounded-lg bg-muted" />
     </div>
   );
 }

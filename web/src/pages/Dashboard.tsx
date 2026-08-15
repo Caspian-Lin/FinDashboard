@@ -1,22 +1,57 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { PageHeader } from "../components/ui/page-header";
+import { PageContainer } from "../components/ui/page-container";
+import { StatCard } from "../components/ui/stat-card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table";
 
 export default function Dashboard() {
-  const { data: health } = useQuery({ queryKey: ["health"], queryFn: api.health });
-  const { data: account } = useQuery({ queryKey: ["account"], queryFn: api.getAccount });
+  const { data: health } = useQuery({
+    queryKey: ["health"],
+    queryFn: api.health,
+    refetchInterval: 5000,
+  });
+  const { data: account } = useQuery({
+    queryKey: ["account"],
+    queryFn: api.getAccount,
+    refetchInterval: 5000,
+  });
   const { data: orders } = useQuery({
     queryKey: ["orders", "active"],
     queryFn: () => api.getOrders({ limit: 500 }),
+    refetchInterval: 5000,
   });
 
   const activeOrders = orders?.items.filter((o) => o.is_active) ?? [];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">仪表盘</h1>
-      <div className="grid grid-cols-4 gap-4">
-        <StatCard label="内核状态" value={health?.kernel_ready ? "就绪" : "未就绪"} color={health?.kernel_ready ? "green" : "red"} />
-        <StatCard label="Kill Switch" value={health?.kill_switch_level ?? "—"} color={health?.kill_switch_level === "off" ? "green" : "red"} />
+    <PageContainer>
+      <PageHeader
+        title="仪表盘"
+        description="账户、内核与活动订单概览;数据每 5 秒刷新。"
+      />
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="内核状态"
+          value={health?.kernel_ready ? "就绪" : "未就绪"}
+          trend={health?.kernel_ready ? { value: "在线", positive: true } : { value: "离线", positive: false }}
+        />
+        <StatCard
+          label="Kill Switch"
+          value={health?.kill_switch_level ?? "—"}
+          trend={
+            health?.kill_switch_level === "off"
+              ? { value: "未触发", positive: true }
+              : { value: "已触发", positive: false }
+          }
+        />
         <StatCard label="活动订单" value={String(activeOrders.length)} />
         <StatCard label="总资产" value={account ? `¥${Number(account.total_asset).toLocaleString()}` : "—"} />
         <StatCard label="可用资金" value={account ? `¥${Number(account.cash).toLocaleString()}` : "—"} />
@@ -26,47 +61,40 @@ export default function Dashboard() {
       </div>
 
       {activeOrders.length > 0 && (
-        <div className="mt-8">
-          <h2 className="text-lg font-semibold mb-3">活动订单</h2>
-          <table className="w-full bg-card rounded-lg shadow text-sm">
-            <thead className="bg-secondary text-muted-foreground">
-              <tr>
-                <th className="px-4 py-2 text-left">标的</th>
-                <th className="px-4 py-2 text-left">方向</th>
-                <th className="px-4 py-2 text-right">数量</th>
-                <th className="px-4 py-2 text-right">价格</th>
-                <th className="px-4 py-2 text-left">状态</th>
-                <th className="px-4 py-2 text-left">下单时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {activeOrders.map((o) => (
-                <tr key={o.client_order_id} className="border-t">
-                  <td className="px-4 py-2 font-mono">{o.symbol}</td>
-                  <td className={`px-4 py-2 ${o.side === "buy" ? "text-red-500" : "text-green-500"}`}>
-                    {o.side === "buy" ? "买入" : "卖出"}
-                  </td>
-                  <td className="px-4 py-2 text-right">{o.quantity}</td>
-                  <td className="px-4 py-2 text-right">{o.price ?? "—"}</td>
-                  <td className="px-4 py-2">{o.status}</td>
-                  <td className="px-4 py-2 text-muted-foreground">{new Date(o.created_at).toLocaleTimeString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <section aria-label="活动订单">
+          <h2 className="mb-3 text-lg font-semibold">活动订单</h2>
+          <div className="overflow-hidden rounded-lg border border-border bg-card">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>标的</TableHead>
+                  <TableHead>方向</TableHead>
+                  <TableHead className="text-right">数量</TableHead>
+                  <TableHead className="text-right">价格</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead>下单时间</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {activeOrders.map((o) => (
+                  <TableRow key={o.client_order_id}>
+                    <TableCell className="font-mono">{o.symbol}</TableCell>
+                    <TableCell className={o.side === "buy" ? "text-up" : "text-down"}>
+                      {o.side === "buy" ? "买入" : "卖出"}
+                    </TableCell>
+                    <TableCell className="text-right">{o.quantity}</TableCell>
+                    <TableCell className="text-right">{o.price ?? "—"}</TableCell>
+                    <TableCell>{o.status}</TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {new Date(o.created_at).toLocaleTimeString()}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </section>
       )}
-    </div>
-  );
-}
-
-function StatCard({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div className="bg-card rounded-lg shadow p-4">
-      <div className="text-muted-foreground text-sm">{label}</div>
-      <div className={`text-xl font-bold mt-1 ${color === "green" ? "text-success" : color === "red" ? "text-destructive" : ""}`}>
-        {value}
-      </div>
-    </div>
+    </PageContainer>
   );
 }

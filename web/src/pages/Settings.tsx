@@ -3,6 +3,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api, type SchedulerConfig } from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
+import { PageHeader } from "../components/ui/page-header";
+import { PageContainer } from "../components/ui/page-container";
+import { Input } from "../components/ui/input";
+import { Switch } from "../components/ui/switch";
+import { Button } from "../components/ui/button";
 
 export default function Settings() {
   const queryClient = useQueryClient();
@@ -37,23 +42,39 @@ export default function Settings() {
     { value: "index", label: "指数" },
   ];
 
+  const toggleMarket = (value: string, checked: boolean) =>
+    setForm({
+      ...form,
+      download_markets: checked
+        ? [...form.download_markets, value]
+        : form.download_markets.filter((m) => m !== value),
+    });
+
+  const toggleType = (value: string, checked: boolean) =>
+    setForm({
+      ...form,
+      download_types: checked
+        ? [...form.download_types, value]
+        : form.download_types.filter((t) => t !== value),
+    });
+
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">设置</h1>
+    <PageContainer>
+      <PageHeader title="设置" description="数据源与定时任务配置(仅数据域,不影响实盘交易内核)。" />
 
       {/* Data Source */}
-      <div className="bg-card rounded-lg shadow p-5 mb-6">
-        <h2 className="text-lg font-semibold mb-3">数据源</h2>
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-3 text-lg font-semibold">数据源</h2>
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-1 text-sm text-muted-foreground">
             <span>当前数据源</span>
             <InfoHint content={INFO_HINTS.settings.dataProvider} />
           </div>
           <span
-            className={`px-3 py-1 rounded text-sm font-medium ${
+            className={`rounded-md px-3 py-1 text-sm font-medium ${
               form.data_provider === "yfinance"
                 ? "bg-primary/10 text-primary"
-                : "bg-orange-100 text-orange-700"
+                : "bg-warning/10 text-warning"
             }`}
           >
             {form.data_provider}
@@ -62,32 +83,28 @@ export default function Settings() {
             切换: FINBOARD_DATA_PROVIDER=tushare / akshare / yfinance 环境变量
           </span>
         </div>
-      </div>
+      </section>
 
       {/* Scheduled Tasks */}
-      <div className="bg-card rounded-lg shadow p-5 mb-6">
-        <h2 className="text-lg font-semibold mb-4">定时任务</h2>
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-4 text-lg font-semibold">定时任务</h2>
 
         {/* Universe Sync Task */}
-        <div className="border rounded-lg p-4 mb-4">
-          <div className="flex items-center justify-between mb-3">
+        <div className="mb-4 rounded-lg border border-border p-4">
+          <div className="mb-3 flex items-center justify-between gap-4">
             <div>
               <h3 className="font-medium">标的池同步</h3>
-              <p className="text-sm text-muted-foreground mt-0.5">
+              <p className="mt-0.5 text-sm text-muted-foreground">
                 每日自动从 akshare 发现新上市/退市标的,更新 instruments 表
               </p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                className="sr-only peer"
-                checked={form.sync_enabled}
-                onChange={(e) =>
-                  setForm({ ...form, sync_enabled: e.target.checked })
-                }
-              />
-              <div className="w-11 h-6 bg-muted peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-card after:border-border after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
-            </label>
+            <Switch
+              checked={form.sync_enabled}
+              onCheckedChange={(checked) =>
+                setForm({ ...form, sync_enabled: checked })
+              }
+              aria-label="标的池同步开关"
+            />
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <HintLabel
@@ -97,37 +114,33 @@ export default function Settings() {
             >
               触发时间
             </HintLabel>
-            <input
+            <Input
               id="settings-sync-time"
               type="time"
               value={form.sync_time}
               onChange={(e) => setForm({ ...form, sync_time: e.target.value })}
-              className="border rounded px-3 py-1.5 text-sm"
+              className="w-auto"
             />
             <span className="text-sm text-muted-foreground/70">(Asia/Shanghai, 仅交易日)</span>
           </div>
         </div>
 
         {/* Bulk Download Task */}
-        <div className="border rounded-lg p-4">
-          <div className="flex items-center justify-between mb-3">
+        <div className="rounded-lg border border-border p-4">
+          <div className="mb-3 flex items-center justify-between gap-4">
             <div>
               <h3 className="font-medium">增量数据拉取</h3>
-              <p className="text-sm text-muted-foreground mt-0.5">
+              <p className="mt-0.5 text-sm text-muted-foreground">
                 每日盘后增量拉取所有活跃标的的最新行情数据到 parquet 缓存
               </p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                className="sr-only peer"
-                checked={form.download_enabled}
-                onChange={(e) =>
-                  setForm({ ...form, download_enabled: e.target.checked })
-                }
-              />
-              <div className="w-11 h-6 bg-muted peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-card after:border-border after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
-            </label>
+            <Switch
+              checked={form.download_enabled}
+              onCheckedChange={(checked) =>
+                setForm({ ...form, download_enabled: checked })
+              }
+              aria-label="增量数据拉取开关"
+            />
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -138,14 +151,13 @@ export default function Settings() {
               >
                 触发时间
               </HintLabel>
-              <input
+              <Input
                 id="settings-download-time"
                 type="time"
                 value={form.download_time}
                 onChange={(e) =>
                   setForm({ ...form, download_time: e.target.value })
                 }
-                className="w-full border rounded px-3 py-1.5 text-sm"
               />
             </div>
             <div>
@@ -155,7 +167,7 @@ export default function Settings() {
               >
                 回溯天数
               </HintLabel>
-              <input
+              <Input
                 id="settings-lookback-days"
                 type="number"
                 value={form.download_lookback_days}
@@ -165,89 +177,65 @@ export default function Settings() {
                     download_lookback_days: Number(e.target.value),
                   })
                 }
-                className="w-full border rounded px-3 py-1.5 text-sm"
               />
             </div>
-            <div>
-              <label className="block text-sm text-muted-foreground mb-1">&nbsp;</label>
+            <div className="flex items-end">
               <span className="text-sm text-muted-foreground/70">天 (增量拉取)</span>
             </div>
           </div>
 
-          <div className="mt-3">
-            <div className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
-              <span>拉取市场</span>
+          <fieldset className="mt-3">
+            <legend className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
+              拉取市场
               <InfoHint content={INFO_HINTS.settings.downloadMarkets} />
-            </div>
-            <div className="flex gap-4">
+            </legend>
+            <div className="flex flex-wrap gap-4">
               {marketOptions.map((opt) => (
-                <label
-                  key={opt.value}
-                  className="flex items-center gap-2 text-sm"
-                >
+                <label key={opt.value} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
                     checked={form.download_markets.includes(opt.value)}
-                    onChange={(e) => {
-                      const markets = e.target.checked
-                        ? [...form.download_markets, opt.value]
-                        : form.download_markets.filter((m) => m !== opt.value);
-                      setForm({ ...form, download_markets: markets });
-                    }}
+                    onChange={(e) => toggleMarket(opt.value, e.target.checked)}
                   />
                   {opt.label}
                 </label>
               ))}
             </div>
-          </div>
+          </fieldset>
 
-          <div className="mt-3">
-            <div className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
-              <span>拉取类型</span>
+          <fieldset className="mt-3">
+            <legend className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
+              拉取类型
               <InfoHint content={INFO_HINTS.settings.downloadTypes} />
-            </div>
-            <div className="flex gap-4">
+            </legend>
+            <div className="flex flex-wrap gap-4">
               {typeOptions.map((opt) => (
-                <label
-                  key={opt.value}
-                  className="flex items-center gap-2 text-sm"
-                >
+                <label key={opt.value} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
                     checked={form.download_types.includes(opt.value)}
-                    onChange={(e) => {
-                      const types = e.target.checked
-                        ? [...form.download_types, opt.value]
-                        : form.download_types.filter((t) => t !== opt.value);
-                      setForm({ ...form, download_types: types });
-                    }}
+                    onChange={(e) => toggleType(opt.value, e.target.checked)}
                   />
                   {opt.label}
                 </label>
               ))}
             </div>
-          </div>
+          </fieldset>
         </div>
-      </div>
+      </section>
 
       {/* Save button */}
       <div className="flex items-center gap-4">
-        <button
-          onClick={() => save.mutate(form)}
-          disabled={save.isPending}
-          className="bg-primary text-white rounded px-6 py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
-        >
+        <Button onClick={() => save.mutate(form)} disabled={save.isPending}>
           {save.isPending ? "保存中..." : "保存配置"}
-        </button>
-        {save.isSuccess && (
-          <span className="text-sm text-success">已保存</span>
-        )}
+        </Button>
+        {save.isSuccess && <span className="text-sm text-success">已保存</span>}
         {save.isError && (
           <span className="text-sm text-destructive">
             {(save.error as Error).message}
           </span>
         )}
       </div>
-    </div>
+    </PageContainer>
   );
 }
