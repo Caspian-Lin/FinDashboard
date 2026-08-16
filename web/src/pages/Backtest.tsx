@@ -591,7 +591,15 @@ export default function Backtest() {
               <MetricCard label="胜率" value={`${(m.win_rate * 100).toFixed(1)}%`} />
               <MetricCard label="交易次数" value={String(m.trade_count)} />
               <MetricCard label="换手率" value={m.turnover.toFixed(2)} />
-              <MetricCard label="超额收益" value={`${(m.excess_return * 100).toFixed(2)}%`} positive={m.excess_return >= 0} />
+              <MetricCard
+                label="超额收益"
+                value={
+                  m.excess_return !== null
+                    ? `${(m.excess_return * 100).toFixed(2)}%`
+                    : "—"
+                }
+                positive={m.excess_return !== null && m.excess_return >= 0}
+              />
             </div>
 
             {result.selection_snapshots.length > 0 && (

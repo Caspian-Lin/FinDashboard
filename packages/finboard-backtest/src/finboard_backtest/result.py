@@ -35,9 +35,9 @@ class BacktestResult:
     commission_paid: Decimal = Decimal("0")
     stamp_tax_paid: Decimal = Decimal("0")
 
-    # 基准
-    benchmark_return: float = 0.0
-    excess_return: float = 0.0
+    # 基准(issue #184:基准缺失时为 None,禁止静默 0.0)
+    benchmark_return: float | None = None
+    excess_return: float | None = None
 
     # 元信息
     start_date: date | None = None
@@ -72,12 +72,14 @@ class BacktestResult:
             f"佣金支出:   ¥{self.commission_paid:,.2f}",
             f"印花税:     ¥{self.stamp_tax_paid:,.2f}",
         ]
-        if self.benchmark_curve:
+        if self.benchmark_curve and self.benchmark_return is not None:
             lines += [
                 "",
                 f"基准收益:   {self.benchmark_return:+.2%}",
                 f"超额收益:   {self.excess_return:+.2%}",
             ]
+        elif self.benchmark_curve:
+            lines += ["", "基准收益:   缺失(未计算)"]
         if self.matching_model:
             lines += [
                 "",

@@ -269,6 +269,7 @@ async def backtest_run(
     slippage_bps: Decimal = Decimal("0"),
     equity_mode: str = "summary",
     max_points: int = 200,
+    benchmark_symbol: str | None = None,
     strategy_spec: dict[str, Any] | None = None,
     queue_payload: dict[str, Any] | None = None,
 ) -> ToolEnvelope:
@@ -301,6 +302,7 @@ async def backtest_run(
         from finboard_backtest import (
             BacktestConfig,
             BacktestEngine,
+            BenchmarkConfig,
             PointInTimeFactorSelector,
         )
         from finboard_backtest.selection_snapshot import FeatureSnapshotFactorReader
@@ -364,6 +366,14 @@ async def backtest_run(
             stamp_tax_rate=stamp_tax_rate,
             slippage_bps=slippage_bps,
             selection=selection_model.to_domain(),
+            benchmark=(
+                BenchmarkConfig(
+                    symbol=benchmark_symbol,
+                    equal_weight_universe=True,
+                )
+                if benchmark_symbol is not None
+                else BenchmarkConfig()
+            ),
         )
 
         async with app.session_maker() as session:
@@ -513,6 +523,7 @@ async def backtest_run(
             "adjust": adjust,
             "params": params,
             "selection": selection,
+            "benchmark_symbol": benchmark_symbol,
         },
         handler=_do,
     )
@@ -635,8 +646,11 @@ def register(mcp: MCPServer) -> None:
             "返回 metrics/equity_curve/fills/selection_snapshots 并落库;"
             "参数 strategy(如 ma_cross)、symbols、start/end(ISO 日期)、"
             "capital、adjust(qfq/hfq/none)、params(策略参数)、selection"
-            "(因子选股配置)、equity_mode(summary 默认:降采样到 max_points 个"
-            "关键点,首末点保留;full:完整曲线)、max_points(默认 200)。"
+            "(因子选股配置)、benchmark_symbol(可选,基准标的代码如 "
+            "000300.SH,指数日线自动走 akshare 指数接口;不传则用等权候选池"
+            "基准,基准缺失时 benchmark_return=null 而非 0)、equity_mode"
+            "(summary 默认:降采样到 max_points 个关键点,首末点保留;full:"
+            "完整曲线)、max_points(默认 200)。"
             "(2) strategy_spec 形态:按已发布策略规格 {strategy_id, version} "
             "路由入队 research_run 管线(冻结 dataset_release_ids/因子快照后"
             "异步执行),返回 run_id + job_id 指针,不阻塞等待完成;其余入队字段"
@@ -660,6 +674,7 @@ def register(mcp: MCPServer) -> None:
         slippage_bps: str = "0",
         equity_mode: str = "summary",
         max_points: int = 200,
+        benchmark_symbol: str | None = None,
         strategy_spec: dict[str, Any] | None = None,
         queue_payload: dict[str, Any] | None = None,
         ctx: Context = None,  # type: ignore[assignment]
@@ -680,6 +695,7 @@ def register(mcp: MCPServer) -> None:
             slippage_bps=Decimal(slippage_bps),
             equity_mode=equity_mode,
             max_points=max_points,
+            benchmark_symbol=benchmark_symbol,
             strategy_spec=strategy_spec,
             queue_payload=queue_payload,
         )
