@@ -88,11 +88,12 @@ async def _wait_filled(repo: OrderRepository, cid: str, timeout_s: float = 3.0) 
 
 async def test_multi_day_simulation(account_id: AccountId) -> None:
     """模拟 5 个交易日: 下单 → 撮合 → 重启恢复 → 网络抖动 → 最终一致。"""
-    from tests.integration.conftest import DB_URL
+    from tests.integration.conftest import DB_URL, ensure_test_db
 
     mock = MockBroker()
     broker = FaultInjectionBroker(mock)
 
+    await ensure_test_db(DB_URL)
     engine = create_async_engine(DB_URL)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

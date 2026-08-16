@@ -24,7 +24,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import os
 import time
 from collections.abc import AsyncIterator
 
@@ -55,11 +54,7 @@ from finboard_shared.background_jobs import (
     generate_background_job_id,
 )
 from finboard_shared.types import BrokerKind
-
-DB_URL = os.getenv(
-    "FINBOARD_DB_URL",
-    "postgresql+psycopg://findashboard:CHANGE_ME@127.0.0.1:5432/findashboard",
-)
+from tests.integration.conftest import TEST_DB_URL as DB_URL
 
 #: 模拟批量拉取的标的数量(issue 要求的 5k 量级)。
 SYMBOL_COUNT = 5000
@@ -104,6 +99,9 @@ class _SlowBulkDownloadExecutor:
 
 @pytest_asyncio.fixture(scope="module")
 async def engine() -> AsyncIterator[AsyncEngine]:
+    from tests.integration.conftest import ensure_test_db
+
+    await ensure_test_db(DB_URL)
     eng = create_async_engine(DB_URL)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

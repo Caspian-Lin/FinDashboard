@@ -8,7 +8,7 @@
 * 取消链路(cancel research_run → background_job cancel_requested/cancelled);
 * worker 中断 → 恢复 → 续跑。
 
-依赖 PostgreSQL(``FINBOARD_DB_URL``)。不连 broker / 不下实盘单。
+依赖 PostgreSQL(``FINBOARD_TEST_DB_URL``,回退 ``FINBOARD_DB_URL``)。不连 broker / 不下实盘单。
 """
 
 from __future__ import annotations
@@ -70,15 +70,11 @@ pytestmark = pytest.mark.asyncio
 
 @pytest_asyncio.fixture(scope="module")
 async def engine() -> AsyncIterator[AsyncEngine]:
-    import os
-
     from finboard_persistence import Base
+    from tests.integration.conftest import TEST_DB_URL, ensure_test_db
 
-    db_url = os.getenv(
-        "FINBOARD_DB_URL",
-        "postgresql+psycopg://findashboard:CHANGE_ME@127.0.0.1:5432/findashboard",
-    )
-    eng = create_async_engine(db_url)
+    await ensure_test_db(TEST_DB_URL)
+    eng = create_async_engine(TEST_DB_URL)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield eng

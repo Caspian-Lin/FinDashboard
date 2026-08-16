@@ -121,6 +121,31 @@ make test             # unit + smoke(默认跳过 integration)
 make test-integration # 需要 PostgreSQL 已就绪
 ```
 
+### 3.1 并行运行 `make dev` 与集成测试(issue #166 / #167)
+
+本地可以一边开着 `make dev` 一边跑全量测试,互不干扰:
+
+- **独立测试库**:集成测试默认连 `findashboard_test`(与 dev 的
+  `findashboard` 完全隔离),首次运行由 conftest 自动 `CREATE DATABASE`
+  (本地角色需要 CREATEDB 权限,或手动 `createdb findashboard_test`)。
+  测试库内 `clean_tables()` 全清;仅当显式用 `FINBOARD_DB_URL` 覆盖测试
+  连接(共享开发库场景)时才保留 `instruments` / `research_dataset_releases`
+  / `dataset_manifests` 等用户数据。
+- **连接切换**:`FINBOARD_TEST_DB_URL` 优先,回退 `FINBOARD_DB_URL`,再
+  回退默认测试库。CI 的 postgres 服务用户是 superuser,自动建库即可。
+- **端口**:`make dev` 的 API(:8000)与内嵌 finboard-mcp(:8765)不会与
+  测试冲突(测试用 ASGITransport,不占端口;MCP bind 失败已容错)。
+- **挂死兜底超时**:pytest-timeout(thread 方式,Windows 无 signal)兜底
+  sync 挂死(超时后 dump 堆栈并退出进程);asyncio 挂死由 conftest 的
+  `asyncio.timeout` 守卫优雅打断(单测试失败,进程继续)。默认超时
+  unit 60s / integration 300s,长用例 `@pytest.mark.timeout(N)` 调大或
+  `timeout(None)` 豁免。验收挂死探针(标记豁免,默认不跑):
+  `uv run pytest tests/unit/test_hang_guard.py -m hang_guard`,预期
+  ~10s 内 1 passed(sync 进程级兜底)+ 1 xfailed(async 优雅失败)。
+- **僵尸锁排查**:测试被 `DELETE`/`UPDATE` 卡住时先查
+  `pg_stat_activity` 的 `idle in transaction` 会话并 terminate,完整指引
+  见 `docs/memory/pg-lock-hygiene.md`。
+
 ### 4. 一键启动开发环境
 
 ```bash

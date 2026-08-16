@@ -39,6 +39,16 @@ PostgreSQL 锁等待**:库里存在数小时前的 `idle in transaction` 僵尸�
    ```
    `idle in transaction` + `xact_age` 很大的就是元凶,
    `select pg_terminate_backend(<pid>);` 清掉后其余等锁会话自动解锁。
-4. 遗留线索:dev server 疑似泄漏事务的端点(候选:research 数据发布
-   相关 GET)值得单独 issue 排查——请求异常路径上 session 未
-   rollback/commit。
+4. 遗留线索(2026-08-16 已由 issue #166 定位并修复):泄漏根因是
+   `finboard_api/routes/instruments.py`(多资产元数据 + 研究数据发布,前端
+   研究数据页)与 `audit.py` 的数据域路由挂在 kernel 共享的长生命周期
+   session(`get_session`)上,只读 GET 从不 commit/rollback,事务在共享
+   连接上永久悬挂 —— 与「僵尸事务最后查询是 research_dataset_releases
+   的 SELECT、事务开始时间吻合 dev server 启动」完全对应。修复:数据域
+   路由统一改用每请求独立 session(`get_db_session`,异常路径自动 rollback);
+   回归测试 `tests/integration/test_session_hygiene.py` 断言请求(含异常
+   路径)后 `pg_stat_activity` 无 `idle in transaction` 残留。另配套
+   issue #167:集成测试改用独立测试库 `findashboard_test`
+   (`FINBOARD_TEST_DB_URL`),测试与 dev server 不再共享库,僵尸锁不再
+   传导到测试清表;pytest 挂死由 pytest-timeout + `asyncio.timeout` 守卫
+   兜底(探针 `tests/unit/test_hang_guard.py`,见 README §3.1)。
