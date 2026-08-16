@@ -97,12 +97,12 @@ def test_build_docker_run_command_basic(work_tmp) -> None:
     assert "0.0.0.0" in cmd
     assert "--port" in cmd
     assert "4097" in cmd
-    # bind mount .opencode / .agents。
-    assert any("/workspace/.opencode" in p for p in cmd)
-    assert any("/workspace/.agents" in p for p in cmd)
-    # #157:运行时 opencode.json 以单文件 mount 覆盖容器内同名文件。
+    # bind mount .opencode / .agents —— 一律只读(:ro,防止放行 bash 后 agent 改写仓库配置)。
+    assert any("/workspace/.opencode:ro" in p for p in cmd)
+    assert any("/workspace/.agents:ro" in p for p in cmd)
+    # #157:运行时 opencode.json 以单文件 mount 覆盖容器内同名文件(同样只读)。
     file_mounts = [
-        p for p in cmd if p.endswith(":/workspace/.opencode/opencode.json")
+        p for p in cmd if p.endswith(":/workspace/.opencode/opencode.json:ro")
     ]
     assert len(file_mounts) == 1
     # Windows 路径含盘符冒号,用 startswith 判定而不是 split(":")。
