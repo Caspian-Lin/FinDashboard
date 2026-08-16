@@ -31,6 +31,7 @@
 - **P5（大部分完成）**：策略框架 + 行情事件 —— 策略运行器（#11）、行情数据接入（#10）已实现；策略状态持久化待验证。
 - **当前方向：回测 + 策略开发** —— QMT 权限受阻,实盘验证暂缓（#22/#24/#26）。转向历史数据源（#27 akshare/tushare）、回测引擎（#28 行情回放 + 纸面撮合 + 绩效分析）、第一个信号驱动策略（#29 均线交叉）。
 - **研究里程碑收尾（#66/#77-#81/#83/#91）**：研究数据发布、因子实验室、无代码策略规格、统一 `ResearchRun` 生命周期、正式组合风控流水线和持久化产品模拟盘均已建立；研究运行使用独立表与 `RR-` ID，模拟运行使用 `simulation_*` 表与 `SIM-*` ID，均不得写入实盘订单/成交/持仓。前端暂不提供 Python 策略代码。
+- **多期再平衡回放（#183）**：research_run 支持 `parameters.rebalance_frequency`（monthly|quarterly）从冻结发布交易日历推导每期 decision date，每期重算 universe/features/signals 与组合，决策间每日 mark-to-market 产出全区间权益曲线与绩效指标（总收益/年化/夏普/最大回撤）；返回与 report 标注 `execution_mode`（single_shot|multi_period）。多期不要求预建因子快照（价格因子按发布每日重算），未声明或非法值一律按 single_shot 单快照路径处理，行为不变；纯离线研究域，不连 broker 不下单。
 - **正式研究组合入口（#91）**：long-only `ResearchRun` 必须由 `PortfolioPipelineAdapter` 从冻结候选池/特征/信号生成目标、硬约束、风险退出、三档资金可行性、研究订单/成交和账本；风险贡献上限启用后缺少协方差、数学不可行或不收敛必须在生成研究订单前失败关闭。
 - **产品模拟盘边界（#83）**：`finboard-simulation` 只接受已发布策略和 completed `ResearchRun` 的结构化目标仓位，订单、成交、持仓、资金、时钟与审计全部持久化在独立模拟表。禁止导入/配置 Broker 或 QMT/CTP、禁止直接创建订单或修改持仓、禁止自动晋级影子盘/实盘。
 - **研究策略配置边界**：允许用版本化无代码规格组合后端白名单候选池 / 因子 / 信号 / 目标仓位 / 研究风控 / 成交假设 / 验证计划；禁止网页提交 Python、模块路径或可执行表达式，保存 / 发布配置不得自动启动任何运行。
@@ -151,6 +152,14 @@ uv run mypy .
 # DB 迁移
 uv run alembic upgrade head
 ```
+
+**pytest 临时目录（Windows ACL 根除，勿绕行）**：所有 pytest 调用统一使用仓库内
+`.pytest-tmp/`（`pyproject.toml` addopts 已固定 `--basetemp .pytest-tmp` +
+`-p no:cacheprovider`，该目录已入 `.gitignore`）。原因：`%LOCALAPPDATA%` 下默认
+`pytest-of-<user>` 与 `.pytest_cache` 在本机偶发 WinError 5 拒绝访问（ACL 损坏），
+导致 `tmp_path` 系 fixture 报错。因此**所有 pytest 必须在仓库根目录运行**（相对路径
+以 CWD 为基准），不要手动加 `--basetemp` 指向系统临时目录，也不要为绕过报错而
+关闭/改写该配置。若仓库根目录没有 `.pytest-tmp`，pytest 会自动创建；CI 与本地行为一致。
 
 ### Monorepo 结构
 

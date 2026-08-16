@@ -28,7 +28,8 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -47,12 +48,16 @@ from finboard_backtest.factors.standardize import (
 )
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.contracts import (
+    REBALANCE_FREQUENCIES,
     DecisionBundle,
+    EquityPoint,
     FeatureValue,
     NormalizedSignal,
+    ResearchExecutionMode,
     ResearchRunManifest,
     ResearchRunReport,
     UniverseCandidate,
+    execution_mode_for,
 )
 from finboard_backtest.research_run.frozen_loader import (
     FeatureSnapshotProvider,
@@ -199,9 +204,7 @@ def _rolling_volatility(values: list[float], window: int) -> list[float]:
             out.append(float("nan"))
             continue
         mean = sum(window_returns) / len(window_returns)
-        variance = sum((item - mean) ** 2 for item in window_returns) / (
-            len(window_returns) - 1
-        )
+        variance = sum((item - mean) ** 2 for item in window_returns) / (len(window_returns) - 1)
         out.append(math.sqrt(variance))
     return out
 
@@ -217,9 +220,7 @@ def _rolling_zscore(values: list[float], window: int) -> list[float]:
             out.append(0.0)
             continue
         mean = sum(window_values) / len(window_values)
-        variance = sum((item - mean) ** 2 for item in window_values) / len(
-            window_values
-        )
+        variance = sum((item - mean) ** 2 for item in window_values) / len(window_values)
         if variance <= 1e-12:
             out.append(0.0)
         else:
@@ -456,7 +457,9 @@ def evaluate_signal_rules(
                 continue
             if policy is SignalConflictPolicy.HIGHEST_PRIORITY:
                 best_priority = max(item[0].priority for item in group_items)
-                chosen.append(next(item for item in group_items if item[0].priority == best_priority))
+                chosen.append(
+                    next(item for item in group_items if item[0].priority == best_priority)
+                )
             else:  # NEUTRALIZE
                 actions = {item[0].action for item in group_items}
                 if SignalAction.BUY in actions and SignalAction.SELL in actions:
@@ -482,9 +485,7 @@ def evaluate_signal_rules(
                 )
             )
     if default_action is not SignalAction.NEUTRAL:
-        missing = sorted(
-            symbol for symbol in included_symbols if symbol not in resolved
-        )
+        missing = sorted(symbol for symbol in included_symbols if symbol not in resolved)
         signals.extend(
             NormalizedSignal(
                 symbol=symbol,
@@ -554,19 +555,15 @@ async def _load_price_series(
     return series
 
 
-async def _next_execution_at(
-    provider: FrozenReleaseProvider,
-    decision_at: datetime,
-) -> datetime:
-    """推断决策时点之后最近的交易日(发布交易日历,超限 fail-closed)。
+async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
+    """读取发布交易日历(首个 ready 标的的已发布 bars,升序去重)。
 
-    交易日历是公开知识,用非 PIT 的 ``fetch_bars`` 读取发布全范围 bars;
-    执行发生在决策之后,不构成未来函数。
+    交易日历是公开知识,用非 PIT 的 ``fetch_bars`` 读取发布全范围;决策与
+    成交发生在发布日期之后,不构成未来函数。
     """
     from finboard_backtest.research_run.frozen_loader import _market_from_value
     from finboard_shared.models import Symbol
 
-    calendar: list[date] | None = None
     for instrument in provider.release.instruments:
         if not instrument.ready:
             continue
@@ -581,8 +578,16 @@ async def _next_execution_at(
             adjust=provider.release.adjustment,
         )
         if bars:
-            calendar = sorted({bar.timestamp.date() for bar in bars})
-            break
+            return sorted({bar.timestamp.date() for bar in bars})
+    return []
+
+
+async def _next_execution_at(
+    provider: FrozenReleaseProvider,
+    decision_at: datetime,
+) -> datetime:
+    """推断决策时点之后最近的交易日(发布交易日历,超限 fail-closed)。"""
+    calendar = await _release_trading_days(provider)
     if not calendar:
         raise ValueError("发布无可用行情,无法推断成交交易日")
     for day in calendar:
@@ -604,11 +609,7 @@ def _estimate_covariance(
     """
     import numpy as np
 
-    symbols = sorted(
-        symbol
-        for symbol, values in price_series.items()
-        if len(values) >= 2
-    )
+    symbols = sorted(symbol for symbol, values in price_series.items() if len(values) >= 2)
     if len(symbols) < 2:
         return None
     n_obs = min(len(price_series[symbol]) for symbol in symbols) - 1
@@ -635,6 +636,171 @@ def _estimate_covariance(
     )
 
 
+def _rebalance_frequency(manifest: ResearchRunManifest) -> str | None:
+    """读取 ``parameters.rebalance_frequency``,非法值 fail-closed。"""
+    value = manifest.parameters.get("rebalance_frequency")
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in REBALANCE_FREQUENCIES:
+        raise ValueError(f"rebalance_frequency 仅支持 {sorted(REBALANCE_FREQUENCIES)}: {value!r}")
+    return value
+
+
+def _period_bucket(day: date, frequency: str) -> tuple[int, int]:
+    """交易日所属周期桶:(year, month) 或 (year, quarter)。"""
+    if frequency == "monthly":
+        return day.year, day.month
+    if frequency == "quarterly":
+        return day.year, (day.month - 1) // 3 + 1
+    raise ValueError(f"未知调仓频率: {frequency}")
+
+
+async def _derive_rebalance_decision_days(
+    provider: FrozenReleaseProvider,
+    frequency: str,
+) -> list[tuple[datetime, str | None]]:
+    """从发布交易日历推导多期回放的决策时点。
+
+    每期(月 / 季)取该期最后一个交易日收盘后 15:00 决策,``factor_snapshot_id``
+    恒为 ``None``(决策日与 features 由管线按冻结发布重算,不绑定单一快照)。
+    成交发生在决策后的下一交易日,因此发布末尾没有后续交易日的期末不产生
+    决策(该期无法成交,fail-closed 语义下直接排除)。
+    """
+    calendar = await _release_trading_days(provider)
+    if not calendar:
+        raise ValueError("发布无可用行情,无法推导多期决策时点")
+    period_ends: dict[tuple[int, int], date] = {}
+    for day in calendar:
+        period_ends[_period_bucket(day, frequency)] = day
+    decisions: list[tuple[datetime, str | None]] = []
+    for day in sorted(period_ends.values()):
+        # 期末之后必须存在下一交易日才能执行成交。
+        if any(item > day for item in calendar):
+            decisions.append((datetime.combine(day, time(15, 0), tzinfo=UTC), None))
+    return decisions
+
+
+async def _compute_period_features(
+    provider: FrozenReleaseProvider,
+    manifest: ResearchRunManifest,
+    decision_at: datetime,
+    release_id: str,
+) -> tuple[FeatureValue, ...]:
+    """按单个决策时点从冻结发布重算价格特征(issue #183)。
+
+    复用 ``build_price_feature_snapshot``(与 feature_snapshot 任务同一实现,
+    避免双源漂移):PIT 门控读取各标的收盘价,计算 momentum / volatility_Nd /
+    downside_volatility,并把观测映射为 ``FeatureValue``(来源绑定冻结 release)。
+    冻结因子快照里的基本面特征(如 pb)由 ``FrozenInputLoader`` 另行 PIT 加载,
+    两者在 ``build_decision_inputs`` 合并。
+    """
+    from finboard_backtest.factor_lab import FactorAnalysisError, build_price_feature_snapshot
+
+    try:
+        snapshot = await build_price_feature_snapshot(
+            provider=provider,
+            decision_at=decision_at,
+            code_version=manifest.code_version,
+        )
+    except FactorAnalysisError as exc:
+        raise ValueError(
+            f"决策时点 {decision_at.date().isoformat()} 无法从发布重算价格特征"
+            f"(通常发布起点历史不足): {exc}"
+        ) from exc
+    return tuple(
+        FeatureValue(
+            symbol=observation.symbol,
+            feature_id=observation.feature_name,
+            value=observation.value,
+            source_artifact_ids=(release_id,),
+            available_at=observation.available_at,
+        )
+        for observation in snapshot.observations
+    )
+
+
+async def _market_close_map(
+    provider: FrozenReleaseProvider,
+    symbols: Sequence[str],
+) -> dict[str, dict[date, Decimal]]:
+    """读取各标的全区间收盘价映射(非 PIT;收盘价在当日收盘即公开)。"""
+    from finboard_backtest.research_run.frozen_loader import _market_from_value
+    from finboard_shared.models import Symbol
+
+    closes_by_symbol: dict[str, dict[date, Decimal]] = {}
+    for code in symbols:
+        bars = await provider.fetch_bars(
+            Symbol(code=code, market=_market_from_value(code)),
+            provider.release.period,
+            provider.release.start_date,
+            provider.release.end_date,
+            adjust=provider.release.adjustment,
+        )
+        closes_by_symbol[code] = {bar.timestamp.date(): bar.close for bar in bars}
+    return closes_by_symbol
+
+
+async def build_daily_equity_curve(
+    provider: FrozenReleaseProvider,
+    manifest: ResearchRunManifest,
+    decisions: Sequence[DecisionBundle],
+) -> tuple[EquityPoint, ...]:
+    """决策间每日 mark-to-market 权益曲线(issue #183)。
+
+    以每次成交的执行日为账本切换边界,执行日之间只随行情波动:
+    ``equity(d) = cash + Σ qty_i * close_i(d) * multiplier_i``;未建仓阶段
+    权益 = 初始资金。覆盖发布交易日历的全部交易日;期末持仓按最后行情持续
+    计值(纯回放不强制平仓)。
+    边界:纯离线研究域,只读冻结发布,不连 broker / 不下单。
+    """
+    from bisect import bisect_right
+
+    calendar = await _release_trading_days(provider)
+    if not calendar:
+        return ()
+    segments: list[tuple[date, Decimal, dict[str, tuple[Decimal, Decimal]]]] = []
+    for decision in decisions:
+        if not decision.fills:
+            continue
+        execution_date = decision.fills[0].filled_at.date()
+        positions: dict[str, tuple[Decimal, Decimal]] = {}
+        for position in decision.positions:
+            if position.quantity <= 0 or position.market_price <= 0:
+                continue
+            multiplier = position.market_value / (position.quantity * position.market_price)
+            positions[position.symbol] = (position.quantity, multiplier)
+        segments.append((execution_date, decision.ledger.cash, positions))
+    segments.sort(key=lambda item: item[0])
+
+    held_symbols = sorted({symbol for _, _, positions in segments for symbol in positions})
+    closes_by_symbol = await _market_close_map(provider, held_symbols)
+    # 每标的预排好日期键,停牌日用最近历史收盘承载。
+    sorted_days: dict[str, list[date]] = {
+        symbol: sorted(days) for symbol, days in closes_by_symbol.items()
+    }
+
+    points: list[EquityPoint] = []
+    segment_index = 0
+    for day in calendar:
+        while segment_index + 1 < len(segments) and segments[segment_index + 1][0] <= day:
+            segment_index += 1
+        if not segments or segments[segment_index][0] > day:
+            points.append(EquityPoint(trade_date=day, equity=manifest.initial_capital))
+            continue
+        cash, positions = segments[segment_index][1], segments[segment_index][2]
+        equity = cash
+        for symbol, (quantity, multiplier) in positions.items():
+            days = sorted_days.get(symbol)
+            if not days:
+                continue
+            index = bisect_right(days, day) - 1
+            if index < 0:
+                continue
+            equity += quantity * closes_by_symbol[symbol][days[index]] * multiplier
+        points.append(EquityPoint(trade_date=day, equity=equity))
+    return tuple(points)
+
+
 def _spec_universe_candidates(
     provider: FrozenReleaseProvider,
     context: LoadedDecisionContext,
@@ -651,17 +817,13 @@ def _spec_universe_candidates(
         if not instrument.ready:
             continue
         fields: dict[str, float | str | bool | None] = {
-            name: by_symbol.get(instrument.code)
-            for name, by_symbol in features_by_source.items()
+            name: by_symbol.get(instrument.code) for name, by_symbol in features_by_source.items()
         }
         price = context.prices.get(instrument.code)
         listing_days = 0
         if instrument.list_date is not None:
             listing_days = max(0, (decision_date - instrument.list_date).days)
-        delisted = (
-            instrument.delist_date is not None
-            and instrument.delist_date <= decision_date
-        )
+        delisted = instrument.delist_date is not None and instrument.delist_date <= decision_date
         average_amount = fields.get("average_amount")
         candidates.append(
             SpecUniverseCandidate(
@@ -670,9 +832,7 @@ def _spec_universe_candidates(
                 asset_class=instrument.asset_class,
                 listing_days=listing_days,
                 average_amount=(
-                    float(average_amount)
-                    if isinstance(average_amount, (int, float))
-                    else None
+                    float(average_amount) if isinstance(average_amount, (int, float)) else None
                 ),
                 price=price,
                 suspended=instrument.suspended_sessions > 0,
@@ -719,32 +879,33 @@ async def build_decision_inputs(
     release_provider_factory: ReleaseProviderFactory,
     snapshot_provider: FeatureSnapshotProvider,
 ) -> tuple[PortfolioDecisionInput, ...]:
-    """按 validation 冻结的快照决策时点组装全部 ``PortfolioDecisionInput``。
+    """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
 
-    * 决策日序列 = manifest.factor_snapshots 的 ``decision_at`` 排序去重;
-    * 每个决策日:``FrozenInputLoader`` 加载机械字段 → 价格序列 → universe
-      过滤 → 信号引擎求值 → 组装输入;
+    * single_shot(默认):决策日序列 = manifest.factor_snapshots 的
+      ``decision_at`` 排序去重,每个决策日由 ``FrozenInputLoader`` 加载机械
+      字段 → 价格序列 → universe 过滤 → 信号引擎求值 → 组装输入;
+    * multi_period:决策日由 ``parameters.rebalance_frequency``(monthly/
+      quarterly)按冻结发布交易日历推导,每期由管线重算 price features →
+      合并冻结快照 PIT 观测 → 同样的 universe 过滤 / 信号求值;
     * 信号只对「included 且决策 / 成交价格齐备」的标的产出(组合流水线要求
       信号标的必须有价格与执行元数据)。
     """
     if not manifest.dataset_releases:
         raise ValueError("manifest 必须冻结至少一个数据发布")
-    decision_days: list[tuple[datetime, str | None]] = []
-    for ref in manifest.factor_snapshots:
-        snapshot = await snapshot_provider(ref.artifact_id)
-        if snapshot is None:
-            raise ValueError(f"因子快照缺失: {ref.artifact_id}")
-        decision_days.append((snapshot.decision_at, snapshot.snapshot_id))
-    decision_days = sorted(set(decision_days))
-    if not decision_days:
-        raise ValueError("manifest 未冻结因子快照,无法推导决策时点")
-
     release_ref = manifest.dataset_releases[0]
     provider = release_provider_factory(release_ref.artifact_id)
     loader = FrozenInputLoader(
         release_provider_factory=release_provider_factory,
         snapshot_provider=snapshot_provider,
     )
+    frequency = _rebalance_frequency(manifest)
+
+    if frequency is not None:
+        decision_days = await _derive_rebalance_decision_days(provider, frequency)
+    else:
+        decision_days = await _snapshot_decision_days(manifest, snapshot_provider)
+    if not decision_days:
+        raise ValueError("manifest 未冻结因子快照且未设置 rebalance_frequency,无法推导决策时点")
 
     inputs: list[PortfolioDecisionInput] = []
     for decision_at, snapshot_id in decision_days:
@@ -752,13 +913,18 @@ async def build_decision_inputs(
         context = await loader.load_context(
             manifest, decision_at=decision_at, execution_at=execution_at
         )
-        features_by_source = _features_by_source(context.features)
+        if frequency is not None:
+            period_features = await _compute_period_features(
+                provider, manifest, decision_at, release_ref.artifact_id
+            )
+            features = (*period_features, *context.features)
+        else:
+            features = context.features
+        features_by_source = _features_by_source(features)
         candidates = _apply_universe_filter(
             manifest.strategy_spec, provider, context, features_by_source
         )
-        included = frozenset(
-            item.symbol for item in candidates if item.included
-        )
+        included = frozenset(item.symbol for item in candidates if item.included)
         # 信号标的必须同时具备决策价、成交价、执行元数据与可估计收益的历史。
         signalable = (
             included
@@ -768,16 +934,14 @@ async def build_decision_inputs(
         )
         price_series = await _load_price_series(provider, tuple(signalable), decision_at)
         signalable = frozenset(
-            symbol
-            for symbol in signalable
-            if len(price_series.get(symbol, ())) >= 2
+            symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
         )
         signals = build_normalized_signals(
             manifest.strategy_spec,
-            features=context.features,
+            features=features,
             prices=context.prices,
             included_symbols=signalable,
-            factor_snapshot_id=snapshot_id,
+            factor_snapshot_id=None if frequency is not None else snapshot_id,
             price_series=price_series,
         )
         inputs.append(
@@ -786,7 +950,7 @@ async def build_decision_inputs(
                 decision_at=context.decision_at,
                 execution_at=context.execution_at,
                 candidates=candidates,
-                features=context.features,
+                features=features,
                 signals=signals,
                 prices=context.prices,
                 execution_prices=context.execution_prices,
@@ -798,12 +962,31 @@ async def build_decision_inputs(
     return tuple(inputs)
 
 
+async def _snapshot_decision_days(
+    manifest: ResearchRunManifest,
+    snapshot_provider: FeatureSnapshotProvider,
+) -> list[tuple[datetime, str | None]]:
+    """按冻结因子快照的 ``decision_at`` 推导单时点决策序列(排序去重)。"""
+    decision_days: list[tuple[datetime, str | None]] = []
+    for ref in manifest.factor_snapshots:
+        snapshot = await snapshot_provider(ref.artifact_id)
+        if snapshot is None:
+            raise ValueError(f"因子快照缺失: {ref.artifact_id}")
+        decision_days.append((snapshot.decision_at, snapshot.snapshot_id))
+    return sorted(set(decision_days))
+
+
 class SignalEnginePipelineAdapter:
     """``multi_factor`` 规格的真实信号引擎适配器(惰性加载)。
 
     工厂同步构造本适配器,首个 ``decisions()`` 迭代时才异步加载冻结产物与
     信号 —— 加载失败会落在 ``ResearchRunCoordinator`` 的异常分流内,
     ``research_runs`` 状态正确迁移为 FAILED(issue #170 伴生缺陷 A)。
+
+    * single_shot:决策日来自冻结因子快照,``execution_mode=single_shot``;
+    * multi_period:``parameters.rebalance_frequency`` 按发布交易日历推导
+      多期决策,每期重算 features,signal_engine 决策间按冻结行情每日
+      mark-to-market 产出 ``equity_curve``(issue #183)。
     """
 
     def __init__(
@@ -823,6 +1006,11 @@ class SignalEnginePipelineAdapter:
         self._release_provider_factory = release_provider_factory
         self._snapshot_provider = snapshot_provider
         self._inputs: tuple[PortfolioDecisionInput, ...] | None = None
+        self._equity_curve: tuple[EquityPoint, ...] = ()
+
+    @property
+    def execution_mode(self) -> ResearchExecutionMode:
+        return execution_mode_for(self._manifest.parameters)
 
     def validate_manifest(self, manifest: ResearchRunManifest) -> None:
         if manifest.strategy_kind != self.strategy_kind:
@@ -853,8 +1041,21 @@ class SignalEnginePipelineAdapter:
         manifest: ResearchRunManifest,
     ) -> AsyncIterator[DecisionBundle]:
         adapter = await self._load()
+        collected: list[DecisionBundle] = []
         async for decision in adapter.decisions(manifest):
             yield decision
+            collected.append(decision)
+        # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(离线圈内,
+        # 只在 coordinator 完整消费决策后执行;中断时曲线保持为空)。
+        if (
+            # 这里用执行时 manifest 判定,避免 replica 的 manifest 与
+            # 构造期 manifest 不一致(重放时参数不变,两者等价)。
+            execution_mode_for(manifest.parameters) is ResearchExecutionMode.MULTI_PERIOD
+            and collected
+        ):
+            release_ref = manifest.dataset_releases[0]
+            provider = self._release_provider_factory(release_ref.artifact_id)
+            self._equity_curve = await build_daily_equity_curve(provider, manifest, collected)
 
     def build_report(
         self,
@@ -865,7 +1066,11 @@ class SignalEnginePipelineAdapter:
             strategy_kind=self.strategy_kind,
             decision_inputs=self._inputs or (),
         )
-        return delegate.build_report(manifest, decisions)
+        return delegate.build_report(
+            manifest,
+            decisions,
+            equity_curve=self._equity_curve,
+        )
 
 
 def build_signal_engine_adapter_factory(
@@ -919,6 +1124,7 @@ def build_signal_engine_adapter_factory(
 __all__ = [
     "SIGNAL_ENGINE_STRATEGY_KINDS",
     "SignalEnginePipelineAdapter",
+    "build_daily_equity_curve",
     "build_decision_inputs",
     "build_normalized_signals",
     "build_signal_engine_adapter_factory",

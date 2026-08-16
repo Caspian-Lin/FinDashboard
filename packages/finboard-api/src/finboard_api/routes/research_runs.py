@@ -74,9 +74,7 @@ async def queue_research_run(
     if strategy_row.status != "published":
         raise HTTPException(status_code=409, detail="仅已发布策略规格可以进入研究运行")
     spec = ResearchStrategySpec.model_validate(strategy_row.payload)
-    if sorted(body.dataset_release_ids) != sorted(
-        spec.validation_plan.dataset_release_ids
-    ):
+    if sorted(body.dataset_release_ids) != sorted(spec.validation_plan.dataset_release_ids):
         raise HTTPException(
             status_code=422,
             detail="运行数据发布必须与策略验证计划完全一致",
@@ -91,12 +89,7 @@ async def queue_research_run(
     try:
         validate_strategy_dataset_capabilities(
             spec.strategy_kind,
-            {
-                item.key
-                for release in releases
-                for item in release.capabilities
-                if item.ready
-            },
+            {item.key for release in releases for item in release.capabilities if item.ready},
         )
     except UnsupportedResearchCapabilityError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -113,15 +106,16 @@ async def queue_research_run(
     required_factor_sources = {
         node.source
         for node in spec.feature_graph.nodes
-        if node.source is not None
-        and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
+        if node.source is not None and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
-    if required_factor_sources and not snapshots:
+    # issue #183:多期回放(parameters.rebalance_frequency)由管线按冻结发布
+    # 每日重算价格因子,不要求为每月预建因子快照;仍缺失的来源执行期 fail-closed。
+    is_multi_period = body.parameters.get("rebalance_frequency") in ("monthly", "quarterly")
+    if required_factor_sources and not snapshots and not is_multi_period:
         raise HTTPException(
             status_code=422,
             detail=(
-                "策略依赖因子输入但未冻结 factor_snapshot_ids: "
-                f"{sorted(required_factor_sources)}"
+                f"策略依赖因子输入但未冻结 factor_snapshot_ids: {sorted(required_factor_sources)}"
             ),
         )
     release_ids = {release.release_id for release in releases}
@@ -129,10 +123,7 @@ async def queue_research_run(
         if snapshot.dataset_release_id not in release_ids:
             raise HTTPException(
                 status_code=422,
-                detail=(
-                    f"因子快照 {snapshot.snapshot_id} 绑定的数据发布"
-                    "不在本次冻结清单中"
-                ),
+                detail=(f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中"),
             )
 
     run_id = _run_id(body.idempotency_key)
@@ -147,9 +138,7 @@ async def queue_research_run(
                     artifact_id=release.release_id,
                     version=release.version,
                     checksum=release.release_checksum,
-                    capabilities=tuple(
-                        item.key for item in release.capabilities if item.ready
-                    ),
+                    capabilities=tuple(item.key for item in release.capabilities if item.ready),
                 )
                 for release in releases
             ),
@@ -160,12 +149,7 @@ async def queue_research_run(
                     version=snapshot.framework_version,
                     checksum=snapshot.checksum,
                     capabilities=tuple(
-                        sorted(
-                            {
-                                f"factor:{item.feature_name}"
-                                for item in snapshot.observations
-                            }
-                        )
+                        sorted({f"factor:{item.feature_name}" for item in snapshot.observations})
                     ),
                 )
                 for snapshot in snapshots
@@ -236,9 +220,7 @@ async def queue_research_run(
         # issue #143:同事务双写 background_jobs,共用 idempotency_key 保证幂等。
         # 已存在的 research_run(幂等命中)若已有 job_id 则保留,否则补建。
         if not row.job_id:
-            row.job_id = await _enqueue_research_run_job(
-                session, manifest=manifest
-            )
+            row.job_id = await _enqueue_research_run_job(session, manifest=manifest)
         await session.commit()
     except (ValueError, ValidationError) as exc:
         await session.rollback()
@@ -339,9 +321,7 @@ async def cancel_research_run(
 
     from finboard_backtest.research_run import ResearchRunCoordinator
 
-    coordinator = ResearchRunCoordinator(
-        SqlAlchemyResearchRunStore(ResearchRunRepository(session))
-    )
+    coordinator = ResearchRunCoordinator(SqlAlchemyResearchRunStore(ResearchRunRepository(session)))
     try:
         record = await coordinator.cancel(run_id)
         # issue #143:协作式取消联动 background_jobs(running → cancel_requested,
@@ -388,9 +368,7 @@ async def queue_research_replay(
             row = await ResearchRunRepository(session).get(record.manifest.run_id)
             assert row is not None
             if not row.job_id:
-                row.job_id = await _enqueue_research_run_job(
-                    session, manifest=manifest
-                )
+                row.job_id = await _enqueue_research_run_job(session, manifest=manifest)
         await session.commit()
     except (
         ResearchRunPersistenceConflictError,

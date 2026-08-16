@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ResearchRunQueueIn(BaseModel):
@@ -28,6 +28,24 @@ class ResearchRunQueueIn(BaseModel):
     initial_capital: Decimal = Field(ge=Decimal("100000"), le=Decimal("500000"))
     requested_by: str = Field(min_length=1, max_length=128)
     actor_type: Literal["human"] = "human"
+
+    @field_validator("parameters")
+    @classmethod
+    def _validate_rebalance_frequency(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """multi_period 参数门:rebalance_frequency 只接受 monthly/quarterly。
+
+        非法值提前在入队时拒绝(研究运行执行时也会 fail-closed,这里给 agent
+        更早、更清晰的错误)。
+        """
+        frequency = value.get("rebalance_frequency")
+        if frequency is None:
+            return value
+        if not isinstance(frequency, str) or frequency not in (
+            "monthly",
+            "quarterly",
+        ):
+            raise ValueError(f"rebalance_frequency 仅支持 monthly/quarterly,收到 {frequency!r}")
+        return value
 
 
 class ResearchRunReplayIn(BaseModel):
