@@ -78,7 +78,18 @@ async def run_backtest_and_persist(
             AkShareProvider()
         )
     elif provider_name == "tushare":
-        provider = TushareBarProvider()
+        # 与 routes/data._get_provider / background_jobs._providers 保持一致:
+        # token 显式从 settings 传入,pydantic-settings 不会把 .env 写回 os.environ。
+        from finboard_app.config import load_settings
+
+        settings = load_settings()
+        provider = TushareBarProvider(
+            token=settings.tushare_token,
+            use_cache=True,
+            requests_per_minute=settings.tushare_requests_per_minute,
+            daily_request_limit=settings.tushare_daily_request_limit,
+            usage_file=settings.tushare_usage_file,
+        )
     else:
         provider = YFinanceProvider()
 
