@@ -103,6 +103,7 @@ class TestScheduler:
 
     async def test_exception_in_task_does_not_kill_loop(self) -> None:
         success_count = 0
+        ran_again = asyncio.Event()
 
         async def _sometimes_fail() -> None:
             nonlocal success_count
@@ -110,17 +111,17 @@ class TestScheduler:
                 success_count += 1
                 raise RuntimeError("boom")
             success_count += 1
+            ran_again.set()
 
         sched = Scheduler(TradingCalendar())
         sched.schedule(
             ScheduledTask(name="flaky", func=_sometimes_fail, interval=0.05)
         )
         await sched.start()
-        # 条件等待而不是固定 sleep:全量测试(coverage 负载)下固定 0.25s
+        # 事件等待而不是固定 sleep:全量测试(coverage 负载)下固定 0.25s
         # 窗口内可能只跑到 1 次(issue #167 时序脆弱修复)。
         async with asyncio.timeout(2.0):
-            while success_count < 2:
-                await asyncio.sleep(0.01)
+            await ran_again.wait()
         await sched.stop()
         # Even though first run threw, subsequent runs should continue
         assert success_count >= 2
