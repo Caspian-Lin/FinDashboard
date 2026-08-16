@@ -536,10 +536,19 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   `stamp_tax_rate: str`、`slippage_bps: str`、
   `equity_mode: str = "summary"`(summary 降采样到 max_points 个关键点,首末
   点保留;full 返回完整曲线)、`max_points: int = 200`
+- `selection.inputs_mode`(#173):
+  - `research_db`(默认):从 research 数据表读 profile/daily_metrics/
+    financial_indicators/industry_memberships
+  - `bars`:纯价格因子(momentum/volatility_20d)从回测行情计算,不要求
+    daily_metrics 发布;dataset 未发布降级为 snapshot warnings,不整日
+    SKIPPED;ST/上市天数过滤在 instrument_profiles 缺失时降级不生效
+  - `snapshot`:因子值直接来自冻结 FeatureSnapshot,需 `snapshot_ids:
+    list[str]`;观测按 available_at <= decision_at 过滤
 - 返回:`{run_id, metrics, equity_curve, equity_point_count, fills, summary,
-  selection_snapshots, ...}`
-- 错误:`invalid_argument`(策略不支持回测 / 参数校验失败 / equity_mode 非法)、
-  `permission_denied`(只读模式)、`unavailable`(数据源连接错误)
+  selection_snapshots(snapshot 含 warnings 降级提示), ...}`
+- 错误:`invalid_argument`(策略不支持回测 / 参数校验失败 / equity_mode 非法 /
+  snapshot 模式缺 snapshot_ids)、`permission_denied`(只读模式)、
+  `unavailable`(数据源连接错误)
 
 ### finboard_backtest_history_list(只读)
 列出最近回测历史记录(摘要,不含完整 equity/fills)。

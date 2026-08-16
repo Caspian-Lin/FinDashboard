@@ -55,11 +55,14 @@ async def run_backtest_and_persist(
         BacktestEngine,
         PointInTimeFactorSelector,
     )
+    from finboard_backtest.selection_snapshot import FeatureSnapshotFactorReader
     from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
+    from finboard_data.factors import InputsMode
     from finboard_persistence import (
         BacktestRunModel,
         BacktestRunRepository,
         FactorSnapshotRepository,
+        FeatureSnapshotRepository,
         ResearchDatasetRepository,
     )
 
@@ -94,7 +97,14 @@ async def run_backtest_and_persist(
     )
     factor_selector = (
         PointInTimeFactorSelector(
-            reader=ResearchDatasetRepository(session),
+            reader=(
+                FeatureSnapshotFactorReader(
+                    snapshot_provider=FeatureSnapshotRepository(session).get,
+                    snapshot_ids=tuple(request.selection.snapshot_ids),
+                )
+                if request.selection.inputs_mode is InputsMode.SNAPSHOT
+                else ResearchDatasetRepository(session)
+            ),
             writer=FactorSnapshotRepository(session),
         )
         if request.selection.enabled
@@ -160,6 +170,7 @@ async def run_backtest_and_persist(
             dataset_versions=snapshot.dataset_versions,
             factor_version=snapshot.factor_version,
             checksum=snapshot.checksum,
+            warnings=list(snapshot.warnings),
         )
         for snapshot in result.selection_snapshots
     ]

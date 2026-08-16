@@ -12,6 +12,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from finboard_data.factor_lab import FeatureObservation
 from finboard_data.research import (
     DailySecurityMetrics,
     FinancialIndicator,
@@ -29,9 +30,25 @@ class FactorName(StrEnum):
     PB = "pb"
     TURNOVER_RATE = "turnover_rate"
     MOMENTUM = "momentum"
+    VOLATILITY_20D = "volatility_20d"
     ROE = "roe"
     GROSS_PROFIT_MARGIN = "gross_profit_margin"
     REVENUE_YOY = "revenue_yoy"
+
+
+class InputsMode(StrEnum):
+    """选股因子输入的来源模式(issue #173)。
+
+    * ``RESEARCH_DB``(默认):从 research 数据表读取 profile / daily_metrics /
+      financial_indicators / industry_memberships;
+    * ``BARS``:纯价格因子从回测行情历史计算(动量 / 波动率),不要求
+      daily_metrics;instrument_profiles 缺失时 ST / 上市天数过滤降级为不生效;
+    * ``SNAPSHOT``:因子值直接来自冻结的 ``FeatureSnapshot`` 观测。
+    """
+
+    RESEARCH_DB = "research_db"
+    BARS = "bars"
+    SNAPSHOT = "snapshot"
 
 
 class FactorFrequency(StrEnum):
@@ -119,6 +136,15 @@ FACTOR_CATALOG: dict[FactorName, FactorDefinition] = {
         point_in_time_safety=PointInTimeSafety.STRICT,
         description="决策日收盘价相对指定回看窗口起点的收益率。",
     ),
+    FactorName.VOLATILITY_20D: FactorDefinition(
+        name=FactorName.VOLATILITY_20D,
+        version=FACTOR_VERSION,
+        frequency=FactorFrequency.DAILY,
+        unit=FactorUnit.RATIO,
+        dependencies=("bars.close",),
+        point_in_time_safety=PointInTimeSafety.STRICT,
+        description="决策日前 20 个交易日的日收益率样本标准差。",
+    ),
     FactorName.ROE: FactorDefinition(
         name=FactorName.ROE,
         version=FACTOR_VERSION,
@@ -155,6 +181,8 @@ class FactorSelectionConfig:
 
     enabled: bool = False
     source: str = "tushare"
+    inputs_mode: InputsMode = InputsMode.RESEARCH_DB
+    snapshot_ids: tuple[str, ...] = ()
     factor_version: str = FACTOR_VERSION
     max_symbols: int = 20
     ranking_factor: FactorName = FactorName.MARKET_CAP
@@ -182,6 +210,12 @@ class FactorSelectionConfig:
             raise ValueError(f"不支持的 factor_version: {self.factor_version}")
         if not self.source.strip():
             raise ValueError("source 不能为空")
+        if self.inputs_mode is InputsMode.SNAPSHOT and not self.snapshot_ids:
+            raise ValueError("snapshot 输入模式必须指定 snapshot_ids")
+        if self.snapshot_ids and self.inputs_mode is not InputsMode.SNAPSHOT:
+            raise ValueError("snapshot_ids 仅在 snapshot 输入模式下使用")
+        if len(set(self.snapshot_ids)) != len(self.snapshot_ids):
+            raise ValueError("snapshot_ids 不能重复")
         if self.max_symbols <= 0:
             raise ValueError("max_symbols 必须大于 0")
         if self.max_per_industry is not None and self.max_per_industry <= 0:
@@ -220,8 +254,25 @@ class FactorSelectionConfig:
 
     @property
     def required_datasets(self) -> frozenset[str]:
-        """为状态过滤和所选因子加载最小数据集集合。"""
-        datasets = {"instrument_profiles", "daily_metrics"}
+        """为状态过滤和所选因子加载最小数据集集合(issue #173)。
+
+        数据集按 ``required_factors`` 的依赖推导,而不是无条件包含
+        ``daily_metrics``:纯价格因子配置(momentum / volatility)不再要求
+        daily_metrics 已发布。``instrument_profiles`` 仅 research_db 模式必选;
+        bars / snapshot 模式下降级为可选(缺失只记录警告)。
+        """
+        datasets = (
+            {"instrument_profiles"}
+            if self.inputs_mode is InputsMode.RESEARCH_DB
+            else set()
+        )
+        daily_dependent = self.required_factors & {
+            FactorName.MARKET_CAP,
+            FactorName.PB,
+            FactorName.TURNOVER_RATE,
+        }
+        if daily_dependent:
+            datasets.add("daily_metrics")
         if self.required_factors & {
             FactorName.ROE,
             FactorName.GROSS_PROFIT_MARGIN,
@@ -240,6 +291,8 @@ class FactorSelectionConfig:
         return {
             "enabled": self.enabled,
             "source": self.source,
+            "inputs_mode": self.inputs_mode.value,
+            "snapshot_ids": list(self.snapshot_ids),
             "factor_version": self.factor_version,
             "max_symbols": self.max_symbols,
             "ranking_factor": self.ranking_factor.value,
@@ -268,13 +321,18 @@ class FactorSelectionConfig:
 
 @dataclass(frozen=True, slots=True)
 class FactorInputRecord:
-    """一个候选标的在决策时点可见的研究数据。"""
+    """一个候选标的在决策时点可见的研究数据。
+
+    ``features`` 仅在 snapshot 输入模式下非空:因子值直接来自冻结快照观测,
+    profile / daily / financial 恒为 None。
+    """
 
     symbol: str
     profile: InstrumentProfile | None
     daily: DailySecurityMetrics | None
     financial: FinancialIndicator | None
     industry: IndustryMembership | None
+    features: tuple[FeatureObservation, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +375,7 @@ class FactorSnapshot:
     config: dict[str, object]
     checksum: str
     snapshot_id: int | None = None
+    warnings: tuple[str, ...] = ()
 
 
 @runtime_checkable

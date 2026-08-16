@@ -209,11 +209,13 @@ async def backtest_run(
             BacktestEngine,
             PointInTimeFactorSelector,
         )
+        from finboard_backtest.selection_snapshot import FeatureSnapshotFactorReader
         from finboard_data import (
             AkShareProvider,
             TushareBarProvider,
             YFinanceProvider,
         )
+        from finboard_data.factors import InputsMode
         from finboard_mcp.downsample import (
             apply_equity_mode,
             clamp_max_points,
@@ -223,6 +225,7 @@ async def backtest_run(
             BacktestRunModel,
             BacktestRunRepository,
             FactorSnapshotRepository,
+            FeatureSnapshotRepository,
             ResearchDatasetRepository,
         )
 
@@ -274,7 +277,16 @@ async def backtest_run(
         async with app.session_maker() as session:
             factor_selector = (
                 PointInTimeFactorSelector(
-                    reader=ResearchDatasetRepository(session),
+                    reader=(
+                        FeatureSnapshotFactorReader(
+                            snapshot_provider=FeatureSnapshotRepository(
+                                session
+                            ).get,
+                            snapshot_ids=tuple(selection_model.snapshot_ids),
+                        )
+                        if selection_model.inputs_mode is InputsMode.SNAPSHOT
+                        else ResearchDatasetRepository(session)
+                    ),
                     writer=FactorSnapshotRepository(session),
                 )
                 if selection_model.enabled
@@ -341,6 +353,7 @@ async def backtest_run(
                     "dataset_versions": dict(s.dataset_versions),
                     "factor_version": s.factor_version,
                     "checksum": s.checksum,
+                    "warnings": list(s.warnings),
                 }
                 for s in result.selection_snapshots
             ]
