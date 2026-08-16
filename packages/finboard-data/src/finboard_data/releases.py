@@ -933,9 +933,7 @@ class FrozenDatasetReleaseBuilder:
                 start=Decimal("0"),
             ) / Decimal(len(released))
             not_ready = [item for item in released if not item.ready]
-            release_sources = sorted(
-                {source for item in released for source in item.sources}
-            )
+            release_sources = sorted({source for item in released for source in item.sources})
             if spec.source == "mixed" and len(release_sources) < 2:
                 raise DatasetReleaseQualityError(
                     "mixed_source_requires_multiple_sources:"
@@ -991,16 +989,10 @@ class FrozenDatasetReleaseBuilder:
                     "sources": release_sources,
                     "source_symbol_counts": dict(
                         sorted(
-                            Counter(
-                                source
-                                for item in released
-                                for source in item.sources
-                            ).items()
+                            Counter(source for item in released for source in item.sources).items()
                         )
                     ),
-                    "source_by_instrument": {
-                        item.code: list(item.sources) for item in released
-                    },
+                    "source_by_instrument": {item.code: list(item.sources) for item in released},
                     "warnings": warnings,
                 },
                 known_limitations=spec.known_limitations,
@@ -1010,12 +1002,39 @@ class FrozenDatasetReleaseBuilder:
             release = replace(release, release_checksum=checksum)
             await asyncio.to_thread(_write_manifest, staging, release)
 
-            # 最终目录不存在时 rename 在同一文件系统内为原子操作。
-            await asyncio.to_thread(staging.replace, final_dir)
+            await self._atomically_publish(spec, staging, final_dir)
             return replace(release, storage_uri=spec.release_id)
         except Exception:
             await asyncio.to_thread(shutil.rmtree, staging, True)
             raise
+
+    async def _atomically_publish(
+        self,
+        spec: DatasetReleaseSpec,
+        staging: Path,
+        final_dir: Path,
+    ) -> None:
+        """把 staging 原子改名为最终发布目录(有界重试)。
+
+        Windows 上杀软 / 目录同步可能瞬时锁定刚写入的目录树,导致
+        ``os.replace`` 抛 PermissionError(WinError 5,与 POSIX rename 语义
+        不同);做有界退避重试,仍失败则原样抛出。最终目录若在等待期间出现
+        (并发发布完成),按「已存在」语义校验后返回,不重复覆盖。
+        """
+        for attempt in range(4):
+            if await asyncio.to_thread(final_dir.exists):
+                existing = await asyncio.to_thread(verify_dataset_release, final_dir)
+                _assert_same_release_identity(existing, spec)
+                return
+            try:
+                # 最终目录不存在时 rename 在同一文件系统内为原子操作。
+                await asyncio.to_thread(staging.replace, final_dir)
+                return
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                await asyncio.sleep(0.05 * (attempt + 1))
+        raise RuntimeError("发布目录原子改名未完成")
 
     async def _freeze_instrument(
         self,
@@ -1069,9 +1088,7 @@ class FrozenDatasetReleaseBuilder:
             raise DatasetReleaseQualityError(f"{instrument.code}:no_bars_in_release_range")
         known_sources = {bar.source for bar in frozen_bars if bar.source}
         if not known_sources:
-            raise DatasetReleaseQualityError(
-                f"{instrument.code}:source_metadata_missing"
-            )
+            raise DatasetReleaseQualityError(f"{instrument.code}:source_metadata_missing")
         if spec.source != "mixed" and known_sources != {spec.source}:
             raise DatasetReleaseQualityError(
                 f"{instrument.code}:source_mismatch:"
@@ -1085,9 +1102,7 @@ class FrozenDatasetReleaseBuilder:
         )
         total_bars = len(frozen_bars)
         anomaly_ratio = (
-            Decimal(audit.anomaly_count) / Decimal(total_bars)
-            if total_bars > 0
-            else Decimal("1")
+            Decimal(audit.anomaly_count) / Decimal(total_bars) if total_bars > 0 else Decimal("1")
         )
         ready = (
             anomaly_ratio <= spec.max_anomaly_ratio
@@ -1097,9 +1112,7 @@ class FrozenDatasetReleaseBuilder:
         )
         issues = list(audit.issues)
         if anomaly_ratio > spec.max_anomaly_ratio:
-            issues.append(
-                f"anomaly_ratio:{anomaly_ratio:.4f}>{spec.max_anomaly_ratio}"
-            )
+            issues.append(f"anomaly_ratio:{anomaly_ratio:.4f}>{spec.max_anomaly_ratio}")
         if not instrument.metadata_complete:
             issues.append("metadata_incomplete")
         missing_events = sorted(
@@ -1658,9 +1671,7 @@ def _coverage_summary(instruments: list[ReleasedInstrument]) -> dict[str, object
         "suspended_sessions": sum(item.suspended_sessions for item in instruments),
         "anomaly_count": sum(item.anomaly_count for item in instruments),
         "name_history_records": sum(len(item.name_history) for item in instruments),
-        "lifecycle_event_records": sum(
-            len(item.lifecycle_events) for item in instruments
-        ),
+        "lifecycle_event_records": sum(len(item.lifecycle_events) for item in instruments),
     }
 
 
@@ -1697,9 +1708,7 @@ def _assert_same_release_identity(
         release.availability_rules,
         release.code_version,
         release.known_limitations,
-        tuple(
-            cast(list[str], release.quality_report.get("required_capabilities", []))
-        ),
+        tuple(cast(list[str], release.quality_report.get("required_capabilities", []))),
         str(release.quality_report.get("minimum_symbol_coverage", "")),
         str(release.quality_report.get("minimum_release_coverage", "")),
     )

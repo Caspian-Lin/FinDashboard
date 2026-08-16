@@ -161,6 +161,12 @@ addopts = [
   "--strict-config",
   # 挂死探针默认不跑(hang_guard marker 的验收运行见 README 测试章节)。
   "-m", "not hang_guard",
+  # Windows 本机 ACL 根除(见 docs/memory/wsl-postgres-keepalive.md):临时目录
+  # 固定到仓库内 .pytest-tmp(已入 .gitignore),并禁用 .pytest_cache —— 二者
+  # 默认落在 %LOCALAPPDATA% 时偶发 WinError 5 拒绝访问,导致 tmp_path 系 fixture
+  # 报错。仓库内运行 pytest 时相对路径以仓库根为基准,勿从子目录裸跑。
+  "--basetemp", ".pytest-tmp",
+  "-p", "no:cacheprovider",
   "--cov=finboard_shared",
   "--cov=finboard_broker",
   "--cov=finboard_core",
