@@ -1,9 +1,10 @@
-"""``finboard.backtest.*`` 工具 —— 回测引擎查询与同步运行(issue #127)。
+"""``finboard.backtest.*`` 工具 —— 回测引擎查询与运行(issue #127 / #174)。
 
-- 只读(3):``backtest_strategy_list``(可用策略 + 参数 schema)/
+- 只读(3):``backtest_strategy_list``(内置策略 + 已发布规格,含执行入口提示)/
   ``backtest_history_list``(历史回测列表)/ ``backtest_history_get``(历史详情)
-- 写(2):``backtest_run``(同步运行回测,返回 metrics/equity/fills,
-  对应 ``POST /api/backtest/run``)/ ``backtest_history_delete``
+- 写(2):``backtest_run`` 双形态——事件驱动同步回测(返回 metrics/equity/fills,
+  对应 ``POST /api/backtest/run``)与 strategy_spec 路由入队 research_run
+  (返回 run/job 指针,复用 ``finboard.run.queue`` 冻结校验)/ ``backtest_history_delete``
 
 复用现有 ``BacktestEngine`` / ``BacktestRunRepository`` /
 ``list_strategy_definitions`` / ``get_strategy_definition``,不重复实现。
@@ -153,19 +154,55 @@ def _history_detail(
 
 
 # --------------------------------------------------------------------------- #
-# finboard.backtest.strategy_list(只读,无 DB)
+# finboard.backtest.strategy_list(只读)
 # --------------------------------------------------------------------------- #
 async def backtest_strategy_list(app: McpAppContext) -> ToolEnvelope:
-    """列出支持回测的内置策略及其参数 schema。"""
+    """列出支持回测的内置策略与已发布策略规格。
 
-    async def _do() -> list[dict[str, Any]]:
+    返回 ``builtin_strategies``(事件驱动引擎,``supports_backtest=true``)、
+    ``published_specs``(已发布研究策略规格,走 research_run 管线)与
+    ``execution_note`` 执行入口提示(issue #174)。
+    """
+
+    async def _do() -> dict[str, Any]:
         from finboard_app.strategies import list_strategy_definitions
+        from finboard_persistence import ResearchStrategySpecRepository
 
-        return [
+        builtin = [
             _strategy_info(d)
             for d in list_strategy_definitions()
             if d.supports_backtest
         ]
+        async with app.session_maker() as session:
+            repo = ResearchStrategySpecRepository(session)
+            published_rows = await repo.list_published()
+            specs = []
+            for row in published_rows:
+                history = await repo.list_history(row.strategy_id)
+                specs.append(
+                    {
+                        "strategy_id": row.strategy_id,
+                        "strategy_kind": row.strategy_kind,
+                        "name": row.name,
+                        "status": row.status,
+                        "version": row.version,
+                        "version_count": len(history),
+                        "execution_hint": (
+                            f"backtest_run(strategy_spec={{\"strategy_id\": "
+                            f"\"{row.strategy_id}\", \"version\": {row.version}}})"
+                        ),
+                    }
+                )
+        return {
+            "builtin_strategies": builtin,
+            "published_specs": specs,
+            "execution_note": (
+                "已发布策略规格的正确回测入口是 research_run 管线:用 "
+                "backtest_run(strategy_spec=...) 路由入队,或直接 finboard_run_queue "
+                "(冻结 dataset_release_ids/factor_snapshot_ids 后异步执行);"
+                "builtin_strategies 才是事件驱动 BacktestEngine 的同步回测。"
+            ),
+        }
 
     return await run_tool(
         audit=app.audit,
@@ -176,15 +213,75 @@ async def backtest_strategy_list(app: McpAppContext) -> ToolEnvelope:
 
 
 # --------------------------------------------------------------------------- #
-# finboard.backtest.run(写,同步执行)
+# finboard.backtest.run(写,双形态:事件驱动同步回测 / 已发布规格路由)
 # --------------------------------------------------------------------------- #
+async def _run_via_strategy_spec(
+    app: McpAppContext,
+    strategy_spec: dict[str, Any],
+    queue_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """已发布规格路由:校验 published → 复用 run_queue 冻结/入队 → 返回指针。
+
+    不把 no-code 规格编译进事件驱动 BacktestEngine(与 research_run 组合流水线
+    重复建设且绕开 #91 冻结/校验语义);只做轻路由(issue #174)。
+    """
+    from finboard_mcp.tools.runs import enqueue_research_run, parse_queue_payload
+    from finboard_persistence import ResearchStrategySpecRepository
+
+    spec_id = strategy_spec.get("strategy_id")
+    version = strategy_spec.get("version")
+    if not isinstance(spec_id, str) or not spec_id:
+        raise McpToolError(
+            "invalid_argument", "strategy_spec 需要 strategy_id(已发布规格 ID)"
+        )
+    if not isinstance(version, int) or version < 1:
+        raise McpToolError(
+            "invalid_argument", "strategy_spec.version 必须是正整数"
+        )
+
+    async with app.session_maker() as session:
+        row = await ResearchStrategySpecRepository(session).get_version(
+            spec_id, version
+        )
+    if row is None:
+        raise McpToolError(
+            "invalid_argument", f"策略规格版本不存在: {spec_id} v{version}"
+        )
+    if row.status != "published":
+        raise McpToolError(
+            "invalid_argument",
+            f"仅已发布策略规格可以进入研究运行: {spec_id} v{version}"
+            f"(当前状态 {row.status})",
+        )
+
+    # strategy_id/version 以 strategy_spec 为准,其余字段复用 run_queue payload
+    payload = dict(queue_payload)
+    payload["strategy_id"] = spec_id
+    payload["strategy_version"] = version
+    body = parse_queue_payload(payload)
+    detail = await enqueue_research_run(app, body)
+    # 返回可跟踪指针(run_id + job_id),不阻塞等待完成
+    return {
+        "run_id": detail["run_id"],
+        "job_id": detail.get("job_id"),
+        "status": detail["status"],
+        "strategy_id": detail["strategy_id"],
+        "strategy_kind": detail["strategy_kind"],
+        "manifest_checksum": detail.get("manifest_checksum"),
+        "execution_path": (
+            "research_run 管线(已入队,异步执行;用 finboard_run_get 或 "
+            "finboard_job_get 轮询进度)"
+        ),
+    }
+
+
 async def backtest_run(
     app: McpAppContext,
     *,
-    strategy: str,
-    symbols: list[str],
-    start: str,
-    end: str,
+    strategy: str | None = None,
+    symbols: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
     capital: Decimal = Decimal("100000"),
     adjust: str = "qfq",
     params: dict[str, Any] | None = None,
@@ -195,11 +292,33 @@ async def backtest_run(
     slippage_bps: Decimal = Decimal("0"),
     equity_mode: str = "summary",
     max_points: int = 200,
+    strategy_spec: dict[str, Any] | None = None,
+    queue_payload: dict[str, Any] | None = None,
 ) -> ToolEnvelope:
-    """同步运行回测,返回 metrics/equity/fills/snapshots 并落库。"""
+    """运行回测 —— 双形态(issue #174):
+
+    * ``strategy`` 形态:事件驱动同步回测(现状);
+    * ``strategy_spec`` 形态:按已发布 ``{strategy_id, version}`` 路由入队
+      research_run 管线,返回 run_id + job_id 指针,不阻塞等待完成。
+    两形态互斥,同时给出报 ``invalid_argument``。
+    """
 
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
+        if strategy_spec is not None:
+            if strategy is not None:
+                raise McpToolError(
+                    "invalid_argument",
+                    "strategy 与 strategy_spec 互斥,只能二选一",
+                )
+            return await _run_via_strategy_spec(
+                app, strategy_spec, queue_payload or {}
+            )
+        if strategy is None or not symbols or not start or not end:
+            raise McpToolError(
+                "invalid_argument",
+                "strategy/symbols/start/end 必填(strategy_spec 形态除外)",
+            )
         import json
 
         from finboard_app.selection_schema import FactorSelectionParams
@@ -416,6 +535,7 @@ async def backtest_run(
         tool_name="finboard.backtest.run",
         arguments={
             "strategy": strategy,
+            "strategy_spec": strategy_spec,
             "symbols": symbols,
             "start": start,
             "end": end,
@@ -525,8 +645,11 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_backtest_strategy_list",
         description=(
-            "列出所有支持回测的内置策略及其参数 schema(supports_backtest=true)。"
-            "返回策略 kind、名称、描述及参数字段清单(类型/默认值/范围)。"
+            "列出回测入口:builtin_strategies(事件驱动引擎,仅 supports_backtest"
+            "=true 的内置策略,含参数 schema)与 published_specs(已发布研究策略"
+            "规格,含状态/版本数/执行入口提示)。已发布规格的正确回测路径是 "
+            "research_run 管线(backtest_run(strategy_spec=...) 或 run_queue),"
+            "builtin_strategies 才是事件驱动同步回测。"
         ),
     )
     async def _strategy_list(
@@ -537,20 +660,26 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_backtest_run",
         description=(
-            "同步运行回测(纸面撮合,不发真实订单),返回 metrics/"
-            "equity_curve/fills/selection_snapshots 并落库。"
-            "参数:strategy(如 ma_cross)、symbols、start/end(ISO 日期)、"
+            "运行回测,双形态(二选一,互斥):"
+            "(1) strategy 形态:同步事件驱动回测(纸面撮合,不发真实订单),"
+            "返回 metrics/equity_curve/fills/selection_snapshots 并落库;"
+            "参数 strategy(如 ma_cross)、symbols、start/end(ISO 日期)、"
             "capital、adjust(qfq/hfq/none)、params(策略参数)、selection"
             "(因子选股配置)、equity_mode(summary 默认:降采样到 max_points 个"
             "关键点,首末点保留;full:完整曲线)、max_points(默认 200)。"
+            "(2) strategy_spec 形态:按已发布策略规格 {strategy_id, version} "
+            "路由入队 research_run 管线(冻结 dataset_release_ids/因子快照后"
+            "异步执行),返回 run_id + job_id 指针,不阻塞等待完成;其余入队字段"
+            "经 queue_payload 传入(与 finboard_run_queue 同构,不含 "
+            "strategy_id/strategy_version)。"
             "复用 BacktestEngine + 数据源(akshare/tushare/yfinance)。"
         ),
     )
     async def _run(
-        strategy: str,
-        symbols: list[str],
-        start: str,
-        end: str,
+        strategy: str | None = None,
+        symbols: list[str] | None = None,
+        start: str | None = None,
+        end: str | None = None,
         capital: str = "100000",
         adjust: str = "qfq",
         params: dict[str, Any] | None = None,
@@ -561,6 +690,8 @@ def register(mcp: MCPServer) -> None:
         slippage_bps: str = "0",
         equity_mode: str = "summary",
         max_points: int = 200,
+        strategy_spec: dict[str, Any] | None = None,
+        queue_payload: dict[str, Any] | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await backtest_run(
@@ -579,6 +710,8 @@ def register(mcp: MCPServer) -> None:
             slippage_bps=Decimal(slippage_bps),
             equity_mode=equity_mode,
             max_points=max_points,
+            strategy_spec=strategy_spec,
+            queue_payload=queue_payload,
         )
 
     @mcp.tool(

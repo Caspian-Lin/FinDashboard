@@ -198,6 +198,21 @@ class ResearchStrategySpecRepository:
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def list_published(
+        self, *, limit: int = 100
+    ) -> list[ResearchStrategySpecModel]:
+        """列出全部已发布版本(按发布时间倒序,issue #174)。"""
+        stmt = (
+            select(ResearchStrategySpecModel)
+            .where(
+                ResearchStrategySpecModel.status
+                == StrategySpecStatus.PUBLISHED.value
+            )
+            .order_by(ResearchStrategySpecModel.published_at.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def list_latest(self, *, limit: int = 100) -> list[ResearchStrategySpecModel]:
         latest_versions = (
             select(
