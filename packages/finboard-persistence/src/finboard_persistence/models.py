@@ -339,6 +339,40 @@ class BacktestRunModel(Base, IdMixin):
     )
 
 
+class BacktestGridRunModel(Base, IdMixin):
+    """批量参数网格回测定义(issue #175)。
+
+    一次提交 N 组参数 → 网格行记录组合展开结果 + 逐组合的 ``backtest_run``
+    任务 job_id(字符串引用,不建外键,与 ``background_jobs`` 同风格)。
+    聚合对比表由 MCP ``grid_get`` 按 grid_id 实时计算,不在本表缓存结果。
+    """
+
+    __tablename__ = "backtest_grid_runs"
+
+    grid_id: Mapped[str] = mapped_column(String(48), unique=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
+    combos_checksum: Mapped[str] = mapped_column(String(64))
+    strategy: Mapped[str] = mapped_column(String(64), index=True)
+    symbols: Mapped[list] = mapped_column(JSON)  # type: ignore[type-arg]
+    start: Mapped[str] = mapped_column(String(16))
+    end: Mapped[str] = mapped_column(String(16))
+    capital: Mapped[Decimal] = mapped_column(_numeric())
+    adjust: Mapped[str] = mapped_column(String(8), default="qfq")
+    base_params: Mapped[dict] = mapped_column(JSON)  # type: ignore[type-arg]
+    selection: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    combos: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    combo_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_combos: Mapped[int] = mapped_column(Integer, default=20, server_default="20")
+    requested_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
 class StrategyPresetModel(Base, IdMixin):
     """经过 schema 校验的内置策略参数预设。"""
 

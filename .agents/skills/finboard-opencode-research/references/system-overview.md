@@ -69,7 +69,7 @@ packages/
 
 ### 1. MCP Server(`finboard-mcp`,#108)
 - 把研究能力以受控 MCP 工具暴露给 OpenCode 等外置 Agent 运行时
-- 113 个已实现工具(#124-#141 扩展完成;#160 移除 ai.* 后 FinBoard 零内置 LLM)
+- 115 个已实现工具(#124-#141 扩展完成;#160 移除 ai.* 后 FinBoard 零内置 LLM)
 - 权限矩阵:研究写操作 agent 自主执行;实盘能力永久不注册
 - 统一信封 `ToolEnvelope` + 审计事件(structlog + 内存副本)
 

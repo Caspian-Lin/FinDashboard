@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 117 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 为既有工具的执行语义与契约增强,不新增工具):
+**已实现 115 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 为既有工具的执行语义与契约增强 / 新增网格工具):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -15,7 +15,7 @@
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |
 | 因子实验室 | 12 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(8 只读 + 4 写,✅ #125;job_start/status 在 #136 迁移到持久化队列) |
 | 策略规格 | 16 | strategy registry/template/list/history/version_get/diff、preset list/get(只读);strategy validate/draft_create/supersede/publish/rollback、preset create/update/delete(写) | 无代码版本化生命周期(8 只读 + 8 写,✅ #126) |
-| 回测 | 5 | backtest_strategy_list、backtest_history_list/get(只读);backtest_run(同步)、backtest_history_delete(写) | 行情回放 + 纸面撮合(3 只读 + 2 写,✅ #127) |
+| 回测 | 7 | backtest_strategy_list、backtest_history_list/get、backtest_grid_get(只读);backtest_run(同步 + strategy_spec 路由)、backtest_history_delete、backtest_grid_submit(写) | 行情回放 + 纸面撮合 + 批量参数网格(4 只读 + 3 写,✅ #127 + #175) |
 | 模拟盘 | 21 | sim_account list/get/create、sim_session list/get/create/start/pause/stop/archive/reset、sim_orders/fills/positions/ledger/audit/report(只读);sim_decision_submit、sim_market_event、sim_session_evaluate、sim_order_cancel(写) | 持久化隔离模拟盘(10 只读 + 11 写,✅ #127 + #139) |
 | portfolio | 4 | portfolio_allocate / sizing / feasibility / attribution | 组合计算(纯计算,无 DB 写入,✅ #128) |
 | `finboard.job.*` | 4 | job list/get(只读);job enqueue/cancel(写) | 统一后台任务队列监控与提交(2 只读 + 2 写,✅ #136) |
@@ -280,6 +280,35 @@ fills_offset / fills_total)。降采样在 `finboard_mcp/downsample.py`,纯展�
 整日 SKIPPED;`snapshot` 模式用 `snapshot_ids` 直接消费冻结 FeatureSnapshot
 观测(available_at <= decision_at 过滤)。`required_datasets` 按所选因子依赖
 推导。`_INSTRUCTIONS` / Skill `tools.md` 已同步。
+
+### ✅ #175 批量参数网格回测(已完成)
+2 个新工具(1 写 + 1 只读),支撑「合理实验」:一个假设下多组参数对比择优,
+替代逐个手跑 `backtest_run` 再人工对比:
+
+- `finboard_backtest_grid_submit`(写)—— 一次提交 N 组参数:组合展开
+  (显式列表 `params_list` 优先 / 笛卡尔积 `params_grid`)+ **上限封顶**
+  (默认 20,硬上限 50,超限 `invalid_argument`,防误操作打爆队列)→
+  逐组合参数校验(复用 `_validate_backtest_params`,任一组合非法即拒,不落库
+  不入队)→ 网格定义与 N 个 `kind=backtest_run` job **同一事务**落库
+  (全有或全无)→ 返回 grid_id + job 指针。网格定义持久化在新增
+  `backtest_grid_runs` 表(独立产物表,不建外键;`grid_id` 为 `BTG-` 前缀),
+  `grid_idempotency_key` 幂等重提交返回同一网格(组合定义不同 → conflict)。
+  每个 job payload 带 `grid: {grid_id, combo_index}` 归属标记(executor 忽略)。
+- `finboard_backtest_grid_get`(只读)—— 按 grid_id 聚合对比表:逐组合读 job
+  状态 + result_ref 回测记录 → 指标矩阵(`metric_fields` 规范列序,收益/回撤/
+  夏普/胜率/超额/换手/费用等)+ 关键指标竞争排名与最优标注(全部「越高越好」,
+  max_drawdown 负值越高=回撤越小;同值同排名)+ **失败组合带错误码单列**
+  (failed/cancelled/interrupted/产物缺失,不影响成功组合返回)。
+  `complete=false` 表示还有组合未到终态。equity 曲线复用 #172 的 summary
+  降采样形态(默认 200 点,首末保留)。顺带修 worker 兜底日志:ExecutorError
+  是 dataclass,`str()` 为空导致任务行 error_summary 丢失 —— 优先取
+  `.summary`。
+
+边界:研究域 only(#136)—— 只入队白名单内的 `backtest_run` 任务,不连
+broker / 账户 / 订单 / 持仓;`_INSTRUCTIONS` / Skill `SKILL.md` +
+`tools.md` 已同步(工具总数 113 → 115)。回滚:移除
+`register_grid_tools(mcp)` 调用 + `grid.py` + 迁移 downgrade
+(`drop_table backtest_grid_runs`)即可,不影响既有回测 / 队列工具。
 
 ## 扩展原则(适用于所有阶段)
 

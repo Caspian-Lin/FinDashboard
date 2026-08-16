@@ -76,6 +76,9 @@ _EXPECTED_TOOLS = {
     "finboard_backtest_history_list",
     "finboard_backtest_history_get",
     "finboard_backtest_history_delete",
+    # #175 批量参数网格回测工具(1 只读 + 1 写)
+    "finboard_backtest_grid_submit",
+    "finboard_backtest_grid_get",
     # #127 模拟盘工具(10 只读 + 8 写)
     "finboard_sim_account_list",
     "finboard_sim_account_get",

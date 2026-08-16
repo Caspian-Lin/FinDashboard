@@ -124,9 +124,7 @@ class BackgroundWorker:
             reclaimed = await repo.reclaim_stale(datetime.now(UTC))
             if reclaimed:
                 await repo.checkpoint()
-                logger.info(
-                    "background_worker.reclaim count=%d", len(reclaimed)
-                )
+                logger.info("background_worker.reclaim count=%d", len(reclaimed))
 
     async def _maintenance(self) -> None:
         """周期性维护:回收过期租约 + 自动重排进入重试态的任务(issue #161)。"""
@@ -165,9 +163,7 @@ class BackgroundWorker:
             if rows:
                 await repo.checkpoint()
         for row in rows:
-            task = asyncio.create_task(
-                self._run_one(row.job_id), name=f"job:{row.job_id}"
-            )
+            task = asyncio.create_task(self._run_one(row.job_id), name=f"job:{row.job_id}")
             self._inflight.add(task)
             task.add_done_callback(self._inflight.discard)
 
@@ -190,9 +186,7 @@ class BackgroundWorker:
                     # 在排队后被取消 / 被其他 worker 抢走 —— 直接放弃。
                     return
                 if row.status == BackgroundJobStatus.CANCEL_REQUESTED.value:
-                    early_result = JobResult(
-                        status=BackgroundJobStatus.CANCELLED.value
-                    )
+                    early_result = JobResult(status=BackgroundJobStatus.CANCELLED.value)
                 else:
                     try:
                         executor = self._registry.get(row.kind)
@@ -239,7 +233,11 @@ class BackgroundWorker:
                 JobResult(
                     status=status,
                     error_code=getattr(exc, "code", type(exc).__name__),
-                    error_summary=str(exc)[:1000] or type(exc).__name__,
+                    # ExecutorError 是 dataclass,str() 为空 —— 优先取 .summary,
+                    # 保证失败原因写入任务行(grid 聚合可见)。
+                    error_summary=(getattr(exc, "summary", None) or str(exc) or type(exc).__name__)[
+                        :1000
+                    ],
                 ),
             )
 
@@ -262,9 +260,7 @@ class BackgroundWorker:
                 if row.status == BackgroundJobStatus.CANCEL_REQUESTED.value:
                     cancel_state["cancelled"] = True
                     raise asyncio.CancelledError()
-                await repo.update_progress(
-                    job_id, done=done, total=total, phase=phase
-                )
+                await repo.update_progress(job_id, done=done, total=total, phase=phase)
                 await repo.checkpoint()
 
         async def heartbeat() -> None:
