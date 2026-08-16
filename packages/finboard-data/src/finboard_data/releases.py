@@ -348,6 +348,20 @@ def default_execution_metadata(
             commission_rate=Decimal("0.00003"),
             trading_calendar="SSE/SZSE",
         )
+    if market is Market.A_SHARE and instrument_type is InstrumentType.INDEX:
+        # 指数基准资产(issue #184):只进数据/发布通道供基准曲线与超额收益
+        # 计算,不可撮合 —— 执行元数据只是数据域占位(零费用、整手=1)。
+        # 回测撮合域没有 INDEX 撮合规则,若把指数放进可交易 universe 会
+        # 按默认 STOCK 规则处理,属调用方误用,不在本通道内放行。
+        return ExecutionMetadata(
+            lot_size=Decimal("1"),
+            price_tick=Decimal("0.01"),
+            settlement_days=0,
+            stamp_tax_rate=Decimal("0"),
+            commission_rate=Decimal("0"),
+            commission_min=Decimal("0"),
+            trading_calendar="SSE/SZSE",
+        )
     if market is Market.FUTURE and instrument_type is InstrumentType.FUTURES:
         if margin_rate is None:
             raise ReleaseCapabilityError("期货缺少 margin_rate")

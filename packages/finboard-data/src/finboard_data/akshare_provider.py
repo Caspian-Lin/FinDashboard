@@ -1,6 +1,7 @@
 """``AkShareProvider`` —— 基于 akshare 的 A 股历史数据提供者。
 
-akshare 免费、无需 token,覆盖 A 股日线 / 分钟线,是个人量化的首选数据源。
+akshare 免费、无需 token,覆盖 A 股股票日线 / 分钟线与指数日线
+(issue #184:指数按代码规则分流到 ``index_zh_a_hist``),是个人量化的首选数据源。
 
 akshare 为同步库,所有调用通过 ``asyncio.to_thread`` 在线程池执行,
 避免阻塞事件循环。
@@ -43,6 +44,30 @@ _ADJUST_MAP: dict[str, str] = {
     "hqfq": "hfq",
     "none": "",
 }
+
+
+def is_index_code(code: str) -> bool:
+    """按 A 股指数代码规则判断是否为指数(供基准行情分流)。
+
+    规则(带交易所后缀,避免把深市股票误判为指数):
+
+    * ``000xxx.SH`` —— SSE 指数(上证指数 / 沪深300 / 中证系列);SSE 股票
+      全部以 6 开头,000 段在 SSE 只属于指数;
+    * ``399xxx.SZ`` —— SZSE 指数(深证成指 / 深证100 等);深市股票为
+      000/001/002/003/300/301 段;
+    * ``899xxx.BJ`` —— 北交所指数。
+
+    指数无除权复权概念,akshare 指数接口也不接受 adjust 参数。
+    """
+    bare, _, suffix = code.partition(".")
+    exchange = suffix.upper()
+    if exchange not in {"SH", "SZ", "BJ"}:
+        return False
+    if exchange == "SH":
+        return bare.startswith("000")
+    if exchange == "SZ":
+        return bare.startswith("399")
+    return bare.startswith("899")
 
 
 class AkShareProvider:
@@ -427,7 +452,18 @@ class AkShareProvider:
             raise ValueError(f"akshare 不支持周期: {period}")
         ak_adjust = _ADJUST_MAP.get(adjust, "")
 
-        if period == BarPeriod.D1:
+        if is_index_code(symbol.code):
+            # 指数基准行情(issue #184):无复权概念,index_zh_a_hist 不接受
+            # adjust 参数;分钟线留待有需要时接入。
+            if period is not BarPeriod.D1:
+                raise ValueError(f"akshare 指数行情仅支持日线,收到 {period}")
+            df = ak.index_zh_a_hist(
+                symbol=code,
+                period=ak_period,
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+            )
+        elif period == BarPeriod.D1:
             df = ak.stock_zh_a_hist(
                 symbol=code,
                 period=ak_period,
