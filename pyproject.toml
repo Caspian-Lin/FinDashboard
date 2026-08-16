@@ -156,6 +156,8 @@ addopts = [
   "-ra",
   "--strict-markers",
   "--strict-config",
+  # 挂死探针默认不跑(hang_guard marker 的验收运行见 README 测试章节)。
+  "-m", "not hang_guard",
   "--cov=finboard_shared",
   "--cov=finboard_broker",
   "--cov=finboard_core",
@@ -173,7 +175,17 @@ markers = [
   "unit: 快速、无 IO 的纯单元测试",
   "integration: 需要 DB / Mock Broker 的集成测试",
   "slow: 耗时较长的测试,默认在 CI 中可选跳过",
+  "hang_guard: 挂死守卫探针(预期在超时后 xfail,默认跳过;验收运行见 README)",
 ]
+
+# pytest-timeout:挂死兜底(issue #167)。Windows 无 signal,thread 方式由
+# watchdog 线程向主线程注入超时异常,可打断 time.sleep 等阻塞;asyncio 测试
+# 的事件循环阻塞在 C 层(select/IOCP)无法被注入打断,由 tests/conftest.py 的
+# asyncio.timeout 守卫兜底。单元测试经 tests/unit/conftest.py 的
+# pytestmark 收紧到 60s,个别长测试用 @pytest.mark.timeout(N) 调大或
+# @pytest.mark.timeout(None) 豁免。
+timeout = 300
+timeout_method = "thread"
 
 [tool.coverage.run]
 source = ["packages"]
