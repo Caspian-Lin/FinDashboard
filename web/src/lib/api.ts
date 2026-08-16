@@ -1,5 +1,61 @@
 const BASE = "/api";
 
+// ---- 统一后台任务队列(background_jobs, BJ- ID) ----
+// 与后端 JobOut(job_schemas.py)逐字段对齐;POST 提交端点统一返回 202 + JobOut,
+// 前端拿到 job_id 后用 getJob 轮询 /api/jobs/{job_id} 直到终态再按 result_ref 取详情。
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "retry_waiting"
+  | "succeeded"
+  | "failed"
+  | "cancel_requested"
+  | "cancelled"
+  | "interrupted";
+
+export const TERMINAL_JOB_STATUSES: ReadonlySet<JobStatus> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+export interface JobOut {
+  job_id: string;
+  kind: string;
+  queue: string;
+  status: JobStatus;
+  priority: number;
+  payload: Record<string, unknown>;
+  payload_checksum: string;
+  idempotency_key: string;
+  progress_total: number;
+  progress_done: number;
+  phase: string | null;
+  result_ref: string | null;
+  error_code: string | null;
+  error_summary: string | null;
+  attempt: number;
+  max_attempts: number;
+  worker_id: string | null;
+  heartbeat_at: string | null;
+  lease_until: string | null;
+  requested_by: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+}
+
+export function isJobRunning(job: Pick<JobOut, "status"> | undefined | null): boolean {
+  if (!job) return false;
+  return job.status === "queued" || job.status === "running" || job.status === "retry_waiting" || job.status === "cancel_requested";
+}
+
+export function isJobTerminal(job: Pick<JobOut, "status"> | undefined | null): boolean {
+  return Boolean(job && TERMINAL_JOB_STATUSES.has(job.status));
+}
+
 export class ApiError extends Error {
   status: number;
   detail: unknown;
@@ -23,10 +79,20 @@ function errorMessage(detail: unknown, fallback: string): string {
       )
       .join("；");
   }
+  if (detail && typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    if (typeof record.message === "string") return record.message;
+    if (typeof record.msg === "string") return record.msg;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return fallback;
+    }
+  }
   return fallback;
 }
 
-async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
+export async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
@@ -168,10 +234,11 @@ export const api = {
   getDataStatus: () => fetchJSON<DataStatus[]>("/data/status"),
   getDataStatusPage: (limit = 200, offset = 0) =>
     fetchJSON<DataStatusList>(`/data/status-page?limit=${limit}&offset=${offset}`),
+  getTushareQuota: () => fetchJSON<TushareQuota>("/data/tushare-quota"),
   fetchData: (body: DataFetchRequest) =>
     fetchJSON<FetchResult>("/data/fetch", { method: "POST", body: JSON.stringify(body) }),
   fetchAllData: () =>
-    fetchJSON<BatchFetchResult>("/data/fetch-all", { method: "POST" }),
+    fetchJSON<JobOut>("/data/fetch-all", { method: "POST" }),
   getSymbolPool: () => fetchJSON<SymbolPool>("/data/symbols"),
   updateSymbolPool: (body: SymbolPoolUpdate) =>
     fetchJSON<SymbolPool>("/data/symbols", { method: "PUT", body: JSON.stringify(body) }),
@@ -179,7 +246,7 @@ export const api = {
   // ---- Backtest ----
   getStrategies: () => fetchJSON<StrategyInfo[]>("/backtest/strategies"),
   runBacktest: (body: BacktestRunRequest) =>
-    fetchJSON<BacktestResult>("/backtest/run", { method: "POST", body: JSON.stringify(body) }),
+    fetchJSON<JobOut>("/backtest/run", { method: "POST", body: JSON.stringify(body) }),
   getBacktestHistory: (limit = 50) =>
     fetchJSON<BacktestHistoryItem[]>(`/backtest/history?limit=${limit}`),
   getBacktestHistoryDetail: (id: number) =>
@@ -225,6 +292,8 @@ export const api = {
   getInstruments: (params?: {
     market?: string;
     instrument_type?: string;
+    exchange?: string;
+    listing_boards?: string[];
     q?: string;
     limit?: number;
     offset?: number;
@@ -232,6 +301,8 @@ export const api = {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.exchange) q.set("exchange", params.exchange);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     if (params?.q) q.set("q", params.q);
     q.set("limit", String(params?.limit ?? 200));
     q.set("offset", String(params?.offset ?? 0));
@@ -239,33 +310,72 @@ export const api = {
   },
   searchInstruments: (query: string) =>
     fetchJSON<InstrumentItem[]>(`/data/instruments/search?q=${encodeURIComponent(query)}`),
-  getInstrumentCodes: (params?: { market?: string; instrument_type?: string; q?: string }) => {
+  getInstrumentCodes: (params?: { market?: string; instrument_type?: string; exchange?: string; listing_boards?: string[]; q?: string }) => {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.exchange) q.set("exchange", params.exchange);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     if (params?.q) q.set("q", params.q);
     return fetchJSON<string[]>(`/data/instruments/codes?${q}`);
   },
 
   // ---- Data Sync & Bulk Download ----
   syncUniverse: () =>
-    fetchJSON<{ total: number; new: number; updated: number }>("/data/sync", { method: "POST" }),
+    fetchJSON<JobOut>("/data/sync", { method: "POST" }),
   startBulkDownload: (body: {
     market?: string;
     instrument_type?: string;
+    exchange?: string;
+    listing_boards?: string[];
     start?: string;
+    source?: string;
   }) =>
-    fetchJSON<BulkDownloadStatus>("/data/bulk-download", {
+    fetchJSON<JobOut>("/data/bulk-download", {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  getBulkDownloadStatus: () =>
-    fetchJSON<BulkDownloadStatus>("/data/bulk-download/status"),
+  // GET /data/bulk-download/status 已随 #144 删除;前端统一用 getJob 轮询 /api/jobs/{job_id}。
+  checkQuality: (symbols?: string, adjust?: string) => {
+    const q = new URLSearchParams();
+    if (symbols) q.set("symbols", symbols);
+    if (adjust) q.set("adjust", adjust);
+    const qs = q.toString();
+    return fetchJSON<QualityReport[]>(`/data/quality${qs ? `?${qs}` : ""}`);
+  },
+  repairQuality: (body: { symbols: string[]; source: "akshare" | "yfinance" | "tushare"; adjust?: string }) =>
+    fetchJSON<JobOut>("/data/quality/repair", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  // ---- Unified Job Queue (background_jobs) ----
+  getJob: (jobId: string) => fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}`),
+  listJobs: (params?: {
+    kind?: string[];
+    status?: JobStatus[];
+    queue?: string[];
+    limit?: number;
+  }) => {
+    const q = new URLSearchParams();
+    params?.kind?.forEach((k) => q.append("kind", k));
+    params?.status?.forEach((s) => q.append("status", s));
+    params?.queue?.forEach((qq) => q.append("queue", qq));
+    if (params?.limit) q.set("limit", String(params.limit));
+    return fetchJSON<JobOut[]>(`/jobs${q.toString() ? "?" + q : ""}`);
+  },
+  cancelJob: (jobId: string, reason?: string) =>
+    fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason ?? null }),
+    }),
 
   // ---- Scheduler Config ----
   getConfig: () => fetchJSON<SchedulerConfig>("/data/config"),
   updateConfig: (body: Partial<SchedulerConfig>) =>
     fetchJSON<SchedulerConfig>("/data/config", { method: "PUT", body: JSON.stringify(body) }),
+
+  // ---- LLM Provider Config (persisted to .env) ----
 };
 
 // ---- Data types ----
@@ -277,6 +387,7 @@ export interface DataStatus {
   first_date: string | null;
   last_date: string | null;
   last_close: string | null;
+  source: string | null;
 }
 
 export interface DataStatusList {
@@ -291,6 +402,7 @@ export interface DataFetchRequest {
   start: string;
   end: string;
   adjust?: string;
+  source?: string;
 }
 
 export interface FetchResult {
@@ -298,6 +410,12 @@ export interface FetchResult {
   bar_count: number;
   first_date: string | null;
   last_date: string | null;
+  source: string | null;
+  fallback_used: boolean;
+  fallback_source: string | null;
+  lifecycle_events: number;
+  lifecycle_sync_failed: boolean;
+  lifecycle_sync_error: string | null;
 }
 
 export interface BatchFetchResult {
@@ -550,6 +668,7 @@ export interface InstrumentItem {
   market: string;
   instrument_type: string;
   exchange: string | null;
+  listing_board: string;
   status: string;
 }
 
@@ -560,8 +679,50 @@ export interface InstrumentList {
   offset: number;
 }
 
+export interface BarAnomaly {
+  date: string;
+  source: string;
+  reasons: string[];
+}
+
+export interface QualityReport {
+  symbol: string;
+  total_bars: number;
+  anomaly_count: number;
+  duplicate_count: number;
+  sources: string[];
+  anomalies: BarAnomaly[];
+  passed: boolean;
+  primary_source: string;
+  fallback_used: boolean;
+  fallback_source: string | null;
+  corrected_dates: string[];
+  error: string | null;
+}
+
+export interface QualityRepairResult {
+  total: number;
+  repaired: number;
+  failed: number;
+  corrected_bars: number;
+  reports: QualityReport[];
+}
+
+export interface ActiveSymbol {
+  code: string;
+  reason: string;
+}
+
+export interface BulkDownloadLog {
+  seq: number;
+  timestamp: string;
+  event: "fetching" | "completed" | "cache_hit" | "failed";
+  code: string;
+  reason: string | null;
+}
+
 export interface BulkDownloadStatus {
-  status: string;  // idle / running / done / error
+  status: string;  // idle / running / done / error / cancelled
   done: number;
   total: number;
   success: number;
@@ -569,6 +730,25 @@ export interface BulkDownloadStatus {
   current_symbol: string | null;
   phase: string | null;
   error: string | null;
+  quality_passed?: number;
+  quality_failed?: number;
+  fallback_used?: number;
+  lifecycle_events?: number;
+  lifecycle_sync_failed?: number;
+  cache_hits?: number;
+  cache_misses?: number;
+  started_at?: string | null;
+  active_symbols?: ActiveSymbol[];
+  logs?: BulkDownloadLog[];
+  quality_reports?: QualityReport[];
+}
+
+export interface TushareQuota {
+  date: string;
+  requests_per_minute: number;
+  daily_limit: number;
+  used: number;
+  remaining: number;
 }
 
 export interface SchedulerConfig {
@@ -581,3 +761,6 @@ export interface SchedulerConfig {
   download_types: string[];
   data_provider: string;
 }
+
+// ---- LLM Provider types ----
+// api_key: GET 返回固定掩码 "********"(已设置时);PUT 回传 "********" 表示不改。

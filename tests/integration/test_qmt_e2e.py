@@ -1,11 +1,14 @@
 """QMT 端到端集成测试(需 Windows + miniQMT + xtquant)。
 
-无 xtquant 环境自动跳过;有 xtquant 时验证:
-connect → query_account → query_positions → place limit → cancel → reconcile。
+默认跳过(包括 Windows 本机):QMT 权限受阻、实盘验证暂缓(issue #22),
+全量测试不跑真机链路。需要真机验证时显式设置 ``FINBOARD_QMT_E2E=1`` 开启;
+开启后验证 connect → query_account → query_positions → place limit →
+cancel → reconcile。
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -13,8 +16,11 @@ import pytest
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        sys.platform != "win32",
-        reason="QMT 端到端测试需 Windows + miniQMT 环境",
+        sys.platform != "win32" or os.getenv("FINBOARD_QMT_E2E") != "1",
+        reason=(
+            "QMT 端到端测试需 Windows + miniQMT 环境;"
+            "设置 FINBOARD_QMT_E2E=1 显式开启"
+        ),
     ),
 ]
 

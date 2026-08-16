@@ -6,11 +6,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from finboard_app.selection_schema import FactorSelectionParams
 
@@ -174,16 +174,19 @@ class DataFetchRequest(BaseSchema):
     start: str
     end: str
     adjust: str = "qfq"
+    source: str | None = None  # akshare / yfinance / tushare; None = 用服务端默认
 
 
 class DataStatusOut(BaseSchema):
     symbol: str
+    listing_board: str = "unknown"
     period: str
     adjust: str
     bar_count: int
     first_date: str | None = None
     last_date: str | None = None
     last_close: Decimal | None = None
+    source: str | None = None
 
 
 class DataStatusListOut(BaseSchema):
@@ -193,18 +196,71 @@ class DataStatusListOut(BaseSchema):
     offset: int
 
 
+class DataStatusSelectionOut(BaseSchema):
+    """匹配缓存筛选条件的完整选择快照。"""
+
+    items: list[DataStatusOut]
+    total: int
+    first_date: str | None = None
+    last_date: str | None = None
+
+
+class TushareQuotaOut(BaseSchema):
+    """Tushare 本地请求预算,不冒充账户侧实时权限。"""
+
+    date: str
+    requests_per_minute: int
+    daily_limit: int
+    used: int
+    remaining: int
+
+
 class FetchResultOut(BaseSchema):
     symbol: str
     bar_count: int
     first_date: str | None = None
     last_date: str | None = None
+    source: str | None = None
+    fallback_used: bool = False
+    fallback_source: str | None = None
+    lifecycle_events: int = 0
+    lifecycle_sync_failed: bool = False
+    lifecycle_sync_error: str | None = None
 
 
-class BatchFetchResultOut(BaseSchema):
+class BarAnomalyOut(BaseSchema):
+    date: str
+    source: str
+    reasons: list[str]
+
+
+class QualityReportOut(BaseSchema):
+    symbol: str
+    total_bars: int
+    anomaly_count: int
+    duplicate_count: int = 0
+    sources: list[str] = []
+    anomalies: list[BarAnomalyOut] = []
+    passed: bool = True
+    primary_source: str = ""
+    fallback_used: bool = False
+    fallback_source: str | None = None
+    corrected_dates: list[str] = []
+    error: str | None = None
+
+
+class QualityRepairRequest(BaseSchema):
+    symbols: list[str]
+    source: Literal["akshare", "yfinance", "tushare"]
+    adjust: str = "qfq"
+
+
+class QualityRepairResultOut(BaseSchema):
     total: int
-    success: int
+    repaired: int
     failed: int
-    details: list[FetchResultOut]
+    corrected_bars: int
+    reports: list[QualityReportOut]
 
 
 class SymbolEntrySchema(BaseSchema):
@@ -233,7 +289,12 @@ class InstrumentOut(BaseSchema):
     market: str
     instrument_type: str
     exchange: str | None = None
+    listing_board: str = "unknown"
+    list_date: date | None = None
+    delist_date: date | None = None
     status: str = "active"
+    sector: str | None = None
+    industry: str | None = None
 
 
 class InstrumentListOut(BaseSchema):
@@ -243,27 +304,25 @@ class InstrumentListOut(BaseSchema):
     offset: int
 
 
-class SyncResultOut(BaseSchema):
+class InstrumentSummaryOut(BaseSchema):
+    """标的字典的全量分布,用于元数据页解释数量口径。"""
+
     total: int
-    new: int
-    updated: int
+    active_total: int
+    active_etf_total: int
+    by_status: dict[str, int] = Field(default_factory=dict)
+    by_market: dict[str, int] = Field(default_factory=dict)
+    by_instrument_type: dict[str, int] = Field(default_factory=dict)
+    by_listing_board: dict[str, int] = Field(default_factory=dict)
 
 
 class BulkDownloadRequest(BaseSchema):
     market: str = "a_share"
     instrument_type: str | None = None
+    exchange: str | None = None
+    listing_boards: list[str] = Field(default_factory=list)
     start: str = "2015-01-01"
-
-
-class BulkDownloadStatusOut(BaseSchema):
-    status: str = "idle"  # idle / running / done / error
-    done: int = 0
-    total: int = 0
-    success: int = 0
-    failed: int = 0
-    current_symbol: str | None = None
-    phase: str | None = None
-    error: str | None = None
+    source: str | None = None
 
 
 class SchedulerConfigOut(BaseSchema):
@@ -372,6 +431,7 @@ class FactorSnapshotOut(BaseSchema):
     dataset_versions: dict[str, str]
     factor_version: str
     checksum: str
+    warnings: list[str] = Field(default_factory=list)
 
 
 class BacktestResultOut(BaseSchema):
@@ -383,6 +443,10 @@ class BacktestResultOut(BaseSchema):
     selection_snapshots: list[FactorSnapshotOut] = Field(default_factory=list)
     dataset_versions: dict[str, list[str]] = Field(default_factory=dict)
     factor_version: str | None = None
+    matching_model: dict[str, Any] = Field(default_factory=dict)
+    asset_rules: dict[str, Any] | None = None
+    fee_assumptions: dict[str, Any] = Field(default_factory=dict)
+    benchmark_config: dict[str, Any] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- Backtest History
@@ -416,6 +480,10 @@ class BacktestHistoryDetailOut(BaseSchema):
     selection_snapshots: list[FactorSnapshotOut] = Field(default_factory=list)
     dataset_versions: dict[str, list[str]] = Field(default_factory=dict)
     factor_version: str | None = None
+    matching_model: dict[str, Any] = Field(default_factory=dict)
+    asset_rules: dict[str, Any] | None = None
+    fee_assumptions: dict[str, Any] = Field(default_factory=dict)
+    benchmark_config: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
 
@@ -469,3 +537,595 @@ class WatchlistDetailOut(WatchlistOut):
 
 class WatchlistAddSymbols(BaseSchema):
     symbols: list[str]
+
+
+# --------------------------------------------------------------------------- Research Experiment (issue #57)
+class VersionStampSchema(BaseSchema):
+    matching_model_version: str
+    asset_rules_version: str
+    factor_version: str | None = None
+    dataset_versions: dict[str, str] = Field(default_factory=dict)
+    selection_config: dict[str, Any] = Field(default_factory=dict)
+    strategy_kind: str
+
+
+class ValidationPlanSchema(BaseSchema):
+    mode: str  # rolling / expanding
+    train_start: str
+    train_end: str
+    validation_start: str
+    validation_end: str
+    test_start: str
+    test_end: str
+    train_window_days: int = 504
+    test_window_days: int = 63
+    step_days: int = 63
+    trial_budget: int = 50
+    random_seed: int = 0
+    benchmark_symbol: str | None = None
+
+
+class AcceptanceThresholdsSchema(BaseSchema):
+    min_in_sample_sharpe: float = 1.0
+    min_oos_sharpe: float = 0.5
+    max_oos_drawdown: float = 0.25
+    min_oos_calmar: float = 0.5
+    min_oos_information_ratio: float = 0.0
+    max_param_sensitivity_sharpe_drop: float = 0.5
+    min_pbo_pass: bool = True
+    max_pbo: float = 0.5
+    min_deflated_sharpe: float = 0.0
+    min_probabilistic_sharpe: float = 0.95
+
+
+class RobustnessPlanSchema(BaseSchema):
+    neighbourhood_steps: int = 5
+    neighbourhood_relative_step: float = 0.1
+    cost_multipliers: list[float] = Field(default_factory=lambda: [1.0, 2.0, 3.0])
+    slippage_stress_bps: list[float] = Field(default_factory=lambda: [0.0, 5.0, 10.0, 20.0])
+    execution_delay_bars: list[int] = Field(default_factory=lambda: [1, 2])
+    stress_phases: list[str] = Field(
+        default_factory=lambda: [
+            "2018-Q4",
+            "2020-Q1",
+            "2022-Q1",
+            "2024-Q1",
+        ]
+    )
+
+
+class ExperimentCreate(BaseSchema):
+    """创建研究实验 —— 假设 / 计划 / 门必须一次性冻结。
+
+    创建后 ``hypothesis`` 不可修改;若需要重新假设,创建新 experiment
+    并设 ``supersedes_id`` 指向旧版本。
+    """
+
+    hypothesis: str = Field(min_length=10, max_length=2000)
+    version_stamp: VersionStampSchema
+    plan: ValidationPlanSchema
+    thresholds: AcceptanceThresholdsSchema = Field(default_factory=AcceptanceThresholdsSchema)
+    robustness: RobustnessPlanSchema = Field(default_factory=RobustnessPlanSchema)
+    strategy_params_space: dict[str, Any] = Field(default_factory=dict)
+    supersedes_id: str | None = None
+    notes: str = ""
+
+
+class ExperimentOut(BaseSchema):
+    experiment_id: str
+    hypothesis: str
+    version_stamp: dict[str, Any]
+    version_checksum: str
+    plan: dict[str, Any]
+    thresholds: dict[str, Any]
+    robustness: dict[str, Any]
+    strategy_params_space: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    created_at: datetime
+    frozen_at: datetime
+    finalized_at: datetime | None = None
+    trials_used: int = 0
+    final_test_unsealed: bool = False
+    rejection_reason: str | None = None
+    supersedes_id: str | None = None
+    notes: str = ""
+
+
+class TrialOut(BaseSchema):
+    trial_id: str
+    experiment_id: str
+    trial_index: int
+    parameters: dict[str, Any]
+    status: str
+    in_sample_metrics: dict[str, Any] | None = None
+    oos_metrics: dict[str, Any] | None = None
+    walk_forward_windows: list[dict[str, Any]] = Field(default_factory=list)
+    robustness_probes: list[dict[str, Any]] = Field(default_factory=list)
+    statistical_report: dict[str, Any] | None = None
+    failure_reason: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class ExperimentDetailOut(ExperimentOut):
+    """实验详情 + 全部 trial(包括失败)。"""
+
+    trials: list[TrialOut] = Field(default_factory=list)
+
+
+class TrialCreate(BaseSchema):
+    """手动登记一次 trial(不通过 runner 自动跑)。"""
+
+    parameters: dict[str, Any]
+    status: str = "candidate"
+    failure_reason: str | None = None
+
+
+class ExperimentRejectIn(BaseSchema):
+    reason: str = Field(min_length=1)
+
+
+# --------------------------------------------------------------------------- Factor Lab (issue #78)
+class FactorDefinitionOut(BaseSchema):
+    name: str
+    version: str
+    role: str
+    preference: str
+    frequency: str
+    unit: str
+    source_fields: list[str]
+    calculation_window: int | None = None
+    default_transform: str
+    default_neutralization: list[str]
+    available_at_rule: str
+    missing_policy: str
+    economic_hypothesis: str
+    expected_failure: str
+    implementation: str
+    signal_eligible: bool
+    checksum: str
+
+
+class FeatureSnapshotCreate(BaseSchema):
+    """从一个已发布数据版本显式生成价格特征快照。"""
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    dataset_release_id: str = Field(min_length=1, max_length=128)
+    decision_at: datetime
+
+    @field_validator("decision_at")
+    @classmethod
+    def validate_decision_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("decision_at 必须带时区,例如 2026-07-31T23:59:59+08:00")
+        return value
+
+
+class FeatureObservationOut(BaseSchema):
+    symbol: str
+    feature_name: str
+    value: float
+    observed_at: datetime
+    available_at: datetime
+    source: str
+    source_version: str
+    market: str | None = None
+    asset_class: str | None = None
+    industry: str | None = None
+
+
+class FeatureSnapshotOut(BaseSchema):
+    snapshot_id: str
+    dataset_release_id: str
+    dataset_release_checksum: str
+    decision_at: datetime
+    published_at: datetime
+    framework_version: str
+    calculation_windows: dict[str, int]
+    transformations: dict[str, str]
+    neutralization: dict[str, list[str]]
+    code_version: str
+    observations: list[FeatureObservationOut]
+    checksum: str
+    issues: list[str] = Field(default_factory=list)
+
+
+class FactorSignalItemOut(BaseSchema):
+    symbol: str
+    direction: str
+    score: float
+    confidence: float
+    valid_from: datetime
+    valid_until: datetime
+    reason: str
+
+
+class FactorSignalOut(BaseSchema):
+    signal_id: str
+    factor_name: str
+    factor_version: str
+    feature_snapshot_id: str
+    feature_snapshot_checksum: str
+    candidate_universe_version: str
+    research_status: str
+    validation_experiment_id: str | None = None
+    created_at: datetime
+    items: list[FactorSignalItemOut]
+    checksum: str
+
+
+class FactorExperimentPlanSchema(BaseSchema):
+    in_sample_start: date
+    in_sample_end: date
+    oos_start: date
+    oos_end: date
+    trial_budget: int = Field(gt=0, le=10000)
+    benchmark_symbol: str = Field(min_length=1, max_length=32)
+    transaction_cost_bps: float = Field(ge=0)
+    quantiles: int = Field(default=5, ge=2, le=20)
+
+
+class FactorExperimentCreate(BaseSchema):
+    """只登记冻结实验;不会启动回测或任何交易。"""
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    hypothesis: str = Field(min_length=10, max_length=2000)
+    factor_names: list[str] = Field(min_length=1)
+    dataset_release_id: str = Field(min_length=1, max_length=128)
+    feature_snapshot_id: str = Field(min_length=1, max_length=64)
+    plan: FactorExperimentPlanSchema
+    comparison_group: str = Field(min_length=1, max_length=64)
+    validation_experiment_id: str | None = Field(default=None, max_length=32)
+
+
+class FactorExperimentOut(BaseSchema):
+    experiment_id: str
+    hypothesis: str
+    factor_names: list[str]
+    dataset_release_id: str
+    dataset_release_checksum: str
+    feature_snapshot_id: str
+    plan: dict[str, Any]
+    comparison_group: str
+    status: str
+    validation_experiment_id: str | None = None
+    result: dict[str, Any] | None = None
+    failure_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+# --------------------------------------------------------------------------- 多资产元数据(issue #58)
+
+
+class EtfMetadataOut(BaseSchema):
+    code: str
+    fund_code: str
+    category: str
+    execution_profile: str | None = None
+    underlying_market: str = "domestic"
+    strategy_type: str = "index"
+    underlying_index: str | None = None
+    underlying_asset_class: str = "equity"
+    management_fee_rate: Decimal | None = None
+    custody_fee_rate: Decimal | None = None
+    tracking_error: Decimal | None = None
+    inception_date: date | None = None
+    listing_date: date | None = None
+    delisting_date: date | None = None
+    iopv_available: bool = False
+    allows_t_plus_0: bool = False
+    dividend_policy: str = "cash"
+    source: str = "manual"
+    rule_version: str = ""
+    confidence: Decimal = Decimal("0")
+    review_status: str = "needs_review"
+    evidence: list[str] = []
+    manual_override: bool = False
+
+
+class EtfClassificationUpdate(BaseSchema):
+    """人工补齐或修正研究用 ETF 分类(issue #97 多维分类)。"""
+
+    execution_profile: (
+        Literal[
+            "domestic_equity_etf",
+            "cross_border_etf",
+            "bond_etf",
+            "money_market_etf",
+            "commodity_etf",
+        ]
+        | None
+    ) = None
+    underlying_market: Literal["domestic", "hk", "overseas", "global"] | None = None
+    strategy_type: Literal["index", "active"] | None = None
+    underlying_index: str | None = Field(default=None, max_length=32)
+    reason: str = Field(default="", max_length=500)
+
+    @field_validator("underlying_index")
+    @classmethod
+    def normalize_underlying_index(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        return normalized or None
+
+
+class EtfSyncPreviewOut(BaseSchema):
+    total: int
+    to_insert: int
+    to_update: int
+    skipped_override: int
+    needs_review: int
+    auto_adopted: int
+
+
+class EtfSyncRequest(BaseSchema):
+    """触发 ETF 元数据批量同步(dry-run 预览或实际写入)。"""
+
+    dry_run: bool = True
+    enrich_codes: list[str] = Field(default_factory=list)
+
+
+class EtfBatchConfirmRequest(BaseSchema):
+    codes: list[str] = Field(min_length=1, max_length=2000)
+    reason: str = Field(default="", max_length=500)
+
+
+class EtfMetadataSummaryOut(BaseSchema):
+    total: int
+    auto_adopted: int
+    needs_review: int
+    manually_confirmed: int
+    manually_overridden: int
+    missing_metadata: int
+
+
+class EtfAuditOut(BaseSchema):
+    id: int
+    code: str
+    field_name: str
+    old_value: str | None = None
+    new_value: str | None = None
+    changed_by: str = "system"
+    reason: str = ""
+    changed_at: datetime
+
+
+class BondMetadataOut(BaseSchema):
+    code: str
+    face_value: Decimal = Decimal("100")
+    coupon_rate: Decimal | None = None
+    coupon_frequency: str = "annual"
+    issue_date: date | None = None
+    maturity_date: date | None = None
+    issuer: str | None = None
+    credit_rating: str | None = None
+    credit_entity_type: str | None = None
+    duration_years: Decimal | None = None
+    yield_to_maturity: Decimal | None = None
+
+
+class ConvertibleMetadataOut(BaseSchema):
+    code: str
+    underlying_stock_code: str
+    conversion_price: Decimal
+    conversion_ratio: Decimal | None = None
+    conversion_premium: Decimal | None = None
+    issue_date: date | None = None
+    maturity_date: date | None = None
+    coupon_schedule: list[Any] = Field(default_factory=list)
+    redemption_yield: Decimal | None = None
+    forced_redeem_trigger: Decimal | None = None
+    put_back_trigger: Decimal | None = None
+    downward_revision_trigger: Decimal | None = None
+
+
+class FuturesContractOut(BaseSchema):
+    contract_code: str
+    series_id: str
+    underlying_symbol: str
+    exchange: str
+    multiplier: Decimal
+    margin_rate: Decimal
+    price_limit_pct: Decimal
+    price_tick: Decimal
+    listing_date: date | None = None
+    last_trade_date: date | None = None
+    delivery_date: date | None = None
+    delivery_method: str = "cash"
+    settle_price: Decimal | None = None
+    open_interest: Decimal | None = None
+
+
+class LifecycleEventOut(BaseSchema):
+    id: int
+    symbol: str
+    event_type: str
+    effective_date: date
+    available_at: datetime
+    source: str
+    dataset_version: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class DatasetManifestOut(BaseSchema):
+    id: int
+    dataset_name: str
+    source: str
+    version: str
+    start_date: date | None = None
+    end_date: date | None = None
+    row_count: int = 0
+    symbol_count: int = 0
+    coverage_pct: Decimal = Decimal("0")
+    gaps: list[Any] = Field(default_factory=list)
+    checksum: str = ""
+    quality_status: str = "unknown"
+    quality_report: dict[str, Any] = Field(default_factory=dict)
+    published_at: datetime
+    code_version: str = ""
+
+
+class DatasetReleaseCapabilityOut(BaseSchema):
+    key: str
+    status: str
+    symbol_count: int
+    ready_count: int
+    missing_requirements: list[str] = Field(default_factory=list)
+
+
+class ResearchDatasetReleaseCreate(BaseSchema):
+    """从本地行情缓存创建不可变研究数据发布。
+
+    缓存目录、发布目录和代码版本均由服务端决定,网页不能提交文件路径或
+    可执行内容。
+    """
+
+    release_id: str = Field(
+        min_length=3,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    dataset_name: str = Field(
+        default="multi_asset_daily_bars",
+        min_length=3,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    release_kind: Literal["a_share_tushare", "multi_asset_mixed"] = (
+        "a_share_tushare"
+    )
+    source: Literal["akshare", "yfinance", "tushare", "mixed", "manual"] | None = None
+    version: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    symbols: list[str] = Field(min_length=1, max_length=10_000)
+    start_date: date
+    end_date: date
+    adjustment: Literal["qfq", "hqfq", "none"] = "qfq"
+    required_capabilities: list[
+        Literal[
+            "stock",
+            "bond",
+            "convertible",
+            "futures",
+            "etf:index",
+            "etf:cross_border",
+            "etf:commodity",
+            "etf:bond",
+        ]
+    ] = Field(default_factory=list, max_length=8)
+
+    @field_validator("symbols")
+    @classmethod
+    def normalize_symbols(cls, value: list[str]) -> list[str]:
+        normalized = [symbol.strip().upper() for symbol in value if symbol.strip()]
+        if not normalized:
+            raise ValueError("至少选择一个已缓存标的")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("发布标的不能重复")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> ResearchDatasetReleaseCreate:
+        if self.start_date > self.end_date:
+            raise ValueError("开始日期不能晚于结束日期")
+        expected_source = (
+            "tushare" if self.release_kind == "a_share_tushare" else "mixed"
+        )
+        if self.source is not None and self.source != expected_source:
+            raise ValueError(
+                f"{self.release_kind} 发布的数据来源必须是 {expected_source}"
+            )
+        return self
+
+
+class DatasetReleaseInstrumentOut(BaseSchema):
+    code: str
+    name: str
+    market: str
+    instrument_type: str
+    asset_class: str
+    available_at: datetime
+    execution: dict[str, Any]
+    artifact_path: str
+    artifact_checksum: str
+    artifact_size: int
+    row_count: int
+    start_date: date
+    end_date: date
+    expected_sessions: int
+    missing_sessions: int
+    suspended_sessions: int
+    anomaly_count: int
+    coverage_pct: Decimal
+    category: str
+    ready: bool
+    issues: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
+    exchange: str | None = None
+    listing_board: str = "unknown"
+    currency: str = "CNY"
+    etf_category: str | None = None
+    list_date: date | None = None
+    delist_date: date | None = None
+    status: str
+    metadata_complete: bool
+    lifecycle_events: list[dict[str, Any]] = Field(default_factory=list)
+    present_event_types: list[str] = Field(default_factory=list)
+    required_event_types: list[str] = Field(default_factory=list)
+    name_history: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ResearchDatasetReleaseOut(BaseSchema):
+    release_id: str
+    dataset_name: str
+    source: str
+    version: str
+    schema_version: str
+    start_date: date
+    end_date: date
+    period: str
+    adjustment: str
+    fields: list[str]
+    availability_rules: list[dict[str, str]]
+    code_version: str
+    published_at: datetime
+    instruments: list[DatasetReleaseInstrumentOut]
+    capabilities: list[DatasetReleaseCapabilityOut]
+    quality_status: str
+    quality_report: dict[str, Any]
+    symbol_count: int
+    row_count: int
+    coverage_pct: Decimal
+    known_limitations: list[str] = Field(default_factory=list)
+    storage_uri: str
+    metadata_version: str
+    release_checksum: str
+
+
+class ResearchDatasetReleaseSummaryOut(BaseSchema):
+    release_id: str
+    dataset_name: str
+    source: str
+    version: str
+    schema_version: str
+    start_date: date
+    end_date: date
+    period: str
+    adjustment: str
+    code_version: str
+    published_at: datetime
+    symbol_count: int
+    row_count: int
+    coverage_pct: Decimal
+    capabilities: list[DatasetReleaseCapabilityOut]
+    quality_status: str
+    known_limitations: list[str] = Field(default_factory=list)
+    metadata_version: str
+    release_checksum: str

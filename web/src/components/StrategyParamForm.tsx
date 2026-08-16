@@ -55,7 +55,7 @@ export default function StrategyParamForm({
 
   if (visibleParams.length === 0) {
     return (
-      <div className="rounded-lg bg-slate-50 px-4 py-3 text-sm text-slate-600">
+      <div className="rounded-lg bg-muted/50 px-4 py-3 text-sm text-muted-foreground">
         此策略没有可配置参数。
       </div>
     );
@@ -66,8 +66,8 @@ export default function StrategyParamForm({
       {visibleParams.map((param) => {
         const id = `strategy-param-${param.name}`;
         const error = errors[param.name];
-        const commonClass = `w-full rounded-md border bg-white px-3 py-2 text-sm text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-blue-200 disabled:bg-slate-100 ${
-          error ? "border-red-400 focus:border-red-500" : "border-slate-300 focus:border-blue-500"
+        const commonClass = `w-full rounded-md border bg-transparent px-3 py-2 text-sm text-foreground outline-none transition-colors focus:ring-2 focus:ring-primary/30 disabled:bg-secondary ${
+          error ? "border-destructive focus:border-destructive" : "border-border focus:border-ring"
         }`;
 
         return (
@@ -75,10 +75,10 @@ export default function StrategyParamForm({
             <HintLabel
               htmlFor={id}
               hint={paramHint(param)}
-              labelClassName="text-sm font-medium text-slate-700"
+              labelClassName="text-sm font-medium text-foreground"
             >
               {param.label}
-              {param.required && <span className="ml-1 text-red-600" aria-hidden="true">*</span>}
+              {param.required && <span className="ml-1 text-destructive" aria-hidden="true">*</span>}
             </HintLabel>
 
             {param.enum ? (
@@ -101,7 +101,7 @@ export default function StrategyParamForm({
                 ))}
               </select>
             ) : param.type === "boolean" ? (
-              <label className="flex min-h-10 items-center gap-2 text-sm text-slate-700">
+              <label className="flex min-h-10 items-center gap-2 text-sm text-foreground">
                 <input
                   id={id}
                   type="checkbox"
@@ -110,7 +110,7 @@ export default function StrategyParamForm({
                     onChange({ ...values, [param.name]: event.target.checked })
                   }
                   disabled={disabled}
-                  className="size-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                  className="size-4 rounded border-border text-primary focus:ring-ring"
                 />
                 启用
               </label>
@@ -134,7 +134,7 @@ export default function StrategyParamForm({
 
             <p
               id={`${id}-description`}
-              className={`mt-1 text-xs ${error ? "text-red-600" : "text-slate-500"}`}
+              className={`mt-1 text-xs ${error ? "text-destructive" : "text-muted-foreground"}`}
             >
               {error ?? param.description}
             </p>

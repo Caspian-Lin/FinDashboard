@@ -1,0 +1,6 @@
+# Windows 开发机使用本机 Python，避免依赖不可访问的 uv 托管 Python 目录。
+python-preference = "only-system"
+python-downloads = "never"
+
+# 将缓存放在项目目录，便于当前工作区使用并规避本机缓存目录冲突。
+cache-dir = ".uv-cache"

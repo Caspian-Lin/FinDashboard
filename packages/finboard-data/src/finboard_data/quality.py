@@ -20,6 +20,7 @@ from finboard_data.research import (
     IndustryMembership,
     InstrumentProfile,
 )
+from finboard_shared.models import Bar
 
 
 class QualitySeverity(StrEnum):
@@ -408,3 +409,118 @@ def _report(
         expected_count=len(expected_symbols) if expected_symbols is not None else None,
         issues=tuple(issues),
     )
+
+
+# ---------------------------------------------------------------------------
+# Bar-level quality (OHLCV) — used at both ingestion and release time
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class BarAnomaly:
+    """单根 bar 的异常详情。"""
+
+    date: date
+    source: str
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BarQualityResult:
+    """单标的 bar 质量检查结果。"""
+
+    symbol: str
+    total_bars: int
+    anomaly_dates: tuple[date, ...]
+    anomalies: tuple[BarAnomaly, ...]
+    duplicate_count: int
+    sources: tuple[str, ...]
+
+    @property
+    def anomaly_count(self) -> int:
+        """不包括重复的异常 bar 数量。"""
+        return len(self.anomalies)
+
+    @property
+    def anomaly_ratio(self) -> Decimal:
+        if self.total_bars == 0:
+            return Decimal("0")
+        return Decimal(len(self.anomalies)) / Decimal(self.total_bars)
+
+    @property
+    def passed(self) -> bool:
+        """通过质量门 = 零异常 + 零重复。"""
+        return self.anomaly_count == 0 and self.duplicate_count == 0
+
+
+class BarQualityChecker:
+    """Bar 级别质量检查器。
+
+    在拉取后立即运行,拦截 OHLCV 异常、重复时间戳、NaN/负值等问题。
+    覆盖率/生命周期相关的检查由 release 层在发布时补充。
+    """
+
+    OHLC_TOLERANCE = Decimal("0.01")
+
+    def check(self, bars: Sequence[Bar], *, symbol: str = "") -> BarQualityResult:
+        """检查 bar 列表,返回异常详情。"""
+        seen: set[date] = set()
+        duplicates = 0
+        anomalies: list[BarAnomaly] = []
+        sources: set[str] = set()
+
+        for bar in bars:
+            bar_date = bar.timestamp.date()
+            if bar_date in seen:
+                duplicates += 1
+            else:
+                seen.add(bar_date)
+            if bar.source:
+                sources.add(bar.source)
+
+            reasons = self._check_bar(bar)
+            if reasons:
+                anomalies.append(
+                    BarAnomaly(date=bar_date, source=bar.source, reasons=tuple(reasons))
+                )
+
+        return BarQualityResult(
+            symbol=symbol,
+            total_bars=len(bars),
+            anomaly_dates=tuple(a.date for a in anomalies),
+            anomalies=tuple(anomalies),
+            duplicate_count=duplicates,
+            sources=tuple(sorted(sources)),
+        )
+
+    @classmethod
+    def _check_bar(cls, bar: Bar) -> list[str]:
+        """返回单根 bar 的异常原因列表(空列表 = 正常)。"""
+        if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
+            return []
+
+        reasons: list[str] = []
+        tol = cls.OHLC_TOLERANCE
+        upper = Decimal("1") + tol
+        lower = Decimal("1") - tol
+
+        for name, val in (("open", bar.open), ("high", bar.high),
+                          ("low", bar.low), ("close", bar.close)):
+            if val.is_nan():
+                reasons.append(f"{name}_nan")
+            elif val <= 0:
+                reasons.append(f"{name}_non_positive")
+
+        if not any(r.endswith("_nan") for r in reasons):
+            o, h, low, c = bar.open, bar.high, bar.low, bar.close
+            if h < max(o, low, c) * lower:
+                reasons.append("high_lt_ohlc")
+            if low > min(o, h, c) * upper:
+                reasons.append("low_gt_ohlc")
+
+        if bar.volume < 0:
+            reasons.append("neg_volume")
+        if bar.amount < 0:
+            reasons.append("neg_amount")
+
+        return reasons

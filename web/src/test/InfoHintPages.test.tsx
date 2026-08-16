@@ -27,12 +27,15 @@ const apiMock = vi.hoisted(() => ({
   addWatchlistSymbols: vi.fn(),
   getDataStatusPage: vi.fn(),
   searchInstruments: vi.fn(),
-  getBulkDownloadStatus: vi.fn(),
+  getJob: vi.fn(),
+  listJobs: vi.fn(),
   syncUniverse: vi.fn(),
   fetchData: vi.fn(),
   startBulkDownload: vi.fn(),
   getConfig: vi.fn(),
   updateConfig: vi.fn(),
+  getLlmConfig: vi.fn(),
+  updateLlmConfig: vi.fn(),
 }));
 
 const defaultFactorSelection = vi.hoisted(() => ({
@@ -61,10 +64,14 @@ const defaultFactorSelection = vi.hoisted(() => ({
   dataset_versions: {},
 }));
 
-vi.mock("../lib/api", () => ({
-  api: apiMock,
-  DEFAULT_FACTOR_SELECTION: defaultFactorSelection,
-}));
+vi.mock("../lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/api")>();
+  return {
+    ...actual,
+    api: { ...actual.api, ...apiMock },
+    DEFAULT_FACTOR_SELECTION: defaultFactorSelection,
+  };
+});
 
 const strategy = {
   kind: "ma_cross",
@@ -124,15 +131,31 @@ beforeEach(() => {
     limit: 200,
     offset: 0,
   });
-  apiMock.getBulkDownloadStatus.mockResolvedValue({
-    status: "idle",
-    done: 0,
-    total: 0,
-    success: 0,
-    failed: 0,
-    current_symbol: null,
+  apiMock.getJob.mockResolvedValue({
+    job_id: "BJ-IDLE",
+    kind: "bulk_download",
+    queue: "data",
+    status: "succeeded",
+    priority: 0,
+    payload: {},
+    payload_checksum: "x",
+    idempotency_key: "x",
+    progress_total: 0,
+    progress_done: 0,
     phase: null,
-    error: null,
+    result_ref: null,
+    error_code: null,
+    error_summary: null,
+    attempt: 0,
+    max_attempts: 3,
+    worker_id: null,
+    heartbeat_at: null,
+    lease_until: null,
+    requested_by: "test",
+    created_at: "2026-08-01T00:00:00+00:00",
+    started_at: null,
+    finished_at: "2026-08-01T00:00:01+00:00",
+    updated_at: "2026-08-01T00:00:01+00:00",
   });
   apiMock.getConfig.mockResolvedValue({
     sync_enabled: true,
@@ -143,6 +166,15 @@ beforeEach(() => {
     download_markets: ["a_share"],
     download_types: ["stock", "etf"],
     data_provider: "akshare",
+  });
+  apiMock.getLlmConfig.mockResolvedValue({
+    provider: "fake",
+    base_url: "",
+    api_key: "",
+    api_key_set: false,
+    model: "gpt-4o-mini",
+    timeout_seconds: 30,
+    max_retries: 3,
   });
 });
 
@@ -169,9 +201,84 @@ describe("目标页面 InfoHint 接入", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("代码.交易所");
 
     await user.click(
+      screen.getByRole("button", { name: "查看“批量行情数据源”说明" }),
+    );
+    expect(screen.getByRole("tooltip")).toHaveTextContent("系统默认配置");
+
+    await user.click(
       screen.getByRole("button", { name: "查看“缓存行情”说明" }),
     );
     expect(screen.getByRole("tooltip")).toHaveTextContent("qfq");
+  });
+
+  it("数据页批量拉取提交后展示统一任务队列进度条", async () => {
+    const user = userEvent.setup();
+    // startBulkDownload 现在返回 JobOut(#144);随后 Data.tsx 轮询 getJob。
+    apiMock.startBulkDownload.mockResolvedValue({
+      job_id: "BJ-PROGRESS",
+      kind: "bulk_download",
+      queue: "data",
+      status: "queued",
+      priority: 0,
+      payload: {},
+      payload_checksum: "x",
+      idempotency_key: "x",
+      progress_total: 3,
+      progress_done: 2,
+      phase: "fetching",
+      result_ref: null,
+      error_code: null,
+      error_summary: null,
+      attempt: 0,
+      max_attempts: 3,
+      worker_id: null,
+      heartbeat_at: null,
+      lease_until: null,
+      requested_by: "test",
+      created_at: "2026-08-03T01:00:00+00:00",
+      started_at: "2026-08-03T01:00:01+00:00",
+      finished_at: null,
+      updated_at: "2026-08-03T01:00:01+00:00",
+    });
+    apiMock.getJob.mockResolvedValue({
+      job_id: "BJ-PROGRESS",
+      kind: "bulk_download",
+      queue: "data",
+      status: "running",
+      priority: 0,
+      payload: {},
+      payload_checksum: "x",
+      idempotency_key: "x",
+      progress_total: 3,
+      progress_done: 2,
+      phase: "fetching",
+      result_ref: null,
+      error_code: null,
+      error_summary: null,
+      attempt: 0,
+      max_attempts: 3,
+      worker_id: null,
+      heartbeat_at: null,
+      lease_until: null,
+      requested_by: "test",
+      created_at: "2026-08-03T01:00:00+00:00",
+      started_at: "2026-08-03T01:00:01+00:00",
+      finished_at: null,
+      updated_at: "2026-08-03T01:00:01+00:00",
+    });
+
+    renderPage(<Data />);
+
+    const startButton = await screen.findByRole("button", {
+      name: "开始批量拉取",
+    });
+    await user.click(startButton);
+
+    // 进度条出现,显示 2 / 3。
+    const progressbar = await screen.findByRole("progressbar");
+    expect(progressbar).toHaveAttribute("aria-valuenow", "2");
+    expect(progressbar).toHaveAttribute("aria-valuemax", "3");
+    expect(screen.getByText("进度: 2 / 3")).toBeInTheDocument();
   });
 
   it("设置页展示数据源与定时任务说明", async () => {

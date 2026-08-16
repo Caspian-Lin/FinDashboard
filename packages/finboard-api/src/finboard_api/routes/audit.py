@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from finboard_api.deps import get_session
+from finboard_api.deps import get_db_session
 from finboard_api.schemas import AuditLogOut, PageResponse
 from finboard_persistence import AuditLogRepository
 
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/audit-logs", tags=["audit"])
 async def list_audit_logs(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_db_session),
 ) -> PageResponse[AuditLogOut]:
     repo = AuditLogRepository(session)
     rows = await repo.list_recent(limit=limit, offset=offset)

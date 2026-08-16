@@ -166,6 +166,8 @@ class AkShareProvider:
             and metadata.last_date is not None
             and metadata.last_date >= expected_end
         ):
+            if on_status is not None:
+                on_status("cache_hit")
             return True
 
         fetch_start = start
@@ -196,6 +198,21 @@ class AkShareProvider:
             existing_bars=existing,
         )
         return True
+
+    async def last_cached_date(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        adjust: str = "qfq",
+    ) -> date | None:
+        """返回该标的缓存中最新 bar 的日期(``None`` 表示无缓存)。
+
+        供停牌检测(issue #35)比较拉取前后是否有新数据。只读 parquet footer。
+        """
+        if self._cache is None:
+            return None
+        metadata = await self._cache.metadata_for(symbol, period, adjust)
+        return metadata.last_date if metadata is not None else None
 
     # ------------------------------------------------------------------ 批量
     async def fetch_bars_batch(
@@ -308,6 +325,8 @@ class AkShareProvider:
                     logger.exception("akshare.cache_update_failed", symbol=sym.code)
                     ok = False
                 results[sym.code] = ok
+                if on_status is not None:
+                    on_status(sym.code, "completed" if ok else "failed")
                 done_count += 1
                 if on_progress is not None:
                     on_progress(sym.code, done_count, total)
@@ -443,6 +462,7 @@ class AkShareProvider:
                     amount=Decimal(
                         str(row[col_map["amount"]]) if col_map["amount"] in df.columns else 0
                     ),
+                    source="akshare",
                 )
             )
         bars.sort(key=lambda b: b.timestamp)

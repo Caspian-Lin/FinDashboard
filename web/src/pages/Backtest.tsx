@@ -14,6 +14,7 @@ import {
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import FactorSelectionForm from "../components/FactorSelectionForm";
 import StrategyParamForm from "../components/StrategyParamForm";
+import { SelectAllResultsButton } from "../components/selection/SelectAllResultsButton";
 import {
   defaultStrategyParams,
   normalizeStrategyParams,
@@ -28,6 +29,7 @@ import {
   type BacktestHistoryItem,
   type BacktestResult,
   type FactorSelectionInput,
+  isJobRunning,
 } from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
 
@@ -79,6 +81,9 @@ export default function Backtest() {
   // 结果视图: 当前结果或历史记录
   const [activeResult, setActiveResult] = useState<BacktestResult | null>(null);
   const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null);
+  // 回测已迁移到统一任务队列(#144):POST /backtest/run 返回 JobOut,前端轮询
+  // /api/jobs/{job_id},succeeded 后用 result_ref(run_id) 查历史详情拿 BacktestResult。
+  const [backtestJobId, setBacktestJobId] = useState<string | null>(null);
 
   const { data: strategies } = useQuery({
     queryKey: ["strategies"],
@@ -203,14 +208,54 @@ export default function Backtest() {
         stamp_tax_rate: stampTaxRate,
         slippage_bps: slippageBps,
       }),
-    onSuccess: (data) => {
+    onSuccess: (job) => {
       setStrategyErrors({});
-      setActiveResult(data);
-      setActiveHistoryId(data.run_id);
-      qc.invalidateQueries({ queryKey: ["backtest-history"] });
+      // 清空旧结果,进入"运行中"态;真正的 BacktestResult 在任务完成后由 detailQuery 注入。
+      setActiveResult(null);
+      setActiveHistoryId(null);
+      setBacktestJobId(job.job_id);
     },
     onError: (error) => setStrategyErrors(strategyFieldErrorsFrom(error)),
   });
+
+  // 轮询回测任务直到终态。result_ref 是 run_id(数字字符串)。
+  const { data: backtestJob } = useQuery({
+    queryKey: ["job", backtestJobId],
+    queryFn: () => api.getJob(backtestJobId as string),
+    enabled: Boolean(backtestJobId),
+    refetchInterval: (query) => (isJobRunning(query.state.data) ? 1500 : false),
+  });
+
+  const backtestRunId =
+    backtestJob && !isJobRunning(backtestJob) && backtestJob.status === "succeeded" && backtestJob.result_ref
+      ? Number(backtestJob.result_ref)
+      : null;
+
+  // 任务完成后,用 run_id 拉历史详情,重构成 BacktestResult 注入 activeResult。
+  const { data: backtestDetail } = useQuery({
+    queryKey: ["backtest-history", backtestRunId],
+    queryFn: () => api.getBacktestHistoryDetail(backtestRunId as number),
+    enabled: backtestRunId !== null,
+    staleTime: Infinity,
+  });
+
+  const appliedJobRunId = useRef<number | null>(null);
+  useEffect(() => {
+    if (!backtestDetail || appliedJobRunId.current === backtestDetail.id) return;
+    appliedJobRunId.current = backtestDetail.id;
+    setActiveResult({
+      metrics: backtestDetail.metrics,
+      equity_curve: backtestDetail.equity_curve,
+      fills: backtestDetail.fills,
+      summary: backtestDetail.summary,
+      run_id: backtestDetail.id,
+      selection_snapshots: backtestDetail.selection_snapshots,
+      dataset_versions: backtestDetail.dataset_versions,
+      factor_version: backtestDetail.factor_version,
+    });
+    setActiveHistoryId(backtestDetail.id);
+    qc.invalidateQueries({ queryKey: ["backtest-history"] });
+  }, [backtestDetail, qc]);
 
   const loadHistory = useMutation({
     mutationFn: (id: number) => api.getBacktestHistoryDetail(id),
@@ -270,6 +315,11 @@ export default function Backtest() {
 
   const result = activeResult;
   const m = result?.metrics;
+  const backtestRunning = runBacktest.isPending || isJobRunning(backtestJob);
+  const backtestFailed =
+    backtestJob && !isJobRunning(backtestJob) && backtestJob.status !== "succeeded"
+      ? backtestJob
+      : null;
 
   const changeStrategy = (kind: string) => {
     const definition = backtestStrategies.find((item) => item.kind === kind);
@@ -277,6 +327,8 @@ export default function Backtest() {
     setStrategyParams(definition ? defaultStrategyParams(definition) : {});
     setStrategyErrors({});
     runBacktest.reset();
+    setBacktestJobId(null);
+    appliedJobRunId.current = null;
     appliedConfig.current = `manual:${kind}`;
   };
 
@@ -291,13 +343,18 @@ export default function Backtest() {
   };
 
   return (
-    <div className="flex gap-6">
+    <div className="flex flex-col gap-6 lg:flex-row">
       {/* Main column */}
-      <div className="flex-1 min-w-0">
-        <h1 className="text-2xl font-bold mb-6">回测</h1>
+      <div className="min-w-0 flex-1">
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">回测</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            历史行情回放 + 纸面撮合;回测任务进入统一队列,可在「任务中心」跟踪。
+          </p>
+        </div>
 
         {/* Config form */}
-        <div className="bg-white rounded-lg shadow p-5 mb-6">
+        <div className="rounded-lg border border-border bg-card p-5">
           <h2 className="text-lg font-semibold mb-4">回测配置</h2>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             <div>
@@ -308,7 +365,7 @@ export default function Backtest() {
                 id="backtest-strategy"
                 value={strategy}
                 onChange={(e) => changeStrategy(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm"
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               >
                 {backtestStrategies.map((s) => (
                   <option key={s.kind} value={s.kind}>
@@ -326,7 +383,7 @@ export default function Backtest() {
                 type="date"
                 value={start}
                 onChange={(e) => setStart(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm"
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               />
             </div>
             <div>
@@ -338,7 +395,7 @@ export default function Backtest() {
                 type="date"
                 value={end}
                 onChange={(e) => setEnd(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm"
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               />
             </div>
             <div>
@@ -353,29 +410,29 @@ export default function Backtest() {
                 type="number"
                 value={capital}
                 onChange={(e) => setCapital(e.target.value)}
-                className="w-full border rounded px-3 py-2 text-sm"
+                className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               />
             </div>
           </div>
 
           {requestedPreset && requestedPresetDefinition && (
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-800">
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-primary/10 px-3 py-2 text-sm text-primary">
               <span>
                 已载入策略预设：<strong>{requestedPreset.name}</strong>
               </span>
-              <span className="text-xs text-blue-700">仅用于本次回测配置</span>
+              <span className="text-xs text-primary">仅用于本次回测配置</span>
             </div>
           )}
           {requestedPreset && !requestedPresetDefinition && (
-            <p className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            <p className="mt-4 rounded-md bg-warning/10 px-3 py-2 text-sm text-warning">
               预设“{requestedPreset.name}”依赖实时时钟事件，当前回测引擎无法运行。
             </p>
           )}
 
           {strategyDefinition && (
-            <div className="mt-4 border-t border-gray-200 pt-4">
+            <div className="mt-4 border-t border-border pt-4">
               <div className="mb-3 flex items-center gap-1">
-                <h3 className="text-sm font-semibold text-gray-700">策略参数</h3>
+                <h3 className="text-sm font-semibold text-muted-foreground">策略参数</h3>
                 <InfoHint content={INFO_HINTS.backtest.strategyParams} />
               </div>
               <StrategyParamForm
@@ -387,7 +444,7 @@ export default function Backtest() {
                   runBacktest.reset();
                 }}
                 errors={strategyErrors}
-                disabled={runBacktest.isPending}
+                disabled={backtestRunning}
               />
             </div>
           )}
@@ -402,7 +459,7 @@ export default function Backtest() {
 
           {/* Fee params */}
           <details className="mt-3">
-            <summary className="text-sm text-gray-500 cursor-pointer hover:text-gray-700">
+            <summary className="text-sm text-muted-foreground cursor-pointer hover:text-muted-foreground">
               费用参数(佣金 / 印花税 / 滑点)
             </summary>
             <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -410,7 +467,7 @@ export default function Backtest() {
                 <HintLabel
                   htmlFor="backtest-commission-rate"
                   hint={INFO_HINTS.backtest.commissionRate}
-                  labelClassName="text-xs text-gray-500"
+                  labelClassName="text-xs text-muted-foreground"
                 >
                   佣金率(万N)
                 </HintLabel>
@@ -420,7 +477,7 @@ export default function Backtest() {
                   step="0.0001"
                   value={commissionRate}
                   onChange={(e) => setCommissionRate(e.target.value)}
-                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
                   placeholder="0.0003 = 万3"
                 />
               </div>
@@ -428,7 +485,7 @@ export default function Backtest() {
                 <HintLabel
                   htmlFor="backtest-minimum-commission"
                   hint={INFO_HINTS.backtest.minimumCommission}
-                  labelClassName="text-xs text-gray-500"
+                  labelClassName="text-xs text-muted-foreground"
                 >
                   最低佣金(¥)
                 </HintLabel>
@@ -437,7 +494,7 @@ export default function Backtest() {
                   type="number"
                   value={commissionMin}
                   onChange={(e) => setCommissionMin(e.target.value)}
-                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
                   placeholder="1"
                 />
               </div>
@@ -445,7 +502,7 @@ export default function Backtest() {
                 <HintLabel
                   htmlFor="backtest-stamp-tax"
                   hint={INFO_HINTS.backtest.stampTax}
-                  labelClassName="text-xs text-gray-500"
+                  labelClassName="text-xs text-muted-foreground"
                 >
                   印花税(万N,卖出)
                 </HintLabel>
@@ -455,7 +512,7 @@ export default function Backtest() {
                   step="0.0001"
                   value={stampTaxRate}
                   onChange={(e) => setStampTaxRate(e.target.value)}
-                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
                   placeholder="0.0005 = 万5, ETF 填 0"
                 />
               </div>
@@ -463,7 +520,7 @@ export default function Backtest() {
                 <HintLabel
                   htmlFor="backtest-slippage"
                   hint={INFO_HINTS.backtest.slippage}
-                  labelClassName="text-xs text-gray-500"
+                  labelClassName="text-xs text-muted-foreground"
                 >
                   滑点(bps)
                 </HintLabel>
@@ -472,12 +529,12 @@ export default function Backtest() {
                   type="number"
                   value={slippageBps}
                   onChange={(e) => setSlippageBps(e.target.value)}
-                  className="w-full border rounded px-2 py-1.5 text-sm"
+                  className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
                   placeholder="0"
                 />
               </div>
             </div>
-            <p className="text-xs text-gray-400 mt-1">
+            <p className="text-xs text-muted-foreground/70 mt-1">
               ETF 免印花税(填 0);股票卖出收万5。佣金 = max(成交额 × 佣金率, 最低佣金)。
             </p>
           </details>
@@ -504,14 +561,21 @@ export default function Backtest() {
 
           <button
             onClick={startBacktest}
-            disabled={runBacktest.isPending || selectedSymbols.length === 0}
-            className="mt-4 bg-blue-600 text-white rounded px-6 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+            disabled={backtestRunning || selectedSymbols.length === 0}
+            className="mt-4 bg-primary text-primary-foreground rounded-md px-6 py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
           >
-            {runBacktest.isPending ? "回测中..." : "运行回测"}
+            {backtestRunning
+              ? `回测中…${backtestJob?.phase ? `（${backtestJob.phase}）` : ""}`
+              : "运行回测"}
           </button>
           {runBacktest.error && (
-            <p className="mt-2 text-sm text-red-600">
+            <p className="mt-2 text-sm text-destructive">
               {(runBacktest.error as Error).message}
+            </p>
+          )}
+          {backtestFailed && (
+            <p className="mt-2 text-sm text-destructive">
+              回测任务失败: {backtestFailed.error_summary ?? backtestFailed.status}
             </p>
           )}
         </div>
@@ -519,7 +583,7 @@ export default function Backtest() {
         {/* Results */}
         {m && (
           <>
-            <div className="grid grid-cols-4 gap-4 mb-6">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <MetricCard label="总收益" value={`${(m.total_return * 100).toFixed(2)}%`} positive={m.total_return >= 0} />
               <MetricCard label="年化" value={`${(m.annualized_return * 100).toFixed(2)}%`} positive={m.annualized_return >= 0} />
               <MetricCard label="夏普" value={m.sharpe_ratio.toFixed(2)} />
@@ -531,37 +595,37 @@ export default function Backtest() {
             </div>
 
             {result.selection_snapshots.length > 0 && (
-              <div className="mb-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="rounded-lg border border-border bg-card p-5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <h2 className="text-lg font-semibold text-slate-900">候选池审计</h2>
-                    <p className="mt-1 text-xs text-slate-500">
+                    <h2 className="text-lg font-semibold text-foreground">候选池审计</h2>
+                    <p className="mt-1 text-xs text-muted-foreground">
                       因子版本 {result.factor_version} · {result.selection_snapshots.length} 个日快照
                     </p>
                   </div>
-                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">
+                  <span className="rounded-full bg-secondary px-2.5 py-1 text-xs text-muted-foreground">
                     数据版本已归档
                   </span>
                 </div>
-                <div className="mt-4 max-h-56 divide-y divide-slate-100 overflow-y-auto">
+                <div className="mt-4 max-h-56 divide-y divide-border overflow-y-auto">
                   {result.selection_snapshots.map((snapshot) => (
                     <div
                       key={snapshot.checksum}
                       className="grid gap-1 py-2 text-sm sm:grid-cols-[7rem_7rem_1fr]"
                     >
-                      <span className="font-mono text-xs text-slate-500">
+                      <span className="font-mono text-xs text-muted-foreground">
                         {snapshot.effective_date}
                       </span>
                       <span
                         className={
                           snapshot.status === "published"
-                            ? "text-emerald-700"
-                            : "text-amber-700"
+                            ? "text-success"
+                            : "text-warning"
                         }
                       >
                         {snapshot.status === "published" ? "已发布" : "跳过调仓"}
                       </span>
-                      <span className="text-slate-700">
+                      <span className="text-foreground">
                         {snapshot.status === "published"
                           ? `${snapshot.selected_symbols.length} 个标的`
                           : snapshot.skip_reason}
@@ -573,11 +637,11 @@ export default function Backtest() {
             )}
 
             {result.equity_curve.length > 0 && (
-              <div className="bg-white rounded-lg shadow p-5 mb-6">
+              <div className="rounded-lg border border-border bg-card p-5">
                 <h2 className="text-lg font-semibold mb-4">权益曲线</h2>
                 <ResponsiveContainer width="100%" height={350}>
                   <LineChart data={result.equity_curve}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip
@@ -586,9 +650,9 @@ export default function Backtest() {
                       }
                     />
                     <Legend />
-                    <Line type="monotone" dataKey="equity" stroke="#2563eb" name="策略" dot={false} strokeWidth={2} />
+                    <Line type="monotone" dataKey="equity" stroke="hsl(var(--chart-1))" name="策略" dot={false} strokeWidth={2} />
                     {result.equity_curve.some((p) => p.benchmark !== null) && (
-                      <Line type="monotone" dataKey="benchmark" stroke="#9ca3af" name="买入持有" dot={false} strokeWidth={1.5} strokeDasharray="5 5" />
+                      <Line type="monotone" dataKey="benchmark" stroke="hsl(var(--muted-foreground))" name="买入持有" dot={false} strokeWidth={1.5} strokeDasharray="5 5" />
                     )}
                   </LineChart>
                 </ResponsiveContainer>
@@ -596,12 +660,13 @@ export default function Backtest() {
             )}
 
             {result.fills.length > 0 && (
-              <div className="bg-white rounded-lg shadow">
+              <div className="rounded-lg border border-border bg-card">
                 <div className="px-5 py-3 border-b">
                   <h2 className="text-lg font-semibold">交易明细 ({result.fills.length})</h2>
                 </div>
+                <div className="overflow-x-auto scrollbar-thin">
                 <table className="w-full text-sm">
-                  <thead className="bg-gray-50 text-gray-600">
+                  <thead className="bg-background text-muted-foreground">
                     <tr>
                       <th className="px-4 py-2 text-left">日期</th>
                       <th className="px-4 py-2 text-left">标的</th>
@@ -614,18 +679,19 @@ export default function Backtest() {
                   <tbody>
                     {result.fills.map((f, i) => (
                       <tr key={i} className="border-t">
-                        <td className="px-4 py-2 text-gray-500">{f.date}</td>
+                        <td className="px-4 py-2 text-muted-foreground">{f.date}</td>
                         <td className="px-4 py-2 font-mono">{f.symbol}</td>
-                        <td className={`px-4 py-2 ${f.side === "buy" ? "text-red-500" : "text-green-500"}`}>
+                        <td className={`px-4 py-2 ${f.side === "buy" ? "text-up" : "text-down"}`}>
                           {f.side === "buy" ? "买入" : "卖出"}
                         </td>
                         <td className="px-4 py-2 text-right">{f.quantity}</td>
                         <td className="px-4 py-2 text-right font-mono">{Number(f.price).toFixed(2)}</td>
-                        <td className="px-4 py-2 text-right text-gray-500">{Number(f.commission).toFixed(2)}</td>
+                        <td className="px-4 py-2 text-right text-muted-foreground">{Number(f.commission).toFixed(2)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+                </div>
               </div>
             )}
           </>
@@ -633,11 +699,11 @@ export default function Backtest() {
       </div>
 
       {/* History sidebar */}
-      <div className="w-72 shrink-0">
-        <h2 className="text-sm font-semibold text-gray-700 mb-3">回测历史</h2>
-        <div className="space-y-2">
+      <div className="w-full shrink-0 lg:w-72">
+        <h2 className="mb-3 text-sm font-semibold text-muted-foreground">回测历史</h2>
+        <div className="space-y-2 lg:max-h-[calc(100vh-16rem)] lg:overflow-y-auto lg:scrollbar-thin lg:pr-1">
           {history && history.length === 0 && (
-            <p className="text-xs text-gray-400">暂无历史记录</p>
+            <p className="text-xs text-muted-foreground/70">暂无历史记录</p>
           )}
           {history?.map((h) => (
             <HistoryCard
@@ -728,64 +794,71 @@ function SymbolSelector({
   const selectedOnPage = selectedSymbols.filter((c) => currentPageCodes.has(c)).length;
 
   return (
-    <div className="mt-4 border rounded-lg p-4 bg-gray-50">
+    <div className="mt-4 border rounded-lg p-4 bg-background">
       <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-1 text-sm font-medium text-gray-700">
+        <div className="flex items-center gap-1 text-sm font-medium text-muted-foreground">
           <span>
             标的选择{" "}
-            <span className="font-normal text-gray-400">({selectedSymbols.length} 个)</span>
+            <span className="font-normal text-muted-foreground/70">({selectedSymbols.length} 个)</span>
           </span>
           <InfoHint content={INFO_HINTS.backtest.symbols} />
         </div>
         <div className="flex gap-2">
-          <button
-            onClick={() => selectAllCandidates.mutate()}
-            disabled={selectAllCandidates.isPending || totalCount === 0}
-            className="text-xs text-blue-600 hover:underline disabled:opacity-50"
-          >
-            {selectAllCandidates.isPending ? "全选中..." : `全选结果(${totalCount})`}
-          </button>
+          <SelectAllResultsButton
+            totalCount={totalCount}
+            isPending={selectAllCandidates.isPending}
+            onSelectAll={() => selectAllCandidates.mutate()}
+          />
           {selectedSymbols.length > 0 && (
-            <button onClick={clearSelection} className="text-xs text-gray-500 hover:underline">
+            <button onClick={clearSelection} className="text-xs text-muted-foreground hover:underline">
               清空
             </button>
           )}
-          <button onClick={() => setShowWatchlist((v) => !v)} className="text-xs text-blue-600 hover:underline">
+          <button onClick={() => setShowWatchlist((v) => !v)} className="text-xs text-primary hover:underline">
             标的组
           </button>
         </div>
       </div>
 
       {/* Search + filter row */}
-      <div className="flex gap-2 mb-2">
-        <input
-          placeholder="搜索代码/名称(至少2字符)..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="flex-1 border rounded px-3 py-1.5 text-sm"
-        />
-        <select value={marketFilter} onChange={(e) => setMarketFilter(e.target.value)} className="border rounded px-2 py-1.5 text-sm">
-          {MARKETS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
-        </select>
-        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="border rounded px-2 py-1.5 text-sm">
-          {TYPES.map((t) => (<option key={t.value} value={t.value}>{t.label}</option>))}
-        </select>
+      <div className="mb-2 flex flex-wrap gap-2">
+        <label className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="sr-only">搜索代码/名称</span>
+          <input
+            placeholder="搜索代码/名称(至少2字符)..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="min-w-0 flex-1 rounded-md border border-input bg-card px-3 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
+          />
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="sr-only">市场筛选</span>
+          <select value={marketFilter} onChange={(e) => setMarketFilter(e.target.value)} className="rounded-md border border-input bg-card px-2 py-1.5 text-sm text-foreground">
+            {MARKETS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
+          </select>
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="sr-only">类型筛选</span>
+          <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="rounded-md border border-input bg-card px-2 py-1.5 text-sm text-foreground">
+            {TYPES.map((t) => (<option key={t.value} value={t.value}>{t.label}</option>))}
+          </select>
+        </label>
       </div>
 
       {/* Candidate list */}
-      <div className="max-h-48 overflow-y-auto border rounded bg-white">
+      <div className="max-h-48 overflow-y-auto border rounded bg-card">
         {candidates.length === 0 && (
-          <p className="text-xs text-gray-400 p-3 text-center">
+          <p className="text-xs text-muted-foreground/70 p-3 text-center">
             {searchQuery.length >= 2 ? "无匹配结果" : "输入搜索或选择筛选条件"}
           </p>
         )}
         {candidates.map((c) => {
           const checked = selectedSymbols.includes(c.code);
           return (
-            <label key={c.code} className="flex items-center gap-2 px-3 py-1.5 hover:bg-blue-50 cursor-pointer text-sm">
+            <label key={c.code} className="flex items-center gap-2 px-3 py-1.5 hover:bg-accent cursor-pointer text-sm">
               <input type="checkbox" checked={checked} onChange={() => toggleSymbol(c.code)} />
               <span className="font-mono text-xs">{c.code}</span>
-              <span className="text-gray-500 text-xs truncate">{c.name}</span>
+              <span className="text-muted-foreground text-xs truncate">{c.name}</span>
             </label>
           );
         })}
@@ -793,16 +866,16 @@ function SymbolSelector({
 
       {/* Pagination */}
       {totalCount > pageSize && (
-        <div className="flex items-center justify-between mt-2 text-xs text-gray-500">
+        <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
           <span>
             第 {rangeStart}-{rangeEnd} 条 / 共 {totalCount} 条
-            {selectedOnPage > 0 && <span className="ml-2 text-blue-500">本页已选 {selectedOnPage}</span>}
+            {selectedOnPage > 0 && <span className="ml-2 text-primary">本页已选 {selectedOnPage}</span>}
           </span>
           <div className="flex gap-1">
             <button
               onClick={() => onPageChange(page - 1)}
               disabled={page === 0}
-              className="px-2 py-0.5 border rounded hover:bg-gray-100 disabled:opacity-30"
+              className="px-2 py-0.5 border rounded hover:bg-secondary disabled:opacity-30"
             >
               上一页
             </button>
@@ -810,7 +883,7 @@ function SymbolSelector({
             <button
               onClick={() => onPageChange(page + 1)}
               disabled={page + 1 >= totalPages}
-              className="px-2 py-0.5 border rounded hover:bg-gray-100 disabled:opacity-30"
+              className="px-2 py-0.5 border rounded hover:bg-secondary disabled:opacity-30"
             >
               下一页
             </button>
@@ -818,7 +891,7 @@ function SymbolSelector({
         </div>
       )}
       {totalCount > 0 && totalCount <= pageSize && (
-        <div className="mt-2 text-xs text-gray-400">共 {totalCount} 条{selectedOnPage > 0 && ` · 已选 ${selectedSymbols.length}`}</div>
+        <div className="mt-2 text-xs text-muted-foreground/70">共 {totalCount} 条{selectedOnPage > 0 && ` · 已选 ${selectedSymbols.length}`}</div>
       )}
 
       {/* Selected symbols summary */}
@@ -827,16 +900,16 @@ function SymbolSelector({
           {selectedSymbols.length <= 50 ? (
             <div className="flex flex-wrap gap-1">
               {selectedSymbols.map((code) => (
-                <span key={code} className="inline-flex items-center gap-1 bg-blue-100 text-blue-700 rounded px-2 py-0.5 text-xs font-mono">
+                <span key={code} className="inline-flex items-center gap-1 rounded-md bg-primary/15 px-2 py-0.5 font-mono text-xs text-primary">
                   {code}
-                  <button onClick={() => toggleSymbol(code)} className="text-blue-400 hover:text-blue-600">×</button>
+                  <button onClick={() => toggleSymbol(code)} className="text-primary hover:text-primary">×</button>
                 </span>
               ))}
             </div>
           ) : (
-            <div className="text-xs text-gray-500">
+            <div className="text-xs text-muted-foreground">
               已选 {selectedSymbols.length} 个标的
-              <button onClick={clearSelection} className="ml-2 text-red-500 hover:underline">清空</button>
+              <button onClick={clearSelection} className="ml-2 text-destructive hover:underline">清空</button>
             </div>
           )}
         </div>
@@ -850,23 +923,23 @@ function SymbolSelector({
               placeholder="新标的组名称..."
               value={newWlName}
               onChange={(e) => setNewWlName(e.target.value)}
-              className="flex-1 border rounded px-2 py-1 text-sm"
+              className="flex-1 border border-input bg-card text-foreground rounded px-2 py-1 text-sm placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring outline-none"
             />
             <button
               onClick={() => newWlName.trim() && createWl.mutate(newWlName.trim())}
               disabled={!newWlName.trim() || createWl.isPending}
-              className="text-xs bg-green-600 text-white rounded px-3 py-1 hover:bg-green-700 disabled:opacity-50"
+              className="text-xs bg-primary text-primary-foreground rounded px-3 py-1 hover:bg-primary/90 disabled:opacity-50"
             >
               存当前选择
             </button>
           </div>
           {watchlists?.map((wl) => (
-            <div key={wl.id} className="flex items-center justify-between text-sm bg-white border rounded px-2 py-1">
+            <div key={wl.id} className="flex items-center justify-between text-sm bg-card border rounded px-2 py-1">
               <span className="truncate">
-                {wl.name} <span className="text-gray-400">({wl.item_count})</span>
+                {wl.name} <span className="text-muted-foreground/70">({wl.item_count})</span>
               </span>
               <div className="flex gap-2 shrink-0">
-                <button onClick={() => loadWl.mutate(wl.id)} className="text-xs text-blue-600 hover:underline">载入</button>
+                <button onClick={() => loadWl.mutate(wl.id)} className="text-xs text-primary hover:underline">载入</button>
               </div>
             </div>
           ))}
@@ -892,41 +965,53 @@ function HistoryCard({
 }) {
   const ret = item.metrics?.total_return;
   return (
-    <div
-      className={`border rounded-lg p-3 cursor-pointer transition ${
-        active ? "border-blue-500 bg-blue-50" : "bg-white hover:border-gray-400"
-      }`}
+    <button
+      type="button"
       onClick={onClick}
+      disabled={loading}
+      className={`block w-full border text-left rounded-lg p-3 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        active ? "border-primary bg-primary/10" : "bg-card hover:border-primary/50"
+      }`}
+      aria-pressed={active}
     >
       <div className="flex items-start justify-between">
         <div className="min-w-0">
-          <div className="text-xs font-mono text-gray-700 truncate">{item.strategy}</div>
-          <div className="text-xs text-gray-400 mt-0.5">
+          <div className="text-xs font-mono text-muted-foreground truncate">{item.strategy}</div>
+          <div className="text-xs text-muted-foreground/70 mt-0.5">
             {item.symbols.length} 标的 · {item.start.slice(0, 10)} ~ {item.end.slice(0, 10)}
           </div>
           {ret !== undefined && (
-            <div className={`text-sm font-bold mt-1 ${ret >= 0 ? "text-green-600" : "text-red-600"}`}>
+            <div className={`text-sm font-bold mt-1 ${ret >= 0 ? "text-success" : "text-destructive"}`}>
               {(ret * 100).toFixed(2)}%
             </div>
           )}
         </div>
         <div className="flex flex-col items-end gap-1 shrink-0">
-          <span className="text-xs text-gray-300">
+          <span className="text-xs text-muted-foreground">
             {new Date(item.created_at).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
           </span>
-          <button
+          <span
+            role="button"
+            tabIndex={0}
             onClick={(e) => {
               e.stopPropagation();
               onDelete();
             }}
-            className="text-xs text-gray-300 hover:text-red-500"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                onDelete();
+              }
+            }}
+            className="cursor-pointer text-xs text-muted-foreground hover:text-destructive"
           >
             删除
-          </button>
+          </span>
         </div>
       </div>
-      {loading && <div className="text-xs text-blue-400 mt-1">加载中...</div>}
-    </div>
+      {loading && <div className="text-xs text-primary mt-1">加载中...</div>}
+    </button>
   );
 }
 
@@ -940,10 +1025,10 @@ function MetricCard({
   positive?: boolean;
 }) {
   const color =
-    positive === undefined ? "" : positive ? "text-green-600" : "text-red-600";
+    positive === undefined ? "" : positive ? "text-success" : "text-destructive";
   return (
-    <div className="bg-white rounded-lg shadow p-4">
-      <div className="text-gray-500 text-sm">{label}</div>
+    <div className="rounded-lg border border-border bg-card p-4">
+      <div className="text-muted-foreground text-sm">{label}</div>
       <div className={`text-xl font-bold mt-1 ${color}`}>{value}</div>
     </div>
   );

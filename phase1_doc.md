@@ -599,6 +599,22 @@ LiveBrokerAdapter
 
 首先保证实盘可靠，再逐步统一事件模型。
 
+当前产品模拟盘复用的是业务语义，而不是实盘 Broker 实例：
+
+```text
+published spec + completed ResearchRun
+→ signal trace + target position
+→ simulation risk / reservation
+→ simulation order
+→ next-bar matching
+→ simulation fill
+→ simulation position / cash / P&L / audit
+```
+
+账户、会话、订单、成交、持仓、行情事件和审计使用 `SIM-*` ID 与
+`simulation_*` 表。模拟包不导入 Broker/QMT/CTP，也不访问实盘账户、订单、
+持仓、恢复或 Kill Switch。持仓与资金只能由模拟成交和期货结算事件改变。
+
 ## 10.2 策略上线流程
 
 正式策略必须经过：
@@ -613,6 +629,24 @@ LiveBrokerAdapter
 → 小资金实盘
 → 扩大资金
 ```
+
+## 10.3 产品模拟盘验收
+
+模拟域对应 §3.4 中的账户查询、订单生成与查询、撤单、部分/全部成交、持仓变化、
+重启恢复和费用/资金审计，但不连接交易前置或券商：
+
+- 策略和数据版本必须冻结到 completed `ResearchRun`；
+- 正式 runner 只能提交带 decision/signal trace 的结构化目标仓位，不能提交
+  Python 或直接修改持仓；
+- next-bar、限价、参与率、停牌/涨跌停、T+N、费用、滑点、期货保证金与每日结算
+  必须由后端规则执行；
+- 期货使用具体合约 ID，换月必须显式平旧开新，禁止连续合约静默切换；
+- 决策、行情、订单和成交必须幂等，事务失败不得留下半笔成交；
+- 启动时从模拟订单、持仓和账本恢复预占与权益，不访问 Broker；
+- 归档只读，重置创建新账户，历史审计不可覆盖；
+- 晋级评估只记录 `eligible/failed`，不得自动启动影子盘或实盘。
+
+详细契约见 `docs/simulation_trading.md`。
 
 ---
 
@@ -651,6 +685,18 @@ LiveBrokerAdapter
 * 判断信号是否稳定；
 * 管理组合风险；
 * 提升扣除成本后的收益。
+
+当前离线研究实现将上述职责固化为：
+
+```text
+冻结原始数据 → 因子/特征 → 标准化信号 → 目标仓位
+→ 组合与风险贡献硬约束 → 止盈止损/回撤降险 → 10/20/50 万可执行性
+→ 研究订单 → 研究成交 → 成交驱动持仓与盈亏 → 可重放报告
+```
+
+单资产风险贡献上限不是告警指标：缺少可用协方差、约束数学不可行或求解不收敛时，
+研究运行必须在生成订单前失败关闭。该约束只属于离线 `ResearchRun`，不能替代
+实盘 `PreTradeChecker`、资金/仓位预占、Kill Switch 或券商侧核对。
 
 ---
 

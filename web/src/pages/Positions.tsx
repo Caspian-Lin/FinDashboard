@@ -1,74 +1,87 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { PageHeader } from "../components/ui/page-header";
+import { PageContainer } from "../components/ui/page-container";
+import { EmptyState } from "../components/ui/states";
+import { Button } from "../components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table";
 
 export default function Positions() {
   const [source, setSource] = useState<"local" | "broker">("local");
   const { data } = useQuery({
     queryKey: ["positions", source],
     queryFn: () => api.getPositions(source),
+    refetchInterval: 5000,
   });
 
   const positions = data?.items ?? [];
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">持仓</h1>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setSource("local")}
-            className={`px-3 py-1.5 rounded text-sm ${
-              source === "local" ? "bg-slate-800 text-white" : "bg-white border"
-            }`}
-          >
-            本地持仓
-          </button>
-          <button
-            onClick={() => setSource("broker")}
-            className={`px-3 py-1.5 rounded text-sm ${
-              source === "broker" ? "bg-slate-800 text-white" : "bg-white border"
-            }`}
-          >
-            券商持仓
-          </button>
-        </div>
-      </div>
+    <PageContainer>
+      <PageHeader
+        title="持仓"
+        description="本地持仓用于实时响应与风控;券商持仓为最终真实来源。"
+        actions={
+          <div className="flex gap-2" role="group" aria-label="持仓数据来源">
+            {(["local", "broker"] as const).map((s) => (
+              <Button
+                key={s}
+                variant={source === s ? "secondary" : "outline"}
+                size="sm"
+                onClick={() => setSource(s)}
+                aria-pressed={source === s}
+              >
+                {s === "local" ? "本地持仓" : "券商持仓"}
+              </Button>
+            ))}
+          </div>
+        }
+      />
 
       {positions.length === 0 ? (
-        <div className="text-gray-400 text-center py-12">无持仓数据</div>
+        <EmptyState title="无持仓数据" description="切换数据来源或等待持仓查询完成。" />
       ) : (
-        <table className="w-full bg-white rounded-lg shadow text-sm">
-          <thead className="bg-gray-100 text-gray-600">
-            <tr>
-              <th className="px-4 py-2 text-left">标的</th>
-              <th className="px-4 py-2 text-left">方向</th>
-              <th className="px-4 py-2 text-right">总持仓</th>
-              <th className="px-4 py-2 text-right">可用</th>
-              <th className="px-4 py-2 text-right">冻结</th>
-              <th className="px-4 py-2 text-right">均价</th>
-              <th className="px-4 py-2 text-right">市值</th>
-              <th className="px-4 py-2 text-right">浮盈亏</th>
-            </tr>
-          </thead>
-          <tbody>
-            {positions.map((p, i) => (
-              <tr key={i} className="border-t">
-                <td className="px-4 py-2 font-mono">{p.symbol}</td>
-                <td className="px-4 py-2">{p.position_side === "long" ? "多头" : "空头"}</td>
-                <td className="px-4 py-2 text-right">{p.total_quantity}</td>
-                <td className="px-4 py-2 text-right">{p.available_quantity}</td>
-                <td className="px-4 py-2 text-right">{p.frozen_quantity}</td>
-                <td className="px-4 py-2 text-right">{p.average_price}</td>
-                <td className="px-4 py-2 text-right">{p.market_value}</td>
-                <td className={`px-4 py-2 text-right ${Number(p.unrealized_pnl) >= 0 ? "text-red-500" : "text-green-500"}`}>
-                  {p.unrealized_pnl}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="overflow-hidden rounded-lg border border-border bg-card">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>标的</TableHead>
+                <TableHead>方向</TableHead>
+                <TableHead className="text-right">总持仓</TableHead>
+                <TableHead className="text-right">可用</TableHead>
+                <TableHead className="text-right">冻结</TableHead>
+                <TableHead className="text-right">均价</TableHead>
+                <TableHead className="text-right">市值</TableHead>
+                <TableHead className="text-right">浮盈亏</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {positions.map((p, i) => (
+                <TableRow key={i}>
+                  <TableCell className="font-mono">{p.symbol}</TableCell>
+                  <TableCell>{p.position_side === "long" ? "多头" : "空头"}</TableCell>
+                  <TableCell className="text-right">{p.total_quantity}</TableCell>
+                  <TableCell className="text-right">{p.available_quantity}</TableCell>
+                  <TableCell className="text-right">{p.frozen_quantity}</TableCell>
+                  <TableCell className="text-right">{p.average_price}</TableCell>
+                  <TableCell className="text-right">{p.market_value}</TableCell>
+                  <TableCell className={`text-right ${Number(p.unrealized_pnl) >= 0 ? "text-up" : "text-down"}`}>
+                    {p.unrealized_pnl}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
       )}
-    </div>
+    </PageContainer>
   );
 }

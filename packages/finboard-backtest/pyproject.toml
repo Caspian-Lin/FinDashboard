@@ -10,7 +10,9 @@ dependencies = [
   "finboard-core",
   "finboard-broker",
   "finboard-data",
+  "pydantic>=2.9",
   "structlog>=24.1",
+  "numpy>=1.26",
 ]
 
 [build-system]

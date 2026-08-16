@@ -24,12 +24,69 @@ from finboard_shared.types import BarPeriod, Market
 logger = structlog.get_logger(__name__)
 
 
-def expected_last_bar_date(end: date, *, today: date | None = None) -> date:
-    """周末请求回退到最近工作日,避免缓存永远差一天。"""
+def _initialize_pyarrow() -> None:
+    """在提交线程任务前初始化 PyArrow 原生模块。
+
+    PyArrow 仍然只在实际访问 Parquet 时加载。初始化与其他 Python 扩展模块
+    同样留在调用线程,避免长生命周期进程第一次在 asyncio executor 中导入
+    原生模块时发生不稳定;真正的文件 I/O 继续在线程中执行。
+    """
+
+    __import__("pyarrow")
+    __import__("pyarrow.parquet")
+
+
+def _normalise_timestamp(
+    value: object,
+    symbol: Symbol,
+    period: BarPeriod,
+) -> datetime:
+    """把 Arrow/Pandas/字符串时间统一为领域层 timestamp。"""
+
+    if isinstance(value, str):
+        timestamp = datetime.fromisoformat(value)
+    elif isinstance(value, datetime):
+        timestamp = value
+    elif hasattr(value, "to_pydatetime"):
+        timestamp = value.to_pydatetime()
+    else:
+        raise TypeError(f"Parquet timestamp 类型无效: {type(value).__name__}")
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    elif period == BarPeriod.D1:
+        timestamp = timestamp.astimezone(UTC)
+    if (
+        period == BarPeriod.D1
+        and symbol.code.endswith((".SH", ".SZ", ".BJ"))
+        and timestamp.hour == 16
+    ):
+        timestamp += timedelta(hours=8)
+    if period == BarPeriod.D1:
+        timestamp = datetime.combine(
+            timestamp.date(), datetime.min.time(), tzinfo=UTC
+        )
+    return timestamp
+
+
+def expected_last_bar_date(
+    end: date, *, today: date | None = None, now: datetime | None = None
+) -> date:
+    """计算应已落盘的最后一个交易日。
+
+    周末自动回退到最近工作日。若 ``end`` 落在今天、且当前本地时间早于
+    21:00(A 股 15:00 收盘 + 6 小时数据发布窗口),则连今天也回退到前一个
+    工作日,避免盘前/盘中批量拉取时缓存永远差"今天"一天从而反复请求。
+    """
     current = today or date.today()
     expected = min(end, current)
     while expected.weekday() >= 5:
         expected -= timedelta(days=1)
+    if expected == current and end >= current:
+        now_dt = now or datetime.now()
+        if now_dt.hour < 21:
+            expected -= timedelta(days=1)
+            while expected.weekday() >= 5:
+                expected -= timedelta(days=1)
     return expected
 
 
@@ -56,6 +113,24 @@ class CacheMetadata:
     first_date: date | None
     last_date: date | None
     file_size: int
+    source: str | None = None
+    covered_ranges: tuple[tuple[date, date], ...] = ()
+
+    def covers(self, start: date, end: date) -> bool:
+        """缓存是否已成功查询过整个请求区间。
+
+        Bar 的首尾区间也视为天然覆盖;显式覆盖区间用于记录停牌、上市前等
+        合法无 Bar 日期,避免这些日期在下一次批量同步时被重复请求。
+        """
+        if start > end:
+            return True
+        ranges = list(self.covered_ranges)
+        if self.first_date is not None and self.last_date is not None:
+            ranges.append((self.first_date, self.last_date))
+        return any(
+            range_start <= start and range_end >= end
+            for range_start, range_end in _coalesce_date_ranges(ranges)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +179,7 @@ class ParquetCache:
         path = self._path(symbol, period, adjust)
         if not path.exists():
             return []
+        _initialize_pyarrow()
         size = path.stat().st_size
         started = time.monotonic()
         async with self._io_semaphore:
@@ -119,31 +195,65 @@ class ParquetCache:
         )
         return bars
 
+    async def read_close_points(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        adjust: str,
+        *,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> list[tuple[datetime, Decimal]]:
+        """只读取 timestamp/close 列,供价格特征计算使用。
+
+        特征快照不需要 OHLCV 的其余字段。保留独立读取入口可以避免为每条
+        历史行情创建完整 ``Bar``/``Decimal`` 对象,同时不改变通用 ``read``
+        的返回契约。
+        """
+
+        path = self._path(symbol, period, adjust)
+        if not path.exists():
+            return []
+        _initialize_pyarrow()
+        size = path.stat().st_size
+        started = time.monotonic()
+        async with self._io_semaphore:
+            points = await asyncio.to_thread(
+                self._read_close_points_sync,
+                path,
+                symbol,
+                period,
+                start,
+                end,
+            )
+        self._read_ops += 1
+        self._read_bytes += size
+        logger.debug(
+            "parquet_cache.read_close_points",
+            path=str(path),
+            bytes=size,
+            points=len(points),
+            elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+        )
+        return points
+
     def _read_sync(self, path: Path, symbol: Symbol, period: BarPeriod) -> list[Bar]:
+        """兼容旧的线程读取入口。"""
+
+        return self.read_bars_sync(path, symbol, period)
+
+    @staticmethod
+    def read_bars_sync(path: Path, symbol: Symbol, period: BarPeriod) -> list[Bar]:
+        """同步读取完整 Bar,供线程/进程 worker 复用。"""
+
         import pyarrow.parquet as pq
 
         # 外层已经限制并发;禁止 Arrow 再启动内部 I/O 线程池放大磁盘压力。
         table = pq.read_table(path, use_threads=False, pre_buffer=False)
+        col_names = set(table.column_names)
         bars: list[Bar] = []
         for row in table.to_pylist():
-            ts = row["timestamp"]
-            if isinstance(ts, str):
-                dt = datetime.fromisoformat(ts)
-            else:
-                dt = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            elif period == BarPeriod.D1:
-                dt = dt.astimezone(UTC)
-            if (
-                period == BarPeriod.D1
-                and symbol.code.endswith((".SH", ".SZ", ".BJ"))
-                and dt.hour == 16
-            ):
-                # 兼容旧版 yfinance 缓存:上海零点被 Parquet 转为前一日 16:00 UTC。
-                dt += timedelta(hours=8)
-            if period == BarPeriod.D1:
-                dt = datetime.combine(dt.date(), datetime.min.time(), tzinfo=UTC)
+            dt = _normalise_timestamp(row["timestamp"], symbol, period)
             bars.append(
                 Bar(
                     symbol=symbol,
@@ -155,10 +265,62 @@ class ParquetCache:
                     close=Decimal(str(row["close"])),
                     volume=Decimal(str(row.get("volume", 0))),
                     amount=Decimal(str(row.get("amount", 0))),
+                    source=str(row.get("source", "")) if "source" in col_names else "",
                 )
             )
         bars.sort(key=lambda b: b.timestamp)
         return bars
+
+    @staticmethod
+    def _read_close_points_sync(
+        path: Path,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date | None,
+        end: date | None,
+    ) -> list[tuple[datetime, Decimal]]:
+        """兼容旧的线程读取入口。"""
+
+        return ParquetCache.read_close_points_sync(
+            path,
+            symbol,
+            period,
+            start,
+            end,
+        )
+
+    @staticmethod
+    def read_close_points_sync(
+        path: Path,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date | None,
+        end: date | None,
+    ) -> list[tuple[datetime, Decimal]]:
+        """同步读取 timestamp/close,供独立进程 worker 复用。"""
+
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(
+            path,
+            columns=["timestamp", "close"],
+            use_threads=False,
+            pre_buffer=False,
+        )
+        points: list[tuple[datetime, Decimal]] = []
+        for row in table.to_pylist():
+            timestamp = _normalise_timestamp(row["timestamp"], symbol, period)
+            business_date = timestamp.date()
+            if start is not None and business_date < start:
+                continue
+            if end is not None and business_date > end:
+                continue
+            close = row.get("close")
+            if close is None:
+                continue
+            points.append((timestamp, Decimal(str(close))))
+        points.sort(key=lambda item: item[0])
+        return points
 
     async def write(
         self,
@@ -166,14 +328,17 @@ class ParquetCache:
         period: BarPeriod,
         adjust: str,
         bars: list[Bar],
+        *,
+        covered_ranges: tuple[tuple[date, date], ...] = (),
     ) -> None:
         """全量写入(覆盖已有文件)。"""
         if not bars:
             return
+        _initialize_pyarrow()
         path = self._path(symbol, period, adjust)
         started = time.monotonic()
         async with self._io_semaphore:
-            await asyncio.to_thread(self._write_sync, path, bars)
+            await asyncio.to_thread(self._write_sync, path, bars, covered_ranges)
         size = path.stat().st_size
         self._write_ops += 1
         self._write_bytes += size
@@ -185,9 +350,18 @@ class ParquetCache:
             elapsed_ms=round((time.monotonic() - started) * 1000, 2),
         )
 
-    def _write_sync(self, path: Path, bars: list[Bar]) -> None:
+    def _write_sync(
+        self,
+        path: Path,
+        bars: list[Bar],
+        covered_ranges: tuple[tuple[date, date], ...] = (),
+    ) -> None:
         import pyarrow as pa
         import pyarrow.parquet as pq
+
+        previous: CacheMetadata | None = None
+        if path.exists():
+            previous = self._read_metadata_sidecar(path, path.stat().st_size)
 
         data = {
             "timestamp": [b.timestamp for b in bars],
@@ -197,9 +371,21 @@ class ParquetCache:
             "close": [float(b.close) for b in bars],
             "volume": [float(b.volume) for b in bars],
             "amount": [float(b.amount) for b in bars],
+            "source": [b.source for b in bars],
         }
         table = pa.table(data)
+        source_names = {bar.source for bar in bars if bar.source}
+        source = (
+            next(iter(source_names))
+            if len(source_names) == 1
+            else ("mixed" if source_names else None)
+        )
+        if source is not None:
+            table = table.replace_schema_metadata({b"finboard.source": source.encode()})
         pq.write_table(table, path)
+        retained_ranges: tuple[tuple[date, date], ...] = ()
+        if previous is not None and previous.source == source:
+            retained_ranges = previous.covered_ranges
         self._write_metadata_sidecar(
             path,
             CacheMetadata(
@@ -207,6 +393,8 @@ class ParquetCache:
                 first_date=bars[0].timestamp.date(),
                 last_date=bars[-1].timestamp.date(),
                 file_size=path.stat().st_size,
+                source=source,
+                covered_ranges=_coalesce_date_ranges([*retained_ranges, *covered_ranges]),
             ),
         )
 
@@ -218,6 +406,7 @@ class ParquetCache:
         new_bars: list[Bar],
         *,
         existing_bars: list[Bar] | None = None,
+        covered_ranges: tuple[tuple[date, date], ...] = (),
     ) -> list[Bar]:
         """增量合并:读取已有缓存,合并新数据(按 timestamp 去重),写回磁盘。
 
@@ -230,11 +419,68 @@ class ParquetCache:
         for b in new_bars:
             merged[b.timestamp] = b
         all_bars = sorted(merged.values(), key=lambda b: b.timestamp)
-        await self.write(symbol, period, adjust, all_bars)
+        await self.write(
+            symbol,
+            period,
+            adjust,
+            all_bars,
+            covered_ranges=covered_ranges,
+        )
         return all_bars
+
+    async def mark_covered(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        adjust: str,
+        start: date,
+        end: date,
+        *,
+        source: str,
+    ) -> bool:
+        """记录一次成功的远端查询区间,不重写 Parquet 行情数据。"""
+        if start > end:
+            return True
+        path = self._path(symbol, period, adjust)
+        if not path.exists():
+            return False
+        _initialize_pyarrow()
+        async with self._io_semaphore:
+            return await asyncio.to_thread(
+                self._mark_covered_sync,
+                path,
+                start,
+                end,
+                source,
+            )
+
+    @staticmethod
+    def _mark_covered_sync(
+        path: Path,
+        start: date,
+        end: date,
+        source: str,
+    ) -> bool:
+        size = path.stat().st_size
+        metadata = ParquetCache._metadata_sync(path, size)
+        if metadata.source != source:
+            return False
+        ParquetCache._write_metadata_sidecar(
+            path,
+            CacheMetadata(
+                bar_count=metadata.bar_count,
+                first_date=metadata.first_date,
+                last_date=metadata.last_date,
+                file_size=size,
+                source=metadata.source,
+                covered_ranges=_coalesce_date_ranges([*metadata.covered_ranges, (start, end)]),
+            ),
+        )
+        return True
 
     async def metadata(self, path: Path) -> CacheMetadata:
         """只读取 Parquet footer,不解码 OHLCV 行情列。"""
+        _initialize_pyarrow()
         size = await asyncio.to_thread(lambda: path.stat().st_size)
         started = time.monotonic()
         async with self._io_semaphore:
@@ -267,10 +513,53 @@ class ParquetCache:
 
         sidecar = ParquetCache._read_metadata_sidecar(path, size)
         if sidecar is not None:
-            return sidecar
+            if sidecar.source is not None:
+                return sidecar
+            try:
+                source_column = pq.read_table(
+                    path,
+                    columns=["source"],
+                    use_threads=False,
+                    pre_buffer=False,
+                ).column("source")
+                source_names = {str(value) for value in source_column.to_pylist() if value}
+                sidecar_source = (
+                    next(iter(source_names))
+                    if len(source_names) == 1
+                    else ("mixed" if source_names else None)
+                )
+                enriched = CacheMetadata(
+                    bar_count=sidecar.bar_count,
+                    first_date=sidecar.first_date,
+                    last_date=sidecar.last_date,
+                    file_size=sidecar.file_size,
+                    source=sidecar_source,
+                    covered_ranges=sidecar.covered_ranges,
+                )
+                ParquetCache._write_metadata_sidecar(path, enriched)
+                return enriched
+            except (KeyError, OSError, ValueError):
+                return sidecar
 
         parquet = pq.ParquetFile(path)
         file_metadata = parquet.metadata
+        source: str | None = None
+        raw_source = (parquet.schema_arrow.metadata or {}).get(b"finboard.source")
+        if raw_source:
+            source = raw_source.decode("utf-8", errors="replace")
+        if source is None and "source" in parquet.schema.names:
+            source_column = pq.read_table(
+                path,
+                columns=["source"],
+                use_threads=False,
+                pre_buffer=False,
+            ).column("source")
+            source_names = {str(value) for value in source_column.to_pylist() if value}
+            source = (
+                next(iter(source_names))
+                if len(source_names) == 1
+                else ("mixed" if source_names else None)
+            )
         first: datetime | None = None
         last: datetime | None = None
 
@@ -303,6 +592,8 @@ class ParquetCache:
             first_date=first.date() if first is not None else None,
             last_date=last.date() if last is not None else None,
             file_size=size,
+            source=source,
+            covered_ranges=(),
         )
         ParquetCache._write_metadata_sidecar(path, metadata)
         return metadata
@@ -327,16 +618,14 @@ class ParquetCache:
             return CacheMetadata(
                 bar_count=int(payload["bar_count"]),
                 first_date=(
-                    date.fromisoformat(payload["first_date"])
-                    if payload.get("first_date")
-                    else None
+                    date.fromisoformat(payload["first_date"]) if payload.get("first_date") else None
                 ),
                 last_date=(
-                    date.fromisoformat(payload["last_date"])
-                    if payload.get("last_date")
-                    else None
+                    date.fromisoformat(payload["last_date"]) if payload.get("last_date") else None
                 ),
                 file_size=size,
+                source=(str(payload["source"]) if payload.get("source") else None),
+                covered_ranges=_parse_covered_ranges(payload.get("covered_ranges")),
             )
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
             return None
@@ -350,10 +639,13 @@ class ParquetCache:
             "source_size": stat.st_size,
             "source_mtime_ns": stat.st_mtime_ns,
             "bar_count": metadata.bar_count,
-            "first_date": (
-                metadata.first_date.isoformat() if metadata.first_date else None
-            ),
+            "first_date": (metadata.first_date.isoformat() if metadata.first_date else None),
             "last_date": metadata.last_date.isoformat() if metadata.last_date else None,
+            "source": metadata.source,
+            "covered_ranges": [
+                [range_start.isoformat(), range_end.isoformat()]
+                for range_start, range_end in metadata.covered_ranges
+            ],
         }
         temporary.write_text(
             json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
@@ -373,6 +665,38 @@ class ParquetCache:
     def filter_by_date(bars: list[Bar], start: date, end: date) -> list[Bar]:
         """按日期范围过滤(左闭右闭)。"""
         return [b for b in bars if start <= b.timestamp.date() <= end]
+
+
+def _coalesce_date_ranges(
+    ranges: list[tuple[date, date]],
+) -> tuple[tuple[date, date], ...]:
+    """合并重叠或相邻的闭区间。"""
+    valid = sorted(item for item in ranges if item[0] <= item[1])
+    if not valid:
+        return ()
+    merged: list[tuple[date, date]] = [valid[0]]
+    for range_start, range_end in valid[1:]:
+        previous_start, previous_end = merged[-1]
+        if range_start <= previous_end + timedelta(days=1):
+            merged[-1] = (previous_start, max(previous_end, range_end))
+        else:
+            merged.append((range_start, range_end))
+    return tuple(merged)
+
+
+def _parse_covered_ranges(value: object) -> tuple[tuple[date, date], ...]:
+    """容错读取 sidecar 中的已查询区间。"""
+    if not isinstance(value, list):
+        return ()
+    ranges: list[tuple[date, date]] = []
+    for item in value:
+        if not isinstance(item, list) or len(item) != 2:
+            continue
+        try:
+            ranges.append((date.fromisoformat(str(item[0])), date.fromisoformat(str(item[1]))))
+        except ValueError:
+            continue
+    return _coalesce_date_ranges(ranges)
 
 
 def make_symbol(code: str) -> Symbol:

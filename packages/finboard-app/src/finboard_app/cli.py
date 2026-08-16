@@ -16,12 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import shutil
 import signal
+import socket
 import subprocess
 import sys
+import threading
 from datetime import date, timedelta
 from datetime import date as parse_date
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import typer
@@ -33,7 +38,11 @@ from finboard_shared.identifiers import AccountId
 from finboard_shared.types import KillSwitchLevel
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from finboard_api.schemas import BacktestRunRequest
     from finboard_app.bootstrap import KernelComponents
+    from finboard_data import ResearchDatasetRelease
     from finboard_reconcile import ReconciliationReport
     from finboard_scheduler import Scheduler
 
@@ -45,6 +54,12 @@ app = typer.Typer(
 )
 
 
+def _configure_windows_asyncio() -> None:
+    """为 Windows 上的 psycopg 异步连接选择兼容的事件循环。"""
+    if sys.platform == "win32" and hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
 @app.callback()
 def _main(
     ctx: typer.Context,
@@ -53,6 +68,7 @@ def _main(
         typer.Option("--env-file", help="指定 .env 文件路径(默认 ./.env)"),
     ] = None,
 ) -> None:
+    _configure_windows_asyncio()
     settings = load_settings(env_file=env_file)
     ctx.obj = settings
 
@@ -112,6 +128,14 @@ def serve(
     """启动 FastAPI 交易控制台后端(含 WebSocket)。"""
     import uvicorn
 
+    # Uvicorn 0.36+ 在 Windows 默认显式创建 ProactorEventLoop,而 psycopg
+    # 的异步连接要求 SelectorEventLoop。reload 子进程必须显式使用
+    # ``asyncio``:Uvicorn 会在 use_subprocess=True 时返回 SelectorEventLoop;
+    # 非 reload 模式继续用 ``none`` 继承上面设置的 Selector policy。
+    if sys.platform == "win32":
+        uvicorn_loop = "asyncio" if reload else "none"
+    else:
+        uvicorn_loop = "auto"
     if reload:
         uvicorn.run(
             "finboard_api.app:create_app",
@@ -119,12 +143,233 @@ def serve(
             host=host,
             port=port,
             reload=True,
+            loop=uvicorn_loop,
         )
     else:
         from finboard_api.app import create_app
 
         app = create_app(ctx.obj)
-        uvicorn.run(app, host=host, port=port)
+        uvicorn.run(app, host=host, port=port, loop=uvicorn_loop)
+
+
+def _stop_dev_process(process: subprocess.Popen[bytes], *, timeout: float = 5.0) -> None:
+    """回收 Vite 进程组;Windows 按精确根 PID 清理整棵子进程树。"""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+        )
+        return
+
+    if process.poll() is not None:
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
+        process.wait(timeout=timeout)
+
+
+async def _check_dev_database(settings: Settings) -> None:
+    """在启动 Vite 前验证数据库,避免前端对未就绪 API 持续代理报错。"""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(
+        settings.db_url,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 3},
+    )
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    finally:
+        await engine.dispose()
+
+
+def _wake_wsl_postgresql(settings: Settings) -> bool:
+    """Windows 本机数据库不可达时,唤醒默认 WSL 发行版的 PostgreSQL。"""
+    if sys.platform != "win32":
+        return False
+
+    from sqlalchemy.engine import make_url
+
+    database_url = make_url(settings.db_url)
+    if database_url.host not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    port = database_url.port or 5432
+    command = (
+        "if command -v systemctl >/dev/null 2>&1; then "
+        "systemctl start postgresql; "
+        "else service postgresql start; fi && "
+        f"pg_isready -h 127.0.0.1 -p {port}"
+    )
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-u", "root", "-e", "sh", "-lc", command],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _ensure_dev_database(settings: Settings) -> bool:
+    """检查数据库;必要时唤醒 WSL PostgreSQL 并重试。"""
+    try:
+        asyncio.run(_check_dev_database(settings))
+        return False
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        if not _wake_wsl_postgresql(settings):
+            raise
+    asyncio.run(_check_dev_database(settings))
+    return True
+
+
+def _start_dev_frontend(npm_executable: str, web_dir: Path) -> subprocess.Popen[bytes]:
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            [npm_executable, "run", "dev"],
+            cwd=web_dir,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    return subprocess.Popen(
+        [npm_executable, "run", "dev"],
+        cwd=web_dir,
+        start_new_session=True,
+    )
+
+
+def _start_frontend_when_api_ready(
+    *,
+    npm_executable: str,
+    web_dir: Path,
+    host: str,
+    port: int,
+    stop_event: threading.Event,
+    frontend_holder: list[subprocess.Popen[bytes]],
+) -> None:
+    """等待 Uvicorn 完成 lifespan 并开始监听后再启动 Vite。"""
+    connect_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    while not stop_event.wait(0.1):
+        try:
+            with socket.create_connection((connect_host, port), timeout=0.2):
+                break
+        except OSError:
+            continue
+    if stop_event.is_set():
+        return
+    frontend_holder.append(_start_dev_frontend(npm_executable, web_dir))
+
+
+def _dev_worker_command() -> list[str]:
+    """dev 托管 worker 子进程的命令;独立进程让队列消费与 API 互不影响。"""
+    return [sys.executable, "-m", "finboard_app.cli", "worker", "run"]
+
+
+def _spawn_dev_worker() -> subprocess.Popen[bytes]:
+    """启动 worker 子进程(与前端一样按进程组托管,退出时整树回收)。"""
+    if sys.platform == "win32":
+        return subprocess.Popen(
+            _dev_worker_command(),
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    return subprocess.Popen(_dev_worker_command(), start_new_session=True)
+
+
+@app.command()
+def dev(
+    ctx: typer.Context,
+    host: Annotated[str, typer.Option("--host", help="后端监听地址")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", "-p", help="后端监听端口")] = 8000,
+    web_dir: Annotated[Path, typer.Option("--web-dir", help="前端目录")] = Path("web"),
+    no_worker: Annotated[
+        bool,
+        typer.Option(
+            "--no-worker",
+            help="不随 dev 启动后台任务 worker(默认启动,研究/数据 job 才能被消费)",
+        ),
+    ] = False,
+) -> None:
+    """前台运行 API 并托管 Vite 与后台 worker,确保 Ctrl-C 触发 FastAPI shutdown。"""
+    resolved_web_dir = web_dir.resolve()
+    if not resolved_web_dir.is_dir():
+        raise typer.BadParameter(f"前端目录不存在: {resolved_web_dir}", param_hint="--web-dir")
+
+    npm_name = "npm.cmd" if sys.platform == "win32" else "npm"
+    npm_executable = shutil.which(npm_name)
+    if npm_executable is None:
+        raise typer.BadParameter(f"找不到 {npm_name},请先安装 Node.js/npm")
+
+    settings: Settings = ctx.obj
+    try:
+        wsl_started = _ensure_dev_database(settings)
+    except KeyboardInterrupt as exc:
+        raise typer.Exit(code=130) from exc
+    except Exception as exc:
+        typer.echo(
+            "PostgreSQL 连接失败,已尝试唤醒 WSL 服务但仍不可用;"
+            "请检查 WSL PostgreSQL 和 .env。",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    if wsl_started:
+        typer.echo("已自动唤醒 WSL PostgreSQL。")
+
+    stop_event = threading.Event()
+    frontend_holder: list[subprocess.Popen[bytes]] = []
+    frontend_thread = threading.Thread(
+        target=_start_frontend_when_api_ready,
+        kwargs={
+            "npm_executable": npm_executable,
+            "web_dir": resolved_web_dir,
+            "host": host,
+            "port": port,
+            "stop_event": stop_event,
+            "frontend_holder": frontend_holder,
+        },
+        name="finboard-vite-launcher",
+        daemon=True,
+    )
+    frontend_thread.start()
+
+    worker_process: subprocess.Popen[bytes] | None = None
+    if not no_worker:
+        # 研究/数据 job 默认由随 dev 托管的 worker 子进程消费;
+        # 生产部署用独立 `finboard worker run`(见 README),--no-worker 关闭。
+        try:
+            worker_process = _spawn_dev_worker()
+        except OSError as exc:
+            typer.echo(f"警告: 后台 worker 启动失败,任务将停留在 queued: {exc}", err=True)
+        else:
+            typer.echo(
+                "已同步启动后台 worker(消费研究/数据任务队列);"
+                "如需关闭请用 --no-worker"
+            )
+
+    try:
+        # Uvicorn 留在当前前台进程中,Ctrl-C 会进入其优雅关闭和 FastAPI lifespan。
+        serve(ctx, host=host, port=port, reload=False)
+    finally:
+        stop_event.set()
+        frontend_thread.join(timeout=1.0)
+        for frontend in frontend_holder:
+            _stop_dev_process(frontend)
+        if worker_process is not None:
+            _stop_dev_process(worker_process)
 
 
 @app.command(name="kill-switch")
@@ -347,6 +592,265 @@ app.add_typer(backtest_app, name="backtest")
 
 
 # ---------------------------------------------------------------------------
+# worker 子命令(统一后台任务队列,issue #117 / #142)
+# ---------------------------------------------------------------------------
+worker_app = typer.Typer(
+    name="worker",
+    help="统一后台任务队列 worker(研究/数据域耗时任务,不触及实盘交易)",
+    no_args_is_help=True,
+)
+
+
+@worker_app.command(name="run")
+def worker_run(
+    ctx: typer.Context,
+    poll_interval: Annotated[
+        float | None,
+        typer.Option("--poll-interval", help="轮询队列的间隔秒数"),
+    ] = None,
+    max_concurrent: Annotated[
+        int | None,
+        typer.Option("--max-concurrent", help="最大并发任务数"),
+    ] = None,
+    queues: Annotated[
+        str | None,
+        typer.Option(
+            "--queues",
+            help="逗号分隔的逻辑队列白名单;留空表示消费全部队列",
+        ),
+    ] = None,
+    maintenance_interval: Annotated[
+        float | None,
+        typer.Option(
+            "--maintenance-interval",
+            help="周期性维护(回收过期租约/重试重排)间隔秒数",
+        ),
+    ] = None,
+    retry_backoff: Annotated[
+        float | None,
+        typer.Option(
+            "--retry-backoff",
+            help="retry_waiting/interrupted 自动重排前的退避秒数",
+        ),
+    ] = None,
+) -> None:
+    """启动后台 worker 进程,从 PostgreSQL 队列领取任务直到 Ctrl-C。"""
+
+    settings = ctx.obj
+    if poll_interval is not None:
+        settings = settings.model_copy(
+            update={"worker_poll_interval_seconds": poll_interval}
+        )
+    if max_concurrent is not None:
+        settings = settings.model_copy(
+            update={"worker_max_concurrent": max_concurrent}
+        )
+    if queues is not None:
+        settings = settings.model_copy(update={"worker_queues": queues})
+    if maintenance_interval is not None:
+        settings = settings.model_copy(
+            update={"worker_maintenance_interval_seconds": maintenance_interval}
+        )
+    if retry_backoff is not None:
+        settings = settings.model_copy(
+            update={"worker_retry_backoff_seconds": retry_backoff}
+        )
+    asyncio.run(_run_worker(settings))
+
+
+@worker_app.command(name="recover")
+def worker_recover(ctx: typer.Context) -> None:
+    """回收过期 lease(running → interrupted),不启动常驻循环。
+
+    适用于:worker 崩溃后只想清理脏状态、不想立刻起常驻进程的场景。
+    """
+
+    asyncio.run(_recover_stale(ctx.obj))
+
+
+async def _run_worker(settings: Settings) -> None:
+    setup_logging(settings)
+    components = build_kernel_components(settings)
+    from finboard_backtest.background_jobs import JobExecutorRegistry
+    from finboard_backtest.background_jobs.executors import (
+        BacktestRunExecutor,
+        BulkDownloadExecutor,
+        DataFetchAllExecutor,
+        DatasetPublishExecutor,
+        DataSyncExecutor,
+        EchoExecutor,
+        FeatureSnapshotExecutor,
+        QualityRepairExecutor,
+        ResearchDataSyncExecutor,
+        ResearchRunExecutor,
+    )
+    from finboard_backtest.background_jobs.executors._providers import (
+        default_settings_factory,
+    )
+    from finboard_backtest.background_jobs.executors.research_run import (
+        default_store_factory,
+    )
+    from finboard_backtest.background_jobs.worker import (
+        WorkerConfig,
+        default_worker_id,
+    )
+    from finboard_backtest.background_jobs.worker import (
+        run_worker as run_bg_worker,
+    )
+
+    # 启动恢复:把崩溃前 research_runs 残留的 RUNNING 收敛成可续跑的 INTERRUPTED
+    # (background_jobs 的过期 lease 由 worker.run() 内部 _recover_stale 处理)。
+    await _recover_research_runs(components.session_maker)
+
+    settings_factory = default_settings_factory
+    registry = JobExecutorRegistry()
+    registry.register("echo", EchoExecutor())
+    # issue #143:research_run 执行器接入统一队列;#170:multi_factor 规格接入
+    # 真实信号引擎适配器工厂(其余 strategy kind 由工厂明确报 not_implemented)。
+    from finboard_backtest.research_run.signal_engine import (
+        build_signal_engine_adapter_factory,
+    )
+
+    registry.register(
+        "research_run",
+        ResearchRunExecutor(
+            session_maker=components.session_maker,
+            store_factory=default_store_factory,
+            adapter_factory=build_signal_engine_adapter_factory(
+                components.session_maker
+            ),
+        ),
+    )
+    # issue #144:7 类数据域任务迁移到统一队列。
+    registry.register(
+        "bulk_download",
+        BulkDownloadExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    registry.register(
+        "feature_snapshot",
+        FeatureSnapshotExecutor(
+            session_maker=components.session_maker,
+            max_concurrency=getattr(settings, "feature_snapshot_max_concurrency", 8),
+            process_workers=getattr(settings, "feature_snapshot_process_workers", 0),
+        ),
+    )
+    registry.register(
+        "dataset_publish",
+        DatasetPublishExecutor(session_maker=components.session_maker),
+    )
+    registry.register(
+        "backtest_run",
+        BacktestRunExecutor(
+            session_maker=components.session_maker,
+            runner=_backtest_runner,
+        ),
+    )
+    registry.register(
+        "data_sync",
+        DataSyncExecutor(session_maker=components.session_maker),
+    )
+    registry.register(
+        "fetch_all",
+        DataFetchAllExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    registry.register(
+        "quality_repair",
+        QualityRepairExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    # issue #171:research 数据表(估值 / 财务 / 行业)摄取编排。
+    registry.register(
+        "research_data_sync",
+        ResearchDataSyncExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    queue_list = [
+        q.strip() for q in settings.worker_queues.split(",") if q.strip()
+    ] or None
+    config = WorkerConfig(
+        worker_id=default_worker_id(),
+        poll_interval_seconds=settings.worker_poll_interval_seconds,
+        max_concurrent=settings.worker_max_concurrent,
+        lease_timeout_seconds=settings.worker_lease_timeout_seconds,
+        heartbeat_interval_seconds=settings.worker_heartbeat_interval_seconds,
+        queues=queue_list,
+        maintenance_interval_seconds=settings.worker_maintenance_interval_seconds,
+        retry_backoff_seconds=settings.worker_retry_backoff_seconds,
+        # issue #144:per-kind 全局并发上限(SQL 层 claim_next max_per_kind 实现)。
+        # 数据源压力敏感的 kind 限制为单并发;dataset_publish / backtest_run 不限。
+        kind_concurrency={
+            "feature_snapshot": 1,
+            "bulk_download": 1,
+            "data_sync": 1,
+            "fetch_all": 1,
+            "quality_repair": 1,
+            "research_data_sync": 1,
+        },
+    )
+    await run_bg_worker(
+        engine=components.engine,
+        session_maker=components.session_maker,
+        registry=registry,
+        config=config,
+    )
+
+
+async def _backtest_runner(
+    session: AsyncSession,
+    request: BacktestRunRequest,
+    provider_name: str,
+) -> int:
+    """注入给 ``BacktestRunExecutor`` 的回测编排(延迟导入 ``finboard_api``)。"""
+    from finboard_api.backtest_service import run_backtest_and_persist
+
+    return await run_backtest_and_persist(session, request, provider_name=provider_name)
+
+
+async def _recover_research_runs(
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """worker 启动时把残留 RUNNING 研究运行收敛为 INTERRUPTED(issue #143)。"""
+    from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+    from finboard_backtest.research_run import ResearchRunCoordinator
+    from finboard_persistence import ResearchRunRepository
+
+    async with session_maker() as session:
+        store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+        await ResearchRunCoordinator(store).mark_stale_running_as_interrupted()
+        await store.checkpoint()
+
+
+async def _recover_stale(settings: Settings) -> None:
+    from datetime import UTC, datetime
+
+    from finboard_persistence import BackgroundJobRepository
+
+    setup_logging(settings)
+    components = build_kernel_components(settings)
+    async with components.session_maker() as session:
+        repo = BackgroundJobRepository(session)
+        rows = await repo.reclaim_stale(datetime.now(UTC))
+        await repo.checkpoint()
+        await components.engine.dispose()
+    typer.echo(f"回收过期 lease 任务: {len(rows)}")
+    for row in rows:
+        typer.echo(f"  {row.job_id} kind={row.kind} -> interrupted")
+
+
+app.add_typer(worker_app, name="worker")
+
+
+# ---------------------------------------------------------------------------
 # data 子命令
 # ---------------------------------------------------------------------------
 data_app = typer.Typer(
@@ -430,7 +934,7 @@ async def _fetch_data(
     from finboard_shared.models import Symbol as Sym
     from finboard_shared.types import BarPeriod, Market
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider()
     else:
@@ -467,7 +971,7 @@ async def _fetch_all_data(*, config_file: str) -> None:
         if config.fetch_period in BarPeriod.__members__
         else BarPeriod(config.fetch_period)
     )
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider()
     else:
@@ -567,14 +1071,207 @@ def data_bulk_download(
     )
 
 
+@data_app.command(name="release")
+def data_release(
+    release_id: Annotated[
+        str,
+        typer.Option("--release-id", help="不可变发布 ID(已存在时只允许相同规格幂等读取)"),
+    ],
+    version: Annotated[
+        str,
+        typer.Option("--version", help="数据版本(同 dataset/source 下唯一)"),
+    ],
+    symbols: Annotated[
+        str,
+        typer.Option("--symbols", help="发布标的代码,逗号分隔"),
+    ],
+    start: Annotated[
+        str,
+        typer.Option("--start", help="发布开始日期 YYYY-MM-DD"),
+    ],
+    end: Annotated[
+        str,
+        typer.Option("--end", help="发布结束日期 YYYY-MM-DD"),
+    ],
+    dataset_name: Annotated[
+        str,
+        typer.Option("--dataset-name", help="数据集名称"),
+    ] = "multi_asset_daily_bars",
+    source: Annotated[
+        str,
+        typer.Option("--source", help="原始行情来源"),
+    ] = "akshare",
+    cache_dir: Annotated[
+        str,
+        typer.Option("--cache-dir", help="可变 Parquet 缓存目录"),
+    ] = "data_cache",
+    release_root: Annotated[
+        str,
+        typer.Option("--release-root", help="不可变发布根目录"),
+    ] = "data_releases",
+    adjust: Annotated[
+        str,
+        typer.Option("--adjust", help="复权方式(qfq/hqfq/none)"),
+    ] = "qfq",
+    required_capabilities: Annotated[
+        str,
+        typer.Option(
+            "--required-capabilities",
+            help="质量门必需能力,逗号分隔",
+        ),
+    ] = "stock,etf:index,etf:cross_border,etf:commodity,etf:bond",
+    code_version: Annotated[
+        str | None,
+        typer.Option("--code-version", help="生成代码版本;默认当前 git commit"),
+    ] = None,
+) -> None:
+    """冻结、校验并登记一个可复现的多资产研究数据发布。"""
+
+    normalized_symbols = [item.strip().upper() for item in symbols.split(",") if item.strip()]
+    capabilities = tuple(
+        item.strip() for item in required_capabilities.split(",") if item.strip()
+    )
+    try:
+        release = asyncio.run(
+            _publish_dataset_release(
+                release_id=release_id,
+                version=version,
+                dataset_name=dataset_name,
+                source=source,
+                symbols=normalized_symbols,
+                start_date=parse_date.fromisoformat(start),
+                end_date=parse_date.fromisoformat(end),
+                cache_dir=cache_dir,
+                release_root=release_root,
+                adjust=adjust,
+                required_capabilities=capabilities,
+                code_version=code_version or _current_code_version(),
+            )
+        )
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(f"发布失败: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        f"发布成功: {release.release_id} quality={release.quality_status.value} "
+        f"symbols={release.symbol_count} rows={release.row_count} "
+        f"coverage={release.coverage_pct} checksum={release.release_checksum}"
+    )
+
+
+@data_app.command(name="release-verify")
+def data_release_verify(
+    release_id: Annotated[
+        str,
+        typer.Argument(help="待校验的发布 ID"),
+    ],
+    release_root: Annotated[
+        str,
+        typer.Option("--release-root", help="不可变发布根目录"),
+    ] = "data_releases",
+) -> None:
+    """离线校验发布 manifest 与全部 Parquet 文件 checksum。"""
+
+    from pathlib import Path
+
+    from finboard_data import DatasetReleaseError, verify_dataset_release
+
+    try:
+        release = verify_dataset_release(Path(release_root) / release_id)
+    except DatasetReleaseError as exc:
+        typer.echo(f"校验失败: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        f"校验通过: {release.release_id} symbols={release.symbol_count} "
+        f"rows={release.row_count} checksum={release.release_checksum}"
+    )
+
+
 app.add_typer(data_app, name="data")
 
 
 # ---------------------------------------------------------------------------
 # data sync / bulk-download 内部实现
 # ---------------------------------------------------------------------------
+def _current_code_version() -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "--short=12", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value:
+        return "unknown"
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return f"{value}-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else value
+
+
+async def _publish_dataset_release(
+    *,
+    release_id: str,
+    version: str,
+    dataset_name: str,
+    source: str,
+    symbols: list[str],
+    start_date: date,
+    end_date: date,
+    cache_dir: str,
+    release_root: str,
+    adjust: str,
+    required_capabilities: tuple[str, ...],
+    code_version: str,
+) -> ResearchDatasetRelease:
+    from finboard_app.config import load_settings
+    from finboard_data import DatasetReleaseSpec
+    from finboard_persistence import (
+        ResearchDatasetReleaseService,
+        create_async_engine,
+        session_factory,
+    )
+
+    settings = load_settings()
+    engine = create_async_engine(settings.db_url)
+    try:
+        async with session_factory(engine)() as session:
+            service = ResearchDatasetReleaseService(
+                session,
+                cache_dir=cache_dir,
+                release_root=release_root,
+            )
+            release = await service.publish(
+                DatasetReleaseSpec(
+                    release_id=release_id,
+                    dataset_name=dataset_name,
+                    source=source,
+                    version=version,
+                    start_date=start_date,
+                    end_date=end_date,
+                    code_version=code_version,
+                    adjustment=adjust,
+                    required_capabilities=required_capabilities,
+                    known_limitations=(
+                        "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
+                        "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
+                        "首期仅发布本地缓存已有字段,不回退到联网数据源",
+                    ),
+                ),
+                symbols,
+            )
+            await session.commit()
+            return release
+    finally:
+        await engine.dispose()
+
+
 async def _sync_universe() -> None:
-    """从 akshare 发现全市场标的,写入 instruments 表。"""
+    """从 akshare 发现全市场标的,写入 instruments 表(带生命周期 diff)。"""
+    from datetime import date
+
     from finboard_app.config import load_settings
     from finboard_data.discovery import UniverseDiscovery
     from finboard_persistence import InstrumentRepository, create_async_engine, session_factory
@@ -600,10 +1297,16 @@ async def _sync_universe() -> None:
 
     async with session_factory(engine)() as session:
         repo = InstrumentRepository(session)
-        count = await repo.upsert_many(dicts)
+        result = await repo.sync_with_diff(dicts, as_of=date.today())
         await session.commit()
 
-    typer.echo(f"已同步 {count} 条标的到 instruments 表")
+    typer.echo(
+        f"已同步 {result.total} 条标的"
+        f"(新增 {result.new}, 更新 {result.updated},"
+        f" 改名 {len(result.renamed)},"
+        f" 待退市确认 {len(result.pending_delist)},"
+        f" 退市 {len(result.delisted)})"
+    )
     await engine.dispose()
 
 
@@ -641,7 +1344,7 @@ async def _bulk_download(
 
     typer.echo(f"开始批量拉取 {len(instruments)} 个标的 ({start_date} ~ today)")
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "yfinance")
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     if provider_name == "akshare":
         provider: AkShareProvider | YFinanceProvider = AkShareProvider(
             max_concurrency=2, request_interval=0.5

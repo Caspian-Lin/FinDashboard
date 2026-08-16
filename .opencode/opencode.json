@@ -1,0 +1,55 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "deepseek": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "DeepSeek",
+      "options": {
+        "baseURL": "https://api.deepseek.com/v1",
+        "apiKey": "{env:DEEPSEEK_API_KEY}"
+      },
+      "models": {
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash"
+        },
+        "deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "finboard": {
+      "type": "remote",
+      "url": "http://host.docker.internal:8765/mcp",
+      "enabled": true,
+      "oauth": false,
+      "headers": {
+        "Authorization": "Bearer {env:FINBOARD_MCP_TOKEN}"
+      }
+    },
+    "exa": {
+      "type": "remote",
+      "url": "https://mcp.exa.ai/mcp",
+      "enabled": true,
+      "oauth": false
+    }
+  },
+  "agent": {
+    "finboard-researcher": {
+      "description": "FinBoard 研究助手 —— 通过 finboard MCP 工具进行量化研究与因子分析：查询 + 研究写操作自主执行(#122)；bash 仅用于轮询/状态检查，exa 搜索用于网络研究。仅在涉及研究数据/因子/回测/模拟盘时使用。",
+      "mode": "primary",
+      "model": "deepseek/deepseek-v4-flash",
+      "permission": {
+        "*": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "skill": "allow",
+        "bash": "allow",
+        "finboard_*": "allow",
+        "exa_*": "allow"
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@ from finboard_data.factors import (
     FACTOR_VERSION,
     FactorName,
     FactorSelectionConfig,
+    InputsMode,
     RankingScope,
 )
 
@@ -21,6 +22,8 @@ class FactorSelectionParams(BaseModel):
 
     enabled: bool = False
     source: str = Field(default="tushare", min_length=1, max_length=32)
+    inputs_mode: InputsMode = InputsMode.RESEARCH_DB
+    snapshot_ids: list[str] = Field(default_factory=list, max_length=64)
     factor_version: str = FACTOR_VERSION
     max_symbols: int = Field(default=20, gt=0, le=5000)
     ranking_factor: FactorName = FactorName.MARKET_CAP
@@ -50,4 +53,6 @@ class FactorSelectionParams(BaseModel):
 
     def to_domain(self) -> FactorSelectionConfig:
         """转换为回测引擎使用的不可变领域配置。"""
-        return FactorSelectionConfig(**self.model_dump())
+        data = self.model_dump()
+        data["snapshot_ids"] = tuple(data["snapshot_ids"])
+        return FactorSelectionConfig(**data)

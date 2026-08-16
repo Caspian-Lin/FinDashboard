@@ -14,6 +14,9 @@ dependencies = [
   "finboard-app",
   "finboard-data",
   "finboard-backtest",
+  "finboard-simulation",
+  "finboard-opencode",
+  "finboard-mcp",
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
 ]

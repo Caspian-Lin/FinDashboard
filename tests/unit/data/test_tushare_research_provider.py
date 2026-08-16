@@ -22,6 +22,11 @@ from finboard_data import (
 OBSERVED_AT = datetime(2026, 7, 27, 2, 30, tzinfo=UTC)
 
 
+class NoopBudget:
+    async def acquire(self) -> None:
+        return None
+
+
 def _daily_row(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "ts_code": "000001.SZ",
@@ -133,6 +138,7 @@ def _provider(
     return TushareResearchDataProvider(
         client=client or FakeTushareClient(),
         now=lambda: OBSERVED_AT,
+        budget=NoopBudget(),
     )
 
 
