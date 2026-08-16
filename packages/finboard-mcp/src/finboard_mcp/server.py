@@ -107,7 +107,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   (2) strategy_spec 形态:按已发布 {strategy_id, version} 路由入队 research_run
   管线,返回 run_id + job_id 指针异步执行(与 strategy 互斥;其余入队字段走
   queue_payload,与 finboard_run_queue 同构;返回值含 execution_mode
-  single_shot|multi_period)。多期回放(#183):queue_payload.parameters 声明
+  single_shot|multi_period)。基准收益真实计算(#184):strategy 形态支持
+  benchmark_symbol 参数(如 000300.SH,指数日线自动走 akshare 指数接口,
+  引擎单独拉取基准 bars 计算 benchmark_return/excess_return);research_run
+  管线按 benchmark_config.symbol 从冻结发布取行情计算基准收益;基准缺失时
+  benchmark_return/excess_return 为 null + 具名 warning,不再静默 0.0。
+  多期回放(#183):queue_payload.parameters 声明
   rebalance_frequency=monthly|quarterly 时,按冻结发布交易日历每期重算
   universe/features/signals 与组合,决策间每日 mark-to-market 产出全区间
   equity_curve(报告含 annualized_return,最终权 益=曲线末点);未声明则

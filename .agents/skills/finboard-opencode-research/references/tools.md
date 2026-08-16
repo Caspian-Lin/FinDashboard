@@ -550,6 +550,10 @@ research_run 管线轻路由(#174)。
     `capital: str = "100000"`、`adjust: str = "qfq"`、`params: dict`、
     `selection: dict`、`commission_rate: str`、`commission_min: str`、
     `stamp_tax_rate: str`、`slippage_bps: str`、
+    `benchmark_symbol: str | None = None`(issue #184:显式基准标的代码,如
+    `000300.SH`,指数日线自动走 akshare 指数接口,引擎单独拉取基准 bars 计算
+    `benchmark_return`/`excess_return`;不传则用等权候选池基准;基准缺失时
+    `benchmark_return`/`excess_return` 为 null)、
     `equity_mode: str = "summary"`(summary 降采样到 max_points 个关键点,首末
     点保留;full 返回完整曲线)、`max_points: int = 200`
   - `selection.inputs_mode`(#173):
@@ -576,6 +580,11 @@ research_run 管线轻路由(#174)。
     `finboard_run_get` 或 `finboard_job_get` 轮询进度;`execution_mode` 为
     single_shot(默认)或 multi_period(#183,报告含 annualized_return 与
     全区间每日 equity_curve)
+  - 基准收益(#184):research_run 管线按 `benchmark_config.symbol` 从冻结
+    发布取行情计算真实 `benchmark_return`/`excess_return`;基准缺失(发布中
+    无该标的)时二者为 null + 具名 warning,不再静默 0.0;`queue_payload.
+    benchmark_config` 可传 `{"overrides": {"return": <手动值>}}` 作为发布
+    无基准行情时的兜底
 - 错误:`invalid_argument`(互斥 / 规格不存在 / 未发布 / 参数校验失败 /
   equity_mode 非法 / snapshot 模式缺 snapshot_ids)、`permission_denied`
   (只读模式)、`unavailable`(数据源连接错误)

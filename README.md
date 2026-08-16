@@ -314,6 +314,12 @@ HTTP 422 返回。
 每个快照给出决策/生效日期、入选标的、发布或跳过状态、跳过原因和校验和。启用
 选股但研究数据质量不足时会跳过当日调仓,不会使用部分数据。
 
+回测请求还可传 `benchmark`(issue #184:`{"symbol": "000300.SH"}` 显式基准,
+指数日线由 akshare 免积分接口提供,基准不在回测 universe 时引擎单独拉取;
+不传时用等权候选池兜底)。基准缺失时 `metrics.benchmark_return` /
+`excess_return` 为 `null` + 具名 warning,不再静默 0.0;
+`backtest_runs.benchmark_config` 如实归档请求配置。
+
 ### 静态候选池与策略层 Bar 规则选股
 
 回测请求的 `symbols` 始终是**静态候选池硬上限**:
