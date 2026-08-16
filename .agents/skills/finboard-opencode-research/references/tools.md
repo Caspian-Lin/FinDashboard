@@ -16,7 +16,7 @@
 | 研究记忆(memory.*) | ✅ | |
 | 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅ | |
 | 策略规格(strategy.* / preset.*,✅ #126) | ✅(含 validate/draft/publish/rollback) | |
-| 回测(backtest.*,✅ #127) | ✅(含同步运行 / 历史 CRUD) | |
+| 回测(backtest.*,✅ #127+#174) | ✅(同步运行 + strategy_spec 路由 research_run + 历史 CRUD) | |
 | 模拟盘(sim.*,✅ #127+#139) | ✅(账户/会话/决策/行情投递/评估/归档/订单/报告) | |
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
@@ -517,38 +517,55 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 参数:`preset_id: int`
 - 返回:`{deleted: true, preset_id}`;未找到 → `not_found`
 
-## finboard.backtest.*(✅ #127)
+## finboard.backtest.*(✅ #127 + #174)
 
 回测引擎(行情回放 + 纸面撮合)。复用 `BacktestEngine` +
-`BacktestRunRepository` + `list_strategy_definitions`。
+`BacktestRunRepository` + `list_strategy_definitions`;已发布规格回测走
+research_run 管线轻路由(#174)。
 
 ### finboard_backtest_strategy_list(只读)
-列出支持回测的内置策略及参数 schema(`supports_backtest=true`)。
+列出回测双入口(issue #174):
 - 参数:无
-- 返回:`list[{kind, name, description, supports_backtest, params: [...]}]`
-- 仅 `ma_cross` 支持回测
+- 返回:`{builtin_strategies: list[{kind, name, description, supports_backtest,
+  params: [...]}], published_specs: list[{strategy_id, strategy_kind, name,
+  status, version, version_count, execution_hint}], execution_note: str}`
+- 内置策略中仅 `ma_cross` 支持事件驱动回测(`supports_backtest=true`);
+  `published_specs` 是已发布研究策略规格(走 research_run 管线,不是
+  事件驱动引擎),`execution_hint` 给出直达入口
 
 ### finboard_backtest_run **[写]**
-同步运行回测,返回 metrics/equity/fills 并落库。纸面撮合,**不发真实订单**。
-- 参数:`strategy: str`、`symbols: list[str]`、`start: str`、`end: str`、
-  `capital: str = "100000"`、`adjust: str = "qfq"`、`params: dict`、
-  `selection: dict`、`commission_rate: str`、`commission_min: str`、
-  `stamp_tax_rate: str`、`slippage_bps: str`、
-  `equity_mode: str = "summary"`(summary 降采样到 max_points 个关键点,首末
-  点保留;full 返回完整曲线)、`max_points: int = 200`
-- `selection.inputs_mode`(#173):
-  - `research_db`(默认):从 research 数据表读 profile/daily_metrics/
-    financial_indicators/industry_memberships
-  - `bars`:纯价格因子(momentum/volatility_20d)从回测行情计算,不要求
-    daily_metrics 发布;dataset 未发布降级为 snapshot warnings,不整日
-    SKIPPED;ST/上市天数过滤在 instrument_profiles 缺失时降级不生效
-  - `snapshot`:因子值直接来自冻结 FeatureSnapshot,需 `snapshot_ids:
-    list[str]`;观测按 available_at <= decision_at 过滤
-- 返回:`{run_id, metrics, equity_curve, equity_point_count, fills, summary,
-  selection_snapshots(snapshot 含 warnings 降级提示), ...}`
-- 错误:`invalid_argument`(策略不支持回测 / 参数校验失败 / equity_mode 非法 /
-  snapshot 模式缺 snapshot_ids)、`permission_denied`(只读模式)、
-  `unavailable`(数据源连接错误)
+双形态(二选一,互斥,同时给出报 `invalid_argument`):
+- **形态 1(strategy)**:同步事件驱动回测,返回 metrics/equity/fills 并落库。
+  纸面撮合,**不发真实订单**。
+  - 参数:`strategy: str`、`symbols: list[str]`、`start: str`、`end: str`、
+    `capital: str = "100000"`、`adjust: str = "qfq"`、`params: dict`、
+    `selection: dict`、`commission_rate: str`、`commission_min: str`、
+    `stamp_tax_rate: str`、`slippage_bps: str`、
+    `equity_mode: str = "summary"`(summary 降采样到 max_points 个关键点,首末
+    点保留;full 返回完整曲线)、`max_points: int = 200`
+  - `selection.inputs_mode`(#173):
+    - `research_db`(默认):从 research 数据表读 profile/daily_metrics/
+      financial_indicators/industry_memberships
+    - `bars`:纯价格因子(momentum/volatility_20d)从回测行情计算,不要求
+      daily_metrics 发布;dataset 未发布降级为 snapshot warnings,不整日
+      SKIPPED;ST/上市天数过滤在 instrument_profiles 缺失时降级不生效
+    - `snapshot`:因子值直接来自冻结 FeatureSnapshot,需 `snapshot_ids:
+      list[str]`;观测按 available_at <= decision_at 过滤
+  - 返回:`{run_id, metrics, equity_curve, equity_point_count, fills, summary,
+    selection_snapshots(snapshot 含 warnings 降级提示), ...}`
+- **形态 2(strategy_spec)**:按已发布规格路由入队 research_run 管线(issue
+  #174),不阻塞等待完成。
+  - 参数:`strategy_spec: {strategy_id: str, version: int}`、
+    `queue_payload: dict`(与 `finboard_run_queue` payload 同构,不含
+    strategy_id/strategy_version;必填 idempotency_key /
+    dataset_release_ids / code_version / initial_capital / requested_by)
+  - 校验:规格版本存在且 `status == "published"`,否则 `invalid_argument`
+  - 返回:`{run_id, job_id, status, strategy_id, strategy_kind,
+    manifest_checksum, execution_path}` —— 已入队异步执行,用
+    `finboard_run_get` 或 `finboard_job_get` 轮询进度
+- 错误:`invalid_argument`(互斥 / 规格不存在 / 未发布 / 参数校验失败 /
+  equity_mode 非法 / snapshot 模式缺 snapshot_ids)、`permission_denied`
+  (只读模式)、`unavailable`(数据源连接错误)
 
 ### finboard_backtest_history_list(只读)
 列出最近回测历史记录(摘要,不含完整 equity/fills)。

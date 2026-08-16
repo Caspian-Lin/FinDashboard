@@ -95,12 +95,16 @@ FinBoard 研究 MCP —— 量化研究工具集
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。
   无代码版本化生命周期,反复 validate 预览 → draft → publish。
-- 回测(5,✅ #127 + #172 + #173):backtest_strategy_list(可用策略+参数 schema)、
-  backtest_run(同步运行,返回 metrics/equity/fills;equity_mode=summary
-  默认降采样,full 返回完整曲线;selection.inputs_mode 支持 research_db(默认)/
-  bars(纯价格因子,不要求 daily_metrics)/snapshot(snapshot_ids 冻结快照观测)),
-  backtest_history_list/get(history_get 支持 fills 分页)、
-  backtest_history_delete(写)。
+- 回测(5,✅ #127 + #172 + #173 + #174):backtest_strategy_list(输出
+  builtin_strategies 事件驱动策略+参数 schema 与 published_specs 已发布规格
+  列表,含状态/版本数/执行入口提示)、backtest_run 双形态——(1) strategy 形态:
+  同步运行(返回 metrics/equity/fills;equity_mode=summary 默认降采样,full
+  返回完整曲线;selection.inputs_mode 支持 research_db(默认)/bars(纯价格因子,
+  不要求 daily_metrics)/snapshot(snapshot_ids 冻结快照观测));
+  (2) strategy_spec 形态:按已发布 {strategy_id, version} 路由入队 research_run
+  管线,返回 run_id + job_id 指针异步执行(与 strategy 互斥;其余入队字段走
+  queue_payload,与 finboard_run_queue 同构)。backtest_history_list/get
+  (history_get 支持 fills 分页)、backtest_history_delete(写)。
 - 模拟盘(21,✅ #127+#139):sim_account list/get/create(写)、
   sim_session list/get/create(写)/start/pause/stop/archive(写)/reset(写)、
   sim_decision_submit(写,结构化目标仓位 → 生成订单,不直接创建订单)、

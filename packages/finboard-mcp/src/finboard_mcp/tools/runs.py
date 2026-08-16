@@ -375,6 +375,84 @@ async def _build_queued_manifest(
     return manifest, strategy_row
 
 
+def parse_queue_payload(payload: dict[str, Any]) -> Any:
+    """规范化并校验 ``ResearchRunQueueIn`` 入队 payload(issue #174 复用)。
+
+    ``initial_capital`` 从 JSON str / number 构造 ``Decimal``;校验失败抛
+    ``McpToolError(invalid_argument)``。
+    """
+    from decimal import Decimal
+
+    from finboard_api.research_run_schemas import ResearchRunQueueIn
+
+    payload_copy = dict(payload)
+    if "initial_capital" in payload_copy and not isinstance(
+        payload_copy["initial_capital"], Decimal
+    ):
+        payload_copy["initial_capital"] = Decimal(
+            str(payload_copy["initial_capital"])
+        )
+    try:
+        return ResearchRunQueueIn.model_validate(payload_copy)
+    except Exception as exc:
+        raise McpToolError("invalid_argument", str(exc)) from exc
+
+
+async def enqueue_research_run(
+    app: McpAppContext,
+    body: Any,
+) -> dict[str, Any]:
+    """冻结 + 登记 queued ResearchRun 的核心事务(写,不执行回测)。
+
+    供 ``queue_run`` 与 ``backtest_run(strategy_spec=...)`` 复用:
+    复用 ``_build_queued_manifest`` 的冻结校验,同事务双写 background_jobs。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from finboard_backtest.research_run import (
+        ResearchRunStatus,
+        to_json_value,
+    )
+    from finboard_persistence import (
+        ResearchRunPersistenceConflictError,
+        ResearchRunRepository,
+    )
+
+    async with app.session_maker() as session:
+        manifest, _ = await _build_queued_manifest(body, session)
+        try:
+            row, _ = await ResearchRunRepository(session).create_or_get(
+                run_id=manifest.run_id,
+                idempotency_key=manifest.idempotency_key,
+                replay_of_run_id=None,
+                strategy_id=manifest.strategy_spec.strategy_id,
+                strategy_kind=manifest.strategy_kind,
+                status=ResearchRunStatus.QUEUED.value,
+                schema_version=manifest.schema_version,
+                manifest_checksum=manifest.checksum,
+                manifest=cast(dict[str, object], to_json_value(manifest)),
+                requested_by=manifest.requested_by,
+            )
+            # issue #143:同事务双写 background_jobs(共用 idempotency_key)。
+            if not getattr(row, "job_id", None):
+                row.job_id = await _enqueue_research_run_job(
+                    session,
+                    run_id=manifest.run_id,
+                    strategy_kind=manifest.strategy_kind,
+                    idempotency_key=manifest.idempotency_key,
+                    requested_by=manifest.requested_by,
+                )
+            await session.commit()
+        except (
+            ResearchRunPersistenceConflictError,
+            BackgroundJobPersistenceConflictError,
+            IntegrityError,
+        ) as exc:
+            await session.rollback()
+            raise McpToolError("conflict", str(exc)) from exc
+        return _run_detail(row)
+
+
 async def queue_run(
     app: McpAppContext,
     *,
@@ -384,66 +462,8 @@ async def queue_run(
 
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
-        from decimal import Decimal
-
-        from sqlalchemy.exc import IntegrityError
-
-        from finboard_api.research_run_schemas import ResearchRunQueueIn
-        from finboard_backtest.research_run import (
-            ResearchRunStatus,
-            to_json_value,
-        )
-        from finboard_persistence import (
-            ResearchRunPersistenceConflictError,
-            ResearchRunRepository,
-        )
-
-        # 规范化 Decimal 字段(从 JSON str / number 构造)
-        payload_copy = dict(payload)
-        if "initial_capital" in payload_copy and not isinstance(
-            payload_copy["initial_capital"], Decimal
-        ):
-            payload_copy["initial_capital"] = Decimal(
-                str(payload_copy["initial_capital"])
-            )
-        try:
-            body = ResearchRunQueueIn.model_validate(payload_copy)
-        except Exception as exc:
-            raise McpToolError("invalid_argument", str(exc)) from exc
-
-        async with app.session_maker() as session:
-            manifest, _ = await _build_queued_manifest(body, session)
-            try:
-                row, _ = await ResearchRunRepository(session).create_or_get(
-                    run_id=manifest.run_id,
-                    idempotency_key=manifest.idempotency_key,
-                    replay_of_run_id=None,
-                    strategy_id=manifest.strategy_spec.strategy_id,
-                    strategy_kind=manifest.strategy_kind,
-                    status=ResearchRunStatus.QUEUED.value,
-                    schema_version=manifest.schema_version,
-                    manifest_checksum=manifest.checksum,
-                    manifest=cast(dict[str, object], to_json_value(manifest)),
-                    requested_by=manifest.requested_by,
-                )
-                # issue #143:同事务双写 background_jobs(共用 idempotency_key)。
-                if not getattr(row, "job_id", None):
-                    row.job_id = await _enqueue_research_run_job(
-                        session,
-                        run_id=manifest.run_id,
-                        strategy_kind=manifest.strategy_kind,
-                        idempotency_key=manifest.idempotency_key,
-                        requested_by=manifest.requested_by,
-                    )
-                await session.commit()
-            except (
-                ResearchRunPersistenceConflictError,
-                BackgroundJobPersistenceConflictError,
-                IntegrityError,
-            ) as exc:
-                await session.rollback()
-                raise McpToolError("conflict", str(exc)) from exc
-            return _run_detail(row)
+        body = parse_queue_payload(payload)
+        return await enqueue_research_run(app, body)
 
     return await run_tool(
         audit=app.audit,
@@ -726,10 +746,12 @@ def register(mcp: MCPServer) -> None:
 
 __all__ = [
     "cancel_run",
+    "enqueue_research_run",
     "get_run",
     "lineage_run",
     "list_artifacts",
     "list_runs",
+    "parse_queue_payload",
     "queue_run",
     "register",
     "replay_run",
