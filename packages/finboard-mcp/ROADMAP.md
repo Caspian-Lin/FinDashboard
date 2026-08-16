@@ -273,6 +273,14 @@ summary):equity 降采样(首末点保留、时序单调、点数 ≤ max_points
 fills_offset / fills_total)。降采样在 `finboard_mcp/downsample.py`,纯展示层
 变换,落库仍存全量。
 
+### ✅ #173 selection 输入模式(bars / snapshot)(已完成)
+`backtest_run` 的 `selection.inputs_mode` 支持 `research_db`(默认)/
+`bars` / `snapshot`:`bars` 模式纯价格因子(momentum / volatility_20d)从回测
+行情计算,不要求 daily_metrics 发布,dataset 未发布降级为快照 warnings 而非
+整日 SKIPPED;`snapshot` 模式用 `snapshot_ids` 直接消费冻结 FeatureSnapshot
+观测(available_at <= decision_at 过滤)。`required_datasets` 按所选因子依赖
+推导。`_INSTRUCTIONS` / Skill `tools.md` 已同步。
+
 ## 扩展原则(适用于所有阶段)
 
 1. **复用现有 service / repository**,MCP 层不直接裸 SQL

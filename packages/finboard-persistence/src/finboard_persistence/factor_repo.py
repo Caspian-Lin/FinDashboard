@@ -38,6 +38,7 @@ class FactorSnapshotRepository:
             config=snapshot.config,
             status=snapshot.status.value,
             skip_reason=snapshot.skip_reason,
+            warnings=list(snapshot.warnings),
             checksum=snapshot.checksum,
         )
         self._session.add(row)
@@ -104,6 +105,7 @@ class FactorSnapshotRepository:
             config=row.config,
             checksum=row.checksum,
             snapshot_id=row.id,
+            warnings=tuple(row.warnings or ()),
         )
 
     async def _model_by_checksum(

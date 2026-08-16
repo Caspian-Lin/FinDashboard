@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
 
+from finboard_data.factor_lab import FeatureObservation
 from finboard_data.factors import (
     FACTOR_CATALOG,
     FactorInputRecord,
@@ -20,9 +21,19 @@ from finboard_data.factors import (
     FactorSnapshotStatus,
     FactorSnapshotWriter,
     FactorValue,
+    InputsMode,
     RankingScope,
 )
 from finboard_shared.models import Bar
+
+_DAILY_DEPENDENT_FACTORS = frozenset(
+    {
+        FactorName.MARKET_CAP,
+        FactorName.PB,
+        FactorName.TURNOVER_RATE,
+    }
+)
+_VOLATILITY_WINDOW = 20
 
 
 class PointInTimeFactorSelector:
@@ -74,7 +85,15 @@ class PointInTimeFactorSelector:
                 dataset_versions=batch.dataset_versions,
                 reason="source_mismatch",
             )
-        if batch.issues:
+        # bars / snapshot 模式不依赖 research 数据表:dataset 未发布降级为
+        # 警告(profile 过滤缺失由下方 profile 检查兜底,因子依赖缺失由
+        # _missing_required_factor 兜底);research_db 模式保持 fail-closed。
+        degraded = config.inputs_mode is not InputsMode.RESEARCH_DB
+        warnings = _degradable_issues(batch.issues) if degraded else ()
+        hard_issues = tuple(
+            issue for issue in batch.issues if issue not in set(warnings)
+        )
+        if hard_issues:
             return await self._skip(
                 config=config,
                 universe=universe,
@@ -82,7 +101,7 @@ class PointInTimeFactorSelector:
                 decision_at=decision_at,
                 effective_date=effective_date,
                 dataset_versions=batch.dataset_versions,
-                reason=";".join(sorted(set(batch.issues))),
+                reason=";".join(sorted(set(hard_issues))),
             )
 
         records = {record.symbol: record for record in batch.records}
@@ -102,6 +121,8 @@ class PointInTimeFactorSelector:
             business_date=business_date,
             decision_at=decision_at,
             source=config.source,
+            required_factors=config.required_factors,
+            inputs_mode=config.inputs_mode,
         )
         if eligibility_issue is not None:
             return await self._skip(
@@ -112,6 +133,11 @@ class PointInTimeFactorSelector:
                 effective_date=effective_date,
                 dataset_versions=batch.dataset_versions,
                 reason=eligibility_issue,
+            )
+        if degraded and any(record.profile is None for record in records.values()):
+            warnings += (
+                "instrument_profiles_unavailable:"
+                "ST/上市天数/退市过滤降级为不生效",
             )
 
         eligible = [
@@ -124,24 +150,30 @@ class PointInTimeFactorSelector:
                 current_bars=price_history.get(symbol, ()),
             )
         ]
-        missing_daily = next(
-            (
-                symbol
-                for symbol in eligible
-                if records[symbol].daily is None
-            ),
-            None,
-        )
-        if missing_daily is not None:
-            return await self._skip(
-                config=config,
-                universe=universe,
-                business_date=business_date,
-                decision_at=decision_at,
-                effective_date=effective_date,
-                dataset_versions=batch.dataset_versions,
-                reason=f"daily_metrics_missing:{missing_daily}",
+        # snapshot 模式因子值来自冻结观测,daily 恒为 None,硬门只对
+        # research_db / bars 模式生效;观测缺因子由 _missing_required_factor 兜底。
+        if (
+            config.inputs_mode is not InputsMode.SNAPSHOT
+            and config.required_factors & _DAILY_DEPENDENT_FACTORS
+        ):
+            missing_daily = next(
+                (
+                    symbol
+                    for symbol in eligible
+                    if records[symbol].daily is None
+                ),
+                None,
             )
+            if missing_daily is not None:
+                return await self._skip(
+                    config=config,
+                    universe=universe,
+                    business_date=business_date,
+                    decision_at=decision_at,
+                    effective_date=effective_date,
+                    dataset_versions=batch.dataset_versions,
+                    reason=f"daily_metrics_missing:{missing_daily}",
+                )
         factor_values = _calculate_factor_values(
             eligible,
             records=records,
@@ -212,6 +244,7 @@ class PointInTimeFactorSelector:
             values=tuple(ranked_values),
             status=FactorSnapshotStatus.PUBLISHED,
             skip_reason=None,
+            warnings=tuple(warnings),
         )
         return await self._persist(snapshot)
 
@@ -247,22 +280,34 @@ class PointInTimeFactorSelector:
         return replace(snapshot, snapshot_id=snapshot_id)
 
 
+def _degradable_issues(issues: Sequence[str]) -> tuple[str, ...]:
+    """bars / snapshot 模式下可降级为警告的 reader issue。"""
+    return tuple(
+        issue
+        for issue in issues
+        if issue.startswith("dataset_unpublished:")
+    )
+
+
 def _input_integrity_issue(
     records: Mapping[str, FactorInputRecord],
     *,
     business_date: date,
     decision_at: datetime,
     source: str,
+    required_factors: frozenset[FactorName],
+    inputs_mode: InputsMode,
 ) -> str | None:
     for symbol in sorted(records):
         record = records[symbol]
         if record.symbol != symbol:
             return f"symbol_mismatch:{symbol}"
-        if record.profile is None:
+        if inputs_mode is InputsMode.RESEARCH_DB and record.profile is None:
             return f"profile_missing:{symbol}"
         if (
             record.daily is not None
             and record.daily.trade_date != business_date
+            and bool(required_factors & _DAILY_DEPENDENT_FACTORS)
         ):
             return f"daily_metrics_stale:{symbol}"
         inputs = (
@@ -286,17 +331,17 @@ def _is_eligible(
     current_bars: Sequence[Bar],
 ) -> bool:
     profile = record.profile
-    assert profile is not None
-    if profile.list_status.upper() != "L":
-        return False
-    if profile.list_date > business_date:
-        return False
-    if profile.delist_date is not None and profile.delist_date <= business_date:
-        return False
-    if (business_date - profile.list_date).days < config.min_listing_days:
-        return False
-    if config.exclude_st and "ST" in profile.name.upper():
-        return False
+    if profile is not None:
+        if profile.list_status.upper() != "L":
+            return False
+        if profile.list_date > business_date:
+            return False
+        if profile.delist_date is not None and profile.delist_date <= business_date:
+            return False
+        if (business_date - profile.list_date).days < config.min_listing_days:
+            return False
+        if config.exclude_st and "ST" in profile.name.upper():
+            return False
     if config.exclude_suspended:
         if not current_bars:
             return False
@@ -318,11 +363,15 @@ def _calculate_factor_values(
     }
     for symbol in symbols:
         record = records[symbol]
+        if record.features:
+            # snapshot 模式:因子值直接来自冻结快照观测,不重复计算。
+            _apply_snapshot_features(result, symbol, record.features)
+            continue
         daily = record.daily
-        assert daily is not None
-        _put(result, FactorName.MARKET_CAP, symbol, daily.total_market_cap)
-        _put(result, FactorName.PB, symbol, daily.pb)
-        _put(result, FactorName.TURNOVER_RATE, symbol, daily.turnover_rate)
+        if daily is not None:
+            _put(result, FactorName.MARKET_CAP, symbol, daily.total_market_cap)
+            _put(result, FactorName.PB, symbol, daily.pb)
+            _put(result, FactorName.TURNOVER_RATE, symbol, daily.turnover_rate)
 
         bars = price_history.get(symbol, ())
         if len(bars) > momentum_lookback:
@@ -330,6 +379,9 @@ def _calculate_factor_values(
             end = bars[-1].close
             if start > 0:
                 _put(result, FactorName.MOMENTUM, symbol, end / start - Decimal(1))
+        volatility = _volatility_20d(bars)
+        if volatility is not None:
+            _put(result, FactorName.VOLATILITY_20D, symbol, volatility)
 
         financial = record.financial
         if financial is not None:
@@ -342,6 +394,37 @@ def _calculate_factor_values(
             )
             _put(result, FactorName.REVENUE_YOY, symbol, financial.revenue_yoy)
     return result
+
+
+def _apply_snapshot_features(
+    target: dict[FactorName, dict[str, Decimal]],
+    symbol: str,
+    observations: Sequence[FeatureObservation],
+) -> None:
+    """把快照观测的因子值写入因子矩阵(未知因子名静默跳过)。"""
+    for observation in observations:
+        try:
+            factor_name = FactorName(observation.feature_name)
+        except ValueError:
+            continue
+        _put(target, factor_name, symbol, Decimal(str(observation.value)))
+
+
+def _volatility_20d(bars: Sequence[Bar]) -> Decimal | None:
+    """最近 20 个交易日收益率的样本标准差(ddof=1),口径与 extract.py 一致。"""
+    if len(bars) < _VOLATILITY_WINDOW + 1:
+        return None
+    returns: list[Decimal] = []
+    for i in range(len(bars) - _VOLATILITY_WINDOW, len(bars)):
+        previous = bars[i - 1].close
+        if previous <= 0:
+            return None
+        returns.append(bars[i].close / previous - Decimal(1))
+    mean = sum(returns, Decimal(0)) / len(returns)
+    variance = sum(
+        ((r - mean) ** 2 for r in returns), Decimal(0)
+    ) / (len(returns) - 1)
+    return variance.sqrt()
 
 
 def _put(
@@ -553,6 +636,7 @@ def _snapshot(
     values: tuple[FactorValue, ...],
     status: FactorSnapshotStatus,
     skip_reason: str | None,
+    warnings: tuple[str, ...] = (),
 ) -> FactorSnapshot:
     config_data = config.as_dict()
     payload = {
@@ -577,6 +661,7 @@ def _snapshot(
         ],
         "status": status.value,
         "skip_reason": skip_reason,
+        "warnings": list(warnings),
         "config": config_data,
     }
     checksum = hashlib.sha256(
@@ -601,4 +686,5 @@ def _snapshot(
         skip_reason=skip_reason,
         config=config_data,
         checksum=checksum,
+        warnings=warnings,
     )

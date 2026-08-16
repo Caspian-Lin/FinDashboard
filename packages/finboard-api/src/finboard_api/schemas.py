@@ -431,6 +431,7 @@ class FactorSnapshotOut(BaseSchema):
     dataset_versions: dict[str, str]
     factor_version: str
     checksum: str
+    warnings: list[str] = Field(default_factory=list)
 
 
 class BacktestResultOut(BaseSchema):
