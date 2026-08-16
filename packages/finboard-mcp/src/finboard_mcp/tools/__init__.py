@@ -6,6 +6,7 @@ from finboard_mcp.tools.backtest import register as register_backtest_tools
 from finboard_mcp.tools.data import register as register_data_tools
 from finboard_mcp.tools.data_write import register as register_data_write_tools
 from finboard_mcp.tools.factors import register as register_factor_tools
+from finboard_mcp.tools.grid import register as register_grid_tools
 from finboard_mcp.tools.jobs import register as register_jobs_tools
 from finboard_mcp.tools.memories import register as register_memory_tools
 from finboard_mcp.tools.portfolio import register as register_portfolio_tools
@@ -23,6 +24,7 @@ __all__ = [
     "register_data_tools",
     "register_data_write_tools",
     "register_factor_tools",
+    "register_grid_tools",
     "register_jobs_tools",
     "register_memory_tools",
     "register_portfolio_tools",

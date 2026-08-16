@@ -4,6 +4,7 @@ from finboard_persistence.background_job_repo import (
     BackgroundJobPersistenceConflictError,
     BackgroundJobRepository,
 )
+from finboard_persistence.backtest_grid_repo import BacktestGridRunRepository
 from finboard_persistence.base import Base
 from finboard_persistence.dataset_release_repo import (
     ReleaseInstrumentCatalogRepository,
@@ -28,6 +29,7 @@ from finboard_persistence.models import (
     AccountModel,
     AuditLogModel,
     BackgroundJobModel,
+    BacktestGridRunModel,
     BacktestRunModel,
     BondMetadataModel,
     ContinuousFuturesRuleModel,
@@ -125,6 +127,9 @@ __all__ = [
     "BackgroundJobModel",
     "BackgroundJobPersistenceConflictError",
     "BackgroundJobRepository",
+    "BacktestGridRunModel",
+    "BacktestGridRunRepository",
+    "BacktestGridRunRepository",
     "BacktestRunModel",
     "BacktestRunRepository",
     "Base",

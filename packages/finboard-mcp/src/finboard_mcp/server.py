@@ -16,8 +16,8 @@
 * ``finboard.strategy.*`` / ``finboard.preset.*``(#126)——
   策略规格注册表 / 模板 / 校验 / 草稿 / 发布 / 回滚 / diff + 预设 CRUD
   (无代码版本化生命周期);
-* ``finboard.backtest.*``(#127)—— 回测引擎(可用策略 schema / 同步运行 /
-  历史列表 / 详情 / 删除);
+* ``finboard.backtest.*``(#127 + #175)—— 回测引擎(可用策略 schema / 同步运行 /
+  历史列表 / 详情 / 删除 / 批量参数网格提交与聚合对比表);
 * ``finboard.sim.*``(#127 + #139)—— 模拟盘(账户 / 会话生命周期 / 决策提交 /
   行情投递 / 晋级评估 / 归档 / 订单 / 成交 / 持仓 / 账本 / 审计 / 报告);
 * ``finboard.run.*`` 写工具(queue / cancel / replay / lineage,#127)。
@@ -57,6 +57,7 @@ from finboard_mcp.tools import (
     register_data_tools,
     register_data_write_tools,
     register_factor_tools,
+    register_grid_tools,
     register_jobs_tools,
     register_memory_tools,
     register_portfolio_tools,
@@ -80,7 +81,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(113 个,已实现)==
+== 当前可用工具(115 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127)
 - finboard.memory.*(7) —— 研究记忆:remember / list / get / forget / correct
@@ -95,7 +96,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。
   无代码版本化生命周期,反复 validate 预览 → draft → publish。
-- 回测(5,✅ #127 + #172 + #173 + #174):backtest_strategy_list(输出
+- 回测(7,✅ #127 + #172 + #173 + #174 + #175):backtest_strategy_list(输出
   builtin_strategies 事件驱动策略+参数 schema 与 published_specs 已发布规格
   列表,含状态/版本数/执行入口提示)、backtest_run 双形态——(1) strategy 形态:
   同步运行(返回 metrics/equity/fills;equity_mode=summary 默认降采样,full
@@ -104,7 +105,11 @@ FinBoard 研究 MCP —— 量化研究工具集
   (2) strategy_spec 形态:按已发布 {strategy_id, version} 路由入队 research_run
   管线,返回 run_id + job_id 指针异步执行(与 strategy 互斥;其余入队字段走
   queue_payload,与 finboard_run_queue 同构)。backtest_history_list/get
-  (history_get 支持 fills 分页)、backtest_history_delete(写)。
+  (history_get 支持 fills 分页)、backtest_history_delete(写)、
+  backtest_grid_submit(写,批量参数网格:一次提交 N 组参数 → N 个 backtest_run
+  后台任务,展开/上限/校验后同一事务落库,返回 grid_id + job 指针)、
+  backtest_grid_get(只读,聚合对比表:指标矩阵 + 排名/最优标注 + 失败清单,
+  equity 复用 summary 降采样)。
 - 模拟盘(21,✅ #127+#139):sim_account list/get/create(写)、
   sim_session list/get/create(写)/start/pause/stop/archive(写)/reset(写)、
   sim_decision_submit(写,结构化目标仓位 → 生成订单,不直接创建订单)、
@@ -177,6 +182,7 @@ def build_mcp_server() -> MCPServer:
     register_factor_tools(mcp)
     register_strategy_tools(mcp)
     register_backtest_tools(mcp)
+    register_grid_tools(mcp)
     register_simulation_tools(mcp)
     register_portfolio_tools(mcp)
     register_report_tools(mcp)

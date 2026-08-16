@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 113 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 115 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -16,7 +16,7 @@
 | 研究记忆(memory.*) | ✅ | |
 | 因子实验室(factor.* / feature_snapshot.*,✅ #125) | ✅ | |
 | 策略规格(strategy.* / preset.*,✅ #126) | ✅(含 validate/draft/publish/rollback) | |
-| 回测(backtest.*,✅ #127+#174) | ✅(同步运行 + strategy_spec 路由 research_run + 历史 CRUD) | |
+| 回测(backtest.*,✅ #127+#174+#175) | ✅(同步运行 + strategy_spec 路由 research_run + 批量网格提交/聚合 + 历史 CRUD) | |
 | 模拟盘(sim.*,✅ #127+#139) | ✅(账户/会话/决策/行情投递/评估/归档/订单/报告) | |
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
@@ -517,7 +517,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 参数:`preset_id: int`
 - 返回:`{deleted: true, preset_id}`;未找到 → `not_found`
 
-## finboard.backtest.*(✅ #127 + #174)
+## finboard.backtest.*(✅ #127 + #174 + #175)
 
 回测引擎(行情回放 + 纸面撮合)。复用 `BacktestEngine` +
 `BacktestRunRepository` + `list_strategy_definitions`;已发布规格回测走
@@ -585,6 +585,54 @@ research_run 管线轻路由(#174)。
 - 参数:`run_id: int`
 - 返回:`{run_id, deleted: true}`
 - 错误:`permission_denied`(只读模式)、`not_found`
+
+### finboard_backtest_grid_submit **[写]**
+批量参数网格回测提交(issue #175):一次提交 N 组参数,逐组合展开 + 上限封顶
++ 参数校验后,各登记一个 `kind=backtest_run` 后台任务(网格定义与任务**同一
+事务**落库,全有或全无),返回 grid_id + job 指针,异步执行。支撑「合理实验」:
+一个假设下多组参数对比择优,替代逐个手跑再人工对比。
+- 参数:
+  - 公共:`strategy: str`、`symbols: list[str]`、`start/end: str`(ISO 日期)、
+    `capital: str = "100000"`、`adjust: str = "qfq"`、`params?: dict`(公共参数,
+    被组合覆盖)、`selection?: dict`、`commission_rate/commission_min/
+    stamp_tax_rate/slippage_bps: str`
+  - 组合来源二选一(互斥):
+    - `params_list: list[dict]`(显式列表,每个元素是一组覆盖参数,优先)
+    - `params_grid: dict[str, list]`(笛卡尔积 `{字段: 值列表}`,跨字段全组合;
+      展开后总数受上限约束)
+  - `max_combos: int = 20`(组合数上限,硬上限 50,超限 `invalid_argument`,
+    防误操作打爆队列)、`grid_idempotency_key: str`(幂等键,≥8 字符,重提交
+    返回同一网格 created=false;组合定义不同 → conflict)、`requested_by: str`
+- 校验:未知策略 / `supports_backtest=false` / 任一组合参数非法 / selection
+  非法 / 日期非法 → `invalid_argument`,不落库不入队
+- 返回:`{grid_id, created, strategy, symbols, start, end, capital, adjust,
+  combo_count, max_combos, jobs: [{combo_index, label, job_id, params}],
+  polling_note}`
+- 错误:`permission_denied`(只读模式)、`invalid_argument`(形态互斥/上限/
+  参数校验)、`conflict`(幂等冲突 / 并发冲突)
+- 完成后用 `finboard_backtest_grid_get(grid_id)` 查询聚合对比表,或
+  `finboard_job_get(job_id)` 逐任务查询
+
+### finboard_backtest_grid_get(只读)
+查询批量参数网格回测的聚合对比表(issue #175):
+- 参数:`grid_id: str`、`equity_mode: str = "summary"`(equity 降采样到
+  max_points 个关键点,首末点保留,复用 #172 形态)、`max_points: int = 200`
+- 返回:
+  - 网格元信息 + `complete: bool`(全部组合到终态)/ `completed_count` /
+    `pending_count` / `failed_count`
+  - `metric_fields: list[str]`(指标矩阵列:收益/年化/夏普/回撤/胜率/换手/超额/
+    费用等,按规范顺序)
+  - `combos: list[{combo_index, label, params, job_id, job_status, run_id?,
+    metrics?, equity_curve?, equity_point_count?, rank?{指标: 竞争排名,同值
+    同排名}, best?{指标: 是否最优}}]`(成功组合带指标矩阵 + 排名 + 最优标注;
+    未到终态组合只有 job_status)
+  - `ranking: {指标: {combo_index, label, value}}`(每关键指标最优组合;
+    全部「越高越好」,max_drawdown 为负值越高=回撤越小)
+  - `failures: list[{combo_index, label, job_id, job_status, error_code,
+    error_summary}]`(失败/取消/中断/产物缺失的组合**带错误码单列**,不影响
+    成功组合返回)
+- 错误:`not_found`(网格不存在)、`invalid_argument`(equity_mode 非法)
+- 部分失败不吞错;`complete=false` 时稍后重试
 
 ## finboard.sim.*(✅ #127 + #139)
 
