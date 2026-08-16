@@ -179,13 +179,17 @@ class OpenCodeProcessConfig:
             "-p", f"{self.hostname}:{self.port}:{self.port}",
         ]
         # bind mount 项目级配置目录(.opencode / .agents)。
+        # 一律 ``:ro`` —— 注释声称只读、代码此前却用 rw 挂载。finboard-researcher
+        # 已放行 ``bash``(#182),rw 会让 agent 经容器改写仓库配置(自提权),只读
+        # 是硬性边界:容器内 opencode 只读这些配置,会话 / 状态写入走 named volume。
         workdir = Path(self.workdir).resolve()
         for host_rel, container_abs in _CONTAINER_MOUNTS:
             host_abs = workdir / host_rel
-            cmd += ["-v", f"{host_abs}:{container_abs}"]
+            cmd += ["-v", f"{host_abs}:{container_abs}:ro"]
         # 渲染后的运行时配置覆盖容器内 opencode.json(MCP 地址可配置,#157)。
+        # 单文件 mount 同样只读(runtime 配置是宿主机渲染产物,容器无需回写)。
         if runtime_config_path is not None:
-            cmd += ["-v", f"{runtime_config_path}:{_CONTAINER_WORKDIR}/.opencode/opencode.json"]
+            cmd += ["-v", f"{runtime_config_path}:{_CONTAINER_WORKDIR}/.opencode/opencode.json:ro"]
         # named volume 持久化会话 DB / auth:容器删除后数据保留,重启可恢复历史。
         for volume_name, container_abs in _RUNTIME_VOLUME_MOUNTS:
             cmd += ["-v", f"{volume_name}:{container_abs}"]

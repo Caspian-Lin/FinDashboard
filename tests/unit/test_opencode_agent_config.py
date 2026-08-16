@@ -4,8 +4,10 @@
 
 1. **权限 allowlist**:`.opencode/opencode.json` 与 agent md 的 permission 必须
    ``"*": "deny"`` 起底,只显式放行 ``read``/``glob``/``grep``/``skill``/
-   ``finboard_*``(Skill 渐进式加载 + MCP 工具);``bash``/``edit``/``write``/
-   ``webfetch`` 等执行 / 外联能力不得被放行。
+   ``finboard_*``(Skill 渐进式加载 + MCP 工具)以及 ``bash``/``exa_*``(#182
+   扩展:bash 上限为只读轮询 / 状态检查,行为边界写在 agent md、机械兜底靠
+   ``.opencode``/``.agents`` 挂载 ``:ro``;exa 为 remote 搜索 MCP);
+   ``edit``/``write``/``webfetch`` 等执行 / 外联能力不得被放行。
 2. **#122 语义**:agent 定义不得再包含「只读 / 写操作需人工审批」过期措辞,
    必须声明研究写操作可自主执行、实盘能力永久拒绝。
 3. **#123 文档同步**:MCP 工具注册表总数 == server ``_INSTRUCTIONS`` 宣称数 ==
@@ -36,7 +38,18 @@ _MCP_SERVER_PY = (
 )
 
 #: 唯一允许的 permission 显式放行键(其余全被 "*" deny 覆盖)。
-_ALLOWED_PERMISSION_KEYS = {"*", "read", "glob", "grep", "skill", "finboard_*"}
+#: #182 扩展:bash(仅只读轮询 / 状态检查,约束在 agent md + 挂载 :ro)与
+#: exa_*(remote 搜索 MCP)。
+_ALLOWED_PERMISSION_KEYS = {
+    "*",
+    "read",
+    "glob",
+    "grep",
+    "skill",
+    "bash",
+    "finboard_*",
+    "exa_*",
+}
 
 
 def _registered_tool_names() -> set[str]:
@@ -80,10 +93,10 @@ def test_opencode_json_permission_is_allowlist() -> None:
     assert explicit <= _ALLOWED_PERMISSION_KEYS - {"*"}, (
         f"出现未约定的放行键: {explicit - (_ALLOWED_PERMISSION_KEYS - {'*'})}"
     )
-    for required in ("read", "glob", "grep", "skill", "finboard_*"):
+    for required in ("read", "glob", "grep", "skill", "bash", "finboard_*", "exa_*"):
         assert permission.get(required) == "allow", f"{required} 必须显式放行"
-    # 执行 / 外联能力不得放行(由 * deny 覆盖)。
-    for forbidden in ("bash", "edit", "write", "webfetch", "websearch", "task"):
+    # 执行 / 外联能力不得放行(由 * deny 覆盖;bash 为 #182 例外,见模块 docstring)。
+    for forbidden in ("edit", "write", "webfetch", "websearch", "task"):
         assert permission.get(forbidden) != "allow", f"{forbidden} 不得放行"
 
 
