@@ -10,6 +10,7 @@
 3. **循环内闭包 late-binding 是守卫注入的经典坑**:`async def _guarded(): await orig()` 直接写在 for 循环里,所有闭包共享循环结束后的最后一个 `orig`(曾致挂死探针 0.03s「通过」——实际执行了别的测试);必须用工厂函数按参数绑定。
 4. **`str(make_url(url).set(database=...))` 会脱敏密码输出 `***`**,create_async_engine 拿到错误凭据 → 「psycopg 直连成功但 SQLAlchemy 连不上」的假象;须 `render_as_string(hide_password=False)`。
 5. 本机环境变更:WSL PostgreSQL 的 `findashboard` 角色已 `ALTER ROLE ... CREATEDB`,且已手动建 `findashboard_test` 库(测试库隔离所需;conftest 会自动建库,CI 的 postgres 服务用户是 superuser 可直接建)。
+6. **pytest-timeout 的 ini 配置(marker 注册 / `timeout` / `timeout_method` / addopts 排除)必须与依赖一起提交**:曾只提交了 `pytest-timeout` 依赖而 ini 留在本地未提交,CI(Linux)上 `config.getini("timeout")` 返回空串 → 守卫 `float('')` 在收集期 INTERNALERROR("collected N items / 1 error"),而本地因工作区文件带配置一切正常 —— 「本地全过、CI 收集期炸」先对比提交版与工作区版配置(`git show HEAD:pyproject.toml`),别猜平台差异。
 
 **Why:** #167 要同时覆盖 sync/async 两类挂死,Windows 无 signal,且测试要与 dev 库彻底隔离;上述框架行为不实测读源码无法预知。
 
