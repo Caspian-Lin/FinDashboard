@@ -22,6 +22,7 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunStage,
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
+    execution_mode_for,
     pipeline_output_checksum,
     stable_checksum,
     to_json_value,
@@ -564,10 +565,19 @@ class ResearchRunCoordinator:
             raise ResearchRunConflictError("报告订单数量不一致")
         if report.fill_count != sum(len(item.fills) for item in decisions):
             raise ResearchRunConflictError("报告成交数量不一致")
+        if report.execution_mode is not execution_mode_for(manifest.parameters):
+            raise ResearchRunConflictError("报告执行模式与 manifest 参数不一致")
         if decisions:
             last = decisions[-1].ledger
-            if report.final_equity != last.equity or report.final_cash != last.cash:
-                raise ResearchRunConflictError("报告期末权益/现金与账本不一致")
+            if report.equity_curve:
+                # 多期回放:期末权益按全区间每日权益曲线最后一个交易日计值
+                # (行情会持续到发布末端,可能晚于最后一次成交执行日)。
+                if report.final_equity != report.equity_curve[-1].equity:
+                    raise ResearchRunConflictError("报告期末权益与权益曲线不一致")
+            elif report.final_equity != last.equity:
+                raise ResearchRunConflictError("报告期末权益与账本不一致")
+            if report.final_cash != last.cash:
+                raise ResearchRunConflictError("报告期末现金与账本不一致")
             if report.commission_paid != last.fees_paid:
                 raise ResearchRunConflictError("报告佣金与账本不一致")
             if report.tax_paid != last.tax_paid:

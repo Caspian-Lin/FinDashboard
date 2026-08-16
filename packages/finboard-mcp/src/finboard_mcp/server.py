@@ -16,8 +16,9 @@
 * ``finboard.strategy.*`` / ``finboard.preset.*``(#126)——
   策略规格注册表 / 模板 / 校验 / 草稿 / 发布 / 回滚 / diff + 预设 CRUD
   (无代码版本化生命周期);
-* ``finboard.backtest.*``(#127 + #175)—— 回测引擎(可用策略 schema / 同步运行 /
-  历史列表 / 详情 / 删除 / 批量参数网格提交与聚合对比表);
+* ``finboard.backtest.*``(#127 + #175 + #183)—— 回测引擎(可用策略 schema / 同步运行 /
+  历史列表 / 详情 / 删除 / 批量参数网格提交与聚合对比表;strategy_spec 形态
+  多期再平衡回放 execution_mode 标注);
 * ``finboard.sim.*``(#127 + #139)—— 模拟盘(账户 / 会话生命周期 / 决策提交 /
   行情投递 / 晋级评估 / 归档 / 订单 / 成交 / 持仓 / 账本 / 审计 / 报告);
 * ``finboard.run.*`` 写工具(queue / cancel / replay / lineage,#127)。
@@ -83,7 +84,8 @@ FinBoard 研究 MCP —— 量化研究工具集
 
 == 当前可用工具(115 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
-  写:queue / cancel / replay / lineage(✅ #127)
+  写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
+  single_shot|multi_period,#183)
 - finboard.memory.*(7) —— 研究记忆:remember / list / get / forget / correct
   / confirm / archive(跨会话长期上下文,操作 research_memories 独立表)
 - 数据查询(9,✅ #124):instrument list/get/search、dataset_release list/get、
@@ -96,7 +98,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。
   无代码版本化生命周期,反复 validate 预览 → draft → publish。
-- 回测(7,✅ #127 + #172 + #173 + #174 + #175):backtest_strategy_list(输出
+- 回测(7,✅ #127 + #172 + #173 + #174 + #175 + #183):backtest_strategy_list(输出
   builtin_strategies 事件驱动策略+参数 schema 与 published_specs 已发布规格
   列表,含状态/版本数/执行入口提示)、backtest_run 双形态——(1) strategy 形态:
   同步运行(返回 metrics/equity/fills;equity_mode=summary 默认降采样,full
@@ -104,7 +106,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   不要求 daily_metrics)/snapshot(snapshot_ids 冻结快照观测));
   (2) strategy_spec 形态:按已发布 {strategy_id, version} 路由入队 research_run
   管线,返回 run_id + job_id 指针异步执行(与 strategy 互斥;其余入队字段走
-  queue_payload,与 finboard_run_queue 同构)。backtest_history_list/get
+  queue_payload,与 finboard_run_queue 同构;返回值含 execution_mode
+  single_shot|multi_period)。多期回放(#183):queue_payload.parameters 声明
+  rebalance_frequency=monthly|quarterly 时,按冻结发布交易日历每期重算
+  universe/features/signals 与组合,决策间每日 mark-to-market 产出全区间
+  equity_curve(报告含 annualized_return,最终权 益=曲线末点);未声明则
+  single_shot 保持单快照路径行为不变。backtest_history_list/get
   (history_get 支持 fills 分页)、backtest_history_delete(写)、
   backtest_grid_submit(写,批量参数网格:一次提交 N 组参数 → N 个 backtest_run
   后台任务,展开/上限/校验后同一事务落库,返回 grid_id + job 指针)、

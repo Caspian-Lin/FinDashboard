@@ -19,7 +19,10 @@
 **本机其它环境坑**(同一次排查发现):
 
 - pytest `tmp_path` 权限问题(`pytest-of-<user>` 目录被锁,fixture setup 全体
-  PermissionError):加 `--basetemp=C:/Users/28491/AppData/Local/Temp/finboard-pytest-tmp -p no:cacheprovider` 绕过。
+  PermissionError):已根除 —— `pyproject.toml` addopts 固定
+  `--basetemp .pytest-tmp -p no:cacheprovider`,临时目录在仓库内(已入
+  .gitignore),**pytest 必须在仓库根目录运行**,不要手动加 `--basetemp`
+  指向系统临时目录(见 AGENTS.md 测试章节)。
 - `data_releases/` 下有锁定目录导致 `mypy .` 失败:改跑 `mypy packages/ tests/ migrations/`。
 - Windows 上 `asyncio` 直接连 psycopg 需 `WindowsSelectorEventLoopPolicy`(否则
   Proactor 报错)。

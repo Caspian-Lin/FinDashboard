@@ -118,10 +118,7 @@ def _input(
         ),
         prices=mark_prices,
         execution_prices=mark_prices,
-        lot_info={
-            symbol: AssetLotInfo(code=symbol, lot_size=100)
-            for symbol in SYMBOLS
-        },
+        lot_info={symbol: AssetLotInfo(code=symbol, lot_size=100) for symbol in SYMBOLS},
         input_artifact_ids=("release-v1", "factor-v1"),
         covariance=covariance,
         sleeve_map=dict.fromkeys(SYMBOLS, "equity"),
@@ -154,9 +151,7 @@ async def test_formal_pipeline_generates_complete_research_lifecycle(
     artifacts = await store.list_artifacts(manifest.run_id)
     assert len(artifacts) == 14
     risk_cap = next(
-        item
-        for item in decision.constraints
-        if item.constraint == "max_risk_contribution"
+        item for item in decision.constraints if item.constraint == "max_risk_contribution"
     )
     assert risk_cap.hard is True
     assert risk_cap.passed is True
@@ -170,14 +165,9 @@ async def test_formal_pipeline_generates_complete_research_lifecycle(
         "200k",
         "500k",
     }
-    assert len(
-        {item.input_checksum for item in decision.capital_feasibility}
-    ) == 1
+    assert len({item.input_checksum for item in decision.capital_feasibility}) == 1
 
-    assert all(
-        item.research_order_id.startswith("RR-PIPE-")
-        for item in decision.orders
-    )
+    assert all(item.research_order_id.startswith("RR-PIPE-") for item in decision.orders)
     assert {item.status.value for item in decision.orders} == {
         ResearchOrderStatus.FILLED.value,
         ResearchOrderStatus.PARTIALLY_FILLED.value,
@@ -254,9 +244,7 @@ async def test_risk_exit_uses_filled_position_and_persists_state(
             ),
         )
     )
-    strategy_spec = manifest.strategy_spec.model_copy(
-        update={"risk_exit_policy": risk_policy}
-    )
+    strategy_spec = manifest.strategy_spec.model_copy(update={"risk_exit_policy": risk_policy})
     manifest = replace(
         manifest,
         strategy_spec=strategy_spec,
@@ -288,7 +276,60 @@ async def test_risk_exit_uses_filled_position_and_persists_state(
     assert "A.SH" in second.risk_state.cooldown_until
     assert "A.SH" not in {item.symbol for item in second.targets_after_risk}
     assert any(
-        item.symbol == "A.SH"
-        and item.action is ResearchFillAction.CLOSE_LONG
+        item.symbol == "A.SH" and item.action is ResearchFillAction.CLOSE_LONG
         for item in second.fills
     )
+
+
+@pytest.mark.asyncio
+async def test_build_report_multi_period_metrics_from_curve(manifest_factory) -> None:
+    """多期回放报告:指标由每日权益曲线计算,单快照路径保持旧行为。"""
+    from decimal import Decimal
+
+    from finboard_backtest.research_run import EquityPoint, ResearchExecutionMode
+
+    manifest = replace(
+        _manifest(manifest_factory),
+        parameters={"rebalance_frequency": "monthly"},
+    )
+    adapter = PortfolioPipelineAdapter(
+        strategy_kind="ma_cross",
+        decision_inputs=(_input(covariance=_covariance()),),
+    )
+    decisions = await _collect_decisions(adapter, manifest)
+    assert decisions
+
+    # 两段日收益:+2% 与 -1%(夏普有定义),总收益约 +0.98%。
+    curve = (
+        EquityPoint(trade_date=date(2025, 1, 2), equity=Decimal("100000")),
+        EquityPoint(trade_date=date(2025, 1, 3), equity=Decimal("102000")),
+        EquityPoint(trade_date=date(2025, 1, 6), equity=Decimal("100980")),
+    )
+    report = adapter.build_report(manifest, decisions, equity_curve=curve)
+
+    assert report.execution_mode is ResearchExecutionMode.MULTI_PERIOD
+    assert report.equity_curve == curve
+    # 总收益 = 曲线末端 / 初始资金 - 1;期末权益 = 曲线末端。
+    assert report.strategy_return == pytest.approx(0.0098, abs=1e-9)
+    assert report.final_equity == Decimal("100980")
+    # 年化 = (1+总收益)^(252/段数) - 1;夏普 > 0(两段收益波动非零)。
+    assert report.annualized_return == pytest.approx((1.0098) ** 126 - 1, rel=1e-6)
+    assert report.sharpe_ratio > 0
+    assert report.max_drawdown == pytest.approx(0.01, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_build_report_single_shot_keeps_legacy_fields(manifest_factory) -> None:
+    """单快照路径:execution_mode=single_shot,不产出 equity_curve。"""
+    from finboard_backtest.research_run import ResearchExecutionMode
+
+    manifest = _manifest(manifest_factory)
+    adapter = PortfolioPipelineAdapter(
+        strategy_kind="ma_cross",
+        decision_inputs=(_input(covariance=_covariance()),),
+    )
+    decisions = await _collect_decisions(adapter, manifest)
+    report = adapter.build_report(manifest, decisions)
+    assert report.execution_mode is ResearchExecutionMode.SINGLE_SHOT
+    assert report.equity_curve == ()
+    assert report.annualized_return == 0.0
