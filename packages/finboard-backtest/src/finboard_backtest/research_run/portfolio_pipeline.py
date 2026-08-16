@@ -14,7 +14,9 @@ from decimal import Decimal
 from typing import cast
 
 import numpy as np
+import structlog
 
+from finboard_backtest.metrics import total_return
 from finboard_backtest.portfolio.allocators import AllocationError
 from finboard_backtest.portfolio.builder import (
     PortfolioBuildInput,
@@ -81,6 +83,8 @@ from finboard_backtest.strategy_spec.contracts import (
     SignalConflictPolicy as SpecSignalConflictPolicy,
 )
 from finboard_backtest.strategy_spec.registry import get_strategy_capability
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +347,7 @@ class PortfolioPipelineAdapter:
         decisions: Sequence[DecisionBundle],
         *,
         equity_curve: tuple[EquityPoint, ...] = (),
+        benchmark_curve: tuple[tuple[date, Decimal], ...] = (),
     ) -> ResearchRunReport:
         execution_mode = execution_mode_for(manifest.parameters)
         if decisions:
@@ -359,7 +364,8 @@ class PortfolioPipelineAdapter:
                 tax_paid=Decimal(),
                 slippage_paid=Decimal(),
             )
-        benchmark_return = _benchmark_return(manifest)
+        benchmark_return = _benchmark_return(manifest, benchmark_curve)
+        benchmark_symbol = _benchmark_symbol(manifest)
         impact: dict[str, float] = {}
         for decision in decisions:
             for outcome in decision.constraints:
@@ -402,9 +408,13 @@ class PortfolioPipelineAdapter:
         return ResearchRunReport(
             strategy_kind=self.strategy_kind,
             strategy_return=strategy_return,
-            benchmark_symbol=manifest.strategy_spec.validation_plan.benchmark_symbol,
+            benchmark_symbol=benchmark_symbol,
             benchmark_return=benchmark_return,
-            excess_return=strategy_return - benchmark_return,
+            excess_return=(
+                strategy_return - benchmark_return
+                if benchmark_return is not None
+                else None
+            ),
             sharpe_ratio=sharpe,
             max_drawdown=drawdown,
             final_equity=final_equity,
@@ -698,10 +708,37 @@ def _required_float(
     return float(cast(float | int | str, overrides.get(key, default)))
 
 
-def _benchmark_return(manifest: ResearchRunManifest) -> float:
+def _benchmark_symbol(manifest: ResearchRunManifest) -> str:
+    """报告展示用的基准标的:优先 manifest.benchmark_config.symbol,
+    兼容旧 manifest 回退到验证计划字段。"""
+    configured = manifest.benchmark_config.get("symbol")
+    if isinstance(configured, str) and configured:
+        return configured
+    return manifest.strategy_spec.validation_plan.benchmark_symbol
+
+
+def _benchmark_return(
+    manifest: ResearchRunManifest,
+    benchmark_curve: tuple[tuple[date, Decimal], ...],
+) -> float | None:
+    """按 benchmark_config.symbol 取冻结行情计算基准收益(issue #184)。
+
+    优先级:冻结基准曲线点对点收益(真实计算)> 显式 ``overrides.return``
+    (发布无该标的行情时的手动兜底);两者都缺失时返回 ``None`` 并由调用方
+    记录具名 warning —— 禁止静默 0.0。
+    """
+    if len(benchmark_curve) >= 2:
+        return total_return(benchmark_curve)
     overrides = _section_overrides(manifest.benchmark_config)
-    value = overrides.get("return", 0.0)
-    return float(cast(float | int | str, value))
+    manual = overrides.get("return")
+    if manual is not None:
+        return float(cast(float | int | str, manual))
+    logger.warning(
+        "research_run.benchmark_missing",
+        symbol=_benchmark_symbol(manifest),
+        reason="no_bars_or_manual_override",
+    )
+    return None
 
 
 def _curve_metrics(

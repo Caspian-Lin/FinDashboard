@@ -166,3 +166,57 @@ def test_ledger_enforces_accounting_identity() -> None:
             tax_paid=Decimal("0"),
             slippage_paid=Decimal("0"),
         )
+
+
+def test_report_round_trip_null_benchmark() -> None:
+    """基准缺失(issue #184):benchmark_return/excess_return 为 null 可 JSON 往返。"""
+    report = ResearchRunReport(
+        strategy_kind="multi_factor",
+        strategy_return=0.05,
+        benchmark_symbol="510300.SH",
+        benchmark_return=None,
+        excess_return=None,
+        sharpe_ratio=0.8,
+        max_drawdown=0.05,
+        final_equity=Decimal("105000"),
+        final_cash=Decimal("0"),
+        commission_paid=Decimal("100"),
+        tax_paid=Decimal("0"),
+        slippage_paid=Decimal("50"),
+        fill_shortfall=Decimal("0"),
+        constraint_impact={},
+        decision_count=1,
+        order_count=1,
+        fill_count=1,
+    )
+    payload = cast(dict[str, object], to_json_value(report))
+    assert payload["benchmark_return"] is None
+    assert payload["excess_return"] is None
+    restored = report_from_json(payload)
+    assert restored == report
+    assert restored.benchmark_return is None
+    assert restored.excess_return is None
+
+
+def test_report_benchmark_pair_must_match() -> None:
+    """基准缺失语义:benchmark_return 与 excess_return 必须同为 None 或同为数值。"""
+    with pytest.raises(ValueError, match="必须同为 None"):
+        ResearchRunReport(
+            strategy_kind="multi_factor",
+            strategy_return=0.0,
+            benchmark_symbol="510300.SH",
+            benchmark_return=None,
+            excess_return=0.0,
+            sharpe_ratio=0.0,
+            max_drawdown=0.0,
+            final_equity=Decimal("100000"),
+            final_cash=Decimal("100000"),
+            commission_paid=Decimal("0"),
+            tax_paid=Decimal("0"),
+            slippage_paid=Decimal("0"),
+            fill_shortfall=Decimal("0"),
+            constraint_impact={},
+            decision_count=1,
+            order_count=0,
+            fill_count=0,
+        )

@@ -333,3 +333,99 @@ async def test_build_report_single_shot_keeps_legacy_fields(manifest_factory) ->
     assert report.execution_mode is ResearchExecutionMode.SINGLE_SHOT
     assert report.equity_curve == ()
     assert report.annualized_return == 0.0
+
+
+# --------------------------------------------------------------------------- 基准收益真实计算(issue #184)
+
+
+@pytest.mark.asyncio
+async def test_build_report_benchmark_missing_returns_null(manifest_factory) -> None:
+    """无基准曲线且无手工 override:benchmark_return/excess_return 为 None。"""
+    manifest = _manifest(manifest_factory)
+    adapter = PortfolioPipelineAdapter(
+        strategy_kind="ma_cross",
+        decision_inputs=(_input(covariance=_covariance()),),
+    )
+    decisions = await _collect_decisions(adapter, manifest)
+    report = adapter.build_report(manifest, decisions)
+    assert report.benchmark_return is None
+    assert report.excess_return is None
+    # 展示字段仍给出基准标的(来自验证计划 / benchmark_config)
+    assert report.benchmark_symbol
+
+
+@pytest.mark.asyncio
+async def test_build_report_benchmark_curve_computes_real_return(
+    manifest_factory,
+) -> None:
+    """基准曲线传入:benchmark_return 取曲线总收益,超额 = 策略 - 基准。"""
+    from decimal import Decimal
+
+    manifest = _manifest(manifest_factory)
+    adapter = PortfolioPipelineAdapter(
+        strategy_kind="ma_cross",
+        decision_inputs=(_input(covariance=_covariance()),),
+    )
+    decisions = await _collect_decisions(adapter, manifest)
+    bench_curve = (
+        (date(2025, 1, 2), Decimal("100000")),
+        (date(2025, 1, 3), Decimal("105000")),
+        (date(2025, 1, 6), Decimal("110000")),
+    )
+    report = adapter.build_report(manifest, decisions, benchmark_curve=bench_curve)
+    assert report.benchmark_return == pytest.approx(0.10, abs=1e-9)
+    assert report.excess_return is not None
+    assert report.excess_return == pytest.approx(
+        report.strategy_return - (report.benchmark_return or 0.0), abs=1e-9
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_report_manual_benchmark_override_is_fallback(manifest_factory) -> None:
+    """发布无基准行情时,手工 override.return 作为兜底(曲线优先)。"""
+    from decimal import Decimal
+
+    manifest = replace(
+        _manifest(manifest_factory),
+        benchmark_config={
+            "symbol": "510300.SH",
+            "overrides": {"return": 0.25},
+        },
+    )
+    adapter = PortfolioPipelineAdapter(
+        strategy_kind="ma_cross",
+        decision_inputs=(_input(covariance=_covariance()),),
+    )
+    decisions = await _collect_decisions(adapter, manifest)
+    # 无基准曲线 → 手工兜底生效;传入曲线时真实计算优先。
+    report = adapter.build_report(manifest, decisions)
+    assert report.benchmark_return == pytest.approx(0.25, abs=1e-9)
+    assert report.excess_return == pytest.approx(
+        report.strategy_return - 0.25, abs=1e-9
+    )
+
+    bench_curve = (
+        (date(2025, 1, 2), Decimal("100000")),
+        (date(2025, 1, 3), Decimal("102000")),
+        (date(2025, 1, 6), Decimal("103000")),
+    )
+    report_real = adapter.build_report(
+        manifest, decisions, benchmark_curve=bench_curve
+    )
+    assert report_real.benchmark_return == pytest.approx(0.03, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_benchmark_symbol_prefers_config_over_plan(manifest_factory) -> None:
+    """报告的 benchmark_symbol 优先取 benchmark_config.symbol。"""
+    manifest = replace(
+        _manifest(manifest_factory),
+        benchmark_config={"symbol": "000300.SH"},
+    )
+    adapter = PortfolioPipelineAdapter(
+        strategy_kind="ma_cross",
+        decision_inputs=(_input(covariance=_covariance()),),
+    )
+    decisions = await _collect_decisions(adapter, manifest)
+    report = adapter.build_report(manifest, decisions)
+    assert report.benchmark_symbol == "000300.SH"

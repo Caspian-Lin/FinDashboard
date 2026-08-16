@@ -32,7 +32,9 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
+import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from finboard_backtest.factors.combine import (
@@ -86,6 +88,8 @@ from finboard_backtest.strategy_spec.universe import explain_universe
 if TYPE_CHECKING:
     from finboard_backtest.portfolio import CovarianceEstimate
     from finboard_data.releases import FrozenReleaseProvider
+
+logger = structlog.get_logger(__name__)
 
 #: 信号引擎当前支持的策略类型(其余 kind 继续明确报 not_implemented)。
 SIGNAL_ENGINE_STRATEGY_KINDS: frozenset[str] = frozenset({"multi_factor"})
@@ -555,6 +559,56 @@ async def _load_price_series(
     return series
 
 
+async def _load_benchmark_curve(
+    manifest: ResearchRunManifest,
+    release_provider_factory: ReleaseProviderFactory,
+) -> tuple[tuple[date, Decimal], ...]:
+    """按 ``benchmark_config.symbol`` 从冻结发布取基准 bars,构建买入持有曲线。
+
+    (issue #184)基准收益必须来自真实行情,不再依赖手工 ``overrides.return``。
+    依次尝试 manifest 的每个数据发布,第一个能提供该标的 bars 的发布胜出
+    (PIT 门按发布末日 17:00 放行全部日线);全部缺失返回空曲线,由
+    ``build_report`` 落 null + 具名 warning。纯离线研究域,只读冻结发布。
+    """
+    from finboard_backtest.metrics import buy_and_hold_return
+    from finboard_backtest.research_run.frozen_loader import _market_from_value
+    from finboard_shared.models import Symbol
+
+    configured = manifest.benchmark_config.get("symbol")
+    if not isinstance(configured, str) or not configured:
+        return ()
+    symbol = Symbol(code=configured, market=_market_from_value(configured))
+    for release_ref in manifest.dataset_releases:
+        try:
+            provider = release_provider_factory(release_ref.artifact_id)
+            bars = await provider.fetch_point_in_time_bars(
+                symbol,
+                provider.release.period,
+                provider.release.start_date,
+                provider.release.end_date,
+                decision_at=datetime.combine(
+                    provider.release.end_date,
+                    time(hour=17, tzinfo=ZoneInfo("Asia/Shanghai")),
+                ),
+                adjust=provider.release.adjustment,
+            )
+        except Exception:
+            logger.warning(
+                "research_run.benchmark_release_unavailable",
+                symbol=configured,
+                release=release_ref.artifact_id,
+            )
+            continue
+        if bars:
+            return tuple(
+                buy_and_hold_return(
+                    [(item.bar.timestamp.date(), item.bar.close) for item in bars],
+                    manifest.initial_capital,
+                )
+            )
+    return ()
+
+
 async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
     """读取发布交易日历(首个 ready 标的的已发布 bars,升序去重)。
 
@@ -1007,6 +1061,7 @@ class SignalEnginePipelineAdapter:
         self._snapshot_provider = snapshot_provider
         self._inputs: tuple[PortfolioDecisionInput, ...] | None = None
         self._equity_curve: tuple[EquityPoint, ...] = ()
+        self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
 
     @property
     def execution_mode(self) -> ResearchExecutionMode:
@@ -1056,6 +1111,11 @@ class SignalEnginePipelineAdapter:
             release_ref = manifest.dataset_releases[0]
             provider = self._release_provider_factory(release_ref.artifact_id)
             self._equity_curve = await build_daily_equity_curve(provider, manifest, collected)
+        # 基准曲线(issue #184):两种执行模式都按 benchmark_config.symbol
+        # 从冻结发布取行情;缺失落空曲线,由 build_report 记 warning。
+        self._benchmark_curve = await _load_benchmark_curve(
+            manifest, self._release_provider_factory
+        )
 
     def build_report(
         self,
@@ -1070,6 +1130,7 @@ class SignalEnginePipelineAdapter:
             manifest,
             decisions,
             equity_curve=self._equity_curve,
+            benchmark_curve=self._benchmark_curve,
         )
 
 
