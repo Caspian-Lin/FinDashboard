@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "FinDashboard Team" }]
+dependencies = [
+    "finboard-data[tushare]",
+]
 
 # 根包本身不打包发布,仅作为 workspace 元包
 [tool.uv.workspace]
@@ -24,11 +27,11 @@ finboard-reconcile = { workspace = true }
 finboard-app = { workspace = true }
 finboard-api = { workspace = true }
 finboard-scheduler = { workspace = true }
-finboard-data = { workspace = true }
 finboard-backtest = { workspace = true }
 finboard-simulation = { workspace = true }
 finboard-mcp = { workspace = true }
 finboard-opencode = { workspace = true }
+finboard-data = { workspace = true }
 
 # 开发期统一依赖,改用 PEP 735 dependency-groups(uv 推荐写法)
 [dependency-groups]
