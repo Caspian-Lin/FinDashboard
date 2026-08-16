@@ -76,7 +76,18 @@ class ResearchRunExecutor:
         async with self._session_maker() as session:
             store = self._store_factory(session)
             manifest = await _reconstruct_manifest(store, run_id)
-            adapter = self._adapter_factory(manifest)
+            try:
+                adapter = self._adapter_factory(manifest)
+            except Exception as exc:
+                # 伴生缺陷 A(issue #170):适配器工厂失败不能只落在
+                # background_jobs 行 —— research_runs 必须同步 FAILED,
+                # 否则 finboard_run_get 查不到失败原因。
+                await _mark_run_failed(store, run_id, exc)
+                raise ExecutorError(
+                    code=getattr(exc, "code", type(exc).__name__),
+                    summary=str(exc)[:1000] or type(exc).__name__,
+                    retryable=False,
+                ) from exc
             coordinator = ResearchRunCoordinator(store)
             record = await coordinator.execute(manifest, adapter)
             await store.checkpoint()
@@ -109,6 +120,40 @@ async def _reconstruct_manifest(
             context={"run_id": run_id},
         )
     return record.manifest
+
+
+async def _mark_run_failed(
+    store: ResearchRunStore,
+    run_id: str,
+    exc: Exception,
+) -> None:
+    """适配器构造失败时把 research_runs 置 FAILED(尽力而为,不掩盖原始错误)。"""
+    from finboard_backtest.research_run import (
+        ResearchRunConflictError,
+        ResearchRunStatus,
+    )
+
+    error_code = getattr(exc, "code", type(exc).__name__)
+    error_summary = str(exc)[:1000] or type(exc).__name__
+    try:
+        record = await store.get(run_id)
+        if record is not None and record.status is ResearchRunStatus.QUEUED:
+            await store.transition(
+                run_id,
+                expected=frozenset({ResearchRunStatus.QUEUED}),
+                target=ResearchRunStatus.RUNNING,
+            )
+        await store.transition(
+            run_id,
+            expected=frozenset({ResearchRunStatus.RUNNING}),
+            target=ResearchRunStatus.FAILED,
+            error_code=error_code,
+            error_summary=error_summary,
+        )
+        await store.checkpoint()
+    except ResearchRunConflictError:
+        # 状态已被并发修改(如取消),让 worker 兜底按原始错误收口。
+        return
 
 
 def _record_to_result(

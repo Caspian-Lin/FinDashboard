@@ -53,6 +53,7 @@ _ALLOWED_KINDS: frozenset[str] = frozenset(
         "data_sync",
         "fetch_all",
         "quality_repair",
+        "research_data_sync",
     }
 )
 
@@ -308,7 +309,8 @@ def register(mcp: MCPServer) -> None:
             "[写] 登记一个 queued 后台任务并立即返回 202 + job_id(不等待执行,"
             "由独立 worker 进程消费)。"
             "参数:kind(白名单:echo/research_run/feature_snapshot/bulk_download/"
-            "dataset_publish/backtest_run/data_sync/fetch_all/quality_repair)、"
+            "dataset_publish/backtest_run/data_sync/fetch_all/quality_repair/"
+            "research_data_sync)、"
             "queue(默认 default)、idempotency_key(8-128 字符,幂等键)、"
             "payload(任务参数,具体结构取决于 kind)、priority(-1000..1000,默认 0)、"
             "max_attempts(1..10,默认 3)、requested_by。"

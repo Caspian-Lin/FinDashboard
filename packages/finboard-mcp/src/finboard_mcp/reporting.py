@@ -125,8 +125,26 @@ def aggregate_run_report(
     }
 
 
-def aggregate_backtest_report(row: BacktestRunModel) -> dict[str, Any]:
-    """聚合回测历史:运行元信息 + metrics + equity_curve + fills + summary。"""
+def aggregate_backtest_report(
+    row: BacktestRunModel,
+    *,
+    equity_mode: str = "summary",
+    max_points: int = 200,
+) -> dict[str, Any]:
+    """聚合回测历史:运行元信息 + metrics + equity_curve + fills + summary。
+
+    ``equity_mode`` 控制 equity 曲线体积(summary 降采样 / full 全量),
+    issue #172;文件导出走全量,不受影响。
+    """
+    from finboard_mcp.downsample import (
+        apply_equity_mode,
+        clamp_max_points,
+        resolve_equity_mode,
+    )
+
+    mode = resolve_equity_mode(equity_mode)
+    max_equity_points = clamp_max_points(max_points)
+    all_equity = list(row.equity_curve) if row.equity_curve else []
     return {
         "run_id": row.id,
         "strategy": row.strategy,
@@ -137,7 +155,10 @@ def aggregate_backtest_report(row: BacktestRunModel) -> dict[str, Any]:
         "adjust": row.adjust,
         "created_at": _iso(row.created_at),
         "metrics": dict(row.metrics) if row.metrics else {},
-        "equity_curve": list(row.equity_curve) if row.equity_curve else [],
+        "equity_curve": apply_equity_mode(
+            all_equity, equity_mode=mode, max_points=max_equity_points
+        ),
+        "equity_point_count": len(all_equity),
         "fills": list(row.fills) if row.fills else [],
         "summary": row.summary,
     }

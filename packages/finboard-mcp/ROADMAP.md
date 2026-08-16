@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 117 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141):
+**已实现 117 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 为既有工具的执行语义与契约增强,不新增工具):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -247,6 +247,31 @@ CSV 带 UTF-8 BOM(Excel 打开中文不乱码)、每节 `# 标题` 注释行 + �
 已覆盖生成,导出可后续扩展 `kind=sim`)。与 #117/#136 协同:报告生成若长耗时
 (如含归因重算)可后续任务化。不触及交易安全红线。回滚:移除
 `register_report_tools(mcp)` 调用 + `reports.py` / `reporting.py` 即可。
+
+### ✅ #170 multi_factor 信号引擎(已完成)
+已发布 multi_factor 规格经 `finboard_run_queue` → worker 端到端执行(信号引擎
++ 组合流水线 → 14 stage artifacts → COMPLETED);执行失败(如快照缺因子源)时
+`finboard_run_get` 可见错误码与摘要,`research_runs` 不停留在 QUEUED。其余
+strategy kind(etf_rotation 等)仍明确报 not_implemented。实现位于
+`finboard_backtest.research_run.signal_engine`(FeatureGraph 算子 +
+SignalRules comparator 求值 + universe 过滤 + 协方差估计),worker 侧
+`build_signal_engine_adapter_factory` 按 kind 分发。
+
+### ✅ #171 research_data_sync 任务(已完成)
+`finboard_job_enqueue(kind=research_data_sync)` 编排 research 数据表
+(估值 / 财务 / 行业)摄取:profiles 全量一次、daily 逐交易日、financial /
+industry 逐标的;逐标的接口接入 tushare_budget 限流,确定性 dataset_version
+断点续跑,单类失败不覆盖已发布数据,重复执行幂等。kind 白名单同步
+`_INSTRUCTIONS` / Skill `tools.md` / REST `/api/jobs`。根元包启用
+`finboard-data[tushare]` extra(未装 SDK / 未配 token fail-fast 报错可操作)。
+
+### ✅ #172 回测返回体积控制(已完成)
+`finboard_backtest_run` / `finboard_backtest_history_get` /
+`finboard_report_backtest` 三处统一 `equity_mode: summary | full`(默认
+summary):equity 降采样(首末点保留、时序单调、点数 ≤ max_points,默认 200),
+`full` 与现状完全一致;`history_get` 支持 fills 分页(fills_limit /
+fills_offset / fills_total)。降采样在 `finboard_mcp/downsample.py`,纯展示层
+变换,落库仍存全量。
 
 ## 扩展原则(适用于所有阶段)
 

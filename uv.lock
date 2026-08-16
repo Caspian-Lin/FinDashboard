@@ -932,6 +932,9 @@ requires-dist = [
 name = "findashboard"
 version = "0.1.0"
 source = { virtual = "." }
+dependencies = [
+    { name = "finboard-data", extra = ["tushare"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -949,6 +952,7 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "finboard-data", extras = ["tushare"], editable = "packages/finboard-data" }]
 
 [package.metadata.requires-dev]
 dev = [

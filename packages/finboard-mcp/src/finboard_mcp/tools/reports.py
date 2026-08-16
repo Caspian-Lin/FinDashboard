@@ -52,7 +52,13 @@ async def report_run(app: McpAppContext, run_id: str) -> ToolEnvelope:
     )
 
 
-async def report_backtest(app: McpAppContext, run_id: int) -> ToolEnvelope:
+async def report_backtest(
+    app: McpAppContext,
+    run_id: int,
+    *,
+    equity_mode: str = "summary",
+    max_points: int = 200,
+) -> ToolEnvelope:
     """聚合单条回测历史报告:metrics + equity_curve + fills + summary。"""
 
     async def _do() -> dict[str, Any]:
@@ -65,7 +71,11 @@ async def report_backtest(app: McpAppContext, run_id: int) -> ToolEnvelope:
                 raise McpToolError("not_found", f"回测记录不存在: {run_id}")
             return cast(
                 dict[str, Any],
-                to_jsonable(reporting.aggregate_backtest_report(row)),
+                to_jsonable(
+                    reporting.aggregate_backtest_report(
+                        row, equity_mode=equity_mode, max_points=max_points
+                    )
+                ),
             )
 
     return await run_tool(
@@ -150,14 +160,22 @@ def register(mcp: MCPServer) -> None:
         name="finboard_report_backtest",
         description=(
             "聚合单条回测历史报告:运行元信息 + metrics + equity_curve + fills +"
-            "summary(标准化结构)。只读。"
+            "summary(标准化结构)。equity_mode(summary 默认:降采样到 max_points"
+            "个关键点;full:完整曲线)、max_points(默认 200)。只读。"
         ),
     )
     async def _backtest(
         run_id: int,
+        equity_mode: str = "summary",
+        max_points: int = 200,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
-        return await report_backtest(app_context(ctx), run_id)
+        return await report_backtest(
+            app_context(ctx),
+            run_id,
+            equity_mode=equity_mode,
+            max_points=max_points,
+        )
 
     @mcp.tool(
         name="finboard_report_export",

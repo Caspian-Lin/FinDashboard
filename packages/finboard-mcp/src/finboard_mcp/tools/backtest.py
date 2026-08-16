@@ -92,15 +92,44 @@ def _history_item(row: BacktestRunModel) -> dict[str, Any]:
     }
 
 
-def _history_detail(row: BacktestRunModel) -> dict[str, Any]:
-    """历史详情(完整 equity_curve / fills / summary)。"""
+def _history_detail(
+    row: BacktestRunModel,
+    *,
+    equity_mode: str = "summary",
+    max_points: int = 200,
+    fills_limit: int | None = None,
+    fills_offset: int = 0,
+) -> dict[str, Any]:
+    """历史详情(equity 按 mode 降采样;fills 按 limit/offset 分页)。"""
+    from finboard_mcp.downsample import (
+        apply_equity_mode,
+        clamp_max_points,
+        resolve_equity_mode,
+    )
+
+    mode = resolve_equity_mode(equity_mode)
+    max_equity_points = clamp_max_points(max_points)
+    all_equity = list(row.equity_curve) if row.equity_curve else []
+    all_fills = list(row.fills) if row.fills else []
+    safe_offset = max(0, fills_offset)
+    safe_limit = (
+        len(all_fills)
+        if fills_limit is None
+        else max(0, min(len(all_fills), fills_limit))
+    )
+    page_fills = all_fills[safe_offset : safe_offset + safe_limit]
     detail = _history_item(row)
     detail.update(
         {
             "params": dict(row.params) if row.params else {},
             "selection": dict(row.selection) if row.selection else {},
-            "equity_curve": list(row.equity_curve) if row.equity_curve else [],
-            "fills": list(row.fills) if row.fills else [],
+            "equity_curve": apply_equity_mode(
+                all_equity, equity_mode=mode, max_points=max_equity_points
+            ),
+            "equity_point_count": len(all_equity),
+            "fills": page_fills,
+            "fills_total": len(all_fills),
+            "fills_offset": safe_offset,
             "summary": row.summary,
             "selection_snapshots": (
                 list(row.selection_snapshots) if row.selection_snapshots else []
@@ -164,6 +193,8 @@ async def backtest_run(
     commission_min: Decimal = Decimal("1"),
     stamp_tax_rate: Decimal = Decimal("0.0005"),
     slippage_bps: Decimal = Decimal("0"),
+    equity_mode: str = "summary",
+    max_points: int = 200,
 ) -> ToolEnvelope:
     """同步运行回测,返回 metrics/equity/fills/snapshots 并落库。"""
 
@@ -183,12 +214,20 @@ async def backtest_run(
             TushareBarProvider,
             YFinanceProvider,
         )
+        from finboard_mcp.downsample import (
+            apply_equity_mode,
+            clamp_max_points,
+            resolve_equity_mode,
+        )
         from finboard_persistence import (
             BacktestRunModel,
             BacktestRunRepository,
             FactorSnapshotRepository,
             ResearchDatasetRepository,
         )
+
+        mode = resolve_equity_mode(equity_mode)
+        max_equity_points = clamp_max_points(max_points)
 
         # 校验参数 + 构建策略
         validated_params = _validate_backtest_params(strategy, params or {})
@@ -333,13 +372,19 @@ async def backtest_run(
             await session.commit()
             run_id = run_row.id
 
+        # issue #172:返回体积控制 —— 默认 summary(降采样),full 与现状一致;
+        # 落库仍是全量(history_get 读取时再按 mode 处理)。
+        returned_equity = apply_equity_mode(
+            equity_curve, equity_mode=mode, max_points=max_equity_points
+        )
         return cast(
             dict[str, Any],
             to_jsonable(
                 {
                     "run_id": run_id,
                     "metrics": metrics,
-                    "equity_curve": equity_curve,
+                    "equity_curve": returned_equity,
+                    "equity_point_count": len(equity_curve),
                     "fills": fills,
                     "summary": result.summary(),
                     "selection_snapshots": selection_snapshots,
@@ -401,6 +446,11 @@ async def backtest_history_list(
 async def backtest_history_get(
     app: McpAppContext,
     run_id: int,
+    *,
+    equity_mode: str = "summary",
+    max_points: int = 200,
+    fills_limit: int | None = None,
+    fills_offset: int = 0,
 ) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         from finboard_persistence import BacktestRunRepository
@@ -410,7 +460,13 @@ async def backtest_history_get(
             row = await repo.get(run_id)
             if row is None:
                 raise McpToolError("not_found", f"回测记录不存在: {run_id}")
-            return _history_detail(row)
+            return _history_detail(
+                row,
+                equity_mode=equity_mode,
+                max_points=max_points,
+                fills_limit=fills_limit,
+                fills_offset=fills_offset,
+            )
 
     return await run_tool(
         audit=app.audit,
@@ -468,11 +524,13 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_backtest_run",
         description=(
-            "同步运行回测(纸面撮合,不发真实订单),返回完整 metrics/"
+            "同步运行回测(纸面撮合,不发真实订单),返回 metrics/"
             "equity_curve/fills/selection_snapshots 并落库。"
             "参数:strategy(如 ma_cross)、symbols、start/end(ISO 日期)、"
             "capital、adjust(qfq/hfq/none)、params(策略参数)、selection"
-            "(因子选股配置)。复用 BacktestEngine + 数据源(akshare/tushare/yfinance)。"
+            "(因子选股配置)、equity_mode(summary 默认:降采样到 max_points 个"
+            "关键点,首末点保留;full:完整曲线)、max_points(默认 200)。"
+            "复用 BacktestEngine + 数据源(akshare/tushare/yfinance)。"
         ),
     )
     async def _run(
@@ -488,6 +546,8 @@ def register(mcp: MCPServer) -> None:
         commission_min: str = "1",
         stamp_tax_rate: str = "0.0005",
         slippage_bps: str = "0",
+        equity_mode: str = "summary",
+        max_points: int = 200,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await backtest_run(
@@ -504,6 +564,8 @@ def register(mcp: MCPServer) -> None:
             commission_min=Decimal(commission_min),
             stamp_tax_rate=Decimal(stamp_tax_rate),
             slippage_bps=Decimal(slippage_bps),
+            equity_mode=equity_mode,
+            max_points=max_points,
         )
 
     @mcp.tool(
@@ -518,13 +580,29 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_backtest_history_get",
-        description="查询单条回测历史详情(含完整 equity_curve/fills/summary)。",
+        description=(
+            "查询单条回测历史详情。equity_mode(summary 默认:降采样到 "
+            "max_points 个关键点,首末点保留;full:完整曲线)、max_points(默认 "
+            "200)、fills_limit/fills_offset(fills 分页;不传 fills_limit 返回全部)。"
+            "返回含 equity_point_count / fills_total 元信息。"
+        ),
     )
     async def _history_get(
         run_id: int,
+        equity_mode: str = "summary",
+        max_points: int = 200,
+        fills_limit: int | None = None,
+        fills_offset: int = 0,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
-        return await backtest_history_get(app_context(ctx), run_id)
+        return await backtest_history_get(
+            app_context(ctx),
+            run_id,
+            equity_mode=equity_mode,
+            max_points=max_points,
+            fills_limit=fills_limit,
+            fills_offset=fills_offset,
+        )
 
     @mcp.tool(
         name="finboard_backtest_history_delete",

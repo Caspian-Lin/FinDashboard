@@ -42,8 +42,6 @@ if TYPE_CHECKING:
 
     from finboard_api.schemas import BacktestRunRequest
     from finboard_app.bootstrap import KernelComponents
-    from finboard_backtest.research_run import ResearchRunManifest
-    from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
     from finboard_data import ResearchDatasetRelease
     from finboard_reconcile import ReconciliationReport
     from finboard_scheduler import Scheduler
@@ -683,6 +681,7 @@ async def _run_worker(settings: Settings) -> None:
         EchoExecutor,
         FeatureSnapshotExecutor,
         QualityRepairExecutor,
+        ResearchDataSyncExecutor,
         ResearchRunExecutor,
     )
     from finboard_backtest.background_jobs.executors._providers import (
@@ -706,15 +705,20 @@ async def _run_worker(settings: Settings) -> None:
     settings_factory = default_settings_factory
     registry = JobExecutorRegistry()
     registry.register("echo", EchoExecutor())
-    # issue #143:research_run 执行器接入统一队列。adapter_factory 用占位实现
-    # (真实「冻结产物 → PortfolioPipelineAdapter」信号引擎留后续 issue);
-    # 端到端验证通过注入 DecisionSequenceAdapter 的测试覆盖(见集成测试)。
+    # issue #143:research_run 执行器接入统一队列;#170:multi_factor 规格接入
+    # 真实信号引擎适配器工厂(其余 strategy kind 由工厂明确报 not_implemented)。
+    from finboard_backtest.research_run.signal_engine import (
+        build_signal_engine_adapter_factory,
+    )
+
     registry.register(
         "research_run",
         ResearchRunExecutor(
             session_maker=components.session_maker,
             store_factory=default_store_factory,
-            adapter_factory=_placeholder_adapter_factory,
+            adapter_factory=build_signal_engine_adapter_factory(
+                components.session_maker
+            ),
         ),
     )
     # issue #144:7 类数据域任务迁移到统一队列。
@@ -762,6 +766,14 @@ async def _run_worker(settings: Settings) -> None:
             settings_factory=settings_factory,
         ),
     )
+    # issue #171:research 数据表(估值 / 财务 / 行业)摄取编排。
+    registry.register(
+        "research_data_sync",
+        ResearchDataSyncExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
     queue_list = [
         q.strip() for q in settings.worker_queues.split(",") if q.strip()
     ] or None
@@ -782,6 +794,7 @@ async def _run_worker(settings: Settings) -> None:
             "data_sync": 1,
             "fetch_all": 1,
             "quality_repair": 1,
+            "research_data_sync": 1,
         },
     )
     await run_bg_worker(
@@ -815,28 +828,6 @@ async def _recover_research_runs(
         store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
         await ResearchRunCoordinator(store).mark_stale_running_as_interrupted()
         await store.checkpoint()
-
-
-def _placeholder_adapter_factory(
-    manifest: ResearchRunManifest,
-) -> ResearchStrategyAdapter:
-    """占位适配器工厂:真实策略信号引擎尚未接入时,任务以不可重试失败收口。
-
-    真实工厂应:用 ``FrozenInputLoader`` 加载机械字段 → 调策略信号引擎生成
-    ``NormalizedSignal`` → 构造 ``PortfolioPipelineAdapter``。端到端验证通过
-    集成测试注入 ``DecisionSequenceAdapter`` 固定样本覆盖。
-    """
-    from finboard_backtest.background_jobs.contracts import ExecutorError
-
-    del manifest
-    raise ExecutorError(
-        code="signal_engine_not_implemented",
-        summary=(
-            "真实策略信号引擎尚未接入;research_run 执行器当前只支持注入固定样本"
-            "适配器的测试路径。请通过后续 issue 实现「冻结产物 → 信号」加载器。"
-        ),
-        retryable=False,
-    )
 
 
 async def _recover_stale(settings: Settings) -> None:

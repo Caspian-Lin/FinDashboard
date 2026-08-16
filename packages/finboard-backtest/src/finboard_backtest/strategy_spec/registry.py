@@ -289,11 +289,12 @@ def _universe(
     min_price: float | None = None,
     max_price: float | None = None,
     events: tuple[str, ...] = (),
+    required_data_fields: tuple[str, ...] = ("price", "average_amount"),
 ) -> UniverseSpec:
     return UniverseSpec(
         markets=(Market.FUTURE,) if asset_classes == (AssetClass.DERIVATIVE,) else (Market.A_SHARE,),
         asset_classes=asset_classes,
-        min_average_amount=min_amount,
+        min_average_amount=None if min_amount == 0 else min_amount,
         min_price=min_price,
         max_price=max_price,
         excluded_event_types=events,
@@ -303,7 +304,7 @@ def _universe(
             else None
         ),
         selection_limit=selection_limit,
-        required_data_fields=("price", "average_amount"),
+        required_data_fields=required_data_fields,
     )
 
 
@@ -371,7 +372,8 @@ def _multi_factor_template(
         universe=_universe(
             asset_classes=(AssetClass.EQUITY,),
             selection_limit=20,
-            ranking_field="market_cap",
+            min_amount=0,
+            required_data_fields=("price",),
         ),
         feature_graph=FeatureGraph(nodes=nodes, outputs=("composite",)),
         signal_rules=SignalRules(

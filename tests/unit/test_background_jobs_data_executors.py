@@ -269,6 +269,110 @@ class TestProgressBridge:
         asyncio.run(_driver())
 
 
+
+
+class TestResearchDataSyncPayload:
+    @pytest.mark.asyncio
+    async def test_missing_dates_raises(self) -> None:
+        from finboard_backtest.background_jobs.executors.research_data_sync import (
+            ResearchDataSyncExecutor,
+        )
+
+        executor = ResearchDataSyncExecutor(session_maker=_fake_session_maker())
+        job = _make_job({"datasets": ["profiles"]}, "research_data_sync")
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+
+    @pytest.mark.asyncio
+    async def test_bad_date_raises(self) -> None:
+        from finboard_backtest.background_jobs.executors.research_data_sync import (
+            ResearchDataSyncExecutor,
+        )
+
+        executor = ResearchDataSyncExecutor(session_maker=_fake_session_maker())
+        job = _make_job(
+            {
+                "datasets": ["daily_metrics"],
+                "start_date": "not-a-date",
+                "end_date": "2026-01-31",
+            },
+            "research_data_sync",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+
+    @pytest.mark.asyncio
+    async def test_unknown_dataset_raises(self) -> None:
+        from finboard_backtest.background_jobs.executors.research_data_sync import (
+            ResearchDataSyncExecutor,
+        )
+
+        executor = ResearchDataSyncExecutor(session_maker=_fake_session_maker())
+        job = _make_job(
+            {
+                "datasets": ["orders"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-31",
+            },
+            "research_data_sync",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_maps_to_retryable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """预算耗尽 → record_upstream_failure + retryable ExecutorError。"""
+
+        from finboard_backtest.background_jobs.executors.research_data_sync import (
+            ResearchDataSyncExecutor,
+        )
+
+        class _ExhaustedProvider:
+            async def fetch_instrument_profiles(self, **kwargs: object) -> list[object]:
+                from finboard_data.tushare_budget import TushareRequestLimitError
+
+                raise TushareRequestLimitError("预算耗尽")
+
+        record_calls: list[tuple[object, ...]] = []
+
+        class _Service:
+            async def record_upstream_failure(self, **kwargs: object) -> object:
+                record_calls.append(tuple(kwargs.items()))
+                return object()
+
+        executor = ResearchDataSyncExecutor(
+            session_maker=_fake_session_maker(),
+            provider_factory=lambda: _ExhaustedProvider(),  # type: ignore[arg-type,return-value]
+        )
+        job = _make_job(
+            {
+                "datasets": ["profiles"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-02",
+            },
+            "research_data_sync",
+        )
+        # 替换 ResearchDataSyncService 构造,避免触碰 DB。
+        import finboard_persistence.research_sync as persistence_mod
+
+        def _service_factory(*args: object, **kwargs: object) -> object:
+            return _Service()
+
+        monkeypatch.setattr(
+            persistence_mod, "ResearchDataSyncService", _service_factory
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "tushare_budget_exhausted"
+        assert exc_info.value.retryable is True
+        assert record_calls  # 上游失败已登记
+
+
 def _fake_session_maker() -> Any:
     """返回一个假的 async_sessionmaker(测试中 executor 不会真正打开 session)"""
     from typing import cast

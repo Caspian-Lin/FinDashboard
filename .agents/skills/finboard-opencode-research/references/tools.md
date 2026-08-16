@@ -44,8 +44,13 @@
 - 参数:`run_id: str`
 - 返回:`list[{artifact_id, sequence, stage, trace_id, payload}]`
 
-### finboard_run_queue(✅ #127,写)
+### finboard_run_queue(✅ #127 + #170,写)
 冻结输入 + 登记 queued ResearchRun(**不执行回测**,执行由离线 worker 完成)。
+issue #170 起 `multi_factor` 已发布规格可由 worker 端到端执行
+(信号引擎 + 组合流水线 → 14 stage artifacts → COMPLETED);其余 strategy
+kind(etf_rotation / mean_reversion / convertible_double_low / futures_tsmom /
+ma_cross)仍报 not_implemented。执行失败(如快照缺因子源)时 `finboard_run_get`
+可见 error_code / error_summary,`research_runs` 不停留在 QUEUED。
 - 参数:`payload: dict`(字段:idempotency_key / strategy_id / strategy_version /
   dataset_release_ids / factor_snapshot_ids / parameters / validation_config /
   portfolio_config / risk_config / execution_config / fee_config /
@@ -524,13 +529,16 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 仅 `ma_cross` 支持回测
 
 ### finboard_backtest_run **[写]**
-同步运行回测,返回完整 metrics/equity/fills 并落库。纸面撮合,**不发真实订单**。
+同步运行回测,返回 metrics/equity/fills 并落库。纸面撮合,**不发真实订单**。
 - 参数:`strategy: str`、`symbols: list[str]`、`start: str`、`end: str`、
   `capital: str = "100000"`、`adjust: str = "qfq"`、`params: dict`、
   `selection: dict`、`commission_rate: str`、`commission_min: str`、
-  `stamp_tax_rate: str`、`slippage_bps: str`
-- 返回:`{run_id, metrics, equity_curve, fills, summary, selection_snapshots, ...}`
-- 错误:`invalid_argument`(策略不支持回测 / 参数校验失败)、
+  `stamp_tax_rate: str`、`slippage_bps: str`、
+  `equity_mode: str = "summary"`(summary 降采样到 max_points 个关键点,首末
+  点保留;full 返回完整曲线)、`max_points: int = 200`
+- 返回:`{run_id, metrics, equity_curve, equity_point_count, fills, summary,
+  selection_snapshots, ...}`
+- 错误:`invalid_argument`(策略不支持回测 / 参数校验失败 / equity_mode 非法)、
   `permission_denied`(只读模式)、`unavailable`(数据源连接错误)
 
 ### finboard_backtest_history_list(只读)
@@ -539,10 +547,12 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 返回:`list[{id, strategy, symbols, start, end, capital, metrics, ...}]`
 
 ### finboard_backtest_history_get(只读)
-查询单条回测历史详情(含完整 equity_curve/fills/summary)。
-- 参数:`run_id: int`
-- 返回:`{id, ..., equity_curve, fills, summary, selection_snapshots, ...}`
-- 错误:`not_found`
+查询单条回测历史详情(equity 默认降采样,fills 支持分页)。
+- 参数:`run_id: int`、`equity_mode: str = "summary"`、`max_points: int = 200`、
+  `fills_limit: int | None`(不传返回全部)、`fills_offset: int = 0`
+- 返回:`{id, ..., equity_curve, equity_point_count, fills, fills_total,
+  fills_offset, summary, selection_snapshots, ...}`
+- 错误:`not_found`、`invalid_argument`(equity_mode 非法)
 
 ### finboard_backtest_history_delete **[写]**
 删除一条回测历史记录。
@@ -750,7 +760,14 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 
 `enqueue` 的 kind 白名单:`echo` / `research_run` / `feature_snapshot` /
 `bulk_download` / `dataset_publish` / `backtest_run` / `data_sync` /
-`fetch_all` / `quality_repair`(全是研究/数据域,不含实盘能力)。
+`fetch_all` / `quality_repair` / `research_data_sync`(全是研究/数据域,
+不含实盘能力)。
+
+`research_data_sync`(issue #171):research 数据表(估值 / 财务 / 行业)摄取
+编排。payload:`{datasets?: [profiles, daily_metrics, financial_indicators,
+industry_memberships](默认全部), start_date, end_date(ISO), symbols?:
+[str]}`。逐标的接口自动限流(tushare_budget)并按确定性 dataset_version
+断点续跑;预算耗尽退避重试,未配 token / 未装 SDK fail-fast。
 
 写操作尊重 `mcp_readonly_only` 开关。
 
@@ -785,6 +802,8 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
   - `bulk_download`:`{market, source, start, instrument_type}`
   - `dataset_publish`:`{release_id, release_kind, symbols, version, start_date, end_date}`
   - `backtest_run`:`{request, provider_name}` → `result_ref=str(run_id)`
+  - `research_data_sync`:`{datasets, start_date, end_date, symbols}` → 研究
+    数据表摄取(batch 发布后 selection 可命中)
 
 ### finboard_job_cancel **[写]**
 请求协作式取消后台任务(running → cancel_requested,executor checkpoint 时退出)。
@@ -865,12 +884,12 @@ REST PUT 是全量语义,这里更安全)。
 
 ### finboard_report_backtest(只读)
 聚合单条回测历史报告:运行元信息 + metrics + equity_curve + fills + summary
-(标准化结构)。
-- 参数:`run_id: int`
+(标准化结构;equity 默认降采样,issue #172)。
+- 参数:`run_id: int`、`equity_mode: str = "summary"`、`max_points: int = 200`
 - 返回:`{run_id, strategy, symbols, start, end, capital, adjust, created_at,
-  metrics, equity_curve: [{date, equity, benchmark?}], fills: [{date, symbol,
-  side, quantity, price, commission}], summary}`
-- 错误:`not_found`(回测记录不存在)
+  metrics, equity_curve: [{date, equity, benchmark?}], equity_point_count,
+  fills: [{date, symbol, side, quantity, price, commission}], summary}`
+- 错误:`not_found`(回测记录不存在)、`invalid_argument`(equity_mode 非法)
 
 ### finboard_report_export(只读)
 把报告聚合后导出为文件,返回绝对路径 + 元信息。

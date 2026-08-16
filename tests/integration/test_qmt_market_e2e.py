@@ -1,17 +1,23 @@
 """QMT 行情端到端集成测试(需 Windows + miniQMT 环境)。
 
-在 CI / Linux 上自动跳过。
+默认跳过(包括 Windows 本机):QMT 权限受阻、实盘验证暂缓(issue #22),
+全量测试不跑真机链路。需要真机验证时显式设置 ``FINBOARD_QMT_E2E=1`` 开启。
+CI / Linux 上同样跳过。
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    sys.platform != "win32",
-    reason="QMT 行情测试需 Windows + miniQMT 环境",
+    sys.platform != "win32" or os.getenv("FINBOARD_QMT_E2E") != "1",
+    reason=(
+        "QMT 行情测试需 Windows + miniQMT 环境;"
+        "设置 FINBOARD_QMT_E2E=1 显式开启"
+    ),
 )
 
 

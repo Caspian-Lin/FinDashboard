@@ -28,9 +28,10 @@ from finboard_shared.background_jobs import (
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
-#: 本期允许通过 API 直接提交的 kind 白名单(只放 echo 自检;
-#: 业务 kind 由 #143/#144 在各自语义化端点里创建,避免前端任意起 job)。
-_ALLOWED_KINDS: frozenset[str] = frozenset({"echo"})
+#: 允许通过 API 直接提交的 kind 白名单(只放 echo 自检与研究数据摄取;
+#: 其余业务 kind 由 #143/#144/#171 在各自语义化端点 / MCP 里创建,
+#: 避免前端任意起 job)。
+_ALLOWED_KINDS: frozenset[str] = frozenset({"echo", "research_data_sync"})
 
 
 @router.post("", response_model=JobOut, status_code=202)
