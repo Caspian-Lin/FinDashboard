@@ -95,9 +95,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。
   无代码版本化生命周期,反复 validate 预览 → draft → publish。
-- 回测(5,✅ #127):backtest_strategy_list(可用策略+参数 schema)、
-  backtest_run(同步运行,返回 metrics/equity/fills)、
-  backtest_history_list/get、backtest_history_delete(写)。
+- 回测(5,✅ #127 + #172):backtest_strategy_list(可用策略+参数 schema)、
+  backtest_run(同步运行,返回 metrics/equity/fills;equity_mode=summary
+  默认降采样,full 返回完整曲线)、backtest_history_list/get(history_get 支持
+  fills 分页)、backtest_history_delete(写)。
 - 模拟盘(21,✅ #127+#139):sim_account list/get/create(写)、
   sim_session list/get/create(写)/start/pause/stop/archive(写)/reset(写)、
   sim_decision_submit(写,结构化目标仓位 → 生成订单,不直接创建订单)、
@@ -133,11 +134,11 @@ FinBoard 研究 MCP —— 量化研究工具集
   add_symbols/remove_symbol(写,受 mcp_readonly_only 守卫)。标的组管理:
   创建标的集合(如回测候选池)→ 加 symbols(自动去重)→ 回测/研究复用,
   与 strategies/simulation 无关联(独立用户查找列表)。
-- 报告聚合与导出(3,✅ #141):report_run(聚合 ResearchRun:result 指标 +
+- 报告聚合与导出(3,✅ #141 + #172):report_run(聚合 ResearchRun:result 指标 +
   全部 artifacts,含 report/equity/decisions 各阶段 payload)、report_backtest
-  (聚合回测:metrics + equity_curve + fills + summary)、report_export
-  (导出 CSV/Markdown 文件,写入 FINBOARD_EXPORT_DIR 或系统临时目录,
-  返回绝对路径;纯标准库,零新依赖;只读不写 DB)。
+  (聚合回测:metrics + equity_curve(默认降采样) + fills + summary)、
+  report_export(导出 CSV/Markdown 文件,写入 FINBOARD_EXPORT_DIR 或系统临时
+  目录,返回绝对路径;导出走全量;纯标准库,零新依赖;只读不写 DB)。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
