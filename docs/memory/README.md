@@ -12,3 +12,5 @@
 - [OpenCode Web 工作台:SPA 状态与容器环境踩坑](opencode-web-state-and-home.md) — 项目/最近会话在浏览器 IndexedDB,服务端无法预置;HOME/XDG 决定文件选择器与数据落点;坏路径会话清理方法
 - [Issue #173:selection bars/snapshot 输入模式](issue-173-bars-snapshot-selection.md) — required_datasets 按因子推导;同名异类 Repository 陷阱;集成测试库 create_all 不加新列需手工 ALTER
 - [OpenCode finboard-researcher:bash 放行 + exa 搜索 MCP](opencode-agent-bash-exa-mcp.md) — 容器无 JS 运行时,local MCP 不可行只能 remote;exa 托管端点匿名可用;.opencode/.agents 挂载补了 :ro;改权限须重启容器
+- [里程碑分支别名与 dev 集成时点](milestone-alias-and-dev-integration.md) — 「m/opencode-research-mcp」实为 m/opencode-research-agent;2026-08-17 里程碑已经 PR #192 暂时并入 dev
+- [test_releases 在 coverage 下偶发失败](test-releases-flaky-under-coverage.md) — 两个用例 flaky 非回归,--no-cov/重跑判定,CI 挂了 rerun 即可
