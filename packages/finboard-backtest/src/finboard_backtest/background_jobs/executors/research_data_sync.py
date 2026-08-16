@@ -40,7 +40,7 @@ from finboard_backtest.background_jobs.executors._runtime import code_version
 from finboard_data.research import ResearchDataProvider
 
 if TYPE_CHECKING:
-    from finboard_app.config import Settings
+    pass
 
 #: 支持的数据集白名单(对应 ResearchDataset 枚举的摄取入口)。
 SUPPORTED_DATASETS: frozenset[str] = frozenset(
@@ -190,18 +190,18 @@ class ResearchDataSyncExecutor:
                 current_dataset = ResearchDataset.INSTRUMENT_PROFILES
                 current_version = f"profiles:{date.today().isoformat()}"
                 await progress(done, total, "research_data_sync:profiles")
-                records = await provider.fetch_instrument_profiles()
+                profile_records = await provider.fetch_instrument_profiles()
                 await service.sync_instrument_profiles(
                     source=source,
                     dataset_version=current_version,
                     code_version=code,
                     parameters={"list_status": "L"},
                     raw_payload=None,
-                    records=list(records),
+                    records=list(profile_records),
                 )
                 if not resolved_symbols:
                     resolved_symbols = tuple(
-                        dict.fromkeys(item.symbol for item in records)
+                        dict.fromkeys(item.symbol for item in profile_records)
                     )
                 done += 1
 
@@ -210,8 +210,10 @@ class ResearchDataSyncExecutor:
                 for day in _workdays(start_date, end_date):
                     current_version = f"daily:{day.isoformat()}"
                     await progress(done, total, f"research_data_sync:daily:{day}")
-                    records = await provider.fetch_daily_metrics(trade_date=day)
-                    if not records:
+                    daily_records = await provider.fetch_daily_metrics(
+                        trade_date=day
+                    )
+                    if not daily_records:
                         continue  # 非交易日(节假日),上游返回空
                     await service.sync_daily_metrics(
                         source=source,
@@ -219,7 +221,7 @@ class ResearchDataSyncExecutor:
                         code_version=code,
                         parameters={"trade_date": day.isoformat()},
                         raw_payload=None,
-                        records=list(records),
+                        records=list(daily_records),
                         expected_trade_date=day,
                     )
                     done += 1
@@ -234,12 +236,12 @@ class ResearchDataSyncExecutor:
                     await progress(
                         done, total, f"research_data_sync:financial:{symbol}"
                     )
-                    records = await provider.fetch_financial_indicators(
+                    financial_records = await provider.fetch_financial_indicators(
                         symbol,
                         start_period=start_date,
                         end_period=end_date,
                     )
-                    if not records:
+                    if not financial_records:
                         continue
                     await service.sync_financial_indicators(
                         source=source,
@@ -251,7 +253,7 @@ class ResearchDataSyncExecutor:
                             "end_period": end_date.isoformat(),
                         },
                         raw_payload=None,
-                        records=list(records),
+                        records=list(financial_records),
                     )
                     done += 1
 
@@ -262,11 +264,11 @@ class ResearchDataSyncExecutor:
                     await progress(
                         done, total, f"research_data_sync:industry:{symbol}"
                     )
-                    records = await provider.fetch_industry_memberships(
+                    industry_records = await provider.fetch_industry_memberships(
                         symbol=symbol,
                         current_only=True,
                     )
-                    if not records:
+                    if not industry_records:
                         continue
                     await service.sync_industry_memberships(
                         source=source,
@@ -274,7 +276,7 @@ class ResearchDataSyncExecutor:
                         code_version=code,
                         parameters={"symbol": symbol, "current_only": True},
                         raw_payload=None,
-                        records=list(records),
+                        records=list(industry_records),
                     )
                     done += 1
 
@@ -363,4 +365,4 @@ def _tushare_provider_factory(
 
 _: type[JobExecutor] = ResearchDataSyncExecutor
 
-__all__ = ["ResearchDataSyncExecutor", "SUPPORTED_DATASETS"]
+__all__ = ["SUPPORTED_DATASETS", "ResearchDataSyncExecutor"]

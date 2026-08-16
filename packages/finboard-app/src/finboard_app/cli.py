@@ -42,8 +42,6 @@ if TYPE_CHECKING:
 
     from finboard_api.schemas import BacktestRunRequest
     from finboard_app.bootstrap import KernelComponents
-    from finboard_backtest.research_run import ResearchRunManifest
-    from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
     from finboard_data import ResearchDatasetRelease
     from finboard_reconcile import ReconciliationReport
     from finboard_scheduler import Scheduler

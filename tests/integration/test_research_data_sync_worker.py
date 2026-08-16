@@ -20,24 +20,20 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from finboard_backtest.background_jobs import JobExecutorRegistry
-from finboard_backtest.background_jobs.contracts import JobRecord, ProgressCallback
+from finboard_backtest.background_jobs.contracts import JobRecord
 from finboard_backtest.background_jobs.executors.research_data_sync import (
     ResearchDataSyncExecutor,
 )
-from finboard_data.quality import ResearchDataQualityValidator
 from finboard_data.research import (
     DailySecurityMetrics,
     FinancialIndicator,
     IndustryMembership,
     InstrumentProfile,
-    ResearchDataError,
     ResearchDataUpstreamError,
 )
 from finboard_persistence import (
     ResearchDailyMetricModel,
     ResearchFinancialIndicatorModel,
-    ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
     ResearchSyncBatchModel,
@@ -101,7 +97,7 @@ class FakeResearchProvider:
         *,
         symbols: tuple[str, ...] = SYMBOLS,
         fail_symbols: frozenset[str] = frozenset(),
-        empty_days: frozenset[date] = frozenset(),
+        empty_days: set[date] | frozenset[date] = frozenset(),
     ) -> None:
         self.symbols = symbols
         self.fail_symbols = fail_symbols
@@ -200,7 +196,7 @@ class FakeResearchProvider:
         return [self._profile(symbol) for symbol in self.symbols]
 
     async def fetch_daily_metrics(
-        self, *, trade_date: date
+        self, trade_date: date
     ) -> list[DailySecurityMetrics]:
         self.calls.append(f"daily:{trade_date}")
         if trade_date in self.empty_days:
@@ -266,7 +262,7 @@ def _payload(**overrides: object) -> dict[str, object]:
 def _make_executor(engine: AsyncEngine, provider: FakeResearchProvider) -> ResearchDataSyncExecutor:
     return ResearchDataSyncExecutor(
         session_maker=session_factory(engine),
-        provider_factory=lambda: provider,  # type: ignore[arg-type]
+        provider_factory=lambda: provider,
     )
 
 
@@ -332,7 +328,7 @@ class TestResearchDataSyncWorker:
                     select(func.count()).select_from(ResearchInstrumentProfileModel)
                 )
             ).scalar_one()
-        assert daily_count == 4  # 2 个交易日 × 2 个标的
+        assert daily_count == 4  # 2 个交易日 x 2 个标的
         assert financial_count == 2
         assert industry_count == 2
         assert profile_count == 2
@@ -379,8 +375,7 @@ class TestResearchDataSyncWorker:
 
     async def test_rerun_idempotent(self, engine: AsyncEngine) -> None:
         """幂等重跑:同 payload 二次执行,已发布切片跳过、数据不重复。"""
-        provider = FakeResearchProvider()
-        executor = _make_executor(engine, provider)
+        executor = _make_executor(engine, FakeResearchProvider())
 
         first = await executor.execute(_job(_payload()), _noop_progress)
         assert first.status == "succeeded"

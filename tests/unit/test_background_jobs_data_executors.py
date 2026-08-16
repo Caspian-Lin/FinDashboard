@@ -323,9 +323,10 @@ class TestResearchDataSyncPayload:
         assert exc_info.value.code == "invalid_payload"
 
     @pytest.mark.asyncio
-    async def test_budget_exhausted_maps_to_retryable(self) -> None:
+    async def test_budget_exhausted_maps_to_retryable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """预算耗尽 → record_upstream_failure + retryable ExecutorError。"""
-        from unittest.mock import AsyncMock
 
         from finboard_backtest.background_jobs.executors.research_data_sync import (
             ResearchDataSyncExecutor,
@@ -346,7 +347,7 @@ class TestResearchDataSyncPayload:
 
         executor = ResearchDataSyncExecutor(
             session_maker=_fake_session_maker(),
-            provider_factory=lambda: _ExhaustedProvider(),  # type: ignore[arg-type]
+            provider_factory=lambda: _ExhaustedProvider(),  # type: ignore[arg-type,return-value]
         )
         job = _make_job(
             {
@@ -359,17 +360,14 @@ class TestResearchDataSyncPayload:
         # 替换 ResearchDataSyncService 构造,避免触碰 DB。
         import finboard_persistence.research_sync as persistence_mod
 
-        original = persistence_mod.ResearchDataSyncService
-
         def _service_factory(*args: object, **kwargs: object) -> object:
             return _Service()
 
-        persistence_mod.ResearchDataSyncService = _service_factory  # type: ignore[assignment]
-        try:
-            with pytest.raises(ExecutorError) as exc_info:
-                await executor.execute(job, _noop_progress)
-        finally:
-            persistence_mod.ResearchDataSyncService = original
+        monkeypatch.setattr(
+            persistence_mod, "ResearchDataSyncService", _service_factory
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
         assert exc_info.value.code == "tushare_budget_exhausted"
         assert exc_info.value.retryable is True
         assert record_calls  # 上游失败已登记

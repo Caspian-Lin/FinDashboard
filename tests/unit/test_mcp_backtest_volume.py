@@ -26,11 +26,12 @@ def _async_return(value: Any) -> Any:
 
 
 def _make_app() -> Any:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
     from finboard_app.config import Settings
     from finboard_backtest.feature_snapshot_jobs import FeatureSnapshotJobManager
     from finboard_mcp.audit import AuditRecorder
     from finboard_mcp.context import McpAppContext
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     session = AsyncMock()
     session.commit = AsyncMock()

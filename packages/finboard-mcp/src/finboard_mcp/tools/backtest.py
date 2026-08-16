@@ -112,10 +112,11 @@ def _history_detail(
     all_equity = list(row.equity_curve) if row.equity_curve else []
     all_fills = list(row.fills) if row.fills else []
     safe_offset = max(0, fills_offset)
-    if fills_limit is None:
-        safe_limit = len(all_fills)
-    else:
-        safe_limit = max(0, min(len(all_fills), fills_limit))
+    safe_limit = (
+        len(all_fills)
+        if fills_limit is None
+        else max(0, min(len(all_fills), fills_limit))
+    )
     page_fills = all_fills[safe_offset : safe_offset + safe_limit]
     detail = _history_item(row)
     detail.update(
@@ -213,16 +214,16 @@ async def backtest_run(
             TushareBarProvider,
             YFinanceProvider,
         )
+        from finboard_mcp.downsample import (
+            apply_equity_mode,
+            clamp_max_points,
+            resolve_equity_mode,
+        )
         from finboard_persistence import (
             BacktestRunModel,
             BacktestRunRepository,
             FactorSnapshotRepository,
             ResearchDatasetRepository,
-        )
-        from finboard_mcp.downsample import (
-            apply_equity_mode,
-            clamp_max_points,
-            resolve_equity_mode,
         )
 
         mode = resolve_equity_mode(equity_mode)
