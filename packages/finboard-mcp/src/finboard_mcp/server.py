@@ -113,7 +113,8 @@ FinBoard 研究 MCP —— 量化研究工具集
 - finboard.job.*(4,✅ #136)—— 统一后台任务队列监控与提交:
   job list/get(只读)、job enqueue/cancel(写)。复用 background_jobs 表,
   enqueue kind 白名单全是研究/数据/回测域(echo/research_run/feature_snapshot/
-  bulk_download/dataset_publish/backtest_run/data_sync/fetch_all/quality_repair);
+  bulk_download/dataset_publish/backtest_run/data_sync/fetch_all/quality_repair/
+  research_data_sync);
   实盘交易内核任务不进入队列。feature_snapshot/bulk_download 等异步任务的进度
   统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id)。
 - 数据写操作(12,✅ #137):data_fetch(同步单标的拉取)、fetch_all /
