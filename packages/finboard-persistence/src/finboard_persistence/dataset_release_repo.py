@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -15,6 +16,7 @@ from finboard_data.releases import (
     FrozenDatasetReleaseBuilder,
     ImmutableReleaseError,
     ReleaseCapabilityError,
+    ReleaseDatasetKind,
     ReleaseInstrumentSpec,
     ReleaseLifecycleEvent,
     ResearchDatasetRelease,
@@ -22,6 +24,7 @@ from finboard_data.releases import (
     default_execution_metadata,
     research_etf_catalog_entry,
 )
+from finboard_data.research import DailySecurityMetrics, FinancialIndicator
 from finboard_persistence.models import (
     ConvertibleMetadataModel,
     EtfMetadataModel,
@@ -29,7 +32,9 @@ from finboard_persistence.models import (
     InstrumentLifecycleEventModel,
     InstrumentModel,
     InstrumentNameModel,
+    ResearchDailyMetricModel,
     ResearchDatasetReleaseModel,
+    ResearchFinancialIndicatorModel,
     ResearchInstrumentProfileModel,
 )
 from finboard_persistence.profile_metadata import ProfileMetadataLookup
@@ -384,6 +389,7 @@ class ResearchDatasetReleaseService:
         self._builder = FrozenDatasetReleaseBuilder(
             cache_dir=cache_dir,
             release_root=release_root,
+            research_source=ResearchTableReleaseSource(session),
         )
 
     async def publish(
@@ -395,6 +401,8 @@ class ResearchDatasetReleaseService:
             dataset_name=spec.dataset_name,
             source=spec.source,
         )
+        if spec.dataset_kind is not ReleaseDatasetKind.BARS:
+            self._require_a_share_stock_scope(spec, symbols)
         candidates = await self._catalog_repo.list_candidates(symbols)
         release = await self._builder.publish(
             spec,
@@ -403,6 +411,134 @@ class ResearchDatasetReleaseService:
         )
         await self._release_repo.publish(release)
         return release
+
+    @staticmethod
+    def _require_a_share_stock_scope(
+        spec: DatasetReleaseSpec,
+        symbols: list[str],
+    ) -> None:
+        """研究数据(非 bars)只支持 A 股股票(range 内推定为 A 股发布)。"""
+        if spec.source != "tushare" or spec.dataset_kind not in (
+            ReleaseDatasetKind.DAILY_METRICS,
+            ReleaseDatasetKind.FINANCIAL_INDICATORS,
+        ):
+            raise ReleaseCapabilityError(
+                f"{spec.dataset_kind.value} 发布要求 source=tushare "
+                f"(研究数据来自 research_data_sync 摄取)"
+            )
+        if not symbols:  # pragma: no cover - 调用方已校验非空
+            raise ReleaseCapabilityError("发布标的不能为空")
+
+
+class ResearchTableReleaseSource:
+    """从 ``research_*`` 表读取研究数据作为发布冻结输入的注入实现。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def daily_metrics(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[DailySecurityMetrics]]:
+        stmt = (
+            select(ResearchDailyMetricModel)
+            .where(
+                ResearchDailyMetricModel.symbol.in_(symbols),
+                ResearchDailyMetricModel.trade_date >= start_date,
+                ResearchDailyMetricModel.trade_date <= end_date,
+            )
+            .order_by(
+                ResearchDailyMetricModel.symbol,
+                ResearchDailyMetricModel.trade_date,
+            )
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        result: dict[str, list[DailySecurityMetrics]] = {}
+        for row in rows:
+            result.setdefault(row.symbol, []).append(_daily_metrics_from_row(row))
+        return result
+
+    async def financial_indicators(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[FinancialIndicator]]:
+        stmt = (
+            select(ResearchFinancialIndicatorModel)
+            .where(
+                ResearchFinancialIndicatorModel.symbol.in_(symbols),
+                ResearchFinancialIndicatorModel.report_period >= start_date,
+                ResearchFinancialIndicatorModel.report_period <= end_date,
+            )
+            .order_by(
+                ResearchFinancialIndicatorModel.symbol,
+                ResearchFinancialIndicatorModel.report_period,
+                ResearchFinancialIndicatorModel.announcement_date,
+            )
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        result: dict[str, list[FinancialIndicator]] = {}
+        for row in rows:
+            result.setdefault(row.symbol, []).append(_financial_indicators_from_row(row))
+        return result
+
+
+def _daily_metrics_from_row(row: ResearchDailyMetricModel) -> DailySecurityMetrics:
+    return DailySecurityMetrics(
+        symbol=row.symbol,
+        trade_date=row.trade_date,
+        close=row.close,
+        turnover_rate=row.turnover_rate,
+        turnover_rate_free=row.turnover_rate_free,
+        volume_ratio=row.volume_ratio,
+        pe=row.pe,
+        pe_ttm=row.pe_ttm,
+        pb=row.pb,
+        ps=row.ps,
+        ps_ttm=row.ps_ttm,
+        dividend_yield=row.dividend_yield,
+        dividend_yield_ttm=row.dividend_yield_ttm,
+        total_shares=row.total_shares,
+        float_shares=row.float_shares,
+        free_shares=row.free_shares,
+        total_market_cap=row.total_market_cap,
+        circulating_market_cap=row.circulating_market_cap,
+        limit_status=row.limit_status,
+        source=row.source,
+        observed_at=row.observed_at,
+        available_at=row.available_at,
+    )
+
+
+def _financial_indicators_from_row(
+    row: ResearchFinancialIndicatorModel,
+) -> FinancialIndicator:
+    return FinancialIndicator(
+        symbol=row.symbol,
+        announcement_date=row.announcement_date,
+        report_period=row.report_period,
+        update_flag=row.update_flag,
+        eps=row.eps,
+        diluted_eps=row.diluted_eps,
+        book_value_per_share=row.book_value_per_share,
+        operating_cash_flow_per_share=row.operating_cash_flow_per_share,
+        return_on_equity=row.return_on_equity,
+        weighted_return_on_equity=row.weighted_return_on_equity,
+        gross_profit_margin=row.gross_profit_margin,
+        net_profit_margin=row.net_profit_margin,
+        debt_to_assets=row.debt_to_assets,
+        revenue_yoy=row.revenue_yoy,
+        net_profit_yoy=row.net_profit_yoy,
+        operating_cash_flow_yoy=row.operating_cash_flow_yoy,
+        source=row.source,
+        observed_at=row.observed_at,
+        available_at=row.available_at,
+    )
 
 
 def _release_from_row(row: ResearchDatasetReleaseModel) -> ResearchDatasetRelease:
