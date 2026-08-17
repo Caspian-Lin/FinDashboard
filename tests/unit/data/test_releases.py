@@ -17,6 +17,7 @@ from finboard_data import (
     FrozenReleaseProvider,
     ImmutableReleaseError,
     ReleaseCapabilityError,
+    ReleasedInstrument,
     ReleaseInstrumentSpec,
     ReleaseIntegrityError,
     ReleaseLifecycleEvent,
@@ -172,8 +173,9 @@ def _spec(
     *,
     version: str = "2024.01",
     fields: tuple[str, ...] | None = None,
+    required_capabilities: tuple[str, ...] | None = None,
 ) -> DatasetReleaseSpec:
-    if fields is None:
+    if fields is not None and required_capabilities is not None:
         return DatasetReleaseSpec(
             release_id=release_id,
             dataset_name="multi_asset_daily_bars",
@@ -182,6 +184,30 @@ def _spec(
             start_date=_START,
             end_date=_END,
             code_version="deadbeef",
+            fields=fields,
+            required_capabilities=required_capabilities,
+        )
+    if fields is not None:
+        return DatasetReleaseSpec(
+            release_id=release_id,
+            dataset_name="multi_asset_daily_bars",
+            source="fixed_sample",
+            version=version,
+            start_date=_START,
+            end_date=_END,
+            code_version="deadbeef",
+            fields=fields,
+        )
+    if required_capabilities is not None:
+        return DatasetReleaseSpec(
+            release_id=release_id,
+            dataset_name="multi_asset_daily_bars",
+            source="fixed_sample",
+            version=version,
+            start_date=_START,
+            end_date=_END,
+            code_version="deadbeef",
+            required_capabilities=required_capabilities,
         )
     return DatasetReleaseSpec(
         release_id=release_id,
@@ -191,7 +217,6 @@ def _spec(
         start_date=_START,
         end_date=_END,
         code_version="deadbeef",
-        fields=fields,
     )
 
 
@@ -603,6 +628,32 @@ async def test_release_identity_and_schema_are_immutable(tmp_path: Path) -> None
             instruments,
             previous_release=previous,
         )
+
+
+@pytest.mark.asyncio
+async def test_release_instrument_industry_flows_to_manifest(tmp_path: Path) -> None:
+    """发布产物携带 industry,as_dict/from_dict 往返不丢(issue #185)。"""
+    cache_dir = tmp_path / "cache"
+    release_root = tmp_path / "releases"
+    instrument = replace(_stock(), name="贵州茅台", industry="白酒")
+    await _seed(cache_dir, [instrument])
+
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=cache_dir,
+        release_root=release_root,
+    ).publish(
+        _spec(
+            release_id="fixed-r185-industry",
+            required_capabilities=("stock",),
+        ),
+        [instrument],
+    )
+
+    released = release.instrument("600519.SH")
+    assert released.industry == "白酒"
+    assert released.as_dict()["industry"] == "白酒"
+    # manifest 序列化往返(DB jsonb / 磁盘 manifest.json 同路径)。
+    assert ReleasedInstrument.from_dict(released.as_dict()) == released
 
 
 @pytest.mark.asyncio

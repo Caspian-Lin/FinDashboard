@@ -1298,6 +1298,11 @@ async def _sync_universe() -> None:
     async with session_factory(engine)() as session:
         repo = InstrumentRepository(session)
         result = await repo.sync_with_diff(dicts, as_of=date.today())
+        # 后置 enrichment(issue #185):akshare 发现链路不携带 list_date/industry,
+        # 按本次发现范围从最近一次已发布的 research_instrument_profiles 回填。
+        backfill = await repo.backfill_metadata_from_profiles(
+            symbols=[ins.code for ins in instruments]
+        )
         await session.commit()
 
     typer.echo(
@@ -1307,6 +1312,15 @@ async def _sync_universe() -> None:
         f" 待退市确认 {len(result.pending_delist)},"
         f" 退市 {len(result.delisted)})"
     )
+    if backfill.profile_batch_available:
+        typer.echo(
+            f"已回填 list_date={backfill.backfilled_list_date} "
+            f"industry={backfill.backfilled_industry};"
+            f" 仍缺失 list_date={backfill.missing_list_date} "
+            f"industry={backfill.missing_industry}"
+        )
+    else:
+        typer.echo("无已发布研究档案批次,跳过 list_date/industry 回填")
     await engine.dispose()
 
 

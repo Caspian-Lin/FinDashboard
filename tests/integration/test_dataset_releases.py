@@ -15,11 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from finboard_data import DatasetReleaseSpec, ImmutableReleaseError
 from finboard_data.cache import ParquetCache
+from finboard_data.research import InstrumentProfile
 from finboard_persistence import (
     InstrumentModel,
+    ResearchDataset,
     ResearchDatasetReleaseModel,
     ResearchDatasetReleaseRepository,
     ResearchDatasetReleaseService,
+    ResearchDatasetRepository,
+    ResearchSyncBatchRepository,
     session_factory,
 )
 from finboard_shared.models import Bar, Symbol
@@ -188,3 +192,119 @@ async def test_service_publishes_files_and_queryable_immutable_record(
         )
     )
     await db_session.commit()
+
+
+async def _publish_profiles(
+    session: AsyncSession,
+    *,
+    dataset_version: str,
+    records: list[InstrumentProfile],
+) -> None:
+    """在当前事务内发布一批 instrument profiles(issue #185 兜底源)。"""
+    batches = ResearchSyncBatchRepository(session)
+    batch, already = await batches.prepare(
+        dataset=ResearchDataset.INSTRUMENT_PROFILES,
+        source="tushare",
+        dataset_version=dataset_version,
+        code_version="test",
+        parameters={},
+        raw_payload=None,
+        expected_rows=len(records),
+        received_rows=len(records),
+    )
+    assert not already
+    locked = await batches.get(batch.id, for_update=True)
+    assert locked is not None
+    accepted = await ResearchDatasetRepository(session).upsert_instrument_profiles(
+        locked, records
+    )
+    await batches.mark_published(
+        batch.id,
+        accepted_rows=accepted,
+        quality_status="passed",
+        quality_report={},
+    )
+
+
+async def test_release_instruments_fallback_to_profiles_for_metadata(
+    _engine: AsyncEngine,  # noqa: PT019 - 共享集成测试 fixture 的既有命名
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    """instruments 的 list_date/industry 为 null 时,发布产物从 profiles 兜底(issue #185)。"""
+    await db_session.execute(
+        delete(InstrumentModel).where(InstrumentModel.code == "TST077.SH")
+    )
+    db_session.add(
+        InstrumentModel(
+            code="TST077.SH",
+            name="issue185 股票样本",
+            market="a_share",
+            instrument_type="stock",
+            exchange="SSE",
+            list_date=None,  # akshare 发现链路不携带该字段
+            status="active",
+            updated_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+    )
+    await _publish_profiles(
+        db_session,
+        dataset_version="issue185-release-v1",
+        records=[
+            InstrumentProfile(
+                symbol="TST077.SH",
+                name="issue185 股票样本",
+                exchange="SSE",
+                market="主板",
+                list_status="L",
+                list_date=date(2020, 1, 1),
+                delist_date=None,
+                industry="银行",
+                source="tushare",
+                observed_at=datetime(2024, 1, 1, tzinfo=UTC),
+                available_at=datetime(2024, 1, 1, tzinfo=UTC),
+            )
+        ],
+    )
+    await db_session.flush()
+
+    await _seed_bars(tmp_path / "cache")
+    service = ResearchDatasetReleaseService(
+        db_session,
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    )
+    release = await service.publish(
+        DatasetReleaseSpec(
+            release_id="integration-r185-fallback",
+            dataset_name="multi_asset_daily_bars",
+            source="fixed_sample",
+            version="integration-r185",
+            start_date=_START,
+            end_date=_END,
+            code_version="integration-test",
+            required_capabilities=("stock",),
+        ),
+        ["TST077.SH"],
+    )
+    try:
+        instrument = release.instrument("TST077.SH")
+        assert instrument.list_date == date(2020, 1, 1)  # 从 profiles 兜底
+        assert instrument.industry == "银行"
+        assert release.quality_report["instrument_metadata"] == {
+            "total": 1,
+            "missing_list_date": 0,
+            "missing_industry": 0,
+        }
+    finally:
+        await db_session.rollback()
+        await db_session.execute(
+            delete(ResearchDatasetReleaseModel).where(
+                ResearchDatasetReleaseModel.release_id
+                == "integration-r185-fallback"
+            )
+        )
+        await db_session.execute(
+            delete(InstrumentModel).where(InstrumentModel.code == "TST077.SH")
+        )
+        await db_session.commit()

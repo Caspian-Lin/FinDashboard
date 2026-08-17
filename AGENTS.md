@@ -31,6 +31,7 @@
 - **P5（大部分完成）**：策略框架 + 行情事件 —— 策略运行器（#11）、行情数据接入（#10）已实现；策略状态持久化待验证。
 - **当前方向：回测 + 策略开发** —— QMT 权限受阻,实盘验证暂缓（#22/#24/#26）。转向历史数据源（#27 akshare/tushare）、回测引擎（#28 行情回放 + 纸面撮合 + 绩效分析）、第一个信号驱动策略（#29 均线交叉）。
 - **研究里程碑收尾（#66/#77-#81/#83/#91）**：研究数据发布、因子实验室、无代码策略规格、统一 `ResearchRun` 生命周期、正式组合风控流水线和持久化产品模拟盘均已建立；研究运行使用独立表与 `RR-` ID，模拟运行使用 `simulation_*` 表与 `SIM-*` ID，均不得写入实盘订单/成交/持仓。前端暂不提供 Python 策略代码。
+- **instrument 元数据回填（#185）**：akshare 发现链路只写 `instruments` 的 code/name/market/instrument_type/exchange/listing_board，list_date/industry 无写入者；tushare `stock_basic` 的 list_date+industry 落在 `research_instrument_profiles`。data_sync 后置从最近一次已发布 profiles 批次回填（只回填 null，不覆盖已有主数据）；发布构造器在 instruments 字段为 null 时从 profiles 兜底，release instruments 携带 list_date/industry（manifest 新增 `industry` 字段）；sync/发布任务报告缺失字段统计（`quality_report.instrument_metadata` / job phase），缺失可见而非静默。`sector` 尚无上游来源，保持 null。纯离线数据域，不连 broker 不下单。
 - **正式研究组合入口（#91）**：long-only `ResearchRun` 必须由 `PortfolioPipelineAdapter` 从冻结候选池/特征/信号生成目标、硬约束、风险退出、三档资金可行性、研究订单/成交和账本；风险贡献上限启用后缺少协方差、数学不可行或不收敛必须在生成研究订单前失败关闭。
 - **产品模拟盘边界（#83）**：`finboard-simulation` 只接受已发布策略和 completed `ResearchRun` 的结构化目标仓位，订单、成交、持仓、资金、时钟与审计全部持久化在独立模拟表。禁止导入/配置 Broker 或 QMT/CTP、禁止直接创建订单或修改持仓、禁止自动晋级影子盘/实盘。
 - **研究策略配置边界**：允许用版本化无代码规格组合后端白名单候选池 / 因子 / 信号 / 目标仓位 / 研究风控 / 成交假设 / 验证计划；禁止网页提交 Python、模块路径或可执行表达式，保存 / 发布配置不得自动启动任何运行。
