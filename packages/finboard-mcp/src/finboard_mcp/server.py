@@ -85,7 +85,10 @@ FinBoard 研究 MCP —— 量化研究工具集
 == 当前可用工具(115 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
-  single_shot|multi_period,#183)
+  single_shot|multi_period,#183)。入队预检(#186):queue 与 backtest_run
+  (strategy_spec 形态)入队时对主数据发布做 universe 候选池非空校验,
+  空池秒级 invalid_argument(不再等执行期跑完后报泛化错误),错误信息附
+  各过滤条件的排除统计与缺失字段名(如 list_date)。
 - finboard.memory.*(7) —— 研究记忆:remember / list / get / forget / correct
   / confirm / archive(跨会话长期上下文,操作 research_memories 独立表)
 - 数据查询(9,✅ #124):instrument list/get/search、dataset_release list/get、
@@ -97,7 +100,11 @@ FinBoard 研究 MCP —— 量化研究工具集
 - 策略规格(16,✅ #126):strategy registry/template/list/history/version_get/
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。
-  无代码版本化生命周期,反复 validate 预览 → draft → publish。
+  无代码版本化生命周期,反复 validate 预览 → draft → publish。validate
+  返回新增 universe_precheck(#186):universe 过滤条件依赖字段(list_date /
+  delist_date / average_amount / ST 标记 / required_data_fields / ranking.field)
+  的存在性 warning 与候选池空池预览(total/included/排除统计/缺失字段),
+  写策略与入队前先看它,避免「list_date 全 null → 全排除」式空转。
 - 回测(7,✅ #127 + #172 + #173 + #174 + #175 + #183):backtest_strategy_list(输出
   builtin_strategies 事件驱动策略+参数 schema 与 published_specs 已发布规格
   列表,含状态/版本数/执行入口提示)、backtest_run 双形态——(1) strategy 形态:
@@ -107,7 +114,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   (2) strategy_spec 形态:按已发布 {strategy_id, version} 路由入队 research_run
   管线,返回 run_id + job_id 指针异步执行(与 strategy 互斥;其余入队字段走
   queue_payload,与 finboard_run_queue 同构;返回值含 execution_mode
-  single_shot|multi_period)。基准收益真实计算(#184):strategy 形态支持
+  single_shot|multi_period;入队同样做 universe 候选池非空预检,#186)。基准收益真实计算(#184):strategy 形态支持
   benchmark_symbol 参数(如 000300.SH,指数日线自动走 akshare 指数接口,
   引擎单独拉取基准 bars 计算 benchmark_return/excess_return);research_run
   管线按 benchmark_config.symbol 从冻结发布取行情计算基准收益;基准缺失时

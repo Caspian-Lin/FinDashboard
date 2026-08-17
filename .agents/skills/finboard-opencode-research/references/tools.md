@@ -65,8 +65,14 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   benchmark_config / code_version / initial_capital / requested_by;
   `parameters.rebalance_frequency ∈ {monthly, quarterly}` 时 multi_period)
 - 返回:ResearchRun 详情(含 manifest 与 execution_mode)
+- **入队预检(issue #186)**:入队时对主数据发布的 instruments 做 universe
+  候选池非空校验(与 data_sync 后的元数据状态一致);空池秒级
+  `invalid_argument`,错误信息附各过滤条件的排除统计(如
+  `listing_age_below_minimum=512`)与缺失字段名(如 `list_date`),不再等执行期
+  跑完后报泛化错误。写策略后先 `finboard_strategy_validate` 看
+  `universe_precheck`,再入队即可避免这类空转。
 - 错误:`invalid_argument`(schema 校验 / 数据发布不匹配 / rebalance_frequency
-  非法)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
+  非法 / 候选池为空)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
 
 ### finboard_run_cancel(✅ #127,写)
 取消 ResearchRun(queued/running/interrupted/failed → cancelled)。
@@ -489,7 +495,21 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 满意后 `draft_create`。
 - 参数:`spec: dict`、`disabled_factors?: list[str]`
 - 返回:`{valid, checksum, feature_order, required_factor_sources,
-  required_datasets, dataset_release_ids, lifecycle_stages, can_execute}`
+  required_datasets, dataset_release_ids, lifecycle_stages, can_execute,
+  universe_precheck}`
+  - `universe_precheck`(issue #186):`{total_candidates, included, excluded,
+    is_empty, excluded_by_condition, missing_fields, warnings}`,来自主数据发布
+    instruments 的静态评估 ——
+    - `warnings` 是具名过滤降级提示(filter 依赖字段缺失):如
+      `universe_listing_days_unavailable`(min_listing_days 依赖 list_date,
+      发布 list_date 全空 → 将过滤全部标的)、`universe_delist_metadata_unavailable`
+      (exclude_delisted 无 delist_date)、`universe_st_filter_inactive`
+      (exclude_st 无 ST 标记)、`universe_average_amount_unavailable`
+      (min_average_amount 无 average_amount 特征)、
+      `universe_required_field_unavailable` / `universe_ranking_field_unavailable`
+      (required_data_fields / ranking.field 无数据源);
+    - `is_empty=true` 时入队必然秒级失败,先修复元数据(如 data_sync profiles
+      回填 list_date)或放宽过滤再入队。
 
 ### finboard_strategy_draft_create **[写]**
 保存策略规格草稿版本(change_type=create,首版本)。
@@ -574,7 +594,9 @@ research_run 管线轻路由(#174)。
     dataset_release_ids / code_version / initial_capital / requested_by;
     `queue_payload.parameters.rebalance_frequency ∈ {monthly, quarterly}`
     时为多期再平衡回放,#183)
-  - 校验:规格版本存在且 `status == "published"`,否则 `invalid_argument`
+  - 校验:规格版本存在且 `status == "published"`,否则 `invalid_argument`;
+    入队时同样做 universe 候选池非空预检(issue #186,与 run_queue 一致),
+    空池秒级 `invalid_argument` 并附排除统计与缺失字段
   - 返回:`{run_id, job_id, status, strategy_id, strategy_kind,
     execution_mode, manifest_checksum, execution_path}` —— 已入队异步执行,用
     `finboard_run_get` 或 `finboard_job_get` 轮询进度;`execution_mode` 为
