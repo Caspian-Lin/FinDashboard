@@ -232,6 +232,11 @@ async def _build_queued_manifest(
     from finboard_backtest.research_run.contracts import JsonValue
     from finboard_backtest.strategy_spec import ResearchStrategySpec
     from finboard_backtest.strategy_spec.contracts import FeatureKind
+    from finboard_backtest.strategy_spec.universe_precheck import (
+        describe_empty_pool,
+        preview_universe_pool,
+        resolvable_feature_names,
+    )
     from finboard_data.releases import ReleaseCapabilityError
     from finboard_persistence import (
         FeatureSnapshotRepository,
@@ -304,6 +309,31 @@ async def _build_queued_manifest(
                 "invalid_argument",
                 f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中",
             )
+
+    # issue #186:入队同步候选池非空校验(与 REST 路由同一评估函数)。
+    # 空池秒级 invalid_argument,附各过滤条件排除统计与缺失字段名。
+    preview = preview_universe_pool(
+        spec.universe,
+        releases[0].instruments,
+        decision_date=releases[0].end_date,
+        available_features=resolvable_feature_names(
+            feature_graph_sources=[
+                node.source for node in spec.feature_graph.nodes
+                if node.source is not None
+            ],
+            snapshot_feature_names=[
+                observation.feature_name
+                for snapshot in snapshots
+                for observation in snapshot.observations
+            ],
+        ),
+    )
+    if preview.is_empty:
+        raise McpToolError(
+            "invalid_argument",
+            "运行数据发布候选池为空,拒绝入队: "
+            f"{describe_empty_pool(preview, decision_date=releases[0].end_date)}",
+        )
 
     run_id = "RR-" + hashlib.sha256(
         body.idempotency_key.encode("utf-8")

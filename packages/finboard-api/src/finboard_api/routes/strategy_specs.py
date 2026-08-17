@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +24,8 @@ from finboard_api.strategy_spec_schemas import (
     StrategySpecValidateIn,
     StrategySpecValidationOut,
     StrategySpecVersionOut,
+    UniversePoolPreviewOut,
+    UniversePrecheckWarningOut,
 )
 from finboard_backtest.strategy_spec import (
     FEATURE_SOURCE_CATALOG,
@@ -34,6 +38,11 @@ from finboard_backtest.strategy_spec import (
     compile_registered_strategy_spec,
     list_strategy_capabilities,
     structured_diff,
+)
+from finboard_backtest.strategy_spec.universe_precheck import (
+    UniversePoolPreview,
+    preview_universe_pool,
+    resolvable_feature_names,
 )
 from finboard_data.releases import ReleaseCapabilityError
 from finboard_persistence import (
@@ -79,6 +88,31 @@ def _validation_out(plan: ResolvedStrategyPlan) -> StrategySpecValidationOut:
         dataset_release_ids=list(plan.dataset_release_ids),
         lifecycle_stages=list(plan.lifecycle_stages),
         can_execute=plan.can_execute,
+        universe_precheck=_preview_out(plan.universe_precheck),
+    )
+
+
+def _preview_out(
+    preview: UniversePoolPreview | None,
+) -> UniversePoolPreviewOut | None:
+    if preview is None:
+        return None
+    return UniversePoolPreviewOut(
+        total_candidates=preview.total_candidates,
+        included=preview.included,
+        excluded=preview.excluded,
+        is_empty=preview.is_empty,
+        excluded_by_condition=dict(sorted(preview.excluded_by_condition.items())),
+        missing_fields=list(preview.missing_fields),
+        warnings=[
+            UniversePrecheckWarningOut(
+                code=item.code,
+                condition=item.condition,
+                field=item.field,
+                message=item.message,
+            )
+            for item in preview.warnings
+        ],
     )
 
 
@@ -99,18 +133,35 @@ async def _compile_with_releases(
     disabled_factors: frozenset[str] = frozenset(),
 ) -> ResolvedStrategyPlan:
     release_repo = ResearchDatasetReleaseRepository(session)
-    available: set[str] = set()
+    releases = []
     try:
         for release_id in spec.validation_plan.dataset_release_ids:
-            release = await release_repo.require_usable(release_id)
-            available.add(release.release_id)
-        return compile_registered_strategy_spec(
+            releases.append(await release_repo.require_usable(release_id))
+        plan = compile_registered_strategy_spec(
             spec,
             disabled_factors=disabled_factors,
-            available_dataset_release_ids=frozenset(available),
+            available_dataset_release_ids=frozenset(r.release_id for r in releases),
         )
     except (ReleaseCapabilityError, StrategySpecError, ValueError) as exc:
         raise _strategy_error(exc) from exc
+    if not releases:
+        return plan
+    # issue #186:universe 静态预检 —— 依赖字段存在性 + 候选池空池诊断。
+    # 与 run_queue 同一评估函数(signal_engine 运行时也复用其聚合语义)。
+    primary = releases[0]
+    return replace(
+        plan,
+        universe_precheck=preview_universe_pool(
+            spec.universe,
+            primary.instruments,
+            decision_date=primary.end_date,
+            available_features=resolvable_feature_names(
+                feature_graph_sources=[
+                    node.source for node in spec.feature_graph.nodes if node.source is not None
+                ],
+            ),
+        ),
+    )
 
 
 @router.get("/registry", response_model=StrategySpecRegistryOut)
