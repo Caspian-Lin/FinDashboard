@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
@@ -839,3 +839,47 @@ class TestMultiPeriodBenchmarkEndToEnd:
             assert result is not None
             assert result["benchmark_return"] is None
             assert result["excess_return"] is None
+
+
+# ---- universe 预检运行时根因(issue #186)-----------------------------------
+
+
+def _null_list_date_provider() -> _StubProvider:
+    """多期发布但你发布 instruments 的 list_date 全 null(模拟 #185 前的数据)。"""
+    provider = _multi_period_provider()
+    provider.release.instruments = tuple(
+        replace(item, list_date=None)
+        for item in provider.release.instruments
+    )
+    return provider
+
+
+class TestUniversePrecheckRuntimeRootCause:
+    async def test_null_list_date_fails_run_with_field_root_cause(
+        self, engine: AsyncEngine
+    ) -> None:
+        """list_date 全 null + min_listing_days(默认 60):执行期空池错误指向 list_date。
+
+        验收:执行期空池错误附根因(缺失字段名),不再只有泛化
+        「组合流水线输入必须包含候选池和标准化信号」。
+        """
+        manifest = _multi_period_manifest("rt-empty-null-list")
+        run_id = await _queue_double_write(engine, manifest)
+        worker = _build_worker(
+            engine, _multi_period_factory(_null_list_date_provider())
+        )
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.FAILED.value
+            summary = run_row.error_summary or ""
+            assert "候选池为空" in summary, summary
+            assert "list_date" in summary, summary
+            assert "listing_age_below_minimum" in summary, summary
+            assert "组合流水线输入必须包含候选池" not in summary
+            assert run_row.job_id is not None
+            job_row = await BackgroundJobRepository(session).get(run_row.job_id)
+            assert job_row is not None
+            assert job_row.status == BackgroundJobStatus.FAILED.value

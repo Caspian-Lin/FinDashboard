@@ -17,6 +17,7 @@ from finboard_backtest.strategy_spec.contracts import (
     StrategySpecError,
     migrate_strategy_payload,
 )
+from finboard_backtest.strategy_spec.universe_precheck import UniversePoolPreview
 from finboard_data.factors import FACTOR_CATALOG
 
 LIFECYCLE_STAGES = (
@@ -166,6 +167,10 @@ class ResolvedStrategyPlan:
     dataset_release_ids: tuple[str, ...]
     lifecycle_stages: tuple[str, ...] = LIFECYCLE_STAGES
     can_execute: bool = False
+    # issue #186:universe 预检结果(字段依赖 warning + 候选池空池预览)。
+    # 由 API/MCP 的 ``_compile_with_releases`` 在拿到发布 instruments 后
+    # 经 ``dataclasses.replace`` 附加;纯 ``compile_strategy_spec`` 路径为 None。
+    universe_precheck: UniversePoolPreview | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -177,6 +182,9 @@ class ResolvedStrategyPlan:
             "dataset_release_ids": list(self.dataset_release_ids),
             "lifecycle_stages": list(self.lifecycle_stages),
             "can_execute": self.can_execute,
+            "universe_precheck": (
+                self.universe_precheck.as_dict() if self.universe_precheck is not None else None
+            ),
         }
 
 

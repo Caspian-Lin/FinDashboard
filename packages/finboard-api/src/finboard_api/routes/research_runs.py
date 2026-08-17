@@ -41,6 +41,11 @@ from finboard_backtest.research_run import (
 from finboard_backtest.research_run.contracts import JsonValue
 from finboard_backtest.strategy_spec import ResearchStrategySpec
 from finboard_backtest.strategy_spec.contracts import FeatureKind
+from finboard_backtest.strategy_spec.universe_precheck import (
+    describe_empty_pool,
+    preview_universe_pool,
+    resolvable_feature_names,
+)
 from finboard_data.releases import ReleaseCapabilityError
 from finboard_persistence import (
     BackgroundJobPersistenceConflictError,
@@ -125,6 +130,33 @@ async def queue_research_run(
                 status_code=422,
                 detail=(f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中"),
             )
+
+    # issue #186:入队同步候选池非空校验。用主发布(信号引擎实际使用的发布)
+    # 的 instruments 做静态评估,空池秒级 422(invalid_argument 语义),附
+    # 各过滤条件排除统计与缺失字段名,不再等执行期跑 30 分钟后才报泛化错误。
+    preview = preview_universe_pool(
+        spec.universe,
+        releases[0].instruments,
+        decision_date=releases[0].end_date,
+        available_features=resolvable_feature_names(
+            feature_graph_sources=[
+                node.source for node in spec.feature_graph.nodes if node.source is not None
+            ],
+            snapshot_feature_names=[
+                observation.feature_name
+                for snapshot in snapshots
+                for observation in snapshot.observations
+            ],
+        ),
+    )
+    if preview.is_empty:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "运行数据发布候选池为空,拒绝入队: "
+                f"{describe_empty_pool(preview, decision_date=releases[0].end_date)}"
+            ),
+        )
 
     run_id = _run_id(body.idempotency_key)
     try:
@@ -232,7 +264,12 @@ async def queue_research_run(
     ) as exc:
         await session.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return ResearchRunOut.model_validate(row)
+    # 提交后重读整行:created_at/updated_at 是 server_default(RETURNING 不保证
+    # 覆盖 onupdate 列),直接序列化新插入对象会在 async 上下文触发 lazy-load
+    # MissingGreenlet。与 cancel/replay 的「提交后 get 重读」口径一致。
+    fresh = await ResearchRunRepository(session).get(run_id)
+    assert fresh is not None
+    return ResearchRunOut.model_validate(fresh)
 
 
 @router.get("", response_model=list[ResearchRunOut])

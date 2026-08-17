@@ -39,6 +39,27 @@ class StrategySpecValidateIn(StrategySpecApiModel):
     disabled_factors: frozenset[str] = frozenset()
 
 
+class UniversePrecheckWarningOut(StrategySpecApiModel):
+    """一条具名 universe 预检 warning(issue #186)。"""
+
+    code: str
+    condition: str
+    field: str
+    message: str
+
+
+class UniversePoolPreviewOut(StrategySpecApiModel):
+    """候选池静态预览:空池判定 + 排除统计 + 具名 warnings(issue #186)。"""
+
+    total_candidates: int
+    included: int
+    excluded: int
+    is_empty: bool
+    excluded_by_condition: dict[str, int]
+    missing_fields: list[str]
+    warnings: list[UniversePrecheckWarningOut]
+
+
 class StrategySpecVersionOut(StrategySpecApiModel):
     strategy_id: str
     version: int
@@ -72,6 +93,7 @@ class StrategySpecValidationOut(StrategySpecApiModel):
     dataset_release_ids: list[str]
     lifecycle_stages: list[str]
     can_execute: bool
+    universe_precheck: UniversePoolPreviewOut | None = None
 
 
 class StrategySpecRegistryOut(StrategySpecApiModel):
@@ -93,4 +115,6 @@ __all__ = [
     "StrategySpecValidateIn",
     "StrategySpecValidationOut",
     "StrategySpecVersionOut",
+    "UniversePoolPreviewOut",
+    "UniversePrecheckWarningOut",
 ]

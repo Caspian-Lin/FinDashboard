@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import os
+from collections import Counter
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -84,6 +85,10 @@ from finboard_backtest.strategy_spec.universe import (
     UniverseCandidate as SpecUniverseCandidate,
 )
 from finboard_backtest.strategy_spec.universe import explain_universe
+from finboard_backtest.strategy_spec.universe_precheck import (
+    resolvable_feature_names,
+    universe_filter_warnings,
+)
 
 if TYPE_CHECKING:
     from finboard_backtest.portfolio import CovarianceEstimate
@@ -927,6 +932,77 @@ def _apply_universe_filter(
     return tuple(out)
 
 
+def _runtime_available_features(
+    spec: ResearchStrategySpec,
+    features_by_source: Mapping[str, Mapping[str, float]],
+) -> frozenset[str]:
+    """运行时特征可解析集合 = 标准价格特征 + 规格 features + 本次观测特征。"""
+    return resolvable_feature_names(
+        feature_graph_sources=[
+            node.source for node in spec.feature_graph.nodes if node.source is not None
+        ],
+        snapshot_feature_names=tuple(features_by_source),
+    )
+
+
+def _emit_universe_degradation_warnings(
+    spec: ResearchStrategySpec,
+    provider: FrozenReleaseProvider,
+    features_by_source: Mapping[str, Mapping[str, float]],
+    decision_at: datetime,
+) -> None:
+    """逐条声明「该过滤因缺元数据/特征未生效」的运行时 warning(issue #186)。"""
+    for warning in universe_filter_warnings(
+        spec.universe,
+        provider.release.instruments,
+        available_features=_runtime_available_features(spec, features_by_source),
+    ):
+        logger.warning(
+            "research_run.universe_filter_degraded",
+            decision_date=decision_at.date().isoformat(),
+            condition=warning.condition,
+            field=warning.field,
+            code=warning.code,
+            message=warning.message,
+        )
+
+
+def _empty_pool_error_message(
+    spec: ResearchStrategySpec,
+    candidates: Sequence[UniverseCandidate],
+    instruments: Sequence[object],
+    features_by_source: Mapping[str, Mapping[str, float]],
+    decision_at: datetime,
+) -> str:
+    """执行期空池错误的根因信息:排除统计 + 缺失字段名(issue #186)。"""
+    reasons: Counter[str] = Counter()
+    for candidate in candidates:
+        reasons.update(candidate.reasons)
+    stats = "、".join(f"{reason}={count}" for reason, count in sorted(reasons.items()))
+    missing: set[str] = set()
+    for reason in reasons:
+        if reason.startswith(("missing_required_field:", "missing_ranking_field:")):
+            missing.add(reason.split(":", 1)[1])
+        elif reason == "missing_average_amount":
+            missing.add("average_amount")
+        elif reason == "listing_age_below_minimum" and any(
+            getattr(item, "list_date", None) is None for item in instruments
+        ):
+            missing.add("list_date")
+        elif reason == "delisted":
+            missing.add("delist_date")
+        elif reason == "st_security":
+            missing.add("st_marker")
+    missing_text = "、".join(sorted(missing)) if missing else "无"
+    return (
+        f"决策日 {decision_at.date().isoformat()} 候选池为空: "
+        f"共 {len(candidates)} 个候选标的全部被过滤。"
+        f"排除统计: {stats or '无'};缺失字段: {missing_text}。"
+        "请检查发布 instrument 元数据(list_date 等)与冻结特征是否齐备,"
+        "或放宽 universe 过滤条件。"
+    )
+
+
 async def build_decision_inputs(
     manifest: ResearchRunManifest,
     *,
@@ -979,6 +1055,26 @@ async def build_decision_inputs(
             manifest.strategy_spec, provider, context, features_by_source
         )
         included = frozenset(item.symbol for item in candidates if item.included)
+        # issue #186:运行时降级 warning —— 元数据/特征缺失时声明该过滤未生效,
+        # 对齐快照链路 `instrument_profiles_unavailable` 的语义(不静默)。
+        _emit_universe_degradation_warnings(
+            manifest.strategy_spec,
+            provider,
+            features_by_source,
+            decision_at,
+        )
+        if not included:
+            # issue #186:执行期空池错误附根因(缺失字段名 + 排除统计),
+            # 不再只有 portfolio_pipeline 的泛化「候选池为空」。
+            raise ValueError(
+                _empty_pool_error_message(
+                    manifest.strategy_spec,
+                    candidates,
+                    provider.release.instruments,
+                    features_by_source,
+                    decision_at,
+                )
+            )
         # 信号标的必须同时具备决策价、成交价、执行元数据与可估计收益的历史。
         signalable = (
             included
