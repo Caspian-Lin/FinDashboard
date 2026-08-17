@@ -68,6 +68,16 @@ class FeatureSnapshotExecutor:
         progress: ProgressCallback,
     ) -> JobResult:
         dataset_release_id = _require_str(job, "dataset_release_id")
+        additional_release_ids = job.payload.get("additional_release_ids")
+        if additional_release_ids is None:
+            additional_release_ids = []
+        if not isinstance(additional_release_ids, list):
+            raise ExecutorError(
+                code="invalid_payload",
+                summary="additional_release_ids 必须是字符串列表",
+                retryable=False,
+                context={"job_id": job.job_id},
+            )
         decision_at_raw = _require_str(job, "decision_at")
         try:
             decision_at = datetime.fromisoformat(decision_at_raw).astimezone(UTC)
@@ -90,7 +100,7 @@ class FeatureSnapshotExecutor:
             )
 
         from finboard_backtest import build_price_feature_snapshot
-        from finboard_data.releases import FrozenReleaseProvider
+        from finboard_data.releases import FrozenReleaseProvider, ReleaseDatasetKind
         from finboard_persistence import ResearchDatasetReleaseRepository
         from finboard_persistence.factor_lab_repo import FeatureSnapshotRepository
 
@@ -98,7 +108,10 @@ class FeatureSnapshotExecutor:
         async with self._session_maker() as session:
             release_repo = ResearchDatasetReleaseRepository(session)
             try:
-                release = await release_repo.require_usable(dataset_release_id)
+                releases = [
+                    await release_repo.require_usable(release_id)
+                    for release_id in (dataset_release_id, *additional_release_ids)
+                ]
             except Exception as exc:
                 raise ExecutorError(
                     code="release_not_usable",
@@ -106,29 +119,33 @@ class FeatureSnapshotExecutor:
                     retryable=False,
                     context={"job_id": job.job_id, "release_id": dataset_release_id},
                 ) from exc
-            if not release.start_date <= decision_at.date() <= release.end_date:
+            primary = releases[0]
+            if not primary.start_date <= decision_at.date() <= primary.end_date:
                 raise ExecutorError(
                     code="decision_at_out_of_range",
                     summary=(
-                        f"decision_at 日期必须在数据发布范围内: "
-                        f"{release.start_date}~{release.end_date}"
+                        f"decision_at 日期必须在 bars 主发布范围内: "
+                        f"{primary.start_date}~{primary.end_date}"
                     ),
                     retryable=False,
                     context={"job_id": job.job_id},
                 )
 
-        total_holder: dict[str, int | None] = {"total": release.symbol_count}
+        total_holder: dict[str, int | None] = {"total": primary.symbol_count}
         on_progress = make_sync_progress(
             progress, phase_prefix="feature_snapshot", total_holder=total_holder
         )
 
         # 2. 构造冻结发布 provider + 计算快照
         try:
-            provider = FrozenReleaseProvider(
-                release_root=self._release_root,
-                release_id=dataset_release_id,
-                max_concurrency=self._max_concurrency,
-            )
+            providers = {
+                release.release_id: FrozenReleaseProvider(
+                    release_root=self._release_root,
+                    release_id=release.release_id,
+                    max_concurrency=self._max_concurrency,
+                )
+                for release in releases
+            }
         except Exception as exc:
             raise ExecutorError(
                 code="release_read_failed",
@@ -142,20 +159,37 @@ class FeatureSnapshotExecutor:
 
         await progress(0, total_holder["total"], "feature_snapshot:start")
         try:
-            snapshot = await build_price_feature_snapshot(
-                provider=provider,
-                decision_at=decision_at,
-                code_version=code_version(),
-                momentum_lookback=momentum_lookback,
-                volatility_windows=(
-                    tuple(volatility_windows)
-                    if isinstance(volatility_windows, list)
-                    else (20, 60, 120)
-                ),
-                max_concurrency=self._max_concurrency,
-                process_workers=self._process_workers,
-                on_progress=on_progress,
-            )
+            if len(releases) == 1 or all(
+                item.dataset_kind is ReleaseDatasetKind.BARS
+                for item in releases[1:]
+            ):
+                snapshot = await build_price_feature_snapshot(
+                    provider=providers[dataset_release_id],
+                    decision_at=decision_at,
+                    code_version=code_version(),
+                    momentum_lookback=momentum_lookback,
+                    volatility_windows=(
+                        tuple(volatility_windows)
+                        if isinstance(volatility_windows, list)
+                        else (20, 60, 120)
+                    ),
+                    max_concurrency=self._max_concurrency,
+                    process_workers=self._process_workers,
+                    on_progress=on_progress,
+                )
+            else:
+                from finboard_backtest.factor_lab import (
+                    build_cross_section_feature_snapshot_from_releases,
+                )
+
+                snapshot = await build_cross_section_feature_snapshot_from_releases(
+                    releases=releases,
+                    providers=providers,
+                    decision_at=decision_at,
+                    code_version=code_version(),
+                    max_concurrency=self._max_concurrency,
+                    on_progress=on_progress,
+                )
         except Exception as exc:
             raise ExecutorError(
                 code="snapshot_build_failed",

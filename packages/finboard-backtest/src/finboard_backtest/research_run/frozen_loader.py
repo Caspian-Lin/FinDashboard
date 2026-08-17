@@ -4,6 +4,13 @@
 ``PortfolioDecisionInput`` 的**机械字段**(价格 / 执行元数据 / 候选池 / 特征 /
 artifact 绑定),供 ``PortfolioPipelineAdapter`` 使用。
 
+issue #187:多数据集联合消费。=== dataset_releases 按 kind 融合 ===
+* ``bars`` release —— 行情 / 候选池 / 执行元数据(主发布,仍要求恰好一个);
+* ``daily_metrics`` / ``financial_indicators`` release —— 研究数据观测
+  (pb / 市值 / 换手 / ROE 等),按 ``available_at <= decision_at`` PIT 门控
+  读取并映射为 ``FeatureValue``,与 ``factor_snapshots`` 的观测合并。
+manifest 冻结多个 release 时,一个 bars 主发布 + 若干研究数据发布联合消费。
+
 边界:**信号(``NormalizedSignal``)不在本加载器生成**。现有策略实现是事件驱动实盘
 ``Strategy``(消费 ``MarketDataEvent`` → ``ctx.submit_order``),没有「OHLCV → 批量
 信号」的离线函数;每个策略的信号逻辑需要独立设计(属于策略实现工作,非队列迁移)。
@@ -14,6 +21,8 @@ artifact 绑定),供 ``PortfolioPipelineAdapter`` 使用。
 
 复用的现成服务(无需新写 Parquet/DB 读取):
 * ``FrozenReleaseProvider.fetch_point_in_time_bars`` —— PIT 门控行情读取
+* ``FrozenReleaseProvider.fetch_daily_metrics`` / ``fetch_financial_indicators``
+  —— 研究数据发布观测读取(issue #187)
 * ``FeatureSnapshotRepository.get`` —— 因子快照反序列化(JSON-in-DB)
 * ``ResearchDatasetRelease.instruments`` —— 候选元数据 / 执行规则
 
@@ -24,7 +33,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from finboard_backtest.portfolio.contracts import AssetLotInfo
@@ -37,7 +46,11 @@ from finboard_backtest.research_run.contracts import (
 
 if TYPE_CHECKING:
     from finboard_data.factor_lab import FeatureSnapshot
-    from finboard_data.releases import FrozenReleaseProvider, ReleasedInstrument
+    from finboard_data.factors import FactorInputBatch
+    from finboard_data.releases import (
+        FrozenReleaseProvider,
+        ReleasedInstrument,
+    )
     from finboard_shared.types import Market
 
 
@@ -95,8 +108,9 @@ class FrozenInputLoader:
     ) -> LoadedDecisionContext:
         """加载单个决策时点的机械字段。
 
-        * 取 manifest.dataset_releases 的首个 release 作为行情 / 候选来源
-          (多 release 融合留作后续)。
+        * 按 kind 融合 manifest.dataset_releases(issue #187):bars 主发布提供
+          候选池 / 价格 / 执行元数据;daily_metrics / financial_indicators 发布
+          提供研究数据观测(PIT 门控),与 factor_snapshots 观测合并。
         * 按 ``decision_at`` 做 PIT 门控取决策日 close;``execution_at`` 取成交日
           close(必须是 decision_at 之后的下一交易日,由调用方保证)。
         * 加载 manifest.factor_snapshots 的特征观测并映射为 ``FeatureValue``。
@@ -105,7 +119,7 @@ class FrozenInputLoader:
             raise ValueError("manifest 必须冻结至少一个数据发布")
         if execution_at <= decision_at:
             raise ValueError("execution_at 必须晚于 decision_at")
-        release_ref = manifest.dataset_releases[0]
+        release_ref = self._bars_release_ref(manifest)
         provider = self.release_provider_factory(release_ref.artifact_id)
         release = provider.release
         included_candidates, lot_info_by_symbol = _build_candidates_and_lots(
@@ -116,6 +130,10 @@ class FrozenInputLoader:
             provider, included_candidates, execution_at
         )
         features = await self._load_features(manifest.factor_snapshots, decision_at)
+        research_features = await self._load_research_features(
+            manifest, included_candidates, decision_at
+        )
+        features = (*features, *research_features)
         artifact_ids = _build_artifact_ids(manifest)
         return LoadedDecisionContext(
             business_date=decision_at.date(),
@@ -129,6 +147,52 @@ class FrozenInputLoader:
             input_artifact_ids=artifact_ids,
             included_symbols=tuple(item.symbol for item in included_candidates),
         )
+
+    def _bars_release_ref(self, manifest: ResearchRunManifest) -> FrozenArtifactRef:
+        """取 bars 主发布引用;缺少或存在多个时 fail-closed。"""
+        from finboard_data.releases import ReleaseDatasetKind
+
+        bars_refs = []
+        for release_ref in manifest.dataset_releases:
+            provider = self.release_provider_factory(release_ref.artifact_id)
+            if provider.release.dataset_kind is ReleaseDatasetKind.BARS:
+                bars_refs.append(release_ref)
+        if len(bars_refs) != 1:
+            raise ValueError(
+                "联合发布必须恰好包含一个 bars 主发布(行情/候选池来源),"
+                "实际: " + ",".join(ref.artifact_id for ref in manifest.dataset_releases)
+            )
+        return bars_refs[0]
+
+    async def _load_research_features(
+        self,
+        manifest: ResearchRunManifest,
+        candidates: Sequence[UniverseCandidate],
+        decision_at: datetime,
+    ) -> tuple[FeatureValue, ...]:
+        """从研究数据发布(daily_metrics / financial_indicators)加载 PIT 观测。
+
+        issue #187:把冻结研究数据映射为因子值(universe 过滤需要的
+        ``feature_id`` 与 ``extract_factor_matrix`` 输出一致),与
+        factor_snapshots 的观测共同构成决策时点的特征。
+        """
+        from finboard_data.releases import ReleaseDatasetKind
+
+        values: list[FeatureValue] = []
+        for release_ref in manifest.dataset_releases:
+            provider = self.release_provider_factory(release_ref.artifact_id)
+            kind = provider.release.dataset_kind
+            if kind is ReleaseDatasetKind.DAILY_METRICS:
+                metrics = await _load_daily_metrics_features(
+                    provider, candidates, decision_at, release_ref.artifact_id
+                )
+                values.extend(metrics)
+            elif kind is ReleaseDatasetKind.FINANCIAL_INDICATORS:
+                financials = await _load_financial_features(
+                    provider, candidates, decision_at, release_ref.artifact_id
+                )
+                values.extend(financials)
+        return tuple(values)
 
     async def _load_features(
         self,
@@ -154,6 +218,135 @@ class FrozenInputLoader:
                     )
                 )
         return tuple(values)
+
+
+async def _load_daily_metrics_features(
+    provider: FrozenReleaseProvider,
+    candidates: Sequence[UniverseCandidate],
+    decision_at: datetime,
+    release_id: str,
+) -> list[FeatureValue]:
+    """把 daily_metrics 发布观测映射为因子值(PIT 门控,复用 extract_factor_matrix)。"""
+    from finboard_data.factors import FactorInputBatch, FactorInputRecord
+    from finboard_shared.models import Symbol
+
+    factor_rows: list[FactorInputRecord] = []
+    for candidate in candidates:
+        symbol = Symbol(code=candidate.symbol, market=_market_from_value(candidate.market))
+        records = await provider.fetch_daily_metrics(
+            symbol,
+            start=provider.release.start_date,
+            end=decision_at.date(),
+            decision_at=decision_at,
+        )
+        if not records:
+            continue
+        # 取决策时点可见的最新一条(同一 trade_date 理论上一条;排序保最新)。
+        latest = sorted(records, key=lambda item: item.available_at)[-1]
+        factor_rows.append(
+            FactorInputRecord(
+                symbol=candidate.symbol,
+                profile=None,
+                daily=latest,
+                financial=None,
+                industry=None,
+            )
+        )
+    if not factor_rows:
+        return []
+    batch = FactorInputBatch(records=tuple(factor_rows), source="tushare", dataset_versions={"research_release": "frozen"})
+    return _matrix_to_feature_values(batch, release_id=release_id)
+
+
+async def _load_financial_features(
+    provider: FrozenReleaseProvider,
+    candidates: Sequence[UniverseCandidate],
+    decision_at: datetime,
+    release_id: str,
+) -> list[FeatureValue]:
+    """把 financial_indicators 发布观测映射为因子值(PIT 门控)。"""
+    from finboard_data.factors import FactorInputBatch, FactorInputRecord
+    from finboard_data.research import FinancialIndicator
+    from finboard_shared.models import Symbol
+
+    factor_rows: list[FactorInputRecord] = []
+    for candidate in candidates:
+        symbol = Symbol(code=candidate.symbol, market=_market_from_value(candidate.market))
+        records = await provider.fetch_financial_indicators(
+            symbol,
+            decision_at=decision_at,
+        )
+        if not records:
+            continue
+        # 同一 report_period 保留公告修订(update_flag);跨期取最新公告的一期。
+        by_period: dict[date, FinancialIndicator] = {}
+        for item in records:
+            previous = by_period.get(item.report_period)
+            if previous is None or item.available_at > previous.available_at:
+                by_period[item.report_period] = item
+        latest = max(by_period.values(), key=lambda item: item.available_at)
+        factor_rows.append(
+            FactorInputRecord(
+                symbol=candidate.symbol,
+                profile=None,
+                daily=None,
+                financial=latest,
+                industry=None,
+            )
+        )
+    if not factor_rows:
+        return []
+    batch = FactorInputBatch(records=tuple(factor_rows), source="tushare", dataset_versions={"research_release": "frozen"})
+    return _matrix_to_feature_values(batch, release_id=release_id)
+
+
+def _matrix_to_feature_values(
+    batch: FactorInputBatch,
+    *,
+    release_id: str,
+) -> list[FeatureValue]:
+    """复用因子提取矩阵,把研究数据横截面映射为 ``FeatureValue``。
+
+    只提取 universe 过滤依赖的日频/财务因子(pb / 市值 / 换手 / ROE /
+    毛利率 / 负债率 / 营收增速),与 ``extract_factor_matrix`` 输出一致,
+    避免因子映射逻辑在加载器与快照构建之间漂移。
+    """
+    from finboard_backtest.factors.extract import extract_factor_matrix
+
+    matrix = extract_factor_matrix(batch)
+    values: list[FeatureValue] = []
+    for factor_name, by_symbol in sorted(matrix.items()):
+        for symbol, value in sorted(by_symbol.items()):
+            values.append(
+                FeatureValue(
+                    symbol=symbol,
+                    feature_id=factor_name,
+                    value=float(value),
+                    source_artifact_ids=(release_id,),
+                    available_at=_latest_available_at(batch, symbol),
+                )
+            )
+    return values
+
+
+def _latest_available_at(batch: FactorInputBatch, symbol: str) -> datetime:
+    """取某标的在横截面中最新的观测时点(研究记录或特征观测)。"""
+    candidates: list[datetime] = []
+    for record in batch.records:
+        if record.symbol != symbol:
+            continue
+        for item in (record.daily, record.financial):
+            if item is not None:
+                candidates.append(_require_aware(item.available_at))
+    if not candidates:
+        return datetime.now(UTC)
+    return max(candidates)
+
+
+def _require_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 def _build_candidates_and_lots(

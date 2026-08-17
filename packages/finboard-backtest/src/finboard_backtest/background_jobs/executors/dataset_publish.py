@@ -53,10 +53,14 @@ class DatasetPublishExecutor:
         release_id = _require_str(job, "release_id")
         dataset_name = _require_str(job, "dataset_name")
         release_kind = _require_str(job, "release_kind")
-        if release_kind not in ("a_share_tushare", "multi_asset_mixed"):
+        kind = _RELEASE_KIND_TO_DATASET_KIND.get(release_kind)
+        if kind is None:
             raise ExecutorError(
                 code="invalid_payload",
-                summary="release_kind 必须是 a_share_tushare 或 multi_asset_mixed",
+                summary=(
+                    "release_kind 必须是 a_share_tushare / multi_asset_mixed / "
+                    "daily_metrics / financial_indicators"
+                ),
                 retryable=False,
                 context={"job_id": job.job_id},
             )
@@ -85,15 +89,12 @@ class DatasetPublishExecutor:
             DatasetReleaseError,
             DatasetReleaseSpec,
             ImmutableReleaseError,
+            ReleaseDatasetKind,
         )
         from finboard_persistence import ResearchDatasetReleaseService
         from finboard_persistence.models import InstrumentModel
 
-        source = (
-            "tushare"
-            if release_kind == "a_share_tushare"
-            else "mixed"
-        )
+        source = _RELEASE_KIND_TO_SOURCE[release_kind]
 
         await progress(0, None, "dataset_publish:validating")
         async with self._session_maker() as session:
@@ -110,7 +111,7 @@ class DatasetPublishExecutor:
                     retryable=False,
                     context={"job_id": job.job_id},
                 )
-            if release_kind == "a_share_tushare":
+            if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators"):
                 invalid = sorted(
                     item.code
                     for item in selected
@@ -120,7 +121,7 @@ class DatasetPublishExecutor:
                     raise ExecutorError(
                         code="a_share_scope_violation",
                         summary=(
-                            "A股 Tushare 单源发布只能包含 A 股股票: "
+                            "A股单源发布只能包含 A 股股票: "
                             + ", ".join(invalid[:20])
                         ),
                         retryable=False,
@@ -142,6 +143,8 @@ class DatasetPublishExecutor:
                         context={"job_id": job.job_id},
                     )
 
+            fields = _default_release_fields(kind)
+
             await progress(1, None, "dataset_publish:publishing")
             service = ResearchDatasetReleaseService(
                 session,
@@ -159,9 +162,11 @@ class DatasetPublishExecutor:
                         end_date=end_date,
                         code_version=code_version(),
                         adjustment=adjustment,
+                        fields=fields,
+                        dataset_kind=ReleaseDatasetKind(kind),
                         required_capabilities=(
                             ("stock",)
-                            if release_kind == "a_share_tushare"
+                            if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators")
                             else tuple(required_capabilities)
                         ),
                         known_limitations=(
@@ -197,6 +202,38 @@ class DatasetPublishExecutor:
 
         await progress(1, 1, "dataset_publish:done")
         return JobResult(status="succeeded", result_ref=release.release_id)
+
+
+_RELEASE_KIND_TO_DATASET_KIND: dict[str, str] = {
+    "a_share_tushare": "bars",
+    "multi_asset_mixed": "bars",
+    # issue #187:研究数据发布。daily_metrics / financial_indicators 由
+    # research_data_sync(#171)摄取进 research_* 表,发布从表冻结而非本地缓存。
+    "daily_metrics": "daily_metrics",
+    "financial_indicators": "financial_indicators",
+}
+
+_RELEASE_KIND_TO_SOURCE: dict[str, str] = {
+    "a_share_tushare": "tushare",
+    "multi_asset_mixed": "mixed",
+    "daily_metrics": "tushare",
+    "financial_indicators": "tushare",
+}
+
+
+def _default_release_fields(kind_value: str) -> tuple[str, ...]:
+    """按数据集类型返回默认冻结字段白名单(全部字段)。"""
+    from finboard_data import (
+        DAILY_METRICS_FIELDS,
+        FINANCIAL_INDICATORS_FIELDS,
+        RELEASE_FIELDS,
+    )
+
+    if kind_value == "daily_metrics":
+        return DAILY_METRICS_FIELDS
+    if kind_value == "financial_indicators":
+        return FINANCIAL_INDICATORS_FIELDS
+    return RELEASE_FIELDS
 
 
 def _require_str(job: JobRecord, key: str) -> str:

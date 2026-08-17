@@ -55,6 +55,7 @@ from finboard_backtest.research_run.contracts import (
     DecisionBundle,
     EquityPoint,
     FeatureValue,
+    FrozenArtifactRef,
     NormalizedSignal,
     ResearchExecutionMode,
     ResearchRunManifest,
@@ -1022,7 +1023,7 @@ async def build_decision_inputs(
     """
     if not manifest.dataset_releases:
         raise ValueError("manifest 必须冻结至少一个数据发布")
-    release_ref = manifest.dataset_releases[0]
+    release_ref = _bars_release_ref(manifest, release_provider_factory)
     provider = release_provider_factory(release_ref.artifact_id)
     loader = FrozenInputLoader(
         release_provider_factory=release_provider_factory,
@@ -1110,6 +1111,30 @@ async def build_decision_inputs(
             )
         )
     return tuple(inputs)
+
+
+def _bars_release_ref(
+    manifest: ResearchRunManifest,
+    release_provider_factory: ReleaseProviderFactory,
+) -> FrozenArtifactRef:
+    """取 bars 主发布引用(issue #187:联合发布按 kind 融合)。
+
+    行情 / 候选池 / 执行元数据必须来自唯一的 bars 发布;daily_metrics /
+    financial_indicators 研究数据发布只提供因子观测,不作为主发布。
+    """
+    from finboard_data.releases import ReleaseDatasetKind
+
+    bars_refs = []
+    for release_ref in manifest.dataset_releases:
+        provider = release_provider_factory(release_ref.artifact_id)
+        if provider.release.dataset_kind is ReleaseDatasetKind.BARS:
+            bars_refs.append(release_ref)
+    if len(bars_refs) != 1:
+        raise ValueError(
+            "联合发布必须恰好包含一个 bars 主发布(行情/候选池来源),"
+            "实际: " + ",".join(ref.artifact_id for ref in manifest.dataset_releases)
+        )
+    return bars_refs[0]
 
 
 async def _snapshot_decision_days(
@@ -1204,7 +1229,7 @@ class SignalEnginePipelineAdapter:
             execution_mode_for(manifest.parameters) is ResearchExecutionMode.MULTI_PERIOD
             and collected
         ):
-            release_ref = manifest.dataset_releases[0]
+            release_ref = _bars_release_ref(manifest, self._release_provider_factory)
             provider = self._release_provider_factory(release_ref.artifact_id)
             self._equity_curve = await build_daily_equity_curve(provider, manifest, collected)
         # 基准曲线(issue #184):两种执行模式都按 benchmark_config.symbol
