@@ -30,7 +30,9 @@ from finboard_persistence.models import (
     InstrumentModel,
     InstrumentNameModel,
     ResearchDatasetReleaseModel,
+    ResearchInstrumentProfileModel,
 )
+from finboard_persistence.profile_metadata import ProfileMetadataLookup
 from finboard_shared.types import (
     AssetClass,
     ConvertibleEventType,
@@ -216,6 +218,9 @@ class ReleaseInstrumentCatalogRepository:
         futures_rows = await self._futures_map(normalized)
         names = await self._name_history(normalized)
         events = await self._events(normalized)
+        # 兜底源(issue #185):instruments 的 list_date/industry 为 null 时,
+        # 用最近一次已发布档案(research_instrument_profiles)补齐,不新建读路径。
+        profiles = await ProfileMetadataLookup(self._session).profiles(normalized)
 
         result: list[ReleaseInstrumentSpec] = []
         missing: list[str] = []
@@ -247,6 +252,7 @@ class ReleaseInstrumentCatalogRepository:
                     _etf_candidate(
                         row,
                         etf_rows.get(code) or etf_rows.get(bare),
+                        profile=profiles.get(code),
                         lifecycle_events=events.get(code, ()),
                         name_history=names.get(code, ()),
                     )
@@ -266,6 +272,7 @@ class ReleaseInstrumentCatalogRepository:
                     _plain_candidate(
                         row,
                         instrument_type=instrument_type,
+                        profile=profiles.get(code),
                         lifecycle_events=events.get(code, ()),
                         name_history=names.get(code, ()),
                     )
@@ -421,6 +428,7 @@ def _plain_candidate(
     row: InstrumentModel,
     *,
     instrument_type: InstrumentType,
+    profile: ResearchInstrumentProfileModel | None,
     lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
     name_history: tuple[tuple[str, date, date | None], ...],
 ) -> ReleaseInstrumentSpec:
@@ -434,6 +442,10 @@ def _plain_candidate(
         asset_class = AssetClass.EQUITY
     else:
         raise ReleaseCapabilityError(f"{row.code}: 不支持的普通资产类型 {instrument_type.value}")
+    # 兜底(issue #185):instruments 由 akshare 发现链路写入,list_date/industry
+    # 可能为 null;research_instrument_profiles(tushare stock_basic)是兜底源。
+    list_date = row.list_date or (profile.list_date if profile is not None else None)
+    industry = row.industry or (profile.industry if profile is not None else None)
     return ReleaseInstrumentSpec(
         code=row.code,
         name=row.name,
@@ -447,8 +459,9 @@ def _plain_candidate(
         ),
         exchange=row.exchange,
         listing_board=row.listing_board,
-        list_date=row.list_date,
+        list_date=list_date,
         delist_date=row.delist_date,
+        industry=industry,
         status=_status(row.status),
         lifecycle_events=lifecycle_events,
         present_event_types=tuple(
@@ -462,6 +475,7 @@ def _etf_candidate(
     row: InstrumentModel,
     metadata: EtfMetadataModel | None,
     *,
+    profile: ResearchInstrumentProfileModel | None,
     lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
     name_history: tuple[tuple[str, date, date | None], ...],
 ) -> ReleaseInstrumentSpec:
@@ -476,6 +490,11 @@ def _etf_candidate(
         list_date = row.list_date or metadata.listing_date
     else:
         raise ReleaseCapabilityError(f"{row.code}: ETF 缺少分类元数据")
+    # 兜底(issue #185):profiles 是 list_date/industry 的兜底源。ETF 优先
+    # catalog/metadata 的 list_date,仅在都缺时用档案;industry 只来自档案。
+    if list_date is None and profile is not None:
+        list_date = profile.list_date
+    industry = row.industry or (profile.industry if profile is not None else None)
     return ReleaseInstrumentSpec(
         code=row.code,
         name=row.name or (catalog.name if catalog else row.code),
@@ -492,6 +511,7 @@ def _etf_candidate(
         etf_category=category,
         list_date=list_date,
         delist_date=row.delist_date,
+        industry=industry,
         status=_status(row.status),
         lifecycle_events=lifecycle_events,
         present_event_types=tuple(

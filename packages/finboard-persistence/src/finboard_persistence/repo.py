@@ -556,6 +556,33 @@ class InstrumentSyncResult:
         return self.new + self.updated
 
 
+@dataclass(frozen=True, slots=True)
+class InstrumentMetadataBackfillResult:
+    """profiles → instruments 元数据回填摘要(issue #185)。
+
+    ``scoped`` 是本次审查的 instruments 行数(按入参 symbols 或全部未退市标的);
+    ``backfilled_*`` 是本次真实回填的行数;``missing_*`` 是回填完成后仍缺失的
+    行数 —— 让缺失可被发现而非静默。
+    """
+
+    profile_batch_available: bool
+    scoped: int = 0
+    backfilled_list_date: int = 0
+    backfilled_industry: int = 0
+    missing_list_date: int = 0
+    missing_industry: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "profile_batch_available": self.profile_batch_available,
+            "scoped": self.scoped,
+            "backfilled_list_date": self.backfilled_list_date,
+            "backfilled_industry": self.backfilled_industry,
+            "missing_list_date": self.missing_list_date,
+            "missing_industry": self.missing_industry,
+        }
+
+
 class InstrumentRepository:
     """标的元数据仓储(instruments 表)。
 
@@ -854,6 +881,59 @@ class InstrumentRepository:
             delisted=len(result.delisted),
             reactivated=len(result.reactivated),
         )
+        return result
+
+    async def backfill_metadata_from_profiles(
+        self,
+        *,
+        symbols: list[str] | None = None,
+        source: str | None = None,
+    ) -> InstrumentMetadataBackfillResult:
+        """从 ``research_instrument_profiles`` 回填 list_date / industry(issue #185)。
+
+        只回填当前为 null 的字段,不覆盖已存在的主数据;profiles 是 tushare
+        ``stock_basic`` 的版本化快照,``instruments`` 的 akshare 发现链路不携带
+        这两个字段。``symbols=None`` 时审查全部未退市标的(适合一次性修复)。
+
+        返回回填前后缺失统计,缺批次(未发布过 profiles)时不视为错误。
+        """
+        from finboard_persistence.profile_metadata import ProfileMetadataLookup
+
+        lookup = ProfileMetadataLookup(self._session)
+        batch = await lookup.latest_batch(source=source)
+        if batch is None:
+            return InstrumentMetadataBackfillResult(profile_batch_available=False)
+
+        stmt = select(InstrumentModel)
+        if symbols is not None:
+            stmt = stmt.where(InstrumentModel.code.in_(symbols))
+        else:
+            stmt = stmt.where(InstrumentModel.status != ListingStatus.DELISTED.value)
+        rows = list((await self._session.execute(stmt)).scalars().all())
+
+        profiles = await lookup.profiles([row.code for row in rows], source=source)
+        backfilled_list_date = 0
+        backfilled_industry = 0
+        for row in rows:
+            profile = profiles.get(row.code)
+            if profile is None:
+                continue
+            if row.list_date is None and profile.list_date is not None:
+                row.list_date = profile.list_date
+                backfilled_list_date += 1
+            if row.industry is None and profile.industry:
+                row.industry = profile.industry
+                backfilled_industry += 1
+        await self._session.flush()
+        result = InstrumentMetadataBackfillResult(
+            profile_batch_available=True,
+            scoped=len(rows),
+            backfilled_list_date=backfilled_list_date,
+            backfilled_industry=backfilled_industry,
+            missing_list_date=sum(1 for row in rows if row.list_date is None),
+            missing_industry=sum(1 for row in rows if row.industry is None),
+        )
+        logger.info("instrument.backfill_from_profiles", **result.as_dict())
         return result
 
     async def update_listing_status(

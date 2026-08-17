@@ -12,3 +12,4 @@
 - [OpenCode Web 工作台:SPA 状态与容器环境踩坑](opencode-web-state-and-home.md) — 项目/最近会话在浏览器 IndexedDB,服务端无法预置;HOME/XDG 决定文件选择器与数据落点;坏路径会话清理方法
 - [Issue #173:selection bars/snapshot 输入模式](issue-173-bars-snapshot-selection.md) — required_datasets 按因子推导;同名异类 Repository 陷阱;集成测试库 create_all 不加新列需手工 ALTER
 - [OpenCode finboard-researcher:bash 放行 + exa 搜索 MCP](opencode-agent-bash-exa-mcp.md) — 容器无 JS 运行时,local MCP 不可行只能 remote;exa 托管端点匿名可用;.opencode/.agents 挂载补了 :ro;改权限须重启容器
+- [Issue #185:instrument 元数据回填贯通发布链路](issue-185-instrument-metadata-backfill.md) — list_date/industry 从「无写入者」到 profiles 回填 + 发布兜底;缺失统计进 quality_report/job phase;发布单资产测试须显式 required_capabilities

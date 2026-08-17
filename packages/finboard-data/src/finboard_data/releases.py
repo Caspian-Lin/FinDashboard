@@ -398,6 +398,7 @@ class ReleaseInstrumentSpec:
     etf_category: EtfCategory | None = None
     list_date: date | None = None
     delist_date: date | None = None
+    industry: str | None = None
     status: ListingStatus = ListingStatus.UNKNOWN
     metadata_complete: bool = True
     lifecycle_events: tuple[ReleaseLifecycleEvent, ...] = ()
@@ -519,6 +520,7 @@ class ReleasedInstrument:
     etf_category: EtfCategory | None = None
     list_date: date | None = None
     delist_date: date | None = None
+    industry: str | None = None
     status: ListingStatus = ListingStatus.UNKNOWN
     metadata_complete: bool = True
     lifecycle_events: tuple[ReleaseLifecycleEvent, ...] = ()
@@ -563,6 +565,7 @@ class ReleasedInstrument:
             "etf_category": self.etf_category.value if self.etf_category else None,
             "list_date": self.list_date.isoformat() if self.list_date else None,
             "delist_date": self.delist_date.isoformat() if self.delist_date else None,
+            "industry": self.industry,
             "status": self.status.value,
             "metadata_complete": self.metadata_complete,
             "lifecycle_events": [event.as_dict() for event in self.lifecycle_events],
@@ -618,6 +621,7 @@ class ReleasedInstrument:
             etf_category=EtfCategory(str(etf_raw)) if etf_raw is not None else None,
             list_date=date.fromisoformat(str(list_raw)) if list_raw is not None else None,
             delist_date=(date.fromisoformat(str(delist_raw)) if delist_raw is not None else None),
+            industry=str(raw["industry"]) if raw.get("industry") is not None else None,
             status=ListingStatus(str(raw.get("status", ListingStatus.UNKNOWN.value))),
             metadata_complete=bool(raw.get("metadata_complete", True)),
             lifecycle_events=tuple(ReleaseLifecycleEvent.from_dict(item) for item in events_raw),
@@ -1006,7 +1010,17 @@ class FrozenDatasetReleaseBuilder:
                             Counter(source for item in released for source in item.sources).items()
                         )
                     ),
-                    "source_by_instrument": {item.code: list(item.sources) for item in released},
+"source_by_instrument": {item.code: list(item.sources) for item in released},
+                    "instrument_metadata": {
+                        "total": len(released),
+                        # 缺失字段统计(issue #185):让 list_date/industry 缺失可见。
+                        "missing_list_date": sum(
+                            1 for item in released if item.list_date is None
+                        ),
+                        "missing_industry": sum(
+                            1 for item in released if item.industry is None
+                        ),
+                    },
                     "warnings": warnings,
                 },
                 known_limitations=spec.known_limitations,
@@ -1180,6 +1194,7 @@ class FrozenDatasetReleaseBuilder:
             etf_category=instrument.etf_category,
             list_date=instrument.list_date,
             delist_date=instrument.delist_date,
+            industry=instrument.industry,
             status=instrument.status,
             metadata_complete=instrument.metadata_complete,
             lifecycle_events=instrument.lifecycle_events,
