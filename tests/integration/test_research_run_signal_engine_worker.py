@@ -761,3 +761,81 @@ class TestMultiPeriodWorkerEndToEnd:
             # 期末权益 = 曲线最后一点;总收益 > 0(价格序列整体上行)。
             assert result["final_equity"] == equity_curve[-1]["equity"]
             assert float(str(result["strategy_return"])) > 0
+
+
+def _benchmark_provider() -> _StubProvider:
+    """multi-period 发布 + 000300.SH 指数基准(直线 10 → 15,+50%)。
+
+    universe 随机游走几乎持平,基准强涨,超额收益应为负、方向确定。
+    """
+    days = _multi_period_calendar(date(2024, 1, 1), date(2024, 4, 30))
+    provider = _multi_period_provider()
+    # 指数直线上行 10 → 15(+50%)。
+    start, end = Decimal("10"), Decimal("15")
+    total = len(days) - 1
+    provider.closes_by_symbol["000300.SH"] = {
+        day: start + (end - start) * Decimal(index) / Decimal(max(total, 1))
+        for index, day in enumerate(days)
+    }
+    return provider
+
+
+def _benchmark_manifest(suffix: str, symbol: str) -> ResearchRunManifest:
+    from dataclasses import replace
+
+    return replace(
+        _multi_period_manifest(suffix),
+        benchmark_config={"symbol": symbol},
+    )
+
+
+class TestMultiPeriodBenchmarkEndToEnd:
+    async def test_index_benchmark_return_computed_and_sign_correct(
+        self, engine: AsyncEngine
+    ) -> None:
+        """000300.SH 指数基准:benchmark_return 来自真实行情,超额方向正确。"""
+        manifest = _benchmark_manifest("bench-hs300", "000300.SH")
+        run_id = await _queue_double_write(engine, manifest)
+        worker = _build_worker(engine, _multi_period_factory(_benchmark_provider()))
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.COMPLETED.value, (
+                f"status={run_row.status} error_code={run_row.error_code} "
+                f"error_summary={run_row.error_summary}"
+            )
+            result = run_row.result
+            assert result is not None
+            benchmark_return = result["benchmark_return"]
+            assert benchmark_return is not None
+            bm = float(str(benchmark_return))
+            st = float(str(result["strategy_return"]))
+            ex = float(str(result["excess_return"]))
+            # 基准:买入持有 000300.SH(10 → 15,+50%)。
+            assert bm == pytest.approx(0.5, abs=1e-6)
+            # 超额 = 策略 - 基准;universe 随机游走接近持平,基准强涨 → 超额为负。
+            assert ex == pytest.approx(st - bm, abs=1e-9)
+            assert ex < 0
+            # 报告展示字段记录基准标的。
+            assert result["benchmark_symbol"] == "000300.SH"
+
+    async def test_missing_benchmark_symbol_returns_null(self, engine: AsyncEngine) -> None:
+        """基准标的在发布中缺失:run 仍 COMPLETED,benchmark_return 为 null。"""
+        manifest = _benchmark_manifest("bench-missing", "399006.SZ")
+        run_id = await _queue_double_write(engine, manifest)
+        worker = _build_worker(engine, _multi_period_factory(_benchmark_provider()))
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.COMPLETED.value, (
+                f"status={run_row.status} error_code={run_row.error_code} "
+                f"error_summary={run_row.error_summary}"
+            )
+            result = run_row.result
+            assert result is not None
+            assert result["benchmark_return"] is None
+            assert result["excess_return"] is None

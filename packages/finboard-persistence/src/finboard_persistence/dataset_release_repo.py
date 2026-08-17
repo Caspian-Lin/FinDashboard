@@ -429,6 +429,9 @@ def _plain_candidate(
         asset_class = AssetClass.EQUITY
     elif instrument_type is InstrumentType.BOND:
         asset_class = AssetClass.FIXED_INCOME
+    elif instrument_type is InstrumentType.INDEX:
+        # 指数基准资产(issue #184):只进数据/发布通道,不可撮合。
+        asset_class = AssetClass.EQUITY
     else:
         raise ReleaseCapabilityError(f"{row.code}: 不支持的普通资产类型 {instrument_type.value}")
     return ReleaseInstrumentSpec(

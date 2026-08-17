@@ -570,8 +570,9 @@ export interface BacktestMetrics {
   turnover: number;
   commission_paid: string;
   stamp_tax_paid: string;
-  benchmark_return: number;
-  excess_return: number;
+  // issue #184:基准缺失时 benchmark_return/excess_return 为 null
+  benchmark_return: number | null;
+  excess_return: number | null;
   initial_capital: string;
   final_equity: string;
 }

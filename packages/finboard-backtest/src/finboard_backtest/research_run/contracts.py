@@ -623,8 +623,9 @@ class ResearchRunReport:
     strategy_kind: str
     strategy_return: float
     benchmark_symbol: str
-    benchmark_return: float
-    excess_return: float
+    # issue #184:基准缺失时 benchmark_return/excess_return 为 None,禁止静默 0.0
+    benchmark_return: float | None
+    excess_return: float | None
     sharpe_ratio: float
     max_drawdown: float
     final_equity: Decimal
@@ -646,18 +647,27 @@ class ResearchRunReport:
     def __post_init__(self) -> None:
         metrics = (
             self.strategy_return,
-            self.benchmark_return,
-            self.excess_return,
             self.sharpe_ratio,
             self.max_drawdown,
             self.annualized_return,
             *self.constraint_impact.values(),
         )
+        if self.benchmark_return is not None:
+            metrics = (*metrics, self.benchmark_return)
         if not all(math.isfinite(value) for value in metrics):
             raise ValueError("报告指标必须为有限数")
-        if abs(
-            self.strategy_return - self.benchmark_return - self.excess_return
-        ) > 1e-9:
+        if (self.benchmark_return is None) != (self.excess_return is None):
+            raise ValueError(
+                "基准缺失时 benchmark_return 与 excess_return 必须同为 None"
+            )
+        if (
+            self.benchmark_return is not None
+            and self.excess_return is not None
+            and abs(
+                self.strategy_return - self.benchmark_return - self.excess_return
+            )
+            > 1e-9
+        ):
             raise ValueError("excess_return 必须等于策略收益减基准收益")
         if min(
             self.final_equity,
@@ -799,12 +809,21 @@ def report_from_json(payload: dict[str, object]) -> ResearchRunReport:
         for item in cast(list[dict[str, object]], raw_curve)
     )
     mode_raw = payload.get("execution_mode", ResearchExecutionMode.SINGLE_SHOT.value)
+    benchmark_return_raw = payload.get("benchmark_return")
+    # issue #184 前的历史 report 恒为数值;新 report 基准缺失时为 null。
+    benchmark_return = (
+        float(str(benchmark_return_raw)) if benchmark_return_raw is not None else None
+    )
     return ResearchRunReport(
         strategy_kind=str(payload["strategy_kind"]),
         strategy_return=float(str(payload["strategy_return"])),
         benchmark_symbol=str(payload["benchmark_symbol"]),
-        benchmark_return=float(str(payload["benchmark_return"])),
-        excess_return=float(str(payload["excess_return"])),
+        benchmark_return=benchmark_return,
+        excess_return=(
+            float(str(payload["excess_return"]))
+            if benchmark_return is not None
+            else None
+        ),
         sharpe_ratio=float(str(payload["sharpe_ratio"])),
         max_drawdown=float(str(payload["max_drawdown"])),
         final_equity=Decimal(str(payload["final_equity"])),
