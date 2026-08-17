@@ -160,10 +160,12 @@ async def test_explicit_benchmark_beats_equal_weight_fallback() -> None:
 
 
 @pytest.mark.unit
-async def test_benchmark_missing_returns_null_with_warning(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+async def test_benchmark_missing_returns_null_with_warning() -> None:
     """显式基准拉取失败:benchmark_return/excess_return 为 None,发出具名 warning。"""
+    from unittest.mock import patch
+
+    from finboard_backtest import engine as engine_module
+
     provider = MemoryProvider(
         {
             UNIVERSE: _flat_bars(Symbol(UNIVERSE, Market.A_SHARE)),
@@ -180,10 +182,16 @@ async def test_benchmark_missing_returns_null_with_warning(
             benchmark=BenchmarkConfig(symbol=BENCHMARK),
         ),
     )
-    result = await engine.run()
+    with patch.object(engine_module.logger, "warning") as warn:
+        result = await engine.run()
     assert result.benchmark_return is None
     assert result.excess_return is None
-    assert "backtest.benchmark_missing" in capsys.readouterr().out
+    # structlog 事件名是首个位置参数;渲染目标随环境(CI/本地)不同,
+    # 直接断言事件本身,不依赖 stdout/stderr。
+    assert any(
+        call.args and call.args[0] == "backtest.benchmark_missing"
+        for call in warn.call_args_list
+    )
 
 
 @pytest.mark.unit
