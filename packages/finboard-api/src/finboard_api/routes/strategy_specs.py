@@ -44,7 +44,11 @@ from finboard_backtest.strategy_spec.universe_precheck import (
     preview_universe_pool,
     resolvable_feature_names,
 )
-from finboard_data.releases import ReleaseCapabilityError
+from finboard_data.releases import (
+    ReleaseCapabilityError,
+    ReleaseDatasetKind,
+    ResearchDatasetRelease,
+)
 from finboard_persistence import (
     ResearchDatasetReleaseRepository,
     ResearchStrategySpecModel,
@@ -146,9 +150,9 @@ async def _compile_with_releases(
         raise _strategy_error(exc) from exc
     if not releases:
         return plan
-    # issue #186:universe 静态预检 —— 依赖字段存在性 + 候选池空池诊断。
-    # 与 run_queue 同一评估函数(signal_engine 运行时也复用其聚合语义)。
-    primary = releases[0]
+    # issue #186 联合 #187:universe 静态预检 —— 依赖字段存在性 + 候选池空池
+    # 诊断,评估必须落在 bars 主发布(研究数据发布只提供因子观测)。
+    primary = _bars_release(releases)
     return replace(
         plan,
         universe_precheck=preview_universe_pool(
@@ -162,6 +166,27 @@ async def _compile_with_releases(
             ),
         ),
     )
+
+
+def _bars_release(releases: list[ResearchDatasetRelease]) -> ResearchDatasetRelease:
+    """取联合发布中的 bars 主发布(issue #187)。
+
+    排除 daily_metrics / financial_indicators 研究数据发布;恰好一个 bars
+    发布才有候选池评估意义,否则 422。
+    """
+    bars_releases = [
+        item for item in releases if item.dataset_kind is ReleaseDatasetKind.BARS
+    ]
+    if len(bars_releases) != 1:
+        raise _strategy_error(
+            StrategySpecError(
+                "联合发布必须恰好包含一个 bars 主发布(行情/候选池来源): "
+                + ", ".join(
+                    f"{item.release_id}({item.dataset_kind.value})" for item in releases
+                )
+            )
+        )
+    return bars_releases[0]
 
 
 @router.get("/registry", response_model=StrategySpecRegistryOut)

@@ -150,7 +150,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id)。
 - 数据写操作(12,✅ #137):data_fetch(同步单标的拉取)、fetch_all /
   sync_universe / bulk_download_start / quality_repair / dataset_release_publish
-  (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询)、
+  (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询;
+  release_kind 支持 a_share_tushare|multi_asset_mixed|daily_metrics|
+  financial_indicators,研究数据发布与 bars 联合供因子快照 #187)、
   data_config_get/update(调度器配置)、etf_sync(默认 dry_run)/
   etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
   补全「数据→因子→策略」闭环的数据准备第一步:agent 能拉 K 线、发布数据集、

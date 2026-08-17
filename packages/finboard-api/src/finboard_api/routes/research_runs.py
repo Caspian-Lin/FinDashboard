@@ -46,7 +46,11 @@ from finboard_backtest.strategy_spec.universe_precheck import (
     preview_universe_pool,
     resolvable_feature_names,
 )
-from finboard_data.releases import ReleaseCapabilityError
+from finboard_data.releases import (
+    ReleaseCapabilityError,
+    ReleaseDatasetKind,
+    ResearchDatasetRelease,
+)
 from finboard_persistence import (
     BackgroundJobPersistenceConflictError,
     BackgroundJobRepository,
@@ -131,13 +135,16 @@ async def queue_research_run(
                 detail=(f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中"),
             )
 
-    # issue #186:入队同步候选池非空校验。用主发布(信号引擎实际使用的发布)
-    # 的 instruments 做静态评估,空池秒级 422(invalid_argument 语义),附
+    # issue #186:入队同步候选池非空校验。用 bars 主发布(信号引擎实际使用的
+    # 发布)的 instruments 做静态评估,空池秒级 422(invalid_argument 语义),附
     # 各过滤条件排除统计与缺失字段名,不再等执行期跑 30 分钟后才报泛化错误。
+    # issue #187:联合发布中研究数据 release(daily_metrics/financial_indicators)
+    # 只提供因子观测,候选池评估必须落在 bars 主发布上。
+    primary = _bars_release(releases)
     preview = preview_universe_pool(
         spec.universe,
-        releases[0].instruments,
-        decision_date=releases[0].end_date,
+        primary.instruments,
+        decision_date=primary.end_date,
         available_features=resolvable_feature_names(
             feature_graph_sources=[
                 node.source for node in spec.feature_graph.nodes if node.source is not None
@@ -154,7 +161,7 @@ async def queue_research_run(
             status_code=422,
             detail=(
                 "运行数据发布候选池为空,拒绝入队: "
-                f"{describe_empty_pool(preview, decision_date=releases[0].end_date)}"
+                f"{describe_empty_pool(preview, decision_date=primary.end_date)}"
             ),
         )
 
@@ -422,6 +429,26 @@ async def queue_research_replay(
 def _run_id(idempotency_key: str) -> str:
     digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
     return f"RR-{digest}"
+
+
+def _bars_release(releases: list[ResearchDatasetRelease]) -> ResearchDatasetRelease:
+    """取联合发布中的 bars 主发布(issue #187)。
+
+    排除 daily_metrics / financial_indicators 研究数据发布;恰好一个 bars
+    发布才有候选池评估意义,否则 422。
+    """
+    bars_releases = [
+        item for item in releases if item.dataset_kind is ReleaseDatasetKind.BARS
+    ]
+    if len(bars_releases) != 1:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "联合发布必须恰好包含一个 bars 主发布(行情/候选池来源): "
+                + ", ".join(f"{item.release_id}({item.dataset_kind.value})" for item in releases)
+            ),
+        )
+    return bars_releases[0]
 
 
 def _payload_checksum(payload: dict[str, object]) -> str:

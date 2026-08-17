@@ -66,6 +66,7 @@ from finboard_data.factor_lab import (
     FactorExperimentPlan,
     FactorExperimentStatus,
     FactorRole,
+    FeatureSnapshot,
     ResearchArtifactStatus,
     factor_lab_catalog,
     new_factor_experiment,
@@ -137,27 +138,90 @@ def _feature_snapshot_process_workers(request: Request) -> int:
 async def _load_feature_snapshot_input(
     body: FeatureSnapshotCreate,
     session: AsyncSession,
-) -> tuple[ResearchDatasetRelease, datetime]:
-    """校验发布与决策时点,供同步和后台入口共用。"""
+) -> tuple[list[ResearchDatasetRelease], datetime]:
+    """校验发布与决策时点,供同步和后台入口共用。
+
+    issue #187:联合发布 —— ``dataset_release_id`` 为 bars 主发布,
+    ``additional_release_ids`` 为 daily_metrics / financial_indicators 研究
+    数据发布;决策时点按 bars 主发布范围校验。
+    """
 
     release_repo = ResearchDatasetReleaseRepository(session)
     try:
-        release = await release_repo.require_usable(body.dataset_release_id)
+        release_ids = [body.dataset_release_id, *body.additional_release_ids]
+        releases = [await release_repo.require_usable(release_id) for release_id in release_ids]
     except (ValueError, DatasetReleaseError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    primary = releases[0]
     decision_at = body.decision_at.astimezone(UTC)
-    if not release.start_date <= decision_at.date() <= release.end_date:
+    if not primary.start_date <= decision_at.date() <= primary.end_date:
         raise HTTPException(
             status_code=422,
             detail=(
-                f"decision_at 日期必须在数据发布范围内: "
-                f"{release.start_date}~{release.end_date}"
+                f"decision_at 日期必须在 bars 主发布范围内: "
+                f"{primary.start_date}~{primary.end_date}"
             ),
         )
     if decision_at > datetime.now(UTC):
         raise HTTPException(status_code=422, detail="decision_at 不能晚于当前时间")
-    return release, decision_at
+    return releases, decision_at
+
+
+async def _build_feature_snapshot_from_releases(
+    *,
+    releases: list[ResearchDatasetRelease],
+    release_root: Path,
+    decision_at: datetime,
+    max_concurrency: int,
+    process_workers: int = 0,
+) -> FeatureSnapshot:
+    """按发布 kind 构建特征快照(issue #187)。
+
+    * 仅 bars 主发布:复用 ``build_price_feature_snapshot``(价格因子,行为不变);
+    * bars + daily_metrics / financial_indicators 联合发布:走
+      ``build_cross_section_feature_snapshot_from_releases``,额外产出
+      pb / 市值 / 换手 / ROE 等基本面因子。
+    """
+    from finboard_data.releases import ReleaseDatasetKind
+
+    primary = releases[0]
+    additional = releases[1:]
+    if not additional or all(
+        item.dataset_kind is ReleaseDatasetKind.BARS for item in additional
+    ):
+        provider = FrozenReleaseProvider(
+            release_root=release_root,
+            release_id=primary.release_id,
+            max_concurrency=max_concurrency,
+        )
+        return await build_price_feature_snapshot(
+            provider=provider,
+            decision_at=decision_at,
+            code_version=_factor_code_version(),
+            max_concurrency=max_concurrency,
+            process_workers=process_workers,
+        )
+    from finboard_backtest.factor_lab import (
+        build_cross_section_feature_snapshot_from_releases,
+    )
+
+    providers = {
+        release.release_id: FrozenReleaseProvider(
+            release_root=release_root,
+            release_id=release.release_id,
+            max_concurrency=max_concurrency,
+        )
+        for release in releases
+    }
+    return await build_cross_section_feature_snapshot_from_releases(
+        releases=releases,
+        providers=providers,
+        decision_at=decision_at,
+        code_version=_factor_code_version(),
+        max_concurrency=max_concurrency,
+        on_progress=None,
+    )
 
 
 
@@ -384,7 +448,7 @@ async def create_feature_snapshot(
     不启动回测、模拟盘或任何实盘动作。
     """
 
-    release, decision_at = await _load_feature_snapshot_input(body, session)
+    releases, decision_at = await _load_feature_snapshot_input(body, session)
     max_concurrency = _feature_snapshot_max_concurrency(request)
     process_workers = _feature_snapshot_process_workers(request)
 
@@ -392,15 +456,10 @@ async def create_feature_snapshot(
         os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT)
     )
     try:
-        provider = FrozenReleaseProvider(
+        snapshot = await _build_feature_snapshot_from_releases(
+            releases=releases,
             release_root=release_root,
-            release_id=release.release_id,
-            max_concurrency=max_concurrency,
-        )
-        snapshot = await build_price_feature_snapshot(
-            provider=provider,
             decision_at=decision_at,
-            code_version=_factor_code_version(),
             max_concurrency=max_concurrency,
             process_workers=process_workers,
         )
@@ -413,7 +472,7 @@ async def create_feature_snapshot(
         await session.rollback()
         logger.exception(
             "research.feature_snapshot_release_read_failed",
-            extra={"release_id": release.release_id, "release_root": str(release_root)},
+            extra={"release_id": releases[0].release_id, "release_root": str(release_root)},
         )
         raise HTTPException(
             status_code=422,
@@ -454,15 +513,16 @@ async def start_feature_snapshot_job(
     from finboard_api.job_helpers import enqueue_job
 
     # 仍同步校验发布可用 + 决策时点范围(早失败,避免入队后才在 worker 端失败)。
-    release, decision_at = await _load_feature_snapshot_input(body, session)
+    releases, decision_at = await _load_feature_snapshot_input(body, session)
     await session.rollback()  # 校验只读,释放行锁;executor 会重读
 
     payload: dict[str, Any] = {
-        "dataset_release_id": release.release_id,
+        "dataset_release_id": releases[0].release_id,
+        "additional_release_ids": [item.release_id for item in releases[1:]],
         "decision_at": decision_at.isoformat(),
     }
     idempotency_key = (
-        f"feature_snapshot:{release.release_id}:{decision_at.date().isoformat()}"
+        f"feature_snapshot:{releases[0].release_id}:{decision_at.date().isoformat()}"
     )
     try:
         job = await enqueue_job(

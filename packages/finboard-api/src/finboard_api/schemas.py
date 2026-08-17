@@ -700,6 +700,9 @@ class FeatureSnapshotCreate(BaseSchema):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 
     dataset_release_id: str = Field(min_length=1, max_length=128)
+    # issue #187:联合发布因子快照 —— 除 bars 主发布外,可附加
+    # daily_metrics / financial_indicators 发布作为因子输入(可空表示纯价格)。
+    additional_release_ids: list[str] = Field(default_factory=list, max_length=16)
     decision_at: datetime
 
     @field_validator("decision_at")
@@ -708,6 +711,14 @@ class FeatureSnapshotCreate(BaseSchema):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("decision_at 必须带时区,例如 2026-07-31T23:59:59+08:00")
         return value
+
+    @field_validator("additional_release_ids")
+    @classmethod
+    def normalize_additional_release_ids(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value if item.strip()]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("附加数据发布不能重复")
+        return normalized
 
 
 class FeatureObservationOut(BaseSchema):
@@ -1003,9 +1014,14 @@ class ResearchDatasetReleaseCreate(BaseSchema):
         max_length=100,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
-    release_kind: Literal["a_share_tushare", "multi_asset_mixed"] = (
-        "a_share_tushare"
-    )
+    release_kind: Literal[
+        "a_share_tushare",
+        "multi_asset_mixed",
+        # issue #187:研究数据发布(daily_metrics / financial_indicators 从
+        # research_* 表冻结,非本地行情缓存)。
+        "daily_metrics",
+        "financial_indicators",
+    ] = "a_share_tushare"
     source: Literal["akshare", "yfinance", "tushare", "mixed", "manual"] | None = None
     version: str = Field(
         min_length=1,
@@ -1044,14 +1060,20 @@ class ResearchDatasetReleaseCreate(BaseSchema):
     def validate_date_range(self) -> ResearchDatasetReleaseCreate:
         if self.start_date > self.end_date:
             raise ValueError("开始日期不能晚于结束日期")
-        expected_source = (
-            "tushare" if self.release_kind == "a_share_tushare" else "mixed"
-        )
+        expected_source = _RELEASE_KIND_SOURCE[self.release_kind]
         if self.source is not None and self.source != expected_source:
             raise ValueError(
                 f"{self.release_kind} 发布的数据来源必须是 {expected_source}"
             )
         return self
+
+
+_RELEASE_KIND_SOURCE: dict[str, str] = {
+    "a_share_tushare": "tushare",
+    "multi_asset_mixed": "mixed",
+    "daily_metrics": "tushare",
+    "financial_indicators": "tushare",
+}
 
 
 class DatasetReleaseInstrumentOut(BaseSchema):
@@ -1102,6 +1124,7 @@ class ResearchDatasetReleaseOut(BaseSchema):
     period: str
     adjustment: str
     fields: list[str]
+    dataset_kind: str = "bars"
     availability_rules: list[dict[str, str]]
     code_version: str
     published_at: datetime
@@ -1128,6 +1151,7 @@ class ResearchDatasetReleaseSummaryOut(BaseSchema):
     end_date: date
     period: str
     adjustment: str
+    dataset_kind: str = "bars"
     code_version: str
     published_at: datetime
     symbol_count: int
