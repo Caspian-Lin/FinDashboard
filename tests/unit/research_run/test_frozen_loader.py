@@ -21,6 +21,7 @@ from finboard_backtest.research_run.contracts import (
 from finboard_backtest.research_run.frozen_loader import FrozenInputLoader
 from finboard_backtest.strategy_spec import build_strategy_template
 from finboard_data.factor_lab import FeatureObservation
+from finboard_data.releases import ReleaseDatasetKind
 from finboard_shared.types import AssetClass, Market
 
 # ---- stubs ------------------------------------------------------------------
@@ -68,6 +69,7 @@ class _StubRelease:
     period: object = "d1"
     adjustment: str = "qfq"
     start_date: date = date(2024, 1, 1)
+    dataset_kind: object = ReleaseDatasetKind.BARS
 
 
 @dataclass
@@ -388,3 +390,191 @@ class TestFrozenInputLoader:
         )
 
         assert ctx.input_artifact_ids == ("release-v1",)
+
+
+@pytest.mark.asyncio
+class TestMultiReleaseMerge:
+    """issue #187:多 release 按 kind 融合(bars + daily_metrics)。"""
+
+    def _daily_provider(self) -> _StubProvider:
+        """返回 daily_metrics 研究数据发布 stub(PIT 观测)。"""
+        from finboard_data.research import DailySecurityMetrics
+
+        daily_metric = DailySecurityMetrics(
+            symbol="600519.SH",
+            trade_date=date(2024, 2, 29),
+            close=Decimal("1800.0"),
+            turnover_rate=Decimal("0.005"),
+            turnover_rate_free=Decimal("0.004"),
+            volume_ratio=Decimal("1.1"),
+            pe=Decimal("45.0"),
+            pe_ttm=Decimal("44.0"),
+            pb=Decimal("9.5"),
+            ps=Decimal("9.0"),
+            ps_ttm=Decimal("8.8"),
+            dividend_yield=Decimal("0.01"),
+            dividend_yield_ttm=Decimal("0.011"),
+            total_shares=Decimal("1000000000"),
+            float_shares=Decimal("900000000"),
+            free_shares=Decimal("850000000"),
+            total_market_cap=Decimal("2200000000000"),
+            circulating_market_cap=Decimal("1980000000000"),
+            limit_status=0,
+            source="tushare",
+            observed_at=datetime(2024, 2, 29, 12, tzinfo=UTC),
+            available_at=datetime(2024, 2, 29, 15, 30, tzinfo=UTC),
+        )
+        daily_release = _StubRelease(
+            "daily-release-v1",
+            (),
+            dataset_kind=ReleaseDatasetKind.DAILY_METRICS,
+        )
+        daily_provider = _StubProvider(
+            release=daily_release,
+            close_by_symbol={},
+        )
+        daily_provider._daily_metrics = {  # type: ignore[attr-defined]
+            "600519.SH": (daily_metric,),
+        }
+
+        async def _fetch_daily(
+            symbol: object,
+            *,
+            start: date,
+            end: date,
+            decision_at: datetime,
+        ) -> list[DailySecurityMetrics]:
+            del start, end
+            return [
+                item
+                for item in daily_provider._daily_metrics.get(  # type: ignore[attr-defined]
+                    symbol.code,  # type: ignore[attr-defined]
+                    (),
+                )
+                if item.available_at <= decision_at
+            ]
+
+        daily_provider.fetch_daily_metrics = _fetch_daily  # type: ignore[attr-defined]
+        daily_provider._release_ref = daily_release  # type: ignore[attr-defined]
+        return daily_provider
+
+    async def test_bars_plus_daily_metrics_merge_features(self) -> None:
+        instruments = (_StubInstrument(code="600519.SH"),)
+        bars_provider = _StubProvider(
+            release=_StubRelease("bars-release-v1", instruments),
+            close_by_symbol={"600519.SH": Decimal("1800.0")},
+        )
+        daily_provider = self._daily_provider()
+
+        def _release_factory(release_id: str) -> _StubProvider:
+            return {
+                "bars-release-v1": bars_provider,
+                "daily-release-v1": daily_provider,
+            }[release_id]
+
+        async def _snapshot_provider(snapshot_id: str) -> None:
+            del snapshot_id
+            return None
+
+        loader = FrozenInputLoader(
+            release_provider_factory=_release_factory,  # type: ignore[arg-type]
+            snapshot_provider=_snapshot_provider,
+        )
+        spec = build_strategy_template(
+            "ma_cross",
+            strategy_id="ma_cross_test",
+            dataset_release_ids=("bars-release-v1", "daily-release-v1"),
+        )
+        manifest = ResearchRunManifest(
+            run_id="RR-multireleasetest001",
+            idempotency_key="multi-release-test-001",
+            strategy_spec=spec,
+            strategy_spec_checksum=stable_checksum(spec.canonical_payload()),
+            dataset_releases=(
+                FrozenArtifactRef(
+                    artifact_id="bars-release-v1",
+                    version="v1",
+                    checksum="a" * 64,
+                    capabilities=("stock",),
+                ),
+                FrozenArtifactRef(
+                    artifact_id="daily-release-v1",
+                    version="v1",
+                    checksum="b" * 64,
+                    capabilities=("stock",),
+                ),
+            ),
+            code_version="abcdef0123456789",
+            initial_capital=Decimal("100000"),
+            requested_by="unit-test",
+        )
+        ctx = await loader.load_context(
+            manifest,
+            decision_at=datetime(2024, 2, 29, 16, 0, tzinfo=UTC),
+            execution_at=datetime(2024, 3, 1, 9, 30, tzinfo=UTC),
+        )
+        # bars 主发布仍提供候选池与价格。
+        assert ctx.candidates
+        assert ctx.candidates[0].symbol == "600519.SH"
+        assert "600519.SH" in ctx.prices
+        # daily_metrics 研究发布被融合进特征:pbm / market_cap / turnover_rate。
+        feature_ids = {item.feature_id for item in ctx.features}
+        assert "pb" in feature_ids
+        assert "market_cap" in feature_ids
+        assert "turnover_rate" in feature_ids
+
+    async def test_requires_exactly_one_bars_release(self) -> None:
+        # 只有研究数据发布、没有 bars 主发布 → fail-closed。
+        from finboard_data.releases import ReleaseDatasetKind as _Kind
+
+        daily_release = _StubRelease(
+            "daily-only",
+            (),
+            dataset_kind=_Kind.DAILY_METRICS,
+        )
+        daily_provider = _StubProvider(release=daily_release, close_by_symbol={})
+        async def _fetch_daily(symbol: object, **_: object) -> list[object]:
+            del symbol
+            return []
+        daily_provider.fetch_daily_metrics = _fetch_daily  # type: ignore[attr-defined]
+
+        def _release_factory(release_id: str) -> _StubProvider:
+            assert release_id == "daily-only"
+            return daily_provider
+
+        async def _snapshot_provider(snapshot_id: str) -> None:
+            del snapshot_id
+            return None
+
+        loader = FrozenInputLoader(
+            release_provider_factory=_release_factory,  # type: ignore[arg-type]
+            snapshot_provider=_snapshot_provider,
+        )
+        spec = build_strategy_template(
+            "ma_cross",
+            strategy_id="ma_cross_test",
+            dataset_release_ids=("daily-only",),
+        )
+        manifest = ResearchRunManifest(
+            run_id="RR-nobarsrelease0001",
+            idempotency_key="no-bars-release-001",
+            strategy_spec=spec,
+            strategy_spec_checksum=stable_checksum(spec.canonical_payload()),
+            dataset_releases=(
+                FrozenArtifactRef(
+                    artifact_id="daily-only",
+                    version="v1",
+                    checksum="a" * 64,
+                    capabilities=("stock",),
+                ),
+            ),
+            code_version="abcdef0123456789",
+            initial_capital=Decimal("100000"),
+            requested_by="unit-test",
+        )
+        with pytest.raises(ValueError, match="bars 主发布"):
+            await loader.load_context(
+                manifest,
+                decision_at=datetime(2024, 2, 29, 16, 0, tzinfo=UTC),
+                execution_at=datetime(2024, 3, 1, 9, 30, tzinfo=UTC),
+            )

@@ -28,6 +28,7 @@ from finboard_backtest.research_run.signal_engine import (
 from finboard_backtest.strategy_spec import build_strategy_template
 from finboard_backtest.strategy_spec.contracts import ResearchStrategySpec
 from finboard_data.factor_lab import FeatureObservation
+from finboard_data.releases import ReleaseDatasetKind
 from finboard_shared.types import AssetClass, Market
 
 # ---- stubs ------------------------------------------------------------------
@@ -92,6 +93,7 @@ class _StubRelease:
     version: str = "v1"
     release_checksum: str = "c" * 64
     is_usable: bool = True
+    dataset_kind: object = ReleaseDatasetKind.BARS
 
 
 @dataclass

@@ -14,3 +14,4 @@
 - [OpenCode finboard-researcher:bash 放行 + exa 搜索 MCP](opencode-agent-bash-exa-mcp.md) — 容器无 JS 运行时,local MCP 不可行只能 remote;exa 托管端点匿名可用;.opencode/.agents 挂载补了 :ro;改权限须重启容器
 - [Issue #185:instrument 元数据回填贯通发布链路](issue-185-instrument-metadata-backfill.md) — list_date/industry 从「无写入者」到 profiles 回填 + 发布兜底;缺失统计进 quality_report/job phase;发布单资产测试须显式 required_capabilities
 - [Issue #186:universe 预检与候选池诊断](issue-186-universe-precheck.md) — 静态预览只对确定性元数据判空(价格/特征字段只 warning 不误报);入队空池秒级失败;enqueue 创建路径 updated_at 懒加载 MissingGreenlet 已顺带修复
+- [Issue #187:冻结发布多数据集联合发布](issue-187-joined-releases-factor-snapshot.md) — daily_metrics/financial_indicators 从 research 表冻结 + 联合 bars 产出基本面因子快照;market_cap 须注册 catalog 因子;测试须显式 volatility_windows、financial report_period 落区间、daily 写满交易日
