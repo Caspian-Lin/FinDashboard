@@ -64,9 +64,7 @@ def _validate_backtest_params(kind: str, params: dict[str, Any]) -> dict[str, An
     try:
         validated = definition.params_model.model_validate(params or {})
     except ValidationError as exc:
-        raise McpToolError(
-            "invalid_argument", f"策略参数校验失败: {exc}"
-        ) from exc
+        raise McpToolError("invalid_argument", f"策略参数校验失败: {exc}") from exc
     return validated.model_dump(mode="json")
 
 
@@ -113,11 +111,7 @@ def _history_detail(
     all_equity = list(row.equity_curve) if row.equity_curve else []
     all_fills = list(row.fills) if row.fills else []
     safe_offset = max(0, fills_offset)
-    safe_limit = (
-        len(all_fills)
-        if fills_limit is None
-        else max(0, min(len(all_fills), fills_limit))
-    )
+    safe_limit = len(all_fills) if fills_limit is None else max(0, min(len(all_fills), fills_limit))
     page_fills = all_fills[safe_offset : safe_offset + safe_limit]
     detail = _history_item(row)
     detail.update(
@@ -135,19 +129,11 @@ def _history_detail(
             "selection_snapshots": (
                 list(row.selection_snapshots) if row.selection_snapshots else []
             ),
-            "dataset_versions": (
-                dict(row.dataset_versions) if row.dataset_versions else {}
-            ),
-            "matching_model": (
-                dict(row.matching_model) if row.matching_model else {}
-            ),
+            "dataset_versions": (dict(row.dataset_versions) if row.dataset_versions else {}),
+            "matching_model": (dict(row.matching_model) if row.matching_model else {}),
             "asset_rules": dict(row.asset_rules) if row.asset_rules else None,
-            "fee_assumptions": (
-                dict(row.fee_assumptions) if row.fee_assumptions else {}
-            ),
-            "benchmark_config": (
-                dict(row.benchmark_config) if row.benchmark_config else {}
-            ),
+            "fee_assumptions": (dict(row.fee_assumptions) if row.fee_assumptions else {}),
+            "benchmark_config": (dict(row.benchmark_config) if row.benchmark_config else {}),
         }
     )
     return cast(dict[str, Any], to_jsonable(detail))
@@ -168,11 +154,7 @@ async def backtest_strategy_list(app: McpAppContext) -> ToolEnvelope:
         from finboard_app.strategies import list_strategy_definitions
         from finboard_persistence import ResearchStrategySpecRepository
 
-        builtin = [
-            _strategy_info(d)
-            for d in list_strategy_definitions()
-            if d.supports_backtest
-        ]
+        builtin = [_strategy_info(d) for d in list_strategy_definitions() if d.supports_backtest]
         async with app.session_maker() as session:
             repo = ResearchStrategySpecRepository(session)
             published_rows = await repo.list_published()
@@ -188,8 +170,8 @@ async def backtest_strategy_list(app: McpAppContext) -> ToolEnvelope:
                         "version": row.version,
                         "version_count": len(history),
                         "execution_hint": (
-                            f"backtest_run(strategy_spec={{\"strategy_id\": "
-                            f"\"{row.strategy_id}\", \"version\": {row.version}}})"
+                            f'backtest_run(strategy_spec={{"strategy_id": '
+                            f'"{row.strategy_id}", "version": {row.version}}})'
                         ),
                     }
                 )
@@ -231,27 +213,18 @@ async def _run_via_strategy_spec(
     spec_id = strategy_spec.get("strategy_id")
     version = strategy_spec.get("version")
     if not isinstance(spec_id, str) or not spec_id:
-        raise McpToolError(
-            "invalid_argument", "strategy_spec 需要 strategy_id(已发布规格 ID)"
-        )
+        raise McpToolError("invalid_argument", "strategy_spec 需要 strategy_id(已发布规格 ID)")
     if not isinstance(version, int) or version < 1:
-        raise McpToolError(
-            "invalid_argument", "strategy_spec.version 必须是正整数"
-        )
+        raise McpToolError("invalid_argument", "strategy_spec.version 必须是正整数")
 
     async with app.session_maker() as session:
-        row = await ResearchStrategySpecRepository(session).get_version(
-            spec_id, version
-        )
+        row = await ResearchStrategySpecRepository(session).get_version(spec_id, version)
     if row is None:
-        raise McpToolError(
-            "invalid_argument", f"策略规格版本不存在: {spec_id} v{version}"
-        )
+        raise McpToolError("invalid_argument", f"策略规格版本不存在: {spec_id} v{version}")
     if row.status != "published":
         raise McpToolError(
             "invalid_argument",
-            f"仅已发布策略规格可以进入研究运行: {spec_id} v{version}"
-            f"(当前状态 {row.status})",
+            f"仅已发布策略规格可以进入研究运行: {spec_id} v{version}(当前状态 {row.status})",
         )
 
     # strategy_id/version 以 strategy_spec 为准,其余字段复用 run_queue payload
@@ -261,6 +234,8 @@ async def _run_via_strategy_spec(
     body = parse_queue_payload(payload)
     detail = await enqueue_research_run(app, body)
     # 返回可跟踪指针(run_id + job_id),不阻塞等待完成
+    from finboard_backtest.research_run.contracts import execution_mode_for
+
     return {
         "run_id": detail["run_id"],
         "job_id": detail.get("job_id"),
@@ -268,9 +243,11 @@ async def _run_via_strategy_spec(
         "strategy_id": detail["strategy_id"],
         "strategy_kind": detail["strategy_kind"],
         "manifest_checksum": detail.get("manifest_checksum"),
+        # issue #183:agent 据此区分单时点决策(single_shot)与全区间回放
+        # (multi_period,由 queue_payload.parameters.rebalance_frequency 决定)。
+        "execution_mode": execution_mode_for(dict(body.parameters)).value,
         "execution_path": (
-            "research_run 管线(已入队,异步执行;用 finboard_run_get 或 "
-            "finboard_job_get 轮询进度)"
+            "research_run 管线(已入队,异步执行;用 finboard_run_get 或 finboard_job_get 轮询进度)"
         ),
     }
 
@@ -292,6 +269,7 @@ async def backtest_run(
     slippage_bps: Decimal = Decimal("0"),
     equity_mode: str = "summary",
     max_points: int = 200,
+    benchmark_symbol: str | None = None,
     strategy_spec: dict[str, Any] | None = None,
     queue_payload: dict[str, Any] | None = None,
 ) -> ToolEnvelope:
@@ -311,9 +289,7 @@ async def backtest_run(
                     "invalid_argument",
                     "strategy 与 strategy_spec 互斥,只能二选一",
                 )
-            return await _run_via_strategy_spec(
-                app, strategy_spec, queue_payload or {}
-            )
+            return await _run_via_strategy_spec(app, strategy_spec, queue_payload or {})
         if strategy is None or not symbols or not start or not end:
             raise McpToolError(
                 "invalid_argument",
@@ -326,6 +302,7 @@ async def backtest_run(
         from finboard_backtest import (
             BacktestConfig,
             BacktestEngine,
+            BenchmarkConfig,
             PointInTimeFactorSelector,
         )
         from finboard_backtest.selection_snapshot import FeatureSnapshotFactorReader
@@ -358,9 +335,9 @@ async def backtest_run(
         # 选择数据源
         provider_name = getattr(app.settings, "data_provider", "akshare")
         if provider_name == "akshare":
-            data_provider: (
-                AkShareProvider | TushareBarProvider | YFinanceProvider
-            ) = AkShareProvider()
+            data_provider: AkShareProvider | TushareBarProvider | YFinanceProvider = (
+                AkShareProvider()
+            )
         elif provider_name == "tushare":
             data_provider = TushareBarProvider(
                 token=app.settings.tushare_token,
@@ -375,9 +352,7 @@ async def backtest_run(
         try:
             selection_model = FactorSelectionParams.model_validate(selection or {})
         except ValidationError as exc:
-            raise McpToolError(
-                "invalid_argument", f"selection 参数校验失败: {exc}"
-            ) from exc
+            raise McpToolError("invalid_argument", f"selection 参数校验失败: {exc}") from exc
 
         config = BacktestConfig(
             symbols=list(symbols),
@@ -391,6 +366,14 @@ async def backtest_run(
             stamp_tax_rate=stamp_tax_rate,
             slippage_bps=slippage_bps,
             selection=selection_model.to_domain(),
+            benchmark=(
+                BenchmarkConfig(
+                    symbol=benchmark_symbol,
+                    equal_weight_universe=True,
+                )
+                if benchmark_symbol is not None
+                else BenchmarkConfig()
+            ),
         )
 
         async with app.session_maker() as session:
@@ -398,9 +381,7 @@ async def backtest_run(
                 PointInTimeFactorSelector(
                     reader=(
                         FeatureSnapshotFactorReader(
-                            snapshot_provider=FeatureSnapshotRepository(
-                                session
-                            ).get,
+                            snapshot_provider=FeatureSnapshotRepository(session).get,
                             snapshot_ids=tuple(selection_model.snapshot_ids),
                         )
                         if selection_model.inputs_mode is InputsMode.SNAPSHOT
@@ -427,8 +408,7 @@ async def backtest_run(
 
             # 构建结果字典(与 API 响应字段一一对应)
             equity_curve: list[dict[str, Any]] = [
-                {"date": str(d), "equity": float(e)}
-                for d, e in result.equity_curve
+                {"date": str(d), "equity": float(e)} for d, e in result.equity_curve
             ]
             bench_map: dict[str, float] = {}
             if result.benchmark_curve:
@@ -543,6 +523,7 @@ async def backtest_run(
             "adjust": adjust,
             "params": params,
             "selection": selection,
+            "benchmark_symbol": benchmark_symbol,
         },
         handler=_do,
     )
@@ -665,8 +646,11 @@ def register(mcp: MCPServer) -> None:
             "返回 metrics/equity_curve/fills/selection_snapshots 并落库;"
             "参数 strategy(如 ma_cross)、symbols、start/end(ISO 日期)、"
             "capital、adjust(qfq/hfq/none)、params(策略参数)、selection"
-            "(因子选股配置)、equity_mode(summary 默认:降采样到 max_points 个"
-            "关键点,首末点保留;full:完整曲线)、max_points(默认 200)。"
+            "(因子选股配置)、benchmark_symbol(可选,基准标的代码如 "
+            "000300.SH,指数日线自动走 akshare 指数接口;不传则用等权候选池"
+            "基准,基准缺失时 benchmark_return=null 而非 0)、equity_mode"
+            "(summary 默认:降采样到 max_points 个关键点,首末点保留;full:"
+            "完整曲线)、max_points(默认 200)。"
             "(2) strategy_spec 形态:按已发布策略规格 {strategy_id, version} "
             "路由入队 research_run 管线(冻结 dataset_release_ids/因子快照后"
             "异步执行),返回 run_id + job_id 指针,不阻塞等待完成;其余入队字段"
@@ -690,6 +674,7 @@ def register(mcp: MCPServer) -> None:
         slippage_bps: str = "0",
         equity_mode: str = "summary",
         max_points: int = 200,
+        benchmark_symbol: str | None = None,
         strategy_spec: dict[str, Any] | None = None,
         queue_payload: dict[str, Any] | None = None,
         ctx: Context = None,  # type: ignore[assignment]
@@ -710,6 +695,7 @@ def register(mcp: MCPServer) -> None:
             slippage_bps=Decimal(slippage_bps),
             equity_mode=equity_mode,
             max_points=max_points,
+            benchmark_symbol=benchmark_symbol,
             strategy_spec=strategy_spec,
             queue_payload=queue_payload,
         )

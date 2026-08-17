@@ -7,12 +7,13 @@ available_at 过滤与候选池过滤;不依赖 PostgreSQL 或 Parquet 文件。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from finboard_backtest.research_run.contracts import (
+    DecisionBundle,
     FeatureValue,
     FrozenArtifactRef,
     ResearchRunManifest,
@@ -41,6 +42,13 @@ class _StubBar:
 @dataclass(frozen=True, slots=True)
 class _StubPointInTimeBar:
     bar: _StubBar
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _StubPointInTimePrice:
+    timestamp: datetime
+    close: Decimal
     available_at: datetime
 
 
@@ -80,6 +88,10 @@ class _StubRelease:
     adjustment: str = "qfq"
     start_date: date = date(2024, 1, 1)
     end_date: date = date(2024, 12, 31)
+    source: str = "stub"
+    version: str = "v1"
+    release_checksum: str = "c" * 64
+    is_usable: bool = True
 
 
 @dataclass
@@ -112,14 +124,37 @@ class _StubProvider:
             _StubPointInTimeBar(
                 _StubBar(
                     close,
-                    timestamp=datetime.combine(
-                        day, datetime.min.time(), tzinfo=UTC
-                    ),
+                    timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
                 ),
                 datetime.combine(day, datetime.min.time(), tzinfo=UTC),
             )
             for day, close in sorted(by_date.items())
             if day <= end
+        ]
+
+    async def fetch_point_in_time_prices(
+        self,
+        symbol: object,
+        period: object,
+        start: date,
+        end: date,
+        *,
+        decision_at: datetime,
+        adjust: str = "qfq",
+    ) -> list[_StubPointInTimePrice]:
+        """价格特征所需的轻量 PIT 收盘价视图(多期回放每期重算 features 用)。"""
+        del period, start, adjust
+        by_date = self.closes_by_symbol.get(symbol.code)  # type: ignore[attr-defined]
+        if not by_date:
+            return []
+        return [
+            _StubPointInTimePrice(
+                timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+                close=close,
+                available_at=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+            )
+            for day, close in sorted(by_date.items())
+            if day <= end and datetime.combine(day, datetime.min.time(), tzinfo=UTC) <= decision_at
         ]
 
     async def fetch_bars(
@@ -350,9 +385,7 @@ class TestSignalRulesEvaluation:
     def test_rank_top_buy_and_rank_bottom_sell(self) -> None:
         """multi_factor 模板:复合得分前 20% BUY、后 50% SELL。"""
         spec = _spec()
-        included = frozenset(
-            {"000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ"}
-        )
+        included = frozenset({"000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ"})
         features = _features(
             [
                 ("000001.SZ", "pb", 0.8),
@@ -585,9 +618,7 @@ class TestBuildDecisionInputs:
             closes_by_symbol=closes_by_symbol,
         )
 
-    def _snapshots(
-        self, decision_at: datetime
-    ) -> dict[str, _StubSnapshot]:
+    def _snapshots(self, decision_at: datetime) -> dict[str, _StubSnapshot]:
         snapshot = _StubSnapshot(
             snapshot_id="factor-v1",
             decision_at=decision_at,
@@ -637,9 +668,7 @@ class TestBuildDecisionInputs:
             ),
             closes,
         )
-        release_factory, snapshot_provider = self._factories(
-            provider, self._snapshots(decision_at)
-        )
+        release_factory, snapshot_provider = self._factories(provider, self._snapshots(decision_at))
 
         inputs = await build_decision_inputs(
             _manifest(_spec()),
@@ -669,9 +698,7 @@ class TestBuildDecisionInputs:
     async def test_universe_selection_limit_applied(self) -> None:
         """selection_limit 生效:候选被过滤到限额内。"""
         decision_at = datetime(2024, 3, 1, 15, tzinfo=UTC)
-        instruments = tuple(
-            _StubInstrument(code=f"00000{i}.SZ") for i in range(1, 6)
-        )
+        instruments = tuple(_StubInstrument(code=f"00000{i}.SZ") for i in range(1, 6))
         closes = {
             inst.code: {
                 date(2024, 2, 27): Decimal("9.6"),
@@ -690,13 +717,8 @@ class TestBuildDecisionInputs:
                     _obs(inst.code, "momentum", float(index + 1))
                     for index, inst in enumerate(instruments)
                 )
-                + tuple(
-                    _obs(inst.code, "pb", 1.0) for inst in instruments
-                )
-                + tuple(
-                    _obs(inst.code, "volatility_20d", 0.3)
-                    for inst in instruments
-                ),
+                + tuple(_obs(inst.code, "pb", 1.0) for inst in instruments)
+                + tuple(_obs(inst.code, "volatility_20d", 0.3) for inst in instruments),
             ),
         }
         release_factory, snapshot_provider = self._factories(provider, snapshots)
@@ -748,3 +770,379 @@ class TestBuildDecisionInputs:
                 release_provider_factory=release_factory,  # type: ignore[arg-type]
                 snapshot_provider=snapshot_provider,
             )
+
+
+# ---- 多期再平衡(issue #183) ---------------------------------------------------
+
+
+def _calendar(start: date, end: date) -> list[date]:
+    """周内连续交易日 stub 日历(跳过周末)。"""
+    days: list[date] = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
+def _multi_provider(
+    start: date,
+    end: date,
+    symbols: tuple[str, ...] = ("000001.SZ", "000002.SZ", "000003.SZ"),
+) -> _StubProvider:
+    """跨多月的价格序列(每标的固定漂移,保证协方差/信号可算)。"""
+    days = _calendar(start, end)
+    closes: dict[str, dict[date, Decimal]] = {}
+    for symbol in symbols:
+        series: dict[date, Decimal] = {}
+        base = Decimal("10.0")
+        for index, day in enumerate(days):
+            drift = Decimal("1.001") ** index
+            if symbol == "000001.SZ":
+                drift *= Decimal("1.02") if index % 21 == 0 else Decimal("1.0")
+            series[day] = base * drift
+        closes[symbol] = series
+    return _StubProvider(
+        release=_StubRelease(
+            "release-multi",
+            tuple(_StubInstrument(code=code) for code in symbols),
+            start_date=start,
+            end_date=end,
+        ),
+        closes_by_symbol=closes,
+    )
+
+
+def _multi_manifest(
+    spec: ResearchStrategySpec,
+    *,
+    frequency: str = "monthly",
+) -> ResearchRunManifest:
+    return ResearchRunManifest(
+        run_id="RR-multiperiod-test0001",
+        idempotency_key="multi-period-0001",
+        strategy_spec=spec,
+        strategy_spec_checksum=stable_checksum(spec.canonical_payload()),
+        dataset_releases=(
+            FrozenArtifactRef(
+                artifact_id="release-multi",
+                version="v1",
+                checksum="a" * 64,
+                capabilities=("stock",),
+            ),
+        ),
+        parameters={"rebalance_frequency": frequency},
+        code_version="abcdef0123456789",
+        initial_capital=Decimal("100000"),
+        requested_by="unit-test",
+    )
+
+
+def _price_only_spec() -> ResearchStrategySpec:
+    """价格因子专用规格(仅 momentum/volatility,无需冻结基本面快照)。"""
+    from finboard_backtest.strategy_spec.contracts import (
+        FeatureGraph,
+        FeatureKind,
+        FeatureNode,
+        FeatureOperator,
+        SignalAction,
+        SignalComparator,
+        SignalRule,
+        SignalRules,
+    )
+
+    spec = build_strategy_template(
+        "multi_factor",
+        strategy_id="signal_engine_multiperiod",
+        dataset_release_ids=("release-multi",),
+    )
+    nodes = (
+        FeatureNode(
+            node_id="momentum",
+            label="动量",
+            kind=FeatureKind.FACTOR,
+            operator=FeatureOperator.IDENTITY,
+            source="momentum",
+        ),
+        FeatureNode(
+            node_id="volatility",
+            label="波动率",
+            kind=FeatureKind.FACTOR,
+            operator=FeatureOperator.IDENTITY,
+            source="volatility_20d",
+        ),
+        FeatureNode(
+            node_id="composite",
+            label="复合得分",
+            kind=FeatureKind.COMPOSITE,
+            operator=FeatureOperator.WEIGHTED_SUM,
+            inputs=("momentum", "volatility"),
+            weights=(0.6, 0.4),
+        ),
+    )
+    return spec.model_copy(
+        update={
+            "feature_graph": FeatureGraph(nodes=nodes, outputs=("composite",)),
+            "signal_rules": SignalRules(
+                rules=(
+                    SignalRule(
+                        rule_id="top_score_buy",
+                        feature_id="composite",
+                        comparator=SignalComparator.RANK_TOP,
+                        threshold=0.5,
+                        action=SignalAction.BUY,
+                        rationale="复合得分前 50% 纳入目标仓位。",
+                    ),
+                )
+            ),
+        }
+    )
+
+
+@pytest.mark.asyncio
+class TestMultiPeriodDecisionInputs:
+    async def test_monthly_derives_multiple_decision_days(self) -> None:
+        """monthly 推导:每自然月最后一个交易日决策;发布末尾无成交日的期末剔除。"""
+        from finboard_backtest.research_run.signal_engine import (
+            _derive_rebalance_decision_days,
+            _release_trading_days,
+        )
+
+        start, end = date(2024, 1, 1), date(2024, 3, 31)
+        provider = _multi_provider(start, end)
+        days = await _release_trading_days(provider)  # type: ignore[arg-type]
+        decisions = await _derive_rebalance_decision_days(
+            provider, "monthly"  # type: ignore[arg-type]
+        )
+        # 1 月末 / 2 月末各一次;3 月末是发布最后交易日,没有下一交易日可成交,剔除。
+        assert len(decisions) == 2
+        assert [item[0].day for item in decisions] == [31, 29]
+        # 决策日必须是交易日,且每个决策日之后都有可成交的交易日。
+        for item in decisions:
+            assert item[0].date() in days
+        assert all(any(item[0].date() < day for day in days) for item in decisions)
+
+    async def test_quarterly_derives_quarter_ends(self) -> None:
+        """quarterly 推导:每季度最后一个交易日决策;发布末尾期末剔除。"""
+        from finboard_backtest.research_run.signal_engine import (
+            _derive_rebalance_decision_days,
+        )
+
+        start, end = date(2024, 1, 1), date(2024, 12, 31)
+        provider = _multi_provider(start, end)
+        decisions = await _derive_rebalance_decision_days(
+            provider, "quarterly"  # type: ignore[arg-type]
+        )
+        decision_dates = [item[0].date() for item in decisions]
+        # 3 月末 / 6 月末 / 9 月末各一次;12 月末是发布最后交易日,无下一成交日。
+        assert len(decision_dates) == 3
+        assert {item.month for item in decision_dates} == {3, 6, 9}
+
+    async def test_invalid_frequency_fails_closed(self) -> None:
+        """非法 rebalance_frequency:fail-closed(不会静默降级)。"""
+        from finboard_backtest.research_run.signal_engine import build_decision_inputs
+
+        provider = _multi_provider(date(2024, 1, 1), date(2024, 3, 31))
+        manifest = _multi_manifest(_price_only_spec(), frequency="daily")
+
+        def release_factory(release_id: str) -> _StubProvider:
+            return provider
+
+        async def snapshot_provider(snapshot_id: str) -> None:
+            return None
+
+        with pytest.raises(ValueError, match="rebalance_frequency"):
+            await build_decision_inputs(
+                manifest,
+                release_provider_factory=release_factory,  # type: ignore[arg-type]
+                snapshot_provider=snapshot_provider,
+            )
+
+    async def test_builds_period_inputs_with_recomputed_features(self) -> None:
+        """多期路径:每期重算 price features 并组装决策输入。"""
+        start, end = date(2024, 1, 1), date(2024, 3, 31)
+        provider = _multi_provider(start, end)
+        manifest = _multi_manifest(_price_only_spec(), frequency="monthly")
+
+        def release_factory(release_id: str) -> _StubProvider:
+            return provider
+
+        async def snapshot_provider(snapshot_id: str) -> None:
+            return None
+
+        inputs = await build_decision_inputs(
+            manifest,
+            release_provider_factory=release_factory,  # type: ignore[arg-type]
+            snapshot_provider=snapshot_provider,
+        )
+        # 1 月末 / 2 月末两次决策(3 月末为发布末日,无下一成交日)。
+        assert len(inputs) == 2
+        # 每期 features 由发布的行情重算,来源绑定冻结 release。
+        for item in inputs:
+            feature_names = {feature.feature_id for feature in item.features}
+            assert "momentum" in feature_names
+            assert "volatility_20d" in feature_names
+            assert all(
+                feature.source_artifact_ids == ("release-multi",) for feature in item.features
+            )
+            assert all(s.factor_snapshot_id is None for s in item.signals)
+        # 决策时间严格递增。
+        assert [item.decision_at for item in inputs] == sorted(item.decision_at for item in inputs)
+
+
+@pytest.mark.asyncio
+class TestDailyEquityCurve:
+    async def test_curve_covers_all_trading_days_and_segments(self) -> None:
+        """每日权益曲线:覆盖全区间交易日,并按成交执行日切换账本段。"""
+        from finboard_backtest.research_run.contracts import (
+            LedgerSnapshot,
+            RebalanceInstruction,
+            ResearchFill,
+            ResearchFillAction,
+            ResearchOrder,
+            ResearchOrderStatus,
+            ResearchPipelineEvidence,
+            ResearchPosition,
+            ResearchPositionSide,
+            ResearchRiskState,
+            UniverseCandidate,
+        )
+        from finboard_backtest.research_run.signal_engine import (
+            build_daily_equity_curve,
+        )
+
+        start, end = date(2024, 1, 1), date(2024, 2, 29)
+        provider = _multi_provider(start, end)
+        manifest = _multi_manifest(_price_only_spec(), frequency="monthly")
+        business_date = date(2024, 1, 31)
+        decision_at = datetime(2024, 1, 31, 15, 0, tzinfo=UTC)
+        execution_at = datetime(2024, 2, 1, 15, 0, tzinfo=UTC)
+        execution_close = {
+            symbol: provider.closes_by_symbol[symbol][date(2024, 2, 1)]
+            for symbol in ("000001.SZ", "000002.SZ")
+        }
+
+        candidates = tuple(
+            UniverseCandidate(
+                symbol=symbol,
+                included=True,
+                reasons=("测试候选",),
+                asset_class="equity",
+                market="a_share",
+            )
+            for symbol in ("000001.SZ", "000002.SZ")
+        )
+        fills = tuple(
+            ResearchFill(
+                research_fill_id=f"RR-MT:F:{symbol}:0",
+                research_order_id=f"RR-MT:O:{symbol}:0",
+                symbol=symbol,
+                action=ResearchFillAction.OPEN_LONG,
+                quantity=Decimal("3000"),
+                price=execution_close[symbol],
+                filled_at=execution_at,
+            )
+            for symbol in ("000001.SZ", "000002.SZ")
+        )
+        orders = tuple(
+            ResearchOrder(
+                research_order_id=f"RR-MT:O:{symbol}:0",
+                instruction_id=f"RR-MT:I:{symbol}:0",
+                symbol=symbol,
+                action=ResearchFillAction.OPEN_LONG,
+                quantity=Decimal("3000"),
+                status=ResearchOrderStatus.FILLED,
+            )
+            for symbol in ("000001.SZ", "000002.SZ")
+        )
+        instructions = tuple(
+            RebalanceInstruction(
+                instruction_id=f"RR-MT:I:{symbol}:0",
+                symbol=symbol,
+                action=ResearchFillAction.OPEN_LONG,
+                target_quantity=Decimal("3000"),
+                current_quantity=Decimal("0"),
+                delta_quantity=Decimal("3000"),
+                lot_size=100,
+                estimated_value=Decimal("31500"),
+                reason="测试调仓",
+            )
+            for symbol in ("000001.SZ", "000002.SZ")
+        )
+        positions = tuple(
+            ResearchPosition(
+                symbol=symbol,
+                position_side=ResearchPositionSide.LONG,
+                quantity=Decimal("3000"),
+                average_price=execution_close[symbol],
+                market_price=execution_close[symbol],
+                market_value=Decimal("3000") * execution_close[symbol],
+                realized_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
+            )
+            for symbol in ("000001.SZ", "000002.SZ")
+        )
+        invested = sum(
+            (Decimal("3000") * execution_close[position.symbol] for position in positions),
+            Decimal(),
+        )
+        ledger = LedgerSnapshot(
+            cash=manifest.initial_capital - invested,
+            market_value=invested,
+            margin_used=Decimal("0"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            equity=manifest.initial_capital,
+            fees_paid=Decimal("0"),
+            tax_paid=Decimal("0"),
+            slippage_paid=Decimal("0"),
+        )
+        decision = DecisionBundle(
+            business_date=business_date,
+            decision_at=decision_at,
+            candidates=candidates,
+            features=(),
+            signals=(),
+            targets_before_constraints=(),
+            constraints=(),
+            targets_after_constraints=(),
+            risk_exits=(),
+            targets_after_risk=(),
+            risk_state=ResearchRiskState(
+                cooldown_until={},
+                opened_on={"000001.SZ": business_date, "000002.SZ": business_date},
+                high_water_prices={"000001.SZ": 10.5, "000002.SZ": 10.5},
+                portfolio_equity_high_water=Decimal("100000"),
+                portfolio_drawdown=0.0,
+                portfolio_paused=False,
+            ),
+            capital_feasibility=(),
+            rebalance_plan=instructions,
+            orders=orders,
+            fills=fills,
+            positions=positions,
+            ledger=ledger,
+            pipeline_evidence=ResearchPipelineEvidence(
+                manifest_input_checksum=manifest.input_checksum,
+                input_checksum=stable_checksum({"test": "input"}),
+                output_checksum=stable_checksum({"test": "output"}),
+                hard_constraints_passed=True,
+            ),
+        )
+        curve = await build_daily_equity_curve(
+            provider,  # type: ignore[arg-type]
+            manifest,
+            (decision,),
+        )
+        assert curve
+        # 覆盖发布全部交易日(1 月至 2 月末)。
+        trading_days = _calendar(start, end)
+        assert [item.trade_date for item in curve] == trading_days
+        # 执行日(2024-02-01)前权益 = 初始资金;执行日按市价成交,权益仍为初始值。
+        feb1 = trading_days.index(date(2024, 2, 1))
+        assert curve[feb1 - 1].equity == manifest.initial_capital
+        assert curve[feb1].equity == manifest.initial_capital
+        # 执行日后持仓随行情漂移,曲线末端(2 月末)权益高于初始资金
+        # (纯回放不强制平仓,期末持仓按最后行情持续计值)。
+        assert curve[-1].equity > manifest.initial_capital

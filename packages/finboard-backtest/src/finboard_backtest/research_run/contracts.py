@@ -37,6 +37,17 @@ JsonValue = (
     | dict[str, "JsonValue"]
 )
 
+#: research_run 支持的调仓频率(``parameters.rebalance_frequency``,issue #183)。
+#: 单快照(冻结因子快照)frozen 路径不设该参数,恒为 single_shot。
+REBALANCE_FREQUENCIES: frozenset[str] = frozenset({"monthly", "quarterly"})
+
+
+class ResearchExecutionMode(StrEnum):
+    """一次 research_run 的是单时点决策还是全区间多期回放。"""
+
+    SINGLE_SHOT = "single_shot"
+    MULTI_PERIOD = "multi_period"
+
 
 class ResearchRunError(RuntimeError):
     """研究运行契约或生命周期不成立。"""
@@ -522,6 +533,31 @@ class LedgerSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class EquityPoint:
+    """权益曲线单点(单快照路径不产出本数据,issue #183)。"""
+
+    trade_date: date
+    equity: Decimal
+
+    def __post_init__(self) -> None:
+        if self.equity < 0:
+            raise ValueError("权益不能为负")
+
+
+def execution_mode_for(parameters: Mapping[str, object]) -> ResearchExecutionMode:
+    """按 ``parameters.rebalance_frequency`` 解析研究运行执行模式。
+
+    多期回放(multi_period)必须显式声明 ``rebalance_frequency``(monthly/
+    quarterly);未声明或非法值一律按单时点(single_shot)处理,与既有
+    单快照路径保持一致。
+    """
+    frequency = parameters.get("rebalance_frequency")
+    if frequency in REBALANCE_FREQUENCIES:
+        return ResearchExecutionMode.MULTI_PERIOD
+    return ResearchExecutionMode.SINGLE_SHOT
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionBundle:
     """单个决策时点的完整闭环。每个阶段都会独立持久化。"""
 
@@ -587,8 +623,9 @@ class ResearchRunReport:
     strategy_kind: str
     strategy_return: float
     benchmark_symbol: str
-    benchmark_return: float
-    excess_return: float
+    # issue #184:基准缺失时 benchmark_return/excess_return 为 None,禁止静默 0.0
+    benchmark_return: float | None
+    excess_return: float | None
     sharpe_ratio: float
     max_drawdown: float
     final_equity: Decimal
@@ -602,21 +639,35 @@ class ResearchRunReport:
     order_count: int
     fill_count: int
     accounting_invariants_passed: bool = True
+    # issue #183:多期回放绩效。single_shot 路径保持既有字段,不产出曲线。
+    execution_mode: ResearchExecutionMode = ResearchExecutionMode.SINGLE_SHOT
+    annualized_return: float = 0.0
+    equity_curve: tuple[EquityPoint, ...] = ()
 
     def __post_init__(self) -> None:
         metrics = (
             self.strategy_return,
-            self.benchmark_return,
-            self.excess_return,
             self.sharpe_ratio,
             self.max_drawdown,
+            self.annualized_return,
             *self.constraint_impact.values(),
         )
+        if self.benchmark_return is not None:
+            metrics = (*metrics, self.benchmark_return)
         if not all(math.isfinite(value) for value in metrics):
             raise ValueError("报告指标必须为有限数")
-        if abs(
-            self.strategy_return - self.benchmark_return - self.excess_return
-        ) > 1e-9:
+        if (self.benchmark_return is None) != (self.excess_return is None):
+            raise ValueError(
+                "基准缺失时 benchmark_return 与 excess_return 必须同为 None"
+            )
+        if (
+            self.benchmark_return is not None
+            and self.excess_return is not None
+            and abs(
+                self.strategy_return - self.benchmark_return - self.excess_return
+            )
+            > 1e-9
+        ):
             raise ValueError("excess_return 必须等于策略收益减基准收益")
         if min(
             self.final_equity,
@@ -629,6 +680,14 @@ class ResearchRunReport:
             raise ValueError("报告金额不能为负")
         if min(self.decision_count, self.order_count, self.fill_count) < 0:
             raise ValueError("报告计数不能为负")
+        if self.equity_curve:
+            days = tuple(item.trade_date for item in self.equity_curve)
+            if days != tuple(sorted(days)):
+                raise ValueError("equity_curve 必须按交易日升序")
+            if any(item.equity <= 0 for item in self.equity_curve):
+                raise ValueError("equity_curve 权益必须为正")
+            if self.execution_mode is not ResearchExecutionMode.MULTI_PERIOD:
+                raise ValueError("只有多期回放可以产出 equity_curve")
 
 
 @dataclass(frozen=True, slots=True)
@@ -741,12 +800,30 @@ def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
 
 
 def report_from_json(payload: dict[str, object]) -> ResearchRunReport:
+    raw_curve = payload.get("equity_curve", [])
+    curve = tuple(
+        EquityPoint(
+            trade_date=date.fromisoformat(str(item["trade_date"])),
+            equity=Decimal(str(item["equity"])),
+        )
+        for item in cast(list[dict[str, object]], raw_curve)
+    )
+    mode_raw = payload.get("execution_mode", ResearchExecutionMode.SINGLE_SHOT.value)
+    benchmark_return_raw = payload.get("benchmark_return")
+    # issue #184 前的历史 report 恒为数值;新 report 基准缺失时为 null。
+    benchmark_return = (
+        float(str(benchmark_return_raw)) if benchmark_return_raw is not None else None
+    )
     return ResearchRunReport(
         strategy_kind=str(payload["strategy_kind"]),
         strategy_return=float(str(payload["strategy_return"])),
         benchmark_symbol=str(payload["benchmark_symbol"]),
-        benchmark_return=float(str(payload["benchmark_return"])),
-        excess_return=float(str(payload["excess_return"])),
+        benchmark_return=benchmark_return,
+        excess_return=(
+            float(str(payload["excess_return"]))
+            if benchmark_return is not None
+            else None
+        ),
         sharpe_ratio=float(str(payload["sharpe_ratio"])),
         max_drawdown=float(str(payload["max_drawdown"])),
         final_equity=Decimal(str(payload["final_equity"])),
@@ -767,6 +844,9 @@ def report_from_json(payload: dict[str, object]) -> ResearchRunReport:
         accounting_invariants_passed=bool(
             payload.get("accounting_invariants_passed", True)
         ),
+        execution_mode=ResearchExecutionMode(str(mode_raw)),
+        annualized_return=float(str(payload.get("annualized_return", 0.0))),
+        equity_curve=curve,
     )
 
 
@@ -804,11 +884,13 @@ def _require_aware(value: datetime, name: str) -> None:
 __all__ = [
     "MAX_RESEARCH_CAPITAL",
     "MIN_RESEARCH_CAPITAL",
+    "REBALANCE_FREQUENCIES",
     "RESEARCH_PORTFOLIO_PIPELINE_VERSION",
     "RESEARCH_RUN_SCHEMA_VERSION",
     "CapitalTierOutcome",
     "ConstraintOutcome",
     "DecisionBundle",
+    "EquityPoint",
     "FeatureValue",
     "FrozenArtifactRef",
     "JsonValue",
@@ -818,6 +900,7 @@ __all__ = [
     "ResearchActorType",
     "ResearchArtifact",
     "ResearchConstraintViolationError",
+    "ResearchExecutionMode",
     "ResearchFill",
     "ResearchFillAction",
     "ResearchOrder",
@@ -839,6 +922,7 @@ __all__ = [
     "UniverseCandidate",
     "UnsupportedResearchCapabilityError",
     "canonical_json",
+    "execution_mode_for",
     "manifest_from_json",
     "pipeline_output_checksum",
     "report_from_json",

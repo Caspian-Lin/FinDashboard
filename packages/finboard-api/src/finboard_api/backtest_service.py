@@ -53,6 +53,7 @@ async def run_backtest_and_persist(
     from finboard_backtest import (
         BacktestConfig,
         BacktestEngine,
+        BenchmarkConfig,
         PointInTimeFactorSelector,
     )
     from finboard_backtest.selection_snapshot import FeatureSnapshotFactorReader
@@ -105,6 +106,14 @@ async def run_backtest_and_persist(
         stamp_tax_rate=request.stamp_tax_rate,
         slippage_bps=request.slippage_bps,
         selection=request.selection.to_domain(),
+        benchmark=(
+            BenchmarkConfig(
+                symbol=request.benchmark.symbol,
+                equal_weight_universe=request.benchmark.equal_weight_universe,
+            )
+            if request.benchmark is not None
+            else BenchmarkConfig()
+        ),
     )
     factor_selector = (
         PointInTimeFactorSelector(

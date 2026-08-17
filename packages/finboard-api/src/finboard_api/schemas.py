@@ -347,6 +347,13 @@ class SchedulerConfigUpdate(BaseSchema):
 
 
 # --------------------------------------------------------------------------- Backtest
+class BenchmarkParams(BaseSchema):
+    """基准选择(issue #184):显式指定基准标的或退回等权候选池。"""
+
+    symbol: str | None = Field(default=None, max_length=32)
+    equal_weight_universe: bool = True
+
+
 class BacktestRunRequest(BaseSchema):
     strategy: str
     symbols: list[str]
@@ -361,6 +368,7 @@ class BacktestRunRequest(BaseSchema):
     commission_min: Decimal = Decimal("1")  # 最低 ¥1/笔
     stamp_tax_rate: Decimal = Decimal("0.0005")  # 万 5(卖出)
     slippage_bps: Decimal = Decimal("0")  # 滑点 bps
+    benchmark: BenchmarkParams | None = None
 
 
 class StrategyParamInfo(BaseSchema):
@@ -405,8 +413,8 @@ class BacktestMetricsOut(BaseSchema):
     turnover: float = 0.0
     commission_paid: Decimal = Decimal("0")
     stamp_tax_paid: Decimal = Decimal("0")
-    benchmark_return: float = 0.0
-    excess_return: float = 0.0
+    benchmark_return: float | None = None
+    excess_return: float | None = None
     initial_capital: Decimal = Decimal("0")
     final_equity: Decimal = Decimal("0")
 
@@ -1014,6 +1022,7 @@ class ResearchDatasetReleaseCreate(BaseSchema):
             "bond",
             "convertible",
             "futures",
+            "index",
             "etf:index",
             "etf:cross_border",
             "etf:commodity",

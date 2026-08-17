@@ -14,7 +14,9 @@ from decimal import Decimal
 from typing import cast
 
 import numpy as np
+import structlog
 
+from finboard_backtest.metrics import total_return
 from finboard_backtest.portfolio.allocators import AllocationError
 from finboard_backtest.portfolio.builder import (
     PortfolioBuildInput,
@@ -52,6 +54,7 @@ from finboard_backtest.research_run.adapters import (
 from finboard_backtest.research_run.contracts import (
     CapitalTierOutcome,
     DecisionBundle,
+    EquityPoint,
     FeatureValue,
     LedgerSnapshot,
     NormalizedSignal,
@@ -69,6 +72,7 @@ from finboard_backtest.research_run.contracts import (
     RiskExitOutcome,
     UniverseCandidate,
     UnsupportedResearchCapabilityError,
+    execution_mode_for,
     pipeline_output_checksum,
     stable_checksum,
 )
@@ -79,6 +83,8 @@ from finboard_backtest.strategy_spec.contracts import (
     SignalConflictPolicy as SpecSignalConflictPolicy,
 )
 from finboard_backtest.strategy_spec.registry import get_strategy_capability
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,7 +345,11 @@ class PortfolioPipelineAdapter:
         self,
         manifest: ResearchRunManifest,
         decisions: Sequence[DecisionBundle],
+        *,
+        equity_curve: tuple[EquityPoint, ...] = (),
+        benchmark_curve: tuple[tuple[date, Decimal], ...] = (),
     ) -> ResearchRunReport:
+        execution_mode = execution_mode_for(manifest.parameters)
         if decisions:
             final = decisions[-1].ledger
         else:
@@ -354,27 +364,8 @@ class PortfolioPipelineAdapter:
                 tax_paid=Decimal(),
                 slippage_paid=Decimal(),
             )
-        strategy_return = float(final.equity / manifest.initial_capital - 1)
-        benchmark_return = _benchmark_return(manifest)
-        equity_values = [float(manifest.initial_capital), *[
-            float(item.ledger.equity) for item in decisions
-        ]]
-        period_returns = [
-            equity_values[index] / equity_values[index - 1] - 1
-            for index in range(1, len(equity_values))
-            if equity_values[index - 1] > 0
-        ]
-        sharpe = 0.0
-        if len(period_returns) >= 2:
-            volatility = float(np.std(period_returns, ddof=1))
-            if volatility > 0:
-                sharpe = float(np.mean(period_returns) / volatility * np.sqrt(252))
-        peak = equity_values[0]
-        max_drawdown = 0.0
-        for equity in equity_values:
-            peak = max(peak, equity)
-            if peak > 0:
-                max_drawdown = max(max_drawdown, (peak - equity) / peak)
+        benchmark_return = _benchmark_return(manifest, benchmark_curve)
+        benchmark_symbol = _benchmark_symbol(manifest)
         impact: dict[str, float] = {}
         for decision in decisions:
             for outcome in decision.constraints:
@@ -383,15 +374,50 @@ class PortfolioPipelineAdapter:
                 impact[outcome.constraint] = impact.get(
                     outcome.constraint, 0.0
                 ) + abs(before - after)
+
+        if equity_curve:
+            strategy_return, annualized, sharpe, drawdown = _curve_metrics(
+                equity_curve, manifest.initial_capital
+            )
+            final_equity = equity_curve[-1].equity
+        else:
+            strategy_return = float(final.equity / manifest.initial_capital - 1)
+            equity_values = [float(manifest.initial_capital), *[
+                float(item.ledger.equity) for item in decisions
+            ]]
+            period_returns = [
+                equity_values[index] / equity_values[index - 1] - 1
+                for index in range(1, len(equity_values))
+                if equity_values[index - 1] > 0
+            ]
+            sharpe = 0.0
+            if len(period_returns) >= 2:
+                volatility = float(np.std(period_returns, ddof=1))
+                if volatility > 0:
+                    sharpe = float(np.mean(period_returns) / volatility * np.sqrt(252))
+            peak = equity_values[0]
+            drawdown = 0.0
+            for equity in equity_values:
+                peak = max(peak, equity)
+                if peak > 0:
+                    drawdown = max(drawdown, (peak - equity) / peak)
+            # 单快照路径保持既有语义:不产出年化(年化只对全区间多期回放有意义)。
+            annualized = 0.0
+            final_equity = final.equity
+
         return ResearchRunReport(
             strategy_kind=self.strategy_kind,
             strategy_return=strategy_return,
-            benchmark_symbol=manifest.strategy_spec.validation_plan.benchmark_symbol,
+            benchmark_symbol=benchmark_symbol,
             benchmark_return=benchmark_return,
-            excess_return=strategy_return - benchmark_return,
+            excess_return=(
+                strategy_return - benchmark_return
+                if benchmark_return is not None
+                else None
+            ),
             sharpe_ratio=sharpe,
-            max_drawdown=max_drawdown,
-            final_equity=final.equity,
+            max_drawdown=drawdown,
+            final_equity=final_equity,
             final_cash=final.cash,
             commission_paid=final.fees_paid,
             tax_paid=final.tax_paid,
@@ -401,6 +427,9 @@ class PortfolioPipelineAdapter:
             decision_count=len(decisions),
             order_count=sum(len(item.orders) for item in decisions),
             fill_count=sum(len(item.fills) for item in decisions),
+            execution_mode=execution_mode,
+            annualized_return=annualized,
+            equity_curve=equity_curve,
         )
 
     def _build_decision(
@@ -679,10 +708,73 @@ def _required_float(
     return float(cast(float | int | str, overrides.get(key, default)))
 
 
-def _benchmark_return(manifest: ResearchRunManifest) -> float:
+def _benchmark_symbol(manifest: ResearchRunManifest) -> str:
+    """报告展示用的基准标的:优先 manifest.benchmark_config.symbol,
+    兼容旧 manifest 回退到验证计划字段。"""
+    configured = manifest.benchmark_config.get("symbol")
+    if isinstance(configured, str) and configured:
+        return configured
+    return manifest.strategy_spec.validation_plan.benchmark_symbol
+
+
+def _benchmark_return(
+    manifest: ResearchRunManifest,
+    benchmark_curve: tuple[tuple[date, Decimal], ...],
+) -> float | None:
+    """按 benchmark_config.symbol 取冻结行情计算基准收益(issue #184)。
+
+    优先级:冻结基准曲线点对点收益(真实计算)> 显式 ``overrides.return``
+    (发布无该标的行情时的手动兜底);两者都缺失时返回 ``None`` 并由调用方
+    记录具名 warning —— 禁止静默 0.0。
+    """
+    if len(benchmark_curve) >= 2:
+        return total_return(benchmark_curve)
     overrides = _section_overrides(manifest.benchmark_config)
-    value = overrides.get("return", 0.0)
-    return float(cast(float | int | str, value))
+    manual = overrides.get("return")
+    if manual is not None:
+        return float(cast(float | int | str, manual))
+    logger.warning(
+        "research_run.benchmark_missing",
+        symbol=_benchmark_symbol(manifest),
+        reason="no_bars_or_manual_override",
+    )
+    return None
+
+
+def _curve_metrics(
+    equity_curve: tuple[EquityPoint, ...],
+    initial_capital: Decimal,
+) -> tuple[float, float, float, float]:
+    """按每日权益曲线计算 总收益 / 年化 / 夏普 / 最大回撤。
+
+    年化用交易日历 252 折算(与夏普同尺度);单点曲线不产出正收益区间,
+    指标按 0 兜底(不抛错,曲线长度由合约保证 >= 2)。
+    """
+    values = [float(item.equity) for item in equity_curve]
+    initial = float(initial_capital)
+    strategy_return = values[-1] / initial - 1
+    period_returns = [
+        values[index] / values[index - 1] - 1
+        for index in range(1, len(values))
+        if values[index - 1] > 0
+    ]
+    annualized = (
+        (1.0 + strategy_return) ** (252.0 / len(period_returns)) - 1.0
+        if period_returns
+        else 0.0
+    )
+    sharpe = 0.0
+    if len(period_returns) >= 2:
+        volatility = float(np.std(period_returns, ddof=1))
+        if volatility > 0:
+            sharpe = float(np.mean(period_returns) / volatility * np.sqrt(252))
+    peak = values[0]
+    drawdown = 0.0
+    for equity in values:
+        peak = max(peak, equity)
+        if peak > 0:
+            drawdown = max(drawdown, (peak - equity) / peak)
+    return strategy_return, annualized, sharpe, drawdown
 
 
 def _mark_current_book(

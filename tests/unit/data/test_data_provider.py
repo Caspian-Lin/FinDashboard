@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from finboard_data.akshare_provider import AkShareProvider
+from finboard_data.akshare_provider import AkShareProvider, is_index_code
 from finboard_data.base import HistoricalDataProvider
 from finboard_data.cache import ParquetCache, expected_last_bar_date
 from finboard_data.yfinance_provider import YFinanceProvider
@@ -307,3 +307,126 @@ class TestYFinanceProvider:
             )
 
         assert bars[0].timestamp == datetime(2024, 1, 2, tzinfo=UTC)
+
+
+# --------------------------------------------------------------------------- 指数代码识别与指数日线(issue #184)
+
+
+class TestIndexCodeDetection:
+    @pytest.mark.unit
+    def test_sse_indexes_are_detected(self) -> None:
+        assert is_index_code("000300.SH") is True
+        assert is_index_code("000001.SH") is True
+        assert is_index_code("000905.SH") is True
+
+    @pytest.mark.unit
+    def test_szse_indexes_are_detected(self) -> None:
+        assert is_index_code("399006.SZ") is True
+        assert is_index_code("399001.SZ") is True
+
+    @pytest.mark.unit
+    def test_bse_index_is_detected(self) -> None:
+        assert is_index_code("899050.BJ") is True
+
+    @pytest.mark.unit
+    def test_stocks_and_etfs_are_not_indexes(self) -> None:
+        assert is_index_code("000001.SZ") is False  # 平安银行(深市股票)
+        assert is_index_code("600519.SH") is False  # 贵州茅台(沪市股票)
+        assert is_index_code("510300.SH") is False  # 沪深300 ETF
+        assert is_index_code("000300") is False  # 无后缀不猜测
+
+    @pytest.mark.unit
+    def test_unknown_suffix_returns_false(self) -> None:
+        assert is_index_code("000300.HK") is False
+        assert is_index_code("000300.US") is False
+
+
+class TestAkShareIndexDailyFetch:
+    @pytest.mark.unit
+    def test_index_daily_routes_to_index_interface(self, tmp_path: Path) -> None:
+        """000300.SH 走 index_zh_a_hist(不带 adjust),列名与股票日线兼容。"""
+        import pandas as pd  # type: ignore[import-untyped]
+
+        from finboard_data.akshare_provider import AkShareProvider
+
+        provider = AkShareProvider(cache_dir=tmp_path / "cache")
+        df = pd.DataFrame(
+            {
+                "日期": ["2024-01-02", "2024-01-03"],
+                "开盘": [3800.0, 3850.0],
+                "收盘": [3810.0, 3890.0],
+                "最高": [3860.0, 3900.0],
+                "最低": [3790.0, 3800.0],
+                "成交量": [100000000.0, 120000000.0],
+                "成交额": [400000000000.0, 480000000000.0],
+                "振幅": [1.0, 2.0],
+                "涨跌幅": [0.5, 2.1],
+                "涨跌额": [20.0, 80.0],
+                "换手率": [0.1, 0.2],
+            }
+        )
+        with (
+            patch("akshare.index_zh_a_hist", return_value=df) as index_mock,
+            patch("akshare.stock_zh_a_hist") as stock_mock,
+        ):
+            bars = provider._fetch_sync(
+                Symbol(code="000300.SH", market=Market.A_SHARE),
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                "qfq",
+            )
+        index_mock.assert_called_once()
+        stock_mock.assert_not_called()
+        assert [bar.close for bar in bars] == [Decimal("3810"), Decimal("3890")]
+        assert all(bar.symbol.code == "000300.SH" for bar in bars)
+        assert all(bar.timestamp.tzinfo is not None for bar in bars)
+
+    @pytest.mark.unit
+    def test_stock_still_routes_to_stock_interface(self, tmp_path: Path) -> None:
+        """深市 000 段股票(000001.SZ)仍走 stock_zh_a_hist。"""
+        import pandas as pd
+
+        from finboard_data.akshare_provider import AkShareProvider
+
+        provider = AkShareProvider(cache_dir=tmp_path / "cache")
+        df = pd.DataFrame(
+            {
+                "日期": ["2024-01-02"],
+                "开盘": [10.0],
+                "收盘": [10.5],
+                "最高": [10.6],
+                "最低": [9.9],
+                "成交量": [1000000.0],
+                "成交额": [10500000.0],
+            }
+        )
+        with (
+            patch("akshare.stock_zh_a_hist", return_value=df) as stock_mock,
+            patch("akshare.index_zh_a_hist") as index_mock,
+        ):
+            bars = provider._fetch_sync(
+                Symbol(code="000001.SZ", market=Market.A_SHARE),
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                "qfq",
+            )
+        stock_mock.assert_called_once()
+        index_mock.assert_not_called()
+        assert len(bars) == 1
+
+    @pytest.mark.unit
+    def test_index_minute_rejected(self, tmp_path: Path) -> None:
+        """指数只放行日线,分钟线明确报错。"""
+        from finboard_data.akshare_provider import AkShareProvider
+
+        provider = AkShareProvider(cache_dir=tmp_path / "cache")
+        with pytest.raises(ValueError, match="仅支持日线"):
+            provider._fetch_sync(
+                Symbol(code="000300.SH", market=Market.A_SHARE),
+                BarPeriod.M1,
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                "qfq",
+            )

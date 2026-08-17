@@ -128,12 +128,14 @@ class DatasetPublishExecutor:
                     )
             else:
                 selected_types = {item.instrument_type for item in selected}
-                missing_types = {"stock", "etf"} - selected_types
+                # issue #184:混合发布放行 index 基准资产(可单独发布指数
+                # benchmark 数据集,也可与股票/ETF 混发);至少含三者之一。
+                missing_types = {"stock", "etf", "index"} - selected_types
                 if missing_types:
                     raise ExecutorError(
                         code="mixed_scope_violation",
                         summary=(
-                            "多资产混合源发布必须同时包含股票和 ETF,缺少: "
+                            "多资产混合源发布必须至少包含股票、ETF 或指数,缺少: "
                             + ", ".join(sorted(missing_types))
                         ),
                         retryable=False,

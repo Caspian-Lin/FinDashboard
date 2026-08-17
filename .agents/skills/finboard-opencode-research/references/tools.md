@@ -32,32 +32,41 @@
 ### finboard_run_list
 列出 ResearchRun。
 - 参数:`statuses?: list[str]`、`strategy_kind?: str`、`limit?: int = 50`
-- 返回:`list[{run_id, strategy_id, strategy_kind, status, ...}]`
+- 返回:`list[{run_id, strategy_id, strategy_kind, status, execution_mode, ...}]`
+  (`execution_mode`: single_shot | multi_period,#183)
 
 ### finboard_run_get
 查询单个 ResearchRun 详情(含 manifest / result)。
 - 参数:`run_id: str`
-- 返回:`{run_id, ..., manifest, result, error_summary}`
+- 返回:`{run_id, ..., manifest, result, error_summary, execution_mode}`
+  (result 多期回放含 `annualized_return` 与 `equity_curve` 全区间每日权益曲线,#183)
 
 ### finboard_run_artifacts
 列出某 ResearchRun 的逐阶段 artifact。
 - 参数:`run_id: str`
 - 返回:`list[{artifact_id, sequence, stage, trace_id, payload}]`
 
-### finboard_run_queue(✅ #127 + #170,写)
+### finboard_run_queue(✅ #127 + #170 + #183,写)
 冻结输入 + 登记 queued ResearchRun(**不执行回测**,执行由离线 worker 完成)。
 issue #170 起 `multi_factor` 已发布规格可由 worker 端到端执行
 (信号引擎 + 组合流水线 → 14 stage artifacts → COMPLETED);其余 strategy
 kind(etf_rotation / mean_reversion / convertible_double_low / futures_tsmom /
 ma_cross)仍报 not_implemented。执行失败(如快照缺因子源)时 `finboard_run_get`
 可见 error_code / error_summary,`research_runs` 不停留在 QUEUED。
+issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
+再平衡回放**:按冻结发布交易日历每期重算 universe/features/signals 与组合,
+决策间每日 mark-to-market 产出全区间权益曲线与绩效指标(总收益/年化/夏普/
+最大回撤),返回值与 report 标注 `execution_mode=multi_period`;多期不要求
+预建因子快照(价格因子按发布每日重算),未声明或非法值一律 single_shot
+单快照路径行为不变。
 - 参数:`payload: dict`(字段:idempotency_key / strategy_id / strategy_version /
   dataset_release_ids / factor_snapshot_ids / parameters / validation_config /
   portfolio_config / risk_config / execution_config / fee_config /
-  benchmark_config / code_version / initial_capital / requested_by)
-- 返回:ResearchRun 详情(含 manifest)
-- 错误:`invalid_argument`(schema 校验 / 数据发布不匹配)、`not_found`(策略规格
-  版本不存在)、`conflict`(策略未发布 / 幂等冲突)
+  benchmark_config / code_version / initial_capital / requested_by;
+  `parameters.rebalance_frequency ∈ {monthly, quarterly}` 时 multi_period)
+- 返回:ResearchRun 详情(含 manifest 与 execution_mode)
+- 错误:`invalid_argument`(schema 校验 / 数据发布不匹配 / rebalance_frequency
+  非法)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
 
 ### finboard_run_cancel(✅ #127,写)
 取消 ResearchRun(queued/running/interrupted/failed → cancelled)。
@@ -541,6 +550,10 @@ research_run 管线轻路由(#174)。
     `capital: str = "100000"`、`adjust: str = "qfq"`、`params: dict`、
     `selection: dict`、`commission_rate: str`、`commission_min: str`、
     `stamp_tax_rate: str`、`slippage_bps: str`、
+    `benchmark_symbol: str | None = None`(issue #184:显式基准标的代码,如
+    `000300.SH`,指数日线自动走 akshare 指数接口,引擎单独拉取基准 bars 计算
+    `benchmark_return`/`excess_return`;不传则用等权候选池基准;基准缺失时
+    `benchmark_return`/`excess_return` 为 null)、
     `equity_mode: str = "summary"`(summary 降采样到 max_points 个关键点,首末
     点保留;full 返回完整曲线)、`max_points: int = 200`
   - `selection.inputs_mode`(#173):
@@ -558,11 +571,20 @@ research_run 管线轻路由(#174)。
   - 参数:`strategy_spec: {strategy_id: str, version: int}`、
     `queue_payload: dict`(与 `finboard_run_queue` payload 同构,不含
     strategy_id/strategy_version;必填 idempotency_key /
-    dataset_release_ids / code_version / initial_capital / requested_by)
+    dataset_release_ids / code_version / initial_capital / requested_by;
+    `queue_payload.parameters.rebalance_frequency ∈ {monthly, quarterly}`
+    时为多期再平衡回放,#183)
   - 校验:规格版本存在且 `status == "published"`,否则 `invalid_argument`
   - 返回:`{run_id, job_id, status, strategy_id, strategy_kind,
-    manifest_checksum, execution_path}` —— 已入队异步执行,用
-    `finboard_run_get` 或 `finboard_job_get` 轮询进度
+    execution_mode, manifest_checksum, execution_path}` —— 已入队异步执行,用
+    `finboard_run_get` 或 `finboard_job_get` 轮询进度;`execution_mode` 为
+    single_shot(默认)或 multi_period(#183,报告含 annualized_return 与
+    全区间每日 equity_curve)
+  - 基准收益(#184):research_run 管线按 `benchmark_config.symbol` 从冻结
+    发布取行情计算真实 `benchmark_return`/`excess_return`;基准缺失(发布中
+    无该标的)时二者为 null + 具名 warning,不再静默 0.0;`queue_payload.
+    benchmark_config` 可传 `{"overrides": {"return": <手动值>}}` 作为发布
+    无基准行情时的兜底
 - 错误:`invalid_argument`(互斥 / 规格不存在 / 未发布 / 参数校验失败 /
   equity_mode 非法 / snapshot 模式缺 snapshot_ids)、`permission_denied`
   (只读模式)、`unavailable`(数据源连接错误)

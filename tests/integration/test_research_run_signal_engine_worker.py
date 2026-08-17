@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -107,6 +107,13 @@ class _StubPointInTimeBar:
 
 
 @dataclass(frozen=True, slots=True)
+class _StubPointInTimePrice:
+    timestamp: datetime
+    close: Decimal
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class _StubExecution:
     lot_size: Decimal = Decimal("100")
     price_tick: Decimal = Decimal("0.01")
@@ -142,6 +149,10 @@ class _StubRelease:
     adjustment: str = "qfq"
     start_date: date = date(2024, 1, 1)
     end_date: date = date(2024, 12, 31)
+    source: str = "stub"
+    version: str = "v1"
+    release_checksum: str = "c" * 64
+    is_usable: bool = True
 
 
 @dataclass
@@ -168,14 +179,37 @@ class _StubProvider:
             _StubPointInTimeBar(
                 _StubBar(
                     close,
-                    timestamp=datetime.combine(
-                        day, datetime.min.time(), tzinfo=UTC
-                    ),
+                    timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
                 ),
                 datetime.combine(day, datetime.min.time(), tzinfo=UTC),
             )
             for day, close in sorted(by_date.items())
             if day <= end
+        ]
+
+    async def fetch_point_in_time_prices(
+        self,
+        symbol: object,
+        period: object,
+        start: date,
+        end: date,
+        *,
+        decision_at: datetime,
+        adjust: str = "qfq",
+    ) -> list[_StubPointInTimePrice]:
+        """价格特征所需的轻量 PIT 收盘价视图(多期回放每期重算 features 用)。"""
+        del period, start, adjust
+        by_date = self.closes_by_symbol.get(symbol.code)  # type: ignore[attr-defined]
+        if not by_date:
+            return []
+        return [
+            _StubPointInTimePrice(
+                timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+                close=close,
+                available_at=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+            )
+            for day, close in sorted(by_date.items())
+            if day <= end and datetime.combine(day, datetime.min.time(), tzinfo=UTC) <= decision_at
         ]
 
     async def fetch_bars(
@@ -464,15 +498,11 @@ async def _drain_worker(worker: BackgroundWorker) -> None:
 
 
 class TestSignalEngineWorkerEndToEnd:
-    async def test_multi_factor_run_completes_with_artifacts(
-        self, engine: AsyncEngine
-    ) -> None:
+    async def test_multi_factor_run_completes_with_artifacts(self, engine: AsyncEngine) -> None:
         """multi_factor 规格:真实信号引擎路径端到端 → COMPLETED + 14 artifacts。"""
         manifest = _manifest("multi_factor", "e2e")
         run_id = await _queue_double_write(engine, manifest)
-        worker = _build_worker(
-            engine, _signal_engine_factory(_make_provider(), _make_snapshot())
-        )
+        worker = _build_worker(engine, _signal_engine_factory(_make_provider(), _make_snapshot()))
         await _drain_worker(worker)
 
         async with session_factory(engine)() as session:
@@ -511,9 +541,7 @@ class TestSignalEngineWorkerEndToEnd:
         }
         assert len(artifacts) == 14
 
-    async def test_unsupported_kind_fails_with_run_error(
-        self, engine: AsyncEngine
-    ) -> None:
+    async def test_unsupported_kind_fails_with_run_error(self, engine: AsyncEngine) -> None:
         """非 multi_factor kind:not_implemented,且 research_runs 同步 FAILED。"""
         manifest = _manifest("etf_rotation", "unsupported")
         run_id = await _queue_double_write(engine, manifest)
@@ -541,15 +569,11 @@ class TestSignalEngineWorkerEndToEnd:
             assert job_row.status == BackgroundJobStatus.FAILED.value
             assert job_row.error_code == "signal_engine_not_implemented"
 
-    async def test_missing_snapshot_fails_run_visibly(
-        self, engine: AsyncEngine
-    ) -> None:
+    async def test_missing_snapshot_fails_run_visibly(self, engine: AsyncEngine) -> None:
         """冻结快照缺失:fail-closed,run 状态 FAILED 且错误原因可查询。"""
         manifest = _manifest("multi_factor", "missing-snapshot")
         run_id = await _queue_double_write(engine, manifest)
-        worker = _build_worker(
-            engine, _signal_engine_factory(_make_provider(), None)
-        )
+        worker = _build_worker(engine, _signal_engine_factory(_make_provider(), None))
         await _drain_worker(worker)
 
         async with session_factory(engine)() as session:
@@ -561,3 +585,257 @@ class TestSignalEngineWorkerEndToEnd:
             job_row = await BackgroundJobRepository(session).get(run_row.job_id)
             assert job_row is not None
             assert job_row.status == BackgroundJobStatus.FAILED.value
+
+
+# ---- 多期再平衡(issue #183)----------------------------------------------------
+
+
+def _multi_period_calendar(start: date, end: date) -> list[date]:
+    """周内连续交易日 stub 日历(跳过周末),缩样区间跨 3 个月。"""
+    days: list[date] = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            days.append(current)
+        current += timedelta(days=1)
+    return days
+
+
+def _multi_period_provider() -> _StubProvider:
+    """跨 2024-01~2024-04 的价格序列(固定 seed 独立随机游走,协方差满秩)。"""
+    import numpy as np
+
+    days = _multi_period_calendar(date(2024, 1, 1), date(2024, 4, 30))
+    rng = np.random.default_rng(20240401)
+    closes: dict[str, dict[date, Decimal]] = {}
+    for symbol in SYMBOLS:
+        price = 10.0
+        closes[symbol] = {}
+        for day in days:
+            price *= 1.0 + float(rng.normal(0.0008, 0.008))
+            closes[symbol][day] = Decimal(str(round(price, 4)))
+    return _StubProvider(
+        release=_StubRelease(
+            "frozen-release-multi",
+            tuple(_StubInstrument(code=symbol) for symbol in SYMBOLS),
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 4, 30),
+        ),
+        closes_by_symbol=closes,
+    )
+
+
+def _price_only_spec(suffix: str) -> ResearchStrategySpec:
+    """价格因子专用 multi_factor 规格(momentum + volatility_20d)。
+
+    多期回放由管线从冻结发布重算价格因子,不要求预建每月因子快照。
+    """
+    from finboard_backtest.strategy_spec.contracts import (
+        FeatureGraph,
+        FeatureKind,
+        FeatureNode,
+        FeatureOperator,
+    )
+
+    spec = build_strategy_template(
+        "multi_factor",
+        strategy_id=f"multi_period_{suffix}",
+        dataset_release_ids=("frozen-release-multi",),
+    )
+    nodes = (
+        FeatureNode(
+            node_id="momentum",
+            label="动量",
+            kind=FeatureKind.FACTOR,
+            operator=FeatureOperator.IDENTITY,
+            source="momentum",
+        ),
+        FeatureNode(
+            node_id="volatility",
+            label="波动率",
+            kind=FeatureKind.FACTOR,
+            operator=FeatureOperator.IDENTITY,
+            source="volatility_20d",
+        ),
+        FeatureNode(
+            node_id="composite",
+            label="复合得分",
+            kind=FeatureKind.COMPOSITE,
+            operator=FeatureOperator.WEIGHTED_SUM,
+            inputs=("momentum", "volatility"),
+            weights=(0.6, 0.4),
+        ),
+    )
+    return spec.model_copy(
+        update={
+            "feature_graph": FeatureGraph(nodes=nodes, outputs=("composite",)),
+            "signal_rules": SignalRules(
+                rules=(
+                    SignalRule(
+                        rule_id="top_score_buy",
+                        feature_id="composite",
+                        comparator=SignalComparator.RANK_TOP,
+                        threshold=0.5,
+                        action=SignalAction.BUY,
+                        rationale="复合得分前 50% 纳入目标仓位。",
+                    ),
+                )
+            ),
+        }
+    )
+
+
+def _multi_period_manifest(suffix: str) -> ResearchRunManifest:
+    spec = _price_only_spec(suffix)
+    return ResearchRunManifest(
+        run_id=_run_id(f"signal-engine-multi-{suffix}"),
+        idempotency_key=f"signal-engine-multi-{suffix}",
+        strategy_spec=spec,
+        strategy_spec_checksum=stable_checksum(spec.canonical_payload()),
+        dataset_releases=(
+            FrozenArtifactRef(
+                artifact_id="frozen-release-multi",
+                version="v1",
+                checksum="a" * 64,
+                capabilities=("stock",),
+            ),
+        ),
+        parameters={"rebalance_frequency": "monthly"},
+        code_version="abcdef0123456789",
+        initial_capital=Decimal("200000"),
+        requested_by="worker-test",
+    )
+
+
+def _multi_period_factory(provider: _StubProvider) -> object:
+    """注入 stub 冻结发布(无因子快照)的信号引擎适配器工厂。"""
+
+    def factory(manifest: ResearchRunManifest) -> SignalEnginePipelineAdapter:
+        def release_factory(release_id: str) -> _StubProvider:
+            assert release_id == "frozen-release-multi"
+            return provider
+
+        async def snapshot_provider(snapshot_id: str) -> None:
+            return None
+
+        return SignalEnginePipelineAdapter(
+            manifest=manifest,
+            release_provider_factory=release_factory,  # type: ignore[arg-type]
+            snapshot_provider=snapshot_provider,
+        )
+
+    return factory
+
+
+class TestMultiPeriodWorkerEndToEnd:
+    async def test_monthly_rebalance_completes_with_equity_curve(self, engine: AsyncEngine) -> None:
+        """monthly 再平衡:多期决策 + COMPLETED + 每日权益曲线 + 指标。"""
+        manifest = _multi_period_manifest("monthly")
+        run_id = await _queue_double_write(engine, manifest)
+        worker = _build_worker(engine, _multi_period_factory(_multi_period_provider()))
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.COMPLETED.value, (
+                f"status={run_row.status} error_code={run_row.error_code} "
+                f"error_summary={run_row.error_summary}"
+            )
+            result = run_row.result
+            assert result is not None
+            # 多期:2024-01~2024-04 共 4 个月,发布末日(4 月末)无下一成交日剔除。
+            assert result["execution_mode"] == "multi_period"
+            assert result["decision_count"] == 3
+            assert result["annualized_return"] != 0.0
+            equity_curve = cast(
+                list[dict[str, object]], result["equity_curve"]
+            )
+            assert equity_curve
+            # 覆盖发布全部交易日(1 月 1 日至 4 月 30 日,周末除外)。
+            expected_days = _multi_period_calendar(date(2024, 1, 1), date(2024, 4, 30))
+            assert [item["trade_date"] for item in equity_curve] == [
+                day.isoformat() for day in expected_days
+            ]
+            assert all(item["equity"] for item in equity_curve)
+            # 期末权益 = 曲线最后一点;总收益 > 0(价格序列整体上行)。
+            assert result["final_equity"] == equity_curve[-1]["equity"]
+            assert float(str(result["strategy_return"])) > 0
+
+
+def _benchmark_provider() -> _StubProvider:
+    """multi-period 发布 + 000300.SH 指数基准(直线 10 → 15,+50%)。
+
+    universe 随机游走几乎持平,基准强涨,超额收益应为负、方向确定。
+    """
+    days = _multi_period_calendar(date(2024, 1, 1), date(2024, 4, 30))
+    provider = _multi_period_provider()
+    # 指数直线上行 10 → 15(+50%)。
+    start, end = Decimal("10"), Decimal("15")
+    total = len(days) - 1
+    provider.closes_by_symbol["000300.SH"] = {
+        day: start + (end - start) * Decimal(index) / Decimal(max(total, 1))
+        for index, day in enumerate(days)
+    }
+    return provider
+
+
+def _benchmark_manifest(suffix: str, symbol: str) -> ResearchRunManifest:
+    from dataclasses import replace
+
+    return replace(
+        _multi_period_manifest(suffix),
+        benchmark_config={"symbol": symbol},
+    )
+
+
+class TestMultiPeriodBenchmarkEndToEnd:
+    async def test_index_benchmark_return_computed_and_sign_correct(
+        self, engine: AsyncEngine
+    ) -> None:
+        """000300.SH 指数基准:benchmark_return 来自真实行情,超额方向正确。"""
+        manifest = _benchmark_manifest("bench-hs300", "000300.SH")
+        run_id = await _queue_double_write(engine, manifest)
+        worker = _build_worker(engine, _multi_period_factory(_benchmark_provider()))
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.COMPLETED.value, (
+                f"status={run_row.status} error_code={run_row.error_code} "
+                f"error_summary={run_row.error_summary}"
+            )
+            result = run_row.result
+            assert result is not None
+            benchmark_return = result["benchmark_return"]
+            assert benchmark_return is not None
+            bm = float(str(benchmark_return))
+            st = float(str(result["strategy_return"]))
+            ex = float(str(result["excess_return"]))
+            # 基准:买入持有 000300.SH(10 → 15,+50%)。
+            assert bm == pytest.approx(0.5, abs=1e-6)
+            # 超额 = 策略 - 基准;universe 随机游走接近持平,基准强涨 → 超额为负。
+            assert ex == pytest.approx(st - bm, abs=1e-9)
+            assert ex < 0
+            # 报告展示字段记录基准标的。
+            assert result["benchmark_symbol"] == "000300.SH"
+
+    async def test_missing_benchmark_symbol_returns_null(self, engine: AsyncEngine) -> None:
+        """基准标的在发布中缺失:run 仍 COMPLETED,benchmark_return 为 null。"""
+        manifest = _benchmark_manifest("bench-missing", "399006.SZ")
+        run_id = await _queue_double_write(engine, manifest)
+        worker = _build_worker(engine, _multi_period_factory(_benchmark_provider()))
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.COMPLETED.value, (
+                f"status={run_row.status} error_code={run_row.error_code} "
+                f"error_summary={run_row.error_summary}"
+            )
+            result = run_row.result
+            assert result is not None
+            assert result["benchmark_return"] is None
+            assert result["excess_return"] is None

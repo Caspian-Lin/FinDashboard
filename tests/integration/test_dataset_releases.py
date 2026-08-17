@@ -308,3 +308,105 @@ async def test_release_instruments_fallback_to_profiles_for_metadata(
             delete(InstrumentModel).where(InstrumentModel.code == "TST077.SH")
         )
         await db_session.commit()
+
+
+async def test_index_benchmark_symbol_publishable(
+    _engine: AsyncEngine,  # noqa: PT019 - 共享集成测试 fixture 的既有命名
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    """指数基准资产(000300.SH)可进发布通道(issue #184)。
+
+    指数不来自 ETF 目录,必须显式登记 instruments 元数据才能发布;
+    发布后带 ``index`` 能力(READY)、资产类 EQUITY、零费用执行占位,
+    冻结 bars 可经 FrozenReleaseProvider 读取。
+    """
+    from finboard_data import FrozenReleaseProvider
+    from finboard_data.releases import CapabilityStatus
+    from finboard_persistence import InstrumentModel
+
+    await db_session.execute(
+        delete(InstrumentModel).where(InstrumentModel.code == "000300.SH")
+    )
+    db_session.add(
+        InstrumentModel(
+            code="000300.SH",
+            name="沪深300指数",
+            market="a_share",
+            instrument_type="index",
+            exchange="SSE",
+            list_date=date(2005, 4, 8),
+            status="active",
+            updated_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+    )
+    await db_session.flush()
+
+    cache = ParquetCache(tmp_path / "cache")
+    symbol = Symbol("000300.SH", Market.A_SHARE)
+    bars = []
+    for offset in range(4):
+        close = Decimal("3800") + Decimal(offset) * Decimal("100")
+        bars.append(
+            Bar(
+                symbol=symbol,
+                period=BarPeriod.D1,
+                timestamp=datetime.combine(
+                    _START + timedelta(days=offset),
+                    datetime.min.time(),
+                    tzinfo=UTC,
+                ),
+                open=close - Decimal("5"),
+                high=close + Decimal("12"),
+                low=close - Decimal("15"),
+                close=close,
+                volume=Decimal("100000000"),
+                amount=Decimal("0"),
+                source="fixed_sample",
+            )
+        )
+    await cache.write(symbol, BarPeriod.D1, "qfq", bars)
+
+    service = ResearchDatasetReleaseService(
+        db_session,
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    )
+    release = await service.publish(
+        DatasetReleaseSpec(
+            release_id="integration-r184-index",
+            dataset_name="benchmark_index_daily_bars",
+            source="fixed_sample",
+            version="integration-index-v1",
+            start_date=_START,
+            end_date=_END,
+            code_version="integration-test",
+            required_capabilities=("index",),
+        ),
+        ["000300.SH"],
+    )
+    await db_session.commit()
+
+    item = release.instrument("000300.SH")
+    assert item is not None
+    assert item.asset_class == "equity"
+    assert item.execution.commission_rate == Decimal("0")
+    capability = next(c for c in release.capabilities if c.key == "index")
+    assert capability.status is CapabilityStatus.READY
+
+    provider = FrozenReleaseProvider(
+        release_root=tmp_path / "releases",
+        release_id=release.release_id,
+    )
+    bars = await provider.fetch_bars(symbol, BarPeriod.D1, _START, _END)
+    assert len(bars) == 4
+
+    await db_session.execute(
+        delete(ResearchDatasetReleaseModel).where(
+            ResearchDatasetReleaseModel.release_id == "integration-r184-index"
+        )
+    )
+    await db_session.execute(
+        delete(InstrumentModel).where(InstrumentModel.code == "000300.SH")
+    )
+    await db_session.commit()

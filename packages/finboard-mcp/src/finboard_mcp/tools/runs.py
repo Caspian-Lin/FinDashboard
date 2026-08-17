@@ -49,7 +49,21 @@ def _run_summary(row: ResearchRunModel) -> dict[str, Any]:
         "started_at": to_jsonable(row.started_at),
         "completed_at": to_jsonable(row.completed_at),
         "error_code": row.error_code,
+        # issue #183:执行模式(single_shot|multi_period),入队即标注。
+        "execution_mode": _execution_mode_from_manifest(row.manifest),
     }
+
+
+def _execution_mode_from_manifest(manifest: object) -> str:
+    """从存储的 manifest dict 推导 execution_mode(issue #183 quick win)。"""
+    from finboard_backtest.research_run.contracts import execution_mode_for
+
+    if not isinstance(manifest, dict):
+        return "single_shot"
+    parameters = manifest.get("parameters")
+    if not isinstance(parameters, dict):
+        return "single_shot"
+    return execution_mode_for(parameters).value
 
 
 def _run_detail(row: ResearchRunModel) -> dict[str, Any]:
@@ -63,6 +77,8 @@ def _run_detail(row: ResearchRunModel) -> dict[str, Any]:
             "manifest": row.manifest,
             "result": row.result,
             "error_summary": row.error_summary,
+            # issue #183:agent 用 execution_mode 区分单时点决策与全区间回放。
+            "execution_mode": _execution_mode_from_manifest(row.manifest),
             # issue #143:关联 background_jobs.job_id,agent 可用 finboard_job_* 轮询。
             "job_id": getattr(row, "job_id", None),
         }
@@ -272,7 +288,11 @@ async def _build_queued_manifest(
         if node.source is not None
         and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
-    if required_factor_sources and not snapshots:
+    # issue #183:多期回放(parameters.rebalance_frequency)由管线按冻结发布
+    # 每日重算价格因子,不要求为每月预建因子快照;仍缺失的来源(如基本面因子)
+    # 在执行期 fail-closed,避免静默产出残缺信号。
+    is_multi_period = body.parameters.get("rebalance_frequency") in ("monthly", "quarterly")
+    if required_factor_sources and not snapshots and not is_multi_period:
         raise McpToolError(
             "invalid_argument",
             f"策略依赖因子输入但未冻结 factor_snapshot_ids: {sorted(required_factor_sources)}",

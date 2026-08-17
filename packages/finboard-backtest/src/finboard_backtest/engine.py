@@ -95,6 +95,8 @@ class BacktestEngine:
         """执行回测,返回绩效报告。"""
         # 1. 加载历史数据
         bars_by_symbol = await self._load_data()
+        # 1b. 显式基准不在回测 universe 时单独拉取(issue #184)
+        benchmark_bars = await self._load_benchmark_bars(bars_by_symbol)
 
         # 2. 合并所有 Bar,按交易日批处理
         all_bars = self._merge_bars(bars_by_symbol)
@@ -213,9 +215,43 @@ class BacktestEngine:
         return self._build_result(
             equity_curve=equity_curve,
             bars_by_symbol=bars_by_symbol,
+            benchmark_bars=benchmark_bars,
             broker=broker,
             selection_snapshots=selection_snapshots,
         )
+
+    async def _load_benchmark_bars(
+        self,
+        bars_by_symbol: dict[str, list[Bar]],
+    ) -> dict[str, list[Bar]]:
+        """显式基准标的单独拉取(不在回测 universe 时,issue #184)。
+
+        基准曲线用买入持有口径,不进入策略 / 撮合;universe 已含该标的时
+        直接复用,避免重复拉取;拉取失败或空数据返回空 dict,由
+        ``_build_result`` 落 null + warning。
+        """
+        bench_cfg = self._config.benchmark
+        if bench_cfg.symbol is None:
+            return {}
+        if bench_cfg.symbol in bars_by_symbol:
+            return {bench_cfg.symbol: bars_by_symbol[bench_cfg.symbol]}
+        symbol = self._parse_symbol(bench_cfg.symbol)
+        try:
+            bars = await self._provider.fetch_bars(
+                symbol,
+                BarPeriod.D1,
+                self._config.start,
+                self._config.end,
+                adjust=self._config.adjust,
+            )
+        except Exception as exc:
+            logger.error(
+                "backtest.benchmark_fetch_failed",
+                symbol=bench_cfg.symbol,
+                error=str(exc),
+            )
+            return {}
+        return {bench_cfg.symbol: bars} if bars else {}
 
     async def _load_data(self) -> dict[str, list[Bar]]:
         """并发加载所有标的的历史 Bar 数据。
@@ -357,6 +393,7 @@ class BacktestEngine:
         *,
         equity_curve: list[tuple[date, Decimal]],
         bars_by_symbol: dict[str, list[Bar]],
+        benchmark_bars: dict[str, list[Bar]],
         broker: BacktestBroker,
         selection_snapshots: list[FactorSnapshot],
     ) -> BacktestResult:
@@ -367,7 +404,7 @@ class BacktestEngine:
         benchmark_curve: list[tuple[date, Decimal]] = []
         bench_cfg = self._config.benchmark
         if bench_cfg.symbol is not None:
-            bench_bars = bars_by_symbol.get(bench_cfg.symbol, [])
+            bench_bars = benchmark_bars.get(bench_cfg.symbol, [])
             if bench_bars:
                 bar_prices = [(b.timestamp.date(), b.close) for b in bench_bars]
                 benchmark_curve = buy_and_hold_return(
@@ -394,7 +431,22 @@ class BacktestEngine:
         comm = total_commission(fills)
         tax = total_tax(fills)
         turn = turnover_ratio(fills, equity_curve)
-        bench_ret = total_return(benchmark_curve) if benchmark_curve else 0.0
+        # 基准缺失 → null + warning(issue #184),禁止静默 0.0
+        if len(benchmark_curve) >= 2:
+            bench_ret: float | None = total_return(benchmark_curve)
+        else:
+            bench_ret = None
+            reason = (
+                "no_bars_in_universe_or_fetch"
+                if bench_cfg.symbol is not None
+                else "empty_universe"
+            )
+            logger.warning(
+                "backtest.benchmark_missing",
+                symbol=bench_cfg.symbol,
+                reason=reason,
+            )
+        excess: float | None = ret - bench_ret if bench_ret is not None else None
         dataset_versions: dict[str, set[str]] = defaultdict(set)
         for snapshot in selection_snapshots:
             for dataset, version in snapshot.dataset_versions.items():
@@ -416,7 +468,7 @@ class BacktestEngine:
             commission_paid=comm,
             stamp_tax_paid=tax,
             benchmark_return=bench_ret,
-            excess_return=ret - bench_ret,
+            excess_return=excess,
             start_date=equity_curve[0][0] if equity_curve else None,
             end_date=equity_curve[-1][0] if equity_curve else None,
             initial_capital=self._config.initial_capital,

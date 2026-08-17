@@ -131,6 +131,16 @@ class TestGetRun:
         assert env.status == "ok"
         assert env.data["run_id"] == "RR-1"
         assert env.data["manifest"] == {"kind": "etf"}
+        # issue #183:单快照(未设置 rebalance_frequency)标注 single_shot。
+        assert env.data["execution_mode"] == "single_shot"
+
+    async def test_returns_detail_multi_period(self) -> None:
+        row = _run_model()
+        row.manifest = {"parameters": {"rebalance_frequency": "monthly"}}
+        app = _make_app(_session_maker(get_row=row))
+        env = await runs.get_run(app, "RR-1")
+        assert env.status == "ok"
+        assert env.data["execution_mode"] == "multi_period"
 
     async def test_not_found(self) -> None:
         app = _make_app(_session_maker(get_row=None))
@@ -142,9 +152,7 @@ class TestGetRun:
 
 class TestListArtifacts:
     async def test_returns_artifacts(self) -> None:
-        app = _make_app(
-            _session_maker(get_row=_run_model(), artifact_rows=[_artifact_model()])
-        )
+        app = _make_app(_session_maker(get_row=_run_model(), artifact_rows=[_artifact_model()]))
         env = await runs.list_artifacts(app, "RR-1")
         assert env.status == "ok"
         assert env.data[0]["artifact_id"] == "A-1"
@@ -194,6 +202,26 @@ class TestQueueRun:
         assert env.error is not None
         assert env.error.kind == "invalid_argument"
 
+    async def test_invalid_rebalance_frequency_rejected(self) -> None:
+        """issue #183:非法 rebalance_frequency 在入队时提前拒绝。"""
+        app = _make_app(_session_maker())
+        env = await runs.queue_run(
+            app,
+            payload={
+                "idempotency_key": "queue-freq-invalid",
+                "strategy_id": "s",
+                "strategy_version": 1,
+                "dataset_release_ids": ["r1"],
+                "parameters": {"rebalance_frequency": "weekly"},
+                "code_version": "abcdef0123456789",
+                "requested_by": "tester",
+            },
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "rebalance_frequency" in (env.error.message or "")
+
 
 class TestCancelRun:
     async def test_write_disabled(self) -> None:
@@ -208,6 +236,7 @@ class TestCancelRun:
         )
 
         app = _make_app(_session_maker(get_row=_run_model()))
+
         # coordinator.cancel 抛 conflict -> 映射 conflict
         async def _boom(self, run_id):
             raise ResearchRunConflictError("illegal transition")
@@ -222,16 +251,12 @@ class TestCancelRun:
 class TestReplayRun:
     async def test_write_disabled(self) -> None:
         app = _write_disabled_app()
-        env = await runs.replay_run(
-            app, "RR-1", idempotency_key="newkey12345", requested_by="u"
-        )
+        env = await runs.replay_run(app, "RR-1", idempotency_key="newkey12345", requested_by="u")
         assert env.status == "denied"
 
 
 class TestLineageRun:
-    async def test_empty_artifacts_returns_not_found(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_empty_artifacts_returns_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from finboard_backtest.research_run import ResearchRunCoordinator
 
         app = _make_app(_session_maker())
