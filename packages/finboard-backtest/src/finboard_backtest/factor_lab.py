@@ -1074,11 +1074,15 @@ def _init_price_feature_process(
     release_dir: str,
     release_id: str,
     verify_files: bool,
+    expected_checksum: str | None = None,
 ) -> None:
     """初始化独立进程的只读研究上下文。"""
 
     global _PRICE_FEATURE_PROCESS_CONTEXT
-    release = load_dataset_release(Path(release_dir))
+    release = load_dataset_release(
+        Path(release_dir),
+        expected_checksum=expected_checksum,
+    )
     if release.release_id != release_id:
         raise RuntimeError("特征计算进程的 release_id 不一致")
     if not release.is_usable:
@@ -1214,6 +1218,7 @@ def _create_price_feature_process_executor(
             str(provider.release_dir),
             release.release_id,
             provider.verify_files,
+            release.release_checksum,
         ),
     )
     warmups = tuple(

@@ -143,6 +143,7 @@ class FeatureSnapshotExecutor:
                     release_root=self._release_root,
                     release_id=release.release_id,
                     max_concurrency=self._max_concurrency,
+                    expected_checksum=release.release_checksum,
                 )
                 for release in releases
             }

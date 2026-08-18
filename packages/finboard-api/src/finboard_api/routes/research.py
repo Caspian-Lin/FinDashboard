@@ -194,6 +194,7 @@ async def _build_feature_snapshot_from_releases(
             release_root=release_root,
             release_id=primary.release_id,
             max_concurrency=max_concurrency,
+            expected_checksum=primary.release_checksum,
         )
         return await build_price_feature_snapshot(
             provider=provider,
@@ -211,6 +212,7 @@ async def _build_feature_snapshot_from_releases(
             release_root=release_root,
             release_id=release.release_id,
             max_concurrency=max_concurrency,
+            expected_checksum=release.release_checksum,
         )
         for release in releases
     }

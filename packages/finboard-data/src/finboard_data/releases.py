@@ -1793,11 +1793,15 @@ class FrozenReleaseProvider:
         release_id: str,
         verify_files: bool = True,
         max_concurrency: int = 8,
+        expected_checksum: str | None = None,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency 必须 >= 1")
         self._release_dir = Path(release_root).resolve() / release_id
-        self._release = load_dataset_release(self._release_dir)
+        self._release = load_dataset_release(
+            self._release_dir,
+            expected_checksum=expected_checksum,
+        )
         if self._release.release_id != release_id:
             raise ReleaseIntegrityError("目录 release_id 与 manifest 不一致")
         if not self._release.is_usable:
@@ -2056,8 +2060,20 @@ class FrozenReleaseProvider:
         return result
 
 
-def load_dataset_release(release_dir: str | Path) -> ResearchDatasetRelease:
-    """从磁盘加载并验证 manifest 自身校验和。"""
+def load_dataset_release(
+    release_dir: str | Path,
+    *,
+    expected_checksum: str | None = None,
+) -> ResearchDatasetRelease:
+    """从磁盘加载并验证 manifest 自身校验和。
+
+    ``expected_checksum``(DB 锚定,取 ``research_dataset_releases.release_checksum``)
+    提供时与 manifest 内嵌 ``release_checksum`` 直接比对,**不做**依赖当前代码
+    ``as_dict()`` 输出的整清单重算——发布端与读取端代码版本漂移(字段增删、
+    git SHA 漂移、工作区 dirty)不会让刚发布的冻结数据被拒读。未提供时保留
+    重算路径(纯磁盘独立场景与向后兼容);文件级完整性两种路径下均由逐文件
+    ``artifact_checksum`` sha256 保证。
+    """
 
     root = Path(release_dir).resolve()
     manifest_path = root / RELEASE_MANIFEST_FILENAME
@@ -2070,6 +2086,13 @@ def load_dataset_release(release_dir: str | Path) -> ResearchDatasetRelease:
     if not isinstance(raw, dict):
         raise ReleaseIntegrityError("发布清单必须是 JSON object")
     release = ResearchDatasetRelease.from_dict(cast(dict[str, object], raw))
+    if expected_checksum is not None:
+        if release.release_checksum != expected_checksum:
+            raise ReleaseIntegrityError(
+                "manifest checksum 与 DB 锚定不一致: "
+                f"expected={expected_checksum} actual={release.release_checksum}"
+            )
+        return release
     expected = _release_checksum(release)
     if release.release_checksum != expected:
         raise ReleaseIntegrityError(
