@@ -253,6 +253,7 @@ async def feature_snapshot_create(
                     release_root=_release_root(),
                     release_id=release.release_id,
                     max_concurrency=max_concurrency,
+                    expected_checksum=release.release_checksum,
                 )
                 snapshot = await build_price_feature_snapshot(
                     provider=provider,

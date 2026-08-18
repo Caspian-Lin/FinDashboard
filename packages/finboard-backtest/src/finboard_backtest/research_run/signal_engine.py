@@ -1287,8 +1287,18 @@ def build_signal_engine_adapter_factory(
             else os.getenv("FINBOARD_DATA_RELEASE_ROOT", "data_releases")
         )
 
+        # manifest 冻结的 release checksum 即 DB release_checksum(issue #202):
+        # 锚定校验替代代码版本敏感的整清单重算,worker 与发布端代码漂移不误伤。
+        release_checksums = {
+            ref.artifact_id: ref.checksum for ref in manifest.dataset_releases
+        }
+
         def _release_factory(release_id: str) -> FrozenReleaseProvider:
-            return FrozenReleaseProvider(release_root=root, release_id=release_id)
+            return FrozenReleaseProvider(
+                release_root=root,
+                release_id=release_id,
+                expected_checksum=release_checksums.get(release_id),
+            )
 
         async def _snapshot_provider(snapshot_id: str) -> object:
             async with session_maker() as session:

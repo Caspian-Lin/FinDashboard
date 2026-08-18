@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from finboard_data import (
+    RELEASE_MANIFEST_FILENAME,
     DatasetReleaseQualityError,
     DatasetReleaseSpec,
     ExecutionMetadata,
@@ -22,6 +24,7 @@ from finboard_data import (
     ReleaseIntegrityError,
     ReleaseLifecycleEvent,
     default_execution_metadata,
+    load_dataset_release,
     verify_dataset_release,
 )
 from finboard_data.cache import ParquetCache
@@ -559,6 +562,96 @@ async def test_checksum_corruption_is_fail_closed(tmp_path: Path) -> None:
     provider = FrozenReleaseProvider(
         release_root=tmp_path / "releases",
         release_id=release.release_id,
+    )
+    with pytest.raises(ReleaseIntegrityError, match="校验和不一致"):
+        await provider.fetch_bars(
+            Symbol("510300.SH", Market.A_SHARE),
+            BarPeriod.D1,
+            _START,
+            _END,
+        )
+
+
+@pytest.mark.asyncio
+async def test_expected_checksum_anchors_to_frozen_value_not_recompute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB 锚定校验不做代码版本敏感的重算(issue #202)。
+
+    模拟「两端 ``as_dict`` 输出不同」(字段增删/git SHA 漂移/dirty 工作区):
+    重算值漂移时,旧路径(未传 expected_checksum)误报 ReleaseIntegrityError,
+    锚定路径以冻结的 release_checksum 正常加载。
+    """
+    instruments = _multi_asset_instruments()
+    await _seed(tmp_path / "cache", instruments)
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    ).publish(_spec(), instruments)
+
+    from finboard_data import releases as releases_module
+
+    monkeypatch.setattr(
+        releases_module, "_release_checksum", lambda _release: "drifted"
+    )
+
+    release_dir = tmp_path / "releases" / release.release_id
+    with pytest.raises(ReleaseIntegrityError, match="manifest checksum 不一致"):
+        load_dataset_release(release_dir)
+    anchored = load_dataset_release(
+        release_dir,
+        expected_checksum=release.release_checksum,
+    )
+    assert anchored.release_id == release.release_id
+    provider = FrozenReleaseProvider(
+        release_root=tmp_path / "releases",
+        release_id=release.release_id,
+        expected_checksum=release.release_checksum,
+    )
+    assert provider.release.release_id == release.release_id
+
+
+@pytest.mark.asyncio
+async def test_expected_checksum_mismatch_is_fail_closed(tmp_path: Path) -> None:
+    """manifest 内嵌 release_checksum 被篡改时,DB 锚定校验仍拦截。"""
+    instruments = _multi_asset_instruments()
+    await _seed(tmp_path / "cache", instruments)
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    ).publish(_spec(), instruments)
+    manifest_path = (
+        tmp_path / "releases" / release.release_id / RELEASE_MANIFEST_FILENAME
+    )
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw["release_checksum"] = "0" * 64
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ReleaseIntegrityError, match="DB 锚定不一致"):
+        load_dataset_release(
+            tmp_path / "releases" / release.release_id,
+            expected_checksum=release.release_checksum,
+        )
+
+
+@pytest.mark.asyncio
+async def test_expected_checksum_keeps_file_level_sha256(tmp_path: Path) -> None:
+    """锚定路径不跳过逐文件 artifact_checksum sha256 校验。"""
+    instruments = _multi_asset_instruments()
+    await _seed(tmp_path / "cache", instruments)
+    release = await FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    ).publish(_spec(), instruments)
+    item = release.instrument("510300.SH")
+    artifact = tmp_path / "releases" / release.release_id / item.artifact_path
+    artifact.write_bytes(artifact.read_bytes() + b"corrupt")
+
+    provider = FrozenReleaseProvider(
+        release_root=tmp_path / "releases",
+        release_id=release.release_id,
+        expected_checksum=release.release_checksum,
     )
     with pytest.raises(ReleaseIntegrityError, match="校验和不一致"):
         await provider.fetch_bars(
