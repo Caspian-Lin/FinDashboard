@@ -6,7 +6,7 @@ available_at 过滤与候选池过滤;不依赖 PostgreSQL 或 Parquet 文件。
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -24,6 +24,7 @@ from finboard_backtest.research_run.signal_engine import (
     build_normalized_signals,
     evaluate_feature_graph,
     evaluate_signal_rules,
+    single_shot_snapshot_gate_error,
 )
 from finboard_backtest.strategy_spec import build_strategy_template
 from finboard_backtest.strategy_spec.contracts import ResearchStrategySpec
@@ -991,6 +992,120 @@ class TestMultiPeriodDecisionInputs:
             assert all(s.factor_snapshot_id is None for s in item.signals)
         # 决策时间严格递增。
         assert [item.decision_at for item in inputs] == sorted(item.decision_at for item in inputs)
+
+    async def test_multi_period_empty_derivation_error_names_root_cause(self) -> None:
+        """issue #203:声明多期但日历推导为空 → 报错区分根因,不再混报缺快照。"""
+        provider = _multi_provider(date(2024, 1, 1), date(2024, 1, 31))
+        manifest = _multi_manifest(_price_only_spec(), frequency="monthly")
+
+        def release_factory(release_id: str) -> _StubProvider:
+            return provider
+
+        async def snapshot_provider(snapshot_id: str) -> None:
+            return None
+
+        # 发布只覆盖一个月,期末即发布末日(无后续成交日)→ 推导为空。
+        with pytest.raises(ValueError, match="execution_mode=multi_period") as excinfo:
+            await build_decision_inputs(
+                manifest,
+                release_provider_factory=release_factory,  # type: ignore[arg-type]
+                snapshot_provider=snapshot_provider,
+            )
+        message = str(excinfo.value)
+        assert "execution_mode=multi_period" in message
+        assert "rebalance_frequency=monthly" in message
+        assert "决策时点" in message
+        # 不再与「未冻结快照」根因混报。
+        assert "factor_snapshots" not in message
+
+    async def test_single_shot_without_snapshots_error_names_root_cause(self) -> None:
+        """issue #203:未声明频率 + 无快照 → single_shot 根因 + 修复路径。"""
+        provider = _multi_provider(date(2024, 1, 1), date(2024, 3, 31))
+        manifest = replace(_multi_manifest(_price_only_spec()), parameters={})
+
+        def release_factory(release_id: str) -> _StubProvider:
+            return provider
+
+        async def snapshot_provider(snapshot_id: str) -> None:
+            return None
+
+        with pytest.raises(ValueError, match="execution_mode=single_shot") as excinfo:
+            await build_decision_inputs(
+                manifest,
+                release_provider_factory=release_factory,  # type: ignore[arg-type]
+                snapshot_provider=snapshot_provider,
+            )
+        message = str(excinfo.value)
+        assert "factor_snapshot_ids" in message
+        assert "rebalance_frequency=monthly|quarterly" in message
+        # 不再误指 multi_period 的日历推导根因。
+        assert "交易日历" not in message
+
+
+class TestSingleShotSnapshotGate:
+    """issue #203:入队期 single_shot 缺快照门控(REST / MCP 共用)。"""
+
+    def test_multi_period_with_frequency_passes_without_snapshots(self) -> None:
+        """声明合法频率(multi_period)不要求预建快照,行为不受 #203 影响。"""
+        for frequency in ("monthly", "quarterly"):
+            assert (
+                single_shot_snapshot_gate_error(
+                    strategy_kind="multi_factor",
+                    required_factor_sources={"pb"},
+                    frozen_snapshot_count=0,
+                    parameters={"rebalance_frequency": frequency},
+                )
+                is None
+            )
+
+    def test_factor_dependencies_without_snapshots_rejected(self) -> None:
+        """single_shot 依赖因子输入但缺快照:拒绝并附 execution_mode 与缺失源。"""
+        error = single_shot_snapshot_gate_error(
+            strategy_kind="multi_factor",
+            required_factor_sources={"pb", "momentum"},
+            frozen_snapshot_count=0,
+            parameters={},
+        )
+        assert error is not None
+        assert "execution_mode=single_shot" in error
+        assert "['momentum', 'pb']" in error
+        assert "factor_snapshot_ids" in error
+
+    def test_executable_kind_without_factor_sources_rejected(self) -> None:
+        """multi_factor 即便无因子源,single_shot 决策时点也只能来自快照。"""
+        error = single_shot_snapshot_gate_error(
+            strategy_kind="multi_factor",
+            required_factor_sources=set(),
+            frozen_snapshot_count=0,
+            parameters={},
+        )
+        assert error is not None
+        assert "execution_mode=single_shot" in error
+        assert "factor_snapshot_ids 为空" in error
+
+    def test_snapshots_frozen_passes(self) -> None:
+        """single_shot 已冻结快照:放行(fail-closed 只拦缺快照)。"""
+        assert (
+            single_shot_snapshot_gate_error(
+                strategy_kind="multi_factor",
+                required_factor_sources={"pb"},
+                frozen_snapshot_count=1,
+                parameters={},
+            )
+            is None
+        )
+
+    def test_unsupported_kind_without_snapshots_not_gated(self) -> None:
+        """其余 kind 由 worker 报 not_implemented,入队不拦截以免遮蔽根因。"""
+        assert (
+            single_shot_snapshot_gate_error(
+                strategy_kind="etf_rotation",
+                required_factor_sources=set(),
+                frozen_snapshot_count=0,
+                parameters={},
+            )
+            is None
+        )
 
 
 @pytest.mark.asyncio

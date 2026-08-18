@@ -39,6 +39,7 @@ from finboard_backtest.research_run import (
     validate_strategy_dataset_capabilities,
 )
 from finboard_backtest.research_run.contracts import JsonValue
+from finboard_backtest.research_run.signal_engine import single_shot_snapshot_gate_error
 from finboard_backtest.strategy_spec import ResearchStrategySpec
 from finboard_backtest.strategy_spec.contracts import FeatureKind
 from finboard_backtest.strategy_spec.universe_precheck import (
@@ -117,16 +118,16 @@ async def queue_research_run(
         for node in spec.feature_graph.nodes
         if node.source is not None and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
-    # issue #183:多期回放(parameters.rebalance_frequency)由管线按冻结发布
-    # 每日重算价格因子,不要求为每月预建因子快照;仍缺失的来源执行期 fail-closed。
-    is_multi_period = body.parameters.get("rebalance_frequency") in ("monthly", "quarterly")
-    if required_factor_sources and not snapshots and not is_multi_period:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"策略依赖因子输入但未冻结 factor_snapshot_ids: {sorted(required_factor_sources)}"
-            ),
-        )
+    # issue #203:入队期 single_shot 缺快照秒级拒绝(与 MCP 共用同一门控函数,
+    # 对齐 #186 预检风格)。multi_period 声明 rebalance_frequency 后不受影响。
+    gate_error = single_shot_snapshot_gate_error(
+        strategy_kind=spec.strategy_kind,
+        required_factor_sources=required_factor_sources,
+        frozen_snapshot_count=len(snapshots),
+        parameters=body.parameters,
+    )
+    if gate_error is not None:
+        raise HTTPException(status_code=422, detail=gate_error)
     release_ids = {release.release_id for release in releases}
     for snapshot in snapshots:
         if snapshot.dataset_release_id not in release_ids:
