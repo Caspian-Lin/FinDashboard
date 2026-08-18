@@ -421,6 +421,20 @@ def test_inputs_mode_validation() -> None:
 
 
 @pytest.mark.unit
+def test_factor_version_error_lists_valid_enum() -> None:
+    """issue #190:不支持的 factor_version 报错必须列出合法枚举,而不是只回显输入。
+
+    常见误传:把特征快照的 ``framework_version``(\"v2\")当选股规则版本传进来。
+    """
+    with pytest.raises(ValueError, match="不支持的 factor_version: v2") as excinfo:
+        FactorSelectionConfig(enabled=True, factor_version="v2")
+    assert "[v1]" in str(excinfo.value)
+
+    # 合法枚举直接构造不报错。
+    FactorSelectionConfig(enabled=True, factor_version="v1")
+
+
+@pytest.mark.unit
 async def test_bars_mode_uses_price_factors_without_daily_metrics() -> None:
     records = tuple(_profile_only(symbol) for symbol in ("000001.SZ", "000002.SZ"))
     history = {

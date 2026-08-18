@@ -177,7 +177,13 @@ FACTOR_CATALOG: dict[FactorName, FactorDefinition] = {
 
 @dataclass(frozen=True, slots=True)
 class FactorSelectionConfig:
-    """按日选股规则;默认关闭以保持旧回测行为。"""
+    """按日选股规则;默认关闭以保持旧回测行为。
+
+    ``factor_version`` 是**选股规则目录版本**(本文件 ``FACTOR_VERSION``,
+    目前仅 ``"v1"``),与特征快照的 ``framework_version``(
+    ``finboard_data.factor_lab.FACTOR_LAB_SCHEMA_VERSION``,注意当前是
+    ``"v2"``)是**两个独立命名空间**:后者描述快照 schema,不接受传给本字段。
+    """
 
     enabled: bool = False
     source: str = "tushare"
@@ -207,7 +213,10 @@ class FactorSelectionConfig:
 
     def __post_init__(self) -> None:
         if self.factor_version != FACTOR_VERSION:
-            raise ValueError(f"不支持的 factor_version: {self.factor_version}")
+            raise ValueError(
+                f"不支持的 factor_version: {self.factor_version},"
+                f"合法值仅 [{FACTOR_VERSION}]"
+            )
         if not self.source.strip():
             raise ValueError("source 不能为空")
         if self.inputs_mode is InputsMode.SNAPSHOT and not self.snapshot_ids:

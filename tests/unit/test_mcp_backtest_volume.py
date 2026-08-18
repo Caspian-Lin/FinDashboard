@@ -129,6 +129,15 @@ class TestDownsampleEquity:
         )
         assert len(sampled) <= 10
 
+    def test_none_mode_returns_empty(self) -> None:
+        """issue #190:equity_mode=none(默认)不返回任何曲线点。"""
+        points = _equity_points(500)
+        sampled = downsample.apply_equity_mode(
+            points, equity_mode="none", max_points=10
+        )
+        assert sampled == []
+        assert downsample.resolve_equity_mode("none") == "none"
+
     def test_invalid_mode_raises(self) -> None:
         with pytest.raises(ValueError, match="equity_mode"):
             downsample.resolve_equity_mode("compact")
