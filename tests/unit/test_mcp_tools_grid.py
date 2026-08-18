@@ -554,7 +554,9 @@ class TestGridGet:
             "get",
             lambda self, run_id: _async_return(_run_row(run_id)),
         )
-        env = await grid_tools.backtest_grid_get(app, grid_id=grid_row.grid_id)
+        env = await grid_tools.backtest_grid_get(
+            app, grid_id=grid_row.grid_id, equity_mode="summary"
+        )
         assert env.status == "ok"
         data = env.data
         assert data["complete"] is False
@@ -565,7 +567,7 @@ class TestGridGet:
         succeeded = data["combos"][0]
         assert succeeded["run_id"] == 10
         assert succeeded["metrics"]["total_return"] == 0.1
-        assert "equity_curve" in succeeded
+        assert "equity_curve" in succeeded  # 显式 equity_mode=summary 才返回曲线
         assert "rank" in succeeded
         assert "best" in succeeded
         assert len(data["failures"]) == 1
@@ -758,6 +760,42 @@ class TestGridGet:
         env = await grid_tools.backtest_grid_get(app, grid_id=grid_row.grid_id, equity_mode="full")
         assert env.status == "ok"
         assert len(env.data["combos"][0]["equity_curve"]) == 500
+
+    async def test_default_no_equity_curve(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """issue #190:grid_get 默认(none)不返回曲线,只留点数提示,响应最轻。"""
+        app = _make_app()
+        grid_row = _grid_row(combos=[{"index": 0, "label": "a", "params": {}, "job_id": "BJ-1"}])
+        monkeypatch.setattr(
+            BacktestGridRunRepository,
+            "get_by_grid_id",
+            lambda self, grid_id: _async_return(grid_row),
+        )
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "get",
+            lambda self, job_id: _async_return(_job_row(job_id, result_ref="1")),
+        )
+        from finboard_persistence import BacktestRunRepository
+
+        long_equity = [{"date": f"2024-{i:02d}-01", "equity": 100000.0 + i} for i in range(1, 501)]
+        monkeypatch.setattr(
+            BacktestRunRepository,
+            "get",
+            lambda self, run_id: _async_return(
+                SimpleNamespace(
+                    id=run_id,
+                    metrics={"total_return": 0.1},
+                    equity_curve=long_equity,
+                )
+            ),
+        )
+        env = await grid_tools.backtest_grid_get(app, grid_id=grid_row.grid_id)
+        assert env.status == "ok"
+        combo = env.data["combos"][0]
+        assert combo["metrics"]["total_return"] == 0.1
+        assert "equity_curve" not in combo  # 默认不返回曲线
+        assert combo["equity_point_count"] == 500  # 仅保留点数提示
+        assert "rank" in combo  # 指标矩阵 + 排名仍返回
 
     async def test_invalid_equity_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         app = _make_app()

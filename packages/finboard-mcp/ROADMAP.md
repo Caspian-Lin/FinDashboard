@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 115 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 为既有工具的执行语义与契约增强 / 新增网格工具):
+**已实现 115 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 为既有工具的执行语义与契约增强 / 新增网格工具):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -15,7 +15,7 @@
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |
 | 因子实验室 | 12 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(8 只读 + 4 写,✅ #125;job_start/status 在 #136 迁移到持久化队列) |
 | 策略规格 | 16 | strategy registry/template/list/history/version_get/diff、preset list/get(只读);strategy validate/draft_create/supersede/publish/rollback、preset create/update/delete(写) | 无代码版本化生命周期(8 只读 + 8 写,✅ #126);validate 返回 universe_precheck(依赖字段缺失 warning + 空池预览,#186) |
-| 回测 | 7 | backtest_strategy_list、backtest_history_list/get、backtest_grid_get(只读);backtest_run(同步/异步 + strategy_spec 路由)、backtest_history_delete、backtest_grid_submit(写) | 行情回放 + 纸面撮合 + 批量参数网格(4 只读 + 3 写,✅ #127 + #175;strategy_spec 形态多期再平衡回放 execution_mode,#183;benchmark_symbol 显式基准 + 基准缺失 null,#184;strategy_spec 形态入队 universe 候选池预检,#186;strategy 形态 run_async=true 或按估算工作量自动切换入队 backtest_run 后台任务返回 job_id,#189) |
+| 回测 | 7 | backtest_strategy_list、backtest_history_list/get、backtest_grid_get(只读);backtest_run(同步/异步 + strategy_spec 路由)、backtest_history_delete、backtest_grid_submit(写) | 行情回放 + 纸面撮合 + 批量参数网格(4 只读 + 3 写,✅ #127 + #175;strategy_spec 形态多期再平衡回放 execution_mode,#183;benchmark_symbol 显式基准 + 基准缺失 null,#184;strategy_spec 形态入队 universe 候选池预检,#186;strategy 形态 run_async=true 或按估算工作量自动切换入队 backtest_run 后台任务返回 job_id,#189;selection.factor_version 报错列合法枚举 + grid_get 默认不返回曲线(显式 equity_mode 才返回),#190) |
 | 模拟盘 | 21 | sim_account list/get/create、sim_session list/get/create/start/pause/stop/archive/reset、sim_orders/fills/positions/ledger/audit/report(只读);sim_decision_submit、sim_market_event、sim_session_evaluate、sim_order_cancel(写) | 持久化隔离模拟盘(10 只读 + 11 写,✅ #127 + #139) |
 | portfolio | 4 | portfolio_allocate / sizing / feasibility / attribution | 组合计算(纯计算,无 DB 写入,✅ #128) |
 | `finboard.job.*` | 4 | job list/get(只读);job enqueue/cancel(写) | 统一后台任务队列监控与提交(2 只读 + 2 写,✅ #136) |
@@ -299,8 +299,10 @@ fills_offset / fills_total)。降采样在 `finboard_mcp/downsample.py`,纯展�
   夏普/胜率/超额/换手/费用等)+ 关键指标竞争排名与最优标注(全部「越高越好」,
   max_drawdown 负值越高=回撤越小;同值同排名)+ **失败组合带错误码单列**
   (failed/cancelled/interrupted/产物缺失,不影响成功组合返回)。
-  `complete=false` 表示还有组合未到终态。equity 曲线复用 #172 的 summary
-  降采样形态(默认 200 点,首末保留)。顺带修 worker 兜底日志:ExecutorError
+  `complete=false` 表示还有组合未到终态。equity 曲线默认**不返回**(#190:
+  `equity_mode=none`,只留 `equity_point_count` 点数提示,9 组合 x 200 点约
+  100-200KB 不再默认灌爆响应);显式 `summary`/`full` 才降采样/全量返回
+  (summary 复用 #172 降采样形态,默认 200 点,首末保留)。顺带修 worker 兜底日志:ExecutorError
   是 dataclass,`str()` 为空导致任务行 error_summary 丢失 —— 优先取
   `.summary`。
 

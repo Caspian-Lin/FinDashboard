@@ -59,11 +59,24 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
 最大回撤),返回值与 report 标注 `execution_mode=multi_period`;多期不要求
 预建因子快照(价格因子按发布每日重算),未声明或非法值一律 single_shot
 单快照路径行为不变。
-- 参数:`payload: dict`(字段:idempotency_key / strategy_id / strategy_version /
-  dataset_release_ids / factor_snapshot_ids / parameters / validation_config /
-  portfolio_config / risk_config / execution_config / fee_config /
-  benchmark_config / code_version / initial_capital / requested_by;
-  `parameters.rebalance_frequency ∈ {monthly, quarterly}` 时 multi_period)
+- 参数:`payload: dict`(JSON 对象,模板与取值来源,必填标 *):
+  - `idempotency_key`*: 8-128 字符去重键;重提交返回同一 run
+  - `strategy_id`*: 已发布策略规格 id(`finboard_strategy_list` / registry 查询)
+  - `strategy_version`*: 整数 >=1(策略规格版本)
+  - `dataset_release_ids`*: 冻结数据发布 release_id 列表,**必须与策略验证计划完全一致**
+    (`finboard_dataset_release_list` 查询)
+  - `factor_snapshot_ids`: 冻结特征快照 snapshot_id 列表(`finboard_feature_snapshot_list`
+    查询);策略依赖因子输入时必填
+  - `parameters`: `{}` —— 可声明 `rebalance_frequency=monthly|quarterly` 触发多期回放(#183)
+  - `validation_config` / `portfolio_config` / `risk_config` / `execution_config` /
+    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空
+  - `code_version`*: 7-64 字符,**本 run 自身的代码版本标识**(如 FinBoard git
+    commit),冻结进 manifest/checksum 供追溯;**与数据集发布的 code_version 同名
+    但互不校验**,别拿数据集 git hash 顶替
+  - `initial_capital`*: 100000-500000 数字
+  - `requested_by`*: 归属人(如 `user:xxx` / `agent:mcp`)
+  - `actor_type`: `"human"`(固定;LLM 不能触发运行)
+  (`parameters.rebalance_frequency ∈ {monthly, quarterly}` 时 multi_period)
 - 返回:ResearchRun 详情(含 manifest 与 execution_mode)
 - **入队预检(issue #186)**:入队时对主数据发布的 instruments 做 universe
   候选池非空校验(与 data_sync 后的元数据状态一致);空池秒级
@@ -591,6 +604,10 @@ research_run 管线轻路由(#174)。
     点保留;full 返回完整曲线)、`max_points: int = 200`、
     `run_async: bool | None = None`(issue #189)、
     `requested_by: str | None = None`(异步任务归属,默认 agent:mcp:backtest_run)
+  - `selection.factor_version` 仅支持 `"v1"`(**选股规则版本**);`"v2"` 等会报
+    「不支持的 factor_version」错误并列出合法值。不要传特征快照的
+    `framework_version`(当前 `"v2"`,是快照 schema 版本)——两者是**不同命名
+    空间**,快照的 `framework_version` 不接受传给选股配置
   - `selection.inputs_mode`(#173):
     - `research_db`(默认):从 research 数据表读 profile/daily_metrics/
       financial_indicators/industry_memberships
@@ -677,15 +694,18 @@ research_run 管线轻路由(#174)。
 
 ### finboard_backtest_grid_get(只读)
 查询批量参数网格回测的聚合对比表(issue #175):
-- 参数:`grid_id: str`、`equity_mode: str = "summary"`(equity 降采样到
-  max_points 个关键点,首末点保留,复用 #172 形态)、`max_points: int = 200`
+- 参数:`grid_id: str`、`equity_mode: str = "none"`(**默认不返回 equity 曲线**,
+  只保留 `equity_point_count` 点数提示,响应最轻;`summary` 降采样到
+  max_points 个关键点,首末点保留;`full` 返回完整曲线;复用 #172 形态 +
+  #190 默认响应瘦身)、`max_points: int = 200`
 - 返回:
   - 网格元信息 + `complete: bool`(全部组合到终态)/ `completed_count` /
     `pending_count` / `failed_count`
   - `metric_fields: list[str]`(指标矩阵列:收益/年化/夏普/回撤/胜率/换手/超额/
     费用等,按规范顺序)
   - `combos: list[{combo_index, label, params, job_id, job_status, run_id?,
-    metrics?, equity_curve?, equity_point_count?, rank?{指标: 竞争排名,同值
+    metrics?, equity_curve?(仅显式 equity_mode 时返回), equity_point_count?,
+    rank?{指标: 竞争排名,同值
     同排名}, best?{指标: 是否最优}}]`(成功组合带指标矩阵 + 排名 + 最优标注;
     未到终态组合只有 job_status)
   - `ranking: {指标: {combo_index, label, value}}`(每关键指标最优组合;
@@ -694,7 +714,8 @@ research_run 管线轻路由(#174)。
     error_summary}]`(失败/取消/中断/产物缺失的组合**带错误码单列**,不影响
     成功组合返回)
 - 错误:`not_found`(网格不存在)、`invalid_argument`(equity_mode 非法)
-- 部分失败不吞错;`complete=false` 时稍后重试
+- 部分失败不吞错;`complete=false` 时稍后重试;多组合对比择优默认不传
+  equity_mode(避免 9 组合 x 200 点 ~100-200KB 响应被截断),确需曲线再显式请求
 
 ## finboard.sim.*(✅ #127 + #139)
 

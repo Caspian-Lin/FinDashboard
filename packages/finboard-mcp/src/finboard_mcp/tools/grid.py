@@ -461,10 +461,10 @@ async def backtest_grid_get(
     app: McpAppContext,
     *,
     grid_id: str,
-    equity_mode: str = "summary",
+    equity_mode: str = "none",
     max_points: int = 200,
 ) -> ToolEnvelope:
-    """聚合网格对比表:指标矩阵 + 排名/最优标注 + 失败清单。"""
+    """聚合网格对比表:指标矩阵 + 排名/最优标注 + 失败清单(默认不含曲线)。"""
 
     async def _do() -> dict[str, Any]:
         from finboard_mcp.downsample import (
@@ -530,18 +530,20 @@ async def backtest_grid_get(
                         )
                         continue
                     equity = list(run.equity_curve or [])
-                    entry.update(
-                        {
-                            "run_id": run.id,
-                            "metrics": dict(run.metrics or {}),
-                            "equity_curve": apply_equity_mode(
-                                equity,
-                                equity_mode=mode,
-                                max_points=max_equity_points,
-                            ),
-                            "equity_point_count": len(equity),
-                        }
-                    )
+                    row_payload: dict[str, Any] = {
+                        "run_id": run.id,
+                        "metrics": dict(run.metrics or {}),
+                        # issue #190:默认(none)不返回曲线,只保留点数提示;
+                        # 显式 equity_mode=summary/full 才带 equity_curve。
+                        "equity_point_count": len(equity),
+                    }
+                    if mode != "none":
+                        row_payload["equity_curve"] = apply_equity_mode(
+                            equity,
+                            equity_mode=mode,
+                            max_points=max_equity_points,
+                        )
+                    entry.update(row_payload)
                     rows.append(entry)
                 elif job.status in TERMINAL_STATUSES:
                     # failed / cancelled / interrupted —— 终态失败,带错误码单列
@@ -687,15 +689,17 @@ def register(mcp: MCPServer) -> None:
             "查询批量参数网格回测的聚合对比表:逐组合指标矩阵(收益/回撤/夏普/"
             "胜率/超额/换手等)+ 关键指标竞争排名与最优标注(ranking/best)+ "
             "失败组合错误清单(failures 带错误码单列,不影响成功组合返回)。"
-            "参数:grid_id、equity_mode(summary 默认:equity 降采样到 max_points "
-            "个关键点,首末点保留;full:完整曲线)、max_points(默认 200)。"
-            "complete=false 表示还有组合未到终态(queued/running),可稍后重试。"
-            "只读。"
+            "参数:grid_id、equity_mode(none 默认:不返回 equity 曲线,响应最轻,"
+            "只保留 equity_point_count 点数提示;summary:equity 降采样到 "
+            "max_points 个关键点,首末点保留;full:完整曲线)、max_points(默认 "
+            "200)。9 组合 x 200 点曲线约 100-200KB,对比择优建议默认 none,"
+            "确需曲线再显式请求。complete=false 表示还有组合未到终态"
+            "(queued/running),可稍后重试。只读。"
         ),
     )
     async def _grid_get(
         grid_id: str,
-        equity_mode: str = "summary",
+        equity_mode: str = "none",
         max_points: int = 200,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:

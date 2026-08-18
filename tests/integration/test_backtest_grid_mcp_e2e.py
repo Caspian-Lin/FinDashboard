@@ -268,7 +268,9 @@ async def test_grid_get_aggregates_with_partial_failure(
         await _execute_job(engine, executor, job_id)
 
     # 聚合:2 成功 + 1 失败(short_window=10),complete=true
-    env = await grid_tools.backtest_grid_get(app, grid_id=grid_id)
+    env = await grid_tools.backtest_grid_get(
+        app, grid_id=grid_id, equity_mode="summary"
+    )
     assert env.status == "ok", env.error
     data = env.data
     assert data["complete"] is True
@@ -288,7 +290,7 @@ async def test_grid_get_aggregates_with_partial_failure(
     assert by_short[5]["best"]["total_return"] is False
     assert data["ranking"]["total_return"]["combo_index"] == by_short[15]["combo_index"]
     assert data["ranking"]["max_drawdown"]["combo_index"] == by_short[15]["combo_index"]
-    # equity 曲线(默认 summary;3 个点不降采样)
+    # equity 曲线(显式 equity_mode=summary;3 个点不降采样)
     assert by_short[5]["equity_point_count"] == 3
     assert len(by_short[5]["equity_curve"]) == 3
     # 指标矩阵列按规范顺序

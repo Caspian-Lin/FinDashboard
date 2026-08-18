@@ -738,12 +738,30 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_run_queue",
         description=(
-            "冻结输入 + 登记 queued ResearchRun(写,不执行回测)。"
-            "payload 字段:idempotency_key / strategy_id / strategy_version / "
-            "dataset_release_ids / factor_snapshot_ids / parameters / "
-            "validation_config / portfolio_config / risk_config / "
-            "execution_config / fee_config / benchmark_config / code_version / "
-            "initial_capital / requested_by。复用 ResearchRunQueueIn schema 校验。"
+            "冻结输入 + 登记 queued ResearchRun(写,不执行回测,由离线 worker "
+            "执行)。payload 为 JSON 对象,模板与取值来源(必填标 *):\n"
+            '- "idempotency_key"*: 8-128 字符去重键;重提交返回同一 run\n'
+            '- "strategy_id"*: 已发布策略规格 id(finboard_strategy_list / '
+            "registry 查询)\n"
+            '- "strategy_version"*: 整数 >=1(策略规格版本)\n'
+            '- "dataset_release_ids"*: 冻结数据发布 release_id 列表,必须与策略'
+            "验证计划完全一致(finboard_dataset_release_list 查询)\n"
+            '- "factor_snapshot_ids": 冻结特征快照 snapshot_id 列表'
+            "(finboard_feature_snapshot_list 查询);策略依赖因子输入时必填\n"
+            '- "parameters": {} —— 可声明 rebalance_frequency=monthly|quarterly '
+            "触发多期再平衡回放(#183)\n"
+            '- "validation_config"/"portfolio_config"/"risk_config"/'
+            '"execution_config"/"fee_config"/"benchmark_config": {} —— '
+            "政策覆盖,一般留空\n"
+            '- "code_version"*: 7-64 字符,**本 run 自身的代码版本标识**(如 '
+            "FinBoard git commit),冻结进 manifest/checksum 供追溯;与数据集发布"
+            "的 code_version 只是同名字段、互不校验,别拿数据集 git hash 顶替\n"
+            '- "initial_capital"*: 100000-500000 数字\n'
+            '- "requested_by"*: 归属人(如 user:xxx / agent:mcp)\n'
+            '- "actor_type": "human"(固定;LLM 不能触发运行)\n'
+            "校验失败返回 invalid_argument 并附原因(复用 ResearchRunQueueIn "
+            "schema)。入队预检(#186):universe 候选池为空秒级 invalid_argument,"
+            "错误附各过滤条件排除统计与缺失字段名。"
         ),
     )
     async def _queue(

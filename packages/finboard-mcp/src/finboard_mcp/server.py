@@ -88,7 +88,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   single_shot|multi_period,#183)。入队预检(#186):queue 与 backtest_run
   (strategy_spec 形态)入队时对主数据发布做 universe 候选池非空校验,
   空池秒级 invalid_argument(不再等执行期跑完后报泛化错误),错误信息附
-  各过滤条件的排除统计与缺失字段名(如 list_date)。
+  各过滤条件的排除统计与缺失字段名(如 list_date)。run_queue payload 模板与
+  各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
+  manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。
 - finboard.memory.*(7) —— 研究记忆:remember / list / get / forget / correct
   / confirm / archive(跨会话长期上下文,操作 research_memories 独立表)
 - 数据查询(9,✅ #124):instrument list/get/search、dataset_release list/get、
@@ -105,12 +107,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   delist_date / average_amount / ST 标记 / required_data_fields / ranking.field)
   的存在性 warning 与候选池空池预览(total/included/排除统计/缺失字段),
   写策略与入队前先看它,避免「list_date 全 null → 全排除」式空转。
-- 回测(7,✅ #127 + #172 + #173 + #174 + #175 + #183 + #184 + #189):backtest_strategy_list(输出
+- 回测(7,✅ #127 + #172 + #173 + #174 + #175 + #183 + #184 + #189 + #190):backtest_strategy_list(输出
   builtin_strategies 事件驱动策略+参数 schema 与 published_specs 已发布规格
   列表,含状态/版本数/执行入口提示)、backtest_run 双形态——(1) strategy 形态:
   默认小规模同步运行(返回 metrics/equity/fills;equity_mode=summary 默认降采样,full
   返回完整曲线;selection.inputs_mode 支持 research_db(默认)/bars(纯价格因子,
-  不要求 daily_metrics)/snapshot(snapshot_ids 冻结快照观测));issue #189:run_async=true
+  不要求 daily_metrics)/snapshot(snapshot_ids 冻结快照观测);selection.factor_version
+  仅支持 "v1"(选股规则版本),不要传特征快照的 framework_version("v2",那是快照
+  schema 版本,不同命名空间));issue #189:run_async=true
   强制入队 kind=backtest_run 后台任务返回 job_id(异步执行,结果用 finboard_job_get
   轮询 result_ref=str(run_id) 后 finboard_backtest_history_get 查询),省略 run_async 时
   按估算工作量(标的不数 x 交易日)自动切换,≥ 阈值 backtest_auto_async_symbol_days
@@ -132,7 +136,8 @@ FinBoard 研究 MCP —— 量化研究工具集
   backtest_grid_submit(写,批量参数网格:一次提交 N 组参数 → N 个 backtest_run
   后台任务,展开/上限/校验后同一事务落库,返回 grid_id + job 指针)、
   backtest_grid_get(只读,聚合对比表:指标矩阵 + 排名/最优标注 + 失败清单,
-  equity 复用 summary 降采样)。
+  equity_mode=none 默认只给 equity_point_count 不返回曲线,显式
+  summary/full 才返回,对比择优默认响应最轻)。
 - 模拟盘(21,✅ #127+#139):sim_account list/get/create(写)、
   sim_session list/get/create(写)/start/pause/stop/archive(写)/reset(写)、
   sim_decision_submit(写,结构化目标仓位 → 生成订单,不直接创建订单)、

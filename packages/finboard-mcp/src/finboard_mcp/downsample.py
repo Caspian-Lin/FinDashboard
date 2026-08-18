@@ -1,8 +1,9 @@
 """MCP 工具返回体积控制:equity 曲线降采样(issue #172)。
 
-``summary`` 模式默认返回体积可控的 equity 曲线:首末点必保留、时序单调、
-点数不超过上限;``full`` 模式返回与现状完全一致的全量数据。降采样是纯
-展示层变换,不修改落库数据(``backtest_runs`` JSON 列仍存全量)。
+``none`` 模式不返回 equity 曲线(默认,供网格对比表使用,只保留指标矩阵 +
+排名);``summary`` 模式默认返回体积可控的 equity 曲线:首末点必保留、
+时序单调、点数不超过上限;``full`` 模式返回与现状完全一致的全量数据。降采样
+是纯展示层变换,不修改落库数据(``backtest_runs`` JSON 列仍存全量)。
 """
 
 from __future__ import annotations
@@ -35,16 +36,22 @@ def apply_equity_mode(
     equity_mode: str,
     max_points: int,
 ) -> list[dict[str, Any]]:
-    """按 ``equity_mode`` 应用降采样(full 原样返回)。"""
+    """按 ``equity_mode`` 应用降采样(full 原样返回;none 返回空)。"""
     if equity_mode == "full":
         return list(points)
+    if equity_mode == "none":
+        return []
     return downsample_equity(points, max_points)
 
 
 def resolve_equity_mode(value: str) -> str:
-    """校验 ``equity_mode`` 取值;非法值抛 ``ValueError``(调用方映射错误)。"""
-    if value not in {"summary", "full"}:
-        raise ValueError(f"equity_mode 必须是 summary 或 full,收到: {value!r}")
+    """校验 ``equity_mode`` 取值;非法值抛 ``ValueError``(调用方映射错误)。
+
+    ``none`` 表示不返回 equity 曲线(默认,体积最小);``summary`` 降采样到
+    ``max_points`` 个关键点;``full`` 返回完整曲线。
+    """
+    if value not in {"none", "summary", "full"}:
+        raise ValueError(f"equity_mode 必须是 none/summary/full,收到: {value!r}")
     return value
 
 
