@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -344,6 +344,164 @@ class TestBacktestRun:
         assert env.status == "error"
         assert env.error is not None
         assert env.error.kind == "invalid_argument"
+
+
+# ---------------------------------------------------------------------------
+# 策略形态异步化(issue #189):自动切换判定 + 入队返回 job_id
+# ---------------------------------------------------------------------------
+
+
+class TestBacktestRunAsync:
+    def test_estimate_symbol_days(self) -> None:
+        from finboard_mcp.tools.backtest import _estimate_symbol_days
+
+        # 半年(2024-01-01..2024-06-30 ≈ 130 个交易日)x 1 标的
+        est = _estimate_symbol_days(["000001"], "2024-01-01", "2024-06-30")
+        assert 120 <= est <= 140
+        # 2 标的大约线性翻倍
+        est2 = _estimate_symbol_days(
+            ["000001", "000002"], "2024-01-01", "2024-06-30"
+        )
+        assert est2 == 2 * est
+        # 非法日期不抛,按 0 处理(调用方据 0 永不算达标)
+        assert _estimate_symbol_days(["000001"], "bad-date", "2024-01-01") == 0
+
+    def test_resolve_async_mode(self) -> None:
+        from finboard_mcp.tools.backtest import _resolve_async_mode
+
+        # 显式强制:run_async=true / false 覆盖自动判定
+        explicit = _resolve_async_mode(
+            True, 0, ["000001"], "2024-01-01", "2024-06-30"
+        )
+        assert explicit.use_async is True
+        assert explicit.reason == "explicit"
+        forced_sync = _resolve_async_mode(
+            False, 10**9, ["000001"], "2024-01-01", "2024-06-30"
+        )
+        assert forced_sync.use_async is False
+        assert forced_sync.reason == "sync_explicit"
+        # 阈值 0 = 关闭自动切换,省略 run_async 时恒同步
+        disabled = _resolve_async_mode(
+            None, 0, ["000001"], "2024-01-01", "2024-06-30"
+        )
+        assert disabled.use_async is False
+        assert disabled.reason == "sync_below_threshold"
+        # 阈值 1 → 任意规模自动异步
+        auto = _resolve_async_mode(None, 1, ["000001"], "2024-01-01", "2024-06-30")
+        assert auto.use_async is True
+        assert auto.reason == "auto_threshold"
+        assert auto.symbol_days_estimate > 0
+        # 阈值远大于估算 → 保持同步(小规模行为不变)
+        under = _resolve_async_mode(
+            None, 10**9, ["000001"], "2024-01-01", "2024-06-30"
+        )
+        assert under.use_async is False
+        assert under.reason == "sync_below_threshold"
+
+    async def test_run_async_true_enqueues_job_and_skips_engine(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        import finboard_app.strategies as strategies_mod
+        from finboard_persistence import BackgroundJobRepository
+
+        app = _make_app()
+        session = _get_session(app)
+        row = SimpleNamespace(job_id="BJ-189abc", status="queued")
+        create_or_get = AsyncMock(return_value=(row, True))
+        monkeypatch.setattr(BackgroundJobRepository, "create_or_get", create_or_get)
+
+        def _engine_should_not_run(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("异步路径不得进入同步引擎")
+
+        monkeypatch.setattr(strategies_mod, "create_strategy", _engine_should_not_run)
+
+        env = await backtest_tools.backtest_run(
+            app,
+            strategy="ma_cross",
+            symbols=["000001.SZ", "000002.SZ"],
+            start="2024-01-01",
+            end="2025-12-31",
+            capital=Decimal("200000"),
+            benchmark_symbol="000300.SH",
+            run_async=True,
+        )
+        assert env.status == "ok", env.error
+        data = env.data
+        assert data["job_id"] == "BJ-189abc"
+        assert data["status"] == "queued"
+        assert data["created"] is True
+        assert data["async_mode"] == "explicit"
+        assert data["auto_async_threshold"] == 15000
+        assert data["idempotency_key"].startswith("backtest:ma_cross:")
+        assert "finboard_job_get" in data["execution_path"]
+        session.commit.assert_awaited()
+
+        # payload 与 REST /api/backtest/run 同形:{request, provider_name}
+        assert create_or_get.await_count == 1
+        call = create_or_get.await_args
+        assert call is not None
+        kwargs = call.kwargs
+        assert kwargs["kind"] == "backtest_run"
+        assert kwargs["queue"] == "data"
+        assert kwargs["requested_by"] == "agent:mcp:backtest_run"
+        request: dict[str, Any] = kwargs["payload"]["request"]
+        assert request["strategy"] == "ma_cross"
+        assert request["symbols"] == ["000001.SZ", "000002.SZ"]
+        # benchmark_symbol 透传为 BacktestRunRequest.benchmark(issue #184 语义)
+        assert request["benchmark"]["symbol"] == "000300.SH"
+        assert request["benchmark"]["equal_weight_universe"] is True
+        assert request["params"]["long_window"] == 20  # 参数校验后展开默认值
+
+    async def test_run_async_invalid_params_fails_fast(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from finboard_persistence import BackgroundJobRepository
+
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "create_or_get",
+            lambda self, **kw: _async_return((SimpleNamespace(job_id="BJ-x", status="queued"), True)),
+        )
+        env = await backtest_tools.backtest_run(
+            app,
+            strategy="ma_cross",
+            symbols=["000001"],
+            start="2024-01-01",
+            end="2024-06-30",
+            params={"short_window": -5, "long_window": "nope"},
+            run_async=True,
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_run_async_conflict_maps_to_conflict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from sqlalchemy.exc import IntegrityError
+
+        from finboard_persistence import BackgroundJobRepository
+
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "create_or_get",
+            AsyncMock(side_effect=IntegrityError("stmt", {}, Exception("dup"))),
+        )
+        env = await backtest_tools.backtest_run(
+            app,
+            strategy="ma_cross",
+            symbols=["000001"],
+            start="2024-01-01",
+            end="2024-06-30",
+            run_async=True,
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "conflict"
 
 
 # ---------------------------------------------------------------------------

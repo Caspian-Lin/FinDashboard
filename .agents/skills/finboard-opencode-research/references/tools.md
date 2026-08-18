@@ -569,8 +569,16 @@ research_run 管线轻路由(#174)。
 
 ### finboard_backtest_run **[写]**
 双形态(二选一,互斥,同时给出报 `invalid_argument`):
-- **形态 1(strategy)**:同步事件驱动回测,返回 metrics/equity/fills 并落库。
-  纸面撮合,**不发真实订单**。
+- **形态 1(strategy)**:事件驱动回测(纸面撮合,**不发真实订单**),默认同步
+  返回 metrics/equity/fills 并落库。**同步形态只适用于小规模**(数只标的 x 短
+  区间,总工作量 ≲ 阈值);大任务必须异步,否则 MCP 客户端会 30s 超时后响应
+  丢失(服务端继续跑完落库,只能事后查 history)。**issue #189**:
+  `run_async: bool | None = None`——`true` 强制入队 `kind=backtest_run` 后台
+  任务返回 job_id、`false` 强制同步、省略时按估算工作量「标的不数 x 交易日」
+  自动切换(≥ `backtest_auto_async_symbol_days`(settings,默认 15000,0=关闭
+  自动切换)即异步)。异步任务用 `finboard_job_get(job_id)` 轮询:成功后
+  `result_ref=str(run_id)`,再用 `finboard_backtest_history_get(run_id)` 查完整
+  结果。`async_mode` 返回 explicit / auto_threshold 便于核对决策。
   - 参数:`strategy: str`、`symbols: list[str]`、`start: str`、`end: str`、
     `capital: str = "100000"`、`adjust: str = "qfq"`、`params: dict`、
     `selection: dict`、`commission_rate: str`、`commission_min: str`、
@@ -580,7 +588,9 @@ research_run 管线轻路由(#174)。
     `benchmark_return`/`excess_return`;不传则用等权候选池基准;基准缺失时
     `benchmark_return`/`excess_return` 为 null)、
     `equity_mode: str = "summary"`(summary 降采样到 max_points 个关键点,首末
-    点保留;full 返回完整曲线)、`max_points: int = 200`
+    点保留;full 返回完整曲线)、`max_points: int = 200`、
+    `run_async: bool | None = None`(issue #189)、
+    `requested_by: str | None = None`(异步任务归属,默认 agent:mcp:backtest_run)
   - `selection.inputs_mode`(#173):
     - `research_db`(默认):从 research 数据表读 profile/daily_metrics/
       financial_indicators/industry_memberships
@@ -590,7 +600,9 @@ research_run 管线轻路由(#174)。
     - `snapshot`:因子值直接来自冻结 FeatureSnapshot,需 `snapshot_ids:
       list[str]`;观测按 available_at <= decision_at 过滤
   - 返回:`{run_id, metrics, equity_curve, equity_point_count, fills, summary,
-    selection_snapshots(snapshot 含 warnings 降级提示), ...}`
+    selection_snapshots(snapshot 含 warnings 降级提示), ...}`(同步);
+    异步返回 `{job_id, status, created, idempotency_key, async_mode,
+    symbol_days_estimate, auto_async_threshold, execution_path}`
 - **形态 2(strategy_spec)**:按已发布规格路由入队 research_run 管线(issue
   #174),不阻塞等待完成。
   - 参数:`strategy_spec: {strategy_id: str, version: int}`、
@@ -614,7 +626,8 @@ research_run 管线轻路由(#174)。
     无基准行情时的兜底
 - 错误:`invalid_argument`(互斥 / 规格不存在 / 未发布 / 参数校验失败 /
   equity_mode 非法 / snapshot 模式缺 snapshot_ids)、`permission_denied`
-  (只读模式)、`unavailable`(数据源连接错误)
+  (只读模式)、`conflict`(异步重复 idempotency_key)、`unavailable`
+  (同步数据源连接错误;异步任务的数据源失败在 job 的 error_code/error_summary)
 
 ### finboard_backtest_history_list(只读)
 列出最近回测历史记录(摘要,不含完整 equity/fills)。
