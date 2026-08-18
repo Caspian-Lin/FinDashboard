@@ -16,3 +16,4 @@
 - [Issue #186:universe 预检与候选池诊断](issue-186-universe-precheck.md) — 静态预览只对确定性元数据判空(价格/特征字段只 warning 不误报);入队空池秒级失败;enqueue 创建路径 updated_at 懒加载 MissingGreenlet 已顺带修复
 - [Issue #187:冻结发布多数据集联合发布](issue-187-joined-releases-factor-snapshot.md) — daily_metrics/financial_indicators 从 research 表冻结 + 联合 bars 产出基本面因子快照;market_cap 须注册 catalog 因子;测试须显式 volatility_windows、financial report_period 落区间、daily 写满交易日
 - [Issue #188:research_run 分阶段进度上报](issue-188-research-run-stage-progress.md) — progress total 递增自修正(worker 只增不减)+ phase 命名 research_run:<stage>;单决策 total=13 精确
+- [Issue #189:backtest_run strategy 形态异步化](issue-189-backtest-async.md) — run_async 命名(async 保留字);工作量=标的不数x交易日,阈值 default 15000(≈10ms/段);异步 payload/幂等键与 REST 同口径
