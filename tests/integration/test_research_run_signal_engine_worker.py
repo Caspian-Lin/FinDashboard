@@ -53,6 +53,7 @@ from finboard_backtest.strategy_spec.contracts import (
     SignalRules,
 )
 from finboard_data.factor_lab import FeatureObservation
+from finboard_data.releases import ReleaseDatasetKind
 from finboard_persistence import (
     BackgroundJobRepository,
     ResearchRunRepository,
@@ -153,6 +154,7 @@ class _StubRelease:
     version: str = "v1"
     release_checksum: str = "c" * 64
     is_usable: bool = True
+    dataset_kind: object | None = ReleaseDatasetKind.BARS
 
 
 @dataclass

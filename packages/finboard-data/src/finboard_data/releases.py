@@ -22,16 +22,18 @@ import re
 import shutil
 import tempfile
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from finboard_data.cache import CacheMetadata, ParquetCache
 from finboard_data.quality import BarQualityChecker
+from finboard_data.research import DailySecurityMetrics, FinancialIndicator
 from finboard_data.trading_calendar import trading_days as _trading_days
 from finboard_shared.instruments import ASSET_METADATA_VERSION, DatasetManifest
 from finboard_shared.models import Bar, Symbol
@@ -55,6 +57,68 @@ RELEASE_FIELDS = (
     "close",
     "volume",
     "amount",
+)
+
+# issue #187:研究数据发布的数据集类型。除价格 bars 外,daily_metrics
+# (每日估值/流动性截面)与 financial_indicators(财务公告修订)也支持冻结发布,
+# 供因子快照从联合 release 取数(解锁 pb/市值/换手/ROE 等 signal_eligible 因子)。
+class ReleaseDatasetKind(StrEnum):
+    """一个冻结发布的数据集类型。"""
+
+    BARS = "bars"
+    DAILY_METRICS = "daily_metrics"
+    FINANCIAL_INDICATORS = "financial_indicators"
+
+
+RELEASE_KINDS = frozenset(kind.value for kind in ReleaseDatasetKind)
+
+# 各数据集类型的字段白名单(fields 只能是白名单子集)。列名与
+# ``research_daily_metrics`` / ``research_financial_indicators`` 表一致,
+# 数据来源是 research_data_sync(#171)摄取的研究数据。
+DAILY_METRICS_FIELDS = (
+    "trade_date",
+    "close",
+    "turnover_rate",
+    "turnover_rate_free",
+    "volume_ratio",
+    "pe",
+    "pe_ttm",
+    "pb",
+    "ps",
+    "ps_ttm",
+    "dividend_yield",
+    "dividend_yield_ttm",
+    "total_shares",
+    "float_shares",
+    "free_shares",
+    "total_market_cap",
+    "circulating_market_cap",
+    "limit_status",
+)
+FINANCIAL_INDICATORS_FIELDS = (
+    "announcement_date",
+    "report_period",
+    "update_flag",
+    "eps",
+    "diluted_eps",
+    "book_value_per_share",
+    "operating_cash_flow_per_share",
+    "return_on_equity",
+    "weighted_return_on_equity",
+    "gross_profit_margin",
+    "net_profit_margin",
+    "debt_to_assets",
+    "revenue_yoy",
+    "net_profit_yoy",
+    "operating_cash_flow_yoy",
+)
+
+# 研究数据冻结字段白名单:symbol 单独成列,available_at/observed_at/source
+# 属于时点化必需元数据,不参与用户声明的 fields。
+RESEARCH_RELEASE_METADATA_FIELDS = (
+    "available_at",
+    "observed_at",
+    "source",
 )
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -442,6 +506,7 @@ class DatasetReleaseSpec:
     period: BarPeriod = BarPeriod.D1
     adjustment: str = "qfq"
     fields: tuple[str, ...] = RELEASE_FIELDS
+    dataset_kind: ReleaseDatasetKind = ReleaseDatasetKind.BARS
     required_capabilities: tuple[str, ...] = (
         InstrumentType.STOCK.value,
         f"etf:{EtfCategory.INDEX.value}",
@@ -477,15 +542,27 @@ class DatasetReleaseSpec:
             raise ValueError("fields 不能为空")
         if len(self.fields) != len(set(self.fields)):
             raise ValueError("fields 不能重复")
-        unknown_fields = set(self.fields) - set(RELEASE_FIELDS)
+        unknown_fields = set(self.fields) - _fields_whitelist(self.dataset_kind)
         if unknown_fields:
-            raise ValueError(f"fields 包含未冻结字段: {sorted(unknown_fields)}")
+            raise ValueError(
+                f"{self.dataset_kind.value} 发布 fields 包含未冻结字段: "
+                f"{sorted(unknown_fields)}"
+            )
         if not (Decimal("0") < self.minimum_symbol_coverage <= Decimal("1")):
             raise ValueError("minimum_symbol_coverage 必须落在 (0, 1]")
         if not (Decimal("0") < self.minimum_release_coverage <= Decimal("1")):
             raise ValueError("minimum_release_coverage 必须落在 (0, 1]")
         if not (Decimal("0") <= self.max_anomaly_ratio <= Decimal("1")):
             raise ValueError("max_anomaly_ratio 必须落在 [0, 1]")
+
+
+def _fields_whitelist(kind: ReleaseDatasetKind) -> frozenset[str]:
+    """按数据集类型返回冻结字段白名单。"""
+    if kind is ReleaseDatasetKind.DAILY_METRICS:
+        return frozenset(DAILY_METRICS_FIELDS)
+    if kind is ReleaseDatasetKind.FINANCIAL_INDICATORS:
+        return frozenset(FINANCIAL_INDICATORS_FIELDS)
+    return frozenset(RELEASE_FIELDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -703,6 +780,7 @@ class ResearchDatasetRelease:
     capabilities: tuple[AssetCapability, ...]
     quality_status: DatasetQualityStatus
     quality_report: dict[str, object]
+    dataset_kind: ReleaseDatasetKind = ReleaseDatasetKind.BARS
     known_limitations: tuple[str, ...] = ()
     storage_uri: str = ""
     metadata_version: str = ASSET_METADATA_VERSION
@@ -787,6 +865,7 @@ class ResearchDatasetRelease:
             "period": self.period.value,
             "adjustment": self.adjustment,
             "fields": list(self.fields),
+            "dataset_kind": self.dataset_kind.value,
             "availability_rules": [
                 {"dataset": dataset, "rule": rule} for dataset, rule in self.availability_rules
             ],
@@ -819,6 +898,9 @@ class ResearchDatasetRelease:
             period=BarPeriod(str(raw["period"])),
             adjustment=str(raw["adjustment"]),
             fields=tuple(str(item) for item in cast(list[object], raw["fields"])),
+            dataset_kind=ReleaseDatasetKind(
+                str(raw.get("dataset_kind", ReleaseDatasetKind.BARS.value))
+            ),
             availability_rules=tuple(
                 (str(item["dataset"]), str(item["rule"])) for item in availability_raw
             ),
@@ -851,6 +933,21 @@ class _BarAudit:
 
 
 @dataclass(frozen=True, slots=True)
+class _ResearchAudit:
+    """研究数据(非 bars)逐标的冻结审计。"""
+
+    start_date: date
+    end_date: date
+    expected_sessions: int
+    missing_sessions: int
+    record_count: int
+    field_null_counts: dict[str, int]
+    coverage_pct: Decimal
+    category: str
+    issues: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
 class PointInTimeBar:
     """带机器可判定 ``available_at`` 的冻结 Bar 视图。"""
 
@@ -867,6 +964,31 @@ class PointInTimePrice:
     available_at: datetime
 
 
+@runtime_checkable
+class ResearchDataReleaseSource(Protocol):
+    """按数据集类型批量读取研究数据记录的注入点(发布冻结输入)。"""
+
+    async def daily_metrics(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[DailySecurityMetrics]]:
+        """返回 {symbol: [PIT 时点化的每日指标记录]},按 available_at 升序。"""
+        ...
+
+    async def financial_indicators(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[FinancialIndicator]]:
+        """返回 {symbol: [PIT 时点化的财务公告修订]},按 available_at 升序。"""
+        ...
+
+
 class FrozenDatasetReleaseBuilder:
     """把可变 Parquet 缓存原子冻结为不可变研究发布。"""
 
@@ -876,6 +998,7 @@ class FrozenDatasetReleaseBuilder:
         cache_dir: str | Path,
         release_root: str | Path,
         max_concurrency: int = 8,
+        research_source: ResearchDataReleaseSource | None = None,
     ) -> None:
         self._cache_dir = Path(cache_dir).resolve()
         self._release_root = Path(release_root).resolve()
@@ -883,6 +1006,13 @@ class FrozenDatasetReleaseBuilder:
         if max_concurrency < 1:
             raise ValueError("max_concurrency 必须 >= 1")
         self._max_concurrency = max_concurrency
+        self._research_source = research_source
+
+    @property
+    def research_source(self) -> ResearchDataReleaseSource | None:
+        """研究数据发布注入点(bars 发布为 None)。"""
+
+        return self._research_source
 
     async def publish(
         self,
@@ -899,6 +1029,15 @@ class FrozenDatasetReleaseBuilder:
         codes = [item.code for item in instruments]
         if len(codes) != len(set(codes)):
             raise DatasetReleaseQualityError("发布标的代码重复")
+        if spec.dataset_kind is not ReleaseDatasetKind.BARS:
+            if self._research_source is None:
+                raise DatasetReleaseQualityError(
+                    f"{spec.dataset_kind.value} 发布缺少研究数据源注入"
+                )
+            if spec.adjustment != "none" and spec.period is not BarPeriod.D1:
+                raise DatasetReleaseQualityError(
+                    "研究数据发布不支持 period/adjustment(非行情数据集)"
+                )
 
         final_dir = self._release_root / spec.release_id
         if final_dir.exists():
@@ -925,12 +1064,18 @@ class FrozenDatasetReleaseBuilder:
 
             async def _freeze_one(instrument: ReleaseInstrumentSpec) -> ReleasedInstrument:
                 async with semaphore:
-                    return await self._freeze_instrument(
+                    if spec.dataset_kind is ReleaseDatasetKind.BARS:
+                        return await self._freeze_bars_instrument(
+                            spec=spec,
+                            instrument=instrument,
+                            staging=staging,
+                            target_cache=target_cache,
+                            source_cache=source_cache,
+                        )
+                    return await self._freeze_research_instrument(
                         spec=spec,
                         instrument=instrument,
                         staging=staging,
-                        target_cache=target_cache,
-                        source_cache=source_cache,
                     )
 
             # 按代码排序保证输入顺序确定;并行执行后再次排序保证 manifest 稳定。
@@ -988,6 +1133,7 @@ class FrozenDatasetReleaseBuilder:
                 adjustment=spec.adjustment,
                 fields=spec.fields,
                 availability_rules=spec.availability_rules,
+                dataset_kind=spec.dataset_kind,
                 code_version=spec.code_version,
                 published_at=published_at,
                 instruments=tuple(released),
@@ -995,6 +1141,7 @@ class FrozenDatasetReleaseBuilder:
                 quality_status=quality_status,
                 quality_report={
                     "source": spec.source,
+                    "dataset_kind": spec.dataset_kind.value,
                     "period": spec.period.value,
                     "adjustment": spec.adjustment,
                     "fields": list(spec.fields),
@@ -1064,107 +1211,51 @@ class FrozenDatasetReleaseBuilder:
                 await asyncio.sleep(0.05 * (attempt + 1))
         raise RuntimeError("发布目录原子改名未完成")
 
-    async def _freeze_instrument(
+    async def _freeze_research_instrument(
         self,
         *,
         spec: DatasetReleaseSpec,
         instrument: ReleaseInstrumentSpec,
         staging: Path,
-        target_cache: ParquetCache,
-        source_cache: ParquetCache,
     ) -> ReleasedInstrument:
-        source_path = _cache_path(
-            self._cache_dir,
-            instrument.code,
-            spec.period,
-            spec.adjustment,
-        )
-        if not source_path.exists() or source_path.is_symlink():
-            raise DatasetReleaseQualityError(f"{instrument.code}:source_artifact_missing")
-        before = source_path.stat()
-        try:
-            bars = await source_cache.read(
-                Symbol(code=instrument.code, market=instrument.market),
-                spec.period,
-                spec.adjustment,
-            )
-        except Exception as exc:
+        """从注入的研究数据源冻结非 bars 数据集(daily_metrics / financial_indicators)。"""
+
+        kinds_dir = staging / spec.dataset_kind.value
+        kinds_dir.mkdir(parents=True, exist_ok=True)
+        records = await self._load_research_records(spec, instrument)
+        if not records:
             raise DatasetReleaseQualityError(
-                f"{instrument.code}:source_read_failed:{type(exc).__name__}"
-            ) from exc
-        # 读取缓存元数据(包含已查询过的合法无 Bar 区间,如停牌/上市前)。
-        # 与批量拉取的日期命中逻辑一致(issue #99):只要某交易日落在
-        # covered_ranges 或 Bar 首尾区间内,就算"已成功查询过",不重复
-        # 请求也不在发布审计中计为 missing。
-        try:
-            metadata = await source_cache.metadata_for(
-                Symbol(code=instrument.code, market=instrument.market),
-                spec.period,
-                spec.adjustment,
+                f"{instrument.code}:no_{spec.dataset_kind.value}_records_in_release_range"
             )
-        except Exception as exc:
-            raise DatasetReleaseQualityError(
-                f"{instrument.code}:source_metadata_failed:{type(exc).__name__}"
-            ) from exc
-        after = source_path.stat()
-        if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
-            raise DatasetReleaseQualityError(f"{instrument.code}:source_changed_during_release")
-        frozen_bars = [
-            bar for bar in bars if spec.start_date <= bar.timestamp.date() <= spec.end_date
-        ]
-        if not frozen_bars:
-            raise DatasetReleaseQualityError(f"{instrument.code}:no_bars_in_release_range")
-        known_sources = {bar.source for bar in frozen_bars if bar.source}
-        if not known_sources:
-            raise DatasetReleaseQualityError(f"{instrument.code}:source_metadata_missing")
-        if spec.source != "mixed" and known_sources != {spec.source}:
-            raise DatasetReleaseQualityError(
-                f"{instrument.code}:source_mismatch:"
-                f"cache={','.join(sorted(known_sources))},release={spec.source}"
-            )
-        audit = _audit_bars(
-            frozen_bars,
+        audit = _audit_research_records(
+            records,
             instrument=instrument,
             spec=spec,
-            metadata=metadata,
         )
-        total_bars = len(frozen_bars)
-        anomaly_ratio = (
-            Decimal(audit.anomaly_count) / Decimal(total_bars) if total_bars > 0 else Decimal("1")
-        )
-        ready = (
-            anomaly_ratio <= spec.max_anomaly_ratio
-            and audit.coverage_pct >= spec.minimum_symbol_coverage
-            and instrument.metadata_complete
-            and set(instrument.required_event_types).issubset(instrument.present_event_types)
-        )
-        issues = list(audit.issues)
-        if anomaly_ratio > spec.max_anomaly_ratio:
-            issues.append(f"anomaly_ratio:{anomaly_ratio:.4f}>{spec.max_anomaly_ratio}")
-        if not instrument.metadata_complete:
-            issues.append("metadata_incomplete")
-        missing_events = sorted(
-            set(instrument.required_event_types) - set(instrument.present_event_types)
-        )
-        if missing_events:
-            issues.append(f"missing_events:{','.join(missing_events)}")
-        if audit.coverage_pct < spec.minimum_symbol_coverage:
-            issues.append(f"coverage:{audit.coverage_pct}<{spec.minimum_symbol_coverage}")
-
-        await target_cache.write(
-            Symbol(code=instrument.code, market=instrument.market),
-            spec.period,
-            spec.adjustment,
-            frozen_bars,
-        )
-        artifact = _cache_path(
-            staging / "bars",
-            instrument.code,
-            spec.period,
-            spec.adjustment,
+        artifact_path = f"{spec.dataset_kind.value}/{instrument.code}.parquet"
+        artifact = kinds_dir / f"{instrument.code}.parquet"
+        await asyncio.to_thread(
+            _write_research_records,
+            artifact,
+            records,
+            fields=spec.fields,
+            dataset_kind=spec.dataset_kind,
         )
         checksum = await asyncio.to_thread(_sha256_file, artifact)
-        relative = artifact.relative_to(staging).as_posix()
+        # 研究数据 quality:`all_null_fields` 只是可见 warning(财务指标字段
+        # 稀疏是常态),不阻止 ready;覆盖率与元数据完整才是硬门。与 bars 的
+        # quality_status=WARNINGS 语义一致 —— 缺失可见而非静默。
+        ready = (
+            audit.coverage_pct >= spec.minimum_symbol_coverage
+            and instrument.metadata_complete
+        )
+        issues = list(audit.issues)
+        if audit.coverage_pct < spec.minimum_symbol_coverage:
+            issues.append(
+                f"coverage:{audit.coverage_pct}<{spec.minimum_symbol_coverage}"
+            )
+        if not instrument.metadata_complete:
+            issues.append("metadata_incomplete")
         return ReleasedInstrument(
             code=instrument.code,
             name=instrument.name,
@@ -1173,21 +1264,23 @@ class FrozenDatasetReleaseBuilder:
             asset_class=instrument.asset_class,
             available_at=instrument.available_at,
             execution=instrument.execution,
-            artifact_path=relative,
+            artifact_path=artifact_path,
             artifact_checksum=checksum,
             artifact_size=artifact.stat().st_size,
-            row_count=len(frozen_bars),
+            row_count=audit.record_count,
             start_date=audit.start_date,
             end_date=audit.end_date,
             expected_sessions=audit.expected_sessions,
             missing_sessions=audit.missing_sessions,
-            suspended_sessions=audit.suspended_sessions,
-            anomaly_count=audit.anomaly_count,
+            suspended_sessions=0,
+            anomaly_count=0,
             coverage_pct=audit.coverage_pct,
             category=audit.category,
             ready=ready,
             issues=tuple(issues),
-            sources=tuple(sorted(known_sources)),
+            sources=tuple(
+                sorted({str(_research_record_value(record, "source")) for record in records})
+            ),
             exchange=instrument.exchange,
             listing_board=instrument.listing_board,
             currency=instrument.currency,
@@ -1202,6 +1295,492 @@ class FrozenDatasetReleaseBuilder:
             required_event_types=instrument.required_event_types,
             name_history=instrument.name_history,
         )
+
+    async def _load_research_records(
+        self,
+        spec: DatasetReleaseSpec,
+        instrument: ReleaseInstrumentSpec,
+    ) -> list[object]:
+        """按 dataset_kind 从注入源加载一条标的的全部研究记录。"""
+        assert self._research_source is not None
+        if spec.dataset_kind is ReleaseDatasetKind.DAILY_METRICS:
+            daily_records = await self._research_source.daily_metrics(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(daily_records[instrument.code], key=_research_record_available_at)
+        if spec.dataset_kind is ReleaseDatasetKind.FINANCIAL_INDICATORS:
+            indicator_records = await self._research_source.financial_indicators(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(
+                indicator_records[instrument.code],
+                key=_research_record_available_at,
+            )
+        raise DatasetReleaseQualityError(f"不支持的发布数据集类型: {spec.dataset_kind}")
+
+    async def _freeze_bars_instrument(
+            self,
+            *,
+            spec: DatasetReleaseSpec,
+            instrument: ReleaseInstrumentSpec,
+            staging: Path,
+            target_cache: ParquetCache,
+            source_cache: ParquetCache,
+        ) -> ReleasedInstrument:
+            source_path = _cache_path(
+                self._cache_dir,
+                instrument.code,
+                spec.period,
+                spec.adjustment,
+            )
+            if not source_path.exists() or source_path.is_symlink():
+                raise DatasetReleaseQualityError(f"{instrument.code}:source_artifact_missing")
+            before = source_path.stat()
+            try:
+                bars = await source_cache.read(
+                    Symbol(code=instrument.code, market=instrument.market),
+                    spec.period,
+                    spec.adjustment,
+                )
+            except Exception as exc:
+                raise DatasetReleaseQualityError(
+                    f"{instrument.code}:source_read_failed:{type(exc).__name__}"
+                ) from exc
+            # 读取缓存元数据(包含已查询过的合法无 Bar 区间,如停牌/上市前)。
+            # 与批量拉取的日期命中逻辑一致(issue #99):只要某交易日落在
+            # covered_ranges 或 Bar 首尾区间内,就算"已成功查询过",不重复
+            # 请求也不在发布审计中计为 missing。
+            try:
+                metadata = await source_cache.metadata_for(
+                    Symbol(code=instrument.code, market=instrument.market),
+                    spec.period,
+                    spec.adjustment,
+                )
+            except Exception as exc:
+                raise DatasetReleaseQualityError(
+                    f"{instrument.code}:source_metadata_failed:{type(exc).__name__}"
+                ) from exc
+            after = source_path.stat()
+            if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+                raise DatasetReleaseQualityError(f"{instrument.code}:source_changed_during_release")
+            frozen_bars = [
+                bar for bar in bars if spec.start_date <= bar.timestamp.date() <= spec.end_date
+            ]
+            if not frozen_bars:
+                raise DatasetReleaseQualityError(f"{instrument.code}:no_bars_in_release_range")
+            known_sources = {bar.source for bar in frozen_bars if bar.source}
+            if not known_sources:
+                raise DatasetReleaseQualityError(f"{instrument.code}:source_metadata_missing")
+            if spec.source != "mixed" and known_sources != {spec.source}:
+                raise DatasetReleaseQualityError(
+                    f"{instrument.code}:source_mismatch:"
+                    f"cache={','.join(sorted(known_sources))},release={spec.source}"
+                )
+            audit = _audit_bars(
+                frozen_bars,
+                instrument=instrument,
+                spec=spec,
+                metadata=metadata,
+            )
+            total_bars = len(frozen_bars)
+            anomaly_ratio = (
+                Decimal(audit.anomaly_count) / Decimal(total_bars) if total_bars > 0 else Decimal("1")
+            )
+            ready = (
+                anomaly_ratio <= spec.max_anomaly_ratio
+                and audit.coverage_pct >= spec.minimum_symbol_coverage
+                and instrument.metadata_complete
+                and set(instrument.required_event_types).issubset(instrument.present_event_types)
+            )
+            issues = list(audit.issues)
+            if anomaly_ratio > spec.max_anomaly_ratio:
+                issues.append(f"anomaly_ratio:{anomaly_ratio:.4f}>{spec.max_anomaly_ratio}")
+            if not instrument.metadata_complete:
+                issues.append("metadata_incomplete")
+            missing_events = sorted(
+                set(instrument.required_event_types) - set(instrument.present_event_types)
+            )
+            if missing_events:
+                issues.append(f"missing_events:{','.join(missing_events)}")
+            if audit.coverage_pct < spec.minimum_symbol_coverage:
+                issues.append(f"coverage:{audit.coverage_pct}<{spec.minimum_symbol_coverage}")
+
+            await target_cache.write(
+                Symbol(code=instrument.code, market=instrument.market),
+                spec.period,
+                spec.adjustment,
+                frozen_bars,
+            )
+            artifact = _cache_path(
+                staging / "bars",
+                instrument.code,
+                spec.period,
+                spec.adjustment,
+            )
+            checksum = await asyncio.to_thread(_sha256_file, artifact)
+            relative = artifact.relative_to(staging).as_posix()
+            return ReleasedInstrument(
+                code=instrument.code,
+                name=instrument.name,
+                market=instrument.market,
+                instrument_type=instrument.instrument_type,
+                asset_class=instrument.asset_class,
+                available_at=instrument.available_at,
+                execution=instrument.execution,
+                artifact_path=relative,
+                artifact_checksum=checksum,
+                artifact_size=artifact.stat().st_size,
+                row_count=len(frozen_bars),
+                start_date=audit.start_date,
+                end_date=audit.end_date,
+                expected_sessions=audit.expected_sessions,
+                missing_sessions=audit.missing_sessions,
+                suspended_sessions=audit.suspended_sessions,
+                anomaly_count=audit.anomaly_count,
+                coverage_pct=audit.coverage_pct,
+                category=audit.category,
+                ready=ready,
+                issues=tuple(issues),
+                sources=tuple(sorted(known_sources)),
+                exchange=instrument.exchange,
+                listing_board=instrument.listing_board,
+                currency=instrument.currency,
+                etf_category=instrument.etf_category,
+                list_date=instrument.list_date,
+                delist_date=instrument.delist_date,
+                industry=instrument.industry,
+                status=instrument.status,
+                metadata_complete=instrument.metadata_complete,
+                lifecycle_events=instrument.lifecycle_events,
+                present_event_types=instrument.present_event_types,
+                required_event_types=instrument.required_event_types,
+                name_history=instrument.name_history,
+            )
+
+
+
+
+
+def _audit_research_records(
+    records: list[object],
+    *,
+    instrument: ReleaseInstrumentSpec,
+    spec: DatasetReleaseSpec,
+) -> _ResearchAudit:
+    """对研究数据记录做覆盖审计与缺失字段统计。"""
+    available_at_values = [
+        _research_record_value(item, "available_at") for item in records
+    ]
+    dates = [
+        (
+            value.date()
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(str(value)).date()
+        )
+        for value in available_at_values
+    ]
+    start_date = min(dates)
+    end_date = max(dates)
+    effective_list = instrument.list_date or start_date
+    effective_delist = instrument.delist_date or end_date
+
+    if spec.dataset_kind is ReleaseDatasetKind.DAILY_METRICS:
+        expected_dates = _trading_days(
+            max(spec.start_date, effective_list),
+            min(spec.end_date, effective_delist),
+        )
+        covered_dates = {
+            _research_record_date(item, "trade_date") for item in records
+        }
+        expected_sessions = len(expected_dates)
+        missing_sessions = len(expected_dates - covered_dates)
+        coverage = (
+            Decimal(len(expected_dates & covered_dates)) / Decimal(expected_sessions)
+            if expected_sessions > 0
+            else Decimal("1")
+        )
+        if instrument.delist_date is not None and instrument.delist_date <= spec.end_date:
+            category = "delisted"
+        elif instrument.list_date is not None and instrument.list_date > spec.start_date:
+            category = "short_history"
+        elif missing_sessions:
+            category = "gaps"
+        else:
+            category = "full"
+    else:
+        # financial_indicators:按报告期(quarter)覆盖,不按交易日。
+        expected_dates = _quarter_end_dates(
+            max(spec.start_date, effective_list),
+            min(spec.end_date, effective_delist),
+        )
+        covered_dates = {
+            _research_record_date(item, "report_period") for item in records
+        }
+        expected_sessions = len(expected_dates)
+        missing_sessions = len(expected_dates - covered_dates)
+        coverage = (
+            Decimal(len(expected_dates & covered_dates)) / Decimal(expected_sessions)
+            if expected_sessions > 0
+            else Decimal("1")
+        )
+        category = "full" if not missing_sessions else "gaps"
+
+    field_names = set(spec.fields) - set(RESEARCH_RELEASE_METADATA_FIELDS)
+    field_null_counts: dict[str, int] = {}
+    for field_name in sorted(field_names):
+        field_null_counts[field_name] = sum(
+            1
+            for item in records
+            if _research_record_value(item, field_name) is None
+        )
+    issues: list[str] = []
+    if missing_sessions:
+        issues.append(f"missing_sessions:{missing_sessions}")
+    stale_fields = [
+        field_name
+        for field_name, null_count in field_null_counts.items()
+        if null_count == len(records)
+    ]
+    if stale_fields:
+        issues.append(f"all_null_fields:{','.join(stale_fields)}")
+    return _ResearchAudit(
+        start_date=start_date,
+        end_date=end_date,
+        expected_sessions=expected_sessions,
+        missing_sessions=missing_sessions,
+        record_count=len(records),
+        field_null_counts=field_null_counts,
+        coverage_pct=coverage,
+        category=category,
+        issues=tuple(issues),
+    )
+
+
+def _quarter_end_dates(start: date, end: date) -> set[date]:
+    """返回 ``[start, end]`` 内的 A 股季度报告期末日期(3/31 6/30 9/30 12/31)。"""
+    result: set[date] = set()
+    year, month = start.year, 3
+    while True:
+        cursor = date(year, month, _QUARTER_END_DAY[month])
+        if cursor > end:
+            break
+        if cursor >= start:
+            result.add(cursor)
+        month += 3
+        if month > 12:
+            month = 3
+            year += 1
+    return result
+
+
+_QUARTER_END_DAY: dict[int, int] = {3: 31, 6: 30, 9: 30, 12: 31}
+
+
+def _research_record_date(item: object, field_name: str) -> date:
+    """把研究记录中的日期字段规范化为 ``date``。"""
+    value = _research_record_value(item, field_name)
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    return date.fromisoformat(str(value))
+
+
+def _research_record_value(item: object, field_name: str) -> object:
+    """从研究数据记录读取字段(DailySecurityMetrics/FinancialIndicator 或字典)。"""
+    if isinstance(item, dict):
+        return item.get(field_name)
+    return getattr(item, field_name)
+
+
+def _research_record_available_at(item: object) -> datetime:
+    value = _research_record_value(item, "available_at")
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
+
+
+def _research_value_to_scalar(value: object) -> object:
+    """把研究字段值转换为 parquet 可写标量(Decimal→float,datetime→iso)。"""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _write_research_records(
+    path: Path,
+    records: list[object],
+    *,
+    fields: tuple[str, ...],
+    dataset_kind: ReleaseDatasetKind,
+) -> None:
+    """把研究数据记录冻结为 parquet(每标的一文件,列=fields 白名单字段)。"""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    key_field = (
+        "trade_date"
+        if dataset_kind is ReleaseDatasetKind.DAILY_METRICS
+        else "report_period"
+    )
+    columns: dict[str, object] = {
+        key_field: [_research_record_date(item, key_field) for item in records],
+        "available_at": [
+            _research_value_to_scalar(_research_record_value(item, "available_at"))
+            for item in records
+        ],
+        "observed_at": [
+            _research_value_to_scalar(_research_record_value(item, "observed_at"))
+            for item in records
+        ],
+        "source": [str(_research_record_value(item, "source")) for item in records],
+    }
+    for field_name in fields:
+        if field_name in columns or field_name in RESEARCH_RELEASE_METADATA_FIELDS:
+            continue
+        columns[field_name] = [
+            _research_value_to_scalar(_research_record_value(item, field_name))
+            for item in records
+        ]
+    table = pa.table(columns)
+    pq.write_table(table, path)
+
+
+def _read_research_records(
+    path: Path,
+    *,
+    kind: ReleaseDatasetKind,
+) -> list[dict[str, object]]:
+    """读回研究数据发布 parquet,还原为记录字典(字段值已规范化)。"""
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path, use_threads=False, pre_buffer=False)
+    rows: list[dict[str, object]] = []
+    for row in table.to_pylist():
+        normalized: dict[str, object] = {}
+        for key, value in row.items():
+            if value is None:
+                normalized[key] = None
+            elif isinstance(value, (datetime, date)):
+                normalized[key] = value
+            else:
+                normalized[key] = value
+        rows.append(normalized)
+    return rows
+
+
+def _daily_metrics_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> DailySecurityMetrics:
+    """把 daily_metrics 发布行还原为领域记录(未冻结字段为 None)。"""
+    value = row.get("available_at") or row.get("observed_at")
+    available_at = _coerce_datetime(value)
+    trade_date = _coerce_date(row.get("trade_date"))
+    if trade_date is None:
+        raise DatasetReleaseQualityError("研究数据记录缺少 trade_date")
+    return DailySecurityMetrics(
+        symbol=symbol,
+        trade_date=trade_date,
+        close=_coerce_decimal(row.get("close")),
+        turnover_rate=_coerce_decimal(row.get("turnover_rate")),
+        turnover_rate_free=_coerce_decimal(row.get("turnover_rate_free")),
+        volume_ratio=_coerce_decimal(row.get("volume_ratio")),
+        pe=_coerce_decimal(row.get("pe")),
+        pe_ttm=_coerce_decimal(row.get("pe_ttm")),
+        pb=_coerce_decimal(row.get("pb")),
+        ps=_coerce_decimal(row.get("ps")),
+        ps_ttm=_coerce_decimal(row.get("ps_ttm")),
+        dividend_yield=_coerce_decimal(row.get("dividend_yield")),
+        dividend_yield_ttm=_coerce_decimal(row.get("dividend_yield_ttm")),
+        total_shares=_coerce_decimal(row.get("total_shares")),
+        float_shares=_coerce_decimal(row.get("float_shares")),
+        free_shares=_coerce_decimal(row.get("free_shares")),
+        total_market_cap=_coerce_decimal(row.get("total_market_cap")),
+        circulating_market_cap=_coerce_decimal(row.get("circulating_market_cap")),
+        limit_status=_coerce_int(row.get("limit_status")),
+        source=str(row.get("source") or ""),
+        observed_at=available_at,
+        available_at=available_at,
+    )
+
+
+def _financial_indicator_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> FinancialIndicator:
+    """把 financial_indicators 发布行还原为领域记录(未冻结字段为 None)。"""
+    value = row.get("available_at") or row.get("observed_at")
+    available_at = _coerce_datetime(value)
+    announcement_date = _coerce_date(row.get("announcement_date"))
+    report_period = _coerce_date(row.get("report_period"))
+    if announcement_date is None or report_period is None:
+        raise DatasetReleaseQualityError("研究数据记录缺少公告日或报告期")
+    return FinancialIndicator(
+        symbol=symbol,
+        announcement_date=announcement_date,
+        report_period=report_period,
+        update_flag=str(row.get("update_flag") or "") or None,
+        eps=_coerce_decimal(row.get("eps")),
+        diluted_eps=_coerce_decimal(row.get("diluted_eps")),
+        book_value_per_share=_coerce_decimal(row.get("book_value_per_share")),
+        operating_cash_flow_per_share=_coerce_decimal(
+            row.get("operating_cash_flow_per_share")
+        ),
+        return_on_equity=_coerce_decimal(row.get("return_on_equity")),
+        weighted_return_on_equity=_coerce_decimal(
+            row.get("weighted_return_on_equity")
+        ),
+        gross_profit_margin=_coerce_decimal(row.get("gross_profit_margin")),
+        net_profit_margin=_coerce_decimal(row.get("net_profit_margin")),
+        debt_to_assets=_coerce_decimal(row.get("debt_to_assets")),
+        revenue_yoy=_coerce_decimal(row.get("revenue_yoy")),
+        net_profit_yoy=_coerce_decimal(row.get("net_profit_yoy")),
+        operating_cash_flow_yoy=_coerce_decimal(row.get("operating_cash_flow_yoy")),
+        source=str(row.get("source") or ""),
+        observed_at=available_at,
+        available_at=available_at,
+    )
+
+
+def _coerce_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if value is None:
+        raise DatasetReleaseQualityError("研究数据记录缺少 available_at")
+    return datetime.fromisoformat(str(value))
+
+
+def _coerce_date(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+def _coerce_decimal(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    return Decimal(str(value))
+
+
+def _coerce_int(value: object) -> int | None:
+    if value is None:
+        return None
+    return int(str(value))
 
 
 class FrozenReleaseProvider:
@@ -1393,6 +1972,88 @@ class FrozenReleaseProvider:
             )
             for point in bars
         ]
+
+    async def fetch_daily_metrics(
+        self,
+        symbol: Symbol,
+        *,
+        start: date,
+        end: date,
+        decision_at: datetime,
+    ) -> list[DailySecurityMetrics]:
+        """读取 ``daily_metrics`` 发布的时点化每日指标记录(PIT 门控)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.DAILY_METRICS,
+            symbol,
+            start=start,
+            end=end,
+            decision_at=decision_at,
+        )
+        return [
+            _daily_metrics_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def fetch_financial_indicators(
+        self,
+        symbol: Symbol,
+        *,
+        decision_at: datetime,
+    ) -> list[FinancialIndicator]:
+        """读取 ``financial_indicators`` 发布在决策时点可见的全部公告修订。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.FINANCIAL_INDICATORS,
+            symbol,
+            start=None,
+            end=None,
+            decision_at=decision_at,
+        )
+        return [
+            _financial_indicator_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def _fetch_research_records(
+        self,
+        kind: ReleaseDatasetKind,
+        symbol: Symbol,
+        *,
+        start: date | None,
+        end: date | None,
+        decision_at: datetime,
+    ) -> list[dict[str, object]]:
+        """按 kind 读取研究数据发布记录;非对应 kind 的发布 fail-closed。"""
+        if decision_at.tzinfo is None:
+            raise ValueError("decision_at 必须带时区")
+        if self._release.dataset_kind is not kind:
+            raise ReleaseCapabilityError(
+                f"发布 {self._release.release_id} 是 {self._release.dataset_kind.value} "
+                f"数据集,不能按 {kind.value} 读取"
+            )
+        item = self._release.instrument(symbol.code)
+        artifact = await self._verified_artifact(item)
+        rows = await asyncio.to_thread(
+            _read_research_records,
+            artifact,
+            kind=kind,
+        )
+        result: list[dict[str, object]] = []
+        for row in rows:
+            available_at = _research_record_available_at(row)
+            if available_at > decision_at:
+                continue
+            if start is not None and end is not None:
+                if kind is ReleaseDatasetKind.DAILY_METRICS:
+                    record_date = _coerce_date(row.get("trade_date"))
+                else:
+                    record_date = _coerce_date(row.get("report_period"))
+                if record_date is None:
+                    raise ReleaseIntegrityError(f"{self._release.release_id} 研究记录缺少日期字段")
+                if start <= record_date <= end:
+                    result.append(row)
+            else:
+                result.append(row)
+        return result
 
 
 def load_dataset_release(release_dir: str | Path) -> ResearchDatasetRelease:
@@ -1734,6 +2395,7 @@ def _assert_same_release_identity(
         release.period,
         release.adjustment,
         release.fields,
+        release.dataset_kind.value,
         release.availability_rules,
         release.code_version,
         release.known_limitations,
@@ -1752,6 +2414,7 @@ def _assert_same_release_identity(
         spec.period,
         spec.adjustment,
         spec.fields,
+        spec.dataset_kind.value,
         spec.availability_rules,
         spec.code_version,
         spec.known_limitations,
@@ -1766,6 +2429,10 @@ def _assert_same_release_identity(
 def _release_checksum(release: ResearchDatasetRelease) -> str:
     payload = release.as_dict()
     payload["release_checksum"] = ""
+    # 向后兼容(issue #187):旧 manifest 没有 dataset_kind 字段;bars 发布
+    # 保持不含该字段的 checksum,使既有冻结发布仍可通过完整性校验。
+    if release.dataset_kind is ReleaseDatasetKind.BARS:
+        payload.pop("dataset_kind", None)
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -1823,7 +2490,10 @@ def _sha256_file(path: Path) -> str:
 
 
 __all__ = [
+    "DAILY_METRICS_FIELDS",
+    "FINANCIAL_INDICATORS_FIELDS",
     "RELEASE_FIELDS",
+    "RELEASE_KINDS",
     "RELEASE_MANIFEST_FILENAME",
     "RELEASE_SCHEMA_VERSION",
     "RESEARCH_ETF_CATALOG",
@@ -1839,10 +2509,12 @@ __all__ = [
     "PointInTimeBar",
     "PointInTimePrice",
     "ReleaseCapabilityError",
+    "ReleaseDatasetKind",
     "ReleaseInstrumentSpec",
     "ReleaseIntegrityError",
     "ReleaseLifecycleEvent",
     "ReleasedInstrument",
+    "ResearchDataReleaseSource",
     "ResearchDatasetRelease",
     "ResearchEtfCatalogEntry",
     "default_execution_metadata",

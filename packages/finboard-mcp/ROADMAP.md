@@ -310,6 +310,22 @@ broker / 账户 / 订单 / 持仓;`_INSTRUCTIONS` / Skill `SKILL.md` +
 `register_grid_tools(mcp)` 调用 + `grid.py` + 迁移 downgrade
 (`drop_table backtest_grid_runs`)即可,不影响既有回测 / 队列工具。
 
+### ✅ #187 冻结发布多数据集联合发布(已完成)
+`dataset_release_publish` 的 `release_kind` 扩为 4 值,补上研究数据冻结发布
+(工具契约已同步):
+
+- `release_kind=daily_metrics|financial_indicators`:从 `research_*` 表
+  (research_data_sync 摄取)冻结基本面/财务指标发布——字段白名单
+  (`DAILY_METRICS_FIELDS` / `FINANCIAL_INDICATORS_FIELDS`)、parquet 冻结
+  (每标的按 kind 目录)、质量门(覆盖率 + 元数据完整;`all_null_fields` 仅作
+  可见 warning)、同名 dataset 版本递增 `schema_version`。A 股校验要求
+  `source=tushare`,`adjustment` 固定 `none`。
+- 联合消费:因子快照可引用 bars 主发布 + research 发布的联合集,产出
+  pb / 市值 / 换手 / ROE 等基本面因子;`strategy_validate` 的
+  `dataset_release_ids` 可同时引用多份发布(universe 预检仍落 bars 主发布)。
+- `_INSTRUCTIONS` / Skill `tools.md` 已同步。回滚:不接受新 release_kind
+  即回退,不影响既有 bars 发布(REST/MCP 同源)。
+
 ## 扩展原则(适用于所有阶段)
 
 1. **复用现有 service / repository**,MCP 层不直接裸 SQL

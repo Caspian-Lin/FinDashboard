@@ -1072,9 +1072,12 @@ def register(mcp: MCPServer) -> None:
             "查发布详情。"
             "参数:release_id / symbols(列表)/ version / start_date / end_date / "
             "dataset_name(默认 multi_asset_daily_bars)/ release_kind"
-            "(a_share_tushare|multi_asset_mixed)/ source / adjustment(qfq|hqfq|none)/ "
+            "(a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators)/ "
+            "source / adjustment(qfq|hqfq|none;研究数据发布固定 none)/ "
             "required_capabilities(stock|bond|convertible|futures|etf:index|"
             "etf:cross_border|etf:commodity|etf:bond)。"
+            "release_kind=daily_metrics|financial_indicators 时从 research_* 表"
+            "冻结基本面/财务指标发布(issue #187),与 bars 发布联合供因子快照取数。"
             "写操作,mcp_readonly_only=true 时拒绝。"
         ),
     )

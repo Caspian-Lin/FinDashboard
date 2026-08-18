@@ -247,12 +247,17 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 数据集就无法排队研究运行。**
 - 参数:`release_id` / `symbols`(列表)/ `version` / `start_date` / `end_date` /
   `dataset_name?`(默认 multi_asset_daily_bars)/ `release_kind?`
-  (a_share_tushare|multi_asset_mixed,默认 a_share_tushare)/ `source?` /
-  `adjustment?`(qfq|hqfq|none,默认 qfq)/ `required_capabilities?`
+  (a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators,
+  默认 a_share_tushare)/ `source?` /
+  `adjustment?`(qfq|hqfq|none,默认 qfq;daily_metrics/financial_indicators 固定 none)/
+  `required_capabilities?`
   (stock|bond|convertible|futures|etf:index|etf:cross_border|etf:commodity|etf:bond)
 - 返回:`JobOut`(`kind=dataset_publish`)
 - 错误:`invalid_argument`(schema 校验:release_id/version pattern、symbols 非空不重复、
   日期顺序)/ `conflict`(幂等冲突)
+- `release_kind=daily_metrics|financial_indicators` 时从 research_* 表冻结
+  基本面/财务指标发布(issue #187),与 bars 发布(dataset_release_ids 含 bars 主发布 +
+  research 发布)联合供因子快照取数;schedule(data_sync)与发布任务报告缺失字段统计。
 
 ### finboard_data_config_get(只读)
 查询定时任务调度器配置(读 `data_config.json`)。

@@ -430,6 +430,7 @@ async def list_dataset_releases(
             end_date=release.end_date,
             period=release.period.value,
             adjustment=release.adjustment,
+            dataset_kind=release.dataset_kind.value,
             code_version=release.code_version,
             published_at=release.published_at,
             symbol_count=release.symbol_count,

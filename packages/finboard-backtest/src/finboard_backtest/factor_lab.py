@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import math
 import multiprocessing
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -39,6 +39,7 @@ from finboard_data.factors import FactorInputBatch
 from finboard_data.releases import (
     FrozenReleaseProvider,
     PointInTimePrice,
+    ReleaseDatasetKind,
     ReleasedInstrument,
     ReleaseIntegrityError,
     ResearchDatasetRelease,
@@ -47,6 +48,7 @@ from finboard_data.releases import (
     _timestamp_available_at,
     load_dataset_release,
 )
+from finboard_data.research import DailySecurityMetrics, FinancialIndicator
 from finboard_shared.models import Symbol
 from finboard_shared.types import AssetClass, BarPeriod, Market
 
@@ -686,6 +688,180 @@ def build_cross_market_snapshot(
     )
 
 
+async def build_cross_section_feature_snapshot_from_releases(
+    *,
+    releases: Sequence[ResearchDatasetRelease],
+    providers: Mapping[str, FrozenReleaseProvider],
+    decision_at: datetime,
+    code_version: str,
+    momentum_lookback: int = 20,
+    volatility_windows: tuple[int, ...] = (20, 60, 120),
+    max_concurrency: int = 8,
+    on_progress: Callable[[str, int, int], None] | None = None,
+) -> FeatureSnapshot:
+    """从联合冻结发布构建横截面因子快照(issue #187)。
+
+    ``bars`` 主发布提供价格特征(momentum / volatility),``daily_metrics`` /
+    ``financial_indicators`` 发布提供估值 / 流动性 / 财务因子(pb / 市值 /
+    换手 / ROE / 毛利率等),观测按 ``available_at <= decision_at`` PIT 门控。
+    与 ``build_price_feature_snapshot`` 共享 ``build_cross_section_feature_snapshot``
+    的因子定义,保证快照产出与信号引擎消费口径一致。
+
+    返回的 ``FeatureSnapshot`` 绑定 bars 主发布(候选池来源);研究数据观测的
+    ``source_artifact_ids`` 语义由调用方(冻结快照任务)保留。
+    """
+    bars_provider = _bars_provider(providers, releases)
+    release = bars_provider.release
+    _require_aware(decision_at, "decision_at")
+    if max_concurrency < 1:
+        raise ValueError("max_concurrency 必须 >= 1")
+    total = len(release.instruments)
+    if total == 0:
+        raise FactorAnalysisError("联合发布没有可计算的标的")
+
+    from finboard_data.factors import FactorInputBatch, FactorInputRecord
+
+    metrics_provider = _kind_provider(
+        providers, ReleaseDatasetKind.DAILY_METRICS
+    )
+    financial_provider = _kind_provider(
+        providers, ReleaseDatasetKind.FINANCIAL_INDICATORS
+    )
+    semaphore = asyncio.Semaphore(max_concurrency)
+    records: dict[str, FactorInputRecord] = {}
+    price_history: dict[str, list[float]] = {}
+    price_available_at: dict[str, datetime] = {}
+    done_count = 0
+
+    async def _load_one(instrument: ReleasedInstrument) -> None:
+        nonlocal done_count
+        symbol = Symbol(code=instrument.code, market=instrument.market)
+        daily = None
+        financial = None
+        if metrics_provider is not None:
+            daily = await _latest_daily_metric(
+                metrics_provider, symbol, decision_at
+            )
+        if financial_provider is not None:
+            financial = await _latest_financial( financial_provider, symbol, decision_at)
+        points = await bars_provider.fetch_point_in_time_prices(
+            symbol,
+            release.period,
+            release.start_date,
+            min(decision_at.date(), release.end_date),
+            decision_at=decision_at,
+            adjust=release.adjustment,
+        )
+        records[instrument.code] = FactorInputRecord(
+            symbol=instrument.code,
+            profile=None,
+            daily=daily,
+            financial=financial,
+            industry=None,
+        )
+        closes = [float(item.close) for item in points]
+        if len(closes) >= 2:
+            price_history[instrument.code] = closes
+            price_available_at[instrument.code] = points[-1].available_at
+        done_count += 1
+        if on_progress is not None:
+            on_progress(instrument.code, done_count, total)
+
+    async def _worker() -> None:
+        while True:
+            try:
+                instrument = _next_instrument()
+            except asyncio.QueueEmpty:
+                return
+            async with semaphore:
+                await _load_one(instrument)
+
+    queue: asyncio.Queue[ReleasedInstrument] = asyncio.Queue()
+    for instrument in release.instruments:
+        queue.put_nowait(instrument)
+
+    def _next_instrument() -> ReleasedInstrument:
+        return queue.get_nowait()
+
+    worker_count = min(max_concurrency, total)
+    workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
+    await asyncio.gather(*workers)
+    batch = FactorInputBatch(
+        records=tuple(records[item.code] for item in release.instruments),
+        source=release.source,
+        dataset_versions={"release": release.release_id},
+    )
+    return build_cross_section_feature_snapshot(
+        release=release,
+        batch=batch,
+        decision_at=decision_at,
+        code_version=code_version,
+        price_history=price_history,
+        price_available_at=price_available_at,
+        momentum_lookback=momentum_lookback,
+        volatility_windows=volatility_windows,
+    )
+
+
+def _bars_provider(
+    providers: Mapping[str, FrozenReleaseProvider],
+    releases: Sequence[ResearchDatasetRelease],
+) -> FrozenReleaseProvider:
+    bars = [
+        providers[release.release_id]
+        for release in releases
+        if release.dataset_kind is ReleaseDatasetKind.BARS
+    ]
+    if len(bars) != 1:
+        raise FactorAnalysisError(
+            "联合发布必须恰好包含一个 bars 主发布,实际: "
+            + ",".join(release.dataset_kind.value for release in releases)
+        )
+    return bars[0]
+
+
+def _kind_provider(
+    providers: Mapping[str, FrozenReleaseProvider],
+    kind: ReleaseDatasetKind,
+) -> FrozenReleaseProvider | None:
+    for provider in providers.values():
+        if provider.release.dataset_kind is kind:
+            return provider
+    return None
+
+
+async def _latest_daily_metric(
+    provider: FrozenReleaseProvider,
+    symbol: Symbol,
+    decision_at: datetime,
+) -> DailySecurityMetrics | None:
+    """取 daily_metrics 发布在决策时点可见的最新一条记录。"""
+    records = await provider.fetch_daily_metrics(
+        symbol,
+        start=provider.release.start_date,
+        end=decision_at.date(),
+        decision_at=decision_at,
+    )
+    if not records:
+        return None
+    return sorted(records, key=lambda item: item.available_at)[-1]
+
+
+async def _latest_financial(
+    provider: FrozenReleaseProvider,
+    symbol: Symbol,
+    decision_at: datetime,
+) -> FinancialIndicator | None:
+    """取 financial_indicators 发布在决策时点可见的最新公告修订。"""
+    records = await provider.fetch_financial_indicators(
+        symbol,
+        decision_at=decision_at,
+    )
+    if not records:
+        return None
+    return sorted(records, key=lambda item: item.available_at)[-1]
+
+
 def build_cross_section_feature_snapshot(
     *,
     release: ResearchDatasetRelease,
@@ -708,29 +884,29 @@ def build_cross_section_feature_snapshot(
         volatility_windows=volatility_windows,
     )
     record_by_symbol = {record.symbol: record for record in batch.records}
+    # 快照观测白名单:价格因子 + 研究数据因子。市值用 ``market_cap``
+    # (universe 过滤的纯 feature_id,无需 FACTOR_LAB_CATALOG 注册)。
+    _observable_factors = frozenset(
+        {
+            "pb",
+            "market_cap",
+            "earnings_yield",
+            "dividend_yield",
+            "roe",
+            "gross_profit_margin",
+            "debt_to_assets",
+            "revenue_yoy",
+            "momentum",
+            "volatility_20d",
+            "volatility_60d",
+            "volatility_120d",
+            "downside_volatility",
+            "turnover_rate",
+        }
+    )
     observations: list[FeatureObservation] = []
     for factor_name, values in sorted(matrix.items()):
-        if factor_name not in {
-            definition.name
-            for definition in (
-                get_factor_definition(name)
-                for name in (
-                    "pb",
-                    "earnings_yield",
-                    "dividend_yield",
-                    "roe",
-                    "gross_profit_margin",
-                    "debt_to_assets",
-                    "revenue_yoy",
-                    "momentum",
-                    "volatility_20d",
-                    "volatility_60d",
-                    "volatility_120d",
-                    "downside_volatility",
-                    "turnover_rate",
-                )
-            )
-        }:
+        if factor_name not in _observable_factors:
             continue
         for symbol, value in sorted(values.items()):
             record = record_by_symbol.get(symbol)
@@ -738,6 +914,7 @@ def build_cross_section_feature_snapshot(
                 continue
             if factor_name in {
                 "pb",
+                "market_cap",
                 "earnings_yield",
                 "dividend_yield",
                 "turnover_rate",
@@ -800,19 +977,35 @@ def build_cross_section_feature_snapshot(
             if any(item.feature_name == name for item in observations)
         },
         transformations={
-            item.feature_name: get_factor_definition(
-                item.feature_name
-            ).default_transform
+            item.feature_name: _snapshot_definition_transform(item.feature_name)
             for item in observations
         },
         neutralization={
-            item.feature_name: get_factor_definition(
-                item.feature_name
-            ).default_neutralization
+            item.feature_name: _snapshot_definition_neutralization(item.feature_name)
             for item in observations
         },
         issues=tuple(batch.issues),
     )
+
+
+def _snapshot_definition_transform(feature_name: str) -> str:
+    """取观测因子的默认变换;未注册的 feature_id(如 market_cap)用 raw。"""
+    from finboard_data.factor_lab import get_factor_definition
+
+    try:
+        return get_factor_definition(feature_name).default_transform
+    except KeyError:
+        return "raw"
+
+
+def _snapshot_definition_neutralization(feature_name: str) -> tuple[str, ...]:
+    """取观测因子的默认中性化;未注册的 feature_id 不中性化。"""
+    from finboard_data.factor_lab import get_factor_definition
+
+    try:
+        return get_factor_definition(feature_name).default_neutralization
+    except KeyError:
+        return ()
 
 
 def _build_price_observations(
