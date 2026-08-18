@@ -11,6 +11,11 @@ Coordinator 内部已内建:
   其他 → FAILED)
 
 因此执行器只需做:重建 manifest → 构造 adapter(注入)→ 调 execute → 映射终态。
+进度上报(issue #188):把 worker 的 :type:`ProgressCallback` 原样透传给
+Coordinator,后者在 ``stage x decision`` 粒度逐阶段回调
+``progress(done, total, "research_run:<stage>")``,运行中
+``finboard_job_get`` / ``GET /api/jobs/{id}`` 即可区分「正常计算」与「卡死」;
+终态仍由本执行器回调 ``research_run:<status>`` 保持兼容。
 ``NormalizedSignal`` 等策略信号由注入的 ``adapter_factory`` 提供;本期 CLI 用固定
 样本 :class:`~finboard_backtest.research_run.adapters.DecisionSequenceAdapter`,
 真实「冻结产物 → PortfolioPipelineAdapter」信号引擎留后续 issue。
@@ -89,7 +94,13 @@ class ResearchRunExecutor:
                     retryable=False,
                 ) from exc
             coordinator = ResearchRunCoordinator(store)
-            record = await coordinator.execute(manifest, adapter)
+            record = await coordinator.execute(
+                manifest,
+                adapter,
+                # issue #188:worker 的进度回调原样透传,Coordinator 在其
+                # stage x decision 持久化路径上逐阶段回调。
+                progress=progress,
+            )
             await store.checkpoint()
         await progress(1, 1, f"research_run:{record.status.value}")
         return _record_to_result(record)

@@ -54,13 +54,18 @@ from finboard_backtest.research_run.contracts import (
     stable_checksum,
     to_json_value,
 )
-from finboard_backtest.research_run.runner import ResearchRunCoordinator
+from finboard_backtest.research_run.runner import (
+    DECISION_STAGE_COUNT,
+    ProgressHook,
+    ResearchRunCoordinator,
+)
 from finboard_backtest.research_run.store import (
     InMemoryResearchRunStore,
     ResearchRunStore,
 )
 
 __all__ = [
+    "DECISION_STAGE_COUNT",
     "MAX_RESEARCH_CAPITAL",
     "MIN_RESEARCH_CAPITAL",
     "REBALANCE_FREQUENCIES",
@@ -77,6 +82,7 @@ __all__ = [
     "InMemoryResearchRunStore",
     "LedgerSnapshot",
     "NormalizedSignal",
+    "ProgressHook",
     "RebalanceInstruction",
     "ResearchActorType",
     "ResearchArtifact",

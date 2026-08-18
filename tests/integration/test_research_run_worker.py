@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, date, datetime
@@ -36,12 +37,14 @@ from finboard_backtest.background_jobs.worker import (
 )
 from finboard_backtest.portfolio import AssetLotInfo, CovarianceEstimate
 from finboard_backtest.research_run import (
+    DecisionBundle,
     FeatureValue,
     FrozenArtifactRef,
     NormalizedSignal,
     ResearchRunCoordinator,
     ResearchRunManifest,
     ResearchRunStatus,
+    ResearchStrategyAdapter,
     UniverseCandidate,
     stable_checksum,
     to_json_value,
@@ -194,6 +197,85 @@ def _make_adapter_factory() -> Callable[[ResearchRunManifest], PortfolioPipeline
     return factory
 
 
+class _SlowPortfolioAdapter(PortfolioPipelineAdapter):
+    """固定样本慢速 adapter:两个决策之间 sleep,给集成测试留出观察窗口。"""
+
+    async def decisions(
+        self,
+        manifest: ResearchRunManifest,
+    ) -> AsyncIterator[DecisionBundle]:
+        index = 0
+        async for decision in super().decisions(manifest):
+            if index > 0:
+                await asyncio.sleep(0.3)
+            index += 1
+            yield decision
+
+
+def _portfolio_input_at(day: int) -> PortfolioDecisionInput:
+    symbols = ("A.SH", "B.SH", "C.SH")
+    decision_at = datetime(2024, 1, 2 + day, 15, tzinfo=UTC)
+    return PortfolioDecisionInput(
+        business_date=date(2024, 1, 2 + day),
+        decision_at=decision_at,
+        execution_at=datetime(2024, 1, 3 + day, 9, 30, tzinfo=UTC),
+        candidates=tuple(
+            UniverseCandidate(
+                symbol=symbol,
+                included=True,
+                reasons=("集成测试候选池通过",),
+                asset_class="equity",
+                market="a_share",
+            )
+            for symbol in symbols
+        ),
+        features=tuple(
+            FeatureValue(
+                symbol=symbol,
+                feature_id="close",
+                value=10.0,
+                source_artifact_ids=("frozen-release-v1",),
+                available_at=decision_at,
+            )
+            for symbol in symbols
+        ),
+        signals=tuple(
+            NormalizedSignal(
+                symbol=symbol,
+                score=1.0,
+                action="buy",
+                rule_id="integration-signal",
+                rationale="集成测试冻结信号",
+            )
+            for symbol in symbols
+        ),
+        prices=dict.fromkeys(symbols, 10.0),
+        execution_prices=dict.fromkeys(symbols, 10.0),
+        lot_info={symbol: AssetLotInfo(code=symbol, lot_size=100) for symbol in symbols},
+        input_artifact_ids=("frozen-release-v1",),
+        covariance=CovarianceEstimate(
+            matrix=np.diag([0.01, 0.01, 0.01]),
+            tickers=list(symbols),
+            shrinkage=0.0,
+            n_observations=252,
+        ),
+        sleeve_map=dict.fromkeys(symbols, "equity"),
+    )
+
+
+def _make_slow_adapter_factory() -> Callable[[ResearchRunManifest], PortfolioPipelineAdapter]:
+    """两个决策、决策间带 sleep 的慢速 adapter 工厂(issue #188)。"""
+
+    def factory(manifest: ResearchRunManifest) -> PortfolioPipelineAdapter:
+        del manifest
+        return _SlowPortfolioAdapter(
+            strategy_kind="ma_cross",
+            decision_inputs=(_portfolio_input_at(0), _portfolio_input_at(1)),
+        )
+
+    return factory
+
+
 # ---- helpers ----------------------------------------------------------------
 
 
@@ -246,14 +328,18 @@ async def _queue_double_write(
     return manifest.run_id
 
 
-def _build_worker(engine: AsyncEngine) -> BackgroundWorker:
+def _build_worker(
+    engine: AsyncEngine,
+    *,
+    adapter_factory: Callable[[ResearchRunManifest], ResearchStrategyAdapter] | None = None,
+) -> BackgroundWorker:
     registry = JobExecutorRegistry()
     registry.register(
         "research_run",
         ResearchRunExecutor(
             session_maker=session_factory(engine),
             store_factory=default_store_factory,
-            adapter_factory=_make_adapter_factory(),
+            adapter_factory=adapter_factory or _make_adapter_factory(),
         ),
     )
     return BackgroundWorker(
@@ -434,3 +520,82 @@ class TestResearchRunWorkerEndToEnd:
             job_row = await BackgroundJobRepository(session).get(run_row.job_id)
             assert job_row is not None
             assert job_row.status == BackgroundJobStatus.SUCCEEDED.value
+
+    async def test_running_job_exposes_stage_progress(
+        self, engine: AsyncEngine
+    ) -> None:
+        """运行中 background_jobs 行可见 ``research_run:<stage>`` 阶段与逐段进度。
+
+        用慢速双决策 adapter(决策间 sleep 0.3s)拉长运行窗口,在 worker 消费期间
+        轮询任务行:必须观察到非 start/completed 的中间阶段(phase 前缀
+        ``research_run:``)且 progress_done ≥ 1、progress_total ≥ done。终态 job
+        phase 保持 ``research_run:completed`` 兼容(issue #188)。
+        """
+        manifest = _manifest("stage")
+        run_id = await _queue_double_write(engine, manifest)
+        worker = _build_worker(engine, adapter_factory=_make_slow_adapter_factory())
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.job_id is not None
+            job_id = run_row.job_id
+
+        await worker._fill_concurrency()
+        observed_phase: str | None = None
+        observed_done_total: tuple[int, int] | None = None
+        for _ in range(300):  # 至多 ~6s,慢速 adapter 提供足够观察窗口
+            if not worker._inflight:
+                break
+            async with session_factory(engine)() as session:
+                job_row = await BackgroundJobRepository(session).get(job_id)
+            if job_row is None or job_row.phase is None:
+                continue
+            is_intermediate_stage = job_row.phase.startswith(
+                "research_run:"
+            ) and job_row.phase not in {
+                "research_run:start",
+                "research_run:completed",
+            }
+            if is_intermediate_stage:
+                observed_phase = job_row.phase
+                observed_done_total = (
+                    job_row.progress_done,
+                    job_row.progress_total,
+                )
+                break
+            await asyncio.sleep(0.02)
+
+        assert observed_phase is not None, "运行中未观察到分阶段进度"
+        assert observed_phase.startswith("research_run:")
+        assert observed_done_total is not None
+        done, total = observed_done_total
+        assert done >= 1
+        assert total >= done  # 当前估算 total(随已发现决策递增)不小于 done
+        assert observed_phase in {
+            "research_run:universe",
+            "research_run:features",
+            "research_run:signals",
+            "research_run:targets_before_constraints",
+            "research_run:constraints",
+            "research_run:targets_after_constraints",
+            "research_run:risk_exits",
+            "research_run:targets_after_risk",
+            "research_run:capital_feasibility",
+            "research_run:rebalance_plan",
+            "research_run:orders",
+            "research_run:fills",
+            "research_run:ledger",
+            "research_run:report",
+        }
+
+        await _drain_worker(worker)
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.COMPLETED.value
+            job_row = await BackgroundJobRepository(session).get(job_id)
+            assert job_row is not None
+            assert job_row.status == BackgroundJobStatus.SUCCEEDED.value
+            # 终态 phase 保持与既有消费方兼容的 ``research_run:<status>``。
+            assert job_row.phase == "research_run:completed"
