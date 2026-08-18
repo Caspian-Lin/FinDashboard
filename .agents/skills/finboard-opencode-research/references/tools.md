@@ -56,9 +56,13 @@ ma_cross)仍报 not_implemented。执行失败(如快照缺因子源)时 `finboa
 issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
 再平衡回放**:按冻结发布交易日历每期重算 universe/features/signals 与组合,
 决策间每日 mark-to-market 产出全区间权益曲线与绩效指标(总收益/年化/夏普/
-最大回撤),返回值与 report 标注 `execution_mode=multi_period`;多期不要求
-预建因子快照(价格因子按发布每日重算),未声明或非法值一律 single_shot
-单快照路径行为不变。
+最大回撤),返回值与 report 标注 `execution_mode=multi_period`。**multi_period
+必须显式声明 `rebalance_frequency`**;未声明即 single_shot,其决策时点**只能**
+来自冻结因子快照 —— 缺快照入队秒级 `invalid_argument`(报错附
+`execution_mode` 与缺失因子源,#203),非法频率值同样在入队时拒绝。
+「多期不要求预建快照」**仅限**决策日推导与价格因子(momentum/volatility
+等按发布每期重算);基本面因子(pb/ROE 等)仍 PIT 取自冻结快照 / 研究数据
+发布(daily_metrics/financial_indicators,#187),缺来源执行期 fail-closed。
 - 参数:`payload: dict`(JSON 对象,模板与取值来源,必填标 *):
   - `idempotency_key`*: 8-128 字符去重键;重提交返回同一 run
   - `strategy_id`*: 已发布策略规格 id(`finboard_strategy_list` / registry 查询)
@@ -66,8 +70,10 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   - `dataset_release_ids`*: 冻结数据发布 release_id 列表,**必须与策略验证计划完全一致**
     (`finboard_dataset_release_list` 查询)
   - `factor_snapshot_ids`: 冻结特征快照 snapshot_id 列表(`finboard_feature_snapshot_list`
-    查询);策略依赖因子输入时必填
-  - `parameters`: `{}` —— 可声明 `rebalance_frequency=monthly|quarterly` 触发多期回放(#183)
+    查询);**single_shot 必填**(决策时点只能来自快照,缺快照入队即拒,#203);
+    multi_period 声明频率后价格因子不需要,基本面因子仍需快照/研究数据发布
+  - `parameters`: `{}` —— 不声明即 single_shot(需冻结快照);声明
+    `rebalance_frequency=monthly|quarterly` 触发多期回放(#183),非法值入队即拒
   - `validation_config` / `portfolio_config` / `risk_config` / `execution_config` /
     `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空
   - `code_version`*: 7-64 字符,**本 run 自身的代码版本标识**(如 FinBoard git

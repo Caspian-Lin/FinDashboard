@@ -243,7 +243,11 @@ async def test_enqueue_succeeds_when_metadata_complete(
     client: httpx.AsyncClient,
     db_session: AsyncSession,
 ) -> None:
-    """元数据齐备(list_date 有值):预检放行,入队成功生成 queued 行(正对照)。"""
+    """元数据齐备(list_date 有值):预检放行,入队成功生成 queued 行(正对照)。
+
+    同时也是 issue #203 的 multi_period 正对照:声明 rebalance_frequency 后
+    不要求预建因子快照(价格因子按发布每期重算)。
+    """
     await _register_release(
         db_session,
         (
@@ -261,3 +265,39 @@ async def test_enqueue_succeeds_when_metadata_complete(
     assert body["strategy_kind"] == "multi_factor"
     assert body["job_id"] is not None
     assert body["status"] == "queued"
+
+
+async def test_enqueue_seconds_fail_when_single_shot_missing_snapshots(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """issue #203:未声明 rebalance_frequency(single_shot)且无快照:入队即 422。
+
+    single_shot 的决策时点只能来自冻结因子快照 —— 缺快照秒级失败并附
+    execution_mode 与缺失因子源,不再等执行期才报;multi_period 不受影响
+    (见上例正对照)。
+    """
+    await _register_release(
+        db_session,
+        (
+            ("600001.SH", date(2020, 1, 1)),
+            ("600002.SH", date(2020, 1, 1)),
+            ("600003.SH", date(2020, 1, 1)),
+        ),
+    )
+    spec = await _register_published_spec(db_session)
+    payload = _queue_payload(spec)
+    # 去掉 rebalance_frequency → single_shot;未提供 factor_snapshot_ids。
+    payload.pop("parameters")
+
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "execution_mode=single_shot" in detail
+    assert "factor_snapshot_ids" in detail
+    # 根因细分:指向缺失的因子源与修复路径(声明频率或冻结快照)。
+    assert "rebalance_frequency=monthly|quarterly" in detail
+    # 快速失败:不产生 queued research_runs 行,不双写 background_jobs。
+    rows = await ResearchRunRepository(db_session).list_recent(limit=10)
+    assert all(row.strategy_kind != spec.strategy_kind for row in rows)

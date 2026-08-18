@@ -88,7 +88,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   single_shot|multi_period,#183)。入队预检(#186):queue 与 backtest_run
   (strategy_spec 形态)入队时对主数据发布做 universe 候选池非空校验,
   空池秒级 invalid_argument(不再等执行期跑完后报泛化错误),错误信息附
-  各过滤条件的排除统计与缺失字段名(如 list_date)。run_queue payload 模板与
+  各过滤条件的排除统计与缺失字段名(如 list_date)。single_shot 缺快照
+  同样入队秒级拒绝(#203):未声明 rebalance_frequency 时决策时点只能来自
+  冻结因子快照,报错附 execution_mode 与缺失因子源。run_queue payload 模板与
   各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
   manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。
 - finboard.memory.*(7) —— 研究记忆:remember / list / get / forget / correct
@@ -130,8 +132,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   多期回放(#183):queue_payload.parameters 声明
   rebalance_frequency=monthly|quarterly 时,按冻结发布交易日历每期重算
   universe/features/signals 与组合,决策间每日 mark-to-market 产出全区间
-  equity_curve(报告含 annualized_return,最终权 益=曲线末点);未声明则
-  single_shot 保持单快照路径行为不变。backtest_history_list/get
+  equity_curve(报告含 annualized_return,最终权 益=曲线末点);「不要求预建
+  快照」仅限决策日推导与价格因子,基本面因子(pb/ROE 等)仍 PIT 取自冻结
+  快照/研究数据发布;未声明即 single_shot,决策时点只能来自冻结因子快照,
+  缺快照入队秒级拒绝(#203)。backtest_history_list/get
   (history_get 支持 fills 分页)、backtest_history_delete(写)、
   backtest_grid_submit(写,批量参数网格:一次提交 N 组参数 → N 个 backtest_run
   后台任务,展开/上限/校验后同一事务落库,返回 grid_id + job 指针)、

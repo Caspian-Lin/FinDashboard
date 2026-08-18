@@ -28,7 +28,7 @@ from __future__ import annotations
 import math
 import os
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -706,6 +706,49 @@ def _rebalance_frequency(manifest: ResearchRunManifest) -> str | None:
     return value
 
 
+def single_shot_snapshot_gate_error(
+    *,
+    strategy_kind: str,
+    required_factor_sources: Collection[str],
+    frozen_snapshot_count: int,
+    parameters: Mapping[str, object],
+) -> str | None:
+    """入队期 single_shot 缺快照校验:返回拒绝原因,放行返回 None(issue #203)。
+
+    REST 与 MCP 入队共用本口径(报错文案单一来源,不双份漂移):
+
+    * multi_period(显式声明 ``rebalance_frequency=monthly|quarterly``;非法值
+      已被 ``ResearchRunQueueIn`` schema 在入队时拒绝)不要求预建快照 ——
+      价格因子按发布每日重算,基本面因子仍 PIT 取自冻结快照/研究数据发布;
+    * 未声明频率即 single_shot,其决策时点**只能**来自冻结因子快照:依赖
+      因子输入或可执行(multi_factor)的策略缺快照时入队秒级拒绝,报错附
+      ``execution_mode`` 与缺失因子源,不再等执行期才失败;
+    * 其余 kind 由 worker 报 not_implemented,这里不拦截以免遮蔽真正根因。
+    """
+    frequency = parameters.get("rebalance_frequency")
+    if isinstance(frequency, str) and frequency in REBALANCE_FREQUENCIES:
+        return None
+    if frozen_snapshot_count > 0:
+        return None
+    sources = sorted(required_factor_sources)
+    if sources:
+        return (
+            "execution_mode=single_shot(未声明 parameters.rebalance_frequency):"
+            f"策略依赖因子输入 {sources} 但未冻结 factor_snapshot_ids。"
+            "请提供覆盖上述因子源的特征快照,或显式声明 "
+            "rebalance_frequency=monthly|quarterly 走多期回放"
+            "(多期仅价格因子按发布每日重算,基本面因子仍需冻结快照/研究数据发布提供)"
+        )
+    if strategy_kind in SIGNAL_ENGINE_STRATEGY_KINDS:
+        return (
+            "execution_mode=single_shot(未声明 parameters.rebalance_frequency):"
+            "该路径的决策时点只能来自冻结因子快照,但 factor_snapshot_ids 为空。"
+            "请冻结至少一份特征快照,或声明 rebalance_frequency=monthly|quarterly"
+            " 走多期回放"
+        )
+    return None
+
+
 def _period_bucket(day: date, frequency: str) -> tuple[int, int]:
     """交易日所属周期桶:(year, month) 或 (year, quarter)。"""
     if frequency == "monthly":
@@ -1033,10 +1076,25 @@ async def build_decision_inputs(
 
     if frequency is not None:
         decision_days = await _derive_rebalance_decision_days(provider, frequency)
+        if not decision_days:
+            # issue #203:区分根因 —— 频率已声明(multi_period)但发布日历推导不出
+            # 任何决策时点,与「未声明频率缺快照」是两回事,不能混报。
+            raise ValueError(
+                f"execution_mode=multi_period:已声明 rebalance_frequency={frequency},"
+                "但冻结发布交易日历未能推导出任何决策时点(每期期末之后必须存在"
+                "下一交易日才能执行成交)。请检查发布区间是否覆盖至少一个完整"
+                "周期期末,或延长发布区间后重新入队。"
+            )
     else:
         decision_days = await _snapshot_decision_days(manifest, snapshot_provider)
-    if not decision_days:
-        raise ValueError("manifest 未冻结因子快照且未设置 rebalance_frequency,无法推导决策时点")
+        if not decision_days:
+            raise ValueError(
+                "execution_mode=single_shot:未声明 parameters.rebalance_frequency,"
+                "该路径的决策时点只能来自冻结因子快照,但 manifest.factor_snapshots"
+                " 为空。请入队时冻结 factor_snapshot_ids,或显式声明 "
+                "rebalance_frequency=monthly|quarterly 走多期回放(多期仅价格因子"
+                "按发布每日重算,基本面因子仍 PIT 取自冻结快照/研究数据发布)。"
+            )
 
     inputs: list[PortfolioDecisionInput] = []
     for decision_at, snapshot_id in decision_days:
@@ -1322,4 +1380,5 @@ __all__ = [
     "build_signal_engine_adapter_factory",
     "evaluate_feature_graph",
     "evaluate_signal_rules",
+    "single_shot_snapshot_gate_error",
 ]

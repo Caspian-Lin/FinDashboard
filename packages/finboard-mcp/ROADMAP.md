@@ -5,11 +5,11 @@
 
 ## 当前状态(2026-08)
 
-**已实现 115 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 为既有工具的执行语义与契约增强 / 新增网格工具):
+**已实现 115 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 / #203 为既有工具的执行语义与契约增强 / 新增网格工具):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
-| `finboard.run.*` | 7 | list / get / artifacts(只读);queue / cancel / replay / lineage(写) | ResearchRun 查询 + 生命周期(3 只读 + 4 写,✅ #127;list/get/queue 返回 execution_mode single_shot\|multi_period,#183;queue 入队 universe 候选池非空预检,空池秒级 invalid_argument 附排除统计与缺失字段,#186) |
+| `finboard.run.*` | 7 | list / get / artifacts(只读);queue / cancel / replay / lineage(写) | ResearchRun 查询 + 生命周期(3 只读 + 4 写,✅ #127;list/get/queue 返回 execution_mode single_shot\|multi_period,#183;queue 入队 universe 候选池非空预检,空池秒级 invalid_argument 附排除统计与缺失字段,#186;single_shot 缺冻结快照入队秒级拒绝附 execution_mode 与缺失因子源,multi_period 必须显式声明 rebalance_frequency,#203) |
 | `finboard.ai.*` | 4 | ask / propose_hypothesis / propose_strategy_draft / propose_strategy_diff | AI 草案(问答 / 因子假设 / 策略) |
 | `finboard.memory.*` | 7 | remember / list / get / forget / correct / confirm / archive | 研究长期记忆 |
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |

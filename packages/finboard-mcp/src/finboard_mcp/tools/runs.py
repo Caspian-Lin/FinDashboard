@@ -230,6 +230,7 @@ async def _build_queued_manifest(
         validate_strategy_dataset_capabilities,
     )
     from finboard_backtest.research_run.contracts import JsonValue
+    from finboard_backtest.research_run.signal_engine import single_shot_snapshot_gate_error
     from finboard_backtest.strategy_spec import ResearchStrategySpec
     from finboard_backtest.strategy_spec.contracts import FeatureKind
     from finboard_backtest.strategy_spec.universe_precheck import (
@@ -293,15 +294,16 @@ async def _build_queued_manifest(
         if node.source is not None
         and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
-    # issue #183:多期回放(parameters.rebalance_frequency)由管线按冻结发布
-    # 每日重算价格因子,不要求为每月预建因子快照;仍缺失的来源(如基本面因子)
-    # 在执行期 fail-closed,避免静默产出残缺信号。
-    is_multi_period = body.parameters.get("rebalance_frequency") in ("monthly", "quarterly")
-    if required_factor_sources and not snapshots and not is_multi_period:
-        raise McpToolError(
-            "invalid_argument",
-            f"策略依赖因子输入但未冻结 factor_snapshot_ids: {sorted(required_factor_sources)}",
-        )
+    # issue #203:入队期 single_shot 缺快照秒级拒绝(与 REST 路由共用同一门控
+    # 函数,对齐 #186 预检风格)。multi_period 声明 rebalance_frequency 后不受影响。
+    gate_error = single_shot_snapshot_gate_error(
+        strategy_kind=spec.strategy_kind,
+        required_factor_sources=required_factor_sources,
+        frozen_snapshot_count=len(snapshots),
+        parameters=body.parameters,
+    )
+    if gate_error is not None:
+        raise McpToolError("invalid_argument", gate_error)
     release_ids = {release.release_id for release in releases}
     for snapshot in snapshots:
         if snapshot.dataset_release_id not in release_ids:
@@ -747,9 +749,12 @@ def register(mcp: MCPServer) -> None:
             '- "dataset_release_ids"*: 冻结数据发布 release_id 列表,必须与策略'
             "验证计划完全一致(finboard_dataset_release_list 查询)\n"
             '- "factor_snapshot_ids": 冻结特征快照 snapshot_id 列表'
-            "(finboard_feature_snapshot_list 查询);策略依赖因子输入时必填\n"
-            '- "parameters": {} —— 可声明 rebalance_frequency=monthly|quarterly '
-            "触发多期再平衡回放(#183)\n"
+            "(finboard_feature_snapshot_list 查询);single_shot 必填(决策时点"
+            "只能来自快照,缺快照入队即拒 #203);multi_period 声明频率后价格"
+            "因子不需要,基本面因子(pb/ROE 等)仍需快照/研究数据发布\n"
+            '- "parameters": {} —— 不声明即 single_shot;声明 '
+            "rebalance_frequency=monthly|quarterly 触发多期再平衡回放(#183,"
+            "仅价格因子按发布每期重算;非法值入队即拒)\n"
             '- "validation_config"/"portfolio_config"/"risk_config"/'
             '"execution_config"/"fee_config"/"benchmark_config": {} —— '
             "政策覆盖,一般留空\n"
@@ -761,7 +766,8 @@ def register(mcp: MCPServer) -> None:
             '- "actor_type": "human"(固定;LLM 不能触发运行)\n'
             "校验失败返回 invalid_argument 并附原因(复用 ResearchRunQueueIn "
             "schema)。入队预检(#186):universe 候选池为空秒级 invalid_argument,"
-            "错误附各过滤条件排除统计与缺失字段名。"
+            "错误附各过滤条件排除统计与缺失字段名。single_shot 缺冻结快照同样"
+            "入队秒级拒绝(#203,报错附 execution_mode 与缺失因子源)。"
         ),
     )
     async def _queue(
