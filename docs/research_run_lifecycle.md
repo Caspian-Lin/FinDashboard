@@ -53,7 +53,20 @@
 - 重放来源 `replay_of_run_id`。
 
 API 会从已发布策略规格补齐验证、组合、退出风控、成交费用和基准默认值，再保存
-显式 overrides。依赖 FACTOR/RISK_FACTOR 输入的策略没有冻结因子快照时不能排队。
+显式 overrides。执行模式由 `parameters.rebalance_frequency` 决定（issue #183，
+措辞经 #203 澄清）：
+
+- **multi_period**：必须显式声明 `rebalance_frequency=monthly|quarterly`，
+  决策日由冻结发布交易日历推导（每期期末之后须存在下一成交日），每期重算
+  价格因子（momentum/volatility 等）。「不要求预建因子快照」**仅限**决策日
+  推导与价格因子——基本面因子（pb/ROE 等）仍 PIT 取自冻结快照 / 研究数据
+  发布（#187），缺来源执行期 fail-closed。
+- **single_shot**（未声明频率的默认）：决策时点**只能**来自冻结因子快照。
+  依赖 FACTOR/RISK_FACTOR 输入的策略或 `multi_factor` 规格没有冻结快照时
+  入队即拒（REST 422 / MCP `invalid_argument`，报错附 `execution_mode` 与
+  缺失因子源，issue #203）；声明了频率但发布日历推导不出任何决策时点属另一
+  根因，执行期单独报错。非法频率值由入队 schema 直接拒绝。
+
 API 的 actor 只允许 `human`;领域层再次拒绝 `llm`。LLM 可以解释、比较或建议配置，
 但不能触发运行。
 

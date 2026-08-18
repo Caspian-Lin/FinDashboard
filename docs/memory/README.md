@@ -19,3 +19,4 @@
 - [Issue #189:backtest_run strategy 形态异步化](issue-189-backtest-async.md) — run_async 命名(async 保留字);工作量=标的不数x交易日,阈值 default 15000(≈10ms/段);异步 payload/幂等键与 REST 同口径
 - [Issue #190:MCP 回测/入队工具易用性修复](issue-190-mcp-tool-usability.md) — factor_version 与快照 framework_version 双命名空间勿混传;grid_get 默认 none 瘦身(显式 equity_mode 才返回曲线);run_queue payload 模板 + code_version 与数据集同名互不校验
 - [冻结发布校验和 DB 锚定(issue #202)](issue-202-release-checksum-db-anchor.md) — manifest 完整性比对 DB release_checksum 不做代码敏感重算;删改 manifest 字段先迁 schema_version 禁止直接改 as_dict();code_version 的 -dirty 语义
+- [Issue #203:multi_period 快照依赖文档与报错对齐](issue-203-multiperiod-snapshot-docs-alignment.md) — 多期免快照仅限决策日推导与价格因子,基本面因子仍需快照/研究发布;single_shot 零快照入队秒级拒(共享门控函数);报错按根因细分附 execution_mode
