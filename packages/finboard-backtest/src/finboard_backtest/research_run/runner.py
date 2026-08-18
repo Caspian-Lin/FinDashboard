@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from decimal import Decimal
 
@@ -73,6 +75,16 @@ _DECISION_STAGES = (
     ResearchRunStage.LEDGER,
 )
 
+#: 单个 decision 内按 _DECISION_STAGES 逐一持久化的工件阶段数(13),与 REPORT
+#: 工件一起构成「stage x decision」进度计量单位(issue #188)。决策总数 N 在执行
+#: 期才得知,故 total 采用「随新决策被发现而递增」的自修正语义(worker 侧
+#: ``update_progress`` 对 total 只增不减,二者兼容)。
+DECISION_STAGE_COUNT = len(_DECISION_STAGES)
+
+#: 进度回调钩子:(done, total, phase) → None,与 background_jobs 的
+#: ``ProgressCallback`` 结构同构;None 表示不对外上报(内存 / 直连 REST 调用)。
+ProgressHook = Callable[[int, int | None, str | None], Awaitable[None]]
+
 
 class ResearchRunCoordinator:
     def __init__(self, store: ResearchRunStore) -> None:
@@ -84,6 +96,7 @@ class ResearchRunCoordinator:
         adapter: ResearchStrategyAdapter,
         *,
         expected_result_checksum: str | None = None,
+        progress: ProgressHook | None = None,
     ) -> ResearchRunRecord:
         record, created = await self._store.create_or_get(manifest)
         await self._store.checkpoint()
@@ -145,13 +158,23 @@ class ResearchRunCoordinator:
                     position_quantities=position_quantities,
                     seen_fill_ids=seen_fill_ids,
                 )
-                await self._persist_decision(manifest.run_id, len(decisions), decision)
+                await self._persist_decision(
+                    manifest.run_id,
+                    len(decisions),
+                    decision,
+                    progress=progress,
+                )
                 await self._store.checkpoint()
                 decisions.append(decision)
 
             report = adapter.build_report(manifest, decisions)
             self._validate_report(manifest, decisions, report)
-            await self._persist_report(manifest.run_id, len(decisions), report)
+            await self._persist_report(
+                manifest.run_id,
+                len(decisions),
+                report,
+                progress=progress,
+            )
             await self._store.checkpoint()
             artifacts = await self._store.list_artifacts(manifest.run_id)
             result_checksum = stable_checksum(
@@ -301,7 +324,12 @@ class ResearchRunCoordinator:
         return sorted(found.values(), key=lambda item: item.sequence)
 
     async def _persist_decision(
-        self, run_id: str, decision_index: int, decision: DecisionBundle
+        self,
+        run_id: str,
+        decision_index: int,
+        decision: DecisionBundle,
+        *,
+        progress: ProgressHook | None = None,
     ) -> None:
         stage_payloads: dict[ResearchRunStage, dict[str, object]] = {
             ResearchRunStage.UNIVERSE: {"candidates": decision.candidates},
@@ -358,10 +386,23 @@ class ResearchRunCoordinator:
                 checksum=payload_checksum,
             )
             await self._store.append_artifact(artifact)
+            if progress is not None:
+                # 单位 = 已完成的 (decision x stage) 工件数;total 随当前已发现的
+                # 决策递增(见 DECISION_STAGE_COUNT 注释)。
+                done = decision_index * DECISION_STAGE_COUNT + offset + 1
+                total = (decision_index + 1) * DECISION_STAGE_COUNT
+                await _report_progress(
+                    progress, done, total, f"research_run:{stage.value}"
+                )
             parent = (trace_id,)
 
     async def _persist_report(
-        self, run_id: str, decision_count: int, report: object
+        self,
+        run_id: str,
+        decision_count: int,
+        report: object,
+        *,
+        progress: ProgressHook | None = None,
     ) -> None:
         payload = to_json_value({"report": report})
         assert isinstance(payload, dict)
@@ -370,7 +411,7 @@ class ResearchRunCoordinator:
                 artifact_id=f"{run_id}:A:report",
                 run_id=run_id,
                 decision_id=None,
-                sequence=decision_count * len(_DECISION_STAGES),
+                sequence=decision_count * DECISION_STAGE_COUNT,
                 stage=ResearchRunStage.REPORT,
                 trace_id=f"RRT-{stable_checksum('report')[:24]}",
                 parent_trace_ids=(),
@@ -378,6 +419,9 @@ class ResearchRunCoordinator:
                 checksum=stable_checksum(payload),
             )
         )
+        if progress is not None:
+            done = decision_count * DECISION_STAGE_COUNT + 1
+            await _report_progress(progress, done, done, "research_run:report")
 
     @staticmethod
     def _with_decision_id(
@@ -644,6 +688,22 @@ class ResearchRunCoordinator:
         if record is None:
             raise ResearchRunConflictError(f"研究运行不存在: {run_id}")
         return record
+
+
+async def _report_progress(
+    progress: ProgressHook,
+    done: int,
+    total: int,
+    phase: str,
+) -> None:
+    """尽力而为上报进度;上报失败不得影响运行状态机(仅可观测性,issue #188)。
+
+    ``asyncio.CancelledError``(BaseException)不被 suppress 捕获,协作式取消仍能
+    透传;其余错误(如任务行被并发删除)静默忽略。
+    """
+
+    with contextlib.suppress(Exception):
+        await progress(done, total, phase)
 
 
 def _position_delta(
