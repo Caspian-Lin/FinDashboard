@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     # 特征快照使用的独立计算进程数;0 表示只使用旧的进程内 worker。
     feature_snapshot_process_workers: int = Field(default=8, ge=0, le=64)
 
+    # ---- 回测 strategy 形态异步化(issue #189) ----
+    # backtest_run(strategy 形态)自动切换异步的估算工作量阈值:工作量 ≈
+    # 标的不数 x 估算交易日(start~end,周末 5/7 折算)。达到阈值自动入队
+    # kind=backtest_run 后台任务并返回 job_id,避免 MCP 客户端超时后响应丢失
+    # (实测约 10ms/段,30s 客户端超时 ≈ 3000 段;默认 15000 ≈ 60 标的 x 一年)。
+    # 0 表示禁用自动切换(仅 run_async=true 显式异步)。
+    backtest_auto_async_symbol_days: int = Field(default=15000, ge=0)
+
     # ---- 统一后台任务队列 worker(issue #117 / #142) ----
     # 独立进程 ``finboard worker`` 用 FOR UPDATE SKIP LOCKED 领取任务。
     # 不影响实盘交易线程,仅服务研究/数据域耗时任务。

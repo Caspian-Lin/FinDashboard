@@ -2,7 +2,8 @@
 
 - 只读(3):``backtest_strategy_list``(内置策略 + 已发布规格,含执行入口提示)/
   ``backtest_history_list``(历史回测列表)/ ``backtest_history_get``(历史详情)
-- 写(2):``backtest_run`` 双形态——事件驱动同步回测(返回 metrics/equity/fills,
+- 写(2):``backtest_run`` 双形态——事件驱动回测(同步返回 metrics/equity/fills,
+  或 ``run_async=true`` 入队 kind=backtest_run 后台任务返回 job_id,issue #189;
   对应 ``POST /api/backtest/run``)与 strategy_spec 路由入队 research_run
   (返回 run/job 指针,复用 ``finboard.run.queue`` 冻结校验)/ ``backtest_history_delete``
 
@@ -13,6 +14,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass
 from datetime import date as date_type
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
@@ -66,6 +70,56 @@ def _validate_backtest_params(kind: str, params: dict[str, Any]) -> dict[str, An
     except ValidationError as exc:
         raise McpToolError("invalid_argument", f"策略参数校验失败: {exc}") from exc
     return validated.model_dump(mode="json")
+
+
+@dataclass(frozen=True, slots=True)
+class _AsyncDecision:
+    """strategy 形态是否走异步的判定结果(issue #189)。"""
+
+    use_async: bool
+    #: 判定依据:explicit(显式 run_async=true)/ auto_threshold(自动切换)/
+    #: sync_explicit(显式 run_async=false)/ sync_below_threshold(未达阈值)。
+    reason: str
+    symbol_days_estimate: int = 0
+
+
+def _estimate_symbol_days(symbols: list[str], start: str, end: str) -> int:
+    """估算回测工作量:标的不数 x 近似交易日(start~end,周末 5/7 折算)。
+
+    价格因子的数据拉取 / 撮合成本近似正比于该值,用于自动异步阈值比较。
+    """
+    try:
+        start_date = date_type.fromisoformat(start)
+        end_date = date_type.fromisoformat(end)
+    except ValueError:
+        return 0
+    if end_date < start_date:
+        return 0
+    trading_days = max(1, round((end_date - start_date).days * 5 / 7))
+    return max(1, len(symbols or [])) * trading_days
+
+
+def _resolve_async_mode(
+    run_async: bool | None,
+    threshold: int,
+    symbols: list[str],
+    start: str,
+    end: str,
+) -> _AsyncDecision:
+    """决定 strategy 形态是否走异步后台任务(issue #189)。
+
+    * ``run_async=True`` → 显式异步;``run_async=False`` → 显式同步;
+    * 省略(None)-> ``threshold`` > 0 时按 标的不数 x 交易日 估算自动切换,
+      达到阈值返回异步(避免 MCP 客户端超时后响应丢失)。
+    """
+    if run_async is True:
+        return _AsyncDecision(True, "explicit")
+    if run_async is False:
+        return _AsyncDecision(False, "sync_explicit")
+    estimate = _estimate_symbol_days(symbols, start, end)
+    if threshold > 0 and estimate >= threshold:
+        return _AsyncDecision(True, "auto_threshold", symbol_days_estimate=estimate)
+    return _AsyncDecision(False, "sync_below_threshold", symbol_days_estimate=estimate)
 
 
 def _strategy_info(definition: Any) -> dict[str, Any]:
@@ -252,6 +306,131 @@ async def _run_via_strategy_spec(
     }
 
 
+async def _enqueue_backtest_job(
+    app: McpAppContext,
+    *,
+    request: dict[str, Any],
+    idempotency_key: str,
+    requested_by: str,
+) -> tuple[Any, bool]:
+    """登记一个 ``kind=backtest_run`` 后台任务,返回 ``(row, created)``。
+
+    与 REST ``POST /api/backtest/run`` 同队列(``data``)同 payload 形态
+    (``{request, provider_name}``),幂等键口径一致;conflict 转
+    :class:`McpToolError` conflict。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from finboard_mcp.tools.jobs import _payload_checksum
+    from finboard_persistence import BackgroundJobRepository
+    from finboard_shared.background_jobs import (
+        BackgroundJobStatus,
+        generate_background_job_id,
+    )
+
+    payload: dict[str, Any] = {
+        "request": request,
+        "provider_name": getattr(app.settings, "data_provider", "akshare"),
+    }
+    checksum = _payload_checksum(payload)
+    async with app.session_maker() as session:
+        try:
+            row, created = await BackgroundJobRepository(session).create_or_get(
+                job_id=generate_background_job_id(),
+                idempotency_key=idempotency_key,
+                kind="backtest_run",
+                queue="data",
+                status=BackgroundJobStatus.QUEUED.value,
+                priority=0,
+                payload=payload,
+                payload_checksum=checksum,
+                max_attempts=3,
+                requested_by=requested_by,
+            )
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise McpToolError("conflict", "重复 idempotency_key") from exc
+    return row, created
+
+
+async def _run_strategy_async(
+    app: McpAppContext,
+    *,
+    strategy: str,
+    symbols: list[str],
+    start: str,
+    end: str,
+    capital: Decimal,
+    adjust: str,
+    validated_params: dict[str, Any],
+    selection_dump: dict[str, Any],
+    commission_rate: Decimal,
+    commission_min: Decimal,
+    stamp_tax_rate: Decimal,
+    slippage_bps: Decimal,
+    benchmark_symbol: str | None,
+    requested_by: str,
+    reason: str,
+    symbol_days_estimate: int,
+) -> dict[str, Any]:
+    """strategy 形态异步化(issue #189):入队后返回 job 指针,不阻塞等待完成。
+
+    复用 ``BacktestRunExecutor``(worker 消费)执行,与同步形态同一引擎与落库
+    语义;参数校验仍在提交前同步完成,非法参数秒级 ``invalid_argument``。
+    """
+    request: dict[str, Any] = {
+        "strategy": strategy,
+        "symbols": list(symbols),
+        "start": start,
+        "end": end,
+        "capital": str(capital),
+        "adjust": adjust,
+        "params": validated_params,
+        "selection": selection_dump,
+        "commission_rate": str(commission_rate),
+        "commission_min": str(commission_min),
+        "stamp_tax_rate": str(stamp_tax_rate),
+        "slippage_bps": str(slippage_bps),
+        "benchmark": (
+            {"symbol": benchmark_symbol, "equal_weight_universe": True}
+            if benchmark_symbol is not None
+            else None
+        ),
+    }
+    params_digest = hashlib.sha256(
+        json.dumps(request, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:24]
+    idempotency_key = f"backtest:{strategy}:{params_digest}"
+    row, created = await _enqueue_backtest_job(
+        app,
+        request=request,
+        idempotency_key=idempotency_key,
+        requested_by=requested_by,
+    )
+    return cast(
+        dict[str, Any],
+        to_jsonable(
+            {
+                "job_id": row.job_id,
+                "status": row.status,
+                "created": created,
+                "idempotency_key": idempotency_key,
+                "async_mode": reason,
+                "symbol_days_estimate": symbol_days_estimate,
+                "auto_async_threshold": int(
+                    getattr(app.settings, "backtest_auto_async_symbol_days", 0) or 0
+                ),
+                "execution_path": (
+                    "kind=backtest_run 后台任务(已入队,异步执行;用 finboard_job_get"
+                    "(job_id) 轮询:成功后 result_ref=str(run_id),再用 "
+                    "finboard_backtest_history_get(run_id=...) 查询完整结果)"
+                ),
+            }
+        ),
+    )
+
+
 async def backtest_run(
     app: McpAppContext,
     *,
@@ -272,10 +451,14 @@ async def backtest_run(
     benchmark_symbol: str | None = None,
     strategy_spec: dict[str, Any] | None = None,
     queue_payload: dict[str, Any] | None = None,
+    run_async: bool | None = None,
+    requested_by: str | None = None,
 ) -> ToolEnvelope:
     """运行回测 —— 双形态(issue #174):
 
-    * ``strategy`` 形态:事件驱动同步回测(现状);
+    * ``strategy`` 形态:事件驱动回测;默认小规模同步返回结果,``run_async=true``
+      或规模达自动阈值时入队 ``kind=backtest_run`` 后台任务返回 job_id(issue
+      #189,避免 MCP 客户端超时后响应丢失);
     * ``strategy_spec`` 形态:按已发布 ``{strategy_id, version}`` 路由入队
       research_run 管线,返回 run_id + job_id 指针,不阻塞等待完成。
     两形态互斥,同时给出报 ``invalid_argument``。
@@ -295,6 +478,45 @@ async def backtest_run(
                 "invalid_argument",
                 "strategy/symbols/start/end 必填(strategy_spec 形态除外)",
             )
+
+        # issue #189:strategy 形态可异步 —— 显式 run_async 或按估算规模自动切换。
+        decision = _resolve_async_mode(
+            run_async,
+            int(getattr(app.settings, "backtest_auto_async_symbol_days", 0) or 0),
+            list(symbols),
+            start,
+            end,
+        )
+        if decision.use_async:
+            from finboard_app.selection_schema import FactorSelectionParams
+
+            validated_params = _validate_backtest_params(strategy, params or {})
+            try:
+                selection_model = FactorSelectionParams.model_validate(selection or {})
+            except ValidationError as exc:
+                raise McpToolError(
+                    "invalid_argument", f"selection 参数校验失败: {exc}"
+                ) from exc
+            return await _run_strategy_async(
+                app,
+                strategy=strategy,
+                symbols=list(symbols),
+                start=start,
+                end=end,
+                capital=capital,
+                adjust=adjust,
+                validated_params=validated_params,
+                selection_dump=selection_model.model_dump(mode="json"),
+                commission_rate=commission_rate,
+                commission_min=commission_min,
+                stamp_tax_rate=stamp_tax_rate,
+                slippage_bps=slippage_bps,
+                benchmark_symbol=benchmark_symbol,
+                requested_by=requested_by or "agent:mcp:backtest_run",
+                reason=decision.reason,
+                symbol_days_estimate=decision.symbol_days_estimate,
+            )
+
         import json
 
         from finboard_app.selection_schema import FactorSelectionParams
@@ -642,21 +864,30 @@ def register(mcp: MCPServer) -> None:
         name="finboard_backtest_run",
         description=(
             "运行回测,双形态(二选一,互斥):"
-            "(1) strategy 形态:同步事件驱动回测(纸面撮合,不发真实订单),"
-            "返回 metrics/equity_curve/fills/selection_snapshots 并落库;"
+            "(1) strategy 形态:事件驱动回测(纸面撮合,不发真实订单),默认同步"
+            "返回 metrics/equity_curve/fills/selection_snapshots 并落库 —— 同步"
+            "形态适用于小规模(数只标的 x 短区间,总工作量 ≲ 阈值);run_async=true"
+            "强制入队 kind=backtest_run 后台任务返回 job_id(异步执行,避免 MCP "
+            "客户端超时后响应丢失);省略 run_async 时按估算工作量『标的不数 x "
+            "交易日』自动切换:≥ 阈值 backtest_auto_async_symbol_days(settings,"
+            "默认 15000,0=关闭自动切换)即异步,否则同步;"
             "参数 strategy(如 ma_cross)、symbols、start/end(ISO 日期)、"
             "capital、adjust(qfq/hfq/none)、params(策略参数)、selection"
             "(因子选股配置)、benchmark_symbol(可选,基准标的代码如 "
             "000300.SH,指数日线自动走 akshare 指数接口;不传则用等权候选池"
             "基准,基准缺失时 benchmark_return=null 而非 0)、equity_mode"
             "(summary 默认:降采样到 max_points 个关键点,首末点保留;full:"
-            "完整曲线)、max_points(默认 200)。"
+            "完整曲线)、max_points(默认 200)、run_async(可选,true 强制异步/"
+            "false 强制同步/省略自动切换,仅 strategy 形态生效)、requested_by"
+            "(可选,异步任务归属,默认 agent:mcp:backtest_run)。"
             "(2) strategy_spec 形态:按已发布策略规格 {strategy_id, version} "
             "路由入队 research_run 管线(冻结 dataset_release_ids/因子快照后"
             "异步执行),返回 run_id + job_id 指针,不阻塞等待完成;其余入队字段"
             "经 queue_payload 传入(与 finboard_run_queue 同构,不含 "
             "strategy_id/strategy_version)。"
-            "复用 BacktestEngine + 数据源(akshare/tushare/yfinance)。"
+            "同步与异步共用 BacktestEngine + 数据源(akshare/tushare/yfinance);"
+            "异步任务用 finboard_job_get 轮询(result_ref=str(run_id)),完成后"
+            "用 finboard_backtest_history_get(run_id) 查询完整结果。"
         ),
     )
     async def _run(
@@ -677,6 +908,8 @@ def register(mcp: MCPServer) -> None:
         benchmark_symbol: str | None = None,
         strategy_spec: dict[str, Any] | None = None,
         queue_payload: dict[str, Any] | None = None,
+        run_async: bool | None = None,
+        requested_by: str | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await backtest_run(
@@ -698,6 +931,8 @@ def register(mcp: MCPServer) -> None:
             benchmark_symbol=benchmark_symbol,
             strategy_spec=strategy_spec,
             queue_payload=queue_payload,
+            run_async=run_async,
+            requested_by=requested_by,
         )
 
     @mcp.tool(
