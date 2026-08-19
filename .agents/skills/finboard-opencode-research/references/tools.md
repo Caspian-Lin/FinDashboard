@@ -626,6 +626,8 @@ research_run 管线轻路由(#174)。
     selection_snapshots(snapshot 含 warnings 降级提示), ...}`(同步);
     异步返回 `{job_id, status, created, idempotency_key, async_mode,
     symbol_days_estimate, auto_async_threshold, execution_path}`
+  - `fills[].date` = 该笔成交实际发生的交易日(issue #205 起);此前旧记录
+    是任务运行日,按 `created_at` 区分,勿混排分析
 - **形态 2(strategy_spec)**:按已发布规格路由入队 research_run 管线(issue
   #174),不阻塞等待完成。
   - 参数:`strategy_spec: {strategy_id: str, version: int}`、

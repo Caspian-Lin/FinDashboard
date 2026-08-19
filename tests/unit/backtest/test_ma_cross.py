@@ -217,6 +217,11 @@ class TestEndToEndBacktest:
         assert result.initial_capital == Decimal("100000")
         # 至少有交易(价格先跌后涨应触发金叉)
         assert result.trade_count > 0
+        # fills 日期 = 实际交易日(合成 Bar 的日期集合),而非任务运行日(issue #205)
+        trading_days = {b.timestamp.date() for b in synthetic_bars}
+        assert result.fills, "先跌后涨应产生成交"
+        for fill in result.fills:
+            assert fill.filled_at.date() in trading_days
         # 权益应为正
         assert result.final_equity > 0
         # 应有佣金支出

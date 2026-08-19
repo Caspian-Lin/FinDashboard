@@ -21,3 +21,4 @@
 - [冻结发布校验和 DB 锚定(issue #202)](issue-202-release-checksum-db-anchor.md) — manifest 完整性比对 DB release_checksum 不做代码敏感重算;删改 manifest 字段先迁 schema_version 禁止直接改 as_dict();code_version 的 -dirty 语义
 - [Issue #203:multi_period 快照依赖文档与报错对齐](issue-203-multiperiod-snapshot-docs-alignment.md) — 多期免快照仅限决策日推导与价格因子,基本面因子仍需快照/研究发布;single_shot 零快照入队秒级拒(共享门控函数);报错按根因细分附 execution_mode
 - [Issue #204:factor_snapshots 原子 upsert](issue-204-factor-snapshot-atomic-upsert.md) — ON CONFLICT 冲突方 RETURNING 为空须再 SELECT 复用,仅插入方写值行;gather 自然交错复现不了 TOCTOU,须 Event 编排时序(A 提交前 B 已卡在服务端)
+- [Issue #205:回测 fills.date 取实际交易日](issue-205-fills-date-trading-day.md) — Fill.filled_at 默认 _utcnow() 陷阱(回测域构造必须显式传时点);收盘约定收敛到 clock.market_close;旧记录按 created_at 区分不回填

@@ -16,8 +16,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -141,6 +142,28 @@ async def _drive_buy_then_sell(
     )
     await broker.drain_events()
     return buy, sell
+
+
+class TestFillTimestamp:
+    """``fills[].filled_at`` 取实际交易日而非任务运行日(issue #205)。"""
+
+    @pytest.mark.unit
+    async def test_filled_at_is_bar_trading_day(self) -> None:
+        broker = BacktestBroker(initial_capital=Decimal("100000"))
+        await broker.connect(ACCOUNT, {})
+        buy_bar = _make_bar(date_str="2024-01-02")
+        next_bar = _make_bar(date_str="2024-01-03")
+        await _drive_buy_then_sell(broker, buy_bar=buy_bar, next_bar=next_bar)
+
+        assert len(broker.fills) == 2
+        buy_fill, sell_fill = broker.fills
+        # 成交日 = 撮合发生那根 Bar 的交易日(2024 年),不是任务运行日
+        assert buy_fill.filled_at.date() == date(2024, 1, 3)
+        assert sell_fill.filled_at.date() == date(2024, 1, 5)
+        # 与 engine decision_at 同约定:Asia/Shanghai 收盘时点
+        for fill in broker.fills:
+            assert fill.filled_at.tzinfo == ZoneInfo("Asia/Shanghai")
+            assert fill.filled_at.hour == 17
 
 
 class TestMatchingModelDefaults:

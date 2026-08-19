@@ -320,6 +320,11 @@ HTTP 422 返回。
 `excess_return` 为 `null` + 具名 warning,不再静默 0.0;
 `backtest_runs.benchmark_config` 如实归档请求配置。
 
+回测结果的 `fills[].date`(REST / MCP 响应及 `backtest_runs.fills` 落库 JSON)
+自 issue #205 起取该笔成交**实际发生的交易日**(与引擎决策时点同一 Asia/Shanghai
+收盘约定),此前旧记录落的是任务运行日,历史数据不回填、以 `created_at` 区分;
+`equity_curve` 的日期一直是真实交易日,不受影响。
+
 ### 静态候选池与策略层 Bar 规则选股
 
 回测请求的 `symbols` 始终是**静态候选池硬上限**:
