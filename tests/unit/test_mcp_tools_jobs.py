@@ -162,10 +162,107 @@ class TestJobGet:
             "get",
             lambda self, jid: _async_return(_job_row(jid, result_ref="FSS-1")),
         )
-        env = await job_tools.job_get(app, "BJ-1")
+        env = await job_tools.job_get(app, "BJ-1", view="detail")
         assert env.status == "ok"
         assert env.data["job_id"] == "BJ-1"
         assert env.data["result_ref"] == "FSS-1"
+        assert env.data["payload"] == {"msg": "hi"}
+
+    async def test_default_summary_strips_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #206:默认 summary 剥离 payload,附 data_hash。"""
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "get",
+            lambda self, jid: _async_return(_job_row(jid, result_ref="FSS-1")),
+        )
+        env = await job_tools.job_get(app, "BJ-1")
+        assert env.status == "ok"
+        data = env.data
+        assert data["job_id"] == "BJ-1"
+        assert data["result_ref"] == "FSS-1"
+        assert "payload" not in data
+        assert data["data_hash"]
+
+    async def test_view_none_is_polling_minimal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #206:view=none 只回轮询最小字段集。"""
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "get",
+            lambda self, jid: _async_return(_job_row(jid, status="running")),
+        )
+        env = await job_tools.job_get(app, "BJ-1", view="none")
+        assert env.status == "ok"
+        data = env.data
+        assert data["status"] == "running"
+        assert set(data) <= {
+            *job_tools._JOB_POLL_FIELDS,
+            "data_hash",
+        }
+
+    async def test_invalid_view_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "get",
+            lambda self, jid: _async_return(_job_row(jid)),
+        )
+        env = await job_tools.job_get(app, "BJ-1", view="huge")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_data_hash_short_circuit_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #206 P3:同状态同 hash → {unchanged: true} 不重发全量。"""
+        row = _job_row("BJ-1", status="running")
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "get",
+            lambda self, jid: _async_return(row),
+        )
+        first = await job_tools.job_get(app, "BJ-1")
+        assert first.status == "ok"
+        data_hash = first.data["data_hash"]
+        assert first.data.get("unchanged") is not True
+
+        second = await job_tools.job_get(app, "BJ-1", data_hash=data_hash)
+        assert second.status == "ok"
+        assert second.data["unchanged"] is True
+        assert second.data["data_hash"] == data_hash
+        assert second.data["status"] == "running"
+        assert "payload" not in second.data
+
+    async def test_data_hash_changes_with_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """状态推进后 data_hash 变化,短路失效返回全量。"""
+        row = _job_row("BJ-1", status="running")
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "get",
+            lambda self, jid: _async_return(row),
+        )
+        first = await job_tools.job_get(app, "BJ-1")
+        stale_hash = first.data["data_hash"]
+
+        row.status = "succeeded"
+        row.result_ref = "123"
+        second = await job_tools.job_get(app, "BJ-1", data_hash=stale_hash)
+        assert second.status == "ok"
+        assert second.data.get("unchanged") is not True
+        assert second.data["status"] == "succeeded"
+        assert second.data["data_hash"] != stale_hash
 
     async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         app = _make_app()

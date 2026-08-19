@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -52,16 +52,20 @@ def _run_model(run_id: str = "RR-1") -> ResearchRunModel:
     )
 
 
-def _artifact_model() -> ResearchRunArtifactModel:
+def _artifact_model(
+    stage: str = "features",
+    payload: dict[str, Any] | None = None,
+    decision_id: str | None = None,
+) -> ResearchRunArtifactModel:
     return ResearchRunArtifactModel(
         run_id="RR-1",
         artifact_id="A-1",
-        decision_id=None,
+        decision_id=decision_id,
         sequence=1,
-        stage="features",
+        stage=stage,
         trace_id="T-1",
         parent_trace_ids=[],
-        payload={"rows": 10},
+        payload=payload if payload is not None else {"rows": 10},
         checksum="ac",
     )
 
@@ -125,22 +129,74 @@ class TestListRuns:
 
 
 class TestGetRun:
-    async def test_returns_detail(self) -> None:
-        app = _make_app(_session_maker(get_row=_run_model()))
+    async def test_default_view_is_summary(self) -> None:
+        """issue #206:默认 summary —— 不序列化 manifest/result,附聚合计数。"""
+        artifacts = [
+            _artifact_model(
+                stage="universe",
+                payload={
+                    "candidates": [
+                        {"symbol": "A", "included": True, "reasons": ["ok"]},
+                        {"symbol": "B", "included": False, "reasons": ["st"]},
+                        {"symbol": "C", "included": False, "reasons": ["st", "thin"]},
+                    ]
+                },
+            ),
+            _artifact_model(
+                stage="fills", payload={"fills": [{"symbol": "A"}]}, decision_id="D-1"
+            ),
+        ]
+        app = _make_app(_session_maker(get_row=_run_model(), artifact_rows=artifacts))
         env = await runs.get_run(app, "RR-1")
+        assert env.status == "ok"
+        data = env.data
+        assert data["run_id"] == "RR-1"
+        assert data["view"] == "summary"
+        # 不序列化全量 manifest / result
+        assert "manifest" not in data
+        assert "result" not in data
+        # 聚合计数与全量判定一致
+        assert data["universe"] == {
+            "total": 3,
+            "included": 1,
+            "excluded_by_reason": {"st": 2, "thin": 1},
+        }
+        assert data["fills"] == {"total": 1, "by_decision": {"D-1": 1}}
+        assert data["artifact_count"] == 2
+        assert data["metrics"] == {"nav": [1.0]}
+        # issue #183:单快照(未设置 rebalance_frequency)标注 single_shot。
+        assert data["execution_mode"] == "single_shot"
+
+    async def test_detail_view_keeps_full_payload(self) -> None:
+        app = _make_app(_session_maker(get_row=_run_model()))
+        env = await runs.get_run(app, "RR-1", view="detail")
         assert env.status == "ok"
         assert env.data["run_id"] == "RR-1"
         assert env.data["manifest"] == {"kind": "etf"}
-        # issue #183:单快照(未设置 rebalance_frequency)标注 single_shot。
+        assert env.data["result"] == {"nav": [1.0]}
         assert env.data["execution_mode"] == "single_shot"
+
+    async def test_invalid_view_rejected(self) -> None:
+        app = _make_app(_session_maker(get_row=_run_model()))
+        env = await runs.get_run(app, "RR-1", view="huge")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
 
     async def test_returns_detail_multi_period(self) -> None:
         row = _run_model()
         row.manifest = {"parameters": {"rebalance_frequency": "monthly"}}
+        row.result = {
+            "strategy_return": 0.5,
+            "equity_curve": [{"date": "2026-01-01", "equity": 1.0}] * 3,
+        }
         app = _make_app(_session_maker(get_row=row))
         env = await runs.get_run(app, "RR-1")
         assert env.status == "ok"
         assert env.data["execution_mode"] == "multi_period"
+        # summary 剔除 result 内嵌 equity_curve,以点数提示代替
+        assert "equity_curve" not in env.data["metrics"]
+        assert env.data["metrics"]["equity_point_count"] == 3
 
     async def test_not_found(self) -> None:
         app = _make_app(_session_maker(get_row=None))
@@ -221,6 +277,20 @@ class TestQueueRun:
         assert env.error is not None
         assert env.error.kind == "invalid_argument"
         assert "rebalance_frequency" in (env.error.message or "")
+
+
+class TestRunAck:
+    def test_ack_has_compact_fields_only(self) -> None:
+        """issue #206 P1:写操作回执为精简字段集,不含 manifest/result 全量。"""
+        ack = runs._run_ack(_run_model())
+        assert ack["run_id"] == "RR-1"
+        assert ack["status"] == "completed"
+        assert ack["checksum"] == "mc"
+        assert ack["execution_mode"] == "single_shot"
+        assert ack["view"] == "ack"
+        assert "manifest" not in ack
+        assert "result" not in ack
+        assert "finboard_run_get" in ack["detail_hint"]
 
 
 class TestCancelRun:

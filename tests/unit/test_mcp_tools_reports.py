@@ -199,6 +199,7 @@ class TestReportRun:
             ),
         ]
         _patch_run_repos(monkeypatch, row, artifacts)
+        # issue #206:默认 summary —— 聚合计数,不序列化全量 artifacts。
         env = await rp_tools.report_run(app, _RUN_ID)
         assert env.status == "ok"
         data = env.data
@@ -209,11 +210,18 @@ class TestReportRun:
         assert data["metrics"]["strategy_return"] == 0.123
         assert data["metrics"]["constraint_impact"]["total_turnover_impact"] == 0.002
         assert data["artifact_count"] == 2
-        assert data["artifacts"][0]["stage"] == "report"
-        assert data["artifacts"][0]["payload"]["report"]["strategy_return"] == 0.123
-        assert data["artifacts"][1]["stage"] == "equity"
+        assert data["view"] == "summary"
+        assert "artifacts" not in data
         assert data["created_at"] == "2026-01-15T08:30:00+00:00"
         assert data["completed_at"] == "2026-01-15T08:35:00+00:00"
+
+        # view=detail 保留旧行为(全量 artifacts payload)。
+        env_detail = await rp_tools.report_run(app, _RUN_ID, view="detail")
+        assert env_detail.status == "ok"
+        detail = env_detail.data
+        assert detail["artifacts"][0]["stage"] == "report"
+        assert detail["artifacts"][0]["payload"]["report"]["strategy_return"] == 0.123
+        assert detail["artifacts"][1]["stage"] == "equity"
 
     async def test_run_not_found(self, monkeypatch: Any) -> None:
         app = _make_app()
@@ -258,7 +266,34 @@ class TestReportBacktest:
         }
         assert len(data["fills"]) == 1
         assert data["fills"][0]["symbol"] == "510300.SH"
+        assert data["fills_total"] == 1
+        assert data["fills_offset"] == 0
         assert "均线交叉" in data["summary"]
+
+    async def test_fills_paginated_and_bounded(
+        self, monkeypatch: Any
+    ) -> None:
+        """issue #206 P0:report_backtest fills 默认有界 + offset/limit 翻页。"""
+        app = _make_app()
+        row = _backtest_row()
+        row.fills = [{"symbol": f"S{i:04d}"} for i in range(450)]
+        _patch_backtest_repos(monkeypatch, row)
+
+        env = await rp_tools.report_backtest(app, 1)
+        assert env.status == "ok"
+        assert len(env.data["fills"]) == 200
+        assert env.data["fills_total"] == 450
+        assert env.data["fills"][0]["symbol"] == "S0000"
+
+        env_page = await rp_tools.report_backtest(
+            app, 1, fills_limit=50, fills_offset=400
+        )
+        assert len(env_page.data["fills"]) == 50
+        assert env_page.data["fills"][0]["symbol"] == "S0400"
+        assert env_page.data["fills_offset"] == 400
+
+        env_all = await rp_tools.report_backtest(app, 1, fills_limit=None)
+        assert len(env_all.data["fills"]) == 450
 
     async def test_backtest_not_found(self, monkeypatch: Any) -> None:
         app = _make_app()

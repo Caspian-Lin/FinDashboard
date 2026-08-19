@@ -507,7 +507,7 @@ async def export_research_run_report(
     if row is None:
         raise HTTPException(status_code=404, detail="研究运行不存在")
     artifacts = await repo.list_artifacts(run_id)
-    report = reporting.aggregate_run_report(row, artifacts)
+    report = reporting.aggregate_run_report(row, artifacts, view="detail")
     content = await asyncio.to_thread(reporting.render_report, "run", report, format)
     filename = f"finboard_run_{_safe_filename(run_id)}.{_report_extension(format)}"
     media_type = "text/csv; charset=utf-8" if format == "csv" else "text/markdown; charset=utf-8"

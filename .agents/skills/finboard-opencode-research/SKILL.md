@@ -34,13 +34,13 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | 数据准备(拉取/同步/发布/修复/ETF/配置) | `finboard.data_write.*` / `.etf.*`(12 个) | ✅ #137 | 2 只读 + 10 自主执行 |
 | 因子目录 / 特征快照 / 因子信号 / 因子实验 | `finboard.factor.*` / `.feature_snapshot.*`(12 个) | ✅ #125 | 8 只读 + 4 自主执行 |
 | 策略规格 / 预设(registry/template/validate/draft/publish/rollback/diff/preset CRUD) | `finboard.strategy.*` / `.preset.*`(16 个) | ✅ #126 | 8 只读 + 8 自主执行 |
-| 回测(双形态:strategy 事件驱动回测——默认小规模同步,run_async=true 或规模达阈值自动入队后台任务返回 job_id(#189,避免 MCP 30s 超时后响应丢失);strategy_spec 路由已发布规格入队 research_run 多期再平衡回放;benchmark_symbol 显式基准(指数日线 akshare 免积分),基准缺失返回 null 不静默 0.0;selection.factor_version 仅 "v1",与快照 framework_version("v2")不同命名空间(#190);批量网格提交/聚合对比——grid_get 默认不返回曲线,显式 equity_mode=summary/full 才返回(#190);history CRUD) | `finboard.backtest.*`(7 个) | ✅ #127+#174+#175+#183+#184+#189+#190 | 4 只读 + 3 自主执行 |
+| 回测(双形态:strategy 事件驱动回测——默认小规模同步,run_async=true 或规模达阈值自动入队后台任务返回 job_id(#189,避免 MCP 30s 超时后响应丢失);strategy_spec 路由已发布规格入队 research_run 多期再平衡回放;benchmark_symbol 显式基准(指数日线 akshare 免积分),基准缺失返回 null 不静默 0.0;selection.factor_version 仅 "v1",与快照 framework_version("v2")不同命名空间(#190);批量网格提交/聚合对比——grid_get 默认不返回曲线,显式 equity_mode=summary/full 才返回,公共字段在网格头部只出现一次(#190/#206);history CRUD——history_get fills 默认有界 200 条分页、history_list symbols 前 10 只+计数(#206)) | `finboard.backtest.*`(7 个) | ✅ #127+#174+#175+#183+#184+#189+#190 | 4 只读 + 3 自主执行 |
 | 模拟盘(账户/会话生命周期/决策/行情投递/晋级评估/归档/订单/成交/持仓/账本/审计/报告) | `finboard.sim.*`(21 个) | ✅ #127+#139 | 10 只读 + 11 自主执行 |
 | portfolio 计算(allocate/sizing/feasibility/attribution) | `finboard.portfolio.*`(4 个) | ✅ #128 | 纯计算,自主执行 |
 | 后台任务队列监控与提交 | `finboard.job.*`(list/get 只读 + enqueue/cancel 写,4 个) | ✅ #136 | 2 只读 + 2 自主执行 |
 | #57 验证实验(创建/列表/详情/拒绝/登记 trial/删除) | `finboard.validation_experiment.*`(6 个) | ✅ #138 | 2 只读 + 4 自主执行 |
 | 自选股(创建/查询标的组、增删标的) | `finboard.watchlist.*`(7 个) | ✅ #140 | 2 只读 + 5 自主执行 |
-| 报告聚合与导出(ResearchRun/回测报告、导出 CSV/Markdown 文件) | `finboard.report.*`(3 个) | ✅ #141 | 3 只读 |
+| 报告聚合与导出(ResearchRun/回测报告、导出 CSV/Markdown 文件;report_run 默认 summary 聚合计数、report_backtest fills 分页有界,#206) | `finboard.report.*`(3 个) | ✅ #141+#206 | 3 只读 |
 
 > 详细工具契约见 `references/tools.md`;扩展计划见
 > `packages/finboard-mcp/ROADMAP.md`。

@@ -287,9 +287,16 @@ async def dataset_release_list(
 
 
 async def dataset_release_get(
-    app: McpAppContext, release_id: str
+    app: McpAppContext,
+    release_id: str,
+    *,
+    view: str = "summary",
 ) -> ToolEnvelope:
+    """查询单个研究数据发布(issue #206:view 默认 summary,省略逐标的数组)。"""
+
     async def _do() -> dict[str, Any]:
+        if view not in ("summary", "detail"):
+            raise McpToolError("invalid_argument", f"未知视图: {view}")
         async with app.session_maker() as session:
             repo = ResearchDatasetReleaseRepository(session)
             release = await repo.get(release_id)
@@ -297,12 +304,14 @@ async def dataset_release_get(
                 raise McpToolError(
                     "not_found", f"未找到研究数据发布: {release_id}"
                 )
+            if view == "summary":
+                return _release_summary_to_dict(release)
             return _release_detail_to_dict(release)
 
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.dataset_release.get",
-        arguments={"release_id": release_id},
+        arguments={"release_id": release_id, "view": view},
         handler=_do,
     )
 
@@ -637,15 +646,20 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_dataset_release_get",
         description=(
-            "查询数据集发布详情(含逐标的覆盖、资产规则、能力缺口)。"
-            "返回完整 release manifest + symbol_count/row_count/coverage_pct。"
-            "未找到返回 not_found。"
+            "查询数据集发布详情。view=summary(默认):头部字段 + capabilities"
+            " + 覆盖统计(symbol_count/row_count/coverage_pct),**不含逐标的 "
+            "instruments 数组**(全市场发布可达几十 MB);view=detail:完整 "
+            "as_dict()(含逐标的覆盖、资产规则,诊断用)。未找到返回 not_found。"
         ),
     )
     async def _dataset_release_get(
-        release_id: str, ctx: Context = None  # type: ignore[assignment]
+        release_id: str,
+        view: str = "summary",
+        ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
-        return await dataset_release_get(app_context(ctx), release_id)
+        return await dataset_release_get(
+            app_context(ctx), release_id, view=view
+        )
 
     @mcp.tool(
         name="finboard_dataset_manifest_list",

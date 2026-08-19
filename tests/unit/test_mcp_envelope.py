@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
-
 import pytest
 
 from finboard_mcp.envelope import (
@@ -54,9 +52,11 @@ class TestEnvelope:
         assert new_operation_id() != new_operation_id()
 
     def test_envelope_is_frozen(self) -> None:
+        from pydantic import ValidationError
+
         env = ok()
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            env.status = "error"  # type: ignore[misc]
+        with pytest.raises(ValidationError):
+            env.status = "error"
 
     def test_unpack_tooldata_lifts_provenance(self) -> None:
         provenance, data = _unpack(ToolData(data=1, provenance={"k": 1}))
@@ -70,3 +70,77 @@ class TestEnvelope:
 
     def test_envelope_is_a_toolenvelope(self) -> None:
         assert isinstance(ok(), ToolEnvelope)
+
+    def test_serialization_omits_none_fields(self) -> None:
+        """issue #206:pydantic 序列化(模拟 MCP SDK output_model 路径)省略 None 字段。"""
+        import json
+
+        from pydantic import TypeAdapter, create_model
+
+        env = ok({"answer": 42})
+        model = create_model("Out", result=ToolEnvelope)
+        payload = json.loads(TypeAdapter(model).dump_json(model(result=env)))
+        assert payload == {
+            "result": {"operation_id": env.operation_id, "status": "ok", "data": {"answer": 42}}
+        }
+
+    def test_serialization_keeps_error_and_message(self) -> None:
+        import json
+
+        from pydantic import TypeAdapter, create_model
+
+        env = error("not_found", "未找到", idempotency_key="K-1")
+        model = create_model("Out", result=ToolEnvelope)
+        payload = json.loads(TypeAdapter(model).dump_json(model(result=env)))
+        assert payload["result"]["error"] == {
+            "kind": "not_found",
+            "message": "未找到",
+            "retryable": False,
+        }
+        assert payload["result"]["message"] == "未找到"
+        assert payload["result"]["idempotency_key"] == "K-1"
+        assert "data" not in payload["result"]
+        assert "provenance" not in payload["result"]
+
+    def test_serialization_keeps_provenance(self) -> None:
+        import json
+
+        from pydantic import TypeAdapter, create_model
+
+        env = ok(1, provenance={"provider": "fake"})
+        model = create_model("Out", result=ToolEnvelope)
+        payload = json.loads(TypeAdapter(model).dump_json(model(result=env)))
+        assert payload["result"]["provenance"] == {"provider": "fake"}
+
+    def test_sdk_convert_result_path_omits_none(self) -> None:
+        """issue #206:MCP SDK 真实序列化路径(structured content)省略 None。
+
+        SDK 对 BaseModel 直接用作 output_model(不重建字段),convert_result 的
+        model_dump 走 model_serializer;此前 dataclass 形态会被 SDK 重建为
+        同名模型导致自定义钩子失效,故固化该回归测试。
+        """
+        from mcp.types import InputRequiredResult
+
+        from finboard_mcp.server import build_mcp_server
+
+        mcp = build_mcp_server()
+        tool = mcp._tool_manager.get_tool("finboard_job_list")
+        assert tool is not None
+        result = tool.fn_metadata.convert_result(ok([{"job_id": "BJ-1"}]))
+        assert not isinstance(result, InputRequiredResult)
+        structured = result.structured_content
+        assert isinstance(structured, dict)
+        assert structured == {
+            "operation_id": structured["operation_id"],
+            "status": "ok",
+            "data": [{"job_id": "BJ-1"}],
+        }
+
+        failed = tool.fn_metadata.convert_result(error("not_found", "未找到"))
+        assert not isinstance(failed, InputRequiredResult)
+        failed_payload = failed.structured_content
+        assert isinstance(failed_payload, dict)
+        assert failed_payload["status"] == "error"
+        assert failed_payload["error"]["kind"] == "not_found"
+        assert "data" not in failed_payload
+        assert "provenance" not in failed_payload

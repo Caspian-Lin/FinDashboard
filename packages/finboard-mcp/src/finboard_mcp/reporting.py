@@ -96,9 +96,18 @@ def _iso(value: Any) -> str | None:
 def aggregate_run_report(
     row: ResearchRunModel,
     artifacts: list[ResearchRunArtifactModel],
+    *,
+    view: str = "summary",
 ) -> dict[str, Any]:
-    """聚合 ResearchRun:run 元信息 + result(ResearchRunReport 扁平字段)+ 全部 artifacts。"""
-    return {
+    """聚合 ResearchRun:run 元信息 + result(ResearchRunReport 扁平字段)+ 全部 artifacts。
+
+    issue #206:``view=summary``(默认)不序列化 UNIVERSE/FILLS 等逐标的全量
+    payload —— universe 判定聚合为计数,fills 按决策计数;``view=detail``
+    保留全量 artifacts(诊断 / 导出用)。纯展示层变换,不修改落库数据。
+    """
+    if view not in ("summary", "detail"):
+        raise ValueError(f"未知视图: {view}")
+    base: dict[str, Any] = {
         "run_id": row.run_id,
         "status": row.status,
         "strategy_id": row.strategy_id,
@@ -110,18 +119,87 @@ def aggregate_run_report(
         "error_summary": row.error_summary,
         "metrics": dict(row.result) if row.result else {},
         "artifact_count": len(artifacts),
-        "artifacts": [
-            {
-                "artifact_id": item.artifact_id,
-                "sequence": item.sequence,
-                "stage": item.stage,
-                "decision_id": item.decision_id,
-                "trace_id": item.trace_id,
-                "checksum": item.checksum,
-                "payload": item.payload,
-            }
-            for item in artifacts
-        ],
+        "view": view,
+    }
+    if view == "summary":
+        base["metrics"] = metrics_without_equity_curve(base["metrics"])
+        base.update(summarize_run_artifacts(artifacts))
+        return base
+    base["artifacts"] = [
+        {
+            "artifact_id": item.artifact_id,
+            "sequence": item.sequence,
+            "stage": item.stage,
+            "decision_id": item.decision_id,
+            "trace_id": item.trace_id,
+            "checksum": item.checksum,
+            "payload": item.payload,
+        }
+        for item in artifacts
+    ]
+    return base
+
+
+#: 默认 fills 分页上限(issue #206 P0:返回体有界,全量走分页翻页)。
+DEFAULT_FILLS_LIMIT = 200
+
+
+def metrics_without_equity_curve(metrics: dict[str, Any]) -> dict[str, Any]:
+    """summary 视图剔除 result 内嵌 equity_curve 列表,以点数提示代替。"""
+    if not isinstance(metrics, dict) or "equity_curve" not in metrics:
+        return metrics
+    trimmed = dict(metrics)
+    curve = trimmed.pop("equity_curve")
+    trimmed["equity_point_count"] = len(curve) if isinstance(curve, list) else 0
+    return trimmed
+
+
+def summarize_run_artifacts(
+    artifacts: list[ResearchRunArtifactModel],
+) -> dict[str, Any]:
+    """把逐决策 artifacts 聚合为计数摘要(issue #206,服务端聚合不传全量)。
+
+    * ``universe``:候选池逐标的判定聚合计数(total / included /
+      ``excluded_by_reason``,与 UNIVERSE stage 全量判定一致);
+    * ``fills``:按决策计数(``total`` + ``by_decision``)。
+    """
+    total = 0
+    included = 0
+    excluded_by_reason: dict[str, int] = {}
+    fills_by_decision: dict[str, int] = {}
+    fill_total = 0
+    for item in artifacts:
+        stage: Any = getattr(item, "stage", None)
+        stage_value = stage.value if hasattr(stage, "value") else stage
+        payload: dict[str, Any] = dict(item.payload or {}) if item.payload else {}
+        if stage_value == "universe":
+            candidates = payload.get("candidates") or []
+            for candidate in candidates:
+                total += 1
+                if candidate.get("included"):
+                    included += 1
+                    continue
+                for reason in candidate.get("reasons") or ["unknown"]:
+                    excluded_by_reason[reason] = (
+                        excluded_by_reason.get(reason, 0) + 1
+                    )
+        elif stage_value == "fills":
+            count = len(payload.get("fills") or [])
+            fill_total += count
+            decision_id = item.decision_id or ""
+            fills_by_decision[decision_id] = (
+                fills_by_decision.get(decision_id, 0) + count
+            )
+    return {
+        "universe": {
+            "total": total,
+            "included": included,
+            "excluded_by_reason": excluded_by_reason,
+        },
+        "fills": {
+            "total": fill_total,
+            "by_decision": fills_by_decision,
+        },
     }
 
 
@@ -130,11 +208,15 @@ def aggregate_backtest_report(
     *,
     equity_mode: str = "summary",
     max_points: int = 200,
+    fills_limit: int | None = DEFAULT_FILLS_LIMIT,
+    fills_offset: int = 0,
 ) -> dict[str, Any]:
     """聚合回测历史:运行元信息 + metrics + equity_curve + fills + summary。
 
     ``equity_mode`` 控制 equity 曲线体积(summary 降采样 / full 全量),
-    issue #172;文件导出走全量,不受影响。
+    issue #172;``fills_limit``/``fills_offset`` 控制 fills 分页(默认有界
+    200 条,issue #206;``fills_limit=None`` 返回全部);文件导出走全量,
+    不受影响。
     """
     from finboard_mcp.downsample import (
         apply_equity_mode,
@@ -145,6 +227,13 @@ def aggregate_backtest_report(
     mode = resolve_equity_mode(equity_mode)
     max_equity_points = clamp_max_points(max_points)
     all_equity = list(row.equity_curve) if row.equity_curve else []
+    all_fills = list(row.fills) if row.fills else []
+    safe_offset = max(0, fills_offset)
+    safe_limit = (
+        len(all_fills)
+        if fills_limit is None
+        else max(0, min(len(all_fills), fills_limit))
+    )
     return {
         "run_id": row.id,
         "strategy": row.strategy,
@@ -159,7 +248,9 @@ def aggregate_backtest_report(
             all_equity, equity_mode=mode, max_points=max_equity_points
         ),
         "equity_point_count": len(all_equity),
-        "fills": list(row.fills) if row.fills else [],
+        "fills": all_fills[safe_offset : safe_offset + safe_limit],
+        "fills_total": len(all_fills),
+        "fills_offset": safe_offset,
         "summary": row.summary,
     }
 
@@ -362,13 +453,16 @@ def export_report(
 
 
 __all__ = [
+    "DEFAULT_FILLS_LIMIT",
     "EXPORT_FORMATS",
     "REPORT_KINDS",
     "aggregate_backtest_report",
     "aggregate_run_report",
     "export_dir",
     "export_report",
+    "metrics_without_equity_curve",
     "render_csv",
     "render_markdown",
     "render_report",
+    "summarize_run_artifacts",
 ]

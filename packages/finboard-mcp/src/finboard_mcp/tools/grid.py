@@ -506,7 +506,8 @@ async def backtest_grid_get(
                     "label": label,
                     "job_id": job.job_id,
                     "job_status": job.status,
-                    "params": combo.get("params") or {},
+                    # issue #206 P1:公共参数上提网格头部 base_params,
+                    # combo 不重复;组合差异由 label(覆盖参数 JSON)承载。
                 }
                 if job.status == BackgroundJobStatus.SUCCEEDED.value:
                     run = None
@@ -594,6 +595,9 @@ async def backtest_grid_get(
                     "end": grid_row.end,
                     "capital": str(grid_row.capital),
                     "adjust": grid_row.adjust,
+                    # issue #206 P1:网格级基础参数在头部只出现一次;
+                    # combo 完整参数 = base_params + label(覆盖参数)。
+                    "params": dict(getattr(grid_row, "base_params", None) or {}),
                     "combo_count": grid_row.combo_count,
                     "complete": complete,
                     "completed_count": sum(1 for status in statuses if status in TERMINAL_STATUSES),
@@ -689,6 +693,10 @@ def register(mcp: MCPServer) -> None:
             "查询批量参数网格回测的聚合对比表:逐组合指标矩阵(收益/回撤/夏普/"
             "胜率/超额/换手等)+ 关键指标竞争排名与最优标注(ranking/best)+ "
             "失败组合错误清单(failures 带错误码单列,不影响成功组合返回)。"
+            "公共字段(strategy/symbols/start/end/capital/adjust/params=base_params)"
+            "在网格头部只出现一次(issue #206);combo 只含 combo_index/label/"
+            "job_id/job_status/指标/权益,组合差异由 label(覆盖参数 JSON)承载,"
+            "完整组合参数 = params + label。"
             "参数:grid_id、equity_mode(none 默认:不返回 equity 曲线,响应最轻,"
             "只保留 equity_point_count 点数提示;summary:equity 降采样到 "
             "max_points 个关键点,首末点保留;full:完整曲线)、max_points(默认 "

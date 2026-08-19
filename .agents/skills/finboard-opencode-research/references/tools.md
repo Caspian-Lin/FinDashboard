@@ -36,10 +36,15 @@
   (`execution_mode`: single_shot | multi_period,#183)
 
 ### finboard_run_get
-查询单个 ResearchRun 详情(含 manifest / result)。
-- 参数:`run_id: str`
-- 返回:`{run_id, ..., manifest, result, error_summary, execution_mode}`
-  (result 多期回放含 `annualized_return` 与 `equity_curve` 全区间每日权益曲线,#183)
+查询单个 ResearchRun。
+- 参数:`run_id: str` / `view?: "summary"|"detail" = "summary"`
+- 返回(默认 summary,#206):`{run_id, status, ..., metrics(剔 equity_curve,
+  附 equity_point_count), universe: {total, included, excluded_by_reason},
+  fills: {total, by_decision}, artifact_count, execution_mode}` —— 不序列化
+  manifest/result 全量
+- 返回(view=detail):`{run_id, ..., manifest, result, error_summary, execution_mode}`
+  (result 多期回放含 `annualized_return` 与 `equity_curve` 全区间每日权益曲线,#183;
+  逐标的全量 payload 可达 MB 级,诊断用)
 
 ### finboard_run_artifacts
 列出某 ResearchRun 的逐阶段 artifact。
@@ -83,7 +88,9 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   - `requested_by`*: 归属人(如 `user:xxx` / `agent:mcp`)
   - `actor_type`: `"human"`(固定;LLM 不能触发运行)
   (`parameters.rebalance_frequency ∈ {monthly, quarterly}` 时 multi_period)
-- 返回:ResearchRun 详情(含 manifest 与 execution_mode)
+- 返回:精简回执(#206)`{run_id, job_id, strategy_id, strategy_kind, status,
+  checksum(manifest_checksum), execution_mode, created_at, view: "ack"}`;
+  全量详情走 `finboard_run_get(run_id)`(含 manifest 与 execution_mode)
 - **入队预检(issue #186)**:入队时对主数据发布的 instruments 做 universe
   候选池非空校验(与 data_sync 后的元数据状态一致);空池秒级
   `invalid_argument`,错误信息附各过滤条件的排除统计(如
@@ -185,9 +192,13 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   row_count, coverage_pct, capabilities, quality_status, ...}]`
 
 ### finboard_dataset_release_get
-查询数据集发布详情(含逐标的覆盖、资产规则、能力缺口)。
-- 参数:`release_id: str`
-- 返回:完整 release manifest + symbol_count/row_count/coverage_pct;未找到 → `not_found`
+查询数据集发布详情。
+- 参数:`release_id: str` / `view?: "summary"|"detail" = "summary"`
+- 返回(默认 summary,#206):头部字段 + capabilities + 覆盖统计
+  (symbol_count/row_count/coverage_pct),**不含逐标的 instruments 数组**
+  (全市场发布可达几十 MB,防截断)
+- 返回(view=detail):完整 as_dict()(含逐标的覆盖、资产规则、能力缺口,诊断用);
+  未找到 → `not_found`
 
 ### finboard_dataset_manifest_list
 列出数据集发布清单(dataset manifests)。
@@ -539,6 +550,8 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 保存策略规格草稿版本(change_type=create,首版本)。
 - 参数:`spec: dict`、`expected_version?: int`
 - 先 validate 再持久化;版本冲突 → `conflict`
+- 返回精简回执(#206):`{strategy_id, version, status, checksum, created_at,
+  view: "ack", detail_hint}` —— 完整 spec 走 `finboard_strategy_version_get`
 
 ### finboard_strategy_supersede **[写]**
 为已存在的策略创建后继草稿(change_type=supersede)。
@@ -549,6 +562,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 发布策略规格的指定版本(draft→published)。
 - 参数:`strategy_id: str`、`version: int`、`expected_version: int`
 - 发布前重新编译校验;版本不存在 → `not_found`,状态转换非法 → `conflict`
+- 返回精简回执(#206,同 draft_create 形态);完整 spec 走 version_get
 
 ### finboard_strategy_rollback **[写]**
 回滚策略规格到指定目标版本(change_type=rollback)。
@@ -657,14 +671,16 @@ research_run 管线轻路由(#174)。
 ### finboard_backtest_history_list(只读)
 列出最近回测历史记录(摘要,不含完整 equity/fills)。
 - 参数:`limit?: int = 50`
-- 返回:`list[{id, strategy, symbols, start, end, capital, metrics, ...}]`
+- 返回:`list[{id, strategy, symbols(前 10 只,#206), symbol_count, start,
+  end, capital, metrics, ...}]`
 
 ### finboard_backtest_history_get(只读)
-查询单条回测历史详情(equity 默认降采样,fills 支持分页)。
+查询单条回测历史详情(equity 默认降采样,fills 分页)。
 - 参数:`run_id: int`、`equity_mode: str = "summary"`、`max_points: int = 200`、
-  `fills_limit: int | None`(不传返回全部)、`fills_offset: int = 0`
+  `fills_limit: int | None = 200`(默认有界 200 条,#206;`null` 返回全部)、
+  `fills_offset: int = 0`
 - 返回:`{id, ..., equity_curve, equity_point_count, fills, fills_total,
-  fills_offset, summary, selection_snapshots, ...}`
+  fills_offset, summary, selection_snapshots, ...}`(symbols 全量,列表才有预览)
 - 错误:`not_found`、`invalid_argument`(equity_mode 非法)
 
 ### finboard_backtest_history_delete **[写]**
@@ -707,11 +723,13 @@ research_run 管线轻路由(#174)。
   max_points 个关键点,首末点保留;`full` 返回完整曲线;复用 #172 形态 +
   #190 默认响应瘦身)、`max_points: int = 200`
 - 返回:
-  - 网格元信息 + `complete: bool`(全部组合到终态)/ `completed_count` /
+  - 网格元信息(公共字段 strategy/symbols/start/end/capital/adjust/params=
+    base_params 在头部只出现一次,#206;combo 完整参数 = params + label 的
+    覆盖参数)+ `complete: bool`(全部组合到终态)/ `completed_count` /
     `pending_count` / `failed_count`
   - `metric_fields: list[str]`(指标矩阵列:收益/年化/夏普/回撤/胜率/换手/超额/
     费用等,按规范顺序)
-  - `combos: list[{combo_index, label, params, job_id, job_status, run_id?,
+  - `combos: list[{combo_index, label, job_id, job_status, run_id?,
     metrics?, equity_curve?(仅显式 equity_mode 时返回), equity_point_count?,
     rank?{指标: 竞争排名,同值
     同排名}, best?{指标: 是否最优}}]`(成功组合带指标矩阵 + 排名 + 最优标注;
@@ -949,9 +967,14 @@ industry_memberships](默认全部), start_date, end_date(ISO), symbols?:
 
 ### finboard_job_get(只读)
 查询单个后台任务详情。
-- 参数:`job_id: str`
-- 返回:`JobOut`(成功后 `result_ref` 携带产物引用,如特征快照的 snapshot_id)
-- 错误:`not_found`
+- 参数:`job_id: str`、`view?: "none"|"summary"|"detail" = "summary"`、
+  `data_hash?: str`
+- 返回(默认 summary,#206):JobOut 全字段但**剥离 payload**,附 `data_hash`
+  (状态指纹);`view=none` 只回轮询最小集(status/phase/progress_*/result_ref/
+  error_*/attempt);`view=detail` 完整含 payload(诊断用)。轮询时把上次
+  `data_hash` 传回:状态未变 → `{unchanged: true, data_hash, status}` 不重发
+  全量(成功后 `result_ref` 携带产物引用,如特征快照的 snapshot_id)
+- 错误:`not_found`、`invalid_argument`(view 非法)
 
 ### finboard_job_enqueue **[写]**
 登记一个 queued 后台任务并立即返回 202 + job_id(不等待执行,由独立 worker 消费)。
@@ -1039,21 +1062,26 @@ REST PUT 是全量语义,这里更安全)。
 模拟盘报告生成已有 `finboard_sim_report`,导出暂不覆盖。
 
 ### finboard_report_run(只读)
-聚合单个 ResearchRun 报告:run 元信息 + result 指标(ResearchRunReport 扁平
-字段)+ 全部 artifacts(含 report / equity / decisions 各阶段 payload)。
-- 参数:`run_id: str`(RR-)
-- 返回:`{run_id, status, strategy_id, strategy_kind, created_at,
-  completed_at, metrics, artifact_count, artifacts: [{artifact_id, sequence,
-  stage, decision_id, trace_id, checksum, payload}]}`
-- 错误:`not_found`(研究运行不存在)
+聚合单个 ResearchRun 报告。
+- 参数:`run_id: str`(RR-)、`view?: "summary"|"detail" = "summary"`
+- 返回(默认 summary,#206):`{run_id, status, strategy_id, strategy_kind,
+  created_at, completed_at, metrics(剔 equity_curve), artifact_count, view,
+  universe: {total, included, excluded_by_reason}, fills: {total, by_decision}}`
+  —— 不序列化逐标的全量 payload
+- 返回(view=detail):`{..., artifacts: [{artifact_id, sequence, stage,
+  decision_id, trace_id, checksum, payload}]}`(含 report / equity / decisions
+  各阶段 payload,可达 MB 级,诊断用)
+- 错误:`not_found`(研究运行不存在)、`invalid_argument`(view 非法)
 
 ### finboard_report_backtest(只读)
 聚合单条回测历史报告:运行元信息 + metrics + equity_curve + fills + summary
 (标准化结构;equity 默认降采样,issue #172)。
-- 参数:`run_id: int`、`equity_mode: str = "summary"`、`max_points: int = 200`
+- 参数:`run_id: int`、`equity_mode: str = "summary"`、`max_points: int = 200`、
+  `fills_limit?: int | null = 200`(默认有界,#206;`null` 全量)、
+  `fills_offset?: int = 0`
 - 返回:`{run_id, strategy, symbols, start, end, capital, adjust, created_at,
   metrics, equity_curve: [{date, equity, benchmark?}], equity_point_count,
-  fills: [{date, symbol, side, quantity, price, commission}], summary}`
+  fills: [...](分页), fills_total, fills_offset, summary}`
 - 错误:`not_found`(回测记录不存在)、`invalid_argument`(equity_mode 非法)
 
 ### finboard_report_export(只读)

@@ -280,7 +280,10 @@ async def test_grid_get_aggregates_with_partial_failure(
 
     succeeded = [row for row in data["combos"] if "metrics" in row]
     assert len(succeeded) == 2
-    by_short = {row["params"]["short_window"]: row for row in succeeded}
+    # issue #206:combo 不再重复 params,组合差异由 label(覆盖参数 JSON)承载。
+    import json as _json
+
+    by_short = {_json.loads(row["label"])["short_window"]: row for row in succeeded}
     assert by_short[5]["metrics"]["total_return"] == 0.05
     assert by_short[15]["metrics"]["total_return"] == 0.15
     # 排名与最优标注:total_return 15 > 5;max_drawdown 越高越好(-0.05 > -0.07)

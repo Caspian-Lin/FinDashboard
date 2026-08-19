@@ -18,6 +18,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from pydantic import BaseModel, ConfigDict, model_serializer
+
 ToolStatus = Literal["ok", "denied", "error", "pending_approval"]
 
 ErrorKind = Literal[
@@ -32,21 +34,30 @@ ErrorKind = Literal[
 ]
 
 
-@dataclass(frozen=True)
-class ToolError:
+class ToolError(BaseModel):
     """结构化错误。
 
     ``kind`` 是机器可读的错误分类,``retryable`` 提示调用方是否可重试。
     """
+
+    model_config = ConfigDict(frozen=True)
 
     kind: ErrorKind
     message: str
     retryable: bool = False
 
 
-@dataclass(frozen=True)
-class ToolEnvelope:
-    """工具统一响应信封。"""
+class ToolEnvelope(BaseModel):
+    """工具统一响应信封。
+
+    issue #206:序列化时省略恒为 ``None`` 的可选字段(error / provenance /
+    idempotency_key / message / data),减少每次调用的信封噪音。实现为
+    pydantic frozen model + ``model_serializer`` —— MCP SDK 对 BaseModel
+    子类直接用作 structured output 模型(不重建字段),model_dump 与
+    to_json 均经过这里的过滤;工具函数与测试继续按属性访问,不受影响。
+    """
+
+    model_config = ConfigDict(frozen=True)
 
     operation_id: str
     status: ToolStatus
@@ -55,6 +66,14 @@ class ToolEnvelope:
     provenance: Mapping[str, Any] | None = None
     idempotency_key: str | None = None
     message: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in handler(self).items()
+            if value is not None
+        }
 
 
 @dataclass(frozen=True)
