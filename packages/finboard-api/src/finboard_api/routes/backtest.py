@@ -174,7 +174,7 @@ async def export_history_report(
     r = await repo.get(run_id)
     if r is None:
         raise HTTPException(status_code=404, detail="回测记录不存在")
-    report = reporting.aggregate_backtest_report(r)
+    report = reporting.aggregate_backtest_report(r, fills_limit=None)
     content = await asyncio.to_thread(reporting.render_report, "backtest", report, format)
     filename = f"finboard_backtest_{run_id}.{ 'md' if format == 'markdown' else format }"
     media_type = "text/csv; charset=utf-8" if format == "csv" else "text/markdown; charset=utf-8"

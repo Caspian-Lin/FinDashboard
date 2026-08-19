@@ -83,6 +83,45 @@ def _job_out(row: Any) -> dict[str, Any]:
     )
 
 
+#: ``job_get(view=none)`` 的轮询最小字段集(issue #206 P2)。
+_JOB_POLL_FIELDS: tuple[str, ...] = (
+    "job_id",
+    "kind",
+    "status",
+    "phase",
+    "progress_done",
+    "progress_total",
+    "result_ref",
+    "error_code",
+    "error_summary",
+    "attempt",
+    "updated_at",
+)
+
+#: 参与 ``data_hash`` 的状态字段(issue #206 P3:状态未变 → unchanged 短路)。
+_JOB_HASH_FIELDS: tuple[str, ...] = (
+    "status",
+    "phase",
+    "progress_done",
+    "progress_total",
+    "result_ref",
+    "error_code",
+    "error_summary",
+    "attempt",
+)
+
+
+def _job_state_hash(row: Any) -> str:
+    """对轮询关心的状态字段计算 sha256,同状态同 hash(不含 payload/时间戳)。"""
+
+    material = json.dumps(
+        {key: to_jsonable(getattr(row, key, None)) for key in _JOB_HASH_FIELDS},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def _payload_checksum(payload: dict[str, Any]) -> str:
     """计算 background_jobs payload checksum(与 routes/jobs.py 口径一致)。"""
 
@@ -131,18 +170,58 @@ async def job_list(
     )
 
 
-async def job_get(app: McpAppContext, job_id: str) -> ToolEnvelope:
+async def job_get(
+    app: McpAppContext,
+    job_id: str,
+    *,
+    view: str = "summary",
+    data_hash: str | None = None,
+) -> ToolEnvelope:
+    """查询单个后台任务(issue #206:view 三档 + data_hash 幂等短路)。
+
+    * ``view=none``:轮询最小字段集(status/progress/result_ref/error);
+    * ``view=summary``(默认):JobOut 全字段,剥离 payload;
+    * ``view=detail``:完整 JobOut(含 payload,诊断用)。
+    * ``data_hash``:上次返回携带的状态指纹;命中(状态未变)返回
+      ``{unchanged: true, data_hash, status}`` 而非重发全量(P3)。
+    """
+
     async def _do() -> dict[str, Any]:
+        if view not in ("none", "summary", "detail"):
+            raise McpToolError(
+                "invalid_argument", f"未知视图: {view}(none|summary|detail)"
+            )
         async with app.session_maker() as session:
             row = await BackgroundJobRepository(session).get(job_id)
             if row is None:
                 raise McpToolError("not_found", f"后台任务不存在: {job_id}")
-            return _job_out(row)
+        current_hash = _job_state_hash(row)
+        if data_hash is not None and data_hash == current_hash:
+            return {
+                "job_id": job_id,
+                "unchanged": True,
+                "data_hash": current_hash,
+                "status": row.status,
+                "view": view,
+            }
+        payload_dict = _job_out(row)
+        if view == "none":
+            out = {
+                key: payload_dict[key]
+                for key in _JOB_POLL_FIELDS
+                if key in payload_dict
+            }
+        elif view == "summary":
+            out = {key: item for key, item in payload_dict.items() if key != "payload"}
+        else:
+            out = payload_dict
+        out["data_hash"] = current_hash
+        return out
 
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.job.get",
-        arguments={"job_id": job_id},
+        arguments={"job_id": job_id, "view": view, "data_hash": data_hash},
         handler=_do,
     )
 
@@ -295,13 +374,24 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_job_get",
         description=(
-            "查询单个后台任务详情。返回 JobOut(含完整进度 / 错误 / 时间戳)。"
+            "查询单个后台任务详情。view=summary(默认):JobOut 全字段但剥离 "
+            "payload(issue #206);view=none:轮询最小集(status/phase/progress_*/"
+            "result_ref/error_*/attempt);view=detail:完整 JobOut 含 payload"
+            "(诊断用)。返回附 data_hash(状态指纹):轮询时把上次 data_hash 传回,"
+            "状态未变则返回 {unchanged: true, data_hash, status} 而非重发全量。"
             "成功后 result_ref 携带产物引用(如特征快照的 snapshot_id)。"
             "未找到返回 not_found。只读。"
         ),
     )
-    async def _get(job_id: str, ctx: Context = None) -> ToolEnvelope:  # type: ignore[assignment]
-        return await job_get(app_context(ctx), job_id)
+    async def _get(
+        job_id: str,
+        view: str = "summary",
+        data_hash: str | None = None,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await job_get(
+            app_context(ctx), job_id, view=view, data_hash=data_hash
+        )
 
     @mcp.tool(
         name="finboard_job_enqueue",

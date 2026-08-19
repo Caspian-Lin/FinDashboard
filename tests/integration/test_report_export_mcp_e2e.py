@@ -126,6 +126,7 @@ async def test_report_mcp_aggregate_and_export(
     backtest_id = await _seed(db_session)
 
     # 1) report_run:聚合 result 指标 + 全部 artifacts(真实 DB)
+    #    issue #206:默认 view=summary(聚合计数),artifacts 走 view=detail。
     run_env = await rp_tools.report_run(app, _RUN_ID)
     assert run_env.status == "ok", run_env.error
     assert run_env.data["run_id"] == _RUN_ID
@@ -133,7 +134,11 @@ async def test_report_mcp_aggregate_and_export(
     assert run_env.data["metrics"]["strategy_return"] == 0.21
     assert run_env.data["metrics"]["备注"] == "e2e 中文指标"
     assert run_env.data["artifact_count"] == 1
-    assert run_env.data["artifacts"][0]["stage"] == "report"
+    assert run_env.data["view"] == "summary"
+
+    run_detail = await rp_tools.report_run(app, _RUN_ID, view="detail")
+    assert run_detail.status == "ok", run_detail.error
+    assert run_detail.data["artifacts"][0]["stage"] == "report"
 
     # 2) report_backtest:聚合 metrics + equity_curve + fills
     bt_env = await rp_tools.report_backtest(app, backtest_id)

@@ -292,15 +292,15 @@ class TestBacktestRun:
             "get_version",
             lambda self, strategy_id, version: _async_return(_spec_row()),
         )
-        fake_detail = {
+        fake_ack = {
             "run_id": "RR-abc123",
             "job_id": "BJ-xyz",
             "status": "queued",
             "strategy_id": "mf_test",
             "strategy_kind": "etf",
-            "manifest_checksum": "mc",
+            "checksum": "mc",
         }
-        enqueue_mock = AsyncMock(return_value=fake_detail)
+        enqueue_mock = AsyncMock(return_value=fake_ack)
         monkeypatch.setattr(runs_tools, "enqueue_research_run", enqueue_mock)
         env = await backtest_tools.backtest_run(
             app,
@@ -528,6 +528,26 @@ class TestBacktestHistoryList:
         assert data[0]["id"] == 1
         assert data[0]["strategy"] == "ma_cross"
 
+    async def test_symbols_preview_with_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #206 P2:列表 symbols 只回前 10 只 + symbol_count。"""
+        from finboard_persistence import BacktestRunRepository
+
+        app = _make_app()
+        row = _history_row(1)
+        row.symbols = [f"60000{i}.SH" for i in range(72)]
+        monkeypatch.setattr(
+            BacktestRunRepository,
+            "list_recent",
+            lambda self, **kw: _async_return([row]),
+        )
+        env = await backtest_tools.backtest_history_list(app, limit=10)
+        assert env.status == "ok"
+        item = env.data[0]
+        assert len(item["symbols"]) == 10
+        assert item["symbol_count"] == 72
+
 
 class TestBacktestHistoryGet:
     async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -560,6 +580,71 @@ class TestBacktestHistoryGet:
         assert data["id"] == 1
         assert "equity_curve" in data
         assert "fills" in data
+
+    async def test_fills_default_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """issue #206 P0:默认 fills 有界(200 条),附 fills_total 元数据。"""
+        from finboard_persistence import BacktestRunRepository
+
+        app = _make_app()
+        row = _history_row(1)
+        row.fills = [
+            {"date": "2024-01-02", "symbol": f"60000{i}.SH", "side": "buy"}
+            for i in range(1500)
+        ]
+        monkeypatch.setattr(
+            BacktestRunRepository,
+            "get",
+            lambda self, run_id: _async_return(row),
+        )
+        env = await backtest_tools.backtest_history_get(app, run_id=1)
+        assert env.status == "ok"
+        data = env.data
+        assert len(data["fills"]) == 200
+        assert data["fills_total"] == 1500
+        assert data["fills_offset"] == 0
+
+    async def test_fills_pagination_offset_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """fills_limit/fills_offset 翻页;None 返回全部。"""
+        from finboard_persistence import BacktestRunRepository
+
+        app = _make_app()
+        row = _history_row(1)
+        row.fills = [{"symbol": f"S{i}"} for i in range(30)]
+        monkeypatch.setattr(
+            BacktestRunRepository,
+            "get",
+            lambda self, run_id: _async_return(row),
+        )
+        env = await backtest_tools.backtest_history_get(
+            app, run_id=1, fills_limit=10, fills_offset=25
+        )
+        assert env.status == "ok"
+        assert [f["symbol"] for f in env.data["fills"]] == ["S25", "S26", "S27", "S28", "S29"]
+        assert env.data["fills_total"] == 30
+
+        env_all = await backtest_tools.backtest_history_get(
+            app, run_id=1, fills_limit=None
+        )
+        assert len(env_all.data["fills"]) == 30
+
+    async def test_detail_symbols_not_truncated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """详情视图 symbols 全量(列表才有预览截断)。"""
+        from finboard_persistence import BacktestRunRepository
+
+        app = _make_app()
+        row = _history_row(1)
+        row.symbols = [f"60000{i}.SH" for i in range(72)]
+        monkeypatch.setattr(
+            BacktestRunRepository,
+            "get",
+            lambda self, run_id: _async_return(row),
+        )
+        env = await backtest_tools.backtest_history_get(app, run_id=1)
+        assert len(env.data["symbols"]) == 72
 
 
 class TestBacktestHistoryDelete:

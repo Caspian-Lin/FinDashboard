@@ -85,19 +85,27 @@ FinBoard 研究 MCP —— 量化研究工具集
 == 当前可用工具(115 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
-  single_shot|multi_period,#183)。入队预检(#186):queue 与 backtest_run
+  single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
+  字段 + metrics(剔 equity_curve)+ universe 聚合计数 + fills 按决策计数,
+  不序列化 manifest/result 全量;view=detail 才含全量(可达 MB 级)。
+  入队预检(#186):queue 与 backtest_run
   (strategy_spec 形态)入队时对主数据发布做 universe 候选池非空校验,
   空池秒级 invalid_argument(不再等执行期跑完后报泛化错误),错误信息附
   各过滤条件的排除统计与缺失字段名(如 list_date)。single_shot 缺快照
   同样入队秒级拒绝(#203):未声明 rebalance_frequency 时决策时点只能来自
   冻结因子快照,报错附 execution_mode 与缺失因子源。run_queue payload 模板与
   各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
-  manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。
+  manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。写操作
+  返回精简回执(run_id/job_id/status/checksum/execution_mode/created_at,
+  #206),全量详情走 run_get。
 - finboard.memory.*(7) —— 研究记忆:remember / list / get / forget / correct
   / confirm / archive(跨会话长期上下文,操作 research_memories 独立表)
 - 数据查询(9,✅ #124):instrument list/get/search、dataset_release list/get、
   dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota
-  (标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额,只读)
+  (标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额,只读)。
+  dataset_release_get 默认 view=summary(#206):头部+capabilities+覆盖统计,
+  不含逐标的 instruments 数组(全市场发布可达几十 MB);view=detail 走
+  as_dict() 诊断。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)
@@ -136,12 +144,15 @@ FinBoard 研究 MCP —— 量化研究工具集
   快照」仅限决策日推导与价格因子,基本面因子(pb/ROE 等)仍 PIT 取自冻结
   快照/研究数据发布;未声明即 single_shot,决策时点只能来自冻结因子快照,
   缺快照入队秒级拒绝(#203)。backtest_history_list/get
-  (history_get 支持 fills 分页)、backtest_history_delete(写)、
+  (history_get fills 分页,默认有界 200 条附 fills_total,#206;history_list
+  symbols 只回前 10 只 + symbol_count)、backtest_history_delete(写)、
   backtest_grid_submit(写,批量参数网格:一次提交 N 组参数 → N 个 backtest_run
   后台任务,展开/上限/校验后同一事务落库,返回 grid_id + job 指针)、
   backtest_grid_get(只读,聚合对比表:指标矩阵 + 排名/最优标注 + 失败清单,
   equity_mode=none 默认只给 equity_point_count 不返回曲线,显式
-  summary/full 才返回,对比择优默认响应最轻)。
+  summary/full 才返回;公共字段(strategy/symbols/start/end/capital/adjust/
+  params=base_params)在网格头部只出现一次,combo 只含指标/权益,组合差异由
+  label 承载,#206)。
 - 模拟盘(21,✅ #127+#139):sim_account list/get/create(写)、
   sim_session list/get/create(写)/start/pause/stop/archive(写)/reset(写)、
   sim_decision_submit(写,结构化目标仓位 → 生成订单,不直接创建订单)、
@@ -160,7 +171,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   bulk_download/dataset_publish/backtest_run/data_sync/fetch_all/quality_repair/
   research_data_sync);
   实盘交易内核任务不进入队列。feature_snapshot/bulk_download 等异步任务的进度
-  统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id)。
+  统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id;
+  view=none 轮询最小集 / summary 默认剥 payload / detail 全量;返回附
+  data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206)。
 - 数据写操作(12,✅ #137):data_fetch(同步单标的拉取)、fetch_all /
   sync_universe / bulk_download_start / quality_repair / dataset_release_publish
   (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询;
@@ -179,11 +192,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   add_symbols/remove_symbol(写,受 mcp_readonly_only 守卫)。标的组管理:
   创建标的集合(如回测候选池)→ 加 symbols(自动去重)→ 回测/研究复用,
   与 strategies/simulation 无关联(独立用户查找列表)。
-- 报告聚合与导出(3,✅ #141 + #172):report_run(聚合 ResearchRun:result 指标 +
-  全部 artifacts,含 report/equity/decisions 各阶段 payload)、report_backtest
-  (聚合回测:metrics + equity_curve(默认降采样) + fills + summary)、
-  report_export(导出 CSV/Markdown 文件,写入 FINBOARD_EXPORT_DIR 或系统临时
-  目录,返回绝对路径;导出走全量;纯标准库,零新依赖;只读不写 DB)。
+- 报告聚合与导出(3,✅ #141 + #172 + #206):report_run(聚合 ResearchRun:
+  view=summary 默认 —— result 指标 + universe 聚合计数 + fills 按决策计数,
+  不序列化逐标的全量 payload;view=detail 全量 artifacts 含 report/equity/
+  decisions 各阶段 payload)、report_backtest(聚合回测:metrics +
+  equity_curve(默认降采样) + fills(默认有界 200 条,limit/offset 分页,
+  fills_limit=null 全量) + summary)、report_export(导出 CSV/Markdown 文件,
+  写入 FINBOARD_EXPORT_DIR 或系统临时目录,返回绝对路径;导出走全量;
+  纯标准库,零新依赖;只读不写 DB)。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
@@ -196,7 +212,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 
 == 输出规范 ==
 - 工具返回统一信封 ToolEnvelope(operation_id / status / data / error /
-  provenance / idempotency_key)。
+  provenance / idempotency_key;序列化时省略恒为 null 的可选字段,#206)。
 - 金融答案必须引用项目来源(ResearchRun ID / 数据集版本 / 模拟盘 ID)。
 - 数据不足时明确声明「数据不足」,绝不编造数字。
 """

@@ -245,7 +245,10 @@ class TestDatasetReleaseList:
 
 
 class TestDatasetReleaseGet:
-    async def test_returns_detail(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_default_view_is_summary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #206:默认 summary —— 省略逐标的 instruments 数组。"""
         release = _release_domain()
         from finboard_persistence.dataset_release_repo import (
             ResearchDatasetReleaseRepository as Repo,
@@ -257,10 +260,80 @@ class TestDatasetReleaseGet:
         app = _make_app()
         env = await data_tools.dataset_release_get(app, "REL-1")
         assert env.status == "ok"
+        data = env.data
+        assert data["release_id"] == "REL-1"
+        assert data["symbol_count"] == 10
+        assert data["coverage_pct"] == "99.5"  # Decimal → str
+        assert data["capabilities"][0]["key"] == "daily_bars"
+        assert "instruments" not in data  # 逐标的数组不进 summary
+        assert "fields" not in data  # as_dict() 独有字段不进 summary
+
+    async def test_detail_view_returns_full(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        release = _release_domain()
+        from finboard_persistence.dataset_release_repo import (
+            ResearchDatasetReleaseRepository as Repo,
+        )
+
+        monkeypatch.setattr(
+            Repo, "get", lambda self, release_id: _async_return(release)
+        )
+        app = _make_app()
+        env = await data_tools.dataset_release_get(app, "REL-1", view="detail")
+        assert env.status == "ok"
         assert env.data["release_id"] == "REL-1"
         assert env.data["symbol_count"] == 10
         assert env.data["coverage_pct"] == "99.5"  # Decimal → str
         assert "fields" in env.data  # from as_dict()
+
+    async def test_invalid_view_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        release = _release_domain()
+        from finboard_persistence.dataset_release_repo import (
+            ResearchDatasetReleaseRepository as Repo,
+        )
+
+        monkeypatch.setattr(
+            Repo, "get", lambda self, release_id: _async_return(release)
+        )
+        app = _make_app()
+        env = await data_tools.dataset_release_get(app, "REL-1", view="huge")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_summary_payload_kb_scale_vs_detail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #206 验收:summary 体积 KB 级,detail(逐标的 x5534)MB 级。"""
+        import json
+
+        release = _release_domain()
+        release.as_dict = lambda: {
+            "release_id": "REL-1",
+            "instruments": [
+                {"code": f"60000{i}.SH", "name": f"股票{i}", "list_date": "2010-01-01"}
+                for i in range(5534)
+            ],
+        }
+        from finboard_persistence.dataset_release_repo import (
+            ResearchDatasetReleaseRepository as Repo,
+        )
+
+        monkeypatch.setattr(
+            Repo, "get", lambda self, release_id: _async_return(release)
+        )
+        app = _make_app()
+        summary_env = await data_tools.dataset_release_get(app, "REL-1")
+        detail_env = await data_tools.dataset_release_get(app, "REL-1", view="detail")
+        assert summary_env.status == "ok", summary_env.error
+        assert detail_env.status == "ok", detail_env.error
+        summary_bytes = len(json.dumps(summary_env.data, ensure_ascii=False))
+        detail_bytes = len(json.dumps(detail_env.data, ensure_ascii=False))
+        assert summary_bytes < 4096  # KB 级
+        assert detail_bytes > 100 * summary_bytes  # 两个数量级差距
 
     async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from finboard_persistence.dataset_release_repo import (

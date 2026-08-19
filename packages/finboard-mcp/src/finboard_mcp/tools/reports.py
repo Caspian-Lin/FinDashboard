@@ -27,8 +27,13 @@ from finboard_mcp.tools._serde import to_jsonable
 __all__ = ["register"]
 
 
-async def report_run(app: McpAppContext, run_id: str) -> ToolEnvelope:
-    """聚合 ResearchRun 报告:run 元信息 + result 指标 + 全部 artifacts。"""
+async def report_run(
+    app: McpAppContext,
+    run_id: str,
+    *,
+    view: str = "summary",
+) -> ToolEnvelope:
+    """聚合 ResearchRun 报告:view=summary 默认(聚合计数)/ detail(全量)。"""
 
     async def _do() -> dict[str, Any]:
         from finboard_persistence import ResearchRunRepository
@@ -41,13 +46,15 @@ async def report_run(app: McpAppContext, run_id: str) -> ToolEnvelope:
             artifacts = await repo.list_artifacts(run_id)
             return cast(
                 dict[str, Any],
-                to_jsonable(reporting.aggregate_run_report(row, artifacts)),
+                to_jsonable(
+                    reporting.aggregate_run_report(row, artifacts, view=view)
+                ),
             )
 
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.report.run",
-        arguments={"run_id": run_id},
+        arguments={"run_id": run_id, "view": view},
         handler=_do,
     )
 
@@ -58,8 +65,10 @@ async def report_backtest(
     *,
     equity_mode: str = "summary",
     max_points: int = 200,
+    fills_limit: int | None = reporting.DEFAULT_FILLS_LIMIT,
+    fills_offset: int = 0,
 ) -> ToolEnvelope:
-    """聚合单条回测历史报告:metrics + equity_curve + fills + summary。"""
+    """聚合单条回测历史报告:metrics + equity_curve + fills(有界分页)+ summary。"""
 
     async def _do() -> dict[str, Any]:
         from finboard_persistence import BacktestRunRepository
@@ -73,7 +82,11 @@ async def report_backtest(
                 dict[str, Any],
                 to_jsonable(
                     reporting.aggregate_backtest_report(
-                        row, equity_mode=equity_mode, max_points=max_points
+                        row,
+                        equity_mode=equity_mode,
+                        max_points=max_points,
+                        fills_limit=fills_limit,
+                        fills_offset=fills_offset,
                     )
                 ),
             )
@@ -81,7 +94,12 @@ async def report_backtest(
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.report.backtest",
-        arguments={"run_id": run_id},
+        arguments={
+            "run_id": run_id,
+            "equity_mode": equity_mode,
+            "fills_limit": fills_limit,
+            "fills_offset": fills_offset,
+        },
         handler=_do,
     )
 
@@ -112,7 +130,9 @@ async def report_export(
                 if run_row is None:
                     raise McpToolError("not_found", f"研究运行不存在: {id}")
                 artifacts = await run_repo.list_artifacts(id)
-                report = reporting.aggregate_run_report(run_row, artifacts)
+                report = reporting.aggregate_run_report(
+                    run_row, artifacts, view="detail"
+                )
             else:
                 try:
                     run_id = int(id)
@@ -124,7 +144,10 @@ async def report_export(
                 bt_row = await bt_repo.get(run_id)
                 if bt_row is None:
                     raise McpToolError("not_found", f"回测记录不存在: {run_id}")
-                report = reporting.aggregate_backtest_report(bt_row)
+                # 导出文件走全量(equity / fills 不降采样不分页,#172 先例)。
+                report = reporting.aggregate_backtest_report(
+                    bt_row, fills_limit=None
+                )
         # 文件写入放到线程池,避免阻塞事件循环。
         return cast(
             dict[str, Any],
@@ -145,29 +168,37 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_report_run",
         description=(
-            "聚合单个 ResearchRun 报告:run 元信息 + result 指标"
-            "(ResearchRunReport 扁平字段)+ 全部 artifacts(含 report / equity /"
-            "decisions 各阶段的 payload)。只读。"
+            "聚合单个 ResearchRun 报告。view=summary(默认):run 元信息 + result "
+            "指标(剔除 equity_curve,以 equity_point_count 提示)+ universe "
+            "聚合计数(total/included/excluded_by_reason,与全量判定一致)"
+            "+ fills 按决策计数,不序列化逐标的全量 payload;view=detail:全部 "
+            "artifacts 含 report/equity/decisions 各阶段 payload(诊断用,体积大)。"
+            "只读。"
         ),
     )
     async def _run(
         run_id: str,
+        view: str = "summary",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
-        return await report_run(app_context(ctx), run_id)
+        return await report_run(app_context(ctx), run_id, view=view)
 
     @mcp.tool(
         name="finboard_report_backtest",
         description=(
             "聚合单条回测历史报告:运行元信息 + metrics + equity_curve + fills +"
             "summary(标准化结构)。equity_mode(summary 默认:降采样到 max_points"
-            "个关键点;full:完整曲线)、max_points(默认 200)。只读。"
+            "个关键点;full:完整曲线)、max_points(默认 200)、fills_limit/"
+            "fills_offset(fills 分页,默认有界 200 条;fills_limit=null 返回全部,"
+            "返回含 fills_total/fills_offset 元信息)。只读。"
         ),
     )
     async def _backtest(
         run_id: int,
         equity_mode: str = "summary",
         max_points: int = 200,
+        fills_limit: int | None = reporting.DEFAULT_FILLS_LIMIT,
+        fills_offset: int = 0,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await report_backtest(
@@ -175,6 +206,8 @@ def register(mcp: MCPServer) -> None:
             run_id,
             equity_mode=equity_mode,
             max_points=max_points,
+            fills_limit=fills_limit,
+            fills_offset=fills_offset,
         )
 
     @mcp.tool(

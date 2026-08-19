@@ -72,6 +72,25 @@ def _version_to_dict(row: Any) -> dict[str, Any]:
     }
 
 
+def _version_ack(row: Any) -> dict[str, Any]:
+    """写操作精简回执(issue #206 P1):id/version/status/checksum/created_at。
+
+    全量详情(含完整 spec payload)走 ``finboard_strategy_version_get``。
+    """
+    return {
+        "strategy_id": row.strategy_id,
+        "version": row.version,
+        "status": row.status,
+        "checksum": row.checksum,
+        "created_at": to_jsonable(row.created_at),
+        "view": "ack",
+        "detail_hint": (
+            f"finboard_strategy_version_get(strategy_id={row.strategy_id!r}, "
+            f"version={row.version})"
+        ),
+    }
+
+
 def _validation_to_dict(plan: Any) -> dict[str, Any]:
     """把 ``ResolvedStrategyPlan`` 映射为 validate 工具返回字典。"""
     preview = getattr(plan, "universe_precheck", None)
@@ -509,7 +528,8 @@ async def strategy_draft_create(
             except Exception:
                 await session.rollback()
                 raise
-            return _version_to_dict(row)
+            # issue #206 P1:写操作返回精简回执,全文走 version_get。
+            return _version_ack(row)
 
     return await run_tool(
         audit=app.audit,
@@ -623,7 +643,8 @@ async def strategy_publish(
             except Exception:
                 await session.rollback()
                 raise
-            return _version_to_dict(row)
+            # issue #206 P1:写操作返回精简回执,全文走 version_get。
+            return _version_ack(row)
 
     return await run_tool(
         audit=app.audit,
@@ -1010,6 +1031,8 @@ def register(mcp: MCPServer) -> None:
         description=(
             "保存策略规格草稿版本(change_type=create,首版本)。"
             "先编译校验(validate)再持久化;冲突(版本号)返回 conflict。"
+            "返回精简回执(strategy_id/version/status/checksum/created_at,"
+            "issue #206),完整 spec 走 finboard_strategy_version_get。"
             "研究写操作(#122,自主执行)。对应 POST /api/research/strategy-specs/drafts。"
         ),
     )
@@ -1051,6 +1074,8 @@ def register(mcp: MCPServer) -> None:
         description=(
             "发布策略规格的指定版本(draft→published)。"
             "发布前会重新编译校验;版本不存在返回 not_found,状态转换非法返回 conflict。"
+            "返回精简回执(strategy_id/version/status/checksum/created_at,"
+            "issue #206),完整 spec 走 finboard_strategy_version_get。"
             "研究写操作(#122,自主执行)。"
             "对应 POST /api/research/strategy-specs/{id}/publish。"
         ),

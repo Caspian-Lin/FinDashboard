@@ -86,6 +86,72 @@ def _run_detail(row: ResearchRunModel) -> dict[str, Any]:
     return cast(dict[str, Any], to_jsonable(detail))
 
 
+def _run_view(
+    row: ResearchRunModel,
+    artifacts: list[ResearchRunArtifactModel] | None = None,
+    *,
+    view: str = "summary",
+) -> dict[str, Any]:
+    """run 详情视图(issue #206):summary 默认聚合计数,detail 全量。
+
+    summary 在 detail 的头部字段之上,把 result 剔除 equity_curve(以点数
+    提示),并附 universe / fills 服务端聚合计数,不序列化 manifest/result
+    与逐标的全量 payload。
+    """
+    if view not in ("summary", "detail"):
+        raise McpToolError("invalid_argument", f"未知视图: {view}")
+    if view == "detail":
+        return _run_detail(row)
+    from finboard_mcp.reporting import (
+        metrics_without_equity_curve,
+        summarize_run_artifacts,
+    )
+
+    payload = _run_summary(row)
+    payload.update(
+        {
+            "idempotency_key": row.idempotency_key,
+            "replay_of_run_id": row.replay_of_run_id,
+            "manifest_checksum": row.manifest_checksum,
+            "result_checksum": row.result_checksum,
+            "error_summary": row.error_summary,
+            "job_id": getattr(row, "job_id", None),
+            "metrics": metrics_without_equity_curve(
+                dict(row.result) if row.result else {}
+            ),
+            "view": "summary",
+        }
+    )
+    if artifacts is not None:
+        payload["artifact_count"] = len(artifacts)
+        payload.update(summarize_run_artifacts(artifacts))
+    return cast(dict[str, Any], to_jsonable(payload))
+
+
+def _run_ack(row: ResearchRunModel) -> dict[str, Any]:
+    """写操作精简回执(issue #206 P1):id/status/checksum/execution_mode/created_at。
+
+    全量详情走 ``finboard_run_get(run_id)``;回执附带 job_id 供轮询。
+    """
+    return cast(
+        dict[str, Any],
+        to_jsonable(
+            {
+                "run_id": row.run_id,
+                "job_id": getattr(row, "job_id", None),
+                "strategy_id": row.strategy_id,
+                "strategy_kind": row.strategy_kind,
+                "status": row.status,
+                "checksum": row.manifest_checksum,
+                "execution_mode": _execution_mode_from_manifest(row.manifest),
+                "created_at": to_jsonable(row.created_at),
+                "view": "ack",
+                "detail_hint": f"finboard_run_get(run_id={row.run_id!r})",
+            }
+        ),
+    )
+
+
 def _artifact_summary(row: ResearchRunArtifactModel) -> dict[str, Any]:
     return cast(dict[str, Any], to_jsonable(
         {
@@ -165,19 +231,27 @@ async def list_runs(
     )
 
 
-async def get_run(app: McpAppContext, run_id: str) -> ToolEnvelope:
+async def get_run(
+    app: McpAppContext,
+    run_id: str,
+    *,
+    view: str = "summary",
+) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         async with app.session_maker() as session:
             repo = ResearchRunRepository(session)
             row = await repo.get(run_id)
             if row is None:
                 raise McpToolError("not_found", f"研究运行不存在: {run_id}")
-            return _run_detail(row)
+            artifacts = (
+                await repo.list_artifacts(run_id) if view == "summary" else None
+            )
+            return _run_view(row, artifacts, view=view)
 
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.run.get",
-        arguments={"run_id": run_id},
+        arguments={"run_id": run_id, "view": view},
         handler=_do,
     )
 
@@ -502,7 +576,9 @@ async def enqueue_research_run(
         ) as exc:
             await session.rollback()
             raise McpToolError("conflict", str(exc)) from exc
-        return _run_detail(row)
+        # issue #206 P1:写操作返回精简回执(六字段 + job 指针),
+        # 全量详情走 finboard_run_get。
+        return _run_ack(row)
 
 
 async def queue_run(
@@ -725,10 +801,20 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_run_get",
-        description="查询单个 ResearchRun 详情(含 manifest / result)。",
+        description=(
+            "查询单个 ResearchRun。view=summary(默认):头部字段 + metrics"
+            "(剔除 equity_curve,以 equity_point_count 提示)+ universe 聚合计数"
+            "(total/included/excluded_by_reason)+ fills 按决策计数 + artifact_count,"
+            "不序列化 manifest/result 全量;view=detail:含 manifest / result / "
+            "逐标的全量 payload(诊断用,可达 MB 级)。"
+        ),
     )
-    async def _get(run_id: str, ctx: Context = None) -> ToolEnvelope:  # type: ignore[assignment]
-        return await get_run(app_context(ctx), run_id)
+    async def _get(
+        run_id: str,
+        view: str = "summary",
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await get_run(app_context(ctx), run_id, view=view)
 
     @mcp.tool(
         name="finboard_run_artifacts",
@@ -768,6 +854,8 @@ def register(mcp: MCPServer) -> None:
             "schema)。入队预检(#186):universe 候选池为空秒级 invalid_argument,"
             "错误附各过滤条件排除统计与缺失字段名。single_shot 缺冻结快照同样"
             "入队秒级拒绝(#203,报错附 execution_mode 与缺失因子源)。"
+            "返回精简回执(issue #206):run_id/job_id/status/checksum/"
+            "execution_mode/created_at,全量详情走 finboard_run_get。"
         ),
     )
     async def _queue(

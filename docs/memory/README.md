@@ -22,3 +22,4 @@
 - [Issue #203:multi_period 快照依赖文档与报错对齐](issue-203-multiperiod-snapshot-docs-alignment.md) — 多期免快照仅限决策日推导与价格因子,基本面因子仍需快照/研究发布;single_shot 零快照入队秒级拒(共享门控函数);报错按根因细分附 execution_mode
 - [Issue #204:factor_snapshots 原子 upsert](issue-204-factor-snapshot-atomic-upsert.md) — ON CONFLICT 冲突方 RETURNING 为空须再 SELECT 复用,仅插入方写值行;gather 自然交错复现不了 TOCTOU,须 Event 编排时序(A 提交前 B 已卡在服务端)
 - [Issue #205:回测 fills.date 取实际交易日](issue-205-fills-date-trading-day.md) — Fill.filled_at 默认 _utcnow() 陷阱(回测域构造必须显式传时点);收盘约定收敛到 clock.market_close;旧记录按 created_at 区分不回填
+- [Issue #206:研究/回测 MCP 返回瘦身](issue-206-mcp-response-slimming.md) — MCP SDK 会把 dataclass 返回注解重建为同名 pydantic 模型,自定义序列化钩子失效,信封须 BaseModel+model_serializer;详情默认 summary/写回执 ack/fills 有界 200

@@ -129,12 +129,25 @@ def _strategy_info(definition: Any) -> dict[str, Any]:
     return cast(dict[str, Any], to_jsonable(strategy_info(definition).model_dump()))
 
 
-def _history_item(row: BacktestRunModel) -> dict[str, Any]:
-    """历史列表项(摘要,不含完整 equity/fills)。"""
-    return {
+#: 列表项 symbols 预览长度(issue #206 P2:72 标的级列表只回前 N 只 + 计数)。
+_SYMBOLS_PREVIEW_COUNT = 10
+
+
+def _history_item(
+    row: BacktestRunModel, *, symbols_preview: bool = False
+) -> dict[str, Any]:
+    """历史列表项(摘要,不含完整 equity/fills)。
+
+    ``symbols_preview=True`` 时 symbols 截断为前 10 只并附 symbol_count
+    (issue #206 P2);详情视图始终用全量 symbols。
+    """
+    symbols = list(row.symbols) if row.symbols else []
+    item: dict[str, Any] = {
         "id": row.id,
         "strategy": row.strategy,
-        "symbols": list(row.symbols) if row.symbols else [],
+        "symbols": (
+            symbols[:_SYMBOLS_PREVIEW_COUNT] if symbols_preview else symbols
+        ),
         "start": row.start,
         "end": row.end,
         "capital": to_jsonable(row.capital),
@@ -143,6 +156,9 @@ def _history_item(row: BacktestRunModel) -> dict[str, Any]:
         "factor_version": row.factor_version,
         "created_at": to_jsonable(row.created_at),
     }
+    if symbols_preview:
+        item["symbol_count"] = len(symbols)
+    return item
 
 
 def _history_detail(
@@ -286,17 +302,17 @@ async def _run_via_strategy_spec(
     payload["strategy_id"] = spec_id
     payload["strategy_version"] = version
     body = parse_queue_payload(payload)
-    detail = await enqueue_research_run(app, body)
+    ack = await enqueue_research_run(app, body)
     # 返回可跟踪指针(run_id + job_id),不阻塞等待完成
     from finboard_backtest.research_run.contracts import execution_mode_for
 
     return {
-        "run_id": detail["run_id"],
-        "job_id": detail.get("job_id"),
-        "status": detail["status"],
-        "strategy_id": detail["strategy_id"],
-        "strategy_kind": detail["strategy_kind"],
-        "manifest_checksum": detail.get("manifest_checksum"),
+        "run_id": ack["run_id"],
+        "job_id": ack.get("job_id"),
+        "status": ack["status"],
+        "strategy_id": ack["strategy_id"],
+        "strategy_kind": ack["strategy_kind"],
+        "manifest_checksum": ack["checksum"],
         # issue #183:agent 据此区分单时点决策(single_shot)与全区间回放
         # (multi_period,由 queue_payload.parameters.rebalance_frequency 决定)。
         "execution_mode": execution_mode_for(dict(body.parameters)).value,
@@ -766,7 +782,8 @@ async def backtest_history_list(
         async with app.session_maker() as session:
             repo = BacktestRunRepository(session)
             rows = await repo.list_recent(limit=safe_limit)
-            return [_history_item(row) for row in rows]
+            # issue #206 P2:列表 symbols 只回前 10 只 + symbol_count。
+            return [_history_item(row, symbols_preview=True) for row in rows]
 
     return await run_tool(
         audit=app.audit,
@@ -785,9 +802,10 @@ async def backtest_history_get(
     *,
     equity_mode: str = "summary",
     max_points: int = 200,
-    fills_limit: int | None = None,
+    fills_limit: int | None = 200,
     fills_offset: int = 0,
 ) -> ToolEnvelope:
+    """历史详情(equity 降采样;fills 默认有界 200 条,issue #206)。"""
     async def _do() -> dict[str, Any]:
         from finboard_persistence import BacktestRunRepository
 
@@ -941,7 +959,10 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_backtest_history_list",
-        description="列出最近的回测历史记录(摘要,不含完整 equity/fills)。",
+        description=(
+            "列出最近的回测历史记录(摘要,不含完整 equity/fills;symbols 只回"
+            "前 10 只,附 symbol_count,issue #206)。"
+        ),
     )
     async def _history_list(
         limit: int = 50,
@@ -954,15 +975,16 @@ def register(mcp: MCPServer) -> None:
         description=(
             "查询单条回测历史详情。equity_mode(summary 默认:降采样到 "
             "max_points 个关键点,首末点保留;full:完整曲线)、max_points(默认 "
-            "200)、fills_limit/fills_offset(fills 分页;不传 fills_limit 返回全部)。"
-            "返回含 equity_point_count / fills_total 元信息。"
+            "200)、fills_limit/fills_offset(fills 分页,默认有界 200 条,"
+            "issue #206;fills_limit=null 返回全部)。"
+            "返回含 equity_point_count / fills_total / fills_offset 元信息。"
         ),
     )
     async def _history_get(
         run_id: int,
         equity_mode: str = "summary",
         max_points: int = 200,
-        fills_limit: int | None = None,
+        fills_limit: int | None = 200,
         fills_offset: int = 0,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:

@@ -328,6 +328,39 @@ broker / 账户 / 订单 / 持仓;`_INSTRUCTIONS` / Skill `SKILL.md` +
 - `_INSTRUCTIONS` / Skill `tools.md` 已同步。回滚:不接受新 release_kind
   即回退,不影响既有 bars 发布(REST/MCP 同源)。
 
+### ✅ #206 研究/回测 MCP 返回瘦身(已完成)
+按 P0→P3 逐级瘦身,默认响应从 MB 级降到 KB 级,决策信息量不变。全部为纯
+展示层变换,不改语义、不动落库(与 #172 equity 降采样同先例):
+
+- **P0 详情接口 `view=summary|detail`,默认 summary**:
+  - `dataset_release_get`:summary 复用 `_release_summary_to_dict`(头部 +
+    capabilities + 覆盖统计),**省略逐标的 instruments 数组**(全市场发布
+    实测 ~97MB);detail 走 `as_dict()`(诊断用)。
+  - `run_get` / `report_run`:summary 把 universe 逐标的判定聚合为
+    `{total, included, excluded_by_reason}`(服务端聚合,与全量判定一致)、
+    fills 按决策计数、metrics 剔除 equity_curve(以点数提示),不序列化
+    manifest/result/UNIVERSE/FILLS 全量 payload;detail 保留现行为。
+- **P0 fills 分页有界**:`backtest_history_get` 默认 `fills_limit=200`
+  (`fills_total` 元数据已有);`report_backtest` 补 `fills_limit/offset`
+  分页(默认 200,`null` 全量);REST/MCP 导出文件保持全量。
+- **P1 写操作回显瘦身**:`run_queue` / `strategy_draft_create` /
+  `strategy_publish` 返回精简回执(id/version/status/checksum/
+  execution_mode/created_at + detail_hint),全文走对应 get;
+  `backtest_run(strategy_spec)` 路由同步适配。
+- **P1 grid 公共字段上提**:`grid_get` 网格级公共字段(strategy/symbols/
+  start/end/capital/adjust/params=base_params)在头部只出现一次,combo 去掉
+  params(组合差异由 label 承载,完整参数 = params + label)。
+- **P2**:`backtest_history_list` symbols 前 10 只 + `symbol_count`;
+  `job_get` 加 `view=none|summary|detail`(none=轮询最小集,summary 默认剥
+  payload);信封 `ToolEnvelope` 挂 pydantic 自定义序列化,序列化时省略恒为
+  null 的可选字段(MCP SDK structured content 路径生效,工具/测试拿到的仍是
+  dataclass 实例)。
+- **P3 幂等短路**:`job_get` 返回附 `data_hash`(状态指纹),轮询回传未变即
+  `{unchanged: true, data_hash, status}` 不重发全量。
+
+`_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` 已同步。回滚:默认 view/fills
+上限恢复全量即可(各参数均显式可传),信封序列化不影响 dataclass 消费方。
+
 ## 扩展原则(适用于所有阶段)
 
 1. **复用现有 service / repository**,MCP 层不直接裸 SQL

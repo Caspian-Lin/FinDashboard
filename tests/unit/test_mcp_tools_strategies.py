@@ -457,6 +457,29 @@ class TestStrategyValidate:
 
 
 class TestStrategyDraftCreate:
+    def test_version_ack_is_compact(self) -> None:
+        """issue #206 P1:写操作回执为精简字段集,全文走 version_get。"""
+        row = SimpleNamespace(
+            strategy_id="mf_test",
+            version=3,
+            status="draft",
+            checksum="cc",
+            created_at=datetime(2026, 8, 19, tzinfo=UTC),
+        )
+        ack = strategy_tools._version_ack(row)
+        assert ack == {
+            "strategy_id": "mf_test",
+            "version": 3,
+            "status": "draft",
+            "checksum": "cc",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "view": "ack",
+            "detail_hint": (
+                "finboard_strategy_version_get(strategy_id='mf_test', version=3)"
+            ),
+        }
+        assert "spec" not in ack
+
     async def test_write_disabled_rejects(self) -> None:
         app = _make_app(write_enabled=False)
         env = await strategy_tools.strategy_draft_create(
