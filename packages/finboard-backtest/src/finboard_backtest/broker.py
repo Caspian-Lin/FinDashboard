@@ -41,6 +41,7 @@ from finboard_backtest.asset_rules import (
     price_with_slippage,
     resolve_rule_from_overrides,
 )
+from finboard_backtest.clock import market_close
 from finboard_backtest.config import FillTiming, MatchingModel
 from finboard_broker.base import BrokerAdapter, SubmissionResult
 from finboard_broker.events import BrokerEvent, BrokerEventType
@@ -639,17 +640,20 @@ class BacktestBroker(BrokerAdapter):
             self._cash += received
 
         # 更新持仓(由 fill 驱动)
+        trade_date = self._current_date
+        assert trade_date is not None  # _match_pending_orders 仅在 on_new_bar 设值后调用
         self._apply_fill_to_position(
             symbol=order.symbol,
             rule=rule,
             side=order.side,
             qty=executed_qty,
             price=slip_price,
-            trade_date=self._current_date,  # type: ignore[arg-type]
+            trade_date=trade_date,
             enforce_t_plus_1=rule.enforce_t_plus_1,
         )
 
-        # 记录成交
+        # 记录成交;filled_at = 实际撮合发生的交易日(收盘约定与 engine
+        # decision_at 同源),不落 Fill 默认的 _utcnow() 任务运行日(issue #205)
         fill = Fill(
             fill_id=f"BT-{next(self._id_counter)}",
             client_order_id=order.client_order_id,
@@ -660,6 +664,7 @@ class BacktestBroker(BrokerAdapter):
             commission=commission,
             tax=tax,
             broker_order_id=order.broker_order_id,
+            filled_at=market_close(trade_date),
         )
         self._fills.append(fill)
 

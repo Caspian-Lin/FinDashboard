@@ -19,14 +19,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 import structlog
 
 from finboard_backtest.broker import BacktestBroker
-from finboard_backtest.clock import SimulatedClock
+from finboard_backtest.clock import SimulatedClock, market_close
 from finboard_backtest.config import BacktestConfig
 from finboard_backtest.context import BacktestContext
 from finboard_backtest.metrics import (
@@ -200,7 +199,7 @@ class BacktestEngine:
                     config=cfg.selection,
                     static_universe=cfg.symbols,
                     business_date=business_date,
-                    decision_at=_market_close(business_date),
+                    decision_at=market_close(business_date),
                     effective_date=next_date,
                     price_history=history_by_symbol,
                 )
@@ -489,10 +488,3 @@ class BacktestEngine:
             fee_assumptions=self._config.resolved_fees().as_dict(),
             benchmark_config=self._config.benchmark.as_dict(),
         )
-
-
-def _market_close(business_date: date) -> datetime:
-    return datetime.combine(
-        business_date,
-        time(hour=17, tzinfo=ZoneInfo("Asia/Shanghai")),
-    )

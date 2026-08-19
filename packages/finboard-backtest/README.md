@@ -91,6 +91,15 @@
 * `allow_short=false` 时,卖出前严格校验可用持仓,不足则按 `available` 截断
   或 `INSUFFICIENT_POSITION` 拒单,现金 / 持仓都不变。
 
+### 成交时标(issue #205)
+
+`Fill.filled_at` = 该笔成交实际发生的交易日,由 `market_close(trade_date)`
+(`finboard_backtest.clock`,Asia/Shanghai 17:00 收盘约定,与 selection
+`decision_at` 同源)构造;**不再落** `finboard_shared.Fill` 默认的
+`_utcnow()`(任务运行日)。API / MCP 落库的 `fills[].date` 因此等于对应 Bar
+的交易日。issue #205 之前的旧 run 落库日期是任务运行日,**历史数据不回填**;
+live/paper 成交的 `filled_at`(运行期真实时间)语义不受影响。
+
 ### 资产规则矩阵
 
 `AssetRuleTable` 按 `(Market, InstrumentType)` 解析规则,未注册的类型 raise
