@@ -8,9 +8,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -243,6 +244,56 @@ async def test_financial_indicators_release_freezes_and_reads_latest(tmp_path) -
     assert records[-1].report_period == date(2024, 6, 30)
     assert records[-1].return_on_equity == Decimal("0.08")
     assert records[-1].gross_profit_margin == Decimal("0.25")
+
+
+@pytest.mark.asyncio
+async def test_financial_indicators_pit_gate_hides_unannounced_reports(tmp_path) -> None:
+    """#212 PIT 回归:公告锚点 = 公告日次日 00:00(上海时区)。
+
+    锚点由 ``TushareResearchDataProvider._parse_financial`` 锚定(ann_date+1);
+    决策时点早于锚点时,该报告期(含修订)必须完全不可见。锚点若被改成
+    报告期 end_date 或公告日当天 00:00,本用例会在边界断言处失败。
+    """
+    code = "600001.SH"
+    anchor = datetime(2024, 5, 1, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    financial = replace(
+        _financial(code, date(2024, 3, 31)),  # fixture 公告日 2024-04-30
+        available_at=anchor,
+    )
+    source = _StubResearchSource(financial_records={code: [financial]})
+    builder = FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+        research_source=source,
+    )
+    spec = DatasetReleaseSpec(
+        release_id="fina-pit-v1",
+        dataset_name="a_share_financial_indicators",
+        source="tushare",
+        version="v1",
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        code_version="test",
+        fields=FINANCIAL_INDICATORS_FIELDS,
+        dataset_kind=ReleaseDatasetKind.FINANCIAL_INDICATORS,
+        required_capabilities=("stock",),
+        adjustment="none",
+    )
+    release = await builder.publish(spec, [_stock(code)])
+    assert release.instrument(code).row_count == 1
+
+    provider = FrozenReleaseProvider(
+        release_root=tmp_path / "releases",
+        release_id="fina-pit-v1",
+    )
+    symbol = Symbol(code, Market.A_SHARE)
+    before = await provider.fetch_financial_indicators(
+        symbol,
+        decision_at=datetime(2024, 4, 30, 23, 59, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    assert before == []
+    after = await provider.fetch_financial_indicators(symbol, decision_at=anchor)
+    assert [item.report_period for item in after] == [date(2024, 3, 31)]
 
 
 @pytest.mark.asyncio
