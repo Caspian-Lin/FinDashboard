@@ -23,3 +23,4 @@
 - [Issue #204:factor_snapshots 原子 upsert](issue-204-factor-snapshot-atomic-upsert.md) — ON CONFLICT 冲突方 RETURNING 为空须再 SELECT 复用,仅插入方写值行;gather 自然交错复现不了 TOCTOU,须 Event 编排时序(A 提交前 B 已卡在服务端)
 - [Issue #205:回测 fills.date 取实际交易日](issue-205-fills-date-trading-day.md) — Fill.filled_at 默认 _utcnow() 陷阱(回测域构造必须显式传时点);收盘约定收敛到 clock.market_close;旧记录按 created_at 区分不回填
 - [Issue #206:研究/回测 MCP 返回瘦身](issue-206-mcp-response-slimming.md) — MCP SDK 会把 dataclass 返回注解重建为同名 pydantic 模型,自定义序列化钩子失效,信封须 BaseModel+model_serializer;详情默认 summary/写回执 ack/fills 有界 200
+- [research_data_sync 同步运营 runbook(issue #212)](research-data-sync-runbook.md) — 首次全量过夜跑(~5s/片×小时计)/增量每日一片;配额是进程内锁须 worker 单进程;daily 截面恒全市场;PIT 锚点有回归测试锁边界
