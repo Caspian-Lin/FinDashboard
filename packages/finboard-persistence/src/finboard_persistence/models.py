@@ -1921,6 +1921,11 @@ class BackgroundJobModel(Base, IdMixin):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # 归档时间(issue #221):NULL=未归档;非 NULL=已归档(从默认列表隐藏,不删除)。
+    # 仅终态任务可归档;归档后 worker 维护路径(requeue_due)跳过该行。
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
