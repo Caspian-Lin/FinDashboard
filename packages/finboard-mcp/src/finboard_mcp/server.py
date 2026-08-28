@@ -24,8 +24,9 @@
 * ``finboard.run.*`` 写工具(queue / cancel / replay / lineage,#127)。
 * ``finboard.portfolio.*``(#128)—— 组合计算(目标权重分配 /
   离散手数 sizing / 资金档位可行性 / 绩效归因,纯计算无 DB 写入);
-* ``finboard.job.*``(#136)—— 统一后台任务队列监控与提交
-  (list / get 只读 + enqueue / cancel 写,复用 ``background_jobs`` 表)。
+* ``finboard.job.*``(#136;#221 归档)—— 统一后台任务队列监控与提交
+  (list / get 只读 + enqueue / cancel / archive / unarchive 写,
+  复用 ``background_jobs`` 表)。
 * 数据写操作(#137)—— ``finboard.data_write.*`` / ``finboard.etf.*``:
   data_fetch(同步单标的)/ fetch_all / sync_universe / bulk_download_start /
   quality_repair / dataset_release_publish(任务化,返回 job_id,用
@@ -82,7 +83,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(115 个,已实现)==
+== 当前可用工具(117 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -165,15 +166,19 @@ FinBoard 研究 MCP —— 量化研究工具集
 - portfolio(4,✅ #128):portfolio_allocate(目标权重分配,纯计算)、
   portfolio_sizing(离散手数 + 费用/保证金)、portfolio_feasibility(10万/20万/50万
   档位可行性)、portfolio_attribution(绩效归因分解,纯计算,无 DB 写入)。
-- finboard.job.*(4,✅ #136)—— 统一后台任务队列监控与提交:
-  job list/get(只读)、job enqueue/cancel(写)。复用 background_jobs 表,
-  enqueue kind 白名单全是研究/数据/回测域(echo/research_run/feature_snapshot/
-  bulk_download/dataset_publish/backtest_run/data_sync/fetch_all/quality_repair/
-  research_data_sync);
+- finboard.job.*(6,✅ #136+#221)—— 统一后台任务队列监控与提交:
+  job list/get(只读)、job enqueue/cancel/archive/unarchive(写)。
+  复用 background_jobs 表,enqueue kind 白名单全是研究/数据/回测域
+  (echo/research_run/feature_snapshot/bulk_download/dataset_publish/
+  backtest_run/data_sync/fetch_all/quality_repair/research_data_sync);
   实盘交易内核任务不进入队列。feature_snapshot/bulk_download 等异步任务的进度
   统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id;
   view=none 轮询最小集 / summary 默认剥 payload / detail 全量;返回附
   data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206)。
+  归档(#221):不重要终态任务 job_archive(单个 job_id 或按 kinds/statuses/
+  finished_before 批量,只回 archived_count)隐藏出默认列表但不删除,
+  job_list 的 archived=exclude(默认)/only/all 控制可见性,finboard_job_get
+  单查不受影响,job_unarchive 可恢复;仅终态可归档,归档即冻结不重排。
 - 数据写操作(12,✅ #137):data_fetch(同步单标的拉取)、fetch_all /
   sync_universe / bulk_download_start / quality_repair / dataset_release_publish
   (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询;

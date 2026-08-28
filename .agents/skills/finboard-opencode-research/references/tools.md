@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 115 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 117 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -20,7 +20,7 @@
 | 模拟盘(sim.*,✅ #127+#139) | ✅(账户/会话/决策/行情投递/评估/归档/订单/报告) | |
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
-| 后台任务队列(job.*,✅ #136) | ✅(list/get 只读 + enqueue/cancel 写) | |
+| 后台任务队列(job.*,✅ #136+#221) | ✅(list/get 只读 + enqueue/cancel/archive/unarchive 写) | |
 | 数据写操作(data_write.* / etf.*,✅ #137) | ✅(拉取/同步/发布/修复/ETF/配置) | |
 | #57 验证实验(validation_experiment.*,✅ #138) | ✅(create/reject/add_trial/delete 写) | |
 | 自选股(watchlist.*,✅ #140) | ✅(create/update/delete/add_symbols/remove_symbol 写) | |
@@ -934,7 +934,7 @@ research_run 管线轻路由(#174)。
 - 错误:`invalid_argument`(weights_history 为空 / 协方差估计失败)、
   `permission_denied`(只读模式)
 
-## finboard.job.*(✅ #136)
+## finboard.job.*(✅ #136 + #221)
 
 统一后台任务队列监控与提交。复用 `BackgroundJobRepository` + `background_jobs`
 表(`BJ-` ID,与实盘 orders/fills/positions 完全隔离)。**任务队列只服务
@@ -958,12 +958,14 @@ industry_memberships](默认全部), start_date, end_date(ISO), symbols?:
 列出后台任务(最近优先)。
 - 参数:`kind?: list[str]`、`status?: list[str]`
   (queued|running|retry_waiting|succeeded|failed|cancel_requested|cancelled|
-  interrupted)、`queue?: list[str]`、`limit?: int = 100`(1-500)
+  interrupted)、`queue?: list[str]`、`limit?: int = 100`(1-500)、
+  `archived?: "exclude"|"only"|"all" = "exclude"`(#221:默认只看未归档;
+  `only` 只看已归档;`all` 不区分)
 - 返回:`list[JobOut]`(`job_id/kind/queue/status/priority/payload/
   progress_done/progress_total/phase/result_ref/error_*/attempt/max_attempts/
   worker_id/heartbeat_at/lease_until/requested_by/created_at/started_at/
-  finished_at/updated_at`)
-- 错误:`invalid_argument`(未知 status)
+  finished_at/archived_at/updated_at`)
+- 错误:`invalid_argument`(未知 status / 未知 archived 过滤值)
 
 ### finboard_job_get(只读)
 查询单个后台任务详情。
@@ -998,6 +1000,25 @@ industry_memberships](默认全部), start_date, end_date(ISO), symbols?:
 - 参数:`job_id: str`
 - 返回:更新后的 `JobOut`
 - 已在终态(succeeded/failed/cancelled/interrupted)的任务返回当前状态不报错。
+- 错误:`permission_denied`(只读模式)、`not_found`
+
+### finboard_job_archive **[写,#221]**
+归档后台任务:从默认列表(`archived=exclude`)隐藏但**不删除**,
+`finboard_job_get` 单查与 `archived=only|all` 列表始终可达,可 unarchive 恢复。
+仅终态任务可归档;归档即冻结(worker 不再自动重排该任务)。
+- 单个:参数 `job_id: str`(幂等,已归档原样返回)→ 返回 `JobOut`
+- 批量:省略 `job_id`,参数 `kinds?: list[str]`、`statuses?: list[str]`
+  (终态子集,空=全部终态)、`queues?: list[str]`、
+  `finished_before?: str`(ISO 时间,只归档完成早于该时刻的)、
+  `limit?: int = 100`(1-1000,从旧到新)→ 返回 `{archived_count}`
+  (只回计数不回全量,#206 精神)
+- `job_id` 与批量过滤参数互斥(同传报 `invalid_argument`)
+- 错误:`permission_denied`(只读模式)、`not_found`、`conflict`(非终态)、
+  `invalid_argument`(statuses 含非终态 / finished_before 非法 / 参数互斥)
+
+### finboard_job_unarchive **[写,#221]**
+取消归档单个后台任务:任务重新出现在默认列表;幂等(未归档原样返回)。
+- 参数:`job_id: str` → 返回更新后的 `JobOut`
 - 错误:`permission_denied`(只读模式)、`not_found`
 
 ## finboard.watchlist.*(✅ #140)

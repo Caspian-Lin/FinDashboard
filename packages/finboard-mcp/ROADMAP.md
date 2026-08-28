@@ -5,7 +5,7 @@
 
 ## 当前状态(2026-08)
 
-**已实现 115 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 / #203 为既有工具的执行语义与契约增强 / 新增网格工具):
+**已实现 117 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 / #203 / #221 为既有工具的执行语义与契约增强 / 新增网格工具):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -18,7 +18,7 @@
 | 回测 | 7 | backtest_strategy_list、backtest_history_list/get、backtest_grid_get(只读);backtest_run(同步/异步 + strategy_spec 路由)、backtest_history_delete、backtest_grid_submit(写) | 行情回放 + 纸面撮合 + 批量参数网格(4 只读 + 3 写,✅ #127 + #175;strategy_spec 形态多期再平衡回放 execution_mode,#183;benchmark_symbol 显式基准 + 基准缺失 null,#184;strategy_spec 形态入队 universe 候选池预检,#186;strategy 形态 run_async=true 或按估算工作量自动切换入队 backtest_run 后台任务返回 job_id,#189;selection.factor_version 报错列合法枚举 + grid_get 默认不返回曲线(显式 equity_mode 才返回),#190) |
 | 模拟盘 | 21 | sim_account list/get/create、sim_session list/get/create/start/pause/stop/archive/reset、sim_orders/fills/positions/ledger/audit/report(只读);sim_decision_submit、sim_market_event、sim_session_evaluate、sim_order_cancel(写) | 持久化隔离模拟盘(10 只读 + 11 写,✅ #127 + #139) |
 | portfolio | 4 | portfolio_allocate / sizing / feasibility / attribution | 组合计算(纯计算,无 DB 写入,✅ #128) |
-| `finboard.job.*` | 4 | job list/get(只读);job enqueue/cancel(写) | 统一后台任务队列监控与提交(2 只读 + 2 写,✅ #136) |
+| `finboard.job.*` | 6 | job list/get(只读);job enqueue/cancel/archive/unarchive(写) | 统一后台任务队列监控与提交(2 只读 + 4 写,✅ #136;archive/unarchive 归档隐藏不删除 + `archived=exclude\|only\|all` 列表过滤 + 批量归档回计数,✅ #221) |
 | 数据写操作 | 12 | data_fetch(同步)、fetch_all/sync_universe/bulk_download_start/quality_repair/dataset_release_publish(任务化)、data_config_get/update、etf_sync/batch_confirm/update/review_queue | 数据准备闭环:拉取/批量下载/同步/质量修复/数据集发布/调度配置/ETF 元数据(2 只读 + 10 写,✅ #137) |
 | #57 验证实验 | 6 | validation_experiment create/list/get/reject/add_trial/delete | OOS 样本外验证实验元数据 CRUD(2 只读 + 4 写,✅ #138),给因子实验的 validation_experiment_id 提供源头 |
 | 自选股 | 7 | watchlist list/get(只读);create/update/delete/add_symbols/remove_symbol(写) | 用户标的组管理:保存常用回测标的集合(2 只读 + 5 写,✅ #140) |
@@ -122,6 +122,13 @@ dataclass 列表逐元素序列化(顶层是 list 时 `dataclasses.asdict` 不�
 日终核对/Broker 心跳/Kill Switch)由专用 `finboard-scheduler` asyncio 调度
 执行,不进入统一队列。回滚:移除 4 个 `finboard_job_*` 工具即可,不影响
 #142/#143/#144 的 worker/任务表/REST 接口。
+
+**#221 扩展(归档,2 写 + list 过滤)**:新增 `finboard_job_archive`(单个
+job_id 或按 kinds/statuses/finished_before 批量,批量只回 archived_count,
+#206 精神)与 `finboard_job_unarchive`;`finboard_job_list` 加
+`archived=exclude(默认)|only|all`。归档是 `background_jobs.archived_at`
+展示维度:隐藏不删除、单查始终可达、仅终态可归档、归档即冻结(worker
+`requeue_due` 跳过)。回滚:移除 2 个新工具 + archived 参数即可。
 
 ### ✅ #137 数据写操作工具(已完成)
 12 个工具(2 只读 + 10 写),补全 #124 只读数据查询之外的数据准备能力,
