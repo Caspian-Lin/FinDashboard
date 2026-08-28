@@ -367,20 +367,23 @@ def _daily_has_invalid_value(item: DailySecurityMetrics) -> bool:
     return (
         (item.close is not None and item.close <= 0)
         or any(value is not None and value < 0 for value in non_negative)
-        # tushare 口径:自由流通股本(free)偶发略高于流通股本(float)
-        # (issue #212 实测 300863.SZ 2024-01-09 倒挂 5.25 万股,约 7% 交易日
-        # 各中 1 行),float>=free 不是上游数据不变式;只保留总股本/总市值
-        # 不小于各分量的检查。
-        or _descending_values_invalid(item.total_shares, item.float_shares)
-        or _descending_values_invalid(item.total_shares, item.free_shares)
+        # tushare 口径:总/流通/自由流通股本来自不同上游表,解禁过渡期偶发小幅
+        # 倒挂(issue #212 实测 300863.SZ float<free 0.16%、603882.SH 2020-09~10
+        # total<float 0.35% 且持续一个月),严格链式不变式会连坐拒收整日全市场
+        # 截面;保留链式检查但允许 2% 相对倒挂,大幅倒挂仍按字段装配错误拦截。
+        or _descending_values_invalid(item.total_shares, item.float_shares, item.free_shares)
         or _descending_values_invalid(item.total_market_cap, item.circulating_market_cap)
         or (item.limit_status is not None and not 0 <= item.limit_status <= 6)
     )
 
 
 def _descending_values_invalid(*values: Decimal | None) -> bool:
+    tolerance = Decimal("0.02")
     present = [value for value in values if value is not None]
-    return any(left < right for left, right in pairwise(present))
+    return any(
+        left < right and (right - left) > tolerance * right
+        for left, right in pairwise(present)
+    )
 
 
 def _is_naive(value: datetime) -> bool:

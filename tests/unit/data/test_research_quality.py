@@ -171,17 +171,33 @@ def test_empty_stale_and_invalid_values_are_rejected() -> None:
 
 
 def test_daily_share_inversion_between_float_and_free_is_tolerated() -> None:
-    """#212:tushare 流通/自由流通口径倒挂(free 略大于 float)不算非法值。
+    """#212:tushare 股本/市值字段小幅倒挂(≤2% 相对值)不算非法值。
 
-    实测 300863.SZ 2024-01-09:float=33,467,087 < free=33,519,587(倒挂 5.25 万股),
-    旧判定(要求 float>=free)会让该日全市场截面整批被拒。仍要求 free 不超过总股本。
+    实测 300863.SZ 2024-01-09:float=33,467,087 < free=33,519,587(0.16%);
+    603882.SH 2020-09~10:total=457,884,577 < float=459,487,577(0.35%,持续一个月)。
+    严格链式不变式会让整日全市场截面被一行的上游噪音连坐拒收;大幅倒挂
+    (字段装配错误级别)仍必须拦截。
     """
     inverted = _validator().validate_daily_metrics(
-        [replace(_daily(), free_shares=Decimal("81000000"))],  # float=80,000,000
+        [replace(_daily(), free_shares=Decimal("81000000"))],  # float=80,000,000(1.25%)
         expected_trade_date=TRADE_DATE,
         expected_source="tushare",
     )
     assert inverted.status is QualityStatus.PASSED
+
+    total_under_float = _validator().validate_daily_metrics(
+        [replace(_daily(), total_shares=Decimal("79720000"))],  # float=80,000,000(0.35%)
+        expected_trade_date=TRADE_DATE,
+        expected_source="tushare",
+    )
+    assert total_under_float.status is QualityStatus.PASSED
+
+    market_cap_inverted = _validator().validate_daily_metrics(
+        [replace(_daily(), total_market_cap=Decimal("980000000"))],  # circ=987,200,000(0.73%)
+        expected_trade_date=TRADE_DATE,
+        expected_source="tushare",
+    )
+    assert market_cap_inverted.status is QualityStatus.PASSED
 
     exceed_total = _validator().validate_daily_metrics(
         [replace(_daily(), free_shares=Decimal("200000000"))],  # total=100,000,000
@@ -190,6 +206,14 @@ def test_daily_share_inversion_between_float_and_free_is_tolerated() -> None:
     )
     assert exceed_total.status is QualityStatus.FAILED
     assert exceed_total.issues[-1].code == "invalid_daily_value"
+
+    float_far_exceeds_total = _validator().validate_daily_metrics(
+        [replace(_daily(), float_shares=Decimal("150000000"))],  # total=100,000,000(50%)
+        expected_trade_date=TRADE_DATE,
+        expected_source="tushare",
+    )
+    assert float_far_exceeds_total.status is QualityStatus.FAILED
+    assert float_far_exceeds_total.issues[-1].code == "invalid_daily_value"
 
 
 def test_financial_and_industry_time_contracts_are_checked() -> None:
