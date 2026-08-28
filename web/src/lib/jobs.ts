@@ -34,7 +34,16 @@ export const JOB_KINDS: { value: string; label: string }[] = [
   { value: "data_sync", label: "数据同步" },
   { value: "fetch_all", label: "全量拉取" },
   { value: "quality_repair", label: "质量修复" },
+  { value: "research_data_sync", label: "研究数据摄取" },
 ];
+
+/** 归档维度过滤(issue #221),与后端 ARCHIVE_FILTER_VALUES 对齐。 */
+export const JOB_ARCHIVED_OPTIONS: { value: "exclude" | "only" | "all"; label: string }[] =
+  [
+    { value: "exclude", label: "排除已归档" },
+    { value: "only", label: "仅已归档" },
+    { value: "all", label: "全部" },
+  ];
 
 export function jobKindLabel(kind: string): string {
   return JOB_KINDS.find((k) => k.value === kind)?.label ?? kind;

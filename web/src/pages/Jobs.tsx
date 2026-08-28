@@ -1,9 +1,16 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { ChevronDown, ChevronUp, ListTodo, RefreshCw } from "lucide-react";
-import { api, isJobRunning, type JobOut, type JobStatus } from "@/lib/api";
+import { Archive, ArchiveRestore, ChevronDown, ChevronUp, ListTodo, RefreshCw } from "lucide-react";
 import {
+  api,
+  isJobRunning,
+  type JobArchivedFilter,
+  type JobOut,
+  type JobStatus,
+} from "@/lib/api";
+import {
+  JOB_ARCHIVED_OPTIONS,
   JOB_KINDS,
   JOB_STATUS_LABELS,
   JOB_STATUS_OPTIONS,
@@ -36,29 +43,32 @@ import { cn, formatDateTime, timeAgo } from "@/lib/utils";
 const ALL = "all";
 const POLL_MS = 5000;
 
-/** 任务中心:研究/数据/回测域统一后台任务的集中管理页(issue #161)。 */
+/** 任务中心:研究/数据/回测域统一后台任务的集中管理页(issue #161;#221 归档)。 */
 export default function Jobs() {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = searchParams.get("status") ?? ALL;
   const kindFilter = searchParams.get("kind") ?? ALL;
+  const archivedFilter = (searchParams.get("archived") ?? "exclude") as JobArchivedFilter;
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
-  const [cancelError, setCancelError] = React.useState<string | null>(null);
+  const [actionError, setActionError] = React.useState<string | null>(null);
+  const [bulkNotice, setBulkNotice] = React.useState<string | null>(null);
 
-  const setFilter = (key: "status" | "kind", value: string) => {
+  const setFilter = (key: "status" | "kind" | "archived", value: string) => {
     const next = new URLSearchParams(searchParams);
-    if (value === ALL) next.delete(key);
+    if (value === ALL || (key === "archived" && value === "exclude")) next.delete(key);
     else next.set(key, value);
     setSearchParams(next, { replace: true });
   };
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["jobs", statusFilter, kindFilter],
+    queryKey: ["jobs", statusFilter, kindFilter, archivedFilter],
     queryFn: () =>
       api.listJobs({
         status: statusFilter === ALL ? undefined : [statusFilter as JobStatus],
         kind: kindFilter === ALL ? undefined : [kindFilter],
         limit: 200,
+        archived: archivedFilter,
       }),
     // 轮询只在还有非终态任务时进行;全部终态后自动停止,避免静态页面持续请求。
     refetchInterval: (query) => {
@@ -67,34 +77,87 @@ export default function Jobs() {
     },
   });
 
+  const invalidateJobs = () => {
+    queryClient.invalidateQueries({ queryKey: ["jobs"] });
+  };
+
   const cancelMutation = useMutation({
     mutationFn: (jobId: string) => api.cancelJob(jobId),
     onSuccess: () => {
-      setCancelError(null);
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      setActionError(null);
+      invalidateJobs();
     },
-    onError: (err: Error) => setCancelError(err.message),
+    onError: (err: Error) => setActionError(err.message),
+  });
+
+  const archiveMutation = useMutation({
+    mutationFn: (jobId: string) => api.archiveJob(jobId),
+    onSuccess: () => {
+      setActionError(null);
+      invalidateJobs();
+    },
+    onError: (err: Error) => setActionError(err.message),
+  });
+
+  const unarchiveMutation = useMutation({
+    mutationFn: (jobId: string) => api.unarchiveJob(jobId),
+    onSuccess: () => {
+      setActionError(null);
+      invalidateJobs();
+    },
+    onError: (err: Error) => setActionError(err.message),
+  });
+
+  // 批量归档「已完成」任务:只收 succeeded/cancelled,failed/interrupted 留在
+  // 列表里便于排查(issue #221)。
+  const bulkArchiveMutation = useMutation({
+    mutationFn: () =>
+      api.bulkArchiveJobs({ statuses: ["succeeded", "cancelled"], limit: 1000 }),
+    onSuccess: (result) => {
+      setActionError(null);
+      setBulkNotice(`已归档 ${result.archived_count} 条任务(数据未删除,可随时恢复)。`);
+      invalidateJobs();
+    },
+    onError: (err: Error) => setActionError(err.message),
   });
 
   const jobs = data ?? [];
   const activeCount = jobs.filter(isJobRunning).length;
+  const bulkTargetCount = jobs.filter(
+    (job) => !job.archived_at && (job.status === "succeeded" || job.status === "cancelled"),
+  ).length;
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6">
       <PageHeader
         title="任务中心"
-        description="研究 / 数据 / 回测域后台任务的统一查看与取消;任务由独立 Worker 进程消费,刷新页面后状态自动恢复。"
+        description="研究 / 数据 / 回测域后台任务的统一查看与取消;任务由独立 Worker 进程消费,刷新页面后状态自动恢复。归档只隐藏不删除,可随时恢复。"
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            disabled={isFetching}
-            aria-label="刷新任务列表"
-          >
-            <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
-            刷新
-          </Button>
+          <div className="flex items-center gap-2">
+            {archivedFilter === "exclude" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => bulkArchiveMutation.mutate()}
+                disabled={bulkArchiveMutation.isPending || bulkTargetCount === 0}
+                aria-label="批量归档已完成的任务"
+                title={`归档列表中的成功/已取消任务(当前 ${bulkTargetCount} 条),失败/中断任务保留`}
+              >
+                <Archive className="h-4 w-4" />
+                {bulkArchiveMutation.isPending ? "归档中…" : "归档已完成"}
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              aria-label="刷新任务列表"
+            >
+              <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
+              刷新
+            </Button>
+          </div>
         }
       />
 
@@ -134,14 +197,34 @@ export default function Jobs() {
             </SelectContent>
           </Select>
         </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="jobs-archived-filter">归档</Label>
+          <Select value={archivedFilter} onValueChange={(v) => setFilter("archived", v)}>
+            <SelectTrigger id="jobs-archived-filter" className="w-36" aria-label="按归档状态过滤">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {JOB_ARCHIVED_OPTIONS.map((opt) => (
+                <SelectItem key={opt.value} value={opt.value}>
+                  {opt.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <div className="text-sm text-muted-foreground">
           共 {jobs.length} 条{activeCount > 0 ? `,${activeCount} 条进行中` : ""}
         </div>
       </div>
 
-      {cancelError && (
+      {actionError && (
         <Alert variant="destructive">
-          <AlertDescription>取消失败:{cancelError}</AlertDescription>
+          <AlertDescription>操作失败:{actionError}</AlertDescription>
+        </Alert>
+      )}
+      {bulkNotice && (
+        <Alert>
+          <AlertDescription>{bulkNotice}</AlertDescription>
         </Alert>
       )}
 
@@ -185,6 +268,10 @@ export default function Jobs() {
                   }
                   onCancel={() => cancelMutation.mutate(job.job_id)}
                   cancelling={cancelMutation.isPending && cancelMutation.variables === job.job_id}
+                  onArchive={() => archiveMutation.mutate(job.job_id)}
+                  archiving={archiveMutation.isPending && archiveMutation.variables === job.job_id}
+                  onUnarchive={() => unarchiveMutation.mutate(job.job_id)}
+                  unarchiving={unarchiveMutation.isPending && unarchiveMutation.variables === job.job_id}
                 />
               ))}
             </TableBody>
@@ -201,16 +288,31 @@ interface JobRowProps {
   onToggleExpand: () => void;
   onCancel: () => void;
   cancelling: boolean;
+  onArchive: () => void;
+  archiving: boolean;
+  onUnarchive: () => void;
+  unarchiving: boolean;
 }
 
-function JobRow({ job, expanded, onToggleExpand, onCancel, cancelling }: JobRowProps) {
+function JobRow({
+  job,
+  expanded,
+  onToggleExpand,
+  onCancel,
+  cancelling,
+  onArchive,
+  archiving,
+  onUnarchive,
+  unarchiving,
+}: JobRowProps) {
   const active = isJobRunning(job);
+  const archived = job.archived_at != null;
   const total = job.progress_total;
   const percent =
     total > 0 ? Math.min(100, Math.round((job.progress_done / total) * 100)) : null;
   return (
     <>
-      <TableRow data-state={expanded ? "selected" : undefined}>
+      <TableRow data-state={expanded ? "selected" : undefined} className={archived ? "opacity-60" : undefined}>
         <TableCell>
           <Button
             variant="ghost"
@@ -226,7 +328,14 @@ function JobRow({ job, expanded, onToggleExpand, onCancel, cancelling }: JobRowP
         <TableCell className="font-mono text-xs">{job.job_id}</TableCell>
         <TableCell>{jobKindLabel(job.kind)}</TableCell>
         <TableCell>
-          <StatusBadge status={job.status}>{JOB_STATUS_LABELS[job.status]}</StatusBadge>
+          <div className="flex items-center gap-1.5">
+            <StatusBadge status={job.status}>{JOB_STATUS_LABELS[job.status]}</StatusBadge>
+            {archived && (
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                已归档
+              </span>
+            )}
+          </div>
         </TableCell>
         <TableCell className="min-w-40">
           {job.status === "running" && total > 0 ? (
@@ -259,8 +368,28 @@ function JobRow({ job, expanded, onToggleExpand, onCancel, cancelling }: JobRowP
             >
               {cancelling ? "取消中…" : "取消"}
             </Button>
+          ) : archived ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onUnarchive}
+              disabled={unarchiving}
+              aria-label={`取消归档任务 ${job.job_id}`}
+            >
+              <ArchiveRestore className="h-4 w-4" />
+              {unarchiving ? "恢复中…" : "恢复"}
+            </Button>
           ) : (
-            <span className="text-xs text-muted-foreground">—</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onArchive}
+              disabled={archiving}
+              aria-label={`归档任务 ${job.job_id}`}
+            >
+              <Archive className="h-4 w-4" />
+              {archiving ? "归档中…" : "归档"}
+            </Button>
           )}
         </TableCell>
       </TableRow>
@@ -288,6 +417,7 @@ function JobDetail({ job }: { job: JobOut }) {
     ["租约到期", formatDateTime(job.lease_until)],
     ["开始时间", formatDateTime(job.started_at)],
     ["完成时间", formatDateTime(job.finished_at)],
+    ["归档时间", formatDateTime(job.archived_at)],
     ["更新时间", formatDateTime(job.updated_at)],
   ];
   return (

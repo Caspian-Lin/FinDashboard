@@ -44,6 +44,7 @@ export interface JobOut {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  archived_at: string | null;
   updated_at: string;
 }
 
@@ -55,6 +56,9 @@ export function isJobRunning(job: Pick<JobOut, "status"> | undefined | null): bo
 export function isJobTerminal(job: Pick<JobOut, "status"> | undefined | null): boolean {
   return Boolean(job && TERMINAL_JOB_STATUSES.has(job.status));
 }
+
+// 归档维度过滤(issue #221):exclude 默认只看未归档 / only 只看已归档 / all 不区分。
+export type JobArchivedFilter = "exclude" | "only" | "all";
 
 export class ApiError extends Error {
   status: number;
@@ -356,18 +360,39 @@ export const api = {
     status?: JobStatus[];
     queue?: string[];
     limit?: number;
+    archived?: JobArchivedFilter;
   }) => {
     const q = new URLSearchParams();
     params?.kind?.forEach((k) => q.append("kind", k));
     params?.status?.forEach((s) => q.append("status", s));
     params?.queue?.forEach((qq) => q.append("queue", qq));
     if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.archived) q.set("archived", params.archived);
     return fetchJSON<JobOut[]>(`/jobs${q.toString() ? "?" + q : ""}`);
   },
   cancelJob: (jobId: string, reason?: string) =>
     fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}/cancel`, {
       method: "POST",
       body: JSON.stringify({ reason: reason ?? null }),
+    }),
+  archiveJob: (jobId: string) =>
+    fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}/archive`, {
+      method: "POST",
+    }),
+  unarchiveJob: (jobId: string) =>
+    fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}/unarchive`, {
+      method: "POST",
+    }),
+  // 批量归档终态任务(issue #221):statuses 省略 = 全部终态;只回计数。
+  bulkArchiveJobs: (body: {
+    kinds?: string[];
+    statuses?: JobStatus[];
+    finished_before?: string;
+    limit?: number;
+  }) =>
+    fetchJSON<{ archived_count: number }>(`/jobs/archive`, {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
 
   // ---- Scheduler Config ----
