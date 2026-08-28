@@ -111,27 +111,28 @@ def _trade_days() -> list[date]:
     return result
 
 
-async def _publish_bars(builder: FrozenDatasetReleaseBuilder, code: str) -> str:
+async def _publish_bars(builder: FrozenDatasetReleaseBuilder, *codes: str) -> str:
     cache_dir = Path(builder._cache_dir)
     cache = ParquetCache(cache_dir)
-    symbol = Symbol(code, Market.A_SHARE)
-    close = Decimal("10.0")
-    bars = [
-        Bar(
-            symbol=symbol,
-            period=BarPeriod.D1,
-            timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
-            open=close,
-            high=close,
-            low=close,
-            close=close,
-            volume=Decimal("10000"),
-            amount=Decimal("100000"),
-            source="fixed_sample",
-        )
-        for day in _trade_days()
-    ]
-    await cache.write(symbol, BarPeriod.D1, "qfq", bars)
+    for code in codes:
+        symbol = Symbol(code, Market.A_SHARE)
+        close = Decimal("10.0")
+        bars = [
+            Bar(
+                symbol=symbol,
+                period=BarPeriod.D1,
+                timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+                open=close,
+                high=close,
+                low=close,
+                close=close,
+                volume=Decimal("10000"),
+                amount=Decimal("100000"),
+                source="fixed_sample",
+            )
+            for day in _trade_days()
+        ]
+        await cache.write(symbol, BarPeriod.D1, "qfq", bars)
     spec = DatasetReleaseSpec(
         release_id="bars-join-v1",
         dataset_name="join_daily_bars",
@@ -142,7 +143,7 @@ async def _publish_bars(builder: FrozenDatasetReleaseBuilder, code: str) -> str:
         code_version="test",
         required_capabilities=("stock",),
     )
-    release = await builder.publish(spec, [_stock(code)])
+    release = await builder.publish(spec, [_stock(code) for code in codes])
     assert release.is_usable
     return release.release_id
 
@@ -329,3 +330,66 @@ async def test_joined_release_requires_exactly_one_bars(tmp_path: Path) -> None:
             decision_at=datetime(2024, 3, 29, 16, 0, tzinfo=UTC),
             code_version="test",
         )
+
+
+@pytest.mark.asyncio
+async def test_joined_release_tolerates_symbol_missing_in_research_release(
+    tmp_path: Path,
+) -> None:
+    """#212:bars 标的不在附加研究发布 → 基本面因子为 null + issues 计数。
+
+    全市场实测 bars 5534 与 financial 5533 标的集有差(次新股无财报等),
+    旧逻辑对差集 fail-closed(误判为「回退外部数据源」),导致任何真实
+    全市场联合快照整体不可计算。价格因子不受影响。
+    """
+    full = "600001.SH"
+    sparse = "600002.SH"
+    builder = FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+        research_source=None,
+    )
+    bars_id = await _publish_bars(builder, full, sparse)
+    trades = [_daily(full, day, pb=Decimal("9.5")) for day in _trade_days()]
+    daily_id = await _publish_research(
+        builder,
+        kind=ReleaseDatasetKind.DAILY_METRICS,
+        code=full,
+        release_id="daily-missing-v1",
+        daily_records={full: trades},
+    )
+    fina_id = await _publish_research(
+        builder,
+        kind=ReleaseDatasetKind.FINANCIAL_INDICATORS,
+        code=full,
+        release_id="fina-missing-v1",
+        financial_records={full: [_financial(full, date(2024, 3, 31))]},
+    )
+
+    providers = {
+        release_id: FrozenReleaseProvider(
+            release_root=tmp_path / "releases",
+            release_id=release_id,
+        )
+        for release_id in (bars_id, daily_id, fina_id)
+    }
+    releases = [providers[release_id].release for release_id in (bars_id, daily_id, fina_id)]
+    snapshot = await build_cross_section_feature_snapshot_from_releases(
+        releases=releases,
+        providers=providers,
+        decision_at=datetime(2024, 3, 29, 16, 0, tzinfo=UTC),
+        code_version="test",
+        momentum_lookback=5,
+        volatility_windows=(20,),
+    )
+
+    # 缺失可见:两个研究发布各缺 sparse 一只。
+    assert "missing_in_research_release:daily_metrics:1" in snapshot.issues
+    assert "missing_in_research_release:financial_indicators:1" in snapshot.issues
+    # 基本面因子只覆盖 full;价格因子两只都有。
+    observed = {}
+    for obs in snapshot.observations:
+        observed.setdefault(obs.feature_name, set()).add(obs.symbol)
+    assert observed["roe"] == {full}
+    assert observed["pb"] == {full}
+    assert observed["momentum"] == {full, sparse}

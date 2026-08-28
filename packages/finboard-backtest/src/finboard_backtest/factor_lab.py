@@ -39,6 +39,7 @@ from finboard_data.factors import FactorInputBatch
 from finboard_data.releases import (
     FrozenReleaseProvider,
     PointInTimePrice,
+    ReleaseCapabilityError,
     ReleaseDatasetKind,
     ReleasedInstrument,
     ReleaseIntegrityError,
@@ -732,6 +733,14 @@ async def build_cross_section_feature_snapshot_from_releases(
     price_history: dict[str, list[float]] = {}
     price_available_at: dict[str, datetime] = {}
     done_count = 0
+    # issue #212:bars 主发布与附加研究发布的标的集天然不完全一致(次新股尚无
+    # 财报、元数据未登记等),研究发布缺标的 → 该标的基本面因子为 null 并计
+    # 数进快照 issues——这不清算为「回退外部数据源」,与 record.daily is None
+    # 的既有语义一致;bars 主发布缺标的仍 fail-closed。
+    missing_in_research: dict[str, int] = {}
+
+    def _tolerate_missing(kind: str) -> None:
+        missing_in_research[kind] = missing_in_research.get(kind, 0) + 1
 
     async def _load_one(instrument: ReleasedInstrument) -> None:
         nonlocal done_count
@@ -739,11 +748,19 @@ async def build_cross_section_feature_snapshot_from_releases(
         daily = None
         financial = None
         if metrics_provider is not None:
-            daily = await _latest_daily_metric(
-                metrics_provider, symbol, decision_at
-            )
+            try:
+                daily = await _latest_daily_metric(
+                    metrics_provider, symbol, decision_at
+                )
+            except ReleaseCapabilityError:
+                _tolerate_missing("daily_metrics")
         if financial_provider is not None:
-            financial = await _latest_financial( financial_provider, symbol, decision_at)
+            try:
+                financial = await _latest_financial(
+                    financial_provider, symbol, decision_at
+                )
+            except ReleaseCapabilityError:
+                _tolerate_missing("financial_indicators")
         points = await bars_provider.fetch_point_in_time_prices(
             symbol,
             release.period,
@@ -790,6 +807,11 @@ async def build_cross_section_feature_snapshot_from_releases(
         records=tuple(records[item.code] for item in release.instruments),
         source=release.source,
         dataset_versions={"release": release.release_id},
+        issues=tuple(
+            f"missing_in_research_release:{kind}:{count}"
+            for kind, count in sorted(missing_in_research.items())
+            if count
+        ),
     )
     return build_cross_section_feature_snapshot(
         release=release,
