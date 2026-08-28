@@ -11,6 +11,7 @@
 - [测试基建关键坑:pytest-timeout / SQLAlchemy URL / 守卫注入](test-infra-timeout-and-testdb.md) — thread 方式 os._exit 杀进程、pytest-asyncio 1.4 无内置超时、str(URL) 脱敏密码、循环闭包 late-binding;findashboard 角色已授 CREATEDB
 - [OpenCode Web 工作台:SPA 状态与容器环境踩坑](opencode-web-state-and-home.md) — 项目/最近会话在浏览器 IndexedDB,服务端无法预置;HOME/XDG 决定文件选择器与数据落点;坏路径会话清理方法
 - [Issue #173:selection bars/snapshot 输入模式](issue-173-bars-snapshot-selection.md) — required_datasets 按因子推导;同名异类 Repository 陷阱;集成测试库 create_all 不加新列需手工 ALTER
+- [测试库 schema 漂移:create_all 不 ALTER 已有表](test-db-create-all-schema-drift.md) — 模型加列后测试库须手动 ALTER(无 alembic_version,跑 alembic 撞 DuplicateTable);.env URL 提取用 Python 勿用 sed
 - [OpenCode finboard-researcher:bash 放行 + exa 搜索 MCP](opencode-agent-bash-exa-mcp.md) — 容器无 JS 运行时,local MCP 不可行只能 remote;exa 托管端点匿名可用;.opencode/.agents 挂载补了 :ro;改权限须重启容器
 - [Issue #185:instrument 元数据回填贯通发布链路](issue-185-instrument-metadata-backfill.md) — list_date/industry 从「无写入者」到 profiles 回填 + 发布兜底;缺失统计进 quality_report/job phase;发布单资产测试须显式 required_capabilities
 - [Issue #186:universe 预检与候选池诊断](issue-186-universe-precheck.md) — 静态预览只对确定性元数据判空(价格/特征字段只 warning 不误报);入队空池秒级失败;enqueue 创建路径 updated_at 懒加载 MissingGreenlet 已顺带修复

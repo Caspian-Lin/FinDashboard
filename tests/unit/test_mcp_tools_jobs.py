@@ -43,6 +43,7 @@ def _job_row(
     kind: str = "echo",
     status: str = "queued",
     result_ref: str | None = None,
+    archived_at: datetime | None = None,
 ) -> Any:
     """构造一个 duck-typed BackgroundJobModel 行(满足 JobOut.model_validate)。"""
 
@@ -71,6 +72,7 @@ def _job_row(
         created_at=now,
         started_at=None,
         finished_at=None,
+        archived_at=archived_at,
         updated_at=now,
     )
 
@@ -147,6 +149,30 @@ class TestJobList:
         assert env.status == "error"
         assert env.error is not None
         assert env.error.kind == "invalid_argument"
+
+    async def test_invalid_archived_filter(self) -> None:
+        """issue #221:archived 过滤值非法 → invalid_argument。"""
+        app = _make_app()
+        env = await job_tools.job_list(app, archived="sometimes")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_archived_param_passed_to_repo(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #221:archived=only 透传给 list_recent。"""
+        captured: dict[str, Any] = {}
+
+        async def _capture(self: Any, **kw: Any) -> list[Any]:
+            captured.update(kw)
+            return []
+
+        app = _make_app()
+        monkeypatch.setattr(BackgroundJobRepository, "list_recent", _capture)
+        env = await job_tools.job_list(app, archived="only")
+        assert env.status == "ok"
+        assert captured["archived"] == "only"
 
 
 # ---------------------------------------------------------------------------
@@ -454,3 +480,133 @@ class TestJobCancel:
         env = await job_tools.job_cancel(app, "BJ-1")
         assert env.status == "ok"
         assert env.data["status"] == "succeeded"
+
+
+# ---------------------------------------------------------------------------
+# finboard.job.archive / finboard.job.unarchive(issue #221)
+# ---------------------------------------------------------------------------
+
+
+class TestJobArchive:
+    async def test_write_disabled_rejects(self) -> None:
+        app = _make_app(write_enabled=False)
+        env = await job_tools.job_archive(app, job_id="BJ-1")
+        assert env.status == "denied"
+        assert env.error is not None
+        assert env.error.kind == "permission_denied"
+
+    async def test_single_ok_returns_jobout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _make_app()
+        archived = _job_row(
+            status="succeeded", archived_at=datetime(2026, 1, 16, tzinfo=UTC)
+        )
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "archive",
+            lambda self, jid: _async_return(archived),
+        )
+        env = await job_tools.job_archive(app, job_id="BJ-1")
+        assert env.status == "ok"
+        assert env.data["job_id"] == "BJ-1"
+        assert env.data["archived_at"] is not None
+        assert app.audit.records[0].tool_name == "finboard.job.archive"
+
+    async def test_single_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        app = _make_app()
+
+        async def _raise(self: Any, jid: str) -> Any:
+            raise BackgroundJobPersistenceConflictError("后台任务不存在: BJ-1")
+
+        monkeypatch.setattr(BackgroundJobRepository, "archive", _raise)
+        env = await job_tools.job_archive(app, job_id="BJ-1")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "not_found"
+
+    async def test_single_non_terminal_conflict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _make_app()
+
+        async def _raise(self: Any, jid: str) -> Any:
+            raise BackgroundJobPersistenceConflictError(
+                "任务 BJ-1 当前状态 running 不是终态,不支持归档"
+            )
+
+        monkeypatch.setattr(BackgroundJobRepository, "archive", _raise)
+        env = await job_tools.job_archive(app, job_id="BJ-1")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "conflict"
+
+    async def test_job_id_and_filters_mutually_exclusive(self) -> None:
+        app = _make_app()
+        env = await job_tools.job_archive(
+            app, job_id="BJ-1", kinds=["echo"]
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_bulk_returns_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "archive_bulk",
+            lambda self, **kw: _async_return(42),
+        )
+        env = await job_tools.job_archive(app, statuses=["succeeded"], limit=50)
+        assert env.status == "ok"
+        assert env.data == {"archived_count": 42}
+
+    async def test_bulk_rejects_non_terminal_statuses(self) -> None:
+        app = _make_app()
+        env = await job_tools.job_archive(app, statuses=["running"])
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_bulk_invalid_finished_before(self) -> None:
+        app = _make_app()
+        env = await job_tools.job_archive(app, finished_before="not-a-date")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+
+class TestJobUnarchive:
+    async def test_write_disabled_rejects(self) -> None:
+        app = _make_app(write_enabled=False)
+        env = await job_tools.job_unarchive(app, "BJ-1")
+        assert env.status == "denied"
+        assert env.error is not None
+        assert env.error.kind == "permission_denied"
+
+    async def test_ok_clears_archived_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _make_app()
+        restored = _job_row(status="succeeded", archived_at=None)
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "unarchive",
+            lambda self, jid: _async_return(restored),
+        )
+        env = await job_tools.job_unarchive(app, "BJ-1")
+        assert env.status == "ok"
+        assert env.data["archived_at"] is None
+        assert app.audit.records[0].tool_name == "finboard.job.unarchive"
+
+    async def test_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        app = _make_app()
+
+        async def _raise(self: Any, jid: str) -> Any:
+            raise BackgroundJobPersistenceConflictError("后台任务不存在: BJ-1")
+
+        monkeypatch.setattr(BackgroundJobRepository, "unarchive", _raise)
+        env = await job_tools.job_unarchive(app, "missing")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "not_found"

@@ -29,6 +29,7 @@ function makeJob(overrides: Partial<JobOut> = {}): JobOut {
     created_at: "2026-08-08T00:00:00+00:00",
     started_at: "2026-08-08T00:00:01+00:00",
     finished_at: null,
+    archived_at: null,
     updated_at: "2026-08-08T00:00:01+00:00",
     ...overrides,
   };

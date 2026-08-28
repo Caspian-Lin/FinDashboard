@@ -513,6 +513,179 @@ class TestRequeueDue:
         assert row.error_code == "max_retries_exceeded"
 
 
+async def _make_terminal(
+    engine: AsyncEngine,
+    job_id: str,
+    *,
+    target: str = BackgroundJobStatus.SUCCEEDED.value,
+    finished_at: datetime | None = None,
+) -> None:
+    """把 queued 任务置为终态(interrupted 须经 reclaim 路径写 finished_at)。"""
+
+    async with session_factory(engine)() as session:
+        repo = BackgroundJobRepository(session)
+        await repo.transition(
+            job_id,
+            expected=frozenset({BackgroundJobStatus.QUEUED.value}),
+            target=target,
+        )
+        if finished_at is not None:
+            await session.execute(
+                text("update background_jobs set finished_at = :f where job_id = :jid"),
+                {"f": finished_at, "jid": job_id},
+            )
+        await repo.checkpoint()
+
+
+class TestArchive:
+    """归档:隐藏不删除 + 仅终态 + 冻结(issue #221)。"""
+
+    async def test_archive_terminal_sets_archived_at(self, engine: AsyncEngine) -> None:
+        job_id = await _enqueue(engine)
+        await _make_terminal(engine, job_id)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            row = await repo.archive(job_id)
+            await repo.checkpoint()
+        assert row.archived_at is not None
+        # 数据未删除:单查仍可达
+        async with session_factory(engine)() as session:
+            fetched = await BackgroundJobRepository(session).get(job_id)
+        assert fetched is not None
+        assert fetched.archived_at is not None
+
+    async def test_archive_is_idempotent(self, engine: AsyncEngine) -> None:
+        job_id = await _enqueue(engine)
+        await _make_terminal(engine, job_id)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            first = await repo.archive(job_id)
+            await repo.checkpoint()
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            second = await repo.archive(job_id)
+            await repo.checkpoint()
+        assert second.archived_at == first.archived_at
+
+    async def test_archive_non_terminal_rejected(self, engine: AsyncEngine) -> None:
+        job_id = await _enqueue(engine)  # queued
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            with pytest.raises(BackgroundJobPersistenceConflictError, match="终态"):
+                await repo.archive(job_id)
+
+    async def test_archive_missing_job_raises(self, engine: AsyncEngine) -> None:
+        async with session_factory(engine)() as session:
+            with pytest.raises(BackgroundJobPersistenceConflictError, match="不存在"):
+                await BackgroundJobRepository(session).archive("BJ-MISSING")
+
+    async def test_unarchive_clears_and_is_idempotent(self, engine: AsyncEngine) -> None:
+        job_id = await _enqueue(engine)
+        await _make_terminal(engine, job_id)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            await repo.archive(job_id)
+            await repo.checkpoint()
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            row = await repo.unarchive(job_id)
+            await repo.checkpoint()
+        assert row.archived_at is None
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            again = await repo.unarchive(job_id)  # 未归档再 unarchive 幂等
+            await repo.checkpoint()
+        assert again.archived_at is None
+
+    async def test_list_recent_archived_filters(self, engine: AsyncEngine) -> None:
+        visible = await _enqueue(engine)
+        hidden = await _enqueue(engine)
+        await _make_terminal(engine, visible)
+        await _make_terminal(engine, hidden)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            await repo.archive(hidden)
+            await repo.checkpoint()
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            default_rows = await repo.list_recent(limit=10)
+            only_rows = await repo.list_recent(limit=10, archived="only")
+            all_rows = await repo.list_recent(limit=10, archived="all")
+        assert [r.job_id for r in default_rows] == [visible]
+        assert [r.job_id for r in only_rows] == [hidden]
+        assert {r.job_id for r in all_rows} == {visible, hidden}
+
+    async def test_archive_bulk_counts_and_filters(
+        self, engine: AsyncEngine
+    ) -> None:
+        old = await _enqueue(engine)
+        recent = await _enqueue(engine)
+        queued = await _enqueue(engine)
+        await _make_terminal(engine, old, finished_at=datetime.now(UTC) - timedelta(days=7))
+        await _make_terminal(engine, recent, finished_at=datetime.now(UTC))
+        # queued 保持非终态:批量归档只匹配终态,不应被归档
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            count = await repo.archive_bulk(
+                finished_before=datetime.now(UTC) - timedelta(days=1),
+            )
+            await repo.checkpoint()
+        assert count == 1
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            remaining = await repo.list_recent(limit=10)
+        assert {r.job_id for r in remaining} == {recent, queued}
+        # 批量归档非终态子集被拒
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            with pytest.raises(BackgroundJobPersistenceConflictError):
+                await repo.archive_bulk(statuses=["running"])
+
+    async def test_archive_bulk_respects_limit_and_skips_archived(
+        self, engine: AsyncEngine
+    ) -> None:
+        ids = [await _enqueue(engine) for _ in range(3)]
+        for jid in ids:
+            await _make_terminal(engine, jid)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            first = await repo.archive_bulk(limit=2)
+            await repo.checkpoint()
+            second = await repo.archive_bulk(limit=2)  # 已归档的不再计数
+            await repo.checkpoint()
+        assert first == 2
+        assert second == 1
+
+    async def test_requeue_due_skips_archived(self, engine: AsyncEngine) -> None:
+        """归档即冻结:interrupted 归档后不被自动重排回队列。"""
+        job_id = await _enqueue(engine)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            await repo.claim_next(
+                worker_id="w-dead",
+                lease_until=datetime.now(UTC) - timedelta(seconds=1),
+            )
+            await repo.checkpoint()
+            await repo.reclaim_stale(datetime.now(UTC))  # → interrupted(终态)
+            await repo.checkpoint()
+            await repo.archive(job_id)
+            await repo.checkpoint()
+        await _age_status_entry(engine, job_id)
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            requeued, exhausted = await repo.requeue_due(
+                datetime.now(UTC), backoff_seconds=30
+            )
+            await repo.checkpoint()
+        assert requeued == []
+        assert exhausted == []
+        async with session_factory(engine)() as session:
+            row = await BackgroundJobRepository(session).get(job_id)
+        assert row is not None
+        assert row.status == BackgroundJobStatus.INTERRUPTED.value
+        assert row.archived_at is not None
+
+
 class TestUpdateProgress:
     async def test_monotonic_and_clamped(self, engine: AsyncEngine) -> None:
         job_id = await _enqueue(engine)

@@ -107,11 +107,13 @@ _EXPECTED_TOOLS = {
     "finboard_portfolio_sizing",
     "finboard_portfolio_feasibility",
     "finboard_portfolio_attribution",
-    # #136 任务队列工具(2 只读 + 2 写)
+    # #136 任务队列工具(2 只读 + 2 写)+ #221 归档(2 写)
     "finboard_job_list",
     "finboard_job_get",
     "finboard_job_enqueue",
     "finboard_job_cancel",
+    "finboard_job_archive",
+    "finboard_job_unarchive",
     # #137 数据写操作工具(10 写 + 2 只读)
     "finboard_data_fetch",
     "finboard_data_fetch_all",
