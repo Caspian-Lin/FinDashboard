@@ -1,16 +1,20 @@
-"""``finboard.job.*`` 工具 —— 统一后台任务队列监控与提交(issue #136)。
+"""``finboard.job.*`` 工具 —— 统一后台任务队列监控与提交(issue #136;#221 归档)。
 
 把 #117/#142/#143/#144 建立的持久化 ``background_jobs`` 队列以受控 MCP 工具形式
 暴露给外置 Agent(OpenCode):
 
 * 只读(2):list / get —— 直接调 :class:`~finboard_persistence.BackgroundJobRepository`;
-* 写(2):enqueue / cancel —— 受 ``_require_write_enabled`` 守卫。
+* 写(4):enqueue / cancel / archive / unarchive —— 受 ``_require_write_enabled`` 守卫。
 
 ``enqueue`` 复用 ``JobIn`` schema 校验(kind / queue / idempotency_key / payload /
 priority / max_attempts / requested_by),kind 白名单只放研究 / 数据 / 回测域
 (``_ALLOWED_KINDS``),与 REST ``POST /api/jobs`` 的边界一致;实盘交易内核
 (盘前检查 / 收盘撤单 / 日终核对 / Broker 心跳 / Kill Switch)由专用 Scheduler
 执行,**不进入**统一队列、不暴露为 MCP 工具。
+
+归档(issue #221)只是 ``background_jobs`` 的展示维度:归档后从默认列表
+(``archived=exclude``)隐藏但**不删除**,``archived=only|all`` 与 get 始终可达,
+可取消归档;仅终态任务可归档,归档后 worker 维护路径不再触碰(冻结)。
 
 权限:写操作尊重 ``settings.mcp_readonly_only`` / ``app.write_tools_enabled``
 开关;只读工具自动允许。不触及交易安全红线(不连 broker / 账户 / 订单 / 持仓)。
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from mcp.server import MCPServer
@@ -34,6 +39,8 @@ from finboard_persistence.background_job_repo import (
     BackgroundJobRepository,
 )
 from finboard_shared.background_jobs import (
+    ARCHIVE_FILTER_VALUES,
+    TERMINAL_STATUSES,
     BackgroundJobStatus,
     generate_background_job_id,
 )
@@ -142,11 +149,17 @@ async def job_list(
     status: list[str] | None = None,
     queue: list[str] | None = None,
     limit: int = 100,
+    archived: str = "exclude",
 ) -> ToolEnvelope:
     async def _do() -> list[dict[str, Any]]:
         valid = {item.value for item in BackgroundJobStatus}
         if status is not None and not set(status).issubset(valid):
             raise McpToolError("invalid_argument", f"未知 job 状态: {status}")
+        if archived not in ARCHIVE_FILTER_VALUES:
+            raise McpToolError(
+                "invalid_argument",
+                f"未知归档过滤值: {archived}(合法 {sorted(ARCHIVE_FILTER_VALUES)})",
+            )
         safe_limit = max(1, min(500, limit))
         async with app.session_maker() as session:
             rows = await BackgroundJobRepository(session).list_recent(
@@ -154,6 +167,7 @@ async def job_list(
                 statuses=status,
                 queues=queue,
                 limit=safe_limit,
+                archived=archived,
             )
             return [_job_out(row) for row in rows]
 
@@ -165,6 +179,7 @@ async def job_list(
             "status": status,
             "queue": queue,
             "limit": limit,
+            "archived": archived,
         },
         handler=_do,
     )
@@ -338,20 +353,141 @@ async def job_cancel(
 
 
 # --------------------------------------------------------------------------- #
+# 写:archive / unarchive(issue #221)
+# --------------------------------------------------------------------------- #
+
+
+def _parse_finished_before(value: str | None) -> datetime | None:
+    """把 MCP 入参的 ISO 时间串解析为 aware datetime;非法值报 invalid_argument。"""
+
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise McpToolError(
+            "invalid_argument", f"finished_before 不是合法 ISO 时间: {value}"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+async def job_archive(
+    app: McpAppContext,
+    *,
+    job_id: str | None = None,
+    kinds: list[str] | None = None,
+    statuses: list[str] | None = None,
+    queues: list[str] | None = None,
+    finished_before: str | None = None,
+    limit: int = 100,
+) -> ToolEnvelope:
+    """归档后台任务(issue #221):从默认列表隐藏但**不删除**,可取消归档。
+
+    * 单个:传 ``job_id``(幂等,已归档原样返回);
+    * 批量:省略 ``job_id``,按 ``kinds`` / ``statuses`` / ``queues`` /
+      ``finished_before``(ISO 时间)过滤,从旧到新归档 ``limit`` 条,返回
+      ``archived_count`` 计数(#206 精神:不回全量任务列表)。
+    仅终态任务可归档;``statuses`` 只接受终态子集(空 = 全部终态)。
+    """
+
+    async def _do() -> dict[str, Any]:
+        await _require_write_enabled(app)
+        finished_at = _parse_finished_before(finished_before)
+        async with app.session_maker() as session:
+            repo = BackgroundJobRepository(session)
+            if job_id is not None:
+                if kinds or statuses or queues or finished_before is not None:
+                    raise McpToolError(
+                        "invalid_argument",
+                        "job_id 与批量过滤参数(kinds/statuses/queues/"
+                        "finished_before)互斥,二选一",
+                    )
+                try:
+                    row = await repo.archive(job_id)
+                    await session.commit()
+                except BackgroundJobPersistenceConflictError as exc:
+                    await session.rollback()
+                    message = str(exc)
+                    if "不存在" in message:
+                        raise McpToolError("not_found", message) from exc
+                    raise McpToolError("conflict", message) from exc
+                return _job_out(row)
+            if statuses is not None and not set(statuses).issubset(TERMINAL_STATUSES):
+                raise McpToolError(
+                    "invalid_argument",
+                    f"仅终态任务可归档(合法 {sorted(TERMINAL_STATUSES)})",
+                )
+            try:
+                count = await repo.archive_bulk(
+                    kinds=kinds,
+                    statuses=statuses,
+                    queues=queues,
+                    finished_before=finished_at,
+                    limit=limit,
+                )
+                await session.commit()
+            except BackgroundJobPersistenceConflictError as exc:
+                await session.rollback()
+                raise McpToolError("conflict", str(exc)) from exc
+            return {"archived_count": count}
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.job.archive",
+        arguments={
+            "job_id": job_id,
+            "kinds": kinds,
+            "statuses": statuses,
+            "queues": queues,
+            "finished_before": finished_before,
+            "limit": limit,
+        },
+        handler=_do,
+    )
+
+
+async def job_unarchive(app: McpAppContext, job_id: str) -> ToolEnvelope:
+    """取消归档:任务重新出现在默认列表;幂等(未归档原样返回)。"""
+
+    async def _do() -> dict[str, Any]:
+        await _require_write_enabled(app)
+        async with app.session_maker() as session:
+            repo = BackgroundJobRepository(session)
+            try:
+                row = await repo.unarchive(job_id)
+                await session.commit()
+            except BackgroundJobPersistenceConflictError as exc:
+                await session.rollback()
+                raise McpToolError("not_found", str(exc)) from exc
+            return _job_out(row)
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.job.unarchive",
+        arguments={"job_id": job_id},
+        handler=_do,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # register
 # --------------------------------------------------------------------------- #
 
 
 def register(mcp: MCPServer) -> None:
-    """把任务队列工具注册到 MCP server(2 只读 + 2 写)。"""
+    """把任务队列工具注册到 MCP server(2 只读 + 4 写)。"""
 
     @mcp.tool(
         name="finboard_job_list",
         description=(
             "列出后台任务(最近优先,可选按 kind/status/queue 过滤,默认 100 条)。"
+            "archived=exclude(默认)只看未归档;only 只看已归档;all 不区分"
+            "(issue #221:归档隐藏不删除,单查 finboard_job_get 始终可达)。"
             "返回 JobOut 列表(job_id/kind/queue/status/priority/payload/"
             "progress_done/progress_total/phase/result_ref/error_*/attempt/"
-            "max_attempts/worker_id/时间戳)。"
+            "max_attempts/worker_id/archived_at/时间戳)。"
             "status 取值:queued|running|retry_waiting|succeeded|failed|"
             "cancel_requested|cancelled|interrupted。只读。"
         ),
@@ -361,6 +497,7 @@ def register(mcp: MCPServer) -> None:
         status: list[str] | None = None,
         queue: list[str] | None = None,
         limit: int = 100,
+        archived: str = "exclude",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await job_list(
@@ -369,6 +506,7 @@ def register(mcp: MCPServer) -> None:
             status=status,
             queue=queue,
             limit=limit,
+            archived=archived,
         )
 
     @mcp.tool(
@@ -445,11 +583,62 @@ def register(mcp: MCPServer) -> None:
     ) -> ToolEnvelope:
         return await job_cancel(app_context(ctx), job_id)
 
+    @mcp.tool(
+        name="finboard_job_archive",
+        description=(
+            "[写] 归档后台任务(issue #221):从默认列表(archived=exclude)隐藏"
+            "但**不删除**,finboard_job_get 单查与 archived=only|all 列表始终可达,"
+            "finboard_job_unarchive 可恢复。"
+            "两种用法:(1) 传 job_id 归档单个任务(幂等,返回 JobOut);"
+            "(2) 省略 job_id 批量归档——按 kinds/statuses/queues/finished_before"
+            "(ISO 时间)过滤终态任务,从旧到新归档 limit(1..1000,默认 100)条,"
+            "返回 {archived_count} 计数(不回全量列表)。"
+            "仅终态(succeeded/failed/cancelled/interrupted)任务可归档,"
+            "statuses 只接受终态子集(空=全部终态);归档即冻结,"
+            "worker 不再自动重排该任务。未找到返回 not_found,"
+            "非终态返回 conflict。写操作,mcp_readonly_only=true 时拒绝。"
+        ),
+    )
+    async def _archive(
+        job_id: str | None = None,
+        kinds: list[str] | None = None,
+        statuses: list[str] | None = None,
+        queues: list[str] | None = None,
+        finished_before: str | None = None,
+        limit: int = 100,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await job_archive(
+            app_context(ctx),
+            job_id=job_id,
+            kinds=kinds,
+            statuses=statuses,
+            queues=queues,
+            finished_before=finished_before,
+            limit=limit,
+        )
+
+    @mcp.tool(
+        name="finboard_job_unarchive",
+        description=(
+            "[写] 取消归档单个后台任务:任务重新出现在默认列表;幂等"
+            "(未归档任务原样返回)。未找到返回 not_found。"
+            "写操作,mcp_readonly_only=true 时拒绝。"
+        ),
+    )
+    async def _unarchive(
+        job_id: str,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await job_unarchive(app_context(ctx), job_id)
+
 
 __all__ = [
+    "job_archive",
     "job_cancel",
     "job_enqueue",
     "job_get",
     "job_list",
+    "job_unarchive",
     "register",
 ]

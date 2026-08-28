@@ -15,6 +15,9 @@ vi.mock("../lib/api", async (importOriginal) => {
       listJobs: vi.fn(),
       cancelJob: vi.fn(),
       getJob: vi.fn(),
+      archiveJob: vi.fn(),
+      unarchiveJob: vi.fn(),
+      bulkArchiveJobs: vi.fn(),
     },
   };
 });
@@ -44,6 +47,7 @@ function makeJob(overrides: Partial<JobOut> = {}): JobOut {
     created_at: "2026-08-16T08:00:00Z",
     started_at: "2026-08-16T08:00:01Z",
     finished_at: "2026-08-16T08:00:02Z",
+    archived_at: null,
     updated_at: "2026-08-16T08:00:02Z",
     ...overrides,
   };
@@ -132,5 +136,67 @@ describe("任务中心页", () => {
     const detail = await screen.findByText("入参 payload");
     expect(within(detail.closest("div")!).getByText(/"steps": 2/)).toBeInTheDocument();
     expect(screen.getByText("结果引用")).toBeInTheDocument();
+  });
+
+  it("归档过滤写入 URL,archived=only 时透传给 listJobs(issue #221)", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue([
+      makeJob({ archived_at: "2026-08-17T08:00:00Z" }),
+    ]);
+    renderWithProviders(<Jobs />, ["/jobs?archived=only"]);
+    expect(await screen.findByText("BJ-TEST000000000001")).toBeInTheDocument();
+    expect(vi.mocked(api.listJobs)).toHaveBeenCalledWith(
+      expect.objectContaining({ archived: "only" }),
+    );
+    // 归档行显示「已归档」标记与「恢复」按钮
+    expect(screen.getByText("已归档")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "取消归档任务 BJ-TEST000000000001" }),
+    ).toBeInTheDocument();
+  });
+
+  it("终态任务显示归档按钮,点击后调用 archiveJob 并刷新列表(issue #221)", async () => {
+    const archive = vi.mocked(api.archiveJob).mockResolvedValue(
+      makeJob({ archived_at: "2026-08-17T08:00:00Z" }),
+    );
+    const list = vi.mocked(api.listJobs).mockResolvedValue([makeJob()]);
+    renderWithProviders(<Jobs />);
+    const archiveButton = await screen.findByRole("button", {
+      name: "归档任务 BJ-TEST000000000001",
+    });
+    await userEvent.click(archiveButton);
+    await waitFor(() => expect(archive).toHaveBeenCalledWith("BJ-TEST000000000001"));
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  });
+
+  it("批量归档按钮调用 bulkArchiveJobs(succeeded+cancelled)并提示计数(issue #221)", async () => {
+    const bulk = vi
+      .mocked(api.bulkArchiveJobs)
+      .mockResolvedValue({ archived_count: 3 });
+    vi.mocked(api.listJobs).mockResolvedValue([
+      makeJob(),
+      makeJob({ job_id: "BJ-TEST000000000002", status: "cancelled" }),
+      makeJob({ job_id: "BJ-TEST000000000003", status: "failed" }),
+    ]);
+    renderWithProviders(<Jobs />);
+    await screen.findByText("BJ-TEST000000000001");
+    await userEvent.click(
+      screen.getByRole("button", { name: "批量归档已完成的任务" }),
+    );
+    await waitFor(() =>
+      expect(bulk).toHaveBeenCalledWith({
+        statuses: ["succeeded", "cancelled"],
+        limit: 1000,
+      }),
+    );
+    expect(await screen.findByText(/已归档 3 条任务/)).toBeInTheDocument();
+  });
+
+  it("archived=only 视图不显示批量归档按钮(issue #221)", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue([]);
+    renderWithProviders(<Jobs />, ["/jobs?archived=only"]);
+    await screen.findByText("暂无任务");
+    expect(
+      screen.queryByRole("button", { name: "批量归档已完成的任务" }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -1,4 +1,4 @@
-"""``/api/jobs`` 路由契约与白名单边界(issue #117 / #142)。
+"""``/api/jobs`` 路由契约与白名单边界(issue #117 / #142;#221 归档)。
 
 只验证路由形状、kind 白名单、入参校验契约;
 真正的 PG 状态机 / SKIP LOCKED / worker 端到端在
@@ -31,6 +31,10 @@ def test_routes_registered(client: TestClient) -> None:
     assert "/api/jobs" in paths
     assert "/api/jobs/{job_id}" in paths
     assert "/api/jobs/{job_id}/cancel" in paths
+    # issue #221:归档 / 取消归档 / 批量归档端点注册
+    assert "/api/jobs/{job_id}/archive" in paths
+    assert "/api/jobs/{job_id}/unarchive" in paths
+    assert "/api/jobs/archive" in paths
     # 不暴露任何 execute / run 端点(执行由独立 worker 进程承接)
     assert all(
         not p.endswith("/execute") and not p.endswith("/run") for p in paths
@@ -84,6 +88,53 @@ def test_extra_fields_forbidden(client: TestClient) -> None:
             "requested_by": "tester",
             "secret_payload": "should-be-rejected",  # extra="forbid"
         },
+    )
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------- issue #221
+
+
+def test_list_rejects_unknown_archived_filter(client: TestClient) -> None:
+    response = client.get("/api/jobs", params={"archived": "sometimes"})
+    assert response.status_code == 422
+    assert "归档过滤值" in response.json()["detail"]
+
+
+def test_list_accepts_valid_archived_filters(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """exclude/only/all 均通过参数校验(handler 内走 mock repo,不触库)。"""
+
+    from finboard_persistence.background_job_repo import BackgroundJobRepository
+
+    monkeypatch.setattr(
+        BackgroundJobRepository, "list_recent", AsyncMock(return_value=[])
+    )
+    for value in ("exclude", "only", "all"):
+        response = client.get("/api/jobs", params={"archived": value, "limit": 1})
+        assert response.status_code == 200, value
+        assert response.json() == []
+
+
+def test_bulk_archive_rejects_non_terminal_statuses(client: TestClient) -> None:
+    response = client.post(
+        "/api/jobs/archive",
+        json={"statuses": ["running", "queued"]},
+    )
+    assert response.status_code == 422
+    assert "终态" in response.json()["detail"]
+
+
+def test_bulk_archive_limit_bounds(client: TestClient) -> None:
+    response = client.post("/api/jobs/archive", json={"limit": 9999})
+    assert response.status_code == 422
+
+
+def test_bulk_archive_extra_fields_forbidden(client: TestClient) -> None:
+    response = client.post(
+        "/api/jobs/archive",
+        json={"statuses": ["succeeded"], "dry_run": True},
     )
     assert response.status_code == 422
 

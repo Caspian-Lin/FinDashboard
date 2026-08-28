@@ -19,7 +19,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_persistence.models import BackgroundJobModel
-from finboard_shared.background_jobs import BackgroundJobStatus
+from finboard_shared.background_jobs import (
+    ARCHIVE_FILTER_VALUES,
+    TERMINAL_STATUSES,
+    BackgroundJobStatus,
+)
 
 
 class BackgroundJobPersistenceConflictError(RuntimeError):
@@ -119,8 +123,24 @@ class BackgroundJobRepository:
         statuses: Iterable[str] | None = None,
         queues: Iterable[str] | None = None,
         limit: int = 100,
+        archived: str = "exclude",
     ) -> list[BackgroundJobModel]:
+        """最近任务列表(issue #221:``archived`` 维度过滤)。
+
+        ``archived`` 取值见 ``ARCHIVE_FILTER_VALUES``:``exclude``(默认)只看
+        未归档;``only`` 只看已归档;``all`` 不区分。归档行数据不删除,
+        单查 ``get`` 不受此参数影响。
+        """
+
+        if archived not in ARCHIVE_FILTER_VALUES:
+            raise BackgroundJobPersistenceConflictError(
+                f"未知归档过滤值: {archived}(合法 {sorted(ARCHIVE_FILTER_VALUES)})"
+            )
         stmt = select(BackgroundJobModel)
+        if archived == "only":
+            stmt = stmt.where(BackgroundJobModel.archived_at.is_not(None))
+        elif archived == "exclude":
+            stmt = stmt.where(BackgroundJobModel.archived_at.is_(None))
         if kinds is not None:
             stmt = stmt.where(BackgroundJobModel.kind.in_(tuple(kinds)))
         if statuses is not None:
@@ -370,6 +390,94 @@ class BackgroundJobRepository:
             f"任务 {job_id} 当前状态 {row.status} 不支持取消"
         )
 
+    # ------------------------------------------------------------------ archive
+    async def archive(self, job_id: str) -> BackgroundJobModel:
+        """归档终态任务(issue #221):``archived_at`` 置当前时间,从默认列表隐藏。
+
+        - 仅 ``TERMINAL_STATUSES`` 可归档 —— 排队 / 运行中的任务被藏起来没人看见
+          是事故温床,fail-closed 拒绝;
+        - 幂等:已归档任务重复归档直接返回当前行;
+        - 归档不删除任何数据,单查 ``get`` / ``archived=only|all`` 列表始终可达,
+          ``unarchive`` 可恢复展示。
+        """
+
+        row = await self.get(job_id, for_update=True)
+        if row is None:
+            raise BackgroundJobPersistenceConflictError(f"后台任务不存在: {job_id}")
+        if row.status not in TERMINAL_STATUSES:
+            raise BackgroundJobPersistenceConflictError(
+                f"任务 {job_id} 当前状态 {row.status} 不是终态,不支持归档"
+            )
+        if row.archived_at is None:
+            now = datetime.now(UTC)
+            row.archived_at = now
+            row.updated_at = now
+            await self._session.flush()
+        return row
+
+    async def unarchive(self, job_id: str) -> BackgroundJobModel:
+        """取消归档(幂等):清空 ``archived_at``,任务重新出现在默认列表。"""
+
+        row = await self.get(job_id, for_update=True)
+        if row is None:
+            raise BackgroundJobPersistenceConflictError(f"后台任务不存在: {job_id}")
+        if row.archived_at is not None:
+            row.archived_at = None
+            row.updated_at = datetime.now(UTC)
+            await self._session.flush()
+        return row
+
+    async def archive_bulk(
+        self,
+        *,
+        kinds: Iterable[str] | None = None,
+        statuses: Iterable[str] | None = None,
+        queues: Iterable[str] | None = None,
+        finished_before: datetime | None = None,
+        limit: int = 100,
+    ) -> int:
+        """批量归档未归档的终态任务,返回实际归档条数(issue #221)。
+
+        - ``statuses`` 须为 ``TERMINAL_STATUSES`` 子集,空 / None 表示全部终态;
+        - ``finished_before`` 只归档 ``finished_at`` 早于该时刻的行(终态行
+          ``finished_at`` 由 ``transition`` 保证写入);
+        - 按 ``created_at`` 从旧到新归档,单次 ``limit`` 夹紧 1..1000;
+        - ``FOR UPDATE SKIP LOCKED`` 与 worker 维护路径并发安全。
+        """
+
+        final_statuses = set(statuses or TERMINAL_STATUSES)
+        invalid = final_statuses - TERMINAL_STATUSES
+        if invalid:
+            raise BackgroundJobPersistenceConflictError(
+                f"非终态状态不支持归档: {sorted(invalid)}"
+            )
+        stmt = (
+            select(BackgroundJobModel)
+            .where(
+                BackgroundJobModel.status.in_(tuple(final_statuses)),
+                BackgroundJobModel.archived_at.is_(None),
+            )
+            .order_by(BackgroundJobModel.created_at.asc())
+            .with_for_update(skip_locked=True)
+            .limit(max(1, min(1000, limit)))
+        )
+        if kinds is not None:
+            stmt = stmt.where(BackgroundJobModel.kind.in_(tuple(kinds)))
+        if queues is not None:
+            stmt = stmt.where(BackgroundJobModel.queue.in_(tuple(queues)))
+        if finished_before is not None:
+            stmt = stmt.where(
+                BackgroundJobModel.finished_at.is_not(None),
+                BackgroundJobModel.finished_at <= finished_before,
+            )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        now = datetime.now(UTC)
+        for row in rows:
+            row.archived_at = now
+            row.updated_at = now
+        await self._session.flush()
+        return len(rows)
+
     async def finish(
         self,
         job_id: str,
@@ -424,6 +532,8 @@ class BackgroundJobRepository:
         - ``interrupted`` / ``retry_waiting`` 且 ``updated_at <= now - backoff``
           (即进入该状态已超过退避窗口)参与本轮;``updated_at`` 在进入这两个
           状态时由 ``transition`` 更新,天然就是状态进入时间;
+        - 已归档(``archived_at`` 非空)的行不参与(issue #221 归档即冻结:
+          不重排回队列、不强制失败,保持归档时的状态原样);
         - 还有剩余 attempt 的 → ``queued`` 重新入队(attempt 在下次领取时递增);
         - attempt 已耗尽 → ``failed``(终态,error_code=max_retries_exceeded)。
 
@@ -441,6 +551,7 @@ class BackgroundJobRepository:
                         BackgroundJobStatus.RETRY_WAITING.value,
                     )
                 ),
+                BackgroundJobModel.archived_at.is_(None),
                 BackgroundJobModel.updated_at <= cutoff,
             )
             .order_by(BackgroundJobModel.updated_at.asc())

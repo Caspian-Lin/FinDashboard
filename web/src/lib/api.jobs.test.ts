@@ -33,6 +33,7 @@ function makeJob(status: JobStatus): JobOut {
     created_at: "2026-08-01T00:00:00+00:00",
     started_at: null,
     finished_at: null,
+    archived_at: null,
     updated_at: "2026-08-01T00:00:00+00:00",
   };
 }
@@ -118,5 +119,71 @@ describe("api.getJob / listJobs 路径", () => {
     expect(calledUrl).toMatch(/status=running/);
     expect(calledUrl).toMatch(/queue=data/);
     expect(calledUrl).toMatch(/limit=25/);
+  });
+
+  it("listJobs 默认不带 archived,显式传时拼接(issue #221)", async () => {
+    // Response body 只能读一次,每次调用返回新实例
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await api.listJobs();
+    expect(String((fetchMock.mock.calls[0] as unknown[])[0])).not.toContain("archived=");
+
+    await api.listJobs({ archived: "only" });
+    expect(String((fetchMock.mock.calls[1] as unknown[])[0])).toMatch(
+      /archived=only/,
+    );
+  });
+
+  it("archiveJob / unarchiveJob 请求对应端点(issue #221)", async () => {
+    // Response body 只能读一次,每次调用返回新实例
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(makeJob("succeeded")), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await api.archiveJob("BJ-1");
+    await api.unarchiveJob("BJ-1");
+    const first = fetchMock.mock.calls[0] as unknown[];
+    const second = fetchMock.mock.calls[1] as unknown[];
+    expect(String(first[0])).toContain("/api/jobs/BJ-1/archive");
+    expect((first[1] as RequestInit).method).toBe("POST");
+    expect(String(second[0])).toContain("/api/jobs/BJ-1/unarchive");
+    expect((second[1] as RequestInit).method).toBe("POST");
+  });
+
+  it("bulkArchiveJobs POST /api/jobs/archive 只回计数(issue #221)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ archived_count: 7 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await api.bulkArchiveJobs({
+      statuses: ["succeeded", "cancelled"],
+      limit: 1000,
+    });
+    expect(result.archived_count).toBe(7);
+    const call = fetchMock.mock.calls[0] as unknown[];
+    expect(String(call[0])).toContain("/api/jobs/archive");
+    expect((call[1] as RequestInit).method).toBe("POST");
+    expect(JSON.parse(String((call[1] as RequestInit).body)).statuses).toEqual([
+      "succeeded",
+      "cancelled",
+    ]);
   });
 });

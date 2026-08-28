@@ -48,6 +48,12 @@ TERMINAL_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+#: 列表接口对归档维度(``archived_at`` 列,issue #221)的过滤取值:
+#: ``exclude`` 默认只看未归档;``only`` 只看已归档;``all`` 不区分。
+#: 归档独立于 status(不新增枚举值),仅终态任务可归档,归档后 worker 维护
+#: 路径(``requeue_due``)不再触碰,数据不删除、单查始终可达。
+ARCHIVE_FILTER_VALUES: frozenset[str] = frozenset({"exclude", "only", "all"})
+
 
 def generate_background_job_id() -> str:
     """生成全局唯一的后台任务 ID(``BJ-<16hex>``)。"""
@@ -56,6 +62,7 @@ def generate_background_job_id() -> str:
 
 
 __all__ = [
+    "ARCHIVE_FILTER_VALUES",
     "TERMINAL_STATUSES",
     "BackgroundJobStatus",
     "generate_background_job_id",
