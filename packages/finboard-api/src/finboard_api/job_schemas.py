@@ -52,6 +52,8 @@ class JobOut(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    # 归档时间(issue #221);默认 None=未归档(兼容 archived_at 之前的行 / mock)。
+    archived_at: datetime | None = None
     updated_at: datetime
 
 
@@ -67,7 +69,28 @@ class JobCancelIn(BaseModel):
     reason: str | None = Field(default=None, max_length=256)
 
 
+class JobArchiveIn(BaseModel):
+    """批量归档过滤条件(issue #221)。全部可选;默认归档全部未归档终态任务中
+    最旧的 ``limit`` 条。``statuses`` 只接受终态子集(路由层校验)。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kinds: list[str] | None = None
+    statuses: list[str] | None = None
+    queues: list[str] | None = None
+    finished_before: datetime | None = None
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
+class JobArchiveResult(BaseModel):
+    """批量归档回执(issue #206 精神:只回计数,不回全量任务列表)。"""
+
+    archived_count: int
+
+
 __all__ = [
+    "JobArchiveIn",
+    "JobArchiveResult",
     "JobCancelIn",
     "JobIn",
     "JobOut",
