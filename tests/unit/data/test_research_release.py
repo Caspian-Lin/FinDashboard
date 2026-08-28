@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -19,6 +19,7 @@ from finboard_data.releases import (
     DAILY_METRICS_FIELDS,
     FINANCIAL_INDICATORS_FIELDS,
     RELEASE_FIELDS,
+    DatasetQualityStatus,
     DatasetReleaseQualityError,
     DatasetReleaseSpec,
     ExecutionMetadata,
@@ -389,6 +390,91 @@ async def test_research_release_quality_gate_reports_null_fields(tmp_path) -> No
     # 财务指标字段稀疏是常态:all_null_fields 是可见 warning,不阻止 ready。
     assert instrument.ready
     assert any("all_null_fields" in issue for issue in instrument.issues)
+
+
+@pytest.mark.asyncio
+async def test_research_release_sparse_coverage_is_warning_not_gate(tmp_path) -> None:
+    """#212:研究数据逐标的 coverage 缺口只是可见 warning,不再阻止发布。
+
+    全市场实测 5534 只中 1421 只跨度口径 coverage<0.98(停牌日 daily_basic
+    无截面、最新报告期未公告是常态),逐标的 0.98 硬门会让任何真实全市场
+    研究发布不可发布;发布级平均覆盖率(研究 kind 由 executor 默认放宽到
+    0.95,此处显式传入对齐)仍是硬门。
+    """
+    full = "600001.SH"
+    sparse = "600002.SH"
+    quarters = [
+        date(2021, 6, 30), date(2021, 9, 30), date(2021, 12, 31),
+        date(2022, 3, 31), date(2022, 6, 30), date(2022, 9, 30), date(2022, 12, 31),
+        date(2023, 3, 31), date(2023, 6, 30), date(2023, 9, 30), date(2023, 12, 31),
+        date(2024, 3, 31), date(2024, 6, 30), date(2024, 9, 30),
+    ]
+
+    def _fin(symbol: str, period: date) -> FinancialIndicator:
+        # 审计的跨度回退按 available_at 日期取边界:公告日按报告期+25 天展开,
+        # 与真实数据一致(_financial 默认全年挤在 4/30 会把跨度压扁)。
+        ann = period + timedelta(days=25)
+        return replace(
+            _financial(symbol, period),
+            announcement_date=ann,
+            available_at=datetime.combine(ann, datetime.min.time(), tzinfo=UTC) + timedelta(days=1),
+        )
+
+    # list_date=None → 审计按记录自身跨度回退,expected=13 个季末。
+    full_instrument = replace(_stock(full), list_date=None)
+    sparse_instrument = replace(_stock(sparse), list_date=None)
+    builder = FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+        research_source=_StubResearchSource(
+            financial_records={
+                full: [_fin(full, q) for q in quarters],
+                # 缺 1 期内部报告期:12/13≈0.923,发布级均值≈0.962≥0.95。
+                sparse: [_fin(sparse, q) for q in quarters if q != date(2023, 6, 30)],
+            }
+        ),
+    )
+    spec = DatasetReleaseSpec(
+        release_id="fina-sparse-warn",
+        dataset_name="a_share_financial_indicators",
+        source="tushare",
+        version="v1",
+        start_date=date(2021, 1, 1),
+        end_date=date(2024, 9, 30),
+        code_version="test",
+        fields=FINANCIAL_INDICATORS_FIELDS,
+        dataset_kind=ReleaseDatasetKind.FINANCIAL_INDICATORS,
+        required_capabilities=("stock",),
+        adjustment="none",
+        minimum_release_coverage=Decimal("0.95"),
+    )
+    release = await builder.publish(spec, [full_instrument, sparse_instrument])
+    sparse_out = release.instrument(sparse)
+    # 元数据完整即 ready;coverage 缺口作为可见 warning 留在 issues。
+    assert sparse_out.ready
+    assert any("coverage:" in issue for issue in sparse_out.issues)
+    assert release.quality_status is DatasetQualityStatus.WARNINGS
+
+    # 发布级平均覆盖率跌破阈值仍硬失败:再缺 2 期 → 均值≈0.885<0.95。
+    strict_builder = FrozenDatasetReleaseBuilder(
+        cache_dir=tmp_path / "cache2",
+        release_root=tmp_path / "releases2",
+        research_source=_StubResearchSource(
+            financial_records={
+                full: [_fin(full, q) for q in quarters],
+                sparse: [
+                    _fin(sparse, q)
+                    for q in quarters
+                    if q not in (date(2023, 6, 30), date(2023, 9, 30), date(2023, 12, 31))
+                ],
+            }
+        ),
+    )
+    with pytest.raises(DatasetReleaseQualityError, match="release_coverage"):
+        await strict_builder.publish(
+            replace(spec, release_id="fina-sparse-fail"),
+            [full_instrument, sparse_instrument],
+        )
 
 
 @pytest.mark.asyncio
