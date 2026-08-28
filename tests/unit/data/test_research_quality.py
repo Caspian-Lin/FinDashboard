@@ -170,6 +170,28 @@ def test_empty_stale_and_invalid_values_are_rejected() -> None:
     assert invalid.issues[0].code == "invalid_daily_value"
 
 
+def test_daily_share_inversion_between_float_and_free_is_tolerated() -> None:
+    """#212:tushare 流通/自由流通口径倒挂(free 略大于 float)不算非法值。
+
+    实测 300863.SZ 2024-01-09:float=33,467,087 < free=33,519,587(倒挂 5.25 万股),
+    旧判定(要求 float>=free)会让该日全市场截面整批被拒。仍要求 free 不超过总股本。
+    """
+    inverted = _validator().validate_daily_metrics(
+        [replace(_daily(), free_shares=Decimal("81000000"))],  # float=80,000,000
+        expected_trade_date=TRADE_DATE,
+        expected_source="tushare",
+    )
+    assert inverted.status is QualityStatus.PASSED
+
+    exceed_total = _validator().validate_daily_metrics(
+        [replace(_daily(), free_shares=Decimal("200000000"))],  # total=100,000,000
+        expected_trade_date=TRADE_DATE,
+        expected_source="tushare",
+    )
+    assert exceed_total.status is QualityStatus.FAILED
+    assert exceed_total.issues[-1].code == "invalid_daily_value"
+
+
 def test_financial_and_industry_time_contracts_are_checked() -> None:
     financial = _validator().validate_financial_indicators(
         [replace(_financial(), available_at=datetime(2026, 4, 20, 12, tzinfo=UTC))],

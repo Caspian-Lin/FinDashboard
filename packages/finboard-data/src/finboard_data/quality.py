@@ -367,15 +367,13 @@ def _daily_has_invalid_value(item: DailySecurityMetrics) -> bool:
     return (
         (item.close is not None and item.close <= 0)
         or any(value is not None and value < 0 for value in non_negative)
-        or _descending_values_invalid(
-            item.total_shares,
-            item.float_shares,
-            item.free_shares,
-        )
-        or _descending_values_invalid(
-            item.total_market_cap,
-            item.circulating_market_cap,
-        )
+        # tushare 口径:自由流通股本(free)偶发略高于流通股本(float)
+        # (issue #212 实测 300863.SZ 2024-01-09 倒挂 5.25 万股,约 7% 交易日
+        # 各中 1 行),float>=free 不是上游数据不变式;只保留总股本/总市值
+        # 不小于各分量的检查。
+        or _descending_values_invalid(item.total_shares, item.float_shares)
+        or _descending_values_invalid(item.total_shares, item.free_shares)
+        or _descending_values_invalid(item.total_market_cap, item.circulating_market_cap)
         or (item.limit_status is not None and not 0 <= item.limit_status <= 6)
     )
 
