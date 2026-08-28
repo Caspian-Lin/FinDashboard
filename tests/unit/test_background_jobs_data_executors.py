@@ -268,6 +268,48 @@ class TestProgressBridge:
 
         asyncio.run(_driver())
 
+    def test_make_sync_progress_coalesces_high_frequency_callbacks(self) -> None:
+        """#212:高频回调单飞合并——并发 async 上报任务至多一个。
+
+        全市场联合因子快照逐标的回调时,旧的逐调用 fire-and-forget 会积压
+        上百个并发 update_progress 任务,每个各开一个 session 写 job 行,
+        打满引擎连接池(5+10)后 worker 维护循环直接被 QueuePool TimeoutError
+        掀翻。合并后:在途任务期间的新帧只更新数值槽,不新增任务。
+        """
+
+        import asyncio
+
+        from finboard_backtest.background_jobs.executors._progress import (
+            make_sync_progress,
+        )
+
+        received: list[tuple[int, int | None, str | None]] = []
+        in_flight = 0
+        max_in_flight = 0
+
+        async def cb(done: int, total: int | None, phase: str | None) -> None:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.001)  # 模拟一次 DB 写的耗时
+            received.append((done, total, phase))
+            in_flight -= 1
+
+        async def _driver() -> None:
+            sync_cb = make_sync_progress(cb, phase_prefix="test")
+            for i in range(200):
+                sync_cb(f"00000{i}.SZ", i, 200)
+                await asyncio.sleep(0)  # 让 drain 与生产交错
+            for _ in range(400):
+                await asyncio.sleep(0)
+            assert max_in_flight == 1  # 任意时刻至多一个在途上报
+            assert received  # 有帧送达
+            assert received[-1][0] == 199  # 最终帧必达
+            # 高频合并:送达帧数远少于触发次数(中间帧被合并丢弃)。
+            assert len(received) < 200
+
+        asyncio.run(_driver())
+
 
 
 
