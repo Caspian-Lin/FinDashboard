@@ -387,7 +387,7 @@ async def test_joined_release_tolerates_symbol_missing_in_research_release(
     assert "missing_in_research_release:daily_metrics:1" in snapshot.issues
     assert "missing_in_research_release:financial_indicators:1" in snapshot.issues
     # 基本面因子只覆盖 full;价格因子两只都有。
-    observed = {}
+    observed: dict[str, set[str]] = {}
     for obs in snapshot.observations:
         observed.setdefault(obs.feature_name, set()).add(obs.symbol)
     assert observed["roe"] == {full}

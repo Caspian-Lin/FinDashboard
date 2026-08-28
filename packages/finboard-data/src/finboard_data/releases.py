@@ -2523,6 +2523,7 @@ __all__ = [
     "RESEARCH_ETF_CATALOG",
     "AssetCapability",
     "CapabilityStatus",
+    "DatasetQualityStatus",
     "DatasetReleaseError",
     "DatasetReleaseQualityError",
     "DatasetReleaseSpec",
