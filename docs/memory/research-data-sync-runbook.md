@@ -13,6 +13,8 @@
 - 股本/市值口径倒挂(2026-08-29 全量实测两类,质量门已改 **2% 相对容差**):300863.SZ float<free 0.16%(单日)、603882.SH 2020-09~10 total<float 0.35%(持续一个月)——严格链式不变式会让整日全市场截面被一行上游噪音连坐拒收;大幅倒挂(字段装配错误级)仍拦截。修复 = 重跑失败日期窗口即可(幂等)。
 - 财务脏行处置(603400.SH 案例):tushare 偶发 `report_period(2026-06-30) > ann_date(2026-04-22)` 的矛盾行,时间契约门会连坐挡掉该标的全部记录。处置 = **收窄 end_date 重跑**(如 end=2026-03-31)让有效记录入库;该 full-range 失败批次留档可见属预期,上游修正后全范围重跑自然通过。
 - 发布标的必须与 instruments 元数据表取交集:research_* 表含已退市股(2015 起历史全量,daily 5808 只中 274 只未登记),`dataset_publish` 执行器校验标的存在性,含未登记标的整批 `invalid_payload` 失败;交集后 daily=5534 只,恰与 bars 主发布同规模。失败后重发须换 release_id 版本号(幂等键 `publish:{release_id}` 锚定失败任务)。
+- 发布质量门(2026-08-29 全市场实测后放宽):研究 kind 逐标的 coverage 缺口只是**可见 warning**(5534 只中 1421 只跨度口径 <0.98——停牌日 daily_basic 无截面是 A 股常态,研究数据无停复牌事件表;bars 路径有停牌感知所以没事),ready 只由元数据完整决定;发布级平均 coverage 硬门对研究 kind 默认 **0.95**(全市场 daily 跨度口径平均≈0.972,0.98 必挂)。审计的跨度回退按 **available_at 日期**取边界(非报告期),写测试时公告日要按报告期展开。
+- 发布耗时:5534 标的 daily 冻结约 40-50 分钟(逐标的 DB 读 + parquet 写,并发受 builder max_io_concurrency 限制),financial 量级小得多;质量门在冻结完成后才判定,失败即整批作废需换版本号重跑——先小范围试发再全量。
 - PIT 锚点(勿改,有回归测试锁边界):fina_indicator `available_at = ann_date(公告日)+1 天 00:00 上海时区`;daily_metrics `available_at = 交易日 17:00`。回归测试:`tests/unit/data/test_research_release.py::test_financial_indicators_pit_gate_hides_unannounced_reports`。
 - 同步完成后的衔接:发布(`POST /api/instruments/datasets/releases`,release_kind=`daily_metrics` / `financial_indicators`)→ 与 bars 主发布联合做因子快照(激活 pb / earnings_yield / dividend_yield / turnover_rate / roe / gross_profit_margin / debt_to_assets / revenue_yoy 8 个 alpha 因子)→ `strategy_validate` 的 universe_precheck 复查字段观测。
 
