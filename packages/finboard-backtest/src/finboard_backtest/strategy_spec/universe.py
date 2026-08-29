@@ -20,6 +20,7 @@ class UniverseCandidate:
     listing_days: int
     average_amount: float | None
     price: float | None
+    market_cap: float | None = None
     suspended: bool = False
     delisted: bool = False
     is_st: bool = False
@@ -32,9 +33,14 @@ class UniverseCandidate:
             "listing_days": self.listing_days,
             "average_amount": self.average_amount,
             "price": self.price,
+            "market_cap": self.market_cap,
             "data_completeness": self.data_completeness,
         }
-        return builtins.get(name, self.fields.get(name))
+        if name in builtins and builtins[name] is not None:
+            return builtins[name]
+        # 内建字段为 None 时回退特征观测(如 market_cap 经 fields 提供给
+        # required_data_fields / ranking 的场景),避免内建名遮蔽特征值。
+        return self.fields.get(name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +87,16 @@ def explain_universe(
                 reasons.append("missing_price")
             elif candidate.price > spec.max_price:
                 reasons.append("price_above_maximum")
+        if spec.min_market_cap is not None:
+            if candidate.market_cap is None:
+                reasons.append("missing_market_cap")
+            elif candidate.market_cap < spec.min_market_cap:
+                reasons.append("market_cap_below_minimum")
+        if spec.max_market_cap is not None:
+            if candidate.market_cap is None:
+                reasons.append("missing_market_cap")
+            elif candidate.market_cap > spec.max_market_cap:
+                reasons.append("market_cap_above_maximum")
         if spec.exclude_suspended and candidate.suspended:
             reasons.append("suspended")
         if spec.exclude_delisted and candidate.delisted:
@@ -101,7 +117,7 @@ def explain_universe(
         ):
             reasons.append(f"missing_ranking_field:{spec.ranking.field}")
 
-        prelim[candidate.symbol] = reasons
+        prelim[candidate.symbol] = list(dict.fromkeys(reasons))
         if not reasons:
             eligible.append(candidate)
 

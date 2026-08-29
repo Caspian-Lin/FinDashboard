@@ -71,7 +71,9 @@ class _StubExecution:
 @dataclass(frozen=True, slots=True)
 class _StubInstrument:
     code: str
-    name: str = "stub"
+    # 注意:名称不得含 "ST" 子串(大写后),否则被 ST 过滤排除(issue #213)。
+    name: str = "sample"
+    name_history: tuple[tuple[str, date, date | None], ...] = ()
     market: Market = Market.A_SHARE
     asset_class: AssetClass = AssetClass.EQUITY
     ready: bool = True
@@ -753,6 +755,115 @@ class TestBuildDecisionInputs:
         )
         included = {c.symbol for c in inputs[0].candidates if c.included}
         assert len(included) == 2
+
+    async def test_universe_market_cap_filter_applies_from_snapshot_features(self) -> None:
+        """issue #213:min_market_cap 用冻结快照的 market_cap 特征观测过滤候选。"""
+        decision_at = datetime(2024, 3, 1, 15, tzinfo=UTC)
+        instruments = (
+            _StubInstrument(code="000001.SZ"),  # 小市值 50 亿
+            _StubInstrument(code="000002.SZ"),  # 大市值 2000 亿
+        )
+        closes = {
+            inst.code: {
+                date(2024, 2, 27): Decimal("9.6"),
+                date(2024, 2, 28): Decimal("9.8"),
+                date(2024, 3, 1): Decimal("10.0"),
+                date(2024, 3, 4): Decimal("10.5"),
+            }
+            for inst in instruments
+        }
+        provider = self._provider(instruments, closes)
+        snapshots = {
+            "factor-v1": _StubSnapshot(
+                snapshot_id="factor-v1",
+                decision_at=decision_at,
+                observations=tuple(
+                    _obs(inst.code, name, value)
+                    for inst in instruments
+                    for name, value in (
+                        ("pb", 1.0),
+                        ("momentum", 0.1),
+                        ("volatility_20d", 0.3),
+                        (
+                            "market_cap",
+                            5e9 if inst.code == "000001.SZ" else 2e11,
+                        ),
+                    )
+                ),
+            ),
+        }
+        release_factory, snapshot_provider = self._factories(provider, snapshots)
+        modified = _spec().model_copy(
+            update={
+                "universe": _spec().universe.model_copy(
+                    update={"min_market_cap": 1e10}
+                )
+            }
+        )
+
+        inputs = await build_decision_inputs(
+            _manifest(modified),
+            release_provider_factory=release_factory,  # type: ignore[arg-type]
+            snapshot_provider=snapshot_provider,  # type: ignore[arg-type]
+        )
+        included = {c.symbol for c in inputs[0].candidates if c.included}
+        assert included == {"000002.SZ"}
+        reasons = {
+            c.symbol: c.reasons
+            for c in inputs[0].candidates
+            if not c.included
+        }
+        assert reasons["000001.SZ"] == ("market_cap_below_minimum",)
+
+    async def test_universe_st_excluded_via_name_history_pit(self) -> None:
+        """issue #213:exclude_st 按决策日名称历史 PIT 判定,当前名称不作数。"""
+        decision_at = datetime(2024, 3, 1, 15, tzinfo=UTC)
+        instruments = (
+            # 当前名称是 ST,但决策日名称历史为正常 → 不排除(PIT 正确性)。
+            _StubInstrument(
+                code="000001.SZ",
+                name="ST样本",
+                name_history=(
+                    ("样本股份", date(2020, 1, 1), None),
+                ),
+            ),
+            # 决策日历史名称为 ST → 排除。
+            _StubInstrument(
+                code="000002.SZ",
+                name="ST问题",
+                name_history=(
+                    ("正常股份", date(2020, 1, 1), date(2024, 1, 1)),
+                    ("ST问题股份", date(2024, 1, 1), None),
+                ),
+            ),
+        )
+        closes = {
+            inst.code: {
+                date(2024, 2, 27): Decimal("9.6"),
+                date(2024, 2, 28): Decimal("9.8"),
+                date(2024, 3, 1): Decimal("10.0"),
+                date(2024, 3, 4): Decimal("10.5"),
+            }
+            for inst in instruments
+        }
+        provider = self._provider(instruments, closes)
+        release_factory, snapshot_provider = self._factories(
+            provider, self._snapshots(decision_at)
+        )
+
+        inputs = await build_decision_inputs(
+            _manifest(_spec()),
+            release_provider_factory=release_factory,  # type: ignore[arg-type]
+            snapshot_provider=snapshot_provider,  # type: ignore[arg-type]
+        )
+        included = {c.symbol for c in inputs[0].candidates if c.included}
+        assert included == {"000001.SZ"}
+        reasons = {
+            c.symbol: c.reasons
+            for c in inputs[0].candidates
+            if not c.included
+        }
+        assert reasons["000002.SZ"] == ("st_security",)
 
     async def test_missing_snapshot_fails_closed(self) -> None:
         """冻结快照缺失时 fail-closed(不会静默跑出空信号)。"""

@@ -402,6 +402,7 @@ async def _build_queued_manifest(
                 for snapshot in snapshots
                 for observation in snapshot.observations
             ],
+            research_release_kinds=[release.dataset_kind for release in releases],
         ),
     )
     if preview.is_empty:

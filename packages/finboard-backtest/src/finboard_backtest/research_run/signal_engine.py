@@ -87,6 +87,7 @@ from finboard_backtest.strategy_spec.universe import (
 )
 from finboard_backtest.strategy_spec.universe import explain_universe
 from finboard_backtest.strategy_spec.universe_precheck import (
+    is_st_at_decision,
     resolvable_feature_names,
     universe_filter_warnings,
 )
@@ -911,8 +912,10 @@ def _spec_universe_candidates(
 ) -> tuple[SpecUniverseCandidate, ...]:
     """把发布标的映射为 ``UniverseSpec`` 候选(近似字段见函数体)。
 
-    字段近似:listing_days 来自 list_date;price 来自决策日 close;停牌 / ST
-    暂按发布快照静态近似(suspended_sessions / delist_date),待数据完备后细化。
+    字段近似:listing_days 来自 list_date;price 来自决策日 close;停牌按
+    发布快照静态近似(suspended_sessions);``is_st`` 按发布 instruments 的
+    ``name_history`` 区间取决策日名称 PIT 判定(issue #213,无覆盖区间回退
+    当前名称近似);``market_cap`` 来自 daily_metrics 的特征观测。
     """
     candidates: list[SpecUniverseCandidate] = []
     decision_date = context.business_date
@@ -928,6 +931,7 @@ def _spec_universe_candidates(
             listing_days = max(0, (decision_date - instrument.list_date).days)
         delisted = instrument.delist_date is not None and instrument.delist_date <= decision_date
         average_amount = fields.get("average_amount")
+        market_cap = fields.get("market_cap")
         candidates.append(
             SpecUniverseCandidate(
                 symbol=instrument.code,
@@ -938,9 +942,12 @@ def _spec_universe_candidates(
                     float(average_amount) if isinstance(average_amount, (int, float)) else None
                 ),
                 price=price,
+                market_cap=(
+                    float(market_cap) if isinstance(market_cap, (int, float)) else None
+                ),
                 suspended=instrument.suspended_sessions > 0,
                 delisted=delisted,
-                is_st=False,
+                is_st=is_st_at_decision(instrument, decision_date),
                 data_completeness=float(instrument.coverage_pct),
                 fields=fields,
             )
@@ -1000,6 +1007,7 @@ def _emit_universe_degradation_warnings(
         spec.universe,
         provider.release.instruments,
         available_features=_runtime_available_features(spec, features_by_source),
+        decision_date=decision_at.date(),
     ):
         logger.warning(
             "research_run.universe_filter_degraded",
@@ -1018,7 +1026,7 @@ def _empty_pool_error_message(
     features_by_source: Mapping[str, Mapping[str, float]],
     decision_at: datetime,
 ) -> str:
-    """执行期空池错误的根因信息:排除统计 + 缺失字段名(issue #186)。"""
+    """执行期空池错误的根因信息:排除统计 + 缺失字段名(issue #186 / #213)。"""
     reasons: Counter[str] = Counter()
     for candidate in candidates:
         reasons.update(candidate.reasons)
@@ -1029,14 +1037,14 @@ def _empty_pool_error_message(
             missing.add(reason.split(":", 1)[1])
         elif reason == "missing_average_amount":
             missing.add("average_amount")
+        elif reason == "missing_market_cap":
+            missing.add("market_cap")
         elif reason == "listing_age_below_minimum" and any(
             getattr(item, "list_date", None) is None for item in instruments
         ):
             missing.add("list_date")
         elif reason == "delisted":
             missing.add("delist_date")
-        elif reason == "st_security":
-            missing.add("st_marker")
     missing_text = "、".join(sorted(missing)) if missing else "无"
     return (
         f"决策日 {decision_at.date().isoformat()} 候选池为空: "

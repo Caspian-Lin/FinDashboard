@@ -131,7 +131,8 @@ class _StubExecution:
 @dataclass(frozen=True, slots=True)
 class _StubInstrument:
     code: str
-    name: str = "stub"
+    # 注意:名称不得含 "ST" 子串(大写后),否则被 ST 过滤排除(issue #213)。
+    name: str = "sample"
     market: Market = Market.A_SHARE
     asset_class: AssetClass = AssetClass.EQUITY
     ready: bool = True

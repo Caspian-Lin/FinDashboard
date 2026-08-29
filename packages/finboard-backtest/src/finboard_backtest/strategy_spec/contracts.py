@@ -136,6 +136,10 @@ class UniverseSpec(NoCodeModel):
     min_average_amount: float | None = Field(default=None, ge=0)
     min_price: float | None = Field(default=None, gt=0)
     max_price: float | None = Field(default=None, gt=0)
+    # 市值单位:人民币元,与 daily_metrics.total_market_cap 派生的
+    # ``market_cap`` 特征观测一致(tushare total_mv 万元 x 1e4)。
+    min_market_cap: float | None = Field(default=None, ge=0)
+    max_market_cap: float | None = Field(default=None, gt=0)
     exclude_suspended: bool = True
     exclude_delisted: bool = True
     exclude_st: bool = True
@@ -154,6 +158,12 @@ class UniverseSpec(NoCodeModel):
             and self.min_price > self.max_price
         ):
             raise ValueError("min_price 不能大于 max_price")
+        if (
+            self.min_market_cap is not None
+            and self.max_market_cap is not None
+            and self.min_market_cap > self.max_market_cap
+        ):
+            raise ValueError("min_market_cap 不能大于 max_market_cap")
         if len(self.explicit_symbols) != len(set(self.explicit_symbols)):
             raise ValueError("explicit_symbols 不允许重复")
         return self

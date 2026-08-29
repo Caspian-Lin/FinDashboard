@@ -175,6 +175,7 @@ async def _compile_with_releases(
                 feature_graph_sources=[
                     node.source for node in spec.feature_graph.nodes if node.source is not None
                 ],
+                research_release_kinds=[release.dataset_kind for release in releases],
             ),
         ),
     )

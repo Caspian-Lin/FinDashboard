@@ -155,6 +155,7 @@ async def queue_research_run(
                 for snapshot in snapshots
                 for observation in snapshot.observations
             ],
+            research_release_kinds=[release.dataset_kind for release in releases],
         ),
     )
     if preview.is_empty:

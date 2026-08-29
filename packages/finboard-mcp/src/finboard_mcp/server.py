@@ -114,10 +114,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。
   无代码版本化生命周期,反复 validate 预览 → draft → publish。validate
-  返回新增 universe_precheck(#186):universe 过滤条件依赖字段(list_date /
-  delist_date / average_amount / ST 标记 / required_data_fields / ranking.field)
-  的存在性 warning 与候选池空池预览(total/included/排除统计/缺失字段),
-  写策略与入队前先看它,避免「list_date 全 null → 全排除」式空转。
+  返回新增 universe_precheck(#186/#213):universe 过滤条件依赖字段(list_date /
+  delist_date / average_amount / market_cap / ST 名称 / required_data_fields /
+  ranking.field)的存在性 warning 与候选池空池预览(total/included/排除统计/
+  缺失字段),写策略与入队前先看它,避免「list_date 全 null → 全排除」式空转。
+  universe 支持 min/max_market_cap(人民币元,取 market_cap 特征观测,#213);
+  exclude_st 按发布 instruments 名称历史 PIT 判定(降级发具名 warning)。
 - 回测(7,✅ #127 + #172 + #173 + #174 + #175 + #183 + #184 + #189 + #190):backtest_strategy_list(输出
   builtin_strategies 事件驱动策略+参数 schema 与 published_specs 已发布规格
   列表,含状态/版本数/执行入口提示)、backtest_run 双形态——(1) strategy 形态:
