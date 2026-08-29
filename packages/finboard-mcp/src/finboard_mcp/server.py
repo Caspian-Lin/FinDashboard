@@ -73,6 +73,7 @@ from finboard_mcp.tools import (
     register_memory_tools,
     register_portfolio_tools,
     register_report_tools,
+    register_research_code_run_tools,
     register_research_code_tools,
     register_run_tools,
     register_simulation_tools,
@@ -93,7 +94,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(121 个,已实现)==
+== 当前可用工具(123 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -227,8 +228,18 @@ FinBoard 研究 MCP —— 量化研究工具集
   生命周期,重复提交同名生成新 commit、旧版自动 retired、可 rollback 到
   历史 commit、可 diff)。目录约定:一因子/策略一目录 factors/<name>/
   {factor.py, manifest.toml}、strategies/<name>/{strategy.py, manifest.toml}。
-  **只存储与版本化,不执行任何代码**(执行须待沙箱容器 issue);web 通道仍
-  禁代码,仅 MCP agent 通道开放。
+  **只存储与版本化**;web 通道仍禁代码,仅 MCP agent 通道开放。
+- 研究代码沙箱执行(2,✅ #216):research_code_run(写,入队)/
+  research_code_run_get(只读)。active 因子代码在一次性 Docker 容器内执行
+  factor.compute(ctx) -> scores + metrics(协议 v1 纯截面函数)。容器
+  --network none / --read-only / cap-drop ALL / 非 root / CPU 与内存限额 /
+  墙钟超时 kill;数据面为按 decision_at 物化的只读挂载(**PIT 物理隔离**:
+  容器内不存在未来数据文件)。run 记录(research_code_runs,RCR-)持有
+  code commit x 数据 release x 输出 checksum 三向引用;失败分类
+  static_validation_failed / runtime_error / timeout / oom_killed /
+  output_contract_violation / sandbox_unavailable。需
+  research_sandbox_enabled=true + Docker Desktop + docker/research-sandbox
+  镜像;纯离线研究域,不连 broker 不下单。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
@@ -239,8 +250,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   永久不可用,不注册为工具。需要它们 = 走错了路。
 - 代码边界(#215):web 通道仍是「无代码版本化规格」,禁止网页提交 Python /
   模块路径 / 可执行表达式;**仅 MCP agent 通道**开放受控研究代码提交
-  (finboard_research_code_submit,静态校验 + 版本化存储)。提交的代码
-  **只存储不执行**;执行须待后续沙箱容器 issue,且 LLM 产出仍须走
+  (finboard_research_code_submit,静态校验 + 版本化存储);执行走
+  finboard_research_code_run(一次性沙箱容器,#216),产出仅为研究截面
+  scores —— 不是策略上线,LLM 产出仍须走
   研究→回测→OOS→模拟→影子→小资金完整晋级链。
 
 == 输出规范 ==
@@ -270,6 +282,7 @@ def build_mcp_server() -> MCPServer:
     register_portfolio_tools(mcp)
     register_report_tools(mcp)
     register_research_code_tools(mcp)
+    register_research_code_run_tools(mcp)
     register_jobs_tools(mcp)
     register_validation_experiment_tools(mcp)
     register_watchlist_tools(mcp)

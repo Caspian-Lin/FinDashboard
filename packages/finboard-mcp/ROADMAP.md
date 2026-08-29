@@ -415,3 +415,49 @@ MCP agent 通道开放受控代码提交**;本 issue 只做存储与版本化,**
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 边界段已同步
 (AGENTS.md 改写前后对照见 PR 描述)。
+
+### ✅ #216 受限沙箱执行器与因子执行协议(已完成)
+
+L3 沙箱路线第二环:让已提交的因子代码「能跑且跑不坏」。单形态(用户决策
+2026-08-28):开发机与生产统一用 **Docker 一次性容器**,不做子进程降级,
+本机前置要求 Docker Desktop。纯离线研究域,容器无网络无凭证。
+
+- 执行器:`finboard-backtest/research_sandbox/` —— `ResearchSandboxRunner`
+  (一次性容器跑完即焚:`--network none`、`--read-only` 根、`--cap-drop
+  ALL` + `no-new-privileges`、非 root uid 65532、`--pids-limit`、CPU/内存
+  限额(memory-swap=memory 禁 swap)、整跑墙钟超时 `docker kill`;
+  运行期轮询 `docker stats` 采样峰值内存/CPU 归档);`data_mount`(冻结
+  发布按 decision_at 物化只读挂载,**PIT 由物理隔离保证** —— 挂载内容即
+  决策时点之前的数据,容器内不存在未来数据文件;provider 门控之上再设
+  fail-closed 防线:任何数据日期晚于 decision_at 当日即拒绝生成挂载;
+  附 `mount_manifest.json` 清单);executor(`kind=research_code_run`,
+  #136 白名单扩展,worker 单并发,执行端重放 #215 静态校验)。
+- 执行协议 v1(纯截面函数,无状态):`factor.compute(ctx) ->
+  FactorResult`,ctx = `finboard_research_kit.FactorContext`(bars /
+  daily_metrics / financial_indicators / symbols / decision_at / params 只读
+  PIT 视图);输出 `/out/scores.parquet` + `metrics.json`(coverage /
+  nan_ratio / 耗时 / kit_version);退出码 0/3/4(成功 / 输出契约 / 运行时)。
+- 新包 `finboard-research-kit`(容器侧唯一 FinBoard 代码:协议 + harness
+  `python -m finboard_research_kit.harness`);镜像 `docker/research-sandbox/`
+  (pinned python + pandas/numpy/polars/pyarrow + kit,非 root 用户),
+  **tag 与 kit `__version__` 绑定**(默认 `finboard-research-sandbox:0.1.0`),
+  CI 单独 job 构建并冒烟(不推 registry);run 记录镜像 digest。
+- 持久化:`research_code_runs` 表(`RCR-` 前缀)持有三向引用 code commit ×
+  dataset release × 输出 scores checksum;stdout/stderr/退出码/超时/OOM/
+  资源用量/metrics 归档 `<workspace>/<RCR-id>/`;失败分类 static_validation_
+  failed / runtime_error / timeout / oom_killed / output_contract_violation /
+  sandbox_unavailable。
+- MCP 工具 2 个:`finboard_research_code_run`(写,入队;同步预检
+  sandbox 开启 / kind=factor / active 产物 / 发布存在且含 bars,秒级失败)
+  + `finboard_research_code_run_get`(只读;detail 附 scores 预览与
+  error.json);`finboard_job_enqueue` kind 白名单加 `research_code_run`。
+- 配置:`research_sandbox_*`(enabled 默认 **false** —— 显式启用,
+  需 Docker + 已构建镜像;image/timeout/memory/cpus/pids/user/docker_bin/
+  workspace_root)。回滚方案:关 enabled(队列里该 kind 任务即刻
+  sandbox_disabled 秒级失败)+ 迁移 downgrade 删表 + 移除 2 个工具与
+  kind 白名单项;workspace 归档文件独立于研究产物,删目录即彻底回退。
+- E2E(容器加固验收)默认跳过,`FINBOARD_SANDBOX_E2E=1` 显式跑
+  (QMT 真机测试同款门控先例):样例因子与内置参照数值一致(容差断言)、
+  断网 / 只读挂载 / 超时 / OOM kill / PIT 清单断言。
+
+`_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 边界段已同步。
