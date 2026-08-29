@@ -1126,13 +1126,13 @@ REST PUT 是全量语义,这里更安全)。
 - 错误:`invalid_argument`(未知 kind / format / 非整数回测 id)、
   `not_found`(run/backtest 不存在)
 
-## 研究代码仓库(#215,agent 代码入口:只存储与版本化,不执行)
+## 研究代码仓库(#215,agent 代码入口:只存储与版本化)
 
 web 通道仍禁代码(无代码规格);仅 MCP agent 通道开放受控代码提交。
 提交的代码进入本地 bare git 仓库(`research_code_repo_path`),git 写操作
-收敛在服务端(本容器文件系统只读)。**提交 ≠ 可执行**:任何代码都要等
-后续沙箱容器 issue 才能运行,LLM 产出仍须走 研究→回测→OOS→模拟→影子→
-小资金 完整晋级链。
+收敛在服务端(本容器文件系统只读)。执行须走 #216 沙箱
+(`finboard_research_code_run`,见下节);LLM 产出仍须走 研究→回测→OOS→
+模拟→影子→小资金 完整晋级链。
 
 ### 目录约定与静态校验
 
@@ -1179,3 +1179,51 @@ commit,旧版本自动 retired。
 - 参数:`kind`、`name`、`commit`
 - 返回:新登记行 `{artifact_id, kind, name, commit, checksum, status}`
 - 错误:`not_found`(历史 commit 不在登记表)、`denied`(只读模式)
+
+## 研究代码沙箱执行(#216,一次性 Docker 容器)
+
+active 因子代码在一次性 Docker 容器内执行 `factor.compute(ctx) -> scores`
+(协议 v1 纯截面函数)。**前置条件**:`research_sandbox_enabled=true` +
+Docker Desktop + 已构建镜像 `docker/research-sandbox`(tag 与
+finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.1.0`;
+仓库根 `docker build -f docker/research-sandbox/Dockerfile -t <tag> .`)。
+
+### 执行协议 v1(ctx / 输出)
+
+- `ctx: finboard_research_kit.FactorContext` 只读输入:
+  `decision_at`(带时区)、`symbols`(候选池)、`bars`(长表
+  symbol/date/open/high/low/close/volume/amount,合并全部 bars 类发布)、
+  `daily_metrics` / `financial_indicators`(研究发布 PIT 视图,缺为 None)、
+  `params`(payload.params 覆盖 manifest.params 的合并结果)
+- 返回:`FactorResult(scores)` / `pd.Series`(index=symbol)/ `dict` /
+  `DataFrame(symbol,score)`;NaN 合法(计 nan_ratio),候选池外 symbol /
+  重复 symbol / 空结果 = 输出契约违规
+- PIT 由物理隔离保证:挂载内容即 decision_at 之前的数据,容器内不存在
+  未来数据文件;容器 `--network none`(socket 连任何地址失败)、根
+  `--read-only`(写挂载路径失败,输出仅出现在 /out)、非 root、CPU/内存/
+  pids 限额、墙钟超时 kill
+
+### finboard_research_code_run(写,入队)
+入队 `kind=research_code_run` 后台任务(worker 单并发),返回 job_id。
+- 参数:`kind: "factor"`(v1 仅 factor)、`name`、`dataset_release_ids`
+  (均已登记且至少一个 bars 类发布)、`decision_at`(带时区 ISO)、
+  `commit?`(须=active 引用,否则先 rollback)、`artifact_id?`、
+  `symbols?`、`params?`
+- 返回:`{job_id, status, created, idempotency_key, detail_hint}`
+- 轮询:`finboard_job_get`(进度 phase `research_code_run:<stage>`,
+  result_ref=RCR-...);终态后 `finboard_research_code_run_get` 取结果
+- 错误:`invalid_argument`(沙箱未开启 / kind 非 factor / 无 bars 发布)、
+  `not_found`(无 active 代码 / 发布不存在)、`denied`(只读模式)
+
+### finboard_research_code_run_get(只读)
+查询单次执行记录(`research_code_runs`,RCR- 前缀)。
+- 参数:`run_id`、`view: "summary"|"detail" = summary`
+- 返回 summary:三向引用(code commit / dataset_release_ids /
+  scores_checksum)、镜像 digest、status、error_code/summary、exit_code、
+  timed_out/oom_killed、usage(峰值内存/CPU)、metrics(coverage/nan_ratio)
+- 返回 detail:另附 `scores_preview`(前 20 行)与容器 `error.json`
+- 失败分类:`static_validation_failed` / `runtime_error` / `timeout` /
+  `oom_killed` / `output_contract_violation` / `sandbox_unavailable`
+  (docker 缺失,可重试)
+- 归档:`<workspace>/<RCR-id>/{code,data,out,stdout.txt,stderr.txt,
+  container.json,usage.json}`(stdout/stderr/退出码/资源用量完整可查)

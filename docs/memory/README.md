@@ -28,3 +28,4 @@
 - [Issue #214:因子目录收敛 v2 唯一事实来源](issue-214-factor-catalog-unification.md) — FACTOR_CATALOG 从 FACTOR_LAB_CATALOG 投影生成,仅原始值单位留 v1 展示映射(v2 unit=标准化后 z_score);v1 名称缺失导入期 fail-loud;还有第三个目录 finboard_backtest RESEARCH_FACTOR_CATALOG 未动
 - [Issue #226:复合评分目录语义字段投影](issue-226-scorer-catalog-projection.md) — 评分参数(winsorize/standardize/missing)本地、假设/失效/来源/方向自 FACTOR_LAB_CATALOG 投影;EXPOSURE_ONLY 无方向映射导入期拒绝
 - [Issue #215:研究代码仓库与服务端提交工具](issue-215-research-code-repo.md) — git 读命令必须显式 --git-dir(否则落在本仓库 CWD);路径历史须 log main -- path;register 返回冻结快照;沙箱 issue 复用 Service.read 取版本源码
+- [Issue #216:研究代码沙箱执行器](issue-216-research-sandbox-run.md) — PIT=物理隔离(挂载生成端 fail-closed);/out 用 bind 而非 tmpfs(容器停后 tmpfs 丢失);镜像 tag↔kit 版本三处同步;harness 须 spec_from_file_location 防 sys.modules 跨运行污染
