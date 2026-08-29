@@ -7,6 +7,8 @@
   ``backtest_run`` / ``data_sync`` / ``fetch_all`` / ``quality_repair``
   —— 把 7 类数据域耗时任务从内存态/同步阻塞迁移到统一队列(#144)。
 * ``research_data_sync`` —— research 数据表(估值 / 财务 / 行业)摄取编排(#171)。
+* ``research_code_run`` —— 研究代码沙箱执行(一次性 Docker 容器,#216;
+  单并发,run 记录 code commit x 数据 release x 输出 checksum 三向引用)。
 """
 
 from finboard_backtest.background_jobs.executors.backtest_run import (
@@ -27,6 +29,9 @@ from finboard_backtest.background_jobs.executors.fetch_all import DataFetchAllEx
 from finboard_backtest.background_jobs.executors.quality_repair import (
     QualityRepairExecutor,
 )
+from finboard_backtest.background_jobs.executors.research_code_run import (
+    ResearchCodeRunExecutor,
+)
 from finboard_backtest.background_jobs.executors.research_data_sync import (
     ResearchDataSyncExecutor,
 )
@@ -43,6 +48,7 @@ __all__ = [
     "EchoExecutor",
     "FeatureSnapshotExecutor",
     "QualityRepairExecutor",
+    "ResearchCodeRunExecutor",
     "ResearchDataSyncExecutor",
     "ResearchRunExecutor",
 ]

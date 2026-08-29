@@ -119,6 +119,25 @@ class Settings(BaseSettings):
     research_code_max_files: int = Field(default=32, ge=1)
     research_code_max_file_bytes: int = Field(default=262144, ge=1024)
 
+    # ---- 研究代码沙箱(issue #216)----
+    # 一次性 Docker 容器执行 agent 因子代码(单形态:开发/生产统一 Docker,
+    # 本机前置要求 Docker Desktop)。默认关闭 —— 回滚 = 关闭入口,已归档的
+    # run 记录与 workspace 文件不受影响。容器无网络无凭证,纯离线研究域。
+    research_sandbox_enabled: bool = False
+    # 沙箱镜像(tag 与 finboard-research-kit 版本绑定,构建见
+    # docker/research-sandbox/;run 记录同时归档镜像 digest)。
+    research_sandbox_image: str = "finboard-research-sandbox:0.1.0"
+    # 整跑墙钟超时(秒),超时 docker kill;内存 MB(memory-swap 同值禁 swap);
+    # CPU 配额;进程数上限;容器内非 root uid(镜像内 sandbox 用户)。
+    research_sandbox_timeout_seconds: float = Field(default=300.0, ge=1.0)
+    research_sandbox_memory_mb: int = Field(default=2048, ge=256)
+    research_sandbox_cpus: float = Field(default=2.0, ge=0.5)
+    research_sandbox_pids_limit: int = Field(default=256, ge=16)
+    research_sandbox_user: str = "65532"
+    research_sandbox_docker_bin: str = "docker"
+    # run workspace 根目录:<root>/<RCR-id>/{code,data,out,stdout.txt,...}。
+    research_sandbox_workspace_root: str = "data_cache/research_sandbox"
+
     # ---- FinBoard MCP Server(issue #108)----
     # 向外置研究 Agent(OpenCode)暴露受控研究工具的 MCP 服务。默认关闭,显式启用。
     # 不连接实盘账户 / 订单 / 持仓;实盘能力永久不注册为工具。

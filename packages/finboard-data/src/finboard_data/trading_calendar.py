@@ -27,7 +27,7 @@ class TradingCalendarError(Exception):
 def _fetch_trade_dates() -> set[date]:
     """从 akshare 拉取全部 A 股交易日(同步,在线)。"""
     import akshare as ak
-    import pandas as pd  # type: ignore[import-untyped]
+    import pandas as pd
 
     df: pd.DataFrame = ak.tool_trade_date_hist_sina()
     return set(pd.to_datetime(df["trade_date"]).dt.date)
