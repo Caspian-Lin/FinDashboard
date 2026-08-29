@@ -25,3 +25,4 @@
 - [Issue #205:回测 fills.date 取实际交易日](issue-205-fills-date-trading-day.md) — Fill.filled_at 默认 _utcnow() 陷阱(回测域构造必须显式传时点);收盘约定收敛到 clock.market_close;旧记录按 created_at 区分不回填
 - [Issue #206:研究/回测 MCP 返回瘦身](issue-206-mcp-response-slimming.md) — MCP SDK 会把 dataclass 返回注解重建为同名 pydantic 模型,自定义序列化钩子失效,信封须 BaseModel+model_serializer;详情默认 summary/写回执 ack/fills 有界 200
 - [research_data_sync 同步运营 runbook(issue #212)](research-data-sync-runbook.md) — 首次全量过夜跑(~5s/片×小时计)/增量每日一片;配额是进程内锁须 worker 单进程;daily 截面恒全市场;PIT 锚点有回归测试锁边界
+- [Issue #214:因子目录收敛 v2 唯一事实来源](issue-214-factor-catalog-unification.md) — FACTOR_CATALOG 从 FACTOR_LAB_CATALOG 投影生成,仅原始值单位留 v1 展示映射(v2 unit=标准化后 z_score);v1 名称缺失导入期 fail-loud;还有第三个目录 finboard_backtest RESEARCH_FACTOR_CATALOG 未动
