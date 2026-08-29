@@ -86,3 +86,23 @@ jobs:
             .coverage
             htmlcov/
           retention-days: 7
+
+  # issue #216:研究沙箱镜像进 CI(只构建 + 自检,不推 registry)。
+  # tag 与 finboard-research-kit __version__ 绑定;改版本时同步 bump。
+  sandbox-image:
+    name: research sandbox image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build docker/research-sandbox
+        run: |
+          docker build -f docker/research-sandbox/Dockerfile \
+            -t finboard-research-sandbox:ci .
+
+      - name: Smoke check kit import & version
+        run: |
+          docker run --rm --network none --read-only \
+            --cap-drop ALL --user 65532 \
+            finboard-research-sandbox:ci \
+            python -c "import finboard_research_kit as k; print(k.__version__)"

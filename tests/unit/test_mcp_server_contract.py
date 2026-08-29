@@ -151,6 +151,9 @@ _EXPECTED_TOOLS = {
     "finboard_research_code_list",
     "finboard_research_code_get",
     "finboard_research_code_rollback",
+    # #216 研究代码沙箱执行工具(1 只读 + 1 写;一次性 Docker 容器)
+    "finboard_research_code_run",
+    "finboard_research_code_run_get",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。

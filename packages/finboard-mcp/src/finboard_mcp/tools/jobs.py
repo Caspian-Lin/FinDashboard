@@ -61,6 +61,7 @@ _ALLOWED_KINDS: frozenset[str] = frozenset(
         "fetch_all",
         "quality_repair",
         "research_data_sync",
+        "research_code_run",
     }
 )
 

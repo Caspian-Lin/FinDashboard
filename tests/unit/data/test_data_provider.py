@@ -345,7 +345,7 @@ class TestAkShareIndexDailyFetch:
     @pytest.mark.unit
     def test_index_daily_routes_to_index_interface(self, tmp_path: Path) -> None:
         """000300.SH 走 index_zh_a_hist(不带 adjust),列名与股票日线兼容。"""
-        import pandas as pd  # type: ignore[import-untyped]
+        import pandas as pd
 
         from finboard_data.akshare_provider import AkShareProvider
 

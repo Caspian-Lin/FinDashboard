@@ -681,6 +681,7 @@ async def _run_worker(settings: Settings) -> None:
         EchoExecutor,
         FeatureSnapshotExecutor,
         QualityRepairExecutor,
+        ResearchCodeRunExecutor,
         ResearchDataSyncExecutor,
         ResearchRunExecutor,
     )
@@ -774,6 +775,15 @@ async def _run_worker(settings: Settings) -> None:
             settings_factory=settings_factory,
         ),
     )
+    # issue #216:研究代码沙箱执行(一次性 Docker 容器;settings 工厂沿用
+    # executors._providers 默认实现,镜像/超时/限额取 research_sandbox_* 配置)。
+    registry.register(
+        "research_code_run",
+        ResearchCodeRunExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
     queue_list = [
         q.strip() for q in settings.worker_queues.split(",") if q.strip()
     ] or None
@@ -788,6 +798,8 @@ async def _run_worker(settings: Settings) -> None:
         retry_backoff_seconds=settings.worker_retry_backoff_seconds,
         # issue #144:per-kind 全局并发上限(SQL 层 claim_next max_per_kind 实现)。
         # 数据源压力敏感的 kind 限制为单并发;dataset_publish / backtest_run 不限。
+        # issue #216:research_code_run 单并发(沙箱容器本机资源受限,
+        # 多容器并发只会互相挤占内存限额)。
         kind_concurrency={
             "feature_snapshot": 1,
             "bulk_download": 1,
@@ -795,6 +807,7 @@ async def _run_worker(settings: Settings) -> None:
             "fetch_all": 1,
             "quality_repair": 1,
             "research_data_sync": 1,
+            "research_code_run": 1,
         },
     )
     await run_bg_worker(
