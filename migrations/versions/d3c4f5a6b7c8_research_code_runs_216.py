@@ -5,7 +5,7 @@ Revises: c1d2e3f4a5b6
 Create Date: 2026-08-29 12:00:00.000000
 
 issue #216:研究代码沙箱执行记录表。一次 ``kind=research_code_run`` 后台
-任务的审计与产物登记 —— code commit × 数据 release × 输出 checksum 三向
+任务的审计与产物登记 —— code commit x 数据 release x 输出 checksum 三向
 引用、镜像 digest、退出码 / 超时 / OOM / 资源用量。纯研究域存储,不触
 实盘表。
 """
