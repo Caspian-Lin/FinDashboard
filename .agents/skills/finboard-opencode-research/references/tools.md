@@ -336,6 +336,10 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 
 ### finboard_factor_catalog
 查询因子目录(版本化实现清单,26 个 alpha/risk/market_input 因子)。
+**此目录(#214 起)是因子定义的唯一事实来源**——v1 选股规则目录
+(`finboard_data.factors.FACTOR_CATALOG`,8 因子)逐字段从这里投影生成,
+selection 可用因子集 = 其子集(market_cap/pb/turnover_rate/momentum/
+volatility_20d/roe/gross_profit_margin/revenue_yoy)。
 - 参数:`role?: str`(alpha|risk|market_input)
 - 返回:`list[{name, version, role, preference, frequency, source_fields, economic_hypothesis, checksum, ...}]`
 - 无 DB 依赖,直接返回内存目录。
@@ -632,9 +636,9 @@ research_run 管线轻路由(#174)。
     `run_async: bool | None = None`(issue #189)、
     `requested_by: str | None = None`(异步任务归属,默认 agent:mcp:backtest_run)
   - `selection.factor_version` 仅支持 `"v1"`(**选股规则版本**);`"v2"` 等会报
-    「不支持的 factor_version」错误并列出合法值。不要传特征快照的
-    `framework_version`(当前 `"v2"`,是快照 schema 版本)——两者是**不同命名
-    空间**,快照的 `framework_version` 不接受传给选股配置
+    「不支持的 factor_version」错误并列出合法值。可用因子集见
+    `finboard_factor_catalog`(v1 选股目录是其投影子集,#214)。特征快照的
+    `framework_version` 是另一契约字段,不传给 selection
   - `selection.inputs_mode`(#173):
     - `research_db`(默认):从 research 数据表读 profile/daily_metrics/
       financial_indicators/industry_memberships
