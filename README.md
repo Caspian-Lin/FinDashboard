@@ -203,6 +203,25 @@ uv run finboard worker recover            # 仅回收过期 lease(running→inte
 `failed`(`error_code=max_retries_exceeded`)。Worker 不触及实盘下单/撤单/
 持仓/Kill Switch ——这些由交易内核专用 `finboard-scheduler` 执行,不进入统一队列。
 
+### 研究代码沙箱(issue #216,可选)
+
+agent 经 MCP 提交的因子代码(`finboard_research_code_submit`,issue #215)可在
+一次性 Docker 容器内执行(`kind=research_code_run` 任务,worker 单并发):
+`--network none` / `--read-only` / `--cap-drop ALL` / 非 root / CPU 与内存限额 /
+墙钟超时 kill;数据面为按 `decision_at` 物化的只读挂载(PIT 物理隔离)。
+默认关闭,启用前置(Docker Desktop 运行):
+
+```bash
+docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.1.0 .
+# .env: FINBOARD_RESEARCH_SANDBOX_ENABLED=true
+```
+
+容器级加固验收(参照一致/断网/只读/超时/OOM/PIT)默认跳过:
+
+```bash
+FINBOARD_SANDBOX_E2E=1 uv run pytest tests/integration/test_research_sandbox_docker_e2e.py -v
+```
+
 ---
 
 ## 统一后台任务队列(issue #117)
