@@ -15,6 +15,7 @@ worker 领取 ``kind=dataset_publish`` 任务后,从 payload 重建
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -164,6 +165,16 @@ class DatasetPublishExecutor:
                         adjustment=adjustment,
                         fields=fields,
                         dataset_kind=ReleaseDatasetKind(kind),
+                        minimum_release_coverage=(
+                            # issue #212:研究数据发布级阈值放宽到 0.95——停牌日
+                            # 无截面、最新报告期未公告是常态(全市场 daily 实测
+                            # 跨度口径平均 coverage≈0.972),0.98 会让真实全市场
+                            # 研究发布不可发布;0.95 仍拦系统性丢失。逐标的缺口
+                            # 已在 builder 侧降级为可见 warning。
+                            Decimal("0.95")
+                            if release_kind in ("daily_metrics", "financial_indicators")
+                            else Decimal("0.98")
+                        ),
                         required_capabilities=(
                             ("stock",)
                             if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators")

@@ -1242,13 +1242,14 @@ class FrozenDatasetReleaseBuilder:
             dataset_kind=spec.dataset_kind,
         )
         checksum = await asyncio.to_thread(_sha256_file, artifact)
-        # 研究数据 quality:`all_null_fields` 只是可见 warning(财务指标字段
-        # 稀疏是常态),不阻止 ready;覆盖率与元数据完整才是硬门。与 bars 的
-        # quality_status=WARNINGS 语义一致 —— 缺失可见而非静默。
-        ready = (
-            audit.coverage_pct >= spec.minimum_symbol_coverage
-            and instrument.metadata_complete
-        )
+        # 研究数据 quality:`all_null_fields` 与逐标的 coverage 缺口都只是可见
+        # warning——财务指标字段稀疏是常态;issue #212 全市场实测 5534 只中
+        # 1421 只跨度口径 coverage<0.98(停牌日 daily_basic 无截面是 A 股常态,
+        # 研究数据无停复牌事件表可查,不像 bars 路径有停牌感知),逐标的硬门
+        # 会让任何真实全市场研究发布不可发布。ready 只由元数据完整决定;
+        # 发布级平均覆盖率 minimum_release_coverage 仍是硬门。与 bars 的
+        # quality_status=WARNINGS 语义一致——缺失可见而非静默。
+        ready = instrument.metadata_complete
         issues = list(audit.issues)
         if audit.coverage_pct < spec.minimum_symbol_coverage:
             issues.append(
@@ -2522,6 +2523,7 @@ __all__ = [
     "RESEARCH_ETF_CATALOG",
     "AssetCapability",
     "CapabilityStatus",
+    "DatasetQualityStatus",
     "DatasetReleaseError",
     "DatasetReleaseQualityError",
     "DatasetReleaseSpec",

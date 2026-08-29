@@ -101,7 +101,15 @@ class BackgroundWorker:
             await self._fill_concurrency()
             now = asyncio.get_running_loop().time()
             if now >= next_maintenance:
-                await self._maintenance()
+                # 维护是尽力而为:单次失败(如瞬时连接池耗尽)只记日志并顺延
+                # 到下一周期,绝不让维护异常杀死整个 worker 进程(issue #212
+                # 实测 QueuePool TimeoutError 曾把维护循环连同 worker 一起掀翻)。
+                try:
+                    await self._maintenance()
+                except TimeoutError:
+                    logger.warning("background_worker.maintenance_timeout")
+                except Exception:
+                    logger.exception("background_worker.maintenance_failed")
                 next_maintenance = now + self._config.maintenance_interval_seconds
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(
