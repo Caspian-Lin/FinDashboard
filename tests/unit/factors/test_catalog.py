@@ -83,3 +83,76 @@ class TestCatalog:
 
     def test_factor_count(self) -> None:
         assert len(RESEARCH_FACTOR_CATALOG) >= 13
+
+
+class TestLabCatalogProjection:
+    """#226:语义字段自 FACTOR_LAB_CATALOG 投影,评分参数本地维护。"""
+
+    def test_semantic_fields_follow_lab_catalog(self) -> None:
+        from finboard_backtest.factors import catalog
+        from finboard_data.factor_lab import FACTOR_LAB_CATALOG
+
+        for name, meta in catalog.RESEARCH_FACTOR_CATALOG.items():
+            source = FACTOR_LAB_CATALOG[name]
+            assert meta.economic_hypothesis == source.economic_hypothesis
+            assert meta.expected_failure == source.expected_failure
+            assert meta.source_field == source.source_fields[0]
+
+    def test_direction_frozen_signs(self) -> None:
+        # 冻结 13 因子的方向语义,投影不得改变评分行为。
+        expected = {
+            "pb": -1.0, "earnings_yield": 1.0, "dividend_yield": 1.0,
+            "roe": 1.0, "gross_profit_margin": 1.0, "debt_to_assets": -1.0,
+            "volatility_20d": -1.0, "volatility_60d": -1.0,
+            "volatility_120d": -1.0, "downside_volatility": -1.0,
+            "turnover_rate": -1.0, "momentum": 1.0, "revenue_yoy": 1.0,
+        }
+        for name, sign in expected.items():
+            assert get_factor_meta(name).direction_sign == sign
+
+    def test_compiler_dataset_mapping_unchanged(self) -> None:
+        from finboard_backtest.strategy_spec.compiler import _dataset_from_source
+
+        expected = {
+            "pb": "daily_metrics",
+            "earnings_yield": "daily_metrics",
+            "dividend_yield": "daily_metrics",
+            "roe": "financial_indicators",
+            "gross_profit_margin": "financial_indicators",
+            "debt_to_assets": "financial_indicators",
+            "volatility_20d": "bars",
+            "volatility_60d": "bars",
+            "volatility_120d": "bars",
+            "downside_volatility": "bars",
+            "turnover_rate": "daily_metrics",
+            "momentum": "bars",
+            "revenue_yoy": "financial_indicators",
+        }
+        for name, dataset in expected.items():
+            assert _dataset_from_source(get_factor_meta(name).source_field) == dataset
+
+    def test_missing_lab_definition_fails_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from finboard_backtest.factors import catalog
+        from finboard_data.factor_lab import FACTOR_LAB_CATALOG
+
+        shrunk = dict(FACTOR_LAB_CATALOG)
+        del shrunk["pb"]
+        monkeypatch.setattr(catalog, "FACTOR_LAB_CATALOG", shrunk)
+        with pytest.raises(RuntimeError, match="FACTOR_LAB_CATALOG"):
+            catalog._project_research_catalog()
+
+    def test_exposure_only_preference_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from dataclasses import replace
+
+        from finboard_backtest.factors import catalog
+        from finboard_data.factor_lab import FACTOR_LAB_CATALOG, FactorPreference
+
+        exposed = replace(
+            FACTOR_LAB_CATALOG["pb"],
+            preference=FactorPreference.EXPOSURE_ONLY,
+        )
+        patched = dict(FACTOR_LAB_CATALOG)
+        patched["pb"] = exposed
+        monkeypatch.setattr(catalog, "FACTOR_LAB_CATALOG", patched)
+        with pytest.raises(RuntimeError, match="无方向映射"):
+            catalog._project_research_catalog()

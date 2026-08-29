@@ -1,14 +1,21 @@
-"""研究因子目录:经济假设、方向、类别、标准化参数。
+"""研究因子目录:评分消费参数 + 自 FACTOR_LAB_CATALOG 投影的语义字段。
 
-每个因子声明其经济假设、预期失效场景、数据来源字段、极值处理和缺失策略,
-使复合评分完全可归档、可复现、可审查。因子方向决定原始值到得分的映射:
-``LONG`` 表示值越高得分越高,``SHORT`` 表示值越低得分越高(如 PB 越低越便宜)。
+本目录(#226 起)只手写复合评分的消费参数——类别、极值处理、标准化、
+缺失策略、PIT 规则与原始值单位;因子的语义字段(经济假设 / 预期失效 /
+数据来源 / 方向)逐项从 ``finboard_data.factor_lab.FACTOR_LAB_CATALOG``
+投影生成,不再双头维护。因子方向决定原始值到得分的映射:``LONG`` 表示
+值越高得分越高,``SHORT`` 表示值越低得分越高(如 PB 越低越便宜)。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+
+from finboard_data.factor_lab import (
+    FACTOR_LAB_CATALOG,
+    FactorPreference,
+)
 
 FACTOR_FRAMEWORK_VERSION = "v1"
 
@@ -62,156 +69,140 @@ class FactorMeta:
         return 1.0 if self.direction is FactorDirection.LONG else -1.0
 
 
-RESEARCH_FACTOR_CATALOG: dict[str, FactorMeta] = {
+@dataclass(frozen=True, slots=True)
+class _ScoringParams:
+    """评分器本地消费参数;语义字段由投影补齐。"""
+
+    category: FactorCategory
+    unit: str = "ratio"
+    winsorize_lower_pct: float = 0.01
+    winsorize_upper_pct: float = 0.99
+    standardize: StandardizeMethod = StandardizeMethod.ZSCORE
+    missing_strategy: MissingStrategy = MissingStrategy.EXCLUDE
+    available_at_rule: str = ""
+
+
+_SCORING_PARAMS: dict[str, _ScoringParams] = {
     # ── 估值 ──
-    "pb": FactorMeta(
-        name="pb",
+    "pb": _ScoringParams(
         category=FactorCategory.VALUE,
-        direction=FactorDirection.SHORT,
-        source_field="daily.pb",
-        economic_hypothesis="低市净率股票长期跑赢高市净率股票(Fama-French HML)。",
-        expected_failure="成长股牛市中低 PB 可能是价值陷阱(银行/地产周期底部)。",
         unit="multiple",
         available_at_rule="T-day daily_metrics",
     ),
-    "earnings_yield": FactorMeta(
-        name="earnings_yield",
+    "earnings_yield": _ScoringParams(
         category=FactorCategory.VALUE,
-        direction=FactorDirection.LONG,
-        source_field="derived:1/pe_ttm",
-        economic_hypothesis="盈利收益率(1/PE_TTM)高的股票长期跑赢,类似 EP 因子。",
-        expected_failure="周期股高点 PE 低但盈利不可持续;亏损股 PE 为负需排除。",
-        unit="ratio",
         available_at_rule="T-day daily_metrics",
     ),
-    "dividend_yield": FactorMeta(
-        name="dividend_yield",
+    "dividend_yield": _ScoringParams(
         category=FactorCategory.VALUE,
-        direction=FactorDirection.LONG,
-        source_field="daily.dividend_yield_ttm",
-        economic_hypothesis="高股息率提供安全边际和复利再投资,在低利率环境下更受青睐。",
-        expected_failure="特别分红或利润大幅下滑导致股息率虚高;价值陷阱。",
-        unit="ratio",
         available_at_rule="T-day daily_metrics",
     ),
     # ── 质量 ──
-    "roe": FactorMeta(
-        name="roe",
+    "roe": _ScoringParams(
         category=FactorCategory.QUALITY,
-        direction=FactorDirection.LONG,
-        source_field="financial.return_on_equity",
-        economic_hypothesis="高 ROE 公司资本配置效率高,长期产生超额回报。",
-        expected_failure="杠杆推高的 ROE 不可持续;行业间 ROE 中枢差异大。",
-        unit="ratio",
         available_at_rule="announcement_date (point-in-time)",
         standardize=StandardizeMethod.ZSCORE,
     ),
-    "gross_profit_margin": FactorMeta(
-        name="gross_profit_margin",
+    "gross_profit_margin": _ScoringParams(
         category=FactorCategory.QUALITY,
-        direction=FactorDirection.LONG,
-        source_field="financial.gross_profit_margin",
-        economic_hypothesis="高毛利率反映定价权和成本优势,Novy-Marx 质量因子。",
-        expected_failure="行业差异极大(科技 vs 公用事业);毛利率提升但收入下滑。",
-        unit="ratio",
         available_at_rule="announcement_date (point-in-time)",
     ),
-    "debt_to_assets": FactorMeta(
-        name="debt_to_assets",
+    "debt_to_assets": _ScoringParams(
         category=FactorCategory.QUALITY,
-        direction=FactorDirection.SHORT,
-        source_field="financial.debt_to_assets",
-        economic_hypothesis="低杠杆公司财务风险小,尾部风险低,长期表现更稳定。",
-        expected_failure="金融/地产行业天然高杠杆;低杠杆可能是增长停滞。",
-        unit="ratio",
         available_at_rule="announcement_date (point-in-time)",
     ),
     # ── 低风险 ──
-    "volatility_20d": FactorMeta(
-        name="volatility_20d",
+    "volatility_20d": _ScoringParams(
         category=FactorCategory.LOW_RISK,
-        direction=FactorDirection.SHORT,
-        source_field="derived:daily_returns_std_20d",
-        economic_hypothesis="低波动率异象:低风险股票风险调整后收益优于高波动股票。",
-        expected_failure="市场底部低波动股可能补跌;短期波动率噪音大。",
-        unit="ratio",
         available_at_rule="T-day bars (20-day window)",
         winsorize_lower_pct=0.02,
         winsorize_upper_pct=0.98,
     ),
-    "volatility_60d": FactorMeta(
-        name="volatility_60d",
+    "volatility_60d": _ScoringParams(
         category=FactorCategory.LOW_RISK,
-        direction=FactorDirection.SHORT,
-        source_field="derived:daily_returns_std_60d",
-        economic_hypothesis="60日波动率比20日更稳定,捕捉中期风险水平。",
-        expected_failure="波动率聚集效应(volatility clustering)使近期值滞后。",
-        unit="ratio",
         available_at_rule="T-day bars (60-day window)",
         winsorize_lower_pct=0.02,
         winsorize_upper_pct=0.98,
     ),
-    "volatility_120d": FactorMeta(
-        name="volatility_120d",
+    "volatility_120d": _ScoringParams(
         category=FactorCategory.LOW_RISK,
-        direction=FactorDirection.SHORT,
-        source_field="derived:daily_returns_std_120d",
-        economic_hypothesis="120日波动率反映长期风险水平,低频策略偏好。",
-        expected_failure="长期波动率可能包含已消退的风险事件。",
-        unit="ratio",
         available_at_rule="T-day bars (120-day window)",
         winsorize_lower_pct=0.02,
         winsorize_upper_pct=0.98,
     ),
-    "downside_volatility": FactorMeta(
-        name="downside_volatility",
+    "downside_volatility": _ScoringParams(
         category=FactorCategory.LOW_RISK,
-        direction=FactorDirection.SHORT,
-        source_field="derived:downside_returns_std_60d",
-        economic_hypothesis="下行波动率只惩罚亏损,比全样本波动率更贴合实际风险感受。",
-        expected_failure="样本不足时估计不稳定;牛市中下行波动率系统性偏低。",
-        unit="ratio",
         available_at_rule="T-day bars (60-day window)",
         winsorize_lower_pct=0.02,
         winsorize_upper_pct=0.98,
     ),
     # ── 流动性 ──
-    "turnover_rate": FactorMeta(
-        name="turnover_rate",
+    "turnover_rate": _ScoringParams(
         category=FactorCategory.LIQUIDITY,
-        direction=FactorDirection.NEUTRAL if False else FactorDirection.SHORT,
-        source_field="daily.turnover_rate",
-        economic_hypothesis="低换手率股票持有者更稳定,流动性溢价补偿。",
-        expected_failure="低换手率可能反映无人关注;小盘股低换手率实盘冲击成本极高。",
-        unit="ratio",
         available_at_rule="T-day daily_metrics",
         missing_strategy=MissingStrategy.FILL_MEDIAN,
     ),
     # ── 动量 ──
-    "momentum": FactorMeta(
-        name="momentum",
+    "momentum": _ScoringParams(
         category=FactorCategory.MOMENTUM,
-        direction=FactorDirection.LONG,
-        source_field="derived:return_excl_latest_20d",
-        economic_hypothesis="中期动量(12M-1M):过去赢家继续跑赢输家。",
-        expected_failure="A股短期反转效应更强;动量在市场转折点反转剧烈。",
-        unit="ratio",
         available_at_rule="T-day bars",
         winsorize_lower_pct=0.01,
         winsorize_upper_pct=0.99,
     ),
     # ── 增长 ──
-    "revenue_yoy": FactorMeta(
-        name="revenue_yoy",
+    "revenue_yoy": _ScoringParams(
         category=FactorCategory.GROWTH,
-        direction=FactorDirection.LONG,
-        source_field="financial.revenue_yoy",
-        economic_hypothesis="收入增长反映企业扩张能力,增长股长期享有估值溢价。",
-        expected_failure="并购导致的一次性增长不可持续;周期股增长见顶信号。",
-        unit="ratio",
         available_at_rule="announcement_date (point-in-time)",
     ),
 }
+
+_DIRECTION_FROM_PREFERENCE = {
+    FactorPreference.HIGHER: FactorDirection.LONG,
+    FactorPreference.LOWER: FactorDirection.SHORT,
+}
+
+
+def _project_research_catalog() -> dict[str, FactorMeta]:
+    """把 FACTOR_LAB_CATALOG 的语义字段投影到评分消费参数上(issue #226)。
+
+    v2 目录是唯一事实来源;评分因子名在 v2 缺失、或 preference 是
+    EXPOSURE_ONLY(无方向语义,不能进复合评分)时导入期即失败,防漂移。
+    """
+
+    catalog: dict[str, FactorMeta] = {}
+    for name, params in _SCORING_PARAMS.items():
+        try:
+            source = FACTOR_LAB_CATALOG[name]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"评分因子 {name} 在 FACTOR_LAB_CATALOG 中不存在;"
+                "因子语义已收敛为 v2 唯一事实来源,请先在 factor_lab 登记该因子"
+            ) from exc
+        try:
+            direction = _DIRECTION_FROM_PREFERENCE[source.preference]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"评分因子 {name} 的 preference={source.preference.value} "
+                "无方向映射,不能进入复合评分目录"
+            ) from exc
+        catalog[name] = FactorMeta(
+            name=name,
+            category=params.category,
+            direction=direction,
+            source_field=source.source_fields[0],
+            economic_hypothesis=source.economic_hypothesis,
+            expected_failure=source.expected_failure,
+            unit=params.unit,
+            winsorize_lower_pct=params.winsorize_lower_pct,
+            winsorize_upper_pct=params.winsorize_upper_pct,
+            standardize=params.standardize,
+            missing_strategy=params.missing_strategy,
+            available_at_rule=params.available_at_rule,
+        )
+    return catalog
+
+
+RESEARCH_FACTOR_CATALOG: dict[str, FactorMeta] = _project_research_catalog()
 
 
 def get_factor_meta(name: str) -> FactorMeta:
