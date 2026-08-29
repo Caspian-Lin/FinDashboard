@@ -146,6 +146,11 @@ _EXPECTED_TOOLS = {
     "finboard_report_run",
     "finboard_report_backtest",
     "finboard_report_export",
+    # #215 研究代码仓库工具(2 只读 + 2 写;只存储与版本化,不执行代码)
+    "finboard_research_code_submit",
+    "finboard_research_code_list",
+    "finboard_research_code_get",
+    "finboard_research_code_rollback",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。

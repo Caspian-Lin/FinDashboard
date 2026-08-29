@@ -51,6 +51,7 @@ from finboard_persistence.models import (
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
+    ResearchCodeArtifactModel,
     ResearchDailyMetricModel,
     ResearchDatasetReleaseModel,
     ResearchExperimentModel,
@@ -90,6 +91,10 @@ from finboard_persistence.repo import (
     ReconciliationLogRepository,
     StrategyPresetRepository,
     WatchlistRepository,
+)
+from finboard_persistence.research_code_repo import (
+    ResearchCodeArtifact,
+    ResearchCodeArtifactRepository,
 )
 from finboard_persistence.research_memory_repo import (
     ResearchMemory,
@@ -171,6 +176,9 @@ __all__ = [
     "ReconciliationLogModel",
     "ReconciliationLogRepository",
     "ReleaseInstrumentCatalogRepository",
+    "ResearchCodeArtifact",
+    "ResearchCodeArtifactModel",
+    "ResearchCodeArtifactRepository",
     "ResearchDailyMetricModel",
     "ResearchDataSyncService",
     "ResearchDataset",

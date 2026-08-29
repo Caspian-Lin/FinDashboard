@@ -111,6 +111,14 @@ class Settings(BaseSettings):
     # ---- Kill Switch 初始态 ----
     kill_switch_initial: KillSwitchLevel = KillSwitchLevel.OFF
 
+    # ---- 研究代码仓库(issue #215)----
+    # agent 提交的策略/因子代码存放的本地 bare git 仓库路径(暂不推远端;
+    # 远端备份作为后续可选项)。只存储与版本化,不执行任何代码。
+    research_code_repo_path: str = "data_cache/research_code.git"
+    # 单次提交文件数 / 单文件字节数上限(静态校验,纵深防御第一层)。
+    research_code_max_files: int = Field(default=32, ge=1)
+    research_code_max_file_bytes: int = Field(default=262144, ge=1024)
+
     # ---- FinBoard MCP Server(issue #108)----
     # 向外置研究 Agent(OpenCode)暴露受控研究工具的 MCP 服务。默认关闭,显式启用。
     # 不连接实盘账户 / 订单 / 持仓;实盘能力永久不注册为工具。

@@ -1125,3 +1125,57 @@ REST PUT 是全量语义,这里更安全)。
   节间空行;Markdown:`#` 标题 + `##` 分节表格
 - 错误:`invalid_argument`(未知 kind / format / 非整数回测 id)、
   `not_found`(run/backtest 不存在)
+
+## 研究代码仓库(#215,agent 代码入口:只存储与版本化,不执行)
+
+web 通道仍禁代码(无代码规格);仅 MCP agent 通道开放受控代码提交。
+提交的代码进入本地 bare git 仓库(`research_code_repo_path`),git 写操作
+收敛在服务端(本容器文件系统只读)。**提交 ≠ 可执行**:任何代码都要等
+后续沙箱容器 issue 才能运行,LLM 产出仍须走 研究→回测→OOS→模拟→影子→
+小资金 完整晋级链。
+
+### 目录约定与静态校验
+
+- 一因子/策略一目录:`factors/<name>/{factor.py, manifest.toml}`、
+  `strategies/<name>/{strategy.py, manifest.toml}`,files 的键是相对该目录的路径
+- manifest.toml 必填 `[manifest] entry`;`params` 须为表(参数 schema)
+- 入口签名:factor 须定义模块级 `compute(data, ...)`,strategy 须定义
+  `decide(...)`,至少一个输入参数,不接受 `*args`
+- import 白名单:`pandas` / `numpy` / `polars` / `math` / `statistics` /
+  `finboard_research_kit`;禁 subprocess/socket/os/sys/ctypes/shutil/importlib、
+  禁相对 import、禁 eval/exec/compile/`__import__`/system/popen、
+  禁 `open()` 写模式(w/a/x/+)
+- 上限:文件数 ≤ 32(settings `research_code_max_files`)、单文件 ≤ 256KB
+  (`research_code_max_file_bytes`);只收文本(.py/.toml/.md/.txt/.json),拒二进制
+
+### finboard_research_code_submit(写)
+提交一版研究代码,静态校验通过后生成新 commit 并登记
+`research_code_artifacts`(created_by=agent:mcp)。同名重复提交生成新
+commit,旧版本自动 retired。
+- 参数:`kind: "factor"|"strategy"`、`name: str`(不含路径分隔符/点号)、
+  `files: {相对路径: 文件内容}`
+- 返回:`{name, kind, commit, checksum, path, artifact_id, status}`
+- 错误:`invalid_argument`(逐条列出可操作问题,如
+  `[import_not_whitelisted] factor.py: import requests 不在白名单 [...]`)、
+  `denied`(mcp_readonly_only)
+
+### finboard_research_code_list(只读)
+列出代码产物登记(新→旧,可按 kind/name/status 过滤)。
+- 参数:`kind?`、`name?`、`status?`(active|retired|draft)、
+  `include_files: bool = false`(结果唯一时附该版本文件)、`commit?`、`limit=100`
+- 返回:`{artifacts: [{artifact_id, kind, name, commit, path, checksum,
+  status, created_by, created_at, updated_at}], count, files?}`
+
+### finboard_research_code_get(只读)
+读某版本全部文件 + 提交历史;`diff_from` 传旧 commit 附 unified diff。
+- 参数:`kind`、`name`、`commit?`(省略=最新 main)、`diff_from?`
+- 返回:`{kind, name, ref, files: {路径: 内容}, history: [{commit, date,
+  message, author}], diff?}`
+- 错误:`not_found`(代码不存在 / commit 无效)
+
+### finboard_research_code_rollback(写)
+把 (kind, name) 的 active 引用回滚到历史 commit(现 active 行 retired,
+历史版本重新登记 active;git 历史不重写)。
+- 参数:`kind`、`name`、`commit`
+- 返回:新登记行 `{artifact_id, kind, name, commit, checksum, status}`
+- 错误:`not_found`(历史 commit 不在登记表)、`denied`(只读模式)
