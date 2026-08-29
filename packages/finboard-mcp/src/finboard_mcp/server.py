@@ -24,6 +24,8 @@
 * ``finboard.run.*`` 写工具(queue / cancel / replay / lineage,#127)。
 * ``finboard.portfolio.*``(#128)—— 组合计算(目标权重分配 /
   离散手数 sizing / 资金档位可行性 / 绩效归因,纯计算无 DB 写入);
+* ``finboard.research_code.*``(#215)—— 研究代码仓库(submit / rollback 写 +
+  list / get 只读;只存储与版本化,不执行代码)。
 * ``finboard.job.*``(#136;#221 归档)—— 统一后台任务队列监控与提交
   (list / get 只读 + enqueue / cancel / archive / unarchive 写,
   复用 ``background_jobs`` 表)。
@@ -42,6 +44,13 @@
 * 报告聚合与导出(#141)—— ``finboard.report.*``:report_run / report_backtest
   只读聚合(ResearchRun result + artifacts;回测 metrics + equity_curve + fills),
   report_export 导出 CSV / Markdown 文件(纯标准库,返回绝对路径)。
+* 研究代码仓库(#215)—— ``finboard.research_code.*``:submit / rollback(写,
+  受 ``mcp_readonly_only`` 门控)+ list / get(只读)。agent 提交策略/因子
+  Python 代码到本地 bare git 仓库(``research_code_repo_path``),静态校验
+  (manifest / 入口签名 / import 白名单 / 危险调用黑名单 / 上限 / 拒二进制)
+  后版本化存储并登记 ``research_code_artifacts``。**只存储与版本化,不执行
+  任何代码**(执行见后续沙箱 issue);git 写操作收敛在服务端,agent 容器
+  文件系统只读。
 
 安全:实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)
 **永久不注册**为工具。研究写操作(创建 Run / 启动回测 / 模拟盘)由 agent 自主执行
@@ -64,6 +73,7 @@ from finboard_mcp.tools import (
     register_memory_tools,
     register_portfolio_tools,
     register_report_tools,
+    register_research_code_tools,
     register_run_tools,
     register_simulation_tools,
     register_strategy_tools,
@@ -83,7 +93,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(117 个,已实现)==
+== 当前可用工具(121 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -208,6 +218,17 @@ FinBoard 研究 MCP —— 量化研究工具集
   fills_limit=null 全量) + summary)、report_export(导出 CSV/Markdown 文件,
   写入 FINBOARD_EXPORT_DIR 或系统临时目录,返回绝对路径;导出走全量;
   纯标准库,零新依赖;只读不写 DB)。
+- 研究代码仓库(4,✅ #215):research_code submit/rollback(写)+ list/get
+  (只读)。agent 提交策略/因子 Python 代码到本地 bare git 仓库,静态校验
+  (manifest 必填 manifest.entry / 入口签名 factor.compute|strategy.decide /
+  import 白名单 pandas·numpy·polars·math·statistics·finboard_research_kit /
+  禁 subprocess·socket·eval·exec·文件写模式 open / 文件数与单文件上限 /
+  拒二进制)通过后版本化存储,登记 research_code_artifacts(active/retired
+  生命周期,重复提交同名生成新 commit、旧版自动 retired、可 rollback 到
+  历史 commit、可 diff)。目录约定:一因子/策略一目录 factors/<name>/
+  {factor.py, manifest.toml}、strategies/<name>/{strategy.py, manifest.toml}。
+  **只存储与版本化,不执行任何代码**(执行须待沙箱容器 issue);web 通道仍
+  禁代码,仅 MCP agent 通道开放。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
@@ -216,7 +237,11 @@ FinBoard 研究 MCP —— 量化研究工具集
   agent 可通过 MCP 自主执行(#122),不触及交易安全红线。
 - 实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测):
   永久不可用,不注册为工具。需要它们 = 走错了路。
-- 不生成代码:策略是无代码版本化规格,禁止生成 Python / 模块路径 / 可执行表达式。
+- 代码边界(#215):web 通道仍是「无代码版本化规格」,禁止网页提交 Python /
+  模块路径 / 可执行表达式;**仅 MCP agent 通道**开放受控研究代码提交
+  (finboard_research_code_submit,静态校验 + 版本化存储)。提交的代码
+  **只存储不执行**;执行须待后续沙箱容器 issue,且 LLM 产出仍须走
+  研究→回测→OOS→模拟→影子→小资金完整晋级链。
 
 == 输出规范 ==
 - 工具返回统一信封 ToolEnvelope(operation_id / status / data / error /
@@ -244,6 +269,7 @@ def build_mcp_server() -> MCPServer:
     register_simulation_tools(mcp)
     register_portfolio_tools(mcp)
     register_report_tools(mcp)
+    register_research_code_tools(mcp)
     register_jobs_tools(mcp)
     register_validation_experiment_tools(mcp)
     register_watchlist_tools(mcp)

@@ -386,3 +386,32 @@ broker / 账户 / 订单 / 持仓;`_INSTRUCTIONS` / Skill `SKILL.md` +
 
 MCP 是受控入口,回滚方案为**关闭 MCP 入口**(不启动 server),不影响现有
 REST 入口与研究产物 / 审计。
+
+### ✅ #215 研究代码仓库与服务端提交工具(已完成)
+
+L3 路线第一环:外置研究 agent 直接编写策略/因子代码,以受控方式提交、
+版本化,并在后续 issue 的沙箱中执行。边界改写:**web 通道仍禁代码,仅
+MCP agent 通道开放受控代码提交**;本 issue 只做存储与版本化,**不执行
+任何代码**(执行见后续沙箱 issue)。
+
+- 代码仓库:本地 bare git repo(settings `research_code_repo_path`,暂不推
+  远端);目录约定一因子/策略一目录 `factors/<name>/{factor.py,
+  manifest.toml}`、`strategies/<name>/{strategy.py, manifest.toml}`。
+  git 写操作收敛在服务端(`finboard-backtest/research_code/` 的
+  `ResearchCodeRepo`),agent 容器文件系统保持只读。
+- 静态校验(纵深防御第一层,硬边界在后续沙箱容器):manifest 必填
+  (`manifest.entry`)、入口函数签名(factor.compute / strategy.decide)、
+  AST import 白名单(pandas/numpy/polars/math/statistics/
+  finboard_research_kit)、禁 subprocess/socket/os/sys/eval/exec/文件写模式
+  open、文件数与单文件大小上限(settings 可调)、拒二进制。
+- MCP 工具 4 个:`finboard_research_code_submit` / `_rollback`(写,受
+  `mcp_readonly_only` 门控)+ `_list` / `_get`(只读);审计照常落
+  mcp_audit_events。OpenCode allowlist 已是 `finboard_*: allow` 通配,
+  新工具自动放行,无需改权限配置。
+- 持久化:`research_code_artifacts` 表(每次 submit 追加 active 行,同名旧
+  版本自动 retired;rollback 把历史 commit 重新登记 active,git 历史不重写)。
+- 回滚方案:迁移 downgrade 删表 + 移除 4 个工具;bare 仓库目录独立于研究
+  产物,删除目录即彻底回退。
+
+`_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 边界段已同步
+(AGENTS.md 改写前后对照见 PR 描述)。

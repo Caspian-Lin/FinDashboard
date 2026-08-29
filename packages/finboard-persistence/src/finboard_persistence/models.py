@@ -1949,3 +1949,42 @@ class BackgroundJobModel(Base, IdMixin):
             "created_at",
         ),
     )
+
+
+class ResearchCodeArtifactModel(Base, IdMixin):
+    """研究代码产物登记(issue #215)。
+
+    agent 通过 MCP 提交的策略/因子代码在 bare git 仓库中的版本化登记簿:
+    每次 submit 追加一行(active),同名旧版本标记 retired;rollback 把
+    指定历史 commit 重新置为 active。git 对象本身存储在 settings
+    ``research_code_repo_path`` 指定的 bare 仓库,本表只做引用与生命周期。
+
+    纯研究域存储,不执行代码、不触实盘 orders/fills/positions。
+    """
+
+    __tablename__ = "research_code_artifacts"
+
+    artifact_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # factor|strategy
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    commit: Mapped[str] = mapped_column(String(40))
+    path: Mapped[str] = mapped_column(String(160))
+    checksum: Mapped[str] = mapped_column(String(32))
+    # draft=已提交未启用 / active=当前生效引用 / retired=被新版本替代或显式退役
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_research_code_artifacts_kind_name_status",
+            "kind",
+            "name",
+            "status",
+        ),
+    )
