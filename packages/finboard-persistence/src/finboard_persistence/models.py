@@ -1988,3 +1988,69 @@ class ResearchCodeArtifactModel(Base, IdMixin):
             "status",
         ),
     )
+
+
+class ResearchCodeRunModel(Base, IdMixin):
+    """研究代码沙箱执行记录(issue #216)。
+
+    一次 ``kind=research_code_run`` 后台任务的审计与产物登记:code commit x
+    数据 release x 输出 checksum 三向引用都在本表;stdout / stderr / scores /
+    metrics / mount_manifest 归档在 ``artifact_dir`` 指向的本地目录。与
+    ``background_jobs`` 不建外键(job_id 为字符串引用)。
+
+    纯研究域:容器无网络无凭证,不触实盘 orders/fills/positions。
+    """
+
+    __tablename__ = "research_code_runs"
+
+    run_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    job_id: Mapped[str | None] = mapped_column(String(48), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # factor|strategy
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    commit: Mapped[str] = mapped_column(String(40))
+    code_checksum: Mapped[str] = mapped_column(String(64))
+    artifact_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dataset_release_ids: Mapped[list[object]] = mapped_column(
+        JSON, default=list, server_default=sql_text("'[]'::json")
+    )
+    # {release_id: release_checksum} —— 数据侧锚定(对齐 #202 checksum 锚定语义)
+    dataset_release_checksums: Mapped[dict[str, object]] = mapped_column(
+        JSON, default=dict, server_default=sql_text("'{}'::json")
+    )
+    decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    params: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    image: Mapped[str] = mapped_column(String(128))
+    image_digest: Mapped[str] = mapped_column(String(160))
+    mount_manifest_checksum: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    scores_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # running|succeeded|failed
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timed_out: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sql_text("false")
+    )
+    oom_killed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sql_text("false")
+    )
+    usage: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    metrics: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    artifact_dir: Mapped[str] = mapped_column(String(260))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_research_code_runs_kind_name_status",
+            "kind",
+            "name",
+            "status",
+        ),
+    )

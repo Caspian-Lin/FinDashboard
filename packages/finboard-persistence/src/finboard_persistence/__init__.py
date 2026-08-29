@@ -52,6 +52,7 @@ from finboard_persistence.models import (
     PositionModel,
     ReconciliationLogModel,
     ResearchCodeArtifactModel,
+    ResearchCodeRunModel,
     ResearchDailyMetricModel,
     ResearchDatasetReleaseModel,
     ResearchExperimentModel,
@@ -95,6 +96,11 @@ from finboard_persistence.repo import (
 from finboard_persistence.research_code_repo import (
     ResearchCodeArtifact,
     ResearchCodeArtifactRepository,
+)
+from finboard_persistence.research_code_run_repo import (
+    ResearchCodeRun,
+    ResearchCodeRunRepository,
+    generate_run_id,
 )
 from finboard_persistence.research_memory_repo import (
     ResearchMemory,
@@ -179,6 +185,9 @@ __all__ = [
     "ResearchCodeArtifact",
     "ResearchCodeArtifactModel",
     "ResearchCodeArtifactRepository",
+    "ResearchCodeRun",
+    "ResearchCodeRunModel",
+    "ResearchCodeRunRepository",
     "ResearchDailyMetricModel",
     "ResearchDataSyncService",
     "ResearchDataset",
@@ -226,5 +235,6 @@ __all__ = [
     "WatchlistModel",
     "WatchlistRepository",
     "create_async_engine",
+    "generate_run_id",
     "session_factory",
 ]
