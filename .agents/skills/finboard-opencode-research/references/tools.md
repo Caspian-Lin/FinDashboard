@@ -532,17 +532,24 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 返回:`{valid, checksum, feature_order, required_factor_sources,
   required_datasets, dataset_release_ids, lifecycle_stages, can_execute,
   universe_precheck}`
-  - `universe_precheck`(issue #186):`{total_candidates, included, excluded,
+  - `universe_precheck`(issue #186/#213):`{total_candidates, included, excluded,
     is_empty, excluded_by_condition, missing_fields, warnings}`,来自主数据发布
     instruments 的静态评估 ——
     - `warnings` 是具名过滤降级提示(filter 依赖字段缺失):如
       `universe_listing_days_unavailable`(min_listing_days 依赖 list_date,
       发布 list_date 全空 → 将过滤全部标的)、`universe_delist_metadata_unavailable`
-      (exclude_delisted 无 delist_date)、`universe_st_filter_inactive`
-      (exclude_st 无 ST 标记)、`universe_average_amount_unavailable`
-      (min_average_amount 无 average_amount 特征)、
+      (exclude_delisted 无 delist_date)、`universe_st_pit_approximate`
+      (exclude_st 名称历史不覆盖决策日,回退当前名称近似判定)、
+      `universe_st_filter_inactive`(exclude_st 无名称数据,ST 过滤不生效)、
+      `universe_average_amount_unavailable`(min_average_amount 无
+      average_amount 特征)、`universe_market_cap_unavailable`
+      (min/max_market_cap 无 market_cap 特征——附 daily_metrics 研究发布
+      或含 market_cap 观测的因子快照即可解析)、
       `universe_required_field_unavailable` / `universe_ranking_field_unavailable`
       (required_data_fields / ranking.field 无数据源);
+    - universe 支持 `min_market_cap`/`max_market_cap`(人民币元,中小盘/大盘
+      池过滤,取 daily_metrics 的 market_cap 特征观测);exclude_st 按发布
+      instruments 名称历史在决策日 PIT 判定(issue #213);
     - `is_empty=true` 时入队必然秒级失败,先修复元数据(如 data_sync profiles
       回填 list_date)或放宽过滤再入队。
 

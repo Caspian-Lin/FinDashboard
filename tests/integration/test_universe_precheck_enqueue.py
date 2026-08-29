@@ -35,7 +35,9 @@ from finboard_backtest.strategy_spec import (
 )
 from finboard_data import AssetCapability, CapabilityStatus, ResearchDatasetRelease
 from finboard_data.releases import (
+    DAILY_METRICS_FIELDS,
     RELEASE_FIELDS,
+    ReleaseDatasetKind,
     ReleasedInstrument,
     default_execution_metadata,
 )
@@ -103,10 +105,17 @@ async def client(engine: AsyncEngine) -> AsyncIterator[httpx.AsyncClient]:
         yield http_client
 
 
-def _instrument(code: str, list_date: date | None) -> ReleasedInstrument:
+def _instrument(
+    code: str,
+    list_date: date | None,
+    *,
+    name: str | None = None,
+    name_history: tuple[tuple[str, date, date | None], ...] = (),
+) -> ReleasedInstrument:
     return ReleasedInstrument(
         code=code,
-        name=code,
+        name=name if name is not None else code,
+        name_history=name_history,
         market=Market.A_SHARE,
         instrument_type=InstrumentType.STOCK,
         asset_class=AssetClass.EQUITY,
@@ -134,7 +143,11 @@ def _instrument(code: str, list_date: date | None) -> ReleasedInstrument:
     )
 
 
-def _release(symbols: tuple[tuple[str, date | None], ...]) -> ResearchDatasetRelease:
+def _release(
+    symbols: tuple[tuple[str, date | None], ...],
+    *,
+    instruments: tuple[ReleasedInstrument, ...] | None = None,
+) -> ResearchDatasetRelease:
     return ResearchDatasetRelease(
         release_id=RELEASE_ID,
         dataset_name="integration_precheck_bars",
@@ -149,7 +162,9 @@ def _release(symbols: tuple[tuple[str, date | None], ...]) -> ResearchDatasetRel
         availability_rules=(("instrument_metadata", "available_at <= decision_at"),),
         code_version="abcdef0123456789",
         published_at=datetime(2024, 1, 1, tzinfo=UTC),
-        instruments=tuple(_instrument(code, list_date) for code, list_date in symbols),
+        instruments=instruments
+        if instruments is not None
+        else tuple(_instrument(code, list_date) for code, list_date in symbols),
         capabilities=(
             AssetCapability(
                 key="stock",
@@ -168,20 +183,70 @@ def _release(symbols: tuple[tuple[str, date | None], ...]) -> ResearchDatasetRel
 async def _register_release(
     db_session: AsyncSession,
     symbols: tuple[tuple[str, date | None], ...],
+    *,
+    instruments: tuple[ReleasedInstrument, ...] | None = None,
 ) -> None:
-    await ResearchDatasetReleaseRepository(db_session).publish(_release(symbols))
+    await ResearchDatasetReleaseRepository(db_session).publish(
+        _release(symbols, instruments=instruments)
+    )
     await db_session.commit()
+
+
+async def _register_daily_metrics_release(
+    db_session: AsyncSession,
+    symbols: tuple[tuple[str, date | None], ...],
+) -> str:
+    """注册最小 daily_metrics 研究数据发布(issue #187 / #213 预检路径)。"""
+    release = ResearchDatasetRelease(
+        release_id=f"{RELEASE_ID}-daily",
+        dataset_name="integration_precheck_daily_metrics",
+        source="integration-precheck",
+        version="v1",
+        schema_version="v1",
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        period=BarPeriod.D1,
+        adjustment="none",
+        fields=DAILY_METRICS_FIELDS,
+        availability_rules=(("instrument_metadata", "available_at <= decision_at"),),
+        code_version="abcdef0123456789",
+        published_at=datetime(2024, 1, 1, tzinfo=UTC),
+        instruments=tuple(_instrument(code, list_date) for code, list_date in symbols),
+        capabilities=(
+            AssetCapability(
+                key="stock",
+                status=CapabilityStatus.READY,
+                symbol_count=len(symbols),
+                ready_count=len(symbols),
+            ),
+        ),
+        quality_status=DatasetQualityStatus.PASSED,
+        quality_report={"release_coverage": "1.0"},
+        dataset_kind=ReleaseDatasetKind.DAILY_METRICS,
+        storage_uri=f"{RELEASE_ID}-daily",
+        release_checksum="c" * 64,
+    )
+    await ResearchDatasetReleaseRepository(db_session).publish(release)
+    await db_session.commit()
+    return release.release_id
 
 
 async def _register_published_spec(
     db_session: AsyncSession,
+    *,
+    universe_updates: dict[str, object] | None = None,
+    dataset_release_ids: tuple[str, ...] = (RELEASE_ID,),
 ) -> ResearchStrategySpec:
     """multi_factor 模板:universe 默认 min_listing_days=60,无 factor 快照要求。"""
     spec = build_strategy_template(
         "multi_factor",
         strategy_id="integration_precheck_strategy",
-        dataset_release_ids=(RELEASE_ID,),
+        dataset_release_ids=dataset_release_ids,
     )
+    if universe_updates:
+        spec = spec.model_copy(
+            update={"universe": spec.universe.model_copy(update=universe_updates)}
+        )
     plan = compile_registered_strategy_spec(spec)
     repo = ResearchStrategySpecRepository(db_session)
     await repo.create_draft(
@@ -203,7 +268,7 @@ def _queue_payload(spec: ResearchStrategySpec) -> dict[str, object]:
         "idempotency_key": "integration-precheck-queue",
         "strategy_id": spec.strategy_id,
         "strategy_version": 1,
-        "dataset_release_ids": [RELEASE_ID],
+        "dataset_release_ids": list(spec.validation_plan.dataset_release_ids),
         "parameters": {"rebalance_frequency": "monthly"},
         "code_version": "abcdef0123456789",
         "initial_capital": "200000",
@@ -301,3 +366,90 @@ async def test_enqueue_seconds_fail_when_single_shot_missing_snapshots(
     # 快速失败:不产生 queued research_runs 行,不双写 background_jobs。
     rows = await ResearchRunRepository(db_session).list_recent(limit=10)
     assert all(row.strategy_kind != spec.strategy_kind for row in rows)
+
+
+# ---- issue #213:市值过滤与 ST 真实判定的入队预检 ----
+
+
+async def test_enqueue_seconds_fail_when_market_cap_unavailable(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """min_market_cap 声明但 market_cap 特征无数据源(未附 daily_metrics 发布
+    且无快照观测):入队秒级 422,错误指向 market_cap。"""
+    await _register_release(
+        db_session,
+        (
+            ("600001.SH", date(2020, 1, 1)),
+            ("600002.SH", date(2020, 1, 1)),
+            ("600003.SH", date(2020, 1, 1)),
+        ),
+    )
+    spec = await _register_published_spec(
+        db_session,
+        universe_updates={"min_market_cap": 1e10},
+    )
+
+    response = await client.post("/api/research/runs", json=_queue_payload(spec))
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "market_cap" in detail
+    assert "missing_market_cap=3" in detail
+    assert "候选池为空" in detail
+
+
+async def test_enqueue_succeeds_with_daily_metrics_release_attached(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """附 daily_metrics 研究发布时 market_cap 运行时可派生:预检不误报空池。"""
+    symbols = (
+        ("600001.SH", date(2020, 1, 1)),
+        ("600002.SH", date(2020, 1, 1)),
+        ("600003.SH", date(2020, 1, 1)),
+    )
+    await _register_release(db_session, symbols)
+    daily_id = await _register_daily_metrics_release(db_session, symbols)
+    spec = await _register_published_spec(
+        db_session,
+        universe_updates={"min_market_cap": 1e10},
+        dataset_release_ids=(RELEASE_ID, daily_id),
+    )
+
+    response = await client.post("/api/research/runs", json=_queue_payload(spec))
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "queued"
+
+
+async def test_enqueue_seconds_fail_when_all_st_by_names(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """全池 ST(名称含 ST):静态预检按名称排除全部标的,秒级 422 指向 st_security。"""
+    await _register_release(
+        db_session,
+        (
+            ("600001.SH", date(2020, 1, 1)),
+            ("600002.SH", date(2020, 1, 1)),
+            ("600003.SH", date(2020, 1, 1)),
+        ),
+        instruments=tuple(
+            _instrument(
+                code,
+                date(2020, 1, 1),
+                name=f"ST样本{index}",
+            )
+            for index, code in enumerate(("600001.SH", "600002.SH", "600003.SH"))
+        ),
+    )
+    spec = await _register_published_spec(db_session)
+
+    response = await client.post("/api/research/runs", json=_queue_payload(spec))
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "st_security=3" in detail
+    assert "候选池为空" in detail

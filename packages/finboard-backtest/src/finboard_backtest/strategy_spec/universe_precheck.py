@@ -24,6 +24,13 @@
 缺失时只给出具名 warning 而非误报空池;``list_date`` / ``delist_date`` /
 ``suspended_sessions`` / ``coverage_pct`` / ``present_event_types`` /
 市场 / 资产类别是发布元数据,按确定性事实参与空池判定。
+
+issue #213:``market_cap`` 与 ``average_amount`` 同为「特征依赖的内建字段」
+—— 运行时值来自冻结快照 / 研究发布(``daily_metrics.total_market_cap``,
+单位人民币元)的 ``market_cap`` 特征观测,取值可用性取决于数据源,不能仅凭
+内建名判定可解析;``exclude_st`` 不再恒为不生效 —— 按发布 instruments 的
+``name_history`` 区间取决策日名称做 PIT 判定(无覆盖区间回退当前名称近似,
+缺名称数据按非 ST 处理),降级路径均发具名 warning 而非静默放行。
 """
 
 from __future__ import annotations
@@ -53,10 +60,13 @@ STANDARD_PRICE_FEATURE_NAMES = frozenset(
 )
 
 #: ``UniverseCandidate.value()`` 的内建字段(不依赖外部特征输入)。
-#: 其中 ``average_amount`` 特殊:其值在运行时来自特征观测,取值可用性取决于
-#: 冻结快照 / 重算是否提供,不能仅凭「内建名」判定为可解析。
-_BUILTIN_FIELDS = frozenset({"listing_days", "average_amount", "price", "data_completeness"})
-_FEATURE_DEPENDENT_FIELDS = frozenset({"average_amount"})
+#: 其中 ``average_amount`` / ``market_cap`` 特殊:其值在运行时来自特征观测,
+#: 取值可用性取决于冻结快照 / 研究发布 / 重算是否提供,不能仅凭「内建名」
+#: 判定为可解析。
+_BUILTIN_FIELDS = frozenset(
+    {"listing_days", "average_amount", "price", "market_cap", "data_completeness"}
+)
+_FEATURE_DEPENDENT_FIELDS = frozenset({"average_amount", "market_cap"})
 
 #: 与 ``explain_universe`` 保持一致的原因命名,便于运行时/预检输出对齐。
 _REASON_MARKET = "market_not_allowed"
@@ -64,15 +74,76 @@ _REASON_ASSET_CLASS = "asset_class_not_allowed"
 _REASON_EXPLICIT = "not_in_explicit_symbols"
 _REASON_LISTING = "listing_age_below_minimum"
 _REASON_AVERAGE_AMOUNT = "missing_average_amount"
+_REASON_MISSING_MARKET_CAP = "missing_market_cap"
 _REASON_SUSPENDED = "suspended"
 _REASON_DELISTED = "delisted"
 _REASON_ST = "st_security"
 _REASON_EVENT = "excluded_event"
 _REASON_COMPLETENESS = "data_completeness_below_minimum"
 
+#: 研究数据发布(daily_metrics / financial_indicators)在运行时经
+#: ``frozen_loader._load_research_features`` → ``factors/extract.py`` 派生的
+#: 特征名。attached 发布让这些特征在静态预检中视为可解析,防止
+#: multi_period(无因子快照)误报空池。
+RESEARCH_RELEASE_FEATURE_NAMES: dict[str, frozenset[str]] = {
+    "daily_metrics": frozenset(
+        {"pb", "turnover_rate", "market_cap", "earnings_yield", "dividend_yield"}
+    ),
+    "financial_indicators": frozenset(
+        {"roe", "gross_profit_margin", "debt_to_assets", "revenue_yoy"}
+    ),
+}
+
+
+def research_release_derived_features(kinds: Sequence[object]) -> frozenset[str]:
+    """附加研究数据发布的 kind → 运行时可派生特征名。"""
+    names: set[str] = set()
+    for kind in kinds:
+        names.update(RESEARCH_RELEASE_FEATURE_NAMES.get(str(getattr(kind, "value", kind)), ()))
+    return frozenset(names)
+
 
 def _attr(instrument: object, name: str, default: Any) -> Any:
     return getattr(instrument, name, default)
+
+
+def name_at_decision(instrument: object, decision_date: date) -> tuple[str | None, bool]:
+    """决策日 PIT 名称:优先 ``name_history`` 覆盖区间,否则回退当前 ``name``。
+
+    ``name_history`` 条目 ``(name, valid_from, valid_to)`` 按半开区间
+    ``valid_from <= decision_date < (valid_to or +∞)`` 匹配。返回
+    ``(名称, 是否 PIT 精确命中)``;名称与历史皆缺时 ``(None, False)``。
+    """
+    for entry in _attr(instrument, "name_history", ()) or ():
+        try:
+            name, valid_from, valid_to = entry
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(name, str)
+            and isinstance(valid_from, date)
+            and valid_from <= decision_date
+            and (
+                valid_to is None
+                or (isinstance(valid_to, date) and decision_date < valid_to)
+            )
+        ):
+            return name, True
+    fallback = _attr(instrument, "name", None)
+    if isinstance(fallback, str) and fallback:
+        return fallback, False
+    return None, False
+
+
+def is_st_name(name: str) -> bool:
+    """与 v1 selection 一致的 ST 判定:证券名称含 ``ST``(覆盖 ST / *ST / S*ST)。"""
+    return "ST" in name.upper()
+
+
+def is_st_at_decision(instrument: object, decision_date: date) -> bool:
+    """决策日 ST 判定(PIT 名称;缺名称数据时按非 ST 处理,配具名 warning)。"""
+    name, _ = name_at_decision(instrument, decision_date)
+    return name is not None and is_st_name(name)
 
 
 def static_universe_candidates(
@@ -84,8 +155,9 @@ def static_universe_candidates(
 
     与 ``signal_engine._spec_universe_candidates`` 对齐:``listing_days``
     来自 ``list_date``(缺失为 0)、``delisted`` 来自 ``delist_date``、
-    ``suspended`` 来自 ``suspended_sessions``。价格 / 特征未知,按 None
-    参与诊断(空池判定中按可满足处理,见模块 docstring)。
+    ``suspended`` 来自 ``suspended_sessions``、``is_st`` 按决策日名称
+    PIT 判定(issue #213)。价格 / 特征未知,按 None 参与诊断(空池判定中
+    按可满足处理,见模块 docstring)。
     """
     candidates: list[UniverseCandidate] = []
     for instrument in instruments:
@@ -111,7 +183,7 @@ def static_universe_candidates(
                 price=None,
                 suspended=bool(suspended_sessions > 0),
                 delisted=delist_date is not None and delist_date <= decision_date,
-                is_st=False,
+                is_st=is_st_at_decision(instrument, decision_date),
                 active_events=tuple(_attr(instrument, "present_event_types", ()) or ()),
                 data_completeness=float(coverage) if coverage is not None else 1.0,
                 fields={},
@@ -124,15 +196,18 @@ def resolvable_feature_names(
     *,
     feature_graph_sources: Sequence[str] = (),
     snapshot_feature_names: Sequence[str] = (),
+    research_release_kinds: Sequence[object] = (),
 ) -> frozenset[str]:
     """运行时特征可解析名称集合。
 
-    由三部分构成:多期重算的标准价格特征、规格特征图声明的 source、
-    冻结因子快照的观测特征名(single_shot 由快照提供,多期为空)。
+    由四部分构成:多期重算的标准价格特征、规格特征图声明的 source、
+    冻结因子快照的观测特征名(single_shot 由快照提供,多期为空)、
+    附加研究数据发布可派生的特征名(issue #213,防止 multi_period 误报)。
     """
     names = set(STANDARD_PRICE_FEATURE_NAMES)
     names.update(feature_graph_sources)
     names.update(snapshot_feature_names)
+    names.update(research_release_derived_features(research_release_kinds))
     return frozenset(names)
 
 
@@ -215,6 +290,7 @@ def _metadata_warnings(
     instruments: Sequence[object],
     *,
     available_features: frozenset[str],
+    decision_date: date,
 ) -> list[UniversePrecheckWarning]:
     """universe 条件依赖字段的缺失诊断(具名 warning,不抛错)。"""
     warnings: list[UniversePrecheckWarning] = []
@@ -259,17 +335,48 @@ def _metadata_warnings(
         )
 
     if spec.exclude_st:
-        warnings.append(
-            UniversePrecheckWarning(
-                code="universe_st_filter_inactive",
-                condition="exclude_st",
-                field="st_marker",
-                message=(
-                    "exclude_st 依赖 ST 标记;signal_engine 暂不提供 ST 判断"
-                    "(is_st 恒为 False),ST 过滤不生效"
-                ),
+        unknown = 0
+        approximate = 0
+        for item in instruments:
+            name, pit_exact = name_at_decision(item, decision_date)
+            if name is None:
+                unknown += 1
+            elif not pit_exact:
+                approximate += 1
+        if unknown == total:
+            warnings.append(
+                UniversePrecheckWarning(
+                    code="universe_st_filter_inactive",
+                    condition="exclude_st",
+                    field="st_marker",
+                    message=(
+                        "exclude_st 依赖 ST 标记;发布 instruments 无名称数据"
+                        "(name / name_history 均缺),ST 过滤不生效"
+                    ),
+                )
             )
-        )
+        elif unknown or approximate:
+            parts: list[str] = []
+            if approximate:
+                parts.append(
+                    f"{approximate}/{total} 个标的决策日名称无 name_history"
+                    "覆盖、回退当前名称近似判定"
+                )
+            if unknown:
+                parts.append(
+                    f"{unknown}/{total} 个标的缺名称数据、按非 ST 处理"
+                    "(ST 过滤对这些标的不生效)"
+                )
+            warnings.append(
+                UniversePrecheckWarning(
+                    code="universe_st_pit_approximate",
+                    condition="exclude_st",
+                    field="name_history",
+                    message=(
+                        f"exclude_st 按名称历史 PIT 判定;{';'.join(parts)}"
+                    ),
+                )
+            )
 
     if (
         spec.min_average_amount is not None
@@ -284,6 +391,31 @@ def _metadata_warnings(
                     f"min_average_amount={spec.min_average_amount} 依赖 "
                     "average_amount 特征;当前冻结快照/发布未提供该特征,"
                     "将按缺失过滤标的"
+                ),
+            )
+        )
+
+    if (
+        (spec.min_market_cap is not None or spec.max_market_cap is not None)
+        and "market_cap" not in available_features
+    ):
+        conditions = "/".join(
+            name
+            for name, value in (
+                ("min_market_cap", spec.min_market_cap),
+                ("max_market_cap", spec.max_market_cap),
+            )
+            if value is not None
+        )
+        warnings.append(
+            UniversePrecheckWarning(
+                code="universe_market_cap_unavailable",
+                condition=conditions,
+                field="market_cap",
+                message=(
+                    f"{conditions} 依赖 market_cap 特征"
+                    "(daily_metrics.total_market_cap,单位人民币元);"
+                    "当前冻结快照/发布未提供该特征,将按缺失过滤标的"
                 ),
             )
         )
@@ -332,13 +464,21 @@ def universe_filter_warnings(
     instruments: Sequence[object],
     *,
     available_features: frozenset[str],
+    decision_date: date,
 ) -> tuple[UniversePrecheckWarning, ...]:
     """运行时 / 静态共用的过滤降级 warning(待生效与否的具名声明)。
 
     ``signal_engine`` 在每次决策时用真实特征集合调用本函数并逐条
     ``logger.warning``,对齐快照链路的「降级为不生效」语义(issue #186)。
     """
-    return tuple(_metadata_warnings(spec, instruments, available_features=available_features))
+    return tuple(
+        _metadata_warnings(
+            spec,
+            instruments,
+            available_features=available_features,
+            decision_date=decision_date,
+        )
+    )
 
 
 def preview_universe_pool(
@@ -351,11 +491,15 @@ def preview_universe_pool(
     """评估发布 instruments 在给定决策日下的静态候选池。
 
     只对确定性元数据条件下结论(见模块 docstring);``price`` /
-    ``average_amount`` 等运行时数据按可满足处理,缺失只产生 warning。
+    ``average_amount`` / ``market_cap`` 等运行时数据按可满足处理
+    (特征不可解析时按缺失参与空池判定,对齐运行时行为),缺失只产生 warning。
     """
     candidates = static_universe_candidates(instruments, decision_date=decision_date)
     warnings = _metadata_warnings(
-        spec, instruments, available_features=available_features
+        spec,
+        instruments,
+        available_features=available_features,
+        decision_date=decision_date,
     )
 
     explicit = set(spec.explicit_symbols)
@@ -386,6 +530,12 @@ def preview_universe_pool(
         ):
             reasons.append(_REASON_AVERAGE_AMOUNT)
             missing_fields.add("average_amount")
+        if (
+            (spec.min_market_cap is not None or spec.max_market_cap is not None)
+            and "market_cap" not in available_features
+        ):
+            reasons.append(_REASON_MISSING_MARKET_CAP)
+            missing_fields.add("market_cap")
         if spec.exclude_suspended and candidate.suspended:
             reasons.append(_REASON_SUSPENDED)
         if spec.exclude_delisted and candidate.delisted:
@@ -443,11 +593,16 @@ def describe_empty_pool(
 
 
 __all__ = [
+    "RESEARCH_RELEASE_FEATURE_NAMES",
     "STANDARD_PRICE_FEATURE_NAMES",
     "UniversePoolPreview",
     "UniversePrecheckWarning",
     "describe_empty_pool",
+    "is_st_at_decision",
+    "is_st_name",
+    "name_at_decision",
     "preview_universe_pool",
+    "research_release_derived_features",
     "resolvable_feature_names",
     "static_universe_candidates",
     "universe_filter_warnings",

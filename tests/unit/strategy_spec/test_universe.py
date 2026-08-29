@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from finboard_backtest.strategy_spec import (
     MissingDataPolicy,
     RankingDirection,
@@ -105,3 +108,100 @@ def test_universe_fail_closed_for_incomplete_and_event_risk() -> None:
         "excluded_event",
         "data_completeness_below_minimum",
     }
+
+
+def test_market_cap_bounds_filter_and_missing_exclusion() -> None:
+    """issue #213:min/max_market_cap 过滤生效,缺市值按 missing_market_cap 排除。"""
+    spec = UniverseSpec(
+        markets=(Market.A_SHARE,),
+        asset_classes=(AssetClass.EQUITY,),
+        min_market_cap=1e10,
+        max_market_cap=5e10,
+    )
+    candidates = (
+        UniverseCandidate(
+            symbol="IN.SH",
+            market=Market.A_SHARE,
+            asset_class=AssetClass.EQUITY,
+            listing_days=100,
+            average_amount=1_000_000,
+            price=10,
+            market_cap=2e10,
+        ),
+        UniverseCandidate(
+            symbol="SMALL.SH",
+            market=Market.A_SHARE,
+            asset_class=AssetClass.EQUITY,
+            listing_days=100,
+            average_amount=1_000_000,
+            price=10,
+            market_cap=5e9,
+        ),
+        UniverseCandidate(
+            symbol="LARGE.SH",
+            market=Market.A_SHARE,
+            asset_class=AssetClass.EQUITY,
+            listing_days=100,
+            average_amount=1_000_000,
+            price=10,
+            market_cap=8e10,
+        ),
+        UniverseCandidate(
+            symbol="NOCAP.SH",
+            market=Market.A_SHARE,
+            asset_class=AssetClass.EQUITY,
+            listing_days=100,
+            average_amount=1_000_000,
+            price=10,
+            market_cap=None,
+        ),
+    )
+    decisions = {item.symbol: item for item in explain_universe(spec, candidates)}
+    assert decisions["IN.SH"].included is True
+    assert decisions["SMALL.SH"].reasons == ("market_cap_below_minimum",)
+    assert decisions["LARGE.SH"].reasons == ("market_cap_above_maximum",)
+    assert decisions["NOCAP.SH"].reasons == ("missing_market_cap",)
+
+
+def test_st_security_excluded_when_exclude_st_enabled() -> None:
+    """issue #213:exclude_st=True 时 ST 候选被排除;关闭后不排除。"""
+    candidate_args: dict[str, object] = {
+        "symbol": "600001.SH",
+        "market": Market.A_SHARE,
+        "asset_class": AssetClass.EQUITY,
+        "listing_days": 100,
+        "average_amount": 1_000_000,
+        "price": 10,
+        "is_st": True,
+    }
+    excluded = explain_universe(
+        UniverseSpec(
+            markets=(Market.A_SHARE,),
+            asset_classes=(AssetClass.EQUITY,),
+            exclude_st=True,
+        ),
+        (UniverseCandidate(**candidate_args),),  # type: ignore[arg-type]
+    )
+    assert excluded[0].included is False
+    assert excluded[0].reasons == ("st_security",)
+
+    allowed = explain_universe(
+        UniverseSpec(
+            markets=(Market.A_SHARE,),
+            asset_classes=(AssetClass.EQUITY,),
+            exclude_st=False,
+        ),
+        (UniverseCandidate(**candidate_args),),  # type: ignore[arg-type]
+    )
+    assert allowed[0].included is True
+
+
+def test_market_cap_bounds_validation_rejects_inverted_range() -> None:
+    """min_market_cap > max_market_cap 在契约校验期即拒绝。"""
+    with pytest.raises(ValidationError, match="min_market_cap"):
+        UniverseSpec(
+            markets=(Market.A_SHARE,),
+            asset_classes=(AssetClass.EQUITY,),
+            min_market_cap=5e10,
+            max_market_cap=1e10,
+        )
