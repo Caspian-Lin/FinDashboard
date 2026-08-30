@@ -23,6 +23,23 @@ from uuid import uuid4
 
 FACTOR_LAB_SCHEMA_VERSION = "v2"
 
+#: 用户自定义因子名前缀(issue #217)。沙箱执行产出的因子不注册进
+#: ``FACTOR_LAB_CATALOG``,以 ``u_`` 前缀与内置目录隔离——防重名、且让
+#: 校验层(观测/快照/编译期/入队门控)有统一判据。
+USER_FACTOR_PREFIX = "u_"
+
+
+def is_user_factor_name(name: str) -> bool:
+    """是否为沙箱用户自定义因子名(``u_`` 前缀,#217)。"""
+    return name.startswith(USER_FACTOR_PREFIX)
+
+
+def sandbox_factor_name(artifact_name: str) -> str:
+    """研究代码 artifact 名 → 可引用的用户因子名(统一加 ``u_`` 前缀)。"""
+    if is_user_factor_name(artifact_name):
+        return artifact_name
+    return USER_FACTOR_PREFIX + artifact_name
+
 
 class FactorRole(StrEnum):
     """因子在研究中的职责;风险暴露不得混入 alpha 分数。"""
@@ -530,7 +547,10 @@ class FeatureObservation:
     def __post_init__(self) -> None:
         if not self.symbol or not self.source or not self.source_version:
             raise ValueError("FeatureObservation 标的、来源和版本不能为空")
-        get_factor_definition(self.feature_name)
+        # 用户因子(u_ 前缀)来自沙箱执行,不在内置目录注册(#217);
+        # 可引用性由入队门控按 artifact status 把关,这里只做格式校验。
+        if not is_user_factor_name(self.feature_name):
+            get_factor_definition(self.feature_name)
         if not math.isfinite(self.value):
             raise ValueError("FeatureObservation.value 必须为有限数")
         _require_aware(self.observed_at, "observed_at")
@@ -568,10 +588,17 @@ class FeatureObservation:
 
 @dataclass(frozen=True, slots=True)
 class FeatureSnapshot:
-    """一个数据发布在单一决策时点的不可变特征快照。"""
+    """一个数据发布在单一决策时点的不可变特征快照。
+
+    数据锚定二选一(#217):常规发布快照填 ``dataset_release_id``
+    (checksum 锚定该发布);沙箱因子快照 ``dataset_release_id=None``、
+    填 ``source_run_id`` 锚定产出它的 ``research_code_runs`` 记录,
+    ``dataset_release_checksum`` 此时承载沙箱数据挂载的 manifest
+    checksum(物理 PIT 隔离的数据面锚点)。
+    """
 
     snapshot_id: str
-    dataset_release_id: str
+    dataset_release_id: str | None
     dataset_release_checksum: str
     decision_at: datetime
     published_at: datetime
@@ -583,6 +610,7 @@ class FeatureSnapshot:
     observations: tuple[FeatureObservation, ...]
     checksum: str
     issues: tuple[str, ...] = ()
+    source_run_id: str | None = None
     _payload_cache: dict[str, object] | None = field(
         default=None,
         init=False,
@@ -591,10 +619,12 @@ class FeatureSnapshot:
     )
 
     def __post_init__(self) -> None:
-        if not self.snapshot_id or not self.dataset_release_id:
-            raise ValueError("snapshot_id/dataset_release_id 不能为空")
+        if not self.snapshot_id:
+            raise ValueError("snapshot_id 不能为空")
+        if self.dataset_release_id is None and self.source_run_id is None:
+            raise ValueError("dataset_release_id 与 source_run_id 必须提供其一")
         if not self.dataset_release_checksum or not self.code_version:
-            raise ValueError("数据发布 checksum 和 code_version 必填")
+            raise ValueError("数据锚定 checksum 和 code_version 必填")
         _require_aware(self.decision_at, "decision_at")
         _require_aware(self.published_at, "published_at")
         keys: set[tuple[str, str]] = set()
@@ -611,7 +641,8 @@ class FeatureSnapshot:
         if not self.observations:
             raise ValueError("FeatureSnapshot 不能为空")
         for name, window in self.calculation_windows.items():
-            get_factor_definition(name)
+            if not is_user_factor_name(name):
+                get_factor_definition(name)
             if window <= 0:
                 raise ValueError("calculation window 必须大于 0")
 
@@ -637,6 +668,9 @@ class FeatureSnapshot:
             "checksum": self.checksum,
             "issues": list(self.issues),
         }
+        # 沙箱快照锚定 run;发布快照不输出该字段,旧 payload checksum 不变。
+        if self.source_run_id is not None:
+            payload["source_run_id"] = self.source_run_id
         object.__setattr__(self, "_payload_cache", payload)
         return payload
 
@@ -652,7 +686,7 @@ class FeatureSnapshot:
         )
         snapshot = cls(
             snapshot_id=str(raw["snapshot_id"]),
-            dataset_release_id=str(raw["dataset_release_id"]),
+            dataset_release_id=_optional_text(raw.get("dataset_release_id")),
             dataset_release_checksum=str(raw["dataset_release_checksum"]),
             decision_at=datetime.fromisoformat(str(raw["decision_at"])),
             published_at=datetime.fromisoformat(str(raw["published_at"])),
@@ -684,6 +718,7 @@ class FeatureSnapshot:
             issues=tuple(
                 str(item) for item in cast(list[object], raw.get("issues", []))
             ),
+            source_run_id=_optional_text(raw.get("source_run_id")),
         )
         if verify_checksum and _feature_snapshot_checksum(snapshot) != snapshot.checksum:
             raise ArtifactIntegrityError("FeatureSnapshot checksum 不一致")
@@ -708,7 +743,7 @@ class SignalNotValidatedError(FactorLabError):
 
 def build_feature_snapshot(
     *,
-    dataset_release_id: str,
+    dataset_release_id: str | None,
     dataset_release_checksum: str,
     decision_at: datetime,
     code_version: str,
@@ -718,8 +753,13 @@ def build_feature_snapshot(
     neutralization: dict[str, tuple[str, ...]] | None = None,
     issues: tuple[str, ...] = (),
     published_at: datetime | None = None,
+    source_run_id: str | None = None,
 ) -> FeatureSnapshot:
-    """构建确定性快照并机器执行 PIT 门。"""
+    """构建确定性快照并机器执行 PIT 门。
+
+    沙箱因子快照传 ``dataset_release_id=None`` + ``source_run_id``
+    (#217),``dataset_release_checksum`` 承载挂载 manifest checksum。
+    """
 
     _require_aware(decision_at, "decision_at")
     ordered = tuple(
@@ -742,6 +782,7 @@ def build_feature_snapshot(
         observations=ordered,
         checksum="pending",
         issues=issues,
+        source_run_id=source_run_id,
     )
     checksum = _feature_snapshot_checksum(provisional)
     result = replace(
@@ -1255,6 +1296,7 @@ def _optional_text(value: object) -> str | None:
 __all__ = [
     "FACTOR_LAB_CATALOG",
     "FACTOR_LAB_SCHEMA_VERSION",
+    "USER_FACTOR_PREFIX",
     "ArtifactIntegrityError",
     "FactorDefinition",
     "FactorExperiment",
@@ -1277,6 +1319,8 @@ __all__ = [
     "build_feature_snapshot",
     "factor_lab_catalog",
     "get_factor_definition",
+    "is_user_factor_name",
     "new_factor_experiment",
+    "sandbox_factor_name",
     "update_factor_experiment",
 ]
