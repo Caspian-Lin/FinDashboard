@@ -36,12 +36,18 @@ def test_registry_adapts_issue_60_to_64_and_ma_cross() -> None:
         "convertible_double_low",
         "futures_tsmom",
         "ma_cross",
+        # issue #218:沙箱策略代码(decide → 目标权重)。
+        "user_code",
     }
     assert {item.issue for item in capabilities if 60 <= item.issue <= 64} == set(
         range(60, 65)
     )
 
     for capability in capabilities:
+        if not capability.supports_no_code_template:
+            # user_code 无 web 无代码模板(代码本体走 #215 MCP 通道)。
+            assert capability.kind == "user_code"
+            continue
         spec = _template(capability.kind)
         plan = compile_registered_strategy_spec(spec)
         assert spec.compatibility is not None

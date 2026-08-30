@@ -30,6 +30,9 @@ from finboard_api.research_run_schemas import (
 from finboard_app.research_run_store import SqlAlchemyResearchRunStore
 from finboard_backtest.research_code import (
     active_user_factor_names,
+    active_user_strategy_commits,
+    freeze_user_code_commit,
+    user_code_reference_gate_error,
     user_factor_reference_gate_error,
 )
 from finboard_backtest.research_run import (
@@ -144,6 +147,24 @@ async def queue_research_run(
     )
     if user_gate_error is not None:
         raise HTTPException(status_code=422, detail=user_gate_error)
+    # issue #218:user_code 策略入队门控 —— artifact active、commit 一致、
+    # 沙箱已启用、single_shot 决策时点可用(REST+MCP 共用同一函数);放行时
+    # 把 active commit 冻结进 spec(manifest input_checksum 覆盖代码版本)。
+    if spec.code_artifact is not None:
+        from finboard_app.config import load_settings
+
+        active_strategies = await active_user_strategy_commits(session)
+        code_gate_error = user_code_reference_gate_error(
+            code_artifact_name=spec.code_artifact.name,
+            code_artifact_commit=spec.code_artifact.commit,
+            active_user_strategies=active_strategies,
+            sandbox_enabled=load_settings().research_sandbox_enabled,
+            frozen_snapshot_count=len(snapshots),
+            parameters=cast(dict[str, JsonValue] | None, body.parameters),
+        )
+        if code_gate_error is not None:
+            raise HTTPException(status_code=422, detail=code_gate_error)
+        spec = freeze_user_code_commit(spec, active_strategies)
     release_ids = {release.release_id for release in releases}
     for snapshot in snapshots:
         # issue #217:沙箱快照(dataset_release_id=None)按其锚定 run 冻结

@@ -287,8 +287,8 @@ class FeatureNode(NoCodeModel):
 
 
 class FeatureGraph(NoCodeModel):
-    nodes: tuple[FeatureNode, ...] = Field(min_length=1)
-    outputs: tuple[Identifier, ...] = Field(min_length=1)
+    nodes: tuple[FeatureNode, ...]
+    outputs: tuple[Identifier, ...]
 
     @model_validator(mode="after")
     def validate_graph(self) -> FeatureGraph:
@@ -405,7 +405,7 @@ class SignalConflictPolicy(StrEnum):
 
 
 class SignalRules(NoCodeModel):
-    rules: tuple[SignalRule, ...] = Field(min_length=1)
+    rules: tuple[SignalRule, ...]
     conflict_policy: SignalConflictPolicy = SignalConflictPolicy.HIGHEST_PRIORITY
     default_action: SignalAction = SignalAction.NEUTRAL
 
@@ -590,6 +590,19 @@ class LegacyCompatibility(NoCodeModel):
     legacy_config_version: str = Field(min_length=1, max_length=32)
 
 
+class StrategyCodeArtifactRef(NoCodeModel):
+    """``user_code`` 策略引用的研究代码 artifact(issue #218)。
+
+    只携带**引用**(name + 可选 commit),不携带任何源码 —— web 通道的
+    无代码边界不变:代码本体只能经 ``finboard_research_code_submit``
+    (MCP 通道,#215)进入独立 git 仓库。``commit`` 省略 = 引用 active
+    版本(入队期解析冻结进 manifest;指定历史 commit 须先 rollback)。
+    """
+
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    commit: str | None = Field(default=None, min_length=8, max_length=64)
+
+
 class ResearchStrategySpec(NoCodeModel):
     """研究策略的完整闭环声明。"""
 
@@ -606,9 +619,29 @@ class ResearchStrategySpec(NoCodeModel):
     execution_model: ExecutionModel
     validation_plan: ValidationPlanSpec
     compatibility: LegacyCompatibility | None = None
+    # issue #218:user_code 策略的代码 artifact 引用(其余 kind 必须为 None)。
+    code_artifact: StrategyCodeArtifactRef | None = None
 
     @model_validator(mode="after")
     def validate_cross_references(self) -> ResearchStrategySpec:
+        # issue #218:user_code 的目标权重由沙箱 decide 产出,feature_graph/
+        # signal_rules 允许为空(特征由代码自行从挂载数据计算);其余 kind
+        # 保持既有非空契约(原 Field(min_length=1) 移到这里统一执行)。
+        if self.strategy_kind == "user_code":
+            if self.code_artifact is None:
+                raise ValueError(
+                    "user_code 策略必须声明 code_artifact(研究代码 artifact 引用,"
+                    "经 finboard_research_code_submit 提交 kind=strategy)"
+                )
+        else:
+            if self.code_artifact is not None:
+                raise ValueError("code_artifact 仅用于 user_code 策略")
+            if not self.feature_graph.nodes:
+                raise ValueError("feature_graph.nodes 不能为空")
+            if not self.feature_graph.outputs:
+                raise ValueError("feature_graph.outputs 不能为空")
+            if not self.signal_rules.rules:
+                raise ValueError("signal_rules.rules 不能为空")
         feature_ids = {node.node_id for node in self.feature_graph.nodes}
         for rule in self.signal_rules.rules:
             references = {rule.feature_id}
@@ -668,6 +701,7 @@ __all__ = [
     "SignalConflictPolicy",
     "SignalRule",
     "SignalRules",
+    "StrategyCodeArtifactRef",
     "StrategySpecError",
     "UniverseRanking",
     "UniverseSpec",

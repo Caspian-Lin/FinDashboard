@@ -169,6 +169,43 @@ class TestBuildDataMount:
         assert manifest["symbols"] == ["600000.SH"]
         assert len(mount.manifest_checksum) == 64
 
+    async def test_strategy_mount_manifest_v2(
+        self, tmp_path: Path
+    ) -> None:
+        """issue #218:策略协议挂载清单携带权重回显与约束视图(checksum 覆盖)。"""
+        provider = _bars_provider(
+            days=(date(2024, 6, 1), date(2024, 6, 2), date(2024, 6, 3))
+        )
+        mount = await build_data_mount(
+            providers=[provider],
+            decision_at=_DECISION_AT,
+            out_root=tmp_path / "data",
+            current_weights={"600000.SH": 0.42},
+            strategy_constraints={
+                "max_weight_per_asset": 0.2,
+                "long_only": True,
+                "max_gross_exposure": 1.0,
+                "min_cash_buffer": 0.05,
+            },
+        )
+        manifest = json.loads(mount.manifest_path.read_text(encoding="utf-8"))
+        assert manifest["version"] == 2
+        assert manifest["current_weights"] == {"600000.SH": 0.42}
+        assert manifest["strategy_constraints"]["max_weight_per_asset"] == 0.2
+        assert mount.current_weights == {"600000.SH": 0.42}
+        assert len(mount.manifest_checksum) == 64
+
+    async def test_factor_mount_omits_v2_fields(self, tmp_path: Path) -> None:
+        provider = _bars_provider(days=(date(2024, 6, 2),))
+        mount = await build_data_mount(
+            providers=[provider],
+            decision_at=_DECISION_AT,
+            out_root=tmp_path / "data",
+        )
+        manifest = json.loads(mount.manifest_path.read_text(encoding="utf-8"))
+        assert "current_weights" not in manifest
+        assert "strategy_constraints" not in manifest
+
     async def test_empty_daily_and_financial_files_removed(
         self, tmp_path: Path
     ) -> None:

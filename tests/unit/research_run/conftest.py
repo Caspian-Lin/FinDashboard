@@ -51,12 +51,38 @@ def manifest_factory():
             "mean_reversion": ("etf:index",),
             "convertible_double_low": ("convertible",),
             "futures_tsmom": ("futures",),
+            "user_code": ("stock",),
         }
-        spec = build_strategy_template(
-            kind,
-            strategy_id=f"{kind}_research",
-            dataset_release_ids=("release-v1",),
-        )
+        if kind == "user_code":
+            # issue #218:user_code 无 web 无代码模板;构造最小引用规格
+            # (空 graph/rules + code_artifact 引用)。
+            template = build_strategy_template(
+                "multi_factor",
+                strategy_id=f"{kind}_research",
+                dataset_release_ids=("release-v1",),
+            )
+            from finboard_backtest.strategy_spec.contracts import (
+                FeatureGraph,
+                SignalRules,
+                StrategyCodeArtifactRef,
+            )
+
+            spec = template.model_copy(
+                update={
+                    "strategy_kind": "user_code",
+                    "feature_graph": FeatureGraph(nodes=(), outputs=()),
+                    "signal_rules": SignalRules(rules=()),
+                    "code_artifact": StrategyCodeArtifactRef(
+                        name="mean_reversion_zscore"
+                    ),
+                }
+            )
+        else:
+            spec = build_strategy_template(
+                kind,
+                strategy_id=f"{kind}_research",
+                dataset_release_ids=("release-v1",),
+            )
         return ResearchRunManifest(
             run_id=run_id,
             idempotency_key=idempotency_key,

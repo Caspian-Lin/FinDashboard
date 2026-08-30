@@ -124,6 +124,21 @@ _REGISTRY: dict[str, StrategyCapability] = {
         asset_classes=(AssetClass.EQUITY,),
         supports_short=False,
     ),
+    "user_code": StrategyCapability(
+        kind="user_code",
+        name="用户代码策略(沙箱 decide)",
+        description=(
+            "agent 提交的策略代码经沙箱逐决策日执行 decide(ctx) → 目标权重,"
+            "输出复用统一组合风控/资金可行性/撮合管线;代码引用 research_code "
+            "artifact(kind=strategy,须 active)。"
+        ),
+        issue=218,
+        asset_classes=(AssetClass.EQUITY,),
+        supports_short=False,
+        # 代码本体走 MCP 研究代码通道(#215),web 无代码模板不适用。
+        supports_no_code_template=False,
+        produces_target_weights=True,
+    ),
 }
 
 
@@ -144,12 +159,14 @@ def compile_registered_strategy_spec(
     disabled_factors: frozenset[str] = frozenset(),
     available_dataset_release_ids: frozenset[str] | None = None,
     user_factor_sources: Collection[str] = frozenset(),
+    user_code_sources: Collection[str] = frozenset(),
 ) -> ResolvedStrategyPlan:
     plan = compile_strategy_spec(
         raw,
         disabled_factors=disabled_factors,
         available_dataset_release_ids=available_dataset_release_ids,
         user_factor_sources=user_factor_sources,
+        user_code_sources=user_code_sources,
     )
     capability = get_strategy_capability(plan.spec.strategy_kind)
     if not set(plan.spec.universe.asset_classes).issubset(capability.asset_classes):

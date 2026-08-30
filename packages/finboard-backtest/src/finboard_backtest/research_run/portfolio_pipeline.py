@@ -816,6 +816,39 @@ def _mark_current_book(
     return current, weights, equity
 
 
+def _current_weights_view(
+    state: _PipelineState,
+    *,
+    prices: Mapping[str, float],
+    lot_info: Mapping[str, AssetLotInfo],
+) -> dict[str, float]:
+    """只读当前权重视图(issue #218 user_code 权重回显)。
+
+    与 :func:`_mark_current_book` 同一数学(持仓市值 / 权益),但不更新
+    ``high_water_price``、不构造快照、权益非正时返回空(正式决策路径随后
+    由 ``_mark_current_book`` 以 fail-closed 拒绝)。回显发生在沙箱 decide
+    之前 —— decide 看到的是上一决策成交后的真实账本状态。
+    """
+    per_symbol_value: dict[str, Decimal] = {}
+    market_value = Decimal()
+    for symbol, book in state.positions.items():
+        if book.quantity <= 0:
+            continue
+        if symbol not in prices or symbol not in lot_info:
+            continue
+        multiplier = Decimal(str(lot_info[symbol].multiplier))
+        value = book.quantity * Decimal(str(prices[symbol])) * multiplier
+        per_symbol_value[symbol] = value
+        market_value += value
+    equity = state.cash + market_value
+    if equity <= 0:
+        return {}
+    return {
+        symbol: float(value / equity)
+        for symbol, value in per_symbol_value.items()
+    }
+
+
 def _execute_research_plan(
     *,
     manifest: ResearchRunManifest,

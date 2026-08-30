@@ -440,7 +440,7 @@ L3 沙箱路线第二环:让已提交的因子代码「能跑且跑不坏」。�
 - 新包 `finboard-research-kit`(容器侧唯一 FinBoard 代码:协议 + harness
   `python -m finboard_research_kit.harness`);镜像 `docker/research-sandbox/`
   (pinned python + pandas/numpy/polars/pyarrow + kit,非 root 用户),
-  **tag 与 kit `__version__` 绑定**(默认 `finboard-research-sandbox:0.1.0`),
+  **tag 与 kit `__version__` 绑定**(默认 `finboard-research-sandbox:0.2.0`),
   CI 单独 job 构建并冒烟(不推 registry);run 记录镜像 digest。
 - 持久化:`research_code_runs` 表(`RCR-` 前缀)持有三向引用 code commit ×
   dataset release × 输出 scores checksum;stdout/stderr/退出码/超时/OOM/
@@ -461,6 +461,44 @@ L3 沙箱路线第二环:让已提交的因子代码「能跑且跑不坏」。�
   断网 / 只读挂载 / 超时 / OOM kill / PIT 清单断言。
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 边界段已同步。
+
+### ✅ #218 策略代码执行与回测接入(逐日决策函数,已完成)
+
+L3 沙箱路线第四环:agent 编写的**策略**代码进入回测。用户决策
+(2026-08-28):v1 只做逐日决策函数 `decide(ctx) → 目标权重`,不做事件
+驱动 on_bar(日内形态需会话式流协议 + 订单意图语义 + 逐 bar 审计,
+另行开 issue)。纯离线研究域,不触实盘。
+
+- **协议 v1(kit 0.2.0)**:`StrategyContext` = PIT 数据视图 +
+  **当前权重回显**(引擎回显上一决策成交后的实际持仓市值占比)+ 约束
+  只读视图(`StrategyConstraints`)+ params;输出 `targets`({symbol:
+  权重},和可 < 1 持现金、可空观望)+ 可选 meta。harness `--mode strategy`
+  产出 `targets.parquet`。
+- **规格**:`strategy_kind=user_code` + `code_artifact {name, commit?}`
+  (StrategyCodeArtifactRef;只引用不携带代码,web 无代码边界不变);
+  feature_graph/signal_rules 允许为空;registry 注册 capability
+  (EQUITY,无 web 模板)。
+- **执行**:`UserCodeStrategyAdapter` 与 multi_factor 共用
+  `build_decision_load_contexts`(决策日推导/universe/价格/协方差同口径);
+  每决策日经 `StrategySandboxCaller`(`research_sandbox/strategy_exec.py`,
+  与 #216 共用 runner/data_mount/静态校验/失败分类)跑一次性容器
+  (`--mode strategy`,挂载清单 v2 含 current_weights +
+  strategy_constraints),不落 research_code_runs 行(provenance 由
+  research run report 归档)。
+- **targets 管线**:权重 → NormalizedSignal(score=权重,池外/缺执行元数据
+  丢弃记 warning)→ `PortfolioPipelineAdapter` 新增 `direct_weights`
+  分配路径(不重缩放;负权重/超上限由约束投影逐项截断审计;equal_weight
+  兜底禁用)—— 复用 #91 全部约束/资金可行性/撮合/账本。
+- **门控**:编译期 `compile_strategy_spec(user_code_sources=...)`;
+  入队期 `user_code_reference_gate_error`(REST+MCP 共用:active/commit
+  一致/沙箱开关/single_shot 缺快照),放行时 active commit 冻结进
+  manifest(input_checksum 覆盖代码版本)。
+- **report**:`ResearchRunReport.sandbox_provenance` 段(code commit +
+  镜像 digest + 逐决策 targets checksum);与 multi_factor 同屏可比。
+- 配置:无新增(reuse research_sandbox_*);镜像 tag 升 0.2.0(kit 版本
+  三处同步)。回滚 = kit 0.1.0 + 移除 registry/dispatch/gate;无新工具名。
+
+`_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md / README 已同步。
 
 ### ✅ #217 沙箱因子接入快照/选股管线与 screen 指标(已完成)
 
@@ -500,3 +538,41 @@ L3 沙箱路线第三环:把 agent 自定义因子变成「可被选股引用的
   工具总数 123 不变。
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 边界段已同步。
+
+### ✅ #218 策略代码执行与回测接入(逐日决策函数,已完成)
+
+L3 沙箱路线第四环:agent 编写的**策略**代码进入回测。用户决策
+(2026-08-28):v1 只做逐日决策函数 `decide(ctx) → 目标权重`,不做事件
+驱动 on_bar(日内形态需会话式流协议 + 订单意图语义 + 逐 bar 审计,
+另行开 issue)。纯离线研究域,不触实盘。
+
+- **协议 v1(kit 0.2.0)**:`StrategyContext` = PIT 数据视图 +
+  **当前权重回显**(引擎回显上一决策成交后的实际持仓市值占比)+ 约束
+  只读视图(`StrategyConstraints`)+ params;输出 `targets`({symbol:
+  权重},和可 < 1 持现金、可空观望)+ 可选 meta。harness `--mode strategy`
+  产出 `targets.parquet`。
+- **规格**:`strategy_kind=user_code` + `code_artifact {name, commit?}`
+  (StrategyCodeArtifactRef;只引用不携带代码,web 无代码边界不变);
+  feature_graph/signal_rules 允许为空;registry 注册 capability
+  (EQUITY,无 web 模板)。
+- **执行**:`UserCodeStrategyAdapter` 与 multi_factor 共用
+  `build_decision_load_contexts`(决策日推导/universe/价格/协方差同口径);
+  每决策日经 `StrategySandboxCaller`(`research_sandbox/strategy_exec.py`,
+  与 #216 共用 runner/data_mount/静态校验/失败分类)跑一次性容器
+  (`--mode strategy`,挂载清单 v2 含 current_weights +
+  strategy_constraints),不落 research_code_runs 行(provenance 由
+  research run report 归档)。
+- **targets 管线**:权重 → NormalizedSignal(score=权重,池外/缺执行元数据
+  丢弃记 warning)→ `PortfolioPipelineAdapter` 新增 `direct_weights`
+  分配路径(不重缩放;负权重/超上限由约束投影逐项截断审计;equal_weight
+  兜底禁用)—— 复用 #91 全部约束/资金可行性/撮合/账本。
+- **门控**:编译期 `compile_strategy_spec(user_code_sources=...)`;
+  入队期 `user_code_reference_gate_error`(REST+MCP 共用:active/commit
+  一致/沙箱开关/single_shot 缺快照),放行时 active commit 冻结进
+  manifest(input_checksum 覆盖代码版本)。
+- **report**:`ResearchRunReport.sandbox_provenance` 段(code commit +
+  镜像 digest + 逐决策 targets checksum);与 multi_factor 同屏可比。
+- 配置:无新增(reuse research_sandbox_*);镜像 tag 升 0.2.0(kit 版本
+  三处同步)。回滚 = kit 0.1.0 + 移除 registry/dispatch/gate;无新工具名。
+
+`_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md / README 已同步。

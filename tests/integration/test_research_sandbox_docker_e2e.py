@@ -6,7 +6,7 @@
 
 前置:Docker Desktop 运行 + 镜像已构建(仓库根)::
 
-    docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.1.0 .
+    docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.2.0 .
 
 镜像 tag 可经 ``FINBOARD_SANDBOX_IMAGE`` 覆盖。
 
@@ -23,13 +23,19 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
+from finboard_backtest.research_run.contracts import (
+    FrozenArtifactRef,
+    ResearchRunManifest,
+    stable_checksum,
+)
 from finboard_backtest.research_sandbox.data_mount import build_data_mount
 from finboard_backtest.research_sandbox.runner import (
     ResearchSandboxRunner,
@@ -45,7 +51,7 @@ pytestmark = [
     ),
 ]
 
-_IMAGE = os.getenv("FINBOARD_SANDBOX_IMAGE", "finboard-research-sandbox:0.1.0")
+_IMAGE = os.getenv("FINBOARD_SANDBOX_IMAGE", "finboard-research-sandbox:0.2.0")
 _DECISION_AT = datetime(2024, 6, 3, 7, 0, tzinfo=UTC)
 _SYMBOLS = ["600000.SH", "000001.SZ"]
 
@@ -333,3 +339,352 @@ class TestSandboxE2E:
         )
         result = await _run(tmp_path, memory_mb=512, timeout_seconds=180.0)
         assert result.oom_killed or result.exit_code == 137
+
+
+# ---- 策略协议 E2E(issue #218)------------------------------------------------
+
+
+_MEAN_REVERSION_ZSCORE = '''
+import numpy as np
+
+
+def decide(ctx):
+    """布林带式均值回归:20 日 zscore 超卖入场,回归带内持有(权重回显)。"""
+    window = int(ctx.params.get("zscore_window", 20))
+    entry_z = float(ctx.params.get("entry_z", 2.0))
+    exit_z = float(ctx.params.get("exit_z", 0.5))
+    cap = float(ctx.constraints.max_weight_per_asset)
+    held = dict(ctx.current_weights)
+    targets = {}
+    for symbol in ctx.symbols:
+        closes = ctx.bars_for(symbol)["close"].to_numpy()
+        if len(closes) < window:
+            continue
+        seg = closes[-window:]
+        std = float(np.std(seg))
+        if std <= 0.0:
+            continue
+        z = float((seg[-1] - float(np.mean(seg))) / std)
+        if z <= -entry_z:
+            targets[symbol] = cap
+        elif symbol in held and z < exit_z:
+            targets[symbol] = float(held[symbol])
+    return targets
+'''
+
+
+class TestStrategyDecideContainer:
+    """单容器 strategy.decide:数值与本地参照一致 + 权重回显进决策。"""
+
+    async def test_mean_reversion_decide_matches_reference(
+        self, tmp_path: Path
+    ) -> None:
+        import numpy as np
+
+        provider, frame = _mount_provider()
+        # 000001.SZ 单调下行(z 高度负)→ 超卖入场;600000.SH 上行 → 不持有。
+        await build_data_mount(
+            providers=[provider],
+            decision_at=_DECISION_AT,
+            out_root=tmp_path / "data",
+            current_weights={"000001.SZ": 0.3},
+            strategy_constraints={
+                "max_weight_per_asset": 0.2,
+                "long_only": True,
+                "max_gross_exposure": 1.0,
+                "min_cash_buffer": 0.05,
+            },
+        )
+        code = tmp_path / "code"
+        code.mkdir(parents=True, exist_ok=True)
+        (code / "strategy.py").write_text(_MEAN_REVERSION_ZSCORE, encoding="utf-8")
+        (code / "manifest.toml").write_text(
+            '[manifest]\nentry = "strategy.decide"\n\n[manifest.params]\n'
+            "zscore_window = 20\nentry_z = 2.0\nexit_z = 0.5\n",
+            encoding="utf-8",
+        )
+        result = await _run(tmp_path, mode="strategy")
+        assert result.exit_code == 0, result.stderr
+
+        targets = pd.read_parquet(tmp_path / "out" / "targets.parquet")
+        weights = dict(zip(targets["symbol"], targets["weight"], strict=True))
+        closes_b = frame[frame["symbol"] == "000001.SZ"]["close"].to_numpy()
+        seg = closes_b[-20:]
+        z_b = (seg[-1] - seg.mean()) / np.std(seg)
+        # 线性温和下行:z 落在 (-entry_z, exit_z) 回归带内 → 持有分支,
+        # 目标 = 引擎回显的当前权重(跨日路径依赖由此覆盖)。
+        assert -2.0 < z_b < 0.5
+        assert weights.get("600000.SH") is None  # 上行且未持有 → 无目标
+        assert weights.get("000001.SZ") == pytest.approx(0.3)  # 权重回显
+        metrics = json.loads(
+            (tmp_path / "out" / "metrics.json").read_text(encoding="utf-8")
+        )
+        assert metrics["mode"] == "strategy"
+        assert metrics["n_positive"] == 1
+        assert metrics["gross_exposure"] == pytest.approx(0.3)
+
+
+@dataclass
+class _Provider4Strategy:
+    """signal_engine 决策加载 + data_mount 挂载双面可用的 stub 发布。"""
+
+    symbols: tuple[str, ...]
+    days: list[date]
+    closes: dict[str, dict[date, float]]
+    release: Any = None
+
+    def __post_init__(self) -> None:
+        from tests.integration.test_research_run_signal_engine_worker import (
+            _StubInstrument,
+            _StubRelease,
+        )
+
+        self.release = _StubRelease(
+            "frozen-release-multi",
+            tuple(_StubInstrument(code=s) for s in self.symbols),
+            start_date=self.days[0],
+            end_date=self.days[-1],
+        )
+
+    def _pit_bars(self, symbol: str, decision_at: datetime):
+        # PIT 门控:只返回 decision_at 之前的行(data_mount 还有二层防线)。
+        cutoff = decision_at.date()
+        return [
+            _PITBarTz(code=symbol, day=day, close=self.closes[symbol][day])
+            for day in self.days
+            if day <= cutoff and day in self.closes[symbol]
+        ]
+
+    async def fetch_point_in_time_bars(
+        self, symbol, period, start, end, *, decision_at, adjust="qfq"
+    ):
+        return self._pit_bars(symbol.code, decision_at)
+
+    async def fetch_point_in_time_prices(
+        self, symbol, period, start, end, *, decision_at, adjust="qfq"
+    ):
+        # signal_engine 价格特征消费 worker 模块的 PIT 价格形状。
+        from tests.integration.test_research_run_signal_engine_worker import (
+            _StubPointInTimePrice,
+        )
+
+        return [
+            _StubPointInTimePrice(
+                timestamp=datetime(d.year, d.month, d.day, tzinfo=UTC),
+                close=Decimal(str(self.closes[symbol.code][d])),
+                available_at=datetime(d.year, d.month, d.day, tzinfo=UTC),
+            )
+            for d in self.days
+            if d <= end and d in self.closes[symbol.code]
+        ]
+
+    async def fetch_bars(self, symbol, period, start, end, *, adjust="qfq"):
+        # 交易日历推断消费 worker 模块的轻量 Bar 形状(close + timestamp)。
+        from tests.integration.test_research_run_signal_engine_worker import (
+            _StubBar,
+        )
+
+        return [
+            _StubBar(
+                close=Decimal(str(self.closes[symbol.code][d])),
+                timestamp=datetime(d.year, d.month, d.day, tzinfo=UTC),
+            )
+            for d in self.days
+            if d <= end and d in self.closes[symbol.code]
+        ]
+
+
+@dataclass
+class _PITBarTz:
+    """tz-aware PIT bar(data_mount OHLCV 列 + 价格特征 observed_at 均要求带时区)。"""
+
+    code: str
+    day: date
+    close: float
+
+    @property
+    def bar(self) -> _Bar:
+        ts = datetime(self.day.year, self.day.month, self.day.day, tzinfo=UTC)
+        return _Bar(
+            symbol=_Sym(self.code),
+            timestamp=ts,
+            open=self.close * 0.995,
+            high=self.close * 1.01,
+            low=self.close * 0.99,
+            close=self.close,
+            volume=10000.0,
+            amount=self.close * 10000.0,
+        )
+
+
+def _group_by_month(days: list[date]) -> dict[int, list[date]]:
+    out: dict[int, list[date]] = {}
+    for day in days:
+        out.setdefault(day.month, []).append(day)
+    return out
+
+
+def _user_code_e2e_manifest(commit: str) -> ResearchRunManifest:
+    import hashlib
+    from decimal import Decimal
+
+    from finboard_backtest.research_run.contracts import ResearchRunManifest
+    from finboard_backtest.strategy_spec import build_strategy_template
+    from finboard_backtest.strategy_spec.contracts import (
+        FeatureGraph,
+        SignalRules,
+        StrategyCodeArtifactRef,
+    )
+
+    spec = build_strategy_template(
+        "multi_factor",
+        strategy_id="user_code_e2e",
+        dataset_release_ids=("frozen-release-multi",),
+    ).model_copy(
+        update={
+            "strategy_kind": "user_code",
+            "feature_graph": FeatureGraph(nodes=(), outputs=()),
+            "signal_rules": SignalRules(rules=()),
+            "code_artifact": StrategyCodeArtifactRef(
+                name="mean_reversion_zscore", commit=commit
+            ),
+        }
+    )
+    digest = hashlib.sha256(b"user-code-e2e").hexdigest()[:24]
+    return ResearchRunManifest(
+        run_id=f"RR-{digest}",
+        idempotency_key="user-code-e2e",
+        strategy_spec=spec,
+        strategy_spec_checksum=stable_checksum(spec.canonical_payload()),
+        dataset_releases=(
+            FrozenArtifactRef(
+                artifact_id="frozen-release-multi",
+                version="v1",
+                checksum="a" * 64,
+                capabilities=("stock",),
+            ),
+        ),
+        parameters={"rebalance_frequency": "monthly"},
+        code_version="abcdef0123456789",
+        initial_capital=Decimal("200000"),
+        requested_by="agent:e2e",
+    )
+
+
+class TestUserCodeStrategyMultiPeriodE2E:
+    """验收里程碑:agent 提交的均值回归策略经真实容器在 multi_period 跑通。
+
+    真实链路:git 提交(#215)→ StrategySandboxCaller(每决策日一个真实
+    一次性容器,PIT 挂载 + 权重回显)→ #91 组合管线 → Coordinator →
+    完整 report(含 sandbox_provenance 与 equity_curve)。
+    """
+
+    async def test_agent_mean_reversion_full_run(self, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
+        from finboard_backtest.research_code import ResearchCodeService
+        from finboard_backtest.research_run.contracts import ResearchRunStatus
+        from finboard_backtest.research_run.runner import (
+            ResearchRunCoordinator,
+        )
+        from finboard_backtest.research_run.store import InMemoryResearchRunStore
+        from finboard_backtest.research_run.user_code_engine import (
+            UserCodeStrategyAdapter,
+        )
+        from tests.integration.test_research_run_signal_engine_worker import (
+            _multi_period_calendar,
+        )
+
+        # 1. agent 提交策略代码到真实 bare git 仓库。
+        repo_path = tmp_path / "research_code.git"
+        service = ResearchCodeService.from_path(str(repo_path))
+        submitted = service.submit(
+            kind="strategy",
+            name="mean_reversion_zscore",
+            files={
+                "strategy.py": _MEAN_REVERSION_ZSCORE,
+                "manifest.toml": (
+                    '[manifest]\nentry = "strategy.decide"\n\n[manifest.params]\n'
+                    "zscore_window = 20\nentry_z = 2.0\nexit_z = 0.5\n"
+                ),
+            },
+            author="agent:e2e",
+        )
+
+        # 2. 多期价格序列:每月末一部分标的连跌(≥4 个 z <= -2,风险贡献可行)。
+        symbols = ("A.SH", "B.SH", "C.SH", "D.SH", "E.SH", "F.SH")
+        days = _multi_period_calendar(date(2024, 1, 1), date(2024, 4, 30))
+        month_days = _group_by_month(days)
+        tail_by_month = {
+            month: set(chunk[-4:]) for month, chunk in month_days.items()
+        }
+        closes: dict[str, dict[date, float]] = {s: {} for s in symbols}
+        price = dict.fromkeys(symbols, 10.0)
+        for i, day in enumerate(days):
+            tail = day in tail_by_month[day.month]
+            for index, symbol in enumerate(symbols):
+                drift = 1.0 + 0.0005 * ((i * 7 + index * 13) % 5 - 2) / 4
+                if tail:
+                    # 轮换:每月末让 4 个标的急跌(其余微涨),保证入场数 >= 4。
+                    dropped = (index + day.month) % 3 != 0
+                    price[symbol] *= drift * (0.965 if dropped else 1.001)
+                else:
+                    price[symbol] *= drift
+                closes[symbol][day] = round(price[symbol], 4)
+
+        provider = _Provider4Strategy(symbols, days, closes)
+        manifest = _user_code_e2e_manifest(submitted["commit"])
+
+        settings = SimpleNamespace(
+            research_sandbox_enabled=True,
+            research_sandbox_image=_IMAGE,
+            research_sandbox_docker_bin="docker",
+            research_sandbox_timeout_seconds=120.0,
+            research_sandbox_memory_mb=1024,
+            research_sandbox_cpus=2.0,
+            research_sandbox_pids_limit=256,
+            research_sandbox_user="65532",
+            research_sandbox_workspace_root=str(tmp_path / "ws"),
+            research_code_repo_path=str(repo_path),
+            research_code_max_files=32,
+            research_code_max_file_bytes=262144,
+        )
+
+        def release_factory(release_id: str):
+            assert release_id == "frozen-release-multi"
+            return provider
+
+        async def snapshot_provider(snapshot_id: str):
+            return None
+
+        adapter = UserCodeStrategyAdapter(
+            manifest=manifest,
+            release_provider_factory=release_factory,
+            snapshot_provider=snapshot_provider,
+            settings_factory=lambda: settings,
+        )
+        store = InMemoryResearchRunStore()
+        record = await ResearchRunCoordinator(store).execute(manifest, adapter)
+
+        assert record.status is ResearchRunStatus.COMPLETED, record.error_summary
+        report = record.result
+        assert report is not None
+        assert report.execution_mode.value == "multi_period"
+        assert report.decision_count >= 3
+        assert report.equity_curve
+        provenance = cast(
+            dict[str, Any],
+            cast(object, report.sandbox_provenance),
+        )
+        assert provenance is not None
+        assert provenance["commit"] == submitted["commit"]
+        assert provenance["image_digest"].startswith("sha256:")
+        assert provenance["image"] == _IMAGE
+        assert len(provenance["decisions"]) == report.decision_count
+        assert all(item["targets_checksum"] for item in provenance["decisions"])
+
+        # decide 逐决策 workspace 留档(代码 staging + 每决策 data/out)。
+        ws = tmp_path / "ws" / manifest.run_id
+        assert (ws / "code" / "strategy.py").exists()
+        decide_dirs = [d for d in ws.iterdir() if d.name.startswith("D")]
+        assert len(decide_dirs) == report.decision_count
