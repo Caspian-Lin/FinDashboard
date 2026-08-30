@@ -290,11 +290,25 @@ def build_portfolio(build_input: PortfolioBuildInput) -> PortfolioBuildResult:
             max_leverage=build_input.constraints.max_leverage,
             long_only=build_input.constraints.long_only,
         )
+        # issue #218:全现金决策(user_code decide 输出全 0 / 信号全中性)
+        # 是合法决策;约束阶段仍须留审计行(research runner 校验
+        # decision.constraints 非空),不能空着导致 run 被拒。
+        cash_audit = (
+            ConstraintAdjustment(
+                constraint="investable_universe",
+                symbol=None,
+                before_value=0.0,
+                after_value=0.0,
+                limit=0.0,
+                passed=True,
+                reason="信号全部为中性,目标仓位为空(全现金),无约束投影",
+            ),
+        )
         return PortfolioBuildResult(
             resolutions=resolutions,
             target_before_constraints=empty,
             target_after_constraints=empty,
-            adjustments=(),
+            adjustments=cash_audit,
             risk=_risk_report(empty, build_input.covariance, build_input, ()),
             covariance_fallback_used=False,
         )
@@ -347,35 +361,60 @@ def build_portfolio(build_input: PortfolioBuildInput) -> PortfolioBuildResult:
         if (
             build_input.constraints.covariance_failure_mode is CovarianceFailureMode.FAIL_CLOSED
             or method == "equal_weight"
+            or method == "direct_weights"
         ):
+            # direct_weights 无求解迭代,异常只可能来自契约层;等权重兜底
+            # 会静默改写 decide 的权重语义,禁止降级(issue #218)。
             raise AllocationError(f"组合分配失败,按 fail_closed 拒绝: {exc}") from exc
         raw = make_allocator("equal_weight").allocate(
             list(resolved), None, relaxed, context=context
         )
         fallback = True
 
-    desired_gross = (
-        build_input.target_gross_exposure
-        if build_input.target_gross_exposure is not None
-        else build_input.constraints.max_investable_weight
-    )
-    if raw.gross_exposure > MAX_WEIGHT_EPSILON:
-        raw_weights = {
-            symbol: float(weight * desired_gross / raw.gross_exposure)
-            for symbol, weight in raw.weights.items()
-        }
+    if method == "direct_weights":
+        # issue #218 user_code 策略:decide 输出的权重就是目标本身,
+        # 不做 desired_gross 重缩放 —— 权重和 < 1 = 持有现金,= 0 = 空仓;
+        # 硬约束(gross/单资产/sleeve 上限)仍由 apply_portfolio_constraints
+        # 执行并逐项记审计(超约束截断),不是静默缩放。
+        raw_weights = dict(raw.weights)
+        net = sum(weight for weight in raw_weights.values())
+        before = TargetWeight(
+            weights=raw_weights,
+            as_of=raw.as_of,
+            strategy_id=raw.strategy_id,
+            cash_buffer=(
+                max(0.0, min(1.0, 1.0 - net))
+                if build_input.constraints.long_only
+                else 0.0
+            ),
+            max_leverage=build_input.constraints.max_leverage,
+            long_only=build_input.constraints.long_only,
+            factor_snapshot_id=raw.factor_snapshot_id,
+            covariance_version=raw.covariance_version,
+        )
     else:
-        raw_weights = {}
-    before = TargetWeight(
-        weights=raw_weights,
-        as_of=raw.as_of,
-        strategy_id=raw.strategy_id,
-        cash_buffer=max(0.0, 1.0 - desired_gross),
-        max_leverage=max(1.0, desired_gross),
-        long_only=build_input.constraints.long_only,
-        factor_snapshot_id=raw.factor_snapshot_id,
-        covariance_version=raw.covariance_version,
-    )
+        desired_gross = (
+            build_input.target_gross_exposure
+            if build_input.target_gross_exposure is not None
+            else build_input.constraints.max_investable_weight
+        )
+        if raw.gross_exposure > MAX_WEIGHT_EPSILON:
+            raw_weights = {
+                symbol: float(weight * desired_gross / raw.gross_exposure)
+                for symbol, weight in raw.weights.items()
+            }
+        else:
+            raw_weights = {}
+        before = TargetWeight(
+            weights=raw_weights,
+            as_of=raw.as_of,
+            strategy_id=raw.strategy_id,
+            cash_buffer=max(0.0, 1.0 - desired_gross),
+            max_leverage=max(1.0, desired_gross),
+            long_only=build_input.constraints.long_only,
+            factor_snapshot_id=raw.factor_snapshot_id,
+            covariance_version=raw.covariance_version,
+        )
 
     application = apply_portfolio_constraints(
         before.weights,

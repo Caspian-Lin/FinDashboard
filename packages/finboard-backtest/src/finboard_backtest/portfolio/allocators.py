@@ -534,22 +534,73 @@ class ErcAllocator:
         )
 
 
+# ---------------------------------------------------------------------- 直权重
+
+
+class DirectWeightsAllocator:
+    """直目标权重分配器(issue #218 ``user_code`` 策略)。
+
+    ``signal.score`` 的语义即目标权重本身(沙箱 ``strategy.decide`` 输出
+    的权重映射为信号分数),分配器**不做任何再缩放** —— 权重和可以 < 1
+    (余下为现金)或 = 0(空仓观望)。硬约束(long-only 负权重截断、单资产
+    上限、sleeve、gross 上限)仍由 :func:`apply_portfolio_constraints` 与
+    build_portfolio 的后续层执行并逐项记审计(超约束截断可见)。
+
+    与其他分配器的关键差异:其余方法把 score 当「强度」经归一/缩放产生
+    权重;本方法信任 score 的绝对值 —— 因此只应由 user_code 管线使用,
+    spec 的 allocation_method 不暴露此取值。
+    """
+
+    name: str = "direct_weights"
+
+    def allocate(
+        self,
+        signals: list[Signal],
+        covariance: CovarianceEstimate | None,
+        constraints: PortfolioConstraints,
+        *,
+        context: AllocationContext | None = None,
+    ) -> TargetWeight:
+        allocation_context = context or AllocationContext()
+        first = signals[0]
+        weights: dict[str, float] = {}
+        for signal in signals:
+            if signal.symbol in allocation_context.disabled_symbols:
+                continue
+            weights[signal.symbol] = float(signal.score * signal.confidence)
+        gross = sum(abs(weight) for weight in weights.values())
+        return TargetWeight(
+            weights=weights,
+            as_of=first.timestamp,
+            strategy_id=first.strategy_id,
+            cash_buffer=max(0.0, 1.0 - gross),
+            max_leverage=max(1.0, gross),
+            long_only=constraints.long_only,
+        )
+
+
 # --------------------------------------------------------------------------- 工厂
 
 
 _ALLOCATOR_REGISTRY: dict[
-    str, type[EqualWeightAllocator] | type[InverseVolatilityAllocator] | type[ErcAllocator]
+    str,
+    type[EqualWeightAllocator]
+    | type[InverseVolatilityAllocator]
+    | type[ErcAllocator]
+    | type[DirectWeightsAllocator],
 ] = {
     "equal_weight": EqualWeightAllocator,
     "inverse_volatility": InverseVolatilityAllocator,
     "erc": ErcAllocator,
+    "direct_weights": DirectWeightsAllocator,
 }
 
 
 def make_allocator(method: str) -> Allocator:
     """按名称构造分配器。
 
-    支持的方法:``"equal_weight"`` / ``"inverse_volatility"`` / ``"erc"``。
+    支持的方法:``"equal_weight"`` / ``"inverse_volatility"`` / ``"erc"`` /
+    ``"direct_weights"``(user_code 专用,score 即权重,不再缩放)。
     未知方法 raise ``AllocationError``。
     """
     cls = _ALLOCATOR_REGISTRY.get(method)
@@ -564,6 +615,7 @@ __all__ = [
     "Allocator",
     "ConstraintAdjustment",
     "ConstraintApplication",
+    "DirectWeightsAllocator",
     "EqualWeightAllocator",
     "ErcAllocator",
     "InverseVolatilityAllocator",
