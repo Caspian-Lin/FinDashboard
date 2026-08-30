@@ -42,13 +42,16 @@ class FeatureSnapshotRepository:
 
     async def publish(self, snapshot: FeatureSnapshot) -> FactorFeatureSnapshotModel:
         FeatureSnapshot.from_dict(snapshot.as_dict())
-        release = await ResearchDatasetReleaseRepository(
-            self._session
-        ).require_usable(snapshot.dataset_release_id)
-        if release.release_checksum != snapshot.dataset_release_checksum:
-            raise ArtifactIntegrityError(
-                "FeatureSnapshot 绑定的数据发布 checksum 不一致"
-            )
+        if snapshot.dataset_release_id is not None:
+            release = await ResearchDatasetReleaseRepository(
+                self._session
+            ).require_usable(snapshot.dataset_release_id)
+            if release.release_checksum != snapshot.dataset_release_checksum:
+                raise ArtifactIntegrityError(
+                    "FeatureSnapshot 绑定的数据发布 checksum 不一致"
+                )
+        # issue #217:沙箱因子快照(dataset_release_id=None)锚定 run,
+        # 不做发布存在性校验;source_run_id 的存在性由产出方(执行器)保证。
         existing = await self._find_identity(snapshot.snapshot_id, snapshot.checksum)
         if existing is not None:
             if (
@@ -61,6 +64,7 @@ class FeatureSnapshotRepository:
         row = FactorFeatureSnapshotModel(
             snapshot_id=snapshot.snapshot_id,
             dataset_release_id=snapshot.dataset_release_id,
+            source_run_id=snapshot.source_run_id,
             dataset_release_checksum=snapshot.dataset_release_checksum,
             decision_at=snapshot.decision_at,
             published_at=snapshot.published_at,
