@@ -60,6 +60,9 @@ class SandboxRunSpec:
     pids_limit: int = 256
     user: str = "65532"
     tmpfs_size_mb: int = 64
+    #: 执行协议(issue #218):factor = factor.compute→scores,
+    #: strategy = strategy.decide→targets(挂载清单 v2 含权重回显)
+    mode: str = "factor"
 
 
 @dataclass
@@ -292,6 +295,8 @@ class ResearchSandboxRunner:
             "/data",
             "--out-dir",
             "/out",
+            "--mode",
+            spec.mode,
         ]
 
 

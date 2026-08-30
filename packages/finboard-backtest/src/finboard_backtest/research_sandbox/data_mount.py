@@ -25,8 +25,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -35,7 +35,7 @@ from typing import Any, Protocol
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 _MOUNT_MANIFEST = "mount_manifest.json"
 
 
@@ -63,13 +63,17 @@ class DataMount:
     symbols: tuple[str, ...]
     datasets: tuple[MountDataset, ...]
     manifest_checksum: str
+    # issue #218:策略协议(strategy.decide)的挂载清单 v2 增量 ——
+    # 引擎回显的当前组合权重与约束只读视图;factor 协议挂载为空映射。
+    current_weights: Mapping[str, float] = field(default_factory=dict)
+    strategy_constraints: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def manifest_path(self) -> Path:
         return self.root / _MOUNT_MANIFEST
 
     def manifest_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "version": MANIFEST_VERSION,
             "decision_at": self.decision_at.isoformat(),
             "symbols": list(self.symbols),
@@ -86,6 +90,11 @@ class DataMount:
                 for d in self.datasets
             ],
         }
+        if self.current_weights:
+            payload["current_weights"] = dict(self.current_weights)
+        if self.strategy_constraints:
+            payload["strategy_constraints"] = dict(self.strategy_constraints)
+        return payload
 
 
 class _MountProvider(Protocol):
@@ -101,12 +110,19 @@ async def build_data_mount(
     decision_at: datetime,
     out_root: Path,
     symbols: Iterable[str] | None = None,
+    current_weights: Mapping[str, float] | None = None,
+    strategy_constraints: Mapping[str, Any] | None = None,
 ) -> DataMount:
     """把若干冻结发布物化为一个只读挂载目录。
 
     ``providers`` 为按 ``dataset_release_ids`` 构造的
     :class:`~finboard_data.releases.FrozenReleaseProvider`;``symbols``
     缺省 = bars 类发布的全部标的(多发布取并集)。
+
+    issue #218:策略协议增 ``current_weights``(引擎回显的当前组合权重,
+    上一决策成交后实际持仓市值占比)/ ``strategy_constraints``(组合约束
+    只读视图)—— 落入挂载清单 v2,容器内 decide 可见;两者不影响 PIT
+    防线(不是按日期门控的数据行)。
     """
     if decision_at.tzinfo is None:
         raise SandboxMountError("decision_at 必须带时区")
@@ -185,12 +201,16 @@ async def build_data_mount(
     )
 
     ordered = tuple(sorted(universe))
+    frozen_weights: Mapping[str, float] = dict(current_weights or {})
+    frozen_constraints: Mapping[str, Any] = dict(strategy_constraints or {})
     mount = DataMount(
         root=out_root,
         decision_at=decision_at,
         symbols=ordered,
         datasets=tuple(contributions),
         manifest_checksum="",
+        current_weights=frozen_weights,
+        strategy_constraints=frozen_constraints,
     )
     payload = json.dumps(
         {**mount.manifest_dict(), "generated_at": datetime.now(UTC).isoformat()},
@@ -207,6 +227,8 @@ async def build_data_mount(
         symbols=ordered,
         datasets=tuple(contributions),
         manifest_checksum=checksum,
+        current_weights=frozen_weights,
+        strategy_constraints=frozen_constraints,
     )
 
 
