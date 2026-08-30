@@ -107,6 +107,24 @@ class TestHardenedCommand:
         assert "--rm" not in argv  # 一次性 = 结束后显式 rm(需先 inspect/logs)
         assert "--detach" in argv
 
+    async def test_mode_flag_strategy(self, tmp_path: Path) -> None:
+        """issue #218:mode=strategy 的容器命令带 --mode strategy(harness
+        按协议装配 StrategyContext 并产出 targets.parquet)。"""
+        spec = _spec(tmp_path, mode="strategy")
+        driver = FakeDriver()
+        await ResearchSandboxRunner(driver).run(spec)
+        argv = driver.argv_seen
+        assert "--mode" in argv
+        assert argv[argv.index("--mode") + 1] == "strategy"
+
+    async def test_mode_defaults_to_factor(self, tmp_path: Path) -> None:
+        spec = _spec(tmp_path)
+        assert spec.mode == "factor"
+        driver = FakeDriver()
+        await ResearchSandboxRunner(driver).run(spec)
+        argv = driver.argv_seen
+        assert argv[argv.index("--mode") + 1] == "factor"
+
     async def test_mounts_and_tmpfs(self, tmp_path: Path) -> None:
         driver = FakeDriver()
         await ResearchSandboxRunner(driver).run(_spec(tmp_path))
