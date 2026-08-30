@@ -27,7 +27,10 @@ from finboard_api.strategy_spec_schemas import (
     UniversePoolPreviewOut,
     UniversePrecheckWarningOut,
 )
-from finboard_backtest.research_code import active_user_factor_names
+from finboard_backtest.research_code import (
+    active_user_factor_names,
+    active_user_strategy_names,
+)
 from finboard_backtest.strategy_spec import (
     FEATURE_SOURCE_CATALOG,
     LIFECYCLE_STAGES,
@@ -145,11 +148,14 @@ async def _compile_with_releases(
         # issue #217:用户因子(u_ 前缀)可引用性 —— 编译期按 artifact
         # status=active 名单校验,retired/不存在直接 422(fail-visible)。
         user_factors = await active_user_factor_names(session)
+        # issue #218:user_code 策略代码 artifact 同口径(active 名单)。
+        user_code = await active_user_strategy_names(session)
         plan = compile_registered_strategy_spec(
             spec,
             disabled_factors=disabled_factors,
             available_dataset_release_ids=frozenset(r.release_id for r in releases),
             user_factor_sources=user_factors,
+            user_code_sources=user_code,
         )
     except (ReleaseCapabilityError, StrategySpecError, ValueError) as exc:
         raise _strategy_error(exc) from exc

@@ -288,6 +288,8 @@ async def _require_write_enabled(app: McpAppContext) -> None:
 async def _build_queued_manifest(
     body: Any,
     session: Any,
+    *,
+    sandbox_enabled: bool = False,
 ) -> tuple[Any, Any]:
     """复用 API 路由 ``queue_research_run`` 的冻结 + manifest 构建逻辑。
 
@@ -394,6 +396,27 @@ async def _build_queued_manifest(
     )
     if user_gate_error is not None:
         raise McpToolError("invalid_argument", user_gate_error)
+    # issue #218:user_code 策略入队门控(与 REST 路由共用同一函数);放行时
+    # 把 active commit 冻结进 spec(manifest input_checksum 覆盖代码版本)。
+    if spec.code_artifact is not None:
+        from finboard_backtest.research_code import (
+            active_user_strategy_commits,
+            freeze_user_code_commit,
+            user_code_reference_gate_error,
+        )
+
+        active_strategies = await active_user_strategy_commits(session)
+        code_gate_error = user_code_reference_gate_error(
+            code_artifact_name=spec.code_artifact.name,
+            code_artifact_commit=spec.code_artifact.commit,
+            active_user_strategies=active_strategies,
+            sandbox_enabled=sandbox_enabled,
+            frozen_snapshot_count=len(snapshots),
+            parameters=body.parameters,
+        )
+        if code_gate_error is not None:
+            raise McpToolError("invalid_argument", code_gate_error)
+        spec = freeze_user_code_commit(spec, active_strategies)
     release_ids = {release.release_id for release in releases}
     for snapshot in snapshots:
         # issue #217:沙箱快照(dataset_release_id=None)按其锚定 run 冻结的
@@ -574,7 +597,11 @@ async def enqueue_research_run(
     )
 
     async with app.session_maker() as session:
-        manifest, _ = await _build_queued_manifest(body, session)
+        manifest, _ = await _build_queued_manifest(
+            body,
+            session,
+            sandbox_enabled=app.settings.research_sandbox_enabled,
+        )
         try:
             row, _ = await ResearchRunRepository(session).create_or_get(
                 run_id=manifest.run_id,
@@ -883,6 +910,12 @@ def register(mcp: MCPServer) -> None:
             "schema)。入队预检(#186):universe 候选池为空秒级 invalid_argument,"
             "错误附各过滤条件排除统计与缺失字段名。single_shot 缺冻结快照同样"
             "入队秒级拒绝(#203,报错附 execution_mode 与缺失因子源)。"
+            "user_code 策略(#218):strategy_kind=user_code 的规格已声明 "
+            "code_artifact(name+可选 commit,引用 kind=strategy 的 active "
+            "artifact);入队门控 artifact 非 active / commit 不一致 / 沙箱未启用 "
+            "/ single_shot 缺快照 → 秒级拒绝,放行时 active commit 冻结进 "
+            "manifest;逐决策日沙箱 decide(ctx)→目标权重 复用组合管线,report "
+            "附 sandbox_provenance(commit+镜像 digest)。"
             "返回精简回执(issue #206):run_id/job_id/status/checksum/"
             "execution_mode/created_at,全量详情走 finboard_run_get。"
         ),

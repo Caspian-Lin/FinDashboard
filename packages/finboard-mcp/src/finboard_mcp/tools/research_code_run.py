@@ -5,7 +5,9 @@ L3 沙箱路线第二环:把已提交的因子代码提交到一次性 Docker �
 同步预检(#186 秒级失败风格):
 
 * ``research_sandbox_enabled`` 必须开启(需 Docker Desktop + 已构建镜像);
-* v1 仅 ``kind=factor``;
+* v1 仅 ``kind=factor``(策略代码 kind=strategy 经 ``strategy_spec``
+  ``code_artifact`` 引用 + ``finboard_run_queue`` 逐决策日执行 decide,
+  issue #218,不走独立沙箱 run);
 * (kind, name) 须有 active 产物(或 artifact_id 一致引用),指定 commit 必须
   等于 active 引用(历史版本先 rollback);
 * ``dataset_release_ids`` 逐个在 DB 已登记,且至少一个 bars 类发布。
@@ -102,7 +104,10 @@ async def run_enqueue(
         if kind != "factor":
             raise McpToolError(
                 "invalid_argument",
-                f"research_code_run v1 仅支持 kind=factor,收到 {kind!r}",
+                f"research_code_run v1 仅支持 kind=factor,收到 {kind!r};"
+                "策略代码(kind=strategy)不走独立沙箱 run,经 strategy_spec "
+                "code_artifact 引用后由 finboard_run_queue(rebalance_frequency"
+                "=multi_period)逐决策日执行 decide(issue #218)",
             )
         if not dataset_release_ids:
             raise McpToolError(

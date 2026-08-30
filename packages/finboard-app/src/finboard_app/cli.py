@@ -707,7 +707,8 @@ async def _run_worker(settings: Settings) -> None:
     registry = JobExecutorRegistry()
     registry.register("echo", EchoExecutor())
     # issue #143:research_run 执行器接入统一队列;#170:multi_factor 规格接入
-    # 真实信号引擎适配器工厂(其余 strategy kind 由工厂明确报 not_implemented)。
+    # 真实信号引擎适配器工厂;#218:user_code 规格经同一工厂分发到沙箱
+    # decide 适配器(需要 settings 解析镜像/资源限制/代码仓库路径)。
     from finboard_backtest.research_run.signal_engine import (
         build_signal_engine_adapter_factory,
     )
@@ -718,7 +719,8 @@ async def _run_worker(settings: Settings) -> None:
             session_maker=components.session_maker,
             store_factory=default_store_factory,
             adapter_factory=build_signal_engine_adapter_factory(
-                components.session_maker
+                components.session_maker,
+                settings_factory=settings_factory,
             ),
         ),
     )
