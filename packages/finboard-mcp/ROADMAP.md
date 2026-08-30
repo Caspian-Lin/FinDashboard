@@ -461,3 +461,42 @@ L3 沙箱路线第二环:让已提交的因子代码「能跑且跑不坏」。�
   断网 / 只读挂载 / 超时 / OOM kill / PIT 清单断言。
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 边界段已同步。
+
+### ✅ #217 沙箱因子接入快照/选股管线与 screen 指标(已完成)
+
+L3 沙箱路线第三环:把 agent 自定义因子变成「可被选股引用的一等公民」,
+并给出机器筛选指标,支撑自主因子挖掘闭环(假设→提交→执行→screen→
+复合→OOS)。纯离线研究域,不触任何实盘表。
+
+- **落库**:沙箱 run 成功输出过质量门后,有限值观测化为 `FeatureSnapshot`
+  写入 `factor_feature_snapshots`(`dataset_release_id` 放宽可空,新
+  `source_run_id` 锚定产出 run;`dataset_release_checksum` 承载挂载
+  manifest checksum 做数据面 PIT 锚点);`research_code_runs.output_snapshot_id`
+  回填引用,run × snapshot 双向可追溯。观测因子名 = `u_<artifact_name>`
+  (`u_` 前缀与内置目录隔离,防重名,校验层统一判据)。
+- **质量门**:`research_sandbox_max_nan_ratio` / `min_coverage`(默认各
+  0.5)—— NaN 比例超上限 / 覆盖率不足 / 输出为空 → 拒绝入库,run
+  failed=`quality_gate_failed`,错误信息指明阈值与实际值;结果(含阈值)
+  记入 run `metrics.quality_gate`。
+- **引用链**:编译期 `compile_strategy_spec(user_factor_sources=...)`
+  校验 active 名单(REST validate / MCP validate / publish 共用);
+  FeatureGraph 按 `{kind: factor, operator: identity, source: "u_<name>"}`
+  引用;入队期 `user_factor_reference_gate_error`(REST+MCP 共用)——
+  retired/不存在秒级拒绝,multi_period(rebalance_frequency)引用用户因子
+  秒级拒绝(观测绑定单一 decision_at);沙箱快照按锚定 run 的发布集合
+  校验 ⊆ 冻结清单。
+- **catalog 混合视图**:`finboard_factor_catalog` 展示 builtin(26)+
+  user_defined(标注 artifact commit/status;`include_user_defined=false`
+  只看内置)。
+- **screen 指标**:引用用户因子的 research run,report 携带 `factor_screen`
+  段 —— rank_ic / rank_ic_ir(spearman 序列,≥2 期才有 IR)、分层收益
+  (5 桶等权 forward return 跨期平均)、换手率(最高值桶成员变化率)、
+  与既有因子的相关性矩阵(同截面 builtin 特征 spearman 跨期平均);
+  forward 窗口 = 相邻决策时点 PIT close(末期为发布区间末);计算失败
+  只记 warning 不阻塞 run(尽力而为)。
+- 配置:`research_sandbox_max_nan_ratio` / `research_sandbox_min_coverage`。
+  回滚 = 迁移 downgrade(删 2 列 + 恢复非空)+ executor 不落库(质量门
+  阈值调 0 即全拒)+ 移除 compiler user_factor_sources 传参;无新工具名,
+  工具总数 123 不变。
+
+`_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 边界段已同步。

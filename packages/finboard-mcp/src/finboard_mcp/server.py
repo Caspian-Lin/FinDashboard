@@ -105,7 +105,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   空池秒级 invalid_argument(不再等执行期跑完后报泛化错误),错误信息附
   各过滤条件的排除统计与缺失字段名(如 list_date)。single_shot 缺快照
   同样入队秒级拒绝(#203):未声明 rebalance_frequency 时决策时点只能来自
-  冻结因子快照,报错附 execution_mode 与缺失因子源。run_queue payload 模板与
+  冻结因子快照,报错附 execution_mode 与缺失因子源。用户自定义因子
+  (u_ 前缀,#217)同样入队秒级拒绝:引用的因子 artifact 非 active
+  (retired/不存在),或 multi_period(rebalance_frequency)引用用户因子
+  (观测绑定单一 decision_at,不支持每期重算)。run_queue payload 模板与
   各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
   manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。写操作
   返回精简回执(run_id/job_id/status/checksum/execution_mode/created_at,
@@ -120,7 +123,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   as_dict() 诊断。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
-  sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)
+  sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。
+  factor_catalog 是混合目录(#217):builtin(26 因子,origin=builtin)+
+  user_defined(沙箱执行的自定义因子,标注 artifact commit/status,引用名
+  u_<artifact_name>,仅 status=active 可被规格引用)。
 - 策略规格(16,✅ #126):strategy registry/template/list/history/version_get/
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。
@@ -213,7 +219,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   与 strategies/simulation 无关联(独立用户查找列表)。
 - 报告聚合与导出(3,✅ #141 + #172 + #206):report_run(聚合 ResearchRun:
   view=summary 默认 —— result 指标 + universe 聚合计数 + fills 按决策计数,
-  不序列化逐标的全量 payload;view=detail 全量 artifacts 含 report/equity/
+  不序列化逐标的全量 payload;引用用户因子(u_)的 run 额外携带
+  factor_screen 段(#217:rank_ic/rank_ic_ir/分层收益/换手率/与既有因子
+  相关性矩阵);view=detail 全量 artifacts 含 report/equity/
   decisions 各阶段 payload)、report_backtest(聚合回测:metrics +
   equity_curve(默认降采样) + fills(默认有界 200 条,limit/offset 分页,
   fills_limit=null 全量) + summary)、report_export(导出 CSV/Markdown 文件,
@@ -229,7 +237,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   历史 commit、可 diff)。目录约定:一因子/策略一目录 factors/<name>/
   {factor.py, manifest.toml}、strategies/<name>/{strategy.py, manifest.toml}。
   **只存储与版本化**;web 通道仍禁代码,仅 MCP agent 通道开放。
-- 研究代码沙箱执行(2,✅ #216):research_code_run(写,入队)/
+- 研究代码沙箱执行(2,✅ #216+#217):research_code_run(写,入队)/
   research_code_run_get(只读)。active 因子代码在一次性 Docker 容器内执行
   factor.compute(ctx) -> scores + metrics(协议 v1 纯截面函数)。容器
   --network none / --read-only / cap-drop ALL / 非 root / CPU 与内存限额 /
@@ -237,7 +245,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   容器内不存在未来数据文件)。run 记录(research_code_runs,RCR-)持有
   code commit x 数据 release x 输出 checksum 三向引用;失败分类
   static_validation_failed / runtime_error / timeout / oom_killed /
-  output_contract_violation / sandbox_unavailable。需
+  output_contract_violation / sandbox_unavailable / quality_gate_failed。
+  #217:成功输出过质量门(NaN 比例/覆盖率,阈值默认 0.5,不合格拒绝入库
+  且错误指明阈值)后落库为 feature snapshot(u_<name> 因子观测,
+  run_get 可见 output_snapshot_id),可被 research run 的
+  factor_snapshot_ids 引用、规格按 u_<name> 引用(仅 active;入队期
+  retired 拦截,multi_period 引用用户因子秒级拒绝)。需
   research_sandbox_enabled=true + Docker Desktop + docker/research-sandbox
   镜像;纯离线研究域,不连 broker 不下单。
 

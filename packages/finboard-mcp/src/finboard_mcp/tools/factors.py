@@ -141,26 +141,56 @@ async def _validate_snapshot_input(
 
 
 # ---------------------------------------------------------------------------
-# finboard.factor.catalog(纯内存,无 DB)
+# finboard.factor.catalog(混合视图:builtin 目录 + user_defined artifacts)
 # ---------------------------------------------------------------------------
 
 
 async def factor_catalog(
-    app: McpAppContext, *, role: str | None = None
+    app: McpAppContext, *, role: str | None = None, include_user_defined: bool = True
 ) -> ToolEnvelope:
+    """混合目录:builtin(FACTOR_LAB_CATALOG)+ user_defined(#217)。"""
+
     async def _do() -> list[dict[str, Any]]:
-        from finboard_data.factor_lab import FactorRole, factor_lab_catalog
+        from finboard_data.factor_lab import FactorRole, factor_lab_catalog, sandbox_factor_name
+        from finboard_persistence import ResearchCodeArtifactRepository
 
         resolved = FactorRole(role) if role else None
         definitions = factor_lab_catalog(resolved)
-        return [
-            cast(dict[str, Any], to_jsonable(d.as_dict())) for d in definitions
+        items = [
+            {
+                **cast(dict[str, Any], to_jsonable(d.as_dict())),
+                "origin": "builtin",
+            }
+            for d in definitions
         ]
+        if include_user_defined:
+            async with app.session_maker() as session:
+                artifacts = await ResearchCodeArtifactRepository(
+                    session
+                ).list_artifacts(kind="factor", limit=500)
+            for artifact in artifacts:
+                items.append(
+                    {
+                        "name": sandbox_factor_name(artifact.name),
+                        "artifact_name": artifact.name,
+                        "origin": "user_defined",
+                        "status": artifact.status,
+                        "commit": artifact.commit,
+                        "artifact_id": artifact.artifact_id,
+                        "code_checksum": artifact.checksum,
+                        "created_at": to_jsonable(artifact.created_at),
+                        "note": (
+                            "沙箱用户因子;仅 status=active 可被规格引用,"
+                            "观测来自 finboard_research_code_run 产出的快照"
+                        ),
+                    }
+                )
+        return items
 
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.factor.catalog",
-        arguments={"role": role},
+        arguments={"role": role, "include_user_defined": include_user_defined},
         handler=_do,
     )
 
@@ -660,17 +690,24 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_factor_catalog",
         description=(
-            "查询因子目录(版本化实现清单,26 个 alpha/risk/market_input 因子)。"
-            "每条含 name/version/role/preference/frequency/source_fields/"
-            "economic_hypothesis/checksum 等。可选过滤 role(alpha|risk|market_input)。"
-            "无 DB 依赖,直接返回内存目录。用于了解系统支持哪些因子。"
+            "查询因子混合目录:builtin(26 个 alpha/risk/market_input 因子,"
+            "每条含 name/version/role/preference/source_fields/"
+            "economic_hypothesis/checksum 等,标注 origin=builtin)+ "
+            "user_defined(沙箱执行的自定义因子,标注 origin=user_defined 与 "
+            "artifact commit/status;仅 status=active 可被规格引用,引用名为 "
+            "u_<artifact_name>,观测来自 finboard_research_code_run 快照)。"
+            "可选过滤 role(仅过滤 builtin);include_user_defined=false 只看内置。"
+            "用于了解系统与 agent 各自提供哪些因子。"
         ),
     )
     async def _factor_catalog(
         role: str | None = None,
+        include_user_defined: bool = True,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
-        return await factor_catalog(app_context(ctx), role=role)
+        return await factor_catalog(
+            app_context(ctx), role=role, include_user_defined=include_user_defined
+        )
 
     @mcp.tool(
         name="finboard_feature_snapshot_list",

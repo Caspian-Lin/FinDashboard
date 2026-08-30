@@ -209,6 +209,10 @@ agent 经 MCP 提交的因子代码(`finboard_research_code_submit`,issue #215)�
 一次性 Docker 容器内执行(`kind=research_code_run` 任务,worker 单并发):
 `--network none` / `--read-only` / `--cap-drop ALL` / 非 root / CPU 与内存限额 /
 墙钟超时 kill;数据面为按 `decision_at` 物化的只读挂载(PIT 物理隔离)。
+成功输出过质量门(NaN 比例 / 覆盖率,默认各 0.5,不合格 `quality_gate_failed`
+且错误指明阈值)后落库为 feature snapshot(issue #217):因子观测名
+`u_<name>`,策略规格按名引用(仅 artifact active 可引用),run report 携带
+`factor_screen` 筛选指标(IC/IR/分层收益/换手率/与既有因子相关性矩阵)。
 默认关闭,启用前置(Docker Desktop 运行):
 
 ```bash

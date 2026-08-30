@@ -29,3 +29,4 @@
 - [Issue #226:复合评分目录语义字段投影](issue-226-scorer-catalog-projection.md) — 评分参数(winsorize/standardize/missing)本地、假设/失效/来源/方向自 FACTOR_LAB_CATALOG 投影;EXPOSURE_ONLY 无方向映射导入期拒绝
 - [Issue #215:研究代码仓库与服务端提交工具](issue-215-research-code-repo.md) — git 读命令必须显式 --git-dir(否则落在本仓库 CWD);路径历史须 log main -- path;register 返回冻结快照;沙箱 issue 复用 Service.read 取版本源码
 - [Issue #216:研究代码沙箱执行器](issue-216-research-sandbox-run.md) — PIT=物理隔离(挂载生成端 fail-closed);/out 用 bind 而非 tmpfs(容器停后 tmpfs 丢失);镜像 tag↔kit 版本三处同步;harness 须 spec_from_file_location 防 sys.modules 跨运行污染
+- [Issue #217:沙箱因子接入选股管线](issue-217-sandbox-factor-pipeline.md) — u_ 前缀全链路判据;as_dict 可选键 None 不输出保旧 checksum;NaN/覆盖率 0.5 阈值互补;screen forward=相邻决策 PIT close;测试库改列须手动 drop 表
