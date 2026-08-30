@@ -19,6 +19,12 @@ worker 领取 ``kind=research_code_run`` 任务后,按 payload 重建执行输�
 scores checksum;stdout/stderr/退出码/资源用量归档 workspace,失败信息
 含峰值内存与日志路径。
 
+issue #217:成功输出先过质量门(NaN 比例 / 覆盖率,阈值见
+``research_sandbox_max_nan_ratio`` / ``research_sandbox_min_coverage``),
+不合格拒绝入库(run failed,错误指明阈值);通过则把有限值观测化为
+``FeatureSnapshot`` 落库(``source_run_id`` 锚定 run,manifest checksum
+做数据面锚点),``research_code_runs.output_snapshot_id`` 回填引用。
+
 失败分类见 :mod:`errors`(``timeout`` / ``oom_killed`` /
 ``output_contract_violation`` / ``runtime_error`` /
 ``static_validation_failed`` / ``sandbox_unavailable``)。
@@ -65,6 +71,12 @@ from finboard_backtest.research_sandbox.errors import (
     STATIC_VALIDATION_FAILED,
     TIMEOUT,
     SandboxError,
+)
+from finboard_backtest.research_sandbox.factor_publish import (
+    QUALITY_GATE_FAILED,
+    QualityGateError,
+    build_factor_snapshot,
+    check_output_quality,
 )
 from finboard_backtest.research_sandbox.runner import (
     ResearchSandboxRunner,
@@ -283,6 +295,47 @@ class ResearchCodeRunExecutor:
         usage = {**result.usage, "duration_seconds": result.duration_seconds}
         _write_json(run_dir / "usage.json", usage)
 
+        # issue #217:成功执行后的输出质量门 + 快照落库。质量门不过 →
+        # run 置 failed(quality_gate_failed),错误信息指明阈值与实际值。
+        output_snapshot_id: str | None = None
+        metrics = outputs.metrics
+        if ok and outputs.scores_path is not None:
+            scores = _load_scores(outputs.scores_path)
+            quality = check_output_quality(
+                scores,
+                universe_size=len(mount.symbols),
+                max_nan_ratio=settings.research_sandbox_max_nan_ratio,
+                min_coverage=settings.research_sandbox_min_coverage,
+            )
+            metrics = {**(metrics or {}), "quality_gate": quality.as_dict()}
+            if not quality.passed:
+                ok = False
+                error_code = QUALITY_GATE_FAILED
+                error_summary = (
+                    "输出质量门未通过,拒绝入库: " + ";".join(quality.failures)
+                )
+            else:
+                try:
+                    snapshot = build_factor_snapshot(
+                        factor_artifact_name=payload.name,
+                        run_id=run_id,
+                        decision_at=payload.decision_at,
+                        commit=commit,
+                        mount_manifest_checksum=mount.manifest_checksum,
+                        scores=scores,
+                        quality=quality,
+                    )
+                    from finboard_persistence import FeatureSnapshotRepository
+
+                    async with self._session_maker() as session:
+                        await FeatureSnapshotRepository(session).publish(snapshot)
+                        await session.commit()
+                    output_snapshot_id = snapshot.snapshot_id
+                except QualityGateError as exc:
+                    ok = False
+                    error_code = QUALITY_GATE_FAILED
+                    error_summary = f"输出质量门未通过,拒绝入库: {exc}"
+
         async with self._session_maker() as session:
             run_repo = ResearchCodeRunRepository(session)
             run = await run_repo.mark_terminal(
@@ -294,10 +347,11 @@ class ResearchCodeRunExecutor:
                 timed_out=result.timed_out,
                 oom_killed=result.oom_killed,
                 usage=usage,
-                metrics=outputs.metrics,
+                metrics=metrics,
                 scores_checksum=outputs.scores_checksum,
                 mount_manifest_checksum=mount.manifest_checksum,
                 dataset_release_checksums=release_checksums,
+                output_snapshot_id=output_snapshot_id,
             )
             await session.commit()
         await progress(_TOTAL_STAGES, _TOTAL_STAGES, f"research_code_run:{run.status}")
@@ -496,6 +550,19 @@ async def _resolve_code(
 # --------------------------------------------------------------------------- #
 # 输出解析 / 失败分类 / 归档
 # --------------------------------------------------------------------------- #
+
+
+def _load_scores(path: Path) -> dict[str, float]:
+    """读取 scores.parquet 为 ``{symbol: score}``(null → NaN,#217)。"""
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path, columns=["symbol", "score"])
+    symbols = table.column("symbol").to_pylist()
+    values = table.column("score").to_pylist()
+    return {
+        str(symbol): (float(value) if value is not None else float("nan"))
+        for symbol, value in zip(symbols, values, strict=True)
+    }
 
 
 def _read_outputs(out_dir: Path) -> _Outputs:

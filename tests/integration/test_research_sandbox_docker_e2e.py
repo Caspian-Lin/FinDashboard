@@ -17,6 +17,7 @@ kill、OOM kill、PIT(挂载清单不含 decision_at 之后的数据)。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -213,6 +214,49 @@ class TestSandboxE2E:
         )
         assert metrics["coverage"] == 1.0
         assert metrics["kit_version"]  # 镜像 tag 与 kit 版本绑定,自报留档
+
+    async def test_container_output_publishes_as_snapshot(self, tmp_path: Path) -> None:
+        """issue #217:真实容器输出 → 质量门 → 快照构造(run 锚定)全接缝。"""
+
+        from finboard_backtest.research_sandbox.executor import _load_scores
+        from finboard_backtest.research_sandbox.factor_publish import (
+            build_factor_snapshot,
+            check_output_quality,
+        )
+
+        await _build_mount(tmp_path)
+        _make_code(tmp_path, _MOMENTUM)
+        result = await _run(tmp_path)
+        assert result.exit_code == 0, result.stderr
+
+        scores = _load_scores(tmp_path / "out" / "scores.parquet")
+        manifest_path = tmp_path / "data" / "mount_manifest.json"
+        mount_checksum = hashlib.sha256(
+            manifest_path.read_bytes()
+        ).hexdigest()
+        quality = check_output_quality(
+            scores, universe_size=len(_SYMBOLS),
+            max_nan_ratio=0.5, min_coverage=0.5,
+        )
+        assert quality.passed, quality.failures
+        snapshot = build_factor_snapshot(
+            factor_artifact_name="mom20",
+            run_id="RCR-e2e000000000000001",
+            decision_at=_DECISION_AT,
+            commit="a" * 40,
+            mount_manifest_checksum=mount_checksum,
+            scores=scores,
+            quality=quality,
+        )
+        assert snapshot.source_run_id == "RCR-e2e000000000000001"
+        assert snapshot.dataset_release_id is None
+        assert snapshot.code_version == "a" * 40
+        # 观测 = 容器 scores 的有限值,因子名带 u_ 前缀
+        assert {o.feature_name for o in snapshot.observations} == {"u_mom20"}
+        assert {o.symbol for o in snapshot.observations} == set(scores)
+        by_symbol = {o.symbol: o.value for o in snapshot.observations}
+        for symbol, value in scores.items():
+            assert by_symbol[symbol] == pytest.approx(value, rel=1e-12)
 
     async def test_pit_manifest_no_future_files(self, tmp_path: Path) -> None:
         await _build_mount(tmp_path)
