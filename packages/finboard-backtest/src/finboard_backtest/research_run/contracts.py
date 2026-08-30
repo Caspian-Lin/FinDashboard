@@ -647,6 +647,9 @@ class ResearchRunReport:
     # 仅当 run 引用用户自定义因子(u_ 前缀,沙箱执行产出)时非空;计算
     # 失败不阻塞 run(尽力而为,失败原因记 issues)。
     factor_screen: dict[str, JsonValue] | None = None
+    # issue #218:user_code 策略的沙箱 provenance —— 所用 code commit、
+    # 镜像 digest 与逐决策 targets checksum;非 user_code run 恒为 None。
+    sandbox_provenance: dict[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
         metrics = (
@@ -851,7 +854,16 @@ def report_from_json(payload: dict[str, object]) -> ResearchRunReport:
         execution_mode=ResearchExecutionMode(str(mode_raw)),
         annualized_return=float(str(payload.get("annualized_return", 0.0))),
         equity_curve=curve,
+        factor_screen=_optional_json_dict(payload.get("factor_screen")),
+        sandbox_provenance=_optional_json_dict(payload.get("sandbox_provenance")),
     )
+
+
+def _optional_json_dict(value: object) -> dict[str, JsonValue] | None:
+    """可选的 JSON dict 段(report 反序列化;非 dict / 空 → None)。"""
+    if not isinstance(value, dict):
+        return None
+    return cast(dict[str, JsonValue], value)
 
 
 def to_json_value(value: object) -> JsonValue:

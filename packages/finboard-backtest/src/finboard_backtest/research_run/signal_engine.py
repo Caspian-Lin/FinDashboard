@@ -29,7 +29,7 @@ import math
 import os
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -748,6 +748,16 @@ def single_shot_snapshot_gate_error(
             "请冻结至少一份特征快照,或声明 rebalance_frequency=monthly|quarterly"
             " 走多期回放"
         )
+    if strategy_kind == "user_code":
+        # issue #218:user_code 的 decide 数据面来自冻结发布,决策时点与
+        # 信号引擎同口径 —— single_shot 取快照 decision_at,缺快照即无决策日。
+        return (
+            "execution_mode=single_shot(未声明 parameters.rebalance_frequency):"
+            "user_code 策略该路径的决策时点只能来自冻结因子快照,但 "
+            "factor_snapshot_ids 为空。请声明 rebalance_frequency="
+            "monthly|quarterly 走多期回放(decide 每期从冻结发布重算),"
+            "或冻结至少一份特征快照以提供决策时点"
+        )
     return None
 
 
@@ -1056,22 +1066,37 @@ def _empty_pool_error_message(
     )
 
 
-async def build_decision_inputs(
+@dataclass(frozen=True, slots=True)
+class DecisionLoadContext:
+    """单个决策时点的机械加载结果 + 可信号化标的(issue #218 拆出)。
+
+    ``build_decision_inputs``(multi_factor 信号引擎)与 ``user_code``
+    沙箱策略适配器共用同一加载路径:决策日推导、PIT 特征、universe 过滤、
+    价格序列与协方差;差异只在「信号」如何产生 —— 前者按 feature_graph
+    求值,后者调沙箱 decide。快照 id 供信号锚定(single_shot)。
+    """
+
+    context: LoadedDecisionContext
+    candidates: tuple[UniverseCandidate, ...]
+    features: tuple[FeatureValue, ...]
+    signalable: frozenset[str]
+    price_series: dict[str, list[float]]
+    covariance: CovarianceEstimate | None
+    snapshot_id: str | None
+
+
+async def build_decision_load_contexts(
     manifest: ResearchRunManifest,
     *,
     release_provider_factory: ReleaseProviderFactory,
     snapshot_provider: FeatureSnapshotProvider,
-) -> tuple[PortfolioDecisionInput, ...]:
-    """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
+) -> tuple[DecisionLoadContext, ...]:
+    """按执行模式加载全部决策的机械上下文(不含信号,issue #218)。
 
-    * single_shot(默认):决策日序列 = manifest.factor_snapshots 的
-      ``decision_at`` 排序去重,每个决策日由 ``FrozenInputLoader`` 加载机械
-      字段 → 价格序列 → universe 过滤 → 信号引擎求值 → 组装输入;
-    * multi_period:决策日由 ``parameters.rebalance_frequency``(monthly/
-      quarterly)按冻结发布交易日历推导,每期由管线重算 price features →
-      合并冻结快照 PIT 观测 → 同样的 universe 过滤 / 信号求值;
-    * 信号只对「included 且决策 / 成交价格齐备」的标的产出(组合流水线要求
-      信号标的必须有价格与执行元数据)。
+    single_shot:决策日序列 = manifest.factor_snapshots 的 ``decision_at``
+    排序去重;multi_period:决策日由 ``parameters.rebalance_frequency``
+    按冻结发布交易日历推导,每期重算 price features 并合并冻结快照 PIT
+    观测。universe 过滤 / 空池根因 / 降级 warning 语义与信号引擎一致。
     """
     if not manifest.dataset_releases:
         raise ValueError("manifest 必须冻结至少一个数据发布")
@@ -1105,7 +1130,7 @@ async def build_decision_inputs(
                 "按发布每日重算,基本面因子仍 PIT 取自冻结快照/研究数据发布)。"
             )
 
-    inputs: list[PortfolioDecisionInput] = []
+    contexts: list[DecisionLoadContext] = []
     for decision_at, snapshot_id in decision_days:
         execution_at = await _next_execution_at(provider, decision_at)
         context = await loader.load_context(
@@ -1154,30 +1179,65 @@ async def build_decision_inputs(
         signalable = frozenset(
             symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
         )
-        signals = build_normalized_signals(
-            manifest.strategy_spec,
-            features=features,
-            prices=context.prices,
-            included_symbols=signalable,
-            factor_snapshot_id=None if frequency is not None else snapshot_id,
-            price_series=price_series,
-        )
-        inputs.append(
-            PortfolioDecisionInput(
-                business_date=context.business_date,
-                decision_at=context.decision_at,
-                execution_at=context.execution_at,
+        contexts.append(
+            DecisionLoadContext(
+                context=context,
                 candidates=candidates,
                 features=features,
-                signals=signals,
-                prices=context.prices,
-                execution_prices=context.execution_prices,
-                lot_info=context.lot_info,
-                input_artifact_ids=context.input_artifact_ids,
+                signalable=signalable,
+                price_series=price_series,
                 covariance=_estimate_covariance(price_series),
+                snapshot_id=snapshot_id,
             )
         )
-    return tuple(inputs)
+    return tuple(contexts)
+
+
+async def build_decision_inputs(
+    manifest: ResearchRunManifest,
+    *,
+    release_provider_factory: ReleaseProviderFactory,
+    snapshot_provider: FeatureSnapshotProvider,
+) -> tuple[PortfolioDecisionInput, ...]:
+    """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
+
+    * single_shot(默认):决策日序列 = manifest.factor_snapshots 的
+      ``decision_at`` 排序去重,每个决策日由 ``FrozenInputLoader`` 加载机械
+      字段 → 价格序列 → universe 过滤 → 信号引擎求值 → 组装输入;
+    * multi_period:决策日由 ``parameters.rebalance_frequency``(monthly/
+      quarterly)按冻结发布交易日历推导,每期由管线重算 price features →
+      合并冻结快照 PIT 观测 → 同样的 universe 过滤 / 信号求值;
+    * 信号只对「included 且决策 / 成交价格齐备」的标的产出(组合流水线要求
+      信号标的必须有价格与执行元数据)。
+    """
+    frequency = _rebalance_frequency(manifest)
+    return tuple(
+        PortfolioDecisionInput(
+            business_date=loaded.context.business_date,
+            decision_at=loaded.context.decision_at,
+            execution_at=loaded.context.execution_at,
+            candidates=loaded.candidates,
+            features=loaded.features,
+            signals=build_normalized_signals(
+                manifest.strategy_spec,
+                features=loaded.features,
+                prices=loaded.context.prices,
+                included_symbols=loaded.signalable,
+                factor_snapshot_id=None if frequency is not None else loaded.snapshot_id,
+                price_series=loaded.price_series,
+            ),
+            prices=loaded.context.prices,
+            execution_prices=loaded.context.execution_prices,
+            lot_info=loaded.context.lot_info,
+            input_artifact_ids=loaded.context.input_artifact_ids,
+            covariance=loaded.covariance,
+        )
+        for loaded in await build_decision_load_contexts(
+            manifest,
+            release_provider_factory=release_provider_factory,
+            snapshot_provider=snapshot_provider,
+        )
+    )
 
 
 def _bars_release_ref(
@@ -1350,25 +1410,17 @@ def build_signal_engine_adapter_factory(
     session_maker: async_sessionmaker[Any],
     *,
     release_root: str | Path | None = None,
+    settings_factory: Callable[[], Any] | None = None,
 ) -> Callable[[ResearchRunManifest], ResearchStrategyAdapter]:
-    """构造 CLI 可注入的 ``AdapterFactory``(multi_factor 分发)。
+    """构造 CLI 可注入的 ``AdapterFactory``(multi_factor / user_code 分发)。
 
     延迟导入 persistence / data 依赖(finboard-backtest 不直接依赖
-    finboard-persistence);非 multi_factor 规格继续明确报 not_implemented。
+    finboard-persistence);其余规格继续明确报 not_implemented。
+    ``settings_factory`` 供 user_code 沙箱调用方解析镜像/资源限制/代码仓库
+    路径(#218);缺省时 user_code 运行在加载期报 sandbox 未启用。
     """
 
     def _factory(manifest: ResearchRunManifest) -> ResearchStrategyAdapter:
-        if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
-            from finboard_backtest.background_jobs.contracts import ExecutorError
-
-            raise ExecutorError(
-                code="signal_engine_not_implemented",
-                summary=(
-                    f"信号引擎当前仅支持 {sorted(SIGNAL_ENGINE_STRATEGY_KINDS)}"
-                    f" 规格;{manifest.strategy_kind} 尚未实现"
-                ),
-                retryable=False,
-            )
         from finboard_data.releases import FrozenReleaseProvider
         from finboard_persistence import FeatureSnapshotRepository
 
@@ -1395,6 +1447,30 @@ def build_signal_engine_adapter_factory(
             async with session_maker() as session:
                 return await FeatureSnapshotRepository(session).get(snapshot_id)
 
+        if manifest.strategy_kind == "user_code":
+            from finboard_backtest.research_run.user_code_engine import (
+                UserCodeStrategyAdapter,
+            )
+
+            return UserCodeStrategyAdapter(
+                manifest=manifest,
+                release_provider_factory=_release_factory,
+                snapshot_provider=_snapshot_provider,  # type: ignore[arg-type]
+                settings_factory=settings_factory,
+            )
+
+        if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
+            from finboard_backtest.background_jobs.contracts import ExecutorError
+
+            raise ExecutorError(
+                code="signal_engine_not_implemented",
+                summary=(
+                    f"信号引擎当前仅支持 {sorted(SIGNAL_ENGINE_STRATEGY_KINDS)}"
+                    f"+user_code 规格;{manifest.strategy_kind} 尚未实现"
+                ),
+                retryable=False,
+            )
+
         return SignalEnginePipelineAdapter(
             manifest=manifest,
             release_provider_factory=_release_factory,
@@ -1406,9 +1482,11 @@ def build_signal_engine_adapter_factory(
 
 __all__ = [
     "SIGNAL_ENGINE_STRATEGY_KINDS",
+    "DecisionLoadContext",
     "SignalEnginePipelineAdapter",
     "build_daily_equity_curve",
     "build_decision_inputs",
+    "build_decision_load_contexts",
     "build_normalized_signals",
     "build_signal_engine_adapter_factory",
     "evaluate_feature_graph",
