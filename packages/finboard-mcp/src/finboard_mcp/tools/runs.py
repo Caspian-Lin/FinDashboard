@@ -378,12 +378,40 @@ async def _build_queued_manifest(
     )
     if gate_error is not None:
         raise McpToolError("invalid_argument", gate_error)
+    # issue #217:用户因子(u_ 前缀)入队门控(与 REST 路由共用同一函数)。
+    from finboard_backtest.research_code import (
+        active_user_factor_names,
+        user_factor_reference_gate_error,
+    )
+    from finboard_backtest.research_sandbox.factor_publish import (
+        sandbox_snapshot_dataset_release_ids,
+    )
+
+    user_gate_error = user_factor_reference_gate_error(
+        required_factor_sources=required_factor_sources,
+        active_user_factors=await active_user_factor_names(session),
+        parameters=body.parameters,
+    )
+    if user_gate_error is not None:
+        raise McpToolError("invalid_argument", user_gate_error)
     release_ids = {release.release_id for release in releases}
     for snapshot in snapshots:
-        if snapshot.dataset_release_id not in release_ids:
+        # issue #217:沙箱快照(dataset_release_id=None)按其锚定 run 冻结的
+        # 发布集合校验 ⊆ 本次冻结清单。
+        sandbox_release_ids = await sandbox_snapshot_dataset_release_ids(
+            session, snapshot
+        )
+        if sandbox_release_ids is None:
+            if snapshot.dataset_release_id not in release_ids:
+                raise McpToolError(
+                    "invalid_argument",
+                    f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中",
+                )
+        elif not sandbox_release_ids <= release_ids:
             raise McpToolError(
                 "invalid_argument",
-                f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中",
+                f"沙箱因子快照 {snapshot.snapshot_id} 锚定 run 的数据发布 "
+                f"{sorted(sandbox_release_ids - release_ids)} 不在本次冻结清单中",
             )
 
     # issue #186:入队同步候选池非空校验(与 REST 路由同一评估函数)。

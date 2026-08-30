@@ -41,6 +41,8 @@ class ResearchCodeRun:
     image_digest: str
     mount_manifest_checksum: str | None
     scores_checksum: str | None
+    # issue #217:成功 run 过质量门后落库的 FeatureSnapshot 引用
+    output_snapshot_id: str | None
     status: str
     error_code: str | None
     error_summary: str | None
@@ -122,6 +124,7 @@ class ResearchCodeRunRepository:
         scores_checksum: str | None = None,
         mount_manifest_checksum: str | None = None,
         dataset_release_checksums: dict[str, str] | None = None,
+        output_snapshot_id: str | None = None,
     ) -> ResearchCodeRun:
         """把 run 置为终态(succeeded/failed)并补齐审计字段。"""
         if status not in _VALID_STATUSES:
@@ -137,6 +140,7 @@ class ResearchCodeRunRepository:
             "metrics": metrics,
             "scores_checksum": scores_checksum,
             "mount_manifest_checksum": mount_manifest_checksum,
+            "output_snapshot_id": output_snapshot_id,
             "updated_at": datetime.now(UTC),
         }
         if dataset_release_checksums is not None:
@@ -209,6 +213,7 @@ def _to_record(model: ResearchCodeRunModel) -> ResearchCodeRun:
         image_digest=model.image_digest,
         mount_manifest_checksum=model.mount_manifest_checksum,
         scores_checksum=model.scores_checksum,
+        output_snapshot_id=model.output_snapshot_id,
         status=model.status,
         error_code=model.error_code,
         error_summary=model.error_summary,

@@ -272,6 +272,9 @@ async def run_get(
                     "metrics": record.metrics,
                     "scores_checksum": record.scores_checksum,
                     "mount_manifest_checksum": record.mount_manifest_checksum,
+                    # issue #217:成功 run 落库的 feature snapshot 引用(可进
+                    # factor_snapshot_ids 被 research run 引用)
+                    "output_snapshot_id": record.output_snapshot_id,
                     "artifact_dir": record.artifact_dir,
                     "created_at": record.created_at,
                 }
@@ -339,7 +342,12 @@ def register(mcp: MCPServer) -> None:
             "finboard_research_code_run_get 取结果。params 覆盖 manifest.params"
             "(合并注入 ctx.params)。失败分类:static_validation_failed / "
             "runtime_error / timeout / oom_killed / output_contract_violation / "
-            "sandbox_unavailable。纯离线研究域,不连 broker 不下单。"
+            "sandbox_unavailable / quality_gate_failed。成功输出经质量门"
+            "(NaN 比例/覆盖率,阈值 research_sandbox_max_nan_ratio 与 "
+            "research_sandbox_min_coverage,默认各 0.5)后落库为 feature "
+            "snapshot(u_<name> 因子观测),run_get 可见 output_snapshot_id,"
+            "该快照可被 research run 的 factor_snapshot_ids 引用。纯离线研究域,"
+            "不连 broker 不下单。"
         ),
     )
     async def _run(
@@ -370,8 +378,11 @@ def register(mcp: MCPServer) -> None:
         description=(
             "查询单次沙箱执行记录(research_code_runs,RCR- 前缀):三向引用"
             "(code commit / dataset_release_ids / scores_checksum)、镜像 digest、"
-            "失败分类与资源用量。view=summary 默认;view=detail 附 scores 预览"
-            "(前 20 行)与容器 error.json。job 维度进度走 finboard_job_get。"
+            "失败分类与资源用量、质量门结果(metrics.quality_gate:nan_ratio/"
+            "coverage/阈值/失败原因)与落库快照引用(output_snapshot_id,可进 "
+            "research run 的 factor_snapshot_ids)。view=summary 默认;view=detail "
+            "附 scores 预览(前 20 行)与容器 error.json。job 维度进度走 "
+            "finboard_job_get。"
         ),
     )
     async def _get(

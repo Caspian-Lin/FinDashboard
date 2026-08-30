@@ -29,6 +29,7 @@ import math
 import os
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -1249,6 +1250,8 @@ class SignalEnginePipelineAdapter:
         self._inputs: tuple[PortfolioDecisionInput, ...] | None = None
         self._equity_curve: tuple[EquityPoint, ...] = ()
         self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
+        # issue #217:用户因子 screen 指标(决策消费后计算,report 阶段取用)。
+        self._factor_screen: dict[str, Any] | None = None
 
     @property
     def execution_mode(self) -> ResearchExecutionMode:
@@ -1303,6 +1306,25 @@ class SignalEnginePipelineAdapter:
         self._benchmark_curve = await _load_benchmark_curve(
             manifest, self._release_provider_factory
         )
+        # issue #217:用户因子 screen 指标 —— 尽力而为,计算失败只记
+        # warning 不把 run 打挂(展示层指标,不影响决策/账本语义)。
+        if self._inputs:
+            try:
+                from finboard_backtest.research_run.factor_screen import (
+                    build_factor_screen,
+                )
+
+                self._factor_screen = await build_factor_screen(
+                    manifest,
+                    self._inputs,
+                    self._release_provider_factory,
+                )
+            except Exception:
+                logger.warning(
+                    "factor_screen_computation_failed",
+                    run_id=manifest.run_id,
+                    exc_info=True,
+                )
 
     def build_report(
         self,
@@ -1313,12 +1335,15 @@ class SignalEnginePipelineAdapter:
             strategy_kind=self.strategy_kind,
             decision_inputs=self._inputs or (),
         )
-        return delegate.build_report(
+        report = delegate.build_report(
             manifest,
             decisions,
             equity_curve=self._equity_curve,
             benchmark_curve=self._benchmark_curve,
         )
+        if self._factor_screen is not None:
+            report = replace(report, factor_screen=self._factor_screen)
+        return report
 
 
 def build_signal_engine_adapter_factory(

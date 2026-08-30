@@ -137,6 +137,11 @@ class Settings(BaseSettings):
     research_sandbox_docker_bin: str = "docker"
     # run workspace 根目录:<root>/<RCR-id>/{code,data,out,stdout.txt,...}。
     research_sandbox_workspace_root: str = "data_cache/research_sandbox"
+    # 输出质量门(issue #217):NaN 比例上限 / 覆盖率下限,不合格拒绝把
+    # scores 落库为 feature snapshot(run failed=quality_gate_failed,
+    # 错误信息指明阈值)。
+    research_sandbox_max_nan_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
+    research_sandbox_min_coverage: float = Field(default=0.5, ge=0.0, le=1.0)
 
     # ---- FinBoard MCP Server(issue #108)----
     # 向外置研究 Agent(OpenCode)暴露受控研究工具的 MCP 服务。默认关闭,显式启用。

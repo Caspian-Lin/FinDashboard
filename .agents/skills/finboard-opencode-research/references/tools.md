@@ -335,14 +335,22 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 因子实验室工具(8 只读 + 4 写,共 12 个)。写操作尊重 `mcp_readonly_only` 开关。
 
 ### finboard_factor_catalog
-查询因子目录(版本化实现清单,26 个 alpha/risk/market_input 因子)。
-**此目录(#214 起)是因子定义的唯一事实来源**——v1 选股规则目录
+查询因子混合目录:builtin(26 个 alpha/risk/market_input 因子)+
+user_defined(沙箱执行的自定义因子,#217)。
+**builtin 目录(#214 起)是因子定义的唯一事实来源**——v1 选股规则目录
 (`finboard_data.factors.FACTOR_CATALOG`,8 因子)逐字段从这里投影生成,
 selection 可用因子集 = 其子集(market_cap/pb/turnover_rate/momentum/
 volatility_20d/roe/gross_profit_margin/revenue_yoy)。
-- 参数:`role?: str`(alpha|risk|market_input)
-- 返回:`list[{name, version, role, preference, frequency, source_fields, economic_hypothesis, checksum, ...}]`
-- 无 DB 依赖,直接返回内存目录。
+user_defined 条目来自 `research_code_artifacts`(kind=factor),标注
+artifact commit 与 status;引用名为 `u_<artifact_name>`,**仅
+status=active 可被规格引用**(retired 后入队秒级拒绝),观测来自
+`finboard_research_code_run` 落库的快照。
+- 参数:`role?: str`(alpha|risk|market_input,仅过滤 builtin)、
+  `include_user_defined?: bool = true`
+- 返回:`list[{name, origin: builtin|user_defined, version, role, ...}]`;
+  user_defined 条目另含 `{artifact_name, status, commit, artifact_id,
+  code_checksum, created_at, note}`
+- builtin 部分无 DB 依赖;user_defined 查 `research_code_artifacts` 表。
 
 ### finboard_feature_snapshot_list
 列出已发布的特征快照(版本化、时点化、不可变)。
@@ -1214,16 +1222,38 @@ finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.1.0`;
   result_ref=RCR-...);终态后 `finboard_research_code_run_get` 取结果
 - 错误:`invalid_argument`(沙箱未开启 / kind 非 factor / 无 bars 发布)、
   `not_found`(无 active 代码 / 发布不存在)、`denied`(只读模式)
+- #217:成功输出先过**质量门**(NaN 比例 ≤ `research_sandbox_max_nan_ratio`
+  且覆盖率 ≥ `research_sandbox_min_coverage`,默认各 0.5),不合格
+  run failed=`quality_gate_failed` 且错误信息指明阈值与实际值;通过则
+  有限值观测落库为 feature snapshot(`u_<name>` 因子),见 run_get 的
+  `output_snapshot_id`。
 
 ### finboard_research_code_run_get(只读)
 查询单次执行记录(`research_code_runs`,RCR- 前缀)。
 - 参数:`run_id`、`view: "summary"|"detail" = summary`
 - 返回 summary:三向引用(code commit / dataset_release_ids /
   scores_checksum)、镜像 digest、status、error_code/summary、exit_code、
-  timed_out/oom_killed、usage(峰值内存/CPU)、metrics(coverage/nan_ratio)
+  timed_out/oom_killed、usage(峰值内存/CPU)、metrics(coverage/nan_ratio +
+  `quality_gate` 段:#217 质量门结果与阈值)、`output_snapshot_id`
+  (#217:落库快照引用,可进 research run 的 `factor_snapshot_ids`)
 - 返回 detail:另附 `scores_preview`(前 20 行)与容器 `error.json`
 - 失败分类:`static_validation_failed` / `runtime_error` / `timeout` /
   `oom_killed` / `output_contract_violation` / `sandbox_unavailable`
-  (docker 缺失,可重试)
+  (docker 缺失,可重试)/ `quality_gate_failed`(#217,NaN 超标或覆盖不足)
 - 归档:`<workspace>/<RCR-id>/{code,data,out,stdout.txt,stderr.txt,
   container.json,usage.json}`(stdout/stderr/退出码/资源用量完整可查)
+
+### 用户自定义因子引用链(#217)
+把沙箱产出变成可被选股管线引用的一等公民:
+1. `finboard_research_code_submit` 提交因子代码(kind=factor,name 如
+   `mom20`)→ artifact active;
+2. `finboard_research_code_run` 沙箱执行(dataset_release_ids +
+   decision_at)→ 质量门通过后快照落库,因子观测名 = `u_mom20`;
+3. `finboard_factor_catalog` 确认 origin=user_defined、status=active;
+4. 策略规格 feature_graph 里按名引用:`{node_id, kind: factor,
+   operator: identity, source: "u_mom20"}`(编译期校验 active 名单);
+5. research run 入队时把 `output_snapshot_id` 放进
+   `factor_snapshot_ids`(single_shot;multi_period 引用用户因子会被
+   入队秒级拒绝);
+6. run report 的 `factor_screen` 段给出该因子的 rank_ic / rank_ic_ir /
+   分层收益(5 桶)/ 换手率 / 与既有因子(builtin)的相关性矩阵。

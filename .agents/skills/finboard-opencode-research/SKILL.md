@@ -33,7 +33,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额 | `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`(9 个) | ✅ #124 | 只读 |
 | 数据准备(拉取/同步/发布/修复/ETF/配置) | `finboard.data_write.*` / `.etf.*`(12 个) | ✅ #137 | 2 只读 + 10 自主执行 |
 | 因子目录 / 特征快照 / 因子信号 / 因子实验 | `finboard.factor.*` / `.feature_snapshot.*`(12 个) | ✅ #125 | 8 只读 + 4 自主执行 |
-| 策略规格 / 预设(registry/template/validate/draft/publish/rollback/diff/preset CRUD) | `finboard.strategy.*` / `.preset.*`(16 个) | ✅ #126 | 8 只读 + 8 自主执行 |
+| 策略规格 / 预设(registry/template/validate/draft/publish/rollback/diff/preset CRUD;feature_graph 可按 `u_<name>` 引用沙箱用户因子,仅 active 可引用,#217) | `finboard.strategy.*` / `.preset.*`(16 个) | ✅ #126 | 8 只读 + 8 自主执行 |
 | 回测(双形态:strategy 事件驱动回测——默认小规模同步,run_async=true 或规模达阈值自动入队后台任务返回 job_id(#189,避免 MCP 30s 超时后响应丢失);strategy_spec 路由已发布规格入队 research_run 多期再平衡回放;benchmark_symbol 显式基准(指数日线 akshare 免积分),基准缺失返回 null 不静默 0.0;selection.factor_version 仅 "v1"(可用因子集=因子目录投影子集,#214);批量网格提交/聚合对比——grid_get 默认不返回曲线,显式 equity_mode=summary/full 才返回,公共字段在网格头部只出现一次(#190/#206);history CRUD——history_get fills 默认有界 200 条分页、history_list symbols 前 10 只+计数(#206)) | `finboard.backtest.*`(7 个) | ✅ #127+#174+#175+#183+#184+#189+#190 | 4 只读 + 3 自主执行 |
 | 模拟盘(账户/会话生命周期/决策/行情投递/晋级评估/归档/订单/成交/持仓/账本/审计/报告) | `finboard.sim.*`(21 个) | ✅ #127+#139 | 10 只读 + 11 自主执行 |
 | portfolio 计算(allocate/sizing/feasibility/attribution) | `finboard.portfolio.*`(4 个) | ✅ #128 | 纯计算,自主执行 |
@@ -42,7 +42,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | 自选股(创建/查询标的组、增删标的) | `finboard.watchlist.*`(7 个) | ✅ #140 | 2 只读 + 5 自主执行 |
 | 报告聚合与导出(ResearchRun/回测报告、导出 CSV/Markdown 文件;report_run 默认 summary 聚合计数、report_backtest fills 分页有界,#206) | `finboard.report.*`(3 个) | ✅ #141+#206 | 3 只读 |
 | 研究代码提交(agent 策略/因子代码入口;静态校验+版本化存储,只存不执行;web 通道仍禁代码) | `finboard.research_code.*`(4 个) | ✅ #215 | 2 只读 + 2 自主执行 |
-| 研究代码沙箱执行(一次性 Docker 容器跑 factor.compute;PIT 物理隔离挂载、断网/只读/限额/超时 kill;run 三向引用审计;需 research_sandbox_enabled + Docker 镜像) | `finboard.research_code_run` / `_get`(2 个) | ✅ #216 | 1 只读 + 1 自主执行 |
+| 研究代码沙箱执行(一次性 Docker 容器跑 factor.compute;PIT 物理隔离挂载、断网/只读/限额/超时 kill;run 三向引用审计;成功输出过质量门后落库为 `u_<name>` 因子快照,可被 research run 引用,run report 携带 factor_screen 筛选指标(#217);需 research_sandbox_enabled + Docker 镜像) | `finboard.research_code_run` / `_get`(2 个) | ✅ #216+#217 | 1 只读 + 1 自主执行 |
 
 > 详细工具契约见 `references/tools.md`;扩展计划见
 > `packages/finboard-mcp/ROADMAP.md`。
@@ -77,7 +77,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 | 文档 | 内容 |
 |------|------|
-| `references/tools.md` | 121 个 MCP 工具完整契约(参数 / 返回 / 场景) |
+| `references/tools.md` | 123 个 MCP 工具完整契约(参数 / 返回 / 场景) |
 | `references/workflow.md` | 研究工作流决策树 + 标准研究循环 |
 | `references/research-workflow.md` | 完整研究流程详解(数据→因子→策略→回测→模拟→评估) |
 | `references/memory.md` | 研究记忆使用规则与生命周期 |

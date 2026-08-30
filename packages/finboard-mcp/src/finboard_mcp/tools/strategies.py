@@ -137,6 +137,7 @@ async def _compile_with_releases(
     """
     from dataclasses import replace
 
+    from finboard_backtest.research_code import active_user_factor_names
     from finboard_backtest.strategy_spec import (
         StrategySpecError,
         compile_registered_strategy_spec,
@@ -153,12 +154,15 @@ async def _compile_with_releases(
     try:
         for release_id in spec.validation_plan.dataset_release_ids:
             releases.append(await release_repo.require_usable(release_id))
+        # issue #217:用户因子(u_ 前缀)按 artifact status=active 名单校验。
+        user_factors = await active_user_factor_names(session)
         plan = compile_registered_strategy_spec(
             spec,
             disabled_factors=disabled_factors,
             available_dataset_release_ids=frozenset(
                 release.release_id for release in releases
             ),
+            user_factor_sources=user_factors,
         )
     except (ReleaseCapabilityError, StrategySpecError, ValueError) as exc:
         raise McpToolError("invalid_argument", f"策略规格校验失败: {exc}") from exc

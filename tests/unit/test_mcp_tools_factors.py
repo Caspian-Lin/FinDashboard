@@ -133,12 +133,25 @@ def _get_session(app: McpAppContext) -> AsyncMock:
 
 
 # ---------------------------------------------------------------------------
-# finboard.factor.catalog(无 DB)
+# finboard.factor.catalog(混合视图:builtin 目录 + user_defined artifacts,#217)
 # ---------------------------------------------------------------------------
 
 
+def _no_user_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from finboard_persistence import ResearchCodeArtifactRepository
+
+    monkeypatch.setattr(
+        ResearchCodeArtifactRepository,
+        "list_artifacts",
+        lambda self, **kw: _async_return([]),
+    )
+
+
 class TestFactorCatalog:
-    async def test_returns_catalog(self) -> None:
+    async def test_returns_catalog(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _no_user_artifacts(monkeypatch)
         app = _make_app()
         env = await factor_tools.factor_catalog(app)
         assert env.status == "ok"
@@ -148,13 +161,63 @@ class TestFactorCatalog:
         assert "name" in first
         assert "version" in first
         assert "checksum" in first
+        assert first["origin"] == "builtin"
 
-    async def test_records_audit(self) -> None:
+    async def test_records_audit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _no_user_artifacts(monkeypatch)
         app = _make_app()
         await factor_tools.factor_catalog(app)
         assert len(app.audit.records) == 1
         assert app.audit.records[0].tool_name == "finboard.factor.catalog"
         assert app.audit.records[0].status == "ok"
+
+    async def test_user_defined_appended(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from finboard_persistence import ResearchCodeArtifactRepository
+        from finboard_persistence.research_code_repo import ResearchCodeArtifact
+
+        monkeypatch.setattr(
+            ResearchCodeArtifactRepository,
+            "list_artifacts",
+            lambda self, **kw: _async_return(
+                [
+                    ResearchCodeArtifact(
+                        artifact_id="RC-1",
+                        kind="factor",
+                        name="mom20",
+                        commit="a" * 40,
+                        path="factors/mom20",
+                        checksum="deadbeef",
+                        status="active",
+                        created_by="agent:mcp",
+                        created_at=datetime(2026, 8, 30, tzinfo=UTC),
+                    )
+                ]
+            ),
+        )
+        app = _make_app()
+        env = await factor_tools.factor_catalog(app)
+        assert env.status == "ok"
+        user_entries = [item for item in env.data if item.get("origin") == "user_defined"]
+        assert len(user_entries) == 1
+        entry = user_entries[0]
+        assert entry["name"] == "u_mom20"
+        assert entry["status"] == "active"
+        assert entry["commit"] == "a" * 40
+
+    async def test_include_user_defined_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # include_user_defined=false 不查 DB,直接返回 builtin
+        app = _make_app()
+        env = await factor_tools.factor_catalog(app, include_user_defined=False)
+        assert env.status == "ok"
+        assert all(item["origin"] == "builtin" for item in env.data)
 
     async def test_role_filter_invalid(self) -> None:
         app = _make_app()

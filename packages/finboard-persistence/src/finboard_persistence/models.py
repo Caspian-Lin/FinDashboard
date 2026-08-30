@@ -1684,16 +1684,21 @@ class ResearchDatasetReleaseModel(Base, IdMixin):
 
 
 class FactorFeatureSnapshotModel(Base, IdMixin):
-    """不可变 FeatureSnapshot;逐条数据保存在完整 payload 中。"""
+    """不可变 FeatureSnapshot;逐条数据保存在完整 payload 中。
+
+    #217:沙箱因子快照没有单一数据发布锚点 —— ``dataset_release_id``
+    为空、``source_run_id`` 指向产出它的 ``research_code_runs.run_id``。
+    """
 
     __tablename__ = "factor_feature_snapshots"
 
     snapshot_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    dataset_release_id: Mapped[str] = mapped_column(
+    dataset_release_id: Mapped[str | None] = mapped_column(
         String(128),
         ForeignKey("research_dataset_releases.release_id", ondelete="RESTRICT"),
         index=True,
     )
+    source_run_id: Mapped[str | None] = mapped_column(String(32), index=True)
     dataset_release_checksum: Mapped[str] = mapped_column(String(64), index=True)
     decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -2025,6 +2030,11 @@ class ResearchCodeRunModel(Base, IdMixin):
         String(64), nullable=True
     )
     scores_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # issue #217:成功 run 落库的 FeatureSnapshot 回填引用(不建外键,
+    # 快照表自身按 checksum 不可变)。
+    output_snapshot_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     # running|succeeded|failed
     status: Mapped[str] = mapped_column(String(16), index=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
