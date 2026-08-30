@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     research_sandbox_enabled: bool = False
     # 沙箱镜像(tag 与 finboard-research-kit 版本绑定,构建见
     # docker/research-sandbox/;run 记录同时归档镜像 digest)。
-    research_sandbox_image: str = "finboard-research-sandbox:0.1.0"
+    research_sandbox_image: str = "finboard-research-sandbox:0.2.0"
     # 整跑墙钟超时(秒),超时 docker kill;内存 MB(memory-swap 同值禁 swap);
     # CPU 配额;进程数上限;容器内非 root uid(镜像内 sandbox 用户)。
     research_sandbox_timeout_seconds: float = Field(default=300.0, ge=1.0)
