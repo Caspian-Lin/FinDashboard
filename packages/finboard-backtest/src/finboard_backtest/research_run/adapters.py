@@ -22,6 +22,8 @@ SUPPORTED_RESEARCH_STRATEGIES = frozenset(
         "mean_reversion",
         "convertible_double_low",
         "futures_tsmom",
+        # issue #218:沙箱策略代码(strategy.decide → 目标权重)。
+        "user_code",
     }
 )
 _CAPABILITY_ALTERNATIVES: dict[str, tuple[tuple[str, ...], ...]] = {
@@ -31,6 +33,8 @@ _CAPABILITY_ALTERNATIVES: dict[str, tuple[tuple[str, ...], ...]] = {
     "mean_reversion": (("etf:*",),),
     "convertible_double_low": (("convertible",),),
     "futures_tsmom": (("futures",),),
+    # issue #218:与 ma_cross 同面 —— A 股权益行情(bars 主发布)。
+    "user_code": (("stock", "etf:*"),),
 }
 
 

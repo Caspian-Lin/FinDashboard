@@ -18,6 +18,12 @@ from finboard_backtest.research_code.git_repo import (
     ResearchCodeError,
     ResearchCodeRepo,
 )
+from finboard_backtest.research_code.user_code import (
+    active_user_strategy_commits,
+    active_user_strategy_names,
+    freeze_user_code_commit,
+    user_code_reference_gate_error,
+)
 from finboard_backtest.research_code.user_factors import (
     active_user_factor_names,
     user_factor_reference_gate_error,
@@ -129,7 +135,11 @@ __all__ = [
     "ResearchCodeRepo",
     "ResearchCodeService",
     "active_user_factor_names",
+    "active_user_strategy_commits",
+    "active_user_strategy_names",
     "compute_checksum",
+    "freeze_user_code_commit",
+    "user_code_reference_gate_error",
     "user_factor_reference_gate_error",
     "validate_submission",
 ]

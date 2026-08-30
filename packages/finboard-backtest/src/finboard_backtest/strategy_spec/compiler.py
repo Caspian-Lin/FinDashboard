@@ -206,16 +206,31 @@ def compile_strategy_spec(
     disabled_factors: frozenset[str] = frozenset(),
     available_dataset_release_ids: frozenset[str] | None = None,
     user_factor_sources: Collection[str] = frozenset(),
+    user_code_sources: Collection[str] = frozenset(),
 ) -> ResolvedStrategyPlan:
     """校验并解析策略规格。所有依赖均 fail closed。
 
     ``user_factor_sources`` 是当前 ``status=active`` 的沙箱用户因子名
     集合(u_ 前缀,#217);引用非集合内的用户因子直接报错(retired /
     不存在的 artifact fail-visible,由调用方从 DB 注入名单)。
+
+    ``user_code_sources`` 是当前 ``status=active`` 的沙箱策略代码
+    artifact 名集合(#218);``strategy_kind=user_code`` 的
+    ``code_artifact.name`` 不在集合内直接报错(同 fail-visible 语义)。
     """
 
     payload = raw.canonical_payload() if isinstance(raw, ResearchStrategySpec) else raw
     spec = ResearchStrategySpec.model_validate(migrate_strategy_payload(payload))
+
+    if spec.strategy_kind == "user_code":
+        artifact_name = spec.code_artifact.name if spec.code_artifact else ""
+        if artifact_name not in user_code_sources:
+            raise StrategySpecError(
+                f"user_code 策略引用的代码 artifact 不可用(不存在或非 active): "
+                f"{artifact_name!r};先经 finboard_research_code_submit 提交 "
+                "kind=strategy 代码并保持 status=active;历史版本引用须先 "
+                "finboard_research_code_rollback 再入队"
+            )
 
     required_sources: set[str] = set()
     required_datasets: set[str] = set()
