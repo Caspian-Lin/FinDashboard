@@ -643,6 +643,10 @@ class ResearchRunReport:
     execution_mode: ResearchExecutionMode = ResearchExecutionMode.SINGLE_SHOT
     annualized_return: float = 0.0
     equity_curve: tuple[EquityPoint, ...] = ()
+    # issue #217:因子筛选指标(IC/IR/分层收益/换手率/与既有因子相关性矩阵)。
+    # 仅当 run 引用用户自定义因子(u_ 前缀,沙箱执行产出)时非空;计算
+    # 失败不阻塞 run(尽力而为,失败原因记 issues)。
+    factor_screen: dict[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
         metrics = (
