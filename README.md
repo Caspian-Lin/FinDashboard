@@ -213,10 +213,14 @@ agent 经 MCP 提交的因子代码(`finboard_research_code_submit`,issue #215)�
 且错误指明阈值)后落库为 feature snapshot(issue #217):因子观测名
 `u_<name>`,策略规格按名引用(仅 artifact active 可引用),run report 携带
 `factor_screen` 筛选指标(IC/IR/分层收益/换手率/与既有因子相关性矩阵)。
+issue #218 起策略代码同样进入回测:`strategy_kind=user_code` 规格引用
+kind=strategy 的 active artifact,`finboard_run_queue`(multi_period)逐
+决策日在沙箱执行 `decide(ctx) -> 目标权重`(当前权重回显 + 约束视图),
+复用组合管线,report 附 `sandbox_provenance`(code commit + 镜像 digest)。
 默认关闭,启用前置(Docker Desktop 运行):
 
 ```bash
-docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.1.0 .
+docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.2.0 .
 # .env: FINBOARD_RESEARCH_SANDBOX_ENABLED=true
 ```
 

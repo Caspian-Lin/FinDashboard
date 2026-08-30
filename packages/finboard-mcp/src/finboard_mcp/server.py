@@ -253,6 +253,22 @@ FinBoard 研究 MCP —— 量化研究工具集
   retired 拦截,multi_period 引用用户因子秒级拒绝)。需
   research_sandbox_enabled=true + Docker Desktop + docker/research-sandbox
   镜像;纯离线研究域,不连 broker 不下单。
+- 用户代码策略执行(✅ #218):strategy_spec ``strategy_kind=user_code`` +
+  ``code_artifact={name, commit?}`` 引用 kind=strategy 的 active artifact
+  (feature_graph/signal_rules 允许为空)。research_run(建议
+  ``parameters.rebalance_frequency=monthly|quarterly`` 走 multi_period;
+  single_shot 需冻结快照提供决策时点)逐决策日在一次性容器执行
+  ``strategy.decide(ctx) -> targets``:输入 = PIT 数据视图 + **当前权重回显**
+  (上一决策成交后的实际持仓)+ 组合约束只读视图;输出目标权重映射为信号,
+  复用 #91 组合管线(硬约束截断审计/风险退出/三档资金可行性/撮合/账本)
+  —— **策略只出目标权重,不触任何订单语义**。越权处理:池外/缺执行元数据
+  标的丢弃记 warning;负权重与超上限由管线约束投影逐项截断审计。入队门控
+  (REST+MCP 共享):artifact 非 active / commit 不一致 / 沙箱未启用 /
+  single_shot 缺快照 → 秒级拒绝;放行时 active commit 冻结进 manifest
+  (input_checksum 覆盖代码版本)。report 附 ``sandbox_provenance``(code
+  commit + 镜像 digest + 逐决策 targets checksum);与 multi_factor 同一
+  决策日/候选池口径,报告同屏可比。逐日决策函数协议 v1 不做事件驱动
+  on_bar(日内形态另行立项)。纯离线研究域,不连 broker 不下单。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
 
@@ -264,8 +280,9 @@ FinBoard 研究 MCP —— 量化研究工具集
 - 代码边界(#215):web 通道仍是「无代码版本化规格」,禁止网页提交 Python /
   模块路径 / 可执行表达式;**仅 MCP agent 通道**开放受控研究代码提交
   (finboard_research_code_submit,静态校验 + 版本化存储);执行走
-  finboard_research_code_run(一次性沙箱容器,#216),产出仅为研究截面
-  scores —— 不是策略上线,LLM 产出仍须走
+  finboard_research_code_run(一次性沙箱容器,#216,因子截面)或 user_code
+  策略规格的逐决策 decide(#218,沙箱内跑、复用组合管线)—— 均不是策略
+  上线,LLM 产出仍须走
   研究→回测→OOS→模拟→影子→小资金完整晋级链。
 
 == 输出规范 ==

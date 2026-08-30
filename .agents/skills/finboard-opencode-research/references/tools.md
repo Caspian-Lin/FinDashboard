@@ -54,9 +54,10 @@
 ### finboard_run_queue(✅ #127 + #170 + #183,写)
 冻结输入 + 登记 queued ResearchRun(**不执行回测**,执行由离线 worker 完成)。
 issue #170 起 `multi_factor` 已发布规格可由 worker 端到端执行
-(信号引擎 + 组合流水线 → 14 stage artifacts → COMPLETED);其余 strategy
-kind(etf_rotation / mean_reversion / convertible_double_low / futures_tsmom /
-ma_cross)仍报 not_implemented。执行失败(如快照缺因子源)时 `finboard_run_get`
+(信号引擎 + 组合流水线 → 14 stage artifacts → COMPLETED);issue #218 起
+`user_code`(沙箱策略代码,见「用户代码策略执行」节)同样端到端;
+其余 strategy kind(etf_rotation / mean_reversion / convertible_double_low /
+futures_tsmom / ma_cross)仍报 not_implemented。执行失败(如快照缺因子源)时 `finboard_run_get`
 可见 error_code / error_summary,`research_runs` 不停留在 QUEUED。
 issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
 再平衡回放**:按冻结发布交易日历每期重算 universe/features/signals 与组合,
@@ -1193,7 +1194,7 @@ commit,旧版本自动 retired。
 active 因子代码在一次性 Docker 容器内执行 `factor.compute(ctx) -> scores`
 (协议 v1 纯截面函数)。**前置条件**:`research_sandbox_enabled=true` +
 Docker Desktop + 已构建镜像 `docker/research-sandbox`(tag 与
-finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.1.0`;
+finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.2.0`;
 仓库根 `docker build -f docker/research-sandbox/Dockerfile -t <tag> .`)。
 
 ### 执行协议 v1(ctx / 输出)
@@ -1257,3 +1258,41 @@ finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.1.0`;
    入队秒级拒绝);
 6. run report 的 `factor_screen` 段给出该因子的 rank_ic / rank_ic_ir /
    分层收益(5 桶)/ 换手率 / 与既有因子(builtin)的相关性矩阵。
+
+## 用户代码策略执行(#218,逐日决策函数)
+
+agent 编写的**策略**代码进入回测。与因子不同,策略代码不落快照,而是经
+strategy_spec 引用后由 research run **逐决策日**在沙箱容器内执行:
+
+```python
+# strategies/<name>/strategy.py(经 finboard_research_code_submit 提交)
+def decide(ctx):
+    # ctx: StrategyContext —— decision_at / symbols / bars / daily_metrics /
+    #      financial_indicators / params(同 FactorContext),另有:
+    #   ctx.current_weights: 引擎回显的当前组合权重(pd.Series,上一决策
+    #     成交后的实际持仓市值占比;首轮为空;跨日路径依赖由此覆盖)
+    #   ctx.constraints: 组合约束只读视图(max_weight_per_asset / long_only /
+    #     max_gross_exposure / min_cash_buffer)
+    targets = {...}  # {symbol: 目标权重};权重和可 < 1(持现金)、可为空(观望)
+    return targets   # 或 StrategyResult(targets, meta)
+```
+
+- 规格侧:`strategy_kind: "user_code"` + `code_artifact: {name, commit?}`
+  (引用 kind=strategy 的 active artifact;commit 省略 = active,入队时冻结
+  进 manifest)。`feature_graph` / `signal_rules` 允许为空(特征由代码自行
+  计算);其余 kind 携带 code_artifact 非法。web 通道仍禁代码。
+- 执行:建议 `parameters.rebalance_frequency=monthly|quarterly`
+  (multi_period,决策日由发布日历推导);single_shot 需冻结快照提供决策
+  时点。每个决策日一个一次性容器(`--network none` / 只读 / PIT 物理隔离,
+  挂载清单含权重回显与约束视图)。
+- 权重语义与越权处理:目标权重 → 信号(score=权重)→ **#91 组合管线**
+  (硬约束截断审计 / 风险退出 / 三档资金可行性 / 撮合 / 账本)—— 策略只出
+  目标权重,不触任何订单语义。池外/缺执行元数据标的**丢弃记 warning**;
+  负权重与超上限由管线约束投影**逐项截断并审计**(constraints 阶段可见)。
+- 入队门控(REST+MCP 共享):artifact 非 active / commit 与 active 不一致 /
+  沙箱未启用 / single_shot 缺快照 → 秒级 `invalid_argument`。
+- report:`sandbox_provenance` 段归档 code commit + 沙箱镜像 digest +
+  逐决策 targets checksum;与 multi_factor 同一决策日/候选池口径,
+  报告**同屏可比**。
+- v1 边界:逐日决策函数(decide),**不做**事件驱动 on_bar(日内止损 /
+  执行形态研究如需,另行开 issue);纯离线研究域,不连 broker 不下单。
