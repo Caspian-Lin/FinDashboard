@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -142,11 +143,13 @@ def compile_registered_strategy_spec(
     *,
     disabled_factors: frozenset[str] = frozenset(),
     available_dataset_release_ids: frozenset[str] | None = None,
+    user_factor_sources: Collection[str] = frozenset(),
 ) -> ResolvedStrategyPlan:
     plan = compile_strategy_spec(
         raw,
         disabled_factors=disabled_factors,
         available_dataset_release_ids=available_dataset_release_ids,
+        user_factor_sources=user_factor_sources,
     )
     capability = get_strategy_capability(plan.spec.strategy_kind)
     if not set(plan.spec.universe.asset_classes).issubset(capability.asset_classes):

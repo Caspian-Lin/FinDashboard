@@ -18,6 +18,10 @@ from finboard_backtest.research_code.git_repo import (
     ResearchCodeError,
     ResearchCodeRepo,
 )
+from finboard_backtest.research_code.user_factors import (
+    active_user_factor_names,
+    user_factor_reference_gate_error,
+)
 from finboard_backtest.research_code.validation import (
     IMPORT_WHITELIST,
     MAX_FILE_BYTES,
@@ -124,6 +128,8 @@ __all__ = [
     "ResearchCodeError",
     "ResearchCodeRepo",
     "ResearchCodeService",
+    "active_user_factor_names",
     "compute_checksum",
+    "user_factor_reference_gate_error",
     "validate_submission",
 ]

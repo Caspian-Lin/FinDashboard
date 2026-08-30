@@ -28,6 +28,10 @@ from finboard_api.research_run_schemas import (
     ResearchRunReplayIn,
 )
 from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+from finboard_backtest.research_code import (
+    active_user_factor_names,
+    user_factor_reference_gate_error,
+)
 from finboard_backtest.research_run import (
     FrozenArtifactRef,
     ResearchActorType,
@@ -40,6 +44,9 @@ from finboard_backtest.research_run import (
 )
 from finboard_backtest.research_run.contracts import JsonValue
 from finboard_backtest.research_run.signal_engine import single_shot_snapshot_gate_error
+from finboard_backtest.research_sandbox.factor_publish import (
+    sandbox_snapshot_dataset_release_ids,
+)
 from finboard_backtest.strategy_spec import ResearchStrategySpec
 from finboard_backtest.strategy_spec.contracts import FeatureKind
 from finboard_backtest.strategy_spec.universe_precheck import (
@@ -128,12 +135,37 @@ async def queue_research_run(
     )
     if gate_error is not None:
         raise HTTPException(status_code=422, detail=gate_error)
+    # issue #217:用户因子(u_ 前缀)入队门控 —— retired/不存在拒绝;
+    # multi_period 引用用户因子拒绝(观测绑定单一 decision_at)。
+    user_gate_error = user_factor_reference_gate_error(
+        required_factor_sources=required_factor_sources,
+        active_user_factors=await active_user_factor_names(session),
+        parameters=cast(dict[str, JsonValue] | None, body.parameters),
+    )
+    if user_gate_error is not None:
+        raise HTTPException(status_code=422, detail=user_gate_error)
     release_ids = {release.release_id for release in releases}
     for snapshot in snapshots:
-        if snapshot.dataset_release_id not in release_ids:
+        # issue #217:沙箱快照(dataset_release_id=None)按其锚定 run 冻结
+        # 的发布集合校验 ⊆ 本次冻结清单(数据一致性 fail-visible)。
+        sandbox_release_ids = await sandbox_snapshot_dataset_release_ids(
+            session, snapshot
+        )
+        if sandbox_release_ids is None:
+            if snapshot.dataset_release_id not in release_ids:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中"
+                    ),
+                )
+        elif not sandbox_release_ids <= release_ids:
             raise HTTPException(
                 status_code=422,
-                detail=(f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中"),
+                detail=(
+                    f"沙箱因子快照 {snapshot.snapshot_id} 锚定 run 的数据发布 "
+                    f"{sorted(sandbox_release_ids - release_ids)} 不在本次冻结清单中"
+                ),
             )
 
     # issue #186:入队同步候选池非空校验。用 bars 主发布(信号引擎实际使用的

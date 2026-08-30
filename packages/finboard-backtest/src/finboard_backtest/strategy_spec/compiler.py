@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,7 @@ from finboard_backtest.strategy_spec.contracts import (
     migrate_strategy_payload,
 )
 from finboard_backtest.strategy_spec.universe_precheck import UniversePoolPreview
+from finboard_data.factor_lab import is_user_factor_name
 from finboard_data.factors import FACTOR_CATALOG
 
 LIFECYCLE_STAGES = (
@@ -203,8 +205,14 @@ def compile_strategy_spec(
     *,
     disabled_factors: frozenset[str] = frozenset(),
     available_dataset_release_ids: frozenset[str] | None = None,
+    user_factor_sources: Collection[str] = frozenset(),
 ) -> ResolvedStrategyPlan:
-    """校验并解析策略规格。所有依赖均 fail closed。"""
+    """校验并解析策略规格。所有依赖均 fail closed。
+
+    ``user_factor_sources`` 是当前 ``status=active`` 的沙箱用户因子名
+    集合(u_ 前缀,#217);引用非集合内的用户因子直接报错(retired /
+    不存在的 artifact fail-visible,由调用方从 DB 注入名单)。
+    """
 
     payload = raw.canonical_payload() if isinstance(raw, ResearchStrategySpec) else raw
     spec = ResearchStrategySpec.model_validate(migrate_strategy_payload(payload))
@@ -213,6 +221,22 @@ def compile_strategy_spec(
     required_datasets: set[str] = set()
     for node in spec.feature_graph.nodes:
         if node.source is None:
+            continue
+        if is_user_factor_name(node.source):
+            if node.source not in user_factor_sources:
+                raise StrategySpecError(
+                    f"用户因子不可引用(artifact 不存在或非 active): {node.source};"
+                    "先 finboard_research_code_submit 提交因子代码并保持 "
+                    "status=active,沙箱执行产出快照后才能被规格引用"
+                )
+            if node.kind is not FeatureKind.FACTOR:
+                raise StrategySpecError(
+                    f"用户因子节点 {node.node_id} kind 须为 factor,"
+                    f"实际 {node.kind.value}"
+                )
+            if node.source in disabled_factors:
+                raise StrategySpecError(f"策略依赖已停用因子: {node.source}")
+            required_sources.add(node.source)
             continue
         definition = FEATURE_SOURCE_CATALOG.get(node.source)
         if definition is None:
