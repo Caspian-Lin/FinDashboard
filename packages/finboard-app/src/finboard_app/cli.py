@@ -239,6 +239,64 @@ def _ensure_dev_database(settings: Settings) -> bool:
     return True
 
 
+def _ensure_sandbox_image(settings: Settings) -> bool:
+    """研究沙箱开关开启时,确保沙箱镜像在本机存在(缺失则自动构建)。
+
+    沙箱没有常驻服务:每次研究代码 run 由 worker 按需 ``docker run`` 一次性
+    容器,镜像缺失只会在执行期报 SANDBOX_UNAVAILABLE。dev 预检把这个失败
+    提前到启动期(与 CI 同源 Dockerfile,layer 缓存命中时秒级);docker
+    不可用或构建失败仅警告,不阻断 dev 启动。返回是否执行了构建。
+    """
+    if not settings.research_sandbox_enabled:
+        return False
+    docker_bin = settings.research_sandbox_docker_bin
+    image = settings.research_sandbox_image
+    try:
+        inspected = subprocess.run(
+            [docker_bin, "image", "inspect", image],
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        typer.echo(f"警告: 无法调用 {docker_bin},跳过沙箱镜像检查({exc})。", err=True)
+        return False
+    if inspected.returncode == 0:
+        return False
+    typer.echo(
+        f"沙箱镜像 {image} 不在本机,自动构建中(docker/research-sandbox/,"
+        "首次约 1-2 分钟,之后走 layer 缓存)..."
+    )
+    try:
+        built = subprocess.run(
+            [
+                docker_bin,
+                "build",
+                "-f",
+                "docker/research-sandbox/Dockerfile",
+                "-t",
+                image,
+                ".",
+            ],
+            check=False,
+        )
+    except OSError as exc:
+        typer.echo(
+            f"警告: 沙箱镜像自动构建失败({exc});研究代码 run 将报 "
+            "SANDBOX_UNAVAILABLE,可手动 docker build -f docker/research-sandbox/Dockerfile。",
+            err=True,
+        )
+        return False
+    if built.returncode != 0:
+        typer.echo(
+            "警告: 沙箱镜像自动构建失败;研究代码 run 将不可用"
+            "(可手动 docker build -f docker/research-sandbox/Dockerfile -t "
+            f"{image} .)。",
+            err=True,
+        )
+        return False
+    typer.echo(f"沙箱镜像 {image} 已就绪。")
+    return True
+
 def _start_dev_frontend(npm_executable: str, web_dir: Path) -> subprocess.Popen[bytes]:
     if sys.platform == "win32":
         return subprocess.Popen(
@@ -328,6 +386,8 @@ def dev(
         raise typer.Exit(code=1) from exc
     if wsl_started:
         typer.echo("已自动唤醒 WSL PostgreSQL。")
+    if _ensure_sandbox_image(settings):
+        typer.echo("已自动构建研究沙箱镜像。")
 
     stop_event = threading.Event()
     frontend_holder: list[subprocess.Popen[bytes]] = []

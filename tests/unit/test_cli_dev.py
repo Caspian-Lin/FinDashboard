@@ -21,6 +21,7 @@ def test_dev_keeps_api_in_foreground_and_always_stops_frontend(tmp_path: Path) -
     with (
         patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
         patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
         patch("finboard_app.cli._spawn_dev_worker") as spawn_worker,
         patch("finboard_app.cli._stop_dev_process"),
         patch("finboard_app.cli.threading.Thread", return_value=thread),
@@ -47,6 +48,7 @@ def test_dev_no_worker_skips_spawn(tmp_path: Path) -> None:
     with (
         patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
         patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
         patch("finboard_app.cli._spawn_dev_worker") as spawn_worker,
         patch("finboard_app.cli.threading.Thread", return_value=thread),
         patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt),
@@ -70,6 +72,7 @@ def test_dev_worker_process_is_stopped_on_exit(tmp_path: Path) -> None:
     with (
         patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
         patch("finboard_app.cli._ensure_dev_database", return_value=False),
+        patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
         patch("finboard_app.cli._spawn_dev_worker", return_value=worker_process),
         patch("finboard_app.cli.threading.Thread", return_value=thread),
         patch("finboard_app.cli._stop_dev_process") as stop_process,
@@ -152,6 +155,7 @@ def test_dev_does_not_start_frontend_when_database_is_unavailable(tmp_path: Path
     with (
         patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
         patch("finboard_app.cli._ensure_dev_database", side_effect=TimeoutError),
+        patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
         patch("finboard_app.cli.threading.Thread") as thread,
         pytest.raises(typer.Exit) as exc_info,
     ):
@@ -197,3 +201,87 @@ def test_wake_wsl_postgresql_starts_fixed_local_service() -> None:
     assert "systemctl start postgresql" in args[6]
     assert "pg_isready -h 127.0.0.1 -p 5432" in args[6]
     assert "secret" not in " ".join(args)
+
+
+# --------------------------------------------------------------------------- #
+# 沙箱镜像 dev 预检(issue #240)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_ensure_sandbox_image_skips_when_disabled() -> None:
+    """开关关闭(默认)零 docker 调用,行为与历史版本一致。"""
+    from finboard_app.cli import _ensure_sandbox_image
+
+    settings = MagicMock()
+    settings.research_sandbox_enabled = False
+    with patch("finboard_app.cli.subprocess.run") as run:
+        assert _ensure_sandbox_image(settings) is False
+    run.assert_not_called()
+
+
+@pytest.mark.unit
+def test_ensure_sandbox_image_noop_when_image_present() -> None:
+    """镜像已存在只做一次 inspect,不构建。"""
+    from finboard_app.cli import _ensure_sandbox_image
+
+    settings = MagicMock()
+    settings.research_sandbox_enabled = True
+    settings.research_sandbox_docker_bin = "docker"
+    settings.research_sandbox_image = "finboard-research-sandbox:0.2.0"
+    with patch(
+        "finboard_app.cli.subprocess.run",
+        return_value=MagicMock(returncode=0),
+    ) as run:
+        assert _ensure_sandbox_image(settings) is False
+    assert run.call_count == 1
+    assert run.call_args.args[0][:3] == ["docker", "image", "inspect"]
+
+
+@pytest.mark.unit
+def test_ensure_sandbox_image_builds_when_missing() -> None:
+    """镜像缺失时用与 CI 同源的 Dockerfile 自动构建。"""
+    from finboard_app.cli import _ensure_sandbox_image
+
+    settings = MagicMock()
+    settings.research_sandbox_enabled = True
+    settings.research_sandbox_docker_bin = "docker"
+    settings.research_sandbox_image = "finboard-research-sandbox:0.2.0"
+    results = [MagicMock(returncode=1), MagicMock(returncode=0)]
+    with patch("finboard_app.cli.subprocess.run", side_effect=results) as run:
+        assert _ensure_sandbox_image(settings) is True
+    assert run.call_count == 2
+    build_cmd = run.call_args.args[0]
+    assert build_cmd[0:2] == ["docker", "build"]
+    assert "docker/research-sandbox/Dockerfile" in build_cmd
+    assert "finboard-research-sandbox:0.2.0" in build_cmd
+
+
+@pytest.mark.unit
+def test_ensure_sandbox_image_build_failure_warns_not_raises() -> None:
+    """构建失败仅警告返回 False,不阻断 dev 启动。"""
+    from finboard_app.cli import _ensure_sandbox_image
+
+    settings = MagicMock()
+    settings.research_sandbox_enabled = True
+    settings.research_sandbox_docker_bin = "docker"
+    settings.research_sandbox_image = "finboard-research-sandbox:0.2.0"
+    results = [MagicMock(returncode=1), MagicMock(returncode=2)]
+    with patch("finboard_app.cli.subprocess.run", side_effect=results):
+        assert _ensure_sandbox_image(settings) is False
+
+
+@pytest.mark.unit
+def test_ensure_sandbox_image_docker_missing_warns_not_raises() -> None:
+    """docker CLI 缺失(OSError)警告跳过。"""
+    from finboard_app.cli import _ensure_sandbox_image
+
+    settings = MagicMock()
+    settings.research_sandbox_enabled = True
+    settings.research_sandbox_docker_bin = "docker"
+    settings.research_sandbox_image = "finboard-research-sandbox:0.2.0"
+    with patch(
+        "finboard_app.cli.subprocess.run", side_effect=FileNotFoundError("docker")
+    ):
+        assert _ensure_sandbox_image(settings) is False
+
