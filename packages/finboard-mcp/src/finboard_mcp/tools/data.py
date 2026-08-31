@@ -35,6 +35,7 @@ from finboard_persistence import (
     InstrumentModel,
     InstrumentRepository,
     ResearchDatasetReleaseRepository,
+    release_symbol_check,
 )
 
 if TYPE_CHECKING:
@@ -286,17 +287,39 @@ async def dataset_release_list(
     )
 
 
+#: symbol 成员核对单次上限(防误传全市场清单把响应撑回 MB 级)
+MAX_SYMBOL_CHECK = 500
+
+
 async def dataset_release_get(
     app: McpAppContext,
     release_id: str,
     *,
     view: str = "summary",
+    symbols: list[str] | None = None,
 ) -> ToolEnvelope:
-    """查询单个研究数据发布(issue #206:view 默认 summary,省略逐标的数组)。"""
+    """查询单个研究数据发布(issue #206:view 默认 summary,省略逐标的数组)。
+
+    issue #238:提供 ``symbols`` 时返回 summary + ``symbol_check``
+    {requested, matched, missing} 轻量成员核对(按冻结 manifest 判定,
+    matched/missing 保持请求顺序)——核对 N 只标的是否在发布内不再需要
+    拉全量 detail。
+    """
 
     async def _do() -> dict[str, Any]:
         if view not in ("summary", "detail"):
             raise McpToolError("invalid_argument", f"未知视图: {view}")
+        codes = [str(c).strip() for c in (symbols or []) if str(c).strip()]
+        if symbols and not codes:
+            raise McpToolError(
+                "invalid_argument", "symbols 不能为空(如 ['600000.SH','000001.SZ'])"
+            )
+        if len(codes) > MAX_SYMBOL_CHECK:
+            raise McpToolError(
+                "invalid_argument",
+                f"symbols 数量 {len(codes)} 超过上限 {MAX_SYMBOL_CHECK};"
+                "全量成员请用 view=detail 或按 data_cache_status 筛选",
+            )
         async with app.session_maker() as session:
             repo = ResearchDatasetReleaseRepository(session)
             release = await repo.get(release_id)
@@ -304,6 +327,10 @@ async def dataset_release_get(
                 raise McpToolError(
                     "not_found", f"未找到研究数据发布: {release_id}"
                 )
+            if codes:
+                summary = _release_summary_to_dict(release)
+                summary["symbol_check"] = release_symbol_check(release, codes)
+                return summary
             if view == "summary":
                 return _release_summary_to_dict(release)
             return _release_detail_to_dict(release)
@@ -311,7 +338,7 @@ async def dataset_release_get(
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.dataset_release.get",
-        arguments={"release_id": release_id, "view": view},
+        arguments={"release_id": release_id, "view": view, "symbols": symbols},
         handler=_do,
     )
 
@@ -649,16 +676,20 @@ def register(mcp: MCPServer) -> None:
             "查询数据集发布详情。view=summary(默认):头部字段 + capabilities"
             " + 覆盖统计(symbol_count/row_count/coverage_pct),**不含逐标的 "
             "instruments 数组**(全市场发布可达几十 MB);view=detail:完整 "
-            "as_dict()(含逐标的覆盖、资产规则,诊断用)。未找到返回 not_found。"
+            "as_dict()(含逐标的覆盖、资产规则,诊断用)。提供 symbols 参数"
+            "(最多 500 只)时不看 view,返回 summary + symbol_check"
+            "{requested, matched, missing} 成员核对(判断 N 只标的是否在"
+            "发布内,免拉全量 detail)。未找到返回 not_found。"
         ),
     )
     async def _dataset_release_get(
         release_id: str,
         view: str = "summary",
+        symbols: list[str] | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await dataset_release_get(
-            app_context(ctx), release_id, view=view
+            app_context(ctx), release_id, view=view, symbols=symbols
         )
 
     @mcp.tool(

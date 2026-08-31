@@ -1167,3 +1167,12 @@ class ResearchDatasetReleaseSummaryOut(BaseSchema):
     known_limitations: list[str] = Field(default_factory=list)
     metadata_version: str
     release_checksum: str
+
+
+class DatasetReleaseSymbolCheckOut(BaseSchema):
+    """轻量发布成员核对(issue #238,免全量 detail)。"""
+
+    release_id: str
+    requested: int
+    matched: list[str]
+    missing: list[str]

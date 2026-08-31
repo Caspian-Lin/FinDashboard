@@ -349,6 +349,72 @@ class TestDatasetReleaseGet:
         assert env.error is not None
         assert env.error.kind == "not_found"
 
+    async def test_symbols_param_returns_summary_plus_check(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #238:symbols 提供时返回 summary + symbol_check 成员核对。"""
+        release = _release_domain()
+        release.instruments = [
+            SimpleNamespace(code="600000.SH"),
+            SimpleNamespace(code="000001.SZ"),
+        ]
+        from finboard_persistence.dataset_release_repo import (
+            ResearchDatasetReleaseRepository as Repo,
+        )
+
+        monkeypatch.setattr(
+            Repo, "get", lambda self, release_id: _async_return(release)
+        )
+        app = _make_app()
+        env = await data_tools.dataset_release_get(
+            app, "REL-1", symbols=["600000.SH", "999999.SZ"]
+        )
+        assert env.status == "ok", env.error
+        data = env.data
+        assert data["symbol_count"] == 10  # summary 头部仍在
+        check = data["symbol_check"]
+        assert check["requested"] == 2
+        assert check["matched"] == ["600000.SH"]
+        assert check["missing"] == ["999999.SZ"]
+        assert "instruments" not in data  # 不回全量清单
+
+    async def test_symbols_exceeding_limit_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        release = _release_domain()
+        from finboard_persistence.dataset_release_repo import (
+            ResearchDatasetReleaseRepository as Repo,
+        )
+
+        monkeypatch.setattr(
+            Repo, "get", lambda self, release_id: _async_return(release)
+        )
+        app = _make_app()
+        env = await data_tools.dataset_release_get(
+            app, "REL-1", symbols=[f"S{i}" for i in range(501)]
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "上限" in (env.error.message or "")
+
+    async def test_symbols_blank_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        release = _release_domain()
+        from finboard_persistence.dataset_release_repo import (
+            ResearchDatasetReleaseRepository as Repo,
+        )
+
+        monkeypatch.setattr(
+            Repo, "get", lambda self, release_id: _async_return(release)
+        )
+        app = _make_app()
+        env = await data_tools.dataset_release_get(app, "REL-1", symbols=["  "])
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
 
 class TestDatasetManifestList:
     async def test_returns_manifests(self) -> None:

@@ -194,11 +194,14 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
 
 ### finboard_dataset_release_get
 查询数据集发布详情。
-- 参数:`release_id: str` / `view?: "summary"|"detail" = "summary"`
+- 参数:`release_id: str` / `view?: "summary"|"detail" = "summary"` /
+  `symbols?: list[str]`(≤500 只,#238)
 - 返回(默认 summary,#206):头部字段 + capabilities + 覆盖统计
   (symbol_count/row_count/coverage_pct),**不含逐标的 instruments 数组**
   (全市场发布可达几十 MB,防截断)
-- 返回(view=detail):完整 as_dict()(含逐标的覆盖、资产规则、能力缺口,诊断用);
+- 返回(view=detail):完整 as_dict()(含逐标的覆盖、资产规则、能力缺口,诊断用)
+- 返回(传 symbols):summary + `symbol_check {requested, matched, missing}`
+  成员核对(判断 N 只标的是否在发布内,**免拉全量 detail**);超 500 只 → `invalid_argument`;
   未找到 → `not_found`
 
 ### finboard_dataset_manifest_list

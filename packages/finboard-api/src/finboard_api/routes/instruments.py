@@ -21,6 +21,7 @@ from finboard_api.schemas import (
     ConvertibleMetadataOut,
     DatasetManifestOut,
     DatasetReleaseCapabilityOut,
+    DatasetReleaseSymbolCheckOut,
     EtfAuditOut,
     EtfBatchConfirmRequest,
     EtfClassificationUpdate,
@@ -47,6 +48,7 @@ from finboard_persistence import (
     InstrumentLifecycleEventModel,
     InstrumentModel,
     ResearchDatasetReleaseRepository,
+    release_symbol_check,
 )
 from finboard_shared.types import EtfExecutionProfile
 
@@ -517,6 +519,32 @@ async def get_dataset_release(
     if release is None:
         raise HTTPException(status_code=404, detail=f"未找到研究数据发布: {release_id}")
     return ResearchDatasetReleaseOut.model_validate(_release_detail_payload(release))
+
+
+@router.get(
+    "/datasets/releases/{release_id}/symbols",
+    response_model=DatasetReleaseSymbolCheckOut,
+)
+async def check_dataset_release_symbols(
+    release_id: str,
+    codes: str = Query(..., description="逗号分隔的标的代码,最多 500 只"),
+    session: AsyncSession = Depends(get_db_session),
+) -> DatasetReleaseSymbolCheckOut:
+    """轻量成员核对(issue #238):按冻结 manifest 判断标的是否在发布内。
+
+    免拉全量 detail(全市场发布可达几十 MB);成员判定与 MCP
+    ``finboard_dataset_release_get(symbols=...)`` 同源。
+    """
+    requested = [code.strip() for code in codes.split(",") if code.strip()]
+    if not requested:
+        raise HTTPException(status_code=422, detail="codes 不能为空(如 600000.SH,000001.SZ)")
+    if len(requested) > 500:
+        raise HTTPException(status_code=422, detail=f"codes 数量 {len(requested)} 超过上限 500")
+    release = await ResearchDatasetReleaseRepository(session).get(release_id)
+    if release is None:
+        raise HTTPException(status_code=404, detail=f"未找到研究数据发布: {release_id}")
+    check = release_symbol_check(release, requested)
+    return DatasetReleaseSymbolCheckOut(release_id=release.release_id, **check)
 
 
 def _instrument_to_out(row: InstrumentModel) -> InstrumentOut:
