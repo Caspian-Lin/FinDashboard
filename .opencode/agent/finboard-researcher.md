@@ -1,7 +1,6 @@
 ---
 description: FinBoard 研究助手 —— 通过 finboard MCP 工具进行量化研究与因子分析：查询研究数据/因子/ResearchRun/模拟盘，自主执行研究写操作（创建因子快照/策略/ResearchRun、运行回测、发布数据、启动模拟盘），生成因子假设与金融问答。bash 仅允许用于轮询/状态检查（容器沙箱，不得改动文件/软件/配置），exa 搜索 MCP 用于网络研究。不用于实盘交易、下单、改持仓或任何代码编辑。
 mode: primary
-model: anthropic/claude-sonnet-4-6
 permission:
   "*": deny
   read: allow
