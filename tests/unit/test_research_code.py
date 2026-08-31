@@ -32,7 +32,7 @@ _FACTOR_FILES = {
         "    return data[-1] / np.mean(data)\n"
     ),
     "manifest.toml": (
-        '[manifest]\nentry = "factor.py"\n\n'
+        '[manifest]\nentry = "factor.compute"\n\n'
         '[manifest.params]\nwindow = 20\n'
     ),
 }
@@ -45,7 +45,7 @@ _STRATEGY_FILES = {
         "def decide(bars, params):\n"
         "    return {'symbol': '000001.SZ', 'target': 0.5}\n"
     ),
-    "manifest.toml": '[manifest]\nentry = "strategy.py"\n',
+    "manifest.toml": '[manifest]\nentry = "strategy.decide"\n',
 }
 
 
@@ -77,14 +77,14 @@ class TestValidation:
         issues = validate_submission(
             kind="strategy",
             name="x",
-            files={"manifest.toml": '[manifest]\nentry = "strategy.py"\n'},
+            files={"manifest.toml": '[manifest]\nentry = "strategy.decide"\n'},
         )
         assert any(i.code == "entry_missing" for i in issues)
 
     def test_entry_signature_missing_function(self) -> None:
         files = {
             "strategy.py": "import math\n\n\ndef other(x):\n    return x\n",
-            "manifest.toml": '[manifest]\nentry = "strategy.py"\n',
+            "manifest.toml": '[manifest]\nentry = "strategy.decide"\n',
         }
         issues = validate_submission(kind="strategy", name="x", files=files)
         assert any(i.code == "entry_signature" for i in issues)
@@ -92,7 +92,7 @@ class TestValidation:
     def test_entry_signature_no_args(self) -> None:
         files = {
             "factor.py": "def compute():\n    return 1\n",
-            "manifest.toml": '[manifest]\nentry = "factor.py"\n',
+            "manifest.toml": '[manifest]\nentry = "factor.compute"\n',
         }
         issues = validate_submission(kind="factor", name="x", files=files)
         assert any(i.code == "entry_signature" for i in issues)
@@ -100,7 +100,7 @@ class TestValidation:
     def test_forbidden_import(self) -> None:
         files = {
             "factor.py": "import subprocess\n\n\ndef compute(d):\n    return d\n",
-            "manifest.toml": '[manifest]\nentry = "factor.py"\n',
+            "manifest.toml": '[manifest]\nentry = "factor.compute"\n',
         }
         issues = validate_submission(kind="factor", name="x", files=files)
         assert any(i.code == "forbidden_import" for i in issues)
@@ -108,7 +108,7 @@ class TestValidation:
     def test_import_not_whitelisted(self) -> None:
         files = {
             "factor.py": "import requests\n\n\ndef compute(d):\n    return d\n",
-            "manifest.toml": '[manifest]\nentry = "factor.py"\n',
+            "manifest.toml": '[manifest]\nentry = "factor.compute"\n',
         }
         issues = validate_submission(kind="factor", name="x", files=files)
         assert any(i.code == "import_not_whitelisted" for i in issues)
@@ -118,7 +118,7 @@ class TestValidation:
             "strategy.py": (
                 "import socket\n\n\ndef decide(d, p):\n    return {}\n"
             ),
-            "manifest.toml": '[manifest]\nentry = "strategy.py"\n',
+            "manifest.toml": '[manifest]\nentry = "strategy.decide"\n',
         }
         issues = validate_submission(kind="strategy", name="x", files=files)
         assert any(i.code == "forbidden_import" for i in issues)
@@ -131,7 +131,7 @@ class TestValidation:
                 "        f.write('x')\n"
                 "    return d\n"
             ),
-            "manifest.toml": '[manifest]\nentry = "factor.py"\n',
+            "manifest.toml": '[manifest]\nentry = "factor.compute"\n',
         }
         issues = validate_submission(kind="factor", name="x", files=files)
         assert any(i.code == "forbidden_call" for i in issues)
@@ -139,7 +139,7 @@ class TestValidation:
     def test_open_read_mode_allowed(self) -> None:
         files = {
             "factor.py": "def compute(d):\n    open('a', 'r').read()\n    return d\n",
-            "manifest.toml": '[manifest]\nentry = "factor.py"\n',
+            "manifest.toml": '[manifest]\nentry = "factor.compute"\n',
         }
         assert (
             validate_submission(kind="factor", name="x", files=files) == []
@@ -148,7 +148,7 @@ class TestValidation:
     def test_eval_forbidden(self) -> None:
         files = {
             "factor.py": "def compute(d):\n    return eval('d')\n",
-            "manifest.toml": '[manifest]\nentry = "factor.py"\n',
+            "manifest.toml": '[manifest]\nentry = "factor.compute"\n',
         }
         issues = validate_submission(kind="factor", name="x", files=files)
         assert any(i.code == "forbidden_call" for i in issues)
@@ -170,7 +170,7 @@ class TestValidation:
     def test_file_too_large(self) -> None:
         files = {
             "factor.py": "def compute(d):\n    return d\n" + "#" * 300_000,
-            "manifest.toml": '[manifest]\nentry = "factor.py"\n',
+            "manifest.toml": '[manifest]\nentry = "factor.compute"\n',
         }
         issues = validate_submission(kind="factor", name="x", files=files)
         assert any(i.code == "file_too_large" for i in issues)
@@ -178,7 +178,7 @@ class TestValidation:
     def test_too_many_files(self) -> None:
         files = {
             "factor.py": "def compute(d):\n    return d\n",
-            "manifest.toml": '[manifest]\nentry = "factor.py"\n',
+            "manifest.toml": '[manifest]\nentry = "factor.compute"\n',
         }
         for i in range(40):
             files[f"note_{i}.md"] = "x"
@@ -204,6 +204,72 @@ class TestValidation:
             kind="widget", name="x", files=_FACTOR_FILES
         )
         assert any(i.code == "invalid_kind" for i in issues)
+
+
+class TestManifestEntryContract:
+    """manifest.entry 契约提交期校验(issue #236)。
+
+    harness 按 ``module.function`` 加载;格式错此前要到沙箱容器里才
+    报 output_contract_violation,浪费一次容器 run。
+    """
+
+    def test_entry_with_py_suffix_rejected(self) -> None:
+        # "factor.py" 可被解析为 module="factor" func="py",落在函数
+        # 不符检查上(harness 里对应 getattr(module, "py") 不可调用)。
+        files = {
+            "factor.py": "def compute(d):\n    return d\n",
+            "manifest.toml": '[manifest]\nentry = "factor.py"\n',
+        }
+        issues = validate_submission(kind="factor", name="x", files=files)
+        assert any(i.code == "manifest_entry_mismatch" for i in issues)
+
+    def test_entry_with_colon_rejected(self) -> None:
+        files = {
+            "factor.py": "def compute(d):\n    return d\n",
+            "manifest.toml": '[manifest]\nentry = "factor.py:compute"\n',
+        }
+        issues = validate_submission(kind="factor", name="x", files=files)
+        assert any(i.code == "manifest_entry_invalid" for i in issues)
+
+    def test_entry_without_dot_rejected(self) -> None:
+        files = {
+            "factor.py": "def compute(d):\n    return d\n",
+            "manifest.toml": '[manifest]\nentry = "factor"\n',
+        }
+        issues = validate_submission(kind="factor", name="x", files=files)
+        assert any(i.code == "manifest_entry_invalid" for i in issues)
+
+    def test_entry_wrong_function_for_kind_rejected(self) -> None:
+        files = {
+            "factor.py": "def compute(d):\n    return d\n",
+            "manifest.toml": '[manifest]\nentry = "factor.decide"\n',
+        }
+        issues = validate_submission(kind="factor", name="x", files=files)
+        assert any(i.code == "manifest_entry_mismatch" for i in issues)
+
+    def test_entry_module_file_missing_rejected(self) -> None:
+        files = {
+            "factor.py": "def compute(d):\n    return d\n",
+            "manifest.toml": '[manifest]\nentry = "momentum.compute"\n',
+        }
+        issues = validate_submission(kind="factor", name="x", files=files)
+        assert any(i.code == "manifest_entry_file_missing" for i in issues)
+
+    def test_error_message_shows_correct_contract(self) -> None:
+        files = {
+            "factor.py": "def compute(d):\n    return d\n",
+            "manifest.toml": '[manifest]\nentry = "factor.py:compute"\n',
+        }
+        issues = validate_submission(kind="factor", name="x", files=files)
+        issue = next(i for i in issues if i.code == "manifest_entry_invalid")
+        assert "factor.compute" in issue.message
+
+    def test_valid_entry_still_passes(self) -> None:
+        files = {
+            "factor.py": "def compute(d):\n    return d\n",
+            "manifest.toml": '[manifest]\nentry = "factor.compute"\n',
+        }
+        assert validate_submission(kind="factor", name="x", files=files) == []
 
 
 # --------------------------------------------------------------------------- #

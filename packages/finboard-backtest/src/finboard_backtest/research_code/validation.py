@@ -2,7 +2,8 @@
 
 在代码进入仓库前做纯静态检查(不 import、不执行):
 
-* manifest 必填字段与入口声明;
+* manifest 必填字段与入口声明(entry 须为 ``module.function`` 且指向
+  提交内的入口文件与 kind 约定函数,factor.compute / strategy.decide);
 * 入口函数存在且签名可调用(factor.compute / strategy.decide,至少一个
   位置参数接收输入数据,不接受 ``*args`` 转发);
 * AST import 白名单(pandas / numpy / polars / math / statistics /
@@ -17,6 +18,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import tomllib
 from dataclasses import dataclass
 
@@ -46,6 +48,9 @@ FORBIDDEN_CALLS: frozenset[str] = frozenset(
 _ENTRY_FILE = {"factor": "factor.py", "strategy": "strategy.py"}
 _ENTRY_FUNC = {"factor": "compute", "strategy": "decide"}
 _TEXT_SUFFIXES = (".py", ".toml", ".md", ".txt", ".json")
+# kit harness 契约(entry.partition(".")):module 对应 <module>.py,
+# function 为模块级入口函数;两侧都必须是合法标识符。
+_ENTRY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -129,7 +134,9 @@ def validate_submission(
             ValidationIssue(manifest_name, "manifest_missing", "缺少 manifest.toml(必填)")
         )
     else:
-        issues.extend(_validate_manifest(manifest_name, normalized[manifest_name]))
+        issues.extend(
+            _validate_manifest(manifest_name, normalized[manifest_name], kind=kind, files=normalized)
+        )
 
     entry = _ENTRY_FILE[kind]
     if entry not in normalized:
@@ -144,7 +151,13 @@ def validate_submission(
     return issues
 
 
-def _validate_manifest(rel: str, data: bytes) -> list[ValidationIssue]:
+def _validate_manifest(
+    rel: str,
+    data: bytes,
+    *,
+    kind: str,
+    files: dict[str, bytes],
+) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     try:
         doc = tomllib.loads(data.decode("utf-8"))
@@ -164,6 +177,42 @@ def _validate_manifest(rel: str, data: bytes) -> list[ValidationIssue]:
     params = top.get("params")
     if params is not None and not isinstance(params, dict):
         issues.append(ValidationIssue(rel, "manifest_invalid", "manifest.params 须为表"))
+
+    # entry 契约(issue #236):沙箱 harness 按 `module.function` 加载,
+    # 格式错要等到容器里才报 output_contract_violation,这里提前到提交期。
+    entry = top.get("entry")
+    if isinstance(entry, str) and entry:
+        expected_func = _ENTRY_FUNC.get(kind)
+        if not _ENTRY_PATTERN.match(entry):
+            issues.append(
+                ValidationIssue(
+                    rel,
+                    "manifest_entry_invalid",
+                    f"manifest.entry {entry!r} 须形如 'module.function'"
+                    f"(如 {_ENTRY_FILE[kind].removesuffix('.py')}.{expected_func}),"
+                    "不要带 .py 后缀或冒号",
+                )
+            )
+        else:
+            module_name, func_name = entry.split(".", 1)
+            if f"{module_name}.py" not in files:
+                issues.append(
+                    ValidationIssue(
+                        rel,
+                        "manifest_entry_file_missing",
+                        f"manifest.entry 指向的模块文件 {module_name}.py "
+                        "不在本次提交文件中",
+                    )
+                )
+            if expected_func is not None and func_name != expected_func:
+                issues.append(
+                    ValidationIssue(
+                        rel,
+                        "manifest_entry_mismatch",
+                        f"manifest.entry 函数 {func_name!r} 与 kind={kind} "
+                        f"的约定入口 {expected_func!r} 不一致",
+                    )
+                )
     return issues
 
 
