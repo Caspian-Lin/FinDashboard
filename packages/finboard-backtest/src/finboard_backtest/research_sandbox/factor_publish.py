@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -35,6 +35,9 @@ from finboard_data.factor_lab import (
 
 #: 质量门失败错误码(不可重试;修因子代码后重新提交 run)
 QUALITY_GATE_FAILED = "quality_gate_failed"
+
+#: missing_symbols 清单截断上限(总数另记,防大候选池撑爆 metrics)
+MAX_MISSING_SYMBOLS = 50
 
 _SOURCE = "research_code_run"
 
@@ -56,6 +59,10 @@ class QualityGateReport:
     max_nan_ratio: float
     min_coverage: float
     failures: tuple[str, ...] = ()
+    #: 挂载 universe 中未产出有限值的标的(排序后截断,issue #237);
+    #: 调用方未提供 universe 清单时为空,总数仍记入 missing_symbols_total
+    missing_symbols: tuple[str, ...] = ()
+    missing_symbols_total: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +77,8 @@ class QualityGateReport:
                 "min_coverage": self.min_coverage,
             },
             "failures": list(self.failures),
+            "missing_symbols": list(self.missing_symbols),
+            "missing_symbols_total": self.missing_symbols_total,
         }
 
 
@@ -79,13 +88,17 @@ def check_output_quality(
     universe_size: int,
     max_nan_ratio: float,
     min_coverage: float,
+    universe_symbols: Sequence[str] | None = None,
 ) -> QualityGateReport:
     """NaN 比例 / 覆盖率 / 长度校验(纯函数,便于单测)。
 
     * NaN 比例 = 非有限值(含 NaN/inf)占输出标的数;超上限拒绝;
     * 覆盖率 = 有限值标的数 / 挂载 universe 大小;低于下限拒绝;
     * 长度校验 = 输出非空且不超出 universe(harness 已挡候选池外
-      symbol,这里再防一层执行器侧回归)。
+      symbol,这里再防一层执行器侧回归);
+    * 缺失标的(issue #237):提供 ``universe_symbols`` 时点名未产出
+      有限值的标的(排序后截断到前 ``MAX_MISSING_SYMBOLS`` 只),总数
+      另记 ``missing_symbols_total``;未提供时只记总数。
     """
     n_scored = len(scores)
     n_finite = sum(1 for value in scores.values() if math.isfinite(value))
@@ -108,6 +121,19 @@ def check_output_quality(
             f"覆盖率 {coverage:.4f} 低于下限 min_coverage={min_coverage}"
             f"({n_finite}/{universe_size} 个有限值)"
         )
+    finite_symbols = {
+        symbol for symbol, value in scores.items() if math.isfinite(value)
+    }
+    if universe_symbols is not None:
+        missing_all = sorted(
+            {str(symbol) for symbol in universe_symbols} - finite_symbols
+        )
+        missing = tuple(missing_all[:MAX_MISSING_SYMBOLS])
+        missing_total = len(missing_all)
+    else:
+        # 未提供清单时不点名;总数按 universe 差额估计(下限 0)
+        missing = ()
+        missing_total = max(universe_size - n_finite, 0)
     return QualityGateReport(
         passed=not failures,
         n_scored=n_scored,
@@ -118,6 +144,8 @@ def check_output_quality(
         max_nan_ratio=max_nan_ratio,
         min_coverage=min_coverage,
         failures=tuple(failures),
+        missing_symbols=missing,
+        missing_symbols_total=missing_total,
     )
 
 
@@ -165,7 +193,8 @@ def build_factor_snapshot(
             (
                 f"quality_gate: nan_ratio={quality.nan_ratio:.4f}, "
                 f"coverage={quality.coverage:.4f}, "
-                f"n_finite={quality.n_finite}/{quality.universe_size}"
+                f"n_finite={quality.n_finite}/{quality.universe_size}, "
+                f"missing_symbols_total={quality.missing_symbols_total}"
             ),
         ),
     )

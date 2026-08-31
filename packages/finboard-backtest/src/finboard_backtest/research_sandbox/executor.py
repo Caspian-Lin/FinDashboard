@@ -305,6 +305,7 @@ class ResearchCodeRunExecutor:
                 universe_size=len(mount.symbols),
                 max_nan_ratio=settings.research_sandbox_max_nan_ratio,
                 min_coverage=settings.research_sandbox_min_coverage,
+                universe_symbols=mount.symbols,
             )
             metrics = {**(metrics or {}), "quality_gate": quality.as_dict()}
             if not quality.passed:

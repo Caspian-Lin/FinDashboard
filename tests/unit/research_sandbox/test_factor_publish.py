@@ -79,6 +79,66 @@ class TestCheckOutputQuality:
         assert report.passed
 
 
+class TestMissingSymbols:
+    """缺失标的点名(issue #237)。"""
+
+    def test_no_missing_when_all_finite(self) -> None:
+        report = check_output_quality(
+            {"A": 1.0, "B": 2.0},
+            universe_size=2,
+            max_nan_ratio=0.5,
+            min_coverage=0.5,
+            universe_symbols=["A", "B"],
+        )
+        assert report.missing_symbols == ()
+        assert report.missing_symbols_total == 0
+        assert report.as_dict()["missing_symbols"] == []
+
+    def test_partial_missing_names_symbols(self) -> None:
+        report = check_output_quality(
+            {"A": 1.0, "B": math.nan},
+            universe_size=4,
+            max_nan_ratio=0.5,
+            min_coverage=0.2,
+            universe_symbols=["D", "A", "C", "B"],
+        )
+        assert report.passed
+        # NaN 输出与未产出同属缺失;排序输出
+        assert report.missing_symbols == ("B", "C", "D")
+        assert report.missing_symbols_total == 3
+
+    def test_all_missing_lists_total(self) -> None:
+        report = check_output_quality(
+            {},
+            universe_size=3,
+            max_nan_ratio=0.5,
+            min_coverage=0.5,
+            universe_symbols=["A", "B", "C"],
+        )
+        assert not report.passed
+        assert report.missing_symbols == ("A", "B", "C")
+        assert report.missing_symbols_total == 3
+
+    def test_truncation_bounded_with_total(self) -> None:
+        universe = [f"S{i:03d}" for i in range(60)]
+        report = check_output_quality(
+            {},
+            universe_size=60,
+            max_nan_ratio=0.5,
+            min_coverage=0.5,
+            universe_symbols=universe,
+        )
+        assert len(report.missing_symbols) == 50
+        assert report.missing_symbols_total == 60
+        assert report.missing_symbols[0] == "S000"
+
+    def test_without_universe_symbols_total_only(self) -> None:
+        # 未传清单时保持旧行为:不点名,总数按 universe 差额记
+        report = _gate({"A": 1.0}, universe=4)
+        assert report.missing_symbols == ()
+        assert report.missing_symbols_total == 3
+
+
 class TestBuildFactorSnapshot:
     def _quality(self, scores: dict[str, float], universe: int = 4):
         return check_output_quality(
