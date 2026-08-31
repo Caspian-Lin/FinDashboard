@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 from finboard_app.config import Settings
@@ -16,6 +18,7 @@ from finboard_backtest.research_code import (
     is_promoted_artifact,
 )
 from finboard_mcp.audit import AuditRecorder
+from finboard_mcp.context import McpAppContext
 from finboard_mcp.tools import research_code
 
 
@@ -144,7 +147,7 @@ class _SessionContext:
         return None
 
 
-def _promotion_app(tmp_path):
+def _promotion_app(tmp_path: Path) -> tuple[McpAppContext, SimpleNamespace]:
     session = SimpleNamespace(commit=AsyncMock())
     app = SimpleNamespace(
         settings=Settings(research_code_repo_path=str(tmp_path / "code.git")),
@@ -152,7 +155,7 @@ def _promotion_app(tmp_path):
         session_maker=lambda: _SessionContext(session),
         audit=AuditRecorder(),
     )
-    return app, session
+    return cast(McpAppContext, app), session
 
 
 def _promotion_artifact() -> SimpleNamespace:
@@ -244,18 +247,20 @@ class _PromotionArtifactRepo:
         return self.artifact
 
 
+class _PromotionExperiment:
+    def __init__(self, validation: dict[str, object]) -> None:
+        self.validation = validation
+
+    def as_dict(self) -> dict[str, object]:
+        return self.validation
+
+
 class _PromotionExperimentRepo:
     def __init__(self, validation: dict[str, object]) -> None:
         self.validation = validation
 
-    async def get(self, _experiment_id: str) -> SimpleNamespace:
-        validation = self.validation
-
-        class _Experiment:
-            def as_dict(self) -> dict[str, object]:
-                return validation
-
-        return _Experiment()
+    async def get(self, _experiment_id: str) -> _PromotionExperiment:
+        return _PromotionExperiment(self.validation)
 
 
 class _PromotionCodeRunRepo:
@@ -280,7 +285,9 @@ async def test_promote_binds_evidence_and_enters_formal_whitelist(tmp_path, monk
             }
         }
     )
-    monkeypatch.setattr(research_code, "ResearchCodeArtifactRepository", lambda _session: artifact_repo)
+    monkeypatch.setattr(
+        research_code, "ResearchCodeArtifactRepository", lambda _session: artifact_repo
+    )
     monkeypatch.setattr(
         research_code,
         "ResearchExperimentRepository",
@@ -300,14 +307,17 @@ async def test_promote_binds_evidence_and_enters_formal_whitelist(tmp_path, monk
     )
 
     assert env.status == "ok"
-    assert env.data["status"] == "active"
-    assert env.data["promotion_status"] == PROMOTION_PASSED
+    data = cast(dict[str, Any], env.data)
+    assert data["status"] == "active"
+    assert data["promotion_status"] == PROMOTION_PASSED
     assert is_promoted_artifact(artifact)
     assert not artifact_repo.failed_calls
     assert session.commit.await_count == 1
-    evidence = artifact_repo.promote_calls[0]["evidence"]
-    assert evidence["gates"]["passed"] is True
-    assert set(evidence["execution"]["audit_refs"]) == {
+    evidence = cast(dict[str, object], artifact_repo.promote_calls[0]["evidence"])
+    gates = cast(dict[str, object], evidence["gates"])
+    execution = cast(dict[str, object], evidence["execution"])
+    assert gates["passed"] is True
+    assert set(cast(list[str], execution["audit_refs"])) == {
         "code",
         "data",
         "parameters",
@@ -316,7 +326,9 @@ async def test_promote_binds_evidence_and_enters_formal_whitelist(tmp_path, monk
     }
 
 
-async def test_promote_failure_keeps_draft_and_records_named_evidence(tmp_path, monkeypatch) -> None:
+async def test_promote_failure_keeps_draft_and_records_named_evidence(
+    tmp_path, monkeypatch
+) -> None:
     app, session = _promotion_app(tmp_path)
     artifact = _promotion_artifact()
     artifact_repo = _PromotionArtifactRepo(artifact)
@@ -330,7 +342,9 @@ async def test_promote_failure_keeps_draft_and_records_named_evidence(tmp_path, 
             }
         }
     )
-    monkeypatch.setattr(research_code, "ResearchCodeArtifactRepository", lambda _session: artifact_repo)
+    monkeypatch.setattr(
+        research_code, "ResearchCodeArtifactRepository", lambda _session: artifact_repo
+    )
     monkeypatch.setattr(
         research_code,
         "ResearchExperimentRepository",
@@ -357,7 +371,9 @@ async def test_promote_failure_keeps_draft_and_records_named_evidence(tmp_path, 
     assert artifact.status == "draft"
     assert artifact.promotion_status == PROMOTION_FAILED
     assert not artifact_repo.promote_calls
-    assert artifact_repo.failed_calls[0]["evidence"]["gates"]["passed"] is False
+    evidence = cast(dict[str, object], artifact_repo.failed_calls[0]["evidence"])
+    gates = cast(dict[str, object], evidence["gates"])
+    assert gates["passed"] is False
     assert session.commit.await_count == 1
 
 
@@ -366,7 +382,9 @@ async def test_missing_screen_is_also_persisted_as_failed_evidence(tmp_path, mon
     artifact = _promotion_artifact()
     artifact_repo = _PromotionArtifactRepo(artifact)
     code_run = _promotion_code_run(metrics={})
-    monkeypatch.setattr(research_code, "ResearchCodeArtifactRepository", lambda _session: artifact_repo)
+    monkeypatch.setattr(
+        research_code, "ResearchCodeArtifactRepository", lambda _session: artifact_repo
+    )
     monkeypatch.setattr(
         research_code,
         "ResearchExperimentRepository",
@@ -391,5 +409,6 @@ async def test_missing_screen_is_also_persisted_as_failed_evidence(tmp_path, mon
     assert "机器 screen 指标" in env.error.message
     assert artifact.status == "draft"
     assert artifact.promotion_status == PROMOTION_FAILED
-    assert artifact_repo.failed_calls[0]["evidence"]["execution"] == {}
+    evidence = cast(dict[str, object], artifact_repo.failed_calls[0]["evidence"])
+    assert evidence["execution"] == {}
     assert session.commit.await_count == 1
