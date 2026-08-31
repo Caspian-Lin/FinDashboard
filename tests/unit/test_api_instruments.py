@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from finboard_data import AssetCapability, CapabilityStatus, ResearchDatasetRelease
 from finboard_shared.types import BarPeriod, DatasetQualityStatus
+
+
+def _async_return(value: Any) -> asyncio.Future[Any]:
+    """构造已完成的 awaitable(repo.get 等 async 方法的 monkeypatch 桩)。"""
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future[Any] = loop.create_future()
+    fut.set_result(value)
+    return fut
 
 
 def _dataset_release() -> ResearchDatasetRelease:
@@ -236,6 +246,66 @@ class TestResearchDatasetReleases:
         with pytest.raises(HTTPException) as exc_info:
             await get_dataset_release("missing", session=mock_session)
         assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_check_release_symbols_membership(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #238:轻量成员核对,免全量 detail。"""
+        from types import SimpleNamespace
+
+        from finboard_api.routes.instruments import check_dataset_release_symbols
+        from finboard_persistence.dataset_release_repo import (
+            ResearchDatasetReleaseRepository as Repo,
+        )
+
+        release = SimpleNamespace(
+            release_id="REL-1",
+            instruments=[SimpleNamespace(code="600000.SH")],
+        )
+        monkeypatch.setattr(Repo, "get", lambda self, release_id: _async_return(release))
+
+        out = await check_dataset_release_symbols(
+            "REL-1", codes="600000.SH,000001.SZ", session=MagicMock()
+        )
+        assert out.release_id == "REL-1"
+        assert out.requested == 2
+        assert out.matched == ["600000.SH"]
+        assert out.missing == ["000001.SZ"]
+
+    @pytest.mark.asyncio
+    async def test_check_release_symbols_not_found(
+        self, mock_session: MagicMock
+    ) -> None:
+        from fastapi import HTTPException
+
+        from finboard_api.routes.instruments import check_dataset_release_symbols
+
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        mock_session.execute = AsyncMock(return_value=result)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await check_dataset_release_symbols(
+                "missing", codes="600000.SH", session=mock_session
+            )
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_check_release_symbols_over_limit_rejected(
+        self, mock_session: MagicMock
+    ) -> None:
+        from fastapi import HTTPException
+
+        from finboard_api.routes.instruments import check_dataset_release_symbols
+
+        with pytest.raises(HTTPException) as exc_info:
+            await check_dataset_release_symbols(
+                "REL-1",
+                codes=",".join(f"S{i}" for i in range(501)),
+                session=mock_session,
+            )
+        assert exc_info.value.status_code == 422
 
     @pytest.mark.asyncio
     async def test_create_release_enqueues_dataset_publish_job(

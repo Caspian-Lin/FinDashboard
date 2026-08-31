@@ -10,6 +10,7 @@ from finboard_persistence.dataset_release_repo import (
     ReleaseInstrumentCatalogRepository,
     ResearchDatasetReleaseRepository,
     ResearchDatasetReleaseService,
+    release_symbol_check,
 )
 from finboard_persistence.engine import create_async_engine
 from finboard_persistence.etf_metadata_repo import (
@@ -236,5 +237,6 @@ __all__ = [
     "WatchlistRepository",
     "create_async_engine",
     "generate_run_id",
+    "release_symbol_check",
     "session_factory",
 ]

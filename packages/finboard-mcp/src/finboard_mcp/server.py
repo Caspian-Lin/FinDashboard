@@ -129,7 +129,8 @@ FinBoard 研究 MCP —— 量化研究工具集
   (标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额,只读)。
   dataset_release_get 默认 view=summary(#206):头部+capabilities+覆盖统计,
   不含逐标的 instruments 数组(全市场发布可达几十 MB);view=detail 走
-  as_dict() 诊断。
+  as_dict() 诊断;传 symbols(≤500 只)返回 summary+symbol_check
+  {requested, matched, missing} 成员核对(#238,免拉全量 detail)。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。

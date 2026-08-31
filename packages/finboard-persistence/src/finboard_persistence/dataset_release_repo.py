@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -781,8 +782,32 @@ def _future_candidate(
     )
 
 
+def release_symbol_check(
+    release: ResearchDatasetRelease,
+    codes: Sequence[str],
+) -> dict[str, Any]:
+    """按冻结发布的逐标的成员核对标的(issue #238)。
+
+    ``Repository.get`` 返回的领域对象自带 ``instruments`` 元组(登记时
+    冻结,与 manifest 同源),成员核对无需读 parquet、无需回放全量清单。
+    matched/missing 均按请求顺序返回;matched 只含 code,详细元数据走
+    instrument_list。instruments 为空(理论上不可能,发布即冻结)按空集
+    处理 → 全部 missing(fail-visible)。
+    """
+    members: set[str] = set()
+    for item in getattr(release, "instruments", None) or ():
+        code = item.get("code") if isinstance(item, dict) else getattr(item, "code", None)
+        if code:
+            members.add(str(code))
+    requested = [str(code).strip() for code in codes if str(code).strip()]
+    matched = [code for code in requested if code in members]
+    missing = [code for code in requested if code not in members]
+    return {"requested": len(requested), "matched": matched, "missing": missing}
+
+
 __all__ = [
     "ReleaseInstrumentCatalogRepository",
     "ResearchDatasetReleaseRepository",
     "ResearchDatasetReleaseService",
+    "release_symbol_check",
 ]
