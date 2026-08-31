@@ -684,6 +684,7 @@ async def _run_worker(settings: Settings) -> None:
         ResearchCodeRunExecutor,
         ResearchDataSyncExecutor,
         ResearchRunExecutor,
+        ValidationExperimentExecutor,
     )
     from finboard_backtest.background_jobs.executors._providers import (
         default_settings_factory,
@@ -786,6 +787,20 @@ async def _run_worker(settings: Settings) -> None:
             settings_factory=settings_factory,
         ),
     )
+    # issue #233:#57 验证实验执行(walk-forward + 一次性揭盲)。runner 工厂
+    # 按实验 selection_config 声明构建注册表策略回测;单并发 —— 揭盲是一次性
+    # 门,并发重入只会重复消耗试验预算。
+    from finboard_backtest.background_jobs.executors.validation_experiment import (
+        default_trial_runner_factory,
+    )
+
+    registry.register(
+        "validation_experiment",
+        ValidationExperimentExecutor(
+            session_maker=components.session_maker,
+            runner_factory=default_trial_runner_factory,
+        ),
+    )
     queue_list = [
         q.strip() for q in settings.worker_queues.split(",") if q.strip()
     ] or None
@@ -802,6 +817,8 @@ async def _run_worker(settings: Settings) -> None:
         # 数据源压力敏感的 kind 限制为单并发;dataset_publish / backtest_run 不限。
         # issue #216:research_code_run 单并发(沙箱容器本机资源受限,
         # 多容器并发只会互相挤占内存限额)。
+        # issue #233:validation_experiment 单并发(揭盲一次性门,并发重入
+        # 只会重复消耗试验预算)。
         kind_concurrency={
             "feature_snapshot": 1,
             "bulk_download": 1,
@@ -810,6 +827,7 @@ async def _run_worker(settings: Settings) -> None:
             "quality_repair": 1,
             "research_data_sync": 1,
             "research_code_run": 1,
+            "validation_experiment": 1,
         },
     )
     await run_bg_worker(

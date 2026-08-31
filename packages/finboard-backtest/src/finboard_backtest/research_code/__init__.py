@@ -30,6 +30,11 @@ from finboard_backtest.research_code.promotion import (
     promotion_status,
     require_promotion_gates,
 )
+from finboard_backtest.research_code.screen_binding import (
+    ScreenBindingResolution,
+    resolve_screen_bindings,
+    screen_factor_snapshot_gate_error,
+)
 from finboard_backtest.research_code.user_code import (
     active_user_strategy_commits,
     active_user_strategy_names,
@@ -146,6 +151,7 @@ __all__ = [
     "ResearchCodeError",
     "ResearchCodeRepo",
     "ResearchCodeService",
+    "ScreenBindingResolution",
     "active_user_factor_names",
     "active_user_strategy_commits",
     "active_user_strategy_names",
@@ -155,6 +161,8 @@ __all__ = [
     "is_promoted_artifact",
     "promotion_status",
     "require_promotion_gates",
+    "resolve_screen_bindings",
+    "screen_factor_snapshot_gate_error",
     "user_code_reference_gate_error",
     "user_factor_reference_gate_error",
     "validate_submission",

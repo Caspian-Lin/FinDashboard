@@ -1,22 +1,29 @@
 """``finboard.validation_experiment.*`` 工具 ——
-#57 机器验证实验(OOS 样本外验证)元数据 CRUD(issue #138)。
+#57 机器验证实验(OOS 样本外验证)元数据 CRUD 与执行入队(issue #138/#233)。
 
 暴露 REST `/api/research/experiments` 的 6 个端点:
 create / list / get / reject / add_trial / delete。复用现有
 `ResearchExperimentRepository` / `ResearchTrialRepository` / 领域契约函数
-(`new_experiment` / `transition_status` / `increment_trials_used`),
+(``new_experiment`` / ``transition_status`` / ``increment_trials_used``),
 不重复业务逻辑。
 
-与因子实验(`finboard.factor.experiment.*`,issue #78/#125)的关系:
+执行入队(#233):``finboard_validation_experiment_run`` 把「按计划真正跑
+walk-forward 并一次性揭盲」登记为 ``kind=validation_experiment`` 后台任务
+(worker 单并发),入队预检秒级拒绝不可运行 / 预算耗尽 / 已揭盲的实验;
+执行由 ValidationExperimentExecutor 完成,``finboard_job_get`` 轮询
+(result_ref=experiment_id,终态 validated_oos → succeeded)。这是
+#219 ``finboard_research_code_promote`` OOS 半边的运营入口。
+
+与因子实验(``finboard.factor.experiment.*``,issue #78/#125)的关系:
 **两套独立但耦合的系统** —— 因子实验通过 `validation_experiment_id` 引用
 #57 验证实验,本批工具给 agent 提供「创建验证实验 → 登记 trial →
 因子实验引用 → sync_validation 同步终态」的源头,补齐 OOS 样本外验证闭环。
 
 边界:
-* 本批工具只做实验元数据 CRUD,不触发 ValidationRunner 执行(长耗时执行
-  任务化见 #117/#136);揭盲端点(`unseal-final`)未实现,不在本批覆盖。
-* 写操作(create / reject / add_trial / delete)受 `_require_write_enabled`
-  守卫(`mcp_readonly_only`);只读(list / get)自动允许。
+* 元数据 CRUD 工具不触发 ValidationRunner;执行只能经 #233 的后台任务。
+* 写操作(run / create / reject / add_trial / delete)受
+  ``_require_write_enabled`` 守卫(``mcp_readonly_only``);只读(list / get)
+  自动允许。
 * 不触及交易安全红线(不创建订单 / 持仓 / 回测 / 模拟盘)。
 """
 
@@ -436,6 +443,132 @@ async def validation_experiment_delete(app: McpAppContext, experiment_id: str) -
 
 
 # ---------------------------------------------------------------------------
+# 写:run 入队(issue #233)
+# ---------------------------------------------------------------------------
+
+
+async def validation_experiment_run(
+    app: McpAppContext,
+    *,
+    experiment_id: str,
+    idempotency_key: str | None = None,
+    requested_by: str = "agent:mcp",
+) -> ToolEnvelope:
+    """把 #57 验证实验执行登记为后台任务(kind=validation_experiment,写)。
+
+    入队预检(#186 秒级失败风格):实验存在 / 状态可接受 trial /
+    试验预算未超 / 未揭盲;不满足直接 invalid_argument / conflict。
+    执行端(ValidationExperimentExecutor)重放同一组检查(双保险)。
+    """
+
+    async def _do() -> dict[str, Any]:
+        await _require_write_enabled(app)
+        from sqlalchemy.exc import IntegrityError
+
+        from finboard_backtest.validation.contracts import ExperimentStatus
+        from finboard_persistence import BackgroundJobRepository
+        from finboard_persistence.validation_repo import (
+            ResearchExperimentRepository,
+        )
+        from finboard_shared.background_jobs import (
+            BackgroundJobStatus,
+            generate_background_job_id,
+        )
+
+        async with app.session_maker() as session:
+            experiment = await ResearchExperimentRepository(session).get(
+                experiment_id
+            )
+            if experiment is None:
+                raise McpToolError("not_found", f"未找到验证实验: {experiment_id}")
+            if experiment.status not in (
+                ExperimentStatus.HYPOTHESIS,
+                ExperimentStatus.IN_SAMPLE,
+            ):
+                raise McpToolError(
+                    "conflict",
+                    f"实验状态不可执行: status={experiment.status.value}"
+                    "(终态实验不可重复执行;已 validated_oos 的实验请直接用于 "
+                    "finboard_research_code_promote)",
+                )
+            if experiment.final_test_unsealed:
+                raise McpToolError(
+                    "conflict",
+                    "实验已揭盲(final_test_unsealed=true),不可再次执行"
+                    "(揭盲不可重做)",
+                )
+            if not experiment.can_run_trial():
+                raise McpToolError(
+                    "invalid_argument",
+                    "试验预算已耗尽: trials_used="
+                    f"{experiment.trials_used}/{experiment.plan.trial_budget};"
+                    "请提高 plan.trial_budget 新建实验(supersedes_id 关联)"
+                    "或改用 finboard_validation_experiment_add_trial 手动登记",
+                )
+            key = idempotency_key or f"validation_experiment:{experiment_id}"
+            payload: dict[str, Any] = {"experiment_id": experiment_id}
+            checksum = _payload_checksum(payload)
+            try:
+                row, created = await BackgroundJobRepository(
+                    session
+                ).create_or_get(
+                    job_id=generate_background_job_id(),
+                    idempotency_key=key,
+                    kind="validation_experiment",
+                    queue="research",
+                    status=BackgroundJobStatus.QUEUED.value,
+                    priority=0,
+                    payload=payload,
+                    payload_checksum=checksum,
+                    # 揭盲是一次性门:不自动重试(重试只会重复消耗试验预算);
+                    # 失败后 agent 排查后换新 idempotency_key 重新入队(续跑安全:
+                    # 已落库 trial 不重复执行,trials_used 不重复递增)。
+                    max_attempts=1,
+                    requested_by=requested_by,
+                )
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                raise McpToolError("conflict", "重复 idempotency_key") from exc
+            return cast(
+                dict[str, Any],
+                to_jsonable(
+                    {
+                        "job_id": row.job_id,
+                        "kind": "validation_experiment",
+                        "experiment_id": experiment_id,
+                        "status": row.status,
+                        "created": created,
+                        "idempotency_key": key,
+                        "detail_hint": (
+                            "finboard_job_get 轮询(result_ref=experiment_id,"
+                            "终态 validated_oos → succeeded / rejected → failed "
+                            "附原因);完成后把实验 id 传给 "
+                            "finboard_research_code_promote"
+                        ),
+                    }
+                ),
+            )
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.validation_experiment.run",
+        arguments={"experiment_id": experiment_id, "requested_by": requested_by},
+        handler=_do,
+        idempotency_key=idempotency_key or f"validation_experiment:{experiment_id}",
+    )
+
+
+def _payload_checksum(payload: dict[str, Any]) -> str:
+    import hashlib
+    import json
+
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+# ---------------------------------------------------------------------------
 # register
 # ---------------------------------------------------------------------------
 
@@ -575,6 +708,39 @@ def register(mcp: MCPServer) -> None:
     ) -> ToolEnvelope:
         return await validation_experiment_delete(app_context(ctx), experiment_id)
 
+    @mcp.tool(
+        name="finboard_validation_experiment_run",
+        description=(
+            "[写] 入队执行 #57 机器验证实验(#233:kind=validation_experiment "
+            "后台任务,worker 单并发)—— 按冻结计划跑 IS 参数搜索 → walk-forward "
+            "OOS(含稳健性与统计修正)→ 一次性揭盲最终测试集,trial 与实验状态"
+            "逐部落库。入队预检秒级拒绝:实验不存在(not_found)/ 终态或已揭盲"
+            "(conflict,揭盲不可重做)/ 预算耗尽(invalid_argument)。实验的 "
+            "version_stamp.selection_config 须声明 validation_trial_runner:"
+            "{strategy, symbols, provider?, params?, capital?}(注册表策略回测),"
+            "未声明执行期报 trial_runner_unconfigured。"
+            "参数:experiment_id / idempotency_key?(默认 "
+            "validation_experiment:<experiment_id>) / requested_by?(默认 "
+            "agent:mcp)。返回 job_id + created;finboard_job_get 轮询"
+            "(result_ref=experiment_id,validated_oos → succeeded,rejected → "
+            "failed 附阈值原因)。完成后把 experiment_id 传给 "
+            "finboard_research_code_promote 补 OOS 门。写操作,"
+            "mcp_readonly_only=true 时拒绝。"
+        ),
+    )
+    async def _validation_experiment_run(
+        experiment_id: str,
+        idempotency_key: str | None = None,
+        requested_by: str = "agent:mcp",
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await validation_experiment_run(
+            app_context(ctx),
+            experiment_id=experiment_id,
+            idempotency_key=idempotency_key,
+            requested_by=requested_by,
+        )
+
 
 __all__ = [
     "register",
@@ -584,4 +750,5 @@ __all__ = [
     "validation_experiment_get",
     "validation_experiment_list",
     "validation_experiment_reject",
+    "validation_experiment_run",
 ]

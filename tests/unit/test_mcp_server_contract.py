@@ -127,13 +127,14 @@ _EXPECTED_TOOLS = {
     "finboard_etf_batch_confirm",
     "finboard_etf_update",
     "finboard_etf_review_queue",
-    # #138 验证实验工具(2 只读 + 4 写)
+    # #138 验证实验工具(2 只读 + 4 写)+ #233 执行入队(1 写)
     "finboard_validation_experiment_create",
     "finboard_validation_experiment_list",
     "finboard_validation_experiment_get",
     "finboard_validation_experiment_reject",
     "finboard_validation_experiment_add_trial",
     "finboard_validation_experiment_delete",
+    "finboard_validation_experiment_run",
     # #140 自选股工具(2 只读 + 5 写)
     "finboard_watchlist_list",
     "finboard_watchlist_get",

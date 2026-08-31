@@ -32,6 +32,8 @@ from finboard_backtest.research_code import (
     active_user_factor_names,
     active_user_strategy_commits,
     freeze_user_code_commit,
+    resolve_screen_bindings,
+    screen_factor_snapshot_gate_error,
     user_code_reference_gate_error,
     user_factor_reference_gate_error,
 )
@@ -45,7 +47,7 @@ from finboard_backtest.research_run import (
     to_json_value,
     validate_strategy_dataset_capabilities,
 )
-from finboard_backtest.research_run.contracts import JsonValue
+from finboard_backtest.research_run.contracts import JsonValue, stable_checksum
 from finboard_backtest.research_run.signal_engine import single_shot_snapshot_gate_error
 from finboard_backtest.research_sandbox.factor_publish import (
     sandbox_snapshot_dataset_release_ids,
@@ -128,6 +130,13 @@ async def queue_research_run(
         for node in spec.feature_graph.nodes
         if node.source is not None and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
+    # issue #234:screen 绑定实绑校验(REST+MCP 共用)—— 声明了
+    # screen_artifact_bindings 的规格按 DB 逐条校验(存在/非 retired/name/
+    # commit 一致),通过后把绑定名并入可引用名单、绑定 commit/ID 冻结进
+    # manifest;未声明绑定的普通规格行为完全不变。
+    resolution, bind_error = await resolve_screen_bindings(session, spec=spec)
+    if bind_error is not None:
+        raise HTTPException(status_code=422, detail=bind_error)
     # issue #203:入队期 single_shot 缺快照秒级拒绝(与 MCP 共用同一门控函数,
     # 对齐 #186 预检风格)。multi_period 声明 rebalance_frequency 后不受影响。
     gate_error = single_shot_snapshot_gate_error(
@@ -140,31 +149,50 @@ async def queue_research_run(
         raise HTTPException(status_code=422, detail=gate_error)
     # issue #217:用户因子(u_ 前缀)入队门控 —— retired/不存在拒绝;
     # multi_period 引用用户因子拒绝(观测绑定单一 decision_at)。
+    active_factors = await active_user_factor_names(session)
+    if resolution is not None:
+        active_factors = active_factors | resolution.user_factor_names
     user_gate_error = user_factor_reference_gate_error(
         required_factor_sources=required_factor_sources,
-        active_user_factors=await active_user_factor_names(session),
+        active_user_factors=active_factors,
         parameters=cast(dict[str, JsonValue] | None, body.parameters),
     )
     if user_gate_error is not None:
         raise HTTPException(status_code=422, detail=user_gate_error)
     # issue #218:user_code 策略入队门控 —— artifact active、commit 一致、
     # 沙箱已启用、single_shot 决策时点可用(REST+MCP 共用同一函数);放行时
-    # 把 active commit 冻结进 spec(manifest input_checksum 覆盖代码版本)。
+    # 把 active commit 冻结进 spec(manifest input_checksum 覆盖代码版本);
+    # issue #234:screen 绑定的 draft 产物 commit/ID 一并冻结。
+    spec_checksum = strategy_row.checksum
     if spec.code_artifact is not None:
         from finboard_app.config import load_settings
 
-        active_strategies = await active_user_strategy_commits(session)
+        merged_strategies = dict(await active_user_strategy_commits(session))
+        if resolution is not None:
+            merged_strategies.update(resolution.strategy_commits)
         code_gate_error = user_code_reference_gate_error(
             code_artifact_name=spec.code_artifact.name,
             code_artifact_commit=spec.code_artifact.commit,
-            active_user_strategies=active_strategies,
+            active_user_strategies=merged_strategies,
             sandbox_enabled=load_settings().research_sandbox_enabled,
             frozen_snapshot_count=len(snapshots),
             parameters=cast(dict[str, JsonValue] | None, body.parameters),
         )
         if code_gate_error is not None:
             raise HTTPException(status_code=422, detail=code_gate_error)
-        spec = freeze_user_code_commit(spec, active_strategies)
+        frozen_spec = freeze_user_code_commit(
+            spec,
+            merged_strategies,
+            artifact_ids=(
+                resolution.strategy_artifact_ids if resolution is not None else None
+            ),
+        )
+        if frozen_spec is not spec:
+            # 冻结 commit/artifact_id 改变了 payload:manifest 内的 checksum
+            # 按 post_init 契约必须等于冻结后规格的 checksum(发布版本本身的
+            # 追溯仍由 strategy_version + 冻结绑定字段承载)。
+            spec_checksum = stable_checksum(frozen_spec.canonical_payload())
+            spec = frozen_spec
     release_ids = {release.release_id for release in releases}
     for snapshot in snapshots:
         # issue #217:沙箱快照(dataset_release_id=None)按其锚定 run 冻结
@@ -188,6 +216,15 @@ async def queue_research_run(
                     f"{sorted(sandbox_release_ids - release_ids)} 不在本次冻结清单中"
                 ),
             )
+    # issue #234:factor 通道 screen 运行的快照证据预检 —— 绑定的 draft 产物
+    # 必须已有其 RCR 产出的快照进入 factor_snapshot_ids,否则秒级拒绝
+    # (没有证据的 screen run 完成后 promote 必失败,提前到入队暴露)。
+    if resolution is not None:
+        snapshot_gate_error = await screen_factor_snapshot_gate_error(
+            session, resolution=resolution, snapshots=snapshots
+        )
+        if snapshot_gate_error is not None:
+            raise HTTPException(status_code=422, detail=snapshot_gate_error)
 
     # issue #186:入队同步候选池非空校验。用 bars 主发布(信号引擎实际使用的
     # 发布)的 instruments 做静态评估,空池秒级 422(invalid_argument 语义),附
@@ -226,7 +263,7 @@ async def queue_research_run(
             run_id=run_id,
             idempotency_key=body.idempotency_key,
             strategy_spec=spec,
-            strategy_spec_checksum=strategy_row.checksum,
+            strategy_spec_checksum=spec_checksum,
             dataset_releases=tuple(
                 FrozenArtifactRef(
                     artifact_id=release.release_id,

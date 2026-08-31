@@ -239,6 +239,12 @@ FINBOARD_SANDBOX_E2E=1 uv run pytest tests/integration/test_research_sandbox_doc
 2 期的机器门,才转为 `active/passed`;失败证据保留在 draft,旧 commit 回滚也
 重新从 draft 开始。
 
+首次晋级的运营闭环(issue #233 + #234):#57 实验经
+`finboard_validation_experiment_run` 任务化执行(walk-forward + 一次性揭盲,
+揭盲不可重做);draft 产物经规格声明的 `screen_artifact_bindings`
+显式绑定进入 screen ResearchRun(入队实绑校验 + manifest 冻结,
+promote 四向校验兜底),非 screen 引用门行为不变。
+
 ```text
 submit -> draft(pending) -- screen + #57 OOS --> active(passed)
                          \-- gate failed --------> draft(failed)

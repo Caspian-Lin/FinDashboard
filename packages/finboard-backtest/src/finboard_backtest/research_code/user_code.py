@@ -11,6 +11,10 @@ artifact;可引用性三道闸的前两道在这里(artifact 必须 active+passe
   active 不一致 / 沙箱未启用 → 拒绝;放行时把 **active commit 冻结进
   manifest 的 strategy_spec.code_artifact.commit**。
 
+issue #234 screen 通道:显式绑定(``screen_artifact_bindings``)经
+``resolve_screen_bindings`` 实绑校验后,把绑定产物的 commit/ID 并入调用方
+传入的名单与冻结映射 —— 仅声明绑定的规格生效,普通引用门行为不变。
+
 纯离线研究域,不连 broker 不下单。
 """
 
@@ -98,17 +102,32 @@ def user_code_reference_gate_error(
     return None
 
 
-def freeze_user_code_commit(spec: Any, active_commits: dict[str, str]) -> Any:
+def freeze_user_code_commit(
+    spec: Any,
+    active_commits: dict[str, str],
+    artifact_ids: dict[str, str] | None = None,
+) -> Any:
     """把 active commit 冻结进 spec 的 ``code_artifact.commit``。
 
     入队期调用(spec.code_artifact.commit 为 None = 引用 active);冻结后
     manifest 的 input_checksum 覆盖代码版本,重放确定性由此保证(#218)。
+    ``artifact_ids``(#234,可选)把实绑校验通过的 screen 绑定产物 id 一并
+    冻结进 ``code_artifact.artifact_id``,promote 侧四向校验据此兜底;
+    普通入队不传,行为与 #218 完全一致。
     spec 是 frozen pydantic 模型,经 ``model_copy(update=...)`` 派生。
     """
     ref = spec.code_artifact
-    if ref is None or ref.commit is not None:
+    if ref is None:
         return spec
-    frozen = ref.model_copy(update={"commit": active_commits[ref.name]})
+    updates: dict[str, str] = {}
+    if ref.commit is None and ref.name in active_commits:
+        updates["commit"] = active_commits[ref.name]
+    ids = artifact_ids or {}
+    if ref.artifact_id is None and ref.name in ids:
+        updates["artifact_id"] = ids[ref.name]
+    if not updates:
+        return spec
+    frozen = ref.model_copy(update=updates)
     return spec.model_copy(update={"code_artifact": frozen})
 
 
