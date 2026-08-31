@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,12 +14,10 @@ from finboard_data import AssetCapability, CapabilityStatus, ResearchDatasetRele
 from finboard_shared.types import BarPeriod, DatasetQualityStatus
 
 
-def _async_return(value):
+def _async_return(value: Any) -> asyncio.Future[Any]:
     """构造已完成的 awaitable(repo.get 等 async 方法的 monkeypatch 桩)。"""
-    import asyncio
-
     loop = asyncio.get_event_loop()
-    fut = loop.create_future()
+    fut: asyncio.Future[Any] = loop.create_future()
     fut.set_result(value)
     return fut
 

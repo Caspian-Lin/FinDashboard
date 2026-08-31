@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
+from finboard_data.releases import ResearchDatasetRelease
 from finboard_persistence import release_symbol_check
 
 
-def _release(instruments: list[SimpleNamespace] | None) -> SimpleNamespace:
-    return SimpleNamespace(release_id="REL-1", instruments=instruments)
+def _release(instruments: list[SimpleNamespace] | None) -> ResearchDatasetRelease:
+    # helper 按 .instruments 鸭子类型读取,领域对象注入即可
+    return cast(
+        ResearchDatasetRelease,
+        SimpleNamespace(release_id="REL-1", instruments=instruments),
+    )
 
 
 class TestReleaseSymbolCheck:
