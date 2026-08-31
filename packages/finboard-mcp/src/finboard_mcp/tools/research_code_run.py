@@ -8,8 +8,9 @@ L3 沙箱路线第二环:把已提交的因子代码提交到一次性 Docker �
 * v1 仅 ``kind=factor``(策略代码 kind=strategy 经 ``strategy_spec``
   ``code_artifact`` 引用 + ``finboard_run_queue`` 逐决策日执行 decide,
   issue #218,不走独立沙箱 run);
-* (kind, name) 须有 active 产物(或 artifact_id 一致引用),指定 commit 必须
-  等于 active 引用(历史版本先 rollback);
+* 默认路径须有 ``status=active/promotion_status=passed`` 产物;显式
+  ``artifact_id`` 可运行 draft 以生成供 screen ResearchRun 使用的快照,
+  但 retired/active 未晋级一律拒绝;指定 commit 必须等于该 artifact;
 * ``dataset_release_ids`` 逐个在 DB 已登记,且至少一个 bars 类发布。
 
 执行端(ResearchCodeRunExecutor)重放静态校验、按 decision_at 生成只读
@@ -33,6 +34,7 @@ from typing import Any, cast
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
+from finboard_backtest.research_code import is_promoted_artifact, promotion_status
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
@@ -66,9 +68,7 @@ def _parse_decision_at(raw: str) -> datetime:
     try:
         value = datetime.fromisoformat(raw)
     except ValueError as exc:
-        raise McpToolError(
-            "invalid_argument", f"decision_at 不是合法 ISO 字符串: {raw!r}"
-        ) from exc
+        raise McpToolError("invalid_argument", f"decision_at 不是合法 ISO 字符串: {raw!r}") from exc
     if value.tzinfo is None:
         raise McpToolError(
             "invalid_argument", "decision_at 必须带时区(如 2024-06-03T15:00:00+08:00)"
@@ -135,27 +135,36 @@ async def run_enqueue(
             if artifact_id is not None:
                 artifact = await artifact_repo.get(artifact_id)
                 if artifact is None:
-                    raise McpToolError(
-                        "not_found", f"研究代码产物不存在: {artifact_id}"
-                    )
+                    raise McpToolError("not_found", f"研究代码产物不存在: {artifact_id}")
                 if artifact.kind != kind or artifact.name != name:
                     raise McpToolError(
                         "invalid_argument",
                         f"artifact_id 与 (kind,name) 不一致: {artifact_id}",
+                    )
+                if artifact.status == "retired":
+                    raise McpToolError(
+                        "invalid_argument",
+                        f"artifact_id 已 retired,不能启动新沙箱执行: {artifact_id}",
+                    )
+                if artifact.status == "active" and not is_promoted_artifact(artifact):
+                    raise McpToolError(
+                        "invalid_argument",
+                        f"artifact_id active 但未通过 screen+OOS 晋级门: {artifact_id} "
+                        f"promotion_status={promotion_status(artifact)}",
                     )
             else:
                 artifact = await artifact_repo.get_active(kind=kind, name=name)
                 if artifact is None:
                     raise McpToolError(
                         "not_found",
-                        f"没有 active 的研究代码: kind={kind} name={name}"
-                        "(先 finboard_research_code_submit)",
+                        f"没有 active+passed 的研究代码: kind={kind} name={name}"
+                        "(先 finboard_research_code_submit 并完成晋级)",
                     )
             if commit is not None and commit != artifact.commit:
                 raise McpToolError(
                     "invalid_argument",
-                    f"指定 commit {commit[:12]} 不是 active 引用"
-                    f"(active={artifact.commit[:12]});历史版本先 "
+                    f"指定 commit {commit[:12]} 不是该 artifact 的 active 引用"
+                    f"(artifact={artifact.commit[:12]});历史版本先 "
                     "finboard_research_code_rollback",
                 )
             payload.setdefault("commit", artifact.commit)
@@ -165,9 +174,7 @@ async def run_enqueue(
             for release_id in dataset_release_ids:
                 release = await release_repo.get(release_id)
                 if release is None:
-                    raise McpToolError(
-                        "not_found", f"研究数据发布不存在: {release_id}"
-                    )
+                    raise McpToolError("not_found", f"研究数据发布不存在: {release_id}")
                 if getattr(release.dataset_kind, "value", "") == "bars":
                     has_bars = True
             if not has_bars:
@@ -263,8 +270,12 @@ async def run_get(
                     "name": record.name,
                     "commit": record.commit,
                     "code_checksum": record.code_checksum,
+                    "artifact_id": record.artifact_id,
                     "dataset_release_ids": record.dataset_release_ids,
+                    "dataset_release_checksums": record.dataset_release_checksums,
                     "decision_at": record.decision_at,
+                    "params": record.params,
+                    "params_checksum": _payload_checksum(record.params or {}),
                     "image": record.image,
                     "image_digest": record.image_digest,
                     "status": record.status,
@@ -282,6 +293,40 @@ async def run_get(
                     "output_snapshot_id": record.output_snapshot_id,
                     "artifact_dir": record.artifact_dir,
                     "created_at": record.created_at,
+                    "audit_refs": {
+                        "code": {
+                            "artifact_id": record.artifact_id,
+                            "name": record.name,
+                            "kind": record.kind,
+                            "commit": record.commit,
+                            "checksum": record.code_checksum,
+                        },
+                        "data": {
+                            "release_ids": record.dataset_release_ids,
+                            "release_checksums": record.dataset_release_checksums,
+                            "decision_at": record.decision_at,
+                            "mount_manifest_checksum": record.mount_manifest_checksum,
+                        },
+                        "parameters": {
+                            "value": record.params or {},
+                            "checksum": _payload_checksum(record.params or {}),
+                        },
+                        "output": {
+                            "scores_checksum": record.scores_checksum,
+                            "output_snapshot_id": record.output_snapshot_id,
+                        },
+                        "container": {
+                            "image": record.image,
+                            "image_digest": record.image_digest,
+                            "usage": record.usage,
+                            "archive_dir": record.artifact_dir,
+                            "stdout": str(Path(record.artifact_dir) / "stdout.txt"),
+                            "stderr": str(Path(record.artifact_dir) / "stderr.txt"),
+                            "container_metadata": str(
+                                Path(record.artifact_dir) / "container.json"
+                            ),
+                        },
+                    },
                 }
             ),
         )
@@ -293,9 +338,7 @@ async def run_get(
             error_path = artifact_dir / "out" / "error.json"
             if error_path.exists():
                 try:
-                    data["error"] = json.loads(
-                        error_path.read_text(encoding="utf-8")
-                    )
+                    data["error"] = json.loads(error_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     data["error"] = None
         return data
@@ -312,9 +355,7 @@ def _scores_preview(path: Path) -> list[dict[str, Any]]:
     import pyarrow.parquet as pq
 
     table = pq.read_table(path).slice(0, _SCORES_PREVIEW_ROWS)
-    rows: list[dict[str, Any]] = [
-        {str(k): v for k, v in row.items()} for row in table.to_pylist()
-    ]
+    rows: list[dict[str, Any]] = [{str(k): v for k, v in row.items()} for row in table.to_pylist()]
     return rows
 
 
@@ -336,12 +377,15 @@ def register(mcp: MCPServer) -> None:
         name="finboard_research_code_run",
         description=(
             "入队一次研究代码沙箱执行(kind=research_code_run 后台任务,worker "
-            "单并发):active 因子代码在一次性 Docker 容器内执行 factor.compute(ctx),"
+            "单并发):已晋级 active 因子代码在一次性 Docker 容器内执行 factor.compute(ctx),"
             "输出截面 scores + metrics(coverage/nan_ratio)。容器 --network none /"
             " --read-only / cap-drop ALL / 非 root / CPU 与内存限额 / 墙钟超时 kill;"
             "数据面为按 decision_at 物化的只读挂载(PIT 物理隔离,容器内不存在未来"
             "数据文件)。入队预检:sandbox 开启(research_sandbox_enabled)、"
-            "kind=factor、(kind,name) 有 active 产物、dataset_release_ids 均已登记"
+            "kind=factor、(kind,name) 有已晋级 active+passed 产物(显式 artifact_id"
+            "也可执行 draft 以产出供 screen ResearchRun 使用的快照,但 retired/"
+            "active 未晋级一律拒绝)、"
+            "dataset_release_ids 均已登记"
             "且至少一个 bars 类发布、decision_at 带时区。返回 job_id;"
             "finboard_job_get 轮询(result_ref=RCR-...),终态后 "
             "finboard_research_code_run_get 取结果。params 覆盖 manifest.params"
@@ -381,7 +425,7 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_research_code_run_get",
         description=(
-            "查询单次沙箱执行记录(research_code_runs,RCR- 前缀):三向引用"
+            "查询单次沙箱执行记录(research_code_runs,RCR- 前缀):四向审计引用"
             "(code commit / dataset_release_ids / scores_checksum)、镜像 digest、"
             "失败分类与资源用量、质量门结果(metrics.quality_gate:nan_ratio/"
             "coverage/阈值/失败原因)与落库快照引用(output_snapshot_id,可进 "

@@ -555,6 +555,11 @@ class VersionStampSchema(BaseSchema):
     dataset_versions: dict[str, str] = Field(default_factory=dict)
     selection_config: dict[str, Any] = Field(default_factory=dict)
     strategy_kind: str
+    # issue #219:user_code 的 OOS 结论必须绑定精确 artifact 与 commit。
+    code_artifact_id: str | None = None
+    code_artifact_name: str | None = None
+    code_kind: str | None = None
+    code_commit: str | None = None
 
 
 class ValidationPlanSchema(BaseSchema):

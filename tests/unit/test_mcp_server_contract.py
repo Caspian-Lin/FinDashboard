@@ -146,11 +146,12 @@ _EXPECTED_TOOLS = {
     "finboard_report_run",
     "finboard_report_backtest",
     "finboard_report_export",
-    # #215 研究代码仓库工具(2 只读 + 2 写;只存储与版本化,不执行代码)
+    # #215/#219 研究代码仓库工具(2 只读 + 3 写;提交/晋级治理,不执行代码)
     "finboard_research_code_submit",
     "finboard_research_code_list",
     "finboard_research_code_get",
     "finboard_research_code_rollback",
+    "finboard_research_code_promote",
     # #216 研究代码沙箱执行工具(1 只读 + 1 写;一次性 Docker 容器)
     "finboard_research_code_run",
     "finboard_research_code_run_get",
@@ -193,17 +194,17 @@ class TestToolExposure:
             # 绝对禁止的关键字(broker / kill_switch / 凭证 / QMT / CTP)——任何工具
             # 都不得含。
             for keyword in _FORBIDDEN_KEYWORDS:
-                assert keyword not in lowered, (
-                    f"工具 {name} 暴露了禁止能力 {keyword}"
-                )
+                assert keyword not in lowered, f"工具 {name} 暴露了禁止能力 {keyword}"
             # 实盘交易动词(order/fill/cancel/buy/sell/trade/position)——模拟盘
             # (``finboard_sim_*``,操作 simulation_* 表与 SIM-* ID)与 ResearchRun
             # (``finboard_run_*``,操作 research_runs 表与 RR- ID)豁免,因为它们的
             # cancel/order/position 语义属于研究 / 模拟域,不触及实盘订单;其他工具
             # 不得暴露这些动词。
-            if lowered.startswith("finboard_sim_") or lowered.startswith(
-                "finboard_run_"
-            ) or lowered.startswith("finboard_job_"):
+            if (
+                lowered.startswith("finboard_sim_")
+                or lowered.startswith("finboard_run_")
+                or lowered.startswith("finboard_job_")
+            ):
                 continue
             for verb in _LIVE_TRADING_VERBS:
                 assert verb not in lowered, (

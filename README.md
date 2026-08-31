@@ -211,10 +211,10 @@ agent 经 MCP 提交的因子代码(`finboard_research_code_submit`,issue #215)�
 墙钟超时 kill;数据面为按 `decision_at` 物化的只读挂载(PIT 物理隔离)。
 成功输出过质量门(NaN 比例 / 覆盖率,默认各 0.5,不合格 `quality_gate_failed`
 且错误指明阈值)后落库为 feature snapshot(issue #217):因子观测名
-`u_<name>`,策略规格按名引用(仅 artifact active 可引用),run report 携带
+`u_<name>`,策略规格按名引用(仅 artifact active 且 promotion_status=passed 可引用),run report 携带
 `factor_screen` 筛选指标(IC/IR/分层收益/换手率/与既有因子相关性矩阵)。
 issue #218 起策略代码同样进入回测:`strategy_kind=user_code` 规格引用
-kind=strategy 的 active artifact,`finboard_run_queue`(multi_period)逐
+kind=strategy 的 active 且 promotion_status=passed artifact,`finboard_run_queue`(multi_period)逐
 决策日在沙箱执行 `decide(ctx) -> 目标权重`(当前权重回显 + 约束视图),
 复用组合管线,report 附 `sandbox_provenance`(code commit + 镜像 digest)。
 默认关闭,启用前置(Docker Desktop 运行):
@@ -229,6 +229,27 @@ docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:
 ```bash
 FINBOARD_SANDBOX_E2E=1 uv run pytest tests/integration/test_research_sandbox_docker_e2e.py -v
 ```
+
+### 研究代码验证门与晋级链路(issue #219)
+
+`finboard_research_code_submit` 通过静态校验后只登记 `draft/pending`,不会替换
+当前正式版本。`finboard_research_code_promote` 必须将同一 artifact 的 screen
+运行与 #57 `validated_oos + final_test_unsealed=true` 实验绑定,并通过
+`abs(rank_ic) >= 0.02`、平均换手率 `<= 0.80`、相关性绝对值 `<= 0.80`、至少
+2 期的机器门,才转为 `active/passed`;失败证据保留在 draft,旧 commit 回滚也
+重新从 draft 开始。
+
+```text
+submit -> draft(pending) -- screen + #57 OOS --> active(passed)
+                         \-- gate failed --------> draft(failed)
+active(passed) -- 新版本晋级或显式退役 --> retired
+rollback(old commit) -----------------------> draft(pending)
+```
+
+晋级/运行审计固定保存 code commit、dataset release/checksum、参数/checksum、
+output checksum 四向引用以及容器日志和资源；模拟盘仍只接受已发布策略和
+completed `ResearchRun` 的结构化目标，所有模拟状态写独立 `simulation_*` 表，
+不连接 broker,不自动晋级影子盘或实盘。
 
 ---
 

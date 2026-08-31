@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_persistence.models import (
+    ResearchCodeArtifactModel,
     ResearchRunArtifactModel,
     ResearchRunModel,
     ResearchStrategySpecModel,
@@ -153,6 +154,19 @@ class SimulationRepository:
     async def get_research_run(self, run_id: str) -> ResearchRunModel | None:
         stmt = select(ResearchRunModel).where(ResearchRunModel.run_id == run_id)
         return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def get_code_artifact(
+        self, *, kind: str, name: str, commit: str
+    ) -> ResearchCodeArtifactModel | None:
+        """读取精确的 active+passed user_code 引用,用于模拟入口晋级门。"""
+        stmt = select(ResearchCodeArtifactModel).where(
+            ResearchCodeArtifactModel.kind == kind,
+            ResearchCodeArtifactModel.name == name,
+            ResearchCodeArtifactModel.commit == commit,
+            ResearchCodeArtifactModel.status == "active",
+            ResearchCodeArtifactModel.promotion_status == "passed",
+        ).order_by(ResearchCodeArtifactModel.created_at.desc())
+        return (await self.session.execute(stmt)).scalars().first()
 
     async def signal_traces(
         self,

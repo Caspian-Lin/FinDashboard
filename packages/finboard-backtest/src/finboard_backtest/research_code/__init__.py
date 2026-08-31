@@ -18,6 +18,18 @@ from finboard_backtest.research_code.git_repo import (
     ResearchCodeError,
     ResearchCodeRepo,
 )
+from finboard_backtest.research_code.promotion import (
+    PROMOTION_FAILED,
+    PROMOTION_PASSED,
+    PROMOTION_PENDING,
+    PromotionGateError,
+    PromotionGateResult,
+    PromotionScreenThresholds,
+    evaluate_promotion_gates,
+    is_promoted_artifact,
+    promotion_status,
+    require_promotion_gates,
+)
 from finboard_backtest.research_code.user_code import (
     active_user_strategy_commits,
     active_user_strategy_names,
@@ -83,7 +95,9 @@ class ResearchCodeService:
         )
         if issues:
             raise ResearchCodeError(
-                "静态校验失败(" + str(len(issues)) + " 个问题):\n"
+                "静态校验失败("
+                + str(len(issues))
+                + " 个问题):\n"
                 + "\n".join(i.render() for i in issues)
             )
         self._repo.ensure_init()
@@ -103,21 +117,13 @@ class ResearchCodeService:
             "path": self._repo.dir_path(kind, name),
         }
 
-    def log(
-        self, *, kind: str, name: str, limit: int = 50
-    ) -> list[dict[str, str]]:
+    def log(self, *, kind: str, name: str, limit: int = 50) -> list[dict[str, str]]:
         return self._repo.log(kind=kind, name=name, limit=limit)
 
-    def diff(
-        self, *, kind: str, name: str, from_commit: str, to_commit: str
-    ) -> str:
-        return self._repo.diff(
-            kind=kind, name=name, from_commit=from_commit, to_commit=to_commit
-        )
+    def diff(self, *, kind: str, name: str, from_commit: str, to_commit: str) -> str:
+        return self._repo.diff(kind=kind, name=name, from_commit=from_commit, to_commit=to_commit)
 
-    def read(
-        self, *, kind: str, name: str, commit: str | None = None
-    ) -> dict[str, str]:
+    def read(self, *, kind: str, name: str, commit: str | None = None) -> dict[str, str]:
         return self._repo.read(kind=kind, name=name, commit=commit)
 
     def exists(self, *, kind: str, name: str, commit: str | None = None) -> bool:
@@ -130,7 +136,13 @@ __all__ = [
     "KIND_STRATEGY",
     "MAX_FILES",
     "MAX_FILE_BYTES",
+    "PROMOTION_FAILED",
+    "PROMOTION_PASSED",
+    "PROMOTION_PENDING",
     "VALID_KINDS",
+    "PromotionGateError",
+    "PromotionGateResult",
+    "PromotionScreenThresholds",
     "ResearchCodeError",
     "ResearchCodeRepo",
     "ResearchCodeService",
@@ -138,7 +150,11 @@ __all__ = [
     "active_user_strategy_commits",
     "active_user_strategy_names",
     "compute_checksum",
+    "evaluate_promotion_gates",
     "freeze_user_code_commit",
+    "is_promoted_artifact",
+    "promotion_status",
+    "require_promotion_gates",
     "user_code_reference_gate_error",
     "user_factor_reference_gate_error",
     "validate_submission",

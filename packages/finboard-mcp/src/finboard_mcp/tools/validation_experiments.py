@@ -68,6 +68,10 @@ def _build_version_stamp(raw: dict[str, Any]) -> VersionStamp:
             dataset_versions=dict(raw.get("dataset_versions", {})),
             selection_config=dict(raw.get("selection_config", {})),
             strategy_kind=raw["strategy_kind"],
+            code_artifact_id=raw.get("code_artifact_id"),
+            code_artifact_name=raw.get("code_artifact_name"),
+            code_kind=raw.get("code_kind"),
+            code_commit=raw.get("code_commit"),
         )
     except (KeyError, TypeError) as exc:
         raise McpToolError(
@@ -124,18 +128,12 @@ def _build_robustness(raw: dict[str, Any] | None) -> RobustnessPlan:
     try:
         return RobustnessPlan(
             neighbourhood_steps=int(raw.get("neighbourhood_steps", 5)),
-            neighbourhood_relative_step=float(
-                raw.get("neighbourhood_relative_step", 0.1)
-            ),
-            cost_multipliers=tuple(
-                float(x) for x in raw.get("cost_multipliers", [1.0, 2.0, 3.0])
-            ),
+            neighbourhood_relative_step=float(raw.get("neighbourhood_relative_step", 0.1)),
+            cost_multipliers=tuple(float(x) for x in raw.get("cost_multipliers", [1.0, 2.0, 3.0])),
             slippage_stress_bps=tuple(
                 float(x) for x in raw.get("slippage_stress_bps", [0.0, 5.0, 10.0, 20.0])
             ),
-            execution_delay_bars=tuple(
-                int(x) for x in raw.get("execution_delay_bars", [1, 2])
-            ),
+            execution_delay_bars=tuple(int(x) for x in raw.get("execution_delay_bars", [1, 2])),
             stress_phases=tuple(
                 raw.get(
                     "stress_phases",
@@ -181,10 +179,7 @@ async def validation_experiment_list(
             experiments = await ResearchExperimentRepository(session).list_by_status(
                 resolved, limit=safe_limit
             )
-            return [
-                cast(dict[str, Any], to_jsonable(e.as_dict()))
-                for e in experiments
-            ]
+            return [cast(dict[str, Any], to_jsonable(e.as_dict())) for e in experiments]
 
     return await run_tool(
         audit=app.audit,
@@ -194,9 +189,7 @@ async def validation_experiment_list(
     )
 
 
-async def validation_experiment_get(
-    app: McpAppContext, experiment_id: str
-) -> ToolEnvelope:
+async def validation_experiment_get(app: McpAppContext, experiment_id: str) -> ToolEnvelope:
     """读取单个 #57 验证实验详情 + 全部 trial(包括 FAILED / REJECTED)。"""
 
     async def _do() -> dict[str, Any]:
@@ -206,20 +199,12 @@ async def validation_experiment_get(
         )
 
         async with app.session_maker() as session:
-            experiment = await ResearchExperimentRepository(session).get(
-                experiment_id
-            )
+            experiment = await ResearchExperimentRepository(session).get(experiment_id)
             if experiment is None:
-                raise McpToolError(
-                    "not_found", f"未找到验证实验: {experiment_id}"
-                )
-            trials = await ResearchTrialRepository(session).list_by_experiment(
-                experiment_id
-            )
+                raise McpToolError("not_found", f"未找到验证实验: {experiment_id}")
+            trials = await ResearchTrialRepository(session).list_by_experiment(experiment_id)
             data = dict(experiment.as_dict())
-            data["trials"] = [
-                cast(dict[str, Any], to_jsonable(t.as_dict())) for t in trials
-            ]
+            data["trials"] = [cast(dict[str, Any], to_jsonable(t.as_dict())) for t in trials]
             return cast(dict[str, Any], to_jsonable(data))
 
     return await run_tool(
@@ -255,9 +240,7 @@ async def validation_experiment_create(
         from finboard_persistence.validation_repo import ResearchExperimentRepository
 
         if len(hypothesis.strip()) < 10:
-            raise McpToolError(
-                "invalid_argument", "hypothesis 至少 10 个字符"
-            )
+            raise McpToolError("invalid_argument", "hypothesis 至少 10 个字符")
         experiment = new_experiment(
             hypothesis=hypothesis,
             version_stamp=_build_version_stamp(version_stamp),
@@ -312,9 +295,7 @@ async def validation_experiment_reject(
             repo = ResearchExperimentRepository(session)
             experiment = await repo.get(experiment_id)
             if experiment is None:
-                raise McpToolError(
-                    "not_found", f"未找到验证实验: {experiment_id}"
-                )
+                raise McpToolError("not_found", f"未找到验证实验: {experiment_id}")
             if experiment.status in (
                 ExperimentStatus.VALIDATED_OOS,
                 ExperimentStatus.SUPERSEDED,
@@ -374,17 +355,13 @@ async def validation_experiment_add_trial(
         try:
             trial_status = TrialStatus(status)
         except ValueError as exc:
-            raise McpToolError(
-                "invalid_argument", f"非法 trial 状态: {status}"
-            ) from exc
+            raise McpToolError("invalid_argument", f"非法 trial 状态: {status}") from exc
         async with app.session_maker() as session:
             exp_repo = ResearchExperimentRepository(session)
             trial_repo = ResearchTrialRepository(session)
             experiment = await exp_repo.get(experiment_id)
             if experiment is None:
-                raise McpToolError(
-                    "not_found", f"未找到验证实验: {experiment_id}"
-                )
+                raise McpToolError("not_found", f"未找到验证实验: {experiment_id}")
             if not experiment.can_run_trial():
                 raise McpToolError(
                     "conflict",
@@ -425,9 +402,7 @@ async def validation_experiment_add_trial(
     )
 
 
-async def validation_experiment_delete(
-    app: McpAppContext, experiment_id: str
-) -> ToolEnvelope:
+async def validation_experiment_delete(app: McpAppContext, experiment_id: str) -> ToolEnvelope:
     """删除 #57 验证实验(级联删除 trial,写操作)。"""
 
     async def _do() -> dict[str, Any]:
@@ -441,17 +416,14 @@ async def validation_experiment_delete(
             try:
                 deleted = await repo.delete(experiment_id)
                 if not deleted:
-                    raise McpToolError(
-                        "not_found", f"未找到验证实验: {experiment_id}"
-                    )
+                    raise McpToolError("not_found", f"未找到验证实验: {experiment_id}")
                 await session.commit()
             except IntegrityError as exc:
                 # 因子实验的 validation_experiment_id 外键仍引用本实验
                 await session.rollback()
                 raise McpToolError(
                     "conflict",
-                    "验证实验仍被因子实验引用(validation_experiment_id),"
-                    "无法删除;请先解除引用",
+                    "验证实验仍被因子实验引用(validation_experiment_id),无法删除;请先解除引用",
                 ) from exc
             return {"deleted": True, "experiment_id": experiment_id}
 
@@ -527,9 +499,7 @@ def register(mcp: MCPServer) -> None:
         limit: int = 100,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
-        return await validation_experiment_list(
-            app_context(ctx), status=status, limit=limit
-        )
+        return await validation_experiment_list(app_context(ctx), status=status, limit=limit)
 
     @mcp.tool(
         name="finboard_validation_experiment_get",

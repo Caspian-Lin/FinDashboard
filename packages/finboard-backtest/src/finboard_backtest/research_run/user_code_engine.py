@@ -49,6 +49,7 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunManifest,
     ResearchRunReport,
     execution_mode_for,
+    stable_checksum,
 )
 from finboard_backtest.research_run.frozen_loader import (
     FeatureSnapshotProvider,
@@ -153,6 +154,9 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         self._contexts: tuple[DecisionLoadContext, ...] | None = None
         self._sandbox: StrategySandboxCaller | None = None
         self._decision_records: list[dict[str, Any]] = []
+        self._screen_inputs: list[PortfolioDecisionInput] = []
+        self._target_weights: list[Mapping[str, float]] = []
+        self._strategy_screen: dict[str, Any] | None = None
         self._equity_curve: tuple[EquityPoint, ...] = ()
         self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
 
@@ -164,12 +168,8 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         if self._contexts is None or self._sandbox is None:
             spec = self._manifest.strategy_spec
             if spec.code_artifact is None:
-                raise ValueError(
-                    "user_code 规格 manifest 未冻结 code_artifact(入队路径异常)"
-                )
-            settings = (
-                self._settings_factory() if self._settings_factory is not None else None
-            )
+                raise ValueError("user_code 规格 manifest 未冻结 code_artifact(入队路径异常)")
+            settings = self._settings_factory() if self._settings_factory is not None else None
             if settings is None:
                 raise UserCodeExecutionError(
                     "sandbox_disabled",
@@ -186,9 +186,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 artifact_name=spec.code_artifact.name,
                 commit=spec.code_artifact.commit,
                 release_provider_factory=self._release_provider_factory,
-                dataset_release_ids=[
-                    ref.artifact_id for ref in self._manifest.dataset_releases
-                ],
+                dataset_release_ids=[ref.artifact_id for ref in self._manifest.dataset_releases],
                 run_id=self._manifest.run_id,
                 params=self._manifest.parameters,
             )
@@ -227,6 +225,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 strategy_constraints=constraints_echo,
             )
             self._decision_records.append(outcome.record)
+            self._target_weights.append(dict(outcome.weights))
             signals = targets_to_signals(
                 outcome.weights, loaded.signalable, decision_at=context.business_date
             )
@@ -243,6 +242,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 input_artifact_ids=context.input_artifact_ids,
                 covariance=loaded.covariance,
             )
+            self._screen_inputs.append(item)
             try:
                 decision = self._build_decision(
                     manifest=manifest,
@@ -261,14 +261,36 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
             yield decision
             collected.append(decision)
 
+        # screen 是治理/展示证据,不改变组合管线的机械结果。若计算因数据
+        # 缺失失败,保留带 issues 的空证据,让晋级门明确 fail-closed。
+        try:
+            from finboard_backtest.research_run.factor_screen import (
+                build_strategy_screen,
+            )
+
+            self._strategy_screen = await build_strategy_screen(
+                manifest,
+                self._screen_inputs,
+                self._target_weights,
+                self._release_provider_factory,
+            )
+        except Exception as exc:
+            logger.warning(
+                "user_code.strategy_screen_failed",
+                error=str(exc),
+                run_id=manifest.run_id,
+            )
+            self._strategy_screen = {
+                "n_periods": len(self._screen_inputs),
+                "issues": [f"strategy_screen_computation_failed: {exc}"],
+            }
+
         # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(与信号引擎
         # 同一函数、同一口径,报告可同屏对比);基准曲线两种模式都加载。
         if self.execution_mode is ResearchExecutionMode.MULTI_PERIOD and collected:
             release_ref = _bars_release_ref(manifest, self._release_provider_factory)
             provider = self._release_provider_factory(release_ref.artifact_id)
-            self._equity_curve = await build_daily_equity_curve(
-                provider, manifest, collected
-            )
+            self._equity_curve = await build_daily_equity_curve(provider, manifest, collected)
         self._benchmark_curve = await _load_benchmark_curve(
             manifest, self._release_provider_factory
         )
@@ -292,14 +314,65 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
             benchmark_curve=benchmark_curve or self._benchmark_curve,
         )
         if self._sandbox is not None:
+            provenance_header = self._sandbox.provenance_header(
+                mode=self.execution_mode.value,
+                decision_count=len(self._decision_records),
+            )
             provenance = {
-                **self._sandbox.provenance_header(
-                    mode=self.execution_mode.value,
-                    decision_count=len(self._decision_records),
+                **provenance_header,
+                "dataset_release_ids": [ref.artifact_id for ref in manifest.dataset_releases],
+                "dataset_release_checksums": {
+                    ref.artifact_id: ref.checksum for ref in manifest.dataset_releases
+                },
+                "parameters": manifest.parameters,
+                "parameters_checksum": stable_checksum(manifest.parameters),
+                "output_checksum": stable_checksum(
+                    [record.get("targets_checksum") for record in self._decision_records]
                 ),
+                "audit_refs": {
+                    "code": {
+                        "kind": "strategy",
+                        "name": manifest.strategy_spec.code_artifact.name
+                        if manifest.strategy_spec.code_artifact
+                        else None,
+                        "commit": self._sandbox.commit,
+                        "checksum": provenance_header.get("code_checksum"),
+                    },
+                    "data": {
+                        "release_ids": [
+                            ref.artifact_id for ref in manifest.dataset_releases
+                        ],
+                        "release_checksums": {
+                            ref.artifact_id: ref.checksum
+                            for ref in manifest.dataset_releases
+                        },
+                    },
+                    "parameters": {
+                        "checksum": stable_checksum(manifest.parameters),
+                    },
+                    "output": {
+                        "checksum": stable_checksum(
+                            [
+                                record.get("targets_checksum")
+                                for record in self._decision_records
+                            ]
+                        ),
+                        "decision_count": len(self._decision_records),
+                    },
+                    "container": {
+                        "image": self._sandbox.image,
+                        "image_digest": self._sandbox.image_digest,
+                        "archive_dir": provenance_header.get("artifact_dir"),
+                        "resource_limits": provenance_header.get("resource_limits", {}),
+                    },
+                },
                 "decisions": self._decision_records,
             }
-            report = replace(report, sandbox_provenance=provenance)
+            report = replace(
+                report,
+                strategy_screen=self._strategy_screen,
+                sandbox_provenance=provenance,
+            )
         return report
 
 

@@ -24,8 +24,9 @@
 * ``finboard.run.*`` 写工具(queue / cancel / replay / lineage,#127)。
 * ``finboard.portfolio.*``(#128)—— 组合计算(目标权重分配 /
   离散手数 sizing / 资金档位可行性 / 绩效归因,纯计算无 DB 写入);
-* ``finboard.research_code.*``(#215)—— 研究代码仓库(submit / rollback 写 +
-  list / get 只读;只存储与版本化,不执行代码)。
+* ``finboard.research_code.*``(#215/#219)—— 研究代码仓库(submit / rollback /
+  promote 写 + list / get 只读);提交先进入 draft,必须通过 screen + #57 OOS
+  晋级门后才进入 active 正式白名单,只存储与版本化,不执行代码。
 * ``finboard.job.*``(#136;#221 归档)—— 统一后台任务队列监控与提交
   (list / get 只读 + enqueue / cancel / archive / unarchive 写,
   复用 ``background_jobs`` 表)。
@@ -44,13 +45,14 @@
 * 报告聚合与导出(#141)—— ``finboard.report.*``:report_run / report_backtest
   只读聚合(ResearchRun result + artifacts;回测 metrics + equity_curve + fills),
   report_export 导出 CSV / Markdown 文件(纯标准库,返回绝对路径)。
-* 研究代码仓库(#215)—— ``finboard.research_code.*``:submit / rollback(写,
-  受 ``mcp_readonly_only`` 门控)+ list / get(只读)。agent 提交策略/因子
-  Python 代码到本地 bare git 仓库(``research_code_repo_path``),静态校验
-  (manifest / 入口签名 / import 白名单 / 危险调用黑名单 / 上限 / 拒二进制)
-  后版本化存储并登记 ``research_code_artifacts``。**只存储与版本化,不执行
-  任何代码**(执行见后续沙箱 issue);git 写操作收敛在服务端,agent 容器
-  文件系统只读。
+* 研究代码仓库(#215/#219)—— ``finboard.research_code.*``:submit / rollback /
+  promote(写,受 ``mcp_readonly_only`` 门控)+ list / get(只读)。agent 提交
+  策略/因子 Python 代码到本地 bare git 仓库(``research_code_repo_path``),
+  静态校验(manifest / 入口签名 / import 白名单 / 危险调用黑名单 / 上限 /
+  拒二进制)后先登记 ``draft/pending``;必须绑定同一 artifact 的 screen 与
+  #57 ``validated_oos + final_test_unsealed=true`` 并通过晋级门,才进入
+  ``active/passed`` 正式白名单。**只存储、版本化与登记证据,不执行任何代码**
+  (执行见后续沙箱 issue);git 写操作收敛在服务端,agent 容器文件系统只读。
 
 安全:实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)
 **永久不注册**为工具。研究写操作(创建 Run / 启动回测 / 模拟盘)由 agent 自主执行
@@ -94,7 +96,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(123 个,已实现)==
+== 当前可用工具(124 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -125,8 +127,8 @@ FinBoard 研究 MCP —— 量化研究工具集
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。
   factor_catalog 是混合目录(#217):builtin(26 因子,origin=builtin)+
-  user_defined(沙箱执行的自定义因子,标注 artifact commit/status,引用名
-  u_<artifact_name>,仅 status=active 可被规格引用)。
+  user_defined(沙箱执行的自定义因子,标注 artifact commit/status/promotion_status,
+  引用名 u_<artifact_name>,仅 status=active 且 promotion_status=passed 可被规格引用)。
 - 策略规格(16,✅ #126):strategy registry/template/list/history/version_get/
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。
@@ -227,18 +229,21 @@ FinBoard 研究 MCP —— 量化研究工具集
   fills_limit=null 全量) + summary)、report_export(导出 CSV/Markdown 文件,
   写入 FINBOARD_EXPORT_DIR 或系统临时目录,返回绝对路径;导出走全量;
   纯标准库,零新依赖;只读不写 DB)。
-- 研究代码仓库(4,✅ #215):research_code submit/rollback(写)+ list/get
-  (只读)。agent 提交策略/因子 Python 代码到本地 bare git 仓库,静态校验
+- 研究代码仓库(5,✅ #215/#219):research_code submit/rollback/promote(写)+
+  list/get(只读)。submit 只登记 draft;必须把同一 artifact 的 screen 运行与
+  #57 validated_oos + final_test_unsealed=true 绑定并通过 IC/换手/相关性门,
+  才转 active/passed 进入正式 composite/模拟盘白名单。静态校验
   (manifest 必填 manifest.entry / 入口签名 factor.compute|strategy.decide /
   import 白名单 pandas·numpy·polars·math·statistics·finboard_research_kit /
   禁 subprocess·socket·eval·exec·文件写模式 open / 文件数与单文件上限 /
-  拒二进制)通过后版本化存储,登记 research_code_artifacts(active/retired
+  拒二进制)通过后版本化存储,登记 research_code_artifacts(draft/active/retired
   生命周期,重复提交同名生成新 commit、旧版自动 retired、可 rollback 到
-  历史 commit、可 diff)。目录约定:一因子/策略一目录 factors/<name>/
+  历史 commit、可 diff)。失败证据保留在 draft,retired/未晋级引用 fail-visible;
+  rollback 只重新建立待验证 draft。目录约定:一因子/策略一目录 factors/<name>/
   {factor.py, manifest.toml}、strategies/<name>/{strategy.py, manifest.toml}。
   **只存储与版本化**;web 通道仍禁代码,仅 MCP agent 通道开放。
 - 研究代码沙箱执行(2,✅ #216+#217):research_code_run(写,入队)/
-  research_code_run_get(只读)。active 因子代码在一次性 Docker 容器内执行
+  research_code_run_get(只读)。通过晋级门的 active 因子代码在一次性 Docker 容器内执行
   factor.compute(ctx) -> scores + metrics(协议 v1 纯截面函数)。容器
   --network none / --read-only / cap-drop ALL / 非 root / CPU 与内存限额 /
   墙钟超时 kill;数据面为按 decision_at 物化的只读挂载(**PIT 物理隔离**:
@@ -249,12 +254,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   #217:成功输出过质量门(NaN 比例/覆盖率,阈值默认 0.5,不合格拒绝入库
   且错误指明阈值)后落库为 feature snapshot(u_<name> 因子观测,
   run_get 可见 output_snapshot_id),可被 research run 的
-  factor_snapshot_ids 引用、规格按 u_<name> 引用(仅 active;入队期
+  factor_snapshot_ids 引用、规格按 u_<name> 引用(仅 active+passed;入队期
   retired 拦截,multi_period 引用用户因子秒级拒绝)。需
   research_sandbox_enabled=true + Docker Desktop + docker/research-sandbox
   镜像;纯离线研究域,不连 broker 不下单。
-- 用户代码策略执行(✅ #218):strategy_spec ``strategy_kind=user_code`` +
-  ``code_artifact={name, commit?}`` 引用 kind=strategy 的 active artifact
+- 用户代码策略执行(✅ #218/#219):strategy_spec ``strategy_kind=user_code`` +
+  ``code_artifact={name, commit?}`` 引用 kind=strategy 的 active+passed artifact
   (feature_graph/signal_rules 允许为空)。research_run(建议
   ``parameters.rebalance_frequency=monthly|quarterly`` 走 multi_period;
   single_shot 需冻结快照提供决策时点)逐决策日在一次性容器执行
@@ -263,11 +268,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   复用 #91 组合管线(硬约束截断审计/风险退出/三档资金可行性/撮合/账本)
   —— **策略只出目标权重,不触任何订单语义**。越权处理:池外/缺执行元数据
   标的丢弃记 warning;负权重与超上限由管线约束投影逐项截断审计。入队门控
-  (REST+MCP 共享):artifact 非 active / commit 不一致 / 沙箱未启用 /
+  (REST+MCP 共享):artifact 非 active+passed / commit 不一致 / 沙箱未启用 /
   single_shot 缺快照 → 秒级拒绝;放行时 active commit 冻结进 manifest
   (input_checksum 覆盖代码版本)。report 附 ``sandbox_provenance``(code
-  commit + 镜像 digest + 逐决策 targets checksum);与 multi_factor 同一
-  决策日/候选池口径,报告同屏可比。逐日决策函数协议 v1 不做事件驱动
+  commit + 镜像 digest + 逐决策 targets checksum);晋级记录还绑定 #57
+  validated_oos、screen 阈值与四向审计引用;与 multi_factor 同一决策日/候选池
+  口径,报告同屏可比。逐日决策函数协议 v1 不做事件驱动
   on_bar(日内形态另行立项)。纯离线研究域,不连 broker 不下单。
 
 分阶段扩展计划见 `packages/finboard-mcp/ROADMAP.md`。
@@ -277,9 +283,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   agent 可通过 MCP 自主执行(#122),不触及交易安全红线。
 - 实盘能力(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测):
   永久不可用,不注册为工具。需要它们 = 走错了路。
-- 代码边界(#215):web 通道仍是「无代码版本化规格」,禁止网页提交 Python /
+- 代码边界(#215/#219):web 通道仍是「无代码版本化规格」,禁止网页提交 Python /
   模块路径 / 可执行表达式;**仅 MCP agent 通道**开放受控研究代码提交
-  (finboard_research_code_submit,静态校验 + 版本化存储);执行走
+  (finboard_research_code_submit,静态校验 + draft 版本化存储);须经 screen + #57
+  OOS 的 promote 晋级门后才能进入正式研究组合/模拟盘白名单;执行走
   finboard_research_code_run(一次性沙箱容器,#216,因子截面)或 user_code
   策略规格的逐决策 decide(#218,沙箱内跑、复用组合管线)—— 均不是策略
   上线,LLM 产出仍须走

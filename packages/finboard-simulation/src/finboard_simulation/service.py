@@ -17,6 +17,7 @@ from typing import cast
 
 from sqlalchemy import distinct, func, select
 
+from finboard_backtest.research_code import is_promoted_artifact, promotion_status
 from finboard_persistence.models import (
     SimulationAccountModel,
     SimulationDecisionModel,
@@ -170,6 +171,30 @@ class SimulationService:
             or str(manifest_spec.get("strategy_id")) != strategy_id
         ):
             raise SimulationIsolationError("机器验证与模拟策略不一致")
+        code_artifact_ref = manifest_spec.get("code_artifact")
+        if manifest_spec.get("strategy_kind") == "user_code":
+            if not isinstance(code_artifact_ref, dict):
+                raise SimulationIsolationError("user_code 模拟策略缺少冻结 code_artifact 引用")
+            artifact_name = code_artifact_ref.get("name")
+            artifact_commit = code_artifact_ref.get("commit")
+            if not isinstance(artifact_name, str) or not isinstance(artifact_commit, str):
+                raise SimulationIsolationError(
+                    "user_code 模拟策略必须冻结 code_artifact.name 与 commit"
+                )
+            code_artifact = await self.repo.get_code_artifact(
+                kind="strategy", name=artifact_name, commit=artifact_commit
+            )
+            if not is_promoted_artifact(code_artifact):
+                state = (
+                    "不存在"
+                    if code_artifact is None
+                    else f"status={code_artifact.status} "
+                    f"promotion_status={promotion_status(code_artifact)}"
+                )
+                raise SimulationIsolationError(
+                    "user_code artifact 未通过 screen + #57 OOS 晋级门,"
+                    f"禁止进入模拟盘: {artifact_name}@{artifact_commit[:12]}({state})"
+                )
         release_ids = {
             str(item.get("artifact_id"))
             for item in cast(list[dict[str, object]], manifest.get("dataset_releases", []))
@@ -201,6 +226,7 @@ class SimulationService:
                 "strategy_version": strategy_version,
                 "validation_run_id": validation_run_id,
                 "data_release_id": data_release_id,
+                "code_artifact": code_artifact_ref,
                 "reset_of_session_id": reset_of_session_id,
             },
         )

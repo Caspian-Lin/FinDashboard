@@ -1,13 +1,13 @@
 """``user_code`` 策略的可引用性与入队门控(issue #218)。
 
 user_code 策略引用 ``research_code_artifacts`` 的 ``kind=strategy``
-artifact;可引用性三道闸的前两道在这里(第三道 = 执行期数据全部来自
+artifact;可引用性三道闸的前两道在这里(artifact 必须 active+passed,第三道 = 执行期数据全部来自
 冻结 manifest,commit 已冻结,artifact 后续 retired 不影响已入队运行):
 
-* 编译期(``compile_strategy_spec(user_code_sources=...)``)—— 名单外
+* 编译期(``compile_strategy_spec(user_code_sources=...)``)—— active+passed 名单外
   的 artifact 直接 ``StrategySpecError``(retired / 不存在 fail-visible);
 * 入队期(:func:`user_code_reference_gate_error`,REST+MCP 共用,对齐
-  #186/#203/#217 秒级失败风格)—— 引用不在 active 名单 / commit 与
+  #186/#203/#217 秒级失败风格)—— 引用不在 active+passed 名单 / commit 与
   active 不一致 / 沙箱未启用 → 拒绝;放行时把 **active commit 冻结进
   manifest 的 strategy_spec.code_artifact.commit**。
 
@@ -18,20 +18,20 @@ from __future__ import annotations
 
 from typing import Any
 
+from finboard_backtest.research_code.promotion import is_promoted_artifact
+
 _USER_CODE_KIND = "user_code"
 _STRATEGY_KIND = "strategy"
 _ACTIVE = "active"
 
 
 async def active_user_strategy_names(session: Any) -> frozenset[str]:
-    """查询当前 ``status=active`` 的沙箱策略代码 artifact 名集合。"""
+    """查询当前 ``status=active/promotion_status=passed`` 的策略 artifact 名集合。"""
     from finboard_persistence import ResearchCodeArtifactRepository
 
     repo = ResearchCodeArtifactRepository(session)
-    artifacts = await repo.list_artifacts(
-        kind=_STRATEGY_KIND, status=_ACTIVE, limit=500
-    )
-    return frozenset(item.name for item in artifacts)
+    artifacts = await repo.list_artifacts(kind=_STRATEGY_KIND, status=_ACTIVE, limit=500)
+    return frozenset(item.name for item in artifacts if is_promoted_artifact(item))
 
 
 async def active_user_strategy_commits(session: Any) -> dict[str, str]:
@@ -39,10 +39,8 @@ async def active_user_strategy_commits(session: Any) -> dict[str, str]:
     from finboard_persistence import ResearchCodeArtifactRepository
 
     repo = ResearchCodeArtifactRepository(session)
-    artifacts = await repo.list_artifacts(
-        kind=_STRATEGY_KIND, status=_ACTIVE, limit=500
-    )
-    return {item.name: item.commit for item in artifacts}
+    artifacts = await repo.list_artifacts(kind=_STRATEGY_KIND, status=_ACTIVE, limit=500)
+    return {item.name: item.commit for item in artifacts if is_promoted_artifact(item)}
 
 
 def user_code_reference_gate_error(
@@ -58,7 +56,7 @@ def user_code_reference_gate_error(
 
     1. 非 user_code 规格(name 为 None)直接放行;
     2. 沙箱未启用 → 拒绝(fail-fast,与 worker 执行期同口径);
-    3. 引用的 artifact 不在 active 名单 → 拒绝(附 rollback 路径);
+    3. 引用的 artifact 不在 active+passed 名单 → 拒绝(附 rollback 路径);
     4. 声明的 commit 与 active 不一致 → 拒绝(历史版本先 rollback);
     5. single_shot(无 rebalance_frequency)且未冻结快照 → 拒绝
        (user_code 决策时点与信号引擎同口径:single_shot 来自快照)。
@@ -74,16 +72,17 @@ def user_code_reference_gate_error(
     active = dict(active_user_strategies or {})
     active_commit = active.get(code_artifact_name)
     if active_commit is None:
+        status_note = "非 active 或未通过 screen+OOS 晋级门"
         return (
             f"user_code 策略引用的代码 artifact 不存在或非 active: "
-            f"{code_artifact_name!r}。策略代码经 finboard_research_code_submit"
+            f"{code_artifact_name!r}({status_note})。策略代码经 finboard_research_code_submit"
             "(kind=strategy)提交;artifact retired 后不可被新运行引用"
             "(已入队运行的 manifest 冻结不受影响);请恢复 artifact"
             "(finboard_research_code_rollback)或更换引用"
         )
     if code_artifact_commit is not None and code_artifact_commit != active_commit:
         return (
-            f"指定 commit {code_artifact_commit[:12]} 不是 active 引用"
+            f"指定 commit {code_artifact_commit[:12]} 不是 active+passed 引用"
             f"(active={active_commit[:12]});历史版本先 "
             "finboard_research_code_rollback 再入队"
         )
@@ -99,9 +98,7 @@ def user_code_reference_gate_error(
     return None
 
 
-def freeze_user_code_commit(
-    spec: Any, active_commits: dict[str, str]
-) -> Any:
+def freeze_user_code_commit(spec: Any, active_commits: dict[str, str]) -> Any:
     """把 active commit 冻结进 spec 的 ``code_artifact.commit``。
 
     入队期调用(spec.code_artifact.commit 为 None = 引用 active);冻结后

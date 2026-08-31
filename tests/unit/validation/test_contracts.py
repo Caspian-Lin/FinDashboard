@@ -264,6 +264,30 @@ class TestSerialization:
         assert restored.robustness.neighbourhood_steps == exp.robustness.neighbourhood_steps
         assert restored.strategy_params_space == exp.strategy_params_space
 
+    def test_roundtrip_preserves_user_code_binding(self) -> None:
+        stamp = VersionStamp(
+            matching_model_version="v2",
+            asset_rules_version="v1",
+            factor_version=None,
+            dataset_versions={},
+            selection_config={},
+            strategy_kind="user_code",
+            code_artifact_id="RC-strategy",
+            code_artifact_name="alpha_strategy",
+            code_kind="strategy",
+            code_commit="b" * 40,
+        )
+        exp = new_experiment(
+            hypothesis="user_code 策略代码绑定序列化测试",
+            version_stamp=stamp,
+            plan=_plan(),
+            thresholds=AcceptanceThresholds(),
+        )
+
+        restored = deserialize_experiment(exp.as_dict())
+
+        assert restored.version_stamp == stamp
+
 
 class TestPlanValidation:
     def test_train_end_after_train_start(self) -> None:

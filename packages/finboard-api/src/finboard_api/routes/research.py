@@ -268,6 +268,10 @@ def _to_version_stamp(v: VersionStampSchema) -> VersionStamp:
         dataset_versions=dict(v.dataset_versions),
         selection_config=dict(v.selection_config),
         strategy_kind=v.strategy_kind,
+        code_artifact_id=v.code_artifact_id,
+        code_artifact_name=v.code_artifact_name,
+        code_kind=v.code_kind,
+        code_commit=v.code_commit,
     )
 
 

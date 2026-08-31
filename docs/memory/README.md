@@ -31,3 +31,4 @@
 - [Issue #216:研究代码沙箱执行器](issue-216-research-sandbox-run.md) — PIT=物理隔离(挂载生成端 fail-closed);/out 用 bind 而非 tmpfs(容器停后 tmpfs 丢失);镜像 tag↔kit 版本三处同步;harness 须 spec_from_file_location 防 sys.modules 跨运行污染
 - [Issue #217:沙箱因子接入选股管线](issue-217-sandbox-factor-pipeline.md) — u_ 前缀全链路判据;as_dict 可选键 None 不输出保旧 checksum;NaN/覆盖率 0.5 阈值互补;screen forward=相邻决策 PIT close;测试库改列须手动 drop 表
 - [Issue #218:沙箱策略代码接入 multi_period 回测](issue-218-sandbox-strategy-backtest.md) — decide(ctx)→targets 逐决策日容器执行;direct_weights 不重缩放、截断权威在管线约束投影;空 targets=合法全现金(空分支须补审计行);commit 由入队冻结、执行期不解析 active;kit 0.2.0 三处同步
+- [Issue #219:研究代码验证门与晋级链路](issue-219-research-code-promotion.md) — submit/rollback 只建 draft;screen + #57 validated_oos/final_test_unsealed 晋级门;active+passed 才可正式消费;四向审计引用与沙箱日志/资源归档;模拟盘保持独立隔离

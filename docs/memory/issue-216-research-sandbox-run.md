@@ -29,8 +29,9 @@
 - issue AC 要求「挂载清单不含 decision_at 之后的数据文件」是数据面断言,真正防
   前视的是物理隔离(容器里根本没有未来文件),不是运行时检查——所以防线放在
   挂载生成端而不是容器内。
-- v1 只允许 active 引用执行(指定 commit ≠ active 先 rollback),让三向引用里的
-  commit 与登记表 active 行恒一致,避免「跑了未登记版本」的审计缺口。
+- v1 默认只允许 active+passed 引用执行(显式 artifact_id 可执行 draft 以生成
+  验证/快照证据;指定 commit ≠ artifact 先 rollback),让三向引用里的 commit
+  与登记表行恒一致,避免「跑了未登记版本」的审计缺口。
 
 ## How to apply
 

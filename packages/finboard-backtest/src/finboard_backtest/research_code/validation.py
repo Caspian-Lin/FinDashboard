@@ -78,24 +78,22 @@ def validate_submission(
     if kind not in _ENTRY_FILE:
         issues.append(
             ValidationIssue(
-                "(submission)", "invalid_kind",
+                "(submission)",
+                "invalid_kind",
                 f"kind 须为 factor|strategy,收到 {kind!r}",
             )
         )
         return issues
 
     if not files:
-        issues.append(
-            ValidationIssue(
-                "(submission)", "no_files", "提交不含任何文件"
-            )
-        )
+        issues.append(ValidationIssue("(submission)", "no_files", "提交不含任何文件"))
         return issues
 
     if len(files) > max_files:
         issues.append(
             ValidationIssue(
-                "(submission)", "too_many_files",
+                "(submission)",
+                "too_many_files",
                 f"文件数 {len(files)} 超过上限 {max_files}",
             )
         )
@@ -103,28 +101,22 @@ def validate_submission(
     normalized: dict[str, bytes] = {}
     for rel, content in files.items():
         if ".." in rel.split("/") or rel.startswith(("/", "~")) or "\\" in rel:
-            issues.append(
-                ValidationIssue(rel, "illegal_path", f"非法相对路径 {rel!r}")
-            )
+            issues.append(ValidationIssue(rel, "illegal_path", f"非法相对路径 {rel!r}"))
             continue
         if not rel.endswith(_TEXT_SUFFIXES):
             issues.append(
-                ValidationIssue(rel, "binary_rejected",
-                                "仅接受文本文件(.py/.toml/.md/.txt/.json)")
+                ValidationIssue(rel, "binary_rejected", "仅接受文本文件(.py/.toml/.md/.txt/.json)")
             )
             continue
-        data = content.encode("utf-8", errors="strict") if isinstance(
-            content, str
-        ) else content
+        data = content.encode("utf-8", errors="strict") if isinstance(content, str) else content
         if b"\x00" in data:
-            issues.append(
-                ValidationIssue(rel, "binary_rejected", "内容含 NUL,疑似二进制")
-            )
+            issues.append(ValidationIssue(rel, "binary_rejected", "内容含 NUL,疑似二进制"))
             continue
         if len(data) > max_file_bytes:
             issues.append(
                 ValidationIssue(
-                    rel, "file_too_large",
+                    rel,
+                    "file_too_large",
                     f"文件 {len(data)} 字节超过上限 {max_file_bytes}",
                 )
             )
@@ -134,24 +126,16 @@ def validate_submission(
     manifest_name = "manifest.toml"
     if manifest_name not in normalized:
         issues.append(
-            ValidationIssue(manifest_name, "manifest_missing",
-                            "缺少 manifest.toml(必填)")
+            ValidationIssue(manifest_name, "manifest_missing", "缺少 manifest.toml(必填)")
         )
     else:
         issues.extend(_validate_manifest(manifest_name, normalized[manifest_name]))
 
     entry = _ENTRY_FILE[kind]
     if entry not in normalized:
-        issues.append(
-            ValidationIssue(entry, "entry_missing",
-                            f"缺少入口文件 {entry}")
-        )
+        issues.append(ValidationIssue(entry, "entry_missing", f"缺少入口文件 {entry}"))
     else:
-        issues.extend(
-            _validate_entry(
-                entry, normalized[entry], _ENTRY_FUNC[kind]
-            )
-        )
+        issues.extend(_validate_entry(entry, normalized[entry], _ENTRY_FUNC[kind]))
 
     for rel, data in normalized.items():
         if rel.endswith(".py"):
@@ -172,38 +156,32 @@ def _validate_manifest(rel: str, data: bytes) -> list[ValidationIssue]:
     for field in ("entry",):
         if not top.get(field):
             issues.append(
-                ValidationIssue(rel, "manifest_missing",
-                                f"manifest 缺少必填字段 {field!r}(manifest.entry)")
+                ValidationIssue(
+                    rel, "manifest_missing", f"manifest 缺少必填字段 {field!r}(manifest.entry)"
+                )
             )
     # params 声明为 schema 时须是表(浅校验,深校验在后续沙箱 issue)
     params = top.get("params")
     if params is not None and not isinstance(params, dict):
-        issues.append(
-            ValidationIssue(rel, "manifest_invalid", "manifest.params 须为表")
-        )
+        issues.append(ValidationIssue(rel, "manifest_invalid", "manifest.params 须为表"))
     return issues
 
 
-def _validate_entry(
-    rel: str, data: bytes, func_name: str
-) -> list[ValidationIssue]:
+def _validate_entry(rel: str, data: bytes, func_name: str) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     try:
         tree = ast.parse(data.decode("utf-8"))
     except SyntaxError as exc:
         return [ValidationIssue(rel, "syntax_error", f"Python 语法错误: {exc}")]
     func = next(
-        (
-            n
-            for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == func_name
-        ),
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == func_name),
         None,
     )
     if func is None:
         issues.append(
             ValidationIssue(
-                rel, "entry_signature",
+                rel,
+                "entry_signature",
                 f"入口文件未定义模块级函数 {func_name}()",
             )
         )
@@ -212,14 +190,16 @@ def _validate_entry(
     if not positional and not func.args.kwonlyargs:
         issues.append(
             ValidationIssue(
-                rel, "entry_signature",
+                rel,
+                "entry_signature",
                 f"{func_name}() 至少须有一个输入参数(接收数据/上下文)",
             )
         )
     if func.args.vararg is not None:
         issues.append(
             ValidationIssue(
-                rel, "entry_signature",
+                rel,
+                "entry_signature",
                 f"{func_name}() 不接受 *args(签名须显式,便于沙箱静态装配)",
             )
         )
@@ -242,10 +222,7 @@ def _validate_python(rel: str, data: bytes) -> list[ValidationIssue]:
                 root = node.module.split(".")[0]
                 issues.extend(_check_import(rel, root, node.module))
             else:
-                issues.append(
-                    ValidationIssue(rel, "forbidden_import",
-                                    "禁止相对 import")
-                )
+                issues.append(ValidationIssue(rel, "forbidden_import", "禁止相对 import"))
         elif isinstance(node, ast.Call):
             issues.extend(_check_call(rel, node))
     return issues
@@ -257,7 +234,8 @@ def _check_import(rel: str, root: str, full: str) -> list[ValidationIssue]:
     if root not in IMPORT_WHITELIST:
         return [
             ValidationIssue(
-                rel, "import_not_whitelisted",
+                rel,
+                "import_not_whitelisted",
                 f"import {full} 不在白名单 {sorted(IMPORT_WHITELIST)}",
             )
         ]
@@ -272,9 +250,7 @@ def _check_call(rel: str, node: ast.Call) -> list[ValidationIssue]:
     elif isinstance(node.func, ast.Attribute):
         name = node.func.attr
     if name in FORBIDDEN_CALLS:
-        issues.append(
-            ValidationIssue(rel, "forbidden_call", f"禁止调用 {name}()")
-        )
+        issues.append(ValidationIssue(rel, "forbidden_call", f"禁止调用 {name}()"))
     if name == "open" and node.args:
         mode = node.args[1] if len(node.args) > 1 else None
         mode_s = None
@@ -286,8 +262,7 @@ def _check_call(rel: str, node: ast.Call) -> list[ValidationIssue]:
             mode_s = "?"  # 非字面量模式:按可疑处理
         if mode_s is not None and any(c in mode_s for c in "wax+"):
             issues.append(
-                ValidationIssue(rel, "forbidden_call",
-                                "open() 禁止写模式(w/a/x/+,代码仓库层只读)")
+                ValidationIssue(rel, "forbidden_call", "open() 禁止写模式(w/a/x/+,代码仓库层只读)")
             )
     return issues
 
