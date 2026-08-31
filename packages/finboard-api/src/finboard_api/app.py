@@ -183,6 +183,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 mcp_auth_token=settings.mcp_auth_token,
                 # #157:容器内 MCP 地址由该配置渲染进运行时 opencode.json。
                 mcp_remote_url=settings.opencode_mcp_remote_url,
+                # #242:渲染期 provider 模型列表同步(只增不改;失败回退缓存)。
+                model_sync_enabled=settings.opencode_model_sync_enabled,
             )
             process_manager = OpenCodeProcessManager(
                 web_config, manage_process=settings.opencode_manage_process

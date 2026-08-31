@@ -207,6 +207,119 @@ def test_render_runtime_config_missing_source_raises(work_tmp) -> None:
 
 
 # ---------------------------------------------------------------------------
+# OpenCodeProcessConfig — provider 模型列表同步(#242)
+# ---------------------------------------------------------------------------
+
+
+def _write_provider_repo_opencode_json(workdir: Path) -> None:
+    """构造含 deepseek provider(baseURL + {env:VAR} 占位 key)的仓库配置。"""
+    config_dir = workdir / ".opencode"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "opencode.json").write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "deepseek": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "DeepSeek",
+                        "options": {
+                            "baseURL": "https://api.deepseek.com/v1",
+                            "apiKey": "{env:DEEPSEEK_API_KEY}",
+                        },
+                        "models": {
+                            "deepseek-v4-flash": {"name": "DeepSeek V4 Flash"},
+                        },
+                    }
+                },
+                "mcp": {"finboard": {"type": "remote", "url": "http://x/mcp"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_render_model_sync_merges_additive_only(work_tmp, monkeypatch) -> None:
+    """拉取的新模型 id 只增不改;手写条目与 options 原样保留;缓存写入。"""
+    _write_provider_repo_opencode_json(work_tmp)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._fetch_provider_model_ids",
+        lambda base_url, api_key, **kwargs: ["deepseek-v4-flash", "deepseek-v5-alpha"],
+    )
+    config = OpenCodeProcessConfig(workdir=str(work_tmp))
+    target = config.render_runtime_config()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    provider = data["provider"]["deepseek"]
+    # 手写条目原样保留,新 id 以 {name: id} 追加。
+    assert provider["models"]["deepseek-v4-flash"] == {"name": "DeepSeek V4 Flash"}
+    assert provider["models"]["deepseek-v5-alpha"] == {"name": "deepseek-v5-alpha"}
+    # 接入面永不改写:apiKey 占位符保持源文件原样。
+    assert provider["options"]["baseURL"] == "https://api.deepseek.com/v1"
+    assert provider["options"]["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+    cache = json.loads(
+        (work_tmp / ".opencode" / "runtime" / "provider-model-cache.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert cache["deepseek"]["models"] == ["deepseek-v4-flash", "deepseek-v5-alpha"]
+
+
+def test_render_model_sync_falls_back_to_cache(work_tmp, monkeypatch) -> None:
+    """拉取失败回退上次缓存;渲染产物仍含上次拉取的模型。"""
+    _write_provider_repo_opencode_json(work_tmp)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    config = OpenCodeProcessConfig(workdir=str(work_tmp))
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._fetch_provider_model_ids",
+        lambda base_url, api_key, **kwargs: ["deepseek-v5-alpha"],
+    )
+    config.render_runtime_config()
+    def _raise(base_url: str, api_key: str | None, **kwargs: object) -> list[str]:
+        raise httpx.ConnectError("boom")
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._fetch_provider_model_ids", _raise
+    )
+    target = config.render_runtime_config()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert "deepseek-v5-alpha" in data["provider"]["deepseek"]["models"]
+
+
+def test_render_model_sync_disabled_skips_network(work_tmp, monkeypatch) -> None:
+    """开关关闭:渲染期不发起任何请求,源 models 原样,不产生缓存。"""
+    _write_provider_repo_opencode_json(work_tmp)
+    def _boom(*args: object, **kwargs: object) -> list[str]:
+        raise AssertionError("model sync must not run when disabled")
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._fetch_provider_model_ids", _boom
+    )
+    config = OpenCodeProcessConfig(workdir=str(work_tmp), model_sync_enabled=False)
+    target = config.render_runtime_config()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert list(data["provider"]["deepseek"]["models"]) == ["deepseek-v4-flash"]
+    assert not (
+        work_tmp / ".opencode" / "runtime" / "provider-model-cache.json"
+    ).exists()
+
+
+def test_render_model_sync_unresolvable_key_skips(work_tmp, monkeypatch) -> None:
+    """{env:VAR} 解析不到 → 不对该 provider 发起请求,源文件原样。"""
+    _write_provider_repo_opencode_json(work_tmp)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    def _boom(*args: object, **kwargs: object) -> list[str]:
+        raise AssertionError("must not fetch without resolvable api key")
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._fetch_provider_model_ids", _boom
+    )
+    config = OpenCodeProcessConfig(workdir=str(work_tmp))
+    target = config.render_runtime_config()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert list(data["provider"]["deepseek"]["models"]) == ["deepseek-v4-flash"]
+    assert not (
+        work_tmp / ".opencode" / "runtime" / "provider-model-cache.json"
+    ).exists()
+
+
+# ---------------------------------------------------------------------------
 # OpenCodeProcessConfig — 环境变量白名单
 # ---------------------------------------------------------------------------
 
