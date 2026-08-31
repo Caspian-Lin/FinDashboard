@@ -1,7 +1,8 @@
 """研究代码产物 repository 集成测试(需 PostgreSQL)。
 
-覆盖:register(active/retired 生命周期) / get_active / list_artifacts /
-rollback_to / 错误路径(非法 kind/status、回滚不存在的历史 commit)。
+覆盖:register(active/retired 生命周期) / draft 晋级与失败证据 / get_active /
+list_artifacts / rollback_to_draft / 兼容 rollback_to / 错误路径(非法
+kind/status、回滚不存在的历史 commit)。
 """
 
 from __future__ import annotations
@@ -100,6 +101,72 @@ class TestResearchCodeArtifactRepository:
             await repo.rollback_to(
                 kind="factor", name="ghost", commit="c" * 40
             )
+
+    async def test_draft_promote_retire_and_rollback_are_fail_visible(self, db_session):
+        repo = ResearchCodeArtifactRepository(db_session)
+        draft = await repo.register(
+            kind="strategy",
+            name="promotion_lifecycle",
+            commit="a" * 40,
+            path="strategies/promotion_lifecycle",
+            checksum="draft",
+            created_by="agent:mcp",
+            status="draft",
+        )
+        assert draft.status == "draft"
+        assert draft.promotion_status == "pending"
+        assert await repo.get_active(kind="strategy", name="promotion_lifecycle") is None
+
+        active = await repo.promote(
+            draft.artifact_id,
+            validation_experiment_id="exp-219",
+            screen_run_id="RR-219",
+            evidence={"schema_version": "research_code_promotion.v1"},
+        )
+        await db_session.commit()
+        assert active.status == "active"
+        assert active.promotion_status == "passed"
+        assert active.validation_experiment_id == "exp-219"
+        assert active.screen_run_id == "RR-219"
+
+        retired = await repo.retire(active.artifact_id)
+        await db_session.commit()
+        assert retired.status == "retired"
+        assert await repo.get_active(kind="strategy", name="promotion_lifecycle") is None
+        visible = await repo.get(active.artifact_id)
+        assert visible is not None
+        assert visible.status == "retired"
+
+        rollback_draft = await repo.rollback_to_draft(
+            kind="strategy", name="promotion_lifecycle", commit="a" * 40
+        )
+        await db_session.commit()
+        assert rollback_draft.status == "draft"
+        assert rollback_draft.promotion_status == "pending"
+
+    async def test_failed_promotion_keeps_draft_and_records_evidence(self, db_session):
+        repo = ResearchCodeArtifactRepository(db_session)
+        draft = await repo.register(
+            kind="factor",
+            name="failed_promotion",
+            commit="b" * 40,
+            path="factors/failed_promotion",
+            checksum="draft",
+            created_by="agent:mcp",
+            status="draft",
+        )
+        failed = await repo.mark_promotion_failed(
+            draft.artifact_id,
+            validation_experiment_id="exp-failed",
+            screen_run_id="RR-failed",
+            evidence={"gates": {"passed": False}},
+        )
+        await db_session.commit()
+
+        assert failed.status == "draft"
+        assert failed.promotion_status == "failed"
+        assert failed.promotion_evidence == {"gates": {"passed": False}}
+        assert await repo.get_active(kind="factor", name="failed_promotion") is None
 
     async def test_register_invalid_kind(self, db_session):
         repo = ResearchCodeArtifactRepository(db_session)

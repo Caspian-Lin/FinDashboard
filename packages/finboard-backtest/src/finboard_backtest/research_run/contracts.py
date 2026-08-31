@@ -27,15 +27,7 @@ MIN_RESEARCH_CAPITAL = Decimal("100000")
 MAX_RESEARCH_CAPITAL = Decimal("500000")
 MONEY_EPSILON = Decimal("0.01")
 
-JsonValue = (
-    None
-    | bool
-    | int
-    | float
-    | str
-    | list["JsonValue"]
-    | dict[str, "JsonValue"]
-)
+JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 #: research_run 支持的调仓频率(``parameters.rebalance_frequency``,issue #183)。
 #: 单快照(冻结因子快照)frozen 路径不设该参数,恒为 single_shot。
@@ -173,13 +165,9 @@ class ResearchRunManifest:
             raise ValueError("必须冻结至少一个数据发布")
         if self.strategy_version is not None and self.strategy_version < 1:
             raise ValueError("strategy_version 必须大于等于 1")
-        if self.strategy_spec_checksum != stable_checksum(
-            self.strategy_spec.canonical_payload()
-        ):
+        if self.strategy_spec_checksum != stable_checksum(self.strategy_spec.canonical_payload()):
             raise ValueError("strategy_spec_checksum 与策略规格内容不一致")
-        frozen_release_ids = tuple(
-            item.artifact_id for item in self.dataset_releases
-        )
+        frozen_release_ids = tuple(item.artifact_id for item in self.dataset_releases)
         if len(frozen_release_ids) != len(set(frozen_release_ids)):
             raise ValueError("dataset_releases 不允许重复")
         if sorted(frozen_release_ids) != sorted(
@@ -516,13 +504,16 @@ class LedgerSnapshot:
     fill_shortfall: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
-        if min(
-            self.margin_used,
-            self.fees_paid,
-            self.tax_paid,
-            self.slippage_paid,
-            self.fill_shortfall,
-        ) < 0:
+        if (
+            min(
+                self.margin_used,
+                self.fees_paid,
+                self.tax_paid,
+                self.slippage_paid,
+                self.fill_shortfall,
+            )
+            < 0
+        ):
             raise ValueError("保证金、费用和未成交缺口不能为负")
         expected = self.cash + self.market_value
         if abs(expected - self.equity) > MONEY_EPSILON:
@@ -647,6 +638,9 @@ class ResearchRunReport:
     # 仅当 run 引用用户自定义因子(u_ 前缀,沙箱执行产出)时非空;计算
     # 失败不阻塞 run(尽力而为,失败原因记 issues)。
     factor_screen: dict[str, JsonValue] | None = None
+    # issue #219:user_code 策略把逐决策目标权重作为截面 score 计算的
+    # IC/换手/相关性 screen,晋级时与 #57 OOS 一起作为机器证据。
+    strategy_screen: dict[str, JsonValue] | None = None
     # issue #218:user_code 策略的沙箱 provenance —— 所用 code commit、
     # 镜像 digest 与逐决策 targets checksum;非 user_code run 恒为 None。
     sandbox_provenance: dict[str, JsonValue] | None = None
@@ -664,26 +658,24 @@ class ResearchRunReport:
         if not all(math.isfinite(value) for value in metrics):
             raise ValueError("报告指标必须为有限数")
         if (self.benchmark_return is None) != (self.excess_return is None):
-            raise ValueError(
-                "基准缺失时 benchmark_return 与 excess_return 必须同为 None"
-            )
+            raise ValueError("基准缺失时 benchmark_return 与 excess_return 必须同为 None")
         if (
             self.benchmark_return is not None
             and self.excess_return is not None
-            and abs(
-                self.strategy_return - self.benchmark_return - self.excess_return
-            )
-            > 1e-9
+            and abs(self.strategy_return - self.benchmark_return - self.excess_return) > 1e-9
         ):
             raise ValueError("excess_return 必须等于策略收益减基准收益")
-        if min(
-            self.final_equity,
-            self.final_cash,
-            self.commission_paid,
-            self.tax_paid,
-            self.slippage_paid,
-            self.fill_shortfall,
-        ) < 0:
+        if (
+            min(
+                self.final_equity,
+                self.final_cash,
+                self.commission_paid,
+                self.tax_paid,
+                self.slippage_paid,
+                self.fill_shortfall,
+            )
+            < 0
+        ):
             raise ValueError("报告金额不能为负")
         if min(self.decision_count, self.order_count, self.fill_count) < 0:
             raise ValueError("报告计数不能为负")
@@ -748,8 +740,7 @@ def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
             version=str(item["version"]),
             checksum=str(item["checksum"]),
             capabilities=tuple(
-                str(value)
-                for value in cast(list[object], item.get("capabilities", []))
+                str(value) for value in cast(list[object], item.get("capabilities", []))
             ),
         )
         for item in cast(list[dict[str, object]], payload["dataset_releases"])
@@ -760,8 +751,7 @@ def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
             version=str(item["version"]),
             checksum=str(item["checksum"]),
             capabilities=tuple(
-                str(value)
-                for value in cast(list[object], item.get("capabilities", []))
+                str(value) for value in cast(list[object], item.get("capabilities", []))
             ),
         )
         for item in cast(list[dict[str, object]], payload.get("factor_snapshots", []))
@@ -779,20 +769,12 @@ def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
         ),
         factor_snapshots=factor_refs,
         parameters=cast(dict[str, JsonValue], payload.get("parameters", {})),
-        validation_config=cast(
-            dict[str, JsonValue], payload.get("validation_config", {})
-        ),
-        portfolio_config=cast(
-            dict[str, JsonValue], payload.get("portfolio_config", {})
-        ),
+        validation_config=cast(dict[str, JsonValue], payload.get("validation_config", {})),
+        portfolio_config=cast(dict[str, JsonValue], payload.get("portfolio_config", {})),
         risk_config=cast(dict[str, JsonValue], payload.get("risk_config", {})),
-        execution_config=cast(
-            dict[str, JsonValue], payload.get("execution_config", {})
-        ),
+        execution_config=cast(dict[str, JsonValue], payload.get("execution_config", {})),
         fee_config=cast(dict[str, JsonValue], payload.get("fee_config", {})),
-        benchmark_config=cast(
-            dict[str, JsonValue], payload.get("benchmark_config", {})
-        ),
+        benchmark_config=cast(dict[str, JsonValue], payload.get("benchmark_config", {})),
         code_version=str(payload["code_version"]),
         initial_capital=Decimal(str(payload["initial_capital"])),
         requested_by=str(payload["requested_by"]),
@@ -827,9 +809,7 @@ def report_from_json(payload: dict[str, object]) -> ResearchRunReport:
         benchmark_symbol=str(payload["benchmark_symbol"]),
         benchmark_return=benchmark_return,
         excess_return=(
-            float(str(payload["excess_return"]))
-            if benchmark_return is not None
-            else None
+            float(str(payload["excess_return"])) if benchmark_return is not None else None
         ),
         sharpe_ratio=float(str(payload["sharpe_ratio"])),
         max_drawdown=float(str(payload["max_drawdown"])),
@@ -841,20 +821,17 @@ def report_from_json(payload: dict[str, object]) -> ResearchRunReport:
         fill_shortfall=Decimal(str(payload["fill_shortfall"])),
         constraint_impact={
             str(key): float(value)
-            for key, value in cast(
-                dict[str, float], payload.get("constraint_impact", {})
-            ).items()
+            for key, value in cast(dict[str, float], payload.get("constraint_impact", {})).items()
         },
         decision_count=int(str(payload["decision_count"])),
         order_count=int(str(payload["order_count"])),
         fill_count=int(str(payload["fill_count"])),
-        accounting_invariants_passed=bool(
-            payload.get("accounting_invariants_passed", True)
-        ),
+        accounting_invariants_passed=bool(payload.get("accounting_invariants_passed", True)),
         execution_mode=ResearchExecutionMode(str(mode_raw)),
         annualized_return=float(str(payload.get("annualized_return", 0.0))),
         equity_curve=curve,
         factor_screen=_optional_json_dict(payload.get("factor_screen")),
+        strategy_screen=_optional_json_dict(payload.get("strategy_screen")),
         sandbox_provenance=_optional_json_dict(payload.get("sandbox_provenance")),
     )
 

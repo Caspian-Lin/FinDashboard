@@ -88,15 +88,9 @@ class OrderModel(Base, IdMixin):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
-    risk_checked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    submitted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    acknowledged_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    risk_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -132,9 +126,7 @@ class FillModel(Base, IdMixin):
     filled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class PositionModel(Base, IdMixin):
@@ -231,9 +223,7 @@ class InstrumentModel(Base, IdMixin):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    __table_args__ = (
-        Index("ix_instruments_market_type", "market", "instrument_type"),
-    )
+    __table_args__ = (Index("ix_instruments_market_type", "market", "instrument_type"),)
 
 
 class InstrumentNameModel(Base, IdMixin):
@@ -251,13 +241,9 @@ class InstrumentNameModel(Base, IdMixin):
     name: Mapped[str] = mapped_column(String(100))
     valid_from: Mapped[date] = mapped_column(Date)
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (
-        Index("ix_instrument_names_code_valid", "instrument_code", "valid_from"),
-    )
+    __table_args__ = (Index("ix_instrument_names_code_valid", "instrument_code", "valid_from"),)
 
 
 class WatchlistModel(Base, IdMixin):
@@ -267,9 +253,7 @@ class WatchlistModel(Base, IdMixin):
 
     name: Mapped[str] = mapped_column(String(100), index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -286,13 +270,9 @@ class WatchlistItemModel(Base, IdMixin):
         index=True,
     )
     symbol_code: Mapped[str] = mapped_column(String(20), index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (
-        UniqueConstraint("watchlist_id", "symbol_code", name="uq_watchlist_item"),
-    )
+    __table_args__ = (UniqueConstraint("watchlist_id", "symbol_code", name="uq_watchlist_item"),)
 
 
 class BacktestRunModel(Base, IdMixin):
@@ -321,9 +301,7 @@ class BacktestRunModel(Base, IdMixin):
     matching_model: Mapped[dict[str, object]] = mapped_column(
         JSON, default=dict, server_default=sql_text("'{}'::json")
     )
-    asset_rules: Mapped[dict[str, object] | None] = mapped_column(
-        JSON, nullable=True
-    )
+    asset_rules: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     fee_assumptions: Mapped[dict[str, object]] = mapped_column(
         JSON, default=dict, server_default=sql_text("'{}'::json")
     )
@@ -384,9 +362,7 @@ class StrategyPresetModel(Base, IdMixin):
     selection: Mapped[dict[str, object]] = mapped_column(
         JSON, default=dict, server_default=sql_text("'{}'::json")
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -411,12 +387,8 @@ class ResearchStrategySpecModel(Base, IdMixin):
     )
     parent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rollback_of_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    published_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -457,12 +429,8 @@ class ResearchRunModel(Base, IdMixin):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -488,20 +456,12 @@ class ResearchRunArtifactModel(Base, IdMixin):
     )
     payload: Mapped[dict[str, object]] = mapped_column(JSON)
     checksum: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint(
-            "run_id", "artifact_id", name="uq_research_run_artifact_id"
-        ),
-        UniqueConstraint(
-            "run_id", "sequence", name="uq_research_run_artifact_sequence"
-        ),
-        UniqueConstraint(
-            "run_id", "trace_id", name="uq_research_run_trace_id"
-        ),
+        UniqueConstraint("run_id", "artifact_id", name="uq_research_run_artifact_id"),
+        UniqueConstraint("run_id", "sequence", name="uq_research_run_artifact_sequence"),
+        UniqueConstraint("run_id", "trace_id", name="uq_research_run_trace_id"),
         Index(
             "ix_research_run_artifact_history",
             "run_id",
@@ -516,28 +476,20 @@ class SimulationAccountModel(Base, IdMixin):
 
     __tablename__ = "simulation_accounts"
 
-    simulation_account_id: Mapped[str] = mapped_column(
-        String(96), unique=True, index=True
-    )
+    simulation_account_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(100))
     mode: Mapped[str] = mapped_column(String(16), default="simulation")
     status: Mapped[str] = mapped_column(String(24), index=True)
     currency: Mapped[str] = mapped_column(String(8), default="CNY")
     initial_cash: Mapped[Decimal] = mapped_column(_research_numeric())
     cash: Mapped[Decimal] = mapped_column(_research_numeric())
-    frozen_cash: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    margin_used: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
+    frozen_cash: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    margin_used: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
     equity: Mapped[Decimal] = mapped_column(_research_numeric())
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
-    archived_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -548,14 +500,10 @@ class SimulationSessionModel(Base, IdMixin):
 
     __tablename__ = "simulation_sessions"
 
-    simulation_session_id: Mapped[str] = mapped_column(
-        String(96), unique=True, index=True
-    )
+    simulation_session_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
     simulation_account_id: Mapped[str] = mapped_column(
         String(96),
-        ForeignKey(
-            "simulation_accounts.simulation_account_id", ondelete="RESTRICT"
-        ),
+        ForeignKey("simulation_accounts.simulation_account_id", ondelete="RESTRICT"),
         index=True,
     )
     mode: Mapped[str] = mapped_column(String(16), default="simulation")
@@ -574,33 +522,17 @@ class SimulationSessionModel(Base, IdMixin):
     clock: Mapped[dict[str, object]] = mapped_column(
         JSON, default=dict, server_default=sql_text("'{}'::json")
     )
-    promotion_status: Mapped[str] = mapped_column(
-        String(24), default="not_evaluated", index=True
-    )
-    reset_of_session_id: Mapped[str | None] = mapped_column(
-        String(96), nullable=True, index=True
-    )
-    recovery_count: Mapped[int] = mapped_column(
-        Integer, default=0, server_default="0"
-    )
-    last_sequence: Mapped[int] = mapped_column(
-        Integer, default=0, server_default="0"
-    )
+    promotion_status: Mapped[str] = mapped_column(String(24), default="not_evaluated", index=True)
+    reset_of_session_id: Mapped[str | None] = mapped_column(String(96), nullable=True, index=True)
+    recovery_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_sequence: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    paused_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    stopped_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    archived_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -649,9 +581,7 @@ class SimulationOrderModel(Base, IdMixin):
 
     __tablename__ = "simulation_orders"
 
-    simulation_order_id: Mapped[str] = mapped_column(
-        String(96), unique=True, index=True
-    )
+    simulation_order_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
     intent_key: Mapped[str] = mapped_column(String(160), unique=True)
     simulation_account_id: Mapped[str] = mapped_column(String(96), index=True)
     simulation_session_id: Mapped[str] = mapped_column(
@@ -672,29 +602,17 @@ class SimulationOrderModel(Base, IdMixin):
     order_type: Mapped[str] = mapped_column(String(8))
     time_in_force: Mapped[str] = mapped_column(String(8))
     quantity: Mapped[Decimal] = mapped_column(_research_numeric())
-    price: Mapped[Decimal | None] = mapped_column(
-        _research_numeric(), nullable=True
-    )
-    filled_quantity: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    average_fill_price: Mapped[Decimal | None] = mapped_column(
-        _research_numeric(), nullable=True
-    )
+    price: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    filled_quantity: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    average_fill_price: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
     status: Mapped[str] = mapped_column(String(24), index=True)
     reject_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reject_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     rule_snapshot: Mapped[dict[str, object]] = mapped_column(JSON)
-    reserved_cash: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    reserved_quantity: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
+    reserved_cash: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    reserved_quantity: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
     submitted_market_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    eligible_after: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
+    eligible_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
@@ -716,9 +634,7 @@ class SimulationFillModel(Base, IdMixin):
 
     __tablename__ = "simulation_fills"
 
-    simulation_fill_id: Mapped[str] = mapped_column(
-        String(96), unique=True, index=True
-    )
+    simulation_fill_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
     fill_event_key: Mapped[str] = mapped_column(String(192), unique=True)
     simulation_order_id: Mapped[str] = mapped_column(
         String(96),
@@ -734,21 +650,11 @@ class SimulationFillModel(Base, IdMixin):
     side: Mapped[str] = mapped_column(String(8))
     quantity: Mapped[Decimal] = mapped_column(_research_numeric())
     price: Mapped[Decimal] = mapped_column(_research_numeric())
-    commission: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    tax: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    slippage_cost: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    filled_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    commission: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    tax: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    slippage_cost: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class SimulationPositionModel(Base, IdMixin):
@@ -762,39 +668,19 @@ class SimulationPositionModel(Base, IdMixin):
     instrument_type: Mapped[str] = mapped_column(String(24))
     asset_rule_key: Mapped[str] = mapped_column(String(32))
     position_side: Mapped[str] = mapped_column(String(8))
-    total_quantity: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    available_quantity: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    frozen_quantity: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    average_price: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    market_value: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    realized_pnl: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    unrealized_pnl: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    margin_used: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    last_price: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
+    total_quantity: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    available_quantity: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    frozen_quantity: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    average_price: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    market_value: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    realized_pnl: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    unrealized_pnl: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    margin_used: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    last_price: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
     last_settlement_price: Mapped[Decimal] = mapped_column(
         _research_numeric(), default=Decimal("0")
     )
-    last_settlement_date: Mapped[date | None] = mapped_column(
-        Date, nullable=True
-    )
+    last_settlement_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     lots: Mapped[list[dict[str, object]]] = mapped_column(
         JSON, default=list, server_default=sql_text("'[]'::json")
     )
@@ -822,24 +708,12 @@ class SimulationLedgerModel(Base, IdMixin):
     simulation_session_id: Mapped[str] = mapped_column(String(96), index=True)
     sequence: Mapped[int] = mapped_column(Integer)
     event_type: Mapped[str] = mapped_column(String(32), index=True)
-    reference_id: Mapped[str | None] = mapped_column(
-        String(128), nullable=True, index=True
-    )
-    cash_delta: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    margin_delta: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    realized_pnl: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    commission: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
-    tax: Mapped[Decimal] = mapped_column(
-        _research_numeric(), default=Decimal("0")
-    )
+    reference_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    cash_delta: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    margin_delta: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    realized_pnl: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    commission: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
+    tax: Mapped[Decimal] = mapped_column(_research_numeric(), default=Decimal("0"))
     cash_after: Mapped[Decimal] = mapped_column(_research_numeric())
     frozen_cash_after: Mapped[Decimal] = mapped_column(_research_numeric())
     margin_used_after: Mapped[Decimal] = mapped_column(_research_numeric())
@@ -847,12 +721,8 @@ class SimulationLedgerModel(Base, IdMixin):
     payload: Mapped[dict[str, object]] = mapped_column(
         JSON, default=dict, server_default=sql_text("'{}'::json")
     )
-    occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint(
@@ -878,17 +748,11 @@ class SimulationMarketEventModel(Base, IdMixin):
     status: Mapped[str] = mapped_column(String(24), index=True)
     symbol: Mapped[str] = mapped_column(String(32), index=True)
     market: Mapped[str] = mapped_column(String(16))
-    timestamp: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     payload: Mapped[dict[str, object]] = mapped_column(JSON)
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    processed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint(
@@ -913,9 +777,7 @@ class SimulationAuditModel(Base, IdMixin):
     audit_id: Mapped[str] = mapped_column(String(96), unique=True, index=True)
     event_key: Mapped[str] = mapped_column(String(192), unique=True)
     simulation_account_id: Mapped[str] = mapped_column(String(96), index=True)
-    simulation_session_id: Mapped[str | None] = mapped_column(
-        String(96), nullable=True, index=True
-    )
+    simulation_session_id: Mapped[str | None] = mapped_column(String(96), nullable=True, index=True)
     sequence: Mapped[int] = mapped_column(Integer)
     actor: Mapped[str] = mapped_column(String(128))
     action: Mapped[str] = mapped_column(String(48), index=True)
@@ -1222,9 +1084,7 @@ class FactorSnapshotModel(Base, IdMixin):
 
     __tablename__ = "factor_snapshots"
 
-    decision_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
+    decision_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     business_date: Mapped[date] = mapped_column(Date)
     effective_date: Mapped[date] = mapped_column(Date, index=True)
     source: Mapped[str] = mapped_column(String(32), index=True)
@@ -1237,9 +1097,7 @@ class FactorSnapshotModel(Base, IdMixin):
     skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
     checksum: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         Index(
@@ -1272,9 +1130,7 @@ class FactorValueModel(Base, IdMixin):
     global_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     industry_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     industry_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint(
@@ -1317,18 +1173,14 @@ class ResearchExperimentModel(Base, IdMixin):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     frozen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    finalized_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     trials_used: Mapped[int] = mapped_column(Integer, default=0)
     final_test_unsealed: Mapped[bool] = mapped_column(Boolean, default=False)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     supersedes_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     notes: Mapped[str] = mapped_column(Text, default="")
 
-    __table_args__ = (
-        Index("ix_research_experiment_status_created", "status", "created_at"),
-    )
+    __table_args__ = (Index("ix_research_experiment_status_created", "status", "created_at"),)
 
 
 class ResearchTrialModel(Base, IdMixin):
@@ -1349,9 +1201,7 @@ class ResearchTrialModel(Base, IdMixin):
     trial_index: Mapped[int] = mapped_column(Integer)
     parameters: Mapped[dict[str, object]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(16), index=True)
-    in_sample_metrics: Mapped[dict[str, object] | None] = mapped_column(
-        JSON, nullable=True
-    )
+    in_sample_metrics: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     oos_metrics: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     walk_forward_windows: Mapped[list[dict[str, object]]] = mapped_column(
         JSON, default=list, server_default=sql_text("'[]'::json")
@@ -1359,16 +1209,10 @@ class ResearchTrialModel(Base, IdMixin):
     robustness_probes: Mapped[list[dict[str, object]]] = mapped_column(
         JSON, default=list, server_default=sql_text("'[]'::json")
     )
-    statistical_report: Mapped[dict[str, object] | None] = mapped_column(
-        JSON, nullable=True
-    )
+    statistical_report: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -1447,13 +1291,9 @@ class EtfMetadataAuditModel(Base, IdMixin):
     new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     changed_by: Mapped[str] = mapped_column(String(64), default="system")
     reason: Mapped[str] = mapped_column(Text, default="")
-    changed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (
-        Index("ix_etf_audit_code_changed", "code", "changed_at"),
-    )
+    __table_args__ = (Index("ix_etf_audit_code_changed", "code", "changed_at"),)
 
 
 class BondMetadataModel(Base, IdMixin):
@@ -1495,7 +1335,9 @@ class ConvertibleMetadataModel(Base, IdMixin):
         JSON, default=list, server_default=sql_text("'[]'::json")
     )
     redemption_yield: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
-    forced_redeem_trigger: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    forced_redeem_trigger: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
     put_back_trigger: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
     downward_revision_trigger: Mapped[Decimal | None] = mapped_column(
         _research_numeric(), nullable=True
@@ -1532,9 +1374,7 @@ class FuturesContractModel(Base, IdMixin):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    __table_args__ = (
-        Index("ix_futures_series_exchange", "series_id", "exchange"),
-    )
+    __table_args__ = (Index("ix_futures_series_exchange", "series_id", "exchange"),)
 
 
 class ContinuousFuturesRuleModel(Base, IdMixin):
@@ -1571,9 +1411,7 @@ class InstrumentLifecycleEventModel(Base, IdMixin):
     details: Mapped[dict[str, object]] = mapped_column(
         JSON, default=dict, server_default=sql_text("'{}'::json")
     )
-    observed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -1709,9 +1547,7 @@ class FactorFeatureSnapshotModel(Base, IdMixin):
     code_version: Mapped[str] = mapped_column(String(64))
     checksum: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     payload: Mapped[dict[str, object]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         Index(
@@ -1847,22 +1683,14 @@ class ResearchMemoryModel(Base, IdMixin):
     status: Mapped[str] = mapped_column(String(16), index=True)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_by: Mapped[str] = mapped_column(String(128))
-    conversation_id: Mapped[str | None] = mapped_column(
-        String(32), nullable=True, index=True
-    )
+    conversation_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     confirmed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    confirmed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    supersedes_id: Mapped[str | None] = mapped_column(
-        String(32), nullable=True, index=True
-    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    supersedes_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         Index(
@@ -1897,12 +1725,8 @@ class BackgroundJobModel(Base, IdMixin):
     )
     payload_checksum: Mapped[str] = mapped_column(String(64), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
-    progress_total: Mapped[int] = mapped_column(
-        Integer, default=0, server_default="0"
-    )
-    progress_done: Mapped[int] = mapped_column(
-        Integer, default=0, server_default="0"
-    )
+    progress_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    progress_done: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     phase: Mapped[str | None] = mapped_column(String(64), nullable=True)
     result_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -1910,27 +1734,17 @@ class BackgroundJobModel(Base, IdMixin):
     attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     max_attempts: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
     worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    heartbeat_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    lease_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     requested_by: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
-    started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 归档时间(issue #221):NULL=未归档;非 NULL=已归档(从默认列表隐藏,不删除)。
     # 仅终态任务可归档;归档后 worker 维护路径(requeue_due)跳过该行。
-    archived_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -1960,8 +1774,8 @@ class ResearchCodeArtifactModel(Base, IdMixin):
     """研究代码产物登记(issue #215)。
 
     agent 通过 MCP 提交的策略/因子代码在 bare git 仓库中的版本化登记簿:
-    每次 submit 追加一行(active),同名旧版本标记 retired;rollback 把
-    指定历史 commit 重新置为 active。git 对象本身存储在 settings
+    每次 submit 追加一行(draft/pending),晋级通过后同名旧版本标记 retired;
+    rollback 把指定历史 commit 重新登记为 draft。git 对象本身存储在 settings
     ``research_code_repo_path`` 指定的 bare 仓库,本表只做引用与生命周期。
 
     纯研究域存储,不执行代码、不触实盘 orders/fills/positions。
@@ -1977,13 +1791,26 @@ class ResearchCodeArtifactModel(Base, IdMixin):
     checksum: Mapped[str] = mapped_column(String(32))
     # draft=已提交未启用 / active=当前生效引用 / retired=被新版本替代或显式退役
     status: Mapped[str] = mapped_column(String(16), index=True)
+    # 生命周期(status)与机器晋级门(promotion_status)分离:active 只表示当前
+    # 引用,只有 promotion_status=passed 才能进入正式组合/模拟盘白名单。
+    promotion_status: Mapped[str] = mapped_column(
+        String(16),
+        index=True,
+        default="pending",
+        server_default=sql_text("'pending'"),
+    )
+    validation_experiment_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
+    screen_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True, index=True)
+    promotion_evidence: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         Index(
@@ -1991,6 +1818,12 @@ class ResearchCodeArtifactModel(Base, IdMixin):
             "kind",
             "name",
             "status",
+        ),
+        Index(
+            "ix_research_code_artifacts_kind_name_promotion",
+            "kind",
+            "name",
+            "promotion_status",
         ),
     )
 
@@ -2026,15 +1859,11 @@ class ResearchCodeRunModel(Base, IdMixin):
     params: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     image: Mapped[str] = mapped_column(String(128))
     image_digest: Mapped[str] = mapped_column(String(160))
-    mount_manifest_checksum: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    mount_manifest_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
     scores_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # issue #217:成功 run 落库的 FeatureSnapshot 回填引用(不建外键,
     # 快照表自身按 checksum 不可变)。
-    output_snapshot_id: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, index=True
-    )
+    output_snapshot_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # running|succeeded|failed
     status: Mapped[str] = mapped_column(String(16), index=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)

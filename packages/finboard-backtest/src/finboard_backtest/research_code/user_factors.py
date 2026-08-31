@@ -1,9 +1,10 @@
 """用户自定义因子的可引用性与入队门控(issue #217)。
 
 用户因子(u_ 前缀)的值来自沙箱执行(``finboard_research_code_run``)
-落库的 feature snapshot;可引用性由 artifact ``status=active`` 把关:
+落库的 feature snapshot;可引用性由 artifact ``status=active`` 且
+``promotion_status=passed`` 把关:
 
-* 编译期(``compile_strategy_spec(user_factor_sources=...)``)—— 名单
+* 编译期(``compile_strategy_spec(user_factor_sources=...)``)—— active+passed 名单
   外的用户因子直接 ``StrategySpecError``(retired / 不存在 fail-visible);
 * 入队期(``user_factor_reference_gate_error``,REST+MCP 共用,对齐
   #186/#203 秒级失败风格)—— 引用的用户因子不在 active 名单 → 拒绝;
@@ -19,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import Any
 
+from finboard_backtest.research_code.promotion import is_promoted_artifact
 from finboard_data.factor_lab import is_user_factor_name, sandbox_factor_name
 
 #: research_code 的 kind 白名单里 user 因子固定为 factor
@@ -27,14 +29,14 @@ _ACTIVE = "active"
 
 
 async def active_user_factor_names(session: Any) -> frozenset[str]:
-    """查询当前 ``status=active`` 的沙箱用户因子名集合(u_ 前缀)。"""
+    """查询当前 ``status=active/promotion_status=passed`` 的用户因子名集合。"""
     from finboard_persistence import ResearchCodeArtifactRepository
 
     repo = ResearchCodeArtifactRepository(session)
-    artifacts = await repo.list_artifacts(
-        kind=_USER_FACTOR_KIND, status=_ACTIVE, limit=500
+    artifacts = await repo.list_artifacts(kind=_USER_FACTOR_KIND, status=_ACTIVE, limit=500)
+    return frozenset(
+        sandbox_factor_name(item.name) for item in artifacts if is_promoted_artifact(item)
     )
-    return frozenset(sandbox_factor_name(item.name) for item in artifacts)
 
 
 def user_factor_reference_gate_error(
@@ -45,7 +47,7 @@ def user_factor_reference_gate_error(
 ) -> str | None:
     """入队期用户因子门控;返回错误文案或 None(放行)。
 
-    1. 引用的用户因子不在 active 名单 → 拒绝(附缺失名单);
+    1. 引用的用户因子不在 active+passed 名单 → 拒绝(附缺失名单);
     2. multi_period(``parameters.rebalance_frequency``)引用用户因子 → 拒绝。
     """
     referenced = {name for name in required_factor_sources if is_user_factor_name(name)}

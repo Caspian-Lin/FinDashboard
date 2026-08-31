@@ -72,9 +72,7 @@ class ResearchCodeRepo:
         base = self._dir(kind, name)
         with tempfile.TemporaryDirectory(prefix="finboard-code-") as tmp:
             work = Path(tmp) / "w"
-            self._git(
-                "clone", "--quiet", "--no-hardlinks", str(self._path), str(work)
-            )
+            self._git("clone", "--quiet", "--no-hardlinks", str(self._path), str(work))
             target = work / base
             target.mkdir(parents=True, exist_ok=True)
             # 全量替换式提交:同名目录旧文件不在本次 files 中即删除,
@@ -113,9 +111,7 @@ class ResearchCodeRepo:
 
     # ---- 查询 -------------------------------------------------------------
 
-    def log(
-        self, *, kind: str, name: str, limit: int = 50
-    ) -> list[dict[str, str]]:
+    def log(self, *, kind: str, name: str, limit: int = 50) -> list[dict[str, str]]:
         """提交历史(新→旧),每条 {commit, date, message, author}。"""
         out = self._git_bare(
             "log",
@@ -140,18 +136,12 @@ class ResearchCodeRepo:
                 )
         return entries
 
-    def diff(
-        self, *, kind: str, name: str, from_commit: str, to_commit: str
-    ) -> str:
+    def diff(self, *, kind: str, name: str, from_commit: str, to_commit: str) -> str:
         """两个 commit 间该 (kind, name) 目录的 unified diff。"""
         path = self._dir(kind, name)
-        return self._git_bare(
-            "diff", f"{from_commit}:{path}", f"{to_commit}:{path}"
-        )
+        return self._git_bare("diff", f"{from_commit}:{path}", f"{to_commit}:{path}")
 
-    def read(
-        self, *, kind: str, name: str, commit: str | None = None
-    ) -> dict[str, str]:
+    def read(self, *, kind: str, name: str, commit: str | None = None) -> dict[str, str]:
         """读某版本的全部文件(路径相对 ``<kind_dir>/<name>/``)。
 
         目录不存在时抛 :class:`ResearchCodeError`。
@@ -170,9 +160,7 @@ class ResearchCodeRepo:
             if not meta.startswith("040000") and rel.endswith(
                 (".py", ".toml", ".md", ".txt", ".json")
             ):
-                files[rel] = self._git_bare(
-                    "show", f"{tree_ref}/{rel}"
-                )
+                files[rel] = self._git_bare("show", f"{tree_ref}/{rel}")
         return files
 
     def exists(self, *, kind: str, name: str, commit: str | None = None) -> bool:
@@ -188,13 +176,9 @@ class ResearchCodeRepo:
 
     def _dir(self, kind: str, name: str) -> str:
         if kind not in VALID_KINDS:
-            raise ResearchCodeError(
-                f"非法 kind {kind!r},允许: {list(VALID_KINDS)}"
-            )
+            raise ResearchCodeError(f"非法 kind {kind!r},允许: {list(VALID_KINDS)}")
         if not name or any(c in name for c in "/\\.. \t"):
-            raise ResearchCodeError(
-                f"非法 name {name!r}:须为非空且不含路径分隔符/点号/空白"
-            )
+            raise ResearchCodeError(f"非法 name {name!r}:须为非空且不含路径分隔符/点号/空白")
         return f"{_KIND_DIR[kind]}/{name}"
 
     def _try_ls_tree(self, tree_ref: str) -> str | None:
@@ -234,9 +218,7 @@ class ResearchCodeRepo:
             check=False,
         )
         if proc.returncode != 0:
-            raise ResearchCodeError(
-                f"git {' '.join(args[:3])} 失败: {proc.stderr.strip()[:500]}"
-            )
+            raise ResearchCodeError(f"git {' '.join(args[:3])} 失败: {proc.stderr.strip()[:500]}")
         return proc.stdout
 
     def _git_bare(self, *args: str) -> str:

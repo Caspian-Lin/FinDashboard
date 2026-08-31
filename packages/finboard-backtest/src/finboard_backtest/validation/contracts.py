@@ -68,7 +68,9 @@ class WindowRole(StrEnum):
 class VersionStamp:
     """实验所基于的代码 / 数据 / 模型版本,用于复现与审计。
 
-    所有字段必填 —— 任何版本漂移都会让"样本外通过"的结论失效。
+    核心模型 / 数据 / 选择字段必填 —— 任何版本漂移都会让"样本外通过"的
+    结论失效。``user_code`` 的四个代码 artifact 字段在旧实验中可为空,
+    新的代码晋级实验必须全部填写并由晋级门逐项绑定。
     """
 
     matching_model_version: str
@@ -77,6 +79,12 @@ class VersionStamp:
     dataset_versions: dict[str, str]
     selection_config: dict[str, object]
     strategy_kind: str
+    # issue #219:user_code 晋级时把 OOS 实验绑定到精确的代码产物与 commit,
+    # 防止把另一条策略/因子的 validated_oos 结论挪用给当前代码。
+    code_artifact_id: str | None = None
+    code_artifact_name: str | None = None
+    code_kind: str | None = None
+    code_commit: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         d = asdict(self)
@@ -132,9 +140,7 @@ class ValidationPlan:
         if self.train_start >= self.train_end:
             raise ValueError("train_start must be < train_end")
         if self.validation_start < self.train_end:
-            raise ValueError(
-                "validation_start must be >= train_end (no look-ahead bleed)"
-            )
+            raise ValueError("validation_start must be >= train_end (no look-ahead bleed)")
         if self.validation_end > self.test_start:
             raise ValueError(
                 "validation_end must be <= test_start (test set frozen before validation)"
@@ -224,9 +230,7 @@ class ResearchExperiment:
         if not self.hypothesis.strip():
             raise ValueError("hypothesis must not be empty")
         if self.status == ExperimentStatus.VALIDATED_OOS and not self.final_test_unsealed:
-            raise ValueError(
-                "VALIDATED_OOS requires final_test_unsealed=True (one-time unseal)"
-            )
+            raise ValueError("VALIDATED_OOS requires final_test_unsealed=True (one-time unseal)")
 
     def can_run_trial(self) -> bool:
         """是否还能继续跑试验(预算未耗尽 + 状态合法)。"""
@@ -240,10 +244,7 @@ class ResearchExperiment:
 
     def can_unseal_final(self) -> bool:
         """是否允许揭盲(只在 IN_SAMPLE 后期,且只允许一次)。"""
-        return (
-            self.status == ExperimentStatus.IN_SAMPLE
-            and not self.final_test_unsealed
-        )
+        return self.status == ExperimentStatus.IN_SAMPLE and not self.final_test_unsealed
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -422,9 +423,7 @@ class ExperimentVerdict:
                 self.unsealed_metrics.as_dict() if self.unsealed_metrics else None
             ),
             "final_statistical_report": (
-                self.final_statistical_report.as_dict()
-                if self.final_statistical_report
-                else None
+                self.final_statistical_report.as_dict() if self.final_statistical_report else None
             ),
         }
 
@@ -460,14 +459,10 @@ def transition_status(
         (ExperimentStatus.REJECTED, ExperimentStatus.SUPERSEDED),
     }
     if (cur, new_status) not in allowed:
-        raise ValueError(
-            f"illegal status transition: {cur.value} -> {new_status.value}"
-        )
+        raise ValueError(f"illegal status transition: {cur.value} -> {new_status.value}")
 
     if new_status == ExperimentStatus.VALIDATED_OOS and not experiment.final_test_unsealed:
-        raise ValueError(
-            "cannot transition to VALIDATED_OOS without one-time final test unseal"
-        )
+        raise ValueError("cannot transition to VALIDATED_OOS without one-time final test unseal")
 
     finalized_at = (
         datetime.now(UTC)
@@ -493,9 +488,7 @@ def mark_final_test_unsealed(experiment: ResearchExperiment) -> ResearchExperime
     if experiment.final_test_unsealed:
         raise ValueError("final test already unsealed — re-unsealing is forbidden")
     if not experiment.can_unseal_final():
-        raise ValueError(
-            f"cannot unseal final test in status={experiment.status.value}"
-        )
+        raise ValueError(f"cannot unseal final test in status={experiment.status.value}")
     return replace(experiment, final_test_unsealed=True)
 
 
@@ -505,9 +498,7 @@ def increment_trials_used(experiment: ResearchExperiment, by: int = 1) -> Resear
         raise ValueError("by must be > 0")
     new_count = experiment.trials_used + by
     if new_count > experiment.plan.trial_budget:
-        raise ValueError(
-            f"trial budget exhausted: {new_count} > {experiment.plan.trial_budget}"
-        )
+        raise ValueError(f"trial budget exhausted: {new_count} > {experiment.plan.trial_budget}")
     return replace(experiment, trials_used=new_count)
 
 
@@ -528,6 +519,10 @@ def deserialize_experiment(data: dict[str, Any]) -> ResearchExperiment:
         dataset_versions=dict(vs_raw.get("dataset_versions", {})),
         selection_config=dict(vs_raw.get("selection_config", {})),
         strategy_kind=vs_raw["strategy_kind"],
+        code_artifact_id=vs_raw.get("code_artifact_id"),
+        code_artifact_name=vs_raw.get("code_artifact_name"),
+        code_kind=vs_raw.get("code_kind"),
+        code_commit=vs_raw.get("code_commit"),
     )
     plan = ValidationPlan(
         mode=ValidationMode(plan_raw["mode"]),
@@ -559,9 +554,7 @@ def deserialize_experiment(data: dict[str, Any]) -> ResearchExperiment:
         created_at=datetime.fromisoformat(data["created_at"]),
         frozen_at=datetime.fromisoformat(data["frozen_at"]),
         finalized_at=(
-            datetime.fromisoformat(data["finalized_at"])
-            if data.get("finalized_at")
-            else None
+            datetime.fromisoformat(data["finalized_at"]) if data.get("finalized_at") else None
         ),
         trials_used=int(data.get("trials_used", 0)),
         final_test_unsealed=bool(data.get("final_test_unsealed", False)),

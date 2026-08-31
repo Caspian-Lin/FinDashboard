@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 117 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 124 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -343,8 +343,8 @@ user_defined(沙箱执行的自定义因子,#217)。
 selection 可用因子集 = 其子集(market_cap/pb/turnover_rate/momentum/
 volatility_20d/roe/gross_profit_margin/revenue_yoy)。
 user_defined 条目来自 `research_code_artifacts`(kind=factor),标注
-artifact commit 与 status;引用名为 `u_<artifact_name>`,**仅
-status=active 可被规格引用**(retired 后入队秒级拒绝),观测来自
+artifact commit、status 与 promotion_status;引用名为 `u_<artifact_name>`,**仅
+status=active 且 promotion_status=passed 可被规格引用**(retired/未晋级后入队秒级拒绝),观测来自
 `finboard_research_code_run` 落库的快照。
 - 参数:`role?: str`(alpha|risk|market_input,仅过滤 builtin)、
   `include_user_defined?: bool = true`
@@ -1135,13 +1135,14 @@ REST PUT 是全量语义,这里更安全)。
 - 错误:`invalid_argument`(未知 kind / format / 非整数回测 id)、
   `not_found`(run/backtest 不存在)
 
-## 研究代码仓库(#215,agent 代码入口:只存储与版本化)
+## 研究代码仓库与晋级(#215/#219,agent 代码入口:只存储与版本化)
 
 web 通道仍禁代码(无代码规格);仅 MCP agent 通道开放受控代码提交。
 提交的代码进入本地 bare git 仓库(`research_code_repo_path`),git 写操作
-收敛在服务端(本容器文件系统只读)。执行须走 #216 沙箱
-(`finboard_research_code_run`,见下节);LLM 产出仍须走 研究→回测→OOS→
-模拟→影子→小资金 完整晋级链。
+收敛在服务端(本容器文件系统只读)。提交后只登记 `draft/pending`,执行须走
+#216 沙箱(`finboard_research_code_run`,见下节);LLM 产出仍须走 研究→回测→OOS→
+模拟→影子→小资金 完整晋级链。正式 composite/模拟盘只消费
+`status=active` 且 `promotion_status=passed` 的 artifact。
 
 ### 目录约定与静态校验
 
@@ -1159,11 +1160,13 @@ web 通道仍禁代码(无代码规格);仅 MCP agent 通道开放受控代码�
 
 ### finboard_research_code_submit(写)
 提交一版研究代码,静态校验通过后生成新 commit 并登记
-`research_code_artifacts`(created_by=agent:mcp)。同名重复提交生成新
-commit,旧版本自动 retired。
+`research_code_artifacts`(created_by=agent:mcp,status=draft,
+promotion_status=pending)。同名重复提交生成新 commit,不会替换当前
+active 版本。
 - 参数:`kind: "factor"|"strategy"`、`name: str`(不含路径分隔符/点号)、
   `files: {相对路径: 文件内容}`
-- 返回:`{name, kind, commit, checksum, path, artifact_id, status}`
+- 返回:`{name, kind, commit, checksum, path, artifact_id, status=draft,
+  promotion_status=pending}`
 - 错误:`invalid_argument`(逐条列出可操作问题,如
   `[import_not_whitelisted] factor.py: import requests 不在白名单 [...]`)、
   `denied`(mcp_readonly_only)
@@ -1173,7 +1176,8 @@ commit,旧版本自动 retired。
 - 参数:`kind?`、`name?`、`status?`(active|retired|draft)、
   `include_files: bool = false`(结果唯一时附该版本文件)、`commit?`、`limit=100`
 - 返回:`{artifacts: [{artifact_id, kind, name, commit, path, checksum,
-  status, created_by, created_at, updated_at}], count, files?}`
+  status, promotion_status, validation_experiment_id, screen_run_id,
+  promotion_evidence, created_by, created_at, updated_at}], count, files?}`
 
 ### finboard_research_code_get(只读)
 读某版本全部文件 + 提交历史;`diff_from` 传旧 commit 附 unified diff。
@@ -1183,15 +1187,31 @@ commit,旧版本自动 retired。
 - 错误:`not_found`(代码不存在 / commit 无效)
 
 ### finboard_research_code_rollback(写)
-把 (kind, name) 的 active 引用回滚到历史 commit(现 active 行 retired,
-历史版本重新登记 active;git 历史不重写)。
+把 (kind, name) 的历史 commit 重新登记为 draft(不替换当前 active,git
+历史不重写)。旧 commit 必须重新完成 screen + #57 OOS 后才能 promote。
 - 参数:`kind`、`name`、`commit`
-- 返回:新登记行 `{artifact_id, kind, name, commit, checksum, status}`
+- 返回:新登记行 `{artifact_id, kind, name, commit, checksum, status=draft,
+  promotion_status=pending}`
 - 错误:`not_found`(历史 commit 不在登记表)、`denied`(只读模式)
+
+### finboard_research_code_promote(写,✅ #219)
+将指定 draft artifact 置为正式 active。必须传同一 artifact 的
+`screen_run_id`(完成 ResearchRun 的 `factor_screen`/`strategy_screen`,或
+成功 RCR 的 screen 指标)与 `validation_experiment_id`(#57),且实验为
+`validated_oos`、`final_test_unsealed=true`,version_stamp 绑定相同
+artifact/name/kind/commit。
+- 默认 screen 门:`abs(rank_ic) >= 0.02`、平均换手率 `<= 0.80`、相关性
+ 绝对值 `<= 0.80`、至少 2 期;阈值随 evidence 冻结。
+- 失败:`promotion_status=failed` 证据保留在 draft,返回具名门失败;
+  通过后当前同名 active 自动 retired,并返回 `promotion_status=passed`。
+- 晋级 evidence 固定四向引用:code commit、dataset release/checksum、
+  参数/checksum、output checksum,并保留沙箱镜像/日志/资源归档位置。
+- 错误:`invalid_argument`(证据缺失/门失败)、`not_found`(artifact 或实验
+  不存在)、`conflict`(非 draft)、`denied`(只读模式)
 
 ## 研究代码沙箱执行(#216,一次性 Docker 容器)
 
-active 因子代码在一次性 Docker 容器内执行 `factor.compute(ctx) -> scores`
+通过晋级门的 active 因子代码在一次性 Docker 容器内执行 `factor.compute(ctx) -> scores`
 (协议 v1 纯截面函数)。**前置条件**:`research_sandbox_enabled=true` +
 Docker Desktop + 已构建镜像 `docker/research-sandbox`(tag 与
 finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.2.0`;
@@ -1216,13 +1236,16 @@ finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.2.0`;
 入队 `kind=research_code_run` 后台任务(worker 单并发),返回 job_id。
 - 参数:`kind: "factor"`(v1 仅 factor)、`name`、`dataset_release_ids`
   (均已登记且至少一个 bars 类发布)、`decision_at`(带时区 ISO)、
-  `commit?`(须=active 引用,否则先 rollback)、`artifact_id?`、
+  `commit?`(须=目标 artifact 引用,否则先 rollback)、`artifact_id?`(显式指定
+  draft 可用于生成供 screen ResearchRun 使用的快照,默认查询只取
+  active+passed)、
   `symbols?`、`params?`
 - 返回:`{job_id, status, created, idempotency_key, detail_hint}`
 - 轮询:`finboard_job_get`(进度 phase `research_code_run:<stage>`,
   result_ref=RCR-...);终态后 `finboard_research_code_run_get` 取结果
-- 错误:`invalid_argument`(沙箱未开启 / kind 非 factor / 无 bars 发布)、
-  `not_found`(无 active 代码 / 发布不存在)、`denied`(只读模式)
+- 错误:`invalid_argument`(沙箱未开启 / kind 非 factor / 无 bars 发布 / active
+  artifact 未通过晋级门)、`not_found`(无 active+passed 代码 / 发布不存在)、
+  `denied`(只读模式)
 - #217:成功输出先过**质量门**(NaN 比例 ≤ `research_sandbox_max_nan_ratio`
   且覆盖率 ≥ `research_sandbox_min_coverage`,默认各 0.5),不合格
   run failed=`quality_gate_failed` 且错误信息指明阈值与实际值;通过则
@@ -1247,16 +1270,20 @@ finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.2.0`;
 ### 用户自定义因子引用链(#217)
 把沙箱产出变成可被选股管线引用的一等公民:
 1. `finboard_research_code_submit` 提交因子代码(kind=factor,name 如
-   `mom20`)→ artifact active;
+   `mom20`)→ artifact draft/promotion_status=pending;
 2. `finboard_research_code_run` 沙箱执行(dataset_release_ids +
    decision_at)→ 质量门通过后快照落库,因子观测名 = `u_mom20`;
-3. `finboard_factor_catalog` 确认 origin=user_defined、status=active;
-4. 策略规格 feature_graph 里按名引用:`{node_id, kind: factor,
+3. 绑定 screen 运行与 #57 `validated_oos` 实验,调用
+   `finboard_research_code_promote` 通过 IC/换手率/相关性门后才变为
+   `active/promotion_status=passed`;
+4. `finboard_factor_catalog` 确认 origin=user_defined、status=active、
+   promotion_status=passed;
+5. 策略规格 feature_graph 里按名引用:`{node_id, kind: factor,
    operator: identity, source: "u_mom20"}`(编译期校验 active 名单);
-5. research run 入队时把 `output_snapshot_id` 放进
+6. research run 入队时把 `output_snapshot_id` 放进
    `factor_snapshot_ids`(single_shot;multi_period 引用用户因子会被
    入队秒级拒绝);
-6. run report 的 `factor_screen` 段给出该因子的 rank_ic / rank_ic_ir /
+7. run report 的 `factor_screen` 段给出该因子的 rank_ic / rank_ic_ir /
    分层收益(5 桶)/ 换手率 / 与既有因子(builtin)的相关性矩阵。
 
 ## 用户代码策略执行(#218,逐日决策函数)
@@ -1278,8 +1305,8 @@ def decide(ctx):
 ```
 
 - 规格侧:`strategy_kind: "user_code"` + `code_artifact: {name, commit?}`
-  (引用 kind=strategy 的 active artifact;commit 省略 = active,入队时冻结
-  进 manifest)。`feature_graph` / `signal_rules` 允许为空(特征由代码自行
+  (引用 kind=strategy 的 active 且 `promotion_status=passed` artifact;commit
+  省略 = 当前 active,入队时冻结进 manifest)。`feature_graph` / `signal_rules` 允许为空(特征由代码自行
   计算);其余 kind 携带 code_artifact 非法。web 通道仍禁代码。
 - 执行:建议 `parameters.rebalance_frequency=monthly|quarterly`
   (multi_period,决策日由发布日历推导);single_shot 需冻结快照提供决策

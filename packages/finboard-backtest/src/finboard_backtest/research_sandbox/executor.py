@@ -5,7 +5,7 @@ worker 领取 ``kind=research_code_run`` 任务后,按 payload 重建执行输�
     {
       "kind": "factor",                # v1 仅 factor
       "name": "mom20",
-      "commit": "<sha>",               # 可省 = active 引用(须与 active 一致)
+      "commit": "<sha>",               # 可省 = active+passed 引用
       "artifact_id": "RC-...",         # 可选,与 (kind,name) 二选一定位
       "dataset_release_ids": ["DR-..."],   # 至少一个 bars 类发布
       "decision_at": "2024-06-03T07:00:00+00:00",  # tz-aware ISO
@@ -56,6 +56,8 @@ from finboard_backtest.research_code import (
     ResearchCodeError,
     ResearchCodeService,
     compute_checksum,
+    is_promoted_artifact,
+    promotion_status,
     validate_submission,
 )
 from finboard_backtest.research_sandbox.data_mount import (
@@ -127,9 +129,7 @@ class ResearchCodeRunPayload:
             for s in sorted(self.symbols):
                 h.update(s.encode())
         if self.params:
-            h.update(
-                json.dumps(self.params, sort_keys=True, ensure_ascii=False).encode()
-            )
+            h.update(json.dumps(self.params, sort_keys=True, ensure_ascii=False).encode())
         return h.hexdigest()[:16]
 
 
@@ -189,9 +189,7 @@ class ResearchCodeRunExecutor:
         if payload.kind != "factor":
             raise ExecutorError(
                 code=KIND_NOT_IMPLEMENTED,
-                summary=(
-                    f"research_code_run v1 仅支持 kind=factor,收到 {payload.kind!r}"
-                ),
+                summary=(f"research_code_run v1 仅支持 kind=factor,收到 {payload.kind!r}"),
                 retryable=False,
             )
 
@@ -214,9 +212,7 @@ class ResearchCodeRunExecutor:
         workspace_root = Path(settings.research_sandbox_workspace_root)
 
         async with self._session_maker() as session:
-            code, artifact_id, commit = await _resolve_code(
-                session, service, payload, settings
-            )
+            code, artifact_id, commit = await _resolve_code(session, service, payload, settings)
             issues = validate_submission(
                 kind=payload.kind,
                 name=payload.name,
@@ -245,8 +241,11 @@ class ResearchCodeRunExecutor:
                 run_id=run_id,
             )
             if issues:
-                summary = "静态校验失败(" + str(len(issues)) + " 个问题):\n" + "\n".join(
-                    i.render() for i in issues[:20]
+                summary = (
+                    "静态校验失败("
+                    + str(len(issues))
+                    + " 个问题):\n"
+                    + "\n".join(i.render() for i in issues[:20])
                 )
                 run = await run_repo.mark_terminal(
                     run.run_id,
@@ -311,9 +310,7 @@ class ResearchCodeRunExecutor:
             if not quality.passed:
                 ok = False
                 error_code = QUALITY_GATE_FAILED
-                error_summary = (
-                    "输出质量门未通过,拒绝入库: " + ";".join(quality.failures)
-                )
+                error_summary = "输出质量门未通过,拒绝入库: " + ";".join(quality.failures)
             else:
                 try:
                     snapshot = build_factor_snapshot(
@@ -368,9 +365,7 @@ class ResearchCodeRunExecutor:
         from finboard_data.releases import FrozenReleaseProvider
         from finboard_persistence import ResearchDatasetReleaseRepository
 
-        root = Path(
-            os.getenv("FINBOARD_DATA_RELEASE_ROOT", "data_releases")
-        )
+        root = Path(os.getenv("FINBOARD_DATA_RELEASE_ROOT", "data_releases"))
         providers: list[Any] = []
         checksums: dict[str, str] = {}
         async with self._session_maker() as session:
@@ -431,8 +426,10 @@ def _parse_payload(job: JobRecord) -> ResearchCodeRunPayload:
         kind = _require_str(payload, "kind")
         name = _require_str(payload, "name")
         raw_releases = payload.get("dataset_release_ids")
-        if not isinstance(raw_releases, list) or not raw_releases or not all(
-            isinstance(r, str) and r for r in raw_releases
+        if (
+            not isinstance(raw_releases, list)
+            or not raw_releases
+            or not all(isinstance(r, str) and r for r in raw_releases)
         ):
             raise ValueError("dataset_release_ids 须为非空字符串数组")
         raw_decision = payload.get("decision_at")
@@ -443,8 +440,7 @@ def _parse_payload(job: JobRecord) -> ResearchCodeRunPayload:
             raise ValueError("decision_at 必须带时区")
         symbols = payload.get("symbols")
         if symbols is not None and (
-            not isinstance(symbols, list)
-            or not all(isinstance(s, str) and s for s in symbols)
+            not isinstance(symbols, list) or not all(isinstance(s, str) and s for s in symbols)
         ):
             raise ValueError("symbols 须为字符串数组")
         params = payload.get("params")
@@ -508,14 +504,29 @@ async def _resolve_code(
                 ),
                 retryable=False,
             )
+        if artifact.status == "retired":
+            raise ExecutorError(
+                code="invalid_payload",
+                summary=f"artifact 已 retired,不能启动新沙箱执行: {payload.artifact_id}",
+                retryable=False,
+            )
+        if artifact.status == "active" and not is_promoted_artifact(artifact):
+            raise ExecutorError(
+                code="invalid_payload",
+                summary=(
+                    f"artifact active 但未通过 screen+OOS 晋级门: {payload.artifact_id} "
+                    f"promotion_status={promotion_status(artifact)}"
+                ),
+                retryable=False,
+            )
     else:
         artifact = await repo.get_active(kind=payload.kind, name=payload.name)
         if artifact is None:
             raise ExecutorError(
                 code="missing_research_code",
                 summary=(
-                    f"没有 active 的研究代码: kind={payload.kind} "
-                    f"name={payload.name}(先 finboard_research_code_submit)"
+                    f"没有 active+passed 的研究代码: kind={payload.kind} "
+                    f"name={payload.name}(先提交并完成晋级)"
                 ),
                 retryable=False,
             )
@@ -524,8 +535,8 @@ async def _resolve_code(
         raise ExecutorError(
             code="invalid_payload",
             summary=(
-                f"指定 commit {commit[:12]} 不是 active 引用"
-                f"(active={artifact.commit[:12]});历史版本先 "
+                f"指定 commit {commit[:12]} 不是该 artifact 的 active 引用"
+                f"(artifact={artifact.commit[:12]});历史版本先 "
                 "finboard_research_code_rollback"
             ),
             retryable=False,
@@ -578,9 +589,7 @@ def _read_outputs(out_dir: Path) -> _Outputs:
             table = pq.read_table(scores)
             columns = set(table.column_names)
             if not {"symbol", "score"} <= columns:
-                outputs.problems.append(
-                    f"scores.parquet 缺列: {sorted(columns)}"
-                )
+                outputs.problems.append(f"scores.parquet 缺列: {sorted(columns)}")
             else:
                 outputs.scores_path = scores
                 outputs.scores_checksum = _sha256_file(scores)
@@ -591,9 +600,7 @@ def _read_outputs(out_dir: Path) -> _Outputs:
     metrics_path = out_dir / "metrics.json"
     if metrics_path.exists():
         try:
-            outputs.metrics = json.loads(
-                metrics_path.read_text(encoding="utf-8")
-            )
+            outputs.metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             outputs.problems.append(f"metrics.json 不可解析: {exc}")
     else:
@@ -607,26 +614,31 @@ def _read_outputs(out_dir: Path) -> _Outputs:
     return outputs
 
 
-def _classify(
-    result: SandboxRunResult, outputs: _Outputs
-) -> tuple[bool, str | None, str | None]:
+def _classify(result: SandboxRunResult, outputs: _Outputs) -> tuple[bool, str | None, str | None]:
     """(是否成功, error_code, error_summary)。"""
     if result.timed_out:
-        return False, TIMEOUT, (
-            f"容器超过墙钟超时({result.duration_seconds}s)被 kill;"
-            f"{_usage_note(result, outputs)}"
+        return (
+            False,
+            TIMEOUT,
+            (f"容器超过墙钟超时({result.duration_seconds}s)被 kill;{_usage_note(result, outputs)}"),
         )
     if result.oom_killed or result.exit_code == 137:
-        return False, OOM_KILLED, (
-            f"容器内存超限被 OOM kill(exit={result.exit_code});"
-            f"{_usage_note(result, outputs)}"
+        return (
+            False,
+            OOM_KILLED,
+            (f"容器内存超限被 OOM kill(exit={result.exit_code});{_usage_note(result, outputs)}"),
         )
     if result.exit_code == 0:
         if outputs.scores_checksum and outputs.metrics is not None:
             return True, None, None
-        return False, OUTPUT_CONTRACT_VIOLATION, (
-            "exit 0 但输出不完整: " + "; ".join(outputs.problems)
-            + f";{_usage_note(result, outputs)}"
+        return (
+            False,
+            OUTPUT_CONTRACT_VIOLATION,
+            (
+                "exit 0 但输出不完整: "
+                + "; ".join(outputs.problems)
+                + f";{_usage_note(result, outputs)}"
+            ),
         )
     if result.exit_code == 3:
         message = (outputs.error or {}).get("message", "输出契约不符")
@@ -637,20 +649,24 @@ def _classify(
         )
         return False, RUNTIME_ERROR, str(message)
     if result.exit_code in _DOCKER_EXIT_CODES:
-        return False, SANDBOX_UNAVAILABLE, (
-            f"docker 运行失败(exit={result.exit_code}): "
-            f"{result.stderr.strip()[:400]}"
+        return (
+            False,
+            SANDBOX_UNAVAILABLE,
+            (f"docker 运行失败(exit={result.exit_code}): {result.stderr.strip()[:400]}"),
         )
-    return False, RUNTIME_ERROR, (
-        f"容器非预期退出码 {result.exit_code}: "
-        f"{(outputs.error or {}).get('message') or result.stderr.strip()[:400]}"
+    return (
+        False,
+        RUNTIME_ERROR,
+        (
+            f"容器非预期退出码 {result.exit_code}: "
+            f"{(outputs.error or {}).get('message') or result.stderr.strip()[:400]}"
+        ),
     )
 
 
 def _usage_note(result: SandboxRunResult, outputs: _Outputs) -> str:
     return (
-        f"峰值内存 {result.usage.get('max_mem_mb')}MB / "
-        f"CPU {result.usage.get('max_cpu_percent')}%"
+        f"峰值内存 {result.usage.get('max_mem_mb')}MB / CPU {result.usage.get('max_cpu_percent')}%"
     )
 
 
@@ -680,9 +696,7 @@ def _archive_logs(
     )
 
 
-def _stage_write_code(
-    run_dir: Path, code: dict[str, str], params: dict[str, Any] | None
-) -> None:
+def _stage_write_code(run_dir: Path, code: dict[str, str], params: dict[str, Any] | None) -> None:
     code_dir = run_dir / "code"
     code_dir.mkdir(parents=True, exist_ok=True)
     for rel, content in code.items():
@@ -696,9 +710,7 @@ def _stage_write_code(
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _sha256_file(path: Path) -> str:
@@ -709,9 +721,7 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _failed_result(
-    run_id: str, error_code: str, summary: str
-) -> JobResult:
+def _failed_result(run_id: str, error_code: str, summary: str) -> JobResult:
     return JobResult(
         status="failed",
         result_ref=run_id,
@@ -726,9 +736,7 @@ def _default_service_factory(settings: Any) -> ResearchCodeService:
 
 def _default_runner_factory(settings: Any) -> ResearchSandboxRunner:
     return ResearchSandboxRunner(
-        SubprocessDockerDriver(
-            getattr(settings, "research_sandbox_docker_bin", "docker")
-        )
+        SubprocessDockerDriver(getattr(settings, "research_sandbox_docker_bin", "docker"))
     )
 
 

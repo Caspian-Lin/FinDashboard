@@ -133,22 +133,16 @@ class StrategySandboxCaller:
                 f"user_code 策略 {artifact_name!r} 的 manifest 未冻结 commit;"
                 "入队路径异常,请重新入队",
             )
-        if not service.exists(
-            kind=STRATEGY_CODE_KIND, name=artifact_name, commit=commit
-        ):
+        if not service.exists(kind=STRATEGY_CODE_KIND, name=artifact_name, commit=commit):
             raise UserCodeExecutionError(
                 "missing_research_code",
                 f"git 仓库中不存在该策略代码版本: {STRATEGY_CODE_KIND}/"
                 f"{artifact_name}@{commit[:12]}",
             )
         try:
-            code = service.read(
-                kind=STRATEGY_CODE_KIND, name=artifact_name, commit=commit
-            )
+            code = service.read(kind=STRATEGY_CODE_KIND, name=artifact_name, commit=commit)
         except ResearchCodeError as exc:
-            raise UserCodeExecutionError(
-                "missing_research_code", str(exc)
-            ) from exc
+            raise UserCodeExecutionError("missing_research_code", str(exc)) from exc
         issues = validate_submission(
             kind=STRATEGY_CODE_KIND,
             name=artifact_name,
@@ -157,8 +151,11 @@ class StrategySandboxCaller:
             max_file_bytes=settings.research_code_max_file_bytes,
         )
         if issues:
-            summary = "策略代码静态校验失败(" + str(len(issues)) + " 个问题):\n" + "\n".join(
-                issue.render() for issue in issues[:20]
+            summary = (
+                "策略代码静态校验失败("
+                + str(len(issues))
+                + " 个问题):\n"
+                + "\n".join(issue.render() for issue in issues[:20])
             )
             raise UserCodeExecutionError("static_validation_failed", summary)
         docker_bin = getattr(settings, "research_sandbox_docker_bin", "docker")
@@ -167,15 +164,10 @@ class StrategySandboxCaller:
         try:
             digest = await SubprocessDockerDriver(docker_bin).image_digest(image)
         except SandboxError as exc:
-            raise UserCodeExecutionError(
-                SANDBOX_UNAVAILABLE, str(exc), retryable=True
-            ) from exc
+            raise UserCodeExecutionError(SANDBOX_UNAVAILABLE, str(exc), retryable=True) from exc
         run_dir = Path(settings.research_sandbox_workspace_root) / run_id
         _stage_code(run_dir, code, dict(params or {}))
-        providers = [
-            release_provider_factory(release_id)
-            for release_id in dataset_release_ids
-        ]
+        providers = [release_provider_factory(release_id) for release_id in dataset_release_ids]
         return cls(
             code=code,
             commit=commit,
@@ -204,6 +196,14 @@ class StrategySandboxCaller:
             "code_checksum": self.code_checksum,
             "image": self.image,
             "image_digest": self.image_digest,
+            "artifact_dir": str(self.run_dir),
+            "resource_limits": {
+                "timeout_seconds": self.timeout_seconds,
+                "memory_mb": self.memory_mb,
+                "cpus": self.cpus,
+                "pids_limit": self.pids_limit,
+                "user": self.user,
+            },
             "execution_mode": mode,
             "decision_count": decision_count,
         }
@@ -244,7 +244,7 @@ class StrategySandboxCaller:
                 mode="strategy",
             )
         )
-        _archive_logs(decision_dir, result)
+        _archive_logs(decision_dir, result, self.image)
         weights, metrics = _read_targets(decision_dir / "out")
         error = _classify_strategy(result, decision_dir / "out")
         record = {
@@ -261,6 +261,12 @@ class StrategySandboxCaller:
                 "duration_seconds": result.duration_seconds,
                 "max_mem_mb": result.usage.get("max_mem_mb"),
             },
+            "archive": {
+                "directory": str(decision_dir),
+                "stdout": str(decision_dir / "stdout.txt"),
+                "stderr": str(decision_dir / "stderr.txt"),
+                "container": str(decision_dir / "container.json"),
+            },
             "metrics": metrics,
         }
         if error is not None:
@@ -273,9 +279,7 @@ class StrategySandboxCaller:
                 retryable=code == SANDBOX_UNAVAILABLE,
             )
         record["n_targets"] = len(weights)
-        record["gross_exposure"] = round(
-            sum(abs(weight) for weight in weights.values()), 6
-        )
+        record["gross_exposure"] = round(sum(abs(weight) for weight in weights.values()), 6)
         return StrategyDecisionOutcome(weights=weights, record=record)
 
 
@@ -292,10 +296,30 @@ def _stage_code(run_dir: Path, code: dict[str, str], params: dict[str, Any]) -> 
         )
 
 
-def _archive_logs(decision_dir: Path, result: SandboxRunResult) -> None:
+def _archive_logs(
+    decision_dir: Path, result: SandboxRunResult, image: str
+) -> None:
     decision_dir.mkdir(parents=True, exist_ok=True)
     (decision_dir / "stdout.txt").write_text(result.stdout, encoding="utf-8")
     (decision_dir / "stderr.txt").write_text(result.stderr, encoding="utf-8")
+    (decision_dir / "container.json").write_text(
+        json.dumps(
+            {
+                "container_id": result.container_id,
+                "image": image,
+                "image_digest": result.image_digest,
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "oom_killed": result.oom_killed,
+                "duration_seconds": result.duration_seconds,
+                "usage": result.usage,
+                "command": result.command,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _read_targets(out_dir: Path) -> tuple[dict[str, float], dict[str, Any] | None]:
@@ -326,14 +350,10 @@ def _read_targets(out_dir: Path) -> tuple[dict[str, float], dict[str, Any] | Non
     return weights, metrics
 
 
-def _classify_strategy(
-    result: SandboxRunResult, out_dir: Path
-) -> tuple[str, str] | None:
+def _classify_strategy(result: SandboxRunResult, out_dir: Path) -> tuple[str, str] | None:
     """(error_code, summary);成功返回 None。口径对齐 #216 executor。"""
     if result.timed_out:
-        return TIMEOUT, (
-            f"容器超过墙钟超时({result.duration_seconds}s)被 kill"
-        )
+        return TIMEOUT, (f"容器超过墙钟超时({result.duration_seconds}s)被 kill")
     if result.oom_killed or result.exit_code == 137:
         return OOM_KILLED, f"容器内存超限被 OOM kill(exit={result.exit_code})"
     if result.exit_code == 0:
@@ -344,14 +364,11 @@ def _classify_strategy(
         message = _error_message(out_dir) or "输出契约不符"
         return OUTPUT_CONTRACT_VIOLATION, message
     if result.exit_code == 4:
-        message = _error_message(out_dir) or (
-            result.stderr.strip()[:500] or "容器内运行时异常"
-        )
+        message = _error_message(out_dir) or (result.stderr.strip()[:500] or "容器内运行时异常")
         return RUNTIME_ERROR, message
     if result.exit_code in _DOCKER_EXIT_CODES:
         return SANDBOX_UNAVAILABLE, (
-            f"docker 运行失败(exit={result.exit_code}): "
-            f"{result.stderr.strip()[:400]}"
+            f"docker 运行失败(exit={result.exit_code}): {result.stderr.strip()[:400]}"
         )
     return RUNTIME_ERROR, (
         f"容器非预期退出码 {result.exit_code}: "

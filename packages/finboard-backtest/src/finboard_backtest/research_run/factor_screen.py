@@ -74,20 +74,63 @@ async def build_factor_screen(
     issues: list[str] = []
     result_factors: dict[str, Any] = {}
     for factor in sorted(user_factors):
-        result_factors[factor] = _screen_one_factor(
-            factor, periods, forward_returns, issues
-        )
-    baselines = sorted(
-        {name for period in periods for name in period["others"]}
-    )
+        result_factors[factor] = _screen_one_factor(factor, periods, forward_returns, issues)
+    baselines = sorted({name for period in periods for name in period["others"]})
     return {
         "factors": result_factors,
         "correlation_baselines": baselines,
         "n_periods": len(periods),
-        "decision_points": [
-            item["decision_at"].isoformat() for item in periods
-        ],
+        "decision_points": [item["decision_at"].isoformat() for item in periods],
         "method": _METHOD_NOTE,
+        "issues": issues,
+    }
+
+
+async def build_strategy_screen(
+    manifest: ResearchRunManifest,
+    inputs: Sequence[PortfolioDecisionInput],
+    target_weights: Sequence[Mapping[str, float]],
+    release_provider_factory: Any,
+) -> dict[str, Any] | None:
+    """对 user_code 每期目标权重计算同口径 screen 指标。
+
+    策略没有单独的因子观测列,这里把每期 ``targets`` 视为一个截面评分
+    ``__strategy__`` 后复用 IC/换手/相关性实现。目标权重只是研究输入,
+    不会在本函数中生成订单或修改组合状态。
+    """
+    if not inputs or len(inputs) != len(target_weights):
+        return None
+    periods = [_period_cross_section(item) for item in inputs]
+    strategy_symbols = {
+        str(symbol)
+        for weights in target_weights
+        for symbol, value in weights.items()
+        if _finite_weight(value)
+    }
+    if not strategy_symbols:
+        return None
+    for period, weights in zip(periods, target_weights, strict=True):
+        period["user"]["__strategy__"] = {
+            str(symbol): float(value) for symbol, value in weights.items() if _finite_weight(value)
+        }
+
+    forward_closes = await _forward_close_series(
+        manifest,
+        inputs,
+        periods,
+        release_provider_factory,
+        symbols=strategy_symbols,
+    )
+    forward_returns = _forward_returns(periods, forward_closes)
+    issues: list[str] = []
+    metrics = _screen_one_factor("__strategy__", periods, forward_returns, issues)
+    metrics["origin"] = "user_code"
+    return {
+        "strategy": metrics,
+        "correlation_baselines": sorted({name for period in periods for name in period["others"]}),
+        "n_periods": len(periods),
+        "decision_points": [item["decision_at"].isoformat() for item in periods],
+        "method": _METHOD_NOTE + ";score=target_weight",
         "issues": issues,
     }
 
@@ -114,13 +157,9 @@ def _period_cross_section(
         # 保证唯一,这里只做防御性覆盖。
         if existing is None or value.available_at >= existing[1]:
             target[value.symbol] = (float(raw), value.available_at)
-    cleaned_user = {
-        name: {s: v for s, (v, _) in series.items()}
-        for name, series in user.items()
-    }
+    cleaned_user = {name: {s: v for s, (v, _) in series.items()} for name, series in user.items()}
     cleaned_others = {
-        name: {s: v for s, (v, _) in series.items()}
-        for name, series in others.items()
+        name: {s: v for s, (v, _) in series.items()} for name, series in others.items()
     }
     return {
         "decision_at": item.decision_at,
@@ -135,10 +174,14 @@ async def _forward_close_series(
     inputs: Sequence[PortfolioDecisionInput],
     periods: Sequence[dict[str, Any]],
     release_provider_factory: Any,
+    *,
+    symbols: set[str] | None = None,
 ) -> list[dict[str, float]]:
     """每期 forward 锚点 close:下一期决策可见 close;末期为发布区间末。"""
     closes = [dict(period["prices"]) for period in periods[1:]]
-    closes.append(await _release_end_closes(manifest, inputs, release_provider_factory))
+    closes.append(
+        await _release_end_closes(manifest, inputs, release_provider_factory, symbols=symbols)
+    )
     return closes
 
 
@@ -146,6 +189,8 @@ async def _release_end_closes(
     manifest: ResearchRunManifest,
     inputs: Sequence[PortfolioDecisionInput],
     release_provider_factory: Any,
+    *,
+    symbols: set[str] | None = None,
 ) -> dict[str, float]:
     """bars 主发布区间末(end_date 收盘后)可见的最新 close。"""
     from finboard_backtest.research_run.signal_engine import _bars_release_ref
@@ -153,12 +198,10 @@ async def _release_end_closes(
     release_ref = _bars_release_ref(manifest, release_provider_factory)
     provider = release_provider_factory(release_ref.artifact_id)
     release = provider.release
-    as_of = datetime.combine(
-        release.end_date + timedelta(days=1), time(0, 0), tzinfo=UTC
-    )
+    as_of = datetime.combine(release.end_date + timedelta(days=1), time(0, 0), tzinfo=UTC)
     markets = _symbol_markets(inputs)
     prices: dict[str, float] = {}
-    for symbol in sorted(_screen_symbols(inputs)):
+    for symbol in sorted(symbols if symbols is not None else _screen_symbols(inputs)):
         market = markets.get(symbol)
         if market is None:
             continue
@@ -247,10 +290,7 @@ def _screen_one_factor(
             ic_series.append(ic)
         buckets, members = _quantile_split(scores)
         quantile_buckets.append(
-            [
-                _mean([returns[s] for s in bucket if s in returns])
-                for bucket in buckets
-            ]
+            [_mean([returns[s] for s in bucket if s in returns]) for bucket in buckets]
         )
         top_members.append(members)
         for name, series in period["others"].items():
@@ -270,9 +310,7 @@ def _screen_one_factor(
 
     quantile_returns: list[dict[str, Any]] = []
     for index in range(QUANTILES):
-        values = [
-            bucket[index] for bucket in quantile_buckets if bucket[index] is not None
-        ]
+        values = [bucket[index] for bucket in quantile_buckets if bucket[index] is not None]
         quantile_returns.append(
             {
                 "quantile": index + 1,
@@ -291,9 +329,7 @@ def _screen_one_factor(
 
     for baseline in sorted(corr_by_baseline):
         if not corr_by_baseline[baseline]:
-            issues.append(
-                f"{factor} 与 {baseline} 的相关样本不足(<{_MIN_OVERLAP} 共同标的)"
-            )
+            issues.append(f"{factor} 与 {baseline} 的相关样本不足(<{_MIN_OVERLAP} 共同标的)")
 
     return {
         "origin": "user_defined",
@@ -303,9 +339,7 @@ def _screen_one_factor(
         "ic_sample_count": len(ic_series),
         "quantile_returns": quantile_returns,
         "average_turnover": average_turnover,
-        "correlation": {
-            name: _mean(values) for name, values in sorted(corr_by_baseline.items())
-        },
+        "correlation": {name: _mean(values) for name, values in sorted(corr_by_baseline.items())},
     }
 
 
@@ -317,11 +351,7 @@ def _quantile_split(
     返回 (逐桶 symbol 列表, 最高值桶成员)。
     """
     ordered = sorted(
-        (
-            (symbol, value)
-            for symbol, value in scores.items()
-            if math.isfinite(value)
-        ),
+        ((symbol, value) for symbol, value in scores.items() if math.isfinite(value)),
         key=lambda item: item[1],
     )
     total = len(ordered)
@@ -391,4 +421,12 @@ def _mean(values: Sequence[float | None]) -> float | None:
     return float(sum(finite) / len(finite))
 
 
-__all__ = ["QUANTILES", "build_factor_screen"]
+def _finite_weight(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+__all__ = ["QUANTILES", "build_factor_screen", "build_strategy_screen"]

@@ -157,8 +157,8 @@ async def _compile_with_releases(
     try:
         for release_id in spec.validation_plan.dataset_release_ids:
             releases.append(await release_repo.require_usable(release_id))
-        # issue #217:用户因子(u_ 前缀)按 artifact status=active 名单校验;
-        # issue #218:user_code 策略代码 artifact 同口径。
+        # issue #217/#219:用户因子(u_ 前缀)按 artifact active+passed 名单校验;
+        # issue #218/#219:user_code 策略代码 artifact 同口径。
         user_factors = await active_user_factor_names(session)
         user_code = await active_user_strategy_names(session)
         plan = compile_registered_strategy_spec(

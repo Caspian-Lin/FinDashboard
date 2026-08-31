@@ -132,8 +132,7 @@ async def _validate_snapshot_input(
     if not release.start_date <= normalized.date() <= release.end_date:
         raise McpToolError(
             "invalid_argument",
-            f"decision_at 日期必须在数据发布范围内: "
-            f"{release.start_date}~{release.end_date}",
+            f"decision_at 日期必须在数据发布范围内: {release.start_date}~{release.end_date}",
         )
     if normalized > datetime.now(UTC):
         raise McpToolError("invalid_argument", "decision_at 不能晚于当前时间")
@@ -165,9 +164,9 @@ async def factor_catalog(
         ]
         if include_user_defined:
             async with app.session_maker() as session:
-                artifacts = await ResearchCodeArtifactRepository(
-                    session
-                ).list_artifacts(kind="factor", limit=500)
+                artifacts = await ResearchCodeArtifactRepository(session).list_artifacts(
+                    kind="factor", limit=500
+                )
             for artifact in artifacts:
                 items.append(
                     {
@@ -175,12 +174,16 @@ async def factor_catalog(
                         "artifact_name": artifact.name,
                         "origin": "user_defined",
                         "status": artifact.status,
+                        "promotion_status": artifact.promotion_status,
+                        "validation_experiment_id": artifact.validation_experiment_id,
+                        "screen_run_id": artifact.screen_run_id,
                         "commit": artifact.commit,
                         "artifact_id": artifact.artifact_id,
                         "code_checksum": artifact.checksum,
                         "created_at": to_jsonable(artifact.created_at),
                         "note": (
-                            "沙箱用户因子;仅 status=active 可被规格引用,"
+                            "沙箱用户因子;仅 status=active 且 promotion_status=passed 可被"
+                            "规格引用,晋级证据需 screen + #57 OOS;"
                             "观测来自 finboard_research_code_run 产出的快照"
                         ),
                     }
@@ -216,10 +219,7 @@ async def feature_snapshot_list(
                 dataset_release_id=dataset_release_id,
                 limit=safe_limit,
             )
-            return [
-                cast(dict[str, Any], to_jsonable(s.as_dict()))
-                for s in snapshots
-            ]
+            return [cast(dict[str, Any], to_jsonable(s.as_dict())) for s in snapshots]
 
     return await run_tool(
         audit=app.audit,
@@ -229,9 +229,7 @@ async def feature_snapshot_list(
     )
 
 
-async def feature_snapshot_get(
-    app: McpAppContext, snapshot_id: str
-) -> ToolEnvelope:
+async def feature_snapshot_get(app: McpAppContext, snapshot_id: str) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         from finboard_persistence import FeatureSnapshotRepository
 
@@ -239,9 +237,7 @@ async def feature_snapshot_get(
             repo = FeatureSnapshotRepository(session)
             snapshot = await repo.get(snapshot_id)
             if snapshot is None:
-                raise McpToolError(
-                    "not_found", f"未找到特征快照: {snapshot_id}"
-                )
+                raise McpToolError("not_found", f"未找到特征快照: {snapshot_id}")
             return cast(dict[str, Any], to_jsonable(snapshot.as_dict()))
 
     return await run_tool(
@@ -296,9 +292,7 @@ async def feature_snapshot_create(
                 await session.commit()
             except (DatasetReleaseError, FactorAnalysisError, ValueError) as exc:
                 await session.rollback()
-                raise McpToolError(
-                    "invalid_argument", f"特征快照生成失败: {exc}"
-                ) from exc
+                raise McpToolError("invalid_argument", f"特征快照生成失败: {exc}") from exc
             except OSError as exc:
                 await session.rollback()
                 raise McpToolError(
@@ -355,8 +349,7 @@ async def feature_snapshot_job_start(
                 "decision_at": normalized_dt.isoformat(),
             }
             idempotency_key = (
-                f"feature_snapshot:{release.release_id}:"
-                f"{normalized_dt.date().isoformat()}"
+                f"feature_snapshot:{release.release_id}:{normalized_dt.date().isoformat()}"
             )
             try:
                 job = await enqueue_job(
@@ -392,9 +385,7 @@ async def feature_snapshot_job_start(
     )
 
 
-async def feature_snapshot_job_status(
-    app: McpAppContext, job_id: str
-) -> ToolEnvelope:
+async def feature_snapshot_job_status(app: McpAppContext, job_id: str) -> ToolEnvelope:
     """查询特征快照任务进度(读持久化 background_jobs 表,issue #136)。
 
     返回 JobOut:status / progress_done / progress_total / phase /
@@ -411,9 +402,7 @@ async def feature_snapshot_job_status(
         async with app.session_maker() as session:
             row = await BackgroundJobRepository(session).get(job_id)
             if row is None:
-                raise McpToolError(
-                    "not_found", f"未找到特征快照任务: {job_id}"
-                )
+                raise McpToolError("not_found", f"未找到特征快照任务: {job_id}")
             return cast(
                 dict[str, Any],
                 to_jsonable(JobOut.model_validate(row).model_dump(mode="json")),
@@ -444,9 +433,7 @@ async def factor_signal_list(
         from finboard_persistence import FactorSignalRepository
 
         safe_limit = max(1, min(500, limit))
-        resolved_status = (
-            ResearchArtifactStatus(research_status) if research_status else None
-        )
+        resolved_status = ResearchArtifactStatus(research_status) if research_status else None
         async with app.session_maker() as session:
             repo = FactorSignalRepository(session)
             signals = await repo.list(
@@ -454,9 +441,7 @@ async def factor_signal_list(
                 research_status=resolved_status,
                 limit=safe_limit,
             )
-            return [
-                cast(dict[str, Any], to_jsonable(s.as_dict())) for s in signals
-            ]
+            return [cast(dict[str, Any], to_jsonable(s.as_dict())) for s in signals]
 
     return await run_tool(
         audit=app.audit,
@@ -470,9 +455,7 @@ async def factor_signal_list(
     )
 
 
-async def factor_signal_get(
-    app: McpAppContext, signal_id: str
-) -> ToolEnvelope:
+async def factor_signal_get(app: McpAppContext, signal_id: str) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         from finboard_persistence import FactorSignalRepository
 
@@ -508,9 +491,7 @@ async def factor_experiment_list(
         from finboard_persistence import FactorExperimentRepository
 
         safe_limit = max(1, min(500, limit))
-        resolved_status = (
-            FactorExperimentStatus(status) if status else None
-        )
+        resolved_status = FactorExperimentStatus(status) if status else None
         async with app.session_maker() as session:
             repo = FactorExperimentRepository(session)
             experiments = await repo.list(
@@ -518,10 +499,7 @@ async def factor_experiment_list(
                 comparison_group=comparison_group,
                 limit=safe_limit,
             )
-            return [
-                cast(dict[str, Any], to_jsonable(e.as_dict()))
-                for e in experiments
-            ]
+            return [cast(dict[str, Any], to_jsonable(e.as_dict())) for e in experiments]
 
     return await run_tool(
         audit=app.audit,
@@ -535,9 +513,7 @@ async def factor_experiment_list(
     )
 
 
-async def factor_experiment_get(
-    app: McpAppContext, experiment_id: str
-) -> ToolEnvelope:
+async def factor_experiment_get(app: McpAppContext, experiment_id: str) -> ToolEnvelope:
     async def _do() -> dict[str, Any]:
         from finboard_persistence import FactorExperimentRepository
 
@@ -545,9 +521,7 @@ async def factor_experiment_get(
             repo = FactorExperimentRepository(session)
             experiment = await repo.get(experiment_id)
             if experiment is None:
-                raise McpToolError(
-                    "not_found", f"未找到因子实验: {experiment_id}"
-                )
+                raise McpToolError("not_found", f"未找到因子实验: {experiment_id}")
             return cast(dict[str, Any], to_jsonable(experiment.as_dict()))
 
     return await run_tool(
@@ -590,9 +564,7 @@ async def factor_experiment_create(
             snapshot_repo = FeatureSnapshotRepository(session)
             snapshot = await snapshot_repo.get(feature_snapshot_id)
             if snapshot is None:
-                raise McpToolError(
-                    "not_found", f"未找到特征快照: {feature_snapshot_id}"
-                )
+                raise McpToolError("not_found", f"未找到特征快照: {feature_snapshot_id}")
             if snapshot.dataset_release_id != release.release_id:
                 raise McpToolError(
                     "conflict",
@@ -613,9 +585,7 @@ async def factor_experiment_create(
                     quantiles=plan.get("quantiles", 5),
                 )
             except (KeyError, TypeError, ValueError) as exc:
-                raise McpToolError(
-                    "invalid_argument", f"plan 参数非法: {exc}"
-                ) from exc
+                raise McpToolError("invalid_argument", f"plan 参数非法: {exc}") from exc
             try:
                 experiment = new_factor_experiment(
                     hypothesis=hypothesis,
@@ -650,9 +620,7 @@ async def factor_experiment_create(
     )
 
 
-async def factor_experiment_sync_validation(
-    app: McpAppContext, experiment_id: str
-) -> ToolEnvelope:
+async def factor_experiment_sync_validation(app: McpAppContext, experiment_id: str) -> ToolEnvelope:
     """同步因子实验的 #57 机器验证终态(写操作)。"""
 
     async def _do() -> dict[str, Any]:
@@ -662,9 +630,7 @@ async def factor_experiment_sync_validation(
 
         async with app.session_maker() as session:
             try:
-                experiment = await FactorExperimentValidationService(
-                    session
-                ).sync(experiment_id)
+                experiment = await FactorExperimentValidationService(session).sync(experiment_id)
                 await session.commit()
             except (ArtifactIntegrityError, ValueError) as exc:
                 await session.rollback()
@@ -694,7 +660,8 @@ def register(mcp: MCPServer) -> None:
             "每条含 name/version/role/preference/source_fields/"
             "economic_hypothesis/checksum 等,标注 origin=builtin)+ "
             "user_defined(沙箱执行的自定义因子,标注 origin=user_defined 与 "
-            "artifact commit/status;仅 status=active 可被规格引用,引用名为 "
+            "artifact commit/status/promotion_status;仅 status=active 且 "
+            "promotion_status=passed 可被规格引用,引用名为 "
             "u_<artifact_name>,观测来自 finboard_research_code_run 快照)。"
             "可选过滤 role(仅过滤 builtin);include_user_defined=false 只看内置。"
             "用于了解系统与 agent 各自提供哪些因子。"
@@ -730,13 +697,11 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_feature_snapshot_get",
-        description=(
-            "查询单个特征快照详情(含完整 observations 因子值)。"
-            "未找到返回 not_found。"
-        ),
+        description=("查询单个特征快照详情(含完整 observations 因子值)。未找到返回 not_found。"),
     )
     async def _feature_snapshot_get(
-        snapshot_id: str, ctx: Context = None  # type: ignore[assignment]
+        snapshot_id: str,
+        ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await feature_snapshot_get(app_context(ctx), snapshot_id)
 
@@ -798,7 +763,8 @@ def register(mcp: MCPServer) -> None:
         ),
     )
     async def _feature_snapshot_job_status(
-        job_id: str, ctx: Context = None  # type: ignore[assignment]
+        job_id: str,
+        ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await feature_snapshot_job_status(app_context(ctx), job_id)
 
@@ -827,13 +793,11 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_factor_signal_get",
-        description=(
-            "查询单个因子信号详情(含完整 items 逐标的信号)。"
-            "未找到返回 not_found。"
-        ),
+        description=("查询单个因子信号详情(含完整 items 逐标的信号)。未找到返回 not_found。"),
     )
     async def _factor_signal_get(
-        signal_id: str, ctx: Context = None  # type: ignore[assignment]
+        signal_id: str,
+        ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await factor_signal_get(app_context(ctx), signal_id)
 
@@ -862,10 +826,7 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_factor_experiment_get",
-        description=(
-            "查询单个因子实验详情(含 plan/result/failure_reason)。"
-            "未找到返回 not_found。"
-        ),
+        description=("查询单个因子实验详情(含 plan/result/failure_reason)。未找到返回 not_found。"),
     )
     async def _factor_experiment_get(
         experiment_id: str,
@@ -921,9 +882,7 @@ def register(mcp: MCPServer) -> None:
         experiment_id: str,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
-        return await factor_experiment_sync_validation(
-            app_context(ctx), experiment_id
-        )
+        return await factor_experiment_sync_validation(app_context(ctx), experiment_id)
 
 
 __all__ = [

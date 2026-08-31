@@ -5,12 +5,12 @@
 
 ## 当前状态(2026-08)
 
-**已实现 117 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 / #203 / #221 为既有工具的执行语义与契约增强 / 新增网格工具):
+**已实现 124 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 / #203 / #214 / #215 / #216 / #217 / #218 / #219 / #221 为既有工具的执行语义与契约增强 / 新增网格工具):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
 | `finboard.run.*` | 7 | list / get / artifacts(只读);queue / cancel / replay / lineage(写) | ResearchRun 查询 + 生命周期(3 只读 + 4 写,✅ #127;list/get/queue 返回 execution_mode single_shot\|multi_period,#183;queue 入队 universe 候选池非空预检,空池秒级 invalid_argument 附排除统计与缺失字段,#186;single_shot 缺冻结快照入队秒级拒绝附 execution_mode 与缺失因子源,multi_period 必须显式声明 rebalance_frequency,#203) |
-| `finboard.ai.*` | 4 | ask / propose_hypothesis / propose_strategy_draft / propose_strategy_diff | AI 草案(问答 / 因子假设 / 策略) |
+| 研究代码与沙箱 | 7 | research_code submit / list / get / rollback / promote、research_code_run enqueue / get | 代码静态校验与版本化(5 个,✅ #215/#219);一次性沙箱执行(2 个,✅ #216),研究域不连 broker |
 | `finboard.memory.*` | 7 | remember / list / get / forget / correct / confirm / archive | 研究长期记忆 |
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |
 | 因子实验室 | 12 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(8 只读 + 4 写,✅ #125;job_start/status 在 #136 迁移到持久化队列;factor_catalog 为唯一因子事实来源,v1 选股目录自其投影生成,#214) |
@@ -404,13 +404,15 @@ MCP agent 通道开放受控代码提交**;本 issue 只做存储与版本化,**
   AST import 白名单(pandas/numpy/polars/math/statistics/
   finboard_research_kit)、禁 subprocess/socket/os/sys/eval/exec/文件写模式
   open、文件数与单文件大小上限(settings 可调)、拒二进制。
-- MCP 工具 4 个:`finboard_research_code_submit` / `_rollback`(写,受
-  `mcp_readonly_only` 门控)+ `_list` / `_get`(只读);审计照常落
+- MCP 工具 5 个:`finboard_research_code_submit` / `_rollback` /
+  `_promote`(写,受 `mcp_readonly_only` 门控)+ `_list` / `_get`(只读);
+  审计照常落
   mcp_audit_events。OpenCode allowlist 已是 `finboard_*: allow` 通配,
   新工具自动放行,无需改权限配置。
-- 持久化:`research_code_artifacts` 表(每次 submit 追加 active 行,同名旧
-  版本自动 retired;rollback 把历史 commit 重新登记 active,git 历史不重写)。
-- 回滚方案:迁移 downgrade 删表 + 移除 4 个工具;bare 仓库目录独立于研究
+- 持久化:`research_code_artifacts` 表(每次 submit 追加 draft/pending 行,
+  不替换当前 active;晋级通过后同名旧版本自动 retired;rollback 把历史
+  commit 重新登记 draft,git 历史不重写)。
+- 回滚方案:迁移 downgrade 删表 + 移除 5 个工具;bare 仓库目录独立于研究
   产物,删除目录即彻底回退。
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 边界段已同步
@@ -448,7 +450,8 @@ L3 沙箱路线第二环:让已提交的因子代码「能跑且跑不坏」。�
   failed / runtime_error / timeout / oom_killed / output_contract_violation /
   sandbox_unavailable。
 - MCP 工具 2 个:`finboard_research_code_run`(写,入队;同步预检
-  sandbox 开启 / kind=factor / active 产物 / 发布存在且含 bars,秒级失败)
+  sandbox 开启 / kind=factor / active+passed 产物 / 发布存在且含 bars,秒级失败;
+  显式 artifact_id 可为 draft 生成供 screen ResearchRun 使用的快照)
   + `finboard_research_code_run_get`(只读;detail 附 scores 预览与
   error.json);`finboard_job_enqueue` kind 白名单加 `research_code_run`。
 - 配置:`research_sandbox_*`(enabled 默认 **false** —— 显式启用,
@@ -475,7 +478,8 @@ L3 沙箱路线第四环:agent 编写的**策略**代码进入回测。用户决
   权重},和可 < 1 持现金、可空观望)+ 可选 meta。harness `--mode strategy`
   产出 `targets.parquet`。
 - **规格**:`strategy_kind=user_code` + `code_artifact {name, commit?}`
-  (StrategyCodeArtifactRef;只引用不携带代码,web 无代码边界不变);
+  (引用 kind=strategy 的 active 且 `promotion_status=passed` artifact;
+  StrategyCodeArtifactRef 只引用不携带代码,web 无代码边界不变);
   feature_graph/signal_rules 允许为空;registry 注册 capability
   (EQUITY,无 web 模板)。
 - **执行**:`UserCodeStrategyAdapter` 与 multi_factor 共用
@@ -497,6 +501,35 @@ L3 沙箱路线第四环:agent 编写的**策略**代码进入回测。用户决
   镜像 digest + 逐决策 targets checksum);与 multi_factor 同屏可比。
 - 配置:无新增(reuse research_sandbox_*);镜像 tag 升 0.2.0(kit 版本
   三处同步)。回滚 = kit 0.1.0 + 移除 registry/dispatch/gate;无新工具名。
+
+`_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md / README 已同步。
+
+### ✅ #219 研究代码验证门与晋级链路(已完成)
+
+L3 沙箱路线第五环:研究代码必须经过可复核的 screen + #57 OOS 验证，
+才能进入正式 composite / simulation whitelist。提交和回滚都只建立
+`draft`，不会改变当前正式版本:
+
+```text
+submit -> draft(pending) -- screen + #57 OOS --> active(passed)
+                       \-- gate failed -------> draft(failed)
+active(passed) -- 新版本晋级或显式退役 --> retired
+rollback(old commit) -----------------------> draft(pending)
+active(passed) -> 正式 composite / simulation whitelist
+```
+
+- `finboard_research_code_promote` 同时校验同一 artifact/name/kind/commit
+  的 screen 指标与 `validated_oos + final_test_unsealed=true` 实验，并按
+  IC、平均换手率、相关性上限 fail-closed；失败证据保留在 draft，旧版本
+  回滚也必须重新验证。
+- 晋级与沙箱运行归档 code commit、dataset release/checksum、参数/checksum、
+  output checksum 四向引用，以及镜像 digest、stdout/stderr、退出码和资源
+  用量；报告与 `research_code_run_get` 可据此复核。
+- 编译期、入队期和模拟盘创建期均只接受 `active + promotion_status=passed`；
+  retired / 未晋级引用返回具名错误。模拟盘继续只写独立 `simulation_*`
+  表，不导入 broker，也不自动晋级影子盘或实盘。
+- 回滚方案:迁移 downgrade 删除晋级字段，移除 promote 工具及引用门控；不改
+  实盘下单、持仓恢复或风控逻辑。
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md / README 已同步。
 
@@ -524,7 +557,8 @@ L3 沙箱路线第三环:把 agent 自定义因子变成「可被选股引用的
   秒级拒绝(观测绑定单一 decision_at);沙箱快照按锚定 run 的发布集合
   校验 ⊆ 冻结清单。
 - **catalog 混合视图**:`finboard_factor_catalog` 展示 builtin(26)+
-  user_defined(标注 artifact commit/status;`include_user_defined=false`
+  user_defined(标注 artifact commit/status/promotion_status,仅 active+
+  passed 可引用;`include_user_defined=false`
   只看内置)。
 - **screen 指标**:引用用户因子的 research run,report 携带 `factor_screen`
   段 —— rank_ic / rank_ic_ir(spearman 序列,≥2 期才有 IR)、分层收益
@@ -535,7 +569,7 @@ L3 沙箱路线第三环:把 agent 自定义因子变成「可被选股引用的
 - 配置:`research_sandbox_max_nan_ratio` / `research_sandbox_min_coverage`。
   回滚 = 迁移 downgrade(删 2 列 + 恢复非空)+ executor 不落库(质量门
   阈值调 0 即全拒)+ 移除 compiler user_factor_sources 传参;无新工具名,
-  工具总数 123 不变。
+  工具总数 124（#219 新增晋级工具）。
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 边界段已同步。
 

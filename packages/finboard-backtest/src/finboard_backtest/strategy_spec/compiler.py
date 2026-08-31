@@ -45,7 +45,9 @@ class FeatureSourceDefinition:
 def _factor_sources() -> dict[str, FeatureSourceDefinition]:
     result: dict[str, FeatureSourceDefinition] = {}
     for definition in FACTOR_CATALOG.values():
-        datasets = tuple(sorted({item.split(".", maxsplit=1)[0] for item in definition.dependencies}))
+        datasets = tuple(
+            sorted({item.split(".", maxsplit=1)[0] for item in definition.dependencies})
+        )
         result[definition.name.value] = FeatureSourceDefinition(
             name=definition.name.value,
             kind=FeatureKind.FACTOR,
@@ -210,11 +212,13 @@ def compile_strategy_spec(
 ) -> ResolvedStrategyPlan:
     """校验并解析策略规格。所有依赖均 fail closed。
 
-    ``user_factor_sources`` 是当前 ``status=active`` 的沙箱用户因子名
+    ``user_factor_sources`` 是当前 ``status=active`` 且通过 screen+OOS 晋级门
+    的沙箱用户因子名
     集合(u_ 前缀,#217);引用非集合内的用户因子直接报错(retired /
     不存在的 artifact fail-visible,由调用方从 DB 注入名单)。
 
-    ``user_code_sources`` 是当前 ``status=active`` 的沙箱策略代码
+    ``user_code_sources`` 是当前 ``status=active`` 且通过 screen+OOS 晋级门
+    的沙箱策略代码
     artifact 名集合(#218);``strategy_kind=user_code`` 的
     ``code_artifact.name`` 不在集合内直接报错(同 fail-visible 语义)。
     """
@@ -226,9 +230,11 @@ def compile_strategy_spec(
         artifact_name = spec.code_artifact.name if spec.code_artifact else ""
         if artifact_name not in user_code_sources:
             raise StrategySpecError(
-                f"user_code 策略引用的代码 artifact 不可用(不存在或非 active): "
+                f"user_code 策略引用的代码 artifact 不可用(不存在/非 active/未通过"
+                f" screen+OOS 晋级门): "
                 f"{artifact_name!r};先经 finboard_research_code_submit 提交 "
-                "kind=strategy 代码并保持 status=active;历史版本引用须先 "
+                "kind=strategy 代码并完成 screen+OOS 后保持 status=active;"
+                "历史版本引用须先 "
                 "finboard_research_code_rollback 再入队"
             )
 
@@ -240,14 +246,15 @@ def compile_strategy_spec(
         if is_user_factor_name(node.source):
             if node.source not in user_factor_sources:
                 raise StrategySpecError(
-                    f"用户因子不可引用(artifact 不存在或非 active): {node.source};"
+                    f"用户因子不可引用(artifact 不存在/非 active/未通过 screen+OOS): "
+                    f"{node.source};"
                     "先 finboard_research_code_submit 提交因子代码并保持 "
-                    "status=active,沙箱执行产出快照后才能被规格引用"
+                    "status=active 且 promotion_status=passed,沙箱执行产出快照后"
+                    "才能被规格引用"
                 )
             if node.kind is not FeatureKind.FACTOR:
                 raise StrategySpecError(
-                    f"用户因子节点 {node.node_id} kind 须为 factor,"
-                    f"实际 {node.kind.value}"
+                    f"用户因子节点 {node.node_id} kind 须为 factor,实际 {node.kind.value}"
                 )
             if node.source in disabled_factors:
                 raise StrategySpecError(f"策略依赖已停用因子: {node.source}")
@@ -269,8 +276,7 @@ def compile_strategy_spec(
     missing_releases: set[str] = set()
     if available_dataset_release_ids is not None:
         missing_releases = (
-            set(spec.validation_plan.dataset_release_ids)
-            - available_dataset_release_ids
+            set(spec.validation_plan.dataset_release_ids) - available_dataset_release_ids
         )
     if missing_releases:
         raise StrategySpecError(f"历史数据发布不存在或不可用: {sorted(missing_releases)}")

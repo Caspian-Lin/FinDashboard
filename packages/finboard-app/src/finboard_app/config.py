@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     # 错误信息指明阈值)。
     research_sandbox_max_nan_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
     research_sandbox_min_coverage: float = Field(default=0.5, ge=0.0, le=1.0)
+    # 研究代码晋级门(issue #219):screen 指标与 #57 OOS 验证共同决定
+    # promotion_status=passed;实际阈值随 artifact evidence 冻结。
+    research_promotion_min_abs_rank_ic: float = Field(default=0.02, ge=0.0)
+    research_promotion_max_average_turnover: float = Field(default=0.80, ge=0.0, le=1.0)
+    research_promotion_max_abs_correlation: float = Field(default=0.80, ge=0.0, le=1.0)
+    research_promotion_min_periods: int = Field(default=2, ge=1)
 
     # ---- FinBoard MCP Server(issue #108)----
     # 向外置研究 Agent(OpenCode)暴露受控研究工具的 MCP 服务。默认关闭,显式启用。
@@ -220,9 +226,7 @@ class Settings(BaseSettings):
         if not self.opencode_web_cors_origins.strip():
             return []
         return [
-            origin.strip()
-            for origin in self.opencode_web_cors_origins.split(",")
-            if origin.strip()
+            origin.strip() for origin in self.opencode_web_cors_origins.split(",") if origin.strip()
         ]
 
     def opencode_env_override_map(self) -> dict[str, str]:
