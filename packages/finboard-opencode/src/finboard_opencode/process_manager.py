@@ -18,6 +18,11 @@ MCP 接线(#157):``mcp_remote_url`` 生效方式 —— ``start()`` 前把仓库
 bind mount 覆盖容器内 ``/workspace/.opencode/opencode.json``。仓库文件保持事实来源,
 运行时产物不入库(.gitignore)。
 
+模型列表同步(#242):渲染时对声明 ``options.baseURL`` 的 config provider 经 OpenAI
+兼容 ``GET /models`` 拉取模型 id,只增不改合并进渲染产物(失败回退缓存)。接入面
+(baseURL/headers/鉴权)永以仓库文件为准,模型列表是纯数据面;渲染在宿主机侧完成、
+容器内只读挂载,agent 不可写。
+
 红线:本模块只管理研究运行时容器,不连接实盘 broker / 账户 / 订单 / 持仓 / 风控。
 
 Windows 事件循环冲突
@@ -118,6 +123,14 @@ _CONTAINER_ENV_DIRS: tuple[tuple[str, str], ...] = (
     ("XDG_STATE_HOME", "/root/.local/state"),
 )
 
+#: provider 模型列表缓存文件名(#242,位于 ``.opencode/runtime/``,gitignore 覆盖)。
+_MODEL_CACHE_NAME = "provider-model-cache.json"
+
+#: 单个 provider ``/models`` 拉取超时(秒)。启动路径上尽力而为:失败即回退缓存,不重试。
+_MODEL_SYNC_TIMEOUT = 5.0
+
+_log = structlog.get_logger("finboard_opencode.process")
+
 
 @dataclass(frozen=True, slots=True)
 class OpenCodeProcessConfig:
@@ -146,6 +159,10 @@ class OpenCodeProcessConfig:
     #: 容器内 opencode 连接宿主机 finboard_mcp 的 URL(#157:由本配置渲染进容器
     #: opencode.json,使 ``opencode_mcp_remote_url`` 设置实际生效)。
     mcp_remote_url: str = "http://host.docker.internal:8765/mcp"
+    #: 是否在渲染 runtime opencode.json 时同步 provider 模型列表(#242)。
+    #: 对声明 ``options.baseURL`` 的 config provider 拉取 OpenAI 兼容 ``/models``
+    #: 并只增不改合并进渲染产物;关闭则渲染期完全不发起网络请求(回滚开关)。
+    model_sync_enabled: bool = True
 
     @property
     def base_url(self) -> str:
@@ -220,7 +237,11 @@ class OpenCodeProcessConfig:
         读取 ``{workdir}/.opencode/opencode.json``(仓库事实来源),把
         ``mcp.finboard.url`` 替换为 ``mcp_remote_url``,写入
         ``{workdir}/.opencode/runtime/opencode.json``(gitignore 的运行时产物)。
-        其余键原样保留(provider / agent / permission 等)。
+        其余键原样保留(agent / permission 等)。
+
+        ``model_sync_enabled`` 时(#242):对声明 ``options.baseURL`` 的 config
+        provider 经 OpenAI 兼容 ``GET /models`` 拉取模型 id,只增不改合并进渲染
+        产物(见 :meth:`_merge_provider_models`)。
         """
         source = Path(self.workdir).resolve() / ".opencode" / "opencode.json"
         target = source.parent / "runtime" / "opencode.json"
@@ -229,10 +250,81 @@ class OpenCodeProcessConfig:
         if isinstance(mcp, dict) and isinstance(mcp.get("finboard"), dict):
             mcp["finboard"]["url"] = self.mcp_remote_url
         target.parent.mkdir(parents=True, exist_ok=True)
+        if self.model_sync_enabled:
+            self._merge_provider_models(data, target.parent)
         target.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         return target
+
+    def _merge_provider_models(self, data: dict[str, Any], runtime_dir: Path) -> None:
+        """把 provider ``/models`` 拉取结果合并进待渲染配置(#242,尽力而为)。
+
+        - 只对声明 ``options.baseURL`` 且 API key 可解析(``{env:VAR}`` 占位符经
+          ``env_overrides``/宿主机环境解析)的 provider 生效;
+        - 合并只增不改:源文件手写的模型条目(显示名等)永不被覆盖,远端新 id 以
+          ``{"name": id}`` 追加;远端响应**永不**改写 ``baseURL``/``headers``/鉴权
+          —— 接入面始终以仓库文件为准,模型列表是纯数据面;
+        - 成功即刷新 ``provider-model-cache.json``;网络/解析失败回退上次缓存,
+          无缓存则保持源文件不变(启动不被网络故障阻塞)。
+        """
+        providers = data.get("provider")
+        if not isinstance(providers, dict) or not providers:
+            return
+        cache_path = runtime_dir / _MODEL_CACHE_NAME
+        cache = _read_json_dict(cache_path)
+        cache_dirty = False
+        for provider_id, spec in providers.items():
+            if not isinstance(spec, dict):
+                continue
+            options = spec.get("options")
+            if not isinstance(options, dict):
+                continue
+            base_url = options.get("baseURL")
+            if (
+                not isinstance(base_url, str)
+                or not base_url.startswith(("http://", "https://"))
+            ):
+                continue
+            api_key = _resolve_env_placeholder(options.get("apiKey"), self.env_overrides)
+            if api_key is None:
+                _log.debug("opencode.model_sync.key_unresolvable", provider=provider_id)
+                continue
+            try:
+                model_ids = _fetch_provider_model_ids(base_url, api_key)
+            except (httpx.HTTPError, ValueError) as exc:
+                _log.warning(
+                    "opencode.model_sync.fetch_failed",
+                    provider=provider_id,
+                    error=str(exc),
+                )
+                model_ids = []
+            if model_ids:
+                cache[str(provider_id)] = {
+                    "fetched_at": datetime.now(UTC).isoformat(),
+                    "models": model_ids,
+                }
+                cache_dirty = True
+            else:
+                cached = cache.get(provider_id)
+                if isinstance(cached, dict) and isinstance(cached.get("models"), list):
+                    model_ids = [m for m in cached["models"] if isinstance(m, str)]
+            if not model_ids:
+                continue
+            models = spec.get("models")
+            if not isinstance(models, dict):
+                models = {}
+            added = [mid for mid in model_ids if mid not in models]
+            if not added:
+                continue
+            for mid in added:
+                models[mid] = {"name": mid}
+            spec["models"] = models
+        if cache_dirty:
+            cache_path.write_text(
+                json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
 
     def build_environment(
         self, *, parent_env: dict[str, str] | None = None
@@ -750,6 +842,56 @@ def _extract_version(data: Any) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    """读 JSON 对象;不存在/损坏返回空 dict(缓存是尽力而为的加速层)。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _resolve_env_placeholder(value: Any, env_overrides: dict[str, str]) -> str | None:
+    """解析 ``{env:VAR}`` 占位符(``env_overrides`` 优先,回退宿主机环境)。
+
+    普通字符串原样返回;空值 / 占位符变量解析不到返回 ``None``(调用方跳过该
+    provider,不对配置端点发起未鉴权请求)。
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    if value.startswith("{env:") and value.endswith("}"):
+        var = value[5:-1]
+        resolved = env_overrides.get(var) or os.environ.get(var)
+        return resolved or None
+    return value
+
+
+def _fetch_provider_model_ids(
+    base_url: str, api_key: str | None, *, timeout: float = _MODEL_SYNC_TIMEOUT
+) -> list[str]:
+    """拉取 OpenAI 兼容 ``GET {base_url}/models``,返回去重排序的模型 id 列表。
+
+    只提取模型 id;响应里的其它字段(无论内容)一律丢弃,调用方只把 id 合并进
+    ``models``。网络/解析错误向上抛,由调用方回退缓存。
+    """
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    resp = httpx.get(
+        f"{base_url.rstrip('/')}/models", headers=headers, timeout=timeout
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        raise ValueError("unexpected /models payload: expected list under data")
+    ids: set[str] = set()
+    for item in items:
+        if isinstance(item, str):
+            ids.add(item)
+        elif isinstance(item, dict) and isinstance(item.get("id"), str):
+            ids.add(item["id"])
+    return sorted(ids)
 
 
 def _prepare_runtime_dirs(workdir: Path, log_path: Path) -> Any:

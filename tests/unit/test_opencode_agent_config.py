@@ -2,12 +2,14 @@
 
 锁定三件事,防止配置 / 文档再次漂移:
 
-1. **权限 allowlist**:`.opencode/opencode.json` 与 agent md 的 permission 必须
-   ``"*": "deny"`` 起底,只显式放行 ``read``/``glob``/``grep``/``skill``/
-   ``finboard_*``(Skill 渐进式加载 + MCP 工具)以及 ``bash``/``exa_*``(#182
-   扩展:bash 上限为只读轮询 / 状态检查,行为边界写在 agent md、机械兜底靠
-   ``.opencode``/``.agents`` 挂载 ``:ro``;exa 为 remote 搜索 MCP);
-   ``edit``/``write``/``webfetch`` 等执行 / 外联能力不得被放行。
+1. **权限 allowlist**:#242 起 agent 唯一权威 = agent md
+   (``.opencode/agent/finboard-researcher.md``;``opencode.json`` 不得再声明
+   被覆盖的 ``agent`` 死块),其 permission 必须 ``"*": "deny"`` 起底,只显式放行
+   ``read``/``glob``/``grep``/``skill``/``finboard_*``(Skill 渐进式加载 + MCP
+   工具)以及 ``bash``/``exa_*``(#182 扩展:bash 上限为只读轮询 / 状态检查,
+   行为边界写在 agent md、机械兜底靠 ``.opencode``/``.agents`` 挂载 ``:ro``;
+   exa 为 remote 搜索 MCP);``edit``/``write``/``webfetch`` 等执行 / 外联能力
+   不得被放行。md 也不得钉死 ``model``(#242:默认模型跟随 OpenCode 选择)。
 2. **#122 语义**:agent 定义不得再包含「只读 / 写操作需人工审批」过期措辞,
    必须声明研究写操作可自主执行、实盘能力永久拒绝。
 3. **#123 文档同步**:MCP 工具注册表总数 == server ``_INSTRUCTIONS`` 宣称数 ==
@@ -85,9 +87,9 @@ def _extract_permission(source: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def test_opencode_json_permission_is_allowlist() -> None:
-    config = json.loads(_OPENCODE_JSON.read_text(encoding="utf-8"))
-    permission = config["agent"]["finboard-researcher"]["permission"]
+def test_agent_md_permission_is_allowlist() -> None:
+    """权限 allowlist 唯一声明处 = agent md(#242 后 opencode.json 无 agent 块)。"""
+    permission = _extract_permission(_AGENT_MD.read_text(encoding="utf-8"))
     assert permission.get("*") == "deny", "必须以 * deny 起底(默认拒绝全部)"
     explicit = set(permission) - {"*"}
     assert explicit <= _ALLOWED_PERMISSION_KEYS - {"*"}, (
@@ -100,12 +102,22 @@ def test_opencode_json_permission_is_allowlist() -> None:
         assert permission.get(forbidden) != "allow", f"{forbidden} 不得放行"
 
 
-def test_agent_md_permission_matches_opencode_json() -> None:
-    """agent md 与 opencode.json 的 permission 必须一致(同一份契约两处声明)。"""
-    json_config = json.loads(_OPENCODE_JSON.read_text(encoding="utf-8"))
-    json_permission = json_config["agent"]["finboard-researcher"]["permission"]
-    md_permission = _extract_permission(_AGENT_MD.read_text(encoding="utf-8"))
-    assert md_permission == json_permission
+def test_opencode_json_has_no_dead_agent_block() -> None:
+    """opencode.json 不得声明 agent 块:同名 agent 以 .md 为准,json 声明是被覆盖的死配置。"""
+    config = json.loads(_OPENCODE_JSON.read_text(encoding="utf-8"))
+    assert "agent" not in config, (
+        ".opencode/opencode.json 的 agent 块会被 .opencode/agent/*.md 覆盖"
+        "(死配置,#242);agent 定义请改 .md"
+    )
+
+
+def test_agent_md_does_not_pin_model() -> None:
+    """agent md 不得钉死默认模型(#242):模型跟随 OpenCode Web UI / 会话选择。"""
+    source = _AGENT_MD.read_text(encoding="utf-8")
+    frontmatter = source.split("---")[1]
+    assert not re.search(r"^model:", frontmatter, re.MULTILINE), (
+        "finboard-researcher.md 不得钉死 model(#242 后默认模型跟随 OpenCode 选择)"
+    )
 
 
 def test_opencode_json_mcp_url_uses_env_compatible_default() -> None:

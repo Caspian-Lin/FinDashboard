@@ -220,6 +220,11 @@ class Settings(BaseSettings):
     # 容器模式下若 ``mcp_host`` 仍为默认 127.0.0.1,lifespan 会自动改绑 0.0.0.0
     # (显式配置了其它地址则尊重用户配置)。
     opencode_embed_mcp: bool = True
+    # 容器启动渲染 runtime opencode.json 时,是否对声明 baseURL 的 config provider
+    # 拉取 OpenAI 兼容 /models 并把新模型 id 只增不改合并进渲染产物(#242)。
+    # 结果缓存 .opencode/runtime/provider-model-cache.json,拉取失败回退缓存;
+    # baseURL/auth 永以仓库文件为准。设 False 渲染期不发起任何网络请求(回滚开关)。
+    opencode_model_sync_enabled: bool = True
 
     def opencode_web_cors_origin_list(self) -> list[str]:
         """解析逗号分隔的 CORS 源列表。"""
