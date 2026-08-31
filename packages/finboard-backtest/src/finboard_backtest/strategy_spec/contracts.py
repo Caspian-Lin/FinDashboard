@@ -597,9 +597,37 @@ class StrategyCodeArtifactRef(NoCodeModel):
     无代码边界不变:代码本体只能经 ``finboard_research_code_submit``
     (MCP 通道,#215)进入独立 git 仓库。``commit`` 省略 = 引用 active
     版本(入队期解析冻结进 manifest;指定历史 commit 须先 rollback)。
+    ``artifact_id``(#234)由入队期冻结:显式 screen 绑定放行时写入精确
+    产物行,普通(active 引用)入队不携带,保持 None。
     """
 
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    commit: str | None = Field(default=None, min_length=8, max_length=64)
+    artifact_id: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=64,
+        pattern=r"^RC-[0-9a-f]{16,32}$",
+    )
+
+
+class ScreenArtifactBinding(NoCodeModel):
+    """screen 用途的 draft 代码产物显式绑定(issue #234)。
+
+    #219 晋级门要求完成的 ResearchRun 提供 screen 证据,而编译期/入队名单
+    只认 ``active + promotion_status=passed`` —— draft 产物永远拿不到 screen
+    证据(鸡生蛋)。本绑定声明「该 screen 规格显式引用这个精确产物」:
+    **只携带引用(kind/name/artifact_id/可选 commit),不携带任何源码**,web
+    通道无代码边界不变。编译期把绑定名并入可引用名单(仅本规格生效);
+    入队期(REST+MCP 共用门控)按 DB 逐条实绑校验(存在 / 非 retired /
+    kind 与 name 一致 / commit 一致)并把 commit + artifact_id 冻结进
+    manifest;promote 侧四向一致性校验(name/kind/artifact_id/commit +
+    快照 source_run_id 追溯)兜底。非 screen 引用门行为完全不变。
+    """
+
+    kind: Literal["factor", "strategy"]
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    artifact_id: str = Field(pattern=r"^RC-[0-9a-f]{16,32}$")
     commit: str | None = Field(default=None, min_length=8, max_length=64)
 
 
@@ -621,6 +649,8 @@ class ResearchStrategySpec(NoCodeModel):
     compatibility: LegacyCompatibility | None = None
     # issue #218:user_code 策略的代码 artifact 引用(其余 kind 必须为 None)。
     code_artifact: StrategyCodeArtifactRef | None = None
+    # issue #234:screen 用途 draft 产物显式绑定(空 = 普通规格,引用门不变)。
+    screen_artifact_bindings: tuple[ScreenArtifactBinding, ...] = ()
 
     @model_validator(mode="after")
     def validate_cross_references(self) -> ResearchStrategySpec:
@@ -642,6 +672,36 @@ class ResearchStrategySpec(NoCodeModel):
                 raise ValueError("feature_graph.outputs 不能为空")
             if not self.signal_rules.rules:
                 raise ValueError("signal_rules.rules 不能为空")
+        # issue #234:screen 绑定的结构一致性(kind 唯一性 + strategy 绑定
+        # 必须落在 user_code 的 code_artifact 上)。与 DB 的一致性(存在/
+        # 非 retired/name 一致/commit 一致)在入队期由共享门控校验。
+        seen_refs: set[tuple[str, str]] = set()
+        seen_artifacts: set[str] = set()
+        for binding in self.screen_artifact_bindings:
+            ref = (binding.kind, binding.name)
+            if ref in seen_refs:
+                raise ValueError(
+                    f"screen_artifact_bindings 重复绑定: kind={binding.kind} "
+                    f"name={binding.name}"
+                )
+            if binding.artifact_id in seen_artifacts:
+                raise ValueError(
+                    f"screen_artifact_bindings 重复绑定 artifact: "
+                    f"{binding.artifact_id}"
+                )
+            seen_refs.add(ref)
+            seen_artifacts.add(binding.artifact_id)
+            if binding.kind == "strategy":
+                if self.strategy_kind != "user_code" or self.code_artifact is None:
+                    raise ValueError(
+                        "strategy 类 screen 绑定仅适用于 user_code 策略"
+                        "(须声明 code_artifact)"
+                    )
+                if binding.name != self.code_artifact.name:
+                    raise ValueError(
+                        f"strategy 类 screen 绑定 name={binding.name} 与 "
+                        f"code_artifact.name={self.code_artifact.name} 不一致"
+                    )
         feature_ids = {node.node_id for node in self.feature_graph.nodes}
         for rule in self.signal_rules.rules:
             references = {rule.feature_id}
@@ -696,6 +756,7 @@ __all__ = [
     "RiskExitPolicy",
     "RiskExitRule",
     "RiskExitType",
+    "ScreenArtifactBinding",
     "SignalAction",
     "SignalComparator",
     "SignalConflictPolicy",

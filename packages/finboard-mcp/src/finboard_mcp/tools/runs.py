@@ -383,21 +383,35 @@ async def _build_queued_manifest(
     # issue #217:用户因子(u_ 前缀)入队门控(与 REST 路由共用同一函数)。
     from finboard_backtest.research_code import (
         active_user_factor_names,
+        resolve_screen_bindings,
+        screen_factor_snapshot_gate_error,
         user_factor_reference_gate_error,
     )
     from finboard_backtest.research_sandbox.factor_publish import (
         sandbox_snapshot_dataset_release_ids,
     )
 
+    # issue #234:screen 绑定实绑校验(REST+MCP 共用同一门控)—— 声明了
+    # screen_artifact_bindings 的规格按 DB 逐条校验,通过后绑定名并入可引用
+    # 名单;未声明绑定的普通规格行为完全不变。
+    resolution, bind_error = await resolve_screen_bindings(session, spec=spec)
+    if bind_error is not None:
+        raise McpToolError("invalid_argument", bind_error)
+
+    active_factors = await active_user_factor_names(session)
+    if resolution is not None:
+        active_factors = active_factors | resolution.user_factor_names
     user_gate_error = user_factor_reference_gate_error(
         required_factor_sources=required_factor_sources,
-        active_user_factors=await active_user_factor_names(session),
+        active_user_factors=active_factors,
         parameters=body.parameters,
     )
     if user_gate_error is not None:
         raise McpToolError("invalid_argument", user_gate_error)
     # issue #218:user_code 策略入队门控(与 REST 路由共用同一函数);放行时
-    # 把 active commit 冻结进 spec(manifest input_checksum 覆盖代码版本)。
+    # 把 active commit 冻结进 spec(manifest input_checksum 覆盖代码版本);
+    # issue #234:screen 绑定的 draft 产物 commit/ID 一并冻结。
+    spec_checksum = strategy_row.checksum
     if spec.code_artifact is not None:
         from finboard_backtest.research_code import (
             active_user_strategy_commits,
@@ -405,18 +419,34 @@ async def _build_queued_manifest(
             user_code_reference_gate_error,
         )
 
-        active_strategies = await active_user_strategy_commits(session)
+        merged_strategies = dict(await active_user_strategy_commits(session))
+        if resolution is not None:
+            merged_strategies.update(resolution.strategy_commits)
         code_gate_error = user_code_reference_gate_error(
             code_artifact_name=spec.code_artifact.name,
             code_artifact_commit=spec.code_artifact.commit,
-            active_user_strategies=active_strategies,
+            active_user_strategies=merged_strategies,
             sandbox_enabled=sandbox_enabled,
             frozen_snapshot_count=len(snapshots),
             parameters=body.parameters,
         )
         if code_gate_error is not None:
             raise McpToolError("invalid_argument", code_gate_error)
-        spec = freeze_user_code_commit(spec, active_strategies)
+        frozen_spec = freeze_user_code_commit(
+            spec,
+            merged_strategies,
+            artifact_ids=(
+                resolution.strategy_artifact_ids if resolution is not None else None
+            ),
+        )
+        if frozen_spec is not spec:
+            # 冻结 commit/artifact_id 改变了 payload:manifest 内的 checksum
+            # 按 post_init 契约必须等于冻结后规格的 checksum(发布版本本身的
+            # 追溯仍由 strategy_version + 冻结绑定字段承载)。
+            from finboard_backtest.research_run.contracts import stable_checksum
+
+            spec_checksum = stable_checksum(frozen_spec.canonical_payload())
+            spec = frozen_spec
     release_ids = {release.release_id for release in releases}
     for snapshot in snapshots:
         # issue #217:沙箱快照(dataset_release_id=None)按其锚定 run 冻结的
@@ -436,6 +466,15 @@ async def _build_queued_manifest(
                 f"沙箱因子快照 {snapshot.snapshot_id} 锚定 run 的数据发布 "
                 f"{sorted(sandbox_release_ids - release_ids)} 不在本次冻结清单中",
             )
+
+    # issue #234:factor 通道 screen 运行的快照证据预检(与 REST 共用)——
+    # 绑定的 draft 产物必须已有其 RCR 产出的快照进入 factor_snapshot_ids。
+    if resolution is not None:
+        snapshot_gate_error = await screen_factor_snapshot_gate_error(
+            session, resolution=resolution, snapshots=snapshots
+        )
+        if snapshot_gate_error is not None:
+            raise McpToolError("invalid_argument", snapshot_gate_error)
 
     # issue #186:入队同步候选池非空校验(与 REST 路由同一评估函数)。
     # 空池秒级 invalid_argument,附各过滤条件排除统计与缺失字段名。
@@ -470,7 +509,7 @@ async def _build_queued_manifest(
         run_id=run_id,
         idempotency_key=body.idempotency_key,
         strategy_spec=spec,
-        strategy_spec_checksum=strategy_row.checksum,
+        strategy_spec_checksum=spec_checksum,
         dataset_releases=tuple(
             FrozenArtifactRef(
                 artifact_id=release.release_id,
@@ -915,7 +954,17 @@ def register(mcp: MCPServer) -> None:
             "artifact);入队门控 artifact 非 active / commit 不一致 / 沙箱未启用 "
             "/ single_shot 缺快照 → 秒级拒绝,放行时 active commit 冻结进 "
             "manifest;逐决策日沙箱 decide(ctx)→目标权重 复用组合管线,report "
-            "附 sandbox_provenance(commit+镜像 digest)。"
+            "附 sandbox_provenance(commit+镜像 digest)。\n"
+            "screen 通道(#234):首次晋级需要 screen 证据而 draft 产物不可被"
+            "普通运行引用 —— 已发布规格声明 screen_artifact_bindings"
+            "({kind, name, artifact_id, commit?})时,入队按 DB 实绑校验"
+            "(存在/非 retired/name/commit 一致,错绑秒级 invalid_argument)"
+            "并放行 draft 引用,strategy 绑定的 commit+artifact_id 冻结进 "
+            "manifest(code_artifact),factor 绑定要求其沙箱快照"
+            "(finboard_research_code_run 显式 artifact_id 产出)已进入 "
+            "factor_snapshot_ids。未声明绑定的普通运行引用 draft/retired 仍被"
+            "秒级拒绝;promote 侧四向校验兜底,screen 运行不可挪作他版代码"
+            "的证据。"
             "返回精简回执(issue #206):run_id/job_id/status/checksum/"
             "execution_mode/created_at,全量详情走 finboard_run_get。"
         ),

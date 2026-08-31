@@ -19,7 +19,7 @@ from finboard_backtest.strategy_spec.contracts import (
     migrate_strategy_payload,
 )
 from finboard_backtest.strategy_spec.universe_precheck import UniversePoolPreview
-from finboard_data.factor_lab import is_user_factor_name
+from finboard_data.factor_lab import is_user_factor_name, sandbox_factor_name
 from finboard_data.factors import FACTOR_CATALOG
 
 LIFECYCLE_STAGES = (
@@ -221,22 +221,54 @@ def compile_strategy_spec(
     的沙箱策略代码
     artifact 名集合(#218);``strategy_kind=user_code`` 的
     ``code_artifact.name`` 不在集合内直接报错(同 fail-visible 语义)。
+
+    issue #234:规格声明的 ``screen_artifact_bindings``(显式 draft 产物
+    绑定)把绑定名并入**本规格**的可引用名单 —— 这是 screen 专用通道,
+    仅声明绑定的规格生效;普通规格的引用门行为完全不变。绑定的 DB 实绑
+    校验(存在 / 非 retired / name/commit 一致)在入队期由共享门控完成,
+    编译期只做引用完整性(绑定了却没引用 → 报错)。
     """
 
     payload = raw.canonical_payload() if isinstance(raw, ResearchStrategySpec) else raw
     spec = ResearchStrategySpec.model_validate(migrate_strategy_payload(payload))
 
+    bound_strategy_names = frozenset(
+        binding.name
+        for binding in spec.screen_artifact_bindings
+        if binding.kind == "strategy"
+    )
+    bound_user_factors = frozenset(
+        sandbox_factor_name(binding.name)
+        for binding in spec.screen_artifact_bindings
+        if binding.kind == "factor"
+    )
+
     if spec.strategy_kind == "user_code":
         artifact_name = spec.code_artifact.name if spec.code_artifact else ""
-        if artifact_name not in user_code_sources:
+        if (
+            artifact_name not in user_code_sources
+            and artifact_name not in bound_strategy_names
+        ):
             raise StrategySpecError(
                 f"user_code 策略引用的代码 artifact 不可用(不存在/非 active/未通过"
                 f" screen+OOS 晋级门): "
                 f"{artifact_name!r};先经 finboard_research_code_submit 提交 "
                 "kind=strategy 代码并完成 screen+OOS 后保持 status=active;"
                 "历史版本引用须先 "
-                "finboard_research_code_rollback 再入队"
+                "finboard_research_code_rollback 再入队;"
+                "首次晋级的 draft 产物请声明 screen_artifact_bindings 显式绑定"
+                "(issue #234 screen 通道)"
             )
+
+    graph_sources = {
+        node.source for node in spec.feature_graph.nodes if node.source is not None
+    }
+    unreferenced_bindings = sorted(bound_user_factors - graph_sources)
+    if unreferenced_bindings:
+        raise StrategySpecError(
+            f"screen_artifact_bindings 绑定了未被 feature_graph 引用的因子: "
+            f"{unreferenced_bindings};screen 绑定必须与引用一一对应"
+        )
 
     required_sources: set[str] = set()
     required_datasets: set[str] = set()
@@ -244,13 +276,18 @@ def compile_strategy_spec(
         if node.source is None:
             continue
         if is_user_factor_name(node.source):
-            if node.source not in user_factor_sources:
+            if (
+                node.source not in user_factor_sources
+                and node.source not in bound_user_factors
+            ):
                 raise StrategySpecError(
                     f"用户因子不可引用(artifact 不存在/非 active/未通过 screen+OOS): "
                     f"{node.source};"
                     "先 finboard_research_code_submit 提交因子代码并保持 "
                     "status=active 且 promotion_status=passed,沙箱执行产出快照后"
-                    "才能被规格引用"
+                    "才能被规格引用;"
+                    "首次晋级的 draft 产物请声明 screen_artifact_bindings 显式绑定"
+                    "(issue #234 screen 通道)"
                 )
             if node.kind is not FeatureKind.FACTOR:
                 raise StrategySpecError(
