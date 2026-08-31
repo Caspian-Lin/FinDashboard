@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 124 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 125 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -22,7 +22,7 @@
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
 | 后台任务队列(job.*,✅ #136+#221) | ✅(list/get 只读 + enqueue/cancel/archive/unarchive 写) | |
 | 数据写操作(data_write.* / etf.*,✅ #137) | ✅(拉取/同步/发布/修复/ETF/配置) | |
-| #57 验证实验(validation_experiment.*,✅ #138) | ✅(create/reject/add_trial/delete 写) | |
+| #57 验证实验(validation_experiment.*,✅ #138+#233) | ✅(create/reject/add_trial/delete/run 写) | |
 | 自选股(watchlist.*,✅ #140) | ✅(create/update/delete/add_symbols/remove_symbol 写) | |
 | 报告聚合与导出(report.*,✅ #141) | ✅(3 只读:聚合 run/backtest + 导出 CSV/Markdown 文件) | |
 | 实盘(下单/撤单/持仓/Kill Switch/broker/凭证) | | ✗ |
@@ -418,14 +418,17 @@ status=active 且 promotion_status=passed 可被规格引用**(retired/未晋级
 - 读取绑定的 validation_experiment_id 的 trial 结果,推进状态机。
 - 返回:`{experiment_id, ..., status, result?}`;冲突返回 `conflict`。
 
-## finboard.validation_experiment.*(✅ #138)
+## finboard.validation_experiment.*(✅ #138 + #233)
 
-#57 机器验证实验(OOS 样本外验证)元数据 CRUD,暴露 REST
+#57 机器验证实验(OOS 样本外验证)元数据 CRUD + 执行入队,暴露 REST
 `/api/research/experiments` 的 6 个端点。与因子实验(登记簿)是**两套独立但
 耦合的系统**:因子实验通过 `validation_experiment_id` 引用本批工具创建的 #57
 实验,再经 `finboard_factor_experiment_sync_validation` 同步终态,补齐 OOS
-过拟合控制闭环。实验执行由离线 ValidationRunner 完成(不在 MCP 内触发);
-揭盲端点(`unseal-final`)未实现。写操作尊重 `mcp_readonly_only` 开关。
+过拟合控制闭环。实验执行(#233)经 `finboard_validation_experiment_run`
+任务化:`kind=validation_experiment` 后台任务由 worker 单并发执行
+ValidationRunner(IS → walk-forward → 一次性揭盲),`finboard_job_get`
+轮询(result_ref=experiment_id;validated_oos → succeeded,rejected → failed
+附阈值原因)。写操作尊重 `mcp_readonly_only` 开关。
 
 ### finboard_validation_experiment_create **[写]**
 创建 #57 机器验证实验 —— 假设 / 计划 / 门一次性冻结(创建后 hypothesis
@@ -488,6 +491,24 @@ status=active 且 promotion_status=passed 可被规格引用**(retired/未晋级
 删除 #57 实验(级联删除全部 trial,不可恢复)。
 - 参数:`experiment_id: str`
 - 返回:`{deleted: true, experiment_id}`;未找到返回 `not_found`。
+
+### finboard_validation_experiment_run **[写]**(✅ #233)
+入队执行 #57 实验:`kind=validation_experiment` 后台任务(worker 单并发)。
+按冻结计划跑 IS 参数搜索(`strategy_params_space` 网格)→ walk-forward OOS
+(稳健性 + DSR/PSR/PBO)→ **一次性揭盲最终测试集**;逐 trial 落库(失败也算
+试验),断点续跑不重复计数;揭盲不可重做(终态后重复执行秒级拒绝)。
+- 参数:`experiment_id: str`、`idempotency_key?: str`(默认
+  `validation_experiment:<experiment_id>`)、`requested_by?: str`(默认
+  `agent:mcp`)
+- 返回:`{job_id, kind, experiment_id, status, created, idempotency_key,
+  detail_hint}`;`finboard_job_get` 轮询
+- 前置:实验的 `version_stamp.selection_config` 须声明
+  `validation_trial_runner: {strategy, symbols, provider?, params?, capital?}`
+  (注册表策略回测;缺省执行期报 `trial_runner_unconfigured`)
+- 错误:不存在 `not_found`;终态 / 已揭盲 `conflict`(揭盲不可重做);
+  预算耗尽 `invalid_argument`
+- 场景:#219 晋级链的 OOS 门入口 —— 完成后把 experiment_id 传给
+  `finboard_research_code_promote`
 
 ## finboard.strategy.* / finboard.preset.*(✅ #126)
 
@@ -1267,24 +1288,33 @@ finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.2.0`;
 - 归档:`<workspace>/<RCR-id>/{code,data,out,stdout.txt,stderr.txt,
   container.json,usage.json}`(stdout/stderr/退出码/资源用量完整可查)
 
-### 用户自定义因子引用链(#217)
-把沙箱产出变成可被选股管线引用的一等公民:
+### 用户自定义因子引用链(#217 + #234 screen 通道)
+把沙箱产出变成可被选股管线引用的一等公民。**首次晋级闭环**(draft 无法被
+普通运行引用,必须走 screen 显式绑定通道):
 1. `finboard_research_code_submit` 提交因子代码(kind=factor,name 如
    `mom20`)→ artifact draft/promotion_status=pending;
 2. `finboard_research_code_run` 沙箱执行(dataset_release_ids +
-   decision_at)→ 质量门通过后快照落库,因子观测名 = `u_mom20`;
-3. 绑定 screen 运行与 #57 `validated_oos` 实验,调用
-   `finboard_research_code_promote` 通过 IC/换手率/相关性门后才变为
-   `active/promotion_status=passed`;
-4. `finboard_factor_catalog` 确认 origin=user_defined、status=active、
-   promotion_status=passed;
-5. 策略规格 feature_graph 里按名引用:`{node_id, kind: factor,
-   operator: identity, source: "u_mom20"}`(编译期校验 active 名单);
-6. research run 入队时把 `output_snapshot_id` 放进
-   `factor_snapshot_ids`(single_shot;multi_period 引用用户因子会被
-   入队秒级拒绝);
-7. run report 的 `factor_screen` 段给出该因子的 rank_ic / rank_ic_ir /
-   分层收益(5 桶)/ 换手率 / 与既有因子(builtin)的相关性矩阵。
+   decision_at,**至少两个不同 decision_at**——screen 门要求 ≥2 期)→
+   质量门通过后快照落库,因子观测名 = `u_mom20`;
+3. 建 screen 用规格(feature_graph 按 `u_mom20` 引用)+ 声明
+   `screen_artifact_bindings: [{kind: "factor", name: "mom20",
+   artifact_id, commit?}]` 显式绑定 draft 产物 → 编译期放行(#234);
+   validate → draft → publish 照常;
+4. `finboard_run_queue` 入队 screen RR(single_shot;把各次
+   `output_snapshot_id` 都放进 `factor_snapshot_ids`):入队按 DB 实绑
+   校验(存在/非 retired/name/commit 一致,错绑秒级 invalid_argument),
+   并要求绑定产物的快照已在冻结清单;
+5. run 完成后 report 的 `factor_screen` 段给出 rank_ic / rank_ic_ir /
+   分层收益(5 桶)/ 换手率 / 与既有因子的相关性矩阵;
+6. `finboard_validation_experiment_create`(version_stamp 四向绑定该
+   artifact)+ `finboard_validation_experiment_run` 跑 OOS →
+   `validated_oos`;
+7. `finboard_research_code_promote`(screen_run_id=RR id)通过
+   IC/换手率/相关性 + 四向绑定门后 → `active/promotion_status=passed`;
+8. 晋级后:普通(无绑定)规格即可按 active 名单引用 `u_mom20`;
+   `finboard_factor_catalog` 确认 origin=user_defined、status=active、
+   promotion_status=passed。非 screen 普通运行引用 draft/retired 仍被
+   编译期/入队门秒级拒绝(行为不变)。
 
 ## 用户代码策略执行(#218,逐日决策函数)
 
@@ -1308,6 +1338,11 @@ def decide(ctx):
   (引用 kind=strategy 的 active 且 `promotion_status=passed` artifact;commit
   省略 = 当前 active,入队时冻结进 manifest)。`feature_graph` / `signal_rules` 允许为空(特征由代码自行
   计算);其余 kind 携带 code_artifact 非法。web 通道仍禁代码。
+  **首次晋级 screen 通道(#234)**:draft 策略 artifact 经规格声明
+  `screen_artifact_bindings: [{kind: "strategy", name, artifact_id,
+  commit?}]` 显式绑定 → 编译期放行,入队按 DB 实绑校验并把
+  commit + artifact_id 冻结进 manifest(code_artifact);screen RR 的
+  `strategy_screen` + `sandbox_provenance` 即 promote 证据,四向校验兜底。
 - 执行:建议 `parameters.rebalance_frequency=monthly|quarterly`
   (multi_period,决策日由发布日历推导);single_shot 需冻结快照提供决策
   时点。每个决策日一个一次性容器(`--network none` / 只读 / PIT 物理隔离,
@@ -1317,9 +1352,14 @@ def decide(ctx):
   目标权重,不触任何订单语义。池外/缺执行元数据标的**丢弃记 warning**;
   负权重与超上限由管线约束投影**逐项截断并审计**(constraints 阶段可见)。
 - 入队门控(REST+MCP 共享):artifact 非 active / commit 与 active 不一致 /
-  沙箱未启用 / single_shot 缺快照 → 秒级 `invalid_argument`。
+  沙箱未启用 / single_shot 缺快照 → 秒级 `invalid_argument`;
+  **screen 绑定(#234)例外**:显式绑定的 draft 产物实绑校验通过即放行。
 - report:`sandbox_provenance` 段归档 code commit + 沙箱镜像 digest +
-  逐决策 targets checksum;与 multi_factor 同一决策日/候选池口径,
+  逐决策 targets checksum;`strategy_screen` 段给出机器 screen 指标
+  (rank_ic / 换手 / n_periods,#234);与 multi_factor 同一决策日/候选池口径,
   报告**同屏可比**。
+- 晋级:screen RR + `finboard_validation_experiment_run`(#233 OOS 门)→
+  `finboard_research_code_promote` → `active/promotion_status=passed`
+  → 消费门(普通入队/编译)放行。
 - v1 边界:逐日决策函数(decide),**不做**事件驱动 on_bar(日内止损 /
   执行形态研究如需,另行开 issue);纯离线研究域,不连 broker 不下单。

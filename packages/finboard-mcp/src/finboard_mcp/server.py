@@ -35,10 +35,11 @@
   quality_repair / dataset_release_publish(任务化,返回 job_id,用
   ``finboard_job_get`` 轮询)、config_get/update、etf_sync/batch_confirm/update/
   review_queue。补全「数据→因子→策略」闭环的数据准备第一步。
-* #57 验证实验(#138)—— ``finboard.validation_experiment.*``:create / list /
-  get / reject / add_trial / delete,暴露 REST ``/api/research/experiments``
-  的 6 个端点(OOS 样本外验证实验元数据 CRUD,不触发 ValidationRunner 执行),
-  给因子实验的 ``validation_experiment_id`` 提供源头,补齐 OOS 验证闭环。
+* #57 验证实验(#138 + #233)—— ``finboard.validation_experiment.*``:create /
+  list / get / reject / add_trial / delete + run(执行入队),暴露 REST
+  ``/api/research/experiments`` 的 6 个端点 + ``kind=validation_experiment``
+  后台任务;run 由 worker 跑 walk-forward 并一次性揭盲(揭盲不可重做),
+  补齐 #219 晋级门 OOS 半边的运营入口。
 * 自选股(#140)—— ``finboard.watchlist.*``:list / get 只读 + create / update /
   delete / add_symbols / remove_symbol 写,暴露 REST ``/api/watchlists`` 的 7 个
   端点(用户标的组 —— 保存常用回测标的集合,为回测 / 研究准备标的池)。
@@ -96,7 +97,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(124 个,已实现)==
+== 当前可用工具(125 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -114,7 +115,13 @@ FinBoard 研究 MCP —— 量化研究工具集
   各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
   manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。写操作
   返回精简回执(run_id/job_id/status/checksum/execution_mode/created_at,
-  #206),全量详情走 run_get。
+  #206),全量详情走 run_get。screen 通道(#234):已发布规格声明
+  screen_artifact_bindings({kind,name,artifact_id,commit?})时,入队按 DB
+  实绑校验(存在/非 retired/name/commit 一致,错绑秒级 invalid_argument)
+  并放行 draft 产物引用,strategy 绑定的 commit+artifact_id 冻结进 manifest,
+  factor 绑定要求其沙箱快照已进入 factor_snapshot_ids;未声明绑定的普通
+  运行引用 draft/retired 仍秒级拒绝。首次晋级:submit → RCR 快照 →
+  screen RR → finboard_validation_experiment_run → promote。
 - finboard.memory.*(7) —— 研究记忆:remember / list / get / forget / correct
   / confirm / archive(跨会话长期上下文,操作 research_memories 独立表)
 - 数据查询(9,✅ #124):instrument list/get/search、dataset_release list/get、
@@ -210,11 +217,18 @@ FinBoard 研究 MCP —— 量化研究工具集
   etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
   补全「数据→因子→策略」闭环的数据准备第一步:agent 能拉 K 线、发布数据集、
   修复质量缺陷、同步 ETF 元数据。不连 broker / 账户 / 订单 / 持仓。
-- 验证实验(6,✅ #138):validation_experiment create/list/get/reject/add_trial/
-  delete(#57 OOS 机器验证实验元数据 CRUD:冻结假设+计划+门 → 登记 trial →
-  因子实验用 validation_experiment_id 引用 → factor_experiment_sync_validation
-  同步终态,补齐 OOS 过拟合控制闭环;实验实际执行由离线 ValidationRunner 完成,
-  揭盲端点不在 MCP 内)。与因子实验(登记簿)是两套独立但耦合的系统。
+- 验证实验(7,✅ #138+#233):validation_experiment create/list/get/reject/
+  add_trial/delete + run(写,入队)。元数据 CRUD 同前(冻结假设+计划+门 →
+  登记 trial → 因子实验引用 → sync_validation 同步终态);**run(#233)把
+  「按计划跑 walk-forward + 一次性揭盲」任务化**:入队 kind=validation_experiment
+  后台任务(worker 单并发),入队预检秒级拒绝不可运行 / 预算耗尽 / 已揭盲;
+  执行端逐 trial 落库(失败也算试验)、断点续跑不重复计数;揭盲不可重做
+  (终态后重复执行秒级拒绝)。result_ref=experiment_id,validated_oos →
+  succeeded / rejected → failed 附阈值原因;完成后把 experiment_id 传给
+  finboard_research_code_promote。实验的 version_stamp.selection_config 须声明
+  validation_trial_runner:{strategy, symbols, provider?, params?, capital?}
+  (注册表策略回测),未声明执行期报 trial_runner_unconfigured。
+  与因子实验(登记簿)是两套独立但耦合的系统。
 - 自选股(7,✅ #140):watchlist list/get(只读)、create/update/delete/
   add_symbols/remove_symbol(写,受 mcp_readonly_only 守卫)。标的组管理:
   创建标的集合(如回测候选池)→ 加 symbols(自动去重)→ 回测/研究复用,
@@ -242,6 +256,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   rollback 只重新建立待验证 draft。目录约定:一因子/策略一目录 factors/<name>/
   {factor.py, manifest.toml}、strategies/<name>/{strategy.py, manifest.toml}。
   **只存储与版本化**;web 通道仍禁代码,仅 MCP agent 通道开放。
+  首次晋级 screen 证据(#234):规格声明 screen_artifact_bindings 显式绑定
+  draft 产物,经 finboard_run_queue(screen RR)产出 factor_screen /
+  strategy_screen 证据,promote 四向校验(name/kind/artifact_id/commit)
+  兜底,screen 运行不可挪作他版代码的证据。
 - 研究代码沙箱执行(2,✅ #216+#217):research_code_run(写,入队)/
   research_code_run_get(只读)。通过晋级门的 active 因子代码在一次性 Docker 容器内执行
   factor.compute(ctx) -> scores + metrics(协议 v1 纯截面函数)。容器

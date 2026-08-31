@@ -5,12 +5,12 @@
 
 ## 当前状态(2026-08)
 
-**已实现 124 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 / #203 / #214 / #215 / #216 / #217 / #218 / #219 / #221 为既有工具的执行语义与契约增强 / 新增网格工具):
+**已实现 125 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 / #203 / #214 / #215 / #216 / #217 / #218 / #219 / #221 为既有工具的执行语义与契约增强 / 新增网格工具):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
 | `finboard.run.*` | 7 | list / get / artifacts(只读);queue / cancel / replay / lineage(写) | ResearchRun 查询 + 生命周期(3 只读 + 4 写,✅ #127;list/get/queue 返回 execution_mode single_shot\|multi_period,#183;queue 入队 universe 候选池非空预检,空池秒级 invalid_argument 附排除统计与缺失字段,#186;single_shot 缺冻结快照入队秒级拒绝附 execution_mode 与缺失因子源,multi_period 必须显式声明 rebalance_frequency,#203) |
-| 研究代码与沙箱 | 7 | research_code submit / list / get / rollback / promote、research_code_run enqueue / get | 代码静态校验与版本化(5 个,✅ #215/#219);一次性沙箱执行(2 个,✅ #216),研究域不连 broker |
+| 研究代码与沙箱 | 7 | research_code submit / list / get / rollback / promote、research_code_run enqueue / get | 代码静态校验与版本化(5 个,✅ #215/#219);一次性沙箱执行(2 个,✅ #216),研究域不连 broker;screen 显式绑定通道(✅ #234,无新工具) |
 | `finboard.memory.*` | 7 | remember / list / get / forget / correct / confirm / archive | 研究长期记忆 |
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |
 | 因子实验室 | 12 | factor_catalog、feature_snapshot list/get/create/job_start/job_status、factor_signal list/get、factor_experiment list/get/create/sync_validation | 因子目录 / 特征快照 / 因子信号 / 因子实验(8 只读 + 4 写,✅ #125;job_start/status 在 #136 迁移到持久化队列;factor_catalog 为唯一因子事实来源,v1 选股目录自其投影生成,#214) |
@@ -20,7 +20,7 @@
 | portfolio | 4 | portfolio_allocate / sizing / feasibility / attribution | 组合计算(纯计算,无 DB 写入,✅ #128) |
 | `finboard.job.*` | 6 | job list/get(只读);job enqueue/cancel/archive/unarchive(写) | 统一后台任务队列监控与提交(2 只读 + 4 写,✅ #136;archive/unarchive 归档隐藏不删除 + `archived=exclude\|only\|all` 列表过滤 + 批量归档回计数,✅ #221) |
 | 数据写操作 | 12 | data_fetch(同步)、fetch_all/sync_universe/bulk_download_start/quality_repair/dataset_release_publish(任务化)、data_config_get/update、etf_sync/batch_confirm/update/review_queue | 数据准备闭环:拉取/批量下载/同步/质量修复/数据集发布/调度配置/ETF 元数据(2 只读 + 10 写,✅ #137) |
-| #57 验证实验 | 6 | validation_experiment create/list/get/reject/add_trial/delete | OOS 样本外验证实验元数据 CRUD(2 只读 + 4 写,✅ #138),给因子实验的 validation_experiment_id 提供源头 |
+| #57 验证实验 | 7 | validation_experiment create/list/get/reject/add_trial/delete/run | OOS 样本外验证实验元数据 CRUD(2 只读 + 4 写,✅ #138)+ 执行入队(1 写,✅ #233:walk-forward + 一次性揭盲任务化) |
 | 自选股 | 7 | watchlist list/get(只读);create/update/delete/add_symbols/remove_symbol(写) | 用户标的组管理:保存常用回测标的集合(2 只读 + 5 写,✅ #140) |
 | 报告聚合与导出 | 3 | report_run / report_backtest(只读聚合);report_export(导出 CSV/Markdown 文件) | 可交付报告:聚合 ResearchRun/回测报告并导出文件(3 只读,✅ #141) |
 
@@ -179,12 +179,41 @@ job_id 或按 kinds/statuses/finished_before 批量,批量只回 archived_count,
 再经 `factor_experiment_sync_validation` 同步终态 —— agent 现在能跑通
 「创建验证实验 → 登记 trial → 因子实验引用 → sync 终态」完整链路。
 
-边界:本批只做实验元数据 CRUD,不触发 `ValidationRunner` 执行(长耗时执行
-任务化见 #117/#136);揭盲端点(`unseal-final`)未实现,不在本批覆盖(需后续
-单独补路由 + MCP 工具)。trial_id 用 `{experiment_id}-mcp-{uuid}` 前缀
+边界:元数据 CRUD 不触发 `ValidationRunner` 执行;**执行入口见 #233**
+(`finboard_validation_experiment_run`,`kind=validation_experiment` 后台
+任务,含一次性揭盲)。trial_id 用 `{experiment_id}-mcp-{uuid}` 前缀
 (审计区分入口)。不触及交易安全红线。回滚:移除
 `register_validation_experiment_tools(mcp)` 调用 + `validation_experiments.py`
 即可,不影响 REST 端点 / 因子实验工具 / 研究产物。
+
+### ✅ #233 验证实验执行任务化(已完成)
+
+补齐 #219 晋级门 OOS 半边的运营入口 —— 在此之前 `ValidationRunner` 只有
+单测调用,任何实验都到不了 `validated_oos + final_test_unsealed`,
+`finboard_research_code_promote` 的 validation 门永远不可满足:
+
+- 新增 `finboard_validation_experiment_run`(写,受 `mcp_readonly_only`
+  门控):入队 `kind=validation_experiment` 后台任务(worker 单并发)。
+  入队预检秒级拒绝:实验不存在(not_found)/ 终态或已揭盲(conflict)/
+  预算耗尽(invalid_argument);执行端重放同一组检查(双保险 fail-closed)。
+- `ValidationExperimentExecutor`:`run_in_sample`(候选来自
+  `strategy_params_space` 网格,逐 trial 落库,失败也算试验,逐 trial 提交
+  无半写)→ `run_walk_forward`(OOS 门 + 稳健性 + DSR/PSR/PBO)→
+  `unseal_final_test`(一次性揭盲)。`JobResult`:validated_oos → succeeded
+  (result_ref=experiment_id);rejected → failed 附可读阈值原因。
+- **揭盲不可重做**:实验终态 / 已揭盲后重复执行抛具名
+  `experiment_not_runnable`(ExecutorError,不可重试),不产生第二次最终
+  测试集评估;`max_attempts` 默认 1(自动重试只会重复消耗预算)。
+- **断点续跑安全**:trial_id 由 (experiment_id, 候选序号) 确定性生成、
+  按 trial_id upsert;重入预载已持久化 trial 并只跑缺失候选,
+  `trials_used` 不重复递增。
+- runner 工厂注入:默认按实验 `version_stamp.selection_config[
+  "validation_trial_runner"]` 声明的 `{strategy, symbols, provider?,
+  params?, capital?}` 构建注册表策略回测(直驱 BacktestEngine,不落
+  backtest_runs);未声明执行期报具名 `trial_runner_unconfigured`
+  (fail-visible,不猜测回测语义)。
+- 回滚 = 移除 executor 注册与 `finboard_validation_experiment_run`;实验
+  仍可走手工 runner 路径。
 
 ### ✅ #139 模拟盘补全工具(已完成)
 3 个写工具(2 写生命周期 + 1 行情投递),补全 #127 之后的模拟盘生命周期缺口,
@@ -532,6 +561,35 @@ active(passed) -> 正式 composite / simulation whitelist
   实盘下单、持仓恢复或风控逻辑。
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md / README 已同步。
+
+### ✅ #234 screen 用途 draft 产物显式绑定通道(已完成)
+
+L3 沙箱路线收尾:解除「draft 产物拿不到 screen 证据 → 永远无法第一次
+promote」的死锁(factor/strategy 双通道)。安全设计不放松消费门,缺的是
+一条**显式、可审计的 screen 专用通道**:
+
+- **声明层**:规格新增 `screen_artifact_bindings`(`{kind:
+  factor|strategy, name, artifact_id, commit?}`,`StrategyCodeArtifactRef`
+  增加可选 `artifact_id`);编译期把绑定名并入**本规格**可引用名单 ——
+  仅声明绑定的规格生效,普通规格引用门行为完全不变(retired/未晋级仍
+  fail-visible)。
+- **实绑层**:入队期(REST `POST /api/research/runs` 与 MCP
+  `finboard_run_queue` 共用 `resolve_screen_bindings` /
+  `screen_factor_snapshot_gate_error`,对齐 #186/#203 秒级失败风格)按 DB
+  逐条校验存在 / 非 retired / kind·name 一致 / commit 一致;factor 通道
+  另要求绑定产物的 RCR 快照已进入 `factor_snapshot_ids`(无证据的 screen
+  run 完成后 promote 必失败,提前到入队暴露)。
+- **冻结层**:strategy 绑定的 commit + artifact_id 冻结进 manifest 的
+  `code_artifact`;factor 绑定由快照 `source_run_id → RCR` 追溯承载。
+  顺带修复 #218 遗留缺陷:规格未声明 commit 时,冻结改变 payload 后
+  manifest checksum 未重算导致入队必败 —— 现按冻结后规格重算。
+- **兜底层**:promote 侧 `_screen_evidence` 四向一致性校验
+  (name/kind/artifact_id/commit + 快照 source_run_id 追溯)不变,screen
+  运行不可挪作他版代码的证据。
+- 无新工具名(工具总数 125,`#233` 新增 run)。回滚 = 移除绑定字段与
+  门控分支,行为回到 active+passed-only。
+
+`_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md 已同步。
 
 ### ✅ #217 沙箱因子接入快照/选股管线与 screen 指标(已完成)
 
