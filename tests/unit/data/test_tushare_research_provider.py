@@ -114,6 +114,7 @@ class FakeTushareClient:
         self.daily_rows = [_daily_row()]
         self.financial_rows = [_financial_row()]
         self.industry_rows = [_industry_row()]
+        self.namechange_rows: list[dict[str, object]] = []
 
     def stock_basic(self, **kwargs: str) -> object:
         self.calls.append(("stock_basic", kwargs))
@@ -130,6 +131,10 @@ class FakeTushareClient:
     def index_member_all(self, **kwargs: str) -> object:
         self.calls.append(("index_member_all", kwargs))
         return self.industry_rows
+
+    def namechange(self, **kwargs: str) -> object:
+        self.calls.append(("namechange", kwargs))
+        return self.namechange_rows
 
 
 def _provider(

@@ -513,7 +513,9 @@ class TestResearchDataSyncInstrumentGovernance:
         assert result.status == "succeeded"
         assert sorted(fetch_statuses) == ["D", "L"]
         assert len(sync_calls) == 1
-        assert len(sync_calls[0]["records"]) == 2  # L + D 合并进同一批次
+        records = sync_calls[0]["records"]
+        assert isinstance(records, list)
+        assert len(records) == 2  # L + D 合并进同一批次
         assert sync_calls[0]["parameters"] == {"list_status": "L+D"}
 
     @pytest.mark.asyncio
