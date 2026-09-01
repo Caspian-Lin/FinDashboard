@@ -130,6 +130,11 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
 
 `memory_type`:`note` / `insight` / `correction` / `confirmation`。
 
+**保留 tags(#268 协议约定)**:`research-plan` / `research-round` /
+`finding-confirmed` / `finding-refuted` —— 跨会话结论检索入口(会话启动协议
+按 tag 过滤;轮次收尾与结论登记必带,详见 `memory.md` / `workflow.md`)。
+`tags` 本身是自由字段,以上四个值有协议含义,不挪作他用。
+
 ### finboard_memory_remember
 记住一条研究记忆(status=active)。
 - 参数:`memory_type: str`、`content: str`、`source_refs?: list[dict]`、

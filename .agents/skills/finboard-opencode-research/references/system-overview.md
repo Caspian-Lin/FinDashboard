@@ -78,6 +78,9 @@ packages/
 - OpenCode 通过 `finboard.*` MCP 工具访问研究能力
 - 不连接实盘 broker / 账户 / 订单 / 持仓 / Kill Switch
 - `opencode_web_enabled` 默认关闭,回滚方案为关闭入口
+- **研究文档只读挂载**(#268):`/workspace/docs/research/`(ROADMAP /
+  FINDINGS / rounds,跨会话结论共享的事实源);容器侧一律 `:ro`,canonical
+  文档经 PR 维护,宿主机目录缺失时跳过该挂载
 
 ## 安全红线(对 Agent 的硬约束)
 
@@ -89,5 +92,6 @@ Agent(包括本 MCP / OpenCode 运行时)**不允许**:
 - 在实盘运行时动态生成代码并立即执行
 - 操作 Kill Switch
 
-`ResearchAssistant`(`finboard-backtest`)是 AI 助手的唯一入口,强制
-`assert_research_only_request` 拒绝越权请求与提示词注入。
+FinBoard 自身**零内置 LLM**(#160)。MCP 入参统一经 `sanitize_prompt` 脱敏
+并记录审计事件(`mcp_audit_events`),工具层拒绝越权请求;提示词注入由
+Skill 边界(实盘动词 / 代码生成禁令)与服务端权限矩阵共同防住。

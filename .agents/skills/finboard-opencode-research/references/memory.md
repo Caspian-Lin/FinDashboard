@@ -25,6 +25,23 @@ remember → active
   └─ confirm  → active + confirmed_by/confirmed_at
 ```
 
+## 保留 tags 约定(#268)
+
+`memory_type` 之外,cross-session 结论检索靠**保留 tags**(`tags` 是自由
+字段,但以下四个值有协议含义,不要挪作他用):
+
+| tag | 何时打 | 检索方式 |
+|-----|--------|----------|
+| `research-plan` | 研究 plan / 路线(roadmap)状态变更、目标调整 | `finboard_memory_list(tag="research-plan")` |
+| `research-round` | 轮次收尾报告(固定模板:目标/动作/证据/结论+置信度/开放问题) | `finboard_memory_list(tag="research-round")` |
+| `finding-confirmed` | 结论获机器验证确认(OOS 终态 / confirm) | `finboard_memory_list(tag="finding-confirmed")` |
+| `finding-refuted` | 结论被证伪(含证据 ID,防止下轮重测) | `finboard_memory_list(tag="finding-refuted")` |
+
+- **会话启动协议**按这些 tag 检索(见 `workflow.md`);打结论时必带对应 tag。
+- 这四个 tag 是记忆层的指针;canonical 结论注册表在
+  `/workspace/docs/research/FINDINGS.md`(只读挂载,经 PR 维护),
+  两者冲突以文档为准。
+
 ## source_refs 规则
 
 - **只引用,不修改** —— `source_refs` 记录记忆关联的产物 ID,绝不修改产物本身。

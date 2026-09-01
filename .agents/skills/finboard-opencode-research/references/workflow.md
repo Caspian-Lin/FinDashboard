@@ -52,8 +52,30 @@
          attribution 绩效归因分解)。纯计算,无 DB 写入,agent 自主执行
 ```
 
+## 会话启动协议(#268)
+
+每轮会话在理解问题**之前**按序执行,目的:不重复造轮子、不重测已证伪假设。
+
+1. **读研究文档**(只读挂载 `/workspace/docs/research/`):
+   - `ROADMAP.md` —— 研究目标阶梯 / 路线 A-D 状态 / 当前证据门 / 数据边界;
+   - `FINDINGS.md` —— 结论注册表(结论 / 置信度 / 证据 ID / 失效条件 /
+     状态:有效 / 待验证 / 已证伪)。
+   - 挂载缺失(目录不存在)→ 跳过本步,并在最终回答注明「研究文档不可见」。
+2. **扫记忆**:`finboard_memory_list(status=active)`;量大按保留 tag 过滤
+   (`research-plan` / `research-round` / `finding-confirmed` /
+   `finding-refuted`)。
+3. **检索产物**:按问题域查相关 ResearchRun / 实验(`finboard.run.list` /
+   `finboard.validation_experiment_list`),把既有证据拼进本轮上下文。
+
+**重测禁令**:FINDINGS / 记忆中状态为「已证伪」的假设,未查索引前禁止重测;
+重开必须满足全部条件——(a) 有新证据来源(新数据域 / 新构造 / 新频率 /
+新 universe);(b) 显式引用旧结论及其证据 ID;(c) 说明本次与既往证伪的
+差异;(d) 结论更新后同步改 FINDINGS 状态并留 `finding-refuted` /
+`finding-confirmed` 记忆链。
+
 ## 标准研究循环
 
+0. **会话启动** —— 执行上方「会话启动协议」,加载前情后再进入澄清。
 1. **澄清** —— 复述研究问题,声明所需数据。数据不足时**先说**「数据不足」,
    不要猜测。
 2. **检索** —— 用 `finboard.run.list` / `finboard.run.get` 查询相关 ResearchRun;
@@ -65,6 +87,33 @@
 4. **记忆** —— 用 `finboard.memory.remember` 记住关键发现,`source_refs` 关联
    具体产物(ResearchRun ID / 数据集版本 / 模拟盘 ID)。
 5. **回答** —— 引用来源,区分个人假设与机器验证结论(OOS 终态)。
+
+## 轮次收尾协议(#268)
+
+每轮研究结束前,两步收尾:
+
+**第 1 步:落一条固定模板记忆**(跨会话检索入口):
+
+```
+finboard_memory_remember(
+  memory_type="insight",
+  tags=["research-round"],          # 结论性发现追加 finding-confirmed / finding-refuted
+  content="""
+    目标:本轮要回答什么(引用 ROADMAP 目标阶梯 / 路线编号)
+    动作:做了什么(建规格 / 入队 run / 建实验,附关键参数)
+    证据:产物 ID 表(ResearchRun / 实验 / 数据集发布,逐行列结论相关性)
+    结论+置信度:各假设的最新状态(高 / 中 / 低 + 一句话依据)
+    开放问题:留给下一轮的清单
+  """,
+  source_refs=[{kind: "research_run", ref_id: "RR-..."}, ...],
+)
+```
+
+**第 2 步:回答末尾附「轮次摘要」**(同模板)——容器对
+`/workspace/docs/research` 只读,canonical 轮次文档
+(`rounds/YYYY-MM-DD-<slug>.md`)由用户 / 主 coding agent 经 PR 落库;
+你的记忆只是指针,**文档与记忆冲突时以文档为准**。摘要要让主 agent
+能原样转录成轮次文档,不要省略证据 ID。
 
 ## 因子假设的结构化要求
 
@@ -83,6 +132,8 @@
 - ❌ 跨域操作 —— 研究工具不触碰实盘订单 / 持仓 / Kill Switch。
 - ❌ 把 portfolio 纯计算结果当实盘可执行 —— sizing/feasibility 输出是研究
   估算,不是实盘下单信号;需经完整研究流程才可上实盘。
+- ❌ 未查结论索引就重测已证伪假设(#268)—— 先走会话启动协议;重开需
+  新证据 + 显式引用旧结论。
 
 > 完整研究流程(数据→因子→策略→回测→模拟→评估)详解见
 > `references/research-workflow.md`。

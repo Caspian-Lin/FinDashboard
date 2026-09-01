@@ -91,9 +91,13 @@ _DEFAULT_IMAGE = "ghcr.io/anomalyco/opencode:latest"
 _CONTAINER_WORKDIR = "/workspace"
 
 #: 容器内需要 bind mount 的项目级配置目录(相对宿主机 workdir)。
+#: ``docs/research``(#268):研究知识沉淀文档(ROADMAP / FINDINGS / rounds)只读
+#: 挂载进容器,让研究 agent 跨会话共享同一事实源;目录不存在时跳过(见
+#: :meth:`OpenCodeProcessConfig.build_docker_run_command`),不阻塞容器启动。
 _CONTAINER_MOUNTS: tuple[tuple[str, str], ...] = (
     (".opencode", f"{_CONTAINER_WORKDIR}/.opencode"),
     (".agents", f"{_CONTAINER_WORKDIR}/.agents"),
+    ("docs/research", f"{_CONTAINER_WORKDIR}/docs/research"),
 )
 
 #: 容器内 OpenCode 运行时数据(会话 DB / auth),用 named volume 持久化。
@@ -150,7 +154,8 @@ class OpenCodeProcessConfig:
     hostname: str = "127.0.0.1"
     #: 允许跨源访问的浏览器源(iframe 跨源嵌入必须显式允许 FinBoard 源)。
     cors_origins: list[str] = field(default_factory=list)
-    #: 宿主机侧工作目录(包含 ``.opencode`` / ``.agents``,bind mount 进容器)。
+    #: 宿主机侧工作目录(包含 ``.opencode`` / ``.agents`` / ``docs/research``,
+    #: 存在的目录 bind mount 进容器,缺失跳过)。
     workdir: str = "."
     #: docker CLI 日志文件路径(``docker run`` / ``docker stop`` 的 stdout/stderr)。
     log_path: str = ".opencode/logs/opencode-web.log"
@@ -181,8 +186,9 @@ class OpenCodeProcessConfig:
         - ``--add-host=host.docker.internal:host-gateway`` —— 容器内可访问宿主机
           finboard_mcp(Windows Docker Desktop 默认支持,Linux 需此 flag)。
         - 容器内 opencode 绑 ``0.0.0.0``(否则端口映射进不来),由 ``--hostname`` 指定。
-        - bind mount ``.opencode`` / ``.agents`` —— agent 定义 / skill / opencode.json
-          持久化在宿主机仓库内,容器只读这些项目级配置。
+        - bind mount ``.opencode`` / ``.agents`` / ``docs/research`` —— agent 定义 /
+          skill / opencode.json / 研究文档(#268)持久化在宿主机仓库内,容器只读。
+          挂载源目录不存在时跳过该条(不阻塞启动,docs/research 为可选目录)。
         - named volume ``opencode-data`` / ``opencode-config`` —— 会话 DB(opencode.db)
           和 auth 持久化,容器删除后保留,重启可恢复历史。
         - ``runtime_config_path`` —— 渲染后的 opencode.json(mcp.finboard.url 已替换为
@@ -198,13 +204,22 @@ class OpenCodeProcessConfig:
             "--add-host=host.docker.internal:host-gateway",
             "-p", f"{self.hostname}:{self.port}:{self.port}",
         ]
-        # bind mount 项目级配置目录(.opencode / .agents)。
+        # bind mount 项目级配置目录(.opencode / .agents / docs/research)。
         # 一律 ``:ro`` —— 注释声称只读、代码此前却用 rw 挂载。finboard-researcher
         # 已放行 ``bash``(#182),rw 会让 agent 经容器改写仓库配置(自提权),只读
         # 是硬性边界:容器内 opencode 只读这些配置,会话 / 状态写入走 named volume。
+        # 宿主机目录不存在时跳过该条(#268:docs/research 是可选目录,缺了不阻塞
+        # 容器启动;也避免 docker 对缺失路径自动在仓库里创建空目录)。
         workdir = Path(self.workdir).resolve()
         for host_rel, container_abs in _CONTAINER_MOUNTS:
             host_abs = workdir / host_rel
+            if not host_abs.is_dir():
+                _log.info(
+                    "opencode_mount_skipped_missing_dir",
+                    host_path=str(host_abs),
+                    container_path=container_abs,
+                )
+                continue
             cmd += ["-v", f"{host_abs}:{container_abs}:ro"]
         # 渲染后的运行时配置覆盖容器内 opencode.json(MCP 地址可配置,#157)。
         # 单文件 mount 同样只读(runtime 配置是宿主机渲染产物,容器无需回写)。

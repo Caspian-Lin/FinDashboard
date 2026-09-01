@@ -44,7 +44,7 @@ def work_tmp() -> Path:
 
 
 def _write_repo_opencode_json(workdir: Path) -> None:
-    """在临时 workdir 下构造仓库形态的 .opencode/opencode.json。"""
+    """在临时 workdir 下构造仓库形态的 .opencode/opencode.json 与 .agents/。"""
     config_dir = workdir / ".opencode"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "opencode.json").write_text(
@@ -62,6 +62,8 @@ def _write_repo_opencode_json(workdir: Path) -> None:
         ),
         encoding="utf-8",
     )
+    # #268:挂载按「宿主机目录存在才下发」过滤,仓库形态的 .agents/ 须真实存在。
+    (workdir / ".agents").mkdir(exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +73,8 @@ def _write_repo_opencode_json(workdir: Path) -> None:
 
 def test_build_docker_run_command_basic(work_tmp) -> None:
     _write_repo_opencode_json(work_tmp)
+    # #268:docs/research 存在时只读挂载进容器(研究文档协议)。
+    (work_tmp / "docs" / "research").mkdir(parents=True)
     config = OpenCodeProcessConfig(
         image="ghcr.io/anomalyco/opencode:latest",
         container_name="test-oc",
@@ -98,9 +102,11 @@ def test_build_docker_run_command_basic(work_tmp) -> None:
     assert "0.0.0.0" in cmd
     assert "--port" in cmd
     assert "4097" in cmd
-    # bind mount .opencode / .agents —— 一律只读(:ro,防止放行 bash 后 agent 改写仓库配置)。
+    # bind mount .opencode / .agents / docs/research —— 一律只读(:ro,防止放行
+    # bash 后 agent 改写仓库配置)。
     assert any("/workspace/.opencode:ro" in p for p in cmd)
     assert any("/workspace/.agents:ro" in p for p in cmd)
+    assert any("/workspace/docs/research:ro" in p for p in cmd)
     # #157:运行时 opencode.json 以单文件 mount 覆盖容器内同名文件(同样只读)。
     file_mounts = [
         p for p in cmd if p.endswith(":/workspace/.opencode/opencode.json:ro")
@@ -127,6 +133,18 @@ def test_build_docker_run_command_basic(work_tmp) -> None:
     # CORS。
     cors_idx = cmd.index("--cors")
     assert cmd[cors_idx + 1] == "http://localhost:5173"
+
+
+def test_build_docker_run_command_skips_missing_docs_research(work_tmp) -> None:
+    """#268:docs/research 目录不存在时优雅跳过该挂载,不阻塞容器启动。"""
+    _write_repo_opencode_json(work_tmp)
+    assert not (work_tmp / "docs" / "research").exists()
+    config = OpenCodeProcessConfig(workdir=str(work_tmp))
+    cmd = config.build_docker_run_command()
+    # 缺失目录不下发 -v;其余挂载不受影响,命令照常构建。
+    assert not any("/workspace/docs/research" in p for p in cmd)
+    assert any("/workspace/.opencode:ro" in p for p in cmd)
+    assert any("/workspace/.agents:ro" in p for p in cmd)
 
 
 def test_build_docker_run_command_omits_empty_cors(work_tmp) -> None:

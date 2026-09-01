@@ -21,6 +21,10 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
    凭证探测不在工具集中。需要它们 = 走错了路。
 4. **不生成代码** —— 策略是无代码版本化规格,禁止生成 Python / 模块路径 /
    可执行表达式。
+5. **禁止未查索引重测已证伪假设**(#268) —— 会话启动先查结论索引
+   (`/workspace/docs/research/FINDINGS.md` + `finboard_memory_list`,见下节),
+   未查之前不得重跑任何「已证伪」假设;确要重开必须有新证据(新数据域 /
+   新构造 / 新频率)并显式引用旧结论,说明本次与既往证伪的差异。
 
 ## 工具选择(快速参考)
 
@@ -48,8 +52,24 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 > 详细工具契约见 `references/tools.md`;扩展计划见
 > `packages/finboard-mcp/ROADMAP.md`。
 
+## 会话启动协议(#268,每轮会话必做)
+
+理解任何研究问题**之前**,先按序加载前情:
+
+1. **读研究文档**(容器只读挂载 `/workspace/docs/research/`):`ROADMAP.md`
+   (研究目标 / 路线 A-D 状态 / 当前证据门)+ `FINDINGS.md`(结论注册表:
+   结论 / 置信度 / 证据 ID / 失效条件 / 状态)。挂载缺失(目录不存在)则跳过
+   本步,并在最终回答中注明「研究文档不可见」。
+2. **扫记忆**:`finboard_memory_list(status=active)`;量大时按保留 `tag` 过滤
+   (`research-plan` / `research-round` / `finding-confirmed` / `finding-refuted`)。
+3. **检索产物**:按问题域查相关 ResearchRun / 实验(`finboard.run.*` /
+   `finboard.validation_experiment.*`),避免重复造轮子。
+
+1-2 未完成之前,禁止启动任何「重测」类运行(HARD RULES 第 5 条)。
+
 ## 研究工作流(简版)
 
+0. **会话启动协议** —— 见上节:读研究文档 + 扫记忆 + 检索产物,先加载前情。
 1. **理解问题** —— 查询相关数据 / ResearchRun / 模拟盘。
 2. **形成假设** —— 你自己(OpenCode LLM)直接分析并给出可检验的研究假设;
    需要机器验证时创建 #57 验证实验(`finboard.validation_experiment.*`)。
@@ -67,12 +87,27 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 ## 记忆使用规则(简版)
 
 - 用 `finboard.memory.remember` 记住跨会话需要的研究上下文。
+- **保留 tags 约定**(#268):`research-plan`(计划 / 路线变更)、
+  `research-round`(轮次收尾报告,固定模板)、`finding-confirmed`(已确认
+  结论)、`finding-refuted`(已证伪结论)。`finboard_memory_list(tag=...)`
+  按此过滤——这四个 tag 是跨会话结论索引的检索入口,打结论时必带。
 - `source_refs` 关联研究产物(只引用,**不修改产物本身**)。
 - 发现错误用 `finboard.memory.correct`(形成纠正链),**不要直接删除**。
 - 过时但仍有参考价值的记忆用 `finboard.memory.archive`,仅在确需移除时用
   `finboard.memory.forget`(软删除,保留审计)。
 
 > 详细记忆规则与生命周期见 `references/memory.md`。
+
+## 轮次收尾协议(简版,#268)
+
+每轮研究结束前:
+
+1. 用 `finboard.memory.remember(memory_type=insight, tags=["research-round"])`
+   记一条**固定模板**记忆:目标 / 动作 / 证据(产物 ID 表)/ 结论+置信度 /
+   开放问题清单。
+2. 在最终回答末尾附同模板的「轮次摘要」——容器对 `/workspace/docs/research`
+   只读,canonical 轮次文档(`rounds/YYYY-MM-DD-<slug>.md`)由用户 / 主
+   coding agent 经 PR 落库,你的记忆只是指针;文档与记忆冲突时以文档为准。
 
 ## 参考文档索引
 
