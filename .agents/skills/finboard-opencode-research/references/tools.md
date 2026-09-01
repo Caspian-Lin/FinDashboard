@@ -1228,7 +1228,10 @@ active 版本。
 `validated_oos`、`final_test_unsealed=true`,version_stamp 绑定相同
 artifact/name/kind/commit。
 - 默认 screen 门:`abs(rank_ic) >= 0.02`、平均换手率 `<= 0.80`、相关性
- 绝对值 `<= 0.80`、至少 2 期;阈值随 evidence 冻结。
+ 绝对值 `<= 0.80`、至少 2 期;阈值随 evidence 冻结。rank_ic 取绝对值是
+ 有意设计(#245 用户决策 A):门只证「存在非噪声信号」,方向正确性由因子
+ 目录 preference 与 screen 权益/换窗复测承担——负 IC 方向型因子(如反向
+ 动量)过门不是缺陷,但采用前应换窗复测方向稳定性并在研究记忆中记录。
 - 失败:`promotion_status=failed` 证据保留在 draft,返回具名门失败;
   通过后当前同名 active 自动 retired,并返回 `promotion_status=passed`。
 - 晋级 evidence 固定四向引用:code commit、dataset release/checksum、
