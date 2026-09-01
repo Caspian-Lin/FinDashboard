@@ -11,6 +11,7 @@ from finboard_persistence.dataset_release_repo import (
     ResearchDatasetReleaseRepository,
     ResearchDatasetReleaseService,
     release_symbol_check,
+    symbol_set_diff,
 )
 from finboard_persistence.engine import create_async_engine
 from finboard_persistence.etf_metadata_repo import (
@@ -239,4 +240,5 @@ __all__ = [
     "generate_run_id",
     "release_symbol_check",
     "session_factory",
+    "symbol_set_diff",
 ]

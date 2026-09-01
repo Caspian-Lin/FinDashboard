@@ -1050,6 +1050,15 @@ class ResearchDatasetReleaseCreate(BaseSchema):
             "etf:bond",
         ]
     ] = Field(default_factory=list, max_length=8)
+    # #252:跨发布标的集一致性校验(可选)——指定同区间关联发布(如 bars 主
+    # 发布)为基线做并集差集校验,差集具名可见;默认只 warning 不阻断,
+    # consistency_fail_on_mismatch=true 时发布任务秒级失败。
+    consistency_baseline_release_id: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    consistency_fail_on_mismatch: bool = False
 
     @field_validator("symbols")
     @classmethod
@@ -1176,3 +1185,20 @@ class DatasetReleaseSymbolCheckOut(BaseSchema):
     requested: int
     matched: list[str]
     missing: list[str]
+
+
+class DatasetReleaseSymbolDiffOut(BaseSchema):
+    """两份发布标的集 diff(issue #252:计数精确,清单有界预览)。"""
+
+    release_id: str
+    other_release_id: str
+    symbol_count_a: int
+    symbol_count_b: int
+    common_count: int
+    only_in_release_count: int
+    only_in_other_count: int
+    only_in_release: list[str]
+    only_in_other: list[str]
+    preview_limit: int
+    truncated: bool
+    consistent: bool

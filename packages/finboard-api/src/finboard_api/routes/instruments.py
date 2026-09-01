@@ -22,6 +22,7 @@ from finboard_api.schemas import (
     DatasetManifestOut,
     DatasetReleaseCapabilityOut,
     DatasetReleaseSymbolCheckOut,
+    DatasetReleaseSymbolDiffOut,
     EtfAuditOut,
     EtfBatchConfirmRequest,
     EtfClassificationUpdate,
@@ -49,6 +50,7 @@ from finboard_persistence import (
     InstrumentModel,
     ResearchDatasetReleaseRepository,
     release_symbol_check,
+    symbol_set_diff,
 )
 from finboard_shared.types import EtfExecutionProfile
 
@@ -486,6 +488,9 @@ async def create_dataset_release(
         "adjustment": request.adjustment,
         "symbols": list(request.symbols),
         "required_capabilities": list(request.required_capabilities),
+        # #252:跨发布标的集一致性校验(可选)。
+        "consistency_baseline_release_id": request.consistency_baseline_release_id,
+        "consistency_fail_on_mismatch": request.consistency_fail_on_mismatch,
     }
     idempotency_key = f"publish:{request.release_id}"
     try:
@@ -545,6 +550,36 @@ async def check_dataset_release_symbols(
         raise HTTPException(status_code=404, detail=f"未找到研究数据发布: {release_id}")
     check = release_symbol_check(release, requested)
     return DatasetReleaseSymbolCheckOut(release_id=release.release_id, **check)
+
+
+@router.get(
+    "/datasets/releases/{release_id}/symbol-diff",
+    response_model=DatasetReleaseSymbolDiffOut,
+)
+async def diff_dataset_release_symbols(
+    release_id: str,
+    other_release_id: str = Query(..., description="对比的基线发布 release_id"),
+    preview_limit: int = Query(200, ge=1, le=1000, description="差集清单预览条数"),
+    session: AsyncSession = Depends(get_db_session),
+) -> DatasetReleaseSymbolDiffOut:
+    """两份发布的标的集 diff(issue #252):计数精确,差集具名清单有界预览。
+
+    发布后自检入口:如 financial_indicators 发布 vs bars 主发布的并集
+    一致性(002889.SZ 类缺标的在发布期即可发现,不必等 research_run
+    执行期失败反查)。与 MCP ``finboard_dataset_release_diff`` 同源。
+    """
+    repo = ResearchDatasetReleaseRepository(session)
+    release = await repo.get(release_id)
+    if release is None:
+        raise HTTPException(status_code=404, detail=f"未找到研究数据发布: {release_id}")
+    other = await repo.get(other_release_id)
+    if other is None:
+        raise HTTPException(
+            status_code=404, detail=f"未找到研究数据发布: {other_release_id}"
+        )
+    return DatasetReleaseSymbolDiffOut.model_validate(
+        symbol_set_diff(release, other, preview_limit=preview_limit)
+    )
 
 
 def _instrument_to_out(row: InstrumentModel) -> InstrumentOut:

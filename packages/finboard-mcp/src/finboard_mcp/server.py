@@ -97,7 +97,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(125 个,已实现)==
+== 当前可用工具(126 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -124,13 +124,15 @@ FinBoard 研究 MCP —— 量化研究工具集
   screen RR → finboard_validation_experiment_run → promote。
 - finboard.memory.*(7) —— 研究记忆:remember / list / get / forget / correct
   / confirm / archive(跨会话长期上下文,操作 research_memories 独立表)
-- 数据查询(9,✅ #124):instrument list/get/search、dataset_release list/get、
-  dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota
+- 数据查询(10,✅ #124):instrument list/get/search、dataset_release list/get/
+  diff、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota
   (标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额,只读)。
   dataset_release_get 默认 view=summary(#206):头部+capabilities+覆盖统计,
   不含逐标的 instruments 数组(全市场发布可达几十 MB);view=detail 走
   as_dict() 诊断;传 symbols(≤500 只)返回 summary+symbol_check
   {requested, matched, missing} 成员核对(#238,免拉全量 detail)。
+  dataset_release_diff(#252):两份发布标的集 diff,计数精确 + 差集具名清单
+  (有界预览),发布后自检并集一致性(如 financial_indicators vs bars 主发布)。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。

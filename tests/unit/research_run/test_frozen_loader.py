@@ -578,3 +578,185 @@ class TestMultiReleaseMerge:
                 decision_at=datetime(2024, 2, 29, 16, 0, tzinfo=UTC),
                 execution_at=datetime(2024, 3, 1, 9, 30, tzinfo=UTC),
             )
+
+
+@pytest.mark.asyncio
+class TestResearchReleaseMissingSymbols:
+    """issue #252:研究发布缺标的的容忍语义(对齐 factor_lab #212)。"""
+
+    def _financial_provider(self, *, symbols_with_data: set[str]) -> _StubProvider:
+        """financial_indicators 研究发布 stub:symbols_with_data 之外抛缺标的错误。"""
+        from finboard_data.releases import ReleaseCapabilityError
+        from finboard_data.research import FinancialIndicator
+
+        fin_release = _StubRelease(
+            "fin-release-v1",
+            (),
+            dataset_kind=ReleaseDatasetKind.FINANCIAL_INDICATORS,
+        )
+        provider = _StubProvider(release=fin_release, close_by_symbol={})
+
+        def _make_record(symbol: str) -> FinancialIndicator:
+            return FinancialIndicator(
+                symbol=symbol,
+                announcement_date=date(2024, 4, 30),
+                report_period=date(2024, 3, 31),
+                update_flag="1",
+                eps=Decimal("0.8"),
+                diluted_eps=None,
+                book_value_per_share=None,
+                operating_cash_flow_per_share=None,
+                return_on_equity=Decimal("0.08"),
+                weighted_return_on_equity=None,
+                gross_profit_margin=None,
+                net_profit_margin=None,
+                debt_to_assets=None,
+                revenue_yoy=None,
+                net_profit_yoy=None,
+                operating_cash_flow_yoy=None,
+                source="tushare",
+                observed_at=datetime(2024, 4, 30, 12, tzinfo=UTC),
+                available_at=datetime(2024, 4, 30, 15, 0, tzinfo=UTC),
+            )
+
+        async def _fetch_financial(
+            symbol: object,
+            *,
+            decision_at: datetime,
+        ) -> list[FinancialIndicator]:
+            code = str(getattr(symbol, "code", symbol))
+            if code not in symbols_with_data:
+                raise ReleaseCapabilityError(
+                    f"标的 {code} 不在发布 fin-release-v1 中,禁止回退到外部数据源"
+                )
+            return [_make_record(code)]
+
+        provider.fetch_financial_indicators = _fetch_financial  # type: ignore[method-assign]
+        return provider
+
+    async def test_missing_symbol_tolerated_and_reported(self) -> None:
+        """缺一只标的:run 不炸;缺失进 context.research_release_missing_symbols。"""
+        instruments = (
+            _StubInstrument(code="600519.SH"),
+            _StubInstrument(code="000002.SZ"),
+        )
+        bars_provider = _StubProvider(
+            release=_StubRelease("bars-release-v1", instruments),
+            close_by_symbol={
+                "600519.SH": Decimal("1800.0"),
+                "000002.SZ": Decimal("10.0"),
+            },
+        )
+        fin_provider = self._financial_provider(symbols_with_data={"600519.SH"})
+
+        def _release_factory(release_id: str) -> _StubProvider:
+            return {
+                "bars-release-v1": bars_provider,
+                "fin-release-v1": fin_provider,
+            }[release_id]
+
+        async def _snapshot_provider(snapshot_id: str) -> None:
+            del snapshot_id
+            return None
+
+        loader = FrozenInputLoader(
+            release_provider_factory=_release_factory,  # type: ignore[arg-type]
+            snapshot_provider=_snapshot_provider,
+        )
+        spec = build_strategy_template(
+            "ma_cross",
+            strategy_id="ma_cross_test",
+            dataset_release_ids=("bars-release-v1", "fin-release-v1"),
+        )
+        manifest = ResearchRunManifest(
+            run_id="RR-missingfintest001",
+            idempotency_key="missing-fin-test-0001",
+            strategy_spec=spec,
+            strategy_spec_checksum=stable_checksum(spec.canonical_payload()),
+            dataset_releases=(
+                FrozenArtifactRef(
+                    artifact_id="bars-release-v1",
+                    version="v1",
+                    checksum="a" * 64,
+                    capabilities=("stock",),
+                ),
+                FrozenArtifactRef(
+                    artifact_id="fin-release-v1",
+                    version="v1",
+                    checksum="c" * 64,
+                    capabilities=("stock",),
+                ),
+            ),
+            code_version="abcdef0123456789",
+            initial_capital=Decimal("100000"),
+            requested_by="unit-test",
+        )
+        ctx = await loader.load_context(
+            manifest,
+            decision_at=datetime(2024, 5, 10, 16, 0, tzinfo=UTC),
+            execution_at=datetime(2024, 5, 13, 9, 30, tzinfo=UTC),
+        )
+        # run 不炸:缺失标的具名可见,其余标的因子照常。
+        assert ctx.research_release_missing_symbols == {
+            "fin-release-v1": ("000002.SZ",)
+        }
+        assert {c.symbol for c in ctx.candidates} == {"600519.SH", "000002.SZ"}
+
+    async def test_full_coverage_reports_no_missing(self) -> None:
+        """发布覆盖全部候选:missing 映射为空。"""
+        instruments = (_StubInstrument(code="600519.SH"),)
+        bars_provider = _StubProvider(
+            release=_StubRelease("bars-release-v2", instruments),
+            close_by_symbol={"600519.SH": Decimal("1800.0")},
+        )
+        fin_provider = self._financial_provider(symbols_with_data={"600519.SH"})
+        fin_provider.release.release_id = "bars-release-v2-fin"  # type: ignore[attr-defined]
+
+        def _release_factory(release_id: str) -> _StubProvider:
+            return {
+                "bars-release-v2": bars_provider,
+                "fin-release-v1": fin_provider,
+            }[release_id]
+
+        async def _snapshot_provider(snapshot_id: str) -> None:
+            del snapshot_id
+            return None
+
+        loader = FrozenInputLoader(
+            release_provider_factory=_release_factory,  # type: ignore[arg-type]
+            snapshot_provider=_snapshot_provider,
+        )
+        spec = build_strategy_template(
+            "ma_cross",
+            strategy_id="ma_cross_test",
+            dataset_release_ids=("bars-release-v2", "fin-release-v1"),
+        )
+        manifest = ResearchRunManifest(
+            run_id="RR-fullcoverage001",
+            idempotency_key="full-coverage-test-001",
+            strategy_spec=spec,
+            strategy_spec_checksum=stable_checksum(spec.canonical_payload()),
+            dataset_releases=(
+                FrozenArtifactRef(
+                    artifact_id="bars-release-v2",
+                    version="v1",
+                    checksum="a" * 64,
+                    capabilities=("stock",),
+                ),
+                FrozenArtifactRef(
+                    artifact_id="fin-release-v1",
+                    version="v1",
+                    checksum="c" * 64,
+                    capabilities=("stock",),
+                ),
+            ),
+            code_version="abcdef0123456789",
+            initial_capital=Decimal("100000"),
+            requested_by="unit-test",
+        )
+        ctx = await loader.load_context(
+            manifest,
+            decision_at=datetime(2024, 5, 10, 16, 0, tzinfo=UTC),
+            execution_at=datetime(2024, 5, 13, 9, 30, tzinfo=UTC),
+        )
+        assert ctx.research_release_missing_symbols == {}

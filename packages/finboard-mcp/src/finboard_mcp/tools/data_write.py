@@ -614,11 +614,17 @@ async def dataset_release_publish(
     source: str | None = None,
     adjustment: str = "qfq",
     required_capabilities: list[str] | None = None,
+    consistency_baseline_release_id: str | None = None,
+    consistency_fail_on_mismatch: bool = False,
 ) -> ToolEnvelope:
     """登记数据集冻结发布任务,返回 202 + job_id(研究闭环关键节点)。
 
     成功后 worker 把 ``result_ref = release_id``;agent 用 ``finboard_job_get``
     轮询拿到 release_id 后再查发布详情(``finboard_dataset_release_get``)。
+
+    ``consistency_baseline_release_id``(#252):指定基线发布(如 bars 主发布)
+    做标的集一致性校验,差集具名;默认只 warning,``fail_on_mismatch`` 时秒级
+    失败(code=symbol_set_mismatch),避免并集不一致拖到执行期才暴露。
     """
 
     async def _do() -> dict[str, Any]:
@@ -639,6 +645,8 @@ async def dataset_release_publish(
             end_date=date.fromisoformat(end_date),
             adjustment=adjustment,  # type: ignore[arg-type]
             required_capabilities=list(required_capabilities or []),  # type: ignore[arg-type]
+            consistency_baseline_release_id=consistency_baseline_release_id,
+            consistency_fail_on_mismatch=consistency_fail_on_mismatch,
         )
         payload: dict[str, Any] = {
             "release_id": body.release_id,
@@ -650,6 +658,10 @@ async def dataset_release_publish(
             "adjustment": body.adjustment,
             "symbols": list(body.symbols),
             "required_capabilities": list(body.required_capabilities),
+            "consistency_baseline_release_id": (
+                body.consistency_baseline_release_id
+            ),
+            "consistency_fail_on_mismatch": body.consistency_fail_on_mismatch,
         }
         idempotency_key = f"publish:{body.release_id}"
         return await _enqueue_data_job(
@@ -1075,9 +1087,13 @@ def register(mcp: MCPServer) -> None:
             "(a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators)/ "
             "source / adjustment(qfq|hqfq|none;研究数据发布固定 none)/ "
             "required_capabilities(stock|bond|convertible|futures|etf:index|"
-            "etf:cross_border|etf:commodity|etf:bond)。"
+            "etf:cross_border|etf:commodity|etf:bond)/ "
+            "consistency_baseline_release_id(#252:基线发布做标的集一致性校验,"
+            "差集具名;默认 warning)/ consistency_fail_on_mismatch(默认 false,"
+            "true 时不一致秒级失败 code=symbol_set_mismatch)。"
             "release_kind=daily_metrics|financial_indicators 时从 research_* 表"
             "冻结基本面/财务指标发布(issue #187),与 bars 发布联合供因子快照取数。"
+            "研究数据发布建议带 baseline=同区间 bars 主发布 + fail_on_mismatch=true。"
             "写操作,mcp_readonly_only=true 时拒绝。"
         ),
     )
@@ -1092,6 +1108,8 @@ def register(mcp: MCPServer) -> None:
         source: str | None = None,
         adjustment: str = "qfq",
         required_capabilities: list[str] | None = None,
+        consistency_baseline_release_id: str | None = None,
+        consistency_fail_on_mismatch: bool = False,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await dataset_release_publish(
@@ -1106,6 +1124,8 @@ def register(mcp: MCPServer) -> None:
             source=source,
             adjustment=adjustment,
             required_capabilities=required_capabilities,
+            consistency_baseline_release_id=consistency_baseline_release_id,
+            consistency_fail_on_mismatch=consistency_fail_on_mismatch,
         )
 
     @mcp.tool(

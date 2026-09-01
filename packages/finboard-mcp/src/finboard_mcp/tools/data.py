@@ -36,6 +36,7 @@ from finboard_persistence import (
     InstrumentRepository,
     ResearchDatasetReleaseRepository,
     release_symbol_check,
+    symbol_set_diff,
 )
 
 if TYPE_CHECKING:
@@ -339,6 +340,48 @@ async def dataset_release_get(
         audit=app.audit,
         tool_name="finboard.dataset_release.get",
         arguments={"release_id": release_id, "view": view, "symbols": symbols},
+        handler=_do,
+    )
+
+
+async def dataset_release_diff(
+    app: McpAppContext,
+    release_id: str,
+    other_release_id: str,
+    *,
+    preview_limit: int = 200,
+) -> ToolEnvelope:
+    """两份发布标的集 diff(#252):计数精确 + 差集具名清单(有界预览)。"""
+
+    async def _do() -> dict[str, Any]:
+        if preview_limit < 1 or preview_limit > 1000:
+            raise McpToolError(
+                "invalid_argument", "preview_limit 必须在 1..1000"
+            )
+        async with app.session_maker() as session:
+            repo = ResearchDatasetReleaseRepository(session)
+            release = await repo.get(release_id)
+            if release is None:
+                raise McpToolError(
+                    "not_found", f"未找到研究数据发布: {release_id}"
+                )
+            other = await repo.get(other_release_id)
+            if other is None:
+                raise McpToolError(
+                    "not_found", f"未找到研究数据发布: {other_release_id}"
+                )
+            return symbol_set_diff(
+                release, other, preview_limit=preview_limit
+            )
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.dataset_release.diff",
+        arguments={
+            "release_id": release_id,
+            "other_release_id": other_release_id,
+            "preview_limit": preview_limit,
+        },
         handler=_do,
     )
 
@@ -690,6 +733,31 @@ def register(mcp: MCPServer) -> None:
     ) -> ToolEnvelope:
         return await dataset_release_get(
             app_context(ctx), release_id, view=view, symbols=symbols
+        )
+
+    @mcp.tool(
+        name="finboard_dataset_release_diff",
+        description=(
+            "对比两份研究数据发布的标的集(issue #252 发布后自检)。返回"
+            "计数(symbol_count_a/b、common_count)与差集具名清单"
+            "(only_in_release / only_in_other,有界预览 + truncated 标注)"
+            "及 consistent 布尔值。用于发现如 financial_indicators 发布缺"
+            " bars 主发布标的的并集不一致——缺标的会让引用该发布的 "
+            "multi_period 研究运行在执行期容忍缺失(具名 warning),发布期"
+            "核对可提前拦截。未找到返回 not_found。"
+        ),
+    )
+    async def _dataset_release_diff(
+        release_id: str,
+        other_release_id: str,
+        preview_limit: int = 200,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await dataset_release_diff(
+            app_context(ctx),
+            release_id,
+            other_release_id,
+            preview_limit=preview_limit,
         )
 
     @mcp.tool(

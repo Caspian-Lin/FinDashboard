@@ -209,6 +209,19 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   成员核对(判断 N 只标的是否在发布内,**免拉全量 detail**);超 500 只 → `invalid_argument`;
   未找到 → `not_found`
 
+### finboard_dataset_release_diff
+两份发布标的集 diff(#252,发布后自检)。
+- 参数:`release_id: str` / `other_release_id: str` / `preview_limit?: int = 200`(1-1000)
+- 返回:`{symbol_count_a, symbol_count_b, common_count, only_in_release_count,
+  only_in_other_count, only_in_release, only_in_other, preview_limit, truncated,
+  consistent}`——计数精确,差集字典序有界预览
+- 用途:研究数据发布(如 financial_indicators)发布后 vs 同区间 bars 主发布
+  核对并集一致性;不一致时用 `finboard_dataset_release_publish` 带
+  `consistency_baseline_release_id` 重发布(差集具名;`consistency_fail_on_mismatch=true`
+  秒级失败 code=symbol_set_mismatch)。执行期对缺标的容忍(具名 warning,
+  因子值 null),发布期核对可提前拦截
+- 未找到 → `not_found`
+
 ### finboard_dataset_manifest_list
 列出数据集发布清单(dataset manifests)。
 - 参数:`dataset_name?` / `quality_status?` / `limit?: int = 50`
