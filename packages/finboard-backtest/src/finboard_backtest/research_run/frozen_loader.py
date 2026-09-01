@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Protocol
 
+import structlog
+
 from finboard_backtest.portfolio.contracts import AssetLotInfo
 from finboard_backtest.research_run.contracts import (
     FeatureValue,
@@ -52,6 +54,8 @@ if TYPE_CHECKING:
         ReleasedInstrument,
     )
     from finboard_shared.types import Market
+
+logger = structlog.get_logger(__name__)
 
 
 class ReleaseProviderFactory(Protocol):
@@ -84,6 +88,12 @@ class LoadedDecisionContext:
     lot_info: dict[str, AssetLotInfo]
     input_artifact_ids: tuple[str, ...]
     included_symbols: tuple[str, ...] = field(default_factory=tuple)
+    # #252:研究数据发布缺标的的容忍语义(对齐 factor_lab #212)——
+    # {release_id: 缺失标的代码}(只列本次执行候选中发布不含的标的)。
+    # 缺失标的的研究数据因子值为 null(不回退外部数据源),不 fail-closed。
+    research_release_missing_symbols: dict[str, tuple[str, ...]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(slots=True)
@@ -130,10 +140,21 @@ class FrozenInputLoader:
             provider, included_candidates, execution_at
         )
         features = await self._load_features(manifest.factor_snapshots, decision_at)
-        research_features = await self._load_research_features(
+        research_features, research_missing = await self._load_research_features(
             manifest, included_candidates, decision_at
         )
         features = (*features, *research_features)
+        if research_missing:
+            # #252:缺标的具名可见(对齐 factor_lab missing_in_research 语义);
+            # bars 主发布缺标的仍由 _load_close_prices / 候选构建 fail-closed。
+            for release_id, missing_symbols in research_missing.items():
+                logger.warning(
+                    "research_release_missing_symbols",
+                    release_id=release_id,
+                    missing_count=len(missing_symbols),
+                    missing_symbols=tuple(missing_symbols[:20]),
+                    decision_at=decision_at.isoformat(),
+                )
         artifact_ids = _build_artifact_ids(manifest)
         return LoadedDecisionContext(
             business_date=decision_at.date(),
@@ -146,6 +167,7 @@ class FrozenInputLoader:
             lot_info=lot_info_by_symbol,
             input_artifact_ids=artifact_ids,
             included_symbols=tuple(item.symbol for item in included_candidates),
+            research_release_missing_symbols=research_missing,
         )
 
     def _bars_release_ref(self, manifest: ResearchRunManifest) -> FrozenArtifactRef:
@@ -169,30 +191,39 @@ class FrozenInputLoader:
         manifest: ResearchRunManifest,
         candidates: Sequence[UniverseCandidate],
         decision_at: datetime,
-    ) -> tuple[FeatureValue, ...]:
+    ) -> tuple[tuple[FeatureValue, ...], dict[str, tuple[str, ...]]]:
         """从研究数据发布(daily_metrics / financial_indicators)加载 PIT 观测。
 
         issue #187:把冻结研究数据映射为因子值(universe 过滤需要的
         ``feature_id`` 与 ``extract_factor_matrix`` 输出一致),与
         factor_snapshots 的观测共同构成决策时点的特征。
+
+        #252:研究发布缺标的按 factor_lab(#212)容忍语义处理——该标的因子
+        观测为 null 并计入返回的 missing 映射,不 fail-closed(研究发布只提供
+        因子观测,候选池已落在 bars 主发布;一只缺失不应炸整条 run)。
         """
         from finboard_data.releases import ReleaseDatasetKind
 
         values: list[FeatureValue] = []
+        missing_by_release: dict[str, tuple[str, ...]] = {}
         for release_ref in manifest.dataset_releases:
             provider = self.release_provider_factory(release_ref.artifact_id)
             kind = provider.release.dataset_kind
             if kind is ReleaseDatasetKind.DAILY_METRICS:
-                metrics = await _load_daily_metrics_features(
+                metrics, missing = await _load_daily_metrics_features(
                     provider, candidates, decision_at, release_ref.artifact_id
                 )
                 values.extend(metrics)
             elif kind is ReleaseDatasetKind.FINANCIAL_INDICATORS:
-                financials = await _load_financial_features(
+                financials, missing = await _load_financial_features(
                     provider, candidates, decision_at, release_ref.artifact_id
                 )
                 values.extend(financials)
-        return tuple(values)
+            else:
+                continue
+            if missing:
+                missing_by_release[release_ref.artifact_id] = missing
+        return tuple(values), missing_by_release
 
     async def _load_features(
         self,
@@ -225,20 +256,29 @@ async def _load_daily_metrics_features(
     candidates: Sequence[UniverseCandidate],
     decision_at: datetime,
     release_id: str,
-) -> list[FeatureValue]:
-    """把 daily_metrics 发布观测映射为因子值(PIT 门控,复用 extract_factor_matrix)。"""
+) -> tuple[list[FeatureValue], tuple[str, ...]]:
+    """把 daily_metrics 发布观测映射为因子值(PIT 门控,复用 extract_factor_matrix)。
+
+    #252:缺标的容忍语义同 :func:`_load_financial_features`。
+    """
     from finboard_data.factors import FactorInputBatch, FactorInputRecord
+    from finboard_data.releases import ReleaseCapabilityError
     from finboard_shared.models import Symbol
 
     factor_rows: list[FactorInputRecord] = []
+    missing: list[str] = []
     for candidate in candidates:
         symbol = Symbol(code=candidate.symbol, market=_market_from_value(candidate.market))
-        records = await provider.fetch_daily_metrics(
-            symbol,
-            start=provider.release.start_date,
-            end=decision_at.date(),
-            decision_at=decision_at,
-        )
+        try:
+            records = await provider.fetch_daily_metrics(
+                symbol,
+                start=provider.release.start_date,
+                end=decision_at.date(),
+                decision_at=decision_at,
+            )
+        except ReleaseCapabilityError:
+            missing.append(candidate.symbol)
+            continue
         if not records:
             continue
         # 取决策时点可见的最新一条(同一 trade_date 理论上一条;排序保最新)。
@@ -253,9 +293,9 @@ async def _load_daily_metrics_features(
             )
         )
     if not factor_rows:
-        return []
+        return [], tuple(missing)
     batch = FactorInputBatch(records=tuple(factor_rows), source="tushare", dataset_versions={"research_release": "frozen"})
-    return _matrix_to_feature_values(batch, release_id=release_id)
+    return _matrix_to_feature_values(batch, release_id=release_id), tuple(missing)
 
 
 async def _load_financial_features(
@@ -263,19 +303,31 @@ async def _load_financial_features(
     candidates: Sequence[UniverseCandidate],
     decision_at: datetime,
     release_id: str,
-) -> list[FeatureValue]:
-    """把 financial_indicators 发布观测映射为因子值(PIT 门控)。"""
+) -> tuple[list[FeatureValue], tuple[str, ...]]:
+    """把 financial_indicators 发布观测映射为因子值(PIT 门控)。
+
+    #252:标的不在发布中时容忍(factor_lab #212 同语义)——该标的因子观测
+    缺失并计入返回的 missing 元组,不回退外部数据源、不 fail-closed。
+    """
     from finboard_data.factors import FactorInputBatch, FactorInputRecord
+    from finboard_data.releases import ReleaseCapabilityError
     from finboard_data.research import FinancialIndicator
     from finboard_shared.models import Symbol
 
     factor_rows: list[FactorInputRecord] = []
+    missing: list[str] = []
     for candidate in candidates:
         symbol = Symbol(code=candidate.symbol, market=_market_from_value(candidate.market))
-        records = await provider.fetch_financial_indicators(
-            symbol,
-            decision_at=decision_at,
-        )
+        try:
+            records = await provider.fetch_financial_indicators(
+                symbol,
+                decision_at=decision_at,
+            )
+        except ReleaseCapabilityError:
+            # 标的不在该研究发布中:计入缺失,继续其余标的( bars 主发布缺
+            # 标的仍由候选构建 fail-closed,语义见 factor_lab #212 注释)。
+            missing.append(candidate.symbol)
+            continue
         if not records:
             continue
         # 同一 report_period 保留公告修订(update_flag);跨期取最新公告的一期。
@@ -295,9 +347,9 @@ async def _load_financial_features(
             )
         )
     if not factor_rows:
-        return []
+        return [], tuple(missing)
     batch = FactorInputBatch(records=tuple(factor_rows), source="tushare", dataset_versions={"research_release": "frozen"})
-    return _matrix_to_feature_values(batch, release_id=release_id)
+    return _matrix_to_feature_values(batch, release_id=release_id), tuple(missing)
 
 
 def _matrix_to_feature_values(

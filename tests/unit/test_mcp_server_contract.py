@@ -36,6 +36,7 @@ _EXPECTED_TOOLS = {
     "finboard_instrument_search",
     "finboard_dataset_release_list",
     "finboard_dataset_release_get",
+    "finboard_dataset_release_diff",
     "finboard_dataset_manifest_list",
     "finboard_data_cache_status",
     "finboard_data_quality_check",

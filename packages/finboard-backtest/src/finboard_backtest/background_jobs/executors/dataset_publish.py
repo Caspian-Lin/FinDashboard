@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,6 +33,11 @@ from finboard_backtest.background_jobs.executors._runtime import (
     code_version,
     release_root,
 )
+
+logger = structlog.get_logger(__name__)
+
+#: 一致性校验差集清单在日志 / 错误摘要里的最大展示条数(总数恒可见)。
+_MISMATCH_PREVIEW_LIMIT = 50
 
 
 class DatasetPublishExecutor:
@@ -85,6 +91,26 @@ class DatasetPublishExecutor:
                 retryable=False,
                 context={"job_id": job.job_id},
             )
+        # #252:跨发布标的集一致性校验(可选)——对同区间关联发布(如同一批
+        # bars / daily_metrics / financial_indicators)做并集差集校验,差集具名。
+        # 默认 warning 不阻断;``consistency_fail_on_mismatch=true`` 时秒级失败,
+        # 避免标的不一致只在执行期(multi_period 研究运行)才暴露。
+        baseline_release_id = job.payload.get("consistency_baseline_release_id")
+        if baseline_release_id is not None and not isinstance(baseline_release_id, str):
+            raise ExecutorError(
+                code="invalid_payload",
+                summary="consistency_baseline_release_id 必须是字符串(release_id)",
+                retryable=False,
+                context={"job_id": job.job_id},
+            )
+        fail_on_mismatch = job.payload.get("consistency_fail_on_mismatch", False)
+        if not isinstance(fail_on_mismatch, bool):
+            raise ExecutorError(
+                code="invalid_payload",
+                summary="consistency_fail_on_mismatch 必须是布尔值",
+                retryable=False,
+                context={"job_id": job.job_id},
+            )
 
         from finboard_data import (
             DatasetReleaseError,
@@ -98,7 +124,61 @@ class DatasetPublishExecutor:
         source = _RELEASE_KIND_TO_SOURCE[release_kind]
 
         await progress(0, None, "dataset_publish:validating")
+        mismatch_summary = ""
         async with self._session_maker() as session:
+            # #252:与基线发布的标的集 diff(在 scope 校验之前,失败不写任何数据)。
+            if baseline_release_id is not None:
+                from finboard_persistence import ResearchDatasetReleaseRepository
+
+                baseline = await ResearchDatasetReleaseRepository(session).get(
+                    baseline_release_id
+                )
+                if baseline is None:
+                    raise ExecutorError(
+                        code="baseline_release_not_found",
+                        summary=(
+                            f"一致性校验基线发布不存在: {baseline_release_id}"
+                        ),
+                        retryable=False,
+                        context={"job_id": job.job_id},
+                    )
+                baseline_codes = {item.code for item in baseline.instruments}
+                release_codes = {str(item) for item in symbols}
+                missing_in_release = sorted(baseline_codes - release_codes)
+                extra_in_release = sorted(release_codes - baseline_codes)
+                if missing_in_release or extra_in_release:
+                    mismatch_context = {
+                        "job_id": job.job_id,
+                        "baseline_release_id": baseline_release_id,
+                        "release_id": release_id,
+                        "missing_in_release_count": len(missing_in_release),
+                        "extra_in_release_count": len(extra_in_release),
+                        "missing_in_release": missing_in_release[
+                            :_MISMATCH_PREVIEW_LIMIT
+                        ],
+                        "extra_in_release": extra_in_release[
+                            :_MISMATCH_PREVIEW_LIMIT
+                        ],
+                    }
+                    if fail_on_mismatch:
+                        raise ExecutorError(
+                            code="symbol_set_mismatch",
+                            summary=(
+                                f"发布 {release_id} 与基线 {baseline_release_id} "
+                                f"标的集不一致:基线有本次缺 "
+                                f"{len(missing_in_release)} 只,本次有基线缺 "
+                                f"{len(extra_in_release)} 只"
+                            ),
+                            retryable=False,
+                            context=mismatch_context,
+                        )
+                    logger.warning(
+                        "dataset_publish.symbol_set_mismatch", **mismatch_context
+                    )
+                    mismatch_summary = (
+                        f" symbol_set_mismatch vs {baseline_release_id}:"
+                        f" -{len(missing_in_release)}/+{len(extra_in_release)}"
+                    )
             rows = await session.execute(
                 select(InstrumentModel).where(InstrumentModel.code.in_(symbols))
             )
@@ -211,7 +291,7 @@ class DatasetPublishExecutor:
                     context={"job_id": job.job_id},
                 ) from exc
 
-        await progress(1, 1, "dataset_publish:done")
+        await progress(1, 1, f"dataset_publish:done{mismatch_summary}")
         return JobResult(status="succeeded", result_ref=release.release_id)
 
 

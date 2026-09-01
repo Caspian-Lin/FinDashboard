@@ -49,3 +49,35 @@ missing_delist_date / with_name_history / name_history_coverage)。
 
 **边界**:`sector` 无上游来源,保持 null;退市 `status` 变更只走缺席二次确认,
 档案回填不触碰。
+
+## 跨发布标的集一致性(#252)
+
+**背景**:2026-09-01 实测全市场 `financial_indicators` 发布缺单只标的
+002889.SZ(发布时点的 symbols 内联清单漏配),引用该发布的 multi_period
+research_run 在执行期才发现并整条失败。三发布(bars / daily_metrics /
+financial_indicators)的标的并集一致性必须自检。
+
+**发布期校验**(推荐,秒级拦截):`dataset_release_publish` 发布研究发布时带
+`consistency_baseline_release_id=<同区间 bars 主发布>` +
+`consistency_fail_on_mismatch=true`——差集非空即拒绝发布(code=
+`symbol_set_mismatch`,差集具名进错误 context);不带 fail 开关则只 warning。
+
+**发布后自检**(任一入口,同一实现):
+
+- MCP:`finboard_dataset_release_diff(release_id=<研究发布>,
+  other_release_id=<bars 主发布>)` → `consistent` 布尔 + 差集具名清单;
+- REST:`GET /api/instruments/datasets/releases/{id}/symbol-diff?other_release_id=...`。
+
+**002889.SZ 补齐运营步骤**(历史缺口的修复路径):
+
+1. `research_data_sync`(datasets 含 `financial_indicators`,symbols 含
+   002889.SZ,报告期区间覆盖该股全部历史)补齐摄取;
+2. 用全市场 symbols 清单重发布 `financial_indicators`(带
+   `consistency_baseline_release_id` + `fail_on_mismatch=true`);
+3. `finboard_dataset_release_diff` 复核 vs bars 主发布 → `consistent: true`;
+4. 引用旧发布的 research_run 用新 release_id 重新入队(发布不可变,不回填)。
+
+**执行期语义**(兜底):研究发布缺标的在 research_run 执行期**不再炸整条
+run**——缺失标的的研究因子值为 null,发具名 `research_release_missing_symbols`
+warning(release_id + 缺失清单),与 factor_lab #212 容忍语义一致;bars 主
+发布缺标的仍 fail-closed。

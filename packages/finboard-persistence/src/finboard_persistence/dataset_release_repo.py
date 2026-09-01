@@ -24,6 +24,7 @@ from finboard_data.releases import (
     ResearchEtfCatalogEntry,
     default_execution_metadata,
     research_etf_catalog_entry,
+    symbol_set_diff,
 )
 from finboard_data.research import DailySecurityMetrics, FinancialIndicator
 from finboard_persistence.models import (
@@ -809,9 +810,11 @@ def release_symbol_check(
     return {"requested": len(requested), "matched": matched, "missing": missing}
 
 
+
 __all__ = [
     "ReleaseInstrumentCatalogRepository",
     "ResearchDatasetReleaseRepository",
     "ResearchDatasetReleaseService",
     "release_symbol_check",
+    "symbol_set_diff",
 ]

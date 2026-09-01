@@ -918,6 +918,42 @@ class ResearchDatasetRelease:
             release_checksum=str(raw.get("release_checksum", "")),
         )
 
+    def symbol_codes(self) -> frozenset[str]:
+        """发布标的代码集合(一致性校验 / diff 用)。"""
+        return frozenset(item.code for item in self.instruments)
+
+
+def symbol_set_diff(
+    release_a: ResearchDatasetRelease,
+    release_b: ResearchDatasetRelease,
+    *,
+    preview_limit: int = 200,
+) -> dict[str, object]:
+    """两份发布的标的集 diff(issue #252):计数 + 具名清单(有界预览)。
+
+    供发布后自检(如 financial_indicators vs bars 主发布的并集一致性):
+    ``only_in_release`` / ``only_in_other`` 是差集的字典序预览(截断由
+    ``truncated`` 标注),计数始终是全量精确值,与 #206 返回瘦身精神一致。
+    """
+    codes_a = release_a.symbol_codes()
+    codes_b = release_b.symbol_codes()
+    only_a = sorted(codes_a - codes_b)
+    only_b = sorted(codes_b - codes_a)
+    return {
+        "release_id": release_a.release_id,
+        "other_release_id": release_b.release_id,
+        "symbol_count_a": len(codes_a),
+        "symbol_count_b": len(codes_b),
+        "common_count": len(codes_a & codes_b),
+        "only_in_release_count": len(only_a),
+        "only_in_other_count": len(only_b),
+        "only_in_release": only_a[:preview_limit],
+        "only_in_other": only_b[:preview_limit],
+        "preview_limit": preview_limit,
+        "truncated": len(only_a) > preview_limit or len(only_b) > preview_limit,
+        "consistent": not only_a and not only_b,
+    }
+
 
 @dataclass(frozen=True, slots=True)
 class _BarAudit:
