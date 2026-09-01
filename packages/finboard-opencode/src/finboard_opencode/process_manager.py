@@ -105,6 +105,9 @@ _RUNTIME_VOLUME_MOUNTS: tuple[tuple[str, str], ...] = (
     ("opencode-config", "/root/.config/opencode"),
 )
 
+#: auth.json 所在的 data 卷名(#248:渲染期模型同步经一次性容器从此卷只读预读凭证)。
+_DATA_VOLUME_NAME = _RUNTIME_VOLUME_MOUNTS[0][0]
+
 #: 容器内 opencode 的环境目录语义(HOME / XDG),与 volume 挂载并列的硬性约束。
 #:
 #: - ``HOME=/workspace``:opencode web 的文件选择器 / homedir 默认从 HOME 开始。
@@ -231,7 +234,9 @@ class OpenCodeProcessConfig:
         """构造 ``docker stop`` + ``rm`` 序列(容器名固定,幂等)。"""
         return ["docker", "rm", "-f", self.container_name]
 
-    def render_runtime_config(self) -> Path:
+    def render_runtime_config(
+        self, auth_keys: dict[str, str] | None = None
+    ) -> Path:
         """渲染容器用的运行时 opencode.json(#157,同步 IO,调用方搬到线程)。
 
         读取 ``{workdir}/.opencode/opencode.json``(仓库事实来源),把
@@ -241,7 +246,9 @@ class OpenCodeProcessConfig:
 
         ``model_sync_enabled`` 时(#242):对声明 ``options.baseURL`` 的 config
         provider 经 OpenAI 兼容 ``GET /models`` 拉取模型 id,只增不改合并进渲染
-        产物(见 :meth:`_merge_provider_models`)。
+        产物(见 :meth:`_merge_provider_models`)。``auth_keys`` 是 auth 连接
+        provider 的凭证映射(#248,由 :meth:`OpenCodeProcessManager.start` 预读自
+        data 卷 auth.json)。
         """
         source = Path(self.workdir).resolve() / ".opencode" / "opencode.json"
         target = source.parent / "runtime" / "opencode.json"
@@ -251,17 +258,24 @@ class OpenCodeProcessConfig:
             mcp["finboard"]["url"] = self.mcp_remote_url
         target.parent.mkdir(parents=True, exist_ok=True)
         if self.model_sync_enabled:
-            self._merge_provider_models(data, target.parent)
+            self._merge_provider_models(data, target.parent, auth_keys)
         target.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         return target
 
-    def _merge_provider_models(self, data: dict[str, Any], runtime_dir: Path) -> None:
+    def _merge_provider_models(
+        self,
+        data: dict[str, Any],
+        runtime_dir: Path,
+        auth_keys: dict[str, str] | None = None,
+    ) -> None:
         """把 provider ``/models`` 拉取结果合并进待渲染配置(#242,尽力而为)。
 
-        - 只对声明 ``options.baseURL`` 且 API key 可解析(``{env:VAR}`` 占位符经
-          ``env_overrides``/宿主机环境解析)的 provider 生效;
+        - 只对声明 ``options.baseURL`` 且 API key 可解析的 provider 生效:key 依次
+          取 ``options.apiKey`` 占位符(``{env:VAR}`` 经 ``env_overrides``/宿主机
+          环境解析)与 ``auth_keys``(auth 连接 provider 的凭证,#248 预读自 data
+          卷 auth.json);两级都解析不到则跳过,不发未鉴权请求;
         - 合并只增不改:源文件手写的模型条目(显示名等)永不被覆盖,远端新 id 以
           ``{"name": id}`` 追加;远端响应**永不**改写 ``baseURL``/``headers``/鉴权
           —— 接入面始终以仓库文件为准,模型列表是纯数据面;
@@ -287,6 +301,10 @@ class OpenCodeProcessConfig:
             ):
                 continue
             api_key = _resolve_env_placeholder(options.get("apiKey"), self.env_overrides)
+            if api_key is None:
+                # auth 连接 provider(#248):凭证留在 auth.json(UI 管理),渲染
+                # 产物不携带 key,由 start() 预读注入。
+                api_key = (auth_keys or {}).get(str(provider_id))
             if api_key is None:
                 _log.debug("opencode.model_sync.key_unresolvable", provider=provider_id)
                 continue
@@ -560,9 +578,14 @@ class OpenCodeProcessManager:
         # 渲染运行时 opencode.json(mcp.finboard.url ← mcp_remote_url,#157),
         # 单文件 bind mount 覆盖容器内同名文件。同步 IO 搬到线程;渲染失败
         # (仓库缺 .opencode/opencode.json 等)视为启动配置错误,fail-fast。
+        # auth 连接 provider 的凭证预读(#248):仅 sync 开启时读卷,失败静默
+        # 跳过(同步退回「key 解析不到即跳过该 provider」,不阻塞启动)。
+        auth_keys: dict[str, str] = {}
+        if self._config.model_sync_enabled:
+            auth_keys = await asyncio.to_thread(self._read_auth_keys_from_volume)
         try:
             runtime_config_path = await asyncio.to_thread(
-                self._config.render_runtime_config
+                self._config.render_runtime_config, auth_keys
             )
         except (OSError, ValueError) as exc:
             raise OpenCodeProcessError(
@@ -732,6 +755,65 @@ class OpenCodeProcessManager:
                 container_name=self._config.container_name,
                 error=str(exc),
             )
+
+    def _read_auth_keys_from_volume(self) -> dict[str, str]:
+        """从 data 卷 auth.json 预读 auth 连接 provider 的 API key(#248,尽力而为)。
+
+        auth 连接 provider(zhipuai-coding-plan / opencode-go 等)的凭证由
+        OpenCode UI 写进 data 卷的 ``auth.json``;渲染期模型同步需要该 key,但
+        渲染发生在宿主机、卷在 Docker VM 内 —— 用一次性容器只读 ``cat`` 出来
+        (``:ro`` 挂载,即用即毁,不写任何数据)。返回 ``{provider_id: key}``;
+        仅 managed 模式执行(外部 serve 模式卷不归本管理器管);docker 不可用 /
+        卷缺失 / 解析失败一律返回空 dict(同步跳过对应 provider,不阻塞启动)。
+        key 只在内存中传递,不落日志、不进渲染产物与缓存。
+        """
+        if not self._manage_process:
+            return {}
+        docker_bin = _resolve_docker_binary()
+        if docker_bin is None:
+            return {}
+        cmd = [
+            docker_bin, "run", "--rm",
+            "-v", f"{_DATA_VOLUME_NAME}:/oc-data:ro",
+            "--entrypoint", "cat",
+            self._config.image, "/oc-data/auth.json",
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+                check=False,
+                env=self._config.build_environment(),
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            _log.debug("opencode.model_sync.auth_read_failed", error=str(exc))
+            return {}
+        if result.returncode != 0:
+            _log.debug(
+                "opencode.model_sync.auth_read_failed",
+                returncode=result.returncode,
+                stderr=result.stderr.strip()[:200],
+            )
+            return {}
+        try:
+            data = json.loads(result.stdout)
+        except ValueError:
+            _log.debug("opencode.model_sync.auth_read_invalid_json")
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        keys: dict[str, str] = {}
+        for provider_id, entry in data.items():
+            if (
+                isinstance(entry, dict)
+                and entry.get("type") == "api"
+                and isinstance(entry.get("key"), str)
+                and entry["key"]
+            ):
+                keys[str(provider_id)] = entry["key"]
+        return keys
 
     async def wait_ready(
         self,

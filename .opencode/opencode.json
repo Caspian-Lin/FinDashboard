@@ -16,6 +16,20 @@
           "name": "DeepSeek V4 Pro"
         }
       }
+    },
+    "zhipuai-coding-plan": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Zhipu AI Coding Plan",
+      "options": {
+        "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4"
+      }
+    },
+    "opencode-go": {
+      "npm": "@ai-sdk/anthropic",
+      "name": "OpenCode Go",
+      "options": {
+        "baseURL": "https://opencode.ai/zen/go/v1"
+      }
     }
   },
   "mcp": {
