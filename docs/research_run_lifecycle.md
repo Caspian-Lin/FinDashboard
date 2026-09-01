@@ -189,6 +189,27 @@ uv run pytest tests/integration/test_research_run_persistence.py -v
 阶段契约、血缘、幂等、能力失败关闭、部分成交和持仓/会计不变量。第二条用
 PostgreSQL 覆盖正式流水线完整运行、历史读取、重启恢复、同版本重放和多策略隔离。
 
+## 绩效指标口径（issue #262）
+
+研究报告与回测报告的 Sharpe 有两个口径,读数和比较时必须区分:
+
+- **research_run 报告** `sharpe_ratio`:rf=0、样本标准差（ddof=1）、√252
+  年化;报告字段 `risk_free_annual=0.0` 标注实际 rf。
+- **事件驱动回测报告** `sharpe_ratio`（REST `BacktestMetricsOut` / MCP
+  backtest metrics）:主口径 rf 默认 3%/年（按 `rf/252` 日化,总体标准差
+  ddof=0）;同报告附 `risk_free_annual`（实际 rf）与 `sharpe_rf0`（rf=0、
+  ddof=1 对照口径）。
+- **跨报告同屏比较**:引擎报告取 `sharpe_rf0`,研究报告取 `sharpe_ratio`
+  ——两个字段同口径。不要拿两边的 `sharpe_ratio` 直比:rf=3% 会把低收益
+  策略的主口径 Sharpe 拖近 0（实例:run 277 年化 3.05%,主口径仅 0.05,
+  rf0 口径明显更高）。2026-09-02 之前的旧回测记录没有 `sharpe_rf0` 键,
+  其 `sharpe_ratio` 恒为主口径。
+
+研究域全部 Sharpe 计算（research_run 组合管线、mean_reversion、
+futures_tsmom、validation 统计）统一委托 `finboard_backtest.metrics` 的
+单一实现,口径映射由
+`tests/unit/backtest/test_issue_262_sharpe_conventions.py` 回归锁定。
+
 ## 与 `phase1_doc.md` §3.4 的映射
 
 研究环境不能声称完成真实券商验收。它只提供对应的离线等价证据:
