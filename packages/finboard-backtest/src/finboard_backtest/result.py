@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
+from finboard_backtest.metrics import DEFAULT_RISK_FREE_ANNUAL
 from finboard_data.factors import FactorSnapshot
 from finboard_shared.models import Fill, Order
 
@@ -28,6 +29,10 @@ class BacktestResult:
     total_return: float = 0.0
     annualized_return: float = 0.0
     sharpe_ratio: float = 0.0
+    # issue #262:rf=0/ddof=1 对照口径 + 主口径 rf 取值标注(随指标序列化,
+    # 防止引擎默认 rf=3% 把低收益策略 Sharpe 拖近 0 后被误读为无风险调整价值)。
+    sharpe_rf0: float = 0.0
+    risk_free_annual: float = DEFAULT_RISK_FREE_ANNUAL
     max_drawdown: float = 0.0
     win_rate: float = 0.0
     trade_count: int = 0
@@ -63,7 +68,9 @@ class BacktestResult:
             "",
             f"总收益率:   {self.total_return:+.2%}",
             f"年化收益率: {self.annualized_return:+.2%}",
-            f"夏普比率:   {self.sharpe_ratio:.2f}",
+            f"夏普比率:   {self.sharpe_ratio:.2f} (rf={self.risk_free_annual:.1%}/年,"
+            f"日频 rf/252,ddof=0)",
+            f"夏普(rf=0): {self.sharpe_rf0:.2f} (与研究报告 sharpe_ratio 同口径)",
             f"最大回撤:   {self.max_drawdown:.2%}",
             f"胜率:       {self.win_rate:.2%}",
             f"交易次数:   {self.trade_count}",

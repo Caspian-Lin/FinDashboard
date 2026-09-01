@@ -668,6 +668,10 @@ async def backtest_run(
                 "total_return": result.total_return,
                 "annualized_return": result.annualized_return,
                 "sharpe_ratio": result.sharpe_ratio,
+                # issue #262:rf=0 对照口径 + 主口径 rf 标注随指标序列化;
+                # 与 research_run 报告同屏比较 Sharpe 时用 sharpe_rf0。
+                "sharpe_rf0": result.sharpe_rf0,
+                "risk_free_annual": result.risk_free_annual,
                 "max_drawdown": result.max_drawdown,
                 "win_rate": result.win_rate,
                 "trade_count": result.trade_count,
@@ -910,6 +914,13 @@ def register(mcp: MCPServer) -> None:
             "同步与异步共用 BacktestEngine + 数据源(akshare/tushare/yfinance);"
             "异步任务用 finboard_job_get 轮询(result_ref=str(run_id)),完成后"
             "用 finboard_backtest_history_get(run_id) 查询完整结果。"
+            "Sharpe 口径(issue #262):metrics.sharpe_ratio 为主口径"
+            "(rf=risk_free_annual/年默认 3%,按 rf/252 日化,总体标准差 ddof=0,"
+            "√252 年化,rf 取值随 risk_free_annual 字段序列化);sharpe_rf0 为"
+            "rf=0 对照口径(样本标准差 ddof=1)——与 finboard_run_report 的"
+            "sharpe_ratio 同口径,跨报告同屏比较 Sharpe 用 sharpe_rf0,勿用"
+            "主口径直比(低收益策略主口径可能被 rf=3% 拖近 0,如 run 277"
+            "年化 3.05% 显示 Sharpe 0.05 的误读)。"
         ),
     )
     async def _run(
@@ -978,6 +989,9 @@ def register(mcp: MCPServer) -> None:
             "200)、fills_limit/fills_offset(fills 分页,默认有界 200 条,"
             "issue #206;fills_limit=null 返回全部)。"
             "返回含 equity_point_count / fills_total / fills_offset 元信息。"
+            "Sharpe 口径(#262):sharpe_ratio=主口径(rf 见 risk_free_annual,"
+            "默认 3%/年,ddof=0);sharpe_rf0=rf=0 对照口径(ddof=1),与"
+            "research_run 报告 sharpe_ratio 同口径,跨报告比较用 sharpe_rf0。"
         ),
     )
     async def _history_get(

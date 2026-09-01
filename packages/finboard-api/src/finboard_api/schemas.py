@@ -406,7 +406,22 @@ class EquityPointOut(BaseSchema):
 class BacktestMetricsOut(BaseSchema):
     total_return: float = 0.0
     annualized_return: float = 0.0
-    sharpe_ratio: float = 0.0
+    sharpe_ratio: float = Field(
+        default=0.0,
+        description="夏普比率(引擎主口径:rf=risk_free_annual/年,按 rf/252 日化,"
+        "总体标准差 ddof=0,√252 年化)",
+    )
+    # issue #262:rf=0 对照口径 + 主口径 rf 取值随指标序列化,防误读
+    # (低收益策略的主口径 Sharpe 可能被 rf=3% 拖近 0)。
+    sharpe_rf0: float = Field(
+        default=0.0,
+        description="夏普比率(rf=0 对照口径:样本标准差 ddof=1,√252 年化;"
+        "与 research_run 报告 sharpe_ratio 同口径,跨报告同屏比较用本字段)",
+    )
+    risk_free_annual: float = Field(
+        default=0.03,
+        description="sharpe_ratio 实际使用的年化无风险利率",
+    )
     max_drawdown: float = 0.0
     win_rate: float = 0.0
     trade_count: int = 0

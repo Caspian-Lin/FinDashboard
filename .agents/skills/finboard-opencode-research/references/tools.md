@@ -702,7 +702,10 @@ research_run 管线轻路由(#174)。
     - `snapshot`:因子值直接来自冻结 FeatureSnapshot,需 `snapshot_ids:
       list[str]`;观测按 available_at <= decision_at 过滤
   - 返回:`{run_id, metrics, equity_curve, equity_point_count, fills, summary,
-    selection_snapshots(snapshot 含 warnings 降级提示), ...}`(同步);
+    selection_snapshots(snapshot 含 warnings 降级提示), ...}`(同步;
+    metrics 里 sharpe_ratio=主口径 rf=3%/ddof=0,sharpe_rf0=rf=0 对照口径
+    ddof=1,risk_free_annual=实际 rf;与 research_run 报告同屏比较 Sharpe 用
+    sharpe_rf0 —— issue #262);
     异步返回 `{job_id, status, created, idempotency_key, async_mode,
     symbol_days_estimate, auto_async_threshold, execution_path}`
   - `fills[].date` = 该笔成交实际发生的交易日(issue #205 起);此前旧记录
@@ -745,7 +748,8 @@ research_run 管线轻路由(#174)。
   `fills_limit: int | None = 200`(默认有界 200 条,#206;`null` 返回全部)、
   `fills_offset: int = 0`
 - 返回:`{id, ..., equity_curve, equity_point_count, fills, fills_total,
-  fills_offset, summary, selection_snapshots, ...}`(symbols 全量,列表才有预览)
+  fills_offset, summary, selection_snapshots, ...}`(symbols 全量,列表才有预览;
+  metrics 含 sharpe_ratio/sharpe_rf0/risk_free_annual 双口径标注,#262)
 - 错误:`not_found`、`invalid_argument`(equity_mode 非法)
 
 ### finboard_backtest_history_delete **[写]**
@@ -793,7 +797,7 @@ research_run 管线轻路由(#174)。
     覆盖参数)+ `complete: bool`(全部组合到终态)/ `completed_count` /
     `pending_count` / `failed_count`
   - `metric_fields: list[str]`(指标矩阵列:收益/年化/夏普/回撤/胜率/换手/超额/
-    费用等,按规范顺序)
+    费用等,按规范顺序;Sharpe 口径见下方「绩效指标口径」)
   - `combos: list[{combo_index, label, job_id, job_status, run_id?,
     metrics?, equity_curve?(仅显式 equity_mode 时返回), equity_point_count?,
     rank?{指标: 竞争排名,同值
@@ -1172,6 +1176,23 @@ REST PUT 是全量语义,这里更安全)。
   metrics, equity_curve: [{date, equity, benchmark?}], equity_point_count,
   fills: [...](分页), fills_total, fills_offset, summary}`
 - 错误:`not_found`(回测记录不存在)、`invalid_argument`(equity_mode 非法)
+
+## 绩效指标口径(issue #262,2026-09-02)
+
+**Sharpe 双口径,跨报告比较必须用 rf=0 口径**:
+- 回测(事件驱动)metrics:`sharpe_ratio` = 主口径(rf=`risk_free_annual`
+  默认 3%/年,按 rf/252 日化,总体标准差 ddof=0,√252 年化);
+  `sharpe_rf0` = rf=0 对照口径(样本标准差 ddof=1)。
+- research_run 报告:`sharpe_ratio` = rf=0 / ddof=1 / √252(即引擎的
+  `sharpe_rf0` 口径),`risk_free_annual=0.0` 标注实际 rf。
+- **同屏比较规则**:引擎报告取 `sharpe_rf0`,研究报告取 `sharpe_ratio`——
+  这两个字段同口径。勿拿引擎 `sharpe_ratio` 与研究报告 `sharpe_ratio` 直比
+  (rf 与 ddof 双重口径差;低收益策略主口径会被 rf=3% 拖近 0,如 run 277
+  年化 3.05% 显示 Sharpe 0.05 的误读)。旧回测记录(2026-09-02 前)无
+  `sharpe_rf0`/`risk_free_annual` 键,其 `sharpe_ratio` 恒为主口径。
+- mean_reversion / futures_tsmom / validation 统计的 Sharpe 已统一委托
+  `finboard_backtest.metrics` 实现;validation 默认口径与引擎主口径一致
+  (PBO 排名场景显式 rf=0)。
 
 ### finboard_report_export(只读)
 把报告聚合后导出为文件,返回绝对路径 + 元信息。

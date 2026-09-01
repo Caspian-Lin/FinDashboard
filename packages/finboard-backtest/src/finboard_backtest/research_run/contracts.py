@@ -644,6 +644,10 @@ class ResearchRunReport:
     # issue #218:user_code 策略的沙箱 provenance —— 所用 code commit、
     # 镜像 digest 与逐决策 targets checksum;非 user_code run 恒为 None。
     sandbox_provenance: dict[str, JsonValue] | None = None
+    # issue #262:Sharpe 口径标注 —— 本报告 sharpe_ratio 的实际 rf 取值(恒
+    # 0.0,口径 rf=0 / 样本标准差 ddof=1 / √252 年化)。与引擎报告同屏比较
+    # 时,引擎侧用 sharpe_rf0(同口径),不用引擎主口径 sharpe_ratio(rf=3%)。
+    risk_free_annual: float = 0.0
 
     def __post_init__(self) -> None:
         metrics = (
@@ -651,6 +655,7 @@ class ResearchRunReport:
             self.sharpe_ratio,
             self.max_drawdown,
             self.annualized_return,
+            self.risk_free_annual,
             *self.constraint_impact.values(),
         )
         if self.benchmark_return is not None:
@@ -833,6 +838,8 @@ def report_from_json(payload: dict[str, object]) -> ResearchRunReport:
         factor_screen=_optional_json_dict(payload.get("factor_screen")),
         strategy_screen=_optional_json_dict(payload.get("strategy_screen")),
         sandbox_provenance=_optional_json_dict(payload.get("sandbox_provenance")),
+        # issue #262:历史 report 无该字段 → 默认 0.0(历史口径即 rf=0)。
+        risk_free_annual=float(str(payload.get("risk_free_annual", 0.0))),
     )
 
 

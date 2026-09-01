@@ -57,6 +57,8 @@ _METRIC_FIELDS: tuple[str, ...] = (
     "total_return",
     "annualized_return",
     "sharpe_ratio",
+    # issue #262:rf=0 对照口径(老 run 无该键时矩阵自动省略该列)。
+    "sharpe_rf0",
     "max_drawdown",
     "win_rate",
     "trade_count",
@@ -693,6 +695,12 @@ def register(mcp: MCPServer) -> None:
             "查询批量参数网格回测的聚合对比表:逐组合指标矩阵(收益/回撤/夏普/"
             "胜率/超额/换手等)+ 关键指标竞争排名与最优标注(ranking/best)+ "
             "失败组合错误清单(failures 带错误码单列,不影响成功组合返回)。"
+            "Sharpe 口径(issue #262):矩阵 sharpe_ratio 列为主口径(rf=3%/年,"
+            "ddof=0),sharpe_rf0 列为 rf=0 对照口径(ddof=1,与 research_run "
+            "报告同口径);跨策略/报告比较用 sharpe_rf0;老 run 无该键时列自动"
+            "省略。排名指标不变(仍用主口径 sharpe_ratio,组合间同口径可比)。"
+            "另 risk_free_annual 键在逐组合 metrics 里可见,矩阵不单列。"
+
             "公共字段(strategy/symbols/start/end/capital/adjust/params=base_params)"
             "在网格头部只出现一次(issue #206);combo 只含 combo_index/label/"
             "job_id/job_status/指标/权益,组合差异由 label(覆盖参数 JSON)承载,"
