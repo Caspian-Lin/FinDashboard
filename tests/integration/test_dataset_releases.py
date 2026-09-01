@@ -295,6 +295,11 @@ async def test_release_instruments_fallback_to_profiles_for_metadata(
             "total": 1,
             "missing_list_date": 0,
             "missing_industry": 0,
+            # #251:delist_date 缺失与名称历史覆盖同样进入质量报告。
+            # 该样本档案无 delist_date、instruments 无名称历史 → 缺失可见。
+            "missing_delist_date": 1,
+            "with_name_history": 0,
+            "name_history_coverage": "0.0000",
         }
     finally:
         await db_session.rollback()

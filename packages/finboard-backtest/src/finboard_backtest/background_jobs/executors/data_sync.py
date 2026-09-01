@@ -85,9 +85,10 @@ class DataSyncExecutor:
         async with self._session_maker() as session:
             repo = InstrumentRepository(session)
             await repo.sync_with_diff(dicts, as_of=date.today())
-            # 后置 enrichment(issue #185):akshare 发现链路不携带 list_date/
-            # industry,按本次发现范围从最近一次已发布的
-            # research_instrument_profiles 回填。
+            # 后置 enrichment(issue #185;#251 放宽批次口径):akshare 发现链路
+            # 不携带 list_date/industry/delist_date,按本次发现范围从最近一次
+            # 实际摄取过的 research_instrument_profiles 批次回填(不再要求该批
+            # 已发布 —— 此前 profiles 摄取过但从未发布时回填永久短路、元数据全空)。
             backfill = await repo.backfill_metadata_from_profiles(
                 symbols=[ins.code for ins in instruments]
             )
@@ -95,9 +96,12 @@ class DataSyncExecutor:
 
         summary = (
             f"标的 {backfill.scoped} 只;回填 list_date={backfill.backfilled_list_date} "
-            f"industry={backfill.backfilled_industry};仍缺失 "
-            f"list_date={backfill.missing_list_date} industry={backfill.missing_industry}"
-            + ("" if backfill.profile_batch_available else "(无已发布档案批次)")
+            f"industry={backfill.backfilled_industry} "
+            f"delist_date={backfill.backfilled_delist_date};仍缺失 "
+            f"list_date={backfill.missing_list_date} "
+            f"industry={backfill.missing_industry} "
+            f"delist_date={backfill.missing_delist_date}"
+            + ("" if backfill.profile_batch_available else "(无档案批次)")
         )
         logger.info("data_sync.done", **backfill.as_dict())
         await progress(1, 1, f"data_sync:done {summary}")
