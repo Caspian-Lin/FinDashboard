@@ -13,9 +13,16 @@
 2. **agent 定义以 `.opencode/agent/*.md` 为准**:同名 agent 的 frontmatter(model /
    permission / description)覆盖 `opencode.json` 的 `agent` 块——json 里写 `model`
    是死配置(#242 已把死块删掉,.md 的 model 钉死也移除,模型跟随 UI/会话选择)。
-3. **同 id 的 config provider 与内置 models.dev 目录合并**:config 手写的 models 与
-   目录模型并存(v1.18.15 实测目录约 180 个 provider;deepseek 的 `-free`/`-lightning`
-   变体来自目录,手写的 v4-flash/v4-pro 来自 config)。
+3. **同 id 的 config provider 与内置目录合并,但内置目录是构建时快照**(#248 实测
+   修正「目录自动更新」的误判):opencode 把 models.dev 目录**构建时打进镜像,
+   运行时不刷新**——镜像 2026-08-07 构建时,活体 models.dev 里 zhipuai-coding-plan
+   已有 10 个模型(含 8 月中旬的 glm-5.3/glm-5.3-flash)、opencode-go 有 33 个,
+   容器只显示 7/18 个,缺失恰为构建后的新模型。auth 连接 provider 的模型清单
+   唯一原生更新途径 = 升级镜像。#248 的修法:仓库 opencode.json 声明这两个
+   provider(仅 baseURL,无 apiKey,凭证留 auth.json),渲染期同步经管理器用
+   一次性容器 `:ro` cat data 卷 auth.json 预读 key 拉取 `/models` 只增不改合并。
+   端点实测:Zhipu coding /models 需鉴权(401),opencode-go /models Bearer 可用,
+   两者都返回 OpenAI 形 `{"data":[{"id"}]}`。
 4. **config 卷 `opencode-config`(/root/.config/opencode)自 2026-08-09 初始化后零写入**:
    全局 config 只有 schema 空壳 + 一次性 node_modules 脚手架,auth 在 data 卷。该卷是
    rw 挂载,agent(root bash)理论上可写全局 config/plugin 提权——现存最小提权面,

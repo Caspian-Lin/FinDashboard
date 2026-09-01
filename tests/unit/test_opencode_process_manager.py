@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -317,6 +318,128 @@ def test_render_model_sync_unresolvable_key_skips(work_tmp, monkeypatch) -> None
     assert not (
         work_tmp / ".opencode" / "runtime" / "provider-model-cache.json"
     ).exists()
+
+
+def _write_auth_provider_repo_opencode_json(workdir: Path) -> None:
+    """构造 auth 连接 provider 形态的仓库配置(#248:baseURL 无 apiKey)。"""
+    config_dir = workdir / ".opencode"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "opencode.json").write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "zhipuai-coding-plan": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "Zhipu AI Coding Plan",
+                        "options": {
+                            "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4"
+                        },
+                    }
+                },
+                "mcp": {"finboard": {"type": "remote", "url": "http://x/mcp"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_render_model_sync_auth_key_merges_without_touching_options(
+    work_tmp, monkeypatch
+) -> None:
+    """#248:无 apiKey 的声明 provider 经 auth_keys 取 key 同步;options 不被改写。"""
+    _write_auth_provider_repo_opencode_json(work_tmp)
+    seen: dict[str, object] = {}
+
+    def _fake(base_url: str, api_key: str | None, **kwargs: object) -> list[str]:
+        seen["base_url"] = base_url
+        seen["api_key"] = api_key
+        return ["glm-5.3", "glm-5.3-flash"]
+
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._fetch_provider_model_ids", _fake
+    )
+    config = OpenCodeProcessConfig(workdir=str(work_tmp))
+    target = config.render_runtime_config(
+        auth_keys={"zhipuai-coding-plan": "sk-from-auth-json"}
+    )
+    data = json.loads(target.read_text(encoding="utf-8"))
+    provider = data["provider"]["zhipuai-coding-plan"]
+    assert seen == {
+        "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+        "api_key": "sk-from-auth-json",
+    }
+    assert provider["models"]["glm-5.3"] == {"name": "glm-5.3"}
+    # 凭证永不写入渲染产物:options 保持仓库文件原样(无 apiKey 键)。
+    assert "apiKey" not in provider["options"]
+    assert provider["options"]["baseURL"] == "https://open.bigmodel.cn/api/coding/paas/v4"
+
+
+def test_render_model_sync_without_auth_key_skips(work_tmp, monkeypatch) -> None:
+    """#248:无 apiKey 且未提供 auth_keys → 跳过,不发未鉴权请求。"""
+    _write_auth_provider_repo_opencode_json(work_tmp)
+    def _boom(*args: object, **kwargs: object) -> list[str]:
+        raise AssertionError("must not fetch without any resolvable key")
+    monkeypatch.setattr(
+        "finboard_opencode.process_manager._fetch_provider_model_ids", _boom
+    )
+    config = OpenCodeProcessConfig(workdir=str(work_tmp))
+    target = config.render_runtime_config()
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert "models" not in data["provider"]["zhipuai-coding-plan"]
+
+
+def test_read_auth_keys_from_volume_parses_api_entries(
+    monkeypatch, tmp_path
+) -> None:
+    """读卷解析:只取 type=api 条目的 key;命令必须 :ro 挂载 + cat。"""
+    from finboard_opencode import process_manager as pm
+
+    auth_payload = json.dumps(
+        {
+            "zhipuai-coding-plan": {"type": "api", "key": "sk-z"},
+            "opencode-go": {"type": "api", "key": "sk-go"},
+            "example-oauth": {"type": "oauth", "refresh": "r"},
+        }
+    )
+    captured: dict[str, list[str]] = {}
+
+    class _Result:
+        returncode = 0
+        stdout = auth_payload
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _Result()
+
+    monkeypatch.setattr(pm, "_resolve_docker_binary", lambda: "docker")
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    config = OpenCodeProcessConfig(workdir=str(tmp_path))
+    manager = OpenCodeProcessManager(config, manage_process=True)
+    keys = manager._read_auth_keys_from_volume()
+    assert keys == {"zhipuai-coding-plan": "sk-z", "opencode-go": "sk-go"}
+    cmd = captured["cmd"]
+    assert any(part == "opencode-data:/oc-data:ro" for part in cmd)
+    assert "cat" in cmd
+
+
+def test_read_auth_keys_from_volume_unmanaged_or_failure_returns_empty(
+    monkeypatch, tmp_path
+) -> None:
+    """非 managed 模式不读卷;docker 失败/解析失败返回空 dict。"""
+    from finboard_opencode import process_manager as pm
+
+    config = OpenCodeProcessConfig(workdir=str(tmp_path))
+    unmanaged = OpenCodeProcessManager(config, manage_process=False)
+    assert unmanaged._read_auth_keys_from_volume() == {}
+
+    def _fail(*args, **kwargs):
+        raise OSError("docker not available")
+
+    monkeypatch.setattr(pm, "_resolve_docker_binary", lambda: "docker")
+    monkeypatch.setattr(subprocess, "run", _fail)
+    managed = OpenCodeProcessManager(config, manage_process=True)
+    assert managed._read_auth_keys_from_volume() == {}
 
 
 # ---------------------------------------------------------------------------
