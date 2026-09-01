@@ -1,4 +1,4 @@
-"""universe 预检入队快速失败集成测试(issue #186)。
+"""universe 预检入队快速失败集成测试(issue #186;#203/#253 增补)。
 
 覆盖验收:「对 list_date 全 null 的发布入队 min_listing_days>0 策略,秒级
 失败且错误指向 list_date」—— 通过真实 REST 入队端点 ``POST /api/research/runs``
@@ -6,7 +6,11 @@
 
 * 发布 instruments 的 list_date 全 null 时,入队立即 422,错误信息含
   ``list_date`` 与 ``listing_age_below_minimum`` 排除统计,不产生 queued 行;
-* 元数据齐备时入队成功(正对照),确保预检不误伤正常研究运行。
+* 元数据齐备时入队成功(正对照),确保预检不误伤正常研究运行;
+* issue #203:未声明频率(single_shot)缺快照秒级拒绝;
+* issue #253:multi_period 声明财务因子(pb / roe)但未附加对应研究数据
+  发布时,入队秒级具名拒绝(此前拖到执行期才报「identity 节点缺少数据源」),
+  附加齐备后放行。
 
 依赖 PostgreSQL(``FINBOARD_TEST_DB_URL``)。只登记发布/策略/运行记录,
 不连 broker / 不下单 / 不跑 worker 回测。
@@ -29,6 +33,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from finboard_api.deps import get_db_session
 from finboard_api.routes.research_runs import router as research_runs_router
 from finboard_backtest.strategy_spec import (
+    FeatureGraph,
+    FeatureKind,
+    FeatureNode,
+    FeatureOperator,
     ResearchStrategySpec,
     build_strategy_template,
     compile_registered_strategy_spec,
@@ -236,13 +244,21 @@ async def _register_published_spec(
     *,
     universe_updates: dict[str, object] | None = None,
     dataset_release_ids: tuple[str, ...] = (RELEASE_ID,),
+    feature_graph: FeatureGraph | None = None,
 ) -> ResearchStrategySpec:
-    """multi_factor 模板:universe 默认 min_listing_days=60,无 factor 快照要求。"""
+    """multi_factor 模板:universe 默认 min_listing_days=60,无 factor 快照要求。
+
+    ``feature_graph`` 可替换模板特征图:multi_factor 模板引用 pb(daily_metrics
+    派生,issue #253),只关心 universe 元数据诊断的用例用纯价格特征图避免
+    特征可用性门控先拦。
+    """
     spec = build_strategy_template(
         "multi_factor",
         strategy_id="integration_precheck_strategy",
         dataset_release_ids=dataset_release_ids,
     )
+    if feature_graph is not None:
+        spec = spec.model_copy(update={"feature_graph": feature_graph})
     if universe_updates:
         spec = spec.model_copy(
             update={"universe": spec.universe.model_copy(update=universe_updates)}
@@ -260,6 +276,37 @@ async def _register_published_spec(
     await repo.publish(spec.strategy_id, 1, expected_version=1)
     await db_session.commit()
     return spec
+
+
+def _price_only_feature_graph() -> FeatureGraph:
+    """仅价格重算特征的模板变体(momentum / volatility_20d,issue #253)。"""
+    return FeatureGraph(
+        nodes=(
+            FeatureNode(
+                node_id="momentum",
+                label="动量",
+                kind=FeatureKind.FACTOR,
+                operator=FeatureOperator.IDENTITY,
+                source="momentum",
+            ),
+            FeatureNode(
+                node_id="volatility",
+                label="20 日波动率",
+                kind=FeatureKind.FACTOR,
+                operator=FeatureOperator.IDENTITY,
+                source="volatility_20d",
+            ),
+            FeatureNode(
+                node_id="composite",
+                label="复合得分",
+                kind=FeatureKind.COMPOSITE,
+                operator=FeatureOperator.WEIGHTED_SUM,
+                inputs=("momentum", "volatility"),
+                weights=(0.5, 0.5),
+            ),
+        ),
+        outputs=("composite",),
+    )
 
 
 def _queue_payload(spec: ResearchStrategySpec) -> dict[str, object]:
@@ -289,7 +336,10 @@ async def test_enqueue_seconds_fail_when_list_date_all_null(
             ("600003.SH", None),
         ),
     )
-    spec = await _register_published_spec(db_session)
+    spec = await _register_published_spec(
+        db_session,
+        feature_graph=_price_only_feature_graph(),
+    )
 
     response = await client.post("/api/research/runs", json=_queue_payload(spec))
 
@@ -311,17 +361,20 @@ async def test_enqueue_succeeds_when_metadata_complete(
     """元数据齐备(list_date 有值):预检放行,入队成功生成 queued 行(正对照)。
 
     同时也是 issue #203 的 multi_period 正对照:声明 rebalance_frequency 后
-    不要求预建因子快照(价格因子按发布每期重算)。
+    不要求预建因子快照;issue #253 起 multi_factor 模板引用的 pb 需要附加
+    daily_metrics 研究发布(特征可用性门控),不再只挂 bars 主发布。
     """
-    await _register_release(
-        db_session,
-        (
-            ("600001.SH", date(2020, 1, 1)),
-            ("600002.SH", date(2020, 1, 1)),
-            ("600003.SH", date(2020, 1, 1)),
-        ),
+    symbols = (
+        ("600001.SH", date(2020, 1, 1)),
+        ("600002.SH", date(2020, 1, 1)),
+        ("600003.SH", date(2020, 1, 1)),
     )
-    spec = await _register_published_spec(db_session)
+    await _register_release(db_session, symbols)
+    daily_id = await _register_daily_metrics_release(db_session, symbols)
+    spec = await _register_published_spec(
+        db_session,
+        dataset_release_ids=(RELEASE_ID, daily_id),
+    )
 
     response = await client.post("/api/research/runs", json=_queue_payload(spec))
 
@@ -388,6 +441,7 @@ async def test_enqueue_seconds_fail_when_market_cap_unavailable(
     spec = await _register_published_spec(
         db_session,
         universe_updates={"min_market_cap": 1e10},
+        feature_graph=_price_only_feature_graph(),
     )
 
     response = await client.post("/api/research/runs", json=_queue_payload(spec))
@@ -445,7 +499,10 @@ async def test_enqueue_seconds_fail_when_all_st_by_names(
             for index, code in enumerate(("600001.SH", "600002.SH", "600003.SH"))
         ),
     )
-    spec = await _register_published_spec(db_session)
+    spec = await _register_published_spec(
+        db_session,
+        feature_graph=_price_only_feature_graph(),
+    )
 
     response = await client.post("/api/research/runs", json=_queue_payload(spec))
 
@@ -453,3 +510,119 @@ async def test_enqueue_seconds_fail_when_all_st_by_names(
     detail = str(response.json()["detail"])
     assert "st_security=3" in detail
     assert "候选池为空" in detail
+
+
+# ---- issue #253:multi_period 特征可用性入队门控 ----
+
+
+async def test_enqueue_seconds_fail_when_financial_factor_without_research_release(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """multi_factor 模板引用 pb 但只挂 bars 发布:入队秒级 422 且文案具名。
+
+    multi_factor 模板的特征图声明 pb identity 源 —— multi_period 下 pb 只能
+    来自 daily_metrics 研究数据发布;此前该组合入队成功、worker 开跑后才报
+    「identity 节点缺少数据源: pb」,现在入队期直接具名拒绝。
+    """
+    await _register_release(
+        db_session,
+        (
+            ("600001.SH", date(2020, 1, 1)),
+            ("600002.SH", date(2020, 1, 1)),
+            ("600003.SH", date(2020, 1, 1)),
+        ),
+    )
+    spec = await _register_published_spec(db_session)
+
+    response = await client.post("/api/research/runs", json=_queue_payload(spec))
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "execution_mode=multi_period" in detail
+    assert "pb" in detail
+    assert "daily_metrics" in detail
+    assert "identity 节点缺少数据源" in detail
+    # 快速失败:不产生 queued research_runs 行。
+    rows = await ResearchRunRepository(db_session).list_recent(limit=10)
+    assert all(row.strategy_kind != spec.strategy_kind for row in rows)
+
+
+async def test_enqueue_seconds_fail_when_roe_without_financial_release(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """引用 roe 但只挂 bars + daily_metrics:具名指向 financial_indicators。"""
+    symbols = (
+        ("600001.SH", date(2020, 1, 1)),
+        ("600002.SH", date(2020, 1, 1)),
+        ("600003.SH", date(2020, 1, 1)),
+    )
+    await _register_release(db_session, symbols)
+    daily_id = await _register_daily_metrics_release(db_session, symbols)
+    spec = await _register_published_spec(
+        db_session,
+        dataset_release_ids=(RELEASE_ID, daily_id),
+        feature_graph=FeatureGraph(
+            nodes=(
+                FeatureNode(
+                    node_id="pb",
+                    label="ROE",
+                    kind=FeatureKind.FACTOR,
+                    operator=FeatureOperator.IDENTITY,
+                    source="roe",
+                ),
+                FeatureNode(
+                    node_id="pb_rank",
+                    label="ROE 排名",
+                    kind=FeatureKind.TRANSFORM,
+                    operator=FeatureOperator.CROSS_SECTION_RANK,
+                    inputs=("pb",),
+                ),
+                FeatureNode(
+                    node_id="value_score",
+                    label="质量得分",
+                    kind=FeatureKind.TRANSFORM,
+                    operator=FeatureOperator.NEGATE,
+                    inputs=("pb_rank",),
+                ),
+                FeatureNode(
+                    node_id="momentum",
+                    label="动量",
+                    kind=FeatureKind.FACTOR,
+                    operator=FeatureOperator.IDENTITY,
+                    source="momentum",
+                ),
+                FeatureNode(
+                    node_id="volatility",
+                    label="20 日波动率",
+                    kind=FeatureKind.FACTOR,
+                    operator=FeatureOperator.IDENTITY,
+                    source="volatility_20d",
+                ),
+                FeatureNode(
+                    node_id="low_risk_score",
+                    label="低风险得分",
+                    kind=FeatureKind.TRANSFORM,
+                    operator=FeatureOperator.NEGATE,
+                    inputs=("volatility",),
+                ),
+                FeatureNode(
+                    node_id="composite",
+                    label="复合得分",
+                    kind=FeatureKind.COMPOSITE,
+                    operator=FeatureOperator.WEIGHTED_SUM,
+                    inputs=("value_score", "momentum", "low_risk_score"),
+                    weights=(0.3, 0.4, 0.3),
+                ),
+            ),
+            outputs=("composite",),
+        ),
+    )
+
+    response = await client.post("/api/research/runs", json=_queue_payload(spec))
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "roe" in detail
+    assert "financial_indicators" in detail
