@@ -88,7 +88,10 @@ from finboard_backtest.strategy_spec.universe import (
 )
 from finboard_backtest.strategy_spec.universe import explain_universe
 from finboard_backtest.strategy_spec.universe_precheck import (
+    RESEARCH_RELEASE_FEATURE_NAMES,
+    STANDARD_PRICE_FEATURE_NAMES,
     is_st_at_decision,
+    research_release_derived_features,
     resolvable_feature_names,
     universe_filter_warnings,
 )
@@ -759,6 +762,82 @@ def single_shot_snapshot_gate_error(
             "或冻结至少一份特征快照以提供决策时点"
         )
     return None
+
+
+def _multi_period_resolvable_features(
+    *,
+    research_release_kinds: Collection[object],
+    snapshot_feature_names: Collection[str],
+) -> frozenset[str]:
+    """multi_period 执行期 ``identity`` 节点可解析的数据源集合。
+
+    与 :func:`build_decision_load_contexts` 的实际供给一致:每期价格重算的
+    标准价格特征、``close``(价格序列特殊分支)、attached 研究数据发布
+    派生的特征(daily_metrics / financial_indicators)与冻结快照观测。
+    """
+    names: set[str] = set(STANDARD_PRICE_FEATURE_NAMES)
+    names.add("close")
+    names.update(research_release_derived_features(research_release_kinds))
+    names.update(snapshot_feature_names)
+    return frozenset(names)
+
+
+def multi_period_feature_gate_error(
+    *,
+    identity_sources: Collection[str],
+    parameters: Mapping[str, object],
+    research_release_kinds: Collection[object],
+    snapshot_feature_names: Collection[str] = (),
+) -> str | None:
+    """入队期 multi_period 特征可用性校验:拒绝原因或 None(放行,issue #253)。
+
+    REST 与 MCP 入队共用本口径(#186/#203 风格):multi_period(显式声明
+    ``rebalance_frequency``)的财务 / 自定义因子只能来自 attached 研究数据
+    发布或冻结快照,此前「identity 节点缺少数据源」拖到执行期才爆 —— run
+    已排队、worker 已开跑。本门控在入队秒级判定:规格 identity 源 ⊆ 多期
+    可解析集合,否则具名缺失特征与所需发布 kind。single_shot 不受影响
+    (决策时点与特征全部来自快照,由 :func:`single_shot_snapshot_gate_error`
+    把关);非法频率值由 ``ResearchRunQueueIn`` schema 拒绝,这里不重复拦。
+    """
+    frequency = parameters.get("rebalance_frequency")
+    if not (isinstance(frequency, str) and frequency in REBALANCE_FREQUENCIES):
+        return None
+    resolvable = _multi_period_resolvable_features(
+        research_release_kinds=research_release_kinds,
+        snapshot_feature_names=snapshot_feature_names,
+    )
+    missing = sorted(set(identity_sources) - resolvable)
+    if not missing:
+        return None
+    feature_to_kinds: dict[str, list[str]] = {}
+    for kind_value, names in RESEARCH_RELEASE_FEATURE_NAMES.items():
+        for name in names:
+            feature_to_kinds.setdefault(name, []).append(kind_value)
+    lines: list[str] = []
+    no_provider: list[str] = []
+    for feature in missing:
+        kinds = feature_to_kinds.get(feature)
+        if kinds:
+            lines.append(f"{feature} 需要 {' / '.join(kinds)} 研究数据发布")
+        else:
+            no_provider.append(feature)
+    if no_provider:
+        lines.append(
+            f"{no_provider} 无任何发布 kind 可提供:多期仅重算标准价格特征 "
+            f"({', '.join(sorted(STANDARD_PRICE_FEATURE_NAMES))}),close 来自"
+            "行情;请改用标准价格特征或移除该节点"
+        )
+    attached = sorted(
+        str(getattr(kind, "value", kind)) for kind in research_release_kinds
+    )
+    return (
+        f"execution_mode=multi_period(已声明 rebalance_frequency={frequency}):"
+        f"策略引用的特征 {sorted(missing)} 无法由当前冻结发布派生,多期回放"
+        "执行期将报「identity 节点缺少数据源」。"
+        f"缺失特征所需数据源: {'; '.join(lines)}。"
+        f"当前冻结的发布 kind: {attached}。"
+        "请在策略验证计划 dataset_release_ids 中附加所需发布后重新入队。"
+    )
 
 
 def _period_bucket(day: date, frequency: str) -> tuple[int, int]:

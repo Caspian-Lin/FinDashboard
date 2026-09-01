@@ -36,7 +36,7 @@ issue #213:``market_cap`` 与 ``average_amount`` 同为「特征依赖的内建�
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -46,6 +46,12 @@ from finboard_backtest.strategy_spec.contracts import (
     UniverseSpec,
 )
 from finboard_backtest.strategy_spec.universe import UniverseCandidate
+from finboard_data.releases import (
+    RESEARCH_RELEASE_FEATURE_NAMES as _CANONICAL_RELEASE_FEATURE_NAMES,
+)
+from finboard_data.releases import (
+    research_release_derived_features as _canonical_release_derived_features,
+)
 
 #: 多期回放由 ``build_price_feature_snapshot`` 从冻结发布每日重算的特征名。
 #: 这些特征不需要预建因子快照,视为运行时必然可用。
@@ -85,22 +91,18 @@ _REASON_COMPLETENESS = "data_completeness_below_minimum"
 #: ``frozen_loader._load_research_features`` → ``factors/extract.py`` 派生的
 #: 特征名。attached 发布让这些特征在静态预检中视为可解析,防止
 #: multi_period(无因子快照)误报空池。
+#: issue #253:唯一事实来源移至 ``finboard_data.releases``(发布构造时按
+#: kind 冻结 ``derived_features`` 元数据),此处按字符串 kind 值投影供既有
+#: 调用方兼容,两份字面量不再各自维护。
 RESEARCH_RELEASE_FEATURE_NAMES: dict[str, frozenset[str]] = {
-    "daily_metrics": frozenset(
-        {"pb", "turnover_rate", "market_cap", "earnings_yield", "dividend_yield"}
-    ),
-    "financial_indicators": frozenset(
-        {"roe", "gross_profit_margin", "debt_to_assets", "revenue_yoy"}
-    ),
+    kind.value: names
+    for kind, names in _CANONICAL_RELEASE_FEATURE_NAMES.items()
 }
 
 
-def research_release_derived_features(kinds: Sequence[object]) -> frozenset[str]:
+def research_release_derived_features(kinds: Iterable[object]) -> frozenset[str]:
     """附加研究数据发布的 kind → 运行时可派生特征名。"""
-    names: set[str] = set()
-    for kind in kinds:
-        names.update(RESEARCH_RELEASE_FEATURE_NAMES.get(str(getattr(kind, "value", kind)), ()))
-    return frozenset(names)
+    return _canonical_release_derived_features(kinds)
 
 
 def _attr(instrument: object, name: str, default: Any) -> Any:

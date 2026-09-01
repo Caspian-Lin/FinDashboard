@@ -111,7 +111,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   冻结因子快照,报错附 execution_mode 与缺失因子源。用户自定义因子
   (u_ 前缀,#217)同样入队秒级拒绝:引用的因子 artifact 非 active
   (retired/不存在),或 multi_period(rebalance_frequency)引用用户因子
-  (观测绑定单一 decision_at,不支持每期重算)。run_queue payload 模板与
+  (观测绑定单一 decision_at,不支持每期重算)。multi_period 特征可用性
+  同样入队秒级判定(#253):规格 identity 源必须可由多期供给派生(标准
+  价格特征 momentum/volatility_Nd/downside_volatility、close、attached
+  daily_metrics / financial_indicators 发布按 kind 派生的特征、快照观测),
+  否则 invalid_argument 具名缺失特征与所需发布 kind —— 此前财务因子
+  (pb/roe 等)拖到执行期才报「identity 节点缺少数据源」。研究数据发布
+  的 manifest 冻结 derived_features(可派生特征集合),旧发布按 kind 回退。
+  run_queue payload 模板与
   各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
   manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。写操作
   返回精简回执(run_id/job_id/status/checksum/execution_mode/created_at,

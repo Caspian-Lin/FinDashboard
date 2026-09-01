@@ -88,6 +88,7 @@ from finboard_data.releases import (
     RELEASE_MANIFEST_FILENAME,
     RELEASE_SCHEMA_VERSION,
     RESEARCH_ETF_CATALOG,
+    RESEARCH_RELEASE_FEATURE_NAMES,
     AssetCapability,
     CapabilityStatus,
     DatasetReleaseError,
@@ -111,6 +112,7 @@ from finboard_data.releases import (
     default_execution_metadata,
     load_dataset_release,
     research_etf_catalog_entry,
+    research_release_derived_features,
     verify_dataset_release,
 )
 from finboard_data.research import (
@@ -148,6 +150,7 @@ __all__ = [
     "RELEASE_MANIFEST_FILENAME",
     "RELEASE_SCHEMA_VERSION",
     "RESEARCH_ETF_CATALOG",
+    "RESEARCH_RELEASE_FEATURE_NAMES",
     "AkShareProvider",
     "ArtifactIntegrityError",
     "AssetCapability",
@@ -249,6 +252,7 @@ __all__ = [
     "load_symbol_pool",
     "new_factor_experiment",
     "research_etf_catalog_entry",
+    "research_release_derived_features",
     "resolve_market_by_code",
     "save_symbol_pool",
     "update_factor_experiment",

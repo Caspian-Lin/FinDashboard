@@ -22,7 +22,7 @@ import re
 import shutil
 import tempfile
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -120,6 +120,35 @@ RESEARCH_RELEASE_METADATA_FIELDS = (
     "observed_at",
     "source",
 )
+
+# issue #253:研究数据发布按 kind 可派生的因子/特征名 —— 发布侧元数据的
+# 唯一事实来源。命名与组合管线的 ``extract_factor_matrix`` 输出一致(由
+# finboard-backtest 单测锁定漂移);multi_period 入队门控与静态预检共用。
+RESEARCH_RELEASE_FEATURE_NAMES: dict[ReleaseDatasetKind, frozenset[str]] = {
+    ReleaseDatasetKind.DAILY_METRICS: frozenset(
+        {"pb", "turnover_rate", "market_cap", "earnings_yield", "dividend_yield"}
+    ),
+    ReleaseDatasetKind.FINANCIAL_INDICATORS: frozenset(
+        {"roe", "gross_profit_margin", "debt_to_assets", "revenue_yoy"}
+    ),
+}
+
+
+def _release_dataset_kind(value: object) -> ReleaseDatasetKind:
+    """容忍枚举 / 字符串 / 带 ``value`` 属性对象的 kind 归一。"""
+    if isinstance(value, ReleaseDatasetKind):
+        return value
+    return ReleaseDatasetKind(str(getattr(value, "value", value)))
+
+
+def research_release_derived_features(
+    kinds: Iterable[object],
+) -> frozenset[str]:
+    """给定发布 kind 集合 → 运行时可派生的特征名并集。"""
+    names: set[str] = set()
+    for kind in kinds:
+        names.update(RESEARCH_RELEASE_FEATURE_NAMES.get(_release_dataset_kind(kind), ()))
+    return frozenset(names)
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.]{0,31}$")
@@ -785,6 +814,9 @@ class ResearchDatasetRelease:
     storage_uri: str = ""
     metadata_version: str = ASSET_METADATA_VERSION
     release_checksum: str = ""
+    # issue #253:发布时可派生的特征名(按 kind 从 RESEARCH_RELEASE_FEATURE_NAMES
+    # 推导冻结)。bars 发布为空元组。
+    derived_features: tuple[str, ...] = ()
 
     @property
     def symbol_count(self) -> int:
@@ -809,6 +841,17 @@ class ResearchDatasetRelease:
             DatasetQualityStatus.PASSED,
             DatasetQualityStatus.WARNINGS,
         )
+
+    @property
+    def derived_feature_names(self) -> frozenset[str]:
+        """本发布可派生的特征名(issue #253)。
+
+        优先取发布时冻结的 ``derived_features`` 元数据;旧发布(字段为空)
+        回退按 ``dataset_kind`` 从映射推导,保证已存在发布的入队校验不误拒。
+        """
+        if self.derived_features:
+            return frozenset(self.derived_features)
+        return research_release_derived_features((self.dataset_kind,))
 
     @property
     def manifest(self) -> DatasetManifest:
@@ -854,7 +897,7 @@ class ResearchDatasetRelease:
         raise ReleaseCapabilityError(f"发布 {self.release_id} 未声明 {key} 能力")
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "release_id": self.release_id,
             "dataset_name": self.dataset_name,
             "source": self.source,
@@ -880,6 +923,11 @@ class ResearchDatasetRelease:
             "metadata_version": self.metadata_version,
             "release_checksum": self.release_checksum,
         }
+        if self.derived_features:
+            # issue #253:仅研究发布携带该键。空值不序列化使旧 manifest
+            # (bars 与既有研究发布)的重算 checksum 保持稳定。
+            payload["derived_features"] = list(self.derived_features)
+        return payload
 
     @classmethod
     def from_dict(cls, raw: dict[str, object]) -> ResearchDatasetRelease:
@@ -916,6 +964,10 @@ class ResearchDatasetRelease:
             storage_uri=str(raw.get("storage_uri", "")),
             metadata_version=str(raw.get("metadata_version", ASSET_METADATA_VERSION)),
             release_checksum=str(raw.get("release_checksum", "")),
+            derived_features=tuple(
+                str(item)
+                for item in cast(list[object], raw.get("derived_features", ()) or ())
+            ),
         )
 
     def symbol_codes(self) -> frozenset[str]:
@@ -1220,6 +1272,11 @@ class FrozenDatasetReleaseBuilder:
                 },
                 known_limitations=spec.known_limitations,
                 storage_uri=spec.release_id,
+                # issue #253:按 kind 冻结本发布可派生的特征名进 manifest
+                # (bars 为空,序列化时省略,checksum 不变)。
+                derived_features=tuple(
+                    sorted(research_release_derived_features((spec.dataset_kind,)))
+                ),
             )
             checksum = _release_checksum(release)
             release = replace(release, release_checksum=checksum)
