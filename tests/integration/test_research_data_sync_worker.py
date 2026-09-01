@@ -28,10 +28,12 @@ from finboard_data.research import (
     DailySecurityMetrics,
     FinancialIndicator,
     IndustryMembership,
+    InstrumentNameChange,
     InstrumentProfile,
     ResearchDataUpstreamError,
 )
 from finboard_persistence import (
+    InstrumentNameModel,
     ResearchDailyMetricModel,
     ResearchFinancialIndicatorModel,
     ResearchIndustryMembershipModel,
@@ -82,6 +84,7 @@ async def _clean(engine: AsyncEngine) -> None:
             "research_industry_classifications",
             "research_industry_memberships",
             "background_jobs",
+            "instrument_names",
         ):
             await conn.execute(text(f"DELETE FROM {table}"))
 
@@ -193,7 +196,35 @@ class FakeResearchProvider:
         self, *, list_status: str = "L"
     ) -> list[InstrumentProfile]:
         self.calls.append("profiles")
+        if list_status != "L":
+            return []  # fake 数据集全部为在市标的;#251 退市档案请求返回空
         return [self._profile(symbol) for symbol in self.symbols]
+
+    async def fetch_name_changes(self) -> list[InstrumentNameChange]:
+        """#251:历史名称变更(单标的两段区间,含去重排序由仓储处理)。"""
+        self.calls.append("name_changes")
+        return [
+            InstrumentNameChange(
+                symbol=self.symbols[0],
+                name="曾用名",
+                start_date=date(1991, 4, 3),
+                end_date=date(1992, 3, 9),
+                change_reason="更名",
+                source="tushare",
+                observed_at=NOW,
+                available_at=NOW,
+            ),
+            InstrumentNameChange(
+                symbol=self.symbols[0],
+                name="现用名",
+                start_date=date(1992, 3, 9),
+                end_date=None,
+                change_reason=None,
+                source="tushare",
+                observed_at=NOW,
+                available_at=NOW,
+            ),
+        ]
 
     async def fetch_daily_metrics(
         self, trade_date: date
@@ -247,6 +278,7 @@ def _payload(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "datasets": [
             "profiles",
+            "name_changes",
             "daily_metrics",
             "financial_indicators",
             "industry_memberships",
@@ -284,7 +316,7 @@ async def _batch_rows(engine: AsyncEngine) -> list[ResearchSyncBatchModel]:
 
 
 class TestResearchDataSyncWorker:
-    async def test_syncs_all_four_datasets(self, engine: AsyncEngine) -> None:
+    async def test_syncs_all_datasets(self, engine: AsyncEngine) -> None:
         provider = FakeResearchProvider(
             empty_days={date(2026, 7, 25), date(2026, 7, 26)}  # 周末无行情
         )
@@ -328,10 +360,17 @@ class TestResearchDataSyncWorker:
                     select(func.count()).select_from(ResearchInstrumentProfileModel)
                 )
             ).scalar_one()
+            # #251:名称历史直接重建主数据表 instrument_names(不走批次)。
+            name_history_count = (
+                await session.execute(
+                    select(func.count()).select_from(InstrumentNameModel)
+                )
+            ).scalar_one()
         assert daily_count == 4  # 2 个交易日 x 2 个标的
         assert financial_count == 2
         assert industry_count == 2
         assert profile_count == 2
+        assert name_history_count == 2
 
     async def test_partial_failure_rerun_completes(
         self, engine: AsyncEngine

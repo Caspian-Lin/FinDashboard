@@ -432,3 +432,178 @@ def _fake_session_maker() -> Any:
         return _FakeSession()
 
     return cast(async_sessionmaker[Any], _maker)
+
+
+# ---------------------------------------------------------------------------
+# #251:profiles 拉取退市档案 + name_changes 名称历史导入
+# ---------------------------------------------------------------------------
+
+
+def _profile_record(symbol: str, list_status: str) -> object:
+    """构造最小 InstrumentProfile 形状(frozen dataclass,构造时校验)。"""
+    from datetime import UTC, date, datetime
+
+    from finboard_data.research import InstrumentProfile
+
+    observed = datetime(2026, 9, 1, tzinfo=UTC)
+    return InstrumentProfile(
+        symbol=symbol,
+        name=f"name-{symbol}",
+        exchange="SZSE",
+        market="主板",
+        list_status=list_status,
+        list_date=date(1991, 4, 3),
+        delist_date=date(2005, 9, 1) if list_status == "D" else None,
+        industry="银行",
+        source="tushare",
+        observed_at=observed,
+        available_at=observed,
+    )
+
+
+class TestResearchDataSyncInstrumentGovernance:
+    @pytest.mark.asyncio
+    async def test_profiles_fetches_delisted_and_merges(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#251:profiles 段同时拉取退市档案(D)并合并进同一批次。"""
+        from finboard_backtest.background_jobs.executors.research_data_sync import (
+            ResearchDataSyncExecutor,
+        )
+
+        fetch_statuses: list[str] = []
+
+        class _Provider:
+            async def fetch_instrument_profiles(
+                self, *, list_status: str = "L"
+            ) -> list[object]:
+                fetch_statuses.append(list_status)
+                if list_status == "L":
+                    return [_profile_record("000001.SZ", "L")]
+                return [_profile_record("000003.SZ", "D")]
+
+        sync_calls: list[dict[str, object]] = []
+
+        class _Service:
+            async def sync_instrument_profiles(self, **kwargs: object) -> object:
+                sync_calls.append(kwargs)
+                return object()
+
+        import finboard_persistence.research_sync as persistence_mod
+
+        monkeypatch.setattr(
+            persistence_mod,
+            "ResearchDataSyncService",
+            lambda *a, **kw: _Service(),
+        )
+        executor = ResearchDataSyncExecutor(
+            session_maker=_fake_session_maker(),
+            provider_factory=lambda: _Provider(),  # type: ignore[arg-type,return-value]
+        )
+        job = _make_job(
+            {
+                "datasets": ["profiles"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-02",
+            },
+            "research_data_sync",
+        )
+        result = await executor.execute(job, _noop_progress)
+
+        assert result.status == "succeeded"
+        assert sorted(fetch_statuses) == ["D", "L"]
+        assert len(sync_calls) == 1
+        assert len(sync_calls[0]["records"]) == 2  # L + D 合并进同一批次
+        assert sync_calls[0]["parameters"] == {"list_status": "L+D"}
+
+    @pytest.mark.asyncio
+    async def test_name_changes_dataset_imports_history(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#251:name_changes dataset 拉取历史名称并写入主数据表。"""
+        from datetime import UTC, date, datetime
+
+        from finboard_backtest.background_jobs.executors.research_data_sync import (
+            ResearchDataSyncExecutor,
+        )
+        from finboard_data.research import InstrumentNameChange
+
+        observed = datetime(2026, 9, 1, tzinfo=UTC)
+
+        class _Provider:
+            async def fetch_name_changes(self) -> list[InstrumentNameChange]:
+                return [
+                    InstrumentNameChange(
+                        symbol="000001.SZ",
+                        name="深发展A",
+                        start_date=date(1991, 4, 3),
+                        end_date=date(1992, 3, 9),
+                        change_reason="更名",
+                        source="tushare",
+                        observed_at=observed,
+                        available_at=observed,
+                    ),
+                    InstrumentNameChange(
+                        symbol="000001.SZ",
+                        name="平安银行",
+                        start_date=date(1992, 3, 9),
+                        end_date=None,
+                        change_reason=None,
+                        source="tushare",
+                        observed_at=observed,
+                        available_at=observed,
+                    ),
+                ]
+
+        imported: list[list[tuple[str, str, object, object]]] = []
+
+        class _FakeInstrumentRepository:
+            def __init__(self, session: object) -> None:
+                self.session = session
+
+            async def import_name_history(
+                self, records: list[tuple[str, str, object, object]]
+            ) -> object:
+                imported.append(records)
+                return object()
+
+        import finboard_persistence as persistence_pkg
+
+        monkeypatch.setattr(
+            persistence_pkg, "InstrumentRepository", _FakeInstrumentRepository
+        )
+
+        class _CommitSession:
+            async def __aenter__(self) -> _CommitSession:
+                return self
+
+            async def __aexit__(self, *args: object) -> None:
+                pass
+
+            async def commit(self) -> None:
+                pass
+
+        class _CommitSessionMaker:
+            def __call__(self) -> _CommitSession:
+                return _CommitSession()
+
+        executor = ResearchDataSyncExecutor(
+            session_maker=_CommitSessionMaker(),  # type: ignore[arg-type]
+            provider_factory=lambda: _Provider(),  # type: ignore[arg-type,return-value]
+        )
+        job = _make_job(
+            {
+                "datasets": ["name_changes"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-02",
+            },
+            "research_data_sync",
+        )
+        result = await executor.execute(job, _noop_progress)
+
+        assert result.status == "succeeded"
+        assert len(imported) == 1
+        records = imported[0]
+        assert [item[0] for item in records] == ["000001.SZ", "000001.SZ"]
+        assert [item[1] for item in records] == ["深发展A", "平安银行"]
+        assert records[1][3] is None  # 当前名称保持开区间
