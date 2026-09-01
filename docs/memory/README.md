@@ -33,4 +33,5 @@
 - [Issue #218:沙箱策略代码接入 multi_period 回测](issue-218-sandbox-strategy-backtest.md) — decide(ctx)→targets 逐决策日容器执行;direct_weights 不重缩放、截断权威在管线约束投影;空 targets=合法全现金(空分支须补审计行);commit 由入队冻结、执行期不解析 active;kit 0.2.0 三处同步
 - [Issue #219:研究代码验证门与晋级链路](issue-219-research-code-promotion.md) — submit/rollback 只建 draft;screen + #57 validated_oos/final_test_unsealed 晋级门;active+passed 才可正式消费;四向审计引用与沙箱日志/资源归档;模拟盘保持独立隔离
 - [#233/#234:首次晋级闭环落地](promotion-chain-closure-233-234.md) — OOS 执行任务化揭盲不可重做;screen 绑定声明放 spec payload(编译期先于 run_queue 拒 draft);#218 遗留 checksum 缺陷顺带修复;factor screen 需 ≥2 份 RCR 快照;测试库 drop 表连带 CASCADE 外键
+- [第二轮 L3 E2E:验证实验三项阻断修复(#244)](e2e-round2-validation-executor-fixes-244.md) — PBO 矩阵取 IS 竞争 trial 非顺序窗口(近似 vs 真实交易日点数必不等);capital 预校验;异常兜底不替实验下 REJECTED(会烧掉不可重入的实验);假 runner 曲线必须含回撤(mdd=0→calmar=Infinity 落 JSON 崩)
 - [OpenCode provider 持久化与模型目录合并](opencode-provider-persistence-and-model-sync.md) — UI 连接=auth.json(data 卷),config provider=仓库文件(徽标「配置」);agent 定义以 .opencode/agent/*.md 为准(json agent 块是死配置);credential 表恒为空;同 id 与 models.dev 目录合并;UI 写配置落 :ro 挂载必失,重启回落仓库冻结态(#242)

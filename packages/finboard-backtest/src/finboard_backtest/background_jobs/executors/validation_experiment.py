@@ -15,10 +15,12 @@
 * **断点续跑安全**:trial_id 由 ``(experiment_id, candidate 序号)`` 确定性
   生成且仓储按 trial_id upsert,重入时先加载已持久化 trial 并跳过已跑候选,
   ``trials_used`` 不重复递增;
-* 失败映射:实验不存在 / 不可运行 / runner 未配置 → 具名 ``ExecutorError``
-  (均不可重试,自动重试只会重复消耗试验预算,``max_attempts`` 默认 1);
-  阈值不满足是**正常实验结论**(REJECTED),job failed 并携带可读原因,
-  不是执行器错误。
+* 失败映射:实验不存在 / 不可运行 / runner 未配置 / 配置不合法 → 具名
+  ``ExecutorError``(均不可重试,自动重试只会重复消耗试验预算,
+  ``max_attempts`` 默认 1);阈值不满足是**正常实验结论**(REJECTED),
+  job failed 并携带可读原因,不是执行器错误。walk-forward / 揭盲段的
+  意外异常兜底为具名 ``experiment_execution_failed``,实验状态不被推进
+  (可修复后重新入队断点续跑,issue #244)。
 
 :type:`TrialRunnerFactory` 是注入点:默认实现按实验
 ``version_stamp.selection_config["validation_trial_runner"]`` 声明的
@@ -33,8 +35,10 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_backtest.background_jobs.contracts import (
@@ -64,6 +68,8 @@ _RUNNABLE_STATUSES = frozenset(
     {ExperimentStatus.HYPOTHESIS, ExperimentStatus.IN_SAMPLE}
 )
 
+logger = structlog.get_logger(__name__)
+
 
 class ValidationExperimentExecutor:
     """``kind=validation_experiment`` 执行器。"""
@@ -85,90 +91,151 @@ class ValidationExperimentExecutor:
         experiment_id = _extract_experiment_id(job)
         await progress(0, None, "validation_experiment:start")
         async with self._session_maker() as session:
-            from finboard_persistence.validation_repo import (
-                ResearchExperimentRepository,
-                ResearchTrialRepository,
-            )
-
-            exp_repo = ResearchExperimentRepository(session)
-            trial_repo = ResearchTrialRepository(session)
-            experiment = await exp_repo.get(experiment_id)
-            if experiment is None:
-                raise ExecutorError(
-                    code="missing_experiment",
-                    summary=f"验证实验不存在: {experiment_id}",
-                    retryable=False,
-                    context={"experiment_id": experiment_id},
+            try:
+                return await self._execute_locked(
+                    session, progress, experiment_id
                 )
-            _precheck_runnable(experiment)
-            trial_runner = await self._runner_factory(session, experiment)
-            runner = ValidationRunner(
-                experiment=experiment, trial_runner=trial_runner
+            except ExecutorError:
+                raise
+            except Exception as exc:
+                raise await _execution_failed_error(
+                    session, experiment_id, exc
+                ) from exc
+
+    async def _execute_locked(
+        self,
+        session: AsyncSession,
+        progress: ProgressCallback,
+        experiment_id: str,
+    ) -> JobResult:
+        from finboard_persistence.validation_repo import (
+            ResearchExperimentRepository,
+            ResearchTrialRepository,
+        )
+
+        exp_repo = ResearchExperimentRepository(session)
+        trial_repo = ResearchTrialRepository(session)
+        experiment = await exp_repo.get(experiment_id)
+        if experiment is None:
+            raise ExecutorError(
+                code="missing_experiment",
+                summary=f"验证实验不存在: {experiment_id}",
+                retryable=False,
+                context={"experiment_id": experiment_id},
             )
-            # 断点续跑:预载已持久化 trial(upsert 幂等),trials_used 不重复递增。
-            persisted = await trial_repo.list_by_experiment(experiment_id)
-            runner.trials.extend(persisted)
-            candidates = _candidates(experiment)
-            pending = candidates[len(persisted):]
+        _precheck_runnable(experiment)
+        trial_runner = await self._runner_factory(session, experiment)
+        runner = ValidationRunner(
+            experiment=experiment, trial_runner=trial_runner
+        )
+        # 断点续跑:预载已持久化 trial(upsert 幂等),trials_used 不重复递增。
+        persisted = await trial_repo.list_by_experiment(experiment_id)
+        runner.trials.extend(persisted)
+        candidates = _candidates(experiment)
+        pending = candidates[len(persisted):]
 
-            total_stages = len(pending) + 3
-            done = 0
-            if pending:
-                await progress(done, total_stages, "validation_experiment:in_sample")
-                for trial in await runner.run_in_sample(pending):
-                    await trial_repo.save(trial)
-                    await exp_repo.save(runner.experiment)
-                    await session.commit()
-                    done += 1
-                    await progress(
-                        done, total_stages, "validation_experiment:in_sample"
-                    )
-            else:
-                # 既有 trial 可能不是 runner 记忆里的最优;重算 IS 最优。
-                _reselect_best(runner)
-                done += 1
-
-            if runner.best_trial_id is None:
-                runner.reject(
-                    "no trial passed the in-sample gate "
-                    f"(trials_used={runner.experiment.trials_used}/"
-                    f"{runner.experiment.plan.trial_budget})"
-                )
+        total_stages = len(pending) + 3
+        done = 0
+        if pending:
+            await progress(done, total_stages, "validation_experiment:in_sample")
+            for trial in await runner.run_in_sample(pending):
+                await trial_repo.save(trial)
                 await exp_repo.save(runner.experiment)
                 await session.commit()
-                await progress(total_stages, total_stages, "validation_experiment:rejected")
-                return _experiment_result(runner.experiment)
-
-            await progress(done, total_stages, "validation_experiment:walk_forward")
-            best = await runner.run_walk_forward()
-            if best is not None:
-                await trial_repo.save(best)
-                await session.commit()
+                done += 1
+                await progress(
+                    done, total_stages, "validation_experiment:in_sample"
+                )
+        else:
+            # 既有 trial 可能不是 runner 记忆里的最优;重算 IS 最优。
+            _reselect_best(runner)
             done += 1
 
-            # 揭盲是一次性门:重入时已持久化 unsealed/终态的实验在上面
-            # _precheck_runnable 已拒绝;走到这里说明本次会话内完成 IS+OOS。
-            await progress(done, total_stages, "validation_experiment:final_test")
-            verdict = await runner.unseal_final_test()
-            await exp_repo.save(runner.experiment)
-            if runner.best_trial_id is not None:
-                final_best = next(
-                    (
-                        t
-                        for t in runner.trials
-                        if t.trial_id == runner.best_trial_id
-                    ),
-                    None,
-                )
-                if final_best is not None:
-                    await trial_repo.save(final_best)
-            await session.commit()
-            await progress(
-                total_stages,
-                total_stages,
-                f"validation_experiment:{runner.experiment.status.value}",
+        if runner.best_trial_id is None:
+            runner.reject(
+                "no trial passed the in-sample gate "
+                f"(trials_used={runner.experiment.trials_used}/"
+                f"{runner.experiment.plan.trial_budget})"
             )
-            return _experiment_result(runner.experiment, verdict=verdict)
+            await exp_repo.save(runner.experiment)
+            await session.commit()
+            await progress(total_stages, total_stages, "validation_experiment:rejected")
+            return _experiment_result(runner.experiment)
+
+        await progress(done, total_stages, "validation_experiment:walk_forward")
+        best = await runner.run_walk_forward()
+        if best is not None:
+            await trial_repo.save(best)
+            await session.commit()
+        done += 1
+
+        # 揭盲是一次性门:重入时已持久化 unsealed/终态的实验在上面
+        # _precheck_runnable 已拒绝;走到这里说明本次会话内完成 IS+OOS。
+        await progress(done, total_stages, "validation_experiment:final_test")
+        verdict = await runner.unseal_final_test()
+        await exp_repo.save(runner.experiment)
+        if runner.best_trial_id is not None:
+            final_best = next(
+                (
+                    t
+                    for t in runner.trials
+                    if t.trial_id == runner.best_trial_id
+                ),
+                None,
+            )
+            if final_best is not None:
+                await trial_repo.save(final_best)
+        await session.commit()
+        await progress(
+            total_stages,
+            total_stages,
+            f"validation_experiment:{runner.experiment.status.value}",
+        )
+        return _experiment_result(runner.experiment, verdict=verdict)
+
+
+async def _execution_failed_error(
+    session: AsyncSession,
+    experiment_id: str,
+    exc: Exception,
+) -> ExecutorError:
+    """意外异常兜底(issue #244):具名化 + 保留可续跑状态。
+
+    实验状态由已持久化的事务决定(IS 段逐 trial 提交),本兜底只回滚
+    失败事务并回读当前状态写进错误摘要;**不**把实验推进到终态 —— 崩溃
+    是执行器/平台问题而非实验结论,REJECTED 会永久烧掉实验(揭盲不可
+    重做),保留 ``in_sample`` 让修复后重入队断点续跑。
+    """
+    status_text = "unknown"
+    try:
+        await session.rollback()
+        from finboard_persistence.validation_repo import (
+            ResearchExperimentRepository,
+        )
+
+        current = await ResearchExperimentRepository(session).get(experiment_id)
+        status_text = current.status.value if current else "missing"
+    except Exception:
+        logger.warning(
+            "validation_experiment.status_probe_failed",
+            experiment_id=experiment_id,
+        )
+    logger.warning(
+        "validation_experiment.execution_failed",
+        experiment_id=experiment_id,
+        persisted_status=status_text,
+        error=f"{type(exc).__name__}: {exc}",
+    )
+    return ExecutorError(
+        code="experiment_execution_failed",
+        summary=(
+            f"实验执行异常中断: {type(exc).__name__}: {exc};"
+            f"实验状态保留在 {status_text},修复后可重新入队断点续跑"
+            "(已持久化的 trial 不重跑)"
+        ),
+        retryable=False,
+        context={"experiment_id": experiment_id},
+    )
 
 
 def _extract_experiment_id(job: JobRecord) -> str:
@@ -291,8 +358,11 @@ async def default_trial_runner_factory(
         }
 
     未声明 / 声明不完整 → 具名 ``trial_runner_unconfigured``(fail-visible,
-    不猜测回测语义;测试注入合成 runner)。回测直接走
-    ``BacktestEngine``,不落 backtest_runs(试验属于实验,不属于回测历史)。
+    不猜测回测语义;测试注入合成 runner)。声明了但配置不合法(capital 非
+    数值 / params 非 mapping / 策略名未注册或基础参数不合法)→ 具名
+    ``trial_runner_invalid_config``,同样在首个 trial 启动前失败,不消耗
+    试验预算(issue #244)。回测直接走 ``BacktestEngine``,不落
+    backtest_runs(试验属于实验,不属于回测历史)。
     """
     del session  # 预留:快照/数据面扩展时复用请求级 session
     raw_config = experiment.version_stamp.selection_config.get(
@@ -320,13 +390,50 @@ async def default_trial_runner_factory(
             context={"experiment_id": experiment.experiment_id},
         )
 
-    from finboard_app.strategies import create_strategy
+    from finboard_app.strategies import (
+        create_strategy,
+        list_strategy_definitions,
+    )
     from finboard_backtest import BacktestConfig, BacktestEngine, BenchmarkConfig
     from finboard_backtest.background_jobs.executors._providers import (
         build_bar_provider,
         default_settings_factory,
         resolve_provider_name,
     )
+
+    # 配置在 runner 构建期全部预校验(issue #244):任何一项不合法都在首个
+    # trial 启动前具名失败,不消耗试验预算,也不留下「str + decimal.Decimal」
+    # 式的逐 trial 不透明失败原因。
+    base_params_raw = config.get("params", {})
+    if not isinstance(base_params_raw, Mapping):
+        raise ExecutorError(
+            code="trial_runner_invalid_config",
+            summary=(
+                "validation_trial_runner.params 必须为对象(mapping),"
+                f"得到 {type(base_params_raw).__name__}: {base_params_raw!r}"
+            ),
+            retryable=False,
+            context={"experiment_id": experiment.experiment_id},
+        )
+    base_params = dict(base_params_raw)
+    capital = _coerce_capital(
+        config.get("capital", 100000), experiment.experiment_id
+    )
+    try:
+        create_strategy(strategy_name, "validation-probe", **base_params)
+    except Exception as exc:
+        available = ", ".join(
+            definition.kind for definition in list_strategy_definitions()
+        )
+        raise ExecutorError(
+            code="trial_runner_invalid_config",
+            summary=(
+                f"validation_trial_runner 无法构建策略 {strategy_name!r}"
+                f"(参数 {base_params!r}): {exc};可用策略: {available}"
+            ),
+            retryable=False,
+            context={"experiment_id": experiment.experiment_id},
+        ) from exc
 
     settings_factory = default_settings_factory
     provider = build_bar_provider(
@@ -337,8 +444,6 @@ async def default_trial_runner_factory(
         settings_factory,
     )
 
-    base_params = dict(config.get("params", {}) or {})
-    capital = config.get("capital", 100000)
     benchmark = config.get("benchmark")
     symbol_codes = [str(s) for s in symbols]
 
@@ -372,6 +477,45 @@ async def default_trial_runner_factory(
         return await engine.run()
 
     return _run
+
+
+def _coerce_capital(raw: object, experiment_id: str) -> Decimal:
+    """``validation_trial_runner.capital`` 宽进严出(issue #244)。
+
+    接受 int / float / 数值字符串,统一转 ``Decimal`` —— ``BacktestConfig``
+    是 dataclass(``initial_capital: Decimal``),JSON 里的 str 直通会在引擎
+    算术处炸出不透明的 ``str + decimal.Decimal``;bool 是 int 子类需显式
+    排除。非正数 / 非有限值一律具名拒绝,在首个 trial 启动前 fail-fast。
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str, Decimal)):
+        raise ExecutorError(
+            code="trial_runner_invalid_config",
+            summary=(
+                "validation_trial_runner.capital 必须为数值"
+                f"(int/float/数值字符串),得到 {type(raw).__name__}: {raw!r}"
+            ),
+            retryable=False,
+            context={"experiment_id": experiment_id},
+        )
+    try:
+        capital = Decimal(str(raw).strip())
+    except InvalidOperation as exc:
+        raise ExecutorError(
+            code="trial_runner_invalid_config",
+            summary=f"validation_trial_runner.capital 无法解析为数值: {raw!r}",
+            retryable=False,
+            context={"experiment_id": experiment_id},
+        ) from exc
+    if not capital.is_finite() or capital <= 0:
+        raise ExecutorError(
+            code="trial_runner_invalid_config",
+            summary=(
+                f"validation_trial_runner.capital 必须为正有限数,得到 {capital}"
+            ),
+            retryable=False,
+            context={"experiment_id": experiment_id},
+        )
+    return capital
 
 
 # JobExecutor 是 runtime_checkable Protocol,直接用类即满足结构子类型。

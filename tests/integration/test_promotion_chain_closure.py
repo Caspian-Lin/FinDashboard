@@ -76,6 +76,7 @@ from finboard_backtest.validation.contracts import (
     new_experiment,
     transition_status,
 )
+from finboard_backtest.validation.runner import ValidationRunner
 from finboard_data.releases import (
     RELEASE_FIELDS,
     AssetCapability,
@@ -527,6 +528,42 @@ def _fake_runner_factory(calls: list[tuple[date, date]]) -> Any:
                     level *= 0.97
                 else:
                     level *= 1.01
+                equity.append(
+                    (start + timedelta(days=index), Decimal(str(round(level, 4))))
+                )
+            return BacktestResult(equity_curve=equity)
+
+        return runner
+
+    return factory
+
+
+def _ragged_runner_factory() -> Any:
+    """不等长权益曲线 runner(#244 回归):模拟真实交易日与近似切窗的点数差。
+
+    旧实现的 PBO 矩阵以顺序窗口序列为行,各窗口点数不等直接触发 CSCV
+    严格等长断言;修复后矩阵取自 IS 竞争 trial,窗口不等长不再致命。
+    """
+
+    async def factory(session: AsyncSession, experiment: Any) -> Any:
+        del session, experiment
+        state = {"calls": 0}
+
+        async def runner(
+            *,
+            start: date,
+            end: date,
+            params: dict[str, object],
+            config_overrides: dict[str, object] | None = None,
+        ) -> BacktestResult:
+            del params, config_overrides, end
+            state["calls"] += 1
+            n_points = 20 - ((state["calls"] - 1) % 8)
+            equity: list[tuple[date, Decimal]] = []
+            level = 100.0
+            for index in range(n_points):
+                # 单日 -3% 回撤:避免 mdd=0 → calmar=Infinity(无法落 JSON 列)
+                level *= 0.97 if index == 10 else 1.01
                 equity.append(
                     (start + timedelta(days=index), Decimal(str(round(level, 4))))
                 )
@@ -1034,6 +1071,119 @@ class TestValidationExperimentExecutor:
         assert env_budget.error is not None
         assert env_budget.error.kind == "invalid_argument"
         assert "预算" in env_budget.error.message
+
+
+    async def test_full_chain_survives_ragged_window_lengths(
+        self, engine: AsyncEngine
+    ) -> None:
+        """#244 回归:窗口收益不等长(真实节假日 vs 近似切窗)不再崩溃。
+
+        修复前:PBO 矩阵以顺序窗口序列为行,不等长触发 CSCV 严格等长
+        断言,实验对一切配置必然崩溃且停留 in_sample;修复后矩阵取自
+        IS 竞争 trial,全链路照常走到 validated_oos。
+        """
+        experiment = _promotion_experiment(
+            artifact_id="RC-" + "6" * 24,
+            artifact_name=FACTOR_NAME,
+            kind="factor",
+            commit=FACTOR_COMMIT,
+        )
+        async with session_factory(engine)() as session:
+            await ResearchExperimentRepository(session).save(experiment)
+            await session.commit()
+        executor = ValidationExperimentExecutor(
+            session_maker=session_factory(engine),
+            runner_factory=_ragged_runner_factory(),
+        )
+        result = await executor.execute(
+            JobRecord(
+                job_id="BJ-ragged",
+                kind="validation_experiment",
+                queue="research",
+                payload={"experiment_id": experiment.experiment_id},
+                attempt=1,
+                max_attempts=1,
+                requested_by="integration-test",
+            ),
+            _noop_progress,
+        )
+        assert result.status == "succeeded", (
+            f"{result.error_code}: {result.error_summary}"
+        )
+        async with session_factory(engine)() as session:
+            saved = await ResearchExperimentRepository(session).get(
+                experiment.experiment_id
+            )
+            assert saved is not None
+            assert saved.status is ExperimentStatus.VALIDATED_OOS
+
+    async def test_unexpected_failure_named_and_resumable(
+        self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """意外异常兜底(#244):具名 experiment_execution_failed,状态保留可续跑。
+
+        兜底不把实验推进终态 —— 崩溃是平台问题而非实验结论,REJECTED
+        会永久烧掉实验(揭盲不可重做);保留 in_sample 让修复后重入队
+        断点续跑(已持久化 trial 不重跑)。
+        """
+
+        async def _boom(self: ValidationRunner) -> Any:
+            raise ValueError("all trials must have the same length")
+
+        monkeypatch.setattr(ValidationRunner, "run_walk_forward", _boom)
+        experiment = _promotion_experiment(
+            artifact_id="RC-" + "7" * 24,
+            artifact_name=FACTOR_NAME,
+            kind="factor",
+            commit=FACTOR_COMMIT,
+        )
+        async with session_factory(engine)() as session:
+            await ResearchExperimentRepository(session).save(experiment)
+            await session.commit()
+        executor = ValidationExperimentExecutor(
+            session_maker=session_factory(engine),
+            runner_factory=_fake_runner_factory([]),
+        )
+        job = JobRecord(
+            job_id="BJ-crash",
+            kind="validation_experiment",
+            queue="research",
+            payload={"experiment_id": experiment.experiment_id},
+            attempt=1,
+            max_attempts=1,
+            requested_by="integration-test",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "experiment_execution_failed"
+        assert not exc_info.value.retryable
+        assert "in_sample" in exc_info.value.summary
+        assert "重新入队" in exc_info.value.summary
+
+        async with session_factory(engine)() as session:
+            saved = await ResearchExperimentRepository(session).get(
+                experiment.experiment_id
+            )
+            assert saved is not None
+            assert saved.status is ExperimentStatus.IN_SAMPLE
+            assert not saved.final_test_unsealed
+            trials = await ResearchTrialRepository(session).list_by_experiment(
+                experiment.experiment_id
+            )
+            assert len(trials) == 2
+
+        # 修复后(此处以解除注入模拟)重入队断点续跑 → validated_oos
+        monkeypatch.undo()
+        result = await executor.execute(job, _noop_progress)
+        assert result.status == "succeeded", (
+            f"{result.error_code}: {result.error_summary}"
+        )
+        async with session_factory(engine)() as session:
+            saved = await ResearchExperimentRepository(session).get(
+                experiment.experiment_id
+            )
+            assert saved is not None
+            assert saved.status is ExperimentStatus.VALIDATED_OOS
 
 
 # ---------------------------------------------------------------------------

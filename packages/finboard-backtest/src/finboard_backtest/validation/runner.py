@@ -173,6 +173,10 @@ class ValidationRunner:
     trial_runner: TrialRunner
     trials: list[TrialRecord] = field(default_factory=list)
     best_trial_id: str | None = None
+    # IS 阶段各 trial 的日收益(内存态,不持久化):PBO/CSCV 的输入矩阵要求
+    # 行=竞争配置、列=同一观测轴,IS 各 trial 在同一训练窗回测天然满足。
+    # 续跑时从仓储加载的 trial 不在其中 → PBO 跳过并具名说明。
+    _in_sample_returns: dict[str, tuple[float, ...]] = field(default_factory=dict)
     _state_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -277,6 +281,8 @@ class ValidationRunner:
             end=plan.train_end,
             result=result,
         )
+        # 无论是否过 IS 门,收益都保留:PBO 要看全部竞争 trial(含被拒者)。
+        self._in_sample_returns[trial_id] = window_result.daily_returns
 
         # IS 门判定
         thr = self.experiment.thresholds
@@ -378,14 +384,15 @@ class ValidationRunner:
         # 跑稳健性 probe
         probes = await self._run_robustness_probes(best=best)
 
-        # 跑统计修正
+        # 跑统计修正。PBO 矩阵取 IS 阶段各竞争 trial 的日收益(同窗同轴),
+        # 不再用顺序 walk-forward 窗口序列:窗口按近似交易日切分、真实权益
+        # 曲线按真实交易日产出,点数天然不等长,曾触发 CSCV 严格等长断言
+        # 使实验对一切配置必然崩溃(issue #244);窗口拼接序列仍作为
+        # best_returns 进入 DSR / PSR / bootstrap。
         best_returns: list[float] = []
         for r in all_window_returns:
             best_returns.extend(r)
-        stat_report = self._build_stat_report(
-            best_returns=best_returns,
-            all_returns_matrix=all_window_returns,
-        )
+        stat_report = self._build_stat_report(best_returns=best_returns)
 
         # OOS 门判定
         thr = self.experiment.thresholds
@@ -493,13 +500,50 @@ class ValidationRunner:
 
         return probes
 
+    def _pbo_matrix(self) -> tuple[list[list[float]] | None, str | None]:
+        """PBO/CSCV 输入矩阵:IS 阶段各竞争 trial 的日收益。
+
+        返回 ``(matrix, None)`` 或 ``(None, 跳过原因)``。CSCV 语义要求
+        行 = 竞争配置、列 = 同一观测轴 —— IS 各 trial 在同一
+        ``[train_start, train_end]`` 上回测,天然满足;<2 个可比 trial
+        或行不等长(理论上仅数据面异常)即跳过,原因具名上报。
+        """
+        rows = [
+            list(returns)
+            for returns in self._in_sample_returns.values()
+            if returns
+        ]
+        if len(rows) < 2:
+            reason = (
+                "fewer than 2 comparable in-sample trials "
+                f"(n={len(rows)};walk-forward 窗口序列不再充当 trials,"
+                "见 issue #244)"
+            )
+            return None, reason
+        n_obs = len(rows[0])
+        if n_obs == 0 or any(len(r) != n_obs for r in rows):
+            return None, "non-rectangular in-sample returns matrix"
+        return rows, None
+
     def _build_stat_report(
         self,
         *,
         best_returns: list[float],
-        all_returns_matrix: list[list[float]],
     ) -> StatisticalReport:
-        """计算统计修正报告(DSR / PSR / PBO / bootstrap CI)。"""
+        """计算统计修正报告(DSR / PSR / PBO / bootstrap CI)。
+
+        PBO 输入见 :meth:`_pbo_matrix`;跳过时 ``pbo=0.0`` 并把原因写进
+        ``methodology_notes``(fail-visible,不静默)。
+        """
+        matrix, pbo_skip_reason = self._pbo_matrix()
+        notes = (
+            "DSR=Deflated Sharpe (Bailey & López de Prado 2014); "
+            "PSR=Probabilistic Sharpe (López de Prado 2012); "
+            "PBO=CSCV (Bailey et al. 2017); "
+            "CI=stationary bootstrap (Politis & Romano 1994)."
+        )
+        if pbo_skip_reason is not None:
+            notes += f" PBO skipped: {pbo_skip_reason}"
         n_trials = max(1, len(self.trials))
         (
             dsr,
@@ -511,7 +555,7 @@ class ValidationRunner:
             mdd_high,
         ) = build_statistical_report(
             best_trial_returns=best_returns,
-            all_trial_returns_matrix=all_returns_matrix if len(all_returns_matrix) >= 2 else None,
+            all_trial_returns_matrix=matrix,
             n_trials=n_trials,
             benchmark_sharpe=0.0,
             risk_free_annual=0.03,
@@ -526,12 +570,7 @@ class ValidationRunner:
             bootstrap_mdd_ci_low=mdd_low,
             bootstrap_mdd_ci_high=mdd_high,
             n_trials=n_trials,
-            methodology_notes=(
-                "DSR=Deflated Sharpe (Bailey & López de Prado 2014); "
-                "PSR=Probabilistic Sharpe (López de Prado 2012); "
-                "PBO=CSCV (Bailey et al. 2017); "
-                "CI=stationary bootstrap (Politis & Romano 1994)."
-            ),
+            methodology_notes=notes,
         )
 
     def _evaluate_oos_gate(

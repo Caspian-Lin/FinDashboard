@@ -228,7 +228,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   succeeded / rejected → failed 附阈值原因;完成后把 experiment_id 传给
   finboard_research_code_promote。实验的 version_stamp.selection_config 须声明
   validation_trial_runner:{strategy, symbols, provider?, params?, capital?}
-  (注册表策略回测),未声明执行期报 trial_runner_unconfigured。
+  (注册表策略回测;capital 数值、params 对象、strategy 须在注册表),
+  未声明执行期报 trial_runner_unconfigured,配置不合法在首个 trial 前
+  报 trial_runner_invalid_config;执行意外中断报 experiment_execution_failed
+  (状态保留,可修复后重新入队断点续跑)。
   与因子实验(登记簿)是两套独立但耦合的系统。
 - 自选股(7,✅ #140):watchlist list/get(只读)、create/update/delete/
   add_symbols/remove_symbol(写,受 mcp_readonly_only 守卫)。标的组管理:
