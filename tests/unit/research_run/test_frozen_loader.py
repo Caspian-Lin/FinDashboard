@@ -631,7 +631,7 @@ class TestResearchReleaseMissingSymbols:
                 )
             return [_make_record(code)]
 
-        provider.fetch_financial_indicators = _fetch_financial  # type: ignore[method-assign]
+        provider.fetch_financial_indicators = _fetch_financial  # type: ignore[attr-defined]
         return provider
 
     async def test_missing_symbol_tolerated_and_reported(self) -> None:
@@ -710,7 +710,7 @@ class TestResearchReleaseMissingSymbols:
             close_by_symbol={"600519.SH": Decimal("1800.0")},
         )
         fin_provider = self._financial_provider(symbols_with_data={"600519.SH"})
-        fin_provider.release.release_id = "bars-release-v2-fin"  # type: ignore[attr-defined]
+        fin_provider.release.release_id = "fin-release-v1"
 
         def _release_factory(release_id: str) -> _StubProvider:
             return {
