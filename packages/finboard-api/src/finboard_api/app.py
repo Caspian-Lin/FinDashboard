@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
+import httpx
 import structlog
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -126,6 +127,112 @@ async def _start_embedded_mcp_server(
     )
 
 
+#: 内嵌 MCP 就绪探测参数(#250):容器创建前的短超时轮询。
+_EMBEDDED_MCP_READY_TIMEOUT = 10.0
+_EMBEDDED_MCP_READY_INTERVAL = 0.2
+
+#: opencode 容器 /mcp 状态自检超时(#250 可见性底线)。
+_OPENCODE_MCP_STATUS_TIMEOUT = 5.0
+
+
+async def _wait_embedded_mcp_ready(
+    port: int,
+    *,
+    timeout: float = _EMBEDDED_MCP_READY_TIMEOUT,  # noqa: ASYNC109
+    interval: float = _EMBEDDED_MCP_READY_INTERVAL,
+) -> bool:
+    """轮询内嵌 MCP 端口直到有任何 HTTP 响应(401 也算就绪)。
+
+    #250 竞态修复:``_start_embedded_mcp_server`` 的 uvicorn ``serve()`` 是后台
+    任务,``create_task`` 返回时端口尚未 bind;而 opencode 容器启动那一刻会首连
+    remote MCP,连不上即被标记 ``failed`` 且 v1.18.15 不再重试(整个容器生命
+    周期 ``finboard_*`` 工具缺失)。容器创建前必须确认端口已监听。
+
+    超时不阻断启动(#118 降级风格):记 WARNING 返回 False;bind 层面的失败
+    已由 ``api.opencode_mcp_bind_failed`` 单独可见。
+
+    返回 True = 端口已就绪;False = 超时未就绪。
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    url = f"http://127.0.0.1:{port}/mcp"
+    # trust_env=False:loopback 探测不受系统代理环境变量影响(走代理会误判)。
+    async with httpx.AsyncClient(timeout=1.0, trust_env=False) as client:
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                # 任何 HTTP 响应(含 401/404)都证明端口已完成 bind 并在 accept。
+                await client.get(url)
+                return True
+            except httpx.HTTPError:
+                await asyncio.sleep(interval)
+    logger.warning(
+        "api.opencode_mcp_ready_timeout", port=port, timeout=timeout
+    )
+    return False
+
+
+async def _check_opencode_mcp_status(
+    base_url: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    attempts: int = 3,
+    interval: float = 2.0,
+) -> str:
+    """opencode 容器就绪后自检 finboard MCP 连接状态(#250 可见性底线)。
+
+    opencode 首连 remote MCP 失败会把它标记 ``failed`` 且不再重试,故障完全
+    静默(agent 没有 ``finboard_*`` 工具却无任何日志,只能用户发现「agent 像
+    坏了」)。此处 GET 容器 ``/mcp`` 读取各 remote MCP 状态,finboard 非
+    ``connected`` 即打 WARNING(status + error 一并记录)。端点不可达 / 非
+    JSON / 缺 finboard 条目同样 WARNING —— 可见性优先。
+
+    容器 ``global/health`` 就绪不等于 remote MCP 初始化完成(实测首连需要
+    数秒),因此内部重试 ``attempts`` 次(间隔 ``interval`` 秒),一旦
+    connected 即返回;全部尝试后仍非 connected 才告警,避免启动噪音。
+
+    返回状态字串(``connected`` / ``not_connected`` / ``missing`` / ``unknown``),
+    供单测断言;生产调用方忽略返回值。
+    """
+    url = f"{base_url.rstrip('/')}/mcp"
+    # trust_env=False:宿主机 loopback 自检不受系统代理环境变量影响。
+    status = "unknown"
+    error: str | None = None
+    for attempt in range(attempts):
+        try:
+            async with httpx.AsyncClient(
+                timeout=_OPENCODE_MCP_STATUS_TIMEOUT,
+                transport=transport,
+                trust_env=False,
+            ) as client:
+                resp = await client.get(url)
+            payload = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            status = "unknown"
+            error = str(exc) or type(exc).__name__
+        else:
+            finboard = payload.get("finboard") if isinstance(payload, dict) else None
+            if not isinstance(finboard, dict):
+                # 无 finboard 条目 = 容器没配置该 remote(配置渲染失败等)。
+                status = "missing"
+                error = None
+            elif finboard.get("status") == "connected":
+                logger.info("api.opencode_mcp_connected", url=url)
+                return "connected"
+            else:
+                status = "not_connected"
+                error = str(finboard.get("error"))
+        if attempt < attempts - 1:
+            await asyncio.sleep(interval)
+    logger.warning(
+        "api.opencode_mcp_not_connected" if status == "not_connected" else
+        "api.opencode_mcp_status_missing" if status == "missing" else
+        "api.opencode_mcp_status_unknown",
+        url=url,
+        status=status,
+        error=error,
+    )
+    return status
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
@@ -189,6 +296,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             process_manager = OpenCodeProcessManager(
                 web_config, manage_process=settings.opencode_manage_process
             )
+            # #250:内嵌 finboard_mcp 必须先监听、容器后创建 —— opencode 容器
+            # 启动那一刻会首连 remote MCP,连不上即被标记 failed 且 v1.18.15
+            # 不再重试(整个容器生命周期 finboard_* 工具缺失)。此前 lifespan
+            # 先起容器后起 MCP,每次冷启动都在赌 8765 先于容器就绪。外部 serve
+            # 模式(形态 B)容器非本进程创建,无此约束,时序保持现状。
+            # 内嵌启动省去单独跑 ``python -m finboard_mcp``;设
+            # ``opencode_embed_mcp=False`` 回退独立进程模式。
+            # #157:容器经 host.docker.internal 跨网络访问宿主机,MCP 服务绑
+            # 127.0.0.1 时不可达 —— ``mcp_host`` 为默认值时自动改绑 0.0.0.0
+            # (Bearer token 保护);用户显式配置了其它地址则尊重配置。
+            if settings.opencode_embed_mcp:
+                mcp_bind_host = settings.mcp_host
+                if mcp_bind_host == "127.0.0.1":
+                    mcp_bind_host = "0.0.0.0"
+                    logger.info(
+                        "api.opencode_mcp_host_widened",
+                        reason="container_needs_host_docker_internal",
+                        host=mcp_bind_host,
+                        port=settings.mcp_port,
+                    )
+                await _start_embedded_mcp_server(app, settings, host=mcp_bind_host)
+                # 确认端口完成 bind 再创建容器;超时只告警不阻断(#118 降级风格)。
+                await _wait_embedded_mcp_ready(settings.mcp_port)
             web_ready = True
             if settings.opencode_manage_process:
                 try:
@@ -231,25 +361,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.warning(
                     "api.opencode_runtime_skipped", reason="web_container_not_ready"
                 )
-            # 内嵌启动 finboard-mcp HTTP server:容器内 opencode 通过
-            # ``host.docker.internal:{mcp_port}`` 访问它。复用 ``build_mcp_server()``
-            # + Bearer 鉴权(``mcp_auth_token``),以 uvicorn 后台任务跑在当前事件循环。
-            # 这样用户无需单独跑 ``python -m finboard_mcp``;设 ``opencode_embed_mcp``
-            # =False 可回退到独立进程模式。
-            # #157:容器经 host.docker.internal 跨网络访问宿主机,MCP 服务绑 127.0.0.1
-            # 时不可达 —— ``mcp_host`` 为默认值时自动改绑 0.0.0.0(Bearer token 保护);
-            # 用户显式配置了其它地址则尊重配置。
-            if settings.opencode_embed_mcp:
-                mcp_bind_host = settings.mcp_host
-                if settings.opencode_web_enabled and mcp_bind_host == "127.0.0.1":
-                    mcp_bind_host = "0.0.0.0"
-                    logger.info(
-                        "api.opencode_mcp_host_widened",
-                        reason="container_needs_host_docker_internal",
-                        host=mcp_bind_host,
-                        port=settings.mcp_port,
-                    )
-                await _start_embedded_mcp_server(app, settings, host=mcp_bind_host)
         elif settings.opencode_enabled:
             # 形态 (B):外部 opencode serve(4096,无 auth),向后兼容。
             app.state.opencode_runtime = OpenCodeRuntimeClient(
@@ -267,6 +378,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         await kernel.start()
         logger.info("api.kernel_started", ready=kernel.ready)
+        # #250 可见性底线:容器就绪后自检 finboard MCP 连接状态,非 connected
+        # 即 WARNING —— 首连失败在 v1.18.15 不再重试,必须启动时可见,不能靠
+        # 用户发现「agent 像坏了」。放在 kernel 启动之后:给首连更多初始化时间,
+        # 且 DB / kernel 故障先行暴露,不掩盖更严重的启动问题。
+        if app.state.opencode_process_manager is not None:
+            await _check_opencode_mcp_status(
+                app.state.opencode_process_manager.base_url
+            )
         async with components.session_maker() as simulation_session:
             recovered = await SimulationService(
                 SimulationRepository(simulation_session)
