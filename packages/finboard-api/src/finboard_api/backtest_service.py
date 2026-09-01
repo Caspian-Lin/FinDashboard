@@ -167,6 +167,8 @@ async def run_backtest_and_persist(
         total_return=result.total_return,
         annualized_return=result.annualized_return,
         sharpe_ratio=result.sharpe_ratio,
+        sharpe_rf0=result.sharpe_rf0,
+        risk_free_annual=result.risk_free_annual,
         max_drawdown=result.max_drawdown,
         win_rate=result.win_rate,
         trade_count=result.trade_count,

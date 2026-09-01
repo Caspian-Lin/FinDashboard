@@ -21,6 +21,7 @@ from finboard_backtest.mean_reversion.backtest import (
     run_backtest,
 )
 from finboard_backtest.mean_reversion.config import MeanReversionConfig
+from finboard_backtest.metrics import sharpe_from_equity_values
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,23 +137,13 @@ class MeanReversionAnalysis:
         }
 
 
-def _compute_sharpe(equity: Sequence[float], annualization: float = 252.0) -> float:
-    """年化 Sharpe 比率(无风险利率 = 0)。"""
-    if len(equity) < 3:
-        return 0.0
-    returns = [
-        equity[i] / equity[i - 1] - 1.0
-        for i in range(1, len(equity))
-        if equity[i - 1] > 0
-    ]
-    if not returns:
-        return 0.0
-    mean = sum(returns) / len(returns)
-    var = sum((r - mean) ** 2 for r in returns) / max(len(returns) - 1, 1)
-    std = math.sqrt(var)
-    if std == 0:
-        return 0.0
-    return mean / std * math.sqrt(annualization)
+def _compute_sharpe(equity: Sequence[float]) -> float:
+    """年化 Sharpe 比率(口径:rf=0、样本标准差 ddof=1、√252,issue #262)。
+
+    委托 ``metrics.sharpe_from_equity_values`` 统一实现,与 research_run
+    报告 sharpe_ratio、引擎报告 sharpe_rf0 同口径。
+    """
+    return sharpe_from_equity_values(equity, risk_free_annual=0.0, ddof=1)
 
 
 def _compute_max_drawdown(equity: Sequence[float]) -> tuple[float, int, int, int]:

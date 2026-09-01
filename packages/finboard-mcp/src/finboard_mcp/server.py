@@ -147,7 +147,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   缺失字段),写策略与入队前先看它,避免「list_date 全 null → 全排除」式空转。
   universe 支持 min/max_market_cap(人民币元,取 market_cap 特征观测,#213);
   exclude_st 按发布 instruments 名称历史 PIT 判定(降级发具名 warning)。
-- 回测(7,✅ #127 + #172 + #173 + #174 + #175 + #183 + #184 + #189 + #190):backtest_strategy_list(输出
+- 回测(7,✅ #127 + #172 + #173 + #174 + #175 + #183 + #184 + #189 + #190 + #262):backtest_strategy_list(输出
   builtin_strategies 事件驱动策略+参数 schema 与 published_specs 已发布规格
   列表,含状态/版本数/执行入口提示)、backtest_run 双形态——(1) strategy 形态:
   默认小规模同步运行(返回 metrics/equity/fills;equity_mode=summary 默认降采样,full
@@ -159,7 +159,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   强制入队 kind=backtest_run 后台任务返回 job_id(异步执行,结果用 finboard_job_get
   轮询 result_ref=str(run_id) 后 finboard_backtest_history_get 查询),省略 run_async 时
   按估算工作量(标的不数 x 交易日)自动切换,≥ 阈值 backtest_auto_async_symbol_days
-  (settings,默认 15000,0=关闭)即异步,大任务不再 MCP 客户端 30s 超时丢响应;
+  (settings,默认 15000,0=关闭)即异步,大任务不再 MCP 客户端 30s 超时丢响应;Sharpe 双口径(#262):metrics.sharpe_ratio=主口径(rf=risk_free_annual 默认 3%/年,ddof=0),sharpe_rf0=rf=0 对照口径(ddof=1,与 research_run 报告 sharpe_ratio 同口径),跨报告比较 Sharpe 用 sharpe_rf0;
   (2) strategy_spec 形态:按已发布 {strategy_id, version} 路由入队 research_run
   管线,返回 run_id + job_id 指针异步执行(与 strategy 互斥;其余入队字段走
   queue_payload,与 finboard_run_queue 同构;返回值含 execution_mode

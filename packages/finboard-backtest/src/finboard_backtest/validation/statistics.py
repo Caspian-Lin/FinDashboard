@@ -22,6 +22,8 @@ import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from finboard_backtest.metrics import sharpe_from_daily_returns
+
 
 def _mean(xs: Sequence[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
@@ -64,15 +66,16 @@ def sharpe_from_returns(
     risk_free_annual: float = 0.03,
     annualization: int = 252,
 ) -> float:
-    """从日收益率序列直接计算年化 Sharpe。"""
+    """从日收益率序列直接计算年化 Sharpe。
+
+    口径(issue #262):默认 rf=3%/年、总体标准差(ddof=0)、√年化 —— 与
+    事件驱动引擎主口径 ``metrics.sharpe_ratio`` 一致;PBO 等排名场景显式传
+    ``risk_free_annual=0.0``(对同一批 trial 的 rank 无影响,保持既有约定)。
+    委托 ``metrics.sharpe_from_daily_returns`` 统一实现。
+    """
     if len(daily_returns) < 3:
         return 0.0
-    mean_r = _mean(daily_returns)
-    std_r = _std(daily_returns)
-    if std_r == 0:
-        return 0.0
-    rf_daily = risk_free_annual / annualization
-    return (mean_r - rf_daily) / std_r * math.sqrt(annualization)
+    return sharpe_from_daily_returns(daily_returns, risk_free_annual, ddof=0, annualization=annualization)
 
 
 def max_drawdown_from_equity(equity: Sequence[float]) -> float:

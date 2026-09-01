@@ -16,6 +16,8 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from finboard_backtest.metrics import sharpe_from_equity_values
+
 from .backtest import TsmomResult
 from .contracts import ContractSpec
 from .roll import ActiveContractSeries
@@ -190,18 +192,10 @@ class TsmomAnalysis:
 
 
 def _compute_sharpe(equity_curve: Sequence[float], risk_free: float = 0.03) -> float:
+    """口径(issue #262):rf=3%/年、样本标准差(ddof=1)、√252;委托统一实现。"""
     if len(equity_curve) < 2:
         return 0.0
-    rets = [equity_curve[i] / equity_curve[i - 1] - 1.0 for i in range(1, len(equity_curve)) if equity_curve[i - 1] > 0]
-    if len(rets) < 2:
-        return 0.0
-    mean_r = sum(rets) / len(rets)
-    var = sum((r - mean_r) ** 2 for r in rets) / (len(rets) - 1)
-    std = math.sqrt(var) if var > 0 else 0.0
-    if std == 0:
-        return 0.0
-    daily_excess = mean_r - risk_free / 252.0
-    return daily_excess * math.sqrt(252.0) / std
+    return sharpe_from_equity_values(equity_curve, risk_free_annual=risk_free, ddof=1)
 
 
 def _compute_sortino(equity_curve: Sequence[float], risk_free: float = 0.03) -> float:

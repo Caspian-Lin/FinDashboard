@@ -16,7 +16,7 @@ from typing import cast
 import numpy as np
 import structlog
 
-from finboard_backtest.metrics import total_return
+from finboard_backtest.metrics import sharpe_from_equity_values, total_return
 from finboard_backtest.portfolio.allocators import AllocationError
 from finboard_backtest.portfolio.builder import (
     PortfolioBuildInput,
@@ -390,6 +390,8 @@ class PortfolioPipelineAdapter:
                 for index in range(1, len(equity_values))
                 if equity_values[index - 1] > 0
             ]
+            # 期收益率口径(决策间频率,非日频):rf=0、ddof=1,与主路径
+            # 的 rf0/ddof=1 一致,但年化因子为名义 252(期频不精确日化)。
             sharpe = 0.0
             if len(period_returns) >= 2:
                 volatility = float(np.std(period_returns, ddof=1))
@@ -749,6 +751,11 @@ def _curve_metrics(
 
     年化用交易日历 252 折算(与夏普同尺度);单点曲线不产出正收益区间,
     指标按 0 兜底(不抛错,曲线长度由合约保证 >= 2)。
+
+    Sharpe 口径(issue #262):rf=0、样本标准差(ddof=1)、√252 年化 ——
+    委托 ``metrics.sharpe_from_equity_values`` 统一实现,与引擎报告的
+    ``sharpe_rf0``、mean_reversion 分析同口径;该口径以
+    ``ResearchRunReport.risk_free_annual=0.0`` 随报告序列化。
     """
     values = [float(item.equity) for item in equity_curve]
     initial = float(initial_capital)
@@ -763,11 +770,7 @@ def _curve_metrics(
         if period_returns
         else 0.0
     )
-    sharpe = 0.0
-    if len(period_returns) >= 2:
-        volatility = float(np.std(period_returns, ddof=1))
-        if volatility > 0:
-            sharpe = float(np.mean(period_returns) / volatility * np.sqrt(252))
+    sharpe = sharpe_from_equity_values(values)
     peak = values[0]
     drawdown = 0.0
     for equity in values:

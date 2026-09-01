@@ -13,6 +13,74 @@ from decimal import Decimal
 
 from finboard_shared.models import Bar, Fill
 
+#: 事件驱动引擎的默认年化无风险利率(issue #262:该取值必须随指标显式序列化,
+#: 避免低收益策略的 Sharpe 被默认 rf 拖近 0 后被误读为「无风险调整价值」)。
+DEFAULT_RISK_FREE_ANNUAL = 0.03
+
+#: 年化因子(交易日)。
+_ANNUALIZATION = 252
+
+
+def _sharpe_core(
+    daily_returns: Sequence[float],
+    rf_daily: float,
+    ddof: int,
+    annualization: int,
+) -> float:
+    """Sharpe 算术核心 —— 研究域四套实现的唯一计算路径(issue #262)。
+
+    口径由参数显式承载:``rf_daily`` 为日频无风险利率(年化 rf / 252),
+    ``ddof=0`` 总体标准差 / ``ddof=1`` 样本标准差。边界:收益率点数 < 2 或
+    标准差为 0 返回 0.0。各公开函数保留各自的输入边界检查后委托到这里。
+    """
+    n = len(daily_returns)
+    if n < 2:
+        return 0.0
+    mean_r = sum(daily_returns) / n
+    denom = n - ddof
+    if denom <= 0:
+        return 0.0
+    var_r = sum((r - mean_r) ** 2 for r in daily_returns) / denom
+    std_r = math.sqrt(var_r)
+    if std_r == 0:
+        return 0.0
+    return (mean_r - rf_daily) / std_r * math.sqrt(annualization)
+
+
+def sharpe_from_daily_returns(
+    daily_returns: Sequence[float],
+    risk_free_annual: float = 0.0,
+    ddof: int = 1,
+    annualization: int = _ANNUALIZATION,
+) -> float:
+    """从日收益率序列直接计算年化 Sharpe(口径显式参数化,issue #262)。
+
+    validation 统计(sharpe_from_returns)等已有收益率序列输入的消费方
+    委托本实现;口径取值由调用方显式给出,不再隐式散落。
+    """
+    rf_daily = risk_free_annual / annualization
+    return _sharpe_core(daily_returns, rf_daily, ddof, annualization)
+
+
+def sharpe_from_equity_values(
+    equity_values: Sequence[float],
+    risk_free_annual: float = 0.0,
+    ddof: int = 1,
+) -> float:
+    """从权益数值序列计算年化 Sharpe(口径显式参数化,issue #262)。
+
+    研究管线(research_run / mean_reversion / futures_tsmom)的统一入口:
+    口径由参数显式承载;非正前值权益点被跳过(与历史行为一致)。
+    """
+    if len(equity_values) < 3:
+        return 0.0
+    returns = [
+        equity_values[i] / equity_values[i - 1] - 1.0
+        for i in range(1, len(equity_values))
+        if equity_values[i - 1] > 0
+    ]
+    return sharpe_from_daily_returns(returns, risk_free_annual, ddof)
+
 
 def total_return(equity_curve: Sequence[tuple[date, Decimal]]) -> float:
     """总收益率。"""
@@ -40,11 +108,14 @@ def annualized_return(equity_curve: Sequence[tuple[date, Decimal]]) -> float:
 
 def sharpe_ratio(
     equity_curve: Sequence[tuple[date, Decimal]],
-    risk_free_annual: float = 0.03,
+    risk_free_annual: float = DEFAULT_RISK_FREE_ANNUAL,
 ) -> float:
-    """夏普比率(日频 → 年化)。
+    """夏普比率(日频 → 年化,引擎主口径)。
 
-    无风险利率默认 3%/年。
+    口径(issue #262):无风险利率默认 3%/年(按 ``rf/252`` 日化后逐日扣减)、
+    **总体标准差(ddof=0)**、√252 年化。该口径随 ``BacktestResult.risk_free_annual``
+    显式序列化;rf=0 对照口径见 ``sharpe_ratio_rf0``——同屏比较研究管线报告
+    (research_run 报告的 ``sharpe_ratio`` 即 rf=0/ddof=1 口径)时必须使用后者。
     """
     if len(equity_curve) < 3:
         return 0.0
@@ -56,18 +127,20 @@ def sharpe_ratio(
         if prev > 0:
             daily_returns.append((curr - prev) / prev)
 
-    if not daily_returns:
-        return 0.0
+    rf_daily = risk_free_annual / _ANNUALIZATION
+    return _sharpe_core(daily_returns, rf_daily, ddof=0, annualization=_ANNUALIZATION)
 
-    mean_r = sum(daily_returns) / len(daily_returns)
-    var_r = sum((r - mean_r) ** 2 for r in daily_returns) / len(daily_returns)
-    std_r = math.sqrt(var_r)
-    if std_r == 0:
-        return 0.0
 
-    rf_daily = risk_free_annual / 252
-    excess = mean_r - rf_daily
-    return excess / std_r * math.sqrt(252)
+def sharpe_ratio_rf0(equity_curve: Sequence[tuple[date, Decimal]]) -> float:
+    """夏普比率(rf=0 对照口径,issue #262)。
+
+    口径:无风险利率 0、**样本标准差(ddof=1)**、√252 年化 —— 与 research_run
+    报告的 ``sharpe_ratio``、mean_reversion 分析完全同口径。引擎报告与研究报告
+    同屏比较 Sharpe 时统一使用本口径字段(引擎侧 ``sharpe_rf0`` / 研究侧
+    ``sharpe_ratio``)。
+    """
+    values = [float(v) for _, v in equity_curve]
+    return sharpe_from_equity_values(values, risk_free_annual=0.0, ddof=1)
 
 
 def max_drawdown(equity_curve: Sequence[tuple[date, Decimal]]) -> float:
@@ -231,8 +304,6 @@ def trading_days_between(start: date, end: date) -> int:
 # ---------------------------------------------------------------------------
 # 研究级指标(issue #57) —— 用于样本外验证与多重试验修正
 # ---------------------------------------------------------------------------
-
-_ANNUALIZATION = 252  # 年化因子(交易日)
 
 
 def daily_returns(

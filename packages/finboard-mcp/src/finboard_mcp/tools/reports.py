@@ -190,7 +190,11 @@ def register(mcp: MCPServer) -> None:
             "summary(标准化结构)。equity_mode(summary 默认:降采样到 max_points"
             "个关键点;full:完整曲线)、max_points(默认 200)、fills_limit/"
             "fills_offset(fills 分页,默认有界 200 条;fills_limit=null 返回全部,"
-            "返回含 fills_total/fills_offset 元信息)。只读。"
+            "返回含 fills_total/fills_offset 元信息)。"
+            "Sharpe 口径(#262):metrics.sharpe_ratio=主口径(rf 见 "
+            "risk_free_annual,默认 3%/年,ddof=0);sharpe_rf0=rf=0 对照口径"
+            "(ddof=1),与 research_run 报告 sharpe_ratio 同口径,跨报告比较用 "
+            "sharpe_rf0。只读。"
         ),
     )
     async def _backtest(

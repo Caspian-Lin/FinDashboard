@@ -34,6 +34,7 @@ from finboard_backtest.metrics import (
     equal_weight_universe_return,
     max_drawdown,
     sharpe_ratio,
+    sharpe_ratio_rf0,
     total_commission,
     total_return,
     total_tax,
@@ -425,6 +426,8 @@ class BacktestEngine:
         ret = total_return(equity_curve)
         ann_ret = annualized_return(equity_curve)
         sharpe = sharpe_ratio(equity_curve)
+        # issue #262:rf=0 对照口径随报告序列化,与 research_run 报告同屏可比。
+        sharpe_rf0 = sharpe_ratio_rf0(equity_curve)
         mdd = max_drawdown(equity_curve)
         wr = win_rate(fills)
         comm = total_commission(fills)
@@ -460,6 +463,7 @@ class BacktestEngine:
             total_return=ret,
             annualized_return=ann_ret,
             sharpe_ratio=sharpe,
+            sharpe_rf0=sharpe_rf0,
             max_drawdown=mdd,
             win_rate=wr,
             trade_count=len(fills),
