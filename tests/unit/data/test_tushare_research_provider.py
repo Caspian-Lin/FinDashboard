@@ -114,6 +114,7 @@ class FakeTushareClient:
         self.daily_rows = [_daily_row()]
         self.financial_rows = [_financial_row()]
         self.industry_rows = [_industry_row()]
+        self.namechange_rows: list[dict[str, object]] = []
 
     def stock_basic(self, **kwargs: str) -> object:
         self.calls.append(("stock_basic", kwargs))
@@ -130,6 +131,10 @@ class FakeTushareClient:
     def index_member_all(self, **kwargs: str) -> object:
         self.calls.append(("index_member_all", kwargs))
         return self.industry_rows
+
+    def namechange(self, **kwargs: str) -> object:
+        self.calls.append(("namechange", kwargs))
+        return self.namechange_rows
 
 
 def _provider(
@@ -325,3 +330,79 @@ def test_naive_clock_is_rejected() -> None:
 
     with pytest.raises(ResearchDataConfigurationError, match="带时区"):
         provider._observed_at()
+
+
+# ---------------------------------------------------------------------------
+# #251:历史名称变更(namechange 分页拉全)
+# ---------------------------------------------------------------------------
+
+
+def _namechange_row(
+    *,
+    ts_code: str,
+    name: str = "平安银行",
+    start_date: str,
+    end_date: str = "",
+) -> dict[str, object]:
+    return {
+        "ts_code": ts_code,
+        "name": name,
+        "start_date": start_date,
+        "end_date": end_date,
+        "change_reason": "其他",
+    }
+
+
+@pytest.mark.unit
+async def test_fetch_name_changes_paginates_until_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#251:namechange 满页继续按 offset 取,不满页停;结果按 symbol+起始日排序。"""
+    from finboard_data import tushare_provider as provider_mod
+
+    monkeypatch.setattr(provider_mod, "_NAMECHANGE_PAGE_SIZE", 2)
+
+    class PagingClient(FakeTushareClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pages = [
+                [
+                    _namechange_row(
+                        ts_code="000001.SZ",
+                        name="深发展A",
+                        start_date="19910403",
+                        end_date="19920309",
+                    ),
+                    _namechange_row(
+                        ts_code="600000.SH",
+                        name="浦发银行",
+                        start_date="19991110",
+                    ),
+                ],
+                [
+                    _namechange_row(
+                        ts_code="000001.SZ",
+                        name="平安银行",
+                        start_date="20120507",
+                    ),
+                ],
+            ]
+
+        def namechange(self, **kwargs: str) -> object:
+            self.calls.append(("namechange", kwargs))
+            page_index = int(kwargs.get("offset", "0")) // 2
+            return self.pages[page_index] if page_index < len(self.pages) else []
+
+    client = PagingClient()
+    changes = await _provider(client).fetch_name_changes()
+
+    # 按 (symbol, start_date) 排序,与摄取顺序无关。
+    assert [(item.symbol, item.start_date) for item in changes] == [
+        ("000001.SZ", date(1991, 4, 3)),
+        ("000001.SZ", date(2012, 5, 7)),
+        ("600000.SH", date(1999, 11, 10)),
+    ]
+    assert [kwargs["offset"] for _, kwargs in client.calls] == ["0", "2"]
+    assert changes[0].end_date == date(1992, 3, 9)
+    assert changes[1].end_date is None  # 当前名称保持开区间
+    assert changes[0].available_at == OBSERVED_AT

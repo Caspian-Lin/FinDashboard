@@ -1,9 +1,13 @@
 """``research_data_sync`` 执行器 —— research 数据表摄取编排(issue #171)。
 
-按数据集 / 日期范围编排四类研究数据摄取(估值 / 财务 / 行业)并通过
-``ResearchDataSyncService`` 写库(质量门 + batch 发布语义):
+按数据集 / 日期范围编排五类研究数据摄取(估值 / 财务 / 行业 / 名称历史)并
+通过 ``ResearchDataSyncService`` 写库(质量门 + batch 发布语义):
 
-* ``profiles`` —— ``fetch_instrument_profiles`` 全量一次;
+* ``profiles`` —— ``fetch_instrument_profiles`` 全量一次;#251 起同时拉取
+  退市档案(``list_status="D"``)合并进同一批次,补齐 delist_date 上游;
+* ``name_changes``(#251)—— ``fetch_name_changes`` 全市场历史名称变更,
+  直接重建主数据表 ``instrument_names``(半开区间),供 #213 ST-PIT 消费;
+  不走 research_* 批次(名称历史是主数据衍生,无批次语义);
 * ``daily_metrics`` —— 逐交易日 ``fetch_daily_metrics`` 截面(非交易日跳过);
 * ``financial_indicators`` —— 逐标的 ``fetch_financial_indicators``(报告期范围);
 * ``industry_memberships`` —— 逐标的 ``fetch_industry_memberships``。
@@ -17,8 +21,8 @@
 ``retryable`` 失败。未装 tushare / 未配 token / 积分不足均 fail-fast,报错
 信息可操作(指明缺什么、怎么配)。
 
-边界:只写 ``research_*`` 独立研究数据表,不进入实盘交易内核调度(#136 边界),
-不连 broker / 不下实盘单 / 不修改持仓。
+边界:写 ``research_*`` 独立研究数据表与 ``instrument_names`` 主数据名称历史,
+不进入实盘交易内核调度(#136 边界),不连 broker / 不下实盘单 / 不修改持仓。
 """
 
 from __future__ import annotations
@@ -42,12 +46,19 @@ from finboard_data.research import ResearchDataProvider
 if TYPE_CHECKING:
     pass
 
-#: 支持的数据集白名单(对应 ResearchDataset 枚举的摄取入口)。
+#: 支持的数据集白名单(对应 ResearchDataset 枚举的摄取入口;#251 加 name_changes)。
 SUPPORTED_DATASETS: frozenset[str] = frozenset(
-    {"profiles", "daily_metrics", "financial_indicators", "industry_memberships"}
+    {
+        "profiles",
+        "name_changes",
+        "daily_metrics",
+        "financial_indicators",
+        "industry_memberships",
+    }
 )
 _DEFAULT_DATASETS: tuple[str, ...] = (
     "profiles",
+    "name_changes",
     "daily_metrics",
     "financial_indicators",
     "industry_memberships",
@@ -178,6 +189,8 @@ class ResearchDataSyncExecutor:
             total = 0
             if "profiles" in datasets:
                 total += 1
+            if "name_changes" in datasets:
+                total += 1
             if "daily_metrics" in datasets:
                 total += len(_workdays(start_date, end_date))
             if "financial_indicators" in datasets:
@@ -190,19 +203,52 @@ class ResearchDataSyncExecutor:
                 current_dataset = ResearchDataset.INSTRUMENT_PROFILES
                 current_version = f"profiles:{date.today().isoformat()}"
                 await progress(done, total, "research_data_sync:profiles")
+                # #251:在市(L)+ 退市(D)档案合并进同一批次 —— 退市档案携带
+                # delist_date,是 instruments 主数据退市日期的唯一结构化上游。
                 profile_records = await provider.fetch_instrument_profiles()
+                delisted_records = await provider.fetch_instrument_profiles(
+                    list_status="D"
+                )
                 await service.sync_instrument_profiles(
                     source=source,
                     dataset_version=current_version,
                     code_version=code,
-                    parameters={"list_status": "L"},
+                    parameters={"list_status": "L+D"},
                     raw_payload=None,
-                    records=list(profile_records),
+                    records=[*profile_records, *delisted_records],
                 )
                 if not resolved_symbols:
                     resolved_symbols = tuple(
                         dict.fromkeys(item.symbol for item in profile_records)
                     )
+                done += 1
+
+            if "name_changes" in datasets:
+                # #251:历史名称变更重建 instrument_names(主数据表,无批次语义)。
+                # 失败映射:上游错误经 ResearchDataError 兜底记录时
+                # current_dataset 沿用上一个切片值 —— 名称历史失败审计以
+                # current_version 的 ``name_changes:`` 前缀区分。
+                current_version = f"name_changes:{date.today().isoformat()}"
+                await progress(done, total, "research_data_sync:name_changes")
+                from finboard_persistence import InstrumentRepository
+
+                name_changes = await provider.fetch_name_changes()
+                if name_changes:
+                    async with self._session_maker() as session:
+                        await InstrumentRepository(
+                            session
+                        ).import_name_history(
+                            [
+                                (
+                                    change.symbol,
+                                    change.name,
+                                    change.start_date,
+                                    change.end_date,
+                                )
+                                for change in name_changes
+                            ]
+                        )
+                        await session.commit()
                 done += 1
 
             if "daily_metrics" in datasets:

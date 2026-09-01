@@ -1011,11 +1011,14 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 `fetch_all` / `quality_repair` / `research_data_sync`(全是研究/数据域,
 不含实盘能力)。
 
-`research_data_sync`(issue #171):research 数据表(估值 / 财务 / 行业)摄取
-编排。payload:`{datasets?: [profiles, daily_metrics, financial_indicators,
-industry_memberships](默认全部), start_date, end_date(ISO), symbols?:
-[str]}`。逐标的接口自动限流(tushare_budget)并按确定性 dataset_version
-断点续跑;预算耗尽退避重试,未配 token / 未装 SDK fail-fast。
+`research_data_sync`(issue #171;#251 扩展):research 数据表(档案 / 估值 /
+财务 / 行业 / 名称历史)摄取编排。payload:`{datasets?: [profiles, name_changes,
+daily_metrics, financial_indicators, industry_memberships](默认全部),
+start_date, end_date(ISO), symbols?: [str]}`。profiles 同时拉取在市(L)与
+退市(D)档案(delist_date 上游);name_changes 全市场历史名称变更直接重建
+`instrument_names`(半开区间,供 ST-PIT)。逐标的接口自动限流(tushare_budget)
+并按确定性 dataset_version 断点续跑;预算耗尽退避重试,未配 token / 未装
+SDK fail-fast。
 
 写操作尊重 `mcp_readonly_only` 开关。
 

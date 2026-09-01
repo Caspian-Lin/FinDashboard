@@ -1203,6 +1203,18 @@ class FrozenDatasetReleaseBuilder:
                         "missing_industry": sum(
                             1 for item in released if item.industry is None
                         ),
+                        # #251:delist_date 缺失与名称历史覆盖同样可见。
+                        "missing_delist_date": sum(
+                            1 for item in released if item.delist_date is None
+                        ),
+                        "with_name_history": sum(
+                            1 for item in released if item.name_history
+                        ),
+                        "name_history_coverage": (
+                            f"{sum(1 for item in released if item.name_history) / len(released):.4f}"
+                            if released
+                            else "0.0000"
+                        ),
                     },
                     "warnings": warnings,
                 },

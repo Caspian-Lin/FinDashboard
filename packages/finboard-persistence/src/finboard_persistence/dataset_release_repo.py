@@ -580,10 +580,14 @@ def _plain_candidate(
         asset_class = AssetClass.EQUITY
     else:
         raise ReleaseCapabilityError(f"{row.code}: 不支持的普通资产类型 {instrument_type.value}")
-    # 兜底(issue #185):instruments 由 akshare 发现链路写入,list_date/industry
-    # 可能为 null;research_instrument_profiles(tushare stock_basic)是兜底源。
+    # 兜底(issue #185;#251 扩展 delist_date):instruments 由 akshare 发现链路
+    # 写入,list_date/industry/delist_date 可能为 null;
+    # research_instrument_profiles(tushare stock_basic,含退市档案)是兜底源。
     list_date = row.list_date or (profile.list_date if profile is not None else None)
     industry = row.industry or (profile.industry if profile is not None else None)
+    delist_date = row.delist_date or (
+        profile.delist_date if profile is not None else None
+    )
     return ReleaseInstrumentSpec(
         code=row.code,
         name=row.name,
@@ -598,7 +602,7 @@ def _plain_candidate(
         exchange=row.exchange,
         listing_board=row.listing_board,
         list_date=list_date,
-        delist_date=row.delist_date,
+        delist_date=delist_date,
         industry=industry,
         status=_status(row.status),
         lifecycle_events=lifecycle_events,
