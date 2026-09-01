@@ -739,7 +739,10 @@ def register(mcp: MCPServer) -> None:
             "成功 RCR screen 指标)与 validation_experiment_id(#57):状态必须"
             "validated_oos 且 final_test_unsealed=true,并绑定同一 artifact/name/"
             "kind/commit。screen 机器门默认要求 abs(rank_ic)>=0.02、"
-            "average_turnover<=0.80、相关性绝对值<=0.80、至少 2 期;失败返回"
+            "average_turnover<=0.80、相关性绝对值<=0.80、至少 2 期;rank_ic 取"
+            "绝对值是有意设计(#245 用户决策 A):门只证「存在非噪声信号」,方向"
+            "正确性由因子目录 preference 与 screen 权益/换窗复测承担,负 IC"
+            "方向型因子过门不构成缺陷。失败返回"
             "具体缺失/超阈值门名并保留 draft + promotion_status=failed 证据。"
             "通过后旧 active 自动 retired。纯研究治理操作,不连接 broker、不下单。"
         ),

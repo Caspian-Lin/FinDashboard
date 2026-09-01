@@ -124,6 +124,44 @@ def test_custom_thresholds_are_applied_and_serialized() -> None:
     }
 
 
+def test_negative_rank_ic_passes_by_design_signal_existence_gate() -> None:
+    """负 IC 方向型因子过 screen 门是有意设计(#245 用户决策 A)。
+
+    门只证「存在非噪声信号」(abs 语义);方向正确性由因子目录
+    preference 与 screen 权益/换窗复测承担。rank_ic=-0.0808 即第二轮
+    E2E mom20p2 的实测值,此处锁定其通过行为,防止未来被「顺手修复」。
+    """
+    screen = _screen()
+    screen["factors"] = {
+        "u_mom20p2": {
+            "n_periods": 2,
+            "rank_ic": -0.0808,
+            "average_turnover": 0.444,
+            "correlation": {},
+        }
+    }
+    validation = _validation()
+    validation["version_stamp"] = {
+        "code_artifact_id": "RC-mom",
+        "code_artifact_name": "mom20p2",
+        "code_kind": "factor",
+        "code_commit": "b" * 40,
+    }
+    result = evaluate_promotion_gates(
+        screen=screen,
+        validation=validation,
+        artifact_id="RC-mom",
+        artifact_kind="factor",
+        artifact_name="mom20p2",
+        artifact_commit="b" * 40,
+        require_artifact_binding=True,
+    )
+
+    assert result.screen_passed
+    assert result.validation_passed
+    assert result.failures == ()
+
+
 def test_artifact_lifecycle_requires_active_and_passed() -> None:
     draft = SimpleNamespace(status="draft", promotion_status=PROMOTION_PENDING)
     failed = SimpleNamespace(status="draft", promotion_status=PROMOTION_FAILED)
