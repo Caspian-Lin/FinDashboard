@@ -8,13 +8,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
 import structlog
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_persistence.models import (
@@ -558,7 +559,7 @@ class InstrumentSyncResult:
 
 @dataclass(frozen=True, slots=True)
 class InstrumentMetadataBackfillResult:
-    """profiles → instruments 元数据回填摘要(issue #185)。
+    """profiles → instruments 元数据回填摘要(issue #185,#251 扩展)。
 
     ``scoped`` 是本次审查的 instruments 行数(按入参 symbols 或全部未退市标的);
     ``backfilled_*`` 是本次真实回填的行数;``missing_*`` 是回填完成后仍缺失的
@@ -569,8 +570,10 @@ class InstrumentMetadataBackfillResult:
     scoped: int = 0
     backfilled_list_date: int = 0
     backfilled_industry: int = 0
+    backfilled_delist_date: int = 0
     missing_list_date: int = 0
     missing_industry: int = 0
+    missing_delist_date: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -578,8 +581,32 @@ class InstrumentMetadataBackfillResult:
             "scoped": self.scoped,
             "backfilled_list_date": self.backfilled_list_date,
             "backfilled_industry": self.backfilled_industry,
+            "backfilled_delist_date": self.backfilled_delist_date,
             "missing_list_date": self.missing_list_date,
             "missing_industry": self.missing_industry,
+            "missing_delist_date": self.missing_delist_date,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NameHistoryImportResult:
+    """``instrument_names`` 历史名称导入摘要(issue #251)。
+
+    ``received_records`` 是上游记录数;``rebuilt_symbols`` / ``inserted_records``
+    是去重排序后实际重建的 symbol 数与落库行数。
+    """
+
+    source: str
+    received_records: int = 0
+    rebuilt_symbols: int = 0
+    inserted_records: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "received_records": self.received_records,
+            "rebuilt_symbols": self.rebuilt_symbols,
+            "inserted_records": self.inserted_records,
         }
 
 
@@ -889,18 +916,22 @@ class InstrumentRepository:
         symbols: list[str] | None = None,
         source: str | None = None,
     ) -> InstrumentMetadataBackfillResult:
-        """从 ``research_instrument_profiles`` 回填 list_date / industry(issue #185)。
+        """从 ``research_instrument_profiles`` 回填 list_date / industry / delist_date。
 
         只回填当前为 null 的字段,不覆盖已存在的主数据;profiles 是 tushare
         ``stock_basic`` 的版本化快照,``instruments`` 的 akshare 发现链路不携带
-        这两个字段。``symbols=None`` 时审查全部未退市标的(适合一次性修复)。
+        这些字段。``symbols=None`` 时审查全部未退市标的(适合一次性修复)。
 
-        返回回填前后缺失统计,缺批次(未发布过 profiles)时不视为错误。
+        #251:取最近一次**实际摄取过档案的批次**(不论发布状态)—— 此前依赖
+        「已发布 profiles 批次」,profiles 摄取过但从未发布时永久短路、元数据
+        全空。``delist_date`` 回填自退市档案(list_status=D);``status`` 不在
+        此处变更 —— 缺席二次确认(sync_with_diff)是退市状态的唯一权威路径。
+        返回回填前后缺失统计,从未摄取过 profiles 时不视为错误。
         """
         from finboard_persistence.profile_metadata import ProfileMetadataLookup
 
         lookup = ProfileMetadataLookup(self._session)
-        batch = await lookup.latest_batch(source=source)
+        batch = await lookup.latest_batch(source=source, require_published=False)
         if batch is None:
             return InstrumentMetadataBackfillResult(profile_batch_available=False)
 
@@ -911,9 +942,12 @@ class InstrumentRepository:
             stmt = stmt.where(InstrumentModel.status != ListingStatus.DELISTED.value)
         rows = list((await self._session.execute(stmt)).scalars().all())
 
-        profiles = await lookup.profiles([row.code for row in rows], source=source)
+        profiles = await lookup.profiles(
+            [row.code for row in rows], source=source, require_published=False
+        )
         backfilled_list_date = 0
         backfilled_industry = 0
+        backfilled_delist_date = 0
         for row in rows:
             profile = profiles.get(row.code)
             if profile is None:
@@ -924,16 +958,87 @@ class InstrumentRepository:
             if row.industry is None and profile.industry:
                 row.industry = profile.industry
                 backfilled_industry += 1
+            if row.delist_date is None and profile.delist_date is not None:
+                row.delist_date = profile.delist_date
+                backfilled_delist_date += 1
         await self._session.flush()
         result = InstrumentMetadataBackfillResult(
             profile_batch_available=True,
             scoped=len(rows),
             backfilled_list_date=backfilled_list_date,
             backfilled_industry=backfilled_industry,
+            backfilled_delist_date=backfilled_delist_date,
             missing_list_date=sum(1 for row in rows if row.list_date is None),
             missing_industry=sum(1 for row in rows if row.industry is None),
+            missing_delist_date=sum(1 for row in rows if row.delist_date is None),
         )
         logger.info("instrument.backfill_from_profiles", **result.as_dict())
+        return result
+
+    async def import_name_history(
+        self,
+        records: Sequence[tuple[str, str, date, date | None]],
+        *,
+        source_name: str = "tushare namechange",
+    ) -> NameHistoryImportResult:
+        """以历史名称变更记录重建 ``instrument_names``(#251)。
+
+        ``records`` 是 ``(symbol, name, valid_from, valid_to)`` 元组(valid_to
+        为 None 表示当前名称,半开区间语义)。上游有记录的 symbol **整组重建**
+        —— 名称历史是纯衍生数据,以 tushare namechange 为准(历史区间从真实
+        变更日开始,而不是首次同步日);上游没有的 symbol 不动(保留
+        ``sync_with_diff`` 已建立的当前名称区间)。同名同起始日的重复行保留
+        最后一条(上游修订);非末行 ``valid_to`` 缺失时用下一行 ``valid_from``
+        补齐,保证区间连续。
+
+        ``status`` 与 ``instruments.name`` 不在此处变更 —— 名称历史的权威在
+        上游区间,主表名称仍由 ``sync_with_diff`` 维护。
+        """
+        by_symbol: dict[str, list[tuple[str, str, date, date | None]]] = {}
+        for record in records:
+            code, name, valid_from, valid_to = record
+            by_symbol.setdefault(code, []).append(
+                (code, name.strip(), valid_from, valid_to)
+            )
+
+        inserted_rows = 0
+        rebuilt_symbols = 0
+        for code, rows in by_symbol.items():
+            # 同 (start_date) 去重,保留最后一条;按 valid_from 排序。
+            deduped: dict[date, tuple[str, str, date, date | None]] = {}
+            for row in rows:
+                deduped[row[2]] = row
+            ordered = [deduped[k] for k in sorted(deduped)]
+            # 非末行缺 valid_to 时用下一行起始日补齐(半开区间连续)。
+            fixed: list[tuple[str, str, date, date | None]] = []
+            for index, row in enumerate(ordered):
+                if row[3] is None and index < len(ordered) - 1:
+                    row = (row[0], row[1], row[2], ordered[index + 1][2])
+                fixed.append(row)
+            await self._session.execute(
+                delete(InstrumentNameModel).where(
+                    InstrumentNameModel.instrument_code == code
+                )
+            )
+            for _, name, valid_from, valid_to in fixed:
+                self._session.add(
+                    InstrumentNameModel(
+                        instrument_code=code,
+                        name=name,
+                        valid_from=valid_from,
+                        valid_to=valid_to,
+                    )
+                )
+            inserted_rows += len(fixed)
+            rebuilt_symbols += 1
+        await self._session.flush()
+        result = NameHistoryImportResult(
+            source=source_name,
+            received_records=len(records),
+            rebuilt_symbols=rebuilt_symbols,
+            inserted_records=inserted_rows,
+        )
+        logger.info("instrument.name_history_imported", **result.as_dict())
         return result
 
     async def update_listing_status(

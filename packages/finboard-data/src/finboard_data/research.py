@@ -120,6 +120,25 @@ class IndustryMembership:
     available_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class InstrumentNameChange:
+    """一条历史名称变更记录(#251,来源 tushare ``namechange``)。
+
+    ``start_date``/``end_date`` 是上游给的业务有效区间(半开区间语义,
+    ``end_date=None`` 表示当前名称);直接对应 ``instrument_names`` 表的
+    ``valid_from``/``valid_to``,供 #213 ST-PIT 按决策日取名称。
+    """
+
+    symbol: str
+    name: str
+    start_date: date
+    end_date: date | None
+    change_reason: str | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
 @runtime_checkable
 class ResearchDataProvider(Protocol):
     """研究数据读取边界;公共接口不暴露 DataFrame 或数据源 SDK 类型。"""
@@ -130,6 +149,12 @@ class ResearchDataProvider(Protocol):
         list_status: str = "L",
     ) -> list[InstrumentProfile]:
         """读取指定上市状态的股票档案。"""
+        ...
+
+    async def fetch_name_changes(
+        self,
+    ) -> list[InstrumentNameChange]:
+        """读取全市场历史名称变更(分页拉全;#251 名称历史 PIT 导入)。"""
         ...
 
     async def fetch_daily_metrics(

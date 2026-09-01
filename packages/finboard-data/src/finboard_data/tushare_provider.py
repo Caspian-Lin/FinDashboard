@@ -21,6 +21,7 @@ from finboard_data.research import (
     DailySecurityMetrics,
     FinancialIndicator,
     IndustryMembership,
+    InstrumentNameChange,
     InstrumentProfile,
     ResearchDataConfigurationError,
     ResearchDataContractError,
@@ -49,6 +50,9 @@ _FINANCIAL_FIELDS = (
 _INDUSTRY_FIELDS = (
     "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,in_date,out_date,is_new"
 )
+_NAMECHANGE_FIELDS = "ts_code,name,start_date,end_date,change_reason"
+#: namechange 单次返回上限以下的安全页大小;超过一页时按 offset 循环拉全。
+_NAMECHANGE_PAGE_SIZE = 5000
 
 
 class TushareClient(Protocol):
@@ -68,6 +72,10 @@ class TushareClient(Protocol):
 
     def index_member_all(self, **kwargs: str) -> object:
         """调用 ``index_member_all``。"""
+        ...
+
+    def namechange(self, **kwargs: str) -> object:
+        """调用 ``namechange``(历史名称变更,#251)。"""
         ...
 
 
@@ -205,6 +213,36 @@ class TushareResearchDataProvider:
             memberships,
             key=lambda item: (item.symbol, item.effective_from, item.level3_code),
         )
+
+    async def fetch_name_changes(self) -> list[InstrumentNameChange]:
+        """读取全市场历史名称变更(分页拉全;#251 名称历史 PIT 导入)。
+
+        ``namechange`` 每行自带 ``start_date``/``end_date`` 业务有效区间,直接
+        对应 ``instrument_names`` 的半开区间,供 #213 ST-PIT 按决策日取名称。
+        接口单次返回有上限,按 ``offset`` 循环直到取尽,每页各自消耗限流预算;
+        名称变更支持 Pit(tushare 提供的就是历史区间),``available_at`` 取本次
+        观察时间(上游无历史发布时间)。
+        """
+        observed_at = self._observed_at()
+        changes: list[InstrumentNameChange] = []
+        offset = 0
+        while True:
+            rows = await self._call(
+                "namechange",
+                fields=_NAMECHANGE_FIELDS,
+                limit=str(_NAMECHANGE_PAGE_SIZE),
+                offset=str(offset),
+            )
+            if not rows:
+                break
+            changes.extend(
+                self._parse_name_change(row, index, observed_at)
+                for index, row in enumerate(rows)
+            )
+            if len(rows) < _NAMECHANGE_PAGE_SIZE:
+                break
+            offset += _NAMECHANGE_PAGE_SIZE
+        return sorted(changes, key=lambda item: (item.symbol, item.start_date))
 
     def _create_client(self, explicit_token: str | None) -> TushareClient:
         token = (
@@ -368,6 +406,25 @@ class TushareResearchDataProvider:
             effective_from=_required_date(row, "in_date", endpoint, index),
             effective_to=_optional_date(row, "out_date", endpoint, index),
             is_current=current_flag == "Y",
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+
+    @staticmethod
+    def _parse_name_change(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> InstrumentNameChange:
+        endpoint = "namechange"
+        _require_fields(row, _NAMECHANGE_FIELDS, endpoint, index)
+        return InstrumentNameChange(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            name=_required_text(row, "name", endpoint, index),
+            start_date=_required_date(row, "start_date", endpoint, index),
+            end_date=_optional_date(row, "end_date", endpoint, index),
+            change_reason=_optional_text(row, "change_reason"),
             source=_SOURCE,
             observed_at=observed_at,
             available_at=observed_at,
