@@ -282,3 +282,102 @@ class TestGridCandidates:
     def test_empty_grid(self) -> None:
         candidates = grid_candidates({})
         assert candidates == [{}]
+
+
+class _DominatingRunner:
+    """trial quality=high 各期收益恒正、quality=low 恒负。
+
+    在任何 IS / OOS 子集里 high 的夏普都占优 → CSCV 的 IS 最优永远是
+    high 且其在 OOS 的相对 rank 恒为 1.0 → PBO 恒等于 0.0(确定性断言
+    PBO 矩阵确实取自 IS 竞争 trial 而非顺序窗口序列)。
+    """
+
+    async def __call__(
+        self,
+        *,
+        start: date,
+        end: date,
+        params: Mapping[str, object],
+        config_overrides: Mapping[str, object] | None = None,
+    ) -> BacktestResult:
+        del config_overrides
+        mu = 0.003 if params.get("quality") == "high" else -0.003
+        curve = _make_equity_curve(start, end, mu=mu, sigma=0.005, seed=7)
+        return BacktestResult(equity_curve=curve)
+
+
+class _RaggedRunner:
+    """按调用序号产出不同点数的权益曲线(#244 崩溃回归)。
+
+    模拟真实交易日(含节假日)与近似交易日切窗的点数差:旧实现的
+    PBO 矩阵以窗口序列为行,不等长直接触发 CSCV 严格等长断言。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(
+        self,
+        *,
+        start: date,
+        end: date,
+        params: Mapping[str, object],
+        config_overrides: Mapping[str, object] | None = None,
+    ) -> BacktestResult:
+        del params, config_overrides, end
+        self.calls += 1
+        n_points = 20 - ((self.calls - 1) % 8)
+        level = 100.0
+        curve: list[tuple[date, Decimal]] = []
+        for index in range(n_points):
+            level *= 0.97 if index == 10 else 1.01
+            curve.append((start, Decimal(str(round(level, 4)))))
+            start += timedelta(days=1)
+        return BacktestResult(equity_curve=curve)
+
+
+class TestPboMatrixSource:
+    async def test_pbo_uses_in_sample_trials_not_windows(self) -> None:
+        """PBO 矩阵来自 IS 竞争 trial:占优 trial 下 PBO 恒 0 且无跳过说明。"""
+        exp = _make_experiment()
+        runner = ValidationRunner(experiment=exp, trial_runner=_DominatingRunner())
+        await runner.run_in_sample([{"quality": "high"}, {"quality": "low"}])
+        updated = await runner.run_walk_forward()
+        assert updated is not None
+        assert updated.statistical_report is not None
+        stat = updated.statistical_report
+        assert stat.pbo == 0.0
+        assert "PBO skipped" not in stat.methodology_notes
+
+    async def test_single_trial_pbo_skipped_with_note(self) -> None:
+        exp = _make_experiment()
+        runner = ValidationRunner(experiment=exp, trial_runner=FakeTrialRunner(seed=3))
+        await runner.run_in_sample([{"alpha": 0.002}])
+        updated = await runner.run_walk_forward()
+        assert updated is not None
+        assert updated.statistical_report is not None
+        assert updated.statistical_report.pbo == 0.0
+        assert "PBO skipped" in updated.statistical_report.methodology_notes
+
+    async def test_resume_without_in_memory_returns_skips_pbo(self) -> None:
+        """续跑场景:IS 收益只存内存,持久化 trial 恢复后 PBO 具名跳过。"""
+        exp = _make_experiment()
+        runner = ValidationRunner(experiment=exp, trial_runner=FakeTrialRunner(seed=3))
+        await runner.run_in_sample([{"alpha": 0.001}, {"alpha": 0.002}])
+        runner._in_sample_returns.clear()
+        updated = await runner.run_walk_forward()
+        assert updated is not None
+        assert updated.statistical_report is not None
+        assert "PBO skipped" in updated.statistical_report.methodology_notes
+
+    async def test_ragged_window_lengths_do_not_crash(self) -> None:
+        """E2E #244 回归:不等长窗口收益不再触发 CSCV 等长断言。"""
+        exp = _make_experiment()
+        runner = ValidationRunner(experiment=exp, trial_runner=_RaggedRunner())
+        await runner.run_in_sample([{"alpha": 0.001}, {"alpha": 0.002}])
+        updated = await runner.run_walk_forward()
+        assert updated is not None
+        assert updated.oos_metrics is not None
+        assert updated.statistical_report is not None
+        # IS 矩阵同样不等长 → PBO 跳过但具名说明,而不是崩溃
+        assert "PBO skipped" in updated.statistical_report.methodology_notes

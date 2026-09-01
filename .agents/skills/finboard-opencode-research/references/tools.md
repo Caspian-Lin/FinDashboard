@@ -507,9 +507,12 @@ ValidationRunner(IS → walk-forward → 一次性揭盲),`finboard_job_get`
   detail_hint}`;`finboard_job_get` 轮询
 - 前置:实验的 `version_stamp.selection_config` 须声明
   `validation_trial_runner: {strategy, symbols, provider?, params?, capital?}`
-  (注册表策略回测;缺省执行期报 `trial_runner_unconfigured`)
+  (注册表策略回测;capital 必须为数值 int/float/数字字符串,params 必须为对象,
+  strategy 必须是注册表策略名;缺省执行期报 `trial_runner_unconfigured`,
+  声明了但配置不合法在首个 trial 前报 `trial_runner_invalid_config`)
 - 错误:不存在 `not_found`;终态 / 已揭盲 `conflict`(揭盲不可重做);
-  预算耗尽 `invalid_argument`
+  预算耗尽 `invalid_argument`;执行意外中断 `experiment_execution_failed`
+  (实验状态保留,修复后可重新入队断点续跑)
 - 场景:#219 晋级链的 OOS 门入口 —— 完成后把 experiment_id 传给
   `finboard_research_code_promote`
 
