@@ -105,9 +105,13 @@ async def test_place_timeout_goes_unknown(
     with pytest.raises(BrokerTimeoutError):
         await kernel.order_manager.place_order(_buy_request(account_id))
 
-    # 等待状态写入
-    await asyncio.sleep(0.05)
-    orders = await kernel.order_manager._orders.list_active(str(account_id))
+    # 等待状态写入(CI 负载下事件消费可能慢于固定 sleep,截止时间轮询)
+    async with asyncio.timeout(2.0):
+        while True:
+            orders = await kernel.order_manager._orders.list_active(str(account_id))
+            if any(o.status is OrderStatus.UNKNOWN for o in orders):
+                break
+            await asyncio.sleep(0.02)
     assert any(o.status is OrderStatus.UNKNOWN for o in orders)
 
     # 验证审计日志
@@ -137,11 +141,13 @@ async def test_cancel_timeout_stays_pending(
     with pytest.raises(BrokerTimeoutError):
         await kernel.order_manager.cancel_order(str(order.client_order_id))
 
-    # 订单应保持 CANCEL_PENDING
-    await asyncio.sleep(0.05)
-    db_order = await kernel.order_manager._orders.get(str(order.client_order_id))
+    # 订单应保持 CANCEL_PENDING(CI 负载下事件消费可能慢于固定 sleep,轮询等待)
+    db_order = await wait_for_status(
+        kernel.order_manager._orders,
+        str(order.client_order_id),
+        OrderStatus.CANCEL_PENDING,
+    )
     assert db_order is not None
-    assert db_order.status is OrderStatus.CANCEL_PENDING
 
     # 审计日志
     logs = await kernel.order_manager._audit.list_recent(limit=20)
@@ -357,9 +363,30 @@ async def test_partial_fill_restart_recovery(account_id: AccountId) -> None:
             await mock.match_limit_order_partial(
                 str(order.client_order_id), Decimal("4.50"), Decimal("200")
             )
-            await asyncio.sleep(0.1)
-
-            db_order = await OrderRepository(session).get(str(order.client_order_id))
+            # 等回报事件被 consumer **完整**消费(fills 落库 + 状态推进 +
+            # OrderFilled→PositionManager 持仓 upsert,三条件齐备才算
+            # _on_filled 结束):只等状态会在 handler 中途返回,stop() 取消
+            # 任务会打断 flush 使事务作废(commit 抛 PendingRollback)。
+            # CI 覆盖率负载下事件消费明显变慢,原固定 sleep(0.1) 同样不够
+            # (2026-09-02 CI 三连败根因)。
+            order_repo = OrderRepository(session)
+            position_repo = PositionRepository(session)
+            db_order = None
+            async with asyncio.timeout(5.0):
+                while True:
+                    db_order = await order_repo.get(str(order.client_order_id))
+                    if (
+                        db_order is not None
+                        and db_order.status is OrderStatus.PARTIALLY_FILLED
+                    ):
+                        positions = await position_repo.list_local(str(account_id))
+                        if any(
+                            p.symbol.code == "510300.SH"
+                            and p.total_quantity == Decimal("200")
+                            for p in positions
+                        ):
+                            break
+                    await asyncio.sleep(0.02)
             assert db_order is not None
             assert db_order.status is OrderStatus.PARTIALLY_FILLED
             assert db_order.filled_quantity == Decimal("200")
