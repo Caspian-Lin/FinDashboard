@@ -56,8 +56,8 @@ async def run_backtest_and_persist(
         BenchmarkConfig,
         PointInTimeFactorSelector,
     )
+    from finboard_backtest.providers import build_backtest_bar_provider
     from finboard_backtest.selection_snapshot import FeatureSnapshotFactorReader
-    from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
     from finboard_data.factors import InputsMode
     from finboard_persistence import (
         BacktestRunModel,
@@ -74,25 +74,17 @@ async def run_backtest_and_persist(
     )
     strategy = create_strategy(request.strategy, "backtest", **params)
 
-    if provider_name == "akshare":
-        provider: AkShareProvider | TushareBarProvider | YFinanceProvider = (
-            AkShareProvider()
-        )
-    elif provider_name == "tushare":
-        # 与 routes/data._get_provider / background_jobs._providers 保持一致:
-        # token 显式从 settings 传入,pydantic-settings 不会把 .env 写回 os.environ。
-        from finboard_app.config import load_settings
+    # issue #257:provider 构造统一收敛到 finboard_backtest.providers,与
+    # MCP 同步路径共用;settings.data_fallback_provider 配置了备用源时,
+    # 主源拉不到的标的(如 tushare 源的 ETF)在取数入口显式回退。
+    # token 显式从 settings 传入,pydantic-settings 不会把 .env 写回 os.environ。
+    from finboard_app.config import load_settings
 
+    try:
         settings = load_settings()
-        provider = TushareBarProvider(
-            token=settings.tushare_token,
-            use_cache=True,
-            requests_per_minute=settings.tushare_requests_per_minute,
-            daily_request_limit=settings.tushare_daily_request_limit,
-            usage_file=settings.tushare_usage_file,
-        )
-    else:
-        provider = YFinanceProvider()
+    except Exception:
+        settings = None
+    provider = build_backtest_bar_provider(provider_name, settings)
 
     # issue #255:research_db 选股必需数据集未发布 → run 启动即具名失败,
     # 不再让逐期 SKIPPED 静默空转成「0 交易成功」。入队路径(REST/MCP)已有
