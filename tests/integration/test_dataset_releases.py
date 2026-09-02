@@ -24,6 +24,7 @@ from finboard_persistence import (
     ResearchDatasetReleaseService,
     ResearchDatasetRepository,
     ResearchSyncBatchRepository,
+    resolve_release_symbols,
     session_factory,
 )
 from finboard_shared.models import Bar, Symbol
@@ -415,3 +416,96 @@ async def test_index_benchmark_symbol_publishable(
         delete(InstrumentModel).where(InstrumentModel.code == "000300.SH")
     )
     await db_session.commit()
+
+
+# --------------------------------------------------------------------- #
+# #261:发布标的集来源(symbols_from_release / full_market)入队期解析
+# --------------------------------------------------------------------- #
+
+
+async def test_resolve_symbols_from_release_copies_frozen_symbol_set(
+    _engine: AsyncEngine,  # noqa: PT019 - 共享集成测试 fixture 的既有命名
+    db_session: AsyncSession,
+    tmp_path: Path,
+    test_stock: None,
+) -> None:
+    """复制语义端到端:解析结果与来源发布冻结清单一致,二次发布继承同一标的集。"""
+    del test_stock, _engine
+    await _seed_bars(tmp_path / "cache")
+
+    service = ResearchDatasetReleaseService(
+        db_session,
+        cache_dir=tmp_path / "cache",
+        release_root=tmp_path / "releases",
+    )
+    source = await service.publish(
+        DatasetReleaseSpec(
+            release_id="integration-r261-src",
+            dataset_name="multi_asset_daily_bars",
+            source="fixed_sample",
+            version="integration-r261-src-v1",
+            start_date=_START,
+            end_date=_END,
+            code_version="integration-test",
+        ),
+        _SYMBOLS,
+    )
+    await db_session.commit()
+
+    copied = await resolve_release_symbols(
+        db_session,
+        release_kind="a_share_tushare",
+        symbols_from_release=source.release_id,
+    )
+    assert copied == sorted(_SYMBOLS)
+
+    # 复制结果直接作为新发布的 symbols:二次发布继承同一标的集。
+    follower = await service.publish(
+        DatasetReleaseSpec(
+            release_id="integration-r261-follower",
+            dataset_name="multi_asset_daily_bars",
+            source="fixed_sample",
+            version="integration-r261-follower-v1",
+            start_date=_START,
+            end_date=_END,
+            code_version="integration-test",
+        ),
+        copied,
+    )
+    await db_session.commit()
+    assert sorted(
+        item.code for item in follower.instruments
+    ) == sorted(item.code for item in source.instruments)
+
+    await db_session.execute(
+        delete(ResearchDatasetReleaseModel).where(
+            ResearchDatasetReleaseModel.release_id.in_(
+                ("integration-r261-src", "integration-r261-follower")
+            )
+        )
+    )
+    await db_session.commit()
+
+
+async def test_resolve_symbols_full_market_expands_active_instruments(
+    db_session: AsyncSession,
+    test_stock: None,
+) -> None:
+    """full_market 按发布 kind 语义展开 instruments 表活跃标的。"""
+    del test_stock
+
+    stock_only = await resolve_release_symbols(
+        db_session,
+        release_kind="a_share_tushare",
+        full_market=True,
+    )
+    assert "TST077.SH" in stock_only
+
+    mixed = await resolve_release_symbols(
+        db_session,
+        release_kind="multi_asset_mixed",
+        full_market=True,
+    )
+    # 混合展开 = 股票 + ETF + 指数并集,股票必然包含。
+    assert "TST077.SH" in mixed
+    assert set(stock_only) <= set(mixed)
