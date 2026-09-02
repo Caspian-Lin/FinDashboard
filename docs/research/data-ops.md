@@ -132,3 +132,44 @@ financial_indicators)的标的并集一致性必须自检。
 run**——缺失标的的研究因子值为 null,发具名 `research_release_missing_symbols`
 warning(release_id + 缺失清单),与 factor_lab #212 容忍语义一致;bars 主
 发布缺标的仍 fail-closed。
+
+## 指数基准数据链路(#256,#184 运营化)
+
+**背景**:2026-09-01 所有 research run 的 `benchmark_return`/`excess_return`
+全 null——#184 读取端完整,但全链路没有 `instrument_type=index` 的登记写入者,
+指数日线进不了缓存,也就进不了任何冻结发布。
+
+**标准运营步骤**(以 000300.SH 基准为例):
+
+1. `data_sync`(REST `POST /api/data/sync` / MCP `finboard_data_sync_universe`)
+   —— `discover_indices` 从受控登记表 `BENCHMARK_INDEX_REGISTRY`(沪深300 /
+   中证500 / 中证1000 / 上证50 / 科创50 / 创业板指 / 深证成指 / 北证50 等 9 只)
+   自动登记 `instrument_type=index` 行。扩展新指数直接在
+   `finboard_data/discovery.py` 的登记表加一行(代码必须满足 `is_index_code`,
+   导入期断言)。指数无 list_date/industry 上游,保持 null(data_sync 统计可见)。
+2. `bulk_download`(REST `POST /api/data/bulk-download` / MCP
+   `finboard_data_bulk_download_start`)带 `instrument_type=index`、
+   `source=akshare` —— 指数日线走 akshare `index_zh_a_hist` 进 parquet 缓存。
+   **tushare 源对指数保持拒绝**(`tushare_scope_mismatch`,不静默换源)。
+3. `dataset_release_publish`(release_kind=`multi_asset_mixed`)—— **指数代码
+   必须与股票放进同一份发布**(manifest 只允许一个 bars 主发布,基准行情与
+   候选池同源);`adjustment` 用默认 `qfq`(与 bulk_download 缓存键一致;
+   指数本身无复权概念,键只是缓存/发布分区)。发布后指数 instrument ready
+   (asset_class=equity、零费用执行占位)。
+4. research_run 入队时 `benchmark_config={"symbol": "000300.SH"}` ——
+   `_load_benchmark_curve` 从同一 bars 发布 PIT 读取指数行情,
+   `benchmark_return`/`excess_return` 非真实行情不落值(缺失仍 null + 具名
+   warning,禁止静默 0.0,#184 不变量)。
+
+**边界**:指数**不进候选池**(只做基准数据、不可撮合)——静态预检 /
+入队空池门控 / 运行时候选构建三处共用 `is_benchmark_only_instrument`
+排除指数;UNIVERSE artifact 中只有股票。验证 SQL:
+
+```sql
+-- 指数登记行
+SELECT code, name, exchange, list_date FROM instruments WHERE instrument_type = 'index';
+```
+
+端到端回归:`tests/integration/test_index_benchmark_chain.py`(登记 → 混发
+发布 → 真实 FrozenReleaseProvider worker run → `benchmark_return` 非 null +
+UNIVERSE artifact 无指数)。
