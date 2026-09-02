@@ -27,6 +27,10 @@ from finboard_api.job_schemas import (
     JobIn,
     JobOut,
 )
+from finboard_backtest.background_jobs.payload_contracts import (
+    PayloadContractError,
+    validate_job_payload,
+)
 from finboard_persistence import (
     BackgroundJobPersistenceConflictError,
     BackgroundJobRepository,
@@ -59,6 +63,15 @@ async def create_job(
             status_code=422,
             detail=f"未开放 kind: {body.kind}(当前仅允许 {sorted(_ALLOWED_KINDS)})",
         )
+    # per-kind payload 入队期契约(#260,与 MCP finboard_job_enqueue 共用):
+    # 未知键 / 缺必填 / 枚举非法秒级 422,不再等 worker 执行期才报错。
+    try:
+        validate_job_payload(body.kind, body.payload)
+    except PayloadContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"payload 契约校验失败[{exc.code}]: {exc.summary}",
+        ) from exc
     job_id = generate_background_job_id()
     payload_checksum = hashlib.sha256(
         json.dumps(body.payload, sort_keys=True, default=str).encode("utf-8")

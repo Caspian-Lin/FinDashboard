@@ -410,6 +410,105 @@ class TestJobEnqueue:
         )
         assert app.audit.records[0].tool_name == "finboard.job.enqueue"
 
+    # ------------------------------------------------- issue #260 payload 契约
+
+    async def test_payload_unknown_key_rejected(self) -> None:
+        """data_types 是不存在的键 → 入队即 invalid_argument(不再静默忽略)。"""
+        app = _make_app()
+        env = await job_tools.job_enqueue(
+            app,
+            kind="research_data_sync",
+            idempotency_key="idem-key-260a",
+            requested_by="agent",
+            payload={
+                "data_types": ["financial_indicators"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-31",
+            },
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "data_types" in (env.error.message or "")
+        assert "datasets" in (env.error.message or "")
+
+    async def test_payload_missing_start_date_rejected(self) -> None:
+        app = _make_app()
+        env = await job_tools.job_enqueue(
+            app,
+            kind="research_data_sync",
+            idempotency_key="idem-key-260b",
+            requested_by="agent",
+            payload={"datasets": ["profiles"], "end_date": "2026-01-31"},
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "start_date" in (env.error.message or "")
+
+    async def test_payload_empty_symbol_pool_rejected(self) -> None:
+        """逐标的数据集缺 symbols 且缺 profiles → 入队即拒(空池静默零迭代)。"""
+        app = _make_app()
+        env = await job_tools.job_enqueue(
+            app,
+            kind="research_data_sync",
+            idempotency_key="idem-key-260c",
+            requested_by="agent",
+            payload={
+                "datasets": ["financial_indicators"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-03-31",
+            },
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "symbol 池" in (env.error.message or "")
+
+    async def test_payload_contract_valid_passes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        app = _make_app()
+        row = _job_row(kind="research_data_sync")
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "create_or_get",
+            lambda self, **kw: _async_return((row, True)),
+        )
+        env = await job_tools.job_enqueue(
+            app,
+            kind="research_data_sync",
+            idempotency_key="idem-key-260d",
+            requested_by="agent",
+            payload={
+                "datasets": ["profiles", "daily_metrics"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-31",
+            },
+        )
+        assert env.status == "ok"
+        assert env.data["created"] is True
+
+    async def test_unregistered_kind_payload_not_validated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """未注册 kind 的 payload 保持自由结构(向后兼容)。"""
+        app = _make_app()
+        row = _job_row(kind="echo")
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "create_or_get",
+            lambda self, **kw: _async_return((row, True)),
+        )
+        env = await job_tools.job_enqueue(
+            app,
+            kind="echo",
+            idempotency_key="idem-key-260e",
+            requested_by="agent",
+            payload={"anything": ["goes", "here"]},
+        )
+        assert env.status == "ok"
+
 
 # ---------------------------------------------------------------------------
 # finboard.job.cancel

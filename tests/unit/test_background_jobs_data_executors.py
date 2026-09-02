@@ -365,6 +365,114 @@ class TestResearchDataSyncPayload:
         assert exc_info.value.code == "invalid_payload"
 
     @pytest.mark.asyncio
+    async def test_unknown_payload_key_replayed_at_execute(self) -> None:
+        """#260:执行器入口重放入队期契约 —— 未知键(data_types)fail-visible,
+        不再被静默忽略后按缺省全数据集执行。"""
+        from finboard_backtest.background_jobs.executors.research_data_sync import (
+            ResearchDataSyncExecutor,
+        )
+
+        executor = ResearchDataSyncExecutor(session_maker=_fake_session_maker())
+        job = _make_job(
+            {
+                "data_types": ["daily_metrics"],  # 拼写错误,正确为 datasets
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-31",
+            },
+            "research_data_sync",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+        assert "data_types" in exc_info.value.summary
+
+    @pytest.mark.asyncio
+    async def test_per_symbol_without_symbols_or_profiles_rejected_before_work(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#260:逐标的数据集缺 symbols 且缺 profiles → 执行端重放契约即拒
+        (契约层拦截;不触 provider)。"""
+
+        from finboard_backtest.background_jobs.executors.research_data_sync import (
+            ResearchDataSyncExecutor,
+        )
+
+        def _boom_factory() -> object:
+            raise AssertionError("契约失败不应构造 provider")
+
+        executor = ResearchDataSyncExecutor(
+            session_maker=_fake_session_maker(),
+            provider_factory=_boom_factory,  # type: ignore[arg-type]
+        )
+        job = _make_job(
+            {
+                "datasets": ["financial_indicators"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-03-31",
+            },
+            "research_data_sync",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+        assert "symbol 池" in exc_info.value.summary
+
+    @pytest.mark.asyncio
+    async def test_empty_symbol_pool_after_profiles_fail_visible(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#260 静默 no-op 治理:profiles 在 datasets 但上游返回空池 →
+        逐标的段落前抛具名 empty_symbol_pool,任务不再「零迭代成功」。"""
+
+        from finboard_backtest.background_jobs.executors.research_data_sync import (
+            ResearchDataSyncExecutor,
+        )
+
+        class _EmptyProfilesProvider:
+            async def fetch_instrument_profiles(self, **kwargs: object) -> list[object]:
+                return []
+
+        class _Service:
+            async def sync_instrument_profiles(self, **kwargs: object) -> object:
+                return object()
+
+        executor = ResearchDataSyncExecutor(
+            session_maker=_fake_session_maker(),
+            provider_factory=lambda: _EmptyProfilesProvider(),  # type: ignore[arg-type,return-value]
+        )
+        import finboard_persistence.research_sync as persistence_mod
+
+        monkeypatch.setattr(
+            persistence_mod,
+            "ResearchDataSyncService",
+            lambda *args: _Service(),
+        )
+        job = _make_job(
+            {
+                "datasets": ["profiles", "financial_indicators"],
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-31",
+            },
+            "research_data_sync",
+        )
+        phases: list[str | None] = []
+
+        async def _progress(
+            _done: int, _total: int | None, phase: str | None
+        ) -> None:
+            phases.append(phase)
+
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _progress)
+        assert exc_info.value.code == "empty_symbol_pool"
+        assert exc_info.value.retryable is False
+        # profiles 段已完成(工作不浪费),失败发生在逐标的段落之前
+        assert "research_data_sync:profiles" in phases
+        assert not any(
+            p and p.startswith("research_data_sync:financial") for p in phases
+        )
+
+    @pytest.mark.asyncio
     async def test_budget_exhausted_maps_to_retryable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

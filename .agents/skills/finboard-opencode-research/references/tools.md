@@ -1113,17 +1113,29 @@ SDK fail-fast。
 - 参数:`kind: str`(白名单)、`idempotency_key: str`(8-128 字符)、
   `requested_by: str`、`queue?: str = "default"`、`payload?: dict`(任务参数,
   结构取决于 kind)、`priority?: int = 0`(-1000..1000)、`max_attempts?: int = 3`(1..10)
+- 入队期 payload 契约(#260,REST `POST /api/jobs` 与本工具共用同一校验):
+  已注册 `research_data_sync` —— **未知键拒绝**(如误传 `data_types`,
+  正确参数名为 `datasets`)、`start_date`/`end_date` 必填(ISO 日期)、
+  `datasets` 枚举校验、逐标的数据集(`financial_indicators`/
+  `industry_memberships`)在未提供 `symbols` 且 `datasets` 不含 `profiles`
+  时拒绝(否则 symbol 池解析为空、任务静默零迭代);执行器入口重放同一契约,
+  覆盖旁路入队的存量行
 - 返回:`JobOut + created`(首次提交 true / 幂等命中 false)
 - 错误:`permission_denied`(只读模式)、`invalid_argument`(kind 不在白名单 /
-  schema 校验失败)、`conflict`(幂等冲突 / 重复 idempotency_key)
+  schema 校验失败 / payload 契约失败`[unknown_payload_key|
+  missing_required_field|invalid_field_value|empty_symbol_pool]`)、
+  `conflict`(幂等冲突 / 重复 idempotency_key)
 - kind payload 契约示例:
   - `feature_snapshot`:`{dataset_release_id, decision_at}` → `result_ref=snapshot_id`
   - `research_run`:`{run_id, strategy_kind}` → 与 `finboard_run_queue` 双写
   - `bulk_download`:`{market, source, start, instrument_type}`
   - `dataset_publish`:`{release_id, release_kind, symbols, version, start_date, end_date}`
   - `backtest_run`:`{request, provider_name}` → `result_ref=str(run_id)`
-  - `research_data_sync`:`{datasets, start_date, end_date, symbols}` → 研究
-    数据表摄取(batch 发布后 selection 可命中)
+  - `research_data_sync`:`{start_date: "YYYY-MM-DD"(必填), end_date:
+    "YYYY-MM-DD"(必填), datasets?: [profiles|name_changes|daily_metrics|
+    financial_indicators|industry_memberships](缺省=全部五类), symbols?:
+    ["000001.SZ",...](省略时逐标的数据集以 profiles 同步结果为池,此时
+    datasets 须含 profiles)}` → 研究数据表摄取(batch 发布后 selection 可命中)
 
 ### finboard_job_cancel **[写]**
 请求协作式取消后台任务(running → cancel_requested,executor checkpoint 时退出)。

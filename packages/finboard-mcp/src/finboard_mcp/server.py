@@ -226,7 +226,13 @@ FinBoard 研究 MCP —— 量化研究工具集
   复用 background_jobs 表,enqueue kind 白名单全是研究/数据/回测域
   (echo/research_run/feature_snapshot/bulk_download/dataset_publish/
   backtest_run/data_sync/fetch_all/quality_repair/research_data_sync);
-  实盘交易内核任务不进入队列。feature_snapshot/bulk_download 等异步任务的进度
+  实盘交易内核任务不进入队列。
+  research_data_sync payload 入队期契约(#260,REST /api/jobs 与 MCP 共用):
+  未知键(如误把 datasets 写成 data_types)/缺 start_date|end_date/
+  datasets 枚举非法/逐标的数据集(financial_indicators|industry_memberships)
+  缺 symbols 且缺 profiles(空 symbol 池静默零迭代)入队即 invalid_argument,
+  工具描述附 payload 模板;执行器入口重放同一契约(旁路入队兜底)。
+  feature_snapshot/bulk_download 等异步任务的进度
   统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id;
   view=none 轮询最小集 / summary 默认剥 payload / detail 全量;返回附
   data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206)。

@@ -10,7 +10,9 @@
 priority / max_attempts / requested_by),kind 白名单只放研究 / 数据 / 回测域
 (``_ALLOWED_KINDS``),与 REST ``POST /api/jobs`` 的边界一致;实盘交易内核
 (盘前检查 / 收盘撤单 / 日终核对 / Broker 心跳 / Kill Switch)由专用 Scheduler
-执行,**不进入**统一队列、不暴露为 MCP 工具。
+执行,**不进入**统一队列、不暴露为 MCP 工具。已注册 kind 的 payload 契约在
+入队期校验(#260,与 REST 共用 ``validate_job_payload``):未知键 / 缺必填 /
+枚举非法秒级 ``invalid_argument``。
 
 归档(issue #221)只是 ``background_jobs`` 的展示维度:归档后从默认列表
 (``archived=exclude``)隐藏但**不删除**,``archived=only|all`` 与 get 始终可达,
@@ -30,6 +32,10 @@ from typing import Any, cast
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
+from finboard_backtest.background_jobs.payload_contracts import (
+    PayloadContractError,
+    validate_job_payload,
+)
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
@@ -282,6 +288,15 @@ async def job_enqueue(
                 f"未开放 kind: {body.kind}"
                 f"(允许 {sorted(_ALLOWED_KINDS)};实盘交易内核任务不进入队列)",
             )
+        # per-kind payload 入队期契约(#260,与 REST POST /api/jobs 共用同一
+        # 校验器):未知键 / 缺必填 / 枚举非法秒级拒绝,不再等 worker 执行期。
+        try:
+            validate_job_payload(body.kind, body.payload)
+        except PayloadContractError as exc:
+            raise McpToolError(
+                "invalid_argument",
+                f"payload 契约校验失败[{exc.code}]: {exc.summary}",
+            ) from exc
         checksum = _payload_checksum(body.payload)
         async with app.session_maker() as session:
             try:
@@ -544,6 +559,14 @@ def register(mcp: MCPServer) -> None:
             "queue(默认 default)、idempotency_key(8-128 字符,幂等键)、"
             "payload(任务参数,具体结构取决于 kind)、priority(-1000..1000,默认 0)、"
             "max_attempts(1..10,默认 3)、requested_by。"
+            "research_data_sync payload 模板(#260 起入队期契约校验,违规秒级 "
+            "invalid_argument):{start_date: 'YYYY-MM-DD'(必填), "
+            "end_date: 'YYYY-MM-DD'(必填), datasets: ['profiles'|'name_changes'|"
+            "'daily_metrics'|'financial_indicators'|'industry_memberships']"
+            "(可选,缺省=全部五类), symbols: ['000001.SZ', ...](可选,字符串列表;"
+            "省略时逐标的数据集以 profiles 同步结果为 symbol 池,此时 datasets "
+            "须含 profiles,否则入队即拒)}。未知键(如误把 datasets 写成 "
+            "data_types)入队即拒,不会被静默忽略。"
             "返回 JobOut + created(首次提交 true / 幂等命中 false)。"
             "实盘交易内核任务不进入队列。写操作,mcp_readonly_only=true 时拒绝。"
         ),
