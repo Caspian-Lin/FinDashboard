@@ -3,6 +3,8 @@
 用 ``AsyncMock`` 模拟 ``AsyncSession`` + monkeypatch repository 方法,验证:
 
 * 组合展开:显式列表 / 笛卡尔积、label 确定性、base params 合并;
+* 选股维度展开(#259):selection_grid 单独使用 / 与 params 侧笛卡尔积 /
+  逐组合 FactorSelectionParams 校验 / label 结构化差异 / 上限约束;
 * 上限与校验:组合数超限 / max_combos 超硬上限 / 非法组合 /
   互斥形态 / 空列表 / 未知策略 → invalid_argument;
 * 提交:成功入队 N 个 backtest_run job(同一事务、幂等键、grid 元数据)、
@@ -150,6 +152,7 @@ def _grid_row(
         end="2024-06-30",
         capital=Decimal("100000"),
         adjust="qfq",
+        selection={"enabled": False},
         combos=combos
         or [
             {"index": 0, "label": "{}", "params": {"short_window": 5}, "job_id": "BJ-1"},
@@ -172,6 +175,7 @@ def _submit_kwargs(**overrides: Any) -> dict[str, Any]:
         "selection": None,
         "params_list": [{"short_window": 5}, {"short_window": 10}],
         "params_grid": None,
+        "selection_grid": None,
         "max_combos": 20,
         "grid_idempotency_key": "grid-key-1",
         "requested_by": "agent",
@@ -498,6 +502,313 @@ class TestGridSubmitOk:
 
 
 # ---------------------------------------------------------------------------
+# finboard.backtest.grid_submit —— selection_grid 选股维度展开(issue #259)
+# ---------------------------------------------------------------------------
+
+
+def _patch_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[dict[str, Any]],
+) -> None:
+    """幂等查重为空 + 捕获逐 job 入队 payload。"""
+
+    _no_existing_grid(monkeypatch)
+
+    async def fake_create_or_get(self: Any, **kw: Any) -> Any:
+        calls.append(kw)
+        return SimpleNamespace(job_id=f"BJ-{len(calls)}"), True
+
+    monkeypatch.setattr(BackgroundJobRepository, "create_or_get", fake_create_or_get)
+
+
+class TestSelectionGrid:
+    async def test_selection_grid_alone_expands(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """selection_grid 单独使用(纯选股扫描,如因子 x 窗口),params 全部为基础值。"""
+
+        app = _make_app()
+        calls: list[dict[str, Any]] = []
+        _patch_enqueue(monkeypatch, calls)
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(
+                params_list=None,
+                selection_grid={
+                    "ranking_factor": ["momentum", "market_cap"],
+                    "momentum_lookback": [20, 60],
+                },
+            ),
+        )
+        assert env.status == "ok"
+        assert env.data["combo_count"] == 4  # 2 因子 x 2 窗口笛卡尔积
+        assert len(calls) == 4
+        selection_pairs = sorted(
+            (
+                kw["payload"]["request"]["selection"]["ranking_factor"],
+                kw["payload"]["request"]["selection"]["momentum_lookback"],
+            )
+            for kw in calls
+        )
+        assert selection_pairs == [
+            ("market_cap", 20),
+            ("market_cap", 60),
+            ("momentum", 20),
+            ("momentum", 60),
+        ]
+        # 未提供 params_list/params_grid → 逐组合 params 都是基础参数(long_window=20 默认)
+        assert all(
+            kw["payload"]["request"]["params"]["long_window"] == 20 for kw in calls
+        )
+
+    async def test_selection_grid_cartesian_with_params_grid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """selection_grid 与 params_grid 做笛卡尔积(2 x 2 = 4)。"""
+
+        app = _make_app()
+        calls: list[dict[str, Any]] = []
+        _patch_enqueue(monkeypatch, calls)
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(
+                params_list=None,
+                params_grid={"short_window": [5, 10]},
+                selection_grid={"ranking_factor": ["momentum", "pb"]},
+            ),
+        )
+        assert env.status == "ok"
+        assert env.data["combo_count"] == 4
+        combos = sorted(
+            (
+                kw["payload"]["request"]["params"]["short_window"],
+                kw["payload"]["request"]["selection"]["ranking_factor"],
+            )
+            for kw in calls
+        )
+        assert combos == [
+            (5, "momentum"),
+            (5, "pb"),
+            (10, "momentum"),
+            (10, "pb"),
+        ]
+        # label 为结构化差异:{"params": ..., "selection": ...}(空 params 侧省略)
+        labels = sorted(job["label"] for job in env.data["jobs"])
+        assert labels == sorted(
+            [
+                '{"params": {"short_window": 5}, "selection": {"ranking_factor": "momentum"}}',
+                '{"params": {"short_window": 5}, "selection": {"ranking_factor": "pb"}}',
+                '{"params": {"short_window": 10}, "selection": {"ranking_factor": "momentum"}}',
+                '{"params": {"short_window": 10}, "selection": {"ranking_factor": "pb"}}',
+            ]
+        )
+        # 提交回执 jobs 与落库 combos 均携带组合级 selection(校验后全量)
+        assert all("selection" in job for job in env.data["jobs"])
+        session = _get_session(app)
+        grid_row = session.add.call_args.args[0]
+        assert all("selection" in combo for combo in grid_row.combos)
+        # 网格级 selection 列仍是基础 selection(None → 默认全量 dump)
+        assert grid_row.selection["ranking_factor"] == "market_cap"
+
+    async def test_selection_grid_with_params_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """params_list(显式列表)与 selection_grid 做笛卡尔积。"""
+
+        app = _make_app()
+        calls: list[dict[str, Any]] = []
+        _patch_enqueue(monkeypatch, calls)
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(
+                params_list=[{"short_window": 5}, {"short_window": 10}],
+                selection_grid={"max_symbols": [10, 30]},
+            ),
+        )
+        assert env.status == "ok"
+        assert env.data["combo_count"] == 4
+        combos = sorted(
+            (
+                kw["payload"]["request"]["params"]["short_window"],
+                kw["payload"]["request"]["selection"]["max_symbols"],
+            )
+            for kw in calls
+        )
+        assert combos == [(5, 10), (5, 30), (10, 10), (10, 30)]
+
+    async def test_selection_grid_invalid_field_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """未知 selection 字段(extra=forbid)→ 具名 invalid_argument,不落库不入队。"""
+
+        app = _make_app()
+        calls: list[dict[str, Any]] = []
+        _patch_enqueue(monkeypatch, calls)
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(
+                params_list=None,
+                selection_grid={"bogus_factor": ["momentum"]},
+            ),
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        session = _get_session(app)
+        session.add.assert_not_called()
+        assert calls == []
+
+    async def test_selection_grid_invalid_value_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """非法 selection 值(momentum_lookback=0 违反 gt=0)→ invalid_argument。"""
+
+        app = _make_app()
+        calls: list[dict[str, Any]] = []
+        _patch_enqueue(monkeypatch, calls)
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(
+                params_list=None,
+                selection_grid={"momentum_lookback": [0]},
+            ),
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        session = _get_session(app)
+        session.add.assert_not_called()
+        assert calls == []
+
+    async def test_base_selection_merged_into_combo_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """组合级 selection = 网格级基础 selection + 覆盖,全量进 payload。"""
+
+        app = _make_app()
+        calls: list[dict[str, Any]] = []
+        _patch_enqueue(monkeypatch, calls)
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(
+                params_list=None,
+                selection={"enabled": True, "source": "akshare"},
+                selection_grid={"ranking_factor": ["momentum"]},
+            ),
+        )
+        assert env.status == "ok"
+        selection = calls[0]["payload"]["request"]["selection"]
+        assert selection["enabled"] is True
+        assert selection["source"] == "akshare"
+        assert selection["ranking_factor"] == "momentum"
+
+    async def test_selection_grid_product_over_max_combos_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """3 params x 2 selection = 6 > max_combos=5 → invalid_argument(列上限)。"""
+
+        app = _make_app()
+        calls: list[dict[str, Any]] = []
+        _patch_enqueue(monkeypatch, calls)
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(
+                params_list=None,
+                params_grid={"short_window": [5, 10, 15]},
+                selection_grid={"ranking_factor": ["momentum", "pb"]},
+                max_combos=5,
+            ),
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        session = _get_session(app)
+        session.add.assert_not_called()
+        assert calls == []
+
+    async def test_selection_grid_empty_or_bad_shape_rejected(self) -> None:
+        app = _make_app()
+        env = await grid_tools.backtest_grid_submit(
+            app, **_submit_kwargs(params_list=None, selection_grid={})
+        )
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(
+                params_list=None,
+                selection_grid={"ranking_factor": []},
+            ),
+        )
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_no_combo_dimension_rejected(self) -> None:
+        """params_list / params_grid / selection_grid 全部缺省 → invalid_argument。"""
+
+        app = _make_app()
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(params_list=None, params_grid=None, selection_grid=None),
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_without_selection_grid_label_and_payload_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """无 selection_grid 时行为与历史完全一致:label 扁平 JSON、
+        combos 不携带 selection 键(checksum 不漂移,幂等重提交仍命中)。"""
+
+        combos = grid_tools._expand_combos(
+            params_list=None,
+            params_grid={"short_window": [5]},
+            selection_grid=None,
+        )
+        assert combos[0]["label"] == '{"short_window": 5}'
+        assert combos[0]["selection"] == {}
+
+        app = _make_app()
+        calls: list[dict[str, Any]] = []
+        _patch_enqueue(monkeypatch, calls)
+        env = await grid_tools.backtest_grid_submit(
+            app,
+            **_submit_kwargs(
+                params_list=None,
+                params_grid={"short_window": [5]},
+            ),
+        )
+        assert env.status == "ok"
+        assert env.data["jobs"][0]["label"] == '{"short_window": 5}'
+        assert "selection" not in env.data["jobs"][0]
+        session = _get_session(app)
+        grid_row = session.add.call_args.args[0]
+        assert all("selection" not in combo for combo in grid_row.combos)
+        # payload selection 仍是网格级基础 selection
+        assert calls[0]["payload"]["request"]["selection"]["ranking_factor"] == "market_cap"
+
+    async def test_checksum_stable_for_legacy_combos(self) -> None:
+        """旧网格组合(无 selection 键)的 checksum 与引入 #259 前的公式一致。"""
+
+        import hashlib
+        import json as json_module
+
+        legacy = [
+            {"index": 0, "label": "{}", "params": {"short_window": 5}, "job_id": "BJ-1"},
+            {"index": 1, "label": "{}", "params": {"short_window": 10}, "job_id": "BJ-2"},
+        ]
+        expected = hashlib.sha256(
+            json_module.dumps(
+                [
+                    {"index": c["index"], "label": c["label"], "params": c["params"]}
+                    for c in legacy
+                ],
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        assert grid_tools._combos_checksum(legacy) == expected
+
+
+# ---------------------------------------------------------------------------
 # finboard.backtest.grid_get —— 聚合
 # ---------------------------------------------------------------------------
 
@@ -514,6 +825,41 @@ class TestGridGet:
         assert env.status == "error"
         assert env.error is not None
         assert env.error.kind == "not_found"
+
+    async def test_header_includes_base_selection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #259:基础 selection 在网格头部出现一次,组合差异由 label 承载。"""
+
+        app = _make_app()
+        grid_row = _grid_row(
+            combos=[
+                {
+                    "index": 0,
+                    "label": '{"selection": {"ranking_factor": "momentum"}}',
+                    "params": {"short_window": 5},
+                    "selection": {"enabled": False, "ranking_factor": "momentum"},
+                    "job_id": "BJ-1",
+                }
+            ]
+        )
+        monkeypatch.setattr(
+            BacktestGridRunRepository,
+            "get_by_grid_id",
+            lambda self, grid_id: _async_return(grid_row),
+        )
+        monkeypatch.setattr(
+            BackgroundJobRepository,
+            "get",
+            lambda self, job_id: _async_return(_job_row(job_id, status="queued", result_ref=None)),
+        )
+        env = await grid_tools.backtest_grid_get(app, grid_id=grid_row.grid_id)
+        assert env.status == "ok"
+        assert env.data["selection"] == {"enabled": False}
+        combo = env.data["combos"][0]
+        # #206 精神:combo 保持精简,selection 差异由 label 承载
+        assert "selection" not in combo
+        assert "selection" in combo["label"]
 
     async def test_aggregates_succeeded_failed_pending(
         self, monkeypatch: pytest.MonkeyPatch
