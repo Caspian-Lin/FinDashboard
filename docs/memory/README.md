@@ -39,3 +39,4 @@
 - [Issue #254/#255:universe 评估域收窄与 research_db 选股 fail-visible](issue-254-255-universe-domain-and-selection-gate.md) — explicit_symbols 收窄共用 explicit_symbol_domain(静态/运行时一致);benchmark_source 独立字段勿塞 benchmark_config;摄取 ≠ 发布(runs 273-275 根因),三层门控共用 repo 方法;MCP 同步/异步/grid 三路径加校验的位置;叠分支避免文档冲突
 - [Issue #256:指数标的数据链路入口](issue-256-index-data-pipeline-done.md) — bars 主发布唯一→指数基准须与股票同份 mixed 发布;is_benchmark_only_instrument 双枚举点排除(不排除=指数被交易);portfolio_config 覆盖必须嵌 overrides 键;WorkerConfig 无 operator/source 字段
 - [本机 akshare 复现实验的 ProxyError 陷阱(#257)](akshare-em-proxy-error-repro-trap.md) — 系统代理对 push2his.eastmoney.com 偶发 ProxyError(600519 真股票也失败),接口行为判定以源码+请求 URL secid 参数为准;集成测试一律 mock 网络
+- [Issue #259:backtest 网格 selection_grid 选股维度组合展开](issue-259-selection-grid-done.md) — 独立 selection_grid 参数而非 selection.* 键(params 校验链路零改动);label/checksum「键存在才纳入」保旧网格幂等;全角乘号 × 触发 RUF001-003;MCP 工具函数加参须给默认值(集成测试显式 kwargs)
