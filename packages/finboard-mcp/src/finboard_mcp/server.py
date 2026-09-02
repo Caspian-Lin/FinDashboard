@@ -35,6 +35,9 @@
   quality_repair / dataset_release_publish(任务化,返回 job_id,用
   ``finboard_job_get`` 轮询)、config_get/update、etf_sync/batch_confirm/update/
   review_queue。补全「数据→因子→策略」闭环的数据准备第一步。
+  sync_universe 自动登记基准指数(#256,instrument_type=index);
+  bulk_download_start 的 instrument_type 支持 index 走 akshare 指数日线,
+  发布 multi_asset_mixed 含指数后 research_run 基准收益可用(#184 链路闭合)。
 * #57 验证实验(#138 + #233)—— ``finboard.validation_experiment.*``:create /
   list / get / reject / add_trial / delete + run(执行入队),暴露 REST
   ``/api/research/experiments`` 的 6 个端点 + ``kind=validation_experiment``
@@ -232,6 +235,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   financial_indicators,研究数据发布与 bars 联合供因子快照 #187)、
   data_config_get/update(调度器配置)、etf_sync(默认 dry_run)/
   etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
+  指数链路(#256):sync_universe 自动登记基准指数(instrument_type=index,
+  受控登记表含沪深300/中证500/中证1000等 9 只),bulk_download_start 的
+  instrument_type=index 走 akshare 指数日线(tushare 源保持
+  tushare_scope_mismatch 拒绝);指数进 multi_asset_mixed 发布后
+  research_run 可计算真实 benchmark_return,指数本身不进候选池
+  (只做基准数据,不可撮合)。
   补全「数据→因子→策略」闭环的数据准备第一步:agent 能拉 K 线、发布数据集、
   修复质量缺陷、同步 ETF 元数据。不连 broker / 账户 / 订单 / 持仓。
 - 验证实验(7,✅ #138+#233):validation_experiment create/list/get/reject/

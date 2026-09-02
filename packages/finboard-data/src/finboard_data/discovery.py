@@ -10,6 +10,11 @@
   - ``0x`` / ``3x`` → ``.SZ`` (深交所:主板 + 创业板/CDR)
   - ``92`` / ``8x`` / ``4x`` → ``.BJ`` (北交所)
 * 带 prefix 的 ETF 代码(``sz159998`` / ``sh510300``)→ 去掉 prefix + 大写后缀
+
+指数登记(issue #256):akshare 全市场列表接口(stock / fund ETF)不覆盖指数,
+``discover_indices`` 从受控登记表 :data:`BENCHMARK_INDEX_REGISTRY` 产出
+``instrument_type=index`` 的标的——这是「指数登记 → 同步 → 发布 →
+benchmark_return」链路的唯一登记写入者。
 """
 
 from __future__ import annotations
@@ -20,12 +25,52 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from finboard_data.akshare_provider import is_index_code
 from finboard_shared.types import InstrumentType, ListingBoard, Market
 
 if TYPE_CHECKING:
     pass
 
 logger = structlog.get_logger(__name__)
+
+
+#: 常用基准指数受控登记表 ``(code, name)``(issue #256)。
+#:
+#: 指数无 akshare 全市场列表接口(股票 / ETF 各有列表 API,指数没有同口径
+#: 的稳定列表),这里维护一张显式登记表,覆盖 A 股主要宽基 / 基准指数;
+#: 全部条目必须满足 ``is_index_code`` 代码规则(模块导入期即断言,防止
+#: 登记表漂移把股票代码混进来)。扩展新指数直接加一行;data_sync 经
+#: ``sync_with_diff`` 自动写入 instruments 表。指数无 list_date / 行业的
+#: 结构化上游,保持 null(缺失在 data_sync 统计中可见,不虚构元数据)。
+BENCHMARK_INDEX_REGISTRY: tuple[tuple[str, str], ...] = (
+    ("000001.SH", "上证指数"),
+    ("000016.SH", "上证50"),
+    ("000300.SH", "沪深300"),
+    ("000688.SH", "科创50"),
+    ("000905.SH", "中证500"),
+    ("000852.SH", "中证1000"),
+    ("399001.SZ", "深证成指"),
+    ("399006.SZ", "创业板指"),
+    ("899050.BJ", "北证50"),
+)
+
+_INVALID_INDEX_CODES = tuple(
+    code for code, _ in BENCHMARK_INDEX_REGISTRY if not is_index_code(code)
+)
+if _INVALID_INDEX_CODES:
+    raise RuntimeError(
+        "BENCHMARK_INDEX_REGISTRY 存在不满足 is_index_code 规则的代码: "
+        + ", ".join(_INVALID_INDEX_CODES)
+    )
+
+
+def _index_exchange(code: str) -> str:
+    """指数代码后缀 → 交易所主数据标识(与股票 / ETF 同一口径)。"""
+    suffix = code.rpartition(".")[2]
+    exchange = {"SH": "SSE", "SZ": "SZSE", "BJ": "BSE"}.get(suffix)
+    if exchange is None:
+        raise ValueError(f"无法识别指数交易所后缀: {code}")
+    return exchange
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,12 +218,38 @@ class UniverseDiscovery:
         df = ak.fund_etf_category_sina("ETF基金")
         return [(str(row["代码"]), str(row["名称"])) for _, row in df.iterrows()]
 
+    async def discover_indices(self) -> list[InstrumentInfo]:
+        """基准指数(受控登记表,issue #256,无网络调用)。
+
+        ``instrument_type=index``;交易所按代码后缀推导,listing_board 恒为
+        UNKNOWN(指数无上市板块)。同步链路对其做 (a_share, index) 作用域的
+        生命周期 diff,与其他资产类型一致。
+        """
+        result = [
+            InstrumentInfo(
+                code=code,
+                name=name,
+                market=Market.A_SHARE,
+                instrument_type=InstrumentType.INDEX,
+                exchange=_index_exchange(code),
+                listing_board=ListingBoard.UNKNOWN,
+            )
+            for code, name in BENCHMARK_INDEX_REGISTRY
+        ]
+        logger.info("discovery.indices", count=len(result))
+        return result
+
     async def discover_all(self) -> list[InstrumentInfo]:
-        """发现全部可用标的(A 股 + ETF)。"""
-        stocks, etfs = await asyncio.gather(
+        """发现全部可用标的(A 股股票 + ETF + 基准指数,issue #256)。"""
+        stocks, etfs, indices = await asyncio.gather(
             self.discover_a_shares(),
             self.discover_a_etfs(),
+            self.discover_indices(),
         )
-        all_instruments = stocks + etfs
-        logger.info("discovery.all", total=len(all_instruments))
+        all_instruments = stocks + etfs + indices
+        logger.info(
+            "discovery.all",
+            total=len(all_instruments),
+            indices=len(indices),
+        )
         return all_instruments

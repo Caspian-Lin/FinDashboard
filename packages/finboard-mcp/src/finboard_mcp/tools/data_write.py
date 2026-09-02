@@ -1013,7 +1013,8 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_data_sync_universe",
         description=(
-            "[写] 登记全市场标的同步任务(akshare 发现 → 写 instruments 表),"
+            "[写] 登记全市场标的同步任务(akshare 发现 → 写 instruments 表,"
+            "自动包含基准指数登记表 instrument_type=index,#256),"
             "返回 202 + job_id。实际执行由 worker 消费 kind=data_sync 任务;"
             "进度/状态/取消用 finboard_job_get(job_id) 轮询。无参数。"
             "写操作,mcp_readonly_only=true 时拒绝。"
@@ -1030,8 +1031,10 @@ def register(mcp: MCPServer) -> None:
             "[写] 登记批量历史数据拉取任务(按市场/类型/交易所筛选标的池),"
             "返回 202 + job_id。实际执行由 worker 消费 kind=bulk_download 任务;"
             "进度/状态/取消用 finboard_job_get(job_id) 轮询。"
-            "参数:market(默认 a_share)/ instrument_type / exchange / "
-            "listing_boards(列表)/ start(默认 2015-01-01)/ source(可选)。"
+            "参数:market(默认 a_share)/ instrument_type(stock|etf|index;"
+            "index=#256 登记的基准指数,日线走 akshare 指数接口)/ exchange / "
+            "listing_boards(列表)/ start(默认 2015-01-01)/ source(可选;"
+            "指数与 ETF 仅 akshare|yfinance,tushare 源报 tushare_scope_mismatch)。"
             "写操作,mcp_readonly_only=true 时拒绝。"
         ),
     )
