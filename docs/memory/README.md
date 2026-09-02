@@ -40,3 +40,4 @@
 - [Issue #256:指数标的数据链路入口](issue-256-index-data-pipeline-done.md) — bars 主发布唯一→指数基准须与股票同份 mixed 发布;is_benchmark_only_instrument 双枚举点排除(不排除=指数被交易);portfolio_config 覆盖必须嵌 overrides 键;WorkerConfig 无 operator/source 字段
 - [本机 akshare 复现实验的 ProxyError 陷阱(#257)](akshare-em-proxy-error-repro-trap.md) — 系统代理对 push2his.eastmoney.com 偶发 ProxyError(600519 真股票也失败),接口行为判定以源码+请求 URL secid 参数为准;集成测试一律 mock 网络
 - [Issue #259:backtest 网格 selection_grid 选股维度组合展开](issue-259-selection-grid-done.md) — 独立 selection_grid 参数而非 selection.* 键(params 校验链路零改动);label/checksum「键存在才纳入」保旧网格幂等;全角乘号 × 触发 RUF001-003;MCP 工具函数加参须给默认值(集成测试显式 kwargs)
+- [Issue #261:发布标的集来源三选一完成](issue-261-release-symbol-source-done.md) — 入队期解析成具体 symbols 执行器零改动;复制 verbatim 勿加 kind 过滤;mixed scope 门要求三类型齐备是 #184 遗留;非 bars 发布有 stock-scope 检查

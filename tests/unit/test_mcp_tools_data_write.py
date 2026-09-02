@@ -349,6 +349,151 @@ class TestEnqueueBasedTools:
         )
         assert env.status == "denied"
 
+    # --------------------------------------------------------------- #261
+
+    async def test_dataset_publish_symbols_from_release_ok(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#261:symbols_from_release 入队期解析成具体 symbols + 溯源。"""
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository, "create_or_get", _make_echo_create_or_get()
+        )
+        resolved = [f"SYM{i:04d}.SZ" for i in range(100)]
+
+        async def _fake_resolve(session: Any, **kw: Any) -> list[str]:
+            assert kw["symbols_from_release"] == "RL-BARS-MAIN"
+            assert kw["symbols"] is None
+            assert kw["full_market"] is False
+            assert kw["release_kind"] == "daily_metrics"
+            return resolved
+
+        monkeypatch.setattr(dw, "resolve_release_symbols", _fake_resolve)
+        env = await dw.dataset_release_publish(
+            app,
+            release_id="RL-2026-DM-1",
+            symbols_from_release="RL-BARS-MAIN",
+            version="v1",
+            start_date="2020-01-01",
+            end_date="2026-01-01",
+            release_kind="daily_metrics",
+            source="tushare",
+            adjustment="none",
+        )
+        assert env.status == "ok"
+        assert env.data["kind"] == "dataset_publish"
+        assert env.data["payload"]["symbols"] == resolved
+        assert env.data["payload"]["symbols_source"] == {
+            "mode": "from_release",
+            "release_id": "RL-BARS-MAIN",
+        }
+        assert env.data["idempotency_key"] == "publish:RL-2026-DM-1"
+
+    async def test_dataset_publish_full_market_ok(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#261:full_market=true 入队期展开,溯源 mode=full_market。"""
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository, "create_or_get", _make_echo_create_or_get()
+        )
+
+        async def _fake_resolve(session: Any, **kw: Any) -> list[str]:
+            assert kw["full_market"] is True
+            assert kw["symbols"] is None
+            assert kw["symbols_from_release"] is None
+            return ["000300.SH", "510300.SH", "600519.SH"]
+
+        monkeypatch.setattr(dw, "resolve_release_symbols", _fake_resolve)
+        env = await dw.dataset_release_publish(
+            app,
+            release_id="RL-2026-FM-1",
+            full_market=True,
+            version="v1",
+            start_date="2020-01-01",
+            end_date="2026-01-01",
+            release_kind="multi_asset_mixed",
+            source="mixed",
+        )
+        assert env.status == "ok"
+        assert env.data["payload"]["symbols_source"] == {"mode": "full_market"}
+        assert env.data["payload"]["symbols"] == [
+            "000300.SH",
+            "510300.SH",
+            "600519.SH",
+        ]
+
+    async def test_dataset_publish_source_release_not_found_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#261:来源发布不存在 → 入队期 invalid_argument 具名拒绝。"""
+        from finboard_persistence import ReleaseSymbolSourceError
+
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository, "create_or_get", _make_echo_create_or_get()
+        )
+
+        async def _fake_resolve(session: Any, **kw: Any) -> list[str]:
+            raise ReleaseSymbolSourceError(
+                "source_release_not_found", "标的集来源发布不存在: RL-MISSING"
+            )
+
+        monkeypatch.setattr(dw, "resolve_release_symbols", _fake_resolve)
+        env = await dw.dataset_release_publish(
+            app,
+            release_id="RL-2026-BAD",
+            symbols_from_release="RL-MISSING",
+            version="v1",
+            start_date="2020-01-01",
+            end_date="2026-01-01",
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "source_release_not_found" in env.error.message
+
+    async def test_dataset_publish_symbol_source_missing_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#261:三种来源都未声明 → schema 层 invalid_argument。"""
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository, "create_or_get", _make_echo_create_or_get()
+        )
+        env = await dw.dataset_release_publish(
+            app,
+            release_id="RL-2026-EMPTY",
+            version="v1",
+            start_date="2020-01-01",
+            end_date="2026-01-01",
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_dataset_publish_symbol_source_ambiguous_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#261:symbols 与 symbols_from_release 同时声明 → invalid_argument。"""
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository, "create_or_get", _make_echo_create_or_get()
+        )
+        env = await dw.dataset_release_publish(
+            app,
+            release_id="RL-2026-DUP",
+            symbols=["600519.SH"],
+            symbols_from_release="RL-BARS-MAIN",
+            version="v1",
+            start_date="2020-01-01",
+            end_date="2026-01-01",
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "三选一" in env.error.message
+
 
 # --------------------------------------------------------------------------- #
 # data_fetch(同步)

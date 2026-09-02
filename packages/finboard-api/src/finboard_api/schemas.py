@@ -1074,7 +1074,16 @@ class ResearchDatasetReleaseCreate(BaseSchema):
         max_length=64,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
-    symbols: list[str] = Field(min_length=1, max_length=10_000)
+    # #261:标的集来源三选一(互斥)——内联 symbols / 从既有发布复制 /
+    # instruments 全活跃展开。入队期由 ``resolve_release_symbols`` 解析成
+    # 具体 symbols 进任务 payload,执行器零改动。
+    symbols: list[str] | None = Field(default=None, max_length=10_000)
+    symbols_from_release: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    full_market: bool = False
     start_date: date
     end_date: date
     adjustment: Literal["qfq", "hqfq", "none"] = "qfq"
@@ -1103,13 +1112,39 @@ class ResearchDatasetReleaseCreate(BaseSchema):
 
     @field_validator("symbols")
     @classmethod
-    def normalize_symbols(cls, value: list[str]) -> list[str]:
+    def normalize_symbols(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
         normalized = [symbol.strip().upper() for symbol in value if symbol.strip()]
         if not normalized:
             raise ValueError("至少选择一个已缓存标的")
         if len(normalized) != len(set(normalized)):
             raise ValueError("发布标的不能重复")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_symbol_source(self) -> ResearchDatasetReleaseCreate:
+        # #261:标的集来源必须恰好声明一种;来源解析(存在 / 可用 / 展开非空)
+        # 由入队路径调 ``resolve_release_symbols`` 兜底(需查库)。
+        declared = [
+            name
+            for name, value in (
+                ("symbols", self.symbols is not None),
+                ("symbols_from_release", self.symbols_from_release is not None),
+                ("full_market", self.full_market),
+            )
+            if value
+        ]
+        if not declared:
+            raise ValueError(
+                "必须提供 symbols / symbols_from_release / full_market 之一"
+            )
+        if len(declared) > 1:
+            raise ValueError(
+                "symbols / symbols_from_release / full_market 只能三选一,"
+                f"同时声明: {declared}"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_date_range(self) -> ResearchDatasetReleaseCreate:

@@ -380,6 +380,227 @@ class TestResearchDatasetReleases:
         mock_session.commit.assert_awaited_once()
         mock_session.rollback.assert_not_awaited()
 
+    # --------------------------------------------------------------- #261
+
+    def _release_create_base(self) -> dict[str, Any]:
+        return {
+            "release_id": "api-r78-v1",
+            "version": "v1",
+            "start_date": date(2024, 1, 2),
+            "end_date": date(2024, 1, 5),
+        }
+
+    def test_create_release_symbol_source_exclusive(self) -> None:
+        """#261:标的集来源三选一——全缺/多声明在 schema 层即拒绝。"""
+        from pydantic import ValidationError
+
+        from finboard_api.schemas import ResearchDatasetReleaseCreate
+
+        base = self._release_create_base()
+        with pytest.raises(ValidationError, match=r"三选一|之一"):
+            ResearchDatasetReleaseCreate(**base)
+        with pytest.raises(ValidationError, match="三选一"):
+            ResearchDatasetReleaseCreate(
+                **base, symbols=["600519.SH"], symbols_from_release="RL-SRC"
+            )
+        with pytest.raises(ValidationError, match="三选一"):
+            ResearchDatasetReleaseCreate(**base, symbols=["600519.SH"], full_market=True)
+        with pytest.raises(ValidationError, match="三选一"):
+            ResearchDatasetReleaseCreate(
+                **base, symbols_from_release="RL-SRC", full_market=True
+            )
+        body = ResearchDatasetReleaseCreate(**base, symbols_from_release="RL-SRC")
+        assert body.symbols is None
+        assert body.full_market is False
+
+    @pytest.mark.asyncio
+    async def test_create_release_symbols_from_release_resolves(
+        self, mock_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#261:symbols_from_release 入队期复制来源发布的冻结标的集。"""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from fastapi import Response
+
+        from finboard_api.routes.instruments import create_dataset_release
+        from finboard_api.schemas import ResearchDatasetReleaseCreate
+        from finboard_persistence import ResearchDatasetReleaseRepository
+
+        mock_session.commit = AsyncMock()
+        mock_session.rollback = AsyncMock()
+        fake_release = SimpleNamespace(
+            instruments=({"code": "600519.SH"}, {"code": "000001.SZ"}),
+            is_usable=True,
+            quality_status=SimpleNamespace(value="passed"),
+        )
+
+        async def _fake_get(self: Any, release_id: str) -> Any:
+            assert release_id == "RL-SRC"
+            return fake_release
+
+        monkeypatch.setattr(ResearchDatasetReleaseRepository, "get", _fake_get)
+        request = ResearchDatasetReleaseCreate(
+            release_kind="a_share_tushare",
+            source="tushare",
+            adjustment="qfq",
+            symbols_from_release="RL-SRC",
+            **self._release_create_base(),
+        )
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTPUB2",
+            kind="dataset_publish",
+            queue="data",
+            status="queued",
+            priority=0,
+            payload={},
+            payload_checksum="x" * 64,
+            idempotency_key="",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:dataset_publish",
+            created_at=datetime(2026, 9, 2, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+        captured: dict[str, Any] = {}
+
+        async def _echo(self: Any, **kw: Any) -> Any:
+            captured.update(kw)
+            return (fake_row, True)
+
+        with patch(
+            "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+            new=_echo,
+        ):
+            result = await create_dataset_release(
+                request, Response(status_code=202), session=mock_session
+            )
+
+        assert result.job_id == "BJ-TESTPUB2"
+        assert captured["payload"]["symbols"] == ["000001.SZ", "600519.SH"]
+        assert captured["payload"]["symbols_source"] == {
+            "mode": "from_release",
+            "release_id": "RL-SRC",
+        }
+        assert captured["idempotency_key"] == "publish:api-r78-v1"
+
+    @pytest.mark.asyncio
+    async def test_create_release_symbols_from_release_not_found(
+        self, mock_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#261:来源发布不存在 → 422 具名拒绝,不入队。"""
+        from fastapi import HTTPException, Response
+
+        from finboard_api.routes.instruments import create_dataset_release
+        from finboard_api.schemas import ResearchDatasetReleaseCreate
+        from finboard_persistence import ResearchDatasetReleaseRepository
+
+        async def _fake_get(self: Any, release_id: str) -> Any:
+            return None
+
+        monkeypatch.setattr(ResearchDatasetReleaseRepository, "get", _fake_get)
+        request = ResearchDatasetReleaseCreate(
+            release_kind="a_share_tushare",
+            source="tushare",
+            adjustment="qfq",
+            symbols_from_release="RL-MISSING",
+            **self._release_create_base(),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await create_dataset_release(
+                request, Response(status_code=202), session=mock_session
+            )
+        assert exc_info.value.status_code == 422
+        assert "source_release_not_found" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_create_release_full_market_expands(
+        self, mock_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#261:full_market 按 kind 语义展开活跃标的并记录溯源。"""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from fastapi import Response
+
+        from finboard_api.routes.instruments import create_dataset_release
+        from finboard_api.schemas import ResearchDatasetReleaseCreate
+        from finboard_persistence import InstrumentRepository
+
+        mock_session.commit = AsyncMock()
+
+        async def _fake_list_codes(
+            self: Any,
+            *,
+            market: str | None = None,
+            instrument_type: str | None = None,
+            **_kw: Any,
+        ) -> list[str]:
+            return {"stock": ["600519.SH"]}.get(instrument_type or "", [])
+
+        monkeypatch.setattr(InstrumentRepository, "list_codes", _fake_list_codes)
+        request = ResearchDatasetReleaseCreate(
+            release_kind="a_share_tushare",
+            source="tushare",
+            adjustment="qfq",
+            full_market=True,
+            **self._release_create_base(),
+        )
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTPUB3",
+            kind="dataset_publish",
+            queue="data",
+            status="queued",
+            priority=0,
+            payload={},
+            payload_checksum="x" * 64,
+            idempotency_key="",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:dataset_publish",
+            created_at=datetime(2026, 9, 2, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 9, 2, tzinfo=UTC),
+        )
+        captured: dict[str, Any] = {}
+
+        async def _echo(self: Any, **kw: Any) -> Any:
+            captured.update(kw)
+            return (fake_row, True)
+
+        with patch(
+            "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+            new=_echo,
+        ):
+            result = await create_dataset_release(
+                request, Response(status_code=202), session=mock_session
+            )
+
+        assert result.job_id == "BJ-TESTPUB3"
+        assert captured["payload"]["symbols"] == ["600519.SH"]
+        assert captured["payload"]["symbols_source"] == {"mode": "full_market"}
+
 
 class TestLifecycleEvents:
     @pytest.mark.asyncio
