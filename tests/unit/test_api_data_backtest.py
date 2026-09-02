@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -522,3 +524,161 @@ class TestBacktestRoutes:
         assert body["kind"] == "backtest_run"
         assert body["job_id"] == "BJ-TESTBT1"
         app.dependency_overrides.clear()
+
+
+class TestBacktestHistoryDetailRoutes:
+    """GET /api/backtest/history/{run_id} 裁剪参数(issue #206/#258 REST parity)。
+
+    REST 默认全量(与裁剪参数引入前的行为一致,前端零改动);
+    selection_snapshots=none|summary|full 与 MCP history_get 同契约。
+    """
+
+    def _history_row(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=7,
+            strategy="ma_cross",
+            symbols=["000001"],
+            start="2024-01-01",
+            end="2024-06-30",
+            capital=Decimal("100000"),
+            adjust="qfq",
+            params={"short_window": 5, "long_window": 20},
+            selection={"enabled": False},
+            metrics={"total_return": 0.12},
+            equity_curve=[
+                {"date": f"day-{i:04d}", "equity": 100000.0 + i} for i in range(300)
+            ],
+            fills=[
+                {
+                    "date": "2024-01-02",
+                    "symbol": "000001",
+                    "side": "buy",
+                    "quantity": "100",
+                    "price": "10.0",
+                    "commission": "1",
+                }
+                for _ in range(30)
+            ],
+            summary="total return 12%",
+            selection_snapshots=[
+                {
+                    "decision_at": f"2024-01-{day:02d}T16:00:00+00:00",
+                    "business_date": f"2024-01-{day:02d}",
+                    "effective_date": f"2024-01-{day + 1:02d}",
+                    "selected_symbols": ["000001", "000002"],
+                    "status": "published",
+                    "skip_reason": None,
+                    "dataset_versions": {"a_share_tushare": "rel-1"},
+                    "factor_version": "v1",
+                    "checksum": f"ck-{day}",
+                    "warnings": [],
+                }
+                for day in range(1, 4)
+            ],
+            dataset_versions={"a_share_tushare": ["rel-1"]},
+            factor_version="v1",
+            matching_model={},
+            asset_rules=None,
+            fee_assumptions={},
+            benchmark_config={},
+            created_at=datetime(2026, 1, 15, tzinfo=UTC),
+        )
+
+    def _get_history(
+        self, client: TestClient, app: FastAPI, **params: Any
+    ) -> Any:
+        from finboard_api.deps import get_db_session
+
+        row = self._history_row()
+        mock_session = AsyncMock()
+        app.dependency_overrides[get_db_session] = lambda: mock_session
+        try:
+            with patch(
+                "finboard_persistence.BacktestRunRepository.get",
+                new=AsyncMock(return_value=row),
+            ):
+                return client.get(
+                    "/api/backtest/history/7",
+                    params=params if params else None,
+                )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_default_returns_full(self, client: TestClient, app: FastAPI) -> None:
+        """REST 默认全量:equity/fills/snapshots 与历史行为一致,附计数元信息。"""
+        resp = self._get_history(client, app)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["equity_curve"]) == 300
+        assert len(body["fills"]) == 30
+        assert len(body["selection_snapshots"]) == 3
+        assert body["selection_snapshots"][0]["selected_symbols"] == ["000001", "000002"]
+        assert body["equity_point_count"] == 300
+        assert body["fills_total"] == 30
+        assert body["fills_offset"] == 0
+        assert body["selection_snapshot_count"] == 3
+
+    def test_selection_none_returns_count_only(
+        self, client: TestClient, app: FastAPI
+    ) -> None:
+        resp = self._get_history(client, app, selection_snapshots="none")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["selection_snapshots"] == []
+        assert body["selection_snapshot_count"] == 3
+        # 其他字段不受该开关影响。
+        assert len(body["equity_curve"]) == 300
+        assert len(body["fills"]) == 30
+
+    def test_selection_summary_is_count_projection(
+        self, client: TestClient, app: FastAPI
+    ) -> None:
+        resp = self._get_history(client, app, selection_snapshots="summary")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["selection_snapshot_count"] == 3
+        for item in body["selection_snapshots"]:
+            assert "selected_symbols" not in item
+            assert item["selected_symbol_count"] == 2
+            assert item["checksum"].startswith("ck-")
+            assert item["effective_date"].startswith("2024-01-")
+
+    def test_selection_full_explicit_same_as_default(
+        self, client: TestClient, app: FastAPI
+    ) -> None:
+        explicit = self._get_history(client, app, selection_snapshots="full").json()
+        default = self._get_history(client, app).json()
+        assert explicit["selection_snapshots"] == default["selection_snapshots"]
+
+    def test_invalid_selection_mode_422(self, client: TestClient, app: FastAPI) -> None:
+        resp = self._get_history(client, app, selection_snapshots="compact")
+        assert resp.status_code == 422
+        assert "selection_snapshots" in resp.json()["detail"]
+
+    def test_equity_and_fills_parity(self, client: TestClient, app: FastAPI) -> None:
+        """#206 parity:equity_mode 与 fills 分页参数可用。"""
+        resp = self._get_history(
+            client, app, equity_mode="none", fills_limit=5, fills_offset=10
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["equity_curve"] == []
+        assert body["equity_point_count"] == 300
+        assert len(body["fills"]) == 5
+        assert body["fills_total"] == 30
+        assert body["fills_offset"] == 10
+
+    def test_not_found(self, client: TestClient, app: FastAPI) -> None:
+        from finboard_api.deps import get_db_session
+
+        mock_session = AsyncMock()
+        app.dependency_overrides[get_db_session] = lambda: mock_session
+        try:
+            with patch(
+                "finboard_persistence.BacktestRunRepository.get",
+                new=AsyncMock(return_value=None),
+            ):
+                resp = client.get("/api/backtest/history/999")
+        finally:
+            app.dependency_overrides.clear()
+        assert resp.status_code == 404

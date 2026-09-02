@@ -17,6 +17,7 @@ from finboard_api.schemas import (
     BacktestRunRequest,
     EquityPointOut,
     FactorSnapshotOut,
+    FactorSnapshotSummaryOut,
     StrategyInfoOut,
 )
 from finboard_api.strategy_validation import strategy_info
@@ -133,16 +134,62 @@ async def list_history(
 @router.get("/history/{run_id}", response_model=BacktestHistoryDetailOut)
 async def get_history(
     run_id: int,
+    equity_mode: str = Query(default="full"),
+    max_points: int = Query(default=200, ge=2, le=5000),
+    fills_limit: int | None = Query(default=None, ge=0),
+    fills_offset: int = Query(default=0, ge=0),
+    selection_snapshots: str = Query(default="full"),
     session: AsyncSession = Depends(get_db_session),
 ) -> BacktestHistoryDetailOut:
-    """获取单次回测的完整详情。"""
+    """获取单次回测的完整详情。
+
+    裁剪参数与 MCP ``finboard_backtest_history_get`` 同契约(issue #206/#258
+    REST parity):``equity_mode``/``max_points`` 控制 equity 曲线降采样,
+    ``fills_limit``/``fills_offset`` 分页 fills,``selection_snapshots``
+    (none|summary|full)裁剪逐决策选股快照(带 selection 的 run 该字段是
+    单次响应 MB 级的主膨胀点;summary 为决策时点+状态+计数投影)。
+    REST 默认全量(网页控制台渲染完整曲线/快照,行为与裁剪参数引入前一致),
+    MCP 默认最瘦;落库始终全量,导出文件不受影响。
+    """
+    from finboard_mcp.downsample import (
+        apply_equity_mode,
+        apply_selection_mode,
+        clamp_max_points,
+        resolve_equity_mode,
+        resolve_selection_mode,
+    )
     from finboard_persistence import BacktestRunRepository
+
+    try:
+        resolved_equity_mode = resolve_equity_mode(equity_mode)
+        resolved_selection_mode = resolve_selection_mode(selection_snapshots)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     repo = BacktestRunRepository(session)
     r = await repo.get(run_id)
     if r is None:
         raise HTTPException(status_code=404, detail="回测记录不存在")
     await session.commit()
+
+    all_equity = list(r.equity_curve) if r.equity_curve else []
+    all_fills = list(r.fills) if r.fills else []
+    all_selection = list(r.selection_snapshots) if r.selection_snapshots else []
+    page_fills = (
+        all_fills
+        if fills_limit is None
+        else all_fills[fills_offset : fills_offset + fills_limit]
+    )
+    trimmed_selection = apply_selection_mode(
+        all_selection, selection_mode=resolved_selection_mode
+    )
+    if resolved_selection_mode == "summary":
+        snapshots_out: list[FactorSnapshotOut | FactorSnapshotSummaryOut] = [
+            FactorSnapshotSummaryOut.model_validate(s) for s in trimmed_selection
+        ]
+    else:
+        snapshots_out = [FactorSnapshotOut.model_validate(s) for s in trimmed_selection]
+
     return BacktestHistoryDetailOut(
         id=r.id,
         strategy=r.strategy,
@@ -154,12 +201,21 @@ async def get_history(
         params=r.params,
         selection=FactorSelectionParams.model_validate(r.selection),
         metrics=r.metrics,
-        equity_curve=[EquityPointOut(**p) for p in r.equity_curve],
-        fills=[BacktestFillOut(**f) for f in r.fills],
-        summary=r.summary,
-        selection_snapshots=[
-            FactorSnapshotOut.model_validate(snapshot) for snapshot in r.selection_snapshots
+        equity_curve=[
+            EquityPointOut(**p)
+            for p in apply_equity_mode(
+                all_equity,
+                equity_mode=resolved_equity_mode,
+                max_points=clamp_max_points(max_points),
+            )
         ],
+        equity_point_count=len(all_equity),
+        fills=[BacktestFillOut(**f) for f in page_fills],
+        fills_total=len(all_fills),
+        fills_offset=fills_offset,
+        summary=r.summary,
+        selection_snapshots=snapshots_out,
+        selection_snapshot_count=len(all_selection),
         dataset_versions=cast(dict[str, list[str]], r.dataset_versions),
         factor_version=r.factor_version,
         matching_model=r.matching_model if r.matching_model is not None else {},
