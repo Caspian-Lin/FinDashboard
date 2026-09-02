@@ -8,9 +8,11 @@ from finboard_persistence.backtest_grid_repo import BacktestGridRunRepository
 from finboard_persistence.base import Base
 from finboard_persistence.dataset_release_repo import (
     ReleaseInstrumentCatalogRepository,
+    ReleaseSymbolSourceError,
     ResearchDatasetReleaseRepository,
     ResearchDatasetReleaseService,
     release_symbol_check,
+    resolve_release_symbols,
     symbol_set_diff,
 )
 from finboard_persistence.engine import create_async_engine
@@ -184,6 +186,7 @@ __all__ = [
     "ReconciliationLogModel",
     "ReconciliationLogRepository",
     "ReleaseInstrumentCatalogRepository",
+    "ReleaseSymbolSourceError",
     "ResearchCodeArtifact",
     "ResearchCodeArtifactModel",
     "ResearchCodeArtifactRepository",
@@ -239,6 +242,7 @@ __all__ = [
     "create_async_engine",
     "generate_run_id",
     "release_symbol_check",
+    "resolve_release_symbols",
     "session_factory",
     "symbol_set_diff",
 ]

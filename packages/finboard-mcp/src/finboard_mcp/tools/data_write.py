@@ -48,6 +48,8 @@ from finboard_persistence import (
     EtfMetadataModel,
     EtfMetadataRepository,
     InstrumentModel,
+    ReleaseSymbolSourceError,
+    resolve_release_symbols,
 )
 from finboard_shared.background_jobs import (
     BackgroundJobStatus,
@@ -605,7 +607,7 @@ async def dataset_release_publish(
     app: McpAppContext,
     *,
     release_id: str,
-    symbols: list[str],
+    symbols: list[str] | None = None,
     version: str,
     start_date: str,
     end_date: str,
@@ -614,6 +616,8 @@ async def dataset_release_publish(
     source: str | None = None,
     adjustment: str = "qfq",
     required_capabilities: list[str] | None = None,
+    symbols_from_release: str | None = None,
+    full_market: bool = False,
     consistency_baseline_release_id: str | None = None,
     consistency_fail_on_mismatch: bool = False,
 ) -> ToolEnvelope:
@@ -621,6 +625,11 @@ async def dataset_release_publish(
 
     成功后 worker 把 ``result_ref = release_id``;agent 用 ``finboard_job_get``
     轮询拿到 release_id 后再查发布详情(``finboard_dataset_release_get``)。
+
+    ``symbols`` / ``symbols_from_release`` / ``full_market`` 三选一(#261):
+    后两者在入队期解析成具体 symbols 进任务 payload(来源发布须可用;
+    full_market 按 kind 语义展开),执行器零改动;来源缺失 / 不可用 /
+    展开为空入队即 ``invalid_argument`` 具名拒绝。
 
     ``consistency_baseline_release_id``(#252):指定基线发布(如 bars 主发布)
     做标的集一致性校验,差集具名;默认只 warning,``fail_on_mismatch`` 时秒级
@@ -632,8 +641,8 @@ async def dataset_release_publish(
         from finboard_api.schemas import ResearchDatasetReleaseCreate
 
         normalized_symbols = [
-            s.strip().upper() for s in symbols if s.strip()
-        ]
+            s.strip().upper() for s in (symbols or []) if s.strip()
+        ] or None
         body = ResearchDatasetReleaseCreate(
             release_id=release_id,
             dataset_name=dataset_name,
@@ -641,6 +650,8 @@ async def dataset_release_publish(
             source=source,  # type: ignore[arg-type]
             version=version,
             symbols=normalized_symbols,
+            symbols_from_release=symbols_from_release,
+            full_market=full_market,
             start_date=date.fromisoformat(start_date),
             end_date=date.fromisoformat(end_date),
             adjustment=adjustment,  # type: ignore[arg-type]
@@ -648,6 +659,29 @@ async def dataset_release_publish(
             consistency_baseline_release_id=consistency_baseline_release_id,
             consistency_fail_on_mismatch=consistency_fail_on_mismatch,
         )
+        async with app.session_maker() as session:
+            try:
+                resolved_symbols = await resolve_release_symbols(
+                    session,
+                    release_kind=body.release_kind,
+                    symbols=body.symbols,
+                    symbols_from_release=body.symbols_from_release,
+                    full_market=body.full_market,
+                )
+            except ReleaseSymbolSourceError as exc:
+                raise McpToolError(
+                    "invalid_argument", f"{exc.code}: {exc.summary}"
+                ) from exc
+
+        if body.symbols_from_release is not None:
+            symbols_source: dict[str, Any] = {
+                "mode": "from_release",
+                "release_id": body.symbols_from_release,
+            }
+        elif body.full_market:
+            symbols_source = {"mode": "full_market"}
+        else:
+            symbols_source = {"mode": "inline"}
         payload: dict[str, Any] = {
             "release_id": body.release_id,
             "dataset_name": body.dataset_name,
@@ -656,12 +690,14 @@ async def dataset_release_publish(
             "start_date": body.start_date.isoformat(),
             "end_date": body.end_date.isoformat(),
             "adjustment": body.adjustment,
-            "symbols": list(body.symbols),
+            "symbols": resolved_symbols,
             "required_capabilities": list(body.required_capabilities),
             "consistency_baseline_release_id": (
                 body.consistency_baseline_release_id
             ),
             "consistency_fail_on_mismatch": body.consistency_fail_on_mismatch,
+            # 执行器忽略未知键,仅供审计/排查。
+            "symbols_source": symbols_source,
         }
         idempotency_key = f"publish:{body.release_id}"
         return await _enqueue_data_job(
@@ -678,6 +714,8 @@ async def dataset_release_publish(
         arguments={
             "release_id": release_id,
             "symbols": symbols,
+            "symbols_from_release": symbols_from_release,
+            "full_market": full_market,
             "version": version,
             "start_date": start_date,
             "end_date": end_date,
@@ -1085,7 +1123,12 @@ def register(mcp: MCPServer) -> None:
             "kind=dataset_publish 任务;成功后 result_ref=release_id,用 "
             "finboard_job_get(job_id) 拿到 release_id 后再 finboard_dataset_release_get "
             "查发布详情。"
-            "参数:release_id / symbols(列表)/ version / start_date / end_date / "
+            "标的集三选一(#261,互斥):symbols(内联列表)/ "
+            "symbols_from_release(复制既有可用发布的冻结标的集,免手工维护"
+            "全市场清单)/ full_market=true(instruments 表全活跃标的按 kind "
+            "展开:股票单源只取 A 股股票,multi_asset_mixed 取股票+ETF+指数)。"
+            "来源发布不存在/不可用/展开为空入队即 invalid_argument 具名拒绝。"
+            "其他参数:release_id / version / start_date / end_date / "
             "dataset_name(默认 multi_asset_daily_bars)/ release_kind"
             "(a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators)/ "
             "source / adjustment(qfq|hqfq|none;研究数据发布固定 none)/ "
@@ -1096,16 +1139,19 @@ def register(mcp: MCPServer) -> None:
             "true 时不一致秒级失败 code=symbol_set_mismatch)。"
             "release_kind=daily_metrics|financial_indicators 时从 research_* 表"
             "冻结基本面/财务指标发布(issue #187),与 bars 发布联合供因子快照取数。"
-            "研究数据发布建议带 baseline=同区间 bars 主发布 + fail_on_mismatch=true。"
+            "研究数据发布建议带 baseline=同区间 bars 主发布 + fail_on_mismatch=true,"
+            "标的集用 symbols_from_release 复制该 bars 主发布。"
             "写操作,mcp_readonly_only=true 时拒绝。"
         ),
     )
     async def _dataset_release_publish(
         release_id: str,
-        symbols: list[str],
         version: str,
         start_date: str,
         end_date: str,
+        symbols: list[str] | None = None,
+        symbols_from_release: str | None = None,
+        full_market: bool = False,
         dataset_name: str = "multi_asset_daily_bars",
         release_kind: str = "a_share_tushare",
         source: str | None = None,
@@ -1119,6 +1165,8 @@ def register(mcp: MCPServer) -> None:
             app_context(ctx),
             release_id=release_id,
             symbols=symbols,
+            symbols_from_release=symbols_from_release,
+            full_market=full_market,
             version=version,
             start_date=start_date,
             end_date=end_date,

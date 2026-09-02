@@ -40,6 +40,7 @@ from finboard_persistence.models import (
     ResearchInstrumentProfileModel,
 )
 from finboard_persistence.profile_metadata import ProfileMetadataLookup
+from finboard_persistence.repo import InstrumentRepository
 from finboard_shared.types import (
     AssetClass,
     ConvertibleEventType,
@@ -787,6 +788,16 @@ def _future_candidate(
     )
 
 
+def _release_member_codes(release: ResearchDatasetRelease) -> set[str]:
+    """收集冻结发布清单的标的代码集(``Repository.get`` 的 instruments 元组)。"""
+    members: set[str] = set()
+    for item in getattr(release, "instruments", None) or ():
+        code = item.get("code") if isinstance(item, dict) else getattr(item, "code", None)
+        if code:
+            members.add(str(code))
+    return members
+
+
 def release_symbol_check(
     release: ResearchDatasetRelease,
     codes: Sequence[str],
@@ -799,22 +810,153 @@ def release_symbol_check(
     instrument_list。instruments 为空(理论上不可能,发布即冻结)按空集
     处理 → 全部 missing(fail-visible)。
     """
-    members: set[str] = set()
-    for item in getattr(release, "instruments", None) or ():
-        code = item.get("code") if isinstance(item, dict) else getattr(item, "code", None)
-        if code:
-            members.add(str(code))
+    members = _release_member_codes(release)
     requested = [str(code).strip() for code in codes if str(code).strip()]
     matched = [code for code in requested if code in members]
     missing = [code for code in requested if code not in members]
     return {"requested": len(requested), "matched": matched, "missing": missing}
 
 
+class ReleaseSymbolSourceError(Exception):
+    """发布标的集来源解析失败(issue #261,入队期 fail-visible)。
+
+    ``code`` 为具名根因,便于测试与日志定位:``symbol_source_missing`` /
+    ``symbol_source_ambiguous`` / ``source_release_not_found`` /
+    ``source_release_not_usable`` / ``source_release_empty`` /
+    ``full_market_empty`` / ``full_market_overflow``。
+    """
+
+    def __init__(self, code: str, summary: str) -> None:
+        super().__init__(summary)
+        self.code = code
+        self.summary = summary
+
+
+#: full_market 展开只覆盖既有发布语义允许的资产类型(#261):股票单源 kind
+#: (含研究数据发布——执行器 scope 门要求全部为 A 股股票)只展开股票;
+#: multi_asset_mixed 展开 stock + etf + index(#184/#256)。债券 / 转债 /
+#: 期货不在行情缓存同步范围,展开进发布必然触发覆盖率门失败,不纳入。
+_FULL_MARKET_STOCK_KINDS: frozenset[str] = frozenset(
+    {"a_share_tushare", "daily_metrics", "financial_indicators"}
+)
+_FULL_MARKET_MIXED_TYPES: tuple[str, ...] = ("stock", "etf", "index")
+#: 与 REST ``ResearchDatasetReleaseCreate.symbols`` 的 max_length 同一上限。
+_MAX_RELEASE_SYMBOLS = 10_000
+
+
+async def resolve_release_symbols(
+    session: AsyncSession,
+    *,
+    release_kind: str,
+    symbols: Sequence[str] | None = None,
+    symbols_from_release: str | None = None,
+    full_market: bool = False,
+) -> list[str]:
+    """解析数据集发布的标的集来源(issue #261),REST 与 MCP 入队期共用。
+
+    三选一(REST/MCP schema 已校验互斥,此处兜底):
+
+    * ``symbols`` —— 内联清单,归一化后放行;
+    * ``symbols_from_release`` —— 复制既有可用发布(passed/warnings)冻结的
+      标的集,消灭人工维护全市场清单的漏配缺口(#252 前科;来源发布清单
+      冻结不可变,复制语义确定);
+    * ``full_market=True`` —— instruments 表全活跃标的按发布 kind 语义展开
+      (股票单源只取 A 股股票;multi_asset_mixed 取股票 + ETF + 指数)。
+
+    解析在**入队期**完成,结果以具体 symbols 进任务 payload,
+    ``DatasetPublishExecutor`` 零改动(unknown_symbols / scope / 覆盖率门
+    原样兜底);来源缺失 / 不可用 / 展开为空均抛
+    :class:`ReleaseSymbolSourceError`(REST 422 / MCP invalid_argument)。
+    """
+    declared = [
+        name
+        for name, value in (
+            ("symbols", symbols is not None),
+            ("symbols_from_release", symbols_from_release is not None),
+            ("full_market", bool(full_market)),
+        )
+        if value
+    ]
+    if not declared:
+        raise ReleaseSymbolSourceError(
+            "symbol_source_missing",
+            "必须提供 symbols / symbols_from_release / full_market 之一",
+        )
+    if len(declared) > 1:
+        raise ReleaseSymbolSourceError(
+            "symbol_source_ambiguous",
+            "symbols / symbols_from_release / full_market 只能三选一,"
+            f"同时声明: {declared}",
+        )
+
+    if symbols is not None:
+        normalized = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        if not normalized:
+            raise ReleaseSymbolSourceError(
+                "symbol_source_missing", "至少选择一个已缓存标的"
+            )
+        return normalized
+
+    if symbols_from_release is not None:
+        release = await ResearchDatasetReleaseRepository(session).get(
+            symbols_from_release
+        )
+        if release is None:
+            raise ReleaseSymbolSourceError(
+                "source_release_not_found",
+                f"标的集来源发布不存在: {symbols_from_release}",
+            )
+        if not release.is_usable:
+            raise ReleaseSymbolSourceError(
+                "source_release_not_usable",
+                f"标的集来源发布不可用: {symbols_from_release} "
+                f"quality={release.quality_status.value}",
+            )
+        codes = sorted(_release_member_codes(release))
+        if not codes:
+            raise ReleaseSymbolSourceError(
+                "source_release_empty",
+                f"标的集来源发布没有冻结标的: {symbols_from_release}",
+            )
+        return codes
+
+    instrument_repo = InstrumentRepository(session)
+    expanded: set[str]
+    if release_kind in _FULL_MARKET_STOCK_KINDS:
+        expanded = set(
+            await instrument_repo.list_codes(
+                market="a_share", instrument_type="stock"
+            )
+        )
+    else:
+        expanded = set()
+        for instrument_type in _FULL_MARKET_MIXED_TYPES:
+            expanded.update(
+                await instrument_repo.list_codes(
+                    market="a_share", instrument_type=instrument_type
+                )
+            )
+    if not expanded:
+        raise ReleaseSymbolSourceError(
+            "full_market_empty",
+            "instruments 表没有匹配的活跃标的,full_market 展开为空"
+            "(先执行 universe 同步 / data_sync 登记标的元数据)",
+        )
+    if len(expanded) > _MAX_RELEASE_SYMBOLS:
+        raise ReleaseSymbolSourceError(
+            "full_market_overflow",
+            f"full_market 展开 {len(expanded)} 只,超过单次发布上限 "
+            f"{_MAX_RELEASE_SYMBOLS}",
+        )
+    return sorted(expanded)
+
 
 __all__ = [
     "ReleaseInstrumentCatalogRepository",
+    "ReleaseSymbolSourceError",
     "ResearchDatasetReleaseRepository",
     "ResearchDatasetReleaseService",
     "release_symbol_check",
+    "resolve_release_symbols",
     "symbol_set_diff",
 ]

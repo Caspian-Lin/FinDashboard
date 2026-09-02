@@ -48,8 +48,10 @@ from finboard_persistence import (
     FuturesContractModel,
     InstrumentLifecycleEventModel,
     InstrumentModel,
+    ReleaseSymbolSourceError,
     ResearchDatasetReleaseRepository,
     release_symbol_check,
+    resolve_release_symbols,
     symbol_set_diff,
 )
 from finboard_shared.types import EtfExecutionProfile
@@ -474,9 +476,36 @@ async def create_dataset_release(
     实际执行(原子 rename + DB 登记 + 标的资产类型校验)由 worker 消费
     ``kind=dataset_publish`` 任务。发布成功后 ``JobOut.result_ref = release_id``;
     前端需轮询 ``/api/jobs/{job_id}`` 拿到 release_id 后再查发布详情。
+
+    #261:标的集来源三选一(内联 symbols / symbols_from_release 复制既有
+    发布 / full_market 全市场展开),入队期解析成具体 symbols 进 payload;
+    来源发布缺失 / 不可用 / 展开为空 422 具名拒绝。
     """
 
     from finboard_api.job_helpers import enqueue_job
+
+    try:
+        symbols = await resolve_release_symbols(
+            session,
+            release_kind=request.release_kind,
+            symbols=request.symbols,
+            symbols_from_release=request.symbols_from_release,
+            full_market=request.full_market,
+        )
+    except ReleaseSymbolSourceError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"{exc.code}: {exc.summary}"
+        ) from exc
+
+    if request.symbols_from_release is not None:
+        symbols_source: dict[str, Any] = {
+            "mode": "from_release",
+            "release_id": request.symbols_from_release,
+        }
+    elif request.full_market:
+        symbols_source = {"mode": "full_market"}
+    else:
+        symbols_source = {"mode": "inline"}
 
     payload: dict[str, Any] = {
         "release_id": request.release_id,
@@ -486,11 +515,13 @@ async def create_dataset_release(
         "start_date": request.start_date.isoformat(),
         "end_date": request.end_date.isoformat(),
         "adjustment": request.adjustment,
-        "symbols": list(request.symbols),
+        "symbols": symbols,
         "required_capabilities": list(request.required_capabilities),
         # #252:跨发布标的集一致性校验(可选)。
         "consistency_baseline_release_id": request.consistency_baseline_release_id,
         "consistency_fail_on_mismatch": request.consistency_fail_on_mismatch,
+        # #261:标的集来源溯源(执行器忽略未知键,仅供审计/排查)。
+        "symbols_source": symbols_source,
     }
     idempotency_key = f"publish:{request.release_id}"
     try:
