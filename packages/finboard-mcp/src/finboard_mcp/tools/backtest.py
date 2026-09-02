@@ -350,6 +350,29 @@ async def _enqueue_backtest_job(
     }
     checksum = _payload_checksum(payload)
     async with app.session_maker() as session:
+        # issue #255:research_db 选股必需数据集批次未发布 → 入队秒级拒绝,
+        # 不再等 worker 开跑后才以「0 交易成功」收场。
+        raw_selection = request.get("selection") or {}
+        if raw_selection:
+            from finboard_app.selection_schema import FactorSelectionParams
+            from finboard_persistence import ResearchDatasetRepository
+
+            try:
+                gate_selection = FactorSelectionParams.model_validate(raw_selection)
+            except Exception as exc:
+                raise McpToolError(
+                    "invalid_argument", f"selection 参数校验失败: {exc}"
+                ) from exc
+            unpublished = await ResearchDatasetRepository(
+                session
+            ).selection_inputs_gate(gate_selection.to_domain())
+            if unpublished:
+                raise McpToolError(
+                    "invalid_argument",
+                    "research_db 选股必需数据集批次未发布,拒绝入队(issue #255): "
+                    f"{'、'.join(unpublished)}。请先执行 data_sync 摄取并完成"
+                    "批次发布,或改用 inputs_mode=bars/snapshot。",
+                )
         try:
             row, created = await BackgroundJobRepository(session).create_or_get(
                 job_id=generate_background_job_id(),
@@ -615,6 +638,18 @@ async def backtest_run(
         )
 
         async with app.session_maker() as session:
+            # issue #255:research_db 选股必需数据集批次未发布 → 同步路径
+            # 秒级拒绝,不让 run 空转成「0 交易成功」。
+            unpublished = await ResearchDatasetRepository(
+                session
+            ).selection_inputs_gate(selection_model.to_domain())
+            if unpublished:
+                raise McpToolError(
+                    "invalid_argument",
+                    "research_db 选股必需数据集批次未发布,拒绝运行(issue #255): "
+                    f"{'、'.join(unpublished)}。请先执行 data_sync 摄取并完成"
+                    "批次发布,或改用 inputs_mode=bars/snapshot。",
+                )
             factor_selector = (
                 PointInTimeFactorSelector(
                     reader=(
@@ -682,6 +717,8 @@ async def backtest_run(
                 "excess_return": result.excess_return,
                 # issue #254:基准曲线实际来源(显式标的/每期选股池等权/静态池等权/首标的)
                 "benchmark_source": result.benchmark_source,
+                # issue #255:选股逐期诊断(整期 SKIPPED / 数据集未发布可见)
+                "selection_diagnostics": result.selection_diagnostics,
                 "initial_capital": to_jsonable(result.initial_capital),
                 "final_equity": to_jsonable(result.final_equity),
             }

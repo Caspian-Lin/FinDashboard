@@ -48,6 +48,10 @@ class BacktestResult:
     # 回测配置与实际使用的基准口径可区分。
     benchmark_source: str | None = None
 
+    # issue #255:选股启用的逐期诊断(快照/跳过统计 + skip 原因计数 +
+    # 候选池是否曾生效),整期 SKIPPED 的 0 交易 run 不再伪装成功。
+    selection_diagnostics: dict[str, object] | None = None
+
     # 元信息
     start_date: date | None = None
     end_date: date | None = None
@@ -100,4 +104,23 @@ class BacktestResult:
                 f" / fill={self.matching_model.get('fill_timing', '?')}",
                 f"规则版本:   {self.matching_model.get('asset_rules_version', '?')}",
             ]
+        if self.selection_diagnostics is not None:
+            diag = self.selection_diagnostics
+            lines += [
+                "",
+                f"选股快照:   {diag.get('published_snapshots', 0)}/"
+                f"{diag.get('total_snapshots', 0)} published,"
+                f"候选池曾生效={diag.get('selection_pool_ever_active', False)}",
+            ]
+            reasons = diag.get("skip_reasons")
+            if isinstance(reasons, dict) and reasons:
+                stats = "、".join(
+                    f"{key}={count}" for key, count in sorted(reasons.items())
+                )
+                lines += [f"跳过原因:   {stats}"]
+            if diag.get("zero_trading_suspected"):
+                lines += [
+                    "⚠ 选股整期无候选生效:本 run 大概率 0 交易,"
+                    "请检查选股数据集发布状态与过滤条件"
+                ]
         return "\n".join(lines)

@@ -13,7 +13,12 @@ from enum import StrEnum
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from finboard_data.factors import FactorInputBatch, FactorInputRecord
+from finboard_data.factors import (
+    FactorInputBatch,
+    FactorInputRecord,
+    FactorSelectionConfig,
+    InputsMode,
+)
 from finboard_data.research import (
     DailySecurityMetrics,
     FinancialIndicator,
@@ -314,6 +319,42 @@ class ResearchDatasetRepository:
             },
             issues=tuple(issues),
         )
+
+    async def selection_inputs_gate(
+        self,
+        config: FactorSelectionConfig,
+    ) -> tuple[str, ...]:
+        """v1 选股必需数据集的发布状态门(issue #255)。
+
+        research_db 选股在必需数据集批次从未发布时,旧链路会逐期 SKIPPED、
+        引擎 0 交易「成功」收场(runs 273-275)。本方法把检查前移:未启用
+        选股或非 research_db 模式(bars/snapshot 按设计降级)返回空元组;
+        research_db 模式逐个解析 ``required_datasets`` 的已发布批次
+        (声明 dataset_version 时查该版本,否则取最近发布),未发布的以
+        ``dataset_unpublished:{dataset}`` 具名返回。入队(REST/MCP)与执行端
+        (``run_backtest_and_persist``)共用同一检查,双保险。
+
+        注意这是「是否存在已发布批次」的粗粒度检查;批次已发布但不覆盖具体
+        交易日的场景仍由逐期 SKIPPED 快照的 skip_reason 承载(配合引擎的
+        selection_diagnostics 可见)。
+        """
+        if not config.enabled or config.inputs_mode is not InputsMode.RESEARCH_DB:
+            return ()
+        missing: list[str] = []
+        for name in sorted(config.required_datasets):
+            try:
+                dataset = ResearchDataset(name)
+            except ValueError:
+                missing.append(f"unknown_dataset:{name}")
+                continue
+            batch = await self._resolve_batch(
+                dataset,
+                config.source,
+                config.dataset_versions.get(name),
+            )
+            if batch is None:
+                missing.append(f"dataset_unpublished:{name}")
+        return tuple(missing)
 
     async def upsert_instrument_profiles(
         self,

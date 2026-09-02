@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -146,6 +146,7 @@ class BacktestEngine:
         history_by_symbol: dict[str, list[Bar]] = defaultdict(list)
         selection_snapshots: list[FactorSnapshot] = []
         active_symbols: set[str] = set(cfg.symbols) if not cfg.selection.enabled else set()
+        selection_pool_ever_active = bool(active_symbols)
         pending_snapshot: FactorSnapshot | None = None
         daily_bars = self._group_bars_by_date(all_bars)
 
@@ -158,6 +159,8 @@ class BacktestEngine:
             if pending_snapshot is not None and pending_snapshot.effective_date == business_date:
                 if pending_snapshot.status is FactorSnapshotStatus.PUBLISHED:
                     active_symbols = set(pending_snapshot.selected_symbols)
+                    if active_symbols:
+                        selection_pool_ever_active = True
                 await self._notify_selection(
                     pending_snapshot,
                     active_symbols=active_symbols,
@@ -212,6 +215,12 @@ class BacktestEngine:
 
         logger.info("backtest.completed", bars=len(all_bars))
 
+        # issue #255:选股启用时归档逐期选股诊断,杜绝「整期 SKIPPED →
+        # 0 交易成功」的假象(runs 273-275)。
+        selection_diagnostics = self._build_selection_diagnostics(
+            selection_snapshots, selection_pool_ever_active
+        )
+
         # 6. 计算绩效
         return self._build_result(
             equity_curve=equity_curve,
@@ -219,7 +228,53 @@ class BacktestEngine:
             benchmark_bars=benchmark_bars,
             broker=broker,
             selection_snapshots=selection_snapshots,
+            selection_diagnostics=selection_diagnostics,
         )
+
+    def _build_selection_diagnostics(
+        self,
+        selection_snapshots: list[FactorSnapshot],
+        selection_pool_ever_active: bool,
+    ) -> dict[str, object] | None:
+        """选股启用的 run 附带逐期诊断;整期无候选时打具名 warning(#255)。"""
+        if not self._config.selection.enabled:
+            return None
+        skip_reasons: Counter[str] = Counter(
+            snapshot.skip_reason or "unknown"
+            for snapshot in selection_snapshots
+            if snapshot.status is FactorSnapshotStatus.SKIPPED
+        )
+        published = sum(
+            1
+            for snapshot in selection_snapshots
+            if snapshot.status is FactorSnapshotStatus.PUBLISHED
+        )
+        diagnostics: dict[str, object] = {
+            "total_snapshots": len(selection_snapshots),
+            "published_snapshots": published,
+            "skipped_snapshots": len(selection_snapshots) - published,
+            "skip_reasons": dict(
+                sorted(skip_reasons.items(), key=lambda item: (-item[1], item[0]))
+            ),
+            "selection_pool_ever_active": selection_pool_ever_active,
+        }
+        if not selection_pool_ever_active:
+            diagnostics["zero_trading_suspected"] = True
+            reasons = (
+                "、".join(f"{reason}={count}" for reason, count in sorted(skip_reasons.items()))
+                or "无(无快照)"
+            )
+            logger.warning(
+                "backtest.selection_pool_never_active",
+                total_snapshots=len(selection_snapshots),
+                published_snapshots=published,
+                skip_reasons=reasons,
+                message=(
+                    "选股启用但整期无任何候选生效:本 run 大概率 0 交易;"
+                    "skip 原因统计见 selection_diagnostics"
+                ),
+            )
+        return diagnostics
 
     async def _load_benchmark_bars(
         self,
@@ -397,6 +452,7 @@ class BacktestEngine:
         benchmark_bars: dict[str, list[Bar]],
         broker: BacktestBroker,
         selection_snapshots: list[FactorSnapshot],
+        selection_diagnostics: dict[str, object] | None = None,
     ) -> BacktestResult:
         fills = broker.fills
         orders = broker.all_orders
@@ -525,4 +581,5 @@ class BacktestEngine:
             fee_assumptions=self._config.resolved_fees().as_dict(),
             benchmark_config=self._config.benchmark.as_dict(),
             benchmark_source=benchmark_source,
+            selection_diagnostics=selection_diagnostics,
         )
