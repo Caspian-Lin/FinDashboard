@@ -67,6 +67,7 @@ from finboard_data.factors import (
     RankingScope,
     factor_catalog,
 )
+from finboard_data.fallback import FallbackBarProvider
 from finboard_data.lifecycle import (
     SuspendDecision,
     SuspendDetector,
@@ -184,6 +185,7 @@ __all__ = [
     "FactorSnapshotWriter",
     "FactorUnit",
     "FactorValue",
+    "FallbackBarProvider",
     "FeatureFrequency",
     "FeatureMissingPolicy",
     "FeatureObservation",

@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, TypeGuard, cast
 
 import structlog
 
@@ -123,6 +123,15 @@ class TushareBarProvider(AkShareProvider):
 
         effective_end = expected_last_bar_date(end)
         metadata = await self._cache.metadata_for(symbol, period, adjust)
+        if _is_foreign_cache(metadata) and metadata.covers(start, effective_end):
+            # issue #257:异源缓存(如 akshare 同步的 ETF/指数)已完整覆盖
+            # 请求区间时直接读出返回,不再视为全量缺口,也不浪费 tushare 预算。
+            logger.info(
+                "tushare.foreign_cache_hit",
+                symbol=symbol.code,
+                foreign_source=metadata.source,
+                period=period.value,
+            )
         ranges = self._cache_fetch_ranges(metadata, start, effective_end)
         cached = await self._cache.read(symbol, period, adjust) if metadata is not None else []
         if not ranges:
@@ -162,6 +171,13 @@ class TushareBarProvider(AkShareProvider):
             on_status("checking_cache")
         effective_end = expected_last_bar_date(end)
         metadata = await self._cache.metadata_for(symbol, period, adjust)
+        if _is_foreign_cache(metadata) and metadata.covers(start, effective_end):
+            logger.info(
+                "tushare.foreign_cache_hit",
+                symbol=symbol.code,
+                foreign_source=metadata.source,
+                period=period.value,
+            )
         ranges = self._cache_fetch_ranges(metadata, start, effective_end)
         if not ranges:
             if on_status is not None:
@@ -187,10 +203,15 @@ class TushareBarProvider(AkShareProvider):
         """逐段拉取,每段拉完立即增量 merge 进 parquet(断点安全)。
 
         来源切换时丢弃旧源历史、从空开始合并,避免 akshare/yfinance 与
-        tushare 混写。返回合并后的完整 Bar 列表(升序)。
+        tushare 混写(adjust 基准日不同,混源会产生价格跳变);唯一例外是
+        tushare 对全部缺口区间都拉不到 bars(ETF / 指数等 2000 积分不覆盖
+        的标的)——此时不再静默丢弃异源缓存,而是具名回退返回异源已缓存
+        的 bars(issue #257),回测引擎才能消费 akshare 同步的 ETF 行情。
+        返回合并后的完整 Bar 列表(升序)。
         """
         sources = {bar.source for bar in cached}
-        current: list[Bar] = [] if sources and sources != {"tushare"} else list(cached)
+        foreign = bool(sources) and sources != {"tushare"}
+        current: list[Bar] = [] if foreign else list(cached)
         for range_start, range_end in ranges:
             bars = await self._fetch_from_akshare(symbol, period, range_start, range_end, adjust)
             if bars and self._cache is not None:
@@ -211,6 +232,15 @@ class TushareBarProvider(AkShareProvider):
                     range_end,
                     source="tushare",
                 )
+        if not current and foreign:
+            logger.warning(
+                "tushare.foreign_cache_fallback",
+                symbol=symbol.code,
+                foreign_sources=sorted(source for source in sources if source),
+                requested_ranges=len(ranges),
+                cached_bars=len(cached),
+            )
+            return cached
         return current
 
     @staticmethod
@@ -222,7 +252,14 @@ class TushareBarProvider(AkShareProvider):
         """返回尚未查询过的日期段;不把合法无 Bar 日期误判为缺口。"""
         if start > effective_end:
             return ()
-        if metadata is None or metadata.source != "tushare":
+        if metadata is None:
+            return ((start, effective_end),)
+        if metadata.source != "tushare":
+            # issue #257:异源缓存完整覆盖时按零缺口处理(read-through,
+            # 由调用方具名记 log);不完整覆盖仍视为全量缺口——对 tushare
+            # 可服务的股票,重建纯 tushare 缓存的既有语义保持不变。
+            if _is_foreign_cache(metadata) and metadata.covers(start, effective_end):
+                return ()
             return ((start, effective_end),)
         if metadata.covers(start, effective_end):
             return ()
@@ -402,6 +439,15 @@ class TushareBarProvider(AkShareProvider):
             return cast(TushareBarClient, factory(token.strip()))
         except Exception:
             raise RuntimeError("Tushare client 初始化失败;凭据错误已脱敏") from None
+
+
+def _is_foreign_cache(metadata: CacheMetadata | None) -> TypeGuard[CacheMetadata]:
+    """缓存是否由其他来源(akshare / yfinance / mixed)构建(issue #257)。
+
+    ``source=None`` 的 legacy 文件无法证明来源,按非异源处理,保持既有
+    「全量重建」行为不变。
+    """
+    return metadata is not None and metadata.source not in (None, "tushare")
 
 
 def _records(payload: object, endpoint: str) -> list[Mapping[str, object]]:
