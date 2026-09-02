@@ -173,3 +173,36 @@ SELECT code, name, exchange, list_date FROM instruments WHERE instrument_type = 
 端到端回归:`tests/integration/test_index_benchmark_chain.py`(登记 → 混发
 发布 → 真实 FrozenReleaseProvider worker run → `benchmark_return` 非 null +
 UNIVERSE artifact 无指数)。
+
+## ETF 行情链路与缓存多源策略(#257)
+
+**背景**:2026-09-01 ETF 轮动 / 均值回归策略全链路空转。复现确认根因(本仓
+无任何 secid 拼接代码,EM secid 前缀是 akshare 库内部行为):akshare 1.18.78
+的股票日线接口内部按 ``6`` 开头判定沪市(``market_code = 1 if
+symbol.startswith("6") else 0``),SH-ETF(51/56/58 段)一律被拼成深市
+secid——实测 ``stock_zh_a_hist("510300")`` 请求 URL 携带 ``secid=0.510300``
+(正确应为 ``1.510300``);正确路由 ``fund_etf_hist_em`` 的 ``get_market_id``
+才能正确处理 5 开头沪市基金。第二个断点:引擎按注入 provider 读共享
+parquet 缓存,``data_provider=tushare`` 时 tushare provider 把异源(akshare)
+缓存视为全量缺口并丢弃 bars,ETF/指数等 tushare 拉不到的标的 bars 恒空。
+
+**标准运营步骤**(以 510300.SH 为例):
+
+1. `bulk_download` 带 `instrument_type=etf`、`source=akshare` —— ETF 日线经
+   `fund_etf_hist_em` 进 parquet 缓存(缓存键与股票同为 `qfq`,列名一致)。
+   **tushare 源对 ETF 保持拒绝**(`tushare_scope_mismatch`,#256 起既有行为,
+   tushare 2000 积分不覆盖 `fund_daily`)。
+2. 回测消费:`data_provider=tushare` 时,若异源缓存完整覆盖请求区间,
+   tushare provider 直接 read-through 返回缓存(具名 log
+   `tushare.foreign_cache_hit`,零 tushare 预算消耗);缺口区间 tushare
+   拉不到时具名回退(`tushare.foreign_cache_fallback`)返回异源已缓存 bars,
+   不再静默丢弃。缺口区间 tushare 拉得到(股票)时保持既有重建语义
+   (重建纯 tushare 缓存),避免两种复权口径混在同一条权益曲线。
+3. (可选)配置 `FINBOARD_DATA_FALLBACK_PROVIDER=akshare`:回测三入口
+   (REST 入队 / MCP 同步 / MCP 异步入队)主源对某标的返回空或抛错时,
+   在取数入口显式回退备用源(具名 log `fallback.using_fallback`)。默认
+   关闭;回退只解决「主源整体不覆盖该标的」,部分区间缺失由第 2 步的
+   缓存层策略处理,不在引擎层拼接异源曲线。
+
+端到端回归:`tests/integration/test_etf_bar_chain.py`(mock akshare 同步 →
+parquet 缓存 → tushare 源引擎回测拿到 bars 并出成交)。

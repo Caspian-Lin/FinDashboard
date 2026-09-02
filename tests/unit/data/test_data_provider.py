@@ -8,11 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pandas as pd
 import pytest
 
-from finboard_data.akshare_provider import AkShareProvider, is_index_code
+from finboard_data.akshare_provider import AkShareProvider, is_etf_code, is_index_code
 from finboard_data.base import HistoricalDataProvider
 from finboard_data.cache import ParquetCache, expected_last_bar_date
+from finboard_data.fallback import FallbackBarProvider
 from finboard_data.yfinance_provider import YFinanceProvider
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
@@ -430,3 +432,251 @@ class TestAkShareIndexDailyFetch:
                 date(2024, 1, 5),
                 "qfq",
             )
+
+
+# --------------------------------------------------------------------------- ETF 代码识别与基金日线(issue #257)
+
+
+class TestEtfCodeDetection:
+    @pytest.mark.unit
+    def test_sh_fund_codes_are_detected(self) -> None:
+        assert is_etf_code("510300.SH") is True  # 沪深300 ETF
+        assert is_etf_code("588000.SH") is True  # 科创50 ETF
+        assert is_etf_code("563800.SH") is True
+        assert is_etf_code("501018.SH") is True  # 南方原油(LOF)
+
+    @pytest.mark.unit
+    def test_sz_fund_codes_are_detected(self) -> None:
+        assert is_etf_code("159915.SZ") is True  # 创业板 ETF
+        assert is_etf_code("159707.SZ") is True
+        assert is_etf_code("160323.SZ") is True  # LOF
+
+    @pytest.mark.unit
+    def test_stocks_indexes_and_unknown_are_not_etf(self) -> None:
+        assert is_etf_code("600519.SH") is False  # 沪市股票
+        assert is_etf_code("000001.SZ") is False  # 深市股票
+        assert is_etf_code("000300.SH") is False  # 沪市指数
+        assert is_etf_code("399006.SZ") is False  # 深市指数
+        assert is_etf_code("899050.BJ") is False  # 北交所无场内基金
+        assert is_etf_code("510300") is False  # 无后缀不猜测
+        assert is_etf_code("510300.HK") is False
+
+
+def _etf_daily_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "日期": ["2024-01-02", "2024-01-03"],
+            "开盘": [3.22, 3.17],
+            "收盘": [3.17, 3.16],
+            "最高": [3.22, 3.18],
+            "最低": [3.17, 3.15],
+            "成交量": [9429306.0, 10617503.0],
+            "成交额": [3.269677e09, 3.654758e09],
+            "振幅": [1.58, 1.01],
+            "涨跌幅": [-1.43, -0.32],
+            "涨跌额": [-0.046, -0.010],
+            "换手率": [4.10, 4.62],
+        }
+    )
+
+
+class TestAkShareEtfFetch:
+    @pytest.mark.unit
+    def test_sh_etf_daily_routes_to_fund_interface(self, tmp_path: Path) -> None:
+        """510300.SH 必须走 fund_etf_hist_em;股票接口会把 5 开头误判为深市。"""
+        provider = AkShareProvider(cache_dir=tmp_path / "cache")
+        with (
+            patch("akshare.fund_etf_hist_em", return_value=_etf_daily_frame()) as fund_mock,
+            patch("akshare.stock_zh_a_hist") as stock_mock,
+            patch("akshare.index_zh_a_hist") as index_mock,
+        ):
+            bars = provider._fetch_sync(
+                Symbol(code="510300.SH", market=Market.A_SHARE),
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                "qfq",
+            )
+        fund_mock.assert_called_once()
+        call = fund_mock.call_args
+        assert call.kwargs["symbol"] == "510300"
+        assert call.kwargs["period"] == "daily"
+        assert call.kwargs["adjust"] == "qfq"
+        stock_mock.assert_not_called()
+        index_mock.assert_not_called()
+        assert [bar.close for bar in bars] == [Decimal("3.17"), Decimal("3.16")]
+        assert all(bar.symbol.code == "510300.SH" for bar in bars)
+        assert all(bar.timestamp.tzinfo is not None for bar in bars)
+
+    @pytest.mark.unit
+    def test_sz_etf_daily_routes_to_fund_interface(self, tmp_path: Path) -> None:
+        provider = AkShareProvider(cache_dir=tmp_path / "cache")
+        with patch("akshare.fund_etf_hist_em", return_value=_etf_daily_frame()) as fund_mock:
+            bars = provider._fetch_sync(
+                Symbol(code="159915.SZ", market=Market.A_SHARE),
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                "qfq",
+            )
+        fund_mock.assert_called_once()
+        assert fund_mock.call_args.kwargs["symbol"] == "159915"
+        assert len(bars) == 2
+
+    @pytest.mark.unit
+    def test_stock_still_uses_stock_interface_not_fund(self, tmp_path: Path) -> None:
+        """沪市股票(6 开头)不被 ETF 规则抢走。"""
+        import pandas as pd
+
+        provider = AkShareProvider(cache_dir=tmp_path / "cache")
+        df = pd.DataFrame(
+            {
+                "日期": ["2024-01-02"],
+                "开盘": [10.0],
+                "收盘": [10.5],
+                "最高": [10.6],
+                "最低": [9.9],
+                "成交量": [1000000.0],
+                "成交额": [10500000.0],
+            }
+        )
+        with (
+            patch("akshare.stock_zh_a_hist", return_value=df) as stock_mock,
+            patch("akshare.fund_etf_hist_em") as fund_mock,
+        ):
+            bars = provider._fetch_sync(
+                Symbol(code="600519.SH", market=Market.A_SHARE),
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                "qfq",
+            )
+        stock_mock.assert_called_once()
+        fund_mock.assert_not_called()
+        assert len(bars) == 1
+
+    @pytest.mark.unit
+    def test_etf_minute_routes_to_fund_min_interface(self, tmp_path: Path) -> None:
+        import pandas as pd
+
+        provider = AkShareProvider(cache_dir=tmp_path / "cache")
+        df = pd.DataFrame(
+            {
+                "时间": ["2024-01-02 09:31:00", "2024-01-02 09:32:00"],
+                "开盘": [3.20, 3.21],
+                "收盘": [3.21, 3.20],
+                "最高": [3.22, 3.21],
+                "最低": [3.20, 3.19],
+                "成交量": [100000.0, 120000.0],
+                "成交额": [32100000.0, 38520000.0],
+            }
+        )
+        with (
+            patch("akshare.fund_etf_hist_min_em", return_value=df) as fund_min_mock,
+            patch("akshare.stock_zh_a_hist_min_em") as stock_min_mock,
+        ):
+            bars = provider._fetch_sync(
+                Symbol(code="510300.SH", market=Market.A_SHARE),
+                BarPeriod.M1,
+                date(2024, 1, 2),
+                date(2024, 1, 2),
+                "qfq",
+            )
+        fund_min_mock.assert_called_once()
+        assert fund_min_mock.call_args.kwargs["symbol"] == "510300"
+        stock_min_mock.assert_not_called()
+        assert [bar.close for bar in bars] == [Decimal("3.21"), Decimal("3.20")]
+
+    @pytest.mark.unit
+    def test_etf_none_adjust_maps_to_empty_string(self, tmp_path: Path) -> None:
+        """adjust=none 映射为 EM 接口的空字符串,与股票分支语义一致。"""
+        provider = AkShareProvider(cache_dir=tmp_path / "cache")
+        with patch("akshare.fund_etf_hist_em", return_value=_etf_daily_frame()) as fund_mock:
+            provider._fetch_sync(
+                Symbol(code="510300.SH", market=Market.A_SHARE),
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 5),
+                "none",
+            )
+        assert fund_mock.call_args.kwargs["adjust"] == ""
+
+
+# --------------------------------------------------------------------------- FallbackBarProvider(issue #257)
+
+
+class TestFallbackBarProvider:
+    def _provider_pair(
+        self,
+        primary_bars: list[Bar] | Exception,
+        fallback_bars: list[Bar],
+    ) -> tuple[FallbackBarProvider, AsyncMock, AsyncMock]:
+        primary = AsyncMock(name="primary")
+        primary.fetch_bars.return_value = None
+        if isinstance(primary_bars, Exception):
+            primary.fetch_bars.side_effect = primary_bars
+        else:
+            primary.fetch_bars.return_value = primary_bars
+        fallback = AsyncMock(name="fallback")
+        fallback.fetch_bars.return_value = fallback_bars
+        wrapper = FallbackBarProvider(
+            primary=primary,
+            primary_name="tushare",
+            fallback=fallback,
+            fallback_name="akshare",
+        )
+        return wrapper, primary, fallback
+
+    @pytest.mark.unit
+    async def test_is_protocol(self) -> None:
+        wrapper, _, _ = self._provider_pair([_make_bar("2024-01-02")], [])
+        assert isinstance(wrapper, HistoricalDataProvider)
+
+    @pytest.mark.unit
+    async def test_primary_result_passes_through(self) -> None:
+        bars = [_make_bar("2024-01-02")]
+        wrapper, primary, fallback = self._provider_pair(bars, [])
+        result = await wrapper.fetch_bars(
+            SYMBOL, BarPeriod.D1, date(2024, 1, 1), date(2024, 1, 5)
+        )
+        assert result is bars
+        primary.fetch_bars.assert_awaited_once()
+        fallback.fetch_bars.assert_not_awaited()
+
+    @pytest.mark.unit
+    async def test_empty_primary_falls_back(self) -> None:
+        fallback_bars = [_make_bar("2024-01-02")]
+        wrapper, primary, fallback = self._provider_pair([], fallback_bars)
+        result = await wrapper.fetch_bars(
+            SYMBOL, BarPeriod.D1, date(2024, 1, 1), date(2024, 1, 5)
+        )
+        assert result is fallback_bars
+        primary.fetch_bars.assert_awaited_once()
+        fallback.fetch_bars.assert_awaited_once()
+
+    @pytest.mark.unit
+    async def test_primary_exception_falls_back(self) -> None:
+        fallback_bars = [_make_bar("2024-01-02")]
+        wrapper, _, _fallback = self._provider_pair(
+            RuntimeError("Tushare daily 调用失败"), fallback_bars
+        )
+        result = await wrapper.fetch_bars(
+            SYMBOL, BarPeriod.D1, date(2024, 1, 1), date(2024, 1, 5)
+        )
+        assert result is fallback_bars
+
+    @pytest.mark.unit
+    async def test_both_empty_returns_empty(self) -> None:
+        wrapper, _, _ = self._provider_pair([], [])
+        result = await wrapper.fetch_bars(
+            SYMBOL, BarPeriod.D1, date(2024, 1, 1), date(2024, 1, 5)
+        )
+        assert result == []
+
+    @pytest.mark.unit
+    async def test_adjust_kwarg_forwarded(self) -> None:
+        wrapper, primary, _ = self._provider_pair([_make_bar("2024-01-02")], [])
+        await wrapper.fetch_bars(
+            SYMBOL, BarPeriod.D1, date(2024, 1, 1), date(2024, 1, 5), adjust="none"
+        )
+        assert primary.fetch_bars.await_args.kwargs["adjust"] == "none"

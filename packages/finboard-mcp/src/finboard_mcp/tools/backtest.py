@@ -570,12 +570,8 @@ async def backtest_run(
             BenchmarkConfig,
             PointInTimeFactorSelector,
         )
+        from finboard_backtest.providers import build_backtest_bar_provider
         from finboard_backtest.selection_snapshot import FeatureSnapshotFactorReader
-        from finboard_data import (
-            AkShareProvider,
-            TushareBarProvider,
-            YFinanceProvider,
-        )
         from finboard_data.factors import InputsMode
         from finboard_mcp.downsample import (
             apply_equity_mode,
@@ -597,21 +593,10 @@ async def backtest_run(
         validated_params = _validate_backtest_params(strategy, params or {})
         strat = create_strategy(strategy, "backtest", **validated_params)
 
-        # 选择数据源
+        # 选择数据源(issue #257:与 REST / backtest_run 执行器共用构造,
+        # settings.data_fallback_provider 配置时包裹备用源回退,三入口语义一致)
         provider_name = getattr(app.settings, "data_provider", "akshare")
-        if provider_name == "akshare":
-            data_provider: AkShareProvider | TushareBarProvider | YFinanceProvider = (
-                AkShareProvider()
-            )
-        elif provider_name == "tushare":
-            data_provider = TushareBarProvider(
-                token=app.settings.tushare_token,
-                requests_per_minute=app.settings.tushare_requests_per_minute,
-                daily_request_limit=app.settings.tushare_daily_request_limit,
-                usage_file=app.settings.tushare_usage_file,
-            )
-        else:
-            data_provider = YFinanceProvider()
+        data_provider = build_backtest_bar_provider(provider_name, app.settings)
 
         # 解析 selection
         try:

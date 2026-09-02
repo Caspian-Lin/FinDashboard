@@ -1,7 +1,9 @@
 """``AkShareProvider`` —— 基于 akshare 的 A 股历史数据提供者。
 
-akshare 免费、无需 token,覆盖 A 股股票日线 / 分钟线与指数日线
-(issue #184:指数按代码规则分流到 ``index_zh_a_hist``),是个人量化的首选数据源。
+akshare 免费、无需 token,覆盖 A 股股票日线 / 分钟线、指数日线
+(issue #184:指数按代码规则分流到 ``index_zh_a_hist``)与 ETF/LOF 基金日线
+(issue #257:基金按代码规则分流到 ``fund_etf_hist_em``,避免股票接口把
+沪市基金代码误拼成深市 secid),是个人量化的首选数据源。
 
 akshare 为同步库,所有调用通过 ``asyncio.to_thread`` 在线程池执行,
 避免阻塞事件循环。
@@ -68,6 +70,30 @@ def is_index_code(code: str) -> bool:
     if exchange == "SZ":
         return bare.startswith("399")
     return bare.startswith("899")
+
+
+def is_etf_code(code: str) -> bool:
+    """按 A 股场内基金代码规则判断是否为 ETF/LOF(issue #257)。
+
+    规则(带交易所后缀,与 :func:`is_index_code` 同风格):
+
+    * ``5xxxxx.SH`` —— 沪市基金(51/56/58 段 ETF 与 50 段 LOF);
+    * ``15xxxx.SZ`` / ``16xxxx.SZ`` —— 深市 ETF / LOF;
+    * 北交所暂无场内基金。
+
+    背景:EM 股票日线接口内部按 ``6`` 开头判定沪市,``5`` 开头的沪市基金
+    会被拼成深市 secid(实测 ``stock_zh_a_hist("510300")`` 请求
+    ``secid=0.510300``)导致取数错误;``fund_etf_hist_em`` 的
+    ``get_market_id`` 才能正确路由(沪市 ``1.510300``)。基金与指数 /
+    股票代码段互不重叠,分流顺序不影响结果。
+    """
+    bare, _, suffix = code.partition(".")
+    exchange = suffix.upper()
+    if exchange == "SH":
+        return bare.startswith("5")
+    if exchange == "SZ":
+        return bare.startswith(("15", "16"))
+    return False
 
 
 class AkShareProvider:
@@ -463,6 +489,26 @@ class AkShareProvider:
                 start_date=start.strftime("%Y%m%d"),
                 end_date=end.strftime("%Y%m%d"),
             )
+        elif is_etf_code(symbol.code):
+            # ETF/LOF 基金行情(issue #257):fund_etf_hist_em 的 get_market_id
+            # 能正确路由 5/6 开头沪市基金(股票接口会把 5 开头误判为深市);
+            # 列名与股票接口一致,复用 _column_map。
+            if period == BarPeriod.D1:
+                df = ak.fund_etf_hist_em(
+                    symbol=code,
+                    period=ak_period,
+                    start_date=start.strftime("%Y%m%d"),
+                    end_date=end.strftime("%Y%m%d"),
+                    adjust=ak_adjust,
+                )
+            else:
+                df = ak.fund_etf_hist_min_em(
+                    symbol=code,
+                    period=ak_period,
+                    start_date=f"{start.strftime('%Y-%m-%d')} 09:30:00",
+                    end_date=f"{end.strftime('%Y-%m-%d')} 15:00:00",
+                    adjust=ak_adjust,
+                )
         elif period == BarPeriod.D1:
             df = ak.stock_zh_a_hist(
                 symbol=code,

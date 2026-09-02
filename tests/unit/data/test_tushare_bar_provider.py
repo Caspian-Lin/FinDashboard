@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -560,3 +561,149 @@ async def test_leading_pre_listing_range_is_only_queried_once(tmp_path: Path) ->
     fetch.assert_awaited_once()
     assert fetch.await_args is not None
     assert fetch.await_args.args[2:] == (date(2024, 1, 2), date(2024, 1, 3), "none")
+
+
+# --------------------------------------------------------------------------- 异源缓存策略(issue #257)
+
+
+def _foreign_bar(day: date, close: str = "4.0") -> Bar:
+    return replace(_cached_bar(day, source="akshare"), close=Decimal(close))
+
+
+class TestForeignCacheStrategy:
+    """tushare provider 对 akshare 等异源缓存的读取策略(issue #257)。"""
+
+    def _provider(self, tmp_path: Path, client: FakeTushareBarClient | None = None):
+        budget = NoopBudget()
+        return (
+            TushareBarProvider(
+                client=client or FakeTushareBarClient(),
+                budget=budget,
+                cache_dir=tmp_path,
+                max_retries=0,
+            ),
+            budget,
+        )
+
+    @pytest.mark.unit
+    async def test_full_foreign_coverage_serves_read_through(self, tmp_path: Path) -> None:
+        """异源缓存完整覆盖请求区间:直接返回缓存,零 tushare 请求。"""
+        provider, budget = self._provider(tmp_path)
+        assert provider._cache is not None
+        symbol = make_symbol("510300.SH")
+        foreign = [_foreign_bar(date(2024, 1, 2)), _foreign_bar(date(2024, 1, 3))]
+        await provider._cache.write(symbol, BarPeriod.D1, "qfq", foreign)
+
+        from unittest.mock import AsyncMock
+
+        fetch = AsyncMock()
+        provider._fetch_from_akshare = fetch
+        result = await provider.fetch_bars(
+            symbol, BarPeriod.D1, date(2024, 1, 2), date(2024, 1, 3), adjust="qfq"
+        )
+
+        fetch.assert_not_awaited()
+        assert budget.calls == 0
+        assert [bar.source for bar in result] == ["akshare", "akshare"]
+        assert [bar.timestamp.date() for bar in result] == [
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+        ]
+
+    @pytest.mark.unit
+    async def test_update_cache_full_foreign_coverage_hits_cache(self, tmp_path: Path) -> None:
+        provider, budget = self._provider(tmp_path)
+        assert provider._cache is not None
+        symbol = make_symbol("510300.SH")
+        await provider._cache.write(
+            symbol,
+            BarPeriod.D1,
+            "qfq",
+            [_foreign_bar(date(2024, 1, 2)), _foreign_bar(date(2024, 1, 3))],
+        )
+
+        from unittest.mock import AsyncMock
+
+        fetch = AsyncMock()
+        provider._fetch_from_akshare = fetch
+        statuses: list[str] = []
+        result = await provider.update_cache(
+            symbol,
+            BarPeriod.D1,
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            adjust="qfq",
+            on_status=statuses.append,
+        )
+
+        assert result is True
+        fetch.assert_not_awaited()
+        assert budget.calls == 0
+        assert statuses == ["checking_cache", "cache_hit"]
+
+    @pytest.mark.unit
+    async def test_foreign_cache_falls_back_when_tushare_empty(self, tmp_path: Path) -> None:
+        """缺口区间 tushare 拉不到(ETF/指数):具名回退返回异源缓存,不改写缓存。"""
+        client = FakeTushareBarClient()
+        client.daily_rows = []
+        client.factor_rows = []
+        provider, _ = self._provider(tmp_path, client)
+        assert provider._cache is not None
+        symbol = make_symbol("510300.SH")
+        foreign = [_foreign_bar(date(2024, 1, 2)), _foreign_bar(date(2024, 1, 3))]
+        await provider._cache.write(symbol, BarPeriod.D1, "qfq", foreign)
+
+        result = await provider.fetch_bars(
+            symbol, BarPeriod.D1, date(2024, 1, 2), date(2024, 1, 10), adjust="qfq"
+        )
+
+        # tushare 拉不到时回退异源已缓存区间(1/2-1/3),不再静默丢弃
+        assert [bar.timestamp.date() for bar in result] == [
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+        ]
+        assert {bar.source for bar in result} == {"akshare"}
+        # 缓存文件保持异源原样,不被 tushare 空结果污染
+        metadata = await provider._cache.metadata_for(symbol, BarPeriod.D1, "qfq")
+        assert metadata is not None
+        assert metadata.source == "akshare"
+
+    @pytest.mark.unit
+    async def test_foreign_cache_rebuilds_when_tushare_has_bars(self, tmp_path: Path) -> None:
+        """缺口区间 tushare 拉得到(股票):保持既有重建语义,写回纯 tushare 缓存。"""
+        provider, _ = self._provider(tmp_path)
+        assert provider._cache is not None
+        symbol = make_symbol("000001.SZ")
+        await provider._cache.write(
+            symbol,
+            BarPeriod.D1,
+            "none",
+            [_foreign_bar(date(2024, 1, 2))],
+        )
+
+        result = await provider.fetch_bars(
+            symbol, BarPeriod.D1, date(2024, 1, 2), date(2024, 1, 3), adjust="none"
+        )
+
+        assert [bar.timestamp.date() for bar in result] == [
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+        ]
+        assert {bar.source for bar in result} == {"tushare"}
+        metadata = await provider._cache.metadata_for(symbol, BarPeriod.D1, "none")
+        assert metadata is not None
+        assert metadata.source == "tushare"
+
+    @pytest.mark.unit
+    async def test_no_cache_full_range_still_fetched(self, tmp_path: Path) -> None:
+        """无缓存时全量拉取行为不回归。"""
+        provider, budget = self._provider(tmp_path)
+        result = await provider.fetch_bars(
+            make_symbol("000001.SZ"),
+            BarPeriod.D1,
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            adjust="qfq",
+        )
+        assert len(result) == 2
+        assert budget.calls > 0
