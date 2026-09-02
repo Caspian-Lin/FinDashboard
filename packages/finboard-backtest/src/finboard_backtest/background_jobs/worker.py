@@ -28,6 +28,7 @@ from finboard_backtest.background_jobs.contracts import (
     JobExecutor,
     JobRecord,
     JobResult,
+    truncate_summary,
 )
 from finboard_backtest.background_jobs.registry import (
     JobExecutorRegistry,
@@ -242,10 +243,11 @@ class BackgroundWorker:
                     status=status,
                     error_code=getattr(exc, "code", type(exc).__name__),
                     # ExecutorError 是 dataclass,str() 为空 —— 优先取 .summary,
-                    # 保证失败原因写入任务行(grid 聚合可见)。
-                    error_summary=(getattr(exc, "summary", None) or str(exc) or type(exc).__name__)[
-                        :1000
-                    ],
+                    # 保证失败原因写入任务行(grid 聚合可见)。截断保头保尾
+                    # (issue #263):头部 stage/决策日上下文与尾部根因均保留。
+                    error_summary=truncate_summary(
+                        getattr(exc, "summary", None) or str(exc) or type(exc).__name__
+                    ),
                 ),
             )
 

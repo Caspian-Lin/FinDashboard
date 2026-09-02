@@ -37,6 +37,7 @@ from finboard_backtest.background_jobs.contracts import (
     JobRecord,
     JobResult,
     ProgressCallback,
+    truncate_summary,
 )
 from finboard_backtest.research_run import (
     ResearchRunCoordinator,
@@ -90,7 +91,7 @@ class ResearchRunExecutor:
                 await _mark_run_failed(store, run_id, exc)
                 raise ExecutorError(
                     code=getattr(exc, "code", type(exc).__name__),
-                    summary=str(exc)[:1000] or type(exc).__name__,
+                    summary=truncate_summary(str(exc)) or type(exc).__name__,
                     retryable=False,
                 ) from exc
             coordinator = ResearchRunCoordinator(store)
@@ -145,7 +146,8 @@ async def _mark_run_failed(
     )
 
     error_code = getattr(exc, "code", type(exc).__name__)
-    error_summary = str(exc)[:1000] or type(exc).__name__
+    # 截断保头保尾(issue #263),头部定位上下文与尾部根因收尾均保留。
+    error_summary = truncate_summary(str(exc)) or type(exc).__name__
     try:
         record = await store.get(run_id)
         if record is not None and record.status is ResearchRunStatus.QUEUED:

@@ -29,6 +29,10 @@ from finboard_backtest.research_run.contracts import (
     stable_checksum,
     to_json_value,
 )
+from finboard_backtest.research_run.failure_context import (
+    FailureContext,
+    build_failure_summary,
+)
 from finboard_backtest.research_run.store import ResearchRunStore
 
 _TRANSITIONS: dict[ResearchRunStatus, frozenset[ResearchRunStatus]] = {
@@ -116,6 +120,9 @@ class ResearchRunCoordinator:
                 ResearchRunStatus.FAILED,
             }
         )
+        # issue #263:执行期失败上下文,随循环进度逐点更新;通用收口拼入
+        # error_summary 头部(专项错误分支不经此路径,保持 str(exc) 原样)。
+        failure_ctx = FailureContext()
         try:
             adapter.validate_manifest(manifest)
             try:
@@ -139,6 +146,10 @@ class ResearchRunCoordinator:
             )
             seen_fill_ids: set[str] = set()
 
+            # 输入构建(含 multi_period 全部期次的一次性预构建,issue #170)
+            # 发生在首次迭代内,失败时尚无任何决策 —— 决策日期由 signal_engine
+            # 的加载期标记补全。
+            failure_ctx.stage = "decision_load"
             async for raw_decision in adapter.decisions(manifest):
                 live_record = await self._store.get(manifest.run_id)
                 if live_record is None:
@@ -152,6 +163,9 @@ class ResearchRunCoordinator:
                 decision = self._with_decision_id(
                     manifest.run_id, len(decisions), raw_decision
                 )
+                failure_ctx.stage = "decision_execute"
+                failure_ctx.decision_date = decision.business_date
+                failure_ctx.decision_index = len(decisions) + 1
                 self._validate_decision(
                     decision,
                     manifest=manifest,
@@ -163,10 +177,12 @@ class ResearchRunCoordinator:
                     len(decisions),
                     decision,
                     progress=progress,
+                    failure_ctx=failure_ctx,
                 )
                 await self._store.checkpoint()
                 decisions.append(decision)
 
+            failure_ctx.stage = "report"
             report = adapter.build_report(manifest, decisions)
             self._validate_report(manifest, decisions, report)
             await self._persist_report(
@@ -174,6 +190,7 @@ class ResearchRunCoordinator:
                 len(decisions),
                 report,
                 progress=progress,
+                failure_ctx=failure_ctx,
             )
             await self._store.checkpoint()
             artifacts = await self._store.list_artifacts(manifest.run_id)
@@ -235,11 +252,15 @@ class ResearchRunCoordinator:
                 error_summary=str(exc),
             )
         except Exception as exc:
+            # issue #263:error_code 保持异常类型名不变;error_summary 头部
+            # 拼结构化定位上下文(stage / 决策日期 / 发布绑定),加载期失败
+            # 由 signal_engine 挂载的标记补全精确决策日。无上下文(循环前
+            # 失败)时与既有行为一致,返回 str(exc) 原文。
             return await self._safe_terminal_transition(
                 manifest.run_id,
                 target=ResearchRunStatus.FAILED,
                 error_code=type(exc).__name__,
-                error_summary=str(exc),
+                error_summary=build_failure_summary(exc, failure_ctx, manifest),
             )
 
     async def cancel(self, run_id: str) -> ResearchRunRecord:
@@ -330,6 +351,7 @@ class ResearchRunCoordinator:
         decision: DecisionBundle,
         *,
         progress: ProgressHook | None = None,
+        failure_ctx: FailureContext | None = None,
     ) -> None:
         stage_payloads: dict[ResearchRunStage, dict[str, object]] = {
             ResearchRunStage.UNIVERSE: {"candidates": decision.candidates},
@@ -363,6 +385,8 @@ class ResearchRunCoordinator:
         }
         parent: tuple[str, ...] = ()
         for offset, stage in enumerate(_DECISION_STAGES):
+            if failure_ctx is not None:
+                failure_ctx.stage = stage.value
             payload_value = to_json_value(
                 {
                     "business_date": decision.business_date,
@@ -403,7 +427,10 @@ class ResearchRunCoordinator:
         report: object,
         *,
         progress: ProgressHook | None = None,
+        failure_ctx: FailureContext | None = None,
     ) -> None:
+        if failure_ctx is not None:
+            failure_ctx.stage = ResearchRunStage.REPORT.value
         payload = to_json_value({"report": report})
         assert isinstance(payload, dict)
         await self._store.append_artifact(
