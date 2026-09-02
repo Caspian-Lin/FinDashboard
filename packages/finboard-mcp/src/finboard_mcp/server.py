@@ -200,12 +200,15 @@ FinBoard 研究 MCP —— 量化研究工具集
   单次响应 MB 级的主膨胀点;history_list
   symbols 只回前 10 只 + symbol_count)、backtest_history_delete(写)、
   backtest_grid_submit(写,批量参数网格:一次提交 N 组参数 → N 个 backtest_run
-  后台任务,展开/上限/校验后同一事务落库,返回 grid_id + job 指针)、
+  后台任务,展开/上限/校验后同一事务落库,返回 grid_id + job 指针;组合维度
+  params_list/params_grid(互斥)x selection_grid(选股维度笛卡尔积,#259,
+  可单独使用做纯选股扫描如因子x窗口,逐组合过 FactorSelectionParams 校验,
+  总组合数受 max_combos 约束))、
   backtest_grid_get(只读,聚合对比表:指标矩阵 + 排名/最优标注 + 失败清单,
   equity_mode=none 默认只给 equity_point_count 不返回曲线,显式
   summary/full 才返回;公共字段(strategy/symbols/start/end/capital/adjust/
-  params=base_params)在网格头部只出现一次,combo 只含指标/权益,组合差异由
-  label 承载,#206)。
+  params=base_params/selection=基础选股配置)在网格头部只出现一次,combo 只含
+  指标/权益,组合差异由 label 承载,#206/#259)。
 - 模拟盘(21,✅ #127+#139):sim_account list/get/create(写)、
   sim_session list/get/create(写)/start/pause/stop/archive(写)/reset(写)、
   sim_decision_submit(写,结构化目标仓位 → 生成订单,不直接创建订单)、
