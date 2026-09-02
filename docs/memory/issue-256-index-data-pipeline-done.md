@@ -42,3 +42,24 @@ bars 主发布唯一性使「指数进发布」与「指数不进候选池」必
   会正确拦截(意外验证了质量门)。
 - 新增基准指数:在 `finboard_data/discovery.py` 登记表加一行即可,
   代码必须满足 `is_index_code`,data_sync 自动落库。
+
+## 附:CI 偶发失败排查(test_partial_fill_restart_recovery,与 #256 主题无关)
+
+**现象**:PR CI 三连败同一实盘域测试;基线分支 8/31 也偶发过。
+
+**根因链**:(1) CI 覆盖率负载下 OrderManager 回报事件消费可超 300ms,测试固定
+`sleep(0.1)` 过期后状态仍 ACKNOWLEDGED → 断言失败;(2) 泄漏的 consumer 任务在
+teardown 清表后才消费事件 → fills FK 报错只是连带噪音;(3) 若只把等待改成
+「状态到位」轮询,会在 handler 中途就返回,`kernel.stop()` 取消任务打断 flush →
+事务作废 → `session.commit()` 抛 PendingRollback(空 original exception)。
+
+**修法**:轮询条件用「fills 落库 + 状态推进 + OrderFilled→PositionManager
+持仓 upsert」三条件齐备 = `_on_filled` 完整结束、consumer 回到 queue.get
+阻塞点,此时 stop() 取消才安全(12 连跑稳定)。
+
+**Why**:AsyncSession 被测试协程与后台 consumer 并发共享;任何「只看单一状态
+字段」的等待都可能停在 handler 中途,取消/回滚类失败全都源于此。
+
+**How to apply**:交易域集成测试等待回报消费时,一律轮询到「事件处理链的
+最后一步 DB 动作」完成(PositionManager 持仓 / audit 日志),不要用固定 sleep,
+也不要只等订单状态字段。
