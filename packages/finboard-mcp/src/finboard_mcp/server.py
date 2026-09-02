@@ -163,7 +163,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   builtin_strategies 事件驱动策略+参数 schema 与 published_specs 已发布规格
   列表,含状态/版本数/执行入口提示)、backtest_run 双形态——(1) strategy 形态:
   默认小规模同步运行(返回 metrics/equity/fills;equity_mode=summary 默认降采样,full
-  返回完整曲线;selection.inputs_mode 支持 research_db(默认)/bars(纯价格因子,
+  返回完整曲线;selection.inputs_mode 支持 research_db(默认;必需数据集批次
+  未发布时入队秒级拒绝,#255——`dataset_unpublished:{dataset}` 具名,先
+  research_data_sync 摄取并发布,核验步骤见 docs/research/data-ops.md)/bars(纯价格因子,
   不要求 daily_metrics)/snapshot(snapshot_ids 冻结快照观测);selection.factor_version
   仅支持 "v1"(选股规则版本;因子目录已统一收敛,选股可用因子集是
   finboard_factor_catalog 所列因子中 FACTOR_CATALOG 投影的子集,见 Skill 文档;

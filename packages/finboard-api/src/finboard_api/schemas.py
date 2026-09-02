@@ -433,6 +433,8 @@ class BacktestMetricsOut(BaseSchema):
     # issue #254:基准曲线实际来源(explicit_symbol:<code> /
     # equal_weight_selection_pool / equal_weight_static_pool / first_symbol)
     benchmark_source: str | None = None
+    # issue #255:选股启用时的逐期诊断(选股数据集未发布/整期 SKIPPED 可见)
+    selection_diagnostics: dict[str, Any] | None = None
     initial_capital: Decimal = Decimal("0")
     final_equity: Decimal = Decimal("0")
 

@@ -58,6 +58,22 @@ async def run_backtest(
         if settings is not None
         else os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
     )
+    # issue #255:research_db 选股必需数据集批次未发布 → 入队秒级 422,
+    # 不再让任务排队跑完后以「0 交易成功」收场(与 #186 秒级失败风格对齐)。
+    from finboard_persistence import ResearchDatasetRepository
+
+    unpublished = await ResearchDatasetRepository(session).selection_inputs_gate(
+        req.selection.to_domain()
+    )
+    if unpublished:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "research_db 选股必需数据集批次未发布,拒绝入队(issue #255): "
+                f"{'、'.join(unpublished)}。请先执行 data_sync 摄取并完成批次"
+                "发布,或改用 inputs_mode=bars/snapshot。"
+            ),
+        )
     request_dict = req.model_dump(mode="json")
     payload: dict[str, Any] = {
         "request": request_dict,

@@ -94,6 +94,24 @@ async def run_backtest_and_persist(
     else:
         provider = YFinanceProvider()
 
+    # issue #255:research_db 选股必需数据集未发布 → run 启动即具名失败,
+    # 不再让逐期 SKIPPED 静默空转成「0 交易成功」。入队路径(REST/MCP)已有
+    # 同一检查的秒级版本,此处执行端重放兜底(grid 等绕过入队校验的路径)。
+    selection_config = request.selection.to_domain()
+    unpublished = await ResearchDatasetRepository(session).selection_inputs_gate(
+        selection_config
+    )
+    if unpublished:
+        raise BacktestRunError(
+            code="selection_dataset_unpublished",
+            summary=(
+                "research_db 选股必需数据集批次未发布,拒绝运行(0 交易防护,"
+                f"issue #255): {'、'.join(unpublished)}。"
+                "请先执行 data_sync 摄取并完成批次发布,或改用 "
+                "inputs_mode=bars/snapshot。"
+            ),
+        )
+
     config = BacktestConfig(
         symbols=request.symbols,
         start=parse_date.fromisoformat(request.start),
@@ -105,7 +123,7 @@ async def run_backtest_and_persist(
         commission_min=request.commission_min,
         stamp_tax_rate=request.stamp_tax_rate,
         slippage_bps=request.slippage_bps,
-        selection=request.selection.to_domain(),
+        selection=selection_config,
         benchmark=(
             BenchmarkConfig(
                 symbol=request.benchmark.symbol,
@@ -178,6 +196,7 @@ async def run_backtest_and_persist(
         benchmark_return=result.benchmark_return,
         excess_return=result.excess_return,
         benchmark_source=result.benchmark_source,
+        selection_diagnostics=result.selection_diagnostics,
         initial_capital=result.initial_capital,
         final_equity=result.final_equity,
     )

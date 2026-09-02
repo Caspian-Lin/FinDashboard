@@ -710,12 +710,20 @@ research_run 管线轻路由(#174)。
     `framework_version` 是另一契约字段,不传给 selection
   - `selection.inputs_mode`(#173):
     - `research_db`(默认):从 research 数据表读 profile/daily_metrics/
-      financial_indicators/industry_memberships
+      financial_indicators/industry_memberships。**必需数据集批次未发布时
+      入队秒级拒绝(#255)**:`dataset_unpublished:{dataset}` 具名
+      `invalid_argument`(摄取 ≠ 发布——`research_data_sync` 质量门通过才
+      自动发布;发布状态核验 SQL 与修复步骤见 `docs/research/data-ops.md`);
+      执行端(grid 旁路)由 worker 以 `selection_dataset_unpublished` 具名拒绝
     - `bars`:纯价格因子(momentum/volatility_20d)从回测行情计算,不要求
       daily_metrics 发布;dataset 未发布降级为 snapshot warnings,不整日
       SKIPPED;ST/上市天数过滤在 instrument_profiles 缺失时降级不生效
     - `snapshot`:因子值直接来自冻结 FeatureSnapshot,需 `snapshot_ids:
       list[str]`;观测按 available_at <= decision_at 过滤
+  - **selection_diagnostics(#255)**:selection 启用时 metrics 附带逐期诊断
+    `{total_snapshots, published_snapshots, skipped_snapshots, skip_reasons,
+    selection_pool_ever_active, zero_trading_suspected?}`——整期 SKIPPED 的
+    0 交易 run 在 summary/诊断中显式标注,不再伪装成功
   - 返回:`{run_id, metrics, equity_curve, equity_point_count, fills, summary,
     selection_snapshots(snapshot 含 warnings 降级提示), ...}`(同步;
     metrics 里 sharpe_ratio=主口径 rf=3%/ddof=0,sharpe_rf0=rf=0 对照口径

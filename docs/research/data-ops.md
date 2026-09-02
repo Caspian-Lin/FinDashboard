@@ -3,6 +3,57 @@
 跨会话运营步骤的 canonical 事实源:研究 / 数据 agent 与主 coding agent 共享。
 与 `research_memories` 记忆冲突时以本文档为准(#268 约定)。
 
+## v1 选股(research_db)必需数据集的发布状态(#255)
+
+**背景**:2026-09-01 runs 273-275(ROE / PB / 换手率 top-N)全部 0 交易
+「成功」。根因:**摄取 ≠ 发布**——`research_data_sync` 会在质量门通过后自动
+`mark_published`(批次 `status=published`),但 profiles 批次的**同步+发布**
+步骤从未进入运行手册;`selection.inputs_mode=research_db`(默认)必需
+`instrument_profiles` 批次已发布,未发布时旧链路逐期 SKIPPED、引擎 0 交易收场。
+
+**已建的防线(#255)**:
+
+- 入队期:REST `POST /api/backtest/run` 与 MCP `finboard_backtest_run`(同步 +
+  异步入队)对 `enabled + inputs_mode=research_db` 的 selection 逐个检查
+  `required_datasets` 的已发布批次,缺失秒级 422 / `invalid_argument`
+  (`dataset_unpublished:{dataset}` 具名);
+- 执行端:`run_backtest_and_persist`(worker,覆盖 grid 提交等旁路)重放同一
+  检查,失败 `selection_dataset_unpublished` 具名错误,任务不重试;
+- 引擎:选股启用的 run 一律随结果携带 `selection_diagnostics`
+  (published/skipped 快照数、skip 原因计数、候选池是否曾生效),整期无候选
+  时打 `backtest.selection_pool_never_active` warning 并在 `summary()` 标注
+  「本 run 大概率 0 交易」。
+
+**运营步骤(选股回测前的核验清单)**:
+
+1. 核验批次发布状态(哪些 dataset、哪个 version、是否 published):
+
+   ```sql
+   SELECT dataset, source, dataset_version, status, published_at, accepted_rows
+   FROM research_sync_batches
+   WHERE source = 'tushare'
+   ORDER BY dataset, id DESC;
+   ```
+
+   选股回测要求的 datasets 按 selection 配置推导(默认 research_db 至少含
+   `instrument_profiles`;配置了市值/PB/换手过滤或排名再加 `daily_metrics`,
+   ROE/毛利率/营收增速再加 `financial_indicators`)。
+
+2. 缺失或 `status != 'published'` 时:`finboard_job_enqueue(kind=research_data_sync,
+   payload={datasets: [...], symbols: [...], start_date: ..., end_date: ...})`
+   摄取;质量门通过即自动发布(见任务 phase 摘要);质量门失败看批次
+   `quality_report` 修复后重跑。
+
+3. 若 selection 显式声明 `dataset_versions`,发布版本必须与之精确匹配
+   (`published_version` 口径);通常不声明即可(取最近发布)。
+
+4. 发布后入队仍有疑虑时:先跑 `finboard_strategy_validate`(research_run 侧
+   universe 预检)或小规模同步 `finboard_backtest_run` 验证选股出单,再放大区间。
+
+**边界**:粗粒度门只回答「是否存在已发布批次」;批次已发布但不覆盖具体
+交易日(如 daily_metrics 只发到 2023)仍由逐期 SKIPPED 的 `skip_reason`
+承载,配合 `selection_diagnostics.skip_reasons` 可见。
+
 ## instruments 主数据元数据(list_date / industry / delist_date / 名称历史,#251)
 
 **背景**:`instruments` 主数据由 akshare 发现链路写入,只含
