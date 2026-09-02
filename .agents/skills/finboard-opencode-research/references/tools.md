@@ -45,6 +45,13 @@
 - 返回(view=detail):`{run_id, ..., manifest, result, error_summary, execution_mode}`
   (result 多期回放含 `annualized_return` 与 `equity_curve` 全区间每日权益曲线,#183;
   逐标的全量 payload 可达 MB 级,诊断用)
+- 排障(#263):status=failed/rejected 时 error_summary 头部自带定位头
+  `[stage=...; decision=...; decision_index=...; release=<bars 主发布>;
+  dataset_releases=...]`(stage 为 `decision_load` 表示输入构建期失败,
+  具体值如 `signals` 表示该 stage 持久化期失败;decision 为失败期次决策日),
+  原始异常消息在尾部——先读头部定位「哪个决策点、哪个 stage、哪个发布」,
+  再按需用 `finboard_run_artifacts` 下钻;超长错误经保头保尾截断,
+  头部上下文仍完整可读。
 
 ### finboard_run_artifacts
 列出某 ResearchRun 的逐阶段 artifact。

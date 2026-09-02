@@ -64,6 +64,9 @@ from finboard_backtest.research_run.contracts import (
     UniverseCandidate,
     execution_mode_for,
 )
+from finboard_backtest.research_run.failure_context import (
+    attach_decision_load_context,
+)
 from finboard_backtest.research_run.frozen_loader import (
     FeatureSnapshotProvider,
     FrozenInputLoader,
@@ -1245,64 +1248,75 @@ async def build_decision_load_contexts(
 
     contexts: list[DecisionLoadContext] = []
     for decision_at, snapshot_id in decision_days:
-        execution_at = await _next_execution_at(provider, decision_at)
-        context = await loader.load_context(
-            manifest, decision_at=decision_at, execution_at=execution_at
-        )
-        if frequency is not None:
-            period_features = await _compute_period_features(
-                provider, manifest, decision_at, release_ref.artifact_id
+        # issue #263:逐期失败在 bare raise 前挂决策上下文标记 —— 异常类型 /
+        # 消息 / traceback 全不变(空池 / 价格特征等具名文案零破坏),runner
+        # 通用收口经 read_decision_load_context 读回失败期次与 bars 主发布。
+        try:
+            execution_at = await _next_execution_at(provider, decision_at)
+            context = await loader.load_context(
+                manifest, decision_at=decision_at, execution_at=execution_at
             )
-            features = (*period_features, *context.features)
-        else:
-            features = context.features
-        features_by_source = _features_by_source(features)
-        candidates = _apply_universe_filter(
-            manifest.strategy_spec, provider, context, features_by_source
-        )
-        included = frozenset(item.symbol for item in candidates if item.included)
-        # issue #186:运行时降级 warning —— 元数据/特征缺失时声明该过滤未生效,
-        # 对齐快照链路 `instrument_profiles_unavailable` 的语义(不静默)。
-        _emit_universe_degradation_warnings(
-            manifest.strategy_spec,
-            provider,
-            features_by_source,
-            decision_at,
-        )
-        if not included:
-            # issue #186:执行期空池错误附根因(缺失字段名 + 排除统计),
-            # 不再只有 portfolio_pipeline 的泛化「候选池为空」。
-            raise ValueError(
-                _empty_pool_error_message(
-                    manifest.strategy_spec,
-                    candidates,
-                    provider.release.instruments,
-                    features_by_source,
-                    decision_at,
+            if frequency is not None:
+                period_features = await _compute_period_features(
+                    provider, manifest, decision_at, release_ref.artifact_id
+                )
+                features = (*period_features, *context.features)
+            else:
+                features = context.features
+            features_by_source = _features_by_source(features)
+            candidates = _apply_universe_filter(
+                manifest.strategy_spec, provider, context, features_by_source
+            )
+            included = frozenset(item.symbol for item in candidates if item.included)
+            # issue #186:运行时降级 warning —— 元数据/特征缺失时声明该过滤未生效,
+            # 对齐快照链路 `instrument_profiles_unavailable` 的语义(不静默)。
+            _emit_universe_degradation_warnings(
+                manifest.strategy_spec,
+                provider,
+                features_by_source,
+                decision_at,
+            )
+            if not included:
+                # issue #186:执行期空池错误附根因(缺失字段名 + 排除统计),
+                # 不再只有 portfolio_pipeline 的泛化「候选池为空」。
+                raise ValueError(
+                    _empty_pool_error_message(
+                        manifest.strategy_spec,
+                        candidates,
+                        provider.release.instruments,
+                        features_by_source,
+                        decision_at,
+                    )
+                )
+            # 信号标的必须同时具备决策价、成交价、执行元数据与可估计收益的历史。
+            signalable = (
+                included
+                & frozenset(context.prices)
+                & frozenset(context.execution_prices)
+                & frozenset(context.lot_info)
+            )
+            price_series = await _load_price_series(
+                provider, tuple(signalable), decision_at
+            )
+            signalable = frozenset(
+                symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
+            )
+            contexts.append(
+                DecisionLoadContext(
+                    context=context,
+                    candidates=candidates,
+                    features=features,
+                    signalable=signalable,
+                    price_series=price_series,
+                    covariance=_estimate_covariance(price_series),
+                    snapshot_id=snapshot_id,
                 )
             )
-        # 信号标的必须同时具备决策价、成交价、执行元数据与可估计收益的历史。
-        signalable = (
-            included
-            & frozenset(context.prices)
-            & frozenset(context.execution_prices)
-            & frozenset(context.lot_info)
-        )
-        price_series = await _load_price_series(provider, tuple(signalable), decision_at)
-        signalable = frozenset(
-            symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
-        )
-        contexts.append(
-            DecisionLoadContext(
-                context=context,
-                candidates=candidates,
-                features=features,
-                signalable=signalable,
-                price_series=price_series,
-                covariance=_estimate_covariance(price_series),
-                snapshot_id=snapshot_id,
+        except Exception as exc:
+            attach_decision_load_context(
+                exc, decision_at=decision_at, release_id=release_ref.artifact_id
             )
-        )
+            raise
     return tuple(contexts)
 
 

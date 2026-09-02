@@ -922,7 +922,10 @@ def register(mcp: MCPServer) -> None:
             "(剔除 equity_curve,以 equity_point_count 提示)+ universe 聚合计数"
             "(total/included/excluded_by_reason)+ fills 按决策计数 + artifact_count,"
             "不序列化 manifest/result 全量;view=detail:含 manifest / result / "
-            "逐标的全量 payload(诊断用,可达 MB 级)。"
+            "逐标的全量 payload(诊断用,可达 MB 级)。失败运行的 error_summary"
+            "(issue #263)头部自带定位上下文"
+            "[stage=...; decision=...; decision_index=...; release=...; "
+            "dataset_releases=...],原始异常消息在尾部,排障先读头部。"
         ),
     )
     async def _get(

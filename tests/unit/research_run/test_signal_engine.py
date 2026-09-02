@@ -19,8 +19,16 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunManifest,
     stable_checksum,
 )
+from finboard_backtest.research_run.failure_context import (
+    read_decision_load_context,
+)
+from finboard_backtest.research_run.frozen_loader import (
+    FrozenInputLoader,
+    LoadedDecisionContext,
+)
 from finboard_backtest.research_run.signal_engine import (
     build_decision_inputs,
+    build_decision_load_contexts,
     build_normalized_signals,
     evaluate_feature_graph,
     evaluate_signal_rules,
@@ -1151,6 +1159,60 @@ class TestMultiPeriodDecisionInputs:
         assert "rebalance_frequency=monthly|quarterly" in message
         # 不再误指 multi_period 的日历推导根因。
         assert "交易日历" not in message
+
+    async def test_mid_series_load_failure_carries_decision_marker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #263:中期加载失败在 bare raise 前挂决策标记,消息不改写。
+
+        第 2 期(2024-02-29)loader 抛裸 RuntimeError —— 异常类型 / 消息 /
+        traceback 保持原样,仅附带失败期次决策时点与 bars 主发布标记,
+        runner 通用收口据此在 error_summary 头部补全定位上下文。
+        """
+        start, end = date(2024, 1, 1), date(2024, 3, 31)
+        provider = _multi_provider(start, end)
+        manifest = _multi_manifest(_price_only_spec(), frequency="monthly")
+        real_load_context = FrozenInputLoader.load_context
+
+        async def failing_second_period(
+            self: FrozenInputLoader,
+            manifest_arg: ResearchRunManifest,
+            *,
+            decision_at: datetime,
+            execution_at: datetime,
+        ) -> LoadedDecisionContext:
+            if decision_at.date() == date(2024, 2, 29):
+                raise RuntimeError("中期数据缺失:2 月发布损坏")
+            return await real_load_context(
+                self,
+                manifest_arg,
+                decision_at=decision_at,
+                execution_at=execution_at,
+            )
+
+        monkeypatch.setattr(
+            FrozenInputLoader, "load_context", failing_second_period
+        )
+
+        def release_factory(release_id: str) -> _StubProvider:
+            return provider
+
+        async def snapshot_provider(snapshot_id: str) -> None:
+            return None
+
+        with pytest.raises(RuntimeError, match="中期数据缺失") as excinfo:
+            await build_decision_load_contexts(
+                manifest,
+                release_provider_factory=release_factory,  # type: ignore[arg-type]
+                snapshot_provider=snapshot_provider,
+            )
+
+        marker = read_decision_load_context(excinfo.value)
+        assert marker is not None
+        assert marker.decision_at.date() == date(2024, 2, 29)
+        assert marker.release_id == "release-multi"
+        # bare raise 语义:消息与类型均不被改写(既有具名文案零破坏)。
+        assert str(excinfo.value) == "中期数据缺失:2 月发布损坏"
 
 
 class TestSingleShotSnapshotGate:
