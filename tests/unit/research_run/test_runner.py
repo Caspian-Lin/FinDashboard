@@ -443,7 +443,92 @@ async def test_strategy_exception_is_persisted_as_failed(manifest_factory) -> No
 
     assert record.status is ResearchRunStatus.FAILED
     assert record.error_code == "ValueError"
-    assert record.error_summary == "strategy calculation failed"
+    # issue #263:通用失败 error_summary 头部附阶段上下文(stage + 冻结发布
+    # 绑定),原始消息保留在尾部;本例失败发生在输入构建期且无决策日期。
+    summary = record.error_summary or ""
+    assert summary.startswith("[stage=decision_load; dataset_releases=release-v1")
+    assert summary.endswith("strategy calculation failed")
+
+
+@pytest.mark.asyncio
+async def test_load_failure_marker_enriches_summary_with_decision_and_release(
+    manifest_factory,
+) -> None:
+    """加载期失败:signal_engine 挂载的标记补全失败期次决策日与 bars 发布。"""
+    from datetime import UTC, datetime
+
+    from finboard_backtest.research_run.failure_context import (
+        attach_decision_load_context,
+    )
+
+    failure = ValueError("发布清单不存在: /data/releases/REL-404")
+    attach_decision_load_context(
+        failure,
+        decision_at=datetime(2024, 6, 28, 15, tzinfo=UTC),
+        release_id="release-v1",
+    )
+
+    class LoadFailureAdapter:
+        strategy_kind = "ma_cross"
+
+        def validate_manifest(self, manifest) -> None:
+            del manifest
+
+        async def decisions(self, manifest):
+            del manifest
+            raise failure
+            yield  # pragma: no cover
+
+        def build_report(self, manifest, decisions):
+            del manifest, decisions
+            raise AssertionError("report must not be called")
+
+    record = await ResearchRunCoordinator(InMemoryResearchRunStore()).execute(
+        manifest_factory(), LoadFailureAdapter()
+    )
+
+    assert record.status is ResearchRunStatus.FAILED
+    assert record.error_code == "ValueError"
+    summary = record.error_summary or ""
+    assert summary.startswith(
+        "[stage=decision_load; decision=2024-06-28; release=release-v1; "
+        "dataset_releases=release-v1"
+    )
+    assert summary.endswith("发布清单不存在: /data/releases/REL-404")
+
+
+@pytest.mark.asyncio
+async def test_decision_execution_failure_summary_carries_stage_and_date(
+    manifest_factory, decision_factory
+) -> None:
+    """执行期失败:头部含具体 stage、决策日期与 1-based 期次序号。"""
+    manifest = manifest_factory()
+    first = decision_factory(manifest=manifest)
+    duplicate = decision_factory(
+        manifest=manifest,
+        index=1,
+        fill_id=first.fills[0].research_fill_id,
+    )
+    adapter = DecisionSequenceAdapter(
+        strategy_kind="ma_cross",
+        decisions=(first, duplicate),
+        report=fixed_report("ma_cross", duplicate),
+    )
+
+    record = await ResearchRunCoordinator(InMemoryResearchRunStore()).execute(
+        manifest, adapter
+    )
+
+    assert record.status is ResearchRunStatus.FAILED
+    assert record.error_code == "ResearchRunConflictError"
+    summary = record.error_summary or ""
+    # 重复成交在 FILLS stage 持久化前校验失败:stage 为 decision_execute
+    # (校验/持久化间隙),决策日与期次来自 runner 循环上下文。
+    assert summary.startswith(
+        "[stage=decision_execute; decision=2024-01-03; decision_index=2; "
+        "dataset_releases=release-v1"
+    )
+    assert "重复成交" in summary
 
 
 @pytest.mark.asyncio

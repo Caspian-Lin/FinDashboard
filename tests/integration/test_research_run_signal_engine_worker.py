@@ -765,6 +765,68 @@ class TestMultiPeriodWorkerEndToEnd:
             assert result["final_equity"] == equity_curve[-1]["equity"]
             assert float(str(result["strategy_return"])) > 0
 
+    async def test_mid_series_load_failure_summary_carries_stage_decision_release(
+        self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #263:multi_period 第 2 期缺数据失败,error_summary 自带定位上下文。
+
+        故障注入:loader 在 2024-02-29(第 2 期决策日)抛裸 RuntimeError。
+        全链路(信号引擎标记 → runner 通用收口 → research_runs → background_jobs)
+        失败摘要头部含 stage / 决策日期 / bars 发布标识,不必翻 artifacts 定位。
+        """
+        from finboard_backtest.research_run.frozen_loader import (
+            FrozenInputLoader,
+            LoadedDecisionContext,
+        )
+
+        manifest = _multi_period_manifest("fail-context")
+        real_load_context = FrozenInputLoader.load_context
+
+        async def failing_second_period(
+            self: FrozenInputLoader,
+            manifest_arg: ResearchRunManifest,
+            *,
+            decision_at: datetime,
+            execution_at: datetime,
+        ) -> LoadedDecisionContext:
+            if decision_at.date() == date(2024, 2, 29):
+                raise RuntimeError("中期数据缺失:2 月发布 bars 段损坏")
+            return await real_load_context(
+                self,
+                manifest_arg,
+                decision_at=decision_at,
+                execution_at=execution_at,
+            )
+
+        monkeypatch.setattr(
+            FrozenInputLoader, "load_context", failing_second_period
+        )
+
+        run_id = await _queue_double_write(engine, manifest)
+        worker = _build_worker(engine, _multi_period_factory(_multi_period_provider()))
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.FAILED.value
+            assert run_row.error_code == "RuntimeError"
+            summary = run_row.error_summary or ""
+            # 头部结构化上下文:stage + 失败期次精确决策日 + bars 主发布。
+            assert summary.startswith(
+                "[stage=decision_load; decision=2024-02-29; "
+                "release=frozen-release-multi; dataset_releases=frozen-release-multi]"
+            )
+            # 原始根因消息保留在尾部。
+            assert summary.endswith("中期数据缺失:2 月发布 bars 段损坏")
+            # 决策总数 0:失败发生在任何工件落库之前(纯可观测性增强点)。
+            assert await ResearchRunRepository(session).list_artifacts(run_id) == []
+            assert run_row.job_id is not None
+            job_row = await BackgroundJobRepository(session).get(run_row.job_id)
+            assert job_row is not None
+            assert job_row.status == BackgroundJobStatus.FAILED.value
+            assert job_row.error_summary == summary
+
 
 def _benchmark_provider() -> _StubProvider:
     """multi-period 发布 + 000300.SH 指数基准(直线 10 → 15,+50%)。
