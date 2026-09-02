@@ -231,6 +231,8 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   秒级失败 code=symbol_set_mismatch)。执行期对缺标的容忍(具名 warning,
   因子值 null),发布期核对可提前拦截
 - 未找到 → `not_found`
+- 提示:重发布时标的集用 `symbols_from_release` 复制基线发布(#261),
+  免手工重抄全市场清单——复制语义保证与基线一致,消灭漏配缺口来源
 
 ### finboard_dataset_manifest_list
 列出数据集发布清单(dataset manifests)。
@@ -311,7 +313,12 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 成功后 `result_ref=release_id`,用 `finboard_job_get` 拿到 release_id 后再
 `finboard_dataset_release_get` 查发布详情。**这是研究闭环关键节点——agent 不发布
 数据集就无法排队研究运行。**
-- 参数:`release_id` / `symbols`(列表)/ `version` / `start_date` / `end_date` /
+- 标的集三选一(#261,互斥,同时声明 `invalid_argument`):
+  `symbols`(内联列表)/ `symbols_from_release`(复制既有可用发布的冻结标的集,
+  全市场发布/跟进发布首选,免手工维护巨型清单)/ `full_market=true`
+  (instruments 表全活跃标的按 kind 展开:股票单源只取 A 股股票,
+  multi_asset_mixed 取股票+ETF+指数)
+- 其他参数:`release_id` / `version` / `start_date` / `end_date` /
   `dataset_name?`(默认 multi_asset_daily_bars)/ `release_kind?`
   (a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators,
   默认 a_share_tushare)/ `source?` /
@@ -319,8 +326,9 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   `required_capabilities?`
   (stock|bond|convertible|futures|etf:index|etf:cross_border|etf:commodity|etf:bond)
 - 返回:`JobOut`(`kind=dataset_publish`)
-- 错误:`invalid_argument`(schema 校验:release_id/version pattern、symbols 非空不重复、
-  日期顺序)/ `conflict`(幂等冲突)
+- 错误:`invalid_argument`(schema 校验:release_id/version pattern、日期顺序;
+  #261 来源解析:来源发布不存在 `source_release_not_found` / 不可用
+  `source_release_not_usable` / 展开为空 `full_market_empty`)/ `conflict`(幂等冲突)
 - `release_kind=daily_metrics|financial_indicators` 时从 research_* 表冻结
   基本面/财务指标发布(issue #187),与 bars 发布(dataset_release_ids 含 bars 主发布 +
   research 发布)联合供因子快照取数;schedule(data_sync)与发布任务报告缺失字段统计。

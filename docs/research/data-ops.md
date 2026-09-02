@@ -113,6 +113,14 @@ financial_indicators)的标的并集一致性必须自检。
 `consistency_fail_on_mismatch=true`——差集非空即拒绝发布(code=
 `symbol_set_mismatch`,差集具名进错误 context);不带 fail 开关则只 warning。
 
+**标的集来源复制(#261,消灭漏配根因)**:发布/重发布时标的集用
+`symbols_from_release=<同区间 bars 主发布 release_id>` 直接复制其冻结标的集
+(与内联 `symbols` / `full_market=true` 三选一,同时声明即 `invalid_argument`
+拒绝),不再手工维护全市场清单——002889.SZ 这类内联清单漏配从源头消失;
+来源发布不存在/不可用(quality 非 passed/warnings)入队即 422/`invalid_argument`
+具名拒绝。REST `POST /api/datasets/releases` 同步支持
+(`ResearchDatasetReleaseCreate.symbols_from_release` / `.full_market`)。
+
 **发布后自检**(任一入口,同一实现):
 
 - MCP:`finboard_dataset_release_diff(release_id=<研究发布>,
