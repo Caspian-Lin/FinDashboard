@@ -57,84 +57,123 @@ import {
 } from "@/lib/research";
 import { fetchJSON } from "@/lib/api";
 import { cn, formatDateTime, timeAgo } from "@/lib/utils";
+import { useT, useLanguage, type LocalizedText } from "@/i18n";
 
-const STATUS_OPTIONS: { value: string; label: string }[] = [
-  { value: "all", label: "全部" },
-  { value: "draft", label: "草稿" },
-  { value: "registered", label: "已注册" },
-  { value: "running", label: "运行中" },
-  { value: "completed", label: "已完成" },
-  { value: "failed", label: "失败" },
-  { value: "rejected", label: "已拒绝" },
+const STATUS_OPTIONS: { value: string; label: LocalizedText }[] = [
+  { value: "all", label: { zh: "全部", en: "All" } },
+  { value: "draft", label: { zh: "草稿", en: "Draft" } },
+  { value: "registered", label: { zh: "已注册", en: "Registered" } },
+  { value: "running", label: { zh: "运行中", en: "Running" } },
+  { value: "completed", label: { zh: "已完成", en: "Completed" } },
+  { value: "failed", label: { zh: "失败", en: "Failed" } },
+  { value: "rejected", label: { zh: "已拒绝", en: "Rejected" } },
 ];
 
-const STRATEGY_KINDS: { value: string; label: string }[] = [
-  { value: "ma_cross", label: "均线交叉 (MA Cross)" },
-  { value: "multi_factor", label: "多因子 (Multi-Factor)" },
-  { value: "etf_rotation", label: "ETF 轮动 (ETF Rotation)" },
-  { value: "mean_reversion", label: "均值回归 (Mean Reversion)" },
-  { value: "convertible_double_low", label: "可转债双低 (Convertible Double-Low)" },
-  { value: "futures_tsmom", label: "期货动量 (Futures TSMOM)" },
+const STRATEGY_KINDS: { value: string; label: LocalizedText }[] = [
+  { value: "ma_cross", label: { zh: "均线交叉 (MA Cross)", en: "MA Cross" } },
+  { value: "multi_factor", label: { zh: "多因子 (Multi-Factor)", en: "Multi-Factor" } },
+  { value: "etf_rotation", label: { zh: "ETF 轮动 (ETF Rotation)", en: "ETF Rotation" } },
+  { value: "mean_reversion", label: { zh: "均值回归 (Mean Reversion)", en: "Mean Reversion" } },
+  { value: "convertible_double_low", label: { zh: "可转债双低 (Convertible Double-Low)", en: "Convertible Double-Low" } },
+  { value: "futures_tsmom", label: { zh: "期货动量 (Futures TSMOM)", en: "Futures TSMOM" } },
 ];
 
-const MODE_OPTIONS: { value: string; label: string; desc: string }[] = [
+const MODE_OPTIONS: { value: string; label: LocalizedText; desc: LocalizedText }[] = [
   {
     value: "rolling",
-    label: "滚动窗口 (Rolling)",
-    desc: "固定长度窗口向前滚动，旧数据逐步丢弃",
+    label: { zh: "滚动窗口 (Rolling)", en: "Rolling window" },
+    desc: {
+      zh: "固定长度窗口向前滚动，旧数据逐步丢弃",
+      en: "A fixed-length window rolls forward, dropping older data step by step",
+    },
   },
   {
     value: "expanding",
-    label: "扩展窗口 (Expanding)",
-    desc: "起点固定，终点逐步前移，数据量递增",
+    label: { zh: "扩展窗口 (Expanding)", en: "Expanding window" },
+    desc: {
+      zh: "起点固定，终点逐步前移，数据量递增",
+      en: "Fixed start with the end moving forward, growing the data over time",
+    },
   },
 ];
 
 interface HintShape {
-  title: string;
-  description: string;
-  detail?: string;
+  title: LocalizedText;
+  description: LocalizedText;
+  detail?: LocalizedText;
 }
 
-const THRESHOLD_META: { key: string; label: string; hint: HintShape }[] = [
+const THRESHOLD_META: { key: string; label: LocalizedText; hint: HintShape }[] = [
   {
     key: "min_oos_sharpe",
-    label: "OOS 夏普下限",
+    label: { zh: "OOS 夏普下限", en: "Min OOS Sharpe" },
     hint: {
-      title: "min_oos_sharpe（样本外夏普比率下限）",
-      description:
-        "夏普比率衡量风险调整后收益，>0.5 表示每承担 1 单位风险获得 0.5 单位超额收益。",
-      detail: "默认 0.5。值越高要求越严格。",
+      title: {
+        zh: "min_oos_sharpe（样本外夏普比率下限）",
+        en: "min_oos_sharpe (minimum out-of-sample Sharpe ratio)",
+      },
+      description: {
+        zh: "夏普比率衡量风险调整后收益，>0.5 表示每承担 1 单位风险获得 0.5 单位超额收益。",
+        en: "The Sharpe ratio measures risk-adjusted return; >0.5 means 0.5 units of excess return per unit of risk taken.",
+      },
+      detail: {
+        zh: "默认 0.5。值越高要求越严格。",
+        en: "Default 0.5. Higher values are stricter.",
+      },
     },
   },
   {
     key: "max_oos_drawdown",
-    label: "OOS 最大回撤上限",
+    label: { zh: "OOS 最大回撤上限", en: "Max OOS drawdown" },
     hint: {
-      title: "max_oos_drawdown（样本外最大回撤上限）",
-      description:
-        "回撤是从历史最高点到最低点的跌幅。25% 意味着最多允许亏 25%。",
-      detail: "默认 0.25。值越低要求越严格。",
+      title: {
+        zh: "max_oos_drawdown（样本外最大回撤上限）",
+        en: "max_oos_drawdown (maximum out-of-sample drawdown)",
+      },
+      description: {
+        zh: "回撤是从历史最高点到最低点的跌幅。25% 意味着最多允许亏 25%。",
+        en: "Drawdown is the peak-to-trough decline. 25% means a loss of at most 25% is allowed.",
+      },
+      detail: {
+        zh: "默认 0.25。值越低要求越严格。",
+        en: "Default 0.25. Lower values are stricter.",
+      },
     },
   },
   {
     key: "max_pbo",
-    label: "过拟合概率上限",
+    label: { zh: "过拟合概率上限", en: "Max overfitting probability" },
     hint: {
-      title: "max_pbo（回测过拟合概率上限）",
-      description:
-        "PBO = Probability of Backtest Overfitting。>50% 说明策略大概率是过拟合的。",
-      detail: "默认 0.5。越低越严格。",
+      title: {
+        zh: "max_pbo（回测过拟合概率上限）",
+        en: "max_pbo (maximum probability of backtest overfitting)",
+      },
+      description: {
+        zh: "PBO = Probability of Backtest Overfitting。>50% 说明策略大概率是过拟合的。",
+        en: "PBO = Probability of Backtest Overfitting. >50% means the strategy is very likely overfitted.",
+      },
+      detail: {
+        zh: "默认 0.5。越低越严格。",
+        en: "Default 0.5. Lower is stricter.",
+      },
     },
   },
   {
     key: "min_deflated_sharpe",
-    label: "Deflated Sharpe 下限",
+    label: { zh: "Deflated Sharpe 下限", en: "Min Deflated Sharpe" },
     hint: {
-      title: "min_deflated_sharpe（Deflated Sharpe Ratio 下限）",
-      description:
-        "对夏普比率进行多重检验校正后的值，消除'试了很多参数碰巧有一个好'的偏差。",
-      detail: "默认 0.0。>0 表示校正后仍有正超额收益。",
+      title: {
+        zh: "min_deflated_sharpe（Deflated Sharpe Ratio 下限）",
+        en: "min_deflated_sharpe (minimum Deflated Sharpe Ratio)",
+      },
+      description: {
+        zh: "对夏普比率进行多重检验校正后的值，消除'试了很多参数碰巧有一个好'的偏差。",
+        en: "The Sharpe ratio after multiple-testing correction, removing the bias of trying many parameter sets until one happens to look good.",
+      },
+      detail: {
+        zh: "默认 0.0。>0 表示校正后仍有正超额收益。",
+        en: "Default 0.0. >0 means positive excess return survives the correction.",
+      },
     },
   },
 ];
@@ -180,39 +219,47 @@ function strField(
   return String(v);
 }
 
-function versionStampText(value: string | Record<string, unknown>): string {
+function versionStampText(
+  value: string | Record<string, unknown>,
+  lang: "zh" | "en",
+): string {
   if (typeof value === "string") return value;
-  const labels: Record<string, string> = {
-    matching_model_version: "撮合",
-    asset_rules_version: "资产规则",
-    factor_version: "因子",
-    strategy_kind: "策略",
+  const labels: Record<string, LocalizedText> = {
+    matching_model_version: { zh: "撮合", en: "Matching" },
+    asset_rules_version: { zh: "资产规则", en: "Asset rules" },
+    factor_version: { zh: "因子", en: "Factors" },
+    strategy_kind: { zh: "策略", en: "Strategy" },
   };
   const valueText = (item: unknown): string => {
     if (item && typeof item === "object") {
       const size = Object.keys(item as Record<string, unknown>).length;
-      return `${size} 项已冻结`;
+      return lang === "en" ? `${size} frozen` : `${size} 项已冻结`;
     }
     return String(item);
   };
   const parts = Object.entries(value)
     .filter(([, item]) => item !== null && item !== undefined && item !== "")
-    .map(([key, item]) => `${labels[key] ?? key} ${valueText(item)}`);
-  return parts.length > 0 ? parts.join(" · ") : "版本信息待补充";
+    .map(([key, item]) =>
+      `${labels[key]?.[lang] ?? key} ${valueText(item)}`,
+    );
+  return parts.length > 0
+    ? parts.join(" · ")
+    : lang === "en"
+      ? "Version info pending"
+      : "版本信息待补充";
 }
 
-function experimentStatusLabel(status: string): string {
-  return (
-    {
-      hypothesis: "假设已冻结",
-      draft: "草稿",
-      registered: "已注册",
-      running: "运行中",
-      completed: "已完成",
-      failed: "失败",
-      rejected: "已拒绝",
-    } as Record<string, string>
-  )[status] ?? status;
+function experimentStatusLabel(status: string, lang: "zh" | "en"): string {
+  const labels: Record<string, LocalizedText> = {
+    hypothesis: { zh: "假设已冻结", en: "Hypothesis frozen" },
+    draft: { zh: "草稿", en: "Draft" },
+    registered: { zh: "已注册", en: "Registered" },
+    running: { zh: "运行中", en: "Running" },
+    completed: { zh: "已完成", en: "Completed" },
+    failed: { zh: "失败", en: "Failed" },
+    rejected: { zh: "已拒绝", en: "Rejected" },
+  };
+  return labels[status]?.[lang] ?? status;
 }
 
 function daysBetween(start: string, end: string): number {
@@ -241,6 +288,7 @@ function JsonBlock({
 }
 
 function PlanTimeline({ plan }: { plan: Record<string, unknown> }) {
+  const { tl } = useT();
   const ts = strField(plan, "train_start");
   const te = strField(plan, "train_end");
   const vs = strField(plan, "validation_start");
@@ -253,23 +301,23 @@ function PlanTimeline({ plan }: { plan: Record<string, unknown> }) {
   const testDays = os !== "—" && oe !== "—" ? daysBetween(os, oe) : 50;
   const total = trainDays + valDays + testDays;
 
-  const segments = [
+  const segments: { label: LocalizedText; range: string; flex: number; color: string; track: string }[] = [
     {
-      label: "训练期",
+      label: { zh: "训练期", en: "Train" },
       range: `${ts} → ${te}`,
       flex: trainDays / total,
       color: "bg-primary/60",
       track: "bg-primary/15",
     },
     {
-      label: "验证期",
+      label: { zh: "验证期", en: "Validation" },
       range: `${vs} → ${ve}`,
       flex: valDays / total,
       color: "bg-warning/60",
       track: "bg-warning/15",
     },
     {
-      label: "测试期 (OOS)",
+      label: { zh: "测试期 (OOS)", en: "Test (OOS)" },
       range: `${os} → ${oe}`,
       flex: testDays / total,
       color: "bg-success/60",
@@ -282,23 +330,23 @@ function PlanTimeline({ plan }: { plan: Record<string, unknown> }) {
       <div className="flex h-3 overflow-hidden rounded-full border border-border bg-muted/20">
         {segments.map((seg) => (
           <div
-            key={seg.label}
+            key={seg.range}
             className={cn("border-r border-card last:border-r-0", seg.color)}
             style={{ flexGrow: seg.flex }}
-            title={`${seg.label}: ${seg.range}`}
+            title={`${tl(seg.label)}: ${seg.range}`}
           />
         ))}
       </div>
       <div className="grid grid-cols-3 gap-2">
         {segments.map((seg) => (
           <div
-            key={seg.label}
+            key={seg.range}
             className={cn("rounded-md border p-2", seg.track)}
           >
             <div className="flex items-center gap-1.5">
               <span className={cn("h-2 w-2 rounded-full", seg.color)} />
               <span className="text-xs font-medium text-foreground">
-                {seg.label}
+                {tl(seg.label)}
               </span>
             </div>
             <p className="mt-1 font-mono text-xs text-muted-foreground">
@@ -312,35 +360,42 @@ function PlanTimeline({ plan }: { plan: Record<string, unknown> }) {
 }
 
 function PlanParams({ plan }: { plan: Record<string, unknown> }) {
-  const cells: { key: string; label: string; hint?: HintShape }[] = [
+  const { tl } = useT();
+  const cells: { key: string; label: LocalizedText; hint?: HintShape }[] = [
     {
       key: "mode",
-      label: "模式",
+      label: { zh: "模式", en: "Mode" },
       hint: {
-        title: "验证模式",
-        description:
-          "rolling = 固定长度窗口向前滚动；expanding = 起点固定，终点前移。",
+        title: { zh: "验证模式", en: "Validation mode" },
+        description: {
+          zh: "rolling = 固定长度窗口向前滚动；expanding = 起点固定，终点前移。",
+          en: "rolling = a fixed-length window rolls forward; expanding = fixed start, the end moves forward.",
+        },
       },
     },
-    { key: "train_window_days", label: "训练窗口(天)" },
-    { key: "test_window_days", label: "测试窗口(天)" },
-    { key: "step_days", label: "滚动步长(天)" },
+    { key: "train_window_days", label: { zh: "训练窗口(天)", en: "Train window (days)" } },
+    { key: "test_window_days", label: { zh: "测试窗口(天)", en: "Test window (days)" } },
+    { key: "step_days", label: { zh: "滚动步长(天)", en: "Step size (days)" } },
     {
       key: "trial_budget",
-      label: "试验预算",
+      label: { zh: "试验预算", en: "Trial budget" },
       hint: {
-        title: "试验次数预算",
-        description:
-          "参数搜索的最大试验次数。预算越大搜索越充分，但多重检验风险也越高。",
+        title: { zh: "试验次数预算", en: "Trial count budget" },
+        description: {
+          zh: "参数搜索的最大试验次数。预算越大搜索越充分，但多重检验风险也越高。",
+          en: "Maximum number of trials in the parameter search. A larger budget explores more thoroughly but raises multiple-testing risk.",
+        },
       },
     },
     {
       key: "benchmark_symbol",
-      label: "基准",
+      label: { zh: "基准", en: "Benchmark" },
       hint: {
-        title: "基准代码",
-        description:
-          "用于计算超额收益的基准标的。000300.SH = 沪深300指数。",
+        title: { zh: "基准代码", en: "Benchmark symbol" },
+        description: {
+          zh: "用于计算超额收益的基准标的。000300.SH = 沪深300指数。",
+          en: "Benchmark used to compute excess returns. 000300.SH = CSI 300 index.",
+        },
       },
     },
   ];
@@ -353,7 +408,7 @@ function PlanParams({ plan }: { plan: Record<string, unknown> }) {
           className="rounded-md border border-border bg-muted/20 p-2.5"
         >
           <div className="flex items-center gap-1">
-            <span className="text-xs text-muted-foreground">{cell.label}</span>
+            <span className="text-xs text-muted-foreground">{tl(cell.label)}</span>
             {cell.hint && <HintLabel hint={cell.hint}>{""}</HintLabel>}
           </div>
           <p className="mt-0.5 font-mono text-sm font-medium text-foreground">
@@ -370,6 +425,7 @@ function ThresholdTable({
 }: {
   thresholds: Record<string, unknown>;
 }) {
+  const { tl } = useT();
   const knownKeys = new Set(THRESHOLD_META.map((m) => m.key));
   const extraKeys = Object.keys(thresholds).filter((k) => !knownKeys.has(k));
 
@@ -378,8 +434,8 @@ function ThresholdTable({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="w-1/2">阈值</TableHead>
-            <TableHead className="text-right">值</TableHead>
+            <TableHead className="w-1/2">{tl({ zh: "阈值", en: "Threshold" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "值", en: "Value" })}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -394,7 +450,7 @@ function ThresholdTable({
             return (
               <TableRow key={meta.key}>
                 <TableCell>
-                  <HintLabel hint={meta.hint}>{meta.label}</HintLabel>
+                  <HintLabel hint={meta.hint}>{tl(meta.label)}</HintLabel>
                 </TableCell>
                 <TableCell className="text-right font-mono tabular-nums">
                   {display}
@@ -432,6 +488,7 @@ function CreateExperimentDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { tl } = useT();
   const queryClient = useQueryClient();
   const [form, setForm] = React.useState<CreateFormState>(DEFAULT_FORM);
 
@@ -492,9 +549,12 @@ function CreateExperimentDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>创建验证实验</DialogTitle>
+          <DialogTitle>{tl({ zh: "创建验证实验", en: "Create validation experiment" })}</DialogTitle>
           <DialogDescription>
-            定义策略假设、验证计划和 OOS 测试区间。提交后进入 draft 状态，可在实验详情中拒绝或删除。
+            {tl({
+              zh: "定义策略假设、验证计划和 OOS 测试区间。提交后进入 draft 状态，可在实验详情中拒绝或删除。",
+              en: "Define the strategy hypothesis, validation plan and OOS test window. After submission the experiment enters draft status and can be rejected or deleted from the experiment detail view.",
+            })}
           </DialogDescription>
         </DialogHeader>
 
@@ -503,26 +563,36 @@ function CreateExperimentDialog({
             <Label htmlFor="exp-hypothesis">
               <HintLabel
                 hint={{
-                  title: "策略假设",
-                  description:
-                    "用一句话描述你要验证的策略假设。需可证伪 —— 明确在什么条件下假设不成立。",
-                  detail: "最少 10 个字符，最多 2000 个字符。",
+                  title: { zh: "策略假设", en: "Strategy hypothesis" },
+                  description: {
+                    zh: "用一句话描述你要验证的策略假设。需可证伪 —— 明确在什么条件下假设不成立。",
+                    en: "Describe the strategy hypothesis you want to test in one sentence. It must be falsifiable — state explicitly under what conditions it fails.",
+                  },
+                  detail: {
+                    zh: "最少 10 个字符，最多 2000 个字符。",
+                    en: "Between 10 and 2000 characters.",
+                  },
                 }}
               >
-                策略假设
+                {tl({ zh: "策略假设", en: "Strategy hypothesis" })}
               </HintLabel>
             </Label>
             <Textarea
               id="exp-hypothesis"
               value={form.hypothesis}
               onChange={(e) => update("hypothesis", e.target.value)}
-              placeholder="例如：均线交叉策略在 A 股大盘 ETF 上具有统计显著的超额收益"
+              placeholder={tl({
+                zh: "例如：均线交叉策略在 A 股大盘 ETF 上具有统计显著的超额收益",
+                en: "e.g. The MA cross strategy has statistically significant excess returns on A-share broad-market ETFs",
+              })}
               rows={3}
             />
             <p className="text-xs text-muted-foreground">
-              {form.hypothesis.trim().length}/2000 字符
+              {form.hypothesis.trim().length}/2000 {tl({ zh: "字符", en: "characters" })}
               {!hypothesisValid && form.hypothesis.length > 0 && (
-                <span className="text-warning"> · 至少需要 10 个字符</span>
+                <span className="text-warning">
+                  {tl({ zh: " · 至少需要 10 个字符", en: " · At least 10 characters required" })}
+                </span>
               )}
             </p>
           </div>
@@ -531,7 +601,7 @@ function CreateExperimentDialog({
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label>策略类型</Label>
+              <Label>{tl({ zh: "策略类型", en: "Strategy type" })}</Label>
               <Select
                 value={form.strategy_kind}
                 onValueChange={(v) => update("strategy_kind", v)}
@@ -542,7 +612,7 @@ function CreateExperimentDialog({
                 <SelectContent>
                   {STRATEGY_KINDS.map((kind) => (
                     <SelectItem key={kind.value} value={kind.value}>
-                      {kind.label}
+                      {tl(kind.label)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -552,12 +622,14 @@ function CreateExperimentDialog({
               <Label>
                 <HintLabel
                   hint={{
-                    title: "验证模式",
-                    description:
-                      "rolling = 固定长度窗口向前滚动，旧数据逐步丢弃；expanding = 起点固定，终点前移，数据量递增。",
+                    title: { zh: "验证模式", en: "Validation mode" },
+                    description: {
+                      zh: "rolling = 固定长度窗口向前滚动，旧数据逐步丢弃；expanding = 起点固定，终点前移，数据量递增。",
+                      en: "rolling = a fixed-length window rolls forward, dropping old data step by step; expanding = fixed start, the end moves forward and data grows.",
+                    },
                   }}
                 >
-                  验证模式
+                  {tl({ zh: "验证模式", en: "Validation mode" })}
                 </HintLabel>
               </Label>
               <Select
@@ -570,7 +642,7 @@ function CreateExperimentDialog({
                 <SelectContent>
                   {MODE_OPTIONS.map((opt) => (
                     <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
+                      {tl(opt.label)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -582,11 +654,11 @@ function CreateExperimentDialog({
 
           <div className="space-y-2">
             <p className="text-xs font-medium text-muted-foreground">
-              时间区间划分
+              {tl({ zh: "时间区间划分", en: "Time window breakdown" })}
             </p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="rounded-md border border-primary/20 bg-primary/5 p-2.5">
-                <p className="text-xs font-medium text-primary">训练期</p>
+                <p className="text-xs font-medium text-primary">{tl({ zh: "训练期", en: "Train" })}</p>
                 <div className="mt-1.5 grid grid-cols-2 gap-1.5">
                   <Input
                     type="date"
@@ -603,7 +675,7 @@ function CreateExperimentDialog({
                 </div>
               </div>
               <div className="rounded-md border border-warning/20 bg-warning/5 p-2.5">
-                <p className="text-xs font-medium text-warning">验证期</p>
+                <p className="text-xs font-medium text-warning">{tl({ zh: "验证期", en: "Validation" })}</p>
                 <div className="mt-1.5 grid grid-cols-2 gap-1.5">
                   <Input
                     type="date"
@@ -625,7 +697,7 @@ function CreateExperimentDialog({
               </div>
               <div className="rounded-md border border-success/20 bg-success/5 p-2.5 sm:col-span-2">
                 <p className="flex items-center gap-1 text-xs font-medium text-success">
-                  测试期 (OOS)
+                  {tl({ zh: "测试期 (OOS)", en: "Test (OOS)" })}
                   <HintLabel hint={RESEARCH_HINTS.experiments.oos}>
                     {""}
                   </HintLabel>
@@ -655,12 +727,14 @@ function CreateExperimentDialog({
               <Label>
                 <HintLabel
                   hint={{
-                    title: "基准代码",
-                    description:
-                      "用于计算超额收益的基准标的。000300.SH = 沪深300指数。",
+                    title: { zh: "基准代码", en: "Benchmark symbol" },
+                    description: {
+                      zh: "用于计算超额收益的基准标的。000300.SH = 沪深300指数。",
+                      en: "Benchmark used to compute excess returns. 000300.SH = CSI 300 index.",
+                    },
                   }}
                 >
-                  基准代码
+                  {tl({ zh: "基准代码", en: "Benchmark symbol" })}
                 </HintLabel>
               </Label>
               <Input
@@ -673,12 +747,14 @@ function CreateExperimentDialog({
               <Label>
                 <HintLabel
                   hint={{
-                    title: "试验次数预算",
-                    description:
-                      "参数搜索的最大试验次数。预算越大搜索越充分，但多重检验风险也越高。",
+                    title: { zh: "试验次数预算", en: "Trial count budget" },
+                    description: {
+                      zh: "参数搜索的最大试验次数。预算越大搜索越充分，但多重检验风险也越高。",
+                      en: "Maximum number of trials in the parameter search. A larger budget explores more thoroughly but raises multiple-testing risk.",
+                    },
                   }}
                 >
-                  试验预算
+                  {tl({ zh: "试验预算", en: "Trial budget" })}
                 </HintLabel>
               </Label>
               <Input
@@ -693,7 +769,7 @@ function CreateExperimentDialog({
 
         {createMutation.isError && (
           <p className="text-sm text-destructive">
-            {errorMessage(createMutation.error, "创建失败，请重试")}
+            {errorMessage(createMutation.error, tl({ zh: "创建失败，请重试", en: "Creation failed. Please retry." }))}
           </p>
         )}
 
@@ -703,13 +779,15 @@ function CreateExperimentDialog({
             onClick={() => onOpenChange(false)}
             disabled={createMutation.isPending}
           >
-            取消
+            {tl({ zh: "取消", en: "Cancel" })}
           </Button>
           <Button
             disabled={!canSubmit}
             onClick={handleSubmit}
           >
-            {createMutation.isPending ? "创建中…" : "创建实验"}
+            {createMutation.isPending
+              ? tl({ zh: "创建中…", en: "Creating…" })
+              : tl({ zh: "创建实验", en: "Create experiment" })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -718,6 +796,8 @@ function CreateExperimentDialog({
 }
 
 export default function Experiments() {
+  const { tl } = useT();
+  const { lang } = useLanguage();
   const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = React.useState<string>("all");
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
@@ -778,39 +858,63 @@ export default function Experiments() {
   return (
     <div>
       <PageHeader
-        title="实验与 OOS"
-        description="机器验证实验、样本外检验与过拟合防护"
+        title={tl({ zh: "实验与 OOS", en: "Experiments & OOS" })}
+        description={tl({
+          zh: "机器验证实验、样本外检验与过拟合防护",
+          en: "Machine validation experiments, out-of-sample checks and overfitting protection",
+        })}
         breadcrumbs={[
-          { label: "研究", href: "/research" },
-          { label: "实验与 OOS" },
+          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
+          { label: tl({ zh: "实验与 OOS", en: "Experiments & OOS" }) },
         ]}
       />
 
       <WorkflowIndicator currentPath="/research/experiments" />
 
       <Alert variant="info" className="mb-4">
-        <AlertTitle>验证实验 vs 回测 vs 模拟盘</AlertTitle>
+        <AlertTitle>{tl({ zh: "验证实验 vs 回测 vs 模拟盘", en: "Validation experiment vs backtest vs simulation" })}</AlertTitle>
         <AlertDescription>
           <div className="space-y-1.5">
             <p>
-              <span className="font-medium text-foreground">验证实验</span>{" "}
-              用于系统性检验策略是否有效。
+              <span className="font-medium text-foreground">
+                {tl({ zh: "验证实验", en: "Validation experiment" })}
+              </span>{" "}
+              {tl({
+                zh: "用于系统性检验策略是否有效。",
+                en: "systematically checks whether a strategy actually works.",
+              })}
             </p>
             <div className="grid grid-cols-1 gap-1 md:grid-cols-3">
               <p className="rounded bg-card/50 px-2 py-1">
-                <span className="font-medium text-foreground">回测</span> = 单次运行看结果（回答"赚不赚钱"）
+                <span className="font-medium text-foreground">{tl({ zh: "回测", en: "Backtest" })}</span>{" "}
+                {tl({
+                  zh: '= 单次运行看结果（回答"赚不赚钱"）',
+                  en: '= one run to see the result (answers “is it profitable”)',
+                })}
               </p>
               <p className="rounded bg-card/50 px-2 py-1">
-                <span className="font-medium text-foreground">验证实验</span> = 多维度检验防过拟合（回答"是不是运气好"）
+                <span className="font-medium text-foreground">{tl({ zh: "验证实验", en: "Validation experiment" })}</span>{" "}
+                {tl({
+                  zh: '= 多维度检验防过拟合（回答"是不是运气好"）',
+                  en: '= multi-dimensional checks against overfitting (answers “was it luck”)',
+                })}
               </p>
               <p className="rounded bg-card/50 px-2 py-1">
-                <span className="font-medium text-foreground">模拟盘</span> = 用纸面资金持续跟踪（回答"真实环境下还行不行"）
+                <span className="font-medium text-foreground">{tl({ zh: "模拟盘", en: "Simulation" })}</span>{" "}
+                {tl({
+                  zh: '= 用纸面资金持续跟踪（回答"真实环境下还行不行"）',
+                  en: '= continuous tracking with paper money (answers “does it hold up in a real environment”)',
+                })}
               </p>
             </div>
             <p className="text-xs leading-relaxed">
-              <span className="font-medium text-foreground">OOS（Out-of-Sample）</span>
-              = 用策略参数优化时未使用过的数据检验。如果只在训练数据上调参，策略容易过拟合
-              —— 在训练集上表现极好但实盘会亏损。OOS 验证是防止自欺欺人的核心手段。
+              <span className="font-medium text-foreground">
+                {tl({ zh: "OOS（Out-of-Sample）", en: "OOS (Out-of-Sample)" })}
+              </span>
+              {tl({
+                zh: "= 用策略参数优化时未使用过的数据检验。如果只在训练数据上调参，策略容易过拟合 —— 在训练集上表现极好但实盘会亏损。OOS 验证是防止自欺欺人的核心手段。",
+                en: "= testing on data never used during parameter optimization. If you only tune on training data, the strategy easily overfits — it looks great on the training set but loses money live. OOS validation is the core defense against self-deception.",
+              })}
             </p>
           </div>
         </AlertDescription>
@@ -822,12 +926,12 @@ export default function Experiments() {
             <div className="flex items-center justify-between gap-2">
               <CardTitle className="text-base">
                 <HintLabel hint={RESEARCH_HINTS.experiments.validation}>
-                  实验列表
+                  {tl({ zh: "实验列表", en: "Experiment list" })}
                 </HintLabel>
               </CardTitle>
               <Button size="sm" onClick={() => setCreateOpen(true)}>
                 <Plus className="h-4 w-4" />
-                创建验证实验
+                {tl({ zh: "创建验证实验", en: "Create validation experiment" })}
               </Button>
             </div>
             <div className="mt-2 flex items-center gap-2">
@@ -838,7 +942,7 @@ export default function Experiments() {
                 <SelectContent>
                   {STATUS_OPTIONS.map((opt) => (
                     <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
+                      {tl(opt.label)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -860,8 +964,11 @@ export default function Experiments() {
             </div>
             <p className="text-xs text-muted-foreground">
               {listQuery.data
-                ? `共 ${listQuery.data.length} 个实验`
-                : "加载中…"}
+                ? tl({
+                    zh: `共 ${listQuery.data.length} 个实验`,
+                    en: `${listQuery.data.length} experiments`,
+                  })
+                : tl({ zh: "加载中…", en: "Loading…" })}
             </p>
           </CardHeader>
           <CardContent>
@@ -869,7 +976,10 @@ export default function Experiments() {
               <LoadingState rows={5} />
             ) : listQuery.isError ? (
               <ErrorState
-                message={errorMessage(listQuery.error, "无法加载实验列表")}
+                message={errorMessage(
+                  listQuery.error,
+                  tl({ zh: "无法加载实验列表", en: "Failed to load experiment list" }),
+                )}
                 onRetry={() => listQuery.refetch()}
               />
             ) : listQuery.data && listQuery.data.length > 0 ? (
@@ -888,7 +998,7 @@ export default function Experiments() {
                     >
                       <div className="flex items-center justify-between gap-2">
                         <StatusBadge status={exp.status}>
-                          {experimentStatusLabel(exp.status)}
+                          {experimentStatusLabel(exp.status, lang)}
                         </StatusBadge>
                         <span className="font-mono text-xs text-muted-foreground">
                           {exp.experiment_id}
@@ -899,11 +1009,11 @@ export default function Experiments() {
                       </p>
                       <div className="mt-1.5 flex items-center justify-between">
                         <span className="text-xs text-muted-foreground">
-                          {timeAgo(exp.created_at)}
+                          {timeAgo(exp.created_at, lang)}
                         </span>
                         {exp.version_stamp && (
                           <Badge variant="outline" className="font-mono text-[10px]">
-                            {versionStampText(exp.version_stamp)}
+                            {versionStampText(exp.version_stamp, lang)}
                           </Badge>
                         )}
                       </div>
@@ -914,12 +1024,15 @@ export default function Experiments() {
             ) : (
               <EmptyState
                 icon={<FlaskConical className="h-8 w-8" />}
-                title="暂无实验"
-                description="点击右上角「创建验证实验」开始检验你的策略假设。"
+                title={tl({ zh: "暂无实验", en: "No experiments yet" })}
+                description={tl({
+                  zh: "点击右上角「创建验证实验」开始检验你的策略假设。",
+                  en: 'Click “Create validation experiment” in the top right to start testing your strategy hypothesis.',
+                })}
                 action={
                   <Button size="sm" onClick={() => setCreateOpen(true)}>
                     <Plus className="h-4 w-4" />
-                    创建验证实验
+                    {tl({ zh: "创建验证实验", en: "Create validation experiment" })}
                   </Button>
                 }
               />
@@ -939,7 +1052,7 @@ export default function Experiments() {
                       </span>
                       {detail && (
                         <StatusBadge status={detail.status}>
-                          {experimentStatusLabel(detail.status)}
+                          {experimentStatusLabel(detail.status, lang)}
                         </StatusBadge>
                       )}
                     </CardTitle>
@@ -947,7 +1060,7 @@ export default function Experiments() {
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         {detail.version_stamp && (
                           <Badge variant="outline" className="font-mono">
-                            {versionStampText(detail.version_stamp)}
+                            {versionStampText(detail.version_stamp, lang)}
                           </Badge>
                         )}
                         <span>·</span>
@@ -956,7 +1069,7 @@ export default function Experiments() {
                           <>
                             <span>·</span>
                             <span>
-                              取代自{" "}
+                              {tl({ zh: "取代自", en: "Supersedes" })}{" "}
                               <span className="font-mono">
                                 {detail.supersedes_id}
                               </span>
@@ -970,7 +1083,7 @@ export default function Experiments() {
                     variant="ghost"
                     size="icon"
                     onClick={() => setSelectedId(null)}
-                    aria-label="取消选择"
+                    aria-label={tl({ zh: "取消选择", en: "Clear selection" })}
                   >
                     <X className="h-4 w-4" />
                   </Button>
@@ -983,7 +1096,7 @@ export default function Experiments() {
                   <ErrorState
                     message={errorMessage(
                       detailQuery.error,
-                      "无法加载实验详情",
+                      tl({ zh: "无法加载实验详情", en: "Failed to load experiment details" }),
                     )}
                     onRetry={() => detailQuery.refetch()}
                   />
@@ -992,7 +1105,7 @@ export default function Experiments() {
                     <div className="space-y-5">
                       <div>
                         <p className="text-xs font-medium text-muted-foreground">
-                          假设
+                          {tl({ zh: "假设", en: "Hypothesis" })}
                         </p>
                         <p className="mt-1 text-sm leading-relaxed text-foreground">
                           {detail.hypothesis}
@@ -1002,7 +1115,7 @@ export default function Experiments() {
                       {detail.notes && (
                         <div>
                           <p className="text-xs font-medium text-muted-foreground">
-                            备注
+                            {tl({ zh: "备注", en: "Notes" })}
                           </p>
                           <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">
                             {detail.notes}
@@ -1014,7 +1127,7 @@ export default function Experiments() {
 
                       <div>
                         <p className="mb-2 flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                          验证计划 — 时间区间
+                          {tl({ zh: "验证计划 — 时间区间", en: "Validation plan — time windows" })}
                           <HintLabel hint={RESEARCH_HINTS.experiments.difference}>
                             {""}
                           </HintLabel>
@@ -1030,7 +1143,7 @@ export default function Experiments() {
                       <div>
                         <p className="mb-2 flex items-center gap-1 text-xs font-medium text-muted-foreground">
                           <HintLabel hint={RESEARCH_HINTS.experiments.thresholds}>
-                            验收阈值
+                            {tl({ zh: "验收阈值", en: "Acceptance thresholds" })}
                           </HintLabel>
                         </p>
                         <ThresholdTable thresholds={detail.thresholds} />
@@ -1043,11 +1156,11 @@ export default function Experiments() {
                           <Separator />
                           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                             <JsonBlock
-                              label="稳健性配置"
+                              label={tl({ zh: "稳健性配置", en: "Robustness config" })}
                               value={detail.robustness}
                             />
                             <JsonBlock
-                              label="策略参数空间"
+                              label={tl({ zh: "策略参数空间", en: "Strategy parameter space" })}
                               value={detail.strategy_params_space}
                             />
                           </div>
@@ -1059,7 +1172,10 @@ export default function Experiments() {
                       <div>
                         <div className="mb-2 flex items-center justify-between">
                           <p className="text-xs font-medium text-muted-foreground">
-                            试验记录（{detail.trials.length}）
+                            {tl({
+                              zh: `试验记录（${detail.trials.length}）`,
+                              en: `Trial records (${detail.trials.length})`,
+                            })}
                           </p>
                           <Button
                             variant="ghost"
@@ -1080,10 +1196,10 @@ export default function Experiments() {
                             <Table>
                               <TableHeader>
                                 <TableRow>
-                                  <TableHead>试验 ID</TableHead>
-                                  <TableHead>状态</TableHead>
-                                  <TableHead>失败原因</TableHead>
-                                  <TableHead>创建时间</TableHead>
+                                  <TableHead>{tl({ zh: "试验 ID", en: "Trial ID" })}</TableHead>
+                                  <TableHead>{tl({ zh: "状态", en: "Status" })}</TableHead>
+                                  <TableHead>{tl({ zh: "失败原因", en: "Failure reason" })}</TableHead>
+                                  <TableHead>{tl({ zh: "创建时间", en: "Created" })}</TableHead>
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -1118,8 +1234,11 @@ export default function Experiments() {
                           </div>
                         ) : (
                           <EmptyState
-                            title="暂无试验"
-                            description="该实验尚未登记任何试验记录。"
+                            title={tl({ zh: "暂无试验", en: "No trials yet" })}
+                            description={tl({
+                              zh: "该实验尚未登记任何试验记录。",
+                              en: "No trial records have been registered for this experiment yet.",
+                            })}
                           />
                         )}
                       </div>
@@ -1131,7 +1250,7 @@ export default function Experiments() {
                           onClick={() => invalidateAll()}
                         >
                           <RefreshCw className="h-4 w-4" />
-                          刷新数据
+                          {tl({ zh: "刷新数据", en: "Refresh data" })}
                         </Button>
                         <Button
                           variant="outline"
@@ -1145,7 +1264,7 @@ export default function Experiments() {
                             setRejectOpen(true);
                           }}
                         >
-                          拒绝实验
+                          {tl({ zh: "拒绝实验", en: "Reject experiment" })}
                         </Button>
                         <Button
                           variant="destructive"
@@ -1154,7 +1273,7 @@ export default function Experiments() {
                           onClick={() => setDeleteOpen(true)}
                         >
                           <Trash2 className="h-4 w-4" />
-                          删除实验
+                          {tl({ zh: "删除实验", en: "Delete experiment" })}
                         </Button>
                       </div>
                     </div>
@@ -1165,8 +1284,11 @@ export default function Experiments() {
           ) : (
             <EmptyState
               icon={<FlaskConical className="h-8 w-8" />}
-              title="请从左侧选择一个实验"
-              description="选中实验后将展示完整假设、验证计划时间线、验收阈值与试验记录。"
+              title={tl({ zh: "请从左侧选择一个实验", en: "Select an experiment from the left" })}
+              description={tl({
+                zh: "选中实验后将展示完整假设、验证计划时间线、验收阈值与试验记录。",
+                en: "Once selected, the full hypothesis, validation plan timeline, acceptance thresholds and trial records will be shown.",
+              })}
             />
           )}
         </div>
@@ -1174,8 +1296,11 @@ export default function Experiments() {
 
       <NextStepCTA
         nextPath="/research/runs"
-        nextLabel="研究运行"
-        description="将通过验证的策略冻结为可复现的研究运行"
+        nextLabel={{ zh: "研究运行", en: "Research runs" }}
+        description={{
+          zh: "将通过验证的策略冻结为可复现的研究运行",
+          en: "Freeze the validated strategy into a reproducible research run",
+        }}
       />
 
       <CreateExperimentDialog open={createOpen} onOpenChange={setCreateOpen} />
@@ -1183,24 +1308,30 @@ export default function Experiments() {
       <Dialog open={rejectOpen} onOpenChange={setRejectOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>拒绝实验</DialogTitle>
+            <DialogTitle>{tl({ zh: "拒绝实验", en: "Reject experiment" })}</DialogTitle>
             <DialogDescription>
-              拒绝后该实验将标记为 rejected，无法继续注册试验。请填写拒绝原因以便审计追溯。
+              {tl({
+                zh: "拒绝后该实验将标记为 rejected，无法继续注册试验。请填写拒绝原因以便审计追溯。",
+                en: "Once rejected, the experiment is marked rejected and can no longer register trials. Please provide a rejection reason for audit traceability.",
+              })}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="reject-reason">拒绝原因</Label>
+            <Label htmlFor="reject-reason">{tl({ zh: "拒绝原因", en: "Rejection reason" })}</Label>
             <Textarea
               id="reject-reason"
               value={rejectReason}
               onChange={(e) => setRejectReason(e.target.value)}
-              placeholder="例如：样本外夏普未达阈值 / 数据泄漏 / 参数过拟合..."
+              placeholder={tl({
+                zh: "例如：样本外夏普未达阈值 / 数据泄漏 / 参数过拟合...",
+                en: "e.g. OOS Sharpe below threshold / data leakage / parameter overfitting...",
+              })}
               rows={4}
             />
           </div>
           {rejectMutation.isError && (
             <p className="text-sm text-destructive">
-              {errorMessage(rejectMutation.error, "拒绝失败，请重试")}
+              {errorMessage(rejectMutation.error, tl({ zh: "拒绝失败，请重试", en: "Rejection failed. Please retry." }))}
             </p>
           )}
           <DialogFooter>
@@ -1209,7 +1340,7 @@ export default function Experiments() {
               onClick={() => setRejectOpen(false)}
               disabled={rejectMutation.isPending}
             >
-              取消
+              {tl({ zh: "取消", en: "Cancel" })}
             </Button>
             <Button
               variant="destructive"
@@ -1224,7 +1355,9 @@ export default function Experiments() {
                 })
               }
             >
-              {rejectMutation.isPending ? "提交中…" : "确认拒绝"}
+              {rejectMutation.isPending
+                ? tl({ zh: "提交中…", en: "Submitting…" })
+                : tl({ zh: "确认拒绝", en: "Confirm rejection" })}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1233,18 +1366,21 @@ export default function Experiments() {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>删除实验</DialogTitle>
+            <DialogTitle>{tl({ zh: "删除实验", en: "Delete experiment" })}</DialogTitle>
             <DialogDescription>
-              该操作不可撤销，将永久删除实验及其试验记录。请确认是否继续。
+              {tl({
+                zh: "该操作不可撤销，将永久删除实验及其试验记录。请确认是否继续。",
+                en: "This action cannot be undone and permanently deletes the experiment and its trial records. Please confirm to continue.",
+              })}
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-md border border-border bg-muted/30 p-3">
-            <p className="text-xs text-muted-foreground">目标实验</p>
+            <p className="text-xs text-muted-foreground">{tl({ zh: "目标实验", en: "Target experiment" })}</p>
             <p className="mt-1 font-mono text-sm">{selectedId ?? "—"}</p>
           </div>
           {deleteMutation.isError && (
             <p className="text-sm text-destructive">
-              {errorMessage(deleteMutation.error, "删除失败，请重试")}
+              {errorMessage(deleteMutation.error, tl({ zh: "删除失败，请重试", en: "Deletion failed. Please retry." }))}
             </p>
           )}
           <DialogFooter>
@@ -1253,14 +1389,16 @@ export default function Experiments() {
               onClick={() => setDeleteOpen(false)}
               disabled={deleteMutation.isPending}
             >
-              取消
+              {tl({ zh: "取消", en: "Cancel" })}
             </Button>
             <Button
               variant="destructive"
               disabled={deleteMutation.isPending || !selectedId}
               onClick={() => selectedId && deleteMutation.mutate(selectedId)}
             >
-              {deleteMutation.isPending ? "删除中…" : "确认删除"}
+              {deleteMutation.isPending
+                ? tl({ zh: "删除中…", en: "Deleting…" })
+                : tl({ zh: "确认删除", en: "Confirm delete" })}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -45,12 +45,20 @@ export function formatDateTime(iso: string | null | undefined): string {
   });
 }
 
-export function timeAgo(iso: string | null | undefined): string {
+export function timeAgo(iso: string | null | undefined, lang: "zh" | "en" = "zh"): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   const diff = Date.now() - d.getTime();
   const sec = Math.floor(diff / 1000);
+  if (lang === "en") {
+    if (sec < 60) return `${sec}s ago`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    return `${Math.floor(hr / 24)}d ago`;
+  }
   if (sec < 60) return `${sec} 秒前`;
   const min = Math.floor(sec / 60);
   if (min < 60) return `${min} 分钟前`;

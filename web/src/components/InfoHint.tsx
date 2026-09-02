@@ -10,6 +10,7 @@ import {
 import { createPortal } from "react-dom";
 import { Info } from "lucide-react";
 import type { InfoHintDefinition } from "../lib/infoHints";
+import { useT } from "@/i18n";
 
 const VIEWPORT_GAP = 12;
 const ANCHOR_GAP = 8;
@@ -20,6 +21,7 @@ export interface InfoHintProps {
 }
 
 export default function InfoHint({ content, className = "" }: InfoHintProps) {
+  const { t, tl } = useT();
   const rawId = useId();
   const tooltipId = `info-hint-${rawId.replaceAll(":", "")}`;
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -129,7 +131,7 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
         ref={triggerRef}
         type="button"
         className="inline-flex size-6 items-center justify-center rounded-full text-muted-foreground/70 transition-colors duration-150 hover:bg-primary/10 hover:text-primary focus:outline-none focus-visible:bg-primary/10 focus-visible:text-primary focus-visible:ring-2 focus-visible:ring-primary/30 motion-reduce:transition-none -m-2.5 p-2.5"
-        aria-label={`查看“${content.title}”说明`}
+        aria-label={t("infoHint.aria", { title: tl(content.title) })}
         aria-describedby={open ? tooltipId : undefined}
         aria-expanded={open}
         onPointerEnter={() => {
@@ -176,13 +178,13 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
               scheduleClose();
             }}
           >
-            <div className="text-sm font-semibold">{content.title}</div>
+            <div className="text-sm font-semibold">{tl(content.title)}</div>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              {content.description}
+              {tl(content.description)}
             </p>
             {content.detail && (
               <p className="mt-1.5 border-t border-border pt-1.5 text-xs leading-5 text-muted-foreground">
-                {content.detail}
+                {tl(content.detail)}
               </p>
             )}
           </div>,

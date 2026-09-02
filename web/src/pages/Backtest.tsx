@@ -32,20 +32,22 @@ import {
   isJobRunning,
 } from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
+import { useT, type LocalizedText } from "@/i18n";
 
-const MARKETS = [
-  { value: "", label: "全部市场" },
-  { value: "a_share", label: "A股" },
-  { value: "hk", label: "港股" },
-  { value: "us", label: "美股" },
+const MARKETS: { value: string; label: LocalizedText }[] = [
+  { value: "", label: { zh: "全部市场", en: "All markets" } },
+  { value: "a_share", label: { zh: "A股", en: "A-shares" } },
+  { value: "hk", label: { zh: "港股", en: "HK stocks" } },
+  { value: "us", label: { zh: "美股", en: "US stocks" } },
 ];
-const TYPES = [
-  { value: "", label: "全部类型" },
-  { value: "stock", label: "股票" },
-  { value: "etf", label: "ETF" },
+const TYPES: { value: string; label: LocalizedText }[] = [
+  { value: "", label: { zh: "全部类型", en: "All types" } },
+  { value: "stock", label: { zh: "股票", en: "Stocks" } },
+  { value: "etf", label: { zh: "ETF", en: "ETF" } },
 ];
 
 export default function Backtest() {
+  const { tl } = useT();
   const qc = useQueryClient();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -347,19 +349,22 @@ export default function Backtest() {
       {/* Main column */}
       <div className="min-w-0 flex-1">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">回测</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">{tl({ zh: "回测", en: "Backtest" })}</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            历史行情回放 + 纸面撮合;回测任务进入统一队列,可在「任务中心」跟踪。
+            {tl({
+              zh: "历史行情回放 + 纸面撮合;回测任务进入统一队列,可在「任务中心」跟踪。",
+              en: "Historical bar replay + paper matching; backtest jobs enter the unified queue and can be tracked in the Task Center.",
+            })}
           </p>
         </div>
 
         {/* Config form */}
         <div className="rounded-lg border border-border bg-card p-5">
-          <h2 className="text-lg font-semibold mb-4">回测配置</h2>
+          <h2 className="text-lg font-semibold mb-4">{tl({ zh: "回测配置", en: "Backtest Configuration" })}</h2>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             <div>
               <HintLabel htmlFor="backtest-strategy" hint={INFO_HINTS.backtest.strategy}>
-                策略
+                {tl({ zh: "策略", en: "Strategy" })}
               </HintLabel>
               <select
                 id="backtest-strategy"
@@ -376,7 +381,7 @@ export default function Backtest() {
             </div>
             <div>
               <HintLabel htmlFor="backtest-start" hint={INFO_HINTS.backtest.startDate}>
-                开始
+                {tl({ zh: "开始", en: "Start" })}
               </HintLabel>
               <input
                 id="backtest-start"
@@ -388,7 +393,7 @@ export default function Backtest() {
             </div>
             <div>
               <HintLabel htmlFor="backtest-end" hint={INFO_HINTS.backtest.endDate}>
-                结束
+                {tl({ zh: "结束", en: "End" })}
               </HintLabel>
               <input
                 id="backtest-end"
@@ -403,7 +408,7 @@ export default function Backtest() {
                 htmlFor="backtest-capital"
                 hint={INFO_HINTS.backtest.initialCapital}
               >
-                初始资金(¥)
+                {tl({ zh: "初始资金(¥)", en: "Initial capital (¥)" })}
               </HintLabel>
               <input
                 id="backtest-capital"
@@ -418,21 +423,24 @@ export default function Backtest() {
           {requestedPreset && requestedPresetDefinition && (
             <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-primary/10 px-3 py-2 text-sm text-primary">
               <span>
-                已载入策略预设：<strong>{requestedPreset.name}</strong>
+                {tl({ zh: "已载入策略预设：", en: "Strategy preset loaded: " })}
+                <strong>{requestedPreset.name}</strong>
               </span>
-              <span className="text-xs text-primary">仅用于本次回测配置</span>
+              <span className="text-xs text-primary">{tl({ zh: "仅用于本次回测配置", en: "Applied to this backtest only" })}</span>
             </div>
           )}
           {requestedPreset && !requestedPresetDefinition && (
             <p className="mt-4 rounded-md bg-warning/10 px-3 py-2 text-sm text-warning">
-              预设“{requestedPreset.name}”依赖实时时钟事件，当前回测引擎无法运行。
+              {tl({ zh: "预设“", en: 'Preset "' })}
+              {requestedPreset.name}
+              {tl({ zh: "”依赖实时时钟事件，当前回测引擎无法运行。", en: '" relies on real-time clock events, which the current backtest engine cannot run.' })}
             </p>
           )}
 
           {strategyDefinition && (
             <div className="mt-4 border-t border-border pt-4">
               <div className="mb-3 flex items-center gap-1">
-                <h3 className="text-sm font-semibold text-muted-foreground">策略参数</h3>
+                <h3 className="text-sm font-semibold text-muted-foreground">{tl({ zh: "策略参数", en: "Strategy Parameters" })}</h3>
                 <InfoHint content={INFO_HINTS.backtest.strategyParams} />
               </div>
               <StrategyParamForm
@@ -460,7 +468,7 @@ export default function Backtest() {
           {/* Fee params */}
           <details className="mt-3">
             <summary className="text-sm text-muted-foreground cursor-pointer hover:text-muted-foreground">
-              费用参数(佣金 / 印花税 / 滑点)
+              {tl({ zh: "费用参数(佣金 / 印花税 / 滑点)", en: "Fee Parameters (commission / stamp tax / slippage)" })}
             </summary>
             <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div>
@@ -469,7 +477,7 @@ export default function Backtest() {
                   hint={INFO_HINTS.backtest.commissionRate}
                   labelClassName="text-xs text-muted-foreground"
                 >
-                  佣金率(万N)
+                  {tl({ zh: "佣金率(万N)", en: "Commission rate (per 10k)" })}
                 </HintLabel>
                 <input
                   id="backtest-commission-rate"
@@ -478,7 +486,7 @@ export default function Backtest() {
                   value={commissionRate}
                   onChange={(e) => setCommissionRate(e.target.value)}
                   className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
-                  placeholder="0.0003 = 万3"
+                  placeholder={tl({ zh: "0.0003 = 万3", en: "0.0003 = 0.03%" })}
                 />
               </div>
               <div>
@@ -487,7 +495,7 @@ export default function Backtest() {
                   hint={INFO_HINTS.backtest.minimumCommission}
                   labelClassName="text-xs text-muted-foreground"
                 >
-                  最低佣金(¥)
+                  {tl({ zh: "最低佣金(¥)", en: "Minimum commission (¥)" })}
                 </HintLabel>
                 <input
                   id="backtest-minimum-commission"
@@ -504,7 +512,7 @@ export default function Backtest() {
                   hint={INFO_HINTS.backtest.stampTax}
                   labelClassName="text-xs text-muted-foreground"
                 >
-                  印花税(万N,卖出)
+                  {tl({ zh: "印花税(万N,卖出)", en: "Stamp tax (per 10k, sell only)" })}
                 </HintLabel>
                 <input
                   id="backtest-stamp-tax"
@@ -513,7 +521,7 @@ export default function Backtest() {
                   value={stampTaxRate}
                   onChange={(e) => setStampTaxRate(e.target.value)}
                   className="w-full border border-input bg-card text-foreground rounded px-2 py-1.5 text-sm"
-                  placeholder="0.0005 = 万5, ETF 填 0"
+                  placeholder={tl({ zh: "0.0005 = 万5, ETF 填 0", en: "0.0005 = 0.05%, enter 0 for ETF" })}
                 />
               </div>
               <div>
@@ -522,7 +530,7 @@ export default function Backtest() {
                   hint={INFO_HINTS.backtest.slippage}
                   labelClassName="text-xs text-muted-foreground"
                 >
-                  滑点(bps)
+                  {tl({ zh: "滑点(bps)", en: "Slippage (bps)" })}
                 </HintLabel>
                 <input
                   id="backtest-slippage"
@@ -535,7 +543,10 @@ export default function Backtest() {
               </div>
             </div>
             <p className="text-xs text-muted-foreground/70 mt-1">
-              ETF 免印花税(填 0);股票卖出收万5。佣金 = max(成交额 × 佣金率, 最低佣金)。
+              {tl({
+                zh: "ETF 免印花税(填 0);股票卖出收万5。佣金 = max(成交额 × 佣金率, 最低佣金)。",
+                en: "ETFs are exempt from stamp tax (enter 0); sells on stocks are charged 0.05%. Commission = max(trade value × rate, minimum commission).",
+              })}
             </p>
           </details>
 
@@ -565,8 +576,11 @@ export default function Backtest() {
             className="mt-4 bg-primary text-primary-foreground rounded-md px-6 py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
           >
             {backtestRunning
-              ? `回测中…${backtestJob?.phase ? `（${backtestJob.phase}）` : ""}`
-              : "运行回测"}
+              ? tl({
+                  zh: `回测中…${backtestJob?.phase ? `（${backtestJob.phase}）` : ""}`,
+                  en: `Running…${backtestJob?.phase ? ` (${backtestJob.phase})` : ""}`,
+                })
+              : tl({ zh: "运行回测", en: "Run backtest" })}
           </button>
           {runBacktest.error && (
             <p className="mt-2 text-sm text-destructive">
@@ -575,7 +589,8 @@ export default function Backtest() {
           )}
           {backtestFailed && (
             <p className="mt-2 text-sm text-destructive">
-              回测任务失败: {backtestFailed.error_summary ?? backtestFailed.status}
+              {tl({ zh: "回测任务失败: ", en: "Backtest job failed: " })}
+              {backtestFailed.error_summary ?? backtestFailed.status}
             </p>
           )}
         </div>
@@ -584,15 +599,15 @@ export default function Backtest() {
         {m && (
           <>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <MetricCard label="总收益" value={`${(m.total_return * 100).toFixed(2)}%`} positive={m.total_return >= 0} />
-              <MetricCard label="年化" value={`${(m.annualized_return * 100).toFixed(2)}%`} positive={m.annualized_return >= 0} />
-              <MetricCard label="夏普" value={m.sharpe_ratio.toFixed(2)} />
-              <MetricCard label="最大回撤" value={`${(m.max_drawdown * 100).toFixed(2)}%`} positive={false} />
-              <MetricCard label="胜率" value={`${(m.win_rate * 100).toFixed(1)}%`} />
-              <MetricCard label="交易次数" value={String(m.trade_count)} />
-              <MetricCard label="换手率" value={m.turnover.toFixed(2)} />
+              <MetricCard label={tl({ zh: "总收益", en: "Total return" })} value={`${(m.total_return * 100).toFixed(2)}%`} positive={m.total_return >= 0} />
+              <MetricCard label={tl({ zh: "年化", en: "Annualized" })} value={`${(m.annualized_return * 100).toFixed(2)}%`} positive={m.annualized_return >= 0} />
+              <MetricCard label={tl({ zh: "夏普", en: "Sharpe" })} value={m.sharpe_ratio.toFixed(2)} />
+              <MetricCard label={tl({ zh: "最大回撤", en: "Max drawdown" })} value={`${(m.max_drawdown * 100).toFixed(2)}%`} positive={false} />
+              <MetricCard label={tl({ zh: "胜率", en: "Win rate" })} value={`${(m.win_rate * 100).toFixed(1)}%`} />
+              <MetricCard label={tl({ zh: "交易次数", en: "Trades" })} value={String(m.trade_count)} />
+              <MetricCard label={tl({ zh: "换手率", en: "Turnover" })} value={m.turnover.toFixed(2)} />
               <MetricCard
-                label="超额收益"
+                label={tl({ zh: "超额收益", en: "Excess return" })}
                 value={
                   m.excess_return !== null
                     ? `${(m.excess_return * 100).toFixed(2)}%`
@@ -606,13 +621,16 @@ export default function Backtest() {
               <div className="rounded-lg border border-border bg-card p-5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <h2 className="text-lg font-semibold text-foreground">候选池审计</h2>
+                    <h2 className="text-lg font-semibold text-foreground">{tl({ zh: "候选池审计", en: "Candidate Pool Audit" })}</h2>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      因子版本 {result.factor_version} · {result.selection_snapshots.length} 个日快照
+                      {tl({
+                        zh: `因子版本 ${result.factor_version} · ${result.selection_snapshots.length} 个日快照`,
+                        en: `Factor version ${result.factor_version} · ${result.selection_snapshots.length} daily snapshots`,
+                      })}
                     </p>
                   </div>
                   <span className="rounded-full bg-secondary px-2.5 py-1 text-xs text-muted-foreground">
-                    数据版本已归档
+                    {tl({ zh: "数据版本已归档", en: "Data versions archived" })}
                   </span>
                 </div>
                 <div className="mt-4 max-h-56 divide-y divide-border overflow-y-auto">
@@ -631,11 +649,14 @@ export default function Backtest() {
                             : "text-warning"
                         }
                       >
-                        {snapshot.status === "published" ? "已发布" : "跳过调仓"}
+                        {snapshot.status === "published" ? tl({ zh: "已发布", en: "Published" }) : tl({ zh: "跳过调仓", en: "Rebalance skipped" })}
                       </span>
                       <span className="text-foreground">
                         {snapshot.status === "published"
-                          ? `${snapshot.selected_symbols.length} 个标的`
+                          ? tl({
+                              zh: `${snapshot.selected_symbols.length} 个标的`,
+                              en: `${snapshot.selected_symbols.length} symbols`,
+                            })
                           : snapshot.skip_reason}
                       </span>
                     </div>
@@ -646,7 +667,7 @@ export default function Backtest() {
 
             {result.equity_curve.length > 0 && (
               <div className="rounded-lg border border-border bg-card p-5">
-                <h2 className="text-lg font-semibold mb-4">权益曲线</h2>
+                <h2 className="text-lg font-semibold mb-4">{tl({ zh: "权益曲线", en: "Equity Curve" })}</h2>
                 <ResponsiveContainer width="100%" height={350}>
                   <LineChart data={result.equity_curve}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -658,9 +679,9 @@ export default function Backtest() {
                       }
                     />
                     <Legend />
-                    <Line type="monotone" dataKey="equity" stroke="hsl(var(--chart-1))" name="策略" dot={false} strokeWidth={2} />
+                    <Line type="monotone" dataKey="equity" stroke="hsl(var(--chart-1))" name={tl({ zh: "策略", en: "Strategy" })} dot={false} strokeWidth={2} />
                     {result.equity_curve.some((p) => p.benchmark !== null) && (
-                      <Line type="monotone" dataKey="benchmark" stroke="hsl(var(--muted-foreground))" name="买入持有" dot={false} strokeWidth={1.5} strokeDasharray="5 5" />
+                      <Line type="monotone" dataKey="benchmark" stroke="hsl(var(--muted-foreground))" name={tl({ zh: "买入持有", en: "Buy & hold" })} dot={false} strokeWidth={1.5} strokeDasharray="5 5" />
                     )}
                   </LineChart>
                 </ResponsiveContainer>
@@ -670,18 +691,18 @@ export default function Backtest() {
             {result.fills.length > 0 && (
               <div className="rounded-lg border border-border bg-card">
                 <div className="px-5 py-3 border-b">
-                  <h2 className="text-lg font-semibold">交易明细 ({result.fills.length})</h2>
+                  <h2 className="text-lg font-semibold">{tl({ zh: "交易明细", en: "Fills" })} ({result.fills.length})</h2>
                 </div>
                 <div className="overflow-x-auto scrollbar-thin">
                 <table className="w-full text-sm">
                   <thead className="bg-background text-muted-foreground">
                     <tr>
-                      <th className="px-4 py-2 text-left">日期</th>
-                      <th className="px-4 py-2 text-left">标的</th>
-                      <th className="px-4 py-2 text-left">方向</th>
-                      <th className="px-4 py-2 text-right">数量</th>
-                      <th className="px-4 py-2 text-right">价格</th>
-                      <th className="px-4 py-2 text-right">佣金</th>
+                      <th className="px-4 py-2 text-left">{tl({ zh: "日期", en: "Date" })}</th>
+                      <th className="px-4 py-2 text-left">{tl({ zh: "标的", en: "Symbol" })}</th>
+                      <th className="px-4 py-2 text-left">{tl({ zh: "方向", en: "Side" })}</th>
+                      <th className="px-4 py-2 text-right">{tl({ zh: "数量", en: "Quantity" })}</th>
+                      <th className="px-4 py-2 text-right">{tl({ zh: "价格", en: "Price" })}</th>
+                      <th className="px-4 py-2 text-right">{tl({ zh: "佣金", en: "Commission" })}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -690,7 +711,7 @@ export default function Backtest() {
                         <td className="px-4 py-2 text-muted-foreground">{f.date}</td>
                         <td className="px-4 py-2 font-mono">{f.symbol}</td>
                         <td className={`px-4 py-2 ${f.side === "buy" ? "text-up" : "text-down"}`}>
-                          {f.side === "buy" ? "买入" : "卖出"}
+                          {f.side === "buy" ? tl({ zh: "买入", en: "Buy" }) : tl({ zh: "卖出", en: "Sell" })}
                         </td>
                         <td className="px-4 py-2 text-right">{f.quantity}</td>
                         <td className="px-4 py-2 text-right font-mono">{Number(f.price).toFixed(2)}</td>
@@ -708,10 +729,10 @@ export default function Backtest() {
 
       {/* History sidebar */}
       <div className="w-full shrink-0 lg:w-72">
-        <h2 className="mb-3 text-sm font-semibold text-muted-foreground">回测历史</h2>
+        <h2 className="mb-3 text-sm font-semibold text-muted-foreground">{tl({ zh: "回测历史", en: "Backtest History" })}</h2>
         <div className="space-y-2 lg:max-h-[calc(100vh-16rem)] lg:overflow-y-auto lg:scrollbar-thin lg:pr-1">
           {history && history.length === 0 && (
-            <p className="text-xs text-muted-foreground/70">暂无历史记录</p>
+            <p className="text-xs text-muted-foreground/70">{tl({ zh: "暂无历史记录", en: "No history yet" })}</p>
           )}
           {history?.map((h) => (
             <HistoryCard
@@ -765,6 +786,7 @@ function SymbolSelector({
   clearSelection: () => void;
   onSymbolsLoaded: (codes: string[]) => void;
 }) {
+  const { tl } = useT();
   const qc = useQueryClient();
   const [showWatchlist, setShowWatchlist] = useState(false);
   const [newWlName, setNewWlName] = useState("");
@@ -806,8 +828,8 @@ function SymbolSelector({
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-1 text-sm font-medium text-muted-foreground">
           <span>
-            标的选择{" "}
-            <span className="font-normal text-muted-foreground/70">({selectedSymbols.length} 个)</span>
+            {tl({ zh: "标的选择", en: "Symbol Selection" })}{" "}
+            <span className="font-normal text-muted-foreground/70">({selectedSymbols.length}{tl({ zh: " 个)", en: " selected)" })}</span>
           </span>
           <InfoHint content={INFO_HINTS.backtest.symbols} />
         </div>
@@ -819,11 +841,11 @@ function SymbolSelector({
           />
           {selectedSymbols.length > 0 && (
             <button onClick={clearSelection} className="text-xs text-muted-foreground hover:underline">
-              清空
+              {tl({ zh: "清空", en: "Clear" })}
             </button>
           )}
           <button onClick={() => setShowWatchlist((v) => !v)} className="text-xs text-primary hover:underline">
-            标的组
+            {tl({ zh: "标的组", en: "Watchlists" })}
           </button>
         </div>
       </div>
@@ -831,24 +853,24 @@ function SymbolSelector({
       {/* Search + filter row */}
       <div className="mb-2 flex flex-wrap gap-2">
         <label className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="sr-only">搜索代码/名称</span>
+          <span className="sr-only">{tl({ zh: "搜索代码/名称", en: "Search code or name" })}</span>
           <input
-            placeholder="搜索代码/名称(至少2字符)..."
+            placeholder={tl({ zh: "搜索代码/名称(至少2字符)...", en: "Search code or name (min 2 chars)..." })}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="min-w-0 flex-1 rounded-md border border-input bg-card px-3 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"
           />
         </label>
         <label className="flex items-center gap-2">
-          <span className="sr-only">市场筛选</span>
+          <span className="sr-only">{tl({ zh: "市场筛选", en: "Market filter" })}</span>
           <select value={marketFilter} onChange={(e) => setMarketFilter(e.target.value)} className="rounded-md border border-input bg-card px-2 py-1.5 text-sm text-foreground">
-            {MARKETS.map((m) => (<option key={m.value} value={m.value}>{m.label}</option>))}
+            {MARKETS.map((m) => (<option key={m.value} value={m.value}>{tl(m.label)}</option>))}
           </select>
         </label>
         <label className="flex items-center gap-2">
-          <span className="sr-only">类型筛选</span>
+          <span className="sr-only">{tl({ zh: "类型筛选", en: "Type filter" })}</span>
           <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="rounded-md border border-input bg-card px-2 py-1.5 text-sm text-foreground">
-            {TYPES.map((t) => (<option key={t.value} value={t.value}>{t.label}</option>))}
+            {TYPES.map((t) => (<option key={t.value} value={t.value}>{tl(t.label)}</option>))}
           </select>
         </label>
       </div>
@@ -857,7 +879,7 @@ function SymbolSelector({
       <div className="max-h-48 overflow-y-auto border rounded bg-card">
         {candidates.length === 0 && (
           <p className="text-xs text-muted-foreground/70 p-3 text-center">
-            {searchQuery.length >= 2 ? "无匹配结果" : "输入搜索或选择筛选条件"}
+            {searchQuery.length >= 2 ? tl({ zh: "无匹配结果", en: "No matching results" }) : tl({ zh: "输入搜索或选择筛选条件", en: "Enter a search or pick a filter" })}
           </p>
         )}
         {candidates.map((c) => {
@@ -876,8 +898,8 @@ function SymbolSelector({
       {totalCount > pageSize && (
         <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
           <span>
-            第 {rangeStart}-{rangeEnd} 条 / 共 {totalCount} 条
-            {selectedOnPage > 0 && <span className="ml-2 text-primary">本页已选 {selectedOnPage}</span>}
+            {tl({ zh: `第 ${rangeStart}-${rangeEnd} 条 / 共 ${totalCount} 条`, en: `${rangeStart}-${rangeEnd} of ${totalCount}` })}
+            {selectedOnPage > 0 && <span className="ml-2 text-primary">{tl({ zh: `本页已选 ${selectedOnPage}`, en: `${selectedOnPage} selected on this page` })}</span>}
           </span>
           <div className="flex gap-1">
             <button
@@ -885,7 +907,7 @@ function SymbolSelector({
               disabled={page === 0}
               className="px-2 py-0.5 border rounded hover:bg-secondary disabled:opacity-30"
             >
-              上一页
+              {tl({ zh: "上一页", en: "Prev" })}
             </button>
             <span className="px-1 py-0.5">{page + 1}/{totalPages}</span>
             <button
@@ -893,13 +915,13 @@ function SymbolSelector({
               disabled={page + 1 >= totalPages}
               className="px-2 py-0.5 border rounded hover:bg-secondary disabled:opacity-30"
             >
-              下一页
+              {tl({ zh: "下一页", en: "Next" })}
             </button>
           </div>
         </div>
       )}
       {totalCount > 0 && totalCount <= pageSize && (
-        <div className="mt-2 text-xs text-muted-foreground/70">共 {totalCount} 条{selectedOnPage > 0 && ` · 已选 ${selectedSymbols.length}`}</div>
+        <div className="mt-2 text-xs text-muted-foreground/70">{tl({ zh: `共 ${totalCount} 条`, en: `${totalCount} total` })}{selectedOnPage > 0 && tl({ zh: ` · 已选 ${selectedSymbols.length}`, en: ` · ${selectedSymbols.length} selected` })}</div>
       )}
 
       {/* Selected symbols summary */}
@@ -916,8 +938,8 @@ function SymbolSelector({
             </div>
           ) : (
             <div className="text-xs text-muted-foreground">
-              已选 {selectedSymbols.length} 个标的
-              <button onClick={clearSelection} className="ml-2 text-destructive hover:underline">清空</button>
+              {tl({ zh: `已选 ${selectedSymbols.length} 个标的`, en: `${selectedSymbols.length} symbols selected` })}
+              <button onClick={clearSelection} className="ml-2 text-destructive hover:underline">{tl({ zh: "清空", en: "Clear" })}</button>
             </div>
           )}
         </div>
@@ -928,7 +950,7 @@ function SymbolSelector({
         <div className="mt-3 border-t pt-3 space-y-2">
           <div className="flex gap-1">
             <input
-              placeholder="新标的组名称..."
+              placeholder={tl({ zh: "新标的组名称...", en: "New watchlist name..." })}
               value={newWlName}
               onChange={(e) => setNewWlName(e.target.value)}
               className="flex-1 border border-input bg-card text-foreground rounded px-2 py-1 text-sm placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring outline-none"
@@ -938,7 +960,7 @@ function SymbolSelector({
               disabled={!newWlName.trim() || createWl.isPending}
               className="text-xs bg-primary text-primary-foreground rounded px-3 py-1 hover:bg-primary/90 disabled:opacity-50"
             >
-              存当前选择
+              {tl({ zh: "存当前选择", en: "Save selection" })}
             </button>
           </div>
           {watchlists?.map((wl) => (
@@ -947,7 +969,7 @@ function SymbolSelector({
                 {wl.name} <span className="text-muted-foreground/70">({wl.item_count})</span>
               </span>
               <div className="flex gap-2 shrink-0">
-                <button onClick={() => loadWl.mutate(wl.id)} className="text-xs text-primary hover:underline">载入</button>
+                <button onClick={() => loadWl.mutate(wl.id)} className="text-xs text-primary hover:underline">{tl({ zh: "载入", en: "Load" })}</button>
               </div>
             </div>
           ))}
@@ -971,6 +993,7 @@ function HistoryCard({
   onClick: () => void;
   onDelete: () => void;
 }) {
+  const { tl } = useT();
   const ret = item.metrics?.total_return;
   return (
     <button
@@ -986,7 +1009,7 @@ function HistoryCard({
         <div className="min-w-0">
           <div className="text-xs font-mono text-muted-foreground truncate">{item.strategy}</div>
           <div className="text-xs text-muted-foreground/70 mt-0.5">
-            {item.symbols.length} 标的 · {item.start.slice(0, 10)} ~ {item.end.slice(0, 10)}
+            {tl({ zh: `${item.symbols.length} 标的 · ${item.start.slice(0, 10)} ~ ${item.end.slice(0, 10)}`, en: `${item.symbols.length} symbols · ${item.start.slice(0, 10)} ~ ${item.end.slice(0, 10)}` })}
           </div>
           {ret !== undefined && (
             <div className={`text-sm font-bold mt-1 ${ret >= 0 ? "text-success" : "text-destructive"}`}>
@@ -1014,11 +1037,11 @@ function HistoryCard({
             }}
             className="cursor-pointer text-xs text-muted-foreground hover:text-destructive"
           >
-            删除
+            {tl({ zh: "删除", en: "Delete" })}
           </span>
         </div>
       </div>
-      {loading && <div className="text-xs text-primary mt-1">加载中...</div>}
+      {loading && <div className="text-xs text-primary mt-1">{tl({ zh: "加载中...", en: "Loading..." })}</div>}
     </button>
   );
 }

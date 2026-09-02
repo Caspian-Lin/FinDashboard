@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import { PageHeader } from "../components/ui/page-header";
 import { PageContainer } from "../components/ui/page-container";
 import { EmptyState } from "../components/ui/states";
+import { useT } from "@/i18n";
 import {
   Table,
   TableBody,
@@ -13,6 +14,7 @@ import {
 } from "../components/ui/table";
 
 export default function Fills() {
+  const { t } = useT();
   const { data } = useQuery({
     queryKey: ["fills"],
     queryFn: () => api.getFills(200),
@@ -22,22 +24,22 @@ export default function Fills() {
 
   return (
     <PageContainer>
-      <PageHeader title="成交" description="最近 200 笔成交回报。" />
+      <PageHeader title={t("fills.title")} description={t("fills.description")} />
       {fills.length === 0 ? (
-        <EmptyState title="无成交记录" description="有成交回报后此处会展示明细。" />
+        <EmptyState title={t("fills.emptyTitle")} description={t("fills.emptyDesc")} />
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-card">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>成交编号</TableHead>
-                <TableHead>标的</TableHead>
-                <TableHead>方向</TableHead>
-                <TableHead className="text-right">数量</TableHead>
-                <TableHead className="text-right">价格</TableHead>
-                <TableHead className="text-right">金额</TableHead>
-                <TableHead className="text-right">手续费</TableHead>
-                <TableHead>时间</TableHead>
+                <TableHead>{t("fills.fillId")}</TableHead>
+                <TableHead>{t("common.symbol")}</TableHead>
+                <TableHead>{t("common.direction")}</TableHead>
+                <TableHead className="text-right">{t("common.quantity")}</TableHead>
+                <TableHead className="text-right">{t("common.price")}</TableHead>
+                <TableHead className="text-right">{t("common.amount")}</TableHead>
+                <TableHead className="text-right">{t("fills.commission")}</TableHead>
+                <TableHead>{t("common.time")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -46,7 +48,7 @@ export default function Fills() {
                   <TableCell className="font-mono text-xs text-muted-foreground">{f.fill_id}</TableCell>
                   <TableCell className="font-mono">{f.symbol}</TableCell>
                   <TableCell className={f.side === "buy" ? "text-up" : "text-down"}>
-                    {f.side === "buy" ? "买入" : "卖出"}
+                    {f.side === "buy" ? t("common.buy") : t("common.sell")}
                   </TableCell>
                   <TableCell className="text-right">{f.quantity}</TableCell>
                   <TableCell className="text-right">{f.price}</TableCell>

@@ -52,16 +52,66 @@ import {
   ResearchHint,
 } from "@/components/research/ResearchHint";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
+import { useT, type LocalizedText } from "@/i18n";
 
 /* Section metadata */
 const SECTIONS = [
-  { key: "universe", label: "标的域", hint: "定义策略在哪些标的上运行：市场、资产类别、流动性筛选和排名规则" },
-  { key: "feature_graph", label: "特征图", hint: "定义因子的计算逻辑：从原始数据出发，通过算子（均线、动量、排名等）计算特征值" },
-  { key: "signal_rules", label: "信号规则", hint: "将特征值转化为买卖信号：如'动量排名前 20% → 买入'。多条规则可并行，冲突按优先级裁决" },
-  { key: "portfolio_policy", label: "组合策略", hint: "将信号转化为目标权重：分配方法（等权/反波动率）、持仓数量上限、单标的权重上限等" },
-  { key: "risk_exit_policy", label: "风险退出", hint: "止损/止盈规则：价格止损、波动率止损、最大回撤降仓、最大持有天数等" },
-  { key: "execution_model", label: "执行模型", hint: "模拟交易的执行假设：佣金费率、印花税、滑点、成交时间（次日开盘/收盘）" },
-  { key: "validation_plan", label: "验证计划", hint: "样本外验证的时间窗口划分：训练集、验证集、测试集(OOS)的日期范围" },
+  {
+    key: "universe",
+    label: { zh: "标的域", en: "Universe" },
+    hint: {
+      zh: "定义策略在哪些标的上运行：市场、资产类别、流动性筛选和排名规则",
+      en: "Defines which instruments the strategy runs on: market, asset classes, liquidity filters and ranking rules",
+    },
+  },
+  {
+    key: "feature_graph",
+    label: { zh: "特征图", en: "Feature Graph" },
+    hint: {
+      zh: "定义因子的计算逻辑：从原始数据出发，通过算子（均线、动量、排名等）计算特征值",
+      en: "Defines factor computation: derive feature values from raw data via operators (moving average, momentum, rank, etc.)",
+    },
+  },
+  {
+    key: "signal_rules",
+    label: { zh: "信号规则", en: "Signal Rules" },
+    hint: {
+      zh: "将特征值转化为买卖信号：如'动量排名前 20% → 买入'。多条规则可并行，冲突按优先级裁决",
+      en: "Converts feature values into buy/sell signals, e.g. 'top 20% momentum → buy'. Multiple rules can run in parallel; conflicts are resolved by priority",
+    },
+  },
+  {
+    key: "portfolio_policy",
+    label: { zh: "组合策略", en: "Portfolio Policy" },
+    hint: {
+      zh: "将信号转化为目标权重：分配方法（等权/反波动率）、持仓数量上限、单标的权重上限等",
+      en: "Converts signals into target weights: allocation method (equal weight / inverse volatility), max positions, per-instrument weight cap, etc.",
+    },
+  },
+  {
+    key: "risk_exit_policy",
+    label: { zh: "风险退出", en: "Risk Exits" },
+    hint: {
+      zh: "止损/止盈规则：价格止损、波动率止损、最大回撤降仓、最大持有天数等",
+      en: "Stop-loss / take-profit rules: price stop, volatility stop, drawdown de-risking, max holding days, etc.",
+    },
+  },
+  {
+    key: "execution_model",
+    label: { zh: "执行模型", en: "Execution Model" },
+    hint: {
+      zh: "模拟交易的执行假设：佣金费率、印花税、滑点、成交时间（次日开盘/收盘）",
+      en: "Execution assumptions for simulated trading: commission, stamp tax, slippage, fill timing (next open/close)",
+    },
+  },
+  {
+    key: "validation_plan",
+    label: { zh: "验证计划", en: "Validation Plan" },
+    hint: {
+      zh: "样本外验证的时间窗口划分：训练集、验证集、测试集(OOS)的日期范围",
+      en: "Time window split for out-of-sample validation: date ranges of the train, validation and test (OOS) sets",
+    },
+  },
 ] as const;
 
 function errorMessage(err: unknown, fallback: string): string {
@@ -69,6 +119,7 @@ function errorMessage(err: unknown, fallback: string): string {
 }
 
 export default function StrategyStudio() {
+  const { tl } = useT();
   const qc = useQueryClient();
   const [selectedKind, setSelectedKind] = React.useState<string | null>(null);
   const [showSetup, setShowSetup] = React.useState(false);
@@ -182,18 +233,34 @@ export default function StrategyStudio() {
   return (
     <div>
       <PageHeader
-        title="策略 Studio"
-        description="无代码结构化策略配置 — 白名单组件、即时校验、版本管理"
+        title={tl({ zh: "策略 Studio", en: "Strategy Studio" })}
+        description={tl({
+          zh: "无代码结构化策略配置 — 白名单组件、即时校验、版本管理",
+          en: "No-code structured strategy configuration — whitelisted components, instant validation, version management",
+        })}
       />
       <WorkflowIndicator currentPath="/research/strategy" />
 
       <Alert variant="info" className="mb-4">
         <Info className="h-4 w-4" />
-        <AlertTitle>策略 Studio vs 策略预设</AlertTitle>
+        <AlertTitle>{tl({ zh: "策略 Studio vs 策略预设", en: "Strategy Studio vs Strategy Presets" })}</AlertTitle>
         <AlertDescription>
-          策略 <strong>预设</strong>（工具栏）用于快速回测探索（选个内置策略 + 改参数 + 跑结果）。
-          策略 <strong>Studio</strong>（本页）用于创建正式的研究规格 —— 完整定义特征图、信号规则、组合策略、风险退出和验证计划，
-          保存后可供研究运行引用。不支持 Python 编辑。
+          {tl({ zh: "策略 ", en: "Strategy " })}
+          <strong>{tl({ zh: "预设", en: "presets" })}</strong>
+          {tl({
+            zh: "（工具栏）用于快速回测探索（选个内置策略 + 改参数 + 跑结果）。",
+            en: " (toolbar) are for quick backtest exploration (pick a built-in strategy + tweak parameters + run results).",
+          })}
+          {tl({ zh: "策略 ", en: " Strategy " })}
+          <strong>Studio</strong>
+          {tl({
+            zh: "（本页）用于创建正式的研究规格 —— 完整定义特征图、信号规则、组合策略、风险退出和验证计划，",
+            en: " (this page) is for creating formal research specs — fully defining the feature graph, signal rules, portfolio policy, risk exits and validation plan. ",
+          })}
+          {tl({
+            zh: "保存后可供研究运行引用。不支持 Python 编辑。",
+            en: "Saved specs can be referenced by research runs. Python editing is not supported.",
+          })}
         </AlertDescription>
       </Alert>
 
@@ -203,7 +270,7 @@ export default function StrategyStudio() {
           <Card>
             <CardHeader>
               <HintLabel hint={RESEARCH_HINTS.strategy.studio} className="text-sm font-semibold">
-                策略类型
+                {tl({ zh: "策略类型", en: "Strategy Type" })}
               </HintLabel>
             </CardHeader>
             <CardContent className="p-2">
@@ -249,7 +316,7 @@ export default function StrategyStudio() {
           {strategies && strategies.length > 0 && (
             <Card className="mt-3">
               <CardHeader>
-                <CardTitle className="text-sm">已保存策略</CardTitle>
+                <CardTitle className="text-sm">{tl({ zh: "已保存策略", en: "Saved Strategies" })}</CardTitle>
               </CardHeader>
               <CardContent className="p-2">
                 <ScrollArea className="max-h-[200px]">
@@ -287,79 +354,107 @@ export default function StrategyStudio() {
         <div className="lg:col-span-3">
           {templateError && (
             <Alert variant="destructive" className="mb-4">
-              <AlertTitle>模板加载失败</AlertTitle>
+              <AlertTitle>{tl({ zh: "模板加载失败", en: "Failed to Load Template" })}</AlertTitle>
               <AlertDescription>
-                {templateError}。策略规格没有被创建或启动；请检查数据发布版本后重试。
+                {templateError}
+                {tl({
+                  zh: "。策略规格没有被创建或启动；请检查数据发布版本后重试。",
+                  en: ". The strategy spec was not created or started; check the dataset release versions and retry.",
+                })}
               </AlertDescription>
             </Alert>
           )}
           {validateMutation.isError && (
             <Alert variant="destructive" className="mb-4">
-              <AlertTitle>规格校验失败</AlertTitle>
+              <AlertTitle>{tl({ zh: "规格校验失败", en: "Spec Validation Failed" })}</AlertTitle>
               <AlertDescription>
                 {validateMutation.error instanceof Error
                   ? validateMutation.error.message
-                  : "服务端无法完成策略规格校验，请检查数据发布和特征依赖。"}
+                  : tl({
+                      zh: "服务端无法完成策略规格校验，请检查数据发布和特征依赖。",
+                      en: "The server could not validate the strategy spec; check dataset releases and feature dependencies.",
+                    })}
               </AlertDescription>
             </Alert>
           )}
           {draftMutation.isError && (
             <Alert variant="destructive" className="mb-4">
-              <AlertTitle>草稿保存失败</AlertTitle>
+              <AlertTitle>{tl({ zh: "草稿保存失败", en: "Failed to Save Draft" })}</AlertTitle>
               <AlertDescription>
                 {draftMutation.error instanceof Error
                   ? draftMutation.error.message
-                  : "策略规格没有保存，请检查校验结果后重试。"}
+                  : tl({
+                      zh: "策略规格没有保存，请检查校验结果后重试。",
+                      en: "The strategy spec was not saved; check the validation result and retry.",
+                    })}
               </AlertDescription>
             </Alert>
           )}
           {draftMutation.isSuccess && (
             <Alert variant="success" className="mb-4">
-              <AlertTitle>策略草稿已保存</AlertTitle>
+              <AlertTitle>{tl({ zh: "策略草稿已保存", en: "Strategy Draft Saved" })}</AlertTitle>
               <AlertDescription>
-                已生成版本记录。保存不会自动发布，也不会启动研究运行；请先完成校验，再按审批流程发布。
+                {tl({
+                  zh: "已生成版本记录。保存不会自动发布，也不会启动研究运行；请先完成校验，再按审批流程发布。",
+                  en: "A version record has been created. Saving neither publishes nor starts a research run; complete validation first, then publish via the approval process.",
+                })}
               </AlertDescription>
             </Alert>
           )}
           {publishMutation.isError && (
             <Alert variant="destructive" className="mb-4">
-              <AlertTitle>策略发布失败</AlertTitle>
+              <AlertTitle>{tl({ zh: "策略发布失败", en: "Failed to Publish Strategy" })}</AlertTitle>
               <AlertDescription>
                 {publishMutation.error instanceof Error
                   ? publishMutation.error.message
-                  : "策略版本没有发布，请检查当前版本和校验状态。"}
+                  : tl({
+                      zh: "策略版本没有发布，请检查当前版本和校验状态。",
+                      en: "The strategy version was not published; check the current version and validation status.",
+                    })}
               </AlertDescription>
             </Alert>
           )}
           {publishMutation.isSuccess && (
             <Alert variant="success" className="mb-4">
-              <AlertTitle>策略版本已发布</AlertTitle>
+              <AlertTitle>{tl({ zh: "策略版本已发布", en: "Strategy Version Published" })}</AlertTitle>
               <AlertDescription>
-                已发布当前策略版本。发布不会自动启动研究运行，请前往研究运行页面显式排队。
+                {tl({
+                  zh: "已发布当前策略版本。发布不会自动启动研究运行，请前往研究运行页面显式排队。",
+                  en: "The current strategy version has been published. Publishing does not automatically start a research run; queue one explicitly on the research runs page.",
+                })}
               </AlertDescription>
             </Alert>
           )}
           {strategiesQuery.isError && (
             <Alert variant="warning" className="mb-4">
-              <AlertTitle>已保存策略列表暂时不可用</AlertTitle>
+              <AlertTitle>{tl({ zh: "已保存策略列表暂时不可用", en: "Saved Strategy List Temporarily Unavailable" })}</AlertTitle>
               <AlertDescription>
-                {errorMessage(strategiesQuery.error, "无法读取策略版本历史")}；新模板仍可编辑，但保存后的版本可能需要刷新或后端恢复后才能显示。
+                {errorMessage(strategiesQuery.error, tl({ zh: "无法读取策略版本历史", en: "Could not read strategy version history" }))}
+                {tl({
+                  zh: "；新模板仍可编辑，但保存后的版本可能需要刷新或后端恢复后才能显示。",
+                  en: "; New templates remain editable, but saved versions may only appear after a refresh or once the backend recovers.",
+                })}
               </AlertDescription>
             </Alert>
           )}
           {releasesQuery.isError && (
             <Alert variant="destructive" className="mb-4">
-              <AlertTitle>数据发布列表加载失败</AlertTitle>
+              <AlertTitle>{tl({ zh: "数据发布列表加载失败", en: "Failed to Load Dataset Releases" })}</AlertTitle>
               <AlertDescription>
-                {errorMessage(releasesQuery.error, "无法读取数据发布版本")}；模板必须绑定可用数据发布后才能校验或保存。
+                {errorMessage(releasesQuery.error, tl({ zh: "无法读取数据发布版本", en: "Could not read dataset release versions" }))}
+                {tl({
+                  zh: "；模板必须绑定可用数据发布后才能校验或保存。",
+                  en: "; Templates must bind an available dataset release before they can be validated or saved.",
+                })}
               </AlertDescription>
             </Alert>
           )}
           {historyQuery.isError && selectedKind && (
             <Alert variant="warning" className="mb-4">
-              <AlertTitle>版本历史加载失败</AlertTitle>
+              <AlertTitle>{tl({ zh: "版本历史加载失败", en: "Failed to Load Version History" })}</AlertTitle>
               <AlertDescription>
-                {errorMessage(historyQuery.error, "无法读取当前策略的版本历史")}；请刷新后再发布或回滚。
+                {errorMessage(historyQuery.error, tl({ zh: "无法读取当前策略的版本历史", en: "Could not read version history for this strategy" }))}
+                {tl({ zh: "；请刷新后再发布或回滚。", en: "; Refresh before publishing or rolling back." })}
               </AlertDescription>
             </Alert>
           )}
@@ -368,8 +463,11 @@ export default function StrategyStudio() {
               <CardContent className="py-16">
                 <EmptyState
                   icon={<Code2 className="h-10 w-10" />}
-                  title="选择策略类型开始"
-                  description="从左侧选择一个策略类型，系统将自动加载模板供你编辑。不需要手写 JSON。"
+                  title={tl({ zh: "选择策略类型开始", en: "Select a Strategy Type to Start" })}
+                  description={tl({
+                    zh: "从左侧选择一个策略类型，系统将自动加载模板供你编辑。不需要手写 JSON。",
+                    en: "Pick a strategy type on the left and a template will be loaded for you to edit. No hand-written JSON required.",
+                  })}
                 />
               </CardContent>
             </Card>
@@ -387,23 +485,25 @@ export default function StrategyStudio() {
                       : `v${String(spec.schema_version)}`}
                   </Badge>
                   {editMode ? (
-                    <Badge variant="warning">JSON 编辑模式</Badge>
+                    <Badge variant="warning">{tl({ zh: "JSON 编辑模式", en: "JSON Edit Mode" })}</Badge>
                   ) : (
-                    <Badge variant="info">结构化视图</Badge>
+                    <Badge variant="info">{tl({ zh: "结构化视图", en: "Structured View" })}</Badge>
                   )}
                 </div>
                 <div className="flex gap-2">
                   <Button size="sm" variant="outline" onClick={handleEditModeToggle}>
                     {editMode ? <Eye className="mr-1.5 h-4 w-4" /> : <Code2 className="mr-1.5 h-4 w-4" />}
-                    {editMode ? "切换到结构化" : "切换到 JSON"}
+                    {editMode
+                      ? tl({ zh: "切换到结构化", en: "Switch to Structured" })
+                      : tl({ zh: "切换到 JSON", en: "Switch to JSON" })}
                   </Button>
                   <Button size="sm" variant="outline" onClick={handleValidate} disabled={!!parseError}>
                     <ShieldCheck className="mr-1.5 h-4 w-4" />
-                    校验
+                    {tl({ zh: "校验", en: "Validate" })}
                   </Button>
                   <Button size="sm" variant="outline" onClick={handleSaveDraft} disabled={!!parseError}>
                     <FilePlus className="mr-1.5 h-4 w-4" />
-                    保存草稿
+                    {tl({ zh: "保存草稿", en: "Save Draft" })}
                   </Button>
                 </div>
               </div>
@@ -423,7 +523,7 @@ export default function StrategyStudio() {
                       onChange={(e) => setSpecText(e.target.value)}
                       className="min-h-[600px] resize-y font-mono text-xs"
                       spellCheck={false}
-                      aria-label="策略规格 JSON"
+                      aria-label={tl({ zh: "策略规格 JSON", en: "Strategy spec JSON" })}
                     />
                   </CardContent>
                 </Card>
@@ -437,7 +537,7 @@ export default function StrategyStudio() {
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2 text-sm">
                       <ShieldCheck className="h-4 w-4" />
-                      <HintLabel hint={RESEARCH_HINTS.strategy.validate}>校验结果</HintLabel>
+                      <HintLabel hint={RESEARCH_HINTS.strategy.validate}>{tl({ zh: "校验结果", en: "Validation Result" })}</HintLabel>
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
@@ -446,10 +546,10 @@ export default function StrategyStudio() {
                         {validation.can_execute ? (
                           <Badge variant="success">
                             <CheckCircle2 className="mr-1 h-3 w-3" />
-                            可执行
+                            {tl({ zh: "可执行", en: "Executable" })}
                           </Badge>
                         ) : (
-                          <Badge variant="warning">执行权关闭</Badge>
+                          <Badge variant="warning">{tl({ zh: "执行权关闭", en: "Execution Disabled" })}</Badge>
                         )}
                         <code className="text-xs text-muted-foreground">{validation.checksum}</code>
                       </div>
@@ -469,13 +569,16 @@ export default function StrategyStudio() {
                         (!validation.errors || validation.errors.length === 0) && (
                           <Alert variant="info">
                             <AlertDescription>
-                              规格解析已完成，但执行权默认关闭。保存/发布不会自动启动回测或模拟；后续必须由受控 worker/CLI 消费 queued 研究运行。
+                              {tl({
+                                zh: "规格解析已完成，但执行权默认关闭。保存/发布不会自动启动回测或模拟；后续必须由受控 worker/CLI 消费 queued 研究运行。",
+                                en: "Spec parsing completed, but execution is disabled by default. Saving/publishing will not start a backtest or simulation; a queued research run must later be consumed by a controlled worker/CLI.",
+                              })}
                             </AlertDescription>
                           </Alert>
                         )}
                       {validation.feature_order.length > 0 && (
                         <div>
-                          <div className="mb-1 text-xs text-muted-foreground">特征顺序</div>
+                          <div className="mb-1 text-xs text-muted-foreground">{tl({ zh: "特征顺序", en: "Feature Order" })}</div>
                           <div className="flex flex-wrap gap-1">
                             {validation.feature_order.map((f) => (
                               <Badge key={f} variant="secondary" className="font-mono text-[10px]">
@@ -487,7 +590,7 @@ export default function StrategyStudio() {
                       )}
                       {validation.required_datasets.length > 0 && (
                         <div>
-                          <div className="mb-1 text-xs text-muted-foreground">依赖数据集</div>
+                          <div className="mb-1 text-xs text-muted-foreground">{tl({ zh: "依赖数据集", en: "Required Datasets" })}</div>
                           <div className="flex flex-wrap gap-1">
                             {validation.required_datasets.map((d) => (
                               <Badge key={d} variant="info" className="text-[10px]">
@@ -507,13 +610,13 @@ export default function StrategyStudio() {
                 <Card>
                   <CardHeader>
                     <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm">版本历史</CardTitle>
+                      <CardTitle className="text-sm">{tl({ zh: "版本历史", en: "Version History" })}</CardTitle>
                       <div className="flex gap-1">
                         <Button
                           size="sm"
                           variant="ghost"
-                          aria-label="发布策略版本"
-                          title="发布策略版本"
+                          aria-label={tl({ zh: "发布策略版本", en: "Publish Strategy Version" })}
+                          title={tl({ zh: "发布策略版本", en: "Publish Strategy Version" })}
                           onClick={() => setShowPublishDialog(true)}
                         >
                           <Send className="h-3.5 w-3.5" />
@@ -521,8 +624,8 @@ export default function StrategyStudio() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          aria-label="回滚策略版本"
-                          title="回滚策略版本"
+                          aria-label={tl({ zh: "回滚策略版本", en: "Roll Back Strategy Version" })}
+                          title={tl({ zh: "回滚策略版本", en: "Roll Back Strategy Version" })}
                           onClick={() => setShowRollbackDialog(true)}
                         >
                           <Undo2 className="h-3.5 w-3.5" />
@@ -534,9 +637,9 @@ export default function StrategyStudio() {
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead className="h-8 text-xs">版本</TableHead>
-                          <TableHead className="h-8 text-xs">状态</TableHead>
-                          <TableHead className="h-8 text-xs">时间</TableHead>
+                          <TableHead className="h-8 text-xs">{tl({ zh: "版本", en: "Version" })}</TableHead>
+                          <TableHead className="h-8 text-xs">{tl({ zh: "状态", en: "Status" })}</TableHead>
+                          <TableHead className="h-8 text-xs">{tl({ zh: "时间", en: "Time" })}</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -546,11 +649,11 @@ export default function StrategyStudio() {
                             <TableCell className="py-1.5">
                               {v.published ? (
                                 <Badge variant="success" className="text-[10px]">
-                                  已发布
+                                  {tl({ zh: "已发布", en: "Published" })}
                                 </Badge>
                               ) : (
                                 <Badge variant="secondary" className="text-[10px]">
-                                  草稿
+                                  {tl({ zh: "草稿", en: "Draft" })}
                                 </Badge>
                               )}
                             </TableCell>
@@ -571,8 +674,11 @@ export default function StrategyStudio() {
 
       <NextStepCTA
         nextPath="/research/experiments"
-        nextLabel="实验与 OOS"
-        description="用样本外数据验证策略是否真的有效，排除过拟合"
+        nextLabel={{ zh: "实验与 OOS", en: "Experiments & OOS" }}
+        description={{
+          zh: "用样本外数据验证策略是否真的有效，排除过拟合",
+          en: "Validate whether the strategy truly works on out-of-sample data and rule out overfitting",
+        }}
       />
 
       {/* Setup dialog */}
@@ -626,7 +732,7 @@ export default function StrategyStudio() {
       setSpec(tmpl);
     } catch (err) {
       setSpec(null);
-      setTemplateError(err instanceof Error ? err.message : "接口未返回有效模板");
+      setTemplateError(err instanceof Error ? err.message : tl({ zh: "接口未返回有效模板", en: "The API returned no valid template" }));
     }
   }
 }
@@ -642,6 +748,7 @@ function StructuredEditor({
   spec: Record<string, unknown>;
   onChange: (spec: Record<string, unknown>) => void;
 }) {
+  const { tl } = useT();
   const updateField = (field: string, value: unknown) => {
     onChange({ ...spec, [field]: value });
   };
@@ -657,7 +764,7 @@ function StructuredEditor({
         <CardContent className="space-y-3 p-4">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div>
-              <Label htmlFor="spec-name">策略名称</Label>
+              <Label htmlFor="spec-name">{tl({ zh: "策略名称", en: "Strategy Name" })}</Label>
               <Input
                 id="spec-name"
                 value={String(spec.name ?? "")}
@@ -665,7 +772,7 @@ function StructuredEditor({
               />
             </div>
             <div>
-              <Label htmlFor="spec-kind">策略类型</Label>
+              <Label htmlFor="spec-kind">{tl({ zh: "策略类型", en: "Strategy Type" })}</Label>
               <Input
                 id="spec-kind"
                 value={String(spec.strategy_kind ?? "")}
@@ -675,7 +782,7 @@ function StructuredEditor({
             </div>
           </div>
           <div>
-            <Label htmlFor="spec-desc">策略描述</Label>
+            <Label htmlFor="spec-desc">{tl({ zh: "策略描述", en: "Strategy Description" })}</Label>
             <Textarea
               id="spec-desc"
               value={String(spec.description ?? "")}
@@ -698,11 +805,11 @@ function StructuredEditor({
             >
               <AccordionTrigger className="px-4 py-3 hover:bg-accent">
                 <div className="flex items-center gap-2">
-                  <span className="font-medium text-sm">{section.label}</span>
+                  <span className="font-medium text-sm">{tl(section.label)}</span>
                   <ResearchHint hint={{ title: section.label, description: section.hint }} />
                   {sectionData != null && (
                     <Badge variant="secondary" className="ml-2 text-[10px]">
-                      已配置
+                      {tl({ zh: "已配置", en: "Configured" })}
                     </Badge>
                   )}
                 </div>
@@ -731,11 +838,12 @@ function SectionViewer({
   onChange,
 }: {
   sectionKey: string;
-  label: string;
-  hint: string;
+  label: LocalizedText;
+  hint: LocalizedText;
   data: unknown;
   onChange: (value: unknown) => void;
 }) {
+  const { tl } = useT();
   const [editing, setEditing] = React.useState(false);
   const [text, setText] = React.useState("");
 
@@ -746,7 +854,7 @@ function SectionViewer({
   const summary = React.useMemo(() => getSectionSummary(sectionKey, data), [sectionKey, data]);
 
   if (!data) {
-    return <p className="py-2 text-sm text-muted-foreground">未配置</p>;
+    return <p className="py-2 text-sm text-muted-foreground">{tl({ zh: "未配置", en: "Not Configured" })}</p>;
   }
 
   return (
@@ -758,8 +866,8 @@ function SectionViewer({
             <div className="space-y-1">
               {summary.map((item, i) => (
                 <div key={i} className="flex items-start gap-2 text-xs">
-                  <span className="shrink-0 text-muted-foreground">{item.label}:</span>
-                  <span className="text-foreground/90">{item.value}</span>
+                  <span className="shrink-0 text-muted-foreground">{tl(item.label)}:</span>
+                  <span className="text-foreground/90">{tl(item.value)}</span>
                 </div>
               ))}
             </div>
@@ -770,7 +878,7 @@ function SectionViewer({
           )}
           <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
             <Code2 className="mr-1.5 h-3.5 w-3.5" />
-            编辑 JSON
+            {tl({ zh: "编辑 JSON", en: "Edit JSON" })}
           </Button>
         </div>
       )}
@@ -783,7 +891,7 @@ function SectionViewer({
             onChange={(e) => setText(e.target.value)}
             className="min-h-[200px] resize-y font-mono text-xs"
             spellCheck={false}
-            aria-label={`${label} JSON 编辑`}
+            aria-label={tl({ zh: `${label.zh} JSON 编辑`, en: `${label.en} JSON editor` })}
           />
           <div className="flex gap-2">
             <Button
@@ -797,10 +905,10 @@ function SectionViewer({
                 }
               }}
             >
-              保存
+              {tl({ zh: "保存", en: "Save" })}
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
-              取消
+              {tl({ zh: "取消", en: "Cancel" })}
             </Button>
           </div>
         </div>
@@ -812,32 +920,32 @@ function SectionViewer({
 function getSectionSummary(
   key: string,
   data: unknown,
-): { label: string; value: string }[] {
+): { label: LocalizedText; value: LocalizedText }[] {
   if (!data || typeof data !== "object") return [];
   const d = data as Record<string, unknown>;
 
   switch (key) {
     case "universe":
       return [
-        { label: "市场", value: arrToStr(d.markets) },
-        { label: "资产类别", value: arrToStr(d.asset_classes) },
-        { label: "最大持仓数", value: String(d.selection_limit ?? "—") },
-        { label: "排除 ST", value: bool(d.exclude_st) },
-        { label: "排除停牌", value: bool(d.exclude_suspended) },
-        { label: "最小上市天数", value: String(d.min_listing_days ?? "—") },
-      ].filter((x) => x.value !== "—");
+        { label: { zh: "市场", en: "Markets" }, value: sameText(arrToStr(d.markets)) },
+        { label: { zh: "资产类别", en: "Asset Classes" }, value: sameText(arrToStr(d.asset_classes)) },
+        { label: { zh: "最大持仓数", en: "Max Positions" }, value: sameText(String(d.selection_limit ?? "—")) },
+        { label: { zh: "排除 ST", en: "Exclude ST" }, value: bool(d.exclude_st) },
+        { label: { zh: "排除停牌", en: "Exclude Suspended" }, value: bool(d.exclude_suspended) },
+        { label: { zh: "最小上市天数", en: "Min Listing Days" }, value: sameText(String(d.min_listing_days ?? "—")) },
+      ].filter((x) => x.value.zh !== "—");
 
     case "feature_graph": {
       const nodes = (d.nodes as unknown[]) ?? [];
       const outputs = (d.outputs as unknown[]) ?? [];
       return [
-        { label: "特征数", value: String(nodes.length) },
-        { label: "输出特征", value: arrToStr(outputs) },
+        { label: { zh: "特征数", en: "Features" }, value: sameText(String(nodes.length)) },
+        { label: { zh: "输出特征", en: "Output Features" }, value: sameText(arrToStr(outputs)) },
         ...nodes.slice(0, 5).map((n, i) => ({
-          label: `节点 ${i + 1}`,
-          value: `${String((n as Record<string, unknown>)?.label ?? "?")} (${String(
+          label: { zh: `节点 ${i + 1}`, en: `Node ${i + 1}` },
+          value: sameText(`${String((n as Record<string, unknown>)?.label ?? "?")} (${String(
             (n as Record<string, unknown>)?.operator ?? "?",
-          )})`,
+          )})`),
         })),
       ];
     }
@@ -845,24 +953,24 @@ function getSectionSummary(
     case "signal_rules": {
       const rules = (d.rules as unknown[]) ?? [];
       return [
-        { label: "规则数", value: String(rules.length) },
-        { label: "冲突策略", value: String(d.conflict_policy ?? "—") },
+        { label: { zh: "规则数", en: "Rules" }, value: sameText(String(rules.length)) },
+        { label: { zh: "冲突策略", en: "Conflict Policy" }, value: sameText(String(d.conflict_policy ?? "—")) },
         ...rules.slice(0, 5).map((r, i) => ({
-          label: `规则 ${i + 1}`,
-          value: `${String((r as Record<string, unknown>)?.feature_id ?? "?")} ${String(
+          label: { zh: `规则 ${i + 1}`, en: `Rule ${i + 1}` },
+          value: sameText(`${String((r as Record<string, unknown>)?.feature_id ?? "?")} ${String(
             (r as Record<string, unknown>)?.comparator ?? "?",
-          )} → ${String((r as Record<string, unknown>)?.action ?? "?")}`,
+          )} → ${String((r as Record<string, unknown>)?.action ?? "?")}`),
         })),
       ];
     }
 
     case "portfolio_policy":
       return [
-        { label: "分配方法", value: String(d.allocation_method ?? "—") },
-        { label: "最大持仓数", value: String(d.max_positions ?? "—") },
-        { label: "单标的权重上限", value: pct(d.max_target_weight) },
-        { label: "目标总暴露", value: pct(d.target_gross_exposure) },
-        { label: "现金缓冲", value: pct(d.cash_buffer) },
+        { label: { zh: "分配方法", en: "Allocation Method" }, value: sameText(String(d.allocation_method ?? "—")) },
+        { label: { zh: "最大持仓数", en: "Max Positions" }, value: sameText(String(d.max_positions ?? "—")) },
+        { label: { zh: "单标的权重上限", en: "Max Weight per Instrument" }, value: sameText(pct(d.max_target_weight)) },
+        { label: { zh: "目标总暴露", en: "Target Gross Exposure" }, value: sameText(pct(d.target_gross_exposure)) },
+        { label: { zh: "现金缓冲", en: "Cash Buffer" }, value: sameText(pct(d.cash_buffer)) },
       ];
 
     case "risk_exit_policy": {
@@ -871,31 +979,37 @@ function getSectionSummary(
         (r) => (r as Record<string, unknown>)?.enabled === true,
       );
       return [
-        { label: "规则数", value: `${enabled.length}/${rules.length} 启用` },
+        {
+          label: { zh: "规则数", en: "Rules" },
+          value: { zh: `${enabled.length}/${rules.length} 启用`, en: `${enabled.length}/${rules.length} enabled` },
+        },
         ...enabled.slice(0, 3).map((r) => ({
-          label: String((r as Record<string, unknown>)?.rule_type ?? "?"),
-          value: `阈值 ${String((r as Record<string, unknown>)?.threshold ?? "?")}`,
+          label: sameText(String((r as Record<string, unknown>)?.rule_type ?? "?")),
+          value: {
+            zh: `阈值 ${String((r as Record<string, unknown>)?.threshold ?? "?")}`,
+            en: `Threshold ${String((r as Record<string, unknown>)?.threshold ?? "?")}`,
+          },
         })),
       ];
     }
 
     case "execution_model":
       return [
-        { label: "成交时间", value: String(d.timing ?? "—") },
-        { label: "佣金率", value: String(d.commission_rate ?? "—") },
-        { label: "印花税", value: String(d.sell_tax_rate ?? "—") },
-        { label: "滑点(bps)", value: String(d.slippage_bps ?? "—") },
+        { label: { zh: "成交时间", en: "Fill Timing" }, value: sameText(String(d.timing ?? "—")) },
+        { label: { zh: "佣金率", en: "Commission Rate" }, value: sameText(String(d.commission_rate ?? "—")) },
+        { label: { zh: "印花税", en: "Stamp Tax" }, value: sameText(String(d.sell_tax_rate ?? "—")) },
+        { label: { zh: "滑点(bps)", en: "Slippage (bps)" }, value: sameText(String(d.slippage_bps ?? "—")) },
       ];
 
     case "validation_plan": {
       const releases = (d.dataset_release_ids as unknown[]) ?? [];
       return [
-        { label: "数据发布", value: String(releases.length) + " 个" },
-        { label: "模式", value: String(d.mode ?? "—") },
-        { label: "训练期", value: `${d.train_start ?? "?"} ~ ${d.train_end ?? "?"}` },
-        { label: "验证期", value: `${d.validation_start ?? "?"} ~ ${d.validation_end ?? "?"}` },
-        { label: "测试期(OOS)", value: `${d.test_start ?? "?"} ~ ${d.test_end ?? "?"}` },
-        { label: "基准", value: String(d.benchmark_symbol ?? "—") },
+        { label: { zh: "数据发布", en: "Dataset Releases" }, value: { zh: `${String(releases.length)} 个`, en: String(releases.length) } },
+        { label: { zh: "模式", en: "Mode" }, value: sameText(String(d.mode ?? "—")) },
+        { label: { zh: "训练期", en: "Train Period" }, value: sameText(`${d.train_start ?? "?"} ~ ${d.train_end ?? "?"}`) },
+        { label: { zh: "验证期", en: "Validation Period" }, value: sameText(`${d.validation_start ?? "?"} ~ ${d.validation_end ?? "?"}`) },
+        { label: { zh: "测试期(OOS)", en: "Test Period (OOS)" }, value: sameText(`${d.test_start ?? "?"} ~ ${d.test_end ?? "?"}`) },
+        { label: { zh: "基准", en: "Benchmark" }, value: sameText(String(d.benchmark_symbol ?? "—")) },
       ];
     }
 
@@ -932,6 +1046,7 @@ function SetupDialog({
   }[];
   onConfirm: (strategyId: string, releaseIds: string[]) => void;
 }) {
+  const { tl } = useT();
   const [strategyId, setStrategyId] = React.useState("");
   const [selectedReleases, setSelectedReleases] = React.useState<Set<string>>(new Set());
 
@@ -955,27 +1070,33 @@ function SetupDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>创建策略规格</DialogTitle>
+          <DialogTitle>{tl({ zh: "创建策略规格", en: "Create Strategy Spec" })}</DialogTitle>
           <DialogDescription>
-            选择数据发布版本。模板将自动填充默认配置，你可以在编辑器中修改。建议优先选择质量为「通过」且包含策略所需能力的数据发布。
+            {tl({
+              zh: "选择数据发布版本。模板将自动填充默认配置，你可以在编辑器中修改。建议优先选择质量为「通过」且包含策略所需能力的数据发布。",
+              en: 'Select dataset release versions. The template will be pre-filled with defaults, which you can edit in the editor. Prefer releases whose quality is "passed" and that include the capabilities the strategy needs.',
+            })}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div>
-            <Label htmlFor="setup-id">策略 ID</Label>
+            <Label htmlFor="setup-id">{tl({ zh: "策略 ID", en: "Strategy ID" })}</Label>
             <Input
               id="setup-id"
               value={strategyId}
               onChange={(e) => setStrategyId(e.target.value)}
               className="font-mono"
-              placeholder="如 ma_cross"
+              placeholder={tl({ zh: "如 ma_cross", en: "e.g. ma_cross" })}
             />
           </div>
           <div>
-            <Label>数据发布版本</Label>
+            <Label>{tl({ zh: "数据发布版本", en: "Dataset Release Versions" })}</Label>
             {releases.length === 0 ? (
               <p className="rounded bg-warning/10 p-2 text-xs text-warning">
-                暂无数据发布。请先在「数据与标的」页面拉取行情数据并发布研究数据集。
+                {tl({
+                  zh: "暂无数据发布。请先在「数据与标的」页面拉取行情数据并发布研究数据集。",
+                  en: 'No dataset releases yet. Fetch market data and publish a research dataset on the "Data & Instruments" page first.',
+                })}
               </p>
             ) : (
               <div className="max-h-[200px] space-y-1 overflow-y-auto scrollbar-thin">
@@ -1001,22 +1122,27 @@ function SetupDialog({
                             variant={r.quality_status === "passed" ? "success" : "warning"}
                             className="text-[10px]"
                           >
-                            {r.quality_status === "passed" ? "质量通过" : "质量告警"}
+                            {r.quality_status === "passed"
+                              ? tl({ zh: "质量通过", en: "Quality Passed" })
+                              : tl({ zh: "质量告警", en: "Quality Warning" })}
                           </Badge>
                         )}
                         {r.quality_status === "passed" && (
-                          <Badge variant="info" className="text-[10px]">推荐</Badge>
+                          <Badge variant="info" className="text-[10px]">{tl({ zh: "推荐", en: "Recommended" })}</Badge>
                         )}
                       </span>
                       <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">
                         {r.release_id}
                       </span>
                       <span className="mt-0.5 block text-[10px] text-muted-foreground">
-                        {r.start_date ?? "—"} ~ {r.end_date ?? "—"} · {r.symbol_count ?? "—"} 标的 · 覆盖 {r.coverage_pct ?? "—"}
+                        {r.start_date ?? "—"} ~ {r.end_date ?? "—"} · {r.symbol_count ?? "—"}
+                        {tl({ zh: " 标的 · 覆盖 ", en: " symbols · coverage " })}
+                        {r.coverage_pct ?? "—"}
                       </span>
                       {r.capabilities && r.capabilities.length > 0 && (
                         <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
-                          能力：{r.capabilities.filter((c) => c.status === "ready").map((c) => c.key).join("、") || "暂无可用能力"}
+                          {tl({ zh: "能力：", en: "Capabilities: " })}
+                          {r.capabilities.filter((c) => c.status === "ready").map((c) => c.key).join(tl({ zh: "、", en: ", " })) || tl({ zh: "暂无可用能力", en: "No ready capabilities" })}
                         </span>
                       )}
                     </span>
@@ -1032,7 +1158,7 @@ function SetupDialog({
             onClick={() => onConfirm(strategyId, Array.from(selectedReleases))}
           >
             <FilePlus className="mr-2 h-4 w-4" />
-            加载模板
+            {tl({ zh: "加载模板", en: "Load Template" })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1057,6 +1183,7 @@ function PublishDialog({
   latestVersion: number;
   onConfirm: (version: number, expectedVersion: number) => void;
 }) {
+  const { tl } = useT();
   const [version, setVersion] = React.useState(latestVersion);
   React.useEffect(() => setVersion(latestVersion), [latestVersion]);
 
@@ -1064,14 +1191,17 @@ function PublishDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>发布策略版本</DialogTitle>
+          <DialogTitle>{tl({ zh: "发布策略版本", en: "Publish Strategy Version" })}</DialogTitle>
           <DialogDescription>
-            发布 {strategyId} 的指定版本。发布不会自动启动运行。
+            {tl({
+              zh: `发布 ${strategyId} 的指定版本。发布不会自动启动运行。`,
+              en: `Publish a chosen version of ${strategyId}. Publishing does not automatically start a run.`,
+            })}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div>
-            <Label htmlFor="pub-version">发布版本号</Label>
+            <Label htmlFor="pub-version">{tl({ zh: "发布版本号", en: "Version to Publish" })}</Label>
             <Input
               id="pub-version"
               type="number"
@@ -1083,7 +1213,7 @@ function PublishDialog({
         <DialogFooter>
           <Button onClick={() => onConfirm(version, latestVersion)}>
             <Send className="mr-2 h-4 w-4" />
-            确认发布
+            {tl({ zh: "确认发布", en: "Confirm Publish" })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1102,14 +1232,15 @@ function RollbackDialog({
   history: { version: number; published: boolean; created_at: string }[];
   onConfirm: (targetVersion: number, expectedVersion: number) => void;
 }) {
+  const { tl } = useT();
   const [target, setTarget] = React.useState(history[0]?.version ?? 0);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>回滚策略版本</DialogTitle>
-          <DialogDescription>选择要回滚到的目标版本</DialogDescription>
+          <DialogTitle>{tl({ zh: "回滚策略版本", en: "Roll Back Strategy Version" })}</DialogTitle>
+          <DialogDescription>{tl({ zh: "选择要回滚到的目标版本", en: "Select the target version to roll back to" })}</DialogDescription>
         </DialogHeader>
         <div className="max-h-[200px] space-y-1 overflow-y-auto scrollbar-thin">
           {history.map((v) => (
@@ -1124,7 +1255,7 @@ function RollbackDialog({
               <span className="font-mono">v{v.version}</span>
               {v.published && (
                 <Badge variant="success" className="text-[10px]">
-                  已发布
+                  {tl({ zh: "已发布", en: "Published" })}
                 </Badge>
               )}
             </button>
@@ -1133,7 +1264,7 @@ function RollbackDialog({
         <DialogFooter>
           <Button onClick={() => onConfirm(target, history[0]?.version ?? 0)}>
             <Undo2 className="mr-2 h-4 w-4" />
-            回滚到 v{target}
+            {tl({ zh: `回滚到 v${target}`, en: `Roll back to v${target}` })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1174,6 +1305,11 @@ function pct(v: unknown): string {
   return `${(n * 100).toFixed(1)}%`;
 }
 
-function bool(v: unknown): string {
-  return v === true ? "是" : v === false ? "否" : "—";
+function bool(v: unknown): LocalizedText {
+  return v === true ? { zh: "是", en: "Yes" } : v === false ? { zh: "否", en: "No" } : { zh: "—", en: "—" };
+}
+
+/** 后端数据(枚举值/数字等)原样展示,两种语言同文 */
+function sameText(s: string): LocalizedText {
+  return { zh: s, en: s };
 }

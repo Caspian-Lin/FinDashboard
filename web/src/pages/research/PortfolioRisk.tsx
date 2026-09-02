@@ -67,6 +67,7 @@ import {
   type TierFeasibility,
 } from "@/lib/portfolio";
 import { cn, formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
+import { useT } from "@/i18n";
 
 type SignalRow = { symbol: string; score: string; direction: "long" | "short" };
 type LotRow = { symbol: string; lot_size: string; price: string };
@@ -117,6 +118,7 @@ function AllocationTab({
 }: {
   onAllocated: (r: AllocateResponse) => void;
 }) {
+  const { tl } = useT();
   const [signals, setSignals] = useState<SignalRow[]>([
     { symbol: "", score: "", direction: "long" },
   ]);
@@ -181,19 +183,22 @@ function AllocationTab({
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <PieChartIcon className="h-4 w-4 text-primary" />
-            信号与约束
+            {tl({ zh: "信号与约束", en: "Signals & Constraints" })}
           </CardTitle>
           <CardDescription>
-            输入标的信号得分与组合约束,生成目标权重分配与风险报告。
+            {tl({
+              zh: "输入标的信号得分与组合约束,生成目标权重分配与风险报告。",
+              en: "Enter instrument signal scores and portfolio constraints to generate target weight allocation and a risk report.",
+            })}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <Label>信号输入</Label>
+              <Label>{tl({ zh: "信号输入", en: "Signal input" })}</Label>
               <Button variant="outline" size="sm" onClick={addSignal}>
                 <Plus className="h-4 w-4" />
-                添加信号
+                {tl({ zh: "添加信号", en: "Add signal" })}
               </Button>
             </div>
             <div className="space-y-2">
@@ -203,7 +208,7 @@ function AllocationTab({
                   className="flex items-center gap-2"
                 >
                   <Input
-                    placeholder="标的代码"
+                    placeholder={tl({ zh: "标的代码", en: "Symbol" })}
                     value={s.symbol}
                     onChange={(e) =>
                       updateSignal(i, { symbol: e.target.value })
@@ -212,7 +217,7 @@ function AllocationTab({
                   />
                   <Input
                     type="number"
-                    placeholder="得分"
+                    placeholder={tl({ zh: "得分", en: "Score" })}
                     value={s.score}
                     onChange={(e) =>
                       updateSignal(i, { score: e.target.value })
@@ -231,8 +236,12 @@ function AllocationTab({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="long">多头</SelectItem>
-                      <SelectItem value="short">空头</SelectItem>
+                      <SelectItem value="long">
+                        {tl({ zh: "多头", en: "Long" })}
+                      </SelectItem>
+                      <SelectItem value="short">
+                        {tl({ zh: "空头", en: "Short" })}
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                   <Button
@@ -252,7 +261,7 @@ function AllocationTab({
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
             <div className="space-y-1.5">
-              <Label>分配方法</Label>
+              <Label>{tl({ zh: "分配方法", en: "Allocation method" })}</Label>
               <Select
                 value={method}
                 onValueChange={(v) => setMethod(v as AllocationMethod)}
@@ -261,37 +270,43 @@ function AllocationTab({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="equal_weight">等权重</SelectItem>
-                  <SelectItem value="inverse_volatility">反波动率</SelectItem>
-                  <SelectItem value="erc">风险平价 (ERC)</SelectItem>
+                  <SelectItem value="equal_weight">
+                    {tl({ zh: "等权重", en: "Equal weight" })}
+                  </SelectItem>
+                  <SelectItem value="inverse_volatility">
+                    {tl({ zh: "反波动率", en: "Inverse volatility" })}
+                  </SelectItem>
+                  <SelectItem value="erc">
+                    {tl({ zh: "风险平价 (ERC)", en: "Risk parity (ERC)" })}
+                  </SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label>单资产权重上限</Label>
+              <Label>{tl({ zh: "单资产权重上限", en: "Max weight per asset" })}</Label>
               <Input
                 type="number"
-                placeholder="如 0.2"
+                placeholder={tl({ zh: "如 0.2", en: "e.g. 0.2" })}
                 value={maxWeight}
                 onChange={(e) => setMaxWeight(e.target.value)}
                 className="tabular-nums"
               />
             </div>
             <div className="space-y-1.5">
-              <Label>最低现金缓冲</Label>
+              <Label>{tl({ zh: "最低现金缓冲", en: "Min cash buffer" })}</Label>
               <Input
                 type="number"
-                placeholder="如 0.05"
+                placeholder={tl({ zh: "如 0.05", en: "e.g. 0.05" })}
                 value={minCash}
                 onChange={(e) => setMinCash(e.target.value)}
                 className="tabular-nums"
               />
             </div>
             <div className="space-y-1.5">
-              <Label>最大杠杆</Label>
+              <Label>{tl({ zh: "最大杠杆", en: "Max leverage" })}</Label>
               <Input
                 type="number"
-                placeholder="如 1.0"
+                placeholder={tl({ zh: "如 1.0", en: "e.g. 1.0" })}
                 value={maxLev}
                 onChange={(e) => setMaxLev(e.target.value)}
                 className="tabular-nums"
@@ -301,9 +316,12 @@ function AllocationTab({
 
           <div className="flex items-center justify-between rounded-md border border-border px-3 py-2.5">
             <div>
-              <Label>仅做多</Label>
+              <Label>{tl({ zh: "仅做多", en: "Long-only" })}</Label>
               <p className="text-xs text-muted-foreground">
-                关闭后允许空头信号产生负权重
+                {tl({
+                  zh: "关闭后允许空头信号产生负权重",
+                  en: "When off, short signals may produce negative weights",
+                })}
               </p>
             </div>
             <Switch checked={longOnly} onCheckedChange={setLongOnly} />
@@ -315,11 +333,16 @@ function AllocationTab({
               disabled={parsedSignals.length === 0 || mutate.isPending}
             >
               <Calculator className="h-4 w-4" />
-              {mutate.isPending ? "计算中…" : "计算目标权重"}
+              {mutate.isPending
+                ? tl({ zh: "计算中…", en: "Computing…" })
+                : tl({ zh: "计算目标权重", en: "Compute target weights" })}
             </Button>
             {parsedSignals.length === 0 && (
               <span className="text-xs text-muted-foreground">
-                请至少填写一行有效的标的与得分
+                {tl({
+                  zh: "请至少填写一行有效的标的与得分",
+                  en: "Enter at least one valid symbol and score",
+                })}
               </span>
             )}
           </div>
@@ -328,11 +351,14 @@ function AllocationTab({
 
       {mutate.isError && (
         <ErrorState
-          title="分配计算失败"
+          title={tl({ zh: "分配计算失败", en: "Allocation failed" })}
           message={
             mutate.error instanceof Error
               ? mutate.error.message
-              : "无法计算目标权重分配"
+              : tl({
+                  zh: "无法计算目标权重分配",
+                  en: "Unable to compute target weight allocation",
+                })
           }
         />
       )}
@@ -341,7 +367,9 @@ function AllocationTab({
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">目标权重分布</CardTitle>
+              <CardTitle className="text-base">
+                {tl({ zh: "目标权重分布", en: "Target weight distribution" })}
+              </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               {pieData.length > 0 ? (
@@ -396,8 +424,11 @@ function AllocationTab({
               ) : (
                 <EmptyState
                   icon={<PieChartIcon className="h-8 w-8" />}
-                  title="无有效权重"
-                  description="所有权重均为零或负值。"
+                  title={tl({ zh: "无有效权重", en: "No valid weights" })}
+                  description={tl({
+                    zh: "所有权重均为零或负值。",
+                    en: "All weights are zero or negative.",
+                  })}
                 />
               )}
 
@@ -405,9 +436,13 @@ function AllocationTab({
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>标的</TableHead>
-                      <TableHead className="text-right">权重</TableHead>
-                      <TableHead className="text-right">信号得分</TableHead>
+                      <TableHead>{tl({ zh: "标的", en: "Symbol" })}</TableHead>
+                      <TableHead className="text-right">
+                        {tl({ zh: "权重", en: "Weight" })}
+                      </TableHead>
+                      <TableHead className="text-right">
+                        {tl({ zh: "信号得分", en: "Signal score" })}
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -430,28 +465,30 @@ function AllocationTab({
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">风险报告</CardTitle>
+              <CardTitle className="text-base">
+                {tl({ zh: "风险报告", en: "Risk report" })}
+              </CardTitle>
             </CardHeader>
             <CardContent>
               {risk ? (
                 <div className="space-y-1">
                   <Metric
-                    label="组合波动率"
+                    label={tl({ zh: "组合波动率", en: "Portfolio volatility" })}
                     value={fmtPct(risk.portfolio_volatility)}
                   />
                   <Metric
-                    label="夏普比率"
+                    label={tl({ zh: "夏普比率", en: "Sharpe ratio" })}
                     value={formatNumber(risk.sharpe_ratio, 3)}
                   />
                   <Metric
-                    label="分散化比率"
+                    label={tl({ zh: "分散化比率", en: "Diversification ratio" })}
                     value={formatNumber(risk.diversification_ratio, 3)}
                   />
                   <Separator className="my-2" />
                   <Metric label="VaR(95%)" value={fmtPct(risk.var_95)} />
                   <Metric label="CVaR(95%)" value={fmtPct(risk.cvar_95)} />
                   <Metric
-                    label="最大回撤"
+                    label={tl({ zh: "最大回撤", en: "Max drawdown" })}
                     value={fmtPct(risk.max_drawdown)}
                   />
                   {risk.risk_contributions &&
@@ -459,7 +496,7 @@ function AllocationTab({
                       <>
                         <Separator className="my-2" />
                         <p className="pt-1 text-xs font-medium text-muted-foreground">
-                          边际风险贡献
+                          {tl({ zh: "边际风险贡献", en: "Marginal risk contribution" })}
                         </p>
                         <div className="space-y-1 pt-1">
                           {risk.risk_contributions.map((rc) => (
@@ -482,8 +519,11 @@ function AllocationTab({
               ) : (
                 <EmptyState
                   icon={<ShieldCheck className="h-8 w-8" />}
-                  title="无风险报告"
-                  description="本次分配未返回风险指标。"
+                  title={tl({ zh: "无风险报告", en: "No risk report" })}
+                  description={tl({
+                    zh: "本次分配未返回风险指标。",
+                    en: "This allocation returned no risk metrics.",
+                  })}
                 />
               )}
             </CardContent>
@@ -492,9 +532,14 @@ function AllocationTab({
           {data.adjustments && data.adjustments.length > 0 && (
             <Card className="lg:col-span-2">
               <CardHeader className="pb-3">
-                <CardTitle className="text-base">约束调整明细</CardTitle>
+                <CardTitle className="text-base">
+                  {tl({ zh: "约束调整明细", en: "Constraint adjustments" })}
+                </CardTitle>
                 <CardDescription>
-                  约束求解器对原始权重的调整记录。
+                  {tl({
+                    zh: "约束求解器对原始权重的调整记录。",
+                    en: "Adjustments applied by the constraint solver to the raw weights.",
+                  })}
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -502,10 +547,14 @@ function AllocationTab({
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>标的</TableHead>
-                        <TableHead className="text-right">调整前</TableHead>
-                        <TableHead className="text-right">调整后</TableHead>
-                        <TableHead>原因</TableHead>
+                        <TableHead>{tl({ zh: "标的", en: "Symbol" })}</TableHead>
+                        <TableHead className="text-right">
+                          {tl({ zh: "调整前", en: "Before" })}
+                        </TableHead>
+                        <TableHead className="text-right">
+                          {tl({ zh: "调整后", en: "After" })}
+                        </TableHead>
+                        <TableHead>{tl({ zh: "原因", en: "Reason" })}</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -550,6 +599,7 @@ function SizingTab({
   capital: string;
   setCapital: React.Dispatch<React.SetStateAction<string>>;
 }) {
+  const { tl } = useT();
   const [commissionRate, setCommissionRate] = useState("0.0003");
   const [stampTaxRate, setStampTaxRate] = useState("0.001");
 
@@ -620,22 +670,28 @@ function SizingTab({
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Coins className="h-4 w-4 text-primary" />
-            离散交易求解参数
+            {tl({ zh: "离散交易求解参数", en: "Discrete trade solver parameters" })}
           </CardTitle>
           <CardDescription>
-            将连续目标权重转化为离散整手交易,估算资金占用与交易成本。
+            {tl({
+              zh: "将连续目标权重转化为离散整手交易,估算资金占用与交易成本。",
+              en: "Convert continuous target weights into discrete round-lot trades, estimating capital usage and transaction costs.",
+            })}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           {!hasWeights && (
             <div className="rounded-md border border-warning/30 bg-warning/5 p-3 text-sm text-warning">
-              尚无目标权重,请先在「目标权重分配」完成计算。
+              {tl({
+                zh: "尚无目标权重,请先在「目标权重分配」完成计算。",
+                en: "No target weights yet. Complete the calculation in “Target Weight Allocation” first.",
+              })}
             </div>
           )}
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
             <div className="space-y-1.5">
-              <Label>资金额度</Label>
+              <Label>{tl({ zh: "资金额度", en: "Capital" })}</Label>
               <Input
                 type="number"
                 value={capital}
@@ -644,7 +700,7 @@ function SizingTab({
               />
             </div>
             <div className="space-y-1.5">
-              <Label>佣金率</Label>
+              <Label>{tl({ zh: "佣金率", en: "Commission rate" })}</Label>
               <Input
                 type="number"
                 value={commissionRate}
@@ -653,7 +709,7 @@ function SizingTab({
               />
             </div>
             <div className="space-y-1.5">
-              <Label>印花税率</Label>
+              <Label>{tl({ zh: "印花税率", en: "Stamp tax rate" })}</Label>
               <Input
                 type="number"
                 value={stampTaxRate}
@@ -667,7 +723,7 @@ function SizingTab({
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <Label>标的手数与价格</Label>
+              <Label>{tl({ zh: "标的手数与价格", en: "Symbol lots & prices" })}</Label>
               <Button
                 variant="outline"
                 size="sm"
@@ -675,21 +731,21 @@ function SizingTab({
                 disabled={!hasWeights}
               >
                 <ArrowRight className="h-4 w-4" />
-                从分配结果导入
+                {tl({ zh: "从分配结果导入", en: "Import from allocation" })}
               </Button>
             </div>
             <div className="space-y-2">
               {lots.map((l, i) => (
                 <div key={i} className="flex items-center gap-2">
                   <Input
-                    placeholder="标的代码"
+                    placeholder={tl({ zh: "标的代码", en: "Symbol" })}
                     value={l.symbol}
                     onChange={(e) => updateLot(i, { symbol: e.target.value })}
                     className="font-mono"
                   />
                   <Input
                     type="number"
-                    placeholder="手数 (lot)"
+                    placeholder={tl({ zh: "手数 (lot)", en: "Lots" })}
                     value={l.lot_size}
                     onChange={(e) =>
                       updateLot(i, { lot_size: e.target.value })
@@ -698,7 +754,7 @@ function SizingTab({
                   />
                   <Input
                     type="number"
-                    placeholder="单价"
+                    placeholder={tl({ zh: "单价", en: "Price" })}
                     value={l.price}
                     onChange={(e) => updateLot(i, { price: e.target.value })}
                     className="w-32 tabular-nums"
@@ -716,7 +772,7 @@ function SizingTab({
             </div>
             <Button variant="outline" size="sm" onClick={addLot}>
               <Plus className="h-4 w-4" />
-              添加标的
+              {tl({ zh: "添加标的", en: "Add symbol" })}
             </Button>
           </div>
 
@@ -726,11 +782,16 @@ function SizingTab({
               disabled={!hasWeights || parsedLots.length === 0 || mutate.isPending}
             >
               <Calculator className="h-4 w-4" />
-              {mutate.isPending ? "求解中…" : "求解离散交易"}
+              {mutate.isPending
+                ? tl({ zh: "求解中…", en: "Solving…" })
+                : tl({ zh: "求解离散交易", en: "Solve discrete trades" })}
             </Button>
             {!hasWeights && (
               <span className="text-xs text-muted-foreground">
-                需先完成目标权重分配
+                {tl({
+                  zh: "需先完成目标权重分配",
+                  en: "Complete target weight allocation first",
+                })}
               </span>
             )}
           </div>
@@ -739,11 +800,14 @@ function SizingTab({
 
       {mutate.isError && (
         <ErrorState
-          title="离散求解失败"
+          title={tl({ zh: "离散求解失败", en: "Discrete solve failed" })}
           message={
             mutate.error instanceof Error
               ? mutate.error.message
-              : "无法求解离散交易"
+              : tl({
+                  zh: "无法求解离散交易",
+                  en: "Unable to solve discrete trades",
+                })
           }
         />
       )}
@@ -752,18 +816,26 @@ function SizingTab({
         <>
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">交易明细</CardTitle>
+              <CardTitle className="text-base">
+                {tl({ zh: "交易明细", en: "Trade details" })}
+              </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="rounded-md border border-border">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>标的</TableHead>
-                      <TableHead>方向</TableHead>
-                      <TableHead className="text-right">手数</TableHead>
-                      <TableHead className="text-right">股数</TableHead>
-                      <TableHead className="text-right">金额</TableHead>
+                      <TableHead>{tl({ zh: "标的", en: "Symbol" })}</TableHead>
+                      <TableHead>{tl({ zh: "方向", en: "Side" })}</TableHead>
+                      <TableHead className="text-right">
+                        {tl({ zh: "手数", en: "Lots" })}
+                      </TableHead>
+                      <TableHead className="text-right">
+                        {tl({ zh: "股数", en: "Shares" })}
+                      </TableHead>
+                      <TableHead className="text-right">
+                        {tl({ zh: "金额", en: "Amount" })}
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -775,7 +847,9 @@ function SizingTab({
                             variant={t.side === "buy" ? "success" : "destructive"}
                             className="font-mono uppercase"
                           >
-                            {t.side === "buy" ? "买入" : "卖出"}
+                            {t.side === "buy"
+                              ? tl({ zh: "买入", en: "Buy" })
+                              : tl({ zh: "卖出", en: "Sell" })}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-right font-mono tabular-nums">
@@ -798,7 +872,9 @@ function SizingTab({
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <Card>
               <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">期初资金</p>
+                <p className="text-xs text-muted-foreground">
+                  {tl({ zh: "期初资金", en: "Initial capital" })}
+                </p>
                 <p className="mt-1 font-mono text-lg tabular-nums">
                   {formatCurrency(data.cash_before)}
                 </p>
@@ -806,7 +882,9 @@ function SizingTab({
             </Card>
             <Card>
               <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">期末资金</p>
+                <p className="text-xs text-muted-foreground">
+                  {tl({ zh: "期末资金", en: "Final capital" })}
+                </p>
                 <p className="mt-1 font-mono text-lg tabular-nums">
                   {formatCurrency(data.cash_after)}
                 </p>
@@ -814,7 +892,9 @@ function SizingTab({
             </Card>
             <Card>
               <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">保证金占用</p>
+                <p className="text-xs text-muted-foreground">
+                  {tl({ zh: "保证金占用", en: "Margin required" })}
+                </p>
                 <p className="mt-1 font-mono text-lg tabular-nums">
                   {formatCurrency(data.margin_required)}
                 </p>
@@ -822,7 +902,9 @@ function SizingTab({
             </Card>
             <Card>
               <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">预估佣金</p>
+                <p className="text-xs text-muted-foreground">
+                  {tl({ zh: "预估佣金", en: "Est. commission" })}
+                </p>
                 <p className="mt-1 font-mono text-lg tabular-nums">
                   {formatCurrency(data.est_commission)}
                 </p>
@@ -830,7 +912,9 @@ function SizingTab({
             </Card>
             <Card>
               <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">预估印花税</p>
+                <p className="text-xs text-muted-foreground">
+                  {tl({ zh: "预估印花税", en: "Est. stamp tax" })}
+                </p>
                 <p className="mt-1 font-mono text-lg tabular-nums">
                   {formatCurrency(data.est_tax)}
                 </p>
@@ -838,7 +922,9 @@ function SizingTab({
             </Card>
             <Card>
               <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">预估滑点</p>
+                <p className="text-xs text-muted-foreground">
+                  {tl({ zh: "预估滑点", en: "Est. slippage" })}
+                </p>
                 <p className="mt-1 font-mono text-lg tabular-nums">
                   {formatCurrency(data.est_slippage)}
                 </p>
@@ -858,6 +944,7 @@ function FeasibilityTab({
   allocateResult: AllocateResponse | null;
   sharedLots: LotRow[];
 }) {
+  const { tl } = useT();
   const [lotRows, setLotRows] = useState<LotRow[]>([]);
 
   const mutate = useMutation({
@@ -917,22 +1004,30 @@ function FeasibilityTab({
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Layers className="h-4 w-4 text-primary" />
-            资金可行性评估
+            {tl({ zh: "资金可行性评估", en: "Capital feasibility assessment" })}
           </CardTitle>
           <CardDescription>
-            在不同资金档位下评估目标组合的可达成性与容量压力。
+            {tl({
+              zh: "在不同资金档位下评估目标组合的可达成性与容量压力。",
+              en: "Assess attainability and capacity pressure of the target portfolio across capital tiers.",
+            })}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           {!hasWeights && (
             <div className="rounded-md border border-warning/30 bg-warning/5 p-3 text-sm text-warning">
-              尚无目标权重,请先在「目标权重分配」完成计算。
+              {tl({
+                zh: "尚无目标权重,请先在「目标权重分配」完成计算。",
+                en: "No target weights yet. Complete the calculation in “Target Weight Allocation” first.",
+              })}
             </div>
           )}
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <Label>标的与手数价格 (可手动调整)</Label>
+              <Label>
+                {tl({ zh: "标的与手数价格 (可手动调整)", en: "Symbol lots & prices (editable)" })}
+              </Label>
               <Button
                 variant="outline"
                 size="sm"
@@ -940,28 +1035,28 @@ function FeasibilityTab({
                 disabled={sharedLots.filter((l) => l.symbol.trim()).length === 0}
               >
                 <RefreshCw className="h-4 w-4" />
-                应用离散求解上下文
+                {tl({ zh: "应用离散求解上下文", en: "Apply sizing context" })}
               </Button>
             </div>
             <div className="space-y-2">
               {lotRows.map((l, i) => (
                 <div key={i} className="flex items-center gap-2">
                   <Input
-                    placeholder="标的代码"
+                    placeholder={tl({ zh: "标的代码", en: "Symbol" })}
                     value={l.symbol}
                     onChange={(e) => updateLot(i, { symbol: e.target.value })}
                     className="font-mono"
                   />
                   <Input
                     type="number"
-                    placeholder="手数"
+                    placeholder={tl({ zh: "手数", en: "Lots" })}
                     value={l.lot_size}
                     onChange={(e) => updateLot(i, { lot_size: e.target.value })}
                     className="w-28 tabular-nums"
                   />
                   <Input
                     type="number"
-                    placeholder="单价"
+                    placeholder={tl({ zh: "单价", en: "Price" })}
                     value={l.price}
                     onChange={(e) => updateLot(i, { price: e.target.value })}
                     className="w-32 tabular-nums"
@@ -979,7 +1074,7 @@ function FeasibilityTab({
             </div>
             <Button variant="outline" size="sm" onClick={addLot}>
               <Plus className="h-4 w-4" />
-              添加标的
+              {tl({ zh: "添加标的", en: "Add symbol" })}
             </Button>
           </div>
 
@@ -989,11 +1084,16 @@ function FeasibilityTab({
               disabled={!hasWeights || parsedLots.length === 0 || mutate.isPending}
             >
               <ShieldCheck className="h-4 w-4" />
-              {mutate.isPending ? "评估中…" : "评估可行性"}
+              {mutate.isPending
+                ? tl({ zh: "评估中…", en: "Evaluating…" })
+                : tl({ zh: "评估可行性", en: "Evaluate feasibility" })}
             </Button>
             {parsedLots.length === 0 && (
               <span className="text-xs text-muted-foreground">
-                请补充标的手数与价格
+                {tl({
+                  zh: "请补充标的手数与价格",
+                  en: "Provide symbol lots and prices",
+                })}
               </span>
             )}
           </div>
@@ -1002,11 +1102,14 @@ function FeasibilityTab({
 
       {mutate.isError && (
         <ErrorState
-          title="可行性评估失败"
+          title={tl({ zh: "可行性评估失败", en: "Feasibility assessment failed" })}
           message={
             mutate.error instanceof Error
               ? mutate.error.message
-              : "无法评估资金可行性"
+              : tl({
+                  zh: "无法评估资金可行性",
+                  en: "Unable to assess capital feasibility",
+                })
           }
         />
       )}
@@ -1014,8 +1117,11 @@ function FeasibilityTab({
       {mutate.isSuccess && tiers.length === 0 && (
         <EmptyState
           icon={<Layers className="h-8 w-8" />}
-          title="无可行性档位"
-          description="未返回任何资金档位结果。"
+          title={tl({ zh: "无可行性档位", en: "No feasible tiers" })}
+          description={tl({
+            zh: "未返回任何资金档位结果。",
+            en: "No capital tier results were returned.",
+          })}
         />
       )}
 
@@ -1031,6 +1137,7 @@ function FeasibilityTab({
 }
 
 function FeasibilityCard({ tier }: { tier: TierFeasibility }) {
+  const { tl } = useT();
   const pressure = Math.min(Math.max(tier.capacity_pressure, 0), 1);
   return (
     <Card className={cn(!tier.feasible && "border-destructive/40")}>
@@ -1043,20 +1150,27 @@ function FeasibilityCard({ tier }: { tier: TierFeasibility }) {
             </p>
           </div>
           <StatusBadge status={tier.feasible ? "ok" : "failed"}>
-            {tier.feasible ? "可行" : "不可行"}
+            {tier.feasible
+              ? tl({ zh: "可行", en: "Feasible" })
+              : tl({ zh: "不可行", en: "Infeasible" })}
           </StatusBadge>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        <Metric label="跟踪误差" value={formatPercent(tier.tracking_error)} />
         <Metric
-          label="保证金占用"
+          label={tl({ zh: "跟踪误差", en: "Tracking error" })}
+          value={formatPercent(tier.tracking_error)}
+        />
+        <Metric
+          label={tl({ zh: "保证金占用", en: "Margin required" })}
           value={formatCurrency(tier.margin_required)}
         />
 
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">容量压力</span>
+            <span className="text-sm text-muted-foreground">
+              {tl({ zh: "容量压力", en: "Capacity pressure" })}
+            </span>
             <span className="font-mono text-sm tabular-nums">
               {fmtPct(pressure)}
             </span>
@@ -1070,7 +1184,9 @@ function FeasibilityCard({ tier }: { tier: TierFeasibility }) {
         <Separator />
 
         <div className="space-y-1.5">
-          <span className="text-sm text-muted-foreground">无法成交标的</span>
+          <span className="text-sm text-muted-foreground">
+            {tl({ zh: "无法成交标的", en: "Unfillable symbols" })}
+          </span>
           {tier.unfillable_symbols.length > 0 ? (
             <div className="flex flex-wrap gap-1">
               {tier.unfillable_symbols.map((s) => (
@@ -1080,7 +1196,7 @@ function FeasibilityCard({ tier }: { tier: TierFeasibility }) {
               ))}
             </div>
           ) : (
-            <p className="text-sm text-success">无</p>
+            <p className="text-sm text-success">{tl({ zh: "无", en: "None" })}</p>
           )}
         </div>
       </CardContent>
@@ -1089,6 +1205,7 @@ function FeasibilityCard({ tier }: { tier: TierFeasibility }) {
 }
 
 export default function PortfolioRisk() {
+  const { tl } = useT();
   const [allocateResult, setAllocateResult] =
     useState<AllocateResponse | null>(null);
   const [lots, setLots] = useState<LotRow[]>([
@@ -1099,11 +1216,14 @@ export default function PortfolioRisk() {
   return (
     <div>
       <PageHeader
-        title="组合与风险"
-        description="目标权重分配、离散交易求解与资金可行性分析"
+        title={tl({ zh: "组合与风险", en: "Portfolio & Risk" })}
+        description={tl({
+          zh: "目标权重分配、离散交易求解与资金可行性分析",
+          en: "Target weight allocation, discrete trade solving and capital feasibility analysis",
+        })}
         breadcrumbs={[
-          { label: "研究", href: "/research" },
-          { label: "组合与风险" },
+          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
+          { label: tl({ zh: "组合与风险", en: "Portfolio & Risk" }) },
         ]}
       />
       <WorkflowIndicator currentPath="/research/portfolio" />
@@ -1112,15 +1232,15 @@ export default function PortfolioRisk() {
         <TabsList>
           <TabsTrigger value="allocate">
             <PieChartIcon className="h-4 w-4" />
-            目标权重分配
+            {tl({ zh: "目标权重分配", en: "Target Weight Allocation" })}
           </TabsTrigger>
           <TabsTrigger value="sizing">
             <Coins className="h-4 w-4" />
-            离散交易求解
+            {tl({ zh: "离散交易求解", en: "Discrete Trade Solver" })}
           </TabsTrigger>
           <TabsTrigger value="feasibility">
             <Layers className="h-4 w-4" />
-            资金可行性
+            {tl({ zh: "资金可行性", en: "Capital Feasibility" })}
           </TabsTrigger>
         </TabsList>
 
@@ -1145,8 +1265,11 @@ export default function PortfolioRisk() {
       </Tabs>
       <NextStepCTA
         nextPath="/research/simulation"
-        nextLabel="模拟盘"
-        description="用纸面撮合验证策略在真实交易环境下的表现"
+        nextLabel={{ zh: "模拟盘", en: "Paper Trading" }}
+        description={{
+          zh: "用纸面撮合验证策略在真实交易环境下的表现",
+          en: "Validate strategy performance in a realistic trading environment via paper matching.",
+        }}
       />
     </div>
   );

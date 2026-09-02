@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import { PageHeader } from "../components/ui/page-header";
 import { PageContainer } from "../components/ui/page-container";
 import { StatCard } from "../components/ui/stat-card";
+import { useT } from "@/i18n";
 import {
   Table,
   TableBody,
@@ -13,6 +14,7 @@ import {
 } from "../components/ui/table";
 
 export default function Dashboard() {
+  const { t } = useT();
   const { data: health } = useQuery({
     queryKey: ["health"],
     queryFn: api.health,
@@ -34,45 +36,45 @@ export default function Dashboard() {
   return (
     <PageContainer>
       <PageHeader
-        title="仪表盘"
-        description="账户、内核与活动订单概览;数据每 5 秒刷新。"
+        title={t("dashboard.title")}
+        description={t("dashboard.description")}
       />
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
-          label="内核状态"
-          value={health?.kernel_ready ? "就绪" : "未就绪"}
-          trend={health?.kernel_ready ? { value: "在线", positive: true } : { value: "离线", positive: false }}
+          label={t("dashboard.kernelStatus")}
+          value={health?.kernel_ready ? t("dashboard.ready") : t("dashboard.notReady")}
+          trend={health?.kernel_ready ? { value: t("dashboard.online"), positive: true } : { value: t("dashboard.offline"), positive: false }}
         />
         <StatCard
-          label="Kill Switch"
+          label={t("dashboard.killSwitch")}
           value={health?.kill_switch_level ?? "—"}
           trend={
             health?.kill_switch_level === "off"
-              ? { value: "未触发", positive: true }
-              : { value: "已触发", positive: false }
+              ? { value: t("dashboard.ksNotTriggered"), positive: true }
+              : { value: t("dashboard.ksTriggered"), positive: false }
           }
         />
-        <StatCard label="活动订单" value={String(activeOrders.length)} />
-        <StatCard label="总资产" value={account ? `¥${Number(account.total_asset).toLocaleString()}` : "—"} />
-        <StatCard label="可用资金" value={account ? `¥${Number(account.cash).toLocaleString()}` : "—"} />
-        <StatCard label="冻结资金" value={account ? `¥${Number(account.frozen_cash).toLocaleString()}` : "—"} />
-        <StatCard label="券商" value={account?.broker_kind ?? "—"} />
-        <StatCard label="账户" value={account?.account_id ?? "—"} />
+        <StatCard label={t("dashboard.activeOrders")} value={String(activeOrders.length)} />
+        <StatCard label={t("dashboard.totalAsset")} value={account ? `¥${Number(account.total_asset).toLocaleString()}` : "—"} />
+        <StatCard label={t("dashboard.availableCash")} value={account ? `¥${Number(account.cash).toLocaleString()}` : "—"} />
+        <StatCard label={t("dashboard.frozenCash")} value={account ? `¥${Number(account.frozen_cash).toLocaleString()}` : "—"} />
+        <StatCard label={t("dashboard.broker")} value={account?.broker_kind ?? "—"} />
+        <StatCard label={t("dashboard.account")} value={account?.account_id ?? "—"} />
       </div>
 
       {activeOrders.length > 0 && (
-        <section aria-label="活动订单">
-          <h2 className="mb-3 text-lg font-semibold">活动订单</h2>
+        <section aria-label={t("dashboard.activeOrders")}>
+          <h2 className="mb-3 text-lg font-semibold">{t("dashboard.activeOrders")}</h2>
           <div className="overflow-hidden rounded-lg border border-border bg-card">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>标的</TableHead>
-                  <TableHead>方向</TableHead>
-                  <TableHead className="text-right">数量</TableHead>
-                  <TableHead className="text-right">价格</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>下单时间</TableHead>
+                  <TableHead>{t("common.symbol")}</TableHead>
+                  <TableHead>{t("common.direction")}</TableHead>
+                  <TableHead className="text-right">{t("common.quantity")}</TableHead>
+                  <TableHead className="text-right">{t("common.price")}</TableHead>
+                  <TableHead>{t("common.status")}</TableHead>
+                  <TableHead>{t("dashboard.orderTime")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -80,7 +82,7 @@ export default function Dashboard() {
                   <TableRow key={o.client_order_id}>
                     <TableCell className="font-mono">{o.symbol}</TableCell>
                     <TableCell className={o.side === "buy" ? "text-up" : "text-down"}>
-                      {o.side === "buy" ? "买入" : "卖出"}
+                      {o.side === "buy" ? t("common.buy") : t("common.sell")}
                     </TableCell>
                     <TableCell className="text-right">{o.quantity}</TableCell>
                     <TableCell className="text-right">{o.price ?? "—"}</TableCell>

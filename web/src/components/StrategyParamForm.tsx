@@ -8,6 +8,7 @@ import type {
   StrategyParams,
 } from "../lib/strategyParams";
 import { HintLabel } from "./InfoHint";
+import { useT, type Language } from "@/i18n";
 
 function inputBounds(param: StrategyParamInfo) {
   return {
@@ -16,25 +17,29 @@ function inputBounds(param: StrategyParamInfo) {
   };
 }
 
-function paramHint(param: StrategyParamInfo): InfoHintDefinition {
+function paramHint(param: StrategyParamInfo, lang: Language): InfoHintDefinition {
+  const zh = lang === "zh";
   const constraints: string[] = [];
-  if (param.enum) constraints.push(`可选值：${param.enum.join("、")}`);
-  if (param.minimum !== null) constraints.push(`最小值 ${param.minimum}`);
+  if (param.enum) constraints.push(zh ? `可选值：${param.enum.join("、")}` : `Allowed: ${param.enum.join(", ")}`);
+  if (param.minimum !== null) constraints.push(zh ? `最小值 ${param.minimum}` : `Minimum ${param.minimum}`);
   if (param.exclusive_minimum !== null) {
-    constraints.push(`必须大于 ${param.exclusive_minimum}`);
+    constraints.push(zh ? `必须大于 ${param.exclusive_minimum}` : `Must be greater than ${param.exclusive_minimum}`);
   }
-  if (param.maximum !== null) constraints.push(`最大值 ${param.maximum}`);
+  if (param.maximum !== null) constraints.push(zh ? `最大值 ${param.maximum}` : `Maximum ${param.maximum}`);
   if (param.exclusive_maximum !== null) {
-    constraints.push(`必须小于 ${param.exclusive_maximum}`);
+    constraints.push(zh ? `必须小于 ${param.exclusive_maximum}` : `Must be less than ${param.exclusive_maximum}`);
   }
-  if (param.min_length !== null) constraints.push(`至少 ${param.min_length} 个字符`);
-  if (param.max_length !== null) constraints.push(`最多 ${param.max_length} 个字符`);
-  constraints.push(param.required ? "必填" : "可选");
+  if (param.min_length !== null) constraints.push(zh ? `至少 ${param.min_length} 个字符` : `At least ${param.min_length} characters`);
+  if (param.max_length !== null) constraints.push(zh ? `最多 ${param.max_length} 个字符` : `At most ${param.max_length} characters`);
+  constraints.push(param.required ? (zh ? "必填" : "Required") : zh ? "可选" : "Optional");
 
   return {
-    title: param.label,
-    description: param.description || "该字段由策略参数 schema 定义并在后端校验。",
-    detail: constraints.join("；"),
+    title: { zh: param.label, en: param.label },
+    description: {
+      zh: param.description || "该字段由策略参数 schema 定义并在后端校验。",
+      en: param.description || "This field is defined by the strategy parameter schema and validated on the backend.",
+    },
+    detail: { zh: constraints.join("；"), en: constraints.join("; ") },
   };
 }
 
@@ -51,12 +56,13 @@ export default function StrategyParamForm({
   errors?: StrategyFieldErrors;
   disabled?: boolean;
 }) {
+  const { t, lang } = useT();
   const visibleParams = definition.params.filter((param) => !param.ui_hidden);
 
   if (visibleParams.length === 0) {
     return (
       <div className="rounded-lg bg-muted/50 px-4 py-3 text-sm text-muted-foreground">
-        此策略没有可配置参数。
+        {t("strategyParamForm.noParams")}
       </div>
     );
   }
@@ -74,7 +80,7 @@ export default function StrategyParamForm({
           <div key={param.name}>
             <HintLabel
               htmlFor={id}
-              hint={paramHint(param)}
+              hint={paramHint(param, lang)}
               labelClassName="text-sm font-medium text-foreground"
             >
               {param.label}
@@ -93,7 +99,7 @@ export default function StrategyParamForm({
                 aria-describedby={`${id}-description`}
                 className={commonClass}
               >
-                {param.nullable && <option value="">留空</option>}
+                {param.nullable && <option value="">{t("strategyParamForm.leaveEmpty")}</option>}
                 {param.enum.map((option) => (
                   <option key={String(option)} value={String(option)}>
                     {String(option)}
@@ -112,7 +118,7 @@ export default function StrategyParamForm({
                   disabled={disabled}
                   className="size-4 rounded border-border text-primary focus:ring-ring"
                 />
-                启用
+                {t("strategyParamForm.enable")}
               </label>
             ) : (
               <input

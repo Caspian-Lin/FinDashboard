@@ -5,6 +5,7 @@ import { PageHeader } from "../components/ui/page-header";
 import { PageContainer } from "../components/ui/page-container";
 import { EmptyState } from "../components/ui/states";
 import { Button } from "../components/ui/button";
+import { useT } from "@/i18n";
 import {
   Table,
   TableBody,
@@ -15,6 +16,7 @@ import {
 } from "../components/ui/table";
 
 export default function Positions() {
+  const { t } = useT();
   const [source, setSource] = useState<"local" | "broker">("local");
   const { data } = useQuery({
     queryKey: ["positions", source],
@@ -27,10 +29,10 @@ export default function Positions() {
   return (
     <PageContainer>
       <PageHeader
-        title="持仓"
-        description="本地持仓用于实时响应与风控;券商持仓为最终真实来源。"
+        title={t("positions.title")}
+        description={t("positions.description")}
         actions={
-          <div className="flex gap-2" role="group" aria-label="持仓数据来源">
+          <div className="flex gap-2" role="group" aria-label={t("positions.sourceGroup")}>
             {(["local", "broker"] as const).map((s) => (
               <Button
                 key={s}
@@ -39,7 +41,7 @@ export default function Positions() {
                 onClick={() => setSource(s)}
                 aria-pressed={source === s}
               >
-                {s === "local" ? "本地持仓" : "券商持仓"}
+                {s === "local" ? t("positions.local") : t("positions.broker")}
               </Button>
             ))}
           </div>
@@ -47,27 +49,27 @@ export default function Positions() {
       />
 
       {positions.length === 0 ? (
-        <EmptyState title="无持仓数据" description="切换数据来源或等待持仓查询完成。" />
+        <EmptyState title={t("positions.emptyTitle")} description={t("positions.emptyDesc")} />
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-card">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>标的</TableHead>
-                <TableHead>方向</TableHead>
-                <TableHead className="text-right">总持仓</TableHead>
-                <TableHead className="text-right">可用</TableHead>
-                <TableHead className="text-right">冻结</TableHead>
-                <TableHead className="text-right">均价</TableHead>
-                <TableHead className="text-right">市值</TableHead>
-                <TableHead className="text-right">浮盈亏</TableHead>
+                <TableHead>{t("common.symbol")}</TableHead>
+                <TableHead>{t("common.direction")}</TableHead>
+                <TableHead className="text-right">{t("positions.totalQty")}</TableHead>
+                <TableHead className="text-right">{t("positions.available")}</TableHead>
+                <TableHead className="text-right">{t("positions.frozen")}</TableHead>
+                <TableHead className="text-right">{t("positions.avgPrice")}</TableHead>
+                <TableHead className="text-right">{t("positions.marketValue")}</TableHead>
+                <TableHead className="text-right">{t("positions.unrealizedPnl")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {positions.map((p, i) => (
                 <TableRow key={i}>
                   <TableCell className="font-mono">{p.symbol}</TableCell>
-                  <TableCell>{p.position_side === "long" ? "多头" : "空头"}</TableCell>
+                  <TableCell>{p.position_side === "long" ? t("common.long") : t("common.short")}</TableCell>
                   <TableCell className="text-right">{p.total_quantity}</TableCell>
                   <TableCell className="text-right">{p.available_quantity}</TableCell>
                   <TableCell className="text-right">{p.frozen_quantity}</TableCell>

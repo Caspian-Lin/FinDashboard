@@ -2,6 +2,7 @@ import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 
 const Dialog = DialogPrimitive.Root;
 const DialogTrigger = DialogPrimitive.Trigger;
@@ -23,6 +24,12 @@ const DialogOverlay = React.forwardRef<
 ));
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
+/** 关闭按钮的 sr-only 文案(取当前语言;forwardRef 内联体不便调用 hook,故独立成组件)。 */
+function SrOnlyClose() {
+  const { tl } = useT();
+  return <span className="sr-only">{tl({ zh: "关闭", en: "Close" })}</span>;
+}
+
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
@@ -40,7 +47,7 @@ const DialogContent = React.forwardRef<
       {children}
       <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring disabled:pointer-events-none">
         <X className="h-4 w-4" />
-        <span className="sr-only">关闭</span>
+        <SrOnlyClose />
       </DialogPrimitive.Close>
     </DialogPrimitive.Content>
   </DialogPortal>

@@ -39,12 +39,14 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import { cn, formatDateTime, timeAgo } from "@/lib/utils";
+import { useT } from "@/i18n";
 
 const ALL = "all";
 const POLL_MS = 5000;
 
 /** 任务中心:研究/数据/回测域统一后台任务的集中管理页(issue #161;#221 归档)。 */
 export default function Jobs() {
+  const { t, tl } = useT();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = searchParams.get("status") ?? ALL;
@@ -115,7 +117,7 @@ export default function Jobs() {
       api.bulkArchiveJobs({ statuses: ["succeeded", "cancelled"], limit: 1000 }),
     onSuccess: (result) => {
       setActionError(null);
-      setBulkNotice(`已归档 ${result.archived_count} 条任务(数据未删除,可随时恢复)。`);
+      setBulkNotice(t("jobs.bulkArchived", { count: result.archived_count }));
       invalidateJobs();
     },
     onError: (err: Error) => setActionError(err.message),
@@ -130,8 +132,8 @@ export default function Jobs() {
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6">
       <PageHeader
-        title="任务中心"
-        description="研究 / 数据 / 回测域后台任务的统一查看与取消;任务由独立 Worker 进程消费,刷新页面后状态自动恢复。归档只隐藏不删除,可随时恢复。"
+        title={t("jobs.title")}
+        description={t("jobs.description")}
         actions={
           <div className="flex items-center gap-2">
             {archivedFilter === "exclude" && (
@@ -140,11 +142,11 @@ export default function Jobs() {
                 size="sm"
                 onClick={() => bulkArchiveMutation.mutate()}
                 disabled={bulkArchiveMutation.isPending || bulkTargetCount === 0}
-                aria-label="批量归档已完成的任务"
-                title={`归档列表中的成功/已取消任务(当前 ${bulkTargetCount} 条),失败/中断任务保留`}
+                aria-label={t("jobs.bulkArchiveAria")}
+                title={t("jobs.bulkArchiveTitle", { count: bulkTargetCount })}
               >
                 <Archive className="h-4 w-4" />
-                {bulkArchiveMutation.isPending ? "归档中…" : "归档已完成"}
+                {bulkArchiveMutation.isPending ? t("jobs.archiving") : t("jobs.bulkArchive")}
               </Button>
             )}
             <Button
@@ -152,10 +154,10 @@ export default function Jobs() {
               size="sm"
               onClick={() => refetch()}
               disabled={isFetching}
-              aria-label="刷新任务列表"
+              aria-label={t("jobs.refreshAria")}
             >
               <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
-              刷新
+              {t("common.refresh")}
             </Button>
           </div>
         }
@@ -163,63 +165,63 @@ export default function Jobs() {
 
       <div className="flex flex-wrap items-end gap-4">
         <div className="space-y-1.5">
-          <Label htmlFor="jobs-status-filter">状态</Label>
+          <Label htmlFor="jobs-status-filter">{t("common.status")}</Label>
           <Select
             value={statusFilter}
             onValueChange={(v) => setFilter("status", v)}
           >
-            <SelectTrigger id="jobs-status-filter" className="w-40" aria-label="按状态过滤">
+            <SelectTrigger id="jobs-status-filter" className="w-40" aria-label={t("jobs.filterByStatus")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={ALL}>全部状态</SelectItem>
+              <SelectItem value={ALL}>{t("jobs.allStatuses")}</SelectItem>
               {JOB_STATUS_OPTIONS.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
+                  {tl(opt.label)}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="jobs-kind-filter">任务类型</Label>
+          <Label htmlFor="jobs-kind-filter">{t("jobs.kind")}</Label>
           <Select value={kindFilter} onValueChange={(v) => setFilter("kind", v)}>
-            <SelectTrigger id="jobs-kind-filter" className="w-48" aria-label="按任务类型过滤">
+            <SelectTrigger id="jobs-kind-filter" className="w-48" aria-label={t("jobs.filterByKind")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={ALL}>全部类型</SelectItem>
+              <SelectItem value={ALL}>{t("jobs.allKinds")}</SelectItem>
               {JOB_KINDS.map((k) => (
                 <SelectItem key={k.value} value={k.value}>
-                  {k.label}
+                  {tl(k.label)}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="jobs-archived-filter">归档</Label>
+          <Label htmlFor="jobs-archived-filter">{t("jobs.archived")}</Label>
           <Select value={archivedFilter} onValueChange={(v) => setFilter("archived", v)}>
-            <SelectTrigger id="jobs-archived-filter" className="w-36" aria-label="按归档状态过滤">
+            <SelectTrigger id="jobs-archived-filter" className="w-36" aria-label={t("jobs.filterByArchived")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               {JOB_ARCHIVED_OPTIONS.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
+                  {tl(opt.label)}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
         <div className="text-sm text-muted-foreground">
-          共 {jobs.length} 条{activeCount > 0 ? `,${activeCount} 条进行中` : ""}
+          {t("jobs.totalCount", { count: jobs.length })}{activeCount > 0 ? t("jobs.activeCount", { count: activeCount }) : ""}
         </div>
       </div>
 
       {actionError && (
         <Alert variant="destructive">
-          <AlertDescription>操作失败:{actionError}</AlertDescription>
+          <AlertDescription>{t("jobs.actionFailed")}{actionError}</AlertDescription>
         </Alert>
       )}
       {bulkNotice && (
@@ -238,8 +240,8 @@ export default function Jobs() {
       ) : jobs.length === 0 ? (
         <EmptyState
           icon={<ListTodo className="h-8 w-8" />}
-          title="暂无任务"
-          description="在数据、回测或研究页面提交的任务会出现在这里。"
+          title={t("jobs.emptyTitle")}
+          description={t("jobs.emptyDesc")}
         />
       ) : (
         <div className="overflow-hidden rounded-lg border border-border bg-card">
@@ -247,14 +249,14 @@ export default function Jobs() {
             <TableHeader>
               <TableRow>
                 <TableHead className="w-10" />
-                <TableHead>任务 ID</TableHead>
-                <TableHead>类型</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>进度</TableHead>
-                <TableHead>尝试</TableHead>
-                <TableHead>提交人</TableHead>
-                <TableHead>创建时间</TableHead>
-                <TableHead className="text-right">操作</TableHead>
+                <TableHead>{t("jobs.jobId")}</TableHead>
+                <TableHead>{t("jobs.kind")}</TableHead>
+                <TableHead>{t("common.status")}</TableHead>
+                <TableHead>{t("jobs.progress")}</TableHead>
+                <TableHead>{t("jobs.attempts")}</TableHead>
+                <TableHead>{t("jobs.requestedBy")}</TableHead>
+                <TableHead>{t("jobs.createdAt")}</TableHead>
+                <TableHead className="text-right">{t("common.actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -305,6 +307,7 @@ function JobRow({
   onUnarchive,
   unarchiving,
 }: JobRowProps) {
+  const { t, tl, lang } = useT();
   const active = isJobRunning(job);
   const archived = job.archived_at != null;
   const total = job.progress_total;
@@ -320,19 +323,19 @@ function JobRow({
             className="h-9 w-9"
             onClick={onToggleExpand}
             aria-expanded={expanded}
-            aria-label={expanded ? "收起任务详情" : "展开任务详情"}
+            aria-label={expanded ? t("jobs.collapseDetail") : t("jobs.expandDetail")}
           >
             {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
           </Button>
         </TableCell>
         <TableCell className="font-mono text-xs">{job.job_id}</TableCell>
-        <TableCell>{jobKindLabel(job.kind)}</TableCell>
+        <TableCell>{jobKindLabel(job.kind, lang)}</TableCell>
         <TableCell>
           <div className="flex items-center gap-1.5">
-            <StatusBadge status={job.status}>{JOB_STATUS_LABELS[job.status]}</StatusBadge>
+            <StatusBadge status={job.status}>{tl(JOB_STATUS_LABELS[job.status])}</StatusBadge>
             {archived && (
               <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                已归档
+                {t("jobs.archivedBadge")}
               </span>
             )}
           </div>
@@ -340,7 +343,7 @@ function JobRow({
         <TableCell className="min-w-40">
           {job.status === "running" && total > 0 ? (
             <div className="flex items-center gap-2">
-              <Progress value={percent ?? 0} className="w-24" aria-label="执行进度" />
+              <Progress value={percent ?? 0} className="w-24" aria-label={t("jobs.progressAria")} />
               <span className="text-xs text-muted-foreground whitespace-nowrap">
                 {job.progress_done}/{total}
                 {job.phase ? ` ${job.phase}` : ""}
@@ -355,7 +358,7 @@ function JobRow({
         </TableCell>
         <TableCell className="text-xs text-muted-foreground">{job.requested_by}</TableCell>
         <TableCell className="text-xs text-muted-foreground" title={formatDateTime(job.created_at)}>
-          {timeAgo(job.created_at)}
+          {timeAgo(job.created_at, lang)}
         </TableCell>
         <TableCell className="text-right">
           {active ? (
@@ -364,9 +367,9 @@ function JobRow({
               size="sm"
               onClick={onCancel}
               disabled={cancelling}
-              aria-label={`取消任务 ${job.job_id}`}
+              aria-label={t("jobs.cancelJobAria", { id: job.job_id })}
             >
-              {cancelling ? "取消中…" : "取消"}
+              {cancelling ? t("jobs.cancelling") : t("common.cancel")}
             </Button>
           ) : archived ? (
             <Button
@@ -374,10 +377,10 @@ function JobRow({
               size="sm"
               onClick={onUnarchive}
               disabled={unarchiving}
-              aria-label={`取消归档任务 ${job.job_id}`}
+              aria-label={t("jobs.unarchiveJobAria", { id: job.job_id })}
             >
               <ArchiveRestore className="h-4 w-4" />
-              {unarchiving ? "恢复中…" : "恢复"}
+              {unarchiving ? t("jobs.restoring") : t("jobs.restore")}
             </Button>
           ) : (
             <Button
@@ -385,10 +388,10 @@ function JobRow({
               size="sm"
               onClick={onArchive}
               disabled={archiving}
-              aria-label={`归档任务 ${job.job_id}`}
+              aria-label={t("jobs.archiveJobAria", { id: job.job_id })}
             >
               <Archive className="h-4 w-4" />
-              {archiving ? "归档中…" : "归档"}
+              {archiving ? t("jobs.archiving") : t("jobs.archive")}
             </Button>
           )}
         </TableCell>
@@ -405,20 +408,21 @@ function JobRow({
 }
 
 function JobDetail({ job }: { job: JobOut }) {
+  const { t } = useT();
   const rows: [string, string][] = [
-    ["队列", job.queue],
-    ["优先级", String(job.priority)],
+    [t("jobs.queue"), job.queue],
+    [t("jobs.priority"), String(job.priority)],
     ["Worker", job.worker_id ?? "—"],
-    ["幂等键", job.idempotency_key],
-    ["结果引用", job.result_ref ?? "—"],
-    ["错误码", job.error_code ?? "—"],
-    ["错误摘要", job.error_summary ?? "—"],
-    ["心跳时间", formatDateTime(job.heartbeat_at)],
-    ["租约到期", formatDateTime(job.lease_until)],
-    ["开始时间", formatDateTime(job.started_at)],
-    ["完成时间", formatDateTime(job.finished_at)],
-    ["归档时间", formatDateTime(job.archived_at)],
-    ["更新时间", formatDateTime(job.updated_at)],
+    [t("jobs.idempotencyKey"), job.idempotency_key],
+    [t("jobs.resultRef"), job.result_ref ?? "—"],
+    [t("jobs.errorCode"), job.error_code ?? "—"],
+    [t("jobs.errorSummary"), job.error_summary ?? "—"],
+    [t("jobs.heartbeatAt"), formatDateTime(job.heartbeat_at)],
+    [t("jobs.leaseUntil"), formatDateTime(job.lease_until)],
+    [t("jobs.startedAt"), formatDateTime(job.started_at)],
+    [t("jobs.finishedAt"), formatDateTime(job.finished_at)],
+    [t("jobs.archivedAt"), formatDateTime(job.archived_at)],
+    [t("jobs.updatedAt"), formatDateTime(job.updated_at)],
   ];
   return (
     <div className="grid gap-6 lg:grid-cols-2">
@@ -433,7 +437,7 @@ function JobDetail({ job }: { job: JobOut }) {
         ))}
       </dl>
       <div className="min-w-0">
-        <p className="mb-1 text-xs text-muted-foreground">入参 payload</p>
+        <p className="mb-1 text-xs text-muted-foreground">{t("jobs.payload")}</p>
         <pre className="max-h-56 overflow-auto scrollbar-thin rounded-md border border-border bg-background p-3 font-mono text-xs">
           {JSON.stringify(job.payload, null, 2)}
         </pre>

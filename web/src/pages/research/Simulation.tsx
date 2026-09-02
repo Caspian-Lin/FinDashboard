@@ -1,5 +1,6 @@
 import { WorkflowIndicator, NextStepCTA } from "@/components/research/ResearchHint";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { useT } from "@/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -109,11 +110,11 @@ function InfoItem({ label, children }: { label: string; children: ReactNode }) {
 }
 
 const SIMULATION_TARGET_RULES = [
-  { key: "equity_etf", label: "股票 ETF（100 份/手）", instrumentType: "etf" },
-  { key: "a_share_stock", label: "A 股股票（100 股/手）", instrumentType: "stock" },
-  { key: "cross_border_etf", label: "跨境 ETF（T+0）", instrumentType: "etf" },
-  { key: "bond_etf", label: "债券 ETF（10 份/手）", instrumentType: "etf" },
-  { key: "money_market_etf", label: "货币 ETF（T+0）", instrumentType: "etf" },
+  { key: "equity_etf", label: { zh: "股票 ETF（100 份/手）", en: "Stock ETF (100 shares/lot)" }, instrumentType: "etf" },
+  { key: "a_share_stock", label: { zh: "A 股股票（100 股/手）", en: "A-share stock (100 shares/lot)" }, instrumentType: "stock" },
+  { key: "cross_border_etf", label: { zh: "跨境 ETF（T+0）", en: "Cross-border ETF (T+0)" }, instrumentType: "etf" },
+  { key: "bond_etf", label: { zh: "债券 ETF（10 份/手）", en: "Bond ETF (10 shares/lot)" }, instrumentType: "etf" },
+  { key: "money_market_etf", label: { zh: "货币 ETF（T+0）", en: "Money market ETF (T+0)" }, instrumentType: "etf" },
 ] as const;
 
 function MetricCard({
@@ -156,11 +157,12 @@ function DataTableShell({
   emptyDescription?: string;
   children: ReactNode;
 }) {
+  const { tl } = useT();
   if (isLoading) return <LoadingState rows={4} />;
   if (isError)
     return (
       <ErrorState
-        message={errorMessage(error, "数据加载失败")}
+        message={errorMessage(error, tl({ zh: "数据加载失败", en: "Failed to load data" }))}
         onRetry={onRetry}
       />
     );
@@ -182,6 +184,7 @@ function SessionDetail({
   session: SimulationSession;
   onClear: () => void;
 }) {
+  const { tl } = useT();
   const queryClient = useQueryClient();
   const [actionActor, setActionActor] = useState("console");
   const [tab, setTab] = useState("positions");
@@ -355,7 +358,7 @@ function SessionDetail({
             variant="ghost"
             size="icon"
             onClick={onClear}
-            aria-label="取消选择"
+            aria-label={tl({ zh: "取消选择", en: "Clear selection" })}
           >
             <RefreshCw className="h-4 w-4 rotate-180" />
           </Button>
@@ -365,44 +368,44 @@ function SessionDetail({
         <ScrollArea className="max-h-[760px] pr-3">
           <div className="space-y-5">
             <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4">
-              <InfoItem label="会话 ID">
+              <InfoItem label={tl({ zh: "会话 ID", en: "Session ID" })}>
                 <span className="font-mono text-xs">{detail.session_id}</span>
               </InfoItem>
-              <InfoItem label="策略">
+              <InfoItem label={tl({ zh: "策略", en: "Strategy" })}>
                 <span className="font-mono text-xs">{detail.strategy_id}</span>
               </InfoItem>
-              <InfoItem label="版本">
+              <InfoItem label={tl({ zh: "版本", en: "Version" })}>
                 <span className="font-mono">v{detail.strategy_version}</span>
               </InfoItem>
-              <InfoItem label="状态">
+              <InfoItem label={tl({ zh: "状态", en: "Status" })}>
                 <StatusBadge status={status} />
               </InfoItem>
-              <InfoItem label="数据源模式">
+              <InfoItem label={tl({ zh: "数据源模式", en: "Data source mode" })}>
                 <Badge variant="info" className="font-mono">
                   {detail.source_mode}
                 </Badge>
               </InfoItem>
-              <InfoItem label="来源运行">
+              <InfoItem label={tl({ zh: "来源运行", en: "Source run" })}>
                 <span className="font-mono text-xs">
                   {detail.source_run_id ?? "—"}
                 </span>
               </InfoItem>
-              <InfoItem label="晋级状态">
+              <InfoItem label={tl({ zh: "晋级状态", en: "Promotion status" })}>
                 <Badge variant="secondary" className="font-mono">
                   {detail.promotion_status}
                 </Badge>
               </InfoItem>
-              <InfoItem label="时钟倍速">
+              <InfoItem label={tl({ zh: "时钟倍速", en: "Clock speed" })}>
                 <span className="font-mono tabular-nums">
                   {formatNumber(detail.clock_speed, 1)}x
                 </span>
               </InfoItem>
-              <InfoItem label="恢复次数">
+              <InfoItem label={tl({ zh: "恢复次数", en: "Recovery count" })}>
                 <span className="font-mono tabular-nums">
                   {detail.recovery_count}
                 </span>
               </InfoItem>
-              <InfoItem label="创建时间">
+              <InfoItem label={tl({ zh: "创建时间", en: "Created at" })}>
                 <span className="tabular-nums">
                   {formatDateTime(detail.created_at)}
                 </span>
@@ -411,7 +414,7 @@ function SessionDetail({
 
             {detail.data_release_id && (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <span>数据发布:</span>
+                <span>{tl({ zh: "数据发布:", en: "Data release:" })}</span>
                 <span className="font-mono text-foreground">
                   {detail.data_release_id}
                 </span>
@@ -423,13 +426,13 @@ function SessionDetail({
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2">
                 <Label htmlFor="action-actor" className="text-xs text-muted-foreground">
-                  操作人
+                  {tl({ zh: "操作人", en: "Actor" })}
                 </Label>
                 <Input
                   id="action-actor"
                   value={actionActor}
                   onChange={(e) => setActionActor(e.target.value)}
-                  placeholder="例如：console"
+                  placeholder={tl({ zh: "例如：console", en: "e.g. console" })}
                   className="h-8 w-40 font-mono text-xs"
                 />
               </div>
@@ -441,7 +444,7 @@ function SessionDetail({
                     onClick={() => startMutation.mutate()}
                   >
                     <Play className="h-4 w-4" />
-                    {startMutation.isPending ? "启动中…" : "启动"}
+                    {startMutation.isPending ? tl({ zh: "启动中…", en: "Starting…" }) : tl({ zh: "启动", en: "Start" })}
                   </Button>
                 )}
                 {status === "running" && (
@@ -453,7 +456,7 @@ function SessionDetail({
                       onClick={() => pauseMutation.mutate()}
                     >
                       <Pause className="h-4 w-4" />
-                      {pauseMutation.isPending ? "暂停中…" : "暂停"}
+                      {pauseMutation.isPending ? tl({ zh: "暂停中…", en: "Pausing…" }) : tl({ zh: "暂停", en: "Pause" })}
                     </Button>
                     <Button
                       size="sm"
@@ -462,7 +465,7 @@ function SessionDetail({
                       onClick={() => stopMutation.mutate()}
                     >
                       <Square className="h-4 w-4" />
-                      {stopMutation.isPending ? "停止中…" : "停止"}
+                      {stopMutation.isPending ? tl({ zh: "停止中…", en: "Stopping…" }) : tl({ zh: "停止", en: "Stop" })}
                     </Button>
                   </>
                 )}
@@ -474,7 +477,7 @@ function SessionDetail({
                       onClick={() => startMutation.mutate()}
                     >
                       <Play className="h-4 w-4" />
-                      {startMutation.isPending ? "启动中…" : "启动"}
+                      {startMutation.isPending ? tl({ zh: "启动中…", en: "Starting…" }) : tl({ zh: "启动", en: "Start" })}
                     </Button>
                     <Button
                       size="sm"
@@ -483,7 +486,7 @@ function SessionDetail({
                       onClick={() => stopMutation.mutate()}
                     >
                       <Square className="h-4 w-4" />
-                      {stopMutation.isPending ? "停止中…" : "停止"}
+                      {stopMutation.isPending ? tl({ zh: "停止中…", en: "Stopping…" }) : tl({ zh: "停止", en: "Stop" })}
                     </Button>
                   </>
                 )}
@@ -495,7 +498,7 @@ function SessionDetail({
                     onClick={() => archiveMutation.mutate()}
                   >
                     <Archive className="h-4 w-4" />
-                    {archiveMutation.isPending ? "归档中…" : "归档"}
+                    {archiveMutation.isPending ? tl({ zh: "归档中…", en: "Archiving…" }) : tl({ zh: "归档", en: "Archive" })}
                   </Button>
                 )}
                 <Button
@@ -505,7 +508,7 @@ function SessionDetail({
                   onClick={openDecisionDialog}
                 >
                   <Plus className="h-4 w-4" />
-                  提交目标仓位
+                  {tl({ zh: "提交目标仓位", en: "Submit target position" })}
                 </Button>
                 <Button
                   size="sm"
@@ -514,7 +517,7 @@ function SessionDetail({
                   onClick={() => setMarketEventOpen(true)}
                 >
                   <Play className="h-4 w-4" />
-                  推进一根行情
+                  {tl({ zh: "推进一根行情", en: "Advance one bar" })}
                 </Button>
                 <Button
                   size="sm"
@@ -528,67 +531,69 @@ function SessionDetail({
                   }}
                 >
                   <RefreshCw className="h-4 w-4" />
-                  刷新数据
+                  {tl({ zh: "刷新数据", en: "Refresh data" })}
                 </Button>
               </div>
               {startMutation.isError && (
                 <p className="text-sm text-destructive">
-                  {errorMessage(startMutation.error, "启动失败")}
+                  {errorMessage(startMutation.error, tl({ zh: "启动失败", en: "Failed to start" }))}
                 </p>
               )}
               {pauseMutation.isError && (
                 <p className="text-sm text-destructive">
-                  {errorMessage(pauseMutation.error, "暂停失败")}
+                  {errorMessage(pauseMutation.error, tl({ zh: "暂停失败", en: "Failed to pause" }))}
                 </p>
               )}
               {stopMutation.isError && (
                 <p className="text-sm text-destructive">
-                  {errorMessage(stopMutation.error, "停止失败")}
+                  {errorMessage(stopMutation.error, tl({ zh: "停止失败", en: "Failed to stop" }))}
                 </p>
               )}
               {archiveMutation.isError && (
                 <p className="text-sm text-destructive">
-                  {errorMessage(archiveMutation.error, "归档失败")}
+                  {errorMessage(archiveMutation.error, tl({ zh: "归档失败", en: "Failed to archive" }))}
                 </p>
               )}
               {status !== "running" && (
                 <p className="text-xs text-muted-foreground">
-                  只有 running 会话可以接收目标仓位决策；当前请先点击“启动”。
+                  {tl({ zh: "只有 running 会话可以接收目标仓位决策；当前请先点击“启动”。", en: "Only running sessions can receive target position decisions; click “Start” first." })}
                 </p>
               )}
               {!sourceRunId && (
                 <Alert variant="warning">
-                  <AlertTitle>会话缺少机器验证来源</AlertTitle>
+                  <AlertTitle>{tl({ zh: "会话缺少机器验证来源", en: "Session lacks a machine-validation source" })}</AlertTitle>
                   <AlertDescription>
-                    此会话没有绑定 <code>RR-</code> 完成运行，无法提交模拟决策。请返回研究运行页面，使用已完成运行和冻结数据发布重新创建会话。
+                    {tl({ zh: "此会话没有绑定 ", en: "This session is not bound to a completed " })}
+                    <code>RR-</code>
+                    {tl({ zh: " 完成运行，无法提交模拟决策。请返回研究运行页面，使用已完成运行和冻结数据发布重新创建会话。", en: " run, so simulation decisions cannot be submitted. Go back to the research runs page and recreate the session with a completed run and a frozen data release." })}
                   </AlertDescription>
                 </Alert>
               )}
               {decisionMutation.isError && (
                 <Alert variant="destructive">
-                  <AlertTitle>目标仓位未提交</AlertTitle>
+                  <AlertTitle>{tl({ zh: "目标仓位未提交", en: "Target position not submitted" })}</AlertTitle>
                   <AlertDescription>
-                    {errorMessage(decisionMutation.error, "请检查 RR- 来源、来源决策和信号 trace 是否属于同一研究运行")}
+                    {errorMessage(decisionMutation.error, tl({ zh: "请检查 RR- 来源、来源决策和信号 trace 是否属于同一研究运行", en: "Check that the RR- source, source decision and signal trace belong to the same research run" }))}
                   </AlertDescription>
                 </Alert>
               )}
               {decisionResult && (
                 <Alert variant="success">
-                  <AlertTitle>目标仓位已记录</AlertTitle>
+                  <AlertTitle>{tl({ zh: "目标仓位已记录", en: "Target position recorded" })}</AlertTitle>
                   <AlertDescription>
                     {decisionResult.duplicate
-                      ? "检测到相同 decision_id，已幂等返回原结果。"
-                      : `已生成 ${decisionResult.orderCount} 个模拟订单；订单仍需行情回放后才会产生成交。`}
+                      ? tl({ zh: "检测到相同 decision_id，已幂等返回原结果。", en: "Duplicate decision_id detected; the original result was returned idempotently." })
+                      : tl({ zh: `已生成 ${decisionResult.orderCount} 个模拟订单；订单仍需行情回放后才会产生成交。`, en: `Generated ${decisionResult.orderCount} simulated orders; fills are only produced after market event replay.` })}
                   </AlertDescription>
                 </Alert>
               )}
               {marketEventResult && (
                 <Alert variant="success">
-                  <AlertTitle>行情事件已处理</AlertTitle>
+                  <AlertTitle>{tl({ zh: "行情事件已处理", en: "Market event processed" })}</AlertTitle>
                   <AlertDescription>
                     {marketEventResult.duplicate
-                      ? "检测到相同 source_event_id，已幂等返回原结果。"
-                      : `已处理 ${marketEventResult.source_event_id}；成交 ${marketEventResult.fill_ids.length} 笔，拒单 ${marketEventResult.rejected_order_ids.length} 笔。`}
+                      ? tl({ zh: "检测到相同 source_event_id，已幂等返回原结果。", en: "Duplicate source_event_id detected; the original result was returned idempotently." })
+                      : tl({ zh: `已处理 ${marketEventResult.source_event_id}；成交 ${marketEventResult.fill_ids.length} 笔，拒单 ${marketEventResult.rejected_order_ids.length} 笔。`, en: `Processed ${marketEventResult.source_event_id}; ${marketEventResult.fill_ids.length} fills, ${marketEventResult.rejected_order_ids.length} rejected orders.` })}
                   </AlertDescription>
                 </Alert>
               )}
@@ -598,11 +603,11 @@ function SessionDetail({
 
             <Tabs value={tab} onValueChange={setTab}>
               <TabsList>
-                <TabsTrigger value="positions">持仓</TabsTrigger>
-                <TabsTrigger value="orders">订单</TabsTrigger>
-                <TabsTrigger value="fills">成交</TabsTrigger>
-                <TabsTrigger value="ledger">账本</TabsTrigger>
-                <TabsTrigger value="report">报告</TabsTrigger>
+                <TabsTrigger value="positions">{tl({ zh: "持仓", en: "Positions" })}</TabsTrigger>
+                <TabsTrigger value="orders">{tl({ zh: "订单", en: "Orders" })}</TabsTrigger>
+                <TabsTrigger value="fills">{tl({ zh: "成交", en: "Fills" })}</TabsTrigger>
+                <TabsTrigger value="ledger">{tl({ zh: "账本", en: "Ledger" })}</TabsTrigger>
+                <TabsTrigger value="report">{tl({ zh: "报告", en: "Report" })}</TabsTrigger>
               </TabsList>
 
               <TabsContent value="positions" className="mt-4">
@@ -612,8 +617,8 @@ function SessionDetail({
                   error={positionsQuery.error}
                   onRetry={() => positionsQuery.refetch()}
                   isEmpty={positions.length === 0}
-                  emptyTitle="暂无持仓"
-                  emptyDescription="该会话当前没有任何持仓记录。"
+                  emptyTitle={tl({ zh: "暂无持仓", en: "No positions" })}
+                  emptyDescription={tl({ zh: "该会话当前没有任何持仓记录。", en: "This session has no position records yet." })}
                 >
                   <PositionsTable rows={positions} />
                 </DataTableShell>
@@ -626,8 +631,8 @@ function SessionDetail({
                   error={ordersQuery.error}
                   onRetry={() => ordersQuery.refetch()}
                   isEmpty={orders.length === 0}
-                  emptyTitle="暂无订单"
-                  emptyDescription="该会话尚未生成任何模拟订单。"
+                  emptyTitle={tl({ zh: "暂无订单", en: "No orders" })}
+                  emptyDescription={tl({ zh: "该会话尚未生成任何模拟订单。", en: "No simulated orders have been generated in this session yet." })}
                 >
                   <OrdersTable rows={orders} />
                 </DataTableShell>
@@ -640,8 +645,8 @@ function SessionDetail({
                   error={fillsQuery.error}
                   onRetry={() => fillsQuery.refetch()}
                   isEmpty={fills.length === 0}
-                  emptyTitle="暂无成交"
-                  emptyDescription="该会话尚未发生任何模拟成交。"
+                  emptyTitle={tl({ zh: "暂无成交", en: "No fills" })}
+                  emptyDescription={tl({ zh: "该会话尚未发生任何模拟成交。", en: "No simulated fills have occurred in this session yet." })}
                 >
                   <FillsTable rows={fills} />
                 </DataTableShell>
@@ -654,8 +659,8 @@ function SessionDetail({
                   error={ledgerQuery.error}
                   onRetry={() => ledgerQuery.refetch()}
                   isEmpty={ledger.length === 0}
-                  emptyTitle="暂无账本记录"
-                  emptyDescription="该会话尚未产生任何资金账本变动。"
+                  emptyTitle={tl({ zh: "暂无账本记录", en: "No ledger entries" })}
+                  emptyDescription={tl({ zh: "该会话尚未产生任何资金账本变动。", en: "No cash ledger changes have been recorded in this session yet." })}
                 >
                   <LedgerTable rows={ledger} />
                 </DataTableShell>
@@ -666,7 +671,7 @@ function SessionDetail({
                   <LoadingState rows={4} />
                 ) : reportQuery.isError ? (
                   <ErrorState
-                    message={errorMessage(reportQuery.error, "报告加载失败")}
+                    message={errorMessage(reportQuery.error, tl({ zh: "报告加载失败", en: "Failed to load report" }))}
                     onRetry={() => reportQuery.refetch()}
                   />
                 ) : report ? (
@@ -679,20 +684,22 @@ function SessionDetail({
         <Dialog open={decisionOpen} onOpenChange={setDecisionOpen}>
           <DialogContent className="max-w-2xl">
             <DialogHeader>
-              <DialogTitle>提交结构化目标仓位</DialogTitle>
+              <DialogTitle>{tl({ zh: "提交结构化目标仓位", en: "Submit structured target position" })}</DialogTitle>
               <DialogDescription>
-                该入口只写入模拟盘决策并生成模拟订单意图，不连接券商，也不会写入实盘订单、成交或持仓。
+                {tl({ zh: "该入口只写入模拟盘决策并生成模拟订单意图，不连接券商，也不会写入实盘订单、成交或持仓。", en: "This entry only writes simulation decisions and generates simulated order intents; it never connects to a broker and never writes live orders, fills or positions." })}
               </DialogDescription>
             </DialogHeader>
             <Alert variant="info">
               <AlertDescription>
-                服务端会校验来源决策和信号 trace 必须存在于同一个已完成的 <code>RR-</code> 研究运行；页面不允许绕过这项血缘校验。
+                {tl({ zh: "服务端会校验来源决策和信号 trace 必须存在于同一个已完成的 ", en: "The server validates that the source decision and the signal trace must exist in the same completed " })}
+                <code>RR-</code>
+                {tl({ zh: " 研究运行；页面不允许绕过这项血缘校验。", en: " research run; this lineage check cannot be bypassed from the page." })}
               </AlertDescription>
             </Alert>
             <div className="space-y-3">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="decision-id">决策 ID</Label>
+                  <Label htmlFor="decision-id">{tl({ zh: "决策 ID", en: "Decision ID" })}</Label>
                   <Input
                     id="decision-id"
                     value={decisionId}
@@ -701,41 +708,41 @@ function SessionDetail({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="decision-source-run">来源 RR-运行</Label>
+                  <Label htmlFor="decision-source-run">{tl({ zh: "来源 RR-运行", en: "Source RR- run" })}</Label>
                   <Input
                     id="decision-source-run"
                     value={sourceRunId}
                     readOnly
-                    placeholder="当前会话未绑定 RR-运行"
+                    placeholder={tl({ zh: "当前会话未绑定 RR-运行", en: "No RR- run bound to this session" })}
                     className="font-mono text-xs"
                   />
                 </div>
               </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="decision-source-id">来源决策 ID</Label>
+                  <Label htmlFor="decision-source-id">{tl({ zh: "来源决策 ID", en: "Source decision ID" })}</Label>
                   <Input
                     id="decision-source-id"
                     value={sourceDecisionId}
                     onChange={(event) => setSourceDecisionId(event.target.value)}
-                    placeholder="研究运行 signals 阶段的 decision_id"
+                    placeholder={tl({ zh: "研究运行 signals 阶段的 decision_id", en: "decision_id from the research run's signals stage" })}
                     className="font-mono text-xs"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="decision-trace">信号 trace ID</Label>
+                  <Label htmlFor="decision-trace">{tl({ zh: "信号 trace ID", en: "Signal trace ID" })}</Label>
                   <Input
                     id="decision-trace"
                     value={signalTraceId}
                     onChange={(event) => setSignalTraceId(event.target.value)}
-                    placeholder="必须属于上述 RR-运行"
+                    placeholder={tl({ zh: "必须属于上述 RR-运行", en: "Must belong to the RR- run above" })}
                     className="font-mono text-xs"
                   />
                 </div>
               </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <div className="space-y-2">
-                  <Label htmlFor="decision-symbol">标的</Label>
+                  <Label htmlFor="decision-symbol">{tl({ zh: "标的", en: "Symbol" })}</Label>
                   <Input
                     id="decision-symbol"
                     value={targetSymbol}
@@ -745,7 +752,7 @@ function SessionDetail({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="decision-rule">资产规则</Label>
+                  <Label htmlFor="decision-rule">{tl({ zh: "资产规则", en: "Asset rule" })}</Label>
                   <Select value={targetRuleKey} onValueChange={setTargetRuleKey}>
                     <SelectTrigger id="decision-rule">
                       <SelectValue />
@@ -753,14 +760,14 @@ function SessionDetail({
                     <SelectContent>
                       {SIMULATION_TARGET_RULES.map((item) => (
                         <SelectItem key={item.key} value={item.key}>
-                          {item.label}
+                          {tl(item.label)}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="decision-quantity">目标数量</Label>
+                  <Label htmlFor="decision-quantity">{tl({ zh: "目标数量", en: "Target quantity" })}</Label>
                   <Input
                     id="decision-quantity"
                     type="number"
@@ -773,24 +780,24 @@ function SessionDetail({
                 </div>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="decision-reason">决策原因</Label>
+                <Label htmlFor="decision-reason">{tl({ zh: "决策原因", en: "Decision reason" })}</Label>
                 <Input
                   id="decision-reason"
                   value={targetReason}
                   onChange={(event) => setTargetReason(event.target.value)}
-                  placeholder="例如：均线金叉，目标仓位由 0 调整为 1000 份"
+                  placeholder={tl({ zh: "例如：均线金叉，目标仓位由 0 调整为 1000 份", en: "e.g. MA golden cross, target position adjusted from 0 to 1000 shares" })}
                 />
               </div>
               <p className="text-xs text-muted-foreground">
-                当前固定为 A 股多头市价单、GFD；资产规则 {targetRule.key} 会决定手数、T+1、费用和风控参数。
+                {tl({ zh: `当前固定为 A 股多头市价单、GFD；资产规则 ${targetRule.key} 会决定手数、T+1、费用和风控参数。`, en: `Currently fixed to A-share long market orders with GFD; asset rule ${targetRule.key} determines lot size, T+1, fees and risk parameters.` })}
               </p>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setDecisionOpen(false)} disabled={decisionMutation.isPending}>
-                取消
+                {tl({ zh: "取消", en: "Cancel" })}
               </Button>
               <Button onClick={() => decisionMutation.mutate()} disabled={!decisionValid || decisionMutation.isPending}>
-                {decisionMutation.isPending ? "提交中…" : "提交目标仓位"}
+                {decisionMutation.isPending ? tl({ zh: "提交中…", en: "Submitting…" }) : tl({ zh: "提交目标仓位", en: "Submit target position" })}
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -810,18 +817,19 @@ function SessionDetail({
 }
 
 function PositionsTable({ rows }: { rows: SimulationPosition[] }) {
+  const { tl } = useT();
   return (
     <div className="rounded-lg border border-border">
       <Table>
         <TableHeader className="sticky top-0 bg-card">
           <TableRow>
-            <TableHead>标的</TableHead>
-            <TableHead>方向</TableHead>
-            <TableHead className="text-right">数量</TableHead>
-            <TableHead className="text-right">成本</TableHead>
-            <TableHead className="text-right">市价</TableHead>
-            <TableHead className="text-right">市值</TableHead>
-            <TableHead className="text-right">浮动盈亏</TableHead>
+            <TableHead>{tl({ zh: "标的", en: "Symbol" })}</TableHead>
+            <TableHead>{tl({ zh: "方向", en: "Side" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "数量", en: "Quantity" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "成本", en: "Avg cost" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "市价", en: "Market price" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "市值", en: "Market value" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "浮动盈亏", en: "Unrealized P&L" })}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -860,20 +868,21 @@ function PositionsTable({ rows }: { rows: SimulationPosition[] }) {
 }
 
 function OrdersTable({ rows }: { rows: SimulationOrder[] }) {
+  const { tl } = useT();
   return (
     <div className="rounded-lg border border-border">
       <Table>
         <TableHeader className="sticky top-0 bg-card">
           <TableRow>
-            <TableHead>标的</TableHead>
-            <TableHead>方向</TableHead>
-            <TableHead>类型</TableHead>
-            <TableHead className="text-right">委托量</TableHead>
-            <TableHead className="text-right">已成交</TableHead>
-            <TableHead className="text-right">委托价</TableHead>
-            <TableHead className="text-right">成交均价</TableHead>
-            <TableHead>状态</TableHead>
-            <TableHead>时间</TableHead>
+            <TableHead>{tl({ zh: "标的", en: "Symbol" })}</TableHead>
+            <TableHead>{tl({ zh: "方向", en: "Side" })}</TableHead>
+            <TableHead>{tl({ zh: "类型", en: "Type" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "委托量", en: "Quantity" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "已成交", en: "Filled" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "委托价", en: "Price" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "成交均价", en: "Avg fill price" })}</TableHead>
+            <TableHead>{tl({ zh: "状态", en: "Status" })}</TableHead>
+            <TableHead>{tl({ zh: "时间", en: "Time" })}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -917,18 +926,19 @@ function OrdersTable({ rows }: { rows: SimulationOrder[] }) {
 }
 
 function FillsTable({ rows }: { rows: SimulationFill[] }) {
+  const { tl } = useT();
   return (
     <div className="rounded-lg border border-border">
       <Table>
         <TableHeader className="sticky top-0 bg-card">
           <TableRow>
-            <TableHead>标的</TableHead>
-            <TableHead>方向</TableHead>
-            <TableHead className="text-right">数量</TableHead>
-            <TableHead className="text-right">成交价</TableHead>
-            <TableHead className="text-right">佣金</TableHead>
-            <TableHead className="text-right">税金</TableHead>
-            <TableHead>时间</TableHead>
+            <TableHead>{tl({ zh: "标的", en: "Symbol" })}</TableHead>
+            <TableHead>{tl({ zh: "方向", en: "Side" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "数量", en: "Quantity" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "成交价", en: "Fill price" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "佣金", en: "Commission" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "税金", en: "Tax" })}</TableHead>
+            <TableHead>{tl({ zh: "时间", en: "Time" })}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -962,16 +972,17 @@ function FillsTable({ rows }: { rows: SimulationFill[] }) {
 }
 
 function LedgerTable({ rows }: { rows: SimulationLedgerEntry[] }) {
+  const { tl } = useT();
   return (
     <div className="rounded-lg border border-border">
       <Table>
         <TableHeader className="sticky top-0 bg-card">
           <TableRow>
-            <TableHead>事件</TableHead>
-            <TableHead className="text-right">资金变动</TableHead>
-            <TableHead className="text-right">变动后资金</TableHead>
-            <TableHead>说明</TableHead>
-            <TableHead>时间</TableHead>
+            <TableHead>{tl({ zh: "事件", en: "Event" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "资金变动", en: "Cash change" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "变动后资金", en: "Cash after" })}</TableHead>
+            <TableHead>{tl({ zh: "说明", en: "Description" })}</TableHead>
+            <TableHead>{tl({ zh: "时间", en: "Time" })}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -1009,42 +1020,43 @@ function LedgerTable({ rows }: { rows: SimulationLedgerEntry[] }) {
 }
 
 function ReportView({ report }: { report: SimulationReport }) {
+  const { tl } = useT();
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
         <MetricCard
-          label="总收益"
+          label={tl({ zh: "总收益", en: "Total return" })}
           value={formatPercent(report.total_return)}
           accent={pnlColor(report.total_return)}
         />
         <MetricCard
-          label="年化收益"
+          label={tl({ zh: "年化收益", en: "Annualized return" })}
           value={formatPercent(report.annual_return)}
           accent={pnlColor(report.annual_return)}
         />
         <MetricCard
-          label="夏普比率"
+          label={tl({ zh: "夏普比率", en: "Sharpe ratio" })}
           value={formatNumber(report.sharpe_ratio, 3)}
           accent={pnlColor(report.sharpe_ratio)}
         />
         <MetricCard
-          label="最大回撤"
+          label={tl({ zh: "最大回撤", en: "Max drawdown" })}
           value={formatPercent(report.max_drawdown)}
           accent="text-destructive"
         />
         <MetricCard
-          label="胜率"
+          label={tl({ zh: "胜率", en: "Win rate" })}
           value={formatPercent(report.win_rate)}
         />
         <MetricCard
-          label="总成交笔数"
+          label={tl({ zh: "总成交笔数", en: "Total trades" })}
           value={formatNumber(report.total_trades, 0)}
         />
       </div>
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">权益曲线</CardTitle>
+          <CardTitle className="text-base">{tl({ zh: "权益曲线", en: "Equity curve" })}</CardTitle>
         </CardHeader>
         <CardContent>
           {report.equity_curve.length > 0 ? (
@@ -1052,8 +1064,8 @@ function ReportView({ report }: { report: SimulationReport }) {
               <Table>
                 <TableHeader className="sticky top-0 bg-card">
                   <TableRow>
-                    <TableHead>时间</TableHead>
-                    <TableHead className="text-right">权益</TableHead>
+                    <TableHead>{tl({ zh: "时间", en: "Time" })}</TableHead>
+                    <TableHead className="text-right">{tl({ zh: "权益", en: "Equity" })}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1072,8 +1084,8 @@ function ReportView({ report }: { report: SimulationReport }) {
             </div>
           ) : (
             <EmptyState
-              title="暂无权益数据"
-              description="该会话尚未生成权益曲线。"
+              title={tl({ zh: "暂无权益数据", en: "No equity data" })}
+              description={tl({ zh: "该会话尚未生成权益曲线。", en: "This session has not generated an equity curve yet." })}
             />
           )}
         </CardContent>
@@ -1089,6 +1101,7 @@ function CreateAccountDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
 }) {
+  const { tl } = useT();
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [initialCash, setInitialCash] = useState("1000000");
@@ -1125,24 +1138,24 @@ function CreateAccountDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>新建模拟账户</DialogTitle>
+          <DialogTitle>{tl({ zh: "新建模拟账户", en: "New simulation account" })}</DialogTitle>
           <DialogDescription>
-            模拟账户与实盘账户完全隔离，仅用于纸面交易。初始资金仅作模拟记账用途。
+            {tl({ zh: "模拟账户与实盘账户完全隔离，仅用于纸面交易。初始资金仅作模拟记账用途。", en: "Simulation accounts are fully isolated from the live account and are for paper trading only. Initial capital is used for simulated bookkeeping only." })}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-2">
-            <Label htmlFor="acct-name">账户名称</Label>
+            <Label htmlFor="acct-name">{tl({ zh: "账户名称", en: "Account name" })}</Label>
             <Input
               id="acct-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="例如：均线策略模拟盘"
+              placeholder={tl({ zh: "例如：均线策略模拟盘", en: "e.g. MA strategy simulation" })}
             />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
-              <Label htmlFor="acct-cash">初始资金</Label>
+              <Label htmlFor="acct-cash">{tl({ zh: "初始资金", en: "Initial capital" })}</Label>
               <Input
                 id="acct-cash"
                 type="number"
@@ -1152,7 +1165,7 @@ function CreateAccountDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="acct-currency">币种</Label>
+              <Label htmlFor="acct-currency">{tl({ zh: "币种", en: "Currency" })}</Label>
               <Input
                 id="acct-currency"
                 value={currency}
@@ -1162,19 +1175,19 @@ function CreateAccountDialog({
             </div>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="acct-actor">操作人</Label>
+            <Label htmlFor="acct-actor">{tl({ zh: "操作人", en: "Actor" })}</Label>
             <Input
               id="acct-actor"
               value={actor}
               onChange={(e) => setActor(e.target.value)}
-              placeholder="例如：analyst@finboard"
+              placeholder={tl({ zh: "例如：analyst@finboard", en: "e.g. analyst@finboard" })}
               className="font-mono"
             />
           </div>
         </div>
         {mutation.isError && (
           <p className="text-sm text-destructive">
-            {errorMessage(mutation.error, "创建账户失败")}
+            {errorMessage(mutation.error, tl({ zh: "创建账户失败", en: "Failed to create account" }))}
           </p>
         )}
         <DialogFooter>
@@ -1183,13 +1196,13 @@ function CreateAccountDialog({
             onClick={() => onOpenChange(false)}
             disabled={mutation.isPending}
           >
-            取消
+            {tl({ zh: "取消", en: "Cancel" })}
           </Button>
           <Button
             disabled={mutation.isPending || !valid}
             onClick={() => mutation.mutate()}
           >
-            {mutation.isPending ? "创建中…" : "创建账户"}
+            {mutation.isPending ? tl({ zh: "创建中…", en: "Creating…" }) : tl({ zh: "创建账户", en: "Create account" })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1208,6 +1221,7 @@ function CreateSessionDialog({
   accounts: SimulationAccount[];
   defaultAccountId: string | null;
 }) {
+  const { tl } = useT();
   const queryClient = useQueryClient();
   const [accountId, setAccountId] = useState<string>(defaultAccountId ?? "");
   const [strategyId, setStrategyId] = useState("");
@@ -1258,22 +1272,24 @@ function CreateSessionDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>新建模拟会话</DialogTitle>
+          <DialogTitle>{tl({ zh: "新建模拟会话", en: "New simulation session" })}</DialogTitle>
           <DialogDescription>
-            会话基于已发布策略、已完成的机器验证运行和数据发布版本创建。订单只能由结构化目标仓位决策生成，不会直接创建订单。
+            {tl({ zh: "会话基于已发布策略、已完成的机器验证运行和数据发布版本创建。订单只能由结构化目标仓位决策生成，不会直接创建订单。", en: "Sessions are created from a published strategy, a completed machine-validation run and a data release version. Orders can only be generated by structured target position decisions, never created directly." })}
           </DialogDescription>
         </DialogHeader>
         <Alert variant="info">
           <AlertDescription>
-            需要先在「研究运行」中获得 <code>RR-</code> 运行 ID，并填写该运行冻结的数据发布 ID；这两个值用于隔离和审计，不能省略。
+            {tl({ zh: "需要先在「研究运行」中获得 ", en: "First obtain an " })}
+            <code>RR-</code>
+            {tl({ zh: " 运行 ID，并填写该运行冻结的数据发布 ID；这两个值用于隔离和审计，不能省略。", en: " run ID from Research Runs and fill in the data release ID frozen by that run; both values are required for isolation and audit and cannot be omitted." })}
           </AlertDescription>
         </Alert>
         <div className="space-y-3">
           <div className="space-y-2">
-            <Label htmlFor="sess-account">模拟账户</Label>
+            <Label htmlFor="sess-account">{tl({ zh: "模拟账户", en: "Simulation account" })}</Label>
             <Select value={accountId} onValueChange={setAccountId}>
               <SelectTrigger id="sess-account">
-                <SelectValue placeholder="选择模拟账户" />
+                <SelectValue placeholder={tl({ zh: "选择模拟账户", en: "Select a simulation account" })} />
               </SelectTrigger>
               <SelectContent>
                 {accounts.map((a) => (
@@ -1289,17 +1305,17 @@ function CreateSessionDialog({
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
-              <Label htmlFor="sess-strategy">策略 ID</Label>
+              <Label htmlFor="sess-strategy">{tl({ zh: "策略 ID", en: "Strategy ID" })}</Label>
               <Input
                 id="sess-strategy"
                 value={strategyId}
                 onChange={(e) => setStrategyId(e.target.value)}
-                placeholder="例如：ma-cross-v1"
+                placeholder={tl({ zh: "例如：ma-cross-v1", en: "e.g. ma-cross-v1" })}
                 className="font-mono"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="sess-version">策略版本</Label>
+              <Label htmlFor="sess-version">{tl({ zh: "策略版本", en: "Strategy version" })}</Label>
               <Input
                 id="sess-version"
                 type="number"
@@ -1311,52 +1327,52 @@ function CreateSessionDialog({
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
-              <Label htmlFor="sess-mode">数据源模式</Label>
+              <Label htmlFor="sess-mode">{tl({ zh: "数据源模式", en: "Data source mode" })}</Label>
               <Select value={sourceMode} onValueChange={setSourceMode}>
                 <SelectTrigger id="sess-mode">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="historical_replay">historical_replay（历史回放）</SelectItem>
-                  <SelectItem value="readonly_market">readonly_market（只读行情）</SelectItem>
+                  <SelectItem value="historical_replay">{tl({ zh: "historical_replay（历史回放）", en: "historical_replay (Historical replay)" })}</SelectItem>
+                  <SelectItem value="readonly_market">{tl({ zh: "readonly_market（只读行情）", en: "readonly_market (Read-only market data)" })}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="sess-run">验证运行 ID（必填）</Label>
+              <Label htmlFor="sess-run">{tl({ zh: "验证运行 ID（必填）", en: "Validation run ID (required)" })}</Label>
               <Input
                 id="sess-run"
                 value={validationRunId}
                 onChange={(e) => setValidationRunId(e.target.value)}
-                placeholder="RR-...（已完成）"
+                placeholder={tl({ zh: "RR-...（已完成）", en: "RR-... (completed)" })}
                 className="font-mono"
               />
             </div>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="sess-release">数据发布 ID（必填）</Label>
+            <Label htmlFor="sess-release">{tl({ zh: "数据发布 ID（必填）", en: "Data release ID (required)" })}</Label>
             <Input
               id="sess-release"
               value={dataReleaseId}
               onChange={(e) => setDataReleaseId(e.target.value)}
-              placeholder="例如：multi-asset-bars-20260801-v1"
+                placeholder={tl({ zh: "例如：multi-asset-bars-20260801-v1", en: "e.g. multi-asset-bars-20260801-v1" })}
               className="font-mono"
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="sess-actor">操作人</Label>
+            <Label htmlFor="sess-actor">{tl({ zh: "操作人", en: "Actor" })}</Label>
             <Input
               id="sess-actor"
               value={actor}
               onChange={(e) => setActor(e.target.value)}
-              placeholder="例如：analyst@finboard"
+              placeholder={tl({ zh: "例如：analyst@finboard", en: "e.g. analyst@finboard" })}
               className="font-mono"
             />
           </div>
         </div>
         {mutation.isError && (
           <p className="text-sm text-destructive">
-            {errorMessage(mutation.error, "创建会话失败")}
+            {errorMessage(mutation.error, tl({ zh: "创建会话失败", en: "Failed to create session" }))}
           </p>
         )}
         <DialogFooter>
@@ -1365,13 +1381,13 @@ function CreateSessionDialog({
             onClick={() => onOpenChange(false)}
             disabled={mutation.isPending}
           >
-            取消
+            {tl({ zh: "取消", en: "Cancel" })}
           </Button>
           <Button
             disabled={mutation.isPending || !valid}
             onClick={() => mutation.mutate()}
           >
-            {mutation.isPending ? "创建中…" : "创建会话"}
+            {mutation.isPending ? tl({ zh: "创建中…", en: "Creating…" }) : tl({ zh: "创建会话", en: "Create session" })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1394,6 +1410,7 @@ function ReplayBarDialog({
   onOpenChange: (value: boolean) => void;
   onProcessed: (result: SimulationProcessResult) => void;
 }) {
+  const { tl } = useT();
   const [sourceEventId, setSourceEventId] = useState("");
   const [symbol, setSymbol] = useState("510300.SH");
   const [timestamp, setTimestamp] = useState("");
@@ -1454,20 +1471,22 @@ function ReplayBarDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>推进一根行情</DialogTitle>
+          <DialogTitle>{tl({ zh: "推进一根行情", en: "Advance one bar" })}</DialogTitle>
           <DialogDescription>
-            仅用于历史回放/纸面撮合。先处理一根行情建立价格，再提交目标仓位；在 next-bar-only 规则下，下一根行情才会尝试成交。
+            {tl({ zh: "仅用于历史回放/纸面撮合。先处理一根行情建立价格，再提交目标仓位；在 next-bar-only 规则下，下一根行情才会尝试成交。", en: "For historical replay / paper matching only. Process one bar to establish prices, then submit target positions; under the next-bar-only rule, fills are attempted on the next bar." })}
           </DialogDescription>
         </DialogHeader>
         <Alert variant="info">
           <AlertDescription>
-            同一个 <code>source_event_id</code> 重复提交是幂等的；行情事件不会连接实盘行情或触发真实订单。
+            {tl({ zh: "同一个 ", en: "Submitting the same " })}
+            <code>source_event_id</code>
+            {tl({ zh: " 重复提交是幂等的；行情事件不会连接实盘行情或触发真实订单。", en: " twice is idempotent; market events do not connect to live market data or trigger real orders." })}
           </AlertDescription>
         </Alert>
         <div className="space-y-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="bar-source-event">行情事件 ID</Label>
+              <Label htmlFor="bar-source-event">{tl({ zh: "行情事件 ID", en: "Market event ID" })}</Label>
               <Input
                 id="bar-source-event"
                 value={sourceEventId}
@@ -1476,7 +1495,7 @@ function ReplayBarDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="bar-timestamp">时间</Label>
+              <Label htmlFor="bar-timestamp">{tl({ zh: "时间", en: "Time" })}</Label>
               <Input
                 id="bar-timestamp"
                 type="datetime-local"
@@ -1487,7 +1506,7 @@ function ReplayBarDialog({
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="bar-symbol">标的</Label>
+              <Label htmlFor="bar-symbol">{tl({ zh: "标的", en: "Symbol" })}</Label>
               <Input
                 id="bar-symbol"
                 value={symbol}
@@ -1497,7 +1516,7 @@ function ReplayBarDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="bar-actor">操作人</Label>
+              <Label htmlFor="bar-actor">{tl({ zh: "操作人", en: "Actor" })}</Label>
               <Input
                 id="bar-actor"
                 value={actor}
@@ -1508,10 +1527,10 @@ function ReplayBarDialog({
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {[
-              ["bar-open", "开盘", openPrice, setOpenPrice],
-              ["bar-high", "最高", highPrice, setHighPrice],
-              ["bar-low", "最低", lowPrice, setLowPrice],
-              ["bar-close", "收盘", closePrice, setClosePrice],
+              ["bar-open", tl({ zh: "开盘", en: "Open" }), openPrice, setOpenPrice],
+              ["bar-high", tl({ zh: "最高", en: "High" }), highPrice, setHighPrice],
+              ["bar-low", tl({ zh: "最低", en: "Low" }), lowPrice, setLowPrice],
+              ["bar-close", tl({ zh: "收盘", en: "Close" }), closePrice, setClosePrice],
             ].map(([id, label, value, setter]) => (
               <div key={id as string} className="space-y-2">
                 <Label htmlFor={id as string}>{label as string}</Label>
@@ -1529,7 +1548,7 @@ function ReplayBarDialog({
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
-              <Label htmlFor="bar-volume">成交量</Label>
+              <Label htmlFor="bar-volume">{tl({ zh: "成交量", en: "Volume" })}</Label>
               <Input
                 id="bar-volume"
                 type="number"
@@ -1540,7 +1559,7 @@ function ReplayBarDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="bar-amount">成交额</Label>
+              <Label htmlFor="bar-amount">{tl({ zh: "成交额", en: "Amount" })}</Label>
               <Input
                 id="bar-amount"
                 type="number"
@@ -1554,18 +1573,18 @@ function ReplayBarDialog({
         </div>
         {mutation.isError && (
           <Alert variant="destructive">
-            <AlertTitle>行情事件未处理</AlertTitle>
+            <AlertTitle>{tl({ zh: "行情事件未处理", en: "Market event not processed" })}</AlertTitle>
             <AlertDescription>
-              {errorMessage(mutation.error, "请检查会话状态、时间顺序和 OHLC 数值")}
+              {errorMessage(mutation.error, tl({ zh: "请检查会话状态、时间顺序和 OHLC 数值", en: "Check the session status, time ordering and OHLC values" }))}
             </AlertDescription>
           </Alert>
         )}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={mutation.isPending}>
-            取消
+            {tl({ zh: "取消", en: "Cancel" })}
           </Button>
           <Button onClick={() => mutation.mutate()} disabled={!valid || mutation.isPending}>
-            {mutation.isPending ? "处理中…" : "处理行情"}
+            {mutation.isPending ? tl({ zh: "处理中…", en: "Processing…" }) : tl({ zh: "处理行情", en: "Process bar" })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1574,6 +1593,7 @@ function ReplayBarDialog({
 }
 
 export default function Simulation() {
+  const { tl, lang } = useT();
   const queryClient = useQueryClient();
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
     null,
@@ -1626,11 +1646,11 @@ export default function Simulation() {
   return (
     <div>
       <PageHeader
-        title="模拟盘"
-        description="产品模拟盘（纸面交易）：基于结构化目标仓位决策的隔离模拟运行"
+        title={tl({ zh: "模拟盘", en: "Simulation" })}
+        description={tl({ zh: "产品模拟盘（纸面交易）：基于结构化目标仓位决策的隔离模拟运行", en: "Product simulation (paper trading): isolated simulation runs driven by structured target position decisions" })}
         breadcrumbs={[
-          { label: "研究", href: "/research" },
-          { label: "模拟盘" },
+          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
+          { label: tl({ zh: "模拟盘", en: "Simulation" }) },
         ]}
         actions={
           <Button
@@ -1645,7 +1665,7 @@ export default function Simulation() {
                 accountsQuery.isFetching && "animate-spin",
               )}
             />
-            刷新账户
+            {tl({ zh: "刷新账户", en: "Refresh accounts" })}
           </Button>
         }
       />
@@ -1654,22 +1674,22 @@ export default function Simulation() {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
         <div className="space-y-4 lg:col-span-1">
           <Alert variant="info">
-            <AlertTitle>实盘隔离</AlertTitle>
+            <AlertTitle>{tl({ zh: "实盘隔离", en: "Live-trading isolation" })}</AlertTitle>
             <AlertDescription>
-              模拟盘与实盘完全隔离。订单只能由结构化目标仓位决策生成，禁止直接创建订单。
+              {tl({ zh: "模拟盘与实盘完全隔离。订单只能由结构化目标仓位决策生成，禁止直接创建订单。", en: "The simulation is fully isolated from live trading. Orders can only be generated by structured target position decisions; creating orders directly is forbidden." })}
             </AlertDescription>
           </Alert>
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">模拟账户</CardTitle>
+              <CardTitle className="text-base">{tl({ zh: "模拟账户", en: "Simulation accounts" })}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               {accountsQuery.isLoading ? (
                 <LoadingState rows={2} />
               ) : accountsQuery.isError ? (
                 <ErrorState
-                  message={errorMessage(accountsQuery.error, "无法加载账户")}
+                  message={errorMessage(accountsQuery.error, tl({ zh: "无法加载账户", en: "Failed to load accounts" }))}
                   onRetry={() => accountsQuery.refetch()}
                 />
               ) : accounts.length > 0 ? (
@@ -1679,7 +1699,7 @@ export default function Simulation() {
                     onValueChange={handleSelectAccount}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="选择模拟账户" />
+                      <SelectValue placeholder={tl({ zh: "选择模拟账户", en: "Select a simulation account" })} />
                     </SelectTrigger>
                     <SelectContent>
                       {accounts.map((a) => (
@@ -1692,25 +1712,25 @@ export default function Simulation() {
                   {selectedAccount && (
                     <div className="grid grid-cols-2 gap-2 rounded-md border border-border bg-muted/30 p-3 text-xs">
                       <div>
-                        <p className="text-muted-foreground">可用资金</p>
+                        <p className="text-muted-foreground">{tl({ zh: "可用资金", en: "Available cash" })}</p>
                         <p className="mt-0.5 font-mono tabular-nums">
                           ¥{formatCurrency(selectedAccount.cash, 0)}
                         </p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground">总权益</p>
+                        <p className="text-muted-foreground">{tl({ zh: "总权益", en: "Total equity" })}</p>
                         <p className="mt-0.5 font-mono tabular-nums">
                           ¥{formatCurrency(selectedAccount.equity, 0)}
                         </p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground">冻结资金</p>
+                        <p className="text-muted-foreground">{tl({ zh: "冻结资金", en: "Frozen cash" })}</p>
                         <p className="mt-0.5 font-mono tabular-nums text-muted-foreground">
                           ¥{formatCurrency(selectedAccount.frozen_cash, 0)}
                         </p>
                       </div>
                       <div>
-                        <p className="text-muted-foreground">状态</p>
+                        <p className="text-muted-foreground">{tl({ zh: "状态", en: "Status" })}</p>
                         <p className="mt-0.5">
                           <StatusBadge status={selectedAccount.status} />
                         </p>
@@ -1720,8 +1740,8 @@ export default function Simulation() {
                 </>
               ) : (
                 <EmptyState
-                  title="暂无模拟账户"
-                  description="点击下方按钮创建第一个模拟账户。"
+                  title={tl({ zh: "暂无模拟账户", en: "No simulation accounts" })}
+                  description={tl({ zh: "点击下方按钮创建第一个模拟账户。", en: "Click the button below to create your first simulation account." })}
                 />
               )}
               <Button
@@ -1731,7 +1751,7 @@ export default function Simulation() {
                 onClick={() => setAccountDialogOpen(true)}
               >
                 <Plus className="h-4 w-4" />
-                新建账户
+                {tl({ zh: "新建账户", en: "New account" })}
               </Button>
             </CardContent>
           </Card>
@@ -1739,7 +1759,7 @@ export default function Simulation() {
           <Card>
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
-                <CardTitle className="text-base">会话列表</CardTitle>
+                <CardTitle className="text-base">{tl({ zh: "会话列表", en: "Sessions" })}</CardTitle>
                 {selectedAccountId && (
                   <Button
                     variant="ghost"
@@ -1761,14 +1781,14 @@ export default function Simulation() {
               {!selectedAccountId ? (
                 <EmptyState
                   icon={<FlaskConical className="h-8 w-8" />}
-                  title="请先选择账户"
-                  description="选择模拟账户后将展示该账户下的全部模拟会话。"
+                  title={tl({ zh: "请先选择账户", en: "Select an account first" })}
+                  description={tl({ zh: "选择模拟账户后将展示该账户下的全部模拟会话。", en: "Once a simulation account is selected, all simulation sessions under it are shown." })}
                 />
               ) : sessionsQuery.isLoading ? (
                 <LoadingState rows={4} />
               ) : sessionsQuery.isError ? (
                 <ErrorState
-                  message={errorMessage(sessionsQuery.error, "无法加载会话")}
+                  message={errorMessage(sessionsQuery.error, tl({ zh: "无法加载会话", en: "Failed to load sessions" }))}
                   onRetry={() => sessionsQuery.refetch()}
                 />
               ) : sessions.length > 0 ? (
@@ -1798,7 +1818,7 @@ export default function Simulation() {
                           <span className="truncate font-mono">
                             {s.strategy_id}
                           </span>
-                          <span>{timeAgo(s.created_at)}</span>
+                          <span>{timeAgo(s.created_at, lang)}</span>
                         </div>
                       </button>
                     ))}
@@ -1807,8 +1827,8 @@ export default function Simulation() {
               ) : (
                 <EmptyState
                   icon={<FlaskConical className="h-8 w-8" />}
-                  title="暂无会话"
-                  description="该账户下还没有模拟会话，可点击下方按钮创建。"
+                  title={tl({ zh: "暂无会话", en: "No sessions" })}
+                  description={tl({ zh: "该账户下还没有模拟会话，可点击下方按钮创建。", en: "No simulation sessions under this account yet; create one with the button below." })}
                 />
               )}
               <Button
@@ -1819,7 +1839,7 @@ export default function Simulation() {
                 disabled={accounts.length === 0}
               >
                 <Plus className="h-4 w-4" />
-                新建会话
+                {tl({ zh: "新建会话", en: "New session" })}
               </Button>
             </CardContent>
           </Card>
@@ -1834,8 +1854,8 @@ export default function Simulation() {
           ) : (
             <EmptyState
               icon={<FlaskConical className="h-8 w-8" />}
-              title="请从左侧选择一个模拟会话"
-              description="选中会话后将展示持仓、订单、成交、账本与绩效报告，并支持启动 / 暂停 / 停止 / 归档操作。"
+              title={tl({ zh: "请从左侧选择一个模拟会话", en: "Select a simulation session on the left" })}
+              description={tl({ zh: "选中会话后将展示持仓、订单、成交、账本与绩效报告，并支持启动 / 暂停 / 停止 / 归档操作。", en: "Once selected, positions, orders, fills, the ledger and performance reports are shown, with start / pause / stop / archive actions." })}
             />
           )}
         </div>
@@ -1853,8 +1873,8 @@ export default function Simulation() {
       />
       <NextStepCTA
         nextPath="/research/reports"
-        nextLabel="研究报告"
-        description="查看模拟交易的完整绩效报告和归因分析"
+        nextLabel={tl({ zh: "研究报告", en: "Research Reports" })}
+        description={tl({ zh: "查看模拟交易的完整绩效报告和归因分析", en: "View the full performance reports and attribution analysis of the simulated trading" })}
       />
     </div>
   );

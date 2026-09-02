@@ -70,6 +70,7 @@ import {
   formatPercent,
   timeAgo,
 } from "@/lib/utils";
+import { useT, type LocalizedText } from "@/i18n";
 
 type ReportSource = "run" | "simulation";
 
@@ -93,27 +94,27 @@ interface ExtraMetric {
   format: "percent" | "number";
 }
 
-const SOURCE_OPTIONS: { value: ReportSource; label: string }[] = [
-  { value: "run", label: "研究运行" },
-  { value: "simulation", label: "模拟会话" },
+const SOURCE_OPTIONS: { value: ReportSource; label: LocalizedText }[] = [
+  { value: "run", label: { zh: "研究运行", en: "Research runs" } },
+  { value: "simulation", label: { zh: "模拟会话", en: "Simulation sessions" } },
 ];
 
 const SIM_REPORT_STATUSES = ["stopped", "archived"];
 
 const EXTRA_METRIC_DEFS: {
   key: string;
-  label: string;
+  label: LocalizedText;
   format: "percent" | "number";
 }[] = [
-  { key: "profit_factor", label: "盈亏比", format: "number" },
-  { key: "sortino_ratio", label: "Sortino", format: "number" },
-  { key: "calmar_ratio", label: "Calmar", format: "number" },
-  { key: "volatility", label: "年化波动率", format: "percent" },
-  { key: "avg_win", label: "平均盈利", format: "percent" },
-  { key: "avg_loss", label: "平均亏损", format: "percent" },
-  { key: "max_runup", label: "最大涨幅", format: "percent" },
-  { key: "longest_win_streak", label: "最长连胜", format: "number" },
-  { key: "longest_loss_streak", label: "最长连亏", format: "number" },
+  { key: "profit_factor", label: { zh: "盈亏比", en: "Profit factor" }, format: "number" },
+  { key: "sortino_ratio", label: { zh: "Sortino", en: "Sortino" }, format: "number" },
+  { key: "calmar_ratio", label: { zh: "Calmar", en: "Calmar" }, format: "number" },
+  { key: "volatility", label: { zh: "年化波动率", en: "Annualized volatility" }, format: "percent" },
+  { key: "avg_win", label: { zh: "平均盈利", en: "Average win" }, format: "percent" },
+  { key: "avg_loss", label: { zh: "平均亏损", en: "Average loss" }, format: "percent" },
+  { key: "max_runup", label: { zh: "最大涨幅", en: "Max runup" }, format: "percent" },
+  { key: "longest_win_streak", label: { zh: "最长连胜", en: "Longest win streak" }, format: "number" },
+  { key: "longest_loss_streak", label: { zh: "最长连亏", en: "Longest loss streak" }, format: "number" },
 ];
 
 function errorMessage(err: unknown, fallback: string): string {
@@ -243,6 +244,7 @@ function EquityTooltip({ active, payload, label }: ChartTooltipProps) {
 }
 
 function DrawdownTooltip({ active, payload, label }: ChartTooltipProps) {
+  const { tl } = useT();
   if (!active || !payload || payload.length === 0) return null;
   return (
     <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs">
@@ -257,7 +259,7 @@ function DrawdownTooltip({ active, payload, label }: ChartTooltipProps) {
             key={i}
             className="font-mono tabular-nums text-destructive"
           >
-            回撤: {Number.isFinite(num) ? formatPercent(num) : "—"}
+            {tl({ zh: "回撤", en: "Drawdown" })}: {Number.isFinite(num) ? formatPercent(num) : "—"}
           </p>
         );
       })}
@@ -266,12 +268,13 @@ function DrawdownTooltip({ active, payload, label }: ChartTooltipProps) {
 }
 
 function EquityChart({ data }: { data: EquityPoint[] }) {
+  const { tl } = useT();
   if (data.length === 0) {
     return (
       <EmptyState
         icon={<LineChartIcon className="h-8 w-8" />}
-        title="暂无权益数据"
-        description="该运行尚未生成权益曲线。"
+        title={tl({ zh: "暂无权益数据", en: "No equity data" })}
+        description={tl({ zh: "该运行尚未生成权益曲线。", en: "This run has not generated an equity curve yet." })}
       />
     );
   }
@@ -305,7 +308,7 @@ function EquityChart({ data }: { data: EquityPoint[] }) {
           <Line
             type="monotone"
             dataKey="equity"
-            name="权益"
+            name={tl({ zh: "权益", en: "Equity" })}
             stroke="hsl(var(--primary))"
             strokeWidth={2}
             dot={false}
@@ -323,12 +326,13 @@ function DrawdownChart({
 }: {
   data: { timestamp: string; drawdown: number }[];
 }) {
+  const { tl } = useT();
   if (data.length === 0) {
     return (
       <EmptyState
         icon={<TrendingDown className="h-8 w-8" />}
-        title="暂无回撤数据"
-        description="权益点数不足，无法计算回撤序列。"
+        title={tl({ zh: "暂无回撤数据", en: "No drawdown data" })}
+        description={tl({ zh: "权益点数不足，无法计算回撤序列。", en: "Not enough equity points to compute the drawdown series." })}
       />
     );
   }
@@ -376,7 +380,7 @@ function DrawdownChart({
           <Area
             type="monotone"
             dataKey="drawdown"
-            name="回撤"
+            name={tl({ zh: "回撤", en: "Drawdown" })}
             stroke="hsl(var(--destructive))"
             strokeWidth={1.5}
             fill="url(#drawdownFill)"
@@ -389,10 +393,11 @@ function DrawdownChart({
 }
 
 function MetricsGrid({ metrics }: { metrics: ReportMetrics }) {
+  const { tl } = useT();
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
       <StatCard
-        label="总收益"
+        label={tl({ zh: "总收益", en: "Total return" })}
         icon={TrendingUp}
         value={
           <span className={cn("font-mono tabular-nums", pnlColor(metrics.total_return))}>
@@ -401,7 +406,7 @@ function MetricsGrid({ metrics }: { metrics: ReportMetrics }) {
         }
       />
       <StatCard
-        label="年化收益"
+        label={tl({ zh: "年化收益", en: "Annual return" })}
         icon={TrendingUp}
         value={
           <span className={cn("font-mono tabular-nums", pnlColor(metrics.annual_return))}>
@@ -410,7 +415,7 @@ function MetricsGrid({ metrics }: { metrics: ReportMetrics }) {
         }
       />
       <StatCard
-        label="夏普比率"
+        label={tl({ zh: "夏普比率", en: "Sharpe ratio" })}
         icon={Gauge}
         value={
           <span className={cn("font-mono tabular-nums", pnlColor(metrics.sharpe_ratio))}>
@@ -419,17 +424,17 @@ function MetricsGrid({ metrics }: { metrics: ReportMetrics }) {
         }
       />
       <StatCard
-        label="最大回撤"
+        label={tl({ zh: "最大回撤", en: "Max drawdown" })}
         icon={TrendingDown}
         value={
           <span className="font-mono tabular-nums text-destructive">
             {formatPercent(metrics.max_drawdown === null ? null : -metrics.max_drawdown)}
           </span>
         }
-        hint={metrics.max_drawdown !== null && metrics.max_drawdown > 0 ? "峰值至谷值" : undefined}
+        hint={metrics.max_drawdown !== null && metrics.max_drawdown > 0 ? tl({ zh: "峰值至谷值", en: "Peak to trough" }) : undefined}
       />
       <StatCard
-        label="胜率"
+        label={tl({ zh: "胜率", en: "Win rate" })}
         icon={Target}
         value={
           <span className="font-mono tabular-nums">
@@ -438,7 +443,7 @@ function MetricsGrid({ metrics }: { metrics: ReportMetrics }) {
         }
       />
       <StatCard
-        label="总成交笔数"
+        label={tl({ zh: "总成交笔数", en: "Total trades" })}
         icon={BarChart3}
         value={
           <span className="font-mono tabular-nums">
@@ -451,12 +456,13 @@ function MetricsGrid({ metrics }: { metrics: ReportMetrics }) {
 }
 
 function TradeSummary({ extras }: { extras: ExtraMetric[] }) {
+  const { tl } = useT();
   if (extras.length === 0) {
     return (
       <EmptyState
         icon={<Layers className="h-8 w-8" />}
-        title="无额外交易明细"
-        description="该运行结果未提供更多交易统计指标。"
+        title={tl({ zh: "无额外交易明细", en: "No extra trade metrics" })}
+        description={tl({ zh: "该运行结果未提供更多交易统计指标。", en: "This run result provides no additional trade statistics." })}
       />
     );
   }
@@ -489,11 +495,12 @@ function TradeSummary({ extras }: { extras: ExtraMetric[] }) {
 }
 
 function PositionsSnapshotTable({ rows }: { rows: SimulationPosition[] }) {
+  const { tl } = useT();
   if (rows.length === 0) {
     return (
       <EmptyState
-        title="暂无持仓快照"
-        description="该模拟会话当前没有任何持仓。"
+        title={tl({ zh: "暂无持仓快照", en: "No position snapshot" })}
+        description={tl({ zh: "该模拟会话当前没有任何持仓。", en: "This simulation session currently has no positions." })}
       />
     );
   }
@@ -502,13 +509,13 @@ function PositionsSnapshotTable({ rows }: { rows: SimulationPosition[] }) {
       <Table>
         <TableHeader className="sticky top-0 bg-card">
           <TableRow>
-            <TableHead>标的</TableHead>
-            <TableHead>方向</TableHead>
-            <TableHead className="text-right">数量</TableHead>
-            <TableHead className="text-right">成本</TableHead>
-            <TableHead className="text-right">市价</TableHead>
-            <TableHead className="text-right">市值</TableHead>
-            <TableHead className="text-right">浮动盈亏</TableHead>
+            <TableHead>{tl({ zh: "标的", en: "Symbol" })}</TableHead>
+            <TableHead>{tl({ zh: "方向", en: "Side" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "数量", en: "Quantity" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "成本", en: "Avg cost" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "市价", en: "Market price" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "市值", en: "Market value" })}</TableHead>
+            <TableHead className="text-right">{tl({ zh: "浮动盈亏", en: "Unrealized PnL" })}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -575,6 +582,7 @@ function ReportContent({
   extra,
   exportBasePath,
 }: ReportContentProps) {
+  const { tl } = useT();
   const { series, maxDrawdown } = useMemo(
     () => computeDrawdownSeries(equityCurve),
     [equityCurve],
@@ -601,7 +609,7 @@ function ReportContent({
                     <a
                       href={`${exportBasePath}?format=csv`}
                       download
-                      title="导出 CSV(元信息 + 指标 + 权益曲线 + 成交,Excel 兼容)"
+                      title={tl({ zh: "导出 CSV(元信息 + 指标 + 权益曲线 + 成交,Excel 兼容)", en: "Export CSV (metadata + metrics + equity curve + trades, Excel compatible)" })}
                     >
                       <Download className="h-4 w-4" />
                       CSV
@@ -611,7 +619,7 @@ function ReportContent({
                     <a
                       href={`${exportBasePath}?format=markdown`}
                       download
-                      title="导出 Markdown 报告"
+                      title={tl({ zh: "导出 Markdown 报告", en: "Export Markdown report" })}
                     >
                       <Download className="h-4 w-4" />
                       Markdown
@@ -622,7 +630,7 @@ function ReportContent({
               <Button asChild variant="outline" size="sm">
                 <Link to={sourceHref}>
                   <ArrowLeft className="h-4 w-4" />
-                  查看原始{sourceLabel}
+                  {tl({ zh: "查看原始", en: "View " })}{sourceLabel}
                 </Link>
               </Button>
             </div>
@@ -632,14 +640,14 @@ function ReportContent({
 
       <div>
         <h3 className="mb-2 text-sm font-semibold text-foreground">
-          绩效指标
+          {tl({ zh: "绩效指标", en: "Performance metrics" })}
         </h3>
         <MetricsGrid metrics={metrics} />
       </div>
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">权益曲线</CardTitle>
+          <CardTitle className="text-base">{tl({ zh: "权益曲线", en: "Equity curve" })}</CardTitle>
         </CardHeader>
         <CardContent>
           <EquityChart data={equityCurve} />
@@ -649,9 +657,9 @@ function ReportContent({
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">回撤分析</CardTitle>
+            <CardTitle className="text-base">{tl({ zh: "回撤分析", en: "Drawdown analysis" })}</CardTitle>
             <div className="text-right">
-              <p className="text-xs text-muted-foreground">最大回撤</p>
+              <p className="text-xs text-muted-foreground">{tl({ zh: "最大回撤", en: "Max drawdown" })}</p>
               <p className="font-mono text-sm tabular-nums text-destructive">
                 {formatPercent(realizedMaxDrawdown === null ? null : -realizedMaxDrawdown)}
               </p>
@@ -665,7 +673,7 @@ function ReportContent({
 
       <div>
         <h3 className="mb-2 text-sm font-semibold text-foreground">
-          交易明细摘要
+          {tl({ zh: "交易明细摘要", en: "Trade summary" })}
         </h3>
         <TradeSummary extras={extras} />
       </div>
@@ -675,7 +683,7 @@ function ReportContent({
           <Separator />
           <div>
             <h3 className="mb-2 text-sm font-semibold text-foreground">
-              持仓快照
+              {tl({ zh: "持仓快照", en: "Position snapshot" })}
             </h3>
             {extra}
           </div>
@@ -686,6 +694,7 @@ function ReportContent({
 }
 
 function RunReportView({ runId }: { runId: string }) {
+  const { tl, lang } = useT();
   const detailQuery = useQuery({
     queryKey: ["reports", "run-detail", runId],
     queryFn: () => researchRunApi.get(runId),
@@ -695,7 +704,7 @@ function RunReportView({ runId }: { runId: string }) {
   if (detailQuery.isError) {
     return (
       <ErrorState
-        message={errorMessage(detailQuery.error, "无法加载研究运行结果")}
+        message={errorMessage(detailQuery.error, tl({ zh: "无法加载研究运行结果", en: "Failed to load research run result" }))}
         onRetry={() => detailQuery.refetch()}
       />
     );
@@ -717,7 +726,7 @@ function RunReportView({ runId }: { runId: string }) {
   const extras: ExtraMetric[] = EXTRA_METRIC_DEFS.filter((d) =>
     hasMetric(result, d.key),
   ).map((d) => ({
-    label: d.label,
+    label: tl(d.label),
     value: getMetric(result, d.key),
     format: d.format,
   }));
@@ -728,7 +737,7 @@ function RunReportView({ runId }: { runId: string }) {
       equityCurve={equityCurve}
       extras={extras}
       sourceHref="/research/runs"
-      sourceLabel="研究运行"
+      sourceLabel={tl({ zh: "研究运行", en: "research run" })}
       sourceId={detail.run_id}
       exportBasePath={`/api/research/runs/${encodeURIComponent(detail.run_id)}/report/export`}
       meta={
@@ -741,13 +750,13 @@ function RunReportView({ runId }: { runId: string }) {
           </span>
           <span>·</span>
           <span className="tabular-nums">
-            初始资金 ¥{formatCurrency(runCapital(detail), 0)}
+            {tl({ zh: "初始资金", en: "Initial capital" })} ¥{formatCurrency(runCapital(detail), 0)}
           </span>
           {detail.completed_at && (
             <>
               <span>·</span>
               <span className="tabular-nums">
-                完成 {timeAgo(detail.completed_at)}
+                {tl({ zh: "完成", en: "Completed" })} {timeAgo(detail.completed_at, lang)}
               </span>
             </>
           )}
@@ -762,6 +771,7 @@ function SimulationReportView({
 }: {
   session: SimulationSession;
 }) {
+  const { tl, lang } = useT();
   const reportQuery = useQuery({
     queryKey: ["reports", "sim-report", session.session_id],
     queryFn: () => simulationApi.report(session.session_id),
@@ -775,7 +785,7 @@ function SimulationReportView({
   if (reportQuery.isError) {
     return (
       <ErrorState
-        message={errorMessage(reportQuery.error, "无法加载模拟会话报告")}
+        message={errorMessage(reportQuery.error, tl({ zh: "无法加载模拟会话报告", en: "Failed to load simulation session report" }))}
         onRetry={() => reportQuery.refetch()}
       />
     );
@@ -801,7 +811,7 @@ function SimulationReportView({
       equityCurve={equityCurve}
       extras={[]}
       sourceHref="/research/simulation"
-      sourceLabel="模拟会话"
+      sourceLabel={tl({ zh: "模拟会话", en: "simulation session" })}
       sourceId={session.session_id}
       meta={
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -815,12 +825,12 @@ function SimulationReportView({
           {session.source_run_id && (
             <>
               <span>·</span>
-              <span className="font-mono">来源 {session.source_run_id}</span>
+              <span className="font-mono">{tl({ zh: "来源", en: "From" })} {session.source_run_id}</span>
             </>
           )}
           <span>·</span>
           <span className="tabular-nums">
-            创建 {timeAgo(session.created_at)}
+            {tl({ zh: "创建", en: "Created" })} {timeAgo(session.created_at, lang)}
           </span>
         </div>
       }
@@ -829,7 +839,7 @@ function SimulationReportView({
           <LoadingState rows={3} />
         ) : positionsQuery.isError ? (
           <ErrorState
-            message={errorMessage(positionsQuery.error, "无法加载持仓快照")}
+            message={errorMessage(positionsQuery.error, tl({ zh: "无法加载持仓快照", en: "Failed to load position snapshot" }))}
             onRetry={() => positionsQuery.refetch()}
           />
         ) : (
@@ -841,6 +851,7 @@ function SimulationReportView({
 }
 
 export default function Reports() {
+  const { tl } = useT();
   const [source, setSource] = useState<ReportSource>("run");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
@@ -879,24 +890,24 @@ export default function Reports() {
   return (
     <div>
       <PageHeader
-        title="研究报告"
-        description="聚合展示运行结果、绩效归因与风险概览"
+        title={tl({ zh: "研究报告", en: "Research report" })}
+        description={tl({ zh: "聚合展示运行结果、绩效归因与风险概览", en: "Aggregated run results, performance attribution and risk overview" })}
         breadcrumbs={[
-          { label: "研究", href: "/research" },
-          { label: "研究报告" },
+          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
+          { label: tl({ zh: "研究报告", en: "Research report" }) },
         ]}
       />
       <WorkflowIndicator currentPath="/research/reports" />
 
       <Card className="mb-4">
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">数据源</CardTitle>
+          <CardTitle className="text-base">{tl({ zh: "数据源", en: "Data source" })}</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap items-end gap-4">
             <div className="space-y-1.5">
               <p className="text-xs font-medium text-muted-foreground">
-                来源类型
+                {tl({ zh: "来源类型", en: "Source type" })}
               </p>
               <Select value={source} onValueChange={handleSourceChange}>
                 <SelectTrigger className="h-9 w-[180px]">
@@ -905,7 +916,7 @@ export default function Reports() {
                 <SelectContent>
                   {SOURCE_OPTIONS.map((opt) => (
                     <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
+                      {tl(opt.label)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -915,19 +926,19 @@ export default function Reports() {
             {source === "run" ? (
               <div className="min-w-[260px] flex-1 space-y-1.5">
                 <p className="text-xs font-medium text-muted-foreground">
-                  研究运行（已完成）
+                  {tl({ zh: "研究运行（已完成）", en: "Research runs (completed)" })}
                 </p>
                 <Select
                   value={selectedRunId ?? undefined}
                   onValueChange={setSelectedRunId}
                 >
                   <SelectTrigger className="h-9 w-full">
-                    <SelectValue placeholder="选择一个已完成的研究运行" />
+                    <SelectValue placeholder={tl({ zh: "选择一个已完成的研究运行", en: "Select a completed research run" })} />
                   </SelectTrigger>
                   <SelectContent>
                     {completedRuns.length === 0 ? (
                       <SelectItem value="__none__" disabled>
-                        暂无已完成的运行
+                        {tl({ zh: "暂无已完成的运行", en: "No completed runs yet" })}
                       </SelectItem>
                     ) : (
                       completedRuns.map((r: ResearchRunSummary) => (
@@ -945,19 +956,19 @@ export default function Reports() {
             ) : (
               <div className="min-w-[260px] flex-1 space-y-1.5">
                 <p className="text-xs font-medium text-muted-foreground">
-                  模拟会话（已停止 / 已归档）
+                  {tl({ zh: "模拟会话（已停止 / 已归档）", en: "Simulation sessions (stopped / archived)" })}
                 </p>
                 <Select
                   value={selectedSessionId ?? undefined}
                   onValueChange={setSelectedSessionId}
                 >
                   <SelectTrigger className="h-9 w-full">
-                    <SelectValue placeholder="选择一个已停止或已归档的模拟会话" />
+                    <SelectValue placeholder={tl({ zh: "选择一个已停止或已归档的模拟会话", en: "Select a stopped or archived simulation session" })} />
                   </SelectTrigger>
                   <SelectContent>
                     {reportableSessions.length === 0 ? (
                       <SelectItem value="__none__" disabled>
-                        暂无可报告的会话
+                        {tl({ zh: "暂无可报告的会话", en: "No reportable sessions yet" })}
                       </SelectItem>
                     ) : (
                       reportableSessions.map((s) => (
@@ -977,12 +988,12 @@ export default function Reports() {
 
           {source === "run" && runsQuery.isError && (
             <p className="mt-3 text-sm text-destructive">
-              {errorMessage(runsQuery.error, "无法加载研究运行列表")}
+              {errorMessage(runsQuery.error, tl({ zh: "无法加载研究运行列表", en: "Failed to load research run list" }))}
             </p>
           )}
           {source === "simulation" && sessionsQuery.isError && (
             <p className="mt-3 text-sm text-destructive">
-              {errorMessage(sessionsQuery.error, "无法加载模拟会话列表")}
+              {errorMessage(sessionsQuery.error, tl({ zh: "无法加载模拟会话列表", en: "Failed to load simulation session list" }))}
             </p>
           )}
         </CardContent>
@@ -994,11 +1005,11 @@ export default function Reports() {
         ) : (
           <EmptyState
             icon={<FileText className="h-8 w-8" />}
-            title="请选择一个已完成的研究运行"
+            title={tl({ zh: "请选择一个已完成的研究运行", en: "Select a completed research run" })}
             description={completedRuns.length === 0
-              ? "还没有已完成运行。先在「研究运行」登记任务，并由离线 worker 完成后再生成报告。"
-              : "选中后将展示绩效指标、权益曲线、回撤分析与交易明细摘要。"}
-            action={completedRuns.length === 0 ? <Button asChild variant="outline" size="sm"><Link to="/research/runs">去研究运行</Link></Button> : undefined}
+              ? tl({ zh: "还没有已完成运行。先在「研究运行」登记任务，并由离线 worker 完成后再生成报告。", en: "No completed runs yet. Register a task under \"Research runs\" first; a report is generated after the offline worker completes it." })
+              : tl({ zh: "选中后将展示绩效指标、权益曲线、回撤分析与交易明细摘要。", en: "Once selected, performance metrics, equity curve, drawdown analysis and trade summary are shown." })}
+            action={completedRuns.length === 0 ? <Button asChild variant="outline" size="sm"><Link to="/research/runs">{tl({ zh: "去研究运行", en: "Go to research runs" })}</Link></Button> : undefined}
           />
         )
       ) : selectedSession ? (
@@ -1006,11 +1017,11 @@ export default function Reports() {
       ) : (
         <EmptyState
           icon={<Activity className="h-8 w-8" />}
-          title="请选择一个模拟会话"
+          title={tl({ zh: "请选择一个模拟会话", en: "Select a simulation session" })}
           description={reportableSessions.length === 0
-            ? "还没有已停止或已归档会话。先完成模拟会话，再停止或归档后生成报告。"
-            : "仅展示已停止或已归档的会话报告，选中后可查看绩效、权益曲线与持仓快照。"}
-          action={reportableSessions.length === 0 ? <Button asChild variant="outline" size="sm"><Link to="/research/simulation">去模拟盘</Link></Button> : undefined}
+            ? tl({ zh: "还没有已停止或已归档会话。先完成模拟会话，再停止或归档后生成报告。", en: "No stopped or archived sessions yet. Complete a simulation session, then stop or archive it to generate a report." })
+            : tl({ zh: "仅展示已停止或已归档的会话报告，选中后可查看绩效、权益曲线与持仓快照。", en: "Only stopped or archived session reports are shown; select one to view performance, equity curve and position snapshot." })}
+          action={reportableSessions.length === 0 ? <Button asChild variant="outline" size="sm"><Link to="/research/simulation">{tl({ zh: "去模拟盘", en: "Go to simulation" })}</Link></Button> : undefined}
         />
       )}
     </div>
