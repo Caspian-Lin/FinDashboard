@@ -811,20 +811,31 @@ research_run 管线轻路由(#174)。
 - 参数:
   - 公共:`strategy: str`、`symbols: list[str]`、`start/end: str`(ISO 日期)、
     `capital: str = "100000"`、`adjust: str = "qfq"`、`params?: dict`(公共参数,
-    被组合覆盖)、`selection?: dict`、`commission_rate/commission_min/
-    stamp_tax_rate/slippage_bps: str`
-  - 组合来源二选一(互斥):
+    被组合覆盖)、`selection?: dict`(基础选股配置,被 selection_grid 覆盖)、
+    `commission_rate/commission_min/stamp_tax_rate/slippage_bps: str`
+  - params 组合维度(二选一,互斥):
     - `params_list: list[dict]`(显式列表,每个元素是一组覆盖参数,优先)
     - `params_grid: dict[str, list]`(笛卡尔积 `{字段: 值列表}`,跨字段全组合;
       展开后总数受上限约束)
+  - selection 组合维度(#259):`selection_grid: dict[str, list]`(选股维度
+    笛卡尔积 `{selection字段: 值列表}`,如 `ranking_factor`/`momentum_lookback`/
+    `max_symbols`,字段名同 `FactorSelectionParams`;与 params 侧做笛卡尔积,
+    也可**单独使用**做纯选股扫描——如因子×窗口
+    `{"ranking_factor": ["momentum", "pb"], "momentum_lookback": [20, 60]}`);
+    逐组合 selection 过 `FactorSelectionParams` 校验,非法组合具名
+    `invalid_argument` 不落库不入队
+  - 三者(params_list / params_grid / selection_grid)至少提供一个;总组合数
+    = params 覆盖 × selection 覆盖
   - `max_combos: int = 20`(组合数上限,硬上限 50,超限 `invalid_argument`,
     防误操作打爆队列)、`grid_idempotency_key: str`(幂等键,≥8 字符,重提交
     返回同一网格 created=false;组合定义不同 → conflict)、`requested_by: str`
 - 校验:未知策略 / `supports_backtest=false` / 任一组合参数非法 / selection
-  非法 / 日期非法 → `invalid_argument`,不落库不入队
+  (基础或任一组合)非法 / 日期非法 → `invalid_argument`,不落库不入队
 - 返回:`{grid_id, created, strategy, symbols, start, end, capital, adjust,
-  combo_count, max_combos, jobs: [{combo_index, label, job_id, params}],
-  polling_note}`
+  combo_count, max_combos, jobs: [{combo_index, label, job_id, params,
+  selection?}], polling_note}`(组合携带 selection 覆盖时 jobs/落库 combos
+  才含 selection 键;label 在有 selection 覆盖时为 `{params, selection}`
+  结构化差异 JSON,无则与历史扁平格式一致)
 - 错误:`permission_denied`(只读模式)、`invalid_argument`(形态互斥/上限/
   参数校验)、`conflict`(幂等冲突 / 并发冲突)
 - 完成后用 `finboard_backtest_grid_get(grid_id)` 查询聚合对比表,或
@@ -838,8 +849,9 @@ research_run 管线轻路由(#174)。
   #190 默认响应瘦身)、`max_points: int = 200`
 - 返回:
   - 网格元信息(公共字段 strategy/symbols/start/end/capital/adjust/params=
-    base_params 在头部只出现一次,#206;combo 完整参数 = params + label 的
-    覆盖参数)+ `complete: bool`(全部组合到终态)/ `completed_count` /
+    base_params/selection=基础选股配置 在头部只出现一次,#206/#259;combo
+    完整参数 = params/selection + label 的覆盖差异)+ `complete: bool`
+    (全部组合到终态)/ `completed_count` /
     `pending_count` / `failed_count`
   - `metric_fields: list[str]`(指标矩阵列:收益/年化/夏普/回撤/胜率/换手/超额/
     费用等,按规范顺序;Sharpe 口径见下方「绩效指标口径」)
@@ -847,7 +859,8 @@ research_run 管线轻路由(#174)。
     metrics?, equity_curve?(仅显式 equity_mode 时返回), equity_point_count?,
     rank?{指标: 竞争排名,同值
     同排名}, best?{指标: 是否最优}}]`(成功组合带指标矩阵 + 排名 + 最优标注;
-    未到终态组合只有 job_status)
+    未到终态组合只有 job_status;组合的 params/selection 覆盖差异都由 label
+    承载,含 selection 覆盖时 label 为 `{params, selection}` 结构 JSON)
   - `ranking: {指标: {combo_index, label, value}}`(每关键指标最优组合;
     全部「越高越好」,max_drawdown 为负值越高=回撤越小)
   - `failures: list[{combo_index, label, job_id, job_status, error_code,
