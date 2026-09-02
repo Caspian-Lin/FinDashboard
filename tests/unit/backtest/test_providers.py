@@ -27,10 +27,12 @@ def test_akshare_without_fallback_returns_primary_only() -> None:
 
 @pytest.mark.unit
 def test_fallback_configured_wraps_primary() -> None:
-    settings = Settings(data_provider="tushare", data_fallback_provider="akshare")
-    provider = build_backtest_bar_provider("tushare", settings)
+    # 不用 tushare 主源:CI 无 .env token,构造真实 TushareBarProvider 会在
+    # token 校验处抛错(本机因 .env 有 token 而通过,属环境差异)。
+    settings = Settings(data_fallback_provider="akshare")
+    provider = build_backtest_bar_provider("yfinance", settings)
     assert isinstance(provider, FallbackBarProvider)
-    assert provider._primary_name == "tushare"
+    assert provider._primary_name == "yfinance"
     assert provider._fallback_name == "akshare"
 
 
