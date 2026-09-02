@@ -706,6 +706,11 @@ research_run 管线轻路由(#174)。
     `benchmark_return`/`excess_return` 为 null)、
     `equity_mode: str = "summary"`(summary 降采样到 max_points 个关键点,首末
     点保留;full 返回完整曲线)、`max_points: int = 200`、
+    `selection_snapshots: str = "none"`(issue #258:逐决策选股快照裁剪,
+    `none` 默认不返回快照列表只回 `selection_snapshot_count`;`summary` 为
+    每期决策时点+状态+`selected_symbol_count` 投影;`full` 才回全量列表——
+    带 selection 的 run 此字段是单次响应 MB 级的主膨胀点,要审计具体选了哪些
+    标的时才传 full)、
     `run_async: bool | None = None`(issue #189)、
     `requested_by: str | None = None`(异步任务归属,默认 agent:mcp:backtest_run)
   - `selection.factor_version` 仅支持 `"v1"`(**选股规则版本**);`"v2"` 等会报
@@ -729,7 +734,8 @@ research_run 管线轻路由(#174)。
     selection_pool_ever_active, zero_trading_suspected?}`——整期 SKIPPED 的
     0 交易 run 在 summary/诊断中显式标注,不再伪装成功
   - 返回:`{run_id, metrics, equity_curve, equity_point_count, fills, summary,
-    selection_snapshots(snapshot 含 warnings 降级提示), ...}`(同步;
+    selection_snapshots(默认 none 不回,#258;full 时 snapshot 含 warnings
+    降级提示), selection_snapshot_count, ...}`(同步;
     metrics 里 sharpe_ratio=主口径 rf=3%/ddof=0,sharpe_rf0=rf=0 对照口径
     ddof=1,risk_free_annual=实际 rf;与 research_run 报告同屏比较 Sharpe 用
     sharpe_rf0 —— issue #262;`benchmark_source`=基准曲线实际来源
@@ -777,14 +783,19 @@ research_run 管线轻路由(#174)。
   end, capital, metrics, ...}]`
 
 ### finboard_backtest_history_get(只读)
-查询单条回测历史详情(equity 默认降采样,fills 分页)。
+查询单条回测历史详情(equity 默认降采样,fills 分页,选股快照默认不回)。
 - 参数:`run_id: int`、`equity_mode: str = "summary"`、`max_points: int = 200`、
   `fills_limit: int | None = 200`(默认有界 200 条,#206;`null` 返回全部)、
-  `fills_offset: int = 0`
+  `fills_offset: int = 0`、
+  `selection_snapshots: str = "none"`(issue #258:`none` 默认不返回逐决策
+  选股快照只回 `selection_snapshot_count`——带 selection 的 run 此字段是
+  单次响应 MB 级的主膨胀点;`summary` 为每期决策时点+状态+
+  `selected_symbol_count` 投影;`full` 才回全量,审计具体选了哪些标的时用)
 - 返回:`{id, ..., equity_curve, equity_point_count, fills, fills_total,
-  fills_offset, summary, selection_snapshots, ...}`(symbols 全量,列表才有预览;
+  fills_offset, summary, selection_snapshots, selection_snapshot_count, ...}`
+  (symbols 全量,列表才有预览;
   metrics 含 sharpe_ratio/sharpe_rf0/risk_free_annual 双口径标注,#262)
-- 错误:`not_found`、`invalid_argument`(equity_mode 非法)
+- 错误:`not_found`、`invalid_argument`(equity_mode / selection_snapshots 非法)
 
 ### finboard_backtest_history_delete **[写]**
 删除一条回测历史记录。
