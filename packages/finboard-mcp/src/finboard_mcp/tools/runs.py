@@ -306,7 +306,10 @@ async def _build_queued_manifest(
         validate_strategy_dataset_capabilities,
     )
     from finboard_backtest.research_run.contracts import JsonValue
-    from finboard_backtest.research_run.signal_engine import single_shot_snapshot_gate_error
+    from finboard_backtest.research_run.signal_engine import (
+        multi_period_feature_gate_error,
+        single_shot_snapshot_gate_error,
+    )
     from finboard_backtest.strategy_spec import ResearchStrategySpec
     from finboard_backtest.strategy_spec.contracts import FeatureKind
     from finboard_backtest.strategy_spec.universe_precheck import (
@@ -408,6 +411,24 @@ async def _build_queued_manifest(
     )
     if user_gate_error is not None:
         raise McpToolError("invalid_argument", user_gate_error)
+    # issue #253:multi_period 特征可用性入队门控(与 REST 路由共用同一函数)。
+    # 放在用户因子门控之后:multi_period 引用 u_ 因子先按 #217 具名拒绝。
+    feature_gate_error = multi_period_feature_gate_error(
+        identity_sources={
+            node.source
+            for node in spec.feature_graph.nodes
+            if node.source is not None
+        },
+        parameters=body.parameters,
+        research_release_kinds=[release.dataset_kind for release in releases],
+        snapshot_feature_names=[
+            observation.feature_name
+            for snapshot in snapshots
+            for observation in snapshot.observations
+        ],
+    )
+    if feature_gate_error is not None:
+        raise McpToolError("invalid_argument", feature_gate_error)
     # issue #218:user_code 策略入队门控(与 REST 路由共用同一函数);放行时
     # 把 active commit 冻结进 spec(manifest input_checksum 覆盖代码版本);
     # issue #234:screen 绑定的 draft 产物 commit/ID 一并冻结。
@@ -935,7 +956,11 @@ def register(mcp: MCPServer) -> None:
             "因子不需要,基本面因子(pb/ROE 等)仍需快照/研究数据发布\n"
             '- "parameters": {} —— 不声明即 single_shot;声明 '
             "rebalance_frequency=monthly|quarterly 触发多期再平衡回放(#183,"
-            "仅价格因子按发布每期重算;非法值入队即拒)\n"
+            "仅价格因子按发布每期重算;非法值入队即拒)。multi_period 特征"
+            "可用性入队即判(#253):规格引用的特征必须可由多期供给派生"
+            "(标准价格特征/close/attached daily_metrics 与 financial_indicators"
+            " 发布/快照观测),声明 pb/roe 等财务因子而未附加对应研究数据发布"
+            " → invalid_argument 具名缺失特征与所需发布 kind\n"
             '- "validation_config"/"portfolio_config"/"risk_config"/'
             '"execution_config"/"fee_config"/"benchmark_config": {} —— '
             "政策覆盖,一般留空\n"

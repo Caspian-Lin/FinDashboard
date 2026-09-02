@@ -48,7 +48,10 @@ from finboard_backtest.research_run import (
     validate_strategy_dataset_capabilities,
 )
 from finboard_backtest.research_run.contracts import JsonValue, stable_checksum
-from finboard_backtest.research_run.signal_engine import single_shot_snapshot_gate_error
+from finboard_backtest.research_run.signal_engine import (
+    multi_period_feature_gate_error,
+    single_shot_snapshot_gate_error,
+)
 from finboard_backtest.research_sandbox.factor_publish import (
     sandbox_snapshot_dataset_release_ids,
 )
@@ -159,6 +162,25 @@ async def queue_research_run(
     )
     if user_gate_error is not None:
         raise HTTPException(status_code=422, detail=user_gate_error)
+    # issue #253:multi_period 特征可用性入队门控(与 MCP 共用同一函数)——
+    # 规格 identity 源必须 ⊆ 多期可解析集合(标准价格特征 / close / attached
+    # 研究发布派生特征 / 快照观测),否则执行期才报「identity 节点缺少数据源」。
+    # 放在用户因子门控之后:multi_period 引用 u_ 因子先按 #217 具名拒绝。
+    identity_sources = {
+        node.source for node in spec.feature_graph.nodes if node.source is not None
+    }
+    feature_gate_error = multi_period_feature_gate_error(
+        identity_sources=identity_sources,
+        parameters=body.parameters,
+        research_release_kinds=[release.dataset_kind for release in releases],
+        snapshot_feature_names=[
+            observation.feature_name
+            for snapshot in snapshots
+            for observation in snapshot.observations
+        ],
+    )
+    if feature_gate_error is not None:
+        raise HTTPException(status_code=422, detail=feature_gate_error)
     # issue #218:user_code 策略入队门控 —— artifact active、commit 一致、
     # 沙箱已启用、single_shot 决策时点可用(REST+MCP 共用同一函数);放行时
     # 把 active commit 冻结进 spec(manifest input_checksum 覆盖代码版本);

@@ -105,7 +105,7 @@ def _release_summary_to_dict(release: Any) -> dict[str, Any]:
 
     复用 ``finboard_api.routes.instruments._release_to_summary`` 的字段清单。
     """
-    return cast(
+    summary = cast(
         dict[str, Any],
         to_jsonable(
             {
@@ -140,6 +140,12 @@ def _release_summary_to_dict(release: Any) -> dict[str, Any]:
             }
         ),
     )
+    derived = getattr(release, "derived_features", ())
+    if derived:
+        # issue #253:研究发布可派生的特征集合(入队期 multi_period 特征
+        # 可用性门控的判定依据),非空才出现,保持默认响应最轻。
+        summary["derived_features"] = list(derived)
+    return summary
 
 
 def _release_detail_to_dict(release: Any) -> dict[str, Any]:

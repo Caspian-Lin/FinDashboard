@@ -68,7 +68,13 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
 `execution_mode` 与缺失因子源,#203),非法频率值同样在入队时拒绝。
 「多期不要求预建快照」**仅限**决策日推导与价格因子(momentum/volatility
 等按发布每期重算);基本面因子(pb/ROE 等)仍 PIT 取自冻结快照 / 研究数据
-发布(daily_metrics/financial_indicators,#187),缺来源执行期 fail-closed。
+发布(daily_metrics/financial_indicators,#187)。**multi_period 特征可用性
+入队即判(#253)**:规格 identity 源必须可由多期供给派生(标准价格特征 /
+`close` / attached 研究发布按 kind 派生的特征 / 快照观测),声明 pb/roe 等
+财务因子而未附加对应研究数据发布 → 入队秒级 `invalid_argument`,报错具名
+缺失特征与所需发布 kind —— 不再拖到执行期才报「identity 节点缺少数据源」。
+研究数据发布的 manifest 冻结 `derived_features`(可派生特征集合),旧发布
+按 kind 回退判定。
 - 参数:`payload: dict`(JSON 对象,模板与取值来源,必填标 *):
   - `idempotency_key`*: 8-128 字符去重键;重提交返回同一 run
   - `strategy_id`*: 已发布策略规格 id(`finboard_strategy_list` / registry 查询)
