@@ -39,6 +39,8 @@ class _Instrument:
     present_event_types: tuple[str, ...] = ()
     name: str | None = None
     name_history: tuple[tuple[str, date, date | None], ...] = ()
+    # issue #256:指数基准判定依赖 instrument_type;None 兼容既有用例。
+    instrument_type: object = None
 
 
 def _spec(**kwargs: object) -> UniverseSpec:
@@ -104,6 +106,63 @@ def test_pool_not_empty_when_metadata_complete() -> None:
     assert preview.is_empty is False
     assert preview.missing_fields == ()
     assert not [w for w in preview.warnings if w.code == "universe_listing_days_unavailable"]
+
+
+def test_benchmark_index_excluded_from_static_pool() -> None:
+    """指数基准资产不进静态候选池(issue #256,#184 不可撮合边界)。
+
+    bars 主发布必须携带指数(基准行情来源),但静态预检 / 空池门控的候选
+    枚举要跳过它——与运行时候选构建共用 ``is_benchmark_only_instrument``。
+    """
+    from finboard_backtest.strategy_spec.universe_precheck import (
+        is_benchmark_only_instrument,
+        static_universe_candidates,
+    )
+    from finboard_shared.types import InstrumentType
+
+    instruments = (
+        _INST[0],
+        _Instrument(
+            code="000300.SH",
+            market=Market.A_SHARE,
+            asset_class=AssetClass.EQUITY,
+            list_date=None,
+            instrument_type="index",
+        ),
+    )
+
+    # 谓词:str / InstrumentType 枚举 / 其他类型 / 缺失。
+    assert is_benchmark_only_instrument(instruments[1]) is True
+    assert (
+        is_benchmark_only_instrument(
+            _Instrument(
+                code="X",
+                market=Market.A_SHARE,
+                asset_class=AssetClass.EQUITY,
+                list_date=None,
+                instrument_type=InstrumentType.INDEX,
+            )
+        )
+        is True
+    )
+    assert is_benchmark_only_instrument(instruments[0]) is False
+    assert is_benchmark_only_instrument(_Instrument(
+        code="Y", market=Market.A_SHARE, asset_class=AssetClass.EQUITY, list_date=None,
+    )) is False
+
+    candidates = static_universe_candidates(instruments, decision_date=DECISION_DATE)
+    assert [c.symbol for c in candidates] == ["600001.SH"]
+
+    preview = preview_universe_pool(
+        _spec(min_listing_days=60),
+        instruments,
+        decision_date=DECISION_DATE,
+    )
+    assert preview.total_candidates == 1
+    # 指数(list_date=None)不参与 list_date 缺失统计,不产出噪音 warning。
+    assert "universe_listing_days_unavailable" not in {
+        w.code for w in preview.warnings
+    }
 
 
 def test_min_listing_days_zero_does_not_empty_pool_on_null_list_date() -> None:

@@ -60,6 +60,8 @@ class _StubInstrument:
     asset_class: AssetClass = AssetClass.EQUITY
     ready: bool = True
     execution: _StubExecution = field(default_factory=_StubExecution)
+    # issue #256:指数基准资产判定依赖 instrument_type;None 兼容既有用例。
+    instrument_type: object = None
 
 
 @dataclass
@@ -303,6 +305,36 @@ class TestFrozenInputLoader:
         assert {c.symbol for c in ctx.candidates} == {"510300.SH"}
         assert "600519.SH" not in ctx.lot_info
         assert "600519.SH" not in ctx.prices
+
+    async def test_benchmark_index_not_a_candidate(self) -> None:
+        """指数基准资产不进候选池 / lot_info(issue #256,#184 不可撮合边界)。
+
+        bars 主发布必须携带指数(基准行情来源),但候选枚举要跳过它;
+        静态预检(static_universe_candidates)与运行时共用同一谓词。
+        """
+        provider = _StubProvider(
+            release=_StubRelease(
+                "release-v1",
+                (
+                    _StubInstrument(code="510300.SH"),
+                    _StubInstrument(code="000300.SH", instrument_type="index"),
+                ),
+            ),
+            close_by_symbol={
+                "510300.SH": Decimal("4.50"),
+                "000300.SH": Decimal("3800.0"),
+            },
+        )
+        loader = _loader(provider, {})
+
+        ctx = await loader.load_context(
+            _manifest(snapshot_ids=()),
+            decision_at=datetime(2024, 3, 1, 15, tzinfo=UTC),
+            execution_at=datetime(2024, 3, 4, 9, 30, tzinfo=UTC),
+        )
+
+        assert {c.symbol for c in ctx.candidates} == {"510300.SH"}
+        assert "000300.SH" not in ctx.lot_info
 
     async def test_missing_price_excluded_from_prices(self) -> None:
         """某标的在决策日无可见 Bar(停牌),prices 不含该标的,但不抛错。"""

@@ -404,11 +404,26 @@ def _require_aware(value: datetime) -> datetime:
 def _build_candidates_and_lots(
     instruments: Sequence[ReleasedInstrument],
 ) -> tuple[tuple[UniverseCandidate, ...], dict[str, AssetLotInfo]]:
-    """从发布 instruments 构造候选池(全部 included)与执行元数据映射。"""
+    """从发布 instruments 构造候选池(全部 included)与执行元数据映射。
+
+    issue #256:指数基准资产(``instrument_type=index``)只做基准数据
+    (``benchmark_config.symbol`` 经 ``_load_benchmark_curve`` 单独读取),
+    不可撮合,不进候选池与执行元数据——与静态预检
+    (``static_universe_candidates``)共用 :func:`is_benchmark_only_instrument`,
+    两边口径一致。
+    """
+    from finboard_backtest.strategy_spec.universe_precheck import (
+        is_benchmark_only_instrument,
+    )
+
     candidates: list[UniverseCandidate] = []
     lot_info: dict[str, AssetLotInfo] = {}
+    skipped_benchmark: list[str] = []
     for inst in instruments:
         if not inst.ready:
+            continue
+        if is_benchmark_only_instrument(inst):
+            skipped_benchmark.append(inst.code)
             continue
         candidates.append(
             UniverseCandidate(
@@ -420,6 +435,13 @@ def _build_candidates_and_lots(
             )
         )
         lot_info[inst.code] = _execution_to_lot_info(inst)
+    if skipped_benchmark:
+        logger.debug(
+            "frozen_loader.benchmark_only_skipped",
+            count=len(skipped_benchmark),
+            symbols=skipped_benchmark[:20],
+            message="指数基准资产不进候选池(只做 benchmark 行情)",
+        )
     return tuple(candidates), lot_info
 
 

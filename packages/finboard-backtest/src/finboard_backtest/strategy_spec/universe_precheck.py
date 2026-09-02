@@ -135,6 +135,19 @@ def explicit_symbol_domain[T](
     return narrowed, tuple(sorted(explicit - present))
 
 
+def is_benchmark_only_instrument(instrument: object) -> bool:
+    """指数基准资产判定(issue #184/#256):``instrument_type=index``。
+
+    指数只做基准数据、不可撮合(AGENTS.md #184 边界),不进研究运行候选池;
+    发布 instruments 里必须携带它(同一 bars 主发布承载基准行情),但候选
+    枚举必须跳过。静态预检(``static_universe_candidates``)与运行时候选
+    构建(``frozen_loader._build_candidates_and_lots``)共用本谓词,两边口径
+    一致。入参兼容 ORM 行(str)与 ``InstrumentType`` 枚举。
+    """
+    value = _attr(instrument, "instrument_type", None)
+    return value is not None and value == "index"
+
+
 def name_at_decision(instrument: object, decision_date: date) -> tuple[str | None, bool]:
     """决策日 PIT 名称:优先 ``name_history`` 覆盖区间,否则回退当前 ``name``。
 
@@ -189,6 +202,11 @@ def static_universe_candidates(
     """
     candidates: list[UniverseCandidate] = []
     for instrument in instruments:
+        # issue #256:指数只做基准数据不可撮合,不进候选池(与运行时候选
+        # 构建 ``_build_candidates_and_lots`` 共用 ``is_benchmark_only_instrument``,
+        # 静态预检 / 空池门控与执行期口径一致)。
+        if is_benchmark_only_instrument(instrument):
+            continue
         market = _attr(instrument, "market", None)
         asset_class = _attr(instrument, "asset_class", None)
         if market is None or asset_class is None:
@@ -356,6 +374,16 @@ def _metadata_warnings(
                 ),
             )
         )
+    total = len(instruments)
+    if total == 0:
+        return warnings
+
+    # issue #256:指数基准资产不进候选池(不可撮合),且无 list_date / 名称等
+    # 主数据上游;元数据缺失统计只服务可撮合候选,把指数计入会让每个含基准
+    # 指数的混发发布永久产出噪音 warning。
+    instruments = [
+        item for item in instruments if not is_benchmark_only_instrument(item)
+    ]
     total = len(instruments)
     if total == 0:
         return warnings
@@ -679,6 +707,7 @@ __all__ = [
     "UniversePrecheckWarning",
     "describe_empty_pool",
     "explicit_symbol_domain",
+    "is_benchmark_only_instrument",
     "is_st_at_decision",
     "is_st_name",
     "name_at_decision",
