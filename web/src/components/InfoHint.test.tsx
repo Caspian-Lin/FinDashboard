@@ -4,9 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import InfoHint from "./InfoHint";
 
 const content = {
-  title: "滑点",
-  description: "模拟信号价格与成交价格之间的不利偏差。",
-  detail: "1 bps = 0.01%。",
+  title: { zh: "滑点", en: "Slippage" },
+  description: { zh: "模拟信号价格与成交价格之间的不利偏差。", en: "Adverse deviation between simulated signal price and fill price." },
+  detail: { zh: "1 bps = 0.01%。", en: "1 bps = 0.01%." },
 };
 
 afterEach(() => {
@@ -23,8 +23,8 @@ describe("InfoHint", () => {
     fireEvent.pointerEnter(trigger);
 
     const tooltip = screen.getByRole("tooltip");
-    expect(tooltip).toHaveTextContent(content.description);
-    expect(tooltip).toHaveTextContent(content.detail);
+    expect(tooltip).toHaveTextContent(content.description.zh);
+    expect(tooltip).toHaveTextContent(content.detail.zh);
     expect(tooltip.parentElement).toBe(document.body);
     expect(trigger).toHaveAttribute("aria-describedby", tooltip.id);
 
@@ -76,14 +76,14 @@ describe("InfoHint", () => {
   it("可以安全渲染长说明并在卸载时清理延时任务", () => {
     vi.useFakeTimers();
     const longContent = {
-      title: "长说明",
-      description: "说明".repeat(300),
+      title: { zh: "长说明", en: "Long description" },
+      description: { zh: "说明".repeat(300), en: "text".repeat(300) },
     };
     const { unmount } = render(<InfoHint content={longContent} />);
     const trigger = screen.getByRole("button", { name: "查看“长说明”说明" });
 
     fireEvent.pointerEnter(trigger);
-    expect(screen.getByRole("tooltip")).toHaveTextContent(longContent.description);
+    expect(screen.getByRole("tooltip")).toHaveTextContent(longContent.description.zh);
     fireEvent.pointerLeave(trigger);
     unmount();
 
