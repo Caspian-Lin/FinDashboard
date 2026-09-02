@@ -1,4 +1,5 @@
 import type { FactorSelectionInput } from "../lib/api";
+import { useT } from "@/i18n";
 
 interface Props {
   value: FactorSelectionInput;
@@ -7,15 +8,15 @@ interface Props {
 
 const FACTORS: Array<{
   value: FactorSelectionInput["ranking_factor"];
-  label: string;
+  label: "marketCap" | "pb" | "turnoverRate" | "momentum" | "roe" | "grossMargin" | "revenueYoy";
 }> = [
-  { value: "market_cap", label: "总市值" },
-  { value: "pb", label: "市净率 PB" },
-  { value: "turnover_rate", label: "换手率" },
-  { value: "momentum", label: "动量" },
-  { value: "roe", label: "净资产收益率 ROE" },
-  { value: "gross_profit_margin", label: "毛利率" },
-  { value: "revenue_yoy", label: "营收同比" },
+  { value: "market_cap", label: "marketCap" },
+  { value: "pb", label: "pb" },
+  { value: "turnover_rate", label: "turnoverRate" },
+  { value: "momentum", label: "momentum" },
+  { value: "roe", label: "roe" },
+  { value: "gross_profit_margin", label: "grossMargin" },
+  { value: "revenue_yoy", label: "revenueYoy" },
 ];
 
 type DecimalKey =
@@ -31,6 +32,7 @@ type DecimalKey =
   | "min_revenue_yoy";
 
 export default function FactorSelectionForm({ value, onChange }: Props) {
+  const { t } = useT();
   const set = <K extends keyof FactorSelectionInput>(
     key: K,
     next: FactorSelectionInput[K],
@@ -44,10 +46,10 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 id="factor-selection-title" className="text-sm font-semibold text-foreground">
-            因子候选池
+            {t("factorSelection.title")}
           </h3>
           <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">
-            每个交易日收盘后冻结横截面数据，次一交易日生效。候选池只约束策略可见标的，不直接下单。
+            {t("factorSelection.description")}
           </p>
         </div>
         <label className="inline-flex cursor-pointer items-center gap-2 text-sm font-medium text-foreground">
@@ -57,27 +59,27 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
             onChange={(event) => set("enabled", event.target.checked)}
             className="h-4 w-4 rounded border-border text-primary focus:ring-ring"
           />
-          启用按日选股
+          {t("factorSelection.enable")}
         </label>
       </div>
 
       {!value.enabled ? (
         <p className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
-          当前沿用静态标的列表，旧回测行为保持不变。
+          {t("factorSelection.disabledHint")}
         </p>
       ) : (
         <>
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <Field label="数据源">
+            <Field label={t("factorSelection.source")}>
               <select
                 value={value.source}
                 onChange={(event) => set("source", event.target.value)}
                 className={controlClass}
               >
-                <option value="tushare">Tushare 研究数据</option>
+                <option value="tushare">{t("factorSelection.sourceTushare")}</option>
               </select>
             </Field>
-            <Field label="排序因子">
+            <Field label={t("factorSelection.rankingFactor")}>
               <select
                 value={value.ranking_factor}
                 onChange={(event) =>
@@ -90,12 +92,12 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
               >
                 {FACTORS.map((factor) => (
                   <option key={factor.value} value={factor.value}>
-                    {factor.label}
+                    {t(`factorSelection.factors.${factor.label}`)}
                   </option>
                 ))}
               </select>
             </Field>
-            <Field label="排名范围">
+            <Field label={t("factorSelection.rankingScope")}>
               <select
                 value={value.ranking_scope}
                 onChange={(event) =>
@@ -106,11 +108,11 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
                 }
                 className={controlClass}
               >
-                <option value="global">全市场横截面</option>
-                <option value="industry">行业内横截面</option>
+                <option value="global">{t("factorSelection.scopeGlobal")}</option>
+                <option value="industry">{t("factorSelection.scopeIndustry")}</option>
               </select>
             </Field>
-            <Field label="最多入选">
+            <Field label={t("factorSelection.maxSymbols")}>
               <input
                 type="number"
                 min={1}
@@ -124,17 +126,17 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
 
           <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm text-foreground">
             <Check
-              label="从小到大排序"
+              label={t("factorSelection.ascending")}
               checked={value.ranking_ascending}
               onChange={(checked) => set("ranking_ascending", checked)}
             />
             <Check
-              label="排除 ST"
+              label={t("factorSelection.excludeSt")}
               checked={value.exclude_st}
               onChange={(checked) => set("exclude_st", checked)}
             />
             <Check
-              label="排除停牌"
+              label={t("factorSelection.excludeSuspended")}
               checked={value.exclude_suspended}
               onChange={(checked) => set("exclude_suspended", checked)}
             />
@@ -142,42 +144,42 @@ export default function FactorSelectionForm({ value, onChange }: Props) {
 
           <details className="mt-4 rounded-lg border border-border">
             <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-foreground">
-              高级过滤与行业约束
+              {t("factorSelection.advanced")}
             </summary>
             <div className="grid grid-cols-1 gap-4 border-t border-border p-3 sm:grid-cols-2 xl:grid-cols-4">
               <NumberField
-                label="最少上市天数"
+                label={t("factorSelection.minListingDays")}
                 value={value.min_listing_days}
                 min={0}
                 onChange={(next) => set("min_listing_days", next)}
               />
               <OptionalNumberField
-                label="每行业上限"
+                label={t("factorSelection.maxPerIndustry")}
                 value={value.max_per_industry}
                 min={1}
                 onChange={(next) => set("max_per_industry", next)}
               />
               <NumberField
-                label="动量回看天数"
+                label={t("factorSelection.momentumLookback")}
                 value={value.momentum_lookback}
                 min={1}
                 onChange={(next) => set("momentum_lookback", next)}
               />
-              <DecimalField label="最小总市值（元）" value={value.min_market_cap} onChange={(raw) => setDecimal("min_market_cap", raw)} />
-              <DecimalField label="最大总市值（元）" value={value.max_market_cap} onChange={(raw) => setDecimal("max_market_cap", raw)} />
-              <DecimalField label="最小 PB" value={value.min_pb} onChange={(raw) => setDecimal("min_pb", raw)} />
-              <DecimalField label="最大 PB" value={value.max_pb} onChange={(raw) => setDecimal("max_pb", raw)} />
-              <DecimalField label="最小换手率" value={value.min_turnover_rate} onChange={(raw) => setDecimal("min_turnover_rate", raw)} />
-              <DecimalField label="最大换手率" value={value.max_turnover_rate} onChange={(raw) => setDecimal("max_turnover_rate", raw)} />
-              <DecimalField label="最小动量" value={value.min_momentum} onChange={(raw) => setDecimal("min_momentum", raw)} />
-              <DecimalField label="最小 ROE" value={value.min_roe} onChange={(raw) => setDecimal("min_roe", raw)} />
-              <DecimalField label="最小毛利率" value={value.min_gross_profit_margin} onChange={(raw) => setDecimal("min_gross_profit_margin", raw)} />
-              <DecimalField label="最小营收同比" value={value.min_revenue_yoy} onChange={(raw) => setDecimal("min_revenue_yoy", raw)} />
+              <DecimalField label={t("factorSelection.minMarketCap")} value={value.min_market_cap} onChange={(raw) => setDecimal("min_market_cap", raw)} />
+              <DecimalField label={t("factorSelection.maxMarketCap")} value={value.max_market_cap} onChange={(raw) => setDecimal("max_market_cap", raw)} />
+              <DecimalField label={t("factorSelection.minPb")} value={value.min_pb} onChange={(raw) => setDecimal("min_pb", raw)} />
+              <DecimalField label={t("factorSelection.maxPb")} value={value.max_pb} onChange={(raw) => setDecimal("max_pb", raw)} />
+              <DecimalField label={t("factorSelection.minTurnoverRate")} value={value.min_turnover_rate} onChange={(raw) => setDecimal("min_turnover_rate", raw)} />
+              <DecimalField label={t("factorSelection.maxTurnoverRate")} value={value.max_turnover_rate} onChange={(raw) => setDecimal("max_turnover_rate", raw)} />
+              <DecimalField label={t("factorSelection.minMomentum")} value={value.min_momentum} onChange={(raw) => setDecimal("min_momentum", raw)} />
+              <DecimalField label={t("factorSelection.minRoe")} value={value.min_roe} onChange={(raw) => setDecimal("min_roe", raw)} />
+              <DecimalField label={t("factorSelection.minGrossMargin")} value={value.min_gross_profit_margin} onChange={(raw) => setDecimal("min_gross_profit_margin", raw)} />
+              <DecimalField label={t("factorSelection.minRevenueYoy")} value={value.min_revenue_yoy} onChange={(raw) => setDecimal("min_revenue_yoy", raw)} />
             </div>
           </details>
 
           <p className="mt-3 text-xs text-muted-foreground">
-            数据不完整、过期或存在未来时点记录时，本日调仓会整体跳过，并保留上一候选池。
+            {t("factorSelection.skipHint")}
           </p>
         </>
       )}
@@ -254,13 +256,14 @@ function OptionalNumberField({
   min: number;
   onChange: (value: number | null) => void;
 }) {
+  const { t } = useT();
   return (
     <Field label={label}>
       <input
         type="number"
         min={min}
         value={value ?? ""}
-        placeholder="不限"
+        placeholder={t("factorSelection.unlimited")}
         onChange={(event) =>
           onChange(event.target.value === "" ? null : Number(event.target.value))
         }
@@ -279,13 +282,14 @@ function DecimalField({
   value: string | null;
   onChange: (value: string) => void;
 }) {
+  const { t } = useT();
   return (
     <Field label={label}>
       <input
         type="number"
         step="any"
         value={value ?? ""}
-        placeholder="不限"
+        placeholder={t("factorSelection.unlimited")}
         onChange={(event) => onChange(event.target.value)}
         className={controlClass}
       />

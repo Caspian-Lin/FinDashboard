@@ -1,4 +1,5 @@
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { useT } from "@/i18n";
 import { Progress } from "@/components/ui/progress";
 import { StatusBadge } from "@/components/ui/status-badge";
 import type { JobOut } from "@/lib/api";
@@ -6,15 +7,15 @@ import type { JobOut } from "@/lib/api";
 // 统一任务队列(#144)后,FeatureSnapshotProgress 改用 JobOut。
 // JobOut 只有 progress_done/progress_total/phase/started_at/finished_at/error_summary,
 // 不再提供 elapsed_seconds / estimated_remaining_seconds —— ETA 由前端按速度估算。
-const STATUS_LABELS: Record<string, string> = {
-  queued: "排队中",
-  running: "计算中",
-  retry_waiting: "重试等待",
-  cancel_requested: "取消中",
-  succeeded: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-  interrupted: "已中断",
+const STATUS_LABELS: Record<string, { zh: string; en: string }> = {
+  queued: { zh: "排队中", en: "Queued" },
+  running: { zh: "计算中", en: "Computing" },
+  retry_waiting: { zh: "重试等待", en: "Waiting to retry" },
+  cancel_requested: { zh: "取消中", en: "Cancelling" },
+  succeeded: { zh: "已完成", en: "Completed" },
+  failed: { zh: "失败", en: "Failed" },
+  cancelled: { zh: "已取消", en: "Cancelled" },
+  interrupted: { zh: "已中断", en: "Interrupted" },
 };
 
 interface FeatureSnapshotProgressProps {
@@ -32,6 +33,7 @@ function computeElapsedSeconds(job: JobOut): number {
 export function FeatureSnapshotProgress({
   job,
 }: FeatureSnapshotProgressProps) {
+  const { t, tl, lang } = useT();
   const done = job.progress_done ?? 0;
   const total = job.progress_total ?? 0;
   const progress =
@@ -46,9 +48,9 @@ export function FeatureSnapshotProgress({
     <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-4" data-testid="feature-snapshot-progress">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">特征快照计算</span>
+          <span className="text-sm font-medium">{t("snapshotProgress.title")}</span>
           <StatusBadge status={job.status}>
-            {STATUS_LABELS[job.status] ?? job.status}
+            {STATUS_LABELS[job.status] ? tl(STATUS_LABELS[job.status]) : job.status}
           </StatusBadge>
         </div>
         <span className="font-mono text-sm tabular-nums">
@@ -58,27 +60,27 @@ export function FeatureSnapshotProgress({
 
       <Progress
         value={progress}
-        aria-label="特征快照计算进度"
+        aria-label={t("snapshotProgress.progressAria")}
         aria-valuetext={`${done} / ${total}，${progress.toFixed(1)}%`}
         indicatorClassName={job.status === "failed" ? "bg-destructive" : undefined}
       />
 
       <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
         <span>
-          已耗时：
+          {t("snapshotProgress.elapsed")}
           <strong className="font-mono font-normal text-foreground">
-            {formatDuration(elapsedSec)}
+            {formatDuration(elapsedSec, lang)}
           </strong>
         </span>
         <span>
-          预计剩余：
+          {t("snapshotProgress.eta")}
           <strong className="font-mono font-normal text-foreground">
             {job.status === "queued"
-              ? "任务开始后计算"
+              ? t("snapshotProgress.etaAfterStart")
               : job.status === "running"
                 ? etaSec !== null
-                  ? formatDuration(etaSec)
-                  : "计算中…"
+                  ? formatDuration(etaSec, lang)
+                  : t("snapshotProgress.computing")
                 : "—"}
           </strong>
         </span>
@@ -92,9 +94,9 @@ export function FeatureSnapshotProgress({
         job.status === "interrupted" ||
         job.status === "cancelled") && (
         <Alert variant="destructive">
-          <AlertTitle>{STATUS_LABELS[job.status] ?? "任务未成功"}</AlertTitle>
+          <AlertTitle>{STATUS_LABELS[job.status] ? tl(STATUS_LABELS[job.status]) : t("snapshotProgress.notSuccessful")}</AlertTitle>
           <AlertDescription>
-            {job.error_summary ?? "服务端未返回失败原因"}
+            {job.error_summary ?? t("snapshotProgress.noErrorDetail")}
           </AlertDescription>
         </Alert>
       )}
@@ -102,11 +104,16 @@ export function FeatureSnapshotProgress({
   );
 }
 
-function formatDuration(sec: number): string {
+function formatDuration(sec: number, lang: "zh" | "en"): string {
   if (!isFinite(sec) || sec <= 0) return "—";
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = Math.floor(sec % 60);
+  if (lang === "en") {
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
   if (h > 0) return `${h} 小时 ${m} 分 ${s} 秒`;
   if (m > 0) return `${m} 分 ${s} 秒`;
   return `${s} 秒`;

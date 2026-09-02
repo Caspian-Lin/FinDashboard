@@ -23,8 +23,10 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { useT } from "@/i18n";
 
 export default function Orders() {
+  const { t } = useT();
   const qc = useQueryClient();
   const [showForm, setShowForm] = useState(false);
   const [cancelTarget, setCancelTarget] = useState<Order | null>(null);
@@ -60,24 +62,24 @@ export default function Orders() {
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold tracking-tight text-foreground">订单</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">{t("orders.title")}</h1>
             <span className="flex items-center gap-1 rounded bg-warning/10 px-2 py-0.5 text-xs font-medium text-warning">
               <AlertTriangle className="h-3 w-3" />
-              实盘受控区域
+              {t("orders.liveControlled")}
             </span>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            下单和撤单操作将影响真实账户;所有操作由交易内核鉴权和风控。
+            {t("orders.description")}
           </p>
         </div>
         <Button onClick={() => setShowForm(!showForm)} variant={showForm ? "outline" : "default"}>
-          {showForm ? "取消" : "手工下单"}
+          {showForm ? t("common.cancel") : t("orders.manualOrder")}
         </Button>
       </div>
 
       {placeMut.isError && (
         <Alert variant="destructive" className="mb-4">
-          <AlertDescription>下单失败: {placeMut.error?.message}</AlertDescription>
+          <AlertDescription>{t("orders.placeFailed")}: {placeMut.error?.message}</AlertDescription>
         </Alert>
       )}
 
@@ -89,22 +91,22 @@ export default function Orders() {
       )}
 
       {orders.length === 0 ? (
-        <div className="py-12 text-center text-muted-foreground">无订单</div>
+        <div className="py-12 text-center text-muted-foreground">{t("orders.noOrders")}</div>
       ) : (
         <div className="overflow-x-auto scrollbar-thin">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>标的</TableHead>
-                <TableHead>方向</TableHead>
-                <TableHead>类型</TableHead>
-                <TableHead className="text-right">数量</TableHead>
-                <TableHead className="text-right">价格</TableHead>
-                <TableHead className="text-right">已成交</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>策略</TableHead>
-                <TableHead>时间</TableHead>
-                <TableHead>操作</TableHead>
+                <TableHead>{t("common.symbol")}</TableHead>
+                <TableHead>{t("common.direction")}</TableHead>
+                <TableHead>{t("common.type")}</TableHead>
+                <TableHead className="text-right">{t("common.quantity")}</TableHead>
+                <TableHead className="text-right">{t("common.price")}</TableHead>
+                <TableHead className="text-right">{t("orders.filled")}</TableHead>
+                <TableHead>{t("common.status")}</TableHead>
+                <TableHead>{t("orders.strategy")}</TableHead>
+                <TableHead>{t("common.time")}</TableHead>
+                <TableHead>{t("common.actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -112,16 +114,16 @@ export default function Orders() {
                 <TableRow key={o.client_order_id}>
                   <TableCell className="font-mono">{o.symbol}</TableCell>
                   <TableCell className={o.side === "buy" ? "text-up" : "text-down"}>
-                    {o.side === "buy" ? "买入" : "卖出"}
+                    {o.side === "buy" ? t("common.buy") : t("common.sell")}
                   </TableCell>
-                  <TableCell>{o.order_type === "limit" ? "限价" : "市价"}</TableCell>
+                  <TableCell>{o.order_type === "limit" ? t("orders.limit") : t("orders.market")}</TableCell>
                   <TableCell className="text-right tabular-nums">{o.quantity}</TableCell>
                   <TableCell className="text-right tabular-nums">{o.price ?? "—"}</TableCell>
                   <TableCell className="text-right tabular-nums">{o.filled_quantity}</TableCell>
                   <TableCell>
                     <OrderStatusBadge status={o.status} />
                   </TableCell>
-                  <TableCell className="text-muted-foreground">{o.strategy_id ?? "人工"}</TableCell>
+                  <TableCell className="text-muted-foreground">{o.strategy_id ?? t("orders.manual")}</TableCell>
                   <TableCell className="text-muted-foreground">
                     {new Date(o.created_at).toLocaleTimeString()}
                   </TableCell>
@@ -132,7 +134,7 @@ export default function Orders() {
                         variant="destructive"
                         onClick={() => setCancelTarget(o)}
                       >
-                        撤单
+                        {t("orders.cancel")}
                       </Button>
                     )}
                   </TableCell>
@@ -147,43 +149,43 @@ export default function Orders() {
       <Dialog open={!!cancelTarget} onOpenChange={(v) => !v && setCancelTarget(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>确认撤单</DialogTitle>
+            <DialogTitle>{t("orders.cancelConfirmTitle")}</DialogTitle>
             <DialogDescription>
-              此操作将撤销以下订单，由交易内核执行。不可撤销已完成订单。
+              {t("orders.cancelConfirmDesc")}
             </DialogDescription>
           </DialogHeader>
           {cancelTarget && (
             <div className="space-y-2 rounded-lg bg-muted/50 p-3 text-sm">
               <div className="flex justify-between">
-                <span className="text-muted-foreground">标的</span>
+                <span className="text-muted-foreground">{t("common.symbol")}</span>
                 <span className="font-mono">{cancelTarget.symbol}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">方向</span>
+                <span className="text-muted-foreground">{t("common.direction")}</span>
                 <span className={cancelTarget.side === "buy" ? "text-up" : "text-down"}>
-                  {cancelTarget.side === "buy" ? "买入" : "卖出"}
+                  {cancelTarget.side === "buy" ? t("common.buy") : t("common.sell")}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">数量</span>
+                <span className="text-muted-foreground">{t("common.quantity")}</span>
                 <span className="tabular-nums">{cancelTarget.quantity}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">订单 ID</span>
+                <span className="text-muted-foreground">{t("orders.orderId")}</span>
                 <span className="font-mono text-xs">{cancelTarget.client_order_id}</span>
               </div>
             </div>
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setCancelTarget(null)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               variant="destructive"
               onClick={() => cancelTarget && cancelMut.mutate(cancelTarget.client_order_id)}
               disabled={cancelMut.isPending}
             >
-              {cancelMut.isPending ? "撤单中..." : "确认撤单"}
+              {cancelMut.isPending ? t("orders.cancelling") : t("orders.cancelConfirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -193,34 +195,34 @@ export default function Orders() {
       <Dialog open={!!placeConfirm} onOpenChange={(v) => !v && setPlaceConfirm(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>确认下单</DialogTitle>
+            <DialogTitle>{t("orders.placeConfirmTitle")}</DialogTitle>
             <DialogDescription>
-              此操作将向券商发送真实订单。请仔细核对以下信息。
+              {t("orders.placeConfirmDesc")}
             </DialogDescription>
           </DialogHeader>
           {placeConfirm && (
             <div className="space-y-2 rounded-lg bg-muted/50 p-3 text-sm">
               <div className="flex justify-between">
-                <span className="text-muted-foreground">标的</span>
+                <span className="text-muted-foreground">{t("common.symbol")}</span>
                 <span className="font-mono">{placeConfirm.symbol}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">方向</span>
+                <span className="text-muted-foreground">{t("common.direction")}</span>
                 <span className={placeConfirm.side === "buy" ? "text-up" : "text-down"}>
-                  {placeConfirm.side === "buy" ? "买入" : "卖出"}
+                  {placeConfirm.side === "buy" ? t("common.buy") : t("common.sell")}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">类型</span>
-                <span>{placeConfirm.order_type === "limit" ? "限价" : "市价"}</span>
+                <span className="text-muted-foreground">{t("common.type")}</span>
+                <span>{placeConfirm.order_type === "limit" ? t("orders.limit") : t("orders.market")}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">数量</span>
+                <span className="text-muted-foreground">{t("common.quantity")}</span>
                 <span className="tabular-nums">{placeConfirm.quantity}</span>
               </div>
               {placeConfirm.order_type === "limit" && placeConfirm.price && (
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">价格</span>
+                  <span className="text-muted-foreground">{t("common.price")}</span>
                   <span className="tabular-nums">{placeConfirm.price}</span>
                 </div>
               )}
@@ -228,13 +230,13 @@ export default function Orders() {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setPlaceConfirm(null)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               onClick={() => placeConfirm && placeMut.mutate(placeConfirm)}
               disabled={placeMut.isPending}
             >
-              {placeMut.isPending ? "提交中..." : "确认下单"}
+              {placeMut.isPending ? t("common.submitting") : t("orders.placeConfirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -258,6 +260,7 @@ function OrderStatusBadge({ status }: { status: string }) {
 }
 
 function OrderForm({ onSubmit, loading }: { onSubmit: (b: OrderCreate) => void; loading: boolean }) {
+  const { t } = useT();
   const [form, setForm] = useState<OrderCreate>({
     symbol: "",
     side: "buy",
@@ -270,53 +273,53 @@ function OrderForm({ onSubmit, loading }: { onSubmit: (b: OrderCreate) => void; 
     <div className="mb-4 rounded-lg border border-border bg-card p-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 lg:grid-cols-6">
         <div className="col-span-2 space-y-1 md:col-span-1">
-          <Label htmlFor="order-symbol">标的</Label>
+          <Label htmlFor="order-symbol">{t("common.symbol")}</Label>
           <Input
             id="order-symbol"
-            placeholder="如 510300.SH"
+            placeholder={t("orders.symbolPlaceholder")}
             value={form.symbol}
             onChange={(e) => setForm({ ...form, symbol: e.target.value })}
           />
         </div>
         <div className="space-y-1">
-          <Label htmlFor="order-side">方向</Label>
+          <Label htmlFor="order-side">{t("common.direction")}</Label>
           <select
             id="order-side"
             className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1.5 text-sm"
             value={form.side}
             onChange={(e) => setForm({ ...form, side: e.target.value as "buy" | "sell" })}
           >
-            <option value="buy">买入</option>
-            <option value="sell">卖出</option>
+            <option value="buy">{t("common.buy")}</option>
+            <option value="sell">{t("common.sell")}</option>
           </select>
         </div>
         <div className="space-y-1">
-          <Label htmlFor="order-type">类型</Label>
+          <Label htmlFor="order-type">{t("common.type")}</Label>
           <select
             id="order-type"
             className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1.5 text-sm"
             value={form.order_type}
             onChange={(e) => setForm({ ...form, order_type: e.target.value as "limit" | "market" })}
           >
-            <option value="limit">限价</option>
-            <option value="market">市价</option>
+            <option value="limit">{t("orders.limit")}</option>
+            <option value="market">{t("orders.market")}</option>
           </select>
         </div>
         <div className="space-y-1">
-          <Label htmlFor="order-quantity">数量</Label>
+          <Label htmlFor="order-quantity">{t("common.quantity")}</Label>
           <Input
             id="order-quantity"
-            placeholder="数量"
+            placeholder={t("common.quantity")}
             value={form.quantity}
             onChange={(e) => setForm({ ...form, quantity: e.target.value })}
           />
         </div>
         {form.order_type === "limit" && (
           <div className="space-y-1">
-            <Label htmlFor="order-price">价格</Label>
+            <Label htmlFor="order-price">{t("common.price")}</Label>
             <Input
               id="order-price"
-              placeholder="价格"
+              placeholder={t("common.price")}
               value={form.price}
               onChange={(e) => setForm({ ...form, price: e.target.value })}
             />
@@ -327,7 +330,7 @@ function OrderForm({ onSubmit, loading }: { onSubmit: (b: OrderCreate) => void; 
           disabled={loading || !form.symbol}
           className="col-span-2 self-end md:col-span-1"
         >
-          {loading ? "提交中..." : "提交"}
+          {loading ? t("common.submitting") : t("common.submit")}
         </Button>
       </div>
     </div>

@@ -78,6 +78,7 @@ import {
 } from "@/lib/research";
 import { api, isJobRunning } from "@/lib/api";
 import { cn, formatDateTime, formatNumber } from "@/lib/utils";
+import { useT, type LocalizedText } from "@/i18n";
 
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
@@ -85,70 +86,73 @@ function errorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
-const FACTOR_LABELS: Record<string, string> = {
-  pb: "市净率",
-  earnings_yield: "盈利收益率",
-  dividend_yield: "股息率",
-  roe: "净资产收益率",
-  gross_profit_margin: "毛利率",
-  debt_to_assets: "资产负债率",
-  revenue_yoy: "营业收入同比",
-  momentum: "20 日动量",
-  volatility_20d: "20 日波动率",
-  volatility_60d: "60 日波动率",
-  volatility_120d: "120 日波动率",
-  downside_volatility: "下行波动率",
-  turnover_rate: "换手率",
-  market_beta: "市场贝塔",
-  industry_exposure: "行业暴露",
-  asset_class_exposure: "资产类别暴露",
-  size_exposure: "规模暴露",
-  volatility_exposure: "波动率暴露",
-  liquidity_exposure: "流动性暴露",
-  risk_free_rate: "无风险利率",
-  government_bond_return: "国债收益",
-  fx_usdcny_return: "美元兑人民币收益",
-  gold_return: "黄金收益",
-  market_breadth: "市场宽度",
-  volatility_regime: "波动状态",
+const FACTOR_LABELS: Record<string, LocalizedText> = {
+  pb: { zh: "市净率", en: "P/B" },
+  earnings_yield: { zh: "盈利收益率", en: "Earnings yield" },
+  dividend_yield: { zh: "股息率", en: "Dividend yield" },
+  roe: { zh: "净资产收益率", en: "ROE" },
+  gross_profit_margin: { zh: "毛利率", en: "Gross profit margin" },
+  debt_to_assets: { zh: "资产负债率", en: "Debt-to-assets ratio" },
+  revenue_yoy: { zh: "营业收入同比", en: "Revenue YoY" },
+  momentum: { zh: "20 日动量", en: "20-day momentum" },
+  volatility_20d: { zh: "20 日波动率", en: "20-day volatility" },
+  volatility_60d: { zh: "60 日波动率", en: "60-day volatility" },
+  volatility_120d: { zh: "120 日波动率", en: "120-day volatility" },
+  downside_volatility: { zh: "下行波动率", en: "Downside volatility" },
+  turnover_rate: { zh: "换手率", en: "Turnover" },
+  market_beta: { zh: "市场贝塔", en: "Market beta" },
+  industry_exposure: { zh: "行业暴露", en: "Industry exposure" },
+  asset_class_exposure: { zh: "资产类别暴露", en: "Asset class exposure" },
+  size_exposure: { zh: "规模暴露", en: "Size exposure" },
+  volatility_exposure: { zh: "波动率暴露", en: "Volatility exposure" },
+  liquidity_exposure: { zh: "流动性暴露", en: "Liquidity exposure" },
+  risk_free_rate: { zh: "无风险利率", en: "Risk-free rate" },
+  government_bond_return: { zh: "国债收益", en: "Government bond return" },
+  fx_usdcny_return: { zh: "美元兑人民币收益", en: "USD/CNY return" },
+  gold_return: { zh: "黄金收益", en: "Gold return" },
+  market_breadth: { zh: "市场宽度", en: "Market breadth" },
+  volatility_regime: { zh: "波动状态", en: "Volatility regime" },
 };
 
-const ROLE_LABELS: Record<string, string> = {
-  alpha: "Alpha",
-  risk: "风险暴露",
-  market_input: "市场输入",
+const ROLE_LABELS: Record<string, LocalizedText> = {
+  alpha: { zh: "Alpha", en: "Alpha" },
+  risk: { zh: "风险暴露", en: "Risk exposure" },
+  market_input: { zh: "市场输入", en: "Market input" },
 };
 
-const PREFERENCE_LABELS: Record<string, string> = {
-  higher: "值高更优",
-  lower: "值低更优",
-  exposure_only: "仅作暴露",
+const PREFERENCE_LABELS: Record<string, LocalizedText> = {
+  higher: { zh: "值高更优", en: "Higher is better" },
+  lower: { zh: "值低更优", en: "Lower is better" },
+  exposure_only: { zh: "仅作暴露", en: "Exposure only" },
 };
 
-const FREQUENCY_LABELS: Record<string, string> = {
-  daily: "日频",
-  report: "财报期",
-  event: "事件驱动",
+const FREQUENCY_LABELS: Record<string, LocalizedText> = {
+  daily: { zh: "日频", en: "Daily" },
+  report: { zh: "财报期", en: "Report period" },
+  event: { zh: "事件驱动", en: "Event-driven" },
 };
 
-const MISSING_POLICY_LABELS: Record<string, string> = {
-  fail_closed: "缺失即阻断",
-  exclude: "缺失剔除",
-  forward_fill: "向前填充",
-  cross_section_median: "截面中位数",
+const MISSING_POLICY_LABELS: Record<string, LocalizedText> = {
+  fail_closed: { zh: "缺失即阻断", en: "Fail closed on missing" },
+  exclude: { zh: "缺失剔除", en: "Exclude missing" },
+  forward_fill: { zh: "向前填充", en: "Forward fill" },
+  cross_section_median: { zh: "截面中位数", en: "Cross-section median" },
 };
 
 const CATALOG_PAGE_SIZE = 10;
 
-function factorLabel(name: string): string {
-  return FACTOR_LABELS[name] ?? name;
+function factorLabel(name: string): LocalizedText {
+  return FACTOR_LABELS[name] ?? { zh: name, en: name };
 }
 
-function formatFactorWindow(window: number | null): string {
-  return window ? `${window} 日窗口` : "单期值";
+function formatFactorWindow(window: number | null): LocalizedText {
+  return window
+    ? { zh: `${window} 日窗口`, en: `${window}-day window` }
+    : { zh: "单期值", en: "Single-period value" };
 }
 
 function CatalogTab() {
+  const { tl } = useT();
   const [expandedName, setExpandedName] = React.useState<string | null>(null);
   const [catalogPage, setCatalogPage] = React.useState(1);
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
@@ -177,8 +181,11 @@ function CatalogTab() {
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
           {data
-            ? `共 ${totalFactors} 个因子 · 第 ${catalogPage}/${pageCount} 页`
-            : "加载中…"}
+            ? tl({
+                zh: `共 ${totalFactors} 个因子 · 第 ${catalogPage}/${pageCount} 页`,
+                en: `${totalFactors} factors · Page ${catalogPage}/${pageCount}`,
+              })
+            : tl({ zh: "加载中…", en: "Loading…" })}
         </p>
         <Button
           variant="outline"
@@ -187,17 +194,18 @@ function CatalogTab() {
           disabled={isFetching}
         >
           <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
-          刷新
+          {tl({ zh: "刷新", en: "Refresh" })}
         </Button>
       </div>
 
       <Alert className="mb-4">
         <Info className="h-4 w-4" />
-        <AlertTitle>如何理解因子目录</AlertTitle>
+        <AlertTitle>{tl({ zh: "如何理解因子目录", en: "How to read the factor catalog" })}</AlertTitle>
           <AlertDescription>
-            目录项描述的是可复现的研究输入，不是买卖指令。Alpha 因子需要经过
-            OOS 验证才能进入后续策略研究；风险暴露和市场输入只用于解释、约束或状态分层。
-            点击行可展开完整口径，表格较窄时可横向滚动查看全部字段。
+            {tl({
+              zh: "目录项描述的是可复现的研究输入，不是买卖指令。Alpha 因子需要经过 OOS 验证才能进入后续策略研究；风险暴露和市场输入只用于解释、约束或状态分层。点击行可展开完整口径，表格较窄时可横向滚动查看全部字段。",
+              en: "Catalog entries describe reproducible research inputs, not trading instructions. Alpha factors must pass OOS validation before entering downstream strategy research; risk exposures and market inputs are only used for explanation, constraints, or regime layering. Click a row to expand the full specification; scroll horizontally when the table is narrow.",
+            })}
           </AlertDescription>
       </Alert>
 
@@ -206,9 +214,9 @@ function CatalogTab() {
       ) : isError ? (
         <EmptyState
           icon={<Atom className="h-8 w-8" />}
-          title="加载失败"
+          title={tl({ zh: "加载失败", en: "Failed to load" })}
           description={
-            error instanceof Error ? error.message : "无法加载因子目录"
+            error instanceof Error ? error.message : tl({ zh: "无法加载因子目录", en: "Unable to load the factor catalog" })
           }
         />
       ) : data && data.length > 0 ? (
@@ -218,10 +226,10 @@ function CatalogTab() {
               <TableHeader className="sticky top-0 bg-card">
                 <TableRow>
                   <TableHead className="w-8" />
-                  <TableHead>因子</TableHead>
-                  <TableHead>经济含义</TableHead>
-                  <TableHead>计算口径</TableHead>
-                  <TableHead>预期失效</TableHead>
+                  <TableHead>{tl({ zh: "因子", en: "Factor" })}</TableHead>
+                  <TableHead>{tl({ zh: "经济含义", en: "Economic rationale" })}</TableHead>
+                  <TableHead>{tl({ zh: "计算口径", en: "Calculation" })}</TableHead>
+                  <TableHead>{tl({ zh: "预期失效", en: "Expected failure" })}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -243,13 +251,15 @@ function CatalogTab() {
                         </TableCell>
                         <TableCell className="min-w-[180px] whitespace-normal">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="font-medium">{factorLabel(factor.name)}</span>
+                            <span className="font-medium">{tl(factorLabel(factor.name))}</span>
                             <StatusBadge status={factor.role}>
-                              {ROLE_LABELS[factor.role] ?? factor.role}
+                              {ROLE_LABELS[factor.role]
+                                ? tl(ROLE_LABELS[factor.role])
+                                : factor.role}
                             </StatusBadge>
                             {factor.signal_eligible && (
                               <Badge variant="secondary" className="text-[10px]">
-                                可做信号
+                                {tl({ zh: "可做信号", en: "Signal eligible" })}
                               </Badge>
                             )}
                           </div>
@@ -262,9 +272,9 @@ function CatalogTab() {
                         </TableCell>
                         <TableCell className="min-w-[220px] whitespace-normal break-words text-xs leading-5 text-muted-foreground">
                           <p>
-                            {FREQUENCY_LABELS[factor.frequency] ?? factor.frequency} ·{" "}
-                            {formatFactorWindow(factor.calculation_window)} ·{" "}
-                            {PREFERENCE_LABELS[factor.preference] ?? factor.preference}
+                            {FREQUENCY_LABELS[factor.frequency] ? tl(FREQUENCY_LABELS[factor.frequency]) : factor.frequency} ·{" "}
+                            {tl(formatFactorWindow(factor.calculation_window))} ·{" "}
+                            {PREFERENCE_LABELS[factor.preference] ? tl(PREFERENCE_LABELS[factor.preference]) : factor.preference}
                           </p>
                           <p className="mt-1 break-all font-mono">{factor.source_fields.join(" · ")}</p>
                         </TableCell>
@@ -277,30 +287,34 @@ function CatalogTab() {
                           <TableCell colSpan={5} className="p-4">
                             <div className="grid gap-4 text-xs md:grid-cols-2 xl:grid-cols-4">
                               <div>
-                                <p className="font-medium text-foreground">数据可用规则</p>
+                                <p className="font-medium text-foreground">{tl({ zh: "数据可用规则", en: "Data availability rule" })}</p>
                                 <p className="mt-1 leading-5 text-muted-foreground">
                                   {factor.available_at_rule}
                                 </p>
                               </div>
                               <div>
-                                <p className="font-medium text-foreground">缺失值策略</p>
+                                <p className="font-medium text-foreground">{tl({ zh: "缺失值策略", en: "Missing value policy" })}</p>
                                 <p className="mt-1 text-muted-foreground">
-                                  {MISSING_POLICY_LABELS[factor.missing_policy] ?? factor.missing_policy}
+                                  {MISSING_POLICY_LABELS[factor.missing_policy]
+                                    ? tl(MISSING_POLICY_LABELS[factor.missing_policy])
+                                    : factor.missing_policy}
                                 </p>
                               </div>
                               <div>
-                                <p className="font-medium text-foreground">转换 / 中性化</p>
+                                <p className="font-medium text-foreground">{tl({ zh: "转换 / 中性化", en: "Transform / Neutralization" })}</p>
                                 <p className="mt-1 font-mono text-muted-foreground">
                                   {factor.default_transform} ·{" "}
                                   {factor.default_neutralization.length > 0
                                     ? factor.default_neutralization.join(" · ")
-                                    : "不做中性化"}
+                                    : tl({ zh: "不做中性化", en: "No neutralization" })}
                                 </p>
                               </div>
                               <div>
-                                <p className="font-medium text-foreground">单位 / 研究边界</p>
+                                <p className="font-medium text-foreground">{tl({ zh: "单位 / 研究边界", en: "Unit / Research boundary" })}</p>
                                 <p className="mt-1 text-muted-foreground">
-                                  {factor.unit} · {factor.signal_eligible ? "可在 OOS 通过后进入信号" : "不可直接生成信号"}
+                                  {factor.unit} · {factor.signal_eligible
+                                    ? tl({ zh: "可在 OOS 通过后进入信号", en: "Eligible for signals after passing OOS" })
+                                    : tl({ zh: "不可直接生成信号", en: "Cannot generate signals directly" })}
                                 </p>
                               </div>
                             </div>
@@ -315,7 +329,10 @@ function CatalogTab() {
           </div>
           <div className="flex flex-col gap-3 border-t border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-xs text-muted-foreground">
-              显示 {visibleStart}–{visibleEnd} / {totalFactors} 个因子，点击行可展开完整说明
+              {tl({
+                zh: `显示 ${visibleStart}–${visibleEnd} / ${totalFactors} 个因子，点击行可展开完整说明`,
+                en: `Showing ${visibleStart}–${visibleEnd} of ${totalFactors} factors, click a row for the full specification`,
+              })}
             </p>
             <div className="flex items-center justify-between gap-2 sm:justify-end">
               <Button
@@ -328,10 +345,10 @@ function CatalogTab() {
                 disabled={catalogPage <= 1}
               >
                 <ChevronLeft className="h-4 w-4" />
-                上一页
+                {tl({ zh: "上一页", en: "Previous" })}
               </Button>
               <span className="min-w-[72px] text-center text-sm tabular-nums text-muted-foreground">
-                第 {catalogPage} / {pageCount} 页
+                {tl({ zh: `第 ${catalogPage} / ${pageCount} 页`, en: `Page ${catalogPage} / ${pageCount}` })}
               </span>
               <Button
                 variant="outline"
@@ -342,7 +359,7 @@ function CatalogTab() {
                 }}
                 disabled={catalogPage >= pageCount}
               >
-                下一页
+                {tl({ zh: "下一页", en: "Next" })}
                 <ChevronRight className="h-4 w-4" />
               </Button>
             </div>
@@ -351,8 +368,11 @@ function CatalogTab() {
       ) : (
         <EmptyState
           icon={<Atom className="h-8 w-8" />}
-          title="暂无因子"
-          description="因子目录注册后将在此列出，包含角色、版本与依赖关系。"
+          title={tl({ zh: "暂无因子", en: "No factors yet" })}
+          description={tl({
+            zh: "因子目录注册后将在此列出，包含角色、版本与依赖关系。",
+            en: "Registered factors will be listed here with role, version, and dependencies.",
+          })}
         />
       )}
     </div>
@@ -368,6 +388,7 @@ function GenerateFeatureSnapshotDialog({
   onOpenChange: (open: boolean) => void;
   onGenerated: (snapshot: import("@/lib/research").FeatureSnapshot) => void;
 }) {
+  const { tl } = useT();
   const [releaseId, setReleaseId] = React.useState("");
   const [decisionDate, setDecisionDate] = React.useState("");
   const [jobId, setJobId] = React.useState<string | null>(null);
@@ -381,7 +402,7 @@ function GenerateFeatureSnapshotDialog({
   const mutation = useMutation({
     mutationFn: () => {
       if (!releaseId || !decisionDate) {
-        throw new Error("请选择数据发布和决策日");
+        throw new Error(tl({ zh: "请选择数据发布和决策日", en: "Select a dataset release and a decision date" }));
       }
       return factorLabApi.startFeatureSnapshotJob({
         dataset_release_id: releaseId,
@@ -455,37 +476,44 @@ function GenerateFeatureSnapshotDialog({
     >
       <DialogContent className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>生成特征快照</DialogTitle>
+          <DialogTitle>{tl({ zh: "生成特征快照", en: "Generate feature snapshot" })}</DialogTitle>
           <DialogDescription>
-            从已发布且不可变的数据版本计算价格特征，并保存为可供实验与研究运行引用的快照。
+            {tl({
+              zh: "从已发布且不可变的数据版本计算价格特征，并保存为可供实验与研究运行引用的快照。",
+              en: "Compute price features from a published, immutable data version and save them as a snapshot that experiments and research runs can reference.",
+            })}
           </DialogDescription>
         </DialogHeader>
 
         <Alert>
           <CalendarDays className="h-4 w-4" />
-          <AlertTitle>本次生成的内容</AlertTitle>
+          <AlertTitle>{tl({ zh: "本次生成的内容", en: "What this generates" })}</AlertTitle>
           <AlertDescription>
-            决策日按 A 股收盘后 23:59:59 处理，默认计算 20 日动量、20/60/120 日波动率和
-            60 日下行波动率。所有观测都必须满足 available_at 不晚于决策时点。
+            {tl({
+              zh: "决策日按 A 股收盘后 23:59:59 处理，默认计算 20 日动量、20/60/120 日波动率和 60 日下行波动率。所有观测都必须满足 available_at 不晚于决策时点。",
+              en: "Decision dates are treated as 23:59:59 after A-share market close; by default this computes 20-day momentum, 20/60/120-day volatility, and 60-day downside volatility. All observations must satisfy available_at no later than the decision time.",
+            })}
           </AlertDescription>
         </Alert>
 
         {releasesQuery.isError ? (
           <Alert variant="destructive">
-            <AlertTitle>数据发布加载失败</AlertTitle>
-            <AlertDescription>{errorMessage(releasesQuery.error, "无法加载可用数据发布")}</AlertDescription>
+            <AlertTitle>{tl({ zh: "数据发布加载失败", en: "Failed to load dataset releases" })}</AlertTitle>
+            <AlertDescription>{errorMessage(releasesQuery.error, tl({ zh: "无法加载可用数据发布", en: "Unable to load available dataset releases" }))}</AlertDescription>
           </Alert>
         ) : releasesQuery.data && releasesQuery.data.length === 0 ? (
           <Alert variant="warning">
-            <AlertTitle>还没有可用数据发布</AlertTitle>
+            <AlertTitle>{tl({ zh: "还没有可用数据发布", en: "No dataset releases yet" })}</AlertTitle>
             <AlertDescription>
-              请先到 <Link className="underline" to="/research/data">数据与标的</Link> 冻结并发布数据，再生成特征快照。
+              {tl({ zh: "请先到 ", en: "Go to " })}
+              <Link className="underline" to="/research/data">{tl({ zh: "数据与标的", en: "Data & Instruments" })}</Link>
+              {tl({ zh: " 冻结并发布数据，再生成特征快照。", en: " to freeze and publish data before generating a feature snapshot." })}
             </AlertDescription>
           </Alert>
         ) : (
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="feature-snapshot-release">数据发布</Label>
+              <Label htmlFor="feature-snapshot-release">{tl({ zh: "数据发布", en: "Dataset release" })}</Label>
               <Select
                 value={releaseId}
                 onValueChange={(value) => {
@@ -495,7 +523,7 @@ function GenerateFeatureSnapshotDialog({
                 }}
               >
                 <SelectTrigger id="feature-snapshot-release">
-                  <SelectValue placeholder="选择已发布数据版本" />
+                  <SelectValue placeholder={tl({ zh: "选择已发布数据版本", en: "Select a published data version" })} />
                 </SelectTrigger>
                 <SelectContent>
                   {(releasesQuery.data ?? []).map((release: DatasetReleaseSummary) => (
@@ -507,12 +535,15 @@ function GenerateFeatureSnapshotDialog({
               </Select>
               {selectedRelease && (
                 <p className="text-xs text-muted-foreground">
-                  范围 {selectedRelease.start_date} ~ {selectedRelease.end_date} · {selectedRelease.symbol_count} 个标的 · 覆盖 {selectedRelease.coverage_pct}
+                  {tl({
+                    zh: `范围 ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} 个标的 · 覆盖 ${selectedRelease.coverage_pct}`,
+                    en: `Range ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} symbols · coverage ${selectedRelease.coverage_pct}`,
+                  })}
                 </p>
               )}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="feature-snapshot-decision-date">决策日（收盘后）</Label>
+              <Label htmlFor="feature-snapshot-decision-date">{tl({ zh: "决策日（收盘后）", en: "Decision date (after close)" })}</Label>
               <Input
                 id="feature-snapshot-decision-date"
                 type="date"
@@ -522,7 +553,7 @@ function GenerateFeatureSnapshotDialog({
                 onChange={(event) => setDecisionDate(event.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                不能超出数据发布范围，也不能晚于当前时间。
+                {tl({ zh: "不能超出数据发布范围，也不能晚于当前时间。", en: "Must stay within the release range and cannot be later than now." })}
               </p>
             </div>
           </div>
@@ -530,24 +561,26 @@ function GenerateFeatureSnapshotDialog({
 
         {mutation.isError && (
           <Alert variant="destructive">
-            <AlertTitle>快照生成失败</AlertTitle>
-            <AlertDescription>{errorMessage(mutation.error, "请检查数据发布和历史数据覆盖")}</AlertDescription>
+            <AlertTitle>{tl({ zh: "快照生成失败", en: "Snapshot generation failed" })}</AlertTitle>
+            <AlertDescription>{errorMessage(mutation.error, tl({ zh: "请检查数据发布和历史数据覆盖", en: "Check the dataset release and historical data coverage" }))}</AlertDescription>
           </Alert>
         )}
         {jobQuery.isError && (
           <Alert variant="destructive">
-            <AlertTitle>进度查询失败</AlertTitle>
-            <AlertDescription>{errorMessage(jobQuery.error, "暂时无法读取任务状态")}</AlertDescription>
+            <AlertTitle>{tl({ zh: "进度查询失败", en: "Failed to poll job status" })}</AlertTitle>
+            <AlertDescription>{errorMessage(jobQuery.error, tl({ zh: "暂时无法读取任务状态", en: "Temporarily unable to read job status" }))}</AlertDescription>
           </Alert>
         )}
         {jobQuery.data && <FeatureSnapshotProgress job={jobQuery.data} />}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
-            取消
+            {tl({ zh: "取消", en: "Cancel" })}
           </Button>
           <Button onClick={() => mutation.mutate()} disabled={!valid || busy}>
             <Sparkles className="mr-2 h-4 w-4" />
-            {busy ? "计算并发布中…" : "计算并发布快照"}
+            {busy
+              ? tl({ zh: "计算并发布中…", en: "Computing and publishing…" })
+              : tl({ zh: "计算并发布快照", en: "Compute and publish snapshot" })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -556,6 +589,7 @@ function GenerateFeatureSnapshotDialog({
 }
 
 function FeaturesTab() {
+  const { tl } = useT();
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
   const [generateOpen, setGenerateOpen] = React.useState(false);
   const [generatedSnapshot, setGeneratedSnapshot] = React.useState<import("@/lib/research").FeatureSnapshot | null>(null);
@@ -569,37 +603,44 @@ function FeaturesTab() {
     <div>
       <div className="mb-3 flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
-          {data ? `共 ${data.length} 个特征快照` : "加载中…"}
+          {data
+            ? tl({ zh: `共 ${data.length} 个特征快照`, en: `${data.length} feature snapshots` })
+            : tl({ zh: "加载中…", en: "Loading…" })}
         </p>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
             <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
-            刷新
+            {tl({ zh: "刷新", en: "Refresh" })}
           </Button>
           <Button size="sm" onClick={() => setGenerateOpen(true)}>
             <Sparkles className="h-4 w-4" />
-            生成快照
+            {tl({ zh: "生成快照", en: "Generate snapshot" })}
           </Button>
         </div>
       </div>
 
       <Alert className="mb-4">
         <Layers className="h-4 w-4" />
-        <AlertTitle>快照是研究输入的不可变切片</AlertTitle>
+        <AlertTitle>{tl({ zh: "快照是研究输入的不可变切片", en: "Snapshots are immutable slices of research inputs" })}</AlertTitle>
         <AlertDescription>
-          它绑定一个数据发布、一个决策时点、计算窗口、每个标的的特征值和 checksum。
-          快照生成成功后，才能在因子实验和研究运行中选择；生成过程不会启动回测或交易。
+          {tl({
+            zh: "它绑定一个数据发布、一个决策时点、计算窗口、每个标的的特征值和 checksum。快照生成成功后，才能在因子实验和研究运行中选择；生成过程不会启动回测或交易。",
+            en: "It binds one dataset release, one decision time, calculation windows, per-symbol feature values, and a checksum. Only after a snapshot is generated can it be selected in factor experiments and research runs; generation never starts backtests or trading.",
+          })}
         </AlertDescription>
       </Alert>
 
       {generatedSnapshot && (
         <Alert variant="success" className="mb-4" aria-live="polite">
           <Sparkles className="h-4 w-4" />
-          <AlertTitle>特征快照已生成并发布</AlertTitle>
+          <AlertTitle>{tl({ zh: "特征快照已生成并发布", en: "Feature snapshot generated and published" })}</AlertTitle>
           <AlertDescription>
             <span className="font-mono">{generatedSnapshot.snapshot_id}</span> ·{" "}
-            {featureSnapshotSymbolCount(generatedSnapshot)} 个标的 ·{" "}
-            {featureSnapshotNames(generatedSnapshot).length} 个因子。现在可以创建因子实验或排队研究运行。
+            {tl({ zh: `${featureSnapshotSymbolCount(generatedSnapshot)} 个标的 ·`, en: `${featureSnapshotSymbolCount(generatedSnapshot)} symbols ·` })}{" "}
+            {tl({
+              zh: `${featureSnapshotNames(generatedSnapshot).length} 个因子。现在可以创建因子实验或排队研究运行。`,
+              en: `${featureSnapshotNames(generatedSnapshot).length} factors. You can now create a factor experiment or queue a research run.`,
+            })}
           </AlertDescription>
         </Alert>
       )}
@@ -609,9 +650,9 @@ function FeaturesTab() {
       ) : isError ? (
         <EmptyState
           icon={<Layers className="h-8 w-8" />}
-          title="加载失败"
+          title={tl({ zh: "加载失败", en: "Failed to load" })}
           description={
-            error instanceof Error ? error.message : "无法加载特征快照"
+            error instanceof Error ? error.message : tl({ zh: "无法加载特征快照", en: "Unable to load feature snapshots" })
           }
         />
       ) : data && data.length > 0 ? (
@@ -621,13 +662,13 @@ function FeaturesTab() {
               <TableHeader className="sticky top-0 bg-card">
                 <TableRow>
                   <TableHead className="w-8" />
-                  <TableHead>快照 ID</TableHead>
-                  <TableHead>数据发布 ID</TableHead>
-                  <TableHead className="text-right">因子数</TableHead>
-                  <TableHead className="text-right">标的数</TableHead>
-                  <TableHead className="text-right">行数</TableHead>
-                  <TableHead>研究状态</TableHead>
-                  <TableHead>创建时间</TableHead>
+                  <TableHead>{tl({ zh: "快照 ID", en: "Snapshot ID" })}</TableHead>
+                  <TableHead>{tl({ zh: "数据发布 ID", en: "Release ID" })}</TableHead>
+                  <TableHead className="text-right">{tl({ zh: "因子数", en: "Factors" })}</TableHead>
+                  <TableHead className="text-right">{tl({ zh: "标的数", en: "Symbols" })}</TableHead>
+                  <TableHead className="text-right">{tl({ zh: "行数", en: "Rows" })}</TableHead>
+                  <TableHead>{tl({ zh: "研究状态", en: "Research status" })}</TableHead>
+                  <TableHead>{tl({ zh: "创建时间", en: "Created" })}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -679,24 +720,24 @@ function FeaturesTab() {
                             <div className="space-y-3">
                               <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                                 <span>
-                                  标的数：
+                                  {tl({ zh: "标的数：", en: "Symbols: " })}
                                   <span className="font-mono text-foreground">
                                     {formatNumber(featureSnapshotSymbolCount(snap), 0)}
                                   </span>
                                 </span>
                                 <span>
-                                  行数：
+                                  {tl({ zh: "行数：", en: "Rows: " })}
                                   <span className="font-mono text-foreground">
                                     {formatNumber(featureSnapshotObservationCount(snap), 0)}
                                   </span>
                                 </span>
                                 <span>
-                                  状态：
+                                  {tl({ zh: "状态：", en: "Status: " })}
                                   <StatusBadge status={featureSnapshotStatus(snap)} />
                                 </span>
-                                <span>决策时点：<span className="font-mono text-foreground">{formatDateTime(snap.decision_at)}</span></span>
+                                <span>{tl({ zh: "决策时点：", en: "Decision time: " })}<span className="font-mono text-foreground">{formatDateTime(snap.decision_at)}</span></span>
                                 <span>
-                                  校验和：
+                                  {tl({ zh: "校验和：", en: "Checksum: " })}
                                   <span className="font-mono text-foreground">
                                     {snap.checksum}
                                   </span>
@@ -705,7 +746,10 @@ function FeaturesTab() {
                               <Separator />
                               <div>
                                 <p className="mb-2 text-xs font-medium text-muted-foreground">
-                                  因子列表（{featureSnapshotNames(snap).length}）
+                                  {tl({
+                                    zh: `因子列表（${featureSnapshotNames(snap).length}）`,
+                                    en: `Factors (${featureSnapshotNames(snap).length})`,
+                                  })}
                                 </p>
                                 <div className="flex flex-wrap gap-1">
                                   {featureSnapshotNames(snap).map((f) => (
@@ -721,15 +765,15 @@ function FeaturesTab() {
                               </div>
                               {snap.issues.length > 0 && (
                                 <Alert variant="warning">
-                                  <AlertTitle>质量提示</AlertTitle>
+                                  <AlertTitle>{tl({ zh: "质量提示", en: "Quality notes" })}</AlertTitle>
                                   <AlertDescription>{snap.issues.join("；")}</AlertDescription>
                                 </Alert>
                               )}
                               <p className="text-xs text-muted-foreground">
-                                计算窗口：{Object.entries(snap.calculation_windows)
-                                  .map(([name, window]) => `${name}=${window}日`)
-                                  .join(" · ") || "无"}
-                                · 代码版本 <span className="font-mono">{snap.code_version}</span>
+                                {tl({ zh: "计算窗口：", en: "Calculation windows: " })}{Object.entries(snap.calculation_windows)
+                                  .map(([name, window]) => tl({ zh: `${name}=${window}日`, en: `${name}=${window}d` }))
+                                  .join(" · ") || tl({ zh: "无", en: "none" })}
+                                {tl({ zh: "· 代码版本 ", en: "· code version " })}<span className="font-mono">{snap.code_version}</span>
                               </p>
                             </div>
                           </TableCell>
@@ -745,12 +789,15 @@ function FeaturesTab() {
       ) : (
         <EmptyState
           icon={<Layers className="h-8 w-8" />}
-          title="暂无特征快照"
-          description="当前数据库中没有已发布快照。选择一个已发布数据版本和决策日，显式生成后才能用于因子实验和研究运行。"
+          title={tl({ zh: "暂无特征快照", en: "No feature snapshots yet" })}
+          description={tl({
+            zh: "当前数据库中没有已发布快照。选择一个已发布数据版本和决策日，显式生成后才能用于因子实验和研究运行。",
+            en: "No published snapshots in the database yet. Pick a published data version and a decision date; generate one explicitly before it can be used in factor experiments and research runs.",
+          })}
           action={
             <Button size="sm" onClick={() => setGenerateOpen(true)}>
               <Sparkles className="h-4 w-4" />
-              生成第一份快照
+              {tl({ zh: "生成第一份快照", en: "Generate first snapshot" })}
             </Button>
           }
         />
@@ -769,6 +816,7 @@ function FeaturesTab() {
 }
 
 function SignalsTab() {
+  const { tl } = useT();
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["factor-signals", { limit: 50 }],
@@ -779,7 +827,9 @@ function SignalsTab() {
     <div>
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          {data ? `共 ${data.length} 个因子信号` : "加载中…"}
+          {data
+            ? tl({ zh: `共 ${data.length} 个因子信号`, en: `${data.length} factor signals` })
+            : tl({ zh: "加载中…", en: "Loading…" })}
         </p>
         <Button
           variant="outline"
@@ -788,7 +838,7 @@ function SignalsTab() {
           disabled={isFetching}
         >
           <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
-          刷新
+          {tl({ zh: "刷新", en: "Refresh" })}
         </Button>
       </div>
 
@@ -797,9 +847,9 @@ function SignalsTab() {
       ) : isError ? (
         <EmptyState
           icon={<Signal className="h-8 w-8" />}
-          title="加载失败"
+          title={tl({ zh: "加载失败", en: "Failed to load" })}
           description={
-            error instanceof Error ? error.message : "无法加载因子信号"
+            error instanceof Error ? error.message : tl({ zh: "无法加载因子信号", en: "Unable to load factor signals" })
           }
         />
       ) : data && data.length > 0 ? (
@@ -809,11 +859,11 @@ function SignalsTab() {
               <TableHeader className="sticky top-0 bg-card">
                 <TableRow>
                   <TableHead className="w-8" />
-                  <TableHead>信号 ID</TableHead>
-                  <TableHead>因子名</TableHead>
-                  <TableHead>研究状态</TableHead>
-                  <TableHead>快照 ID</TableHead>
-                  <TableHead>创建时间</TableHead>
+                  <TableHead>{tl({ zh: "信号 ID", en: "Signal ID" })}</TableHead>
+                  <TableHead>{tl({ zh: "因子名", en: "Factor" })}</TableHead>
+                  <TableHead>{tl({ zh: "研究状态", en: "Research status" })}</TableHead>
+                  <TableHead>{tl({ zh: "快照 ID", en: "Snapshot ID" })}</TableHead>
+                  <TableHead>{tl({ zh: "创建时间", en: "Created" })}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -861,8 +911,10 @@ function SignalsTab() {
                           <TableCell colSpan={6} className="p-4">
                             <div className="space-y-3">
                               <p className="text-xs font-medium text-muted-foreground">
-                                信号 payload（{payloadKeys.length} 个字段，含
-                                IC 值、分层收益等）
+                                {tl({
+                                  zh: `信号 payload（${payloadKeys.length} 个字段，含 IC 值、分层收益等）`,
+                                  en: `Signal payload (${payloadKeys.length} fields, incl. IC values, layered returns, etc.)`,
+                                })}
                               </p>
                               <pre className="max-h-80 overflow-auto rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed">
                                 {JSON.stringify(sig.payload, null, 2)}
@@ -881,8 +933,11 @@ function SignalsTab() {
       ) : (
         <EmptyState
           icon={<Signal className="h-8 w-8" />}
-          title="暂无因子信号"
-          description="因子信号由因子计算产出，用于驱动策略目标仓位与组合决策。"
+          title={tl({ zh: "暂无因子信号", en: "No factor signals yet" })}
+          description={tl({
+            zh: "因子信号由因子计算产出，用于驱动策略目标仓位与组合决策。",
+            en: "Factor signals are produced by factor computations and drive strategy target positions and portfolio decisions.",
+          })}
         />
       )}
     </div>
@@ -928,6 +983,7 @@ function CreateExperimentDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
 }) {
+  const { tl } = useT();
   const queryClient = useQueryClient();
   const [form, setForm] = React.useState<ExperimentFormState>(DEFAULT_FORM);
 
@@ -1009,25 +1065,33 @@ function CreateExperimentDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>创建因子实验</DialogTitle>
+          <DialogTitle>{tl({ zh: "创建因子实验", en: "Create factor experiment" })}</DialogTitle>
           <DialogDescription>
-            冻结因子假设、数据版本与评估计划，用于系统性检验因子的预测能力。
+            {tl({
+              zh: "冻结因子假设、数据版本与评估计划，用于系统性检验因子的预测能力。",
+              en: "Freeze the factor hypothesis, data versions, and evaluation plan to systematically test the factor's predictive power.",
+            })}
           </DialogDescription>
         </DialogHeader>
 
         {releases && releases.length === 0 && (
           <Alert variant="warning">
-            <AlertTitle>缺少数据发布</AlertTitle>
+            <AlertTitle>{tl({ zh: "缺少数据发布", en: "Missing dataset release" })}</AlertTitle>
             <AlertDescription>
-              先到 <Link className="underline" to="/research/data">数据与标的</Link> 创建不可变数据发布，再回来绑定因子实验。
+              {tl({ zh: "先到 ", en: "Go to " })}
+              <Link className="underline" to="/research/data">{tl({ zh: "数据与标的", en: "Data & Instruments" })}</Link>
+              {tl({ zh: " 创建不可变数据发布，再回来绑定因子实验。", en: " to create an immutable dataset release, then come back to bind the factor experiment." })}
             </AlertDescription>
           </Alert>
         )}
         {features && features.length === 0 && (
           <Alert variant="warning">
-            <AlertTitle>缺少特征快照</AlertTitle>
+            <AlertTitle>{tl({ zh: "缺少特征快照", en: "Missing feature snapshot" })}</AlertTitle>
             <AlertDescription>
-              因子实验必须绑定已发布的 FeatureSnapshot。当前没有可用快照，请先在「特征快照」页完成生成/发布；仅有因子目录不能直接创建实验。
+              {tl({
+                zh: "因子实验必须绑定已发布的 FeatureSnapshot。当前没有可用快照，请先在「特征快照」页完成生成/发布；仅有因子目录不能直接创建实验。",
+                en: "Factor experiments must bind a published FeatureSnapshot. No snapshot is available yet — generate and publish one on the Feature Snapshots tab first; a factor catalog alone cannot create an experiment.",
+              })}
             </AlertDescription>
           </Alert>
         )}
@@ -1035,9 +1099,9 @@ function CreateExperimentDialog({
         <div className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="exp-hypothesis">
-              因子假设
+              {tl({ zh: "因子假设", en: "Factor hypothesis" })}
               <span className="ml-1 text-xs text-muted-foreground">
-                （至少 10 字符）
+                {tl({ zh: "（至少 10 字符）", en: "(at least 10 characters)" })}
               </span>
             </Label>
             <Textarea
@@ -1046,16 +1110,19 @@ function CreateExperimentDialog({
               onChange={(e) =>
                 setForm((p) => ({ ...p, hypothesis: e.target.value }))
               }
-              placeholder="例如：过去 20 日动量排名对未来 5 日收益有正向预测力"
+              placeholder={tl({ zh: "例如：过去 20 日动量排名对未来 5 日收益有正向预测力", en: "e.g. 20-day momentum rank positively predicts 5-day forward returns" })}
               className="min-h-[72px]"
             />
           </div>
 
           <div className="space-y-2">
             <Label>
-              因子列表
+              {tl({ zh: "因子列表", en: "Factors" })}
               <span className="ml-1 text-xs text-muted-foreground">
-                （从目录选择，已选 {form.factor_names.length}）
+                {tl({
+                  zh: `（从目录选择，已选 ${form.factor_names.length}）`,
+                  en: `(pick from catalog, ${form.factor_names.length} selected)`,
+                })}
               </span>
             </Label>
             <div className="max-h-44 overflow-y-auto rounded-md border border-border p-2">
@@ -1100,7 +1167,7 @@ function CreateExperimentDialog({
                 </div>
               ) : (
                 <p className="p-2 text-xs text-muted-foreground">
-                  因子目录为空或加载中…
+                  {tl({ zh: "因子目录为空或加载中…", en: "Factor catalog is empty or loading…" })}
                 </p>
               )}
             </div>
@@ -1108,7 +1175,7 @@ function CreateExperimentDialog({
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label>数据发布</Label>
+              <Label>{tl({ zh: "数据发布", en: "Dataset release" })}</Label>
               <Select
                 value={form.dataset_release_id}
                 onValueChange={(v) =>
@@ -1116,7 +1183,7 @@ function CreateExperimentDialog({
                 }
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="选择数据发布" />
+                  <SelectValue placeholder={tl({ zh: "选择数据发布", en: "Select a dataset release" })} />
                 </SelectTrigger>
                 <SelectContent>
                   {(releases ?? []).map((r: DatasetReleaseSummary) => (
@@ -1133,7 +1200,7 @@ function CreateExperimentDialog({
               </Select>
             </div>
             <div className="space-y-2">
-              <Label>特征快照</Label>
+              <Label>{tl({ zh: "特征快照", en: "Feature snapshot" })}</Label>
               <Select
                 value={form.feature_snapshot_id}
                 onValueChange={(v) =>
@@ -1141,7 +1208,7 @@ function CreateExperimentDialog({
                 }
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="选择特征快照" />
+                  <SelectValue placeholder={tl({ zh: "选择特征快照", en: "Select a feature snapshot" })} />
                 </SelectTrigger>
                 <SelectContent>
                   {(features ?? []).map((s: FeatureSnapshot) => (
@@ -1151,7 +1218,8 @@ function CreateExperimentDialog({
                     >
                       <span className="font-mono">
                         {s.snapshot_id.slice(0, 12)}… ·{" "}
-                        {featureSnapshotNames(s).length} 因子
+                        {featureSnapshotNames(s).length}{" "}
+                        {tl({ zh: "因子", en: "factors" })}
                       </span>
                     </SelectItem>
                   ))}
@@ -1164,12 +1232,12 @@ function CreateExperimentDialog({
 
           <div className="space-y-2">
             <Label className="text-xs font-medium text-muted-foreground">
-              评估计划
+              {tl({ zh: "评估计划", en: "Evaluation plan" })}
             </Label>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label htmlFor="is-start" className="text-xs">
-                  样本内起始
+                  {tl({ zh: "样本内起始", en: "In-sample start" })}
                 </Label>
                 <Input
                   id="is-start"
@@ -1185,7 +1253,7 @@ function CreateExperimentDialog({
               </div>
               <div className="space-y-1">
                 <Label htmlFor="is-end" className="text-xs">
-                  样本内结束
+                  {tl({ zh: "样本内结束", en: "In-sample end" })}
                 </Label>
                 <Input
                   id="is-end"
@@ -1201,7 +1269,7 @@ function CreateExperimentDialog({
               </div>
               <div className="space-y-1">
                 <Label htmlFor="oos-start" className="text-xs">
-                  OOS 起始
+                  {tl({ zh: "OOS 起始", en: "OOS start" })}
                 </Label>
                 <Input
                   id="oos-start"
@@ -1214,7 +1282,7 @@ function CreateExperimentDialog({
               </div>
               <div className="space-y-1">
                 <Label htmlFor="oos-end" className="text-xs">
-                  OOS 结束
+                  {tl({ zh: "OOS 结束", en: "OOS end" })}
                 </Label>
                 <Input
                   id="oos-end"
@@ -1231,7 +1299,7 @@ function CreateExperimentDialog({
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div className="space-y-1">
               <Label htmlFor="trial-budget" className="text-xs">
-                试验预算
+                {tl({ zh: "试验预算", en: "Trial budget" })}
               </Label>
               <Input
                 id="trial-budget"
@@ -1249,7 +1317,7 @@ function CreateExperimentDialog({
             </div>
             <div className="space-y-1">
               <Label htmlFor="quantiles" className="text-xs">
-                分层数
+                {tl({ zh: "分层数", en: "Quantiles" })}
               </Label>
               <Input
                 id="quantiles"
@@ -1267,7 +1335,7 @@ function CreateExperimentDialog({
             </div>
             <div className="space-y-1">
               <Label htmlFor="benchmark" className="text-xs">
-                基准代码
+                {tl({ zh: "基准代码", en: "Benchmark symbol" })}
               </Label>
               <Input
                 id="benchmark"
@@ -1283,7 +1351,7 @@ function CreateExperimentDialog({
             </div>
             <div className="space-y-1">
               <Label htmlFor="tx-cost" className="text-xs">
-                交易成本 (bps)
+                {tl({ zh: "交易成本 (bps)", en: "Transaction cost (bps)" })}
               </Label>
               <Input
                 id="tx-cost"
@@ -1303,7 +1371,7 @@ function CreateExperimentDialog({
 
           <div className="space-y-1">
             <Label htmlFor="comparison-group" className="text-xs">
-              对比组
+              {tl({ zh: "对比组", en: "Comparison group" })}
             </Label>
             <Input
               id="comparison-group"
@@ -1318,7 +1386,7 @@ function CreateExperimentDialog({
 
         {mutation.isError && (
           <p className="text-sm text-destructive">
-            {errorMessage(mutation.error, "创建因子实验失败")}
+            {errorMessage(mutation.error, tl({ zh: "创建因子实验失败", en: "Failed to create factor experiment" }))}
           </p>
         )}
 
@@ -1328,13 +1396,15 @@ function CreateExperimentDialog({
             onClick={() => onOpenChange(false)}
             disabled={mutation.isPending}
           >
-            取消
+            {tl({ zh: "取消", en: "Cancel" })}
           </Button>
           <Button
             disabled={mutation.isPending || !valid}
             onClick={handleSubmit}
           >
-            {mutation.isPending ? "创建中…" : "创建实验"}
+            {mutation.isPending
+              ? tl({ zh: "创建中…", en: "Creating…" })
+              : tl({ zh: "创建实验", en: "Create experiment" })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1343,6 +1413,7 @@ function CreateExperimentDialog({
 }
 
 function ExperimentsTab() {
+  const { tl } = useT();
   const [createOpen, setCreateOpen] = React.useState(false);
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["factor-experiments", { limit: 50 }],
@@ -1353,7 +1424,9 @@ function ExperimentsTab() {
     <div>
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          {data ? `共 ${data.length} 个因子实验` : "加载中…"}
+          {data
+            ? tl({ zh: `共 ${data.length} 个因子实验`, en: `${data.length} factor experiments` })
+            : tl({ zh: "加载中…", en: "Loading…" })}
         </p>
         <div className="flex items-center gap-2">
           <Button
@@ -1365,11 +1438,11 @@ function ExperimentsTab() {
             <RefreshCw
               className={cn("h-4 w-4", isFetching && "animate-spin")}
             />
-            刷新
+            {tl({ zh: "刷新", en: "Refresh" })}
           </Button>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4" />
-            创建实验
+            {tl({ zh: "创建实验", en: "Create experiment" })}
           </Button>
         </div>
       </div>
@@ -1379,9 +1452,9 @@ function ExperimentsTab() {
       ) : isError ? (
         <EmptyState
           icon={<TestTube className="h-8 w-8" />}
-          title="加载失败"
+          title={tl({ zh: "加载失败", en: "Failed to load" })}
           description={
-            error instanceof Error ? error.message : "无法加载因子实验"
+            error instanceof Error ? error.message : tl({ zh: "无法加载因子实验", en: "Unable to load factor experiments" })
           }
         />
       ) : data && data.length > 0 ? (
@@ -1390,12 +1463,12 @@ function ExperimentsTab() {
             <Table>
               <TableHeader className="sticky top-0 bg-card">
                 <TableRow>
-                  <TableHead>实验 ID</TableHead>
-                  <TableHead>假设</TableHead>
-                  <TableHead>因子列表</TableHead>
-                  <TableHead>数据发布 ID</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>创建时间</TableHead>
+                  <TableHead>{tl({ zh: "实验 ID", en: "Experiment ID" })}</TableHead>
+                  <TableHead>{tl({ zh: "假设", en: "Hypothesis" })}</TableHead>
+                  <TableHead>{tl({ zh: "因子列表", en: "Factors" })}</TableHead>
+                  <TableHead>{tl({ zh: "数据发布 ID", en: "Release ID" })}</TableHead>
+                  <TableHead>{tl({ zh: "状态", en: "Status" })}</TableHead>
+                  <TableHead>{tl({ zh: "创建时间", en: "Created" })}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1442,12 +1515,15 @@ function ExperimentsTab() {
       ) : (
         <EmptyState
           icon={<TestTube className="h-8 w-8" />}
-          title="暂无因子实验"
-          description="创建因子实验以系统性验证因子假设的预测力，并与机器验证实验关联。"
+          title={tl({ zh: "暂无因子实验", en: "No factor experiments yet" })}
+          description={tl({
+            zh: "创建因子实验以系统性验证因子假设的预测力，并与机器验证实验关联。",
+            en: "Create a factor experiment to systematically validate the predictive power of a factor hypothesis and link it to machine-validated experiments.",
+          })}
           action={
             <Button size="sm" onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4" />
-              创建实验
+              {tl({ zh: "创建实验", en: "Create experiment" })}
             </Button>
           }
         />
@@ -1459,14 +1535,15 @@ function ExperimentsTab() {
 }
 
 export default function FactorLab() {
+  const { tl } = useT();
   return (
     <div>
       <PageHeader
-        title="因子实验室"
-        description="因子发现、信号预览与实验验证"
+        title={tl({ zh: "因子实验室", en: "Factor Lab" })}
+        description={tl({ zh: "因子发现、信号预览与实验验证", en: "Factor discovery, signal preview, and experiment validation" })}
         breadcrumbs={[
-          { label: "研究", href: "/research" },
-          { label: "因子实验室" },
+          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
+          { label: tl({ zh: "因子实验室", en: "Factor Lab" }) },
         ]}
       />
 
@@ -1474,13 +1551,13 @@ export default function FactorLab() {
 
       <Tabs defaultValue="catalog">
         <TabsList className="h-auto flex-wrap gap-1">
-          <TabsTrigger value="catalog">因子目录</TabsTrigger>
+          <TabsTrigger value="catalog">{tl({ zh: "因子目录", en: "Factor catalog" })}</TabsTrigger>
           <ResearchHint hint={RESEARCH_HINTS.factors.catalog} />
-          <TabsTrigger value="features">特征快照</TabsTrigger>
+          <TabsTrigger value="features">{tl({ zh: "特征快照", en: "Feature snapshots" })}</TabsTrigger>
           <ResearchHint hint={RESEARCH_HINTS.factors.features} />
-          <TabsTrigger value="signals">因子信号</TabsTrigger>
+          <TabsTrigger value="signals">{tl({ zh: "因子信号", en: "Factor signals" })}</TabsTrigger>
           <ResearchHint hint={RESEARCH_HINTS.factors.signals} />
-          <TabsTrigger value="experiments">因子实验</TabsTrigger>
+          <TabsTrigger value="experiments">{tl({ zh: "因子实验", en: "Factor experiments" })}</TabsTrigger>
           <ResearchHint hint={RESEARCH_HINTS.factors.experiments} />
         </TabsList>
 
@@ -1500,8 +1577,8 @@ export default function FactorLab() {
 
       <NextStepCTA
         nextPath="/research/strategy"
-        nextLabel="策略 Studio"
-        description="将因子组合为完整的交易策略"
+        nextLabel={{ zh: "策略 Studio", en: "Strategy Studio" }}
+        description={{ zh: "将因子组合为完整的交易策略", en: "Combine factors into a complete trading strategy" }}
       />
     </div>
   );

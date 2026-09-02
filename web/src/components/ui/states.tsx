@@ -1,5 +1,6 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 
 interface EmptyStateProps {
   icon?: React.ReactNode;
@@ -51,7 +52,8 @@ interface ErrorStateProps {
   className?: string;
 }
 
-export function ErrorState({ title = "加载失败", message, onRetry, className }: ErrorStateProps) {
+export function ErrorState({ title, message, onRetry, className }: ErrorStateProps) {
+  const { t } = useT();
   return (
     <div
       className={cn(
@@ -59,14 +61,14 @@ export function ErrorState({ title = "加载失败", message, onRetry, className
         className,
       )}
     >
-      <p className="text-sm font-medium text-destructive">{title}</p>
+      <p className="text-sm font-medium text-destructive">{title ?? t("states.loadFailed")}</p>
       {message && <p className="mt-1 max-w-sm text-sm text-muted-foreground">{message}</p>}
       {onRetry && (
         <button
           onClick={onRetry}
           className="mt-4 rounded-md border border-border px-4 py-2 text-sm font-medium hover:bg-accent"
         >
-          重试
+          {t("common.retry")}
         </button>
       )}
     </div>

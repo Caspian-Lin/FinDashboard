@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { ThemeProvider } from "@/components/ui/theme-provider";
+import { LanguageProvider } from "@/i18n";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import "./index.css";
 
@@ -18,13 +19,15 @@ const queryClient = new QueryClient({
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ThemeProvider>
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
-          <TooltipProvider delayDuration={200}>
-            <App />
-          </TooltipProvider>
-        </BrowserRouter>
-      </QueryClientProvider>
+      <LanguageProvider>
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter>
+            <TooltipProvider delayDuration={200}>
+              <App />
+            </TooltipProvider>
+          </BrowserRouter>
+        </QueryClientProvider>
+      </LanguageProvider>
     </ThemeProvider>
   </StrictMode>,
 );

@@ -8,8 +8,11 @@ import { PageContainer } from "../components/ui/page-container";
 import { Input } from "../components/ui/input";
 import { Switch } from "../components/ui/switch";
 import { Button } from "../components/ui/button";
+import { useT, useLanguage, type Language } from "@/i18n";
 
 export default function Settings() {
+  const { t } = useT();
+  const { lang, setLanguage } = useLanguage();
   const queryClient = useQueryClient();
   const { data: config } = useQuery({
     queryKey: ["scheduler-config"],
@@ -28,18 +31,23 @@ export default function Settings() {
       queryClient.invalidateQueries({ queryKey: ["scheduler-config"] }),
   });
 
-  if (!form) return <div className="text-muted-foreground/70">加载中...</div>;
+  if (!form) return <div className="text-muted-foreground/70">{t("common.loading")}</div>;
 
   const marketOptions = [
-    { value: "a_share", label: "A股" },
-    { value: "hk", label: "港股" },
-    { value: "us", label: "美股" },
+    { value: "a_share", label: t("settings.marketAShare") },
+    { value: "hk", label: t("settings.marketHk") },
+    { value: "us", label: t("settings.marketUs") },
   ];
 
   const typeOptions = [
-    { value: "stock", label: "股票" },
-    { value: "etf", label: "ETF" },
-    { value: "index", label: "指数" },
+    { value: "stock", label: t("settings.typeStock") },
+    { value: "etf", label: t("settings.typeEtf") },
+    { value: "index", label: t("settings.typeIndex") },
+  ];
+
+  const languageOptions: { value: Language; label: string }[] = [
+    { value: "zh", label: t("settings.languageZh") },
+    { value: "en", label: t("settings.languageEn") },
   ];
 
   const toggleMarket = (value: string, checked: boolean) =>
@@ -55,19 +63,44 @@ export default function Settings() {
       ...form,
       download_types: checked
         ? [...form.download_types, value]
-        : form.download_types.filter((t) => t !== value),
+        : form.download_types.filter((item) => item !== value),
     });
 
   return (
     <PageContainer>
-      <PageHeader title="设置" description="数据源与定时任务配置(仅数据域,不影响实盘交易内核)。" />
+      <PageHeader title={t("settings.title")} description={t("settings.description")} />
+
+      {/* Interface Language */}
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-3 text-lg font-semibold">{t("settings.sectionLanguage")}</h2>
+        <div className="flex flex-wrap items-center gap-4">
+          <div>
+            <label htmlFor="settings-language" className="text-sm font-medium text-foreground">
+              {t("settings.languageLabel")}
+            </label>
+            <p className="mt-0.5 text-xs text-muted-foreground">{t("settings.languageHint")}</p>
+          </div>
+          <select
+            id="settings-language"
+            value={lang}
+            onChange={(e) => setLanguage(e.target.value as Language)}
+            className="h-9 w-44 rounded-md border border-input bg-transparent px-3 py-1.5 text-sm"
+          >
+            {languageOptions.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </section>
 
       {/* Data Source */}
       <section className="rounded-lg border border-border bg-card p-5">
-        <h2 className="mb-3 text-lg font-semibold">数据源</h2>
+        <h2 className="mb-3 text-lg font-semibold">{t("settings.sectionDataSource")}</h2>
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-1 text-sm text-muted-foreground">
-            <span>当前数据源</span>
+            <span>{t("settings.currentProvider")}</span>
             <InfoHint content={INFO_HINTS.settings.dataProvider} />
           </div>
           <span
@@ -80,22 +113,22 @@ export default function Settings() {
             {form.data_provider}
           </span>
           <span className="text-sm text-muted-foreground/70">
-            切换: FINBOARD_DATA_PROVIDER=tushare / akshare / yfinance 环境变量
+            {t("settings.providerSwitchHint")}
           </span>
         </div>
       </section>
 
       {/* Scheduled Tasks */}
       <section className="rounded-lg border border-border bg-card p-5">
-        <h2 className="mb-4 text-lg font-semibold">定时任务</h2>
+        <h2 className="mb-4 text-lg font-semibold">{t("settings.sectionScheduler")}</h2>
 
         {/* Universe Sync Task */}
         <div className="mb-4 rounded-lg border border-border p-4">
           <div className="mb-3 flex items-center justify-between gap-4">
             <div>
-              <h3 className="font-medium">标的池同步</h3>
+              <h3 className="font-medium">{t("settings.universeSync")}</h3>
               <p className="mt-0.5 text-sm text-muted-foreground">
-                每日自动从 akshare 发现新上市/退市标的,更新 instruments 表
+                {t("settings.universeSyncDesc")}
               </p>
             </div>
             <Switch
@@ -103,7 +136,7 @@ export default function Settings() {
               onCheckedChange={(checked) =>
                 setForm({ ...form, sync_enabled: checked })
               }
-              aria-label="标的池同步开关"
+              aria-label={t("settings.universeSyncSwitch")}
             />
           </div>
           <div className="flex flex-wrap items-center gap-3">
@@ -112,7 +145,7 @@ export default function Settings() {
               hint={INFO_HINTS.settings.syncTime}
               className=""
             >
-              触发时间
+              {t("settings.triggerTime")}
             </HintLabel>
             <Input
               id="settings-sync-time"
@@ -121,7 +154,7 @@ export default function Settings() {
               onChange={(e) => setForm({ ...form, sync_time: e.target.value })}
               className="w-auto"
             />
-            <span className="text-sm text-muted-foreground/70">(Asia/Shanghai, 仅交易日)</span>
+            <span className="text-sm text-muted-foreground/70">{t("settings.tradingDaysOnly")}</span>
           </div>
         </div>
 
@@ -129,9 +162,9 @@ export default function Settings() {
         <div className="rounded-lg border border-border p-4">
           <div className="mb-3 flex items-center justify-between gap-4">
             <div>
-              <h3 className="font-medium">增量数据拉取</h3>
+              <h3 className="font-medium">{t("settings.bulkDownload")}</h3>
               <p className="mt-0.5 text-sm text-muted-foreground">
-                每日盘后增量拉取所有活跃标的的最新行情数据到 parquet 缓存
+                {t("settings.bulkDownloadDesc")}
               </p>
             </div>
             <Switch
@@ -139,7 +172,7 @@ export default function Settings() {
               onCheckedChange={(checked) =>
                 setForm({ ...form, download_enabled: checked })
               }
-              aria-label="增量数据拉取开关"
+              aria-label={t("settings.bulkDownloadSwitch")}
             />
           </div>
 
@@ -149,7 +182,7 @@ export default function Settings() {
                 htmlFor="settings-download-time"
                 hint={INFO_HINTS.settings.downloadTime}
               >
-                触发时间
+                {t("settings.triggerTime")}
               </HintLabel>
               <Input
                 id="settings-download-time"
@@ -165,7 +198,7 @@ export default function Settings() {
                 htmlFor="settings-lookback-days"
                 hint={INFO_HINTS.settings.lookbackDays}
               >
-                回溯天数
+                {t("settings.lookbackDays")}
               </HintLabel>
               <Input
                 id="settings-lookback-days"
@@ -180,13 +213,13 @@ export default function Settings() {
               />
             </div>
             <div className="flex items-end">
-              <span className="text-sm text-muted-foreground/70">天 (增量拉取)</span>
+              <span className="text-sm text-muted-foreground/70">{t("settings.lookbackDaysUnit")}</span>
             </div>
           </div>
 
           <fieldset className="mt-3">
             <legend className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
-              拉取市场
+              {t("settings.downloadMarkets")}
               <InfoHint content={INFO_HINTS.settings.downloadMarkets} />
             </legend>
             <div className="flex flex-wrap gap-4">
@@ -205,7 +238,7 @@ export default function Settings() {
 
           <fieldset className="mt-3">
             <legend className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
-              拉取类型
+              {t("settings.downloadTypes")}
               <InfoHint content={INFO_HINTS.settings.downloadTypes} />
             </legend>
             <div className="flex flex-wrap gap-4">
@@ -227,9 +260,9 @@ export default function Settings() {
       {/* Save button */}
       <div className="flex items-center gap-4">
         <Button onClick={() => save.mutate(form)} disabled={save.isPending}>
-          {save.isPending ? "保存中..." : "保存配置"}
+          {save.isPending ? t("common.saving") : t("settings.saveConfig")}
         </Button>
-        {save.isSuccess && <span className="text-sm text-success">已保存</span>}
+        {save.isSuccess && <span className="text-sm text-success">{t("common.saved")}</span>}
         {save.isError && (
           <span className="text-sm text-destructive">
             {(save.error as Error).message}

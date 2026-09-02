@@ -12,6 +12,7 @@ import {
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import FactorSelectionForm from "../components/FactorSelectionForm";
 import StrategyParamForm from "../components/StrategyParamForm";
+import { useT } from "@/i18n";
 import {
   defaultStrategyParams,
   normalizeStrategyParams,
@@ -31,6 +32,7 @@ import { INFO_HINTS } from "../lib/infoHints";
 export default function Strategies() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { tl } = useT();
   const [selectedKind, setSelectedKind] = useState("ma_cross");
   const [selectedPresetId, setSelectedPresetId] = useState<number | null>(null);
   const [name, setName] = useState("");
@@ -73,7 +75,12 @@ export default function Strategies() {
       setParams(preset.params);
       setSelection(preset.selection);
       setFieldErrors({});
-      setNotice("预设已保存。它不会启动策略或改变实盘配置。");
+      setNotice(
+        tl({
+          zh: "预设已保存。它不会启动策略或改变实盘配置。",
+          en: "Preset saved. It does not start any strategy or change live trading configuration.",
+        }),
+      );
       queryClient.invalidateQueries({ queryKey: ["strategy-presets"] });
     },
     onError: (error) => {
@@ -126,7 +133,8 @@ export default function Strategies() {
   function submit() {
     if (!definition) return;
     const errors = validateStrategyParams(definition, params);
-    if (!name.trim()) errors.name = "请输入预设名称";
+    if (!name.trim())
+      errors.name = tl({ zh: "请输入预设名称", en: "Preset name is required" });
     setFieldErrors(errors);
     setNotice("");
     if (Object.keys(errors).length > 0) return;
@@ -164,9 +172,13 @@ export default function Strategies() {
   if (strategiesQuery.error || !definition) {
     return (
       <div className="mx-auto max-w-7xl">
-        <h1 className="text-2xl font-bold text-foreground">策略配置</h1>
+        <h1 className="text-2xl font-bold text-foreground">
+          {tl({ zh: "策略配置", en: "Strategy configuration" })}
+        </h1>
         <p className="mt-3 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
-          无法加载内置策略：{(strategiesQuery.error as Error | null)?.message ?? "没有可用策略"}
+          {tl({ zh: "无法加载内置策略：", en: "Unable to load built-in strategies: " })}
+          {(strategiesQuery.error as Error | null)?.message ??
+            tl({ zh: "没有可用策略", en: "No strategies available" })}
         </p>
       </div>
     );
@@ -176,22 +188,26 @@ export default function Strategies() {
     <div className="mx-auto w-full max-w-7xl space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">策略配置</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">
+            {tl({ zh: "策略配置", en: "Strategy configuration" })}
+          </h1>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-            配置经过测试的内置策略参数，并保存为可复用预设。参数由后端 schema
-            自动生成，页面不接收或执行策略代码。
+            {tl({
+              zh: "配置经过测试的内置策略参数，并保存为可复用预设。参数由后端 schema 自动生成，页面不接收或执行策略代码。",
+              en: "Configure parameters for tested built-in strategies and save them as reusable presets. Parameters are generated from the backend schema; the page never receives or executes strategy code.",
+            })}
           </p>
         </div>
         <div className="flex items-center gap-2 rounded-md bg-success/10 px-3 py-2 text-xs font-medium text-success">
           <ShieldCheck size={16} aria-hidden="true" />
-          保存预设不会启动策略
+          {tl({ zh: "保存预设不会启动策略", en: "Saving a preset does not start a strategy" })}
         </div>
       </div>
 
       <div className="grid overflow-hidden rounded-lg border border-border bg-card lg:grid-cols-[15rem_minmax(0,1fr)_18rem]">
         <aside className="border-b border-border bg-background p-3 lg:border-b-0 lg:border-r">
           <div className="mb-2 flex items-center gap-1 px-2 text-xs font-semibold text-muted-foreground">
-            <span>内置策略</span>
+            <span>{tl({ zh: "内置策略", en: "Built-in strategies" })}</span>
             <InfoHint content={INFO_HINTS.strategies.builtinStrategies} />
           </div>
           <div className="space-y-1">
@@ -212,7 +228,9 @@ export default function Strategies() {
                     strategy.kind === selectedKind ? "text-muted-foreground" : "text-muted-foreground"
                   }`}
                 >
-                  {strategy.supports_backtest ? "可用于回测" : "实时时钟策略"}
+                  {strategy.supports_backtest
+                    ? tl({ zh: "可用于回测", en: "Backtest-capable" })
+                    : tl({ zh: "实时时钟策略", en: "Realtime clock strategy" })}
                 </span>
               </button>
             ))}
@@ -241,7 +259,7 @@ export default function Strategies() {
               hint={INFO_HINTS.strategies.presetName}
               labelClassName="text-sm font-medium text-foreground"
             >
-              预设名称 <span className="text-destructive">*</span>
+              {tl({ zh: "预设名称", en: "Preset name" })} <span className="text-destructive">*</span>
             </HintLabel>
             <input
               id="preset-name"
@@ -252,7 +270,7 @@ export default function Strategies() {
                 savePreset.reset();
               }}
               maxLength={100}
-              placeholder="例如：沪深 300 中期趋势"
+              placeholder={tl({ zh: "例如：沪深 300 中期趋势", en: "e.g. CSI 300 mid-term trend" })}
               aria-invalid={Boolean(fieldErrors.name)}
               className={`w-full rounded-md border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/30 ${
                 fieldErrors.name ? "border-destructive" : "border-input focus:border-primary"
@@ -307,10 +325,10 @@ export default function Strategies() {
             >
               <Save size={16} aria-hidden="true" />
               {savePreset.isPending
-                ? "保存中…"
+                ? tl({ zh: "保存中…", en: "Saving…" })
                 : selectedPresetId === null
-                  ? "保存新预设"
-                  : "更新预设"}
+                  ? tl({ zh: "保存新预设", en: "Save new preset" })
+                  : tl({ zh: "更新预设", en: "Update preset" })}
             </button>
             {selectedPresetId !== null && (
               <button
@@ -319,7 +337,7 @@ export default function Strategies() {
                 className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-background"
               >
                 <Plus size={16} aria-hidden="true" />
-                另存新预设
+                {tl({ zh: "另存新预设", en: "Save as new preset" })}
               </button>
             )}
             {definition.supports_backtest && (
@@ -329,7 +347,7 @@ export default function Strategies() {
                 className="ml-auto inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-primary hover:bg-accent"
               >
                 <FlaskConical size={16} aria-hidden="true" />
-                带入回测
+                {tl({ zh: "带入回测", en: "Load into backtest" })}
                 <ArrowRight size={15} aria-hidden="true" />
               </button>
             )}
@@ -339,10 +357,17 @@ export default function Strategies() {
         <aside className="border-t border-border bg-background p-4 lg:border-l lg:border-t-0">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-1">
-              <h2 className="text-sm font-semibold text-foreground">已保存预设</h2>
+              <h2 className="text-sm font-semibold text-foreground">
+                {tl({ zh: "已保存预设", en: "Saved presets" })}
+              </h2>
               <InfoHint content={INFO_HINTS.strategies.savedPresets} />
             </div>
-            <span className="text-xs text-muted-foreground">{presetsQuery.data?.length ?? 0} 个</span>
+            <span className="text-xs text-muted-foreground">
+              {tl({
+                zh: `${presetsQuery.data?.length ?? 0} 个`,
+                en: `${presetsQuery.data?.length ?? 0}`,
+              })}
+            </span>
           </div>
 
           {presetsQuery.isPending && <PresetListSkeleton />}
@@ -353,9 +378,14 @@ export default function Strategies() {
           )}
           {presetsQuery.data?.length === 0 && (
             <div className="rounded-lg border border-dashed border-input p-4 text-center">
-              <p className="text-sm font-medium text-foreground">还没有策略预设</p>
+              <p className="text-sm font-medium text-foreground">
+                {tl({ zh: "还没有策略预设", en: "No strategy presets yet" })}
+              </p>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                在左侧选择策略，填写参数后保存；以后可以直接载入回测。
+                {tl({
+                  zh: "在左侧选择策略，填写参数后保存；以后可以直接载入回测。",
+                  en: "Pick a strategy on the left, fill in the parameters and save; you can then load it directly into a backtest.",
+                })}
               </p>
             </div>
           )}
@@ -384,14 +414,16 @@ export default function Strategies() {
 
                 {deleteConfirmId === preset.id ? (
                   <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2">
-                    <span className="text-xs text-destructive">确认删除？</span>
+                    <span className="text-xs text-destructive">
+                      {tl({ zh: "确认删除？", en: "Confirm deletion?" })}
+                    </span>
                     <div className="flex gap-2">
                       <button
                         type="button"
                         onClick={() => setDeleteConfirmId(null)}
                         className="text-xs text-muted-foreground hover:text-foreground"
                       >
-                        取消
+                        {tl({ zh: "取消", en: "Cancel" })}
                       </button>
                       <button
                         type="button"
@@ -399,7 +431,7 @@ export default function Strategies() {
                         disabled={deletePreset.isPending}
                         className="text-xs font-medium text-destructive hover:text-destructive"
                       >
-                        删除
+                        {tl({ zh: "删除", en: "Delete" })}
                       </button>
                     </div>
                   </div>
@@ -410,7 +442,7 @@ export default function Strategies() {
                     className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-destructive"
                   >
                     <Trash2 size={13} aria-hidden="true" />
-                    删除
+                    {tl({ zh: "删除", en: "Delete" })}
                   </button>
                 )}
               </div>
@@ -420,16 +452,22 @@ export default function Strategies() {
       </div>
 
       <p className="mt-4 text-xs leading-5 text-muted-foreground">
-        安全边界：本页面不上传、导入或执行 Python 代码，也不会修改正在运行的实盘策略。
-        在线策略代码能力不在本阶段范围内。
+        {tl({
+          zh: "安全边界：本页面不上传、导入或执行 Python 代码，也不会修改正在运行的实盘策略。 在线策略代码能力不在本阶段范围内。",
+          en: "Safety boundary: this page never uploads, imports, or executes Python code, nor modifies running live strategies. Online strategy code capability is out of scope for this phase.",
+        })}
       </p>
     </div>
   );
 }
 
 function StrategiesSkeleton() {
+  const { tl } = useT();
   return (
-    <div className="mx-auto max-w-7xl animate-pulse" aria-label="正在加载策略配置">
+    <div
+      className="mx-auto max-w-7xl animate-pulse"
+      aria-label={tl({ zh: "正在加载策略配置", en: "Loading strategy configuration" })}
+    >
       <div className="h-8 w-36 rounded bg-muted" />
       <div className="mt-3 h-4 w-full max-w-xl rounded bg-muted" />
       <div className="mt-6 h-[30rem] rounded-lg bg-muted" />
@@ -438,8 +476,12 @@ function StrategiesSkeleton() {
 }
 
 function PresetListSkeleton() {
+  const { tl } = useT();
   return (
-    <div className="space-y-2 animate-pulse" aria-label="正在加载策略预设">
+    <div
+      className="space-y-2 animate-pulse"
+      aria-label={tl({ zh: "正在加载策略预设", en: "Loading strategy presets" })}
+    >
       <div className="h-16 rounded-lg bg-muted" />
       <div className="h-16 rounded-lg bg-muted" />
     </div>

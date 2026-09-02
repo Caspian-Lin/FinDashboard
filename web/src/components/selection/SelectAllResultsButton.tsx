@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 
 interface SelectAllResultsButtonProps {
   totalCount: number;
@@ -13,6 +14,7 @@ export function SelectAllResultsButton({
   onSelectAll,
   className,
 }: SelectAllResultsButtonProps) {
+  const { t } = useT();
   return (
     <button
       type="button"
@@ -23,7 +25,7 @@ export function SelectAllResultsButton({
         className,
       )}
     >
-      {isPending ? "正在选择全部结果…" : `全选筛选结果（${totalCount}）`}
+      {isPending ? t("selectAll.selecting") : t("selectAll.selectAll", { count: totalCount })}
     </button>
   );
 }

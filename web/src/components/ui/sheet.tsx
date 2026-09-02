@@ -3,6 +3,7 @@ import * as SheetPrimitive from "@radix-ui/react-dialog";
 import { cva, type VariantProps } from "class-variance-authority";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 
 const Sheet = SheetPrimitive.Root;
 const SheetTrigger = SheetPrimitive.Trigger;
@@ -43,6 +44,12 @@ interface SheetContentProps
   extends React.ComponentPropsWithoutRef<typeof SheetPrimitive.Content>,
     VariantProps<typeof sheetVariants> {}
 
+/** 关闭按钮的 sr-only 文案(取当前语言;forwardRef 内联体不便调用 hook,故独立成组件)。 */
+function SrOnlyClose() {
+  const { tl } = useT();
+  return <span className="sr-only">{tl({ zh: "关闭", en: "Close" })}</span>;
+}
+
 const SheetContent = React.forwardRef<React.ElementRef<typeof SheetPrimitive.Content>, SheetContentProps>(
   ({ side = "right", className, children, ...props }, ref) => (
     <SheetPortal>
@@ -51,7 +58,7 @@ const SheetContent = React.forwardRef<React.ElementRef<typeof SheetPrimitive.Con
         {children}
         <SheetPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring disabled:pointer-events-none">
           <X className="h-4 w-4" />
-          <span className="sr-only">关闭</span>
+          <SrOnlyClose />
         </SheetPrimitive.Close>
       </SheetPrimitive.Content>
     </SheetPortal>

@@ -9,18 +9,21 @@ import { StatusDot } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 import { navGroups } from "./nav-config";
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
+  const { t } = useT();
   return (
-    <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="切换主题">
+    <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label={t("shell.toggleTheme")}>
       {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
     </Button>
   );
 }
 
 function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
+  const { tl } = useT();
   return (
     <div className="flex h-full flex-col">
       {/* Logo:与顶栏同高(56px),图标/文字在同一对齐线上 */}
@@ -36,16 +39,16 @@ function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavig
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 overflow-y-auto scrollbar-thin py-3" aria-label="主导航">
+      <nav className="flex-1 overflow-y-auto scrollbar-thin py-3" aria-label={tl({ zh: "主导航", en: "Main navigation" })}>
         {navGroups.map((group) => (
-          <div key={group.label} className="mb-4">
+          <div key={group.label.en} className="mb-4">
             {!collapsed && (
               <div className="mb-1 flex items-center gap-2 px-4">
                 <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  {group.label}
+                  {tl(group.label)}
                 </span>
                 {group.restricted && (
-                  <AlertTriangle className="h-3 w-3 text-warning" aria-label="受控区域" />
+                  <AlertTriangle className="h-3 w-3 text-warning" aria-label={tl({ zh: "受控区域", en: "Restricted area" })} />
                 )}
               </div>
             )}
@@ -66,10 +69,10 @@ function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavig
                       group.restricted && !isActive && "text-muted-foreground/70",
                     )
                   }
-                  title={collapsed ? item.label : undefined}
+                  title={collapsed ? tl(item.label) : undefined}
                 >
                   <item.icon className="h-4 w-4 shrink-0" />
-                  {!collapsed && <span>{item.label}</span>}
+                  {!collapsed && <span>{tl(item.label)}</span>}
                 </NavLink>
               ))}
             </div>
@@ -81,6 +84,7 @@ function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavig
 }
 
 function SystemStatus() {
+  const { t } = useT();
   const wsConnected = useWebSocket();
   const healthQuery = useQuery({
     queryKey: ["health"],
@@ -91,16 +95,16 @@ function SystemStatus() {
   const kernelOk = health?.kernel_ready ?? false;
   const ksLevel = health?.kill_switch_level ?? "off";
   const kernelLabel = healthQuery.isError
-    ? "API 不可用"
+    ? t("shell.apiUnavailable")
     : kernelOk
-      ? "内核就绪"
-      : "内核未就绪（研究可用，实盘受阻）";
+      ? t("shell.kernelReady")
+      : t("shell.kernelNotReady");
 
   return (
     <div className="flex items-center gap-4 px-4 py-2 border-t border-border">
       <div className="flex items-center gap-1.5 text-xs">
         <StatusDot status={kernelOk ? "online" : "offline"} />
-        <span className="text-muted-foreground" title={healthQuery.isError ? "无法连接后端健康检查，请重试或检查 API 服务" : undefined}>
+        <span className="text-muted-foreground" title={healthQuery.isError ? t("shell.healthCheckFailed") : undefined}>
           {kernelLabel}
         </span>
       </div>
@@ -119,6 +123,7 @@ function SystemStatus() {
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const { tl } = useT();
   const [collapsed, setCollapsed] = React.useState(false);
   const [mobileOpen, setMobileOpen] = React.useState(false);
   const location = useLocation();
@@ -127,7 +132,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     for (const group of navGroups) {
       for (const item of group.items) {
         if (item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)) {
-          return { title: item.label, group: group.label, restricted: group.restricted };
+          return { title: tl(item.label), group: tl(group.label), restricted: group.restricted };
         }
       }
     }
@@ -151,7 +156,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             size="sm"
             className="w-full justify-center text-muted-foreground"
             onClick={() => setCollapsed((c) => !c)}
-            aria-label={collapsed ? "展开侧栏" : "折叠侧栏"}
+            aria-label={collapsed ? tl({ zh: "展开侧栏", en: "Expand sidebar" }) : tl({ zh: "折叠侧栏", en: "Collapse sidebar" })}
           >
             {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
           </Button>
@@ -166,12 +171,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             {/* Mobile menu */}
             <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
               <SheetTrigger asChild>
-                <Button variant="ghost" size="icon" className="md:hidden" aria-label="打开菜单">
+                <Button variant="ghost" size="icon" className="md:hidden" aria-label={tl({ zh: "打开菜单", en: "Open menu" })}>
                   <Menu className="h-5 w-5" />
                 </Button>
               </SheetTrigger>
               <SheetContent side="left" className="w-72 p-0">
-                <SheetTitle className="sr-only">导航菜单</SheetTitle>
+                <SheetTitle className="sr-only">{tl({ zh: "导航菜单", en: "Navigation menu" })}</SheetTitle>
                 <div className="flex h-full flex-col bg-card">
                   <SidebarContent collapsed={false} onNavigate={() => setMobileOpen(false)} />
                   <SystemStatus />
@@ -191,7 +196,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               {pageTitle.restricted && (
                 <span className="hidden items-center gap-1 rounded bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning sm:inline-flex">
                   <AlertTriangle className="h-2.5 w-2.5" />
-                  受控区域
+                  {tl({ zh: "受控区域", en: "Restricted area" })}
                 </span>
               )}
             </div>

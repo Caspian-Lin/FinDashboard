@@ -25,50 +25,51 @@ import {
   TableRow,
 } from "../components/ui/table";
 import { cn } from "../lib/utils";
+import { useT, type LocalizedText } from "@/i18n";
 
 interface KsLevel {
   value: string;
-  label: string;
+  label: LocalizedText;
   variant: "success" | "warning" | "destructive";
-  impact: string;
-  notice: string;
+  impact: LocalizedText;
+  notice: LocalizedText;
 }
 
 const KS_LEVELS: KsLevel[] = [
   {
     value: "off",
-    label: "恢复正常",
+    label: { zh: "恢复正常", en: "Resume Normal" },
     variant: "success",
-    impact: "恢复提交新订单的能力,解除当前中止状态。",
-    notice: "解除限制后交易行为立即恢复,请确认当前已无风险。",
+    impact: { zh: "恢复提交新订单的能力,解除当前中止状态。", en: "Restores the ability to submit new orders and lifts the current halt." },
+    notice: { zh: "解除限制后交易行为立即恢复,请确认当前已无风险。", en: "Trading resumes immediately once the restriction is lifted; please confirm there is no remaining risk." },
   },
   {
     value: "no_new_orders",
-    label: "暂停新单",
+    label: { zh: "暂停新单", en: "Pause New Orders" },
     variant: "warning",
-    impact: "禁止提交任何新订单;已提交订单不受影响,仍可撤单、查询与减仓。",
-    notice: "可随时切换其他级别解除限制。",
+    impact: { zh: "禁止提交任何新订单;已提交订单不受影响,仍可撤单、查询与减仓。", en: "Blocks submitting any new orders; already-submitted orders are unaffected and can still be cancelled, queried, or reduced." },
+    notice: { zh: "可随时切换其他级别解除限制。", en: "You can switch to another level at any time to lift the restriction." },
   },
   {
     value: "reduce_only",
-    label: "仅减仓",
+    label: { zh: "仅减仓", en: "Reduce Only" },
     variant: "warning",
-    impact: "禁止开新仓,仅允许减少现有持仓的卖出操作。",
-    notice: "可随时切换其他级别解除限制。",
+    impact: { zh: "禁止开新仓,仅允许减少现有持仓的卖出操作。", en: "Blocks opening new positions; only sell operations that reduce existing positions are allowed." },
+    notice: { zh: "可随时切换其他级别解除限制。", en: "You can switch to another level at any time to lift the restriction." },
   },
   {
     value: "cancel_all",
-    label: "撤全部",
+    label: { zh: "撤全部", en: "Cancel All" },
     variant: "destructive",
-    impact: "向券商撤销全部活动订单(不可撤销的订单除外),撤销动作由交易内核执行;随后进入仅减仓约束。",
-    notice: "撤单动作不可自动恢复;解除限制需人工确认后逐级切换。",
+    impact: { zh: "向券商撤销全部活动订单(不可撤销的订单除外),撤销动作由交易内核执行;随后进入仅减仓约束。", en: "Cancels all active orders at the broker (except non-cancellable ones); the cancellation is executed by the trading kernel, followed by a reduce-only constraint." },
+    notice: { zh: "撤单动作不可自动恢复;解除限制需人工确认后逐级切换。", en: "Cancellations cannot be undone automatically; lifting the restriction requires step-by-step manual confirmation." },
   },
   {
     value: "halt",
-    label: "全局停止",
+    label: { zh: "全局停止", en: "Global Halt" },
     variant: "destructive",
-    impact: "立即停止一切交易行为:禁止新单、撤单与减仓,策略暂停,由交易内核强制生效。",
-    notice: "不可自动恢复;恢复交易需人工确认后逐级解除。",
+    impact: { zh: "立即停止一切交易行为:禁止新单、撤单与减仓,策略暂停,由交易内核强制生效。", en: "Immediately stops all trading: new orders, cancellations and position reduction are blocked and strategies pause, enforced by the trading kernel." },
+    notice: { zh: "不可自动恢复;恢复交易需人工确认后逐级解除。", en: "Cannot be resumed automatically; restoring trading requires step-by-step manual confirmation." },
   },
 ];
 
@@ -82,11 +83,12 @@ function ksColorClass(variant: KsLevel["variant"]) {
   return "border-warning text-warning hover:bg-warning/10";
 }
 
-function levelLabel(level: string | undefined) {
-  return KS_LEVELS.find((l) => l.value === level)?.label ?? level ?? "";
+function levelValue(level: string | undefined) {
+  return KS_LEVELS.find((l) => l.value === level)?.label ?? undefined;
 }
 
 export default function Control() {
+  const { t, tl } = useT();
   const qc = useQueryClient();
   const [reason, setReason] = useState("manual");
   const [confirmLevel, setConfirmLevel] = useState<string | null>(null);
@@ -123,20 +125,20 @@ export default function Control() {
   return (
     <PageContainer>
       <PageHeader
-        title="控制台"
-        description="Kill Switch 由交易内核执行;页面只提交指令,不绕过内核。"
+        title={t("control.title")}
+        description={t("control.description")}
       />
 
       {/* Kill Switch */}
       <section className="rounded-lg border border-border bg-card p-5">
         <h2 className="mb-4 font-semibold">Kill Switch</h2>
         <div className="mb-4">
-          <span className="text-sm text-muted-foreground">当前状态: </span>
+          <span className="text-sm text-muted-foreground">{t("control.currentLevel")}</span>
           <span className={`font-bold ${ks?.level === "off" ? "text-success" : "text-destructive"}`}>
             {ks?.level ?? "—"}
           </span>
         </div>
-        <div className="flex flex-wrap gap-2" role="group" aria-label="Kill Switch 级别">
+        <div className="flex flex-wrap gap-2" role="group" aria-label={t("control.levelGroup")}>
           {KS_LEVELS.map((lvl) => (
             <Button
               key={lvl.value}
@@ -150,7 +152,7 @@ export default function Control() {
               disabled={busy}
               className={ksColorClass(lvl.variant)}
             >
-              {lvl.label}
+              {tl(lvl.label)}
             </Button>
           ))}
         </div>
@@ -162,8 +164,8 @@ export default function Control() {
             ksMut.isSuccess ? "text-success" : "text-muted-foreground",
           )}
         >
-          {busy && `正在切换 Kill Switch 至「${levelLabel(ksMut.variables?.level)}」...`}
-          {ksMut.isSuccess && `✓ Kill Switch 已切换至「${levelLabel(ksMut.variables?.level)}」`}
+          {busy && t("control.switching", { level: tl(levelValue(ksMut.variables?.level) ?? { zh: "", en: "" }) })}
+          {ksMut.isSuccess && t("control.switched", { level: tl(levelValue(ksMut.variables?.level) ?? { zh: "", en: "" }) })}
         </p>
       </section>
 
@@ -183,49 +185,49 @@ export default function Control() {
           }}
         >
           <DialogHeader>
-            <DialogTitle>确认切换 Kill Switch</DialogTitle>
+            <DialogTitle>{t("control.confirmTitle")}</DialogTitle>
             <DialogDescription>
-              此操作由交易内核执行,页面只提交指令,不绕过内核。请核对目标状态与影响范围后确认。
+              {t("control.confirmDescription")}
             </DialogDescription>
           </DialogHeader>
           {confirmTarget && (
             <div className="space-y-3 text-sm">
               <div className="space-y-2 rounded-lg bg-muted/50 p-3">
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">当前状态</span>
+                  <span className="text-muted-foreground">{t("control.currentLevelLabel")}</span>
                   <span className="font-semibold">{ks?.level ?? "—"}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">目标状态</span>
+                  <span className="text-muted-foreground">{t("control.targetLevel")}</span>
                   <span className={`font-bold ${ksColorClass(confirmTarget.variant)}`}>
-                    {confirmTarget.label}
+                    {tl(confirmTarget.label)}
                   </span>
                 </div>
               </div>
               <div className="space-y-1">
-                <p className="font-medium">影响范围</p>
-                <p className="text-muted-foreground">{confirmTarget.impact}</p>
+                <p className="font-medium">{t("control.impact")}</p>
+                <p className="text-muted-foreground">{tl(confirmTarget.impact)}</p>
               </div>
               <p
                 className={
                   confirmTarget.variant === "destructive" ? "text-destructive" : "text-warning"
                 }
               >
-                {confirmTarget.notice}
+                {tl(confirmTarget.notice)}
               </p>
               <div className="space-y-1.5">
-                <Label htmlFor="ks-confirm-reason">操作原因</Label>
+                <Label htmlFor="ks-confirm-reason">{t("control.reason")}</Label>
                 <Input
                   id="ks-confirm-reason"
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
-                  placeholder="记录本次操作原因(写入审计)"
+                  placeholder={t("control.reasonPlaceholder")}
                 />
               </div>
               {ksMut.isError && (
                 <Alert variant="destructive">
                   <AlertDescription>
-                    {ksMut.error?.message ?? "请求失败,请重试或取消。"}
+                    {ksMut.error?.message ?? t("control.requestFailed")}
                   </AlertDescription>
                 </Alert>
               )}
@@ -233,7 +235,7 @@ export default function Control() {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmLevel(null)} disabled={busy}>
-              取消
+              {t("common.cancel")}
             </Button>
             <Button
               variant="outline"
@@ -241,7 +243,7 @@ export default function Control() {
               disabled={busy}
               className={ksColorClass(confirmTarget?.variant ?? "warning")}
             >
-              {busy ? "切换中..." : `确认${confirmTarget?.label ?? ""}`}
+              {busy ? t("control.switchingShort") : t("control.confirmLevel", { level: confirmTarget ? tl(confirmTarget.label) : "" })}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -249,9 +251,9 @@ export default function Control() {
 
       {/* Reconcile */}
       <section className="rounded-lg border border-border bg-card p-5">
-        <h2 className="mb-4 font-semibold">核对</h2>
+        <h2 className="mb-4 font-semibold">{t("control.reconcile")}</h2>
         <Button onClick={() => reconMut.mutate()} disabled={reconMut.isPending}>
-          {reconMut.isPending ? "核对中..." : "触发核对"}
+          {reconMut.isPending ? t("control.reconciling") : t("control.triggerReconcile")}
         </Button>
         {reconMut.data && (
           <p
@@ -266,17 +268,17 @@ export default function Control() {
 
       {/* Audit Logs */}
       <section className="rounded-lg border border-border bg-card p-5">
-        <h2 className="mb-4 font-semibold">审计日志</h2>
+        <h2 className="mb-4 font-semibold">{t("control.auditLog")}</h2>
         {(logs?.items ?? []).length === 0 ? (
-          <EmptyState title="无日志" />
+          <EmptyState title={t("control.noLogs")} />
         ) : (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>时间</TableHead>
-                <TableHead>操作者</TableHead>
-                <TableHead>动作</TableHead>
-                <TableHead>目标</TableHead>
+                <TableHead>{t("common.time")}</TableHead>
+                <TableHead>{t("control.actor")}</TableHead>
+                <TableHead>{t("control.action")}</TableHead>
+                <TableHead>{t("control.target")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>

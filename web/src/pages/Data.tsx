@@ -6,26 +6,33 @@ import type { JobOut, QualityReport } from "../lib/api";
 import { isJobRunning } from "../lib/api";
 import { INFO_HINTS, type InfoHintDefinition } from "../lib/infoHints";
 import { cn } from "../lib/utils";
+import { useT, useLanguage, type LocalizedText } from "@/i18n";
 
-const BULK_PHASE_LABELS: Record<string, string> = {
-  starting: "准备任务",
-  checking_cache: "检查缓存",
-  cache_hit: "缓存命中",
-  fetching: "请求行情",
-  reading_cache: "读取缓存",
-  writing_cache: "写入缓存",
+const BULK_PHASE_LABELS: Record<string, LocalizedText> = {
+  starting: { zh: "准备任务", en: "Starting job" },
+  checking_cache: { zh: "检查缓存", en: "Checking cache" },
+  cache_hit: { zh: "缓存命中", en: "Cache hit" },
+  fetching: { zh: "请求行情", en: "Fetching bars" },
+  reading_cache: { zh: "读取缓存", en: "Reading cache" },
+  writing_cache: { zh: "写入缓存", en: "Writing cache" },
 };
 
-function formatDuration(sec: number): string {
+function formatDuration(sec: number, lang: "zh" | "en"): string {
   if (!isFinite(sec) || sec <= 0) return "—";
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = Math.floor(sec % 60);
+  if (lang === "en") {
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    return `${m}m ${s}s`;
+  }
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export default function Data() {
+  const { tl } = useT();
+  const { lang } = useLanguage();
   const queryClient = useQueryClient();
   const [fetchSymbol, setFetchSymbol] = useState("000001.SZ");
   const [fetchStart, setFetchStart] = useState("2024-01-01");
@@ -206,7 +213,11 @@ export default function Data() {
 
   const totalInstruments = databaseUniverse?.total ?? 0;
   const isDownloading = startDownload.isPending || isJobRunning(bulkJob);
-  const phaseLabel = bulkJob?.phase ? BULK_PHASE_LABELS[bulkJob.phase] ?? bulkJob.phase : undefined;
+  const phaseLabel = bulkJob?.phase
+    ? BULK_PHASE_LABELS[bulkJob.phase]
+      ? tl(BULK_PHASE_LABELS[bulkJob.phase])
+      : bulkJob.phase
+    : undefined;
 
   useEffect(() => {
     if (!isDownloading) return;
@@ -248,9 +259,12 @@ export default function Data() {
     <div className="mx-auto w-full max-w-7xl space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">行情数据</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">{tl({ zh: "行情数据", en: "Market Data" })}</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            标的池、单标的拉取与缓存管理;耗时任务进入统一队列,可在「任务中心」跟踪。
+            {tl({
+              zh: "标的池、单标的拉取与缓存管理;耗时任务进入统一队列,可在「任务中心」跟踪。",
+              en: "Universe, single-symbol fetch and cache management; long-running jobs enter the unified queue and can be tracked in the Task Center.",
+            })}
           </p>
         </div>
       </div>
@@ -258,12 +272,12 @@ export default function Data() {
       {/* Stats row */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
-          label="数据库标的数"
+          label={tl({ zh: "数据库标的数", en: "Instruments in DB" })}
           value={String(totalInstruments)}
           hint={INFO_HINTS.data.databaseUniverse}
         />
-        <StatCard label="缓存标的数" value={String(status?.total ?? 0)} />
-        <StatCard label="A股" value={String(aShareStocks?.total ?? 0)} />
+        <StatCard label={tl({ zh: "缓存标的数", en: "Cached symbols" })} value={String(status?.total ?? 0)} />
+        <StatCard label={tl({ zh: "A股", en: "A-shares" })} value={String(aShareStocks?.total ?? 0)} />
         <StatCard label="ETF" value={String(etfs?.total ?? 0)} />
       </div>
 
@@ -273,18 +287,23 @@ export default function Data() {
         <div className="rounded-lg border border-border bg-card p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="flex items-center gap-1 text-lg font-semibold">
-              标的池同步
+              {tl({ zh: "标的池同步", en: "Universe Sync" })}
               <InfoHint content={INFO_HINTS.data.universeSync} />
               <span className="ml-2 rounded-md bg-primary/15 px-2 py-0.5 text-xs font-medium text-primary">
                 akshare
               </span>
             </h2>
             {totalInstruments > 0 && (
-              <span className="text-sm text-muted-foreground/70">已同步 {totalInstruments} 条</span>
+              <span className="text-sm text-muted-foreground/70">
+                {tl({ zh: `已同步 ${totalInstruments} 条`, en: `${totalInstruments} synced` })}
+              </span>
             )}
           </div>
           <p className="text-sm text-muted-foreground mb-3">
-            从 akshare 自动发现全市场 A 股(~5500) + ETF(~1600),写入数据库。
+            {tl({
+              zh: "从 akshare 自动发现全市场 A 股(~5500) + ETF(~1600),写入数据库。",
+              en: "Auto-discover all A-share (~5,500) and ETF (~1,600) instruments from akshare and write them to the database.",
+            })}
           </p>
           <button
             type="button"
@@ -292,17 +311,24 @@ export default function Data() {
             disabled={sync.isPending}
             className="w-full rounded-md bg-primary text-primary-foreground py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
           >
-            {sync.isPending ? "同步中..." : totalInstruments === 0 ? "同步标的池" : "刷新标的池"}
+            {sync.isPending
+              ? tl({ zh: "同步中...", en: "Syncing..." })
+              : totalInstruments === 0
+                ? tl({ zh: "同步标的池", en: "Sync universe" })
+                : tl({ zh: "刷新标的池", en: "Refresh universe" })}
           </button>
           {sync.isPending && (
-            <p className="text-sm text-muted-foreground mt-2">已提交同步任务,等待队列调度…</p>
+            <p className="text-sm text-muted-foreground mt-2">
+              {tl({ zh: "已提交同步任务,等待队列调度…", en: "Sync job submitted, waiting for the queue…" })}
+            </p>
           )}
           {syncJob && !isJobRunning(syncJob) && syncJob.status === "succeeded" && (
-            <p className="text-sm text-success mt-2">标的池同步完成</p>
+            <p className="text-sm text-success mt-2">{tl({ zh: "标的池同步完成", en: "Universe sync completed" })}</p>
           )}
           {syncJob && !isJobRunning(syncJob) && syncJob.status !== "succeeded" && (
             <p className="text-sm text-destructive mt-2">
-              同步失败: {syncJob.error_summary ?? syncJob.status}
+              {tl({ zh: "同步失败: ", en: "Sync failed: " })}
+              {syncJob.error_summary ?? syncJob.status}
             </p>
           )}
           {sync.error && (
@@ -314,11 +340,11 @@ export default function Data() {
 
         {/* Single fetch */}
         <div className="rounded-lg border border-border bg-card p-5">
-          <h2 className="text-lg font-semibold mb-3">单标的拉取</h2>
+          <h2 className="text-lg font-semibold mb-3">{tl({ zh: "单标的拉取", en: "Single-Symbol Fetch" })}</h2>
           <div className="space-y-3">
             <div>
               <HintLabel htmlFor="data-symbol" hint={INFO_HINTS.data.symbol}>
-                标的
+                {tl({ zh: "标的", en: "Symbol" })}
               </HintLabel>
               <input
                 id="data-symbol"
@@ -331,7 +357,7 @@ export default function Data() {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <HintLabel htmlFor="data-fetch-start" hint={INFO_HINTS.data.dateRange}>
-                  开始
+                  {tl({ zh: "开始", en: "Start" })}
                 </HintLabel>
                 <input
                   id="data-fetch-start"
@@ -343,7 +369,7 @@ export default function Data() {
               </div>
               <div>
                 <HintLabel htmlFor="data-fetch-end" hint={INFO_HINTS.data.dateRange}>
-                  结束
+                  {tl({ zh: "结束", en: "End" })}
                 </HintLabel>
                 <input
                   id="data-fetch-end"
@@ -356,7 +382,7 @@ export default function Data() {
             </div>
             <div>
               <label htmlFor="data-fetch-source" className="block text-sm font-medium text-foreground mb-1">
-                数据源
+                {tl({ zh: "数据源", en: "Data provider" })}
               </label>
               <select
                 id="data-fetch-source"
@@ -364,8 +390,8 @@ export default function Data() {
                 onChange={(e) => setFetchSource(e.target.value)}
                 className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               >
-                <option value="">默认 ({defaultProvider})</option>
-                <option value="tushare">tushare（A股股票）</option>
+                <option value="">{tl({ zh: `默认 (${defaultProvider})`, en: `Default (${defaultProvider})` })}</option>
+                <option value="tushare">{tl({ zh: "tushare（A股股票）", en: "tushare (A-share stocks)" })}</option>
                 <option value="akshare">akshare</option>
                 <option value="yfinance">yfinance</option>
               </select>
@@ -382,17 +408,22 @@ export default function Data() {
               disabled={fetchOne.isPending}
               className="w-full bg-primary text-primary-foreground rounded-md py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
             >
-              {fetchOne.isPending ? "拉取中..." : "拉取"}
+              {fetchOne.isPending ? tl({ zh: "拉取中...", en: "Fetching..." }) : tl({ zh: "拉取", en: "Fetch" })}
             </button>
             {fetchOne.data && (
               <p className="text-sm text-success">
-                已获取 {fetchOne.data.bar_count} 根日线（来源 {fetchOne.data.source ?? "未记录"}
-                {fetchOne.data.fallback_used
-                  ? `，主源失败，已切换 ${fetchOne.data.fallback_source}`
-                  : ""}；停复牌事件新增 {fetchOne.data.lifecycle_events}
-                {fetchOne.data.lifecycle_sync_failed
-                  ? `，事件同步失败（${fetchOne.data.lifecycle_sync_error ?? "未知错误"}）`
-                  : ""}）
+                {tl({
+                  zh: `已获取 ${fetchOne.data.bar_count} 根日线（来源 ${fetchOne.data.source ?? "未记录"}${
+                    fetchOne.data.fallback_used ? `，主源失败，已切换 ${fetchOne.data.fallback_source}` : ""
+                  }；停复牌事件新增 ${fetchOne.data.lifecycle_events}${
+                    fetchOne.data.lifecycle_sync_failed ? `，事件同步失败（${fetchOne.data.lifecycle_sync_error ?? "未知错误"}）` : ""
+                  }）`,
+                  en: `Fetched ${fetchOne.data.bar_count} daily bars (source ${fetchOne.data.source ?? "not recorded"}${
+                    fetchOne.data.fallback_used ? `, primary source failed, switched to ${fetchOne.data.fallback_source}` : ""
+                  }; ${fetchOne.data.lifecycle_events} new halt/resume events${
+                    fetchOne.data.lifecycle_sync_failed ? `, event sync failed (${fetchOne.data.lifecycle_sync_error ?? "unknown error"})` : ""
+                  })`,
+                })}
               </p>
             )}
             {fetchOne.error && (
@@ -407,13 +438,13 @@ export default function Data() {
       {/* Bulk Download */}
       <div className="rounded-lg border border-border bg-card p-5">
         <h2 className="mb-4 flex items-center gap-1 text-lg font-semibold">
-          批量拉取
+          {tl({ zh: "批量拉取", en: "Bulk Download" })}
           <InfoHint content={INFO_HINTS.data.bulkDownload} />
         </h2>
         <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
           <div>
             <HintLabel htmlFor="data-bulk-market" hint={INFO_HINTS.data.market}>
-              市场
+              {tl({ zh: "市场", en: "Market" })}
             </HintLabel>
             <select
               id="data-bulk-market"
@@ -422,9 +453,9 @@ export default function Data() {
               disabled={isDownloading}
               className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             >
-              <option value="a_share">A股</option>
-              <option value="hk">港股</option>
-              <option value="us">美股</option>
+              <option value="a_share">{tl({ zh: "A股", en: "A-shares" })}</option>
+              <option value="hk">{tl({ zh: "港股", en: "HK stocks" })}</option>
+              <option value="us">{tl({ zh: "美股", en: "US stocks" })}</option>
             </select>
           </div>
           <div>
@@ -432,7 +463,7 @@ export default function Data() {
               htmlFor="data-bulk-type"
               hint={INFO_HINTS.data.instrumentType}
             >
-              类型
+              {tl({ zh: "类型", en: "Type" })}
             </HintLabel>
             <select
               id="data-bulk-type"
@@ -441,10 +472,10 @@ export default function Data() {
               disabled={isDownloading}
               className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             >
-              <option value="" disabled={tushareBulk}>全部</option>
-              <option value="stock">股票</option>
+              <option value="" disabled={tushareBulk}>{tl({ zh: "全部", en: "All" })}</option>
+              <option value="stock">{tl({ zh: "股票", en: "Stocks" })}</option>
               <option value="etf" disabled={tushareBulk}>ETF</option>
-              <option value="index" disabled={tushareBulk}>指数</option>
+              <option value="index" disabled={tushareBulk}>{tl({ zh: "指数", en: "Index" })}</option>
             </select>
           </div>
           <div>
@@ -452,7 +483,7 @@ export default function Data() {
               htmlFor="data-bulk-start"
               hint={INFO_HINTS.data.bulkStartDate}
             >
-              起始日期
+              {tl({ zh: "起始日期", en: "Start date" })}
             </HintLabel>
             <input
               id="data-bulk-start"
@@ -468,7 +499,7 @@ export default function Data() {
               htmlFor="data-bulk-source"
               hint={INFO_HINTS.data.bulkSource}
             >
-              数据源
+              {tl({ zh: "数据源", en: "Data provider" })}
             </HintLabel>
             <select
               id="data-bulk-source"
@@ -483,15 +514,15 @@ export default function Data() {
               disabled={isDownloading}
               className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             >
-              <option value="">默认 ({defaultProvider})</option>
-              <option value="tushare">tushare（A股股票）</option>
+              <option value="">{tl({ zh: `默认 (${defaultProvider})`, en: `Default (${defaultProvider})` })}</option>
+              <option value="tushare">{tl({ zh: "tushare（A股股票）", en: "tushare (A-share stocks)" })}</option>
               <option value="akshare">akshare</option>
               <option value="yfinance">yfinance</option>
             </select>
           </div>
           <div>
             <label htmlFor="data-bulk-board" className="mb-1 block text-sm text-muted-foreground">
-              上市板块
+              {tl({ zh: "上市板块", en: "Listing board" })}
             </label>
             <select
               id="data-bulk-board"
@@ -500,12 +531,12 @@ export default function Data() {
               disabled={isDownloading || dlMarket !== "a_share" || dlType !== "stock"}
               className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             >
-              <option value="">全部板块</option>
-              <option value="sse_main">沪市主板</option>
-              <option value="szse_main">深市主板</option>
-              <option value="chinext">创业板</option>
-              <option value="star">科创板</option>
-              <option value="bse">北交所</option>
+              <option value="">{tl({ zh: "全部板块", en: "All boards" })}</option>
+              <option value="sse_main">{tl({ zh: "沪市主板", en: "SSE Main Board" })}</option>
+              <option value="szse_main">{tl({ zh: "深市主板", en: "SZSE Main Board" })}</option>
+              <option value="chinext">{tl({ zh: "创业板", en: "ChiNext" })}</option>
+              <option value="star">{tl({ zh: "科创板", en: "STAR Market" })}</option>
+              <option value="bse">{tl({ zh: "北交所", en: "BSE" })}</option>
               <option value="cdr">CDR</option>
             </select>
           </div>
@@ -517,15 +548,21 @@ export default function Data() {
               disabled={isDownloading || startDownload.isPending}
               className="h-10 w-full rounded bg-primary text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
-              {isDownloading ? "拉取中..." : "开始批量拉取"}
+              {isDownloading ? tl({ zh: "拉取中...", en: "Downloading..." }) : tl({ zh: "开始批量拉取", en: "Start bulk download" })}
             </button>
           </div>
         </div>
 
         <p className="mb-4 text-sm text-muted-foreground">
           {tushareBulk
-            ? "Tushare 任务只拉取 A 股股票，并保持缓存为单一来源；失败标的可重跑，不会自动换源。"
-            : "ETF 与其他资产请单独拉取。发布时可与 Tushare 股票缓存组合为多资产混合来源数据集。"}
+            ? tl({
+                zh: "Tushare 任务只拉取 A 股股票，并保持缓存为单一来源；失败标的可重跑，不会自动换源。",
+                en: "Tushare jobs fetch A-share stocks only and keep the cache single-source; failed symbols can be re-run and never switch sources automatically.",
+              })
+            : tl({
+                zh: "ETF 与其他资产请单独拉取。发布时可与 Tushare 股票缓存组合为多资产混合来源数据集。",
+                en: "Fetch ETFs and other asset types separately. At publish time they can be combined with the Tushare stock cache into a multi-asset mixed-source dataset.",
+              })}
         </p>
 
         {tushareBulk && (
@@ -535,9 +572,12 @@ export default function Data() {
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <h3 className="text-sm font-semibold">Tushare 请求预算</h3>
+                <h3 className="text-sm font-semibold">{tl({ zh: "Tushare 请求预算", en: "Tushare Request Budget" })}</h3>
                 <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-                  每次 daily、adj_factor、停复牌请求及重试都会计入本地保护预算。每日上限按北京时间每天 00:00 自动重置，100,000 次是单日额度，不是累计总额度。这里显示的是本应用配置和本地用量，不是 Tushare 账户后台的实时权限。
+                  {tl({
+                    zh: "每次 daily、adj_factor、停复牌请求及重试都会计入本地保护预算。每日上限按北京时间每天 00:00 自动重置，100,000 次是单日额度，不是累计总额度。这里显示的是本应用配置和本地用量，不是 Tushare 账户后台的实时权限。",
+                    en: "Every daily, adj_factor and halt/resume request, including retries, counts against the local protection budget. The daily limit resets automatically at 00:00 Beijing time each day; 100,000 calls is a per-day quota, not a cumulative allowance. What is shown here is this app's configuration and local usage, not the live entitlement of your Tushare account console.",
+                  })}
                 </p>
               </div>
               <span className="rounded bg-primary/15 px-2 py-1 text-xs font-medium text-primary">
@@ -545,33 +585,33 @@ export default function Data() {
               </span>
             </div>
             {tushareQuotaLoading && !tushareQuota ? (
-              <p className="mt-3 text-sm text-muted-foreground">正在读取今日预算…</p>
+              <p className="mt-3 text-sm text-muted-foreground">{tl({ zh: "正在读取今日预算…", en: "Reading today's budget…" })}</p>
             ) : tushareQuota ? (
               <>
                 <div className="mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
                   <div>
-                    <span className="text-muted-foreground">统计日期（北京时间）</span>
+                    <span className="text-muted-foreground">{tl({ zh: "统计日期（北京时间）", en: "Stats date (Beijing time)" })}</span>
                     <p className="mt-1 font-medium tabular-nums">{tushareQuota.date}</p>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">今日已用</span>
+                    <span className="text-muted-foreground">{tl({ zh: "今日已用", en: "Used today" })}</span>
                     <p className="mt-1 font-medium tabular-nums">
-                      {tushareQuota.used.toLocaleString()} 次
+                      {tl({ zh: `${tushareQuota.used.toLocaleString()} 次`, en: `${tushareQuota.used.toLocaleString()} calls` })}
                     </p>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">每日上限（00:00刷新）</span>
+                    <span className="text-muted-foreground">{tl({ zh: "每日上限（00:00刷新）", en: "Daily limit (resets at 00:00)" })}</span>
                     <p className="mt-1 font-medium tabular-nums">
-                      {tushareQuota.daily_limit.toLocaleString()} 次
+                      {tl({ zh: `${tushareQuota.daily_limit.toLocaleString()} 次`, en: `${tushareQuota.daily_limit.toLocaleString()} calls` })}
                     </p>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">剩余预算</span>
+                    <span className="text-muted-foreground">{tl({ zh: "剩余预算", en: "Remaining budget" })}</span>
                     <p className={cn(
                       "mt-1 font-medium tabular-nums",
                       tushareQuota.remaining === 0 ? "text-destructive" : "text-success",
                     )}>
-                      {tushareQuota.remaining.toLocaleString()} 次
+                      {tl({ zh: `${tushareQuota.remaining.toLocaleString()} 次`, en: `${tushareQuota.remaining.toLocaleString()} calls` })}
                     </p>
                   </div>
                 </div>
@@ -586,12 +626,17 @@ export default function Data() {
                 </div>
                 {tushareQuotaPercent >= 75 && (
                   <p className="mt-2 text-xs text-warning">
-                    今日本地预算已使用 {tushareQuotaPercent.toFixed(1)}%，继续批量拉取可能提前触发保护阈值。
+                    {tl({
+                      zh: `今日本地预算已使用 ${tushareQuotaPercent.toFixed(1)}%，继续批量拉取可能提前触发保护阈值。`,
+                      en: `Today's local budget is ${tushareQuotaPercent.toFixed(1)}% used; continuing bulk downloads may trigger the protection threshold early.`,
+                    })}
                   </p>
                 )}
               </>
             ) : (
-              <p className="mt-3 text-sm text-destructive">预算读取失败，请检查 API 服务和配置文件。</p>
+              <p className="mt-3 text-sm text-destructive">
+                {tl({ zh: "预算读取失败，请检查 API 服务和配置文件。", en: "Failed to read the budget; check the API service and configuration file." })}
+              </p>
             )}
           </div>
         )}
@@ -600,13 +645,13 @@ export default function Data() {
         {isDownloading && bulkJob && (
           <div className="mt-4" aria-live="polite">
             <div className="flex justify-between text-sm text-muted-foreground mb-1">
-              <span>进度: {bulkDone} / {bulkTotal}</span>
+              <span>{tl({ zh: `进度: ${bulkDone} / ${bulkTotal}`, en: `Progress: ${bulkDone} / ${bulkTotal}` })}</span>
               <span>{bulkTotal > 0 ? `${(bulkDone * 100 / bulkTotal).toFixed(1)}%` : ""}</span>
             </div>
             <div
               className="w-full bg-muted rounded-full h-3 overflow-hidden"
               role="progressbar"
-              aria-label="批量行情拉取进度"
+              aria-label={tl({ zh: "批量行情拉取进度", en: "Bulk market data download progress" })}
               aria-valuemin={0}
               aria-valuemax={bulkTotal}
               aria-valuenow={bulkDone}
@@ -620,8 +665,8 @@ export default function Data() {
             </div>
             {startedAtMs > 0 && bulkDone > 0 && (
               <div className="mt-1 flex justify-between text-xs text-muted-foreground tabular-nums">
-                <span>速度: {bulkSpeed.toFixed(1)} 标的/分</span>
-                <span>预计剩余: {formatDuration(bulkEtaSec)}</span>
+                <span>{tl({ zh: `速度: ${bulkSpeed.toFixed(1)} 标的/分`, en: `Speed: ${bulkSpeed.toFixed(1)} symbols/min` })}</span>
+                <span>{tl({ zh: `预计剩余: ${formatDuration(bulkEtaSec, lang)}`, en: `ETA: ${formatDuration(bulkEtaSec, lang)}` })}</span>
               </div>
             )}
             {phaseLabel && (
@@ -630,7 +675,10 @@ export default function Data() {
               </p>
             )}
             <p className="mt-1 text-xs text-muted-foreground">
-              统一任务队列已合并逐标的日志/质量报告(#144),完成后再检查缓存质量查看明细。
+              {tl({
+                zh: "统一任务队列已合并逐标的日志/质量报告(#144),完成后再检查缓存质量查看明细。",
+                en: "The unified job queue merges per-symbol logs/quality reports (#144); after completion, run a cache quality check to see the details.",
+              })}
             </p>
           </div>
         )}
@@ -638,12 +686,13 @@ export default function Data() {
         {/* Download result */}
         {bulkJob && !isJobRunning(bulkJob) && bulkJob.status === "succeeded" && (
           <p className="mt-3 text-sm text-success">
-            拉取完成: {bulkDone} / {bulkTotal}。
+            {tl({ zh: `拉取完成: ${bulkDone} / ${bulkTotal}。`, en: `Download completed: ${bulkDone} / ${bulkTotal}.` })}
           </p>
         )}
         {bulkJob && !isJobRunning(bulkJob) && bulkJob.status !== "succeeded" && (
           <p className="mt-3 text-sm text-destructive">
-            错误: {bulkJob.error_summary ?? bulkJob.status}
+            {tl({ zh: "错误: ", en: "Error: " })}
+            {bulkJob.error_summary ?? bulkJob.status}
           </p>
         )}
         {startDownload.error && (
@@ -657,25 +706,25 @@ export default function Data() {
       <div className="rounded-lg border border-border bg-card">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3">
           <h2 className="flex items-center gap-1 text-lg font-semibold">
-            标的列表 ({listedInstrumentTotal})
+            {tl({ zh: `标的列表 (${listedInstrumentTotal})`, en: `Instruments (${listedInstrumentTotal})` })}
             <InfoHint content={INFO_HINTS.data.instrumentList} />
           </h2>
           <div className="flex flex-wrap items-center gap-3">
             <div className="space-y-1">
               <label htmlFor="data-instrument-search" className="text-xs text-muted-foreground">
-                搜索代码/名称
+                {tl({ zh: "搜索代码/名称", en: "Search code/name" })}
               </label>
               <input
                 id="data-instrument-search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="如 510300"
+                placeholder={tl({ zh: "如 510300", en: "e.g. 510300" })}
                 className="w-40 rounded-md border border-input bg-card px-3 py-1 text-sm text-foreground placeholder:text-muted-foreground"
               />
             </div>
             <div className="space-y-1">
               <label htmlFor="data-instrument-market" className="text-xs text-muted-foreground">
-                市场
+                {tl({ zh: "市场", en: "Market" })}
               </label>
               <select
                 id="data-instrument-market"
@@ -683,15 +732,15 @@ export default function Data() {
                 onChange={(e) => setMarketFilter(e.target.value)}
                 className="rounded-md border border-input bg-card px-2 py-1 text-sm text-foreground"
               >
-                <option value="">全部市场</option>
-                <option value="a_share">A股</option>
-                <option value="hk">港股</option>
-                <option value="us">美股</option>
+                <option value="">{tl({ zh: "全部市场", en: "All markets" })}</option>
+                <option value="a_share">{tl({ zh: "A股", en: "A-shares" })}</option>
+                <option value="hk">{tl({ zh: "港股", en: "HK stocks" })}</option>
+                <option value="us">{tl({ zh: "美股", en: "US stocks" })}</option>
               </select>
             </div>
             <div className="space-y-1">
               <label htmlFor="data-instrument-type" className="text-xs text-muted-foreground">
-                类型
+                {tl({ zh: "类型", en: "Type" })}
               </label>
               <select
                 id="data-instrument-type"
@@ -699,8 +748,8 @@ export default function Data() {
                 onChange={(e) => setTypeFilter(e.target.value)}
                 className="rounded-md border border-input bg-card px-2 py-1 text-sm text-foreground"
               >
-                <option value="">全部类型</option>
-                <option value="stock">股票</option>
+                <option value="">{tl({ zh: "全部类型", en: "All types" })}</option>
+                <option value="stock">{tl({ zh: "股票", en: "Stocks" })}</option>
                 <option value="etf">ETF</option>
               </select>
             </div>
@@ -710,12 +759,12 @@ export default function Data() {
           <table className="w-full text-sm">
             <thead className="bg-background text-muted-foreground">
               <tr>
-                <th className="px-4 py-2 text-left">代码</th>
-                <th className="px-4 py-2 text-left">名称</th>
-                <th className="px-4 py-2 text-left">市场</th>
-                <th className="px-4 py-2 text-left">类型</th>
-                <th className="px-4 py-2 text-left">交易所</th>
-                <th className="px-4 py-2 text-right">操作</th>
+                <th className="px-4 py-2 text-left">{tl({ zh: "代码", en: "Code" })}</th>
+                <th className="px-4 py-2 text-left">{tl({ zh: "名称", en: "Name" })}</th>
+                <th className="px-4 py-2 text-left">{tl({ zh: "市场", en: "Market" })}</th>
+                <th className="px-4 py-2 text-left">{tl({ zh: "类型", en: "Type" })}</th>
+                <th className="px-4 py-2 text-left">{tl({ zh: "交易所", en: "Exchange" })}</th>
+                <th className="px-4 py-2 text-right">{tl({ zh: "操作", en: "Actions" })}</th>
               </tr>
             </thead>
             <tbody>
@@ -734,9 +783,9 @@ export default function Data() {
                         type="button"
                         onClick={() => setFetchSymbol(ins.code)}
                         className="rounded-md border border-input px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
-                        aria-label={`选择 ${ins.code} 到单标的拉取`}
+                        aria-label={tl({ zh: `选择 ${ins.code} 到单标的拉取`, en: `Select ${ins.code} for single fetch` })}
                       >
-                        选择
+                        {tl({ zh: "选择", en: "Select" })}
                       </button>
                     </td>
                   </tr>
@@ -747,14 +796,14 @@ export default function Data() {
         {pagedInstruments.length === 0 && (
           <div className="p-8 text-center text-muted-foreground/70">
             {totalInstruments === 0
-              ? '标的池为空 — 点击上方"同步标的池"自动发现'
-              : "没有匹配当前搜索或筛选条件的活跃标的"}
+              ? tl({ zh: '标的池为空 — 点击上方"同步标的池"自动发现', en: 'Universe is empty — click "Sync universe" above to auto-discover' })
+              : tl({ zh: "没有匹配当前搜索或筛选条件的活跃标的", en: "No active instruments match the current search or filters" })}
           </div>
         )}
         {listedInstrumentTotal > PAGE_SIZE && (
           <div className="flex items-center justify-between border-t px-5 py-3 text-sm">
             <span className="text-muted-foreground">
-              第 {instPage}/{instTotalPages} 页 · 共 {listedInstrumentTotal} 条
+              {tl({ zh: `第 ${instPage}/${instTotalPages} 页 · 共 ${listedInstrumentTotal} 条`, en: `Page ${instPage}/${instTotalPages} · ${listedInstrumentTotal} total` })}
             </span>
             <div className="flex gap-2">
               <button
@@ -762,14 +811,14 @@ export default function Data() {
                 disabled={instPage <= 1}
                 className="rounded border border-input px-3 py-1 hover:bg-accent disabled:opacity-40"
               >
-                上一页
+                {tl({ zh: "上一页", en: "Previous" })}
               </button>
               <button
                 onClick={() => setInstPage((p) => Math.min(instTotalPages, p + 1))}
                 disabled={instPage >= instTotalPages}
                 className="rounded border border-input px-3 py-1 hover:bg-accent disabled:opacity-40"
               >
-                下一页
+                {tl({ zh: "下一页", en: "Next" })}
               </button>
             </div>
           </div>
@@ -780,7 +829,7 @@ export default function Data() {
       <div className="rounded-lg border border-border bg-card">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-3">
           <div className="flex items-center gap-1">
-            <h2 className="text-lg font-semibold">已缓存数据 ({status?.total ?? 0})</h2>
+            <h2 className="text-lg font-semibold">{tl({ zh: `已缓存数据 (${status?.total ?? 0})`, en: `Cached Data (${status?.total ?? 0})` })}</h2>
             <InfoHint content={INFO_HINTS.data.cachedData} />
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -788,18 +837,18 @@ export default function Data() {
               value={repairSource}
               onChange={(event) => setRepairSource(event.target.value as "akshare" | "yfinance" | "tushare")}
               className="rounded border border-input bg-card px-2 py-1.5 text-sm text-foreground"
-              aria-label="批量换源修复数据源"
+              aria-label={tl({ zh: "批量换源修复数据源", en: "Bulk source-switch repair provider" })}
             >
-              <option value="tushare">备用源: tushare（仅A股股票）</option>
-              <option value="akshare">备用源: akshare</option>
-              <option value="yfinance">备用源: yfinance</option>
+              <option value="tushare">{tl({ zh: "备用源: tushare（仅A股股票）", en: "Fallback: tushare (A-share stocks only)" })}</option>
+              <option value="akshare">{tl({ zh: "备用源: akshare", en: "Fallback: akshare" })}</option>
+              <option value="yfinance">{tl({ zh: "备用源: yfinance", en: "Fallback: yfinance" })}</option>
             </select>
             <button
               onClick={() => refetchQuality()}
               disabled={qualityFetching || repairQuality.isPending}
               className="rounded border border-input px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50"
             >
-              {qualityFetching ? "检查中..." : "检查全部缓存"}
+              {qualityFetching ? tl({ zh: "检查中...", en: "Checking..." }) : tl({ zh: "检查全部缓存", en: "Check all caches" })}
             </button>
             <button
               onClick={() => repairQuality.mutate()}
@@ -810,8 +859,11 @@ export default function Data() {
               className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
               {repairQuality.isPending
-                ? "批量修复中..."
-                : `批量换源修复 (${qualityReports?.filter((report) => !report.passed).length ?? 0})`}
+                ? tl({ zh: "批量修复中...", en: "Repairing..." })
+                : tl({
+                    zh: `批量换源修复 (${qualityReports?.filter((report) => !report.passed).length ?? 0})`,
+                    en: `Bulk source-switch repair (${qualityReports?.filter((report) => !report.passed).length ?? 0})`,
+                  })}
             </button>
           </div>
         </div>
@@ -824,17 +876,17 @@ export default function Data() {
           repairError={repairQuality.error as Error | null}
         />
         {!status || status.items.length === 0 ? (
-          <div className="p-8 text-center text-muted-foreground/70">缓存为空</div>
+          <div className="p-8 text-center text-muted-foreground/70">{tl({ zh: "缓存为空", en: "Cache is empty" })}</div>
         ) : (
           <div className="overflow-x-auto scrollbar-thin">
           <table className="w-full text-sm">
             <thead className="bg-background text-muted-foreground">
               <tr>
-                <th className="px-4 py-2 text-left">标的</th>
-                <th className="px-4 py-2 text-right">Bar 数</th>
-                <th className="px-4 py-2 text-left">范围</th>
-                <th className="px-4 py-2 text-left">来源</th>
-                <th className="px-4 py-2 text-right">最新收盘</th>
+                <th className="px-4 py-2 text-left">{tl({ zh: "标的", en: "Symbol" })}</th>
+                <th className="px-4 py-2 text-right">{tl({ zh: "Bar 数", en: "Bars" })}</th>
+                <th className="px-4 py-2 text-left">{tl({ zh: "范围", en: "Range" })}</th>
+                <th className="px-4 py-2 text-left">{tl({ zh: "来源", en: "Source" })}</th>
+                <th className="px-4 py-2 text-right">{tl({ zh: "最新收盘", en: "Last close" })}</th>
               </tr>
             </thead>
             <tbody>
@@ -845,7 +897,7 @@ export default function Data() {
                   <td className="px-4 py-2 text-muted-foreground">
                     {s.first_date ?? "—"} ~ {s.last_date ?? "—"}
                   </td>
-                  <td className="px-4 py-2 text-muted-foreground">{s.source ?? "未记录"}</td>
+                  <td className="px-4 py-2 text-muted-foreground">{s.source ?? tl({ zh: "未记录", en: "Not recorded" })}</td>
                   <td className="px-4 py-2 text-right font-mono">
                     {s.last_close ? Number(s.last_close).toFixed(2) : "—"}
                   </td>
@@ -858,7 +910,7 @@ export default function Data() {
         {cacheTotal > PAGE_SIZE && (
           <div className="flex items-center justify-between border-t px-5 py-3 text-sm">
             <span className="text-muted-foreground">
-              第 {cachePage}/{cacheTotalPages} 页 · 共 {cacheTotal} 条
+              {tl({ zh: `第 ${cachePage}/${cacheTotalPages} 页 · 共 ${cacheTotal} 条`, en: `Page ${cachePage}/${cacheTotalPages} · ${cacheTotal} total` })}
             </span>
             <div className="flex gap-2">
               <button
@@ -866,14 +918,14 @@ export default function Data() {
                 disabled={cachePage <= 1}
                 className="rounded border border-input px-3 py-1 hover:bg-accent disabled:opacity-40"
               >
-                上一页
+                {tl({ zh: "上一页", en: "Previous" })}
               </button>
               <button
                 onClick={() => setCachePage((p) => Math.min(cacheTotalPages, p + 1))}
                 disabled={cachePage >= cacheTotalPages}
                 className="rounded border border-input px-3 py-1 hover:bg-accent disabled:opacity-40"
               >
-                下一页
+                {tl({ zh: "下一页", en: "Next" })}
               </button>
             </div>
           </div>
@@ -898,15 +950,17 @@ function CacheQualitySummary({
   repairPending: boolean;
   repairError: Error | null;
 }) {
+  const { tl } = useT();
+
   if (!reports) {
     return (
       <div className="border-b px-5 py-3 text-sm text-muted-foreground">
-        点击“检查全部缓存”后显示存量数据质量结果。
+        {tl({ zh: "点击“检查全部缓存”后显示存量数据质量结果。", en: 'Run "Check all caches" to show quality results for the cached data.' })}
       </div>
     );
   }
   if (reports.length === 0) {
-    return <div className="border-b px-5 py-3 text-sm text-muted-foreground">无缓存数据。</div>;
+    return <div className="border-b px-5 py-3 text-sm text-muted-foreground">{tl({ zh: "无缓存数据。", en: "No cached data." })}</div>;
   }
 
   const failed = reports.filter((report) => !report.passed);
@@ -914,52 +968,60 @@ function CacheQualitySummary({
     <div className="border-b px-5 py-3">
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
         <span>
-          已检查 <strong>{reports.length}</strong> 个缓存标的
+          {tl({ zh: "已检查", en: "Checked" })} <strong>{reports.length}</strong> {tl({ zh: "个缓存标的", en: "cached symbols" })}
         </span>
-        <span className="text-success">通过 {reports.length - failed.length}</span>
+        <span className="text-success">{tl({ zh: `通过 ${reports.length - failed.length}`, en: `Passed ${reports.length - failed.length}` })}</span>
         <span className={failed.length ? "text-destructive" : "text-muted-foreground"}>
-          异常 {failed.length}
+          {tl({ zh: `异常 ${failed.length}`, en: `Failed ${failed.length}` })}
         </span>
         {failed.length > 0 && (
           <button onClick={onToggle} className="text-primary hover:underline">
-            {expanded ? "收起" : "展开"}异常详情
+            {expanded
+              ? tl({ zh: "收起异常详情", en: "Collapse failure details" })
+              : tl({ zh: "展开异常详情", en: "Expand failure details" })}
           </button>
         )}
       </div>
       {repairPending && (
         <p className="mt-2 text-sm text-muted-foreground">
-          批量修复任务已提交,等待队列调度…
+          {tl({ zh: "批量修复任务已提交,等待队列调度…", en: "Bulk repair job submitted, waiting for the queue…" })}
         </p>
       )}
       {repairJob && isJobRunning(repairJob) && (
         <p className="mt-2 text-sm text-muted-foreground">
-          批量修复进行中: {repairJob.progress_done} / {repairJob.progress_total}
-          {repairJob.phase ? ` · ${repairJob.phase}` : ""}
+          {tl({
+            zh: `批量修复进行中: ${repairJob.progress_done} / ${repairJob.progress_total}${repairJob.phase ? ` · ${repairJob.phase}` : ""}`,
+            en: `Bulk repair in progress: ${repairJob.progress_done} / ${repairJob.progress_total}${repairJob.phase ? ` · ${repairJob.phase}` : ""}`,
+          })}
         </p>
       )}
       {repairJob && !isJobRunning(repairJob) && repairJob.status === "succeeded" && (
         <p className="mt-2 text-sm text-success">
-          批量修复完成(逐标的报告已随 #144 降级,请重新检查缓存查看明细)。
+          {tl({
+            zh: "批量修复完成(逐标的报告已随 #144 降级,请重新检查缓存查看明细)。",
+            en: "Bulk repair completed (per-symbol reports were reduced in #144; re-check the cache to see the details).",
+          })}
         </p>
       )}
       {repairJob && !isJobRunning(repairJob) && repairJob.status !== "succeeded" && (
         <p className="mt-2 text-sm text-destructive">
-          批量修复失败: {repairJob.error_summary ?? repairJob.status}
+          {tl({ zh: "批量修复失败: ", en: "Bulk repair failed: " })}
+          {repairJob.error_summary ?? repairJob.status}
         </p>
       )}
       {repairError && (
-        <p className="mt-2 text-sm text-destructive">批量修复失败: {repairError.message}</p>
+        <p className="mt-2 text-sm text-destructive">{tl({ zh: "批量修复失败: ", en: "Bulk repair failed: " })}{repairError.message}</p>
       )}
       {expanded && failed.length > 0 && (
         <div className="mt-3 max-h-80 overflow-auto rounded border">
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-muted">
               <tr>
-                <th className="px-3 py-2 text-left">标的</th>
-                <th className="px-3 py-2 text-right">异常数</th>
-                <th className="px-3 py-2 text-right">重复</th>
-                <th className="px-3 py-2 text-left">数据源</th>
-                <th className="px-3 py-2 text-left">异常日期 / 原因</th>
+                <th className="px-3 py-2 text-left">{tl({ zh: "标的", en: "Symbol" })}</th>
+                <th className="px-3 py-2 text-right">{tl({ zh: "异常数", en: "Anomalies" })}</th>
+                <th className="px-3 py-2 text-right">{tl({ zh: "重复", en: "Duplicates" })}</th>
+                <th className="px-3 py-2 text-left">{tl({ zh: "数据源", en: "Data provider" })}</th>
+                <th className="px-3 py-2 text-left">{tl({ zh: "异常日期 / 原因", en: "Anomaly date / reason" })}</th>
               </tr>
             </thead>
             <tbody>
@@ -970,7 +1032,7 @@ function CacheQualitySummary({
                     {report.anomaly_count}
                   </td>
                   <td className="px-3 py-1.5 text-right">{report.duplicate_count || "-"}</td>
-                  <td className="px-3 py-1.5">{report.sources.join(",") || "未记录"}</td>
+                  <td className="px-3 py-1.5">{report.sources.join(",") || tl({ zh: "未记录", en: "Not recorded" })}</td>
                   <td className="px-3 py-1.5">
                     {report.anomalies
                       .slice(0, 3)

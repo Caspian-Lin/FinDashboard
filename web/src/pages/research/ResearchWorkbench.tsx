@@ -16,6 +16,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { timeAgo } from "@/lib/utils";
 import { opencodeGatewayApi } from "@/lib/opencode";
 import { buildWorkbenchUrl } from "@/lib/opencode-url";
+import { useLanguage, useT } from "@/i18n";
 
 /* ============================================================ */
 /* OpenCode 研究工作台(issue #111 / 重构 #121 / #157 / #160)      */
@@ -33,6 +34,8 @@ import { buildWorkbenchUrl } from "@/lib/opencode-url";
 //   - opencode_web_enabled=false(网关 503)时显示降级提示。
 
 export default function ResearchWorkbench() {
+  const { tl } = useT();
+  const { lang } = useLanguage();
   const [workbenchNonce, setWorkbenchNonce] = useState(0);
   // 首次使用引导(opencode web 项目列表在浏览器本地存储,首次打开为空)。
   const [guideDismissed, setGuideDismissed] = useState(
@@ -71,29 +74,26 @@ export default function ResearchWorkbench() {
   return (
     <div>
       <PageHeader
-        title="研究工作台"
-        description="OpenCode Web 研究交互层(不连实盘)"
+        title={tl({ zh: "研究工作台", en: "Research Workbench" })}
+        description={tl({ zh: "OpenCode Web 研究交互层(不连实盘)", en: "OpenCode Web research interaction layer (not connected to live trading)" })}
       />
 
       <div className="space-y-4">
         {/* 边界提示 */}
         <Alert>
           <ShieldCheck className="h-4 w-4" />
-          <AlertTitle>研究边界</AlertTitle>
+          <AlertTitle>{tl({ zh: "研究边界", en: "Research Boundary" })}</AlertTitle>
           <AlertDescription>
-            OpenCode Web 是研究交互层,OpenCode 自身管理会话/历史/恢复。
-            研究写操作(创建 ResearchRun/回测/模拟盘)由 agent 通过 MCP 自主执行。
-            工作台不连接实盘 broker/账户/订单/持仓。
+            {tl({ zh: "OpenCode Web 是研究交互层,OpenCode 自身管理会话/历史/恢复。研究写操作(创建 ResearchRun/回测/模拟盘)由 agent 通过 MCP 自主执行。工作台不连接实盘 broker/账户/订单/持仓。", en: "OpenCode Web is the research interaction layer; OpenCode itself manages sessions/history/recovery. Research write operations (creating ResearchRuns/backtests/simulations) are executed by the agent via MCP. The workbench does not connect to live trading broker/account/orders/positions." })}
           </AlertDescription>
         </Alert>
 
         {showWorkbenchDowngrade ? (
           <Alert variant="warning">
             <AlertTriangle className="h-4 w-4" />
-            <AlertTitle>OpenCode Web 网关未启用</AlertTitle>
+            <AlertTitle>{tl({ zh: "OpenCode Web 网关未启用", en: "OpenCode Web gateway not enabled" })}</AlertTitle>
             <AlertDescription>
-              网关返回 503,OpenCode Web 工作台不可用。请检查
-              opencode_web_enabled 配置与 Docker 容器状态。
+              {tl({ zh: "网关返回 503,OpenCode Web 工作台不可用。请检查 opencode_web_enabled 配置与 Docker 容器状态。", en: "The gateway returned 503; the OpenCode Web workbench is unavailable. Check the opencode_web_enabled setting and the Docker container status." })}
             </AlertDescription>
           </Alert>
         ) : (
@@ -125,19 +125,21 @@ export default function ResearchWorkbench() {
                 <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                     <span>
-                      实例状态:
+                      {tl({ zh: "实例状态:", en: "Instance status:" })}
                       <span className="ml-1 font-medium text-foreground">
-                        {status?.running ? "运行中" : "未运行"}
+                        {status?.running
+                          ? tl({ zh: "运行中", en: "Running" })
+                          : tl({ zh: "未运行", en: "Not running" })}
                       </span>
                     </span>
                     <span>
-                      健康探测:
+                      {tl({ zh: "健康探测:", en: "Health check:" })}
                       <span className="ml-1 font-medium text-foreground">
                         {status?.healthy == null
-                          ? "未知"
+                          ? tl({ zh: "未知", en: "Unknown" })
                           : status.healthy
-                            ? "健康"
-                            : "异常"}
+                            ? tl({ zh: "健康", en: "Healthy" })
+                            : tl({ zh: "异常", en: "Unhealthy" })}
                       </span>
                     </span>
                     {/* #157:内嵌 FinBoard MCP 状态(agent 的工具通道) */}
@@ -150,17 +152,17 @@ export default function ResearchWorkbench() {
                       />
                       <span className="font-medium text-foreground">
                         {status?.mcp == null
-                          ? "未知"
+                          ? tl({ zh: "未知", en: "Unknown" })
                           : status.mcp.embedded_running
-                            ? `内嵌运行中(${status.mcp.host ?? "?"}:${status.mcp.port ?? "?"})`
+                            ? tl({ zh: `内嵌运行中(${status.mcp.host ?? "?"}:${status.mcp.port ?? "?"})`, en: `Embedded running (${status.mcp.host ?? "?"}:${status.mcp.port ?? "?"})` })
                             : status.mcp.embedded_configured
-                              ? "已配置未运行(检查 MCP_AUTH_TOKEN)"
-                              : "未启用内嵌(独立进程模式)"}
+                              ? tl({ zh: "已配置未运行(检查 MCP_AUTH_TOKEN)", en: "Configured but not running (check MCP_AUTH_TOKEN)" })
+                              : tl({ zh: "未启用内嵌(独立进程模式)", en: "Embedded not enabled (standalone process mode)" })}
                       </span>
                     </span>
                     {status?.managed && status.container_id != null && (
                       <span>
-                        容器:
+                        {tl({ zh: "容器:", en: "Container:" })}
                         <span className="ml-1 font-mono text-foreground">
                           {status.container_id}
                         </span>
@@ -168,9 +170,9 @@ export default function ResearchWorkbench() {
                     )}
                     {status?.started_at && (
                       <span>
-                        启动:
+                        {tl({ zh: "启动:", en: "Started:" })}
                         <span className="ml-1 text-foreground">
-                          {timeAgo(status.started_at)}
+                          {timeAgo(status.started_at, lang)}
                         </span>
                       </span>
                     )}
@@ -183,7 +185,7 @@ export default function ResearchWorkbench() {
                       className="inline-flex items-center gap-1 text-primary hover:underline"
                     >
                       <ExternalLink className="h-3 w-3" />
-                      新窗口打开
+                      {tl({ zh: "新窗口打开", en: "Open in new window" })}
                     </a>
                   )}
                 </div>
@@ -194,8 +196,8 @@ export default function ResearchWorkbench() {
             {accessError ? (
               <Card className="flex min-h-[520px] items-center justify-center">
                 <ErrorState
-                  title="工作台访问信息获取失败"
-                  message={String(accessErr?.message ?? "访问信息签发失败")}
+                  title={tl({ zh: "工作台访问信息获取失败", en: "Failed to get workbench access info" })}
+                  message={String(accessErr?.message ?? tl({ zh: "访问信息签发失败", en: "Failed to issue access info" }))}
                 />
               </Card>
             ) : !workbenchUrl ? (
@@ -208,17 +210,17 @@ export default function ResearchWorkbench() {
                 <CardHeader className="flex-row items-center justify-between space-y-0 border-b pb-3">
                   <CardTitle className="flex items-center gap-2 truncate text-sm">
                     <StatusDot status={status?.healthy ? "online" : "warning"} />
-                    OpenCode Web 研究工作台
+                    {tl({ zh: "OpenCode Web 研究工作台", en: "OpenCode Web Research Workbench" })}
                   </CardTitle>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={() => setWorkbenchNonce((n) => n + 1)}
-                    title="刷新工作台"
+                    title={tl({ zh: "刷新工作台", en: "Refresh workbench" })}
                     data-testid="wb-refresh"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
-                    刷新
+                    {tl({ zh: "刷新", en: "Refresh" })}
                   </Button>
                 </CardHeader>
                   {/* 首次使用引导:opencode web 项目列表在浏览器本地(IndexedDB),
@@ -227,14 +229,13 @@ export default function ResearchWorkbench() {
                     <Alert className="items-start">
                       <Sparkles className="mt-0.5 h-4 w-4" />
                       <div className="flex-1 space-y-1">
-                        <AlertTitle>首次使用:打开历史会话</AlertTitle>
+                        <AlertTitle>{tl({ zh: "首次使用:打开历史会话", en: "First use: open past sessions" })}</AlertTitle>
                         <AlertDescription>
-                          OpenCode Web 的项目列表保存在浏览器本地,首次打开(iframe
-                          或新窗口各自独立)会显示空白。点击左侧「添加项目」→
-                          搜索框输入 <code className="rounded bg-muted px-1 font-mono text-xs">/</code>
-                          → 点击 <code className="rounded bg-muted px-1 font-mono text-xs">~</code>
-                          (主目录,即容器内 /workspace)即可恢复历史会话;打开一次后
-                          该浏览器会自动记住。
+                          {tl({ zh: "OpenCode Web 的项目列表保存在浏览器本地,首次打开(iframe 或新窗口各自独立)会显示空白。点击左侧「添加项目」→ 搜索框输入 ", en: "The OpenCode Web project list is stored in your browser; the first open (iframe or new window, each independent) appears blank. Click “Add Project” on the left → enter " })}
+                          <code className="rounded bg-muted px-1 font-mono text-xs">/</code>
+                          {tl({ zh: " → 点击 ", en: " → click " })}
+                          <code className="rounded bg-muted px-1 font-mono text-xs">~</code>
+                          {tl({ zh: "(主目录,即容器内 /workspace)即可恢复历史会话;打开一次后该浏览器会自动记住。", en: " (home directory, i.e. /workspace inside the container) to restore past sessions; once opened, this browser remembers it automatically." })}
                         </AlertDescription>
                       </div>
                       <Button
@@ -245,7 +246,7 @@ export default function ResearchWorkbench() {
                           setGuideDismissed(true);
                         }}
                       >
-                        我知道了
+                        {tl({ zh: "我知道了", en: "Got it" })}
                       </Button>
                     </Alert>
                   )}
@@ -255,7 +256,7 @@ export default function ResearchWorkbench() {
                     <iframe
                       key={workbenchNonce}
                       src={workbenchUrl}
-                      title="OpenCode Web 研究工作台"
+                      title={tl({ zh: "OpenCode Web 研究工作台", en: "OpenCode Web Research Workbench" })}
                       className="absolute inset-0 h-full w-full border-0"
                       sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                     />

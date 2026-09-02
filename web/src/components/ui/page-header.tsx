@@ -1,5 +1,6 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 
 interface PageHeaderProps {
   title: string;
@@ -10,10 +11,11 @@ interface PageHeaderProps {
 }
 
 export function PageHeader({ title, description, breadcrumbs, actions, className }: PageHeaderProps) {
+  const { tl } = useT();
   return (
     <div className={cn("mb-6", className)}>
       {breadcrumbs && breadcrumbs.length > 0 && (
-        <nav aria-label="面包屑" className="mb-2">
+        <nav aria-label={tl({ zh: "面包屑", en: "Breadcrumb" })} className="mb-2">
           <ol className="flex items-center gap-1.5 text-xs text-muted-foreground">
             {breadcrumbs.map((crumb, i) => (
               <li key={i} className="flex items-center gap-1.5">

@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react";
+import type { LocalizedText } from "@/i18n";
 import {
   Home,
   Database,
@@ -23,51 +24,51 @@ import {
 
 export interface NavItem {
   to: string;
-  label: string;
+  label: LocalizedText;
   icon: LucideIcon;
   end?: boolean;
 }
 
 export interface NavGroup {
-  label: string;
+  label: LocalizedText;
   items: NavItem[];
   restricted?: boolean;
 }
 
 export const navGroups: NavGroup[] = [
   {
-    label: "研究",
+    label: { zh: "研究", en: "Research" },
     items: [
-      { to: "/research", label: "研究首页", icon: Home, end: true },
-      { to: "/research/data", label: "数据与标的", icon: Database },
-      { to: "/research/factors", label: "因子实验室", icon: Atom },
-      { to: "/research/strategy", label: "策略 Studio", icon: SlidersHorizontal },
-      { to: "/research/experiments", label: "实验与 OOS", icon: TestTube },
-      { to: "/research/runs", label: "研究运行", icon: GitBranch },
-      { to: "/research/portfolio", label: "组合与风险", icon: Scale },
-      { to: "/research/simulation", label: "模拟盘", icon: PlayCircle },
-      { to: "/research/workbench", label: "研究工作台", icon: MonitorSmartphone },
-      { to: "/research/reports", label: "研究报告", icon: FileText },
+      { to: "/research", label: { zh: "研究首页", en: "Research Home" }, icon: Home, end: true },
+      { to: "/research/data", label: { zh: "数据与标的", en: "Data & Instruments" }, icon: Database },
+      { to: "/research/factors", label: { zh: "因子实验室", en: "Factor Lab" }, icon: Atom },
+      { to: "/research/strategy", label: { zh: "策略 Studio", en: "Strategy Studio" }, icon: SlidersHorizontal },
+      { to: "/research/experiments", label: { zh: "实验与 OOS", en: "Experiments & OOS" }, icon: TestTube },
+      { to: "/research/runs", label: { zh: "研究运行", en: "Research Runs" }, icon: GitBranch },
+      { to: "/research/portfolio", label: { zh: "组合与风险", en: "Portfolio & Risk" }, icon: Scale },
+      { to: "/research/simulation", label: { zh: "模拟盘", en: "Simulation" }, icon: PlayCircle },
+      { to: "/research/workbench", label: { zh: "研究工作台", en: "Research Workbench" }, icon: MonitorSmartphone },
+      { to: "/research/reports", label: { zh: "研究报告", en: "Research Reports" }, icon: FileText },
     ],
   },
   {
-    label: "实盘交易",
+    label: { zh: "实盘交易", en: "Live Trading" },
     restricted: true,
     items: [
-      { to: "/", label: "仪表盘", icon: LayoutDashboard, end: true },
-      { to: "/positions", label: "持仓", icon: CandlestickChart },
-      { to: "/orders", label: "订单", icon: ListOrdered },
-      { to: "/fills", label: "成交", icon: ScrollText },
-      { to: "/control", label: "控制台", icon: ShieldAlert },
+      { to: "/", label: { zh: "仪表盘", en: "Dashboard" }, icon: LayoutDashboard, end: true },
+      { to: "/positions", label: { zh: "持仓", en: "Positions" }, icon: CandlestickChart },
+      { to: "/orders", label: { zh: "订单", en: "Orders" }, icon: ListOrdered },
+      { to: "/fills", label: { zh: "成交", en: "Fills" }, icon: ScrollText },
+      { to: "/control", label: { zh: "控制台", en: "Control Console" }, icon: ShieldAlert },
     ],
   },
   {
-    label: "工具",
+    label: { zh: "工具", en: "Tools" },
     items: [
-      { to: "/backtest", label: "回测", icon: TrendingUp },
-      { to: "/strategies", label: "策略预设", icon: Bookmark },
-      { to: "/jobs", label: "任务中心", icon: ListTodo },
-      { to: "/settings", label: "设置", icon: Settings },
+      { to: "/backtest", label: { zh: "回测", en: "Backtest" }, icon: TrendingUp },
+      { to: "/strategies", label: { zh: "策略预设", en: "Strategy Presets" }, icon: Bookmark },
+      { to: "/jobs", label: { zh: "任务中心", en: "Jobs" }, icon: ListTodo },
+      { to: "/settings", label: { zh: "设置", en: "Settings" }, icon: Settings },
     ],
   },
 ];
