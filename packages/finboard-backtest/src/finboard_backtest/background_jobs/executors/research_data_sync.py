@@ -41,21 +41,19 @@ from finboard_backtest.background_jobs.contracts import (
     ProgressCallback,
 )
 from finboard_backtest.background_jobs.executors._runtime import code_version
+from finboard_backtest.background_jobs.payload_contracts import (
+    RESEARCH_DATA_SYNC_DATASETS,
+    PayloadContractError,
+    validate_job_payload,
+)
 from finboard_data.research import ResearchDataProvider
 
 if TYPE_CHECKING:
     pass
 
-#: 支持的数据集白名单(对应 ResearchDataset 枚举的摄取入口;#251 加 name_changes)。
-SUPPORTED_DATASETS: frozenset[str] = frozenset(
-    {
-        "profiles",
-        "name_changes",
-        "daily_metrics",
-        "financial_indicators",
-        "industry_memberships",
-    }
-)
+#: 支持的数据集白名单(#260 起唯一事实来源在 payload_contracts;此处 re-export
+#: 保持既有导入路径,导入期断言防漂移)。默认缺省 = 全部五类。
+SUPPORTED_DATASETS: frozenset[str] = RESEARCH_DATA_SYNC_DATASETS
 _DEFAULT_DATASETS: tuple[str, ...] = (
     "profiles",
     "name_changes",
@@ -63,6 +61,7 @@ _DEFAULT_DATASETS: tuple[str, ...] = (
     "financial_indicators",
     "industry_memberships",
 )
+assert set(_DEFAULT_DATASETS) == set(SUPPORTED_DATASETS)
 
 
 def _parse_date(value: object, key: str) -> date:
@@ -136,6 +135,17 @@ class ResearchDataSyncExecutor:
         progress: ProgressCallback,
     ) -> JobResult:
         payload = job.payload
+        # 入队期契约重放(#260,同 #255 执行端防线):覆盖旁路入队(直接写库 /
+        # 旧版本入队的存量行)。未知键(如 data_types)此前被静默忽略后按缺省
+        # 全数据集执行,这里 fail-visible 而非延续错误行为。
+        try:
+            validate_job_payload(job.kind, payload)
+        except PayloadContractError as exc:
+            raise ExecutorError(
+                code="invalid_payload",
+                summary=exc.summary,
+                retryable=False,
+            ) from exc
         raw_datasets = payload.get("datasets")
         if raw_datasets is None:
             datasets = _DEFAULT_DATASETS
@@ -271,6 +281,25 @@ class ResearchDataSyncExecutor:
                         expected_trade_date=day,
                     )
                     done += 1
+
+            # 静默 no-op 治理(#260):逐标的数据集在 symbol 池为空时整段循环
+            # 零迭代、任务仍以 succeeded 收场。入队期已在「缺 symbols 且缺
+            # profiles」时拒绝;这里是执行端兜底(profiles 返回空池 / symbols
+            # 全空字符串),在无标的迭代的段落前 fail-visible,不留「成功」假象。
+            _per_symbol_requested = sorted(
+                {"financial_indicators", "industry_memberships"} & set(datasets)
+            )
+            if _per_symbol_requested and not resolved_symbols:
+                raise ExecutorError(
+                    code="empty_symbol_pool",
+                    summary=(
+                        f"逐标的数据集 {_per_symbol_requested} 的 symbol 池解析为空"
+                        "(payload.symbols 未提供或为空,profiles 同步也未解析出任何"
+                        "标的);任务将零迭代结束 —— 请检查 symbols 输入或上游 "
+                        "profiles 数据后重新入队"
+                    ),
+                    retryable=False,
+                )
 
             if "financial_indicators" in datasets:
                 current_dataset = ResearchDataset.FINANCIAL_INDICATORS
