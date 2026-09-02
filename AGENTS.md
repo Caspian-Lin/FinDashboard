@@ -114,6 +114,50 @@ LLM（包括本 agent 自身）**不允许**：直接连接实盘账户、直接
 
 feat 分支只能通过 PR 合并进里程碑或 `dev`，禁止直接 push 合并。
 
+### 多 worktree 并行开发（多 agent，#289）
+
+主目录是第一个 agent 的常驻工作区；更多 agent 各用独立 git worktree，禁止共用
+工作目录、禁止在他人工作区 checkout / merge 对方分支、禁止 checkout 别的 worktree
+已持有的分支（git 本身会拒绝）。昂贵数据（`data_cache` ≈680MB / `data_releases`
+≈2.0GB）只存主目录一份，worktree 以 NTFS junction 共享，重新拉取不可接受。
+
+**一键创建（推荐，幂等可重跑）**：
+
+```bash
+scripts/create-worktree.sh <N> <feat分支名> [base=origin/m/<里程碑>]
+# 例: scripts/create-worktree.sh 3 feat/my-issue-290 origin/m/research-backtest
+```
+
+脚本依次完成：worktree add（主目录同级 `FinDashboard-wtN`）→ junction 共享
+`data_cache` / `data_releases` → 复制并改写 `.env`（独立库 + 端口 + 关闭
+OpenCode/MCP）→ 建库 `findashboard_wtN` / `findashboard_wtN_test` →
+`uv sync`（复用主目录 `.uv-cache`）→ `alembic upgrade head` → `web npm install`。
+
+**手工等价步骤与硬性规则**：
+
+- **数据共享**：`cmd //c "mklink /J data_cache <主目录绝对路径>\data_cache"`
+  （`data_releases` 同理）。**禁止 `ln -s`**（Git Bash 默认是复制而非链接）；
+  **禁止对 junction 执行 `rm -rf`**（Git Bash 会穿透链接删掉主目录真实数据），
+  删除链接只能 `cmd //c rmdir <名字>`。
+- **隔离配置**：pydantic 按 CWD 读 `.env`，每 worktree 一份——`FINBOARD_DB_URL` /
+  `FINBOARD_TEST_DB_URL` 指向 `findashboard_wtN` / `findashboard_wtN_test`；
+  `FINBOARD_OPENCODE_ENABLED` / `FINBOARD_OPENCODE_WEB_ENABLED` /
+  `FINBOARD_MCP_ENABLED` 置 false——OpenCode / MCP / 研究运行时全局锚定主目录
+  （容器名与端口全局唯一，第二个实例会撞名）。
+- **端口分配（wtN，N≥2）**：API `8000+N`、前端 `5172+N`、MCP（如启用）`8763+N`；
+  启动用 `make dev API_PORT=8002 WEB_PORT=5174`（vite 端口 / API 代理目标支持
+  `FINBOARD_WEB_PORT` / `FINBOARD_WEB_API_PORT` 覆盖；显式指定端口被占用即报错，
+  不静默换端口——静默换端口后代理会指到别的 worktree 的后端，预览到错误数据）。
+- **依赖**：`UV_CACHE_DIR=<主目录>/.uv-cache uv sync --all-packages` 一次性复用
+  主目录下载缓存；`web/node_modules` 各 worktree 独立 `npm install`，不共享
+  （两端 install 会互相踩）。测试库无需 alembic（conftest `ensure_test_db` +
+  `create_all` 自动建表），开发库须 `uv run alembic upgrade head`。
+- **纪律**：进 worktree 先切 feat 分支再动代码，不直接在 `m/*` 分支提交；pytest
+  仍在各 worktree 根目录运行（`--basetemp .pytest-tmp` 相对各自根，见下文
+  Windows ACL 约定）；PR / issue 流程与单工作区完全一致。
+- **回收**：先 `cmd //c rmdir` 两个 junction，再 `git worktree remove
+  ../FinDashboard-wtN`；数据主体在主目录，删除 worktree 不影响缓存与发布数据。
+
 ### 提交信息
 - 格式：`<分类>: <修改点描述>`，分类如 `feat` / `fix` / `refactor` / `docs` / `chore` 等
 - 描述要点到修改层面即可，不要罗列具体代码行
