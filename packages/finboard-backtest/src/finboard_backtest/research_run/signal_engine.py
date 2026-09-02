@@ -90,6 +90,7 @@ from finboard_backtest.strategy_spec.universe import explain_universe
 from finboard_backtest.strategy_spec.universe_precheck import (
     RESEARCH_RELEASE_FEATURE_NAMES,
     STANDARD_PRICE_FEATURE_NAMES,
+    explicit_symbol_domain,
     is_st_at_decision,
     research_release_derived_features,
     resolvable_feature_names,
@@ -98,7 +99,7 @@ from finboard_backtest.strategy_spec.universe_precheck import (
 
 if TYPE_CHECKING:
     from finboard_backtest.portfolio import CovarianceEstimate
-    from finboard_data.releases import FrozenReleaseProvider
+    from finboard_data.releases import FrozenReleaseProvider, ReleasedInstrument
 
 logger = structlog.get_logger(__name__)
 
@@ -890,11 +891,15 @@ async def _compute_period_features(
     """
     from finboard_backtest.factor_lab import FactorAnalysisError, build_price_feature_snapshot
 
+    explicit_symbols = manifest.strategy_spec.universe.explicit_symbols
     try:
         snapshot = await build_price_feature_snapshot(
             provider=provider,
             decision_at=decision_at,
             code_version=manifest.code_version,
+            # issue #254:声明 explicit_symbols 时只重算声明域——universe
+            # 过滤域之外的价格特征无消费方,发布全市场重算是纯开销。
+            symbols=tuple(explicit_symbols) if explicit_symbols else None,
         )
     except FactorAnalysisError as exc:
         raise ValueError(
@@ -996,7 +1001,7 @@ async def build_daily_equity_curve(
 
 
 def _spec_universe_candidates(
-    provider: FrozenReleaseProvider,
+    instruments: Sequence[ReleasedInstrument],
     context: LoadedDecisionContext,
     features_by_source: Mapping[str, Mapping[str, float]],
 ) -> tuple[SpecUniverseCandidate, ...]:
@@ -1006,10 +1011,12 @@ def _spec_universe_candidates(
     发布快照静态近似(suspended_sessions);``is_st`` 按发布 instruments 的
     ``name_history`` 区间取决策日名称 PIT 判定(issue #213,无覆盖区间回退
     当前名称近似);``market_cap`` 来自 daily_metrics 的特征观测。
+
+    ``instruments`` 由调用方按 ``explicit_symbols`` 收窄(issue #254)。
     """
     candidates: list[SpecUniverseCandidate] = []
     decision_date = context.business_date
-    for instrument in provider.release.instruments:
+    for instrument in instruments:
         if not instrument.ready:
             continue
         fields: dict[str, float | str | bool | None] = {
@@ -1051,9 +1058,25 @@ def _apply_universe_filter(
     context: LoadedDecisionContext,
     features_by_source: Mapping[str, Mapping[str, float]],
 ) -> tuple[UniverseCandidate, ...]:
-    """``UniverseSpec`` 过滤候选池(ranking / selection_limit / 排除规则)。"""
+    """``UniverseSpec`` 过滤候选池(ranking / selection_limit / 排除规则)。
+
+    issue #254:声明 ``explicit_symbols`` 时评估域收窄为 explicit ∩ 发布
+    标的(与静态预检共用 ``explicit_symbol_domain``,两边一致);声明但
+    发布中缺失的标的随降级 warning 具名声明,不静默。
+    """
+    domain, missing_explicit = explicit_symbol_domain(
+        spec.universe, provider.release.instruments
+    )
+    if missing_explicit:
+        logger.warning(
+            "research_run.universe_explicit_symbol_missing",
+            decision_date=context.business_date.isoformat(),
+            missing_count=len(missing_explicit),
+            missing_symbols=missing_explicit[:20],
+            message="explicit_symbols 声明的标的不在发布 instruments 中,已按缺失处理",
+        )
     decisions = explain_universe(
-        spec.universe, _spec_universe_candidates(provider, context, features_by_source)
+        spec.universe, _spec_universe_candidates(domain, context, features_by_source)
     )
     by_symbol = {item.symbol: item for item in decisions}
     out: list[UniverseCandidate] = []
@@ -1116,7 +1139,12 @@ def _empty_pool_error_message(
     features_by_source: Mapping[str, Mapping[str, float]],
     decision_at: datetime,
 ) -> str:
-    """执行期空池错误的根因信息:排除统计 + 缺失字段名(issue #186 / #213)。"""
+    """执行期空池错误的根因信息:排除统计 + 缺失字段名(issue #186 / #213)。
+
+    issue #254:声明 ``explicit_symbols`` 时诊断域与过滤域一致收窄,
+    ``list_date`` 缺失统计不再误报声明域之外的标的。
+    """
+    domain, missing_explicit = explicit_symbol_domain(spec.universe, instruments)
     reasons: Counter[str] = Counter()
     for candidate in candidates:
         reasons.update(candidate.reasons)
@@ -1130,15 +1158,21 @@ def _empty_pool_error_message(
         elif reason == "missing_market_cap":
             missing.add("market_cap")
         elif reason == "listing_age_below_minimum" and any(
-            getattr(item, "list_date", None) is None for item in instruments
+            getattr(item, "list_date", None) is None for item in domain
         ):
             missing.add("list_date")
         elif reason == "delisted":
             missing.add("delist_date")
     missing_text = "、".join(sorted(missing)) if missing else "无"
+    explicit_note = ""
+    if spec.universe.explicit_symbols:
+        explicit_note = (
+            f"(explicit_symbols 声明 {len(spec.universe.explicit_symbols)} 个,"
+            f"其中 {len(missing_explicit)} 个不在发布中)"
+        )
     return (
         f"决策日 {decision_at.date().isoformat()} 候选池为空: "
-        f"共 {len(candidates)} 个候选标的全部被过滤。"
+        f"共 {len(candidates)} 个候选标的全部被过滤{explicit_note}。"
         f"排除统计: {stats or '无'};缺失字段: {missing_text}。"
         "请检查发布 instrument 元数据(list_date 等)与冻结特征是否齐备,"
         "或放宽 universe 过滤条件。"

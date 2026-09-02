@@ -256,15 +256,87 @@ def test_ranking_field_unavailable_rank_worst_keeps_pool() -> None:
     )
 
 
-def test_explicit_symbols_restrict_pool() -> None:
-    """explicit_symbols 只保留命中的标的,其余按 not_in_explicit_symbols 排除。"""
+def test_explicit_symbols_narrow_evaluation_domain() -> None:
+    """explicit_symbols 声明后评估域收窄为 explicit ∩ 发布(#254)。
+
+    声明域之外的标的不再参与静态评估:total_candidates 只计交集,
+    排除统计不再产出全市场 ``not_in_explicit_symbols`` 噪音。
+    """
     preview = preview_universe_pool(
         _spec(min_listing_days=0, explicit_symbols=("600001.SH",)),
         _INST,
         decision_date=DECISION_DATE,
     )
+    assert preview.total_candidates == 1
     assert preview.included == 1
-    assert preview.excluded_by_condition["not_in_explicit_symbols"] == 2
+    assert preview.is_empty is False
+    assert "not_in_explicit_symbols" not in preview.excluded_by_condition
+    assert preview.explicit_total == 1
+    assert preview.explicit_missing == ()
+    assert not [w for w in preview.warnings if w.code == "universe_explicit_symbol_missing"]
+
+
+def test_explicit_symbols_missing_from_release_warns() -> None:
+    """声明但发布中缺失的 explicit 标的发具名 warning,不静默忽略(#254)。"""
+    preview = preview_universe_pool(
+        _spec(
+            min_listing_days=0,
+            explicit_symbols=("600001.SH", "688999.SH", "688998.SH"),
+        ),
+        _INST,
+        decision_date=DECISION_DATE,
+    )
+    assert preview.total_candidates == 1
+    assert preview.explicit_total == 3
+    assert preview.explicit_missing == ("688998.SH", "688999.SH")
+    warning = next(
+        w for w in preview.warnings if w.code == "universe_explicit_symbol_missing"
+    )
+    assert warning.condition == "explicit_symbols"
+    assert "688999.SH" in warning.message
+
+
+def test_explicit_symbols_all_missing_judged_empty() -> None:
+    """声明的 explicit 标的全部不在发布中:交集为空 → 判空池(#254)。"""
+    preview = preview_universe_pool(
+        _spec(min_listing_days=0, explicit_symbols=("688999.SH",)),
+        _INST,
+        decision_date=DECISION_DATE,
+    )
+    assert preview.total_candidates == 0
+    assert preview.is_empty is True
+    message = describe_empty_pool(preview, decision_date=DECISION_DATE)
+    assert "explicit_symbols 声明的 1 个标的均不在" in message
+    assert "688999.SH" in message
+
+
+def test_explicit_symbols_missing_field_warnings_cover_declared_domain_only() -> None:
+    """list_date 缺失统计只覆盖声明域:声明域外缺失不再计入(#254)。"""
+    instruments = (
+        _Instrument(
+            code="600001.SH",
+            market=Market.A_SHARE,
+            asset_class=AssetClass.EQUITY,
+            list_date=date(2020, 1, 1),
+        ),
+        _Instrument(
+            code="600002.SH",
+            market=Market.A_SHARE,
+            asset_class=AssetClass.EQUITY,
+            list_date=None,
+        ),
+    )
+    preview = preview_universe_pool(
+        _spec(min_listing_days=60, explicit_symbols=("600001.SH",)),
+        instruments,
+        decision_date=DECISION_DATE,
+    )
+    # 600002.SH 声明域之外:其 list_date 缺失不触发 warning、不进缺失字段
+    assert preview.included == 1
+    assert preview.missing_fields == ()
+    assert not [
+        w for w in preview.warnings if w.code == "universe_listing_days_unavailable"
+    ]
 
 
 def test_excluded_event_types_and_coverage_filters() -> None:

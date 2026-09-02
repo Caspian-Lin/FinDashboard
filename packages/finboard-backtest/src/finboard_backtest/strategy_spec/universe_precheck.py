@@ -109,6 +109,32 @@ def _attr(instrument: object, name: str, default: Any) -> Any:
     return getattr(instrument, name, default)
 
 
+def explicit_symbol_domain[T](
+    spec: UniverseSpec,
+    instruments: Sequence[T],
+) -> tuple[list[T], tuple[str, ...]]:
+    """explicit_symbols 声明时把评估域收窄为 explicit ∩ 发布标的(issue #254)。
+
+    声明 explicit 后对发布全市场(可能数千只)做静态评估只会产出
+    ``not_in_explicit_symbols`` 海量噪音;评估域应跟随声明收窄。返回
+    ``(收窄后的 instruments, 声明但发布中缺失的 explicit 标的)``;未声明
+    explicit 时原样返回全量与空元组。缺失标的由调用方发具名 warning
+    (静默忽略声明即候选池不受控)。静态预检与运行时候选构建共用本函数,
+    两边评估域一致。
+    """
+    explicit = set(spec.explicit_symbols)
+    if not explicit:
+        return list(instruments), ()
+    narrowed: list[T] = []
+    present: set[str] = set()
+    for item in instruments:
+        code = str(_attr(item, "code", ""))
+        if code in explicit:
+            narrowed.append(item)
+            present.add(code)
+    return narrowed, tuple(sorted(explicit - present))
+
+
 def name_at_decision(instrument: object, decision_date: date) -> tuple[str | None, bool]:
     """决策日 PIT 名称:优先 ``name_history`` 覆盖区间,否则回退当前 ``name``。
 
@@ -254,6 +280,10 @@ class UniversePoolPreview:
     ``excluded_by_condition`` 是『排除原因 → 被排除标的数』的聚合(与
     ``explain_universe`` 的原因命名一致)。``missing_fields`` 是导致排除的
     缺失字段名(去重、排序),供错误信息直接指向根因。
+
+    issue #254:声明 ``explicit_symbols`` 时评估域收窄为 explicit ∩ 发布
+    标的——``total_candidates`` 只覆盖该交集;``explicit_total`` 是声明数,
+    ``explicit_missing`` 是声明但发布中缺失的标的(有界预览)。
     """
 
     total_candidates: int
@@ -261,6 +291,8 @@ class UniversePoolPreview:
     excluded_by_condition: dict[str, int]
     missing_fields: tuple[str, ...]
     warnings: tuple[UniversePrecheckWarning, ...]
+    explicit_total: int = 0
+    explicit_missing: tuple[str, ...] = ()
 
     @property
     def excluded(self) -> int:
@@ -271,8 +303,12 @@ class UniversePoolPreview:
         """候选池是否为空。
 
         仅当候选可评估(``total_candidates > 0``)时下结论:清单为空说明发布
-        本身缺少 instruments,属发布级问题,不由本预览判空。
+        本身缺少 instruments,属发布级问题,不由本预览判空。声明了
+        ``explicit_symbols`` 时例外(issue #254):评估域已收窄为 explicit ∩
+        发布,交集为空意味着声明的标的全部不可交易,直接判空。
         """
+        if self.explicit_total > 0:
+            return self.included == 0
         return self.total_candidates > 0 and self.included == 0
 
     def as_dict(self) -> dict[str, object]:
@@ -284,6 +320,8 @@ class UniversePoolPreview:
             "excluded_by_condition": dict(sorted(self.excluded_by_condition.items())),
             "missing_fields": list(self.missing_fields),
             "warnings": [item.as_dict() for item in self.warnings],
+            "explicit_total": self.explicit_total,
+            "explicit_missing": list(self.explicit_missing[:20]),
         }
 
 
@@ -294,8 +332,30 @@ def _metadata_warnings(
     available_features: frozenset[str],
     decision_date: date,
 ) -> list[UniversePrecheckWarning]:
-    """universe 条件依赖字段的缺失诊断(具名 warning,不抛错)。"""
+    """universe 条件依赖字段的缺失诊断(具名 warning,不抛错)。
+
+    issue #254:声明 ``explicit_symbols`` 时评估域收窄为 explicit ∩ 发布
+    标的(全市场评估只在未声明时进行);声明但发布中缺失的标的发具名
+    warning,不做静默忽略。
+    """
     warnings: list[UniversePrecheckWarning] = []
+    instruments, missing_explicit = explicit_symbol_domain(spec, instruments)
+    if missing_explicit:
+        preview = "、".join(missing_explicit[:10])
+        if len(missing_explicit) > 10:
+            preview += f" 等 {len(missing_explicit)} 个"
+        warnings.append(
+            UniversePrecheckWarning(
+                code="universe_explicit_symbol_missing",
+                condition="explicit_symbols",
+                field="dataset_release_instruments",
+                message=(
+                    f"explicit_symbols 声明的 {len(missing_explicit)} 个标的不在"
+                    f"发布 instruments 中(评估域按 explicit ∩ 发布收窄): "
+                    f"{preview};请核对代码书写或扩大数据发布覆盖范围"
+                ),
+            )
+        )
     total = len(instruments)
     if total == 0:
         return warnings
@@ -495,8 +555,13 @@ def preview_universe_pool(
     只对确定性元数据条件下结论(见模块 docstring);``price`` /
     ``average_amount`` / ``market_cap`` 等运行时数据按可满足处理
     (特征不可解析时按缺失参与空池判定,对齐运行时行为),缺失只产生 warning。
+
+    issue #254:声明 ``explicit_symbols`` 时评估域收窄为 explicit ∩ 发布
+    标的——排除统计只反映声明域内的过滤,不再产出全市场的
+    ``not_in_explicit_symbols`` 噪音;声明但发布中缺失的标的发具名 warning。
     """
-    candidates = static_universe_candidates(instruments, decision_date=decision_date)
+    domain, explicit_missing = explicit_symbol_domain(spec, instruments)
+    candidates = static_universe_candidates(domain, decision_date=decision_date)
     warnings = _metadata_warnings(
         spec,
         instruments,
@@ -504,11 +569,10 @@ def preview_universe_pool(
         decision_date=decision_date,
     )
 
-    explicit = set(spec.explicit_symbols)
     excluded_events = set(spec.excluded_event_types)
     list_date_by_symbol = {
         str(_attr(item, "code", "")): _attr(item, "list_date", None)
-        for item in instruments
+        for item in domain
     }
     missing_fields: set[str] = set()
     exclusions: Counter[str] = Counter()
@@ -520,8 +584,6 @@ def preview_universe_pool(
             reasons.append(_REASON_MARKET)
         if candidate.asset_class not in spec.asset_classes:
             reasons.append(_REASON_ASSET_CLASS)
-        if explicit and candidate.symbol not in explicit:
-            reasons.append(_REASON_EXPLICIT)
         if candidate.listing_days < spec.min_listing_days:
             reasons.append(_REASON_LISTING)
             if list_date_by_symbol.get(candidate.symbol) is None:
@@ -571,6 +633,8 @@ def preview_universe_pool(
         excluded_by_condition=dict(exclusions),
         missing_fields=tuple(sorted(missing_fields)),
         warnings=tuple(warnings),
+        explicit_total=len(spec.explicit_symbols),
+        explicit_missing=explicit_missing,
     )
 
 
@@ -580,14 +644,28 @@ def describe_empty_pool(
     decision_date: date,
 ) -> str:
     """把空池预览格式化为可读的失败信息(入队拒绝 / 运行时错误共用)。"""
+    if preview.explicit_total > 0 and preview.total_candidates == 0:
+        return (
+            f"explicit_symbols 声明的 {preview.explicit_total} 个标的均不在"
+            f"数据发布 instruments 中(决策日 {decision_date.isoformat()}),"
+            f"候选池为空。缺失标的: "
+            f"{'、'.join(preview.explicit_missing[:20]) or '无'}。"
+            "请核对代码书写或扩大数据发布覆盖范围。"
+        )
     stats = "、".join(
         f"{reason}={count}"
         for reason, count in sorted(preview.excluded_by_condition.items())
     )
     missing = "、".join(preview.missing_fields) if preview.missing_fields else "无"
+    explicit_note = ""
+    if preview.explicit_total > 0:
+        explicit_note = (
+            f"(explicit_symbols 声明 {preview.explicit_total} 个,"
+            f"其中 {len(preview.explicit_missing)} 个不在发布中)"
+        )
     return (
         f"候选池为空(决策日 {decision_date.isoformat()} 共 "
-        f"{preview.total_candidates} 个候选标的全部被过滤)。"
+        f"{preview.total_candidates} 个候选标的全部被过滤){explicit_note}。"
         f"排除统计: {stats or '无'};缺失字段: {missing}。"
         "请检查数据集发布是否含 instrument 元数据(如 list_date,可通过 "
         "data_sync 的 profiles 回填),或放宽 universe 过滤条件。"
@@ -600,6 +678,7 @@ __all__ = [
     "UniversePoolPreview",
     "UniversePrecheckWarning",
     "describe_empty_pool",
+    "explicit_symbol_domain",
     "is_st_at_decision",
     "is_st_name",
     "name_at_decision",

@@ -177,6 +177,7 @@ async def run_backtest_and_persist(
         stamp_tax_paid=result.stamp_tax_paid,
         benchmark_return=result.benchmark_return,
         excess_return=result.excess_return,
+        benchmark_source=result.benchmark_source,
         initial_capital=result.initial_capital,
         final_equity=result.final_equity,
     )

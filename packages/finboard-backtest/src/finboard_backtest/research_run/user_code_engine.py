@@ -233,7 +233,12 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 business_date=context.business_date,
                 decision_at=context.decision_at,
                 execution_at=context.execution_at,
-                candidates=context.candidates,
+                # issue #254:candidates 语义与 multi_factor 引擎对齐 —— 用
+                # universe 过滤后的候选池(loaded.candidates),不再把发布全
+                # ready 标的(context.candidates,全部 included=True)透传。
+                # decide 输出的池外标的仍由 targets_to_signals 丢弃 + 具名
+                # warning 兜底(#218),但候选池本身受 UniverseSpec 控制。
+                candidates=loaded.candidates,
                 features=loaded.features,
                 signals=signals,
                 prices=context.prices,

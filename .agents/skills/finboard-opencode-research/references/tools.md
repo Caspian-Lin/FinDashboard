@@ -104,6 +104,10 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   `listing_age_below_minimum=512`)与缺失字段名(如 `list_date`),不再等执行期
   跑完后报泛化错误。写策略后先 `finboard_strategy_validate` 看
   `universe_precheck`,再入队即可避免这类空转。
+  **评估域(#254)**:声明 `universe.explicit_symbols` 时预检只评估
+  explicit ∩ 发布标的(`total_candidates` 即交集规模),全市场评估仅在未声明
+  explicit 时进行;声明但发布中缺失的标的发具名 warning
+  `universe_explicit_symbol_missing`,不静默忽略。
 - 错误:`invalid_argument`(schema 校验 / 数据发布不匹配 / rebalance_frequency
   非法 / 候选池为空)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
 
@@ -597,8 +601,13 @@ ValidationRunner(IS → walk-forward → 一次性揭盲),`finboard_job_get`
   required_datasets, dataset_release_ids, lifecycle_stages, can_execute,
   universe_precheck}`
   - `universe_precheck`(issue #186/#213):`{total_candidates, included, excluded,
-    is_empty, excluded_by_condition, missing_fields, warnings}`,来自主数据发布
-    instruments 的静态评估 ——
+    is_empty, excluded_by_condition, missing_fields, warnings, explicit_total,
+    explicit_missing}`,来自主数据发布 instruments 的静态评估 ——
+    - 评估域(#254):声明 `universe.explicit_symbols` 时只评估 explicit ∩
+      发布标的,`total_candidates` 即交集规模(不再对全市场产出
+      `not_in_explicit_symbols` 噪音);声明但发布中缺失的标的计进
+      `explicit_missing` 并发 `universe_explicit_symbol_missing` warning ——
+      全部缺失时 `is_empty=true`,入队必然秒级失败;
     - `warnings` 是具名过滤降级提示(filter 依赖字段缺失):如
       `universe_listing_days_unavailable`(min_listing_days 依赖 list_date,
       发布 list_date 全空 → 将过滤全部标的)、`universe_delist_metadata_unavailable`
@@ -689,7 +698,7 @@ research_run 管线轻路由(#174)。
     `stamp_tax_rate: str`、`slippage_bps: str`、
     `benchmark_symbol: str | None = None`(issue #184:显式基准标的代码,如
     `000300.SH`,指数日线自动走 akshare 指数接口,引擎单独拉取基准 bars 计算
-    `benchmark_return`/`excess_return`;不传则用等权候选池基准;基准缺失时
+    `benchmark_return`/`excess_return`;基准缺失时
     `benchmark_return`/`excess_return` 为 null)、
     `equity_mode: str = "summary"`(summary 降采样到 max_points 个关键点,首末
     点保留;full 返回完整曲线)、`max_points: int = 200`、
@@ -711,7 +720,10 @@ research_run 管线轻路由(#174)。
     selection_snapshots(snapshot 含 warnings 降级提示), ...}`(同步;
     metrics 里 sharpe_ratio=主口径 rf=3%/ddof=0,sharpe_rf0=rf=0 对照口径
     ddof=1,risk_free_annual=实际 rf;与 research_run 报告同屏比较 Sharpe 用
-    sharpe_rf0 —— issue #262);
+    sharpe_rf0 —— issue #262;`benchmark_source`=基准曲线实际来源
+    `explicit_symbol:<code>` / `equal_weight_selection_pool`(选股启用时按每期
+    选股结果动态等权,#254)/ `equal_weight_static_pool` / `first_symbol`,
+    回退来源可见);
     异步返回 `{job_id, status, created, idempotency_key, async_mode,
     symbol_days_estimate, auto_async_threshold, execution_path}`
   - `fills[].date` = 该笔成交实际发生的交易日(issue #205 起);此前旧记录
@@ -1406,7 +1418,9 @@ def decide(ctx):
   挂载清单含权重回显与约束视图)。
 - 权重语义与越权处理:目标权重 → 信号(score=权重)→ **#91 组合管线**
   (硬约束截断审计 / 风险退出 / 三档资金可行性 / 撮合 / 账本)—— 策略只出
-  目标权重,不触任何订单语义。池外/缺执行元数据标的**丢弃记 warning**;
+  目标权重,不触任何订单语义。**候选池 = universe 过滤后的 included 集**
+  (#254,与 multi_factor 引擎同一口径;不再透传发布全 ready 标的);
+  decide 输出的池外/缺执行元数据标的**丢弃记 warning**(#218 兜底不变);
   负权重与超上限由管线约束投影**逐项截断并审计**(constraints 阶段可见)。
 - 入队门控(REST+MCP 共享):artifact 非 active / commit 与 active 不一致 /
   沙箱未启用 / single_shot 缺快照 → 秒级 `invalid_argument`;

@@ -15,6 +15,8 @@ from finboard_backtest.config import BacktestConfig, BenchmarkConfig
 from finboard_backtest.engine import BacktestEngine
 from finboard_backtest.result import BacktestResult
 from finboard_core import Strategy
+from finboard_data import FactorSelectionConfig
+from finboard_data.factors import FactorSnapshot
 from finboard_shared.identifiers import StrategyId
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
@@ -215,3 +217,150 @@ async def test_first_symbol_fallback_remains_real_benchmark() -> None:
     result = await engine.run()
     assert result.benchmark_return == pytest.approx(0.21, abs=1e-9)
     assert result.excess_return == pytest.approx(-0.21, abs=1e-9)
+
+
+# ---- issue #254:选股启用时基准回退优先每期选股池 ----
+
+
+class _PoolSelector:
+    """恒发布且恒选同一标的的确定性 selector。"""
+
+    def __init__(self, selected: tuple[str, ...]) -> None:
+        self._selected = selected
+
+    async def select(self, **kwargs: object) -> FactorSnapshot:
+        from finboard_data import FactorSnapshot, FactorSnapshotStatus
+
+        business_date = kwargs["business_date"]
+        decision_at = kwargs["decision_at"]
+        effective_date = kwargs["effective_date"]
+        assert isinstance(business_date, date)
+        assert isinstance(decision_at, datetime)
+        assert isinstance(effective_date, date)
+        return FactorSnapshot(
+            decision_at=decision_at,
+            business_date=business_date,
+            effective_date=effective_date,
+            source="test",
+            dataset_versions={"daily_metrics": f"daily-{business_date}"},
+            factor_version="v1",
+            static_universe=self._selected,
+            selected_symbols=self._selected,
+            values=(),
+            status=FactorSnapshotStatus.PUBLISHED,
+            skip_reason=None,
+            config={"enabled": True},
+            checksum=f"{business_date:%Y%m%d}".ljust(64, "0"),
+        )
+
+
+class _SkippedSelector:
+    """恒 SKIPPED 的 selector(模拟 research_db 缺 profiles 整期空转)。"""
+
+    async def select(self, **kwargs: object) -> FactorSnapshot:
+        from finboard_data import FactorSnapshot, FactorSnapshotStatus
+
+        business_date = kwargs["business_date"]
+        decision_at = kwargs["decision_at"]
+        effective_date = kwargs["effective_date"]
+        assert isinstance(business_date, date)
+        assert isinstance(decision_at, datetime)
+        assert isinstance(effective_date, date)
+        return FactorSnapshot(
+            decision_at=decision_at,
+            business_date=business_date,
+            effective_date=effective_date,
+            source="test",
+            dataset_versions={},
+            factor_version="v1",
+            static_universe=(UNIVERSE,),
+            selected_symbols=(),
+            values=(),
+            status=FactorSnapshotStatus.SKIPPED,
+            skip_reason="profile_missing",
+            config={"enabled": True},
+            checksum=f"{business_date:%Y%m%d}".ljust(64, "0"),
+        )
+
+
+@pytest.mark.unit
+async def test_selection_pool_benchmark_preferred_over_static_pool() -> None:
+    """选股启用:回退基准跟随每期选股结果(动态等权),不用静态全池。"""
+    other = "000002.SZ"
+    provider = MemoryProvider(
+        {
+            UNIVERSE: _rising_bars(Symbol(UNIVERSE, Market.A_SHARE)),
+            other: _flat_bars(Symbol(other, Market.A_SHARE)),
+        }
+    )
+    engine = BacktestEngine(
+        strategy=NoopStrategy(),
+        data_provider=provider,
+        config=BacktestConfig(
+            symbols=[UNIVERSE, other],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+            selection=FactorSelectionConfig(enabled=True),
+        ),
+        factor_selector=_PoolSelector((UNIVERSE,)),  # type: ignore[arg-type]
+    )
+    result = await engine.run()
+    # 选股池只含 UNIVERSE(100→121):动态等权 = +21%;
+    # 静态全池等权买入持有只有 +10.5%——旧口径即由此失真。
+    assert result.benchmark_return == pytest.approx(0.21, abs=1e-6)
+    assert result.benchmark_source == "equal_weight_selection_pool"
+    assert "基准来源:   equal_weight_selection_pool" in result.summary()
+
+
+@pytest.mark.unit
+async def test_selection_all_skipped_falls_back_to_static_with_source() -> None:
+    """选股启用但整期 SKIPPED:选股池不可用,回退静态口径且来源可见。"""
+    other = "000002.SZ"
+    provider = MemoryProvider(
+        {
+            UNIVERSE: _flat_bars(Symbol(UNIVERSE, Market.A_SHARE)),
+            other: _flat_bars(Symbol(other, Market.A_SHARE)),
+        }
+    )
+    engine = BacktestEngine(
+        strategy=NoopStrategy(),
+        data_provider=provider,
+        config=BacktestConfig(
+            symbols=[UNIVERSE, other],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+            selection=FactorSelectionConfig(enabled=True),
+        ),
+        factor_selector=_SkippedSelector(),  # type: ignore[arg-type]
+    )
+    result = await engine.run()
+    assert result.benchmark_return is not None
+    assert result.benchmark_source == "equal_weight_static_pool"
+
+
+@pytest.mark.unit
+async def test_explicit_benchmark_still_beats_selection_pool() -> None:
+    """显式基准优先级最高,选股启用也不改变。"""
+    other = "000002.SZ"
+    provider = MemoryProvider(
+        {
+            UNIVERSE: _flat_bars(Symbol(UNIVERSE, Market.A_SHARE)),
+            other: _flat_bars(Symbol(other, Market.A_SHARE)),
+            BENCHMARK: _rising_bars(Symbol(BENCHMARK, Market.A_SHARE)),
+        }
+    )
+    engine = BacktestEngine(
+        strategy=NoopStrategy(),
+        data_provider=provider,
+        config=BacktestConfig(
+            symbols=[UNIVERSE, other],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+            selection=FactorSelectionConfig(enabled=True),
+            benchmark=BenchmarkConfig(symbol=BENCHMARK),
+        ),
+        factor_selector=_PoolSelector((UNIVERSE,)),  # type: ignore[arg-type]
+    )
+    result = await engine.run()
+    assert result.benchmark_return == pytest.approx(0.21, abs=1e-9)
+    assert result.benchmark_source == f"explicit_symbol:{BENCHMARK}"

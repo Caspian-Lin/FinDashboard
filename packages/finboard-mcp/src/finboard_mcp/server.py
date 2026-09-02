@@ -154,6 +154,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   delist_date / average_amount / market_cap / ST 名称 / required_data_fields /
   ranking.field)的存在性 warning 与候选池空池预览(total/included/排除统计/
   缺失字段),写策略与入队前先看它,避免「list_date 全 null → 全排除」式空转。
+  评估域跟随 explicit_symbols(#254):声明 explicit_symbols 时预检只评估
+  explicit ∩ 发布标的,声明但发布中缺失的标的发 universe_explicit_symbol_missing
+  warning(全部缺失判空池秒级拒绝)。
   universe 支持 min/max_market_cap(人民币元,取 market_cap 特征观测,#213);
   exclude_st 按发布 instruments 名称历史 PIT 判定(降级发具名 warning)。
 - 回测(7,✅ #127 + #172 + #173 + #174 + #175 + #183 + #184 + #189 + #190 + #262):backtest_strategy_list(输出
@@ -177,6 +180,8 @@ FinBoard 研究 MCP —— 量化研究工具集
   引擎单独拉取基准 bars 计算 benchmark_return/excess_return);research_run
   管线按 benchmark_config.symbol 从冻结发布取行情计算基准收益;基准缺失时
   benchmark_return/excess_return 为 null + 具名 warning,不再静默 0.0。
+  无显式基准的回退链跟随选股池(#254):每期选股池动态等权 > 静态候选池
+  等权 > 首个标的,实际来源在 metrics.benchmark_source 与 summary() 可见。
   多期回放(#183):queue_payload.parameters 声明
   rebalance_frequency=monthly|quarterly 时,按冻结发布交易日历每期重算
   universe/features/signals 与组合,决策间每日 mark-to-market 产出全区间
