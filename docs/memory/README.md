@@ -41,3 +41,4 @@
 - [本机 akshare 复现实验的 ProxyError 陷阱(#257)](akshare-em-proxy-error-repro-trap.md) — 系统代理对 push2his.eastmoney.com 偶发 ProxyError(600519 真股票也失败),接口行为判定以源码+请求 URL secid 参数为准;集成测试一律 mock 网络
 - [Issue #259:backtest 网格 selection_grid 选股维度组合展开](issue-259-selection-grid-done.md) — 独立 selection_grid 参数而非 selection.* 键(params 校验链路零改动);label/checksum「键存在才纳入」保旧网格幂等;全角乘号 × 触发 RUF001-003;MCP 工具函数加参须给默认值(集成测试显式 kwargs)
 - [Issue #261:发布标的集来源三选一完成](issue-261-release-symbol-source-done.md) — 入队期解析成具体 symbols 执行器零改动;复制 verbatim 勿加 kind 过滤;mixed scope 门要求三类型齐备是 #184 遗留;非 bars 发布有 stock-scope 检查
+- [多 worktree 并行开发:本机落地参数与坑位(#289)](multi-worktree-parallel-dev.md) — wt2 已就位(junction 共享 data_cache/data_releases + 独立库/端口);删 junction 禁 rm -rf;vite 端口/代理可环境变量覆盖
