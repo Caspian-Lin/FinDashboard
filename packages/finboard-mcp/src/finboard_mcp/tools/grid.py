@@ -5,8 +5,9 @@
 对比表(指标矩阵 + 关键指标排名 + 最优标注),部分失败带错误码单独列出,
 不影响成功组合返回。
 
-- ``backtest_grid_submit``(写):组合展开(显式列表 / 笛卡尔积)+ 上限封顶 →
-  逐组合参数校验 → 网格定义与 N 个 backtest_run job **同一事务**落库
+- ``backtest_grid_submit``(写):组合展开(params 显式列表 / 笛卡尔积 x
+  selection_grid 选股维度笛卡尔积,#259)+ 上限封顶 → 逐组合参数与
+  selection 校验 → 网格定义与 N 个 backtest_run job **同一事务**落库
   (全有或全无)→ 返回 grid_id + job 指针,异步执行;
 - ``backtest_grid_get``(只读):按 grid_id 聚合 —— 逐组合读 job 状态 +
   result_ref 对应的回测记录 → 指标矩阵 / 排名 / 最优标注 / 失败清单。
@@ -92,28 +93,37 @@ def _expand_combos(
     *,
     params_list: list[dict[str, Any]] | None,
     params_grid: dict[str, list[Any]] | None,
+    selection_grid: dict[str, list[Any]] | None,
 ) -> list[dict[str, Any]]:
-    """展开组合覆盖参数,返回 ``[{label, params}]``。
+    """展开组合覆盖,返回 ``[{label, params, selection}]``。
 
-    ``params_list`` 是显式列表(优先,每个元素是一组覆盖参数);
-    ``params_grid`` 是笛卡尔积(``{字段: 值列表}``,跨字段全组合)。
-    两形态互斥;组合数上限由调用方在展开后校验。
+    params 侧 ``params_list``(显式列表)与 ``params_grid``(笛卡尔积)互斥;
+    selection 侧 ``selection_grid``(``{selection字段: 值列表}``,与 params_grid
+    同构)是独立的笛卡尔积维度(issue #259)。两侧做笛卡尔积,至少一侧非空;
+    组合数上限由调用方在展开后校验。label 是覆盖差异的确定性 JSON:无
+    selection_grid 时与历史格式一致(覆盖参数 JSON),有 selection_grid 时为
+    ``{"params": ..., "selection": ...}``(空 params 侧省略)。
     """
-    if (params_list is None) == (params_grid is None):
+    if params_list is not None and params_grid is not None:
         raise McpToolError(
             "invalid_argument",
             "params_list(显式列表)与 params_grid(笛卡尔积)必须二选一",
         )
-    overrides: list[dict[str, Any]]
+    if params_list is None and params_grid is None and selection_grid is None:
+        raise McpToolError(
+            "invalid_argument",
+            "params_list / params_grid / selection_grid 至少提供一个组合维度",
+        )
+
+    params_overrides: list[dict[str, Any]]
     if params_list is not None:
         if not params_list:
             raise McpToolError("invalid_argument", "params_list 不能为空列表")
         for index, item in enumerate(params_list):
             if not isinstance(item, dict):
                 raise McpToolError("invalid_argument", f"params_list[{index}] 必须是参数 dict")
-        overrides = params_list
-    else:
-        assert params_grid is not None
+        params_overrides = params_list
+    elif params_grid is not None:
         if not params_grid:
             raise McpToolError("invalid_argument", "params_grid 不能为空 dict")
         for key, values in params_grid.items():
@@ -123,24 +133,70 @@ def _expand_combos(
                     f"params_grid[{key!r}] 必须是非空值列表(笛卡尔积维度)",
                 )
         keys = list(params_grid)
-        overrides = [
+        params_overrides = [
             dict(zip(keys, values, strict=True))
             for values in itertools.product(*(params_grid[key] for key in keys))
         ]
-    return [
-        {
-            "label": json.dumps(override, sort_keys=True, ensure_ascii=False),
-            "params": override,
-        }
-        for override in overrides
-    ]
+    else:
+        params_overrides = [{}]
+
+    selection_overrides: list[dict[str, Any]]
+    if selection_grid is not None:
+        if not selection_grid:
+            raise McpToolError("invalid_argument", "selection_grid 不能为空 dict")
+        for key, values in selection_grid.items():
+            if not isinstance(values, list) or not values:
+                raise McpToolError(
+                    "invalid_argument",
+                    f"selection_grid[{key!r}] 必须是非空值列表(笛卡尔积维度)",
+                )
+        selection_keys = list(selection_grid)
+        selection_overrides = [
+            dict(zip(selection_keys, values, strict=True))
+            for values in itertools.product(*(selection_grid[key] for key in selection_keys))
+        ]
+    else:
+        selection_overrides = [{}]
+
+    has_selection_grid = selection_grid is not None
+    combos: list[dict[str, Any]] = []
+    for params_override in params_overrides:
+        for selection_override in selection_overrides:
+            if has_selection_grid:
+                label_parts: dict[str, Any] = {}
+                if params_override:
+                    label_parts["params"] = params_override
+                label_parts["selection"] = selection_override
+                label = json.dumps(label_parts, sort_keys=True, ensure_ascii=False)
+            else:
+                label = json.dumps(params_override, sort_keys=True, ensure_ascii=False)
+            combos.append(
+                {
+                    "label": label,
+                    "params": params_override,
+                    "selection": selection_override,
+                }
+            )
+    return combos
 
 
 def _combos_checksum(combos: list[dict[str, Any]]) -> str:
-    """组合定义(索引 + 标签 + 校验后参数)的确定性指纹,用于幂等重提交校验。"""
+    """组合定义(索引 + 标签 + 校验后参数)的确定性指纹,用于幂等重提交校验。
+
+    selection 仅在组合携带时进入指纹(#259)—— 旧网格(无 selection 键)的
+    checksum 不因本字段引入而漂移,幂等重提交仍能命中既有网格。
+    """
 
     canonical = json.dumps(
-        [{"index": c["index"], "label": c["label"], "params": c["params"]} for c in combos],
+        [
+            {
+                "index": c["index"],
+                "label": c["label"],
+                "params": c["params"],
+                **({"selection": c["selection"]} if "selection" in c else {}),
+            }
+            for c in combos
+        ],
         sort_keys=True,
         default=str,
     )
@@ -235,6 +291,7 @@ async def backtest_grid_submit(
     selection: dict[str, Any] | None,
     params_list: list[dict[str, Any]] | None,
     params_grid: dict[str, list[Any]] | None,
+    selection_grid: dict[str, list[Any]] | None = None,
     max_combos: int,
     grid_idempotency_key: str,
     requested_by: str,
@@ -263,15 +320,20 @@ async def backtest_grid_submit(
             raise McpToolError("invalid_argument", f"start/end 必须是 ISO 日期: {exc}") from exc
 
         # 1) 组合展开 + 上限封顶(在任何入队/落库之前)
-        raw_combos = _expand_combos(params_list=params_list, params_grid=params_grid)
+        raw_combos = _expand_combos(
+            params_list=params_list,
+            params_grid=params_grid,
+            selection_grid=selection_grid,
+        )
         if len(raw_combos) > max_combos:
             raise McpToolError(
                 "invalid_argument",
                 f"组合数 {len(raw_combos)} 超过 max_combos={max_combos}"
-                f"(硬上限 {_GRID_COMBO_HARD_LIMIT};收敛网格或提高 max_combos)",
+                f"(硬上限 {_GRID_COMBO_HARD_LIMIT};组合数 = params 覆盖 x selection "
+                f"覆盖的笛卡尔积,收敛网格或提高 max_combos)",
             )
 
-        # 2) 逐组合参数校验(与 backtest_run 同一校验入口,失败即拒)
+        # 2) 逐组合参数与 selection 校验(与 backtest_run 同一校验入口,失败即拒)
         from finboard_app.selection_schema import FactorSelectionParams
 
         validated_base = _validate_backtest_params(strategy, params or {})
@@ -285,7 +347,20 @@ async def backtest_grid_submit(
         for index, item in enumerate(raw_combos):
             merged = {**validated_base, **item["params"]}
             validated = _validate_backtest_params(strategy, merged)
-            combos.append({"index": index, "label": item["label"], "params": validated})
+            entry: dict[str, Any] = {"index": index, "label": item["label"], "params": validated}
+            # issue #259:selection 覆盖只在组合携带时合并校验;
+            # 基础 selection 已在上方整体验证过。
+            if item["selection"]:
+                merged_selection = {**selection_dump, **item["selection"]}
+                try:
+                    combo_selection = FactorSelectionParams.model_validate(merged_selection)
+                except ValidationError as exc:
+                    raise McpToolError(
+                        "invalid_argument",
+                        f"组合 {index}({item['label']}) selection 参数校验失败: {exc}",
+                    ) from exc
+                entry["selection"] = combo_selection.model_dump(mode="json")
+            combos.append(entry)
         checksum = _combos_checksum(combos)
         provider_name = getattr(app.settings, "data_provider", "akshare")
 
@@ -330,6 +405,9 @@ async def backtest_grid_submit(
             job_repo = BackgroundJobRepository(session)
             jobs: list[dict[str, Any]] = []
             for combo in combos:
+                # issue #259:组合携带 selection 覆盖时 payload 用组合级
+                # selection(已校验合并),否则用网格级基础 selection。
+                combo_selection = combo.get("selection", selection_dump)
                 payload: dict[str, Any] = {
                     "request": _build_request(
                         strategy=strategy,
@@ -339,7 +417,7 @@ async def backtest_grid_submit(
                         capital=capital,
                         adjust=adjust,
                         params=combo["params"],
-                        selection=selection_dump,
+                        selection=combo_selection,
                         commission_rate=commission_rate,
                         commission_min=commission_min,
                         stamp_tax_rate=stamp_tax_rate,
@@ -365,14 +443,15 @@ async def backtest_grid_submit(
                     await session.rollback()
                     raise McpToolError("conflict", f"网格任务登记冲突,请重试: {exc}") from exc
                 combo["job_id"] = job_row.job_id
-                jobs.append(
-                    {
-                        "combo_index": combo["index"],
-                        "label": combo["label"],
-                        "job_id": job_row.job_id,
-                        "params": combo["params"],
-                    }
-                )
+                job_entry: dict[str, Any] = {
+                    "combo_index": combo["index"],
+                    "label": combo["label"],
+                    "job_id": job_row.job_id,
+                    "params": combo["params"],
+                }
+                if "selection" in combo:
+                    job_entry["selection"] = combo["selection"]
+                jobs.append(job_entry)
             row.combos = combos
             await session.commit()
         return cast(
@@ -412,6 +491,7 @@ async def backtest_grid_submit(
             "max_combos": max_combos,
             "params_list": params_list,
             "params_grid": params_grid,
+            "selection_grid": selection_grid,
             "params": params,
             "selection": selection,
         },
@@ -423,15 +503,17 @@ async def backtest_grid_submit(
 def _grid_submit_out(row: BacktestGridRunModel, *, created: bool) -> dict[str, Any]:
     """幂等命中时返回已存在的网格定义(created=False)。"""
 
-    jobs = [
-        {
+    jobs = []
+    for combo in row.combos or []:
+        entry: dict[str, Any] = {
             "combo_index": combo["index"],
             "label": combo.get("label"),
             "job_id": combo.get("job_id"),
             "params": combo.get("params") or {},
         }
-        for combo in (row.combos or [])
-    ]
+        if combo.get("selection") is not None:
+            entry["selection"] = combo["selection"]
+        jobs.append(entry)
     return cast(
         dict[str, Any],
         to_jsonable(
@@ -600,6 +682,9 @@ async def backtest_grid_get(
                     # issue #206 P1:网格级基础参数在头部只出现一次;
                     # combo 完整参数 = base_params + label(覆盖参数)。
                     "params": dict(getattr(grid_row, "base_params", None) or {}),
+                    # issue #259:基础 selection 同样只在头部出现一次,
+                    # 组合级 selection 差异由 label(覆盖 JSON)承载。
+                    "selection": dict(getattr(grid_row, "selection", None) or {}),
                     "combo_count": grid_row.combo_count,
                     "complete": complete,
                     "completed_count": sum(1 for status in statuses if status in TERMINAL_STATUSES),
@@ -641,9 +726,14 @@ def register(mcp: MCPServer) -> None:
             "与任务同一事务落库,全有或全无),返回 grid_id + job 指针,异步执行。"
             "公共参数:strategy/symbols/start/end/capital/adjust/params/selection/"
             "commission_rate/commission_min/stamp_tax_rate/slippage_bps;"
-            "组合来源二选一:params_list(显式列表,N 个参数 dict)或 params_grid"
-            "(笛卡尔积 {字段: 值列表});max_combos(默认 20,硬上限 50,超限"
-            "invalid_argument);grid_idempotency_key(幂等键,重提交返回同一网格);"
+            "组合维度:params_list(显式参数列表)与 params_grid(参数笛卡尔积"
+            " {字段: 值列表})互斥二选一;selection_grid(#259,选股维度笛卡尔积 "
+            "{selection字段: 值列表},如 ranking_factor/momentum_lookback/max_symbols)"
+            "为独立维度,与 params 侧做笛卡尔积,可单独使用(纯选股扫描,如因子"
+            "x窗口);三者至少提供一个,总组合数受 max_combos(默认 20,硬上限 "
+            "50,超限 invalid_argument)约束;逐组合 selection 过 FactorSelectionParams "
+            "校验,非法组合具名 invalid_argument 不落库不入队。"
+            "grid_idempotency_key(幂等键,重提交返回同一网格);"
             "requested_by。完成后用 finboard_backtest_grid_get(grid_id) 查询聚合"
             "对比表,或 finboard_job_get 逐任务查询。研究域 only,不连实盘。"
         ),
@@ -661,6 +751,7 @@ def register(mcp: MCPServer) -> None:
         selection: dict[str, Any] | None = None,
         params_list: list[dict[str, Any]] | None = None,
         params_grid: dict[str, list[Any]] | None = None,
+        selection_grid: dict[str, list[Any]] | None = None,
         max_combos: int = _DEFAULT_MAX_COMBOS,
         commission_rate: str = "0.0003",
         commission_min: str = "1",
@@ -680,6 +771,7 @@ def register(mcp: MCPServer) -> None:
             selection=selection,
             params_list=params_list,
             params_grid=params_grid,
+            selection_grid=selection_grid,
             max_combos=max_combos,
             grid_idempotency_key=grid_idempotency_key,
             requested_by=requested_by,
@@ -701,10 +793,12 @@ def register(mcp: MCPServer) -> None:
             "省略。排名指标不变(仍用主口径 sharpe_ratio,组合间同口径可比)。"
             "另 risk_free_annual 键在逐组合 metrics 里可见,矩阵不单列。"
 
-            "公共字段(strategy/symbols/start/end/capital/adjust/params=base_params)"
-            "在网格头部只出现一次(issue #206);combo 只含 combo_index/label/"
-            "job_id/job_status/指标/权益,组合差异由 label(覆盖参数 JSON)承载,"
-            "完整组合参数 = params + label。"
+            "公共字段(strategy/symbols/start/end/capital/adjust/params=base_params/"
+            "selection=基础选股配置)在网格头部只出现一次(issue #206/#259);"
+            "combo 只含 combo_index/label/"
+            "job_id/job_status/指标/权益,组合差异由 label(覆盖参数 JSON,"
+            "含 selection 覆盖时为 {params, selection} 结构)承载,"
+            "完整组合参数 = params/selection + label。"
             "参数:grid_id、equity_mode(none 默认:不返回 equity 曲线,响应最轻,"
             "只保留 equity_point_count 点数提示;summary:equity 降采样到 "
             "max_points 个关键点,首末点保留;full:完整曲线)、max_points(默认 "

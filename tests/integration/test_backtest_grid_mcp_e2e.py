@@ -244,6 +244,76 @@ async def test_grid_submit_enqueues_n_jobs_and_idempotent_resubmit(
 
 
 @pytest.mark.asyncio
+async def test_grid_submit_selection_grid_enqueues_per_combo_selection(
+    engine: AsyncEngine, app: McpAppContext
+) -> None:
+    """issue #259:selection_grid 选股维度展开 —— 逐组合 selection 进 payload,
+    落库 combos 携带组合级 selection,grid_get 头部返回基础 selection。"""
+
+    env = await grid_tools.backtest_grid_submit(
+        app,
+        **{
+            **SUBMIT_KWARGS,
+            "grid_idempotency_key": "grid-key-e2e-259",
+            "params_list": None,
+            "params_grid": None,
+            "selection_grid": {
+                "ranking_factor": ["momentum", "pb"],
+                "momentum_lookback": [20, 60],
+            },
+        },
+    )
+    assert env.status == "ok", env.error
+    grid_id = env.data["grid_id"]
+    assert env.data["combo_count"] == 4  # 2 因子 x 2 窗口
+    assert all("selection" in job for job in env.data["jobs"])
+
+    async with session_factory(engine)() as session:
+        repo = BackgroundJobRepository(session)
+        payloads = []
+        for job in env.data["jobs"]:
+            row = await repo.get(job["job_id"])
+            assert row is not None
+            payload: dict[str, Any] = dict(row.payload or {})
+            payloads.append(payload["request"])
+            assert payload["request"]["selection"]["ranking_factor"] in ("momentum", "pb")
+            assert payload["request"]["selection"]["momentum_lookback"] in (20, 60)
+            # 未提供 params 维度 → 逐组合 params 都是基础参数
+            assert payload["request"]["params"]["long_window"] == 20
+        selection_pairs = {
+            (p["selection"]["ranking_factor"], p["selection"]["momentum_lookback"])
+            for p in payloads
+        }
+        assert selection_pairs == {
+            ("momentum", 20),
+            ("momentum", 60),
+            ("pb", 20),
+            ("pb", 60),
+        }
+
+    # grid_get:头部带基础 selection(默认 enabled=False),组合差异由 label 承载
+    env_get = await grid_tools.backtest_grid_get(app, grid_id=grid_id)
+    assert env_get.status == "ok", env_get.error
+    assert env_get.data["selection"]["enabled"] is False
+    assert all("selection" in combo["label"] for combo in env_get.data["combos"])
+
+    # 非法 selection 维度值(momentum_lookback=0)→ 秒级 invalid_argument 不落库
+    env_bad = await grid_tools.backtest_grid_submit(
+        app,
+        **{
+            **SUBMIT_KWARGS,
+            "grid_idempotency_key": "grid-key-e2e-259-bad",
+            "params_list": None,
+            "params_grid": None,
+            "selection_grid": {"momentum_lookback": [0]},
+        },
+    )
+    assert env_bad.status == "error"
+    assert env_bad.error is not None
+    assert env_bad.error.kind == "invalid_argument"
+
+
+@pytest.mark.asyncio
 async def test_grid_get_aggregates_with_partial_failure(
     engine: AsyncEngine, app: McpAppContext
 ) -> None:
