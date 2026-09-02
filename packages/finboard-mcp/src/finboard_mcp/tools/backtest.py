@@ -501,6 +501,10 @@ async def backtest_run(
     * ``strategy_spec`` 形态:按已发布 ``{strategy_id, version}`` 路由入队
       research_run 管线,返回 run_id + job_id 指针,不阻塞等待完成。
     两形态互斥,同时给出报 ``invalid_argument``。
+
+    selection.inputs_mode=research_db(默认)必需数据集批次未发布时入队/运行
+    秒级拒绝 ``dataset_unpublished:{dataset}``(issue #255,防「0 交易成功」);
+    先 research_data_sync 摄取并发布,核验步骤见 docs/research/data-ops.md。
     """
 
     async def _do() -> dict[str, Any]:
