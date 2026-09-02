@@ -284,13 +284,17 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 
 ### finboard_data_sync_universe **[写,任务化]**
 登记全市场标的同步任务(akshare 发现 → 写 instruments 表),返回 202 + `job_id`。
+自动包含基准指数登记(#256):`instrument_type=index`(受控登记表
+`BENCHMARK_INDEX_REGISTRY`,含沪深300/中证500/中证1000/创业板指等 9 只)。
 - 参数:无
 - 返回:`JobOut`(`kind=data_sync`)
 - 进度:用 `finboard_job_get(job_id)` 轮询
 
 ### finboard_data_bulk_download_start **[写,任务化]**
 登记批量历史数据拉取任务(按市场/类型/交易所筛选),返回 202 + `job_id`。
-- 参数:`market?`(默认 a_share)/ `instrument_type?` / `exchange?` /
+- 参数:`market?`(默认 a_share)/ `instrument_type?`(`stock|etf|index`;
+  index=#256 基准指数,日线走 akshare 指数接口;`source=tushare` 对非 stock
+  报 `tushare_scope_mismatch`)/ `exchange?` /
   `listing_boards?` / `start?`(默认 2015-01-01)/ `source?`
 - 返回:`JobOut`(`kind=bulk_download`)
 - 进度:用 `finboard_job_get(job_id)` 轮询(阶段如 `bulk_download:fetching`)
@@ -756,7 +760,11 @@ research_run 管线轻路由(#174)。
     发布取行情计算真实 `benchmark_return`/`excess_return`;基准缺失(发布中
     无该标的)时二者为 null + 具名 warning,不再静默 0.0;`queue_payload.
     benchmark_config` 可传 `{"overrides": {"return": <手动值>}}` 作为发布
-    无基准行情时的兜底
+    无基准行情时的兜底。基准标的必须**在同一个 bars 主发布内**(#256:
+    manifest 只允许一个 bars 发布;先用 data_sync 登记指数 →
+    bulk_download_start(instrument_type=index)拉指数日线 → 发布
+    multi_asset_mixed 时把指数代码一并放进 symbols)。指数自动不进候选池
+    (只做基准数据,不可撮合,#256)
 - 错误:`invalid_argument`(互斥 / 规格不存在 / 未发布 / 参数校验失败 /
   equity_mode 非法 / snapshot 模式缺 snapshot_ids)、`permission_denied`
   (只读模式)、`conflict`(异步重复 idempotency_key)、`unavailable`

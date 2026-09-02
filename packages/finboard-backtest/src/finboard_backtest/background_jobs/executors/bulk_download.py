@@ -148,9 +148,11 @@ def _validate_tushare_scope(provider_name: str, instruments: Sequence[object]) -
         or getattr(ins, "instrument_type", None) != "stock"
     ]
     if incompatible:
+        # issue #256:指数(#256 登记)与 ETF 一样只能走 akshare 源;
+        # tushare 拒绝行为保持不变(具名 tushare_scope_mismatch,不静默换源)。
         raise ExecutorError(
             code="tushare_scope_mismatch",
-            summary="Tushare 批量任务仅支持 A 股股票;ETF 请另建任务选 akshare 或 yfinance",
+            summary="Tushare 批量任务仅支持 A 股股票;ETF / 指数请另建任务选 akshare 或 yfinance",
             retryable=False,
             context={"sample": incompatible[:5]},
         )

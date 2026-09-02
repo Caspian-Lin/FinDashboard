@@ -363,3 +363,172 @@ class TestBulkDownloadEndToEnd:
             row = await BackgroundJobRepository(session).get(jid)
             assert row is not None
             assert row.status == BackgroundJobStatus.CANCEL_REQUESTED.value
+
+    async def test_bulk_download_index_instrument_type(
+        self, engine: AsyncEngine
+    ) -> None:
+        """instrument_type=index 选中指数标的走 akshare 源(issue #256)。
+
+        bulk_download 按 instrument_type 从 instruments 表筛出指数标的
+        (生产路径由 data_sync 经 discover_indices + sync_with_diff 写入),
+        交给 provider 拉取日线(akshare 指数接口,#184 分流)。
+        """
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import select
+
+        from finboard_persistence import InstrumentModel
+        from finboard_persistence.models import BackgroundJobModel
+        from finboard_shared.models import Symbol
+
+        codes = ("000300.SH", "000905.SH")
+        async with session_factory(engine)() as session:
+            await session.execute(
+                sa_delete(InstrumentModel).where(InstrumentModel.code.in_(codes))
+            )
+            await session.flush()
+            session.add_all(
+                (
+                    InstrumentModel(
+                        code="000300.SH",
+                        name="沪深300",
+                        market="a_share",
+                        instrument_type="index",
+                        exchange="SSE",
+                        status="active",
+                    ),
+                    InstrumentModel(
+                        code="000905.SH",
+                        name="中证500",
+                        market="a_share",
+                        instrument_type="index",
+                        exchange="SSE",
+                        status="active",
+                    ),
+                )
+            )
+            await session.commit()
+
+        registry = JobExecutorRegistry()
+        registry.register(
+            "bulk_download",
+            BulkDownloadExecutor(
+                session_maker=_session_maker(engine),  # type: ignore[arg-type]
+                settings_factory=lambda: None,
+            ),
+        )
+        worker = _build_worker(engine, registry)
+        await _enqueue(
+            engine,
+            kind="bulk_download",
+            payload={
+                "market": "a_share",
+                "source": "akshare",
+                "start": "2024-01-01",
+                "instrument_type": "index",
+            },
+        )
+
+        mock_provider = AsyncMock()
+        mock_provider.update_cache_batch.return_value = {
+            "000300.SH": True,
+            "000905.SH": True,
+        }
+        with patch(
+            "finboard_backtest.background_jobs.executors.bulk_download.build_bar_provider",
+            return_value=mock_provider,
+        ):
+            await _drain(worker)
+
+        async with session_factory(engine)() as session:
+            row = (
+                await session.execute(
+                    select(BackgroundJobModel).where(
+                        BackgroundJobModel.kind == "bulk_download",
+                        BackgroundJobModel.payload["instrument_type"].as_string()
+                        == "index",
+                    )
+                )
+            ).scalar_one()
+            assert row.status == "succeeded"
+        called = mock_provider.update_cache_batch.await_args
+        assert called is not None
+        symbols = list(called.args[0])
+        assert sorted(s.code for s in symbols) == ["000300.SH", "000905.SH"]
+        assert all(isinstance(s, Symbol) for s in symbols)
+
+        async with session_factory(engine)() as session:
+            await session.execute(
+                sa_delete(InstrumentModel).where(InstrumentModel.code.in_(codes))
+            )
+            await session.commit()
+
+    async def test_bulk_download_tushare_rejects_index(
+        self, engine: AsyncEngine
+    ) -> None:
+        """tushare 源对指数保持 scope 拒绝(issue #256:不静默换源)。"""
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import select
+
+        from finboard_persistence import InstrumentModel
+        from finboard_persistence.models import BackgroundJobModel
+
+        async with session_factory(engine)() as session:
+            await session.execute(
+                sa_delete(InstrumentModel).where(InstrumentModel.code == "000300.SH")
+            )
+            await session.flush()
+            session.add(
+                InstrumentModel(
+                    code="000300.SH",
+                    name="沪深300",
+                    market="a_share",
+                    instrument_type="index",
+                    exchange="SSE",
+                    status="active",
+                )
+            )
+            await session.commit()
+
+        registry = JobExecutorRegistry()
+        registry.register(
+            "bulk_download",
+            BulkDownloadExecutor(
+                session_maker=_session_maker(engine),  # type: ignore[arg-type]
+                settings_factory=lambda: None,
+            ),
+        )
+        worker = _build_worker(engine, registry)
+        await _enqueue(
+            engine,
+            kind="bulk_download",
+            payload={
+                "market": "a_share",
+                "source": "tushare",
+                "start": "2024-01-01",
+                "instrument_type": "index",
+            },
+        )
+        with patch(
+            "finboard_backtest.background_jobs.executors.bulk_download.build_bar_provider",
+        ) as build:
+            await _drain(worker)
+            # scope 校验先于 provider 构建失败。
+            build.assert_not_called()
+
+        async with session_factory(engine)() as session:
+            row = (
+                await session.execute(
+                    select(BackgroundJobModel).where(
+                        BackgroundJobModel.kind == "bulk_download",
+                        BackgroundJobModel.payload["source"].as_string() == "tushare",
+                    )
+                )
+            ).scalar_one()
+            assert row.status == "failed"
+            assert row.error_code == "tushare_scope_mismatch"
+
+        async with session_factory(engine)() as session:
+            await session.execute(
+                sa_delete(InstrumentModel).where(InstrumentModel.code == "000300.SH")
+            )
+            await session.commit()
