@@ -168,18 +168,24 @@ def _history_detail(
     max_points: int = 200,
     fills_limit: int | None = None,
     fills_offset: int = 0,
+    selection_snapshots: str = "none",
 ) -> dict[str, Any]:
-    """历史详情(equity 按 mode 降采样;fills 按 limit/offset 分页)。"""
+    """历史详情(equity 按 mode 降采样;fills 按 limit/offset 分页;
+    逐决策选股快照按 selection_snapshots 裁剪,默认 none,issue #258)。"""
     from finboard_mcp.downsample import (
         apply_equity_mode,
+        apply_selection_mode,
         clamp_max_points,
         resolve_equity_mode,
+        resolve_selection_mode,
     )
 
     mode = resolve_equity_mode(equity_mode)
+    selection_mode = resolve_selection_mode(selection_snapshots)
     max_equity_points = clamp_max_points(max_points)
     all_equity = list(row.equity_curve) if row.equity_curve else []
     all_fills = list(row.fills) if row.fills else []
+    all_selection = list(row.selection_snapshots) if row.selection_snapshots else []
     safe_offset = max(0, fills_offset)
     safe_limit = len(all_fills) if fills_limit is None else max(0, min(len(all_fills), fills_limit))
     page_fills = all_fills[safe_offset : safe_offset + safe_limit]
@@ -196,9 +202,10 @@ def _history_detail(
             "fills_total": len(all_fills),
             "fills_offset": safe_offset,
             "summary": row.summary,
-            "selection_snapshots": (
-                list(row.selection_snapshots) if row.selection_snapshots else []
+            "selection_snapshots": apply_selection_mode(
+                all_selection, selection_mode=selection_mode
             ),
+            "selection_snapshot_count": len(all_selection),
             "dataset_versions": (dict(row.dataset_versions) if row.dataset_versions else {}),
             "matching_model": (dict(row.matching_model) if row.matching_model else {}),
             "asset_rules": dict(row.asset_rules) if row.asset_rules else None,
@@ -487,6 +494,7 @@ async def backtest_run(
     slippage_bps: Decimal = Decimal("0"),
     equity_mode: str = "summary",
     max_points: int = 200,
+    selection_snapshots: str = "none",
     benchmark_symbol: str | None = None,
     strategy_spec: dict[str, Any] | None = None,
     queue_payload: dict[str, Any] | None = None,
@@ -575,8 +583,10 @@ async def backtest_run(
         from finboard_data.factors import InputsMode
         from finboard_mcp.downsample import (
             apply_equity_mode,
+            apply_selection_mode,
             clamp_max_points,
             resolve_equity_mode,
+            resolve_selection_mode,
         )
         from finboard_persistence import (
             BacktestRunModel,
@@ -587,6 +597,7 @@ async def backtest_run(
         )
 
         mode = resolve_equity_mode(equity_mode)
+        selection_mode = resolve_selection_mode(selection_snapshots)
         max_equity_points = clamp_max_points(max_points)
 
         # 校验参数 + 构建策略
@@ -711,7 +722,8 @@ async def backtest_run(
                 "initial_capital": to_jsonable(result.initial_capital),
                 "final_equity": to_jsonable(result.final_equity),
             }
-            selection_snapshots = [
+            # issue #258:局部列表避开外层 selection_snapshots 模式参数同名遮蔽。
+            selection_rows = [
                 {
                     "decision_at": to_jsonable(s.decision_at),
                     "business_date": str(s.business_date),
@@ -743,7 +755,7 @@ async def backtest_run(
                 summary=result.summary(),
                 dataset_versions=result.dataset_versions,
                 factor_version=result.factor_version,
-                selection_snapshots=selection_snapshots,
+                selection_snapshots=selection_rows,
                 matching_model=result.matching_model,
                 asset_rules=result.asset_rules,
                 fee_assumptions=result.fee_assumptions,
@@ -756,6 +768,7 @@ async def backtest_run(
 
         # issue #172:返回体积控制 —— 默认 summary(降采样),full 与现状一致;
         # 落库仍是全量(history_get 读取时再按 mode 处理)。
+        # issue #258:逐决策选股快照默认 none 不回,只附计数;full 才全量。
         returned_equity = apply_equity_mode(
             equity_curve, equity_mode=mode, max_points=max_equity_points
         )
@@ -769,7 +782,10 @@ async def backtest_run(
                     "equity_point_count": len(equity_curve),
                     "fills": fills,
                     "summary": result.summary(),
-                    "selection_snapshots": selection_snapshots,
+                    "selection_snapshots": apply_selection_mode(
+                        selection_rows, selection_mode=selection_mode
+                    ),
+                    "selection_snapshot_count": len(selection_rows),
                     "dataset_versions": result.dataset_versions,
                     "factor_version": result.factor_version,
                     "matching_model": result.matching_model,
@@ -836,8 +852,10 @@ async def backtest_history_get(
     max_points: int = 200,
     fills_limit: int | None = 200,
     fills_offset: int = 0,
+    selection_snapshots: str = "none",
 ) -> ToolEnvelope:
-    """历史详情(equity 降采样;fills 默认有界 200 条,issue #206)。"""
+    """历史详情(equity 降采样;fills 默认有界 200 条,issue #206;
+    选股快照默认不回,只附计数,issue #258)。"""
     async def _do() -> dict[str, Any]:
         from finboard_persistence import BacktestRunRepository
 
@@ -852,6 +870,7 @@ async def backtest_history_get(
                 max_points=max_points,
                 fills_limit=fills_limit,
                 fills_offset=fills_offset,
+                selection_snapshots=selection_snapshots,
             )
 
     return await run_tool(
@@ -929,7 +948,11 @@ def register(mcp: MCPServer) -> None:
             "000300.SH,指数日线自动走 akshare 指数接口;不传则用等权候选池"
             "基准,基准缺失时 benchmark_return=null 而非 0)、equity_mode"
             "(summary 默认:降采样到 max_points 个关键点,首末点保留;full:"
-            "完整曲线)、max_points(默认 200)、run_async(可选,true 强制异步/"
+            "完整曲线)、max_points(默认 200)、selection_snapshots(同步形态"
+            "返回的逐决策选股快照裁剪,issue #258:none 默认,不返回快照列表"
+            "只回 selection_snapshot_count;summary:每期决策时点+状态+"
+            "selected_symbol_count;full:全量含 selected_symbols 列表;"
+            "落库始终全量)、run_async(可选,true 强制异步/"
             "false 强制同步/省略自动切换,仅 strategy 形态生效)、requested_by"
             "(可选,异步任务归属,默认 agent:mcp:backtest_run)。"
             "(2) strategy_spec 形态:按已发布策略规格 {strategy_id, version} "
@@ -966,6 +989,7 @@ def register(mcp: MCPServer) -> None:
         slippage_bps: str = "0",
         equity_mode: str = "summary",
         max_points: int = 200,
+        selection_snapshots: str = "none",
         benchmark_symbol: str | None = None,
         strategy_spec: dict[str, Any] | None = None,
         queue_payload: dict[str, Any] | None = None,
@@ -989,6 +1013,7 @@ def register(mcp: MCPServer) -> None:
             slippage_bps=Decimal(slippage_bps),
             equity_mode=equity_mode,
             max_points=max_points,
+            selection_snapshots=selection_snapshots,
             benchmark_symbol=benchmark_symbol,
             strategy_spec=strategy_spec,
             queue_payload=queue_payload,
@@ -1015,8 +1040,14 @@ def register(mcp: MCPServer) -> None:
             "查询单条回测历史详情。equity_mode(summary 默认:降采样到 "
             "max_points 个关键点,首末点保留;full:完整曲线)、max_points(默认 "
             "200)、fills_limit/fills_offset(fills 分页,默认有界 200 条,"
-            "issue #206;fills_limit=null 返回全部)。"
-            "返回含 equity_point_count / fills_total / fills_offset 元信息。"
+            "issue #206;fills_limit=null 返回全部)、selection_snapshots"
+            "(逐决策选股快照裁剪,issue #258:none 默认,不返回快照列表只回 "
+            "selection_snapshot_count —— 带 selection 的 run 此字段是单次响应 "
+            "1.2-1.8MB 的主膨胀点;summary:每期决策时点/日期/状态+"
+            "selected_symbol_count;full:全量含 selected_symbols 列表与 "
+            "warnings;落库始终全量)。"
+            "返回含 equity_point_count / fills_total / fills_offset / "
+            "selection_snapshot_count 元信息。"
             "Sharpe 口径(#262):sharpe_ratio=主口径(rf 见 risk_free_annual,"
             "默认 3%/年,ddof=0);sharpe_rf0=rf=0 对照口径(ddof=1),与"
             "research_run 报告 sharpe_ratio 同口径,跨报告比较用 sharpe_rf0。"
@@ -1028,6 +1059,7 @@ def register(mcp: MCPServer) -> None:
         max_points: int = 200,
         fills_limit: int | None = 200,
         fills_offset: int = 0,
+        selection_snapshots: str = "none",
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await backtest_history_get(
@@ -1037,6 +1069,7 @@ def register(mcp: MCPServer) -> None:
             max_points=max_points,
             fills_limit=fills_limit,
             fills_offset=fills_offset,
+            selection_snapshots=selection_snapshots,
         )
 
     @mcp.tool(

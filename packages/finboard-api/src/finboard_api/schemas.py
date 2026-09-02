@@ -462,6 +462,18 @@ class FactorSnapshotOut(BaseSchema):
     warnings: list[str] = Field(default_factory=list)
 
 
+class FactorSnapshotSummaryOut(BaseSchema):
+    """选股快照 summary 投影(issue #258):不含全量 selected_symbols 列表。"""
+
+    decision_at: datetime
+    business_date: str
+    effective_date: str
+    status: str
+    skip_reason: str | None = None
+    checksum: str
+    selected_symbol_count: int
+
+
 class BacktestResultOut(BaseSchema):
     metrics: BacktestMetricsOut
     equity_curve: list[EquityPointOut]
@@ -505,7 +517,11 @@ class BacktestHistoryDetailOut(BaseSchema):
     equity_curve: list[EquityPointOut]
     fills: list[BacktestFillOut]
     summary: str
-    selection_snapshots: list[FactorSnapshotOut] = Field(default_factory=list)
+    # issue #258:selection_snapshots=summary 时逐条为 FactorSnapshotSummaryOut
+    # (计数投影),full 才是 FactorSnapshotOut 全量;落库始终全量。
+    selection_snapshots: list[FactorSnapshotOut | FactorSnapshotSummaryOut] = Field(
+        default_factory=list
+    )
     dataset_versions: dict[str, list[str]] = Field(default_factory=dict)
     factor_version: str | None = None
     matching_model: dict[str, Any] = Field(default_factory=dict)
@@ -513,6 +529,11 @@ class BacktestHistoryDetailOut(BaseSchema):
     fee_assumptions: dict[str, Any] = Field(default_factory=dict)
     benchmark_config: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+    # 裁剪元信息(issue #206/#258 REST parity):全量计数,不受请求裁剪影响。
+    equity_point_count: int | None = None
+    fills_total: int | None = None
+    fills_offset: int | None = None
+    selection_snapshot_count: int | None = None
 
 
 # --------------------------------------------------------------------------- Strategy Preset

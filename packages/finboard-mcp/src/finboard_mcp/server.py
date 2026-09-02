@@ -194,7 +194,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   快照」仅限决策日推导与价格因子,基本面因子(pb/ROE 等)仍 PIT 取自冻结
   快照/研究数据发布;未声明即 single_shot,决策时点只能来自冻结因子快照,
   缺快照入队秒级拒绝(#203)。backtest_history_list/get
-  (history_get fills 分页,默认有界 200 条附 fills_total,#206;history_list
+  (history_get fills 分页,默认有界 200 条附 fills_total,#206;选股快照
+  selection_snapshots=none 默认不回只附 selection_snapshot_count,summary 为
+  决策时点+状态+计数投影,full 才全量,#258 —— 带 selection 的 run 此字段是
+  单次响应 MB 级的主膨胀点;history_list
   symbols 只回前 10 只 + symbol_count)、backtest_history_delete(写)、
   backtest_grid_submit(写,批量参数网格:一次提交 N 组参数 → N 个 backtest_run
   后台任务,展开/上限/校验后同一事务落库,返回 grid_id + job 指针)、
