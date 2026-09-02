@@ -680,6 +680,8 @@ async def backtest_run(
                 "stamp_tax_paid": to_jsonable(result.stamp_tax_paid),
                 "benchmark_return": result.benchmark_return,
                 "excess_return": result.excess_return,
+                # issue #254:基准曲线实际来源(显式标的/每期选股池等权/静态池等权/首标的)
+                "benchmark_source": result.benchmark_source,
                 "initial_capital": to_jsonable(result.initial_capital),
                 "final_equity": to_jsonable(result.final_equity),
             }

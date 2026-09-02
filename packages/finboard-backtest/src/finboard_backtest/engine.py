@@ -31,6 +31,7 @@ from finboard_backtest.context import BacktestContext
 from finboard_backtest.metrics import (
     annualized_return,
     buy_and_hold_return,
+    equal_weight_selection_pool_return,
     equal_weight_universe_return,
     max_drawdown,
     sharpe_ratio,
@@ -400,8 +401,13 @@ class BacktestEngine:
         fills = broker.fills
         orders = broker.all_orders
 
-        # 基准:显式选择 > 等权候选池 > 第一个标的(向后兼容)
+        # 基准回退链(issue #254):显式标的 > 每期选股池等权(选股启用时) >
+        # 静态候选池等权 > 首个标的。选股启用时旧逻辑用静态 cfg.symbols 全池
+        # 或首标的兜底,基准几乎必然不在当日候选池内、口径失真;现在优先跟随
+        # 每期选股结果(动态等权),回退来源记录在 result.benchmark_source 并
+        # 打日志,report 可见。
         benchmark_curve: list[tuple[date, Decimal]] = []
+        benchmark_source: str | None = None
         bench_cfg = self._config.benchmark
         if bench_cfg.symbol is not None:
             bench_bars = benchmark_bars.get(bench_cfg.symbol, [])
@@ -410,17 +416,44 @@ class BacktestEngine:
                 benchmark_curve = buy_and_hold_return(
                     bar_prices, self._config.initial_capital
                 )
-        elif bench_cfg.equal_weight_universe and len(bars_by_symbol) > 1:
-            benchmark_curve = equal_weight_universe_return(
-                bars_by_symbol, self._config.initial_capital
-            )
+                benchmark_source = f"explicit_symbol:{bench_cfg.symbol}"
         else:
-            first_symbol_bars = next(iter(bars_by_symbol.values()), [])
-            if first_symbol_bars:
-                bar_prices = [(b.timestamp.date(), b.close) for b in first_symbol_bars]
-                benchmark_curve = buy_and_hold_return(
-                    bar_prices, self._config.initial_capital
+            published_periods = [
+                (snapshot.effective_date, snapshot.selected_symbols)
+                for snapshot in selection_snapshots
+                if snapshot.status is FactorSnapshotStatus.PUBLISHED
+                and snapshot.selected_symbols
+            ]
+            if published_periods:
+                benchmark_curve = equal_weight_selection_pool_return(
+                    bars_by_symbol,
+                    published_periods,
+                    self._config.initial_capital,
                 )
+                if benchmark_curve:
+                    benchmark_source = "equal_weight_selection_pool"
+            if not benchmark_curve and bench_cfg.equal_weight_universe and len(bars_by_symbol) > 1:
+                benchmark_curve = equal_weight_universe_return(
+                    bars_by_symbol, self._config.initial_capital
+                )
+                if benchmark_curve:
+                    benchmark_source = "equal_weight_static_pool"
+            if not benchmark_curve:
+                first_symbol_bars = next(iter(bars_by_symbol.values()), [])
+                if first_symbol_bars:
+                    bar_prices = [
+                        (b.timestamp.date(), b.close) for b in first_symbol_bars
+                    ]
+                    benchmark_curve = buy_and_hold_return(
+                        bar_prices, self._config.initial_capital
+                    )
+                    benchmark_source = "first_symbol"
+        if benchmark_source is not None:
+            logger.info(
+                "backtest.benchmark_source",
+                source=benchmark_source,
+                points=len(benchmark_curve),
+            )
 
         # 绩效指标
         ret = total_return(equity_curve)
@@ -491,4 +524,5 @@ class BacktestEngine:
             ),
             fee_assumptions=self._config.resolved_fees().as_dict(),
             benchmark_config=self._config.benchmark.as_dict(),
+            benchmark_source=benchmark_source,
         )

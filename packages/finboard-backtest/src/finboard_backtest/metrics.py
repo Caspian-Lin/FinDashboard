@@ -290,6 +290,69 @@ def equal_weight_universe_return(
     return curve
 
 
+def equal_weight_selection_pool_return(
+    bars_by_symbol: Mapping[str, Sequence[Bar]],
+    selection_periods: Sequence[tuple[date, Sequence[str]]],
+    initial_capital: Decimal,
+) -> list[tuple[date, Decimal]]:
+    """随选股结果变动的等权基准(issue #254)。
+
+    ``selection_periods`` 是 ``[(effective_date, selected_symbols), ...]``
+    (按 effective_date 升序)。每个交易日取「已生效的最近一期选股结果」为
+    当期基准成分,日收益 = 成分股日收益等权平均(每日再平衡);当期无成分
+    或成分缺价格时该日权益持平(基准持币,与策略同样无法交易)。
+
+    与 :func:`equal_weight_universe_return`(静态全池买入持有)的区别:
+    成分随每期选股结果变动,基准口径与策略实际可交易池一致,不再被静态
+    ``cfg.symbols`` 全池稀释。全部日期都无可用成分时返回空曲线。
+    """
+    periods = sorted(
+        ((effective, tuple(symbols)) for effective, symbols in selection_periods),
+        key=lambda item: item[0],
+    )
+    if not periods:
+        return []
+
+    close_by_date: dict[date, dict[str, Decimal]] = defaultdict(dict)
+    all_dates: set[date] = set()
+    for code, bars in bars_by_symbol.items():
+        for bar in bars:
+            all_dates.add(bar.timestamp.date())
+            if bar.close > 0:
+                close_by_date[bar.timestamp.date()][code] = bar.close
+    if not all_dates:
+        return []
+
+    calendar = sorted(all_dates)
+    equity = initial_capital
+    curve: list[tuple[date, Decimal]] = []
+    period_index = 0
+    constituents: tuple[str, ...] = ()
+    has_constituent_day = False
+    for index, day in enumerate(calendar):
+        while period_index < len(periods) and periods[period_index][0] <= day:
+            constituents = periods[period_index][1]
+            period_index += 1
+        if constituents and index > 0:
+            has_constituent_day = True
+            prev_day = calendar[index - 1]
+            returns: list[Decimal] = []
+            for symbol in constituents:
+                prev_close = close_by_date[prev_day].get(symbol)
+                close = close_by_date[day].get(symbol)
+                if prev_close is not None and close is not None and prev_close > 0:
+                    returns.append(close / prev_close - Decimal("1"))
+            if returns:
+                equity *= Decimal("1") + sum(returns) / Decimal(len(returns))
+        curve.append((day, equity))
+
+    if not has_constituent_day:
+        # 从未有任何选股成分生效日:基准曲线无意义,按缺失处理交由调用方
+        # 回退(全部持平但合法的曲线不受影响)。
+        return []
+    return curve
+
+
 def trading_days_between(start: date, end: date) -> int:
     """估算交易日数(排除周末,粗略)。"""
     days = 0

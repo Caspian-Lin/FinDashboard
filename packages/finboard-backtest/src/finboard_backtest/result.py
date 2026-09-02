@@ -43,6 +43,10 @@ class BacktestResult:
     # 基准(issue #184:基准缺失时为 None,禁止静默 0.0)
     benchmark_return: float | None = None
     excess_return: float | None = None
+    # issue #254:基准曲线的实际来源(explicit_symbol:<code> /
+    # equal_weight_selection_pool / equal_weight_static_pool / first_symbol),
+    # 回测配置与实际使用的基准口径可区分。
+    benchmark_source: str | None = None
 
     # 元信息
     start_date: date | None = None
@@ -85,6 +89,8 @@ class BacktestResult:
                 f"基准收益:   {self.benchmark_return:+.2%}",
                 f"超额收益:   {self.excess_return:+.2%}",
             ]
+            if self.benchmark_source:
+                lines += [f"基准来源:   {self.benchmark_source}"]
         elif self.benchmark_curve:
             lines += ["", "基准收益:   缺失(未计算)"]
         if self.matching_model:

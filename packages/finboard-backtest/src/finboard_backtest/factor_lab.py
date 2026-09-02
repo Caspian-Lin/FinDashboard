@@ -1259,14 +1259,16 @@ async def _build_price_feature_snapshot_in_processes(
     volatility_windows: tuple[int, ...],
     process_workers: int,
     on_progress: Callable[[str, int, int], None] | None,
+    symbols: Sequence[str] | None = None,
 ) -> FeatureSnapshot:
     """使用独立 spawn 进程计算价格特征,不占用 API 进程的 GIL。"""
 
     release = provider.release
-    total = len(release.instruments)
+    instruments = _scoped_instruments(release, symbols)
+    total = len(instruments)
     worker_count = min(process_workers, total)
     tasks = asyncio.Queue[_PriceFeatureProcessTask]()
-    for item in release.instruments:
+    for item in instruments:
         tasks.put_nowait(
             _PriceFeatureProcessTask(
                 code=item.code,
@@ -1321,7 +1323,7 @@ async def _build_price_feature_snapshot_in_processes(
 
         observations = [
             observation
-            for instrument in release.instruments
+            for instrument in instruments
             for observation in observations_by_symbol[instrument.code]
         ]
         if not observations:
@@ -1367,6 +1369,23 @@ async def _build_price_feature_snapshot_in_processes(
     return snapshot
 
 
+def _scoped_instruments(
+    release: ResearchDatasetRelease,
+    symbols: Sequence[str] | None,
+) -> Sequence[ReleasedInstrument]:
+    """按符号清单收窄发布 instruments(issue #254)。
+
+    ``symbols`` 为 None / 空时返回全部 instruments(既有行为);非空时只保留
+    命中的标的,用于 multi_period 回放在声明 ``explicit_symbols`` 时跳过对
+    发布全市场的价格特征重算(universe 过滤域之外的特征无人消费)。
+    """
+    instruments = release.instruments
+    if not symbols:
+        return instruments
+    wanted = set(symbols)
+    return [item for item in instruments if item.code in wanted]
+
+
 async def build_price_feature_snapshot(
     *,
     provider: FrozenReleaseProvider,
@@ -1377,12 +1396,17 @@ async def build_price_feature_snapshot(
     max_concurrency: int = 8,
     process_workers: int = 0,
     on_progress: Callable[[str, int, int], None] | None = None,
+    symbols: Sequence[str] | None = None,
 ) -> FeatureSnapshot:
     """从 #77 冻结发布构建 ETF/多资产价格特征快照。
 
     每个标的只返回价格特征所需的轻量数据,跨标的读取使用有界 worker;
     ``process_workers`` 大于 0 时使用独立 spawn 进程,避免大量 Parquet
     解码和 Decimal 转换阻塞 API 进程;结果仍按冻结发布顺序汇总。
+
+    ``symbols``(issue #254)非空时只重算命中标的——multi_period 回放声明
+    ``explicit_symbols`` 时按声明域收窄,行为不变(过滤域之外的特征无消费方),
+    每期重算成本从发布全市场降到声明规模。
     """
 
     _require_aware(decision_at, "decision_at")
@@ -1392,9 +1416,14 @@ async def build_price_feature_snapshot(
         raise ValueError("process_workers 必须 >= 0")
     release = provider.release
     end = min(decision_at.date(), release.end_date)
-    total = len(release.instruments)
+    instruments = _scoped_instruments(release, symbols)
+    total = len(instruments)
     if total == 0:
-        raise FactorAnalysisError("冻结发布没有可计算的标的")
+        raise FactorAnalysisError(
+            "冻结发布没有可计算的标的"
+            if not symbols
+            else "explicit_symbols 声明的标的均不在冻结发布 instruments 中"
+        )
     if process_workers > 0:
         return await _build_price_feature_snapshot_in_processes(
             provider=provider,
@@ -1404,10 +1433,11 @@ async def build_price_feature_snapshot(
             volatility_windows=volatility_windows,
             process_workers=process_workers,
             on_progress=on_progress,
+            symbols=symbols,
         )
 
     queue: asyncio.Queue[ReleasedInstrument] = asyncio.Queue()
-    for instrument in release.instruments:
+    for instrument in instruments:
         queue.put_nowait(instrument)
     observations_by_symbol: dict[str, list[FeatureObservation]] = {}
     done_count = 0
@@ -1454,7 +1484,7 @@ async def build_price_feature_snapshot(
 
     observations = [
         observation
-        for instrument in release.instruments
+        for instrument in instruments
         for observation in observations_by_symbol[instrument.code]
     ]
     if not observations:
