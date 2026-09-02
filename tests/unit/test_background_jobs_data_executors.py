@@ -402,7 +402,7 @@ class TestResearchDataSyncPayload:
 
         executor = ResearchDataSyncExecutor(
             session_maker=_fake_session_maker(),
-            provider_factory=_boom_factory,  # type: ignore[arg-type,return-value]
+            provider_factory=_boom_factory,  # type: ignore[arg-type]
         )
         job = _make_job(
             {
