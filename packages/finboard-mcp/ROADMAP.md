@@ -9,7 +9,7 @@
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
-| `finboard.run.*` | 7 | list / get / artifacts(只读);queue / cancel / replay / lineage(写) | ResearchRun 查询 + 生命周期(3 只读 + 4 写,✅ #127;list/get/queue 返回 execution_mode single_shot\|multi_period,#183;queue 入队 universe 候选池非空预检,空池秒级 invalid_argument 附排除统计与缺失字段,#186;single_shot 缺冻结快照入队秒级拒绝附 execution_mode 与缺失因子源,multi_period 必须显式声明 rebalance_frequency,#203) |
+| `finboard.run.*` | 7 | list / get / artifacts(只读);queue / cancel / replay / lineage(写) | ResearchRun 查询 + 生命周期(3 只读 + 4 写,✅ #127;list/get/queue 返回 execution_mode single_shot\|multi_period,#183;queue 入队 universe 候选池非空预检,空池秒级 invalid_argument 附排除统计与缺失字段,#186;single_shot 缺冻结快照入队秒级拒绝附 execution_mode 与缺失因子源,multi_period 必须显式声明 rebalance_frequency,#203;组合可行性预检——静态池 < ceil(1/生效 max_risk_contribution) 秒级拒绝 + risk_config.overrides 接线风险退出(两分区键位:组合约束在 portfolio_config、风险退出在 risk_config),#303) |
 | 研究代码与沙箱 | 7 | research_code submit / list / get / rollback / promote、research_code_run enqueue / get | 代码静态校验与版本化(5 个,✅ #215/#219);一次性沙箱执行(2 个,✅ #216),研究域不连 broker;screen 显式绑定通道(✅ #234,无新工具) |
 | `finboard.memory.*` | 7 | remember / list / get / forget / correct / confirm / archive | 研究长期记忆 |
 | 数据查询 | 9 | instrument list/get/search、dataset_release list/get、dataset_manifest_list、data_cache_status、data_quality_check、tushare_quota | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(✅ #124) |

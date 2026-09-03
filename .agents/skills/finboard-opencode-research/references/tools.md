@@ -93,12 +93,20 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
     multi_period 声明频率后价格因子不需要,基本面因子仍需快照/研究数据发布
   - `parameters`: `{}` —— 不声明即 single_shot(需冻结快照);声明
     `rebalance_frequency=monthly|quarterly` 触发多期回放(#183),非法值入队即拒
-  - `validation_config` / `portfolio_config` / `risk_config` / `execution_config` /
-    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空;
-    `portfolio_config.overrides.risk_factor_limits`(#266)可声明风险因子
-    active 暴露上限(`[{factor, max_active_exposure}]`,因子名与冻结特征
-    feature_id 同名,如 market_beta / size_exposure / 行业 one-hot 列名),
-    暴露缺失降级为具名 warning,不可满足执行期 fail-closed
+  - `validation_config` / `execution_config` /
+    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空
+  - `portfolio_config` / `risk_config`: `{}` —— 组合约束 / 风险退出分区覆盖
+    (#303,键位不可混):
+    `portfolio_config` 管组合约束(overrides 直接就是键值),如
+    `{"max_risk_contribution": 0.5}`(默认 0.35,合法域 0<值<=1,=1 关闭该
+    约束;隐含买入池 n>=ceil(1/值))、`risk_factor_limits`(#266,可声明风险
+    因子 active 暴露上限 `[{factor, max_active_exposure}]`,因子名与冻结特征
+    feature_id 同名,如 market_beta / size_exposure / 行业 one-hot 列名,
+    暴露缺失降级为具名 warning,不可满足执行期 fail-closed);
+    `risk_config` 管风险退出(stop-loss 等),形态 `{"rules": [{"rule_type":
+    "price_stop_loss", "enabled": true, "threshold": 0.08}]}`,按 rule_type 与
+    规格策略同名合并、覆盖同名键(未声明字段继承基准值;新 rule_type 须给
+    全字段含 rationale);manifest 原样冻结,覆盖只发生在消费端
   - `code_version`*: 7-64 字符,**本 run 自身的代码版本标识**(如 FinBoard git
     commit),冻结进 manifest/checksum 供追溯;**与数据集发布的 code_version 同名
     但互不校验**,别拿数据集 git hash 顶替
@@ -119,8 +127,15 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   explicit ∩ 发布标的(`total_candidates` 即交集规模),全市场评估仅在未声明
   explicit 时进行;声明但发布中缺失的标的发具名 warning
   `universe_explicit_symbol_missing`,不静默忽略。
+- **组合可行性预检(issue #303)**:入队解析生效 `max_risk_contribution`
+  (portfolio_config.overrides 可覆盖,默认 0.35)后,静态候选池
+  `< ceil(1/阈值)` 秒级 `invalid_argument`(默认 0.35 隐含买入池 >=3,
+  候选只有 2 只的 screen run 此前会白跑 1-2 小时才在组合阶段 REJECTED),
+  错误附排除统计、生效阈值与 portfolio_config 键位修复路径;
+  `max_risk_contribution` 非法值与 `risk_config.overrides` 形态错误同样入队
+  即拒。逐期真实买入池入队期不可精确预知,运行期 fail-closed 兜底不变。
 - 错误:`invalid_argument`(schema 校验 / 数据发布不匹配 / rebalance_frequency
-  非法 / 候选池为空)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
+  非法 / 候选池为空 / 组合可行性预检失败 #303)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
 
 ### finboard_run_cancel(✅ #127,写)
 取消 ResearchRun(queued/running/interrupted/failed → cancelled)。
