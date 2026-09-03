@@ -601,14 +601,14 @@ def _history_from_points(
 ) -> SymbolCloseHistory | None:
     """把发布全区间 PIT bars 转成可切片的 close 历史(#287)。
 
-    ``available_at`` / bar 日期任一序列非递减(异常数据)时返回 ``None``:
-    前缀切片不再与逐期过滤等价,调用方对该标的回退逐期读取。
+    ``available_at`` / bar 日期任一序列出现回退(异常数据,非递减被破坏)时
+    返回 ``None``:前缀切片不再与逐期过滤等价,调用方对该标的回退逐期读取。
     """
     available = tuple(item.available_at for item in points)
     dates = tuple(item.bar.timestamp.date() for item in points)
     closes = tuple(float(item.bar.close) for item in points)
-    if any(a < b for a, b in pairwise(available)) or any(
-        a < b for a, b in pairwise(dates)
+    if any(later < earlier for earlier, later in pairwise(available)) or any(
+        later < earlier for earlier, later in pairwise(dates)
     ):
         return None
     return SymbolCloseHistory(available_at=available, dates=dates, closes=closes)
