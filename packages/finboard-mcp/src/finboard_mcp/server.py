@@ -275,6 +275,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   akshare 兜底,失败降级为 warning);发布侧新增 convertible_metrics
   (转股价值/转股溢价率 = 快照转股价 x 同日正股收盘,非全历史 PIT,
   只接受 A 股转债标的),convertible_double_low 据此消费溢价观测。
+  期货链路(#267):sync_universe 从受控登记表自动登记 IF/IH/IC/IM 期货
+  主连(instrument_type=futures,market=future);bulk_download_start 的
+  futures(需配 market=future)走 akshare 新浪主连日线入缓存(tushare 源
+  fail-visible 拒绝);主连是换月拼接序列,仅研究信号/基准、不可当作
+  可成交合约,is_benchmark_only_instrument 与指数同口径排除出候选池;
+  mixed 发布展开含期货,`futures_instruments` 质量块可见。
   补全「数据→因子→策略」闭环的数据准备第一步:agent 能拉 K 线、发布数据集、
   修复质量缺陷、同步 ETF 元数据。不连 broker / 账户 / 订单 / 持仓。
 - 验证实验(7,✅ #138+#233):validation_experiment create/list/get/reject/
