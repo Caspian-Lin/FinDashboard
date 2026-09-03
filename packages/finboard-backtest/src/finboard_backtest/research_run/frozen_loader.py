@@ -78,6 +78,33 @@ class FeatureSnapshotProvider(Protocol):
 #: 信号量约束;这里限制的是同时在途的任务数与结果占用的峰值内存)。
 _LOAD_CONCURRENCY = 8
 
+
+def _declared_domain_instruments(
+    manifest: ResearchRunManifest,
+    instruments: Sequence[ReleasedInstrument],
+) -> list[ReleasedInstrument]:
+    """声明 ``explicit_symbols`` 时把评估域收窄为 explicit ∩ 发布标的(#254/#299)。
+
+    close 矩阵预建与逐期机械字段加载共用本收窄:声明域之外的价格 /
+    执行元数据 / 研究观测不会被任何下游消费(universe 过滤与信号求值都
+    在声明域内,#254)。声明但发布中缺失的标的由 ``_apply_universe_filter``
+    发具名 warning,此处不重复告警。
+    """
+    from finboard_backtest.strategy_spec.universe_precheck import explicit_symbol_domain
+
+    narrowed, _missing = explicit_symbol_domain(
+        manifest.strategy_spec.universe, instruments
+    )
+    if len(narrowed) != len(instruments):
+        logger.debug(
+            "frozen_loader.close_matrix_domain_narrowed",
+            declared=len(manifest.strategy_spec.universe.explicit_symbols),
+            domain_size=len(narrowed),
+            release_size=len(instruments),
+            message="close 矩阵与机械字段加载按 explicit_symbols 声明域收窄",
+        )
+    return narrowed
+
 #: close 矩阵全区间读取使用的 decision_at 上界(发布区间内的 bar 全部可见;
 #: available_at 由各市场收盘规则派生,不会超过发布末日)。
 _PIT_UNBOUNDED = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
@@ -200,7 +227,7 @@ class FrozenInputLoader:
         provider = self.release_provider_factory(release_ref.artifact_id)
         release = provider.release
         included_candidates, lot_info_by_symbol = _build_candidates_and_lots(
-            list(release.instruments)
+            _declared_domain_instruments(manifest, list(release.instruments))
         )
         prices = await self._load_close_prices(
             provider, included_candidates, decision_at
@@ -247,13 +274,17 @@ class FrozenInputLoader:
         其它期会看到「已开建但未完成」的空矩阵而全部回退逐期读取(结果仍等值,
         但矩阵收益清零且重复读盘)。加载前显式调用本方法把首建收敛到单一顺序
         点。非真实 provider(矩阵不启用)与已建情形零成本返回。
+
+        issue #299:声明 ``explicit_symbols`` 时预建范围收窄到声明域
+        (∩ 发布标的),不再为全发布(可能数千只)付一次性全量读取成本;
+        未声明时行为不变(全发布预建)。
         """
         if self._close_histories_built:
             return
         release_ref = self._bars_release_ref(manifest)
         provider = self.release_provider_factory(release_ref.artifact_id)
         included_candidates, _ = _build_candidates_and_lots(
-            list(provider.release.instruments)
+            _declared_domain_instruments(manifest, list(provider.release.instruments))
         )
         await self._ensure_close_histories(provider, included_candidates)
 
