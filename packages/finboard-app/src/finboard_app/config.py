@@ -82,6 +82,11 @@ class Settings(BaseSettings):
         default="",
         description="逗号分隔的逻辑队列白名单;空字符串表示消费全部队列",
     )
+    # worker 进程数(issue #286):默认 1 保持单进程行为;>1 时 ``finboard worker
+    # run`` 作为父进程拉起 N 个独立 worker 子进程(各自 engine / session_maker /
+    # worker_id),把 GIL 边界从 1 核扩到 N 核。kind_concurrency 由 claim_next
+    # 的 SQL 层约束跨进程生效。回滚 = --workers 1(默认)+ revert。
+    worker_processes: int = Field(default=1, ge=1, le=64)
 
     # ---- Broker ----
     broker: BrokerKind = BrokerKind.MOCK
