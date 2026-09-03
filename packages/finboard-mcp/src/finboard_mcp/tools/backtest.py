@@ -719,6 +719,8 @@ async def backtest_run(
                 "benchmark_source": result.benchmark_source,
                 # issue #255:选股逐期诊断(整期 SKIPPED / 数据集未发布可见)
                 "selection_diagnostics": result.selection_diagnostics,
+                # issue #285:job 级分段耗时(总耗时/数据加载/parquet 聚合)
+                "timing": result.timing,
                 "initial_capital": to_jsonable(result.initial_capital),
                 "final_equity": to_jsonable(result.final_equity),
             }
