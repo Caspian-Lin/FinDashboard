@@ -38,14 +38,19 @@ from finboard_backtest.research_code import (
     user_factor_reference_gate_error,
 )
 from finboard_backtest.research_run import (
+    REPLAYABLE_SOURCE_STATUSES,
     FrozenArtifactRef,
     ResearchActorType,
     ResearchRunConflictError,
     ResearchRunManifest,
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
+    replay_guard_error,
     to_json_value,
     validate_strategy_dataset_capabilities,
+)
+from finboard_backtest.research_run.config_overrides import (
+    research_portfolio_gate_error,
 )
 from finboard_backtest.research_run.contracts import JsonValue, stable_checksum
 from finboard_backtest.research_run.signal_engine import (
@@ -279,6 +284,23 @@ async def queue_research_run(
             ),
         )
 
+    # issue #303:入队组合可行性预检(与 MCP ``_build_queued_manifest`` 共用
+    # 同一门控函数)—— 解析生效 max_risk_contribution(portfolio_config.overrides
+    # 可覆盖,默认 0.35)后,静态候选池 < ceil(1/阈值) 时秒级 422(附排除统计、
+    # 生效阈值与键位修复路径),不再等执行期组合阶段 RiskBudgetError 才
+    # REJECTED;阈值非法值与 risk_config.overrides 形态错误同样入队即拒
+    # (分区键位:组合约束在 portfolio_config,风险退出在 risk_config)。
+    # 逐期真实买入池入队期不可精确预知,运行期 fail-closed 兜底(#91)不变。
+    portfolio_gate_error = research_portfolio_gate_error(
+        preview=preview,
+        risk_exit_policy=spec.risk_exit_policy,
+        portfolio_overrides=body.portfolio_config,
+        risk_overrides=body.risk_config,
+        decision_date=primary.end_date,
+    )
+    if portfolio_gate_error is not None:
+        raise HTTPException(status_code=422, detail=portfolio_gate_error)
+
     run_id = _run_id(body.idempotency_key)
     try:
         manifest = ResearchRunManifest(
@@ -503,14 +525,20 @@ async def queue_research_replay(
     body: ResearchRunReplayIn,
     session: AsyncSession = Depends(get_db_session),
 ) -> ResearchRunOut:
-    """复制完整冻结清单为新 queued 运行;仍不在 HTTP 中执行。"""
+    """复制完整冻结清单为新 queued 运行;仍不在 HTTP 中执行。
+
+    issue #305:interrupted 源放开为事故恢复通道 —— 新 run 自动继承原
+    manifest 全部冻结输入(含 factor_snapshots 全部 ID),血缘标注
+    ``replay_of_run_id`` + ``replay_source_status``;cancelled 仍拒绝,
+    completed 重放行为不变。
+    """
 
     store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
     source = await store.get(run_id)
     if source is None:
         raise HTTPException(status_code=404, detail="源研究运行不存在")
-    if source.status is not ResearchRunStatus.COMPLETED:
-        raise HTTPException(status_code=409, detail="仅允许重放已完成运行")
+    if source.status not in REPLAYABLE_SOURCE_STATUSES:
+        raise HTTPException(status_code=409, detail=replay_guard_error(source.status))
     manifest = replace(
         source.manifest,
         run_id=_run_id(body.idempotency_key),
@@ -518,6 +546,7 @@ async def queue_research_replay(
         requested_by=body.requested_by,
         actor_type=ResearchActorType.HUMAN,
         replay_of_run_id=run_id,
+        replay_source_status=source.status.value,
     )
     try:
         record, created = await store.create_or_get(manifest)

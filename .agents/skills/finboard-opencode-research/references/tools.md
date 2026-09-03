@@ -93,12 +93,20 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
     multi_period 声明频率后价格因子不需要,基本面因子仍需快照/研究数据发布
   - `parameters`: `{}` —— 不声明即 single_shot(需冻结快照);声明
     `rebalance_frequency=monthly|quarterly` 触发多期回放(#183),非法值入队即拒
-  - `validation_config` / `portfolio_config` / `risk_config` / `execution_config` /
-    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空;
-    `portfolio_config.overrides.risk_factor_limits`(#266)可声明风险因子
-    active 暴露上限(`[{factor, max_active_exposure}]`,因子名与冻结特征
-    feature_id 同名,如 market_beta / size_exposure / 行业 one-hot 列名),
-    暴露缺失降级为具名 warning,不可满足执行期 fail-closed
+  - `validation_config` / `execution_config` /
+    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空
+  - `portfolio_config` / `risk_config`: `{}` —— 组合约束 / 风险退出分区覆盖
+    (#303,键位不可混):
+    `portfolio_config` 管组合约束(overrides 直接就是键值),如
+    `{"max_risk_contribution": 0.5}`(默认 0.35,合法域 0<值<=1,=1 关闭该
+    约束;隐含买入池 n>=ceil(1/值))、`risk_factor_limits`(#266,可声明风险
+    因子 active 暴露上限 `[{factor, max_active_exposure}]`,因子名与冻结特征
+    feature_id 同名,如 market_beta / size_exposure / 行业 one-hot 列名,
+    暴露缺失降级为具名 warning,不可满足执行期 fail-closed);
+    `risk_config` 管风险退出(stop-loss 等),形态 `{"rules": [{"rule_type":
+    "price_stop_loss", "enabled": true, "threshold": 0.08}]}`,按 rule_type 与
+    规格策略同名合并、覆盖同名键(未声明字段继承基准值;新 rule_type 须给
+    全字段含 rationale);manifest 原样冻结,覆盖只发生在消费端
   - `code_version`*: 7-64 字符,**本 run 自身的代码版本标识**(如 FinBoard git
     commit),冻结进 manifest/checksum 供追溯;**与数据集发布的 code_version 同名
     但互不校验**,别拿数据集 git hash 顶替
@@ -119,8 +127,15 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   explicit ∩ 发布标的(`total_candidates` 即交集规模),全市场评估仅在未声明
   explicit 时进行;声明但发布中缺失的标的发具名 warning
   `universe_explicit_symbol_missing`,不静默忽略。
+- **组合可行性预检(issue #303)**:入队解析生效 `max_risk_contribution`
+  (portfolio_config.overrides 可覆盖,默认 0.35)后,静态候选池
+  `< ceil(1/阈值)` 秒级 `invalid_argument`(默认 0.35 隐含买入池 >=3,
+  候选只有 2 只的 screen run 此前会白跑 1-2 小时才在组合阶段 REJECTED),
+  错误附排除统计、生效阈值与 portfolio_config 键位修复路径;
+  `max_risk_contribution` 非法值与 `risk_config.overrides` 形态错误同样入队
+  即拒。逐期真实买入池入队期不可精确预知,运行期 fail-closed 兜底不变。
 - 错误:`invalid_argument`(schema 校验 / 数据发布不匹配 / rebalance_frequency
-  非法 / 候选池为空)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
+  非法 / 候选池为空 / 组合可行性预检失败 #303)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
 
 ### finboard_run_cancel(✅ #127,写)
 取消 ResearchRun(queued/running/interrupted/failed → cancelled)。
@@ -128,11 +143,20 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
 - 返回:更新后的 ResearchRun 详情
 - 错误:`conflict`(非法状态转换)
 
-### finboard_run_replay(✅ #127,写)
-复制 completed ResearchRun 为新 queued 运行(**不执行**)。
+### finboard_run_replay(✅ #127,写;#305 放开 interrupted)
+复制 completed 或 interrupted ResearchRun 为新 queued 运行(**不执行**)。
 - 参数:`run_id: str`、`idempotency_key: str`、`requested_by: str`
-- 返回:新 ResearchRun 详情(`replay_of_run_id` 指向源)
-- 错误:`not_found`(源不存在)、`conflict`(源未 completed / 幂等冲突)
+- 返回:新 ResearchRun 详情(`replay_of_run_id` + manifest `replay_source_status`
+  标注血缘;REST 等价入口 `POST /api/research/runs/{run_id}/replay`)
+- **interrupted 即事故恢复通道(#305)**:run 被标 interrupted(error_summary
+  指向本工具)后,**一条命令按冻结输入恢复** —— 新 run 自动继承原 manifest
+  全部冻结输入(dataset_release_ids / factor_snapshots 全部 ID,零手工重填),
+  `input_checksum` 与源一致;源 run 不被复活,也不复活原 job
+  (job 侧自动恢复由 `requeue_due` 覆盖)
+- completed 源保持确定性重放对照(结果漂移判 `non_deterministic_replay`);
+  cancelled 是显式用户意图,拒绝重放
+- 错误:`not_found`(源不存在)、`conflict`(源状态不可重放(仅
+  completed/interrupted 可重放)/ 幂等冲突)
 
 ### finboard_run_lineage
 查询某 ResearchRun 内指定 trace_id 的 artifact 血缘(BFS 向上遍历 parent)。
@@ -425,12 +449,19 @@ status=active 且 promotion_status=passed 可被规格引用**(retired/未晋级
 - builtin 部分无 DB 依赖;user_defined 查 `research_code_artifacts` 表。
 
 ### finboard_feature_snapshot_list
-列出已发布的特征快照(版本化、时点化、不可变)。
-- 参数:`dataset_release_id?: str`、`limit?: int = 100`
-- 返回:`list[{snapshot_id, dataset_release_id, decision_at, checksum, observations, ...}]`
+列出特征快照(版本化、时点化、不可变)。**默认 header-only(#309)**:
+不含 observations 逐条值——大快照单条可达 MB 级,默认全量会被 MCP 客户端截断。
+- 参数:`dataset_release_id?: str`、
+  `source_run_id?: str`(按产出 run 精确过滤,**RCR→快照映射一条查询完成**,
+  替代逐个单查)、`include_observations?: bool = false`(显式 true 才返回
+  完整 observations,旧行为,响应大)、`limit?: int = 100`
+- 返回(header):`list[{snapshot_id, dataset_release_id, source_run_id,
+  decision_at, published_at, framework_version, feature_names, symbol_count,
+  observation_count, code_version, checksum, ...}]`
+  (include_observations=true 时每条另含 observations)
 
 ### finboard_feature_snapshot_get
-查询单个特征快照详情(含完整 observations 因子值)。
+查询单个特征快照详情(含完整 observations 因子值;list 瘦身后取全量的常规路径)。
 - 参数:`snapshot_id: str`
 - 返回:`{snapshot_id, ..., observations, checksum}`;未找到返回 `not_found`。
 
@@ -1164,10 +1195,14 @@ SDK fail-fast。
 - 参数:`job_id: str`、`view?: "none"|"summary"|"detail" = "summary"`、
   `data_hash?: str`
 - 返回(默认 summary,#206):JobOut 全字段但**剥离 payload**,附 `data_hash`
-  (状态指纹);`view=none` 只回轮询最小集(status/phase/progress_*/result_ref/
-  error_*/attempt);`view=detail` 完整含 payload(诊断用)。轮询时把上次
-  `data_hash` 传回:状态未变 → `{unchanged: true, data_hash, status}` 不重发
-  全量(成功后 `result_ref` 携带产物引用,如特征快照的 snapshot_id)
+  (状态指纹,含 run_status);`view=none` 只回轮询最小集(status/phase/
+  progress_*/result_ref/error_*/attempt/run_status);`view=detail` 完整含
+  payload(诊断用)。轮询时把上次 `data_hash` 传回:状态未变 →
+  `{unchanged: true, data_hash, status, run_status}` 不重发全量(成功后
+  `result_ref` 携带产物引用,如特征快照的 snapshot_id)
+- **run_status(#306)**:kind=research_run 的任务附关联 `research_runs.status`
+  (查不到为 null)——「run interrupted 但 job 仍 running」的两表不一致一眼
+  可见;REST `GET /api/jobs/{id}` 同口径,列表端点不 join 恒 null
 - 错误:`not_found`、`invalid_argument`(view 非法)
 
 ### finboard_job_enqueue **[写]**
@@ -1398,8 +1433,10 @@ active 版本。
 
 ### finboard_research_code_promote(写,✅ #219)
 将指定 draft artifact 置为正式 active。必须传同一 artifact 的
-`screen_run_id`(完成 ResearchRun 的 `factor_screen`/`strategy_screen`,或
-成功 RCR 的 screen 指标)与 `validation_experiment_id`(#57),且实验为
+`screen_run_id`(ResearchRun 的 `factor_screen`/`strategy_screen`:completed,
+或 rejected+partial —— 组合阶段硬约束拒绝但保留的 screen 证据,#304,证据
+`execution.source_run_status` 显式标注来源 run 状态;或成功 RCR 的 screen
+指标)与 `validation_experiment_id`(#57),且实验为
 `validated_oos`、`final_test_unsealed=true`,version_stamp 绑定相同
 artifact/name/kind/commit。
 - 默认 screen 门:`abs(rank_ic) >= 0.02`、平均换手率 `<= 0.80`、相关性

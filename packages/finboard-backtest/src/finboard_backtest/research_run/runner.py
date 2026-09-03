@@ -15,6 +15,7 @@ import structlog
 
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.contracts import (
+    REPLAYABLE_SOURCE_STATUSES,
     RESEARCH_PORTFOLIO_PIPELINE_VERSION,
     DecisionBundle,
     JsonValue,
@@ -32,6 +33,7 @@ from finboard_backtest.research_run.contracts import (
     UnsupportedResearchCapabilityError,
     execution_mode_for,
     pipeline_output_checksum,
+    replay_guard_error,
     stable_checksum,
     to_json_value,
 )
@@ -97,6 +99,15 @@ DECISION_STAGE_COUNT = len(_DECISION_STAGES)
 #: 进度回调钩子:(done, total, phase) → None,与 background_jobs 的
 #: ``ProgressCallback`` 结构同构;None 表示不对外上报(内存 / 直连 REST 调用)。
 ProgressHook = Callable[[int, int | None, str | None], Awaitable[None]]
+
+#: run 属主探针(issue #306):给定 run 关联的 background_jobs.job_id,返回该
+#: 任务是否仍被活跃 worker 持有(status=running/cancel_requested 且 lease /
+#: heartbeat 新鲜)。True = 活跃属主在场,启动恢复必须跳过误标;False = 真孤儿
+#: (job 已终态 / lease 过期 / 行不存在),照旧标 interrupted。None(默认不
+#: 注入)保持旧行为:全部 RUNNING run 标 interrupted(仅供纯内存测试使用;
+#: 生产 worker 启动路径必须注入,否则多进程下新 worker 启动会误标兄弟进程
+#: 正在活跃执行的 run)。
+JobOwnershipProbe = Callable[[str], Awaitable[bool]]
 
 
 @dataclass(slots=True)
@@ -194,6 +205,10 @@ class ResearchRunCoordinator:
         # issue #263:执行期失败上下文,随循环进度逐点更新;通用收口拼入
         # error_summary 头部(专项错误分支不经此路径,保持 str(exc) 原样)。
         failure_ctx = FailureContext()
+        # issue #304:在 try 外初始化 —— 组合阶段硬约束分支(#304)在异常
+        # 处理器里仍要读已完成决策数,适配器 validate_manifest 若抛硬约束
+        # 错误时该变量必须已绑定。
+        decisions: list[DecisionBundle] = []
         # issue #285:分段耗时(decision_load / 逐决策 execute / report),
         # 只观测,不改变 artifact/checkpoint/进度上报语义。
         run_started = time.monotonic()
@@ -214,7 +229,6 @@ class ResearchRunCoordinator:
                     return current
                 raise
             await self._store.checkpoint()
-            decisions: list[DecisionBundle] = []
             position_quantities: dict[tuple[str, ResearchPositionSide], Decimal] = (
                 defaultdict(Decimal)
             )
@@ -342,11 +356,16 @@ class ResearchRunCoordinator:
                 error_summary=str(exc),
             )
         except ResearchConstraintViolationError as exc:
-            return await self._safe_terminal_transition(
-                manifest.run_id,
-                target=ResearchRunStatus.REJECTED,
-                error_code="hard_constraint_rejected",
-                error_summary=str(exc),
+            # issue #304:组合阶段硬约束拒绝仍补算不依赖组合阶段的 screen 证据
+            # (partial 标记 + 失败决策定位落 report/result),随后按原语义
+            # REJECTED / hard_constraint_rejected 收尾。
+            return await self._reject_with_partial_evidence(
+                manifest,
+                adapter,
+                decisions,
+                exc,
+                progress=progress,
+                failure_ctx=failure_ctx,
             )
         except ResearchRunInterruptedError as exc:
             return await self._safe_terminal_transition(
@@ -386,17 +405,62 @@ class ResearchRunCoordinator:
         await self._store.checkpoint()
         return cancelled
 
-    async def mark_stale_running_as_interrupted(self) -> list[ResearchRunRecord]:
+    async def mark_stale_running_as_interrupted(
+        self, *, job_ownership: JobOwnershipProbe | None = None
+    ) -> list[ResearchRunRecord]:
+        """把残留 RUNNING run 收敛为 INTERRUPTED(进程重启恢复,issue #143)。
+
+        issue #306:注入 ``job_ownership`` 探针时先做属主检查 —— 经
+        ``run.job_id`` join background_jobs,job 仍 running/cancel_requested 且
+        lease/heartbeat 活跃的 run 视为「兄弟 worker 正在活跃执行」,跳过并打
+        具名 WARNING(``research_run.stale_skip_owned_job``),多 worker
+        (issue #286)并发启动互不误伤;job 不存在 / 已终态 / lease 过期才是
+        真孤儿,照旧标 interrupted(#305 的 replay 恢复通道保持不变)。
+        """
+
         stale = await self._store.list_by_status({ResearchRunStatus.RUNNING})
         recovered: list[ResearchRunRecord] = []
         for record in stale:
+            job_id = record.job_id
+            if job_ownership is not None and job_id is not None:
+                try:
+                    owned = await job_ownership(job_id)
+                except Exception:
+                    # 探针故障(瞬时连接问题等)按孤儿处理会误标活跃 run ——
+                    # fail-closed:跳过本轮,等下一次恢复窗口再收敛。
+                    logger.warning(
+                        "research_run.stale_ownership_probe_failed",
+                        run_id=record.manifest.run_id,
+                        job_id=job_id,
+                        message="属主探针抛错,本轮跳过该 run 的误标收敛",
+                        exc_info=True,
+                    )
+                    continue
+                if owned:
+                    logger.warning(
+                        "research_run.stale_skip_owned_job",
+                        run_id=record.manifest.run_id,
+                        job_id=job_id,
+                        message=(
+                            "run 处于 RUNNING 但其后台任务仍被活跃 worker 持有"
+                            "(lease/heartbeat 新鲜),跳过误标"
+                        ),
+                    )
+                    continue
             recovered.append(
                 await self._transition(
                     record.manifest.run_id,
                     expected=frozenset({ResearchRunStatus.RUNNING}),
                     target=ResearchRunStatus.INTERRUPTED,
                     error_code="process_restart",
-                    error_summary="进程重启:已保留 checkpoint,可按冻结输入恢复",
+                    # issue #305:恢复承诺落到真实通道 —— interrupted run 可经
+                    # replay 按冻结输入恢复(此前文案承诺了不存在的入口)。
+                    error_summary=(
+                        "进程重启:已保留 checkpoint;可经 finboard_run_replay"
+                        " 或 REST POST /api/research/runs/"
+                        f"{record.manifest.run_id}/replay 按冻结输入恢复"
+                        "(新 run 自动继承全部冻结输入)"
+                    ),
                 )
             )
             await self._store.checkpoint()
@@ -412,15 +476,22 @@ class ResearchRunCoordinator:
         adapter: ResearchStrategyAdapter,
     ) -> ResearchRunRecord:
         source = await self._require_run(source_run_id)
-        if source.status is not ResearchRunStatus.COMPLETED:
-            raise ResearchRunConflictError("仅允许重放已完成运行")
+        # issue #305:interrupted 放开为事故恢复通道(自动继承冻结输入);
+        # cancelled 是显式用户意图,仍拒绝;completed 重放行为不变。
+        if source.status not in REPLAYABLE_SOURCE_STATUSES:
+            raise ResearchRunConflictError(replay_guard_error(source.status))
         manifest = replace(
             source.manifest,
             run_id=new_run_id,
             idempotency_key=idempotency_key,
             requested_by=requested_by,
             replay_of_run_id=source_run_id,
+            replay_source_status=source.status.value,
         )
+        if source.status is ResearchRunStatus.INTERRUPTED:
+            # interrupted 源未产出终态结果(result_checksum=None),重放即
+            # 全新执行;冻结输入已随 manifest 自动继承,不做确定性对照。
+            return await self.execute(manifest, adapter)
         assert source.result_checksum is not None
         return await self.execute(
             manifest,
@@ -447,6 +518,100 @@ class ResearchRunCoordinator:
             found[current] = artifact
             pending.extend(artifact.parent_trace_ids)
         return sorted(found.values(), key=lambda item: item.sequence)
+
+    async def _reject_with_partial_evidence(
+        self,
+        manifest: ResearchRunManifest,
+        adapter: ResearchStrategyAdapter,
+        decisions: list[DecisionBundle],
+        exc: ResearchConstraintViolationError,
+        *,
+        progress: ProgressHook | None = None,
+        failure_ctx: FailureContext | None = None,
+    ) -> ResearchRunRecord:
+        """issue #304:组合阶段硬约束拒绝,保留不依赖组合阶段的 screen 证据。
+
+        factor_screen / strategy_screen 只消费已构建的冻结决策输入,与组合
+        阶段结果无关;这里尽力补算并把 report artifact / result JSON 落库
+        (标注 ``partial: true`` 与 ``constraint_failure`` 失败决策定位),
+        随后按原语义迁移 REJECTED / ``hard_constraint_rejected`` —— fail-closed
+        状态机、error_code、成功路径 checksum 语义零改动。补算 / 落库任一步
+        失败都不得掩盖原硬约束错误:具名 warning 记日志后直接按原语义收尾。
+        """
+        marker = await self._compute_partial_marker(manifest, adapter, len(decisions))
+        if marker is not None:
+            try:
+                report = await asyncio.to_thread(adapter.build_report, manifest, decisions)
+                self._validate_report(manifest, decisions, report)
+                await self._persist_report(
+                    manifest.run_id,
+                    len(decisions),
+                    report,
+                    progress=progress,
+                    failure_ctx=failure_ctx,
+                    partial_failure=marker,
+                )
+                await self._store.checkpoint()
+                artifacts = await self._store.list_artifacts(manifest.run_id)
+                # partial run 不参与确定性重放(重放只允许 completed 源),
+                # 无 expected_result_checksum 可比,直接归档 artifact 指纹。
+                result_checksum = stable_checksum(
+                    [
+                        {
+                            "stage": item.stage.value,
+                            "decision_id": _stable_decision_suffix(item.decision_id),
+                            "checksum": item.checksum,
+                        }
+                        for item in artifacts
+                    ]
+                )
+                await self._store.save_result(
+                    manifest.run_id,
+                    report=report,
+                    result_checksum=result_checksum,
+                    partial_failure=marker,
+                )
+                await self._store.checkpoint()
+            except Exception:
+                logger.warning(
+                    "research_run.partial_evidence_persist_failed",
+                    run_id=manifest.run_id,
+                    exc_info=True,
+                )
+        return await self._safe_terminal_transition(
+            manifest.run_id,
+            target=ResearchRunStatus.REJECTED,
+            error_code="hard_constraint_rejected",
+            error_summary=str(exc),
+        )
+
+    async def _compute_partial_marker(
+        self,
+        manifest: ResearchRunManifest,
+        adapter: ResearchStrategyAdapter,
+        completed_decisions: int,
+    ) -> dict[str, JsonValue] | None:
+        """向适配器要 partial 标记(可选钩子,issue #304)。
+
+        只有实现了 ``compute_partial_evidence`` 的适配器(signal_engine /
+        user_code)能基于已构建的冻结输入补算 screen;其余适配器
+        (DecisionSequenceAdapter、裸组合管线)返回 None,REJECTED 路径与
+        既有行为完全一致(零 artifact)。钩子异常吞掉并具名 warning,不
+        掩盖原硬约束错误。
+        """
+        hook = getattr(adapter, "compute_partial_evidence", None)
+        if not callable(hook):
+            return None
+        try:
+            marker = await hook(manifest, completed_decisions=completed_decisions)
+        except Exception:
+            logger.warning(
+                "research_run.partial_evidence_compute_failed",
+                run_id=manifest.run_id,
+                exc_info=True,
+            )
+            return None
+        return marker if isinstance(marker, dict) else None
 
     async def _persist_decision(
         self,
@@ -532,11 +697,19 @@ class ResearchRunCoordinator:
         *,
         progress: ProgressHook | None = None,
         failure_ctx: FailureContext | None = None,
+        partial_failure: dict[str, JsonValue] | None = None,
     ) -> None:
         if failure_ctx is not None:
             failure_ctx.stage = ResearchRunStage.REPORT.value
         payload = to_json_value({"report": report})
         assert isinstance(payload, dict)
+        if partial_failure is not None:
+            # issue #304:report JSON 内标注 partial 与失败决策定位。成功路径
+            # 不注入任何键,report artifact 的 checksum 逐字节零漂移。
+            report_payload = payload["report"]
+            assert isinstance(report_payload, dict)
+            report_payload["partial"] = True
+            report_payload["constraint_failure"] = partial_failure
         await self._store.append_artifact(
             ResearchArtifact(
                 artifact_id=f"{run_id}:A:report",

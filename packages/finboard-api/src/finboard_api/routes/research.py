@@ -39,6 +39,7 @@ from finboard_api.schemas import (
     FactorExperimentOut,
     FactorSignalOut,
     FeatureSnapshotCreate,
+    FeatureSnapshotHeaderOut,
     FeatureSnapshotOut,
     RobustnessPlanSchema,
     TrialCreate,
@@ -549,19 +550,51 @@ async def start_feature_snapshot_job(
 
 @router.get(
     "/factors/features",
-    response_model=list[FeatureSnapshotOut],
+    response_model=list[FeatureSnapshotHeaderOut | FeatureSnapshotOut],
 )
 async def list_feature_snapshots(
     dataset_release_id: str | None = Query(default=None),
+    source_run_id: str | None = Query(
+        default=None,
+        description="按产出 run(RCR-)过滤;RCR→快照映射一条查询完成(issue #309)",
+    ),
+    include_observations: bool = Query(
+        default=False,
+        description=(
+            "默认 header-only(不含 observations 逐条值);"
+            "显式 true 才返回全量(issue #309,原默认行为)"
+        ),
+    ),
     limit: int = Query(default=100, ge=1, le=500),
     session: AsyncSession = Depends(get_db_session),
-) -> list[FeatureSnapshotOut]:
-    snapshots = await FeatureSnapshotRepository(session).list(
+) -> list[FeatureSnapshotHeaderOut | FeatureSnapshotOut]:
+    """列出特征快照(issue #309:默认 header-only)。
+
+    默认只返回头部字段与覆盖统计(feature_names/symbol_count/
+    observation_count,取发布时落库的现成列,响应 KB 级);大快照
+    observations 单条可达 MB 级,不再随 list 全量展开——完整值走单查
+    ``GET /factors/features/{snapshot_id}`` 或显式
+    ``include_observations=true``(旧行为)。``source_run_id`` 过滤
+    repo/REST/MCP 三层一致,沙箱因子快照(#217)按 RCR 一条查询映射。
+    """
+    repo = FeatureSnapshotRepository(session)
+    if include_observations:
+        snapshots = await repo.list(
+            dataset_release_id=dataset_release_id,
+            source_run_id=source_run_id,
+            limit=limit,
+        )
+        return [
+            FeatureSnapshotOut.model_validate(item.as_dict()) for item in snapshots
+        ]
+    headers = await repo.list_headers(
         dataset_release_id=dataset_release_id,
+        source_run_id=source_run_id,
         limit=limit,
     )
     return [
-        FeatureSnapshotOut.model_validate(item.as_dict()) for item in snapshots
+        FeatureSnapshotHeaderOut.model_validate(header.as_dict())
+        for header in headers
     ]
 
 

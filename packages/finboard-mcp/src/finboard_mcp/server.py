@@ -110,6 +110,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
   字段 + metrics(剔 equity_curve)+ universe 聚合计数 + fills 按决策计数,
   不序列化 manifest/result 全量;view=detail 才含全量(可达 MB 级)。
+  replay 放开 interrupted(#305):interrupted run 一条命令按冻结输入恢复,
+  新 run 自动继承原 manifest 全部冻结输入(含 factor_snapshots 全部 ID,
+  零手工),血缘标注 replay_of_run_id + replay_source_status;cancelled
+  是显式用户意图仍拒绝,completed 保持确定性重放对照。
   入队预检(#186):queue 与 backtest_run
   (strategy_spec 形态)入队时对主数据发布做 universe 候选池非空校验,
   空池秒级 invalid_argument(不再等执行期跑完后报泛化错误),错误信息附
@@ -125,6 +129,17 @@ FinBoard 研究 MCP —— 量化研究工具集
   否则 invalid_argument 具名缺失特征与所需发布 kind —— 此前财务因子
   (pb/roe 等)拖到执行期才报「identity 节点缺少数据源」。研究数据发布
   的 manifest 冻结 derived_features(可派生特征集合),旧发布按 kind 回退。
+  组合可行性预检(#303):静态候选池 < ceil(1/生效 max_risk_contribution)
+  秒级 invalid_argument(此前默认 0.35 隐含买入池 ≥3,候选只有 2 只的
+  screen run 会白跑 1-2 小时才在组合阶段 REJECTED),错误附排除统计、生效
+  阈值与 portfolio_config.overrides 键位修复路径;max_risk_contribution
+  非法值与 risk_config.overrides 形态错误同样入队即拒。配置分区键位
+  (#303 起 risk_config 真实接线,此前是死分区):portfolio_config 管
+  组合约束(如 {"max_risk_contribution": 0.5}),risk_config 管风险退出
+  (如 {"rules": [{"rule_type": "price_stop_loss", "enabled": true,
+  "threshold": 0.08}]},按 rule_type 与规格策略同名合并覆盖),键位不可混;
+  manifest 原样冻结,覆盖只发生在消费端。逐期真实买入池入队期不可精确
+  预知,运行期 fail-closed 兜底不变。
   run_queue payload 模板与
   各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
   manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。写操作
@@ -153,6 +168,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   factor_catalog 是混合目录(#217):builtin(26 因子,origin=builtin)+
   user_defined(沙箱执行的自定义因子,标注 artifact commit/status/promotion_status,
   引用名 u_<artifact_name>,仅 status=active 且 promotion_status=passed 可被规格引用)。
+  feature_snapshot_list 默认 header-only(#309):只回 snapshot_id/decision_at/
+  source_run_id/dataset_release_id/feature_names/symbol_count/observation_count
+  等头部与覆盖统计,不含 observations(大快照单条 MB 级,全量会被客户端截断);
+  完整值走 feature_snapshot_get 单查或 include_observations=true(旧行为)。
+  source_run_id 过滤一条查询完成 RCR→快照映射(原需逐个单查),REST
+  /api/research/factors/features 同步(source_run_id / include_observations)。
 - 策略规格(16,✅ #126):strategy registry/template/list/history/version_get/
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。
@@ -247,6 +268,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id;
   view=none 轮询最小集 / summary 默认剥 payload / detail 全量;返回附
   data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206)。
+  kind=research_run 的 job_get 附 run_status(#306:关联 research_runs.status,
+  「run interrupted 但 job 仍 running」的两表不一致一眼可见;REST
+  GET /api/jobs/{id} 同口径,列表不 join 为 null)。
   归档(#221):不重要终态任务 job_archive(单个 job_id 或按 kinds/statuses/
   finished_before 批量,只回 archived_count)隐藏出默认列表但不删除,
   job_list 的 archived=exclude(默认)/only/all 控制可见性,finboard_job_get
@@ -329,7 +353,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   首次晋级 screen 证据(#234):规格声明 screen_artifact_bindings 显式绑定
   draft 产物,经 finboard_run_queue(screen RR)产出 factor_screen /
   strategy_screen 证据,promote 四向校验(name/kind/artifact_id/commit)
-  兜底,screen 运行不可挪作他版代码的证据。
+  兜底,screen 运行不可挪作他版代码的证据。screen RR 来源状态(#304):
+  completed 或 rejected+partial(组合阶段硬约束拒绝但保留的 screen 证据,
+  result 顶层 partial=true + constraint_failure 失败决策定位)均可作晋级
+  证据,证据 execution.source_run_status 显式标注来源 run 状态。
 - 研究代码沙箱执行(2,✅ #216+#217):research_code_run(写,入队)/
   research_code_run_get(只读)。通过晋级门的 active 因子代码在一次性 Docker 容器内执行
   factor.compute(ctx) -> scores + metrics(协议 v1 纯截面函数)。容器

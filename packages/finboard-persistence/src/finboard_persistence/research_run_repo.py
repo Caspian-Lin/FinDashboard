@@ -114,6 +114,22 @@ class ResearchRunRepository:
         ).limit(limit)
         return list((await self._session.execute(stmt)).scalars().all())
 
+    async def get_status_by_job_id(self, job_id: str) -> str | None:
+        """按关联 job_id 取 run 状态(issue #306);无关联 run 返回 None。
+
+        供 job 视图(``GET /api/jobs/{id}`` / ``finboard_job_get``)把
+        ``research_runs.status`` 透传为 ``run_status``,让「run interrupted 但
+        job 仍 running」的两表不一致一眼可见。轻量投影只取 status 列。
+        """
+
+        stmt = (
+            select(ResearchRunModel.status)
+            .where(ResearchRunModel.job_id == job_id)
+            .order_by(ResearchRunModel.id.asc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def transition(
         self,
         run_id: str,

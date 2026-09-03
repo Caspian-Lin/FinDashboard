@@ -29,6 +29,7 @@ from finboard_persistence.factor_lab_repo import (
     FactorExperimentRepository,
     FactorExperimentValidationService,
     FactorSignalRepository,
+    FeatureSnapshotHeader,
     FeatureSnapshotRepository,
 )
 from finboard_persistence.factor_repo import FactorSnapshotRepository
@@ -173,6 +174,7 @@ __all__ = [
     "FactorSnapshotModel",
     "FactorSnapshotRepository",
     "FactorValueModel",
+    "FeatureSnapshotHeader",
     "FeatureSnapshotRepository",
     "FillModel",
     "FillRepository",

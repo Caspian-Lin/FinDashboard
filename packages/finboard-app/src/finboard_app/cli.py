@@ -1002,7 +1002,12 @@ async def _run_worker(settings: Settings) -> None:
 
     # 启动恢复:把崩溃前 research_runs 残留的 RUNNING 收敛成可续跑的 INTERRUPTED
     # (background_jobs 的过期 lease 由 worker.run() 内部 _recover_stale 处理)。
-    await _recover_research_runs(components.session_maker)
+    # issue #306:属主检查 —— 兄弟 worker 活跃持有的 run 跳过误标;lease 活跃
+    # 判定阈值与 worker lease 超时同源。
+    await _recover_research_runs(
+        components.session_maker,
+        lease_active_seconds=settings.worker_lease_timeout_seconds,
+    )
 
     settings_factory = default_settings_factory
     registry = JobExecutorRegistry()
@@ -1117,6 +1122,8 @@ async def _run_worker(settings: Settings) -> None:
         # (现状语义);>0 = 先等 in-flight 完成至宽限上限再取消。等待中第二
         # 次停止信号立即强退(退出码 130)。
         shutdown_grace_seconds=settings.worker_shutdown_grace_seconds,
+        # issue #306:僵尸无进展检测阈值(0 = 关闭;默认 3600s 见 settings 注释)。
+        zombie_no_progress_seconds=settings.worker_zombie_no_progress_seconds,
         # issue #144:per-kind 全局并发上限(SQL 层 claim_next max_per_kind 实现)。
         # 数据源压力敏感的 kind 限制为单并发;dataset_publish / backtest_run 不限。
         # issue #216:research_code_run 单并发(沙箱容器本机资源受限,
@@ -1155,15 +1162,62 @@ async def _backtest_runner(
 
 async def _recover_research_runs(
     session_maker: async_sessionmaker[AsyncSession],
+    *,
+    lease_active_seconds: float = 600.0,
 ) -> None:
-    """worker 启动时把残留 RUNNING 研究运行收敛为 INTERRUPTED(issue #143)。"""
+    """worker 启动时把残留 RUNNING 研究运行收敛为 INTERRUPTED(issue #143)。
+
+    issue #306:注入属主探针 —— 经 ``run.job_id`` join background_jobs,job 仍
+    running/cancel_requested 且 lease/heartbeat 活跃的 run 视为兄弟 worker 正在
+    活跃执行,跳过误标(多 worker 并发启动互不误伤);job 不存在 / 已终态 /
+    lease 过期才是真孤儿,照旧标 interrupted(#305 replay 通道)。
+    ``lease_active_seconds`` 与 worker lease 超时同源(settings
+    ``worker_lease_timeout_seconds``):lease 未到期即 reclaim_stale 也不会回收
+    该任务,口径一致。
+    """
+
+    from datetime import UTC, datetime, timedelta
+
     from finboard_app.research_run_store import SqlAlchemyResearchRunStore
-    from finboard_backtest.research_run import ResearchRunCoordinator
-    from finboard_persistence import ResearchRunRepository
+    from finboard_backtest.research_run import JobOwnershipProbe, ResearchRunCoordinator
+    from finboard_persistence import BackgroundJobRepository, ResearchRunRepository
+    from finboard_shared.background_jobs import (
+        TERMINAL_STATUSES,
+        BackgroundJobStatus,
+    )
+
+    active_window = timedelta(seconds=max(lease_active_seconds, 0.0))
+
+    def _job_ownership_probe() -> JobOwnershipProbe:
+        async def probe(job_id: str) -> bool:
+            async with session_maker() as session:
+                row = await BackgroundJobRepository(session).get(job_id)
+            if row is None or row.status in TERMINAL_STATUSES:
+                return False
+            if row.status not in (
+                BackgroundJobStatus.RUNNING.value,
+                BackgroundJobStatus.CANCEL_REQUESTED.value,
+            ):
+                # queued / retry_waiting:没有 worker 在活跃推进该 run。
+                return False
+            # 「活跃」口径与 reclaim_stale 一致:lease 未过期即不会被回收,
+            # run 也不该被误标。heartbeat 仅在 lease 缺失(旧行)时兜底,
+            # 窗口与 lease 超时同源 —— 不然过期 lease 会被旧心跳长期续命。
+            now = datetime.now(UTC)
+            if row.lease_until is not None:
+                return row.lease_until >= now
+            return (
+                row.heartbeat_at is not None
+                and row.heartbeat_at >= now - active_window
+            )
+
+        return probe
 
     async with session_maker() as session:
         store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
-        await ResearchRunCoordinator(store).mark_stale_running_as_interrupted()
+        await ResearchRunCoordinator(store).mark_stale_running_as_interrupted(
+            job_ownership=_job_ownership_probe()
+        )
         await store.checkpoint()
 
 

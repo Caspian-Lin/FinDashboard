@@ -10,7 +10,10 @@
 * issue #203:未声明频率(single_shot)缺快照秒级拒绝;
 * issue #253:multi_period 声明财务因子(pb / roe)但未附加对应研究数据
   发布时,入队秒级具名拒绝(此前拖到执行期才报「identity 节点缺少数据源」),
-  附加齐备后放行。
+  附加齐备后放行;
+* issue #303:静态候选池 < ceil(1/生效 max_risk_contribution)(默认 0.35
+  隐含买入池 >=3)时入队秒级拒绝,portfolio_config.overrides 调高阈值放行;
+  阈值非法值与 risk_config.overrides 形态错误同样入队即拒。
 
 依赖 PostgreSQL(``FINBOARD_TEST_DB_URL``)。只登记发布/策略/运行记录,
 不连 broker / 不下单 / 不跑 worker 回测。
@@ -626,3 +629,155 @@ async def test_enqueue_seconds_fail_when_roe_without_financial_release(
     detail = str(response.json()["detail"])
     assert "roe" in detail
     assert "financial_indicators" in detail
+
+
+# ---- issue #303:组合硬约束配置传导与入队组合可行性预检 ----
+
+
+async def test_enqueue_seconds_fail_when_static_pool_below_risk_cap_floor(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """静态池 2 只 + 默认 max_risk_contribution=0.35:入队秒级 422。
+
+    默认 0.35 隐含买入池 >= ceil(1/0.35)=3 只,候选只有 2 只时组合阶段
+    RiskBudgetError 数学不可行会让整个 run 执行完才 REJECTED —— 现在入队期
+    直接拒绝,错误附生效阈值、ceil 推导与 portfolio_config 键位修复路径。
+    """
+    await _register_release(
+        db_session,
+        (
+            ("600001.SH", date(2020, 1, 1)),
+            ("600002.SH", date(2020, 1, 1)),
+        ),
+    )
+    spec = await _register_published_spec(
+        db_session,
+        feature_graph=_price_only_feature_graph(),
+    )
+
+    response = await client.post("/api/research/runs", json=_queue_payload(spec))
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "ceil(1/0.35)=3" in detail
+    assert "静态候选池仅 2 只" in detail
+    assert "portfolio_config.overrides['max_risk_contribution']" in detail
+    # 快速失败:不产生 queued research_runs 行。
+    rows = await ResearchRunRepository(db_session).list_recent(limit=10)
+    assert all(row.strategy_kind != spec.strategy_kind for row in rows)
+
+
+async def test_enqueue_succeeds_when_portfolio_override_relaxes_risk_cap(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """portfolio_config.overrides 调高 max_risk_contribution 到 0.5:同一 2 只池放行。"""
+    symbols = (
+        ("600001.SH", date(2020, 1, 1)),
+        ("600002.SH", date(2020, 1, 1)),
+    )
+    await _register_release(db_session, symbols)
+    daily_id = await _register_daily_metrics_release(db_session, symbols)
+    spec = await _register_published_spec(
+        db_session,
+        dataset_release_ids=(RELEASE_ID, daily_id),
+    )
+    payload = _queue_payload(spec)
+    payload["portfolio_config"] = {"max_risk_contribution": 0.5}
+
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "queued"
+
+
+async def test_enqueue_seconds_fail_when_max_risk_contribution_invalid(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """阈值非法值(0 越界)入队即拒,错误附合法域。"""
+    symbols = (
+        ("600001.SH", date(2020, 1, 1)),
+        ("600002.SH", date(2020, 1, 1)),
+        ("600003.SH", date(2020, 1, 1)),
+    )
+    await _register_release(db_session, symbols)
+    daily_id = await _register_daily_metrics_release(db_session, symbols)
+    spec = await _register_published_spec(
+        db_session,
+        dataset_release_ids=(RELEASE_ID, daily_id),
+    )
+    payload = _queue_payload(spec)
+    payload["portfolio_config"] = {"max_risk_contribution": 0}
+
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "portfolio_config.overrides['max_risk_contribution']" in detail
+    assert "0 < 值 <= 1" in detail
+
+
+async def test_enqueue_seconds_fail_when_risk_config_overrides_invalid(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """risk_config.overrides 形态非法(未知 rule_type)入队秒级 422。
+
+    此前 risk_config 是死分区,任何形态错误都到执行期组合阶段才暴露。
+    """
+    symbols = (
+        ("600001.SH", date(2020, 1, 1)),
+        ("600002.SH", date(2020, 1, 1)),
+        ("600003.SH", date(2020, 1, 1)),
+    )
+    await _register_release(db_session, symbols)
+    daily_id = await _register_daily_metrics_release(db_session, symbols)
+    spec = await _register_published_spec(
+        db_session,
+        dataset_release_ids=(RELEASE_ID, daily_id),
+    )
+    payload = _queue_payload(spec)
+    payload["risk_config"] = {"rules": [{"rule_type": "no_such_rule"}]}
+
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "risk_config.overrides" in detail
+
+
+async def test_enqueue_accepts_valid_risk_config_stop_loss_override(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """合法 stop-loss 覆盖(risk_config)+ 3 只池(满足默认 0.35 门槛)放行。"""
+    symbols = (
+        ("600001.SH", date(2020, 1, 1)),
+        ("600002.SH", date(2020, 1, 1)),
+        ("600003.SH", date(2020, 1, 1)),
+    )
+    await _register_release(db_session, symbols)
+    daily_id = await _register_daily_metrics_release(db_session, symbols)
+    spec = await _register_published_spec(
+        db_session,
+        dataset_release_ids=(RELEASE_ID, daily_id),
+    )
+    payload = _queue_payload(spec)
+    payload["risk_config"] = {
+        "rules": [
+            {
+                "rule_type": "price_stop_loss",
+                "enabled": True,
+                "threshold": 0.08,
+            }
+        ]
+    }
+
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "queued"

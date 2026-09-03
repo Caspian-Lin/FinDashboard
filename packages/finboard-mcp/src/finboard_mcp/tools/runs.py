@@ -1,7 +1,8 @@
 """``finboard.run.*`` 工具 —— ResearchRun 查询与写操作(复用 ``ResearchRunRepository``)。
 
 只读(3):list / get / artifacts —— 自动允许。
-写(4,issue #127):queue(冻结 + 登记 queued)/ cancel / replay(复制 completed)/
+写(4,issue #127):queue(冻结 + 登记 queued)/ cancel /
+replay(复制 completed;interrupted 即事故恢复通道,#305)/
 lineage(artifact 血缘)。
 
 写工具在 ``mcp_readonly_only=false`` 时由 agent 自主执行(#122),不执行回测本身
@@ -305,6 +306,9 @@ async def _build_queued_manifest(
         UnsupportedResearchCapabilityError,
         validate_strategy_dataset_capabilities,
     )
+    from finboard_backtest.research_run.config_overrides import (
+        research_portfolio_gate_error,
+    )
     from finboard_backtest.research_run.contracts import JsonValue
     from finboard_backtest.research_run.signal_engine import (
         multi_period_feature_gate_error,
@@ -522,6 +526,20 @@ async def _build_queued_manifest(
             "运行数据发布候选池为空,拒绝入队: "
             f"{describe_empty_pool(preview, decision_date=releases[0].end_date)}",
         )
+
+    # issue #303:入队组合可行性预检(与 REST 路由共用同一门控函数)—— 静态
+    # 候选池 < ceil(1/生效 max_risk_contribution) 秒级拒绝(附排除统计、生效
+    # 阈值与键位修复路径);阈值非法值与 risk_config.overrides 形态错误同样
+    # 入队即拒。逐期真实买入池不可精确预知,运行期 fail-closed 兜底不变。
+    portfolio_gate_error = research_portfolio_gate_error(
+        preview=preview,
+        risk_exit_policy=spec.risk_exit_policy,
+        portfolio_overrides=body.portfolio_config,
+        risk_overrides=body.risk_config,
+        decision_date=releases[0].end_date,
+    )
+    if portfolio_gate_error is not None:
+        raise McpToolError("invalid_argument", portfolio_gate_error)
 
     run_id = "RR-" + hashlib.sha256(
         body.idempotency_key.encode("utf-8")
@@ -771,7 +789,12 @@ async def replay_run(
     idempotency_key: str,
     requested_by: str,
 ) -> ToolEnvelope:
-    """复制 completed ResearchRun 为新 queued 运行(写,不执行)。"""
+    """复制 completed/interrupted ResearchRun 为新 queued 运行(写,不执行)。
+
+    issue #305:interrupted 源即事故恢复通道 —— 新 run 经 ``replace(manifest)``
+    自动继承全部冻结输入(含 factor_snapshots 全部 ID,零手工),血缘标注
+    ``replay_of_run_id`` + ``replay_source_status``;cancelled 仍拒绝。
+    """
 
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
@@ -782,8 +805,9 @@ async def replay_run(
 
         from finboard_app.research_run_store import SqlAlchemyResearchRunStore
         from finboard_backtest.research_run import (
+            REPLAYABLE_SOURCE_STATUSES,
             ResearchActorType,
-            ResearchRunStatus,
+            replay_guard_error,
         )
         from finboard_persistence import (
             ResearchRunPersistenceConflictError,
@@ -795,8 +819,8 @@ async def replay_run(
             source = await store.get(run_id)
             if source is None:
                 raise McpToolError("not_found", f"源研究运行不存在: {run_id}")
-            if source.status is not ResearchRunStatus.COMPLETED:
-                raise McpToolError("conflict", "仅允许重放已完成运行")
+            if source.status not in REPLAYABLE_SOURCE_STATUSES:
+                raise McpToolError("conflict", replay_guard_error(source.status))
             new_run_id = "RR-" + hashlib.sha256(
                 idempotency_key.encode("utf-8")
             ).hexdigest()[:24]
@@ -807,6 +831,7 @@ async def replay_run(
                 requested_by=requested_by,
                 actor_type=ResearchActorType.HUMAN,
                 replay_of_run_id=run_id,
+                replay_source_status=source.status.value,
             )
             try:
                 record, created = await store.create_or_get(manifest)
@@ -964,9 +989,17 @@ def register(mcp: MCPServer) -> None:
             "(标准价格特征/close/attached daily_metrics 与 financial_indicators"
             " 发布/快照观测),声明 pb/roe 等财务因子而未附加对应研究数据发布"
             " → invalid_argument 具名缺失特征与所需发布 kind\n"
-            '- "validation_config"/"portfolio_config"/"risk_config"/'
-            '"execution_config"/"fee_config"/"benchmark_config": {} —— '
-            "政策覆盖,一般留空\n"
+            '- "validation_config"/"execution_config"/"fee_config"/'
+            '"benchmark_config": {} —— 政策覆盖,一般留空\n'
+            '- "portfolio_config"/"risk_config": {} —— 组合约束 / 风险退出'
+            "分区覆盖(#303,键位不可混):\n"
+            "  · portfolio_config 管组合约束(overrides 直接就是键值),如 "
+            '{"max_risk_contribution": 0.5}(默认 0.35,合法域 0<值<=1,=1 '
+            "关闭该约束;隐含买入池 n>=ceil(1/值))、risk_factor_limits(#266)\n"
+            "  · risk_config 管风险退出(stop-loss 等),形态 "
+            '{"rules": [{"rule_type": "price_stop_loss", "enabled": true, '
+            '"threshold": 0.08}]},按 rule_type 与规格策略同名合并、覆盖同名键'
+            "(未声明字段继承基准值;新 rule_type 须给全字段含 rationale)\n"
             '- "code_version"*: 7-64 字符,**本 run 自身的代码版本标识**(如 '
             "FinBoard git commit),冻结进 manifest/checksum 供追溯;与数据集发布"
             "的 code_version 只是同名字段、互不校验,别拿数据集 git hash 顶替\n"
@@ -977,6 +1010,12 @@ def register(mcp: MCPServer) -> None:
             "schema)。入队预检(#186):universe 候选池为空秒级 invalid_argument,"
             "错误附各过滤条件排除统计与缺失字段名。single_shot 缺冻结快照同样"
             "入队秒级拒绝(#203,报错附 execution_mode 与缺失因子源)。"
+            "组合可行性预检(#303):静态候选池 < ceil(1/生效 "
+            "max_risk_contribution)秒级 invalid_argument(错误附排除统计、"
+            "生效阈值与 portfolio_config.overrides 键位修复路径),"
+            "max_risk_contribution 非法值与 risk_config.overrides 形态错误"
+            "同样入队即拒;逐期真实买入池不可精确预知,运行期 fail-closed 兜底"
+            "不变。"
             "user_code 策略(#218):strategy_kind=user_code 的规格已声明 "
             "code_artifact(name+可选 commit,引用 kind=strategy 的 active "
             "artifact);入队门控 artifact 非 active / commit 不一致 / 沙箱未启用 "
@@ -1016,8 +1055,13 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_run_replay",
         description=(
-            "复制 completed ResearchRun 为新 queued 运行(写,不执行)。"
-            "需要新 idempotency_key + requested_by。"
+            "复制 completed 或 interrupted ResearchRun 为新 queued 运行"
+            "(写,不执行)。需要新 idempotency_key + requested_by。"
+            "interrupted 源即事故恢复通道(#305):新 run 自动继承原 manifest "
+            "全部冻结输入(dataset_release_ids / factor_snapshots 全部 ID,"
+            "零手工重填),血缘标注 replay_of_run_id + replay_source_status;"
+            "completed 源保持确定性重放对照(结果漂移判 failed);"
+            "cancelled 是显式用户意图,拒绝重放。"
         ),
     )
     async def _replay(
