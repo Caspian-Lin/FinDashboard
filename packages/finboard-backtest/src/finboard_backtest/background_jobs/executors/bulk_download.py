@@ -142,8 +142,9 @@ def _validate_tushare_scope(provider_name: str, instruments: Sequence[object]) -
 
     可转债(issue #265)走 2000 积分档的 ``cb_daily`` 专属接口
     (TushareBarProvider 按代码规则分流),与 ETF / 指数「2000 积分拉不到」
-    的边界不同,因此放行;tushare 拒绝行为对其余非股票标的保持不变
-    (具名 tushare_scope_mismatch,不静默换源)。
+    的边界不同,因此放行;期货(issue #267)tushare 侧不接线(fut_daily
+    属另档积分),走 akshare 新浪主连。tushare 拒绝行为对其余非股票标的
+    保持不变(具名 tushare_scope_mismatch,不静默换源)。
     """
     if provider_name != "tushare":
         return
@@ -157,8 +158,8 @@ def _validate_tushare_scope(provider_name: str, instruments: Sequence[object]) -
         raise ExecutorError(
             code="tushare_scope_mismatch",
             summary=(
-                "Tushare 批量任务仅支持 A 股股票与可转债;ETF / 指数请另建任务选 "
-                "akshare 或 yfinance"
+                "Tushare 批量任务仅支持 A 股股票与可转债;"
+                "ETF / 指数 / 期货请另建任务选 akshare"
             ),
             retryable=False,
             context={"sample": incompatible[:5]},
