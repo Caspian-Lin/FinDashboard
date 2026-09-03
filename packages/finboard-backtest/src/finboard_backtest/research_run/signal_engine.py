@@ -1387,7 +1387,11 @@ async def build_decision_load_contexts(
                     features=features,
                     signalable=signalable,
                     price_series=price_series,
-                    covariance=_estimate_covariance(price_series),
+                    # 协方差估计是纯 CPU 段(numpy 矩阵运算),经 to_thread 卸载
+                    # (issue #286);price_series 为普通数据,线程间无共享可变态。
+                    covariance=await asyncio.to_thread(
+                        _estimate_covariance, price_series
+                    ),
                     snapshot_id=snapshot_id,
                 )
             )
@@ -1417,33 +1421,40 @@ async def build_decision_inputs(
       信号标的必须有价格与执行元数据)。
     """
     frequency = _rebalance_frequency(manifest)
-    return tuple(
-        PortfolioDecisionInput(
-            business_date=loaded.context.business_date,
-            decision_at=loaded.context.decision_at,
-            execution_at=loaded.context.execution_at,
-            candidates=loaded.candidates,
+    # 信号求值(特征图 + 规则)是逐决策的纯 CPU 密集段,经 asyncio.to_thread
+    # 卸载(issue #286):长计算不再阻塞事件循环线程,worker 心跳可续约。
+    # build_normalized_signals 为模块级纯函数,普通数据入参,线程间无共享可变态。
+    inputs: list[PortfolioDecisionInput] = []
+    for loaded in await build_decision_load_contexts(
+        manifest,
+        release_provider_factory=release_provider_factory,
+        snapshot_provider=snapshot_provider,
+    ):
+        signals = await asyncio.to_thread(
+            build_normalized_signals,
+            manifest.strategy_spec,
             features=loaded.features,
-            signals=build_normalized_signals(
-                manifest.strategy_spec,
-                features=loaded.features,
-                prices=loaded.context.prices,
-                included_symbols=loaded.signalable,
-                factor_snapshot_id=None if frequency is not None else loaded.snapshot_id,
-                price_series=loaded.price_series,
-            ),
             prices=loaded.context.prices,
-            execution_prices=loaded.context.execution_prices,
-            lot_info=loaded.context.lot_info,
-            input_artifact_ids=loaded.context.input_artifact_ids,
-            covariance=loaded.covariance,
+            included_symbols=loaded.signalable,
+            factor_snapshot_id=None if frequency is not None else loaded.snapshot_id,
+            price_series=loaded.price_series,
         )
-        for loaded in await build_decision_load_contexts(
-            manifest,
-            release_provider_factory=release_provider_factory,
-            snapshot_provider=snapshot_provider,
+        inputs.append(
+            PortfolioDecisionInput(
+                business_date=loaded.context.business_date,
+                decision_at=loaded.context.decision_at,
+                execution_at=loaded.context.execution_at,
+                candidates=loaded.candidates,
+                features=loaded.features,
+                signals=signals,
+                prices=loaded.context.prices,
+                execution_prices=loaded.context.execution_prices,
+                lot_info=loaded.context.lot_info,
+                input_artifact_ids=loaded.context.input_artifact_ids,
+                covariance=loaded.covariance,
+            )
         )
-    )
+    return tuple(inputs)
 
 
 def _bars_release_ref(

@@ -1457,7 +1457,11 @@ async def build_price_feature_snapshot(
                 decision_at=decision_at,
                 adjust=release.adjustment,
             )
-            observations_by_symbol[instrument.code] = _build_price_observations(
+            # 特征计算(momentum / 波动率滚动窗口)是逐标的纯 CPU 段,经
+            # to_thread 卸载(issue #286):全市场重算时不再阻塞事件循环;
+            # IO(Parquet 解码)已由 provider 内部的 to_thread 承担。
+            observations_by_symbol[instrument.code] = await asyncio.to_thread(
+                _build_price_observations,
                 source=release.source,
                 source_version=release.version,
                 symbol=instrument.code,
