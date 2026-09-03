@@ -300,16 +300,21 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 自动包含基准指数登记(#256):`instrument_type=index`(受控登记表
 `BENCHMARK_INDEX_REGISTRY`,含沪深300/中证500/中证1000/创业板指等 9 只);
 #265 起同时从东财可转债一览登记 `instrument_type=convertible`
-(11xxxx.SH/12xxxx.SZ,存续转债,list_date 由 convertible_profiles 回填)。
+(11xxxx.SH/12xxxx.SZ,存续转债,list_date 由 convertible_profiles 回填);
+#267 起同时从受控登记表登记 IF/IH/IC/IM 期货主连 `instrument_type=futures`
+(market=future,主连仅研究信号/基准、不可当作可成交合约)。
 - 参数:无
 - 返回:`JobOut`(`kind=data_sync`)
 - 进度:用 `finboard_job_get(job_id)` 轮询
 
 ### finboard_data_bulk_download_start **[写,任务化]**
 登记批量历史数据拉取任务(按市场/类型/交易所筛选),返回 202 + `job_id`。
-- 参数:`market?`(默认 a_share)/ `instrument_type?`(`stock|etf|index|
-  convertible`;index=#256 基准指数,日线走 akshare 指数接口;convertible=
-  #265 转债,走 tushare `cb_daily`,akshare 源 fail-visible 拒绝;
+- 参数:`market?`(默认 a_share;期货用 future)/ `instrument_type?`(`stock|etf|index|
+  convertible|futures`;index=#256 基准指数,日线走 akshare 指数接口;convertible=
+  #265 转债,走 tushare `cb_daily`,akshare 源 fail-visible 拒绝;futures=
+  #267 期货主连(如 IF0.CFFEX),需配 market=future,走 akshare 新浪
+  `futures_main_sina`,tushare 源 fail-visible 拒绝,主连仅研究信号/基准
+  不可当作可成交合约;
   `source=tushare` 对 stock/convertible 之外报 `tushare_scope_mismatch`)/
   `exchange?` /
   `listing_boards?` / `start?`(默认 2015-01-01)/ `source?`
@@ -332,7 +337,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   `symbols`(内联列表)/ `symbols_from_release`(复制既有可用发布的冻结标的集,
   全市场发布/跟进发布首选,免手工维护巨型清单)/ `full_market=true`
   (instruments 表全活跃标的按 kind 展开:股票单源只取 A 股股票,
-  multi_asset_mixed 取股票+ETF+指数+转债(#265),convertible_metrics
+  multi_asset_mixed 取股票+ETF+指数+转债(#265)+期货主连(#267),convertible_metrics
   只取转债)
 - 其他参数:`release_id` / `version` / `start_date` / `end_date` /
   `dataset_name?`(默认 multi_asset_daily_bars)/ `release_kind?`

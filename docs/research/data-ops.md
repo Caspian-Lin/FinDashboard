@@ -289,3 +289,58 @@ WHERE event_type = 'forced_redemption' ORDER BY effective_date;
 端到端回归:`tests/integration/test_convertible_chain.py`(mock bond_zh_cov /
 cb_daily / cb_basic → 登记 → 缓存 → convertible_profiles 同步 → 双发布 →
 双低回测出非空成交)。
+
+## 期货 EOD 数据链路(#267)
+
+**背景**:路线 C(市场中性对冲:股票多头 + 股指空头)的数据面前置。此前
+期货既无登记写入者也无行情接入(akshare 全市场列表接口不覆盖期货,tushare
+`fut_daily` 属另档积分)。#267 打通「主连登记 → 新浪主连日线 → 冻结发布 →
+研究数据可读」全链路。**范围只做数据面**:对冲组合回测工程(换月展期 /
+贴水成本 / 保证金占用)另行立项;期货不可撮合,通用回测引擎不做期货撮合
+(`asset_rules.py` docstring 明示)。
+
+**主连 vs 具体合约(核心语义,不混淆)**:
+
+- **主连**(品种+`0`,如 `IF0.CFFEX`):换月拼接的连续序列,**仅用于研究
+  信号 / 基准数据,不可当作可成交合约**。v1 只登记 / 只缓存主连。
+- **具体合约**(如 `IF2406.CFFEX`):不进逐标的缓存(无结构化合约链上游,
+  合约链另行立项);EOD 按日全市场表可经 `fetch_futures_official_daily`
+  读取(交易所官网 `get_futures_daily`,v1 仅供研究脚本直读)。非主连代码
+  在缓存层 fail-visible 拒绝,防止两种语义的数据混进同一条权益曲线。
+
+**标准运营步骤**:
+
+1. `data_sync`(REST `POST /api/data/sync` / MCP `finboard_data_sync_universe`)
+   —— `discover_futures_main` 从受控登记表 `FUTURES_MAIN_SERIES_REGISTRY`
+   登记 IF/IH/IC/IM 主连(`market=future` / `instrument_type=futures`,
+   CFFEX;乘数 / 保证金率与 `FuturesRule` 同口径)。扩展新品种直接在登记表
+   加一行;未登记品种 fail-closed 拒绝。主连无 list_date 上游,保持 null
+   可见缺失(主连是连续序列,不是单一上市合约)。
+2. `bulk_download` 带 `instrument_type=future`、`source=akshare` —— 主连
+   日线走新浪 `futures_main_sina` 进 parquet 缓存(无复权概念,缓存键沿用
+   默认 `qfq` 但语义为 no-op,发布 adjustment 与下载键一致;新浪无成交额
+   列 amount=0)。**tushare 源对期货拒绝**(fut_daily 属另档积分,具名
+   提示另建 akshare 任务,不静默换源)。
+3. `dataset_release_publish` —— 期货 bars 建议与股票 / 债券基准同处一份
+   `multi_asset_mixed` 发布(mixed 展开含 futures 五类之一),或独立 BARS
+   发布(source=akshare)。发布候选从登记表读取乘数 / 保证金率 / 最小变动
+   价位 / `allows_short`;质量报告 `futures_instruments` 块:期货标的数 /
+   continuous / missing_list_date / with_lifecycle_events 计数。期货事件
+   硬门降级(#58 换月 / 到期事件在主连日线上无结构化上游,同 #265 转债
+   决策),已同步事件仍随 manifest 冻结。
+4. 消费 —— 研究运行 / 回测把期货主连当**基准数据**用(`benchmark_config`
+   / 研究发布引用):`is_benchmark_only_instrument` 扩为 index + futures,
+   静态预检与运行时候选一致排除(不进候选池、不撮合)。缓存 `make_symbol`
+   已支持期货后缀 → `Market.FUTURE`(此前未知后缀兜底 A_SHARE 会让冻结
+   发布 market 校验误拒)。
+
+验证 SQL:
+
+```sql
+-- 期货主连登记
+SELECT code, name, exchange FROM instruments WHERE instrument_type = 'futures';
+```
+
+端到端回归:`tests/integration/test_futures_chain.py`(受控登记 → mock
+futures_main_sina → 缓存 → BARS 发布 → 真实 FrozenReleaseProvider 读回;
+主连 / 合约语义守卫)。
