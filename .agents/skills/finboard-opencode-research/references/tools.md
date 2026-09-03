@@ -294,16 +294,20 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 ### finboard_data_sync_universe **[写,任务化]**
 登记全市场标的同步任务(akshare 发现 → 写 instruments 表),返回 202 + `job_id`。
 自动包含基准指数登记(#256):`instrument_type=index`(受控登记表
-`BENCHMARK_INDEX_REGISTRY`,含沪深300/中证500/中证1000/创业板指等 9 只)。
+`BENCHMARK_INDEX_REGISTRY`,含沪深300/中证500/中证1000/创业板指等 9 只);
+#265 起同时从东财可转债一览登记 `instrument_type=convertible`
+(11xxxx.SH/12xxxx.SZ,存续转债,list_date 由 convertible_profiles 回填)。
 - 参数:无
 - 返回:`JobOut`(`kind=data_sync`)
 - 进度:用 `finboard_job_get(job_id)` 轮询
 
 ### finboard_data_bulk_download_start **[写,任务化]**
 登记批量历史数据拉取任务(按市场/类型/交易所筛选),返回 202 + `job_id`。
-- 参数:`market?`(默认 a_share)/ `instrument_type?`(`stock|etf|index`;
-  index=#256 基准指数,日线走 akshare 指数接口;`source=tushare` 对非 stock
-  报 `tushare_scope_mismatch`)/ `exchange?` /
+- 参数:`market?`(默认 a_share)/ `instrument_type?`(`stock|etf|index|
+  convertible`;index=#256 基准指数,日线走 akshare 指数接口;convertible=
+  #265 转债,走 tushare `cb_daily`,akshare 源 fail-visible 拒绝;
+  `source=tushare` 对 stock/convertible 之外报 `tushare_scope_mismatch`)/
+  `exchange?` /
   `listing_boards?` / `start?`(默认 2015-01-01)/ `source?`
 - 返回:`JobOut`(`kind=bulk_download`)
 - 进度:用 `finboard_job_get(job_id)` 轮询(阶段如 `bulk_download:fetching`)
@@ -324,12 +328,14 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   `symbols`(内联列表)/ `symbols_from_release`(复制既有可用发布的冻结标的集,
   全市场发布/跟进发布首选,免手工维护巨型清单)/ `full_market=true`
   (instruments 表全活跃标的按 kind 展开:股票单源只取 A 股股票,
-  multi_asset_mixed 取股票+ETF+指数)
+  multi_asset_mixed 取股票+ETF+指数+转债(#265),convertible_metrics
+  只取转债)
 - 其他参数:`release_id` / `version` / `start_date` / `end_date` /
   `dataset_name?`(默认 multi_asset_daily_bars)/ `release_kind?`
-  (a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators,
-  默认 a_share_tushare)/ `source?` /
-  `adjustment?`(qfq|hqfq|none,默认 qfq;daily_metrics/financial_indicators 固定 none)/
+  (a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators|
+  convertible_metrics,默认 a_share_tushare)/ `source?` /
+  `adjustment?`(qfq|hqfq|none,默认 qfq;daily_metrics/financial_indicators/
+  convertible_metrics 固定 none)/
   `required_capabilities?`
   (stock|bond|convertible|futures|etf:index|etf:cross_border|etf:commodity|etf:bond)
 - 返回:`JobOut`(`kind=dataset_publish`)
@@ -339,6 +345,12 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - `release_kind=daily_metrics|financial_indicators` 时从 research_* 表冻结
   基本面/财务指标发布(issue #187),与 bars 发布(dataset_release_ids 含 bars 主发布 +
   research 发布)联合供因子快照取数;schedule(data_sync)与发布任务报告缺失字段统计。
+- `release_kind=convertible_metrics`(#265)只接受 A 股可转债标的(非转债
+  `convertible_scope_violation`),从本地缓存 bars x 冻结转股价元数据
+  (`convertible_metadata`)计算转股价值/转股溢价率并冻结为带日期观测;
+  元数据缺失 `convertible_metadata_missing`(先跑 research_data_sync 的
+  convertible_profiles)。质量报告 `convertible_instruments` 块可见转债标的数
+  与评级/到期日缺失计数。
 
 ### finboard_data_config_get(只读)
 查询定时任务调度器配置(读 `data_config.json`)。
@@ -1088,12 +1100,16 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 `fetch_all` / `quality_repair` / `research_data_sync`(全是研究/数据域,
 不含实盘能力)。
 
-`research_data_sync`(issue #171;#251 扩展):research 数据表(档案 / 估值 /
-财务 / 行业 / 名称历史)摄取编排。payload:`{datasets?: [profiles, name_changes,
-daily_metrics, financial_indicators, industry_memberships](默认全部),
-start_date, end_date(ISO), symbols?: [str]}`。profiles 同时拉取在市(L)与
-退市(D)档案(delist_date 上游);name_changes 全市场历史名称变更直接重建
-`instrument_names`(半开区间,供 ST-PIT)。逐标的接口自动限流(tushare_budget)
+`research_data_sync`(issue #171;#251/#265 扩展):research 数据表(档案 / 估值 /
+财务 / 行业 / 名称历史 / 转债条款)摄取编排。payload:`{datasets?: [profiles,
+name_changes, convertible_profiles, daily_metrics, financial_indicators,
+industry_memberships](默认全部), start_date, end_date(ISO), symbols?: [str]}`。
+profiles 同时拉取在市(L)与退市(D)档案(delist_date 上游);name_changes
+全市场历史名称变更直接重建 `instrument_names`(半开区间,供 ST-PIT);
+convertible_profiles(#265)tushare cb_basic 条款快照 upsert 主数据
+`convertible_metadata`(转股价/到期日,评级与集思录强赎事件走 akshare 兜底,
+失败降级为 warning 不阻断),顺带回填 `instruments.list_date/delist_date`。
+逐标的接口自动限流(tushare_budget)
 并按确定性 dataset_version 断点续跑;预算耗尽退避重试,未配 token / 未装
 SDK fail-fast。
 
@@ -1147,8 +1163,9 @@ SDK fail-fast。
   - `dataset_publish`:`{release_id, release_kind, symbols, version, start_date, end_date}`
   - `backtest_run`:`{request, provider_name}` → `result_ref=str(run_id)`
   - `research_data_sync`:`{start_date: "YYYY-MM-DD"(必填), end_date:
-    "YYYY-MM-DD"(必填), datasets?: [profiles|name_changes|daily_metrics|
-    financial_indicators|industry_memberships](缺省=全部五类), symbols?:
+    "YYYY-MM-DD"(必填), datasets?: [profiles|name_changes|convertible_profiles|
+    daily_metrics|financial_indicators|industry_memberships](缺省=全部六类;
+    convertible_profiles=#265 转债条款快照), symbols?:
     ["000001.SZ",...](省略时逐标的数据集以 profiles 同步结果为池,此时
     datasets 须含 profiles)}` → 研究数据表摄取(batch 发布后 selection 可命中)
 
