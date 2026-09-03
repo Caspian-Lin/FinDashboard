@@ -66,6 +66,10 @@ class BacktestResult:
     fee_assumptions: dict[str, object] = field(default_factory=dict)
     benchmark_config: dict[str, object] = field(default_factory=dict)
 
+    # job 级分段耗时(issue #285):total_elapsed_seconds / data_load_elapsed_seconds
+    # / parquet_reads;纯可观测性,不参与任何 checksum。
+    timing: dict[str, object] | None = None
+
     def summary(self) -> str:
         """生成文本绩效摘要。"""
         lines = [
@@ -123,4 +127,14 @@ class BacktestResult:
                     "⚠ 选股整期无候选生效:本 run 大概率 0 交易,"
                     "请检查选股数据集发布状态与过滤条件"
                 ]
+        if self.timing:
+            total = self.timing.get("total_elapsed_seconds")
+            load = self.timing.get("data_load_elapsed_seconds")
+            if isinstance(total, (int, float)):
+                load_text = (
+                    f"(加载 {load:.2f}s)"
+                    if isinstance(load, (int, float))
+                    else ""
+                )
+                lines += ["", f"耗时:       {float(total):.2f}s{load_text}"]
         return "\n".join(lines)

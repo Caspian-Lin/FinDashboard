@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import Counter, defaultdict
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -48,6 +49,7 @@ from finboard_broker.events import BrokerEvent, BrokerEventType
 from finboard_broker.market_base import MarketDataEvent, MarketDataEventType
 from finboard_core.strategy import OrderEvent, Strategy, UniverseSelectionEvent
 from finboard_data.base import HistoricalDataProvider
+from finboard_data.cache import ParquetReadJobStats, collect_parquet_read_stats
 from finboard_data.factors import FactorSnapshot, FactorSnapshotStatus
 from finboard_shared.identifiers import AccountId
 from finboard_shared.models import Bar, Symbol
@@ -94,16 +96,27 @@ class BacktestEngine:
 
     async def run(self) -> BacktestResult:
         """执行回测,返回绩效报告。"""
-        # 1. 加载历史数据
-        bars_by_symbol = await self._load_data()
-        # 1b. 显式基准不在回测 universe 时单独拉取(issue #184)
-        benchmark_bars = await self._load_benchmark_bars(bars_by_symbol)
+        run_started = time.monotonic()
+        load_started = time.monotonic()
+        # parquet 读取聚合只包裹加载段(issue #285):回放/撮合段无缓存读取,
+        # 段内聚合即数据加载 IO 的画像,回答「慢在 IO 还是计算」。
+        with collect_parquet_read_stats() as parquet_stats:
+            # 1. 加载历史数据
+            bars_by_symbol = await self._load_data()
+            # 1b. 显式基准不在回测 universe 时单独拉取(issue #184)
+            benchmark_bars = await self._load_benchmark_bars(bars_by_symbol)
+        data_load_elapsed = time.monotonic() - load_started
 
         # 2. 合并所有 Bar,按交易日批处理
         all_bars = self._merge_bars(bars_by_symbol)
         if not all_bars:
-            logger.warning("backtest.no_data")
-            return BacktestResult()
+            no_data_timing = self._build_timing(
+                run_started=run_started,
+                data_load_elapsed=data_load_elapsed,
+                parquet_stats=parquet_stats,
+            )
+            logger.warning("backtest.no_data", **no_data_timing)
+            return BacktestResult(timing=no_data_timing)
 
         logger.info(
             "backtest.starting",
@@ -221,15 +234,40 @@ class BacktestEngine:
             selection_snapshots, selection_pool_ever_active
         )
 
+        # job 级分段耗时(issue #285):进 result payload 与 structlog。
+        timing = self._build_timing(
+            run_started=run_started,
+            data_load_elapsed=data_load_elapsed,
+            parquet_stats=parquet_stats,
+        )
+
         # 6. 计算绩效
-        return self._build_result(
+        result = self._build_result(
             equity_curve=equity_curve,
             bars_by_symbol=bars_by_symbol,
             benchmark_bars=benchmark_bars,
             broker=broker,
             selection_snapshots=selection_snapshots,
             selection_diagnostics=selection_diagnostics,
+            timing=timing,
         )
+        logger.info("backtest.timing", bars=len(all_bars), **timing)
+        return result
+
+    @staticmethod
+    def _build_timing(
+        *,
+        run_started: float,
+        data_load_elapsed: float,
+        parquet_stats: ParquetReadJobStats,
+    ) -> dict[str, object]:
+        """聚合 job 级分段耗时(issue #285,纯可观测性,不参与任何 checksum)。"""
+
+        return {
+            "total_elapsed_seconds": round(time.monotonic() - run_started, 3),
+            "data_load_elapsed_seconds": round(data_load_elapsed, 3),
+            "parquet_reads": parquet_stats.as_dict(),
+        }
 
     def _build_selection_diagnostics(
         self,
@@ -453,6 +491,7 @@ class BacktestEngine:
         broker: BacktestBroker,
         selection_snapshots: list[FactorSnapshot],
         selection_diagnostics: dict[str, object] | None = None,
+        timing: dict[str, object] | None = None,
     ) -> BacktestResult:
         fills = broker.fills
         orders = broker.all_orders
@@ -582,4 +621,5 @@ class BacktestEngine:
             benchmark_config=self._config.benchmark.as_dict(),
             benchmark_source=benchmark_source,
             selection_diagnostics=selection_diagnostics,
+            timing=timing,
         )
