@@ -94,7 +94,11 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   - `parameters`: `{}` —— 不声明即 single_shot(需冻结快照);声明
     `rebalance_frequency=monthly|quarterly` 触发多期回放(#183),非法值入队即拒
   - `validation_config` / `portfolio_config` / `risk_config` / `execution_config` /
-    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空
+    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空;
+    `portfolio_config.overrides.risk_factor_limits`(#266)可声明风险因子
+    active 暴露上限(`[{factor, max_active_exposure}]`,因子名与冻结特征
+    feature_id 同名,如 market_beta / size_exposure / 行业 one-hot 列名),
+    暴露缺失降级为具名 warning,不可满足执行期 fail-closed
   - `code_version`*: 7-64 字符,**本 run 自身的代码版本标识**(如 FinBoard git
     commit),冻结进 manifest/checksum 供追溯;**与数据集发布的 code_version 同名
     但互不校验**,别拿数据集 git hash 顶替
@@ -1019,8 +1023,20 @@ research_run 管线轻路由(#174)。
 归为研究写(经 `mcp_readonly_only` 门控),agent 可自主执行。
 
 ### finboard_portfolio_allocate **[写·纯计算]**
-目标权重分配(equal_weight / inverse_volatility / erc)+ 约束 + 风险报告。
-对应 `POST /api/portfolio/allocate`,调 `build_portfolio`。
+目标权重分配(equal_weight / inverse_volatility / erc / max_ir)+ 约束 +
+风险报告。对应 `POST /api/portfolio/allocate`,调 `build_portfolio`。
+**max_ir(#266)**:最大 IR(切点)组合 —— LW 协方差 + 信号强度代理预期
+超额收益,capped simplex 投影梯度求解(确定性,零随机成分);依赖协方差,
+缺协方差/信号全中性按 `covariance_failure_mode` 分流(默认 fail_closed)。
+**风险因子中性化(#266)**:`risk_factor_limits`([{factor, max_active_exposure}])
++ `factor_exposures`({因子: {标的: 暴露观测}})启用 active 暴露硬上限
+`|Σ(w−baseline)·f| ≤ 阈值`(`neutralization_baseline?` 提供基准权重,缺省
+现金基准)—— 只减仓投影、逐项审计(`risk_factor_neutralization` 硬约束行);
+暴露观测缺失的因子降级为具名 warning 审计行
+(`risk_factor_neutralization_skipped`,passed=false,不静默);
+约束本体不可满足报 `invalid_argument`(fail-closed)。research_run 侧经
+`portfolio_config.overrides.risk_factor_limits` 声明同一约束(因子名与冻结
+特征 feature_id 同名)。
 - 参数:`signals: list[{symbol, score, confidence?}]`、`as_of: str`(ISO 日期)、
   `method: str = "equal_weight"`、`strategy_id? = "mcp"`、
   `max_weight_per_asset? = 0.25`、`max_weight_per_sleeve? = 0.40`、
@@ -1031,7 +1047,10 @@ research_run 管线轻路由(#174)。
   `current_weights?: dict[str,float]`、`target_gross_exposure?`、
   `betas?: dict[str,float]`、`max_drawdown? = 0.0`、
   `max_risk_contribution? = 1.0`、`conflict_policy? = "net"`、
-  `covariance_failure_mode? = "fail_closed"`
+  `covariance_failure_mode? = "fail_closed"`、
+  `risk_factor_limits?: list[{factor, max_active_exposure}]`(#266)、
+  `factor_exposures?: dict[str, dict[str,float]]`(#266)、
+  `neutralization_baseline?: dict[str,float]`(#266)
 - 返回:`{weights, weights_before_constraints, cash_buffer, gross_weight,
   net_weight, configured_max_leverage, n_assets, contract_version,
   covariance_shrinkage, covariance_fallback_used, adjustments, risk}`

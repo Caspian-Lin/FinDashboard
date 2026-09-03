@@ -156,12 +156,23 @@ async def portfolio_allocate(
     max_risk_contribution: float = 1.0,
     conflict_policy: str = "net",
     covariance_failure_mode: str = "fail_closed",
+    risk_factor_limits: list[dict[str, Any]] | None = None,
+    factor_exposures: dict[str, dict[str, float]] | None = None,
+    neutralization_baseline: dict[str, float] | None = None,
 ) -> ToolEnvelope:
-    """目标权重分配(equal_weight / inverse_volatility / erc)+ 约束 + 风险报告。
+    """目标权重分配(equal_weight / inverse_volatility / erc / max_ir)+ 约束 + 风险报告。
 
     纯计算,无 DB 写入。对应 ``POST /api/portfolio/allocate``,调 ``build_portfolio``。
     返回 weights / weights_before_constraints / cash_buffer / gross_weight /
     net_weight / adjustments / risk。
+
+    issue #266 扩展:``method="max_ir"`` 为最大 IR(切点)组合(需协方差);
+    ``risk_factor_limits``(``[{factor, max_active_exposure}]``)声明风险因子
+    active 暴露硬上限,``factor_exposures``(``{因子: {标的: 暴露}}``)提供
+    PIT 观测,``neutralization_baseline`` 提供基准权重(缺省现金基准)。
+    暴露观测缺失的因子降级为具名 warning 审计行
+    (``risk_factor_neutralization_skipped``,passed=false,不静默);
+    约束本体不可满足按 fail_closed 报 invalid_argument。
     """
 
     async def _do() -> dict[str, Any]:
@@ -173,6 +184,7 @@ async def portfolio_allocate(
             CovarianceFailureMode,
             PortfolioBuildInput,
             PortfolioConstraints,
+            RiskFactorLimit,
             SignalConflictPolicy,
             build_portfolio,
             estimate_covariance,
@@ -184,6 +196,22 @@ async def portfolio_allocate(
 
         as_of_d = _parse_date(as_of)
         sig_objs = _build_signals(signals, as_of=as_of_d, strategy_id=strategy_id)
+
+        parsed_limits: tuple[RiskFactorLimit, ...] = ()
+        if risk_factor_limits:
+            try:
+                parsed_limits = tuple(
+                    RiskFactorLimit(
+                        factor=str(item["factor"]),
+                        max_active_exposure=float(item["max_active_exposure"]),
+                    )
+                    for item in risk_factor_limits
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise McpToolError(
+                    "invalid_argument",
+                    f"risk_factor_limits 形态应为 [{{factor, max_active_exposure}}]: {exc}",
+                ) from exc
 
         try:
             constraints = PortfolioConstraints(
@@ -198,6 +226,7 @@ async def portfolio_allocate(
                 max_risk_contribution=max_risk_contribution,
                 long_only=long_only,
                 covariance_failure_mode=CovarianceFailureMode(covariance_failure_mode),
+                risk_factor_limits=parsed_limits,
             )
         except ValueError as exc:
             raise McpToolError("invalid_argument", str(exc)) from exc
@@ -232,6 +261,8 @@ async def portfolio_allocate(
                     betas=betas or {},
                     max_drawdown=max_drawdown,
                     conflict_policy=SignalConflictPolicy(conflict_policy),
+                    factor_exposures=factor_exposures or {},
+                    neutralization_baseline=neutralization_baseline or {},
                 )
             )
         except (AllocationError, ValueError) as exc:
@@ -291,6 +322,9 @@ async def portfolio_allocate(
             "max_risk_contribution": max_risk_contribution,
             "conflict_policy": conflict_policy,
             "covariance_failure_mode": covariance_failure_mode,
+            "risk_factor_limits": risk_factor_limits,
+            "factor_exposure_factors": sorted(factor_exposures or {}),
+            "neutralization_baseline_symbols": sorted(neutralization_baseline or {}),
             "n_returns_tickers": len(returns_by_ticker) if returns_by_ticker else 0,
         },
         handler=_do,
@@ -568,9 +602,14 @@ def register(mcp: MCPServer) -> None:
         name="finboard_portfolio_allocate",
         description=(
             "组合目标权重分配(纯计算,无 DB 写入)。输入信号清单 + 方法"
-            "(equal_weight/inverse_volatility/erc)+ 约束,返回目标权重 / 约束前权重"
-            " / cash_buffer / gross/net_weight / 约束调整 / 风险报告。"
+            "(equal_weight/inverse_volatility/erc/max_ir)+ 约束,返回目标权重 /"
+            " 约束前权重 / cash_buffer / gross/net_weight / 约束调整 / 风险报告。"
             "对应 POST /api/portfolio/allocate,调 build_portfolio。"
+            "max_ir 为最大 IR(切点)组合,依赖协方差(#266)。"
+            "risk_factor_limits([{factor, max_active_exposure}])+ factor_exposures"
+            "({因子: {标的: 暴露}})启用风险因子 active 暴露硬上限(#266):"
+            "只减仓投影、逐项审计,暴露缺失的因子降级为具名 warning 审计行"
+            "(risk_factor_neutralization_skipped),不可满足按 fail_closed 拒绝。"
             "研究写操作(自主执行,经 mcp_readonly_only 门控)。"
         ),
     )
@@ -598,6 +637,9 @@ def register(mcp: MCPServer) -> None:
         max_risk_contribution: float = 1.0,
         conflict_policy: str = "net",
         covariance_failure_mode: str = "fail_closed",
+        risk_factor_limits: list[dict[str, Any]] | None = None,
+        factor_exposures: dict[str, dict[str, float]] | None = None,
+        neutralization_baseline: dict[str, float] | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await portfolio_allocate(
@@ -625,6 +667,9 @@ def register(mcp: MCPServer) -> None:
             max_risk_contribution=max_risk_contribution,
             conflict_policy=conflict_policy,
             covariance_failure_mode=covariance_failure_mode,
+            risk_factor_limits=risk_factor_limits,
+            factor_exposures=factor_exposures,
+            neutralization_baseline=neutralization_baseline,
         )
 
     @mcp.tool(

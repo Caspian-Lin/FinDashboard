@@ -119,6 +119,102 @@ class TestPortfolioAllocate:
         assert env.error is not None
         assert env.error.kind == "invalid_argument"
 
+    async def test_max_ir_with_covariance(self) -> None:
+        """issue #266:max_ir 方法(最大 IR 切点组合)经 MCP 可运行。"""
+        app = _make_app()
+        env = await portfolio_tools.portfolio_allocate(
+            app,
+            signals=[
+                {"symbol": "A", "score": 1.0},
+                {"symbol": "B", "score": 0.7},
+            ],
+            as_of="2026-01-15",
+            method="max_ir",
+            max_weight_per_asset=1.0,
+            max_weight_per_sleeve=1.0,
+            min_cash_buffer=0.0,
+            returns_by_ticker={
+                "A": [0.01, -0.02, 0.015, 0.008] * 8,
+                "B": [0.005, 0.007, -0.004, 0.011] * 8,
+            },
+        )
+        assert env.status == "ok", env.error
+        data = env.data
+        assert data is not None
+        weight_map = {w["code"]: w["weight"] for w in data["weights"]}
+        assert weight_map
+        assert data["covariance_fallback_used"] is False
+        assert abs(sum(weight_map.values()) - 1.0) <= 1e-9
+
+    async def test_risk_factor_neutralization_enforced(self) -> None:
+        """issue #266:risk_factor_limits + factor_exposures → 只减仓投影审计。"""
+        app = _make_app()
+        env = await portfolio_tools.portfolio_allocate(
+            app,
+            signals=[
+                {"symbol": "A", "score": 1.0},
+                {"symbol": "B", "score": 1.0},
+            ],
+            as_of="2026-01-15",
+            method="equal_weight",
+            max_weight_per_asset=1.0,
+            max_weight_per_sleeve=1.0,
+            min_cash_buffer=0.0,
+            risk_factor_limits=[
+                {"factor": "market_beta", "max_active_exposure": 0.1},
+            ],
+            factor_exposures={"market_beta": {"A": 1.0, "B": 1.0}},
+        )
+        assert env.status == "ok", env.error
+        data = env.data
+        assert data is not None
+        row = next(
+            item
+            for item in data["adjustments"]
+            if item["constraint"] == "risk_factor_neutralization"
+        )
+        assert row["passed"] is True
+        assert row["after_value"] <= 0.1 + 1e-9
+
+    async def test_risk_factor_neutralization_missing_observations_degrade(self) -> None:
+        """issue #266:暴露缺失 → skipped 软约束行(具名 warning),不失败。"""
+        app = _make_app()
+        env = await portfolio_tools.portfolio_allocate(
+            app,
+            signals=[
+                {"symbol": "A", "score": 1.0},
+                {"symbol": "B", "score": 1.0},
+            ],
+            as_of="2026-01-15",
+            method="equal_weight",
+            risk_factor_limits=[
+                {"factor": "market_beta", "max_active_exposure": 0.1},
+            ],
+        )
+        assert env.status == "ok", env.error
+        data = env.data
+        assert data is not None
+        row = next(
+            item
+            for item in data["adjustments"]
+            if item["constraint"] == "risk_factor_neutralization_skipped"
+        )
+        assert row["passed"] is False
+        assert "factor_neutralization_inactive" in row["reason"]
+
+    async def test_risk_factor_limits_malformed_rejected(self) -> None:
+        app = _make_app()
+        env = await portfolio_tools.portfolio_allocate(
+            app,
+            signals=[{"symbol": "A", "score": 1.0}],
+            as_of="2026-01-15",
+            risk_factor_limits=[{"factor": "market_beta"}],
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "risk_factor_limits" in (env.error.message or "")
+
 
 # ---------------------------------------------------------------------------
 # portfolio_sizing

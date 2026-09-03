@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -27,10 +28,17 @@ from finboard_backtest.portfolio.contracts import (
     TargetWeight,
 )
 from finboard_backtest.portfolio.covariance import CovarianceEstimate
+from finboard_backtest.portfolio.neutralization import (
+    NEUTRALIZATION_CONSTRAINT,
+    NEUTRALIZATION_SKIPPED_CONSTRAINT,
+    neutralization_audit_rows,
+    project_risk_factor_neutralization,
+)
 from finboard_backtest.portfolio.risk_budget import (
     RiskBudgetError,
     enforce_risk_contribution_cap,
     portfolio_volatility,
+    risk_concentration_check,
     scale_to_target_volatility,
 )
 from finboard_backtest.research_run.contracts import (
@@ -76,6 +84,10 @@ class PortfolioBuildInput:
     betas: dict[str, float] = field(default_factory=dict)
     max_drawdown: float = 0.0
     conflict_policy: SignalConflictPolicy = SignalConflictPolicy.NET
+    # issue #266:{因子名: {标的: 暴露观测}},来自冻结特征/PIT 观测;
+    # 声明了 risk_factor_limits 却缺观测时按具名 warning 降级而非静默。
+    factor_exposures: dict[str, dict[str, float]] = field(default_factory=dict)
+    neutralization_baseline: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.signals:
@@ -88,6 +100,17 @@ class PortfolioBuildInput:
             raise AllocationError("target_gross_exposure 不能为负")
         if not 0 <= self.max_drawdown <= 1:
             raise AllocationError("max_drawdown 必须落在 [0, 1]")
+        for factor, observations in self.factor_exposures.items():
+            for symbol, value in observations.items():
+                if value is None:
+                    continue
+                if not math.isfinite(float(value)):
+                    raise AllocationError(
+                        f"因子暴露观测必须为有限数: {factor}/{symbol}={value}"
+                    )
+        for symbol, weight in self.neutralization_baseline.items():
+            if not math.isfinite(float(weight)):
+                raise AllocationError(f"基准权重必须为有限数: {symbol}={weight}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,7 +339,7 @@ def build_portfolio(build_input: PortfolioBuildInput) -> PortfolioBuildResult:
     method = build_input.method
     covariance = build_input.covariance
     fallback = False
-    covariance_needed = method in {"inverse_volatility", "erc"}
+    covariance_needed = method in {"inverse_volatility", "erc", "max_ir"}
     if covariance is not None:
         covariance_problem = _covariance_problem(
             covariance, {signal.symbol for signal in resolved}
@@ -547,6 +570,66 @@ def build_portfolio(build_input: PortfolioBuildInput) -> PortfolioBuildResult:
             )
         )
 
+    if build_input.constraints.risk_factor_limits:
+        # issue #266:风险因子 active 暴露硬上限 —— 只减仓投影,放在
+        # 所有其他改权重阶段之后,使审计的 before/after 反映真实边界;
+        # 暴露观测缺失的因子降级为具名 warning(软约束行,不静默失效)。
+        neutralization = project_risk_factor_neutralization(
+            after.weights,
+            build_input.constraints.risk_factor_limits,
+            build_input.factor_exposures,
+            baseline_weights=build_input.neutralization_baseline,
+        )
+        for constraint, symbol, before_v, after_v, limit_v, passed, reason in neutralization_audit_rows(
+            neutralization
+        ):
+            adjustments.append(
+                ConstraintAdjustment(
+                    constraint=constraint,
+                    symbol=symbol,
+                    before_value=before_v,
+                    after_value=after_v,
+                    limit=limit_v,
+                    passed=passed,
+                    reason=reason,
+                )
+            )
+        if not neutralization.converged:
+            violated = [
+                f"{audit.factor}(after={abs(audit.after_exposure or 0.0):.6f},"
+                f" limit={audit.limit:.6f})"
+                for audit in neutralization.audits
+                if audit.enforced
+                and audit.after_exposure is not None
+                and abs(audit.after_exposure) > audit.limit + MAX_WEIGHT_EPSILON
+            ]
+            raise AllocationError(
+                f"风险因子中性化约束不可满足,按 fail_closed 拒绝: {violated}"
+            )
+        if neutralization.changed:
+            after = _target_from_weights(
+                neutralization.weights, after, build_input.constraints
+            )
+            if build_input.constraints.max_risk_contribution < 1.0 - MAX_WEIGHT_EPSILON:
+                # 中性化只减权,但减「低风险贡献资产」会抬升高贡献资产的风险
+                # 占比;与风险贡献上限构成潜在冲突时必须失败关闭而非静默失守。
+                if covariance is None:
+                    raise AllocationError(
+                        "风险因子中性化后无法复核风险贡献上限(缺少协方差),按 fail_closed 拒绝"
+                    )
+                check = risk_concentration_check(
+                    after.weights,
+                    covariance,
+                    threshold=build_input.constraints.max_risk_contribution,
+                )
+                if not check.passed:
+                    raise AllocationError(
+                        "风险因子中性化投影与风险贡献上限冲突,"
+                        f"按 fail_closed 拒绝: argmax={check.argmax_code},"
+                        f" contribution={check.max_risk_contribution:.6f},"
+                        f" limit={build_input.constraints.max_risk_contribution:.6f}"
+                    )
+
     cash_passed = after.cash_buffer + MAX_WEIGHT_EPSILON >= (
         build_input.constraints.min_cash_buffer
     )
@@ -584,9 +667,13 @@ def to_research_constraint_outcomes(
         "gross_leverage",
         "volatility",
         "max_risk_contribution",
+        NEUTRALIZATION_CONSTRAINT,
     }
+    # issue #266:暴露观测缺失而跳过的中性化约束是「降级可见」而非
+    # 「执行后失败」—— 记软约束,不触发 hard-fail,但 passed=False 保留。
+    soft_constraints = {"rebalance_band", NEUTRALIZATION_SKIPPED_CONSTRAINT}
     for item in result.adjustments:
-        hard = item.constraint != "rebalance_band"
+        hard = item.constraint not in soft_constraints
         passed = item.passed
         changed = abs(item.before_value - item.after_value) > MAX_WEIGHT_EPSILON
         if (
