@@ -757,6 +757,13 @@ research_run 管线轻路由(#174)。
     `explicit_symbol:<code>` / `equal_weight_selection_pool`(选股启用时按每期
     选股结果动态等权,#254)/ `equal_weight_static_pool` / `first_symbol`,
     回退来源可见);
+  - **timing(#285)**:metrics.timing =
+    `{total_elapsed_seconds, data_load_elapsed_seconds, parquet_reads
+    {read_ops, read_elapsed_ms, read_bytes, ops_by_entry}}` —— job 级分段
+    耗时,判定「慢在 IO 还是计算」;research_run 侧 `finboard_run_get` 的
+    result.timing 另有 `decision_load_elapsed_seconds` /
+    `decision_execute`(count/min/avg/max + slowest_decision_date)/
+    `report_elapsed_seconds`。纯可观测性,不参与任何 checksum;
     异步返回 `{job_id, status, created, idempotency_key, async_mode,
     symbol_days_estimate, auto_async_threshold, execution_path}`
   - `fills[].date` = 该笔成交实际发生的交易日(issue #205 起);此前旧记录

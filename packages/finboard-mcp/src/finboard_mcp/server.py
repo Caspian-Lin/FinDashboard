@@ -181,6 +181,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   轮询 result_ref=str(run_id) 后 finboard_backtest_history_get 查询),省略 run_async 时
   按估算工作量(标的不数 x 交易日)自动切换,≥ 阈值 backtest_auto_async_symbol_days
   (settings,默认 15000,0=关闭)即异步,大任务不再 MCP 客户端 30s 超时丢响应;Sharpe 双口径(#262):metrics.sharpe_ratio=主口径(rf=risk_free_annual 默认 3%/年,ddof=0),sharpe_rf0=rf=0 对照口径(ddof=1,与 research_run 报告 sharpe_ratio 同口径),跨报告比较 Sharpe 用 sharpe_rf0;
+  job 级分段耗时(#285):metrics.timing={total_elapsed_seconds, data_load_elapsed_seconds, parquet_reads{read_ops,read_elapsed_ms,read_bytes,ops_by_entry}}(纯可观测性,慢在 IO 还是计算由此判定);research_run 的 run_get result.timing 同理,附 decision_load_elapsed_seconds/decision_execute(count/min/avg/max+slowest_decision_date)/report_elapsed_seconds;
   (2) strategy_spec 形态:按已发布 {strategy_id, version} 路由入队 research_run
   管线,返回 run_id + job_id 指针异步执行(与 strategy 互斥;其余入队字段走
   queue_payload,与 finboard_run_queue 同构;返回值含 execution_mode
