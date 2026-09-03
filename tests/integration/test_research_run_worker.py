@@ -572,7 +572,11 @@ class TestResearchRunWorkerEndToEnd:
         done, total = observed_done_total
         assert done >= 1
         assert total >= done  # 当前估算 total(随已发现决策递增)不小于 done
-        assert observed_phase in {
+        # 决策执行期 phase 携带决策级上下文(issue #308):
+        # ``research_run:<stage>#<序号>@<日期>``;REPORT 段无后缀。此处按
+        # stage 名(剥掉 #308 后缀)匹配既有阶段集合,终态兼容断言不变。
+        observed_stage = observed_phase.split("#", 1)[0]
+        assert observed_stage in {
             "research_run:universe",
             "research_run:features",
             "research_run:signals",

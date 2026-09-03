@@ -46,6 +46,10 @@ export interface JobOut {
   finished_at: string | null;
   archived_at: string | null;
   updated_at: string;
+  // 关联 research_runs 的状态(issue #306/#308):kind=research_run 且单查
+  // GET /api/jobs/{id} 时服务端填充;列表端点不 join,恒为 null。
+  // 「run interrupted 但 job 仍 running」的两表不一致一眼可见。
+  run_status: string | null;
 }
 
 export function isJobRunning(job: Pick<JobOut, "status"> | undefined | null): boolean {

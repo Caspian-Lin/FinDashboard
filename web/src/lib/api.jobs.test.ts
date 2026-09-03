@@ -35,6 +35,7 @@ function makeJob(status: JobStatus): JobOut {
     finished_at: null,
     archived_at: null,
     updated_at: "2026-08-01T00:00:00+00:00",
+    run_status: null,
   };
 }
 

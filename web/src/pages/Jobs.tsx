@@ -15,6 +15,7 @@ import {
   JOB_STATUS_LABELS,
   JOB_STATUS_OPTIONS,
   jobKindLabel,
+  parseJobPhase,
 } from "@/lib/jobs";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
@@ -43,6 +44,37 @@ import { useT } from "@/i18n";
 
 const ALL = "all";
 const POLL_MS = 5000;
+
+/** run 终态但非 completed 且 job 仍在运行族 → 两表状态不一致(RR-7a74 僵尸形态)。 */
+const RUN_STUCK_STATUSES: ReadonlySet<string> = new Set([
+  "interrupted",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * phase 展示文本(issue #308):research_run 的加载 k/N 帧与决策级
+ * `#序号@日期` 帧翻译为可读文案;其余(含其他 kind)原样返回。
+ */
+function usePhaseText(phase: string | null): string | null {
+  const { t } = useT();
+  const info = parseJobPhase(phase);
+  if (!info) return phase;
+  if (info.load) {
+    return t("jobs.phaseLoad", {
+      done: info.load.done,
+      total: info.load.total,
+    });
+  }
+  if (info.decision) {
+    return t("jobs.phaseDecision", {
+      index: info.decision.index,
+      date: info.decision.date,
+      stage: info.stage,
+    });
+  }
+  return phase;
+}
 
 /** 任务中心:研究/数据/回测域统一后台任务的集中管理页(issue #161;#221 归档)。 */
 export default function Jobs() {
@@ -313,6 +345,7 @@ function JobRow({
   const total = job.progress_total;
   const percent =
     total > 0 ? Math.min(100, Math.round((job.progress_done / total) * 100)) : null;
+  const phaseText = usePhaseText(job.phase);
   return (
     <>
       <TableRow data-state={expanded ? "selected" : undefined} className={archived ? "opacity-60" : undefined}>
@@ -344,13 +377,21 @@ function JobRow({
           {job.status === "running" && total > 0 ? (
             <div className="flex items-center gap-2">
               <Progress value={percent ?? 0} className="w-24" aria-label={t("jobs.progressAria")} />
-              <span className="text-xs text-muted-foreground whitespace-nowrap">
+              <span
+                className="text-xs text-muted-foreground whitespace-nowrap"
+                title={job.phase ?? undefined}
+              >
                 {job.progress_done}/{total}
-                {job.phase ? ` ${job.phase}` : ""}
+                {phaseText ? ` ${phaseText}` : ""}
               </span>
             </div>
           ) : (
-            <span className="text-xs text-muted-foreground">{job.phase ?? "—"}</span>
+            <span
+              className="text-xs text-muted-foreground"
+              title={job.phase ?? undefined}
+            >
+              {phaseText ?? "—"}
+            </span>
           )}
         </TableCell>
         <TableCell className="text-xs text-muted-foreground">
@@ -409,11 +450,40 @@ function JobRow({
 
 function JobDetail({ job }: { job: JobOut }) {
   const { t } = useT();
+  // kind=research_run 时单查最新任务(issue #306/#308):run_status 只在
+  // GET /api/jobs/{id} 透传(列表不 join),展开详情即实时可见 run/job 两表
+  // 一致性与决策级进度;运行中随轮询刷新。
+  const isResearchRun = job.kind === "research_run";
+  const { data: live } = useQuery({
+    queryKey: ["job", job.job_id],
+    queryFn: () => api.getJob(job.job_id),
+    enabled: isResearchRun,
+    refetchInterval: isJobRunning(job) ? POLL_MS : false,
+  });
+  const runStatus = live?.run_status ?? job.run_status ?? null;
+  const phaseInfo = parseJobPhase(live?.phase ?? job.phase);
+  const mismatched =
+    runStatus != null && RUN_STUCK_STATUSES.has(runStatus) && isJobRunning(job);
   const rows: [string, string][] = [
     [t("jobs.queue"), job.queue],
     [t("jobs.priority"), String(job.priority)],
     ["Worker", job.worker_id ?? "—"],
     [t("jobs.idempotencyKey"), job.idempotency_key],
+    ...(isResearchRun
+      ? ([[t("jobs.runStatus"), runStatus ?? "—"]] as [string, string][])
+      : []),
+    ...(phaseInfo?.decision
+      ? ([
+          [
+            t("jobs.decisionProgress"),
+            t("jobs.phaseDecision", {
+              index: phaseInfo.decision.index,
+              date: phaseInfo.decision.date,
+              stage: phaseInfo.stage,
+            }),
+          ],
+        ] as [string, string][])
+      : []),
     [t("jobs.resultRef"), job.result_ref ?? "—"],
     [t("jobs.errorCode"), job.error_code ?? "—"],
     [t("jobs.errorSummary"), job.error_summary ?? "—"],
@@ -425,22 +495,34 @@ function JobDetail({ job }: { job: JobOut }) {
     [t("jobs.updatedAt"), formatDateTime(job.updated_at)],
   ];
   return (
-    <div className="grid gap-6 lg:grid-cols-2">
-      <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
-        {rows.map(([label, value]) => (
-          <div key={label} className="min-w-0">
-            <dt className="text-xs text-muted-foreground">{label}</dt>
-            <dd className="truncate font-mono text-xs" title={value}>
-              {value}
-            </dd>
-          </div>
-        ))}
-      </dl>
-      <div className="min-w-0">
-        <p className="mb-1 text-xs text-muted-foreground">{t("jobs.payload")}</p>
-        <pre className="max-h-56 overflow-auto scrollbar-thin rounded-md border border-border bg-background p-3 font-mono text-xs">
-          {JSON.stringify(job.payload, null, 2)}
-        </pre>
+    <div className="space-y-3">
+      {mismatched && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            {t("jobs.runStatusMismatch", {
+              runStatus,
+              jobStatus: job.status,
+            })}
+          </AlertDescription>
+        </Alert>
+      )}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+          {rows.map(([label, value]) => (
+            <div key={label} className="min-w-0">
+              <dt className="text-xs text-muted-foreground">{label}</dt>
+              <dd className="truncate font-mono text-xs" title={value}>
+                {value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        <div className="min-w-0">
+          <p className="mb-1 text-xs text-muted-foreground">{t("jobs.payload")}</p>
+          <pre className="max-h-56 overflow-auto scrollbar-thin rounded-md border border-border bg-background p-3 font-mono text-xs">
+            {JSON.stringify(job.payload, null, 2)}
+          </pre>
+        </div>
       </div>
     </div>
   );

@@ -552,6 +552,12 @@ def register(mcp: MCPServer) -> None:
             " run_status} 而非重发全量。kind=research_run 的任务附带 run_status"
             " 字段(issue #306:关联 research_runs.status,查不到为 null)——"
             "「run interrupted 但 job 仍 running」的两表不一致一眼可见。"
+            "research_run 的 phase 携带实时进度(issue #308):加载期为"
+            " `research_run:decision_load k/N`(k=已完成期数,N=决策期总数,"
+            "multi_period/single_shot 同机制),决策执行期为"
+            " `research_run:<stage>#<序号>@<YYYY-MM-DD>`(序号 1-based),"
+            "REPORT/终态保持 `research_run:report` / `research_run:<status>`;"
+            "done/total 数值恒为「stage x decision」工件计数(issue #188 口径)。"
             "成功后 result_ref 携带产物引用(如特征快照的 snapshot_id)。"
             "未找到返回 not_found。只读。"
         ),

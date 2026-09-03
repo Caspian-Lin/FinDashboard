@@ -1340,13 +1340,17 @@ class DecisionLoadContext:
 _DECISION_LOAD_CHUNK = 4
 
 
-#: 加载期分块探针(issue #306):(done, total) → None,在每个分块完成点调用。
+#: 加载期分块探针(issue #306,进度形态 #308):(done, total) → None。
+#: ``done`` = 已完成加载的决策期数,``total`` = 推导出的决策期总数。
 #: 实现方(:func:`build_run_interrupt_probe`,构造于 adapter 工厂、持有 DB
 #: 会话)承担两件事:(1) 轮询 run status 与 job cancel_requested,发现外部
 #: 打断即抛 :class:`ResearchRunInterruptedError`(coordinator 走既有
 #: INTERRUPTED → job retry_waiting 自动重试路径);(2) 尽力而为把加载进度
-#: 上报到 background_jobs(phase=``research_run:decision_load``),让 worker
-#: 维护路径的「无进展检测」在加载期也有进展可判,正常长加载不被误杀。
+#: ``research_run:decision_load k/N`` 写入 background_jobs 的 **phase 字段**
+#: (不写 done/total 数值 —— #188 的数值口径是「stage x decision」计数,
+#: 混写两种口径会被 ``update_progress`` 的单调/夹紧规则互相污染),让
+#: worker 维护路径的「无进展检测」在加载期也有进展可判,正常长加载不被
+#: 误杀,job 视图实时可见 k/N 推进。
 LoadChunkProbe = Callable[[int, int], Awaitable[None]]
 
 
@@ -1354,14 +1358,16 @@ def build_run_interrupt_probe(
     session_maker: async_sessionmaker[Any],
     run_id: str,
 ) -> LoadChunkProbe:
-    """构造加载期分块探针(issue #306):run status / cancel 轮询 + 进度上报。
+    """构造加载期分块探针(issue #306;进度形态 #308):轮询 + k/N 进度上报。
 
     僵尸场景(RR-7a74):run 行被外部标 interrupted 后,加载期毫无感知、
     心跳照常续租,job 永不回收。本探针在每个分块边界做毫秒级一次的只读
     轮询:run 非 RUNNING(被打断/取消)或 job 被 request_cancel 即抛
-    :class:`ResearchRunInterruptedError`。存活时尽力把 ``(done, total)``
-    写入 background_jobs 的进度字段(单条 UPDATE,失败静默 —— 可观测性
-    不阻断执行)。DB 会话按次开关,不跨块持有。
+    :class:`ResearchRunInterruptedError`。存活时尽力把加载进度以
+    ``research_run:decision_load k/N``(**k/N 只进 phase 字段**,done/total
+    数值列保持 #188 决策执行口径不被污染,#308)写入 background_jobs
+    (单条 UPDATE,失败静默 —— 可观测性不阻断执行)。DB 会话按次开关,
+    不跨块持有。
     """
 
     async def _probe(done: int, total: int) -> None:
@@ -1393,16 +1399,18 @@ def build_run_interrupt_probe(
             )
         if job_id is None:
             return
-        # 加载进度上报(尽力而为):#188 进度语义之外的加载段补充,失败
-        # 不影响执行;僵尸无进展检测(#306)由此在加载期获得判定依据。
+        # 加载进度上报(尽力而为,issue #306/#308):k/N 编码进 phase,
+        # done/total 数值列不动(避免 #188 口径被加载期数值占位)。僵尸无
+        # 进展检测(#306)由此在加载期获得判定依据;update_progress 顺带
+        # 刷新 heartbeat_at,长加载期间心跳与进度同源推进。
         with contextlib.suppress(Exception):
             async with session_maker() as session:
                 repo = BackgroundJobRepository(session)
                 await repo.update_progress(
                     job_id,
-                    done=done,
-                    total=total,
-                    phase="research_run:decision_load",
+                    done=0,
+                    total=None,
+                    phase=f"research_run:decision_load {done}/{total}",
                 )
                 await repo.checkpoint()
 
@@ -1475,6 +1483,11 @@ async def build_decision_load_contexts(
     外部打断抛 ``ResearchRunInterruptedError`` 并尽力上报加载进度。打断是
     协作取消信号而非数据失败,不经 #263 的 ``attach_decision_load_context``
     标记路径。
+
+    issue #308:加载进度以 ``research_run:decision_load k/N`` 编码进 job 的
+    phase 字段(k=已完成期数、N=推导出的决策期总数,multi_period 与
+    single_shot 同机制);首帧(k=0)在 close 矩阵预建**之前**上报,覆盖
+    预建这段此前零进度的空白窗。
     """
     if not manifest.dataset_releases:
         raise ValueError("manifest 必须冻结至少一个数据发布")
@@ -1511,6 +1524,11 @@ async def build_decision_load_contexts(
     # issue #288:日历与 close 矩阵(#287 的惰性进程内缓存)在进入分块并行
     # 前预建 —— 并发首建只会重复读盘且打穿矩阵收益,预建收敛到单一顺序点。
     # multi_period 的日历在决策推导时已缓存,这里是 single_shot 的兜底预热。
+    # issue #308:首帧探针在预建**之前**触发 —— 决策日总数已推导完成,先把
+    # ``decision_load 0/N`` 透出到 job 视图,覆盖日历预热 + close 矩阵全区间
+    # 读取这段此前完全无进度的最长空白窗(RR-7a74 的「数小时 0/0」)。
+    if chunk_probe is not None and decision_days:
+        await chunk_probe(0, len(decision_days))
     await _release_trading_days(provider)
     await loader.ensure_close_histories(manifest)
 
@@ -1592,9 +1610,10 @@ async def build_decision_load_contexts(
     try:
         for chunk_start in range(0, len(decision_days), _DECISION_LOAD_CHUNK):
             # issue #306:分块边界探针 —— 打断(外部 interrupted / cancel_requested)
-            # 在进入下一块前秒级感知;加载进度(已完成期数)尽力上报。探针
-            # 自身抛错原样透传,不经 #263 数据失败标记路径。
-            if chunk_probe is not None:
+            # 在进入下一块前秒级感知;加载进度 k/N 尽力上报(#308 phase 编码)。
+            # 首块边界跳过(k=0 已由预建前的首帧上报,见上),避免重复帧;
+            # 探针自身抛错原样透传,不经 #263 数据失败标记路径。
+            if chunk_probe is not None and contexts:
                 await chunk_probe(len(contexts), len(decision_days))
             chunk = decision_days[chunk_start : chunk_start + _DECISION_LOAD_CHUNK]
             results = await asyncio.gather(

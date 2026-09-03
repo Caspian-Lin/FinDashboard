@@ -1,12 +1,14 @@
-"""research_run 分阶段进度上报单元测试(issue #188)。
+"""research_run 分阶段进度上报单元测试(issue #188;phase 编码 #308)。
 
 不依赖 PostgreSQL:用 InMemoryResearchRunStore + 固定样本 DecisionSequenceAdapter
 验证 Coordinator 在 ``stage x decision`` 粒度回调 ``progress(done, total, phase)``:
 
 * 每次 decision 回调 13 次(每个 stage 一次),再加 REPORT 1 次;
-* phase 命名 ``research_run:<stage>``,终态 phase 仍由执行器/协调器按 status 收口;
+* phase 命名:决策执行期 ``research_run:<stage>#<序号>@<YYYY-MM-DD>``(issue
+  #308 的决策级编码,序号 1-based);REPORT 段保持 ``research_run:report``,
+  终态 phase 仍由执行器/协调器按 status 收口;
 * done/total 按「stage x decision」计数:单决策 total=13;双决策第 1 段 total=13、
-  第 2 段 total=26,REPORT 段 total=27;
+  第 2 段 total=26,REPORT 段 total=27(#188 数值口径不变);
 * 进度回调抛错不影响运行状态机(尽力而为可观测性)。
 """
 
@@ -33,6 +35,32 @@ from .conftest import fixed_report
 
 _SINGLE_TOTAL = DECISION_STAGE_COUNT
 _TWO_TOTAL = DECISION_STAGE_COUNT * 2 + 1  # 2 decisions + report
+
+#: 固定样本 decision_factory 的 business_date(index=0 → 2024-01-02)。
+_DECISION_DATE = "2024-01-02"
+
+
+def _expected_stage_phases(index: int, date_text: str) -> list[str]:
+    """决策执行期 phase 期望序列(issue #308 编码,序号 1-based)。"""
+
+    return [
+        f"research_run:{stage}#{index}@{date_text}"
+        for stage in (
+            "universe",
+            "features",
+            "signals",
+            "targets_before_constraints",
+            "constraints",
+            "targets_after_constraints",
+            "risk_exits",
+            "targets_after_risk",
+            "capital_feasibility",
+            "rebalance_plan",
+            "orders",
+            "fills",
+            "ledger",
+        )
+    ]
 
 
 class _ProgressRecorder:
@@ -117,22 +145,8 @@ async def test_single_decision_reports_each_stage_once(
     # 13 stages + 1 report。
     assert len(reporter.calls) == DECISION_STAGE_COUNT + 1
     phases = [phase for _, _, phase in reporter.calls]
-    assert phases == [
-        "research_run:universe",
-        "research_run:features",
-        "research_run:signals",
-        "research_run:targets_before_constraints",
-        "research_run:constraints",
-        "research_run:targets_after_constraints",
-        "research_run:risk_exits",
-        "research_run:targets_after_risk",
-        "research_run:capital_feasibility",
-        "research_run:rebalance_plan",
-        "research_run:orders",
-        "research_run:fills",
-        "research_run:ledger",
-        "research_run:report",
-    ]
+    # 决策执行期 phase 携带决策级上下文(#308:#序号@日期);REPORT 段原样。
+    assert phases == [*_expected_stage_phases(1, _DECISION_DATE), "research_run:report"]
 
 
 @pytest.mark.asyncio
@@ -180,8 +194,16 @@ async def test_two_decisions_grow_total_and_done(
     for index, (done, total, _) in enumerate(second_segment):
         assert done == DECISION_STAGE_COUNT + index + 1
         assert total == DECISION_STAGE_COUNT * 2
-    done, total, _ = reporter.calls[-1]
+    # phase 序号随决策递增(#308):第 1 段 #1,第 2 段 #2(日期 2024-01-03)。
+    assert [phase for _, _, phase in first_segment] == _expected_stage_phases(
+        1, "2024-01-02"
+    )
+    assert [phase for _, _, phase in second_segment] == _expected_stage_phases(
+        2, "2024-01-03"
+    )
+    done, total, phase = reporter.calls[-1]
     assert (done, total) == (_TWO_TOTAL, _TWO_TOTAL)
+    assert phase == "research_run:report"
 
 
 @pytest.mark.asyncio
