@@ -1342,6 +1342,9 @@ class ConvertibleMetadataModel(Base, IdMixin):
     downward_revision_trigger: Mapped[Decimal | None] = mapped_column(
         _research_numeric(), nullable=True
     )
+    # 债券评级(issue #265):tushare cb_basic 无评级字段,由 akshare
+    # bond_zh_cov 债券评级列兜底回填;快照字段,缺失保持 null 可见。
+    rating: Mapped[str | None] = mapped_column(String(16), nullable=True)
     source: Mapped[str] = mapped_column(String(32), default="manual")
     dataset_version: Mapped[str] = mapped_column(String(128), default="v1")
     updated_at: Mapped[datetime] = mapped_column(

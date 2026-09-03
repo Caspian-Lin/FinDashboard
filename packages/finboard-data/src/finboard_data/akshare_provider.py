@@ -14,11 +14,13 @@ akshare 为同步库,所有调用通过 ``asyncio.to_thread`` 在线程池执行
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path
+from typing import Any, cast
 
 import structlog
 
@@ -94,6 +96,266 @@ def is_etf_code(code: str) -> bool:
     if exchange == "SZ":
         return bare.startswith(("15", "16"))
     return False
+
+
+def is_convertible_code(code: str) -> bool:
+    """按 A 股可转债代码规则判断是否为转债(issue #265)。
+
+    规则(带交易所后缀,与 :func:`is_index_code` / :func:`is_etf_code`
+    同风格,代码段互不重叠):
+
+    * ``11xxxx.SH`` —— 沪市转债(110/111/113/118 段);
+    * ``12xxxx.SZ`` —— 深市转债(123/127/128 段);
+    * 北交所暂无场内转债(117 段暂不纳入,无日线数据上游)。
+
+    与 ``finboard_data.assets.registry`` 的 ``_A_SHARE_CODE_TYPE``
+    (11/12 → CONVERTIBLE)同口径。
+    """
+    bare, _, suffix = code.partition(".")
+    exchange = suffix.upper()
+    if exchange == "SH":
+        return bare.startswith("11")
+    if exchange == "SZ":
+        return bare.startswith("12")
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class ConvertibleOverviewEntry:
+    """东财可转债一览(``bond_zh_cov``)的归一化单行(issue #265)。
+
+    用途:转债标的登记的发现源 + cb_basic 的交叉验证 / 评级兜底。
+    ``rating`` / ``conversion_price`` 是快照字段,东财无历史版本。
+    """
+
+    code: str  # 归一化转债代码 113000.SH
+    name: str
+    underlying_symbol: str | None  # 正股归一化代码 600519.SH
+    rating: str | None  # 债券评级(AA / AA+ ...)
+    conversion_price: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class ConvertibleRedemptionEvent:
+    """集思录强赎(``bond_cb_redeem_jsl``)归一化单行(issue #265)。
+
+    PIT 语义(诚实边界):集思录只提供**当前时点**的强赎快照,没有历史
+    公告时间,``available_at`` = 本次观察时间;历史回测只能对「观察时点
+    之后」的决策生效,历史公告回补需 5000 积分的 tushare ``cb_call``
+    (后续 issue)。``redemption_date``(赎回日)优先,缺失回退
+    ``stop_transfer_date``(停止交易日/最后转股日)作生效日。
+    """
+
+    code: str
+    name: str
+    underlying_symbol: str | None
+    redemption_date: date | None
+    stop_transfer_date: date | None
+    redemption_price: Decimal | None
+    observed_at: datetime
+
+    @property
+    def effective_date(self) -> date | None:
+        return self.redemption_date or self.stop_transfer_date
+
+
+def _frame_column(frame: object, candidates: Sequence[str]) -> str | None:
+    """容错取列名:akshare 不同版本列名可能为中英文 / 空格差异。"""
+    columns = getattr(frame, "columns", None)
+    if columns is None:
+        return None
+    available = {str(col).strip(): str(col) for col in columns}
+    for candidate in candidates:
+        exact = available.get(candidate)
+        if exact is not None:
+            return exact
+    lowered = {key.lower(): value for key, value in available.items()}
+    for candidate in candidates:
+        match = lowered.get(candidate.lower())
+        if match is not None:
+            return match
+    return None
+
+
+def _frame_columns_repr(frame: object) -> list[str]:
+    """容错列出 DataFrame 列名(报错信息用;pandas Index 不能参与真值运算)。"""
+    columns = getattr(frame, "columns", None)
+    return [str(col) for col in columns] if columns is not None else []
+
+
+def _cell(row: Mapping[str, object], column: str) -> str | None:
+    value = row[column]
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:  # NaN
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "nat", "none", "null", "--"}:
+        return None
+    return text
+
+
+def parse_convertible_overview_frame(frame: object) -> list[ConvertibleOverviewEntry]:
+    """把 ``bond_zh_cov`` DataFrame 归一化为一览条目(纯函数,可离线测试)。
+
+    必需列:债券代码 / 债券简称 / 正股代码;可选列:债券评级 / 转股价。
+    缺必需列直接 raise(上游形状变化要 fail-visible,不静默出空清单)。
+    非转债代码段(不以 11/12 开头的行,如页面附带的已兑付归档)按行跳过并计数。
+    """
+    code_col = _frame_column(frame, ("债券代码", "bond_id"))
+    name_col = _frame_column(frame, ("债券简称", "bond_nm"))
+    stock_col = _frame_column(frame, ("正股代码", "stock_id"))
+    if code_col is None or name_col is None or stock_col is None:
+        raise ValueError(
+            "akshare bond_zh_cov 返回形状不符合预期(缺少 债券代码/债券简称/正股代码 列);"
+            f"实际列: {_frame_columns_repr(frame)}"
+        )
+    rating_col = _frame_column(frame, ("债券评级", "rating"))
+    price_col = _frame_column(frame, ("转股价", "convert_price"))
+
+    entries: list[ConvertibleOverviewEntry] = []
+    skipped = 0
+    # akshare 无类型标注:经 Any 解包 DataFrame 行(上游形状错误已由
+    # 必需列检查 fail-visible)。
+    for raw_row in cast(Any, frame).to_dict(orient="records"):
+        row: Mapping[str, object] = raw_row
+        raw_code = _cell(row, code_col)
+        raw_name = _cell(row, name_col)
+        if raw_code is None or raw_name is None:
+            skipped += 1
+            continue
+        code = normalize_overview_code(raw_code)
+        if code is None or not is_convertible_code(code):
+            skipped += 1
+            continue
+        underlying: str | None = None
+        raw_stock = _cell(row, stock_col)
+        if raw_stock is not None:
+            underlying = normalize_overview_code(str(raw_stock))
+        conversion_price: Decimal | None = None
+        if price_col is not None:
+            raw_price = _cell(row, price_col)
+            if raw_price is not None:
+                try:
+                    candidate = Decimal(raw_price)
+                except InvalidOperation:
+                    candidate = None
+                if candidate is not None and candidate > 0:
+                    conversion_price = candidate
+        entries.append(
+            ConvertibleOverviewEntry(
+                code=code,
+                name=str(raw_name),
+                underlying_symbol=underlying,
+                rating=_cell(row, rating_col) if rating_col is not None else None,
+                conversion_price=conversion_price,
+            )
+        )
+    if not entries and skipped:
+        raise ValueError(
+            f"akshare bond_zh_cov 返回 {skipped} 行但无可识别的转债代码段(11xxxx.SH/12xxxx.SZ)"
+        )
+    return entries
+
+
+def parse_convertible_redeem_frame(
+    frame: object,
+    *,
+    observed_at: datetime,
+) -> list[ConvertibleRedemptionEvent]:
+    """把 ``bond_cb_redeem_jsl`` DataFrame 归一化为强赎事件(纯函数)。
+
+    赎回日(redeem_dt/赎回日)与停止交易日(put_dt/停止交易日)都缺的行
+    跳过(无法确定生效日);日期列容错解析 ``%Y-%m-%d`` / ``%Y%m%d``。
+    """
+    code_col = _frame_column(frame, ("债券代码", "bond_id"))
+    name_col = _frame_column(frame, ("债券简称", "bond_nm"))
+    if code_col is None or name_col is None:
+        raise ValueError(
+            "akshare bond_cb_redeem_jsl 返回形状不符合预期(缺少 债券代码/债券简称 列);"
+            f"实际列: {_frame_columns_repr(frame)}"
+        )
+    stock_col = _frame_column(frame, ("正股代码", "stock_id"))
+    redeem_col = _frame_column(frame, ("赎回日", "redeem_dt"))
+    stop_col = _frame_column(frame, ("停止交易日", "put_dt", "最后转股日", "stop_transfer_date"))
+    price_col = _frame_column(frame, ("赎回价", "redeem_price"))
+
+    events: list[ConvertibleRedemptionEvent] = []
+    for raw_row in cast(Any, frame).to_dict(orient="records"):
+        row: Mapping[str, object] = raw_row
+        raw_code = _cell(row, code_col)
+        raw_name = _cell(row, name_col)
+        if raw_code is None or raw_name is None:
+            continue
+        code = normalize_overview_code(str(raw_code))
+        if code is None or not is_convertible_code(code):
+            continue
+        redemption_date = (
+            _parse_flex_date(_cell(row, redeem_col)) if redeem_col is not None else None
+        )
+        stop_date = _parse_flex_date(_cell(row, stop_col)) if stop_col is not None else None
+        if redemption_date is None and stop_date is None:
+            continue
+        redemption_price: Decimal | None = None
+        if price_col is not None:
+            raw_price = _cell(row, price_col)
+            if raw_price is not None:
+                try:
+                    candidate = Decimal(raw_price)
+                except InvalidOperation:
+                    candidate = None
+                if candidate is not None and candidate > 0:
+                    redemption_price = candidate
+        events.append(
+            ConvertibleRedemptionEvent(
+                code=code,
+                name=str(raw_name),
+                underlying_symbol=(
+                    normalize_overview_code(str(_cell(row, stock_col)))
+                    if stock_col is not None and _cell(row, stock_col) is not None
+                    else None
+                ),
+                redemption_date=redemption_date,
+                stop_transfer_date=stop_date,
+                redemption_price=redemption_price,
+                observed_at=observed_at,
+            )
+        )
+    return events
+
+
+def normalize_overview_code(raw: str) -> str | None:
+    """东财/集思录 6 位纯数字代码 → 带后缀归一代码(转债/正股通用)。
+
+    转债段显式映射(11 开头 → .SH,12 开头 → .SZ)—— 不能直接委托
+    :func:`normalize_a_share_code`:其 6 位数字规则只认 6/9(沪)、0/3(深)、
+    8/4/92(北),转债的 1 开头段不在其中,委托会把每只转债都归一失败。
+    其余代码段(转债的正股)委托既有规则;无法归一返回 None。
+    """
+    text = str(raw).strip()
+    if text.endswith((".SH", ".SZ", ".BJ")):
+        return text.upper()
+    if len(text) == 6 and text.isdigit():
+        if text.startswith("11"):
+            return f"{text}.SH"
+        if text.startswith("12"):
+            return f"{text}.SZ"
+        from finboard_data.discovery import normalize_a_share_code
+
+        return normalize_a_share_code(text)
+    return None
+
+
+def _parse_flex_date(value: object) -> date | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    for pattern in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    return None
 
 
 class AkShareProvider:
@@ -264,6 +526,75 @@ class AkShareProvider:
             return None
         metadata = await self._cache.metadata_for(symbol, period, adjust)
         return metadata.last_date if metadata is not None else None
+
+    # ------------------------------------------------------------------ 转债兜底 (#265)
+
+    async def fetch_convertible_overview(self) -> list[ConvertibleOverviewEntry]:
+        """拉取东财可转债一览(``bond_zh_cov``,免费)。
+
+        用途:cb_basic 的交叉验证 / 评级兜底(research_data_sync
+        ``convertible_profiles`` 数据集消费)。退避/间隔遵循本 provider
+        既有约定(信号量 + 请求间隔 + 指数退避重试)。
+        """
+        return await self._call_with_retry(
+            "bond_zh_cov",
+            lambda ak: ak.bond_zh_cov(),
+            parse_convertible_overview_frame,
+        )
+
+    async def fetch_convertible_redeem_events(
+        self,
+        *,
+        now: Callable[[], datetime] | None = None,
+    ) -> list[ConvertibleRedemptionEvent]:
+        """拉取集思录强赎快照(``bond_cb_redeem_jsl``,免费)。
+
+        ``now`` 可注入观察时钟(缺省 UTC 当前时间),决定事件
+        ``observed_at``/``available_at``(集思录无历史公告时间,PIT 边界
+        见 :class:`ConvertibleRedemptionEvent`)。
+        """
+        observed_at = (now or (lambda: datetime.now(UTC)))()
+        return await self._call_with_retry(
+            "bond_cb_redeem_jsl",
+            lambda ak: ak.bond_cb_redeem_jsl(),
+            lambda frame: parse_convertible_redeem_frame(frame, observed_at=observed_at),
+        )
+
+    async def _call_with_retry[T](
+        self,
+        name: str,
+        call: Callable[[Any], object],
+        parse: Callable[[object], list[T]],
+    ) -> list[T]:
+        """转债兜底接口的统一调用:限流间隔 + 指数退避重试 + 线程池。"""
+
+        def _invoke() -> list[T]:
+            import akshare as ak
+
+            frame = call(ak)
+            return parse(frame)
+
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                async with self._semaphore:
+                    await self._enforce_interval()
+                    return await asyncio.to_thread(_invoke)
+            except Exception as exc:
+                last_error = exc
+                if attempt < self._max_retries:
+                    wait = self._retry_backoff**attempt
+                    logger.warning(
+                        "akshare.convertible_retry",
+                        interface=name,
+                        attempt=attempt + 1,
+                        max_retries=self._max_retries,
+                        wait=f"{wait:.1f}s",
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(wait)
+        assert last_error is not None
+        raise last_error
 
     # ------------------------------------------------------------------ 批量
     async def fetch_bars_batch(
@@ -477,6 +808,16 @@ class AkShareProvider:
         if ak_period is None:
             raise ValueError(f"akshare 不支持周期: {period}")
         ak_adjust = _ADJUST_MAP.get(adjust, "")
+
+        if is_convertible_code(symbol.code):
+            # 可转债日线(issue #265):akshare 无可靠的转债日线接口
+            # (股票接口按 6 开头拼 secid,会把转债误路由成深市,#257 同源
+            # 缺陷),fail-visible 拒绝而不是静默产出空/错数据;转债行情
+            # 走 tushare cb_daily(TushareBarProvider._fetch_daily_chunks)。
+            raise ValueError(
+                f"akshare 不支持可转债日线: {symbol.code};"
+                "转债行情请使用 tushare 源(cb_daily 专属接口,issue #265)"
+            )
 
         if is_index_code(symbol.code):
             # 指数基准行情(issue #184):无复权概念,index_zh_a_hist 不接受

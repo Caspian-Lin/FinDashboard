@@ -139,6 +139,36 @@ class InstrumentNameChange:
     available_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ConvertibleProfile:
+    """可转债基础条款快照(tushare ``cb_basic``,issue #265)。
+
+    PIT 语义(诚实边界):``cb_basic`` 是**当前时点**的条款快照,不含
+    转股价历史变动(下修史 / 除权除息调整史);``available_at`` = 本次
+    观察时间。转股价变动历史不在覆盖范围,下游派生观测(如转股溢价率)
+    不得宣称全历史 PIT。
+
+    字段映射:``conversion_price`` ← ``swap_price``(当前转股价,可空);
+    ``issue_date`` ← ``value_date``(起息日,转债语境下近似发行日);
+    ``maturity_date`` ← ``mature_date``。评级不在 cb_basic 字段内,
+    由 akshare ``bond_zh_cov`` 债券评级列兜底(research_data_sync 合并)。
+    """
+
+    symbol: str
+    name: str
+    underlying_symbol: str
+    underlying_name: str | None
+    list_date: date | None
+    delist_date: date | None
+    conversion_price: Decimal | None
+    issue_date: date | None
+    maturity_date: date | None
+    coupon_rate: Decimal | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
 @runtime_checkable
 class ResearchDataProvider(Protocol):
     """研究数据读取边界;公共接口不暴露 DataFrame 或数据源 SDK 类型。"""
@@ -181,6 +211,12 @@ class ResearchDataProvider(Protocol):
         current_only: bool = True,
     ) -> list[IndustryMembership]:
         """读取申万行业成员关系。"""
+        ...
+
+    async def fetch_convertible_profiles(
+        self,
+    ) -> list[ConvertibleProfile]:
+        """读取全市场可转债基础条款快照(在市 + 摘牌,issue #265)。"""
         ...
 
 

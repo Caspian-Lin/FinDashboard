@@ -18,6 +18,7 @@ from typing import Protocol, cast
 from zoneinfo import ZoneInfo
 
 from finboard_data.research import (
+    ConvertibleProfile,
     DailySecurityMetrics,
     FinancialIndicator,
     IndustryMembership,
@@ -53,6 +54,15 @@ _INDUSTRY_FIELDS = (
 _NAMECHANGE_FIELDS = "ts_code,name,start_date,end_date,change_reason"
 #: namechange 单次返回上限以下的安全页大小;超过一页时按 offset 循环拉全。
 _NAMECHANGE_PAGE_SIZE = 5000
+#: 可转债基础条款字段白名单(issue #265,doc_id=185)。cb_basic 无评级字段,
+#: 评级由 akshare bond_zh_cov 兜底(research_data_sync 合并);swap_price 是
+#: **当前**转股价快照(下修史不在覆盖范围)。
+_CB_BASIC_FIELDS = (
+    "ts_code,bond_full_name,bond_short_name,stock_code,stock_name,list_date,"
+    "delist_date,swap_price,value_date,mature_date,coupon_rate"
+)
+#: cb_basic 在市 + 摘牌合计千级;远低于该值的安全截断护栏。
+_CB_BASIC_LIMIT = 5000
 
 
 class TushareClient(Protocol):
@@ -76,6 +86,10 @@ class TushareClient(Protocol):
 
     def namechange(self, **kwargs: str) -> object:
         """调用 ``namechange``(历史名称变更,#251)。"""
+        ...
+
+    def cb_basic(self, **kwargs: str) -> object:
+        """调用 ``cb_basic``(可转债基础条款,#265)。"""
         ...
 
 
@@ -243,6 +257,34 @@ class TushareResearchDataProvider:
                 break
             offset += _NAMECHANGE_PAGE_SIZE
         return sorted(changes, key=lambda item: (item.symbol, item.start_date))
+
+    async def fetch_convertible_profiles(self) -> list[ConvertibleProfile]:
+        """读取全市场可转债基础条款(issue #265,2000 积分档)。
+
+        在市(L)+ 摘牌(D)档案分两次拉取合并进同一批(与 #251 股票档案
+        同风格,摘牌档案携带 delist_date);同 symbol 去重保留在市记录。
+        cb_basic 是当前快照,``available_at`` = 本次观察时间;限流经
+        ``tushare_budget`` 与其他接口共享配额。
+        """
+        observed_at = self._observed_at()
+        by_symbol: dict[str, ConvertibleProfile] = {}
+        # 先 D 后 L:L(在市)记录对同 symbol 权威(真实数据两态互斥,这里
+        # 只防御上游同 symbol 双写);D 记录填补摘牌债的 delist_date。
+        for list_status in ("D", "L"):
+            rows = await self._call(
+                "cb_basic",
+                list_status=list_status,
+                fields=_CB_BASIC_FIELDS,
+            )
+            _reject_possible_truncation(rows, "cb_basic", limit=_CB_BASIC_LIMIT)
+            parsed = [
+                self._parse_convertible_profile(row, index, observed_at)
+                for index, row in enumerate(rows)
+            ]
+            for item in parsed:
+                if list_status == "L" or item.symbol not in by_symbol:
+                    by_symbol[item.symbol] = item
+        return sorted(by_symbol.values(), key=lambda item: item.symbol)
 
     def _create_client(self, explicit_token: str | None) -> TushareClient:
         token = (
@@ -425,6 +467,36 @@ class TushareResearchDataProvider:
             start_date=_required_date(row, "start_date", endpoint, index),
             end_date=_optional_date(row, "end_date", endpoint, index),
             change_reason=_optional_text(row, "change_reason"),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+
+    @staticmethod
+    def _parse_convertible_profile(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> ConvertibleProfile:
+        endpoint = "cb_basic"
+        _require_fields(row, _CB_BASIC_FIELDS, endpoint, index)
+        swap_price = _optional_decimal(row, "swap_price", endpoint, index)
+        # 转债转股价必须为正;0/负值视同缺失(缺失在下游质量报告可见)。
+        if swap_price is not None and swap_price <= 0:
+            swap_price = None
+        return ConvertibleProfile(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            name=_required_text(row, "bond_short_name", endpoint, index),
+            underlying_symbol=_normalize_symbol(
+                _required_text(row, "stock_code", endpoint, index)
+            ),
+            underlying_name=_optional_text(row, "stock_name"),
+            list_date=_optional_date(row, "list_date", endpoint, index),
+            delist_date=_optional_date(row, "delist_date", endpoint, index),
+            conversion_price=swap_price,
+            issue_date=_optional_date(row, "value_date", endpoint, index),
+            maturity_date=_optional_date(row, "mature_date", endpoint, index),
+            coupon_rate=_percentage(row, "coupon_rate", endpoint, index),
             source=_SOURCE,
             observed_at=observed_at,
             available_at=observed_at,

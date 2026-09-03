@@ -3,7 +3,14 @@
 akshare / yfinance / tushare / pyarrow 均为 lazy import,Linux CI 环境无需安装。
 """
 
-from finboard_data.akshare_provider import AkShareProvider
+from finboard_data.akshare_provider import (
+    AkShareProvider,
+    ConvertibleOverviewEntry,
+    ConvertibleRedemptionEvent,
+    is_convertible_code,
+    parse_convertible_overview_frame,
+    parse_convertible_redeem_frame,
+)
 from finboard_data.assets import (
     ContinuousFuturesBuildError,
     CoverageEntry,
@@ -82,6 +89,7 @@ from finboard_data.quality import (
     ResearchDataQualityValidator,
 )
 from finboard_data.releases import (
+    CONVERTIBLE_METRICS_FIELDS,
     DAILY_METRICS_FIELDS,
     FINANCIAL_INDICATORS_FIELDS,
     RELEASE_FIELDS,
@@ -92,6 +100,8 @@ from finboard_data.releases import (
     RESEARCH_RELEASE_FEATURE_NAMES,
     AssetCapability,
     CapabilityStatus,
+    ConvertibleDailyMetric,
+    ConvertibleReleaseMetadata,
     DatasetReleaseError,
     DatasetReleaseQualityError,
     DatasetReleaseSpec,
@@ -110,6 +120,8 @@ from finboard_data.releases import (
     ResearchDataReleaseSource,
     ResearchDatasetRelease,
     ResearchEtfCatalogEntry,
+    conversion_premium_rate,
+    conversion_value,
     default_execution_metadata,
     load_dataset_release,
     research_etf_catalog_entry,
@@ -117,6 +129,7 @@ from finboard_data.releases import (
     verify_dataset_release,
 )
 from finboard_data.research import (
+    ConvertibleProfile,
     DailySecurityMetrics,
     FinancialIndicator,
     IndustryMembership,
@@ -140,6 +153,7 @@ from finboard_data.tushare_provider import TushareResearchDataProvider
 from finboard_data.yfinance_provider import YFinanceProvider
 
 __all__ = [
+    "CONVERTIBLE_METRICS_FIELDS",
     "DAILY_METRICS_FIELDS",
     "FACTOR_CATALOG",
     "FACTOR_LAB_CATALOG",
@@ -157,6 +171,11 @@ __all__ = [
     "AssetCapability",
     "CapabilityStatus",
     "ContinuousFuturesBuildError",
+    "ConvertibleDailyMetric",
+    "ConvertibleOverviewEntry",
+    "ConvertibleProfile",
+    "ConvertibleRedemptionEvent",
+    "ConvertibleReleaseMetadata",
     "CoverageEntry",
     "CoverageReport",
     "DailySecurityMetrics",
@@ -246,13 +265,18 @@ __all__ = [
     "build_factor_signal",
     "build_feature_snapshot",
     "compute_has_new",
+    "conversion_premium_rate",
+    "conversion_value",
     "default_execution_metadata",
     "factor_catalog",
     "factor_lab_catalog",
     "get_factor_definition",
+    "is_convertible_code",
     "load_dataset_release",
     "load_symbol_pool",
     "new_factor_experiment",
+    "parse_convertible_overview_frame",
+    "parse_convertible_redeem_frame",
     "research_etf_catalog_entry",
     "research_release_derived_features",
     "resolve_market_by_code",
