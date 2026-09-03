@@ -39,6 +39,10 @@ from finboard_app.logging import setup_logging
 from finboard_shared.identifiers import AccountId
 from finboard_shared.types import KillSwitchLevel
 
+# Windows CTRL_BREAK_EVENT=1;非 win32 平台取默认值仅服务测试态的 mock 路径求值,
+# 真实 os.kill 只在 sys.platform == "win32" 分支内发生。
+_CTRL_BREAK_EVENT = getattr(signal, "CTRL_BREAK_EVENT", 1)
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -195,7 +199,7 @@ def _stop_dev_process(
     if sys.platform == "win32":
         if graceful_seconds > 0:
             with contextlib.suppress(OSError):
-                os.kill(process.pid, signal.CTRL_BREAK_EVENT)
+                os.kill(process.pid, _CTRL_BREAK_EVENT)
             try:
                 process.wait(timeout=graceful_seconds)
                 return
@@ -759,7 +763,7 @@ def _signal_worker_children_graceful(procs: list[subprocess.Popen[bytes]]) -> No
             continue
         if sys.platform == "win32":
             with contextlib.suppress(OSError):
-                os.kill(proc.pid, signal.CTRL_BREAK_EVENT)
+                os.kill(proc.pid, _CTRL_BREAK_EVENT)
         else:
             with contextlib.suppress(Exception):
                 proc.terminate()

@@ -25,6 +25,7 @@ import pytest
 import typer
 
 from finboard_app.cli import (
+    _CTRL_BREAK_EVENT,
     _WORKER_STOP_FALLBACK_GRACE_SECONDS,
     _dev_worker_stop_grace_seconds,
     _stop_dev_process,
@@ -239,9 +240,11 @@ class TestSignalRoutingAndExitCode:
     async def test_windows_handlers_restored_after_run(self) -> None:
         """Windows:注册的 SIGINT/SIGBREAK 处理器在 run 结束后恢复,不留全局状态。"""
 
-        previous = {
-            sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGBREAK)
-        }
+        if sys.platform == "win32":
+            watch = (signal.SIGINT, signal.SIGBREAK)
+        else:
+            watch = (signal.SIGINT,)
+        previous = {sig: signal.getsignal(sig) for sig in watch}
         kwargs = self._run_worker_kwargs()
         with patch.object(BackgroundWorker, "run", AsyncMock(return_value=False)):
             await run_worker(**kwargs)  # type: ignore[arg-type]
@@ -298,7 +301,7 @@ class TestDevStopProcess:
             patch("finboard_app.cli.subprocess.run") as run,
         ):
             _stop_dev_process(process, graceful_seconds=1.0)
-        kill.assert_called_once_with(12345, signal.CTRL_BREAK_EVENT)
+        kill.assert_called_once_with(12345, _CTRL_BREAK_EVENT)
         run.assert_called_once_with(
             ["taskkill", "/PID", "12345", "/T", "/F"],
             check=False,
@@ -317,7 +320,7 @@ class TestDevStopProcess:
             patch("finboard_app.cli.subprocess.run") as run,
         ):
             _stop_dev_process(process, graceful_seconds=5.0)
-        kill.assert_called_once_with(12345, signal.CTRL_BREAK_EVENT)
+        kill.assert_called_once_with(12345, _CTRL_BREAK_EVENT)
         run.assert_not_called()
 
     def test_windows_zero_grace_keeps_instant_taskkill(self) -> None:
