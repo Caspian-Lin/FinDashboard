@@ -46,6 +46,7 @@ class ResearchRunStore(Protocol):
         report: ResearchRunReport,
         result_checksum: str,
         timing: dict[str, JsonValue] | None = None,
+        partial_failure: dict[str, JsonValue] | None = None,
     ) -> ResearchRunRecord: ...
 
     async def append_artifact(self, artifact: ResearchArtifact) -> bool: ...
@@ -137,6 +138,7 @@ class InMemoryResearchRunStore:
         report: ResearchRunReport,
         result_checksum: str,
         timing: dict[str, JsonValue] | None = None,
+        partial_failure: dict[str, JsonValue] | None = None,
     ) -> ResearchRunRecord:
         async with self._lock:
             record = self._runs[run_id]
@@ -146,6 +148,10 @@ class InMemoryResearchRunStore:
             record.result_checksum = result_checksum
             # issue #285:分段耗时只挂 record,不进 report/checksum。
             record.timing = timing
+            # issue #304:partial_failure 只存在于序列化 result JSON(SQL store
+            # 落库时注入顶层 partial/constraint_failure 键);内存形态没有序列化
+            # 层,单测经 report artifact payload 断言 partial 标记。
+            del partial_failure
             record.updated_at = datetime.now(UTC)
             return record
 

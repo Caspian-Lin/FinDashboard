@@ -59,6 +59,7 @@ from finboard_backtest.research_run.contracts import (
     EquityPoint,
     FeatureValue,
     FrozenArtifactRef,
+    JsonValue,
     NormalizedSignal,
     ResearchExecutionMode,
     ResearchRunManifest,
@@ -1729,23 +1730,69 @@ class SignalEnginePipelineAdapter:
         )
         # issue #217:用户因子 screen 指标 —— 尽力而为,计算失败只记
         # warning 不把 run 打挂(展示层指标,不影响决策/账本语义)。
-        if self._inputs:
-            try:
-                from finboard_backtest.research_run.factor_screen import (
-                    build_factor_screen,
-                )
+        # issue #304:组合阶段拒绝时由 compute_partial_evidence 走同一补算。
+        await self._compute_factor_screen(manifest)
 
-                self._factor_screen = await build_factor_screen(
-                    manifest,
-                    self._inputs,
-                    self._release_provider_factory,
-                )
-            except Exception:
-                logger.warning(
-                    "factor_screen_computation_failed",
-                    run_id=manifest.run_id,
-                    exc_info=True,
-                )
+    async def _compute_factor_screen(self, manifest: ResearchRunManifest) -> str | None:
+        """用户因子 screen 指标(issue #217/#304):尽力而为,幂等。
+
+        成功把结果暂存 ``self._factor_screen``(report 阶段取用)并返回
+        None;失败记具名 warning 并返回失败原因(不把 run 打挂)。已有
+        结果不重算。
+        """
+        if self._factor_screen is not None or not self._inputs:
+            return None
+        try:
+            from finboard_backtest.research_run.factor_screen import (
+                build_factor_screen,
+            )
+
+            self._factor_screen = await build_factor_screen(
+                manifest,
+                self._inputs,
+                self._release_provider_factory,
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "factor_screen_computation_failed",
+                run_id=manifest.run_id,
+                exc_info=True,
+            )
+            return f"factor_screen_computation_failed: {exc}"
+
+    async def compute_partial_evidence(
+        self,
+        manifest: ResearchRunManifest,
+        *,
+        completed_decisions: int,
+    ) -> dict[str, JsonValue] | None:
+        """组合阶段硬约束拒绝后的部分证据补算(issue #304)。
+
+        factor_screen 只依赖已构建的冻结决策输入(``self._inputs``),与组合
+        阶段是否失败无关;在 run 被拒绝前尽力补算并暂存,``build_report``
+        照常携带。返回 partial 标记(失败决策 1-based 定位 + 补算 warning),
+        无冻结输入可补算时返回 None。本方法不改变失败语义,只保留不依赖
+        组合阶段的证据;失败决策的日期取自同序号的冻结输入(该决策未产出,
+        runner 只知道已完成期数)。
+        """
+        if not self._inputs:
+            return None
+        marker: dict[str, JsonValue] = {
+            "completed_decisions": completed_decisions,
+            "failed_decision_index": completed_decisions + 1,
+        }
+        if completed_decisions < len(self._inputs):
+            marker["decision_date"] = self._inputs[
+                completed_decisions
+            ].business_date.isoformat()
+        warnings: list[JsonValue] = []
+        screen_failure = await self._compute_factor_screen(manifest)
+        if screen_failure is not None:
+            warnings.append(screen_failure)
+        if warnings:
+            marker["warnings"] = warnings
+        return marker
 
     def build_report(
         self,
