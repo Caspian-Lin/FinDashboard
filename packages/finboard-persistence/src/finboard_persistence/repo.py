@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -23,6 +23,7 @@ from finboard_persistence.models import (
     AuditLogModel,
     BacktestRunModel,
     FillModel,
+    InstrumentLifecycleEventModel,
     InstrumentModel,
     InstrumentNameModel,
     OrderModel,
@@ -33,6 +34,7 @@ from finboard_persistence.models import (
     WatchlistModel,
 )
 from finboard_shared.identifiers import AccountId, ClientOrderId, StrategyId
+from finboard_shared.instruments import LifecycleEvent
 from finboard_shared.models import Account, Fill, Order, Position, Symbol
 from finboard_shared.types import (
     BrokerKind,
@@ -1040,6 +1042,99 @@ class InstrumentRepository:
         )
         logger.info("instrument.name_history_imported", **result.as_dict())
         return result
+
+    async def backfill_listing_dates(
+        self,
+        records: Mapping[str, tuple[date | None, date | None]],
+    ) -> dict[str, int]:
+        """从转债档案回填 ``instruments.list_date`` / ``delist_date``(#265)。
+
+        只回填当前为 null 的字段,不覆盖已有主数据(#251 同风格);来源是
+        tushare cb_basic(转债无 stock_basic 式档案,研究 profiles 表不覆盖
+        转债)。``records`` 是 ``{code: (list_date|None, delist_date|None)}``。
+        返回 scoped / backfilled / missing 计数,缺失可见而非静默。
+        """
+        if not records:
+            return {
+                "scoped": 0,
+                "backfilled_list_date": 0,
+                "backfilled_delist_date": 0,
+                "missing_list_date": 0,
+                "missing_delist_date": 0,
+            }
+        stmt = select(InstrumentModel).where(InstrumentModel.code.in_(list(records)))
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        backfilled_list = 0
+        backfilled_delist = 0
+        for row in rows:
+            list_date, delist_date = records[row.code]
+            if row.list_date is None and list_date is not None:
+                row.list_date = list_date
+                backfilled_list += 1
+            if row.delist_date is None and delist_date is not None:
+                row.delist_date = delist_date
+                backfilled_delist += 1
+        await self._session.flush()
+        result = {
+            "scoped": len(rows),
+            "backfilled_list_date": backfilled_list,
+            "backfilled_delist_date": backfilled_delist,
+            "missing_list_date": sum(1 for row in rows if row.list_date is None),
+            "missing_delist_date": sum(1 for row in rows if row.delist_date is None),
+        }
+        logger.info("instrument.backfill_listing_dates", **result)
+        return result
+
+    async def import_lifecycle_events(
+        self,
+        events: Sequence[LifecycleEvent],
+    ) -> dict[str, int]:
+        """导入时点化生命周期事件到 ``instrument_lifecycle_events``(#265)。
+
+        幂等:按唯一约束 ``(symbol, event_type, effective_date, source,
+        dataset_version)`` 跳过已存在事件(重跑同一上游快照零重复)。
+        ``available_at`` / ``effective_date`` 的一致性由领域模型
+        :class:`finboard_shared.instruments.LifecycleEvent` 的不变量保证。
+        返回 ``{received, inserted, skipped}``。
+        """
+        received = len(events)
+        inserted = 0
+        for event in events:
+            exists_stmt = (
+                select(InstrumentLifecycleEventModel.id)
+                .where(
+                    InstrumentLifecycleEventModel.symbol == event.symbol,
+                    InstrumentLifecycleEventModel.event_type == event.event_type.value,
+                    InstrumentLifecycleEventModel.effective_date == event.effective_date,
+                    InstrumentLifecycleEventModel.source == event.source,
+                    InstrumentLifecycleEventModel.dataset_version
+                    == event.dataset_version,
+                )
+                .limit(1)
+            )
+            if (await self._session.execute(exists_stmt)).scalar() is not None:
+                continue
+            self._session.add(
+                InstrumentLifecycleEventModel(
+                    symbol=event.symbol,
+                    event_type=event.event_type.value,
+                    effective_date=event.effective_date,
+                    available_at=event.available_at,
+                    source=event.source,
+                    dataset_version=event.dataset_version,
+                    details=dict(event.details),
+                    observed_at=event.observed_at or event.available_at,
+                )
+            )
+            inserted += 1
+        await self._session.flush()
+        logger.info(
+            "instrument.lifecycle_events_imported",
+            received=received,
+            inserted=inserted,
+            skipped=received - inserted,
+        )
+        return {"received": received, "inserted": inserted, "skipped": received - inserted}
 
     async def update_listing_status(
         self,

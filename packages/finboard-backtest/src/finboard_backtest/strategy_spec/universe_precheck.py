@@ -136,16 +136,19 @@ def explicit_symbol_domain[T](
 
 
 def is_benchmark_only_instrument(instrument: object) -> bool:
-    """指数基准资产判定(issue #184/#256):``instrument_type=index``。
+    """基准数据资产判定(issue #184/#256 指数;#267 期货主连)。
 
-    指数只做基准数据、不可撮合(AGENTS.md #184 边界),不进研究运行候选池;
-    发布 instruments 里必须携带它(同一 bars 主发布承载基准行情),但候选
-    枚举必须跳过。静态预检(``static_universe_candidates``)与运行时候选
-    构建(``frozen_loader._build_candidates_and_lots``)共用本谓词,两边口径
-    一致。入参兼容 ORM 行(str)与 ``InstrumentType`` 枚举。
+    ``instrument_type=index``(指数)与 ``instrument_type=futures``
+    (期货主连,换月拼接序列)都只做基准 / 研究数据、不可撮合
+    (AGENTS.md #184 边界;主连不可当作可成交合约,#267),不进研究运行
+    候选池;发布 instruments 里必须携带它们(同一 bars 主发布承载基准
+    行情),但候选枚举必须跳过。静态预检(``static_universe_candidates``)
+    与运行时候选构建(``frozen_loader._build_candidates_and_lots``)共用
+    本谓词,两边口径一致。入参兼容 ORM 行(str)与 ``InstrumentType``
+    枚举。
     """
     value = _attr(instrument, "instrument_type", None)
-    return value is not None and value == "index"
+    return value is not None and value in ("index", "futures")
 
 
 def name_at_decision(instrument: object, decision_date: date) -> tuple[str | None, bool]:

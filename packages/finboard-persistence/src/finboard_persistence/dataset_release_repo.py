@@ -11,7 +11,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_data.akshare_provider import futures_series_entry
 from finboard_data.releases import (
+    ConvertibleReleaseMetadata,
     DatasetReleaseSpec,
     ExecutionMetadata,
     FrozenDatasetReleaseBuilder,
@@ -43,7 +45,6 @@ from finboard_persistence.profile_metadata import ProfileMetadataLookup
 from finboard_persistence.repo import InstrumentRepository
 from finboard_shared.types import (
     AssetClass,
-    ConvertibleEventType,
     DatasetQualityStatus,
     EtfCategory,
     EtfExecutionProfile,
@@ -55,12 +56,6 @@ from finboard_shared.types import (
     etf_category_from_execution_profile,
 )
 
-_CONVERTIBLE_REQUIRED_EVENTS = (
-    ConvertibleEventType.FORCED_REDEMPTION.value,
-    ConvertibleEventType.SELL_BACK.value,
-    ConvertibleEventType.DOWNWARD_REVISION.value,
-    ConvertibleEventType.CONVERSION_PRICE_ADJUST.value,
-)
 _FUTURES_REQUIRED_EVENTS = (
     FuturesEventType.ROLL.value,
     FuturesEventType.EXPIRATION.value,
@@ -275,6 +270,14 @@ class ReleaseInstrumentCatalogRepository:
                         name_history=names.get(code, ()),
                     )
                 )
+            elif instrument_type is InstrumentType.FUTURES:
+                result.append(
+                    _futures_main_candidate(
+                        row,
+                        lifecycle_events=events.get(code, ()),
+                        name_history=names.get(code, ()),
+                    )
+                )
             else:
                 result.append(
                     _plain_candidate(
@@ -420,10 +423,16 @@ class ResearchDatasetReleaseService:
         spec: DatasetReleaseSpec,
         symbols: list[str],
     ) -> None:
-        """研究数据(非 bars)只支持 A 股股票(range 内推定为 A 股发布)。"""
+        """研究数据(非 bars)的来源与标的域校验。
+
+        daily_metrics / financial_indicators 只支持 A 股股票(#187);
+        convertible_metrics(#265)只支持 A 股可转债,数据输入是缓存中的
+        转债/正股日线(cb_daily 2000 积分上游),source 同样要求 tushare。
+        """
         if spec.source != "tushare" or spec.dataset_kind not in (
             ReleaseDatasetKind.DAILY_METRICS,
             ReleaseDatasetKind.FINANCIAL_INDICATORS,
+            ReleaseDatasetKind.CONVERTIBLE_METRICS,
         ):
             raise ReleaseCapabilityError(
                 f"{spec.dataset_kind.value} 发布要求 source=tushare "
@@ -729,6 +738,25 @@ def _convertible_candidate(
     lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
     name_history: tuple[tuple[str, date, date | None], ...],
 ) -> ReleaseInstrumentSpec:
+    # 事件要求(issue #265 修订):v1 数据上游只有集思录强赎兜底,无法为
+    # 每只转债凑齐 #58 预想的四类条款事件(强赎/回售/下修/转股价调整),
+    # 沿用「逐券全事件才 ready」会让真实转债发布永远不可发布。事件要求
+    # 降级为不设硬门:已同步的事件仍随 manifest 冻结(present_event_types +
+    # quality_report.convertible_instruments.with_lifecycle_events 可见),
+    # 强赎风险过滤由 convertible_double_low 的事件层承担。
+    convertible: ConvertibleReleaseMetadata | None = None
+    if metadata is not None:
+        updated_at = metadata.updated_at or datetime.now(UTC)
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=UTC)
+        convertible = ConvertibleReleaseMetadata(
+            underlying_stock_code=metadata.underlying_stock_code,
+            conversion_price=metadata.conversion_price,
+            observed_at=updated_at,
+            issue_date=metadata.issue_date,
+            maturity_date=metadata.maturity_date,
+            rating=metadata.rating,
+        )
     return ReleaseInstrumentSpec(
         code=row.code,
         name=row.name,
@@ -744,10 +772,63 @@ def _convertible_candidate(
         list_date=row.list_date,
         delist_date=row.delist_date,
         status=_status(row.status),
+        convertible=convertible,
         metadata_complete=metadata is not None,
         lifecycle_events=lifecycle_events,
         present_event_types=tuple(sorted({event.event_type for event in lifecycle_events})),
-        required_event_types=_CONVERTIBLE_REQUIRED_EVENTS,
+        name_history=name_history,
+    )
+
+
+def _futures_main_candidate(
+    row: InstrumentModel,
+    *,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
+    name_history: tuple[tuple[str, date, date | None], ...],
+) -> ReleaseInstrumentSpec:
+    """期货**主连**标的候选(issue #267,登记来自 instruments 表)。
+
+    与 :func:`_future_candidate`(futures_contracts 表的具体月份合约,
+    #58 合约链)是两条不同通道:主连登记在 instruments
+    (``market=future`` / ``instrument_type=futures``),乘数 / 保证金率 /
+    最小变动价位从受控登记表 ``FUTURES_MAIN_SERIES_REGISTRY`` 读取
+    (与 finboard-backtest ``FuturesRule`` 同口径),未登记品种
+    fail-closed 拒绝,禁止猜测。
+
+    语义标注(诚实边界):主连是换月拼接产物,**仅用于研究信号 / 基准
+    数据,不可当作可成交合约**(对齐 #184「指数不可撮合只做基准」)。
+    事件硬门降级(#267,同 #265 转债决策):``required_event_types``
+    保持空 —— 换月 / 到期 / 交割事件(#58)在新浪主连日线上没有结构化
+    上游,逐合约全事件才 ready 会让真实期货发布永不可发布;主连本身
+    就没有「单份合约到期」语义。已同步事件仍随 manifest 冻结
+    (present_event_types + quality_report.futures_instruments 可见)。
+    """
+    entry = futures_series_entry(row.code)
+    return ReleaseInstrumentSpec(
+        code=row.code,
+        name=row.name or entry.name,
+        market=Market.FUTURE,
+        instrument_type=InstrumentType.FUTURES,
+        asset_class=AssetClass.DERIVATIVE,
+        available_at=_available_at(row),
+        execution=ExecutionMetadata(
+            lot_size=Decimal("1"),
+            price_tick=entry.price_tick,
+            settlement_days=0,
+            multiplier=entry.multiplier,
+            margin_rate=entry.margin_rate,
+            stamp_tax_rate=Decimal("0"),
+            commission_min=Decimal("0"),
+            trading_calendar=entry.exchange,
+            allows_short=True,
+        ),
+        exchange=row.exchange or entry.exchange,
+        list_date=row.list_date,
+        delist_date=row.delist_date,
+        status=_status(row.status),
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(sorted({event.event_type for event in lifecycle_events})),
+        # required_event_types 保持空:事件硬门降级,见 docstring。
         name_history=name_history,
     )
 
@@ -834,12 +915,21 @@ class ReleaseSymbolSourceError(Exception):
 
 #: full_market 展开只覆盖既有发布语义允许的资产类型(#261):股票单源 kind
 #: (含研究数据发布——执行器 scope 门要求全部为 A 股股票)只展开股票;
-#: multi_asset_mixed 展开 stock + etf + index(#184/#256)。债券 / 转债 /
-#: 期货不在行情缓存同步范围,展开进发布必然触发覆盖率门失败,不纳入。
+#: multi_asset_mixed 展开 stock + etf + index + convertible + futures
+#: (#184/#256/#265/#267:指数与期货主连只做基准/研究数据,不可撮合);
+#: convertible_metrics(#265)单独展开转债标的。债券不在行情缓存
+#: 同步范围,展开进发布必然触发覆盖率门失败,不纳入。
 _FULL_MARKET_STOCK_KINDS: frozenset[str] = frozenset(
     {"a_share_tushare", "daily_metrics", "financial_indicators"}
 )
-_FULL_MARKET_MIXED_TYPES: tuple[str, ...] = ("stock", "etf", "index")
+_FULL_MARKET_MIXED_TYPES: tuple[str, ...] = (
+    "stock",
+    "etf",
+    "index",
+    "convertible",
+    "futures",
+)
+_FULL_MARKET_CONVERTIBLE_KINDS: frozenset[str] = frozenset({"convertible_metrics"})
 #: 与 REST ``ResearchDatasetReleaseCreate.symbols`` 的 max_length 同一上限。
 _MAX_RELEASE_SYMBOLS = 10_000
 
@@ -926,6 +1016,13 @@ async def resolve_release_symbols(
         expanded = set(
             await instrument_repo.list_codes(
                 market="a_share", instrument_type="stock"
+            )
+        )
+    elif release_kind in _FULL_MARKET_CONVERTIBLE_KINDS:
+        # issue #265:转债派生指标发布按全市场活跃转债展开。
+        expanded = set(
+            await instrument_repo.list_codes(
+                market="a_share", instrument_type="convertible"
             )
         )
     else:

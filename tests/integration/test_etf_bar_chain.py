@@ -64,6 +64,9 @@ class _EmptyTushareClient:
     def daily(self, **kwargs: str) -> list[dict[str, object]]:
         return []
 
+    def cb_daily(self, **kwargs: str) -> list[dict[str, object]]:
+        return []
+
     def adj_factor(self, **kwargs: str) -> list[dict[str, object]]:
         return []
 

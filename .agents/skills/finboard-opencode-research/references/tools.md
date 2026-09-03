@@ -94,7 +94,11 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   - `parameters`: `{}` —— 不声明即 single_shot(需冻结快照);声明
     `rebalance_frequency=monthly|quarterly` 触发多期回放(#183),非法值入队即拒
   - `validation_config` / `portfolio_config` / `risk_config` / `execution_config` /
-    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空
+    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空;
+    `portfolio_config.overrides.risk_factor_limits`(#266)可声明风险因子
+    active 暴露上限(`[{factor, max_active_exposure}]`,因子名与冻结特征
+    feature_id 同名,如 market_beta / size_exposure / 行业 one-hot 列名),
+    暴露缺失降级为具名 warning,不可满足执行期 fail-closed
   - `code_version`*: 7-64 字符,**本 run 自身的代码版本标识**(如 FinBoard git
     commit),冻结进 manifest/checksum 供追溯;**与数据集发布的 code_version 同名
     但互不校验**,别拿数据集 git hash 顶替
@@ -294,16 +298,25 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 ### finboard_data_sync_universe **[写,任务化]**
 登记全市场标的同步任务(akshare 发现 → 写 instruments 表),返回 202 + `job_id`。
 自动包含基准指数登记(#256):`instrument_type=index`(受控登记表
-`BENCHMARK_INDEX_REGISTRY`,含沪深300/中证500/中证1000/创业板指等 9 只)。
+`BENCHMARK_INDEX_REGISTRY`,含沪深300/中证500/中证1000/创业板指等 9 只);
+#265 起同时从东财可转债一览登记 `instrument_type=convertible`
+(11xxxx.SH/12xxxx.SZ,存续转债,list_date 由 convertible_profiles 回填);
+#267 起同时从受控登记表登记 IF/IH/IC/IM 期货主连 `instrument_type=futures`
+(market=future,主连仅研究信号/基准、不可当作可成交合约)。
 - 参数:无
 - 返回:`JobOut`(`kind=data_sync`)
 - 进度:用 `finboard_job_get(job_id)` 轮询
 
 ### finboard_data_bulk_download_start **[写,任务化]**
 登记批量历史数据拉取任务(按市场/类型/交易所筛选),返回 202 + `job_id`。
-- 参数:`market?`(默认 a_share)/ `instrument_type?`(`stock|etf|index`;
-  index=#256 基准指数,日线走 akshare 指数接口;`source=tushare` 对非 stock
-  报 `tushare_scope_mismatch`)/ `exchange?` /
+- 参数:`market?`(默认 a_share;期货用 future)/ `instrument_type?`(`stock|etf|index|
+  convertible|futures`;index=#256 基准指数,日线走 akshare 指数接口;convertible=
+  #265 转债,走 tushare `cb_daily`,akshare 源 fail-visible 拒绝;futures=
+  #267 期货主连(如 IF0.CFFEX),需配 market=future,走 akshare 新浪
+  `futures_main_sina`,tushare 源 fail-visible 拒绝,主连仅研究信号/基准
+  不可当作可成交合约;
+  `source=tushare` 对 stock/convertible 之外报 `tushare_scope_mismatch`)/
+  `exchange?` /
   `listing_boards?` / `start?`(默认 2015-01-01)/ `source?`
 - 返回:`JobOut`(`kind=bulk_download`)
 - 进度:用 `finboard_job_get(job_id)` 轮询(阶段如 `bulk_download:fetching`)
@@ -324,12 +337,14 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   `symbols`(内联列表)/ `symbols_from_release`(复制既有可用发布的冻结标的集,
   全市场发布/跟进发布首选,免手工维护巨型清单)/ `full_market=true`
   (instruments 表全活跃标的按 kind 展开:股票单源只取 A 股股票,
-  multi_asset_mixed 取股票+ETF+指数)
+  multi_asset_mixed 取股票+ETF+指数+转债(#265)+期货主连(#267),convertible_metrics
+  只取转债)
 - 其他参数:`release_id` / `version` / `start_date` / `end_date` /
   `dataset_name?`(默认 multi_asset_daily_bars)/ `release_kind?`
-  (a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators,
-  默认 a_share_tushare)/ `source?` /
-  `adjustment?`(qfq|hqfq|none,默认 qfq;daily_metrics/financial_indicators 固定 none)/
+  (a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators|
+  convertible_metrics,默认 a_share_tushare)/ `source?` /
+  `adjustment?`(qfq|hqfq|none,默认 qfq;daily_metrics/financial_indicators/
+  convertible_metrics 固定 none)/
   `required_capabilities?`
   (stock|bond|convertible|futures|etf:index|etf:cross_border|etf:commodity|etf:bond)
 - 返回:`JobOut`(`kind=dataset_publish`)
@@ -339,6 +354,12 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - `release_kind=daily_metrics|financial_indicators` 时从 research_* 表冻结
   基本面/财务指标发布(issue #187),与 bars 发布(dataset_release_ids 含 bars 主发布 +
   research 发布)联合供因子快照取数;schedule(data_sync)与发布任务报告缺失字段统计。
+- `release_kind=convertible_metrics`(#265)只接受 A 股可转债标的(非转债
+  `convertible_scope_violation`),从本地缓存 bars x 冻结转股价元数据
+  (`convertible_metadata`)计算转股价值/转股溢价率并冻结为带日期观测;
+  元数据缺失 `convertible_metadata_missing`(先跑 research_data_sync 的
+  convertible_profiles)。质量报告 `convertible_instruments` 块可见转债标的数
+  与评级/到期日缺失计数。
 
 ### finboard_data_config_get(只读)
 查询定时任务调度器配置(读 `data_config.json`)。
@@ -1026,8 +1047,20 @@ research_run 管线轻路由(#174)。
 归为研究写(经 `mcp_readonly_only` 门控),agent 可自主执行。
 
 ### finboard_portfolio_allocate **[写·纯计算]**
-目标权重分配(equal_weight / inverse_volatility / erc)+ 约束 + 风险报告。
-对应 `POST /api/portfolio/allocate`,调 `build_portfolio`。
+目标权重分配(equal_weight / inverse_volatility / erc / max_ir)+ 约束 +
+风险报告。对应 `POST /api/portfolio/allocate`,调 `build_portfolio`。
+**max_ir(#266)**:最大 IR(切点)组合 —— LW 协方差 + 信号强度代理预期
+超额收益,capped simplex 投影梯度求解(确定性,零随机成分);依赖协方差,
+缺协方差/信号全中性按 `covariance_failure_mode` 分流(默认 fail_closed)。
+**风险因子中性化(#266)**:`risk_factor_limits`([{factor, max_active_exposure}])
++ `factor_exposures`({因子: {标的: 暴露观测}})启用 active 暴露硬上限
+`|Σ(w−baseline)·f| ≤ 阈值`(`neutralization_baseline?` 提供基准权重,缺省
+现金基准)—— 只减仓投影、逐项审计(`risk_factor_neutralization` 硬约束行);
+暴露观测缺失的因子降级为具名 warning 审计行
+(`risk_factor_neutralization_skipped`,passed=false,不静默);
+约束本体不可满足报 `invalid_argument`(fail-closed)。research_run 侧经
+`portfolio_config.overrides.risk_factor_limits` 声明同一约束(因子名与冻结
+特征 feature_id 同名)。
 - 参数:`signals: list[{symbol, score, confidence?}]`、`as_of: str`(ISO 日期)、
   `method: str = "equal_weight"`、`strategy_id? = "mcp"`、
   `max_weight_per_asset? = 0.25`、`max_weight_per_sleeve? = 0.40`、
@@ -1038,7 +1071,10 @@ research_run 管线轻路由(#174)。
   `current_weights?: dict[str,float]`、`target_gross_exposure?`、
   `betas?: dict[str,float]`、`max_drawdown? = 0.0`、
   `max_risk_contribution? = 1.0`、`conflict_policy? = "net"`、
-  `covariance_failure_mode? = "fail_closed"`
+  `covariance_failure_mode? = "fail_closed"`、
+  `risk_factor_limits?: list[{factor, max_active_exposure}]`(#266)、
+  `factor_exposures?: dict[str, dict[str,float]]`(#266)、
+  `neutralization_baseline?: dict[str,float]`(#266)
 - 返回:`{weights, weights_before_constraints, cash_buffer, gross_weight,
   net_weight, configured_max_leverage, n_assets, contract_version,
   covariance_shrinkage, covariance_fallback_used, adjustments, risk}`
@@ -1095,12 +1131,16 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 `fetch_all` / `quality_repair` / `research_data_sync`(全是研究/数据域,
 不含实盘能力)。
 
-`research_data_sync`(issue #171;#251 扩展):research 数据表(档案 / 估值 /
-财务 / 行业 / 名称历史)摄取编排。payload:`{datasets?: [profiles, name_changes,
-daily_metrics, financial_indicators, industry_memberships](默认全部),
-start_date, end_date(ISO), symbols?: [str]}`。profiles 同时拉取在市(L)与
-退市(D)档案(delist_date 上游);name_changes 全市场历史名称变更直接重建
-`instrument_names`(半开区间,供 ST-PIT)。逐标的接口自动限流(tushare_budget)
+`research_data_sync`(issue #171;#251/#265 扩展):research 数据表(档案 / 估值 /
+财务 / 行业 / 名称历史 / 转债条款)摄取编排。payload:`{datasets?: [profiles,
+name_changes, convertible_profiles, daily_metrics, financial_indicators,
+industry_memberships](默认全部), start_date, end_date(ISO), symbols?: [str]}`。
+profiles 同时拉取在市(L)与退市(D)档案(delist_date 上游);name_changes
+全市场历史名称变更直接重建 `instrument_names`(半开区间,供 ST-PIT);
+convertible_profiles(#265)tushare cb_basic 条款快照 upsert 主数据
+`convertible_metadata`(转股价/到期日,评级与集思录强赎事件走 akshare 兜底,
+失败降级为 warning 不阻断),顺带回填 `instruments.list_date/delist_date`。
+逐标的接口自动限流(tushare_budget)
 并按确定性 dataset_version 断点续跑;预算耗尽退避重试,未配 token / 未装
 SDK fail-fast。
 
@@ -1154,8 +1194,9 @@ SDK fail-fast。
   - `dataset_publish`:`{release_id, release_kind, symbols, version, start_date, end_date}`
   - `backtest_run`:`{request, provider_name}` → `result_ref=str(run_id)`
   - `research_data_sync`:`{start_date: "YYYY-MM-DD"(必填), end_date:
-    "YYYY-MM-DD"(必填), datasets?: [profiles|name_changes|daily_metrics|
-    financial_indicators|industry_memberships](缺省=全部五类), symbols?:
+    "YYYY-MM-DD"(必填), datasets?: [profiles|name_changes|convertible_profiles|
+    daily_metrics|financial_indicators|industry_memberships](缺省=全部六类;
+    convertible_profiles=#265 转债条款快照), symbols?:
     ["000001.SZ",...](省略时逐标的数据集以 profiles 同步结果为池,此时
     datasets 须含 profiles)}` → 研究数据表摄取(batch 发布后 selection 可命中)
 

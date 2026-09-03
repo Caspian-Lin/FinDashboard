@@ -62,12 +62,17 @@ RELEASE_FIELDS = (
 # issue #187:研究数据发布的数据集类型。除价格 bars 外,daily_metrics
 # (每日估值/流动性截面)与 financial_indicators(财务公告修订)也支持冻结发布,
 # 供因子快照从联合 release 取数(解锁 pb/市值/换手/ROE 等 signal_eligible 因子)。
+# issue #265:convertible_metrics 是可转债派生指标(转股价值/转股溢价率),
+# 由发布执行时从「转债 bars 缓存 x 冻结转股价元数据 x 正股 bars 缓存」计算
+# 并冻结 —— 数据与 daily_metrics 一样按 available_at 时点化,但输入是缓存
+# bars 而非 research_* 表。
 class ReleaseDatasetKind(StrEnum):
     """一个冻结发布的数据集类型。"""
 
     BARS = "bars"
     DAILY_METRICS = "daily_metrics"
     FINANCIAL_INDICATORS = "financial_indicators"
+    CONVERTIBLE_METRICS = "convertible_metrics"
 
 
 RELEASE_KINDS = frozenset(kind.value for kind in ReleaseDatasetKind)
@@ -112,6 +117,18 @@ FINANCIAL_INDICATORS_FIELDS = (
     "net_profit_yoy",
     "operating_cash_flow_yoy",
 )
+# issue #265:可转债派生指标冻结字段白名单。conversion_premium = 转债收盘 /
+# 转股价值 - 1;转股价值 = 100 / 转股价 x 正股收盘。underlying_symbol /
+# underlying_close 记录派生输入,保证发布内可复算(reproducible)。
+CONVERTIBLE_METRICS_FIELDS = (
+    "trade_date",
+    "close",
+    "conversion_price",
+    "conversion_value",
+    "conversion_premium",
+    "underlying_symbol",
+    "underlying_close",
+)
 
 # 研究数据冻结字段白名单:symbol 单独成列,available_at/observed_at/source
 # 属于时点化必需元数据,不参与用户声明的 fields。
@@ -124,12 +141,17 @@ RESEARCH_RELEASE_METADATA_FIELDS = (
 # issue #253:研究数据发布按 kind 可派生的因子/特征名 —— 发布侧元数据的
 # 唯一事实来源。命名与组合管线的 ``extract_factor_matrix`` 输出一致(由
 # finboard-backtest 单测锁定漂移);multi_period 入队门控与静态预检共用。
+# issue #265:convertible_metrics 提供「快照转股价 x 同日正股收盘」的带日期
+# 转股溢价率观测 —— 双低策略的溢价输入,PIT 门控与 daily_metrics 同语义。
 RESEARCH_RELEASE_FEATURE_NAMES: dict[ReleaseDatasetKind, frozenset[str]] = {
     ReleaseDatasetKind.DAILY_METRICS: frozenset(
         {"pb", "turnover_rate", "market_cap", "earnings_yield", "dividend_yield"}
     ),
     ReleaseDatasetKind.FINANCIAL_INDICATORS: frozenset(
         {"roe", "gross_profit_margin", "debt_to_assets", "revenue_yoy"}
+    ),
+    ReleaseDatasetKind.CONVERTIBLE_METRICS: frozenset(
+        {"conversion_premium", "conversion_value"}
     ),
 }
 
@@ -292,6 +314,58 @@ class ExecutionMetadata:
             commission_min=Decimal(str(raw.get("commission_min", "5"))),
             trading_calendar=str(raw.get("trading_calendar", "SSE")),
             allows_short=bool(raw.get("allows_short", False)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ConvertibleReleaseMetadata:
+    """冻结进发布的可转债条款快照(issue #265)。
+
+    来源是 ``convertible_metadata`` 表(tushare cb_basic + akshare 评级兜底
+    回填)。PIT 语义(诚实边界):cb_basic 是**当前时点**快照,不含转股价
+    历史变动(下修史);``observed_at`` 是快照摄取时间,由 data_sync 写入。
+    下游派生观测(转股溢价率)据此只能宣称「冻结快照转股价 x 同日收盘」
+    语义,不得宣称全历史 PIT。
+    """
+
+    underlying_stock_code: str
+    conversion_price: Decimal
+    observed_at: datetime
+    issue_date: date | None = None
+    maturity_date: date | None = None
+    rating: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.conversion_price <= 0:
+            raise ValueError("conversion_price 必须为正")
+        if self.observed_at.tzinfo is None:
+            raise ValueError("observed_at 必须带时区")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "underlying_stock_code": self.underlying_stock_code,
+            "conversion_price": str(self.conversion_price),
+            "observed_at": self.observed_at.isoformat(),
+            "issue_date": self.issue_date.isoformat() if self.issue_date else None,
+            "maturity_date": (
+                self.maturity_date.isoformat() if self.maturity_date else None
+            ),
+            "rating": self.rating,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, object]) -> ConvertibleReleaseMetadata:
+        issue_raw = raw.get("issue_date")
+        maturity_raw = raw.get("maturity_date")
+        return cls(
+            underlying_stock_code=str(raw["underlying_stock_code"]),
+            conversion_price=Decimal(str(raw["conversion_price"])),
+            observed_at=datetime.fromisoformat(str(raw["observed_at"])),
+            issue_date=date.fromisoformat(str(issue_raw)) if issue_raw else None,
+            maturity_date=(
+                date.fromisoformat(str(maturity_raw)) if maturity_raw else None
+            ),
+            rating=str(raw["rating"]) if raw.get("rating") is not None else None,
         )
 
 
@@ -489,6 +563,7 @@ class ReleaseInstrumentSpec:
     listing_board: str = "unknown"
     currency: str = "CNY"
     etf_category: EtfCategory | None = None
+    convertible: ConvertibleReleaseMetadata | None = None
     list_date: date | None = None
     delist_date: date | None = None
     industry: str | None = None
@@ -591,6 +666,8 @@ def _fields_whitelist(kind: ReleaseDatasetKind) -> frozenset[str]:
         return frozenset(DAILY_METRICS_FIELDS)
     if kind is ReleaseDatasetKind.FINANCIAL_INDICATORS:
         return frozenset(FINANCIAL_INDICATORS_FIELDS)
+    if kind is ReleaseDatasetKind.CONVERTIBLE_METRICS:
+        return frozenset(CONVERTIBLE_METRICS_FIELDS)
     return frozenset(RELEASE_FIELDS)
 
 
@@ -624,6 +701,7 @@ class ReleasedInstrument:
     listing_board: str = "unknown"
     currency: str = "CNY"
     etf_category: EtfCategory | None = None
+    convertible: ConvertibleReleaseMetadata | None = None
     list_date: date | None = None
     delist_date: date | None = None
     industry: str | None = None
@@ -669,6 +747,9 @@ class ReleasedInstrument:
             "listing_board": self.listing_board,
             "currency": self.currency,
             "etf_category": self.etf_category.value if self.etf_category else None,
+            # issue #265:转债条款快照(含 observed_at PIT 语义)随 manifest
+            # 冻结,None 时省略键 —— 非转债标的的 manifest 不变(checksum 稳定)。
+            **({"convertible": self.convertible.as_dict()} if self.convertible else {}),
             "list_date": self.list_date.isoformat() if self.list_date else None,
             "delist_date": self.delist_date.isoformat() if self.delist_date else None,
             "industry": self.industry,
@@ -692,6 +773,7 @@ class ReleasedInstrument:
         execution = cast(dict[str, object], raw["execution"])
         history_raw = cast(list[dict[str, object]], raw.get("name_history", []))
         etf_raw = raw.get("etf_category")
+        convertible_raw = raw.get("convertible")
         list_raw = raw.get("list_date")
         delist_raw = raw.get("delist_date")
         events_raw = cast(
@@ -725,6 +807,13 @@ class ReleasedInstrument:
             listing_board=str(raw.get("listing_board", "unknown")),
             currency=str(raw.get("currency", "CNY")),
             etf_category=EtfCategory(str(etf_raw)) if etf_raw is not None else None,
+            convertible=(
+                ConvertibleReleaseMetadata.from_dict(
+                    cast(dict[str, object], convertible_raw)
+                )
+                if convertible_raw is not None
+                else None
+            ),
             list_date=date.fromisoformat(str(list_raw)) if list_raw is not None else None,
             delist_date=(date.fromisoformat(str(delist_raw)) if delist_raw is not None else None),
             industry=str(raw["industry"]) if raw.get("industry") is not None else None,
@@ -1117,7 +1206,14 @@ class FrozenDatasetReleaseBuilder:
         codes = [item.code for item in instruments]
         if len(codes) != len(set(codes)):
             raise DatasetReleaseQualityError("发布标的代码重复")
-        if spec.dataset_kind is not ReleaseDatasetKind.BARS:
+        if spec.dataset_kind is ReleaseDatasetKind.CONVERTIBLE_METRICS:
+            # issue #265:转债派生指标从日线缓存派生,必须日线口径;
+            # adjustment 作为缓存读取键与发布声明保持一致。
+            if spec.period is not BarPeriod.D1:
+                raise DatasetReleaseQualityError(
+                    "convertible_metrics 发布仅支持日线 period"
+                )
+        elif spec.dataset_kind is not ReleaseDatasetKind.BARS:
             if self._research_source is None:
                 raise DatasetReleaseQualityError(
                     f"{spec.dataset_kind.value} 发布缺少研究数据源注入"
@@ -1160,6 +1256,13 @@ class FrozenDatasetReleaseBuilder:
                             target_cache=target_cache,
                             source_cache=source_cache,
                         )
+                    if spec.dataset_kind is ReleaseDatasetKind.CONVERTIBLE_METRICS:
+                        return await self._freeze_convertible_metrics_instrument(
+                            spec=spec,
+                            instrument=instrument,
+                            staging=staging,
+                            source_cache=source_cache,
+                        )
                     return await self._freeze_research_instrument(
                         spec=spec,
                         instrument=instrument,
@@ -1168,9 +1271,19 @@ class FrozenDatasetReleaseBuilder:
 
             # 按代码排序保证输入顺序确定;并行执行后再次排序保证 manifest 稳定。
             sorted_instruments = sorted(instruments, key=lambda item: item.code)
-            released_unordered = await asyncio.gather(
-                *(_freeze_one(item) for item in sorted_instruments)
-            )
+            freeze_tasks = [
+                asyncio.ensure_future(_freeze_one(item)) for item in sorted_instruments
+            ]
+            try:
+                released_unordered = await asyncio.gather(*freeze_tasks)
+            except BaseException:
+                # gather 传播首个异常即返回但不取消兄弟任务:仍有一位冻结任务
+                # 在写暂存区。失败清理(rmtree)必须等它们落地,否则与 writer
+                # 赛跑会在 release_root 留下残缺 staging 目录(Linux CI 上
+                # test_failed_release_preserves_previous_and_cleans_staging 的
+                # 间歇失败根因)。
+                await asyncio.gather(*freeze_tasks, return_exceptions=True)
+                raise
             released = sorted(released_unordered, key=lambda item: item.code)
 
             capabilities = _build_capabilities(released, spec.required_capabilities)
@@ -1245,7 +1358,7 @@ class FrozenDatasetReleaseBuilder:
                             Counter(source for item in released for source in item.sources).items()
                         )
                     ),
-"source_by_instrument": {item.code: list(item.sources) for item in released},
+                    "source_by_instrument": {item.code: list(item.sources) for item in released},
                     "instrument_metadata": {
                         "total": len(released),
                         # 缺失字段统计(issue #185):让 list_date/industry 缺失可见。
@@ -1268,6 +1381,90 @@ class FrozenDatasetReleaseBuilder:
                             else "0.0000"
                         ),
                     },
+                    # issue #265:转债标的与关键字段完整度(条款快照/评级/事件)。
+                    # 含转债标的时才出现该块;缺失可见而非静默(#251 风格)。
+                    **(
+                        {
+                            "convertible_instruments": {
+                                "total": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.CONVERTIBLE
+                                ),
+                                "with_metadata": sum(
+                                    1
+                                    for item in released
+                                    if item.convertible is not None
+                                ),
+                                "missing_maturity_date": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.CONVERTIBLE
+                                    and (
+                                        item.convertible is None
+                                        or item.convertible.maturity_date is None
+                                    )
+                                ),
+                                "missing_rating": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.CONVERTIBLE
+                                    and (
+                                        item.convertible is None
+                                        or item.convertible.rating is None
+                                    )
+                                ),
+                                "with_lifecycle_events": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.CONVERTIBLE
+                                    and item.lifecycle_events
+                                ),
+                            }
+                        }
+                        if any(
+                            item.instrument_type is InstrumentType.CONVERTIBLE
+                            for item in released
+                        )
+                        else {}
+                    ),
+                    # issue #267:期货主连标的可见性块。主连无 list_date /
+                    # 换月事件的正式上游(新浪主连是连续序列),缺失按
+                    # 「可见而非静默」落统计,不设硬门(事件硬门降级,
+                    # dataset_release_repo._futures_main_candidate)。
+                    **(
+                        {
+                            "futures_instruments": {
+                                "total": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                ),
+                                # v1 唯一入缓存的期货形态是主连(continuous),
+                                # 值恒等于 total;显式落键是为了 manifest
+                                # 语义自描述(主连 ≠ 可成交合约)。
+                                "continuous": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                ),
+                                "missing_list_date": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                    and item.list_date is None
+                                ),
+                                "with_lifecycle_events": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                    and item.lifecycle_events
+                                ),
+                            }
+                        }
+                        if any(item.instrument_type is InstrumentType.FUTURES for item in released)
+                        else {}
+                    ),
                     "warnings": warnings,
                 },
                 known_limitations=spec.known_limitations,
@@ -1391,6 +1588,7 @@ class FrozenDatasetReleaseBuilder:
             listing_board=instrument.listing_board,
             currency=instrument.currency,
             etf_category=instrument.etf_category,
+            convertible=instrument.convertible,
             list_date=instrument.list_date,
             delist_date=instrument.delist_date,
             industry=instrument.industry,
@@ -1427,6 +1625,160 @@ class FrozenDatasetReleaseBuilder:
                 key=_research_record_available_at,
             )
         raise DatasetReleaseQualityError(f"不支持的发布数据集类型: {spec.dataset_kind}")
+
+    async def _freeze_convertible_metrics_instrument(
+        self,
+        *,
+        spec: DatasetReleaseSpec,
+        instrument: ReleaseInstrumentSpec,
+        staging: Path,
+        source_cache: ParquetCache,
+    ) -> ReleasedInstrument:
+        """转债派生指标冻结:转债 bars x 冻结转股价 x 正股 bars → 带日期观测(#265)。
+
+        与 research 类发布不同,输入是**本地缓存 bars**(与 bars 主发布同源
+        同缓存)而不是 research_* 表;转股价来自随 manifest 冻结的
+        :class:`ConvertibleReleaseMetadata`(cb_basic 快照,下修史不在覆盖
+        范围,语义见类注释)。整期无正股收盘时 fail-visible 拒绝发布。
+        """
+        if instrument.instrument_type is not InstrumentType.CONVERTIBLE:
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:convertible_metrics 只接受可转债标的"
+            )
+        if instrument.market is not Market.A_SHARE:
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:convertible_metrics 仅支持 A 股转债(日线 available_at 规则)"
+            )
+        meta = instrument.convertible
+        if meta is None:
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:convertible_metadata_missing(先执行 research_data_sync "
+                "convertible_profiles 回填条款元数据)"
+            )
+
+        async def _read_close_by_date(code: str) -> dict[date, tuple[Decimal, str]]:
+            symbol = Symbol(code=code, market=instrument.market)
+            bars = await source_cache.read(symbol, spec.period, spec.adjustment)
+            return {
+                bar.timestamp.date(): (bar.close, bar.source or spec.source)
+                for bar in bars
+                if spec.start_date <= bar.timestamp.date() <= spec.end_date
+            }
+
+        bond_closes = await _read_close_by_date(instrument.code)
+        if not bond_closes:
+            raise DatasetReleaseQualityError(f"{instrument.code}:no_bars_in_release_range")
+        known_sources = {source for _, source in bond_closes.values() if source}
+        if not known_sources:
+            raise DatasetReleaseQualityError(f"{instrument.code}:source_metadata_missing")
+        if spec.source != "mixed" and known_sources != {spec.source}:
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:source_mismatch:"
+                f"cache={','.join(sorted(known_sources))},release={spec.source}"
+            )
+        underlying_closes = await _read_close_by_date(meta.underlying_stock_code)
+
+        kinds_dir = staging / spec.dataset_kind.value
+        kinds_dir.mkdir(parents=True, exist_ok=True)
+        records: list[ConvertibleDailyMetric] = []
+        premium_missing_days = 0
+        for day in sorted(bond_closes):
+            close, bond_source = bond_closes[day]
+            underlying_close = underlying_closes.get(day)
+            value: Decimal | None = None
+            premium: Decimal | None = None
+            if underlying_close is not None:
+                value = conversion_value(meta.conversion_price, underlying_close[0])
+                premium = conversion_premium_rate(close, value)
+            else:
+                premium_missing_days += 1
+            records.append(
+                ConvertibleDailyMetric(
+                    symbol=instrument.code,
+                    trade_date=day,
+                    close=close,
+                    conversion_price=meta.conversion_price,
+                    conversion_value=value,
+                    conversion_premium=premium,
+                    underlying_symbol=meta.underlying_stock_code,
+                    underlying_close=underlying_close[0] if underlying_close else None,
+                    source=bond_source,
+                    observed_at=meta.observed_at,
+                    available_at=datetime.combine(
+                        day, time(15, 30), tzinfo=ZoneInfo("Asia/Shanghai")
+                    ).astimezone(UTC),
+                )
+            )
+        if premium_missing_days == len(records):
+            raise DatasetReleaseQualityError(
+                f"{instrument.code}:no_underlying_close_for_premium"
+                f"(正股 {meta.underlying_stock_code} 在发布区间无同日收盘,拒绝空观测发布)"
+            )
+
+        audit = _audit_research_records(
+            records,
+            instrument=instrument,
+            spec=spec,
+        )
+        artifact_path = f"{spec.dataset_kind.value}/{instrument.code}.parquet"
+        artifact = kinds_dir / f"{instrument.code}.parquet"
+        await asyncio.to_thread(
+            _write_research_records,
+            artifact,
+            records,
+            fields=spec.fields,
+            dataset_kind=spec.dataset_kind,
+        )
+        checksum = await asyncio.to_thread(_sha256_file, artifact)
+        ready = instrument.metadata_complete
+        issues = list(audit.issues)
+        if premium_missing_days:
+            # 缺正股同日收盘(停牌/未上市)的天数逐日可见,不静默。
+            issues.append(f"premium_missing_days:{premium_missing_days}")
+        if audit.coverage_pct < spec.minimum_symbol_coverage:
+            issues.append(
+                f"coverage:{audit.coverage_pct}<{spec.minimum_symbol_coverage}"
+            )
+        if not instrument.metadata_complete:
+            issues.append("metadata_incomplete")
+        return ReleasedInstrument(
+            code=instrument.code,
+            name=instrument.name,
+            market=instrument.market,
+            instrument_type=instrument.instrument_type,
+            asset_class=instrument.asset_class,
+            available_at=instrument.available_at,
+            execution=instrument.execution,
+            artifact_path=artifact_path,
+            artifact_checksum=checksum,
+            artifact_size=artifact.stat().st_size,
+            row_count=audit.record_count,
+            start_date=audit.start_date,
+            end_date=audit.end_date,
+            expected_sessions=audit.expected_sessions,
+            missing_sessions=audit.missing_sessions,
+            suspended_sessions=0,
+            anomaly_count=0,
+            coverage_pct=audit.coverage_pct,
+            category=audit.category,
+            ready=ready,
+            issues=tuple(issues),
+            sources=tuple(sorted(known_sources)),
+            exchange=instrument.exchange,
+            listing_board=instrument.listing_board,
+            currency=instrument.currency,
+            etf_category=instrument.etf_category,
+            convertible=meta,
+            list_date=instrument.list_date,
+            delist_date=instrument.delist_date,
+            industry=instrument.industry,
+            status=instrument.status,
+            metadata_complete=instrument.metadata_complete,
+            lifecycle_events=instrument.lifecycle_events,
+            present_event_types=instrument.present_event_types,
+            required_event_types=instrument.required_event_types,
+            name_history=instrument.name_history,
+        )
 
     async def _freeze_bars_instrument(
             self,
@@ -1556,6 +1908,7 @@ class FrozenDatasetReleaseBuilder:
                 listing_board=instrument.listing_board,
                 currency=instrument.currency,
                 etf_category=instrument.etf_category,
+                convertible=instrument.convertible,
                 list_date=instrument.list_date,
                 delist_date=instrument.delist_date,
                 industry=instrument.industry,
@@ -1568,11 +1921,49 @@ class FrozenDatasetReleaseBuilder:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class ConvertibleDailyMetric:
+    """单只可转债某日的派生指标观测(issue #265)。
 
+    观测语义(诚实边界):``conversion_price`` 是 cb_basic **快照**转股价
+    (下修史不在覆盖范围),``underlying_close`` 是同日正股收盘,
+    ``conversion_premium`` = close / conversion_value - 1。
+    ``available_at`` 与日线一致(T 日 15:30 上海);``observed_at`` 沿用
+    转债条款快照的摄取时间。这是「带日期冻结观测」,不是全历史 PIT。
+    """
+
+    symbol: str
+    trade_date: date
+    close: Decimal | None
+    conversion_price: Decimal | None
+    conversion_value: Decimal | None
+    conversion_premium: Decimal | None
+    underlying_symbol: str | None
+    underlying_close: Decimal | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
+def conversion_value(conversion_price: Decimal, underlying_close: Decimal) -> Decimal:
+    """转股价值 = 100 / 转股价 x 正股收盘(每张转债转股后的市值)。"""
+    if conversion_price <= 0:
+        raise ValueError("conversion_price 必须为正")
+    return Decimal("100") / conversion_price * underlying_close
+
+
+def conversion_premium_rate(
+    close: Decimal,
+    value: Decimal,
+) -> Decimal:
+    """转股溢价率 = 转债收盘 / 转股价值 - 1(小数;2.5% 表示为 0.025)。"""
+    if value <= 0:
+        raise ValueError("conversion_value 必须为正")
+    return close / value - Decimal("1")
 
 
 def _audit_research_records(
-    records: list[object],
+    records: Sequence[object],
     *,
     instrument: ReleaseInstrumentSpec,
     spec: DatasetReleaseSpec,
@@ -1595,6 +1986,31 @@ def _audit_research_records(
     effective_delist = instrument.delist_date or end_date
 
     if spec.dataset_kind is ReleaseDatasetKind.DAILY_METRICS:
+        expected_dates = _trading_days(
+            max(spec.start_date, effective_list),
+            min(spec.end_date, effective_delist),
+        )
+        covered_dates = {
+            _research_record_date(item, "trade_date") for item in records
+        }
+        expected_sessions = len(expected_dates)
+        missing_sessions = len(expected_dates - covered_dates)
+        coverage = (
+            Decimal(len(expected_dates & covered_dates)) / Decimal(expected_sessions)
+            if expected_sessions > 0
+            else Decimal("1")
+        )
+        if instrument.delist_date is not None and instrument.delist_date <= spec.end_date:
+            category = "delisted"
+        elif instrument.list_date is not None and instrument.list_date > spec.start_date:
+            category = "short_history"
+        elif missing_sessions:
+            category = "gaps"
+        else:
+            category = "full"
+    elif spec.dataset_kind is ReleaseDatasetKind.CONVERTIBLE_METRICS:
+        # 与 daily_metrics 同为逐交易日口径(#265);转股溢价率缺失(正股
+        # 无同日 bar / 转股价缺失)由字段 null 计数可见,不计缺口。
         expected_dates = _trading_days(
             max(spec.start_date, effective_list),
             min(spec.end_date, effective_delist),
@@ -1723,7 +2139,7 @@ def _research_value_to_scalar(value: object) -> object:
 
 def _write_research_records(
     path: Path,
-    records: list[object],
+    records: Sequence[object],
     *,
     fields: tuple[str, ...],
     dataset_kind: ReleaseDatasetKind,
@@ -1734,7 +2150,8 @@ def _write_research_records(
 
     key_field = (
         "trade_date"
-        if dataset_kind is ReleaseDatasetKind.DAILY_METRICS
+        if dataset_kind
+        in (ReleaseDatasetKind.DAILY_METRICS, ReleaseDatasetKind.CONVERTIBLE_METRICS)
         else "report_period"
     )
     columns: dict[str, object] = {
@@ -1865,6 +2282,34 @@ def _coerce_datetime(value: object) -> datetime:
     if value is None:
         raise DatasetReleaseQualityError("研究数据记录缺少 available_at")
     return datetime.fromisoformat(str(value))
+
+
+def _convertible_metric_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> ConvertibleDailyMetric:
+    """把 convertible_metrics 发布行还原为领域记录(未冻结字段为 None,#265)。"""
+    value = row.get("available_at") or row.get("observed_at")
+    available_at = _coerce_datetime(value)
+    trade_date = _coerce_date(row.get("trade_date"))
+    if trade_date is None:
+        raise DatasetReleaseQualityError("可转债派生指标记录缺少 trade_date")
+    return ConvertibleDailyMetric(
+        symbol=symbol,
+        trade_date=trade_date,
+        close=_coerce_decimal(row.get("close")),
+        conversion_price=_coerce_decimal(row.get("conversion_price")),
+        conversion_value=_coerce_decimal(row.get("conversion_value")),
+        conversion_premium=_coerce_decimal(row.get("conversion_premium")),
+        underlying_symbol=(
+            str(row["underlying_symbol"]) if row.get("underlying_symbol") else None
+        ),
+        underlying_close=_coerce_decimal(row.get("underlying_close")),
+        source=str(row.get("source") or ""),
+        observed_at=available_at,
+        available_at=available_at,
+    )
 
 
 def _coerce_date(value: object) -> date | None:
@@ -2123,6 +2568,27 @@ class FrozenReleaseProvider:
             for row in rows
         ]
 
+    async def fetch_convertible_metrics(
+        self,
+        symbol: Symbol,
+        *,
+        start: date,
+        end: date,
+        decision_at: datetime,
+    ) -> list[ConvertibleDailyMetric]:
+        """读取 ``convertible_metrics`` 发布的时点化派生指标(PIT 门控,#265)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.CONVERTIBLE_METRICS,
+            symbol,
+            start=start,
+            end=end,
+            decision_at=decision_at,
+        )
+        return [
+            _convertible_metric_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
     async def _fetch_research_records(
         self,
         kind: ReleaseDatasetKind,
@@ -2153,7 +2619,10 @@ class FrozenReleaseProvider:
             if available_at > decision_at:
                 continue
             if start is not None and end is not None:
-                if kind is ReleaseDatasetKind.DAILY_METRICS:
+                if kind in (
+                    ReleaseDatasetKind.DAILY_METRICS,
+                    ReleaseDatasetKind.CONVERTIBLE_METRICS,
+                ):
                     record_date = _coerce_date(row.get("trade_date"))
                 else:
                     record_date = _coerce_date(row.get("report_period"))

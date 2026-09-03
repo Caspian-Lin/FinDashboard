@@ -65,6 +65,10 @@ class FakeTushareBarClient:
         self.calls.append(("daily", kwargs))
         return self.daily_rows
 
+    def cb_daily(self, **kwargs: str) -> object:
+        self.calls.append(("cb_daily", kwargs))
+        return []
+
     def adj_factor(self, **kwargs: str) -> object:
         self.calls.append(("adj_factor", kwargs))
         return self.factor_rows
@@ -315,6 +319,9 @@ async def test_batch_uses_sixteen_workers_for_200_slow_symbols() -> None:
             self.maximum = 0
             self.lock = Lock()
             self.saturated = Event()
+
+        def cb_daily(self, **kwargs: str) -> object:
+            return []
 
         def daily(self, **kwargs: str) -> object:
             with self.lock:
@@ -707,3 +714,98 @@ class TestForeignCacheStrategy:
         )
         assert len(result) == 2
         assert budget.calls > 0
+
+
+# ---------------------------------------------------------------------------
+# #265:可转债日线(cb_daily 专属接口,无复权,1 手 = 10 张)
+# ---------------------------------------------------------------------------
+
+
+class FakeConvertibleTushareClient(FakeTushareBarClient):
+    """cb_daily 桩:记录调用并可断言股票接口未被触碰。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cb_daily_rows: list[dict[str, object]] = [
+            {
+                "ts_code": "113050.SH",
+                "trade_date": "20240103",
+                "open": 101,
+                "high": 102,
+                "low": 100,
+                "close": 101.5,
+                "vol": 30,
+                "amount": 3045.0,
+            },
+            {
+                "ts_code": "113050.SH",
+                "trade_date": "20240102",
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100.5,
+                "vol": 20,
+                "amount": 2010.0,
+            },
+        ]
+
+    def cb_daily(self, **kwargs: str) -> object:
+        self.calls.append(("cb_daily", kwargs))
+        return self.cb_daily_rows
+
+
+@pytest.mark.unit
+async def test_convertible_daily_uses_cb_daily_without_adjustment() -> None:
+    """转债按代码规则分流 cb_daily:不调 daily/adj_factor,原始价落盘。"""
+    client = FakeConvertibleTushareClient()
+    provider, budget = _provider(client)
+
+    bars = await provider.fetch_bars(
+        make_symbol("113050.SH"),
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        adjust="qfq",
+    )
+
+    assert [bar.timestamp.date() for bar in bars] == [date(2024, 1, 2), date(2024, 1, 3)]
+    # 无复权:收盘价 = 上游原始价。
+    assert bars[0].close == Decimal("100.5")
+    assert bars[1].close == Decimal("101.5")
+    # 转债 1 手 = 10 张:vol 单位换算与股票(x100)不同。
+    assert bars[0].volume == Decimal("200")
+    assert bars[0].amount == Decimal("2010000")
+    assert {bar.source for bar in bars} == {"tushare"}
+    # 只调 cb_daily,不碰股票 daily / 复权因子接口;两天同 chunk 一次取回。
+    assert [name for name, _ in client.calls] == ["cb_daily"]
+    assert client.calls[0][1]["ts_code"] == "113050.SH"
+    assert budget.calls == 1
+
+
+@pytest.mark.unit
+async def test_convertible_daily_cache_key_follows_requested_adjust(
+    tmp_path: Path,
+) -> None:
+    """缓存键沿用请求 adjust(qfq 键存在但语义为 no-op),发布口径与下载键一致。"""
+    provider = TushareBarProvider(
+        client=FakeConvertibleTushareClient(),
+        cache_dir=tmp_path,
+        max_retries=0,
+    )
+    assert provider._cache is not None
+    symbol = make_symbol("113050.SH")
+
+    ok = await provider.update_cache(
+        symbol,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        adjust="qfq",
+    )
+    assert ok is True
+    metadata = await provider._cache.metadata_for(symbol, BarPeriod.D1, "qfq")
+    assert metadata is not None
+    assert metadata.bar_count == 2
+    assert metadata.source == "tushare"
+    cached = await provider._cache.read(symbol, BarPeriod.D1, "qfq")
+    assert [bar.close for bar in cached] == [Decimal("100.5"), Decimal("101.5")]

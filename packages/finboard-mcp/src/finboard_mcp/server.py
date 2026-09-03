@@ -223,9 +223,15 @@ FinBoard 研究 MCP —— 量化研究工具集
   (只读)。
   完整生命周期:创建账户+会话 → start → 投 K 线撮合 → 提交决策 → stop →
   evaluate(eligible/failed)→ archive。
-- portfolio(4,✅ #128):portfolio_allocate(目标权重分配,纯计算)、
+- portfolio(4,✅ #128+#266):portfolio_allocate(目标权重分配,纯计算;
+  method=max_ir 最大 IR 切点组合,#266)、
   portfolio_sizing(离散手数 + 费用/保证金)、portfolio_feasibility(10万/20万/50万
   档位可行性)、portfolio_attribution(绩效归因分解,纯计算,无 DB 写入)。
+  风险因子中性化(#266):portfolio_allocate 的 risk_factor_limits +
+  factor_exposures 声明风险因子 active 暴露硬上限 —— 只减仓投影、逐项审计,
+  暴露缺失降级为具名 warning 审计行(risk_factor_neutralization_skipped),
+  不可满足 fail_closed 拒绝;research_run 侧经 portfolio_config.overrides
+  声明同一约束(risk_factor_limits,因子名与冻结 feature_id 同名)。
 - finboard.job.*(6,✅ #136+#221)—— 统一后台任务队列监控与提交:
   job list/get(只读)、job enqueue/cancel/archive/unarchive(写)。
   复用 background_jobs 表,enqueue kind 白名单全是研究/数据/回测域
@@ -249,7 +255,8 @@ FinBoard 研究 MCP —— 量化研究工具集
   sync_universe / bulk_download_start / quality_repair / dataset_release_publish
   (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询;
   release_kind 支持 a_share_tushare|multi_asset_mixed|daily_metrics|
-  financial_indicators,研究数据发布与 bars 联合供因子快照 #187;
+  financial_indicators|convertible_metrics(#265 转债派生指标),
+  研究数据发布与 bars 联合供因子快照 #187;
   标的集三选一 #261:symbols / symbols_from_release 复制既有可用发布 /
   full_market 全市场按 kind 展开,来源缺失/不可用/展开为空入队即
   invalid_argument)、
@@ -261,6 +268,20 @@ FinBoard 研究 MCP —— 量化研究工具集
   tushare_scope_mismatch 拒绝);指数进 multi_asset_mixed 发布后
   research_run 可计算真实 benchmark_return,指数本身不进候选池
   (只做基准数据,不可撮合)。
+  转债链路(#265):sync_universe 经东财一览自动登记可转债
+  (instrument_type=convertible,11xxxx.SH/12xxxx.SZ);bulk_download_start
+  的 convertible 走 tushare cb_daily(2000 积分档,转债/股票均放行);
+  research_data_sync 的 convertible_profiles 数据集把 cb_basic 条款快照
+  upsert 进 convertible_metadata(转股价/到期日,评级与集思录强赎事件走
+  akshare 兜底,失败降级为 warning);发布侧新增 convertible_metrics
+  (转股价值/转股溢价率 = 快照转股价 x 同日正股收盘,非全历史 PIT,
+  只接受 A 股转债标的),convertible_double_low 据此消费溢价观测。
+  期货链路(#267):sync_universe 从受控登记表自动登记 IF/IH/IC/IM 期货
+  主连(instrument_type=futures,market=future);bulk_download_start 的
+  futures(需配 market=future)走 akshare 新浪主连日线入缓存(tushare 源
+  fail-visible 拒绝);主连是换月拼接序列,仅研究信号/基准、不可当作
+  可成交合约,is_benchmark_only_instrument 与指数同口径排除出候选池;
+  mixed 发布展开含期货,`futures_instruments` 质量块可见。
   补全「数据→因子→策略」闭环的数据准备第一步:agent 能拉 K 线、发布数据集、
   修复质量缺陷、同步 ETF 元数据。不连 broker / 账户 / 订单 / 持仓。
 - 验证实验(7,✅ #138+#233):validation_experiment create/list/get/reject/

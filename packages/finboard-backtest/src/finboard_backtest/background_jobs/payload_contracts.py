@@ -18,11 +18,14 @@ from datetime import date
 from typing import Any
 
 #: ``research_data_sync`` 数据集白名单(唯一事实来源;执行器从这里 re-export,
-#: 对应 ResearchDataset 枚举的摄取入口,#251 加 name_changes)。
+#: 对应 ResearchDataset 枚举的摄取入口,#251 加 name_changes,#265 加
+#: convertible_profiles —— 转债条款快照,写主数据 convertible_metadata,
+#: 不走 research_* 批次,与 name_changes 同风格)。
 RESEARCH_DATA_SYNC_DATASETS: frozenset[str] = frozenset(
     {
         "profiles",
         "name_changes",
+        "convertible_profiles",
         "daily_metrics",
         "financial_indicators",
         "industry_memberships",

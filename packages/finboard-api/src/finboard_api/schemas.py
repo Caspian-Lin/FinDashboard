@@ -1070,6 +1070,9 @@ class ResearchDatasetReleaseCreate(BaseSchema):
         # research_* 表冻结,非本地行情缓存)。
         "daily_metrics",
         "financial_indicators",
+        # issue #265:可转债派生指标发布(转股价值/转股溢价率,从本地缓存
+        # bars x 冻结转股价元数据计算)。
+        "convertible_metrics",
     ] = "a_share_tushare"
     source: Literal["akshare", "yfinance", "tushare", "mixed", "manual"] | None = None
     version: str = Field(
@@ -1166,6 +1169,7 @@ _RELEASE_KIND_SOURCE: dict[str, str] = {
     "multi_asset_mixed": "mixed",
     "daily_metrics": "tushare",
     "financial_indicators": "tushare",
+    "convertible_metrics": "tushare",
 }
 
 

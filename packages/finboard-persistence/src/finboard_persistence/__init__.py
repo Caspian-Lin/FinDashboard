@@ -6,6 +6,10 @@ from finboard_persistence.background_job_repo import (
 )
 from finboard_persistence.backtest_grid_repo import BacktestGridRunRepository
 from finboard_persistence.base import Base
+from finboard_persistence.convertible_metadata_repo import (
+    ConvertibleMetadataRepository,
+    ConvertibleMetadataSyncResult,
+)
 from finboard_persistence.dataset_release_repo import (
     ReleaseInstrumentCatalogRepository,
     ReleaseSymbolSourceError,
@@ -152,6 +156,8 @@ __all__ = [
     "BondMetadataModel",
     "ContinuousFuturesRuleModel",
     "ConvertibleMetadataModel",
+    "ConvertibleMetadataRepository",
+    "ConvertibleMetadataSyncResult",
     "DatasetManifestModel",
     "EtfMetadataAuditModel",
     "EtfMetadataModel",

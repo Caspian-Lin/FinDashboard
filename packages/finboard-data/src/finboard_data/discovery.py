@@ -15,6 +15,23 @@
 ``discover_indices`` 从受控登记表 :data:`BENCHMARK_INDEX_REGISTRY` 产出
 ``instrument_type=index`` 的标的——这是「指数登记 → 同步 → 发布 →
 benchmark_return」链路的唯一登记写入者。
+
+可转债登记(issue #265):akshare 股票 / ETF / 指数列表接口同样不覆盖转债,
+``discover_convertibles`` 从东财可转债一览 ``bond_zh_cov`` 产出
+``instrument_type=convertible`` 标的(代码规则 11xxxx.SH / 12xxxx.SZ,
+见 :func:`finboard_data.akshare_provider.is_convertible_code`),并入
+``discover_all()``;data_sync 经 ``sync_with_diff`` 自动登记。
+转债无 list_date 的结构化上游(东财一览无上市日列),保持 null,由
+research_data_sync ``convertible_profiles`` 数据集从 tushare cb_basic 回填。
+
+期货主连登记(issue #267):akshare 全市场列表接口不覆盖期货,
+``discover_futures_main`` 从受控登记表
+:data:`finboard_data.akshare_provider.FUTURES_MAIN_SERIES_REGISTRY`
+(IF/IH/IC/IM 主连,CFFEX)产出 ``market=future`` /
+``instrument_type=futures`` 标的 —— 期货进入 instruments 表的登记
+写入者。登记的是**主连序列**(continuous 语义),不是可成交合约;
+主连仅用于研究信号 / 基准数据。合约 → 品种映射显式维护在登记表
+(乘数 / 保证金率与 finboard-backtest ``FuturesRule`` 同口径,单测锁定)。
 """
 
 from __future__ import annotations
@@ -25,7 +42,12 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from finboard_data.akshare_provider import is_index_code
+from finboard_data.akshare_provider import (
+    FUTURES_MAIN_SERIES_REGISTRY,
+    is_convertible_code,
+    is_index_code,
+    normalize_overview_code,
+)
 from finboard_shared.types import InstrumentType, ListingBoard, Market
 
 if TYPE_CHECKING:
@@ -218,6 +240,22 @@ class UniverseDiscovery:
         df = ak.fund_etf_category_sina("ETF基金")
         return [(str(row["代码"]), str(row["名称"])) for _, row in df.iterrows()]
 
+    def _fetch_convertibles_sync(self) -> list[tuple[str, str]]:
+        import akshare as ak
+
+        # 东财可转债一览:免费、全量;列名容错解析见 akshare_provider
+        # 的 parse_convertible_overview_frame(此处只取代码+名称)。
+        from finboard_data.akshare_provider import _frame_column
+
+        df = ak.bond_zh_cov()
+        code_col = _frame_column(df, ("债券代码", "bond_id"))
+        name_col = _frame_column(df, ("债券简称", "bond_nm"))
+        if code_col is None or name_col is None:
+            raise RuntimeError(
+                "akshare bond_zh_cov 返回形状不符合预期(缺少 债券代码/债券简称 列)"
+            )
+        return [(str(row[code_col]), str(row[name_col])) for _, row in df.iterrows()]
+
     async def discover_indices(self) -> list[InstrumentInfo]:
         """基准指数(受控登记表,issue #256,无网络调用)。
 
@@ -239,17 +277,84 @@ class UniverseDiscovery:
         logger.info("discovery.indices", count=len(result))
         return result
 
+    async def discover_convertibles(self) -> list[InstrumentInfo]:
+        """可转债(东财一览 bond_zh_cov,issue #265)。
+
+        ``instrument_type=convertible``;交易所按代码规则推导
+        (11 开头 → SSE,12 开头 → SZSE),listing_board 恒为 UNKNOWN。
+        与指数登记(#256)同型:这是转债进入 instruments 表的登记写入者。
+        东财一览只覆盖当前存续转债,退市转债不在列表 —— 存续偏差是已知
+        限制(data-ops 文档与 cb_basic 摘牌档案共同缓解)。
+        """
+        raw_list = await asyncio.to_thread(self._fetch_convertibles_sync)
+        result: list[InstrumentInfo] = []
+        skipped = 0
+        for raw_code, name in raw_list:
+            # 必须走 normalize_overview_code:normalize_a_share_code 的 6 位
+            # 数字规则不认转债 1 开头段,会把每只转债都归一失败(全量 skip)。
+            code = normalize_overview_code(raw_code)
+            if code is None:
+                skipped += 1
+                continue
+            if not is_convertible_code(code):
+                skipped += 1
+                continue
+            result.append(
+                InstrumentInfo(
+                    code=code,
+                    name=name.strip(),
+                    market=Market.A_SHARE,
+                    instrument_type=InstrumentType.CONVERTIBLE,
+                    exchange="SSE" if code.endswith(".SH") else "SZSE",
+                    listing_board=ListingBoard.UNKNOWN,
+                )
+            )
+        if not result and skipped:
+            raise RuntimeError(
+                f"bond_zh_cov 返回 {skipped} 行但无可识别的可转债代码(11xxxx.SH/12xxxx.SZ)"
+            )
+        logger.info("discovery.convertibles", count=len(result), skipped=skipped)
+        return result
+
+    async def discover_futures_main(self) -> list[InstrumentInfo]:
+        """期货主连序列(受控登记表,issue #267,无网络调用)。
+
+        ``market=future`` / ``instrument_type=futures``;交易所取登记表
+        (CFFEX),listing_board 恒为 UNKNOWN。与指数登记(#256)同型:
+        这是期货进入 instruments 表的登记写入者。**登记语义是主连**
+        (continuous):主连价格是换月拼接产物,仅用于研究信号 / 基准,
+        不可当作可成交合约 —— 具体月份合约不经本入口登记(v1 无结构化
+        上游,合约链另行立项)。主连无 list_date 上游,保持 null 可见缺失。
+        """
+        result = [
+            InstrumentInfo(
+                code=entry.code,
+                name=entry.name,
+                market=Market.FUTURE,
+                instrument_type=InstrumentType.FUTURES,
+                exchange=entry.exchange,
+                listing_board=ListingBoard.UNKNOWN,
+            )
+            for entry in FUTURES_MAIN_SERIES_REGISTRY
+        ]
+        logger.info("discovery.futures_main", count=len(result))
+        return result
+
     async def discover_all(self) -> list[InstrumentInfo]:
-        """发现全部可用标的(A 股股票 + ETF + 基准指数,issue #256)。"""
-        stocks, etfs, indices = await asyncio.gather(
+        """发现全部可用标的(A 股股票 + ETF + 基准指数 + 可转债 + 期货主连)。"""
+        stocks, etfs, indices, convertibles, futures = await asyncio.gather(
             self.discover_a_shares(),
             self.discover_a_etfs(),
             self.discover_indices(),
+            self.discover_convertibles(),
+            self.discover_futures_main(),
         )
-        all_instruments = stocks + etfs + indices
+        all_instruments = stocks + etfs + indices + convertibles + futures
         logger.info(
             "discovery.all",
             total=len(all_instruments),
             indices=len(indices),
+            convertibles=len(convertibles),
+            futures=len(futures),
         )
         return all_instruments
