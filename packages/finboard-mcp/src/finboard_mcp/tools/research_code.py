@@ -765,9 +765,15 @@ def register(mcp: MCPServer) -> None:
             "average_turnover<=0.80、相关性绝对值<=0.80、至少 2 期;rank_ic 取"
             "绝对值是有意设计(#245 用户决策 A):门只证「存在非噪声信号」,方向"
             "正确性由因子目录 preference 与 screen 权益/换窗复测承担,负 IC"
-            "方向型因子过门不构成缺陷。失败返回"
-            "具体缺失/超阈值门名并保留 draft + promotion_status=failed 证据。"
-            "通过后旧 active 自动 retired。纯研究治理操作,不连接 broker、不下单。"
+            "方向型因子过门不构成缺陷。相关性证据 fail-closed(#311):screen "
+            "证据缺 correlation 或空对象报 screen.correlation_missing,不因空"
+            "mapping 静默通过;correlation_baselines=[](横截面确无 baseline "
+            "因子可比)报 screen.correlation_not_evaluated 并附修复路径(screen "
+            "run 横截面需含至少一个非用户因子特征)。失败返回"
+            "具体缺失/超阈值门名并保留 draft + promotion_status=failed 证据,"
+            "gate 逐项结果(pass/fail/not_evaluated)在 evidence.gates."
+            "screen_checks 与失败信息可见。通过后旧 active 自动 retired。"
+            "纯研究治理操作,不连接 broker、不下单。"
         ),
     )
     async def _promote(

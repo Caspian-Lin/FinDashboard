@@ -1452,6 +1452,15 @@ artifact/name/kind/commit。
  有意设计(#245 用户决策 A):门只证「存在非噪声信号」,方向正确性由因子
  目录 preference 与 screen 权益/换窗复测承担——负 IC 方向型因子(如反向
  动量)过门不是缺陷,但采用前应换窗复测方向稳定性并在研究记忆中记录。
+- 相关性证据 fail-closed(#311):screen 证据缺 `correlation` 键或为空
+  对象 → `screen.correlation_missing`;`correlation_baselines=[]`
+  (screen run 横截面确无 baseline 因子可比)→
+  `screen.correlation_not_evaluated`,修复路径:重跑 screen 时横截面需含
+  至少一个非用户因子特征(builtin 因子或价格特征)。两种情况均不 pass,
+  只引用 u_ 因子、无对照特征的 screen run 不能用于晋级。
+- gate 逐项结果(`evidence.gates.screen_checks`:`n_periods` /
+  `rank_ic` / `average_turnover` / `correlation` →
+  `pass|fail|not_evaluated`)随 evidence 归档并出现在失败返回信息里。
 - 失败:`promotion_status=failed` 证据保留在 draft,返回具名门失败;
   通过后当前同名 active 自动 retired,并返回 `promotion_status=passed`。
 - 晋级 evidence 固定四向引用:code commit、dataset release/checksum、

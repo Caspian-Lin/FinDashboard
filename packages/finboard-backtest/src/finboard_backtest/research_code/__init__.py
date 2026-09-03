@@ -19,6 +19,9 @@ from finboard_backtest.research_code.git_repo import (
     ResearchCodeRepo,
 )
 from finboard_backtest.research_code.promotion import (
+    CHECK_FAIL,
+    CHECK_NOT_EVALUATED,
+    CHECK_PASS,
     PROMOTION_FAILED,
     PROMOTION_PASSED,
     PROMOTION_PENDING,
@@ -136,6 +139,9 @@ class ResearchCodeService:
 
 
 __all__ = [
+    "CHECK_FAIL",
+    "CHECK_NOT_EVALUATED",
+    "CHECK_PASS",
     "IMPORT_WHITELIST",
     "KIND_FACTOR",
     "KIND_STRATEGY",

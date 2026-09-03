@@ -279,6 +279,23 @@ def _trend_closes() -> dict[str, dict[date, Decimal]]:
     return closes
 
 
+def _baseline_values() -> dict[str, float]:
+    """对照特征(momentum)观测:与 u_ 因子 spearman 相关约 0.71,低于 0.8 门。
+
+    #311:晋级相关性门 fail-closed,screen 证据必须含非空 correlation,
+    横截面需至少一个非用户因子特征作为 baseline;这里给 fake 沙箱快照
+    附带一组排序部分一致的对照观测(6 标的,秩 d² 合计 10)。
+    """
+    return {
+        "A.SH": 3.0,
+        "B.SH": 4.0,
+        "C.SH": 5.0,
+        "D.SH": 1.0,
+        "E.SH": 2.0,
+        "F.SH": 0.5,
+    }
+
+
 async def _register_rcr_and_snapshot(
     session: AsyncSession,
     *,
@@ -286,7 +303,14 @@ async def _register_rcr_and_snapshot(
     decision_at: datetime,
     release_id: str,
 ) -> str:
-    """登记成功 RCR + 产出 u_ 快照(fake 沙箱执行产物,#217 形状)。"""
+    """登记成功 RCR + 产出 u_ 快照(fake 沙箱执行产物,#217 形状)。
+
+    #311:快照额外附带一组 momentum 对照观测,使 screen run 横截面
+    存在非用户因子 baseline、correlation 真实可算 —— 修复前空
+    correlation 凭门洞即可晋级,修复后链路须产出真实相关性证据。
+    """
+    from finboard_data.factor_lab import FeatureObservation, build_feature_snapshot
+
     run_repo = ResearchCodeRunRepository(session)
     rcr = await run_repo.create(
         kind="factor",
@@ -316,6 +340,30 @@ async def _register_rcr_and_snapshot(
         mount_manifest_checksum="m" * 64,
         scores=scores,
         quality=quality,
+    )
+    observations = (
+        *snapshot.observations,
+        *(
+            FeatureObservation(
+                symbol=symbol,
+                feature_name="momentum",
+                value=value,
+                observed_at=decision_at,
+                available_at=decision_at,
+                source="research_code_run",
+                source_version=artifact.commit,
+            )
+            for symbol, value in sorted(_baseline_values().items())
+        ),
+    )
+    snapshot = build_feature_snapshot(
+        dataset_release_id=None,
+        dataset_release_checksum="m" * 64,
+        decision_at=decision_at,
+        code_version=artifact.commit,
+        observations=observations,
+        source_run_id=rcr.run_id,
+        issues=snapshot.issues,
     )
     await FeatureSnapshotRepository(session).publish(snapshot)
     await run_repo.mark_terminal(
@@ -858,6 +906,11 @@ class TestFactorScreenPromotionChain:
             assert abs(metrics["rank_ic"]) >= 0.02
             assert metrics["average_turnover"] is not None
             assert metrics["average_turnover"] <= 0.8
+            # #311:横截面含 momentum baseline,correlation 真实可算,
+            # 不再凭空证据静默过门。
+            assert set(factor_screen["correlation_baselines"]) == {"momentum"}
+            assert metrics["correlation"]
+            assert all(abs(value) <= 0.8 for value in metrics["correlation"].values())
 
         # OOS 门(#233 执行器)→ validated_oos
         experiment = _promotion_experiment(
@@ -893,6 +946,14 @@ class TestFactorScreenPromotionChain:
         assert env.status == "ok", env.error
         assert env.data["status"] == "active"
         assert env.data["promotion_status"] == "passed"
+        # #311:gate 逐项结果(含相关性 pass)随 promote 响应可见
+        evidence = cast(dict[str, Any], env.data["promotion_evidence"])
+        assert cast(dict[str, Any], evidence["gates"])["screen_checks"] == {
+            "n_periods": "pass",
+            "rank_ic": "pass",
+            "average_turnover": "pass",
+            "correlation": "pass",
+        }
 
         # 消费门放行:普通(无绑定)规格引用 u_ 因子可编译
         async with session_factory(engine)() as session:
