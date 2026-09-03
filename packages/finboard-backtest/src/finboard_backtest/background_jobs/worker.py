@@ -1,8 +1,14 @@
 """后台任务 worker 进程主循环(issue #117 / #142)。
 
 独立进程(``finboard worker run``)从 PostgreSQL ``background_jobs`` 队列用
-``FOR UPDATE SKIP LOCKED`` 领取 queued 任务,按 ``kind`` 分发到执行器,
+``FOR UPDATE SKIP LOCKED`` 领取任务,按 ``kind`` 分发到执行器,
 执行期间周期性续约心跳并在每个 checkpoint 重读任务状态以支持协作式取消。
+
+停机语义(issue #307):第一次停止信号(POSIX SIGINT/SIGTERM,Windows
+Ctrl-C / CTRL_BREAK)停止领新任务并收尾 in-flight —— ``shutdown_grace_seconds``
+为 0 立即取消(现状语义),>0 先等任务完成至宽限上限再取消;等待中第二次
+停止信号立即强退(退出码 130)。优雅退出码 0,未完成任务统一由 lease 过期
+回收 → interrupted → 退避重排兜底。
 
 session 隔离红线:**每个 job 用一个独立 session**,绝不复用 kernel / 请求 session,
 避免一个任务的长事务阻塞另一个任务 / 污染 kernel 交易域。
@@ -16,6 +22,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import sys
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -42,6 +49,15 @@ from finboard_shared.background_jobs import BackgroundJobStatus
 
 logger = logging.getLogger(__name__)
 
+#: 第二次停止信号(优雅宽限等待中)强退时的进程退出码(128 + SIGINT = 130,
+#: 约定俗成;正常优雅退出为 0,issue #307 退出码约定)。
+WORKER_FORCE_EXIT_CODE = 130
+
+#: grace>0 的 drain 等待轮询粒度(秒):Windows 上 ``signal.signal`` 注册的
+#: 处理器只在主线程从 select 返回后的字节码边界执行 —— 等待按短窗口分片,
+#: 保证第二次停止信号的反应延迟有界(≤ ~0.4s),而不是被整个宽限窗口卡住。
+_DRAIN_POLL_SECONDS = 0.2
+
 
 @dataclass
 class WorkerConfig:
@@ -60,6 +76,13 @@ class WorkerConfig:
     maintenance_interval_seconds: float = 10.0
     #: retry_waiting / interrupted 自动重排前必须等待的退避秒数。
     retry_backoff_seconds: float = 30.0
+    #: 停机优雅宽限秒数(issue #307)。0(默认)= 收到停止信号立即取消
+    #: in-flight(现状语义,任务留给 lease 过期回收);>0 = 先等 in-flight
+    #: 自然完成至该上限、超时才取消(兜底语义与 0 相同)。等待中第二次停止
+    #: 信号立即强退(退出码 :data:`WORKER_FORCE_EXIT_CODE`)。与 settings
+    #: ``worker_shutdown_grace_seconds`` 对齐,``finboard dev`` /
+    #: ``--workers N`` supervisor 的子进程收敛宽限共用同一值。
+    shutdown_grace_seconds: float = 0.0
 
 
 def default_worker_id() -> str:
@@ -82,12 +105,33 @@ class BackgroundWorker:
         self._registry = registry
         self._config = config
         self._stop_event = asyncio.Event()
+        self._force_stop_event = asyncio.Event()
         self._inflight: set[asyncio.Task[None]] = set()
+
+    @property
+    def stop_requested(self) -> bool:
+        """是否已收到(第一次)停止信号。"""
+        return self._stop_event.is_set()
+
+    @property
+    def force_stop_requested(self) -> bool:
+        """是否已收到第二次停止信号(立即强退)。"""
+        return self._force_stop_event.is_set()
 
     def request_stop(self) -> None:
         self._stop_event.set()
 
-    async def run(self) -> None:
+    def request_force_stop(self) -> None:
+        """第二次停止信号:跳过剩余优雅宽限,立即强退(issue #307)。
+
+        in-flight 任务照旧取消、留给 lease 过期回收(兜底语义不变);区别
+        仅在于 ``run`` 返回 True,由 ``run_worker`` 以非 0 退出码结束进程。
+        """
+        self._stop_event.set()
+        self._force_stop_event.set()
+
+    async def run(self) -> bool:
+        """主循环:领取任务直到停止信号,收尾后返回是否因第二次信号强退。"""
         logger.info(
             "background_worker.start worker_id=%s queues=%s max_concurrent=%d",
             self._config.worker_id,
@@ -117,8 +161,13 @@ class BackgroundWorker:
                     self._stop_event.wait(),
                     timeout=self._config.poll_interval_seconds,
                 )
-        await self._drain()
-        logger.info("background_worker.stop worker_id=%s", self._config.worker_id)
+        force = await self._drain()
+        logger.info(
+            "background_worker.stop worker_id=%s force=%s",
+            self._config.worker_id,
+            force,
+        )
+        return force
 
     # ------------------------------------------------------------- 内部流程
     async def _recover_stale(self) -> None:
@@ -327,14 +376,68 @@ class BackgroundWorker:
                     exc,
                 )
 
-    async def _drain(self) -> None:
-        """关闭流程:取消 in-flight tasks 并等待它们落库后退出。"""
+    async def _drain(self) -> bool:
+        """关闭流程:按 ``shutdown_grace_seconds`` 收尾 in-flight tasks(#307)。
 
-        for task in list(self._inflight):
+        * grace = 0(默认):立即取消全部 in-flight —— 任务留在 running,由
+          lease 过期回收 → interrupted → 退避重排(现状语义,行为零回归);
+        * grace > 0:先等 in-flight 自然完成至宽限上限;超时才取消剩余任务
+          (兜底语义与 grace=0 相同);
+        * 等待期间收到第二次停止信号(或进入 drain 前已收到):立即取消剩余
+          任务并返回 True —— ``run_worker`` 据此以 :data:`WORKER_FORCE_EXIT_CODE`
+          强退。
+        """
+
+        inflight = [task for task in self._inflight if not task.done()]
+        if not inflight:
+            self._inflight.clear()
+            return False
+        grace = self._config.shutdown_grace_seconds
+        if grace <= 0 and not self._force_stop_event.is_set():
+            for task in inflight:
+                task.cancel()
+            await asyncio.gather(*inflight, return_exceptions=True)
+            self._inflight.clear()
+            return False
+
+        pending: set[asyncio.Task[None]] = set(inflight)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + grace if grace > 0 else 0.0
+        while pending and not self._force_stop_event.is_set():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            _done, pending = await asyncio.wait(
+                pending, timeout=min(remaining, _DRAIN_POLL_SECONDS)
+            )
+        if not pending:
+            self._inflight.clear()
+            return False
+        if self._force_stop_event.is_set():
+            logger.warning(
+                "background_worker.force_stop inflight=%d (任务留给 lease 回收)",
+                len(pending),
+            )
+        else:
+            logger.warning(
+                "background_worker.drain_timeout grace_seconds=%.1f inflight=%d",
+                grace,
+                len(pending),
+            )
+        for task in pending:
             task.cancel()
-        if self._inflight:
-            await asyncio.gather(*self._inflight, return_exceptions=True)
+        await asyncio.gather(*pending, return_exceptions=True)
         self._inflight.clear()
+        return self._force_stop_event.is_set()
+
+
+def route_stop_signal(worker: BackgroundWorker) -> None:
+    """停止信号路由(issue #307):第一次 → 优雅停止,第二次 → 立即强退。"""
+
+    if worker.stop_requested:
+        worker.request_force_stop()
+    else:
+        worker.request_stop()
 
 
 async def run_worker(
@@ -344,24 +447,58 @@ async def run_worker(
     registry: JobExecutorRegistry,
     config: WorkerConfig,
 ) -> None:
-    """便捷入口:注册信号处理并阻塞运行直到 SIGINT/SIGTERM。"""
+    """便捷入口:注册停止信号并阻塞运行,直到停止信号收尾完成。
+
+    信号语义与退出码约定(issue #307):
+
+    * **第一次停止信号**(POSIX SIGINT/SIGTERM;Windows Ctrl-C / CTRL_BREAK)——
+      停止领取新任务并进入 :meth:`BackgroundWorker._drain`:grace=0 立即取消
+      in-flight(现状语义),grace>0 先等 in-flight 完成至
+      ``config.shutdown_grace_seconds`` 上限 —— 优雅完成退出码 0(宽限超时后
+      的取消兜底同为 0,与 grace=0 同一终点语义);
+    * **宽限等待中第二次停止信号** —— 立即强退,进程退出码
+      :data:`WORKER_FORCE_EXIT_CODE`(130);未完成任务照旧由 lease 过期回收。
+    """
 
     worker = BackgroundWorker(
         engine=engine, session_maker=session_maker, registry=registry, config=config
     )
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, worker.request_stop)
+    win_restored: list[tuple[int, object]] = []
+    if sys.platform == "win32":
+        # Windows 的 asyncio 不支持 add_signal_handler(NotImplementedError):
+        # 经 signal.signal 在主线程注册,回调里 call_soon_threadsafe 唤醒事件
+        # 循环。注意:子进程按 CREATE_NEW_PROCESS_GROUP 托管时 Ctrl-C 被禁用,
+        # 优雅信号是 CTRL_BREAK(映射为 SIGBREAK)—— 必须一并注册。
+        def _on_stop_signal(signum: int, frame: object) -> None:
+            loop.call_soon_threadsafe(route_stop_signal, worker)
+
+        for sig in (signal.SIGINT, signal.SIGBREAK):
+            # 非主线程(嵌入运行)或无控制台 —— 与既有 NotImplementedError
+            # 抑制同口径:注册失败不阻断 worker 运行。
+            with contextlib.suppress(OSError, ValueError):
+                win_restored.append((sig, signal.signal(sig, _on_stop_signal)))
+    else:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, route_stop_signal, worker)
     try:
-        await worker.run()
+        force = await worker.run()
     finally:
+        # 恢复既有 handler,避免嵌入调用方(如测试)残留全局信号状态。
+        for restored_sig, restored_handler in win_restored:
+            with contextlib.suppress(OSError, ValueError):
+                signal.signal(restored_sig, restored_handler)  # type: ignore[arg-type]
         await engine.dispose()
+    if force:
+        raise SystemExit(WORKER_FORCE_EXIT_CODE)
 
 
 __all__ = [
+    "WORKER_FORCE_EXIT_CODE",
     "BackgroundWorker",
     "WorkerConfig",
     "default_worker_id",
+    "route_stop_signal",
     "run_worker",
 ]
