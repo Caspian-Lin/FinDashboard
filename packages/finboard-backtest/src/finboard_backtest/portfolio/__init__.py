@@ -6,9 +6,11 @@ issue #59:策略输出标准化 Signal / TargetWeight,组合层统一生成调�
 公共 API:
 
 * 契约: ``Signal``, ``TargetWeight``, ``PortfolioConstraints``, ``RebalancePlan``
-* 分配: ``EqualWeightAllocator``, ``InverseVolatilityAllocator``, ``ErcAllocator``
+* 分配: ``EqualWeightAllocator``, ``InverseVolatilityAllocator``, ``ErcAllocator``,
+  ``MaxIrAllocator`` (issue #266 最大 IR 切点组合)
 * 协方差: ``estimate_covariance`` (Ledoit-Wolf 收缩)
 * 风险预算: ``scale_to_target_volatility``, ``needs_rebalance``
+* 中性化: ``project_risk_factor_neutralization`` (issue #266 风险因子暴露上限)
 * 离散求解: ``solve_sizing`` (10万/20万/50万元可行性)
 * 归因: ``compute_attribution`` (资产 / sleeve 分解)
 """
@@ -53,6 +55,7 @@ from finboard_backtest.portfolio.contracts import (
     PortfolioConstraints,
     RebalancePlan,
     RebalanceTrade,
+    RiskFactorLimit,
     Signal,
     Sleeve,
     TargetWeight,
@@ -76,6 +79,21 @@ from finboard_backtest.portfolio.feasibility import (
     asset_lot_info_from_metadata,
     evaluate_capital_tiers,
 )
+from finboard_backtest.portfolio.max_ir import (
+    MaxIrAllocator,
+    MaxIrSolution,
+    project_onto_capped_simplex,
+    solve_max_ir,
+)
+from finboard_backtest.portfolio.neutralization import (
+    NEUTRALIZATION_CONSTRAINT,
+    NEUTRALIZATION_INACTIVE_WARNING,
+    NEUTRALIZATION_SKIPPED_CONSTRAINT,
+    FactorNeutralizationAudit,
+    FactorNeutralizationResult,
+    neutralization_audit_rows,
+    project_risk_factor_neutralization,
+)
 from finboard_backtest.portfolio.risk_budget import (
     ConcentrationCheck,
     RiskBudgetError,
@@ -97,6 +115,9 @@ from finboard_backtest.portfolio.sizing import (
 __all__ = [
     "CAPITAL_TIERS",
     "MAX_WEIGHT_EPSILON",
+    "NEUTRALIZATION_CONSTRAINT",
+    "NEUTRALIZATION_INACTIVE_WARNING",
+    "NEUTRALIZATION_SKIPPED_CONSTRAINT",
     "PORTFOLIO_CONTRACT_VERSION",
     "RISK_EXIT_EXECUTOR_VERSION",
     "AllocationContext",
@@ -118,8 +139,12 @@ __all__ = [
     "ErcAllocator",
     "ExitDecision",
     "ExitPositionSnapshot",
+    "FactorNeutralizationAudit",
+    "FactorNeutralizationResult",
     "FeasiblePosition",
     "InverseVolatilityAllocator",
+    "MaxIrAllocator",
+    "MaxIrSolution",
     "PortfolioBuildInput",
     "PortfolioBuildResult",
     "PortfolioConstraints",
@@ -130,6 +155,7 @@ __all__ = [
     "RiskBudgetError",
     "RiskContributionProjection",
     "RiskExitResult",
+    "RiskFactorLimit",
     "Signal",
     "SignalConflictPolicy",
     "SignalResolution",
@@ -150,9 +176,13 @@ __all__ = [
     "get_capital_tier",
     "make_allocator",
     "needs_rebalance",
+    "neutralization_audit_rows",
     "portfolio_volatility",
+    "project_onto_capped_simplex",
+    "project_risk_factor_neutralization",
     "risk_concentration_check",
     "scale_to_target_volatility",
+    "solve_max_ir",
     "solve_sizing",
     "to_research_constraint_outcomes",
     "to_research_rebalance_instructions",

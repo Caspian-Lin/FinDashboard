@@ -60,6 +60,26 @@ class CovarianceFailureMode(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class RiskFactorLimit:
+    """单风险因子的 active 暴露硬上限(issue #266)。
+
+    ``factor`` 是因子观测的键名(与冻结特征 / ``FACTOR_LAB_CATALOG`` 中
+    RISK 角色因子同名,如 ``market_beta`` / ``size_exposure``;行业 one-hot
+    可展开为逐行业列)。``max_active_exposure`` 约束
+    ``|Σ (w_i - baseline_i) * f_i| <= max_active_exposure``。
+    """
+
+    factor: str
+    max_active_exposure: float
+
+    def __post_init__(self) -> None:
+        if not self.factor:
+            raise ValueError("风险因子中性化的 factor 不能为空")
+        if not math.isfinite(self.max_active_exposure) or self.max_active_exposure <= 0:
+            raise ValueError("max_active_exposure 必须为正且有限")
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioConstraints:
     """组合层硬约束 —— 所有分配方法都必须满足。
 
@@ -72,6 +92,8 @@ class PortfolioConstraints:
     4. ``max_leverage`` — 杠杆上限;1.0 = 无杠杆(默认)。
     5. ``target_volatility`` / ``max_volatility`` — 年化波动率目标 / 上限。
     6. ``rebalance_threshold`` — 再平衡带:权重偏离不超过此阈值时不调仓。
+    7. ``risk_factor_limits`` — 风险因子 active 暴露上限(issue #266),
+       只减仓投影;缺失暴露观测时降级并记录具名 warning。
     """
 
     max_weight_per_asset: float = 0.25
@@ -85,6 +107,7 @@ class PortfolioConstraints:
     max_risk_contribution: float = 1.0
     long_only: bool = True
     covariance_failure_mode: CovarianceFailureMode = CovarianceFailureMode.FAIL_CLOSED
+    risk_factor_limits: tuple[RiskFactorLimit, ...] = ()
 
     def __post_init__(self) -> None:
         if not (0 < self.max_weight_per_asset <= 1.0):
@@ -111,6 +134,9 @@ class PortfolioConstraints:
             raise ValueError("min_weight_to_trade 不能为负")
         if not (0 < self.max_risk_contribution <= 1):
             raise ValueError("max_risk_contribution 必须落在 (0, 1]")
+        factors = [limit.factor for limit in self.risk_factor_limits]
+        if len(factors) != len(set(factors)):
+            raise ValueError("risk_factor_limits 因子名不允许重复")
 
     @property
     def max_investable_weight(self) -> float:
@@ -404,6 +430,7 @@ __all__ = [
     "PortfolioConstraints",
     "RebalancePlan",
     "RebalanceTrade",
+    "RiskFactorLimit",
     "Signal",
     "Sleeve",
     "TargetWeight",

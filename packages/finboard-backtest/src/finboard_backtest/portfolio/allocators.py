@@ -600,12 +600,20 @@ def make_allocator(method: str) -> Allocator:
     """按名称构造分配器。
 
     支持的方法:``"equal_weight"`` / ``"inverse_volatility"`` / ``"erc"`` /
-    ``"direct_weights"``(user_code 专用,score 即权重,不再缩放)。
+    ``"direct_weights"``(user_code 专用,score 即权重,不再缩放) /
+    ``"max_ir"``(issue #266,最大 IR 切点组合)。
     未知方法 raise ``AllocationError``。
+
+    ``max_ir`` 惰性导入:``max_ir`` 模块反向复用本模块的候选筛选与
+    信号聚合 helper,模块级互相导入会构成环。
     """
+    if method == "max_ir":
+        from finboard_backtest.portfolio.max_ir import MaxIrAllocator
+
+        return MaxIrAllocator()
     cls = _ALLOCATOR_REGISTRY.get(method)
     if cls is None:
-        raise AllocationError(f"未知分配方法: {method};可选: {', '.join(_ALLOCATOR_REGISTRY)}")
+        raise AllocationError(f"未知分配方法: {method};可选: max_ir, {', '.join(_ALLOCATOR_REGISTRY)}")
     return cls()
 
 
