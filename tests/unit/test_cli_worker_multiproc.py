@@ -101,7 +101,7 @@ class TestSuperviseWorkerProcesses:
 
         def interrupting_sleep(_: float) -> None:
             calls["n"] += 1
-            if calls["n"] >= 2:  # 第一轮让 Popen 有机会启动,第二轮即打断
+            if calls["n"] == 2:  # 精确一次:等待循环第二轮打断(模拟 Ctrl-C)
                 raise KeyboardInterrupt
 
         with patch("finboard_app.cli.time.sleep", side_effect=interrupting_sleep):
@@ -121,7 +121,7 @@ class TestSuperviseWorkerProcesses:
 
         def interrupting_sleep(_: float) -> None:
             calls["n"] += 1
-            if calls["n"] >= 2:
+            if calls["n"] == 2:
                 raise KeyboardInterrupt
 
         with (
