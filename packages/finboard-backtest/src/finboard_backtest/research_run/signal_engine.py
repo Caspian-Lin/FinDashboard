@@ -25,6 +25,7 @@ cross_* 规则比较两个节点的完整序列。
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import weakref
@@ -73,6 +74,7 @@ from finboard_backtest.research_run.frozen_loader import (
     FrozenInputLoader,
     LoadedDecisionContext,
     ReleaseProviderFactory,
+    SymbolCloseHistory,
 )
 from finboard_backtest.research_run.portfolio_pipeline import (
     PortfolioDecisionInput,
@@ -114,7 +116,7 @@ SIGNAL_ENGINE_STRATEGY_KINDS: frozenset[str] = frozenset({"multi_factor"})
 #: 发布不可变且 checksum 已由 manifest 冻结锚定,同一 provider 的日历恒定;
 #: provider 经工厂按 run memoize(#287),WeakKeyDictionary 让缓存条目随
 #: provider 一起被回收 —— 不引入跨 run / 跨事件循环的长命可变状态。
-_TRADING_DAYS_CACHE: "weakref.WeakKeyDictionary[FrozenReleaseProvider, list[date]]" = (
+_TRADING_DAYS_CACHE: weakref.WeakKeyDictionary[FrozenReleaseProvider, list[date]] = (
     weakref.WeakKeyDictionary()
 )
 
@@ -562,24 +564,57 @@ async def _load_price_series(
     provider: FrozenReleaseProvider,
     symbols: Sequence[str],
     as_of: datetime,
+    close_histories: Mapping[str, SymbolCloseHistory | None] | None = None,
 ) -> dict[str, list[float]]:
-    """PIT 门控读取各标的决策时点前可见的完整 close 序列(时间升序)。"""
+    """PIT 门控读取各标的决策时点前可见的完整 close 序列(时间升序)。
+
+    issue #287:提供 ``close_histories``(close 矩阵)时,序列由矩阵前缀切片
+    取得,与逐期 PIT 读取逐值等价、不再读盘;矩阵未覆盖的标的回退逐标的
+    读取,并以 ``asyncio.gather`` + 信号量并发化(结果与异常都按输入顺序
+    组装/抛出,与串行实现一致)。
+    """
     from finboard_backtest.research_run.frozen_loader import _market_from_value
     from finboard_shared.models import Symbol
 
     series: dict[str, list[float]] = {}
+    pending: list[str] = []
     for code in symbols:
-        market = _market_from_value(code)
-        bars = await provider.fetch_point_in_time_bars(
-            Symbol(code=code, market=market),
-            provider.release.period,
-            provider.release.start_date,
-            as_of.date(),
-            decision_at=as_of,
-            adjust=provider.release.adjustment,
-        )
-        if bars:
-            series[code] = [float(bar.bar.close) for bar in bars]
+        history = close_histories.get(code) if close_histories else None
+        if history is not None:
+            values = history.series_until(as_of)
+            if values:
+                series[code] = values
+        else:
+            pending.append(code)
+    if not pending:
+        return series
+    semaphore = asyncio.Semaphore(8)
+
+    async def _fetch(code: str) -> list[float]:
+        async with semaphore:
+            bars = await provider.fetch_point_in_time_bars(
+                Symbol(code=code, market=_market_from_value(code)),
+                provider.release.period,
+                provider.release.start_date,
+                as_of.date(),
+                decision_at=as_of,
+                adjust=provider.release.adjustment,
+            )
+        return [float(bar.bar.close) for bar in bars]
+
+    results = await asyncio.gather(
+        *(_fetch(code) for code in pending), return_exceptions=True
+    )
+    fetched: dict[str, list[float]] = {}
+    for code, result in zip(pending, results, strict=True):
+        if isinstance(result, BaseException):
+            raise result
+        if result:
+            fetched[code] = result
+    # 按输入顺序合并,保持与串行实现相同的字典插入序。
+    for code in symbols:
+        if code in fetched:
+            series[code] = fetched[code]
     return series
 
 
@@ -953,21 +988,36 @@ async def _market_close_map(
     provider: FrozenReleaseProvider,
     symbols: Sequence[str],
 ) -> dict[str, dict[date, Decimal]]:
-    """读取各标的全区间收盘价映射(非 PIT;收盘价在当日收盘即公开)。"""
+    """读取各标的全区间收盘价映射(非 PIT;收盘价在当日收盘即公开)。
+
+    issue #287:逐 symbol 串行改 ``asyncio.gather`` + 信号量;异常按输入
+    顺序抛出,与串行实现逐值一致。
+    """
     from finboard_backtest.research_run.frozen_loader import _market_from_value
     from finboard_shared.models import Symbol
 
-    closes_by_symbol: dict[str, dict[date, Decimal]] = {}
-    for code in symbols:
-        bars = await provider.fetch_bars(
-            Symbol(code=code, market=_market_from_value(code)),
-            provider.release.period,
-            provider.release.start_date,
-            provider.release.end_date,
-            adjust=provider.release.adjustment,
-        )
-        closes_by_symbol[code] = {bar.timestamp.date(): bar.close for bar in bars}
-    return closes_by_symbol
+    semaphore = asyncio.Semaphore(8)
+
+    async def _fetch(code: str) -> dict[date, Decimal]:
+        async with semaphore:
+            bars = await provider.fetch_bars(
+                Symbol(code=code, market=_market_from_value(code)),
+                provider.release.period,
+                provider.release.start_date,
+                provider.release.end_date,
+                adjust=provider.release.adjustment,
+            )
+        return {bar.timestamp.date(): bar.close for bar in bars}
+
+    results = await asyncio.gather(
+        *(_fetch(code) for code in symbols), return_exceptions=True
+    )
+    fetched: dict[str, dict[date, Decimal]] = {}
+    for code, result in zip(symbols, results, strict=True):
+        if isinstance(result, BaseException):
+            raise result
+        fetched[code] = result
+    return fetched
 
 
 async def build_daily_equity_curve(
@@ -1324,7 +1374,8 @@ async def build_decision_load_contexts(
                 & frozenset(context.lot_info)
             )
             price_series = await _load_price_series(
-                provider, tuple(signalable), decision_at
+                provider, tuple(signalable), decision_at,
+                close_histories=loader.close_histories,
             )
             signalable = frozenset(
                 symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
