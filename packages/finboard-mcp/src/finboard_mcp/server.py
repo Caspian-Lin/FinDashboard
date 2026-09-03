@@ -248,7 +248,8 @@ FinBoard 研究 MCP —— 量化研究工具集
   sync_universe / bulk_download_start / quality_repair / dataset_release_publish
   (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询;
   release_kind 支持 a_share_tushare|multi_asset_mixed|daily_metrics|
-  financial_indicators,研究数据发布与 bars 联合供因子快照 #187;
+  financial_indicators|convertible_metrics(#265 转债派生指标),
+  研究数据发布与 bars 联合供因子快照 #187;
   标的集三选一 #261:symbols / symbols_from_release 复制既有可用发布 /
   full_market 全市场按 kind 展开,来源缺失/不可用/展开为空入队即
   invalid_argument)、
@@ -260,6 +261,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   tushare_scope_mismatch 拒绝);指数进 multi_asset_mixed 发布后
   research_run 可计算真实 benchmark_return,指数本身不进候选池
   (只做基准数据,不可撮合)。
+  转债链路(#265):sync_universe 经东财一览自动登记可转债
+  (instrument_type=convertible,11xxxx.SH/12xxxx.SZ);bulk_download_start
+  的 convertible 走 tushare cb_daily(2000 积分档,转债/股票均放行);
+  research_data_sync 的 convertible_profiles 数据集把 cb_basic 条款快照
+  upsert 进 convertible_metadata(转股价/到期日,评级与集思录强赎事件走
+  akshare 兜底,失败降级为 warning);发布侧新增 convertible_metrics
+  (转股价值/转股溢价率 = 快照转股价 x 同日正股收盘,非全历史 PIT,
+  只接受 A 股转债标的),convertible_double_low 据此消费溢价观测。
   补全「数据→因子→策略」闭环的数据准备第一步:agent 能拉 K 线、发布数据集、
   修复质量缺陷、同步 ETF 元数据。不连 broker / 账户 / 订单 / 持仓。
 - 验证实验(7,✅ #138+#233):validation_experiment create/list/get/reject/
