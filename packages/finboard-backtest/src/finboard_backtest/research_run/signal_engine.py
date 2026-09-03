@@ -104,7 +104,9 @@ from finboard_backtest.strategy_spec.universe_precheck import (
 )
 
 if TYPE_CHECKING:
+    from finboard_backtest.factor_lab import PriceFeatureProcessPool
     from finboard_backtest.portfolio import CovarianceEstimate
+    from finboard_data.factor_lab import FeatureSnapshot
     from finboard_data.releases import FrozenReleaseProvider, ReleasedInstrument
 
 logger = structlog.get_logger(__name__)
@@ -946,6 +948,8 @@ async def _compute_period_features(
     manifest: ResearchRunManifest,
     decision_at: datetime,
     release_id: str,
+    *,
+    process_pool: PriceFeatureProcessPool | None = None,
 ) -> tuple[FeatureValue, ...]:
     """按单个决策时点从冻结发布重算价格特征(issue #183)。
 
@@ -954,24 +958,71 @@ async def _compute_period_features(
     downside_volatility,并把观测映射为 ``FeatureValue``(来源绑定冻结 release)。
     冻结因子快照里的基本面特征(如 pb)由 ``FrozenInputLoader`` 另行 PIT 加载,
     两者在 ``build_decision_inputs`` 合并。
+
+    issue #288:``process_pool`` 非空且未损坏时,特征计算在常驻 spawn 进程池
+    执行(结果与进程内协程路径逐值相等);池中途损坏(BrokenProcessPool,
+    进程被杀 / OOM / pickle 断裂)对本期**具名降级**为进程内协程路径重算一次
+    —— 池只是性能优化,不改变结果语义;重算再失败则原样抛(真实数据 /
+    代码问题,不吞)。worker 内的业务异常(如数据不足)不是池异常,原样抛。
     """
+    from concurrent.futures.process import BrokenProcessPool
+
     from finboard_backtest.factor_lab import FactorAnalysisError, build_price_feature_snapshot
 
+    def _data_error(exc: FactorAnalysisError) -> ValueError:
+        return ValueError(
+            f"决策时点 {decision_at.date().isoformat()} 无法从发布重算价格特征"
+            f"(通常发布起点历史不足): {exc}"
+        )
+
     explicit_symbols = manifest.strategy_spec.universe.explicit_symbols
+    symbols_argument: tuple[str, ...] | None = (
+        tuple(explicit_symbols) if explicit_symbols else None
+    )
+    if process_pool is not None and not process_pool.broken:
+        try:
+            pool_snapshot = await build_price_feature_snapshot(
+                provider=provider,
+                decision_at=decision_at,
+                code_version=manifest.code_version,
+                # issue #254:声明 explicit_symbols 时只重算声明域——universe
+                # 过滤域之外的价格特征无消费方,发布全市场重算是纯开销。
+                symbols=symbols_argument,
+                process_workers=process_pool.worker_count,
+                process_executor=process_pool.executor,
+            )
+        except BrokenProcessPool as exc:
+            # 池只是性能优化:损坏对本期与后续期具名降级,不炸 run。
+            process_pool.mark_broken()
+            logger.warning(
+                "research_run.process_pool_degraded",
+                stage="execute",
+                decision_at=decision_at.date().isoformat(),
+                release_id=release_id,
+                error=str(exc),
+                message="常驻特征计算进程池损坏,本期及后续期降级为进程内协程路径重算",
+            )
+        except FactorAnalysisError as exc:
+            raise _data_error(exc) from exc
+        else:
+            return _period_feature_values(pool_snapshot, release_id)
     try:
         snapshot = await build_price_feature_snapshot(
             provider=provider,
             decision_at=decision_at,
             code_version=manifest.code_version,
-            # issue #254:声明 explicit_symbols 时只重算声明域——universe
-            # 过滤域之外的价格特征无消费方,发布全市场重算是纯开销。
-            symbols=tuple(explicit_symbols) if explicit_symbols else None,
+            symbols=symbols_argument,
         )
     except FactorAnalysisError as exc:
-        raise ValueError(
-            f"决策时点 {decision_at.date().isoformat()} 无法从发布重算价格特征"
-            f"(通常发布起点历史不足): {exc}"
-        ) from exc
+        raise _data_error(exc) from exc
+    return _period_feature_values(snapshot, release_id)
+
+
+def _period_feature_values(
+    snapshot: FeatureSnapshot,
+    release_id: str,
+) -> tuple[FeatureValue, ...]:
+    """把价格特征快照观测映射为 ``FeatureValue``(两种执行路径共用,零漂移)。"""
     return tuple(
         FeatureValue(
             symbol=observation.symbol,
@@ -1279,11 +1330,59 @@ class DecisionLoadContext:
     snapshot_id: str | None
 
 
+#: 加载期分块大小(issue #288):分块内的期次并发 gather,分块之间顺序推进,
+#: 结果按原始期序归位。取值权衡:足以让常驻特征进程池(默认 4 worker)与
+#: 线程池并发读持续有活干(每期内部各自还有 8 并发读),又不至于让过多期的
+#: 全市场上下文(候选 / 价格 / 特征快照)同时驻留;4 x 8 = 至多 32 个在途
+#: 读取任务,由默认线程池上限自然钳制,不与 #287 的并发读无界叠加。
+_DECISION_LOAD_CHUNK = 4
+
+
+async def _start_period_feature_pool(
+    provider: FrozenReleaseProvider,
+    process_workers: int,
+) -> PriceFeatureProcessPool | None:
+    """启动本次加载期常驻的价格特征计算进程池(issue #288)。
+
+    池是纯性能优化:构建 / 预热失败(spawn 环境损坏、发布初始化失败等)不把
+    run 打挂 —— 记 ``research_run.process_pool_start_failed`` 具名 warning 后
+    返回 ``None``,本次加载全部期次降级为进程内协程路径(结果逐值一致)。
+    返回非 ``None`` 时调用方负责在加载结束(含异常)后 ``aclose()``。
+    """
+    from finboard_backtest.factor_lab import (
+        PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD,
+        PriceFeatureProcessPool,
+    )
+
+    pool = PriceFeatureProcessPool(provider=provider, worker_count=process_workers)
+    try:
+        await pool.start()
+    except Exception as exc:
+        logger.warning(
+            "research_run.process_pool_start_failed",
+            stage="decision_load",
+            worker_count=process_workers,
+            release_id=provider.release.release_id,
+            error=str(exc),
+            message="常驻特征计算进程池启动失败,本次加载全部期次降级为进程内协程路径",
+        )
+        return None
+    logger.info(
+        "research_run.process_pool_started",
+        stage="decision_load",
+        worker_count=process_workers,
+        release_id=provider.release.release_id,
+        max_tasks_per_child=PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD,
+    )
+    return pool
+
+
 async def build_decision_load_contexts(
     manifest: ResearchRunManifest,
     *,
     release_provider_factory: ReleaseProviderFactory,
     snapshot_provider: FeatureSnapshotProvider,
+    process_workers: int = 0,
 ) -> tuple[DecisionLoadContext, ...]:
     """按执行模式加载全部决策的机械上下文(不含信号,issue #218)。
 
@@ -1291,6 +1390,13 @@ async def build_decision_load_contexts(
     排序去重;multi_period:决策日由 ``parameters.rebalance_frequency``
     按冻结发布交易日历推导,每期重算 price features 并合并冻结快照 PIT
     观测。universe 过滤 / 空池根因 / 降级 warning 语义与信号引擎一致。
+
+    issue #288:逐期加载按 ``_DECISION_LOAD_CHUNK`` 分块 ``gather`` 并行 ——
+    纯读,结果按原始期序归位(contexts 顺序 / 产物 checksum 不变);
+    ``process_workers`` > 0 且 multi_period 时,逐期价格特征经常驻 spawn
+    进程池计算,池构建失败 / 中途损坏均具名降级为进程内协程路径。
+    #263 逐期失败标记:分块内 ``return_exceptions=True`` 收集后按原始期序
+    重抛**第一个**异常(与串行首个失败一致),挂标记后类型 / 消息不变。
     """
     if not manifest.dataset_releases:
         raise ValueError("manifest 必须冻结至少一个数据发布")
@@ -1324,82 +1430,110 @@ async def build_decision_load_contexts(
                 "按发布每日重算,基本面因子仍 PIT 取自冻结快照/研究数据发布)。"
             )
 
-    contexts: list[DecisionLoadContext] = []
-    for decision_at, snapshot_id in decision_days:
-        # issue #263:逐期失败在 bare raise 前挂决策上下文标记 —— 异常类型 /
-        # 消息 / traceback 全不变(空池 / 价格特征等具名文案零破坏),runner
-        # 通用收口经 read_decision_load_context 读回失败期次与 bars 主发布。
-        try:
-            execution_at = await _next_execution_at(provider, decision_at)
-            context = await loader.load_context(
-                manifest, decision_at=decision_at, execution_at=execution_at
-            )
-            if frequency is not None:
-                period_features = await _compute_period_features(
-                    provider, manifest, decision_at, release_ref.artifact_id
-                )
-                features = (*period_features, *context.features)
-            else:
-                features = context.features
-            features_by_source = _features_by_source(features)
-            candidates = _apply_universe_filter(
-                manifest.strategy_spec, provider, context, features_by_source
-            )
-            included = frozenset(item.symbol for item in candidates if item.included)
-            # issue #186:运行时降级 warning —— 元数据/特征缺失时声明该过滤未生效,
-            # 对齐快照链路 `instrument_profiles_unavailable` 的语义(不静默)。
-            _emit_universe_degradation_warnings(
-                manifest.strategy_spec,
+    # issue #288:日历与 close 矩阵(#287 的惰性进程内缓存)在进入分块并行
+    # 前预建 —— 并发首建只会重复读盘且打穿矩阵收益,预建收敛到单一顺序点。
+    # multi_period 的日历在决策推导时已缓存,这里是 single_shot 的兜底预热。
+    await _release_trading_days(provider)
+    await loader.ensure_close_histories(manifest)
+
+    pool: PriceFeatureProcessPool | None = None
+    if frequency is not None and process_workers > 0:
+        pool = await _start_period_feature_pool(provider, process_workers)
+
+    async def _load_one(
+        decision_at: datetime, snapshot_id: str | None
+    ) -> DecisionLoadContext:
+        execution_at = await _next_execution_at(provider, decision_at)
+        context = await loader.load_context(
+            manifest, decision_at=decision_at, execution_at=execution_at
+        )
+        if frequency is not None:
+            period_features = await _compute_period_features(
                 provider,
-                features_by_source,
+                manifest,
                 decision_at,
+                release_ref.artifact_id,
+                process_pool=pool,
             )
-            if not included:
-                # issue #186:执行期空池错误附根因(缺失字段名 + 排除统计),
-                # 不再只有 portfolio_pipeline 的泛化「候选池为空」。
-                raise ValueError(
-                    _empty_pool_error_message(
-                        manifest.strategy_spec,
-                        candidates,
-                        provider.release.instruments,
-                        features_by_source,
-                        decision_at,
-                    )
-                )
-            # 信号标的必须同时具备决策价、成交价、执行元数据与可估计收益的历史。
-            signalable = (
-                included
-                & frozenset(context.prices)
-                & frozenset(context.execution_prices)
-                & frozenset(context.lot_info)
-            )
-            price_series = await _load_price_series(
-                provider, tuple(signalable), decision_at,
-                close_histories=loader.close_histories,
-            )
-            signalable = frozenset(
-                symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
-            )
-            contexts.append(
-                DecisionLoadContext(
-                    context=context,
-                    candidates=candidates,
-                    features=features,
-                    signalable=signalable,
-                    price_series=price_series,
-                    # 协方差估计是纯 CPU 段(numpy 矩阵运算),经 to_thread 卸载
-                    # (issue #286);price_series 为普通数据,线程间无共享可变态。
-                    covariance=await asyncio.to_thread(
-                        _estimate_covariance, price_series
-                    ),
-                    snapshot_id=snapshot_id,
+            features = (*period_features, *context.features)
+        else:
+            features = context.features
+        features_by_source = _features_by_source(features)
+        candidates = _apply_universe_filter(
+            manifest.strategy_spec, provider, context, features_by_source
+        )
+        included = frozenset(item.symbol for item in candidates if item.included)
+        # issue #186:运行时降级 warning —— 元数据/特征缺失时声明该过滤未生效,
+        # 对齐快照链路 `instrument_profiles_unavailable` 的语义(不静默)。
+        _emit_universe_degradation_warnings(
+            manifest.strategy_spec,
+            provider,
+            features_by_source,
+            decision_at,
+        )
+        if not included:
+            # issue #186:执行期空池错误附根因(缺失字段名 + 排除统计),
+            # 不再只有 portfolio_pipeline 的泛化「候选池为空」。
+            raise ValueError(
+                _empty_pool_error_message(
+                    manifest.strategy_spec,
+                    candidates,
+                    provider.release.instruments,
+                    features_by_source,
+                    decision_at,
                 )
             )
-        except Exception as exc:
-            attach_decision_load_context(
-                exc, decision_at=decision_at, release_id=release_ref.artifact_id
+        # 信号标的必须同时具备决策价、成交价、执行元数据与可估计收益的历史。
+        signalable = (
+            included
+            & frozenset(context.prices)
+            & frozenset(context.execution_prices)
+            & frozenset(context.lot_info)
+        )
+        price_series = await _load_price_series(
+            provider, tuple(signalable), decision_at,
+            close_histories=loader.close_histories,
+        )
+        signalable = frozenset(
+            symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
+        )
+        return DecisionLoadContext(
+            context=context,
+            candidates=candidates,
+            features=features,
+            signalable=signalable,
+            price_series=price_series,
+            # 协方差估计是纯 CPU 段(numpy 矩阵运算),经 to_thread 卸载
+            # (issue #286);price_series 为普通数据,线程间无共享可变态。
+            # 分块 gather(issue #288)下各期的卸载调用互不共享状态,安全。
+            covariance=await asyncio.to_thread(_estimate_covariance, price_series),
+            snapshot_id=snapshot_id,
+        )
+
+    contexts: list[DecisionLoadContext] = []
+    try:
+        for chunk_start in range(0, len(decision_days), _DECISION_LOAD_CHUNK):
+            chunk = decision_days[chunk_start : chunk_start + _DECISION_LOAD_CHUNK]
+            results = await asyncio.gather(
+                *(_load_one(decision_at, snapshot_id) for decision_at, snapshot_id in chunk),
+                return_exceptions=True,
             )
-            raise
+            # issue #263:按原始期序收集 —— 第一个失败期(与串行首个失败一致)
+            # 在 bare raise 前挂决策标记;异常类型 / 消息 / traceback 不被改写,
+            # runner 通用收口经 read_decision_load_context 读回失败期次。
+            for ((decision_at, _), result) in zip(chunk, results, strict=True):
+                if isinstance(result, BaseException):
+                    if isinstance(result, Exception):
+                        attach_decision_load_context(
+                            result,
+                            decision_at=decision_at,
+                            release_id=release_ref.artifact_id,
+                        )
+                    raise result
+                contexts.append(result)
+    finally:
+        if pool is not None:
+            await pool.aclose()
     return tuple(contexts)
 
 
@@ -1408,6 +1542,7 @@ async def build_decision_inputs(
     *,
     release_provider_factory: ReleaseProviderFactory,
     snapshot_provider: FeatureSnapshotProvider,
+    process_workers: int = 0,
 ) -> tuple[PortfolioDecisionInput, ...]:
     """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
 
@@ -1419,6 +1554,9 @@ async def build_decision_inputs(
       合并冻结快照 PIT 观测 → 同样的 universe 过滤 / 信号求值;
     * 信号只对「included 且决策 / 成交价格齐备」的标的产出(组合流水线要求
       信号标的必须有价格与执行元数据)。
+
+    ``process_workers``(issue #288)> 0 且 multi_period 时,逐期价格特征
+    经常驻 spawn 进程池计算;结果与进程内路径逐值相等。
     """
     frequency = _rebalance_frequency(manifest)
     # 信号求值(特征图 + 规则)是逐决策的纯 CPU 密集段,经 asyncio.to_thread
@@ -1429,6 +1567,7 @@ async def build_decision_inputs(
         manifest,
         release_provider_factory=release_provider_factory,
         snapshot_provider=snapshot_provider,
+        process_workers=process_workers,
     ):
         signals = await asyncio.to_thread(
             build_normalized_signals,
@@ -1514,6 +1653,7 @@ class SignalEnginePipelineAdapter:
         manifest: ResearchRunManifest,
         release_provider_factory: ReleaseProviderFactory,
         snapshot_provider: FeatureSnapshotProvider,
+        process_workers: int = 0,
     ) -> None:
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
             raise ValueError(
@@ -1524,6 +1664,9 @@ class SignalEnginePipelineAdapter:
         self._manifest = manifest
         self._release_provider_factory = release_provider_factory
         self._snapshot_provider = snapshot_provider
+        # issue #288:multi_period 逐期价格特征使用的常驻进程池 worker 数
+        # (settings ``research_price_feature_process_workers``;0 = 进程内)。
+        self._process_workers = max(0, process_workers)
         self._inputs: tuple[PortfolioDecisionInput, ...] | None = None
         self._equity_curve: tuple[EquityPoint, ...] = ()
         self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
@@ -1552,6 +1695,7 @@ class SignalEnginePipelineAdapter:
                 self._manifest,
                 release_provider_factory=self._release_provider_factory,
                 snapshot_provider=self._snapshot_provider,
+                process_workers=self._process_workers,
             )
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
@@ -1623,6 +1767,34 @@ class SignalEnginePipelineAdapter:
         return report
 
 
+def _resolve_period_feature_process_workers(
+    settings_factory: Callable[[], Any] | None,
+) -> int:
+    """从 settings 解析 research 逐期价格特征进程池 worker 数(issue #288)。
+
+    ``research_price_feature_process_workers``(默认 4,0 = 关闭);settings
+    工厂缺失 / 抛错 / 返回 None 一律按 0(进程内协程路径)处理 —— 该配置
+    只是性能开关,解析失败不能阻断 run 入口。
+    """
+    if settings_factory is None:
+        return 0
+    try:
+        settings = settings_factory()
+    except Exception:
+        logger.warning(
+            "research_run.process_workers_settings_unavailable",
+            message="settings 工厂抛错,逐期价格特征多进程关闭",
+        )
+        return 0
+    if settings is None:
+        return 0
+    try:
+        value = int(getattr(settings, "research_price_feature_process_workers", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
+
+
 def build_signal_engine_adapter_factory(
     session_maker: async_sessionmaker[Any],
     *,
@@ -1634,7 +1806,8 @@ def build_signal_engine_adapter_factory(
     延迟导入 persistence / data 依赖(finboard-backtest 不直接依赖
     finboard-persistence);其余规格继续明确报 not_implemented。
     ``settings_factory`` 供 user_code 沙箱调用方解析镜像/资源限制/代码仓库
-    路径(#218);缺省时 user_code 运行在加载期报 sandbox 未启用。
+    路径(#218)与 multi_period 逐期特征进程池 worker 数(#288);缺省时
+    user_code 运行在加载期报 sandbox 未启用、特征走进程内协程路径。
     """
 
     def _factory(manifest: ResearchRunManifest) -> ResearchStrategyAdapter:
@@ -1709,6 +1882,7 @@ def build_signal_engine_adapter_factory(
             manifest=manifest,
             release_provider_factory=_release_factory,
             snapshot_provider=_snapshot_provider,  # type: ignore[arg-type]
+            process_workers=_resolve_period_feature_process_workers(settings_factory),
         )
 
     return _factory

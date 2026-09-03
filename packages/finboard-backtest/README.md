@@ -187,6 +187,14 @@ issue #56 起,多标的回测的默认基准**不再只取请求中的第一个�
 都不能进入持仓。详见
 [`docs/research_run_lifecycle.md`](../../docs/research_run_lifecycle.md)。
 
+multi_period 回放的计算并行化(issue #288):逐期价格特征可经 settings
+`FINBOARD_RESEARCH_PRICE_FEATURE_PROCESS_WORKERS`(默认 4,0 = 进程内协程池
+旧行为)在常驻 spawn 进程池执行(一次加载期内建池/预热一次,跨期复用,
+`max_tasks_per_child=128` 定期重启 worker 摊销 Windows spawn 开销);逐期加载
+按块(常量 4)`gather` 并行,结果按原始期序归位。两者均为纯性能优化:
+池启动失败 / 中途损坏具名降级为进程内路径,contexts 顺序、产物 checksum、
+确定性重放、#263 失败标记与 #188 进度计数不变。
+
 ## 策略层 Bar 规则选股 (`bar_universe`)
 
 `BarUniverseSelector` 是不依赖因子系统的研究级选股器,只消费策略已经收到的

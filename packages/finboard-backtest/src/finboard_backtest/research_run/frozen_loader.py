@@ -239,6 +239,35 @@ class FrozenInputLoader:
             research_release_missing_symbols=research_missing,
         )
 
+    async def ensure_close_histories(self, manifest: ResearchRunManifest) -> None:
+        """一次性预建 close 矩阵(幂等;issue #288 分块并行加载的前置步骤)。
+
+        矩阵是 loader 实例上的惰性进程内缓存(#287):``build_decision_load_
+        contexts`` 改分块并行后,若仍由首个 ``load_context`` 惰性首建,同分块的
+        其它期会看到「已开建但未完成」的空矩阵而全部回退逐期读取(结果仍等值,
+        但矩阵收益清零且重复读盘)。加载前显式调用本方法把首建收敛到单一顺序
+        点。非真实 provider(矩阵不启用)与已建情形零成本返回。
+        """
+        if self._close_histories_built:
+            return
+        release_ref = self._bars_release_ref(manifest)
+        provider = self.release_provider_factory(release_ref.artifact_id)
+        included_candidates, _ = _build_candidates_and_lots(
+            list(provider.release.instruments)
+        )
+        await self._ensure_close_histories(provider, included_candidates)
+
+    async def _ensure_close_histories(
+        self,
+        provider: FrozenReleaseProvider,
+        candidates: Sequence[UniverseCandidate],
+    ) -> None:
+        """构建 close 矩阵(只尝试一次;失败不缓存,逐期回退读取)。"""
+        if self._close_histories_built:
+            return
+        self._close_histories_built = True
+        self._close_histories.update(await _load_close_histories(provider, candidates))
+
     async def _load_close_prices(
         self,
         provider: FrozenReleaseProvider,
@@ -250,11 +279,7 @@ class FrozenInputLoader:
         close 矩阵可用时直接前缀切片(与逐期 PIT 过滤读取逐值等价,不再读盘);
         矩阵未覆盖 / 不可切片的标的回退 :func:`_load_close_prices` 逐期读取。
         """
-        if not self._close_histories_built:
-            self._close_histories_built = True
-            self._close_histories.update(
-                await _load_close_histories(provider, candidates)
-            )
+        await self._ensure_close_histories(provider, candidates)
         prices: dict[str, float] = {}
         fallback: list[UniverseCandidate] = []
         for candidate in candidates:
