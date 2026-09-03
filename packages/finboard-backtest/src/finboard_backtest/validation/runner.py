@@ -60,6 +60,7 @@ from finboard_backtest.validation.contracts import (
     TrialStatus,
     WindowMetrics,
     WindowRole,
+    append_note,
     increment_trials_used,
     mark_final_test_unsealed,
     transition_status,
@@ -637,6 +638,13 @@ class ValidationRunner:
         必须在 ``run_walk_forward`` 之后调用,且只能调用一次。返回 ``ExperimentVerdict``:
         * ``VALIDATED_OOS`` —— 揭盲后通过最终门;
         * ``REJECTED`` —— 揭盲后未通过门(已经"使用"了揭盲,无法重来)。
+
+        issue #310:best trial 的 OOS 门被拒**不阻止揭盲**(#245 决策 A 下
+        流程如此是设计使然,不硬阻断、不改状态机与一次性语义),但揭盲前打
+        具名 WARNING ``validation.unseal_with_rejected_trials`` 并把警示写入
+        ``experiment.notes``,明示 final test 揭盲机会消耗在被拒配置上——
+        ``validated_oos`` 只代表 OOS 流程完成,不代表假设获支持(结论语义
+        见 :func:`derive_oos_outcome`)。
         """
         if self.best_trial_id is None:
             return ExperimentVerdict(
@@ -645,10 +653,19 @@ class ValidationRunner:
                 reason="no best trial selected before unseal",
             )
 
-        async with self._state_lock:
-            self.experiment = mark_final_test_unsealed(self.experiment)
-
         best = next(t for t in self.trials if t.trial_id == self.best_trial_id)
+        oos_rejected = best.status is TrialStatus.REJECTED
+        async with self._state_lock:
+            experiment = mark_final_test_unsealed(self.experiment)
+            if oos_rejected:
+                experiment = append_note(experiment, _unseal_rejected_note(best))
+                logger.warning(
+                    "validation.unseal_with_rejected_trials",
+                    experiment_id=experiment.experiment_id,
+                    best_trial_id=best.trial_id,
+                    oos_failure_reason=best.failure_reason,
+                )
+            self.experiment = experiment
         plan = self.experiment.plan
 
         try:
@@ -750,6 +767,22 @@ class ValidationRunner:
 # ---------------------------------------------------------------------------
 # OOS 指标聚合
 # ---------------------------------------------------------------------------
+
+_UNSEAL_REJECTED_NOTE_PREFIX = "unseal_with_rejected_trials"
+
+
+def _unseal_rejected_note(best: TrialRecord) -> str:
+    """best trial OOS 被拒仍揭盲时的实验备注文案(issue #310)。
+
+    与 structlog ``validation.unseal_with_rejected_trials`` 同名前缀,随
+    ``experiment.notes`` 持久化,明示 final test 揭盲机会消耗在被拒配置上。
+    """
+    reason = best.failure_reason or "oos gate rejected"
+    return (
+        f"{_UNSEAL_REJECTED_NOTE_PREFIX}: best trial {best.trial_id} 的 OOS 门"
+        f"未通过({reason});final test 揭盲机会消耗在被拒配置上——"
+        "validated_oos 只代表 OOS 流程完成,不代表假设获支持(issue #310)"
+    )
 
 
 def _aggregate_oos_metrics(windows: Sequence[WindowResult]) -> WindowMetrics:

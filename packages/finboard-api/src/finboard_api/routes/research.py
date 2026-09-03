@@ -59,6 +59,7 @@ from finboard_backtest.validation.contracts import (
     ValidationMode,
     ValidationPlan,
     VersionStamp,
+    derive_oos_outcome,
     new_experiment,
     transition_status,
 )
@@ -312,10 +313,21 @@ async def list_experiments(
     limit: int = Query(default=100, ge=1, le=500),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[ExperimentOut]:
-    """列出实验(可选按状态过滤)。"""
+    """列出实验(可选按状态过滤),附派生 oos_outcome(#310)。"""
     repo = ExpRepo(session)
     exps = await repo.list_by_status(status, limit=limit)
-    return [ExperimentOut(**e.as_dict()) for e in exps]  # type: ignore[arg-type]
+    trials_map = await TrialRepo(session).map_by_experiment(
+        [e.experiment_id for e in exps]
+    )
+    return [
+        ExperimentOut(
+            **e.as_dict(),  # type: ignore[arg-type]
+            oos_outcome=derive_oos_outcome(
+                e, trials_map.get(e.experiment_id, [])
+            ).value,
+        )
+        for e in exps
+    ]
 
 
 @router.get("/experiments/{experiment_id}", response_model=ExperimentDetailOut)
@@ -323,7 +335,7 @@ async def get_experiment(
     experiment_id: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> ExperimentDetailOut:
-    """读取实验详情 + 全部 trial(包括 FAILED / REJECTED)。"""
+    """读取实验详情 + 全部 trial(包括 FAILED / REJECTED),附派生 oos_outcome。"""
     exp_repo = ExpRepo(session)
     trial_repo = TrialRepo(session)
     exp = await exp_repo.get(experiment_id)
@@ -332,6 +344,8 @@ async def get_experiment(
     trials = await trial_repo.list_by_experiment(experiment_id)
     return ExperimentDetailOut(
         **exp.as_dict(),  # type: ignore[arg-type]
+        # issue #310:validated_oos 只代表 OOS 流程完成,不代表假设获支持。
+        oos_outcome=derive_oos_outcome(exp, trials).value,
         trials=[TrialOut(**t.as_dict()) for t in trials],  # type: ignore[arg-type]
     )
 

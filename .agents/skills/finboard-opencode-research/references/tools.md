@@ -532,6 +532,17 @@ ValidationRunner(IS → walk-forward → 一次性揭盲),`finboard_job_get`
 轮询(result_ref=experiment_id;validated_oos → succeeded,rejected → failed
 附阈值原因)。写操作尊重 `mcp_readonly_only` 开关。
 
+**结论语义(#310)**:list/get 返回派生 `oos_outcome`
+(supported|not_supported|inconclusive)—— `validated_oos` 只代表 **OOS
+流程完成**,不代表**假设获支持**:#245 决策 A(screen 门取 abs(rank_ic))下
+best trial OOS 被拒不阻止揭盲,此时 status=validated_oos 而
+oos_outcome=not_supported;全 trial OOS 被拒仍揭盲时打具名 WARNING
+`unseal_with_rejected_trials` 并写入实验 notes(明示 final test 揭盲机会
+消耗在被拒配置上),不硬阻断、状态机与揭盲一次性语义零变化。解读规则:
+supported=best trial OOS 门过且揭盲达标;not_supported=best trial OOS 被
+拒或揭盲未达标;inconclusive=无 trial / OOS 无可判定证据 / 流程未走完。
+晋级证据 `gates.validation.oos_outcome` 同步携带该字段。
+
 ### finboard_validation_experiment_create **[写]**
 创建 #57 机器验证实验 —— 假设 / 计划 / 门一次性冻结(创建后 hypothesis
 不可修改,变更需新建实验并设 `supersedes_id`)。
@@ -563,14 +574,16 @@ ValidationRunner(IS → walk-forward → 一次性揭盲),`finboard_job_get`
 - 参数:`status?: str`(hypothesis|in_sample|validated_oos|rejected|superseded)、
   `limit?: int = 100`
 - 返回:`list[{experiment_id, hypothesis, version_checksum, plan, thresholds,
-  robustness, status, trials_used, final_test_unsealed, ...}]`
+  robustness, status, trials_used, final_test_unsealed, oos_outcome(#310),
+  ...}]`
 - 错误:`invalid_argument`(非法状态)
 
 ### finboard_validation_experiment_get
 查询单个 #57 验证实验详情 + **全部 trial(包括 FAILED / REJECTED —— 多重试验
 修正需要真实试验总数)**。
 - 参数:`experiment_id: str`
-- 返回:`{experiment_id, ..., trials: [{trial_id, trial_index, parameters,
+- 返回:`{experiment_id, ..., oos_outcome(#310: 派生结论语义,validated_oos
+  也可能是 not_supported), trials: [{trial_id, trial_index, parameters,
   status, failure_reason, ...}]}`;未找到返回 `not_found`。
 
 ### finboard_validation_experiment_reject **[写]**
@@ -1456,6 +1469,9 @@ artifact/name/kind/commit。
   通过后当前同名 active 自动 retired,并返回 `promotion_status=passed`。
 - 晋级 evidence 固定四向引用:code commit、dataset release/checksum、
   参数/checksum、output checksum,并保留沙箱镜像/日志/资源归档位置。
+  `gates.validation.oos_outcome`(#310)携带派生 OOS 结论:`validated_oos`
+  只是晋级门,OOS 流程完成 ≠ 假设获支持——best trial OOS 被拒不改变门判定
+  (#245 决策 A),但 `not_supported` 结论在证据中可见,采用前应自行评估。
 - 错误:`invalid_argument`(证据缺失/门失败)、`not_found`(artifact 或实验
   不存在)、`conflict`(非 draft)、`denied`(只读模式)
 

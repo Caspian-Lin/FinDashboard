@@ -326,6 +326,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   未声明执行期报 trial_runner_unconfigured,配置不合法在首个 trial 前
   报 trial_runner_invalid_config;执行意外中断报 experiment_execution_failed
   (状态保留,可修复后重新入队断点续跑)。
+  **结论语义区分(#310)**:list/get 返回派生 `oos_outcome`(supported|
+  not_supported|inconclusive,由 trial OOS 门状态 + 揭盲指标推导,不落库)
+  —— **`validated_oos` 只代表 OOS 流程完成,不代表假设获支持**:#245 决策 A
+  下 best trial OOS 被拒不阻止揭盲,此时 status=validated_oos 而
+  oos_outcome=not_supported;全 trial OOS 被拒仍揭盲时打具名 WARNING
+  `unseal_with_rejected_trials` 并写入实验 notes(明示 final test 揭盲机会
+  消耗在被拒配置上),不硬阻断、状态机与一次性语义零变化。晋级证据
+  gates.validation 同步携带 oos_outcome。
   与因子实验(登记簿)是两套独立但耦合的系统。
 - 自选股(7,✅ #140):watchlist list/get(只读)、create/update/delete/
   add_symbols/remove_symbol(写,受 mcp_readonly_only 守卫)。标的组管理:
