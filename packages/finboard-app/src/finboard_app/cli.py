@@ -783,6 +783,15 @@ def _supervise_worker_processes(
     """
 
     procs: list[subprocess.Popen[bytes]] = []
+    if sys.platform != "win32":
+        # SIGTERM(systemd / docker stop 的默认信号)走与 Ctrl-C 相同的优雅
+        # 收敛路径。没有本处理器时 supervisor 被即刻杀死,子 worker(各自
+        # 独立会话)成为孤儿、继续消费队列(issue #316 实测)。
+        def _sigterm_to_interrupt(signum: int, frame: object) -> None:
+            del signum, frame
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGTERM, _sigterm_to_interrupt)
     for _ in range(workers):
         if sys.platform == "win32":
             procs.append(

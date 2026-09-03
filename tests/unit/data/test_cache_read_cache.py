@@ -11,13 +11,36 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
+import finboard_data.cache as finboard_cache_module
 from finboard_data.cache import ParquetCache
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
 
 _SYMBOL = Symbol(code="510300.SH", market=Market.A_SHARE)
+
+
+@pytest.fixture(autouse=True)
+def _unfiltered_structlog():
+    """隔离 ``setup_logging`` 对 structlog 的全局污染,保 debug 断言确定性。
+
+    CI 从仓库根跑全量(集成测试按字母序先于 unit),任何先行的测试调用
+    ``setup_logging``(INFO 级 ``make_filtering_bound_logger`` +
+    ``cache_logger_on_first_use=True``)后,debug 事件在 wrapper 层即被丢弃,
+    ``capture_logs`` 永远抓空。本文件断言的恰是 debug 日志内容(issue #287
+    AC「debug 日志带 cache_hit 字段」),故测试期重置为无级别过滤 + 不缓存
+    并重建模块 logger(旧 proxy 可能已缓存被过滤的 wrapper),结束恢复原配置。
+    """
+    saved_config = structlog.get_config()
+    saved_logger = finboard_cache_module.logger
+    structlog.reset_defaults()
+    structlog.configure(cache_logger_on_first_use=False)
+    finboard_cache_module.logger = structlog.get_logger("finboard_data.cache")
+    yield
+    finboard_cache_module.logger = saved_logger
+    structlog.configure(**saved_config)
 
 
 def _bars(count: int, *, source: str = "fixed_sample") -> list[Bar]:
