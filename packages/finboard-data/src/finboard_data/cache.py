@@ -341,6 +341,13 @@ class ParquetCache:
         started = time.monotonic()
         entry = self._read_cache_get(key)
         if entry is not None and entry.bars is not None:
+            # 命中同样计入 job 级读取聚合(issue #285 语义:入口处计数,
+            # 命中耗时 ~0 如实反映缓存收益);io_stats 的磁盘 I/O 口径不计命中。
+            _record_job_read(
+                "read",
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                size_bytes=stat.st_size,
+            )
             logger.debug(
                 "parquet_cache.read",
                 path=str(path),
@@ -405,6 +412,13 @@ class ParquetCache:
                 if (start is None or item[0].date() >= start)
                 and (end is None or item[0].date() <= end)
             ]
+            # 命中同样计入 job 级读取聚合(issue #285 语义:入口处计数,
+            # 命中耗时 ~0 如实反映缓存收益);io_stats 的磁盘 I/O 口径不计命中。
+            _record_job_read(
+                "read_close_points",
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                size_bytes=stat.st_size,
+            )
             logger.debug(
                 "parquet_cache.read_close_points",
                 path=str(path),
