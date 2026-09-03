@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     # worker_id),把 GIL 边界从 1 核扩到 N 核。kind_concurrency 由 claim_next
     # 的 SQL 层约束跨进程生效。回滚 = --workers 1(默认)+ revert。
     worker_processes: int = Field(default=1, ge=1, le=64)
+    # 僵尸无进展检测阈值(issue #306):heartbeat 正常续租但 progress_done/phase
+    # 持续无变化超过该秒数 → job 具名失败 zombie_no_progress 并转 retry_waiting
+    # 自动重试。默认 3600s(1 小时)刻意宽松 —— 研究加载期分块探针、数据摄取
+    # 逐 symbol 进度、回测引擎至少每小时推进一次;RR-7a74 类「心跳续租型僵尸」
+    # 7.5h 才被人肉发现,1h 阈值已能兜底且远离健康长任务的误杀线。0 = 关闭。
+    worker_zombie_no_progress_seconds: float = Field(default=3600.0, ge=0)
 
     # ---- Broker ----
     broker: BrokerKind = BrokerKind.MOCK

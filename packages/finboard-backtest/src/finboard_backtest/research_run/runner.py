@@ -100,6 +100,15 @@ DECISION_STAGE_COUNT = len(_DECISION_STAGES)
 #: ``ProgressCallback`` 结构同构;None 表示不对外上报(内存 / 直连 REST 调用)。
 ProgressHook = Callable[[int, int | None, str | None], Awaitable[None]]
 
+#: run 属主探针(issue #306):给定 run 关联的 background_jobs.job_id,返回该
+#: 任务是否仍被活跃 worker 持有(status=running/cancel_requested 且 lease /
+#: heartbeat 新鲜)。True = 活跃属主在场,启动恢复必须跳过误标;False = 真孤儿
+#: (job 已终态 / lease 过期 / 行不存在),照旧标 interrupted。None(默认不
+#: 注入)保持旧行为:全部 RUNNING run 标 interrupted(仅供纯内存测试使用;
+#: 生产 worker 启动路径必须注入,否则多进程下新 worker 启动会误标兄弟进程
+#: 正在活跃执行的 run)。
+JobOwnershipProbe = Callable[[str], Awaitable[bool]]
+
 
 @dataclass(slots=True)
 class _DecisionTiming:
@@ -388,10 +397,48 @@ class ResearchRunCoordinator:
         await self._store.checkpoint()
         return cancelled
 
-    async def mark_stale_running_as_interrupted(self) -> list[ResearchRunRecord]:
+    async def mark_stale_running_as_interrupted(
+        self, *, job_ownership: JobOwnershipProbe | None = None
+    ) -> list[ResearchRunRecord]:
+        """把残留 RUNNING run 收敛为 INTERRUPTED(进程重启恢复,issue #143)。
+
+        issue #306:注入 ``job_ownership`` 探针时先做属主检查 —— 经
+        ``run.job_id`` join background_jobs,job 仍 running/cancel_requested 且
+        lease/heartbeat 活跃的 run 视为「兄弟 worker 正在活跃执行」,跳过并打
+        具名 WARNING(``research_run.stale_skip_owned_job``),多 worker
+        (issue #286)并发启动互不误伤;job 不存在 / 已终态 / lease 过期才是
+        真孤儿,照旧标 interrupted(#305 的 replay 恢复通道保持不变)。
+        """
+
         stale = await self._store.list_by_status({ResearchRunStatus.RUNNING})
         recovered: list[ResearchRunRecord] = []
         for record in stale:
+            job_id = record.job_id
+            if job_ownership is not None and job_id is not None:
+                try:
+                    owned = await job_ownership(job_id)
+                except Exception:
+                    # 探针故障(瞬时连接问题等)按孤儿处理会误标活跃 run ——
+                    # fail-closed:跳过本轮,等下一次恢复窗口再收敛。
+                    logger.warning(
+                        "research_run.stale_ownership_probe_failed",
+                        run_id=record.manifest.run_id,
+                        job_id=job_id,
+                        message="属主探针抛错,本轮跳过该 run 的误标收敛",
+                        exc_info=True,
+                    )
+                    continue
+                if owned:
+                    logger.warning(
+                        "research_run.stale_skip_owned_job",
+                        run_id=record.manifest.run_id,
+                        job_id=job_id,
+                        message=(
+                            "run 处于 RUNNING 但其后台任务仍被活跃 worker 持有"
+                            "(lease/heartbeat 新鲜),跳过误标"
+                        ),
+                    )
+                    continue
             recovered.append(
                 await self._transition(
                     record.manifest.run_id,

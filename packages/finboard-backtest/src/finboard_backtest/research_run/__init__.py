@@ -58,6 +58,7 @@ from finboard_backtest.research_run.contracts import (
 )
 from finboard_backtest.research_run.runner import (
     DECISION_STAGE_COUNT,
+    JobOwnershipProbe,
     ProgressHook,
     ResearchRunCoordinator,
 )
@@ -83,6 +84,7 @@ __all__ = [
     "FeatureValue",
     "FrozenArtifactRef",
     "InMemoryResearchRunStore",
+    "JobOwnershipProbe",
     "LedgerSnapshot",
     "NormalizedSignal",
     "ProgressHook",

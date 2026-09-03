@@ -26,11 +26,12 @@ cross_* 规则比较两个节点的完整序列。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import os
 import weakref
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -61,6 +62,7 @@ from finboard_backtest.research_run.contracts import (
     FrozenArtifactRef,
     NormalizedSignal,
     ResearchExecutionMode,
+    ResearchRunInterruptedError,
     ResearchRunManifest,
     ResearchRunReport,
     UniverseCandidate,
@@ -1338,6 +1340,75 @@ class DecisionLoadContext:
 _DECISION_LOAD_CHUNK = 4
 
 
+#: 加载期分块探针(issue #306):(done, total) → None,在每个分块完成点调用。
+#: 实现方(:func:`build_run_interrupt_probe`,构造于 adapter 工厂、持有 DB
+#: 会话)承担两件事:(1) 轮询 run status 与 job cancel_requested,发现外部
+#: 打断即抛 :class:`ResearchRunInterruptedError`(coordinator 走既有
+#: INTERRUPTED → job retry_waiting 自动重试路径);(2) 尽力而为把加载进度
+#: 上报到 background_jobs(phase=``research_run:decision_load``),让 worker
+#: 维护路径的「无进展检测」在加载期也有进展可判,正常长加载不被误杀。
+LoadChunkProbe = Callable[[int, int], Awaitable[None]]
+
+
+def build_run_interrupt_probe(
+    session_maker: async_sessionmaker[Any],
+    run_id: str,
+) -> LoadChunkProbe:
+    """构造加载期分块探针(issue #306):run status / cancel 轮询 + 进度上报。
+
+    僵尸场景(RR-7a74):run 行被外部标 interrupted 后,加载期毫无感知、
+    心跳照常续租,job 永不回收。本探针在每个分块边界做毫秒级一次的只读
+    轮询:run 非 RUNNING(被打断/取消)或 job 被 request_cancel 即抛
+    :class:`ResearchRunInterruptedError`。存活时尽力把 ``(done, total)``
+    写入 background_jobs 的进度字段(单条 UPDATE,失败静默 —— 可观测性
+    不阻断执行)。DB 会话按次开关,不跨块持有。
+    """
+
+    async def _probe(done: int, total: int) -> None:
+        from finboard_persistence import (
+            BackgroundJobRepository,
+            ResearchRunRepository,
+        )
+
+        async with session_maker() as session:
+            row = await ResearchRunRepository(session).get(run_id)
+            if row is None:
+                raise ResearchRunInterruptedError(f"运行记录在加载期消失: {run_id}")
+            if row.status == "cancelled":
+                raise ResearchRunInterruptedError(
+                    f"运行已被取消(cancelled),中止加载: {run_id}"
+                )
+            if row.status != "running":
+                raise ResearchRunInterruptedError(
+                    f"运行状态已变为 {row.status}(外部打断),中止加载: {run_id}"
+                )
+            job_id = row.job_id
+            job_status: str | None = None
+            if job_id is not None:
+                job_row = await BackgroundJobRepository(session).get(job_id)
+                job_status = None if job_row is None else job_row.status
+        if job_status == "cancel_requested":
+            raise ResearchRunInterruptedError(
+                f"后台任务被请求取消(cancel_requested),中止加载: {run_id}"
+            )
+        if job_id is None:
+            return
+        # 加载进度上报(尽力而为):#188 进度语义之外的加载段补充,失败
+        # 不影响执行;僵尸无进展检测(#306)由此在加载期获得判定依据。
+        with contextlib.suppress(Exception):
+            async with session_maker() as session:
+                repo = BackgroundJobRepository(session)
+                await repo.update_progress(
+                    job_id,
+                    done=done,
+                    total=total,
+                    phase="research_run:decision_load",
+                )
+                await repo.checkpoint()
+
+    return _probe
+
+
 async def _start_period_feature_pool(
     provider: FrozenReleaseProvider,
     process_workers: int,
@@ -1383,6 +1454,7 @@ async def build_decision_load_contexts(
     release_provider_factory: ReleaseProviderFactory,
     snapshot_provider: FeatureSnapshotProvider,
     process_workers: int = 0,
+    chunk_probe: LoadChunkProbe | None = None,
 ) -> tuple[DecisionLoadContext, ...]:
     """按执行模式加载全部决策的机械上下文(不含信号,issue #218)。
 
@@ -1397,6 +1469,12 @@ async def build_decision_load_contexts(
     进程池计算,池构建失败 / 中途损坏均具名降级为进程内协程路径。
     #263 逐期失败标记:分块内 ``return_exceptions=True`` 收集后按原始期序
     重抛**第一个**异常(与串行首个失败一致),挂标记后类型 / 消息不变。
+
+    issue #306:``chunk_probe``(可选)在每个分块边界(块内异常处理之后、
+    下一块 gather 之前)调用 —— 轮询 run status / job cancel_requested,
+    外部打断抛 ``ResearchRunInterruptedError`` 并尽力上报加载进度。打断是
+    协作取消信号而非数据失败,不经 #263 的 ``attach_decision_load_context``
+    标记路径。
     """
     if not manifest.dataset_releases:
         raise ValueError("manifest 必须冻结至少一个数据发布")
@@ -1513,6 +1591,11 @@ async def build_decision_load_contexts(
     contexts: list[DecisionLoadContext] = []
     try:
         for chunk_start in range(0, len(decision_days), _DECISION_LOAD_CHUNK):
+            # issue #306:分块边界探针 —— 打断(外部 interrupted / cancel_requested)
+            # 在进入下一块前秒级感知;加载进度(已完成期数)尽力上报。探针
+            # 自身抛错原样透传,不经 #263 数据失败标记路径。
+            if chunk_probe is not None:
+                await chunk_probe(len(contexts), len(decision_days))
             chunk = decision_days[chunk_start : chunk_start + _DECISION_LOAD_CHUNK]
             results = await asyncio.gather(
                 *(_load_one(decision_at, snapshot_id) for decision_at, snapshot_id in chunk),
@@ -1543,6 +1626,7 @@ async def build_decision_inputs(
     release_provider_factory: ReleaseProviderFactory,
     snapshot_provider: FeatureSnapshotProvider,
     process_workers: int = 0,
+    chunk_probe: LoadChunkProbe | None = None,
 ) -> tuple[PortfolioDecisionInput, ...]:
     """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
 
@@ -1568,6 +1652,7 @@ async def build_decision_inputs(
         release_provider_factory=release_provider_factory,
         snapshot_provider=snapshot_provider,
         process_workers=process_workers,
+        chunk_probe=chunk_probe,
     ):
         signals = await asyncio.to_thread(
             build_normalized_signals,
@@ -1654,6 +1739,7 @@ class SignalEnginePipelineAdapter:
         release_provider_factory: ReleaseProviderFactory,
         snapshot_provider: FeatureSnapshotProvider,
         process_workers: int = 0,
+        chunk_probe: LoadChunkProbe | None = None,
     ) -> None:
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
             raise ValueError(
@@ -1667,6 +1753,8 @@ class SignalEnginePipelineAdapter:
         # issue #288:multi_period 逐期价格特征使用的常驻进程池 worker 数
         # (settings ``research_price_feature_process_workers``;0 = 进程内)。
         self._process_workers = max(0, process_workers)
+        # issue #306:加载期分块探针(run status / cancel 轮询 + 进度上报)。
+        self._chunk_probe = chunk_probe
         self._inputs: tuple[PortfolioDecisionInput, ...] | None = None
         self._equity_curve: tuple[EquityPoint, ...] = ()
         self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
@@ -1696,6 +1784,7 @@ class SignalEnginePipelineAdapter:
                 release_provider_factory=self._release_provider_factory,
                 snapshot_provider=self._snapshot_provider,
                 process_workers=self._process_workers,
+                chunk_probe=self._chunk_probe,
             )
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
@@ -1854,6 +1943,12 @@ def build_signal_engine_adapter_factory(
             async with session_maker() as session:
                 return await FeatureSnapshotRepository(session).get(snapshot_id)
 
+        # issue #306:加载期分块探针 —— run status / job cancel_requested 轮询 +
+        # 加载进度上报。打断路径(run 被外部标 interrupted 等)在此秒级感知,
+        # 不再出现「run 已 interrupted、job 靠心跳续租僵死 7.5 小时」的僵尸。
+        # 按 manifest.run_id 在工厂闭包内构造,与 provider memo 同生命周期。
+        chunk_probe = build_run_interrupt_probe(session_maker, manifest.run_id)
+
         if manifest.strategy_kind == "user_code":
             from finboard_backtest.research_run.user_code_engine import (
                 UserCodeStrategyAdapter,
@@ -1864,6 +1959,7 @@ def build_signal_engine_adapter_factory(
                 release_provider_factory=_release_factory,
                 snapshot_provider=_snapshot_provider,  # type: ignore[arg-type]
                 settings_factory=settings_factory,
+                chunk_probe=chunk_probe,
             )
 
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
@@ -1883,6 +1979,7 @@ def build_signal_engine_adapter_factory(
             release_provider_factory=_release_factory,
             snapshot_provider=_snapshot_provider,  # type: ignore[arg-type]
             process_workers=_resolve_period_feature_process_workers(settings_factory),
+            chunk_probe=chunk_probe,
         )
 
     return _factory
@@ -1891,11 +1988,13 @@ def build_signal_engine_adapter_factory(
 __all__ = [
     "SIGNAL_ENGINE_STRATEGY_KINDS",
     "DecisionLoadContext",
+    "LoadChunkProbe",
     "SignalEnginePipelineAdapter",
     "build_daily_equity_curve",
     "build_decision_inputs",
     "build_decision_load_contexts",
     "build_normalized_signals",
+    "build_run_interrupt_probe",
     "build_signal_engine_adapter_factory",
     "evaluate_feature_graph",
     "evaluate_signal_rules",
