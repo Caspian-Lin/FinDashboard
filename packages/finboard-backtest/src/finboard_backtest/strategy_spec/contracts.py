@@ -423,6 +423,9 @@ class AllocationMethod(StrEnum):
     INVERSE_VOLATILITY = "inverse_volatility"
     EQUAL_RISK_CONTRIBUTION = "equal_risk_contribution"
     VOLATILITY_SCALED = "volatility_scaled"
+    # issue #266:最大 IR(切点)组合,依赖协方差(LW 估计)可用;
+    # 仅新增枚举成员,旧规格未声明该值,序列化/checksum 零漂移。
+    MAX_IR = "max_ir"
 
 
 class ConstraintName(StrEnum):

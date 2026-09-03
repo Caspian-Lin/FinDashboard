@@ -20,6 +20,7 @@ from finboard_backtest.portfolio import (
     CovarianceFailureMode,
     PortfolioBuildInput,
     PortfolioConstraints,
+    RiskFactorLimit,
     Signal,
     SignalConflictPolicy,
     build_portfolio,
@@ -40,9 +41,16 @@ class SignalIn(BaseModel):
     confidence: float = 1.0
 
 
+class RiskFactorLimitIn(BaseModel):
+    """单风险因子 active 暴露上限(issue #266)。"""
+
+    factor: str = Field(min_length=1, description="因子名,与冻结特征 feature_id 同名")
+    max_active_exposure: float = Field(gt=0, description="|Σ(w-baseline)·f| 的硬上限")
+
+
 class AllocateRequest(BaseModel):
     signals: list[SignalIn]
-    method: Literal["equal_weight", "inverse_volatility", "erc"] = "equal_weight"
+    method: Literal["equal_weight", "inverse_volatility", "erc", "max_ir"] = "equal_weight"
     as_of: date
     strategy_id: str = "api"
     max_weight_per_asset: float = 0.25
@@ -69,6 +77,10 @@ class AllocateRequest(BaseModel):
     )
     conflict_policy: Literal["net", "neutralize"] = "net"
     covariance_failure_mode: Literal["fail_closed", "fallback_equal_weight"] = "fail_closed"
+    # issue #266:风险因子中性化(暴露观测缺失的因子降级为具名 warning 审计行)
+    risk_factor_limits: list[RiskFactorLimitIn] = Field(default_factory=list)
+    factor_exposures: dict[str, dict[str, float]] = Field(default_factory=dict)
+    neutralization_baseline: dict[str, float] = Field(default_factory=dict)
 
 
 class WeightOut(BaseModel):
@@ -144,6 +156,13 @@ async def allocate_portfolio(request: AllocateRequest) -> AllocateResponse:
             covariance_failure_mode=CovarianceFailureMode(
                 request.covariance_failure_mode
             ),
+            risk_factor_limits=tuple(
+                RiskFactorLimit(
+                    factor=item.factor,
+                    max_active_exposure=item.max_active_exposure,
+                )
+                for item in request.risk_factor_limits
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -173,6 +192,8 @@ async def allocate_portfolio(request: AllocateRequest) -> AllocateResponse:
                 betas=request.betas,
                 max_drawdown=request.max_drawdown,
                 conflict_policy=SignalConflictPolicy(request.conflict_policy),
+                factor_exposures=request.factor_exposures,
+                neutralization_baseline=request.neutralization_baseline,
             )
         )
     except (AllocationError, ValueError) as exc:

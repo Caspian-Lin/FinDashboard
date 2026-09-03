@@ -222,9 +222,15 @@ FinBoard 研究 MCP —— 量化研究工具集
   (只读)。
   完整生命周期:创建账户+会话 → start → 投 K 线撮合 → 提交决策 → stop →
   evaluate(eligible/failed)→ archive。
-- portfolio(4,✅ #128):portfolio_allocate(目标权重分配,纯计算)、
+- portfolio(4,✅ #128+#266):portfolio_allocate(目标权重分配,纯计算;
+  method=max_ir 最大 IR 切点组合,#266)、
   portfolio_sizing(离散手数 + 费用/保证金)、portfolio_feasibility(10万/20万/50万
   档位可行性)、portfolio_attribution(绩效归因分解,纯计算,无 DB 写入)。
+  风险因子中性化(#266):portfolio_allocate 的 risk_factor_limits +
+  factor_exposures 声明风险因子 active 暴露硬上限 —— 只减仓投影、逐项审计,
+  暴露缺失降级为具名 warning 审计行(risk_factor_neutralization_skipped),
+  不可满足 fail_closed 拒绝;research_run 侧经 portfolio_config.overrides
+  声明同一约束(risk_factor_limits,因子名与冻结 feature_id 同名)。
 - finboard.job.*(6,✅ #136+#221)—— 统一后台任务队列监控与提交:
   job list/get(只读)、job enqueue/cancel/archive/unarchive(写)。
   复用 background_jobs 表,enqueue kind 白名单全是研究/数据/回测域

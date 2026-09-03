@@ -30,6 +30,7 @@ from finboard_backtest.portfolio.contracts import (
     AssetLotInfo,
     CovarianceFailureMode,
     PortfolioConstraints,
+    RiskFactorLimit,
     Signal,
 )
 from finboard_backtest.portfolio.covariance import CovarianceEstimate
@@ -466,6 +467,23 @@ class PortfolioPipelineAdapter:
             )
             for signal in item.signals
         )
+        # issue #266:风险因子中性化的暴露观测取自本期冻结特征 —— 按
+        # 声明的因子名(feature_id)过滤;缺失的观测不由管线补造,
+        # 交给 build_portfolio 的具名降级路径(factor_neutralization_inactive)。
+        # _features_by_source 惰性导入:signal_engine 反向导入本模块,
+        # 模块级互相导入会构成环。
+        from finboard_backtest.research_run.signal_engine import _features_by_source
+
+        declared_factors = {limit.factor for limit in constraints.risk_factor_limits}
+        factor_exposures: dict[str, dict[str, float]] = (
+            {
+                factor: observations
+                for factor, observations in _features_by_source(item.features).items()
+                if factor in declared_factors
+            }
+            if declared_factors
+            else {}
+        )
         built = build_portfolio(
             PortfolioBuildInput(
                 signals=signals,
@@ -479,6 +497,7 @@ class PortfolioPipelineAdapter:
                 betas=item.betas,
                 max_drawdown=portfolio_drawdown,
                 conflict_policy=conflict_policy,
+                factor_exposures=factor_exposures,
             )
         )
         constraint_outcomes = to_research_constraint_outcomes(built)
@@ -667,6 +686,7 @@ def _constraints_from_manifest(
         ),
         long_only=bool(overrides.get("long_only", True)),
         covariance_failure_mode=failure_mode,
+        risk_factor_limits=_risk_factor_limits(overrides),
     )
 
 
@@ -689,8 +709,51 @@ def _allocation_method(manifest: ResearchRunManifest) -> str:
         AllocationMethod.INVERSE_VOLATILITY: "inverse_volatility",
         AllocationMethod.EQUAL_RISK_CONTRIBUTION: "erc",
         AllocationMethod.VOLATILITY_SCALED: "inverse_volatility",
+        AllocationMethod.MAX_IR: "max_ir",
     }
     return mapping[method]
+
+
+def _risk_factor_limits(overrides: Mapping[str, object]) -> tuple[RiskFactorLimit, ...]:
+    """解析 ``portfolio_config.overrides.risk_factor_limits``(issue #266)。
+
+    期望形态:``[{"factor": "market_beta", "max_active_exposure": 0.05}]``;
+    因子名与冻结特征 ``feature_id`` 同名(行业 one-hot 展开为逐行业列名)。
+    声明了上限但决策日特征缺失不是入队错误 —— 执行期按具名 warning 降级
+    (``factor_neutralization_inactive:<factor>``),可见但不静默失效。
+    """
+    raw = overrides.get("risk_factor_limits")
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            "portfolio_config.overrides.risk_factor_limits 必须是 "
+            "[{factor, max_active_exposure}] 列表"
+        )
+    limits: list[RiskFactorLimit] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            raise ValueError(
+                f"risk_factor_limits[{index}] 必须是含 factor/max_active_exposure 的对象"
+            )
+        factor = item.get("factor")
+        exposure = item.get("max_active_exposure")
+        if not isinstance(factor, str) or not factor.strip():
+            raise ValueError(f"risk_factor_limits[{index}].factor 必须是非空字符串")
+        if isinstance(exposure, bool) or not isinstance(exposure, (int, float)):
+            raise ValueError(
+                f"risk_factor_limits[{index}].max_active_exposure 必须为正数"
+            )
+        try:
+            limits.append(
+                RiskFactorLimit(
+                    factor=factor.strip(),
+                    max_active_exposure=float(exposure),
+                )
+            )
+        except ValueError as exc:
+            raise ValueError(f"risk_factor_limits[{index}]: {exc}") from exc
+    return tuple(limits)
 
 
 def _section_overrides(section: Mapping[str, object]) -> dict[str, object]:
