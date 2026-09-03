@@ -38,6 +38,7 @@ _PREFIX_TABLE: tuple[_CodePrefix, ...] = (
     _CodePrefix(".SHFE", Market.FUTURE),  # 上期所:CU / AL / AU
     _CodePrefix(".DCE", Market.FUTURE),  # 大商所:I / J / JM
     _CodePrefix(".CZCE", Market.FUTURE),  # 郑商所:MA / TA / CF
+    _CodePrefix(".INE", Market.FUTURE),  # 上期能源:SC / LU(issue #267 补齐)
     _CodePrefix(".GFEX", Market.FUTURE),  # 广期所:SI / LC
     # 港股 / 美股
     _CodePrefix(".HK", Market.HK),

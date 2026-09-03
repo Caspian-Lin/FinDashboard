@@ -1418,6 +1418,43 @@ class FrozenDatasetReleaseBuilder:
                         )
                         else {}
                     ),
+                    # issue #267:期货主连标的可见性块。主连无 list_date /
+                    # 换月事件的正式上游(新浪主连是连续序列),缺失按
+                    # 「可见而非静默」落统计,不设硬门(事件硬门降级,
+                    # dataset_release_repo._futures_main_candidate)。
+                    **(
+                        {
+                            "futures_instruments": {
+                                "total": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                ),
+                                # v1 唯一入缓存的期货形态是主连(continuous),
+                                # 值恒等于 total;显式落键是为了 manifest
+                                # 语义自描述(主连 ≠ 可成交合约)。
+                                "continuous": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                ),
+                                "missing_list_date": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                    and item.list_date is None
+                                ),
+                                "with_lifecycle_events": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                    and item.lifecycle_events
+                                ),
+                            }
+                        }
+                        if any(item.instrument_type is InstrumentType.FUTURES for item in released)
+                        else {}
+                    ),
                     "warnings": warnings,
                 },
                 known_limitations=spec.known_limitations,

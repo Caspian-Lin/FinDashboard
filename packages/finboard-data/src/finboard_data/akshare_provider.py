@@ -1,9 +1,11 @@
 """``AkShareProvider`` —— 基于 akshare 的 A 股历史数据提供者。
 
 akshare 免费、无需 token,覆盖 A 股股票日线 / 分钟线、指数日线
-(issue #184:指数按代码规则分流到 ``index_zh_a_hist``)与 ETF/LOF 基金日线
+(issue #184:指数按代码规则分流到 ``index_zh_a_hist``)、ETF/LOF 基金日线
 (issue #257:基金按代码规则分流到 ``fund_etf_hist_em``,避免股票接口把
-沪市基金代码误拼成深市 secid),是个人量化的首选数据源。
+沪市基金代码误拼成深市 secid)、期货主连日线(issue #267:主连分流到
+``futures_main_sina``,仅研究信号 / 基准,不可当作可成交合约)与可转债
+兜底接口(issue #265:东财一览 + 集思录强赎),是个人量化的首选数据源。
 
 akshare 为同步库,所有调用通过 ``asyncio.to_thread`` 在线程池执行,
 避免阻塞事件循环。
@@ -14,6 +16,7 @@ akshare 为同步库,所有调用通过 ``asyncio.to_thread`` 在线程池执行
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -118,6 +121,183 @@ def is_convertible_code(code: str) -> bool:
     if exchange == "SZ":
         return bare.startswith("12")
     return False
+
+
+#: 境内期货交易所后缀(issue #267)。与 ``finboard_data.assets.registry``
+#: 的 ``_PREFIX_TABLE``(.CFFEX 等 → Market.FUTURE)同口径;INE(上期能源)
+#: 在 assets 侧同期补齐。
+FUTURES_EXCHANGES = frozenset({"CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"})
+
+
+def is_futures_code(code: str) -> bool:
+    """按期货合约代码规则判断是否为期货(issue #267)。
+
+    规则:带期货交易所后缀(``IF0.CFFEX`` / ``CU2408.SHFE`` / ``TA409.CZCE``),
+    后缀属于 :data:`FUTURES_EXCHANGES`。与 A 股 / 指数 / ETF / 转债代码段
+    互不重叠(后缀空间不相交),分流顺序不影响结果。
+    """
+    _, _, suffix = code.partition(".")
+    return suffix.upper() in FUTURES_EXCHANGES
+
+
+def is_futures_main_code(code: str) -> bool:
+    """判断是否为期货**主力连续(主连)**代码(issue #267)。
+
+    主连与具体合约是两种语义,必须可判定区分(数据不混淆):
+
+    * 主连:品种字母段 + ``0``,如 ``IF0.CFFEX``(新浪主连接口的原生代码形制);
+    * 具体合约:品种字母段 + 年月数字,如 ``IF2406.CFFEX``。
+
+    判据 ``bare 去掉末位后全为字母`` 同时排除具体合约(``IF2410`` 去掉
+    末位是 ``IF241``,非字母)。**主连仅用于研究信号 / 基准数据,不可当作
+    可成交合约** —— 主连价格是换月拼接产物,无单一真实合约与之对应。
+    """
+    if not is_futures_code(code):
+        return False
+    bare = code.split(".", 1)[0]
+    return len(bare) >= 2 and bare.isascii() and bare.endswith("0") and bare[:-1].isalpha()
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesSeriesEntry:
+    """期货主连品种登记(issue #267)。
+
+    ``multiplier`` / ``margin_rate`` 与 finboard-backtest
+    ``asset_rules.DEFAULT_TABLE`` 的 ``FuturesRule`` 同口径(成本口径,
+    非交易所最新保证金下限);跨包一致性由单测锁定
+    (tests/unit/data/test_akshare_futures.py)。``continuous=True``
+    是登记语义的显式标注:登记的是主连序列,不是可成交合约。
+    """
+
+    code: str  # 归一化主连代码 IF0.CFFEX
+    name: str  # 沪深300股指期货主连
+    product: str  # 品种代码 IF(合约 → 品种映射的品种层)
+    exchange: str  # CFFEX
+    multiplier: Decimal
+    margin_rate: Decimal
+    price_tick: Decimal
+    continuous: bool = True
+
+
+#: 期货主连受控登记表(issue #267):IF/IC/IM 优先(路线 C 市场中性对冲
+#: 的空头腿),IH 同属中金所股指期货一并纳入。全部条目必须满足
+#: :func:`is_futures_main_code` 代码规则且 ``product`` 与代码一致(模块
+#: 导入期即断言,防止登记表漂移)——#256 ``BENCHMARK_INDEX_REGISTRY``
+#: 的受控风格。扩展新品种直接加一行;discover 经 ``sync_with_diff``
+#: 自动写入 instruments 表。主连无 list_date / 行业的结构化上游
+#: (新浪主连是连续序列,不是单一上市合约),保持 null。
+FUTURES_MAIN_SERIES_REGISTRY: tuple[FuturesSeriesEntry, ...] = (
+    FuturesSeriesEntry(
+        code="IF0.CFFEX",
+        name="沪深300股指期货主连",
+        product="IF",
+        exchange="CFFEX",
+        multiplier=Decimal("300"),
+        margin_rate=Decimal("0.12"),
+        price_tick=Decimal("0.2"),
+    ),
+    FuturesSeriesEntry(
+        code="IH0.CFFEX",
+        name="上证50股指期货主连",
+        product="IH",
+        exchange="CFFEX",
+        multiplier=Decimal("300"),
+        margin_rate=Decimal("0.12"),
+        price_tick=Decimal("0.2"),
+    ),
+    FuturesSeriesEntry(
+        code="IC0.CFFEX",
+        name="中证500股指期货主连",
+        product="IC",
+        exchange="CFFEX",
+        multiplier=Decimal("200"),
+        margin_rate=Decimal("0.14"),
+        price_tick=Decimal("0.2"),
+    ),
+    FuturesSeriesEntry(
+        code="IM0.CFFEX",
+        name="中证1000股指期货主连",
+        product="IM",
+        exchange="CFFEX",
+        multiplier=Decimal("200"),
+        margin_rate=Decimal("0.14"),
+        price_tick=Decimal("0.2"),
+    ),
+)
+
+_INVALID_FUTURES_ENTRIES = tuple(
+    entry.code
+    for entry in FUTURES_MAIN_SERIES_REGISTRY
+    if not is_futures_main_code(entry.code)
+    or entry.product != entry.code.split(".", 1)[0][:-1]
+    or entry.multiplier <= 0
+    or not (Decimal("0") < entry.margin_rate <= Decimal("1"))
+    or entry.price_tick <= 0
+    or not entry.continuous
+)
+if _INVALID_FUTURES_ENTRIES:
+    raise RuntimeError(
+        "FUTURES_MAIN_SERIES_REGISTRY 存在不满足主连代码规则 / 乘数口径的条目: "
+        + ", ".join(_INVALID_FUTURES_ENTRIES)
+    )
+
+_FUTURES_REGISTRY_BY_CODE = {entry.code: entry for entry in FUTURES_MAIN_SERIES_REGISTRY}
+if len(_FUTURES_REGISTRY_BY_CODE) != len(FUTURES_MAIN_SERIES_REGISTRY):
+    raise RuntimeError("FUTURES_MAIN_SERIES_REGISTRY 存在重复主连代码")
+
+
+def futures_series_entry(code: str) -> FuturesSeriesEntry:
+    """按归一化主连代码查登记表;未登记 raise(fail-closed,不猜测乘数)。"""
+    entry = _FUTURES_REGISTRY_BY_CODE.get(code.strip().upper())
+    if entry is None:
+        raise ValueError(
+            f"期货主连 {code} 未在 FUTURES_MAIN_SERIES_REGISTRY 登记;"
+            "品种乘数 / 保证金率禁止猜测,请先扩登记表(issue #267)"
+        )
+    return entry
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesDailyBar:
+    """期货日线单日观测(主连 / 具体合约通用字段,issue #267)。
+
+    语义标注由上游代码决定(:func:`is_futures_main_code`):主连价格是
+    换月拼接产物,仅用于研究信号 / 基准;具体合约价格才是真实成交价。
+    ``settle`` 为结算价(交易所官网日线提供;新浪主连为动态结算价)。
+    """
+
+    trade_date: date
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal | None  # 手(张);新浪主连无成交额列
+    open_interest: Decimal | None
+    settle: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesOfficialDailyRow:
+    """交易所官网日线(``get_futures_daily``)归一化单行(issue #267)。
+
+    上游是「**按日 x 全市场合约**」表(每行一份具体月份合约),
+    ``symbol`` 是具体合约代码(如 ``IF2406``)、``product`` 是品种;
+    与主连的「逐标的 x 区间」形态不同构 —— 这是 v1 具体合约 EOD
+    不进逐标的 parquet 缓存的直接原因(取舍见 fetch_futures_official_daily)。
+    """
+
+    symbol: str  # 具体合约代码 IF2406(上游无交易所后缀)
+    product: str  # 品种 IF
+    trade_date: date
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal | None
+    open_interest: Decimal | None
+    turnover: Decimal | None
+    settle: Decimal | None
+    pre_settle: Decimal | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +504,157 @@ def parse_convertible_redeem_frame(
     return events
 
 
+def _decimal_cell(row: Mapping[str, object], column: str) -> Decimal | None:
+    """容错解析数值列:占位值(None/NaN/``--``)按缺失处理,非数字 raise。"""
+    text = _cell(row, column)
+    if text is None:
+        return None
+    try:
+        result = Decimal(text)
+    except InvalidOperation:
+        raise ValueError(f"列 {column} 含非数字值: {text!r}") from None
+    return result if result.is_finite() else None
+
+
+def parse_futures_main_sina_frame(frame: object) -> list[FuturesDailyBar]:
+    """把 ``futures_main_sina`` DataFrame 归一化为主连日线(纯函数,可离线测试)。
+
+    必需列:日期 / 开盘价 / 最高价 / 最低价 / 收盘价;可选列:成交量 /
+    持仓量 / 动态结算价(新浪主连无成交额列)。缺必需列直接 raise
+    (上游形状变化要 fail-visible,不静默出空序列)。
+
+    **主连语义**:输入是新浪主力连续序列,价格是换月拼接产物 ——
+    仅用于研究信号 / 基准,不可当作可成交合约(issue #267)。
+    """
+    date_col = _frame_column(frame, ("日期", "date"))
+    open_col = _frame_column(frame, ("开盘价", "开盘", "open"))
+    high_col = _frame_column(frame, ("最高价", "最高", "high"))
+    low_col = _frame_column(frame, ("最低价", "最低", "low"))
+    close_col = _frame_column(frame, ("收盘价", "收盘", "close"))
+    if date_col is None or open_col is None or high_col is None or low_col is None or close_col is None:
+        raise ValueError(
+            "akshare futures_main_sina 返回形状不符合预期"
+            "(缺少 日期/开盘价/最高价/最低价/收盘价 列);"
+            f"实际列: {_frame_columns_repr(frame)}"
+        )
+    volume_col = _frame_column(frame, ("成交量", "volume"))
+    oi_col = _frame_column(frame, ("持仓量", "open_interest"))
+    settle_col = _frame_column(frame, ("动态结算价", "结算价", "settle"))
+
+    bars: list[FuturesDailyBar] = []
+    for raw_row in cast(Any, frame).to_dict(orient="records"):
+        row: Mapping[str, object] = raw_row
+        # 日期列不经 _cell(会把 Timestamp 字符串化成带时刻的文本,三个
+        # strptime 格式都解析不了):直接取原始值交给 _parse_flex_date,
+        # 它对 datetime/Timestamp 实例与常见字符串都健在。
+        trade_date = _parse_flex_date(row.get(date_col))
+        open_value = _decimal_cell(row, open_col)
+        high_value = _decimal_cell(row, high_col)
+        low_value = _decimal_cell(row, low_col)
+        close_value = _decimal_cell(row, close_col)
+        if (
+            trade_date is None
+            or open_value is None
+            or high_value is None
+            or low_value is None
+            or close_value is None
+        ):
+            # 单行缺日期 / OHLC 无法解析时跳过并计数;整表无效由调用方
+            # 判空 fail-visible(与转换后的 Bar 非空校验一致)。
+            continue
+        bars.append(
+            FuturesDailyBar(
+                trade_date=trade_date,
+                open=open_value,
+                high=high_value,
+                low=low_value,
+                close=close_value,
+                volume=_decimal_cell(row, volume_col) if volume_col is not None else None,
+                open_interest=_decimal_cell(row, oi_col) if oi_col is not None else None,
+                settle=_decimal_cell(row, settle_col) if settle_col is not None else None,
+            )
+        )
+    return bars
+
+
+def parse_futures_official_daily_frame(frame: object) -> list[FuturesOfficialDailyRow]:
+    """把交易所官网日线 ``get_futures_daily`` DataFrame 归一化(纯函数)。
+
+    上游列名为英文(symbol/date/open/high/low/close/volume/open_interest/
+    turnover/settle/pre_settle/variety,各交易所分支已由 akshare 统一)。
+    必需列:symbol/date/open/high/low/close;variety 缺失时按合约代码的
+    字母前缀推导(与 akshare CFFEX 分支同规则)。
+    """
+    symbol_col = _frame_column(frame, ("symbol", "合约代码"))
+    date_col = _frame_column(frame, ("date", "日期"))
+    open_col = _frame_column(frame, ("open",))
+    high_col = _frame_column(frame, ("high",))
+    low_col = _frame_column(frame, ("low",))
+    close_col = _frame_column(frame, ("close",))
+    if (
+        symbol_col is None
+        or date_col is None
+        or open_col is None
+        or high_col is None
+        or low_col is None
+        or close_col is None
+    ):
+        raise ValueError(
+            "akshare get_futures_daily 返回形状不符合预期"
+            "(缺少 symbol/date/open/high/low/close 列);"
+            f"实际列: {_frame_columns_repr(frame)}"
+        )
+    volume_col = _frame_column(frame, ("volume",))
+    oi_col = _frame_column(frame, ("open_interest",))
+    turnover_col = _frame_column(frame, ("turnover",))
+    settle_col = _frame_column(frame, ("settle",))
+    pre_settle_col = _frame_column(frame, ("pre_settle",))
+    variety_col = _frame_column(frame, ("variety",))
+
+    rows: list[FuturesOfficialDailyRow] = []
+    for raw_row in cast(Any, frame).to_dict(orient="records"):
+        row: Mapping[str, object] = raw_row
+        raw_symbol = _cell(row, symbol_col)
+        open_value = _decimal_cell(row, open_col)
+        high_value = _decimal_cell(row, high_col)
+        low_value = _decimal_cell(row, low_col)
+        close_value = _decimal_cell(row, close_col)
+        # 同 parse_futures_main_sina_frame:日期列取原始值,不经 _cell。
+        trade_date = _parse_flex_date(row.get(date_col))
+        if (
+            raw_symbol is None
+            or trade_date is None
+            or open_value is None
+            or high_value is None
+            or low_value is None
+            or close_value is None
+        ):
+            continue
+        product: str | None = _cell(row, variety_col) if variety_col is not None else None
+        if product is None:
+            letters = re.findall(r"[A-Za-z]+", raw_symbol)
+            product = letters[0] if letters else raw_symbol
+        rows.append(
+            FuturesOfficialDailyRow(
+                symbol=str(raw_symbol).upper(),
+                product=str(product).upper(),
+                trade_date=trade_date,
+                open=open_value,
+                high=high_value,
+                low=low_value,
+                close=close_value,
+                volume=_decimal_cell(row, volume_col) if volume_col is not None else None,
+                open_interest=_decimal_cell(row, oi_col) if oi_col is not None else None,
+                turnover=_decimal_cell(row, turnover_col) if turnover_col is not None else None,
+                settle=_decimal_cell(row, settle_col) if settle_col is not None else None,
+                pre_settle=(
+                    _decimal_cell(row, pre_settle_col) if pre_settle_col is not None else None
+                ),
+            )
+        )
+    return rows
+
+
 def normalize_overview_code(raw: str) -> str | None:
     """东财/集思录 6 位纯数字代码 → 带后缀归一代码(转债/正股通用)。
 
@@ -349,6 +680,12 @@ def normalize_overview_code(raw: str) -> str | None:
 def _parse_flex_date(value: object) -> date | None:
     if value is None:
         return None
+    # pandas 日期列常直接给出 datetime/date 实例(新浪主连“日期”列即
+    # Timestamp),先按实例处理,再退回字符串格式容错。
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
     text = str(value).strip()
     for pattern in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d"):
         try:
@@ -559,6 +896,93 @@ class AkShareProvider:
             lambda ak: ak.bond_cb_redeem_jsl(),
             lambda frame: parse_convertible_redeem_frame(frame, observed_at=observed_at),
         )
+
+    # ------------------------------------------------------------------ 期货 (#267)
+
+    async def fetch_futures_official_daily(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        market: str = "CFFEX",
+    ) -> list[FuturesOfficialDailyRow]:
+        """拉取交易所官网日线(``get_futures_daily``,免费)。
+
+        上游是「**按日 x 全市场具体合约**」表(SHFE/DCE/CZCE/INE/CFFEX/GFEX
+        五个官网封装),每行一份具体月份合约 EOD。**取舍**:v1 不把它接进
+        逐标的 parquet 缓存 —— 缓存模型是「逐标的 x 区间增量」,与「按日
+        全市场」形态不同构(每合约一次全交易所重拉,浪费且易错);且主连
+        与具体合约必须在缓存层就分开(数据不混淆)。本方法是原始数据入口
+        (限流 / 退避走 provider 既有约定),供后续合约链 / 换月拼接 issue
+        消费;研究信号 / 基准用的主连日线走 ``fetch_bars`` 缓存路径。
+        """
+        return await self._call_with_retry(
+            f"get_futures_daily:{market}",
+            lambda ak: ak.get_futures_daily(
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=end_date.strftime("%Y%m%d"),
+                market=market,
+            ),
+            parse_futures_official_daily_frame,
+        )
+
+    def _fetch_futures_main_sync(
+        self,
+        ak: Any,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+    ) -> list[Bar]:
+        """新浪主连日线(``futures_main_sina``)→ 领域 Bar(issue #267)。
+
+        * 仅主连代码(``IF0.CFFEX``)入缓存;具体合约代码 fail-visible 拒绝,
+          主连 / 具体合约语义在缓存层就不混淆(具体合约 EOD 走
+          :meth:`fetch_futures_official_daily`)。
+        * 新浪主连无成交额列 → ``amount=0``(质量门只拒负值);成交量单位
+          为手(1 手 = 1 张合约),领域 Bar 按张 1:1 落盘。
+        * 期货无复权概念:缓存键沿用请求 adjust(默认 qfq,#256 指数同策略
+          —— 键存在但语义为 no-op,发布 adjustment 与下载键一致)。
+        * **主连仅用于研究信号 / 基准,不可当作可成交合约** —— 主连价格是
+          换月拼接产物,无单一真实合约与之对应;通用回测引擎不做期货撮合。
+        """
+        if period is not BarPeriod.D1:
+            raise ValueError(f"akshare 期货行情仅支持日线,收到 {period}")
+        if not is_futures_main_code(symbol.code):
+            raise ValueError(
+                f"akshare 期货日线缓存只支持主连代码(品种+0,如 IF0.CFFEX): {symbol.code};"
+                "具体合约 EOD 走 fetch_futures_official_daily(交易所官网按日全市场表,"
+                "v1 不进逐标的缓存,主连/具体合约语义不混淆,issue #267)"
+            )
+        frame = ak.futures_main_sina(
+            symbol=symbol.code.split(".")[0],
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+        )
+        bars = [
+            Bar(
+                symbol=symbol,
+                period=period,
+                timestamp=datetime.combine(item.trade_date, datetime.min.time(), tzinfo=UTC),
+                open=item.open,
+                high=item.high,
+                low=item.low,
+                close=item.close,
+                volume=item.volume if item.volume is not None else Decimal("0"),
+                amount=Decimal("0"),
+                source="akshare",
+            )
+            for item in parse_futures_main_sina_frame(frame)
+        ]
+        bars.sort(key=lambda b: b.timestamp)
+        logger.info(
+            "akshare.fetched_futures_main",
+            symbol=symbol.code,
+            period=period.value,
+            count=len(bars),
+            continuous=True,
+        )
+        return bars
 
     async def _call_with_retry[T](
         self,
@@ -818,6 +1242,12 @@ class AkShareProvider:
                 f"akshare 不支持可转债日线: {symbol.code};"
                 "转债行情请使用 tushare 源(cb_daily 专属接口,issue #265)"
             )
+
+        if is_futures_code(symbol.code):
+            # 期货日线(issue #267):主连走新浪 futures_main_sina(缓存的
+            # 唯一期货形态,仅研究信号 / 基准);具体合约 fail-visible
+            # 指路官网日线原始入口,主连/具体合约在缓存层不混淆。
+            return self._fetch_futures_main_sync(ak, symbol, period, start, end)
 
         if is_index_code(symbol.code):
             # 指数基准行情(issue #184):无复权概念,index_zh_a_hist 不接受

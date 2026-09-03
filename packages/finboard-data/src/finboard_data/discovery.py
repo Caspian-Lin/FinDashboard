@@ -23,6 +23,15 @@ benchmark_return」链路的唯一登记写入者。
 ``discover_all()``;data_sync 经 ``sync_with_diff`` 自动登记。
 转债无 list_date 的结构化上游(东财一览无上市日列),保持 null,由
 research_data_sync ``convertible_profiles`` 数据集从 tushare cb_basic 回填。
+
+期货主连登记(issue #267):akshare 全市场列表接口不覆盖期货,
+``discover_futures_main`` 从受控登记表
+:data:`finboard_data.akshare_provider.FUTURES_MAIN_SERIES_REGISTRY`
+(IF/IH/IC/IM 主连,CFFEX)产出 ``market=future`` /
+``instrument_type=futures`` 标的 —— 期货进入 instruments 表的登记
+写入者。登记的是**主连序列**(continuous 语义),不是可成交合约;
+主连仅用于研究信号 / 基准数据。合约 → 品种映射显式维护在登记表
+(乘数 / 保证金率与 finboard-backtest ``FuturesRule`` 同口径,单测锁定)。
 """
 
 from __future__ import annotations
@@ -34,6 +43,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from finboard_data.akshare_provider import (
+    FUTURES_MAIN_SERIES_REGISTRY,
     is_convertible_code,
     is_index_code,
     normalize_overview_code,
@@ -306,19 +316,45 @@ class UniverseDiscovery:
         logger.info("discovery.convertibles", count=len(result), skipped=skipped)
         return result
 
+    async def discover_futures_main(self) -> list[InstrumentInfo]:
+        """期货主连序列(受控登记表,issue #267,无网络调用)。
+
+        ``market=future`` / ``instrument_type=futures``;交易所取登记表
+        (CFFEX),listing_board 恒为 UNKNOWN。与指数登记(#256)同型:
+        这是期货进入 instruments 表的登记写入者。**登记语义是主连**
+        (continuous):主连价格是换月拼接产物,仅用于研究信号 / 基准,
+        不可当作可成交合约 —— 具体月份合约不经本入口登记(v1 无结构化
+        上游,合约链另行立项)。主连无 list_date 上游,保持 null 可见缺失。
+        """
+        result = [
+            InstrumentInfo(
+                code=entry.code,
+                name=entry.name,
+                market=Market.FUTURE,
+                instrument_type=InstrumentType.FUTURES,
+                exchange=entry.exchange,
+                listing_board=ListingBoard.UNKNOWN,
+            )
+            for entry in FUTURES_MAIN_SERIES_REGISTRY
+        ]
+        logger.info("discovery.futures_main", count=len(result))
+        return result
+
     async def discover_all(self) -> list[InstrumentInfo]:
-        """发现全部可用标的(A 股股票 + ETF + 基准指数 + 可转债,issue #256/#265)。"""
-        stocks, etfs, indices, convertibles = await asyncio.gather(
+        """发现全部可用标的(A 股股票 + ETF + 基准指数 + 可转债 + 期货主连)。"""
+        stocks, etfs, indices, convertibles, futures = await asyncio.gather(
             self.discover_a_shares(),
             self.discover_a_etfs(),
             self.discover_indices(),
             self.discover_convertibles(),
+            self.discover_futures_main(),
         )
-        all_instruments = stocks + etfs + indices + convertibles
+        all_instruments = stocks + etfs + indices + convertibles + futures
         logger.info(
             "discovery.all",
             total=len(all_instruments),
             indices=len(indices),
             convertibles=len(convertibles),
+            futures=len(futures),
         )
         return all_instruments
