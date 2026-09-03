@@ -8,6 +8,11 @@
 * ``name_changes``(#251)—— ``fetch_name_changes`` 全市场历史名称变更,
   直接重建主数据表 ``instrument_names``(半开区间),供 #213 ST-PIT 消费;
   不走 research_* 批次(名称历史是主数据衍生,无批次语义);
+* ``convertible_profiles``(#265)—— tushare ``cb_basic`` 转债条款快照
+  upsert 主数据表 ``convertible_metadata``(转股价/起息日/到期日/评级),
+  顺带回填 ``instruments.list_date/delist_date`` 与集思录强赎事件;评级与
+  事件来自 akshare 兜底接口,失败降级为 warning 不阻断 tushare 主链路;
+  同样不走 research_* 批次;
 * ``daily_metrics`` —— 逐交易日 ``fetch_daily_metrics`` 截面(非交易日跳过);
 * ``financial_indicators`` —— 逐标的 ``fetch_financial_indicators``(报告期范围);
 * ``industry_memberships`` —— 逐标的 ``fetch_industry_memberships``。
@@ -28,9 +33,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_backtest.background_jobs.contracts import (
@@ -47,16 +53,25 @@ from finboard_backtest.background_jobs.payload_contracts import (
     validate_job_payload,
 )
 from finboard_data.research import ResearchDataProvider
+from finboard_shared.instruments import LifecycleEvent
+from finboard_shared.types import LifecycleEventType
 
 if TYPE_CHECKING:
-    pass
+    from finboard_data.akshare_provider import ConvertibleRedemptionEvent
+
+logger = structlog.get_logger(__name__)
+
+#: 强赎事件的 dataset_version(与 job 无关的**上游接口**口径):import 幂等键
+#: 含 dataset_version,若随日期变化同一强赎事件每天都会插入新行,永不安定。
+_CONVERTIBLE_EVENT_DATASET_VERSION = "jsl_redeem_v1"
 
 #: 支持的数据集白名单(#260 起唯一事实来源在 payload_contracts;此处 re-export
-#: 保持既有导入路径,导入期断言防漂移)。默认缺省 = 全部五类。
+#: 保持既有导入路径,导入期断言防漂移)。默认缺省 = 全部六类(#265 起)。
 SUPPORTED_DATASETS: frozenset[str] = RESEARCH_DATA_SYNC_DATASETS
 _DEFAULT_DATASETS: tuple[str, ...] = (
     "profiles",
     "name_changes",
+    "convertible_profiles",
     "daily_metrics",
     "financial_indicators",
     "industry_memberships",
@@ -109,6 +124,67 @@ def _workdays(start: date, end: date) -> tuple[date, ...]:
             days.append(current)
         current += timedelta(days=1)
     return tuple(days)
+
+
+def _redemption_to_lifecycle_event(
+    item: ConvertibleRedemptionEvent,
+) -> LifecycleEvent:
+    """集思录强赎快照行 → 时点化强赎事件(#265)。
+
+    PIT 语义(诚实边界):集思录无公告时间,``observed_at`` = 本次观察时间。
+    领域不变量要求 ``available_at >= effective_date`` 开盘(防未来信息泄漏),
+    而已公告、未来生效的赎回日晚于观察时间 —— 取两者较晚者:生效日在未来的
+    事件按**生效日**可见(保守方向:只会晚看到,不会提前看到),真实观察
+    时间保留在 ``details.observed_at`` 供审计。
+    """
+    effective = item.effective_date
+    if effective is None:  # parse 端已过滤双缺失行;此处防御归一
+        raise ValueError(f"{item.code}:强赎事件缺少生效日(赎回日/停止交易日均空)")
+    effective_open = datetime.combine(effective, datetime.min.time(), tzinfo=UTC)
+    available_at = max(item.observed_at, effective_open)
+    return LifecycleEvent(
+        symbol=item.code,
+        event_type=LifecycleEventType.FORCED_REDEMPTION,
+        effective_date=effective,
+        available_at=available_at,
+        source="akshare",
+        dataset_version=_CONVERTIBLE_EVENT_DATASET_VERSION,
+        details={
+            "redemption_date": (
+                item.redemption_date.isoformat() if item.redemption_date else None
+            ),
+            "stop_transfer_date": (
+                item.stop_transfer_date.isoformat() if item.stop_transfer_date else None
+            ),
+            "redemption_price": (
+                str(item.redemption_price) if item.redemption_price is not None else None
+            ),
+            "underlying_symbol": item.underlying_symbol,
+            "observed_at": item.observed_at.isoformat(),
+        },
+        observed_at=item.observed_at,
+    )
+
+
+async def _fetch_convertible_enrichment(
+    *,
+    now: Callable[[], datetime] | None = None,
+) -> tuple[dict[str, str], list[LifecycleEvent]]:
+    """akshare 兜底增强:东财评级映射 + 集思录强赎事件(#265)。
+
+    主数据是 tushare cb_basic;这里只提供 cb_basic 没有的评级列与事件行。
+    任一接口失败整体抛出,由调用方降级为 warning(tushare 主链路不阻断,
+    评级缺失经 ``ConvertibleMetadataSyncResult.missing_rating`` 可见)。
+    """
+    from finboard_data import AkShareProvider
+
+    # 兜底接口是全量单页快照,与行情缓存无关:use_cache=False 免建缓存目录。
+    provider = AkShareProvider(use_cache=False, max_retries=2)
+    overview = await provider.fetch_convertible_overview()
+    ratings = {entry.code: entry.rating for entry in overview if entry.rating}
+    redeem = await provider.fetch_convertible_redeem_events(now=now)
+    events = [_redemption_to_lifecycle_event(item) for item in redeem]
+    return ratings, events
 
 
 class ResearchDataSyncExecutor:
@@ -201,6 +277,8 @@ class ResearchDataSyncExecutor:
                 total += 1
             if "name_changes" in datasets:
                 total += 1
+            if "convertible_profiles" in datasets:
+                total += 1
             if "daily_metrics" in datasets:
                 total += len(_workdays(start_date, end_date))
             if "financial_indicators" in datasets:
@@ -259,6 +337,60 @@ class ResearchDataSyncExecutor:
                             ]
                         )
                         await session.commit()
+                done += 1
+
+            if "convertible_profiles" in datasets:
+                # #265:cb_basic 条款快照 upsert 主数据 convertible_metadata
+                # (无批次语义,与 name_changes 同风格);顺带回填 instruments
+                # 的上市/退市日期(只补 null)并导入集思录强赎事件。akshare
+                # 评级/事件是兜底增强,失败降级为 warning 不阻断 tushare 主
+                # 链路 —— 缺失经 upsert 结果的 missing_* 计数可见。
+                current_version = f"convertible_profiles:{date.today().isoformat()}"
+                await progress(done, total, "research_data_sync:convertible_profiles")
+                from finboard_persistence import (
+                    ConvertibleMetadataRepository,
+                    InstrumentRepository,
+                )
+
+                cb_profiles = await provider.fetch_convertible_profiles()
+                ratings: dict[str, str] = {}
+                redemption_events: list[LifecycleEvent] = []
+                enrichment_failed = False
+                try:
+                    ratings, redemption_events = await _fetch_convertible_enrichment()
+                except Exception as exc:
+                    enrichment_failed = True
+                    logger.warning(
+                        "research_data_sync.convertible_enrichment_failed",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                async with self._session_maker() as session:
+                    meta_result = await ConvertibleMetadataRepository(
+                        session
+                    ).upsert_many(
+                        cb_profiles,
+                        ratings=ratings,
+                        source=source,
+                        dataset_version=current_version,
+                    )
+                    instrument_repo = InstrumentRepository(session)
+                    listing_result = await instrument_repo.backfill_listing_dates(
+                        {
+                            item.symbol: (item.list_date, item.delist_date)
+                            for item in cb_profiles
+                        }
+                    )
+                    if redemption_events:
+                        await instrument_repo.import_lifecycle_events(
+                            redemption_events
+                        )
+                    await session.commit()
+                logger.info(
+                    "research_data_sync.convertible_profiles",
+                    **meta_result.as_dict(),
+                    **listing_result,
+                    enrichment_failed=enrichment_failed,
+                )
                 done += 1
 
             if "daily_metrics" in datasets:

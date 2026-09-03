@@ -138,21 +138,28 @@ class BulkDownloadExecutor:
 
 
 def _validate_tushare_scope(provider_name: str, instruments: Sequence[object]) -> None:
-    """复刻 ``data._validate_bulk_provider_scope``:tushare 批量仅支持 A 股股票。"""
+    """复刻 ``data._validate_bulk_provider_scope``:tushare 批量仅支持 A 股股票与转债。
+
+    可转债(issue #265)走 2000 积分档的 ``cb_daily`` 专属接口
+    (TushareBarProvider 按代码规则分流),与 ETF / 指数「2000 积分拉不到」
+    的边界不同,因此放行;tushare 拒绝行为对其余非股票标的保持不变
+    (具名 tushare_scope_mismatch,不静默换源)。
+    """
     if provider_name != "tushare":
         return
     incompatible = [
         getattr(ins, "code", "?")
         for ins in instruments
         if getattr(ins, "market", None) != "a_share"
-        or getattr(ins, "instrument_type", None) != "stock"
+        or getattr(ins, "instrument_type", None) not in ("stock", "convertible")
     ]
     if incompatible:
-        # issue #256:指数(#256 登记)与 ETF 一样只能走 akshare 源;
-        # tushare 拒绝行为保持不变(具名 tushare_scope_mismatch,不静默换源)。
         raise ExecutorError(
             code="tushare_scope_mismatch",
-            summary="Tushare 批量任务仅支持 A 股股票;ETF / 指数请另建任务选 akshare 或 yfinance",
+            summary=(
+                "Tushare 批量任务仅支持 A 股股票与可转债;ETF / 指数请另建任务选 "
+                "akshare 或 yfinance"
+            ),
             retryable=False,
             context={"sample": incompatible[:5]},
         )
