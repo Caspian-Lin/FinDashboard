@@ -1,7 +1,8 @@
 """``finboard.run.*`` 工具 —— ResearchRun 查询与写操作(复用 ``ResearchRunRepository``)。
 
 只读(3):list / get / artifacts —— 自动允许。
-写(4,issue #127):queue(冻结 + 登记 queued)/ cancel / replay(复制 completed)/
+写(4,issue #127):queue(冻结 + 登记 queued)/ cancel /
+replay(复制 completed;interrupted 即事故恢复通道,#305)/
 lineage(artifact 血缘)。
 
 写工具在 ``mcp_readonly_only=false`` 时由 agent 自主执行(#122),不执行回测本身
@@ -788,7 +789,12 @@ async def replay_run(
     idempotency_key: str,
     requested_by: str,
 ) -> ToolEnvelope:
-    """复制 completed ResearchRun 为新 queued 运行(写,不执行)。"""
+    """复制 completed/interrupted ResearchRun 为新 queued 运行(写,不执行)。
+
+    issue #305:interrupted 源即事故恢复通道 —— 新 run 经 ``replace(manifest)``
+    自动继承全部冻结输入(含 factor_snapshots 全部 ID,零手工),血缘标注
+    ``replay_of_run_id`` + ``replay_source_status``;cancelled 仍拒绝。
+    """
 
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
@@ -799,8 +805,9 @@ async def replay_run(
 
         from finboard_app.research_run_store import SqlAlchemyResearchRunStore
         from finboard_backtest.research_run import (
+            REPLAYABLE_SOURCE_STATUSES,
             ResearchActorType,
-            ResearchRunStatus,
+            replay_guard_error,
         )
         from finboard_persistence import (
             ResearchRunPersistenceConflictError,
@@ -812,8 +819,8 @@ async def replay_run(
             source = await store.get(run_id)
             if source is None:
                 raise McpToolError("not_found", f"源研究运行不存在: {run_id}")
-            if source.status is not ResearchRunStatus.COMPLETED:
-                raise McpToolError("conflict", "仅允许重放已完成运行")
+            if source.status not in REPLAYABLE_SOURCE_STATUSES:
+                raise McpToolError("conflict", replay_guard_error(source.status))
             new_run_id = "RR-" + hashlib.sha256(
                 idempotency_key.encode("utf-8")
             ).hexdigest()[:24]
@@ -824,6 +831,7 @@ async def replay_run(
                 requested_by=requested_by,
                 actor_type=ResearchActorType.HUMAN,
                 replay_of_run_id=run_id,
+                replay_source_status=source.status.value,
             )
             try:
                 record, created = await store.create_or_get(manifest)
@@ -1047,8 +1055,13 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_run_replay",
         description=(
-            "复制 completed ResearchRun 为新 queued 运行(写,不执行)。"
-            "需要新 idempotency_key + requested_by。"
+            "复制 completed 或 interrupted ResearchRun 为新 queued 运行"
+            "(写,不执行)。需要新 idempotency_key + requested_by。"
+            "interrupted 源即事故恢复通道(#305):新 run 自动继承原 manifest "
+            "全部冻结输入(dataset_release_ids / factor_snapshots 全部 ID,"
+            "零手工重填),血缘标注 replay_of_run_id + replay_source_status;"
+            "completed 源保持确定性重放对照(结果漂移判 failed);"
+            "cancelled 是显式用户意图,拒绝重放。"
         ),
     )
     async def _replay(

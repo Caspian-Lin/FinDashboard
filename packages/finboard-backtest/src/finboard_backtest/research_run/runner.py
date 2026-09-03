@@ -15,6 +15,7 @@ import structlog
 
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.contracts import (
+    REPLAYABLE_SOURCE_STATUSES,
     RESEARCH_PORTFOLIO_PIPELINE_VERSION,
     DecisionBundle,
     JsonValue,
@@ -32,6 +33,7 @@ from finboard_backtest.research_run.contracts import (
     UnsupportedResearchCapabilityError,
     execution_mode_for,
     pipeline_output_checksum,
+    replay_guard_error,
     stable_checksum,
     to_json_value,
 )
@@ -404,7 +406,14 @@ class ResearchRunCoordinator:
                     expected=frozenset({ResearchRunStatus.RUNNING}),
                     target=ResearchRunStatus.INTERRUPTED,
                     error_code="process_restart",
-                    error_summary="进程重启:已保留 checkpoint,可按冻结输入恢复",
+                    # issue #305:恢复承诺落到真实通道 —— interrupted run 可经
+                    # replay 按冻结输入恢复(此前文案承诺了不存在的入口)。
+                    error_summary=(
+                        "进程重启:已保留 checkpoint;可经 finboard_run_replay"
+                        " 或 REST POST /api/research/runs/"
+                        f"{record.manifest.run_id}/replay 按冻结输入恢复"
+                        "(新 run 自动继承全部冻结输入)"
+                    ),
                 )
             )
             await self._store.checkpoint()
@@ -420,15 +429,22 @@ class ResearchRunCoordinator:
         adapter: ResearchStrategyAdapter,
     ) -> ResearchRunRecord:
         source = await self._require_run(source_run_id)
-        if source.status is not ResearchRunStatus.COMPLETED:
-            raise ResearchRunConflictError("仅允许重放已完成运行")
+        # issue #305:interrupted 放开为事故恢复通道(自动继承冻结输入);
+        # cancelled 是显式用户意图,仍拒绝;completed 重放行为不变。
+        if source.status not in REPLAYABLE_SOURCE_STATUSES:
+            raise ResearchRunConflictError(replay_guard_error(source.status))
         manifest = replace(
             source.manifest,
             run_id=new_run_id,
             idempotency_key=idempotency_key,
             requested_by=requested_by,
             replay_of_run_id=source_run_id,
+            replay_source_status=source.status.value,
         )
+        if source.status is ResearchRunStatus.INTERRUPTED:
+            # interrupted 源未产出终态结果(result_checksum=None),重放即
+            # 全新执行;冻结输入已随 manifest 自动继承,不做确定性对照。
+            return await self.execute(manifest, adapter)
         assert source.result_checksum is not None
         return await self.execute(
             manifest,

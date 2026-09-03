@@ -38,12 +38,14 @@ from finboard_backtest.research_code import (
     user_factor_reference_gate_error,
 )
 from finboard_backtest.research_run import (
+    REPLAYABLE_SOURCE_STATUSES,
     FrozenArtifactRef,
     ResearchActorType,
     ResearchRunConflictError,
     ResearchRunManifest,
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
+    replay_guard_error,
     to_json_value,
     validate_strategy_dataset_capabilities,
 )
@@ -523,14 +525,20 @@ async def queue_research_replay(
     body: ResearchRunReplayIn,
     session: AsyncSession = Depends(get_db_session),
 ) -> ResearchRunOut:
-    """复制完整冻结清单为新 queued 运行;仍不在 HTTP 中执行。"""
+    """复制完整冻结清单为新 queued 运行;仍不在 HTTP 中执行。
+
+    issue #305:interrupted 源放开为事故恢复通道 —— 新 run 自动继承原
+    manifest 全部冻结输入(含 factor_snapshots 全部 ID),血缘标注
+    ``replay_of_run_id`` + ``replay_source_status``;cancelled 仍拒绝,
+    completed 重放行为不变。
+    """
 
     store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
     source = await store.get(run_id)
     if source is None:
         raise HTTPException(status_code=404, detail="源研究运行不存在")
-    if source.status is not ResearchRunStatus.COMPLETED:
-        raise HTTPException(status_code=409, detail="仅允许重放已完成运行")
+    if source.status not in REPLAYABLE_SOURCE_STATUSES:
+        raise HTTPException(status_code=409, detail=replay_guard_error(source.status))
     manifest = replace(
         source.manifest,
         run_id=_run_id(body.idempotency_key),
@@ -538,6 +546,7 @@ async def queue_research_replay(
         requested_by=body.requested_by,
         actor_type=ResearchActorType.HUMAN,
         replay_of_run_id=run_id,
+        replay_source_status=source.status.value,
     )
     try:
         record, created = await store.create_or_get(manifest)
