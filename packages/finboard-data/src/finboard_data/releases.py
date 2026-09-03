@@ -1271,9 +1271,19 @@ class FrozenDatasetReleaseBuilder:
 
             # 按代码排序保证输入顺序确定;并行执行后再次排序保证 manifest 稳定。
             sorted_instruments = sorted(instruments, key=lambda item: item.code)
-            released_unordered = await asyncio.gather(
-                *(_freeze_one(item) for item in sorted_instruments)
-            )
+            freeze_tasks = [
+                asyncio.ensure_future(_freeze_one(item)) for item in sorted_instruments
+            ]
+            try:
+                released_unordered = await asyncio.gather(*freeze_tasks)
+            except BaseException:
+                # gather 传播首个异常即返回但不取消兄弟任务:仍有一位冻结任务
+                # 在写暂存区。失败清理(rmtree)必须等它们落地,否则与 writer
+                # 赛跑会在 release_root 留下残缺 staging 目录(Linux CI 上
+                # test_failed_release_preserves_previous_and_cleans_staging 的
+                # 间歇失败根因)。
+                await asyncio.gather(*freeze_tasks, return_exceptions=True)
+                raise
             released = sorted(released_unordered, key=lambda item: item.code)
 
             capabilities = _build_capabilities(released, spec.required_capabilities)
