@@ -226,9 +226,11 @@ class TestJobGet:
         assert env.status == "ok"
         data = env.data
         assert data["status"] == "running"
+        # issue #306:轮询最小集新增 run_status(kind=research_run 时非 null)。
         assert set(data) <= {
             *job_tools._JOB_POLL_FIELDS,
             "data_hash",
+            "run_status",
         }
 
     async def test_invalid_view_rejected(

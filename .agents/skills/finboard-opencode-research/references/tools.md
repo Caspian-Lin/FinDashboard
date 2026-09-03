@@ -1195,10 +1195,14 @@ SDK fail-fast。
 - 参数:`job_id: str`、`view?: "none"|"summary"|"detail" = "summary"`、
   `data_hash?: str`
 - 返回(默认 summary,#206):JobOut 全字段但**剥离 payload**,附 `data_hash`
-  (状态指纹);`view=none` 只回轮询最小集(status/phase/progress_*/result_ref/
-  error_*/attempt);`view=detail` 完整含 payload(诊断用)。轮询时把上次
-  `data_hash` 传回:状态未变 → `{unchanged: true, data_hash, status}` 不重发
-  全量(成功后 `result_ref` 携带产物引用,如特征快照的 snapshot_id)
+  (状态指纹,含 run_status);`view=none` 只回轮询最小集(status/phase/
+  progress_*/result_ref/error_*/attempt/run_status);`view=detail` 完整含
+  payload(诊断用)。轮询时把上次 `data_hash` 传回:状态未变 →
+  `{unchanged: true, data_hash, status, run_status}` 不重发全量(成功后
+  `result_ref` 携带产物引用,如特征快照的 snapshot_id)
+- **run_status(#306)**:kind=research_run 的任务附关联 `research_runs.status`
+  (查不到为 null)——「run interrupted 但 job 仍 running」的两表不一致一眼
+  可见;REST `GET /api/jobs/{id}` 同口径,列表端点不 join 恒 null
 - 错误:`not_found`、`invalid_argument`(view 非法)
 
 ### finboard_job_enqueue **[写]**

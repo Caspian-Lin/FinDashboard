@@ -66,6 +66,7 @@ from finboard_backtest.research_run.portfolio_pipeline import (
 )
 from finboard_backtest.research_run.signal_engine import (
     DecisionLoadContext,
+    LoadChunkProbe,
     _bars_release_ref,
     _load_benchmark_curve,
     build_daily_equity_curve,
@@ -147,12 +148,15 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         release_provider_factory: ReleaseProviderFactory,
         snapshot_provider: FeatureSnapshotProvider,
         settings_factory: Callable[[], Any] | None = None,
+        chunk_probe: LoadChunkProbe | None = None,
     ) -> None:
         super().__init__(strategy_kind="user_code", decision_inputs=())
         self._manifest = manifest
         self._release_provider_factory = release_provider_factory
         self._snapshot_provider = snapshot_provider
         self._settings_factory = settings_factory
+        # issue #306:加载期分块探针(run status / cancel 轮询 + 进度上报)。
+        self._chunk_probe = chunk_probe
         self._contexts: tuple[DecisionLoadContext, ...] | None = None
         self._sandbox: StrategySandboxCaller | None = None
         self._decision_records: list[dict[str, Any]] = []
@@ -182,6 +186,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 self._manifest,
                 release_provider_factory=self._release_provider_factory,
                 snapshot_provider=self._snapshot_provider,
+                chunk_probe=self._chunk_probe,
             )
             self._sandbox = await StrategySandboxCaller.create(
                 settings=settings,

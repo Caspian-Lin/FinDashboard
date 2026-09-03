@@ -60,6 +60,51 @@ class WorkerConfig:
     maintenance_interval_seconds: float = 10.0
     #: retry_waiting / interrupted 自动重排前必须等待的退避秒数。
     retry_backoff_seconds: float = 30.0
+    #: 僵尸无进展检测阈值(issue #306):heartbeat 正常续租但 progress_done /
+    #: phase 持续无变化超过该秒数 → job 具名失败 ``zombie_no_progress`` 并转
+    #: retry_waiting 走重试。默认 3600s(1 小时)—— 宽松值:健康的长任务
+    #: (研究加载分块探针 / 数据摄取逐 symbol / 回测引擎)至少每小时推进一次
+    #: 进度或阶段,再紧就开始有误杀长尾任务的风险;RR-7a74 类僵尸 7.5h 才被
+    #: 人肉发现,1h 已能把它压缩到十分之一。0 = 关闭检测。
+    zombie_no_progress_seconds: float = 3600.0
+
+
+class _ZombieProgressWatch:
+    """进程内「心跳在续但进度不动」监视器(issue #306,纯逻辑可单测)。
+
+    维护路径每轮对全部 running job 观察一次指纹 ``(progress_done, phase)``:
+
+    * 指纹变化(或首次见到)→ 记为基准点,不判僵尸;
+    * 指纹不变且距基准点超过阈值 → 判僵尸(True);
+    * :meth:`retain_only` 清掉本轮不在 running 列表的监视项,防字典无界增长。
+
+    时间源由调用方注入(:func:`asyncio.get_running_loop().time` 单调钟),
+    本类不做任何 IO;并发安全由维护路径的 ``transition(expected={running})``
+    行锁 + 状态守卫保证(多 worker 同时判定时只有一个完成失败转移,另一方
+    收到 conflict 后静默跳过),无需额外 advisory lock。
+    """
+
+    def __init__(self, threshold_seconds: float) -> None:
+        self._threshold = threshold_seconds
+        self._baseline: dict[str, tuple[tuple[object, object], float]] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return self._threshold > 0
+
+    def observe(self, job_id: str, fingerprint: tuple[object, object], now: float) -> bool:
+        """记录一次观察;指纹超阈值未变化返回 True(建议按僵尸失败)。"""
+
+        entry = self._baseline.get(job_id)
+        if entry is None or entry[0] != fingerprint:
+            self._baseline[job_id] = (fingerprint, now)
+            return False
+        return (now - entry[1]) >= self._threshold
+
+    def retain_only(self, job_ids: set[str]) -> None:
+        self._baseline = {
+            key: value for key, value in self._baseline.items() if key in job_ids
+        }
 
 
 def default_worker_id() -> str:
@@ -83,6 +128,9 @@ class BackgroundWorker:
         self._config = config
         self._stop_event = asyncio.Event()
         self._inflight: set[asyncio.Task[None]] = set()
+        # issue #306:僵尸无进展监视(仅本进程观察到的指纹;判定动作的并发
+        # 安全由 DB 行锁 + 状态守卫承担,见 _ZombieProgressWatch 文档)。
+        self._zombie_watch = _ZombieProgressWatch(config.zombie_no_progress_seconds)
 
     def request_stop(self) -> None:
         self._stop_event.set()
@@ -136,7 +184,7 @@ class BackgroundWorker:
                 logger.info("background_worker.reclaim count=%d", len(reclaimed))
 
     async def _maintenance(self) -> None:
-        """周期性维护:回收过期租约 + 自动重排进入重试态的任务(issue #161)。"""
+        """周期性维护:回收过期租约 + 重排重试任务 + 僵尸无进展检测(issue #161/#306)。"""
 
         await self._recover_stale()
         async with self._session_maker() as session:
@@ -152,6 +200,82 @@ class BackgroundWorker:
                     len(requeued),
                     len(exhausted),
                 )
+        await self._detect_zombie_jobs()
+
+    async def _detect_zombie_jobs(self) -> None:
+        """无进展僵尸检测(issue #306):heartbeat 在续但进度/阶段长期不动。
+
+        活跃续租的 job 永远不会被 :meth:`_recover_stale` 回收(lease 每次心跳
+        都被推远)—— 若 executor 卡死(如研究加载期阻塞、下游 IO 悬挂),任务
+        会以「running + 新鲜 lease」的形态永久占坑。本检测在维护路径对全部
+        ``running`` 且 heartbeat 新鲜的 job 观察指纹 ``(progress_done, phase)``:
+        超过 ``zombie_no_progress_seconds`` 无任何变化 → ``transition(expected=
+        {running}, target=retry_waiting, error_code=zombie_no_progress)`` 走既有
+        重试语义(attempt 预算耗尽可能由 requeue_due 转 failed)。
+
+        并发安全:``transition`` 的行锁 + ``expected={running}`` 状态守卫是唯一
+        串行化点 —— 多 worker 同时判定同一僵尸时只有一个完成转移,另一方收到
+        conflict 静默跳过(参考 claim_next 先例,但无需 advisory lock:无
+        「计数 + 领取」式两段逻辑,单条守卫转移天然原子)。被转移 job 的原属主
+        worker 心跳见状态已非 running 即停止续租(见心跳循环守卫),其 executor
+        若日后自行完成,``_finalize`` 亦因状态冲突被跳过,不会覆盖重试结果。
+        """
+
+        if not self._zombie_watch.enabled:
+            return
+        now = datetime.now(UTC)
+        loop_now = asyncio.get_running_loop().time()
+        # heartbeat 新鲜判定:正常续租间隔为 heartbeat_interval,留 4 倍 +
+        # 120s 下限余量吸收 Windows 调度抖动(#286 实测唤醒延迟可达 ~0.4s,
+        # 放大余量避免把「心跳稍慢」误判为「心跳已死」—— 后者由 lease 回收兜底)。
+        heartbeat_cutoff = now - timedelta(
+            seconds=max(120.0, 4.0 * self._config.heartbeat_interval_seconds)
+        )
+        async with self._session_maker() as session:
+            repo = BackgroundJobRepository(session)
+            rows = await repo.list_recent(
+                statuses=(BackgroundJobStatus.RUNNING.value,), limit=500
+            )
+            candidates = [
+                row
+                for row in rows
+                if row.heartbeat_at is not None and row.heartbeat_at >= heartbeat_cutoff
+            ]
+            killed: list[str] = []
+            for row in candidates:
+                fingerprint = (row.progress_done, row.phase)
+                if not self._zombie_watch.observe(row.job_id, fingerprint, loop_now):
+                    continue
+                try:
+                    await repo.transition(
+                        row.job_id,
+                        expected=frozenset({BackgroundJobStatus.RUNNING.value}),
+                        target=BackgroundJobStatus.RETRY_WAITING.value,
+                        error_code="zombie_no_progress",
+                        error_summary=(
+                            f"僵尸检测:heartbeat 正常续租但 progress/phase 超过 "
+                            f"{self._config.zombie_no_progress_seconds:.0f}s 无变化"
+                            f"(done={row.progress_done}, phase={row.phase!r}),"
+                            "按无进展失败并自动重试"
+                        ),
+                    )
+                except BackgroundJobPersistenceConflictError:
+                    # 另一 worker 的维护路径已处理(或状态已变)—— 只认赢家。
+                    continue
+                killed.append(row.job_id)
+                logger.warning(
+                    "background_worker.zombie_no_progress job_id=%s kind=%s "
+                    "progress_done=%d phase=%s threshold=%.0fs",
+                    row.job_id,
+                    row.kind,
+                    row.progress_done or 0,
+                    row.phase,
+                    self._config.zombie_no_progress_seconds,
+                )
+            if killed:
+                await repo.checkpoint()
+            # 清掉已不在 running 列表的监视项(终态 / 被本检测击杀 / 被回收)。
+            self._zombie_watch.retain_only({row.job_id for row in rows} - set(killed))
 
     async def _fill_concurrency(self) -> None:
         """把空闲的并发槽填满:领取任务并为每个任务起一个独立 task。"""
@@ -259,7 +383,7 @@ class BackgroundWorker:
     ) -> JobResult:
         """跑 executor,后台心跳 + 协作式取消检测。"""
 
-        cancel_state = {"cancelled": False}
+        cancel_state = {"cancelled": False, "aborted_by_progress": False}
 
         async def progress(done: int, total: int | None, phase: str | None) -> None:
             async with self._session_maker() as session:
@@ -269,6 +393,12 @@ class BackgroundWorker:
                     return
                 if row.status == BackgroundJobStatus.CANCEL_REQUESTED.value:
                     cancel_state["cancelled"] = True
+                    # issue #306:标记「执行器经 progress 回调自愿中止」,让
+                    # _execute_with_heart 把这次 CancelledError 收口为 cancelled
+                    # 终态,而不是把孤儿 cancel_requested 行留给 lease 回收
+                    # (旧路径最长悬挂一个 lease 周期,且 reclaim+requeue 会把
+                    # 被取消的任务原样重放)。
+                    cancel_state["aborted_by_progress"] = True
                     raise asyncio.CancelledError()
                 await repo.update_progress(job_id, done=done, total=total, phase=phase)
                 await repo.checkpoint()
@@ -284,6 +414,16 @@ class BackgroundWorker:
                     if row.status == BackgroundJobStatus.CANCEL_REQUESTED.value:
                         cancel_state["cancelled"] = True
                         return
+                    # issue #306:任务已离开本 worker 名下(僵尸检测转
+                    # retry_waiting / reclaim 回收 / 重试被其他 worker 重新领取)
+                    # 时停止续租 —— 否则僵尸检测击杀任务后,旧心跳仍把 lease
+                    # 不断推远,重试编排与属主判定(research_run 启动恢复的
+                    # job_ownership 探针)都会被污染。
+                    if (
+                        row.status != BackgroundJobStatus.RUNNING.value
+                        or row.worker_id != self._config.worker_id
+                    ):
+                        return
                     await repo.update_heartbeat(
                         job_id,
                         worker_id=self._config.worker_id,
@@ -295,7 +435,15 @@ class BackgroundWorker:
         heart = asyncio.create_task(heartbeat(), name=f"heart:{job_id}")
         result: JobResult | None = None
         try:
-            result = await executor.execute(record, progress)
+            try:
+                result = await executor.execute(record, progress)
+            except asyncio.CancelledError:
+                if not cancel_state["aborted_by_progress"]:
+                    raise
+                # issue #306:协作式取消经 progress 回调中止执行器 —— 立即按
+                # cancelled 收口;外部(task/进程级)取消仍原样上抛,维持
+                # 「留在 running 由 lease 回收」的停机语义不变。
+                result = JobResult(status=BackgroundJobStatus.CANCELLED.value)
         finally:
             heart.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):

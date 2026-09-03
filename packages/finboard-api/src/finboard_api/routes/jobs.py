@@ -136,7 +136,16 @@ async def get_job(
     row = await BackgroundJobRepository(session).get(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="后台任务不存在")
-    return JobOut.model_validate(row)
+    out = JobOut.model_validate(row)
+    if row.kind == "research_run":
+        # issue #306:透传关联 research_runs 状态 —— 「run interrupted 但 job
+        # 仍 running」的两表不一致在单查视图一眼可见(查不到 run 为 null)。
+        from finboard_persistence import ResearchRunRepository
+
+        out.run_status = await ResearchRunRepository(session).get_status_by_job_id(
+            job_id
+        )
+    return out
 
 
 @router.post("/{job_id}/cancel", response_model=JobOut)

@@ -55,6 +55,11 @@ class JobOut(BaseModel):
     # 归档时间(issue #221);默认 None=未归档(兼容 archived_at 之前的行 / mock)。
     archived_at: datetime | None = None
     updated_at: datetime
+    # 关联 research_runs 的状态(issue #306):kind=research_run 且单查
+    # ``GET /api/jobs/{id}`` 时服务端填充(查不到关联 run 为 None);列表与写
+    # 端点不 join,恒为 None。让「run interrupted 但 job 仍 running」的两表
+    # 不一致一眼可见。
+    run_status: str | None = None
 
 
 class JobUpdate(BaseModel):
