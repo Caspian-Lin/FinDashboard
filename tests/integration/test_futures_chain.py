@@ -23,11 +23,10 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 
 import pandas as pd
 import pytest
@@ -56,7 +55,7 @@ from finboard_persistence.models import (
     InstrumentModel,
     ResearchDatasetReleaseModel,
 )
-from finboard_shared.models import Bar, Symbol
+from finboard_shared.models import Bar
 from finboard_shared.types import BarPeriod
 
 pytestmark = pytest.mark.asyncio
@@ -72,34 +71,41 @@ _INDEX = "000300.SH"
 
 def _days() -> list[pd.Timestamp]:
     """发布区间的营业日(合成 CFFEX 日线用,与 A 股日历近似即可)。"""
-    return pd.bdate_range(_START, _END)
+    return list(pd.bdate_range(_START, _END))
 
 
 def _main_frame(start: str, end: str) -> pd.DataFrame:
     """形制对齐 akshare ``futures_main_sina``:中文列 + 持仓量,无成交额。
 
-    价格温和正弦扰动(3500 上下),保证 OHLC 关系成立;主连价格是换月
+    价格温和扰动(3500 上下),保证 OHLC 关系成立;主连价格是换月
     拼接产物,合成数据只要形状/数值合法即可(数据面不验证价格语义)。
     """
-    days = _days()
     s = pd.Timestamp(start)
     e = pd.Timestamp(end)
-    window = days[(days >= s) & (days <= e)]
-    rows: dict[str, object] = {"日期": [], "开盘价": [], "最高价": [], "最低价": [], "收盘价": []}
+    window = [day for day in _days() if s <= day <= e]
+    dates: list[datetime] = []
+    opens: list[float] = []
+    highs: list[float] = []
+    lows: list[float] = []
+    closes: list[float] = []
     for index, day in enumerate(window):
         base = Decimal("3500") + Decimal(index % 30) / Decimal(10)
-        o = base - Decimal("2")
-        c = base + Decimal("2")
-        h = base + Decimal("6")
-        low = base - Decimal("6")
-        rows["日期"].append(day.to_pydatetime())
-        rows["开盘价"].append(float(o))
-        rows["最高价"].append(float(h))
-        rows["最低价"].append(float(low))
-        rows["收盘价"].append(float(c))
-    rows["成交量"] = [100000 + index for index in range(len(window))]
-    rows["持仓量"] = [200000 + index for index in range(len(window))]
-    return pd.DataFrame(rows)
+        dates.append(day.to_pydatetime())
+        opens.append(float(base - Decimal("2")))
+        highs.append(float(base + Decimal("6")))
+        lows.append(float(base - Decimal("6")))
+        closes.append(float(base + Decimal("2")))
+    return pd.DataFrame(
+        {
+            "日期": dates,
+            "开盘价": opens,
+            "最高价": highs,
+            "最低价": lows,
+            "收盘价": closes,
+            "成交量": [100000 + index for index in range(len(dates))],
+            "持仓量": [200000 + index for index in range(len(dates))],
+        }
+    )
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -282,7 +288,7 @@ async def test_main_continuous_semantics_guard(tmp_path: Path) -> None:
         request_interval=0,
         max_retries=1,
     )
-    contract = cast(Symbol, make_symbol("IF2406.CFFEX"))
+    contract = make_symbol("IF2406.CFFEX")
     with patch("akshare.futures_main_sina", side_effect=AssertionError("不应发起网络请求")):
         with pytest.raises(ValueError, match="主连"):
             await provider.fetch_bars(contract, BarPeriod.D1, _START, _END)
