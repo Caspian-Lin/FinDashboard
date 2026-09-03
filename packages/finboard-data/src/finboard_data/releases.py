@@ -1271,9 +1271,19 @@ class FrozenDatasetReleaseBuilder:
 
             # 按代码排序保证输入顺序确定;并行执行后再次排序保证 manifest 稳定。
             sorted_instruments = sorted(instruments, key=lambda item: item.code)
-            released_unordered = await asyncio.gather(
-                *(_freeze_one(item) for item in sorted_instruments)
-            )
+            freeze_tasks = [
+                asyncio.ensure_future(_freeze_one(item)) for item in sorted_instruments
+            ]
+            try:
+                released_unordered = await asyncio.gather(*freeze_tasks)
+            except BaseException:
+                # gather 传播首个异常即返回但不取消兄弟任务:仍有一位冻结任务
+                # 在写暂存区。失败清理(rmtree)必须等它们落地,否则与 writer
+                # 赛跑会在 release_root 留下残缺 staging 目录(Linux CI 上
+                # test_failed_release_preserves_previous_and_cleans_staging 的
+                # 间歇失败根因)。
+                await asyncio.gather(*freeze_tasks, return_exceptions=True)
+                raise
             released = sorted(released_unordered, key=lambda item: item.code)
 
             capabilities = _build_capabilities(released, spec.required_capabilities)
@@ -1416,6 +1426,43 @@ class FrozenDatasetReleaseBuilder:
                             item.instrument_type is InstrumentType.CONVERTIBLE
                             for item in released
                         )
+                        else {}
+                    ),
+                    # issue #267:期货主连标的可见性块。主连无 list_date /
+                    # 换月事件的正式上游(新浪主连是连续序列),缺失按
+                    # 「可见而非静默」落统计,不设硬门(事件硬门降级,
+                    # dataset_release_repo._futures_main_candidate)。
+                    **(
+                        {
+                            "futures_instruments": {
+                                "total": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                ),
+                                # v1 唯一入缓存的期货形态是主连(continuous),
+                                # 值恒等于 total;显式落键是为了 manifest
+                                # 语义自描述(主连 ≠ 可成交合约)。
+                                "continuous": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                ),
+                                "missing_list_date": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                    and item.list_date is None
+                                ),
+                                "with_lifecycle_events": sum(
+                                    1
+                                    for item in released
+                                    if item.instrument_type is InstrumentType.FUTURES
+                                    and item.lifecycle_events
+                                ),
+                            }
+                        }
+                        if any(item.instrument_type is InstrumentType.FUTURES for item in released)
                         else {}
                     ),
                     "warnings": warnings,

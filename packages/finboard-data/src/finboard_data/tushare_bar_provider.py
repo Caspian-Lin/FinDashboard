@@ -23,7 +23,7 @@ from typing import Literal, Protocol, TypeGuard, cast
 
 import structlog
 
-from finboard_data.akshare_provider import AkShareProvider, is_convertible_code
+from finboard_data.akshare_provider import AkShareProvider, is_convertible_code, is_futures_code
 from finboard_data.cache import CacheMetadata, ParquetCache, expected_last_bar_date
 from finboard_data.tushare_budget import TushareBudget, shared_tushare_budget
 from finboard_shared.models import Bar, Symbol
@@ -308,6 +308,14 @@ class TushareBarProvider(AkShareProvider):
             raise ValueError(f"不支持的复权方式: {adjust}")
         if start > end:
             raise ValueError("start 不能晚于 end")
+        if is_futures_code(symbol.code):
+            # 期货(issue #267):tushare 侧本 issue 不接线(fut_daily 属另
+            # 档积分),fail-visible 指路 akshare 源,不静默走股票 daily
+            # 误路由。
+            raise ValueError(
+                f"tushare 2000 积分源不提供期货行情: {symbol.code};"
+                "期货日线请使用 akshare 源(新浪主连,issue #267)"
+            )
         async with self._semaphore:
             bars = await self._fetch_daily_chunks(symbol, start, end, adjust)
         logger.info(

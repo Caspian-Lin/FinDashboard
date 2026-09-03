@@ -777,9 +777,23 @@ def _parse_covered_ranges(value: object) -> tuple[tuple[date, date], ...]:
     return _coalesce_date_ranges(ranges)
 
 
+#: 期货交易所后缀(issue #267)。与 ``akshare_provider.FUTURES_EXCHANGES``
+#: 同口径 —— 不直接 import 是因为 akshare_provider 反向依赖本模块
+#: (缓存原语),常量一致性由 tests/unit/data/test_akshare_futures.py 锁定。
+_FUTURE_SUFFIXES = (".CFFEX", ".CZCE", ".DCE", ".GFEX", ".INE", ".SHFE")
+
+
 def make_symbol(code: str) -> Symbol:
-    """从 ``510300.SH`` / ``000001.SZ`` 推断 Market 并构造 Symbol。"""
+    """从 ``510300.SH`` / ``000001.SZ`` / ``IF0.CFFEX`` 推断 Market 并构造 Symbol。
+
+    期货交易所后缀(issue #267)→ ``Market.FUTURE``:此前未知后缀一律兜底
+    ``A_SHARE``,会让冻结发布的逐标的 market 校验把期货代码误判成
+    ``a_share`` 而拒绝读取;与 ``finboard_data.assets.registry`` 的
+    ``_PREFIX_TABLE``(CFFEX 等 → FUTURE)对齐。
+    """
     upper = code.upper()
+    if upper.endswith(_FUTURE_SUFFIXES):
+        return Symbol(code=upper, market=Market.FUTURE)
     if upper.endswith((".SH", ".SZ")):
         return Symbol(code=upper, market=Market.A_SHARE)
     if upper.endswith(".BJ"):

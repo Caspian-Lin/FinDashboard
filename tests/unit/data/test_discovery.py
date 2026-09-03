@@ -135,6 +135,7 @@ class TestDiscoverIndices:
 
     async def test_discover_all_includes_indices(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """discover_all = 股票 + ETF + 指数;akshare 依赖被打桩(不联网)。"""
+        from finboard_data import FUTURES_MAIN_SERIES_REGISTRY
         from finboard_data.discovery import (
             BENCHMARK_INDEX_REGISTRY,
             InstrumentInfo,
@@ -182,13 +183,17 @@ class TestDiscoverIndices:
         monkeypatch.setattr(d, "discover_convertibles", _fake_convertibles)
         all_instruments = await d.discover_all()
         by_type = {item.instrument_type for item in all_instruments}
+        # #267:discover_all 并入期货主连段(受控登记表,无网络)。
         assert by_type == {
             InstrumentType.STOCK,
             InstrumentType.ETF,
             InstrumentType.INDEX,
             InstrumentType.CONVERTIBLE,
+            InstrumentType.FUTURES,
         }
-        assert len(all_instruments) == 3 + len(BENCHMARK_INDEX_REGISTRY)
+        assert len(all_instruments) == (
+            3 + len(BENCHMARK_INDEX_REGISTRY) + len(FUTURES_MAIN_SERIES_REGISTRY)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +235,7 @@ class TestDiscoverConvertibles:
         """discover_all 并入转债段(#265);akshare 依赖被打桩(不联网)。"""
         import pandas as pd
 
+        from finboard_data import FUTURES_MAIN_SERIES_REGISTRY
         from finboard_data.discovery import (
             BENCHMARK_INDEX_REGISTRY,
             InstrumentInfo,
@@ -254,5 +260,11 @@ class TestDiscoverConvertibles:
 
         all_instruments = await d.discover_all()
         by_type = {item.instrument_type for item in all_instruments}
-        assert by_type == {InstrumentType.CONVERTIBLE, InstrumentType.INDEX}
-        assert len(all_instruments) == 1 + len(BENCHMARK_INDEX_REGISTRY)
+        assert by_type == {
+            InstrumentType.CONVERTIBLE,
+            InstrumentType.INDEX,
+            InstrumentType.FUTURES,
+        }
+        assert len(all_instruments) == (
+            1 + len(BENCHMARK_INDEX_REGISTRY) + len(FUTURES_MAIN_SERIES_REGISTRY)
+        )

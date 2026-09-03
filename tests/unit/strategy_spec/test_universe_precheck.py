@@ -145,6 +145,19 @@ def test_benchmark_index_excluded_from_static_pool() -> None:
         )
         is True
     )
+    # issue #267:期货主连同为基准数据资产(仅研究信号/基准,不可撮合)。
+    assert (
+        is_benchmark_only_instrument(
+            _Instrument(
+                code="IF0.CFFEX",
+                market=Market.FUTURE,
+                asset_class=AssetClass.DERIVATIVE,
+                list_date=None,
+                instrument_type="futures",
+            )
+        )
+        is True
+    )
     assert is_benchmark_only_instrument(instruments[0]) is False
     assert is_benchmark_only_instrument(_Instrument(
         code="Y", market=Market.A_SHARE, asset_class=AssetClass.EQUITY, list_date=None,

@@ -229,14 +229,18 @@ class DatasetPublishExecutor:
                 selected_types = {item.instrument_type for item in selected}
                 # issue #184:混合发布放行 index 基准资产(可单独发布指数
                 # benchmark 数据集,也可与股票/ETF 混发);issue #265 放行
-                # convertible 转债(转债 bars 与正股/基准同处一份发布)。
-                # 至少含四者之一。
-                missing_types = {"stock", "etf", "index", "convertible"} - selected_types
+                # convertible 转债(转债 bars 与正股/基准同处一份发布);
+                # issue #267 放行 futures 期货主连(仅基准/研究数据,
+                # 不可撮合,对齐 index 先例)。至少含五者之一。
+                missing_types = (
+                    {"stock", "etf", "index", "convertible", "futures"} - selected_types
+                )
                 if missing_types:
                     raise ExecutorError(
                         code="mixed_scope_violation",
                         summary=(
-                            "多资产混合源发布必须至少包含股票、ETF、指数或可转债,缺少: "
+                            "多资产混合源发布必须至少包含股票、ETF、指数、可转债或期货主连,"
+                            "缺少: "
                             + ", ".join(sorted(missing_types))
                         ),
                         retryable=False,
