@@ -125,6 +125,17 @@ FinBoard 研究 MCP —— 量化研究工具集
   否则 invalid_argument 具名缺失特征与所需发布 kind —— 此前财务因子
   (pb/roe 等)拖到执行期才报「identity 节点缺少数据源」。研究数据发布
   的 manifest 冻结 derived_features(可派生特征集合),旧发布按 kind 回退。
+  组合可行性预检(#303):静态候选池 < ceil(1/生效 max_risk_contribution)
+  秒级 invalid_argument(此前默认 0.35 隐含买入池 ≥3,候选只有 2 只的
+  screen run 会白跑 1-2 小时才在组合阶段 REJECTED),错误附排除统计、生效
+  阈值与 portfolio_config.overrides 键位修复路径;max_risk_contribution
+  非法值与 risk_config.overrides 形态错误同样入队即拒。配置分区键位
+  (#303 起 risk_config 真实接线,此前是死分区):portfolio_config 管
+  组合约束(如 {"max_risk_contribution": 0.5}),risk_config 管风险退出
+  (如 {"rules": [{"rule_type": "price_stop_loss", "enabled": true,
+  "threshold": 0.08}]},按 rule_type 与规格策略同名合并覆盖),键位不可混;
+  manifest 原样冻结,覆盖只发生在消费端。逐期真实买入池入队期不可精确
+  预知,运行期 fail-closed 兜底不变。
   run_queue payload 模板与
   各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
   manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。写操作
