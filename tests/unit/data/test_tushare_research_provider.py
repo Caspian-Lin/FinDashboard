@@ -94,6 +94,25 @@ def _industry_row(**overrides: object) -> dict[str, object]:
     return row
 
 
+def _cb_basic_row(**overrides: object) -> dict[str, object]:
+    """tushare cb_basic 单行(issue #265,默认在市转债)。"""
+    row: dict[str, object] = {
+        "ts_code": "113050.SH",
+        "bond_full_name": "南银转债",
+        "bond_short_name": "南银转债",
+        "stock_code": "601009.SH",
+        "stock_name": "南京银行",
+        "list_date": "20210628",
+        "delist_date": "",
+        "swap_price": 8.5,
+        "value_date": "20210621",
+        "mature_date": "20270621",
+        "coupon_rate": 0.3,
+    }
+    row.update(overrides)
+    return row
+
+
 class FakeTushareClient:
     """记录调用参数并返回离线记录。"""
 
@@ -115,6 +134,21 @@ class FakeTushareClient:
         self.financial_rows = [_financial_row()]
         self.industry_rows = [_industry_row()]
         self.namechange_rows: list[dict[str, object]] = []
+        # cb_basic 按 list_status 分桶(L=在市 / D=摘牌)。
+        self.cb_basic_rows: dict[str, list[dict[str, object]]] = {
+            "L": [_cb_basic_row()],
+            "D": [
+                _cb_basic_row(
+                    ts_code="110059.SH",
+                    bond_short_name="浦发转债",
+                    stock_code="600000.SH",
+                    stock_name="浦发银行",
+                    list_date="20191101",
+                    delist_date="20251028",
+                    swap_price=12.3,
+                )
+            ],
+        }
 
     def stock_basic(self, **kwargs: str) -> object:
         self.calls.append(("stock_basic", kwargs))
@@ -135,6 +169,10 @@ class FakeTushareClient:
     def namechange(self, **kwargs: str) -> object:
         self.calls.append(("namechange", kwargs))
         return self.namechange_rows
+
+    def cb_basic(self, **kwargs: str) -> object:
+        self.calls.append(("cb_basic", kwargs))
+        return self.cb_basic_rows.get(kwargs.get("list_status", "L"), [])
 
 
 def _provider(
@@ -406,3 +444,88 @@ async def test_fetch_name_changes_paginates_until_exhausted(
     assert changes[0].end_date == date(1992, 3, 9)
     assert changes[1].end_date is None  # 当前名称保持开区间
     assert changes[0].available_at == OBSERVED_AT
+
+
+# ---------------------------------------------------------------------------
+# #265:可转债基础条款(cb_basic,在市 + 摘牌合并)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_fetch_convertible_profiles_merges_listed_and_delisted() -> None:
+    """在市 + 摘牌档案合并;字段映射 swap_price→conversion_price 等;快照语义。"""
+    client = FakeTushareClient()
+    profiles = await _provider(client).fetch_convertible_profiles()
+
+    # 在市与摘牌档案各一只,按 symbol 排序。
+    assert [item.symbol for item in profiles] == ["110059.SH", "113050.SH"]
+    listed = profiles[1]
+    assert listed.name == "南银转债"
+    assert listed.underlying_symbol == "601009.SH"
+    assert listed.underlying_name == "南京银行"
+    assert listed.conversion_price == Decimal("8.5")
+    assert listed.list_date == date(2021, 6, 28)
+    assert listed.delist_date is None
+    assert listed.issue_date == date(2021, 6, 21)
+    assert listed.maturity_date == date(2027, 6, 21)
+    # coupon_rate 百分比归一(0.3 → 0.003),与 daily_metrics 同口径。
+    assert listed.coupon_rate == Decimal("0.003")
+    # cb_basic 是当前快照:available_at = 观察时间,不含历史版本。
+    assert listed.available_at == OBSERVED_AT
+    assert listed.observed_at == OBSERVED_AT
+    assert listed.source == "tushare"
+
+    delisted = profiles[0]
+    assert delisted.delist_date == date(2025, 10, 28)
+
+
+@pytest.mark.unit
+async def test_convertible_profiles_query_both_list_status_with_whitelist() -> None:
+    """先 D 后 L 各查一次;字段白名单随请求下发。"""
+    client = FakeTushareClient()
+    await _provider(client).fetch_convertible_profiles()
+
+    cb_calls = [kwargs for name, kwargs in client.calls if name == "cb_basic"]
+    assert [kwargs["list_status"] for kwargs in cb_calls] == ["D", "L"]
+    for kwargs in cb_calls:
+        assert kwargs["fields"].startswith("ts_code,bond_full_name,bond_short_name")
+        assert "swap_price" in kwargs["fields"]
+        assert "mature_date" in kwargs["fields"]
+
+
+@pytest.mark.unit
+async def test_convertible_profile_zero_swap_price_treated_as_missing() -> None:
+    """转股价必须为正:0/负值视同缺失(null),由下游质量报告可见。"""
+    client = FakeTushareClient()
+    client.cb_basic_rows = {
+        "L": [
+            _cb_basic_row(swap_price=0),
+            _cb_basic_row(ts_code="128095.SZ", swap_price=-1),
+        ],
+        "D": [],
+    }
+    profiles = await _provider(client).fetch_convertible_profiles()
+
+    assert len(profiles) == 2
+    assert all(item.conversion_price is None for item in profiles)
+
+
+@pytest.mark.unit
+async def test_convertible_profiles_truncation_guard_rejects() -> None:
+    """返回行数达到护栏值(5000)时拒绝,防上游静默截断。"""
+    client = FakeTushareClient()
+    client.cb_basic_rows = {"L": [_cb_basic_row() for _ in range(5000)], "D": []}
+
+    with pytest.raises(ResearchDataContractError, match="结果可能被截断"):
+        await _provider(client).fetch_convertible_profiles()
+
+
+@pytest.mark.unit
+async def test_convertible_profiles_missing_upstream_field_is_actionable() -> None:
+    client = FakeTushareClient()
+    row = _cb_basic_row()
+    del row["mature_date"]
+    client.cb_basic_rows = {"L": [row], "D": []}
+
+    with pytest.raises(ResearchDataContractError, match="缺少字段: mature_date"):
+        await _provider(client).fetch_convertible_profiles()

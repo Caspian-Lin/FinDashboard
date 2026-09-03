@@ -165,9 +165,94 @@ class TestDiscoverIndices:
                 )
             ]
 
+        async def _fake_convertibles() -> list[InstrumentInfo]:
+            return [
+                InstrumentInfo(
+                    code="113050.SH",
+                    name="南银转债",
+                    market=Market.A_SHARE,
+                    instrument_type=InstrumentType.CONVERTIBLE,
+                    exchange="SSE",
+                )
+            ]
+
         monkeypatch.setattr(d, "discover_a_shares", _fake_stocks)
         monkeypatch.setattr(d, "discover_a_etfs", _fake_etfs)
+        # #265:discover_all 并入转债段,同样打桩保持测试离线。
+        monkeypatch.setattr(d, "discover_convertibles", _fake_convertibles)
         all_instruments = await d.discover_all()
         by_type = {item.instrument_type for item in all_instruments}
-        assert by_type == {InstrumentType.STOCK, InstrumentType.ETF, InstrumentType.INDEX}
-        assert len(all_instruments) == 2 + len(BENCHMARK_INDEX_REGISTRY)
+        assert by_type == {
+            InstrumentType.STOCK,
+            InstrumentType.ETF,
+            InstrumentType.INDEX,
+            InstrumentType.CONVERTIBLE,
+        }
+        assert len(all_instruments) == 3 + len(BENCHMARK_INDEX_REGISTRY)
+
+
+# ---------------------------------------------------------------------------
+# #265:可转债登记(discover_convertibles,东财一览)
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverConvertibles:
+    async def test_discover_convertibles_normalizes_codes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """bond_zh_cov 一览 → convertible 标的;非转债段跳过;交易所按代码段。"""
+        import pandas as pd
+
+        from finboard_data.discovery import UniverseDiscovery
+
+        frame = pd.DataFrame(
+            {
+                "债券代码": ["113050", "123101", "500001"],
+                "债券简称": ["南银转债", "天赐转2", "已兑付归档"],
+                "正股代码": ["601009", "002709", "600000"],
+            }
+        )
+        monkeypatch.setattr(
+            "akshare.bond_zh_cov", lambda: frame
+        )
+
+        instruments = await UniverseDiscovery().discover_convertibles()
+
+        assert [(item.code, item.name) for item in instruments] == [
+            ("113050.SH", "南银转债"),
+            ("123101.SZ", "天赐转2"),
+        ]
+        for item in instruments:
+            assert item.market is Market.A_SHARE
+            assert item.instrument_type is InstrumentType.CONVERTIBLE
+        assert instruments[0].exchange == "SSE"
+        assert instruments[1].exchange == "SZSE"
+
+    async def test_discover_all_includes_convertibles(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """discover_all 并入转债段(#265);akshare 依赖被打桩(不联网)。"""
+        import pandas as pd
+
+        from finboard_data.discovery import (
+            BENCHMARK_INDEX_REGISTRY,
+            InstrumentInfo,
+            UniverseDiscovery,
+        )
+
+        d = UniverseDiscovery()
+
+        async def _empty() -> list[InstrumentInfo]:
+            return []
+
+        frame = pd.DataFrame(
+            {
+                "债券代码": ["113050"],
+                "债券简称": ["南银转债"],
+                "正股代码": ["601009"],
+            }
+        )
+        monkeypatch.setattr(d, "discover_a_shares", _empty)
+        monkeypatch.setattr(d, "discover_a_etfs", _empty)
+        monkeypatch.setattr("akshare.bond_zh_cov", lambda: frame)
+
+        all_instruments = await d.discover_all()
+        by_type = {item.instrument_type for item in all_instruments}
+        assert by_type == {InstrumentType.CONVERTIBLE, InstrumentType.INDEX}
+        assert len(all_instruments) == 1 + len(BENCHMARK_INDEX_REGISTRY)
