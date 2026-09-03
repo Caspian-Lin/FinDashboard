@@ -23,6 +23,8 @@ import socket
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Mapping
 from datetime import date, timedelta
 from datetime import date as parse_date
 from decimal import Decimal
@@ -661,6 +663,95 @@ worker_app = typer.Typer(
 )
 
 
+#: 多 worker 进程下父进程转发给子进程的 CLI 覆盖项(#286):
+#: (选项名, 目标 settings 键)。--workers 不转发 —— 子进程固定单 worker
+#: 形态,避免递归拉起进程树。
+_WORKER_CHILD_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("--poll-interval", "worker_poll_interval_seconds"),
+    ("--max-concurrent", "worker_max_concurrent"),
+    ("--queues", "worker_queues"),
+    ("--maintenance-interval", "worker_maintenance_interval_seconds"),
+    ("--retry-backoff", "worker_retry_backoff_seconds"),
+)
+
+#: Ctrl-C 收敛子进程时 terminate → kill 的宽限秒数。
+_WORKER_CHILD_TERMINATE_GRACE_SECONDS = 10.0
+
+
+def _worker_child_command(overrides: Mapping[str, str]) -> list[str]:
+    """构造单 worker 子进程命令(#286):重新拉起 CLI 单 worker 形态。
+
+    与 ``finboard dev`` 托管 worker(``_dev_worker_command``)同一入口 ——
+    spawn 天然安全(无 pickle 约束),子进程各自独立 engine / session_maker /
+    worker_id(``default_worker_id()`` 进程内生成,全局唯一)。只转发用户在
+    CLI 显式给出的覆盖项(含空串 ``--queues ""`` = 消费全部队列),其余配置
+    由子进程自行读 settings / .env(同一 CWD);``--workers`` 永不转发 ——
+    子进程固定单 worker 形态,避免递归拉起进程树。
+    """
+
+    cmd = [sys.executable, "-m", "finboard_app.cli", "worker", "run"]
+    for flag, key in _WORKER_CHILD_OPTIONS:
+        if key in overrides:
+            cmd.extend([flag, overrides[key]])
+    return cmd
+
+
+def _supervise_worker_processes(command: list[str], workers: int) -> int:
+    """拉起并收敛 N 个 worker 子进程,返回父进程退出码(#286)。
+
+    * 正常退出:任一子进程非零退出 → 父进程返回 1(子进程崩溃不自动重启 ——
+      队列语义下重启安全:未完成任务由 lease 过期回收后重排,重新执行命令即可);
+    * Ctrl-C / 终止信号:先等子进程自行收敛(Windows 上同控制台子进程直接
+      收到 Ctrl-C;POSIX 上子进程在独立会话,由父进程转发 terminate 走优雅
+      停止),宽限超时后强杀兜底 —— 用户主动停止不算失败,退出码 0。
+    """
+
+    procs: list[subprocess.Popen[bytes]] = []
+    for _ in range(workers):
+        if sys.platform == "win32":
+            procs.append(
+                subprocess.Popen(command, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+            )
+        else:
+            procs.append(subprocess.Popen(command, start_new_session=True))
+    typer.echo(f"已启动 {workers} 个 worker 子进程(pid: {[p.pid for p in procs]})")
+    interrupted = False
+    try:
+        while any(p.poll() is None for p in procs):
+            time.sleep(0.5)
+    except (KeyboardInterrupt, SystemExit):
+        interrupted = True
+        typer.echo("收到停止信号,正在收敛 worker 子进程…")
+    failed: list[int] = []
+    if interrupted:
+        deadline = time.monotonic() + _WORKER_CHILD_TERMINATE_GRACE_SECONDS
+        for proc in procs:
+            if proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    proc.terminate()
+        for proc in procs:
+            timeout = max(0.1, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=5)
+        return 0
+    for proc in procs:
+        code = proc.wait()
+        if code != 0:
+            failed.append(code)
+    if failed:
+        typer.echo(
+            f"警告: {len(failed)} 个 worker 子进程异常退出(退出码 {failed});"
+            "未完成任务将由 lease 过期回收后重排,请排查后重新执行本命令",
+            err=True,
+        )
+        return 1
+    return 0
+
+
 @worker_app.command(name="run")
 def worker_run(
     ctx: typer.Context,
@@ -693,28 +784,50 @@ def worker_run(
             help="retry_waiting/interrupted 自动重排前的退避秒数",
         ),
     ] = None,
+    workers: Annotated[
+        int | None,
+        typer.Option(
+            "--workers",
+            help=(
+                "worker 进程数(默认取 settings.worker_processes,=1 单进程)。"
+                ">1 时本命令作为父进程拉起 N 个独立 worker 子进程,各自"
+                "engine/worker_id,多核并行消费;Ctrl-C 收敛全部子进程"
+            ),
+        ),
+    ] = None,
 ) -> None:
     """启动后台 worker 进程,从 PostgreSQL 队列领取任务直到 Ctrl-C。"""
 
     settings = ctx.obj
+    overrides: dict[str, str] = {}
     if poll_interval is not None:
+        overrides["worker_poll_interval_seconds"] = str(poll_interval)
         settings = settings.model_copy(
             update={"worker_poll_interval_seconds": poll_interval}
         )
     if max_concurrent is not None:
+        overrides["worker_max_concurrent"] = str(max_concurrent)
         settings = settings.model_copy(
             update={"worker_max_concurrent": max_concurrent}
         )
     if queues is not None:
+        overrides["worker_queues"] = queues
         settings = settings.model_copy(update={"worker_queues": queues})
     if maintenance_interval is not None:
+        overrides["worker_maintenance_interval_seconds"] = str(maintenance_interval)
         settings = settings.model_copy(
             update={"worker_maintenance_interval_seconds": maintenance_interval}
         )
     if retry_backoff is not None:
+        overrides["worker_retry_backoff_seconds"] = str(retry_backoff)
         settings = settings.model_copy(
             update={"worker_retry_backoff_seconds": retry_backoff}
         )
+    process_count = workers if workers is not None else settings.worker_processes
+    if process_count > 1:
+        # 多进程形态:父进程只做监管,不领取任务(issue #286)。
+        child_cmd = _worker_child_command(overrides)
+        raise typer.Exit(_supervise_worker_processes(child_cmd, process_count))
     asyncio.run(_run_worker(settings))
 
 

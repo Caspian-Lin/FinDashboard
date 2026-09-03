@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     feature_snapshot_max_concurrency: int = Field(default=8, ge=1, le=64)
     # 特征快照使用的独立计算进程数;0 表示只使用旧的进程内 worker。
     feature_snapshot_process_workers: int = Field(default=8, ge=0, le=64)
+    # research_run 多期回放逐期价格特征重算使用的独立计算进程数(issue #288);
+    # 池在一次加载期内常驻并复用(max_tasks_per_child 摊销 Windows spawn 开销),
+    # 0 表示沿用进程内协程池(单核,旧行为)。只影响研究/回测域。
+    research_price_feature_process_workers: int = Field(default=4, ge=0, le=64)
 
     # ---- 回测 strategy 形态异步化(issue #189) ----
     # backtest_run(strategy 形态)自动切换异步的估算工作量阈值:工作量 ≈
@@ -82,6 +86,11 @@ class Settings(BaseSettings):
         default="",
         description="逗号分隔的逻辑队列白名单;空字符串表示消费全部队列",
     )
+    # worker 进程数(issue #286):默认 1 保持单进程行为;>1 时 ``finboard worker
+    # run`` 作为父进程拉起 N 个独立 worker 子进程(各自 engine / session_maker /
+    # worker_id),把 GIL 边界从 1 核扩到 N 核。kind_concurrency 由 claim_next
+    # 的 SQL 层约束跨进程生效。回滚 = --workers 1(默认)+ revert。
+    worker_processes: int = Field(default=1, ge=1, le=64)
 
     # ---- Broker ----
     broker: BrokerKind = BrokerKind.MOCK

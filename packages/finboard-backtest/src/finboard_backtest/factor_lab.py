@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+import structlog
 
 from finboard_backtest.factors.extract import extract_factor_matrix
 from finboard_backtest.factors.standardize import zscore
@@ -54,6 +55,7 @@ from finboard_shared.models import Symbol
 from finboard_shared.types import AssetClass, BarPeriod, Market
 
 _EPS = 1e-12
+_logger = structlog.get_logger(__name__)
 _TRADING_DAYS = 252
 _MARKET_SYMBOL = "__market__"
 
@@ -1228,6 +1230,7 @@ def _create_price_feature_process_executor(
     *,
     worker_count: int,
     provider: FrozenReleaseProvider,
+    max_tasks_per_child: int | None = None,
 ) -> tuple[ProcessPoolExecutor, tuple[Future[None], ...]]:
     """创建并提交预热任务;调用方应在线程中执行本函数。"""
 
@@ -1242,12 +1245,122 @@ def _create_price_feature_process_executor(
             provider.verify_files,
             release.release_checksum,
         ),
+        # issue #288:常驻池每个 worker 执行 N 个任务后重启一次,既把 Windows
+        # spawn 的 import/initializer 开销摊销到多次调用,又防止长跑进程的
+        # 内存累积(spawn 上下文才支持本参数;fork 不支持,本项目只在 spawn 用池)。
+        max_tasks_per_child=max_tasks_per_child,
     )
     warmups = tuple(
         executor.submit(_price_feature_process_warmup)
         for _ in range(worker_count)
     )
     return executor, warmups
+
+
+#: 常驻池(:class:`PriceFeatureProcessPool`)每个 worker 进程重启前的任务数
+#: (issue #288)。取值权衡:过小则 spawn 重启频繁(Windows 每次约 1-2s),
+#: 过大则失去防内存累积意义;128 ≈ 数个决策期 x 数十标的的任务量。
+PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD = 128
+
+
+class PriceFeatureProcessPool:
+    """跨多次价格特征计算复用的常驻 spawn 进程池(issue #288)。
+
+    research_run 多期回放逐期重算价格特征时,若每期各自 ``build_price_feature_
+    snapshot(process_workers>0)``,则每期都要付出一次「建池 + spawn import +
+    关池」的开销(N 期 = N 倍)。本句柄把池的生命周期提升到「一次加载期」:
+    ``start`` 一次建池 + 预热,期内全部期共享,``aclose`` 在加载结束(或异常)
+    后统一关闭。``max_tasks_per_child`` 令 worker 定期重启,防内存累积。
+
+    池以给定 provider 的冻结发布初始化(``_init_price_feature_process``)——
+    调用方必须保证传给 ``build_price_feature_snapshot(process_executor=...)``
+    的 provider 与本池的 provider 是同一发布(checksum 锚定一致),否则结果
+    无意义;research_run 路径天然满足(逐期特征只读 bars 主发布)。
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: FrozenReleaseProvider,
+        worker_count: int,
+        max_tasks_per_child: int = PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD,
+    ) -> None:
+        if worker_count < 1:
+            raise ValueError("worker_count 必须 >= 1")
+        self._provider = provider
+        self._worker_count = worker_count
+        self._max_tasks_per_child = max_tasks_per_child
+        self._executor: ProcessPoolExecutor | None = None
+        self._broken = False
+
+    @property
+    def worker_count(self) -> int:
+        return self._worker_count
+
+    @property
+    def broken(self) -> bool:
+        """池已在中途损坏(BrokenProcessPool),不应再提交任务。"""
+        return self._broken
+
+    def mark_broken(self) -> None:
+        self._broken = True
+
+    @property
+    def executor(self) -> ProcessPoolExecutor:
+        if self._executor is None:
+            raise RuntimeError("PriceFeatureProcessPool 尚未 start()")
+        return self._executor
+
+    async def start(self) -> None:
+        """创建进程池并预热全部 worker(阻塞操作放线程,不卡事件循环)。
+
+        initializer / 预热失败(spawn 环境损坏、发布不可读等)在此抛出,由
+        调用方决定降级;失败后池保持未启动状态。
+        """
+        if self._executor is not None:
+            return
+        executor, warmups = await asyncio.to_thread(
+            _create_price_feature_process_executor,
+            worker_count=self._worker_count,
+            provider=self._provider,
+            max_tasks_per_child=self._max_tasks_per_child,
+        )
+        try:
+            await asyncio.gather(
+                *(asyncio.wrap_future(warmup) for warmup in warmups)
+            )
+        except BaseException:
+            await asyncio.to_thread(
+                executor.shutdown, wait=True, cancel_futures=True
+            )
+            raise
+        self._executor = executor
+
+    async def aclose(self) -> None:
+        """关闭池(shutdown 是同步 API,放线程避免卡事件循环)。幂等。
+
+        shutdown 异常(如池已 BrokenProcessPool 后的收尾失败)只记 debug 日志
+        不上抛 —— 生命周期清理不得掩盖调用方的业务结果 / 异常。
+        """
+        if self._executor is None:
+            return
+        executor, self._executor = self._executor, None
+        try:
+            await asyncio.to_thread(
+                executor.shutdown, wait=True, cancel_futures=True
+            )
+        except Exception:
+            _logger.debug(
+                "price_feature_pool.shutdown_failed",
+                exc_info=True,
+            )
+
+    async def __aenter__(self) -> PriceFeatureProcessPool:
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
 
 
 async def _build_price_feature_snapshot_in_processes(
@@ -1260,8 +1373,14 @@ async def _build_price_feature_snapshot_in_processes(
     process_workers: int,
     on_progress: Callable[[str, int, int], None] | None,
     symbols: Sequence[str] | None = None,
+    external_executor: ProcessPoolExecutor | None = None,
 ) -> FeatureSnapshot:
-    """使用独立 spawn 进程计算价格特征,不占用 API 进程的 GIL。"""
+    """使用独立 spawn 进程计算价格特征,不占用 API 进程的 GIL。
+
+    ``external_executor``(issue #288)非空时复用调用方管理的常驻池(必须以
+    同一发布初始化),本函数不再建池 / 预热 / 关池;为 None 时自建自毁(既有
+    行为,单次调用场景)。
+    """
 
     release = provider.release
     instruments = _scoped_instruments(release, symbols)
@@ -1280,11 +1399,15 @@ async def _build_price_feature_snapshot_in_processes(
             )
         )
 
-    executor, warmups = await asyncio.to_thread(
-        _create_price_feature_process_executor,
-        worker_count=worker_count,
-        provider=provider,
-    )
+    executor = external_executor
+    if executor is None:
+        executor, warmups = await asyncio.to_thread(
+            _create_price_feature_process_executor,
+            worker_count=worker_count,
+            provider=provider,
+        )
+    # 自建 / 外部常驻池二选一,此处必非 None(供闭包与 finally 收窄)。
+    assert executor is not None
     loop = asyncio.get_running_loop()
     observations_by_symbol: dict[str, list[FeatureObservation]] = {}
     done_count = 0
@@ -1310,9 +1433,10 @@ async def _build_price_feature_snapshot_in_processes(
     snapshot: FeatureSnapshot | None = None
     try:
         try:
-            await asyncio.gather(
-                *(asyncio.wrap_future(warmup) for warmup in warmups)
-            )
+            if external_executor is None:
+                await asyncio.gather(
+                    *(asyncio.wrap_future(warmup) for warmup in warmups)
+                )
             await asyncio.gather(*workers)
         except BaseException:
             for worker in workers:
@@ -1360,11 +1484,13 @@ async def _build_price_feature_snapshot_in_processes(
         )
     finally:
         # shutdown 是同步 API,放到线程中避免应用关闭/任务失败时再次卡住事件循环。
-        await asyncio.to_thread(
-            executor.shutdown,
-            wait=True,
-            cancel_futures=True,
-        )
+        # 外部常驻池(issue #288)由调用方负责生命周期,这里不关。
+        if external_executor is None:
+            await asyncio.to_thread(
+                executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
     assert snapshot is not None
     return snapshot
 
@@ -1397,12 +1523,17 @@ async def build_price_feature_snapshot(
     process_workers: int = 0,
     on_progress: Callable[[str, int, int], None] | None = None,
     symbols: Sequence[str] | None = None,
+    process_executor: ProcessPoolExecutor | None = None,
 ) -> FeatureSnapshot:
     """从 #77 冻结发布构建 ETF/多资产价格特征快照。
 
     每个标的只返回价格特征所需的轻量数据,跨标的读取使用有界 worker;
     ``process_workers`` 大于 0 时使用独立 spawn 进程,避免大量 Parquet
     解码和 Decimal 转换阻塞 API 进程;结果仍按冻结发布顺序汇总。
+
+    ``process_executor``(issue #288)非空时复用外部常驻池(见
+    :class:`PriceFeatureProcessPool`,必须以同一发布初始化),跳过每次调用
+    的建池 / 预热 / 关池开销;仅 ``process_workers > 0`` 时生效。
 
     ``symbols``(issue #254)非空时只重算命中标的——multi_period 回放声明
     ``explicit_symbols`` 时按声明域收窄,行为不变(过滤域之外的特征无消费方),
@@ -1434,6 +1565,7 @@ async def build_price_feature_snapshot(
             process_workers=process_workers,
             on_progress=on_progress,
             symbols=symbols,
+            external_executor=process_executor,
         )
 
     queue: asyncio.Queue[ReleasedInstrument] = asyncio.Queue()
@@ -1457,7 +1589,11 @@ async def build_price_feature_snapshot(
                 decision_at=decision_at,
                 adjust=release.adjustment,
             )
-            observations_by_symbol[instrument.code] = _build_price_observations(
+            # 特征计算(momentum / 波动率滚动窗口)是逐标的纯 CPU 段,经
+            # to_thread 卸载(issue #286):全市场重算时不再阻塞事件循环;
+            # IO(Parquet 解码)已由 provider 内部的 to_thread 承担。
+            observations_by_symbol[instrument.code] = await asyncio.to_thread(
+                _build_price_observations,
                 source=release.source,
                 source_version=release.version,
                 symbol=instrument.code,
@@ -1712,6 +1848,7 @@ def _require_aware(value: datetime, name: str) -> None:
 
 
 __all__ = [
+    "PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD",
     "AlphaAnalysisReport",
     "BasicRiskModel",
     "CrossMarketSnapshot",
@@ -1720,6 +1857,7 @@ __all__ = [
     "FactorPeriod",
     "MarketInputError",
     "MarketInputObservation",
+    "PriceFeatureProcessPool",
     "QuantileReturn",
     "RegimeAnalysis",
     "RiskExposure",

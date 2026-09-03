@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import time
 from collections import defaultdict
@@ -273,7 +274,10 @@ class ResearchRunCoordinator:
 
             failure_ctx.stage = "report"
             report_started = time.monotonic()
-            report = adapter.build_report(manifest, decisions)
+            # 报告构建是纯 CPU 段(指标聚合 / 会计恒等式前置计算),经
+            # asyncio.to_thread 卸载(issue #286),不阻塞事件循环线程;
+            # 协作式取消检查在随后的 DB 持久化路径上照常进行。
+            report = await asyncio.to_thread(adapter.build_report, manifest, decisions)
             self._validate_report(manifest, decisions, report)
             await self._persist_report(
                 manifest.run_id,

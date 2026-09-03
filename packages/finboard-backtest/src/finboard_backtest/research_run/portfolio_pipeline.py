@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -329,7 +330,12 @@ class PortfolioPipelineAdapter:
 
         for index, item in enumerate(self._inputs):
             try:
-                yield self._build_decision(
+                # 逐决策 CPU 密集段(组合构建 / 约束 / 风险退出 / 资金可行性 /
+                # sizing / 账本)是纯同步计算,经 asyncio.to_thread 卸载
+                # (issue #286):事件循环线程被解放,worker 心跳不被饿死。
+                # 无 session / 数据 IO 触碰;state 由本协程独占,线程间无竞争。
+                yield await asyncio.to_thread(
+                    self._build_decision,
                     manifest=manifest,
                     item=item,
                     index=index,

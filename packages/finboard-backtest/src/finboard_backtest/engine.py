@@ -20,8 +20,12 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from functools import partial
+from typing import Any
 
 import structlog
 
@@ -65,6 +69,67 @@ _KIND_MAP: dict[BrokerEventType, str] = {
     BrokerEventType.ORDER_CANCELLED: "cancelled",
     BrokerEventType.ORDER_REJECTED: "rejected",
 }
+
+
+@dataclass(slots=True)
+class _ReplayState:
+    """逐日回放的跨日可变状态(抽取自 ``run`` 本地变量,issue #286)。
+
+    回放段经 ``asyncio.to_thread`` 在工作线程执行;这些容器由该线程独占读写,
+    事件循环线程在 ``to_thread`` 返回后才读取,无并发竞争。
+    """
+
+    equity_by_date: dict[date, Decimal]
+    history_by_symbol: dict[str, list[Bar]]
+    selection_snapshots: list[FactorSnapshot]
+    active_symbols: set[str]
+    selection_pool_ever_active: bool
+    pending_snapshot: FactorSnapshot | None
+
+
+class _EventLoopBridge:
+    """工作线程同步等待事件循环 awaitable 的桥(issue #286)。
+
+    回放段经 ``asyncio.to_thread`` 卸载后,段内的 async 调用分两类:
+
+    * **快路径** —— 「同步实现被当协程 await」的纯计算协程(策略回调 /
+      BacktestBroker 查询 / 成交事件排水):在当前工作线程 ``send`` 内联驱动到
+      完成,零跨线程往返;99% 的调用走这条路径。
+    * **慢路径** —— 发生真实 await 的协程(如 factor_selector 的 AsyncSession
+      数据库读取):放弃半执行的副本,把完整协程投递回事件循环线程执行并阻塞
+      等待结果。事件循环线程因此始终空闲可跑心跳 / 维护 / 其他 job 的 IO 段,
+      且 session 只被事件循环线程触碰。
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+
+    def call(self, factory: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
+        """在调用方线程同步执行 ``factory()`` 产出的协程,返回其结果。
+
+        入参 / 返回值用具体化 ``Any``:调用点遍布策略回调(签名含 ``# type:
+        ignore``)与 broker 查询,泛型版本会让 mypy 无法推断 lambda 形参类型。
+        """
+
+        coro = factory()
+        try:
+            coro.send(None)
+        except StopIteration as stop:
+            # 协程体内部抛出的 StopIteration 已被 PEP 479 转为 RuntimeError,
+            # 这里捕获到的只能是协程正常返回。
+            return stop.value
+        except RuntimeError:
+            # 协程体依赖「运行中的事件循环」(get_running_loop / create_task 等):
+            # 不让线程内联执行变成任务失败,回事件循环线程重跑完整协程。
+            coro.close()
+            return asyncio.run_coroutine_threadsafe(factory(), self._loop).result()
+        except BaseException:
+            coro.close()
+            raise
+        # send 返回说明协程让出了控制权(真实 await):丢弃半执行的副本,
+        # 在事件循环线程重跑。纯计算副本无外部副作用,重跑安全。
+        coro.close()
+        return asyncio.run_coroutine_threadsafe(factory(), self._loop).result()
 
 
 class BacktestEngine:
@@ -155,83 +220,48 @@ class BacktestEngine:
             raise ValueError("启用因子选股时必须提供 factor_selector")
 
         # 5. 按日回放:先一次性更新全部标的行情,再派发策略回调。
-        equity_by_date: dict[date, Decimal] = {}
-        history_by_symbol: dict[str, list[Bar]] = defaultdict(list)
-        selection_snapshots: list[FactorSnapshot] = []
-        active_symbols: set[str] = set(cfg.symbols) if not cfg.selection.enabled else set()
-        selection_pool_ever_active = bool(active_symbols)
-        pending_snapshot: FactorSnapshot | None = None
+        # CPU 密集段逐日经 asyncio.to_thread 卸载(issue #286):逐日纯计算
+        # 不再阻塞事件循环线程 —— worker 心跳续约 / 维护循环 / 多 job 的 IO 段
+        # 可交错,单段长计算不再把 lease 拖到被误回收。跨日状态收拢进
+        # _ReplayState,由工作线程独占读写;段内 async 调用经 _EventLoopBridge
+        # (纯计算快路径内联,数据库慢路径回事件循环线程)。
         daily_bars = self._group_bars_by_date(all_bars)
+        bridge = _EventLoopBridge(asyncio.get_running_loop())
+        state = _ReplayState(
+            equity_by_date={},
+            history_by_symbol=defaultdict(list),
+            selection_snapshots=[],
+            active_symbols=set(cfg.symbols) if not cfg.selection.enabled else set(),
+            selection_pool_ever_active=bool(cfg.symbols) and not cfg.selection.enabled,
+            pending_snapshot=None,
+        )
 
         for index, (business_date, bars) in enumerate(daily_bars):
-            clock.advance_to(max(bar.timestamp for bar in bars))
-            for bar in bars:
-                broker.on_new_bar(bar)
-                history_by_symbol[bar.symbol.code].append(bar)
-
-            if pending_snapshot is not None and pending_snapshot.effective_date == business_date:
-                if pending_snapshot.status is FactorSnapshotStatus.PUBLISHED:
-                    active_symbols = set(pending_snapshot.selected_symbols)
-                    if active_symbols:
-                        selection_pool_ever_active = True
-                await self._notify_selection(
-                    pending_snapshot,
-                    active_symbols=active_symbols,
-                    ctx=ctx,
-                )
-
-            held_symbols = {position.symbol.code for position in await broker.query_positions()}
-            dispatch_symbols = (
-                active_symbols | held_symbols
-                if cfg.selection.enabled
-                else {bar.symbol.code for bar in bars}
+            next_business_date = (
+                daily_bars[index + 1][0] if index + 1 < len(daily_bars) else None
             )
-            for bar in bars:
-                if bar.symbol.code not in dispatch_symbols:
-                    continue
-                market_event = MarketDataEvent(
-                    type=MarketDataEventType.BAR,
-                    bar=bar,
-                )
-                try:
-                    await self._strategy.on_market_data(
-                        market_event,
-                        ctx,  # type: ignore[arg-type]
-                    )
-                except Exception:
-                    logger.exception(
-                        "backtest.strategy_error",
-                        bar_date=str(business_date),
-                        symbol=bar.symbol.code,
-                    )
-                await self._drain_order_events(broker, ctx)
-
-            # 没有入选标的时也必须投递由挂单撮合产生的订单回报。
-            await self._drain_order_events(broker, ctx)
-            equity_by_date[business_date] = broker.total_equity()
-
-            if cfg.selection.enabled and index + 1 < len(daily_bars):
-                assert self._factor_selector is not None
-                next_date = daily_bars[index + 1][0]
-                pending_snapshot = await self._factor_selector.select(
-                    config=cfg.selection,
-                    static_universe=cfg.symbols,
-                    business_date=business_date,
-                    decision_at=market_close(business_date),
-                    effective_date=next_date,
-                    price_history=history_by_symbol,
-                )
-                selection_snapshots.append(pending_snapshot)
+            await asyncio.to_thread(
+                self._replay_one_day,
+                bridge=bridge,
+                state=state,
+                cfg=cfg,
+                broker=broker,
+                clock=clock,
+                ctx=ctx,
+                business_date=business_date,
+                bars=bars,
+                next_business_date=next_business_date,
+            )
 
         # dict → 按日期排序的 list
-        equity_curve = sorted(equity_by_date.items())
+        equity_curve = sorted(state.equity_by_date.items())
 
         logger.info("backtest.completed", bars=len(all_bars))
 
         # issue #255:选股启用时归档逐期选股诊断,杜绝「整期 SKIPPED →
         # 0 交易成功」的假象(runs 273-275)。
         selection_diagnostics = self._build_selection_diagnostics(
-            selection_snapshots, selection_pool_ever_active
+            state.selection_snapshots, state.selection_pool_ever_active
         )
 
         # job 级分段耗时(issue #285):进 result payload 与 structlog。
@@ -247,7 +277,7 @@ class BacktestEngine:
             bars_by_symbol=bars_by_symbol,
             benchmark_bars=benchmark_bars,
             broker=broker,
-            selection_snapshots=selection_snapshots,
+            selection_snapshots=state.selection_snapshots,
             selection_diagnostics=selection_diagnostics,
             timing=timing,
         )
@@ -268,6 +298,97 @@ class BacktestEngine:
             "data_load_elapsed_seconds": round(data_load_elapsed, 3),
             "parquet_reads": parquet_stats.as_dict(),
         }
+
+    def _replay_one_day(
+        self,
+        *,
+        bridge: _EventLoopBridge,
+        state: _ReplayState,
+        cfg: BacktestConfig,
+        broker: BacktestBroker,
+        clock: SimulatedClock,
+        ctx: BacktestContext,
+        business_date: date,
+        bars: list[Bar],
+        next_business_date: date | None,
+    ) -> None:
+        """单个交易日的回放(纯 CPU 密集段,在 to_thread 工作线程内执行,#286)。
+
+        策略回调 / broker 查询 / 成交事件排水是「同步实现被当协程 await」,
+        经 bridge 快路径在本线程内联驱动;factor_selector 的数据库读取经慢路径
+        投递回事件循环线程 —— AsyncSession 始终只被事件循环线程触碰。
+        """
+
+        clock.advance_to(max(bar.timestamp for bar in bars))
+        for bar in bars:
+            broker.on_new_bar(bar)
+            state.history_by_symbol[bar.symbol.code].append(bar)
+
+        pending_snapshot = state.pending_snapshot
+        if pending_snapshot is not None and pending_snapshot.effective_date == business_date:
+            if pending_snapshot.status is FactorSnapshotStatus.PUBLISHED:
+                state.active_symbols = set(pending_snapshot.selected_symbols)
+                if state.active_symbols:
+                    state.selection_pool_ever_active = True
+            # mypy 不把外层 None 收窄传播进闭包:用收窄后的新名字供 lambda 捕获。
+            snapshot: FactorSnapshot = pending_snapshot
+            bridge.call(
+                lambda: self._notify_selection(
+                    snapshot,
+                    active_symbols=state.active_symbols,
+                    ctx=ctx,
+                )
+            )
+
+        held_symbols = {
+            position.symbol.code for position in bridge.call(broker.query_positions)
+        }
+        dispatch_symbols = (
+            state.active_symbols | held_symbols
+            if cfg.selection.enabled
+            else {bar.symbol.code for bar in bars}
+        )
+        for bar in bars:
+            if bar.symbol.code not in dispatch_symbols:
+                continue
+            market_event = MarketDataEvent(
+                type=MarketDataEventType.BAR,
+                bar=bar,
+            )
+            try:
+                # partial 而非闭包:market_event 是循环变量,B023 零延迟绑定
+                # 噪音没有意义 —— bridge.call 立即同步执行该工厂。ctx 与实盘
+                # StrategyContext 同形(回测桩),沿用原有 ignore。
+                bridge.call(
+                    partial(self._strategy.on_market_data, market_event, ctx)  # type: ignore[arg-type]
+                )
+            except Exception:
+                logger.exception(
+                    "backtest.strategy_error",
+                    bar_date=str(business_date),
+                    symbol=bar.symbol.code,
+                )
+            bridge.call(lambda: self._drain_order_events(broker, ctx))
+
+        # 没有入选标的时也必须投递由挂单撮合产生的订单回报。
+        bridge.call(lambda: self._drain_order_events(broker, ctx))
+        state.equity_by_date[business_date] = broker.total_equity()
+
+        if cfg.selection.enabled and next_business_date is not None:
+            assert self._factor_selector is not None
+            selector = self._factor_selector
+            pending_snapshot = bridge.call(
+                lambda: selector.select(
+                    config=cfg.selection,
+                    static_universe=cfg.symbols,
+                    business_date=business_date,
+                    decision_at=market_close(business_date),
+                    effective_date=next_business_date,
+                    price_history=state.history_by_symbol,
+                )
+            )
+            state.pending_snapshot = pending_snapshot
+            state.selection_snapshots.append(pending_snapshot)
 
     def _build_selection_diagnostics(
         self,
