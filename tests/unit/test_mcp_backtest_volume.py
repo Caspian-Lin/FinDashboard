@@ -415,6 +415,9 @@ def _fake_engine_result(selection_rows: list[SimpleNamespace]) -> SimpleNamespac
         benchmark_return=None,
         excess_return=None,
         benchmark_source=None,
+        # issue #285:job 级分段耗时与真实 BacktestResult 契约一致
+        # (None=无计时,如引擎早退;dict 时随 metrics 自然携带)。
+        timing={"total_elapsed_seconds": 0.5, "data_load_elapsed_seconds": 0.2},
         selection_diagnostics={},
         initial_capital=Decimal("100000"),
         final_equity=Decimal("101000"),

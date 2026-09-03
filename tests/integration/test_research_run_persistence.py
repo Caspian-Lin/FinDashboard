@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import cast
 
 import numpy as np
 import pytest
@@ -305,3 +306,38 @@ async def test_running_checkpoint_is_recovered_after_new_session(
     assert interrupted
     assert resumed.status is ResearchRunStatus.COMPLETED
     assert len(await store.list_artifacts(manifest.run_id)) == 14
+
+
+async def test_job_timing_round_trips_through_result_json(
+    _engine: AsyncEngine,  # noqa: PT019
+    db_session: AsyncSession,
+) -> None:
+    """issue #285:分段耗时随 result JSON 落库,重启读回后原样可见。"""
+    manifest = _manifest("ma_cross", "timing")
+    store = SqlAlchemyResearchRunStore(ResearchRunRepository(db_session))
+    record = await ResearchRunCoordinator(store).execute(
+        manifest, _adapter("ma_cross", manifest)
+    )
+
+    assert record.status is ResearchRunStatus.COMPLETED, record.error_summary
+    timing = record.timing
+    assert timing is not None
+    assert cast(int, cast(dict[str, object], timing["decision_execute"])["count"]) == 1
+    assert cast(float, timing["total_elapsed_seconds"]) >= 0
+
+    # 落库位置:timing 冗余存放在 result JSON 的 "timing" 键下;
+    # result_checksum 只锚定报告字段,与 timing 取值无关。
+    row = await ResearchRunRepository(db_session).get(manifest.run_id)
+    assert row is not None
+    assert isinstance(row.result, dict)
+    assert row.result["timing"] == timing
+    assert row.result_checksum == record.result_checksum
+
+    # 重启(新 session)读回:timing 原样可见。
+    maker = session_factory(_engine)
+    async with maker() as restarted:
+        restored = await SqlAlchemyResearchRunStore(
+            ResearchRunRepository(restarted)
+        ).get(manifest.run_id)
+        assert restored is not None
+        assert restored.timing == timing
