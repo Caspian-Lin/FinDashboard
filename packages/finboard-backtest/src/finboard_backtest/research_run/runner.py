@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
+from typing import cast
+
+import structlog
 
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.contracts import (
     RESEARCH_PORTFOLIO_PIPELINE_VERSION,
     DecisionBundle,
+    JsonValue,
     ResearchArtifact,
     ResearchConstraintViolationError,
     ResearchFillAction,
@@ -34,6 +39,9 @@ from finboard_backtest.research_run.failure_context import (
     build_failure_summary,
 )
 from finboard_backtest.research_run.store import ResearchRunStore
+from finboard_data.cache import ParquetReadJobStats, collect_parquet_read_stats
+
+logger = structlog.get_logger(__name__)
 
 _TRANSITIONS: dict[ResearchRunStatus, frozenset[ResearchRunStatus]] = {
     ResearchRunStatus.QUEUED: frozenset(
@@ -90,6 +98,68 @@ DECISION_STAGE_COUNT = len(_DECISION_STAGES)
 ProgressHook = Callable[[int, int | None, str | None], Awaitable[None]]
 
 
+@dataclass(slots=True)
+class _DecisionTiming:
+    """逐决策 execute 耗时聚合(issue #285):min/avg/max + 最慢决策日定位。"""
+
+    durations: list[float] = field(default_factory=list)
+    #: 初值 -1.0:首条记录必写入(0.0 耗时也算),平局保持最早的慢决策日。
+    slowest_seconds: float = -1.0
+    slowest_date: str | None = None
+
+    def record(self, business_date: object, elapsed_seconds: float) -> None:
+        self.durations.append(elapsed_seconds)
+        if elapsed_seconds > self.slowest_seconds:
+            self.slowest_seconds = elapsed_seconds
+            self.slowest_date = str(business_date)
+
+    def as_dict(self) -> dict[str, JsonValue]:
+        if not self.durations:
+            return {
+                "count": 0,
+                "min_seconds": 0.0,
+                "avg_seconds": 0.0,
+                "max_seconds": 0.0,
+                "slowest_decision_date": None,
+            }
+        count = len(self.durations)
+        total = sum(self.durations)
+        return {
+            "count": count,
+            "min_seconds": round(min(self.durations), 6),
+            "avg_seconds": round(total / count, 6),
+            "max_seconds": round(max(self.durations), 6),
+            "slowest_decision_date": self.slowest_date,
+        }
+
+
+def _build_run_timing(
+    *,
+    run_started: float,
+    decision_load_elapsed: float,
+    decision_timing: _DecisionTiming,
+    report_elapsed: float,
+    parquet_stats: ParquetReadJobStats,
+) -> dict[str, JsonValue]:
+    """聚合 research_run 分段耗时(issue #285)。
+
+    纯可观测性:不进 report、不进任何 artifact/checksum,只随 ``save_result``
+    落到 ``research_runs.result`` JSON 的 ``timing`` 键与 structlog。
+    """
+
+    return {
+        "total_elapsed_seconds": round(time.monotonic() - run_started, 3),
+        "decision_load_elapsed_seconds": round(decision_load_elapsed, 3),
+        "decision_execute": decision_timing.as_dict(),
+        "report_elapsed_seconds": round(report_elapsed, 3),
+        # ParquetReadJobStats.as_dict 的值只有 int/float/str/dict[str, int],
+        # 本身就是 JsonValue;finboard-data 不反向依赖研究 contracts,此处收窄。
+        "parquet_reads": cast(
+            dict[str, JsonValue], parquet_stats.as_dict()
+        ),
+    }
+
+
 class ResearchRunCoordinator:
     def __init__(self, store: ResearchRunStore) -> None:
         self._store = store
@@ -123,6 +193,9 @@ class ResearchRunCoordinator:
         # issue #263:执行期失败上下文,随循环进度逐点更新;通用收口拼入
         # error_summary 头部(专项错误分支不经此路径,保持 str(exc) 原样)。
         failure_ctx = FailureContext()
+        # issue #285:分段耗时(decision_load / 逐决策 execute / report),
+        # 只观测,不改变 artifact/checkpoint/进度上报语义。
+        run_started = time.monotonic()
         try:
             adapter.validate_manifest(manifest)
             try:
@@ -145,44 +218,61 @@ class ResearchRunCoordinator:
                 defaultdict(Decimal)
             )
             seen_fill_ids: set[str] = set()
+            decision_timing = _DecisionTiming()
+            decision_load_elapsed = 0.0
 
             # 输入构建(含 multi_period 全部期次的一次性预构建,issue #170)
             # 发生在首次迭代内,失败时尚无任何决策 —— 决策日期由 signal_engine
-            # 的加载期标记补全。
+            # 的加载期标记补全。async for 等价展开为 __anext__ 手工迭代,把
+            # 「产出下一条决策」的耗时计入 decision_load(issue #285)。
             failure_ctx.stage = "decision_load"
-            async for raw_decision in adapter.decisions(manifest):
-                live_record = await self._store.get(manifest.run_id)
-                if live_record is None:
-                    raise ResearchRunConflictError("运行记录在执行中消失")
-                if live_record.status is ResearchRunStatus.CANCELLED:
-                    return live_record
-                if live_record.status is not ResearchRunStatus.RUNNING:
-                    raise ResearchRunInterruptedError(
-                        f"运行状态变为 {live_record.status.value}"
+            decision_iterator = adapter.decisions(manifest)
+            with collect_parquet_read_stats() as parquet_stats:
+                while True:
+                    load_started = time.monotonic()
+                    try:
+                        raw_decision = await decision_iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        decision_load_elapsed += time.monotonic() - load_started
+                    execute_started = time.monotonic()
+                    live_record = await self._store.get(manifest.run_id)
+                    if live_record is None:
+                        raise ResearchRunConflictError("运行记录在执行中消失")
+                    if live_record.status is ResearchRunStatus.CANCELLED:
+                        return live_record
+                    if live_record.status is not ResearchRunStatus.RUNNING:
+                        raise ResearchRunInterruptedError(
+                            f"运行状态变为 {live_record.status.value}"
+                        )
+                    decision = self._with_decision_id(
+                        manifest.run_id, len(decisions), raw_decision
                     )
-                decision = self._with_decision_id(
-                    manifest.run_id, len(decisions), raw_decision
-                )
-                failure_ctx.stage = "decision_execute"
-                failure_ctx.decision_date = decision.business_date
-                failure_ctx.decision_index = len(decisions) + 1
-                self._validate_decision(
-                    decision,
-                    manifest=manifest,
-                    position_quantities=position_quantities,
-                    seen_fill_ids=seen_fill_ids,
-                )
-                await self._persist_decision(
-                    manifest.run_id,
-                    len(decisions),
-                    decision,
-                    progress=progress,
-                    failure_ctx=failure_ctx,
-                )
-                await self._store.checkpoint()
-                decisions.append(decision)
+                    failure_ctx.stage = "decision_execute"
+                    failure_ctx.decision_date = decision.business_date
+                    failure_ctx.decision_index = len(decisions) + 1
+                    self._validate_decision(
+                        decision,
+                        manifest=manifest,
+                        position_quantities=position_quantities,
+                        seen_fill_ids=seen_fill_ids,
+                    )
+                    await self._persist_decision(
+                        manifest.run_id,
+                        len(decisions),
+                        decision,
+                        progress=progress,
+                        failure_ctx=failure_ctx,
+                    )
+                    await self._store.checkpoint()
+                    decisions.append(decision)
+                    decision_timing.record(
+                        decision.business_date, time.monotonic() - execute_started
+                    )
 
             failure_ctx.stage = "report"
+            report_started = time.monotonic()
             report = adapter.build_report(manifest, decisions)
             self._validate_report(manifest, decisions, report)
             await self._persist_report(
@@ -192,6 +282,7 @@ class ResearchRunCoordinator:
                 progress=progress,
                 failure_ctx=failure_ctx,
             )
+            report_elapsed = time.monotonic() - report_started
             await self._store.checkpoint()
             artifacts = await self._store.list_artifacts(manifest.run_id)
             result_checksum = stable_checksum(
@@ -217,11 +308,20 @@ class ResearchRunCoordinator:
                         f" {expected_result_checksum} 不一致"
                     ),
                 )
+            timing = _build_run_timing(
+                run_started=run_started,
+                decision_load_elapsed=decision_load_elapsed,
+                decision_timing=decision_timing,
+                report_elapsed=report_elapsed,
+                parquet_stats=parquet_stats,
+            )
             await self._store.save_result(
                 manifest.run_id,
                 report=report,
                 result_checksum=result_checksum,
+                timing=timing,
             )
+            logger.info("research_run.timing", run_id=manifest.run_id, **timing)
             await self._store.checkpoint()
             completed = await self._transition(
                 manifest.run_id,

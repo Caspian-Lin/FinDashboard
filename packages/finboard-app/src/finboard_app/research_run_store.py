@@ -93,9 +93,14 @@ class SqlAlchemyResearchRunStore(ResearchRunStore):
         *,
         report: ResearchRunReport,
         result_checksum: str,
+        timing: dict[str, JsonValue] | None = None,
     ) -> ResearchRunRecord:
         payload = to_json_value(report)
         assert isinstance(payload, dict)
+        if timing is not None:
+            # issue #285:分段耗时与 report 同存于 result JSON,但不是 report
+            # 字段、不参与任何 artifact/checksum(重放耗时不同不判漂移)。
+            payload = {**payload, "timing": timing}
         try:
             row = await self._repository.save_result(
                 run_id,
@@ -150,6 +155,11 @@ def _record_from_model(row: object) -> ResearchRunRecord:
 
     assert isinstance(row, ResearchRunModel)
     manifest = manifest_from_json(row.manifest)
+    # issue #285:result JSON 中的 "timing" 键不是 report 字段(report_from_json
+    # 忽略未知键),读回时单独提取挂到 record 上。
+    raw_result = row.result if isinstance(row.result, dict) else {}
+    timing_raw = raw_result.get("timing")
+    timing = dict(timing_raw) if isinstance(timing_raw, dict) else None
     return ResearchRunRecord(
         manifest=manifest,
         status=ResearchRunStatus(row.status),
@@ -162,6 +172,7 @@ def _record_from_model(row: object) -> ResearchRunRecord:
         started_at=row.started_at,
         completed_at=row.completed_at,
         updated_at=row.updated_at,
+        timing=cast(dict[str, JsonValue] | None, timing),
     )
 
 
