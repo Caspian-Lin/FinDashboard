@@ -62,10 +62,12 @@ def test_dev_no_worker_skips_spawn(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_dev_worker_process_is_stopped_on_exit(tmp_path: Path) -> None:
     """dev 退出时必须与 Vite 一样回收 worker 子进程(不留孤儿进程)。"""
-    from finboard_app.cli import dev
+    from finboard_app.cli import _WORKER_STOP_FALLBACK_GRACE_SECONDS, dev
+    from finboard_app.config import Settings
 
     ctx = MagicMock()
-    ctx.obj = MagicMock()
+    # settings 必须是真实 Settings:worker 停机宽限(#307)从 settings 读取。
+    ctx.obj = Settings()
     thread = MagicMock()
     worker_process = MagicMock(spec=subprocess.Popen)
 
@@ -81,7 +83,14 @@ def test_dev_worker_process_is_stopped_on_exit(tmp_path: Path) -> None:
     ):
         dev(ctx, host="127.0.0.1", port=8000, web_dir=tmp_path)
 
-    stop_process.assert_any_call(worker_process)
+    # worker 停机走 #307 优雅路径:settings 宽限默认 0 → dev 给 10s 兜底窗口
+    # (先 CTRL_BREAK/SIGTERM 后强杀);Vite 仍走默认参数。
+    stop_process.assert_any_call(
+        worker_process,
+        graceful_seconds=_WORKER_STOP_FALLBACK_GRACE_SECONDS,
+    )
+    # 本用例前端线程被 mock(frontend_holder 为空),只发生 worker 这一次回收。
+    assert stop_process.call_count == 1
 
 
 @pytest.mark.unit
@@ -101,18 +110,28 @@ def test_stop_dev_process_kills_real_child() -> None:
     """真实子进程验证:stop 后进程树退出,不留下孤儿进程(Windows + Unix)。
 
     用无害的 sleep 子进程验证回收逻辑,避免在测试期间拉起真实 worker
-    连接开发数据库。
+    连接开发数据库。子进程按 dev/supervisor 相同的进程组形态托管:
+    graceful>0 先发优雅信号(Windows CTRL_BREAK / POSIX SIGTERM),子进程
+    自行退出,不强杀(issue #307)。
     """
+    import subprocess as sp
     import sys
     import time
 
     from finboard_app.cli import _stop_dev_process
 
-    process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)"]
-    )
+    if sys.platform == "win32":
+        process = sp.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            creationflags=sp.CREATE_NEW_PROCESS_GROUP,
+        )
+    else:
+        process = sp.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
     try:
-        _stop_dev_process(process, timeout=3.0)
+        _stop_dev_process(process, graceful_seconds=10.0)
     finally:
         if process.poll() is None:
             process.kill()
@@ -125,16 +144,17 @@ def test_stop_dev_process_kills_real_child() -> None:
 
 @pytest.mark.unit
 def test_stop_dev_process_uses_windows_process_tree_fallback() -> None:
-    """Windows 按精确 PID 清理 Vite 子进程树。"""
+    """Windows graceful=0(或优雅超时)按精确 PID 清理整棵子进程树。"""
     from finboard_app.cli import _stop_dev_process
 
     process = MagicMock(spec=subprocess.Popen)
     process.pid = 12345
+    process.poll.return_value = None
     with (
         patch("finboard_app.cli.sys.platform", "win32"),
         patch("finboard_app.cli.subprocess.run") as run,
     ):
-        _stop_dev_process(process, timeout=0.01)
+        _stop_dev_process(process, graceful_seconds=0.0)
 
     run.assert_called_once_with(
         ["taskkill", "/PID", "12345", "/T", "/F"],

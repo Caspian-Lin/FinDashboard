@@ -116,6 +116,7 @@ class TestSuperviseWorkerProcesses:
 
         # 子进程捕获 SIGTERM(POSIX)/忽略友好信号后仍会被 kill 兜底;
         # Windows TerminateProcess 本身不可拦截,直接验证收敛路径返回 0。
+        # grace=0(默认)走「立即 terminate + 兜底窗口」路径(#307)。
         stubborn = [sys.executable, "-c", "import time; time.sleep(30)"]
         calls = {"n": 0}
 
@@ -125,7 +126,7 @@ class TestSuperviseWorkerProcesses:
                 raise KeyboardInterrupt
 
         with (
-            patch("finboard_app.cli._WORKER_CHILD_TERMINATE_GRACE_SECONDS", 1.0),
+            patch("finboard_app.cli._WORKER_STOP_FALLBACK_GRACE_SECONDS", 1.0),
             patch("finboard_app.cli.time.sleep", side_effect=interrupting_sleep),
         ):
             code = cli._supervise_worker_processes(stubborn, 1)
