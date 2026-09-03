@@ -348,6 +348,10 @@ class TestSupervisorGrace:
 
     @pytest.mark.unit
     @pytest.mark.timeout(30)
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="断言 Windows CTRL_BREAK 优雅收敛;patch time.sleep 与 POSIX 收敛轮询相互干扰会挂死,POSIX 路径由 #316 单测与真实子进程集成测试覆盖",
+    )
     def test_supervisor_graceful_signal_converges_children(self) -> None:
         """supervisor grace>0:先发优雅信号,子进程自行收敛 → 退出码 0。"""
 
