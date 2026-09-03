@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import time
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -212,6 +214,26 @@ def _record_job_read(entry: str, *, elapsed_ms: float, size_bytes: int) -> None:
         stats.record(entry, elapsed_ms=elapsed_ms, size_bytes=size_bytes)
 
 
+#: 进程内读缓存的默认元素上限(bars 与 close 点位合并计数,LRU 驱逐)。
+#: 内存护栏:约 2e6 根日线 Bar 最坏情形数百 MB;典型日频文件 ~250 根,
+#: 足以容纳数千只标的的全区间工作集(multi_period 回放逐期扫描全部标的,
+#: 缓存容量须 ≥ 工作集才不抖动)。置 0 关闭缓存。
+DEFAULT_READ_CACHE_MAX_ELEMENTS = 2_000_000
+
+#: 读缓存条目种类(bars / close 点位),参与缓存键。
+_READ_CACHE_KIND_BARS = "bars"
+_READ_CACHE_KIND_CLOSE_POINTS = "close_points"
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadCacheEntry:
+    """进程内读缓存条目:反序列化结果 + 元素计数(bars / 点位二选一)。"""
+
+    bars: list[Bar] | None
+    points: list[tuple[datetime, Decimal]] | None
+    elements: int
+
+
 class ParquetCache:
     """基于 parquet 文件的本地行情缓存。
 
@@ -224,9 +246,14 @@ class ParquetCache:
         cache_dir: str | Path = "data_cache",
         *,
         max_io_concurrency: int = 1,
+        read_cache_max_elements: int | None = None,
     ) -> None:
         if max_io_concurrency < 1:
             raise ValueError("max_io_concurrency 必须 >= 1")
+        if read_cache_max_elements is None:
+            read_cache_max_elements = DEFAULT_READ_CACHE_MAX_ELEMENTS
+        if read_cache_max_elements < 0:
+            raise ValueError("read_cache_max_elements 必须 >= 0")
         self._dir = Path(cache_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._io_semaphore = asyncio.Semaphore(max_io_concurrency)
@@ -234,6 +261,61 @@ class ParquetCache:
         self._read_bytes = 0
         self._write_ops = 0
         self._write_bytes = 0
+        # issue #287:进程内读缓存(实例作用域)。键含文件 size + mtime_ns,
+        # 任何写入(本实例 write / 外部进程改写)都会因键变化自然失效;
+        # write 后再显式丢弃同路径条目,避免陈旧条目占用内存等 LRU 驱逐。
+        self._read_cache_max_elements = read_cache_max_elements
+        self._read_cache: OrderedDict[
+            tuple[str, int, int, str], _ReadCacheEntry
+        ] = OrderedDict()
+        self._read_cache_elements = 0
+        self._read_cache_hits = 0
+
+    # ---- 进程内读缓存(LRU)------------------------------------------------
+
+    @staticmethod
+    def _read_cache_key(
+        path: Path, stat: os.stat_result, kind: str
+    ) -> tuple[str, int, int, str]:
+        return (str(path), stat.st_size, stat.st_mtime_ns, kind)
+
+    def _read_cache_get(self, key: tuple[str, int, int, str]) -> _ReadCacheEntry | None:
+        entry = self._read_cache.get(key)
+        if entry is None:
+            return None
+        self._read_cache.move_to_end(key)
+        self._read_cache_hits += 1
+        return entry
+
+    def _read_cache_put(
+        self, key: tuple[str, int, int, str], entry: _ReadCacheEntry
+    ) -> None:
+        if entry.elements > self._read_cache_max_elements:
+            # 单文件超过整个缓存预算:不缓存(避免把其它条目全部挤掉)。
+            return
+        while (
+            self._read_cache
+            and self._read_cache_elements + entry.elements > self._read_cache_max_elements
+        ):
+            _, evicted = self._read_cache.popitem(last=False)
+            self._read_cache_elements -= evicted.elements
+        self._read_cache[key] = entry
+        self._read_cache_elements += entry.elements
+
+    def _read_cache_drop_path(self, path: Path) -> None:
+        """丢弃某路径的全部缓存条目(write 后调用,防陈旧条目滞留)。"""
+        prefix = str(path)
+        for key in [item for item in self._read_cache if item[0] == prefix]:
+            entry = self._read_cache.pop(key)
+            self._read_cache_elements -= entry.elements
+
+    def read_cache_info(self) -> dict[str, int]:
+        """进程内读缓存概况(观测 / 测试用):条目数、元素数、命中次数。"""
+        return {
+            "entries": len(self._read_cache),
+            "elements": self._read_cache_elements,
+            "hits": self._read_cache_hits,
+        }
 
     def _path(self, symbol: Symbol, period: BarPeriod, adjust: str) -> Path:
         return self._dir / f"{symbol.code}_{period.value}_{adjust}.parquet"
@@ -244,15 +326,37 @@ class ParquetCache:
         period: BarPeriod,
         adjust: str,
     ) -> list[Bar]:
-        """读取缓存;文件不存在时返回空列表。"""
+        """读取缓存;文件不存在时返回空列表。
+
+        进程内读缓存(issue #287):同一文件(键 = 路径 + size + mtime_ns)
+        的重复读取直接返回上次反序列化结果,不再重读磁盘。命中与否通过
+        debug 日志的 ``cache_hit`` 字段可见。返回值为缓存列表的浅拷贝,
+        调用方的就地修改不影响缓存。
+        """
         path = self._path(symbol, period, adjust)
         if not path.exists():
             return []
-        _initialize_pyarrow()
-        size = path.stat().st_size
+        stat = path.stat()
+        key = self._read_cache_key(path, stat, _READ_CACHE_KIND_BARS)
         started = time.monotonic()
+        entry = self._read_cache_get(key)
+        if entry is not None and entry.bars is not None:
+            logger.debug(
+                "parquet_cache.read",
+                path=str(path),
+                bytes=stat.st_size,
+                bars=len(entry.bars),
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                cache_hit=True,
+            )
+            return list(entry.bars)
+        _initialize_pyarrow()
+        size = stat.st_size
         async with self._io_semaphore:
             bars = await asyncio.to_thread(self._read_sync, path, symbol, period)
+        self._read_cache_put(
+            key, _ReadCacheEntry(bars=bars, points=None, elements=len(bars))
+        )
         self._read_ops += 1
         self._read_bytes += size
         elapsed_ms = round((time.monotonic() - started) * 1000, 2)
@@ -263,8 +367,9 @@ class ParquetCache:
             bytes=size,
             bars=len(bars),
             elapsed_ms=elapsed_ms,
+            cache_hit=False,
         )
-        return bars
+        return list(bars)
 
     async def read_close_points(
         self,
@@ -280,23 +385,58 @@ class ParquetCache:
         特征快照不需要 OHLCV 的其余字段。保留独立读取入口可以避免为每条
         历史行情创建完整 ``Bar``/``Decimal`` 对象,同时不改变通用 ``read``
         的返回契约。
+
+        进程内读缓存(issue #287):缓存整文件的 timestamp/close 点位,请求
+        区间在缓存之后内存裁剪(与逐次读取的日期过滤同口径),multi_period
+        回放逐期重复读取同一文件时命中缓存,``cache_hit`` debug 日志可见。
         """
 
         path = self._path(symbol, period, adjust)
         if not path.exists():
             return []
-        _initialize_pyarrow()
-        size = path.stat().st_size
+        stat = path.stat()
+        key = self._read_cache_key(path, stat, _READ_CACHE_KIND_CLOSE_POINTS)
         started = time.monotonic()
+        entry = self._read_cache_get(key)
+        if entry is not None and entry.points is not None:
+            points = [
+                item
+                for item in entry.points
+                if (start is None or item[0].date() >= start)
+                and (end is None or item[0].date() <= end)
+            ]
+            logger.debug(
+                "parquet_cache.read_close_points",
+                path=str(path),
+                bytes=stat.st_size,
+                points=len(points),
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                cache_hit=True,
+            )
+            return points
+        _initialize_pyarrow()
+        size = stat.st_size
         async with self._io_semaphore:
-            points = await asyncio.to_thread(
+            # 未命中时一次读取整文件点位并整份进缓存(区间裁剪在内存做),
+            # 后续任意区间 / 下一期的读取不再触盘。
+            full_points = await asyncio.to_thread(
                 self._read_close_points_sync,
                 path,
                 symbol,
                 period,
-                start,
-                end,
+                None,
+                None,
             )
+        self._read_cache_put(
+            key,
+            _ReadCacheEntry(bars=None, points=full_points, elements=len(full_points)),
+        )
+        points = [
+            item
+            for item in full_points
+            if (start is None or item[0].date() >= start)
+            and (end is None or item[0].date() <= end)
+        ]
         self._read_ops += 1
         self._read_bytes += size
         elapsed_ms = round((time.monotonic() - started) * 1000, 2)
@@ -307,6 +447,7 @@ class ParquetCache:
             bytes=size,
             points=len(points),
             elapsed_ms=elapsed_ms,
+            cache_hit=False,
         )
         return points
 
@@ -324,21 +465,32 @@ class ParquetCache:
         # 外层已经限制并发;禁止 Arrow 再启动内部 I/O 线程池放大磁盘压力。
         table = pq.read_table(path, use_threads=False, pre_buffer=False)
         col_names = set(table.column_names)
+        # issue #287:按列提取(每列一次 to_pylist),避免逐行 dict 构造的
+        # 开销;缺列 / 空值语义与逐行读取保持一致(volume/amount 缺列按 0,
+        # source 缺列按空串,列存在但值为 None 时 str(None) 报错行为不变)。
+        timestamps = table.column("timestamp").to_pylist()
+        opens = table.column("open").to_pylist()
+        highs = table.column("high").to_pylist()
+        lows = table.column("low").to_pylist()
+        closes = table.column("close").to_pylist()
+        volumes = table.column("volume").to_pylist() if "volume" in col_names else None
+        amounts = table.column("amount").to_pylist() if "amount" in col_names else None
+        sources = table.column("source").to_pylist() if "source" in col_names else None
         bars: list[Bar] = []
-        for row in table.to_pylist():
-            dt = _normalise_timestamp(row["timestamp"], symbol, period)
+        for index, raw_timestamp in enumerate(timestamps):
+            dt = _normalise_timestamp(raw_timestamp, symbol, period)
             bars.append(
                 Bar(
                     symbol=symbol,
                     period=period,
                     timestamp=dt,
-                    open=Decimal(str(row["open"])),
-                    high=Decimal(str(row["high"])),
-                    low=Decimal(str(row["low"])),
-                    close=Decimal(str(row["close"])),
-                    volume=Decimal(str(row.get("volume", 0))),
-                    amount=Decimal(str(row.get("amount", 0))),
-                    source=str(row.get("source", "")) if "source" in col_names else "",
+                    open=Decimal(str(opens[index])),
+                    high=Decimal(str(highs[index])),
+                    low=Decimal(str(lows[index])),
+                    close=Decimal(str(closes[index])),
+                    volume=Decimal(str(0 if volumes is None else volumes[index])),
+                    amount=Decimal(str(0 if amounts is None else amounts[index])),
+                    source="" if sources is None else str(sources[index]),
                 )
             )
         bars.sort(key=lambda b: b.timestamp)
@@ -412,6 +564,8 @@ class ParquetCache:
         started = time.monotonic()
         async with self._io_semaphore:
             await asyncio.to_thread(self._write_sync, path, bars, covered_ranges)
+        # write 覆盖文件:立即丢弃该路径的进程内读缓存条目(防陈旧滞留)。
+        self._read_cache_drop_path(path)
         size = path.stat().st_size
         self._write_ops += 1
         self._write_bytes += size
