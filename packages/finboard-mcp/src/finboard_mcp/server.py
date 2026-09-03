@@ -168,6 +168,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   factor_catalog 是混合目录(#217):builtin(26 因子,origin=builtin)+
   user_defined(沙箱执行的自定义因子,标注 artifact commit/status/promotion_status,
   引用名 u_<artifact_name>,仅 status=active 且 promotion_status=passed 可被规格引用)。
+  feature_snapshot_list 默认 header-only(#309):只回 snapshot_id/decision_at/
+  source_run_id/dataset_release_id/feature_names/symbol_count/observation_count
+  等头部与覆盖统计,不含 observations(大快照单条 MB 级,全量会被客户端截断);
+  完整值走 feature_snapshot_get 单查或 include_observations=true(旧行为)。
+  source_run_id 过滤一条查询完成 RCR→快照映射(原需逐个单查),REST
+  /api/research/factors/features 同步(source_run_id / include_observations)。
 - 策略规格(16,✅ #126):strategy registry/template/list/history/version_get/
   diff、preset list/get(只读);strategy validate(纯计算)/draft_create/
   supersede/publish/rollback、preset create/update/delete(写操作)。

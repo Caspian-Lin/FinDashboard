@@ -449,12 +449,19 @@ status=active 且 promotion_status=passed 可被规格引用**(retired/未晋级
 - builtin 部分无 DB 依赖;user_defined 查 `research_code_artifacts` 表。
 
 ### finboard_feature_snapshot_list
-列出已发布的特征快照(版本化、时点化、不可变)。
-- 参数:`dataset_release_id?: str`、`limit?: int = 100`
-- 返回:`list[{snapshot_id, dataset_release_id, decision_at, checksum, observations, ...}]`
+列出特征快照(版本化、时点化、不可变)。**默认 header-only(#309)**:
+不含 observations 逐条值——大快照单条可达 MB 级,默认全量会被 MCP 客户端截断。
+- 参数:`dataset_release_id?: str`、
+  `source_run_id?: str`(按产出 run 精确过滤,**RCR→快照映射一条查询完成**,
+  替代逐个单查)、`include_observations?: bool = false`(显式 true 才返回
+  完整 observations,旧行为,响应大)、`limit?: int = 100`
+- 返回(header):`list[{snapshot_id, dataset_release_id, source_run_id,
+  decision_at, published_at, framework_version, feature_names, symbol_count,
+  observation_count, code_version, checksum, ...}]`
+  (include_observations=true 时每条另含 observations)
 
 ### finboard_feature_snapshot_get
-查询单个特征快照详情(含完整 observations 因子值)。
+查询单个特征快照详情(含完整 observations 因子值;list 瘦身后取全量的常规路径)。
 - 参数:`snapshot_id: str`
 - 返回:`{snapshot_id, ..., observations, checksum}`;未找到返回 `not_found`。
 

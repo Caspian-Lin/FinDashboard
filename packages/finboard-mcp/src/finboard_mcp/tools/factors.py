@@ -207,24 +207,52 @@ async def feature_snapshot_list(
     app: McpAppContext,
     *,
     dataset_release_id: str | None = None,
+    source_run_id: str | None = None,
+    include_observations: bool = False,
     limit: int = 100,
 ) -> ToolEnvelope:
+    """列出特征快照(issue #309:默认 header-only)。
+
+    默认走 ``list_headers`` 头部投影(覆盖统计取表列,不读 payload JSON,
+    响应 KB 级);``include_observations=true`` 兼容旧全量行为;
+    ``source_run_id`` 一条查询完成 RCR→快照映射(原需逐个单查)。
+    """
+
     async def _do() -> list[dict[str, Any]]:
         from finboard_persistence import FeatureSnapshotRepository
 
         safe_limit = max(1, min(500, limit))
         async with app.session_maker() as session:
             repo = FeatureSnapshotRepository(session)
-            snapshots = await repo.list(
+            if include_observations:
+                snapshots = await repo.list(
+                    dataset_release_id=dataset_release_id,
+                    source_run_id=source_run_id,
+                    limit=safe_limit,
+                )
+                return [
+                    cast(dict[str, Any], to_jsonable(s.as_dict()))
+                    for s in snapshots
+                ]
+            headers = await repo.list_headers(
                 dataset_release_id=dataset_release_id,
+                source_run_id=source_run_id,
                 limit=safe_limit,
             )
-            return [cast(dict[str, Any], to_jsonable(s.as_dict())) for s in snapshots]
+            return [
+                cast(dict[str, Any], to_jsonable(header.as_dict()))
+                for header in headers
+            ]
 
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.feature_snapshot.list",
-        arguments={"dataset_release_id": dataset_release_id, "limit": limit},
+        arguments={
+            "dataset_release_id": dataset_release_id,
+            "source_run_id": source_run_id,
+            "include_observations": include_observations,
+            "limit": limit,
+        },
         handler=_do,
     )
 
@@ -679,19 +707,30 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_feature_snapshot_list",
         description=(
-            "列出已发布的特征快照(版本化、时点化、不可变)。"
-            "每条含 snapshot_id/dataset_release_id/decision_at/checksum/"
-            "observations 等。可选过滤 dataset_release_id / limit(默认 100)。"
+            "列出特征快照(版本化、时点化、不可变)。默认 header-only(#309):"
+            "每条只含 snapshot_id/dataset_release_id/source_run_id/decision_at/"
+            "framework_version/feature_names/symbol_count/observation_count/"
+            "checksum 等头部与覆盖统计,不含 observations 逐条值——大快照单条"
+            "可达 MB 级,默认全量会被 MCP 客户端截断;完整 observations 用 "
+            "finboard_feature_snapshot_get 单查,或显式 include_observations=true"
+            "(旧行为,响应大)。可选过滤 dataset_release_id / source_run_id / "
+            "limit(默认 100)。"
+            "RCR→快照映射:传 source_run_id(如 'RCR-xxxx')一条查询即得该 "
+            "run 产出的沙箱因子快照,替代逐个单查。"
         ),
     )
     async def _feature_snapshot_list(
         dataset_release_id: str | None = None,
+        source_run_id: str | None = None,
+        include_observations: bool = False,
         limit: int = 100,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await feature_snapshot_list(
             app_context(ctx),
             dataset_release_id=dataset_release_id,
+            source_run_id=source_run_id,
+            include_observations=include_observations,
             limit=limit,
         )
 

@@ -763,14 +763,14 @@ function FeaturesTab() {
                                   ))}
                                 </div>
                               </div>
-                              {snap.issues.length > 0 && (
+                              {(snap.issues ?? []).length > 0 && (
                                 <Alert variant="warning">
                                   <AlertTitle>{tl({ zh: "质量提示", en: "Quality notes" })}</AlertTitle>
-                                  <AlertDescription>{snap.issues.join("；")}</AlertDescription>
+                                  <AlertDescription>{(snap.issues ?? []).join("；")}</AlertDescription>
                                 </Alert>
                               )}
                               <p className="text-xs text-muted-foreground">
-                                {tl({ zh: "计算窗口：", en: "Calculation windows: " })}{Object.entries(snap.calculation_windows)
+                                {tl({ zh: "计算窗口：", en: "Calculation windows: " })}{Object.entries(snap.calculation_windows ?? {})
                                   .map(([name, window]) => tl({ zh: `${name}=${window}日`, en: `${name}=${window}d` }))
                                   .join(" · ") || tl({ zh: "无", en: "none" })}
                                 {tl({ zh: "· 代码版本 ", en: "· code version " })}<span className="font-mono">{snap.code_version}</span>

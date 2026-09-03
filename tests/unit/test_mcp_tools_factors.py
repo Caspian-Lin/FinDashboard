@@ -237,6 +237,25 @@ class TestFeatureSnapshotList:
     async def test_returns_snapshots(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """#309 起默认 header-only,走 ``list_headers`` 头部投影。"""
+        app = _make_app()
+        from finboard_persistence import FeatureSnapshotRepository
+
+        monkeypatch.setattr(
+            FeatureSnapshotRepository,
+            "list_headers",
+            lambda self, **kw: _async_return([_snapshot_domain()]),
+        )
+        env = await factor_tools.feature_snapshot_list(app)
+        assert env.status == "ok"
+        assert isinstance(env.data, list)
+        assert env.data[0]["snapshot_id"] == "FSS-1"
+        assert "observations" not in env.data[0]
+
+    async def test_returns_snapshots_with_observations(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """include_observations=true 兼容旧全量行为(#309)。"""
         app = _make_app()
         from finboard_persistence import FeatureSnapshotRepository
 
@@ -245,7 +264,9 @@ class TestFeatureSnapshotList:
             "list",
             lambda self, **kw: _async_return([_snapshot_domain()]),
         )
-        env = await factor_tools.feature_snapshot_list(app)
+        env = await factor_tools.feature_snapshot_list(
+            app, include_observations=True
+        )
         assert env.status == "ok"
         assert isinstance(env.data, list)
         assert env.data[0]["snapshot_id"] == "FSS-1"
@@ -256,7 +277,7 @@ class TestFeatureSnapshotList:
 
         monkeypatch.setattr(
             FeatureSnapshotRepository,
-            "list",
+            "list_headers",
             lambda self, **kw: _async_return([]),
         )
         await factor_tools.feature_snapshot_list(app)

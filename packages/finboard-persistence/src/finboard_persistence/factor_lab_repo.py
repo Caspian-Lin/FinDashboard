@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING
+
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +36,56 @@ from finboard_persistence.validation_repo import (
     ResearchExperimentRepository,
     ResearchTrialRepository,
 )
+
+if TYPE_CHECKING:
+    # 类体内同名方法 ``FeatureSnapshotRepository.list`` 会遮蔽内建 ``list``,
+    # 使后续方法注解 ``list[...]`` 被解析为该方法;mypy 检查期用内建模块消歧。
+    import builtins
+
+
+@dataclass(frozen=True)
+class FeatureSnapshotHeader:
+    """特征快照头部投影(issue #309)。
+
+    list 视图的轻量读模型:字段全部来自 ``factor_feature_snapshots``
+    列(含 ``feature_names`` / ``symbol_count`` / ``observation_count``
+    覆盖统计),**不含 observations 逐条值**——大快照单条 payload 可达
+    MB 级,header-only 让列表响应保持在 KB 级;逐条值仍走
+    ``FeatureSnapshotRepository.get``(全量)。
+    """
+
+    snapshot_id: str
+    dataset_release_id: str | None
+    source_run_id: str | None
+    dataset_release_checksum: str
+    decision_at: datetime
+    published_at: datetime
+    framework_version: str
+    feature_names: list[str]
+    symbol_count: int
+    observation_count: int
+    code_version: str
+    checksum: str
+    created_at: datetime | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "snapshot_id": self.snapshot_id,
+            "dataset_release_id": self.dataset_release_id,
+            "source_run_id": self.source_run_id,
+            "dataset_release_checksum": self.dataset_release_checksum,
+            "decision_at": self.decision_at.isoformat(),
+            "published_at": self.published_at.isoformat(),
+            "framework_version": self.framework_version,
+            "feature_names": list(self.feature_names),
+            "symbol_count": self.symbol_count,
+            "observation_count": self.observation_count,
+            "code_version": self.code_version,
+            "checksum": self.checksum,
+        }
+        if self.created_at is not None:
+            payload["created_at"] = self.created_at.isoformat()
+        return payload
 
 
 class FeatureSnapshotRepository:
@@ -94,6 +148,7 @@ class FeatureSnapshotRepository:
         self,
         *,
         dataset_release_id: str | None = None,
+        source_run_id: str | None = None,
         limit: int = 100,
     ) -> list[FeatureSnapshot]:
         statement = select(FactorFeatureSnapshotModel)
@@ -102,11 +157,77 @@ class FeatureSnapshotRepository:
                 FactorFeatureSnapshotModel.dataset_release_id
                 == dataset_release_id
             )
+        if source_run_id is not None:
+            # issue #309:按产出 run(RCR-)过滤,RCR→快照映射一条查询完成。
+            statement = statement.where(
+                FactorFeatureSnapshotModel.source_run_id == source_run_id
+            )
         statement = statement.order_by(
             FactorFeatureSnapshotModel.decision_at.desc()
         ).limit(limit)
         rows = (await self._session.execute(statement)).scalars().all()
         return [FeatureSnapshot.from_dict(row.payload) for row in rows]
+
+    async def list_headers(
+        self,
+        *,
+        dataset_release_id: str | None = None,
+        source_run_id: str | None = None,
+        limit: int = 100,
+    ) -> builtins.list[FeatureSnapshotHeader]:
+        """header-only 列表(issue #309):不读 payload JSON 列。
+
+        过滤条件 / 排序 / limit 与 :meth:`list` 完全一致;字段只投影
+        ``factor_feature_snapshots`` 表列,覆盖统计(feature_names /
+        symbol_count / observation_count)直接取发布时落库的现成列,
+        不把 observations 拉回内存再数。
+        """
+        statement = select(
+            FactorFeatureSnapshotModel.snapshot_id,
+            FactorFeatureSnapshotModel.dataset_release_id,
+            FactorFeatureSnapshotModel.source_run_id,
+            FactorFeatureSnapshotModel.dataset_release_checksum,
+            FactorFeatureSnapshotModel.decision_at,
+            FactorFeatureSnapshotModel.published_at,
+            FactorFeatureSnapshotModel.framework_version,
+            FactorFeatureSnapshotModel.feature_names,
+            FactorFeatureSnapshotModel.symbol_count,
+            FactorFeatureSnapshotModel.observation_count,
+            FactorFeatureSnapshotModel.code_version,
+            FactorFeatureSnapshotModel.checksum,
+            FactorFeatureSnapshotModel.created_at,
+        )
+        if dataset_release_id is not None:
+            statement = statement.where(
+                FactorFeatureSnapshotModel.dataset_release_id
+                == dataset_release_id
+            )
+        if source_run_id is not None:
+            statement = statement.where(
+                FactorFeatureSnapshotModel.source_run_id == source_run_id
+            )
+        statement = statement.order_by(
+            FactorFeatureSnapshotModel.decision_at.desc()
+        ).limit(limit)
+        rows = (await self._session.execute(statement)).all()
+        return [
+            FeatureSnapshotHeader(
+                snapshot_id=row.snapshot_id,
+                dataset_release_id=row.dataset_release_id,
+                source_run_id=row.source_run_id,
+                dataset_release_checksum=row.dataset_release_checksum,
+                decision_at=row.decision_at,
+                published_at=row.published_at,
+                framework_version=row.framework_version,
+                feature_names=list(row.feature_names),
+                symbol_count=row.symbol_count,
+                observation_count=row.observation_count,
+                code_version=row.code_version,
+                checksum=row.checksum,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
 
     async def _model(
         self,
