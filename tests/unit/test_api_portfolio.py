@@ -107,6 +107,102 @@ class TestAllocateEndpoint:
         assert data["covariance_shrinkage"] is not None
         assert 0 <= data["covariance_shrinkage"] <= 1
 
+    def test_max_ir_with_returns(self, client: TestClient) -> None:
+        """issue #266:max_ir 方法经 REST 可运行,权重满足预算与上限。"""
+        import numpy as np
+
+        rng = np.random.default_rng(266)
+        resp = client.post("/api/portfolio/allocate", json={
+            "signals": [
+                {"symbol": "A", "score": 1.0},
+                {"symbol": "B", "score": 0.8},
+                {"symbol": "C", "score": 0.5},
+            ],
+            "method": "max_ir",
+            "as_of": "2024-06-28",
+            "min_cash_buffer": 0.0,
+            "max_weight_per_asset": 0.6,
+            "max_weight_per_sleeve": 0.9,
+            "returns_by_ticker": {
+                "A": (rng.standard_normal(100) * 0.01).tolist(),
+                "B": (rng.standard_normal(100) * 0.02).tolist(),
+                "C": (rng.standard_normal(100) * 0.03).tolist(),
+            },
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        weight_map = {w["code"]: w["weight"] for w in data["weights"]}
+        assert weight_map
+        assert all(weight <= 0.6 + 1e-9 for weight in weight_map.values())
+        assert data["gross_weight"] <= 1.0 + 1e-9
+
+    def test_risk_factor_neutralization_projection(self, client: TestClient) -> None:
+        """issue #266:风险因子 active 暴露上限经 REST 生效并逐项审计。"""
+        resp = client.post("/api/portfolio/allocate", json={
+            "signals": [
+                {"symbol": "A", "score": 1.0},
+                {"symbol": "B", "score": 1.0},
+            ],
+            "method": "equal_weight",
+            "as_of": "2024-06-28",
+            "min_cash_buffer": 0.0,
+            "max_weight_per_asset": 1.0,
+            "max_weight_per_sleeve": 1.0,
+            "risk_factor_limits": [
+                {"factor": "market_beta", "max_active_exposure": 0.1},
+            ],
+            "factor_exposures": {
+                "market_beta": {"A": 1.0, "B": 1.0},
+            },
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        row = next(
+            item
+            for item in data["adjustments"]
+            if item["constraint"] == "risk_factor_neutralization"
+        )
+        assert row["passed"] is True
+        assert row["before_value"] == pytest.approx(1.0, abs=1e-9)
+        assert row["after_value"] <= 0.1 + 1e-9
+
+    def test_risk_factor_neutralization_missing_observations_degrade(
+        self, client: TestClient
+    ) -> None:
+        """issue #266:暴露缺失 → skipped 软约束行,具名 warning,请求不失败。"""
+        resp = client.post("/api/portfolio/allocate", json={
+            "signals": [
+                {"symbol": "A", "score": 1.0},
+                {"symbol": "B", "score": 1.0},
+            ],
+            "method": "equal_weight",
+            "as_of": "2024-06-28",
+            "risk_factor_limits": [
+                {"factor": "market_beta", "max_active_exposure": 0.1},
+            ],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        row = next(
+            item
+            for item in data["adjustments"]
+            if item["constraint"] == "risk_factor_neutralization_skipped"
+        )
+        assert row["passed"] is False
+        assert "factor_neutralization_inactive" in row["reason"]
+
+    def test_risk_factor_neutralization_invalid_limit_rejected(
+        self, client: TestClient
+    ) -> None:
+        resp = client.post("/api/portfolio/allocate", json={
+            "signals": [{"symbol": "A", "score": 1.0}],
+            "as_of": "2024-06-28",
+            "risk_factor_limits": [
+                {"factor": "market_beta", "max_active_exposure": -0.1},
+            ],
+        })
+        assert resp.status_code == 422
+
 
 class TestSizingEndpoint:
     def test_basic(self, client: TestClient) -> None:
