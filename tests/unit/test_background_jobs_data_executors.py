@@ -297,15 +297,19 @@ class TestProgressBridge:
 
         async def _driver() -> None:
             sync_cb = make_sync_progress(cb, phase_prefix="test")
-            for i in range(200):
+            # 每 tick 连发两帧:第二帧发出时首个 drain 任务必然在途(尚未被
+            # 调度过一次),合并语义与墙钟快慢无关——不依赖「迭代耗时 < 模拟
+            # DB 写耗时」的余量(2 核 CI 高载下该余量不可靠,#316)。
+            for i in range(0, 200, 2):
                 sync_cb(f"00000{i}.SZ", i, 200)
+                sync_cb(f"0000{i + 1}.SZ", i + 1, 200)
                 await asyncio.sleep(0)  # 让 drain 与生产交错
             for _ in range(400):
                 await asyncio.sleep(0)
             assert max_in_flight == 1  # 任意时刻至多一个在途上报
             assert received  # 有帧送达
             assert received[-1][0] == 199  # 最终帧必达
-            # 高频合并:送达帧数远少于触发次数(中间帧被合并丢弃)。
+            # 高频合并:每 tick 至多启动一个 drain,送达帧数必少于触发次数。
             assert len(received) < 200
 
         asyncio.run(_driver())

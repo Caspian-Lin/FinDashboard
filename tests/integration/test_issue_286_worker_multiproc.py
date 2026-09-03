@@ -19,6 +19,7 @@ import contextlib
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -245,8 +246,16 @@ class _WorkerSubprocess:
                 with contextlib.suppress(Exception):
                     proc.terminate()
         for proc in self.procs:
-            with contextlib.suppress(Exception):
+            if proc.poll() is not None:
+                continue
+            try:
                 proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                # SIGTERM 后仍未退出(还在加载/挂死):必须 kill,否则子 worker
+                # 成为孤儿继续轮询测试库,污染后续全部 worker 测试(issue #316)。
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=5)
 
 
 def _spawn_workers(test_db_url: str, count: int) -> _WorkerSubprocess:
@@ -376,9 +385,20 @@ class TestDualWorkerProcessCompetition:
                     check=False,
                 )
             else:
-                proc.terminate()
+                # POSIX:必须用 SIGINT 触发 supervisor 的优雅收敛(它会对两个
+                # 子 worker 转发 terminate 后再退出)。直接 SIGTERM 会即刻杀死
+                # supervisor——子 worker 各自独立会话收不到信号,成为孤儿继续
+                # 轮询测试库,污染后续全部 worker 测试(issue #316 取证实证)。
+                with contextlib.suppress(ProcessLookupError):
+                    proc.send_signal(signal.SIGINT)
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    with contextlib.suppress(Exception):
+                        proc.wait(timeout=5)
             with contextlib.suppress(Exception):
-                proc.wait(timeout=15)
+                proc.wait(timeout=5)
 
         assert len(rows) == total, f"只看到 {len(rows)}/{total} 个任务"
         statuses = [status for _, status, _, _ in rows]
