@@ -784,8 +784,13 @@ class FeatureObservationOut(BaseSchema):
 
 
 class FeatureSnapshotOut(BaseSchema):
+    """特征快照全量视图(单查 / 创建端点;observations 逐条值恒返回)。"""
+
     snapshot_id: str
-    dataset_release_id: str
+    # issue #217/#309:沙箱快照无发布锚点(dataset_release_id=None),
+    # 改可空并携带 source_run_id;此前单查沙箱快照会在校验时 500。
+    dataset_release_id: str | None = None
+    source_run_id: str | None = None
     dataset_release_checksum: str
     decision_at: datetime
     published_at: datetime
@@ -797,6 +802,29 @@ class FeatureSnapshotOut(BaseSchema):
     observations: list[FeatureObservationOut]
     checksum: str
     issues: list[str] = Field(default_factory=list)
+
+
+class FeatureSnapshotHeaderOut(BaseSchema):
+    """特征快照头部视图(issue #309):list 端点默认返回。
+
+    只含头部字段与覆盖统计(feature_names/symbol_count/observation_count),
+    **不含 observations 逐条值**(大快照单条可达 MB 级,list 全量会被
+    MCP 客户端截断);完整值走单查端点或 ``include_observations=true``。
+    """
+
+    snapshot_id: str
+    dataset_release_id: str | None = None
+    source_run_id: str | None = None
+    dataset_release_checksum: str
+    decision_at: datetime
+    published_at: datetime
+    framework_version: str
+    feature_names: list[str] = Field(default_factory=list)
+    symbol_count: int
+    observation_count: int
+    code_version: str
+    checksum: str
+    created_at: datetime | None = None
 
 
 class FactorSignalItemOut(BaseSchema):

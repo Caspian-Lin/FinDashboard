@@ -49,6 +49,9 @@ from finboard_backtest.research_run import (
     to_json_value,
     validate_strategy_dataset_capabilities,
 )
+from finboard_backtest.research_run.config_overrides import (
+    research_portfolio_gate_error,
+)
 from finboard_backtest.research_run.contracts import JsonValue, stable_checksum
 from finboard_backtest.research_run.signal_engine import (
     multi_period_feature_gate_error,
@@ -280,6 +283,23 @@ async def queue_research_run(
                 f"{describe_empty_pool(preview, decision_date=primary.end_date)}"
             ),
         )
+
+    # issue #303:入队组合可行性预检(与 MCP ``_build_queued_manifest`` 共用
+    # 同一门控函数)—— 解析生效 max_risk_contribution(portfolio_config.overrides
+    # 可覆盖,默认 0.35)后,静态候选池 < ceil(1/阈值) 时秒级 422(附排除统计、
+    # 生效阈值与键位修复路径),不再等执行期组合阶段 RiskBudgetError 才
+    # REJECTED;阈值非法值与 risk_config.overrides 形态错误同样入队即拒
+    # (分区键位:组合约束在 portfolio_config,风险退出在 risk_config)。
+    # 逐期真实买入池入队期不可精确预知,运行期 fail-closed 兜底(#91)不变。
+    portfolio_gate_error = research_portfolio_gate_error(
+        preview=preview,
+        risk_exit_policy=spec.risk_exit_policy,
+        portfolio_overrides=body.portfolio_config,
+        risk_overrides=body.risk_config,
+        decision_date=primary.end_date,
+    )
+    if portfolio_gate_error is not None:
+        raise HTTPException(status_code=422, detail=portfolio_gate_error)
 
     run_id = _run_id(body.idempotency_key)
     try:

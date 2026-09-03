@@ -215,6 +215,10 @@ class ResearchRunCoordinator:
         # issue #263:执行期失败上下文,随循环进度逐点更新;通用收口拼入
         # error_summary 头部(专项错误分支不经此路径,保持 str(exc) 原样)。
         failure_ctx = FailureContext()
+        # issue #304:在 try 外初始化 —— 组合阶段硬约束分支(#304)在异常
+        # 处理器里仍要读已完成决策数,适配器 validate_manifest 若抛硬约束
+        # 错误时该变量必须已绑定。
+        decisions: list[DecisionBundle] = []
         # issue #285:分段耗时(decision_load / 逐决策 execute / report),
         # 只观测,不改变 artifact/checkpoint/进度上报语义。
         run_started = time.monotonic()
@@ -235,7 +239,6 @@ class ResearchRunCoordinator:
                     return current
                 raise
             await self._store.checkpoint()
-            decisions: list[DecisionBundle] = []
             position_quantities: dict[tuple[str, ResearchPositionSide], Decimal] = (
                 defaultdict(Decimal)
             )
@@ -363,11 +366,16 @@ class ResearchRunCoordinator:
                 error_summary=str(exc),
             )
         except ResearchConstraintViolationError as exc:
-            return await self._safe_terminal_transition(
-                manifest.run_id,
-                target=ResearchRunStatus.REJECTED,
-                error_code="hard_constraint_rejected",
-                error_summary=str(exc),
+            # issue #304:组合阶段硬约束拒绝仍补算不依赖组合阶段的 screen 证据
+            # (partial 标记 + 失败决策定位落 report/result),随后按原语义
+            # REJECTED / hard_constraint_rejected 收尾。
+            return await self._reject_with_partial_evidence(
+                manifest,
+                adapter,
+                decisions,
+                exc,
+                progress=progress,
+                failure_ctx=failure_ctx,
             )
         except ResearchRunInterruptedError as exc:
             return await self._safe_terminal_transition(
@@ -521,6 +529,100 @@ class ResearchRunCoordinator:
             pending.extend(artifact.parent_trace_ids)
         return sorted(found.values(), key=lambda item: item.sequence)
 
+    async def _reject_with_partial_evidence(
+        self,
+        manifest: ResearchRunManifest,
+        adapter: ResearchStrategyAdapter,
+        decisions: list[DecisionBundle],
+        exc: ResearchConstraintViolationError,
+        *,
+        progress: ProgressHook | None = None,
+        failure_ctx: FailureContext | None = None,
+    ) -> ResearchRunRecord:
+        """issue #304:组合阶段硬约束拒绝,保留不依赖组合阶段的 screen 证据。
+
+        factor_screen / strategy_screen 只消费已构建的冻结决策输入,与组合
+        阶段结果无关;这里尽力补算并把 report artifact / result JSON 落库
+        (标注 ``partial: true`` 与 ``constraint_failure`` 失败决策定位),
+        随后按原语义迁移 REJECTED / ``hard_constraint_rejected`` —— fail-closed
+        状态机、error_code、成功路径 checksum 语义零改动。补算 / 落库任一步
+        失败都不得掩盖原硬约束错误:具名 warning 记日志后直接按原语义收尾。
+        """
+        marker = await self._compute_partial_marker(manifest, adapter, len(decisions))
+        if marker is not None:
+            try:
+                report = await asyncio.to_thread(adapter.build_report, manifest, decisions)
+                self._validate_report(manifest, decisions, report)
+                await self._persist_report(
+                    manifest.run_id,
+                    len(decisions),
+                    report,
+                    progress=progress,
+                    failure_ctx=failure_ctx,
+                    partial_failure=marker,
+                )
+                await self._store.checkpoint()
+                artifacts = await self._store.list_artifacts(manifest.run_id)
+                # partial run 不参与确定性重放(重放只允许 completed 源),
+                # 无 expected_result_checksum 可比,直接归档 artifact 指纹。
+                result_checksum = stable_checksum(
+                    [
+                        {
+                            "stage": item.stage.value,
+                            "decision_id": _stable_decision_suffix(item.decision_id),
+                            "checksum": item.checksum,
+                        }
+                        for item in artifacts
+                    ]
+                )
+                await self._store.save_result(
+                    manifest.run_id,
+                    report=report,
+                    result_checksum=result_checksum,
+                    partial_failure=marker,
+                )
+                await self._store.checkpoint()
+            except Exception:
+                logger.warning(
+                    "research_run.partial_evidence_persist_failed",
+                    run_id=manifest.run_id,
+                    exc_info=True,
+                )
+        return await self._safe_terminal_transition(
+            manifest.run_id,
+            target=ResearchRunStatus.REJECTED,
+            error_code="hard_constraint_rejected",
+            error_summary=str(exc),
+        )
+
+    async def _compute_partial_marker(
+        self,
+        manifest: ResearchRunManifest,
+        adapter: ResearchStrategyAdapter,
+        completed_decisions: int,
+    ) -> dict[str, JsonValue] | None:
+        """向适配器要 partial 标记(可选钩子,issue #304)。
+
+        只有实现了 ``compute_partial_evidence`` 的适配器(signal_engine /
+        user_code)能基于已构建的冻结输入补算 screen;其余适配器
+        (DecisionSequenceAdapter、裸组合管线)返回 None,REJECTED 路径与
+        既有行为完全一致(零 artifact)。钩子异常吞掉并具名 warning,不
+        掩盖原硬约束错误。
+        """
+        hook = getattr(adapter, "compute_partial_evidence", None)
+        if not callable(hook):
+            return None
+        try:
+            marker = await hook(manifest, completed_decisions=completed_decisions)
+        except Exception:
+            logger.warning(
+                "research_run.partial_evidence_compute_failed",
+                run_id=manifest.run_id,
+                exc_info=True,
+            )
+            return None
+        return marker if isinstance(marker, dict) else None
+
     async def _persist_decision(
         self,
         run_id: str,
@@ -609,11 +711,19 @@ class ResearchRunCoordinator:
         *,
         progress: ProgressHook | None = None,
         failure_ctx: FailureContext | None = None,
+        partial_failure: dict[str, JsonValue] | None = None,
     ) -> None:
         if failure_ctx is not None:
             failure_ctx.stage = ResearchRunStage.REPORT.value
         payload = to_json_value({"report": report})
         assert isinstance(payload, dict)
+        if partial_failure is not None:
+            # issue #304:report JSON 内标注 partial 与失败决策定位。成功路径
+            # 不注入任何键,report artifact 的 checksum 逐字节零漂移。
+            report_payload = payload["report"]
+            assert isinstance(report_payload, dict)
+            report_payload["partial"] = True
+            report_payload["constraint_failure"] = partial_failure
         await self._store.append_artifact(
             ResearchArtifact(
                 artifact_id=f"{run_id}:A:report",

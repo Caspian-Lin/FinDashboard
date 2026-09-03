@@ -94,6 +94,7 @@ class SqlAlchemyResearchRunStore(ResearchRunStore):
         report: ResearchRunReport,
         result_checksum: str,
         timing: dict[str, JsonValue] | None = None,
+        partial_failure: dict[str, JsonValue] | None = None,
     ) -> ResearchRunRecord:
         payload = to_json_value(report)
         assert isinstance(payload, dict)
@@ -101,6 +102,16 @@ class SqlAlchemyResearchRunStore(ResearchRunStore):
             # issue #285:分段耗时与 report 同存于 result JSON,但不是 report
             # 字段、不参与任何 artifact/checksum(重放耗时不同不判漂移)。
             payload = {**payload, "timing": timing}
+        if partial_failure is not None:
+            # issue #304:组合阶段拒绝但保留部分证据时,result JSON 顶层标注
+            # partial 与失败决策定位(constraint_failure);成功路径不注入,
+            # result 序列化与既有输出逐字节一致。report_from_json 忽略未知键,
+            # 读回 record 不受影响。
+            payload = {
+                **payload,
+                "partial": True,
+                "constraint_failure": partial_failure,
+            }
         try:
             row = await self._repository.save_result(
                 run_id,
