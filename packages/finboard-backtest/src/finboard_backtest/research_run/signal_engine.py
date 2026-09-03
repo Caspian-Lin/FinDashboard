@@ -25,8 +25,10 @@ cross_* 规则比较两个节点的完整序列。
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
+import weakref
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -72,6 +74,7 @@ from finboard_backtest.research_run.frozen_loader import (
     FrozenInputLoader,
     LoadedDecisionContext,
     ReleaseProviderFactory,
+    SymbolCloseHistory,
 )
 from finboard_backtest.research_run.portfolio_pipeline import (
     PortfolioDecisionInput,
@@ -108,6 +111,14 @@ logger = structlog.get_logger(__name__)
 
 #: 信号引擎当前支持的策略类型(其余 kind 继续明确报 not_implemented)。
 SIGNAL_ENGINE_STRATEGY_KINDS: frozenset[str] = frozenset({"multi_factor"})
+
+#: 交易日历进程内缓存:provider → 发布交易日历(升序去重)。
+#: 发布不可变且 checksum 已由 manifest 冻结锚定,同一 provider 的日历恒定;
+#: provider 经工厂按 run memoize(#287),WeakKeyDictionary 让缓存条目随
+#: provider 一起被回收 —— 不引入跨 run / 跨事件循环的长命可变状态。
+_TRADING_DAYS_CACHE: weakref.WeakKeyDictionary[FrozenReleaseProvider, list[date]] = (
+    weakref.WeakKeyDictionary()
+)
 
 #: 节点值序列:symbol → 时间升序数值序列(单点序列长度 1)。
 NodeSeries = dict[str, list[float]]
@@ -553,24 +564,57 @@ async def _load_price_series(
     provider: FrozenReleaseProvider,
     symbols: Sequence[str],
     as_of: datetime,
+    close_histories: Mapping[str, SymbolCloseHistory | None] | None = None,
 ) -> dict[str, list[float]]:
-    """PIT 门控读取各标的决策时点前可见的完整 close 序列(时间升序)。"""
+    """PIT 门控读取各标的决策时点前可见的完整 close 序列(时间升序)。
+
+    issue #287:提供 ``close_histories``(close 矩阵)时,序列由矩阵前缀切片
+    取得,与逐期 PIT 读取逐值等价、不再读盘;矩阵未覆盖的标的回退逐标的
+    读取,并以 ``asyncio.gather`` + 信号量并发化(结果与异常都按输入顺序
+    组装/抛出,与串行实现一致)。
+    """
     from finboard_backtest.research_run.frozen_loader import _market_from_value
     from finboard_shared.models import Symbol
 
     series: dict[str, list[float]] = {}
+    pending: list[str] = []
     for code in symbols:
-        market = _market_from_value(code)
-        bars = await provider.fetch_point_in_time_bars(
-            Symbol(code=code, market=market),
-            provider.release.period,
-            provider.release.start_date,
-            as_of.date(),
-            decision_at=as_of,
-            adjust=provider.release.adjustment,
-        )
-        if bars:
-            series[code] = [float(bar.bar.close) for bar in bars]
+        history = close_histories.get(code) if close_histories else None
+        if history is not None:
+            values = history.series_until(as_of)
+            if values:
+                series[code] = values
+        else:
+            pending.append(code)
+    if not pending:
+        return series
+    semaphore = asyncio.Semaphore(8)
+
+    async def _fetch(code: str) -> list[float]:
+        async with semaphore:
+            bars = await provider.fetch_point_in_time_bars(
+                Symbol(code=code, market=_market_from_value(code)),
+                provider.release.period,
+                provider.release.start_date,
+                as_of.date(),
+                decision_at=as_of,
+                adjust=provider.release.adjustment,
+            )
+        return [float(bar.bar.close) for bar in bars]
+
+    results = await asyncio.gather(
+        *(_fetch(code) for code in pending), return_exceptions=True
+    )
+    fetched: dict[str, list[float]] = {}
+    for code, result in zip(pending, results, strict=True):
+        if isinstance(result, BaseException):
+            raise result
+        if result:
+            fetched[code] = result
+    # 按输入顺序合并,保持与串行实现相同的字典插入序。
+    for code in symbols:
+        if code in fetched:
+            series[code] = fetched[code]
     return series
 
 
@@ -629,9 +673,25 @@ async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
 
     交易日历是公开知识,用非 PIT 的 ``fetch_bars`` 读取发布全范围;决策与
     成交发生在发布日期之后,不构成未来函数。
+
+    issue #287:日历按 provider 进程内缓存(N 期回放此前每期重读完整
+    parquet)。只对真实 ``FrozenReleaseProvider`` 启用 —— 其发布不可变、
+    日历恒定;其它实现(测试 stub 等)保持每次推导的原行为。
     """
     from finboard_backtest.research_run.frozen_loader import _market_from_value
+    from finboard_data.releases import FrozenReleaseProvider
     from finboard_shared.models import Symbol
+
+    cacheable = isinstance(provider, FrozenReleaseProvider)
+    if cacheable:
+        cached = _TRADING_DAYS_CACHE.get(provider)
+        if cached is not None:
+            logger.debug(
+                "research_run.trading_calendar_cache_hit",
+                release_id=provider.release.release_id,
+                days=len(cached),
+            )
+            return cached
 
     for instrument in provider.release.instruments:
         if not instrument.ready:
@@ -647,7 +707,10 @@ async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
             adjust=provider.release.adjustment,
         )
         if bars:
-            return sorted({bar.timestamp.date() for bar in bars})
+            days = sorted({bar.timestamp.date() for bar in bars})
+            if cacheable:
+                _TRADING_DAYS_CACHE[provider] = days
+            return days
     return []
 
 
@@ -925,21 +988,36 @@ async def _market_close_map(
     provider: FrozenReleaseProvider,
     symbols: Sequence[str],
 ) -> dict[str, dict[date, Decimal]]:
-    """读取各标的全区间收盘价映射(非 PIT;收盘价在当日收盘即公开)。"""
+    """读取各标的全区间收盘价映射(非 PIT;收盘价在当日收盘即公开)。
+
+    issue #287:逐 symbol 串行改 ``asyncio.gather`` + 信号量;异常按输入
+    顺序抛出,与串行实现逐值一致。
+    """
     from finboard_backtest.research_run.frozen_loader import _market_from_value
     from finboard_shared.models import Symbol
 
-    closes_by_symbol: dict[str, dict[date, Decimal]] = {}
-    for code in symbols:
-        bars = await provider.fetch_bars(
-            Symbol(code=code, market=_market_from_value(code)),
-            provider.release.period,
-            provider.release.start_date,
-            provider.release.end_date,
-            adjust=provider.release.adjustment,
-        )
-        closes_by_symbol[code] = {bar.timestamp.date(): bar.close for bar in bars}
-    return closes_by_symbol
+    semaphore = asyncio.Semaphore(8)
+
+    async def _fetch(code: str) -> dict[date, Decimal]:
+        async with semaphore:
+            bars = await provider.fetch_bars(
+                Symbol(code=code, market=_market_from_value(code)),
+                provider.release.period,
+                provider.release.start_date,
+                provider.release.end_date,
+                adjust=provider.release.adjustment,
+            )
+        return {bar.timestamp.date(): bar.close for bar in bars}
+
+    results = await asyncio.gather(
+        *(_fetch(code) for code in symbols), return_exceptions=True
+    )
+    fetched: dict[str, dict[date, Decimal]] = {}
+    for code, result in zip(symbols, results, strict=True):
+        if isinstance(result, BaseException):
+            raise result
+        fetched[code] = result
+    return fetched
 
 
 async def build_daily_equity_curve(
@@ -1296,7 +1374,8 @@ async def build_decision_load_contexts(
                 & frozenset(context.lot_info)
             )
             price_series = await _load_price_series(
-                provider, tuple(signalable), decision_at
+                provider, tuple(signalable), decision_at,
+                close_histories=loader.close_histories,
             )
             signalable = frozenset(
                 symbol for symbol in signalable if len(price_series.get(symbol, ())) >= 2
@@ -1563,12 +1642,29 @@ def build_signal_engine_adapter_factory(
             ref.artifact_id: ref.checksum for ref in manifest.dataset_releases
         }
 
+        # issue #287:provider 按 release_id 在本 run(工厂闭包)内 memoize。
+        # 发布不可变且 checksum 已由 manifest 锚定,实例复用使逐文件 SHA256
+        # 校验缓存(_verified)与 manifest 加载每发布只付一次 —— 此前 loader
+        # 每决策 3 处调用工厂,per-instance 校验缓存被打穿、每次重验整文件。
+        # 缓存生命周期 = 闭包生命周期 = 单次 run 适配器,无跨 run / 跨事件
+        # 循环共享的可变状态。
+        provider_memo: dict[str, FrozenReleaseProvider] = {}
+
         def _release_factory(release_id: str) -> FrozenReleaseProvider:
-            return FrozenReleaseProvider(
+            provider = provider_memo.get(release_id)
+            if provider is not None:
+                logger.debug(
+                    "research_run.release_provider_reused", release_id=release_id
+                )
+                return provider
+            provider = FrozenReleaseProvider(
                 release_root=root,
                 release_id=release_id,
                 expected_checksum=release_checksums.get(release_id),
             )
+            provider_memo[release_id] = provider
+            logger.debug("research_run.release_provider_created", release_id=release_id)
+            return provider
 
         async def _snapshot_provider(snapshot_id: str) -> object:
             async with session_maker() as session:
