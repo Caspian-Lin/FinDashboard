@@ -435,6 +435,9 @@ class BacktestMetricsOut(BaseSchema):
     benchmark_source: str | None = None
     # issue #255:选股启用时的逐期诊断(选股数据集未发布/整期 SKIPPED 可见)
     selection_diagnostics: dict[str, Any] | None = None
+    # issue #285:job 级分段耗时(total_elapsed_seconds / data_load_elapsed_seconds
+    # / parquet_reads),纯可观测性,随 metrics JSON 自然携带,无迁移。
+    timing: dict[str, Any] | None = None
     initial_capital: Decimal = Decimal("0")
     final_equity: Decimal = Decimal("0")
 

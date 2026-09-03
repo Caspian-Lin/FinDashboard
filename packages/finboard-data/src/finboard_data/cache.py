@@ -9,9 +9,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -143,6 +146,72 @@ class CacheIOStats:
     write_bytes: int
 
 
+@dataclass(slots=True)
+class ParquetReadJobStats:
+    """job 级 parquet 读取聚合计时(issue #285)。
+
+    由 :func:`collect_parquet_read_stats` 激活,``ParquetCache`` 的读取入口
+    (``read`` / ``read_close_points`` / ``metadata``)在入口处累加,聚合出
+    单个 job 内的读取次数 / 累计耗时 / 累计字节,回答「慢在 IO 还是计算」。
+    不改动任何读取内部逻辑;未激活时零开销。
+    """
+
+    read_ops: int = 0
+    read_elapsed_ms: float = 0.0
+    read_bytes: int = 0
+    #: 按读取入口细分的次数(read / read_close_points / metadata)。
+    ops_by_entry: dict[str, int] = field(default_factory=dict)
+
+    def record(self, entry: str, *, elapsed_ms: float, size_bytes: int) -> None:
+        self.read_ops += 1
+        self.read_elapsed_ms += elapsed_ms
+        self.read_bytes += size_bytes
+        self.ops_by_entry[entry] = self.ops_by_entry.get(entry, 0) + 1
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "read_ops": self.read_ops,
+            "read_elapsed_ms": round(self.read_elapsed_ms, 2),
+            "read_bytes": self.read_bytes,
+            "ops_by_entry": dict(sorted(self.ops_by_entry.items())),
+        }
+
+
+_PARQUET_READ_STATS: ContextVar[ParquetReadJobStats | None] = ContextVar(
+    "finboard_parquet_read_stats", default=None
+)
+
+
+@contextlib.contextmanager
+def collect_parquet_read_stats() -> Iterator[ParquetReadJobStats]:
+    """在当前上下文(asyncio task)内聚合 parquet 读取耗时(issue #285)。
+
+    用法::
+
+        with collect_parquet_read_stats() as stats:
+            ...  # 数据加载 / 回测运行
+        print(stats.as_dict())
+
+    asyncio task 创建时复制 contextvar,worker 每 job 一个 task,天然按 job
+    隔离;嵌套激活以内层为准(当前无嵌套使用方)。
+    """
+
+    stats = ParquetReadJobStats()
+    token = _PARQUET_READ_STATS.set(stats)
+    try:
+        yield stats
+    finally:
+        _PARQUET_READ_STATS.reset(token)
+
+
+def _record_job_read(entry: str, *, elapsed_ms: float, size_bytes: int) -> None:
+    """读取入口处向已激活的 job 级聚合句柄累加(未激活时静默跳过)。"""
+
+    stats = _PARQUET_READ_STATS.get()
+    if stats is not None:
+        stats.record(entry, elapsed_ms=elapsed_ms, size_bytes=size_bytes)
+
+
 class ParquetCache:
     """基于 parquet 文件的本地行情缓存。
 
@@ -186,12 +255,14 @@ class ParquetCache:
             bars = await asyncio.to_thread(self._read_sync, path, symbol, period)
         self._read_ops += 1
         self._read_bytes += size
+        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+        _record_job_read("read", elapsed_ms=elapsed_ms, size_bytes=size)
         logger.debug(
             "parquet_cache.read",
             path=str(path),
             bytes=size,
             bars=len(bars),
-            elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+            elapsed_ms=elapsed_ms,
         )
         return bars
 
@@ -228,12 +299,14 @@ class ParquetCache:
             )
         self._read_ops += 1
         self._read_bytes += size
+        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+        _record_job_read("read_close_points", elapsed_ms=elapsed_ms, size_bytes=size)
         logger.debug(
             "parquet_cache.read_close_points",
             path=str(path),
             bytes=size,
             points=len(points),
-            elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+            elapsed_ms=elapsed_ms,
         )
         return points
 
@@ -486,13 +559,18 @@ class ParquetCache:
         async with self._io_semaphore:
             metadata = await asyncio.to_thread(self._metadata_sync, path, size)
         self._read_ops += 1
-        self._read_bytes += min(size, 64 * 1024)
+        # footer-only 读取按 io_stats 同口径计字节(上限 64KB),避免 job 级
+        # bytes 聚合被整文件大小虚增。
+        counted_bytes = min(size, 64 * 1024)
+        self._read_bytes += counted_bytes
+        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+        _record_job_read("metadata", elapsed_ms=elapsed_ms, size_bytes=counted_bytes)
         logger.debug(
             "parquet_cache.metadata",
             path=str(path),
             bytes=size,
             bars=metadata.bar_count,
-            elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+            elapsed_ms=elapsed_ms,
         )
         return metadata
 

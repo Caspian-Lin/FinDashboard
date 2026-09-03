@@ -189,6 +189,7 @@ async def run_backtest_and_persist(
         excess_return=result.excess_return,
         benchmark_source=result.benchmark_source,
         selection_diagnostics=result.selection_diagnostics,
+        timing=result.timing,
         initial_capital=result.initial_capital,
         final_equity=result.final_equity,
     )

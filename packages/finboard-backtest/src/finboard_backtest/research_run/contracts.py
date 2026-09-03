@@ -722,6 +722,10 @@ class ResearchRunRecord:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # issue #285:job 级分段耗时(decision_load / decision_execute 聚合 / report),
+    # 纯可观测性 —— 不进 report、不参与任何 checksum;PostgreSQL 路径冗余存放
+    # 在 research_runs.result JSON 的 "timing" 键下。
+    timing: dict[str, JsonValue] | None = None
 
 
 def canonical_json(value: object) -> str:

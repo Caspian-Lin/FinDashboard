@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from finboard_backtest.research_run.contracts import (
+    JsonValue,
     ResearchArtifact,
     ResearchRunConflictError,
     ResearchRunManifest,
@@ -44,6 +45,7 @@ class ResearchRunStore(Protocol):
         *,
         report: ResearchRunReport,
         result_checksum: str,
+        timing: dict[str, JsonValue] | None = None,
     ) -> ResearchRunRecord: ...
 
     async def append_artifact(self, artifact: ResearchArtifact) -> bool: ...
@@ -134,6 +136,7 @@ class InMemoryResearchRunStore:
         *,
         report: ResearchRunReport,
         result_checksum: str,
+        timing: dict[str, JsonValue] | None = None,
     ) -> ResearchRunRecord:
         async with self._lock:
             record = self._runs[run_id]
@@ -141,6 +144,8 @@ class InMemoryResearchRunStore:
                 raise ResearchRunConflictError("同一次运行产生了不同结果")
             record.result = report
             record.result_checksum = result_checksum
+            # issue #285:分段耗时只挂 record,不进 report/checksum。
+            record.timing = timing
             record.updated_at = datetime.now(UTC)
             return record
 
