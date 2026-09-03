@@ -158,18 +158,24 @@ export interface FeatureObservation {
 
 export interface FeatureSnapshot {
   snapshot_id: string;
-  dataset_release_id: string;
+  /** issue #217/#309:沙箱快照无发布锚点,可空并携带 source_run_id。 */
+  dataset_release_id: string | null;
+  source_run_id?: string | null;
   dataset_release_checksum: string;
   decision_at: string;
   published_at: string;
   framework_version: string;
-  calculation_windows: Record<string, number>;
-  transformations: Record<string, string>;
-  neutralization: Record<string, string[]>;
+  /** issue #309:features 列表默认 header-only,以下逐条值仅单查/创建返回。 */
+  calculation_windows?: Record<string, number>;
+  transformations?: Record<string, string>;
+  neutralization?: Record<string, string[]>;
   code_version: string;
-  observations: FeatureObservation[];
+  observations?: FeatureObservation[] | null;
   checksum: string;
-  issues: string[];
+  issues?: string[];
+  /** header 视图(#309)携带的覆盖统计,列表渲染不再依赖 observations。 */
+  feature_names?: string[];
+  observation_count?: number;
   /** 兼容旧 API fixture,真实后端以 observations 为准。 */
   factor_names?: string[];
   row_count?: number;
@@ -797,22 +803,29 @@ export const datasetApi = {
 };
 
 export function featureSnapshotNames(snapshot: FeatureSnapshot): string[] {
+  // issue #309:list 默认 header-only,优先读 header 的 feature_names。
+  if (snapshot.feature_names && snapshot.feature_names.length > 0) {
+    return snapshot.feature_names;
+  }
   if (snapshot.factor_names && snapshot.factor_names.length > 0) {
     return snapshot.factor_names;
   }
   return Array.from(
-    new Set(snapshot.observations.map((item) => item.feature_name)),
+    new Set((snapshot.observations ?? []).map((item) => item.feature_name)),
   ).sort();
 }
 
 export function featureSnapshotSymbolCount(snapshot: FeatureSnapshot): number {
   if (typeof snapshot.symbol_count === "number") return snapshot.symbol_count;
-  return new Set(snapshot.observations.map((item) => item.symbol)).size;
+  return new Set((snapshot.observations ?? []).map((item) => item.symbol)).size;
 }
 
 export function featureSnapshotObservationCount(snapshot: FeatureSnapshot): number {
+  if (typeof snapshot.observation_count === "number") {
+    return snapshot.observation_count;
+  }
   if (typeof snapshot.row_count === "number") return snapshot.row_count;
-  return snapshot.observations.length;
+  return (snapshot.observations ?? []).length;
 }
 
 export function featureSnapshotStatus(snapshot: FeatureSnapshot): string {

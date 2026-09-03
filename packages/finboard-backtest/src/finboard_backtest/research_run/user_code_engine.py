@@ -43,6 +43,7 @@ from finboard_backtest.portfolio.sizing import SizingError
 from finboard_backtest.research_run.contracts import (
     DecisionBundle,
     EquityPoint,
+    JsonValue,
     NormalizedSignal,
     ResearchConstraintViolationError,
     ResearchExecutionMode,
@@ -61,6 +62,7 @@ from finboard_backtest.research_run.portfolio_pipeline import (
     _constraints_from_manifest,
     _current_weights_view,
     _PipelineState,
+    _risk_exit_policy_from_manifest,
 )
 from finboard_backtest.research_run.signal_engine import (
     DecisionLoadContext,
@@ -207,6 +209,12 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
             equity_high_water=manifest.initial_capital,
         )
         constraints = _constraints_from_manifest(manifest)
+        # issue #303:risk_config.overrides 解析为生效风险退出策略 —— user_code
+        # 的 direct_weights 目标同样经风险退出,与 multi_factor 管线同口径。
+        try:
+            risk_exit_policy = _risk_exit_policy_from_manifest(manifest)
+        except ValueError as exc:
+            raise ResearchConstraintViolationError(str(exc)) from exc
         conflict_policy = (
             SignalConflictPolicy.NEUTRALIZE
             if manifest.strategy_spec.signal_rules.conflict_policy
@@ -260,6 +268,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                     index=index,
                     state=state,
                     constraints=constraints,
+                    risk_exit_policy=risk_exit_policy,
                     allocation_method=_DIRECT_WEIGHTS_METHOD,
                     conflict_policy=conflict_policy,
                     # direct_weights 路径不消费 target_gross(builder 显式
@@ -273,6 +282,28 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
 
         # screen 是治理/展示证据,不改变组合管线的机械结果。若计算因数据
         # 缺失失败,保留带 issues 的空证据,让晋级门明确 fail-closed。
+        # issue #304:组合阶段拒绝时由 compute_partial_evidence 走同一补算。
+        await self._compute_strategy_screen(manifest)
+
+        # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(与信号引擎
+        # 同一函数、同一口径,报告可同屏对比);基准曲线两种模式都加载。
+        if self.execution_mode is ResearchExecutionMode.MULTI_PERIOD and collected:
+            release_ref = _bars_release_ref(manifest, self._release_provider_factory)
+            provider = self._release_provider_factory(release_ref.artifact_id)
+            self._equity_curve = await build_daily_equity_curve(provider, manifest, collected)
+        self._benchmark_curve = await _load_benchmark_curve(
+            manifest, self._release_provider_factory
+        )
+
+    async def _compute_strategy_screen(self, manifest: ResearchRunManifest) -> str | None:
+        """user_code 策略 screen(issue #219/#304):尽力而为,幂等。
+
+        成功把结果暂存 ``self._strategy_screen`` 并返回 None;计算异常时记
+        具名 warning、保留带 issues 的空证据(让晋级门明确 fail-closed)并
+        返回失败原因。已有结果不重算。
+        """
+        if self._strategy_screen is not None:
+            return None
         try:
             from finboard_backtest.research_run.factor_screen import (
                 build_strategy_screen,
@@ -284,6 +315,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 self._target_weights,
                 self._release_provider_factory,
             )
+            return None
         except Exception as exc:
             logger.warning(
                 "user_code.strategy_screen_failed",
@@ -294,16 +326,40 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 "n_periods": len(self._screen_inputs),
                 "issues": [f"strategy_screen_computation_failed: {exc}"],
             }
+            return f"strategy_screen_computation_failed: {exc}"
 
-        # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(与信号引擎
-        # 同一函数、同一口径,报告可同屏对比);基准曲线两种模式都加载。
-        if self.execution_mode is ResearchExecutionMode.MULTI_PERIOD and collected:
-            release_ref = _bars_release_ref(manifest, self._release_provider_factory)
-            provider = self._release_provider_factory(release_ref.artifact_id)
-            self._equity_curve = await build_daily_equity_curve(provider, manifest, collected)
-        self._benchmark_curve = await _load_benchmark_curve(
-            manifest, self._release_provider_factory
-        )
+    async def compute_partial_evidence(
+        self,
+        manifest: ResearchRunManifest,
+        *,
+        completed_decisions: int,
+    ) -> dict[str, JsonValue] | None:
+        """组合阶段硬约束拒绝后的部分证据补算(issue #304,与信号引擎同构)。
+
+        strategy_screen 的输入(``_screen_inputs`` / ``_target_weights``)在
+        每期 ``_build_decision`` 之前就已收集,失败期次的权重也在内;这里基于
+        已构建的冻结上下文尽力补算并暂存,``build_report`` 照常携带。返回
+        partial 标记(失败决策 1-based 定位 + 补算 warning),冻结上下文尚未
+        加载时返回 None。
+        """
+        contexts = self._contexts
+        if contexts is None or not contexts:
+            return None
+        marker: dict[str, JsonValue] = {
+            "completed_decisions": completed_decisions,
+            "failed_decision_index": completed_decisions + 1,
+        }
+        if completed_decisions < len(contexts):
+            marker["decision_date"] = contexts[
+                completed_decisions
+            ].context.business_date.isoformat()
+        warnings: list[JsonValue] = []
+        screen_failure = await self._compute_strategy_screen(manifest)
+        if screen_failure is not None:
+            warnings.append(screen_failure)
+        if warnings:
+            marker["warnings"] = warnings
+        return marker
 
     def build_report(
         self,
