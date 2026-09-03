@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     # worker_id),把 GIL 边界从 1 核扩到 N 核。kind_concurrency 由 claim_next
     # 的 SQL 层约束跨进程生效。回滚 = --workers 1(默认)+ revert。
     worker_processes: int = Field(default=1, ge=1, le=64)
+    # worker 停机优雅宽限秒数(issue #307):收到停止信号后,worker 先等
+    # in-flight 任务完成至该上限、超时才取消(取消后任务由 lease 过期回收 →
+    # interrupted → 退避重排兜底,与既有语义一致)。默认 0 = 立即取消 in-flight
+    # (即时停机,行为零回归)。``finboard dev`` 与 ``--workers N`` supervisor
+    # 的子进程收敛宽限同读此值;等待中第二次停止信号立即强退(退出码 130)。
+    worker_shutdown_grace_seconds: float = Field(default=0.0, ge=0)
     # 僵尸无进展检测阈值(issue #306):heartbeat 正常续租但 progress_done/phase
     # 持续无变化超过该秒数 → job 具名失败 zombie_no_progress 并转 retry_waiting
     # 自动重试。默认 3600s(1 小时)刻意宽松 —— 研究加载期分块探针、数据摄取

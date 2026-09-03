@@ -39,6 +39,10 @@ from finboard_app.logging import setup_logging
 from finboard_shared.identifiers import AccountId
 from finboard_shared.types import KillSwitchLevel
 
+# Windows CTRL_BREAK_EVENT=1;非 win32 平台取默认值仅服务测试态的 mock 路径求值,
+# 真实 os.kill 只在 sys.platform == "win32" 分支内发生。
+_CTRL_BREAK_EVENT = getattr(signal, "CTRL_BREAK_EVENT", 1)
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -154,9 +158,53 @@ def serve(
         uvicorn.run(app, host=host, port=port, loop=uvicorn_loop)
 
 
-def _stop_dev_process(process: subprocess.Popen[bytes], *, timeout: float = 5.0) -> None:
-    """回收 Vite 进程组;Windows 按精确根 PID 清理整棵子进程树。"""
+#: worker 子进程停机兜底窗口秒数(issue #307):settings 宽限为 0 时(worker
+#: 收到优雅信号后立即取消 in-flight 并快速退出),父进程(dev / ``--workers N``
+#: supervisor)仍给子进程这段窗口自行收敛,超时才 taskkill / kill 强杀。
+_WORKER_STOP_FALLBACK_GRACE_SECONDS = 10.0
+
+
+def _dev_worker_stop_grace_seconds(settings: Settings) -> float:
+    """dev 停机给 worker 子进程的优雅宽限(#307):settings 值,0 时用兜底窗口。
+
+    settings 宽限 >0 时 worker 侧会先等 in-flight 任务完成至同一上限,父进程
+    等待窗口与之对齐;为 0 时 worker 立即取消并退出,窗口只覆盖「取消 + 退出
+    + engine.dispose」的耗时,超时说明 worker 卡死,强杀兜底(任务由 lease
+    过期回收,与既有兜底语义一致)。
+    """
+
+    grace = float(settings.worker_shutdown_grace_seconds)
+    return grace if grace > 0 else _WORKER_STOP_FALLBACK_GRACE_SECONDS
+
+
+def _stop_dev_process(
+    process: subprocess.Popen[bytes],
+    *,
+    graceful_seconds: float = 5.0,
+) -> None:
+    """回收 dev 托管子进程;先优雅信号、超时才强杀兜底(issue #307)。
+
+    * Windows —— ``graceful_seconds > 0`` 且子进程仍在运行时,先向子进程自身
+      的进程组(经 ``CREATE_NEW_PROCESS_GROUP`` 托管,组根 = 子进程 pid)发
+      ``CTRL_BREAK_EVENT``:信号只送达该组,dev 主进程不会被打到;worker 侧
+      注册的 SIGBREAK 处理器进入优雅停机。等待 ``graceful_seconds`` 仍未退出
+      再 ``taskkill /PID /T /F`` 强杀整树。``graceful_seconds <= 0`` 保持既有
+      立即 ``taskkill /T /F``。
+    * POSIX —— ``killpg SIGTERM`` 等待 ``graceful_seconds`` 后 ``killpg
+      SIGKILL`` 兜底(与既有行为同形,宽限可配)。
+    """
+
+    if process.poll() is not None:
+        return
     if sys.platform == "win32":
+        if graceful_seconds > 0:
+            with contextlib.suppress(OSError):
+                os.kill(process.pid, _CTRL_BREAK_EVENT)
+            try:
+                process.wait(timeout=graceful_seconds)
+                return
+            except subprocess.TimeoutExpired:
+                pass
         subprocess.run(
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
             check=False,
@@ -164,18 +212,16 @@ def _stop_dev_process(process: subprocess.Popen[bytes], *, timeout: float = 5.0)
         )
         return
 
-    if process.poll() is not None:
-        return
-
     try:
         os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=timeout)
+        process.wait(timeout=max(0.1, graceful_seconds))
     except (OSError, subprocess.TimeoutExpired):
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except OSError:
             process.kill()
-        process.wait(timeout=timeout)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=5.0)
 
 
 async def _check_dev_database(settings: Settings) -> None:
@@ -431,7 +477,14 @@ def dev(
         for frontend in frontend_holder:
             _stop_dev_process(frontend)
         if worker_process is not None:
-            _stop_dev_process(worker_process)
+            # issue #307:不再 taskkill /F 首杀 —— 先向 worker 进程组发优雅
+            # 信号(Windows CTRL_BREAK / POSIX SIGTERM),给 worker 侧宽限
+            # (settings.worker_shutdown_grace_seconds,默认 0 时给兜底窗口
+            # 让 worker 完成「立即取消 → 退出」),超时才强杀。
+            _stop_dev_process(
+                worker_process,
+                graceful_seconds=_dev_worker_stop_grace_seconds(settings),
+            )
 
 
 @app.command(name="kill-switch")
@@ -665,17 +718,16 @@ worker_app = typer.Typer(
 
 #: 多 worker 进程下父进程转发给子进程的 CLI 覆盖项(#286):
 #: (选项名, 目标 settings 键)。--workers 不转发 —— 子进程固定单 worker
-#: 形态,避免递归拉起进程树。
+#: 形态,避免递归拉起进程树;--shutdown-grace(#307)显式给出时转发,
+#: 保证子进程侧 drain 宽限与 supervisor 侧等待窗口取同一值。
 _WORKER_CHILD_OPTIONS: tuple[tuple[str, str], ...] = (
     ("--poll-interval", "worker_poll_interval_seconds"),
     ("--max-concurrent", "worker_max_concurrent"),
     ("--queues", "worker_queues"),
     ("--maintenance-interval", "worker_maintenance_interval_seconds"),
     ("--retry-backoff", "worker_retry_backoff_seconds"),
+    ("--shutdown-grace", "worker_shutdown_grace_seconds"),
 )
-
-#: Ctrl-C 收敛子进程时 terminate → kill 的宽限秒数。
-_WORKER_CHILD_TERMINATE_GRACE_SECONDS = 10.0
 
 
 def _worker_child_command(overrides: Mapping[str, str]) -> list[str]:
@@ -696,14 +748,42 @@ def _worker_child_command(overrides: Mapping[str, str]) -> list[str]:
     return cmd
 
 
-def _supervise_worker_processes(command: list[str], workers: int) -> int:
+def _signal_worker_children_graceful(procs: list[subprocess.Popen[bytes]]) -> None:
+    """向 worker 子进程组发优雅停止信号(issue #307)。
+
+    Windows:子进程经 ``CREATE_NEW_PROCESS_GROUP`` 托管(组根 = 子进程
+    pid),CTRL_BREAK 只送达该组 —— 子进程内注册的 SIGBREAK 处理器进入优雅
+    停机;supervisor 自身不在组内,不会被打到(同控制台 Ctrl-C 对新进程组
+    默认禁用,子进程本来就收不到)。POSIX:子进程在独立会话,SIGTERM 由
+    ``run_worker`` 注册的信号处理器接管,进入同一优雅停机路径。
+    """
+
+    for proc in procs:
+        if proc.poll() is not None:
+            continue
+        if sys.platform == "win32":
+            with contextlib.suppress(OSError):
+                os.kill(proc.pid, _CTRL_BREAK_EVENT)
+        else:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+
+
+def _supervise_worker_processes(
+    command: list[str],
+    workers: int,
+    shutdown_grace_seconds: float = 0.0,
+) -> int:
     """拉起并收敛 N 个 worker 子进程,返回父进程退出码(#286)。
 
     * 正常退出:任一子进程非零退出 → 父进程返回 1(子进程崩溃不自动重启 ——
       队列语义下重启安全:未完成任务由 lease 过期回收后重排,重新执行命令即可);
-    * Ctrl-C / 终止信号:先等子进程自行收敛(Windows 上同控制台子进程直接
-      收到 Ctrl-C;POSIX 上子进程在独立会话,由父进程转发 terminate 走优雅
-      停止),宽限超时后强杀兜底 —— 用户主动停止不算失败,退出码 0。
+    * Ctrl-C / 终止信号(#307):宽限 >0 时先向各子进程组发优雅停止信号
+      (Windows CTRL_BREAK / POSIX SIGTERM),等 in-flight 任务在
+      ``shutdown_grace_seconds`` 内自行收尾(与 worker 侧 drain 宽限同读
+      settings),超时才强杀兜底;宽限 = 0(默认)保持立即 terminate(worker
+      侧收到信号立即取消 in-flight),仅保留 ``_WORKER_STOP_FALLBACK_GRACE_SECONDS``
+      兜底窗口供子进程完成取消收尾。用户主动停止不算失败,退出码 0。
     """
 
     procs: list[subprocess.Popen[bytes]] = []
@@ -733,11 +813,18 @@ def _supervise_worker_processes(command: list[str], workers: int) -> int:
         typer.echo("收到停止信号,正在收敛 worker 子进程…")
     failed: list[int] = []
     if interrupted:
-        deadline = time.monotonic() + _WORKER_CHILD_TERMINATE_GRACE_SECONDS
-        for proc in procs:
-            if proc.poll() is None:
-                with contextlib.suppress(Exception):
-                    proc.terminate()
+        if shutdown_grace_seconds > 0:
+            typer.echo(
+                f"优雅停机:等待 in-flight 任务收尾(宽限 {shutdown_grace_seconds:g}s)…"
+            )
+            _signal_worker_children_graceful(procs)
+            deadline = time.monotonic() + shutdown_grace_seconds
+        else:
+            for proc in procs:
+                if proc.poll() is None:
+                    with contextlib.suppress(Exception):
+                        proc.terminate()
+            deadline = time.monotonic() + _WORKER_STOP_FALLBACK_GRACE_SECONDS
         for proc in procs:
             timeout = max(0.1, deadline - time.monotonic())
             try:
@@ -793,6 +880,18 @@ def worker_run(
             help="retry_waiting/interrupted 自动重排前的退避秒数",
         ),
     ] = None,
+    shutdown_grace: Annotated[
+        float | None,
+        typer.Option(
+            "--shutdown-grace",
+            help=(
+                "优雅停机宽限秒数(默认取 settings."
+                "worker_shutdown_grace_seconds,0=立即取消 in-flight)。"
+                ">0 时收到停止信号先等 in-flight 完成至宽限上限再取消;"
+                "等待中第二次 Ctrl-C 立即强退(退出码 130)"
+            ),
+        ),
+    ] = None,
     workers: Annotated[
         int | None,
         typer.Option(
@@ -805,7 +904,13 @@ def worker_run(
         ),
     ] = None,
 ) -> None:
-    """启动后台 worker 进程,从 PostgreSQL 队列领取任务直到 Ctrl-C。"""
+    """启动后台 worker 进程,从 PostgreSQL 队列领取任务直到 Ctrl-C。
+
+    停机语义与退出码(issue #307):第一次停止信号停止领新任务并按
+    ``--shutdown-grace``(默认 settings.worker_shutdown_grace_seconds,0)
+    收尾 in-flight;等待中第二次 Ctrl-C 立即强退。退出码:优雅完成 0,
+    强退 130、异常非 0;未完成任务由 lease 过期回收后重排。
+    """
 
     settings = ctx.obj
     overrides: dict[str, str] = {}
@@ -832,11 +937,24 @@ def worker_run(
         settings = settings.model_copy(
             update={"worker_retry_backoff_seconds": retry_backoff}
         )
+    if shutdown_grace is not None:
+        overrides["worker_shutdown_grace_seconds"] = str(shutdown_grace)
+        settings = settings.model_copy(
+            update={"worker_shutdown_grace_seconds": shutdown_grace}
+        )
     process_count = workers if workers is not None else settings.worker_processes
     if process_count > 1:
         # 多进程形态:父进程只做监管,不领取任务(issue #286)。
         child_cmd = _worker_child_command(overrides)
-        raise typer.Exit(_supervise_worker_processes(child_cmd, process_count))
+        raise typer.Exit(
+            _supervise_worker_processes(
+                child_cmd,
+                process_count,
+                # issue #307:supervisor 收敛宽限与 worker 侧 drain 宽限同读
+                # settings(显式 --shutdown-grace 已合入上方 model_copy)。
+                shutdown_grace_seconds=settings.worker_shutdown_grace_seconds,
+            )
+        )
     asyncio.run(_run_worker(settings))
 
 
@@ -1000,6 +1118,10 @@ async def _run_worker(settings: Settings) -> None:
         queues=queue_list,
         maintenance_interval_seconds=settings.worker_maintenance_interval_seconds,
         retry_backoff_seconds=settings.worker_retry_backoff_seconds,
+        # issue #307:优雅停机宽限 —— 0(默认)= 停止信号立即取消 in-flight
+        # (现状语义);>0 = 先等 in-flight 完成至宽限上限再取消。等待中第二
+        # 次停止信号立即强退(退出码 130)。
+        shutdown_grace_seconds=settings.worker_shutdown_grace_seconds,
         # issue #306:僵尸无进展检测阈值(0 = 关闭;默认 3600s 见 settings 注释)。
         zombie_no_progress_seconds=settings.worker_zombie_no_progress_seconds,
         # issue #144:per-kind 全局并发上限(SQL 层 claim_next max_per_kind 实现)。
