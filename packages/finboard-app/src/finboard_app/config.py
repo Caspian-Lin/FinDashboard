@@ -226,6 +226,8 @@ class Settings(BaseSettings):
     # OpenCodeProcessManager 托管一个进程级隔离的 Docker 容器(而非宿主机子进程),
     # 实现与会话 / auth.json / 版本彻底隔离。需要 Docker Desktop 运行。
     # Docker 镜像(官方 ``ghcr.io/anomalyco/opencode``;旧 ``ghcr.io/sst/opencode`` 已废弃)。
+    # 可指向衍生镜像 ``finboard-opencode-agent:<版本>``(官方镜像 + jq/python3,
+    # issue #313);启用 / 升级 / 回滚步骤见 docs/opencode-agent-image.md。
     opencode_image: str = "ghcr.io/anomalyco/opencode:latest"
     # 固定容器名(便于 stop / logs / inspect)。
     opencode_container_name: str = "finboard-opencode-web"
