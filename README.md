@@ -193,8 +193,22 @@ uv run finboard worker run \
 uv run finboard worker run \
     --maintenance-interval 5 \
     --retry-backoff 60                    # 调周期维护 / 重试退避秒数
+uv run finboard worker run --workers 4    # 多进程:父进程拉起 4 个独立 worker 子进程
 uv run finboard worker recover            # 仅回收过期 lease(running→interrupted),不常驻
 ```
+
+**多进程 worker(issue #286)**:CPU 密集的回测 / research_run 计算段虽已
+`asyncio.to_thread` 卸载(事件循环不被长计算阻塞、心跳正常续约),但 Python
+GIL 之下单进程同一时刻仍只有一核在算。`--workers N`(或 settings
+`FINBOARD_WORKER_PROCESSES`,默认 1)让 `worker run` 作为**父进程监管者**
+拉起 N 个独立 worker 子进程(各自 engine / session_maker / worker_id),
+把并行边界从 1 核扩到 N 核;任务领取靠 PostgreSQL `FOR UPDATE SKIP LOCKED`
++ `claim_next` 的 SQL 级约束(含 `kind_concurrency` 单并发,跨进程全局生效,
+经事务级 advisory lock 串行化),无需任何消息队列中间件。子进程经 CLI 单
+worker 形态重新拉起(spawn 天然安全),显式 CLI 覆盖项转发给子进程;Ctrl-C
+时父进程先等子进程自行收敛、宽限 10s 后强杀兜底(主动停止退出码 0);子进程
+崩溃不自动重启 —— 未完成任务由 lease 过期回收后重排,重新执行命令即可。
+回滚 = `--workers 1`(默认)+ revert。
 
 不启动 Worker 时,提交端点仍会返回 `202 + job_id`,但任务会停留在 `queued`
 直到 Worker 上线。Worker 崩溃后,过期租约由 Worker 启动与**周期性维护**
