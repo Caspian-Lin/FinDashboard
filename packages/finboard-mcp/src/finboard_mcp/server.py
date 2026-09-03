@@ -110,6 +110,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
   字段 + metrics(剔 equity_curve)+ universe 聚合计数 + fills 按决策计数,
   不序列化 manifest/result 全量;view=detail 才含全量(可达 MB 级)。
+  replay 放开 interrupted(#305):interrupted run 一条命令按冻结输入恢复,
+  新 run 自动继承原 manifest 全部冻结输入(含 factor_snapshots 全部 ID,
+  零手工),血缘标注 replay_of_run_id + replay_source_status;cancelled
+  是显式用户意图仍拒绝,completed 保持确定性重放对照。
   入队预检(#186):queue 与 backtest_run
   (strategy_spec 形态)入队时对主数据发布做 universe 候选池非空校验,
   空池秒级 invalid_argument(不再等执行期跑完后报泛化错误),错误信息附

@@ -71,6 +71,31 @@ class ResearchRunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+#: 允许重放(replay)的源状态(issue #305):
+#:
+#: - ``COMPLETED`` —— 确定性重放对照(既有语义,expected_result_checksum 生效);
+#: - ``INTERRUPTED`` —— 事故恢复通道:run 被标 interrupted 后 checkpoint 保留,
+#:   重放自动继承原 manifest 全部冻结输入(含 factor_snapshots 全部 ID,零手工),
+#:   血缘标注 ``replay_of_run_id`` + ``replay_source_status``。
+#:
+#: ``CANCELLED`` 是显式用户意图,不放开;queued/running 尚有归属、failed/rejected
+#: 有专属错误处置路径,均不可重放。MCP/REST/Coordinator 三处守卫共用本判定。
+REPLAYABLE_SOURCE_STATUSES: frozenset[ResearchRunStatus] = frozenset(
+    {ResearchRunStatus.COMPLETED, ResearchRunStatus.INTERRUPTED}
+)
+
+
+def replay_guard_error(status: ResearchRunStatus) -> str:
+    """不可重放源状态的统一解释文案(issue #305,三处守卫共用)。"""
+
+    return (
+        f"仅允许重放 completed 或 interrupted 运行,当前状态 {status.value} 不可重放;"
+        "interrupted 运行可经 finboard_run_replay(MCP)或 REST "
+        "POST /api/research/runs/{run_id}/replay 按冻结输入恢复,"
+        "新 run 自动继承原 manifest 全部冻结输入,无需手工重填快照 ID"
+    )
+
+
 class ResearchRunStage(StrEnum):
     UNIVERSE = "universe"
     FEATURES = "features"
@@ -154,6 +179,10 @@ class ResearchRunManifest:
     requested_by: str = ""
     actor_type: ResearchActorType = ResearchActorType.HUMAN
     replay_of_run_id: str | None = None
+    # issue #305:重放源状态血缘标注(completed=确定性重放对照 /
+    # interrupted=事故恢复)。仅随 replay_of_run_id 一起出现;不入 input_checksum,
+    # None 时也不入 manifest checksum(保持历史 manifest checksum 不漂移)。
+    replay_source_status: str | None = None
     schema_version: str = RESEARCH_RUN_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -183,6 +212,14 @@ class ResearchRunManifest:
             raise ValueError("requested_by 不能为空")
         if self.actor_type is ResearchActorType.LLM:
             raise ValueError("LLM 不能触发研究运行")
+        if self.replay_source_status is not None:
+            if self.replay_of_run_id is None:
+                raise ValueError("replay_source_status 必须与 replay_of_run_id 一起声明")
+            if self.replay_source_status not in REPLAYABLE_SOURCE_STATUSES:
+                raise ValueError(
+                    "replay_source_status 仅接受 completed/interrupted,"
+                    f"收到 {self.replay_source_status!r}"
+                )
         if not MIN_RESEARCH_CAPITAL <= self.initial_capital <= MAX_RESEARCH_CAPITAL:
             raise ValueError("研究资金必须位于 10 万至 50 万元")
         reject_executable_payload(self.parameters, path="$.parameters")
@@ -200,6 +237,10 @@ class ResearchRunManifest:
         # 校验. 新 manifest 在提供版本时把版本纳入冻结清单 checksum.
         if self.strategy_version is None:
             payload.pop("strategy_version", None)
+        # issue #305:血缘标注仅在 replay 时出现;None 时弹出,历史(非重放)
+        # manifest 的 checksum 不因新增字段而漂移(同 strategy_version 先例)。
+        if self.replay_source_status is None:
+            payload.pop("replay_source_status", None)
         return stable_checksum(payload)
 
     @property
@@ -793,6 +834,11 @@ def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
             if payload.get("replay_of_run_id") is not None
             else None
         ),
+        replay_source_status=(
+            str(payload["replay_source_status"])
+            if payload.get("replay_source_status") is not None
+            else None
+        ),
         schema_version=str(payload.get("schema_version", RESEARCH_RUN_SCHEMA_VERSION)),
     )
 
@@ -889,6 +935,7 @@ __all__ = [
     "MAX_RESEARCH_CAPITAL",
     "MIN_RESEARCH_CAPITAL",
     "REBALANCE_FREQUENCIES",
+    "REPLAYABLE_SOURCE_STATUSES",
     "RESEARCH_PORTFOLIO_PIPELINE_VERSION",
     "RESEARCH_RUN_SCHEMA_VERSION",
     "CapitalTierOutcome",
@@ -929,6 +976,7 @@ __all__ = [
     "execution_mode_for",
     "manifest_from_json",
     "pipeline_output_checksum",
+    "replay_guard_error",
     "report_from_json",
     "stable_checksum",
     "to_json_value",

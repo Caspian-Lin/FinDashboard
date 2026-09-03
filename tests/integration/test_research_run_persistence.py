@@ -308,6 +308,71 @@ async def test_running_checkpoint_is_recovered_after_new_session(
     assert len(await store.list_artifacts(manifest.run_id)) == 14
 
 
+async def test_interrupted_run_replay_recovers_with_frozen_inputs(
+    _engine: AsyncEngine,  # noqa: PT019
+    db_session: AsyncSession,
+) -> None:
+    """issue #305:RR-7a74 恢复通道 —— interrupted run 一条 replay 命令恢复。
+
+    进程重启(mark_stale_running_as_interrupted)后,源 run 的 error_summary
+    指向 finboard_run_replay;replay 的新 run 经 PostgreSQL 存储自动继承全部
+    冻结输入(含 factor_snapshots 全集,零手工),血缘标注
+    replay_of_run_id + replay_source_status;源 run 保持 INTERRUPTED。
+    """
+    del _engine
+    base_manifest = _manifest("ma_cross", "interrupted-305")
+    snapshots = (
+        FrozenArtifactRef(
+            artifact_id="factor-305-a",
+            version="v1",
+            checksum="b" * 64,
+            capabilities=("factor:close",),
+        ),
+        FrozenArtifactRef(
+            artifact_id="factor-305-b",
+            version="v1",
+            checksum="c" * 64,
+            capabilities=("factor:momentum",),
+        ),
+    )
+    manifest = replace(base_manifest, factor_snapshots=snapshots)
+    store = SqlAlchemyResearchRunStore(ResearchRunRepository(db_session))
+    await store.create_or_get(manifest)
+    await store.transition(
+        manifest.run_id,
+        expected=frozenset({ResearchRunStatus.QUEUED}),
+        target=ResearchRunStatus.RUNNING,
+    )
+    await store.checkpoint()
+
+    coordinator = ResearchRunCoordinator(store)
+    recovered = await coordinator.mark_stale_running_as_interrupted()
+    assert [item.status for item in recovered] == [ResearchRunStatus.INTERRUPTED]
+    assert "finboard_run_replay" in (recovered[0].error_summary or "")
+
+    replayed = await coordinator.replay(
+        source_run_id=manifest.run_id,
+        new_run_id="RR-integration-305-replay",
+        idempotency_key="integration-idempotency-305-replay",
+        requested_by="integration-test",
+        adapter=_adapter("ma_cross", manifest),
+    )
+
+    assert replayed.status is ResearchRunStatus.COMPLETED, replayed.error_summary
+    # 血缘标注:replay-of-interrupted。
+    assert replayed.manifest.replay_of_run_id == manifest.run_id
+    assert replayed.manifest.replay_source_status == "interrupted"
+    # 冻结输入零手工继承(跨 PostgreSQL JSONB 往返后仍逐项一致)。
+    assert replayed.manifest.input_checksum == manifest.input_checksum
+    assert replayed.manifest.factor_snapshots == snapshots
+    assert replayed.manifest.dataset_releases == manifest.dataset_releases
+    # 源 run 不被复活。
+    source_after = await store.get(manifest.run_id)
+    assert source_after is not None
+    assert source_after.status is ResearchRunStatus.INTERRUPTED
+    assert source_after.result_checksum is None
+
+
 async def test_job_timing_round_trips_through_result_json(
     _engine: AsyncEngine,  # noqa: PT019
     db_session: AsyncSession,

@@ -128,11 +128,20 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
 - 返回:更新后的 ResearchRun 详情
 - 错误:`conflict`(非法状态转换)
 
-### finboard_run_replay(✅ #127,写)
-复制 completed ResearchRun 为新 queued 运行(**不执行**)。
+### finboard_run_replay(✅ #127,写;#305 放开 interrupted)
+复制 completed 或 interrupted ResearchRun 为新 queued 运行(**不执行**)。
 - 参数:`run_id: str`、`idempotency_key: str`、`requested_by: str`
-- 返回:新 ResearchRun 详情(`replay_of_run_id` 指向源)
-- 错误:`not_found`(源不存在)、`conflict`(源未 completed / 幂等冲突)
+- 返回:新 ResearchRun 详情(`replay_of_run_id` + manifest `replay_source_status`
+  标注血缘;REST 等价入口 `POST /api/research/runs/{run_id}/replay`)
+- **interrupted 即事故恢复通道(#305)**:run 被标 interrupted(error_summary
+  指向本工具)后,**一条命令按冻结输入恢复** —— 新 run 自动继承原 manifest
+  全部冻结输入(dataset_release_ids / factor_snapshots 全部 ID,零手工重填),
+  `input_checksum` 与源一致;源 run 不被复活,也不复活原 job
+  (job 侧自动恢复由 `requeue_due` 覆盖)
+- completed 源保持确定性重放对照(结果漂移判 `non_deterministic_replay`);
+  cancelled 是显式用户意图,拒绝重放
+- 错误:`not_found`(源不存在)、`conflict`(源状态不可重放(仅
+  completed/interrupted 可重放)/ 幂等冲突)
 
 ### finboard_run_lineage
 查询某 ResearchRun 内指定 trace_id 的 artifact 血缘(BFS 向上遍历 parent)。
