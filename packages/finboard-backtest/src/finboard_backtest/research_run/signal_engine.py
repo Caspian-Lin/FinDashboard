@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import os
+import weakref
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -108,6 +109,14 @@ logger = structlog.get_logger(__name__)
 
 #: 信号引擎当前支持的策略类型(其余 kind 继续明确报 not_implemented)。
 SIGNAL_ENGINE_STRATEGY_KINDS: frozenset[str] = frozenset({"multi_factor"})
+
+#: 交易日历进程内缓存:provider → 发布交易日历(升序去重)。
+#: 发布不可变且 checksum 已由 manifest 冻结锚定,同一 provider 的日历恒定;
+#: provider 经工厂按 run memoize(#287),WeakKeyDictionary 让缓存条目随
+#: provider 一起被回收 —— 不引入跨 run / 跨事件循环的长命可变状态。
+_TRADING_DAYS_CACHE: "weakref.WeakKeyDictionary[FrozenReleaseProvider, list[date]]" = (
+    weakref.WeakKeyDictionary()
+)
 
 #: 节点值序列:symbol → 时间升序数值序列(单点序列长度 1)。
 NodeSeries = dict[str, list[float]]
@@ -629,9 +638,25 @@ async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
 
     交易日历是公开知识,用非 PIT 的 ``fetch_bars`` 读取发布全范围;决策与
     成交发生在发布日期之后,不构成未来函数。
+
+    issue #287:日历按 provider 进程内缓存(N 期回放此前每期重读完整
+    parquet)。只对真实 ``FrozenReleaseProvider`` 启用 —— 其发布不可变、
+    日历恒定;其它实现(测试 stub 等)保持每次推导的原行为。
     """
     from finboard_backtest.research_run.frozen_loader import _market_from_value
+    from finboard_data.releases import FrozenReleaseProvider
     from finboard_shared.models import Symbol
+
+    cacheable = isinstance(provider, FrozenReleaseProvider)
+    if cacheable:
+        cached = _TRADING_DAYS_CACHE.get(provider)
+        if cached is not None:
+            logger.debug(
+                "research_run.trading_calendar_cache_hit",
+                release_id=provider.release.release_id,
+                days=len(cached),
+            )
+            return cached
 
     for instrument in provider.release.instruments:
         if not instrument.ready:
@@ -647,7 +672,10 @@ async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
             adjust=provider.release.adjustment,
         )
         if bars:
-            return sorted({bar.timestamp.date() for bar in bars})
+            days = sorted({bar.timestamp.date() for bar in bars})
+            if cacheable:
+                _TRADING_DAYS_CACHE[provider] = days
+            return days
     return []
 
 
@@ -1563,12 +1591,29 @@ def build_signal_engine_adapter_factory(
             ref.artifact_id: ref.checksum for ref in manifest.dataset_releases
         }
 
+        # issue #287:provider 按 release_id 在本 run(工厂闭包)内 memoize。
+        # 发布不可变且 checksum 已由 manifest 锚定,实例复用使逐文件 SHA256
+        # 校验缓存(_verified)与 manifest 加载每发布只付一次 —— 此前 loader
+        # 每决策 3 处调用工厂,per-instance 校验缓存被打穿、每次重验整文件。
+        # 缓存生命周期 = 闭包生命周期 = 单次 run 适配器,无跨 run / 跨事件
+        # 循环共享的可变状态。
+        provider_memo: dict[str, FrozenReleaseProvider] = {}
+
         def _release_factory(release_id: str) -> FrozenReleaseProvider:
-            return FrozenReleaseProvider(
+            provider = provider_memo.get(release_id)
+            if provider is not None:
+                logger.debug(
+                    "research_run.release_provider_reused", release_id=release_id
+                )
+                return provider
+            provider = FrozenReleaseProvider(
                 release_root=root,
                 release_id=release_id,
                 expected_checksum=release_checksums.get(release_id),
             )
+            provider_memo[release_id] = provider
+            logger.debug("research_run.release_provider_created", release_id=release_id)
+            return provider
 
         async def _snapshot_provider(snapshot_id: str) -> object:
             async with session_maker() as session:
