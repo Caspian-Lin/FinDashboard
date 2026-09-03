@@ -340,7 +340,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   首次晋级 screen 证据(#234):规格声明 screen_artifact_bindings 显式绑定
   draft 产物,经 finboard_run_queue(screen RR)产出 factor_screen /
   strategy_screen 证据,promote 四向校验(name/kind/artifact_id/commit)
-  兜底,screen 运行不可挪作他版代码的证据。
+  兜底,screen 运行不可挪作他版代码的证据。screen RR 来源状态(#304):
+  completed 或 rejected+partial(组合阶段硬约束拒绝但保留的 screen 证据,
+  result 顶层 partial=true + constraint_failure 失败决策定位)均可作晋级
+  证据,证据 execution.source_run_status 显式标注来源 run 状态。
 - 研究代码沙箱执行(2,✅ #216+#217):research_code_run(写,入队)/
   research_code_run_get(只读)。通过晋级门的 active 因子代码在一次性 Docker 容器内执行
   factor.compute(ctx) -> scores + metrics(协议 v1 纯截面函数)。容器

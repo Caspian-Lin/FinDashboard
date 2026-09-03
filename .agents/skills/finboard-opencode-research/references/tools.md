@@ -1413,8 +1413,10 @@ active 版本。
 
 ### finboard_research_code_promote(写,✅ #219)
 将指定 draft artifact 置为正式 active。必须传同一 artifact 的
-`screen_run_id`(完成 ResearchRun 的 `factor_screen`/`strategy_screen`,或
-成功 RCR 的 screen 指标)与 `validation_experiment_id`(#57),且实验为
+`screen_run_id`(ResearchRun 的 `factor_screen`/`strategy_screen`:completed,
+或 rejected+partial —— 组合阶段硬约束拒绝但保留的 screen 证据,#304,证据
+`execution.source_run_status` 显式标注来源 run 状态;或成功 RCR 的 screen
+指标)与 `validation_experiment_id`(#57),且实验为
 `validated_oos`、`final_test_unsealed=true`,version_stamp 绑定相同
 artifact/name/kind/commit。
 - 默认 screen 门:`abs(rank_ic) >= 0.02`、平均换手率 `<= 0.80`、相关性

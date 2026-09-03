@@ -432,10 +432,27 @@ async def _screen_evidence(
     if screen_run_id.startswith("RR-") or not screen_run_id.startswith("RCR-"):
         run_row = await ResearchRunRepository(session).get(screen_run_id)
     if run_row is not None:
-        if run_row.status != "completed" or not isinstance(run_row.result, dict):
+        # issue #304:completed 之外,rejected + partial 标记(组合阶段硬约束
+        # 拒绝但保留的 factor_screen/strategy_screen 证据)同样可作晋级证据;
+        # 来源 run 状态显式标注进 execution(source_run_status),消费方可
+        # 区分证据出自完成 run 还是拒绝 run。四向一致性校验不变。
+        run_result = run_row.result if isinstance(run_row.result, dict) else None
+        source_run_status = str(run_row.status)
+        source_run_partial = (
+            run_result is not None and run_result.get("partial") is True
+        )
+        if not (
+            source_run_status == "completed"
+            or (source_run_status == "rejected" and source_run_partial)
+        ):
             raise McpToolError(
                 "invalid_argument",
                 f"screen ResearchRun 未完成或缺少 report: {screen_run_id}",
+            )
+        if run_result is None:
+            raise McpToolError(
+                "invalid_argument",
+                f"screen ResearchRun 缺少 report: {screen_run_id}",
             )
         manifest = run_row.manifest if isinstance(run_row.manifest, dict) else {}
         spec = manifest.get("strategy_spec")
@@ -454,7 +471,7 @@ async def _screen_evidence(
                 raise McpToolError(
                     "invalid_argument", "screen ResearchRun 的 code commit 与 artifact 不一致"
                 )
-            screen = run_row.result.get("strategy_screen")
+            screen = run_result.get("strategy_screen")
         else:
             feature_graph = spec.get("feature_graph")
             nodes = feature_graph.get("nodes", []) if isinstance(feature_graph, dict) else []
@@ -505,7 +522,7 @@ async def _screen_evidence(
                     "invalid_argument",
                     "screen ResearchRun 的用户因子快照未绑定同一 artifact/name/kind/commit",
                 )
-            screen = run_row.result.get("factor_screen")
+            screen = run_result.get("factor_screen")
         if not isinstance(screen, dict):
             raise McpToolError(
                 "invalid_argument",
@@ -524,11 +541,13 @@ async def _screen_evidence(
             if isinstance(item, dict) and item.get("artifact_id") and item.get("checksum")
         }
         params = manifest.get("parameters", {})
-        result = run_row.result
+        result = run_result
         output_checksum = run_row.result_checksum or stable_checksum(result)
         execution = {
             "run_id": run_row.run_id,
             "run_kind": "research_run",
+            # issue #304:证据来源 run 状态显式标注(completed / rejected)。
+            "source_run_status": source_run_status,
             "manifest_checksum": run_row.manifest_checksum or stable_checksum(manifest),
             "result_checksum": output_checksum,
             "output_checksum": output_checksum,
@@ -539,6 +558,8 @@ async def _screen_evidence(
             "parameters": params,
             "parameters_checksum": stable_checksum(params),
         }
+        if source_run_status == "rejected":
+            execution["source_run_partial"] = True
         if factor_snapshot_bindings:
             execution["factor_snapshot_bindings"] = factor_snapshot_bindings
         sandbox_provenance = result.get("sandbox_provenance")
@@ -734,9 +755,11 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_research_code_promote",
         description=(
-            "[写] 将指定 draft 研究代码晋级为 active。必须同时提供已完成的"
-            "screen_run_id(完成 ResearchRun 的 factor_screen/strategy_screen 或"
-            "成功 RCR screen 指标)与 validation_experiment_id(#57):状态必须"
+            "[写] 将指定 draft 研究代码晋级为 active。必须同时提供 screen_run_id"
+            "(ResearchRun 的 factor_screen/strategy_screen:completed,或 #304 "
+            "rejected+partial —— 组合阶段硬约束拒绝但保留的 screen 证据,来源 "
+            "run 状态标注在证据 execution.source_run_status;或成功 RCR screen "
+            "指标)与 validation_experiment_id(#57):状态必须"
             "validated_oos 且 final_test_unsealed=true,并绑定同一 artifact/name/"
             "kind/commit。screen 机器门默认要求 abs(rank_ic)>=0.02、"
             "average_turnover<=0.80、相关性绝对值<=0.80、至少 2 期;rank_ic 取"
