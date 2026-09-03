@@ -53,6 +53,11 @@ from finboard_backtest.research_run.adapters import (
     SUPPORTED_RESEARCH_STRATEGIES,
     validate_strategy_dataset_capabilities,
 )
+from finboard_backtest.research_run.config_overrides import (
+    effective_max_risk_contribution,
+    merge_risk_exit_policy,
+    section_overrides,
+)
 from finboard_backtest.research_run.contracts import (
     CapitalTierOutcome,
     DecisionBundle,
@@ -80,6 +85,7 @@ from finboard_backtest.research_run.contracts import (
 )
 from finboard_backtest.strategy_spec.contracts import (
     AllocationMethod,
+    RiskExitPolicy,
 )
 from finboard_backtest.strategy_spec.contracts import (
     SignalConflictPolicy as SpecSignalConflictPolicy,
@@ -319,6 +325,13 @@ class PortfolioPipelineAdapter:
             equity_high_water=manifest.initial_capital,
         )
         constraints = _constraints_from_manifest(manifest)
+        # issue #303:risk_config.overrides 在此解析为生效风险退出策略(此前该
+        # manifest 分区无任何业务消费者)。非法覆盖 fail-closed 转换为
+        # ResearchConstraintViolationError,与组合硬约束同走 REJECTED 语义。
+        try:
+            risk_exit_policy = _risk_exit_policy_from_manifest(manifest)
+        except ValueError as exc:
+            raise ResearchConstraintViolationError(str(exc)) from exc
         allocation_method = _allocation_method(manifest)
         conflict_policy = (
             SignalConflictPolicy.NEUTRALIZE
@@ -341,6 +354,7 @@ class PortfolioPipelineAdapter:
                     index=index,
                     state=state,
                     constraints=constraints,
+                    risk_exit_policy=risk_exit_policy,
                     allocation_method=allocation_method,
                     conflict_policy=conflict_policy,
                     target_gross=target_gross,
@@ -449,6 +463,7 @@ class PortfolioPipelineAdapter:
         index: int,
         state: _PipelineState,
         constraints: PortfolioConstraints,
+        risk_exit_policy: RiskExitPolicy,
         allocation_method: str,
         conflict_policy: SignalConflictPolicy,
         target_gross: float,
@@ -531,8 +546,10 @@ class PortfolioPipelineAdapter:
             for symbol, book in sorted(state.positions.items())
             if book.quantity > 0 and book.opened_on is not None
         )
+        # issue #303:生效风险退出策略在 decisions() 一次性解析
+        # (risk_config.overrides 已按 rule_type 合并),传入而非逐决策重放。
         exit_result = execute_risk_exit_policy(
-            policy=manifest.strategy_spec.risk_exit_policy,
+            policy=risk_exit_policy,
             target=built.target_after_constraints,
             positions=exit_positions,
             as_of=item.business_date,
@@ -687,12 +704,30 @@ def _constraints_from_manifest(
         min_weight_to_trade=_required_float(
             overrides, "min_weight_to_trade", policy.min_target_weight
         ),
-        max_risk_contribution=_required_float(
-            overrides, "max_risk_contribution", 0.35
-        ),
+        max_risk_contribution=effective_max_risk_contribution(overrides),
         long_only=bool(overrides.get("long_only", True)),
         covariance_failure_mode=failure_mode,
         risk_factor_limits=_risk_factor_limits(overrides),
+    )
+
+
+def _risk_exit_policy_from_manifest(
+    manifest: ResearchRunManifest,
+) -> RiskExitPolicy:
+    """manifest → 生效风险退出策略(issue #303)。
+
+    ``risk_config.overrides`` 按 ``rule_type`` 同名覆盖
+    ``strategy_spec.risk_exit_policy``(stop-loss 等风险退出参数的 run 级
+    覆盖从此真实生效);未声明 overrides 时原样返回规格策略,零行为变化。
+    非法覆盖抛 ``ValueError``,由 ``decisions()`` 转换为
+    ``ResearchConstraintViolationError`` 使 run REJECTED。
+    """
+    overrides = section_overrides(manifest.risk_config)
+    if not overrides:
+        return manifest.strategy_spec.risk_exit_policy
+    return merge_risk_exit_policy(
+        manifest.strategy_spec.risk_exit_policy,
+        overrides,
     )
 
 
@@ -763,8 +798,8 @@ def _risk_factor_limits(overrides: Mapping[str, object]) -> tuple[RiskFactorLimi
 
 
 def _section_overrides(section: Mapping[str, object]) -> dict[str, object]:
-    value = section.get("overrides", {})
-    return cast(dict[str, object], value) if isinstance(value, dict) else {}
+    """配置分区 → overrides 子 dict(共享实现见 ``config_overrides``)。"""
+    return section_overrides(section)
 
 
 def _optional_float(value: object) -> float | None:

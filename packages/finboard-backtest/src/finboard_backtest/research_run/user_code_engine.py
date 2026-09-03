@@ -61,6 +61,7 @@ from finboard_backtest.research_run.portfolio_pipeline import (
     _constraints_from_manifest,
     _current_weights_view,
     _PipelineState,
+    _risk_exit_policy_from_manifest,
 )
 from finboard_backtest.research_run.signal_engine import (
     DecisionLoadContext,
@@ -202,6 +203,12 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
             equity_high_water=manifest.initial_capital,
         )
         constraints = _constraints_from_manifest(manifest)
+        # issue #303:risk_config.overrides 解析为生效风险退出策略 —— user_code
+        # 的 direct_weights 目标同样经风险退出,与 multi_factor 管线同口径。
+        try:
+            risk_exit_policy = _risk_exit_policy_from_manifest(manifest)
+        except ValueError as exc:
+            raise ResearchConstraintViolationError(str(exc)) from exc
         conflict_policy = (
             SignalConflictPolicy.NEUTRALIZE
             if manifest.strategy_spec.signal_rules.conflict_policy
@@ -255,6 +262,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                     index=index,
                     state=state,
                     constraints=constraints,
+                    risk_exit_policy=risk_exit_policy,
                     allocation_method=_DIRECT_WEIGHTS_METHOD,
                     conflict_policy=conflict_policy,
                     # direct_weights 路径不消费 target_gross(builder 显式
