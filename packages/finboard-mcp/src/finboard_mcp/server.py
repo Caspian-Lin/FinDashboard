@@ -270,7 +270,11 @@ FinBoard 研究 MCP —— 量化研究工具集
   data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206)。
   kind=research_run 的 job_get 附 run_status(#306:关联 research_runs.status,
   「run interrupted 但 job 仍 running」的两表不一致一眼可见;REST
-  GET /api/jobs/{id} 同口径,列表不 join 为 null)。
+  GET /api/jobs/{id} 同口径,列表不 join 为 null)。research_run 的 phase
+  即实时进度(#308):加载期 `research_run:decision_load k/N`(k=已完成期数),
+  决策执行期 `research_run:<stage>#<序号>@<YYYY-MM-DD>`(序号 1-based),
+  done/total 恒为「stage x decision」计数(#188 口径);轮询 phase 变化即可
+  区分「正常计算 / 加载中 / 卡死」,不再只能靠 (done-1)//13 反推决策序号。
   归档(#221):不重要终态任务 job_archive(单个 job_id 或按 kinds/statuses/
   finished_before 批量,只回 archived_count)隐藏出默认列表但不删除,
   job_list 的 archived=exclude(默认)/only/all 控制可见性,finboard_job_get

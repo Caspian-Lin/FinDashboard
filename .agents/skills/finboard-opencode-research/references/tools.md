@@ -1203,6 +1203,14 @@ SDK fail-fast。
 - **run_status(#306)**:kind=research_run 的任务附关联 `research_runs.status`
   (查不到为 null)——「run interrupted 但 job 仍 running」的两表不一致一眼
   可见;REST `GET /api/jobs/{id}` 同口径,列表端点不 join 恒 null
+- **实时进度 phase(#308)**:research_run 轮询期间 phase 即进度 —— 加载期
+  `research_run:decision_load k/N`(k=已完成期数、N=推导出的决策期总数,
+  multi_period/single_shot 同机制,首帧在 close 矩阵预建前透出),
+  决策执行期 `research_run:<stage>#<序号>@<YYYY-MM-DD>`(序号 1-based),
+  REPORT/终态保持 `research_run:report` / `research_run:<status>`;
+  `progress_done/total` 恒为「stage x decision」工件计数(#188 口径,
+  total 随已发现决策递增)。轮询 phase 变化即可区分「正常计算 / 加载中 /
+  卡死」,不再只能靠 `(done-1)//13` 反推决策序号
 - 错误:`not_found`、`invalid_argument`(view 非法)
 
 ### finboard_job_enqueue **[写]**

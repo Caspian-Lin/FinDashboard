@@ -94,6 +94,16 @@ _DECISION_STAGES = (
 #: 工件一起构成「stage x decision」进度计量单位(issue #188)。决策总数 N 在执行
 #: 期才得知,故 total 采用「随新决策被发现而递增」的自修正语义(worker 侧
 #: ``update_progress`` 对 total 只增不减,二者兼容)。
+#:
+#: phase 编码(issue #188 + #308):done/total 数值保持 #188 的
+#: 「stage x decision」口径不变;决策执行期的 phase 在 stage 名后追加决策级
+#: 上下文 ``research_run:<stage>#<序号>@<YYYY-MM-DD>``(序号 1-based、日期为
+#: decision business_date),job 视图(MCP ``finboard_job_get`` / REST
+#: ``GET /api/jobs/{id}`` / 前端任务中心)不必再靠 ``(done-1)//13`` 反推;
+#: REPORT 段与终态 phase 保持 ``research_run:report`` / ``research_run:<status>``
+#: 原样(#188 终态兼容不变)。加载期 phase 由 signal_engine 的分块探针
+#: (#306/#308)以 ``research_run:decision_load k/N`` 上报,与本地数值口径无耦合
+#: (probe 只写 phase,不写 done/total,避免与 #188 数值口径冲突)。
 DECISION_STAGE_COUNT = len(_DECISION_STAGES)
 
 #: 进度回调钩子:(done, total, phase) → None,与 background_jobs 的
@@ -681,11 +691,15 @@ class ResearchRunCoordinator:
             await self._store.append_artifact(artifact)
             if progress is not None:
                 # 单位 = 已完成的 (decision x stage) 工件数;total 随当前已发现的
-                # 决策递增(见 DECISION_STAGE_COUNT 注释)。
+                # 决策递增(见 DECISION_STAGE_COUNT 注释)。phase 携带决策级
+                # 上下文(issue #308):序号 1-based + business_date。
                 done = decision_index * DECISION_STAGE_COUNT + offset + 1
                 total = (decision_index + 1) * DECISION_STAGE_COUNT
                 await _report_progress(
-                    progress, done, total, f"research_run:{stage.value}"
+                    progress,
+                    done,
+                    total,
+                    _decision_phase(stage.value, decision_index, decision.business_date),
                 )
             parent = (trace_id,)
 
@@ -992,6 +1006,22 @@ class ResearchRunCoordinator:
         if record is None:
             raise ResearchRunConflictError(f"研究运行不存在: {run_id}")
         return record
+
+
+def _decision_phase(stage_value: str, decision_index: int, business_date: object) -> str:
+    """决策执行期 phase 编码(issue #308):``research_run:<stage>#<序号>@<日期>``。
+
+    序号 1-based;``business_date`` 为 :class:`datetime.date`(isoformat 即
+    ``YYYY-MM-DD``)。job 视图与前端任务中心按此格式解析出「当前第几个决策 /
+    哪个决策日」,不再只能靠 ``(done-1)//13`` 反推序号。
+    """
+
+    date_text = (
+        business_date.isoformat()
+        if hasattr(business_date, "isoformat")
+        else str(business_date)
+    )
+    return f"research_run:{stage_value}#{decision_index + 1}@{date_text}"
 
 
 async def _report_progress(

@@ -285,6 +285,11 @@ export const zh = {
     archivedAt: "归档时间",
     updatedAt: "更新时间",
     payload: "入参 payload",
+    runStatus: "Run 状态",
+    decisionProgress: "当前决策",
+    phaseLoad: "加载决策上下文 {done}/{total} 期",
+    phaseDecision: "决策 #{index}({date}) · {stage}",
+    runStatusMismatch: "run 与任务状态不一致:run 已 {{runStatus}},任务仍 {{jobStatus}} —— 心跳可能仍在续租,请排查僵尸任务(issue #306/#308)。",
   },
   factorSelection: {
     title: "因子候选池",

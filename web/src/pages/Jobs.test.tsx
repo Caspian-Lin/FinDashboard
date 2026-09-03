@@ -49,6 +49,7 @@ function makeJob(overrides: Partial<JobOut> = {}): JobOut {
     finished_at: "2026-08-16T08:00:02Z",
     archived_at: null,
     updated_at: "2026-08-16T08:00:02Z",
+    run_status: null,
     ...overrides,
   };
 }
@@ -197,6 +198,89 @@ describe("任务中心页", () => {
     await screen.findByText("暂无任务");
     expect(
       screen.queryByRole("button", { name: "批量归档已完成的任务" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("research_run 加载期 phase 显示 k/N 推进(issue #308)", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue([
+      makeJob({
+        kind: "research_run",
+        status: "running",
+        progress_total: 0,
+        progress_done: 0,
+        phase: "research_run:decision_load 4/36",
+      }),
+    ]);
+    renderWithProviders(<Jobs />);
+    expect(await screen.findByText("BJ-TEST000000000001")).toBeInTheDocument();
+    expect(screen.getByText(/加载决策上下文 4\/36 期/)).toBeInTheDocument();
+  });
+
+  it("research_run 决策期 phase 显示决策序号与日期(issue #308)", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue([
+      makeJob({
+        kind: "research_run",
+        status: "running",
+        progress_total: 13,
+        progress_done: 16,
+        phase: "research_run:signals#2@2024-01-03",
+      }),
+    ]);
+    renderWithProviders(<Jobs />);
+    expect(await screen.findByText("BJ-TEST000000000001")).toBeInTheDocument();
+    expect(screen.getByText(/决策 #2\(2024-01-03\)/)).toBeInTheDocument();
+  });
+
+  it("展开 research_run 详情显示 run_status,不一致时告警(issue #306/#308)", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue([
+      makeJob({
+        kind: "research_run",
+        status: "running",
+        phase: "research_run:decision_load 4/36",
+      }),
+    ]);
+    // 列表不 join,单查才透传 run_status —— 模拟 run 已被标 interrupted
+    // 但 job 仍 running 的僵尸形态(RR-7a74)。
+    vi.mocked(api.getJob).mockResolvedValue(
+      makeJob({
+        kind: "research_run",
+        status: "running",
+        run_status: "interrupted",
+        phase: "research_run:decision_load 4/36",
+      }),
+    );
+    renderWithProviders(<Jobs />);
+    await screen.findByText("BJ-TEST000000000001");
+    await userEvent.click(
+      screen.getByRole("button", { name: "展开任务详情" }),
+    );
+    expect(vi.mocked(api.getJob)).toHaveBeenCalledWith("BJ-TEST000000000001");
+    expect(await screen.findByText("Run 状态")).toBeInTheDocument();
+    expect(screen.getByText("interrupted")).toBeInTheDocument();
+    expect(
+      screen.getByText(/run 与任务状态不一致/),
+    ).toBeInTheDocument();
+  });
+
+  it("run 状态一致时不显示不一致告警(issue #308)", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue([
+      makeJob({ kind: "research_run", status: "succeeded", phase: null }),
+    ]);
+    vi.mocked(api.getJob).mockResolvedValue(
+      makeJob({
+        kind: "research_run",
+        status: "succeeded",
+        run_status: "completed",
+      }),
+    );
+    renderWithProviders(<Jobs />);
+    await screen.findByText("BJ-TEST000000000001");
+    await userEvent.click(
+      screen.getByRole("button", { name: "展开任务详情" }),
+    );
+    expect(await screen.findByText("completed")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/run 与任务状态不一致/),
     ).not.toBeInTheDocument();
   });
 });

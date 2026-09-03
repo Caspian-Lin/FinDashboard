@@ -343,6 +343,15 @@ async def _job_phase_is(engine: AsyncEngine, job_id: str, phase: str) -> bool:
     return row is not None and row.phase == phase
 
 
+async def _job_phase_starts_with(
+    engine: AsyncEngine, job_id: str, prefix: str
+) -> bool:
+    """phase 前缀匹配(issue #308:加载期 phase 携带 k/N 计数后缀)。"""
+
+    row = await _get_job(engine, job_id)
+    return row is not None and row.phase is not None and row.phase.startswith(prefix)
+
+
 # ---- 验收 1:worker B 启动不误标 worker A 活跃 run ----------------------------
 
 
@@ -759,7 +768,7 @@ class TestLoadPhaseInterrupt:
         await worker._fill_concurrency()
         # 探针在首块边界把 phase 置为 decision_load —— 加载窗口已打开。
         await _wait_until(
-            lambda: _job_phase_is(engine, job_id, "research_run:decision_load"),
+            lambda: _job_phase_starts_with(engine, job_id, "research_run:decision_load"),
             timeout_seconds=10.0,
             message="加载期探针未上报 decision_load 阶段",
         )
@@ -830,7 +839,7 @@ class TestLoadPhaseInterrupt:
 
         await worker._fill_concurrency()
         await _wait_until(
-            lambda: _job_phase_is(engine, job_id, "research_run:decision_load"),
+            lambda: _job_phase_starts_with(engine, job_id, "research_run:decision_load"),
             timeout_seconds=10.0,
             message="加载窗口未打开",
         )

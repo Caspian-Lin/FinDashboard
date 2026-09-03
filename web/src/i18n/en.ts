@@ -287,6 +287,11 @@ export const en: Dict = {
     archivedAt: "Archived at",
     updatedAt: "Updated",
     payload: "Request payload",
+    runStatus: "Run status",
+    decisionProgress: "Current decision",
+    phaseLoad: "Loading decision contexts {done}/{total}",
+    phaseDecision: "Decision #{index} ({date}) · {stage}",
+    runStatusMismatch: "Run and job status diverge: run is {{runStatus}} while job is still {{jobStatus}}; the worker lease may still be renewing. Investigate for a zombie job (issue #306/#308).",
   },
   factorSelection: {
     title: "Factor candidate pool",

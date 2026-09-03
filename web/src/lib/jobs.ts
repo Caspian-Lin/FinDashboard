@@ -50,3 +50,41 @@ export function jobKindLabel(kind: string, lang: "zh" | "en" = "zh"): string {
   const found = JOB_KINDS.find((k) => k.value === kind)?.label;
   return found ? found[lang] : kind;
 }
+
+/** job phase 解析结果(issue #308:research_run 实时进度透出)。 */
+export interface JobPhaseInfo {
+  /** 阶段名:start / decision_load / <stage> / report / completed 等。 */
+  stage: string;
+  /** 加载期帧:`research_run:decision_load k/N`(k=已完成期数)。 */
+  load?: { done: number; total: number };
+  /** 决策级帧:`research_run:<stage>#<序号>@<YYYY-MM-DD>`(序号 1-based)。 */
+  decision?: { index: number; date: string };
+}
+
+const DECISION_PHASE_RE = /^research_run:([a-z_]+)#(\d+)@(\d{4}-\d{2}-\d{2})$/;
+const LOAD_PHASE_RE = /^research_run:decision_load (\d+)\/(\d+)$/;
+const PLAIN_PHASE_RE = /^research_run:([a-z_]+)$/;
+
+/** 解析 research_run 的 phase 字符串;非 research_run 格式返回 null。 */
+export function parseJobPhase(
+  phase: string | null | undefined,
+): JobPhaseInfo | null {
+  if (!phase) return null;
+  const decision = DECISION_PHASE_RE.exec(phase);
+  if (decision) {
+    return {
+      stage: decision[1],
+      decision: { index: Number(decision[2]), date: decision[3] },
+    };
+  }
+  const load = LOAD_PHASE_RE.exec(phase);
+  if (load) {
+    return {
+      stage: "decision_load",
+      load: { done: Number(load[1]), total: Number(load[2]) },
+    };
+  }
+  const plain = PLAIN_PHASE_RE.exec(phase);
+  if (plain) return { stage: plain[1] };
+  return null;
+}
