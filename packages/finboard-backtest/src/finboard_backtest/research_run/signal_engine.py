@@ -1780,10 +1780,78 @@ class SignalEnginePipelineAdapter:
         self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
         # issue #217:用户因子 screen 指标(决策消费后计算,report 阶段取用)。
         self._factor_screen: dict[str, Any] | None = None
+        # issue #314:断点续算种子(coordinator 从 artifact 读回的已完成决策
+        # 前缀,resume_from 接受后非空;decisions() 首次迭代时惰性消费)。
+        self._resume_bundles: tuple[DecisionBundle, ...] | None = None
 
     @property
     def execution_mode(self) -> ResearchExecutionMode:
         return execution_mode_for(self._manifest.parameters)
+
+    def resume_from(self, completed: Sequence[DecisionBundle]) -> bool:
+        """断点续算种子(issue #314;coordinator 经 getattr 探测,#304 先例)。
+
+        只能在首次加载前接受(惰性加载尚未发生);转发到组合管线在
+        ``decisions()`` 首次迭代时完成:部分完成走完整加载 + 管线种子
+        (跳过前缀重算),全部完成走快速路径(跳过整段加载,见
+        ``_resume_all_completed``)。契约与 :meth:`PortfolioPipelineAdapter.
+        resume_from` 一致 —— 拒绝 / 异常时零突变,coordinator 回退全量重算。
+        """
+
+        if self._inputs is not None or self._resume_bundles is not None:
+            return False
+        if not completed:
+            return False
+        self._resume_bundles = tuple(completed)
+        return True
+
+    async def _resume_all_completed(
+        self, resume: tuple[DecisionBundle, ...]
+    ) -> bool:
+        """全部决策均已落库时允许跳过整段加载(issue #314)。
+
+        快速路径的两个前置:(1) 报告构建不依赖冻结输入 —— 引用用户因子
+        (u_ 前缀)的 run 需要 factor_screen,而 screen 只能从已构建的冻结
+        输入计算,这类 run 不走快速路径(报告等值优先于加载跳过);
+        (2) 已落库决策数与当前冻结输入可推导的决策总数一致(仅日历/快照
+        推导,远轻于完整加载)。推导失败返回 False 走完整路径 —— 原始错误
+        会在加载期以既有语义重现(fail-closed,不吞错)。
+        """
+
+        from finboard_data.factor_lab import is_user_factor_name
+
+        if any(
+            is_user_factor_name(feature.feature_id)
+            for bundle in resume
+            for feature in bundle.features
+        ):
+            return False
+        total = await self._resume_schedule_total()
+        return total is not None and len(resume) == total
+
+    async def _resume_schedule_total(self) -> int | None:
+        """轻量推导当前冻结输入的决策总数(不做特征/价格/协方差加载)。"""
+
+        try:
+            frequency = _rebalance_frequency(self._manifest)
+            if frequency is not None:
+                release_ref = _bars_release_ref(
+                    self._manifest, self._release_provider_factory
+                )
+                provider = self._release_provider_factory(release_ref.artifact_id)
+                return len(
+                    await _derive_rebalance_decision_days(provider, frequency)
+                )
+            return len(
+                await _snapshot_decision_days(self._manifest, self._snapshot_provider)
+            )
+        except Exception:
+            logger.warning(
+                "research_run.resume_schedule_probe_failed",
+                run_id=self._manifest.run_id,
+                exc_info=True,
+            )
+            return None
 
     def validate_manifest(self, manifest: ResearchRunManifest) -> None:
         if manifest.strategy_kind != self.strategy_kind:
@@ -1815,11 +1883,36 @@ class SignalEnginePipelineAdapter:
         self,
         manifest: ResearchRunManifest,
     ) -> AsyncIterator[DecisionBundle]:
-        adapter = await self._load()
+        resume = self._resume_bundles
+        resume_all: tuple[DecisionBundle, ...] | None = None
+        pipeline: PortfolioPipelineAdapter | None = None
+        if resume is not None:
+            if await self._resume_all_completed(resume):
+                # issue #314:全部决策已落库 —— 跳过整段加载
+                # (build_decision_load_contexts),报告构建只消费读回的决策
+                # (inputs 置空同时让 factor_screen 显式跳过;快速路径前置
+                # 已排除需要 screen 的 run)。加载期探针(#306)与 k/N phase
+                # (#308)随之不触发 —— 无加载即无加载进度,phase 直接进入
+                # 决策执行段。
+                self._inputs = ()
+                resume_all = resume
+            else:
+                pipeline = await self._load()
+                if not pipeline.resume_from(resume):
+                    # 种子被拒(数量/时序与冻结输入不一致):整段回退全量重算
+                    # (#314 fail-closed 兜底,宁重算不漂移)。
+                    self._resume_bundles = None
         collected: list[DecisionBundle] = []
-        async for decision in adapter.decisions(manifest):
-            yield decision
-            collected.append(decision)
+        if resume_all is not None:
+            for decision in resume_all:
+                yield decision
+                collected.append(decision)
+        else:
+            if pipeline is None:
+                pipeline = await self._load()
+            async for decision in pipeline.decisions(manifest):
+                yield decision
+                collected.append(decision)
         # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(离线圈内,
         # 只在 coordinator 完整消费决策后执行;中断时曲线保持为空)。
         if (

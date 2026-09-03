@@ -249,6 +249,52 @@ class PortfolioPipelineAdapter:
         self._required_capabilities = tuple(
             sorted(set(required_capabilities))
         )
+        # issue #314:断点续算种子(resume_from 接受后非空)。decisions() 先
+        # 原样产出前缀(零重算),再从其后继续组合构建,账本状态由种子接续。
+        self._resume_bundles: tuple[DecisionBundle, ...] | None = None
+        self._resume_state: _PipelineState | None = None
+
+    def resume_from(self, completed: Sequence[DecisionBundle]) -> bool:
+        """断点续算种子(issue #314):接受已落库的决策前缀,跳过其重算。
+
+        契约(validate-then-mutate):返回 False 或抛错时本适配器零突变,
+        coordinator 回退全量重算路径(幂等去重保证正确性,只是不省计算)。
+        接受后 :meth:`decisions` 先原样产出前缀,再从 ``len(前缀)`` 期继续
+        构建 —— 全局 decision_index 连续(指令/订单/成交 ID 内嵌序号不漂移),
+        内部账本状态由最后一个已完成决策精确重建。
+        """
+
+        if self._resume_bundles is not None or not completed:
+            return False
+        if len(completed) > len(self._inputs):
+            return False
+        previous_at: datetime | None = None
+        for index, bundle in enumerate(completed):
+            if previous_at is not None and bundle.decision_at <= previous_at:
+                return False
+            previous_at = bundle.decision_at
+            # 种子重放的 lot_info / business_date 取自对应期冻结输入,
+            # 输入-决策错位(理论上不可能,漂移防护)一律拒绝。
+            item = self._inputs[index]
+            if (
+                item.business_date != bundle.business_date
+                or item.decision_at != bundle.decision_at
+            ):
+                return False
+        try:
+            seeded = _pipeline_state_from_resume(completed, self._inputs)
+        except Exception:
+            logger.warning(
+                "research_run.resume_seed_rejected",
+                strategy_kind=self.strategy_kind,
+                completed_decisions=len(completed),
+                exc_info=True,
+                message="断点续算状态种子构建/校验失败,回退全量重算",
+            )
+            return False
+        self._resume_bundles = tuple(completed)
+        self._resume_state = seeded
+        return True
 
     def validate_manifest(self, manifest: ResearchRunManifest) -> None:
         if manifest.strategy_kind != self.strategy_kind:
@@ -320,10 +366,15 @@ class PortfolioPipelineAdapter:
         self,
         manifest: ResearchRunManifest,
     ) -> AsyncIterator[DecisionBundle]:
-        state = _PipelineState(
-            cash=manifest.initial_capital,
-            equity_high_water=manifest.initial_capital,
-        )
+        if self._resume_state is not None:
+            # issue #314:断点续算 —— 账本状态已由 resume_from 从最后一个
+            # 已完成决策精确重建(现金/费用/持仓/风险状态与全新执行逐值一致)。
+            state = self._resume_state
+        else:
+            state = _PipelineState(
+                cash=manifest.initial_capital,
+                equity_high_water=manifest.initial_capital,
+            )
         constraints = _constraints_from_manifest(manifest)
         # issue #303:risk_config.overrides 在此解析为生效风险退出策略(此前该
         # manifest 分区无任何业务消费者)。非法覆盖 fail-closed 转换为
@@ -341,7 +392,15 @@ class PortfolioPipelineAdapter:
         )
         target_gross = manifest.strategy_spec.portfolio_policy.target_gross_exposure
 
-        for index, item in enumerate(self._inputs):
+        # issue #314:已落库的决策前缀原样产出(零重算),其内容已由
+        # coordinator 读回校验并将再次通过 _validate_decision + 幂等持久化。
+        start_index = 0
+        for bundle in self._resume_bundles or ():
+            yield bundle
+            start_index += 1
+
+        for index in range(start_index, len(self._inputs)):
+            item = self._inputs[index]
             try:
                 # 逐决策 CPU 密集段(组合构建 / 约束 / 风险退出 / 资金可行性 /
                 # sizing / 账本)是纯同步计算,经 asyncio.to_thread 卸载
@@ -1215,6 +1274,127 @@ def _mark_after_execution(
         fill_shortfall=state.fill_shortfall,
     )
     return tuple(positions), ledger
+
+
+def _pipeline_state_from_resume(
+    completed: Sequence[DecisionBundle],
+    inputs: Sequence[PortfolioDecisionInput],
+) -> _PipelineState:
+    """从已完成决策前缀精确重建组合管线账本状态(issue #314)。
+
+    数值面三条线,全部与全新执行**逐位等值**(Decimal 的 str 表示参与
+    checksum,数值相等但刻度不同也会漂移,不能只做数值恢复):
+
+    * 现金 / cumulative 费用 / fill_shortfall / 组合权益高水位 —— 直接取
+      最后一个已完成决策的 ledger 与 risk_state(落库即原始 Decimal 文本,
+      刻度无损);
+    * cooldown / paused —— 取 risk_state;
+    * 逐标的账本(数量/均价/已实现盈亏/opened_on/价格高水位)—— **按前缀
+      全部成交重放** :meth:`_apply_research_fill` 的账本字段算术(同一
+      运算序列作用在同一 fill/lot_info 值上,含 realized_pnl 的刻度残留),
+      最后逐项对照最后一个决策的 positions / risk_state 记录,不一致抛错
+      (拒绝种子 → 全量重算,防实现漂移静默穿透)。
+
+    持仓字典按成交首次出现顺序重建,与全新执行 ``setdefault`` 的插入序
+    一致(dict 序影响逐项求和顺序)。quantity=0 且已实现盈亏=0 的账本不在
+    positions 记录中,由重放自然还原。
+    """
+
+    last = completed[-1]
+    state = _PipelineState(
+        cash=last.ledger.cash,
+        fees_paid=last.ledger.fees_paid,
+        tax_paid=last.ledger.tax_paid,
+        slippage_paid=last.ledger.slippage_paid,
+        fill_shortfall=last.ledger.fill_shortfall,
+        cooldown_until=dict(last.risk_state.cooldown_until),
+        equity_high_water=last.risk_state.portfolio_equity_high_water,
+        portfolio_paused=last.risk_state.portfolio_paused,
+    )
+    for index, bundle in enumerate(completed):
+        item = inputs[index]
+        lot_info = item.lot_info
+        business_date = item.business_date
+        # 决策前盯市(_mark_current_book):quantity>0 的账本按决策价更新
+        # 价格高水位(max 与顺序无关,取值即参与比较的某个操作数,刻度一致)。
+        # 原路径要求 quantity>0 账本必须有决策价与执行元数据,缺失即失败 ——
+        # 重放保持同一条件(异常 → 拒绝种子 → 全量重算)。
+        for symbol, book in state.positions.items():
+            if book.quantity <= 0:
+                continue
+            if symbol not in item.prices or symbol not in lot_info:
+                raise ValueError(f"{symbol} 当前持仓缺少决策价格或执行元数据")
+            book.high_water_price = max(
+                book.high_water_price, Decimal(str(item.prices[symbol]))
+            )
+        for fill in bundle.fills:
+            info = lot_info[fill.symbol]
+            multiplier = Decimal(str(info.multiplier))
+            book = state.positions.setdefault(fill.symbol, _BookPosition())
+            # 与 _apply_research_fill 的账本字段算术逐行一致(不动现金/费用,
+            # 两者由 ledger 直接恢复;负现金检查在原始路径已保证)。
+            if fill.action is ResearchFillAction.OPEN_LONG:
+                total_quantity = book.quantity + fill.quantity
+                book.average_price = (
+                    book.average_price * book.quantity + fill.price * fill.quantity
+                ) / total_quantity
+                if book.quantity == 0:
+                    book.opened_on = business_date
+                    book.high_water_price = fill.price
+                book.quantity = total_quantity
+                book.high_water_price = max(book.high_water_price, fill.price)
+            elif fill.action is ResearchFillAction.CLOSE_LONG:
+                if fill.quantity > book.quantity:
+                    raise ValueError(f"{fill.symbol} 种子重放出现超卖成交")
+                book.realized_pnl += (
+                    fill.price - book.average_price
+                ) * fill.quantity * multiplier
+                book.quantity -= fill.quantity
+                if book.quantity == 0:
+                    book.average_price = Decimal()
+                    book.opened_on = None
+                    book.high_water_price = Decimal()
+            else:
+                raise ValueError(f"{fill.symbol} 种子重放遇到非 long-only 成交")
+        # 成交后盯市(_mark_after_execution):quantity>0 的账本按成交价更新
+        # 价格高水位。
+        for symbol, book in state.positions.items():
+            if book.quantity > 0:
+                book.high_water_price = max(
+                    book.high_water_price,
+                    Decimal(str(item.execution_prices.get(symbol, 0.0))),
+                )
+    _verify_resume_state(state, last)
+    return state
+
+
+def _verify_resume_state(state: _PipelineState, last: DecisionBundle) -> None:
+    """重放账本 vs 最后决策记录逐项对照(不一致即拒绝种子,fail-closed)。"""
+
+    recorded = {item.symbol: item for item in last.positions}
+    for symbol, book in state.positions.items():
+        position = recorded.get(symbol)
+        if position is None:
+            if book.quantity != 0 or book.realized_pnl != 0:
+                raise ValueError(f"{symbol} 重放账本未出现在决策记录中")
+            continue
+        if (
+            book.quantity != position.quantity
+            or book.average_price != position.average_price
+            or book.realized_pnl != position.realized_pnl
+        ):
+            raise ValueError(f"{symbol} 重放账本与决策记录不一致")
+        if book.opened_on != last.risk_state.opened_on.get(symbol):
+            raise ValueError(f"{symbol} 重放 opened_on 与风险状态不一致")
+        recorded_high_water = last.risk_state.high_water_prices.get(symbol)
+        if (
+            recorded_high_water is None
+            or float(book.high_water_price) != recorded_high_water
+        ):
+            raise ValueError(f"{symbol} 重放价格高水位与风险状态不一致")
+    if set(recorded) - set(state.positions):
+        missing = sorted(set(recorded) - set(state.positions))
+        raise ValueError(f"重放账本缺少持仓记录: {missing}")
 
 
 def _risk_state(

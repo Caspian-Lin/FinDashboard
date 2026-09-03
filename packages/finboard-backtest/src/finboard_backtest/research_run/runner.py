@@ -14,6 +14,9 @@ from typing import cast
 import structlog
 
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
+from finboard_backtest.research_run.checkpoint_resume import (
+    completed_decision_prefix,
+)
 from finboard_backtest.research_run.contracts import (
     REPLAYABLE_SOURCE_STATUSES,
     RESEARCH_PORTFOLIO_PIPELINE_VERSION,
@@ -239,6 +242,14 @@ class ResearchRunCoordinator:
                     return current
                 raise
             await self._store.checkpoint()
+            # issue #314:断点续算 —— 读回已完整落库的决策前缀(每决策 13
+            # artifact 且逐 artifact 校验和复验),交给支持 ``resume_from``
+            # 的适配器跳过前缀重算(#304 getattr 探测先例;不支持 / 拒绝 /
+            # 读回失败一律走既有全量重算路径 —— 幂等去重保证正确性,
+            # 「宁重算不漂移」)。
+            resume_prefix = await self._load_resume_prefix(manifest.run_id)
+            if resume_prefix:
+                self._offer_resume(manifest.run_id, adapter, resume_prefix)
             position_quantities: dict[tuple[str, ResearchPositionSide], Decimal] = (
                 defaultdict(Decimal)
             )
@@ -622,6 +633,81 @@ class ResearchRunCoordinator:
             )
             return None
         return marker if isinstance(marker, dict) else None
+
+    async def _load_resume_prefix(self, run_id: str) -> list[DecisionBundle]:
+        """读回已完整落库的决策前缀(issue #314);任何意外都回退空列表。
+
+        前缀判定与重建见 ``checkpoint_resume.completed_decision_prefix``:
+        从 0 开始的最长连续决策,每决策既有全部 13 stage artifact、逐
+        artifact 复验载荷校验和、且能无损重建为 ``DecisionBundle``;任何
+        缺失 / 不一致在该决策处截断,被截断的决策由适配器照常重算。
+        """
+
+        try:
+            artifacts = await self._store.list_artifacts(run_id)
+        except Exception:
+            logger.warning(
+                "research_run.resume_artifacts_unreadable",
+                run_id=run_id,
+                exc_info=True,
+            )
+            return []
+        if not artifacts:
+            return []
+        prefix = completed_decision_prefix(run_id, artifacts)
+        if prefix:
+            logger.info(
+                "research_run.resume_prefix_loaded",
+                run_id=run_id,
+                completed_decisions=len(prefix),
+            )
+        return prefix
+
+    def _offer_resume(
+        self,
+        run_id: str,
+        adapter: ResearchStrategyAdapter,
+        prefix: list[DecisionBundle],
+    ) -> None:
+        """把已完成决策前缀提议给适配器(可选协议,issue #304 getattr 先例)。
+
+        实现了 ``resume_from`` 的适配器接受后对前缀零重算(原样产出);
+        未实现 / 拒绝 / 抛错都走既有全量重算路径 —— resume_from 契约要求
+        失败时零突变,重算路径与既有语义完全一致(幂等去重兜底)。
+        """
+
+        hook = getattr(adapter, "resume_from", None)
+        if not callable(hook):
+            logger.info(
+                "research_run.resume_unsupported",
+                run_id=run_id,
+                completed_decisions=len(prefix),
+                message="适配器不支持断点续算,已完成决策将全量重算(幂等去重兜底)",
+            )
+            return
+        try:
+            accepted = bool(hook(prefix))
+        except Exception:
+            logger.warning(
+                "research_run.resume_offer_failed",
+                run_id=run_id,
+                completed_decisions=len(prefix),
+                exc_info=True,
+            )
+            return
+        if accepted:
+            logger.info(
+                "research_run.resume_accepted",
+                run_id=run_id,
+                completed_decisions=len(prefix),
+            )
+        else:
+            logger.info(
+                "research_run.resume_declined",
+                run_id=run_id,
+                completed_decisions=len(prefix),
+                message="适配器拒绝断点续算种子,已完成决策将全量重算",
+            )
 
     async def _persist_decision(
         self,
