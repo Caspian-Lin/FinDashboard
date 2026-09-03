@@ -66,7 +66,7 @@ class DatasetPublishExecutor:
                 code="invalid_payload",
                 summary=(
                     "release_kind 必须是 a_share_tushare / multi_asset_mixed / "
-                    "daily_metrics / financial_indicators"
+                    "daily_metrics / financial_indicators / convertible_metrics"
                 ),
                 retryable=False,
                 context={"job_id": job.job_id},
@@ -208,16 +208,35 @@ class DatasetPublishExecutor:
                         retryable=False,
                         context={"job_id": job.job_id},
                     )
+            elif release_kind == "convertible_metrics":
+                # issue #265:转债派生指标发布只接受 A 股可转债。
+                invalid = sorted(
+                    item.code
+                    for item in selected
+                    if item.market != "a_share" or item.instrument_type != "convertible"
+                )
+                if invalid:
+                    raise ExecutorError(
+                        code="convertible_scope_violation",
+                        summary=(
+                            "convertible_metrics 发布只能包含 A 股可转债: "
+                            + ", ".join(invalid[:20])
+                        ),
+                        retryable=False,
+                        context={"job_id": job.job_id},
+                    )
             else:
                 selected_types = {item.instrument_type for item in selected}
                 # issue #184:混合发布放行 index 基准资产(可单独发布指数
-                # benchmark 数据集,也可与股票/ETF 混发);至少含三者之一。
-                missing_types = {"stock", "etf", "index"} - selected_types
+                # benchmark 数据集,也可与股票/ETF 混发);issue #265 放行
+                # convertible 转债(转债 bars 与正股/基准同处一份发布)。
+                # 至少含四者之一。
+                missing_types = {"stock", "etf", "index", "convertible"} - selected_types
                 if missing_types:
                     raise ExecutorError(
                         code="mixed_scope_violation",
                         summary=(
-                            "多资产混合源发布必须至少包含股票、ETF 或指数,缺少: "
+                            "多资产混合源发布必须至少包含股票、ETF、指数或可转债,缺少: "
                             + ", ".join(sorted(missing_types))
                         ),
                         retryable=False,
@@ -248,16 +267,21 @@ class DatasetPublishExecutor:
                         minimum_release_coverage=(
                             # issue #212:研究数据发布级阈值放宽到 0.95——停牌日
                             # 无截面、最新报告期未公告是常态(全市场 daily 实测
-                            # 跨度口径平均 coverage≈0.972),0.98 会让真实全市场
+                            # 跨度口径平均 coverage≈0.972),0.98 会让任何真实全市场
                             # 研究发布不可发布;0.95 仍拦系统性丢失。逐标的缺口
-                            # 已在 builder 侧降级为可见 warning。
+                            # 已在 builder 侧降级为可见 warning。#265 转债派生
+                            # 指标同口径(转债停牌/正股停牌日溢价缺观测)。
                             Decimal("0.95")
-                            if release_kind in ("daily_metrics", "financial_indicators")
+                            if release_kind
+                            in ("daily_metrics", "financial_indicators", "convertible_metrics")
                             else Decimal("0.98")
                         ),
                         required_capabilities=(
                             ("stock",)
                             if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators")
+                            # issue #265:转债派生指标发布固定要求 convertible 能力。
+                            else ("convertible",)
+                            if release_kind == "convertible_metrics"
                             else tuple(required_capabilities)
                         ),
                         known_limitations=(
@@ -268,6 +292,15 @@ class DatasetPublishExecutor:
                                 "A股单源发布严格要求所有 Bar 来源为 tushare"
                                 if release_kind == "a_share_tushare"
                                 else "多资产发布允许按标的混合来源,实际来源写入质量报告"
+                            ),
+                            *(
+                                (
+                                    "转股溢价率 = 转债收盘 / (100/快照转股价x同日正股收盘) - 1;"
+                                    "转股价取 cb_basic 当前快照(下修史不在覆盖范围),"
+                                    "非全历史 PIT(#265)"
+                                )
+                                if release_kind == "convertible_metrics"
+                                else ()
                             ),
                         ),
                     ),
@@ -302,6 +335,9 @@ _RELEASE_KIND_TO_DATASET_KIND: dict[str, str] = {
     # research_data_sync(#171)摄取进 research_* 表,发布从表冻结而非本地缓存。
     "daily_metrics": "daily_metrics",
     "financial_indicators": "financial_indicators",
+    # issue #265:可转债派生指标发布(转股价值/转股溢价率),发布执行时从
+    # 本地缓存 bars x 冻结转股价元数据计算。
+    "convertible_metrics": "convertible_metrics",
 }
 
 _RELEASE_KIND_TO_SOURCE: dict[str, str] = {
@@ -309,12 +345,14 @@ _RELEASE_KIND_TO_SOURCE: dict[str, str] = {
     "multi_asset_mixed": "mixed",
     "daily_metrics": "tushare",
     "financial_indicators": "tushare",
+    "convertible_metrics": "tushare",
 }
 
 
 def _default_release_fields(kind_value: str) -> tuple[str, ...]:
     """按数据集类型返回默认冻结字段白名单(全部字段)。"""
     from finboard_data import (
+        CONVERTIBLE_METRICS_FIELDS,
         DAILY_METRICS_FIELDS,
         FINANCIAL_INDICATORS_FIELDS,
         RELEASE_FIELDS,
@@ -324,6 +362,8 @@ def _default_release_fields(kind_value: str) -> tuple[str, ...]:
         return DAILY_METRICS_FIELDS
     if kind_value == "financial_indicators":
         return FINANCIAL_INDICATORS_FIELDS
+    if kind_value == "convertible_metrics":
+        return CONVERTIBLE_METRICS_FIELDS
     return RELEASE_FIELDS
 
 

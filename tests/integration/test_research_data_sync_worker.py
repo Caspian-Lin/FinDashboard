@@ -25,6 +25,7 @@ from finboard_backtest.background_jobs.executors.research_data_sync import (
     ResearchDataSyncExecutor,
 )
 from finboard_data.research import (
+    ConvertibleProfile,
     DailySecurityMetrics,
     FinancialIndicator,
     IndustryMembership,
@@ -106,6 +107,10 @@ class FakeResearchProvider:
         self.fail_symbols = fail_symbols
         self.empty_days = empty_days
         self.calls: list[str] = []
+
+    async def fetch_convertible_profiles(self) -> list[ConvertibleProfile]:
+        # #265:本测试不覆盖转债段(datasets 显式声明),协议要求空实现。
+        return []
 
     def _profile(self, symbol: str) -> InstrumentProfile:
         return InstrumentProfile(

@@ -197,10 +197,11 @@ async def test_full_market_stock_kind_expands_a_share_stocks_only(
     "release_kind",
     ["multi_asset_mixed"],
 )
-async def test_full_market_mixed_expands_stock_etf_index(
+async def test_full_market_mixed_expands_stock_etf_index_convertible(
     monkeypatch: pytest.MonkeyPatch,
     release_kind: str,
 ) -> None:
+    """#265:mixed 全市场展开并入 convertible(转债与股票/ETF/指数同发)。"""
     requested_types: list[str | None] = []
 
     async def _fake_list_codes(
@@ -215,6 +216,7 @@ async def test_full_market_mixed_expands_stock_etf_index(
             "stock": ["600519.SH"],
             "etf": ["510300.SH"],
             "index": ["000300.SH"],
+            "convertible": ["113050.SH"],
         }.get(instrument_type or "", [])
 
     monkeypatch.setattr(InstrumentRepository, "list_codes", _fake_list_codes)
@@ -223,8 +225,8 @@ async def test_full_market_mixed_expands_stock_etf_index(
         release_kind=release_kind,
         full_market=True,
     )
-    assert result == ["000300.SH", "510300.SH", "600519.SH"]
-    assert requested_types == ["stock", "etf", "index"]
+    assert result == ["000300.SH", "113050.SH", "510300.SH", "600519.SH"]
+    assert requested_types == ["stock", "etf", "index", "convertible"]
 
 
 @pytest.mark.asyncio

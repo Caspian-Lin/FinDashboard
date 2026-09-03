@@ -1,7 +1,9 @@
 """Tushare A 股日线行情 Provider。
 
 2000 积分覆盖 ``daily`` 与 ``adj_factor``,但不覆盖要求 5000 积分的
-``fund_daily``。本 Provider 因此只承诺 A 股股票日线;ETF 由上层明确降级。
+``fund_daily``。本 Provider 因此承诺 A 股股票日线;ETF 由上层明确降级。
+可转债日线(issue #265)走 2000 积分档的 ``cb_daily`` 专属接口:按代码
+规则(11xxxx.SH / 12xxxx.SZ)分流,无复权,原始价落盘。
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from typing import Literal, Protocol, TypeGuard, cast
 
 import structlog
 
-from finboard_data.akshare_provider import AkShareProvider
+from finboard_data.akshare_provider import AkShareProvider, is_convertible_code
 from finboard_data.cache import CacheMetadata, ParquetCache, expected_last_bar_date
 from finboard_data.tushare_budget import TushareBudget, shared_tushare_budget
 from finboard_shared.models import Bar, Symbol
@@ -31,6 +33,8 @@ logger = structlog.get_logger(__name__)
 
 _VALID_ADJUSTMENTS = frozenset({"qfq", "hqfq", "none"})
 _DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,vol,amount"
+#: 可转债日线字段白名单(issue #265,doc_id=187,2000 积分档)。
+_CB_DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,vol,amount"
 _ADJ_FIELDS = "ts_code,trade_date,adj_factor"
 _SUSPEND_FIELDS = "ts_code,trade_date,suspend_timing,suspend_type"
 _MAX_CHUNK_DAYS = 15 * 366
@@ -53,6 +57,10 @@ class TushareLifecycleEvent:
 class TushareBarClient(Protocol):
     def daily(self, **kwargs: str) -> object:
         """调用 A 股日线接口。"""
+        ...
+
+    def cb_daily(self, **kwargs: str) -> object:
+        """调用可转债日线接口(issue #265)。"""
         ...
 
     def adj_factor(self, **kwargs: str) -> object:
@@ -318,6 +326,34 @@ class TushareBarProvider(AkShareProvider):
         end: date,
         adjust: str,
     ) -> list[Bar]:
+        if is_convertible_code(symbol.code):
+            # 可转债日线(issue #265):cb_daily 是 2000 积分专属接口,转债
+            # 无股票式复权概念 —— 不调 adj_factor,按原始成交价落盘。缓存键
+            # 沿用请求 adjust(默认 qfq,与全资产/发布默认一致,#256 指数同
+            # 策略:键存在但语义为 no-op,发布 adjustment 与下载键一致)。
+            cb_rows: list[Mapping[str, object]] = []
+            cursor = start
+            while cursor <= end:
+                chunk_end = min(end, cursor + timedelta(days=_MAX_CHUNK_DAYS - 1))
+                cb_rows.extend(
+                    await self._call(
+                        "cb_daily",
+                        ts_code=symbol.code,
+                        start_date=cursor.strftime("%Y%m%d"),
+                        end_date=chunk_end.strftime("%Y%m%d"),
+                        fields=_CB_DAILY_FIELDS,
+                    )
+                )
+                cursor = chunk_end + timedelta(days=1)
+            return _build_bars(
+                symbol,
+                cb_rows,
+                [],
+                "none",
+                endpoint="cb_daily",
+                # 转债 1 手 = 10 张(与 10 张/手最小交易单位一致)。
+                volume_multiplier=Decimal("10"),
+            )
         daily_rows: list[Mapping[str, object]] = []
         factor_rows: list[Mapping[str, object]] = []
         cursor = start
@@ -500,7 +536,15 @@ def _build_bars(
     daily_rows: list[Mapping[str, object]],
     factor_rows: list[Mapping[str, object]],
     adjust: str,
+    *,
+    endpoint: str = "daily",
+    volume_multiplier: Decimal = Decimal("100"),
 ) -> list[Bar]:
+    """把 tushare 日线行规范化为领域 Bar。
+
+    ``volume_multiplier``:daily 的 vol 单位为手(1 手=100 股);cb_daily
+    的 vol 单位亦为手,但可转债 1 手=10 张(issue #265),传 10。
+    """
     factors: dict[date, Decimal] = {
         _trade_date(row, "adj_factor"): _decimal(row, "adj_factor", "adj_factor")
         for row in factor_rows
@@ -509,9 +553,9 @@ def _build_bars(
     bars: list[Bar] = []
     seen: set[date] = set()
     for row in daily_rows:
-        business_date = _trade_date(row, "daily")
+        business_date = _trade_date(row, endpoint)
         if business_date in seen:
-            raise ValueError(f"Tushare daily 返回重复交易日: {business_date}")
+            raise ValueError(f"Tushare {endpoint} 返回重复交易日: {business_date}")
         seen.add(business_date)
         factor = Decimal("1")
         if adjust != "none":
@@ -527,11 +571,11 @@ def _build_bars(
             else factor
         )
         prices = {
-            name: _decimal(row, name, "daily") * multiplier
+            name: _decimal(row, name, endpoint) * multiplier
             for name in ("open", "high", "low", "close")
         }
         if any(not math.isfinite(float(value)) or value <= 0 for value in prices.values()):
-            raise ValueError(f"Tushare daily {business_date} 包含无效价格")
+            raise ValueError(f"Tushare {endpoint} {business_date} 包含无效价格")
         bars.append(
             Bar(
                 symbol=symbol,
@@ -541,9 +585,9 @@ def _build_bars(
                 high=prices["high"],
                 low=prices["low"],
                 close=prices["close"],
-                # Tushare vol 为手、amount 为千元;领域 Bar 使用股和元。
-                volume=_decimal(row, "vol", "daily") * Decimal("100"),
-                amount=_decimal(row, "amount", "daily") * Decimal("1000"),
+                # Tushare vol 为手、amount 为千元;领域 Bar 使用股(张)和元。
+                volume=_decimal(row, "vol", endpoint) * volume_multiplier,
+                amount=_decimal(row, "amount", endpoint) * Decimal("1000"),
                 source="tushare",
             )
         )

@@ -214,3 +214,78 @@ parquet 缓存,``data_provider=tushare`` 时 tushare provider 把异源(akshare)
 
 端到端回归:`tests/integration/test_etf_bar_chain.py`(mock akshare 同步 →
 parquet 缓存 → tushare 源引擎回测拿到 bars 并出成交)。
+
+## 可转债数据链路(#265)
+
+**背景**:可转债双低策略(#63)此前只有策略引擎没有数据上游——转债既无登记
+写入者(`discover_a_shares` / ETF / 指数接口都不覆盖转债),也没有条款元数据
+(转股价/到期日/评级)和转股溢价率观测。#265 打通「转债登记 → cb_daily 日线
+→ cb_basic 条款 → 溢价率冻结发布 → 双低回测」全链路。
+
+**标准运营步骤**(转债 + 正股同链路):
+
+1. `data_sync`(REST `POST /api/data/sync` / MCP `finboard_data_sync_universe`)
+   —— `discover_convertibles` 从东财可转债一览 `bond_zh_cov` 登记
+   `instrument_type=convertible` 行(11xxxx.SH / 12xxxx.SZ,北交所暂无场内
+   转债不纳入)。**已知边界**:东财一览只覆盖当前存续转债,退市转债不在
+   列表(存续偏差由第 2 步 cb_basic 摘牌档案缓解);转债无 list_date 上游,
+   保持 null 等第 3 步回填。
+2. `bulk_download` 带 `instrument_type=convertible`、`source=tushare` ——
+   转债日线走 2000 积分档专属接口 `cb_daily` 进 parquet 缓存(无复权概念,
+   缓存键沿用默认 `qfq` 但语义为 no-op,发布 adjustment 与下载键一致;
+   1 手 = 10 张,vol 换算 ×10)。**tushare 源放行转债**(与 ETF/指数的
+   `tushare_scope_mismatch` 边界相反);akshare 源对转债日线 fail-visible
+   拒绝(股票接口会把 1 开头误路由,#257 同源缺陷)。正股日线照常同步
+   (溢价率计算的另一输入,必须与转债同区间同缓存)。
+3. `research_data_sync` 带 `datasets=["convertible_profiles"]`(默认全数据集
+   已包含)—— tushare `cb_basic`(在市 L + 摘牌 D 合并)快照 upsert 主数据
+   `convertible_metadata`(转股价 `swap_price` / 起息日 / 到期日 / 票面利率;
+   `conversion_price NOT NULL`,无转股价的行跳过并计数),顺带回填
+   `instruments.list_date/delist_date`(只补 null);评级(akshare
+   `bond_zh_cov` 债券评级列)与集思录强赎事件(`bond_cb_redeem_jsl` →
+   `instrument_lifecycle_events`,event_type=forced_redemption)走 akshare
+   兜底,**失败降级为 warning 不阻断 tushare 主链路**(评级缺失经
+   `missing_rating` 计数可见)。
+4. `dataset_release_publish`(release_kind=`convertible_metrics`)—— 只接受
+   A 股转债标的(非转债 `convertible_scope_violation`);发布执行时从本地
+   缓存 bars × 冻结转股价元数据计算转股价值(`100/转股价×正股收盘`)与
+   转股溢价率(`转债收盘/转股价值-1`),逐日冻结为带日期观测
+   (`available_at` = T 日 15:30 上海,与日线一致);整期无正股同日收盘时
+   fail-visible 拒绝(`no_underlying_close_for_premium`),部分缺口计入
+   `premium_missing_days` issue 可见。转债 bars 建议与正股/基准同处一份
+   `multi_asset_mixed` 发布(mixed 展开已含 convertible),供双低回测同源
+   消费;manifest instruments 携带 `convertible` 条款快照(含 observed_at)。
+   质量报告 `convertible_instruments` 块:转债标的数 / with_metadata /
+   missing_maturity_date / missing_rating / with_lifecycle_events 计数。
+
+**PIT 语义(诚实边界)**:`cb_basic` 是**当前时点**条款快照,不含转股价历史
+变动(下修史/除权除息调整史);评级与强赎是快照/当前公告(集思录无历史公告
+时间,历史公告回补需 5000 积分的 `cb_call`,后续 issue)。下游派生观测
+(转股溢价率)只能宣称「冻结快照转股价 × 同日正股收盘」的带日期冻结语义,
+**不得宣称全历史 PIT**。未来生效的强赎事件按生效日可见(领域不变量
+`available_at >= effective_date` 开盘,保守方向),真实观察时间保留在
+`details.observed_at`。
+
+**策略消费**:`convertible_double_low` 用真实 `FrozenReleaseProvider` 读
+mixed bars 发布(收盘/开盘/成交额 + manifest 条款)+ convertible_metrics
+发布(`fetch_convertible_metrics`,PIT 门控)构建逐日快照后回测;已同步的
+强赎事件经 `filter_event_risk` 按 `available_at` 门控参与事件风险过滤
+(#63 既有语义)。已知缺口(本 issue 不修):通用事件驱动回测引擎
+(`BacktestEngine`)的默认 resolver 把一切代码按 A 股股票撮合(engine.py 不传
+resolver),转债走通用引擎需 resolver 注入;`convertible_double_low` 独立
+模拟器路径不受影响。
+
+验证 SQL:
+
+```sql
+-- 转债登记与条款元数据
+SELECT code, name, list_date FROM instruments WHERE instrument_type = 'convertible';
+SELECT code, conversion_price, maturity_date, rating FROM convertible_metadata;
+-- 强赎事件
+SELECT symbol, effective_date, available_at FROM instrument_lifecycle_events
+WHERE event_type = 'forced_redemption' ORDER BY effective_date;
+```
+
+端到端回归:`tests/integration/test_convertible_chain.py`(mock bond_zh_cov /
+cb_daily / cb_basic → 登记 → 缓存 → convertible_profiles 同步 → 双发布 →
+双低回测出非空成交)。
