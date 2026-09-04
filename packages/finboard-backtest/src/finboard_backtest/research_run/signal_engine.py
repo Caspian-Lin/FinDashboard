@@ -35,6 +35,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapp
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -607,9 +608,7 @@ async def _load_price_series(
             )
         return [float(bar.bar.close) for bar in bars]
 
-    results = await asyncio.gather(
-        *(_fetch(code) for code in pending), return_exceptions=True
-    )
+    results = await asyncio.gather(*(_fetch(code) for code in pending), return_exceptions=True)
     fetched: dict[str, list[float]] = {}
     for code, result in zip(pending, results, strict=True):
         if isinstance(result, BaseException):
@@ -673,11 +672,65 @@ async def _load_benchmark_curve(
     return ()
 
 
+#: 交易日历采样并集的标的数上限(issue #334):对 ready 标的等距采样
+#: (含首尾)取 bar 日期并集,单标的(尤其代码排序恰好的第一只)的大段
+#: 数据缺失由其余采样标的补齐,不再偏移决策 / 成交时点。
+_TRADING_CALENDAR_SAMPLE_INSTRUMENTS = 8
+
+#: 交易日历相邻间隔哨兵(issue #334):A 股市场级最长休市为春节 + 周末
+#: (实测约 10-11 个自然日,含 2020 年疫情延长休市);多标的并集日历仍
+#: 出现超过 14 个自然日的空洞只可能是发布数据整体缺口,fail-closed 拒绝
+#: 在其上推导决策 / 成交时点。
+_MAX_TRADING_CALENDAR_GAP_DAYS = 14
+
+
+def _spread_sample_indices(count: int, size: int) -> list[int]:
+    """在 ``[0, count)`` 内等距取 ``size`` 个下标(含首尾,去重升序)。"""
+    if count <= size:
+        return list(range(count))
+    return sorted({round(index * (count - 1) / (size - 1)) for index in range(size)})
+
+
+def _validate_calendar_contiguity(days: Sequence[date]) -> None:
+    """交易日历相邻间隔哨兵(issue #334):超市场最长休市即数据缺口。
+
+    正常长假(春节 + 周末 ≈ 10-11 天)不触发;多标的并集日历仍出现超过
+    :data:`_MAX_TRADING_CALENDAR_GAP_DAYS` 的空洞,说明发布数据整体大段
+    缺失(如 RR-26e5640 的 000001.SZ 缺 2020-07→2024-01),旧实现会在其上
+    静默跳洞,把全部决策的成交时点推到空洞之后的单一 bar。
+    """
+    for previous, following in pairwise(days):
+        gap = (following - previous).days
+        if gap > _MAX_TRADING_CALENDAR_GAP_DAYS:
+            logger.error(
+                "research_run.trading_calendar_gap",
+                previous=previous.isoformat(),
+                following=following.isoformat(),
+                gap_days=gap,
+            )
+            raise ValueError(
+                f"发布交易日历存在异常空洞:{previous.isoformat()} → "
+                f"{following.isoformat()}(间隔 {gap} 个自然日,超过 A 股最长"
+                f"休市约 {_MAX_TRADING_CALENDAR_GAP_DAYS} 天的合理范围)。"
+                "多标的并集仍出现大段缺失说明发布数据整体缺口,禁止在其上"
+                "推导决策/成交时点;请重跑 data_sync 补齐后重新发布"
+                "(发布审计按逐标的覆盖率会拦截缺口标的)。"
+            )
+
+
 async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
-    """读取发布交易日历(首个 ready 标的的已发布 bars,升序去重)。
+    """读取发布交易日历(ready 标的等距采样并集,升序去重,fail-closed)。
 
     交易日历是公开知识,用非 PIT 的 ``fetch_bars`` 读取发布全范围;决策与
     成交发生在发布日期之后,不构成未来函数。
+
+    issue #334:不再只读第一个 ready 标的 —— RR-26e5640 事故中发布首标的
+    (000001.SZ)缓存缺 2020-07→2024-01,单标的日历让 ``_next_execution_at``
+    把全部决策的成交时点静默跳过 3.5 年空洞落到 2024-01-02。改为对 ready
+    标的等距采样(:data:`_TRADING_CALENDAR_SAMPLE_INSTRUMENTS`)取 bar 日期
+    **并集**:单标的(乃至前几只采样标的)的数据洞不再偏移日历;逐标的
+    读取失败降级具名 warning 跳过(全部失败返回空,由调用方按既有语义
+    报错)。并集后经 :func:`_validate_calendar_contiguity` 哨兵 fail-closed。
 
     issue #287:日历按 provider 进程内缓存(N 期回放此前每期重读完整
     parquet)。只对真实 ``FrozenReleaseProvider`` 启用 —— 其发布不可变、
@@ -698,25 +751,39 @@ async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
             )
             return cached
 
-    for instrument in provider.release.instruments:
-        if not instrument.ready:
+    ready = [item for item in provider.release.instruments if item.ready]
+    sample = [
+        ready[index]
+        for index in _spread_sample_indices(len(ready), _TRADING_CALENDAR_SAMPLE_INSTRUMENTS)
+    ]
+    days: set[date] = set()
+    for instrument in sample:
+        try:
+            bars = await provider.fetch_bars(
+                Symbol(
+                    code=instrument.code,
+                    market=_market_from_value(instrument.code),
+                ),
+                provider.release.period,
+                provider.release.start_date,
+                provider.release.end_date,
+                adjust=provider.release.adjustment,
+            )
+        except Exception:
+            # 采样单标的读取失败不掩盖其余标的 —— 并集只增不减,具名可见
+            # 后继续;全部失败由下方空日历的既有调用方语义收口。
+            logger.warning(
+                "research_run.trading_calendar_instrument_unreadable",
+                symbol=instrument.code,
+                exc_info=True,
+            )
             continue
-        bars = await provider.fetch_bars(
-            Symbol(
-                code=instrument.code,
-                market=_market_from_value(instrument.code),
-            ),
-            provider.release.period,
-            provider.release.start_date,
-            provider.release.end_date,
-            adjust=provider.release.adjustment,
-        )
-        if bars:
-            days = sorted({bar.timestamp.date() for bar in bars})
-            if cacheable:
-                _TRADING_DAYS_CACHE[provider] = days
-            return days
-    return []
+        days.update(bar.timestamp.date() for bar in bars)
+    calendar = sorted(days)
+    _validate_calendar_contiguity(calendar)
+    if calendar and cacheable:
+        _TRADING_DAYS_CACHE[provider] = calendar
+    return calendar
 
 
 async def _next_execution_at(
@@ -899,9 +966,7 @@ def multi_period_feature_gate_error(
             f"({', '.join(sorted(STANDARD_PRICE_FEATURE_NAMES))}),close 来自"
             "行情;请改用标准价格特征或移除该节点"
         )
-    attached = sorted(
-        str(getattr(kind, "value", kind)) for kind in research_release_kinds
-    )
+    attached = sorted(str(getattr(kind, "value", kind)) for kind in research_release_kinds)
     return (
         f"execution_mode=multi_period(已声明 rebalance_frequency={frequency}):"
         f"策略引用的特征 {sorted(missing)} 无法由当前冻结发布派生,多期回放"
@@ -979,9 +1044,7 @@ async def _compute_period_features(
         )
 
     explicit_symbols = manifest.strategy_spec.universe.explicit_symbols
-    symbols_argument: tuple[str, ...] | None = (
-        tuple(explicit_symbols) if explicit_symbols else None
-    )
+    symbols_argument: tuple[str, ...] | None = tuple(explicit_symbols) if explicit_symbols else None
     if process_pool is not None and not process_pool.broken:
         try:
             pool_snapshot = await build_price_feature_snapshot(
@@ -1063,9 +1126,7 @@ async def _market_close_map(
             )
         return {bar.timestamp.date(): bar.close for bar in bars}
 
-    results = await asyncio.gather(
-        *(_fetch(code) for code in symbols), return_exceptions=True
-    )
+    results = await asyncio.gather(*(_fetch(code) for code in symbols), return_exceptions=True)
     fetched: dict[str, dict[date, Decimal]] = {}
     for code, result in zip(symbols, results, strict=True):
         if isinstance(result, BaseException):
@@ -1174,9 +1235,7 @@ def _spec_universe_candidates(
                     float(average_amount) if isinstance(average_amount, (int, float)) else None
                 ),
                 price=price,
-                market_cap=(
-                    float(market_cap) if isinstance(market_cap, (int, float)) else None
-                ),
+                market_cap=(float(market_cap) if isinstance(market_cap, (int, float)) else None),
                 suspended=instrument.suspended_sessions > 0,
                 delisted=delisted,
                 is_st=is_st_at_decision(instrument, decision_date),
@@ -1199,9 +1258,7 @@ def _apply_universe_filter(
     标的(与静态预检共用 ``explicit_symbol_domain``,两边一致);声明但
     发布中缺失的标的随降级 warning 具名声明,不静默。
     """
-    domain, missing_explicit = explicit_symbol_domain(
-        spec.universe, provider.release.instruments
-    )
+    domain, missing_explicit = explicit_symbol_domain(spec.universe, provider.release.instruments)
     if missing_explicit:
         logger.warning(
             "research_run.universe_explicit_symbol_missing",
@@ -1382,9 +1439,7 @@ def build_run_interrupt_probe(
             if row is None:
                 raise ResearchRunInterruptedError(f"运行记录在加载期消失: {run_id}")
             if row.status == "cancelled":
-                raise ResearchRunInterruptedError(
-                    f"运行已被取消(cancelled),中止加载: {run_id}"
-                )
+                raise ResearchRunInterruptedError(f"运行已被取消(cancelled),中止加载: {run_id}")
             if row.status != "running":
                 raise ResearchRunInterruptedError(
                     f"运行状态已变为 {row.status}(外部打断),中止加载: {run_id}"
@@ -1540,9 +1595,7 @@ async def build_decision_load_contexts(
     await _release_trading_days(provider)
     await loader.ensure_close_histories(manifest, process_pool=pool)
 
-    async def _load_one(
-        decision_at: datetime, snapshot_id: str | None
-    ) -> DecisionLoadContext:
+    async def _load_one(decision_at: datetime, snapshot_id: str | None) -> DecisionLoadContext:
         execution_at = await _next_execution_at(provider, decision_at)
         context = await loader.load_context(
             manifest, decision_at=decision_at, execution_at=execution_at
@@ -1591,7 +1644,9 @@ async def build_decision_load_contexts(
             & frozenset(context.lot_info)
         )
         price_series = await _load_price_series(
-            provider, tuple(signalable), decision_at,
+            provider,
+            tuple(signalable),
+            decision_at,
             close_histories=loader.close_histories,
         )
         signalable = frozenset(
@@ -1627,7 +1682,7 @@ async def build_decision_load_contexts(
             # issue #263:按原始期序收集 —— 第一个失败期(与串行首个失败一致)
             # 在 bare raise 前挂决策标记;异常类型 / 消息 / traceback 不被改写,
             # runner 通用收口经 read_decision_load_context 读回失败期次。
-            for ((decision_at, _), result) in zip(chunk, results, strict=True):
+            for (decision_at, _), result in zip(chunk, results, strict=True):
                 if isinstance(result, BaseException):
                     if isinstance(result, Exception):
                         attach_decision_load_context(
@@ -1808,9 +1863,7 @@ class SignalEnginePipelineAdapter:
         self._resume_bundles = tuple(completed)
         return True
 
-    async def _resume_all_completed(
-        self, resume: tuple[DecisionBundle, ...]
-    ) -> bool:
+    async def _resume_all_completed(self, resume: tuple[DecisionBundle, ...]) -> bool:
         """全部决策均已落库时允许跳过整段加载(issue #314)。
 
         快速路径的两个前置:(1) 报告构建不依赖冻结输入 —— 引用用户因子
@@ -1838,16 +1891,10 @@ class SignalEnginePipelineAdapter:
         try:
             frequency = _rebalance_frequency(self._manifest)
             if frequency is not None:
-                release_ref = _bars_release_ref(
-                    self._manifest, self._release_provider_factory
-                )
+                release_ref = _bars_release_ref(self._manifest, self._release_provider_factory)
                 provider = self._release_provider_factory(release_ref.artifact_id)
-                return len(
-                    await _derive_rebalance_decision_days(provider, frequency)
-                )
-            return len(
-                await _snapshot_decision_days(self._manifest, self._snapshot_provider)
-            )
+                return len(await _derive_rebalance_decision_days(provider, frequency))
+            return len(await _snapshot_decision_days(self._manifest, self._snapshot_provider))
         except Exception:
             logger.warning(
                 "research_run.resume_schedule_probe_failed",
@@ -1987,9 +2034,7 @@ class SignalEnginePipelineAdapter:
             "failed_decision_index": completed_decisions + 1,
         }
         if completed_decisions < len(self._inputs):
-            marker["decision_date"] = self._inputs[
-                completed_decisions
-            ].business_date.isoformat()
+            marker["decision_date"] = self._inputs[completed_decisions].business_date.isoformat()
         warnings: list[JsonValue] = []
         screen_failure = await self._compute_factor_screen(manifest)
         if screen_failure is not None:
@@ -2073,9 +2118,7 @@ def build_signal_engine_adapter_factory(
 
         # manifest 冻结的 release checksum 即 DB release_checksum(issue #202):
         # 锚定校验替代代码版本敏感的整清单重算,worker 与发布端代码漂移不误伤。
-        release_checksums = {
-            ref.artifact_id: ref.checksum for ref in manifest.dataset_releases
-        }
+        release_checksums = {ref.artifact_id: ref.checksum for ref in manifest.dataset_releases}
 
         # issue #287:provider 按 release_id 在本 run(工厂闭包)内 memoize。
         # 发布不可变且 checksum 已由 manifest 锚定,实例复用使逐文件 SHA256
@@ -2088,9 +2131,7 @@ def build_signal_engine_adapter_factory(
         def _release_factory(release_id: str) -> FrozenReleaseProvider:
             provider = provider_memo.get(release_id)
             if provider is not None:
-                logger.debug(
-                    "research_run.release_provider_reused", release_id=release_id
-                )
+                logger.debug("research_run.release_provider_reused", release_id=release_id)
                 return provider
             provider = FrozenReleaseProvider(
                 release_root=root,
