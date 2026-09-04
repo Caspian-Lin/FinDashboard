@@ -131,6 +131,8 @@ def test_negative_rank_ic_passes_by_design_signal_existence_gate() -> None:
     门只证「存在非噪声信号」(abs 语义);方向正确性由因子目录
     preference 与 screen 权益/换窗复测承担。rank_ic=-0.0808 即第二轮
     E2E mom20p2 的实测值,此处锁定其通过行为,防止未来被「顺手修复」。
+    correlation 需非空(issue #311:空 mapping 不再静默 pass,空证据
+    三态行为由 test_issue_311 系列单测锁定)。
     """
     screen = _screen()
     screen["factors"] = {
@@ -138,7 +140,7 @@ def test_negative_rank_ic_passes_by_design_signal_existence_gate() -> None:
             "n_periods": 2,
             "rank_ic": -0.0808,
             "average_turnover": 0.444,
-            "correlation": {},
+            "correlation": {"momentum": 0.35},
         }
     }
     validation = _validation()

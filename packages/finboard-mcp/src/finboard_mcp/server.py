@@ -369,6 +369,13 @@ FinBoard 研究 MCP —— 量化研究工具集
   completed 或 rejected+partial(组合阶段硬约束拒绝但保留的 screen 证据,
   result 顶层 partial=true + constraint_failure 失败决策定位)均可作晋级
   证据,证据 execution.source_run_status 显式标注来源 run 状态。
+  相关性证据 fail-closed(#311):screen 证据缺 correlation / 空对象
+  (报 screen.correlation_missing)与横截面确无 baseline 因子可比
+  (correlation_baselines=[],报 screen.correlation_not_evaluated 附修复
+  路径「screen run 横截面需含至少一个非用户因子特征」)均不静默 pass;
+  gate 逐项结果(n_periods/rank_ic/average_turnover/correlation →
+  pass|fail|not_evaluated)随 evidence.gates.screen_checks 归档并进
+  promote 失败信息。
 - 研究代码沙箱执行(2,✅ #216+#217):research_code_run(写,入队)/
   research_code_run_get(只读)。通过晋级门的 active 因子代码在一次性 Docker 容器内执行
   factor.compute(ctx) -> scores + metrics(协议 v1 纯截面函数)。容器

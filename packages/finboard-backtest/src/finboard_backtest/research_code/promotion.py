@@ -8,6 +8,10 @@
 
 MCP/API/模拟盘只应消费 ``is_promoted_artifact`` 判定为真的版本。这里不
 连接数据库、不执行用户代码,也不触及实盘订单、成交、持仓或风控。
+
+issue #311:相关性检查 fail-closed —— ``correlation`` 缺失或空 mapping
+不再零迭代静默 pass,按证据的 ``correlation_baselines`` 分流具名 failure;
+screen 逐项检查状态(含 not_evaluated)经 ``screen_checks`` 进 evidence。
 """
 
 from __future__ import annotations
@@ -20,6 +24,17 @@ from typing import Any
 PROMOTION_PENDING = "pending"
 PROMOTION_PASSED = "passed"
 PROMOTION_FAILED = "failed"
+
+#: screen 逐项检查状态(issue #311,随 evidence 归档供审计检索)。
+CHECK_PASS = "pass"
+CHECK_FAIL = "fail"
+CHECK_NOT_EVALUATED = "not_evaluated"
+
+#: 横截面确无 baseline 因子可比时的修复路径(拼进具名 failure,可操作)。
+_CORRELATION_NOT_EVALUATED_FIX = (
+    "修复:screen run 横截面需含至少一个非用户因子特征"
+    "(builtin 因子或价格特征)作为相关性 baseline,重跑 screen 后再晋级"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +87,9 @@ class PromotionGateResult:
     screen_metrics: dict[str, Any] | None
     validation_summary: dict[str, Any]
     thresholds: PromotionScreenThresholds
+    #: screen 逐项检查状态(issue #311):检查名 -> pass|fail|not_evaluated。
+    #: correlation 在横截面无 baseline 因子可比时记 not_evaluated 而非缺席。
+    screen_checks: dict[str, str]
 
     @property
     def passed(self) -> bool:
@@ -83,6 +101,7 @@ class PromotionGateResult:
             "screen_passed": self.screen_passed,
             "validation_passed": self.validation_passed,
             "failures": list(self.failures),
+            "screen_checks": dict(self.screen_checks),
             "screen": self.screen_metrics,
             "validation": self.validation_summary,
             "thresholds": self.thresholds.as_dict(),
@@ -110,9 +129,13 @@ def evaluate_promotion_gates(
     其中的单个 metrics 对象。``validation`` 接受 #57 实验的 ``as_dict``
     结果或同形状 mapping。MCP 正式晋级会打开 ``require_artifact_binding``,
     要求 OOS 实验的 version_stamp 绑定同一个 artifact 与 commit。
+
+    issue #311:screen 逐项检查状态(n_periods/rank_ic/average_turnover/
+    correlation -> pass|fail|not_evaluated)随结果返回;correlation 缺失
+    或空 mapping 按 ``correlation_baselines`` 分流具名 failure,不静默 pass。
     """
     resolved = thresholds or PromotionScreenThresholds()
-    screen_metrics, screen_failures = _screen_metrics_and_failures(
+    screen_metrics, screen_failures, screen_checks = _screen_metrics_and_failures(
         screen, thresholds=resolved, artifact_name=artifact_name
     )
     validation_data = _object_as_mapping(validation)
@@ -132,6 +155,7 @@ def evaluate_promotion_gates(
         screen_metrics=screen_metrics,
         validation_summary=validation_summary,
         thresholds=resolved,
+        screen_checks=screen_checks,
     )
 
 
@@ -172,51 +196,100 @@ def _screen_metrics_and_failures(
     *,
     thresholds: PromotionScreenThresholds,
     artifact_name: str | None,
-) -> tuple[dict[str, Any] | None, list[str]]:
+) -> tuple[dict[str, Any] | None, list[str], dict[str, str]]:
     if screen is None:
-        return None, ["screen_missing"]
+        return None, ["screen_missing"], {}
     root = dict(screen)
     metrics = _select_screen_metrics(root, artifact_name=artifact_name)
     if metrics is None:
-        return None, ["screen_metrics_missing"]
+        return None, ["screen_metrics_missing"], {}
 
     failures: list[str] = []
+    checks: dict[str, str] = {}
+
+    def _record(check: str, failure: str | None) -> None:
+        if failure is None:
+            checks[check] = CHECK_PASS
+        else:
+            failures.append(failure)
+            checks[check] = CHECK_FAIL
+
     periods = _finite_number(metrics.get("n_periods", root.get("n_periods")))
     if periods is None:
-        failures.append("screen.n_periods_missing")
+        _record("n_periods", "screen.n_periods_missing")
     elif periods < thresholds.min_periods:
-        failures.append(f"screen.n_periods_below_minimum({periods:g}<{thresholds.min_periods})")
+        _record(
+            "n_periods",
+            f"screen.n_periods_below_minimum({periods:g}<{thresholds.min_periods})",
+        )
+    else:
+        _record("n_periods", None)
 
     rank_ic = _finite_number(metrics.get("rank_ic", metrics.get("ic")))
     if rank_ic is None:
-        failures.append("screen.rank_ic_missing")
+        _record("rank_ic", "screen.rank_ic_missing")
     elif abs(rank_ic) < thresholds.min_abs_rank_ic:
-        failures.append(
-            f"screen.rank_ic_below_minimum(abs={abs(rank_ic):g}<{thresholds.min_abs_rank_ic:g})"
+        _record(
+            "rank_ic",
+            f"screen.rank_ic_below_minimum(abs={abs(rank_ic):g}<{thresholds.min_abs_rank_ic:g})",
         )
+    else:
+        _record("rank_ic", None)
 
     turnover = _finite_number(metrics.get("average_turnover", metrics.get("turnover")))
     if turnover is None:
-        failures.append("screen.average_turnover_missing")
+        _record("average_turnover", "screen.average_turnover_missing")
     elif turnover < 0 or turnover > thresholds.max_average_turnover:
-        failures.append(
-            f"screen.turnover_above_maximum({turnover:g}>{thresholds.max_average_turnover:g})"
+        _record(
+            "average_turnover",
+            f"screen.turnover_above_maximum({turnover:g}>{thresholds.max_average_turnover:g})",
         )
+    else:
+        _record("average_turnover", None)
 
     correlations = metrics.get("correlation", metrics.get("correlations"))
-    if not isinstance(correlations, Mapping):
-        failures.append("screen.correlation_missing")
+    if not isinstance(correlations, Mapping) or not correlations:
+        # issue #311:``{}`` 与缺失同罪 —— 空 mapping 零迭代曾零 failure 静默
+        # pass,违背本模块「永不因缺证据而默认通过」。按证据的
+        # ``correlation_baselines`` 分流:显式 [](横截面确无 baseline 因子
+        # 可比,factor_screen/strategy_screen 的如实记录)记 not_evaluated 并
+        # 附修复路径;缺失 / 形状异常 / 声明过 baseline 一律按证据缺失兜底,
+        # 不虚构 not_evaluated。两条路径都不得 pass。
+        if _declares_empty_baselines(root):
+            failures.append(
+                f"screen.correlation_not_evaluated({_CORRELATION_NOT_EVALUATED_FIX})"
+            )
+            checks["correlation"] = CHECK_NOT_EVALUATED
+        else:
+            failures.append("screen.correlation_missing")
+            checks["correlation"] = CHECK_FAIL
     else:
+        breached = False
         for baseline, raw_value in sorted(correlations.items(), key=lambda item: str(item[0])):
             value = _finite_number(raw_value)
             if value is None:
                 failures.append(f"screen.correlation_invalid({baseline})")
+                breached = True
             elif abs(value) > thresholds.max_abs_correlation:
                 failures.append(
                     f"screen.correlation_above_maximum({baseline}:abs={abs(value):g}"
                     f">{thresholds.max_abs_correlation:g})"
                 )
-    return metrics, failures
+                breached = True
+        checks["correlation"] = CHECK_FAIL if breached else CHECK_PASS
+    return metrics, failures, checks
+
+
+def _declares_empty_baselines(root: Mapping[str, object]) -> bool:
+    """screen 证据是否显式声明横截面无相关性 baseline(``correlation_baselines=[]``)。
+
+    只有显式空列表才判定「确无 baseline 可比」(factor_screen /
+    strategy_screen 对横截面无对照特征的如实记录,#217);缺失或形状
+    异常的证据一律按 ``screen.correlation_missing`` 兜底,不虚构
+    not_evaluated。
+    """
+    baselines = root.get("correlation_baselines")
+    return isinstance(baselines, (list, tuple)) and len(baselines) == 0
 
 
 def _select_screen_metrics(
@@ -357,6 +430,9 @@ def _first_text(mapping: Mapping[str, object], *keys: str) -> str | None:
 
 
 __all__ = [
+    "CHECK_FAIL",
+    "CHECK_NOT_EVALUATED",
+    "CHECK_PASS",
     "PROMOTION_FAILED",
     "PROMOTION_PASSED",
     "PROMOTION_PENDING",
