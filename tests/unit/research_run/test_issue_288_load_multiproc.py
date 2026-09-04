@@ -1063,6 +1063,6 @@ class TestCloseMatrixPrebuild:
         )
         assert len(contexts) == len(_month_end_decisions())
         # issue #300 后 fetch_close_history 同时覆盖矩阵构建(每标的 1 次)与
-        # 逐期价格特征重算(每期 × 每标的各 1 次);矩阵被打穿回退全区间
+        # 逐期价格特征重算(每期 x 每标的各 1 次);矩阵被打穿回退全区间
         # 逐期读取时,计数将显著超过该值。
         assert counter["pit"] == len(_SYMBOLS) * (1 + len(_month_end_decisions()))
