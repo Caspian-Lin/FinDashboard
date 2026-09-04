@@ -43,7 +43,12 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { strategySpecApi, datasetApi } from "@/lib/research";
+import { Link } from "react-router-dom";
+import { strategySpecApi, datasetApi, factorLabApi } from "@/lib/research";
+import type {
+  DatasetReleaseSummary,
+  FactorCatalogEntry,
+} from "@/lib/research";
 import { cn, formatDateTime } from "@/lib/utils";
 import {
   WorkflowHelpPopover,
@@ -116,6 +121,197 @@ const SECTIONS = [
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
+}
+
+/* ============================================================ */
+/* 数据与信号链路只读视图 — 数据集发布 → 特征节点 → 信号规则 → 组合      */
+/* ============================================================ */
+
+function specSection(
+  spec: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = spec[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function SpecChainPanel({
+  spec,
+  releases,
+}: {
+  spec: Record<string, unknown>;
+  releases: DatasetReleaseSummary[];
+}) {
+  const { tl } = useT();
+  const catalogQuery = useQuery({
+    queryKey: ["factor-catalog"],
+    queryFn: () => factorLabApi.catalog(),
+  });
+  const factorByName = React.useMemo(() => {
+    const map = new Map<string, FactorCatalogEntry>();
+    for (const entry of catalogQuery.data ?? []) map.set(entry.name, entry);
+    return map;
+  }, [catalogQuery.data]);
+  const releaseById = React.useMemo(() => {
+    const map = new Map<string, DatasetReleaseSummary>();
+    for (const rel of releases) map.set(rel.release_id, rel);
+    return map;
+  }, [releases]);
+
+  const graph = specSection(spec, "feature_graph");
+  const nodes = Array.isArray(graph?.nodes) ? (graph!.nodes as Record<string, unknown>[]) : [];
+  const rulesSection = specSection(spec, "signal_rules");
+  const rules = Array.isArray(rulesSection?.rules)
+    ? (rulesSection!.rules as Record<string, unknown>[])
+    : [];
+  const portfolio = specSection(spec, "portfolio_policy");
+  const plan = specSection(spec, "validation_plan");
+  const releaseIds = Array.isArray(plan?.dataset_release_ids)
+    ? (plan!.dataset_release_ids as unknown[]).filter(
+        (id): id is string => typeof id === "string",
+      )
+    : [];
+
+  const ruleText = (rule: Record<string, unknown>) => {
+    const bits = [String(rule.feature_id ?? "?"), String(rule.comparator ?? "?")];
+    if (rule.threshold !== undefined && rule.threshold !== null) bits.push(String(rule.threshold));
+    if (rule.reference_feature_id) bits.push(String(rule.reference_feature_id));
+    bits.push(`→ ${String(rule.action ?? "?")}`);
+    return bits.join(" ");
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">
+          {tl({ zh: "数据与信号链路", en: "Data & signal chain" })}
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            {tl({
+              zh: "本规格如何从已发布数据计算出信号(只读)",
+              en: "How this spec derives signals from published data (read-only)",
+            })}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-xs">
+        <div>
+          <p className="font-medium text-foreground">
+            1. {tl({ zh: "数据集发布", en: "Dataset releases" })}
+            <span className="ml-1 text-muted-foreground">({releaseIds.length})</span>
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {releaseIds.length === 0 && (
+              <span className="text-muted-foreground">{tl({ zh: "未绑定", en: "None bound" })}</span>
+            )}
+            {releaseIds.map((id) => {
+              const rel = releaseById.get(id);
+              return (
+                <Link
+                  key={id}
+                  to={`/research/data?release=${encodeURIComponent(id)}`}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 transition-colors hover:bg-accent"
+                >
+                  <span className="font-mono text-[11px] text-foreground">{id}</span>
+                  {rel && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {rel.dataset_name}
+                      {rel.dataset_kind ? ` · ${rel.dataset_kind}` : ""} · v{rel.version}
+                    </span>
+                  )}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <p className="font-medium text-foreground">
+            2. {tl({ zh: "特征节点", en: "Feature nodes" })}
+            <span className="ml-1 text-muted-foreground">({nodes.length})</span>
+          </p>
+          <div className="mt-1.5 space-y-1">
+            {nodes.map((node, i) => {
+              const nodeId = String(node.node_id ?? `node-${i}`);
+              const source = typeof node.source === "string" ? node.source : null;
+              const inputs = Array.isArray(node.inputs) ? (node.inputs as unknown[]).map(String) : [];
+              const factor = source ? factorByName.get(source) : undefined;
+              return (
+                <div key={nodeId} className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium text-foreground">{String(node.label ?? nodeId)}</span>
+                  <Badge variant="info" className="font-mono text-[10px]">
+                    {String(node.operator ?? "?")}
+                  </Badge>
+                  {typeof node.window === "number" && (
+                    <span className="text-muted-foreground">{node.window}d</span>
+                  )}
+                  {source && (
+                    <span className="text-muted-foreground">
+                      ← <span className="font-mono">{source}</span>
+                      {factor ? (
+                        <span className="ml-1 text-[10px]">
+                          {tl({ zh: "[目录因子]", en: "[catalog factor]" })}
+                          {(factor.source_datasets ?? []).length > 0 &&
+                            ` · ${factor.source_datasets!.join("/")}`}
+                        </span>
+                      ) : (
+                        source !== "close" && (
+                          <span className="ml-1 text-[10px] text-muted-foreground/70">
+                            {tl({ zh: "[价格特征]", en: "[price feature]" })}
+                          </span>
+                        )
+                      )}
+                    </span>
+                  )}
+                  {inputs.length > 0 && (
+                    <span className="text-muted-foreground">
+                      ← <span className="font-mono">{inputs.join(" + ")}</span>
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+            {nodes.length === 0 && (
+              <span className="text-muted-foreground">{tl({ zh: "无特征节点", en: "No feature nodes" })}</span>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <p className="font-medium text-foreground">
+            3. {tl({ zh: "信号规则", en: "Signal rules" })}
+            <span className="ml-1 text-muted-foreground">({rules.length})</span>
+          </p>
+          <div className="mt-1.5 space-y-1 font-mono text-[11px] text-muted-foreground">
+            {rules.map((rule, i) => (
+              <p key={String(rule.rule_id ?? i)}>{ruleText(rule)}</p>
+            ))}
+            {rules.length === 0 && (
+              <span className="font-sans text-muted-foreground">
+                {tl({ zh: "无信号规则", en: "No signal rules" })}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <p className="font-medium text-foreground">4. {tl({ zh: "组合策略", en: "Portfolio policy" })}</p>
+          <p className="mt-1 text-muted-foreground">
+            {portfolio
+              ? [
+                  String(portfolio.allocation_method ?? ""),
+                  portfolio.max_positions ? tl({ zh: `最多 ${String(portfolio.max_positions)} 只`, en: `max ${String(portfolio.max_positions)}` }) : "",
+                  portfolio.max_target_weight ? `${tl({ zh: "单标的上限", en: "per-instrument cap" })} ${String(portfolio.max_target_weight)}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ") || tl({ zh: "默认配置", en: "Defaults" })
+              : tl({ zh: "未声明", en: "Not specified" })}
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 export default function StrategyStudio() {
@@ -323,7 +519,7 @@ export default function StrategyStudio() {
                   <div className="space-y-1">
                     {strategies.map((s) => (
                       <button
-                        key={s.strategy_id}
+                        key={`${s.strategy_id}@${s.version}`}
                         onClick={() => {
                           setSelectedKind(s.strategy_id);
                           setSpec(s.spec);
@@ -513,6 +709,9 @@ export default function StrategyStudio() {
                   <AlertDescription className="font-mono text-xs">{parseError}</AlertDescription>
                 </Alert>
               )}
+
+              {/* 数据与信号链路只读视图 */}
+              <SpecChainPanel spec={spec} releases={releasesQuery.data ?? []} />
 
               {/* Editor body */}
               {editMode ? (

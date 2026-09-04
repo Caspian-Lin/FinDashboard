@@ -141,6 +141,8 @@ export interface FactorCatalogEntry {
   implementation: string;
   signal_eligible: boolean;
   checksum: string;
+  /** 展示注记:输入字段来自哪些发布数据集(bars/daily_metrics/...),由后端从发布映射派生。 */
+  source_datasets?: string[];
 }
 
 export interface FeatureObservation {
@@ -199,7 +201,8 @@ export interface FactorSignal {
 }
 
 export interface FactorExperiment {
-  factor_experiment_id: string;
+  /** 后端 FactorExperimentOut.experiment_id(历史前端误写 factor_experiment_id 导致 ID 列为空)。 */
+  experiment_id: string;
   hypothesis: string;
   factor_names: string[];
   dataset_release_id: string;
@@ -208,6 +211,15 @@ export interface FactorExperiment {
   comparison_group?: string;
   validation_experiment_id?: string;
   created_at: string;
+}
+
+/** GET /research/factors/experiments/{id}(比列表多冻结引用与结果/失败原因)。 */
+export interface FactorExperimentDetail extends FactorExperiment {
+  dataset_release_checksum: string;
+  plan: Record<string, unknown>;
+  result?: Record<string, unknown> | null;
+  failure_reason?: string | null;
+  updated_at: string;
 }
 
 export interface FactorExperimentCreate {
@@ -270,7 +282,7 @@ export const factorLabApi = {
     return fetchJSON<FactorExperiment[]>(`/research/factors/experiments${q.toString() ? "?" + q : ""}`);
   },
   factorExperimentDetail: (id: string) =>
-    fetchJSON<FactorExperiment>(`/research/factors/experiments/${id}`),
+    fetchJSON<FactorExperimentDetail>(`/research/factors/experiments/${id}`),
   syncValidation: (id: string, validationExperimentId: string) =>
     fetchJSON<FactorExperiment>(
       `/research/factors/experiments/${id}/sync-validation`,
@@ -492,6 +504,8 @@ export interface DatasetReleaseSummary {
   end_date: string;
   period: string;
   adjustment: string;
+  dataset_kind?: string;
+  code_version?: string;
   symbol_count: number;
   row_count: number;
   coverage_pct: number;

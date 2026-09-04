@@ -74,8 +74,10 @@ from finboard_data.factor_lab import (
     new_factor_experiment,
 )
 from finboard_data.releases import (
+    RESEARCH_RELEASE_FEATURE_NAMES,
     DatasetReleaseError,
     FrozenReleaseProvider,
+    ReleaseDatasetKind,
     ResearchDatasetRelease,
 )
 from finboard_persistence import BackgroundJobPersistenceConflictError
@@ -441,16 +443,38 @@ async def delete_experiment(
 # ---------------------------------------------------------------------------
 
 
+# 因子目录展示注记(因子实验室可观测性):按 source_fields 反查数据来源发布
+# kind,映射消费 RESEARCH_RELEASE_FEATURE_NAMES(唯一事实来源,finboard_data.releases)。
+# bars 白名单取发布字段口径中的价格/量额列(timestamp 是键列,不算因子输入)。
+_FACTOR_BARS_INPUT_FIELDS = frozenset({"open", "high", "low", "close", "volume", "amount"})
+
+
+def _factor_source_datasets(source_fields: list[str]) -> list[str]:
+    fields = set(source_fields)
+    datasets: list[str] = []
+    if fields & _FACTOR_BARS_INPUT_FIELDS:
+        datasets.append(ReleaseDatasetKind.BARS.value)
+    for kind in ReleaseDatasetKind:
+        names = RESEARCH_RELEASE_FEATURE_NAMES.get(kind)
+        if names and fields & set(names):
+            datasets.append(kind.value)
+    return datasets
+
+
 @router.get("/factors/catalog", response_model=list[FactorDefinitionOut])
 async def get_factor_catalog(
     role: FactorRole | None = Query(default=None),
 ) -> list[FactorDefinitionOut]:
     """返回有真实实现的版本化目录;未实现因子不会出现在列表中。"""
 
-    return [
-        FactorDefinitionOut.model_validate(definition.as_dict())
-        for definition in factor_lab_catalog(role)
-    ]
+    items: list[FactorDefinitionOut] = []
+    for definition in factor_lab_catalog(role):
+        data = definition.as_dict()
+        data["source_datasets"] = _factor_source_datasets(
+            [str(field) for field in data.get("source_fields", [])]
+        )
+        items.append(FactorDefinitionOut.model_validate(data))
+    return items
 
 
 @router.post(

@@ -745,6 +745,9 @@ class FactorDefinitionOut(BaseSchema):
     implementation: str
     signal_eligible: bool
     checksum: str
+    # 展示注记:该因子输入字段来自哪些发布数据集(bars/daily_metrics/...),
+    # 由 RESEARCH_RELEASE_FEATURE_NAMES 唯一事实来源派生,不属于目录 checksum。
+    source_datasets: list[str] = Field(default_factory=list)
 
 
 class FeatureSnapshotCreate(BaseSchema):
