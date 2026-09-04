@@ -1,5 +1,6 @@
 import { ResearchHint } from "@/components/research/ResearchHint";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
+import { RunReportView } from "@/components/research/report/RunReportView";
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
@@ -56,6 +57,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import {
   factorLabApi,
@@ -628,6 +630,22 @@ export default function ResearchRuns() {
 
   const detail = detailQuery.data;
 
+  // 绩效报告页签:仅 completed 运行可用;页签状态进 URL(?tab=overview|report),
+  // 与 ?run= 参数并存(setSearchParams replace,不产生历史记录)。
+  const reportAvailable = detail?.status === "completed";
+  const requestedTab = searchParams.get("tab");
+  const activeTab: "overview" | "report" =
+    requestedTab === "report" && reportAvailable ? "report" : "overview";
+  const handleTabChange = (value: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (value === "report") {
+      next.set("tab", "report");
+    } else {
+      next.delete("tab");
+    }
+    setSearchParams(next, { replace: true });
+  };
+
   // 统一任务队列 job 状态(#157):queued/running 运行轮询 /api/jobs/{job_id},
   // 展示 phase / progress / worker / 失败原因 / result_ref;job 终态后刷新运行。
   const detailJobId = detail?.job_id ?? null;
@@ -859,430 +877,457 @@ export default function ResearchRuns() {
                     onRetry={() => detailQuery.refetch()}
                   />
                 ) : detail ? (
-                  <ScrollArea className="max-h-[720px] pr-3">
-                    <div className="space-y-5">
-                      <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
-                        <InfoItem label={tl({ zh: "运行 ID", en: "Run ID" })}>
-                          <span className="font-mono text-xs">
-                            {detail.run_id}
-                          </span>
-                        </InfoItem>
-                        <InfoItem label={tl({ zh: "策略 ID", en: "Strategy ID" })}>
-                          <span className="font-mono text-xs">
-                            {detail.strategy_id}
-                          </span>
-                        </InfoItem>
-                        <InfoItem label={tl({ zh: "版本", en: "Version" })}>
-                          <span className="font-mono">{tl(strategyVersionLabel(detail))}</span>
-                        </InfoItem>
-                        <InfoItem label={tl({ zh: "状态", en: "Status" })}>
-                          <StatusBadge status={detail.status} />
-                        </InfoItem>
-                        <InfoItem label={tl({ zh: "发起人", en: "Requested by" })}>
-                          <span className="font-mono text-xs">
-                            {detail.requested_by}
-                          </span>
-                        </InfoItem>
-                        <InfoItem label={tl({ zh: "发起方类型", en: "Actor type" })}>
-                          <span className="font-mono text-xs">
-                            {actorType(detail)}
-                          </span>
-                        </InfoItem>
-                        <InfoItem label={tl({ zh: "初始资金", en: "Initial capital" })}>
-                          <span className="tabular-nums font-medium">
-                            ¥{formatCurrency(initialCapital(detail), 0)}
-                          </span>
-                        </InfoItem>
-                        <InfoItem label={tl({ zh: "创建时间", en: "Created" })}>
-                          <span className="tabular-nums">
-                            {formatDateTime(detail.created_at)}
-                          </span>
-                        </InfoItem>
-                        <InfoItem label={tl({ zh: "开始时间", en: "Started" })}>
-                          <span className="tabular-nums">
-                            {formatDateTime(detail.started_at)}
-                          </span>
-                        </InfoItem>
-                        <InfoItem label={tl({ zh: "完成时间", en: "Completed" })}>
-                          <span className="tabular-nums">
-                            {formatDateTime(detail.completed_at)}
-                          </span>
-                        </InfoItem>
-                        {detail.job_id && (
-                          <InfoItem label={tl({ zh: "后台任务", en: "Background job" })}>
-                            <span className="font-mono text-xs">
-                              {detail.job_id}
-                            </span>
-                          </InfoItem>
-                        )}
-                      </div>
-
-                      {/* 统一任务队列 job 状态(#157):queued/running 时轮询展示阶段/进度/worker */}
-                      {detail.job_id && (
-                        <Card>
-                          <CardHeader className="pb-3">
-                            <CardTitle className="flex items-center justify-between text-sm">
-                              <span className="flex items-center gap-2">
-                                <Activity className="h-4 w-4 text-primary" />
-                                {tl({ zh: "后台任务进度", en: "Background job progress" })}
-                                <ResearchHint hint={RESEARCH_HINTS.runs.jobProgress} />
+                  <Tabs value={activeTab} onValueChange={handleTabChange}>
+                    <div className="mb-3 flex flex-wrap items-center gap-3">
+                      <TabsList>
+                        <TabsTrigger value="overview">
+                          {tl({ zh: "概览", en: "Overview" })}
+                        </TabsTrigger>
+                        <TabsTrigger value="report" disabled={!reportAvailable}>
+                          {tl({ zh: "绩效报告", en: "Performance report" })}
+                        </TabsTrigger>
+                      </TabsList>
+                      {!reportAvailable && (
+                        <p className="text-xs text-muted-foreground">
+                          {tl({
+                            zh: "绩效报告在运行完成后生成；当前运行尚未完成，完成后此页签可查看收益、权益曲线与回撤。",
+                            en: "The performance report is generated once the run completes; this tab becomes available afterwards.",
+                          })}
+                        </p>
+                      )}
+                    </div>
+                    <TabsContent value="overview">
+                      <ScrollArea className="max-h-[720px] pr-3">
+                        <div className="space-y-5">
+                          <div className="grid grid-cols-2 gap-4 md:grid-cols-3">
+                            <InfoItem label={tl({ zh: "运行 ID", en: "Run ID" })}>
+                              <span className="font-mono text-xs">
+                                {detail.run_id}
                               </span>
-                              {jobQuery.data && (
-                                <StatusBadge status={jobQuery.data.status} />
-                              )}
-                            </CardTitle>
-                          </CardHeader>
-                          <CardContent className="space-y-3 text-xs">
-                            {jobQuery.isLoading ? (
-                              <p className="text-muted-foreground">
-                                {tl({ zh: "正在加载任务状态…", en: "Loading job status…" })}
-                              </p>
-                            ) : jobQuery.isError ? (
-                              <p className="text-destructive">
-                                {tl({ zh: "任务状态加载失败:", en: "Failed to load job status: " })}
-                                {errorMessage(jobQuery.error, tl({ zh: "无法连接任务队列", en: "Cannot connect to the job queue" }))}
-                              </p>
-                            ) : jobQuery.data ? (
-                              <>
-                                <div className="grid grid-cols-2 gap-x-4 gap-y-1 md:grid-cols-3">
-                                  <span>
-                                    {tl({ zh: "任务:", en: "Job:" })}
-                                    <span className="ml-1 font-mono text-foreground">
-                                      {jobQuery.data.job_id}
-                                    </span>
+                            </InfoItem>
+                            <InfoItem label={tl({ zh: "策略 ID", en: "Strategy ID" })}>
+                              <span className="font-mono text-xs">
+                                {detail.strategy_id}
+                              </span>
+                            </InfoItem>
+                            <InfoItem label={tl({ zh: "版本", en: "Version" })}>
+                              <span className="font-mono">{tl(strategyVersionLabel(detail))}</span>
+                            </InfoItem>
+                            <InfoItem label={tl({ zh: "状态", en: "Status" })}>
+                              <StatusBadge status={detail.status} />
+                            </InfoItem>
+                            <InfoItem label={tl({ zh: "发起人", en: "Requested by" })}>
+                              <span className="font-mono text-xs">
+                                {detail.requested_by}
+                              </span>
+                            </InfoItem>
+                            <InfoItem label={tl({ zh: "发起方类型", en: "Actor type" })}>
+                              <span className="font-mono text-xs">
+                                {actorType(detail)}
+                              </span>
+                            </InfoItem>
+                            <InfoItem label={tl({ zh: "初始资金", en: "Initial capital" })}>
+                              <span className="tabular-nums font-medium">
+                                ¥{formatCurrency(initialCapital(detail), 0)}
+                              </span>
+                            </InfoItem>
+                            <InfoItem label={tl({ zh: "创建时间", en: "Created" })}>
+                              <span className="tabular-nums">
+                                {formatDateTime(detail.created_at)}
+                              </span>
+                            </InfoItem>
+                            <InfoItem label={tl({ zh: "开始时间", en: "Started" })}>
+                              <span className="tabular-nums">
+                                {formatDateTime(detail.started_at)}
+                              </span>
+                            </InfoItem>
+                            <InfoItem label={tl({ zh: "完成时间", en: "Completed" })}>
+                              <span className="tabular-nums">
+                                {formatDateTime(detail.completed_at)}
+                              </span>
+                            </InfoItem>
+                            {detail.job_id && (
+                              <InfoItem label={tl({ zh: "后台任务", en: "Background job" })}>
+                                <span className="font-mono text-xs">
+                                  {detail.job_id}
+                                </span>
+                              </InfoItem>
+                            )}
+                          </div>
+
+                          {/* 统一任务队列 job 状态(#157):queued/running 时轮询展示阶段/进度/worker */}
+                          {detail.job_id && (
+                            <Card>
+                              <CardHeader className="pb-3">
+                                <CardTitle className="flex items-center justify-between text-sm">
+                                  <span className="flex items-center gap-2">
+                                    <Activity className="h-4 w-4 text-primary" />
+                                    {tl({ zh: "后台任务进度", en: "Background job progress" })}
+                                    <ResearchHint hint={RESEARCH_HINTS.runs.jobProgress} />
                                   </span>
-                                  <span>
-                                    {tl({ zh: "阶段:", en: "Phase:" })}
-                                    <span className="ml-1 font-mono text-foreground">
-                                      {jobQuery.data.phase ?? "—"}
-                                    </span>
-                                  </span>
-                                  <span>
-                                    {tl({ zh: "进度:", en: "Progress:" })}
-                                    <span className="ml-1 tabular-nums text-foreground">
-                                      {jobQuery.data.progress_done}/
-                                      {jobQuery.data.progress_total}
-                                    </span>
-                                  </span>
-                                  <span>
-                                    {tl({ zh: "尝试:", en: "Attempts:" })}
-                                    <span className="ml-1 tabular-nums text-foreground">
-                                      {jobQuery.data.attempt}/
-                                      {jobQuery.data.max_attempts}
-                                    </span>
-                                  </span>
-                                  <span>
-                                    Worker:
-                                    <span className="ml-1 font-mono text-foreground">
-                                      {jobQuery.data.worker_id ?? "—"}
-                                    </span>
-                                  </span>
-                                  {jobQuery.data.heartbeat_at && (
-                                    <span>
-                                      {tl({ zh: "心跳:", en: "Heartbeat:" })}
-                                      <span className="ml-1 text-foreground">
-                                        {timeAgo(jobQuery.data.heartbeat_at, lang)}
-                                      </span>
-                                    </span>
+                                  {jobQuery.data && (
+                                    <StatusBadge status={jobQuery.data.status} />
                                   )}
-                                </div>
-                                {jobQuery.data.progress_total > 0 && (
-                                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                                    <div
-                                      className="h-full rounded-full bg-primary transition-all"
-                                      style={{
-                                        width: `${Math.min(
-                                          100,
-                                          Math.round(
-                                            (jobQuery.data.progress_done /
-                                              jobQuery.data.progress_total) *
-                                              100,
-                                          ),
-                                        )}%`,
-                                      }}
-                                    />
-                                  </div>
-                                )}
-                                {jobQuery.data.error_code && (
-                                  <Alert variant="destructive">
-                                    <AlertTitle>
-                                      {tl({ zh: "任务失败:", en: "Job failed:" })}
-                                      <span className="ml-1 font-mono">
-                                        {jobQuery.data.error_code}
-                                      </span>
-                                    </AlertTitle>
-                                    <AlertDescription>
-                                      {jobQuery.data.error_summary ?? tl({ zh: "无详细信息", en: "No details available" })}
-                                    </AlertDescription>
-                                  </Alert>
-                                )}
-                                {jobQuery.data.result_ref && (
+                                </CardTitle>
+                              </CardHeader>
+                              <CardContent className="space-y-3 text-xs">
+                                {jobQuery.isLoading ? (
                                   <p className="text-muted-foreground">
-                                    {tl({ zh: "结果引用:", en: "Result ref:" })}
-                                    <span className="ml-1 font-mono text-foreground">
-                                      {jobQuery.data.result_ref}
-                                    </span>
+                                    {tl({ zh: "正在加载任务状态…", en: "Loading job status…" })}
+                                  </p>
+                                ) : jobQuery.isError ? (
+                                  <p className="text-destructive">
+                                    {tl({ zh: "任务状态加载失败:", en: "Failed to load job status: " })}
+                                    {errorMessage(jobQuery.error, tl({ zh: "无法连接任务队列", en: "Cannot connect to the job queue" }))}
+                                  </p>
+                                ) : jobQuery.data ? (
+                                  <>
+                                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 md:grid-cols-3">
+                                      <span>
+                                        {tl({ zh: "任务:", en: "Job:" })}
+                                        <span className="ml-1 font-mono text-foreground">
+                                          {jobQuery.data.job_id}
+                                        </span>
+                                      </span>
+                                      <span>
+                                        {tl({ zh: "阶段:", en: "Phase:" })}
+                                        <span className="ml-1 font-mono text-foreground">
+                                          {jobQuery.data.phase ?? "—"}
+                                        </span>
+                                      </span>
+                                      <span>
+                                        {tl({ zh: "进度:", en: "Progress:" })}
+                                        <span className="ml-1 tabular-nums text-foreground">
+                                          {jobQuery.data.progress_done}/
+                                          {jobQuery.data.progress_total}
+                                        </span>
+                                      </span>
+                                      <span>
+                                        {tl({ zh: "尝试:", en: "Attempts:" })}
+                                        <span className="ml-1 tabular-nums text-foreground">
+                                          {jobQuery.data.attempt}/
+                                          {jobQuery.data.max_attempts}
+                                        </span>
+                                      </span>
+                                      <span>
+                                        Worker:
+                                        <span className="ml-1 font-mono text-foreground">
+                                          {jobQuery.data.worker_id ?? "—"}
+                                        </span>
+                                      </span>
+                                      {jobQuery.data.heartbeat_at && (
+                                        <span>
+                                          {tl({ zh: "心跳:", en: "Heartbeat:" })}
+                                          <span className="ml-1 text-foreground">
+                                            {timeAgo(jobQuery.data.heartbeat_at, lang)}
+                                          </span>
+                                        </span>
+                                      )}
+                                    </div>
+                                    {jobQuery.data.progress_total > 0 && (
+                                      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                                        <div
+                                          className="h-full rounded-full bg-primary transition-all"
+                                          style={{
+                                            width: `${Math.min(
+                                              100,
+                                              Math.round(
+                                                (jobQuery.data.progress_done /
+                                                  jobQuery.data.progress_total) *
+                                                  100,
+                                              ),
+                                            )}%`,
+                                          }}
+                                        />
+                                      </div>
+                                    )}
+                                    {jobQuery.data.error_code && (
+                                      <Alert variant="destructive">
+                                        <AlertTitle>
+                                          {tl({ zh: "任务失败:", en: "Job failed:" })}
+                                          <span className="ml-1 font-mono">
+                                            {jobQuery.data.error_code}
+                                          </span>
+                                        </AlertTitle>
+                                        <AlertDescription>
+                                          {jobQuery.data.error_summary ?? tl({ zh: "无详细信息", en: "No details available" })}
+                                        </AlertDescription>
+                                      </Alert>
+                                    )}
+                                    {jobQuery.data.result_ref && (
+                                      <p className="text-muted-foreground">
+                                        {tl({ zh: "结果引用:", en: "Result ref:" })}
+                                        <span className="ml-1 font-mono text-foreground">
+                                          {jobQuery.data.result_ref}
+                                        </span>
+                                      </p>
+                                    )}
+                                  </>
+                                ) : (
+                                  <p className="text-muted-foreground">
+                                    {tl({ zh: "任务已结束(运行已进入终态,无活跃 job)。", en: "The job has ended (the run reached a terminal state; no active job)." })}
                                   </p>
                                 )}
-                              </>
-                            ) : (
-                              <p className="text-muted-foreground">
-                                {tl({ zh: "任务已结束(运行已进入终态,无活跃 job)。", en: "The job has ended (the run reached a terminal state; no active job)." })}
+                              </CardContent>
+                            </Card>
+                          )}
+
+                          {detail.result_checksum && (
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <span>{tl({ zh: "结果校验和:", en: "Result checksum:" })}</span>
+                              <span className="font-mono text-foreground">
+                                {detail.result_checksum}
+                              </span>
+                            </div>
+                          )}
+
+                          {detail.error_code && (
+                            <Alert variant="destructive">
+                              <AlertTitle>{tl({ zh: "运行失败", en: "Run failed" })}</AlertTitle>
+                              <AlertDescription>
+                                <span className="font-mono">{detail.error_code}</span>
+                                {detail.error_summary && (
+                                  <p className="mt-1.5 whitespace-pre-wrap break-words">{detail.error_summary}</p>
+                                )}
+                              </AlertDescription>
+                            </Alert>
+                          )}
+
+                          {detail.manifest && <FrozenInputsCard manifest={detail.manifest} />}
+
+                          <Separator />
+
+                          <div className="space-y-2">
+                            <details className="group rounded-md border border-border">
+                              <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+                                {tl({ zh: "冻结清单 (manifest) 原始 JSON", en: "Frozen manifest (raw JSON)" })}
+                              </summary>
+                              <div className="px-3 pb-3">
+                                <JsonBlock label="" value={detail.manifest} />
+                              </div>
+                            </details>
+                            <details className="group rounded-md border border-border">
+                              <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+                                {tl({ zh: "结果 (result) 原始 JSON", en: "Result (raw JSON)" })}
+                              </summary>
+                              <div className="px-3 pb-3">
+                                <JsonBlock label="" value={detail.result} />
+                              </div>
+                            </details>
+                          </div>
+
+                          <div>
+                            <div className="mb-2 flex items-center justify-between">
+                              <p className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                                {tl({ zh: "决策产物（artifacts）", en: "Decision artifacts" })}
+                                <ResearchHint hint={RESEARCH_HINTS.runs.artifacts} />
+                                {artifactsQuery.data &&
+                                  tl({
+                                    zh: `（${artifactsQuery.data.length}）`,
+                                    en: ` (${artifactsQuery.data.length})`,
+                                  })}
                               </p>
-                            )}
-                          </CardContent>
-                        </Card>
-                      )}
-
-                      {detail.result_checksum && (
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <span>{tl({ zh: "结果校验和:", en: "Result checksum:" })}</span>
-                          <span className="font-mono text-foreground">
-                            {detail.result_checksum}
-                          </span>
-                        </div>
-                      )}
-
-                      {detail.error_code && (
-                        <Alert variant="destructive">
-                          <AlertTitle>{tl({ zh: "运行失败", en: "Run failed" })}</AlertTitle>
-                          <AlertDescription>
-                            <span className="font-mono">{detail.error_code}</span>
-                            {detail.error_summary && (
-                              <p className="mt-1.5 whitespace-pre-wrap break-words">{detail.error_summary}</p>
-                            )}
-                          </AlertDescription>
-                        </Alert>
-                      )}
-
-                      {detail.manifest && <FrozenInputsCard manifest={detail.manifest} />}
-
-                      <Separator />
-
-                      <div className="space-y-2">
-                        <details className="group rounded-md border border-border">
-                          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
-                            {tl({ zh: "冻结清单 (manifest) 原始 JSON", en: "Frozen manifest (raw JSON)" })}
-                          </summary>
-                          <div className="px-3 pb-3">
-                            <JsonBlock label="" value={detail.manifest} />
-                          </div>
-                        </details>
-                        <details className="group rounded-md border border-border">
-                          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
-                            {tl({ zh: "结果 (result) 原始 JSON", en: "Result (raw JSON)" })}
-                          </summary>
-                          <div className="px-3 pb-3">
-                            <JsonBlock label="" value={detail.result} />
-                          </div>
-                        </details>
-                      </div>
-
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <p className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                            {tl({ zh: "决策产物（artifacts）", en: "Decision artifacts" })}
-                            <ResearchHint hint={RESEARCH_HINTS.runs.artifacts} />
-                            {artifactsQuery.data &&
-                              tl({
-                                zh: `（${artifactsQuery.data.length}）`,
-                                en: ` (${artifactsQuery.data.length})`,
-                              })}
-                          </p>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => artifactsQuery.refetch()}
-                            disabled={artifactsQuery.isFetching}
-                          >
-                            <RefreshCw
-                              className={cn(
-                                "h-3.5 w-3.5",
-                                artifactsQuery.isFetching && "animate-spin",
-                              )}
-                            />
-                          </Button>
-                        </div>
-                        {artifactsQuery.isLoading ? (
-                          <LoadingState rows={3} />
-                        ) : artifactsQuery.isError ? (
-                          <ErrorState
-                            message={errorMessage(
-                              artifactsQuery.error,
-                              tl({ zh: "无法加载决策产物", en: "Failed to load decision artifacts" }),
-                            )}
-                            onRetry={() => artifactsQuery.refetch()}
-                          />
-                        ) : artifactsQuery.data &&
-                          artifactsQuery.data.length > 0 ? (
-                          <div className="rounded-lg border border-border">
-                            <Table>
-                              <TableHeader className="sticky top-0 bg-card">
-                                <TableRow>
-                                  <TableHead className="w-16">#</TableHead>
-                                  <TableHead>{tl({ zh: "阶段", en: "Stage" })}</TableHead>
-                                  <TableHead>{tl({ zh: "决策 ID", en: "Decision ID" })}</TableHead>
-                                  <TableHead>trace_id</TableHead>
-                                  <TableHead>{tl({ zh: "父 trace", en: "Parent trace" })}</TableHead>
-                                </TableRow>
-                              </TableHeader>
-                              <TableBody>
-                                {artifactsQuery.data.map((art) => {
-                                  const expanded = expandedArtifacts.has(art.artifact_id);
-                                  return (
-                                    <Fragment key={art.artifact_id}>
-                                    <TableRow
-                                      className="cursor-pointer"
-                                      onClick={() =>
-                                        setExpandedArtifacts((current) => {
-                                          const next = new Set(current);
-                                          if (next.has(art.artifact_id)) {
-                                            next.delete(art.artifact_id);
-                                          } else {
-                                            next.add(art.artifact_id);
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => artifactsQuery.refetch()}
+                                disabled={artifactsQuery.isFetching}
+                              >
+                                <RefreshCw
+                                  className={cn(
+                                    "h-3.5 w-3.5",
+                                    artifactsQuery.isFetching && "animate-spin",
+                                  )}
+                                />
+                              </Button>
+                            </div>
+                            {artifactsQuery.isLoading ? (
+                              <LoadingState rows={3} />
+                            ) : artifactsQuery.isError ? (
+                              <ErrorState
+                                message={errorMessage(
+                                  artifactsQuery.error,
+                                  tl({ zh: "无法加载决策产物", en: "Failed to load decision artifacts" }),
+                                )}
+                                onRetry={() => artifactsQuery.refetch()}
+                              />
+                            ) : artifactsQuery.data &&
+                              artifactsQuery.data.length > 0 ? (
+                              <div className="rounded-lg border border-border">
+                                <Table>
+                                  <TableHeader className="sticky top-0 bg-card">
+                                    <TableRow>
+                                      <TableHead className="w-16">#</TableHead>
+                                      <TableHead>{tl({ zh: "阶段", en: "Stage" })}</TableHead>
+                                      <TableHead>{tl({ zh: "决策 ID", en: "Decision ID" })}</TableHead>
+                                      <TableHead>trace_id</TableHead>
+                                      <TableHead>{tl({ zh: "父 trace", en: "Parent trace" })}</TableHead>
+                                    </TableRow>
+                                  </TableHeader>
+                                  <TableBody>
+                                    {artifactsQuery.data.map((art) => {
+                                      const expanded = expandedArtifacts.has(art.artifact_id);
+                                      return (
+                                        <Fragment key={art.artifact_id}>
+                                        <TableRow
+                                          className="cursor-pointer"
+                                          onClick={() =>
+                                            setExpandedArtifacts((current) => {
+                                              const next = new Set(current);
+                                              if (next.has(art.artifact_id)) {
+                                                next.delete(art.artifact_id);
+                                              } else {
+                                                next.add(art.artifact_id);
+                                              }
+                                              return next;
+                                            })
                                           }
-                                          return next;
-                                        })
-                                      }
-                                    >
-                                      <TableCell className="tabular-nums">
-                                        <span className={cn("mr-1 inline-block text-[10px] text-muted-foreground transition-transform", expanded && "rotate-90")}>
-                                          ▶
-                                        </span>
-                                        {art.sequence}
-                                      </TableCell>
-                                      <TableCell>
-                                        <Badge variant="info" className="font-mono">
-                                          {art.stage}
-                                        </Badge>
-                                      </TableCell>
-                                      <TableCell>
-                                        {art.decision_id ? (
-                                          <Tooltip>
-                                            <TooltipTrigger asChild>
-                                              <span className="font-mono text-xs text-muted-foreground">
-                                                {art.decision_id.slice(0, 12)}…
-                                              </span>
-                                            </TooltipTrigger>
-                                            <TooltipContent className="font-mono">
-                                              {art.decision_id}
-                                            </TooltipContent>
-                                          </Tooltip>
-                                        ) : (
-                                          <span className="text-xs text-muted-foreground">—</span>
-                                        )}
-                                      </TableCell>
-                                      <TableCell>
-                                        {art.trace_id ? (
-                                          <Tooltip>
-                                            <TooltipTrigger asChild>
-                                              <span className="font-mono text-xs text-muted-foreground">
-                                                {art.trace_id.slice(0, 12)}…
-                                              </span>
-                                            </TooltipTrigger>
-                                            <TooltipContent className="font-mono">
-                                              {art.trace_id}
-                                            </TooltipContent>
-                                          </Tooltip>
-                                        ) : (
-                                          <span className="text-xs text-muted-foreground">—</span>
-                                        )}
-                                      </TableCell>
-                                      <TableCell>
-                                        {art.parent_trace_ids.length > 0 ? (
-                                          <div className="flex flex-wrap gap-1">
-                                            {art.parent_trace_ids.map((pid) => (
-                                              <Tooltip key={pid}>
+                                        >
+                                          <TableCell className="tabular-nums">
+                                            <span className={cn("mr-1 inline-block text-[10px] text-muted-foreground transition-transform", expanded && "rotate-90")}>
+                                              ▶
+                                            </span>
+                                            {art.sequence}
+                                          </TableCell>
+                                          <TableCell>
+                                            <Badge variant="info" className="font-mono">
+                                              {art.stage}
+                                            </Badge>
+                                          </TableCell>
+                                          <TableCell>
+                                            {art.decision_id ? (
+                                              <Tooltip>
                                                 <TooltipTrigger asChild>
-                                                  <Badge
-                                                    variant="outline"
-                                                    className="font-mono text-[10px]"
-                                                  >
-                                                    {pid.slice(0, 8)}…
-                                                  </Badge>
+                                                  <span className="font-mono text-xs text-muted-foreground">
+                                                    {art.decision_id.slice(0, 12)}…
+                                                  </span>
                                                 </TooltipTrigger>
                                                 <TooltipContent className="font-mono">
-                                                  {pid}
+                                                  {art.decision_id}
                                                 </TooltipContent>
                                               </Tooltip>
-                                            ))}
-                                          </div>
-                                        ) : (
-                                          <span className="text-xs text-muted-foreground">
-                                            —
-                                          </span>
+                                            ) : (
+                                              <span className="text-xs text-muted-foreground">—</span>
+                                            )}
+                                          </TableCell>
+                                          <TableCell>
+                                            {art.trace_id ? (
+                                              <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                  <span className="font-mono text-xs text-muted-foreground">
+                                                    {art.trace_id.slice(0, 12)}…
+                                                  </span>
+                                                </TooltipTrigger>
+                                                <TooltipContent className="font-mono">
+                                                  {art.trace_id}
+                                                </TooltipContent>
+                                              </Tooltip>
+                                            ) : (
+                                              <span className="text-xs text-muted-foreground">—</span>
+                                            )}
+                                          </TableCell>
+                                          <TableCell>
+                                            {art.parent_trace_ids.length > 0 ? (
+                                              <div className="flex flex-wrap gap-1">
+                                                {art.parent_trace_ids.map((pid) => (
+                                                  <Tooltip key={pid}>
+                                                    <TooltipTrigger asChild>
+                                                      <Badge
+                                                        variant="outline"
+                                                        className="font-mono text-[10px]"
+                                                      >
+                                                        {pid.slice(0, 8)}…
+                                                      </Badge>
+                                                    </TooltipTrigger>
+                                                    <TooltipContent className="font-mono">
+                                                      {pid}
+                                                    </TooltipContent>
+                                                  </Tooltip>
+                                                ))}
+                                              </div>
+                                            ) : (
+                                              <span className="text-xs text-muted-foreground">
+                                                —
+                                              </span>
+                                            )}
+                                          </TableCell>
+                                        </TableRow>
+                                        {expanded && (
+                                          <TableRow className="hover:bg-transparent">
+                                            <TableCell colSpan={5} className="bg-muted/20">
+                                              <pre className="max-h-64 overflow-auto rounded-md border border-border bg-muted/30 p-3 font-mono text-[11px] leading-relaxed">
+                                                {art.payload ? JSON.stringify(art.payload, null, 2) : "—"}
+                                              </pre>
+                                            </TableCell>
+                                          </TableRow>
                                         )}
-                                      </TableCell>
-                                    </TableRow>
-                                    {expanded && (
-                                      <TableRow className="hover:bg-transparent">
-                                        <TableCell colSpan={5} className="bg-muted/20">
-                                          <pre className="max-h-64 overflow-auto rounded-md border border-border bg-muted/30 p-3 font-mono text-[11px] leading-relaxed">
-                                            {art.payload ? JSON.stringify(art.payload, null, 2) : "—"}
-                                          </pre>
-                                        </TableCell>
-                                      </TableRow>
-                                    )}
-                                    </Fragment>
-                                  );
-                                })}
-                              </TableBody>
-                            </Table>
+                                        </Fragment>
+                                      );
+                                    })}
+                                  </TableBody>
+                                </Table>
+                              </div>
+                            ) : (
+                              <EmptyState
+                                title={tl({ zh: "暂无决策产物", en: "No decision artifacts yet" })}
+                                description={tl({ zh: "该运行尚未产生任何决策产物 (artifact)。", en: "This run has not produced any decision artifacts yet." })}
+                              />
+                            )}
                           </div>
-                        ) : (
-                          <EmptyState
-                            title={tl({ zh: "暂无决策产物", en: "No decision artifacts yet" })}
-                            description={tl({ zh: "该运行尚未产生任何决策产物 (artifact)。", en: "This run has not produced any decision artifacts yet." })}
-                          />
-                        )}
-                      </div>
 
-                      <Separator />
+                          <Separator />
 
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => invalidateAll()}
-                        >
-                          <RefreshCw className="h-4 w-4" />
-                          {tl({ zh: "刷新数据", en: "Refresh data" })}
-                        </Button>
-                        {!TERMINAL_STATUSES.includes(detail.status) && (
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            disabled={cancelMutation.isPending}
-                            onClick={() => setCancelOpen(true)}
-                          >
-                            <XCircle className="h-4 w-4" />
-                            {tl({ zh: "取消运行", en: "Cancel run" })}
-                          </Button>
-                        )}
-                        {detail.status === "completed" && (
-                          <Button
-                            variant="default"
-                            size="sm"
-                            onClick={openReplayDialog}
-                          >
-                            <Play className="h-4 w-4" />
-                            {tl({ zh: "重放", en: "Replay" })}
-                          </Button>
-                        )}
-                        {artifactsQuery.data &&
-                          artifactsQuery.data.length > 0 && (
+                          <div className="flex flex-wrap items-center gap-2">
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => setLineageOpen(true)}
+                              onClick={() => invalidateAll()}
                             >
-                              <GitBranch className="h-4 w-4" />
-                              {tl({ zh: "查看血缘链路", en: "View lineage" })}
+                              <RefreshCw className="h-4 w-4" />
+                              {tl({ zh: "刷新数据", en: "Refresh data" })}
                             </Button>
-                          )}
-                      </div>
-                    </div>
-                  </ScrollArea>
+                            {!TERMINAL_STATUSES.includes(detail.status) && (
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                disabled={cancelMutation.isPending}
+                                onClick={() => setCancelOpen(true)}
+                              >
+                                <XCircle className="h-4 w-4" />
+                                {tl({ zh: "取消运行", en: "Cancel run" })}
+                              </Button>
+                            )}
+                            {detail.status === "completed" && (
+                              <Button
+                                variant="default"
+                                size="sm"
+                                onClick={openReplayDialog}
+                              >
+                                <Play className="h-4 w-4" />
+                                {tl({ zh: "重放", en: "Replay" })}
+                              </Button>
+                            )}
+                            {artifactsQuery.data &&
+                              artifactsQuery.data.length > 0 && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => setLineageOpen(true)}
+                                >
+                                  <GitBranch className="h-4 w-4" />
+                                  {tl({ zh: "查看血缘链路", en: "View lineage" })}
+                                </Button>
+                              )}
+                          </div>
+                        </div>
+                      </ScrollArea>
+                    </TabsContent>
+                    <TabsContent value="report">
+                      <ScrollArea className="max-h-[720px] pr-3">
+                        <RunReportView runId={detail.run_id} />
+                      </ScrollArea>
+                    </TabsContent>
+                  </Tabs>
                 ) : null}
               </CardContent>
             </Card>
