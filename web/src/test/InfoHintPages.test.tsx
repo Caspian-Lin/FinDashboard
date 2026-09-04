@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import Backtest from "../pages/Backtest";
 import Data from "../pages/Data";
 import Settings from "../pages/Settings";
-import Strategies from "../pages/Strategies";
+import { StrategyPresetsPanel } from "../pages/Strategies";
 
 const apiMock = vi.hoisted(() => ({
   getStrategies: vi.fn(),
@@ -294,9 +294,9 @@ describe("目标页面 InfoHint 接入", () => {
     );
   });
 
-  it("策略配置页展示预设安全边界", async () => {
+  it("策略预设面板展示预设安全边界", async () => {
     const user = userEvent.setup();
-    renderPage(<Strategies />);
+    renderPage(<StrategyPresetsPanel />);
 
     const trigger = await screen.findByRole("button", {
       name: "查看“策略预设”说明",

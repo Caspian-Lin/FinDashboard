@@ -57,8 +57,8 @@ import { api, isJobRunning } from "@/lib/api";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
 import { cn, formatDateTime, formatNumber, formatPercent } from "@/lib/utils";
 import {
-  WorkflowIndicator,
-  NextStepCTA,
+  WorkflowHelpPopover,
+  WORKFLOW_NEXT,
   HintLabel,
   ResearchHint,
 } from "@/components/research/ResearchHint";
@@ -2168,8 +2168,8 @@ export default function ResearchData() {
           zh: "行情数据拉取、研究数据发布、数据集清单与标的元数据",
           en: "Bar data fetch, research data releases, dataset manifests and instrument metadata",
         })}
+        actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.data} />}
       />
-      <WorkflowIndicator currentPath="/research/data" />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="h-auto max-w-full justify-start overflow-x-auto">
@@ -2206,15 +2206,6 @@ export default function ResearchData() {
           <InstrumentsTab onGoToFetch={() => setActiveTab("fetch")} />
         </TabsContent>
       </Tabs>
-
-      <NextStepCTA
-        nextPath="/research/factors"
-        nextLabel={{ zh: "因子实验室", en: "Factor Lab" }}
-        description={{
-          zh: "基于已拉取的数据探索因子、创建因子实验",
-          en: "Explore factors and create factor experiments from the fetched data",
-        }}
-      />
     </div>
   );
 }

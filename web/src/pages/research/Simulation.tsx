@@ -1,4 +1,4 @@
-import { WorkflowIndicator, NextStepCTA } from "@/components/research/ResearchHint";
+import { WorkflowHelpPopover, WORKFLOW_NEXT } from "@/components/research/ResearchHint";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useT } from "@/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -1648,28 +1648,26 @@ export default function Simulation() {
       <PageHeader
         title={tl({ zh: "模拟盘", en: "Simulation" })}
         description={tl({ zh: "产品模拟盘（纸面交易）：基于结构化目标仓位决策的隔离模拟运行", en: "Product simulation (paper trading): isolated simulation runs driven by structured target position decisions" })}
-        breadcrumbs={[
-          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
-          { label: tl({ zh: "模拟盘", en: "Simulation" }) },
-        ]}
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => accountsQuery.refetch()}
-            disabled={accountsQuery.isFetching}
-          >
-            <RefreshCw
-              className={cn(
-                "h-4 w-4",
-                accountsQuery.isFetching && "animate-spin",
-              )}
-            />
-            {tl({ zh: "刷新账户", en: "Refresh accounts" })}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <WorkflowHelpPopover next={WORKFLOW_NEXT.simulation} />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => accountsQuery.refetch()}
+              disabled={accountsQuery.isFetching}
+            >
+              <RefreshCw
+                className={cn(
+                  "h-4 w-4",
+                  accountsQuery.isFetching && "animate-spin",
+                )}
+              />
+              {tl({ zh: "刷新账户", en: "Refresh accounts" })}
+            </Button>
+          </div>
         }
       />
-      <WorkflowIndicator currentPath="/research/simulation" />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
         <div className="space-y-4 lg:col-span-1">
@@ -1870,11 +1868,6 @@ export default function Simulation() {
         onOpenChange={setSessionDialogOpen}
         accounts={accounts}
         defaultAccountId={selectedAccountId}
-      />
-      <NextStepCTA
-        nextPath="/research/reports"
-        nextLabel={tl({ zh: "研究报告", en: "Research Reports" })}
-        description={tl({ zh: "查看模拟交易的完整绩效报告和归因分析", en: "View the full performance reports and attribution analysis of the simulated trading" })}
       />
     </div>
   );

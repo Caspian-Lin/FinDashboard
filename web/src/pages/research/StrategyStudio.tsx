@@ -46,8 +46,8 @@ import {
 import { strategySpecApi, datasetApi } from "@/lib/research";
 import { cn, formatDateTime } from "@/lib/utils";
 import {
-  WorkflowIndicator,
-  NextStepCTA,
+  WorkflowHelpPopover,
+  WORKFLOW_NEXT,
   HintLabel,
   ResearchHint,
 } from "@/components/research/ResearchHint";
@@ -238,18 +238,18 @@ export default function StrategyStudio() {
           zh: "无代码结构化策略配置 — 白名单组件、即时校验、版本管理",
           en: "No-code structured strategy configuration — whitelisted components, instant validation, version management",
         })}
+        actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.strategy} />}
       />
-      <WorkflowIndicator currentPath="/research/strategy" />
 
       <Alert variant="info" className="mb-4">
         <Info className="h-4 w-4" />
-        <AlertTitle>{tl({ zh: "策略 Studio vs 策略预设", en: "Strategy Studio vs Strategy Presets" })}</AlertTitle>
+        <AlertTitle>{tl({ zh: "策略 Studio vs 回测预设", en: "Strategy Studio vs backtest presets" })}</AlertTitle>
         <AlertDescription>
-          {tl({ zh: "策略 ", en: "Strategy " })}
+          {tl({ zh: "回测页内的策略 ", en: "Backtest " })}
           <strong>{tl({ zh: "预设", en: "presets" })}</strong>
           {tl({
-            zh: "（工具栏）用于快速回测探索（选个内置策略 + 改参数 + 跑结果）。",
-            en: " (toolbar) are for quick backtest exploration (pick a built-in strategy + tweak parameters + run results).",
+            zh: "用于快速回测探索（选个内置策略 + 改参数 + 跑结果）。",
+            en: " (inside the Backtest page) are for quick backtest exploration (pick a built-in strategy + tweak parameters + run results).",
           })}
           {tl({ zh: "策略 ", en: " Strategy " })}
           <strong>Studio</strong>
@@ -671,15 +671,6 @@ export default function StrategyStudio() {
           )}
         </div>
       </div>
-
-      <NextStepCTA
-        nextPath="/research/experiments"
-        nextLabel={{ zh: "实验与 OOS", en: "Experiments & OOS" }}
-        description={{
-          zh: "用样本外数据验证策略是否真的有效，排除过拟合",
-          en: "Validate whether the strategy truly works on out-of-sample data and rule out overfitting",
-        }}
-      />
 
       {/* Setup dialog */}
       <SetupDialog

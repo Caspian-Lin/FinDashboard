@@ -56,8 +56,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   ResearchHint,
-  WorkflowIndicator,
-  NextStepCTA,
+  WorkflowHelpPopover,
+  WORKFLOW_NEXT,
 } from "@/components/research/ResearchHint";
 import { FeatureSnapshotProgress } from "@/components/research/FeatureSnapshotProgress";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
@@ -1541,13 +1541,8 @@ export default function FactorLab() {
       <PageHeader
         title={tl({ zh: "因子实验室", en: "Factor Lab" })}
         description={tl({ zh: "因子发现、信号预览与实验验证", en: "Factor discovery, signal preview, and experiment validation" })}
-        breadcrumbs={[
-          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
-          { label: tl({ zh: "因子实验室", en: "Factor Lab" }) },
-        ]}
+        actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.factors} />}
       />
-
-      <WorkflowIndicator currentPath="/research/factors" />
 
       <Tabs defaultValue="catalog">
         <TabsList className="h-auto flex-wrap gap-1">
@@ -1574,12 +1569,6 @@ export default function FactorLab() {
           <ExperimentsTab />
         </TabsContent>
       </Tabs>
-
-      <NextStepCTA
-        nextPath="/research/strategy"
-        nextLabel={{ zh: "策略 Studio", en: "Strategy Studio" }}
-        description={{ zh: "将因子组合为完整的交易策略", en: "Combine factors into a complete trading strategy" }}
-      />
     </div>
   );
 }

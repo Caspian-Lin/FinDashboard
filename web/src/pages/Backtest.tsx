@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useSearchParams } from "react-router-dom";
+import { Bookmark } from "lucide-react";
 import {
   LineChart,
   Line,
@@ -14,6 +15,17 @@ import {
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import FactorSelectionForm from "../components/FactorSelectionForm";
 import StrategyParamForm from "../components/StrategyParamForm";
+import { StrategyPresetsPanel } from "./Strategies";
+import { PageHeader } from "@/components/ui/page-header";
+import { Button } from "@/components/ui/button";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { WorkflowHelpPopover } from "@/components/research/ResearchHint";
 import { SelectAllResultsButton } from "../components/selection/SelectAllResultsButton";
 import {
   defaultStrategyParams,
@@ -83,6 +95,8 @@ export default function Backtest() {
   // 结果视图: 当前结果或历史记录
   const [activeResult, setActiveResult] = useState<BacktestResult | null>(null);
   const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null);
+  // 策略预设抽屉(原独立「策略预设」页并入)
+  const [presetsOpen, setPresetsOpen] = useState(false);
   // 回测已迁移到统一任务队列(#144):POST /backtest/run 返回 JobOut,前端轮询
   // /api/jobs/{job_id},succeeded 后用 result_ref(run_id) 查历史详情拿 BacktestResult。
   const [backtestJobId, setBacktestJobId] = useState<string | null>(null);
@@ -345,19 +359,27 @@ export default function Backtest() {
   };
 
   return (
-    <div className="flex flex-col gap-6 lg:flex-row">
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title={tl({ zh: "回测", en: "Backtest" })}
+        description={tl({
+          zh: "历史行情回放 + 纸面撮合;回测任务进入统一队列,可在「任务中心」跟踪。",
+          en: "Historical bar replay + paper matching; backtest jobs enter the unified queue and can be tracked in the Task Center.",
+        })}
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <WorkflowHelpPopover />
+            <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setPresetsOpen(true)}>
+              <Bookmark className="h-4 w-4" />
+              {tl({ zh: "策略预设", en: "Strategy presets" })}
+            </Button>
+          </div>
+        }
+      />
+
+      <div className="flex flex-col gap-6 lg:flex-row">
       {/* Main column */}
       <div className="min-w-0 flex-1">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">{tl({ zh: "回测", en: "Backtest" })}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {tl({
-              zh: "历史行情回放 + 纸面撮合;回测任务进入统一队列,可在「任务中心」跟踪。",
-              en: "Historical bar replay + paper matching; backtest jobs enter the unified queue and can be tracked in the Task Center.",
-            })}
-          </p>
-        </div>
-
         {/* Config form */}
         <div className="rounded-lg border border-border bg-card p-5">
           <h2 className="text-lg font-semibold mb-4">{tl({ zh: "回测配置", en: "Backtest Configuration" })}</h2>
@@ -746,6 +768,24 @@ export default function Backtest() {
           ))}
         </div>
       </div>
+      </div>
+
+      <Sheet open={presetsOpen} onOpenChange={setPresetsOpen}>
+        <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl">
+          <SheetHeader>
+            <SheetTitle>{tl({ zh: "策略预设", en: "Strategy presets" })}</SheetTitle>
+            <SheetDescription>
+              {tl({
+                zh: "内置策略的参数预设库;选择预设后点「带入回测」即可填充到当前配置。",
+                en: "Parameter presets for built-in strategies; pick one and press \"Load into backtest\" to fill the current configuration.",
+              })}
+            </SheetDescription>
+          </SheetHeader>
+          <div className="pb-6">
+            <StrategyPresetsPanel onLoadedPreset={() => setPresetsOpen(false)} />
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

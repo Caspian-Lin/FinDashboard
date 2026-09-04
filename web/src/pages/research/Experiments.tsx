@@ -46,8 +46,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   HintLabel,
-  NextStepCTA,
-  WorkflowIndicator,
+  WorkflowHelpPopover,
+  WORKFLOW_NEXT,
 } from "@/components/research/ResearchHint";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
 import {
@@ -863,13 +863,8 @@ export default function Experiments() {
           zh: "机器验证实验、样本外检验与过拟合防护",
           en: "Machine validation experiments, out-of-sample checks and overfitting protection",
         })}
-        breadcrumbs={[
-          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
-          { label: tl({ zh: "实验与 OOS", en: "Experiments & OOS" }) },
-        ]}
+        actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.experiments} />}
       />
-
-      <WorkflowIndicator currentPath="/research/experiments" />
 
       <Alert variant="info" className="mb-4">
         <AlertTitle>{tl({ zh: "验证实验 vs 回测 vs 模拟盘", en: "Validation experiment vs backtest vs simulation" })}</AlertTitle>
@@ -1293,15 +1288,6 @@ export default function Experiments() {
           )}
         </div>
       </div>
-
-      <NextStepCTA
-        nextPath="/research/runs"
-        nextLabel={{ zh: "研究运行", en: "Research runs" }}
-        description={{
-          zh: "将通过验证的策略冻结为可复现的研究运行",
-          en: "Freeze the validated strategy into a reproducible research run",
-        }}
-      />
 
       <CreateExperimentDialog open={createOpen} onOpenChange={setCreateOpen} />
 

@@ -1,7 +1,9 @@
 import * as React from "react";
-import { Link } from "react-router-dom";
-import { HelpCircle, ArrowRight, CheckCircle2 } from "lucide-react";
+import { Link, useLocation } from "react-router-dom";
+import { HelpCircle, ArrowRight, CheckCircle2, CircleHelp } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useT, type LocalizedText } from "@/i18n";
 
@@ -57,7 +59,7 @@ export function HintLabel({
   );
 }
 
-/* Research workflow steps indicator */
+/* Research workflow steps (rendered inside the page-header help popover) */
 
 const WORKFLOW_STEPS: { path: string; label: LocalizedText; step: number }[] = [
   { path: "/research/data", label: { zh: "数据", en: "Data" }, step: 1 },
@@ -70,62 +72,137 @@ const WORKFLOW_STEPS: { path: string; label: LocalizedText; step: number }[] = [
   { path: "/research/reports", label: { zh: "报告", en: "Reports" }, step: 8 },
 ];
 
-export function WorkflowIndicator({ currentPath }: { currentPath: string }) {
-  const { tl } = useT();
-  const currentStep = WORKFLOW_STEPS.find((s) => currentPath.startsWith(s.path));
-
-  if (!currentStep) return null;
-
-  return (
-    <div className="mb-4 flex items-center gap-1 overflow-x-auto scrollbar-thin rounded-lg border border-border bg-card p-2">
-      {WORKFLOW_STEPS.map((step, i) => {
-        const isCurrent = step.step === currentStep.step;
-        const isPast = step.step < currentStep.step;
-        return (
-          <React.Fragment key={step.path}>
-            {i > 0 && <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground/40" />}
-            <Link
-              to={step.path}
-              className={cn(
-                "flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                isCurrent && "bg-primary/10 text-primary",
-                isPast && "text-success",
-                !isCurrent && !isPast && "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {isPast && <CheckCircle2 className="h-3 w-3" />}
-              <span className="tabular-nums opacity-60">{step.step}</span>
-              {tl(step.label)}
-            </Link>
-          </React.Fragment>
-        );
-      })}
-    </div>
-  );
+export interface WorkflowNextStep {
+  path: string;
+  label: LocalizedText | string;
+  description?: LocalizedText | string;
 }
 
-/* Next step CTA */
+/** 各研究页在流程中的「下一步」引导(原先每页页底 NextStepCTA 的文案)。 */
+export const WORKFLOW_NEXT: Record<string, WorkflowNextStep> = {
+  data: {
+    path: "/research/factors",
+    label: { zh: "因子实验室", en: "Factor Lab" },
+    description: {
+      zh: "基于已拉取的数据探索因子、创建因子实验",
+      en: "Explore factors and create factor experiments from the fetched data",
+    },
+  },
+  factors: {
+    path: "/research/strategy",
+    label: { zh: "策略 Studio", en: "Strategy Studio" },
+    description: { zh: "将因子组合为完整的交易策略", en: "Combine factors into a complete trading strategy" },
+  },
+  strategy: {
+    path: "/research/experiments",
+    label: { zh: "实验与 OOS", en: "Experiments & OOS" },
+    description: {
+      zh: "用样本外数据验证策略是否真的有效，排除过拟合",
+      en: "Validate whether the strategy truly works on out-of-sample data and rule out overfitting",
+    },
+  },
+  experiments: {
+    path: "/research/runs",
+    label: { zh: "研究运行", en: "Research runs" },
+    description: {
+      zh: "将通过验证的策略冻结为可复现的研究运行",
+      en: "Freeze the validated strategy into a reproducible research run",
+    },
+  },
+  runs: {
+    path: "/research/portfolio",
+    label: { zh: "组合与风险", en: "Portfolio & Risk" },
+    description: {
+      zh: "将冻结的策略转化为目标权重和离散交易计划",
+      en: "Turn the frozen strategy into target weights and discrete trade plans",
+    },
+  },
+  portfolio: {
+    path: "/research/simulation",
+    label: { zh: "模拟盘", en: "Paper Trading" },
+    description: {
+      zh: "用纸面撮合验证策略在真实交易环境下的表现",
+      en: "Validate strategy performance in a realistic trading environment via paper matching.",
+    },
+  },
+  simulation: {
+    path: "/research/reports",
+    label: { zh: "研究报告", en: "Research Reports" },
+    description: {
+      zh: "查看模拟交易的完整绩效报告和归因分析",
+      en: "View the full performance reports and attribution analysis of the simulated trading",
+    },
+  },
+};
 
-export function NextStepCTA({
-  nextPath,
-  nextLabel,
-  description,
-}: {
-  nextPath: string;
-  nextLabel: LocalizedText | string;
-  description?: LocalizedText | string;
-}) {
+/**
+ * 页顶「研究流程」帮助弹窗:收纳全流程导航与「下一步」引导,
+ * 取代此前每页内联的 8 步流程条与页底 NextStepCTA(与侧边栏三重重复)。
+ */
+export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
   const { tl } = useT();
+  const { pathname } = useLocation();
+  const currentStep = WORKFLOW_STEPS.find((s) => pathname.startsWith(s.path));
+
   return (
-    <Link
-      to={nextPath}
-      className="mt-6 flex items-center justify-between rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 transition-colors hover:border-primary/50 hover:bg-primary/10"
-    >
-      <div>
-        <p className="text-sm font-medium text-foreground">{tl({ zh: "下一步：", en: "Next: " })}{typeof nextLabel === "string" ? nextLabel : tl(nextLabel)}</p>
-        {description && <p className="text-xs text-muted-foreground">{typeof description === "string" ? description : tl(description)}</p>}
-      </div>
-      <ArrowRight className="h-4 w-4 text-primary" />
-    </Link>
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="gap-1.5">
+          <CircleHelp className="h-4 w-4" />
+          {tl({ zh: "研究流程", en: "Workflow" })}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80">
+        <p className="text-sm font-medium text-foreground">
+          {tl({ zh: "研究流程", en: "Research workflow" })}
+        </p>
+        <div className="mt-2 space-y-0.5">
+          {WORKFLOW_STEPS.map((step) => {
+            const isCurrent = currentStep?.step === step.step;
+            const isPast = currentStep ? step.step < currentStep.step : false;
+            return (
+              <Link
+                key={step.path}
+                to={step.path}
+                className={cn(
+                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
+                  isCurrent && "bg-primary/10 text-primary",
+                  isPast && "text-success",
+                  !isCurrent && !isPast && "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {isPast ? (
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <span className="w-3.5 shrink-0 text-center tabular-nums opacity-60">{step.step}</span>
+                )}
+                {tl(step.label)}
+              </Link>
+            );
+          })}
+        </div>
+        {next && (
+          <div className="mt-3 border-t border-border pt-3">
+            <Link
+              to={next.path}
+              className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-accent"
+            >
+              <span>
+                <span className="block text-xs font-medium text-foreground">
+                  {tl({ zh: "下一步：", en: "Next: " })}
+                  {typeof next.label === "string" ? next.label : tl(next.label)}
+                </span>
+                {next.description && (
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    {typeof next.description === "string" ? next.description : tl(next.description)}
+                  </span>
+                )}
+              </span>
+              <ArrowRight className="h-4 w-4 shrink-0 text-primary" />
+            </Link>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }

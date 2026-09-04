@@ -1,4 +1,4 @@
-import { WorkflowIndicator, NextStepCTA } from "@/components/research/ResearchHint";
+import { WorkflowHelpPopover, WORKFLOW_NEXT } from "@/components/research/ResearchHint";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -524,12 +524,9 @@ export default function ResearchRuns() {
       <PageHeader
         title={tl({ zh: "研究运行", en: "Research runs" })}
         description={tl({ zh: "冻结输入、血缘追踪与运行重放", en: "Frozen inputs, lineage tracing, and run replay" })}
-        breadcrumbs={[
-          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
-          { label: tl({ zh: "研究运行", en: "Research runs" }) },
-        ]}
         actions={
           <div className="flex flex-wrap gap-2">
+            <WorkflowHelpPopover next={WORKFLOW_NEXT.runs} />
             <Button size="sm" onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4" />
               {tl({ zh: "排队研究运行", en: "Queue research run" })}
@@ -543,7 +540,6 @@ export default function ResearchRuns() {
           </div>
         }
       />
-      <WorkflowIndicator currentPath="/research/runs" />
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
@@ -1263,11 +1259,6 @@ export default function ResearchRuns() {
         open={createOpen}
         onOpenChange={setCreateOpen}
         onCreated={(run) => setSelectedId(run.run_id)}
-      />
-      <NextStepCTA
-        nextPath="/research/portfolio"
-        nextLabel={{ zh: "组合与风险", en: "Portfolio & Risk" }}
-        description={{ zh: "将冻结的策略转化为目标权重和离散交易计划", en: "Turn the frozen strategy into target weights and discrete trade plans" }}
       />
     </div>
   );

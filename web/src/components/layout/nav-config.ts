@@ -17,7 +17,6 @@ import {
   ScrollText,
   ShieldAlert,
   TrendingUp,
-  Bookmark,
   ListTodo,
   Settings,
 } from "lucide-react";
@@ -43,6 +42,7 @@ export const navGroups: NavGroup[] = [
       { to: "/research/data", label: { zh: "数据与标的", en: "Data & Instruments" }, icon: Database },
       { to: "/research/factors", label: { zh: "因子实验室", en: "Factor Lab" }, icon: Atom },
       { to: "/research/strategy", label: { zh: "策略 Studio", en: "Strategy Studio" }, icon: SlidersHorizontal },
+      { to: "/backtest", label: { zh: "回测", en: "Backtest" }, icon: TrendingUp },
       { to: "/research/experiments", label: { zh: "实验与 OOS", en: "Experiments & OOS" }, icon: TestTube },
       { to: "/research/runs", label: { zh: "研究运行", en: "Research Runs" }, icon: GitBranch },
       { to: "/research/portfolio", label: { zh: "组合与风险", en: "Portfolio & Risk" }, icon: Scale },
@@ -65,8 +65,6 @@ export const navGroups: NavGroup[] = [
   {
     label: { zh: "工具", en: "Tools" },
     items: [
-      { to: "/backtest", label: { zh: "回测", en: "Backtest" }, icon: TrendingUp },
-      { to: "/strategies", label: { zh: "策略预设", en: "Strategy Presets" }, icon: Bookmark },
       { to: "/jobs", label: { zh: "任务中心", en: "Jobs" }, icon: ListTodo },
       { to: "/settings", label: { zh: "设置", en: "Settings" }, icon: Settings },
     ],
