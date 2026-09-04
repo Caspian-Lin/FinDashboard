@@ -21,17 +21,19 @@ import json
 import re
 import shutil
 import tempfile
+from bisect import bisect_right
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from functools import cache
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
-from finboard_data.cache import CacheMetadata, ParquetCache
+from finboard_data.cache import CacheMetadata, CloseColumns, ParquetCache
 from finboard_data.quality import BarQualityChecker
 from finboard_data.research import DailySecurityMetrics, FinancialIndicator
 from finboard_data.trading_calendar import trading_days as _trading_days
@@ -46,6 +48,9 @@ from finboard_shared.types import (
     ListingStatus,
     Market,
 )
+
+if TYPE_CHECKING:
+    import numpy as np
 
 RELEASE_SCHEMA_VERSION = "v1"
 RELEASE_MANIFEST_FILENAME = "manifest.json"
@@ -1139,6 +1144,100 @@ class PointInTimePrice:
     timestamp: datetime
     close: Decimal
     available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CloseHistoryColumns:
+    """列式 PIT close 历史(issue #300):四条按 bar 顺序平行的序列。
+
+    ``available_at`` 是 ``dates`` 的确定性函数(D1 = 业务日期 + 市场收盘规则),
+    随日期单调非递减,因此 PIT 门控(``available_at <= decision_at``)是严格
+    前缀,切片由 :func:`_pit_close_history` 二分完成,与逐行过滤逐值等价。
+    ``closes`` 为 float64 直出(不经 ``Decimal`` 往返);``last_timestamp`` 为
+    末根 bar 的归一化 timestamp(D1 恒为当日 00:00 UTC,非 D1 为原始
+    timestamp),供特征观测 ``observed_at`` 使用;空序列为 ``None``。
+    """
+
+    dates: tuple[date, ...]
+    available_at: tuple[datetime, ...]
+    closes: np.ndarray
+    last_timestamp: datetime | None
+
+    def __len__(self) -> int:
+        return len(self.dates)
+
+
+@cache
+def d1_available_at(market: Market, business_date: date) -> datetime:
+    """D1 available_at 的按(市场, 业务日期)记忆化派生(#300)。
+
+    与 :func:`_timestamp_available_at` 的 D1 分支逐值等价——timestamp 归一化
+    只保留业务日期后,available_at 仅由(市场, 日期)决定,逐行重算
+    ZoneInfo 时区换算纯属重复;调用方须以归一化后的业务日期传入。
+    """
+
+    return _timestamp_available_at(
+        datetime.combine(business_date, time.min, tzinfo=UTC),
+        BarPeriod.D1,
+        market,
+    )
+
+
+def close_history_from_columns(
+    columns: CloseColumns,
+    *,
+    market: Market,
+    decision_at: datetime,
+) -> CloseHistoryColumns:
+    """``CloseColumns`` + 市场规则 → PIT 门控列式 close 历史(#300)。
+
+    provider 异步路径(:meth:`FrozenReleaseProvider.fetch_close_history`)与
+    独立进程 worker(#288 池,issue #300 同步化)共用的派生逻辑:
+    available_at 按业务日期记忆化派生,``decision_at`` 前缀切片;D1 的归一化
+    timestamp 恒为当日 00:00 UTC,末根 timestamp 由切片后末位业务日期还原
+    (等价对象路径 ``points[-1].timestamp``,不随全区间末端漂移)。
+    """
+
+    available_at = tuple(d1_available_at(market, day) for day in columns.dates)
+    return _pit_close_history(
+        columns,
+        available_at,
+        decision_at=decision_at,
+        timestamps=None,
+    )
+
+
+def _pit_close_history(
+    columns: CloseColumns,
+    available_at: tuple[datetime, ...],
+    *,
+    decision_at: datetime,
+    timestamps: tuple[datetime, ...] | None,
+) -> CloseHistoryColumns:
+    """按 ``available_at <= decision_at`` 前缀切片列式 close 历史(#300)。
+
+    available_at 随 bar 顺序单调非递减(D1 派生自业务日期,非 D1 即排序后的
+    timestamp),``bisect_right`` 与逐行过滤保留的集合逐值一致。``timestamps``
+    为逐行归一化 timestamp(非 D1 传入;D1 传 None,按切片后末位业务日期还原
+    当日 00:00 UTC)。切片后末根 timestamp 必须跟随前缀截断,否则决策时点在
+    区间中途时 ``observed_at`` 会指向未来 bar。
+    """
+
+    cut = bisect_right(available_at, decision_at)
+    if cut == 0:
+        last_timestamp: datetime | None = None
+    elif timestamps is not None:
+        last_timestamp = timestamps[cut - 1]
+    else:
+        last_timestamp = datetime.combine(
+            columns.dates[cut - 1], time.min, tzinfo=UTC
+        )
+    return CloseHistoryColumns(
+        dates=columns.dates[:cut],
+        available_at=available_at[:cut],
+        closes=columns.closes[:cut],
+        last_timestamp=last_timestamp,
+    )
 
 
 @runtime_checkable
@@ -2527,6 +2626,69 @@ class FrozenReleaseProvider:
             )
             for point in bars
         ]
+
+    async def fetch_close_history(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+        *,
+        decision_at: datetime,
+        adjust: str = "qfq",
+    ) -> CloseHistoryColumns:
+        """列式读取 PIT 门控的 close 历史(issue #300)。
+
+        D1:timestamp/close 两列直出(:meth:`ParquetCache.read_close_columns`),
+        ``available_at`` 按业务日期与市场收盘规则记忆化派生,PIT 门控为前缀
+        切片;与 :meth:`fetch_point_in_time_prices` 的对象路径逐值等价
+        (close float64 直出与 ``float(Decimal(str(f)))`` 逐值相等)。其它周期
+        回退 :meth:`fetch_point_in_time_bars` 对象路径后转列式容器,保持既有
+        PIT 语义(非 D1 的 timestamp 即 available_at,不归一化为零点)。
+        """
+
+        if decision_at.tzinfo is None:
+            raise ValueError("decision_at 必须带时区")
+        item = self._validate_fetch_request(symbol, period, start, end, adjust)
+        if period is BarPeriod.D1:
+            await self._verified_artifact(item)
+            columns = await self._cache.read_close_columns(
+                symbol,
+                period,
+                adjust,
+                start=start,
+                end=end,
+            )
+            return close_history_from_columns(
+                columns,
+                market=item.market,
+                decision_at=decision_at,
+            )
+
+        bars = await self.fetch_point_in_time_bars(
+            symbol,
+            period,
+            start,
+            end,
+            decision_at=decision_at,
+            adjust=adjust,
+        )
+        import numpy as np
+
+        columns = CloseColumns(
+            dates=tuple(bar.bar.timestamp.date() for bar in bars),
+            closes=np.array(
+                [float(bar.bar.close) for bar in bars], dtype=np.float64
+            ),
+        )
+        available_at = tuple(bar.available_at for bar in bars)
+        last_timestamp = bars[-1].bar.timestamp if bars else None
+        return CloseHistoryColumns(
+            dates=columns.dates,
+            available_at=available_at,
+            closes=columns.closes,
+            last_timestamp=last_timestamp,
+        )
 
     async def fetch_daily_metrics(
         self,

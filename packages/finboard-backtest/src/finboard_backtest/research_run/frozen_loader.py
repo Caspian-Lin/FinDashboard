@@ -655,10 +655,12 @@ def _execution_to_lot_info(instrument: ReleasedInstrument) -> AssetLotInfo:
 def _history_from_points(
     points: Sequence[PointInTimeBar],
 ) -> SymbolCloseHistory | None:
-    """把发布全区间 PIT bars 转成可切片的 close 历史(#287)。
+    """把发布全区间 PIT bars 转成可切片的 close 历史(#287,对象路径)。
 
-    ``available_at`` / bar 日期任一序列出现回退(异常数据,非递减被破坏)时
-    返回 ``None``:前缀切片不再与逐期过滤等价,调用方对该标的回退逐期读取。
+    issue #300 后矩阵预建已走列式直出(:func:`_load_close_histories`),本函数
+    保留给需要从对象序列构建历史的调用方(等值测试对照)。``available_at`` /
+    bar 日期任一序列出现回退(异常数据,非递减被破坏)时返回 ``None``:前缀
+    切片不再与逐期过滤等价,调用方对该标的回退逐期读取。
     """
     available = tuple(item.available_at for item in points)
     dates = tuple(item.bar.timestamp.date() for item in points)
@@ -681,6 +683,12 @@ async def _load_close_histories(
     与逐期 PIT 过滤读取逐值等价。其它实现(测试 stub 等)返回空映射,调用方
     全部走逐期回退读取,行为与优化前一致。逐标的读取经 ``asyncio.gather`` +
     信号量并发化;异常按候选顺序抛出,与串行语义一致。
+
+    issue #300:读取走列式直出(``fetch_close_history``,timestamp/close 两列
+    float64 直出),不再经 Bar / Decimal 逐行对象构造;列式序列按发布 bar 顺序
+    平行排列且 available_at 是业务日期的确定性函数,矩阵切片的「时间升序前缀」
+    前提由构造保证(此前依赖逐点单调性检查,异常数据回退逐期读取——列式路径
+    排序后该前提恒成立,回退不再有触发面,取值语义不变)。
     """
     from finboard_data.releases import FrozenReleaseProvider
     from finboard_shared.models import Symbol
@@ -689,9 +697,9 @@ async def _load_close_histories(
         return {}
     semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
 
-    async def _one(candidate: UniverseCandidate) -> SymbolCloseHistory | None:
+    async def _one(candidate: UniverseCandidate) -> SymbolCloseHistory:
         async with semaphore:
-            points = await provider.fetch_point_in_time_bars(
+            columns = await provider.fetch_close_history(
                 Symbol(
                     code=candidate.symbol,
                     market=_market_from_value(candidate.market),
@@ -702,7 +710,11 @@ async def _load_close_histories(
                 decision_at=_PIT_UNBOUNDED,
                 adjust=provider.release.adjustment,
             )
-        return _history_from_points(points)
+        return SymbolCloseHistory(
+            available_at=columns.available_at,
+            dates=columns.dates,
+            closes=tuple(columns.closes),
+        )
 
     results = await asyncio.gather(
         *(_one(candidate) for candidate in candidates), return_exceptions=True

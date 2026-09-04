@@ -202,12 +202,16 @@ async def _reference_series(
 
 
 def _provider_stub(provider: FrozenReleaseProvider, counter: dict[str, int]) -> None:
-    """给 provider 的两个读取入口挂调用计数。"""
+    """给 provider 的读取入口挂调用计数。
+
+    issue #300:close 矩阵构建读取入口为列式 ``fetch_close_history``
+    (原 ``fetch_point_in_time_bars``),计数键名保持 ``pit`` 不变。
+    """
 
     async def counting_pit(symbol: Symbol, period: BarPeriod, start: date, end: date, *,
                             decision_at: datetime, adjust: str = "qfq") -> object:
         counter["pit"] += 1
-        return await FrozenReleaseProvider.fetch_point_in_time_bars(
+        return await FrozenReleaseProvider.fetch_close_history(
             provider, symbol, period, start, end,
             decision_at=decision_at, adjust=adjust,
         )
@@ -219,7 +223,7 @@ def _provider_stub(provider: FrozenReleaseProvider, counter: dict[str, int]) -> 
             provider, symbol, period, start, end, adjust=adjust,
         )
 
-    provider.fetch_point_in_time_bars = counting_pit  # type: ignore[assignment]
+    provider.fetch_close_history = counting_pit  # type: ignore[assignment]
     provider.fetch_bars = counting_bars  # type: ignore[assignment]
 
 
