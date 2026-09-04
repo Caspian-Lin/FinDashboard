@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import time
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextvars import ContextVar
@@ -20,11 +21,16 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
+
+if TYPE_CHECKING:
+    import numpy as np
+    import pyarrow as pa
 
 logger = structlog.get_logger(__name__)
 
@@ -220,18 +226,86 @@ def _record_job_read(entry: str, *, elapsed_ms: float, size_bytes: int) -> None:
 #: 缓存容量须 ≥ 工作集才不抖动)。置 0 关闭缓存。
 DEFAULT_READ_CACHE_MAX_ELEMENTS = 2_000_000
 
-#: 读缓存条目种类(bars / close 点位),参与缓存键。
+#: 读缓存条目种类(bars / close 点位 / 列式 close),参与缓存键。
 _READ_CACHE_KIND_BARS = "bars"
 _READ_CACHE_KIND_CLOSE_POINTS = "close_points"
+_READ_CACHE_KIND_CLOSE_COLUMNS = "close_columns"
 
 
 @dataclass(frozen=True, slots=True)
 class _ReadCacheEntry:
-    """进程内读缓存条目:反序列化结果 + 元素计数(bars / 点位二选一)。"""
+    """进程内读缓存条目:反序列化结果 + 元素计数(bars / 点位 / 列式三选一)。"""
 
     bars: list[Bar] | None
     points: list[tuple[datetime, Decimal]] | None
     elements: int
+    columns: CloseColumns | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CloseColumns:
+    """D1 列式 close 直出(issue #300):业务日期 + float64 收盘价平行序列。
+
+    ``dates`` 升序(与 :meth:`ParquetCache.read_close_points` 同一排序口径,
+    稳定排序保留同业务日期行的文件内原序),``closes`` 由 parquet close 列
+    ``to_numpy`` 直出 float64——不经 ``Decimal`` 往返
+    (``float(Decimal(str(f))) == f`` 对全部有限 float64 逐值成立),也不逐行
+    构造对象。close 为 null 的行跳过(与既有 close_points 语义一致)。
+
+    仅支持日线:列式形态依赖 D1 timestamp 归一化后恒为当日 00:00 UTC 的
+    性质,``dates`` 与归一化 timestamp 无损互相推导。
+    """
+
+    dates: tuple[date, ...]
+    closes: np.ndarray
+
+
+def _d1_midnight_us(timestamps: pa.ChunkedArray, symbol: Symbol) -> np.ndarray:
+    """timestamp 列批量归一为「当日 00:00 UTC」的 int64 微秒数组(#300)。
+
+    与逐行 :func:`_normalise_timestamp` 的 D1 分支逐值等价(naive 视为 UTC、
+    aware 转 UTC、A 股三市 hour==16 加 8 小时、取当日零点),全部在 Arrow /
+    numpy C 层完成,消除逐行 datetime 构造税;等值性由单测锁定。
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    if timestamps.type.tz is None:
+        normalised = pc.assume_timezone(timestamps, "UTC")
+    else:
+        # cast 在 tz-aware 之间保持时刻不变(等价 astimezone(UTC))。
+        normalised = pc.cast(timestamps, pa.timestamp("us", "UTC"))
+    if symbol.code.endswith((".SH", ".SZ", ".BJ")):
+        hour16 = pc.equal(pc.hour(normalised), 16)
+        eight_hours = pa.scalar(8 * 3_600_000_000, type=pa.duration("us"))
+        normalised = pc.if_else(hour16, pc.add(normalised, eight_hours), normalised)
+    midnight = pc.floor_temporal(normalised, unit="day")
+    micros: np.ndarray = pc.cast(midnight, pa.int64()).to_numpy(zero_copy_only=False)
+    return micros
+
+
+def _empty_float64() -> np.ndarray:
+    """空 float64 数组(文件不存在时列式读取的 closes 占位)。"""
+    import numpy as np
+
+    return np.empty(0, dtype=np.float64)
+
+
+def _slice_close_columns(
+    columns: CloseColumns,
+    start: date | None,
+    end: date | None,
+) -> CloseColumns:
+    """按业务日期窗口裁剪列式 close(升序序列上的二分切片)。"""
+
+    lo = 0 if start is None else bisect_left(columns.dates, start)
+    hi = len(columns.dates) if end is None else bisect_right(columns.dates, end)
+    if lo == 0 and hi == len(columns.dates):
+        return columns
+    return CloseColumns(
+        dates=columns.dates[lo:hi],
+        closes=columns.closes[lo:hi],
+    )
 
 
 class ParquetCache:
@@ -470,6 +544,97 @@ class ParquetCache:
 
         return self.read_bars_sync(path, symbol, period)
 
+    async def read_close_columns(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        adjust: str,
+        *,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> CloseColumns:
+        """列式直出 D1 close 序列(issue #300),供 close 矩阵 / 价格特征消费。
+
+        与 :meth:`read_close_points` 同一读取与缓存语义(timestamp/close 两列、
+        进程内读缓存、区间内存裁剪),但输出为 :class:`CloseColumns`——日期与
+        float64 数组,不再逐行构造 ``Decimal`` / tuple 对象。仅支持日线。
+        """
+
+        if period is not BarPeriod.D1:
+            raise ValueError("列式 close 直出仅支持日线(period 必须为 D1)")
+        path = self._path(symbol, period, adjust)
+        if not path.exists():
+            return CloseColumns(dates=(), closes=_empty_float64())
+        stat = path.stat()
+        key = self._read_cache_key(path, stat, _READ_CACHE_KIND_CLOSE_COLUMNS)
+        started = time.monotonic()
+        entry = self._read_cache_get(key)
+        if entry is not None and entry.columns is not None:
+            columns = _slice_close_columns(entry.columns, start, end)
+            # 命中同样计入 job 级读取聚合(issue #285 语义:入口处计数,
+            # 命中耗时 ~0 如实反映缓存收益);io_stats 的磁盘 I/O 口径不计命中。
+            _record_job_read(
+                "read_close_columns",
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                size_bytes=stat.st_size,
+            )
+            logger.debug(
+                "parquet_cache.read_close_columns",
+                path=str(path),
+                bytes=stat.st_size,
+                points=len(columns.dates),
+                elapsed_ms=round((time.monotonic() - started) * 1000, 2),
+                cache_hit=True,
+            )
+            return columns
+        _initialize_pyarrow()
+        size = stat.st_size
+        async with self._io_semaphore:
+            # 未命中时一次读取整文件点位并整份进缓存(区间裁剪在内存做)。
+            full_columns = await asyncio.to_thread(
+                self._read_close_columns_sync,
+                path,
+                symbol,
+                period,
+                None,
+                None,
+            )
+        self._read_cache_put(
+            key,
+            _ReadCacheEntry(
+                bars=None,
+                points=None,
+                columns=full_columns,
+                elements=len(full_columns.dates),
+            ),
+        )
+        columns = _slice_close_columns(full_columns, start, end)
+        self._read_ops += 1
+        self._read_bytes += size
+        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+        _record_job_read("read_close_columns", elapsed_ms=elapsed_ms, size_bytes=size)
+        logger.debug(
+            "parquet_cache.read_close_columns",
+            path=str(path),
+            bytes=size,
+            points=len(columns.dates),
+            elapsed_ms=elapsed_ms,
+            cache_hit=False,
+        )
+        return columns
+
+    @staticmethod
+    def _read_close_columns_sync(
+        path: Path,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date | None,
+        end: date | None,
+    ) -> CloseColumns:
+        """兼容旧的线程读取入口。"""
+
+        return ParquetCache.read_close_columns_sync(path, symbol, period, start, end)
+
     @staticmethod
     def read_bars_sync(path: Path, symbol: Symbol, period: BarPeriod) -> list[Bar]:
         """同步读取完整 Bar,供线程/进程 worker 复用。"""
@@ -560,6 +725,45 @@ class ParquetCache:
             points.append((timestamp, Decimal(str(close))))
         points.sort(key=lambda item: item[0])
         return points
+
+    @staticmethod
+    def read_close_columns_sync(
+        path: Path,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date | None,
+        end: date | None,
+    ) -> CloseColumns:
+        """同步列式读取 D1 close 序列(#300),供独立进程 worker 复用。
+
+        与 :meth:`read_close_points_sync` 逐值等价:同一 null-close 跳过语义、
+        同一稳定排序口径(按归一化 timestamp,同值保留文件内原序),close 以
+        float64 直出不经 ``Decimal`` 往返。请求区间裁剪按 ``dates`` 二分定位
+        (升序序列上的窗口切片与逐行日期过滤等价)。
+        """
+
+        import numpy as np
+        import pyarrow.parquet as pq
+
+        if period is not BarPeriod.D1:
+            raise ValueError("列式 close 直出仅支持日线(period 必须为 D1)")
+        table = pq.read_table(
+            path,
+            columns=["timestamp", "close"],
+            use_threads=False,
+            pre_buffer=False,
+        )
+        import pyarrow.compute as pc
+
+        table = table.filter(pc.is_valid(table.column("close")))
+        midnight_us = _d1_midnight_us(table.column("timestamp"), symbol)
+        close_arr = table.column("close").to_numpy(zero_copy_only=False)
+        # 与 read_close_points_sync / read_bars_sync 同一稳定排序口径。
+        order = np.argsort(midnight_us, kind="stable")
+        day_numbers = midnight_us[order] // 86_400_000_000
+        dates_np = day_numbers.astype("datetime64[D]")
+        columns = CloseColumns(dates=tuple(dates_np.tolist()), closes=close_arr[order])
+        return _slice_close_columns(columns, start, end)
 
     async def write(
         self,

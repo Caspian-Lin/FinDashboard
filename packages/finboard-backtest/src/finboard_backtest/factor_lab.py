@@ -38,8 +38,8 @@ from finboard_data.factor_lab import (
 )
 from finboard_data.factors import FactorInputBatch
 from finboard_data.releases import (
+    CloseHistoryColumns,
     FrozenReleaseProvider,
-    PointInTimePrice,
     ReleaseCapabilityError,
     ReleaseDatasetKind,
     ReleasedInstrument,
@@ -48,6 +48,7 @@ from finboard_data.releases import (
     _safe_release_artifact,
     _sha256_file,
     _timestamp_available_at,
+    close_history_from_columns,
     load_dataset_release,
 )
 from finboard_data.research import DailySecurityMetrics, FinancialIndicator
@@ -763,7 +764,7 @@ async def build_cross_section_feature_snapshot_from_releases(
                 )
             except ReleaseCapabilityError:
                 _tolerate_missing("financial_indicators")
-        points = await bars_provider.fetch_point_in_time_prices(
+        columns = await bars_provider.fetch_close_history(
             symbol,
             release.period,
             release.start_date,
@@ -778,10 +779,12 @@ async def build_cross_section_feature_snapshot_from_releases(
             financial=financial,
             industry=None,
         )
-        closes = [float(item.close) for item in points]
+        # issue #300:列式直出的 close 序列,to_list() 与旧逐行
+        # [float(item.close)...] 逐值相等。
+        closes = columns.closes.tolist()
         if len(closes) >= 2:
             price_history[instrument.code] = closes
-            price_available_at[instrument.code] = points[-1].available_at
+            price_available_at[instrument.code] = columns.available_at[-1]
         done_count += 1
         if on_progress is not None:
             on_progress(instrument.code, done_count, total)
@@ -1039,25 +1042,33 @@ def _build_price_observations(
     symbol: str,
     market: Market,
     asset_class: AssetClass,
-    points: list[PointInTimePrice],
+    columns: CloseHistoryColumns,
     momentum_lookback: int,
     volatility_windows: tuple[int, ...],
 ) -> list[FeatureObservation]:
-    """把单个标的的 PIT 收盘价转换为价格特征观测。"""
+    """把单个标的的列式 PIT close(#300)转换为价格特征观测。
 
-    if not points:
+    与对象路径逐值等价:``closes`` float64 直出与
+    ``np.asarray([float(item.close) for item in points])`` 逐值相等,
+    ``last_timestamp`` / ``last available_at`` 即旧路径 ``points[-1]`` 的
+    timestamp / available_at,特征数学段不变。
+    """
+
+    closes = columns.closes
+    if closes.size == 0:
         return []
-    closes = np.asarray([float(item.close) for item in points], dtype=np.float64)
     returns = np.diff(closes) / closes[:-1]
-    last = points[-1]
+    last_timestamp = columns.last_timestamp
+    last_available_at = columns.available_at[-1]
+    assert last_timestamp is not None
 
     def _observation(feature_name: str, value: float) -> FeatureObservation:
         return FeatureObservation(
             symbol=symbol,
             feature_name=feature_name,
             value=value,
-            observed_at=last.timestamp,
-            available_at=last.available_at,
+            observed_at=last_timestamp,
+            available_at=last_available_at,
             source=source,
             source_version=source_version,
             market=market.value,
@@ -1156,49 +1167,45 @@ def _compute_price_feature_process_task(
 
     symbol = Symbol(task.code, item.market)
     if context.period is BarPeriod.D1:
-        raw_points = ParquetCache.read_close_points_sync(
-            artifact,
-            symbol,
-            context.period,
-            task.start,
-            task.end,
+        columns = close_history_from_columns(
+            ParquetCache.read_close_columns_sync(
+                artifact,
+                symbol,
+                context.period,
+                task.start,
+                task.end,
+            ),
+            market=item.market,
+            decision_at=task.decision_at,
         )
-        points = [
-            PointInTimePrice(
-                timestamp=timestamp,
-                close=close,
-                available_at=_timestamp_available_at(
-                    timestamp,
-                    context.period,
-                    item.market,
-                ),
-            )
-            for timestamp, close in raw_points
-        ]
     else:
         bars = ParquetCache.read_bars_sync(artifact, symbol, context.period)
-        points = [
-            PointInTimePrice(
-                timestamp=bar.timestamp,
-                close=bar.close,
-                available_at=_timestamp_available_at(
-                    bar.timestamp,
-                    context.period,
-                    item.market,
-                ),
-            )
+        visible = [
+            bar
             for bar in bars
             if task.start <= bar.timestamp.date() <= task.end
+            and _timestamp_available_at(bar.timestamp, context.period, item.market)
+            <= task.decision_at
         ]
+        columns = CloseHistoryColumns(
+            dates=tuple(bar.timestamp.date() for bar in visible),
+            available_at=tuple(
+                _timestamp_available_at(bar.timestamp, context.period, item.market)
+                for bar in visible
+            ),
+            closes=np.array(
+                [float(bar.close) for bar in visible], dtype=np.float64
+            ),
+            last_timestamp=visible[-1].timestamp if visible else None,
+        )
 
-    points = [point for point in points if point.available_at <= task.decision_at]
     observations = _build_price_observations(
         source=context.source,
         source_version=context.source_version,
         symbol=item.code,
         market=item.market,
         asset_class=item.asset_class,
-        points=points,
+        columns=columns,
         momentum_lookback=task.momentum_lookback,
         volatility_windows=task.volatility_windows,
     )
@@ -1581,7 +1588,7 @@ async def build_price_feature_snapshot(
                 instrument = queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
-            points = await provider.fetch_point_in_time_prices(
+            columns = await provider.fetch_close_history(
                 Symbol(instrument.code, instrument.market),
                 release.period,
                 release.start_date,
@@ -1592,6 +1599,7 @@ async def build_price_feature_snapshot(
             # 特征计算(momentum / 波动率滚动窗口)是逐标的纯 CPU 段,经
             # to_thread 卸载(issue #286):全市场重算时不再阻塞事件循环;
             # IO(Parquet 解码)已由 provider 内部的 to_thread 承担。
+            # issue #300:输入为列式 close(future 直出),不再逐行建对象。
             observations_by_symbol[instrument.code] = await asyncio.to_thread(
                 _build_price_observations,
                 source=release.source,
@@ -1599,7 +1607,7 @@ async def build_price_feature_snapshot(
                 symbol=instrument.code,
                 market=instrument.market,
                 asset_class=instrument.asset_class,
-                points=points,
+                columns=columns,
                 momentum_lookback=momentum_lookback,
                 volatility_windows=volatility_windows,
             )
