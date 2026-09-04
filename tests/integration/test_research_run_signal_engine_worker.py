@@ -20,6 +20,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
+import numpy as np
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -53,7 +54,7 @@ from finboard_backtest.strategy_spec.contracts import (
     SignalRules,
 )
 from finboard_data.factor_lab import FeatureObservation
-from finboard_data.releases import ReleaseDatasetKind
+from finboard_data.releases import CloseHistoryColumns, ReleaseDatasetKind
 from finboard_persistence import (
     BackgroundJobRepository,
     ResearchRunRepository,
@@ -214,6 +215,39 @@ class _StubProvider:
             for day, close in sorted(by_date.items())
             if day <= end and datetime.combine(day, datetime.min.time(), tzinfo=UTC) <= decision_at
         ]
+
+    async def fetch_close_history(
+        self,
+        symbol: object,
+        period: object,
+        start: date,
+        end: date,
+        *,
+        decision_at: datetime,
+        adjust: str = "qfq",
+    ) -> CloseHistoryColumns:
+        """列式 PIT close(issue #300);可见性与 fetch_point_in_time_prices 一致。"""
+        del period, start, adjust
+        by_date = self.closes_by_symbol.get(symbol.code)  # type: ignore[attr-defined]
+        visible = [
+            (day, close)
+            for day, close in sorted((by_date or {}).items())
+            if day <= end
+            and datetime.combine(day, datetime.min.time(), tzinfo=UTC) <= decision_at
+        ]
+        return CloseHistoryColumns(
+            dates=tuple(day for day, _ in visible),
+            available_at=tuple(
+                datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+                for day, _ in visible
+            ),
+            closes=np.array([float(close) for _, close in visible], dtype=np.float64),
+            last_timestamp=(
+                datetime.combine(visible[-1][0], datetime.min.time(), tzinfo=UTC)
+                if visible
+                else None
+            ),
+        )
 
     async def fetch_bars(
         self,
