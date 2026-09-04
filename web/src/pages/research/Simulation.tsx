@@ -1,4 +1,5 @@
 import { WorkflowHelpPopover, WORKFLOW_NEXT } from "@/components/research/ResearchHint";
+import { MasterList, MasterListItem } from "@/components/ui/master-list";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useT } from "@/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -1754,93 +1755,83 @@ export default function Simulation() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base">{tl({ zh: "会话列表", en: "Sessions" })}</CardTitle>
-                {selectedAccountId && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => invalidateSessions()}
-                    disabled={sessionsQuery.isFetching}
-                  >
-                    <RefreshCw
-                      className={cn(
-                        "h-3.5 w-3.5",
-                        sessionsQuery.isFetching && "animate-spin",
-                      )}
-                    />
-                  </Button>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {!selectedAccountId ? (
-                <EmptyState
-                  icon={<FlaskConical className="h-8 w-8" />}
-                  title={tl({ zh: "请先选择账户", en: "Select an account first" })}
-                  description={tl({ zh: "选择模拟账户后将展示该账户下的全部模拟会话。", en: "Once a simulation account is selected, all simulation sessions under it are shown." })}
-                />
-              ) : sessionsQuery.isLoading ? (
-                <LoadingState rows={4} />
-              ) : sessionsQuery.isError ? (
-                <ErrorState
-                  message={errorMessage(sessionsQuery.error, tl({ zh: "无法加载会话", en: "Failed to load sessions" }))}
-                  onRetry={() => sessionsQuery.refetch()}
-                />
-              ) : sessions.length > 0 ? (
-                <ScrollArea className="max-h-[520px] pr-3">
-                  <div className="space-y-2">
-                    {sessions.map((s) => (
-                      <button
-                        key={s.session_id}
-                        type="button"
-                        onClick={() => setSelectedSessionId(s.session_id)}
-                        className={cn(
-                          "w-full rounded-md border border-border p-3 text-left transition-colors hover:bg-accent",
-                          selectedSessionId === s.session_id &&
-                            "border-primary bg-accent ring-1 ring-primary/40",
-                        )}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <StatusBadge status={s.status} />
-                          <Badge variant="info" className="font-mono">
-                            {s.source_mode}
-                          </Badge>
-                        </div>
-                        <p className="mt-2 truncate font-mono text-xs text-foreground">
-                          {s.session_id}
-                        </p>
-                        <div className="mt-1.5 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                          <span className="truncate font-mono">
-                            {s.strategy_id}
-                          </span>
-                          <span>{timeAgo(s.created_at, lang)}</span>
-                        </div>
-                      </button>
-                    ))}
+          <MasterList
+            title={tl({ zh: "会话列表", en: "Sessions" })}
+            count={selectedAccountId && sessionsQuery.isSuccess ? sessions.length : undefined}
+            actions={
+              selectedAccountId && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => invalidateSessions()}
+                  disabled={sessionsQuery.isFetching}
+                >
+                  <RefreshCw
+                    className={cn(
+                      "h-3.5 w-3.5",
+                      sessionsQuery.isFetching && "animate-spin",
+                    )}
+                  />
+                </Button>
+              )
+            }
+          >
+            {!selectedAccountId ? (
+              <EmptyState
+                icon={<FlaskConical className="h-8 w-8" />}
+                title={tl({ zh: "请先选择账户", en: "Select an account first" })}
+                description={tl({ zh: "选择模拟账户后将展示该账户下的全部模拟会话。", en: "Once a simulation account is selected, all simulation sessions under it are shown." })}
+              />
+            ) : sessionsQuery.isLoading ? (
+              <LoadingState rows={4} />
+            ) : sessionsQuery.isError ? (
+              <ErrorState
+                message={errorMessage(sessionsQuery.error, tl({ zh: "无法加载会话", en: "Failed to load sessions" }))}
+                onRetry={() => sessionsQuery.refetch()}
+              />
+            ) : sessions.length > 0 ? (
+              sessions.map((s) => (
+                <MasterListItem
+                  key={s.session_id}
+                  selected={selectedSessionId === s.session_id}
+                  onClick={() => setSelectedSessionId(s.session_id)}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <StatusBadge status={s.status} />
+                    <Badge variant="info" className="font-mono">
+                      {s.source_mode}
+                    </Badge>
                   </div>
-                </ScrollArea>
-              ) : (
-                <EmptyState
-                  icon={<FlaskConical className="h-8 w-8" />}
-                  title={tl({ zh: "暂无会话", en: "No sessions" })}
-                  description={tl({ zh: "该账户下还没有模拟会话，可点击下方按钮创建。", en: "No simulation sessions under this account yet; create one with the button below." })}
-                />
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full"
-                onClick={() => setSessionDialogOpen(true)}
-                disabled={accounts.length === 0}
-              >
-                <Plus className="h-4 w-4" />
-                {tl({ zh: "新建会话", en: "New session" })}
-              </Button>
-            </CardContent>
-          </Card>
+                  <p className="mt-2 min-w-0 truncate font-mono text-xs text-foreground">
+                    {s.session_id}
+                  </p>
+                  <div className="mt-1.5 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span className="min-w-0 truncate font-mono">
+                      {s.strategy_id}
+                    </span>
+                    <span>{timeAgo(s.created_at, lang)}</span>
+                  </div>
+                </MasterListItem>
+              ))
+            ) : (
+              <EmptyState
+                icon={<FlaskConical className="h-8 w-8" />}
+                title={tl({ zh: "暂无会话", en: "No sessions" })}
+                description={tl({ zh: "该账户下还没有模拟会话，可点击下方按钮创建。", en: "No simulation sessions under this account yet; create one with the button below." })}
+              />
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={() => setSessionDialogOpen(true)}
+              disabled={accounts.length === 0}
+            >
+              <Plus className="h-4 w-4" />
+              {tl({ zh: "新建会话", en: "New session" })}
+            </Button>
+          </MasterList>
         </div>
 
         <div className="lg:col-span-3">

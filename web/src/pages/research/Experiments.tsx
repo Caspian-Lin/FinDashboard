@@ -43,6 +43,7 @@ import {
   LoadingState,
 } from "@/components/ui/states";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { MasterList, MasterListItem } from "@/components/ui/master-list";
 import { Separator } from "@/components/ui/separator";
 import {
   HintLabel,
@@ -916,36 +917,20 @@ export default function Experiments() {
       </Alert>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-1">
-          <CardHeader className="pb-3">
-            <div className="flex items-center justify-between gap-2">
-              <CardTitle className="text-base">
-                <HintLabel hint={RESEARCH_HINTS.experiments.validation}>
-                  {tl({ zh: "实验列表", en: "Experiment list" })}
-                </HintLabel>
-              </CardTitle>
-              <Button size="sm" onClick={() => setCreateOpen(true)}>
-                <Plus className="h-4 w-4" />
-                {tl({ zh: "创建验证实验", en: "Create validation experiment" })}
-              </Button>
-            </div>
-            <div className="mt-2 flex items-center gap-2">
-              <Select value={statusFilter} onValueChange={setStatusFilter}>
-                <SelectTrigger className="h-8 w-full text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {STATUS_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {tl(opt.label)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+        <MasterList
+          className="lg:col-span-1"
+          title={
+            <HintLabel hint={RESEARCH_HINTS.experiments.validation}>
+              {tl({ zh: "实验列表", en: "Experiment list" })}
+            </HintLabel>
+          }
+          count={listQuery.isSuccess ? listQuery.data?.length : undefined}
+          actions={
+            <>
               <Button
                 variant="outline"
                 size="icon"
-                className="h-8 w-8 shrink-0"
+                className="h-8 w-8"
                 onClick={() => listQuery.refetch()}
                 disabled={listQuery.isFetching}
               >
@@ -956,84 +941,84 @@ export default function Experiments() {
                   )}
                 />
               </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {listQuery.data
-                ? tl({
-                    zh: `共 ${listQuery.data.length} 个实验`,
-                    en: `${listQuery.data.length} experiments`,
-                  })
-                : tl({ zh: "加载中…", en: "Loading…" })}
-            </p>
-          </CardHeader>
-          <CardContent>
-            {listQuery.isLoading ? (
-              <LoadingState rows={5} />
-            ) : listQuery.isError ? (
-              <ErrorState
-                message={errorMessage(
-                  listQuery.error,
-                  tl({ zh: "无法加载实验列表", en: "Failed to load experiment list" }),
-                )}
-                onRetry={() => listQuery.refetch()}
-              />
-            ) : listQuery.data && listQuery.data.length > 0 ? (
-              <ScrollArea className="h-[600px] pr-3">
-                <div className="space-y-2">
-                  {listQuery.data.map((exp: ValidationExperiment) => (
-                    <button
-                      key={exp.experiment_id}
-                      type="button"
-                      onClick={() => setSelectedId(exp.experiment_id)}
-                      className={cn(
-                        "w-full rounded-md border border-border p-3 text-left transition-colors hover:bg-accent",
-                        selectedId === exp.experiment_id &&
-                          "border-primary bg-accent ring-1 ring-primary/40",
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <StatusBadge status={exp.status}>
-                          {experimentStatusLabel(exp.status, lang)}
-                        </StatusBadge>
-                        <span className="font-mono text-xs text-muted-foreground">
-                          {exp.experiment_id}
-                        </span>
-                      </div>
-                      <p className="mt-2 line-clamp-2 text-sm text-foreground">
-                        {exp.hypothesis}
-                      </p>
-                      <div className="mt-1.5 flex items-center justify-between">
-                        <span className="text-xs text-muted-foreground">
-                          {timeAgo(exp.created_at, lang)}
-                        </span>
-                        {exp.version_stamp && (
-                          <Badge variant="outline" className="font-mono text-[10px]">
-                            {versionStampText(exp.version_stamp, lang)}
-                          </Badge>
-                        )}
-                      </div>
-                    </button>
-                  ))}
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="h-4 w-4" />
+                {tl({ zh: "创建验证实验", en: "Create validation experiment" })}
+              </Button>
+            </>
+          }
+          toolbar={
+            <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <SelectTrigger className="h-8 w-full text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {STATUS_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {tl(opt.label)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          }
+        >
+          {listQuery.isLoading ? (
+            <LoadingState rows={5} />
+          ) : listQuery.isError ? (
+            <ErrorState
+              message={errorMessage(
+                listQuery.error,
+                tl({ zh: "无法加载实验列表", en: "Failed to load experiment list" }),
+              )}
+              onRetry={() => listQuery.refetch()}
+            />
+          ) : listQuery.data && listQuery.data.length > 0 ? (
+            listQuery.data.map((exp: ValidationExperiment) => (
+              <MasterListItem
+                key={exp.experiment_id}
+                selected={selectedId === exp.experiment_id}
+                onClick={() => setSelectedId(exp.experiment_id)}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <StatusBadge status={exp.status}>
+                    {experimentStatusLabel(exp.status, lang)}
+                  </StatusBadge>
+                  <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+                    {exp.experiment_id}
+                  </span>
                 </div>
-              </ScrollArea>
-            ) : (
-              <EmptyState
-                icon={<FlaskConical className="h-8 w-8" />}
-                title={tl({ zh: "暂无实验", en: "No experiments yet" })}
-                description={tl({
-                  zh: "点击右上角「创建验证实验」开始检验你的策略假设。",
-                  en: 'Click “Create validation experiment” in the top right to start testing your strategy hypothesis.',
-                })}
-                action={
-                  <Button size="sm" onClick={() => setCreateOpen(true)}>
-                    <Plus className="h-4 w-4" />
-                    {tl({ zh: "创建验证实验", en: "Create validation experiment" })}
-                  </Button>
-                }
-              />
-            )}
-          </CardContent>
-        </Card>
+                <p className="mt-2 line-clamp-2 text-sm text-foreground">
+                  {exp.hypothesis}
+                </p>
+                <div className="mt-1.5 flex items-start justify-between gap-2">
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {timeAgo(exp.created_at, lang)}
+                  </span>
+                  {exp.version_stamp && (
+                    <span className="min-w-0 break-all text-right text-[10px] text-muted-foreground">
+                      {versionStampText(exp.version_stamp, lang)}
+                    </span>
+                  )}
+                </div>
+              </MasterListItem>
+            ))
+          ) : (
+            <EmptyState
+              icon={<FlaskConical className="h-8 w-8" />}
+              title={tl({ zh: "暂无实验", en: "No experiments yet" })}
+              description={tl({
+                zh: "点击右上角「创建验证实验」开始检验你的策略假设。",
+                en: 'Click “Create validation experiment” in the top right to start testing your strategy hypothesis.',
+              })}
+              action={
+                <Button size="sm" onClick={() => setCreateOpen(true)}>
+                  <Plus className="h-4 w-4" />
+                  {tl({ zh: "创建验证实验", en: "Create validation experiment" })}
+                </Button>
+              }
+            />
+          )}
+        </MasterList>
 
         <div className="lg:col-span-2">
           {selectedId ? (
@@ -1096,7 +1081,7 @@ export default function Experiments() {
                     onRetry={() => detailQuery.refetch()}
                   />
                 ) : detail ? (
-                  <ScrollArea className="h-[560px] pr-3">
+                  <ScrollArea className="max-h-[560px] pr-3">
                     <div className="space-y-5">
                       <div>
                         <p className="text-xs font-medium text-muted-foreground">

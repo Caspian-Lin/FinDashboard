@@ -36,7 +36,6 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Accordion,
   AccordionContent,
@@ -45,6 +44,7 @@ import {
 } from "@/components/ui/accordion";
 import { Link } from "react-router-dom";
 import { strategySpecApi, datasetApi, factorLabApi } from "@/lib/research";
+import { MasterList, MasterListItem } from "@/components/ui/master-list";
 import type {
   DatasetReleaseSummary,
   FactorCatalogEntry,
@@ -462,87 +462,68 @@ export default function StrategyStudio() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
         {/* Left: Strategy list */}
-        <div className="lg:col-span-1">
-          <Card>
-            <CardHeader>
+        <div className="space-y-4 lg:col-span-1">
+          <MasterList
+            title={
               <HintLabel hint={RESEARCH_HINTS.strategy.studio} className="text-sm font-semibold">
                 {tl({ zh: "策略类型", en: "Strategy Type" })}
               </HintLabel>
-            </CardHeader>
-            <CardContent className="p-2">
-              {registryLoading ? (
-                <div className="space-y-2 p-2">
-                  <Skeleton className="h-10 w-full" />
-                  <Skeleton className="h-10 w-full" />
-                </div>
-              ) : (
-                <ScrollArea className="max-h-[400px]">
-                  <div className="space-y-1">
-                    {registry?.strategies.map((s) => {
-                      const kind = s.kind as string;
-                      const name = (s.name ?? kind) as string;
-                      const desc = (s.description ?? "") as string;
-                      return (
-                        <button
-                          key={kind}
-                          onClick={() => {
-                            setSelectedKind(kind);
-                            setTemplateError(null);
-                            setShowSetup(true);
-                          }}
-                          className={cn(
-                            "w-full rounded-md px-3 py-2.5 text-left transition-colors",
-                            selectedKind === kind && !showSetup
-                              ? "bg-primary/10 text-primary"
-                              : "hover:bg-accent text-muted-foreground",
-                          )}
-                        >
-                          <div className="font-medium text-sm">{name}</div>
-                          <div className="text-xs text-muted-foreground/60">{kind}</div>
-                          <div className="mt-1 line-clamp-2 text-xs text-muted-foreground/50">{desc}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </ScrollArea>
-              )}
-            </CardContent>
-          </Card>
+            }
+          >
+            {registryLoading ? (
+              <div className="space-y-2 p-2">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+              </div>
+            ) : (
+              registry?.strategies.map((s) => {
+                const kind = s.kind as string;
+                const name = (s.name ?? kind) as string;
+                const desc = (s.description ?? "") as string;
+                return (
+                  <MasterListItem
+                    key={kind}
+                    selected={selectedKind === kind && !showSetup}
+                    onClick={() => {
+                      setSelectedKind(kind);
+                      setTemplateError(null);
+                      setShowSetup(true);
+                    }}
+                  >
+                    <div className="text-sm font-medium">{name}</div>
+                    <div className="min-w-0 truncate text-xs text-muted-foreground/60">{kind}</div>
+                    <div className="mt-1 line-clamp-2 text-xs text-muted-foreground/50">{desc}</div>
+                  </MasterListItem>
+                );
+              })
+            )}
+          </MasterList>
 
           {strategies && strategies.length > 0 && (
-            <Card className="mt-3">
-              <CardHeader>
-                <CardTitle className="text-sm">{tl({ zh: "已保存策略", en: "Saved Strategies" })}</CardTitle>
-              </CardHeader>
-              <CardContent className="p-2">
-                <ScrollArea className="max-h-[200px]">
-                  <div className="space-y-1">
-                    {strategies.map((s) => (
-                      <button
-                        key={`${s.strategy_id}@${s.version}`}
-                        onClick={() => {
-                          setSelectedKind(s.strategy_id);
-                          setSpec(s.spec);
-                          setShowSetup(false);
-                        }}
-                        className={cn(
-                          "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors",
-                          selectedKind === s.strategy_id && !showSetup
-                            ? "bg-primary/10 text-primary"
-                            : "hover:bg-accent text-muted-foreground",
-                        )}
-                      >
-                        <span className="font-medium">{s.strategy_id}</span>
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs text-muted-foreground/60">v{s.version}</span>
-                          {s.published && <Lock className="h-3 w-3 text-success" />}
-                        </div>
-                      </button>
-                    ))}
+            <MasterList
+              title={tl({ zh: "已保存策略", en: "Saved Strategies" })}
+              count={strategies.length}
+            >
+              {strategies.map((s) => (
+                <MasterListItem
+                  key={`${s.strategy_id}@${s.version}`}
+                  selected={selectedKind === s.strategy_id && !showSetup}
+                  onClick={() => {
+                    setSelectedKind(s.strategy_id);
+                    setSpec(s.spec);
+                    setShowSetup(false);
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="min-w-0 truncate text-sm font-medium">{s.strategy_id}</span>
+                    <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground/60">
+                      v{s.version}
+                      {s.published && <Lock className="h-3 w-3 text-success" />}
+                    </span>
                   </div>
-                </ScrollArea>
-              </CardContent>
-            </Card>
+                </MasterListItem>
+              ))}
+            </MasterList>
           )}
         </div>
 

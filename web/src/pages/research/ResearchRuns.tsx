@@ -13,6 +13,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
+import { MasterList, MasterListItem } from "@/components/ui/master-list";
 import {
   Card,
   CardContent,
@@ -767,65 +768,55 @@ export default function ResearchRuns() {
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-1">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">{tl({ zh: "运行列表", en: "Run list" })}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {listQuery.isLoading ? (
-              <LoadingState rows={5} />
-            ) : listQuery.isError ? (
-              <ErrorState
-                message={errorMessage(listQuery.error, tl({ zh: "无法加载运行列表", en: "Failed to load run list" }))}
-                onRetry={() => listQuery.refetch()}
-              />
-            ) : filteredRuns.length > 0 ? (
-              <ScrollArea className="max-h-[700px] pr-3">
-                <div className="space-y-2">
-                  {filteredRuns.map((run: ResearchRunSummary) => (
-                    <button
-                      key={run.run_id}
-                      type="button"
-                      onClick={() => setSelectedId(run.run_id)}
-                      className={cn(
-                        "w-full rounded-md border border-border p-3 text-left transition-colors hover:bg-accent",
-                        selectedId === run.run_id &&
-                          "border-primary bg-accent ring-1 ring-primary/40",
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <StatusBadge status={run.status} />
-                        <span className="font-mono text-xs text-muted-foreground">
-                          {run.run_id}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex items-center justify-between gap-2">
-                        <span className="truncate font-mono text-xs text-foreground">
-                          {run.strategy_id}
-                        </span>
-                        <Badge variant="secondary" className="font-mono">
-                          {tl(strategyVersionLabel(run))}
-                        </Badge>
-                      </div>
-                      <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                        <span className="tabular-nums">
-                          ¥{formatCurrency(initialCapital(run), 0)}
-                        </span>
-                        <span>{timeAgo(run.created_at, lang)}</span>
-                      </div>
-                    </button>
-                  ))}
+        <MasterList
+          className="lg:col-span-1"
+          title={tl({ zh: "运行列表", en: "Run list" })}
+          count={listQuery.isSuccess ? filteredRuns.length : undefined}
+        >
+          {listQuery.isLoading ? (
+            <LoadingState rows={5} />
+          ) : listQuery.isError ? (
+            <ErrorState
+              message={errorMessage(listQuery.error, tl({ zh: "无法加载运行列表", en: "Failed to load run list" }))}
+              onRetry={() => listQuery.refetch()}
+            />
+          ) : filteredRuns.length > 0 ? (
+            filteredRuns.map((run: ResearchRunSummary) => (
+              <MasterListItem
+                key={run.run_id}
+                selected={selectedId === run.run_id}
+                onClick={() => setSelectedId(run.run_id)}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <StatusBadge status={run.status} />
+                  <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+                    {run.run_id}
+                  </span>
                 </div>
-              </ScrollArea>
-            ) : (
-              <EmptyState
-                icon={<Activity className="h-8 w-8" />}
-                title={tl({ zh: "暂无运行", en: "No runs yet" })}
-                description={tl({ zh: "当前筛选条件下没有研究运行，可切换状态筛选或刷新列表。", en: "No research runs under the current filter. Switch the status filter or refresh the list." })}
-              />
-            )}
-          </CardContent>
-        </Card>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate font-mono text-xs text-foreground">
+                    {run.strategy_id}
+                  </span>
+                  <Badge variant="secondary" className="font-mono">
+                    {tl(strategyVersionLabel(run))}
+                  </Badge>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span className="tabular-nums">
+                    ¥{formatCurrency(initialCapital(run), 0)}
+                  </span>
+                  <span>{timeAgo(run.created_at, lang)}</span>
+                </div>
+              </MasterListItem>
+            ))
+          ) : (
+            <EmptyState
+              icon={<Activity className="h-8 w-8" />}
+              title={tl({ zh: "暂无运行", en: "No runs yet" })}
+              description={tl({ zh: "当前筛选条件下没有研究运行，可切换状态筛选或刷新列表。", en: "No research runs under the current filter. Switch the status filter or refresh the list." })}
+            />
+          )}
+        </MasterList>
 
         <div className="lg:col-span-2">
           {selectedId ? (
