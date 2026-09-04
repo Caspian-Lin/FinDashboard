@@ -112,7 +112,8 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
     但互不校验**,别拿数据集 git hash 顶替
   - `initial_capital`*: 100000-500000 数字
   - `requested_by`*: 归属人(如 `user:xxx` / `agent:mcp`)
-  - `actor_type`: `"human"`(固定;LLM 不能触发运行)
+  - `actor_type`: `"agent"`(MCP 通道固定,#312 与 `requested_by` 对齐;
+    llm 不能触发运行)
   (`parameters.rebalance_frequency ∈ {monthly, quarterly}` 时 multi_period)
 - 返回:精简回执(#206)`{run_id, job_id, strategy_id, strategy_kind, status,
   checksum(manifest_checksum), execution_mode, created_at, view: "ack"}`;
@@ -145,6 +146,7 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
 
 ### finboard_run_replay(✅ #127,写;#305 放开 interrupted)
 复制 completed 或 interrupted ResearchRun 为新 queued 运行(**不执行**)。
+新 run `actor_type="agent"`(MCP 通道固定,#312)。
 - 参数:`run_id: str`、`idempotency_key: str`、`requested_by: str`
 - 返回:新 ResearchRun 详情(`replay_of_run_id` + manifest `replay_source_status`
   标注血缘;REST 等价入口 `POST /api/research/runs/{run_id}/replay`)

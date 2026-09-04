@@ -117,6 +117,10 @@ class ResearchActorType(StrEnum):
     HUMAN = "human"
     SYSTEM = "system"
     LLM = "llm"
+    # issue #312:外置研究 agent 经 MCP 自主执行研究写操作(#122 放开),
+    # MCP 通道创建的 run/replay 归属 actor_type=agent,与 requested_by=agent:mcp
+    # 对齐;llm 仍被 fail-closed 拒绝(红线不变),REST 默认 human 不变。
+    AGENT = "agent"
 
 
 class ResearchOrderStatus(StrEnum):
@@ -210,6 +214,7 @@ class ResearchRunManifest:
             raise ValueError("必须冻结 code_version")
         if not self.requested_by:
             raise ValueError("requested_by 不能为空")
+        # 红线不变(issue #312):仅 llm 拒绝;agent(#122 MCP 自主执行)放行。
         if self.actor_type is ResearchActorType.LLM:
             raise ValueError("LLM 不能触发研究运行")
         if self.replay_source_status is not None:

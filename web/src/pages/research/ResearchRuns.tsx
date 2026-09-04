@@ -116,6 +116,13 @@ function initialCapital(run: ResearchRunSummary): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+// issue #312:发起方类型(actor_type)随 manifest 返回;human/agent 之外的历史
+// 值原样透传展示,llm 不会出现在合法记录中(契约层 fail-closed)。
+function actorType(run: ResearchRunSummary): string {
+  const value = run.manifest?.actor_type;
+  return typeof value === "string" && value !== "" ? value : "human";
+}
+
 function specReleaseIds(strategy: ResearchStrategySpec | undefined): string[] {
   const plan = manifestRecord(strategy?.spec, "validation_plan");
   const ids = plan?.dataset_release_ids;
@@ -700,6 +707,11 @@ export default function ResearchRuns() {
                         <InfoItem label={tl({ zh: "发起人", en: "Requested by" })}>
                           <span className="font-mono text-xs">
                             {detail.requested_by}
+                          </span>
+                        </InfoItem>
+                        <InfoItem label={tl({ zh: "发起方类型", en: "Actor type" })}>
+                          <span className="font-mono text-xs">
+                            {actorType(detail)}
                           </span>
                         </InfoItem>
                         <InfoItem label={tl({ zh: "初始资金", en: "Initial capital" })}>

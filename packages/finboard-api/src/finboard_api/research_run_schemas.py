@@ -27,7 +27,9 @@ class ResearchRunQueueIn(BaseModel):
     code_version: str = Field(min_length=7, max_length=64)
     initial_capital: Decimal = Field(ge=Decimal("100000"), le=Decimal("500000"))
     requested_by: str = Field(min_length=1, max_length=128)
-    actor_type: Literal["human"] = "human"
+    # issue #312:REST 默认 human 不变;放开 agent(网关/自动化通道显式声明),
+    # llm 仍被拒绝(契约层 fail-closed,红线不变)。
+    actor_type: Literal["human", "agent"] = "human"
 
     @field_validator("parameters")
     @classmethod
@@ -53,7 +55,8 @@ class ResearchRunReplayIn(BaseModel):
 
     idempotency_key: str = Field(min_length=8, max_length=128)
     requested_by: str = Field(min_length=1, max_length=128)
-    actor_type: Literal["human"] = "human"
+    # issue #312:同 queue —— 默认 human 不变,放开 agent,llm 仍拒绝。
+    actor_type: Literal["human", "agent"] = "human"
 
 
 class ResearchRunOut(BaseModel):
