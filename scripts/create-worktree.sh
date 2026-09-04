@@ -60,7 +60,14 @@ for d in data_cache data_releases; do
   if [ -e "$d" ]; then
     echo "[2/7] $d 已存在,跳过 junction"
   elif [ -d "$MAIN/$d" ]; then
-    cmd //c "mklink /J \"${d}\" \"${MAIN_WIN}\\${d}\""
+    # 注意:link 名与 target 都不能加内层引号(Git Bash 会把 \" 原样传给 cmd,
+    # 拼出 \data_cache\ 这类带反斜杠的参数导致 dangling junction);本路径
+    # 约定无空格,直接裸传。创建后必须验证可解析,失败即中止。
+    cmd //c "mklink /J ${d} ${MAIN_WIN}\\${d}"
+    if [ ! -e "$d" ]; then
+      echo "junction 创建失败或不可解析: $d -> ${MAIN_WIN}\\${d}" >&2
+      exit 1
+    fi
     echo "[2/7] $d -> 主目录 junction"
   else
     echo "[2/7] 主目录不存在 $d,跳过(首次数据同步后重跑本脚本再补)"
