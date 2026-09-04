@@ -8,6 +8,7 @@
         db-up db-down db-logs migrate migrate-new run serve \
         web-install web-dev web-build web-lint \
         opencode-serve opencode-web mcp-serve \
+        opencode-agent-image opencode-agent-smoke \
         worker dev clean
 
 PYTHON ?= python3.12
@@ -117,6 +118,17 @@ mcp-serve: ## 启动 finboard-mcp(stdio 传输,供 OpenCode 子进程接入)
 
 mcp-serve-http: ## 启动 finboard-mcp(HTTP 传输,Docker 隔离前置;容器内 opencode 通过 host.docker.internal:8765 接入;须设 MCP_AUTH_TOKEN)
 	FINBOARD_MCP_ENABLED=true FINBOARD_MCP_TRANSPORT=streamable-http FINBOARD_MCP_HOST=0.0.0.0 FINBOARD_MCP_PORT=8765 FINBOARD_MCP_AUTH_TOKEN=$(MCP_AUTH_TOKEN) $(UV) run python -m finboard_mcp
+
+# 衍生镜像 tag:与 Dockerfile ARG BASE_IMAGE 的 opencode 版本同步 bump(#313)。
+OPENCODE_AGENT_IMAGE ?= finboard-opencode-agent:1.18.15
+
+opencode-agent-image: ## 构建 OpenCode 容器衍生镜像($(OPENCODE_AGENT_IMAGE);官方镜像 + jq/python3,见 docs/opencode-agent-image.md)
+	docker build -f docker/opencode-agent/Dockerfile \
+		-t $(OPENCODE_AGENT_IMAGE) docker/opencode-agent/
+
+opencode-agent-smoke: ## 衍生镜像 smoke:jq/python3 可用 + ENTRYPOINT 完好
+	docker run --rm $(OPENCODE_AGENT_IMAGE) --version
+	docker run --rm --entrypoint /bin/sh $(OPENCODE_AGENT_IMAGE) -c 'jq --version && python3 --version'
 
 # --------------------------------------------------------------------------- 后台任务队列
 worker: ## 启动后台任务 worker(消费研究/数据 job 队列;make dev 已默认附带)

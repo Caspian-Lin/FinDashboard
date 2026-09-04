@@ -661,7 +661,13 @@ uv run uvicorn finboard_api.app:app
 - **网络**:宿主机侧强制 `127.0.0.1` 绑定,不暴露公网;容器经
   `host.docker.internal` 访问宿主机 finboard-mcp;
 - **项目配置 bind mount**:`.opencode`(agent 定义 / opencode.json)与
-  `.agents`(研究 Skill)只读挂载进容器。
+  `.agents`(研究 Skill)只读挂载进容器;
+- **JSON 工具衍生镜像(#313)**:官方容器内无 python/jq;`make
+  opencode-agent-image` 构建 `finboard-opencode-agent:<opencode版本>`
+  (官方镜像 + jq/python3,base pin 版本 tag),`FINBOARD_OPENCODE_IMAGE`
+  指向它即启用、指回官方镜像名即回滚(切换后须 `docker rm -f
+  finboard-opencode-web` 重建容器)。构建 / 升级 / 版本锁定 / 人工回归步骤见
+  `docs/opencode-agent-image.md`。
 
 ### 网关端点(`/api/opencode`)
 
