@@ -1530,12 +1530,15 @@ async def build_decision_load_contexts(
     # 读取这段此前完全无进度的最长空白窗(RR-7a74 的「数小时 0/0」)。
     if chunk_probe is not None and decision_days:
         await chunk_probe(0, len(decision_days))
-    await _release_trading_days(provider)
-    await loader.ensure_close_histories(manifest)
-
+    # issue #301:池启动提前到 close 矩阵预建之前——矩阵预建的 parquet 解码 +
+    # 列式转换同样分发到常驻池(反序列化并行),预建与逐期特征共用一个池。
+    # 池是纯性能优化:启动失败返回 None(#288 语义),矩阵预建随即降级进程内
+    # 线程路径;multi_period 才启用池(#288 门槛,single_shot 维持线程路径)。
     pool: PriceFeatureProcessPool | None = None
     if frequency is not None and process_workers > 0:
         pool = await _start_period_feature_pool(provider, process_workers)
+    await _release_trading_days(provider)
+    await loader.ensure_close_histories(manifest, process_pool=pool)
 
     async def _load_one(
         decision_at: datetime, snapshot_id: str | None

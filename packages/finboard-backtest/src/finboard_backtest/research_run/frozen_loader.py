@@ -50,6 +50,7 @@ from finboard_backtest.research_run.contracts import (
 )
 
 if TYPE_CHECKING:
+    from finboard_backtest.factor_lab import PriceFeatureProcessPool
     from finboard_data.factor_lab import FeatureSnapshot
     from finboard_data.factors import FactorInputBatch
     from finboard_data.releases import (
@@ -266,7 +267,12 @@ class FrozenInputLoader:
             research_release_missing_symbols=research_missing,
         )
 
-    async def ensure_close_histories(self, manifest: ResearchRunManifest) -> None:
+    async def ensure_close_histories(
+        self,
+        manifest: ResearchRunManifest,
+        *,
+        process_pool: PriceFeatureProcessPool | None = None,
+    ) -> None:
         """一次性预建 close 矩阵(幂等;issue #288 分块并行加载的前置步骤)。
 
         矩阵是 loader 实例上的惰性进程内缓存(#287):``build_decision_load_
@@ -278,6 +284,11 @@ class FrozenInputLoader:
         issue #299:声明 ``explicit_symbols`` 时预建范围收窄到声明域
         (∩ 发布标的),不再为全发布(可能数千只)付一次性全量读取成本;
         未声明时行为不变(全发布预建)。
+
+        issue #301:``process_pool`` 非空(已 start 的常驻池)时预建读取分发到
+        进程池——worker 内完成 parquet 解码 + 列式转换,主进程只收列式数据;
+        池未启动 / 启动失败 / 任务损坏一律具名降级为进程内线程路径(结果逐值
+        一致),不改变池自身状态(特征路径的降级语义由 #288 自行处理)。
         """
         if self._close_histories_built:
             return
@@ -286,6 +297,14 @@ class FrozenInputLoader:
         included_candidates, _ = _build_candidates_and_lots(
             _declared_domain_instruments(manifest, list(provider.release.instruments))
         )
+        if process_pool is not None and not process_pool.broken:
+            built = await _load_close_histories_via_pool(
+                process_pool, provider, included_candidates
+            )
+            if built is not None:
+                self._close_histories_built = True
+                self._close_histories.update(built)
+                return
         await self._ensure_close_histories(provider, included_candidates)
 
     async def _ensure_close_histories(
@@ -729,6 +748,88 @@ async def _load_close_histories(
         release_id=provider.release.release_id,
         candidates=len(candidates),
         sliceable=sum(1 for item in built.values() if item is not None),
+    )
+    return built
+
+
+async def _load_close_histories_via_pool(
+    pool: PriceFeatureProcessPool,
+    provider: FrozenReleaseProvider,
+    candidates: Sequence[UniverseCandidate],
+) -> dict[str, SymbolCloseHistory | None] | None:
+    """经常驻进程池预建 close 矩阵(issue #301);不可用时返回 ``None``。
+
+    worker 内完成 parquet 解码 + 列式转换(PIT 门控含内),主进程只收列式
+    数据并组装 ``SymbolCloseHistory``,绕开反序列化段的 GIL;磁盘并发由
+    ``worker_count`` 个串行 worker 进程自然钳制(与 io_semaphore 同语义)。
+    池未启动 / 任务损坏(BrokenProcessPool 等)/ 逐任务业务异常时记具名
+    warning 并返回 ``None``,调用方降级为进程内线程路径(结果逐值一致,
+    :func:`_load_close_histories`);不修改池自身状态(#288 特征路径的降级
+    语义自行处理)。结果按候选顺序组装,与进程内路径逐值一致。
+    """
+    from finboard_backtest.factor_lab import (
+        _CloseHistoryProcessTask,
+        _compute_close_history_process_task,
+    )
+
+    if not candidates or pool.broken:
+        return None
+    try:
+        executor = pool.executor
+    except RuntimeError:
+        return None
+    loop = asyncio.get_running_loop()
+    tasks = [
+        _CloseHistoryProcessTask(
+            code=candidate.symbol,
+            start=provider.release.start_date,
+            end=provider.release.end_date,
+            decision_at=_PIT_UNBOUNDED,
+        )
+        for candidate in candidates
+    ]
+    try:
+        results = await asyncio.gather(
+            *(
+                loop.run_in_executor(executor, _compute_close_history_process_task, task)
+                for task in tasks
+            ),
+            return_exceptions=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            "frozen_loader.close_matrix_pool_failed",
+            stage="decision_load",
+            release_id=provider.release.release_id,
+            candidates=len(candidates),
+            error=str(exc),
+            message="close 矩阵池分发失败,降级进程内路径",
+        )
+        return None
+    built: dict[str, SymbolCloseHistory | None] = {}
+    for candidate, result in zip(candidates, results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "frozen_loader.close_matrix_pool_failed",
+                stage="decision_load",
+                release_id=provider.release.release_id,
+                candidates=len(candidates),
+                symbol=candidate.symbol,
+                error=str(result),
+                message="close 矩阵池任务异常,降级进程内路径",
+            )
+            return None
+        code, columns = result
+        built[code] = SymbolCloseHistory(
+            available_at=columns.available_at,
+            dates=columns.dates,
+            closes=tuple(columns.closes),
+        )
+    logger.debug(
+        "frozen_loader.close_history_built_via_pool",
+        release_id=provider.release.release_id,
+        candidates=len(candidates),
+        worker_count=pool.worker_count,
     )
     return built
 
