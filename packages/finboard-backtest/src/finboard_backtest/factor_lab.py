@@ -108,6 +108,8 @@ class _CloseHistoryProcessTask:
     start: date
     end: date
     decision_at: datetime
+    #: issue #336:next_open 执行价基的 run 附带 open 平行序列;特征任务恒 False。
+    include_open: bool = False
 
 
 #: worker 进程本地已校验的 artifact 集合(spawn 后为空集,按进程记忆化)。
@@ -1170,12 +1172,15 @@ def _read_close_history_in_worker(
     start: date,
     end: date,
     decision_at: datetime,
+    *,
+    include_open: bool = False,
 ) -> CloseHistoryColumns:
     """worker 进程内读取单标的列式 PIT close 历史(#301)。
 
     特征任务与 close 矩阵任务共用的读半段:artifact 校验按 worker 进程本地
     记忆化(冻结文件不可变,与主进程 provider 的每实例一次语义一致),
     D1 走列式直出,其它周期回退对象路径后转列式容器。
+    issue #336:``include_open=True`` 时附带 open 平行序列。
     """
 
     item = context.instruments.get(code)
@@ -1200,6 +1205,7 @@ def _read_close_history_in_worker(
                 context.period,
                 start,
                 end,
+                include_open,
             ),
             market=item.market,
             decision_at=decision_at,
@@ -1220,6 +1226,9 @@ def _read_close_history_in_worker(
         ),
         closes=np.array([float(bar.close) for bar in visible], dtype=np.float64),
         last_timestamp=visible[-1].timestamp if visible else None,
+        opens=np.array([float(bar.open) for bar in visible], dtype=np.float64)
+        if include_open
+        else None,
     )
 
 
@@ -1232,7 +1241,12 @@ def _compute_close_history_process_task(
     if context is None:
         raise RuntimeError("特征计算进程未初始化")
     columns = _read_close_history_in_worker(
-        context, task.code, task.start, task.end, task.decision_at
+        context,
+        task.code,
+        task.start,
+        task.end,
+        task.decision_at,
+        include_open=task.include_open,
     )
     return task.code, columns
 

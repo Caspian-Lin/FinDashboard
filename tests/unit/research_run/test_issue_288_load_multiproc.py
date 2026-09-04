@@ -717,6 +717,8 @@ class _StubPitBar:
 class _StubBarBody:
     close: Decimal
     timestamp: datetime
+    # issue #336:next_open 执行价基读取 bar.open;测试桩与 close 相同。
+    open: Decimal | None = None
 
 
 @dataclass
@@ -757,6 +759,7 @@ class _StubProvider:
                 _StubBarBody(
                     close=value,
                     timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+                    open=value,
                 ),
                 self._available_at(day),
             )
@@ -1001,11 +1004,13 @@ class TestCloseMatrixPrebuild:
         # issue #300:矩阵构建读取入口改为列式 fetch_close_history。
         async def counting_pit(symbol: Symbol, period: BarPeriod, start: date,
                                end: date, *, decision_at: datetime,
-                               adjust: str = "qfq") -> object:
+                               adjust: str = "qfq",
+                               include_open: bool = False) -> object:
             counter["pit"] += 1
             return await FrozenReleaseProvider.fetch_close_history(
                 provider, symbol, period, start, end,
                 decision_at=decision_at, adjust=adjust,
+                include_open=include_open,
             )
 
         provider.fetch_close_history = counting_pit  # type: ignore[assignment]
@@ -1042,11 +1047,13 @@ class TestCloseMatrixPrebuild:
         # issue #300:矩阵构建读取入口改为列式 fetch_close_history。
         async def counting_pit(symbol: Symbol, period: BarPeriod, start: date,
                                end: date, *, decision_at: datetime,
-                               adjust: str = "qfq") -> object:
+                               adjust: str = "qfq",
+                               include_open: bool = False) -> object:
             counter["pit"] += 1
             return await FrozenReleaseProvider.fetch_close_history(
                 provider, symbol, period, start, end,
                 decision_at=decision_at, adjust=adjust,
+                include_open=include_open,
             )
 
         provider.fetch_close_history = counting_pit  # type: ignore[assignment]

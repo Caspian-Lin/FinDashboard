@@ -181,6 +181,31 @@ async def _reference_close(
     return float(bars[-1].bar.close) if bars else None
 
 
+async def _reference_execution_price(
+    provider: FrozenReleaseProvider,
+    code: str,
+    execution_at: datetime,
+    *,
+    want_open: bool,
+) -> float | None:
+    """执行价参照(issue #336):日终门控下最后可见 bar 的 open / close。"""
+
+    gate = execution_at.replace(hour=23, minute=59)
+    bars = await FrozenReleaseProvider.fetch_point_in_time_bars(
+        provider,
+        Symbol(code=code, market=Market.A_SHARE),
+        provider.release.period,
+        provider.release.start_date,
+        gate.date(),
+        decision_at=gate,
+        adjust=provider.release.adjustment,
+    )
+    if not bars:
+        return None
+    last = bars[-1].bar
+    return float(last.open if want_open else last.close)
+
+
 async def _reference_series(
     provider: FrozenReleaseProvider, codes: Sequence[str], as_of: datetime
 ) -> dict[str, list[float]]:
@@ -216,6 +241,7 @@ def _provider_stub(provider: FrozenReleaseProvider, counter: dict[str, int]) -> 
         *,
         decision_at: datetime,
         adjust: str = "qfq",
+        include_open: bool = False,
     ) -> object:
         counter["pit"] += 1
         return await FrozenReleaseProvider.fetch_close_history(
@@ -226,6 +252,7 @@ def _provider_stub(provider: FrozenReleaseProvider, counter: dict[str, int]) -> 
             end,
             decision_at=decision_at,
             adjust=adjust,
+            include_open=include_open,
         )
 
     async def counting_bars(
@@ -298,8 +325,11 @@ class TestCloseMatrixEqualsPerPeriodPitReads:
                 assert context.prices.get(code) == (
                     await _reference_close(provider, code, decision_at)
                 )
+                # issue #336:执行价 = 执行日 bar 的 open(模板默认 next_open)。
                 assert context.execution_prices.get(code) == (
-                    await _reference_close(provider, code, execution_at)
+                    await _reference_execution_price(
+                        provider, code, execution_at, want_open=True
+                    )
                 )
 
         # 矩阵构建后,后续所有期的加载不再触发逐标的 PIT 读取:
