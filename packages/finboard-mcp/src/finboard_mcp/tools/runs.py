@@ -626,7 +626,9 @@ async def _build_queued_manifest(
         code_version=body.code_version,
         initial_capital=body.initial_capital,
         requested_by=body.requested_by,
-        actor_type=ResearchActorType.HUMAN,
+        # issue #312:MCP 通道(agent 自主执行,#122)归属 agent,
+        # 与 requested_by=agent:mcp 对齐;REST 默认 human 不变。
+        actor_type=ResearchActorType.AGENT,
     )
     return manifest, strategy_row
 
@@ -829,7 +831,8 @@ async def replay_run(
                 run_id=new_run_id,
                 idempotency_key=idempotency_key,
                 requested_by=requested_by,
-                actor_type=ResearchActorType.HUMAN,
+                # issue #312:MCP 重放归属 agent(与 queue 通道一致)。
+                actor_type=ResearchActorType.AGENT,
                 replay_of_run_id=run_id,
                 replay_source_status=source.status.value,
             )
@@ -1005,7 +1008,8 @@ def register(mcp: MCPServer) -> None:
             "的 code_version 只是同名字段、互不校验,别拿数据集 git hash 顶替\n"
             '- "initial_capital"*: 100000-500000 数字\n'
             '- "requested_by"*: 归属人(如 user:xxx / agent:mcp)\n'
-            '- "actor_type": "human"(固定;LLM 不能触发运行)\n'
+            '- "actor_type": "agent"(MCP 通道固定,#312 与 requested_by 对齐;'
+            'llm 不能触发运行)\n'
             "校验失败返回 invalid_argument 并附原因(复用 ResearchRunQueueIn "
             "schema)。入队预检(#186):universe 候选池为空秒级 invalid_argument,"
             "错误附各过滤条件排除统计与缺失字段名。single_shot 缺冻结快照同样"
@@ -1056,7 +1060,8 @@ def register(mcp: MCPServer) -> None:
         name="finboard_run_replay",
         description=(
             "复制 completed 或 interrupted ResearchRun 为新 queued 运行"
-            "(写,不执行)。需要新 idempotency_key + requested_by。"
+            "(写,不执行)。需要新 idempotency_key + requested_by;"
+            "新 run actor_type=agent(MCP 通道固定,#312)。"
             "interrupted 源即事故恢复通道(#305):新 run 自动继承原 manifest "
             "全部冻结输入(dataset_release_ids / factor_snapshots 全部 ID,"
             "零手工重填),血缘标注 replay_of_run_id + replay_source_status;"

@@ -378,7 +378,9 @@ async def queue_research_run(
             code_version=body.code_version,
             initial_capital=body.initial_capital,
             requested_by=body.requested_by,
-            actor_type=ResearchActorType.HUMAN,
+            # issue #312:REST 默认 human 不变;body 可显式声明 agent
+            # (schema Literal 已放开,llm 由契约层 fail-closed 拒绝)。
+            actor_type=ResearchActorType(body.actor_type),
         )
         row, _ = await ResearchRunRepository(session).create_or_get(
             run_id=manifest.run_id,
@@ -544,7 +546,8 @@ async def queue_research_replay(
         run_id=_run_id(body.idempotency_key),
         idempotency_key=body.idempotency_key,
         requested_by=body.requested_by,
-        actor_type=ResearchActorType.HUMAN,
+        # issue #312:REST 默认 human 不变;body 可显式声明 agent。
+        actor_type=ResearchActorType(body.actor_type),
         replay_of_run_id=run_id,
         replay_source_status=source.status.value,
     )

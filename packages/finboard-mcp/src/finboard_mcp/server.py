@@ -110,6 +110,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
   字段 + metrics(剔 equity_curve)+ universe 聚合计数 + fills 按决策计数,
   不序列化 manifest/result 全量;view=detail 才含全量(可达 MB 级)。
+  run 归属(#312):MCP 通道创建的 run(含 replay 与 backtest_run 的
+  strategy_spec 形态)actor_type=agent,与 requested_by=agent:mcp 语义对齐
+  (#122 agent 自主执行);REST 默认 human 不变,schema 放开 human|agent,
+  llm 仍 fail-closed 拒绝(红线不变)。
   replay 放开 interrupted(#305):interrupted run 一条命令按冻结输入恢复,
   新 run 自动继承原 manifest 全部冻结输入(含 factor_snapshots 全部 ID,
   零手工),血缘标注 replay_of_run_id + replay_source_status;cancelled

@@ -247,7 +247,8 @@ class TestMcpReplayInterrupted:
         assert new_manifest.replay_of_run_id == source_manifest.run_id
         assert new_manifest.replay_source_status == "interrupted"
         assert new_manifest.requested_by == "user:305"
-        assert new_manifest.actor_type is ResearchActorType.HUMAN
+        # issue #312:MCP 通道重放归属 agent(与 requested_by 语义对齐)。
+        assert new_manifest.actor_type is ResearchActorType.AGENT
         # 冻结输入零手工继承:input_checksum 相等 + 快照全集一致。
         assert new_manifest.input_checksum == source_manifest.input_checksum
         assert new_manifest.factor_snapshots == source_manifest.factor_snapshots
