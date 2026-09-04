@@ -5,7 +5,7 @@ Repository 模式与交易域一致:不控制事务边界,commit 由调用方决
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Any, cast
 
@@ -158,6 +158,29 @@ class ResearchTrialRepository:
             stmt = stmt.where(ResearchTrialModel.status == status.value)
         result = await self._session.execute(stmt)
         return [_model_to_trial(m) for m in result.scalars()]
+
+    async def map_by_experiment(
+        self,
+        experiment_ids: Sequence[str],
+    ) -> dict[str, list[TrialRecord]]:
+        """按 experiment_id 批量取 trial(单条 IN 查询,避免 list 页 N+1)。
+
+        返回 ``{experiment_id: [trial, ...]}``(trial_index 升序);没有
+        trial 的 experiment_id 不出现在结果中,调用方以 ``get(id, [])`` 取。
+        """
+        ids = [eid for eid in dict.fromkeys(experiment_ids) if eid]
+        if not ids:
+            return {}
+        stmt = (
+            select(ResearchTrialModel)
+            .where(ResearchTrialModel.experiment_id.in_(ids))
+            .order_by(ResearchTrialModel.experiment_id.asc(), ResearchTrialModel.trial_index.asc())
+        )
+        result = await self._session.execute(stmt)
+        grouped: dict[str, list[TrialRecord]] = {}
+        for model in result.scalars():
+            grouped.setdefault(model.experiment_id, []).append(_model_to_trial(model))
+        return grouped
 
     async def count_by_experiment(self, experiment_id: str) -> int:
         """统计某实验的 trial 总数(包括失败)。"""

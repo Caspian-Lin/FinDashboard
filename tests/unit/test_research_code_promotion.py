@@ -17,6 +17,7 @@ from finboard_backtest.research_code import (
     evaluate_promotion_gates,
     is_promoted_artifact,
 )
+from finboard_backtest.validation.contracts import ExperimentStatus
 from finboard_mcp.audit import AuditRecorder
 from finboard_mcp.context import McpAppContext
 from finboard_mcp.tools import research_code
@@ -290,6 +291,9 @@ class _PromotionArtifactRepo:
 class _PromotionExperiment:
     def __init__(self, validation: dict[str, object]) -> None:
         self.validation = validation
+        # issue #310:promote 会派生 oos_outcome,需要领域属性(status/unsealed)
+        self.status = ExperimentStatus(str(validation["status"]))
+        self.final_test_unsealed = validation.get("final_test_unsealed") is True
 
     def as_dict(self) -> dict[str, object]:
         return self.validation
@@ -301,6 +305,13 @@ class _PromotionExperimentRepo:
 
     async def get(self, _experiment_id: str) -> _PromotionExperiment:
         return _PromotionExperiment(self.validation)
+
+
+class _PromotionTrialRepo:
+    """issue #310:promote 派生 oos_outcome 时的 trial 读取桩。"""
+
+    async def list_by_experiment(self, _experiment_id: str) -> list[object]:
+        return []
 
 
 class _PromotionCodeRunRepo:
@@ -335,6 +346,11 @@ async def test_promote_binds_evidence_and_enters_formal_whitelist(tmp_path, monk
     )
     monkeypatch.setattr(
         research_code,
+        "ResearchTrialRepository",
+        lambda _session: _PromotionTrialRepo(),
+    )
+    monkeypatch.setattr(
+        research_code,
         "ResearchCodeRunRepository",
         lambda _session: _PromotionCodeRunRepo(code_run),
     )
@@ -357,6 +373,10 @@ async def test_promote_binds_evidence_and_enters_formal_whitelist(tmp_path, monk
     gates = cast(dict[str, object], evidence["gates"])
     execution = cast(dict[str, object], evidence["execution"])
     assert gates["passed"] is True
+    # issue #310:晋级证据 validation 摘要携带派生 oos_outcome(本桩无 trial
+    # → inconclusive;门判定不受影响)
+    validation_gate = cast(dict[str, object], gates["validation"])
+    assert validation_gate["oos_outcome"] == "inconclusive"
     assert set(cast(list[str], execution["audit_refs"])) == {
         "code",
         "data",
@@ -389,6 +409,11 @@ async def test_promote_failure_keeps_draft_and_records_named_evidence(
         research_code,
         "ResearchExperimentRepository",
         lambda _session: _PromotionExperimentRepo(_promotion_validation()),
+    )
+    monkeypatch.setattr(
+        research_code,
+        "ResearchTrialRepository",
+        lambda _session: _PromotionTrialRepo(),
     )
     monkeypatch.setattr(
         research_code,
@@ -429,6 +454,11 @@ async def test_missing_screen_is_also_persisted_as_failed_evidence(tmp_path, mon
         research_code,
         "ResearchExperimentRepository",
         lambda _session: _PromotionExperimentRepo(_promotion_validation()),
+    )
+    monkeypatch.setattr(
+        research_code,
+        "ResearchTrialRepository",
+        lambda _session: _PromotionTrialRepo(),
     )
     monkeypatch.setattr(
         research_code,

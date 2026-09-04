@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
@@ -62,6 +63,30 @@ class WindowRole(StrEnum):
     TRAIN = "train"  # 训练集
     VALIDATION = "validation"  # 调参 / 早停验证集
     TEST = "test"  # 冻结测试集(揭盲)
+
+
+class OosOutcome(StrEnum):
+    """实验结论的派生语义(issue #310)。
+
+    ``ExperimentStatus.validated_oos`` 只表示「OOS 流程(含一次性揭盲)走完
+    且最终门通过」,不表示「假设获支持」——#245 决策 A(screen 门取
+    abs(rank_ic))下,best trial 在 OOS walk-forward 被拒后继续揭盲是设计
+    使然,``validated_oos`` 与「trial 被拒」可并存。本枚举把两者区分开:
+
+    * ``supported`` —— best trial OOS 门通过**且**揭盲达标
+      (experiment=validated_oos):证据链完整支持假设;
+    * ``not_supported`` —— best trial 的 OOS 门被拒,或揭盲最终测试集
+      未达标:现有配置未获样本外证据支持;
+    * ``inconclusive`` —— 无 trial / OOS 未产出可判定证据(walk-forward
+      未跑、全部窗口失败等)或流程未走完(OOS 过但未揭盲):无法判定。
+
+    这是**派生展示字段**(get/list 序列化时由 trial OOS 状态 + 揭盲指标
+    推导),不落库、不参与状态机。
+    """
+
+    SUPPORTED = "supported"
+    NOT_SUPPORTED = "not_supported"
+    INCONCLUSIVE = "inconclusive"
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,6 +525,72 @@ def increment_trials_used(experiment: ResearchExperiment, by: int = 1) -> Resear
     if new_count > experiment.plan.trial_budget:
         raise ValueError(f"trial budget exhausted: {new_count} > {experiment.plan.trial_budget}")
     return replace(experiment, trials_used=new_count)
+
+
+def append_note(experiment: ResearchExperiment, note: str) -> ResearchExperiment:
+    """向 ``experiment.notes`` 追加一条备注(换行分隔,immutable 新实例)。
+
+    notes 是自由文本展示字段,不参与 checksum / 状态机;调用方保证幂等
+    (如揭盲一次性语义下 warning note 至多追加一次)。
+    """
+    existing = experiment.notes or ""
+    joined = f"{existing}\n{note}" if existing else note
+    return replace(experiment, notes=joined)
+
+
+def best_oos_trial(trials: Sequence[TrialRecord]) -> TrialRecord | None:
+    """取携带 OOS 证据(``oos_metrics``)的 trial 中 IS Sharpe 最优者。
+
+    runner 流程下只有 IS 最优 trial 会被 walk-forward 评估,因此
+    ``oos_metrics`` 非空即唯一标识「进入过 OOS 的 best trial」;防御性地,
+    出现多个(如手工登记)时取 IS Sharpe 最高的一个。
+    """
+    oos_trials = [t for t in trials if t.oos_metrics is not None]
+    if not oos_trials:
+        return None
+    return max(
+        oos_trials,
+        key=lambda t: (
+            t.in_sample_metrics.sharpe_ratio if t.in_sample_metrics else float("-inf")
+        ),
+    )
+
+
+def derive_oos_outcome(
+    experiment: ResearchExperiment,
+    trials: Sequence[TrialRecord],
+) -> OosOutcome:
+    """从 trial OOS 门状态 + 揭盲指标派生实验结论语义(issue #310)。
+
+    精确规则:
+
+    1. best trial = 携带 ``oos_metrics`` 的 trial(见 :func:`best_oos_trial`);
+       不存在(无 trial / OOS 未跑 / 全部 walk-forward 窗口失败未产出指标)
+       → ``inconclusive``;
+    2. best trial OOS 门被拒(``status=REJECTED``)→ ``not_supported`` ——
+       **无论揭盲结果如何**:这正是「validated_oos + trial 被拒」的动机
+       场景,#245 决策 A 下流程如此是设计使然,但结论不是「假设获支持」;
+    3. best trial OOS 门通过(``status=SELECTED``)时:
+       * 未揭盲(流程未走完)→ ``inconclusive``;
+       * 揭盲且 ``status=validated_oos`` → ``supported``(OOS 门过且揭盲
+         指标达标);
+       * 揭盲但 ``status=rejected``(最终冻结测试集未达标)→
+         ``not_supported``。
+
+    纯函数,不落库、不改状态机;experiment 与 trials 来自持久化记录时
+    规则完全可重放。
+    """
+    best = best_oos_trial(trials)
+    if best is None:
+        return OosOutcome.INCONCLUSIVE
+    if best.status is TrialStatus.REJECTED:
+        return OosOutcome.NOT_SUPPORTED
+    # best.status is SELECTED:OOS 门通过。
+    if not experiment.final_test_unsealed:
+        return OosOutcome.INCONCLUSIVE
+    if experiment.status is ExperimentStatus.VALIDATED_OOS:
+        return OosOutcome.SUPPORTED
+    return OosOutcome.NOT_SUPPORTED
 
 
 def deserialize_experiment(data: dict[str, Any]) -> ResearchExperiment:

@@ -686,6 +686,10 @@ class ExperimentOut(BaseSchema):
     rejection_reason: str | None = None
     supersedes_id: str | None = None
     notes: str = ""
+    # issue #310:派生结论语义(supported|not_supported|inconclusive),仅在
+    # list/get 读取时由 trial OOS 状态 + 揭盲指标推导,不落库;写路径回执为
+    # None。validated_oos 只代表 OOS 流程完成,不代表假设获支持。
+    oos_outcome: str | None = None
 
 
 class TrialOut(BaseSchema):

@@ -158,6 +158,7 @@ class TestValidationExperimentList:
         app = _make_app()
         from finboard_persistence.validation_repo import (
             ResearchExperimentRepository,
+            ResearchTrialRepository,
         )
 
         monkeypatch.setattr(
@@ -165,12 +166,19 @@ class TestValidationExperimentList:
             "list_by_status",
             lambda self, status, **kw: _async_return([_experiment()]),
         )
+        monkeypatch.setattr(
+            ResearchTrialRepository,
+            "map_by_experiment",
+            lambda self, ids: _async_return({}),
+        )
         env = await ve_tools.validation_experiment_list(app)
         assert env.status == "ok"
         assert isinstance(env.data, list)
         assert env.data[0]["experiment_id"]
         assert env.data[0]["status"] == "hypothesis"
         assert env.data[0]["version_checksum"]
+        # issue #310:list 附带派生 oos_outcome(无 OOS 证据 → inconclusive)
+        assert env.data[0]["oos_outcome"] == "inconclusive"
 
     async def test_status_filter_passthrough(self, monkeypatch: Any) -> None:
         app = _make_app()
@@ -260,6 +268,8 @@ class TestValidationExperimentGet:
         assert env.status == "ok"
         assert env.data["experiment_id"] == exp.experiment_id
         assert env.data["trials"] == []
+        # issue #310:get 附带派生 oos_outcome(无 OOS 证据 → inconclusive)
+        assert env.data["oos_outcome"] == "inconclusive"
 
     async def test_not_found(self, monkeypatch: Any) -> None:
         app = _make_app()

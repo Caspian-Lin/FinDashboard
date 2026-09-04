@@ -24,10 +24,16 @@ from finboard_backtest.validation.contracts import (
     ExperimentStatus,
     ResearchExperiment,
     RobustnessPlan,
+    TrialRecord,
+    TrialStatus,
     ValidationMode,
     ValidationPlan,
     VersionStamp,
+    WindowMetrics,
+    WindowRole,
+    mark_final_test_unsealed,
     new_experiment,
+    transition_status,
 )
 from finboard_data.factor_lab import (
     FeatureObservation,
@@ -224,6 +230,143 @@ class TestListAndGet:
         # mock_session fixture 默认 scalar_one_or_none 返回 None
         resp = client.get("/api/research/experiments/nonexistent")
         assert resp.status_code == 404
+
+
+class _FakeExpRepo:
+    """issue #310:绕开 DB,直接以领域对象驱动实验路由。"""
+
+    def __init__(self, experiments: dict[str, ResearchExperiment]) -> None:
+        self._experiments = experiments
+
+    async def save(self, exp: ResearchExperiment) -> None:
+        self._experiments[exp.experiment_id] = exp
+
+    async def get(self, experiment_id: str) -> ResearchExperiment | None:
+        return self._experiments.get(experiment_id)
+
+    async def list_by_status(
+        self, status: ExperimentStatus | None, *, limit: int = 100
+    ) -> list[ResearchExperiment]:
+        exps = [
+            e
+            for e in self._experiments.values()
+            if status is None or e.status == status
+        ]
+        return exps[:limit]
+
+
+class _FakeTrialRepo:
+    def __init__(self, trials: dict[str, list[TrialRecord]]) -> None:
+        self._trials = trials
+
+    async def list_by_experiment(
+        self, experiment_id: str, *, status: TrialStatus | None = None
+    ) -> list[TrialRecord]:
+        trials = self._trials.get(experiment_id, [])
+        if status is None:
+            return trials
+        return [t for t in trials if t.status == status]
+
+    async def map_by_experiment(
+        self, experiment_ids: list[str]
+    ) -> dict[str, list[TrialRecord]]:
+        return {eid: self._trials.get(eid, []) for eid in experiment_ids}
+
+
+class TestOosOutcomeDerived:
+    """REST 读取端点展示派生 oos_outcome(issue #310)。"""
+
+    @staticmethod
+    def _validated_experiment_with_rejected_trial() -> tuple[
+        ResearchExperiment, list[TrialRecord]
+    ]:
+        """动机场景:status=validated_oos 但 best trial OOS 被拒。"""
+        exp = new_experiment(
+            hypothesis="REST oos_outcome 展示:validated_oos 但 trial 被拒",
+            version_stamp=VersionStamp(
+                matching_model_version="v2",
+                asset_rules_version="v1",
+                factor_version=None,
+                dataset_versions={},
+                selection_config={},
+                strategy_kind="ma_cross",
+            ),
+            plan=ValidationPlan(
+                mode=ValidationMode.ROLLING,
+                train_start=date(2020, 1, 1),
+                train_end=date(2020, 6, 30),
+                validation_start=date(2020, 7, 1),
+                validation_end=date(2020, 12, 31),
+                test_start=date(2021, 1, 1),
+                test_end=date(2021, 6, 30),
+                train_window_days=126,
+                test_window_days=21,
+                step_days=21,
+                trial_budget=4,
+            ),
+            thresholds=AcceptanceThresholds(),
+            robustness=RobustnessPlan(),
+            strategy_params_space={"window": [5]},
+        )
+        exp = transition_status(exp, ExperimentStatus.IN_SAMPLE)
+        exp = mark_final_test_unsealed(exp)
+        exp = transition_status(exp, ExperimentStatus.VALIDATED_OOS)
+        trial = TrialRecord(
+            trial_id=f"{exp.experiment_id}-t0",
+            experiment_id=exp.experiment_id,
+            trial_index=0,
+            parameters={"window": 5},
+            status=TrialStatus.REJECTED,
+            in_sample_metrics=WindowMetrics(
+                role=WindowRole.TRAIN,
+                start=date(2020, 1, 1),
+                end=date(2020, 6, 30),
+                sharpe_ratio=2.0,
+            ),
+            oos_metrics=WindowMetrics(
+                role=WindowRole.TEST,
+                start=date(2020, 7, 1),
+                end=date(2020, 12, 31),
+                sharpe_ratio=-0.1,
+            ),
+            failure_reason="oos_sharpe=-0.100 < 0.500",
+        )
+        return exp, [trial]
+
+    @pytest.fixture
+    def routed_client(
+        self,
+        app: FastAPI,
+        mock_session: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> TestClient:
+        exp, trials = self._validated_experiment_with_rejected_trial()
+        monkeypatch.setattr(
+            research_routes,
+            "ExpRepo",
+            lambda _session: _FakeExpRepo({exp.experiment_id: exp}),
+        )
+        monkeypatch.setattr(
+            research_routes,
+            "TrialRepo",
+            lambda _session: _FakeTrialRepo({exp.experiment_id: trials}),
+        )
+        app.dependency_overrides[get_db_session] = lambda: mock_session
+        return TestClient(app)
+
+    def test_list_and_get_show_oos_outcome(self, routed_client: TestClient) -> None:
+        # list:validated_oos + best trial rejected → not_supported
+        resp = routed_client.get("/api/research/experiments")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["status"] == "validated_oos"
+        assert body[0]["oos_outcome"] == "not_supported"
+
+        exp_id = body[0]["experiment_id"]
+        detail = routed_client.get(f"/api/research/experiments/{exp_id}")
+        assert detail.status_code == 200
+        assert detail.json()["oos_outcome"] == "not_supported"
 
 
 class TestReject:

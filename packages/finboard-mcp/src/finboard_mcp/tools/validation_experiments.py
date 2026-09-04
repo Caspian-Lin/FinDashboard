@@ -166,11 +166,17 @@ async def validation_experiment_list(
     status: str | None = None,
     limit: int = 100,
 ) -> ToolEnvelope:
-    """列出 #57 验证实验(可选按状态过滤)。"""
+    """列出 #57 验证实验(可选按状态过滤),每条附派生 oos_outcome。"""
 
     async def _do() -> list[dict[str, Any]]:
-        from finboard_backtest.validation.contracts import ExperimentStatus
-        from finboard_persistence.validation_repo import ResearchExperimentRepository
+        from finboard_backtest.validation.contracts import (
+            ExperimentStatus,
+            derive_oos_outcome,
+        )
+        from finboard_persistence.validation_repo import (
+            ResearchExperimentRepository,
+            ResearchTrialRepository,
+        )
 
         resolved = None
         if status is not None:
@@ -186,7 +192,24 @@ async def validation_experiment_list(
             experiments = await ResearchExperimentRepository(session).list_by_status(
                 resolved, limit=safe_limit
             )
-            return [cast(dict[str, Any], to_jsonable(e.as_dict())) for e in experiments]
+            trials_map = await ResearchTrialRepository(session).map_by_experiment(
+                [e.experiment_id for e in experiments]
+            )
+            return [
+                cast(
+                    dict[str, Any],
+                    to_jsonable(
+                        {
+                            **e.as_dict(),
+                            # issue #310:派生结论语义(OOS 流程完成 ≠ 假设获支持)
+                            "oos_outcome": derive_oos_outcome(
+                                e, trials_map.get(e.experiment_id, [])
+                            ).value,
+                        }
+                    ),
+                )
+                for e in experiments
+            ]
 
     return await run_tool(
         audit=app.audit,
@@ -200,6 +223,7 @@ async def validation_experiment_get(app: McpAppContext, experiment_id: str) -> T
     """读取单个 #57 验证实验详情 + 全部 trial(包括 FAILED / REJECTED)。"""
 
     async def _do() -> dict[str, Any]:
+        from finboard_backtest.validation.contracts import derive_oos_outcome
         from finboard_persistence.validation_repo import (
             ResearchExperimentRepository,
             ResearchTrialRepository,
@@ -211,6 +235,9 @@ async def validation_experiment_get(app: McpAppContext, experiment_id: str) -> T
                 raise McpToolError("not_found", f"未找到验证实验: {experiment_id}")
             trials = await ResearchTrialRepository(session).list_by_experiment(experiment_id)
             data = dict(experiment.as_dict())
+            # issue #310:派生结论语义(不落库,序列化时由 trial OOS 状态 +
+            # 揭盲指标推导)——validated_oos 只代表 OOS 流程完成。
+            data["oos_outcome"] = derive_oos_outcome(experiment, trials).value
             data["trials"] = [cast(dict[str, Any], to_jsonable(t.as_dict())) for t in trials]
             return cast(dict[str, Any], to_jsonable(data))
 
@@ -623,7 +650,11 @@ def register(mcp: MCPServer) -> None:
             "列出 #57 机器验证实验(可选按状态过滤 hypothesis|in_sample|"
             "validated_oos|rejected|superseded)。"
             "每条含 experiment_id/hypothesis/version_checksum/plan/thresholds/"
-            "robustness/status/trials_used/final_test_unsealed。"
+            "robustness/status/trials_used/final_test_unsealed/notes,以及派生"
+            "oos_outcome(supported|not_supported|inconclusive,#310):"
+            "validated_oos 只代表 OOS 流程完成,不代表假设获支持——best trial"
+            "OOS 被拒后仍揭盲是 #245 决策 A 的设计使然,此时 status=validated_oos "
+            "而 oos_outcome=not_supported。"
             "参数:status? / limit(默认 100,上限 500)。"
         ),
     )
@@ -638,7 +669,12 @@ def register(mcp: MCPServer) -> None:
         name="finboard_validation_experiment_get",
         description=(
             "查询单个 #57 机器验证实验详情 + 全部 trial(包括 FAILED / REJECTED,"
-            "多重试验修正需要真实试验总数)。"
+            "多重试验修正需要真实试验总数)。返回附派生 oos_outcome"
+            "(supported|not_supported|inconclusive,#310):supported=best trial "
+            "OOS 门过且揭盲达标;not_supported=best trial OOS 被拒或揭盲未达标"
+            "(status=validated_oos 也可能 not_supported——OOS 流程完成 ≠ 假设"
+            "获支持);inconclusive=无 trial / OOS 无可判定证据 / 流程未走完。"
+            "全 trial OOS 被拒仍揭盲时 notes 含 unseal_with_rejected_trials 警示。"
             "参数:experiment_id。未找到返回 not_found。"
         ),
     )
