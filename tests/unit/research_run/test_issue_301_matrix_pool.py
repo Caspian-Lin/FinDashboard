@@ -377,3 +377,23 @@ class TestBuildContextsPooledEquivalence:
         )
         assert pooled
         _assert_contexts_equal(pooled, serial)
+
+
+# ---- worker 回收禁用回归 ------------------------------------------------------
+
+
+class TestWorkerRecyclingDisabled:
+    """AC:worker 回收默认禁用(#301 实测 Windows spawn 死锁)。
+
+    CPython 3.12 Windows 下,池经 asyncio run_in_executor 消费时,worker 达到
+    ``max_tasks_per_child`` 上限后的重生 spawn 会死锁(调用队列有积压时替生
+    worker 永远起不来;纯同步语境回收正常)。默认必须为 None——多期回放任务
+    量过阈值即触发整条 run 挂死,比内存累积危险得多。
+    """
+
+    def test_default_max_tasks_per_child_is_none(self) -> None:
+        from finboard_backtest.factor_lab import (
+            PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD,
+        )
+
+        assert PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD is None

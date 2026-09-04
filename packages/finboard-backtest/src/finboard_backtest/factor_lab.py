@@ -1316,9 +1316,13 @@ def _create_price_feature_process_executor(
 
 
 #: 常驻池(:class:`PriceFeatureProcessPool`)每个 worker 进程重启前的任务数
-#: (issue #288)。取值权衡:过小则 spawn 重启频繁(Windows 每次约 1-2s),
-#: 过大则失去防内存累积意义;128 ≈ 数个决策期 x 数十标的的任务量。
-PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD = 128
+#: (issue #288)。issue #301 实测定为 ``None``(禁用回收):CPython 3.12
+#: Windows spawn + asyncio 事件循环经 run_in_executor 消费时,worker 达到
+#: 上限后的**重生 spawn 会死锁**——调用队列有积压时替生 worker 永远起不来
+#: (纯同步语境回收正常,首代 spawn 正常;复现与禁用验证见 #301)。回收本
+#: 只为防内存累积,代价是整条 run 挂死,不值得;箭头/parquet 缓冲在任务间
+#: 复用,单 worker 峰值内存有界。CPython 修复后可改回正整数重启该机制。
+PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD: int | None = None
 
 
 class PriceFeatureProcessPool:
@@ -1328,7 +1332,8 @@ class PriceFeatureProcessPool:
     snapshot(process_workers>0)``,则每期都要付出一次「建池 + spawn import +
     关池」的开销(N 期 = N 倍)。本句柄把池的生命周期提升到「一次加载期」:
     ``start`` 一次建池 + 预热,期内全部期共享,``aclose`` 在加载结束(或异常)
-    后统一关闭。``max_tasks_per_child`` 令 worker 定期重启,防内存累积。
+    后统一关闭。``max_tasks_per_child`` 默认禁用(worker 回收重生在 Windows
+    spawn + asyncio 消费语境死锁,issue #301),保留参数供 CPython 修复后重启。
 
     池以给定 provider 的冻结发布初始化(``_init_price_feature_process``)——
     调用方必须保证传给 ``build_price_feature_snapshot(process_executor=...)``
@@ -1341,7 +1346,7 @@ class PriceFeatureProcessPool:
         *,
         provider: FrozenReleaseProvider,
         worker_count: int,
-        max_tasks_per_child: int = PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD,
+        max_tasks_per_child: int | None = PRICE_FEATURE_POOL_MAX_TASKS_PER_CHILD,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count 必须 >= 1")
