@@ -1,45 +1,20 @@
 import * as React from "react";
 import { Link, useLocation } from "react-router-dom";
-import { HelpCircle, ArrowRight, CheckCircle2, CircleHelp } from "lucide-react";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { ArrowRight, CheckCircle2, CircleHelp } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { useT, type LocalizedText } from "@/i18n";
+import InfoHint from "@/components/InfoHint";
+import type { InfoHintDefinition } from "@/lib/infoHints";
 
-/* Reusable InfoHint badge that shows help text on hover/focus */
+/* 研究/工具页统一的帮助提示:ResearchHint 现在是 InfoHint 的薄封装,
+   图标、悬停+点击钉住、弹出样式全局只有 InfoHint 一套实现。 */
 
-interface HintData {
-  title: LocalizedText;
-  description: LocalizedText;
-  detail?: LocalizedText;
-}
+export type ResearchHintContent = InfoHintDefinition;
 
-export function ResearchHint({ hint, className }: { hint: HintData; className?: string }) {
-  const { tl } = useT();
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          className={cn(
-            "inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring -m-2.5 p-2.5",
-            className,
-          )}
-          aria-label={tl(hint.title)}
-        >
-          <HelpCircle className="h-3.5 w-3.5" />
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-sm">
-        <div className="space-y-1">
-          <p className="font-medium text-foreground">{tl(hint.title)}</p>
-          <p className="text-xs text-muted-foreground">{tl(hint.description)}</p>
-          {hint.detail && <p className="text-xs italic text-muted-foreground/70">{tl(hint.detail)}</p>}
-        </div>
-      </TooltipContent>
-    </Tooltip>
-  );
+export function ResearchHint({ hint, className }: { hint: ResearchHintContent; className?: string }) {
+  return <InfoHint content={hint} className={className} />;
 }
 
 export function HintLabel({
@@ -48,7 +23,7 @@ export function HintLabel({
   className,
 }: {
   children: React.ReactNode;
-  hint: HintData;
+  hint: ResearchHintContent;
   className?: string;
 }) {
   return (

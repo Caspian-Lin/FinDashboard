@@ -29,6 +29,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { StatusBadge } from "@/components/ui/status-badge";
+import InfoHint from "@/components/InfoHint";
+import { INFO_HINTS } from "@/lib/infoHints";
 import {
   Table,
   TableBody,
@@ -197,7 +199,10 @@ export default function Jobs() {
 
       <div className="flex flex-wrap items-end gap-4">
         <div className="space-y-1.5">
-          <Label htmlFor="jobs-status-filter">{t("common.status")}</Label>
+          <div className="flex items-center gap-1">
+            <Label htmlFor="jobs-status-filter">{t("common.status")}</Label>
+            <InfoHint content={INFO_HINTS.jobs.status} />
+          </div>
           <Select
             value={statusFilter}
             onValueChange={(v) => setFilter("status", v)}
@@ -216,7 +221,10 @@ export default function Jobs() {
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="jobs-kind-filter">{t("jobs.kind")}</Label>
+          <div className="flex items-center gap-1">
+            <Label htmlFor="jobs-kind-filter">{t("jobs.kind")}</Label>
+            <InfoHint content={INFO_HINTS.jobs.kind} />
+          </div>
           <Select value={kindFilter} onValueChange={(v) => setFilter("kind", v)}>
             <SelectTrigger id="jobs-kind-filter" className="w-48" aria-label={t("jobs.filterByKind")}>
               <SelectValue />

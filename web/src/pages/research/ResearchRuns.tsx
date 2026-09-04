@@ -1,4 +1,5 @@
-import { WorkflowHelpPopover, WORKFLOW_NEXT } from "@/components/research/ResearchHint";
+import { WorkflowHelpPopover, WORKFLOW_NEXT, ResearchHint } from "@/components/research/ResearchHint";
+import { RESEARCH_HINTS } from "@/lib/research-hints";
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
@@ -218,9 +219,10 @@ function FrozenInputsCard({ manifest }: { manifest: Record<string, unknown> }) {
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-sm">
+        <CardTitle className="flex items-center gap-1 text-sm">
           {tl({ zh: "冻结输入", en: "Frozen inputs" })}
-          <span className="ml-2 text-xs font-normal text-muted-foreground">
+          <ResearchHint hint={RESEARCH_HINTS.runs.freeze} />
+          <span className="ml-1 text-xs font-normal text-muted-foreground">
             {tl({
               zh: "运行执行时只读取以下内容寻址引用,与后续数据变化隔离",
               en: "The run only reads these content-addressed references, isolated from later data changes",
@@ -727,6 +729,7 @@ export default function ResearchRuns() {
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
           <Label className="text-xs text-muted-foreground">{tl({ zh: "状态筛选", en: "Status filter" })}</Label>
+          <ResearchHint hint={RESEARCH_HINTS.runs.statusFilter} />
           <Select value={statusFilter} onValueChange={setStatusFilter}>
             <SelectTrigger className="h-9 w-[160px]">
               <SelectValue />
@@ -930,6 +933,7 @@ export default function ResearchRuns() {
                               <span className="flex items-center gap-2">
                                 <Activity className="h-4 w-4 text-primary" />
                                 {tl({ zh: "后台任务进度", en: "Background job progress" })}
+                                <ResearchHint hint={RESEARCH_HINTS.runs.jobProgress} />
                               </span>
                               {jobQuery.data && (
                                 <StatusBadge status={jobQuery.data.status} />
@@ -1084,8 +1088,9 @@ export default function ResearchRuns() {
 
                       <div>
                         <div className="mb-2 flex items-center justify-between">
-                          <p className="text-xs font-medium text-muted-foreground">
+                          <p className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
                             {tl({ zh: "决策产物（artifacts）", en: "Decision artifacts" })}
+                            <ResearchHint hint={RESEARCH_HINTS.runs.artifacts} />
                             {artifactsQuery.data &&
                               tl({
                                 zh: `（${artifactsQuery.data.length}）`,
