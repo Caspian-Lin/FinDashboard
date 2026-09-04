@@ -97,6 +97,26 @@ class _PriceFeatureProcessTask:
 
 
 @dataclass(frozen=True, slots=True)
+class _CloseHistoryProcessTask:
+    """一个独立、可 pickle 的标的列式 close 历史读取任务(issue #301)。
+
+    close 矩阵预建(#287)分发到常驻进程池时提交:worker 内完成 parquet
+    解码 + 列式转换(PIT 门控含内),主进程只收列式数据,绕开 GIL。
+    """
+
+    code: str
+    start: date
+    end: date
+    decision_at: datetime
+
+
+#: worker 进程本地已校验的 artifact 集合(spawn 后为空集,按进程记忆化)。
+#: 冻结发布文件不可变(发布期已校验 + manifest checksum 锚定),与主进程
+#: provider 的 ``_verified`` 每实例一次语义对齐,不再逐任务重算 SHA256。
+_WORKER_VERIFIED: set[Path] = set()
+
+
+@dataclass(frozen=True, slots=True)
 class _PriceFeatureProcessContext:
     release_dir: Path
     source: str
@@ -1144,6 +1164,79 @@ def _init_price_feature_process(
     )
 
 
+def _read_close_history_in_worker(
+    context: _PriceFeatureProcessContext,
+    code: str,
+    start: date,
+    end: date,
+    decision_at: datetime,
+) -> CloseHistoryColumns:
+    """worker 进程内读取单标的列式 PIT close 历史(#301)。
+
+    特征任务与 close 矩阵任务共用的读半段:artifact 校验按 worker 进程本地
+    记忆化(冻结文件不可变,与主进程 provider 的每实例一次语义一致),
+    D1 走列式直出,其它周期回退对象路径后转列式容器。
+    """
+
+    item = context.instruments.get(code)
+    if item is None:
+        raise FactorAnalysisError(f"进程 worker 找不到标的: {code}")
+    artifact = _safe_release_artifact(context.release_dir, item.artifact_path)
+    if context.verify_files and artifact not in _WORKER_VERIFIED:
+        actual = _sha256_file(artifact)
+        if actual != item.artifact_checksum:
+            raise ReleaseIntegrityError(
+                f"{code} 文件校验和不一致: expected={item.artifact_checksum} "
+                f"actual={actual}"
+            )
+        _WORKER_VERIFIED.add(artifact)
+
+    symbol = Symbol(code, item.market)
+    if context.period is BarPeriod.D1:
+        return close_history_from_columns(
+            ParquetCache.read_close_columns_sync(
+                artifact,
+                symbol,
+                context.period,
+                start,
+                end,
+            ),
+            market=item.market,
+            decision_at=decision_at,
+        )
+    bars = ParquetCache.read_bars_sync(artifact, symbol, context.period)
+    visible = [
+        bar
+        for bar in bars
+        if start <= bar.timestamp.date() <= end
+        and _timestamp_available_at(bar.timestamp, context.period, item.market)
+        <= decision_at
+    ]
+    return CloseHistoryColumns(
+        dates=tuple(bar.timestamp.date() for bar in visible),
+        available_at=tuple(
+            _timestamp_available_at(bar.timestamp, context.period, item.market)
+            for bar in visible
+        ),
+        closes=np.array([float(bar.close) for bar in visible], dtype=np.float64),
+        last_timestamp=visible[-1].timestamp if visible else None,
+    )
+
+
+def _compute_close_history_process_task(
+    task: _CloseHistoryProcessTask,
+) -> tuple[str, CloseHistoryColumns]:
+    """在子进程中读取一个标的的列式 PIT close 历史(issue #301)。"""
+
+    context = _PRICE_FEATURE_PROCESS_CONTEXT
+    if context is None:
+        raise RuntimeError("特征计算进程未初始化")
+    columns = _read_close_history_in_worker(
+        context, task.code, task.start, task.end, task.decision_at
+    )
+    return task.code, columns
+
+
 def _compute_price_feature_process_task(
     task: _PriceFeatureProcessTask,
 ) -> tuple[str, list[FeatureObservation]]:
@@ -1152,59 +1245,17 @@ def _compute_price_feature_process_task(
     context = _PRICE_FEATURE_PROCESS_CONTEXT
     if context is None:
         raise RuntimeError("特征计算进程未初始化")
-    item = context.instruments.get(task.code)
-    if item is None:
-        raise FactorAnalysisError(f"进程 worker 找不到标的: {task.code}")
 
-    artifact = _safe_release_artifact(context.release_dir, item.artifact_path)
-    if context.verify_files:
-        actual = _sha256_file(artifact)
-        if actual != item.artifact_checksum:
-            raise ReleaseIntegrityError(
-                f"{task.code} 文件校验和不一致: expected={item.artifact_checksum} "
-                f"actual={actual}"
-            )
-
-    symbol = Symbol(task.code, item.market)
-    if context.period is BarPeriod.D1:
-        columns = close_history_from_columns(
-            ParquetCache.read_close_columns_sync(
-                artifact,
-                symbol,
-                context.period,
-                task.start,
-                task.end,
-            ),
-            market=item.market,
-            decision_at=task.decision_at,
-        )
-    else:
-        bars = ParquetCache.read_bars_sync(artifact, symbol, context.period)
-        visible = [
-            bar
-            for bar in bars
-            if task.start <= bar.timestamp.date() <= task.end
-            and _timestamp_available_at(bar.timestamp, context.period, item.market)
-            <= task.decision_at
-        ]
-        columns = CloseHistoryColumns(
-            dates=tuple(bar.timestamp.date() for bar in visible),
-            available_at=tuple(
-                _timestamp_available_at(bar.timestamp, context.period, item.market)
-                for bar in visible
-            ),
-            closes=np.array(
-                [float(bar.close) for bar in visible], dtype=np.float64
-            ),
-            last_timestamp=visible[-1].timestamp if visible else None,
-        )
+    columns = _read_close_history_in_worker(
+        context, task.code, task.start, task.end, task.decision_at
+    )
 
     observations = _build_price_observations(
         source=context.source,
         source_version=context.source_version,
-        symbol=item.code,
-        market=item.market,
-        asset_class=item.asset_class,
+        symbol=task.code,
+        market=context.instruments[task.code].market,
+        asset_class=context.instruments[task.code].asset_class,
         columns=columns,
         momentum_lookback=task.momentum_lookback,
         volatility_windows=task.volatility_windows,
