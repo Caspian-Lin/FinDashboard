@@ -25,7 +25,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { WorkflowHelpPopover } from "@/components/research/ResearchHint";
 import { SelectAllResultsButton } from "../components/selection/SelectAllResultsButton";
 import {
   defaultStrategyParams,
@@ -368,7 +367,6 @@ export default function Backtest() {
         })}
         actions={
           <div className="flex flex-wrap gap-2">
-            <WorkflowHelpPopover />
             <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setPresetsOpen(true)}>
               <Bookmark className="h-4 w-4" />
               {tl({ zh: "策略预设", en: "Strategy presets" })}

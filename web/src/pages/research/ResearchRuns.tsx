@@ -1,4 +1,4 @@
-import { WorkflowHelpPopover, WORKFLOW_NEXT, ResearchHint } from "@/components/research/ResearchHint";
+import { ResearchHint } from "@/components/research/ResearchHint";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
 import { Fragment, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -714,7 +714,6 @@ export default function ResearchRuns() {
         description={tl({ zh: "冻结输入、血缘追踪与运行重放", en: "Frozen inputs, lineage tracing, and run replay" })}
         actions={
           <div className="flex flex-wrap gap-2">
-            <WorkflowHelpPopover next={WORKFLOW_NEXT.runs} />
             <Button size="sm" onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4" />
               {tl({ zh: "排队研究运行", en: "Queue research run" })}

@@ -11,6 +11,11 @@ import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/s
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
 import { navGroups } from "./nav-config";
+import {
+  WorkflowHelpPopover,
+  workflowNextForPath,
+  isResearchWorkflowPath,
+} from "@/components/research/ResearchHint";
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
@@ -25,7 +30,7 @@ function ThemeToggle() {
 function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
   const { tl } = useT();
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* Logo:与顶栏同高(56px),图标/文字在同一对齐线上 */}
       <div className={cn("flex h-14 items-center border-b border-border px-4", collapsed && "justify-center px-2")}>
         <div className="flex items-center gap-2">
@@ -39,7 +44,7 @@ function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavig
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 overflow-y-auto scrollbar-thin py-3" aria-label={tl({ zh: "主导航", en: "Main navigation" })}>
+      <nav className="min-h-0 flex-1 overflow-y-auto scrollbar-thin py-3" aria-label={tl({ zh: "主导航", en: "Main navigation" })}>
         {navGroups.map((group) => (
           <div key={group.label.en} className="mb-4">
             {!collapsed && (
@@ -203,6 +208,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex items-center gap-1">
+            {isResearchWorkflowPath(location.pathname) && (
+              <WorkflowHelpPopover next={workflowNextForPath(location.pathname)} />
+            )}
             <ThemeToggle />
           </div>
         </header>

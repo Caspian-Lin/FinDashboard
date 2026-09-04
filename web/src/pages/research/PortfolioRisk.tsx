@@ -1,4 +1,3 @@
-import { WorkflowHelpPopover, WORKFLOW_NEXT } from "@/components/research/ResearchHint";
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
@@ -1221,7 +1220,6 @@ export default function PortfolioRisk() {
           zh: "目标权重分配、离散交易求解与资金可行性分析",
           en: "Target weight allocation, discrete trade solving and capital feasibility analysis",
         })}
-        actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.portfolio} />}
       />
 
       <Tabs defaultValue="allocate">

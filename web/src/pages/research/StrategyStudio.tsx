@@ -51,8 +51,6 @@ import type {
 } from "@/lib/research";
 import { cn, formatDateTime } from "@/lib/utils";
 import {
-  WorkflowHelpPopover,
-  WORKFLOW_NEXT,
   HintLabel,
   ResearchHint,
 } from "@/components/research/ResearchHint";
@@ -434,7 +432,6 @@ export default function StrategyStudio() {
           zh: "无代码结构化策略配置 — 白名单组件、即时校验、版本管理",
           en: "No-code structured strategy configuration — whitelisted components, instant validation, version management",
         })}
-        actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.strategy} />}
       />
 
       <Alert variant="info" className="mb-4">

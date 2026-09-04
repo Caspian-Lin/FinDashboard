@@ -1,4 +1,3 @@
-import { WorkflowHelpPopover } from "@/components/research/ResearchHint";
 import { type ReactNode, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -892,7 +891,6 @@ export default function Reports() {
       <PageHeader
         title={tl({ zh: "研究报告", en: "Research report" })}
         description={tl({ zh: "聚合展示运行结果、绩效归因与风险概览", en: "Aggregated run results, performance attribution and risk overview" })}
-        actions={<WorkflowHelpPopover />}
       />
 
       <Card className="mb-4">

@@ -110,9 +110,29 @@ export const WORKFLOW_NEXT: Record<string, WorkflowNextStep> = {
   },
 };
 
+const WORKFLOW_NEXT_BY_PATH: [prefix: string, next: WorkflowNextStep][] = [
+  ["/research/data", WORKFLOW_NEXT.data],
+  ["/research/factors", WORKFLOW_NEXT.factors],
+  ["/research/strategy", WORKFLOW_NEXT.strategy],
+  ["/research/experiments", WORKFLOW_NEXT.experiments],
+  ["/research/runs", WORKFLOW_NEXT.runs],
+  ["/research/portfolio", WORKFLOW_NEXT.portfolio],
+  ["/research/simulation", WORKFLOW_NEXT.simulation],
+];
+
+/** 按路径前缀推导当前页在流程中的「下一步」(顶栏 workflow help 用;/backtest 无下一步)。 */
+export function workflowNextForPath(pathname: string): WorkflowNextStep | undefined {
+  return WORKFLOW_NEXT_BY_PATH.find(([prefix]) => pathname.startsWith(prefix))?.[1];
+}
+
+/** 顶栏 workflow help 可见性:研究分组页面 + 回测页。 */
+export function isResearchWorkflowPath(pathname: string): boolean {
+  return pathname.startsWith("/research/") || pathname.startsWith("/backtest");
+}
+
 /**
- * 页顶「研究流程」帮助弹窗:收纳全流程导航与「下一步」引导,
- * 取代此前每页内联的 8 步流程条与页底 NextStepCTA(与侧边栏三重重复)。
+ * 「研究流程」帮助弹窗:全局只挂一份在顶栏(研究分组可见),
+ * 收纳全流程导航与「下一步」引导,取代此前每页页头的独立按钮。
  */
 export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
   const { tl } = useT();

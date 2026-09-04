@@ -55,8 +55,6 @@ import { api, isJobRunning } from "@/lib/api";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
 import { cn, formatDateTime, formatNumber, formatPercent } from "@/lib/utils";
 import {
-  WorkflowHelpPopover,
-  WORKFLOW_NEXT,
   HintLabel,
   ResearchHint,
 } from "@/components/research/ResearchHint";
@@ -2057,7 +2055,6 @@ export default function ResearchData() {
           zh: "行情数据拉取、研究数据发布(含数据预览)与标的元数据",
           en: "Bar data fetch, research data releases (with data preview) and instrument metadata",
         })}
-        actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.data} />}
       />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>

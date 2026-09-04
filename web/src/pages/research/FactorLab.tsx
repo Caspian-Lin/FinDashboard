@@ -56,8 +56,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   ResearchHint,
-  WorkflowHelpPopover,
-  WORKFLOW_NEXT,
 } from "@/components/research/ResearchHint";
 import { FeatureSnapshotProgress } from "@/components/research/FeatureSnapshotProgress";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
@@ -1829,7 +1827,6 @@ export default function FactorLab() {
       <PageHeader
         title={tl({ zh: "因子实验室", en: "Factor Lab" })}
         description={tl({ zh: "因子发现、信号预览与实验验证", en: "Factor discovery, signal preview, and experiment validation" })}
-        actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.factors} />}
       />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>

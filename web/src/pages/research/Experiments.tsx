@@ -47,8 +47,6 @@ import { MasterList, MasterListItem } from "@/components/ui/master-list";
 import { Separator } from "@/components/ui/separator";
 import {
   HintLabel,
-  WorkflowHelpPopover,
-  WORKFLOW_NEXT,
 } from "@/components/research/ResearchHint";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
 import {
@@ -864,7 +862,6 @@ export default function Experiments() {
           zh: "机器验证实验、样本外检验与过拟合防护",
           en: "Machine validation experiments, out-of-sample checks and overfitting protection",
         })}
-        actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.experiments} />}
       />
 
       <Alert variant="info" className="mb-4">

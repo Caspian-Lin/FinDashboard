@@ -1,4 +1,3 @@
-import { WorkflowHelpPopover, WORKFLOW_NEXT } from "@/components/research/ResearchHint";
 import { MasterList, MasterListItem } from "@/components/ui/master-list";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useT } from "@/i18n";
@@ -1651,7 +1650,6 @@ export default function Simulation() {
         description={tl({ zh: "产品模拟盘（纸面交易）：基于结构化目标仓位决策的隔离模拟运行", en: "Product simulation (paper trading): isolated simulation runs driven by structured target position decisions" })}
         actions={
           <div className="flex flex-wrap gap-2">
-            <WorkflowHelpPopover next={WORKFLOW_NEXT.simulation} />
             <Button
               variant="outline"
               size="sm"
