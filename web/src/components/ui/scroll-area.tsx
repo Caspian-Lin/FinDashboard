@@ -11,7 +11,10 @@ const ScrollArea = React.forwardRef<
     className={cn("relative overflow-hidden", className)}
     {...props}
   >
-    <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit]">
+    {/* max-h-[inherit]:max-h 加在 Root 上时父级高度仍是 auto,
+        Viewport 的 h-full 解析不出确定高度会被裁切而不滚动(shadcn#594);
+        inherit 让 Viewport 直接继承 Root 的 max-height,滚动区生效。 */}
+    <ScrollAreaPrimitive.Viewport className="h-full max-h-[inherit] w-full rounded-[inherit]">
       {children}
     </ScrollAreaPrimitive.Viewport>
     <ScrollBar />
