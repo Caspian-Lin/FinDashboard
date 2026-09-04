@@ -382,6 +382,29 @@ class TestBuildContextsPooledEquivalence:
 # ---- worker 回收禁用回归 ------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _unfiltered_structlog():
+    """隔离 ``setup_logging`` 对 structlog 的全局污染(#315 同款,#316 记录)。
+
+    CI 从仓库根跑全量(集成测试按字母序先于 unit),任何先行的测试调用
+    ``setup_logging``(级别过滤 + ``cache_logger_on_first_use=True``)后,
+    frozen_loader 的模块 logger 已缓存,``capture_logs`` 永远抓空。本文件的
+    降级测试断言具名 warning,测试期重置为不缓存并重建模块 logger,结束恢复。
+    """
+    import structlog
+
+    from finboard_backtest.research_run import frozen_loader
+
+    saved_config = structlog.get_config()
+    saved_logger = frozen_loader.logger
+    structlog.reset_defaults()
+    structlog.configure(cache_logger_on_first_use=False)
+    frozen_loader.logger = structlog.get_logger("finboard_backtest.research_run.frozen_loader")
+    yield
+    frozen_loader.logger = saved_logger
+    structlog.configure(**saved_config)
+
+
 class TestWorkerRecyclingDisabled:
     """AC:worker 回收默认禁用(#301 实测 Windows spawn 死锁)。
 
