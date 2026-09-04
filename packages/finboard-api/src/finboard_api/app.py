@@ -36,6 +36,7 @@ from finboard_api.routes import (
     portfolio_router,
     positions_router,
     reconcile_router,
+    research_docs_router,
     research_memories_router,
     research_router,
     research_runs_router,
@@ -468,6 +469,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(strategy_presets_router)
     app.include_router(strategy_specs_router)
     app.include_router(research_router)
+    app.include_router(research_docs_router)
     app.include_router(research_memories_router)
     app.include_router(research_runs_router)
     app.include_router(jobs_router)

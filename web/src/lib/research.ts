@@ -909,3 +909,29 @@ export function featureSnapshotCreatedAt(snapshot: FeatureSnapshot): string {
 }
 
 export type { ApiError };
+
+/* ---------------------------------------------------------------------------
+ * 研究记录(docs/research 三件套,只读)
+ * 后端: GET /api/research/docs + GET /api/research/docs/{path}
+ * canonical 仍是仓库文件(经 PR 维护),前端只读展示。
+ * ------------------------------------------------------------------------- */
+
+export type ResearchDocKind = "overview" | "roadmap" | "findings" | "round" | "other";
+
+export interface ResearchDocSummary {
+  path: string;
+  kind: ResearchDocKind;
+  title: string;
+  size_bytes: number;
+  updated_at: string;
+}
+
+export interface ResearchDocDetail extends ResearchDocSummary {
+  content: string;
+}
+
+export const researchDocsApi = {
+  list: () => fetchJSON<{ docs: ResearchDocSummary[] }>(`/research/docs`),
+  get: (path: string) =>
+    fetchJSON<ResearchDocDetail>(`/research/docs/${path.split("/").map(encodeURIComponent).join("/")}`),
+};
