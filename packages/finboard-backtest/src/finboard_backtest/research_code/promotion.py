@@ -300,6 +300,11 @@ def _validation_summary_and_failures(
         "experiment_id": validation.get("experiment_id"),
         "status": status,
         "final_test_unsealed": unsealed,
+        # issue #310:调用方在 validation mapping 上附带的派生结论语义
+        # (supported|not_supported|inconclusive)透传进证据摘要——
+        # validated_oos 只代表 OOS 流程完成,不代表假设获支持;缺失为 None
+        # (旧调用方不携带),不参与门判定。
+        "oos_outcome": _enum_value(validation.get("oos_outcome")),
         "finalized_at": validation.get("finalized_at"),
         "version_checksum": validation.get("version_checksum"),
     }

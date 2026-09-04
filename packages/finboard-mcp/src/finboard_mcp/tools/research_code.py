@@ -29,6 +29,7 @@ from finboard_backtest.research_code import (
     is_promoted_artifact,
 )
 from finboard_backtest.research_run.contracts import stable_checksum
+from finboard_backtest.validation.contracts import derive_oos_outcome
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
@@ -39,6 +40,7 @@ from finboard_persistence import (
     ResearchCodeRunRepository,
     ResearchExperimentRepository,
     ResearchRunRepository,
+    ResearchTrialRepository,
 )
 
 _AGENT_ACTOR = "agent:mcp"
@@ -275,6 +277,17 @@ async def promote(
                 )
 
             experiment = await ResearchExperimentRepository(session).get(validation_experiment_id)
+            # issue #310:派生 oos_outcome 随晋级证据展示——status=validated_oos
+            # 只代表 OOS 流程完成;best trial OOS 被拒不改变晋级门判定(#245
+            # 决策 A 的语义区分交由证据消费方),但结论必须可见、不静默。
+            oos_outcome: str | None = None
+            if experiment is not None:
+                oos_outcome = derive_oos_outcome(
+                    experiment,
+                    await ResearchTrialRepository(session).list_by_experiment(
+                        validation_experiment_id
+                    ),
+                ).value
             if experiment is None:
                 failure = McpToolError(
                     "not_found",
@@ -286,6 +299,7 @@ async def promote(
                     validation_experiment_id=validation_experiment_id,
                     screen_run_id=screen_run_id,
                     failure=failure,
+                    oos_outcome=None,
                 )
                 raise failure
             try:
@@ -299,12 +313,13 @@ async def promote(
                     validation_experiment_id=validation_experiment_id,
                     screen_run_id=screen_run_id,
                     failure=failure,
+                    oos_outcome=oos_outcome,
                 )
                 raise
             thresholds = _promotion_thresholds(app)
             gate = evaluate_promotion_gates(
                 screen=screen,
-                validation=experiment.as_dict(),
+                validation={**experiment.as_dict(), "oos_outcome": oos_outcome},
                 thresholds=thresholds,
                 artifact_id=artifact.artifact_id,
                 artifact_kind=artifact.kind,
@@ -372,6 +387,7 @@ async def _record_promotion_failure(
     validation_experiment_id: str,
     screen_run_id: str,
     failure: McpToolError,
+    oos_outcome: str | None = None,
 ) -> None:
     """把可识别的证据缺失/绑定错误也归档为 draft/failed。"""
     evidence = _promotion_evidence(
@@ -382,6 +398,8 @@ async def _record_promotion_failure(
             "passed": False,
             "failures": [failure.message],
             "error_kind": failure.kind,
+            # issue #310:失败证据同样携带派生 OOS 结论(实验不存在时为 None)。
+            "validation": {"oos_outcome": oos_outcome},
         },
         execution={},
     )
@@ -761,11 +779,14 @@ def register(mcp: MCPServer) -> None:
             "run 状态标注在证据 execution.source_run_status;或成功 RCR screen "
             "指标)与 validation_experiment_id(#57):状态必须"
             "validated_oos 且 final_test_unsealed=true,并绑定同一 artifact/name/"
-            "kind/commit。screen 机器门默认要求 abs(rank_ic)>=0.02、"
-            "average_turnover<=0.80、相关性绝对值<=0.80、至少 2 期;rank_ic 取"
-            "绝对值是有意设计(#245 用户决策 A):门只证「存在非噪声信号」,方向"
-            "正确性由因子目录 preference 与 screen 权益/换窗复测承担,负 IC"
-            "方向型因子过门不构成缺陷。失败返回"
+            "kind/commit。晋级证据 gates.validation 附带派生 oos_outcome(#310:"
+            "supported|not_supported|inconclusive)——status=validated_oos 只代表"
+            "OOS 流程完成,best trial OOS 被拒不阻止晋级门(#245 决策 A),但"
+            "not_supported 结论在证据中可见,消费方应自行评估。screen 机器门默认"
+            "要求 abs(rank_ic)>=0.02、average_turnover<=0.80、相关性绝对值<=0.80、"
+            "至少 2 期;rank_ic 取绝对值是有意设计(#245 用户决策 A):门只证"
+            "「存在非噪声信号」,方向正确性由因子目录 preference 与 screen 权益/"
+            "换窗复测承担,负 IC 方向型因子过门不构成缺陷。失败返回"
             "具体缺失/超阈值门名并保留 draft + promotion_status=failed 证据。"
             "通过后旧 active 自动 retired。纯研究治理操作,不连接 broker、不下单。"
         ),
