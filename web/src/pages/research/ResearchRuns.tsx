@@ -1,7 +1,7 @@
 import { WorkflowHelpPopover, WORKFLOW_NEXT } from "@/components/research/ResearchHint";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Activity,
   ArrowLeft,
@@ -166,6 +166,170 @@ function InfoItem({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+interface FrozenRef {
+  id: string;
+  version: string;
+  checksum: string;
+}
+
+/** manifest.dataset_releases / manifest.factor_snapshots 是 FrozenArtifactRef 数组。 */
+function frozenRefs(value: unknown): FrozenRef[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      const rec = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+      return {
+        id: typeof rec.artifact_id === "string" ? rec.artifact_id : "",
+        version: typeof rec.version === "string" ? rec.version : "",
+        checksum: typeof rec.checksum === "string" ? rec.checksum : "",
+      };
+    })
+    .filter((item) => item.id !== "");
+}
+
+/**
+ * 冻结输入结构化视图:把 manifest 里埋着的数据发布 / 因子快照 / 执行模式
+ * 提升为可读卡片,dataset_release_ids 可跳数据页详情、快照可跳因子实验室。
+ */
+function FrozenInputsCard({ manifest }: { manifest: Record<string, unknown> }) {
+  const { tl } = useT();
+  const releases = frozenRefs(manifest.dataset_releases);
+  const snapshots = frozenRefs(manifest.factor_snapshots);
+  const parameters = manifestRecord(manifest, "parameters");
+  const benchmarkConfig = manifestRecord(manifest, "benchmark_config");
+  const benchmarkSymbol =
+    typeof benchmarkConfig?.symbol === "string" && benchmarkConfig.symbol !== ""
+      ? benchmarkConfig.symbol
+      : null;
+  const rebalanceFrequency =
+    typeof parameters?.rebalance_frequency === "string" && parameters.rebalance_frequency !== ""
+      ? parameters.rebalance_frequency
+      : null;
+  const executionMode = rebalanceFrequency !== null ? "multi_period" : "single_shot";
+  const specChecksum =
+    typeof manifest.strategy_spec_checksum === "string" ? manifest.strategy_spec_checksum : null;
+  const codeVersion =
+    typeof manifest.code_version === "string" && manifest.code_version !== ""
+      ? manifest.code_version
+      : null;
+
+  if (releases.length === 0 && snapshots.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">
+          {tl({ zh: "冻结输入", en: "Frozen inputs" })}
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            {tl({
+              zh: "运行执行时只读取以下内容寻址引用,与后续数据变化隔离",
+              en: "The run only reads these content-addressed references, isolated from later data changes",
+            })}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-xs">
+        <div className="flex flex-wrap gap-x-6 gap-y-1">
+          <span>
+            {tl({ zh: "执行模式:", en: "Execution mode:" })}
+            <Badge variant="info" className="ml-1.5 font-mono">
+              {executionMode}
+            </Badge>
+            {rebalanceFrequency && (
+              <span className="ml-2 text-muted-foreground">
+                {tl({ zh: "调仓频率:", en: "Rebalance:" })}
+                <span className="ml-1 font-mono text-foreground">{rebalanceFrequency}</span>
+              </span>
+            )}
+          </span>
+          {benchmarkSymbol && (
+            <span>
+              {tl({ zh: "基准:", en: "Benchmark:" })}
+              <span className="ml-1 font-mono text-foreground">{benchmarkSymbol}</span>
+            </span>
+          )}
+          {codeVersion && (
+            <span>
+              {tl({ zh: "代码版本:", en: "Code version:" })}
+              <span className="ml-1 font-mono text-foreground">{codeVersion}</span>
+            </span>
+          )}
+        </div>
+
+        <div>
+          <p className="font-medium text-foreground">
+            {tl({ zh: "数据发布", en: "Data releases" })}
+            <span className="ml-1 text-muted-foreground">({releases.length})</span>
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {releases.map((ref) => (
+              <Tooltip key={ref.id}>
+                <TooltipTrigger asChild>
+                  <Link
+                    to={`/research/data?release=${encodeURIComponent(ref.id)}`}
+                    className="inline-flex items-center rounded-md border border-border bg-card px-2 py-1 font-mono text-[11px] text-foreground transition-colors hover:bg-accent"
+                  >
+                    {ref.id}
+                    {ref.version && <span className="ml-1 text-muted-foreground">@{ref.version}</span>}
+                  </Link>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-sm break-all font-mono text-[10px]">
+                  {tl({ zh: "点击到数据页查看发布详情", en: "Open release details in the Data page" })}
+                  {ref.checksum && (
+                    <>
+                      <br />
+                      checksum: {ref.checksum}
+                    </>
+                  )}
+                </TooltipContent>
+              </Tooltip>
+            ))}
+          </div>
+        </div>
+
+        {snapshots.length > 0 && (
+          <div>
+            <p className="font-medium text-foreground">
+              {tl({ zh: "因子快照", en: "Factor snapshots" })}
+              <span className="ml-1 text-muted-foreground">({snapshots.length})</span>
+            </p>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {snapshots.map((ref) => (
+                <Tooltip key={ref.id}>
+                  <TooltipTrigger asChild>
+                    <Link
+                      to={`/research/factors?snapshot=${encodeURIComponent(ref.id)}`}
+                      className="inline-flex items-center rounded-md border border-border bg-card px-2 py-1 font-mono text-[11px] text-foreground transition-colors hover:bg-accent"
+                    >
+                      {ref.id}
+                    </Link>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-sm break-all font-mono text-[10px]">
+                    {tl({ zh: "点击到因子实验室查看快照详情", en: "Open snapshot details in Factor Lab" })}
+                    {ref.checksum && (
+                      <>
+                        <br />
+                        checksum: {ref.checksum}
+                      </>
+                    )}
+                  </TooltipContent>
+                </Tooltip>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {specChecksum && (
+          <p className="break-all text-muted-foreground">
+            {tl({ zh: "策略规格 checksum:", en: "Strategy spec checksum:" })}
+            <span className="ml-1 font-mono text-foreground">{specChecksum}</span>
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function CreateResearchRunDialog({
   open,
   onOpenChange,
@@ -193,9 +357,21 @@ function CreateResearchRunDialog({
   );
   const releaseIds = specReleaseIds(selectedStrategy);
   const needsFactorSnapshot = specNeedsFactorSnapshot(selectedStrategy);
+  const releaseKey = releaseIds.join(",");
   const snapshotsQuery = useQuery({
-    queryKey: ["feature-snapshots", "queue", releaseIds[0]],
-    queryFn: () => factorLabApi.features(releaseIds[0], 100),
+    queryKey: ["feature-snapshots", "queue", releaseKey],
+    queryFn: async () => {
+      // 验证计划可引用多份数据发布;快照须按全部所选发布并集匹配(此前只查第一份)。
+      const perRelease = await Promise.all(
+        releaseIds.map((id) => factorLabApi.features(id, 100)),
+      );
+      const seen = new Set<string>();
+      return perRelease.flat().filter((snapshot) => {
+        if (seen.has(snapshot.snapshot_id)) return false;
+        seen.add(snapshot.snapshot_id);
+        return true;
+      });
+    },
     enabled: open && releaseIds.length > 0 && needsFactorSnapshot,
   });
 
@@ -403,13 +579,20 @@ export default function ResearchRuns() {
   const { tl, lang } = useT();
   const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 选中运行进 URL(?run=RR-xxx):刷新/分享/返回不再丢详情。
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedId = searchParams.get("run");
+  const setSelectedId = (runId: string | null) => {
+    setSearchParams(runId ? { run: runId } : {}, { replace: true });
+  };
   const [cancelOpen, setCancelOpen] = useState(false);
   const [replayOpen, setReplayOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [idempotencyKey, setIdempotencyKey] = useState("");
   const [requestedBy, setRequestedBy] = useState("");
   const [lineageOpen, setLineageOpen] = useState(false);
+  // 决策产物表中被展开查看 payload 的 artifact。
+  const [expandedArtifacts, setExpandedArtifacts] = useState<Set<string>>(new Set());
 
   // 状态过滤走服务端(status 多值查询参数);"all" 不传,由后端返回全部。
   const listQuery = useQuery({
@@ -869,14 +1052,35 @@ export default function ResearchRuns() {
                           <AlertTitle>{tl({ zh: "运行失败", en: "Run failed" })}</AlertTitle>
                           <AlertDescription>
                             <span className="font-mono">{detail.error_code}</span>
+                            {detail.error_summary && (
+                              <p className="mt-1.5 whitespace-pre-wrap break-words">{detail.error_summary}</p>
+                            )}
                           </AlertDescription>
                         </Alert>
                       )}
 
+                      {detail.manifest && <FrozenInputsCard manifest={detail.manifest} />}
+
                       <Separator />
 
-                      <JsonBlock label={tl({ zh: "冻结清单 (manifest)", en: "Frozen manifest" })} value={detail.manifest} />
-                      <JsonBlock label={tl({ zh: "结果 (result)", en: "Result" })} value={detail.result} />
+                      <div className="space-y-2">
+                        <details className="group rounded-md border border-border">
+                          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+                            {tl({ zh: "冻结清单 (manifest) 原始 JSON", en: "Frozen manifest (raw JSON)" })}
+                          </summary>
+                          <div className="px-3 pb-3">
+                            <JsonBlock label="" value={detail.manifest} />
+                          </div>
+                        </details>
+                        <details className="group rounded-md border border-border">
+                          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+                            {tl({ zh: "结果 (result) 原始 JSON", en: "Result (raw JSON)" })}
+                          </summary>
+                          <div className="px-3 pb-3">
+                            <JsonBlock label="" value={detail.result} />
+                          </div>
+                        </details>
+                      </div>
 
                       <div>
                         <div className="mb-2 flex items-center justify-between">
@@ -926,67 +1130,97 @@ export default function ResearchRuns() {
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
-                                {artifactsQuery.data.map((art) => (
-                                  <TableRow key={art.artifact_id}>
-                                    <TableCell className="tabular-nums">
-                                      {art.sequence}
-                                    </TableCell>
-                                    <TableCell>
-                                      <Badge variant="info" className="font-mono">
-                                        {art.stage}
-                                      </Badge>
-                                    </TableCell>
-                                    <TableCell>
-                                      <Tooltip>
-                                        <TooltipTrigger asChild>
-                                          <span className="font-mono text-xs text-muted-foreground">
-                                            {art.decision_id.slice(0, 12)}…
-                                          </span>
-                                        </TooltipTrigger>
-                                        <TooltipContent className="font-mono">
-                                          {art.decision_id}
-                                        </TooltipContent>
-                                      </Tooltip>
-                                    </TableCell>
-                                    <TableCell>
-                                      <Tooltip>
-                                        <TooltipTrigger asChild>
-                                          <span className="font-mono text-xs text-muted-foreground">
-                                            {art.trace_id.slice(0, 12)}…
-                                          </span>
-                                        </TooltipTrigger>
-                                        <TooltipContent className="font-mono">
-                                          {art.trace_id}
-                                        </TooltipContent>
-                                      </Tooltip>
-                                    </TableCell>
-                                    <TableCell>
-                                      {art.parent_trace_ids.length > 0 ? (
-                                        <div className="flex flex-wrap gap-1">
-                                          {art.parent_trace_ids.map((pid) => (
-                                            <Tooltip key={pid}>
-                                              <TooltipTrigger asChild>
-                                                <Badge
-                                                  variant="outline"
-                                                  className="font-mono text-[10px]"
-                                                >
-                                                  {pid.slice(0, 8)}…
-                                                </Badge>
-                                              </TooltipTrigger>
-                                              <TooltipContent className="font-mono">
-                                                {pid}
-                                              </TooltipContent>
-                                            </Tooltip>
-                                          ))}
-                                        </div>
-                                      ) : (
-                                        <span className="text-xs text-muted-foreground">
-                                          —
+                                {artifactsQuery.data.map((art) => {
+                                  const expanded = expandedArtifacts.has(art.artifact_id);
+                                  return (
+                                    <Fragment key={art.artifact_id}>
+                                    <TableRow
+                                      className="cursor-pointer"
+                                      onClick={() =>
+                                        setExpandedArtifacts((current) => {
+                                          const next = new Set(current);
+                                          if (next.has(art.artifact_id)) {
+                                            next.delete(art.artifact_id);
+                                          } else {
+                                            next.add(art.artifact_id);
+                                          }
+                                          return next;
+                                        })
+                                      }
+                                    >
+                                      <TableCell className="tabular-nums">
+                                        <span className={cn("mr-1 inline-block text-[10px] text-muted-foreground transition-transform", expanded && "rotate-90")}>
+                                          ▶
                                         </span>
-                                      )}
-                                    </TableCell>
-                                  </TableRow>
-                                ))}
+                                        {art.sequence}
+                                      </TableCell>
+                                      <TableCell>
+                                        <Badge variant="info" className="font-mono">
+                                          {art.stage}
+                                        </Badge>
+                                      </TableCell>
+                                      <TableCell>
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <span className="font-mono text-xs text-muted-foreground">
+                                              {art.decision_id.slice(0, 12)}…
+                                            </span>
+                                          </TooltipTrigger>
+                                          <TooltipContent className="font-mono">
+                                            {art.decision_id}
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      </TableCell>
+                                      <TableCell>
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <span className="font-mono text-xs text-muted-foreground">
+                                              {art.trace_id.slice(0, 12)}…
+                                            </span>
+                                          </TooltipTrigger>
+                                          <TooltipContent className="font-mono">
+                                            {art.trace_id}
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      </TableCell>
+                                      <TableCell>
+                                        {art.parent_trace_ids.length > 0 ? (
+                                          <div className="flex flex-wrap gap-1">
+                                            {art.parent_trace_ids.map((pid) => (
+                                              <Tooltip key={pid}>
+                                                <TooltipTrigger asChild>
+                                                  <Badge
+                                                    variant="outline"
+                                                    className="font-mono text-[10px]"
+                                                  >
+                                                    {pid.slice(0, 8)}…
+                                                  </Badge>
+                                                </TooltipTrigger>
+                                                <TooltipContent className="font-mono">
+                                                  {pid}
+                                                </TooltipContent>
+                                              </Tooltip>
+                                            ))}
+                                          </div>
+                                        ) : (
+                                          <span className="text-xs text-muted-foreground">
+                                            —
+                                          </span>
+                                        )}
+                                      </TableCell>
+                                    </TableRow>
+                                    {expanded && (
+                                      <TableRow className="hover:bg-transparent">
+                                        <TableCell colSpan={5} className="bg-muted/20">
+                                          <pre className="max-h-64 overflow-auto rounded-md border border-border bg-muted/30 p-3 font-mono text-[11px] leading-relaxed">
+                                            {art.payload ? JSON.stringify(art.payload, null, 2) : "—"}
+                                          </pre>
+                                        </TableCell>
+                                      </TableRow>
+                                    )}
+                                    </Fragment>
+                                  );
+                                })}
                               </TableBody>
                             </Table>
                           </div>
