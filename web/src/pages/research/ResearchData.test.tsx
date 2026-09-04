@@ -217,7 +217,7 @@ describe("ResearchData 数据发布闭环", () => {
     const user = userEvent.setup();
     const { container } = renderWithProviders(<ResearchData />);
 
-    await user.click(screen.getByRole("tab", { name: "数据发布" }));
+    await user.click(screen.getByRole("tab", { name: "行情" }));
     await user.click(
       screen.getByRole("button", { name: "创建数据发布" }),
     );
@@ -270,7 +270,7 @@ describe("ResearchData 数据发布闭环", () => {
     });
 
     renderWithProviders(<ResearchData />);
-    await user.click(screen.getByRole("tab", { name: "标的元数据" }));
+    await user.click(screen.getByRole("tab", { name: "标的与档案" }));
 
     expect(
       await screen.findByText("元数据尚未覆盖现有行情缓存"),
@@ -323,7 +323,7 @@ describe("ResearchData 数据发布闭环", () => {
     });
 
     renderWithProviders(<ResearchData />);
-    await user.click(screen.getByRole("tab", { name: "数据发布" }));
+    await user.click(screen.getByRole("tab", { name: "行情" }));
     await user.click(screen.getByRole("button", { name: "创建数据发布" }));
     await user.click(
       await screen.findByRole("button", {
@@ -402,7 +402,7 @@ describe("ResearchData 数据发布闭环", () => {
       });
 
     renderWithProviders(<ResearchData />);
-    await user.click(screen.getByRole("tab", { name: "数据发布" }));
+    await user.click(screen.getByRole("tab", { name: "行情" }));
     await user.click(screen.getByRole("button", { name: "创建数据发布" }));
     await user.click(screen.getByLabelText("发布类型"));
     await user.click(screen.getByRole("option", { name: "多资产混合来源" }));

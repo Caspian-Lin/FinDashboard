@@ -552,13 +552,36 @@ export interface DatasetReleaseCapability {
   missing_requirements: string[];
 }
 
+/**
+ * 数据集发布类型(与后端 ResearchDatasetReleaseCreate.release_kind 一致):
+ * - a_share_tushare / multi_asset_mixed → bars 主发布(dataset_kind=bars);
+ * - daily_metrics / financial_indicators → 从 research_* 表冻结的研究数据发布;
+ * - convertible_metrics → 转债派生指标(转股价值/转股溢价率)发布。
+ */
+export type DatasetReleaseKind =
+  | "a_share_tushare"
+  | "multi_asset_mixed"
+  | "daily_metrics"
+  | "financial_indicators"
+  | "convertible_metrics";
+
 export interface DatasetReleaseCreate {
   release_id: string;
   dataset_name: string;
-  release_kind: "a_share_tushare" | "multi_asset_mixed";
+  release_kind: DatasetReleaseKind;
   source?: "akshare" | "yfinance" | "tushare" | "mixed" | "manual";
   version: string;
-  symbols: string[];
+  /**
+   * 标的集三选一(与后端 #261 一致,恰好声明一种):
+   * - symbols:内联标的列表;
+   * - symbols_from_release:复制既有可用发布冻结的标的集;
+   * - full_market:instruments 表全活跃标的按 release_kind 语义展开
+   *   (股票单源/研究数据发布只取 A 股股票,convertible_metrics 只取转债),
+   *   展开发生在入队期,展开为空 422 拒绝。
+   */
+  symbols?: string[];
+  symbols_from_release?: string;
+  full_market?: boolean;
   start_date: string;
   end_date: string;
   adjustment: "qfq" | "hqfq" | "none";
