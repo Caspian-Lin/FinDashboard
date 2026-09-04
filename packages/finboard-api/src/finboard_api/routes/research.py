@@ -21,7 +21,7 @@ import subprocess
 from datetime import UTC, datetime
 from datetime import date as _date
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -470,8 +470,9 @@ async def get_factor_catalog(
     items: list[FactorDefinitionOut] = []
     for definition in factor_lab_catalog(role):
         data = definition.as_dict()
+        raw_fields = data.get("source_fields", [])
         data["source_datasets"] = _factor_source_datasets(
-            [str(field) for field in data.get("source_fields", [])]
+            [str(field) for field in cast(list[object], raw_fields)]
         )
         items.append(FactorDefinitionOut.model_validate(data))
     return items
