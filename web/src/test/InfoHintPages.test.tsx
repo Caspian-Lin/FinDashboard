@@ -183,6 +183,8 @@ describe("目标页面 InfoHint 接入", () => {
     const user = userEvent.setup();
     renderPage(<Backtest />);
 
+    // 配置卡默认折叠(结果优先布局):先展开再查字段级说明
+    await user.click(screen.getByRole("button", { name: /回测配置/ }));
     const trigger = await screen.findByRole("button", {
       name: "查看“初始资金”说明",
     });
