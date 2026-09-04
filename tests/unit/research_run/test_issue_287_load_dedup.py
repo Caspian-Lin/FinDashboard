@@ -208,19 +208,37 @@ def _provider_stub(provider: FrozenReleaseProvider, counter: dict[str, int]) -> 
     (原 ``fetch_point_in_time_bars``),计数键名保持 ``pit`` 不变。
     """
 
-    async def counting_pit(symbol: Symbol, period: BarPeriod, start: date, end: date, *,
-                            decision_at: datetime, adjust: str = "qfq") -> object:
+    async def counting_pit(
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+        *,
+        decision_at: datetime,
+        adjust: str = "qfq",
+    ) -> object:
         counter["pit"] += 1
         return await FrozenReleaseProvider.fetch_close_history(
-            provider, symbol, period, start, end,
-            decision_at=decision_at, adjust=adjust,
+            provider,
+            symbol,
+            period,
+            start,
+            end,
+            decision_at=decision_at,
+            adjust=adjust,
         )
 
-    async def counting_bars(symbol: Symbol, period: BarPeriod, start: date, end: date, *,
-                            adjust: str = "qfq") -> object:
+    async def counting_bars(
+        symbol: Symbol, period: BarPeriod, start: date, end: date, *, adjust: str = "qfq"
+    ) -> object:
         counter["bars"] += 1
         return await FrozenReleaseProvider.fetch_bars(
-            provider, symbol, period, start, end, adjust=adjust,
+            provider,
+            symbol,
+            period,
+            start,
+            end,
+            adjust=adjust,
         )
 
     provider.fetch_close_history = counting_pit  # type: ignore[assignment]
@@ -231,9 +249,7 @@ def _provider_stub(provider: FrozenReleaseProvider, counter: dict[str, int]) -> 
 class TestCloseMatrixEqualsPerPeriodPitReads:
     """AC:close 矩阵切片与逐期 PIT 读取逐值相等(真实 provider)。"""
 
-    async def test_prices_and_execution_prices_equal_per_period(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_prices_and_execution_prices_equal_per_period(self, tmp_path: Path) -> None:
         provider, _ = await _build_release(tmp_path)
 
         def factory(release_id: str) -> FrozenReleaseProvider:
@@ -291,14 +307,9 @@ class TestCloseMatrixEqualsPerPeriodPitReads:
         assert counter["pit"] == len(_SYMBOL_CODES)
         # 矩阵对全部候选可切片(真实 provider、单调数据)。
         assert set(loader.close_histories) == set(_SYMBOL_CODES)
-        assert all(
-            isinstance(item, SymbolCloseHistory)
-            for item in loader.close_histories.values()
-        )
+        assert all(isinstance(item, SymbolCloseHistory) for item in loader.close_histories.values())
 
-    async def test_price_series_matrix_equals_serial_reference(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_price_series_matrix_equals_serial_reference(self, tmp_path: Path) -> None:
         provider, _ = await _build_release(tmp_path)
         loader = FrozenInputLoader(
             release_provider_factory=lambda rid: provider,
@@ -307,9 +318,7 @@ class TestCloseMatrixEqualsPerPeriodPitReads:
         # 触发矩阵构建。
         await loader._load_close_prices(
             provider,
-            tuple(
-                _candidate(code) for code in _SYMBOL_CODES
-            ),
+            tuple(_candidate(code) for code in _SYMBOL_CODES),
             datetime.combine(SESSIONS[5], time(15, 0), tzinfo=_CST),
         )
         for decision_at, _ in _decision_days():
@@ -352,7 +361,9 @@ class TestTradingCalendarCache:
         second = await _release_trading_days(provider)
 
         assert first == second == SESSIONS
-        assert counter["bars"] == 1
+        # issue #334:日历改为 ≤8 只 ready 标的的采样并集(本发布 3 只全采),
+        # 缓存命中后第二次推导零新增读取。
+        assert counter["bars"] == len(_SYMBOL_CODES)
 
     async def test_unhashable_stub_provider_still_works(self) -> None:
         """非真实 provider(非 isinstance)保持逐次推导原行为,不走缓存。"""
@@ -451,9 +462,7 @@ class _InterleavedStub:
                 dataset_kind: Any = ReleaseDatasetKind.BARS
 
             self.release = _Release()
-        self.yield_rounds = {
-            code: index + 1 for index, code in enumerate(self.closes_by_symbol)
-        }
+        self.yield_rounds = {code: index + 1 for index, code in enumerate(self.closes_by_symbol)}
 
     async def fetch_point_in_time_bars(
         self,
@@ -502,8 +511,7 @@ class TestGatherEqualsSerial:
     async def test_load_close_prices_fallback_matches_serial(self) -> None:
         stub = _InterleavedStub(
             closes_by_symbol={
-                code: [_close(code, day) for day in SESSIONS]
-                for code in _SYMBOL_CODES
+                code: [_close(code, day) for day in SESSIONS] for code in _SYMBOL_CODES
             }
         )
         as_of = datetime.combine(SESSIONS[4], time(15, 0), tzinfo=_CST)
@@ -531,21 +539,29 @@ class TestGatherEqualsSerial:
 
         class _Exploding(_InterleavedStub):
             async def fetch_point_in_time_bars(
-                self, symbol: object, period: object, start: date, end: date, *,
-                decision_at: datetime, adjust: str = "qfq",
+                self,
+                symbol: object,
+                period: object,
+                start: date,
+                end: date,
+                *,
+                decision_at: datetime,
+                adjust: str = "qfq",
             ) -> list[Any]:
                 code = cast(Any, symbol).code
                 await asyncio.sleep(0)
                 if code in {"600519.SH", "600036.SH"}:
                     raise _Err(f"missing {code}")
                 return await super().fetch_point_in_time_bars(
-                    symbol, period, start, end,
-                    decision_at=decision_at, adjust=adjust,
+                    symbol,
+                    period,
+                    start,
+                    end,
+                    decision_at=decision_at,
+                    adjust=adjust,
                 )
 
-        stub = _Exploding(
-            closes_by_symbol={code: [Decimal("10")] * 4 for code in _SYMBOL_CODES}
-        )
+        stub = _Exploding(closes_by_symbol={code: [Decimal("10")] * 4 for code in _SYMBOL_CODES})
         candidates = [_candidate(code) for code in _SYMBOL_CODES]
         as_of = datetime.combine(SESSIONS[4], time(15, 0), tzinfo=_CST)
         with pytest.raises(_Err, match=re.escape("missing 600519.SH")):
@@ -571,8 +587,7 @@ class TestGatherEqualsSerial:
     async def test_load_price_series_fallback_matches_serial(self) -> None:
         stub = _InterleavedStub(
             closes_by_symbol={
-                code: [_close(code, day) for day in SESSIONS]
-                for code in _SYMBOL_CODES
+                code: [_close(code, day) for day in SESSIONS] for code in _SYMBOL_CODES
             }
         )
         as_of = datetime.combine(SESSIONS[6], time(15, 0), tzinfo=_CST)
@@ -598,15 +613,12 @@ class TestGatherEqualsSerial:
                 visible = [
                     point
                     for point in points
-                    if _point_available_at(point) <= as_of
-                    and point.at <= as_of.date()
+                    if _point_available_at(point) <= as_of and point.at <= as_of.date()
                 ]
                 assert history.close_at(as_of) == (
                     float(visible[-1].bar.close) if visible else None
                 )
-                assert history.series_until(as_of) == [
-                    float(point.bar.close) for point in visible
-                ]
+                assert history.series_until(as_of) == [float(point.bar.close) for point in visible]
 
 
 async def _reference_series_stub(
