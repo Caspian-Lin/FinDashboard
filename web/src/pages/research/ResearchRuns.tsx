@@ -652,9 +652,11 @@ export default function ResearchRuns() {
 
   const leafTraceId = useMemo(() => {
     if (!artifactsQuery.data || artifactsQuery.data.length === 0) return null;
-    return artifactsQuery.data.reduce(
+    const withTrace = artifactsQuery.data.filter((a) => a.trace_id);
+    if (withTrace.length === 0) return null;
+    return withTrace.reduce(
       (acc, a) => (a.sequence > acc.sequence ? a : acc),
-      artifactsQuery.data[0],
+      withTrace[0],
     ).trace_id;
   }, [artifactsQuery.data]);
 
@@ -1165,28 +1167,36 @@ export default function ResearchRuns() {
                                         </Badge>
                                       </TableCell>
                                       <TableCell>
-                                        <Tooltip>
-                                          <TooltipTrigger asChild>
-                                            <span className="font-mono text-xs text-muted-foreground">
-                                              {art.decision_id.slice(0, 12)}…
-                                            </span>
-                                          </TooltipTrigger>
-                                          <TooltipContent className="font-mono">
-                                            {art.decision_id}
-                                          </TooltipContent>
-                                        </Tooltip>
+                                        {art.decision_id ? (
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <span className="font-mono text-xs text-muted-foreground">
+                                                {art.decision_id.slice(0, 12)}…
+                                              </span>
+                                            </TooltipTrigger>
+                                            <TooltipContent className="font-mono">
+                                              {art.decision_id}
+                                            </TooltipContent>
+                                          </Tooltip>
+                                        ) : (
+                                          <span className="text-xs text-muted-foreground">—</span>
+                                        )}
                                       </TableCell>
                                       <TableCell>
-                                        <Tooltip>
-                                          <TooltipTrigger asChild>
-                                            <span className="font-mono text-xs text-muted-foreground">
-                                              {art.trace_id.slice(0, 12)}…
-                                            </span>
-                                          </TooltipTrigger>
-                                          <TooltipContent className="font-mono">
-                                            {art.trace_id}
-                                          </TooltipContent>
-                                        </Tooltip>
+                                        {art.trace_id ? (
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <span className="font-mono text-xs text-muted-foreground">
+                                                {art.trace_id.slice(0, 12)}…
+                                              </span>
+                                            </TooltipTrigger>
+                                            <TooltipContent className="font-mono">
+                                              {art.trace_id}
+                                            </TooltipContent>
+                                          </Tooltip>
+                                        ) : (
+                                          <span className="text-xs text-muted-foreground">—</span>
+                                        )}
                                       </TableCell>
                                       <TableCell>
                                         {art.parent_trace_ids.length > 0 ? (

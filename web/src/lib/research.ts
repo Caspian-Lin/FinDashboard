@@ -57,7 +57,8 @@ export interface ResearchRunQueueIn {
 
 export interface ResearchArtifact {
   artifact_id: string;
-  decision_id: string;
+  /** 血缘/决策未关联的 artifact(partial evidence 等)为 null。 */
+  decision_id: string | null;
   sequence: number;
   stage: string;
   trace_id: string;

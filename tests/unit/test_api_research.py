@@ -575,3 +575,33 @@ class TestFactorLaboratory:
             ).status_code
             == 404
         )
+
+
+class TestFactorSourceDatasets:
+    """因子目录 source_datasets 展示注记(因子实验室可观测性)。
+
+    目录 source_fields 存在两种形态:裸字段名与 ``<dataset>.<field>``
+    带来源前缀形式,还可能出现变体后缀(dividend_yield_ttm);
+    注记只做展示,不参与任何门控。
+    """
+
+    def test_prefixed_and_bare_fields(self) -> None:
+        from finboard_api.routes.research import _factor_source_datasets
+
+        assert _factor_source_datasets(["financial_indicators.roe"]) == [
+            "financial_indicators"
+        ]
+        assert _factor_source_datasets(["close"]) == ["bars"]
+        assert _factor_source_datasets(["daily_metrics.pb"]) == ["daily_metrics"]
+
+    def test_variant_suffix_matches_by_substring(self) -> None:
+        from finboard_api.routes.research import _factor_source_datasets
+
+        assert _factor_source_datasets(["daily_metrics.dividend_yield_ttm"]) == [
+            "daily_metrics"
+        ]
+
+    def test_unknown_field_stays_empty(self) -> None:
+        from finboard_api.routes.research import _factor_source_datasets
+
+        assert _factor_source_datasets(["release.instruments.asset_class"]) == []
