@@ -13,12 +13,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_api._preview import (
+    MAX_PREVIEW_LIMIT,
+    read_parquet_tail,
+    validate_preview_symbol,
+)
 from finboard_api.deps import get_db_session
 from finboard_api.job_schemas import JobOut
 from finboard_api.schemas import (
     BarAnomalyOut,
     BulkDownloadRequest,
     DataFetchRequest,
+    DataPreviewOut,
     DataStatusListOut,
     DataStatusOut,
     DataStatusSelectionOut,
@@ -376,6 +382,41 @@ async def get_cache_status(symbol: str) -> DataStatusOut:
         last_date=str(metadata.last_date) if metadata and metadata.last_date else None,
         last_close=None,
         source=metadata.source if metadata else None,
+    )
+
+
+@router.get("/cache/preview", response_model=DataPreviewOut)
+async def preview_cache_bars(
+    symbol: str = Query(..., description="含交易所后缀的标的代码,如 510300.SH"),
+    limit: int = Query(default=20, ge=1, le=MAX_PREVIEW_LIMIT, description="尾部 bar 数"),
+    adjust: str = Query(default="qfq", description="复权键(qfq/none)"),
+) -> DataPreviewOut:
+    """只读预览单标的本地缓存 parquet 的尾部 bar(数据页可观测性)。
+
+    直接按缓存文件名定位(与 /status 系列同一 D1/qfq 口径),pyarrow 读
+    尾部行,不走 Bar 对象构造;纯读,无写路径。
+    """
+    from finboard_data.cache import make_symbol
+
+    try:
+        normalized = validate_preview_symbol(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    sym = make_symbol(normalized)
+    artifact = Path(_CACHE_DIR) / f"{sym.code}_1d_{adjust}.parquet"
+    if not artifact.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"缓存文件不存在: {artifact}(请先在行情拉取页同步该标的)",
+        )
+    columns, rows, total = await asyncio.to_thread(read_parquet_tail, artifact, limit)
+    return DataPreviewOut(
+        label=f"{normalized} · 本地缓存 (1d/{adjust})",
+        columns=columns,
+        rows=rows,
+        total_rows=total,
+        truncated=total > len(rows),
+        artifact=artifact.name,
     )
 
 

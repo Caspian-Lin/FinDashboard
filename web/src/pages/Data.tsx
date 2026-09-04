@@ -1,5 +1,12 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "../components/ui/dialog";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
 import type { JobOut, QualityReport } from "../lib/api";
@@ -30,10 +37,12 @@ function formatDuration(sec: number, lang: "zh" | "en"): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export default function Data() {
+export default function Data({ embedded = false }: { embedded?: boolean }) {
   const { tl } = useT();
   const { lang } = useLanguage();
   const queryClient = useQueryClient();
+  // 缓存预览对话框选中的标的(null=关闭)
+  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
   const [fetchSymbol, setFetchSymbol] = useState("000001.SZ");
   const [fetchStart, setFetchStart] = useState("2024-01-01");
   const [fetchEnd, setFetchEnd] = useState(
@@ -257,17 +266,19 @@ export default function Data() {
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">{tl({ zh: "行情数据", en: "Market Data" })}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {tl({
-              zh: "标的池、单标的拉取与缓存管理;耗时任务进入统一队列,可在「任务中心」跟踪。",
-              en: "Universe, single-symbol fetch and cache management; long-running jobs enter the unified queue and can be tracked in the Task Center.",
-            })}
-          </p>
+      {!embedded && (
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">{tl({ zh: "行情数据", en: "Market Data" })}</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {tl({
+                zh: "标的池、单标的拉取与缓存管理;耗时任务进入统一队列,可在「任务中心」跟踪。",
+                en: "Universe, single-symbol fetch and cache management; long-running jobs enter the unified queue and can be tracked in the Task Center.",
+              })}
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Stats row */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -886,21 +897,19 @@ export default function Data() {
                 <th className="px-4 py-2 text-right">{tl({ zh: "Bar 数", en: "Bars" })}</th>
                 <th className="px-4 py-2 text-left">{tl({ zh: "范围", en: "Range" })}</th>
                 <th className="px-4 py-2 text-left">{tl({ zh: "来源", en: "Source" })}</th>
-                <th className="px-4 py-2 text-right">{tl({ zh: "最新收盘", en: "Last close" })}</th>
+                <th className="px-4 py-2 text-right">{tl({ zh: "预览", en: "Preview" })}</th>
               </tr>
             </thead>
             <tbody>
               {status.items.map((s) => (
-                <tr key={`${s.symbol}-${s.period}-${s.adjust}`} className="border-t">
+                <tr key={`${s.symbol}-${s.period}-${s.adjust}`} className="cursor-pointer border-t hover:bg-muted/50" onClick={() => setPreviewSymbol(s.symbol)}>
                   <td className="px-4 py-2 font-mono">{s.symbol}</td>
                   <td className="px-4 py-2 text-right">{s.bar_count}</td>
                   <td className="px-4 py-2 text-muted-foreground">
                     {s.first_date ?? "—"} ~ {s.last_date ?? "—"}
                   </td>
                   <td className="px-4 py-2 text-muted-foreground">{s.source ?? tl({ zh: "未记录", en: "Not recorded" })}</td>
-                  <td className="px-4 py-2 text-right font-mono">
-                    {s.last_close ? Number(s.last_close).toFixed(2) : "—"}
-                  </td>
+                  <td className="px-4 py-2 text-right text-xs text-primary">{tl({ zh: "查看", en: "View" })}</td>
                 </tr>
               ))}
             </tbody>
@@ -931,7 +940,80 @@ export default function Data() {
           </div>
         )}
       </div>
+
+      <CachePreviewDialog symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />
     </div>
+  );
+}
+
+/** 缓存数据预览对话框:只读展示本地 parquet 尾部 bar(GET /data/cache/preview)。 */
+function CachePreviewDialog({ symbol, onClose }: { symbol: string | null; onClose: () => void }) {
+  const { tl } = useT();
+  const previewQuery = useQuery({
+    queryKey: ["cache-preview", symbol],
+    queryFn: () => api.previewCacheBars(symbol as string, 20),
+    enabled: symbol !== null,
+  });
+
+  return (
+    <Dialog open={symbol !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="font-mono text-sm">{symbol ?? ""}</DialogTitle>
+          <DialogDescription>
+            {tl({
+              zh: "本地缓存尾部 20 根 bar(只读);数据以本地缓存为准,非券商口径。",
+              en: "Last 20 bars of the local cache (read-only); data reflects the local cache, not the broker.",
+            })}
+          </DialogDescription>
+        </DialogHeader>
+        {previewQuery.isLoading ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">{tl({ zh: "加载中…", en: "Loading…" })}</p>
+        ) : previewQuery.isError ? (
+          <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {previewQuery.error instanceof Error ? previewQuery.error.message : tl({ zh: "预览加载失败", en: "Failed to load preview" })}
+          </p>
+        ) : previewQuery.data ? (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              {previewQuery.data.label} ·{" "}
+              {tl({
+                zh: `尾部 ${previewQuery.data.rows.length} 行 / 共 ${previewQuery.data.total_rows} 行`,
+                en: `last ${previewQuery.data.rows.length} of ${previewQuery.data.total_rows} rows`,
+              })}
+            </p>
+            <div className="max-h-80 overflow-auto rounded-md border border-border scrollbar-thin">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-background text-muted-foreground">
+                  <tr>
+                    {previewQuery.data.columns.map((column) => (
+                      <th key={column} className="whitespace-nowrap px-2 py-1.5 text-left font-mono">
+                        {column}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {previewQuery.data.rows.map((row, i) => (
+                    <tr key={i} className="border-t">
+                      {previewQuery.data.columns.map((column) => (
+                        <td key={column} className="whitespace-nowrap px-2 py-1.5 font-mono">
+                          {row[column] === null || row[column] === undefined ? (
+                            <span className="text-muted-foreground/50">null</span>
+                          ) : (
+                            String(row[column])
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
   );
 }
 

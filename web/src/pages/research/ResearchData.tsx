@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useState, lazy, Suspense } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import {
   Archive,
   Database,
   RefreshCw,
-  Package,
   Search,
   ChevronRight,
   Layers,
@@ -13,12 +13,10 @@ import {
   X,
 } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -62,17 +60,11 @@ import {
   HintLabel,
   ResearchHint,
 } from "@/components/research/ResearchHint";
+import { ReleaseDetailDrawer } from "@/components/research/ReleaseDetailDrawer";
 import { SelectAllResultsButton } from "@/components/selection/SelectAllResultsButton";
 import { useT, type LocalizedText } from "@/i18n";
 
 const MarketDataTab = lazy(() => import("@/pages/Data"));
-
-function coverageColor(pct: number): string {
-  if (pct >= 95) return "bg-success";
-  if (pct >= 80) return "bg-primary";
-  if (pct >= 60) return "bg-warning";
-  return "bg-destructive";
-}
 
 const MULTI_ASSET_CAPABILITIES = [
   "stock",
@@ -1419,9 +1411,11 @@ function ReleasePublisher({
 function ReleasesTab({
   onGoToFetch,
   onGoToInstruments,
+  onOpenRelease,
 }: {
   onGoToFetch: () => void;
   onGoToInstruments: () => void;
+  onOpenRelease: (releaseId: string) => void;
 }) {
   const { tl } = useT();
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
@@ -1489,7 +1483,11 @@ function ReleasesTab({
             </TableHeader>
             <TableBody>
               {data.map((rel) => (
-                <TableRow key={rel.release_id}>
+                <TableRow
+                  key={rel.release_id}
+                  className="cursor-pointer hover:bg-muted/50"
+                  onClick={() => onOpenRelease(rel.release_id)}
+                >
                   <TableCell>
                     <p className="font-medium">{rel.dataset_name}</p>
                     <p className="font-mono text-xs text-muted-foreground">
@@ -1533,130 +1531,6 @@ function ReleasesTab({
           description={tl({
             zh: "研究数据发布后将在此列出，包含版本、覆盖率与质量状态。",
             en: "Research data releases will be listed here once published, with version, coverage and quality status.",
-          })}
-        />
-      )}
-    </div>
-  );
-}
-
-function ManifestsTab() {
-  const { tl } = useT();
-  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    // 新版不可变发布登记写入 research_dataset_releases;旧 manifests
-    // 表是历史同步管线遗留,在当前发布流程中不会产生记录。
-    queryKey: ["dataset-releases", { limit: 50 }],
-    queryFn: () => datasetApi.releases({ limit: 50 }),
-  });
-
-  return (
-    <div>
-      <div className="mb-3 flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {data
-            ? tl({
-                zh: `共 ${data.length} 个已发布数据版本`,
-                en: `${data.length} published data versions`,
-              })
-            : tl({ zh: "加载中…", en: "Loading…" })}
-        </p>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => refetch()}
-          disabled={isFetching}
-        >
-          <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
-          {tl({ zh: "刷新", en: "Refresh" })}
-        </Button>
-      </div>
-
-      {isLoading ? (
-        <LoadingState rows={6} />
-      ) : isError ? (
-        <ErrorState
-          message={
-            error instanceof Error
-              ? error.message
-              : tl({ zh: "无法加载数据集清单", en: "Failed to load dataset manifests" })
-          }
-          onRetry={() => refetch()}
-        />
-      ) : data && data.length > 0 ? (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {data.map((rel) => (
-            <Card key={rel.release_id}>
-              <CardHeader className="pb-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <CardTitle className="truncate text-base">
-                      {rel.dataset_name}
-                    </CardTitle>
-                    <p className="mt-1 font-mono text-xs text-muted-foreground">
-                      {rel.release_id}
-                    </p>
-                  </div>
-                  <Badge variant="outline">{rel.version}</Badge>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Badge variant="info" className="font-mono">
-                    {rel.source}
-                  </Badge>
-                  <StatusBadge status={rel.quality_status} />
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div>
-                    <p className="text-xs text-muted-foreground">{tl({ zh: "标的数", en: "Symbols" })}</p>
-                    <p className="tabular-nums font-medium">
-                      {formatNumber(rel.symbol_count, 0)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">{tl({ zh: "行数", en: "Rows" })}</p>
-                    <p className="tabular-nums font-medium">
-                      {formatNumber(rel.row_count, 0)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">{tl({ zh: "数据范围", en: "Date range" })}</p>
-                    <p className="truncate tabular-nums font-medium">
-                      {tl({
-                        zh: `${rel.start_date} 至 ${rel.end_date}`,
-                        en: `${rel.start_date} to ${rel.end_date}`,
-                      })}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">{tl({ zh: "覆盖率", en: "Coverage" })}</p>
-                    <p className="tabular-nums font-medium">
-                      {formatPercent(rel.coverage_pct, 1)}
-                    </p>
-                  </div>
-                </div>
-
-                <div>
-                  <Progress
-                    value={rel.coverage_pct * 100}
-                    indicatorClassName={coverageColor(rel.coverage_pct * 100)}
-                  />
-                </div>
-                <p className="font-mono text-xs text-muted-foreground">
-                  checksum {rel.release_checksum.slice(0, 12)}
-                </p>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      ) : (
-        <EmptyState
-          icon={<Package className="h-8 w-8" />}
-          title={tl({ zh: "暂无数据集清单", en: "No dataset manifests yet" })}
-          description={tl({
-            zh: "数据集清单记录了每个数据集的行数、标的数、覆盖率与质量。",
-            en: "Dataset manifests record rows, symbols, coverage and quality for each dataset.",
           })}
         />
       )}
@@ -2152,11 +2026,26 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
 
 export default function ResearchData() {
   const { tl } = useT();
-  const [activeTab, setActiveTab] = useState("fetch");
+  const [searchParams, setSearchParams] = useSearchParams();
+  // 发布详情抽屉走 ?release= 深链(研究运行「冻结输入」卡片/因子实验室跳转目标)。
+  const drawerRelease = searchParams.get("release");
+  const openRelease = (releaseId: string) => {
+    setSearchParams({ release: releaseId }, { replace: true });
+  };
+  const closeRelease = () => {
+    setSearchParams({}, { replace: true });
+  };
+  // 页签状态进 URL(?tab=):刷新不再跳回默认页签。
+  const activeTab = searchParams.get("tab") ?? "fetch";
+  const setActiveTab = (value: string) => {
+    const next: Record<string, string> = {};
+    if (value !== "fetch") next.tab = value;
+    if (drawerRelease) next.release = drawerRelease;
+    setSearchParams(next, { replace: true });
+  };
   const activeTabHint = {
     fetch: RESEARCH_HINTS.data.fetch,
     releases: RESEARCH_HINTS.data.releases,
-    manifests: RESEARCH_HINTS.data.manifests,
     instruments: RESEARCH_HINTS.data.instrumentMetadata,
   }[activeTab];
 
@@ -2165,8 +2054,8 @@ export default function ResearchData() {
       <PageHeader
         title={tl({ zh: "数据与标的", en: "Data & Instruments" })}
         description={tl({
-          zh: "行情数据拉取、研究数据发布、数据集清单与标的元数据",
-          en: "Bar data fetch, research data releases, dataset manifests and instrument metadata",
+          zh: "行情数据拉取、研究数据发布(含数据预览)与标的元数据",
+          en: "Bar data fetch, research data releases (with data preview) and instrument metadata",
         })}
         actions={<WorkflowHelpPopover next={WORKFLOW_NEXT.data} />}
       />
@@ -2178,7 +2067,6 @@ export default function ResearchData() {
             {tl({ zh: "行情拉取", en: "Bar data fetch" })}
           </TabsTrigger>
           <TabsTrigger value="releases">{tl({ zh: "数据发布", en: "Data releases" })}</TabsTrigger>
-          <TabsTrigger value="manifests">{tl({ zh: "数据集清单", en: "Dataset manifests" })}</TabsTrigger>
           <TabsTrigger value="instruments">{tl({ zh: "标的元数据", en: "Instrument metadata" })}</TabsTrigger>
         </TabsList>
         {activeTabHint && (
@@ -2190,22 +2078,22 @@ export default function ResearchData() {
 
         <TabsContent value="fetch">
           <Suspense fallback={<LoadingState rows={5} />}>
-            <MarketDataTab />
+            <MarketDataTab embedded />
           </Suspense>
         </TabsContent>
         <TabsContent value="releases">
           <ReleasesTab
             onGoToFetch={() => setActiveTab("fetch")}
             onGoToInstruments={() => setActiveTab("instruments")}
+            onOpenRelease={openRelease}
           />
-        </TabsContent>
-        <TabsContent value="manifests">
-          <ManifestsTab />
         </TabsContent>
         <TabsContent value="instruments">
           <InstrumentsTab onGoToFetch={() => setActiveTab("fetch")} />
         </TabsContent>
       </Tabs>
+
+      <ReleaseDetailDrawer releaseId={drawerRelease} onClose={closeRelease} />
     </div>
   );
 }

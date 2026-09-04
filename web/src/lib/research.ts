@@ -1,4 +1,4 @@
-import { fetchJSON, type ApiError, type JobOut } from "./api";
+import { fetchJSON, type ApiError, type DataPreview, type JobOut } from "./api";
 
 /* ============================================================ */
 /* Research Runs                                                */
@@ -516,6 +516,33 @@ export interface DatasetReleaseSummary {
   release_checksum: string;
 }
 
+/** GET /instruments/datasets/releases/{id}:发布详情(含逐标的冻结清单)。 */
+export interface DatasetReleaseInstrumentInfo {
+  code: string;
+  name: string;
+  market: string;
+  instrument_type: string;
+  asset_class: string;
+  artifact_path: string;
+  row_count: number;
+  start_date: string;
+  end_date: string;
+  missing_sessions: number;
+  suspended_sessions: number;
+  ready?: boolean;
+  issues?: string[];
+  listing_board?: string;
+}
+
+export interface DatasetReleaseDetail extends DatasetReleaseSummary {
+  dataset_kind?: string;
+  availability_rules?: Record<string, string>[];
+  instruments: DatasetReleaseInstrumentInfo[];
+  quality_report?: Record<string, unknown>;
+  storage_uri?: string;
+  metadata_version?: string;
+}
+
 export interface DatasetReleaseCapability {
   key: string;
   status: string;
@@ -715,7 +742,14 @@ export const datasetApi = {
     );
   },
   releaseDetail: (releaseId: string) =>
-    fetchJSON<Record<string, unknown>>(`/instruments/datasets/releases/${releaseId}`),
+    fetchJSON<DatasetReleaseDetail>(`/instruments/datasets/releases/${releaseId}`),
+  releasePreview: (releaseId: string, symbol?: string, limit = 20) => {
+    const q = new URLSearchParams({ limit: String(limit) });
+    if (symbol) q.set("symbol", symbol);
+    return fetchJSON<DataPreview>(
+      `/instruments/datasets/releases/${releaseId}/preview?${q.toString()}`,
+    );
+  },
   createRelease: (body: DatasetReleaseCreate) =>
     fetchJSON<JobOut>("/instruments/datasets/releases", {
       method: "POST",

@@ -250,6 +250,11 @@ export const api = {
   getSymbolPool: () => fetchJSON<SymbolPool>("/data/symbols"),
   updateSymbolPool: (body: SymbolPoolUpdate) =>
     fetchJSON<SymbolPool>("/data/symbols", { method: "PUT", body: JSON.stringify(body) }),
+  /** 只读预览单标的本地缓存 parquet 尾部 bar(数据页可观测性)。 */
+  previewCacheBars: (symbol: string, limit = 20, adjust = "qfq") =>
+    fetchJSON<DataPreview>(
+      `/data/cache/preview?symbol=${encodeURIComponent(symbol)}&limit=${limit}&adjust=${encodeURIComponent(adjust)}`,
+    ),
 
   // ---- Backtest ----
   getStrategies: () => fetchJSON<StrategyInfo[]>("/backtest/strategies"),
@@ -424,6 +429,16 @@ export interface DataStatusList {
   total: number;
   limit: number;
   offset: number;
+}
+
+/** 数据预览(只读):缓存/冻结发布 parquet 尾部行采样(数据页可观测性)。 */
+export interface DataPreview {
+  label: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  total_rows: number;
+  truncated: boolean;
+  artifact: string;
 }
 
 export interface DataFetchRequest {

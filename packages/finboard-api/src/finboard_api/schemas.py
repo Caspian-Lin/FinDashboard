@@ -1296,6 +1296,17 @@ class ResearchDatasetReleaseSummaryOut(BaseSchema):
     release_checksum: str
 
 
+class DataPreviewOut(BaseSchema):
+    """数据预览(只读):缓存/冻结发布 parquet 的尾部行采样。"""
+
+    label: str
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    total_rows: int
+    truncated: bool
+    artifact: str
+
+
 class DatasetReleaseSymbolCheckOut(BaseSchema):
     """轻量发布成员核对(issue #238,免全量 detail)。"""
 
