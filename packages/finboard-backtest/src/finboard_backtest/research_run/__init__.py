@@ -7,6 +7,13 @@ from finboard_backtest.research_run.adapters import (
     registered_adapter_kinds,
     validate_strategy_dataset_capabilities,
 )
+from finboard_backtest.research_run.checkpoint_resume import (
+    DECISION_ARTIFACT_STAGES,
+    completed_decision_prefix,
+    decision_artifact_index,
+    group_decision_artifacts,
+    rebuild_decision,
+)
 from finboard_backtest.research_run.contracts import (
     MAX_RESEARCH_CAPITAL,
     MIN_RESEARCH_CAPITAL,
@@ -68,6 +75,7 @@ from finboard_backtest.research_run.store import (
 )
 
 __all__ = [
+    "DECISION_ARTIFACT_STAGES",
     "DECISION_STAGE_COUNT",
     "MAX_RESEARCH_CAPITAL",
     "MIN_RESEARCH_CAPITAL",
@@ -117,9 +125,13 @@ __all__ = [
     "UniverseCandidate",
     "UnsupportedResearchCapabilityError",
     "canonical_json",
+    "completed_decision_prefix",
+    "decision_artifact_index",
     "execution_mode_for",
+    "group_decision_artifacts",
     "manifest_from_json",
     "pipeline_output_checksum",
+    "rebuild_decision",
     "registered_adapter_kinds",
     "replay_guard_error",
     "report_from_json",
