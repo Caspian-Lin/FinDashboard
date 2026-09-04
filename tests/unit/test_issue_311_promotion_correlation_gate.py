@@ -216,6 +216,13 @@ def test_no_screen_evidence_keeps_checks_empty() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _PromotionTrialRepo:
+    """issue #310:promote 派生 oos_outcome 时的 trial 读取桩(空列表 → inconclusive)。"""
+
+    async def list_by_experiment(self, _experiment_id: str) -> list[object]:
+        return []
+
+
 def _patch_promote_repos(monkeypatch: Any, *, artifact_repo: Any, code_run: Any) -> None:
     monkeypatch.setattr(
         research_code, "ResearchCodeArtifactRepository", lambda _session: artifact_repo
@@ -227,6 +234,9 @@ def _patch_promote_repos(monkeypatch: Any, *, artifact_repo: Any, code_run: Any)
     )
     monkeypatch.setattr(
         research_code, "ResearchCodeRunRepository", lambda _session: _PromotionCodeRunRepo(code_run)
+    )
+    monkeypatch.setattr(
+        research_code, "ResearchTrialRepository", lambda _session: _PromotionTrialRepo()
     )
 
 
