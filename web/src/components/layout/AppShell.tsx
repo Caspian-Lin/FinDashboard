@@ -88,7 +88,7 @@ function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavig
   );
 }
 
-function SystemStatus() {
+function SystemStatus({ collapsed = false }: { collapsed?: boolean }) {
   const { t } = useT();
   const wsConnected = useWebSocket();
   const healthQuery = useQuery({
@@ -105,8 +105,30 @@ function SystemStatus() {
       ? t("shell.kernelReady")
       : t("shell.kernelNotReady");
 
+  if (collapsed) {
+    // 折叠态(w-16)放不下文字标签:只渲染状态点,title 承载语义,防止逐字竖排换行挤出框。
+    return (
+      <div className="flex flex-col items-center gap-2 border-t border-border py-2">
+        <span className="flex items-center" title={kernelLabel}>
+          <StatusDot status={kernelOk ? "online" : "offline"} />
+          <span className="sr-only">{kernelLabel}</span>
+        </span>
+        <span className="flex items-center" title="WS">
+          <StatusDot status={wsConnected ? "online" : "idle"} />
+          <span className="sr-only">WS</span>
+        </span>
+        {ksLevel !== "off" && (
+          <span className="flex items-center text-warning" title={`KS: ${ksLevel}`}>
+            <AlertTriangle className="h-3 w-3" />
+            <span className="sr-only">KS: {ksLevel}</span>
+          </span>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="flex items-center gap-4 px-4 py-2 border-t border-border">
+    <div className="flex items-center gap-4 whitespace-nowrap border-t border-border px-4 py-2">
       <div className="flex items-center gap-1.5 text-xs">
         <StatusDot status={kernelOk ? "online" : "offline"} />
         <span className="text-muted-foreground" title={healthQuery.isError ? t("shell.healthCheckFailed") : undefined}>
@@ -154,7 +176,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
       >
         <SidebarContent collapsed={collapsed} />
-        <SystemStatus />
+        <SystemStatus collapsed={collapsed} />
         <div className="border-t border-border p-2">
           <Button
             variant="ghost"
