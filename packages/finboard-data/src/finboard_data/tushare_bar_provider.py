@@ -220,9 +220,10 @@ class TushareBarProvider(AkShareProvider):
 
         来源切换时丢弃旧源历史、从空开始合并,避免 akshare/yfinance 与
         tushare 混写(adjust 基准日不同,混源会产生价格跳变);唯一例外是
-        tushare 对全部缺口区间都拉不到 bars(ETF / 指数等 2000 积分不覆盖
-        的标的)——此时不再静默丢弃异源缓存,而是具名回退返回异源已缓存
-        的 bars(issue #257),回测引擎才能消费 akshare 同步的 ETF 行情。
+        tushare 对全部缺口区间都拉不到 bars(指数 / ETF 等不在本 provider
+        scope 的标的——scope 由上层路由决定,非积分硬约束,#341)——此时
+        不再静默丢弃异源缓存,而是具名回退返回异源已缓存的 bars
+        (issue #257),回测引擎才能消费 akshare 同步的 ETF 行情。
         返回合并后的完整 Bar 列表(升序)。
         """
         sources = {bar.source for bar in cached}

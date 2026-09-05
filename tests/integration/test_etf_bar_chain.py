@@ -2,7 +2,8 @@
 
 链路:mock akshare ETF 接口 → ``AkShareProvider`` 同步入 parquet 缓存 →
 事件驱动 ``BacktestEngine`` 用 **TushareBarProvider**(mock tushare client
-对 ETF 恒返回空,复刻 2000 积分拉不到 ``fund_daily`` 的真实边界)回测 →
+对 ETF 恒返回空,复刻「ETF 不在 tushare provider scope」的真实边界——
+2026-09-06 复核该边界是 scope 设计决定而非积分硬约束,#341)回测 →
 异源缓存 read-through 拿到 bars → 策略出成交。
 
 不联网(akshare 接口 monkeypatch 为内存 DataFrame)、不需要数据库;
@@ -139,8 +140,8 @@ async def test_etf_sync_cache_and_backtest_with_tushare_provider(tmp_path: Path)
     )
     result = await engine.run()
 
-    # 修复前:tushare provider 丢弃 akshare 缓存 + fund_daily 拉不到 →
-    # bars 全空、引擎 0 交易空转。修复后必须拿到 bars 并成交。
+    # 修复前:tushare provider 丢弃 akshare 缓存 + ETF 不在 tushare scope
+    # (拉不到)→ bars 全空、引擎 0 交易空转。修复后必须拿到 bars 并成交。
     assert result.start_date is not None
     assert result.trade_count > 0
     assert result.fills, "ETF 策略在修复后必须产生成交"

@@ -18,7 +18,7 @@
 | F-2 | 趋势类策略存在 OOS 衰减(IS 表现显著好于样本外) | 中 | 研究 run(**ID 待回填**) | 更长 OOS 窗口 / 更严谨 #57 验证实验复测 | 待验证 | 2026-09-01 种子 |
 | F-3 | 转债双低策略 2025-12 出现警讯:券商双低组合 -4.72% vs 转债指数 +2.13%(标的稀缺 + 强赎潮);2017-2023 文献年化 15% 只能当先验 | 高 | 公开市场数据(2025-12);Route A 调研(#265 背景) | 2024-2026 OOS 复测通过 #57 门 | 待验证(先验存疑,OOS 是唯一裁判) | 2026-09-01 种子 |
 | F-4 | 通用 `BacktestEngine` 默认把一切代码按 A 股股票撮合:`_DefaultInstrumentResolver`(engine.py:116-125),转债 / ETF 会被套错涨跌停与 T+1 规则;双低独立模拟器不受影响 | 高 | 代码核实(engine.py;2026-09-01) | 引擎注入 instrument_resolver 后 | **有效**(工程事实) | 2026-09-01 种子 |
-| F-5 | tushare 2000 积分档边界:`cb_daily`/`cb_basic`/`cb_issue`/`cb_share`/`top_list`/`margin`/`margin_detail`/`forecast` 可用;`cb_call`/`fund_daily`/`stk_mins`/`top_inst` 需 5000 档 | 高 | 官方文档核对(2026-09-01) | 积分档位 / 权限变更 | **有效**(环境事实) | 2026-09-01 种子 |
+| F-5 | tushare 2000 积分档边界:`cb_daily`/`cb_basic`/`cb_issue`/`cb_share`/`top_list`/`margin`/`margin_detail`/`forecast` 可用;`cb_call`/`stk_mins`/`top_inst` 需 5000 档;2026-09-06 实测修正:`index_daily`/`fund_daily` 2000 档可调(fund_daily 文档标 5000 与实测不符,cb_call 被拒佐证账户 <5000) | 高 | 官方文档核对(2026-09-01)+ token 实测(2026-09-06,#341) | 积分档位 / 权限变更 | **有效**(环境事实) | 2026-09-01 种子,2026-09-06 实测修正(#341) |
 | F-6 | 研究数据 PIT 口径:财务数据 `available_at = ann_date + 1`,无前视 | 高 | 数据基座核实(2026-08-28,#212 同步链路) | 上游披露口径变更 | **有效** | 2026-08-28 核实,2026-09-01 登记 |
 
 ## 维护约定
