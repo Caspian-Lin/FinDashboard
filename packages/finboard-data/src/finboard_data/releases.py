@@ -1162,6 +1162,9 @@ class CloseHistoryColumns:
     available_at: tuple[datetime, ...]
     closes: np.ndarray
     last_timestamp: datetime | None
+    #: 可选携带的 open 平行序列(issue #336,next_open 执行价基用);仅请求时
+    #: 读取,None 表示未携带(open 缺失的标的由消费方回退对象路径读取)。
+    opens: np.ndarray | None = None
 
     def __len__(self) -> int:
         return len(self.dates)
@@ -1237,6 +1240,7 @@ def _pit_close_history(
         available_at=available_at[:cut],
         closes=columns.closes[:cut],
         last_timestamp=last_timestamp,
+        opens=None if columns.opens is None else columns.opens[:cut],
     )
 
 
@@ -2636,6 +2640,7 @@ class FrozenReleaseProvider:
         *,
         decision_at: datetime,
         adjust: str = "qfq",
+        include_open: bool = False,
     ) -> CloseHistoryColumns:
         """列式读取 PIT 门控的 close 历史(issue #300)。
 
@@ -2645,6 +2650,10 @@ class FrozenReleaseProvider:
         (close float64 直出与 ``float(Decimal(str(f)))`` 逐值相等)。其它周期
         回退 :meth:`fetch_point_in_time_bars` 对象路径后转列式容器,保持既有
         PIT 语义(非 D1 的 timestamp 即 available_at,不归一化为零点)。
+
+        issue #336:``include_open=True`` 时附带 open 平行序列(D1 走三列直出,
+        对象路径取 ``bar.open``),next_open 执行价基消费;默认 False,
+        close-only 消费方零变化。
         """
 
         if decision_at.tzinfo is None:
@@ -2658,6 +2667,7 @@ class FrozenReleaseProvider:
                 adjust,
                 start=start,
                 end=end,
+                include_open=include_open,
             )
             return close_history_from_columns(
                 columns,
@@ -2680,6 +2690,9 @@ class FrozenReleaseProvider:
             closes=np.array(
                 [float(bar.bar.close) for bar in bars], dtype=np.float64
             ),
+            opens=np.array([float(bar.bar.open) for bar in bars], dtype=np.float64)
+            if include_open
+            else None,
         )
         available_at = tuple(bar.available_at for bar in bars)
         last_timestamp = bars[-1].bar.timestamp if bars else None
@@ -2688,6 +2701,7 @@ class FrozenReleaseProvider:
             available_at=available_at,
             closes=columns.closes,
             last_timestamp=last_timestamp,
+            opens=columns.opens,
         )
 
     async def fetch_daily_metrics(
