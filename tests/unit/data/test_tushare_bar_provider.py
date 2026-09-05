@@ -650,13 +650,17 @@ class TestForeignCacheStrategy:
 
     @pytest.mark.unit
     async def test_foreign_cache_falls_back_when_tushare_empty(self, tmp_path: Path) -> None:
-        """缺口区间 tushare 拉不到(ETF/指数):具名回退返回异源缓存,不改写缓存。"""
+        """缺口区间 tushare 拉不到(股票上游为空):具名回退返回异源缓存,不改写缓存。
+
+        #341 起 ETF 在 provider 层 fail-visible 拒绝(不再静默空结果回退),
+        空拉回退语义改用上游为空的股票标的锁定。
+        """
         client = FakeTushareBarClient()
         client.daily_rows = []
         client.factor_rows = []
         provider, _ = self._provider(tmp_path, client)
         assert provider._cache is not None
-        symbol = make_symbol("510300.SH")
+        symbol = make_symbol("000001.SZ")
         foreign = [_foreign_bar(date(2024, 1, 2)), _foreign_bar(date(2024, 1, 3))]
         await provider._cache.write(symbol, BarPeriod.D1, "qfq", foreign)
 
@@ -809,3 +813,114 @@ async def test_convertible_daily_cache_key_follows_requested_adjust(
     assert metadata.source == "tushare"
     cached = await provider._cache.read(symbol, BarPeriod.D1, "qfq")
     assert [bar.close for bar in cached] == [Decimal("100.5"), Decimal("101.5")]
+
+
+# ---------------------------------------------------------------------------
+# #341:指数日线(index_daily 专属接口,无复权)+ ETF fail-visible
+# ---------------------------------------------------------------------------
+
+
+class FakeIndexTushareClient(FakeTushareBarClient):
+    """index_daily 桩:记录调用并可断言股票/复权接口未被触碰。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.index_daily_rows: list[dict[str, object]] = [
+            {
+                "ts_code": "000852.SH",
+                "trade_date": "20240103",
+                "open": 7000,
+                "high": 7100,
+                "low": 6950,
+                "close": 7050.5,
+                "vol": 300,
+                "amount": 492508.5,
+            },
+            {
+                "ts_code": "000852.SH",
+                "trade_date": "20240102",
+                "open": 6900,
+                "high": 7020,
+                "low": 6880,
+                "close": 6980.25,
+                "vol": 280,
+                "amount": 460001.0,
+            },
+        ]
+
+    def index_daily(self, **kwargs: str) -> object:
+        self.calls.append(("index_daily", kwargs))
+        return self.index_daily_rows
+
+
+@pytest.mark.unit
+async def test_index_daily_uses_index_daily_without_adjustment() -> None:
+    """指数按代码规则分流 index_daily:不调 daily/adj_factor,原始指数点落盘。"""
+    client = FakeIndexTushareClient()
+    provider, budget = _provider(client)
+
+    bars = await provider.fetch_bars(
+        make_symbol("000852.SH"),
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        adjust="qfq",
+    )
+
+    assert [bar.timestamp.date() for bar in bars] == [date(2024, 1, 2), date(2024, 1, 3)]
+    # 无复权:收盘价 = 上游原始指数点(qfq 请求下不做因子换算)。
+    assert bars[0].close == Decimal("6980.25")
+    assert bars[1].close == Decimal("7050.5")
+    # vol/amount 单位与股票 daily 相同(手 x100 / 千元 x1000)。
+    assert bars[0].volume == Decimal("28000")
+    assert bars[0].amount == Decimal("460001000")
+    assert {bar.source for bar in bars} == {"tushare"}
+    # 只调 index_daily,不碰股票 daily / 复权因子接口;两天同 chunk 一次取回。
+    assert [name for name, _ in client.calls] == ["index_daily"]
+    assert client.calls[0][1]["ts_code"] == "000852.SH"
+    assert budget.calls == 1
+
+
+@pytest.mark.unit
+async def test_index_daily_cache_key_follows_requested_adjust(tmp_path: Path) -> None:
+    """缓存键沿用请求 adjust(qfq 键存在但语义为 no-op),与发布口径一致。"""
+    provider = TushareBarProvider(
+        client=FakeIndexTushareClient(),
+        cache_dir=tmp_path,
+        max_retries=0,
+    )
+    assert provider._cache is not None
+    symbol = make_symbol("000852.SH")
+
+    ok = await provider.update_cache(
+        symbol,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        adjust="qfq",
+    )
+    assert ok is True
+    metadata = await provider._cache.metadata_for(symbol, BarPeriod.D1, "qfq")
+    assert metadata is not None
+    assert metadata.bar_count == 2
+    assert metadata.source == "tushare"
+    cached = await provider._cache.read(symbol, BarPeriod.D1, "qfq")
+    assert [bar.close for bar in cached] == [Decimal("6980.25"), Decimal("7050.5")]
+
+
+@pytest.mark.unit
+async def test_etf_code_fails_visible_instead_of_silent_empty() -> None:
+    """ETF 走股票 daily 会静默返回空(#341):fail-visible 指路 akshare。"""
+    client = FakeIndexTushareClient()
+    provider, _ = _provider(client)
+
+    with pytest.raises(ValueError, match="tushare 源暂不提供 ETF 行情"):
+        await provider.fetch_bars(
+            make_symbol("510300.SH"),
+            BarPeriod.D1,
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            adjust="qfq",
+        )
+    # 未触碰任何行情接口。
+    assert client.calls == []

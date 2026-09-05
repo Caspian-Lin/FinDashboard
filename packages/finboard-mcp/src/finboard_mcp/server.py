@@ -296,8 +296,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
   指数链路(#256):sync_universe 自动登记基准指数(instrument_type=index,
   受控登记表含沪深300/中证500/中证1000等 9 只),bulk_download_start 的
-  instrument_type=index 走 akshare 指数日线(tushare 源保持
-  tushare_scope_mismatch 拒绝);指数进 multi_asset_mixed 发布后
+  instrument_type=index:akshare 走指数接口、tushare 走 index_daily
+  (#341,2000 积分档实测可调;ETF/期货仍 tushare_scope_mismatch 拒绝);
+  指数进 multi_asset_mixed 发布后
   research_run 可计算真实 benchmark_return,指数本身不进候选池
   (只做基准数据,不可撮合)。
   转债链路(#265):sync_universe 经东财一览自动登记可转债

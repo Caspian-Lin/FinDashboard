@@ -206,8 +206,8 @@ export const INFO_HINTS = {
         en: "Chooses the bar provider for this bulk job; leave empty to use the system default.",
       },
       detail: {
-        zh: "Tushare 批量任务仅处理 A 股股票，并保持缓存为单一来源。",
-        en: "Tushare bulk jobs only process A-share stocks and keep the cache single-source.",
+        zh: "Tushare 批量任务支持 A 股股票与指数（缓存保持单一来源），指数走 index_daily 专属接口、2000 积分档实测可调；ETF 暂仅支持 akshare/yfinance（复权口径对齐设计中，#341）。",
+        en: "Tushare bulk jobs cover A-share stocks and indices (single-source cache); indices use the dedicated index_daily endpoint, verified callable at the 2000-point tier. ETF is still akshare/yfinance-only while adjustment semantics are being aligned (#341).",
       },
     },
     cachedData: {

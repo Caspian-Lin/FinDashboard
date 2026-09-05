@@ -158,7 +158,9 @@ warning(release_id + 缺失清单),与 factor_lab #212 容忍语义一致;bars �
 2. `bulk_download`(REST `POST /api/data/bulk-download` / MCP
    `finboard_data_bulk_download_start`)带 `instrument_type=index`、
    `source=akshare` —— 指数日线走 akshare `index_zh_a_hist` 进 parquet 缓存。
-   **tushare 源对指数保持拒绝**(`tushare_scope_mismatch`,不静默换源)。
+   #341 起 tushare 源亦放行指数(`index_daily` 专属接口,2000 积分档
+   实测可调;无复权概念,缓存键沿用请求 adjust no-op);ETF/期货仍
+   `tushare_scope_mismatch` 拒绝(不静默换源)。
 3. `dataset_release_publish`(release_kind=`multi_asset_mixed`)—— **指数代码
    必须与股票放进同一份发布**(manifest 只允许一个 bars 主发布,基准行情与
    候选池同源);`adjustment` 用默认 `qfq`(与 bulk_download 缓存键一致;

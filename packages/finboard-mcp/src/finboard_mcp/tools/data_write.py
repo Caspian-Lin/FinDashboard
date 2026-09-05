@@ -1073,14 +1073,15 @@ def register(mcp: MCPServer) -> None:
             "返回 202 + job_id。实际执行由 worker 消费 kind=bulk_download 任务;"
             "进度/状态/取消用 finboard_job_get(job_id) 轮询。"
             "参数:market(默认 a_share;期货用 future)/ instrument_type(stock|etf|index|"
-            "convertible|futures;index=#256 登记的基准指数,日线走 akshare 指数接口;"
+            "convertible|futures;index=#256 登记的基准指数,akshare 源走指数接口、"
+            "tushare 源走 index_daily(#341,2000 积分档实测可调);"
             "convertible=#265 转债,走 tushare cb_daily 专属接口,akshare 源"
             "fail-visible 拒绝;futures=#267 期货主连(如 IF0.CFFEX),需配"
             " market=future,走 akshare 新浪 futures_main_sina,tushare 源"
             "fail-visible 拒绝;主连仅研究信号/基准,不可当作可成交合约)/ exchange / "
             "listing_boards(列表)/ start(默认 2015-01-01)/ source(可选;"
-            "指数与 ETF 仅 akshare|yfinance,tushare 源报 tushare_scope_mismatch;"
-            "转债与股票 tushare 放行;期货仅 akshare)。"
+            "ETF 与期货仅 akshare|yfinance,tushare 源报 tushare_scope_mismatch;"
+            "股票/转债/指数 tushare 放行)。"
             "写操作,mcp_readonly_only=true 时拒绝。"
         ),
     )

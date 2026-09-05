@@ -1,11 +1,11 @@
 """Tushare A 股日线行情 Provider。
 
-2000 积分覆盖 ``daily`` 与 ``adj_factor``;2026-09-06 实测(issue #341)
-``index_daily`` / ``fund_daily`` 2000 积分档亦可调(fund_daily 官方文档
-仍标 5000,与实测不符)。本 Provider 的 scope 仍只承诺 A 股股票日线,
-ETF / 指数由上层路由 akshare——scope 设计决定,非积分硬约束。
-可转债日线(issue #265)走 2000 积分档的 ``cb_daily`` 专属接口:按代码
-规则(11xxxx.SH / 12xxxx.SZ)分流,无复权,原始价落盘。
+2000 积分覆盖 ``daily`` 与 ``adj_factor``;2026-09-06 实测复核(issue
+#341)后按代码规则分流三类 2000 积分档接口:股票 ``daily`` +
+``adj_factor``、可转债(issue #265)``cb_daily``、指数 ``index_daily``,
+后两者无复权概念,原始价落盘。ETF(``fund_daily`` 2000 档实测可调,
+但复权口径与 akshare qfq 对齐未定稿)与期货(issue #267)fail-visible
+指路 akshare,不静默误路由。
 """
 
 from __future__ import annotations
@@ -25,7 +25,13 @@ from typing import Literal, Protocol, TypeGuard, cast
 
 import structlog
 
-from finboard_data.akshare_provider import AkShareProvider, is_convertible_code, is_futures_code
+from finboard_data.akshare_provider import (
+    AkShareProvider,
+    is_convertible_code,
+    is_etf_code,
+    is_futures_code,
+    is_index_code,
+)
 from finboard_data.cache import CacheMetadata, ParquetCache, expected_last_bar_date
 from finboard_data.tushare_budget import TushareBudget, shared_tushare_budget
 from finboard_shared.models import Bar, Symbol
@@ -319,6 +325,15 @@ class TushareBarProvider(AkShareProvider):
                 f"tushare 2000 积分源不提供期货行情: {symbol.code};"
                 "期货日线请使用 akshare 源(新浪主连,issue #267)"
             )
+        if is_etf_code(symbol.code):
+            # ETF(issue #341):fund_daily 2000 积分档实测可调,但 akshare
+            # fund_etf_hist_em 落 qfq 复权价、tushare fund_daily 是原始价,
+            # 复权口径(fund_adj)对齐未定稿前 fail-visible 指路 akshare 源,
+            # 不静默走股票 daily 误路由(此前静默返回空,#267 同策略)。
+            raise ValueError(
+                f"tushare 源暂不提供 ETF 行情: {symbol.code};"
+                "ETF 日线请使用 akshare 源(fund_etf_hist_em,#341 复权口径对齐中)"
+            )
         async with self._semaphore:
             bars = await self._fetch_daily_chunks(symbol, start, end, adjust)
         logger.info(
@@ -365,6 +380,27 @@ class TushareBarProvider(AkShareProvider):
                 # 转债 1 手 = 10 张(与 10 张/手最小交易单位一致)。
                 volume_multiplier=Decimal("10"),
             )
+        if is_index_code(symbol.code):
+            # 指数日线(issue #341):index_daily 是 2000 积分档专属接口
+            #(官方文档本就标注 2000 可调,2026-09-06 实测复核),指数无
+            # 复权概念 —— 不调 adj_factor,原始指数点落盘;缓存键沿用请求
+            # adjust(键存在但语义为 no-op,#265 转债同策略)。vol/amount
+            # 单位与股票 daily 相同(手/千元)。
+            index_rows: list[Mapping[str, object]] = []
+            cursor = start
+            while cursor <= end:
+                chunk_end = min(end, cursor + timedelta(days=_MAX_CHUNK_DAYS - 1))
+                index_rows.extend(
+                    await self._call(
+                        "index_daily",
+                        ts_code=symbol.code,
+                        start_date=cursor.strftime("%Y%m%d"),
+                        end_date=chunk_end.strftime("%Y%m%d"),
+                        fields=_DAILY_FIELDS,
+                    )
+                )
+                cursor = chunk_end + timedelta(days=1)
+            return _build_bars(symbol, index_rows, [], "none", endpoint="index_daily")
         daily_rows: list[Mapping[str, object]] = []
         factor_rows: list[Mapping[str, object]] = []
         cursor = start
