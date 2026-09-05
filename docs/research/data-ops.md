@@ -192,14 +192,16 @@ secid——实测 ``stock_zh_a_hist("510300")`` 请求 URL 携带 ``secid=0.5103
 (正确应为 ``1.510300``);正确路由 ``fund_etf_hist_em`` 的 ``get_market_id``
 才能正确处理 5 开头沪市基金。第二个断点:引擎按注入 provider 读共享
 parquet 缓存,``data_provider=tushare`` 时 tushare provider 把异源(akshare)
-缓存视为全量缺口并丢弃 bars,ETF/指数等 tushare 拉不到的标的 bars 恒空。
+缓存视为全量缺口并丢弃 bars,指数/ETF 等不在 tushare scope 的标的 bars 恒空
+(scope 是设计决定而非积分硬约束:实测 index_daily/fund_daily 2000 积分档可调,#341)。
 
 **标准运营步骤**(以 510300.SH 为例):
 
 1. `bulk_download` 带 `instrument_type=etf`、`source=akshare` —— ETF 日线经
    `fund_etf_hist_em` 进 parquet 缓存(缓存键与股票同为 `qfq`,列名一致)。
-   **tushare 源对 ETF 保持拒绝**(`tushare_scope_mismatch`,#256 起既有行为,
-   tushare 2000 积分不覆盖 `fund_daily`)。
+   **tushare 源对 ETF 保持拒绝**(`tushare_scope_mismatch`,#256 起既有行为
+   ——scope 设计决定而非积分硬约束:2026-09-06 实测 `fund_daily` 2000
+   积分档可调,官方文档标 5000 与实测不符,#341)。
 2. 回测消费:`data_provider=tushare` 时,若异源缓存完整覆盖请求区间,
    tushare provider 直接 read-through 返回缓存(具名 log
    `tushare.foreign_cache_hit`,零 tushare 预算消耗);缺口区间 tushare
