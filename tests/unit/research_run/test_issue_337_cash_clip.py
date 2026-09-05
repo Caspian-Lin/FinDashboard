@@ -97,7 +97,7 @@ def _covariance() -> CovarianceEstimate:
 
 
 def _manifest(manifest_factory) -> ResearchRunManifest:
-    manifest = manifest_factory(
+    manifest: ResearchRunManifest = manifest_factory(
         run_id="RR-cash-clip-test001",
         idempotency_key="cash-clip-test-0001",
     )
