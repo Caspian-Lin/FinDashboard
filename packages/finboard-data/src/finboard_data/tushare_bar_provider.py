@@ -1,7 +1,9 @@
 """Tushare A 股日线行情 Provider。
 
-2000 积分覆盖 ``daily`` 与 ``adj_factor``,但不覆盖要求 5000 积分的
-``fund_daily``。本 Provider 因此承诺 A 股股票日线;ETF 由上层明确降级。
+2000 积分覆盖 ``daily`` 与 ``adj_factor``;2026-09-06 实测(issue #341)
+``index_daily`` / ``fund_daily`` 2000 积分档亦可调(fund_daily 官方文档
+仍标 5000,与实测不符)。本 Provider 的 scope 仍只承诺 A 股股票日线,
+ETF / 指数由上层路由 akshare——scope 设计决定,非积分硬约束。
 可转债日线(issue #265)走 2000 积分档的 ``cb_daily`` 专属接口:按代码
 规则(11xxxx.SH / 12xxxx.SZ)分流,无复权,原始价落盘。
 """
@@ -212,9 +214,10 @@ class TushareBarProvider(AkShareProvider):
 
         来源切换时丢弃旧源历史、从空开始合并,避免 akshare/yfinance 与
         tushare 混写(adjust 基准日不同,混源会产生价格跳变);唯一例外是
-        tushare 对全部缺口区间都拉不到 bars(ETF / 指数等 2000 积分不覆盖
-        的标的)——此时不再静默丢弃异源缓存,而是具名回退返回异源已缓存
-        的 bars(issue #257),回测引擎才能消费 akshare 同步的 ETF 行情。
+        tushare 对全部缺口区间都拉不到 bars(指数 / ETF 等不在本 provider
+        scope 的标的——scope 由上层路由决定,非积分硬约束,#341)——此时
+        不再静默丢弃异源缓存,而是具名回退返回异源已缓存的 bars
+        (issue #257),回测引擎才能消费 akshare 同步的 ETF 行情。
         返回合并后的完整 Bar 列表(升序)。
         """
         sources = {bar.source for bar in cached}

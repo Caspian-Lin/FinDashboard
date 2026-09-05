@@ -65,10 +65,12 @@
 2. 数据成本投入前置条件:对应路线先在现有数据域过 L1 证据门。
 3. 已证伪假设重开须有新证据并显式引用旧结论(见 FINDINGS 与 Skill 启动协议)。
 
-## 数据边界速查(tushare 2000 档,2026-09-01 官方文档核实)
+## 数据边界速查(tushare 2000 档,2026-09-01 官方文档核实,2026-09-06 实测修正 #341)
 
 - **可用**:`cb_daily` / `cb_basic` / `cb_issue` / `cb_share`、`top_list`
   龙虎榜、`margin` / `margin_detail` 两融、`forecast` 业绩预告;
-- **需 5000 档**:`cb_call` 强赎(用 akshare 兜底)、`fund_daily` ETF 日线
-  (akshare `fund_etf_hist_em` 兜底)、`stk_mins` 分钟线、`top_inst` 机构席位;
+  2026-09-06 实测补充:`index_daily` 指数日线(官方文档本就标注 2000 可调)
+  与 `fund_daily` ETF 日线(官方文档标 5000,实测 2000 档放行)亦可调;
+- **需 5000 档**:`cb_call` 强赎(用 akshare 兜底)、`stk_mins` 分钟线、
+  `top_inst` 机构席位;
 - 北向 `moneyflow_hsgt` 2024-08 后披露降频,不值得投。
