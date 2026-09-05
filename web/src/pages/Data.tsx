@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import {
   Dialog,
   DialogContent,
@@ -402,7 +403,7 @@ export default function Data({ embedded = false }: { embedded?: boolean }) {
                 className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               >
                 <option value="">{tl({ zh: `默认 (${defaultProvider})`, en: `Default (${defaultProvider})` })}</option>
-                <option value="tushare">{tl({ zh: "tushare（A股股票）", en: "tushare (A-share stocks)" })}</option>
+                <option value="tushare">{tl({ zh: "tushare（A股股票/指数）", en: "tushare (A-share stocks & indices)" })}</option>
                 <option value="akshare">akshare</option>
                 <option value="yfinance">yfinance</option>
               </select>
@@ -486,7 +487,7 @@ export default function Data({ embedded = false }: { embedded?: boolean }) {
               <option value="" disabled={tushareBulk}>{tl({ zh: "全部", en: "All" })}</option>
               <option value="stock">{tl({ zh: "股票", en: "Stocks" })}</option>
               <option value="etf" disabled={tushareBulk}>ETF</option>
-              <option value="index" disabled={tushareBulk}>{tl({ zh: "指数", en: "Index" })}</option>
+              <option value="index">{tl({ zh: "指数", en: "Index" })}</option>
             </select>
           </div>
           <div>
@@ -518,7 +519,7 @@ export default function Data({ embedded = false }: { embedded?: boolean }) {
               onChange={(e) => {
                 const nextSource = e.target.value;
                 setDlSource(nextSource);
-                if ((nextSource || defaultProvider) === "tushare") {
+                if ((nextSource || defaultProvider) === "tushare" && dlType === "etf") {
                   setDlType("stock");
                 }
               }}
@@ -526,7 +527,7 @@ export default function Data({ embedded = false }: { embedded?: boolean }) {
               className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             >
               <option value="">{tl({ zh: `默认 (${defaultProvider})`, en: `Default (${defaultProvider})` })}</option>
-              <option value="tushare">{tl({ zh: "tushare（A股股票）", en: "tushare (A-share stocks)" })}</option>
+              <option value="tushare">{tl({ zh: "tushare（A股股票/指数）", en: "tushare (A-share stocks & indices)" })}</option>
               <option value="akshare">akshare</option>
               <option value="yfinance">yfinance</option>
             </select>
@@ -564,11 +565,26 @@ export default function Data({ embedded = false }: { embedded?: boolean }) {
           </div>
         </div>
 
+        {bulkJobId && (
+          <p className="mb-4 text-sm text-muted-foreground">
+            {tl({ zh: "任务 ID：", en: "Job ID: " })}
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground">
+              {bulkJobId}
+            </code>{" "}
+            <Link
+              to={`/jobs?job=${encodeURIComponent(bulkJobId)}`}
+              className="text-primary underline underline-offset-4 hover:text-primary/80"
+            >
+              {tl({ zh: "在任务中心查看", en: "View in Jobs" })}
+            </Link>
+          </p>
+        )}
+
         <p className="mb-4 text-sm text-muted-foreground">
           {tushareBulk
             ? tl({
-                zh: "Tushare 任务只拉取 A 股股票，并保持缓存为单一来源；失败标的可重跑，不会自动换源。",
-                en: "Tushare jobs fetch A-share stocks only and keep the cache single-source; failed symbols can be re-run and never switch sources automatically.",
+                zh: "Tushare 任务支持 A 股股票与指数，并保持缓存为单一来源；失败标的可重跑，不会自动换源。ETF 因复权口径对齐仍在设计中（#341），请暂用 akshare 拉取。",
+                en: "Tushare jobs cover A-share stocks and indices and keep the cache single-source; failed symbols can be re-run and never switch sources automatically. ETF is still akshare-only while adjustment semantics are being aligned (#341).",
               })
             : tl({
                 zh: "ETF 与其他资产请单独拉取。发布时可与 Tushare 股票缓存组合为多资产混合来源数据集。",

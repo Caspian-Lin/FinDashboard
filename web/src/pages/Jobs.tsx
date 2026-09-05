@@ -86,7 +86,7 @@ export default function Jobs() {
   const statusFilter = searchParams.get("status") ?? ALL;
   const kindFilter = searchParams.get("kind") ?? ALL;
   const archivedFilter = (searchParams.get("archived") ?? "exclude") as JobArchivedFilter;
-  const [expandedId, setExpandedId] = React.useState<string | null>(null);
+  const [expandedId, setExpandedId] = React.useState<string | null>(() => searchParams.get("job"));
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [bulkNotice, setBulkNotice] = React.useState<string | null>(null);
 
