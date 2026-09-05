@@ -77,17 +77,36 @@ def matches_worker_run(*, argv: tuple[str, ...] | None, cmdline: str | None) -> 
 
 def belongs_to_environment(
     *,
+    argv: tuple[str, ...] | None,
     exe: str | None,
     cmdline: str | None,
     scripts_dir: Path,
 ) -> bool:
-    """进程是否属于本工作区环境(exe 或命令行引用本 venv Scripts 目录)。
+    """进程是否属于本工作区环境(argv[0]/exe/命令行引用本 venv Scripts 目录)。
 
-    路径比较经 :func:`os.path.normcase`(Windows 大小写不敏感)。命令行引用
-    覆盖 console-script shim 的底座解释器子进程(exe 是 base python,但
-    命令行含 ``<venv>/Scripts/finboard.exe worker run``)。
+    路径比较经 :func:`os.path.normcase`(Windows 大小写不敏感)。三个依据的
+    优先序:
+
+    * ``argv[0]``(POSIX)——启动时的解释器路径,**venv 符号链接未解析**:
+      uv 等工具的 ``.venv/bin/python`` 是指向共享 base 解释器的符号链接,
+      ``/proc/<pid>/exe`` 与 argv[0] 不同,前者跨工作区不可分辨(所有
+      worktree 的 venv 都解析到同一个 base),后者按 worktree 各自的 venv
+      路径记录——这是唯一可靠的 per-worktree 判别依据(CI Linux 实测)。
+      Windows 无此问题:ExecutablePath 按启动路径记录,junction 未解析。
+    * ``exe``(Windows GetModuleFileName)——按启动时的路径记录,可直接与
+      Scripts 目录比对;
+    * ``cmdline`` 引用 Scripts 目录——覆盖 console-script shim(``finboard.exe
+      worker run``)拉起的底座解释器子进程(exe 是 base python,但命令行
+      引用 venv 内 shim)。
     """
     marker = os.path.normcase(str(scripts_dir))
+    if argv:
+        invoked = argv[0]
+        if (
+            os.path.isabs(invoked)
+            and os.path.normcase(str(Path(invoked).parent)) == marker
+        ):
+            return True
     if exe and os.path.normcase(str(Path(exe).parent)) == marker:
         return True
     if not cmdline:
@@ -109,7 +128,10 @@ def select_stale_worker_processes(
         if not matches_worker_run(argv=process.argv, cmdline=process.cmdline):
             continue
         if not belongs_to_environment(
-            exe=process.exe, cmdline=process.cmdline, scripts_dir=scripts_dir
+            argv=process.argv,
+            exe=process.exe,
+            cmdline=process.cmdline,
+            scripts_dir=scripts_dir,
         ):
             continue
         selected.append(process)

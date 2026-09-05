@@ -72,19 +72,41 @@ class TestWorkerRunMatching:
 class TestEnvironmentScoping:
     def test_same_venv_exe_matches(self) -> None:
         assert belongs_to_environment(
+            argv=None,
             exe=str(_SCRIPTS / "python.exe"),
             cmdline=None,
             scripts_dir=_SCRIPTS,
         )
         assert belongs_to_environment(
+            argv=None,
             exe=str(_SCRIPTS / "finboard.exe"),
+            cmdline=None,
+            scripts_dir=_SCRIPTS,
+        )
+
+    def test_symlinked_interpreter_matches_via_argv0(self) -> None:
+        """POSIX 符号链接解释器(CI 实测):/proc/exe 解析到共享 base 解释器,
+        与 venv 路径对不上;argv[0] 保留启动时的 venv 路径,是可靠判别依据。"""
+        base_python = "/home/runner/.local/share/uv/python/cpython3.12/bin/python3.12"
+        assert belongs_to_environment(
+            argv=(str(_SCRIPTS / "python"), "-c", "x", "worker", "run"),
+            exe=base_python,
             cmdline=None,
             scripts_dir=_SCRIPTS,
         )
 
     def test_other_worktree_venv_rejected(self) -> None:
         assert not belongs_to_environment(
+            argv=None,
             exe=_OTHER_VENV,
+            cmdline=None,
+            scripts_dir=_SCRIPTS,
+        )
+        # argv[0] 指向其他 worktree 的 venv:即使 exe 解析到同一个共享 base
+        # 解释器,也不属于本工作区(uv venv 全部符号链接到同一 base)。
+        assert not belongs_to_environment(
+            argv=(str(_OTHER_VENV), "-m", "finboard_app.cli", "worker", "run"),
+            exe="C:/Program_Files/miniconda3/python.exe",
             cmdline=None,
             scripts_dir=_SCRIPTS,
         )
@@ -92,6 +114,7 @@ class TestEnvironmentScoping:
     def test_cmdline_referencing_scripts_dir_matches(self) -> None:
         """console-script shim 的底座子进程:exe 在 base 环境,命令行引用 venv。"""
         assert belongs_to_environment(
+            argv=None,
             exe="C:/Program_Files/miniconda3/python.exe",
             cmdline=f'"{_SCRIPTS / "finboard.exe"}" worker run',
             scripts_dir=_SCRIPTS,
@@ -99,6 +122,7 @@ class TestEnvironmentScoping:
 
     def test_base_python_without_reference_rejected(self) -> None:
         assert not belongs_to_environment(
+            argv=None,
             exe="C:/Program_Files/miniconda3/python.exe",
             cmdline="python -m finboard_app.cli worker run",
             scripts_dir=_SCRIPTS,
