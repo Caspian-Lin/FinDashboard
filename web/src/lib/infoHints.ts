@@ -316,4 +316,24 @@ export const INFO_HINTS = {
       },
     },
   },
+  jobs: {
+    status: {
+      title: { zh: "任务状态", en: "Job status" },
+      description: {
+        zh: "queued=排队；running=执行中；retry_waiting=等待自动重试；succeeded/failed/cancelled/interrupted=终态。",
+        en: "queued=waiting; running=executing; retry_waiting=awaiting automatic retry; succeeded/failed/cancelled/interrupted=terminal.",
+      },
+      detail: {
+        zh: "失败任务的 error_summary 头部带 [stage=...; decision=...] 定位信息；终态任务可归档隐藏但不会删除。",
+        en: "A failed job's error_summary starts with [stage=...; decision=...] locating context; archived terminal jobs are hidden but never deleted.",
+      },
+    },
+    kind: {
+      title: { zh: "任务类型", en: "Job kind" },
+      description: {
+        zh: "data_sync/bulk_download/fetch_all=行情数据；dataset_publish/research_data_sync=研究数据；research_run/backtest_run/validation_experiment/research_code_run=研究与回测。",
+        en: "data_sync/bulk_download/fetch_all=market data; dataset_publish/research_data_sync=research data; research_run/backtest_run/validation_experiment/research_code_run=research & backtesting.",
+      },
+    },
+  },
 } satisfies Record<string, Record<string, InfoHintDefinition>>;

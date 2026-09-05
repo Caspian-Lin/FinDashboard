@@ -745,6 +745,9 @@ class FactorDefinitionOut(BaseSchema):
     implementation: str
     signal_eligible: bool
     checksum: str
+    # 展示注记:该因子输入字段来自哪些发布数据集(bars/daily_metrics/...),
+    # 由 RESEARCH_RELEASE_FEATURE_NAMES 唯一事实来源派生,不属于目录 checksum。
+    source_datasets: list[str] = Field(default_factory=list)
 
 
 class FeatureSnapshotCreate(BaseSchema):
@@ -1291,6 +1294,17 @@ class ResearchDatasetReleaseSummaryOut(BaseSchema):
     known_limitations: list[str] = Field(default_factory=list)
     metadata_version: str
     release_checksum: str
+
+
+class DataPreviewOut(BaseSchema):
+    """数据预览(只读):缓存/冻结发布 parquet 的尾部行采样。"""
+
+    label: str
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    total_rows: int
+    truncated: bool
+    artifact: str
 
 
 class DatasetReleaseSymbolCheckOut(BaseSchema):

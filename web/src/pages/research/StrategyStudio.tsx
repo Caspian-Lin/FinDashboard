@@ -36,18 +36,21 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Accordion,
   AccordionContent,
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { strategySpecApi, datasetApi } from "@/lib/research";
+import { Link } from "react-router-dom";
+import { strategySpecApi, datasetApi, factorLabApi } from "@/lib/research";
+import { MasterList, MasterListItem } from "@/components/ui/master-list";
+import type {
+  DatasetReleaseSummary,
+  FactorCatalogEntry,
+} from "@/lib/research";
 import { cn, formatDateTime } from "@/lib/utils";
 import {
-  WorkflowIndicator,
-  NextStepCTA,
   HintLabel,
   ResearchHint,
 } from "@/components/research/ResearchHint";
@@ -116,6 +119,197 @@ const SECTIONS = [
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
+}
+
+/* ============================================================ */
+/* 数据与信号链路只读视图 — 数据集发布 → 特征节点 → 信号规则 → 组合      */
+/* ============================================================ */
+
+function specSection(
+  spec: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = spec[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function SpecChainPanel({
+  spec,
+  releases,
+}: {
+  spec: Record<string, unknown>;
+  releases: DatasetReleaseSummary[];
+}) {
+  const { tl } = useT();
+  const catalogQuery = useQuery({
+    queryKey: ["factor-catalog"],
+    queryFn: () => factorLabApi.catalog(),
+  });
+  const factorByName = React.useMemo(() => {
+    const map = new Map<string, FactorCatalogEntry>();
+    for (const entry of catalogQuery.data ?? []) map.set(entry.name, entry);
+    return map;
+  }, [catalogQuery.data]);
+  const releaseById = React.useMemo(() => {
+    const map = new Map<string, DatasetReleaseSummary>();
+    for (const rel of releases) map.set(rel.release_id, rel);
+    return map;
+  }, [releases]);
+
+  const graph = specSection(spec, "feature_graph");
+  const nodes = Array.isArray(graph?.nodes) ? (graph!.nodes as Record<string, unknown>[]) : [];
+  const rulesSection = specSection(spec, "signal_rules");
+  const rules = Array.isArray(rulesSection?.rules)
+    ? (rulesSection!.rules as Record<string, unknown>[])
+    : [];
+  const portfolio = specSection(spec, "portfolio_policy");
+  const plan = specSection(spec, "validation_plan");
+  const releaseIds = Array.isArray(plan?.dataset_release_ids)
+    ? (plan!.dataset_release_ids as unknown[]).filter(
+        (id): id is string => typeof id === "string",
+      )
+    : [];
+
+  const ruleText = (rule: Record<string, unknown>) => {
+    const bits = [String(rule.feature_id ?? "?"), String(rule.comparator ?? "?")];
+    if (rule.threshold !== undefined && rule.threshold !== null) bits.push(String(rule.threshold));
+    if (rule.reference_feature_id) bits.push(String(rule.reference_feature_id));
+    bits.push(`→ ${String(rule.action ?? "?")}`);
+    return bits.join(" ");
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">
+          {tl({ zh: "数据与信号链路", en: "Data & signal chain" })}
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            {tl({
+              zh: "本规格如何从已发布数据计算出信号(只读)",
+              en: "How this spec derives signals from published data (read-only)",
+            })}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-xs">
+        <div>
+          <p className="font-medium text-foreground">
+            1. {tl({ zh: "数据集发布", en: "Dataset releases" })}
+            <span className="ml-1 text-muted-foreground">({releaseIds.length})</span>
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {releaseIds.length === 0 && (
+              <span className="text-muted-foreground">{tl({ zh: "未绑定", en: "None bound" })}</span>
+            )}
+            {releaseIds.map((id) => {
+              const rel = releaseById.get(id);
+              return (
+                <Link
+                  key={id}
+                  to={`/research/data?release=${encodeURIComponent(id)}`}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 transition-colors hover:bg-accent"
+                >
+                  <span className="font-mono text-[11px] text-foreground">{id}</span>
+                  {rel && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {rel.dataset_name}
+                      {rel.dataset_kind ? ` · ${rel.dataset_kind}` : ""} · v{rel.version}
+                    </span>
+                  )}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <p className="font-medium text-foreground">
+            2. {tl({ zh: "特征节点", en: "Feature nodes" })}
+            <span className="ml-1 text-muted-foreground">({nodes.length})</span>
+          </p>
+          <div className="mt-1.5 space-y-1">
+            {nodes.map((node, i) => {
+              const nodeId = String(node.node_id ?? `node-${i}`);
+              const source = typeof node.source === "string" ? node.source : null;
+              const inputs = Array.isArray(node.inputs) ? (node.inputs as unknown[]).map(String) : [];
+              const factor = source ? factorByName.get(source) : undefined;
+              return (
+                <div key={nodeId} className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium text-foreground">{String(node.label ?? nodeId)}</span>
+                  <Badge variant="info" className="font-mono text-[10px]">
+                    {String(node.operator ?? "?")}
+                  </Badge>
+                  {typeof node.window === "number" && (
+                    <span className="text-muted-foreground">{node.window}d</span>
+                  )}
+                  {source && (
+                    <span className="text-muted-foreground">
+                      ← <span className="font-mono">{source}</span>
+                      {factor ? (
+                        <span className="ml-1 text-[10px]">
+                          {tl({ zh: "[目录因子]", en: "[catalog factor]" })}
+                          {(factor.source_datasets ?? []).length > 0 &&
+                            ` · ${factor.source_datasets!.join("/")}`}
+                        </span>
+                      ) : (
+                        source !== "close" && (
+                          <span className="ml-1 text-[10px] text-muted-foreground/70">
+                            {tl({ zh: "[价格特征]", en: "[price feature]" })}
+                          </span>
+                        )
+                      )}
+                    </span>
+                  )}
+                  {inputs.length > 0 && (
+                    <span className="text-muted-foreground">
+                      ← <span className="font-mono">{inputs.join(" + ")}</span>
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+            {nodes.length === 0 && (
+              <span className="text-muted-foreground">{tl({ zh: "无特征节点", en: "No feature nodes" })}</span>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <p className="font-medium text-foreground">
+            3. {tl({ zh: "信号规则", en: "Signal rules" })}
+            <span className="ml-1 text-muted-foreground">({rules.length})</span>
+          </p>
+          <div className="mt-1.5 space-y-1 font-mono text-[11px] text-muted-foreground">
+            {rules.map((rule, i) => (
+              <p key={String(rule.rule_id ?? i)}>{ruleText(rule)}</p>
+            ))}
+            {rules.length === 0 && (
+              <span className="font-sans text-muted-foreground">
+                {tl({ zh: "无信号规则", en: "No signal rules" })}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <p className="font-medium text-foreground">4. {tl({ zh: "组合策略", en: "Portfolio policy" })}</p>
+          <p className="mt-1 text-muted-foreground">
+            {portfolio
+              ? [
+                  String(portfolio.allocation_method ?? ""),
+                  portfolio.max_positions ? tl({ zh: `最多 ${String(portfolio.max_positions)} 只`, en: `max ${String(portfolio.max_positions)}` }) : "",
+                  portfolio.max_target_weight ? `${tl({ zh: "单标的上限", en: "per-instrument cap" })} ${String(portfolio.max_target_weight)}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ") || tl({ zh: "默认配置", en: "Defaults" })
+              : tl({ zh: "未声明", en: "Not specified" })}
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 export default function StrategyStudio() {
@@ -239,17 +433,16 @@ export default function StrategyStudio() {
           en: "No-code structured strategy configuration — whitelisted components, instant validation, version management",
         })}
       />
-      <WorkflowIndicator currentPath="/research/strategy" />
 
       <Alert variant="info" className="mb-4">
         <Info className="h-4 w-4" />
-        <AlertTitle>{tl({ zh: "策略 Studio vs 策略预设", en: "Strategy Studio vs Strategy Presets" })}</AlertTitle>
+        <AlertTitle>{tl({ zh: "策略 Studio vs 回测预设", en: "Strategy Studio vs backtest presets" })}</AlertTitle>
         <AlertDescription>
-          {tl({ zh: "策略 ", en: "Strategy " })}
+          {tl({ zh: "回测页内的策略 ", en: "Backtest " })}
           <strong>{tl({ zh: "预设", en: "presets" })}</strong>
           {tl({
-            zh: "（工具栏）用于快速回测探索（选个内置策略 + 改参数 + 跑结果）。",
-            en: " (toolbar) are for quick backtest exploration (pick a built-in strategy + tweak parameters + run results).",
+            zh: "用于快速回测探索（选个内置策略 + 改参数 + 跑结果）。",
+            en: " (inside the Backtest page) are for quick backtest exploration (pick a built-in strategy + tweak parameters + run results).",
           })}
           {tl({ zh: "策略 ", en: " Strategy " })}
           <strong>Studio</strong>
@@ -266,87 +459,68 @@ export default function StrategyStudio() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
         {/* Left: Strategy list */}
-        <div className="lg:col-span-1">
-          <Card>
-            <CardHeader>
+        <div className="space-y-4 lg:col-span-1">
+          <MasterList
+            title={
               <HintLabel hint={RESEARCH_HINTS.strategy.studio} className="text-sm font-semibold">
                 {tl({ zh: "策略类型", en: "Strategy Type" })}
               </HintLabel>
-            </CardHeader>
-            <CardContent className="p-2">
-              {registryLoading ? (
-                <div className="space-y-2 p-2">
-                  <Skeleton className="h-10 w-full" />
-                  <Skeleton className="h-10 w-full" />
-                </div>
-              ) : (
-                <ScrollArea className="max-h-[400px]">
-                  <div className="space-y-1">
-                    {registry?.strategies.map((s) => {
-                      const kind = s.kind as string;
-                      const name = (s.name ?? kind) as string;
-                      const desc = (s.description ?? "") as string;
-                      return (
-                        <button
-                          key={kind}
-                          onClick={() => {
-                            setSelectedKind(kind);
-                            setTemplateError(null);
-                            setShowSetup(true);
-                          }}
-                          className={cn(
-                            "w-full rounded-md px-3 py-2.5 text-left transition-colors",
-                            selectedKind === kind && !showSetup
-                              ? "bg-primary/10 text-primary"
-                              : "hover:bg-accent text-muted-foreground",
-                          )}
-                        >
-                          <div className="font-medium text-sm">{name}</div>
-                          <div className="text-xs text-muted-foreground/60">{kind}</div>
-                          <div className="mt-1 line-clamp-2 text-xs text-muted-foreground/50">{desc}</div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </ScrollArea>
-              )}
-            </CardContent>
-          </Card>
+            }
+          >
+            {registryLoading ? (
+              <div className="space-y-2 p-2">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+              </div>
+            ) : (
+              registry?.strategies.map((s) => {
+                const kind = s.kind as string;
+                const name = (s.name ?? kind) as string;
+                const desc = (s.description ?? "") as string;
+                return (
+                  <MasterListItem
+                    key={kind}
+                    selected={selectedKind === kind && !showSetup}
+                    onClick={() => {
+                      setSelectedKind(kind);
+                      setTemplateError(null);
+                      setShowSetup(true);
+                    }}
+                  >
+                    <div className="text-sm font-medium">{name}</div>
+                    <div className="min-w-0 truncate text-xs text-muted-foreground/60">{kind}</div>
+                    <div className="mt-1 line-clamp-2 text-xs text-muted-foreground/50">{desc}</div>
+                  </MasterListItem>
+                );
+              })
+            )}
+          </MasterList>
 
           {strategies && strategies.length > 0 && (
-            <Card className="mt-3">
-              <CardHeader>
-                <CardTitle className="text-sm">{tl({ zh: "已保存策略", en: "Saved Strategies" })}</CardTitle>
-              </CardHeader>
-              <CardContent className="p-2">
-                <ScrollArea className="max-h-[200px]">
-                  <div className="space-y-1">
-                    {strategies.map((s) => (
-                      <button
-                        key={s.strategy_id}
-                        onClick={() => {
-                          setSelectedKind(s.strategy_id);
-                          setSpec(s.spec);
-                          setShowSetup(false);
-                        }}
-                        className={cn(
-                          "flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors",
-                          selectedKind === s.strategy_id && !showSetup
-                            ? "bg-primary/10 text-primary"
-                            : "hover:bg-accent text-muted-foreground",
-                        )}
-                      >
-                        <span className="font-medium">{s.strategy_id}</span>
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs text-muted-foreground/60">v{s.version}</span>
-                          {s.published && <Lock className="h-3 w-3 text-success" />}
-                        </div>
-                      </button>
-                    ))}
+            <MasterList
+              title={tl({ zh: "已保存策略", en: "Saved Strategies" })}
+              count={strategies.length}
+            >
+              {strategies.map((s) => (
+                <MasterListItem
+                  key={`${s.strategy_id}@${s.version}`}
+                  selected={selectedKind === s.strategy_id && !showSetup}
+                  onClick={() => {
+                    setSelectedKind(s.strategy_id);
+                    setSpec(s.spec);
+                    setShowSetup(false);
+                  }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="min-w-0 truncate text-sm font-medium">{s.strategy_id}</span>
+                    <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground/60">
+                      v{s.version}
+                      {s.published && <Lock className="h-3 w-3 text-success" />}
+                    </span>
                   </div>
-                </ScrollArea>
-              </CardContent>
-            </Card>
+                </MasterListItem>
+              ))}
+            </MasterList>
           )}
         </div>
 
@@ -514,6 +688,9 @@ export default function StrategyStudio() {
                 </Alert>
               )}
 
+              {/* 数据与信号链路只读视图 */}
+              <SpecChainPanel spec={spec} releases={releasesQuery.data ?? []} />
+
               {/* Editor body */}
               {editMode ? (
                 <Card>
@@ -671,15 +848,6 @@ export default function StrategyStudio() {
           )}
         </div>
       </div>
-
-      <NextStepCTA
-        nextPath="/research/experiments"
-        nextLabel={{ zh: "实验与 OOS", en: "Experiments & OOS" }}
-        description={{
-          zh: "用样本外数据验证策略是否真的有效，排除过拟合",
-          en: "Validate whether the strategy truly works on out-of-sample data and rule out overfitting",
-        }}
-      />
 
       {/* Setup dialog */}
       <SetupDialog

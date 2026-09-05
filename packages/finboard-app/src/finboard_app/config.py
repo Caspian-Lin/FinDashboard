@@ -216,6 +216,9 @@ class Settings(BaseSettings):
     opencode_web_cors_origins: str = ""
     # 宿主机侧工作目录(仓库根;含 ``.opencode`` / ``.agents``,bind mount 进容器)。
     opencode_workdir: str = "."
+    # 研究记录目录(仓库 ``docs/research/`` 三件套 + rounds/,只读暴露给前端,
+    # 见 finboard_api.routes.research_docs;canonical 仍是仓库文件)。
+    research_docs_dir: str = "docs/research"
     # 子进程日志路径。
     opencode_log_path: str = ".opencode/logs/opencode-web.log"
     # 额外注入子进程的环境变量(LLM provider Key 等;逗号分隔 KEY=VAL)。

@@ -318,6 +318,35 @@ export const RESEARCH_HINTS = {
         en: "Freezing is the foundation of reproducibility. Even after the data source updates, a frozen run recomputes with the old versions.",
       },
     },
+    statusFilter: {
+      title: { zh: "运行状态", en: "Run status" },
+      description: {
+        zh: "queued=排队等待 worker；running=执行中；completed/failed/interrupted/rejected/cancelled=终态。",
+        en: "queued=waiting for a worker; running=executing; completed/failed/interrupted/rejected/cancelled=terminal.",
+      },
+      detail: {
+        zh: "interrupted 表示进程中断(可经重放恢复)；rejected 表示风控/约束校验拒绝(重放也不会通过)。",
+        en: "interrupted means the process was cut off (replay to resume); rejected means a risk/constraint check refused (replay will not pass).",
+      },
+    },
+    jobProgress: {
+      title: { zh: "后台任务进度", en: "Background job progress" },
+      description: {
+        zh: "研究运行由离线 worker 消费统一任务队列执行；此处展示阶段(phase)、逐决策进度与心跳。",
+        en: "Runs are executed by an offline worker consuming the unified job queue; this shows phase, per-decision progress and heartbeat.",
+      },
+      detail: {
+        zh: "phase 形如 research_run:<stage>#序号@日期；数据加载期显示 decision_load k/N。进度长时间不动而心跳仍在刷新可能是卡死。",
+        en: "phase looks like research_run:<stage>#n@date; loading shows decision_load k/N. Stalled progress with a live heartbeat may indicate a hang.",
+      },
+    },
+    artifacts: {
+      title: { zh: "决策产物", en: "Decision artifacts" },
+      description: {
+        zh: "每个决策时点的逐阶段产物,带 trace_id 血缘与内容校验和;点击行展开 payload 原始内容。",
+        en: "Per-decision stage artifacts with trace_id lineage and content checksums; click a row to expand its raw payload.",
+      },
+    },
   },
   portfolio: {
     allocate: {

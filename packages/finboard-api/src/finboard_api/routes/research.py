@@ -21,7 +21,7 @@ import subprocess
 from datetime import UTC, datetime
 from datetime import date as _date
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,8 +74,10 @@ from finboard_data.factor_lab import (
     new_factor_experiment,
 )
 from finboard_data.releases import (
+    RESEARCH_RELEASE_FEATURE_NAMES,
     DatasetReleaseError,
     FrozenReleaseProvider,
+    ReleaseDatasetKind,
     ResearchDatasetRelease,
 )
 from finboard_persistence import BackgroundJobPersistenceConflictError
@@ -441,16 +443,49 @@ async def delete_experiment(
 # ---------------------------------------------------------------------------
 
 
+# 因子目录展示注记(因子实验室可观测性):按 source_fields 反查数据来源发布
+# kind,映射消费 RESEARCH_RELEASE_FEATURE_NAMES(唯一事实来源,finboard_data.releases)。
+# bars 白名单取发布字段口径中的价格/量额列(timestamp 是键列,不算因子输入)。
+# 目录 source_fields 可能是裸字段名,也可能是 "<dataset>.<field>" 带来源前缀
+# 形式(如 daily_metrics.turnover_rate),两种都按末段裸名参与匹配。
+_FACTOR_BARS_INPUT_FIELDS = frozenset({"open", "high", "low", "close", "volume", "amount"})
+
+
+def _factor_source_datasets(source_fields: list[str]) -> list[str]:
+    bare_names = {
+        field.split(".")[-1] for field in source_fields if field
+    }
+    datasets: list[str] = []
+    if bare_names & _FACTOR_BARS_INPUT_FIELDS:
+        datasets.append(ReleaseDatasetKind.BARS.value)
+    for kind in ReleaseDatasetKind:
+        names = RESEARCH_RELEASE_FEATURE_NAMES.get(kind)
+        if not names:
+            continue
+        for name in names:
+            # 精确匹配为主;目录字段可能带变体后缀(如 dividend_yield_ttm),
+            # 展示注记按「映射名是目录字段子串」放宽 —— 仅用于展示,不参与任何门控。
+            if any(name == bare or name in bare for bare in bare_names):
+                datasets.append(kind.value)
+                break
+    return datasets
+
+
 @router.get("/factors/catalog", response_model=list[FactorDefinitionOut])
 async def get_factor_catalog(
     role: FactorRole | None = Query(default=None),
 ) -> list[FactorDefinitionOut]:
     """返回有真实实现的版本化目录;未实现因子不会出现在列表中。"""
 
-    return [
-        FactorDefinitionOut.model_validate(definition.as_dict())
-        for definition in factor_lab_catalog(role)
-    ]
+    items: list[FactorDefinitionOut] = []
+    for definition in factor_lab_catalog(role):
+        data = definition.as_dict()
+        raw_fields = data.get("source_fields", [])
+        data["source_datasets"] = _factor_source_datasets(
+            [str(field) for field in cast(list[object], raw_fields)]
+        )
+        items.append(FactorDefinitionOut.model_validate(data))
+    return items
 
 
 @router.post(
