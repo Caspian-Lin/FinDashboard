@@ -1,46 +1,27 @@
 import * as React from "react";
-import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area";
 import { cn } from "@/lib/utils";
 
+/**
+ * 竖向滚动区:原生 overflow-y-auto(scrollbar-thin 细滚动条)。
+ *
+ * 曾用 Radix ScrollArea:其 Viewport 高度约束依赖 max-h 在 Root/Viewport
+ * 之间传递,`max-h` 加在 Root 上时 Viewport 的 h-full 解析不出确定高度,
+ * 真实客户端出现过内容被裁切且不可滚动(shadcn#594,inherit 修复仍不可靠)。
+ * 本仓全部调用点都是「max-h 限高的竖向列表」,原生溢出滚动无高度传递前提,
+ * 滚轮/触摸/键盘行为均为浏览器原生。
+ */
 const ScrollArea = React.forwardRef<
-  React.ElementRef<typeof ScrollAreaPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root>
+  HTMLDivElement,
+  React.ComponentPropsWithoutRef<"div">
 >(({ className, children, ...props }, ref) => (
-  <ScrollAreaPrimitive.Root
+  <div
     ref={ref}
-    className={cn("relative overflow-hidden", className)}
+    className={cn("overflow-x-hidden overflow-y-auto scrollbar-thin", className)}
     {...props}
   >
-    {/* max-h-[inherit]:max-h 加在 Root 上时父级高度仍是 auto,
-        Viewport 的 h-full 解析不出确定高度会被裁切而不滚动(shadcn#594);
-        inherit 让 Viewport 直接继承 Root 的 max-height,滚动区生效。 */}
-    <ScrollAreaPrimitive.Viewport className="h-full max-h-[inherit] w-full rounded-[inherit]">
-      {children}
-    </ScrollAreaPrimitive.Viewport>
-    <ScrollBar />
-    <ScrollAreaPrimitive.Corner />
-  </ScrollAreaPrimitive.Root>
+    {children}
+  </div>
 ));
-ScrollArea.displayName = ScrollAreaPrimitive.Root.displayName;
+ScrollArea.displayName = "ScrollArea";
 
-const ScrollBar = React.forwardRef<
-  React.ElementRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>,
-  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>
->(({ className, orientation = "vertical", ...props }, ref) => (
-  <ScrollAreaPrimitive.ScrollAreaScrollbar
-    ref={ref}
-    orientation={orientation}
-    className={cn(
-      "flex touch-none select-none transition-colors",
-      orientation === "vertical" && "h-full w-2.5 border-l border-l-transparent p-[1px]",
-      orientation === "horizontal" && "h-2.5 flex-col border-t border-t-transparent p-[1px]",
-      className,
-    )}
-    {...props}
-  >
-    <ScrollAreaPrimitive.ScrollAreaThumb className="relative flex-1 rounded-full bg-border" />
-  </ScrollAreaPrimitive.ScrollAreaScrollbar>
-));
-ScrollBar.displayName = ScrollAreaPrimitive.ScrollAreaScrollbar.displayName;
-
-export { ScrollArea, ScrollBar };
+export { ScrollArea };
