@@ -462,10 +462,10 @@ class TestBulkDownloadEndToEnd:
             )
             await session.commit()
 
-    async def test_bulk_download_tushare_rejects_index(
+    async def test_bulk_download_tushare_rejects_etf(
         self, engine: AsyncEngine
     ) -> None:
-        """tushare 源对指数保持 scope 拒绝(issue #256:不静默换源)。"""
+        """tushare 源对 ETF 保持 scope 拒绝(#341:复权口径对齐前不静默换源)。"""
         from sqlalchemy import delete as sa_delete
         from sqlalchemy import select
 
@@ -474,13 +474,85 @@ class TestBulkDownloadEndToEnd:
 
         async with session_factory(engine)() as session:
             await session.execute(
-                sa_delete(InstrumentModel).where(InstrumentModel.code == "000300.SH")
+                sa_delete(InstrumentModel).where(InstrumentModel.code == "510300.SH")
             )
             await session.flush()
             session.add(
                 InstrumentModel(
-                    code="000300.SH",
-                    name="沪深300",
+                    code="510300.SH",
+                    name="沪深300ETF",
+                    market="a_share",
+                    instrument_type="etf",
+                    exchange="SSE",
+                    status="active",
+                )
+            )
+            await session.commit()
+
+        registry = JobExecutorRegistry()
+        registry.register(
+            "bulk_download",
+            BulkDownloadExecutor(
+                session_maker=_session_maker(engine),  # type: ignore[arg-type]
+                settings_factory=lambda: None,
+            ),
+        )
+        worker = _build_worker(engine, registry)
+        await _enqueue(
+            engine,
+            kind="bulk_download",
+            payload={
+                "market": "a_share",
+                "source": "tushare",
+                "start": "2024-01-01",
+                "instrument_type": "etf",
+            },
+        )
+        with patch(
+            "finboard_backtest.background_jobs.executors.bulk_download.build_bar_provider",
+        ) as build:
+            await _drain(worker)
+            # scope 校验先于 provider 构建失败。
+            build.assert_not_called()
+
+        async with session_factory(engine)() as session:
+            row = (
+                await session.execute(
+                    select(BackgroundJobModel).where(
+                        BackgroundJobModel.kind == "bulk_download",
+                        BackgroundJobModel.payload["source"].as_string() == "tushare",
+                        BackgroundJobModel.payload["instrument_type"].as_string() == "etf",
+                    )
+                )
+            ).scalar_one()
+            assert row.status == "failed"
+            assert row.error_code == "tushare_scope_mismatch"
+
+        async with session_factory(engine)() as session:
+            await session.execute(
+                sa_delete(InstrumentModel).where(InstrumentModel.code == "510300.SH")
+            )
+            await session.commit()
+
+    async def test_bulk_download_tushare_allows_index(
+        self, engine: AsyncEngine
+    ) -> None:
+        """#341:tushare 源放行指数(index_daily 专属接口),scope 校验通过。"""
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import select
+
+        from finboard_persistence import InstrumentModel
+        from finboard_persistence.models import BackgroundJobModel
+
+        async with session_factory(engine)() as session:
+            await session.execute(
+                sa_delete(InstrumentModel).where(InstrumentModel.code == "000852.SH")
+            )
+            await session.flush()
+            session.add(
+                InstrumentModel(
+                    code="000852.SH",
+                    name="中证1000",
                     market="a_share",
                     instrument_type="index",
                     exchange="SSE",
@@ -508,12 +580,14 @@ class TestBulkDownloadEndToEnd:
                 "instrument_type": "index",
             },
         )
+
+        mock_provider = AsyncMock()
+        mock_provider.update_cache_batch.return_value = {"000852.SH": True}
         with patch(
             "finboard_backtest.background_jobs.executors.bulk_download.build_bar_provider",
-        ) as build:
+            return_value=mock_provider,
+        ):
             await _drain(worker)
-            # scope 校验先于 provider 构建失败。
-            build.assert_not_called()
 
         async with session_factory(engine)() as session:
             row = (
@@ -521,14 +595,18 @@ class TestBulkDownloadEndToEnd:
                     select(BackgroundJobModel).where(
                         BackgroundJobModel.kind == "bulk_download",
                         BackgroundJobModel.payload["source"].as_string() == "tushare",
+                        BackgroundJobModel.payload["instrument_type"].as_string() == "index",
                     )
                 )
             ).scalar_one()
-            assert row.status == "failed"
-            assert row.error_code == "tushare_scope_mismatch"
+            assert row.status == "succeeded"
+        called = mock_provider.update_cache_batch.await_args
+        assert called is not None
+        symbols = list(called.args[0])
+        assert [s.code for s in symbols] == ["000852.SH"]
 
         async with session_factory(engine)() as session:
             await session.execute(
-                sa_delete(InstrumentModel).where(InstrumentModel.code == "000300.SH")
+                sa_delete(InstrumentModel).where(InstrumentModel.code == "000852.SH")
             )
             await session.commit()

@@ -138,13 +138,13 @@ class BulkDownloadExecutor:
 
 
 def _validate_tushare_scope(provider_name: str, instruments: Sequence[object]) -> None:
-    """复刻 ``data._validate_bulk_provider_scope``:tushare 批量仅支持 A 股股票与转债。
+    """复刻 ``data._validate_bulk_provider_scope``:tushare 批量支持股票/转债/指数。
 
-    可转债(issue #265)走 2000 积分档的 ``cb_daily`` 专属接口
-    (TushareBarProvider 按代码规则分流),与 ETF / 指数「2000 积分拉不到」
-    的边界不同,因此放行;期货(issue #267)tushare 侧不接线(fut_daily
-    属另档积分),走 akshare 新浪主连。tushare 拒绝行为对其余非股票标的
-    保持不变(具名 tushare_scope_mismatch,不静默换源)。
+    可转债(issue #265)与指数(issue #341,2026-09-06 实测 2000 积分档
+    可调)各走 ``cb_daily`` / ``index_daily`` 专属接口(TushareBarProvider
+    按代码规则分流);期货(issue #267)tushare 侧不接线(fut_daily 属另档
+    积分),走 akshare 新浪主连;ETF(issue #341,复权口径对齐未定稿)仍仅
+    akshare|yfinance。拒绝行为具名 tushare_scope_mismatch,不静默换源。
     """
     if provider_name != "tushare":
         return
@@ -152,14 +152,14 @@ def _validate_tushare_scope(provider_name: str, instruments: Sequence[object]) -
         getattr(ins, "code", "?")
         for ins in instruments
         if getattr(ins, "market", None) != "a_share"
-        or getattr(ins, "instrument_type", None) not in ("stock", "convertible")
+        or getattr(ins, "instrument_type", None) not in ("stock", "convertible", "index")
     ]
     if incompatible:
         raise ExecutorError(
             code="tushare_scope_mismatch",
             summary=(
-                "Tushare 批量任务仅支持 A 股股票与可转债;"
-                "ETF / 指数 / 期货请另建任务选 akshare"
+                "Tushare 批量任务支持 A 股股票、可转债与指数;"
+                "ETF / 期货请另建任务选 akshare"
             ),
             retryable=False,
             context={"sample": incompatible[:5]},
