@@ -29,7 +29,7 @@ from finboard_app.dev_cleanup import (
 )
 
 _SCRIPTS = Path(sys.executable).parent
-_OTHER_VENV = Path("C:/other/FinDashboard-wt9/.venv/Scripts/python.exe")
+_OTHER_VENV = "C:/other/FinDashboard-wt9/.venv/Scripts/python.exe"
 
 
 def _info(
@@ -112,7 +112,7 @@ class TestSelection:
             _info(pid=2, cmdline="finboard.exe dev --port 8000"),
             _info(
                 pid=3,
-                exe=str(_OTHER_VENV),
+                exe=_OTHER_VENV,
                 cmdline="python -m finboard_app.cli worker run",
             ),
             _info(pid=4, argv=("python", "-c", "x", "worker", "run")),
