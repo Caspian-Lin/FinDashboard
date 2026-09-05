@@ -94,17 +94,13 @@ class DataSyncExecutor:
             )
             await session.commit()
 
-        summary = (
-            f"标的 {backfill.scoped} 只;回填 list_date={backfill.backfilled_list_date} "
-            f"industry={backfill.backfilled_industry} "
-            f"delist_date={backfill.backfilled_delist_date};仍缺失 "
-            f"list_date={backfill.missing_list_date} "
-            f"industry={backfill.missing_industry} "
-            f"delist_date={backfill.missing_delist_date}"
-            + ("" if backfill.profile_batch_available else "(无档案批次)")
-        )
+        # issue #348:完成语收短为 ``data_sync:done`` 短摘要 —— 旧完成语
+        # (标的数 + 回填/缺失明细)恒超旧列宽 64 字符,收尾写 phase 触发
+        # StringDataRightTruncation,实际已完成的任务被误报 failed。回填
+        # 明细数字由下面的 data_sync.done 结构化日志(backfill.as_dict())
+        # 完整承载,不丢信息。
         logger.info("data_sync.done", **backfill.as_dict())
-        await progress(1, 1, f"data_sync:done {summary}")
+        await progress(1, 1, "data_sync:done")
         return JobResult(status="succeeded", result_ref=None)
 
 
