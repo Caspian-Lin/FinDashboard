@@ -1,11 +1,14 @@
 import type { ReactNode } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
 /**
  * 主从布局页的左侧二级列表统一容器:Card + 标题/计数/操作一行 + 统一高度滚动区。
  * 此前 5 个页面各自为政(九种 max-h、两种卡片内边距、三种头部模式),本组件收拢。
+ *
+ * 滚动用原生 overflow-y-auto 而非 Radix ScrollArea:后者的 Viewport 高度
+ * 约束依赖 max-h 在 Root/Viewport 间的传递,真实客户端出现过约束失效
+ * (内容被裁切且不可滚);原生溢出滚动无此类高度传递前提。
  */
 export function MasterList({
   title,
@@ -38,9 +41,9 @@ export function MasterList({
         {toolbar && <div className="mt-2">{toolbar}</div>}
       </CardHeader>
       <CardContent className="p-2 pt-0">
-        <ScrollArea className="max-h-[560px] pr-3">
-          <div className="space-y-2">{children}</div>
-        </ScrollArea>
+        <div className="max-h-[560px] space-y-2 overflow-x-hidden overflow-y-auto scrollbar-thin p-1">
+          {children}
+        </div>
       </CardContent>
     </Card>
   );
