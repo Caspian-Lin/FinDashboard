@@ -270,6 +270,71 @@ class TestEnqueueBasedTools:
             == "bulk_download:a_share:akshare:2020-01-01:all"
         )
 
+    async def test_bulk_download_symbols_subset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """symbols 子集(#347)落 payload(去重保序)+ 幂等键带摘要。"""
+        import hashlib
+
+        app = _make_app()
+        monkeypatch.setattr(
+            BackgroundJobRepository, "create_or_get", _make_echo_create_or_get()
+        )
+        symbols = ["000858.SZ", "000001.SZ", "000001.SZ"]
+        digest = hashlib.sha256(
+            ",".join(dict.fromkeys(symbols)).encode("utf-8")
+        ).hexdigest()[:16]
+        env = await dw.data_bulk_download_start(
+            app,
+            market="a_share",
+            start="2020-01-01",
+            source="akshare",
+            symbols=symbols,
+        )
+        assert env.status == "ok"
+        assert env.data["payload"]["symbols"] == ["000858.SZ", "000001.SZ"]
+        assert (
+            env.data["idempotency_key"]
+            == f"bulk_download:a_share:akshare:2020-01-01:all:sub:{digest}"
+        )
+
+    async def test_bulk_download_unknown_source_invalid_argument(self) -> None:
+        """>#347 入队期契约:未知 source 秒级 invalid_argument(不再等执行期)。"""
+        app = _make_app()
+        env = await dw.data_bulk_download_start(
+            app, market="a_share", start="2020-01-01", source="wind"
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "wind" in env.error.message
+        assert "invalid_field_value" in env.error.message
+
+    async def test_bulk_download_bad_date_invalid_argument(self) -> None:
+        """>#347:坏日期入队即拒。"""
+        app = _make_app()
+        env = await dw.data_bulk_download_start(
+            app, market="a_share", start="2020/01/01", source="akshare"
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
+    async def test_bulk_download_tushare_etf_invalid_argument(self) -> None:
+        """>#347:tushare x etf 字面量预检入队即拒(执行器 DB 行 scope 校验保留)。"""
+        app = _make_app()
+        env = await dw.data_bulk_download_start(
+            app,
+            market="a_share",
+            start="2020-01-01",
+            source="tushare",
+            instrument_type="etf",
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        assert "tushare_scope_mismatch" in env.error.message
+
     async def test_quality_repair_ok(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

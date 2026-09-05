@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -29,11 +29,20 @@ from finboard_backtest.background_jobs.executors._providers import (
     build_bar_provider,
     resolve_provider_name,
 )
+from finboard_backtest.background_jobs.payload_contracts import (
+    PayloadContractError,
+    validate_job_payload,
+)
 
 if TYPE_CHECKING:
     from finboard_backtest.background_jobs.executors._providers import (
         SettingsFactory,
     )
+
+#: 部分失败报告里逐标的列出的上限(#347):error_summary 是单行文本字段,
+#: 全市场任务可能有几千个失败标的,超出部分聚合计数(完整清单在 worker 日志
+#: ``*.cache_update_failed``),防止超长摘要撑爆任务详情。
+_PARTIAL_REPORT_MAX_SYMBOLS = 20
 
 
 class BulkDownloadExecutor:
@@ -55,12 +64,24 @@ class BulkDownloadExecutor:
         job: JobRecord,
         progress: ProgressCallback,
     ) -> JobResult:
+        # 入队期契约重放(#260 风格,#347 注册):覆盖旁路入队(直接写库 /
+        # 旧版本入队的存量行),未知键 / 非法 source / 坏日期执行期同样 fail-fast。
+        try:
+            validate_job_payload(job.kind, job.payload)
+        except PayloadContractError as exc:
+            raise ExecutorError(
+                code="invalid_payload",
+                summary=exc.summary,
+                retryable=False,
+                context={"job_id": job.job_id},
+            ) from exc
         market = _require_str(job, "market")
         source = _require_str(job, "source")
         start = _parse_date(job, "start")
         instrument_type_raw = job.payload.get("instrument_type")
         exchange = job.payload.get("exchange")
         listing_boards = job.payload.get("listing_boards")
+        symbols_filter = job.payload.get("symbols")
         if instrument_type_raw is not None and not isinstance(instrument_type_raw, str):
             raise ExecutorError(
                 code="invalid_payload",
@@ -72,6 +93,17 @@ class BulkDownloadExecutor:
             raise ExecutorError(
                 code="invalid_payload",
                 summary="listing_boards 必须是列表",
+                retryable=False,
+                context={"job_id": job.job_id},
+            )
+        if symbols_filter is not None and (
+            not isinstance(symbols_filter, list)
+            or not symbols_filter
+            or not all(isinstance(code, str) for code in symbols_filter)
+        ):
+            raise ExecutorError(
+                code="invalid_payload",
+                summary="symbols 必须是非空字符串列表(缺省不传 = 全池,#347)",
                 retryable=False,
                 context={"job_id": job.job_id},
             )
@@ -93,6 +125,30 @@ class BulkDownloadExecutor:
             )
             await session.commit()
 
+        # symbols 子集过滤(#347):与 market / instrument_type / exchange /
+        # listing_boards 过滤叠加 —— 失败清单可直接回填重跑。交集为空按
+        # no_instruments 拒,不让任务静默零迭代。
+        if symbols_filter:
+            wanted = set(symbols_filter)
+            instruments = [
+                ins for ins in instruments if getattr(ins, "code", None) in wanted
+            ]
+            if not instruments:
+                raise ExecutorError(
+                    code="no_instruments",
+                    summary=(
+                        "symbols 子集与筛选条件交集为空"
+                        "(标的未登记或不在 market/instrument_type 过滤范围内;"
+                        "请先同步标的,或放宽过滤条件)"
+                    ),
+                    retryable=False,
+                    context={
+                        "job_id": job.job_id,
+                        "market": market,
+                        "symbols": sorted(wanted)[:_PARTIAL_REPORT_MAX_SYMBOLS],
+                    },
+                )
+
         if not instruments:
             raise ExecutorError(
                 code="no_instruments",
@@ -111,6 +167,13 @@ class BulkDownloadExecutor:
         on_progress = make_sync_progress(
             progress, phase_prefix="bulk_download", total_holder=total_holder
         )
+        # 逐标的失败摘要(#347):provider 侧 on_error 回调聚合异常类型 +
+        # 截断消息;返回 dict[code, bool] 里 False 但无回调上报的(如测试
+        # stub / 未升级 provider)标注原因未上报,保持缺口可见。
+        failures: dict[str, str] = {}
+
+        def _collect_failure(code: str, reason: str) -> None:
+            failures.setdefault(code, reason)
 
         await progress(0, len(sym_objs), "bulk_download:fetching")
         results = await provider.update_cache_batch(
@@ -119,20 +182,38 @@ class BulkDownloadExecutor:
             start,
             end,
             on_progress=on_progress,
+            on_error=_collect_failure,
         )
         success = sum(results.values())
         failed = len(sym_objs) - success
-        await progress(len(sym_objs), len(sym_objs), "bulk_download:done")
+        if failed == 0:
+            await progress(len(sym_objs), len(sym_objs), "bulk_download:done")
+        else:
+            await progress(
+                len(sym_objs),
+                len(sym_objs),
+                f"bulk_download:partial {failed} failed",
+            )
         if failed == len(sym_objs) and success == 0:
             raise ExecutorError(
                 code="all_symbols_failed",
-                summary=f"批量拉取全部 {failed} 个标的均失败",
+                summary=_partial_failure_summary(
+                    failed, len(sym_objs), results, failures
+                ),
                 retryable=False,
                 context={"job_id": job.job_id, "failed": failed},
             )
+        # 「全部失败才 failed」语义不变:部分失败仍 succeeded,但缺口以
+        # error_summary 透出(worker 落库路径对该字段不按状态过滤,
+        # finboard_job_get / GET /api/jobs/{id} 均可见),phase 同步标注。
         return JobResult(
             status="succeeded",
             result_ref=None,
+            error_summary=(
+                _partial_failure_summary(failed, len(sym_objs), results, failures)
+                if failed
+                else None
+            ),
             progress_total=len(sym_objs),
         )
 
@@ -164,6 +245,33 @@ def _validate_tushare_scope(provider_name: str, instruments: Sequence[object]) -
             retryable=False,
             context={"sample": incompatible[:5]},
         )
+
+
+def _partial_failure_summary(
+    failed: int,
+    total: int,
+    results: dict[str, bool],
+    failures: Mapping[str, str],
+) -> str:
+    """汇总部分失败报告(#347):失败标的 + 异常类型与截断消息。
+
+    排序列出前 :data:`_PARTIAL_REPORT_MAX_SYMBOLS` 个失败标的(排序保证
+    报告确定性),超出部分只聚合计数;未收到 on_error 上报的失败标的标注
+    原因未上报(测试 stub / 未升级 provider 路径),缺口依旧可见。
+    """
+
+    failed_codes = sorted(code for code, ok in results.items() if not ok)
+    parts = [
+        f"{code}: {failures.get(code, '原因未上报(详见 worker 日志)')}"
+        for code in failed_codes[:_PARTIAL_REPORT_MAX_SYMBOLS]
+    ]
+    listed = " ;".join(parts)
+    if len(failed_codes) > _PARTIAL_REPORT_MAX_SYMBOLS:
+        listed += (
+            f" ;…等共 {len(failed_codes)} 个失败标的"
+            "(完整清单见 worker 日志 cache_update_failed)"
+        )
+    return f"部分标的拉取失败: {failed}/{total}({listed})"
 
 
 def _require_str(job: JobRecord, key: str) -> str:

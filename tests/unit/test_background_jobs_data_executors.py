@@ -84,6 +84,77 @@ class TestBulkDownloadPayload:
             await executor.execute(job, _noop_progress)
         assert exc_info.value.code == "invalid_payload"
 
+    @pytest.mark.asyncio
+    async def test_unknown_source_replayed_at_execute(self) -> None:
+        """>#347 契约重放:未知 source 执行期同样 fail-fast(覆盖旁路入队)。"""
+        from finboard_backtest.background_jobs.executors.bulk_download import (
+            BulkDownloadExecutor,
+        )
+
+        executor = BulkDownloadExecutor(
+            session_maker=_fake_session_maker(),
+            settings_factory=lambda: None,
+        )
+        job = _make_job(
+            {"market": "a_share", "source": "wind", "start": "2024-01-01"},
+            "bulk_download",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+        assert "wind" in exc_info.value.summary
+
+    @pytest.mark.asyncio
+    async def test_tushare_etf_literal_replayed_at_execute(self) -> None:
+        """>#347 契约重放:tushare x etf 字面量预检在 scope 校验(需 DB)之前。"""
+        from finboard_backtest.background_jobs.executors.bulk_download import (
+            BulkDownloadExecutor,
+        )
+
+        executor = BulkDownloadExecutor(
+            session_maker=_fake_session_maker(),
+            settings_factory=lambda: None,
+        )
+        job = _make_job(
+            {
+                "market": "a_share",
+                "source": "tushare",
+                "start": "2024-01-01",
+                "instrument_type": "etf",
+            },
+            "bulk_download",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+        # 重放把 PayloadContractError 收敛为 invalid_payload,具名根因保留在
+        # summary 文案里(与 research_data_sync 重放同风格)。
+        assert "不支持 ETF" in exc_info.value.summary
+
+    @pytest.mark.asyncio
+    async def test_empty_symbols_list_replayed_at_execute(self) -> None:
+        """>#347:显式空 symbols 列表执行期拒绝(缺省不传 = 全池)。"""
+        from finboard_backtest.background_jobs.executors.bulk_download import (
+            BulkDownloadExecutor,
+        )
+
+        executor = BulkDownloadExecutor(
+            session_maker=_fake_session_maker(),
+            settings_factory=lambda: None,
+        )
+        job = _make_job(
+            {
+                "market": "a_share",
+                "source": "akshare",
+                "start": "2024-01-01",
+                "symbols": [],
+            },
+            "bulk_download",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+
 
 class TestFeatureSnapshotPayload:
     @pytest.mark.asyncio

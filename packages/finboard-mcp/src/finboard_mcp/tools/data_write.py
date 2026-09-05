@@ -512,11 +512,23 @@ async def data_bulk_download_start(
     listing_boards: list[str] | None = None,
     start: str = "2015-01-01",
     source: str | None = None,
+    symbols: list[str] | None = None,
 ) -> ToolEnvelope:
-    """登记批量历史数据拉取任务,返回 202 + job_id(不等待执行)。"""
+    """登记批量历史数据拉取任务,返回 202 + job_id(不等待执行)。
+
+    ``symbols``(#347):可选子集重跑 —— 与 market/instrument_type/exchange/
+    listing_boards 过滤叠加(交集为空执行器按 no_instruments 拒),失败清单
+    可直接回填;入队期 payload 契约校验(#347,#260 风格)非法参数秒级
+    ``invalid_argument``。
+    """
 
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
+        from finboard_backtest.background_jobs.payload_contracts import (
+            PayloadContractError,
+            validate_job_payload,
+        )
+
         payload: dict[str, Any] = {
             "market": market,
             "source": source or "",
@@ -525,10 +537,30 @@ async def data_bulk_download_start(
             "exchange": exchange,
             "listing_boards": list(listing_boards or []),
         }
+        # symbols 只在显式提供时进入 payload:缺省 payload 与 #347 之前逐字节
+        # 一致(payload checksum 稳定,同 idempotency_key 重提交不因新增键冲突)。
+        symbols_digest = ""
+        if symbols:
+            deduped = list(dict.fromkeys(symbols))
+            payload["symbols"] = deduped
+            symbols_digest = hashlib.sha256(
+                ",".join(deduped).encode("utf-8")
+            ).hexdigest()[:16]
+        # 入队期契约(#347):与 REST 语义化端点共用同一校验函数。
+        try:
+            validate_job_payload("bulk_download", payload)
+        except PayloadContractError as exc:
+            raise McpToolError(
+                "invalid_argument",
+                f"payload 契约校验失败[{exc.code}]: {exc.summary}",
+            ) from exc
         idempotency_key = (
             f"bulk_download:{market}:{source or 'auto'}:{start}:"
             f"{instrument_type or 'all'}"
         )
+        if symbols_digest:
+            # 子集重跑的幂等键带 symbols 摘要:不同子集不互相命中旧任务。
+            idempotency_key += f":sub:{symbols_digest}"
         return await _enqueue_data_job(
             app,
             kind="bulk_download",
@@ -547,6 +579,7 @@ async def data_bulk_download_start(
             "listing_boards": listing_boards,
             "start": start,
             "source": source,
+            "symbols": symbols,
         },
         handler=_do,
     )
@@ -1081,7 +1114,13 @@ def register(mcp: MCPServer) -> None:
             "fail-visible 拒绝;主连仅研究信号/基准,不可当作可成交合约)/ exchange / "
             "listing_boards(列表)/ start(默认 2015-01-01)/ source(可选;"
             "ETF 与期货仅 akshare|yfinance,tushare 源报 tushare_scope_mismatch;"
-            "股票/转债/指数 tushare 放行)。"
+            "股票/转债/指数 tushare 放行)/ symbols(可选,#347 子集重跑:与"
+            " market/instrument_type 过滤叠加,交集为空按 no_instruments 拒,"
+            "部分失败任务的 error_summary 清单可直接回填)。"
+            "#347 起入队期 payload 契约校验(#260 风格):未知 source / 非法日期 / "
+            "tushare x etf|futures 等非法参数秒级 invalid_argument;部分标的失败"
+            "仍 succeeded,失败标的与原因看 finboard_job_get 的 error_summary"
+            "(phase 形如 bulk_download:partial N failed)。"
             "写操作,mcp_readonly_only=true 时拒绝。"
         ),
     )
@@ -1092,6 +1131,7 @@ def register(mcp: MCPServer) -> None:
         listing_boards: list[str] | None = None,
         start: str = "2015-01-01",
         source: str | None = None,
+        symbols: list[str] | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await data_bulk_download_start(
@@ -1102,6 +1142,7 @@ def register(mcp: MCPServer) -> None:
             listing_boards=listing_boards,
             start=start,
             source=source,
+            symbols=symbols,
         )
 
     @mcp.tool(
