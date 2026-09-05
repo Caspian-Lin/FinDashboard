@@ -35,6 +35,7 @@ import typer
 
 from finboard_app.bootstrap import build_kernel_components
 from finboard_app.config import Settings, load_settings
+from finboard_app.dev_cleanup import sweep_stale_workers
 from finboard_app.logging import setup_logging
 from finboard_shared.identifiers import AccountId
 from finboard_shared.types import KillSwitchLevel
@@ -436,6 +437,15 @@ def dev(
         typer.echo("已自动唤醒 WSL PostgreSQL。")
     if _ensure_sandbox_image(settings):
         typer.echo("已自动构建研究沙箱镜像。")
+    # issue #339:启动前清扫本工作区残留 worker(上一会话孤儿)——
+    # 防止旧代码 worker 与本次 spawn 的新 worker 赛跑抢队列。
+    swept_workers = sweep_stale_workers()
+    if swept_workers:
+        typer.echo(
+            "已清理残留 worker 进程: "
+            + ", ".join(f"PID {item.pid}" for item in swept_workers)
+            + "(其 in-flight 任务由 lease 过期回收后自动重排)。"
+        )
 
     stop_event = threading.Event()
     frontend_holder: list[subprocess.Popen[bytes]] = []
