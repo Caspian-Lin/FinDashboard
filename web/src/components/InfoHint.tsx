@@ -130,7 +130,7 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
       <button
         ref={triggerRef}
         type="button"
-        className="inline-flex size-6 items-center justify-center rounded-full text-muted-foreground/70 transition-colors duration-150 hover:bg-primary/10 hover:text-primary focus:outline-none focus-visible:bg-primary/10 focus-visible:text-primary focus-visible:ring-2 focus-visible:ring-primary/30 motion-reduce:transition-none -m-2.5 p-2.5"
+        className="inline-flex size-5 items-center justify-center rounded-full text-muted-foreground/70 transition-colors duration-150 hover:bg-primary/10 hover:text-primary focus:outline-none focus-visible:bg-primary/10 focus-visible:text-primary focus-visible:ring-2 focus-visible:ring-primary/30 motion-reduce:transition-none -m-1.5"
         aria-label={t("infoHint.aria", { title: tl(content.title) })}
         aria-describedby={open ? tooltipId : undefined}
         aria-expanded={open}
@@ -158,7 +158,7 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
           setOpen(nextPinned);
         }}
       >
-        <Info size={14} strokeWidth={2.25} aria-hidden="true" />
+        <Info size={16} strokeWidth={2} aria-hidden="true" />
       </button>
 
       {open &&
