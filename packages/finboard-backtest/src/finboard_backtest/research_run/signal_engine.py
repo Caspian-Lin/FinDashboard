@@ -85,6 +85,7 @@ from finboard_backtest.research_run.portfolio_pipeline import (
     PortfolioPipelineAdapter,
 )
 from finboard_backtest.strategy_spec.contracts import (
+    ExecutionTiming,
     FeatureNode,
     FeatureOperator,
     ResearchStrategySpec,
@@ -789,14 +790,23 @@ async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
 async def _next_execution_at(
     provider: FrozenReleaseProvider,
     decision_at: datetime,
+    *,
+    timing: ExecutionTiming | None = None,
 ) -> datetime:
-    """推断决策时点之后最近的交易日(发布交易日历,超限 fail-closed)。"""
+    """推断决策时点之后最近的交易日(发布交易日历,超限 fail-closed)。
+
+    issue #336:成交时间戳按执行假设分派——``next_open`` 为该日 **09:30**
+    (A 股连续竞价首时点,开盘成交),``next_close`` 为该日 **15:00**(收盘)。
+    此前恒为 15:00,与规格声明的 ``timing=next_open`` 不符。``timing`` 缺省
+    保持 15:00(兼容既有调用方)。
+    """
     calendar = await _release_trading_days(provider)
     if not calendar:
         raise ValueError("发布无可用行情,无法推断成交交易日")
+    fill_time = time(9, 30) if timing is ExecutionTiming.NEXT_OPEN else time(15, 0)
     for day in calendar:
         if day > decision_at.date():
-            return datetime.combine(day, time(15, 0), tzinfo=decision_at.tzinfo)
+            return datetime.combine(day, fill_time, tzinfo=decision_at.tzinfo)
     raise ValueError(
         f"决策时点 {decision_at.date().isoformat()} 之后无可用成交日"
         f"(发布交易日历止于 {calendar[-1].isoformat()})"
@@ -1596,7 +1606,11 @@ async def build_decision_load_contexts(
     await loader.ensure_close_histories(manifest, process_pool=pool)
 
     async def _load_one(decision_at: datetime, snapshot_id: str | None) -> DecisionLoadContext:
-        execution_at = await _next_execution_at(provider, decision_at)
+        execution_at = await _next_execution_at(
+            provider,
+            decision_at,
+            timing=manifest.strategy_spec.execution_model.timing,
+        )
         context = await loader.load_context(
             manifest, decision_at=decision_at, execution_at=execution_at
         )
