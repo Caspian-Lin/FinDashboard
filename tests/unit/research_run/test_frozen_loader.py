@@ -30,6 +30,8 @@ from finboard_shared.types import AssetClass, Market
 @dataclass(frozen=True, slots=True)
 class _StubBar:
     close: Decimal
+    # issue #336:next_open 执行价基读取 bar.open;测试桩与 close 相同。
+    open: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +95,9 @@ class _StubProvider:
         close = self.close_by_symbol.get(symbol.code)  # type: ignore[attr-defined]
         if close is None:
             return []
-        return [_StubPointInTimeBar(_StubBar(close), datetime.now(UTC))]
+        return [
+            _StubPointInTimeBar(_StubBar(close, open=close), datetime.now(UTC))
+        ]
 
 
 @dataclass

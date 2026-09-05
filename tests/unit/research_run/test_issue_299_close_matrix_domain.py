@@ -214,6 +214,23 @@ async def _reference_close(
     return float(bars[-1].bar.close) if bars else None
 
 
+async def _reference_execution_open(
+    provider: FrozenReleaseProvider, code: str, execution_at: datetime
+) -> float | None:
+    """执行价参照(issue #336):日终门控下最后可见 bar 的 open。"""
+    gate = execution_at.replace(hour=23, minute=59)
+    bars = await FrozenReleaseProvider.fetch_point_in_time_bars(
+        provider,
+        Symbol(code=code, market=Market.A_SHARE),
+        provider.release.period,
+        provider.release.start_date,
+        gate.date(),
+        decision_at=gate,
+        adjust=provider.release.adjustment,
+    )
+    return float(bars[-1].bar.open) if bars else None
+
+
 @pytest.mark.asyncio
 class TestCloseMatrixPrebuildDomainNarrowing:
     """AC:预建范围跟随 explicit_symbols 声明域,未声明行为不变。"""
@@ -304,7 +321,8 @@ class TestDeclaredDomainPeriodLoadsEquivalent:
             assert set(context.execution_prices) == set(_DECLARED)
             for code in _DECLARED:
                 expected_decision = await _reference_close(provider, code, decision_at)
-                expected_execution = await _reference_close(
+                # issue #336:执行价 = 执行日 bar 的 open(模板默认 next_open)。
+                expected_execution = await _reference_execution_open(
                     provider, code, execution_at
                 )
                 assert context.prices[code] == expected_decision

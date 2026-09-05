@@ -100,6 +100,8 @@ async def _clean(engine: AsyncEngine) -> None:
 class _StubBar:
     close: Decimal
     timestamp: datetime | None = None
+    # issue #336:next_open 执行价基读取 bar.open;测试桩与 close 相同。
+    open: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +186,7 @@ class _StubProvider:
                 _StubBar(
                     close,
                     timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+                    open=close,
                 ),
                 datetime.combine(day, datetime.min.time(), tzinfo=UTC),
             )

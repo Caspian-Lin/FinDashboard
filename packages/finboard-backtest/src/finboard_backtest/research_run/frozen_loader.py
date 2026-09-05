@@ -35,7 +35,7 @@ import asyncio
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from itertools import pairwise
 from typing import TYPE_CHECKING, Protocol
 
@@ -111,6 +111,28 @@ def _declared_domain_instruments(
 _PIT_UNBOUNDED = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 
 
+def _wants_execution_open(manifest: ResearchRunManifest) -> bool:
+    """执行价基是否为 open(issue #336):timing=next_open 时 True。
+
+    next_open 语义 = 下一交易日开盘成交;next_close = 下一交易日收盘。
+    """
+    from finboard_backtest.strategy_spec.contracts import ExecutionTiming
+
+    return (
+        manifest.strategy_spec.execution_model.timing is ExecutionTiming.NEXT_OPEN
+    )
+
+
+def _end_of_day(at: datetime) -> datetime:
+    """执行日的日终时点(同一时区):执行日 bar 在此刻必然可见(#336)。
+
+    D1 bar 的 available_at 为本市场收盘规则时点(A 股 15:30),恒早于当日
+    23:59;执行价读取用日终门控即可看到执行日 bar,同时不越过执行日
+    (执行日次日及其后的 bar 仍不可见,不引入执行日之后的任何数据)。
+    """
+    return datetime.combine(at.date(), time(23, 59), tzinfo=at.tzinfo)
+
+
 @dataclass(frozen=True, slots=True)
 class SymbolCloseHistory:
     """单标的冻结全区间 close 历史(close 矩阵切片底座,issue #287)。
@@ -124,6 +146,10 @@ class SymbolCloseHistory:
     available_at: tuple[datetime, ...]
     dates: tuple[date, ...]
     closes: tuple[float, ...]
+    #: 可选携带的 open 平行序列(issue #336):仅 timing=next_open 的 run 在
+    #: 矩阵预建时附带,与 available_at/dates/closes 严格同长;``None`` 表示
+    #: 未携带(close-only 矩阵),open 查询由调用方回退逐期对象路径读取。
+    opens: tuple[float, ...] | None = None
 
     def visible_index(self, as_of: datetime) -> int:
         """``as_of`` 时点可见最后一根的索引;-1 表示无可见 bar。"""
@@ -139,6 +165,19 @@ class SymbolCloseHistory:
         if index < 0:
             return None
         return self.closes[index]
+
+    def open_at(self, as_of: datetime) -> float | None:
+        """``as_of`` 时点可见最新 bar 的 open(issue #336 执行价基)。
+
+        矩阵未携带 opens 时返回 ``None``,调用方回退逐期对象路径;无可见
+        bar 同样返回 ``None``。
+        """
+        if self.opens is None:
+            return None
+        index = self.visible_index(as_of)
+        if index < 0:
+            return None
+        return self.opens[index]
 
     def series_until(self, as_of: datetime) -> list[float]:
         """``as_of`` 时点可见的完整 close 序列(时间升序;可能为空)。"""
@@ -216,8 +255,12 @@ class FrozenInputLoader:
         * 按 kind 融合 manifest.dataset_releases(issue #187):bars 主发布提供
           候选池 / 价格 / 执行元数据;daily_metrics / financial_indicators 发布
           提供研究数据观测(PIT 门控),与 factor_snapshots 观测合并。
-        * 按 ``decision_at`` 做 PIT 门控取决策日 close;``execution_at`` 取成交日
-          close(必须是 decision_at 之后的下一交易日,由调用方保证)。
+        * 按 ``decision_at`` 做 PIT 门控取决策日 close;执行价按执行假设读取
+          (issue #336):timing=next_open → 执行日 bar 的 **open**,
+          next_close → 执行日 bar 的 close,门控放宽到执行日日终(执行行为
+          发生在执行日内,不构成未来函数);``execution_at`` 为成交时间戳
+          (next_open = 09:30 / next_close = 15:00,由调用方保证在 decision_at
+          之后的下一交易日)。
         * 加载 manifest.factor_snapshots 的特征观测并映射为 ``FeatureValue``。
         """
         if not manifest.dataset_releases:
@@ -233,8 +276,15 @@ class FrozenInputLoader:
         prices = await self._load_close_prices(
             provider, included_candidates, decision_at
         )
-        execution_prices = await self._load_close_prices(
-            provider, included_candidates, execution_at
+        # issue #336:执行价按执行假设读取(next_open → 执行日 open;
+        # next_close → 执行日 close),PIT 门控放宽到执行日日终——此前按
+        # 15:00 门控使执行日 bar(available_at = 15:30)不可见,成交价退化
+        # 为决策日收盘,与 timing 声明不符。
+        execution_prices = await self._load_execution_prices(
+            provider,
+            included_candidates,
+            execution_at=execution_at,
+            want_open=_wants_execution_open(manifest),
         )
         features = await self._load_features(manifest.factor_snapshots, decision_at)
         research_features, research_missing = await self._load_research_features(
@@ -297,26 +347,85 @@ class FrozenInputLoader:
         included_candidates, _ = _build_candidates_and_lots(
             _declared_domain_instruments(manifest, list(provider.release.instruments))
         )
+        # issue #336:next_open 执行价基需要 open 平行序列,矩阵预建时一并
+        # 读取(next_close 不付这份数据成本)。
+        include_open = _wants_execution_open(manifest)
         if process_pool is not None and not process_pool.broken:
             built = await _load_close_histories_via_pool(
-                process_pool, provider, included_candidates
+                process_pool, provider, included_candidates, include_open=include_open
             )
             if built is not None:
                 self._close_histories_built = True
                 self._close_histories.update(built)
                 return
-        await self._ensure_close_histories(provider, included_candidates)
+        await self._ensure_close_histories(
+            provider, included_candidates, include_open=include_open
+        )
 
     async def _ensure_close_histories(
         self,
         provider: FrozenReleaseProvider,
         candidates: Sequence[UniverseCandidate],
+        *,
+        include_open: bool = False,
     ) -> None:
         """构建 close 矩阵(只尝试一次;失败不缓存,逐期回退读取)。"""
         if self._close_histories_built:
             return
         self._close_histories_built = True
-        self._close_histories.update(await _load_close_histories(provider, candidates))
+        self._close_histories.update(
+            await _load_close_histories(
+                provider, candidates, include_open=include_open
+            )
+        )
+
+    async def _load_execution_prices(
+        self,
+        provider: FrozenReleaseProvider,
+        candidates: Sequence[UniverseCandidate],
+        *,
+        execution_at: datetime,
+        want_open: bool,
+    ) -> dict[str, float]:
+        """按执行假设读取各标的的执行价(issue #336)。
+
+        * ``want_open``(timing=next_open)—— 执行日 bar 的 **open**;
+        * 否则(timing=next_close)—— 执行日 bar 的 **close**;
+        * PIT 门控 as_of 放宽到执行日**日终**:执行行为本身发生在执行日内,
+          读取执行日 bar 不构成未来函数(决策输入的 PIT 门控仍在
+          ``decision_at``,与本读取无关)。此前实现按 15:00 门控,执行日 bar
+          (available_at = 15:30)不可见,成交价退化为**决策日收盘**。
+
+        矩阵未携带 opens / 无可见 bar / 不可切片的标的回退逐期对象路径读取;
+        执行日无 bar(停牌 / 数据缺口)的标的沿用「最后可见 bar」价格(与
+        close 路径同一降级语义)。
+        """
+        read_as_of = _end_of_day(execution_at)
+        await self._ensure_close_histories(provider, candidates)
+        prices: dict[str, float] = {}
+        fallback: list[UniverseCandidate] = []
+        for candidate in candidates:
+            history = self._close_histories.get(candidate.symbol)
+            if history is None:
+                fallback.append(candidate)
+                continue
+            value = (
+                history.open_at(read_as_of)
+                if want_open
+                else history.close_at(read_as_of)
+            )
+            if value is not None:
+                prices[candidate.symbol] = value
+            else:
+                # close-only 矩阵遇到 open 请求 → 该标的回退对象路径读取。
+                fallback.append(candidate)
+        if fallback:
+            prices.update(
+                await _load_execution_prices_from_bars(
+                    provider, fallback, read_as_of, want_open=want_open
+                )
+            )
+        return prices
 
     async def _load_close_prices(
         self,
@@ -694,6 +803,8 @@ def _history_from_points(
 async def _load_close_histories(
     provider: FrozenReleaseProvider,
     candidates: Sequence[UniverseCandidate],
+    *,
+    include_open: bool = False,
 ) -> dict[str, SymbolCloseHistory | None]:
     """并发读取各标的冻结全区间 close 历史,构建 close 矩阵(issue #287)。
 
@@ -728,11 +839,13 @@ async def _load_close_histories(
                 provider.release.end_date,
                 decision_at=_PIT_UNBOUNDED,
                 adjust=provider.release.adjustment,
+                include_open=include_open,
             )
         return SymbolCloseHistory(
             available_at=columns.available_at,
             dates=columns.dates,
             closes=tuple(columns.closes),
+            opens=None if columns.opens is None else tuple(columns.opens),
         )
 
     results = await asyncio.gather(
@@ -756,6 +869,8 @@ async def _load_close_histories_via_pool(
     pool: PriceFeatureProcessPool,
     provider: FrozenReleaseProvider,
     candidates: Sequence[UniverseCandidate],
+    *,
+    include_open: bool = False,
 ) -> dict[str, SymbolCloseHistory | None] | None:
     """经常驻进程池预建 close 矩阵(issue #301);不可用时返回 ``None``。
 
@@ -785,6 +900,7 @@ async def _load_close_histories_via_pool(
             start=provider.release.start_date,
             end=provider.release.end_date,
             decision_at=_PIT_UNBOUNDED,
+            include_open=include_open,
         )
         for candidate in candidates
     ]
@@ -824,6 +940,7 @@ async def _load_close_histories_via_pool(
             available_at=columns.available_at,
             dates=columns.dates,
             closes=tuple(columns.closes),
+            opens=None if columns.opens is None else tuple(columns.opens),
         )
     logger.debug(
         "frozen_loader.close_history_built_via_pool",
@@ -865,6 +982,53 @@ async def _load_close_prices(
         if not bars:
             return None
         return float(bars[-1].bar.close)
+
+    results = await asyncio.gather(
+        *(_one(candidate) for candidate in candidates), return_exceptions=True
+    )
+    prices: dict[str, float] = {}
+    for candidate, result in zip(candidates, results, strict=True):
+        if isinstance(result, BaseException):
+            raise result
+        if result is not None:
+            prices[candidate.symbol] = result
+    return prices
+
+
+async def _load_execution_prices_from_bars(
+    provider: FrozenReleaseProvider,
+    candidates: Sequence[UniverseCandidate],
+    read_as_of: datetime,
+    *,
+    want_open: bool,
+) -> dict[str, float]:
+    """逐期对象路径读取执行价(issue #336;矩阵未覆盖 / 未携带 opens 的回退)。
+
+    与 :func:`_load_close_prices` 同一 PIT 门控与并发语义,取最后可见 bar 的
+    open(next_open)或 close(next_close);执行日无 bar 的标的沿用最后
+    可见 bar 的价格(与矩阵路径同一降级语义)。
+    """
+    from finboard_shared.models import Symbol
+
+    semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
+
+    async def _one(candidate: UniverseCandidate) -> float | None:
+        async with semaphore:
+            bars = await provider.fetch_point_in_time_bars(
+                Symbol(
+                    code=candidate.symbol,
+                    market=_market_from_value(candidate.market),
+                ),
+                provider.release.period,
+                provider.release.start_date,
+                read_as_of.date(),
+                decision_at=read_as_of,
+                adjust=provider.release.adjustment,
+            )
+        if not bars:
+            return None
+        last = bars[-1].bar
+        return float(last.open if want_open else last.close)
 
     results = await asyncio.gather(
         *(_one(candidate) for candidate in candidates), return_exceptions=True
