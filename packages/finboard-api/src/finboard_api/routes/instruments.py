@@ -97,6 +97,9 @@ def _current_code_version() -> str:
 def _release_detail_payload(release: Any) -> dict[str, object]:
     """把领域对象转换成详情响应,同时补齐列表摘要字段。"""
     # 这里不把摘要字段写入 manifest,避免改变已有发布的 checksum 契约。
+    # issue #349:manifest as_dict 的 coverage_pct 保持 str(Decimal)(checksum
+    # 语义不动);本层 coverage_pct 覆盖为 Decimal 数值,由响应模型声明为
+    # float 归一,JSON 序列化输出数值而非字符串。
     dataset_release = release
     payload = cast(dict[str, object], dataset_release.as_dict())
     payload.update(
@@ -449,7 +452,8 @@ async def list_dataset_releases(
             published_at=release.published_at,
             symbol_count=release.symbol_count,
             row_count=release.row_count,
-            coverage_pct=release.coverage_pct,
+            # issue #349:Decimal→float,JSON 序列化输出数值而非字符串。
+            coverage_pct=float(release.coverage_pct),
             capabilities=[
                 DatasetReleaseCapabilityOut(
                     key=item.key,
@@ -800,7 +804,8 @@ def _manifest_to_out(row: DatasetManifestModel) -> DatasetManifestOut:
         end_date=row.end_date,
         row_count=row.row_count,
         symbol_count=row.symbol_count,
-        coverage_pct=row.coverage_pct,
+        # issue #349:DB Numeric(Decimal)→float,响应序列化为 JSON 数值。
+        coverage_pct=float(row.coverage_pct),
         gaps=row.gaps,
         checksum=row.checksum,
         quality_status=row.quality_status,

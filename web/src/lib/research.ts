@@ -509,7 +509,11 @@ export interface DatasetReleaseSummary {
   code_version?: string;
   symbol_count: number;
   row_count: number;
-  coverage_pct: number;
+  /**
+   * 覆盖率(issue #349):后端已数值化,旧实例 / MCP 通道可能仍下发字符串
+   * (如 "1"),按 number | string 如实声明,展示层经 formatPercent 归一。
+   */
+  coverage_pct: number | string;
   capabilities: DatasetReleaseCapability[];
   quality_status: string;
   known_limitations: string[];
@@ -596,7 +600,8 @@ export interface DatasetManifest {
   end_date?: string;
   row_count: number;
   symbol_count: number;
-  coverage_pct: number;
+  /** 覆盖率(issue #349):历史通道可能下发字符串,展示层需容错。 */
+  coverage_pct: number | string;
   gaps: unknown[];
   checksum: string;
   quality_status: string;

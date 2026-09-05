@@ -578,8 +578,9 @@ function GenerateFeatureSnapshotDialog({
               {selectedRelease && (
                 <p className="text-xs text-muted-foreground">
                   {tl({
-                    zh: `范围 ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} 个标的 · 覆盖 ${selectedRelease.coverage_pct}`,
-                    en: `Range ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} symbols · coverage ${selectedRelease.coverage_pct}`,
+                    // issue #349:coverage_pct 兼容字符串通道,归一为数值展示。
+                    zh: `范围 ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} 个标的 · 覆盖 ${Number(selectedRelease.coverage_pct)}`,
+                    en: `Range ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} symbols · coverage ${Number(selectedRelease.coverage_pct)}`,
                   })}
                 </p>
               )}

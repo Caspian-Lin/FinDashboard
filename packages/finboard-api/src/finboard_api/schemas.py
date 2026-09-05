@@ -1063,7 +1063,9 @@ class DatasetManifestOut(BaseSchema):
     end_date: date | None = None
     row_count: int = 0
     symbol_count: int = 0
-    coverage_pct: Decimal = Decimal("0")
+    # issue #349:coverage_pct 用 float 声明,pydantic 会把 Decimal / manifest
+    # 里的字符串("1")归一为数值序列化,避免 JSON/前端显示成字符串 "1"。
+    coverage_pct: float = 0.0
     gaps: list[Any] = Field(default_factory=list)
     checksum: str = ""
     quality_status: str = "unknown"
@@ -1226,7 +1228,9 @@ class DatasetReleaseInstrumentOut(BaseSchema):
     missing_sessions: int
     suspended_sessions: int
     anomaly_count: int
-    coverage_pct: Decimal
+    # issue #349:manifest 逐标的 coverage_pct 冻结为 str(Decimal),这里只在
+    # API 层归一为 float 数值,manifest checksum 语义不受影响。
+    coverage_pct: float
     category: str
     ready: bool
     issues: list[str] = Field(default_factory=list)
@@ -1266,7 +1270,8 @@ class ResearchDatasetReleaseOut(BaseSchema):
     quality_report: dict[str, Any]
     symbol_count: int
     row_count: int
-    coverage_pct: Decimal
+    # issue #349:数值化序列化,避免 pydantic 把 Decimal 输出成 JSON 字符串。
+    coverage_pct: float
     known_limitations: list[str] = Field(default_factory=list)
     storage_uri: str
     metadata_version: str
@@ -1288,7 +1293,8 @@ class ResearchDatasetReleaseSummaryOut(BaseSchema):
     published_at: datetime
     symbol_count: int
     row_count: int
-    coverage_pct: Decimal
+    # issue #349:数值化序列化,避免 pydantic 把 Decimal 输出成 JSON 字符串。
+    coverage_pct: float
     capabilities: list[DatasetReleaseCapabilityOut]
     quality_status: str
     known_limitations: list[str] = Field(default_factory=list)
