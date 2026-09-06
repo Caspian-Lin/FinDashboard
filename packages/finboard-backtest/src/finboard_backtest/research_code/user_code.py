@@ -23,6 +23,10 @@ from __future__ import annotations
 from typing import Any
 
 from finboard_backtest.research_code.promotion import is_promoted_artifact
+from finboard_backtest.research_run.contracts import (
+    ResearchExecutionMode,
+    execution_mode_for,
+)
 
 _USER_CODE_KIND = "user_code"
 _STRATEGY_KIND = "strategy"
@@ -62,8 +66,8 @@ def user_code_reference_gate_error(
     2. 沙箱未启用 → 拒绝(fail-fast,与 worker 执行期同口径);
     3. 引用的 artifact 不在 active+passed 名单 → 拒绝(附 rollback 路径);
     4. 声明的 commit 与 active 不一致 → 拒绝(历史版本先 rollback);
-    5. single_shot(无 rebalance_frequency)且未冻结快照 → 拒绝
-       (user_code 决策时点与信号引擎同口径:single_shot 来自快照)。
+    5. single_shot(未声明 decision_schedule / rebalance_frequency)且未冻结
+       快照 → 拒绝(user_code 决策时点与信号引擎同口径:single_shot 来自快照)。
     """
     if code_artifact_name is None:
         return None
@@ -90,13 +94,18 @@ def user_code_reference_gate_error(
             f"(active={active_commit[:12]});历史版本先 "
             "finboard_research_code_rollback 再入队"
         )
-    frequency = (parameters or {}).get("rebalance_frequency")
-    if not frequency and frozen_snapshot_count <= 0:
+    # issue #361:multi_period 判定跟随 decision_schedule(含 custom)或
+    # legacy rebalance_frequency;single_shot 的决策时点只能来自快照。
+    if (
+        execution_mode_for(parameters or {}) is ResearchExecutionMode.SINGLE_SHOT
+        and frozen_snapshot_count <= 0
+    ):
         return (
-            "execution_mode=single_shot(未声明 parameters.rebalance_frequency):"
+            "execution_mode=single_shot(未声明 parameters.decision_schedule):"
             "user_code 策略该路径的决策时点只能来自冻结因子快照,但 "
-            "factor_snapshot_ids 为空。请声明 rebalance_frequency="
-            "monthly|quarterly 走多期回放(decide 每期从冻结发布重算),"
+            "factor_snapshot_ids 为空。请声明 parameters.decision_schedule"
+            "(或 legacy rebalance_frequency=daily/weekly/monthly/quarterly)"
+            "走多期回放(decide 每期从冻结发布重算),"
             "或冻结至少一份特征快照以提供决策时点"
         )
     return None

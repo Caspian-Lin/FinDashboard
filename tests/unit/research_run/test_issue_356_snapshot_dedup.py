@@ -39,12 +39,13 @@ from finboard_backtest.research_run import (
     ResearchRunStatus,
 )
 from finboard_backtest.research_run.contracts import (
+    DecisionSchedule,
     FrozenArtifactRef,
     ResearchRunManifest,
     stable_checksum,
 )
 from finboard_backtest.research_run.signal_engine import (
-    _derive_rebalance_decision_days,
+    _derive_schedule_decision_days,
     _snapshot_decision_days,
     build_decision_load_contexts,
 )
@@ -712,7 +713,9 @@ class TestUnchangedPaths:
             requested_by="unit-test",
         )
 
-        decision_days = await _derive_rebalance_decision_days(provider, "monthly")
+        decision_days = await _derive_schedule_decision_days(
+            provider, DecisionSchedule(kind="monthly")
+        )
         assert len(decision_days) == expected_periods
 
         contexts = await build_decision_load_contexts(

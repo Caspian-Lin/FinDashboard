@@ -15,6 +15,7 @@ from finboard_backtest.research_run.checkpoint_resume import (
     rebuild_decision,
 )
 from finboard_backtest.research_run.contracts import (
+    DECISION_SCHEDULE_KINDS,
     MAX_RESEARCH_CAPITAL,
     MIN_RESEARCH_CAPITAL,
     REBALANCE_FREQUENCIES,
@@ -24,6 +25,7 @@ from finboard_backtest.research_run.contracts import (
     CapitalTierOutcome,
     ConstraintOutcome,
     DecisionBundle,
+    DecisionSchedule,
     EquityPoint,
     FeatureValue,
     FrozenArtifactRef,
@@ -57,9 +59,11 @@ from finboard_backtest.research_run.contracts import (
     canonical_json,
     execution_mode_for,
     manifest_from_json,
+    parse_decision_schedule,
     pipeline_output_checksum,
     replay_guard_error,
     report_from_json,
+    resolve_decision_schedule,
     stable_checksum,
     to_json_value,
 )
@@ -76,6 +80,7 @@ from finboard_backtest.research_run.store import (
 
 __all__ = [
     "DECISION_ARTIFACT_STAGES",
+    "DECISION_SCHEDULE_KINDS",
     "DECISION_STAGE_COUNT",
     "MAX_RESEARCH_CAPITAL",
     "MIN_RESEARCH_CAPITAL",
@@ -87,6 +92,7 @@ __all__ = [
     "CapitalTierOutcome",
     "ConstraintOutcome",
     "DecisionBundle",
+    "DecisionSchedule",
     "DecisionSequenceAdapter",
     "EquityPoint",
     "FeatureValue",
@@ -130,11 +136,13 @@ __all__ = [
     "execution_mode_for",
     "group_decision_artifacts",
     "manifest_from_json",
+    "parse_decision_schedule",
     "pipeline_output_checksum",
     "rebuild_decision",
     "registered_adapter_kinds",
     "replay_guard_error",
     "report_from_json",
+    "resolve_decision_schedule",
     "stable_checksum",
     "to_json_value",
     "validate_strategy_dataset_capabilities",
