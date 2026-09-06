@@ -74,6 +74,7 @@ from finboard_backtest.research_run.failure_context import (
     attach_decision_load_context,
 )
 from finboard_backtest.research_run.frozen_loader import (
+    FactorSeriesProvider,
     FeatureSnapshotProvider,
     FrozenInputLoader,
     LoadedDecisionContext,
@@ -1529,6 +1530,7 @@ async def build_decision_load_contexts(
     snapshot_provider: FeatureSnapshotProvider,
     process_workers: int = 0,
     chunk_probe: LoadChunkProbe | None = None,
+    series_provider: FactorSeriesProvider | None = None,
 ) -> tuple[DecisionLoadContext, ...]:
     """按执行模式加载全部决策的机械上下文(不含信号,issue #218)。
 
@@ -1562,6 +1564,7 @@ async def build_decision_load_contexts(
     loader = FrozenInputLoader(
         release_provider_factory=release_provider_factory,
         snapshot_provider=snapshot_provider,
+        series_provider=series_provider,
     )
     frequency = _rebalance_frequency(manifest)
 
@@ -1719,6 +1722,7 @@ async def build_decision_inputs(
     snapshot_provider: FeatureSnapshotProvider,
     process_workers: int = 0,
     chunk_probe: LoadChunkProbe | None = None,
+    series_provider: FactorSeriesProvider | None = None,
 ) -> tuple[PortfolioDecisionInput, ...]:
     """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
 
@@ -1745,6 +1749,7 @@ async def build_decision_inputs(
         snapshot_provider=snapshot_provider,
         process_workers=process_workers,
         chunk_probe=chunk_probe,
+        series_provider=series_provider,
     ):
         signals = await asyncio.to_thread(
             build_normalized_signals,
@@ -1851,6 +1856,7 @@ class SignalEnginePipelineAdapter:
         snapshot_provider: FeatureSnapshotProvider,
         process_workers: int = 0,
         chunk_probe: LoadChunkProbe | None = None,
+        series_provider: FactorSeriesProvider | None = None,
     ) -> None:
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
             raise ValueError(
@@ -1861,6 +1867,9 @@ class SignalEnginePipelineAdapter:
         self._manifest = manifest
         self._release_provider_factory = release_provider_factory
         self._snapshot_provider = snapshot_provider
+        # issue #360:因子序列工件读取回调(未声明 series 的 run 为 None,
+        # 加载器走纯快照路径,历史行为不变)。
+        self._series_provider = series_provider
         # issue #288:multi_period 逐期价格特征使用的常驻进程池 worker 数
         # (settings ``research_price_feature_process_workers``;0 = 进程内)。
         self._process_workers = max(0, process_workers)
@@ -1956,6 +1965,7 @@ class SignalEnginePipelineAdapter:
                 snapshot_provider=self._snapshot_provider,
                 process_workers=self._process_workers,
                 chunk_probe=self._chunk_probe,
+                series_provider=self._series_provider,
             )
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
@@ -2179,6 +2189,14 @@ def build_signal_engine_adapter_factory(
             async with session_maker() as session:
                 return await FeatureSnapshotRepository(session).get(snapshot_id)
 
+        # issue #360:因子序列工件读取回调(与 _snapshot_provider 同域;
+        # 未声明 series 的 run 不触发任何读取)。
+        async def _series_provider(series_id: str) -> object:
+            from finboard_persistence import FactorSeriesRepository
+
+            async with session_maker() as session:
+                return await FactorSeriesRepository(session).get(series_id)
+
         # issue #306:加载期分块探针 —— run status / job cancel_requested 轮询 +
         # 加载进度上报。打断路径(run 被外部标 interrupted 等)在此秒级感知,
         # 不再出现「run 已 interrupted、job 靠心跳续租僵死 7.5 小时」的僵尸。
@@ -2196,6 +2214,7 @@ def build_signal_engine_adapter_factory(
                 snapshot_provider=_snapshot_provider,  # type: ignore[arg-type]
                 settings_factory=settings_factory,
                 chunk_probe=chunk_probe,
+                series_provider=_series_provider,  # type: ignore[arg-type]
             )
 
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
@@ -2216,6 +2235,7 @@ def build_signal_engine_adapter_factory(
             snapshot_provider=_snapshot_provider,  # type: ignore[arg-type]
             process_workers=_resolve_period_feature_process_workers(settings_factory),
             chunk_probe=chunk_probe,
+            series_provider=_series_provider,  # type: ignore[arg-type]
         )
 
     return _factory

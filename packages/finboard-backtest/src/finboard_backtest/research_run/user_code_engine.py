@@ -53,6 +53,7 @@ from finboard_backtest.research_run.contracts import (
     stable_checksum,
 )
 from finboard_backtest.research_run.frozen_loader import (
+    FactorSeriesProvider,
     FeatureSnapshotProvider,
     ReleaseProviderFactory,
 )
@@ -149,14 +150,18 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         snapshot_provider: FeatureSnapshotProvider,
         settings_factory: Callable[[], Any] | None = None,
         chunk_probe: LoadChunkProbe | None = None,
+        series_provider: FactorSeriesProvider | None = None,
     ) -> None:
         super().__init__(strategy_kind="user_code", decision_inputs=())
         self._manifest = manifest
         self._release_provider_factory = release_provider_factory
         self._snapshot_provider = snapshot_provider
         self._settings_factory = settings_factory
-        # issue #306:加载期分块探针(run status / cancel 轮询 + 进度上报)。
+        # issue #306:加载期分块探针(run status / job cancel 轮询 + 进度上报)。
         self._chunk_probe = chunk_probe
+        # issue #360:因子序列工件读取回调(未声明 series 的 run 为 None,
+        # 加载器走纯快照路径,历史行为不变)。
+        self._series_provider = series_provider
         self._contexts: tuple[DecisionLoadContext, ...] | None = None
         self._sandbox: StrategySandboxCaller | None = None
         self._decision_records: list[dict[str, Any]] = []
@@ -187,6 +192,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 release_provider_factory=self._release_provider_factory,
                 snapshot_provider=self._snapshot_provider,
                 chunk_probe=self._chunk_probe,
+                series_provider=self._series_provider,
             )
             self._sandbox = await StrategySandboxCaller.create(
                 settings=settings,

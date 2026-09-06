@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from itertools import pairwise
@@ -73,6 +73,37 @@ class FeatureSnapshotProvider(Protocol):
     """按 snapshot_id 读取 ``FeatureSnapshot`` 的回调(注入点)。"""
 
     async def __call__(self, snapshot_id: str) -> FeatureSnapshot | None: ...
+
+
+class FactorSeriesRecordLike(Protocol):
+    """加载器消费的因子序列视图(issue #360)。
+
+    ``finboard_persistence.FactorSeriesRecord`` 结构性满足本协议(loader
+    不直接依赖 persistence);``dates`` 为升序决策日,``values`` 为
+    ``{date(ISO): {symbol: float|null}}`` 逐日截面。只读成员用 property
+    声明(可变容器型别的协议匹配要求只读访问器)。
+    """
+
+    @property
+    def series_id(self) -> str: ...
+
+    @property
+    def code_artifact(self) -> str: ...
+
+    @property
+    def release_id(self) -> str: ...
+
+    @property
+    def dates(self) -> tuple[date, ...]: ...
+
+    @property
+    def values(self) -> Mapping[str, Mapping[str, float | None]]: ...
+
+
+class FactorSeriesProvider(Protocol):
+    """按 series_id 读取因子序列工件的回调(注入点,issue #360)。"""
+
+    async def __call__(self, series_id: str) -> FactorSeriesRecordLike | None: ...
 
 
 #: 逐标的并发加载的信号量上限(实际磁盘读仍受 provider 内 ParquetCache
@@ -230,6 +261,9 @@ class FrozenInputLoader:
 
     release_provider_factory: ReleaseProviderFactory
     snapshot_provider: FeatureSnapshotProvider
+    # issue #360:因子序列工件读取回调;None 或 manifest 未声明 series 时
+    # 加载器走纯快照路径(历史行为不变)。
+    series_provider: FactorSeriesProvider | None = None
     # symbol → close 历史;``None`` 表示该标的不可安全切片(非单调数据),
     # 逐期回退读取。空映射 = 矩阵未启用(非真实 provider)。
     _close_histories: dict[str, SymbolCloseHistory | None] = field(
@@ -286,7 +320,18 @@ class FrozenInputLoader:
             execution_at=execution_at,
             want_open=_wants_execution_open(manifest),
         )
-        features = await self._load_features(manifest.factor_snapshots, decision_at)
+        # issue #360 双轨:声明 series 时 u_ 因子观测优先从 series.values 取
+        # (按决策日索引),同因子的快照观测让位;未声明走纯快照路径。
+        series_features: tuple[FeatureValue, ...] = ()
+        series_covered: frozenset[str] = frozenset()
+        if manifest.factor_series and self.series_provider is not None:
+            series_features, series_covered = await self._load_series_features(
+                manifest.factor_series, decision_at
+            )
+        features = await self._load_features(
+            manifest.factor_snapshots, decision_at, exclude_features=series_covered
+        )
+        features = (*series_features, *features)
         research_features, research_missing = await self._load_research_features(
             manifest, included_candidates, decision_at
         )
@@ -512,8 +557,14 @@ class FrozenInputLoader:
         self,
         snapshots: Sequence[FrozenArtifactRef],
         decision_at: datetime,
+        *,
+        exclude_features: Collection[str] = frozenset(),
     ) -> tuple[FeatureValue, ...]:
-        """加载所有 factor_snapshot 的观测并按 ``available_at <= decision_at`` 过滤。"""
+        """加载所有 factor_snapshot 的观测并按 ``available_at <= decision_at`` 过滤。
+
+        ``exclude_features``(issue #360):被声明因子序列覆盖的因子名集合 ——
+        序列路径优先,同因子的快照观测让位(避免两条路径各供一份观测)。
+        """
         values: list[FeatureValue] = []
         for snapshot_ref in snapshots:
             snapshot = await self.snapshot_provider(snapshot_ref.artifact_id)
@@ -521,6 +572,8 @@ class FrozenInputLoader:
                 continue
             for obs in snapshot.observations:
                 if obs.available_at > decision_at:
+                    continue
+                if obs.feature_name in exclude_features:
                     continue
                 values.append(
                     FeatureValue(
@@ -532,6 +585,47 @@ class FrozenInputLoader:
                     )
                 )
         return tuple(values)
+
+    async def _load_series_features(
+        self,
+        series: Sequence[FrozenArtifactRef],
+        decision_at: datetime,
+    ) -> tuple[tuple[FeatureValue, ...], frozenset[str]]:
+        """加载因子序列工件在 ``decision_at`` 决策日的截面(issue #360)。
+
+        返回 ``(观测, 覆盖的因子名集合)``;序列未覆盖该决策日时发具名
+        warning(``research_run.factor_series_date_missing``)并跳过 —— 因子
+        观测缺失沿既有 missing 语义(null / 下游 warning),不 fail-closed。
+        逐序列 ``available_at = decision_at``:序列由前缀不变性审计保证
+        「决策日观测只用决策日之前的数据」,该时点可见性是审计结论。
+        """
+        from finboard_data.factor_lab import sandbox_factor_name
+
+        values: list[FeatureValue] = []
+        covered: set[str] = set()
+        for series_ref in series:
+            assert self.series_provider is not None  # 调用点已判空
+            record = await self.series_provider(series_ref.artifact_id)
+            if record is None:
+                raise ValueError(f"因子序列缺失: {series_ref.artifact_id}")
+            factor_name = sandbox_factor_name(record.code_artifact)
+            covered.add(factor_name)
+            day_values = record.values.get(decision_at.date().isoformat())
+            if day_values is None:
+                logger.warning(
+                    "research_run.factor_series_date_missing",
+                    series_id=series_ref.artifact_id,
+                    factor=factor_name,
+                    decision_at=decision_at.isoformat(),
+                    window=f"{record.dates[0]}~{record.dates[-1]}" if record.dates else "empty",
+                )
+                continue
+            values.extend(
+                series_feature_values(
+                    record, decision_at, factor_name=factor_name
+                )
+            )
+        return tuple(values), frozenset(covered)
 
 
 async def _load_daily_metrics_features(
@@ -1058,10 +1152,39 @@ def _market_from_value(value: str) -> Market:
         return Market.A_SHARE
 
 
+def series_feature_values(
+    record: FactorSeriesRecordLike,
+    decision_at: datetime,
+    *,
+    factor_name: str,
+) -> tuple[FeatureValue, ...]:
+    """把序列在 ``decision_at`` 决策日的截面映射为 ``FeatureValue``(#360)。
+
+    与快照路径(``_load_features``)喂同一 ``extract_factor_matrix`` 消费的
+    ``FeatureValue`` 形态;``available_at = decision_at`` 由前缀不变性审计
+    背书(序列构建即审计,决策日观测只用决策日之前的数据)。调用方负责
+    判定决策日已被序列覆盖(缺失日发具名 warning 后跳过)。
+    """
+    day_values = record.values.get(decision_at.date().isoformat())
+    if day_values is None:
+        return ()
+    return tuple(
+        FeatureValue(
+            symbol=symbol,
+            feature_id=factor_name,
+            value=None if value is None else float(value),
+            source_artifact_ids=(record.series_id,),
+            available_at=decision_at,
+        )
+        for symbol, value in sorted(day_values.items())
+    )
+
+
 def _build_artifact_ids(manifest: ResearchRunManifest) -> tuple[str, ...]:
-    """收集 manifest 冻结的所有 artifact_id(release + snapshot)。"""
+    """收集 manifest 冻结的所有 artifact_id(release + snapshot + series)。"""
     ids: list[str] = [ref.artifact_id for ref in manifest.dataset_releases]
     ids.extend(ref.artifact_id for ref in manifest.factor_snapshots)
+    ids.extend(ref.artifact_id for ref in manifest.factor_series)
     # 去重保序(PortfolioDecisionInput 要求 input_artifact_ids 唯一)。
     seen: set[str] = set()
     unique: list[str] = []
@@ -1073,9 +1196,11 @@ def _build_artifact_ids(manifest: ResearchRunManifest) -> tuple[str, ...]:
 
 
 __all__ = [
+    "FactorSeriesProvider",
     "FeatureSnapshotProvider",
     "FrozenInputLoader",
     "LoadedDecisionContext",
     "ReleaseProviderFactory",
     "SymbolCloseHistory",
+    "series_feature_values",
 ]
