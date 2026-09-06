@@ -138,13 +138,6 @@ exclude = ["migrations/versions/", "data_releases/", "data_cache/"]  # 后两者
 module = ["xtquant.*", "pyarrow.*", "akshare.*", "yfinance.*", "tushare.*"]
 ignore_missing_imports = true
 
-# issue #361:因子 series 仓储由并行分支 #360 提供(user_factors.py 的
-# SeriesLookup 真实 wiring 以函数体内 lazy import 消费);两分支整合后该
-# 模块存在,本 override 即冗余可移除(保留无害——仅对该模块放宽缺失导入)。
-[[tool.mypy.overrides]]
-module = ["finboard_persistence.factor_series_repo"]
-ignore_missing_imports = true
-
 # 测试代码放宽部分严格项
 [[tool.mypy.overrides]]
 module = "tests.*"

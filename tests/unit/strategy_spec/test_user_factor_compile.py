@@ -133,7 +133,7 @@ class _StubLookup:
         self._series = series_by_artifact
         self.calls: list[tuple[str, str]] = []
 
-    def find_matching(
+    async def find_matching(
         self,
         *,
         code_artifact: str,
@@ -142,7 +142,7 @@ class _StubLookup:
         params: object = None,
         window_start: date | None = None,
         window_end: date | None = None,
-    ) -> _StubSeries | None:
+    ) -> Any:  # 宽返回:与 SeriesLookup 协议结构化兼容(单测 stub)
         self.calls.append((code_artifact, release_id))
         return self._series.get(code_artifact)
 
@@ -161,10 +161,10 @@ _WINDOW = (date(2024, 1, 1), date(2024, 2, 29))
 class TestSeriesCoverageGate:
     """issue #361:multi_period x u_ 因子的 series 覆盖检查(替代一刀切秒拒)。"""
 
-    def test_multi_period_with_full_coverage_passes(self) -> None:
+    async def test_multi_period_with_full_coverage_passes(self) -> None:
         """全覆盖 series 放行 —— 不再「multi_period 不许引用 u_」。"""
         assert (
-            user_factor_series_coverage_gate_error(
+            await user_factor_series_coverage_gate_error(
                 referenced_user_factors={"u_agent_alpha"},
                 series_lookup=_StubLookup(
                     {"agent_alpha": _StubSeries("release-multi", _DECISION_DATES)}
@@ -180,8 +180,8 @@ class TestSeriesCoverageGate:
             is None
         )
 
-    def test_missing_series_named_rejection_with_build_hint(self) -> None:
-        error = user_factor_series_coverage_gate_error(
+    async def test_missing_series_named_rejection_with_build_hint(self) -> None:
+        error = await user_factor_series_coverage_gate_error(
             referenced_user_factors={"u_agent_alpha"},
             series_lookup=_StubLookup({"agent_alpha": None}),
             bars_release_id="release-multi",
@@ -196,9 +196,9 @@ class TestSeriesCoverageGate:
         assert SERIES_COVERAGE_MISSING_CODE in error
         assert "finboard_factor_series_build" in error
 
-    def test_partial_coverage_lists_missing_dates(self) -> None:
+    async def test_partial_coverage_lists_missing_dates(self) -> None:
         """覆盖不足:具名拒绝 + 缺失决策日期清单。"""
-        error = user_factor_series_coverage_gate_error(
+        error = await user_factor_series_coverage_gate_error(
             referenced_user_factors={"u_agent_alpha"},
             series_lookup=_StubLookup(
                 {"agent_alpha": _StubSeries("release-multi", (_DECISION_DATES[0],))}
@@ -217,10 +217,10 @@ class TestSeriesCoverageGate:
         assert "2024-02-28" in error
         assert "finboard_factor_series_build" in error
 
-    def test_missing_dates_preview_bounded_at_10(self) -> None:
+    async def test_missing_dates_preview_bounded_at_10(self) -> None:
         """缺失日期清单有界预览 ≤10(总数可见,不刷屏)。"""
         many_dates = tuple(date(2024, 1, 2 + index) for index in range(15))
-        error = user_factor_series_coverage_gate_error(
+        error = await user_factor_series_coverage_gate_error(
             referenced_user_factors={"u_agent_alpha"},
             series_lookup=_StubLookup({"agent_alpha": _StubSeries("release-multi", ())}),
             bars_release_id="release-multi",
@@ -238,9 +238,9 @@ class TestSeriesCoverageGate:
         assert "2024-01-11。请执行" in error
         assert ": 2024-01-12" not in error
 
-    def test_anchor_mismatch_named_rejection(self) -> None:
+    async def test_anchor_mismatch_named_rejection(self) -> None:
         """series 锚定发布与 run bars 主发布不一致:具名拒绝。"""
-        error = user_factor_series_coverage_gate_error(
+        error = await user_factor_series_coverage_gate_error(
             referenced_user_factors={"u_agent_alpha"},
             series_lookup=_StubLookup(
                 {"agent_alpha": _StubSeries("release-other", _DECISION_DATES)}
@@ -257,10 +257,10 @@ class TestSeriesCoverageGate:
         assert SERIES_ANCHOR_MISMATCH_CODE in error
         assert "release-other" in error
 
-    def test_lookup_receives_stripped_artifact_name_and_release(self) -> None:
+    async def test_lookup_receives_stripped_artifact_name_and_release(self) -> None:
         """``find_matching`` 收到去 u_ 前缀的 artifact 名与 bars 主发布 id。"""
         lookup = _StubLookup({"agent_alpha": None})
-        user_factor_series_coverage_gate_error(
+        await user_factor_series_coverage_gate_error(
             referenced_user_factors={"u_agent_alpha"},
             series_lookup=lookup,
             bars_release_id="release-multi",
@@ -273,10 +273,10 @@ class TestSeriesCoverageGate:
         )
         assert lookup.calls == [("agent_alpha", "release-multi")]
 
-    def test_empty_decision_dates_passes(self) -> None:
+    async def test_empty_decision_dates_passes(self) -> None:
         """发布区间推导不出决策日:不构成覆盖缺口(执行期根因报错兜底)。"""
         assert (
-            user_factor_series_coverage_gate_error(
+            await user_factor_series_coverage_gate_error(
                 referenced_user_factors={"u_agent_alpha"},
                 series_lookup=_StubLookup({"agent_alpha": None}),
                 bars_release_id="release-multi",
@@ -290,10 +290,10 @@ class TestSeriesCoverageGate:
             is None
         )
 
-    def test_single_shot_not_gated_by_coverage(self) -> None:
+    async def test_single_shot_not_gated_by_coverage(self) -> None:
         """single_shot 不走覆盖检查(仍由 #203 快照门控把关)。"""
         assert (
-            user_factor_series_coverage_gate_error(
+            await user_factor_series_coverage_gate_error(
                 referenced_user_factors={"u_agent_alpha"},
                 series_lookup=_StubLookup({"agent_alpha": None}),
                 bars_release_id="release-multi",

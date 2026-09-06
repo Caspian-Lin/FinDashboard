@@ -225,7 +225,7 @@ async def queue_research_run(
     if schedule is not None and referenced_user_factors:
         if trading_days is None:
             trading_days = await _enqueue_trading_days(primary)
-        series_gate_error = user_factor_series_coverage_gate_error(
+        series_gate_error = await user_factor_series_coverage_gate_error(
             referenced_user_factors=referenced_user_factors,
             series_lookup=default_series_lookup(session),
             bars_release_id=primary.release_id,

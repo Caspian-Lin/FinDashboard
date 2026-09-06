@@ -298,9 +298,12 @@ def test_plain_manifest_checksum_stable_without_lineage(manifest_factory) -> Non
     """
     manifest = manifest_factory()
     payload = asdict(manifest)
-    # 模拟改版前(字段不存在)的 payload:弹出两个条件键后 checksum 必须一致。
+    # 模拟改版前(字段不存在)的 payload:弹出全部条件键后 checksum 必须一致。
+    # (strategy_version/replay_source_status=#305 时代;factor_series=#360
+    # 新增的条件键,空序列不入 checksum。)
     payload.pop("strategy_version", None)
     payload.pop("replay_source_status", None)
+    payload.pop("factor_series", None)
     assert stable_checksum(payload) == manifest.checksum
 
     # 血缘标注出现时则纳入 checksum(replay run 身份可区分)。
@@ -311,5 +314,6 @@ def test_plain_manifest_checksum_stable_without_lineage(manifest_factory) -> Non
     )
     replayed_payload = asdict(replayed)
     replayed_payload.pop("strategy_version", None)
+    replayed_payload.pop("factor_series", None)
     assert stable_checksum(replayed_payload) == replayed.checksum
     assert replayed.checksum != manifest.checksum

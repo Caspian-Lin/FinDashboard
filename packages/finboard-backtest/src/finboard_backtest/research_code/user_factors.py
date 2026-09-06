@@ -74,7 +74,9 @@ class SeriesLookup(Protocol):
     :func:`default_series_lookup`。
     """
 
-    def find_matching(
+    # 整合修正:真实仓储(#360 FactorSeriesRepository)是 async DB 访问,
+    # 协议随之 async(同步 stub 一并改 async)。
+    async def find_matching(
         self,
         *,
         code_artifact: str,
@@ -180,7 +182,7 @@ def default_series_lookup(session: Any) -> SeriesLookup:
     return lookup
 
 
-def user_factor_series_coverage_gate_error(
+async def user_factor_series_coverage_gate_error(
     *,
     referenced_user_factors: Collection[str],
     series_lookup: SeriesLookup,
@@ -212,7 +214,7 @@ def user_factor_series_coverage_gate_error(
         return None
     probe = coverage_missing or _default_series_coverage_missing
     for name in referenced:
-        series = series_lookup.find_matching(
+        series = await series_lookup.find_matching(
             code_artifact=name[len(USER_FACTOR_PREFIX) :],
             release_id=bars_release_id,
             dataset_release_ids=tuple(dataset_release_ids),
