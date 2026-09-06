@@ -122,11 +122,19 @@ FinBoard 研究 MCP —— 量化研究工具集
   (strategy_spec 形态)入队时对主数据发布做 universe 候选池非空校验,
   空池秒级 invalid_argument(不再等执行期跑完后报泛化错误),错误信息附
   各过滤条件的排除统计与缺失字段名(如 list_date)。single_shot 缺快照
-  同样入队秒级拒绝(#203):未声明 rebalance_frequency 时决策时点只能来自
-  冻结因子快照,报错附 execution_mode 与缺失因子源。用户自定义因子
-  (u_ 前缀,#217)同样入队秒级拒绝:引用的因子 artifact 非 active
-  (retired/不存在),或 multi_period(rebalance_frequency)引用用户因子
-  (观测绑定单一 decision_at,不支持每期重算)。multi_period 特征可用性
+  同样入队秒级拒绝(#203):未声明决策日历(decision_schedule /
+  rebalance_frequency)时决策时点只能来自冻结因子快照,报错附
+  execution_mode 与缺失因子源。决策日历(#361):
+  parameters.decision_schedule={kind:
+  daily|weekly|monthly|quarterly|custom} 泛化决策频率(weekly=每周最后
+  交易日,custom 显式 dates 须 ⊆ 发布交易日且升序去重);legacy
+  rebalance_frequency 扩展接受 daily|weekly(旧值零变化,映射进
+  schedule;两键不可同时声明)。用户自定义因子(u_ 前缀,#217)同样
+  入队秒级拒绝:引用的因子 artifact 非 active(retired/不存在);而
+  multi_period(decision_schedule)引用用户因子改为 series 覆盖检查
+  (#361):无 series / 覆盖不足 / series 锚定发布与 bars 主发布不一致
+  → invalid_argument(附缺失决策日期预览与 finboard_factor_series_build
+  重建命令;single_shot 仍走快照门控)。multi_period 特征可用性
   同样入队秒级判定(#253):规格 identity 源必须可由多期供给派生(标准
   价格特征 momentum/volatility_Nd/downside_volatility、close、attached
   daily_metrics / financial_indicators 发布按 kind 派生的特征、快照观测),
@@ -217,8 +225,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   benchmark_return/excess_return 为 null + 具名 warning,不再静默 0.0。
   无显式基准的回退链跟随选股池(#254):每期选股池动态等权 > 静态候选池
   等权 > 首个标的,实际来源在 metrics.benchmark_source 与 summary() 可见。
-  多期回放(#183):queue_payload.parameters 声明
-  rebalance_frequency=monthly|quarterly 时,按冻结发布交易日历每期重算
+  多期回放(#183/#361):queue_payload.parameters 声明
+  decision_schedule={kind: daily|weekly|monthly|quarterly|custom} 或 legacy
+  rebalance_frequency=daily|weekly|monthly|quarterly 时,按冻结发布交易日历
+  每期重算
   universe/features/signals 与组合,决策间每日 mark-to-market 产出全区间
   equity_curve(报告含 annualized_return,最终权 益=曲线末点);「不要求预建
   快照」仅限决策日推导与价格因子,基本面因子(pb/ROE 等)仍 PIT 取自冻结
@@ -394,13 +404,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   且错误指明阈值)后落库为 feature snapshot(u_<name> 因子观测,
   run_get 可见 output_snapshot_id),可被 research run 的
   factor_snapshot_ids 引用、规格按 u_<name> 引用(仅 active+passed;入队期
-  retired 拦截,multi_period 引用用户因子秒级拒绝)。需
+  retired 拦截,multi_period 引用用户因子走 series 覆盖检查 #361)。需
   research_sandbox_enabled=true + Docker Desktop + docker/research-sandbox
   镜像;纯离线研究域,不连 broker 不下单。
 - 用户代码策略执行(✅ #218/#219):strategy_spec ``strategy_kind=user_code`` +
   ``code_artifact={name, commit?}`` 引用 kind=strategy 的 active+passed artifact
   (feature_graph/signal_rules 允许为空)。research_run(建议
-  ``parameters.rebalance_frequency=monthly|quarterly`` 走 multi_period;
+  ``parameters.decision_schedule`` 走 multi_period(四频 + custom,#361;legacy
+  ``rebalance_frequency`` 仍接受);
   single_shot 需冻结快照提供决策时点)逐决策日在一次性容器执行
   ``strategy.decide(ctx) -> targets``:输入 = PIT 数据视图 + **当前权重回显**
   (上一决策成交后的实际持仓)+ 组合约束只读视图;输出目标权重映射为信号,

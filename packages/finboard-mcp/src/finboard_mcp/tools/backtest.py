@@ -321,7 +321,8 @@ async def _run_via_strategy_spec(
         "strategy_kind": ack["strategy_kind"],
         "manifest_checksum": ack["checksum"],
         # issue #183:agent 据此区分单时点决策(single_shot)与全区间回放
-        # (multi_period,由 queue_payload.parameters.rebalance_frequency 决定)。
+        # (multi_period,由 queue_payload.parameters 的 decision_schedule /
+        # legacy rebalance_frequency 决定,issue #361)。
         "execution_mode": execution_mode_for(dict(body.parameters)).value,
         "execution_path": (
             "research_run 管线(已入队,异步执行;用 finboard_run_get 或 finboard_job_get 轮询进度)"
@@ -960,7 +961,8 @@ def register(mcp: MCPServer) -> None:
             "(2) strategy_spec 形态:按已发布策略规格 {strategy_id, version} "
             "路由入队 research_run 管线(冻结 dataset_release_ids/因子快照后"
             "异步执行;single_shot 需 factor_snapshot_ids,多期在 queue_payload."
-            "parameters 声明 rebalance_frequency,#203),返回 run_id + job_id "
+            "parameters 声明 decision_schedule(四频 + custom)或 legacy "
+            "rebalance_frequency,#203/#361),返回 run_id + job_id "
             "指针,不阻塞等待完成;其余入队字段"
             "经 queue_payload 传入(与 finboard_run_queue 同构,不含 "
             "strategy_id/strategy_version)。"
