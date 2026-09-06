@@ -28,10 +28,9 @@ worker 领取 ``kind=factor_series_build`` 任务(单并发,复用 research_code
 自检;换 bars 发布的托管批量重建 = 一次入队 N 个本 job(内容寻址缓存使
 未受影响的输入组合自动 unchanged,不新造编排器)。
 
-容器执行与审计本体由并行分支 #359 提供(``runner.FactorSeriesRunSpec`` /
-``runner.run_factor_series_container`` / ``research_sandbox.audit``);本模块
-直接属性访问(不做 ImportError 兜底吞错),单测经构造注入 mock。整合 #359
-后移除对应 ``type: ignore`` 标记即可。
+容器执行与审计本体由 #359 提供(``runner.FactorSeriesRunSpec`` /
+``runner.run_factor_series_container`` / ``research_sandbox.audit`` 前缀不变性
+引擎);默认实现走真实容器与审计引擎,测试经构造注入 mock。
 
 边界:纯离线研究域;容器无网络无凭证,不触实盘任何组件。
 """
@@ -39,8 +38,8 @@ worker 领取 ``kind=factor_series_build`` 任务(单并发,复用 research_code
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from typing import Any
 
@@ -112,19 +111,37 @@ class FactorSeriesBuildPayload:
 
 
 async def _default_container_runner(spec: Any) -> Any:
-    """#359 钉死的容器执行入口;整合时移除 type: ignore。"""
+    """#359 钉死的容器执行入口。"""
     from finboard_backtest.research_sandbox import runner
 
-    return await runner.run_factor_series_container(spec)  # type: ignore[attr-defined]
+    return await runner.run_factor_series_container(spec)
 
 
 async def _default_prefix_audit(spec: Any, *, truncate_at: date) -> Any:
-    """#359 钉死的前缀不变性审计;整合时移除 type: ignore。"""
-    from finboard_backtest.research_sandbox.audit import (  # type: ignore[import-not-found]
-        run_prefix_invariance_audit,
-    )
+    """前缀不变性审计(截断模式;#359 纯引擎 + 容器重放)。
 
-    return await run_prefix_invariance_audit(spec, truncate_at=truncate_at)
+    截断变体 = ``dates`` 截到 cut 且 ``window_end`` 收紧到 cut(v3 挂载的
+    PIT 上界随 window_end 收紧,变体容器物理上只可见 cut 日终之前的数据);
+    基线与变体各重放一次容器,报告携带 ``passed`` / ``first_divergence_date``
+    (执行器 ``_audit_sample`` 的消费形态)。
+    """
+    from finboard_backtest.research_sandbox.audit import run_prefix_invariance_audit
+    from finboard_backtest.research_sandbox.runner import run_factor_series_container
+
+    async def build_fn(
+        dates: Sequence[date], perturb_from: date | None = None
+    ) -> Any:
+        del perturb_from  # 截断模式忽略第二参(#359 引擎语义)
+        return await run_factor_series_container(
+            replace(spec, dates=tuple(dates), window_end=max(dates))
+        )
+
+    return await run_prefix_invariance_audit(
+        build_fn,
+        mode="truncation",
+        cut_points=[truncate_at],
+        dates=list(spec.dates),
+    )
 
 
 def audit_truncation_points(dates: list[date]) -> list[date]:
@@ -224,10 +241,10 @@ class FactorSeriesBuildExecutor:
                 ),
             )
 
-        artifact_id, commit = await self._resolve_code(payload)
+        _artifact_id, commit = await self._resolve_code(payload)
         await progress(3, _TOTAL_STAGES, "factor_series_build:execute")
 
-        spec = self._build_spec(payload, commit=commit, artifact_id=artifact_id)
+        spec = self._build_spec(payload, commit=commit)
         result = await self._container_runner(spec)
         record = _record_from_result(
             result,
@@ -385,21 +402,35 @@ class FactorSeriesBuildExecutor:
         payload: FactorSeriesBuildPayload,
         *,
         commit: str,
-        artifact_id: str | None,
     ) -> Any:
-        """构造 #359 钉死的 ``FactorSeriesRunSpec``(整合时移除 ignore)。"""
-        from finboard_backtest.research_sandbox import runner
+        """构造 #359 的 ``FactorSeriesRunSpec``。
 
-        return runner.FactorSeriesRunSpec(  # type: ignore[attr-defined]
-            kind=payload.kind,
-            name=payload.name,
-            commit=commit,
-            artifact_id=artifact_id,
+        窗口内决策日 = A 股交易日历在 ``[window_start, window_end]`` 的
+        全部交易日(序列工件逐交易日产出,消费端按决策日索引取子集)。
+        """
+        from finboard_backtest.research_sandbox import runner
+        from finboard_data.trading_calendar import trading_days
+
+        dates = tuple(sorted(trading_days(payload.window_start, payload.window_end)))
+        if not dates:
+            raise ExecutorError(
+                code="invalid_payload",
+                summary=(
+                    f"窗口 [{payload.window_start.isoformat()}, "
+                    f"{payload.window_end.isoformat()}] 内无 A 股交易日"
+                    "(交易日历未加载或窗口非法),无法构建因子序列"
+                ),
+                retryable=False,
+            )
+        return runner.FactorSeriesRunSpec(
+            code_artifact=payload.name,
+            code_commit=commit,
             release_id=payload.release_id,
-            dataset_release_ids=list(payload.dataset_release_ids),
+            dataset_release_ids=tuple(payload.dataset_release_ids),
             params=payload.params or {},
             window_start=payload.window_start,
             window_end=payload.window_end,
+            dates=dates,
         )
 
     async def _audit_sample(
@@ -542,6 +573,9 @@ def _record_from_result(
             for symbol, value in dict(day_values).items()
         }
     quality = getattr(result, "quality", None)
+    if quality is not None and not isinstance(quality, dict):
+        # #359 产出 SeriesQualityReport dataclass,归档为普通 dict
+        quality = asdict(quality)
     source_run_id = getattr(result, "run_id", None)
     return FactorSeriesRecord.build(
         code_artifact=code_artifact,

@@ -376,22 +376,30 @@ def _make_executor(
 
     @dataclass(frozen=True)
     class _StubSpec:
-        kind: str
-        name: str
-        commit: str
+        code_artifact: str
+        code_commit: str
         release_id: str
-        dataset_release_ids: list[str]
+        dataset_release_ids: tuple[str, ...]
         params: dict[str, Any]
         window_start: Any
         window_end: Any
-        artifact_id: str | None = None
+        dates: tuple[Any, ...]
 
     async def _run_container(spec: Any) -> Any:
         observed["specs"].append(spec)
         return runner_result
 
-    async def _run_audit(spec: Any, *, truncate_at: Any) -> Any:
-        observed["truncate_points"].append(truncate_at)
+    async def _run_audit(
+        build_fn: Any,
+        *,
+        mode: Any,
+        cut_points: Any,
+        dates: Any = None,
+    ) -> Any:
+        # 与 #359 真实引擎同签名的假引擎:只记录抽样截断点并回放结果,
+        # 不调 build_fn(引擎本体行为由 research_sandbox 审计专项测试覆盖)
+        assert mode == "truncation"
+        observed["truncate_points"].extend(cut_points)
         return audit_outcomes.pop(0)
 
     monkeypatch.setattr(
@@ -400,9 +408,8 @@ def _make_executor(
     monkeypatch.setattr(
         runner_mod, "run_factor_series_container", _run_container, raising=False
     )
-    # audit 引擎属并行分支 #359(本分支尚无该模块):按任务约定以
-    # sys.modules 桩顶替(monkeypatch 模式,生产代码保持直接 import,
-    # 不做 ImportError 兜底)。
+    # audit 引擎以 sys.modules 桩顶替(与 #359 引擎同签名;monkeypatch
+    # 模式,生产代码保持直接 import,不做 ImportError 兜底)。
     audit_stub = types.ModuleType("finboard_backtest.research_sandbox.audit")
     audit_stub.run_prefix_invariance_audit = _run_audit  # type: ignore[attr-defined]
     monkeypatch.setitem(
@@ -476,8 +483,8 @@ class TestAuditSampling:
         assert observed["truncate_points"] == [dates[1], dates[2]]
         assert observed["specs"] == observed["specs"]  # 1 个 spec(build)
         spec = observed["specs"][0]
-        assert spec.name == "mom20"
-        assert spec.commit == "c" * 40
+        assert spec.code_artifact == "mom20"
+        assert spec.code_commit == "c" * 40
         assert spec.release_id == "DR-bars-1"
 
     async def test_positive_audit_fails_named_date(self, monkeypatch) -> None:

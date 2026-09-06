@@ -23,7 +23,8 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision = "a9b0c1d2e3f4"
-down_revision = "d4e5f6a7b8c9"
+# 整合:#359 的 RCR mode 迁移先落(b5e6f7a8c9d0),本迁移串接其后(单头)
+down_revision = "b5e6f7a8c9d0"
 branch_labels = None
 depends_on = None
 
