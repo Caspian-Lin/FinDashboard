@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 125 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 128 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -1603,6 +1603,53 @@ finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.2.0`;
 `finboard_research_code_run`(每个 decision_at 一次 RCR → 质量门 →
 新快照),再用新 `output_snapshot_id` 入队;或把旧锚定发布一并放进
 `dataset_release_ids`(保持 ⊆ 约束,不推荐与新发布混用作主行情)。
+
+## 因子序列工件(#360,内容寻址缓存 + 托管重建)
+
+因子序列(FS- 前缀,`research_factor_series`)把 u_ 因子观测从「绑定单一
+decision_at 的点快照」升级为**内容寻址派生工件**:`series_key` =
+sha256(代码 commit | bars 主发布 | 研究发布联合集(排序) | params(canonical
+json)| 窗口),`values` 为 `{date: {symbol: float|null}}` 逐决策日截面。
+冻结时机移到 **run 入队**(入队 payload 新键 `factor_series_ids`,
+manifest 冻结 `{series_id, content_checksum}` 并入 `input_checksum`;
+未声明序列的旧 manifest checksum 零漂移)。声明序列的 run:加载器按
+(因子名, 决策日) 从 series.values 取观测(双轨优先,回退快照路径),
+被覆盖的 u_ 因子**跳过 multi_period 拒绝**(序列按决策日索引,不再绑定
+单一 decision_at)—— 换发布从死墙变为托管批量重建。
+
+### finboard_factor_series_build(写,入队)
+入队 `kind=factor_series_build` 后台任务(worker 单并发,复用沙箱槽位)。
+- 参数:`name: str`(因子产物名)、`release_id: str`(bars 主发布锚定)、
+  `window_start/window_end: ISO 日期`、`dataset_release_ids?: list[str]`
+  (研究发布联合集,排序冻结)、`commit?`、`artifact_id?`、`params?`
+- 入队预检:sandbox 开启、(factor,name) 有已晋级 active+passed 产物
+  (显式 artifact_id 同样要求非 retired;指定 commit 须等于 active 引用)、
+  release 均已登记
+- **缓存检查**:series_key 已存在且 content_checksum 一致 → 直接返回
+  `unchanged=true`(不创建任务,不启动容器);否则入队返回 job_id
+- 执行:窗口内逐决策日沙箱执行 factor.compute(#359 容器执行本体)→
+  抽 2 个截断点做前缀不变性审计(检出前视 → failed=
+  `lookahead_detected`,错误具名首个分歧日期,与
+  output_contract_violation 同级)→ 内容寻址落库
+- 轮询:`finboard_job_get`(成功 result_ref=FS-...;error_summary 含
+  `cache_hit` 表示命中缓存)
+
+### finboard_factor_series_get(只读)
+查询序列内容(`research_factor_series`,FS- 前缀)。
+- 参数:`series_id`、`view: "summary"|"detail" = "summary"`
+- 返回 summary:三向代码引用(code_artifact/commit/kind)、release 锚定
+  与联合集、窗口、date_count/symbol_count、content_checksum、quality
+  (#217 质量门归档)、source_run_id(RCR-);**不含逐日 values**(#206 瘦身)
+- 返回 detail:另附 dates(升序)与 values 全量
+
+### 换 bars 发布的托管重建(解反馈 #8 本体)
+入队/validate 发现引用序列的 `release_id` 不在本次 `dataset_release_ids`
+→ 入队秒级具名拒绝 `series_release_mismatch`(附失效 series 清单 +
+重建代价预估 N 条 × 预计分钟);`finboard_strategy_validate` 的
+`factor_series_anchor_warnings` 提前可见。**重建 = 一次入队 N 个
+`finboard_factor_series_build`**(复用 job 基础设施,不新造编排器;
+内容寻址缓存使未受影响的输入组合自动 unchanged);窗口扩展重建后重叠
+前缀 checksum 必须一致(前缀不变性审计免费充当一致性自检)。
 
 ## 用户代码策略执行(#218,逐日决策函数)
 

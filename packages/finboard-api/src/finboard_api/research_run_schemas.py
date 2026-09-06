@@ -17,6 +17,9 @@ class ResearchRunQueueIn(BaseModel):
     strategy_version: int = Field(ge=1)
     dataset_release_ids: list[str] = Field(min_length=1)
     factor_snapshot_ids: list[str] = Field(default_factory=list)
+    # issue #360:内容寻址因子序列工件引用(FS- 前缀);声明时 u_ 因子观测
+    # 按决策日从 series.values 取(加载器双轨优先),空 = 既有快照路径。
+    factor_series_ids: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     validation_config: dict[str, Any] = Field(default_factory=dict)
     portfolio_config: dict[str, Any] = Field(default_factory=dict)

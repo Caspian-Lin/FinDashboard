@@ -9,6 +9,9 @@
 * ``research_data_sync`` —— research 数据表(估值 / 财务 / 行业)摄取编排(#171)。
 * ``research_code_run`` —— 研究代码沙箱执行(一次性 Docker 容器,#216;
   单并发,run 记录 code commit x 数据 release x 输出 checksum 三向引用)。
+* ``factor_series_build`` —— 内容寻址因子序列构建(#360;单并发,复用
+  research_code_run 的 worker 槽位约定;缓存命中 unchanged / 前缀不变性
+  审计抽样 / ``research_factor_series`` 幂等落库)。
 * ``validation_experiment`` —— #57 验证实验执行(walk-forward + 一次性揭盲,
   #233;补齐 #219 晋级门 OOS 半边的运营入口,单并发)。
 """
@@ -24,6 +27,9 @@ from finboard_backtest.background_jobs.executors.dataset_publish import (
     DatasetPublishExecutor,
 )
 from finboard_backtest.background_jobs.executors.echo import EchoExecutor
+from finboard_backtest.background_jobs.executors.factor_series_build import (
+    FactorSeriesBuildExecutor,
+)
 from finboard_backtest.background_jobs.executors.feature_snapshot import (
     FeatureSnapshotExecutor,
 )
@@ -51,6 +57,7 @@ __all__ = [
     "DataSyncExecutor",
     "DatasetPublishExecutor",
     "EchoExecutor",
+    "FactorSeriesBuildExecutor",
     "FeatureSnapshotExecutor",
     "QualityRepairExecutor",
     "ResearchCodeRunExecutor",

@@ -171,6 +171,11 @@ class ResearchRunManifest:
     # 本次运行实际引用的已发布版本. None 兼容历史 manifest.
     strategy_version: int | None = None
     factor_snapshots: tuple[FrozenArtifactRef, ...] = ()
+    # issue #360:内容寻址因子序列工件引用({series_id, content_checksum});
+    # 声明时 u_ 因子观测按 (因子名, 决策日) 从 series.values 取(加载器双轨
+    # 优先路径),未声明回退既有快照路径。空元组不入 checksum / input_checksum
+    # —— 历史 manifest 的 checksum 零漂移(同 strategy_version 先例)。
+    factor_series: tuple[FrozenArtifactRef, ...] = ()
     parameters: dict[str, JsonValue] = field(default_factory=dict)
     validation_config: dict[str, JsonValue] = field(default_factory=dict)
     portfolio_config: dict[str, JsonValue] = field(default_factory=dict)
@@ -210,6 +215,9 @@ class ResearchRunManifest:
         factor_ids = tuple(item.artifact_id for item in self.factor_snapshots)
         if len(factor_ids) != len(set(factor_ids)):
             raise ValueError("factor_snapshots 不允许重复")
+        series_ids = tuple(item.artifact_id for item in self.factor_series)
+        if len(series_ids) != len(set(series_ids)):
+            raise ValueError("factor_series 不允许重复")
         if not self.code_version:
             raise ValueError("必须冻结 code_version")
         if not self.requested_by:
@@ -246,6 +254,10 @@ class ResearchRunManifest:
         # manifest 的 checksum 不因新增字段而漂移(同 strategy_version 先例)。
         if self.replay_source_status is None:
             payload.pop("replay_source_status", None)
+        # issue #360:序列引用仅在声明时入 checksum;空时不序列化,历史
+        # manifest checksum 零漂移(同 replay_source_status 先例)。
+        if not self.factor_series:
+            payload.pop("factor_series", None)
         return stable_checksum(payload)
 
     @property
@@ -269,6 +281,11 @@ class ResearchRunManifest:
         }
         if self.strategy_version is not None:
             payload["strategy_version"] = self.strategy_version
+        # issue #360:序列引用覆盖进 input_checksum(同 strategy_version 的
+        # 「仅在存在时入键」先例)—— 序列内容变化(content_checksum)使冻结
+        # 输入身份变化;未声明的 run 保持历史 input_checksum 零漂移。
+        if self.factor_series:
+            payload["factor_series"] = self.factor_series
         return stable_checksum(payload)
 
     @property
@@ -811,6 +828,17 @@ def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
         )
         for item in cast(list[dict[str, object]], payload.get("factor_snapshots", []))
     )
+    series_refs = tuple(
+        FrozenArtifactRef(
+            artifact_id=str(item["artifact_id"]),
+            version=str(item["version"]),
+            checksum=str(item["checksum"]),
+            capabilities=tuple(
+                str(value) for value in cast(list[object], item.get("capabilities", []))
+            ),
+        )
+        for item in cast(list[dict[str, object]], payload.get("factor_series", []))
+    )
     return ResearchRunManifest(
         run_id=str(payload["run_id"]),
         idempotency_key=str(payload["idempotency_key"]),
@@ -823,6 +851,7 @@ def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
             else None
         ),
         factor_snapshots=factor_refs,
+        factor_series=series_refs,
         parameters=cast(dict[str, JsonValue], payload.get("parameters", {})),
         validation_config=cast(dict[str, JsonValue], payload.get("validation_config", {})),
         portfolio_config=cast(dict[str, JsonValue], payload.get("portfolio_config", {})),

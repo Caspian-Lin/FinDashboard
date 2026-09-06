@@ -77,6 +77,7 @@ from finboard_mcp.tools import (
     register_backtest_tools,
     register_data_tools,
     register_data_write_tools,
+    register_factor_series_tools,
     register_factor_tools,
     register_grid_tools,
     register_jobs_tools,
@@ -104,7 +105,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(126 个,已实现)==
+== 当前可用工具(128 个,已实现)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -397,6 +398,22 @@ FinBoard 研究 MCP —— 量化研究工具集
   retired 拦截,multi_period 引用用户因子秒级拒绝)。需
   research_sandbox_enabled=true + Docker Desktop + docker/research-sandbox
   镜像;纯离线研究域,不连 broker 不下单。
+- 因子序列工件(2,✅ #360):factor_series_build(写,入队)/
+  factor_series_get(只读)。内容寻址派生工件(research_factor_series,FS-
+  前缀):series_key = sha256(代码 commit x bars 主发布 x 研究发布联合集 x
+  params x 窗口),values 为逐决策日截面 —— u_ 因子观测从「绑定单一
+  decision_at 的点快照」升级为可 multi_period 引用的序列(research run
+  入队 payload 新键 factor_series_ids,声明时加载器按决策日索引 series.values,
+  被覆盖的 u_ 因子跳过 multi_period 拒绝;manifest 冻结
+  {series_id, content_checksum} 并入 input_checksum)。build job(worker
+  单并发,复用沙箱槽位)窗口内逐决策日沙箱执行 + 抽 2 个截断点做前缀不变性
+  审计(检出前视 failed=lookahead_detected);series_key 已存在且 checksum
+  一致直接 unchanged(不启动容器)。换 bars 发布:入队/validate 发现
+  series.release_id 不在冻结清单即具名拒绝(series_release_mismatch,附
+  失效清单与重建代价预估);托管批量重建 = 一次入队 N 个 factor_series_build
+  (内容寻址缓存使未受影响的组合自动 unchanged),不新造编排器。
+  factor_series_get 默认 view=summary(#206 瘦身,不含逐日 values),detail
+  才给 dates+values 全量。纯离线研究域,不连 broker 不下单。
 - 用户代码策略执行(✅ #218/#219):strategy_spec ``strategy_kind=user_code`` +
   ``code_artifact={name, commit?}`` 引用 kind=strategy 的 active+passed artifact
   (feature_graph/signal_rules 允许为空)。research_run(建议
@@ -451,6 +468,7 @@ def build_mcp_server() -> MCPServer:
     register_data_tools(mcp)
     register_data_write_tools(mcp)
     register_factor_tools(mcp)
+    register_factor_series_tools(mcp)
     register_strategy_tools(mcp)
     register_backtest_tools(mcp)
     register_grid_tools(mcp)

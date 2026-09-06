@@ -314,7 +314,11 @@ class PortfolioPipelineAdapter:
         validate_strategy_dataset_capabilities(self.strategy_kind, available)
         frozen_ids = {
             item.artifact_id
-            for item in (*manifest.dataset_releases, *manifest.factor_snapshots)
+            for item in (
+                *manifest.dataset_releases,
+                *manifest.factor_snapshots,
+                *manifest.factor_series,
+            )
         }
         factor_snapshot_ids = {
             item.artifact_id for item in manifest.factor_snapshots

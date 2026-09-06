@@ -33,6 +33,15 @@ from finboard_persistence.factor_lab_repo import (
     FeatureSnapshotRepository,
 )
 from finboard_persistence.factor_repo import FactorSnapshotRepository
+from finboard_persistence.factor_series_repo import (
+    FactorSeriesConflictError,
+    FactorSeriesRecord,
+    FactorSeriesRepository,
+    compute_content_checksum,
+    compute_series_key,
+    series_coverage_missing,
+    series_id_for,
+)
 from finboard_persistence.mcp_audit_repo import McpAuditRepository
 from finboard_persistence.models import (
     AccountModel,
@@ -65,6 +74,7 @@ from finboard_persistence.models import (
     ResearchDailyMetricModel,
     ResearchDatasetReleaseModel,
     ResearchExperimentModel,
+    ResearchFactorSeriesModel,
     ResearchFinancialIndicatorModel,
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
@@ -169,6 +179,9 @@ __all__ = [
     "FactorExperimentRepository",
     "FactorExperimentValidationService",
     "FactorFeatureSnapshotModel",
+    "FactorSeriesConflictError",
+    "FactorSeriesRecord",
+    "FactorSeriesRepository",
     "FactorSignalModel",
     "FactorSignalRepository",
     "FactorSnapshotModel",
@@ -210,6 +223,7 @@ __all__ = [
     "ResearchDatasetRepository",
     "ResearchExperimentModel",
     "ResearchExperimentRepository",
+    "ResearchFactorSeriesModel",
     "ResearchFinancialIndicatorModel",
     "ResearchIndustryClassificationModel",
     "ResearchIndustryMembershipModel",
@@ -247,10 +261,14 @@ __all__ = [
     "WatchlistItemModel",
     "WatchlistModel",
     "WatchlistRepository",
+    "compute_content_checksum",
+    "compute_series_key",
     "create_async_engine",
     "generate_run_id",
     "release_symbol_check",
     "resolve_release_symbols",
+    "series_coverage_missing",
+    "series_id_for",
     "session_factory",
     "symbol_set_diff",
 ]

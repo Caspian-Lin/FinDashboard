@@ -96,6 +96,16 @@ class UserFactorAnchorWarningOut(StrategySpecApiModel):
     message: str
 
 
+class FactorSeriesAnchorWarningOut(StrategySpecApiModel):
+    """一条因子序列锚定失配提示(issue #360,validate 通道)。"""
+
+    code: str
+    factor_name: str
+    series_id: str
+    anchored_release_id: str
+    message: str
+
+
 class StrategySpecValidationOut(StrategySpecApiModel):
     valid: bool = True
     checksum: str
@@ -109,6 +119,9 @@ class StrategySpecValidationOut(StrategySpecApiModel):
     # issue #355:引用 u_ 因子的既有沙箱快照锚定发布 ⊄ 本次 dataset_release_ids
     # 时的具名提示(不阻断;全匹配为空列表,零噪音)。直接引用将被入队秒拒。
     user_factor_anchor_warnings: list[UserFactorAnchorWarningOut] = []
+    # issue #360:引用 u_ 因子的既有序列锚定发布不在本次 dataset_release_ids
+    # 时的具名提示(不阻断);修复路径 = finboard_factor_series_build 托管重建。
+    factor_series_anchor_warnings: list[FactorSeriesAnchorWarningOut] = []
 
 
 class StrategySpecRegistryOut(StrategySpecApiModel):
@@ -121,6 +134,7 @@ class StrategySpecRegistryOut(StrategySpecApiModel):
 
 
 __all__ = [
+    "FactorSeriesAnchorWarningOut",
     "StrategySpecDiffOut",
     "StrategySpecDraftIn",
     "StrategySpecPublishIn",
