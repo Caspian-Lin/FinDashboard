@@ -84,6 +84,18 @@ class StrategySpecDiffOut(StrategySpecApiModel):
     changes: list[dict[str, object]]
 
 
+class UserFactorAnchorWarningOut(StrategySpecApiModel):
+    """一条用户因子快照锚定失配提示(issue #355,validate 通道)。"""
+
+    code: str
+    factor_name: str
+    run_id: str
+    snapshot_id: str
+    anchored_release_ids: list[str]
+    missing_release_ids: list[str]
+    message: str
+
+
 class StrategySpecValidationOut(StrategySpecApiModel):
     valid: bool = True
     checksum: str
@@ -94,6 +106,9 @@ class StrategySpecValidationOut(StrategySpecApiModel):
     lifecycle_stages: list[str]
     can_execute: bool
     universe_precheck: UniversePoolPreviewOut | None = None
+    # issue #355:引用 u_ 因子的既有沙箱快照锚定发布 ⊄ 本次 dataset_release_ids
+    # 时的具名提示(不阻断;全匹配为空列表,零噪音)。直接引用将被入队秒拒。
+    user_factor_anchor_warnings: list[UserFactorAnchorWarningOut] = []
 
 
 class StrategySpecRegistryOut(StrategySpecApiModel):
@@ -117,4 +132,5 @@ __all__ = [
     "StrategySpecVersionOut",
     "UniversePoolPreviewOut",
     "UniversePrecheckWarningOut",
+    "UserFactorAnchorWarningOut",
 ]

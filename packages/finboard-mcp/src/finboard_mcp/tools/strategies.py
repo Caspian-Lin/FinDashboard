@@ -15,6 +15,7 @@ draft / supersede / publish / rollback / diff / preset CRUD。
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from mcp.server import MCPServer
@@ -91,7 +92,11 @@ def _version_ack(row: Any) -> dict[str, Any]:
     }
 
 
-def _validation_to_dict(plan: Any) -> dict[str, Any]:
+def _validation_to_dict(
+    plan: Any,
+    *,
+    anchor_warnings: Sequence[Any] = (),
+) -> dict[str, Any]:
     """把 ``ResolvedStrategyPlan`` 映射为 validate 工具返回字典。"""
     preview = getattr(plan, "universe_precheck", None)
     return {
@@ -105,6 +110,12 @@ def _validation_to_dict(plan: Any) -> dict[str, Any]:
         "can_execute": plan.can_execute,
         # issue #186:universe 预检(universe_precheck.as_dict);无发布信息时为空。
         "universe_precheck": preview.as_dict() if preview is not None else None,
+        # issue #355:引用 u_ 因子的既有沙箱快照锚定发布 ⊄ 本次
+        # dataset_release_ids 的具名提示(不阻断;全匹配为空列表,零噪音)。
+        "user_factor_anchor_warnings": [
+            cast(dict[str, Any], to_jsonable(item.as_dict()))
+            for item in anchor_warnings
+        ],
     }
 
 
@@ -487,7 +498,17 @@ async def strategy_validate(
                 session,
                 disabled_factors=frozenset(disabled_factors or []),
             )
-        return _validation_to_dict(plan)
+            # issue #355:引用 u_ 因子的既有沙箱快照若锚定发布 ⊄ 本次
+            # dataset_release_ids,给具名 warning 提示(不阻断;入队期由
+            # snapshot_anchor_mismatches 秒级拒绝,REST 同口径)。
+            from finboard_backtest.research_code import user_factor_anchor_warnings
+
+            anchor_warnings = await user_factor_anchor_warnings(
+                session,
+                required_factor_sources=plan.required_factor_sources,
+                dataset_release_ids=plan.dataset_release_ids,
+            )
+        return _validation_to_dict(plan, anchor_warnings=anchor_warnings)
 
     return await run_tool(
         audit=app.audit,
@@ -1023,6 +1044,10 @@ def register(mcp: MCPServer) -> None:
             "required_factor_sources/required_datasets/dataset_release_ids/"
             "lifecycle_stages/can_execute。**不持久化**,agent 可反复修改规格 → "
             "validate 预览 → 满意后 strategy_draft_create。"
+            "引用 u_ 用户因子时返回 user_factor_anchor_warnings(#355):"
+            "该因子既有沙箱快照锚定发布 ⊄ 本次 dataset_release_ids 则逐因子"
+            "具名提示(不阻断)—— 直接引用入队会被 snapshot_anchor_mismatch "
+            "秒拒,须把锚定发布加入 dataset_release_ids 或对新发布重算 RCR。"
             "研究写操作(#122,自主执行)。对应 POST /api/research/strategy-specs/validate。"
         ),
     )

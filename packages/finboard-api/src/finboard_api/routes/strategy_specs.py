@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -26,10 +27,13 @@ from finboard_api.strategy_spec_schemas import (
     StrategySpecVersionOut,
     UniversePoolPreviewOut,
     UniversePrecheckWarningOut,
+    UserFactorAnchorWarningOut,
 )
 from finboard_backtest.research_code import (
+    UserFactorAnchorWarning,
     active_user_factor_names,
     active_user_strategy_names,
+    user_factor_anchor_warnings,
 )
 from finboard_backtest.strategy_spec import (
     FEATURE_SOURCE_CATALOG,
@@ -87,7 +91,11 @@ def _version_out(row: ResearchStrategySpecModel) -> StrategySpecVersionOut:
     )
 
 
-def _validation_out(plan: ResolvedStrategyPlan) -> StrategySpecValidationOut:
+def _validation_out(
+    plan: ResolvedStrategyPlan,
+    *,
+    anchor_warnings: Sequence[UserFactorAnchorWarning] = (),
+) -> StrategySpecValidationOut:
     return StrategySpecValidationOut(
         checksum=plan.checksum,
         feature_order=list(plan.feature_order),
@@ -97,6 +105,18 @@ def _validation_out(plan: ResolvedStrategyPlan) -> StrategySpecValidationOut:
         lifecycle_stages=list(plan.lifecycle_stages),
         can_execute=plan.can_execute,
         universe_precheck=_preview_out(plan.universe_precheck),
+        user_factor_anchor_warnings=[
+            UserFactorAnchorWarningOut(
+                code=item.code,
+                factor_name=item.factor_name,
+                run_id=item.run_id,
+                snapshot_id=item.snapshot_id,
+                anchored_release_ids=list(item.anchored_release_ids),
+                missing_release_ids=list(item.missing_release_ids),
+                message=item.message,
+            )
+            for item in anchor_warnings
+        ],
     )
 
 
@@ -255,7 +275,15 @@ async def validate_strategy_spec(
         session,
         disabled_factors=body.disabled_factors,
     )
-    return _validation_out(plan)
+    # issue #355:引用 u_ 因子的既有沙箱快照若锚定发布 ⊄ 本次
+    # dataset_release_ids,给具名 warning 提示(不阻断;入队期由
+    # snapshot_anchor_mismatches 秒级拒绝,共用同一领域函数)。
+    anchor_warnings = await user_factor_anchor_warnings(
+        session,
+        required_factor_sources=plan.required_factor_sources,
+        dataset_release_ids=plan.dataset_release_ids,
+    )
+    return _validation_out(plan, anchor_warnings=anchor_warnings)
 
 
 @router.post("/drafts", response_model=StrategySpecVersionOut, status_code=201)

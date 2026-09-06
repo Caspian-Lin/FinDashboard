@@ -392,10 +392,9 @@ async def _build_queued_manifest(
         active_user_factor_names,
         resolve_screen_bindings,
         screen_factor_snapshot_gate_error,
+        snapshot_anchor_mismatch_error,
+        snapshot_anchor_mismatches,
         user_factor_reference_gate_error,
-    )
-    from finboard_backtest.research_sandbox.factor_publish import (
-        sandbox_snapshot_dataset_release_ids,
     )
 
     # issue #234:screen 绑定实绑校验(REST+MCP 共用同一门控)—— 声明了
@@ -473,24 +472,17 @@ async def _build_queued_manifest(
             spec_checksum = stable_checksum(frozen_spec.canonical_payload())
             spec = frozen_spec
     release_ids = {release.release_id for release in releases}
-    for snapshot in snapshots:
-        # issue #217:沙箱快照(dataset_release_id=None)按其锚定 run 冻结的
-        # 发布集合校验 ⊆ 本次冻结清单。
-        sandbox_release_ids = await sandbox_snapshot_dataset_release_ids(
-            session, snapshot
+    # issue #217:#355 —— 快照锚定发布 ⊆ 本次冻结清单(数据一致性 fail-visible,
+    # 约束零放松);失配改为逐快照全量收集后一次性具名拒绝(名称 / 锚定发布 /
+    # 失配方向 + 两条修复路径),与 REST 路由共用同一收集与文案函数。
+    anchor_mismatches = await snapshot_anchor_mismatches(
+        session, snapshots=snapshots, requested_release_ids=release_ids
+    )
+    if anchor_mismatches:
+        raise McpToolError(
+            "invalid_argument",
+            snapshot_anchor_mismatch_error(anchor_mismatches),
         )
-        if sandbox_release_ids is None:
-            if snapshot.dataset_release_id not in release_ids:
-                raise McpToolError(
-                    "invalid_argument",
-                    f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中",
-                )
-        elif not sandbox_release_ids <= release_ids:
-            raise McpToolError(
-                "invalid_argument",
-                f"沙箱因子快照 {snapshot.snapshot_id} 锚定 run 的数据发布 "
-                f"{sorted(sandbox_release_ids - release_ids)} 不在本次冻结清单中",
-            )
 
     # issue #234:factor 通道 screen 运行的快照证据预检(与 REST 共用)——
     # 绑定的 draft 产物必须已有其 RCR 产出的快照进入 factor_snapshot_ids。
@@ -1014,6 +1006,12 @@ def register(mcp: MCPServer) -> None:
             "schema)。入队预检(#186):universe 候选池为空秒级 invalid_argument,"
             "错误附各过滤条件排除统计与缺失字段名。single_shot 缺冻结快照同样"
             "入队秒级拒绝(#203,报错附 execution_mode 与缺失因子源)。"
+            "快照锚定预检(#355):引用快照锚定的数据发布 ⊄ 本次 "
+            "dataset_release_ids(典型场景:更换 bars 主发布后未重算沙箱因子)"
+            "秒级 invalid_argument,具名 snapshot_anchor_mismatch,逐快照列出"
+            "因子名/锚定发布/缺失清单,修复路径二选一:把缺失发布一并加入 "
+            "dataset_release_ids,或 finboard_research_code_run 对新发布重算"
+            "(RCR → 质量门 → 新快照)后引用。"
             "组合可行性预检(#303):静态候选池 < ceil(1/生效 "
             "max_risk_contribution)秒级 invalid_argument(错误附排除统计、"
             "生效阈值与 portfolio_config.overrides 键位修复路径),"

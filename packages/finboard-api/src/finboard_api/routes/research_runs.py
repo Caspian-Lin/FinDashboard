@@ -34,6 +34,8 @@ from finboard_backtest.research_code import (
     freeze_user_code_commit,
     resolve_screen_bindings,
     screen_factor_snapshot_gate_error,
+    snapshot_anchor_mismatch_error,
+    snapshot_anchor_mismatches,
     user_code_reference_gate_error,
     user_factor_reference_gate_error,
 )
@@ -56,9 +58,6 @@ from finboard_backtest.research_run.contracts import JsonValue, stable_checksum
 from finboard_backtest.research_run.signal_engine import (
     multi_period_feature_gate_error,
     single_shot_snapshot_gate_error,
-)
-from finboard_backtest.research_sandbox.factor_publish import (
-    sandbox_snapshot_dataset_release_ids,
 )
 from finboard_backtest.strategy_spec import ResearchStrategySpec
 from finboard_backtest.strategy_spec.contracts import FeatureKind
@@ -221,28 +220,17 @@ async def queue_research_run(
             spec_checksum = stable_checksum(frozen_spec.canonical_payload())
             spec = frozen_spec
     release_ids = {release.release_id for release in releases}
-    for snapshot in snapshots:
-        # issue #217:沙箱快照(dataset_release_id=None)按其锚定 run 冻结
-        # 的发布集合校验 ⊆ 本次冻结清单(数据一致性 fail-visible)。
-        sandbox_release_ids = await sandbox_snapshot_dataset_release_ids(
-            session, snapshot
+    # issue #217:#355 —— 快照锚定发布 ⊆ 本次冻结清单(数据一致性 fail-visible,
+    # 约束零放松);失配改为逐快照全量收集后一次性具名拒绝(名称 / 锚定发布 /
+    # 失配方向 + 两条修复路径),不再逐次提交只暴露第一个失配。
+    anchor_mismatches = await snapshot_anchor_mismatches(
+        session, snapshots=snapshots, requested_release_ids=release_ids
+    )
+    if anchor_mismatches:
+        raise HTTPException(
+            status_code=422,
+            detail=snapshot_anchor_mismatch_error(anchor_mismatches),
         )
-        if sandbox_release_ids is None:
-            if snapshot.dataset_release_id not in release_ids:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中"
-                    ),
-                )
-        elif not sandbox_release_ids <= release_ids:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"沙箱因子快照 {snapshot.snapshot_id} 锚定 run 的数据发布 "
-                    f"{sorted(sandbox_release_ids - release_ids)} 不在本次冻结清单中"
-                ),
-            )
     # issue #234:factor 通道 screen 运行的快照证据预检 —— 绑定的 draft 产物
     # 必须已有其 RCR 产出的快照进入 factor_snapshot_ids,否则秒级拒绝
     # (没有证据的 screen run 完成后 promote 必失败,提前到入队暴露)。
