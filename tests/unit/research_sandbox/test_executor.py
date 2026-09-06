@@ -60,6 +60,7 @@ class TestParsePayload:
     def test_valid(self) -> None:
         payload = _parse_payload(_job(_VALID))
         assert payload.kind == "factor"
+        assert payload.decision_at is not None
         assert payload.decision_at.tzinfo is not None
 
     def test_missing_fields(self) -> None:
