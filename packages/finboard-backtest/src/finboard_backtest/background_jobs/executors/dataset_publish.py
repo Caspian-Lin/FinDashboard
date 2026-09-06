@@ -111,6 +111,9 @@ class DatasetPublishExecutor:
                 retryable=False,
                 context={"job_id": job.job_id},
             )
+        # #348:容忍路径的完成语只保留具名标记(不含 baseline id 与计数明细),
+        # ``dataset_publish:done symbol_set_mismatch`` 共 41 字符,旧列宽 64 内安全。
+        mismatch_suffix = ""
 
         from finboard_data import (
             DatasetReleaseError,
@@ -124,7 +127,6 @@ class DatasetPublishExecutor:
         source = _RELEASE_KIND_TO_SOURCE[release_kind]
 
         await progress(0, None, "dataset_publish:validating")
-        mismatch_summary = ""
         async with self._session_maker() as session:
             # #252:与基线发布的标的集 diff(在 scope 校验之前,失败不写任何数据)。
             if baseline_release_id is not None:
@@ -175,10 +177,7 @@ class DatasetPublishExecutor:
                     logger.warning(
                         "dataset_publish.symbol_set_mismatch", **mismatch_context
                     )
-                    mismatch_summary = (
-                        f" symbol_set_mismatch vs {baseline_release_id}:"
-                        f" -{len(missing_in_release)}/+{len(extra_in_release)}"
-                    )
+                    mismatch_suffix = " symbol_set_mismatch"
             rows = await session.execute(
                 select(InstrumentModel).where(InstrumentModel.code.in_(symbols))
             )
@@ -334,7 +333,14 @@ class DatasetPublishExecutor:
                     context={"job_id": job.job_id},
                 ) from exc
 
-        await progress(1, 1, f"dataset_publish:done{mismatch_summary}")
+        # issue #348:完成语收短为 ``dataset_publish:done[ symbol_set_mismatch]``
+        # —— 旧完成语拼上 mismatch 摘要(含 baseline release_id 与双向计数)
+        # 约 75-85 字符,可超旧列宽 64,收尾写 phase 触发
+        # StringDataRightTruncation。具名标记保留(任务时间线可见不一致发生,
+        # test_baseline_mismatch_warns_by_default 锁定),差集明细由上面的
+        # ``dataset_publish.symbol_set_mismatch`` 结构化 warning(mismatch_context
+        # 含基线 id / 双向计数 / 预览清单)承载,不丢信息。
+        await progress(1, 1, f"dataset_publish:done{mismatch_suffix}")
         return JobResult(status="succeeded", result_ref=release.release_id)
 
 

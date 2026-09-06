@@ -1730,7 +1730,9 @@ class BackgroundJobModel(Base, IdMixin):
     idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
     progress_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     progress_done: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    phase: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # phase 列宽 256(issue #348,迁移 d4e5f6a7b8c9):完成语级别短摘要,
+    # 写入路径另有同上限截断兜底(update_progress),防未来更长文案炸写库。
+    phase: Mapped[str | None] = mapped_column(String(256), nullable=True)
     result_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

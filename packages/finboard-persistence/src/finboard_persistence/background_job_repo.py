@@ -31,6 +31,15 @@ from finboard_shared.background_jobs import (
 #: 「临界区串行化」,堵住并发 claimer 双双通过计数检查的 TOCTOU 竞态。
 _CLAIM_ADVISORY_LOCK_KEY = 0x46696E44  # "FinD"
 
+#: phase 写入上限(issue #348):与 ``background_jobs.phase`` 列宽(迁移
+#: d4e5f6a7b8c9 加宽至 256)一致。超长完成语在收尾写 phase 时曾触发
+#: ``StringDataRightTruncation``,把实际已完成的任务误报 failed —— 列加宽
+#: 之外,``update_progress`` 写入前再按此上限硬截兜底,防未来更长的文案
+#: 复发。phase 是短标签,就地截断即可;error_summary 的保头保尾截断见
+#: ``finboard_backtest.background_jobs.contracts.truncate_summary``(#263,
+#: persistence 不反向依赖 backtest,故不共用)。
+_PHASE_MAX_LENGTH = 256
+
 
 class BackgroundJobPersistenceConflictError(RuntimeError):
     """数据库中的幂等内容或状态与请求冲突。"""
@@ -323,7 +332,9 @@ class BackgroundJobRepository:
             row.progress_done, done
         )
         if phase is not None:
-            row.phase = phase
+            # issue #348:超长 phase 截断兜底,宁截标签不炸写库(任务被误报
+            # failed 比丢一段展示文案严重得多)。
+            row.phase = phase[:_PHASE_MAX_LENGTH]
         row.heartbeat_at = datetime.now(UTC)
         row.updated_at = row.heartbeat_at
         await self._session.flush()
