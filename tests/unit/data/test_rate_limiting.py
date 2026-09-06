@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import patch
@@ -355,3 +356,85 @@ class TestFetchBatch:
         assert all(results.values())
         assert cache.maximum <= 3
         assert cache.full_reads == 0
+
+
+class TestUpdateCacheBatchErrorReport:
+    """逐标的失败摘要回调(#347):on_error 透出异常类型 + 截断消息。
+
+    返回值仍为 ``dict[code, bool]``;``False`` 且无异常路径(上游无新数据
+    且无既有缓存)上报文字原因,保持缺口可见而不仅进日志。
+    """
+
+    @staticmethod
+    def _collector(failures: dict[str, str]) -> Callable[[str, str], None]:
+        def _on_error(code: str, reason: str) -> None:
+            failures.setdefault(code, reason)
+
+        return _on_error
+
+    @pytest.mark.asyncio
+    async def test_on_error_reports_exception_type_and_message(self) -> None:
+        provider = AkShareProvider(use_cache=False, max_concurrency=2)
+        failures: dict[str, str] = {}
+
+        def mock_fetch_sync(symbol: Symbol, *_args: object, **_kw: object) -> object:
+            if symbol.code == "000002.SZ":
+                raise ConnectionError("ProxyError: 上游断连(mock)")
+            return [_make_bar(symbol, 0)]
+
+        with patch.object(provider, "_fetch_sync", side_effect=mock_fetch_sync):
+            results = await provider.update_cache_batch(
+                [
+                    SYMBOL_A,
+                    Symbol(code="000002.SZ", market=Market.A_SHARE),
+                ],
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 31),
+                on_error=self._collector(failures),
+            )
+
+        assert results["000002.SZ"] is False
+        assert results["510300.SH"] is True
+        assert failures["000002.SZ"].startswith("ConnectionError")
+        assert "ProxyError" in failures["000002.SZ"]
+
+    @pytest.mark.asyncio
+    async def test_on_error_reports_false_without_exception(self) -> None:
+        provider = AkShareProvider(use_cache=False, max_concurrency=2)
+        failures: dict[str, str] = {}
+
+        with patch.object(provider, "_fetch_sync", side_effect=lambda *a, **k: []):
+            results = await provider.update_cache_batch(
+                [SYMBOL_A],
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 31),
+                on_error=self._collector(failures),
+            )
+
+        assert results["510300.SH"] is False
+        assert "update_cache 返回 False" in failures["510300.SH"]
+
+    @pytest.mark.asyncio
+    async def test_without_on_error_still_returns_bool_map(self) -> None:
+        """缺省不传 on_error:既有调用方行为零变化。"""
+        provider = AkShareProvider(use_cache=False, max_concurrency=2)
+
+        def mock_fetch_sync(symbol: Symbol, *_args: object, **_kw: object) -> object:
+            if symbol.code == "000002.SZ":
+                raise ConnectionError("boom")
+            return [_make_bar(symbol, 0)]
+
+        with patch.object(provider, "_fetch_sync", side_effect=mock_fetch_sync):
+            results = await provider.update_cache_batch(
+                [
+                    SYMBOL_A,
+                    Symbol(code="000002.SZ", market=Market.A_SHARE),
+                ],
+                BarPeriod.D1,
+                date(2024, 1, 1),
+                date(2024, 1, 31),
+            )
+
+        assert results == {"510300.SH": True, "000002.SZ": False}

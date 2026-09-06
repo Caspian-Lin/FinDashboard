@@ -93,6 +93,19 @@ function ReleaseDetailTabs({ detail }: { detail: DatasetReleaseDetail }) {
   );
 }
 
+/**
+ * 质量报告的值形态混杂:嵌套对象(coverage / source_by_instrument 等)直接
+ * String() 会渲染成 "[object Object]";统一转紧凑 JSON,超长文本(逐标的
+ * warnings 串等)截断保持网格可读,全量数据走导出/接口。
+ */
+function formatQualityValue(value: unknown): string {
+  const text =
+    value !== null && typeof value === "object"
+      ? JSON.stringify(value)
+      : String(value);
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
 function ReleaseOverview({ detail }: { detail: DatasetReleaseDetail }) {
   const { tl } = useT();
   const qualityReport = detail.quality_report ?? {};
@@ -241,7 +254,7 @@ function ReleaseOverview({ detail }: { detail: DatasetReleaseDetail }) {
           <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground md:grid-cols-3">
             {qualityEntries.map(([key, value]) => (
               <p key={key} className="break-all">
-                <span className="font-mono">{key}</span>: {String(value)}
+                <span className="font-mono">{key}</span>: {formatQualityValue(value)}
               </p>
             ))}
           </div>

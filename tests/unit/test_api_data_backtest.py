@@ -419,6 +419,120 @@ class TestDataRoutes:
         mock_save.assert_called_once()
 
 
+class TestBulkDownloadEnqueueContract:
+    """bulk_download 语义化端点的入队期契约(#347,#260 风格)。
+
+    校验发生在 enqueue 之前,非法参数秒级 422,不触碰数据库;
+    合法请求透传 symbols 子集并落 payload / 幂等键。
+    """
+
+    def _post(self, client: TestClient, app: FastAPI, json: dict[str, Any]) -> Any:
+        from finboard_api.deps import get_db_session
+
+        app.dependency_overrides[get_db_session] = lambda: AsyncMock()
+        try:
+            return client.post("/api/data/bulk-download", json=json)
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_unknown_source_rejected_422(
+        self, client: TestClient, app: FastAPI
+    ) -> None:
+        resp = self._post(
+            client, app, {"market": "a_share", "source": "wind", "start": "2024-01-01"}
+        )
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert "invalid_field_value" in detail
+        assert "wind" in detail
+
+    def test_bad_start_date_rejected_422(
+        self, client: TestClient, app: FastAPI
+    ) -> None:
+        resp = self._post(
+            client, app, {"market": "a_share", "source": "akshare", "start": "2024/01/01"}
+        )
+        assert resp.status_code == 422
+        assert "invalid_field_value" in resp.json()["detail"]
+
+    def test_tushare_etf_rejected_422(self, client: TestClient, app: FastAPI) -> None:
+        """tushare x etf 字面量预检入队即拒(执行器 DB 行 scope 校验保留)。"""
+        resp = self._post(
+            client,
+            app,
+            {
+                "market": "a_share",
+                "source": "tushare",
+                "start": "2024-01-01",
+                "instrument_type": "etf",
+            },
+        )
+        assert resp.status_code == 422
+        assert "tushare_scope_mismatch" in resp.json()["detail"]
+
+    def test_symbols_subset_passthrough(
+        self, client: TestClient, app: FastAPI
+    ) -> None:
+        """symbols 子集(#347)落 payload + 幂等键带摘要。"""
+        import hashlib
+
+        from finboard_api.deps import get_db_session
+
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTSUB1",
+            kind="bulk_download",
+            queue="data",
+            status="queued",
+            priority=0,
+            payload={},
+            payload_checksum="x" * 64,
+            idempotency_key="bulk_download:test",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:bulk_download",
+            created_at=datetime(2026, 9, 6, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 9, 6, tzinfo=UTC),
+        )
+        app.dependency_overrides[get_db_session] = lambda: AsyncMock()
+        symbols = ["000001.SZ", "600000.SH", "000001.SZ"]
+        digest = hashlib.sha256(
+            ",".join(dict.fromkeys(symbols)).encode("utf-8")
+        ).hexdigest()[:16]
+        try:
+            with patch(
+                "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+                new=AsyncMock(return_value=(fake_row, True)),
+            ) as create:
+                resp = client.post(
+                    "/api/data/bulk-download",
+                    json={
+                        "market": "a_share",
+                        "source": "akshare",
+                        "start": "2024-01-01",
+                        "symbols": symbols,
+                    },
+                )
+        finally:
+            app.dependency_overrides.clear()
+        assert resp.status_code == 202
+        assert create.await_args is not None
+        payload = create.await_args.kwargs["payload"]
+        assert payload["symbols"] == ["000001.SZ", "600000.SH"]  # 去重保序
+        idem = create.await_args.kwargs["idempotency_key"]
+        assert idem == f"bulk_download:a_share:akshare:2024-01-01:all:sub:{digest}"
+
+
 class TestBacktestRoutes:
     """Backtest 路由测试。"""
 

@@ -190,6 +190,37 @@ class DatasetReleaseQualityError(DatasetReleaseError):
     """发布内容没有通过质量门。"""
 
 
+class _FreezeCacheGateError(DatasetReleaseQualityError):
+    """bars 冻结阶段的逐标的缓存工件错误(仅内部聚合用,issue #345)。
+
+    只覆盖 ``source_artifact_missing`` / ``source_read_failed`` 两类逐标的
+    失败,供冻结循环结束后聚合报告全部缺失标的;其余冻结错误(区间无
+    数据 / 来源不匹配 / 发布期间缓存变更等)不进聚合,保持首个异常原样
+    上抛。对外仍是 :class:`DatasetReleaseQualityError`,行为不变。
+    """
+
+
+def _aggregate_cache_gate_errors(
+    first_error: BaseException,
+    outcomes: list[ReleasedInstrument | BaseException],
+) -> BaseException:
+    """聚合缓存工件门错误为一条列出全部标的的错误(issue #345)。
+
+    仅当首个异常本身是缓存工件门错误且同类失败不止一只时,才替换为
+    聚合错误(``__cause__`` 保留首个异常);单只失败 / 首个异常属其他
+    冻结阶段 / 外部取消等场景原样返回首个异常,既有语义零变化。
+    """
+    gate_errors = [item for item in outcomes if isinstance(item, _FreezeCacheGateError)]
+    if len(gate_errors) < 2 or not any(item is first_error for item in gate_errors):
+        return first_error
+    aggregated = DatasetReleaseQualityError(
+        f"以下 {len(gate_errors)} 个标的缓存工件缺失或读取失败,禁止发布: "
+        + "; ".join(str(item) for item in gate_errors)
+    )
+    aggregated.__cause__ = first_error
+    return aggregated
+
+
 class ImmutableReleaseError(DatasetReleaseError):
     """尝试以不同规格覆盖已经冻结的发布。"""
 
@@ -1379,14 +1410,20 @@ class FrozenDatasetReleaseBuilder:
             ]
             try:
                 released_unordered = await asyncio.gather(*freeze_tasks)
-            except BaseException:
+            except BaseException as first_error:
                 # gather 传播首个异常即返回但不取消兄弟任务:仍有一位冻结任务
                 # 在写暂存区。失败清理(rmtree)必须等它们落地,否则与 writer
                 # 赛跑会在 release_root 留下残缺 staging 目录(Linux CI 上
                 # test_failed_release_preserves_previous_and_cleans_staging 的
                 # 间歇失败根因)。
-                await asyncio.gather(*freeze_tasks, return_exceptions=True)
-                raise
+                outcomes = await asyncio.gather(*freeze_tasks, return_exceptions=True)
+                # issue #345:缓存工件门(source_artifact_missing /
+                # source_read_failed)聚合报告全部缺失标的,不再「修一个换
+                # 一个」;其余冻结错误保持首个异常原样上抛。
+                to_raise = _aggregate_cache_gate_errors(first_error, outcomes)
+                if to_raise is first_error:
+                    raise
+                raise to_raise from first_error
             released = sorted(released_unordered, key=lambda item: item.code)
 
             capabilities = _build_capabilities(released, spec.required_capabilities)
@@ -1899,7 +1936,7 @@ class FrozenDatasetReleaseBuilder:
                 spec.adjustment,
             )
             if not source_path.exists() or source_path.is_symlink():
-                raise DatasetReleaseQualityError(f"{instrument.code}:source_artifact_missing")
+                raise _FreezeCacheGateError(f"{instrument.code}:source_artifact_missing")
             before = source_path.stat()
             try:
                 bars = await source_cache.read(
@@ -1908,7 +1945,7 @@ class FrozenDatasetReleaseBuilder:
                     spec.adjustment,
                 )
             except Exception as exc:
-                raise DatasetReleaseQualityError(
+                raise _FreezeCacheGateError(
                     f"{instrument.code}:source_read_failed:{type(exc).__name__}"
                 ) from exc
             # 读取缓存元数据(包含已查询过的合法无 Bar 区间,如停牌/上市前)。

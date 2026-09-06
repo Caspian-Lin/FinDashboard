@@ -227,6 +227,10 @@ class ReleaseInstrumentCatalogRepository:
 
         result: list[ReleaseInstrumentSpec] = []
         missing: list[str] = []
+        # ETF 分类元数据门(issue #345):单只 ETF 缺元数据 / 待复核不再
+        # 「首错即拒」,逐标的收集失败原因,循环结束后与 missing 一起一次性
+        # 聚合抛出,让操作者一次拿到完整缺口清单。
+        etf_failures: list[str] = []
         for code in normalized:
             row = instrument_rows.get(code)
             future = futures_rows.get(code)
@@ -251,15 +255,19 @@ class ReleaseInstrumentCatalogRepository:
             instrument_type = InstrumentType(row.instrument_type)
             if instrument_type is InstrumentType.ETF:
                 bare = code.split(".", 1)[0] if "." in code else code
-                result.append(
-                    _etf_candidate(
-                        row,
-                        etf_rows.get(code) or etf_rows.get(bare),
-                        profile=profiles.get(code),
-                        lifecycle_events=events.get(code, ()),
-                        name_history=names.get(code, ()),
+                try:
+                    result.append(
+                        _etf_candidate(
+                            row,
+                            etf_rows.get(code) or etf_rows.get(bare),
+                            profile=profiles.get(code),
+                            lifecycle_events=events.get(code, ()),
+                            name_history=names.get(code, ()),
+                        )
                     )
-                )
+                except ReleaseCapabilityError as exc:
+                    etf_failures.append(str(exc))
+                    continue
             elif instrument_type is InstrumentType.CONVERTIBLE:
                 lifecycle_events = events.get(code, ())
                 result.append(
@@ -288,10 +296,18 @@ class ReleaseInstrumentCatalogRepository:
                         name_history=names.get(code, ()),
                     )
                 )
-        if missing:
-            raise ReleaseCapabilityError(
-                f"以下标的缺少 #35/#58 元数据,禁止猜测: {','.join(missing)}"
-            )
+        if missing or etf_failures:
+            parts = []
+            if missing:
+                parts.append(
+                    f"以下标的缺少 #35/#58 元数据,禁止猜测: {','.join(missing)}"
+                )
+            if etf_failures:
+                parts.append(
+                    f"以下 {len(etf_failures)} 个标的发布元数据缺失/待复核,"
+                    "禁止猜测: " + "; ".join(etf_failures)
+                )
+            raise ReleaseCapabilityError("; ".join(parts))
         return result
 
     async def _instrument_map(self, symbols: list[str]) -> dict[str, InstrumentModel]:
