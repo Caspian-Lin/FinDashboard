@@ -1801,14 +1801,33 @@ async def _snapshot_decision_days(
     manifest: ResearchRunManifest,
     snapshot_provider: FeatureSnapshotProvider,
 ) -> list[tuple[datetime, str | None]]:
-    """按冻结因子快照的 ``decision_at`` 推导单时点决策序列(排序去重)。"""
-    decision_days: list[tuple[datetime, str | None]] = []
+    """按冻结因子快照的 ``decision_at`` 推导单时点决策序列。
+
+    issue #356:**按业务日期去重**(``decision_at.date()``,与
+    ``LoadedDecisionContext.business_date`` 同口径)。此前按
+    ``(decision_at, snapshot_id)`` 元组去重,同一业务日期冻结多个快照
+    (不同 snapshot_id,甚至同日不同时点)时逐个展开成多条重复决策 ——
+    同一日期的同一决策被重复加载 / 执行 / 落库(实测 x4)。
+
+    去重不改变决策输入:特征按**全部**冻结快照 PIT 合并(``_load_features``
+    不绑定单一快照),决策价与成交日只取决于业务日期(``_next_execution_at``
+    读 ``decision_at.date()``),同日重复决策的输入完全一致 —— 重复执行只是
+    把同一组合构建(同一约束投影 / 同一再平衡解)重做多次;费用 / 手数取整
+    下重复执行还可能产生有界矫正单,同属应消除的浪费。每个业务日期保留
+    ``decision_at`` 最晚的代表项(并列取 snapshot_id 最大;排序遍历后者覆盖,
+    顺序确定)—— 晚时点的 PIT 可见性是同日早时点的超集,与去重前「当日
+    最后一个决策收敛出最终组合状态」的语义一致。
+    """
+    entries: list[tuple[datetime, str | None]] = []
     for ref in manifest.factor_snapshots:
         snapshot = await snapshot_provider(ref.artifact_id)
         if snapshot is None:
             raise ValueError(f"因子快照缺失: {ref.artifact_id}")
-        decision_days.append((snapshot.decision_at, snapshot.snapshot_id))
-    return sorted(set(decision_days))
+        entries.append((snapshot.decision_at, snapshot.snapshot_id))
+    deduped: dict[date, tuple[datetime, str | None]] = {}
+    for decision_at, snapshot_id in sorted(entries):
+        deduped[decision_at.date()] = (decision_at, snapshot_id)
+    return sorted(deduped.values())
 
 
 class SignalEnginePipelineAdapter:
