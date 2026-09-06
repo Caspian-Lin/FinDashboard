@@ -157,6 +157,9 @@ _EXPECTED_TOOLS = {
     # #216 研究代码沙箱执行工具(1 只读 + 1 写;一次性 Docker 容器)
     "finboard_research_code_run",
     "finboard_research_code_run_get",
+    # #360 因子序列工件工具(1 只读 + 1 写;内容寻址缓存 + 托管重建)
+    "finboard_factor_series_get",
+    "finboard_factor_series_build",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。
