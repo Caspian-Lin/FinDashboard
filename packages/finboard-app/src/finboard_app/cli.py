@@ -989,6 +989,7 @@ async def _run_worker(settings: Settings) -> None:
         DatasetPublishExecutor,
         DataSyncExecutor,
         EchoExecutor,
+        FactorSeriesBuildExecutor,
         FeatureSnapshotExecutor,
         QualityRepairExecutor,
         ResearchCodeRunExecutor,
@@ -1102,6 +1103,15 @@ async def _run_worker(settings: Settings) -> None:
             settings_factory=settings_factory,
         ),
     )
+    # issue #360:内容寻址因子序列构建(单并发,复用 research_code_run 的
+    # 沙箱容器槽位约定;容器执行本体由 #359 runner 提供,缓存命中不启动容器)。
+    registry.register(
+        "factor_series_build",
+        FactorSeriesBuildExecutor(
+            session_maker=components.session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
     # issue #233:#57 验证实验执行(walk-forward + 一次性揭盲)。runner 工厂
     # 按实验 selection_config 声明构建注册表策略回测;单并发 —— 揭盲是一次性
     # 门,并发重入只会重复消耗试验预算。
@@ -1138,6 +1148,8 @@ async def _run_worker(settings: Settings) -> None:
         # 数据源压力敏感的 kind 限制为单并发;dataset_publish / backtest_run 不限。
         # issue #216:research_code_run 单并发(沙箱容器本机资源受限,
         # 多容器并发只会互相挤占内存限额)。
+        # issue #360:factor_series_build 单并发(复用 research_code_run 的
+        # 沙箱容器槽位约定)。
         # issue #233:validation_experiment 单并发(揭盲一次性门,并发重入
         # 只会重复消耗试验预算)。
         kind_concurrency={
@@ -1148,6 +1160,7 @@ async def _run_worker(settings: Settings) -> None:
             "quality_repair": 1,
             "research_data_sync": 1,
             "research_code_run": 1,
+            "factor_series_build": 1,
             "validation_experiment": 1,
         },
     )
