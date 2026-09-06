@@ -52,6 +52,16 @@ class _PITBar:
     close: float
     day: date
     code: str
+    # issue #359:窗口挂载(v3)读取逐行 available_at;缺省按 D1 语义
+    # 派生为业务日 15:30 UTC(FrozenReleaseProvider 的确定性规则)。
+    available_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.available_at is None:
+            self.available_at = datetime(
+                self.day.year, self.day.month, self.day.day, 15, 30,
+                tzinfo=UTC,
+            )
 
     @property
     def bar(self) -> _Bar:
@@ -80,6 +90,8 @@ class _DailyRecord:
     symbol: str
     trade_date: date
     pb: Decimal | None = None
+    # issue #359:窗口挂载(v3)读取逐行 available_at
+    available_at: datetime | None = None
 
 
 @dataclass
@@ -90,6 +102,8 @@ class _FinRecord:
     announcement_date: date
     report_period: date
     eps: Decimal | None = None
+    # issue #359:窗口挂载(v3)读取逐行 available_at
+    available_at: datetime | None = None
 
 
 @dataclass

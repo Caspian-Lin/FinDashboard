@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from finboard_data.factor_lab import (
@@ -149,6 +149,120 @@ def check_output_quality(
     )
 
 
+@dataclass(frozen=True)
+class SeriesQualityReport:
+    """区间输出(factor_series)质量门评估(issue #359,逐日截面口径)。
+
+    聚合口径:nan_ratio / coverage 在「决策日 x 候选标的」全部格子上
+    计算(None / NaN / inf 均计非有限值);``worst_day_nan_ratio`` 为逐日
+    截面 nan_ratio 的最大值(定位最差决策日,修复因子用)。
+    """
+
+    passed: bool
+    n_dates: int
+    universe_size: int
+    nan_ratio: float
+    coverage: float
+    worst_day: date | None
+    worst_day_nan_ratio: float
+    max_nan_ratio: float
+    min_coverage: float
+    failures: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "n_dates": self.n_dates,
+            "universe_size": self.universe_size,
+            "nan_ratio": self.nan_ratio,
+            "coverage": self.coverage,
+            "worst_day": self.worst_day.isoformat() if self.worst_day else None,
+            "worst_day_nan_ratio": self.worst_day_nan_ratio,
+            "thresholds": {
+                "max_nan_ratio": self.max_nan_ratio,
+                "min_coverage": self.min_coverage,
+            },
+            "failures": list(self.failures),
+        }
+
+
+def check_series_quality(
+    values: Mapping[date, Mapping[str, float | None]],
+    *,
+    dates: Sequence[date],
+    universe: Sequence[str],
+    max_nan_ratio: float,
+    min_coverage: float,
+) -> SeriesQualityReport:
+    """区间输出质量门(纯函数;阈值复用 ``research_sandbox_*`` 设置)。
+
+    逐日截面口径:每日截面按 ``{symbol: float | None}`` 评估 ——
+    ``None`` / 非有限值均计缺测;聚合成整窗 nan_ratio / coverage 后按
+    阈值判定,另报最差决策日的 nan_ratio(排查锚点)。空截面(没有任何
+    打分格子)直接拒绝。
+    """
+    n_days = len(dates)
+    n_universe = len(universe)
+    n_cells = n_days * n_universe
+    n_scored = 0
+    n_finite = 0
+    worst_day: date | None = None
+    worst_day_nan_ratio = 0.0
+    for day in dates:
+        cross = values.get(day, {})
+        day_scored = 0
+        day_finite = 0
+        for symbol in universe:
+            value = cross.get(symbol)
+            if value is None:
+                continue
+            day_scored += 1
+            if math.isfinite(value):
+                day_finite += 1
+        n_scored += day_scored
+        n_finite += day_finite
+        day_nan_ratio = (
+            1.0 - (day_finite / day_scored) if day_scored else 1.0
+        )
+        if day_nan_ratio > worst_day_nan_ratio:
+            worst_day_nan_ratio = day_nan_ratio
+            worst_day = day
+    nan_ratio = 1.0 - (n_finite / n_scored) if n_scored else 1.0
+    coverage = n_finite / n_cells if n_cells else 0.0
+    failures: list[str] = []
+    if n_scored == 0:
+        failures.append(
+            "区间输出为空(全部决策日均无任何打分格子),拒绝"
+        )
+    if n_scored and nan_ratio > max_nan_ratio:
+        failures.append(
+            f"整窗 NaN 比例 {nan_ratio:.4f} 超过上限 max_nan_ratio="
+            f"{max_nan_ratio}({n_scored - n_finite}/{n_scored} 个非有限值)"
+        )
+    if n_scored and worst_day_nan_ratio > max_nan_ratio:
+        failures.append(
+            f"最差决策日 {worst_day} NaN 比例 {worst_day_nan_ratio:.4f} "
+            f"超过上限 max_nan_ratio={max_nan_ratio}"
+        )
+    if coverage < min_coverage:
+        failures.append(
+            f"覆盖率 {coverage:.4f} 低于下限 min_coverage={min_coverage}"
+            f"({n_finite}/{n_cells} 个有限值格子)"
+        )
+    return SeriesQualityReport(
+        passed=not failures,
+        n_dates=n_days,
+        universe_size=n_universe,
+        nan_ratio=nan_ratio,
+        coverage=coverage,
+        worst_day=worst_day,
+        worst_day_nan_ratio=worst_day_nan_ratio,
+        max_nan_ratio=max_nan_ratio,
+        min_coverage=min_coverage,
+        failures=tuple(failures),
+    )
+
+
 def build_factor_snapshot(
     *,
     factor_artifact_name: str,
@@ -231,7 +345,9 @@ __all__ = [
     "QUALITY_GATE_FAILED",
     "QualityGateError",
     "QualityGateReport",
+    "SeriesQualityReport",
     "build_factor_snapshot",
     "check_output_quality",
+    "check_series_quality",
     "sandbox_snapshot_dataset_release_ids",
 ]
