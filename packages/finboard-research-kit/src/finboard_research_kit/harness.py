@@ -1,16 +1,23 @@
-"""沙箱 harness —— 容器内的执行入口(issue #216;#218 增 strategy 模式)。
+"""沙箱 harness —— 容器内的执行入口(issue #216;#218 增 strategy 模式;
+#359 增 factor_series 区间模式)。
 
 ``python -m finboard_research_kit.harness`` 由服务端 ``ResearchSandboxRunner``
 作为容器 command 启动,职责:
 
 1. 读 ``/data/mount_manifest.json``(服务端 data_mount 写出的挂载清单)与
-   各 parquet,按 ``--mode`` 装配 :class:`FactorContext` 或
-   :class:`StrategyContext`(PIT 由挂载内容物理保证);
+   各 parquet,按 ``--mode`` 装配 :class:`FactorContext` /
+   :class:`StrategyContext` / :class:`FactorSeriesContext`(v1 单日两模式的
+   PIT 由挂载内容物理保证;v2 区间模式的挂载覆盖整个窗口,逐日 PIT 由
+   ``bars_view`` / ``dataset_view`` 访问器契约承担);
 2. 读 ``/code/manifest.toml`` 的 ``manifest.entry``(``factor.compute`` /
-   ``strategy.decide``),按文件路径导入入口模块并调用入口函数;
+   ``factor.compute_series`` / ``strategy.decide``),按文件路径导入入口
+   模块并调用入口函数;factor_series 模式下 manifest 声明
+   ``factor.compute_series`` 优先,缺失时回退 ``factor.compute``(v1 因子
+   逐日重放,双轨);
 3. 规范化输出(见 ``result``):factor 模式写 ``/out/scores.parquet``,
-   strategy 模式写 ``/out/targets.parquet``;两者都写
-   ``/out/metrics.json``(耗时 / kit_version / 模式专属指标)。
+   strategy 模式写 ``/out/targets.parquet``,factor_series 模式写
+   ``/out/factor_series.json``(canonical JSON,结构钉死供下游存储消费);
+   三者都写 ``/out/metrics.json``(耗时 / kit_version / 模式专属指标)。
 
 退出码协议(服务端按此分类失败):
 
@@ -28,10 +35,11 @@ import argparse
 import contextlib
 import importlib.util
 import json
+import math
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -39,12 +47,21 @@ from typing import Any
 import pandas as pd
 
 from finboard_research_kit import __version__
-from finboard_research_kit.context import FactorContext, StrategyConstraints, StrategyContext
+from finboard_research_kit.context import (
+    FactorContext,
+    FactorSeriesContext,
+    StrategyConstraints,
+    StrategyContext,
+    end_of_day,
+)
 from finboard_research_kit.result import (
+    FactorSeries,
     OutputContractError,
     normalize_result,
+    normalize_series_result,
     normalize_strategy_result,
     result_metrics,
+    series_metrics,
     strategy_metrics,
 )
 
@@ -54,12 +71,17 @@ EXIT_RUNTIME = 4
 
 MODE_FACTOR = "factor"
 MODE_STRATEGY = "strategy"
+MODE_FACTOR_SERIES = "factor_series"
 
 _MOUNT_MANIFEST = "mount_manifest.json"
 _SCORES = "scores.parquet"
 _TARGETS = "targets.parquet"
+_FACTOR_SERIES = "factor_series.json"
 _METRICS = "metrics.json"
 _ERROR = "error.json"
+
+#: 协议 v2 的 canonical JSON 版本(issue #359 钉死供下游存储消费)
+PROTOCOL_VERSION = 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,9 +91,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", default="/out")
     parser.add_argument(
         "--mode",
-        choices=(MODE_FACTOR, MODE_STRATEGY),
+        choices=(MODE_FACTOR, MODE_STRATEGY, MODE_FACTOR_SERIES),
         default=MODE_FACTOR,
-        help="执行协议:factor.compute(scores)/ strategy.decide(targets)",
+        help=(
+            "执行协议:factor.compute(scores)/ strategy.decide(targets)/ "
+            "factor.compute_series(区间序列,挂载清单 v3)"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -85,6 +110,14 @@ def main(argv: list[str] | None = None) -> int:
         entry = _read_entry(code_dir)
         if args.mode == MODE_STRATEGY:
             return _run_strategy(
+                code_dir=code_dir,
+                data_dir=data_dir,
+                out_dir=out_dir,
+                entry=entry,
+                started=started,
+            )
+        if args.mode == MODE_FACTOR_SERIES:
+            return _run_factor_series(
                 code_dir=code_dir,
                 data_dir=data_dir,
                 out_dir=out_dir,
@@ -148,6 +181,180 @@ def _run_strategy(
         encoding="utf-8",
     )
     return EXIT_OK
+
+
+def _run_factor_series(
+    *,
+    code_dir: Path,
+    data_dir: Path,
+    out_dir: Path,
+    entry: str,
+    started: float,
+) -> int:
+    """factor.compute_series(ctx) → factor_series.json(协议 v2,issue #359)。
+
+    入口解析:manifest 声明 ``factor.compute_series`` 优先;缺失回退
+    ``factor.compute``(v1 因子逐日重放 —— 每个决策日构造单日 FactorContext
+    调用一次 compute,汇成序列,双轨完整保留)。
+    """
+    manifest = _read_mount_manifest(data_dir)
+    ctx = build_series_context(
+        code_dir=code_dir, data_dir=data_dir, manifest=manifest
+    )
+    if entry.endswith(".compute_series"):
+        raw = _invoke(code_dir=code_dir, entry=entry, ctx=ctx)
+        series = normalize_series_result(
+            raw, expected_dates=ctx.dates, universe=ctx.symbols
+        )
+        entry_used = entry
+    elif entry.endswith(".compute"):
+        series = _invoke_v1_per_day(code_dir=code_dir, entry=entry, ctx=ctx)
+        entry_used = f"{entry}(v1 逐日回退)"
+    else:
+        raise OutputContractError(
+            f"factor_series 模式的 manifest.entry 须为 factor.compute_series "
+            f"或 factor.compute,收到 {entry!r}"
+        )
+    metrics = {
+        **series_metrics(series, universe=ctx.symbols),
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "entry": entry,
+        "entry_used": entry_used,
+        "kit_version": __version__,
+        "mode": MODE_FACTOR_SERIES,
+        "protocol_version": PROTOCOL_VERSION,
+    }
+    payload = _series_payload(manifest=manifest, series=series, ctx=ctx)
+    (out_dir / _FACTOR_SERIES).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
+    (out_dir / _METRICS).write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
+    return EXIT_OK
+
+
+def _invoke_v1_per_day(
+    *, code_dir: Path, entry: str, ctx: FactorSeriesContext
+) -> FactorSeries:
+    """v1 回退:逐决策日构造单日 FactorContext 调用 ``compute``。
+
+    每日数据面 = 该日的 PIT 视图(``available_at <= t`` 日终),与 v1 单日
+    容器的挂载内容逐值等值 —— v1 因子不改一行代码即可产序列。
+    """
+    values: dict[date, dict[str, float | None]] = {}
+    for day in ctx.dates:
+        day_ctx = FactorContext(
+            decision_at=end_of_day(day),
+            symbols=ctx.symbols,
+            bars=ctx.bars_view(day).frame,
+            daily_metrics=ctx.dataset_view("daily_metrics", day).frame,
+            financial_indicators=ctx.dataset_view(
+                "financial_indicators", day
+            ).frame,
+            params=ctx.params,
+        )
+        raw = _invoke(code_dir=code_dir, entry=entry, ctx=day_ctx)
+        normalized = normalize_result(raw)
+        _check_universe(normalized, ctx.symbols)
+        values[day] = {
+            str(symbol): float(value) if pd.notna(value) else None
+            for symbol, value in normalized.items()
+        }
+    return normalize_series_result(
+        values, expected_dates=ctx.dates, universe=ctx.symbols
+    )
+
+
+def _read_mount_manifest(data_dir: Path) -> dict[str, Any]:
+    manifest: dict[str, Any] = json.loads(
+        (data_dir / _MOUNT_MANIFEST).read_text(encoding="utf-8")
+    )
+    if int(manifest.get("version", 0)) < 3:
+        raise OutputContractError(
+            "factor_series 模式要求挂载清单 v3(窗口语义),"
+            f"收到 version={manifest.get('version')!r}"
+        )
+    return manifest
+
+
+def build_series_context(
+    *, code_dir: Path, data_dir: Path, manifest: dict[str, Any]
+) -> FactorSeriesContext:
+    """从挂载清单 v3 + parquet 装配 :class:`FactorSeriesContext`。"""
+    window = manifest.get("window") or {}
+    dates = tuple(
+        date.fromisoformat(str(d)) for d in window.get("dates", ())
+    )
+    if not dates:
+        raise OutputContractError(
+            "挂载清单 v3 缺少 window.dates(窗口内决策日序列)"
+        )
+    bars = _read_frame(data_dir / "bars.parquet")
+    if bars is None:
+        raise OutputContractError("挂载缺少 bars.parquet(数据面不完整)")
+    daily = _read_frame(data_dir / "daily_metrics.parquet")
+    fin = _read_frame(data_dir / "financial_indicators.parquet")
+    params = _merge_params(code_dir, manifest)
+    return FactorSeriesContext(
+        dates=dates,
+        symbols=tuple(manifest.get("symbols", ())),
+        bars=bars,
+        daily_metrics=daily,
+        financial_indicators=fin,
+        params=params,
+    )
+
+
+def _series_payload(
+    *,
+    manifest: dict[str, Any],
+    series: FactorSeries,
+    ctx: FactorSeriesContext,
+) -> dict[str, Any]:
+    """canonical ``factor_series.json``(结构钉死供下游存储消费)。
+
+    非有限值(NaN/inf)序列化为 null —— canonical JSON 保持严格 JSON
+    语法,缺测语义由 null 承担(质量门按非有限口径计数)。
+    """
+    window = manifest.get("window") or {}
+
+    def cross(day: date) -> dict[str, float | None]:
+        return {
+            symbol: (
+                value
+                if value is not None and math.isfinite(value)
+                else None
+            )
+            for symbol, value in sorted(series.values.get(day, {}).items())
+        }
+
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "code_artifact": str(manifest.get("code_artifact", "")),
+        "code_commit": str(manifest.get("code_commit", "")),
+        "kind": "factor",
+        "release_id": str(manifest.get("release_id", "")),
+        "dataset_release_ids": [
+            str(rid) for rid in manifest.get("dataset_release_ids", ())
+        ],
+        "params": dict(ctx.params),
+        "window_start": str(window.get("window_start", "")),
+        "window_end": str(window.get("window_end", "")),
+        "dates": [d.isoformat() for d in series.dates],
+        "values": {d.isoformat(): cross(d) for d in series.dates},
+    }
+
+
+def _json_default(value: Any) -> Any:
+    """metrics 序列化兜错:date/datetime/Decimal 等转可读字符串。"""
+    if isinstance(value, date | datetime):
+        return value.isoformat()
+    if isinstance(value, MappingProxyType):
+        return dict(value)
+    return str(value)
 
 
 def build_context(*, code_dir: Path, data_dir: Path) -> FactorContext:
@@ -250,7 +457,12 @@ def _read_entry(code_dir: Path) -> str:
     return entry
 
 
-def _invoke(*, code_dir: Path, entry: str, ctx: FactorContext | StrategyContext) -> Any:
+def _invoke(
+    *,
+    code_dir: Path,
+    entry: str,
+    ctx: FactorContext | StrategyContext | FactorSeriesContext,
+) -> Any:
     """按文件路径加载入口模块并调用入口函数。
 
     不走 ``sys.path`` + ``importlib.import_module``:同进程多次运行时

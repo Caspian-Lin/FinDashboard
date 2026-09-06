@@ -871,7 +871,7 @@ requires-dist = [
 
 [[package]]
 name = "finboard-research-kit"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/finboard-research-kit" }
 dependencies = [
     { name = "numpy" },

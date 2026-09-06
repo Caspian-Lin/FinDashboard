@@ -1,4 +1,4 @@
-"""因子执行协议 v1 —— 输出契约(issue #216)。
+"""因子执行协议 —— 输出契约(issue #216;#359 增区间协议 v2)。
 
 ``factor.compute(ctx)`` 的返回值经 :func:`normalize_result` 收敛为规范形态:
 ``symbol -> float`` 的截面打分。允许的原始返回:
@@ -10,15 +10,28 @@
 
 未打分(NaN / inf / None)合法,计入 ``nan_ratio``;但出现非数值、空结果、
 重复 symbol 或候选池外 symbol 属于输出契约违规(exit 3)。
+
+协议 v2(issue #359):``factor.compute_series(ctx) -> FactorSeries`` 的
+返回值经 :func:`normalize_series_result` 收敛 —— 逐决策日截面 ``date ->
+symbol -> float | None``;允许的原始返回:
+
+* :class:`FactorSeries`(推荐,显式);
+* ``Mapping[date, Mapping[str, float | None]]``;
+* ``pd.DataFrame``(含 ``date`` / ``symbol`` / ``score`` 三列的长表)。
+
+未打分(None / NaN)合法,计入逐日 ``nan_ratio``;但日期集与平台传入的
+``dates`` 不一致、候选池外 symbol、非数值属于输出契约违规(exit 3)。
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 
@@ -95,6 +108,178 @@ def result_metrics(scores: pd.Series, *, universe: tuple[str, ...]) -> dict[str,
 
 
 @dataclass(frozen=True, slots=True)
+class FactorSeries:
+    """区间因子输出(协议 v2,issue #359;纯函数输出,无副作用)。
+
+    ``values``:逐决策日截面 ``{date: {symbol: float | None}}`` —— 每个决策
+    日对全部候选标的给出打分,None 表示当日未打分(计入 nan_ratio,不属
+    契约违规)。契约:value[t] 只许依赖 ``available_at <= t`` 的数据。
+    """
+
+    dates: tuple[date, ...]
+    values: dict[date, dict[str, float | None]] = field(default_factory=dict)
+
+
+def normalize_series_result(
+    raw: Any,
+    *,
+    expected_dates: tuple[date, ...],
+    universe: tuple[str, ...],
+) -> FactorSeries:
+    """把 ``compute_series`` 的合法返回收敛为规范 :class:`FactorSeries`。
+
+    校验(违规抛 :class:`OutputContractError`):
+
+    * 日期集与 ``expected_dates`` 完全一致(缺日/多日都不允许 —— 平台按
+      窗口决策日消费,因子算不出的日期应显式产出 None 截面);
+    * symbol 必须在候选池内;
+    * 值须为数值或 None(NaN/inf 合法,计入质量门 nan_ratio)。
+
+    每日截面在 universe 内补全:未出现的 symbol 视为 None(缺测),
+    显式给出的值保留原样。
+    """
+    if isinstance(raw, FactorSeries):
+        return normalize_series_result(
+            raw.values,
+            expected_dates=expected_dates,
+            universe=universe,
+        )
+    if isinstance(raw, Mapping):
+        daily: dict[date, dict[str, float | None]] = {}
+        for key, cross in raw.items():
+            day = _coerce_date(key)
+            daily[day] = _normalize_cross_section(cross, universe=universe)
+    elif isinstance(raw, pd.DataFrame):
+        missing = {"date", "symbol", "score"} - set(raw.columns)
+        if missing:
+            raise OutputContractError(
+                f"DataFrame 返回须含 date/symbol/score 三列,缺 {sorted(missing)}"
+            )
+        daily = {}
+        for row in raw.itertuples(index=False):
+            day = _coerce_date(row.date)
+            cross = daily.setdefault(day, {})
+            symbol = str(row.symbol)
+            cross[symbol] = _coerce_value(row.score, symbol=symbol)
+        for day, cross in daily.items():
+            daily[day] = _normalize_cross_section(cross, universe=universe)
+    else:
+        raise OutputContractError(
+            f"compute_series() 返回类型不支持: {type(raw).__name__}"
+            "(允许 FactorSeries / Mapping[date, Mapping] / DataFrame)"
+        )
+    expected = set(expected_dates)
+    produced = set(daily)
+    if produced != expected:
+        missing_days = sorted(expected - produced)
+        extra_days = sorted(produced - expected)
+        raise OutputContractError(
+            "compute_series 输出日期集与窗口决策日不一致:"
+            f"缺 {len(missing_days)} 日(如 {[d.isoformat() for d in missing_days[:3]]}),"
+            f"多 {len(extra_days)} 日(如 {[d.isoformat() for d in extra_days[:3]]});"
+            f"期望 {len(expected)} 日,产出 {len(produced)} 日"
+        )
+    return FactorSeries(
+        dates=tuple(expected_dates),
+        values={day: daily[day] for day in expected_dates},
+    )
+
+
+def _coerce_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    raise OutputContractError(
+        f"compute_series 输出含非法日期键: {value!r}({type(value).__name__})"
+    )
+
+
+def _coerce_value(value: Any, *, symbol: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, pd.Timestamp):
+        raise OutputContractError(
+            f"标的 {symbol} 的因子值非数值: {value!r}"
+        )
+    if isinstance(value, bool | str):
+        raise OutputContractError(
+            f"标的 {symbol} 的因子值非数值: {value!r}"
+        )
+    if isinstance(value, int | float | np.floating | np.integer):
+        return float(value)
+    raise OutputContractError(
+        f"标的 {symbol} 的因子值非数值: {value!r}({type(value).__name__})"
+    )
+
+
+def _normalize_cross_section(
+    cross: Any, *, universe: tuple[str, ...]
+) -> dict[str, float | None]:
+    if not isinstance(cross, Mapping):
+        raise OutputContractError(
+            f"compute_series 的每日截面须为 Mapping[symbol, value],"
+            f"收到 {type(cross).__name__}"
+        )
+    allowed = set(universe)
+    normalized: dict[str, float | None] = {}
+    for key, value in cross.items():
+        symbol = str(key)
+        if symbol in normalized:
+            raise OutputContractError(
+                f"每日截面存在重复 symbol: {symbol}"
+            )
+        if allowed and symbol not in allowed:
+            raise OutputContractError(
+                f"scores 含候选池外 symbol {symbol!r}(候选池大小 {len(allowed)})"
+            )
+        normalized[symbol] = _coerce_value(value, symbol=symbol)
+    # universe 内补全:未出现的 symbol 视为当日缺测(None)
+    for symbol in universe:
+        normalized.setdefault(symbol, None)
+    return normalized
+
+
+def series_metrics(
+    series: FactorSeries, *, universe: tuple[str, ...]
+) -> dict[str, Any]:
+    """区间输出契约指标(协议 v2):逐日截面聚合的 coverage / nan_ratio。
+
+    口径与 :func:`result_metrics` 对齐:nan_ratio = 非有限值(含 NaN/inf)
+    占产出格子数;coverage = 有限值格子数 / (决策日数 x 候选池标的数)。
+    阈值判定在服务端(``research_sandbox_*``),这里只产原始指标。
+    """
+    n_days = len(series.dates)
+    n_cells = n_days * len(universe)
+    n_finite = 0
+    n_scored = 0
+    for day in series.dates:
+        cross = series.values.get(day, {})
+        for symbol in universe:
+            value = cross.get(symbol)
+            if value is None:
+                continue
+            n_scored += 1
+            if math.isfinite(value):
+                n_finite += 1
+    return {
+        "n_dates": n_days,
+        "n_symbols_input": len(universe),
+        "n_cells": n_cells,
+        "n_cells_scored": n_scored,
+        "n_cells_finite": n_finite,
+        "coverage": (n_finite / n_cells) if n_cells else 0.0,
+        "nan_ratio": (
+            1.0 - (n_finite / n_scored) if n_scored else 1.0
+        ),
+    }
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyResult:
     """策略决策输出(纯函数输出;targets = 目标权重,issue #218)。
 
@@ -162,10 +347,13 @@ def strategy_metrics(
 
 __all__ = [
     "FactorResult",
+    "FactorSeries",
     "OutputContractError",
     "StrategyResult",
     "normalize_result",
+    "normalize_series_result",
     "normalize_strategy_result",
     "result_metrics",
+    "series_metrics",
     "strategy_metrics",
 ]
