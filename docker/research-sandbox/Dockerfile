@@ -8,11 +8,11 @@
 #   --pids-limit/--cpus/--memory(+memory-skip 同值)/ 墙钟超时 docker kill
 #
 # 版本绑定:tag = finboard-research-kit 的 __version__(settings
-# research_sandbox_image 默认 finboard-research-sandbox:0.2.0);run 记录
+# research_sandbox_image 默认 finboard-research-sandbox:0.3.0);run 记录
 # 另存镜像 digest。改 kit 版本时同步 bump tag 与下方 KIT_VERSION。
 #
 # 构建(仓库根):docker build -f docker/research-sandbox/Dockerfile \
-#   -t finboard-research-sandbox:0.2.0 .
+#   -t finboard-research-sandbox:0.3.0 .
 # CI 在 lint-typecheck-test 之外单独构建本镜像(见 .github/workflows/ci.yml)。
 
 FROM python:3.12-slim
@@ -22,7 +22,7 @@ ARG PANDAS_VERSION=3.0.5
 ARG NUMPY_VERSION=2.5.1
 ARG PYARROW_VERSION=25.0.0
 ARG POLARS_VERSION=1.44.1
-ARG KIT_VERSION=0.2.0
+ARG KIT_VERSION=0.3.0
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

@@ -6,7 +6,7 @@
 
 前置:Docker Desktop 运行 + 镜像已构建(仓库根)::
 
-    docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.2.0 .
+    docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.3.0 .
 
 镜像 tag 可经 ``FINBOARD_SANDBOX_IMAGE`` 覆盖。
 
@@ -51,7 +51,7 @@ pytestmark = [
     ),
 ]
 
-_IMAGE = os.getenv("FINBOARD_SANDBOX_IMAGE", "finboard-research-sandbox:0.2.0")
+_IMAGE = os.getenv("FINBOARD_SANDBOX_IMAGE", "finboard-research-sandbox:0.3.0")
 _DECISION_AT = datetime(2024, 6, 3, 7, 0, tzinfo=UTC)
 _SYMBOLS = ["600000.SH", "000001.SZ"]
 
