@@ -931,8 +931,18 @@ async def start_bulk_download(
 
     实际执行由独立 worker 进程(``finboard worker run``)消费 ``kind=bulk_download``
     任务。进度 / 状态 / 取消统一通过 ``/api/jobs/{job_id}`` 轮询。
+    ``symbols``(#347)可选 —— 失败标的子集重跑,与 market / instrument_type /
+    exchange / listing_boards 过滤叠加,交集为空执行器按 no_instruments 拒。
+    入队期 payload 契约校验(#347,#260 风格):非法 source / 坏日期 /
+    tushare x etf|futures 秒级 422,不再等 worker 执行期才失败。
     """
+    import hashlib
+
     from finboard_api.job_helpers import enqueue_job
+    from finboard_backtest.background_jobs.payload_contracts import (
+        PayloadContractError,
+        validate_job_payload,
+    )
 
     payload: dict[str, Any] = {
         "market": req.market,
@@ -942,10 +952,30 @@ async def start_bulk_download(
         "exchange": req.exchange,
         "listing_boards": list(req.listing_boards),
     }
+    # symbols 只在显式提供时进入 payload:缺省 payload 与 #347 之前逐字节
+    # 一致(payload_checksum 稳定,同 idempotency_key 重提交不因新增键冲突)。
+    symbols_digest = ""
+    if req.symbols:
+        deduped = list(dict.fromkeys(req.symbols))
+        payload["symbols"] = deduped
+        symbols_digest = hashlib.sha256(
+            ",".join(deduped).encode("utf-8")
+        ).hexdigest()[:16]
+    # 入队期契约(#347):REST 与 MCP 语义化端点共用同一校验函数。
+    try:
+        validate_job_payload("bulk_download", payload)
+    except PayloadContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"payload 契约校验失败[{exc.code}]: {exc.summary}",
+        ) from exc
     idempotency_key = (
         f"bulk_download:{req.market}:{req.source or 'auto'}:{req.start}:"
         f"{req.instrument_type or 'all'}"
     )
+    if symbols_digest:
+        # 子集重跑的幂等键带 symbols 摘要:不同子集不互相命中旧任务。
+        idempotency_key += f":sub:{symbols_digest}"
     try:
         job = await enqueue_job(
             session,

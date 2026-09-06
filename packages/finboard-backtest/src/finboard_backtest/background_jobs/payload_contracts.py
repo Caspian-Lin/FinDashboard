@@ -36,6 +36,18 @@ _RESEARCH_DATA_SYNC_ALLOWED_KEYS: frozenset[str] = frozenset(
     {"datasets", "start_date", "end_date", "symbols"}
 )
 
+#: ``bulk_download`` 合法 payload 键(issue #347)。
+_BULK_DOWNLOAD_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {"market", "source", "start", "instrument_type", "exchange", "listing_boards", "symbols"}
+)
+
+#: ``bulk_download`` 行情源白名单(#347)。空串 / 缺省 = 回落配置默认源
+#: (``resolve_provider_name`` 的回落链:settings 默认 → env → akshare,
+#: #341 跟进先例)。
+BULK_DOWNLOAD_SOURCES: frozenset[str] = frozenset(
+    {"akshare", "tushare", "yfinance"}
+)
+
 #: 逐标的迭代的数据集:symbol 池为空时整段循环零迭代(静默 no-op)。
 _RESEARCH_DATA_SYNC_PER_SYMBOL: frozenset[str] = frozenset(
     {"financial_indicators", "industry_memberships"}
@@ -145,10 +157,92 @@ def validate_research_data_sync_payload(payload: Mapping[str, Any]) -> None:
         )
 
 
+def validate_bulk_download_payload(payload: Mapping[str, Any]) -> None:
+    """校验 ``kind=bulk_download`` 的 payload(入队期契约,issue #347)。
+
+    * 未知键拒绝;``market`` 必填非空;``start`` 必填且为 ISO 日期;
+    * ``source`` 白名单(akshare/tushare/yfinance,大小写不敏感,与
+      ``resolve_provider_name`` 的 ``strip().lower()`` 口径一致);
+      空串 / 缺省 = 回落配置默认源(#341 跟进语义);
+    * ``instrument_type`` / ``exchange`` 须为字符串,``listing_boards`` /
+      ``symbols`` 须为字符串列表(``symbols`` 空列表拒绝 —— 缺省不传 =
+      全池,显式空列表几乎必然是调用方笔误,fail-visible);
+    * ``tushare`` x ``etf|futures`` 字面量预检(执行器基于 DB 行的
+      ``tushare_scope_mismatch`` 校验保留,#341/#267 边界不变)。
+    """
+
+    unknown = sorted(set(payload) - _BULK_DOWNLOAD_ALLOWED_KEYS)
+    if unknown:
+        raise PayloadContractError(
+            "unknown_payload_key",
+            f"未知 payload 键: {unknown};已知键: "
+            f"{sorted(_BULK_DOWNLOAD_ALLOWED_KEYS)}",
+        )
+
+    market = payload.get("market")
+    if not isinstance(market, str) or not market:
+        raise PayloadContractError(
+            "missing_required_field", "market 必填(非空字符串,如 a_share / future)"
+        )
+
+    raw_source = payload.get("source")
+    source: str | None = None
+    if raw_source is not None and raw_source != "":
+        if not isinstance(raw_source, str) or raw_source.strip().lower() not in (
+            BULK_DOWNLOAD_SOURCES
+        ):
+            raise PayloadContractError(
+                "invalid_field_value",
+                f"不支持的 source: {raw_source!r};可用: "
+                f"{sorted(BULK_DOWNLOAD_SOURCES)};空 / 缺省 = 回落配置默认源",
+            )
+        source = raw_source.strip().lower()
+
+    _require_date(payload, "start")
+
+    instrument_type = payload.get("instrument_type")
+    if instrument_type is not None and not isinstance(instrument_type, str):
+        raise PayloadContractError(
+            "invalid_field_value", "instrument_type 必须是字符串"
+        )
+    exchange = payload.get("exchange")
+    if exchange is not None and not isinstance(exchange, str):
+        raise PayloadContractError("invalid_field_value", "exchange 必须是字符串")
+    listing_boards = payload.get("listing_boards")
+    if listing_boards is not None and (
+        not isinstance(listing_boards, list)
+        or not all(isinstance(item, str) for item in listing_boards)
+    ):
+        raise PayloadContractError(
+            "invalid_field_value", "listing_boards 必须是字符串列表"
+        )
+
+    symbols = payload.get("symbols")
+    if symbols is not None:
+        if not isinstance(symbols, list) or not all(
+            isinstance(item, str) for item in symbols
+        ):
+            raise PayloadContractError("invalid_field_value", "symbols 必须是字符串列表")
+        if not symbols:
+            raise PayloadContractError(
+                "empty_symbol_pool",
+                "symbols 不能为空列表(缺省不传 = 全池不过滤子集;"
+                "子集重跑请列出失败标的代码,如 000001.SZ)",
+            )
+
+    if source == "tushare" and instrument_type in ("etf", "futures"):
+        raise PayloadContractError(
+            "tushare_scope_mismatch",
+            "Tushare 批量任务不支持 ETF(复权口径对齐未定稿,#341)与期货"
+            "(fut_daily 未接线,#267);请选 akshare 源",
+        )
+
+
 #: kind → 入队期 payload 校验器。新 kind 在此注册即可被 REST + MCP + 执行器
 #: 重放三方共用。
 PAYLOAD_CONTRACTS: dict[str, Callable[[Mapping[str, Any]], None]] = {
     "research_data_sync": validate_research_data_sync_payload,
+    "bulk_download": validate_bulk_download_payload,
 }
 
 
@@ -163,9 +257,11 @@ def validate_job_payload(kind: str, payload: Mapping[str, Any] | None) -> None:
 
 
 __all__ = [
+    "BULK_DOWNLOAD_SOURCES",
     "PAYLOAD_CONTRACTS",
     "RESEARCH_DATA_SYNC_DATASETS",
     "PayloadContractError",
+    "validate_bulk_download_payload",
     "validate_job_payload",
     "validate_research_data_sync_payload",
 ]

@@ -323,6 +323,9 @@ class BulkDownloadRequest(BaseSchema):
     listing_boards: list[str] = Field(default_factory=list)
     start: str = "2015-01-01"
     source: str | None = None
+    # symbols 子集重跑(#347):与 market/instrument_type/exchange/listing_boards
+    # 过滤叠加(交集为空执行器按 no_instruments 拒);失败清单可直接回填。
+    symbols: list[str] | None = None
 
 
 class SchedulerConfigOut(BaseSchema):

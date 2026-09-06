@@ -343,9 +343,15 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   不可当作可成交合约;
   `source=tushare` 对 stock/convertible 之外报 `tushare_scope_mismatch`)/
   `exchange?` /
-  `listing_boards?` / `start?`(默认 2015-01-01)/ `source?`
+  `listing_boards?` / `start?`(默认 2015-01-01)/ `source?` /
+  `symbols?`(#347 子集重跑:与 market/instrument_type 过滤叠加,交集为空按
+  no_instruments 拒;部分失败任务的 `error_summary` 清单可直接回填)
 - 返回:`JobOut`(`kind=bulk_download`)
-- 进度:用 `finboard_job_get(job_id)` 轮询(阶段如 `bulk_download:fetching`)
+- 校验(#347):入队期 payload 契约(#260 风格)—— 未知 source / 非法日期 /
+  tushare×etf|futures 等非法参数秒级 `invalid_argument`
+- 进度:用 `finboard_job_get(job_id)` 轮询(阶段如 `bulk_download:fetching`;
+  部分标的失败仍 succeeded,phase 形如 `bulk_download:partial N failed`,
+  失败标的与原因看 `error_summary`)
 
 ### finboard_data_quality_repair **[写,任务化]**
 登记批量缓存异常 bar 修复任务(读缓存→质量检查→拉取修复→重写),返回 202 + `job_id`。

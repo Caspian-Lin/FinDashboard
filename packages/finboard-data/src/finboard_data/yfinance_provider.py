@@ -258,8 +258,14 @@ class YFinanceProvider:
         adjust: str = "qfq",
         on_progress: Callable[[str, int, int], None] | None = None,
         on_status: Callable[[str, str], None] | None = None,
+        on_error: Callable[[str, str], None] | None = None,
     ) -> dict[str, bool]:
-        """有界并发批量更新缓存,不在内存中保留历史 bars。"""
+        """有界并发批量更新缓存,不在内存中保留历史 bars。
+
+        ``on_error(code, reason)``(可选,#347):逐标的失败摘要回调,与
+        ``AkShareProvider.update_cache_batch`` 同约定;返回值仍是
+        ``dict[code, bool]``,既有调用方零影响。
+        """
         total = len(symbols)
         if total == 0:
             return {}
@@ -278,6 +284,7 @@ class YFinanceProvider:
                     sym = queue.get_nowait()
                 except asyncio.QueueEmpty:
                     return
+                reported = False
                 try:
                     ok = await self.update_cache(
                         sym,
@@ -291,10 +298,15 @@ class YFinanceProvider:
                             else None
                         ),
                     )
-                except Exception:
+                except Exception as exc:
                     logger.exception("yfinance.cache_update_failed", symbol=sym.code)
                     ok = False
+                    if on_error is not None:
+                        reported = True
+                        on_error(sym.code, f"{type(exc).__name__}: {exc}"[:200])
                 results[sym.code] = ok
+                if on_error is not None and not ok and not reported:
+                    on_error(sym.code, "update_cache 返回 False(上游无新数据且无既有缓存)")
                 if on_status is not None:
                     on_status(sym.code, "completed" if ok else "failed")
                 done_count += 1
