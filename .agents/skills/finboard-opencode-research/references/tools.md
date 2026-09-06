@@ -135,8 +135,17 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   错误附排除统计、生效阈值与 portfolio_config 键位修复路径;
   `max_risk_contribution` 非法值与 `risk_config.overrides` 形态错误同样入队
   即拒。逐期真实买入池入队期不可精确预知,运行期 fail-closed 兜底不变。
+- **快照锚定预检(issue #355)**:引用快照(factor_snapshot_ids)锚定的
+  数据发布 ⊄ 本次 `dataset_release_ids` 时秒级 `invalid_argument`,具名
+  `snapshot_anchor_mismatch`,逐快照列出因子名 / 锚定发布 / 缺失清单
+  (典型场景:更换 bars 主发布后未重算沙箱因子,#217 的 ⊆ 约束不变)。
+  修复路径二选一:(a) 把缺失发布一并加入本次 `dataset_release_ids`;
+  (b) 对新 bars 发布重算沙箱因子(`finboard_research_code_run` 提交
+  RCR → 质量门 → 新快照)后以新 snapshot_id 入队。
+  `finboard_strategy_validate` 的 `user_factor_anchor_warnings` 可在
+  写策略阶段提前看到同类失配。
 - 错误:`invalid_argument`(schema 校验 / 数据发布不匹配 / rebalance_frequency
-  非法 / 候选池为空 / 组合可行性预检失败 #303)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
+  非法 / 候选池为空 / 组合可行性预检失败 #303 / 快照锚定失配 #355)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
 
 ### finboard_run_cancel(✅ #127,写)
 取消 ResearchRun(queued/running/interrupted/failed → cancelled)。
@@ -691,7 +700,7 @@ supported=best trial OOS 门过且揭盲达标;not_supported=best trial OOS 被
 - 参数:`spec: dict`、`disabled_factors?: list[str]`
 - 返回:`{valid, checksum, feature_order, required_factor_sources,
   required_datasets, dataset_release_ids, lifecycle_stages, can_execute,
-  universe_precheck}`
+  universe_precheck, user_factor_anchor_warnings}`
   - `universe_precheck`(issue #186/#213):`{total_candidates, included, excluded,
     is_empty, excluded_by_condition, missing_fields, warnings, explicit_total,
     explicit_missing}`,来自主数据发布 instruments 的静态评估 ——
@@ -717,6 +726,15 @@ supported=best trial OOS 门过且揭盲达标;not_supported=best trial OOS 被
       instruments 名称历史在决策日 PIT 判定(issue #213);
     - `is_empty=true` 时入队必然秒级失败,先修复元数据(如 data_sync profiles
       回填 list_date)或放宽过滤再入队。
+  - `user_factor_anchor_warnings`(issue #355,不阻断,全匹配为空列表):
+    规格引用的 u_ 用户因子存在既有沙箱快照、其锚定发布 ⊄ 本次
+    `dataset_release_ids` 时逐因子具名提示
+    (`{code: "user_factor_anchor_mismatch", factor_name, run_id, snapshot_id,
+    anchored_release_ids, missing_release_ids, message}`)—— 直接引用该快照
+    入队将被 `snapshot_anchor_mismatch` 秒拒;先按提示二选一:(a) 把缺失
+    发布一并加入 dataset_release_ids;(b) 对新 bars 发布重算
+    (`finboard_research_code_run` → 质量门 → 新快照)后引用。
+    典型触发:更换 bars 主发布后引用旧快照的所有 run。
 
 ### finboard_strategy_draft_create **[写]**
 保存策略规格草稿版本(change_type=create,首版本)。
@@ -1577,6 +1595,14 @@ finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.2.0`;
    `finboard_factor_catalog` 确认 origin=user_defined、status=active、
    promotion_status=passed。非 screen 普通运行引用 draft/retired 仍被
    编译期/入队门秒级拒绝(行为不变)。
+
+**换 bars 主发布后(#355)**:既有 u_ 快照锚定的是重算时的发布集合,
+换新发布直接引用会入队秒级 `snapshot_anchor_mismatch`(逐快照清单 +
+修复路径);`finboard_strategy_validate` 的 `user_factor_anchor_warnings`
+提前可见。标准动作:对全部待引用因子按新发布重跑
+`finboard_research_code_run`(每个 decision_at 一次 RCR → 质量门 →
+新快照),再用新 `output_snapshot_id` 入队;或把旧锚定发布一并放进
+`dataset_release_ids`(保持 ⊆ 约束,不推荐与新发布混用作主行情)。
 
 ## 用户代码策略执行(#218,逐日决策函数)
 

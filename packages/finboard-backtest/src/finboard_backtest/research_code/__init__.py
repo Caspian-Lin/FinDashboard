@@ -45,7 +45,14 @@ from finboard_backtest.research_code.user_code import (
     user_code_reference_gate_error,
 )
 from finboard_backtest.research_code.user_factors import (
+    SNAPSHOT_ANCHOR_MISMATCH_CODE,
+    USER_FACTOR_ANCHOR_WARNING_CODE,
+    SnapshotAnchorMismatch,
+    UserFactorAnchorWarning,
     active_user_factor_names,
+    snapshot_anchor_mismatch_error,
+    snapshot_anchor_mismatches,
+    user_factor_anchor_warnings,
     user_factor_reference_gate_error,
 )
 from finboard_backtest.research_code.validation import (
@@ -150,6 +157,8 @@ __all__ = [
     "PROMOTION_FAILED",
     "PROMOTION_PASSED",
     "PROMOTION_PENDING",
+    "SNAPSHOT_ANCHOR_MISMATCH_CODE",
+    "USER_FACTOR_ANCHOR_WARNING_CODE",
     "VALID_KINDS",
     "PromotionGateError",
     "PromotionGateResult",
@@ -158,6 +167,8 @@ __all__ = [
     "ResearchCodeRepo",
     "ResearchCodeService",
     "ScreenBindingResolution",
+    "SnapshotAnchorMismatch",
+    "UserFactorAnchorWarning",
     "active_user_factor_names",
     "active_user_strategy_commits",
     "active_user_strategy_names",
@@ -169,7 +180,10 @@ __all__ = [
     "require_promotion_gates",
     "resolve_screen_bindings",
     "screen_factor_snapshot_gate_error",
+    "snapshot_anchor_mismatch_error",
+    "snapshot_anchor_mismatches",
     "user_code_reference_gate_error",
+    "user_factor_anchor_warnings",
     "user_factor_reference_gate_error",
     "validate_submission",
 ]
