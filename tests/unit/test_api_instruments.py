@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -246,6 +246,143 @@ class TestResearchDatasetReleases:
         with pytest.raises(HTTPException) as exc_info:
             await get_dataset_release("missing", session=mock_session)
         assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_release_coverage_pct_serialized_as_number(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issue #349:API 层 coverage_pct 序列化为数值,manifest str(Decimal) 不动。
+
+        manifest as_dict 的 str(Decimal) 参与 checksum 语义,必须保持原样;
+        只有 API 响应模型把 coverage_pct 归一为 float 输出数值。
+        """
+        import json
+
+        from finboard_data.releases import ReleasedInstrument, default_execution_metadata
+        from finboard_persistence.dataset_release_repo import (
+            ResearchDatasetReleaseRepository as Repo,
+        )
+        from finboard_shared.types import AssetClass, InstrumentType, Market
+
+        instrument = ReleasedInstrument(
+            code="600519.SH",
+            name="贵州茅台",
+            market=Market.A_SHARE,
+            instrument_type=InstrumentType.STOCK,
+            asset_class=AssetClass.EQUITY,
+            available_at=datetime(2024, 1, 6, tzinfo=UTC),
+            execution=default_execution_metadata(
+                market=Market.A_SHARE,
+                instrument_type=InstrumentType.STOCK,
+            ),
+            artifact_path="bars/600519.SH_D1_qfq.parquet",
+            artifact_checksum="b" * 64,
+            artifact_size=1024,
+            row_count=40,
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 5),
+            expected_sessions=40,
+            missing_sessions=3,
+            suspended_sessions=2,
+            anomaly_count=1,
+            coverage_pct=Decimal("0.9833"),
+            category="stock",
+            ready=True,
+        )
+        import dataclasses
+
+        base = _dataset_release()
+        release = dataclasses.replace(
+            base,
+            instruments=(instrument,),
+            quality_report={
+                "release_coverage": "0.9833",
+                "coverage": {
+                    "missing_sessions": 3,
+                    "suspended_sessions": 2,
+                    "anomaly_count": 1,
+                },
+            },
+        )
+        monkeypatch.setattr(
+            Repo, "get", lambda self, release_id: _async_return(release)
+        )
+
+        from finboard_api.routes.instruments import get_dataset_release
+
+        out = await get_dataset_release("api-r77-v1", session=MagicMock())
+
+        # 响应模型字段与 JSON 序列化均为数值(非 Decimal 字符串)。
+        assert isinstance(out.coverage_pct, float)
+        assert out.coverage_pct == pytest.approx(0.9833)
+        assert isinstance(out.instruments[0].coverage_pct, float)
+        assert out.instruments[0].coverage_pct == pytest.approx(0.9833)
+        payload = json.loads(out.model_dump_json())
+        assert isinstance(payload["coverage_pct"], float)
+        assert isinstance(payload["instruments"][0]["coverage_pct"], float)
+
+        # manifest 冻结语义保持:as_dict 仍输出 str(Decimal),checksum 口径不变。
+        manifest = release.as_dict()
+        manifest_instruments = cast(
+            list[dict[str, object]], manifest["instruments"]
+        )
+        assert manifest_instruments[0]["coverage_pct"] == "0.9833"
+
+    @pytest.mark.asyncio
+    async def test_release_summary_coverage_pct_serialized_as_number(
+        self,
+    ) -> None:
+        """issue #349:发布列表 API 的 coverage_pct 同样输出数值。"""
+        import json
+
+        from finboard_api.routes.instruments import list_dataset_releases
+        from finboard_api.schemas import ResearchDatasetReleaseSummaryOut
+
+        # model_validate 传入 Decimal,验证 lax 模式归一为 float(数值序列化)。
+        summary = ResearchDatasetReleaseSummaryOut.model_validate(
+            {
+                "release_id": "api-r77-v1",
+                "dataset_name": "multi_asset_daily_bars",
+                "source": "fixed_sample",
+                "version": "api-v1",
+                "schema_version": "v1",
+                "start_date": date(2024, 1, 2),
+                "end_date": date(2024, 1, 5),
+                "period": "D1",
+                "adjustment": "qfq",
+                "dataset_kind": "bars",
+                "code_version": "deadbeef",
+                "published_at": datetime(2024, 1, 6, tzinfo=UTC),
+                "symbol_count": 1,
+                "row_count": 40,
+                "coverage_pct": Decimal("0.9833"),
+                "capabilities": [],
+                "quality_status": "passed",
+                "known_limitations": [],
+                "metadata_version": "v1",
+                "release_checksum": "a" * 64,
+            }
+        )
+        assert isinstance(summary.coverage_pct, float)
+        payload = json.loads(summary.model_dump_json())
+        assert isinstance(payload["coverage_pct"], float)
+
+        # 列表路由透传领域对象 Decimal("1") 时同样归一为数值。
+        row = MagicMock()
+        row.manifest = _dataset_release().as_dict()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [row]
+        mock_session = MagicMock()
+        mock_session.execute = AsyncMock(return_value=result)
+        items = await list_dataset_releases(
+            dataset_name=None,
+            source=None,
+            quality_status=None,
+            limit=50,
+            session=mock_session,
+        )
+        assert isinstance(items[0].coverage_pct, float)
+        assert items[0].coverage_pct == 0.0  # 空清单发布 coverage_pct = Decimal("0")
 
     @pytest.mark.asyncio
     async def test_check_release_symbols_membership(

@@ -13,10 +13,22 @@ export function formatCurrency(value: number | null | undefined, digits = 2): st
   });
 }
 
-export function formatPercent(value: number | null | undefined, digits = 2): string {
-  if (value === null || value === undefined || Number.isNaN(value)) return "—";
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${(value * 100).toFixed(digits)}%`;
+/**
+ * 百分比格式化(issue #349):coverage_pct 等字段在旧后端 / MCP 通道可能以
+ * 字符串(如 "1")下发,这里先归一为数值再格式化;空串 / 非法文本显示占位符,
+ * 避免把字符串原样拼进百分比造成误导展示。
+ */
+export function formatPercent(
+  value: number | string | null | undefined,
+  digits = 2,
+): string {
+  const normalized =
+    typeof value === "string" ? (value.trim() === "" ? NaN : Number(value)) : value;
+  if (normalized === null || normalized === undefined || Number.isNaN(normalized)) {
+    return "—";
+  }
+  const sign = normalized > 0 ? "+" : "";
+  return `${sign}${(normalized * 100).toFixed(digits)}%`;
 }
 
 export function formatNumber(value: number | null | undefined, digits = 2): string {

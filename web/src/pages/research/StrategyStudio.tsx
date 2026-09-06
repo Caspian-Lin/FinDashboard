@@ -1208,7 +1208,8 @@ function SetupDialog({
     start_date?: string;
     end_date?: string;
     symbol_count?: number;
-    coverage_pct?: number;
+    /* issue #349:历史通道可能下发字符串,展示层归一为数值。 */
+    coverage_pct?: number | string;
     quality_status?: string;
     capabilities?: { key: string; status: string; ready_count?: number }[];
   }[];
@@ -1305,7 +1306,10 @@ function SetupDialog({
                       <span className="mt-0.5 block text-[10px] text-muted-foreground">
                         {r.start_date ?? "—"} ~ {r.end_date ?? "—"} · {r.symbol_count ?? "—"}
                         {tl({ zh: " 标的 · 覆盖 ", en: " symbols · coverage " })}
-                        {r.coverage_pct ?? "—"}
+                        {/* issue #349:字符串容错,避免把 "1" 原样展示。 */}
+                        {r.coverage_pct === undefined || Number.isNaN(Number(r.coverage_pct))
+                          ? "—"
+                          : Number(r.coverage_pct)}
                       </span>
                       {r.capabilities && r.capabilities.length > 0 && (
                         <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">

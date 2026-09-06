@@ -112,6 +112,37 @@ function ReleaseOverview({ detail }: { detail: DatasetReleaseDetail }) {
   const qualityEntries = Object.entries(qualityReport)
     .filter(([, value]) => value !== null && value !== undefined)
     .slice(0, 24);
+
+  // issue #349:覆盖率口径含「已查询但无 bar」的区间(停牌/节假日语义),
+  // 数据源静默漏数时仍可能为 100%。把质量报告里交易日历审计口径的缺口合计
+  // (missing_sessions / suspended_sessions / anomaly_count)与覆盖率并排
+  // 展示;质量报告无该块时显示占位,不强造数据。
+  const coverageBlock =
+    typeof qualityReport["coverage"] === "object" && qualityReport["coverage"] !== null
+      ? (qualityReport["coverage"] as Record<string, unknown>)
+      : null;
+  const asCount = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  const missingSessions = asCount(coverageBlock?.["missing_sessions"]);
+  const suspendedSessions = asCount(coverageBlock?.["suspended_sessions"]);
+  const anomalyCount = asCount(coverageBlock?.["anomaly_count"]);
+  const gapSummary =
+    missingSessions === null && suspendedSessions === null && anomalyCount === null
+      ? null
+      : [
+          missingSessions !== null
+            ? tl({ zh: `缺 ${missingSessions} 日`, en: `${missingSessions} missing` })
+            : null,
+          suspendedSessions !== null
+            ? tl({ zh: `停牌 ${suspendedSessions}`, en: `${suspendedSessions} suspended` })
+            : null,
+          anomalyCount !== null
+            ? tl({ zh: `异常 ${anomalyCount}`, en: `${anomalyCount} anomalies` })
+            : null,
+        ]
+          .filter((item): item is string => item !== null)
+          .join(" · ");
+
   return (
     <div className="space-y-5 text-xs">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
@@ -160,6 +191,18 @@ function ReleaseOverview({ detail }: { detail: DatasetReleaseDetail }) {
           <p className="mt-0.5 tabular-nums text-foreground">{formatPercent(detail.coverage_pct, 1)}</p>
         </div>
         <div>
+          <p className="font-medium text-muted-foreground">
+            {tl({ zh: "数据缺口(审计)", en: "Data gaps (audit)" })}
+          </p>
+          <p
+            className={`mt-0.5 tabular-nums ${
+              (missingSessions ?? 0) > 0 ? "text-warning" : "text-foreground"
+            }`}
+          >
+            {gapSummary ?? "—"}
+          </p>
+        </div>
+        <div>
           <p className="font-medium text-muted-foreground">{tl({ zh: "发布时间", en: "Published" })}</p>
           <p className="mt-0.5 tabular-nums text-foreground">{formatDateTime(detail.published_at)}</p>
         </div>
@@ -172,6 +215,13 @@ function ReleaseOverview({ detail }: { detail: DatasetReleaseDetail }) {
           <p className="mt-0.5 break-all font-mono text-foreground">{detail.release_checksum || "—"}</p>
         </div>
       </div>
+
+      <p className="text-muted-foreground">
+        {tl({
+          zh: "口径:覆盖率含「已查询但无 bar」的区间(停牌/节假日);真实数据缺口以质量报告 missing_sessions(交易日历审计)为准。",
+          en: "Coverage counts queried sessions without bars (suspensions/holidays); real data gaps follow missing_sessions in the quality report (trading-calendar audit).",
+        })}
+      </p>
 
       {(detail.known_limitations ?? []).length > 0 && (
         <div className="rounded-md border border-warning/30 bg-warning/5 p-3">
