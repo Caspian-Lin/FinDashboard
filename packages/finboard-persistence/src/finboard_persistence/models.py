@@ -31,6 +31,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     text as sql_text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from finboard_persistence.base import Base, IdMixin
@@ -1896,5 +1897,59 @@ class ResearchCodeRunModel(Base, IdMixin):
             "kind",
             "name",
             "status",
+        ),
+    )
+
+
+class ResearchFactorSeriesModel(Base, IdMixin):
+    """内容寻址的因子序列工件(issue #360)。
+
+    因子序列从「用户策划的点快照」(``factor_feature_snapshots`` 绑定单一
+    decision_at x 单一 bars 发布)升级为派生工件:同一 (code_commit, bars
+    主发布, 研究发布联合集, params, 窗口) 的 ``series_key`` 内容寻址,
+    换 bars 发布时按新 series_key 托管批量重建(不再全作废 + 手工重跑
+    全部 RCR)。``values`` 为 ``{date: {symbol: float|null}}`` 逐决策日截面,
+    供 research_run 加载器按 (因子名, 决策日) 索引消费(双轨优先路径)。
+
+    纯离线研究域存储,不迁移历史快照,不触实盘表。
+    """
+
+    __tablename__ = "research_factor_series"
+
+    # "FS-" + series_key[:12](内容寻址键截断,与 series_key 一一对应;
+    # 业务主键,按本表惯例以唯一索引承载,代理主键仍为 IdMixin.id)
+    series_id: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    series_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # 代码三向引用(与 research_code_runs 同口径:kind=factor)
+    code_artifact: Mapped[str] = mapped_column(String(64), index=True)
+    code_commit: Mapped[str] = mapped_column(String(40))
+    kind: Mapped[str] = mapped_column(String(16))
+    # bars 主发布锚定 + 研究发布联合集(排序冻结,入 series_key)
+    release_id: Mapped[str] = mapped_column(String(128), index=True)
+    dataset_release_ids: Mapped[list[str]] = mapped_column(JSONB)
+    params: Mapped[dict[str, object]] = mapped_column(JSONB)
+    window_start: Mapped[date] = mapped_column(Date)
+    window_end: Mapped[date] = mapped_column(Date)
+    # 升序决策日数组 + 逐日截面值(dates 与 values 的键一一对应)
+    dates: Mapped[list[str]] = mapped_column(JSONB)
+    values: Mapped[dict[str, object]] = mapped_column(JSONB)
+    content_checksum: Mapped[str] = mapped_column(String(64))
+    # 质量门结果归档(NaN 比例 / 覆盖率等)
+    quality: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    # 产出 RCR(RCR- 前缀,字符串引用不建外键)
+    source_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_research_factor_series_release_window",
+            "release_id",
+            "window_start",
+            "window_end",
         ),
     )
