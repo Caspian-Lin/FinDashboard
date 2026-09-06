@@ -210,10 +210,12 @@ class TestDatasetPublishDonePhaseShort:
     async def test_completion_phase_short_even_with_symbol_mismatch(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """#252 mismatch 路径收尾 phase 同样是 ``dataset_publish:done`` 短摘要。
+        """#252 mismatch 路径收尾 phase 保留具名标记且不超旧列宽。
 
         旧完成语拼上 mismatch 摘要(含基线 release_id)约 75-85 字符;
-        差集明细由 ``dataset_publish.symbol_set_mismatch`` warning 承载。
+        收尾语只留 ``dataset_publish:done symbol_set_mismatch`` 具名标记
+        (任务时间线可见不一致发生),差集明细由
+        ``dataset_publish.symbol_set_mismatch`` warning 承载。
         """
         import finboard_persistence as persistence_pkg
 
@@ -293,7 +295,7 @@ class TestDatasetPublishDonePhaseShort:
 
         assert result.status == "succeeded"
         assert result.result_ref == "rel-348"
-        assert phases[-1] == "dataset_publish:done"
+        assert phases[-1] == "dataset_publish:done symbol_set_mismatch"
         assert all(p is not None and len(p) <= 64 for p in phases)
         # 明细不丢:mismatch warning 携带基线 id 与双向差集计数。
         mismatch = [
