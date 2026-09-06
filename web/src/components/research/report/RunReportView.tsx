@@ -120,16 +120,31 @@ function shortDate(iso: string): string {
 
 export function getMetric(
   result: Record<string, unknown> | undefined,
-  key: string,
-  defaultVal = 0,
-): number {
+  key: string | string[],
+  defaultVal?: number,
+): number;
+export function getMetric(
+  result: Record<string, unknown> | undefined,
+  key: string | string[],
+  defaultVal: null,
+): number | null;
+export function getMetric(
+  result: Record<string, unknown> | undefined,
+  key: string | string[],
+  defaultVal: number | null = 0,
+): number | null {
   if (!result) return defaultVal;
-  const direct = result[key];
-  if (typeof direct === "number") return direct;
-  const metrics = result["metrics"];
-  if (metrics && typeof metrics === "object") {
-    const nested = (metrics as Record<string, unknown>)[key];
-    if (typeof nested === "number") return nested;
+  // 研究运行 result 的字段名与报告指标不同源:总收益/年化/成交笔数
+  // 在后端叫 strategy_return / annualized_return / fill_count,按序取别名。
+  const keys = typeof key === "string" ? [key] : key;
+  for (const k of keys) {
+    const direct = result[k];
+    if (typeof direct === "number") return direct;
+    const metrics = result["metrics"];
+    if (metrics && typeof metrics === "object") {
+      const nested = (metrics as Record<string, unknown>)[k];
+      if (typeof nested === "number") return nested;
+    }
   }
   return defaultVal;
 }
@@ -156,14 +171,21 @@ export function getEquityCurve(
   if (!Array.isArray(candidate)) return [];
   const out: EquityPoint[] = [];
   for (const p of candidate) {
-    if (
-      p &&
-      typeof p === "object" &&
-      typeof (p as Record<string, unknown>)["timestamp"] === "string" &&
-      typeof (p as Record<string, unknown>)["equity"] === "number"
-    ) {
-      const rec = p as { timestamp: string; equity: number };
-      out.push({ timestamp: rec.timestamp, equity: rec.equity });
+    if (!p || typeof p !== "object") continue;
+    const rec = p as Record<string, unknown>;
+    // 研究运行报告的权益点序列化为 {trade_date, equity:"<Decimal 字符串>"}
+    // (contracts.EquityPoint asdict + Decimal→str),与回测/模拟的
+    // {timestamp, equity:number} 形态并存,两种都接受。
+    const timestamp = rec["timestamp"] ?? rec["trade_date"];
+    const rawEquity = rec["equity"];
+    const equity =
+      typeof rawEquity === "number"
+        ? rawEquity
+        : typeof rawEquity === "string"
+          ? Number(rawEquity)
+          : NaN;
+    if (typeof timestamp === "string" && Number.isFinite(equity)) {
+      out.push({ timestamp, equity });
     }
   }
   return out;
@@ -627,12 +649,13 @@ export function RunReportView({ runId }: { runId: string }) {
   const result = detail.result;
 
   const metrics: ReportMetrics = {
-    total_return: getMetric(result, "total_return"),
-    annual_return: getMetric(result, "annual_return"),
+    total_return: getMetric(result, ["total_return", "strategy_return"]),
+    annual_return: getMetric(result, ["annual_return", "annualized_return"]),
     sharpe_ratio: getMetric(result, "sharpe_ratio"),
     max_drawdown: getMetric(result, "max_drawdown"),
-    win_rate: getMetric(result, "win_rate"),
-    total_trades: getMetric(result, "total_trades"),
+    // 研究运行报告没有胜率字段,缺数据显示「—」而非误导读成 0.00%。
+    win_rate: getMetric(result, "win_rate", null),
+    total_trades: getMetric(result, ["total_trades", "fill_count"]),
   };
   const equityCurve = getEquityCurve(result);
   const extras: ExtraMetric[] = EXTRA_METRIC_DEFS.filter((d) =>

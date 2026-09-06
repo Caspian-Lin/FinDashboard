@@ -462,6 +462,82 @@ class TestBulkDownloadEndToEnd:
             )
             await session.commit()
 
+    async def test_bulk_download_empty_source_resolves_to_default(
+        self, engine: AsyncEngine
+    ) -> None:
+        """「默认源」入队写空串 source(#341 跟进):不再 invalid_payload,回落配置默认源。"""
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import select
+
+        from finboard_persistence import InstrumentModel
+        from finboard_persistence.models import BackgroundJobModel
+
+        async with session_factory(engine)() as session:
+            await session.execute(
+                sa_delete(InstrumentModel).where(InstrumentModel.code == "000852.SH")
+            )
+            await session.flush()
+            session.add(
+                InstrumentModel(
+                    code="000852.SH",
+                    name="中证1000",
+                    market="a_share",
+                    instrument_type="index",
+                    exchange="SSE",
+                    status="active",
+                )
+            )
+            await session.commit()
+
+        registry = JobExecutorRegistry()
+        registry.register(
+            "bulk_download",
+            BulkDownloadExecutor(
+                session_maker=_session_maker(engine),  # type: ignore[arg-type]
+                settings_factory=lambda: None,
+            ),
+        )
+        worker = _build_worker(engine, registry)
+        await _enqueue(
+            engine,
+            kind="bulk_download",
+            payload={
+                "market": "a_share",
+                "source": "",
+                "start": "2024-01-01",
+                "instrument_type": "index",
+            },
+        )
+
+        mock_provider = AsyncMock()
+        mock_provider.update_cache_batch.return_value = {"000852.SH": True}
+        with patch(
+            "finboard_backtest.background_jobs.executors.bulk_download.build_bar_provider",
+            return_value=mock_provider,
+        ):
+            await _drain(worker)
+
+        async with session_factory(engine)() as session:
+            row = (
+                await session.execute(
+                    select(BackgroundJobModel).where(
+                        BackgroundJobModel.kind == "bulk_download",
+                        BackgroundJobModel.payload["source"].as_string() == "",
+                    )
+                )
+            ).scalar_one()
+            assert row.status == "succeeded"
+        called = mock_provider.update_cache_batch.await_args
+        assert called is not None
+        symbols = list(called.args[0])
+        assert [s.code for s in symbols] == ["000852.SH"]
+
+        async with session_factory(engine)() as session:
+            await session.execute(
+                sa_delete(InstrumentModel).where(InstrumentModel.code == "000852.SH")
+            )
+            await session.commit()
+
     async def test_bulk_download_tushare_rejects_etf(
         self, engine: AsyncEngine
     ) -> None:

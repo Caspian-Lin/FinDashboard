@@ -231,17 +231,23 @@ class DatasetPublishExecutor:
                 # benchmark 数据集,也可与股票/ETF 混发);issue #265 放行
                 # convertible 转债(转债 bars 与正股/基准同处一份发布);
                 # issue #267 放行 futures 期货主连(仅基准/研究数据,
-                # 不可撮合,对齐 index 先例)。至少含五者之一。
-                missing_types = (
-                    {"stock", "etf", "index", "convertible", "futures"} - selected_types
-                )
-                if missing_types:
+                # 不可撮合,对齐 index 先例)。五种类型任意非空子集均合法
+                # (基准行情本就可以只发指数/期货);只拒绝白名单之外的
+                # 类型,防未来新增 instrument_type 静默混入 bars 发布。
+                disallowed_types = selected_types - {
+                    "stock",
+                    "etf",
+                    "index",
+                    "convertible",
+                    "futures",
+                }
+                if disallowed_types:
                     raise ExecutorError(
                         code="mixed_scope_violation",
                         summary=(
-                            "多资产混合源发布必须至少包含股票、ETF、指数、可转债或期货主连,"
-                            "缺少: "
-                            + ", ".join(sorted(missing_types))
+                            "多资产混合源发布只允许股票、ETF、指数、可转债、期货主连,"
+                            "包含未放行类型: "
+                            + ", ".join(sorted(disallowed_types))
                         ),
                         retryable=False,
                         context={"job_id": job.job_id},

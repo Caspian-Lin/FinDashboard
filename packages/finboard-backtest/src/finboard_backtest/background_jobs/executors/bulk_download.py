@@ -56,7 +56,17 @@ class BulkDownloadExecutor:
         progress: ProgressCallback,
     ) -> JobResult:
         market = _require_str(job, "market")
-        source = _require_str(job, "source")
+        source_raw = job.payload.get("source")
+        if source_raw is not None and not isinstance(source_raw, str):
+            raise ExecutorError(
+                code="invalid_payload",
+                summary="source 必须是字符串",
+                retryable=False,
+                context={"job_id": job.job_id},
+            )
+        # REST/MCP 入队对「默认源」写的是空串("" → auto,#341 跟进):交给
+        # resolve_provider_name 的回落链(settings 默认 → env → akshare)。
+        source = source_raw or None
         start = _parse_date(job, "start")
         instrument_type_raw = job.payload.get("instrument_type")
         exchange = job.payload.get("exchange")
