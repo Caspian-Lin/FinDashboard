@@ -5,7 +5,8 @@
 ``adj_factor``、可转债(issue #265)``cb_daily``、指数 ``index_daily``,
 后两者无复权概念,原始价落盘。ETF(``fund_daily`` 2000 档实测可调,
 但复权口径与 akshare qfq 对齐未定稿)与期货(issue #267)fail-visible
-指路 akshare,不静默误路由。
+指路 akshare,不静默误路由。指数 ``index_daily`` 的基日行 open/high/low
+为 NaN、close 正常时单行跳过并发具名 warning(issue #346)。
 """
 
 from __future__ import annotations
@@ -400,7 +401,16 @@ class TushareBarProvider(AkShareProvider):
                     )
                 )
                 cursor = chunk_end + timedelta(days=1)
-            return _build_bars(symbol, index_rows, [], "none", endpoint="index_daily")
+            return _build_bars(
+                symbol,
+                index_rows,
+                [],
+                "none",
+                endpoint="index_daily",
+                # 指数基日行(issue #346):open/high/low 为 NaN、close 正常
+                # 的行单行跳过 + 具名 warning;close 坏行仍整段拒绝。
+                lenient_ohlc=True,
+            )
         daily_rows: list[Mapping[str, object]] = []
         factor_rows: list[Mapping[str, object]] = []
         cursor = start
@@ -562,6 +572,23 @@ def _decimal(row: Mapping[str, object], field: str, endpoint: str) -> Decimal:
     return result
 
 
+def _lenient_decimal(row: Mapping[str, object], field: str, endpoint: str) -> Decimal | None:
+    """index 路径宽容解析(issue #346):无效 / 非有限数字返回 None,不抛错。
+
+    仅用于 ``index_daily`` 的 open/high/low —— 指数基日行(实测 000688.SH
+    2019-12-31、899050.BJ 2022-04-29)上游只给 close,其余价格字段为 NaN。
+    close 不走本函数,仍由 :func:`_decimal` 严格解析。
+    """
+    value = row.get(field)
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not result.is_finite():
+        return None
+    return result
+
+
 def _trade_date(row: Mapping[str, object], endpoint: str) -> date:
     try:
         return datetime.strptime(str(row["trade_date"]), "%Y%m%d").date()
@@ -586,11 +613,18 @@ def _build_bars(
     *,
     endpoint: str = "daily",
     volume_multiplier: Decimal = Decimal("100"),
+    lenient_ohlc: bool = False,
 ) -> list[Bar]:
     """把 tushare 日线行规范化为领域 Bar。
 
     ``volume_multiplier``:daily 的 vol 单位为手(1 手=100 股);cb_daily
     的 vol 单位亦为手,但可转债 1 手=10 张(issue #265),传 10。
+
+    ``lenient_ohlc``(issue #346,仅 ``index_daily`` 路径传 True):对
+    「close 有限且 > 0,但 open/high/low 含非有限值」的行(指数基日行)
+    跳过该行并发具名 warning ``tushare.index_row_skipped_nonfinite_ohlc``,
+    不做「以 close 回填缺失 OHLC」的数据制造;close 非有限或 ≤ 0 仍整段
+    拒绝。默认 False,股票 / 可转债口径完全不变(一行坏即整段拒)。
     """
     factors: dict[date, Decimal] = {
         _trade_date(row, "adj_factor"): _decimal(row, "adj_factor", "adj_factor")
@@ -599,6 +633,7 @@ def _build_bars(
     reference_factor = factors[max(factors)] if factors else Decimal("1")
     bars: list[Bar] = []
     seen: set[date] = set()
+    skipped_dates: list[date] = []
     for row in daily_rows:
         business_date = _trade_date(row, endpoint)
         if business_date in seen:
@@ -617,10 +652,28 @@ def _build_bars(
             if adjust == "qfq"
             else factor
         )
-        prices = {
-            name: _decimal(row, name, endpoint) * multiplier
-            for name in ("open", "high", "low", "close")
-        }
+        prices: dict[str, Decimal]
+        if lenient_ohlc:
+            # close 仍严格解析:非有限值在此处即整段抛出(fail-visible 不变)。
+            close_price = _decimal(row, "close", endpoint) * multiplier
+            ohlc_prices: dict[str, Decimal] = {}
+            row_skipped = False
+            for name in ("open", "high", "low"):
+                value = _lenient_decimal(row, name, endpoint)
+                if value is None:
+                    # 指数基日坏行:宁可缺一天,不虚构数据(issue #346)。
+                    row_skipped = True
+                    break
+                ohlc_prices[name] = value * multiplier
+            if row_skipped:
+                skipped_dates.append(business_date)
+                continue
+            prices = {**ohlc_prices, "close": close_price}
+        else:
+            prices = {
+                name: _decimal(row, name, endpoint) * multiplier
+                for name in ("open", "high", "low", "close")
+            }
         if any(not math.isfinite(float(value)) or value <= 0 for value in prices.values()):
             raise ValueError(f"Tushare {endpoint} {business_date} 包含无效价格")
         bars.append(
@@ -637,6 +690,15 @@ def _build_bars(
                 amount=_decimal(row, "amount", endpoint) * Decimal("1000"),
                 source="tushare",
             )
+        )
+    if skipped_dates:
+        logger.warning(
+            "tushare.index_row_skipped_nonfinite_ohlc",
+            symbol=symbol.code,
+            endpoint=endpoint,
+            skipped_dates=[item.isoformat() for item in skipped_dates],
+            skipped_count=len(skipped_dates),
+            total_rows=len(daily_rows),
         )
     bars.sort(key=lambda item: item.timestamp)
     return bars
