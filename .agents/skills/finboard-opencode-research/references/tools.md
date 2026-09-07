@@ -1633,7 +1633,7 @@ manifest 冻结 `{series_id, content_checksum}` 并入 `input_checksum`;
 单一 decision_at)—— 换发布从死墙变为托管批量重建。
 
 ### finboard_factor_series_build(写,入队)
-入队 `kind=factor_series_build` 后台任务(worker 单并发,复用沙箱槽位)。
+入队 `kind=factor_series_build` 后台任务(worker 并发 2;沙箱内存默认 4096MB,并发 x 4096MB 不得超 Docker Desktop 可用内存)。
 - 参数:`name: str`(因子产物名)、`release_id: str`(bars 主发布锚定,
   **自动进挂载**且必须为 bars 类发布,非 bars 秒拒 #371)、
   `window_start/window_end: ISO 日期`、`dataset_release_ids?: list[str]`

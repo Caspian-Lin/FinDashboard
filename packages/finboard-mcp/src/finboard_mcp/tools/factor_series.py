@@ -3,7 +3,7 @@
 内容寻址因子序列(FS- 前缀,``research_factor_series``)的两个工具:
 
 * ``finboard_factor_series_build``(写)—— 入队 ``kind=factor_series_build``
-  后台任务(worker 单并发);入队前同步做缓存检查:``series_key``(由
+  后台任务(worker 并发 2,#375;入队前同步做缓存检查:``series_key``(由
   resolved commit x bars 主发布 x 研究发布联合集 x params x 窗口 内容寻址)
   已存在且 ``content_checksum`` 一致 → 直接返回 ``unchanged``,不创建 job。
 * ``finboard_factor_series_get``(只读)—— ``view=summary|detail`` 默认
@@ -330,7 +330,7 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_factor_series_build",
         description=(
-            "入队因子序列构建(kind=factor_series_build 后台任务,worker 单并发):"
+            "入队因子序列构建(kind=factor_series_build 后台任务,worker 并发 2):"
             "已晋级 active 因子代码按窗口逐决策日在沙箱容器构建内容寻址序列"
             "(series_key = sha256(commit|bars 主发布|研究发布联合集|params|窗口)),"
             "窗口内逐决策日截面 values + 质量归档冻结进 research_factor_series"

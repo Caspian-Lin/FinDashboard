@@ -37,6 +37,7 @@ worker 领取 ``kind=factor_series_build`` 任务(单并发,复用 research_code
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -484,19 +485,27 @@ class FactorSeriesBuildExecutor:
         """抽 2 个截断点跑前缀不变性审计;返回失败文案或 None(通过)。
 
         ``baseline`` 为主构建阶段产物(结果契约见 ``_record_from_result``),
-        传入审计回调复用(#371,免每截断点重建基线)。检出 →
-        ``lookahead_detected``,错误具名**首个分歧日期**(多个截断点均检出
-        时取最早);审计本体 #359 提供,经构造注入可 mock。
+        传入审计回调复用(#371,免每截断点重建基线)。两个截断点相互独立
+        (各自从基线挂载过滤出变体挂载 + 独立容器),并发执行(#375):
+        检出语义零变化(失败报告仍取最早分歧日期),成功场景审计段墙钟
+        近半;异常按截断点顺序重抛第一个(与串行一致)。审计本体 #359
+        提供,经构造注入可 mock。
         """
+        cuts = audit_truncation_points(list(record.dates))
+        outcomes = await asyncio.gather(
+            *(
+                self._prefix_audit(spec, baseline, truncate_at=cut)
+                for cut in cuts
+            ),
+            return_exceptions=True,
+        )
         divergences: list[date] = []
-        for truncate_at in audit_truncation_points(list(record.dates)):
-            outcome = await self._prefix_audit(spec, baseline, truncate_at=truncate_at)
+        for cut, outcome in zip(cuts, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                raise outcome
             if not getattr(outcome, "passed", True):
                 first = getattr(outcome, "first_divergence_date", None)
-                if first is not None:
-                    divergences.append(first)
-                else:
-                    divergences.append(truncate_at)
+                divergences.append(first if first is not None else cut)
         if not divergences:
             return None
         first_divergence = min(divergences)
