@@ -142,8 +142,10 @@ async def build_data_mount(
     wanted = frozenset(symbols) if symbols is not None else None
 
     await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
-    bars_rows: list[dict[str, Any]] = []
-    daily_rows: list[dict[str, Any]] = []
+    # 流式写入器(#371):与窗口挂载同构,bars / daily_metrics 逐标的落盘;
+    # financial_indicators 公告量小,保留整集累积旧路径。
+    bars_writer = _DatasetStreamWriter(out_root / "bars.parquet")
+    daily_writer = _DatasetStreamWriter(out_root / "daily_metrics.parquet")
     fin_rows: list[dict[str, Any]] = []
     contributions: list[MountDataset] = []
     universe: set[str] = set()
@@ -163,51 +165,85 @@ async def build_data_mount(
                     f"发布 {release_id} 缺少请求的标的: {sorted(missing)[:10]}"
                 )
         if kind.value == "bars":
-            rows = await _collect_bars(provider, instruments, decision_at)
-            _guard_pit(rows, "date", release_id, decision_day)
-            bars_rows.extend(rows)
-            universe.update(r["symbol"] for r in rows)
-            file_name, max_day = "bars.parquet", _max_date(rows, "date")
-        elif kind.value == "daily_metrics":
-            rows = await _collect_daily_metrics(
-                provider, instruments, decision_at
+            bars_schema = _bars_schema(include_available_at=False)
+            start_rows = bars_writer.rows
+            provider_max: date | None = None
+            for item in instruments:
+                rows = await _collect_bars(
+                    provider, [item], decision_at, include_available_at=False
+                )
+                if not rows:
+                    continue
+                universe.update(r["symbol"] for r in rows)
+                table = pa.Table.from_pylist(rows, schema=bars_schema)
+                _guard_pit_table(table, "date", release_id, decision_day)
+                bars_writer.write(table)
+                provider_max = _max_date_optional(provider_max, rows, "date")
+            contributions.append(
+                MountDataset(
+                    release_id=release_id,
+                    dataset_kind=kind.value,
+                    file="bars.parquet",
+                    row_count=bars_writer.rows - start_rows,
+                    max_data_date=provider_max,
+                )
             )
-            _guard_pit(rows, "trade_date", release_id, decision_day)
-            daily_rows.extend(rows)
-            file_name, max_day = "daily_metrics.parquet", _max_date(
-                rows, "trade_date"
+        elif kind.value == "daily_metrics":
+            daily_schema: pa.Schema | None = None
+            start_rows = daily_writer.rows
+            provider_max_daily: date | None = None
+            for item in instruments:
+                rows = await _collect_daily_metrics(
+                    provider, [item], decision_at, include_available_at=False
+                )
+                if not rows:
+                    continue
+                if daily_schema is None:
+                    daily_schema = _daily_metrics_schema(
+                        list(rows[0]), include_available_at=False
+                    )
+                table = pa.Table.from_pylist(rows, schema=daily_schema)
+                _guard_pit_table(table, "trade_date", release_id, decision_day)
+                daily_writer.write(table)
+                provider_max_daily = _max_date_optional(
+                    provider_max_daily, rows, "trade_date"
+                )
+            contributions.append(
+                MountDataset(
+                    release_id=release_id,
+                    dataset_kind=kind.value,
+                    file="daily_metrics.parquet",
+                    row_count=daily_writer.rows - start_rows,
+                    max_data_date=provider_max_daily,
+                )
             )
         elif kind.value == "financial_indicators":
-            rows = await _collect_financial(provider, instruments, decision_at)
+            rows = await _collect_financial(
+                provider, instruments, decision_at, include_available_at=False
+            )
             _guard_pit(rows, "announcement_date", release_id, decision_day)
             fin_rows.extend(rows)
-            file_name, max_day = (
-                "financial_indicators.parquet",
-                _max_date(rows, "announcement_date"),
+            contributions.append(
+                MountDataset(
+                    release_id=release_id,
+                    dataset_kind=kind.value,
+                    file="financial_indicators.parquet",
+                    row_count=len(rows),
+                    max_data_date=_max_date(rows, "announcement_date"),
+                )
             )
         else:
             raise SandboxMountError(
                 f"发布 {release_id} 的 dataset_kind={kind.value!r} 不支持挂载"
             )
-        contributions.append(
-            MountDataset(
-                release_id=release_id,
-                dataset_kind=kind.value,
-                file=file_name,
-                row_count=len(rows),
-                max_data_date=max_day,
-            )
-        )
 
-    if not bars_rows:
+    if bars_writer.rows == 0:
         raise SandboxMountError(
             "挂载不含任何行情行:dataset_release_ids 须至少包含一个含目标"
             "标的的 bars 类发布"
         )
-    await asyncio.to_thread(_write_parquet, out_root / "bars.parquet", bars_rows)
-    await asyncio.to_thread(
-        _write_parquet, out_root / "daily_metrics.parquet", daily_rows
-    )
+    bars_writer.finish()
+    daily_writer.finish()
     await asyncio.to_thread(
         _write_parquet, out_root / "financial_indicators.parquet", fin_rows
     )
@@ -305,6 +341,131 @@ def _end_of_window(window_end: date) -> datetime:
     return datetime.combine(window_end, time(23, 59, 59, 999999), tzinfo=UTC)
 
 
+#: 数据集 kind → 行级数据日期列(过滤挂载重跑窗口防线用,#371)
+_DATASET_DATE_FIELD: dict[str, str] = {
+    "bars": "date",
+    "daily_metrics": "trade_date",
+    "financial_indicators": "announcement_date",
+}
+
+
+async def filter_window_data_mount(
+    baseline: WindowDataMount,
+    *,
+    new_window_end: date,
+    dates: Sequence[date],
+    out_root: Path,
+) -> WindowDataMount:
+    """从基线窗口挂载派生**更紧上界**的变体挂载(issue #371,审计重放)。
+
+    数学等值性:逐行 ``available_at`` 固定且 PIT 门控单调,「在 cut 现场
+    物化」(provider 走读 + available_at <= cut 日终门控)所得行集恒等于
+    基线行集 ∩ available_at <= cut 日终 —— 本函数对基线各数据集 parquet
+    做 Arrow 过滤(保序)后重跑窗口防线(数据日期 <= new_window_end),
+    免掉一次全市场 provider 对象走读。
+
+    清单 version=3:窗口字段换新(``window_end`` / ``dates``),代码与
+    发布溯源沿用基线;``symbols`` 为过滤后 bars 行集的标的并集(与现场
+    物化的 universe 同口径);checksum 与现场物化同法计算。
+
+    前置(违反即 :class:`SandboxMountError`):基线上界不得收紧到窗口起点
+    之前;``dates`` 非空、升序、且全部落在 ``[window_start, new_window_end]``。
+    """
+    if new_window_end > baseline.window_end or new_window_end < baseline.window_start:
+        raise SandboxMountError(
+            f"过滤挂载的新 window_end {new_window_end} 须落在基线窗口 "
+            f"[{baseline.window_start}, {baseline.window_end}] 内"
+        )
+    ordered_dates = tuple(dates)
+    if not ordered_dates:
+        raise SandboxMountError("过滤挂载要求非空 dates(截断后决策日序列)")
+    if list(ordered_dates) != sorted(ordered_dates):
+        raise SandboxMountError("dates 须按升序排列")
+    outside = [
+        d for d in ordered_dates if d < baseline.window_start or d > new_window_end
+    ]
+    if outside:
+        raise SandboxMountError(
+            f"dates 含新窗口外决策日: {outside[:3]}(window "
+            f"[{baseline.window_start}, {new_window_end}])"
+        )
+    ceiling = _end_of_window(new_window_end)
+
+    import pyarrow.compute as pc
+
+    await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
+    contributions: list[MountDataset] = []
+    universe: set[str] = set()
+    for dataset in baseline.datasets:
+        source = baseline.root / dataset.file
+        if not source.exists():
+            continue
+        table = await asyncio.to_thread(pq.read_table, source)
+        if "available_at" not in table.column_names:
+            raise SandboxMountError(
+                f"基线挂载 {dataset.file} 缺少 available_at 列,无法过滤"
+                "(窗口挂载 v3 各数据集恒携带该列)"
+            )
+        keep = pc.invert(
+            pc.fill_null(pc.greater(table.column("available_at"), ceiling), False)
+        )
+        filtered = table.filter(keep)
+        date_field = _DATASET_DATE_FIELD.get(dataset.dataset_kind)
+        if date_field is not None and filtered.num_rows:
+            _guard_window_pit_table(
+                filtered, date_field, dataset.release_id, new_window_end
+            )
+        if dataset.dataset_kind == "bars" and filtered.num_rows:
+            universe.update(filtered.column("symbol").unique().to_pylist())
+        max_day: date | None = None
+        if date_field is not None and filtered.num_rows:
+            max_day = pc.max(filtered.column(date_field)).as_py()
+        await asyncio.to_thread(
+            _write_table_parquet, out_root / dataset.file, filtered
+        )
+        contributions.append(
+            MountDataset(
+                release_id=dataset.release_id,
+                dataset_kind=dataset.dataset_kind,
+                file=dataset.file,
+                row_count=filtered.num_rows,
+                max_data_date=max_day,
+            )
+        )
+
+    mount = WindowDataMount(
+        root=out_root,
+        window_start=baseline.window_start,
+        window_end=new_window_end,
+        dates=ordered_dates,
+        symbols=tuple(sorted(universe)),
+        datasets=tuple(contributions),
+        manifest_checksum="",
+        code_artifact=baseline.code_artifact,
+        code_commit=baseline.code_commit,
+        release_id=baseline.release_id,
+        dataset_release_ids=baseline.dataset_release_ids,
+    )
+    payload = json.dumps(
+        {**mount.manifest_dict(), "generated_at": datetime.now(UTC).isoformat()},
+        ensure_ascii=False,
+        indent=2,
+    )
+    await asyncio.to_thread(
+        mount.manifest_path.write_text, payload, encoding="utf-8"
+    )
+    checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return replace(mount, manifest_checksum=checksum)
+
+
+def _write_table_parquet(path: Path, table: pa.Table) -> None:
+    """Arrow 表直接落盘(空表 = 确保文件不存在;同步,调用方走 to_thread)。"""
+    if table.num_rows == 0:
+        path.unlink(missing_ok=True)
+        return
+    pq.write_table(table, path, compression="zstd")
+
+
 async def build_window_data_mount(
     *,
     providers: Iterable[Any],
@@ -356,8 +517,10 @@ async def build_window_data_mount(
     wanted = frozenset(symbols) if symbols is not None else None
 
     await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
-    bars_rows: list[dict[str, Any]] = []
-    daily_rows: list[dict[str, Any]] = []
+    # 流式写入器(#371):bars / daily_metrics 逐标的批次落盘,内存只持
+    # row group 缓冲;financial_indicators 公告量小,保留整集累积旧路径。
+    bars_writer = _DatasetStreamWriter(out_root / "bars.parquet")
+    daily_writer = _DatasetStreamWriter(out_root / "daily_metrics.parquet")
     fin_rows: list[dict[str, Any]] = []
     contributions: list[MountDataset] = []
     universe: set[str] = set()
@@ -377,21 +540,69 @@ async def build_window_data_mount(
                     f"发布 {rel_id} 缺少请求的标的: {sorted(missing)[:10]}"
                 )
         if kind.value == "bars":
-            rows = await _collect_bars(
-                provider, instruments, ceiling, include_available_at=True
+            bars_schema = _bars_schema(include_available_at=True)
+            start_rows = bars_writer.rows
+            provider_max: date | None = None
+            for item in instruments:
+                rows = await _collect_bars(
+                    provider, [item], ceiling, include_available_at=True
+                )
+                if not rows:
+                    continue
+                universe.update(r["symbol"] for r in rows)
+                table = pa.Table.from_pylist(rows, schema=bars_schema)
+                _guard_window_pit_table(table, "date", rel_id, window_end)
+                bars_writer.write(table)
+                provider_max = _max_date_optional(provider_max, rows, "date")
+            contributions.append(
+                MountDataset(
+                    release_id=rel_id,
+                    dataset_kind=kind.value,
+                    file="bars.parquet",
+                    row_count=bars_writer.rows - start_rows,
+                    max_data_date=provider_max,
+                )
             )
-            _guard_window_pit(rows, "date", rel_id, window_end)
-            bars_rows.extend(rows)
-            universe.update(r["symbol"] for r in rows)
-            file_name, max_day = "bars.parquet", _max_date(rows, "date")
         elif kind.value == "daily_metrics":
-            rows = await _collect_daily_metrics(
-                provider, instruments, ceiling, include_available_at=True
-            )
-            _guard_window_pit(rows, "trade_date", rel_id, window_end)
-            daily_rows.extend(rows)
-            file_name, max_day = "daily_metrics.parquet", _max_date(
-                rows, "trade_date"
+            daily_schema: pa.Schema | None = None
+            start_rows = daily_writer.rows
+            provider_max_daily: date | None = None
+            # 列式快路径(#371):provider 支持列式读取时逐标的 Arrow 直通,
+            # 免整行对象税;测试 stub 等无该方法时回退对象路径(逐值等值)。
+            columnar = hasattr(provider, "fetch_daily_metrics_columns")
+            for item in instruments:
+                if columnar:
+                    table = await _collect_daily_metrics_columns(
+                        provider, item, ceiling
+                    )
+                else:
+                    rows = await _collect_daily_metrics(
+                        provider, [item], ceiling, include_available_at=True
+                    )
+                    if not rows:
+                        continue
+                    if daily_schema is None:
+                        daily_schema = _daily_metrics_schema(
+                            list(rows[0]), include_available_at=True
+                        )
+                    table = pa.Table.from_pylist(rows, schema=daily_schema)
+                if table.num_rows == 0:
+                    continue
+                if daily_schema is None:
+                    daily_schema = table.schema
+                _guard_window_pit_table(table, "trade_date", rel_id, window_end)
+                daily_writer.write(table)
+                provider_max_daily = _max_date_optional_table(
+                    provider_max_daily, table, "trade_date"
+                )
+            contributions.append(
+                MountDataset(
+                    release_id=rel_id,
+                    dataset_kind=kind.value,
+                    file="daily_metrics.parquet",
+                    row_count=daily_writer.rows - start_rows,
+                    max_data_date=provider_max_daily,
+                )
             )
         elif kind.value == "financial_indicators":
             rows = await _collect_financial(
@@ -399,33 +610,27 @@ async def build_window_data_mount(
             )
             _guard_window_pit(rows, "announcement_date", rel_id, window_end)
             fin_rows.extend(rows)
-            file_name, max_day = (
-                "financial_indicators.parquet",
-                _max_date(rows, "announcement_date"),
+            contributions.append(
+                MountDataset(
+                    release_id=rel_id,
+                    dataset_kind=kind.value,
+                    file="financial_indicators.parquet",
+                    row_count=len(rows),
+                    max_data_date=_max_date(rows, "announcement_date"),
+                )
             )
         else:
             raise SandboxMountError(
                 f"发布 {rel_id} 的 dataset_kind={kind.value!r} 不支持挂载"
             )
-        contributions.append(
-            MountDataset(
-                release_id=rel_id,
-                dataset_kind=kind.value,
-                file=file_name,
-                row_count=len(rows),
-                max_data_date=max_day,
-            )
-        )
 
-    if not bars_rows:
+    if bars_writer.rows == 0:
         raise SandboxMountError(
             "窗口挂载不含任何行情行:dataset_release_ids 须至少包含一个含"
             "目标标的的 bars 类发布"
         )
-    await asyncio.to_thread(_write_parquet, out_root / "bars.parquet", bars_rows)
-    await asyncio.to_thread(
-        _write_parquet, out_root / "daily_metrics.parquet", daily_rows
-    )
+    bars_writer.finish()
+    daily_writer.finish()
     await asyncio.to_thread(
         _write_parquet, out_root / "financial_indicators.parquet", fin_rows
     )
@@ -555,6 +760,80 @@ async def _collect_daily_metrics(
     return rows
 
 
+async def _collect_daily_metrics_columns(
+    provider: Any,
+    item: Any,
+    decision_at: datetime,
+) -> pa.Table:
+    """列式采集单标的 daily_metrics(issue #371 快路径,v3 挂载专用)。
+
+    消费 ``FrozenReleaseProvider.fetch_daily_metrics_columns``(PIT/区间
+    门控在 provider 内完成,语义与对象路径逐值一致),把逐标的原始表整形为
+    与 :func:`_collect_daily_metrics` 相同的行结构(symbol / trade_date /
+    数值字段按 dataclass 序 / available_at 末列):日期与时间戳两小列逐行
+    解析(同一 fromisoformat / ``_coerce_date`` 镜像语义),数值列保持
+    Arrow、缺列(旧发布字段白名单更窄)补全 null float64。
+    """
+    import dataclasses
+
+    from finboard_data.research import DailySecurityMetrics
+    from finboard_shared.models import Symbol
+
+    symbol = Symbol(code=item.code, market=item.market)
+    release = provider.release
+    table = await provider.fetch_daily_metrics_columns(
+        symbol,
+        start=release.start_date,
+        end=release.end_date,
+        decision_at=decision_at,
+    )
+    if table.num_rows == 0:
+        return table
+    meta_fields = {"symbol", "trade_date", "available_at", "observed_at", "source"}
+    metric_fields = [
+        f.name
+        for f in dataclasses.fields(DailySecurityMetrics)
+        if f.name not in meta_fields
+    ]
+    columns: dict[str, pa.Array | pa.ChunkedArray] = {
+        "symbol": pa.array([item.code] * table.num_rows, type=pa.string()),
+        "trade_date": pa.array(
+            [_date_from_value(v) for v in table.column("trade_date").to_pylist()],
+            type=pa.date32(),
+        ),
+        "available_at": pa.array(
+            [
+                v if isinstance(v, datetime) else datetime.fromisoformat(str(v))
+                for v in table.column("available_at").to_pylist()
+            ],
+            type=pa.timestamp("us", tz="UTC"),
+        ),
+    }
+    for name in metric_fields:
+        if name in table.column_names:
+            col = table.column(name)
+            # 全 None 列在逐标的文件里可能被推断为 null 类型(数值列统一
+            # float64,与对象路径 _f() 归一口径一致;null/int → float64 cast 安全)
+            columns[name] = (
+                col.cast(pa.float64()) if col.type != pa.float64() else col
+            )
+        else:
+            columns[name] = pa.nulls(table.num_rows, type=pa.float64())
+    ordered = ["symbol", "trade_date", *metric_fields, "available_at"]
+    return pa.table({name: columns[name] for name in ordered})
+
+
+def _date_from_value(value: Any) -> date | None:
+    """镜像 ``finboard_data.releases._coerce_date``(避免跨包私有导入)。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
 async def _collect_financial(
     provider: Any,
     instruments: list[Any],
@@ -594,6 +873,109 @@ async def _collect_financial(
 
 
 # --------------------------------------------------------------------------- #
+# 流式物化(issue #371):逐标的批次写 parquet,不再整发布堆 list[dict]
+# --------------------------------------------------------------------------- #
+
+#: 流式写 row group 的目标行数。逐标的批次(单标的 ~2K 行)直接落盘会产生
+#: 上万碎 row group,zstd 压缩比与容器端读取性能都显著劣化;先在内存缓冲、
+#: 攒满目标行数再写。内存上界 ≈ 目标行数 x 列数 x 8B(~20MB 量级)。
+_ROW_GROUP_TARGET_ROWS = 262_144
+
+
+class _DatasetStreamWriter:
+    """单一数据集 parquet 文件的流式写入器(issue #371)。
+
+    旧实现把全部行堆成 ``list[dict]`` 最后一次性 ``_write_parquet``——
+    全市场 daily_metrics 发布(5534 标的 x 全区间 ≈ 800 万行)仅 dict 列表
+    即 5-6GB。本写入器逐标的收批次,攒满 :data:`_ROW_GROUP_TARGET_ROWS`
+    落一个 row group,内存只持缓冲;文件 schema 取首个非空批次的 schema,
+    其后批次逐个 cast(数据集内列集恒定,cast 为 no-op,漂移即 fail-visible)。
+    空数据集 ``finish`` 时确保文件不存在(与旧 ``_write_parquet(path, [])``
+    的 unlink 语义一致)。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._schema: pa.Schema | None = None
+        self._writer: pq.ParquetWriter | None = None
+        self._buffer: list[pa.Table] = []
+        self._buffer_rows = 0
+        #: 已落盘 + 缓冲中的总行数(= 旧实现贡献计数的 len(rows))
+        self.rows = 0
+
+    def write(self, table: pa.Table) -> None:
+        if table.num_rows == 0:
+            return
+        if self._schema is None:
+            self._schema = table.schema
+            self._writer = pq.ParquetWriter(
+                self._path, self._schema, compression="zstd"
+            )
+        if table.schema != self._schema:
+            table = table.cast(self._schema)
+        self._buffer.append(table)
+        self._buffer_rows += table.num_rows
+        self.rows += table.num_rows
+        if self._buffer_rows >= _ROW_GROUP_TARGET_ROWS:
+            self._flush()
+
+    def _flush(self) -> None:
+        assert self._writer is not None  # write() 已建
+        if not self._buffer:
+            return
+        table = (
+            pa.concat_tables(self._buffer)
+            if len(self._buffer) > 1
+            else self._buffer[0]
+        )
+        self._writer.write_table(table, row_group_size=_ROW_GROUP_TARGET_ROWS)
+        self._buffer.clear()
+        self._buffer_rows = 0
+
+    def finish(self) -> None:
+        if self._writer is not None:
+            self._flush()
+            self._writer.close()
+            self._writer = None
+        if self.rows == 0:
+            self._path.unlink(missing_ok=True)
+
+
+def _bars_schema(include_available_at: bool) -> pa.Schema:
+    """bars 显式 schema:列序与旧实现首行 dict 的键序逐列一致。"""
+    fields = [pa.field("symbol", pa.string()), pa.field("date", pa.date32())]
+    fields += [
+        pa.field(name, pa.float64())
+        for name in ("open", "high", "low", "close", "volume", "amount")
+    ]
+    if include_available_at:
+        fields.append(pa.field("available_at", pa.timestamp("us", tz="UTC")))
+    return pa.schema(fields)
+
+
+def _daily_metrics_schema(
+    columns: Sequence[str], *, include_available_at: bool
+) -> pa.Schema:
+    """daily_metrics 显式 schema:列序随首条记录字段序,类型按域规则。
+
+    采集层 ``_f`` 已把全部数值字段规范化为 ``float | None``,故除标识与
+    日期列外恒为 float64(旧实现对全 None 列推断 pa.null(),语义差异仅
+    在 pandas 端 object-None 列变 float64-NaN 列,消费端读取更稳)。
+    """
+    fields = []
+    for col in columns:
+        if col == "symbol":
+            fields.append(pa.field(col, pa.string()))
+        elif col == "trade_date":
+            fields.append(pa.field(col, pa.date32()))
+        elif col == "available_at":
+            fields.append(pa.field(col, pa.timestamp("us", tz="UTC")))
+        else:
+            fields.append(pa.field(col, pa.float64()))
+    return pa.schema(fields)
+
+
+# --------------------------------------------------------------------------- #
 # 防线:PIT fail-closed + parquet 落盘
 # --------------------------------------------------------------------------- #
 
@@ -601,7 +983,11 @@ async def _collect_financial(
 def _guard_pit(
     rows: list[dict[str, Any]], date_field: str, release_id: str, decision_day: date
 ) -> None:
-    """任何数据日期晚于 decision_at 当日即拒绝生成挂载(物理隔离防线)。"""
+    """任何数据日期晚于 decision_at 当日即拒绝生成挂载(物理隔离防线)。
+
+    仅剩 financial_indicators 遗留路径使用(#371:bars / daily_metrics 已
+    改流式批次,走 :func:`_guard_pit_table`)。
+    """
     violations = [
         r for r in rows if r.get(date_field) and r[date_field] > decision_day
     ]
@@ -610,6 +996,28 @@ def _guard_pit(
         raise SandboxMountError(
             f"PIT 违规:发布 {release_id} 经 provider 门控后仍含 "
             f"{date_field} > {decision_day} 的行({len(violations)} 行,"
+            f"如 {sample});拒绝生成挂载"
+        )
+
+
+def _guard_pit_table(
+    table: pa.Table, date_field: str, release_id: str, decision_day: date
+) -> None:
+    """:func:`_guard_pit` 的流式批次版(issue #371):Arrow 计数,文案一致。
+
+    违规计数为**当前批次**内计数——任一批次违规即刻具名拒绝,不再等剩余
+    标的走完;fail-closed 语义不变,失败时点提前。
+    """
+    import pyarrow.compute as pc
+
+    flags = pc.fill_null(pc.greater(table.column(date_field), decision_day), False)
+    count = pc.sum(flags).as_py() or 0
+    if count:
+        idx = pc.index(flags, True).as_py()
+        sample = table.column(date_field)[idx].as_py().isoformat()
+        raise SandboxMountError(
+            f"PIT 违规:发布 {release_id} 经 provider 门控后仍含 "
+            f"{date_field} > {decision_day} 的行({count} 行,"
             f"如 {sample});拒绝生成挂载"
         )
 
@@ -625,6 +1033,8 @@ def _guard_window_pit(
     与 :func:`_guard_pit` 同构但独立成法:窗口模式的泄漏上界是窗口末端
     而非决策日,错误文案指明窗口语义与修复方向(检查 provider PIT 门控 /
     窗口参数),供 factor_series 执行链路 fail-closed 分类。
+
+    仅剩 financial_indicators 遗留路径使用(#371)。
     """
     violations = [
         r for r in rows if r.get(date_field) and r[date_field] > window_end
@@ -635,6 +1045,29 @@ def _guard_window_pit(
             f"窗口外数据:发布 {release_id} 经 provider 门控(上界 "
             f"window_end={window_end} 日终)后仍含 {date_field} > "
             f"{window_end} 的行({len(violations)} 行,如 {sample});"
+            "拒绝生成窗口挂载(factor_series 窗口上界 fail-closed)"
+        )
+
+
+def _guard_window_pit_table(
+    table: pa.Table, date_field: str, release_id: str, window_end: date
+) -> None:
+    """:func:`_guard_window_pit` 的流式批次版(issue #371):文案一致。
+
+    违规计数为**当前批次**内计数,任一批次违规即刻拒绝(fail-closed 不变,
+    失败时点提前,不再走完全部标的才发现)。
+    """
+    import pyarrow.compute as pc
+
+    flags = pc.fill_null(pc.greater(table.column(date_field), window_end), False)
+    count = pc.sum(flags).as_py() or 0
+    if count:
+        idx = pc.index(flags, True).as_py()
+        sample = table.column(date_field)[idx].as_py().isoformat()
+        raise SandboxMountError(
+            f"窗口外数据:发布 {release_id} 经 provider 门控(上界 "
+            f"window_end={window_end} 日终)后仍含 {date_field} > "
+            f"{window_end} 的行({count} 行,如 {sample});"
             "拒绝生成窗口挂载(factor_series 窗口上界 fail-closed)"
         )
 
@@ -704,6 +1137,34 @@ def _max_date(rows: list[dict[str, Any]], field: str) -> date | None:
     return max(values) if values else None
 
 
+def _max_date_optional(
+    current: date | None, rows: list[dict[str, Any]], field: str
+) -> date | None:
+    """流式归并单 provider 的最大数据日期(#371:逐标的批次累计)。"""
+    batch_max = _max_date(rows, field)
+    if current is None:
+        return batch_max
+    if batch_max is not None and batch_max > current:
+        return batch_max
+    return current
+
+
+def _max_date_optional_table(
+    current: date | None, table: pa.Table, field: str
+) -> date | None:
+    """表版 :func:`_max_date_optional`(列式快路径批次归并,#371)。"""
+    import pyarrow.compute as pc
+
+    batch_max: date | None = (
+        pc.max(table.column(field)).as_py() if table.num_rows else None
+    )
+    if current is None:
+        return batch_max
+    if batch_max is not None and batch_max > current:
+        return batch_max
+    return current
+
+
 def _symbol(item: Any) -> Any:
     from finboard_shared.models import Symbol
 
@@ -724,4 +1185,5 @@ __all__ = [
     "WindowDataMount",
     "build_data_mount",
     "build_window_data_mount",
+    "filter_window_data_mount",
 ]

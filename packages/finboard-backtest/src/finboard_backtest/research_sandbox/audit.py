@@ -147,6 +147,7 @@ async def run_prefix_invariance_audit(
     mode: AuditMode,
     cut_points: Sequence[date],
     dates: Sequence[date] | None = None,
+    baseline: FactorSeriesLike | None = None,
 ) -> PrefixInvarianceReport:
     """对一个区间构建函数跑前缀不变性审计(纯引擎,无 IO)。
 
@@ -159,7 +160,10 @@ async def run_prefix_invariance_audit(
     * ``cut_points``:cut 点序列(升序;每个 cut 产生一次对照重算);
     * ``dates``:完整审计窗口的决策日(升序)。**缺省 = ``cut_points``
       本身**(此时最后一个 cut 的对照是空操作,只在前几个 cut 上有意义);
-      正式编排(#360)应显式传入全窗口决策日。
+      正式编排(#360)应显式传入全窗口决策日;
+    * ``baseline``:已算好的全窗口基线(issue #371)。编排方在主构建阶段
+      已持有基线产物时传入,引擎免一次全量容器重放;None(缺省)时引擎
+      经 ``build_fn(full_dates)`` 自建,行为与 #359 原语义完全一致。
 
     检出即短路:首个分歧(最早的 cut x 最早的日期)即返回,不再跑剩余
     cut —— 审计目标是定位与拒绝,不是穷举。
@@ -179,7 +183,9 @@ async def run_prefix_invariance_audit(
             f"cut_points 含窗口外日期: {outside[:3]}(window [{lower}, {upper}])"
         )
 
-    baseline = await build_fn(full_dates, None)
+    audit_baseline = (
+        baseline if baseline is not None else await build_fn(full_dates, None)
+    )
     checks = 0
     for cut in ordered_cuts:
         if mode == "truncation":
@@ -194,7 +200,7 @@ async def run_prefix_invariance_audit(
             if not compare_dates:
                 continue
         checks += 1
-        found = _first_divergence(baseline, variant, compare_dates)
+        found = _first_divergence(audit_baseline, variant, compare_dates)
         if found is not None:
             day, divergent, base_cross, var_cross = found
             return PrefixInvarianceReport(

@@ -19,6 +19,7 @@ import hashlib
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -110,6 +111,139 @@ async def _clean(engine: AsyncEngine) -> None:
 
 
 # ---------------------------------------------------------------- Repository
+
+
+class TestIdempotencyDeadRecreate:
+    """issue #371:幂等键命中 failed/cancelled 死行时放行同键新建。
+
+    succeeded 仍返回旧记录(幂等命中);interrupted 保持单行语义
+    (lease 回收重排 / #305 replay 依赖);唯一性由部分唯一索引承载
+    (只约束活跃行)。
+    """
+
+    async def _seed(self, engine: AsyncEngine, key: str, status: str) -> str:
+        """建一个 queued 任务并直接置为指定状态(绕过状态机守卫)。"""
+        job_id = generate_background_job_id()
+        payload: dict[str, object] = {"x": 1}
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            await repo.create_or_get(
+                job_id=job_id,
+                idempotency_key=key,
+                kind="echo",
+                queue="default",
+                status=BackgroundJobStatus.QUEUED.value,
+                priority=0,
+                payload=payload,
+                payload_checksum=_checksum(payload),
+                max_attempts=3,
+                requested_by="tester",
+            )
+            await repo.checkpoint()
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("update background_jobs set status = :s where job_id = :j"),
+                {"s": status, "j": job_id},
+            )
+        return job_id
+
+    async def _create_again(
+        self, engine: AsyncEngine, key: str, payload: dict[str, object]
+    ) -> tuple[Any, bool]:
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            row, created = await repo.create_or_get(
+                job_id=generate_background_job_id(),
+                idempotency_key=key,
+                kind="echo",
+                queue="default",
+                status=BackgroundJobStatus.QUEUED.value,
+                priority=0,
+                payload=payload,
+                payload_checksum=_checksum(payload),
+                max_attempts=3,
+                requested_by="tester",
+            )
+            await repo.checkpoint()
+        return row, created
+
+    async def test_failed_row_allows_new_job(self, engine: AsyncEngine) -> None:
+        """失败尸体不再挡同参数重试:新建 job,旧行保留。"""
+        key = "idem-371-failed"
+        old_id = await self._seed(engine, key, "failed")
+        row, created = await self._create_again(engine, key, {"x": 1})
+        assert created is True
+        assert row.job_id != old_id
+        assert row.status == BackgroundJobStatus.QUEUED.value
+        # 同键多行时,查询语义 = 活跃行优先(返回新建行)
+        async with session_factory(engine)() as session:
+            looked = await BackgroundJobRepository(
+                session
+            ).get_by_idempotency_key(key)
+        assert looked is not None
+        assert looked.job_id == row.job_id
+
+    async def test_cancelled_row_allows_new_job(self, engine: AsyncEngine) -> None:
+        key = "idem-371-cancelled"
+        old_id = await self._seed(engine, key, "cancelled")
+        row, created = await self._create_again(engine, key, {"x": 1})
+        assert created is True
+        assert row.job_id != old_id
+
+    async def test_succeeded_row_still_idempotent(self, engine: AsyncEngine) -> None:
+        """succeeded 命中返回旧记录(对内容寻址构建即缓存命中)。"""
+        key = "idem-371-succeeded"
+        old_id = await self._seed(engine, key, "succeeded")
+        row, created = await self._create_again(engine, key, {"x": 1})
+        assert created is False
+        assert row.job_id == old_id
+
+    async def test_interrupted_row_still_idempotent(self, engine: AsyncEngine) -> None:
+        """interrupted 保持单行语义(lease 回收重排 / replay 通道依赖)。"""
+        key = "idem-371-interrupted"
+        old_id = await self._seed(engine, key, "interrupted")
+        row, created = await self._create_again(engine, key, {"x": 1})
+        assert created is False
+        assert row.job_id == old_id
+
+    async def test_dead_row_different_payload_conflicts(
+        self, engine: AsyncEngine
+    ) -> None:
+        key = "idem-371-conflict"
+        await self._seed(engine, key, "failed")
+        with pytest.raises(BackgroundJobPersistenceConflictError):
+            await self._create_again(engine, key, {"x": 2})
+
+    async def test_partial_index_replaces_column_unique(
+        self, engine: AsyncEngine
+    ) -> None:
+        """schema 断言:部分唯一索引在位,旧列级 UNIQUE 已移除。
+
+        本地旧测试库若残留建表时的 UNIQUE(表不重建则 create_all 不改),
+        本用例会失败——按惯例 drop background_jobs 表重跑即可。
+        """
+        async with engine.begin() as conn:
+            indexes = (
+                await conn.execute(
+                    text(
+                        "select indexname from pg_indexes "
+                        "where tablename = 'background_jobs'"
+                    )
+                )
+            ).fetchall()
+            legacy = (
+                await conn.execute(
+                    text(
+                        "select conname from pg_constraint "
+                        "where conrelid = 'background_jobs'::regclass "
+                        "and contype = 'u' "
+                        "and conname = 'background_jobs_idempotency_key_key'"
+                    )
+                )
+            ).fetchall()
+        names = {r[0] for r in indexes}
+        assert "uq_background_jobs_idempotency_active" in names
+        assert legacy == []
 
 
 class TestRepositoryStateMachine:

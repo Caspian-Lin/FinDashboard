@@ -1728,7 +1728,10 @@ class BackgroundJobModel(Base, IdMixin):
         JSON, default=dict, server_default=sql_text("'{}'::json")
     )
     payload_checksum: Mapped[str] = mapped_column(String(64), index=True)
-    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
+    # 幂等键(issue #371):不设列级 UNIQUE —— 唯一性由 __table_args__ 的部分
+    # 唯一索引承载,只约束「活跃」行;failed/cancelled 死行不挡同键新建
+    # (同参数重试不再被失败尸体以 conflict 挡死),succeeded/interrupted 仍唯一。
+    idempotency_key: Mapped[str] = mapped_column(String(128), index=True)
     progress_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     progress_done: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # phase 列宽 256(issue #348,迁移 d4e5f6a7b8c9):完成语级别短摘要,
@@ -1772,6 +1775,14 @@ class BackgroundJobModel(Base, IdMixin):
             "queue",
             "priority",
             "created_at",
+        ),
+        # issue #371:幂等唯一性只约束活跃行;failed/cancelled 是状态机永不
+        # 回访的死行,放行同键新建(同参数重试),succeeded/interrupted 保持唯一。
+        Index(
+            "uq_background_jobs_idempotency_active",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sql_text("status NOT IN ('failed', 'cancelled')"),
         ),
     )
 

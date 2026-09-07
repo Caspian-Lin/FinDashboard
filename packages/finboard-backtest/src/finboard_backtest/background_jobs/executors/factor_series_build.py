@@ -41,6 +41,7 @@ import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -117,23 +118,42 @@ async def _default_container_runner(spec: Any) -> Any:
     return await runner.run_factor_series_container(spec)
 
 
-async def _default_prefix_audit(spec: Any, *, truncate_at: date) -> Any:
-    """前缀不变性审计(截断模式;#359 纯引擎 + 容器重放)。
+async def _default_prefix_audit(spec: Any, baseline: Any, *, truncate_at: date) -> Any:
+    """前缀不变性审计(截断模式;#359 纯引擎,#371 基线复用)。
 
-    截断变体 = ``dates`` 截到 cut 且 ``window_end`` 收紧到 cut(v3 挂载的
-    PIT 上界随 window_end 收紧,变体容器物理上只可见 cut 日终之前的数据);
-    基线与变体各重放一次容器,报告携带 ``passed`` / ``first_divergence_date``
-    (执行器 ``_audit_sample`` 的消费形态)。
+    * ``baseline``(主构建阶段的 ``FactorSeriesOutput``)直接作为审计基线
+      传给引擎,免一次全窗口容器重放(#359 原语义每个截断点都重建基线,
+      一次 build 因此跑 5 次容器);
+    * 变体构建:基线挂载经 ``filter_window_data_mount`` 按 cut 收紧上界
+      (Arrow 过滤,秒级),变体容器经 ``mount_override`` 直接运行——
+      物理上只可见 cut 日终之前的数据,与现场物化数学等值;基线产物缺
+      mount(测试注入形态)时退回完整重放路径。
     """
     from finboard_backtest.research_sandbox.audit import run_prefix_invariance_audit
+    from finboard_backtest.research_sandbox.data_mount import (
+        filter_window_data_mount,
+    )
     from finboard_backtest.research_sandbox.runner import run_factor_series_container
+
+    baseline_mount = getattr(baseline, "mount", None)
+    workspace_dir = getattr(baseline, "workspace_dir", None)
 
     async def build_fn(
         dates: Sequence[date], perturb_from: date | None = None
     ) -> Any:
         del perturb_from  # 截断模式忽略第二参(#359 引擎语义)
+        window_end = max(dates)
+        variant_spec = replace(spec, dates=tuple(dates), window_end=window_end)
+        if baseline_mount is None or workspace_dir is None:
+            return await run_factor_series_container(variant_spec)
+        variant_mount = await filter_window_data_mount(
+            baseline_mount,
+            new_window_end=window_end,
+            dates=dates,
+            out_root=Path(workspace_dir) / f"data-cut-{window_end.isoformat()}",
+        )
         return await run_factor_series_container(
-            replace(spec, dates=tuple(dates), window_end=max(dates))
+            variant_spec, mount_override=variant_mount
         )
 
     return await run_prefix_invariance_audit(
@@ -141,6 +161,7 @@ async def _default_prefix_audit(spec: Any, *, truncate_at: date) -> Any:
         mode="truncation",
         cut_points=[truncate_at],
         dates=list(spec.dates),
+        baseline=baseline,
     )
 
 
@@ -260,7 +281,8 @@ class FactorSeriesBuildExecutor:
         await progress(4, _TOTAL_STAGES, "factor_series_build:audit")
 
         # 前缀不变性审计抽样:检出前视 → failed=lookahead_detected(不落库)。
-        audit_failure = await self._audit_sample(spec, record)
+        # 基线复用主构建产物(#371):audit 回调接收 (spec, baseline, cut)。
+        audit_failure = await self._audit_sample(spec, record, result)
         if audit_failure is not None:
             return JobResult(
                 status="failed",
@@ -368,12 +390,35 @@ class FactorSeriesBuildExecutor:
             return artifact.artifact_id, commit
 
     async def _require_releases(self, payload: FactorSeriesBuildPayload) -> None:
-        """bars 主发布与联合集逐个存在性检查(fail-visible)。"""
+        """bars 主发布与联合集逐个存在性检查(fail-visible)。
+
+        ``release_id`` 须锚定 **bars** 类发布(issue #371):挂载的全部
+        行情行来自它;此前不校验 kind,错锚会在走完全量挂载物化(真实
+        发布 ~20 分钟)后才以「窗口挂载不含任何行情行」失败——这里秒拒。
+        """
+        from finboard_data.releases import ReleaseDatasetKind
         from finboard_persistence import ResearchDatasetReleaseRepository
 
         async with self._session_maker() as session:
             repo = ResearchDatasetReleaseRepository(session)
-            for release_id in (payload.release_id, *payload.dataset_release_ids):
+            main_release = await repo.get(payload.release_id)
+            if main_release is None:
+                raise ExecutorError(
+                    code=DATASET_RELEASE_UNAVAILABLE,
+                    summary=f"研究数据发布不存在: {payload.release_id}",
+                    retryable=False,
+                )
+            if main_release.dataset_kind != ReleaseDatasetKind.BARS:
+                raise ExecutorError(
+                    code="invalid_payload",
+                    summary=(
+                        f"release_id 须锚定 bars 主发布: {payload.release_id} "
+                        f"是 {main_release.dataset_kind.value} 数据集;"
+                        "研究数据发布应放进 dataset_release_ids"
+                    ),
+                    retryable=False,
+                )
+            for release_id in payload.dataset_release_ids:
                 if await repo.get(release_id) is None:
                     raise ExecutorError(
                         code=DATASET_RELEASE_UNAVAILABLE,
@@ -434,16 +479,18 @@ class FactorSeriesBuildExecutor:
         )
 
     async def _audit_sample(
-        self, spec: Any, record: FactorSeriesRecord
+        self, spec: Any, record: FactorSeriesRecord, baseline: Any
     ) -> str | None:
         """抽 2 个截断点跑前缀不变性审计;返回失败文案或 None(通过)。
 
-        检出 → ``lookahead_detected``,错误具名**首个分歧日期**(多个截断点
-        均检出时取最早);审计本体 #359 提供,经构造注入可 mock。
+        ``baseline`` 为主构建阶段产物(结果契约见 ``_record_from_result``),
+        传入审计回调复用(#371,免每截断点重建基线)。检出 →
+        ``lookahead_detected``,错误具名**首个分歧日期**(多个截断点均检出
+        时取最早);审计本体 #359 提供,经构造注入可 mock。
         """
         divergences: list[date] = []
         for truncate_at in audit_truncation_points(list(record.dates)):
-            outcome = await self._prefix_audit(spec, truncate_at=truncate_at)
+            outcome = await self._prefix_audit(spec, baseline, truncate_at=truncate_at)
             if not getattr(outcome, "passed", True):
                 first = getattr(outcome, "first_divergence_date", None)
                 if first is not None:

@@ -373,7 +373,13 @@ def _make_executor(
 
     import finboard_backtest.research_sandbox.runner as runner_mod
 
-    observed: dict[str, Any] = {"specs": [], "truncate_points": [], "persisted": []}
+    observed: dict[str, Any] = {
+        "specs": [],
+        "truncate_points": [],
+        "persisted": [],
+        "audit_baselines": [],
+        "runner_results": [],
+    }
 
     @dataclass(frozen=True)
     class _StubSpec:
@@ -388,6 +394,7 @@ def _make_executor(
 
     async def _run_container(spec: Any) -> Any:
         observed["specs"].append(spec)
+        observed["runner_results"].append(runner_result)
         return runner_result
 
     async def _run_audit(
@@ -396,11 +403,14 @@ def _make_executor(
         mode: Any,
         cut_points: Any,
         dates: Any = None,
+        baseline: Any = None,
     ) -> Any:
-        # 与 #359 真实引擎同签名的假引擎:只记录抽样截断点并回放结果,
-        # 不调 build_fn(引擎本体行为由 research_sandbox 审计专项测试覆盖)
+        # 与 #359 真实引擎同签名的假引擎:只记录抽样截断点与编排方传入的
+        # 基线(#371 起主构建产物直接复用,不再重建),回放结果,不调
+        # build_fn(引擎本体行为由 research_sandbox 审计专项测试覆盖)
         assert mode == "truncation"
         observed["truncate_points"].extend(cut_points)
+        observed["audit_baselines"].append(baseline)
         return audit_outcomes.pop(0)
 
     monkeypatch.setattr(
@@ -482,6 +492,11 @@ class TestAuditSampling:
         assert result.result_ref == observed["persisted"][0].series_id
         # 抽样恰好 2 个截断点(3 日序列 → 1/3 与 2/3 位),specs 透传给审计。
         assert observed["truncate_points"] == [dates[1], dates[2]]
+        # 两个截断点都复用主构建产物作基线,不再重建(#371)。
+        assert observed["audit_baselines"] == [
+            observed["runner_results"][0],
+            observed["runner_results"][0],
+        ]
         assert observed["specs"] == observed["specs"]  # 1 个 spec(build)
         spec = observed["specs"][0]
         assert spec.code_artifact == "mom20"
