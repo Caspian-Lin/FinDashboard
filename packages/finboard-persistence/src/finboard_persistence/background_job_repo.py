@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, desc, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +43,16 @@ _PHASE_MAX_LENGTH = 256
 
 class BackgroundJobPersistenceConflictError(RuntimeError):
     """数据库中的幂等内容或状态与请求冲突。"""
+
+
+#: 幂等键「可被同键新建取代」的死状态(issue #371)。failed/cancelled 是状态机
+#: 永不回访的终态:同 payload 重试不再返回尸体,而是新建 job(此前同参数重试
+#: 被失败记录以 conflict 挡死,修复后的任务无法重新入队)。succeeded 仍返回旧
+#: 记录(幂等命中;对内容寻址的 factor_series_build 即缓存命中);interrupted
+#: 保留单行语义(lease 回收自动重排与 #305 replay 通道依赖它)。
+_RECREATABLE_STATUSES = frozenset(
+    {BackgroundJobStatus.FAILED.value, BackgroundJobStatus.CANCELLED.value}
+)
 
 
 class BackgroundJobRepository:
@@ -74,7 +84,9 @@ class BackgroundJobRepository:
         max_attempts: int,
         requested_by: str,
     ) -> tuple[BackgroundJobModel, bool]:
-        """幂等创建。同 idempotency_key 已存在则返回旧记录(created=False)。"""
+        """幂等创建。同 idempotency_key 的活跃任务已存在则返回旧记录
+        (created=False);旧记录为 failed/cancelled 死行时放行同键新建
+        (issue #371,同参数重试不再被失败尸体挡死)。"""
 
         existing = await self.get_by_idempotency_key(idempotency_key)
         if existing is None:
@@ -84,7 +96,9 @@ class BackgroundJobRepository:
                 raise BackgroundJobPersistenceConflictError(
                     "相同 job_id/idempotency_key 对应不同 payload"
                 )
-            return existing, False
+            if existing.status not in _RECREATABLE_STATUSES:
+                return existing, False
+            # failed/cancelled 死行:部分唯一索引只约束活跃行,落新行。
         row = BackgroundJobModel(
             job_id=job_id,
             idempotency_key=idempotency_key,
@@ -106,7 +120,12 @@ class BackgroundJobRepository:
             existing = await self.get_by_idempotency_key(idempotency_key)
             if existing is None:
                 existing = await self.get(job_id)
-            if existing is None:
+            if (
+                existing is None
+                or existing.status in _RECREATABLE_STATUSES
+            ):
+                # 部分唯一索引只可能撞活跃行;查不到活跃行说明是 job_id
+                # 冲突等异常,原样上抛。
                 raise
             if existing.payload_checksum != payload_checksum:
                 raise BackgroundJobPersistenceConflictError(
@@ -126,8 +145,23 @@ class BackgroundJobRepository:
     async def get_by_idempotency_key(
         self, idempotency_key: str
     ) -> BackgroundJobModel | None:
-        stmt = select(BackgroundJobModel).where(
-            BackgroundJobModel.idempotency_key == idempotency_key
+        """按幂等键取「当前」任务(#371):活跃行优先,其余取创建时间最新。
+
+        死行(failed/cancelled)放行同键新建后,同键可能有多行 —— 查询语义
+        固定为:活跃行(含 succeeded/interrupted)优先,无活跃行时取最新的
+        死行。
+        """
+        stmt = (
+            select(BackgroundJobModel)
+            .where(BackgroundJobModel.idempotency_key == idempotency_key)
+            .order_by(
+                case(
+                    (BackgroundJobModel.status.in_(_RECREATABLE_STATUSES), 1),
+                    else_=0,
+                ),
+                desc(BackgroundJobModel.created_at),
+            )
+            .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 

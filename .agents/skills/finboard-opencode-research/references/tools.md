@@ -1634,18 +1634,22 @@ manifest 冻结 `{series_id, content_checksum}` 并入 `input_checksum`;
 
 ### finboard_factor_series_build(写,入队)
 入队 `kind=factor_series_build` 后台任务(worker 单并发,复用沙箱槽位)。
-- 参数:`name: str`(因子产物名)、`release_id: str`(bars 主发布锚定)、
+- 参数:`name: str`(因子产物名)、`release_id: str`(bars 主发布锚定,
+  **自动进挂载**且必须为 bars 类发布,非 bars 秒拒 #371)、
   `window_start/window_end: ISO 日期`、`dataset_release_ids?: list[str]`
-  (研究发布联合集,排序冻结)、`commit?`、`artifact_id?`、`params?`
+  (研究发布联合集,排序冻结,不得含 bars 主发布)、`commit?`、
+  `artifact_id?`、`params?`
 - 入队预检:sandbox 开启、(factor,name) 有已晋级 active+passed 产物
   (显式 artifact_id 同样要求非 retired;指定 commit 须等于 active 引用)、
   release 均已登记
 - **缓存检查**:series_key 已存在且 content_checksum 一致 → 直接返回
-  `unchanged=true`(不创建任务,不启动容器);否则入队返回 job_id
+  `unchanged=true`(不创建任务,不启动容器);同参数任务此前
+  failed/cancelled 时重提交**新建任务**(#371,不会命中失败尸体);否则
+  入队返回 job_id
 - 执行:窗口内逐决策日沙箱执行 factor.compute(#359 容器执行本体)→
-  抽 2 个截断点做前缀不变性审计(检出前视 → failed=
-  `lookahead_detected`,错误具名首个分歧日期,与
-  output_contract_violation 同级)→ 内容寻址落库
+  抽 2 个截断点做前缀不变性审计(基线复用主构建产物,变体挂载由基线
+  Arrow 过滤派生,#371;检出前视 → failed=`lookahead_detected`,错误具名
+  首个分歧日期,与 output_contract_violation 同级)→ 内容寻址落库
 - 轮询:`finboard_job_get`(成功 result_ref=FS-...;error_summary 含
   `cache_hit` 表示命中缓存)
 

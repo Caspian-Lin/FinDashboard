@@ -396,6 +396,9 @@ class FactorSeriesOutput:
     workspace_dir: Path
     image: str
     image_digest: str
+    #: 本次执行实际使用的窗口挂载(issue #371,仅内存传递不落库):编排方
+    #: (#360 执行器)据此为审计变体派生更紧上界的过滤挂载,免全量重物化。
+    mount: WindowDataMount | None = None
 
 
 def _validate_series_spec(spec: FactorSeriesRunSpec) -> None:
@@ -434,6 +437,7 @@ async def run_factor_series_container(
     driver: DockerDriver | None = None,
     release_provider_factory: Callable[[str], Any] | None = None,
     workspace_root: Path | None = None,
+    mount_override: WindowDataMount | None = None,
 ) -> FactorSeriesOutput:
     """执行一次区间因子沙箱容器(issue #359;#360 编排调用)。
 
@@ -443,6 +447,10 @@ async def run_factor_series_container(
     → 失败分类(:mod:`errors` 码,抛 :class:`SandboxError`)→ 质量门指标
     (不抛错,由调用方按 ``quality.passed`` 处置)→ 归档 stdout/stderr/
     container.json/usage.json 到 workspace。
+
+    ``mount_override``(issue #371,审计变体路径):传入已构建的窗口挂载
+    时跳过 provider 物化,直接以该挂载运行容器——挂载与 spec 的一致性经
+    :func:`_validate_mount_override` fail-closed 校验。缺省 None 走原路径。
 
     依赖注入(测试与 #360 编排用,均可缺省走默认):``settings`` 缺省经
     ``finboard_app.config.load_settings`` 延迟加载;``driver`` 缺省走
@@ -474,26 +482,31 @@ async def run_factor_series_container(
     run_dir = workspace / f"FSC-{uuid.uuid4().hex[:12]}"
     _stage_series_code(run_dir, code, spec.params)
 
-    providers, release_checksums = await _series_providers(
-        spec, release_provider_factory, settings
-    )
-    mount = await build_window_data_mount(
-        providers=providers,
-        window_start=spec.window_start,
-        window_end=spec.window_end,
-        dates=spec.dates,
-        out_root=run_dir / "data",
-        code_artifact=spec.code_artifact,
-        code_commit=spec.code_commit,
-        release_id=spec.release_id,
-        dataset_release_ids=spec.dataset_release_ids,
-    )
+    if mount_override is not None:
+        _validate_mount_override(spec, mount_override)
+        mount = mount_override
+        release_checksums: dict[str, str] = {}
+    else:
+        providers, release_checksums = await _series_providers(
+            spec, release_provider_factory, settings
+        )
+        mount = await build_window_data_mount(
+            providers=providers,
+            window_start=spec.window_start,
+            window_end=spec.window_end,
+            dates=spec.dates,
+            out_root=run_dir / "data",
+            code_artifact=spec.code_artifact,
+            code_commit=spec.code_commit,
+            release_id=spec.release_id,
+            dataset_release_ids=spec.dataset_release_ids,
+        )
 
     result = await ResearchSandboxRunner(driver).run(
         SandboxRunSpec(
             image=image,
             code_dir=run_dir / "code",
-            data_dir=run_dir / "data",
+            data_dir=mount.root,
             out_dir=run_dir / "out",
             timeout_seconds=settings.research_sandbox_timeout_seconds,
             memory_mb=settings.research_sandbox_memory_mb,
@@ -541,6 +554,7 @@ async def run_factor_series_container(
         workspace_dir=run_dir,
         image=image,
         image_digest=digest,
+        mount=mount,
     )
 
 
@@ -607,10 +621,15 @@ async def _series_providers(
     ``release_provider_factory`` 注入时直接使用(测试/#360 编排免 DB);
     否则从研究数据发布表解析 checksum 后构造 ``FrozenReleaseProvider``
     (与 ResearchCodeRunExecutor._build_mount 同口径)。
+
+    provider 迭代序见 :func:`_series_provider_ids`(bars 主发布在前,#371)。
     """
     if release_provider_factory is not None:
         return (
-            [release_provider_factory(rid) for rid in spec.dataset_release_ids],
+            [
+                release_provider_factory(rid)
+                for rid in _series_provider_ids(spec)
+            ],
             {},
         )
     import os
@@ -630,7 +649,7 @@ async def _series_providers(
         checksums: dict[str, str] = {}
         async with maker() as session:
             repo = ResearchDatasetReleaseRepository(session)
-            for release_id in spec.dataset_release_ids:
+            for release_id in _series_provider_ids(spec):
                 release = await repo.get(release_id)
                 if release is None:
                     raise SandboxError(
@@ -648,6 +667,60 @@ async def _series_providers(
         return providers, checksums
     finally:
         await engine.dispose()
+
+
+def _series_provider_ids(spec: FactorSeriesRunSpec) -> list[str]:
+    """挂载 provider 的 release_id 迭代序(issue #371)。
+
+    bars 主发布(``spec.release_id``)**必须**进挂载 —— 挂载的行情行全部
+    来自它;研究发布联合集去重后跟随。此前只挂 dataset_release_ids,而
+    MCP 入队层又禁止把 bars 主发布放进联合集,任何真实 build 必然在走完
+    全量物化后报「窗口挂载不含任何行情行」(BJ-7DA144 事故根因)。
+    """
+    ids = [spec.release_id]
+    for rid in spec.dataset_release_ids:
+        if rid != spec.release_id:
+            ids.append(rid)
+    return ids
+
+
+def _validate_mount_override(
+    spec: FactorSeriesRunSpec, mount: WindowDataMount
+) -> None:
+    """mount_override 与 spec 的一致性 fail-closed 校验(issue #371)。
+
+    审计变体容器只应看到「截断后的窗口」:挂载的窗口字段、代码与发布溯源
+    必须与 spec 逐项一致,任何错位都拒绝运行(防错误复用基线挂载把窗口后
+    数据泄进变体容器)。
+    """
+    checks: tuple[tuple[str, object, object], ...] = (
+        ("code_artifact", mount.code_artifact, spec.code_artifact),
+        ("code_commit", mount.code_commit, spec.code_commit),
+        ("release_id", mount.release_id, spec.release_id),
+        (
+            "dataset_release_ids",
+            list(mount.dataset_release_ids),
+            list(spec.dataset_release_ids),
+        ),
+        ("window_start", mount.window_start, spec.window_start),
+        ("window_end", mount.window_end, spec.window_end),
+        ("dates", list(mount.dates), list(spec.dates)),
+    )
+    mismatches = [
+        f"{name}: mount={actual!r} vs spec={expected!r}"
+        for name, actual, expected in checks
+        if actual != expected
+    ]
+    if mismatches:
+        raise SandboxError(
+            "mount_spec_mismatch",
+            "mount_override 与 spec 不一致: " + "; ".join(mismatches),
+        )
+    if not mount.manifest_path.exists():
+        raise SandboxError(
+            "mount_spec_mismatch",
+            f"mount_override 缺少挂载清单: {mount.manifest_path}",
+        )
 
 
 def _stage_series_code(

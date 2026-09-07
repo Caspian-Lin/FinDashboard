@@ -51,6 +51,7 @@ from finboard_shared.types import (
 
 if TYPE_CHECKING:
     import numpy as np
+    import pyarrow as pa
 
 RELEASE_SCHEMA_VERSION = "v1"
 RELEASE_MANIFEST_FILENAME = "manifest.json"
@@ -2340,6 +2341,51 @@ def _read_research_records(
     return rows
 
 
+def _read_daily_metrics_columns(
+    path: Path,
+    *,
+    release_id: str,
+    start: date,
+    end: date,
+    decision_at: datetime,
+) -> pa.Table:
+    """:func:`_read_research_records` + ``_fetch_research_records`` 门控的
+    列式合并版(issue #371):Arrow 读 + 门控过滤,不产生整行 Python 对象。
+
+    门控语义逐值一致:``available_at`` > decision_at 的行跳过;PIT 可见行
+    缺 ``trade_date`` 具名 :class:`ReleaseIntegrityError`;其余按
+    ``start <= trade_date <= end`` 保留。仅日期/时间两小列逐行解析(与对象
+    路径同一 fromisoformat 语义),payload 列全程 Arrow。
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path, use_threads=False, pre_buffer=False)
+    if table.num_rows == 0:
+        return table
+    keep: list[bool] = []
+    for available_raw, trade_raw in zip(
+        table.column("available_at").to_pylist(),
+        table.column("trade_date").to_pylist(),
+        strict=True,
+    ):
+        available = (
+            available_raw
+            if isinstance(available_raw, datetime)
+            else datetime.fromisoformat(str(available_raw))
+        )
+        if available > decision_at:
+            keep.append(False)
+            continue
+        if trade_raw is None:
+            raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
+        record_date = _coerce_date(trade_raw)
+        if record_date is None:
+            raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
+        keep.append(start <= record_date <= end)
+    return table.filter(pa.array(keep))
+
+
 def _daily_metrics_from_release_row(
     row: dict[str, object],
     *,
@@ -2761,6 +2807,41 @@ class FrozenReleaseProvider:
             _daily_metrics_from_release_row(row, symbol=symbol.code)
             for row in rows
         ]
+
+    async def fetch_daily_metrics_columns(
+        self,
+        symbol: Symbol,
+        *,
+        start: date,
+        end: date,
+        decision_at: datetime,
+    ) -> pa.Table:
+        """:meth:`fetch_daily_metrics` 的列式版本(issue #371,挂载流式消费)。
+
+        语义逐值一致(PIT 门控 ``available_at <= decision_at`` + 日期区间
+        过滤 + 缺日期具名拒绝),但跳过整行 ``to_pylist`` / 领域对象 / dict
+        的对象税,直接返回过滤后的 Arrow 表(逐标的文件原列:string 日期、
+        float64 数值;不含 symbol 列)。``start``/``end`` 必填(调用方传
+        发布区间)。非 daily_metrics 发布 fail-closed,与对象路径同口径。
+        """
+        if decision_at.tzinfo is None:
+            raise ValueError("decision_at 必须带时区")
+        if self._release.dataset_kind is not ReleaseDatasetKind.DAILY_METRICS:
+            raise ReleaseCapabilityError(
+                f"发布 {self._release.release_id} 是 "
+                f"{self._release.dataset_kind.value} 数据集,不能按 "
+                f"daily_metrics 列式读取"
+            )
+        item = self._release.instrument(symbol.code)
+        artifact = await self._verified_artifact(item)
+        return await asyncio.to_thread(
+            _read_daily_metrics_columns,
+            artifact,
+            release_id=self._release.release_id,
+            start=start,
+            end=end,
+            decision_at=decision_at,
+        )
 
     async def fetch_financial_indicators(
         self,
