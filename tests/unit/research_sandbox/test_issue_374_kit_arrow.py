@@ -137,7 +137,10 @@ async def _run_harness(tmp_path: Path, factor_src: str) -> dict[str, Any]:
         ]
     )
     assert code == EXIT_OK, (out / "error.json").read_text(encoding="utf-8")
-    return json.loads((out / "factor_series.json").read_text(encoding="utf-8"))
+    payload: dict[str, Any] = json.loads(
+        (out / "factor_series.json").read_text(encoding="utf-8")
+    )
+    return payload
 
 
 def _run_pandas_reference(
@@ -369,9 +372,9 @@ class TestLazyMaterialization:
             code_dir=tmp_path, data_dir=data_dir, manifest=manifest
         )
         with pytest.raises(AttributeError, match="只读上下文"):
-            ctx.dates = ()  # type: ignore[misc]
+            ctx.dates = ()
         with pytest.raises(AttributeError, match="只读上下文"):
-            ctx.anything = 1  # type: ignore[attr-defined]
+            ctx.anything = 1
 
 
 class TestSourceContract:
@@ -385,13 +388,14 @@ class TestSourceContract:
             "close": [10.0 + i for i in range(len(days))],
         }
         if with_available_at:
-            rows["available_at"] = pa.array(  # type: ignore[assignment]
+            available_at = pa.array(
                 [
                     datetime(d.year, d.month, d.day, 15, 30, tzinfo=UTC)
                     for d in days
                 ],
                 type=pa.timestamp("us", tz="UTC"),
             )
+            rows["available_at"] = available_at
         return pa.table(rows)
 
     def test_mixed_sources_rejected(self) -> None:
