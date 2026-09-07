@@ -371,6 +371,25 @@ async def _build_queued_manifest(
                 "invalid_argument", f"因子快照不存在: {snapshot_id}"
             )
         snapshots.append(snapshot)
+    # issue #360:因子序列工件解析(内容寻址 FS-);声明时 u_ 因子观测按
+    # 决策日从 series.values 取,被覆盖因子跳过 single_shot 缺快照清单与
+    # #217 multi_period 拒绝(与 REST 路由同口径)。
+    from finboard_backtest.research_code import (
+        build_factor_series_refs,
+        factor_series_rebuild_error,
+        series_covered_factor_names,
+        series_release_mismatches,
+    )
+    from finboard_persistence import FactorSeriesRepository
+
+    series_repo = FactorSeriesRepository(session)
+    series_records: list[Any] = []
+    for series_id in body.factor_series_ids:
+        record = await series_repo.get(series_id)
+        if record is None:
+            raise McpToolError("invalid_argument", f"因子序列不存在: {series_id}")
+        series_records.append(record)
+    series_covered = series_covered_factor_names(series_records)
     required_factor_sources = {
         node.source
         for node in spec.feature_graph.nodes
@@ -379,15 +398,19 @@ async def _build_queued_manifest(
     }
     # issue #203:入队期 single_shot 缺快照秒级拒绝(与 REST 路由共用同一门控
     # 函数,对齐 #186 预检风格)。multi_period 声明 rebalance_frequency 后不受影响。
+    # issue #360:被声明因子序列覆盖的因子源不再要求快照(序列提供逐日观测;
+    # 决策时点仍需快照提供,零快照拒绝分支保持)。
     gate_error = single_shot_snapshot_gate_error(
         strategy_kind=spec.strategy_kind,
-        required_factor_sources=required_factor_sources,
+        required_factor_sources=required_factor_sources - series_covered,
         frozen_snapshot_count=len(snapshots),
         parameters=body.parameters,
     )
     if gate_error is not None:
         raise McpToolError("invalid_argument", gate_error)
     # issue #217:用户因子(u_ 前缀)入队门控(与 REST 路由共用同一函数)。
+    # issue #360:被声明因子序列覆盖的 u_ 因子跳过(序列按决策日索引,
+    # 不绑定单一 decision_at;冻结工件不受 artifact 生命周期影响)。
     from finboard_backtest.research_code import (
         active_user_factor_names,
         resolve_screen_bindings,
@@ -411,6 +434,7 @@ async def _build_queued_manifest(
         required_factor_sources=required_factor_sources,
         active_user_factors=active_factors,
         parameters=body.parameters,
+        series_covered_factors=series_covered,
     )
     if user_gate_error is not None:
         raise McpToolError("invalid_argument", user_gate_error)
@@ -428,7 +452,8 @@ async def _build_queued_manifest(
             observation.feature_name
             for snapshot in snapshots
             for observation in snapshot.observations
-        ],
+        ]
+        + sorted(series_covered),
     )
     if feature_gate_error is not None:
         raise McpToolError("invalid_argument", feature_gate_error)
@@ -472,6 +497,14 @@ async def _build_queued_manifest(
             spec_checksum = stable_checksum(frozen_spec.canonical_payload())
             spec = frozen_spec
     release_ids = {release.release_id for release in releases}
+    # issue #360:换发布守卫 —— 引用序列锚定的 bars 主发布不在本次冻结清单
+    # 即具名拒绝(失效 series 清单 + 重建代价预估;与 REST 路由共用函数)。
+    series_mismatches = series_release_mismatches(series_records, release_ids)
+    if series_mismatches:
+        raise McpToolError(
+            "invalid_argument",
+            factor_series_rebuild_error(series_mismatches),
+        )
     # issue #217:#355 —— 快照锚定发布 ⊆ 本次冻结清单(数据一致性 fail-visible,
     # 约束零放松);失配改为逐快照全量收集后一次性具名拒绝(名称 / 锚定发布 /
     # 失配方向 + 两条修复路径),与 REST 路由共用同一收集与文案函数。
@@ -508,7 +541,8 @@ async def _build_queued_manifest(
                 observation.feature_name
                 for snapshot in snapshots
                 for observation in snapshot.observations
-            ],
+            ]
+            + sorted(series_covered),
             research_release_kinds=[release.dataset_kind for release in releases],
         ),
     )
@@ -568,6 +602,11 @@ async def _build_queued_manifest(
                 ),
             )
             for snapshot in snapshots
+        ),
+        # issue #360:因子序列冻结引用({series_id, content_checksum});
+        # 空集合传空元组(不入 checksum,历史 manifest 零漂移)。
+        factor_series=(
+            build_factor_series_refs(series_records) if series_records else ()
         ),
         parameters=_cast(dict[str, JsonValue], body.parameters),
         validation_config=_cast(

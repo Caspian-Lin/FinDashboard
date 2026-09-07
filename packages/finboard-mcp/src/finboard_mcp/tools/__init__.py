@@ -5,6 +5,9 @@ from __future__ import annotations
 from finboard_mcp.tools.backtest import register as register_backtest_tools
 from finboard_mcp.tools.data import register as register_data_tools
 from finboard_mcp.tools.data_write import register as register_data_write_tools
+from finboard_mcp.tools.factor_series import (
+    register as register_factor_series_tools,
+)
 from finboard_mcp.tools.factors import register as register_factor_tools
 from finboard_mcp.tools.grid import register as register_grid_tools
 from finboard_mcp.tools.jobs import register as register_jobs_tools
@@ -27,6 +30,7 @@ __all__ = [
     "register_backtest_tools",
     "register_data_tools",
     "register_data_write_tools",
+    "register_factor_series_tools",
     "register_factor_tools",
     "register_grid_tools",
     "register_jobs_tools",

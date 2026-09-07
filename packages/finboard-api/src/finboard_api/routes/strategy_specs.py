@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
 from finboard_api.strategy_spec_schemas import (
+    FactorSeriesAnchorWarningOut,
     StrategySpecDiffOut,
     StrategySpecDraftIn,
     StrategySpecPublishIn,
@@ -30,9 +31,11 @@ from finboard_api.strategy_spec_schemas import (
     UserFactorAnchorWarningOut,
 )
 from finboard_backtest.research_code import (
+    FactorSeriesAnchorWarning,
     UserFactorAnchorWarning,
     active_user_factor_names,
     active_user_strategy_names,
+    factor_series_anchor_warnings,
     user_factor_anchor_warnings,
 )
 from finboard_backtest.strategy_spec import (
@@ -95,6 +98,7 @@ def _validation_out(
     plan: ResolvedStrategyPlan,
     *,
     anchor_warnings: Sequence[UserFactorAnchorWarning] = (),
+    series_warnings: Sequence[FactorSeriesAnchorWarning] = (),
 ) -> StrategySpecValidationOut:
     return StrategySpecValidationOut(
         checksum=plan.checksum,
@@ -116,6 +120,16 @@ def _validation_out(
                 message=item.message,
             )
             for item in anchor_warnings
+        ],
+        factor_series_anchor_warnings=[
+            FactorSeriesAnchorWarningOut(
+                code=item.code,
+                factor_name=item.factor_name,
+                series_id=item.series_id,
+                anchored_release_id=item.anchored_release_id,
+                message=item.message,
+            )
+            for item in series_warnings
         ],
     )
 
@@ -283,7 +297,17 @@ async def validate_strategy_spec(
         required_factor_sources=plan.required_factor_sources,
         dataset_release_ids=plan.dataset_release_ids,
     )
-    return _validation_out(plan, anchor_warnings=anchor_warnings)
+    # issue #360:引用 u_ 因子的既有因子序列若锚定发布不在本次
+    # dataset_release_ids,给具名 warning(不阻断;入队期由
+    # series_release_mismatches 秒级拒绝,共用同一领域函数)。
+    series_warnings = await factor_series_anchor_warnings(
+        session,
+        required_factor_sources=plan.required_factor_sources,
+        dataset_release_ids=plan.dataset_release_ids,
+    )
+    return _validation_out(
+        plan, anchor_warnings=anchor_warnings, series_warnings=series_warnings
+    )
 
 
 @router.post("/drafts", response_model=StrategySpecVersionOut, status_code=201)

@@ -59,13 +59,24 @@ def user_factor_reference_gate_error(
     required_factor_sources: Collection[str],
     active_user_factors: Collection[str],
     parameters: dict[str, Any] | None,
+    series_covered_factors: Collection[str] = frozenset(),
 ) -> str | None:
     """入队期用户因子门控;返回错误文案或 None(放行)。
 
     1. 引用的用户因子不在 active+passed 名单 → 拒绝(附缺失名单);
     2. multi_period(``parameters.rebalance_frequency``)引用用户因子 → 拒绝。
+
+    issue #360:被声明 ``factor_series_ids`` 覆盖的 u_ 因子跳过上述两条 ——
+    序列是内容寻址的冻结工件(逐决策日观测,不再绑定单一 decision_at),
+    multi_period 按决策日索引 series.values,artifact 生命周期(retired 等)
+    不影响已冻结序列的可引用性(同 manifest 冻结先例)。
     """
-    referenced = {name for name in required_factor_sources if is_user_factor_name(name)}
+    covered = set(series_covered_factors)
+    referenced = {
+        name
+        for name in required_factor_sources
+        if is_user_factor_name(name) and name not in covered
+    }
     if not referenced:
         return None
     frequency = (parameters or {}).get("rebalance_frequency")
