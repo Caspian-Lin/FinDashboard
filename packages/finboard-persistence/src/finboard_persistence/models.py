@@ -1849,6 +1849,12 @@ class ResearchCodeRunModel(Base, IdMixin):
     run_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     job_id: Mapped[str | None] = mapped_column(String(48), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(16), index=True)  # factor|strategy
+    # issue #359:factor 双轨执行协议 —— factor = v1 单日截面,
+    # factor_series = v2 区间执行(compute_series + 窗口挂载 v3)。
+    # 文本列无枚举约束,新 mode 值无需迁移;kind=strategy 恒为 factor 占位。
+    mode: Mapped[str] = mapped_column(
+        String(16), default="factor", server_default="factor"
+    )
     name: Mapped[str] = mapped_column(String(64), index=True)
     commit: Mapped[str] = mapped_column(String(40))
     code_checksum: Mapped[str] = mapped_column(String(64))

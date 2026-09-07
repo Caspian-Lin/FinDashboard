@@ -1,4 +1,4 @@
-"""因子执行协议 v1 —— 沙箱内数据上下文(issue #216)。
+"""因子执行协议 —— 沙箱内数据上下文(issue #216;#359 增区间协议 v2)。
 
 ``FactorContext`` 是 agent 因子代码在沙箱容器内看到的**全部**数据面:
 决策时点 ``decision_at`` 之前的冻结发布行情/研究指标(PIT 由挂载内容物理
@@ -15,6 +15,15 @@
 * DataFrame 内容应视为只读:容器根文件系统与挂载均为只读,harness 也只
   信任自己从 parquet 重新读出的数据,因子内篡改 ctx 只会污染自身计算。
 
+**协议 v2(issue #359,区间执行)**:``FactorSeriesContext`` 覆盖整个
+决策窗口 —— 挂载(服务端 data_mount v3)物化 ``available_at <=
+window_end`` 日终的全量数据(否则算不了后段日期),容器内逐日 PIT 由
+``bars_view(as_of)`` / ``dataset_view(kind, as_of)`` 访问器契约承担:
+``as_of`` 日终(``available_at <= as_of 当日 23:59:59.999999 UTC``)之前
+的数据才可见。**契约:value[t] 只许依赖 available_at <= t 的数据**;
+违反由服务端前缀不变性审计(truncation / perturbation)检出 —— 逐日
+物理隔离不再是窗口模式的防线,窗口上界(window_end)仍是物理硬边界。
+
 不在白名单的 import(subprocess/socket/os...)在静态校验(#215)与本镜像
 运行环境双重拒绝。
 """
@@ -23,11 +32,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, date, datetime, time
 from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
+
+#: 窗口挂载(v3)在 bars / 研究数据集长表中携带的逐行可见时点列名
+AVAILABLE_AT_COL = "available_at"
 
 
 def _empty_bars() -> pd.DataFrame:
@@ -119,4 +131,141 @@ class StrategyContext:
         return self.bars[self.bars["symbol"] == symbol].sort_values("date")
 
 
-__all__ = ["FactorContext", "StrategyConstraints", "StrategyContext"]
+def end_of_day(day: date) -> datetime:
+    """``day`` 的日终(UTC 23:59:59.999999)—— 访问器 PIT 上界。
+
+    D1 bar 的 ``available_at`` 恒为业务日之内(如 A 股 T 日 15:30 沪时),
+    因此「``available_at <= as_of 日终``」与「``as_of`` 当日数据可见」
+    逐值等值,同时天然容纳 available_at 落在业务日晚间的研究指标发布。
+    """
+    return datetime.combine(day, time(23, 59, 59, 999999), tzinfo=UTC)
+
+
+def _pit_frame(
+    frame: pd.DataFrame | None,
+    *,
+    as_of: date,
+    fallback_date_col: str,
+) -> pd.DataFrame | None:
+    """按 ``available_at <= as_of 日终`` 过滤;无 available_at 列时按
+    业务日期列回退(D1 available_at 是日期的确定性函数,两者逐值等值)。"""
+    if frame is None or frame.empty:
+        return frame
+    ceiling = end_of_day(as_of)
+    visible: pd.DataFrame
+    if AVAILABLE_AT_COL in frame.columns:
+        stamps = pd.to_datetime(frame[AVAILABLE_AT_COL], utc=True)
+        visible = frame.loc[stamps <= ceiling]
+    else:
+        col = frame[fallback_date_col]
+        if isinstance(col.dtype, pd.DatetimeTZDtype) or str(col.dtype).startswith(
+            "datetime64"
+        ):
+            mask = col.dt.date <= as_of
+        else:
+            mask = col.map(lambda d: d is not None and d <= as_of)
+        visible = frame.loc[mask]
+    return visible
+
+
+@dataclass(frozen=True, slots=True)
+class BarsView:
+    """``as_of`` 时点可见的行情 PIT 视图(协议 v2)。
+
+    列约定与 :class:`FactorContext`.`bars` 一致(symbol/date/open/high/
+    low/close/volume/amount,窗口挂载 v3 另携带 available_at);只含
+    ``available_at <= as_of`` 日终的行 —— 通过它看到 as_of 之后的数据
+    即协议违规,由服务端前缀不变性审计检出。
+    """
+
+    as_of: date
+    frame: pd.DataFrame
+
+    def for_symbol(self, symbol: str) -> pd.DataFrame:
+        """单个标的的可见行情子集(按 date 升序)。"""
+        return self.frame[self.frame["symbol"] == symbol].sort_values("date")
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetView:
+    """``as_of`` 时点可见的研究数据集 PIT 视图(协议 v2)。
+
+    ``kind``:``daily_metrics`` / ``financial_indicators``;对应发布未
+    挂载时 ``frame`` 为 ``None``。列约定与 v1 的同名上下文字段一致。
+    """
+
+    kind: str
+    as_of: date
+    frame: pd.DataFrame | None
+
+
+@dataclass(frozen=True, slots=True)
+class FactorSeriesContext:
+    """区间因子计算的只读输入(协议 v2,issue #359)。
+
+    与 :class:`FactorContext` 的差异:数据面覆盖**整个窗口**
+    (``available_at <= window_end`` 日终,由服务端窗口挂载物化),
+    逐日 PIT 由访问器承担 —— ``bars_view(as_of)`` / ``dataset_view`` 只
+    返回 ``available_at <= as_of`` 日终的行。``dates`` 为平台推导后传入
+    的窗口内决策日(升序),容器不自行推导。
+
+    契约:``compute_series`` 产出的 ``value[t]`` 只许依赖
+    ``available_at <= t`` 的数据;违反由前缀不变性审计检出。
+    """
+
+    #: 窗口内决策日(升序;平台推导后传入)
+    dates: tuple[date, ...]
+    #: 候选池标的代码
+    symbols: tuple[str, ...]
+    #: 窗口全量行情长表(含 window_end 之前的数据;列约定同 FactorContext,
+    #: 窗口挂载 v3 另携带逐行 available_at)
+    bars: pd.DataFrame = field(default_factory=_empty_bars)
+    #: daily_metrics 研究发布窗口视图;无对应发布时为 None
+    daily_metrics: pd.DataFrame | None = None
+    #: financial_indicators 研究发布窗口视图;无对应发布时为 None
+    financial_indicators: pd.DataFrame | None = None
+    #: 运行参数(入队 payload.params 覆盖 manifest.params 的合并结果,只读)
+    params: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+
+    def bars_view(self, as_of: date) -> BarsView:
+        """``as_of`` 日终时点可见的行情视图(PIT 契约入口)。"""
+        visible = _pit_frame(self.bars, as_of=as_of, fallback_date_col="date")
+        return BarsView(
+            as_of=as_of,
+            frame=visible if visible is not None else pd.DataFrame(),
+        )
+
+    def dataset_view(self, kind: str, as_of: date) -> DatasetView:
+        """``as_of`` 日终时点可见的研究数据集视图。
+
+        ``kind``:``daily_metrics`` / ``financial_indicators``;未挂载的
+        kind 返回 ``frame=None`` 的视图(因子代码应按缺数据降级)。
+        """
+        if kind == "daily_metrics":
+            frame = _pit_frame(
+                self.daily_metrics, as_of=as_of, fallback_date_col="trade_date"
+            )
+        elif kind == "financial_indicators":
+            frame = _pit_frame(
+                self.financial_indicators,
+                as_of=as_of,
+                fallback_date_col="announcement_date",
+            )
+        else:
+            raise ValueError(
+                f"未知数据集 kind {kind!r}"
+                "(允许: daily_metrics / financial_indicators)"
+            )
+        return DatasetView(kind=kind, as_of=as_of, frame=frame)
+
+
+__all__ = [
+    "AVAILABLE_AT_COL",
+    "BarsView",
+    "DatasetView",
+    "FactorContext",
+    "FactorSeriesContext",
+    "StrategyConstraints",
+    "StrategyContext",
+    "end_of_day",
+]
