@@ -417,8 +417,9 @@ async def test_enqueue_seconds_fail_when_single_shot_missing_snapshots(
     detail = str(response.json()["detail"])
     assert "execution_mode=single_shot" in detail
     assert "factor_snapshot_ids" in detail
-    # 根因细分:指向缺失的因子源与修复路径(声明频率或冻结快照)。
-    assert "rebalance_frequency=monthly|quarterly" in detail
+    # 根因细分:指向缺失的因子源与修复路径(声明 decision_schedule 或冻结快照)。
+    assert "parameters.decision_schedule" in detail
+    assert "rebalance_frequency" in detail
     # 快速失败:不产生 queued research_runs 行,不双写 background_jobs。
     rows = await ResearchRunRepository(db_session).list_recent(limit=10)
     assert all(row.strategy_kind != spec.strategy_kind for row in rows)

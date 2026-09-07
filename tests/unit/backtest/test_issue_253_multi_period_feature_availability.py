@@ -314,11 +314,23 @@ class TestMultiPeriodFeatureGate:
         )
 
     def test_invalid_frequency_not_gated(self) -> None:
-        """非法频率值不在本门控拦截(schema 与 fail-closed 读取负责)。"""
+        """非法频率值不在本门控拦截(schema 与 fail-closed 读取负责)。
+
+        issue #361:weekly 已成为合法多期频率(legacy 扩展),非法值改用
+        "yearly";weekly 与 decision_schedule 声明同样进入本门控判定。
+        """
         assert (
             multi_period_feature_gate_error(
                 identity_sources={"pb"},
-                parameters={"rebalance_frequency": "weekly"},
+                parameters={"rebalance_frequency": "yearly"},
+                research_release_kinds=[ReleaseDatasetKind.BARS],
+            )
+            is None
+        )
+        assert (
+            multi_period_feature_gate_error(
+                identity_sources={},
+                parameters={"decision_schedule": {"kind": "weekly"}},
                 research_release_kinds=[ReleaseDatasetKind.BARS],
             )
             is None

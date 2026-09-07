@@ -124,6 +124,9 @@ def build_failure_summary(
     factor_snapshots = ",".join(ref.artifact_id for ref in manifest.factor_snapshots)
     if factor_snapshots:
         fields.append(f"factor_snapshots={factor_snapshots}")
+    factor_series = ",".join(ref.artifact_id for ref in manifest.factor_series)
+    if factor_series:
+        fields.append(f"factor_series={factor_series}")
 
     message = str(exc)
     if not fields:

@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 125 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 128 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -67,12 +67,18 @@ issue #170 起 `multi_factor` 已发布规格可由 worker 端到端执行
 futures_tsmom / ma_cross)仍报 not_implemented。执行失败(如快照缺因子源)时 `finboard_run_get`
 可见 error_code / error_summary,`research_runs` 不停留在 QUEUED。
 issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
-再平衡回放**:按冻结发布交易日历每期重算 universe/features/signals 与组合,
+再平衡回放**;issue #361 起决策频率泛化为日历服务
+`parameters.decision_schedule = {"kind": daily|weekly|monthly|quarterly|custom,
+"dates": [...]}`(weekly = 每周最后一个交易日;custom 必须显式声明
+`dates`,须 ⊆ 发布交易日且升序去重;legacy `rebalance_frequency` 扩展接受
+daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻结发布
+交易日历每期重算 universe/features/signals 与组合,
 决策间每日 mark-to-market 产出全区间权益曲线与绩效指标(总收益/年化/夏普/
 最大回撤),返回值与 report 标注 `execution_mode=multi_period`。**multi_period
-必须显式声明 `rebalance_frequency`**;未声明即 single_shot,其决策时点**只能**
+必须显式声明决策日历(`decision_schedule` 或 legacy `rebalance_frequency`)**;
+未声明即 single_shot,其决策时点**只能**
 来自冻结因子快照 —— 缺快照入队秒级 `invalid_argument`(报错附
-`execution_mode` 与缺失因子源,#203),非法频率值同样在入队时拒绝。
+`execution_mode` 与缺失因子源,#203),非法声明值同样在入队时拒绝。
 「多期不要求预建快照」**仅限**决策日推导与价格因子(momentum/volatility
 等按发布每期重算);基本面因子(pb/ROE 等)仍 PIT 取自冻结快照 / 研究数据
 发布(daily_metrics/financial_indicators,#187)。**multi_period 特征可用性
@@ -90,9 +96,16 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
     (`finboard_dataset_release_list` 查询)
   - `factor_snapshot_ids`: 冻结特征快照 snapshot_id 列表(`finboard_feature_snapshot_list`
     查询);**single_shot 必填**(决策时点只能来自快照,缺快照入队即拒,#203);
-    multi_period 声明频率后价格因子不需要,基本面因子仍需快照/研究数据发布
+    multi_period 声明决策日历后价格因子不需要,基本面因子仍需快照/研究数据发布;
+    multi_period 引用用户因子(u_ 前缀)入队做 series 覆盖检查(#361)——
+    无 series / 覆盖不足 / series 锚定发布与 bars 主发布不一致秒级
+    `invalid_argument`(附缺失决策日期预览与 `finboard_factor_series_build`
+    重建命令),全覆盖时放行
   - `parameters`: `{}` —— 不声明即 single_shot(需冻结快照);声明
-    `rebalance_frequency=monthly|quarterly` 触发多期回放(#183),非法值入队即拒
+    `decision_schedule={"kind": daily|weekly|monthly|quarterly|custom}`
+    触发多期回放(#361;custom 须给 `dates`,⊆ 发布交易日且升序去重);
+    legacy `rebalance_frequency=daily|weekly|monthly|quarterly` 仍接受
+    (等价同名 kind),非法值入队即拒
   - `validation_config` / `execution_config` /
     `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空
   - `portfolio_config` / `risk_config`: `{}` —— 组合约束 / 风险退出分区覆盖
@@ -114,7 +127,8 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   - `requested_by`*: 归属人(如 `user:xxx` / `agent:mcp`)
   - `actor_type`: `"agent"`(MCP 通道固定,#312 与 `requested_by` 对齐;
     llm 不能触发运行)
-  (`parameters.rebalance_frequency ∈ {monthly, quarterly}` 时 multi_period)
+  (`parameters` 声明 `decision_schedule` 或 legacy `rebalance_frequency` 时
+  multi_period,#361)
 - 返回:精简回执(#206)`{run_id, job_id, strategy_id, strategy_kind, status,
   checksum(manifest_checksum), execution_mode, created_at, view: "ack"}`;
   全量详情走 `finboard_run_get(run_id)`(含 manifest 与 execution_mode)
@@ -144,8 +158,8 @@ issue #183 起 `parameters.rebalance_frequency`(monthly|quarterly)启用**多期
   RCR → 质量门 → 新快照)后以新 snapshot_id 入队。
   `finboard_strategy_validate` 的 `user_factor_anchor_warnings` 可在
   写策略阶段提前看到同类失配。
-- 错误:`invalid_argument`(schema 校验 / 数据发布不匹配 / rebalance_frequency
-  非法 / 候选池为空 / 组合可行性预检失败 #303 / 快照锚定失配 #355)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
+- 错误:`invalid_argument`(schema 校验 / 数据发布不匹配 / decision_schedule
+  非法(kind/dates 形状/custom 日期 ⊄ 发布交易日)/ 候选池为空 / 组合可行性预检失败 #303 / 快照锚定失配 #355)、`not_found`(策略规格版本不存在)、`conflict`(策略未发布 / 幂等冲突)
 
 ### finboard_run_cancel(✅ #127,写)
 取消 ResearchRun(queued/running/interrupted/failed → cancelled)。
@@ -865,8 +879,9 @@ research_run 管线轻路由(#174)。
     `queue_payload: dict`(与 `finboard_run_queue` payload 同构,不含
     strategy_id/strategy_version;必填 idempotency_key /
     dataset_release_ids / code_version / initial_capital / requested_by;
-    `queue_payload.parameters.rebalance_frequency ∈ {monthly, quarterly}`
-    时为多期再平衡回放,#183)
+    `queue_payload.parameters` 声明 `decision_schedule`(四频 + custom)或
+    legacy `rebalance_frequency ∈ {daily, weekly, monthly, quarterly}`
+    时为多期再平衡回放,#183/#361)
   - 校验:规格版本存在且 `status == "published"`,否则 `invalid_argument`;
     入队时同样做 universe 候选池非空预检(issue #186,与 run_queue 一致),
     空池秒级 `invalid_argument` 并附排除统计与缺失字段
@@ -1604,6 +1619,53 @@ finboard-research-kit 版本绑定,默认 `finboard-research-sandbox:0.2.0`;
 新快照),再用新 `output_snapshot_id` 入队;或把旧锚定发布一并放进
 `dataset_release_ids`(保持 ⊆ 约束,不推荐与新发布混用作主行情)。
 
+## 因子序列工件(#360,内容寻址缓存 + 托管重建)
+
+因子序列(FS- 前缀,`research_factor_series`)把 u_ 因子观测从「绑定单一
+decision_at 的点快照」升级为**内容寻址派生工件**:`series_key` =
+sha256(代码 commit | bars 主发布 | 研究发布联合集(排序) | params(canonical
+json)| 窗口),`values` 为 `{date: {symbol: float|null}}` 逐决策日截面。
+冻结时机移到 **run 入队**(入队 payload 新键 `factor_series_ids`,
+manifest 冻结 `{series_id, content_checksum}` 并入 `input_checksum`;
+未声明序列的旧 manifest checksum 零漂移)。声明序列的 run:加载器按
+(因子名, 决策日) 从 series.values 取观测(双轨优先,回退快照路径),
+被覆盖的 u_ 因子**跳过 multi_period 拒绝**(序列按决策日索引,不再绑定
+单一 decision_at)—— 换发布从死墙变为托管批量重建。
+
+### finboard_factor_series_build(写,入队)
+入队 `kind=factor_series_build` 后台任务(worker 单并发,复用沙箱槽位)。
+- 参数:`name: str`(因子产物名)、`release_id: str`(bars 主发布锚定)、
+  `window_start/window_end: ISO 日期`、`dataset_release_ids?: list[str]`
+  (研究发布联合集,排序冻结)、`commit?`、`artifact_id?`、`params?`
+- 入队预检:sandbox 开启、(factor,name) 有已晋级 active+passed 产物
+  (显式 artifact_id 同样要求非 retired;指定 commit 须等于 active 引用)、
+  release 均已登记
+- **缓存检查**:series_key 已存在且 content_checksum 一致 → 直接返回
+  `unchanged=true`(不创建任务,不启动容器);否则入队返回 job_id
+- 执行:窗口内逐决策日沙箱执行 factor.compute(#359 容器执行本体)→
+  抽 2 个截断点做前缀不变性审计(检出前视 → failed=
+  `lookahead_detected`,错误具名首个分歧日期,与
+  output_contract_violation 同级)→ 内容寻址落库
+- 轮询:`finboard_job_get`(成功 result_ref=FS-...;error_summary 含
+  `cache_hit` 表示命中缓存)
+
+### finboard_factor_series_get(只读)
+查询序列内容(`research_factor_series`,FS- 前缀)。
+- 参数:`series_id`、`view: "summary"|"detail" = "summary"`
+- 返回 summary:三向代码引用(code_artifact/commit/kind)、release 锚定
+  与联合集、窗口、date_count/symbol_count、content_checksum、quality
+  (#217 质量门归档)、source_run_id(RCR-);**不含逐日 values**(#206 瘦身)
+- 返回 detail:另附 dates(升序)与 values 全量
+
+### 换 bars 发布的托管重建(解反馈 #8 本体)
+入队/validate 发现引用序列的 `release_id` 不在本次 `dataset_release_ids`
+→ 入队秒级具名拒绝 `series_release_mismatch`(附失效 series 清单 +
+重建代价预估 N 条 × 预计分钟);`finboard_strategy_validate` 的
+`factor_series_anchor_warnings` 提前可见。**重建 = 一次入队 N 个
+`finboard_factor_series_build`**(复用 job 基础设施,不新造编排器;
+内容寻址缓存使未受影响的输入组合自动 unchanged);窗口扩展重建后重叠
+前缀 checksum 必须一致(前缀不变性审计免费充当一致性自检)。
+
 ## 用户代码策略执行(#218,逐日决策函数)
 
 agent 编写的**策略**代码进入回测。与因子不同,策略代码不落快照,而是经
@@ -1631,7 +1693,8 @@ def decide(ctx):
   commit?}]` 显式绑定 → 编译期放行,入队按 DB 实绑校验并把
   commit + artifact_id 冻结进 manifest(code_artifact);screen RR 的
   `strategy_screen` + `sandbox_provenance` 即 promote 证据,四向校验兜底。
-- 执行:建议 `parameters.rebalance_frequency=monthly|quarterly`
+- 执行:建议 `parameters.decision_schedule`(四频 + custom)或 legacy
+  `parameters.rebalance_frequency=daily|weekly|monthly|quarterly`
   (multi_period,决策日由发布日历推导);single_shot 需冻结快照提供决策
   时点。每个决策日一个一次性容器(`--network none` / 只读 / PIT 物理隔离,
   挂载清单含权重回显与约束视图)。

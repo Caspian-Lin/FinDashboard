@@ -10,8 +10,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 from dataclasses import replace
+from datetime import date
+from pathlib import Path
 from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -31,13 +34,19 @@ from finboard_app.research_run_store import SqlAlchemyResearchRunStore
 from finboard_backtest.research_code import (
     active_user_factor_names,
     active_user_strategy_commits,
+    build_factor_series_refs,
+    default_series_lookup,
+    factor_series_rebuild_error,
     freeze_user_code_commit,
     resolve_screen_bindings,
     screen_factor_snapshot_gate_error,
+    series_covered_factor_names,
+    series_release_mismatches,
     snapshot_anchor_mismatch_error,
     snapshot_anchor_mismatches,
     user_code_reference_gate_error,
     user_factor_reference_gate_error,
+    user_factor_series_coverage_gate_error,
 )
 from finboard_backtest.research_run import (
     REPLAYABLE_SOURCE_STATUSES,
@@ -48,6 +57,7 @@ from finboard_backtest.research_run import (
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
     replay_guard_error,
+    resolve_decision_schedule,
     to_json_value,
     validate_strategy_dataset_capabilities,
 )
@@ -56,6 +66,9 @@ from finboard_backtest.research_run.config_overrides import (
 )
 from finboard_backtest.research_run.contracts import JsonValue, stable_checksum
 from finboard_backtest.research_run.signal_engine import (
+    decision_schedule_dates_gate_error,
+    enqueue_decision_dates,
+    enqueue_trading_days,
     multi_period_feature_gate_error,
     single_shot_snapshot_gate_error,
 )
@@ -66,6 +79,7 @@ from finboard_backtest.strategy_spec.universe_precheck import (
     preview_universe_pool,
     resolvable_feature_names,
 )
+from finboard_data.factor_lab import is_user_factor_name
 from finboard_data.releases import (
     ReleaseCapabilityError,
     ReleaseDatasetKind,
@@ -74,6 +88,7 @@ from finboard_data.releases import (
 from finboard_persistence import (
     BackgroundJobPersistenceConflictError,
     BackgroundJobRepository,
+    FactorSeriesRepository,
     FeatureSnapshotRepository,
     ResearchDatasetReleaseRepository,
     ResearchRunPersistenceConflictError,
@@ -132,6 +147,20 @@ async def queue_research_run(
                 detail=f"因子快照不存在: {snapshot_id}",
             )
         snapshots.append(snapshot)
+    # issue #360:因子序列工件解析(内容寻址 FS-);声明时 u_ 因子观测按
+    # 决策日从 series.values 取(加载器双轨优先),被覆盖因子跳过
+    # single_shot 缺快照清单与 #217 multi_period 拒绝。
+    series_repo = FactorSeriesRepository(session)
+    series_records = []
+    for series_id in body.factor_series_ids:
+        record = await series_repo.get(series_id)
+        if record is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"因子序列不存在: {series_id}",
+            )
+        series_records.append(record)
+    series_covered = series_covered_factor_names(series_records)
     required_factor_sources = {
         node.source
         for node in spec.feature_graph.nodes
@@ -145,27 +174,72 @@ async def queue_research_run(
     if bind_error is not None:
         raise HTTPException(status_code=422, detail=bind_error)
     # issue #203:入队期 single_shot 缺快照秒级拒绝(与 MCP 共用同一门控函数,
-    # 对齐 #186 预检风格)。multi_period 声明 rebalance_frequency 后不受影响。
+    # 对齐 #186 预检风格)。multi_period 声明 decision_schedule(issue #361,
+    # 含 legacy rebalance_frequency)后不受影响。issue #360:被声明因子序列
+    # 覆盖的因子源不再要求快照(序列提供逐日观测;决策时点仍需快照提供,
+    # 零快照拒绝分支保持)。
     gate_error = single_shot_snapshot_gate_error(
         strategy_kind=spec.strategy_kind,
-        required_factor_sources=required_factor_sources,
+        required_factor_sources=required_factor_sources - series_covered,
         frozen_snapshot_count=len(snapshots),
         parameters=body.parameters,
     )
     if gate_error is not None:
         raise HTTPException(status_code=422, detail=gate_error)
+    # issue #361:decision_schedule(四频 + custom)。custom dates 必须落在
+    # bars 主发布交易日历内(读取发布日历,复用 #334 并集日历 + 间隙哨兵);
+    # kind / 形状 / 升序去重已由 ResearchRunQueueIn schema 拦截(与 MCP
+    # ``parse_queue_payload`` 同一 schema、同一门控函数,两口径一致)。
+    primary = _bars_release(releases)
+    schedule = resolve_decision_schedule(body.parameters)
+    trading_days: list[date] | None = None
+    if schedule is not None and schedule.kind == "custom":
+        trading_days = await _enqueue_trading_days(primary)
+        dates_error = decision_schedule_dates_gate_error(schedule, trading_days)
+        if dates_error is not None:
+            raise HTTPException(status_code=422, detail=dates_error)
     # issue #217:用户因子(u_ 前缀)入队门控 —— retired/不存在拒绝;
-    # multi_period 引用用户因子拒绝(观测绑定单一 decision_at)。
+    # issue #360:被声明因子序列覆盖的 u_ 因子跳过名单检查(序列按决策日
+    # 索引,不绑定单一 decision_at;冻结工件不受 artifact 生命周期影响)。
+    # issue #361:multi_period x u_ 改为 series 覆盖检查(不再一刀切秒拒,
+    # 拒的是「数据没备齐」)—— 每个未声明的引用 u_ 因子需有锚定本次 bars
+    # 主发布、覆盖全部决策日的已构建 series,缺失具名拒绝 + 重建命令提示。
     active_factors = await active_user_factor_names(session)
     if resolution is not None:
         active_factors = active_factors | resolution.user_factor_names
     user_gate_error = user_factor_reference_gate_error(
         required_factor_sources=required_factor_sources,
         active_user_factors=active_factors,
-        parameters=cast(dict[str, JsonValue] | None, body.parameters),
+        series_covered_factors=series_covered,
     )
     if user_gate_error is not None:
         raise HTTPException(status_code=422, detail=user_gate_error)
+    # issue #360:已按 factor_series_ids 声明的因子由 ID 直查校验(上游已
+    # 完成),不进入 find_matching 反查——反查以运行参数计算期望 series_key,
+    # 与构建期因子参数不同会误报「未构建」。
+    referenced_user_factors = {
+        name
+        for name in required_factor_sources
+        if is_user_factor_name(name) and name not in series_covered
+    }
+    if schedule is not None and referenced_user_factors:
+        if trading_days is None:
+            trading_days = await _enqueue_trading_days(primary)
+        series_gate_error = await user_factor_series_coverage_gate_error(
+            referenced_user_factors=referenced_user_factors,
+            series_lookup=default_series_lookup(session),
+            bars_release_id=primary.release_id,
+            dataset_release_ids=[release.release_id for release in releases],
+            parameters=body.parameters,
+            decision_dates=enqueue_decision_dates(
+                parameters=body.parameters,
+                trading_days=trading_days,
+            ),
+            window_start=primary.start_date,
+            window_end=primary.end_date,
+        )
+        if series_gate_error is not None:
+            raise HTTPException(status_code=422, detail=series_gate_error)
     # issue #253:multi_period 特征可用性入队门控(与 MCP 共用同一函数)——
     # 规格 identity 源必须 ⊆ 多期可解析集合(标准价格特征 / close / attached
     # 研究发布派生特征 / 快照观测),否则执行期才报「identity 节点缺少数据源」。
@@ -181,7 +255,8 @@ async def queue_research_run(
             observation.feature_name
             for snapshot in snapshots
             for observation in snapshot.observations
-        ],
+        ]
+        + sorted(series_covered),
     )
     if feature_gate_error is not None:
         raise HTTPException(status_code=422, detail=feature_gate_error)
@@ -220,6 +295,15 @@ async def queue_research_run(
             spec_checksum = stable_checksum(frozen_spec.canonical_payload())
             spec = frozen_spec
     release_ids = {release.release_id for release in releases}
+    # issue #360:换发布守卫 —— 引用序列锚定的 bars 主发布不在本次冻结清单
+    # 即具名拒绝(失效 series 清单 + 重建代价预估;托管重建 = 一次入队 N 个
+    # 既有 finboard_factor_series_build,不新造编排器)。
+    series_mismatches = series_release_mismatches(series_records, release_ids)
+    if series_mismatches:
+        raise HTTPException(
+            status_code=422,
+            detail=factor_series_rebuild_error(series_mismatches),
+        )
     # issue #217:#355 —— 快照锚定发布 ⊆ 本次冻结清单(数据一致性 fail-visible,
     # 约束零放松);失配改为逐快照全量收集后一次性具名拒绝(名称 / 锚定发布 /
     # 失配方向 + 两条修复路径),不再逐次提交只暴露第一个失配。
@@ -246,7 +330,7 @@ async def queue_research_run(
     # 各过滤条件排除统计与缺失字段名,不再等执行期跑 30 分钟后才报泛化错误。
     # issue #187:联合发布中研究数据 release(daily_metrics/financial_indicators)
     # 只提供因子观测,候选池评估必须落在 bars 主发布上。
-    primary = _bars_release(releases)
+    # (issue #361:``primary`` 已在 decision_schedule / u_ 因子门控段前置取得。)
     preview = preview_universe_pool(
         spec.universe,
         primary.instruments,
@@ -259,7 +343,8 @@ async def queue_research_run(
                 observation.feature_name
                 for snapshot in snapshots
                 for observation in snapshot.observations
-            ],
+            ]
+            + sorted(series_covered),
             research_release_kinds=[release.dataset_kind for release in releases],
         ),
     )
@@ -316,6 +401,11 @@ async def queue_research_run(
                     ),
                 )
                 for snapshot in snapshots
+            ),
+            # issue #360:因子序列冻结引用({series_id, content_checksum});
+            # 空集合不传,历史 manifest checksum 零漂移。
+            factor_series=(
+                build_factor_series_refs(series_records) if series_records else ()
             ),
             parameters=cast(dict[str, JsonValue], body.parameters),
             validation_config=cast(
@@ -583,6 +673,31 @@ def _bars_release(releases: list[ResearchDatasetRelease]) -> ResearchDatasetRele
             ),
         )
     return bars_releases[0]
+
+
+async def _enqueue_trading_days(primary: ResearchDatasetRelease) -> list[date]:
+    """入队期读取 bars 主发布交易日历(issue #361;读失败具名 422)。
+
+    仅 custom dates 校验与 multi_period x u_ 因子覆盖检查触达(非必要
+    不读发布文件);与 MCP ``_build_queued_manifest`` 共用同一读取实现
+    (``enqueue_trading_days``,#334 并集日历 + 间隙哨兵)。
+    """
+    try:
+        return await enqueue_trading_days(
+            bars_release_id=primary.release_id,
+            bars_release_checksum=primary.release_checksum,
+            release_root=Path(os.getenv("FINBOARD_DATA_RELEASE_ROOT", "data_releases")),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "无法读取 bars 主发布交易日历以校验 decision_schedule / 用户因子"
+                f" series 覆盖(release {primary.release_id}): {exc}"
+            ),
+        ) from exc
 
 
 def _payload_checksum(payload: dict[str, object]) -> str:

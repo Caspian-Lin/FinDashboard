@@ -268,7 +268,7 @@ class TestQueueRun:
                 "strategy_id": "s",
                 "strategy_version": 1,
                 "dataset_release_ids": ["r1"],
-                "parameters": {"rebalance_frequency": "weekly"},
+                "parameters": {"rebalance_frequency": "yearly"},
                 "code_version": "abcdef0123456789",
                 "requested_by": "tester",
             },
@@ -277,6 +277,89 @@ class TestQueueRun:
         assert env.error is not None
         assert env.error.kind == "invalid_argument"
         assert "rebalance_frequency" in (env.error.message or "")
+
+    async def test_invalid_decision_schedule_rejected(self) -> None:
+        """issue #361:非法 decision_schedule(kind 非法 / custom 缺 dates /
+        dates 非升序)入队即 invalid_argument。"""
+        cases: list[tuple[str, dict[str, object]]] = [
+            ("kind 非法", {"kind": "yearly"}),
+            ("custom 缺 dates", {"kind": "custom"}),
+            ("dates 非升序", {"kind": "custom", "dates": ["2024-02-01", "2024-01-02"]}),
+            ("dates 重复", {"kind": "custom", "dates": ["2024-01-02", "2024-01-02"]}),
+            ("多余字段", {"kind": "daily", "freq": "x"}),
+        ]
+        for index, (label, schedule) in enumerate(cases):
+            app = _make_app(_session_maker())
+            env = await runs.queue_run(
+                app,
+                payload={
+                    "idempotency_key": f"queue-sched-invalid-{index:02d}",
+                    "strategy_id": "s",
+                    "strategy_version": 1,
+                    "dataset_release_ids": ["r1"],
+                    "parameters": {"decision_schedule": schedule},
+                    "code_version": "abcdef0123456789",
+                    "requested_by": "tester",
+                },
+            )
+            assert env.status == "error", label
+            assert env.error is not None, label
+            assert env.error.kind == "invalid_argument", label
+            assert "decision_schedule" in (env.error.message or ""), label
+
+    async def test_decision_schedule_with_legacy_frequency_rejected(self) -> None:
+        """issue #361:decision_schedule 与 legacy rebalance_frequency 不可同时声明。"""
+        app = _make_app(_session_maker())
+        env = await runs.queue_run(
+            app,
+            payload={
+                "idempotency_key": "queue-sched-both-keys",
+                "strategy_id": "s",
+                "strategy_version": 1,
+                "dataset_release_ids": ["r1"],
+                "parameters": {
+                    "decision_schedule": {"kind": "daily"},
+                    "rebalance_frequency": "monthly",
+                },
+                "code_version": "abcdef0123456789",
+                "requested_by": "tester",
+            },
+        )
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+        message = env.error.message or ""
+        assert "decision_schedule" in message
+        assert "不可同时声明" in message
+
+    async def test_decision_schedule_accepts_daily_and_legacy_weekly(self) -> None:
+        """issue #361:daily schedule 与 legacy weekly 通过 schema 形状校验
+        (后续门控因 strategy 不存在先拒,不得因参数形状失败)。"""
+        for index, parameters in enumerate(
+            (
+                {"decision_schedule": {"kind": "daily"}},
+                {"decision_schedule": {"kind": "custom", "dates": ["2024-01-02"]}},
+                {"rebalance_frequency": "weekly"},
+            )
+        ):
+            app = _make_app(_session_maker())
+            env = await runs.queue_run(
+                app,
+                payload={
+                    "idempotency_key": f"queue-sched-ok-{index:02d}",
+                    "strategy_id": "s",
+                    "strategy_version": 1,
+                    "dataset_release_ids": ["r1"],
+                    "parameters": parameters,
+                    "code_version": "abcdef0123456789",
+                    "initial_capital": "100000",
+                    "requested_by": "tester",
+                },
+            )
+            assert env.status == "error"
+            assert env.error is not None
+            # 策略规格不存在(404 语义 invalid_argument 文案),而非参数形状错误。
+            assert "策略规格版本不存在" in (env.error.message or "")
 
 
 class TestRunAck:

@@ -1063,16 +1063,17 @@ def _price_only_spec() -> ResearchStrategySpec:
 class TestMultiPeriodDecisionInputs:
     async def test_monthly_derives_multiple_decision_days(self) -> None:
         """monthly 推导:每自然月最后一个交易日决策;发布末尾无成交日的期末剔除。"""
+        from finboard_backtest.research_run.contracts import DecisionSchedule
         from finboard_backtest.research_run.signal_engine import (
-            _derive_rebalance_decision_days,
+            _derive_schedule_decision_days,
             _release_trading_days,
         )
 
         start, end = date(2024, 1, 1), date(2024, 3, 31)
         provider = _multi_provider(start, end)
         days = await _release_trading_days(provider)  # type: ignore[arg-type]
-        decisions = await _derive_rebalance_decision_days(
-            provider, "monthly"  # type: ignore[arg-type]
+        decisions = await _derive_schedule_decision_days(
+            provider, DecisionSchedule(kind="monthly")  # type: ignore[arg-type]
         )
         # 1 月末 / 2 月末各一次;3 月末是发布最后交易日,没有下一交易日可成交,剔除。
         assert len(decisions) == 2
@@ -1084,14 +1085,15 @@ class TestMultiPeriodDecisionInputs:
 
     async def test_quarterly_derives_quarter_ends(self) -> None:
         """quarterly 推导:每季度最后一个交易日决策;发布末尾期末剔除。"""
+        from finboard_backtest.research_run.contracts import DecisionSchedule
         from finboard_backtest.research_run.signal_engine import (
-            _derive_rebalance_decision_days,
+            _derive_schedule_decision_days,
         )
 
         start, end = date(2024, 1, 1), date(2024, 12, 31)
         provider = _multi_provider(start, end)
-        decisions = await _derive_rebalance_decision_days(
-            provider, "quarterly"  # type: ignore[arg-type]
+        decisions = await _derive_schedule_decision_days(
+            provider, DecisionSchedule(kind="quarterly")  # type: ignore[arg-type]
         )
         decision_dates = [item[0].date() for item in decisions]
         # 3 月末 / 6 月末 / 9 月末各一次;12 月末是发布最后交易日,无下一成交日。
@@ -1103,7 +1105,7 @@ class TestMultiPeriodDecisionInputs:
         from finboard_backtest.research_run.signal_engine import build_decision_inputs
 
         provider = _multi_provider(date(2024, 1, 1), date(2024, 3, 31))
-        manifest = _multi_manifest(_price_only_spec(), frequency="daily")
+        manifest = _multi_manifest(_price_only_spec(), frequency="yearly")
 
         def release_factory(release_id: str) -> _StubProvider:
             return provider
@@ -1169,7 +1171,7 @@ class TestMultiPeriodDecisionInputs:
             )
         message = str(excinfo.value)
         assert "execution_mode=multi_period" in message
-        assert "rebalance_frequency=monthly" in message
+        assert "decision_schedule" in message
         assert "决策时点" in message
         # 不再与「未冻结快照」根因混报。
         assert "factor_snapshots" not in message
@@ -1193,7 +1195,8 @@ class TestMultiPeriodDecisionInputs:
             )
         message = str(excinfo.value)
         assert "factor_snapshot_ids" in message
-        assert "rebalance_frequency=monthly|quarterly" in message
+        assert "parameters.decision_schedule" in message
+        assert "rebalance_frequency" in message
         # 不再误指 multi_period 的日历推导根因。
         assert "交易日历" not in message
 
@@ -1257,13 +1260,30 @@ class TestSingleShotSnapshotGate:
 
     def test_multi_period_with_frequency_passes_without_snapshots(self) -> None:
         """声明合法频率(multi_period)不要求预建快照,行为不受 #203 影响。"""
-        for frequency in ("monthly", "quarterly"):
+        for frequency in ("monthly", "quarterly", "daily", "weekly"):
             assert (
                 single_shot_snapshot_gate_error(
                     strategy_kind="multi_factor",
                     required_factor_sources={"pb"},
                     frozen_snapshot_count=0,
                     parameters={"rebalance_frequency": frequency},
+                )
+                is None
+            )
+        # issue #361:decision_schedule(含 custom)同样放行 multi_period。
+        for schedule in (
+            {"kind": "daily"},
+            {"kind": "weekly"},
+            {"kind": "monthly"},
+            {"kind": "quarterly"},
+            {"kind": "custom", "dates": ["2024-01-02", "2024-01-31"]},
+        ):
+            assert (
+                single_shot_snapshot_gate_error(
+                    strategy_kind="multi_factor",
+                    required_factor_sources={"pb"},
+                    frozen_snapshot_count=0,
+                    parameters={"decision_schedule": schedule},
                 )
                 is None
             )

@@ -28,7 +28,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-当前已实现 126 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+当前已实现 128 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
@@ -47,7 +47,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | 报告聚合与导出(ResearchRun/回测报告、导出 CSV/Markdown 文件;report_run 默认 summary 聚合计数、report_backtest fills 分页有界,#206) | `finboard.report.*`(3 个) | ✅ #141+#206 | 3 只读 |
 | 研究代码提交与晋级(agent 策略/因子代码入口;静态校验+draft 版本化存储;screen + #57 OOS 晋级门;web 通道仍禁代码) | `finboard.research_code.*`(5 个) | ✅ #215/#219 | 2 只读 + 3 自主执行 |
 | 研究代码沙箱执行(一次性 Docker 容器跑 factor.compute;PIT 物理隔离挂载、断网/只读/限额/超时 kill;run 三向引用审计;成功输出过质量门后落库为 `u_<name>` 因子快照,可被 research run 引用,run report 携带 factor_screen 筛选指标(#217);需 research_sandbox_enabled + Docker 镜像) | `finboard.research_code_run` / `_get`(2 个) | ✅ #216+#217 | 1 只读 + 1 自主执行 |
-| 用户代码策略执行(agent 编写的策略代码进入回测:spec `strategy_kind=user_code` + `code_artifact` 引用 active+passed artifact;`finboard_run_queue` 声明 `rebalance_frequency=multi_period` 走逐决策日沙箱 `decide(ctx)→目标权重`(当前权重回显 + 约束视图),复用 #91 组合管线;report 附 `sandbox_provenance`(commit+镜像 digest);与 multi_factor 同屏可比;入队门控 active+passed/commit/沙箱开关,#218/#219) | `finboard_run_queue` + `finboard_strategy_*`(复用,无新工具) | ✅ #218/#219 | 复用 run_queue 写权限 |
+| 用户代码策略执行(agent 编写的策略代码进入回测:spec `strategy_kind=user_code` + `code_artifact` 引用 active+passed artifact;`finboard_run_queue` 声明 `decision_schedule` 走 multi_period(legacy `rebalance_frequency` 仍接受)逐决策日沙箱 `decide(ctx)→目标权重`(当前权重回显 + 约束视图),复用 #91 组合管线;report 附 `sandbox_provenance`(commit+镜像 digest);与 multi_factor 同屏可比;入队门控 active+passed/commit/沙箱开关,#218/#219) | `finboard_run_queue` + `finboard_strategy_*`(复用,无新工具) | ✅ #218/#219 | 复用 run_queue 写权限 |
 
 > 详细工具契约见 `references/tools.md`;扩展计划见
 > `packages/finboard-mcp/ROADMAP.md`。

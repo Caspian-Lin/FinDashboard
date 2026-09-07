@@ -1,4 +1,4 @@
-"""用户自定义因子的可引用性与入队门控(issue #217)。
+"""用户自定义因子的可引用性与入队门控(issue #217;#361 多期改覆盖检查)。
 
 用户因子(u_ 前缀)的值来自沙箱执行(``finboard_research_code_run``)
 落库的 feature snapshot;可引用性由 artifact ``status=active`` 且
@@ -8,9 +8,16 @@
   外的用户因子直接 ``StrategySpecError``(retired / 不存在 fail-visible);
 * 入队期(``user_factor_reference_gate_error``,REST+MCP 共用,对齐
   #186/#203 秒级失败风格)—— 引用的用户因子不在 active 名单 → 拒绝;
-  声明 ``rebalance_frequency``(multi_period)且引用用户因子 → 拒绝
-  (沙箱因子观测绑定单一 decision_at,多期重算不支持,未来扩展需
-  逐期独立 run);
+* multi_period x u_ 因子的 **series 覆盖检查**(issue #361,替代 #217 的
+  一刀切秒拒)—— 拒的是「数据没备齐」,不再是「这个组合不许存在」:
+  每个引用的 u_ 因子经 ``SeriesLookup.find_matching``(#360 钉死签名)找
+  series,**无 series / 覆盖不足 / series 锚定发布与 run 的 bars 主发布
+  不一致 → 具名拒绝**(缺失决策日期有界预览 ≤10 + 一条
+  ``finboard_factor_series_build`` 重建命令);single_shot 分支不动(仍走
+  #203 快照门控)。series 查找以 :class:`SeriesLookup` Protocol 注入,
+  单测用 stub;真实 wiring 经 :func:`default_series_lookup` lazy import
+  ``finboard_persistence.factor_series_repo``(#360 并行分支提供,import
+  放函数体内,整合时接线);
 * 快照锚定预检(issue #355,REST+MCP 共用)—— 引用快照锚定的数据发布
   ⊄ 本次 ``dataset_release_ids`` 时入队即拒(逐快照全量列出 + 修复路径;
   ⊆ 约束本身与快照 PIT 语义不变),``strategy_validate`` 通道给具名
@@ -21,9 +28,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from datetime import date
+from typing import TYPE_CHECKING, Any, Protocol
 
 from finboard_backtest.research_code.promotion import is_promoted_artifact
 from finboard_data.factor_lab import (
@@ -31,6 +39,11 @@ from finboard_data.factor_lab import (
     is_user_factor_name,
     sandbox_factor_name,
 )
+
+if TYPE_CHECKING:
+    # issue #360(并行分支)提供的因子 series 记录;本分支以 Protocol 消费
+    # 其形状(release_id 锚定 + 覆盖日期),真实类合入后静态解析。
+    from finboard_persistence.factor_series_repo import FactorSeriesRecord
 
 #: research_code 的 kind 白名单里 user 因子固定为 factor
 _USER_FACTOR_KIND = "factor"
@@ -41,6 +54,53 @@ SNAPSHOT_ANCHOR_MISMATCH_CODE = "snapshot_anchor_mismatch"
 
 #: validate 通道 warning 的具名标记(issue #355)
 USER_FACTOR_ANCHOR_WARNING_CODE = "user_factor_anchor_mismatch"
+
+#: multi_period x u_ 因子 series 覆盖不足的具名标记(issue #361)
+SERIES_COVERAGE_MISSING_CODE = "user_factor_series_coverage_missing"
+
+#: series 锚定发布与 run bars 主发布不一致的具名标记(issue #361)
+SERIES_ANCHOR_MISMATCH_CODE = "user_factor_series_anchor_mismatch"
+
+#: 覆盖不足时缺失决策日期的有界预览上限(issue #361)
+SERIES_COVERAGE_PREVIEW_LIMIT = 10
+
+
+class SeriesLookup(Protocol):
+    """因子 series 查找协议(issue #361,签名由 #360 钉死)。
+
+    ``code_artifact`` 为去掉 ``u_`` 前缀的 artifact 名;``release_id`` 是
+    run 的 bars 主发布;``window_start`` / ``window_end`` 是 run 的决策
+    窗口(bars 发布区间)。单测注入 stub;真实 wiring 见
+    :func:`default_series_lookup`。
+    """
+
+    # 整合修正:真实仓储(#360 FactorSeriesRepository)是 async DB 访问,
+    # 协议随之 async(同步 stub 一并改 async)。
+    async def find_matching(
+        self,
+        *,
+        code_artifact: str,
+        release_id: str,
+        dataset_release_ids: Sequence[str],
+        params: Mapping[str, Any],
+        window_start: date,
+        window_end: date,
+    ) -> FactorSeriesRecord | None: ...
+
+
+class SeriesCoverageProbe(Protocol):
+    """series 覆盖检查协议(issue #361;默认经 #360 的
+    ``series_coverage_missing`` lazy import)。
+
+    返回 series 未覆盖的决策日期(升序);空序列 = 全覆盖。
+    """
+
+    def __call__(
+        self,
+        series: Any,
+        *,
+        decision_dates: Sequence[date],
+    ) -> Sequence[date]: ...
 
 
 async def active_user_factor_names(session: Any) -> frozenset[str]:
@@ -58,25 +118,29 @@ def user_factor_reference_gate_error(
     *,
     required_factor_sources: Collection[str],
     active_user_factors: Collection[str],
-    parameters: dict[str, Any] | None,
+    series_covered_factors: Collection[str] = frozenset(),
 ) -> str | None:
-    """入队期用户因子门控;返回错误文案或 None(放行)。
+    """入队期用户因子 active 名单门控;返回错误文案或 None(放行)。
 
-    1. 引用的用户因子不在 active+passed 名单 → 拒绝(附缺失名单);
-    2. multi_period(``parameters.rebalance_frequency``)引用用户因子 → 拒绝。
+    1. 引用的用户因子不在 active+passed 名单 → 拒绝(附缺失名单)。
+
+    issue #360:被声明 ``factor_series_ids`` 覆盖的 u_ 因子跳过名单检查 ——
+    序列是内容寻址的冻结工件(逐决策日观测,不再绑定单一 decision_at),
+    artifact 生命周期(retired 等)不影响已冻结序列的可引用性(同 manifest
+    冻结先例)。
+
+    issue #361:multi_period x u_ 不再在本函数一刀切秒拒,由调用方在放行后
+    追加 :func:`user_factor_series_coverage_gate_error` 做 series 覆盖检查
+    (拒的是「数据没备齐」);single_shot 分支不动(仍走 #203 快照门控)。
     """
-    referenced = {name for name in required_factor_sources if is_user_factor_name(name)}
+    covered = set(series_covered_factors)
+    referenced = {
+        name
+        for name in required_factor_sources
+        if is_user_factor_name(name) and name not in covered
+    }
     if not referenced:
         return None
-    frequency = (parameters or {}).get("rebalance_frequency")
-    if frequency:
-        return (
-            f"execution_mode=multi_period(rebalance_frequency={frequency})不支持引用"
-            f"用户自定义因子: {sorted(referenced)}。沙箱因子观测绑定单一 "
-            "decision_at(finboard_research_code_run 的快照),多期每期重算"
-            "仅覆盖价格因子;请去掉 rebalance_frequency 走 single_shot,"
-            "决策时点由快照 decision_at 推导。"
-        )
     missing = referenced - set(active_user_factors)
     if missing:
         return (
@@ -85,6 +149,114 @@ def user_factor_reference_gate_error(
             "(已入队运行的 manifest 冻结不受影响);请恢复 artifact"
             "(finboard_research_code_rollback)或移除该因子引用。"
         )
+    return None
+
+
+def _default_series_coverage_missing(
+    series: Any,
+    *,
+    decision_dates: Sequence[date],
+) -> Sequence[date]:
+    """#360 的 ``series_coverage_missing``(lazy import,Protocol 化)。
+
+    模块由并行分支 #360 提供,合入前 import 失败原样上抛(不吞错、不静默
+    放行);单测注入 stub probe,不触本函数。真实函数签名以 #360 为准,
+    这里只做返回类型收窄(mypy no-any-return)。
+    """
+    from finboard_persistence.factor_series_repo import series_coverage_missing
+
+    result: Sequence[date] = series_coverage_missing(series, decision_dates=decision_dates)
+    return result
+
+
+def default_series_lookup(session: Any) -> SeriesLookup:
+    """真实 series 查找 wiring(#360 合入后接线,本分支不执行)。
+
+    ``factor_series_repo`` 的 lookup 预期与 :class:`SeriesLookup` 协议
+    同形(find_matching 关键字签名);整合时若 #360 的实现形状有出入,
+    只需在本函数内适配(调用方只依赖 Protocol)。
+    """
+    from finboard_persistence.factor_series_repo import FactorSeriesRepository
+
+    lookup: SeriesLookup = FactorSeriesRepository(session)
+    return lookup
+
+
+async def user_factor_series_coverage_gate_error(
+    *,
+    referenced_user_factors: Collection[str],
+    series_lookup: SeriesLookup,
+    bars_release_id: str,
+    dataset_release_ids: Sequence[str],
+    parameters: Mapping[str, Any] | None,
+    decision_dates: Sequence[date],
+    window_start: date,
+    window_end: date,
+    coverage_missing: SeriesCoverageProbe | None = None,
+) -> str | None:
+    """multi_period x u_ 因子的 series 覆盖检查;返回错误文案或 None(放行)。
+
+    issue #361:替代 #217「multi_period 引用用户因子一刀切秒拒」—— 拒的是
+    「数据没备齐」,不再是「这个组合不许存在」。逐个引用的 u_ 因子:
+
+    1. ``find_matching`` 找不到 series → 具名拒绝(附
+       ``finboard_factor_series_build`` 重建命令);
+    2. series 的 ``release_id`` 与 run 的 bars 主发布不一致 → 具名锚定拒绝;
+    3. 覆盖不足(``series_coverage_missing`` 非空)→ 具名拒绝,列出缺失
+       决策日期(有界预览 ≤ :data:`SERIES_COVERAGE_PREVIEW_LIMIT`)+ 重建命令。
+
+    ``decision_dates`` 由调用方按声明的 ``decision_schedule`` 从发布交易日历
+    推导(REST+MCP 共用 ``enqueue_decision_dates``);空列表(如发布区间
+    推导不出决策)不构成覆盖缺口,放行(执行期既有根因报错兜底)。
+    """
+    referenced = sorted(referenced_user_factors)
+    if not referenced or not decision_dates:
+        return None
+    probe = coverage_missing or _default_series_coverage_missing
+    for name in referenced:
+        series = await series_lookup.find_matching(
+            code_artifact=name[len(USER_FACTOR_PREFIX) :],
+            release_id=bars_release_id,
+            dataset_release_ids=tuple(dataset_release_ids),
+            params=dict(parameters or {}),
+            window_start=window_start,
+            window_end=window_end,
+        )
+        if series is None:
+            return (
+                f"用户自定义因子 {name} 在决策窗口内未找到已构建的因子 series"
+                f"({SERIES_COVERAGE_MISSING_CODE};window "
+                f"{window_start.isoformat()}→{window_end.isoformat()},"
+                f"bars 主发布 {bars_release_id})。请先执行 "
+                "finboard_factor_series_build 对该发布与窗口构建 series"
+                " 后重新入队"
+            )
+        series_release = getattr(series, "release_id", None)
+        if series_release != bars_release_id:
+            return (
+                f"用户自定义因子 {name} 的 series 锚定发布 {series_release!r} "
+                f"与本次 bars 主发布 {bars_release_id!r} 不一致"
+                f"({SERIES_ANCHOR_MISMATCH_CODE})。series 必须锚定本次运行的"
+                "bars 主发布(换发布需重建);请执行 finboard_factor_series_build"
+                " 对本次发布构建 series 后重新入队"
+            )
+        missing = sorted(probe(series, decision_dates=decision_dates))
+        if missing:
+            preview = ", ".join(
+                day.isoformat() for day in missing[:SERIES_COVERAGE_PREVIEW_LIMIT]
+            )
+            more = (
+                f"(共 {len(missing)} 天,仅列前 {SERIES_COVERAGE_PREVIEW_LIMIT})"
+                if len(missing) > SERIES_COVERAGE_PREVIEW_LIMIT
+                else ""
+            )
+            return (
+                f"用户自定义因子 {name} 的 series 未覆盖全部决策日"
+                f"({SERIES_COVERAGE_MISSING_CODE}):缺失 {len(missing)} 个"
+                f"决策日{more}: {preview}。请执行 finboard_factor_series_build"
+                f" 重建覆盖 {window_start.isoformat()}→"
+                f"{window_end.isoformat()} 的 series 后重新入队"
+            )
     return None
 
 
@@ -298,13 +470,20 @@ async def user_factor_anchor_warnings(
 
 
 __all__ = [
+    "SERIES_ANCHOR_MISMATCH_CODE",
+    "SERIES_COVERAGE_MISSING_CODE",
+    "SERIES_COVERAGE_PREVIEW_LIMIT",
     "SNAPSHOT_ANCHOR_MISMATCH_CODE",
     "USER_FACTOR_ANCHOR_WARNING_CODE",
+    "SeriesCoverageProbe",
+    "SeriesLookup",
     "SnapshotAnchorMismatch",
     "UserFactorAnchorWarning",
     "active_user_factor_names",
+    "default_series_lookup",
     "snapshot_anchor_mismatch_error",
     "snapshot_anchor_mismatches",
     "user_factor_anchor_warnings",
     "user_factor_reference_gate_error",
+    "user_factor_series_coverage_gate_error",
 ]
