@@ -150,8 +150,13 @@ class Settings(BaseSettings):
     research_sandbox_image: str = "finboard-research-sandbox:0.3.0"
     # 整跑墙钟超时(秒),超时 docker kill;内存 MB(memory-swap 同值禁 swap);
     # CPU 配额;进程数上限;容器内非 root uid(镜像内 sandbox 用户)。
-    research_sandbox_timeout_seconds: float = Field(default=300.0, ge=1.0)
-    research_sandbox_memory_mb: int = Field(default=2048, ge=256)
+    # 容量规划(issue #374):容器内存 ≈ 2GB 基线 + 挂载行数 x ~0.3KB(pandas
+    # 整表加载对象开销)——4096 档覆盖全市场 daily_metrics ~18 个月窗口
+    # (≈700 万行,2026-09-07 BJ-CF3D90915A75443C 在 2048 档实测 OOM);
+    # 更长窗口(如 3 年 ≈ 1100 万行)经 env 提到 8192。无 swap,并发 build
+    # 时并发数 x 本值须 ≤ Docker Desktop WSL2 可用内存。
+    research_sandbox_timeout_seconds: float = Field(default=600.0, ge=1.0)
+    research_sandbox_memory_mb: int = Field(default=4096, ge=256)
     research_sandbox_cpus: float = Field(default=2.0, ge=0.5)
     research_sandbox_pids_limit: int = Field(default=256, ge=16)
     research_sandbox_user: str = "65532"
