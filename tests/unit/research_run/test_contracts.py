@@ -41,10 +41,28 @@ def test_execution_mode_for_rebalance_frequency() -> None:
         execution_mode_for({"rebalance_frequency": "quarterly"})
         is ResearchExecutionMode.MULTI_PERIOD
     )
+    # issue #361:legacy 频率兼容扩展 daily/weekly(旧值 monthly/quarterly 零变化)。
+    assert (
+        execution_mode_for({"rebalance_frequency": "daily"}) is ResearchExecutionMode.MULTI_PERIOD
+    )
+    assert (
+        execution_mode_for({"rebalance_frequency": "weekly"}) is ResearchExecutionMode.MULTI_PERIOD
+    )
+    # decision_schedule(含 custom)同样触发 multi_period(issue #361)。
+    assert (
+        execution_mode_for(
+            {"decision_schedule": {"kind": "custom", "dates": ["2024-01-02"]}}
+        )
+        is ResearchExecutionMode.MULTI_PERIOD
+    )
+    assert (
+        execution_mode_for({"decision_schedule": {"kind": "daily"}})
+        is ResearchExecutionMode.MULTI_PERIOD
+    )
     assert execution_mode_for({}) is ResearchExecutionMode.SINGLE_SHOT
     # 非法值按 single_shot 兜底(执行时由信号引擎 fail-closed)。
     assert (
-        execution_mode_for({"rebalance_frequency": "weekly"}) is ResearchExecutionMode.SINGLE_SHOT
+        execution_mode_for({"rebalance_frequency": "yearly"}) is ResearchExecutionMode.SINGLE_SHOT
     )
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -29,9 +29,20 @@ MONEY_EPSILON = Decimal("0.01")
 
 JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
-#: research_run 支持的调仓频率(``parameters.rebalance_frequency``,issue #183)。
+#: legacy 调仓频率(``parameters.rebalance_frequency``,issue #183)。
 #: 单快照(冻结因子快照)frozen 路径不设该参数,恒为 single_shot。
-REBALANCE_FREQUENCIES: frozenset[str] = frozenset({"monthly", "quarterly"})
+#: issue #361 兼容扩展接受 daily / weekly(旧值 monthly/quarterly 零变化,
+#: 与 ``decision_schedule`` 同名 kind 互映射),决策频率的完整表达走
+#: ``parameters.decision_schedule``。
+REBALANCE_FREQUENCIES: frozenset[str] = frozenset(
+    {"daily", "weekly", "monthly", "quarterly"}
+)
+
+#: ``decision_schedule.kind`` 合法集合(issue #361):决策频率泛化为日历服务。
+#: ``custom`` 必须显式声明 ``dates``(升序去重,入队时校验 ⊆ 发布交易日)。
+DECISION_SCHEDULE_KINDS: frozenset[str] = frozenset(
+    {"daily", "weekly", "monthly", "quarterly", "custom"}
+)
 
 
 class ResearchExecutionMode(StrEnum):
@@ -598,15 +609,116 @@ class EquityPoint:
             raise ValueError("权益不能为负")
 
 
-def execution_mode_for(parameters: Mapping[str, object]) -> ResearchExecutionMode:
-    """按 ``parameters.rebalance_frequency`` 解析研究运行执行模式。
+@dataclass(frozen=True, slots=True)
+class DecisionSchedule:
+    """多期回放的决策日历声明(issue #361,决策频率泛化为日历服务)。
 
-    多期回放(multi_period)必须显式声明 ``rebalance_frequency``(monthly/
-    quarterly);未声明或非法值一律按单时点(single_shot)处理,与既有
-    单快照路径保持一致。
+    * ``kind`` ∈ :data:`DECISION_SCHEDULE_KINDS`;
+    * ``dates`` 仅 ``custom`` 必填(严格升序、去重;入队期另校验 ⊆ 发布
+      交易日),其余 kind 恒为空(决策日由发布交易日历推导);
+    * legacy ``parameters.rebalance_frequency``(daily/weekly/monthly/
+      quarterly)解析为同名 kind 的 schedule,旧值语义零变化。
+
+    manifest 冻结 ``parameters`` 原文(含 ``decision_schedule`` 原始 dict),
+    归一化只发生在消费端(确定性重放,#183 语义不变)。
     """
-    frequency = parameters.get("rebalance_frequency")
-    if frequency in REBALANCE_FREQUENCIES:
+
+    kind: str
+    dates: tuple[date, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.kind not in DECISION_SCHEDULE_KINDS:
+            raise ValueError(
+                f"decision_schedule.kind 仅支持 {sorted(DECISION_SCHEDULE_KINDS)}: {self.kind!r}"
+            )
+        if self.kind == "custom" and not self.dates:
+            raise ValueError("decision_schedule.kind=custom 必须声明非空 dates")
+        if self.kind != "custom" and self.dates:
+            raise ValueError(
+                f"decision_schedule.kind={self.kind} 不接受 dates(仅 custom 声明)"
+            )
+        if list(self.dates) != sorted(set(self.dates)):
+            raise ValueError("decision_schedule.dates 必须严格升序且不重复")
+
+
+def parse_decision_schedule(raw: object) -> DecisionSchedule:
+    """解析 ``parameters.decision_schedule`` 声明;非法形状抛 ``ValueError``。
+
+    REST ``ResearchRunQueueIn`` schema 校验与执行期 :func:`resolve_decision_schedule`
+    共用本函数(形状规则单一来源,不双份漂移):kind 白名单、多余键拒绝、
+    custom 缺 dates 拒绝、非 custom 带 dates 拒绝、dates 须为 YYYY-MM-DD
+    字符串且严格升序去重。
+    """
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"decision_schedule 须为对象(kind/dates): {raw!r}")
+    extra = sorted(set(raw) - {"kind", "dates"})
+    if extra:
+        raise ValueError(f"decision_schedule 不支持的字段: {extra}")
+    kind = raw.get("kind")
+    if not isinstance(kind, str) or kind not in DECISION_SCHEDULE_KINDS:
+        raise ValueError(
+            f"decision_schedule.kind 仅支持 {sorted(DECISION_SCHEDULE_KINDS)}: {kind!r}"
+        )
+    dates_raw = raw.get("dates")
+    if dates_raw is None:
+        dates_raw = ()
+    if isinstance(dates_raw, (str, bytes)) or not isinstance(dates_raw, Sequence):
+        raise ValueError(
+            f"decision_schedule.dates 须为 YYYY-MM-DD 字符串列表: {dates_raw!r}"
+        )
+    dates: list[date] = []
+    for item in dates_raw:
+        if not isinstance(item, str):
+            raise ValueError(f"decision_schedule.dates 须为 YYYY-MM-DD 字符串: {item!r}")
+        try:
+            dates.append(date.fromisoformat(item))
+        except ValueError as exc:
+            raise ValueError(
+                f"decision_schedule.dates 含无法解析的日期: {item!r}"
+            ) from exc
+    return DecisionSchedule(kind=kind, dates=tuple(dates))
+
+
+def resolve_decision_schedule(
+    parameters: Mapping[str, object],
+) -> DecisionSchedule | None:
+    """从 run ``parameters`` 解析决策日历声明;未声明返回 ``None``。
+
+    优先 ``decision_schedule``;legacy ``rebalance_frequency`` 映射为同 kind
+    的 schedule(旧值零变化)。非法值 / 两键同时声明 fail-closed 抛
+    ``ValueError``(与既有执行期口径一致,入队侧 schema 先行拒绝)。
+    """
+    has_schedule = "decision_schedule" in parameters
+    has_frequency = parameters.get("rebalance_frequency") is not None
+    if has_schedule and has_frequency:
+        raise ValueError(
+            "parameters.decision_schedule 与 legacy rebalance_frequency"
+            " 不可同时声明(声明 decision_schedule 即 multi_period)"
+        )
+    if has_schedule:
+        return parse_decision_schedule(parameters["decision_schedule"])
+    if not has_frequency:
+        return None
+    frequency = parameters["rebalance_frequency"]
+    if not isinstance(frequency, str) or frequency not in REBALANCE_FREQUENCIES:
+        raise ValueError(
+            f"rebalance_frequency 仅支持 {sorted(REBALANCE_FREQUENCIES)}: {frequency!r}"
+        )
+    return DecisionSchedule(kind=frequency)
+
+
+def execution_mode_for(parameters: Mapping[str, object]) -> ResearchExecutionMode:
+    """按 ``parameters`` 的决策日历声明解析研究运行执行模式。
+
+    多期回放(multi_period)必须显式声明决策日历 —— ``decision_schedule``
+    (issue #361,含 custom)或 legacy ``rebalance_frequency``(daily/weekly/
+    monthly/quarterly);未声明或非法值一律按单时点(single_shot)处理,
+    与既有单快照路径保持一致(非法值在执行期由
+    :func:`resolve_decision_schedule` fail-closed)。
+    """
+    if isinstance(parameters.get("decision_schedule"), Mapping):
+        return ResearchExecutionMode.MULTI_PERIOD
+    if parameters.get("rebalance_frequency") in REBALANCE_FREQUENCIES:
         return ResearchExecutionMode.MULTI_PERIOD
     return ResearchExecutionMode.SINGLE_SHOT
 
@@ -966,6 +1078,7 @@ def _require_aware(value: datetime, name: str) -> None:
 
 
 __all__ = [
+    "DECISION_SCHEDULE_KINDS",
     "MAX_RESEARCH_CAPITAL",
     "MIN_RESEARCH_CAPITAL",
     "REBALANCE_FREQUENCIES",
@@ -975,6 +1088,7 @@ __all__ = [
     "CapitalTierOutcome",
     "ConstraintOutcome",
     "DecisionBundle",
+    "DecisionSchedule",
     "EquityPoint",
     "FeatureValue",
     "FrozenArtifactRef",
@@ -1009,9 +1123,11 @@ __all__ = [
     "canonical_json",
     "execution_mode_for",
     "manifest_from_json",
+    "parse_decision_schedule",
     "pipeline_output_checksum",
     "replay_guard_error",
     "report_from_json",
+    "resolve_decision_schedule",
     "stable_checksum",
     "to_json_value",
 ]

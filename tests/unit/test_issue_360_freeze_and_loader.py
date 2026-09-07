@@ -268,13 +268,16 @@ class TestRebuildGuard:
         assert covered == frozenset({"u_mom20"})
 
     def test_series_covered_bypasses_user_factor_gate(self) -> None:
-        """被序列覆盖的 u_ 因子:multi_period 拒绝与 retired 拦截均跳过。"""
-        params_multi: dict[str, Any] = {"rebalance_frequency": "monthly"}
+        """被序列覆盖的 u_ 因子跳过名单检查;未覆盖因子仍按 active 名单拦截。
+
+        整合语义(#360 x #361):multi_period 一刀切拒绝已由覆盖检查门控
+        (user_factor_series_coverage_gate_error)替代,本门控只剩 active
+        名单检查;序列覆盖的因子是内容寻址冻结工件,不受名单约束。
+        """
         assert (
             user_factor_reference_gate_error(
                 required_factor_sources={"u_mom20"},
                 active_user_factors=frozenset(),
-                parameters=params_multi,
                 series_covered_factors=frozenset({"u_mom20"}),
             )
             is None
@@ -283,17 +286,15 @@ class TestRebuildGuard:
             user_factor_reference_gate_error(
                 required_factor_sources={"u_mom20"},
                 active_user_factors=frozenset(),  # retired/不存在
-                parameters={},
                 series_covered_factors=frozenset({"u_mom20"}),
             )
             is None
         )
-        # 未覆盖因子行为不变(multi_period 仍拒绝)。
+        # 未覆盖因子:不在 active 名单 → 拦截(multi_period 语义走 #361 覆盖门控)。
         assert (
             user_factor_reference_gate_error(
                 required_factor_sources={"u_mom20", "u_other"},
                 active_user_factors=frozenset({"u_mom20"}),
-                parameters=params_multi,
                 series_covered_factors=frozenset({"u_mom20"}),
             )
             is not None

@@ -8,6 +8,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from finboard_backtest.research_run.contracts import (
+    DECISION_SCHEDULE_KINDS,
+    REBALANCE_FREQUENCIES,
+    parse_decision_schedule,
+)
+
 
 class ResearchRunQueueIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -36,20 +42,40 @@ class ResearchRunQueueIn(BaseModel):
 
     @field_validator("parameters")
     @classmethod
-    def _validate_rebalance_frequency(cls, value: dict[str, Any]) -> dict[str, Any]:
-        """multi_period 参数门:rebalance_frequency 只接受 monthly/quarterly。
+    def _validate_decision_schedule(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """决策日历声明参数门(issue #361,#183 legacy 扩展)。
+
+        * ``decision_schedule``:kind ∈ {daily, weekly, monthly, quarterly,
+          custom};custom 必须声明非空 ``dates``(YYYY-MM-DD 字符串,严格
+          升序去重);形状规则与执行期 ``parse_decision_schedule`` 同源
+          (单一事实来源,不双份漂移);
+        * legacy ``rebalance_frequency`` 兼容扩展接受 daily/weekly(旧值
+          monthly/quarterly 零变化);与 ``decision_schedule`` 不可同时声明;
+        * ``dates ⊆ 发布交易日`` 不是形状规则(需要发布日历),由入队路由
+          的日历门控校验(REST+MCP 共用)。
 
         非法值提前在入队时拒绝(研究运行执行时也会 fail-closed,这里给 agent
         更早、更清晰的错误)。
         """
+        if "decision_schedule" in value:
+            if value.get("rebalance_frequency") is not None:
+                raise ValueError(
+                    "parameters.decision_schedule 与 legacy rebalance_frequency"
+                    " 不可同时声明(声明 decision_schedule 即 multi_period)"
+                )
+            try:
+                parse_decision_schedule(value["decision_schedule"])
+            except ValueError as exc:
+                raise ValueError(f"decision_schedule 非法: {exc}") from exc
         frequency = value.get("rebalance_frequency")
-        if frequency is None:
-            return value
-        if not isinstance(frequency, str) or frequency not in (
-            "monthly",
-            "quarterly",
+        if frequency is not None and (
+            not isinstance(frequency, str) or frequency not in REBALANCE_FREQUENCIES
         ):
-            raise ValueError(f"rebalance_frequency 仅支持 monthly/quarterly,收到 {frequency!r}")
+            raise ValueError(
+                f"rebalance_frequency 仅支持 {sorted(REBALANCE_FREQUENCIES)}"
+                f"(decision_schedule.kind 支持 {sorted(DECISION_SCHEDULE_KINDS)}),"
+                f"收到 {frequency!r}"
+            )
         return value
 
 
