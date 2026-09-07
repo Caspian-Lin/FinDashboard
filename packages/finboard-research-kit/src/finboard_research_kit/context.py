@@ -24,6 +24,13 @@ window_end`` 日终的全量数据(否则算不了后段日期),容器内逐日 
 违反由服务端前缀不变性审计(truncation / perturbation)检出 —— 逐日
 物理隔离不再是窗口模式的防线,窗口上界(window_end)仍是物理硬边界。
 
+**数据面底座(issue #374)**:harness 以 **Arrow 常驻 + 按需截面** 装配
+序列上下文 —— parquet 读为 Arrow 表(raw 内存,无 Python 对象税),
+``as_of`` 过滤在 Arrow compute 内完成,仅当次访问的可见行物化为
+pandas;容器内存不再随「整表进 pandas」线性放大(705 万行 daily_metrics
+曾以 ~2GB 撞穿容器限额)。直接以 pandas 构造(测试 / 老代码)的行为
+与 0.3.0 完全一致,两种来源构造时二选一。
+
 不在白名单的 import(subprocess/socket/os...)在静态校验(#215)与本镜像
 运行环境双重拒绝。
 """
@@ -37,6 +44,8 @@ from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 
 #: 窗口挂载(v3)在 bars / 研究数据集长表中携带的逐行可见时点列名
 AVAILABLE_AT_COL = "available_at"
@@ -199,37 +208,245 @@ class DatasetView:
     frame: pd.DataFrame | None
 
 
-@dataclass(frozen=True, slots=True)
+def _table_to_frame(table: pa.Table) -> pd.DataFrame:
+    """Arrow 表物化为 pandas(镜像 harness ``_read_frame`` 的读出语义)。
+
+    ``pd.read_parquet`` 即 pyarrow 读表 + ``to_pandas``;date32 → object
+    dtype 的 ``datetime.date`` 逐值一致,bars 的 ``date`` 列随后
+    ``pd.to_datetime``(与既有 harness 行为一致),其余列不动。
+    """
+    frame: pd.DataFrame = table.to_pandas()
+    if "date" in frame.columns:
+        frame["date"] = pd.to_datetime(frame["date"])
+    return frame
+
+
+def _visible_table_to_frame(
+    table: pa.Table,
+    *,
+    as_of: date,
+    fallback_date_col: str,
+) -> pd.DataFrame:
+    """Arrow 底座的可见行物化(与 pandas ``frame.loc[mask]`` 语义逐值等值)。
+
+    行内容经 :func:`_visible_from_table` 同一过滤;行索引镜像 pandas
+    ``loc`` 的标签语义 —— 保留命中行在原表中的位置(过滤空洞保留),
+    与 0.3.0 pandas 过滤路径的帧完全一致。
+    """
+    if table.num_rows == 0:
+        return _table_to_frame(table)
+    mask = _visibility_mask(table, as_of=as_of, fallback_date_col=fallback_date_col)
+    frame = _table_to_frame(table.filter(mask))
+    positions = pa.array(range(table.num_rows), type=pa.int64())
+    frame.index = pd.Index(pc.filter(positions, mask).to_pylist())
+    return frame
+
+
+def _visibility_mask(
+    table: pa.Table,
+    *,
+    as_of: date,
+    fallback_date_col: str,
+) -> pa.BooleanArray:
+    """``available_at <= as_of 日终`` 的布尔掩码(#374)。
+
+    与 :func:`_pit_frame` 逐值等值:available_at 为 null 的行不可见
+    (掩码 null 行在 filter 中被丢弃,与 pandas NaT 比较为 False 一致)。
+    无 available_at 列时按业务日期列回退 —— v3 挂载写出恒为 date32;
+    其余类型 fail-closed(不猜测时区语义)。
+    """
+    if AVAILABLE_AT_COL in table.column_names:
+        stamps = table.column(AVAILABLE_AT_COL)
+        ceiling = pa.scalar(end_of_day(as_of), type=stamps.type)
+        return pc.less_equal(stamps, ceiling)
+    col = table.column(fallback_date_col)
+    if not pa.types.is_date(col.type):
+        raise ValueError(
+            f"无 {AVAILABLE_AT_COL} 列的 Arrow 数据面仅支持 "
+            f"{fallback_date_col} 为 date 列,收到 {col.type}"
+            "(窗口挂载 v3 各数据集恒携带 available_at)"
+        )
+    return pc.less_equal(col, pa.scalar(as_of, type=col.type))
+
+
 class FactorSeriesContext:
     """区间因子计算的只读输入(协议 v2,issue #359)。
 
     与 :class:`FactorContext` 的差异:数据面覆盖**整个窗口**
     (``available_at <= window_end`` 日终,由服务端窗口挂载物化),
-    逐日 PIT 由访问器承担 —— ``bars_view(as_of)`` / ``dataset_view`` 只
+    逐日 PIT 由访问器承担 —— ``bars_view`` / ``dataset_view`` 只
     返回 ``available_at <= as_of`` 日终的行。``dates`` 为平台推导后传入
     的窗口内决策日(升序),容器不自行推导。
 
     契约:``compute_series`` 产出的 ``value[t]`` 只许依赖
     ``available_at <= t`` 的数据;违反由前缀不变性审计检出。
+
+    数据面来源(harness 装配,#374):**Arrow 底座** —— ``*_table`` 传入
+    pyarrow 表,常驻内存为 raw Arrow(无对象税),访问器在 Arrow compute
+    内做 ``as_of`` 过滤后仅把可见行物化为 pandas;pandas 字段(``bars`` /
+    ``daily_metrics`` / ``financial_indicators``)成为惰性属性,首次访问
+    才整表物化(0.3.0 行为兼容)。两种来源构造时**二选一**;直接以 pandas
+    构造(测试 / 老代码)的访问器行为与 0.3.0 完全一致。
     """
 
-    #: 窗口内决策日(升序;平台推导后传入)
+    __slots__ = (
+        "_bars_frame",
+        "_bars_source",
+        "_daily_frame",
+        "_daily_source",
+        "_fin_frame",
+        "_fin_source",
+        "dates",
+        "params",
+        "symbols",
+    )
+
     dates: tuple[date, ...]
-    #: 候选池标的代码
     symbols: tuple[str, ...]
-    #: 窗口全量行情长表(含 window_end 之前的数据;列约定同 FactorContext,
-    #: 窗口挂载 v3 另携带逐行 available_at)
-    bars: pd.DataFrame = field(default_factory=_empty_bars)
-    #: daily_metrics 研究发布窗口视图;无对应发布时为 None
-    daily_metrics: pd.DataFrame | None = None
-    #: financial_indicators 研究发布窗口视图;无对应发布时为 None
-    financial_indicators: pd.DataFrame | None = None
-    #: 运行参数(入队 payload.params 覆盖 manifest.params 的合并结果,只读)
-    params: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    params: Mapping[str, Any]
+    _bars_source: pa.Table | pd.DataFrame
+    _daily_source: pa.Table | pd.DataFrame | None
+    _fin_source: pa.Table | pd.DataFrame | None
+    _bars_frame: pd.DataFrame | None
+    _daily_frame: pd.DataFrame | None
+    _fin_frame: pd.DataFrame | None
+
+    def __init__(
+        self,
+        *,
+        dates: tuple[date, ...],
+        symbols: tuple[str, ...],
+        bars: pd.DataFrame | None = None,
+        daily_metrics: pd.DataFrame | None = None,
+        financial_indicators: pd.DataFrame | None = None,
+        params: Mapping[str, Any] = MappingProxyType({}),
+        bars_table: pa.Table | None = None,
+        daily_metrics_table: pa.Table | None = None,
+        financial_indicators_table: pa.Table | None = None,
+    ) -> None:
+        if bars_table is not None and bars is not None:
+            raise ValueError(
+                "bars 与 bars_table 二选一(Arrow 底座与 pandas 兼容来源不可混装)"
+            )
+        if daily_metrics_table is not None and daily_metrics is not None:
+            raise ValueError(
+                "daily_metrics 与 daily_metrics_table 二选一"
+                "(Arrow 底座与 pandas 兼容来源不可混装)"
+            )
+        if (
+            financial_indicators_table is not None
+            and financial_indicators is not None
+        ):
+            raise ValueError(
+                "financial_indicators 与 financial_indicators_table 二选一"
+                "(Arrow 底座与 pandas 兼容来源不可混装)"
+            )
+        set_ = object.__setattr__
+        set_(self, "dates", tuple(dates))
+        set_(self, "symbols", tuple(symbols))
+        set_(self, "params", params)
+        set_(
+            self,
+            "_bars_source",
+            bars_table
+            if bars_table is not None
+            else (bars if bars is not None else _empty_bars()),
+        )
+        set_(
+            self,
+            "_daily_source",
+            daily_metrics_table
+            if daily_metrics_table is not None
+            else daily_metrics,
+        )
+        set_(
+            self,
+            "_fin_source",
+            financial_indicators_table
+            if financial_indicators_table is not None
+            else financial_indicators,
+        )
+        set_(self, "_bars_frame", None)
+        set_(self, "_daily_frame", None)
+        set_(self, "_fin_frame", None)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(
+            f"{type(self).__name__} 是只读上下文(不可赋值: {name})"
+        )
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(
+            f"{type(self).__name__} 是只读上下文(不可删除: {name})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(dates={len(self.dates)}, "
+            f"symbols={len(self.symbols)}, "
+            f"bars_source={'arrow' if isinstance(self._bars_source, pa.Table) else 'pandas'})"
+        )
+
+    # ---- 惰性 pandas 兼容字段(#374:Arrow 底座下首次访问才整表物化) ----
+
+    def _materialize(
+        self, source: pa.Table | pd.DataFrame | None, cache_slot: str
+    ) -> pd.DataFrame | None:
+        """按来源物化 pandas 并缓存;pandas 来源原样返回(无需缓存)。"""
+        if isinstance(source, pd.DataFrame) or source is None:
+            return source
+        frame = _table_to_frame(source)
+        object.__setattr__(self, cache_slot, frame)
+        return frame
+
+    @property
+    def bars(self) -> pd.DataFrame:
+        """窗口全量行情长表(惰性;Arrow 底座下首次访问才物化)。"""
+        if self._bars_frame is not None:
+            return self._bars_frame
+        frame = self._materialize(self._bars_source, "_bars_frame")
+        if frame is None:
+            return _empty_bars()
+        return frame
+
+    @property
+    def daily_metrics(self) -> pd.DataFrame | None:
+        """daily_metrics 研究发布窗口视图(惰性;无对应发布时为 None)。"""
+        if self._daily_frame is None:
+            return self._materialize(self._daily_source, "_daily_frame")
+        return self._daily_frame
+
+    @property
+    def financial_indicators(self) -> pd.DataFrame | None:
+        """financial_indicators 研究发布窗口视图(惰性;无对应发布时 None)。"""
+        if self._fin_frame is None:
+            return self._materialize(self._fin_source, "_fin_frame")
+        return self._fin_frame
+
+    # ---- 访问器(逐日 PIT 契约入口) ----
+
+    def _visible(
+        self, source: Any, *, as_of: date, fallback_date_col: str
+    ) -> pd.DataFrame | None:
+        """按来源分派 PIT 过滤:Arrow 底座走 compute,pandas 走既有实现。"""
+        if source is None:
+            return None
+        if isinstance(source, pd.DataFrame):
+            return _pit_frame(source, as_of=as_of, fallback_date_col=fallback_date_col)
+        return _visible_table_to_frame(
+            source, as_of=as_of, fallback_date_col=fallback_date_col
+        )
 
     def bars_view(self, as_of: date) -> BarsView:
-        """``as_of`` 日终时点可见的行情视图(PIT 契约入口)。"""
-        visible = _pit_frame(self.bars, as_of=as_of, fallback_date_col="date")
+        """``as_of`` 日终时点可见的行情视图(PIT 契约入口)。
+
+        Arrow 底座下每次调用都把当次可见行物化为一个新 pandas 帧(不缓存
+        —— 按日缓存会让内存随窗口长度二次增长);同一 ``as_of`` 的多次
+        调用应在逐日循环外复用视图变量。
+        """
+        visible = self._visible(
+            self._bars_source, as_of=as_of, fallback_date_col="date"
+        )
         return BarsView(
             as_of=as_of,
             frame=visible if visible is not None else pd.DataFrame(),
@@ -242,12 +459,12 @@ class FactorSeriesContext:
         kind 返回 ``frame=None`` 的视图(因子代码应按缺数据降级)。
         """
         if kind == "daily_metrics":
-            frame = _pit_frame(
-                self.daily_metrics, as_of=as_of, fallback_date_col="trade_date"
+            frame = self._visible(
+                self._daily_source, as_of=as_of, fallback_date_col="trade_date"
             )
         elif kind == "financial_indicators":
-            frame = _pit_frame(
-                self.financial_indicators,
+            frame = self._visible(
+                self._fin_source,
                 as_of=as_of,
                 fallback_date_col="announcement_date",
             )
