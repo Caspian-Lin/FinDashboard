@@ -858,6 +858,27 @@ def _supervise_worker_processes(
     return 0
 
 
+#: worker per-kind 并发上限(issue #144 claim_next max_per_kind)。
+#: 数据源压力敏感的 kind 单并发;dataset_publish / backtest_run 不限。
+#: research_code_run 单并发(#216,沙箱容器本机资源受限);factor_series_build
+#: 为 2(#375,#360 曾单并发)—— 单因子 build 的 3 个容器(主构建 + 2 审计
+#: 截断)本就两两并发,双 job 并行使 4 因子队列墙钟近半;并发受
+#: 「并发数 x research_sandbox_memory_mb(默认 4096,#374)<= Docker Desktop
+#: WSL2 可用内存」约束,内存不足时经 env/配置回落。validation_experiment
+#: 单并发(#233,揭盲一次性门,并发重入只会重复消耗试验预算)。
+_KIND_CONCURRENCY: dict[str, int] = {
+    "feature_snapshot": 1,
+    "bulk_download": 1,
+    "data_sync": 1,
+    "fetch_all": 1,
+    "quality_repair": 1,
+    "research_data_sync": 1,
+    "research_code_run": 1,
+    "factor_series_build": 2,
+    "validation_experiment": 1,
+}
+
+
 @worker_app.command(name="run")
 def worker_run(
     ctx: typer.Context,
@@ -1144,25 +1165,8 @@ async def _run_worker(settings: Settings) -> None:
         shutdown_grace_seconds=settings.worker_shutdown_grace_seconds,
         # issue #306:僵尸无进展检测阈值(0 = 关闭;默认 3600s 见 settings 注释)。
         zombie_no_progress_seconds=settings.worker_zombie_no_progress_seconds,
-        # issue #144:per-kind 全局并发上限(SQL 层 claim_next max_per_kind 实现)。
-        # 数据源压力敏感的 kind 限制为单并发;dataset_publish / backtest_run 不限。
-        # issue #216:research_code_run 单并发(沙箱容器本机资源受限,
-        # 多容器并发只会互相挤占内存限额)。
-        # issue #360:factor_series_build 单并发(复用 research_code_run 的
-        # 沙箱容器槽位约定)。
-        # issue #233:validation_experiment 单并发(揭盲一次性门,并发重入
-        # 只会重复消耗试验预算)。
-        kind_concurrency={
-            "feature_snapshot": 1,
-            "bulk_download": 1,
-            "data_sync": 1,
-            "fetch_all": 1,
-            "quality_repair": 1,
-            "research_data_sync": 1,
-            "research_code_run": 1,
-            "factor_series_build": 1,
-            "validation_experiment": 1,
-        },
+        # per-kind 全局并发上限见模块级 _KIND_CONCURRENCY(#144/#375)。
+        kind_concurrency=dict(_KIND_CONCURRENCY),
     )
     await run_bg_worker(
         engine=components.engine,
