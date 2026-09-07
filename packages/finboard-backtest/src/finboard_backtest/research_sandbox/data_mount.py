@@ -535,13 +535,20 @@ async def _collect_daily_metrics(
                     "available_at": record.available_at,
                 }
             else:
+                # v2 单日挂载:与 v3 同口径,非数值元数据(source/observed_at/
+                # available_at)不进数值白名单——真实 DailySecurityMetrics 的
+                # source 是 str、两个时间戳是 datetime,float 化必崩(#366);
+                # kit 端无 available_at 列时按 trade_date 回退做 PIT 过滤
+                # (D1 available_at 是日期的确定性函数,逐值等值)。
                 row = {
                     "symbol": record.symbol,
                     "trade_date": record.trade_date,
                     **{
                         f.name: _f(getattr(record, f.name))
                         for f in _fields(record)
-                        if f.name not in {"symbol", "trade_date"}
+                        if f.name not in
+                        {"symbol", "trade_date", "available_at",
+                         "observed_at", "source"}
                     },
                 }
             rows.append(row)
