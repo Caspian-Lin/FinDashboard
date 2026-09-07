@@ -283,7 +283,17 @@ def _read_mount_manifest(data_dir: Path) -> dict[str, Any]:
 def build_series_context(
     *, code_dir: Path, data_dir: Path, manifest: dict[str, Any]
 ) -> FactorSeriesContext:
-    """从挂载清单 v3 + parquet 装配 :class:`FactorSeriesContext`。"""
+    """从挂载清单 v3 + parquet 装配 :class:`FactorSeriesContext`。
+
+    数据面以 **Arrow 常驻 + 按需截面** 装配(issue #374):parquet 直接读
+    为 pyarrow 表(raw 内存,无 pandas 对象税),``as_of`` 过滤在 Arrow
+    compute 内完成,仅当次访问的可见行物化为 pandas —— 容器内存不随窗口
+    长度 x 标的数整表放大(705 万行 daily_metrics 整表进 pandas 曾以
+    ~2GB 撞穿容器限额)。挂载内容与读取语义逐值不变(与 0.3.0 的
+    ``pd.read_parquet`` 读出逐值一致)。
+    """
+    import pyarrow.parquet as pq
+
     window = manifest.get("window") or {}
     dates = tuple(
         date.fromisoformat(str(d)) for d in window.get("dates", ())
@@ -292,18 +302,22 @@ def build_series_context(
         raise OutputContractError(
             "挂载清单 v3 缺少 window.dates(窗口内决策日序列)"
         )
-    bars = _read_frame(data_dir / "bars.parquet")
-    if bars is None:
+    bars_path = data_dir / "bars.parquet"
+    if not bars_path.exists():
         raise OutputContractError("挂载缺少 bars.parquet(数据面不完整)")
-    daily = _read_frame(data_dir / "daily_metrics.parquet")
-    fin = _read_frame(data_dir / "financial_indicators.parquet")
+    daily_path = data_dir / "daily_metrics.parquet"
+    fin_path = data_dir / "financial_indicators.parquet"
     params = _merge_params(code_dir, manifest)
     return FactorSeriesContext(
         dates=dates,
         symbols=tuple(manifest.get("symbols", ())),
-        bars=bars,
-        daily_metrics=daily,
-        financial_indicators=fin,
+        bars_table=pq.read_table(bars_path),
+        daily_metrics_table=(
+            pq.read_table(daily_path) if daily_path.exists() else None
+        ),
+        financial_indicators_table=(
+            pq.read_table(fin_path) if fin_path.exists() else None
+        ),
         params=params,
     )
 

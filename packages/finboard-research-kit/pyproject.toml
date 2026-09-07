@@ -1,6 +1,6 @@
 [project]
 name = "finboard-research-kit"
-version = "0.3.0"
+version = "0.3.1"
 description = "研究代码沙箱工具包 —— 因子执行协议 v1/v2(FactorContext / FactorSeriesContext / harness)。"
 readme = "README.md"
 requires-python = ">=3.12"
