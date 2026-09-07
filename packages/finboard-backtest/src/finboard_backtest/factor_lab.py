@@ -65,6 +65,11 @@ class FactorAnalysisError(RuntimeError):
     """Alpha 分析输入不满足最小样本或时点约束。"""
 
 
+#: 动量特征默认回看窗口——签名默认与 research_run 预热报错提示(#368)
+#: 共用单一事实来源,防两处漂移。
+DEFAULT_MOMENTUM_LOOKBACK = 20
+
+
 class RiskModelError(RuntimeError):
     """风险模型缺少必要数据或无法得到稳定估计。"""
 
@@ -720,7 +725,7 @@ async def build_cross_section_feature_snapshot_from_releases(
     providers: Mapping[str, FrozenReleaseProvider],
     decision_at: datetime,
     code_version: str,
-    momentum_lookback: int = 20,
+    momentum_lookback: int = DEFAULT_MOMENTUM_LOOKBACK,
     volatility_windows: tuple[int, ...] = (20, 60, 120),
     max_concurrency: int = 8,
     on_progress: Callable[[str, int, int], None] | None = None,
@@ -919,7 +924,7 @@ def build_cross_section_feature_snapshot(
     code_version: str,
     price_history: dict[str, list[float]] | None = None,
     price_available_at: dict[str, datetime] | None = None,
-    momentum_lookback: int = 20,
+    momentum_lookback: int = DEFAULT_MOMENTUM_LOOKBACK,
     volatility_windows: tuple[int, ...] = (20, 60, 120),
 ) -> FeatureSnapshot:
     """把 A 股时点化横截面输入转换为统一 FeatureSnapshot。"""
@@ -1594,7 +1599,7 @@ async def build_price_feature_snapshot(
     provider: FrozenReleaseProvider,
     decision_at: datetime,
     code_version: str,
-    momentum_lookback: int = 20,
+    momentum_lookback: int = DEFAULT_MOMENTUM_LOOKBACK,
     volatility_windows: tuple[int, ...] = (20, 60, 120),
     max_concurrency: int = 8,
     process_workers: int = 0,

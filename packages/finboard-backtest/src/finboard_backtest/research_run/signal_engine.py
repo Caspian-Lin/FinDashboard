@@ -1144,6 +1144,27 @@ def enqueue_decision_dates(
     return _derive_decision_dates(trading_days, schedule)
 
 
+async def _earliest_feasible_decision_start(
+    provider: FrozenReleaseProvider,
+) -> date | None:
+    """动量类价格特征可用的最早决策日(#368 方案 A,best effort)。
+
+    判定与 :func:`build_price_feature_snapshot` 的不足判定同源:决策日须为
+    发布交易日历上第 ``DEFAULT_MOMENTUM_LOOKBACK + 1`` 个交易日(0 基下标
+    ``>=`` lookback;不足回看时全部标的都算不出动量,观测为空即被拒绝)。
+    日历读取失败返回 None——错误提示降级为原文,不掩盖原始异常。
+    """
+    from finboard_backtest.factor_lab import DEFAULT_MOMENTUM_LOOKBACK
+
+    try:
+        days = await _release_trading_days(provider)
+    except Exception:
+        return None
+    if len(days) > DEFAULT_MOMENTUM_LOOKBACK:
+        return days[DEFAULT_MOMENTUM_LOOKBACK]
+    return None
+
+
 async def _compute_period_features(
     provider: FrozenReleaseProvider,
     manifest: ResearchRunManifest,
@@ -1168,12 +1189,26 @@ async def _compute_period_features(
     """
     from concurrent.futures.process import BrokenProcessPool
 
-    from finboard_backtest.factor_lab import FactorAnalysisError, build_price_feature_snapshot
+    from finboard_backtest.factor_lab import (
+        DEFAULT_MOMENTUM_LOOKBACK,
+        FactorAnalysisError,
+        build_price_feature_snapshot,
+    )
 
-    def _data_error(exc: FactorAnalysisError) -> ValueError:
+    async def _data_error(exc: FactorAnalysisError) -> ValueError:
+        # issue #368 方案 A:保持 fail-closed,报错具名最早可行决策起点
+        # (best effort,日历读不出时降级为原文),拒绝语义零变化。
+        earliest = await _earliest_feasible_decision_start(provider)
+        hint = ""
+        if earliest is not None:
+            hint = (
+                f";动量类价格特征需发布内前 {DEFAULT_MOMENTUM_LOOKBACK + 1} "
+                f"个交易日收盘,最早可行决策起点 {earliest.isoformat()}"
+                "(请将决策窗口起点后移到该日或之后)"
+            )
         return ValueError(
             f"决策时点 {decision_at.date().isoformat()} 无法从发布重算价格特征"
-            f"(通常发布起点历史不足): {exc}"
+            f"(通常发布起点历史不足): {exc}{hint}"
         )
 
     explicit_symbols = manifest.strategy_spec.universe.explicit_symbols
@@ -1202,7 +1237,7 @@ async def _compute_period_features(
                 message="常驻特征计算进程池损坏,本期及后续期降级为进程内协程路径重算",
             )
         except FactorAnalysisError as exc:
-            raise _data_error(exc) from exc
+            raise await _data_error(exc) from exc
         else:
             return _period_feature_values(pool_snapshot, release_id)
     try:
@@ -1213,7 +1248,7 @@ async def _compute_period_features(
             symbols=symbols_argument,
         )
     except FactorAnalysisError as exc:
-        raise _data_error(exc) from exc
+        raise await _data_error(exc) from exc
     return _period_feature_values(snapshot, release_id)
 
 
