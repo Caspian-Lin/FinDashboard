@@ -989,7 +989,8 @@ class ReleaseSymbolSourceError(Exception):
     """发布标的集来源解析失败(issue #261,入队期 fail-visible)。
 
     ``code`` 为具名根因,便于测试与日志定位:``symbol_source_missing`` /
-    ``symbol_source_ambiguous`` / ``source_release_not_found`` /
+    ``symbol_source_ambiguous`` / ``symbol_filter_requires_full_market`` /
+    ``source_release_not_found`` /
     ``source_release_not_usable`` / ``source_release_empty`` /
     ``full_market_empty`` / ``full_market_overflow``。
     """
@@ -1028,6 +1029,8 @@ async def resolve_release_symbols(
     symbols: Sequence[str] | None = None,
     symbols_from_release: str | None = None,
     full_market: bool = False,
+    exchange: str | None = None,
+    listing_boards: Sequence[str] | None = None,
 ) -> list[str]:
     """解析数据集发布的标的集来源(issue #261),REST 与 MCP 入队期共用。
 
@@ -1039,6 +1042,12 @@ async def resolve_release_symbols(
       冻结不可变,复制语义确定);
     * ``full_market=True`` —— instruments 表全活跃标的按发布 kind 语义展开
       (股票单源只取 A 股股票;multi_asset_mixed 取股票 + ETF + 指数)。
+
+    ``exchange`` / ``listing_boards``(#385,与 bulk_download 同词表)只对
+    ``full_market`` 展开生效,叠加为 SQL ``IN`` 过滤;与其他两种来源同时
+    声明语义歧义,入队即具名拒绝(不做静默叠加)。instruments 表
+    ``listing_board`` 实际取值:股票 ``sse_main`` / ``szse_main`` / ``star``
+    / ``chinext`` / ``bse`` / ``cdr``,ETF/指数/转债恒为 ``unknown``。
 
     解析在**入队期**完成,结果以具体 symbols 进任务 payload,
     ``DatasetPublishExecutor`` 零改动(unknown_symbols / scope / 覆盖率门
@@ -1064,6 +1073,19 @@ async def resolve_release_symbols(
             "symbol_source_ambiguous",
             "symbols / symbols_from_release / full_market 只能三选一,"
             f"同时声明: {declared}",
+        )
+
+    # #385:板块/交易所过滤仅对 full_market 展开有意义;与其他来源混用
+    # (如 inline symbols 再套 boards)语义歧义,fail-closed 而非静默叠加。
+    normalized_exchange = (exchange or "").strip().upper() or None
+    normalized_boards = sorted(
+        {board.strip().lower() for board in (listing_boards or []) if board.strip()}
+    ) or None
+    if (normalized_exchange or normalized_boards) and not full_market:
+        raise ReleaseSymbolSourceError(
+            "symbol_filter_requires_full_market",
+            "exchange / listing_boards 过滤仅支持 full_market 展开,"
+            "与 symbols / symbols_from_release 互斥",
         )
 
     if symbols is not None:
@@ -1102,14 +1124,20 @@ async def resolve_release_symbols(
     if release_kind in _FULL_MARKET_STOCK_KINDS:
         expanded = set(
             await instrument_repo.list_codes(
-                market="a_share", instrument_type="stock"
+                market="a_share",
+                instrument_type="stock",
+                exchange=normalized_exchange,
+                listing_boards=normalized_boards,
             )
         )
     elif release_kind in _FULL_MARKET_CONVERTIBLE_KINDS:
         # issue #265:转债派生指标发布按全市场活跃转债展开。
         expanded = set(
             await instrument_repo.list_codes(
-                market="a_share", instrument_type="convertible"
+                market="a_share",
+                instrument_type="convertible",
+                exchange=normalized_exchange,
+                listing_boards=normalized_boards,
             )
         )
     else:
@@ -1117,7 +1145,10 @@ async def resolve_release_symbols(
         for instrument_type in _FULL_MARKET_MIXED_TYPES:
             expanded.update(
                 await instrument_repo.list_codes(
-                    market="a_share", instrument_type=instrument_type
+                    market="a_share",
+                    instrument_type=instrument_type,
+                    exchange=normalized_exchange,
+                    listing_boards=normalized_boards,
                 )
             )
     if not expanded:

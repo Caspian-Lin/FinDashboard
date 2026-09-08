@@ -394,6 +394,12 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   (instruments 表全活跃标的按 kind 展开:股票单源只取 A 股股票,
   multi_asset_mixed 取股票+ETF+指数+转债(#265)+期货主连(#267),convertible_metrics
   只取转债)
+- full_market 可叠加板块/交易所过滤(#385,仅该模式生效,与
+  symbols/symbols_from_release 混用 `invalid_argument` code=
+  `symbol_filter_requires_full_market`):`exchange?`(SSE|SZSE|BSE|CFFEX)/
+  `listing_boards?`(sse_main|szse_main|star|chinext|bse|cdr;ETF/指数/转债
+  恒为 unknown,过滤后想保留它们须显式含 unknown)。例:全市场股票发布剔除
+  北交所 → `listing_boards=[sse_main,szse_main,star,chinext,cdr]`(不含 bse)
 - 其他参数:`release_id` / `version` / `start_date` / `end_date` /
   `dataset_name?`(默认 multi_asset_daily_bars)/ `release_kind?`
   (a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators|
@@ -405,7 +411,8 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 返回:`JobOut`(`kind=dataset_publish`)
 - 错误:`invalid_argument`(schema 校验:release_id/version pattern、日期顺序;
   #261 来源解析:来源发布不存在 `source_release_not_found` / 不可用
-  `source_release_not_usable` / 展开为空 `full_market_empty`)/ `conflict`(幂等冲突)
+  `source_release_not_usable` / 展开为空 `full_market_empty` / #385 过滤与其他
+  标的来源混用 `symbol_filter_requires_full_market`)/ `conflict`(幂等冲突)
 - `release_kind=daily_metrics|financial_indicators` 时从 research_* 表冻结
   基本面/财务指标发布(issue #187),与 bars 发布(dataset_release_ids 含 bars 主发布 +
   research 发布)联合供因子快照取数;schedule(data_sync)与发布任务报告缺失字段统计。
