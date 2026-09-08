@@ -1109,12 +1109,15 @@ class TestJobViewRunStatus:
     ) -> None:
         """列表端点不 join(范围外):run_status 恒 None,单查才有。"""
 
+        from fastapi import Response
+
         from finboard_api.routes.jobs import list_jobs
 
         manifest = _manifest("view-list")
         await _queue_double_write(engine, manifest)
         async with session_factory(engine)() as session:
             rows = await list_jobs(
+                Response(),
                 kind=None,
                 status=None,
                 queue=None,

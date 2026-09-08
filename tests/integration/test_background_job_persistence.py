@@ -999,3 +999,32 @@ async def _drain_worker(worker: BackgroundWorker) -> None:
             break
         await asyncio.sleep(0.02)
     assert not worker._inflight
+
+
+# ---------------------------------------------------------------- 分页(issue #373)
+
+
+class TestListRecentPagination:
+    """list_recent offset + count_recent(issue #373 任务中心服务端分页)。"""
+
+    async def test_offset_window_and_count_consistency(self, engine: AsyncEngine) -> None:
+        for i in range(5):
+            await _enqueue(engine, kind="echo", job_id=f"BJ-PAGE{i:012d}")
+
+        async with session_factory(engine)() as session:
+            repo = BackgroundJobRepository(session)
+            page1 = await repo.list_recent(limit=2, offset=0)
+            page2 = await repo.list_recent(limit=2, offset=2)
+            page3 = await repo.list_recent(limit=2, offset=4)
+            total = await repo.count_recent()
+            filtered_total = await repo.count_recent(kinds=["echo"])
+            other_total = await repo.count_recent(kinds=["backtest_run"])
+
+        ids = [r.job_id for r in page1] + [r.job_id for r in page2] + [
+            r.job_id for r in page3
+        ]
+        assert len(ids) == 5  # 三窗拼出全量
+        assert len(set(ids)) == 5  # 窗口不重叠
+        assert total == 5
+        assert filtered_total == 5
+        assert other_total == 0

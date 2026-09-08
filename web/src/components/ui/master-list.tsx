@@ -41,7 +41,9 @@ export function MasterList({
         {toolbar && <div className="mt-2">{toolbar}</div>}
       </CardHeader>
       <CardContent className="p-2 pt-0">
-        <div className="max-h-[560px] space-y-2 overflow-x-hidden overflow-y-auto scrollbar-thin p-1">
+        {/* overflow-auto 而非 x-hidden(issue #373):横向空间不足时出滚动条
+            而非静默裁切;内容不超宽时与原行为无差异。 */}
+        <div className="max-h-[560px] space-y-2 overflow-auto scrollbar-thin">
           {children}
         </div>
       </CardContent>

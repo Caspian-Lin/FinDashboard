@@ -7,7 +7,7 @@ API 只负责创建 / 查询 / 请求取消,不在 HTTP 请求内执行任务(�
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -97,7 +97,54 @@ class JobArchiveResult(BaseModel):
     archived_count: int
 
 
+# ---- 诊断重放(火焰图)REST 服务化(issue #373;CLI 见 #383) ----
+
+
+class FlamegraphReplayResultOut(BaseModel):
+    """诊断重放终态(``job-replay-exec`` 落盘 ``result.json`` 的摘要)。"""
+
+    status: str
+    result_ref: str | None = None
+    error_code: str | None = None
+    error_summary: str | None = None
+
+
+class FlamegraphSessionOut(BaseModel):
+    """一个诊断会话(产物目录 ``<job_id>-<时间戳>`` 的服务端视图)。
+
+    ``status``:``running`` = 本进程句柄存活;``done`` = flamegraph.svg 已生成;
+    ``failed`` = 句柄已退出但无 svg(采样失败);``orphaned`` = 服务重启丢失
+    句柄且尚无完整产物(重放为分离进程,完成后状态自愈为 done)。
+    """
+
+    session_id: str
+    status: Literal["running", "done", "failed", "orphaned"]
+    meta: dict[str, Any] | None = None
+    timing: dict[str, Any] | None = None
+    result: FlamegraphReplayResultOut | None = None
+
+
+class FlamegraphStartOut(BaseModel):
+    """触发诊断的 202 回执(前端拿 session_id 轮询)。"""
+
+    session: FlamegraphSessionOut
+
+
+class FlamegraphMetaOut(BaseModel):
+    """诊断重放能力表:放行 kind → 重放副作用说明 / 拒绝 kind → 原因。
+
+    前端用于按钮置灰 tooltip 与触发前确认弹窗的副作用明示文案。
+    """
+
+    replayable_kinds: dict[str, str]
+    rejected_kinds: dict[str, str]
+
+
 __all__ = [
+    "FlamegraphMetaOut",
+    "FlamegraphReplayResultOut",
+    "FlamegraphSessionOut",
+    "FlamegraphStartOut",
     "JobArchiveIn",
     "JobArchiveResult",
     "JobCancelIn",

@@ -1,5 +1,7 @@
 """issue #383:``job-flamegraph`` 门控纯函数 / scratch release_root 助手 /
-共享执行器注册表 ``build_executor_registry``。
+共享执行器注册表 ``build_executor_registry``。#373 起门控与 kind 集合的
+单一事实源迁至 ``finboard_backtest.background_jobs.diagnostics``(REST
+触发侧共用),cli 经别名引用同一对象。
 """
 
 from __future__ import annotations
@@ -8,12 +10,25 @@ import os
 from unittest.mock import MagicMock
 
 from finboard_app.cli import (
-    _FLAMEGRAPH_REJECTED_KINDS,
-    _FLAMEGRAPH_REPLAYABLE_KINDS,
-    _flamegraph_gate_error,
     _make_scratch_release_root,
     build_executor_registry,
 )
+from finboard_backtest.background_jobs.diagnostics import (
+    FLAMEGRAPH_REJECTED_KINDS,
+    FLAMEGRAPH_REPLAYABLE_KINDS,
+    flamegraph_gate_error,
+    resolve_py_spy,
+)
+
+
+def test_cli_aliases_share_diagnostics_single_source() -> None:
+    """cli 经同名导入再导出门控(#373 REST 触发侧共用),两入口同一对象。"""
+
+    from finboard_app import cli
+
+    assert cli.FLAMEGRAPH_REPLAYABLE_KINDS is FLAMEGRAPH_REPLAYABLE_KINDS
+    assert cli.flamegraph_gate_error is flamegraph_gate_error
+    assert cli.resolve_py_spy is resolve_py_spy
 
 #: worker 装配的全部 kind(cli.build_executor_registry 单一事实源)。
 _ALL_WORKER_KINDS = frozenset(
@@ -37,12 +52,12 @@ _ALL_WORKER_KINDS = frozenset(
 
 class TestFlamegraphGate:
     def test_all_replayable_kinds_pass_when_succeeded(self) -> None:
-        for kind in _FLAMEGRAPH_REPLAYABLE_KINDS:
-            assert _flamegraph_gate_error(kind, "succeeded") is None, kind
+        for kind in FLAMEGRAPH_REPLAYABLE_KINDS:
+            assert flamegraph_gate_error(kind, "succeeded") is None, kind
 
     def test_failed_source_allowed_except_dataset_publish(self) -> None:
-        for kind in _FLAMEGRAPH_REPLAYABLE_KINDS:
-            error = _flamegraph_gate_error(kind, "failed")
+        for kind in FLAMEGRAPH_REPLAYABLE_KINDS:
+            error = flamegraph_gate_error(kind, "failed")
             if kind == "dataset_publish":
                 assert error is not None, kind
             else:
@@ -56,34 +71,34 @@ class TestFlamegraphGate:
             "interrupted",
             "cancel_requested",
         ):
-            error = _flamegraph_gate_error("echo", status)
+            error = flamegraph_gate_error("echo", status)
             assert error is not None
             assert "终态" in error
 
     def test_rejected_kinds_have_named_reason(self) -> None:
-        for kind in _FLAMEGRAPH_REJECTED_KINDS:
-            error = _flamegraph_gate_error(kind, "succeeded")
+        for kind in FLAMEGRAPH_REJECTED_KINDS:
+            error = flamegraph_gate_error(kind, "succeeded")
             assert error is not None
             assert "不支持诊断重放" in error
 
     def test_unknown_kind_rejected(self) -> None:
-        error = _flamegraph_gate_error("definitely_not_a_kind", "succeeded")
+        error = flamegraph_gate_error("definitely_not_a_kind", "succeeded")
         assert error is not None
         assert "未知 job kind" in error
 
     def test_dataset_publish_failed_source_rejected(self) -> None:
-        error = _flamegraph_gate_error("dataset_publish", "failed")
+        error = flamegraph_gate_error("dataset_publish", "failed")
         assert error is not None
         assert "succeeded" in error
 
     def test_dataset_publish_cancelled_source_rejected(self) -> None:
-        assert _flamegraph_gate_error("dataset_publish", "cancelled") is not None
+        assert flamegraph_gate_error("dataset_publish", "cancelled") is not None
 
     def test_gate_covers_every_worker_kind(self) -> None:
         """放行 + 拒绝两个集合必须覆盖 worker 注册的全部 kind,防止未来
         新增 kind 漏掉门控评估。"""
 
-        covered = set(_FLAMEGRAPH_REPLAYABLE_KINDS) | set(_FLAMEGRAPH_REJECTED_KINDS)
+        covered = set(FLAMEGRAPH_REPLAYABLE_KINDS) | set(FLAMEGRAPH_REJECTED_KINDS)
         assert covered == set(_ALL_WORKER_KINDS)
 
 

@@ -32,6 +32,7 @@ function makeJob(overrides: Partial<JobOut> = {}): JobOut {
     archived_at: null,
     updated_at: "2026-08-08T00:00:01+00:00",
     run_status: null,
+    timing: null,
     ...overrides,
   };
 }

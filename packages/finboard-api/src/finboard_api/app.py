@@ -28,6 +28,7 @@ from finboard_api.routes import (
     fills_router,
     health_router,
     instruments_router,
+    job_flamegraph_router,
     jobs_router,
     kill_switch_router,
     mcp_audit_router,
@@ -473,6 +474,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_memories_router)
     app.include_router(research_runs_router)
     app.include_router(jobs_router)
+    app.include_router(job_flamegraph_router)
     app.include_router(mcp_audit_router)
     app.include_router(opencode_gateway_router)
     app.include_router(instruments_router)
