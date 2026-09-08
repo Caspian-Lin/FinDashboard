@@ -193,7 +193,9 @@ class TestParquetJobStats:
 
     @pytest.mark.asyncio
     @pytest.mark.unit
-    async def test_nested_collection_scopes_inner(self, tmp_path: Path) -> None:
+    async def test_nested_collection_accumulates_all_handles(
+        self, tmp_path: Path
+    ) -> None:
         cache = ParquetCache(tmp_path)
         await cache.write(SYMBOL, BarPeriod.D1, "qfq", [_bar(2)])
 
@@ -201,6 +203,7 @@ class TestParquetJobStats:
             assert len(await cache.read(SYMBOL, BarPeriod.D1, "qfq")) == 1
             with collect_parquet_read_stats() as inner:
                 assert len(await cache.read(SYMBOL, BarPeriod.D1, "qfq")) == 1
-            # 嵌套激活以内层为准:内层只记自己的读取。
+            # issue #383:读取向全部活跃句柄累加 —— 内层只记自身段,
+            # 外层记全程(不再「以内层为准」遮蔽外层聚合)。
             assert inner.as_dict()["read_ops"] == 1
-        assert outer.as_dict()["read_ops"] == 1
+        assert outer.as_dict()["read_ops"] == 2

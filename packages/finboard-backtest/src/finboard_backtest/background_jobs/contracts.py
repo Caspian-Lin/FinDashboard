@@ -39,6 +39,9 @@ class JobResult:
       不可重试 / 已达 max_attempts → ``failed``;协作式取消 → ``cancelled``。
     * ``result_ref``:产物引用字符串(run_id / snapshot_id 等),写入 ``result_ref`` 列。
     * ``progress_total``:executor 知道总量后回填,供后续进度百分比计算。
+    * ``timing``:job 级耗时/IO 聚合(issue #383)。executor 不设置 —— worker 在
+      ``_execute_with_heart`` 外层统一测量后注入(成功与失败兜底路径都带),
+      ``_finalize`` 转传 ``repo.finish`` 落 ``timing`` 列。
     """
 
     status: str
@@ -46,6 +49,7 @@ class JobResult:
     error_code: str | None = None
     error_summary: str | None = None
     progress_total: int | None = None
+    timing: dict[str, object] | None = None
 
 
 #: 进度回调:(done, total, phase) → None。worker 实现里会续约心跳 + 检测取消。

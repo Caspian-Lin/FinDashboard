@@ -185,8 +185,11 @@ class ParquetReadJobStats:
         }
 
 
-_PARQUET_READ_STATS: ContextVar[ParquetReadJobStats | None] = ContextVar(
-    "finboard_parquet_read_stats", default=None
+#: 活跃句柄栈(issue #383 前为单句柄):外层句柄 = 全程聚合,内层句柄 = 自身
+#: 段聚合,读取向全部活跃句柄累加。worker 层全程激活(issue #383)后,引擎内
+#: 既有激活(#285 backtest/research_run)不再遮蔽外层的 job 级总数。
+_PARQUET_READ_STATS: ContextVar[tuple[ParquetReadJobStats, ...]] = ContextVar(
+    "finboard_parquet_read_stats", default=()
 )
 
 
@@ -201,11 +204,12 @@ def collect_parquet_read_stats() -> Iterator[ParquetReadJobStats]:
         print(stats.as_dict())
 
     asyncio task 创建时复制 contextvar,worker 每 job 一个 task,天然按 job
-    隔离;嵌套激活以内层为准(当前无嵌套使用方)。
+    隔离;嵌套激活(issue #383)时每个句柄独立聚合、读取向全部活跃句柄累加
+    ——外层句柄覆盖全程,内层句柄只覆盖自身段,单层使用方行为不变。
     """
 
     stats = ParquetReadJobStats()
-    token = _PARQUET_READ_STATS.set(stats)
+    token = _PARQUET_READ_STATS.set((*_PARQUET_READ_STATS.get(), stats))
     try:
         yield stats
     finally:
@@ -213,10 +217,9 @@ def collect_parquet_read_stats() -> Iterator[ParquetReadJobStats]:
 
 
 def _record_job_read(entry: str, *, elapsed_ms: float, size_bytes: int) -> None:
-    """读取入口处向已激活的 job 级聚合句柄累加(未激活时静默跳过)。"""
+    """读取入口处向全部活跃的 job 级聚合句柄累加(未激活时静默跳过)。"""
 
-    stats = _PARQUET_READ_STATS.get()
-    if stats is not None:
+    for stats in _PARQUET_READ_STATS.get():
         stats.record(entry, elapsed_ms=elapsed_ms, size_bytes=size_bytes)
 
 
