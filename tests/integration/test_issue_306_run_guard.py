@@ -1122,6 +1122,9 @@ class TestJobViewRunStatus:
                 status=None,
                 queue=None,
                 limit=10,
+                # 直调不经 FastAPI 依赖注入:Query 默认值不会解析,
+                # offset(#373)须显式传,否则 Query 对象透传进 repo 才炸。
+                offset=0,
                 archived="exclude",
                 session=session,
             )
