@@ -1,7 +1,16 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { Archive, ArchiveRestore, ChevronDown, ChevronUp, ListTodo, RefreshCw } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  ListTodo,
+  RefreshCw,
+} from "lucide-react";
 import {
   api,
   isJobRunning,
@@ -29,6 +38,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { CopyButton } from "@/components/ui/copy-button";
+import { FlamegraphPanel } from "@/components/jobs/FlamegraphPanel";
+import { TimingLine } from "@/components/jobs/TimingLine";
 import InfoHint from "@/components/InfoHint";
 import { INFO_HINTS } from "@/lib/infoHints";
 import {
@@ -46,6 +58,8 @@ import { useT } from "@/i18n";
 
 const ALL = "all";
 const POLL_MS = 5000;
+/** 每页条数(issue #373):默认前 10 条,翻页查看;页码入 URL search params。 */
+const PAGE_SIZE = 10;
 
 /** run 终态但非 completed 且 job 仍在运行族 → 两表状态不一致(RR-7a74 僵尸形态)。 */
 const RUN_STUCK_STATUSES: ReadonlySet<string> = new Set([
@@ -86,6 +100,7 @@ export default function Jobs() {
   const statusFilter = searchParams.get("status") ?? ALL;
   const kindFilter = searchParams.get("kind") ?? ALL;
   const archivedFilter = (searchParams.get("archived") ?? "exclude") as JobArchivedFilter;
+  const page = Math.max(1, Number.parseInt(searchParams.get("page") ?? "1", 10) || 1);
   const [expandedId, setExpandedId] = React.useState<string | null>(() => searchParams.get("job"));
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [bulkNotice, setBulkNotice] = React.useState<string | null>(null);
@@ -94,23 +109,50 @@ export default function Jobs() {
     const next = new URLSearchParams(searchParams);
     if (value === ALL || (key === "archived" && value === "exclude")) next.delete(key);
     else next.set(key, value);
+    // 过滤条件变更时页码重置回第 1 页(issue #373)。
+    next.delete("page");
     setSearchParams(next, { replace: true });
   };
 
+  const setPage = React.useCallback(
+    (next: number) => {
+      const params = new URLSearchParams(searchParams);
+      if (next <= 1) params.delete("page");
+      else params.set("page", String(next));
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["jobs", statusFilter, kindFilter, archivedFilter],
+    queryKey: ["jobs", statusFilter, kindFilter, archivedFilter, page],
     queryFn: () =>
       api.listJobs({
         status: statusFilter === ALL ? undefined : [statusFilter as JobStatus],
         kind: kindFilter === ALL ? undefined : [kindFilter],
-        limit: 200,
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
         archived: archivedFilter,
       }),
     // 轮询只在还有非终态任务时进行;全部终态后自动停止,避免静态页面持续请求。
     refetchInterval: (query) => {
-      const jobs = query.state.data;
-      return jobs && jobs.some(isJobRunning) ? POLL_MS : false;
+      const items = query.state.data?.items;
+      return items && items.some(isJobRunning) ? POLL_MS : false;
     },
+  });
+
+  // 批量归档目标计数(issue #373):分页后当前页不再是全量 —— 用轻量
+  // limit=1 查询取同过滤条件的精确总数(X-Total-Count)。
+  const { data: bulkData } = useQuery({
+    queryKey: ["jobs", "bulk-target-count"],
+    queryFn: () =>
+      api.listJobs({
+        status: ["succeeded", "cancelled"],
+        archived: "exclude",
+        limit: 1,
+      }),
+    enabled: archivedFilter === "exclude",
+    staleTime: 30_000,
   });
 
   const invalidateJobs = () => {
@@ -157,11 +199,15 @@ export default function Jobs() {
     onError: (err: Error) => setActionError(err.message),
   });
 
-  const jobs = data ?? [];
+  const jobs = data?.items ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // 页码越界(过滤/归档后总页数缩水)自动回退到最后一页。
+  React.useEffect(() => {
+    if (!isLoading && total > 0 && page > totalPages) setPage(totalPages);
+  }, [isLoading, total, page, totalPages, setPage]);
   const activeCount = jobs.filter(isJobRunning).length;
-  const bulkTargetCount = jobs.filter(
-    (job) => !job.archived_at && (job.status === "succeeded" || job.status === "cancelled"),
-  ).length;
+  const bulkTargetCount = bulkData?.total ?? 0;
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6">
@@ -255,7 +301,7 @@ export default function Jobs() {
           </Select>
         </div>
         <div className="text-sm text-muted-foreground">
-          {t("jobs.totalCount", { count: jobs.length })}{activeCount > 0 ? t("jobs.activeCount", { count: activeCount }) : ""}
+          {t("jobs.totalCount", { count: total })}{activeCount > 0 ? t("jobs.activeCount", { count: activeCount }) : ""}
         </div>
       </div>
 
@@ -277,48 +323,82 @@ export default function Jobs() {
           message={error instanceof Error ? error.message : undefined}
           onRetry={() => refetch()}
         />
-      ) : jobs.length === 0 ? (
+      ) : jobs.length === 0 && total === 0 ? (
         <EmptyState
           icon={<ListTodo className="h-8 w-8" />}
           title={t("jobs.emptyTitle")}
           description={t("jobs.emptyDesc")}
         />
       ) : (
-        <div className="overflow-hidden rounded-lg border border-border bg-card">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-10" />
-                <TableHead>{t("jobs.jobId")}</TableHead>
-                <TableHead>{t("jobs.kind")}</TableHead>
-                <TableHead>{t("common.status")}</TableHead>
-                <TableHead>{t("jobs.progress")}</TableHead>
-                <TableHead>{t("jobs.attempts")}</TableHead>
-                <TableHead>{t("jobs.requestedBy")}</TableHead>
-                <TableHead>{t("jobs.createdAt")}</TableHead>
-                <TableHead className="text-right">{t("common.actions")}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {jobs.map((job) => (
-                <JobRow
-                  key={job.job_id}
-                  job={job}
-                  expanded={expandedId === job.job_id}
-                  onToggleExpand={() =>
-                    setExpandedId((prev) => (prev === job.job_id ? null : job.job_id))
-                  }
-                  onCancel={() => cancelMutation.mutate(job.job_id)}
-                  cancelling={cancelMutation.isPending && cancelMutation.variables === job.job_id}
-                  onArchive={() => archiveMutation.mutate(job.job_id)}
-                  archiving={archiveMutation.isPending && archiveMutation.variables === job.job_id}
-                  onUnarchive={() => unarchiveMutation.mutate(job.job_id)}
-                  unarchiving={unarchiveMutation.isPending && unarchiveMutation.variables === job.job_id}
-                />
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+        <>
+          {/* min-w:9 列表格在窄视口下不挤压,经 Table 内建 overflow-auto 出横向滚动条(issue #373 条目5)。 */}
+          <div className="overflow-hidden rounded-lg border border-border bg-card">
+            <Table className="min-w-[64rem]">
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-10" />
+                  <TableHead>{t("jobs.jobId")}</TableHead>
+                  <TableHead>{t("jobs.kind")}</TableHead>
+                  <TableHead>{t("common.status")}</TableHead>
+                  <TableHead>{t("jobs.progress")}</TableHead>
+                  <TableHead>{t("jobs.attempts")}</TableHead>
+                  <TableHead>{t("jobs.requestedBy")}</TableHead>
+                  <TableHead>{t("jobs.createdAt")}</TableHead>
+                  <TableHead className="text-right">{t("common.actions")}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {jobs.map((job) => (
+                  <JobRow
+                    key={job.job_id}
+                    job={job}
+                    expanded={expandedId === job.job_id}
+                    onToggleExpand={() =>
+                      setExpandedId((prev) => (prev === job.job_id ? null : job.job_id))
+                    }
+                    onCancel={() => cancelMutation.mutate(job.job_id)}
+                    cancelling={cancelMutation.isPending && cancelMutation.variables === job.job_id}
+                    onArchive={() => archiveMutation.mutate(job.job_id)}
+                    archiving={archiveMutation.isPending && archiveMutation.variables === job.job_id}
+                    onUnarchive={() => unarchiveMutation.mutate(job.job_id)}
+                    unarchiving={unarchiveMutation.isPending && unarchiveMutation.variables === job.job_id}
+                  />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          {/* 分页控件(issue #373 条目1):页码入 URL,轮询刷新按 queryKey 自然保页。 */}
+          <nav
+            className="flex items-center justify-between"
+            aria-label={t("jobs.paginationAria")}
+          >
+            <span className="text-xs text-muted-foreground">
+              {t("jobs.pageInfo", { page, totalPages })}
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page <= 1}
+                onClick={() => setPage(page - 1)}
+                aria-label={t("common.prevPage")}
+              >
+                <ChevronLeft className="h-4 w-4" />
+                {t("common.prevPage")}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page >= totalPages}
+                onClick={() => setPage(page + 1)}
+                aria-label={t("common.nextPage")}
+              >
+                {t("common.nextPage")}
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          </nav>
+        </>
       )}
     </div>
   );
@@ -494,7 +574,6 @@ function JobDetail({ job }: { job: JobOut }) {
       : []),
     [t("jobs.resultRef"), job.result_ref ?? "—"],
     [t("jobs.errorCode"), job.error_code ?? "—"],
-    [t("jobs.errorSummary"), job.error_summary ?? "—"],
     [t("jobs.heartbeatAt"), formatDateTime(job.heartbeat_at)],
     [t("jobs.leaseUntil"), formatDateTime(job.lease_until)],
     [t("jobs.startedAt"), formatDateTime(job.started_at)],
@@ -525,13 +604,40 @@ function JobDetail({ job }: { job: JobOut }) {
             </div>
           ))}
         </dl>
-        <div className="min-w-0">
-          <p className="mb-1 text-xs text-muted-foreground">{t("jobs.payload")}</p>
-          <pre className="max-h-56 overflow-auto scrollbar-thin rounded-md border border-border bg-background p-3 font-mono text-xs">
-            {JSON.stringify(job.payload, null, 2)}
-          </pre>
+        <div className="min-w-0 space-y-3">
+          {/* 耗时 / IO 聚合(issue #383 落库、#373 透出):一行读法 + 占比条。 */}
+          <div>
+            <p className="mb-1 text-xs text-muted-foreground">{t("jobs.timing")}</p>
+            <TimingLine timing={live?.timing ?? job.timing} />
+          </div>
+          <div>
+            <p className="mb-1 text-xs text-muted-foreground">{t("jobs.payload")}</p>
+            <pre className="max-h-56 overflow-auto scrollbar-thin rounded-md border border-border bg-background p-3 font-mono text-xs">
+              {JSON.stringify(job.payload, null, 2)}
+            </pre>
+          </div>
         </div>
       </div>
+      {/* 错误摘要(issue #373 条目2):从单行 truncate 通用行拆出 —— 多行完整
+          展示(含 #263 定位头),文本可选中,附一键复制(对齐 ResearchRuns
+          侧 whitespace-pre-wrap 先例)。服务端已按 1000 字符保头保尾截断。 */}
+      {job.error_summary && (
+        <div>
+          <div className="mb-1 flex items-center gap-1">
+            <p className="text-xs text-muted-foreground">{t("jobs.errorSummary")}</p>
+            <CopyButton
+              text={job.error_summary}
+              labels={{ copy: t("jobs.copyErrorSummary"), copied: t("common.copied") }}
+            />
+          </div>
+          <pre className="max-h-48 overflow-auto scrollbar-thin rounded-md border border-border bg-background p-3 font-mono text-xs whitespace-pre-wrap break-words">
+            {job.error_summary}
+          </pre>
+        </div>
+      )}
+      {/* 诊断重放(火焰图)入口(issue #373 条目4):仅终态 job;panel 内部
+          做能力表门控 / 副作用确认 / 会话轮询。 */}
+      <FlamegraphPanel job={live ?? job} />
     </div>
   );
 }

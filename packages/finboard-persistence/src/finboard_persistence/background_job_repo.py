@@ -172,13 +172,15 @@ class BackgroundJobRepository:
         statuses: Iterable[str] | None = None,
         queues: Iterable[str] | None = None,
         limit: int = 100,
+        offset: int = 0,
         archived: str = "exclude",
     ) -> list[BackgroundJobModel]:
         """最近任务列表(issue #221:``archived`` 维度过滤)。
 
         ``archived`` 取值见 ``ARCHIVE_FILTER_VALUES``:``exclude``(默认)只看
         未归档;``only`` 只看已归档;``all`` 不区分。归档行数据不删除,
-        单查 ``get`` 不受此参数影响。
+        单查 ``get`` 不受此参数影响。``offset`` 供 REST 分页(issue #373):
+        与 ``count_recent`` 同过滤条件配对使用。
         """
 
         if archived not in ARCHIVE_FILTER_VALUES:
@@ -199,7 +201,36 @@ class BackgroundJobRepository:
         stmt = stmt.order_by(
             BackgroundJobModel.created_at.desc(), BackgroundJobModel.id.desc()
         ).limit(limit)
+        if offset:
+            stmt = stmt.offset(offset)
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def count_recent(
+        self,
+        *,
+        kinds: Iterable[str] | None = None,
+        statuses: Iterable[str] | None = None,
+        queues: Iterable[str] | None = None,
+        archived: str = "exclude",
+    ) -> int:
+        """与 :meth:`list_recent` 同过滤条件的总行数(issue #373 分页 total)。"""
+
+        if archived not in ARCHIVE_FILTER_VALUES:
+            raise BackgroundJobPersistenceConflictError(
+                f"未知归档过滤值: {archived}(合法 {sorted(ARCHIVE_FILTER_VALUES)})"
+            )
+        stmt = select(func.count()).select_from(BackgroundJobModel)
+        if archived == "only":
+            stmt = stmt.where(BackgroundJobModel.archived_at.is_not(None))
+        elif archived == "exclude":
+            stmt = stmt.where(BackgroundJobModel.archived_at.is_(None))
+        if kinds is not None:
+            stmt = stmt.where(BackgroundJobModel.kind.in_(tuple(kinds)))
+        if statuses is not None:
+            stmt = stmt.where(BackgroundJobModel.status.in_(tuple(statuses)))
+        if queues is not None:
+            stmt = stmt.where(BackgroundJobModel.queue.in_(tuple(queues)))
+        return int((await self._session.execute(stmt)).scalar_one())
 
     # --------------------------------------------------------------- transition
     async def transition(

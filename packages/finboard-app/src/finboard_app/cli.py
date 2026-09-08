@@ -38,6 +38,18 @@ from finboard_app.bootstrap import build_kernel_components
 from finboard_app.config import Settings, load_settings
 from finboard_app.dev_cleanup import sweep_stale_workers
 from finboard_app.logging import setup_logging
+
+# ``as`` 同名别名 = 显式再导出(no_implicit_reexport):测试与 #373 REST
+# 触发侧经 cli.<名> 引用,与 diagnostics 单一事实源同一,防两入口口径漂移。
+from finboard_backtest.background_jobs.diagnostics import (
+    FLAMEGRAPH_REPLAYABLE_KINDS as FLAMEGRAPH_REPLAYABLE_KINDS,
+)
+from finboard_backtest.background_jobs.diagnostics import (
+    flamegraph_gate_error as flamegraph_gate_error,
+)
+from finboard_backtest.background_jobs.diagnostics import (
+    resolve_py_spy as resolve_py_spy,
+)
 from finboard_shared.identifiers import AccountId
 from finboard_shared.types import KillSwitchLevel
 
@@ -1917,73 +1929,8 @@ async def _run_reconcile(settings: Settings) -> ReconciliationReport:
 
 
 # ---- 诊断重放 + py-spy 火焰图(issue #383) ----
-
-#: ``job-flamegraph`` 放行重放的 kind → 重放副作用说明(透传给操作者)。
-#: 只放行「重放幂等」或「副作用已知且明示」的离线域 kind;判定依据见
-#: issue #383:research_run 走 #305 replay 新建 run;dataset_publish scratch
-#: root 强制重算 + DB 身份幂等;feature_snapshot / factor_series_build 内容
-#: 寻址幂等;backtest_run 执行层无幂等(明示会多插一行)。
-_FLAMEGRAPH_REPLAYABLE_KINDS: dict[str, str] = {
-    "research_run": "走 #305 replay 语义新建 run 并在本诊断进程内同步执行"
-    "(产生新 run 行,带 replay_of_run_id 血缘;completed 源兼得确定性对照)",
-    "dataset_publish": "scratch release_root 强制重新冻结(计算全量执行);"
-    "DB 身份命中返回已有行,不插新行(scratch 用后即删)",
-    "feature_snapshot": "内容寻址快照:计算照跑,落库幂等(不覆盖已有行)",
-    "backtest_run": "重放会真实插入一行新 backtest_runs(执行层无幂等检查)",
-    "factor_series_build": "内容寻址序列构建:计算照跑(含容器),同键 upsert 幂等;"
-    "容器内计算 py-spy 采样不到,火焰图覆盖挂载构建/审计/落库编排段",
-}
-
-#: 明确拒绝重放的 kind → 原因。
-_FLAMEGRAPH_REJECTED_KINDS: dict[str, str] = {
-    "bulk_download": "网络摄取:重放会重复消耗数据源配额/限流",
-    "data_sync": "网络摄取:重放会重复消耗数据源配额/限流",
-    "fetch_all": "网络摄取:重放会重复消耗数据源配额/限流",
-    "research_data_sync": "网络摄取:重放会重复消耗数据源配额/限流",
-    "quality_repair": "重放会改写真实数据缓存文件",
-    "research_code_run": "计算在一次性 Docker 容器内,py-spy 采样不到",
-    "validation_experiment": "揭盲是一次性门,重放会重复消耗试验预算",
-    "echo": "自检桩,无诊断价值",
-}
-
-#: 终态集合(queued/running/retry_waiting/interrupted/cancel_requested 不可重放)。
-_FLAMEGRAPH_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
-
-
-def _flamegraph_gate_error(kind: str, status: str) -> str | None:
-    """诊断重放门控(issue #383):返回拒绝原因,None=放行。纯函数便于单测。
-
-    dataset_publish 额外要求源 job succeeded —— 失败源重放会以真实身份
-    检查路径走 DB 插行(把失败的发布真的完成),诊断工具不做这件事;
-    其余放行 kind 对失败源亦安全(重放幂等或副作用已知)。
-    """
-
-    if status not in _FLAMEGRAPH_TERMINAL_STATUSES:
-        return f"job 尚为终态前状态 {status};只放行 succeeded/failed/cancelled"
-    if kind in _FLAMEGRAPH_REJECTED_KINDS:
-        return f"kind={kind} 不支持诊断重放:{_FLAMEGRAPH_REJECTED_KINDS[kind]}"
-    if kind not in _FLAMEGRAPH_REPLAYABLE_KINDS:
-        return f"未知 job kind: {kind}"
-    if kind == "dataset_publish" and status != "succeeded":
-        return (
-            "dataset_publish 仅放行 succeeded 源:"
-            "失败源重放会真实完成发布(插 DB 行)"
-        )
-    return None
-
-
-def _resolve_py_spy() -> str | None:
-    """解析 py-spy 可执行文件(issue #383):venv 同目录优先,退 PATH。
-
-    py-spy 在 dev 依赖组 —— 经 ``uv run`` / venv 内 ``finboard.exe`` 运行时
-    同目录即有 ``py-spy(.exe)``;直接 PATH 调用(如 uv tool 独立安装)仍可命中。
-    """
-
-    exe = "py-spy.exe" if sys.platform == "win32" else "py-spy"
-    candidate = Path(sys.executable).with_name(exe)
-    if candidate.is_file():
-        return str(candidate)
-    return shutil.which("py-spy")
+# 门控纯函数 / 放行-拒绝 kind 集合 / py-spy 解析在
+# finboard_backtest.background_jobs.diagnostics(#373 起与 REST 触发侧共用)。
 
 
 async def _load_job_row(settings: Settings, job_id: str) -> BackgroundJobModel | None:
@@ -2029,7 +1976,7 @@ def job_flamegraph(
         raise typer.BadParameter("--format 只接受 flamegraph|speedscope")
     from datetime import UTC, datetime
 
-    pyspy = _resolve_py_spy()
+    pyspy = resolve_py_spy()
     if pyspy is None:
         typer.echo(
             "未找到 py-spy(dev 依赖组已包含)。请在仓库根执行:\n"
@@ -2047,7 +1994,7 @@ def job_flamegraph(
         raise typer.Exit(code=1)
     kind = row.kind
     status = row.status
-    gate_error = _flamegraph_gate_error(kind, status)
+    gate_error = flamegraph_gate_error(kind, status)
     if gate_error is not None:
         typer.echo(gate_error, err=True)
         raise typer.Exit(code=1)
@@ -2062,7 +2009,7 @@ def job_flamegraph(
         "job_id": job_id,
         "kind": kind,
         "source_status": status,
-        "replay_side_effect": _FLAMEGRAPH_REPLAYABLE_KINDS[kind],
+        "replay_side_effect": FLAMEGRAPH_REPLAYABLE_KINDS[kind],
         "format": fmt_normalized,
         "rate_hz": rate,
         "started_at": datetime.now(UTC).isoformat(),
@@ -2093,7 +2040,7 @@ def job_flamegraph(
         "--",
         *child_cmd,
     ]
-    typer.echo(f"诊断重放 kind={kind}:{_FLAMEGRAPH_REPLAYABLE_KINDS[kind]}")
+    typer.echo(f"诊断重放 kind={kind}:{FLAMEGRAPH_REPLAYABLE_KINDS[kind]}")
     typer.echo("采样中 —— Ctrl-C 可提前结束(py-spy 仍会写出已采集部分)。")
     completed = subprocess.run(cmd, check=False)
 

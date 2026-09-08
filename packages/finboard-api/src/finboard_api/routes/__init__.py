@@ -7,6 +7,7 @@ from finboard_api.routes.data import router as data_router
 from finboard_api.routes.fills import router as fills_router
 from finboard_api.routes.health import router as health_router
 from finboard_api.routes.instruments import router as instruments_router
+from finboard_api.routes.job_flamegraph import router as job_flamegraph_router
 from finboard_api.routes.jobs import router as jobs_router
 from finboard_api.routes.kill_switch import router as kill_switch_router
 from finboard_api.routes.mcp_audit import router as mcp_audit_router
@@ -32,6 +33,7 @@ __all__ = [
     "fills_router",
     "health_router",
     "instruments_router",
+    "job_flamegraph_router",
     "jobs_router",
     "kill_switch_router",
     "mcp_audit_router",

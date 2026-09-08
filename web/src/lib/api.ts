@@ -20,6 +20,19 @@ export const TERMINAL_JOB_STATUSES: ReadonlySet<JobStatus> = new Set([
   "interrupted",
 ]);
 
+// job 级耗时/IO 聚合(issue #383):worker 收口时写入,timing=null 表示
+// 旧行 / 未走到收口。IO 占比 = read_elapsed_ms / execute 墙钟,占比高 ≈
+// IO 瓶颈、低 ≈ CPU 瓶颈(配合火焰图定位热点)。
+export interface JobTiming {
+  execute_elapsed_seconds: number;
+  parquet_reads: {
+    read_ops: number;
+    read_elapsed_ms: number;
+    read_bytes: number;
+    ops_by_entry: Record<string, number>;
+  };
+}
+
 export interface JobOut {
   job_id: string;
   kind: string;
@@ -50,6 +63,8 @@ export interface JobOut {
   // GET /api/jobs/{id} 时服务端填充;列表端点不 join,恒为 null。
   // 「run interrupted 但 job 仍 running」的两表不一致一眼可见。
   run_status: string | null;
+  // job 级耗时/IO 聚合(issue #383):列表与单查都带;null 兼容旧行/测试桩。
+  timing: JobTiming | null;
 }
 
 export function isJobRunning(job: Pick<JobOut, "status"> | undefined | null): boolean {
@@ -63,6 +78,47 @@ export function isJobTerminal(job: Pick<JobOut, "status"> | undefined | null): b
 
 // 归档维度过滤(issue #221):exclude 默认只看未归档 / only 只看已归档 / all 不区分。
 export type JobArchivedFilter = "exclude" | "only" | "all";
+
+// ---- 任务诊断重放(火焰图,issue #373 服务化) ----
+
+export type FlamegraphSessionStatus = "running" | "done" | "failed" | "orphaned";
+
+export interface FlamegraphSessionMeta {
+  job_id: string;
+  kind: string;
+  source_status: string;
+  replay_side_effect: string;
+  format: string;
+  rate_hz: number;
+  started_at: string;
+}
+
+export interface FlamegraphReplayResult {
+  status: string;
+  result_ref: string | null;
+  error_code: string | null;
+  error_summary: string | null;
+}
+
+/** 服务端产物目录视图;meta/timing/result 为 null = 未就绪(轮询中)。 */
+export interface FlamegraphSession {
+  session_id: string;
+  status: FlamegraphSessionStatus;
+  meta: FlamegraphSessionMeta | null;
+  timing: JobTiming | null;
+  result: FlamegraphReplayResult | null;
+}
+
+/** 诊断重放能力表:放行 kind → 副作用说明 / 拒绝 kind → 原因。 */
+export interface FlamegraphMeta {
+  replayable_kinds: Record<string, string>;
+  rejected_kinds: Record<string, string>;
+}
+
+/** 产物 svg 的直链(<img>/<a> 引用)。 */
+export function flamegraphSvgUrl(jobId: string, sessionId: string): string {
+  return `${BASE}/jobs/${encodeURIComponent(jobId)}/flamegraph/${encodeURIComponent(sessionId)}/flamegraph.svg`;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -364,11 +420,14 @@ export const api = {
 
   // ---- Unified Job Queue (background_jobs) ----
   getJob: (jobId: string) => fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}`),
-  listJobs: (params?: {
+  // 服务端分页(issue #373):offset + X-Total-Count 响应头,total 为与过滤
+  // 条件匹配的全量行数(翻页 total 不变,页面内轮询/操作刷新自然保页)。
+  listJobs: async (params?: {
     kind?: string[];
     status?: JobStatus[];
     queue?: string[];
     limit?: number;
+    offset?: number;
     archived?: JobArchivedFilter;
   }) => {
     const q = new URLSearchParams();
@@ -376,9 +435,37 @@ export const api = {
     params?.status?.forEach((s) => q.append("status", s));
     params?.queue?.forEach((qq) => q.append("queue", qq));
     if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
     if (params?.archived) q.set("archived", params.archived);
-    return fetchJSON<JobOut[]>(`/jobs${q.toString() ? "?" + q : ""}`);
+    const resp = await fetch(`${BASE}/jobs${q.toString() ? "?" + q : ""}`, {
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new ApiError(
+        resp.status,
+        body.detail,
+        errorMessage(body.detail, resp.statusText || `${resp.status}`),
+      );
+    }
+    const items = (await resp.json()) as JobOut[];
+    const total = Number.parseInt(resp.headers.get("x-total-count") ?? "0", 10);
+    return { items, total: Number.isNaN(total) ? items.length : total };
   },
+  // ---- 任务诊断重放(火焰图,issue #373 服务化;CLI 见 #383) ----
+  // 能力表:放行 kind → 重放副作用说明 / 拒绝 kind → 原因(静态,可长缓存)。
+  flamegraphMeta: () =>
+    fetchJSON<FlamegraphMeta>(`/jobs/flamegraph/meta`),
+  listFlamegraphSessions: (jobId: string) =>
+    fetchJSON<FlamegraphSession[]>(
+      `/jobs/${encodeURIComponent(jobId)}/flamegraph`,
+    ),
+  startFlamegraph: (jobId: string) =>
+    fetchJSON<{ session: FlamegraphSession }>(
+      `/jobs/${encodeURIComponent(jobId)}/flamegraph`,
+      { method: "POST" },
+    ),
+  // 产物 svg 直接以 <img>/<a> 引用(前端只拼 URL,不做鉴权 fetch)。
   cancelJob: (jobId: string, reason?: string) =>
     fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}/cancel`, {
       method: "POST",

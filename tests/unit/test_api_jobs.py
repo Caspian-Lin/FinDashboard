@@ -240,6 +240,10 @@ def test_list_accepts_valid_archived_filters(
     monkeypatch.setattr(
         BackgroundJobRepository, "list_recent", AsyncMock(return_value=[])
     )
+    # #373 起列表端点同时调用 count_recent 计算 X-Total-Count。
+    monkeypatch.setattr(
+        BackgroundJobRepository, "count_recent", AsyncMock(return_value=0)
+    )
     for value in ("exclude", "only", "all"):
         response = client.get("/api/jobs", params={"archived": value, "limit": 1})
         assert response.status_code == 200, value
