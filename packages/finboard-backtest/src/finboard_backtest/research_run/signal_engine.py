@@ -105,6 +105,7 @@ from finboard_backtest.strategy_spec.universe_precheck import (
     RESEARCH_RELEASE_FEATURE_NAMES,
     STANDARD_PRICE_FEATURE_NAMES,
     explicit_symbol_domain,
+    is_benchmark_only_instrument,
     is_st_at_decision,
     research_release_derived_features,
     resolvable_feature_names,
@@ -1165,6 +1166,55 @@ async def _earliest_feasible_decision_start(
     return None
 
 
+def _benchmark_only_symbols(
+    provider: FrozenReleaseProvider,
+    exempt: frozenset[str] = frozenset(),
+) -> frozenset[str]:
+    """发布中基准专用(index / futures 主连)标的符号集(issue #380)。
+
+    与候选池(``_build_candidates_and_lots``)共用 :func:`is_benchmark_only_instrument`
+    同一谓词,两阶段口径一致;``explicit_symbols`` 显式声明的标的豁免
+    (#254/#299 声明域优先——显式引用如指数动量特征是用户明确意图,
+    但其不可撮合属性不变,依旧进不了候选池与目标仓位)。
+    """
+    return frozenset(
+        inst.code
+        for inst in provider.release.instruments
+        if inst.code not in exempt and is_benchmark_only_instrument(inst)
+    )
+
+
+def _exclude_benchmark_only_features(
+    features: tuple[FeatureValue, ...],
+    provider: FrozenReleaseProvider,
+    manifest: ResearchRunManifest,
+) -> tuple[FeatureValue, ...]:
+    """把信号引擎特征截面收窄到发布可交易域(issue #380)。
+
+    基准 / 主连按设计「不进候选池、不可撮合」,其特征观测进截面只会污染
+    rank_top / rank_bottom 的排名分母(universe 阶段已排除,此前 feature /
+    signal 阶段没同步,截面从 40 涨到 51 后 rank 边界滑动曾把无信号持仓经
+    再平衡带保留进目标仓位触发 hard_constraint_rejected)。逐期重算路径已在
+    :func:`_compute_period_features` 源头收窄,这里对冻结快照 / 研究发布观测
+    兜底(single_shot 与 multi_period 统一)。只影响信号引擎消费面;后台
+    快照任务仍忠实记录发布全量观测,存量快照 checksum 零漂移。
+    """
+    exempt = frozenset(manifest.strategy_spec.universe.explicit_symbols or ())
+    banned = _benchmark_only_symbols(provider, exempt)
+    if not banned:
+        return features
+    kept = tuple(item for item in features if item.symbol not in banned)
+    excluded = sorted({item.symbol for item in features} & banned)
+    if excluded:
+        logger.debug(
+            "research_run.benchmark_features_excluded",
+            count=len(excluded),
+            symbols=excluded[:20],
+            message="基准专用标的特征观测不进信号排名截面",
+        )
+    return kept
+
+
 async def _compute_period_features(
     provider: FrozenReleaseProvider,
     manifest: ResearchRunManifest,
@@ -1212,7 +1262,19 @@ async def _compute_period_features(
         )
 
     explicit_symbols = manifest.strategy_spec.universe.explicit_symbols
-    symbols_argument: tuple[str, ...] | None = tuple(explicit_symbols) if explicit_symbols else None
+    if explicit_symbols:
+        symbols_argument: tuple[str, ...] | None = tuple(explicit_symbols)
+    else:
+        # issue #380:未声明 explicit_symbols 时特征截面收窄到发布可交易域——
+        # 基准 / 主连(index/futures)不进候选池、不可撮合,其价格特征进截面
+        # 只会污染 rank_top/rank_bottom 的排名分母;与候选池
+        # (_build_candidates_and_lots)同一谓词,universe 与 feature/signal
+        # 两阶段口径对齐。
+        symbols_argument = tuple(
+            inst.code
+            for inst in provider.release.instruments
+            if not is_benchmark_only_instrument(inst)
+        )
     if process_pool is not None and not process_pool.broken:
         try:
             pool_snapshot = await build_price_feature_snapshot(
@@ -1789,6 +1851,9 @@ async def build_decision_load_contexts(
             features = (*period_features, *context.features)
         else:
             features = context.features
+        # issue #380:信号引擎特征截面统一收窄到发布可交易域(逐期重算已在
+        # 源头收窄,这里对快照 / 研究发布观测兜底,single_shot 同样覆盖)。
+        features = _exclude_benchmark_only_features(features, provider, manifest)
         features_by_source = _features_by_source(features)
         candidates = _apply_universe_filter(
             manifest.strategy_spec, provider, context, features_by_source
