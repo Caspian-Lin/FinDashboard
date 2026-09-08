@@ -824,6 +824,10 @@ def register(mcp: MCPServer) -> None:
             "每条含 symbol/total_bars/anomaly_count/duplicate_count/sources/"
             "anomalies/passed/primary_source/error。"
             "参数:symbols(逗号分隔代码,不传则检查全部)/ adjust(默认 qfq)。"
+            "口径(#386):anomaly_count 只含 OHLCV 异常,与发布质量门的 "
+            "anomaly_count 同义;发布门另计 lifecycle(pre_list_bars/"
+            "post_delist_bars,可见不阻断)与本工具检查全量缓存不同,发布门只看"
+            "发布窗口内的 bar,两处计数据此可能不同。"
         ),
     )
     async def _data_quality_check(

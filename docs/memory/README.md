@@ -42,3 +42,4 @@
 - [Issue #259:backtest 网格 selection_grid 选股维度组合展开](issue-259-selection-grid-done.md) — 独立 selection_grid 参数而非 selection.* 键(params 校验链路零改动);label/checksum「键存在才纳入」保旧网格幂等;全角乘号 × 触发 RUF001-003;MCP 工具函数加参须给默认值(集成测试显式 kwargs)
 - [Issue #261:发布标的集来源三选一完成](issue-261-release-symbol-source-done.md) — 入队期解析成具体 symbols 执行器零改动;复制 verbatim 勿加 kind 过滤;mixed scope 门要求三类型齐备是 #184 遗留;非 bars 发布有 stock-scope 检查
 - [多 worktree 并行开发:本机落地参数与坑位(#289)](multi-worktree-parallel-dev.md) — wt2 已就位(junction 共享 data_cache/data_releases + 独立库/端口);删 junction 禁 rm -rf;vite 端口/代理可环境变量覆盖
+- [Issue #385/#386:publish full_market 板块过滤 + 发布质量门口径拆分](issue-385-386-publish-board-filter-quality-gate.md) — 920 系 64.8%「异常」=代码切换史早于 list_date(lifecycle 计数混入 anomaly),非坏数据;修复后 OHLCV=anomaly 仍拒、duplicate 独立仍拒、pre/post_list 可见不拒;boards 过滤仅 full_market 生效与内联清单互斥;spec 默认 required_capabilities 含四类 ETF,单股票冒烟须显式收窄

@@ -262,6 +262,10 @@ async def test_publish_multi_asset_release_and_read_only_provider(tmp_path: Path
         "missing_sessions": 0,
         "suspended_sessions": 0,
         "anomaly_count": 0,
+        # issue #386:重复与 lifecycle 计数独立聚合(可见不阻断)。
+        "duplicate_count": 0,
+        "pre_list_bars": 0,
+        "post_delist_bars": 0,
         "name_history_records": 1,
         "lifecycle_event_records": 1,
     }

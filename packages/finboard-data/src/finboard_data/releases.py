@@ -748,6 +748,13 @@ class ReleasedInstrument:
     present_event_types: tuple[str, ...] = ()
     required_event_types: tuple[str, ...] = ()
     name_history: tuple[tuple[str, date, date | None], ...] = ()
+    # issue #386:异常口径拆分——anomaly_count 只计 OHLCV 异常;重复与
+    # lifecycle(早于 list_date / 晚于 delist_date)独立计数,可见不阻断。
+    # 仅 bars 冻结路径填非零值;as_dict 对零值省略键,旧 manifest 逐字节
+    # 兼容,from_dict 对缺键回退 0。
+    duplicate_count: int = 0
+    pre_list_bars: int = 0
+    post_delist_bars: int = 0
 
     @property
     def capability_key(self) -> str:
@@ -780,6 +787,10 @@ class ReleasedInstrument:
             "ready": self.ready,
             "issues": list(self.issues),
             **({"sources": list(self.sources)} if self.sources else {}),
+            # issue #386:零值省略键,干净标的的 manifest 与旧版本逐字节一致。
+            **({"duplicate_count": self.duplicate_count} if self.duplicate_count else {}),
+            **({"pre_list_bars": self.pre_list_bars} if self.pre_list_bars else {}),
+            **({"post_delist_bars": self.post_delist_bars} if self.post_delist_bars else {}),
             "exchange": self.exchange,
             "listing_board": self.listing_board,
             "currency": self.currency,
@@ -840,6 +851,9 @@ class ReleasedInstrument:
             ready=bool(raw["ready"]),
             issues=tuple(str(item) for item in cast(list[object], raw.get("issues", []))),
             sources=tuple(str(item) for item in cast(list[object], raw.get("sources", []))),
+            duplicate_count=int(str(raw.get("duplicate_count", 0))),
+            pre_list_bars=int(str(raw.get("pre_list_bars", 0))),
+            post_delist_bars=int(str(raw.get("post_delist_bars", 0))),
             exchange=str(raw["exchange"]) if raw.get("exchange") is not None else None,
             listing_board=str(raw.get("listing_board", "unknown")),
             currency=str(raw.get("currency", "CNY")),
@@ -1141,6 +1155,9 @@ class _BarAudit:
     missing_sessions: int
     suspended_sessions: int
     anomaly_count: int
+    duplicate_count: int
+    pre_list_bars: int
+    post_delist_bars: int
     coverage_pct: Decimal
     category: str
     issues: tuple[str, ...] = field(default_factory=tuple)
@@ -1989,8 +2006,13 @@ class FrozenDatasetReleaseBuilder:
             anomaly_ratio = (
                 Decimal(audit.anomaly_count) / Decimal(total_bars) if total_bars > 0 else Decimal("1")
             )
+            # issue #386:ready 门 = OHLCV 异常率 + 重复(与
+            # BarQualityChecker.passed 同语义)+ 覆盖率 + 元数据 + 事件;
+            # pre_list/post_delist bars 是主数据与代码迁移史的口径冲突,
+            # 只进 issues/quality_report 可见,不再阻断。
             ready = (
                 anomaly_ratio <= spec.max_anomaly_ratio
+                and audit.duplicate_count == 0
                 and audit.coverage_pct >= spec.minimum_symbol_coverage
                 and instrument.metadata_complete
                 and set(instrument.required_event_types).issubset(instrument.present_event_types)
@@ -1998,6 +2020,8 @@ class FrozenDatasetReleaseBuilder:
             issues = list(audit.issues)
             if anomaly_ratio > spec.max_anomaly_ratio:
                 issues.append(f"anomaly_ratio:{anomaly_ratio:.4f}>{spec.max_anomaly_ratio}")
+            if audit.duplicate_count:
+                issues.append(f"duplicate_bars:{audit.duplicate_count}")
             if not instrument.metadata_complete:
                 issues.append("metadata_incomplete")
             missing_events = sorted(
@@ -2040,6 +2064,9 @@ class FrozenDatasetReleaseBuilder:
                 missing_sessions=audit.missing_sessions,
                 suspended_sessions=audit.suspended_sessions,
                 anomaly_count=audit.anomaly_count,
+                duplicate_count=audit.duplicate_count,
+                pre_list_bars=audit.pre_list_bars,
+                post_delist_bars=audit.post_delist_bars,
                 coverage_pct=audit.coverage_pct,
                 category=audit.category,
                 ready=ready,
@@ -3003,16 +3030,26 @@ def _audit_bars(
         if bar.volume == 0 and bar.open == bar.high == bar.low == bar.close:
             suspended_bar_dates.add(bar.timestamp.date())
 
-    # bars before list_date / after delist_date
-    lifecycle_anomalies = 0
+    # issue #386:lifecycle 与 bar 序列的口径冲突独立计数,不再混入
+    # anomaly_count。北交所 2024-2025 代码切换(老 8xx/43x → 920 新代码)
+    # 后,数据源在新代码下返回含新三板/精选层时代的全量历史,而
+    # list_date 是北交所/精选层挂牌日——list_date 之前的 bar 是真实历史
+    # 交易而非坏数据;把这类合法历史计入 anomaly 会让整批 920 系标的
+    # 被质量门拦截(a-share-full-20260908-v4 事故)。计数保留并进 issues
+    # / quality_report,可见不静默,但不阻断 ready。
+    pre_list_bars = 0
+    post_delist_bars = 0
     for bar in bars:
         bar_date = bar.timestamp.date()
         if instrument.list_date is not None and bar_date < instrument.list_date:
-            lifecycle_anomalies += 1
+            pre_list_bars += 1
         if instrument.delist_date is not None and bar_date > instrument.delist_date:
-            lifecycle_anomalies += 1
+            post_delist_bars += 1
 
-    anomaly_count = qr.anomaly_count + lifecycle_anomalies + qr.duplicate_count
+    # anomaly_count 与 BarQualityChecker(data_quality_check 同源)同义:
+    # 只计 OHLCV 数值异常;重复日期单独计数(ready 仍要求为 0,语义与
+    # BarQualityChecker.passed 一致)。
+    anomaly_count = qr.anomaly_count
 
     first_bar_date = min(unique_dates)
     last_bar_date = max(unique_dates)
@@ -3051,6 +3088,21 @@ def _audit_bars(
     issues: list[str] = []
     if anomaly_count:
         issues.append(f"anomalies:{anomaly_count}")
+        # issue #386:异常类型构成(OHLCV reasons 分布,计数全量、种类有界
+        # ——reasons 种类是有限集合),错误信息可定位,不必读源码猜口径。
+        reason_counts = Counter(
+            reason for anomaly in qr.anomalies for reason in anomaly.reasons
+        )
+        issues.append(
+            "anomaly_reasons:"
+            + ",".join(f"{name}={count}" for name, count in sorted(reason_counts.items()))
+        )
+    if qr.duplicate_count:
+        issues.append(f"duplicate_bars:{qr.duplicate_count}")
+    if pre_list_bars:
+        issues.append(f"pre_list_bars:{pre_list_bars}")
+    if post_delist_bars:
+        issues.append(f"post_delist_bars:{post_delist_bars}")
     # 使用真实 A 股交易日历后,missing_sessions 只反映真正的数据缺口。
     if missing_sessions:
         issues.append(f"missing_sessions:{missing_sessions}")
@@ -3074,6 +3126,9 @@ def _audit_bars(
         missing_sessions=missing_sessions,
         suspended_sessions=len(suspended_dates),
         anomaly_count=anomaly_count,
+        duplicate_count=qr.duplicate_count,
+        pre_list_bars=pre_list_bars,
+        post_delist_bars=post_delist_bars,
         coverage_pct=coverage,
         category=category,
         issues=tuple(issues),
@@ -3251,7 +3306,12 @@ def _coverage_summary(instruments: list[ReleasedInstrument]) -> dict[str, object
         "listing_boards": listing_boards,
         "missing_sessions": sum(item.missing_sessions for item in instruments),
         "suspended_sessions": sum(item.suspended_sessions for item in instruments),
+        # issue #386:anomaly_count 只含 OHLCV 异常;重复与 lifecycle 独立
+        # 聚合可见。
         "anomaly_count": sum(item.anomaly_count for item in instruments),
+        "duplicate_count": sum(item.duplicate_count for item in instruments),
+        "pre_list_bars": sum(item.pre_list_bars for item in instruments),
+        "post_delist_bars": sum(item.post_delist_bars for item in instruments),
         "name_history_records": sum(len(item.name_history) for item in instruments),
         "lifecycle_event_records": sum(len(item.lifecycle_events) for item in instruments),
     }
