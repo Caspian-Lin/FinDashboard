@@ -651,6 +651,8 @@ async def dataset_release_publish(
     required_capabilities: list[str] | None = None,
     symbols_from_release: str | None = None,
     full_market: bool = False,
+    exchange: str | None = None,
+    listing_boards: list[str] | None = None,
     consistency_baseline_release_id: str | None = None,
     consistency_fail_on_mismatch: bool = False,
 ) -> ToolEnvelope:
@@ -663,6 +665,12 @@ async def dataset_release_publish(
     后两者在入队期解析成具体 symbols 进任务 payload(来源发布须可用;
     full_market 按 kind 语义展开),执行器零改动;来源缺失 / 不可用 /
     展开为空入队即 ``invalid_argument`` 具名拒绝。
+
+    ``exchange`` / ``listing_boards``(#385,与 bulk_download 同词表)只对
+    ``full_market`` 展开生效(exchange 实际取值 SSE/SZSE/BSE/CFFEX;
+    listing_board 实际取值 sse_main/szse_main/star/chinext/bse/cdr,
+    ETF/指数/转债恒为 unknown,过滤后想保留它们须显式含 unknown);
+    与 symbols / symbols_from_release 混用入队即 ``invalid_argument``。
 
     ``consistency_baseline_release_id``(#252):指定基线发布(如 bars 主发布)
     做标的集一致性校验,差集具名;默认只 warning,``fail_on_mismatch`` 时秒级
@@ -685,6 +693,8 @@ async def dataset_release_publish(
             symbols=normalized_symbols,
             symbols_from_release=symbols_from_release,
             full_market=full_market,
+            exchange=exchange,
+            listing_boards=list(listing_boards or []),
             start_date=date.fromisoformat(start_date),
             end_date=date.fromisoformat(end_date),
             adjustment=adjustment,  # type: ignore[arg-type]
@@ -700,6 +710,8 @@ async def dataset_release_publish(
                     symbols=body.symbols,
                     symbols_from_release=body.symbols_from_release,
                     full_market=body.full_market,
+                    exchange=body.exchange,
+                    listing_boards=body.listing_boards,
                 )
             except ReleaseSymbolSourceError as exc:
                 raise McpToolError(
@@ -713,6 +725,11 @@ async def dataset_release_publish(
             }
         elif body.full_market:
             symbols_source = {"mode": "full_market"}
+            # #385:板块/交易所过滤溯源(归一化后记录;未声明保持旧形状)。
+            if body.exchange is not None:
+                symbols_source["exchange"] = body.exchange
+            if body.listing_boards:
+                symbols_source["listing_boards"] = list(body.listing_boards)
         else:
             symbols_source = {"mode": "inline"}
         payload: dict[str, Any] = {
@@ -749,6 +766,8 @@ async def dataset_release_publish(
             "symbols": symbols,
             "symbols_from_release": symbols_from_release,
             "full_market": full_market,
+            "exchange": exchange,
+            "listing_boards": listing_boards,
             "version": version,
             "start_date": start_date,
             "end_date": end_date,
@@ -1178,6 +1197,11 @@ def register(mcp: MCPServer) -> None:
             "全市场清单)/ full_market=true(instruments 表全活跃标的按 kind "
             "展开:股票单源只取 A 股股票,multi_asset_mixed 取股票+ETF+指数+"
             "转债(#265)+期货主连(#267),convertible_metrics 只取转债)。"
+            "full_market 可叠加 exchange / listing_boards 过滤(#385,仅该模式"
+            "生效,与 symbols/symbols_from_release 混用拒绝;exchange 取值 "
+            "SSE/SZSE/BSE/CFFEX,listing_board 取值 sse_main/szse_main/star/"
+            "chinext/bse/cdr,ETF/指数/转债恒为 unknown;股票发布剔除北交所:"
+            "listing_boards=[sse_main,szse_main,star,chinext,cdr](不含 bse)。"
             "来源发布不存在/不可用/展开为空入队即 invalid_argument 具名拒绝。"
             "其他参数:release_id / version / start_date / end_date / "
             "dataset_name(默认 multi_asset_daily_bars)/ release_kind"
@@ -1208,6 +1232,8 @@ def register(mcp: MCPServer) -> None:
         symbols: list[str] | None = None,
         symbols_from_release: str | None = None,
         full_market: bool = False,
+        exchange: str | None = None,
+        listing_boards: list[str] | None = None,
         dataset_name: str = "multi_asset_daily_bars",
         release_kind: str = "a_share_tushare",
         source: str | None = None,
@@ -1223,6 +1249,8 @@ def register(mcp: MCPServer) -> None:
             symbols=symbols,
             symbols_from_release=symbols_from_release,
             full_market=full_market,
+            exchange=exchange,
+            listing_boards=listing_boards,
             version=version,
             start_date=start_date,
             end_date=end_date,

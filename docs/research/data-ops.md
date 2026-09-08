@@ -121,6 +121,13 @@ financial_indicators)的标的并集一致性必须自检。
 具名拒绝。REST `POST /api/datasets/releases` 同步支持
 (`ResearchDatasetReleaseCreate.symbols_from_release` / `.full_market`)。
 
+**full_market 板块/交易所过滤(#385)**:`full_market=true` 可叠加
+`exchange`(SSE|SZSE|BSE|CFFEX)与 `listing_boards`(sse_main|szse_main|
+star|chinext|bse|cdr)缩小展开范围(仅 full_market 模式生效,与其他标的来源
+混用入队即拒)。ETF/指数/转债的 listing_board 恒为 `unknown`,mixed 发布
+过滤后想保留它们须显式含 `unknown`。例:全市场股票发布剔除北交所 →
+`listing_boards=[sse_main,szse_main,star,chinext,cdr]`(不含 bse)。
+
 **发布后自检**(任一入口,同一实现):
 
 - MCP:`finboard_dataset_release_diff(release_id=<研究发布>,

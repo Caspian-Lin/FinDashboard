@@ -738,6 +738,99 @@ class TestResearchDatasetReleases:
         assert captured["payload"]["symbols"] == ["600519.SH"]
         assert captured["payload"]["symbols_source"] == {"mode": "full_market"}
 
+    @pytest.mark.asyncio
+    async def test_create_release_full_market_board_filter(
+        self, mock_session: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#385:full_market + listing_boards/exchange 过滤,溯源进 symbols_source。"""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from fastapi import Response
+
+        from finboard_api.routes.instruments import create_dataset_release
+        from finboard_api.schemas import ResearchDatasetReleaseCreate
+        from finboard_persistence import InstrumentRepository
+
+        mock_session.commit = AsyncMock()
+
+        async def _fake_list_codes(
+            self: Any,
+            *,
+            market: str | None = None,
+            instrument_type: str | None = None,
+            exchange: str | None = None,
+            listing_boards: list[str] | None = None,
+        ) -> list[str]:
+            # 模拟 SQL 过滤:股票按 boards 过滤(无 bse 请求则北交所不出)。
+            if instrument_type == "stock":
+                boards = listing_boards or ["sse_main", "szse_main", "star", "chinext", "bse"]
+                return (
+                    ["600519.SH"]
+                    if "sse_main" in boards and "bse" not in boards
+                    else ["600519.SH", "920023.BJ"]
+                )
+            return []
+
+        monkeypatch.setattr(InstrumentRepository, "list_codes", _fake_list_codes)
+        request = ResearchDatasetReleaseCreate(
+            release_kind="a_share_tushare",
+            source="tushare",
+            adjustment="qfq",
+            full_market=True,
+            exchange="sse",
+            listing_boards=["SSE_MAIN", "SZSE_MAIN", "STAR", "CHINEXT", "CDR"],
+            **self._release_create_base(),
+        )
+        fake_row = SimpleNamespace(
+            job_id="BJ-TESTPUB4",
+            kind="dataset_publish",
+            queue="data",
+            status="queued",
+            priority=0,
+            payload={},
+            payload_checksum="x" * 64,
+            idempotency_key="",
+            progress_total=0,
+            progress_done=0,
+            phase=None,
+            result_ref=None,
+            error_code=None,
+            error_summary=None,
+            attempt=0,
+            max_attempts=3,
+            worker_id=None,
+            heartbeat_at=None,
+            lease_until=None,
+            requested_by="api:dataset_publish",
+            created_at=datetime(2026, 9, 8, tzinfo=UTC),
+            started_at=None,
+            finished_at=None,
+            updated_at=datetime(2026, 9, 8, tzinfo=UTC),
+        )
+        captured: dict[str, Any] = {}
+
+        async def _echo(self: Any, **kw: Any) -> Any:
+            captured.update(kw)
+            return (fake_row, True)
+
+        with patch(
+            "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
+            new=_echo,
+        ):
+            result = await create_dataset_release(
+                request, Response(status_code=202), session=mock_session
+            )
+
+        assert result.job_id == "BJ-TESTPUB4"
+        # 北交所标的被过滤掉,溯源记录归一化后的过滤条件。
+        assert captured["payload"]["symbols"] == ["600519.SH"]
+        assert captured["payload"]["symbols_source"] == {
+            "mode": "full_market",
+            "exchange": "SSE",
+            "listing_boards": ["cdr", "chinext", "sse_main", "star", "szse_main"],
+        }
+
 
 class TestLifecycleEvents:
     @pytest.mark.asyncio

@@ -1130,6 +1130,13 @@ class ResearchDatasetReleaseCreate(BaseSchema):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
     full_market: bool = False
+    # #385:full_market 展开的交易所/板块过滤(与 bulk_download 同词表;
+    # exchange 实际取值 SSE/SZSE/BSE/CFFEX,listing_board 实际取值
+    # sse_main/szse_main/star/chinext/bse/cdr,ETF/指数/转债恒为 unknown)。
+    # 仅 full_market 模式生效,与 symbols / symbols_from_release 同时声明
+    # 入队即拒(schema 与 resolve_release_symbols 兜底双层校验)。
+    exchange: str | None = Field(default=None, max_length=16)
+    listing_boards: list[str] = Field(default_factory=list, max_length=8)
     start_date: date
     end_date: date
     adjustment: Literal["qfq", "hqfq", "none"] = "qfq"
@@ -1168,6 +1175,23 @@ class ResearchDatasetReleaseCreate(BaseSchema):
             raise ValueError("发布标的不能重复")
         return normalized
 
+    @field_validator("exchange")
+    @classmethod
+    def normalize_exchange(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        return normalized or None
+
+    @field_validator("listing_boards")
+    @classmethod
+    def normalize_listing_boards(cls, value: list[str]) -> list[str]:
+        # 归一到 instruments.listing_board 小写词表并去重排序(确定性 payload)。
+        normalized = sorted(
+            {board.strip().lower() for board in value if board.strip()}
+        )
+        return normalized
+
     @model_validator(mode="after")
     def validate_symbol_source(self) -> ResearchDatasetReleaseCreate:
         # #261:标的集来源必须恰好声明一种;来源解析(存在 / 可用 / 展开非空)
@@ -1189,6 +1213,13 @@ class ResearchDatasetReleaseCreate(BaseSchema):
             raise ValueError(
                 "symbols / symbols_from_release / full_market 只能三选一,"
                 f"同时声明: {declared}"
+            )
+        # #385:板块/交易所过滤只对 full_market 展开有意义;与内联清单或
+        # 来源发布复制混用语义歧义,fail-closed 而非静默叠加。
+        if (self.exchange or self.listing_boards) and declared != ["full_market"]:
+            raise ValueError(
+                "exchange / listing_boards 过滤仅支持 full_market 展开,"
+                "与 symbols / symbols_from_release 互斥"
             )
         return self
 
@@ -1236,6 +1267,11 @@ class DatasetReleaseInstrumentOut(BaseSchema):
     coverage_pct: float
     category: str
     ready: bool
+    # issue #386:异常口径拆分——anomaly_count 只含 OHLCV 异常,重复与
+    # lifecycle(早于 list_date / 晚于 delist_date)独立计数(可见不阻断)。
+    duplicate_count: int = 0
+    pre_list_bars: int = 0
+    post_delist_bars: int = 0
     issues: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
     exchange: str | None = None

@@ -492,6 +492,8 @@ async def create_dataset_release(
     #261:标的集来源三选一(内联 symbols / symbols_from_release 复制既有
     发布 / full_market 全市场展开),入队期解析成具体 symbols 进 payload;
     来源发布缺失 / 不可用 / 展开为空 422 具名拒绝。
+    #385:full_market 展开支持 exchange / listing_boards 过滤(仅该模式
+    生效,与其他来源混用 422),用于从全市场发布中剔除特定板块(如北交所)。
     """
 
     from finboard_api.job_helpers import enqueue_job
@@ -503,6 +505,8 @@ async def create_dataset_release(
             symbols=request.symbols,
             symbols_from_release=request.symbols_from_release,
             full_market=request.full_market,
+            exchange=request.exchange,
+            listing_boards=request.listing_boards,
         )
     except ReleaseSymbolSourceError as exc:
         raise HTTPException(
@@ -516,6 +520,11 @@ async def create_dataset_release(
         }
     elif request.full_market:
         symbols_source = {"mode": "full_market"}
+        # #385:板块/交易所过滤溯源(归一化后记录;未声明保持旧 payload 形状)。
+        if request.exchange is not None:
+            symbols_source["exchange"] = request.exchange
+        if request.listing_boards:
+            symbols_source["listing_boards"] = list(request.listing_boards)
     else:
         symbols_source = {"mode": "inline"}
 
