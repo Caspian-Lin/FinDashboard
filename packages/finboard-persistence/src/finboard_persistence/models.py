@@ -1738,6 +1738,10 @@ class BackgroundJobModel(Base, IdMixin):
     # 写入路径另有同上限截断兜底(update_progress),防未来更长文案炸写库。
     phase: Mapped[str | None] = mapped_column(String(256), nullable=True)
     result_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # job 级耗时/IO 聚合(issue #383):worker 统一包裹 _execute_with_heart 产出
+    # {"execute_elapsed_seconds", "parquet_reads"};nullable JSON,所有 kind 通用,
+    # 不参与轮询指纹(#306/#308 语义零变化)。NULL=旧数据或未走到收口。
+    timing: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

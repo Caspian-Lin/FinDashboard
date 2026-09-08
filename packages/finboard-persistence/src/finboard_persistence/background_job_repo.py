@@ -558,6 +558,7 @@ class BackgroundJobRepository:
         result_ref: str | None = None,
         error_code: str | None = None,
         error_summary: str | None = None,
+        timing: dict[str, object] | None = None,
     ) -> BackgroundJobModel:
         """worker 在 executor 返回后统一收口(running → succeeded/failed/cancelled)。"""
 
@@ -575,6 +576,9 @@ class BackgroundJobRepository:
         )
         if result_ref is not None:
             row.result_ref = result_ref
+        if timing is not None:
+            # job 级耗时/IO 聚合(issue #383);成功与失败路径都可携带。
+            row.timing = timing
         await self._session.flush()
         return row
 

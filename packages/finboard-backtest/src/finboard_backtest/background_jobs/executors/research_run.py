@@ -26,8 +26,11 @@ Coordinator,后者在 ``stage x decision`` 粒度逐阶段回调
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -105,6 +108,65 @@ class ResearchRunExecutor:
             await store.checkpoint()
         await progress(1, 1, f"research_run:{record.status.value}")
         return _record_to_result(record)
+
+    async def execute_replay(self, source_run_id: str) -> JobResult:
+        """诊断重放(issue #383):按 #305 replay 语义新建 run,在调用进程内
+        同步执行全量计算。
+
+        仅供 ``finboard job-flamegraph`` 的诊断子进程使用 —— 不经 worker
+        领取、不写 background_jobs;新 run 继承源 manifest 全部冻结输入,
+        血缘标注 ``replay_of_run_id``(completed 源同时得到确定性重放对照,
+        interrupted 源即事故恢复通道,均 #305 既有语义)。idempotency_key
+        带时间戳:每次诊断重放产生新 run(重复采样不被「新 run 已 COMPLETED
+        → execute 短路」挡住)。对 COMPLETED 源 run 走普通 ``execute`` 是
+        瞬时 no-op(终态直接返回),采样不到计算 —— 这正是需要本方法的原因。
+        源状态 CANCELLED / 不存在等由 replay 守卫 / store 具名拒绝。
+        """
+
+        from finboard_backtest.research_run import ResearchRunConflictError
+
+        async with self._session_maker() as session:
+            store = self._store_factory(session)
+            record = await store.get(source_run_id)
+            if record is None:
+                raise ExecutorError(
+                    code="missing_research_run",
+                    summary=f"研究运行 {source_run_id} 不存在,可能已被清理",
+                    retryable=False,
+                    context={"run_id": source_run_id},
+                )
+            try:
+                adapter = self._adapter_factory(record.manifest)
+            except Exception as exc:
+                raise ExecutorError(
+                    code=getattr(exc, "code", type(exc).__name__),
+                    summary=truncate_summary(str(exc)) or type(exc).__name__,
+                    retryable=False,
+                ) from exc
+            coordinator = ResearchRunCoordinator(store)
+            # 幂等键 = 可读时间戳 + uuid 后缀:同一时钟粒度内的两次诊断重放
+            # 也不会撞键(撞键会让 create_or_get 返回已 COMPLETED 的新 run,
+            # 第二次采样扑空;Windows datetime.now 粒度可达 ~15ms)。
+            stamp = f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+            idempotency_key = f"job-flamegraph:{source_run_id}:{stamp}"
+            digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
+            try:
+                new_record = await coordinator.replay(
+                    source_run_id=source_run_id,
+                    new_run_id=f"RR-{digest}",
+                    idempotency_key=idempotency_key,
+                    requested_by="job-flamegraph",
+                    adapter=adapter,
+                )
+            except ResearchRunConflictError as exc:
+                raise ExecutorError(
+                    code="replay_guard_rejected",
+                    summary=str(exc),
+                    retryable=False,
+                    context={"run_id": source_run_id},
+                ) from exc
+            await store.checkpoint()
+        return _record_to_result(new_record)
 
 
 def _extract_run_id(job: JobRecord) -> str:
