@@ -232,19 +232,26 @@ def _spawn_detached(cmd: list[str], log_path: Path) -> subprocess.Popen[bytes]:
     状态自愈为 done)。
     """
 
-    popen_kwargs: dict[str, Any] = (
-        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
-        if sys.platform == "win32"
-        else {"start_new_session": True}
-    )
+    # 语句级 if 分开两次完整调用(非三元 + **kwargs):mypy 平台收窄只在
+    # if 语句生效,linux 侧不看 win32 分支(CREATE_* 是 typeshed 的 win32
+    # 专属定义);展开 dict 会打散 Popen 重载([no-any-return])。
     log_file = log_path.open("wb")
     try:
+        if sys.platform == "win32":
+            return subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.CREATE_NO_WINDOW,
+            )
         return subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
-            **popen_kwargs,
+            start_new_session=True,
         )
     finally:
         log_file.close()
