@@ -6,7 +6,7 @@
 
 前置:Docker Desktop 运行 + 镜像已构建(仓库根)::
 
-    docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.3.1 .
+    docker build -f docker/research-sandbox/Dockerfile -t finboard-research-sandbox:0.3.2 .
 
 镜像 tag 可经 ``FINBOARD_SANDBOX_IMAGE`` 覆盖。
 
@@ -54,7 +54,7 @@ pytestmark = [
     ),
 ]
 
-_IMAGE = os.getenv("FINBOARD_SANDBOX_IMAGE", "finboard-research-sandbox:0.3.1")
+_IMAGE = os.getenv("FINBOARD_SANDBOX_IMAGE", "finboard-research-sandbox:0.3.2")
 _DECISION_AT = datetime(2024, 6, 3, 7, 0, tzinfo=UTC)
 _SYMBOLS = ["600000.SH", "000001.SZ"]
 
@@ -721,12 +721,23 @@ def compute_series(ctx):
     return values
 '''
 
+#: v1 单日入口因子(rev5 同款横截面反转,2 日窗口)——序列模式走逐日回退
+_SERIES_V1_REVERSAL = '''
+import pandas as pd
+
+
+def compute(ctx):
+    close = ctx.bars.pivot(index="date", columns="symbol", values="close").sort_index()
+    mom = close.pct_change(2).iloc[-1]
+    return (-mom).dropna()
+'''
+
 
 class TestFactorSeriesSandboxE2E:
     """``--mode factor_series`` 端到端:窗口挂载 v3 + 容器内 Arrow 数据面。
 
     进程内等值覆盖见 ``tests/unit/research_sandbox/test_issue_374_kit_arrow.py``;
-    这里验证真实镜像(0.3.1 起 harness 装配为 Arrow 常驻 + 按需截面)产出
+    这里验证真实镜像(0.3.2 起 harness 装配为 Arrow 常驻 + 按需截面)产出
     canonical ``factor_series.json`` 且逐日值与进程内参照一致。
     """
 
@@ -771,5 +782,48 @@ class TestFactorSeriesSandboxE2E:
         assert metrics["mode"] == "factor_series"
         assert metrics["protocol_version"] == 2
         if os.getenv("FINBOARD_SANDBOX_IMAGE") is None:
-            # 默认镜像 tag 与 kit 版本绑定:0.3.1 起容器内为 Arrow 数据面
-            assert metrics["kit_version"] == "0.3.1"
+            # 默认镜像 tag 与 kit 版本绑定:0.3.2 起容器内为 Arrow 数据面
+            assert metrics["kit_version"] == "0.3.2"
+
+    async def test_v1_fallback_container_end_to_end(self, tmp_path: Path) -> None:
+        """v1 因子(compute)序列回退:真实容器逐日回放,值与进程内参照一致。
+
+        issue #378 回归守卫:BJ-0C7981C96AF4427(rev5,v1 因子)曾在该路径
+        因每日急切物化研究数据集 OOM;0.3.2 起未触碰的数据集零读取。
+        """
+        provider, _ = _mount_provider()
+        window_dates = [date(2024, 5, 18), date(2024, 5, 19), date(2024, 5, 20)]
+        await build_window_data_mount(
+            providers=[provider],
+            window_start=window_dates[0],
+            window_end=window_dates[-1],
+            dates=window_dates,
+            out_root=tmp_path / "data",
+            code_artifact="rev5_v1",
+            code_commit="b" * 40,
+            release_id="DR-e2e",
+            dataset_release_ids=[],
+        )
+        _make_code(tmp_path, _SERIES_V1_REVERSAL, entry="factor.compute")
+        result = await _run(tmp_path, mode="factor_series")
+        assert result.exit_code == 0, result.stderr
+        payload = json.loads(
+            (tmp_path / "out" / "factor_series.json").read_text(encoding="utf-8")
+        )
+        assert payload["protocol_version"] == 2
+        assert payload["dates"] == [d.isoformat() for d in window_dates]
+        # 每日截面 = -(2 日前缀动量),与 0.3.1 急切构造的语义逐值一致
+        for symbol in _SYMBOLS:
+            symbol_bars = sorted(
+                (b for b in provider.bars if b.code == symbol),
+                key=lambda b: b.day,
+            )
+            for day in window_dates:
+                prefix = [b.close for b in symbol_bars if b.day <= day]
+                expected = -(prefix[-1] / prefix[-3] - 1.0)
+                got = payload["values"][day.isoformat()][symbol]
+                assert got == pytest.approx(expected, rel=1e-9)
+        metrics = json.loads(
+            (tmp_path / "out" / "metrics.json").read_text(encoding="utf-8")
+        )
+        assert "v1 逐日回退" in metrics["entry_used"]

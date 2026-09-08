@@ -31,13 +31,21 @@ pandas;容器内存不再随「整表进 pandas」线性放大(705 万行 daily_
 曾以 ~2GB 撞穿容器限额)。直接以 pandas 构造(测试 / 老代码)的行为
 与 0.3.0 完全一致,两种来源构造时二选一。
 
+**v1 回退路径惰性化(issue #378)**:#374 只覆盖了 v2 访问器路径,v1
+因子在序列模式下的逐日回退仍每日**急切物化全部三个数据集**的当日
+视图 —— 因子不碰的数据集也逐日付出「整段前缀进 pandas」的成本,真实
+挂载(705 万行 daily_metrics)据此再次撞穿容器限额。0.3.2 起
+:class:`FactorContext` 接受 ``*_factory`` 构造参(帧二选一,属性首次
+访问才物化并缓存),:class:`FactorSeriesContext` 接受 ``*_loader``
+(首次访问才读 parquet)—— 不触碰的数据集连文件都不读。
+
 不在白名单的 import(subprocess/socket/os...)在静态校验(#215)与本镜像
 运行环境双重拒绝。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from types import MappingProxyType
@@ -53,27 +61,111 @@ AVAILABLE_AT_COL = "available_at"
 
 def _empty_bars() -> pd.DataFrame:
     return pd.DataFrame(
-        columns=["symbol", "date", "open", "high", "low", "close",
-                 "volume", "amount"]
+        columns=["symbol", "date", "open", "high", "low", "close", "volume", "amount"]
     )
 
 
-@dataclass(frozen=True, slots=True)
 class FactorContext:
-    """一次因子计算的只读输入(挂载内容 = decision_at 之前的世界)。"""
+    """一次因子计算的只读输入(挂载内容 = decision_at 之前的世界)。
+
+    数据字段支持两种构造来源(issue #378):直接传 pandas 帧(测试 /
+    0.3.x 兼容行为),或传 ``*_factory``(harness 装配)—— factory 在
+    属性**首次访问**时调用一次,结果物化并缓存。v1 因子在序列回退路径
+    下由 harness 传 factory:因子不触碰的数据集完全不付物化成本(此前
+    逐日急切物化曾让不碰 daily_metrics 的因子也被其 705 万行前缀帧
+    撞穿容器限额)。帧与 factory 二选一,不可混装。
+    """
+
+    __slots__ = (
+        "_bars_factory",
+        "_bars_frame",
+        "_daily_factory",
+        "_daily_frame",
+        "_fin_factory",
+        "_fin_frame",
+        "decision_at",
+        "params",
+        "symbols",
+    )
 
     #: 决策时点(UTC,带时区);挂载数据的 available_at 均不晚于它
     decision_at: datetime
     #: 候选池标的代码(如 "600000.SH")
     symbols: tuple[str, ...]
-    #: 全部标的的日线长表(见模块 docstring 列约定)
-    bars: pd.DataFrame = field(default_factory=_empty_bars)
-    #: daily_metrics 研究发布视图;无对应发布时为 None
-    daily_metrics: pd.DataFrame | None = None
-    #: financial_indicators 研究发布视图;无对应发布时为 None
-    financial_indicators: pd.DataFrame | None = None
     #: 运行参数(入队 payload.params 覆盖 manifest.params 的合并结果,只读)
-    params: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    params: Mapping[str, Any]
+    _bars_factory: Callable[[], pd.DataFrame | None] | None
+    _bars_frame: pd.DataFrame | None
+    _daily_factory: Callable[[], pd.DataFrame | None] | None
+    _daily_frame: pd.DataFrame | None
+    _fin_factory: Callable[[], pd.DataFrame | None] | None
+    _fin_frame: pd.DataFrame | None
+
+    def __init__(
+        self,
+        *,
+        decision_at: datetime,
+        symbols: tuple[str, ...],
+        bars: pd.DataFrame | None = None,
+        daily_metrics: pd.DataFrame | None = None,
+        financial_indicators: pd.DataFrame | None = None,
+        params: Mapping[str, Any] = MappingProxyType({}),
+        bars_factory: Callable[[], pd.DataFrame | None] | None = None,
+        daily_metrics_factory: Callable[[], pd.DataFrame | None] | None = None,
+        financial_indicators_factory: (Callable[[], pd.DataFrame | None] | None) = None,
+    ) -> None:
+        if bars is not None and bars_factory is not None:
+            raise ValueError("bars 与 bars_factory 二选一(帧与惰性来源不可混装)")
+        if daily_metrics is not None and daily_metrics_factory is not None:
+            raise ValueError("daily_metrics 与 daily_metrics_factory 二选一(帧与惰性来源不可混装)")
+        if financial_indicators is not None and financial_indicators_factory is not None:
+            raise ValueError(
+                "financial_indicators 与 financial_indicators_factory 二选一(帧与惰性来源不可混装)"
+            )
+        set_ = object.__setattr__
+        set_(self, "decision_at", decision_at)
+        set_(self, "symbols", tuple(symbols))
+        set_(self, "params", params)
+        set_(self, "_bars_factory", bars_factory)
+        set_(self, "_bars_frame", bars)
+        set_(self, "_daily_factory", daily_metrics_factory)
+        set_(self, "_daily_frame", daily_metrics)
+        set_(self, "_fin_factory", financial_indicators_factory)
+        set_(self, "_fin_frame", financial_indicators)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(f"{type(self).__name__} 是只读上下文(不可赋值: {name})")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"{type(self).__name__} 是只读上下文(不可删除: {name})")
+
+    def _load(self, factory_slot: str, frame_slot: str) -> pd.DataFrame | None:
+        """首次访问调用 factory 物化并缓存;此后直接返回缓存帧。"""
+        factory: Callable[[], pd.DataFrame | None] | None = getattr(self, factory_slot)
+        if factory is not None:
+            object.__setattr__(self, frame_slot, factory())
+            object.__setattr__(self, factory_slot, None)
+        frame: pd.DataFrame | None = getattr(self, frame_slot)
+        return frame
+
+    @property
+    def bars(self) -> pd.DataFrame:
+        """全部标的的日线长表(见模块 docstring 列约定;惰性物化)。"""
+        frame = self._load("_bars_factory", "_bars_frame")
+        if frame is None:
+            frame = _empty_bars()
+            object.__setattr__(self, "_bars_frame", frame)
+        return frame
+
+    @property
+    def daily_metrics(self) -> pd.DataFrame | None:
+        """daily_metrics 研究发布视图;无对应发布时为 None(惰性物化)。"""
+        return self._load("_daily_factory", "_daily_frame")
+
+    @property
+    def financial_indicators(self) -> pd.DataFrame | None:
+        """financial_indicators 研究发布视图;无对应发布时 None。"""
+        return self._load("_fin_factory", "_fin_frame")
 
     def bars_for(self, symbol: str) -> pd.DataFrame:
         """单个标的的行情子集(按 date 升序)。"""
@@ -167,9 +259,7 @@ def _pit_frame(
         visible = frame.loc[stamps <= ceiling]
     else:
         col = frame[fallback_date_col]
-        if isinstance(col.dtype, pd.DatetimeTZDtype) or str(col.dtype).startswith(
-            "datetime64"
-        ):
+        if isinstance(col.dtype, pd.DatetimeTZDtype) or str(col.dtype).startswith("datetime64"):
             mask = col.dt.date <= as_of
         else:
             mask = col.map(lambda d: d is not None and d <= as_of)
@@ -287,14 +377,22 @@ class FactorSeriesContext:
     ``daily_metrics`` / ``financial_indicators``)成为惰性属性,首次访问
     才整表物化(0.3.0 行为兼容)。两种来源构造时**二选一**;直接以 pandas
     构造(测试 / 老代码)的访问器行为与 0.3.0 完全一致。
+
+    ``*_loader``(issue #378):harness 以 loader 构造时,parquet 的读取
+    本身也推迟到该数据集**首次被访问** —— 只用 bars 的因子不为 705 万行
+    daily_metrics 付任何常驻成本。loader 与帧 / 表互斥,调用一次后缓存
+    (清空 loader 槽位,不重复读盘)。
     """
 
     __slots__ = (
         "_bars_frame",
+        "_bars_loader",
         "_bars_source",
         "_daily_frame",
+        "_daily_loader",
         "_daily_source",
         "_fin_frame",
+        "_fin_loader",
         "_fin_source",
         "dates",
         "params",
@@ -304,9 +402,12 @@ class FactorSeriesContext:
     dates: tuple[date, ...]
     symbols: tuple[str, ...]
     params: Mapping[str, Any]
-    _bars_source: pa.Table | pd.DataFrame
+    _bars_source: pa.Table | pd.DataFrame | None
     _daily_source: pa.Table | pd.DataFrame | None
     _fin_source: pa.Table | pd.DataFrame | None
+    _bars_loader: Callable[[], pa.Table | pd.DataFrame | None] | None
+    _daily_loader: Callable[[], pa.Table | pd.DataFrame | None] | None
+    _fin_loader: Callable[[], pa.Table | pd.DataFrame | None] | None
     _bars_frame: pd.DataFrame | None
     _daily_frame: pd.DataFrame | None
     _fin_frame: pd.DataFrame | None
@@ -323,23 +424,35 @@ class FactorSeriesContext:
         bars_table: pa.Table | None = None,
         daily_metrics_table: pa.Table | None = None,
         financial_indicators_table: pa.Table | None = None,
+        bars_loader: (Callable[[], pa.Table | pd.DataFrame | None] | None) = None,
+        daily_metrics_loader: (Callable[[], pa.Table | pd.DataFrame | None] | None) = None,
+        financial_indicators_loader: (Callable[[], pa.Table | pd.DataFrame | None] | None) = None,
     ) -> None:
         if bars_table is not None and bars is not None:
-            raise ValueError(
-                "bars 与 bars_table 二选一(Arrow 底座与 pandas 兼容来源不可混装)"
-            )
+            raise ValueError("bars 与 bars_table 二选一(Arrow 底座与 pandas 兼容来源不可混装)")
         if daily_metrics_table is not None and daily_metrics is not None:
             raise ValueError(
-                "daily_metrics 与 daily_metrics_table 二选一"
-                "(Arrow 底座与 pandas 兼容来源不可混装)"
+                "daily_metrics 与 daily_metrics_table 二选一(Arrow 底座与 pandas 兼容来源不可混装)"
             )
-        if (
-            financial_indicators_table is not None
-            and financial_indicators is not None
-        ):
+        if financial_indicators_table is not None and financial_indicators is not None:
             raise ValueError(
                 "financial_indicators 与 financial_indicators_table 二选一"
                 "(Arrow 底座与 pandas 兼容来源不可混装)"
+            )
+        if bars_loader is not None and (bars is not None or bars_table is not None):
+            raise ValueError("bars_loader 与 bars/bars_table 二选一(惰性读取不可与既有来源混装)")
+        if daily_metrics_loader is not None and (
+            daily_metrics is not None or daily_metrics_table is not None
+        ):
+            raise ValueError(
+                "daily_metrics_loader 与 daily_metrics(_table) 二选一(惰性读取不可与既有来源混装)"
+            )
+        if financial_indicators_loader is not None and (
+            financial_indicators is not None or financial_indicators_table is not None
+        ):
+            raise ValueError(
+                "financial_indicators_loader 与 financial_indicators(_table)"
+                " 二选一(惰性读取不可与既有来源混装)"
             )
         set_ = object.__setattr__
         set_(self, "dates", tuple(dates))
@@ -348,16 +461,12 @@ class FactorSeriesContext:
         set_(
             self,
             "_bars_source",
-            bars_table
-            if bars_table is not None
-            else (bars if bars is not None else _empty_bars()),
+            bars_table if bars_table is not None else (bars if bars is not None else _empty_bars()),
         )
         set_(
             self,
             "_daily_source",
-            daily_metrics_table
-            if daily_metrics_table is not None
-            else daily_metrics,
+            daily_metrics_table if daily_metrics_table is not None else daily_metrics,
         )
         set_(
             self,
@@ -366,28 +475,40 @@ class FactorSeriesContext:
             if financial_indicators_table is not None
             else financial_indicators,
         )
+        set_(self, "_bars_loader", bars_loader)
+        set_(self, "_daily_loader", daily_metrics_loader)
+        set_(self, "_fin_loader", financial_indicators_loader)
         set_(self, "_bars_frame", None)
         set_(self, "_daily_frame", None)
         set_(self, "_fin_frame", None)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        raise AttributeError(
-            f"{type(self).__name__} 是只读上下文(不可赋值: {name})"
-        )
+        raise AttributeError(f"{type(self).__name__} 是只读上下文(不可赋值: {name})")
 
     def __delattr__(self, name: str) -> None:
-        raise AttributeError(
-            f"{type(self).__name__} 是只读上下文(不可删除: {name})"
-        )
+        raise AttributeError(f"{type(self).__name__} 是只读上下文(不可删除: {name})")
 
     def __repr__(self) -> str:
+        if self._bars_loader is not None:
+            base = "lazy"
+        elif isinstance(self._bars_source, pa.Table):
+            base = "arrow"
+        else:
+            base = "pandas"
         return (
             f"{type(self).__name__}(dates={len(self.dates)}, "
-            f"symbols={len(self.symbols)}, "
-            f"bars_source={'arrow' if isinstance(self._bars_source, pa.Table) else 'pandas'})"
+            f"symbols={len(self.symbols)}, bars_source={base})"
         )
 
     # ---- 惰性 pandas 兼容字段(#374:Arrow 底座下首次访问才整表物化) ----
+
+    def _ensure(self, loader_slot: str, source_slot: str) -> Any:
+        """loader 存在则首次访问读表并缓存(清空 loader,不重复读盘)。"""
+        loader: Callable[[], pa.Table | pd.DataFrame | None] | None = getattr(self, loader_slot)
+        if loader is not None:
+            object.__setattr__(self, source_slot, loader())
+            object.__setattr__(self, loader_slot, None)
+        return getattr(self, source_slot)
 
     def _materialize(
         self, source: pa.Table | pd.DataFrame | None, cache_slot: str
@@ -404,7 +525,8 @@ class FactorSeriesContext:
         """窗口全量行情长表(惰性;Arrow 底座下首次访问才物化)。"""
         if self._bars_frame is not None:
             return self._bars_frame
-        frame = self._materialize(self._bars_source, "_bars_frame")
+        source = self._ensure("_bars_loader", "_bars_source")
+        frame = self._materialize(source, "_bars_frame")
         if frame is None:
             return _empty_bars()
         return frame
@@ -413,29 +535,27 @@ class FactorSeriesContext:
     def daily_metrics(self) -> pd.DataFrame | None:
         """daily_metrics 研究发布窗口视图(惰性;无对应发布时为 None)。"""
         if self._daily_frame is None:
-            return self._materialize(self._daily_source, "_daily_frame")
+            source = self._ensure("_daily_loader", "_daily_source")
+            return self._materialize(source, "_daily_frame")
         return self._daily_frame
 
     @property
     def financial_indicators(self) -> pd.DataFrame | None:
         """financial_indicators 研究发布窗口视图(惰性;无对应发布时 None)。"""
         if self._fin_frame is None:
-            return self._materialize(self._fin_source, "_fin_frame")
+            source = self._ensure("_fin_loader", "_fin_source")
+            return self._materialize(source, "_fin_frame")
         return self._fin_frame
 
     # ---- 访问器(逐日 PIT 契约入口) ----
 
-    def _visible(
-        self, source: Any, *, as_of: date, fallback_date_col: str
-    ) -> pd.DataFrame | None:
+    def _visible(self, source: Any, *, as_of: date, fallback_date_col: str) -> pd.DataFrame | None:
         """按来源分派 PIT 过滤:Arrow 底座走 compute,pandas 走既有实现。"""
         if source is None:
             return None
         if isinstance(source, pd.DataFrame):
             return _pit_frame(source, as_of=as_of, fallback_date_col=fallback_date_col)
-        return _visible_table_to_frame(
-            source, as_of=as_of, fallback_date_col=fallback_date_col
-        )
+        return _visible_table_to_frame(source, as_of=as_of, fallback_date_col=fallback_date_col)
 
     def bars_view(self, as_of: date) -> BarsView:
         """``as_of`` 日终时点可见的行情视图(PIT 契约入口)。
@@ -444,9 +564,8 @@ class FactorSeriesContext:
         —— 按日缓存会让内存随窗口长度二次增长);同一 ``as_of`` 的多次
         调用应在逐日循环外复用视图变量。
         """
-        visible = self._visible(
-            self._bars_source, as_of=as_of, fallback_date_col="date"
-        )
+        source = self._ensure("_bars_loader", "_bars_source")
+        visible = self._visible(source, as_of=as_of, fallback_date_col="date")
         return BarsView(
             as_of=as_of,
             frame=visible if visible is not None else pd.DataFrame(),
@@ -459,19 +578,18 @@ class FactorSeriesContext:
         kind 返回 ``frame=None`` 的视图(因子代码应按缺数据降级)。
         """
         if kind == "daily_metrics":
-            frame = self._visible(
-                self._daily_source, as_of=as_of, fallback_date_col="trade_date"
-            )
+            source = self._ensure("_daily_loader", "_daily_source")
+            frame = self._visible(source, as_of=as_of, fallback_date_col="trade_date")
         elif kind == "financial_indicators":
+            source = self._ensure("_fin_loader", "_fin_source")
             frame = self._visible(
-                self._fin_source,
+                source,
                 as_of=as_of,
                 fallback_date_col="announcement_date",
             )
         else:
             raise ValueError(
-                f"未知数据集 kind {kind!r}"
-                "(允许: daily_metrics / financial_indicators)"
+                f"未知数据集 kind {kind!r}(允许: daily_metrics / financial_indicators)"
             )
         return DatasetView(kind=kind, as_of=as_of, frame=frame)
 
