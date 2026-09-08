@@ -1655,33 +1655,34 @@ async def _publish_dataset_release(
     settings = load_settings()
     engine = create_async_engine(settings.db_url)
     try:
-        async with session_factory(engine)() as session:
-            service = ResearchDatasetReleaseService(
-                session,
-                cache_dir=cache_dir,
-                release_root=release_root,
-            )
-            release = await service.publish(
-                DatasetReleaseSpec(
-                    release_id=release_id,
-                    dataset_name=dataset_name,
-                    source=source,
-                    version=version,
-                    start_date=start_date,
-                    end_date=end_date,
-                    code_version=code_version,
-                    adjustment=adjust,
-                    required_capabilities=required_capabilities,
-                    known_limitations=(
-                        "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
-                        "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
-                        "首期仅发布本地缓存已有字段,不回退到联网数据源",
-                    ),
+        # 分段短事务(元数据 prep / 物化 / 登记):物化是分钟级纯文件 I/O,
+        # 不能在打开的 PG 事务内进行,否则全市场规模发布会被
+        # idle_in_transaction_session_timeout 杀连接。
+        service = ResearchDatasetReleaseService(
+            None,
+            session_factory=session_factory(engine),
+            cache_dir=cache_dir,
+            release_root=release_root,
+        )
+        return await service.publish(
+            DatasetReleaseSpec(
+                release_id=release_id,
+                dataset_name=dataset_name,
+                source=source,
+                version=version,
+                start_date=start_date,
+                end_date=end_date,
+                code_version=code_version,
+                adjustment=adjust,
+                required_capabilities=required_capabilities,
+                known_limitations=(
+                    "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
+                    "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
+                    "首期仅发布本地缓存已有字段,不回退到联网数据源",
                 ),
-                symbols,
-            )
-            await session.commit()
-            return release
+            ),
+            symbols,
+        )
     finally:
         await engine.dispose()
 

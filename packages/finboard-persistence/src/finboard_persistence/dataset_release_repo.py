@@ -8,8 +8,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import Select, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_data.akshare_provider import futures_series_entry
 from finboard_data.releases import (
@@ -397,21 +397,36 @@ class ReleaseInstrumentCatalogRepository:
 
 
 class ResearchDatasetReleaseService:
-    """文件原子发布 + 数据库不可变登记的应用服务。"""
+    """文件原子发布 + 数据库不可变登记的应用服务。
+
+    传入 ``session_factory`` 时走**分段短事务**模式:元数据准备、物化、
+    登记拆成互不重叠的 DB 段,物化阶段(7000+ 符号 x 全历史流式冻结,
+    分钟级纯文件 I/O)不再悬挂任何打开的 PG 事务,避免
+    ``idle_in_transaction_session_timeout`` 在长发布中途杀连接
+    (全市场发布事故 BJ-2307A2188D1645BA)。不传时沿用单 session 行为,
+    事务边界由调用方控制(向后兼容)。
+    """
 
     def __init__(
         self,
-        session: AsyncSession,
+        session: AsyncSession | None,
         *,
         cache_dir: str | Path,
         release_root: str | Path,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
     ) -> None:
-        self._release_repo = ResearchDatasetReleaseRepository(session)
-        self._catalog_repo = ReleaseInstrumentCatalogRepository(session)
+        if session is None and session_factory is None:
+            raise ValueError("session 与 session_factory 至少提供一个")
+        self._release_repo = ResearchDatasetReleaseRepository(session)  # type: ignore[arg-type]
+        self._catalog_repo = ReleaseInstrumentCatalogRepository(session)  # type: ignore[arg-type]
+        self._session_factory = session_factory
         self._builder = FrozenDatasetReleaseBuilder(
             cache_dir=cache_dir,
             release_root=release_root,
-            research_source=ResearchTableReleaseSource(session),
+            research_source=ResearchTableReleaseSource(
+                session,
+                session_factory=session_factory,
+            ),
         )
 
     async def publish(
@@ -419,20 +434,49 @@ class ResearchDatasetReleaseService:
         spec: DatasetReleaseSpec,
         symbols: list[str],
     ) -> ResearchDatasetRelease:
-        previous = await self._release_repo.latest_usable(
-            dataset_name=spec.dataset_name,
-            source=spec.source,
-        )
-        if spec.dataset_kind is not ReleaseDatasetKind.BARS:
-            self._require_a_share_stock_scope(spec, symbols)
-        candidates = await self._catalog_repo.list_candidates(symbols)
+        if self._session_factory is None:
+            previous = await self._release_repo.latest_usable(
+                dataset_name=spec.dataset_name,
+                source=spec.source,
+            )
+            if spec.dataset_kind is not ReleaseDatasetKind.BARS:
+                self._require_a_share_stock_scope(spec, symbols)
+            candidates = await self._catalog_repo.list_candidates(symbols)
+        else:
+            previous, candidates = await self._prepare_metadata(spec, symbols)
         release = await self._builder.publish(
             spec,
             candidates,
             previous_release=previous,
         )
-        await self._release_repo.publish(release)
-        return release
+        if self._session_factory is None:
+            await self._release_repo.publish(release)
+            return release
+        factory = self._session_factory
+        async with factory() as session:
+            row = await ResearchDatasetReleaseRepository(session).publish(release)
+            await session.commit()
+            return _release_from_row(row)
+
+    async def _prepare_metadata(
+        self,
+        spec: DatasetReleaseSpec,
+        symbols: list[str],
+    ) -> tuple[ResearchDatasetRelease | None, list[ReleaseInstrumentSpec]]:
+        """段 1:一个短事务里读齐 previous release 与标的元数据候选。"""
+        assert self._session_factory is not None  # 仅分段模式调用
+        if spec.dataset_kind is not ReleaseDatasetKind.BARS:
+            self._require_a_share_stock_scope(spec, symbols)
+        async with self._session_factory() as session:
+            previous = await ResearchDatasetReleaseRepository(session).latest_usable(
+                dataset_name=spec.dataset_name,
+                source=spec.source,
+            )
+            candidates = await ReleaseInstrumentCatalogRepository(
+                session
+            ).list_candidates(symbols)
+            await session.commit()
+        return previous, candidates
 
     @staticmethod
     def _require_a_share_stock_scope(
@@ -459,10 +503,35 @@ class ResearchDatasetReleaseService:
 
 
 class ResearchTableReleaseSource:
-    """从 ``research_*`` 表读取研究数据作为发布冻结输入的注入实现。"""
+    """从 ``research_*`` 表读取研究数据作为发布冻结输入的注入实现。
 
-    def __init__(self, session: AsyncSession) -> None:
+    传入 ``session_factory`` 时每次读取自开一个**短事务**,查询完成立即
+    结束(物化期间不再悬挂长事务);否则复用构造传入的 session(旧模式)。
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession | None,
+        *,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
+        if session is None and session_factory is None:
+            raise ValueError("session 与 session_factory 至少提供一个")
         self._session = session
+        self._session_factory = session_factory
+
+    async def _rows(
+        self,
+        stmt: Select[Any],
+    ) -> list[Any]:
+        if self._session_factory is not None:
+            async with self._session_factory() as session:
+                rows = (await session.execute(stmt)).scalars().all()
+                await session.commit()
+                return list(rows)
+        assert self._session is not None  # 构造已保证
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows)
 
     async def daily_metrics(
         self,
@@ -483,7 +552,7 @@ class ResearchTableReleaseSource:
                 ResearchDailyMetricModel.trade_date,
             )
         )
-        rows = (await self._session.execute(stmt)).scalars().all()
+        rows = await self._rows(stmt)
         result: dict[str, list[DailySecurityMetrics]] = {}
         for row in rows:
             result.setdefault(row.symbol, []).append(_daily_metrics_from_row(row))
@@ -509,10 +578,12 @@ class ResearchTableReleaseSource:
                 ResearchFinancialIndicatorModel.announcement_date,
             )
         )
-        rows = (await self._session.execute(stmt)).scalars().all()
+        rows = await self._rows(stmt)
         result: dict[str, list[FinancialIndicator]] = {}
         for row in rows:
-            result.setdefault(row.symbol, []).append(_financial_indicators_from_row(row))
+            result.setdefault(row.symbol, []).append(
+                _financial_indicators_from_row(row)
+            )
         return result
 
 

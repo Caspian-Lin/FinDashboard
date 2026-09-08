@@ -254,84 +254,89 @@ class DatasetPublishExecutor:
 
             fields = _default_release_fields(kind)
 
-            await progress(1, None, "dataset_publish:publishing")
-            service = ResearchDatasetReleaseService(
-                session,
-                cache_dir=cache_dir(),
-                release_root=release_root(),
-            )
-            try:
-                release = await service.publish(
-                    DatasetReleaseSpec(
-                        release_id=release_id,
-                        dataset_name=dataset_name,
-                        source=source,
-                        version=version,
-                        start_date=start_date,
-                        end_date=end_date,
-                        code_version=code_version(),
-                        adjustment=adjustment,
-                        fields=fields,
-                        dataset_kind=ReleaseDatasetKind(kind),
-                        minimum_release_coverage=(
-                            # issue #212:研究数据发布级阈值放宽到 0.95——停牌日
-                            # 无截面、最新报告期未公告是常态(全市场 daily 实测
-                            # 跨度口径平均 coverage≈0.972),0.98 会让任何真实全市场
-                            # 研究发布不可发布;0.95 仍拦系统性丢失。逐标的缺口
-                            # 已在 builder 侧降级为可见 warning。#265 转债派生
-                            # 指标同口径(转债停牌/正股停牌日溢价缺观测)。
-                            Decimal("0.95")
-                            if release_kind
-                            in ("daily_metrics", "financial_indicators", "convertible_metrics")
-                            else Decimal("0.98")
+        # 校验段到此结束(以上全部只读):session 随 with 退出结束 DB 事务。
+        # 物化(7000+ 符号 x 全历史流式冻结,分钟级纯文件 I/O)不能在打开的
+        # PG 事务内进行 —— 全市场发布 BJ-2307A2188D1645BA 因此被
+        # idle_in_transaction_session_timeout 杀连接。发布改走
+        # session_factory 分段短事务:元数据 prep / 物化 / 登记各自独立;
+        # 物化成功而登记失败时,重试经 builder 的 final_dir 幂等路径
+        # (校验同一性后返回既有发布)不重复冻结。
+        await progress(1, None, "dataset_publish:publishing")
+        service = ResearchDatasetReleaseService(
+            None,
+            session_factory=self._session_maker,
+            cache_dir=cache_dir(),
+            release_root=release_root(),
+        )
+        try:
+            release = await service.publish(
+                DatasetReleaseSpec(
+                    release_id=release_id,
+                    dataset_name=dataset_name,
+                    source=source,
+                    version=version,
+                    start_date=start_date,
+                    end_date=end_date,
+                    code_version=code_version(),
+                    adjustment=adjustment,
+                    fields=fields,
+                    dataset_kind=ReleaseDatasetKind(kind),
+                    minimum_release_coverage=(
+                        # issue #212:研究数据发布级阈值放宽到 0.95——停牌日
+                        # 无截面、最新报告期未公告是常态(全市场 daily 实测
+                        # 跨度口径平均 coverage≈0.972),0.98 会让任何真实全市场
+                        # 研究发布不可发布;0.95 仍拦系统性丢失。逐标的缺口
+                        # 已在 builder 侧降级为可见 warning。#265 转债派生
+                        # 指标同口径(转债停牌/正股停牌日溢价缺观测)。
+                        Decimal("0.95")
+                        if release_kind
+                        in ("daily_metrics", "financial_indicators", "convertible_metrics")
+                        else Decimal("0.98")
+                    ),
+                    required_capabilities=(
+                        ("stock",)
+                        if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators")
+                        # issue #265:转债派生指标发布固定要求 convertible 能力。
+                        else ("convertible",)
+                        if release_kind == "convertible_metrics"
+                        else tuple(required_capabilities)
+                    ),
+                    known_limitations=(
+                        "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
+                        "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
+                        "只冻结本地缓存已有字段,不会回退到联网数据源",
+                        (
+                            "A股单源发布严格要求所有 Bar 来源为 tushare"
+                            if release_kind == "a_share_tushare"
+                            else "多资产发布允许按标的混合来源,实际来源写入质量报告"
                         ),
-                        required_capabilities=(
-                            ("stock",)
-                            if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators")
-                            # issue #265:转债派生指标发布固定要求 convertible 能力。
-                            else ("convertible",)
-                            if release_kind == "convertible_metrics"
-                            else tuple(required_capabilities)
-                        ),
-                        known_limitations=(
-                            "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
-                            "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
-                            "只冻结本地缓存已有字段,不会回退到联网数据源",
+                        *(
                             (
-                                "A股单源发布严格要求所有 Bar 来源为 tushare"
-                                if release_kind == "a_share_tushare"
-                                else "多资产发布允许按标的混合来源,实际来源写入质量报告"
-                            ),
-                            *(
-                                (
-                                    "转股溢价率 = 转债收盘 / (100/快照转股价x同日正股收盘) - 1;"
-                                    "转股价取 cb_basic 当前快照(下修史不在覆盖范围),"
-                                    "非全历史 PIT(#265)"
-                                )
-                                if release_kind == "convertible_metrics"
-                                else ()
-                            ),
+                                "转股溢价率 = 转债收盘 / (100/快照转股价x同日正股收盘) - 1;"
+                                "转股价取 cb_basic 当前快照(下修史不在覆盖范围),"
+                                "非全历史 PIT(#265)"
+                            )
+                            if release_kind == "convertible_metrics"
+                            else ()
                         ),
                     ),
-                    symbols,
-                )
-                await session.commit()
-            except ImmutableReleaseError as exc:
-                await session.rollback()
-                raise ExecutorError(
-                    code="release_identity_conflict",
-                    summary=f"发布身份冲突: {exc}",
-                    retryable=False,
-                    context={"job_id": job.job_id, "release_id": release_id},
-                ) from exc
-            except (DatasetReleaseError, ValueError) as exc:
-                await session.rollback()
-                raise ExecutorError(
-                    code="quality_gate_failed",
-                    summary=f"数据质量门未通过: {exc}",
-                    retryable=False,
-                    context={"job_id": job.job_id},
-                ) from exc
+                ),
+                symbols,
+            )
+        except ImmutableReleaseError as exc:
+            raise ExecutorError(
+                code="release_identity_conflict",
+                summary=f"发布身份冲突: {exc}",
+                retryable=False,
+                context={"job_id": job.job_id, "release_id": release_id},
+            ) from exc
+        except (DatasetReleaseError, ValueError) as exc:
+            raise ExecutorError(
+                code="quality_gate_failed",
+                summary=f"数据质量门未通过: {exc}",
+                retryable=False,
+                context={"job_id": job.job_id},
+            ) from exc
 
         # issue #348:完成语收短为 ``dataset_publish:done[ symbol_set_mismatch]``
         # —— 旧完成语拼上 mismatch 摘要(含 baseline release_id 与双向计数)
