@@ -1972,6 +1972,20 @@ def _flamegraph_gate_error(kind: str, status: str) -> str | None:
     return None
 
 
+def _resolve_py_spy() -> str | None:
+    """解析 py-spy 可执行文件(issue #383):venv 同目录优先,退 PATH。
+
+    py-spy 在 dev 依赖组 —— 经 ``uv run`` / venv 内 ``finboard.exe`` 运行时
+    同目录即有 ``py-spy(.exe)``;直接 PATH 调用(如 uv tool 独立安装)仍可命中。
+    """
+
+    exe = "py-spy.exe" if sys.platform == "win32" else "py-spy"
+    candidate = Path(sys.executable).with_name(exe)
+    if candidate.is_file():
+        return str(candidate)
+    return shutil.which("py-spy")
+
+
 async def _load_job_row(settings: Settings, job_id: str) -> BackgroundJobModel | None:
     """读一行 background_jobs(诊断进程独立 engine,用完即弃)。"""
 
@@ -2015,12 +2029,12 @@ def job_flamegraph(
         raise typer.BadParameter("--format 只接受 flamegraph|speedscope")
     from datetime import UTC, datetime
 
-    pyspy = shutil.which("py-spy")
+    pyspy = _resolve_py_spy()
     if pyspy is None:
         typer.echo(
-            "未找到 py-spy。请先安装(不进本仓依赖):\n"
-            "  uv tool install py-spy\n"
-            "  或 pip install py-spy",
+            "未找到 py-spy(dev 依赖组已包含)。请在仓库根执行:\n"
+            "  uv sync\n"
+            "或确认 venv 完整(.venv/Scripts/py-spy.exe)。",
             err=True,
         )
         raise typer.Exit(code=1)
