@@ -28,6 +28,13 @@ from finboard_backtest.factors.predefined.operators import (
     cs_scale,
     cs_winsorize,
     cs_zscore,
+    ew_div,
+    ew_gt,
+    ew_log,
+    ew_lt,
+    ew_sign,
+    ew_signed_power,
+    ew_where,
     rolling_ols_resid,
     ts_argmax,
     ts_argmin,
@@ -337,3 +344,62 @@ class TestCrossSectionOperators:
         out = cs_rank({"a": 1.0, "b": math.inf})
         assert out["b"] is None
         assert out["a"] == pytest.approx(1.0)
+
+
+class TestElementwiseOperators:
+    """ew_* 逐点算子逐值(#400 Alpha101 批次所需;NaN 纪律同 ts_*)。"""
+
+    X = np.array([1.0, -2.0, 0.0, 3.5, np.nan])
+
+    def test_ew_sign_hand_computed(self) -> None:
+        out = ew_sign(self.X)
+        assert _nan_equal(out, np.array([1.0, -1.0, 0.0, 1.0, np.nan]))
+
+    def test_ew_signed_power_hand_computed(self) -> None:
+        out = ew_signed_power(self.X, 2.0)
+        # sign(x) * |x|^2:负值平方后保持负号(WQ SignedPower 语义)
+        assert _nan_equal(out, np.array([1.0, -4.0, 0.0, 12.25, np.nan]))
+        half = ew_signed_power(np.array([-8.0, 4.0, np.nan]), 1.0 / 3.0)
+        assert _nan_equal(half, np.array([-2.0, 4.0 ** (1.0 / 3.0), np.nan]))
+
+    def test_ew_log_nonpositive_is_nan(self) -> None:
+        out = ew_log(np.array([1.0, np.e, 0.0, -3.0, np.nan]))
+        assert _nan_equal(out, np.array([0.0, 1.0, np.nan, np.nan, np.nan]))
+
+    def test_ew_where_nan_condition_propagates(self) -> None:
+        cond = np.array([1.0, 0.0, np.nan, 1.0])
+        x = np.array([10.0, 20.0, 30.0, np.nan])
+        y = np.array([-1.0, -2.0, -3.0, -4.0])
+        out = ew_where(cond, x, y)
+        assert _nan_equal(out, np.array([10.0, -2.0, np.nan, np.nan]))
+        with pytest.raises(ValueError, match="等长"):
+            ew_where(cond, np.array([1.0]), y)
+
+    def test_ew_lt_gt_nan_aware(self) -> None:
+        a = np.array([1.0, 5.0, np.nan])
+        assert _nan_equal(ew_gt(a, 2.0), np.array([0.0, 1.0, np.nan]))
+        assert _nan_equal(ew_lt(a, 2.0), np.array([1.0, 0.0, np.nan]))
+        assert _nan_equal(
+            ew_gt(a, np.array([2.0, np.nan, 0.0])), np.array([0.0, np.nan, np.nan])
+        )
+
+    def test_ew_div_zero_denominator_is_nan(self) -> None:
+        a = np.array([1.0, 8.0, 3.0, np.inf, np.nan])
+        b = np.array([2.0, 0.0, np.nan, 2.0, 5.0])
+        out = ew_div(a, b)
+        assert _nan_equal(out, np.array([0.5, np.nan, np.nan, np.nan, np.nan]))
+        assert _nan_equal(ew_div(a, 2.0), np.array([0.5, 4.0, 1.5, np.nan, np.nan]))
+
+    def test_elementwise_causal_trivially(self) -> None:
+        """逐点变换天然因果:截断前缀与全量前缀逐值相等。"""
+        rng = np.random.default_rng(7)
+        x = rng.normal(size=40)
+        transforms: list[Callable[[np.ndarray], np.ndarray]] = [
+            lambda v: ew_sign(v),
+            lambda v: ew_signed_power(v, 2.0),
+            lambda v: ew_log(np.abs(v) + 1.0),
+        ]
+        for fn in transforms:
+            full = fn(x)
+            cut = fn(x[:25])
+            assert _nan_equal(full[:25], cut)
