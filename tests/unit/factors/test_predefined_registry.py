@@ -735,7 +735,10 @@ class TestAlpha101ReferenceEquivalence:
         ret = c / c.shift(1) - 1.0
         std20 = ret.rolling(20).std(ddof=1)
         cond = ret < 0
-        inner = std20.where(~cond, c)
+        # 论文/tushare:IF(returns < 0, stddev(returns, 20), close) —— 真
+        # 分支 = std20(pandas where 保留 cond 为 True 的值)。#400 收尾审计
+        # 修正:初版参照与实现同为 (ret<0)→close 的颠倒读法,互相印证不出。
+        inner = std20.where(cond, c)
         inner = inner.where(cond.notna(), np.nan)
         sp = inner * inner.abs()
         arg = sp.rolling(5).apply(
@@ -841,7 +844,10 @@ class TestAlpha101ReferenceEquivalence:
         t1 = -sign_frame * (1.0 + _cs_rank_ref(1.0 + ret.rolling(250).sum()))
         a_corr = _cs_rank_ref(vwap - c).rolling(12).corr(_cs_rank_ref(v))
         b_corr = _cs_rank_ref(c).rolling(12).corr(_cs_rank_ref(adv))
-        a_rank = _cs_rank_ref(a_corr * b_corr)
+        # tushare 文本:X = Corr1 * Rank(Corr2) —— 第二个 Correlation 外层
+        # 有 Rank(...)(#400 收尾审计修正,与「各自 Rank 后相乘」的论文
+        # 写法不同)。
+        a_rank = _cs_rank_ref(a_corr * _cs_rank_ref(b_corr))
         reference = t1 + (-a_rank * a_rank)
         # 250 日长窗:只取窗口末端决策日
         _assert_matches_reference("alpha101_19", fields, (dates[259],), reference)

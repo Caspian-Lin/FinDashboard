@@ -291,7 +291,7 @@ def _compute_alpha101_1(inp: PredefinedFactorInput) -> FactorSeriesFrame:
     returns = _returns_values(closes)
     inner = {
         symbol: ew_where(
-            ew_lt(item, 0.0), closes[symbol], ts_std(item, 20)
+            ew_lt(item, 0.0), ts_std(item, 20), closes[symbol]
         )
         for symbol, item in returns.items()
     }
@@ -568,9 +568,10 @@ def _compute_alpha101_18(inp: PredefinedFactorInput) -> FactorSeriesFrame:
 def _compute_alpha101_19(inp: PredefinedFactorInput) -> FactorSeriesFrame:
     """``-Sign((Close-Delay(Close,7))+Delta(Close,7)) * (1+Rank(1+Sum(Returns,250))) - Rank(X)^2``;
 
-    其中 ``X = Corr(Rank(VWAP-Close), Rank(Volume), 12) * Corr(Rank(Close),
-    Rank(ADV20), 12)``(tushare 口径把论文的 scale/indneutralize 项写为
-    ``-Rank(X) * Rank(X)``,逐字直译)。
+    其中 ``X = Corr(Rank(VWAP-Close), Rank(Volume), 12) * Rank(Corr(Rank(Close),
+    Rank(ADV20), 12))``(tushare 口径把论文的 scale/indneutralize 项写为
+    ``-Rank(X) * Rank(X)``,逐字直译;注意 tushare 文本中第二个 Correlation
+    外层有 ``Rank(...)``,与论文「两 Correlation 各自 Rank 后相乘」不同)。
     """
     axis = inp.bars("close")
     closes = _values(axis)
@@ -603,7 +604,10 @@ def _compute_alpha101_19(inp: PredefinedFactorInput) -> FactorSeriesFrame:
         _cs_rank_series(axis, adv20, inp),
         lambda a, b: ts_corr(a, b, 12),
     )
-    product = _per_symbol_pair(left_corr, right_corr, lambda a, b: a * b)
+    ranked_right_corr = _cs_rank_series(axis, right_corr, inp)
+    product = _per_symbol_pair(
+        left_corr, ranked_right_corr, lambda a, b: a * b
+    )
     term2_rank = _cs_rank_series(axis, product, inp)
     return inp.sample(
         axis,
