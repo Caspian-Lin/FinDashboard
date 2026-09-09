@@ -103,4 +103,4 @@
 3. **index_daily / index_basic / fut_basic / fut_daily / fut_trade_cal 均 2000 积分档可调(实测)**,纳入方案;index_dailybasic 未确认暂缓 backlog ✅
 4. **因子批次 0-5 顺序与排除清单**(log_price/ma_20d/price_dist/days_down_up)✅
 
-issue 拆分见总览 issue(创建后回填链接)。
+issue 拆分已创建:总览 #391;框架 #392(dataset_sync);数据源 #393(股票主源)/#394(指数)/#395(期货)/#396(trade_cal+suspend_d)/#397(三表+dividend);因子 #398(批次0)/#399(批次1)/#400(批次2)/#401(批次3)/#402(批次4)/#403(批次5)。
