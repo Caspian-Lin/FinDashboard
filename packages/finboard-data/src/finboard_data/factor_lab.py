@@ -28,6 +28,15 @@ FACTOR_LAB_SCHEMA_VERSION = "v2"
 #: 校验层(观测/快照/编译期/入队门控)有统一判据。
 USER_FACTOR_PREFIX = "u_"
 
+#: 平台预置因子名前缀(issue #398)。``finboard_backtest.factors.predefined``
+#: 目录注册的平台因子经 factor_series 通道产出序列,以 ``p_`` 前缀
+#: (platform)与用户因子 ``u_`` 对称、与内置快照目录隔离——同一判据风格。
+PREDEFINED_FACTOR_PREFIX = "p_"
+
+#: research_code 产物的 kind 白名单值(#217 用户因子 / #398 预置因子)。
+USER_FACTOR_KIND = "factor"
+PREDEFINED_FACTOR_KIND = "predefined_factor"
+
 
 def is_user_factor_name(name: str) -> bool:
     """是否为沙箱用户自定义因子名(``u_`` 前缀,#217)。"""
@@ -39,6 +48,31 @@ def sandbox_factor_name(artifact_name: str) -> str:
     if is_user_factor_name(artifact_name):
         return artifact_name
     return USER_FACTOR_PREFIX + artifact_name
+
+
+def is_predefined_factor_name(name: str) -> bool:
+    """是否为平台预置因子名(``p_`` 前缀,#398)。"""
+    return name.startswith(PREDEFINED_FACTOR_PREFIX)
+
+
+def predefined_factor_name(artifact_name: str) -> str:
+    """预置因子目录名 → 可引用的因子名(统一加 ``p_`` 前缀)。"""
+    if is_predefined_factor_name(artifact_name):
+        return artifact_name
+    return PREDEFINED_FACTOR_PREFIX + artifact_name
+
+
+def series_factor_name(kind: str, code_artifact: str) -> str:
+    """factor series 工件 (kind, code_artifact) → 可引用因子名(#398)。
+
+    ``kind=predefined_factor`` → ``p_<artifact>``;其余(含 ``factor``)
+    → ``u_<artifact>``(既有语义,用户因子路径零变化)。``research_factor_series``
+    的消费端(冻结加载器 / 入队覆盖集合 / manifest capabilities)统一经
+    本函数派生因子名,不再假设 u_ 单一前缀。
+    """
+    if kind == PREDEFINED_FACTOR_KIND:
+        return predefined_factor_name(code_artifact)
+    return sandbox_factor_name(code_artifact)
 
 
 class FactorRole(StrEnum):
@@ -1296,6 +1330,9 @@ def _optional_text(value: object) -> str | None:
 __all__ = [
     "FACTOR_LAB_CATALOG",
     "FACTOR_LAB_SCHEMA_VERSION",
+    "PREDEFINED_FACTOR_KIND",
+    "PREDEFINED_FACTOR_PREFIX",
+    "USER_FACTOR_KIND",
     "USER_FACTOR_PREFIX",
     "ArtifactIntegrityError",
     "FactorDefinition",
@@ -1319,8 +1356,11 @@ __all__ = [
     "build_feature_snapshot",
     "factor_lab_catalog",
     "get_factor_definition",
+    "is_predefined_factor_name",
     "is_user_factor_name",
     "new_factor_experiment",
+    "predefined_factor_name",
     "sandbox_factor_name",
+    "series_factor_name",
     "update_factor_experiment",
 ]
