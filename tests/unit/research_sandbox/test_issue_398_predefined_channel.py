@@ -490,6 +490,17 @@ def _patch_repos(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "finboard_persistence.FactorSeriesRepository", _FakeSeriesRepo
     )
+    # 交易日历注入(执行器 _build_spec 推导窗口决策日;单测不联网)
+    monkeypatch.setattr(
+        "finboard_data.trading_calendar.trading_days", _patched_calendar
+    )
+
+
+def _patched_calendar(start: date, end: date) -> set[date]:
+    return {
+        start + timedelta(days=k)
+        for k in range((end - start).days + 1)
+    }
 
 
 class _JobRecord:
@@ -548,12 +559,12 @@ class TestExecutorPredefinedKind:
         assert record.kind == "predefined_factor"
         assert record.code_artifact == "return_21d"
         assert record.code_commit == predefined_factor_commit("return_21d")
-        # 引擎真实产出进入了内容寻址 record(执行器按 A 股交易日历推导窗口)
-        from finboard_data.trading_calendar import trading_days
-
-        assert record.dates == tuple(
-            sorted(trading_days(date(2023, 8, 30), date(2023, 9, 4)))
+        # 引擎真实产出进入了内容寻址 record(执行器按 A 股交易日历推导
+        # 窗口;单测注入合成日历,不依赖 akshare 联网加载)
+        expected_dates = tuple(
+            sorted(_patched_calendar(date(2023, 8, 30), date(2023, 9, 4)))
         )
+        assert record.dates == expected_dates
         assert record.quality is not None
 
     async def test_sandbox_gate_skipped_but_unknown_factor_rejected(

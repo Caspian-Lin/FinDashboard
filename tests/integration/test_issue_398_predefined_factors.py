@@ -247,7 +247,11 @@ class _ExecutorSettings:
 
 class TestBuildAndConsume:
     async def test_build_audit_persist_then_enqueue(
-        self, engine: AsyncEngine, client: httpx.AsyncClient, tmp_path: Any
+        self,
+        engine: AsyncEngine,
+        client: httpx.AsyncClient,
+        tmp_path: Any,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """构建 → 审计 → 落库 → REST 入队消费(验收主链路)。"""
         async with session_factory(engine)() as session:
@@ -257,6 +261,15 @@ class TestBuildAndConsume:
 
         # ---- 真实执行器:进程内构建 + 真实审计 ----
         from finboard_backtest.research_sandbox import predefined_runner
+
+        # 交易日历注入(_build_spec 推导窗口决策日;测试不联网拉 akshare)
+        monkeypatch.setattr(
+            "finboard_data.trading_calendar.trading_days",
+            lambda start, end: {
+                start + timedelta(days=k)
+                for k in range((end - start).days + 1)
+            },
+        )
 
         async def runner(spec: FactorSeriesRunSpec) -> Any:
             return await predefined_runner.run_predefined_factor_series(
