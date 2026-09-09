@@ -1114,6 +1114,74 @@ class FactorSnapshotModel(Base, IdMixin):
     )
 
 
+class TradeCalModel(Base):
+    """A 股交易日历(按 exchange 存交易日,issue #396)。
+
+    读取口径「DB 优先,缺失回源 akshare 并回写」:交易日是公开知识,落库后
+    发布覆盖率审计 / 决策日推导不再依赖 akshare 启动期可用性。akshare
+    ``tool_trade_date_hist_sina`` 是沪深统一日历,回源按 SSE / SZSE 两行
+    写入同一天集;``is_open`` 预留非交易日行(tushare ``trade_cal`` 口径),
+    akshare 回源只产生 ``is_open=true`` 行。
+    """
+
+    __tablename__ = "trade_cal"
+
+    exchange: Mapped[str] = mapped_column(String(16), primary_key=True)
+    cal_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    is_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    source: Mapped[str] = mapped_column(String(32))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_trade_cal_open_date", "exchange", "is_open", "cal_date"),
+    )
+
+
+class ResearchSuspensionModel(Base, IdMixin):
+    """版本化的单标的停复牌记录(tushare ``suspend_d``,issue #396)。
+
+    停牌是**交易状态**不是条款事件:独立表,不入 ``instrument_lifecycle_events``。
+    ``suspend_kind`` 与缓存侧 ``TushareLifecycleEvent.event_type`` 同词表
+    (``suspension_day`` / ``intraday_suspension`` / ``resumption``),便于
+    两口径对账。PIT=当日:``available_at`` = 交易日 09:30(上海)—— 全天
+    停牌开盘即可观察,计划停复牌按生效日可见(不早于生效日看到)。
+    """
+
+    __tablename__ = "research_suspensions"
+
+    batch_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("research_sync_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(32))
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(20))
+    trade_date: Mapped[date] = mapped_column(Date)
+    suspend_type: Mapped[str] = mapped_column(String(8))
+    suspend_timing: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    suspend_kind: Mapped[str] = mapped_column(String(24))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "symbol",
+            "trade_date",
+            name="uq_research_suspension_source_version_symbol_date",
+        ),
+        Index("ix_research_suspension_symbol_date", "symbol", "trade_date"),
+        Index("ix_research_suspension_date_symbol", "trade_date", "symbol"),
+    )
+
+
 class FactorValueModel(Base, IdMixin):
     """快照内的规范化因子值与全市场/行业排名。"""
 

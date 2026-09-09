@@ -145,12 +145,18 @@ from finboard_persistence.strategy_spec_repo import (
     StrategySpecTransitionError,
     StrategySpecVersionConflictError,
 )
+from finboard_persistence.trade_calendar_repo import (
+    PRIMARY_EXCHANGE,
+    PgTradingCalendarStore,
+    TradeCalRepository,
+)
 from finboard_persistence.validation_repo import (
     ResearchExperimentRepository,
     ResearchTrialRepository,
 )
 
 __all__ = [
+    "PRIMARY_EXCHANGE",
     "AccountModel",
     "AccountRepository",
     "AuditLogModel",
@@ -202,6 +208,7 @@ __all__ = [
     "McpAuditRepository",
     "OrderModel",
     "OrderRepository",
+    "PgTradingCalendarStore",
     "PositionModel",
     "PositionRepository",
     "ReconciliationLogModel",
@@ -237,6 +244,7 @@ __all__ = [
     "ResearchRunRepository",
     "ResearchStrategySpecModel",
     "ResearchStrategySpecRepository",
+    "ResearchSuspensionModel",
     "ResearchSyncBatchModel",
     "ResearchSyncBatchRepository",
     "ResearchTrialModel",
@@ -258,6 +266,8 @@ __all__ = [
     "StrategySpecTransitionError",
     "StrategySpecVersionConflictError",
     "SyncBatchStatus",
+    "TradeCalModel",
+    "TradeCalRepository",
     "WatchlistItemModel",
     "WatchlistModel",
     "WatchlistRepository",
