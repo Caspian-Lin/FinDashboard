@@ -122,6 +122,41 @@ FINANCIAL_INDICATORS_FIELDS = (
     "revenue_yoy",
     "net_profit_yoy",
     "operating_cash_flow_yoy",
+    # ---- issue #401 批次 3:fina_indicator 白名单扩展(12 → 41 字段)----
+    # 增长(YoY / 单季 YoY / 单季 QoQ)
+    "operating_revenue_yoy",
+    "basic_eps_yoy",
+    "deducted_netprofit_yoy",
+    "operating_profit_yoy",
+    "revenue_yoy_q",
+    "revenue_qoq",
+    "netprofit_yoy_q",
+    "netprofit_qoq",
+    # 盈利质量(ROA / ROIC / 扣非 / 单季盈利 / 期间费用率)
+    "return_on_assets",
+    "return_on_assets_np",
+    "roe_deducted",
+    "roic",
+    "roe_q",
+    "return_on_assets_q",
+    "grossprofit_margin_q",
+    "netprofit_margin_q",
+    "expense_to_revenue",
+    # 营运效率(周转率族)
+    "inventory_turnover",
+    "receivables_turnover",
+    "current_assets_turnover",
+    "fixed_assets_turnover",
+    "total_assets_turnover",
+    # 流动性 / 偿债
+    "current_ratio",
+    "quick_ratio",
+    "debt_to_equity",
+    "interest_coverage",
+    "equity_multiplier",
+    # 现金流质量
+    "ocf_to_revenue",
+    "ocf_to_debt",
 )
 # issue #265:可转债派生指标冻结字段白名单。conversion_premium = 转债收盘 /
 # 转股价值 - 1;转股价值 = 100 / 转股价 x 正股收盘。underlying_symbol /
@@ -2455,7 +2490,11 @@ def _financial_indicator_from_release_row(
     *,
     symbol: str,
 ) -> FinancialIndicator:
-    """把 financial_indicators 发布行还原为领域记录(未冻结字段为 None)。"""
+    """把 financial_indicators 发布行还原为领域记录(未冻结字段为 None)。
+
+    issue #401:白名单扩展后的新字段在旧发布(冻结于扩列前)中无该键,
+    ``row.get`` 自然回退 None —— 旧发布产物只读兼容,checksum 不受影响。
+    """
     value = row.get("available_at") or row.get("observed_at")
     available_at = _coerce_datetime(value)
     announcement_date = _coerce_date(row.get("announcement_date"))
@@ -2483,6 +2522,36 @@ def _financial_indicator_from_release_row(
         revenue_yoy=_coerce_decimal(row.get("revenue_yoy")),
         net_profit_yoy=_coerce_decimal(row.get("net_profit_yoy")),
         operating_cash_flow_yoy=_coerce_decimal(row.get("operating_cash_flow_yoy")),
+        # issue #401 批次 3 扩展字段(旧发布无键 → None)
+        operating_revenue_yoy=_coerce_decimal(row.get("operating_revenue_yoy")),
+        basic_eps_yoy=_coerce_decimal(row.get("basic_eps_yoy")),
+        deducted_netprofit_yoy=_coerce_decimal(row.get("deducted_netprofit_yoy")),
+        operating_profit_yoy=_coerce_decimal(row.get("operating_profit_yoy")),
+        revenue_yoy_q=_coerce_decimal(row.get("revenue_yoy_q")),
+        revenue_qoq=_coerce_decimal(row.get("revenue_qoq")),
+        netprofit_yoy_q=_coerce_decimal(row.get("netprofit_yoy_q")),
+        netprofit_qoq=_coerce_decimal(row.get("netprofit_qoq")),
+        return_on_assets=_coerce_decimal(row.get("return_on_assets")),
+        return_on_assets_np=_coerce_decimal(row.get("return_on_assets_np")),
+        roe_deducted=_coerce_decimal(row.get("roe_deducted")),
+        roic=_coerce_decimal(row.get("roic")),
+        roe_q=_coerce_decimal(row.get("roe_q")),
+        return_on_assets_q=_coerce_decimal(row.get("return_on_assets_q")),
+        grossprofit_margin_q=_coerce_decimal(row.get("grossprofit_margin_q")),
+        netprofit_margin_q=_coerce_decimal(row.get("netprofit_margin_q")),
+        expense_to_revenue=_coerce_decimal(row.get("expense_to_revenue")),
+        inventory_turnover=_coerce_decimal(row.get("inventory_turnover")),
+        receivables_turnover=_coerce_decimal(row.get("receivables_turnover")),
+        current_assets_turnover=_coerce_decimal(row.get("current_assets_turnover")),
+        fixed_assets_turnover=_coerce_decimal(row.get("fixed_assets_turnover")),
+        total_assets_turnover=_coerce_decimal(row.get("total_assets_turnover")),
+        current_ratio=_coerce_decimal(row.get("current_ratio")),
+        quick_ratio=_coerce_decimal(row.get("quick_ratio")),
+        debt_to_equity=_coerce_decimal(row.get("debt_to_equity")),
+        interest_coverage=_coerce_decimal(row.get("interest_coverage")),
+        equity_multiplier=_coerce_decimal(row.get("equity_multiplier")),
+        ocf_to_revenue=_coerce_decimal(row.get("ocf_to_revenue")),
+        ocf_to_debt=_coerce_decimal(row.get("ocf_to_debt")),
         source=str(row.get("source") or ""),
         observed_at=available_at,
         available_at=available_at,
