@@ -2,6 +2,11 @@
 
 SDK 在显式构造 Provider 且未注入 client 时才加载。外部响应会先完整规范化,
 任意一行不满足契约都会拒绝整批结果,避免把部分坏数据伪装成有效快照。
+
+例外:``stock_basic`` / ``namechange`` 两个全市场档案接口按行解析,单行
+契约违规(如退市档案的历史前缀代码 T600018.SH、namechange 的 X19363.SH)
+跳过并具名告警,不再炸整批同步;批级护栏(截断防护、状态一致性、全部行
+被跳过)仍 fail-closed。
 """
 
 from __future__ import annotations
@@ -16,6 +21,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Protocol, cast
 from zoneinfo import ZoneInfo
+
+import structlog
 
 from finboard_data.research import (
     ConvertibleProfile,
@@ -37,6 +44,8 @@ _SYMBOL_PATTERN = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 _VALID_LIST_STATUSES = frozenset({"L", "D", "P", "G"})
 _TEN_THOUSAND = Decimal("10000")
 _ONE_HUNDRED = Decimal("100")
+
+logger = structlog.get_logger(__name__)
 
 _STOCK_BASIC_FIELDS = "ts_code,name,industry,market,exchange,list_status,list_date,delist_date"
 _DAILY_BASIC_FIELDS = (
@@ -129,7 +138,11 @@ class TushareResearchDataProvider:
         *,
         list_status: str = "L",
     ) -> list[InstrumentProfile]:
-        """读取股票档案;不把当前快照伪装成历史时点数据。"""
+        """读取股票档案;不把当前快照伪装成历史时点数据。
+
+        单行契约违规(退市档案的历史前缀代码等)跳过并具名告警
+        ``tushare.dirty_row_skipped``;截断防护与状态一致性检查仍整批拒绝。
+        """
         normalized_status = list_status.strip().upper()
         if normalized_status not in _VALID_LIST_STATUSES:
             raise ResearchDataConfigurationError("list_status 必须是 L、D、P 或 G")
@@ -141,9 +154,12 @@ class TushareResearchDataProvider:
             fields=_STOCK_BASIC_FIELDS,
         )
         _reject_possible_truncation(rows, "stock_basic", limit=6000)
-        profiles = [
-            self._parse_instrument(row, index, observed_at) for index, row in enumerate(rows)
-        ]
+        profiles = _parse_rows_skipping_dirty(
+            rows,
+            self._parse_instrument,
+            observed_at=observed_at,
+            endpoint="stock_basic",
+        )
         if any(item.list_status != normalized_status for item in profiles):
             raise ResearchDataContractError("Tushare stock_basic 返回了请求状态之外的记录")
         return sorted(profiles, key=lambda item: item.symbol)
@@ -235,7 +251,8 @@ class TushareResearchDataProvider:
         对应 ``instrument_names`` 的半开区间,供 #213 ST-PIT 按决策日取名称。
         接口单次返回有上限,按 ``offset`` 循环直到取尽,每页各自消耗限流预算;
         名称变更支持 Pit(tushare 提供的就是历史区间),``available_at`` 取本次
-        观察时间(上游无历史发布时间)。
+        观察时间(上游无历史发布时间)。单行契约违规(历史前缀代码等)跳过
+        并具名告警 ``tushare.dirty_row_skipped``,页级护栏照常生效。
         """
         observed_at = self._observed_at()
         changes: list[InstrumentNameChange] = []
@@ -250,8 +267,12 @@ class TushareResearchDataProvider:
             if not rows:
                 break
             changes.extend(
-                self._parse_name_change(row, index, observed_at)
-                for index, row in enumerate(rows)
+                _parse_rows_skipping_dirty(
+                    rows,
+                    self._parse_name_change,
+                    observed_at=observed_at,
+                    endpoint="namechange",
+                )
             )
             if len(rows) < _NAMECHANGE_PAGE_SIZE:
                 break
@@ -563,6 +584,39 @@ def _normalize_symbol(value: str) -> str:
     if not _SYMBOL_PATTERN.fullmatch(normalized):
         raise ResearchDataContractError("股票代码必须是 6 位数字并使用 .SH、.SZ 或 .BJ 后缀")
     return normalized
+
+
+def _parse_rows_skipping_dirty[T](
+    rows: Sequence[Mapping[str, object]],
+    parse: Callable[[Mapping[str, object], int, datetime], T],
+    *,
+    observed_at: datetime,
+    endpoint: str,
+) -> list[T]:
+    """逐行解析全市场档案;单行契约违规跳过并具名告警。
+
+    全市场档案(stock_basic / namechange)覆盖含历史前缀代码的退市老股
+    (T600018.SH 等),单条脏行不值得炸整批同步;但「全部行被跳过」意味
+    着上游 schema 破坏而非孤立脏数据,仍按整批拒绝处理。
+    """
+    parsed: list[T] = []
+    for index, row in enumerate(rows):
+        try:
+            parsed.append(parse(row, index, observed_at))
+        except ResearchDataContractError as exc:
+            logger.warning(
+                "tushare.dirty_row_skipped",
+                endpoint=endpoint,
+                index=index,
+                ts_code=row.get("ts_code"),
+                name=row.get("name"),
+                reason=str(exc),
+            )
+    if rows and not parsed:
+        raise ResearchDataContractError(
+            f"Tushare {endpoint} 全部 {len(rows)} 行均违反契约,疑似上游 schema 变更"
+        )
+    return parsed
 
 
 def _format_date(value: date) -> str:
