@@ -3,10 +3,12 @@
 SDK 在显式构造 Provider 且未注入 client 时才加载。外部响应会先完整规范化,
 任意一行不满足契约都会拒绝整批结果,避免把部分坏数据伪装成有效快照。
 
-例外:``stock_basic`` / ``namechange`` 两个全市场档案接口按行解析,单行
-契约违规(如退市档案的历史前缀代码 T600018.SH、namechange 的 X19363.SH)
-跳过并具名告警,不再炸整批同步;批级护栏(截断防护、状态一致性、全部行
-被跳过)仍 fail-closed。
+例外:``stock_basic`` / ``namechange`` / ``daily_basic`` 三个全市场枚举
+接口按行解析,单行契约违规(如退市档案的历史前缀代码 T600018.SH、
+namechange 的 X19363.SH)跳过并具名告警,不再炸整批同步;批级护栏
+(截断防护、状态/交易日一致性、全部行被跳过)仍 fail-closed。
+按 symbol 精确查询的接口(fina_indicator / index_member_all / cb_basic)
+响应集由入参锚定,契约违约即系统性问题,维持整批拒绝。
 """
 
 from __future__ import annotations
@@ -168,7 +170,11 @@ class TushareResearchDataProvider:
         self,
         trade_date: date,
     ) -> list[DailySecurityMetrics]:
-        """读取全市场每日指标,最早可用时间固定为交易日 17:00(上海时区)。"""
+        """读取全市场每日指标,最早可用时间固定为交易日 17:00(上海时区)。
+
+        单行契约违规(上游全市场枚举里的历史占位代码等)跳过并具名告警
+        ``tushare.dirty_row_skipped``;截断防护与交易日一致性检查仍整批拒绝。
+        """
         observed_at = self._observed_at()
         rows = await self._call(
             "daily_basic",
@@ -177,9 +183,12 @@ class TushareResearchDataProvider:
             fields=_DAILY_BASIC_FIELDS,
         )
         _reject_possible_truncation(rows, "daily_basic", limit=6000)
-        metrics = [
-            self._parse_daily_metric(row, index, observed_at) for index, row in enumerate(rows)
-        ]
+        metrics = _parse_rows_skipping_dirty(
+            rows,
+            self._parse_daily_metric,
+            observed_at=observed_at,
+            endpoint="daily_basic",
+        )
         if any(item.trade_date != trade_date for item in metrics):
             raise ResearchDataContractError("Tushare daily_basic 返回了请求交易日之外的记录")
         return sorted(metrics, key=lambda item: item.symbol)
@@ -593,11 +602,12 @@ def _parse_rows_skipping_dirty[T](
     observed_at: datetime,
     endpoint: str,
 ) -> list[T]:
-    """逐行解析全市场档案;单行契约违规跳过并具名告警。
+    """逐行解析全市场枚举响应;单行契约违规跳过并具名告警。
 
-    全市场档案(stock_basic / namechange)覆盖含历史前缀代码的退市老股
-    (T600018.SH 等),单条脏行不值得炸整批同步;但「全部行被跳过」意味
-    着上游 schema 破坏而非孤立脏数据,仍按整批拒绝处理。
+    全市场枚举接口(stock_basic / namechange / daily_basic)覆盖含历史
+    前缀代码的退市老股(T600018.SH 等),单条脏行不值得炸整批同步;但
+    「全部行被跳过」意味着上游 schema 破坏而非孤立脏数据,仍按整批拒绝
+    处理。
     """
     parsed: list[T] = []
     for index, row in enumerate(rows):

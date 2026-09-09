@@ -274,23 +274,32 @@ async def test_dataframe_shape_is_converted_without_leaking_dataframe() -> None:
         ("pb", float("inf")),
     ],
 )
-async def test_bad_row_rejects_entire_batch(field: str, bad_value: object) -> None:
+async def test_daily_bad_row_is_skipped_with_good_rows_intact(
+    field: str, bad_value: object
+) -> None:
+    """2026-09-09 口径:全市场枚举接口单行契约违规跳过,好行照常返回。"""
     client = FakeTushareClient()
     client.daily_rows = [_daily_row(), _daily_row(**{field: bad_value})]
 
-    with pytest.raises(ResearchDataContractError):
-        await _provider(client).fetch_daily_metrics(date(2026, 7, 24))
+    metrics = await _provider(client).fetch_daily_metrics(date(2026, 7, 24))
+
+    assert [item.symbol for item in metrics] == ["000001.SZ"]
 
 
 @pytest.mark.unit
 async def test_missing_upstream_field_is_actionable() -> None:
+    """按 symbol 精确查询接口维持整批拒绝:缺字段立即具名报错不静默。"""
     client = FakeTushareClient()
-    row = _daily_row()
-    del row["total_mv"]
-    client.daily_rows = [row]
+    row = _financial_row()
+    del row["eps"]
+    client.financial_rows = [row]
 
-    with pytest.raises(ResearchDataContractError, match="缺少字段: total_mv"):
-        await _provider(client).fetch_daily_metrics(date(2026, 7, 24))
+    with pytest.raises(ResearchDataContractError, match="缺少字段: eps"):
+        await _provider(client).fetch_financial_indicators(
+            "000001.SZ",
+            start_period=date(2026, 1, 1),
+            end_period=date(2026, 12, 31),
+        )
 
 
 @pytest.mark.unit
