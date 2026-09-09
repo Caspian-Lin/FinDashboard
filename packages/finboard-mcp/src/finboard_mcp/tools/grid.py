@@ -362,7 +362,7 @@ async def backtest_grid_submit(
                 entry["selection"] = combo_selection.model_dump(mode="json")
             combos.append(entry)
         checksum = _combos_checksum(combos)
-        provider_name = getattr(app.settings, "data_provider", "akshare")
+        provider_name = getattr(app.settings, "data_provider", "tushare")
 
         # 3) 网格定义 + N 个 backtest_run job 同一事务落库(全有或全无)
         async with app.session_maker() as session:

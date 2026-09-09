@@ -63,7 +63,12 @@ if TYPE_CHECKING:
     from finboard_api.schemas import BacktestRunRequest
     from finboard_app.bootstrap import KernelComponents
     from finboard_backtest.background_jobs import JobExecutorRegistry
-    from finboard_data import ResearchDatasetRelease
+    from finboard_data import (
+        AkShareProvider,
+        ResearchDatasetRelease,
+        TushareBarProvider,
+        YFinanceProvider,
+    )
     from finboard_persistence import BackgroundJobModel
     from finboard_reconcile import ReconciliationReport
     from finboard_scheduler import Scheduler
@@ -1368,6 +1373,32 @@ def data_status(
     asyncio.run(_data_status(symbol=symbol, cache_dir=cache_dir))
 
 
+def _cli_bar_provider(
+    provider_name: str,
+    *,
+    max_concurrency: int | None = None,
+    request_interval: float | None = None,
+) -> AkShareProvider | TushareBarProvider | YFinanceProvider:
+    """CLI 数据命令的行情 provider 构造(issue #393:默认主源 tushare)。
+
+    复用 executor 侧 ``build_bar_provider`` 作为单一事实源:三源路由、
+    tushare token / 预算参数读 settings,与 REST / MCP / worker 三入口
+    保持同一构造口径。``provider_name`` 解析沿用 CLI 既有 env 直读语义
+    (缺省 tushare,#393)。
+    """
+    from finboard_backtest.background_jobs.executors._providers import (
+        build_bar_provider,
+        default_settings_factory,
+    )
+
+    return build_bar_provider(
+        provider_name.strip().lower(),
+        default_settings_factory,
+        max_concurrency=max_concurrency,
+        request_interval=request_interval,
+    )
+
+
 async def _fetch_data(
     *,
     symbol: str,
@@ -1377,15 +1408,11 @@ async def _fetch_data(
 ) -> None:
     import os
 
-    from finboard_data import AkShareProvider, YFinanceProvider
     from finboard_shared.models import Symbol as Sym
     from finboard_shared.types import BarPeriod, Market
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
-    else:
-        provider = YFinanceProvider()
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
+    provider = _cli_bar_provider(provider_name)
     bars = await provider.fetch_bars(
         Sym(code=symbol, market=Market.A_SHARE),
         BarPeriod.D1,
@@ -1402,7 +1429,7 @@ async def _fetch_data(
 async def _fetch_all_data(*, config_file: str) -> None:
     import os
 
-    from finboard_data import AkShareProvider, YFinanceProvider, load_symbol_pool
+    from finboard_data import load_symbol_pool
     from finboard_data.cache import make_symbol
     from finboard_shared.types import BarPeriod
 
@@ -1418,11 +1445,8 @@ async def _fetch_all_data(*, config_file: str) -> None:
         if config.fetch_period in BarPeriod.__members__
         else BarPeriod(config.fetch_period)
     )
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
-    else:
-        provider = YFinanceProvider()
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
+    provider = _cli_bar_provider(provider_name)
     sym_objs = [make_symbol(s.code) for s in config.symbols]
 
     typer.echo(
@@ -1782,7 +1806,6 @@ async def _bulk_download(
     import os
 
     from finboard_app.config import load_settings
-    from finboard_data import AkShareProvider, YFinanceProvider
     from finboard_data.cache import make_symbol
     from finboard_persistence import InstrumentRepository, create_async_engine, session_factory
     from finboard_shared.types import BarPeriod
@@ -1806,13 +1829,8 @@ async def _bulk_download(
 
     typer.echo(f"开始批量拉取 {len(instruments)} 个标的 ({start_date} ~ today)")
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider(
-            max_concurrency=2, request_interval=0.5
-        )
-    else:
-        provider = YFinanceProvider(max_concurrency=3, request_interval=0.3)
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
+    provider = _cli_bar_provider(provider_name, max_concurrency=2, request_interval=0.5)
 
     end = date.today()
     sym_objs = [make_symbol(ins.code) for ins in instruments]
