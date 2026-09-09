@@ -84,10 +84,12 @@ class _FakeInput(PredefinedFactorInput):
         return {}
 
     def sample(
-        self, per_symbol_values: dict[str, np.ndarray]
+        self,
+        series_by_symbol: dict[str, SymbolSeries],
+        per_symbol_values: dict[str, np.ndarray],
     ) -> FactorSeriesFrame:
         return sample_series_frame(
-            self._series,
+            series_by_symbol,
             per_symbol_values,
             decision_dates=self.decision_dates,
             value_universe=self._universe,

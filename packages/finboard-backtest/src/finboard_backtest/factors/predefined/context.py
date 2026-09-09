@@ -136,9 +136,16 @@ class PredefinedFactorInput(ABC):
 
     @abstractmethod
     def sample(
-        self, per_symbol_values: Mapping[str, np.ndarray]
+        self,
+        series_by_symbol: Mapping[str, SymbolSeries],
+        per_symbol_values: Mapping[str, np.ndarray],
     ) -> FactorSeriesFrame:
-        """逐标的 1-D 因子序列 → 决策日截面帧(契约见模块 docstring)。"""
+        """逐标的 1-D 因子序列 → 决策日截面帧(契约见模块 docstring)。
+
+        ``series_by_symbol`` 是值对齐的序列轴(时序因子传 ``bars(field)``、
+        daily 因子传 ``daily_metrics(field)``);输出 universe 由引擎按
+        目录条目决定(cross_section → 可交易域)。
+        """
 
 
 def sample_series_frame(

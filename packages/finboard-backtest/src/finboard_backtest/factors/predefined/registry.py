@@ -105,7 +105,7 @@ def _momentum_return(window: int) -> PredefinedFactorCompute:
         for symbol, series in closes.items():
             base = ts_delay(series.values, window)
             per_symbol[symbol] = ts_delta(series.values, window) / base
-        return inp.sample(per_symbol)
+        return inp.sample(closes, per_symbol)
 
     return compute
 
