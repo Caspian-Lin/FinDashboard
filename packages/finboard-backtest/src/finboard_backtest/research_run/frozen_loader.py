@@ -242,6 +242,35 @@ class LoadedDecisionContext:
     research_release_missing_symbols: dict[str, tuple[str, ...]] = field(
         default_factory=dict
     )
+    # issue #396:决策日 / 执行日全天停牌标的(PIT 门控)。空集 = 无停牌
+    # 信息(research_suspensions 未同步或未接线),消费端行为与历史一致。
+    decision_suspended: frozenset[str] = field(default_factory=frozenset)
+    execution_suspended: frozenset[str] = field(default_factory=frozenset)
+
+
+class SuspensionView:
+    """停复牌记录的进程内查询视图(issue #396)。
+
+    只收录**全天停牌**(``suspend_kind="suspension_day"``)记录:盘中停牌
+    当日仍可撮合,不计入不可撮合口径;复牌记录不单独消费。查询按 PIT 门控
+    (记录 ``available_at <= visible_at``;PIT=当日,09:30 上海后可见)。
+    无停牌数据时传 ``None``(而非空视图),保持「信息缺失行为不变」。
+    """
+
+    def __init__(self, records: Sequence[tuple[date, str, datetime]]) -> None:
+        by_day: dict[date, dict[str, datetime]] = {}
+        for trade_date, symbol, available_at in records:
+            by_day.setdefault(trade_date, {})[symbol] = available_at
+        self._by_day = by_day
+
+    def suspended(self, day: date, *, visible_at: datetime) -> frozenset[str]:
+        """``day`` 全天停牌且在 ``visible_at`` 时点已可见的标的集。"""
+        rows = self._by_day.get(day)
+        if not rows:
+            return frozenset()
+        return frozenset(
+            symbol for symbol, available_at in rows.items() if available_at <= visible_at
+        )
 
 
 @dataclass(slots=True)
@@ -264,6 +293,9 @@ class FrozenInputLoader:
     # issue #360:因子序列工件读取回调;None 或 manifest 未声明 series 时
     # 加载器走纯快照路径(历史行为不变)。
     series_provider: FactorSeriesProvider | None = None
+    # issue #396:停复牌查询视图(research_suspensions,PIT 门控);None =
+    # 无停牌信息,加载结果不含停牌标注,消费端行为与历史一致。
+    suspension_view: SuspensionView | None = None
     # symbol → close 历史;``None`` 表示该标的不可安全切片(非单调数据),
     # 逐期回退读取。空映射 = 矩阵未启用(非真实 provider)。
     _close_histories: dict[str, SymbolCloseHistory | None] = field(
@@ -348,6 +380,22 @@ class FrozenInputLoader:
                     decision_at=decision_at.isoformat(),
                 )
         artifact_ids = _build_artifact_ids(manifest)
+        # issue #396:决策日 / 执行日全天停牌标的(PIT 门控;决策日按决策
+        # 时点可见,执行日按执行日日终可见——与执行价同一放宽口径)。
+        decision_suspended = (
+            self.suspension_view.suspended(
+                decision_at.date(), visible_at=decision_at
+            )
+            if self.suspension_view is not None
+            else frozenset()
+        )
+        execution_suspended = (
+            self.suspension_view.suspended(
+                execution_at.date(), visible_at=execution_at
+            )
+            if self.suspension_view is not None
+            else frozenset()
+        )
         return LoadedDecisionContext(
             business_date=decision_at.date(),
             decision_at=decision_at,
@@ -360,6 +408,8 @@ class FrozenInputLoader:
             input_artifact_ids=artifact_ids,
             included_symbols=tuple(item.symbol for item in included_candidates),
             research_release_missing_symbols=research_missing,
+            decision_suspended=decision_suspended,
+            execution_suspended=execution_suspended,
         )
 
     async def ensure_close_histories(
@@ -1201,6 +1251,7 @@ __all__ = [
     "FrozenInputLoader",
     "LoadedDecisionContext",
     "ReleaseProviderFactory",
+    "SuspensionView",
     "SymbolCloseHistory",
     "series_feature_values",
 ]

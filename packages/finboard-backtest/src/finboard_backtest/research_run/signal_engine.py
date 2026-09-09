@@ -81,6 +81,7 @@ from finboard_backtest.research_run.frozen_loader import (
     FrozenInputLoader,
     LoadedDecisionContext,
     ReleaseProviderFactory,
+    SuspensionView,
     SymbolCloseHistory,
 )
 from finboard_backtest.research_run.portfolio_pipeline import (
@@ -723,19 +724,27 @@ def _validate_calendar_contiguity(days: Sequence[date]) -> None:
             )
 
 
-async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
-    """读取发布交易日历(ready 标的等距采样并集,升序去重,fail-closed)。
+#: 交易日历 DB 优先读取回调(issue #396):返回 trade_cal 全量交易日;
+#: ``None`` = DB 无日历或读取失败(回退发布 bar 并集推导,行为不变)。
+type TradingDaysLoader = Callable[[], Awaitable[list[date] | None]]
 
-    交易日历是公开知识,用非 PIT 的 ``fetch_bars`` 读取发布全范围;决策与
-    成交发生在发布日期之后,不构成未来函数。
 
-    issue #334:不再只读第一个 ready 标的 —— RR-26e5640 事故中发布首标的
-    (000001.SZ)缓存缺 2020-07→2024-01,单标的日历让 ``_next_execution_at``
-    把全部决策的成交时点静默跳过 3.5 年空洞落到 2024-01-02。改为对 ready
-    标的等距采样(:data:`_TRADING_CALENDAR_SAMPLE_INSTRUMENTS`)取 bar 日期
-    **并集**:单标的(乃至前几只采样标的)的数据洞不再偏移日历;逐标的
-    读取失败降级具名 warning 跳过(全部失败返回空,由调用方按既有语义
-    报错)。并集后经 :func:`_validate_calendar_contiguity` 哨兵 fail-closed。
+async def _release_trading_days(
+    provider: FrozenReleaseProvider,
+    *,
+    trading_days_loader: TradingDaysLoader | None = None,
+) -> list[date]:
+    """读取发布交易日历(升序去重,fail-closed;issue #396 起 DB 优先)。
+
+    issue #396:``trade_cal`` 落库后,发布窗口内的市场交易日历优先于 bar
+    日期并集 —— 单标的(乃至采样标的集体)的数据洞不再偏移决策 / 成交
+    时点;DB 无日历或加载失败回退既有并集推导(信息缺失行为不变)。DB
+    日历按发布窗口过滤后同样过 :func:`_validate_calendar_contiguity` 间隙
+    哨兵(fail-closed 语义不放松)。
+
+    issue #334(fallback 路径):对 ready 标的等距采样(含首尾)取 bar
+    日期并集,单标的的大段数据缺失由其余采样标的补齐;逐标的读取失败降级
+    具名 warning 跳过(全部失败返回空,由调用方按既有语义报错)。
 
     issue #287:日历按 provider 进程内缓存(N 期回放此前每期重读完整
     parquet)。只对真实 ``FrozenReleaseProvider`` 启用 —— 其发布不可变、
@@ -755,6 +764,26 @@ async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
                 days=len(cached),
             )
             return cached
+
+    if trading_days_loader is not None:
+        db_days = await trading_days_loader()
+        if db_days:
+            window = [
+                day
+                for day in sorted(db_days)
+                if provider.release.start_date <= day <= provider.release.end_date
+            ]
+            if window:
+                _validate_calendar_contiguity(window)
+                logger.debug(
+                    "research_run.trading_calendar_source",
+                    source="trade_cal",
+                    release_id=provider.release.release_id,
+                    days=len(window),
+                )
+                if cacheable:
+                    _TRADING_DAYS_CACHE[provider] = window
+                return window
 
     ready = [item for item in provider.release.instruments if item.ready]
     sample = [
@@ -796,15 +825,18 @@ async def _next_execution_at(
     decision_at: datetime,
     *,
     timing: ExecutionTiming | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
 ) -> datetime:
-    """推断决策时点之后最近的交易日(发布交易日历,超限 fail-closed)。
+    """推断决策时点之后最近的交易日(#396 起 DB 优先,超限 fail-closed)。
 
     issue #336:成交时间戳按执行假设分派——``next_open`` 为该日 **09:30**
     (A 股连续竞价首时点,开盘成交),``next_close`` 为该日 **15:00**(收盘)。
     此前恒为 15:00,与规格声明的 ``timing=next_open`` 不符。``timing`` 缺省
     保持 15:00(兼容既有调用方)。
     """
-    calendar = await _release_trading_days(provider)
+    calendar = await _release_trading_days(
+        provider, trading_days_loader=trading_days_loader
+    )
     if not calendar:
         raise ValueError("发布无可用行情,无法推断成交交易日")
     fill_time = time(9, 30) if timing is ExecutionTiming.NEXT_OPEN else time(15, 0)
@@ -1066,6 +1098,8 @@ def _derive_decision_dates(
 async def _derive_schedule_decision_days(
     provider: FrozenReleaseProvider,
     schedule: DecisionSchedule,
+    *,
+    trading_days_loader: TradingDaysLoader | None = None,
 ) -> list[tuple[datetime, str | None]]:
     """从发布交易日历推导多期回放的决策时点(issue #361 泛化)。
 
@@ -1075,7 +1109,9 @@ async def _derive_schedule_decision_days(
     成交发生在决策后的下一交易日,因此发布末尾没有后续交易日的期次不产生
     决策(该期无法成交,fail-closed 语义下直接排除)。
     """
-    calendar = await _release_trading_days(provider)
+    calendar = await _release_trading_days(
+        provider, trading_days_loader=trading_days_loader
+    )
     if not calendar:
         raise ValueError("发布无可用行情,无法推导多期决策时点")
     return [
@@ -1089,13 +1125,16 @@ async def enqueue_trading_days(
     bars_release_id: str,
     bars_release_checksum: str,
     release_root: str | Path,
+    trading_days_loader: TradingDaysLoader | None = None,
 ) -> list[date]:
     """入队期读取 bars 主发布交易日历(issue #361,REST+MCP 共用)。
 
-    复用 #334 的多点采样并集日历 + 间隙哨兵(``_release_trading_days``,
-    不做新日历源);供 custom dates ⊆ 发布交易日校验与 u_ 因子 series
-    覆盖检查的决策日推导消费。发布文件不可读 / 校验失败原样上抛,由调用
-    方渲染入队错误(不吞错)。
+    复用 #334 的多点采样并集日历 + 间隙哨兵(``_release_trading_days``);
+    ``trading_days_loader``(#396,可选)提供 trade_cal DB 日历时 DB 优先。
+    供 custom dates ⊆ 发布交易日校验与 u_ 因子 series 覆盖检查的决策日推
+    导消费。发布文件不可读 / 校验失败原样上抛,由调用方渲染入队错误
+    (不吞错)。注意:未提供 loader 的调用方(现状)走 bar 并集 —— 并集
+    ⊆ 市场日历,校验方向保守(入队通过的日期执行期必然存在)。
     """
     from finboard_data.releases import FrozenReleaseProvider
 
@@ -1104,7 +1143,9 @@ async def enqueue_trading_days(
         release_id=bars_release_id,
         expected_checksum=bars_release_checksum,
     )
-    return await _release_trading_days(provider)
+    return await _release_trading_days(
+        provider, trading_days_loader=trading_days_loader
+    )
 
 
 def decision_schedule_dates_gate_error(
@@ -1433,10 +1474,14 @@ def _spec_universe_candidates(
 ) -> tuple[SpecUniverseCandidate, ...]:
     """把发布标的映射为 ``UniverseSpec`` 候选(近似字段见函数体)。
 
-    字段近似:listing_days 来自 list_date;price 来自决策日 close;停牌按
-    发布快照静态近似(suspended_sessions);``is_st`` 按发布 instruments 的
-    ``name_history`` 区间取决策日名称 PIT 判定(issue #213,无覆盖区间回退
-    当前名称近似);``market_cap`` 来自 daily_metrics 的特征观测。
+    字段近似:listing_days 来自 list_date;price 来自决策日 close;``is_st``
+    按发布 instruments 的 ``name_history`` 区间取决策日名称 PIT 判定
+    (issue #213,无覆盖区间回退当前名称近似);``market_cap`` 来自
+    daily_metrics 的特征观测。
+
+    issue #396:``suspended`` 在发布快照静态近似(``suspended_sessions``)
+    之上叠加决策日全天停牌标注(research_suspensions,PIT=当日)—— 决策
+    日停牌的标的标注不可撮合;无停牌数据时维持静态近似(信息缺失不阻塞)。
 
     ``instruments`` 由调用方按 ``explicit_symbols`` 收窄(issue #254)。
     """
@@ -1466,7 +1511,10 @@ def _spec_universe_candidates(
                 ),
                 price=price,
                 market_cap=(float(market_cap) if isinstance(market_cap, (int, float)) else None),
-                suspended=instrument.suspended_sessions > 0,
+                suspended=(
+                    instrument.suspended_sessions > 0
+                    or instrument.code in context.decision_suspended
+                ),
                 delisted=delisted,
                 is_st=is_st_at_decision(instrument, decision_date),
                 data_completeness=float(instrument.coverage_pct),
@@ -1750,6 +1798,8 @@ async def build_decision_load_contexts(
     process_workers: int = 0,
     chunk_probe: LoadChunkProbe | None = None,
     series_provider: FactorSeriesProvider | None = None,
+    suspension_view: SuspensionView | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
 ) -> tuple[DecisionLoadContext, ...]:
     """按执行模式加载全部决策的机械上下文(不含信号,issue #218)。
 
@@ -1785,11 +1835,14 @@ async def build_decision_load_contexts(
         release_provider_factory=release_provider_factory,
         snapshot_provider=snapshot_provider,
         series_provider=series_provider,
+        suspension_view=suspension_view,
     )
     schedule = resolve_decision_schedule(manifest.parameters)
 
     if schedule is not None:
-        decision_days = await _derive_schedule_decision_days(provider, schedule)
+        decision_days = await _derive_schedule_decision_days(
+            provider, schedule, trading_days_loader=trading_days_loader
+        )
         if not decision_days:
             # issue #203:区分根因 —— 日历声明已给出(multi_period)但发布日历
             # 推导不出任何决策时点,与「未声明日历缺快照」是两回事,不能混报。
@@ -1828,7 +1881,7 @@ async def build_decision_load_contexts(
     pool: PriceFeatureProcessPool | None = None
     if schedule is not None and process_workers > 0:
         pool = await _start_period_feature_pool(provider, process_workers)
-    await _release_trading_days(provider)
+    await _release_trading_days(provider, trading_days_loader=trading_days_loader)
     await loader.ensure_close_histories(manifest, process_pool=pool)
 
     async def _load_one(decision_at: datetime, snapshot_id: str | None) -> DecisionLoadContext:
@@ -1836,6 +1889,7 @@ async def build_decision_load_contexts(
             provider,
             decision_at,
             timing=manifest.strategy_spec.execution_model.timing,
+            trading_days_loader=trading_days_loader,
         )
         context = await loader.load_context(
             manifest, decision_at=decision_at, execution_at=execution_at
@@ -1886,6 +1940,9 @@ async def build_decision_load_contexts(
             & frozenset(context.execution_prices)
             & frozenset(context.lot_info)
         )
+        # issue #396:执行日全天停牌的标的不可撮合,不产出新信号(卖出由
+        # 组合管线按停牌拒单 fail-visible 处理,持仓保留)。
+        signalable -= context.execution_suspended
         price_series = await _load_price_series(
             provider,
             tuple(signalable),
@@ -1949,6 +2006,8 @@ async def build_decision_inputs(
     process_workers: int = 0,
     chunk_probe: LoadChunkProbe | None = None,
     series_provider: FactorSeriesProvider | None = None,
+    suspension_view: SuspensionView | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
 ) -> tuple[PortfolioDecisionInput, ...]:
     """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
 
@@ -1977,6 +2036,8 @@ async def build_decision_inputs(
         process_workers=process_workers,
         chunk_probe=chunk_probe,
         series_provider=series_provider,
+        suspension_view=suspension_view,
+        trading_days_loader=trading_days_loader,
     ):
         signals = await asyncio.to_thread(
             build_normalized_signals,
@@ -2000,6 +2061,7 @@ async def build_decision_inputs(
                 lot_info=loaded.context.lot_info,
                 input_artifact_ids=loaded.context.input_artifact_ids,
                 covariance=loaded.covariance,
+                suspended_symbols=loaded.context.execution_suspended,
             )
         )
     return tuple(inputs)
@@ -2085,6 +2147,9 @@ class SignalEnginePipelineAdapter:
         process_workers: int = 0,
         chunk_probe: LoadChunkProbe | None = None,
         series_provider: FactorSeriesProvider | None = None,
+        suspension_view_factory: Callable[[], Awaitable[SuspensionView | None]]
+        | None = None,
+        trading_days_loader: TradingDaysLoader | None = None,
     ) -> None:
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
             raise ValueError(
@@ -2098,6 +2163,11 @@ class SignalEnginePipelineAdapter:
         # issue #360:因子序列工件读取回调(未声明 series 的 run 为 None,
         # 加载器走纯快照路径,历史行为不变)。
         self._series_provider = series_provider
+        # issue #396:停复牌视图工厂(research_suspensions;None = 无停牌
+        # 信息,行为不变)与交易日历 DB 优先读取回调(trade_cal;None =
+        # 回退发布 bar 并集推导)。
+        self._suspension_view_factory = suspension_view_factory
+        self._trading_days_loader = trading_days_loader
         # issue #288:multi_period 逐期价格特征使用的常驻进程池 worker 数
         # (settings ``research_price_feature_process_workers``;0 = 进程内)。
         self._process_workers = max(0, process_workers)
@@ -2163,7 +2233,13 @@ class SignalEnginePipelineAdapter:
             if schedule is not None:
                 release_ref = _bars_release_ref(self._manifest, self._release_provider_factory)
                 provider = self._release_provider_factory(release_ref.artifact_id)
-                return len(await _derive_schedule_decision_days(provider, schedule))
+                return len(
+                    await _derive_schedule_decision_days(
+                        provider,
+                        schedule,
+                        trading_days_loader=self._trading_days_loader,
+                    )
+                )
             return len(await _snapshot_decision_days(self._manifest, self._snapshot_provider))
         except Exception:
             logger.warning(
@@ -2187,6 +2263,17 @@ class SignalEnginePipelineAdapter:
 
     async def _load(self) -> PortfolioPipelineAdapter:
         if self._inputs is None:
+            # issue #396:停复牌视图一次性加载(读取失败 → None,行为不变)。
+            suspension_view: SuspensionView | None = None
+            if self._suspension_view_factory is not None:
+                try:
+                    suspension_view = await self._suspension_view_factory()
+                except Exception:
+                    logger.warning(
+                        "research_run.suspension_view_unavailable",
+                        run_id=self._manifest.run_id,
+                        exc_info=True,
+                    )
             self._inputs = await build_decision_inputs(
                 self._manifest,
                 release_provider_factory=self._release_provider_factory,
@@ -2194,6 +2281,8 @@ class SignalEnginePipelineAdapter:
                 process_workers=self._process_workers,
                 chunk_probe=self._chunk_probe,
                 series_provider=self._series_provider,
+                suspension_view=suspension_view,
+                trading_days_loader=self._trading_days_loader,
             )
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
@@ -2431,6 +2520,70 @@ def build_signal_engine_adapter_factory(
         # 按 manifest.run_id 在工厂闭包内构造,与 provider memo 同生命周期。
         chunk_probe = build_run_interrupt_probe(session_maker, manifest.run_id)
 
+        # issue #396:停复牌视图 + trade_cal 日历 DB 优先回调(与 provider
+        # memo 同生命周期 = 单次 run)。两个回调都尽力而为:research_suspensions
+        # 批次不存在 / trade_cal 表不可用时返回 None,消费端行为与历史一致。
+        suspension_memo: dict[str, SuspensionView | None] = {}
+
+        async def _suspension_view_factory() -> SuspensionView | None:
+            if "view" in suspension_memo:
+                return suspension_memo["view"]
+            from finboard_persistence import ResearchDatasetRepository
+
+            view: SuspensionView | None = None
+            try:
+                release_ref = _bars_release_ref(manifest, _release_factory)
+                release = _release_factory(release_ref.artifact_id).release
+                async with session_maker() as session:
+                    records = await ResearchDatasetRepository(
+                        session
+                    ).list_suspensions_as_of(
+                        start_date=release.start_date,
+                        end_date=release.end_date,
+                        decision_at=datetime.now(UTC),
+                        source="tushare",
+                    )
+                    await session.commit()
+                view = SuspensionView(
+                    [
+                        (item.trade_date, item.symbol, item.available_at)
+                        for item in records
+                        if item.suspend_kind == "suspension_day"
+                    ]
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_run.suspension_view_unavailable",
+                    run_id=manifest.run_id,
+                    error=str(exc),
+                    message="停复牌研究数据不可用,本次 run 不做停牌标注/拒单(行为不变)",
+                )
+            suspension_memo["view"] = view
+            return view
+
+        trading_days_memo: dict[str, list[date] | None] = {}
+
+        async def _trading_days_loader() -> list[date] | None:
+            if "days" in trading_days_memo:
+                return trading_days_memo["days"]
+            from finboard_persistence import TradeCalRepository
+
+            days: list[date] | None = None
+            try:
+                async with session_maker() as session:
+                    db_days = await TradeCalRepository(session).list_trading_days()
+                    await session.commit()
+                days = sorted(db_days) or None
+            except Exception as exc:
+                logger.warning(
+                    "research_run.trade_cal_unavailable",
+                    run_id=manifest.run_id,
+                    error=str(exc),
+                    message="trade_cal 日历不可用,发布交易日回退 bar 并集推导(行为不变)",
+                )
+            trading_days_memo["days"] = days
+            return days
+
         if manifest.strategy_kind == "user_code":
             from finboard_backtest.research_run.user_code_engine import (
                 UserCodeStrategyAdapter,
@@ -2464,6 +2617,8 @@ def build_signal_engine_adapter_factory(
             process_workers=_resolve_period_feature_process_workers(settings_factory),
             chunk_probe=chunk_probe,
             series_provider=_series_provider,  # type: ignore[arg-type]
+            suspension_view_factory=_suspension_view_factory,
+            trading_days_loader=_trading_days_loader,
         )
 
     return _factory
@@ -2474,6 +2629,7 @@ __all__ = [
     "DecisionLoadContext",
     "LoadChunkProbe",
     "SignalEnginePipelineAdapter",
+    "TradingDaysLoader",
     "build_daily_equity_curve",
     "build_decision_inputs",
     "build_decision_load_contexts",

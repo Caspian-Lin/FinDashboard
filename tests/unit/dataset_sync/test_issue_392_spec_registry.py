@@ -21,26 +21,30 @@ pytestmark = pytest.mark.unit
 
 
 class TestRegistry:
-    def test_builtin_six_datasets_registered(self) -> None:
+    def test_builtin_seven_datasets_registered(self) -> None:
+        # #396:第七集 suspensions(停复牌,DAILY_MARKET)注册。
         assert SYNC_SPECS.names == frozenset(
             {
                 "profiles",
                 "name_changes",
                 "convertible_profiles",
                 "daily_metrics",
+                "suspensions",
                 "financial_indicators",
                 "industry_memberships",
             }
         )
 
     def test_declaration_order_is_default_execution_order(self) -> None:
-        # 与旧路径编排顺序一致(profiles → name_changes → convertible →
-        # daily → financial → industry),golden 依赖此序。
+        # 编排顺序:旧六集保持原相对序(profiles → name_changes →
+        # convertible → daily → financial → industry,golden 依赖此序),
+        # #396 suspensions 插在 daily_metrics 之后。
         assert SYNC_SPECS.default_names() == (
             "profiles",
             "name_changes",
             "convertible_profiles",
             "daily_metrics",
+            "suspensions",
             "financial_indicators",
             "industry_memberships",
         )

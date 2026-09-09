@@ -355,3 +355,43 @@ SELECT code, name, exchange FROM instruments WHERE instrument_type = 'futures';
 端到端回归:`tests/integration/test_futures_chain.py`(受控登记 → mock
 futures_main_sina → 缓存 → BARS 发布 → 真实 FrozenReleaseProvider 读回;
 主连 / 合约语义守卫)。
+
+## 交易日历落库与停复牌数据集(#396)
+
+### trade_cal 交易日历(免费接口口径)
+
+交易日历读取口径为「DB 优先,缺失回源 akshare 并回写」:
+
+* PG `trade_cal` 表按 exchange 存交易日(akshare `tool_trade_date_hist_sina`
+  为沪深统一日历,回源按 SSE / SZSE 两行集写入同一天集,幂等 upsert);
+* 异步执行域(数据集发布覆盖率审计、factor_series_build 决策日推导)入口
+  调 `ensure_calendar_loaded()`:进程缓存 → PG → 空/过期(跨年)回源
+  akshare 并回写 → exchange_calendars 兜底;全部失败缓存空集,消费方按
+  `TradingCalendarError` 收口;
+* composition root(`build_kernel_components`)安装
+  `PgTradingCalendarStore`,未安装(纯同步消费、测试)时走历史同步路径,
+  行为不变;
+* research_run 发布交易日(`#334` 并集日历)切换为 DB 优先:trade_cal 有
+  日历 → 按发布窗口过滤 + `#334` 间隙哨兵 fail-closed;DB 无日历回退既有
+  bar 并集推导(信息缺失行为不变)。
+
+对账基线(2026-09-09):akshare 现拉 8797 天(1990-12-19 → 2026-12-31)
+与 `trade_cal`(SSE)逐日一致,差集为空。
+
+### research_suspensions 停复牌数据集(dataset_sync 第七集)
+
+* 入队:`finboard_job_enqueue(kind=dataset_sync,
+  payload={datasets: ["suspensions"], start_date, end_date})`;DAILY_MARKET
+  形态按工作日切片(非交易日上游空响应不产生批次行),dataset_version =
+  `suspensions:<trade_date>`,行级跳过口径(`tushare.dirty_row_skipped`);
+* 落点:`research_suspensions`(独立表——停牌是交易状态不是条款事件,
+  不入 `instrument_lifecycle_events`);`suspend_kind` 词表与缓存侧
+  `TushareLifecycleEvent.event_type` 一致(`suspension_day` /
+  `intraday_suspension` / `resumption`),便于两侧对账;
+* PIT=当日:`available_at` = 交易日 09:30(上海)—— 全天停牌开盘即可
+  观察,计划停复牌按生效日可见(不早于生效日看到);
+* 消费:research_run 执行期一次性加载发布窗口内已发布停复牌记录——
+  universe 候选对决策日停牌标的标注不可撮合(叠加发布快照静态近似);
+  执行日全天停牌的标的不产出新信号、当日指令拒单(fail-visible,
+  `停牌日拒绝成交(execution_suspended)`),持仓保留至复牌;停牌数据缺失
+  时全部行为与历史一致。发布 kind 扩展(冻结 parquet)另议。

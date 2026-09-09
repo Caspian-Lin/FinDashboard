@@ -141,6 +141,7 @@ def _research_dataset_for(name: str) -> ResearchDataset | None:
         "daily_metrics": ResearchDataset.DAILY_METRICS,
         "financial_indicators": ResearchDataset.FINANCIAL_INDICATORS,
         "industry_memberships": ResearchDataset.INDUSTRY_MEMBERSHIPS,
+        "suspensions": ResearchDataset.SUSPENSIONS,
     }.get(name)
 
 

@@ -135,6 +135,7 @@ class FakeTushareClient:
         self.industry_rows = [_industry_row()]
         self.namechange_rows: list[dict[str, object]] = []
         # cb_basic 按 list_status 分桶(L=在市 / D=摘牌)。
+        self.suspend_d_rows: list[dict[str, object]] = []
         self.cb_basic_rows: dict[str, list[dict[str, object]]] = {
             "L": [_cb_basic_row()],
             "D": [
@@ -173,6 +174,10 @@ class FakeTushareClient:
     def cb_basic(self, **kwargs: str) -> object:
         self.calls.append(("cb_basic", kwargs))
         return self.cb_basic_rows.get(kwargs.get("list_status", "L"), [])
+
+    def suspend_d(self, **kwargs: str) -> object:
+        self.calls.append(("suspend_d", kwargs))
+        return self.suspend_d_rows
 
 
 def _provider(

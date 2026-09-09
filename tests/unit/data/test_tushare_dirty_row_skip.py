@@ -62,6 +62,9 @@ class _ArchiveClient:
     def cb_basic(self, **kwargs: str) -> object:
         raise AssertionError("unexpected call")
 
+    def suspend_d(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
 
 def _provider(client: _ArchiveClient) -> TushareResearchDataProvider:
     return TushareResearchDataProvider(

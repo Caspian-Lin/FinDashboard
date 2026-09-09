@@ -391,6 +391,9 @@ class FakeTushareClient:
     def cb_basic(self, **kwargs: str) -> list[dict[str, object]]:
         return _cb_basic_rows(str(kwargs["list_status"]))
 
+    def suspend_d(self, **kwargs: str) -> list[dict[str, object]]:
+        return []
+
 
 def _build_provider(
     client: FakeTushareClient, budget: _FakeBudget
