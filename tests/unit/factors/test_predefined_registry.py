@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -25,6 +27,7 @@ from finboard_backtest.factors.predefined.context import (
 )
 from finboard_backtest.factors.predefined.registry import (
     PREDEFINED_FACTORS,
+    PredefinedFactorDefinition,
     get_predefined_factor,
     is_registered_predefined_factor,
     predefined_factor_commit,
@@ -35,7 +38,7 @@ D0 = date(2024, 1, 2)
 
 
 def _series(
-    closes: list[float | None],
+    closes: Sequence[float | None],
     *,
     start: date = date(2023, 1, 2),
     available_hour: int = 15,
@@ -85,8 +88,8 @@ class _FakeInput(PredefinedFactorInput):
 
     def sample(
         self,
-        series_by_symbol: dict[str, SymbolSeries],
-        per_symbol_values: dict[str, np.ndarray],
+        series_by_symbol: Mapping[str, SymbolSeries],
+        per_symbol_values: Mapping[str, np.ndarray],
     ) -> FactorSeriesFrame:
         return sample_series_frame(
             series_by_symbol,
@@ -269,10 +272,12 @@ class TestReturn21dCompute:
         assert "000300.SH" not in frame_cs[decision_dates[0]]
 
 
-def replace_definition(item: object, **changes: object) -> object:
+def replace_definition(
+    item: PredefinedFactorDefinition, **changes: Any
+) -> PredefinedFactorDefinition:
     from dataclasses import replace
 
-    return replace(item, **changes)  # type: ignore[arg-type]
+    return replace(item, **changes)
 
 
 class TestSampleSeriesFrame:

@@ -535,14 +535,16 @@ class TestExecutorPredefinedKind:
             )
 
         executor = _executor(runner, audit)
-        executor._session_maker = _SM()
+        executor._session_maker = cast(Any, _SM())
         _patch_repos(monkeypatch)
         result = await executor.execute(
-            _JobRecord(_job()), _noop_progress
+            cast(Any, _JobRecord(_job())), cast(Any, _noop_progress)
         )
         assert result.status == "succeeded"
+        assert _FakeSeriesRepo.upserted is not None
         assert result.result_ref == _FakeSeriesRepo.upserted.series_id
         record = _FakeSeriesRepo.upserted
+        assert record is not None
         assert record.kind == "predefined_factor"
         assert record.code_artifact == "return_21d"
         assert record.code_commit == predefined_factor_commit("return_21d")
@@ -558,13 +560,14 @@ class TestExecutorPredefinedKind:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         executor = _executor(None, None)
-        executor._session_maker = _SM()
+        executor._session_maker = cast(Any, _SM())
         _patch_repos(monkeypatch)
         from finboard_backtest.background_jobs.contracts import ExecutorError
 
         with pytest.raises(ExecutorError) as exc_info:
             await executor.execute(
-                _JobRecord(_job(name="no_such_factor")), _noop_progress
+                cast(Any, _JobRecord(_job(name="no_such_factor"))),
+                cast(Any, _noop_progress),
             )
         assert exc_info.value.code == UNKNOWN_PREDEFINED_FACTOR
 
@@ -609,7 +612,8 @@ class TestExecutorPredefinedKind:
         executor = _executor(None, None)
         with pytest.raises(ExecutorError) as exc_info:
             await executor.execute(
-                _JobRecord(_job(kind="strategy", name="x")), _noop_progress
+                cast(Any, _JobRecord(_job(kind="strategy", name="x"))),
+                cast(Any, _noop_progress),
             )
         assert exc_info.value.code == "factor_series_build_kind_not_implemented"
 
@@ -637,9 +641,11 @@ class TestExecutorPredefinedKind:
             return _Outcome()
 
         executor = _executor(runner, audit)
-        executor._session_maker = _SM()
+        executor._session_maker = cast(Any, _SM())
         _patch_repos(monkeypatch)
-        result = await executor.execute(_JobRecord(_job()), _noop_progress)
+        result = await executor.execute(
+            cast(Any, _JobRecord(_job())), cast(Any, _noop_progress)
+        )
         assert result.status == "failed"
         assert result.error_code == LOOKAHEAD_DETECTED
         assert "首个分歧日期" in (result.error_summary or "")

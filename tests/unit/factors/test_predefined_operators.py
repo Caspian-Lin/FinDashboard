@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
@@ -182,7 +183,7 @@ class TestTimeseriesNanDiscipline:
         rng = np.random.default_rng(11)
         x = rng.normal(size=80)
         y = 0.3 * x + rng.normal(size=80)
-        single_series_ops = [
+        single_series_ops: list[Callable[[np.ndarray], np.ndarray]] = [
             lambda v: ts_mean(v, 12),
             lambda v: ts_std(v, 12),
             lambda v: ts_rank(v, 9),
@@ -196,7 +197,7 @@ class TestTimeseriesNanDiscipline:
             truncated = op(x[:cut])
             assert _nan_equal(full[:cut], truncated), op
         # 双序列算子:同步截断(y 与 x 等长契约)
-        pair_ops = [
+        pair_ops: list[Callable[[np.ndarray], np.ndarray]] = [
             lambda v: ts_corr(v, y[: len(v)], 15),
             lambda v: ts_cov(v, y[: len(v)], 15),
             lambda v: rolling_ols_resid(y[: len(v)], v, 15),
@@ -297,7 +298,7 @@ class TestCrossSectionOperators:
         for i, symbol in enumerate(symbols):
             assert out[symbol] == pytest.approx(expected[i])
         # 缺测成对删除
-        values_missing = dict(values)
+        values_missing: dict[str, float | None] = dict(values)
         values_missing["s0"] = None
         out2 = cs_regression_resid(values_missing, factor)
         assert out2["s0"] is None

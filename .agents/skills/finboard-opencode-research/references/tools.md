@@ -1639,6 +1639,15 @@ manifest 冻结 `{series_id, content_checksum}` 并入 `input_checksum`;
 被覆盖的 u_ 因子**跳过 multi_period 拒绝**(序列按决策日索引,不再绑定
 单一 decision_at)—— 换发布从死墙变为托管批量重建。
 
+**平台预置因子(#398)**:目录注册的因子(return_21d/63d/126d/252d
+等,实现 = finboard_backtest/factors/predefined 算子库组合)以
+kind=predefined_factor 走同一构建通道(**进程内执行,免容器**)、同一
+research_factor_series 落库,引用名 = `p_<name>`(与 u_ 对称)。
+消费规则:single_shot 引用 p_ 因子必须以 factor_series_ids 声明
+(predefined_factor_series_undeclared);multi_period 未声明则做覆盖检查
+反查(params={},预置因子构建恒无参数;predefined_factor_series_coverage_
+missing 具名拒绝 + 重建命令)。
+
 ### finboard_factor_series_build(写,入队)
 入队 `kind=factor_series_build` 后台任务(worker 并发 2;沙箱内存默认 4096MB,并发 x 4096MB 不得超 Docker Desktop 可用内存)。
 - 参数:`name: str`(因子产物名 / 预置因子目录裸名)、
