@@ -38,23 +38,6 @@ def _dataset_sync_per_symbol() -> frozenset[str]:
     )
 
 
-#: ``research_data_sync``(旧 kind,#392 起 dataset_sync 取代;常量仅为旧
-#: 执行器 / 存量测试的过渡 re-export,随旧执行器一并删除)。
-RESEARCH_DATA_SYNC_DATASETS: frozenset[str] = frozenset(
-    {
-        "profiles",
-        "name_changes",
-        "convertible_profiles",
-        "daily_metrics",
-        "financial_indicators",
-        "industry_memberships",
-    }
-)
-
-_RESEARCH_DATA_SYNC_ALLOWED_KEYS: frozenset[str] = frozenset(
-    {"datasets", "start_date", "end_date", "symbols"}
-)
-
 #: ``dataset_sync`` 合法 payload 键(issue #392):旧 research_data_sync 键集
 #: + scope 四元组(#385 过滤语义升为框架级公共参数,与 bulk_download 共享解析)。
 _DATASET_SYNC_ALLOWED_KEYS: frozenset[str] = frozenset(
@@ -215,70 +198,6 @@ def validate_dataset_sync_payload(payload: Mapping[str, Any]) -> None:
         )
 
 
-def validate_research_data_sync_payload(payload: Mapping[str, Any]) -> None:
-    """校验 ``kind=research_data_sync`` 的 payload(入队期契约,issue #260)。
-
-    * 未知键拒绝 —— ``data_types`` 类拼写错误入队即报并列出已知键,
-      不再静默忽略后按缺省全数据集执行;
-    * ``start_date`` / ``end_date`` 必填且为 ISO 日期,``start <= end``;
-    * ``datasets`` 枚举校验(缺省 = 全部五类);
-    * ``symbols`` 须为字符串列表(缺省可空);逐标的数据集在「未提供 symbols
-      且 datasets 不含 profiles」时拒绝 —— symbol 池将解析为空、任务静默零迭代。
-    """
-
-    unknown = sorted(set(payload) - _RESEARCH_DATA_SYNC_ALLOWED_KEYS)
-    if unknown:
-        raise PayloadContractError(
-            "unknown_payload_key",
-            f"未知 payload 键: {unknown};已知键: "
-            f"{sorted(_RESEARCH_DATA_SYNC_ALLOWED_KEYS)}"
-            "(常见拼写错误:data_types 不存在,数据集参数名为 datasets)",
-        )
-
-    raw_datasets = payload.get("datasets")
-    if raw_datasets is None:
-        datasets = RESEARCH_DATA_SYNC_DATASETS
-    else:
-        if not isinstance(raw_datasets, list) or not all(
-            isinstance(item, str) for item in raw_datasets
-        ):
-            raise PayloadContractError(
-                "invalid_field_value", "datasets 必须是字符串列表"
-            )
-        unknown_datasets = sorted(set(raw_datasets) - RESEARCH_DATA_SYNC_DATASETS)
-        if unknown_datasets:
-            raise PayloadContractError(
-                "invalid_field_value",
-                f"不支持的 datasets: {unknown_datasets};"
-                f" 可用: {sorted(RESEARCH_DATA_SYNC_DATASETS)}",
-            )
-        datasets = frozenset(raw_datasets)
-
-    start = _require_date(payload, "start_date")
-    end = _require_date(payload, "end_date")
-    if start > end:
-        raise PayloadContractError(
-            "invalid_field_value",
-            f"start_date({start}) 不能晚于 end_date({end})",
-        )
-
-    symbols = payload.get("symbols")
-    if symbols is not None and (
-        not isinstance(symbols, list) or not all(isinstance(i, str) for i in symbols)
-    ):
-        raise PayloadContractError("invalid_field_value", "symbols 必须是字符串列表")
-
-    per_symbol = _RESEARCH_DATA_SYNC_PER_SYMBOL & datasets
-    if per_symbol and not any(s for s in (symbols or [])) and "profiles" not in datasets:
-        raise PayloadContractError(
-            "empty_symbol_pool",
-            f"datasets 含逐标的同步 {sorted(per_symbol)} 但未提供 symbols 且"
-            " datasets 不含 profiles —— symbol 池将解析为空,任务静默零迭代;"
-            "修复:提供 symbols 列表,或把 profiles 加入 datasets(以其同步"
-            "结果作为全市场 symbol 池)",
-        )
-
-
 def validate_bulk_download_payload(payload: Mapping[str, Any]) -> None:
     """校验 ``kind=bulk_download`` 的 payload(入队期契约,issue #347)。
 
@@ -363,7 +282,6 @@ def validate_bulk_download_payload(payload: Mapping[str, Any]) -> None:
 #: kind → 入队期 payload 校验器。新 kind 在此注册即可被 REST + MCP + 执行器
 #: 重放三方共用。
 PAYLOAD_CONTRACTS: dict[str, Callable[[Mapping[str, Any]], None]] = {
-    "research_data_sync": validate_research_data_sync_payload,
     "dataset_sync": validate_dataset_sync_payload,
     "bulk_download": validate_bulk_download_payload,
 }
@@ -382,10 +300,8 @@ def validate_job_payload(kind: str, payload: Mapping[str, Any] | None) -> None:
 __all__ = [
     "BULK_DOWNLOAD_SOURCES",
     "PAYLOAD_CONTRACTS",
-    "RESEARCH_DATA_SYNC_DATASETS",
     "PayloadContractError",
     "validate_bulk_download_payload",
     "validate_dataset_sync_payload",
     "validate_job_payload",
-    "validate_research_data_sync_payload",
 ]

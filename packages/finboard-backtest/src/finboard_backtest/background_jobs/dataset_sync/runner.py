@@ -58,7 +58,6 @@ from finboard_backtest.background_jobs.dataset_sync.spec import (
     UnknownDatasetError,
     slices_for_spec,
 )
-from finboard_backtest.background_jobs.executors._runtime import code_version
 from finboard_backtest.background_jobs.payload_contracts import (
     PayloadContractError,
     validate_job_payload,
@@ -232,6 +231,9 @@ class DatasetSyncExecutor:
                 retryable=False,
             ) from exc
 
+        # 延迟导入:executors 包 __init__ 反向 re-export 本执行器,模块级
+        # import 会形成 dataset_sync ↔ executors 循环(#392)。
+        from finboard_backtest.background_jobs.executors._runtime import code_version
         from finboard_data.research import ResearchDataError
         from finboard_data.tushare_budget import TushareRequestLimitError
         from finboard_persistence.research_sync import ResearchDataSyncService

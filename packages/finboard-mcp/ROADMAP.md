@@ -293,7 +293,7 @@ strategy kind(etf_rotation 等)仍明确报 not_implemented。实现位于
 SignalRules comparator 求值 + universe 过滤 + 协方差估计),worker 侧
 `build_signal_engine_adapter_factory` 按 kind 分发。
 
-### ✅ #171 research_data_sync 任务(已完成)
+### ✅ #171 research_data_sync 任务(已完成;#392 起 kind 改名 dataset_sync)
 `finboard_job_enqueue(kind=research_data_sync)` 编排 research 数据表
 (估值 / 财务 / 行业)摄取:profiles 全量一次、daily 逐交易日、financial /
 industry 逐标的;逐标的接口接入 tushare_budget 限流,确定性 dataset_version
@@ -353,7 +353,7 @@ broker / 账户 / 订单 / 持仓;`_INSTRUCTIONS` / Skill `SKILL.md` +
 (工具契约已同步):
 
 - `release_kind=daily_metrics|financial_indicators`:从 `research_*` 表
-  (research_data_sync 摄取)冻结基本面/财务指标发布——字段白名单
+  (dataset_sync 摄取,#392 前称 research_data_sync)冻结基本面/财务指标发布——字段白名单
   (`DAILY_METRICS_FIELDS` / `FINANCIAL_INDICATORS_FIELDS`)、parquet 冻结
   (每标的按 kind 目录)、质量门(覆盖率 + 元数据完整;`all_null_fields` 仅作
   可见 warning)、同名 dataset 版本递增 `schema_version`。A 股校验要求

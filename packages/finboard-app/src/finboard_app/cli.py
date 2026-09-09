@@ -887,7 +887,7 @@ _KIND_CONCURRENCY: dict[str, int] = {
     "data_sync": 1,
     "fetch_all": 1,
     "quality_repair": 1,
-    "research_data_sync": 1,
+    "dataset_sync": 1,
     "research_code_run": 1,
     "factor_series_build": 2,
     "validation_experiment": 1,
@@ -1025,6 +1025,7 @@ def build_executor_registry(
     """
 
     from finboard_backtest.background_jobs import JobExecutorRegistry
+    from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
     from finboard_backtest.background_jobs.executors import (
         BacktestRunExecutor,
         BulkDownloadExecutor,
@@ -1036,7 +1037,6 @@ def build_executor_registry(
         FeatureSnapshotExecutor,
         QualityRepairExecutor,
         ResearchCodeRunExecutor,
-        ResearchDataSyncExecutor,
         ResearchRunExecutor,
         ValidationExperimentExecutor,
     )
@@ -1112,10 +1112,11 @@ def build_executor_registry(
             settings_factory=settings_factory,
         ),
     )
-    # issue #171:research 数据表(估值 / 财务 / 行业)摄取编排。
+    # issue #171 → #392:数据集驱动统一同步框架(SyncSpec 注册表,kind 由
+    # research_data_sync 改名 dataset_sync)。
     registry.register(
-        "research_data_sync",
-        ResearchDataSyncExecutor(
+        "dataset_sync",
+        DatasetSyncExecutor(
             session_maker=session_maker,
             settings_factory=settings_factory,
         ),

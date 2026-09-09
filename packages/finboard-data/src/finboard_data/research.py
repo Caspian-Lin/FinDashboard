@@ -151,7 +151,7 @@ class ConvertibleProfile:
     字段映射:``conversion_price`` ← ``swap_price``(当前转股价,可空);
     ``issue_date`` ← ``value_date``(起息日,转债语境下近似发行日);
     ``maturity_date`` ← ``mature_date``。评级不在 cb_basic 字段内,
-    由 akshare ``bond_zh_cov`` 债券评级列兜底(research_data_sync 合并)。
+    由 akshare ``bond_zh_cov`` 债券评级列兜底(dataset_sync 合并)。
     """
 
     symbol: str

@@ -4,7 +4,7 @@
 
 1. 固定一份**原始 tushare 行**(dict,与 SDK 返回同形,含脏行)喂给
    ``TushareResearchDataProvider``(注入 fake client / 固定预算桩 / 真实时钟作
-   ``observed_at``),经 ``ResearchDataSyncExecutor`` 全量同步 6 数据集落真实 PG;
+   ``observed_at``),经 dataset_sync 执行器全量同步 6 数据集落真实 PG;
 2. 快照全部产物表(研究数据表 / instrument_names / convertible_metadata /
    instrument_lifecycle_events / research_sync_batches)为规范化 JSON,与
    ``tests/integration/goldens/dataset_sync_392.json`` 逐值对照;
@@ -412,7 +412,7 @@ def _fake_enrichment() -> (
     async def _inner(
         *, now: object = None
     ) -> tuple[dict[str, str], list[LifecycleEvent]]:
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
+        from finboard_backtest.background_jobs.dataset_sync.specs import (
             _redemption_to_lifecycle_event,
         )
 
@@ -442,7 +442,7 @@ def _fake_enrichment() -> (
     return _inner
 
 
-def _job(*, kind: str = "research_data_sync") -> JobRecord:
+def _job(*, kind: str = "dataset_sync") -> JobRecord:
     return JobRecord(
         job_id="BJ-GOLDEN392",
         kind=kind,
@@ -548,58 +548,6 @@ def _compare_with_golden(section: str, snapshot: dict[str, list[dict[str, object
 # ---- 场景执行 ----------------------------------------------------------------
 
 
-async def _run_old_all_six(engine: AsyncEngine, client: FakeTushareClient, budget: _FakeBudget) -> None:
-    """旧路径:ResearchDataSyncExecutor 全量同步 6 数据集。"""
-
-    from finboard_backtest.background_jobs.executors import research_data_sync as legacy_module
-    from finboard_backtest.background_jobs.executors.research_data_sync import (
-        ResearchDataSyncExecutor,
-    )
-
-    executor = ResearchDataSyncExecutor(
-        session_maker=session_factory(engine),
-        provider_factory=lambda: _build_provider(client, budget),
-    )
-    original = legacy_module._fetch_convertible_enrichment
-    legacy_module._fetch_convertible_enrichment = _fake_enrichment()  # type: ignore[assignment]
-    try:
-        result = await executor.execute(_job(), _noop_progress)
-    finally:
-        legacy_module._fetch_convertible_enrichment = original
-    assert result.status == "succeeded"
-
-
-async def _run_old_upstream_failure(engine: AsyncEngine) -> tuple[_FakeBudget, object]:
-    """旧路径:financial_indicators 对 600000.SH 上游失败(固死点记账)。"""
-
-    from finboard_backtest.background_jobs.contracts import ExecutorError
-    from finboard_backtest.background_jobs.executors import research_data_sync as legacy_module
-    from finboard_backtest.background_jobs.executors.research_data_sync import (
-        ResearchDataSyncExecutor,
-    )
-
-    client = FakeTushareClient(fail_financial_symbol="600000.SH")
-    budget = _FakeBudget()
-    executor = ResearchDataSyncExecutor(
-        session_maker=session_factory(engine),
-        provider_factory=lambda: _build_provider(client, budget),
-    )
-    original = legacy_module._fetch_convertible_enrichment
-    legacy_module._fetch_convertible_enrichment = _fake_enrichment()  # type: ignore[assignment]
-    try:
-        error: ExecutorError | None = None
-        try:
-            await executor.execute(_job(), _noop_progress)
-        except ExecutorError as exc:
-            error = exc
-    finally:
-        legacy_module._fetch_convertible_enrichment = original
-    assert error is not None
-    assert error.code == "research_data_upstream"
-    assert error.retryable is True
-    return budget, error
-
-
 async def _run_new_all_six(engine: AsyncEngine, client: FakeTushareClient, budget: _FakeBudget) -> None:
     """新路径:dataset_sync 框架(SyncSpec)全量同步 6 数据集。"""
 
@@ -651,23 +599,25 @@ async def _run_new_upstream_failure(engine: AsyncEngine) -> _FakeBudget:
 # ---- tests -------------------------------------------------------------------
 
 
-class TestGoldenOldPathAllSix:
-    async def test_products_match_golden(
+class TestGoldenDatasetSync:
+    """dataset_sync 框架产物对 golden fixture 逐值对照。
+
+    fixture 由迁移前的旧 ``research_data_sync`` 路径落定;框架迁移时以
+    新旧双跑逐字节等值验收,旧路径删除后本类即新路径回归(语义锚点防
+    fixture 自证)。
+    """
+
+    async def test_all_six_products_match_golden(
         self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("FINBOARD_CODE_VERSION", "golden392")
         client = FakeTushareClient()
         budget = _FakeBudget()
-        await _run_old_all_six(engine, client, budget)
-
-        # 预算共享计数:stock_basic x2 + namechange x1 + daily_basic x2 +
-        # fina_indicator x2 + index_member_all x2 + cb_basic x2 = 11。
+        await _run_new_all_six(engine, client, budget)
+        # 预算共享计数与旧路径一致(provider 调用次数不变)。
         assert budget.acquires == 11
 
         snapshot = await _snapshot(engine, tables=_SNAPSHOT_TABLES)
-        # 显式语义锚点(防 golden 自证):批次全部 published;脏行被跳过;
-        # daily available_at 为交易日 17:00 上海时区;强赎事件 available_at
-        # 不早于生效日。
         batch_status = {
             (row["dataset"], row["dataset_version"]): row["status"]
             for row in snapshot["research_sync_batches"]
@@ -689,53 +639,7 @@ class TestGoldenOldPathAllSix:
         assert len(snapshot["instrument_lifecycle_events"]) == 2
         _compare_with_golden("all_six", snapshot)
 
-
-class TestGoldenOldPathUpstreamFailure:
-    async def test_failure_accounting_matches_golden(
-        self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("FINBOARD_CODE_VERSION", "golden392")
-        _budget, _error = await _run_old_upstream_failure(engine)
-
-        snapshot = await _snapshot(engine, tables=(ResearchSyncBatchModel,))
-        # 已发布切片保留;失败切片以 dataset_version 定位死点。
-        statuses = {row["status"] for row in snapshot["research_sync_batches"]}
-        assert "published" in statuses
-        failed = [
-            row
-            for row in snapshot["research_sync_batches"]
-            if row["status"] == "failed"
-        ]
-        assert len(failed) == 1
-        assert failed[0]["dataset_version"] == (
-            f"financial:600000.SH:{START_DATE.isoformat()}:{END_DATE.isoformat()}"
-        )
-        _compare_with_golden("upstream_failure", snapshot)
-
-
-class TestGoldenNewPathEquivalence:
-    """dataset_sync 框架(SyncSpec)与旧路径产物逐值等值(同一批 mock)。"""
-
-    async def test_all_six_products_identical(
-        self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("FINBOARD_CODE_VERSION", "golden392")
-        client = FakeTushareClient()
-        budget = _FakeBudget()
-        await _run_new_all_six(engine, client, budget)
-        # 预算共享计数与旧路径一致(provider 调用次数不变)。
-        assert budget.acquires == 11
-
-        snapshot = await _snapshot(engine, tables=_SNAPSHOT_TABLES)
-        batch_status = {
-            (row["dataset"], row["dataset_version"]): row["status"]
-            for row in snapshot["research_sync_batches"]
-        }
-        assert set(batch_status.values()) == {"published"}
-        assert len(snapshot["research_instrument_profiles"]) == 3  # 脏行已跳过
-        _compare_with_golden("all_six", snapshot)
-
-    async def test_upstream_failure_accounting_identical(
+    async def test_upstream_failure_accounting_matches_golden(
         self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("FINBOARD_CODE_VERSION", "golden392")

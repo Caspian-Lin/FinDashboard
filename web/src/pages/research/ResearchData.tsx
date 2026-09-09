@@ -179,8 +179,8 @@ const RESEARCH_KIND_META: Record<ResearchReleaseKind, ResearchKindInfo> = {
     icon: LineChart,
     title: { zh: "每日指标", en: "Daily metrics" },
     summary: {
-      zh: "每日截面指标（估值、换手、市值等），由 research_data_sync 从 tushare 摄取进 research_daily_metrics 表；发布把字段白名单冻结为逐标的 parquet，是 pb / market_cap / turnover_rate 等基本面因子的数据上游。",
-      en: "Daily cross-sectional metrics (valuation, turnover, market cap, etc.) ingested from tushare into the research_daily_metrics table by research_data_sync; publishing freezes the field whitelist into per-symbol parquet, feeding fundamental factors like pb / market_cap / turnover_rate.",
+      zh: "每日截面指标（估值、换手、市值等），由 dataset_sync 从 tushare 摄取进 research_daily_metrics 表；发布把字段白名单冻结为逐标的 parquet，是 pb / market_cap / turnover_rate 等基本面因子的数据上游。",
+      en: "Daily cross-sectional metrics (valuation, turnover, market cap, etc.) ingested from tushare into the research_daily_metrics table by dataset_sync; publishing freezes the field whitelist into per-symbol parquet, feeding fundamental factors like pb / market_cap / turnover_rate.",
     },
     fields: [
       "pe_ttm",
@@ -200,7 +200,7 @@ const RESEARCH_KIND_META: Record<ResearchReleaseKind, ResearchKindInfo> = {
     icon: Landmark,
     title: { zh: "财务指标", en: "Financial indicators" },
     summary: {
-      zh: "财报截面指标（盈利能力、杠杆、成长），按报告期 + 公告日由 research_data_sync 从 tushare 摄取进 research_financial_indicators 表；发布冻结为逐标的 parquet，供 ROE / 毛利率 / 营收同比等因子取数。",
+      zh: "财报截面指标（盈利能力、杠杆、成长），按报告期 + 公告日由 dataset_sync 从 tushare 摄取进 research_financial_indicators 表；发布冻结为逐标的 parquet，供 ROE / 毛利率 / 营收同比等因子取数。",
       en: "Cross-sectional report metrics (profitability, leverage, growth) ingested from tushare by report period plus announcement date into the research_financial_indicators table; publishing freezes per-symbol parquet for factors like ROE / gross margin / revenue YoY.",
     },
     fields: [
@@ -221,8 +221,8 @@ const RESEARCH_KIND_META: Record<ResearchReleaseKind, ResearchKindInfo> = {
     icon: Repeat,
     title: { zh: "可转债", en: "Convertible bonds" },
     summary: {
-      zh: "可转债派生指标：转股价值 = 100 / 转股价 × 正股收盘，转股溢价率 = 转债收盘 / 转股价值 − 1。发布时从本地缓存 bars × 冻结转股价元数据（cb_basic 快照）计算；条款元数据由 research_data_sync 的 convertible_profiles 回填，缺失时先跑同步。",
-      en: "Derived convertible metrics: conversion value = 100 / conversion price × underlying close; conversion premium = bond close / conversion value − 1. Computed at publish time from local cached bars × frozen conversion-price metadata (cb_basic snapshot); terms metadata is backfilled by the convertible_profiles dataset of research_data_sync — run the sync first if missing.",
+      zh: "可转债派生指标：转股价值 = 100 / 转股价 × 正股收盘，转股溢价率 = 转债收盘 / 转股价值 − 1。发布时从本地缓存 bars × 冻结转股价元数据（cb_basic 快照）计算；条款元数据由 dataset_sync 的 convertible_profiles 回填，缺失时先跑同步。",
+      en: "Derived convertible metrics: conversion value = 100 / conversion price × underlying close; conversion premium = bond close / conversion value − 1. Computed at publish time from local cached bars × frozen conversion-price metadata (cb_basic snapshot); terms metadata is backfilled by the convertible_profiles dataset of dataset_sync — run the sync first if missing.",
     },
     fields: [
       "close",
@@ -948,7 +948,7 @@ function ReleasePublisher({
   };
   const toggleSymbol = (item: CachedDataStatus) => {
     // 除 multi_asset_mixed 外全部要求缓存来源为 tushare(研究数据来自
-    // research_data_sync 的 tushare 摄取,转债 bars 亦为 tushare cb_daily)。
+    // dataset_sync 的 tushare 摄取,转债 bars 亦为 tushare cb_daily)。
     if (releaseKind !== "multi_asset_mixed" && item.source !== "tushare") {
       return;
     }
@@ -1222,8 +1222,8 @@ function ReleasePublisher({
                 : releaseKind === "multi_asset_mixed"
                   ? tl({ zh: "混合来源：逐标的记录实际来源", en: "Mixed sources: actual source recorded per symbol" })
                   : tl({
-                      zh: "固定单源：tushare（研究数据来自 research_data_sync 摄取）",
-                      en: "Fixed single source: tushare (research data ingested by research_data_sync)",
+                      zh: "固定单源：tushare（研究数据来自 dataset_sync 摄取）",
+                      en: "Fixed single source: tushare (research data ingested by dataset_sync)",
                     })}
             </div>
           </div>
@@ -1312,8 +1312,8 @@ function ReleasePublisher({
             <AlertTitle>{tl({ zh: "可转债派生指标发布只接受 A 股转债", en: "Convertible metric releases accept A-share convertibles only" })}</AlertTitle>
             <AlertDescription>
               {tl({
-                zh: "发布执行时从本地缓存 bars × 冻结转股价元数据计算转股价值与转股溢价率；标的缺条款元数据（convertible_metadata_missing）时先到任务中心跑 research_data_sync 的 convertible_profiles。全市场展开只取转债标的。",
-                en: "Conversion value and premium are computed at publish time from local cached bars × frozen conversion-price metadata; when a symbol lacks terms metadata (convertible_metadata_missing), run the convertible_profiles dataset of research_data_sync in the job center first. Full-market expansion only picks convertible instruments.",
+                zh: "发布执行时从本地缓存 bars × 冻结转股价元数据计算转股价值与转股溢价率；标的缺条款元数据（convertible_metadata_missing）时先到任务中心跑 dataset_sync 的 convertible_profiles。全市场展开只取转债标的。",
+                en: "Conversion value and premium are computed at publish time from local cached bars × frozen conversion-price metadata; when a symbol lacks terms metadata (convertible_metadata_missing), run the convertible_profiles dataset of dataset_sync in the job center first. Full-market expansion only picks convertible instruments.",
               })}
             </AlertDescription>
           </Alert>
@@ -1322,8 +1322,8 @@ function ReleasePublisher({
             <AlertTitle>{tl({ zh: "研究数据发布从 research_* 表冻结，不读行情缓存", en: "Research releases freeze from research_* tables, not bar caches" })}</AlertTitle>
             <AlertDescription>
               {tl({
-                zh: "先由 research_data_sync 摄取（任务中心 kind=research_data_sync），再创建发布。只接受 A 股股票标的，source 固定 tushare，质量门阈值 0.95；建议与同区间 bars 主发布做一致性校验。",
-                en: "research_data_sync ingests the data first (job center, kind=research_data_sync), then create the release. Only A-share stocks are accepted, source is fixed to tushare, and the quality-gate threshold is 0.95; consider a consistency check against the bar release covering the same window.",
+                zh: "先由 dataset_sync 摄取（任务中心 kind=dataset_sync），再创建发布。只接受 A 股股票标的，source 固定 tushare，质量门阈值 0.95；建议与同区间 bars 主发布做一致性校验。",
+                en: "dataset_sync ingests the data first (job center, kind=dataset_sync), then create the release. Only A-share stocks are accepted, source is fixed to tushare, and the quality-gate threshold is 0.95; consider a consistency check against the bar release covering the same window.",
               })}
             </AlertDescription>
           </Alert>
@@ -1894,20 +1894,20 @@ function ResearchIngestCard({ kind }: { kind: ResearchReleaseKind }) {
     <Alert variant="info">
       <AlertTitle>
         {tl({
-          zh: "数据从哪里来？研究数据摄取（research_data_sync）",
-          en: "Where does the data come from? Research data ingest (research_data_sync)",
+          zh: "数据从哪里来？研究数据摄取（dataset_sync）",
+          en: "Where does the data come from? Research data ingest (dataset_sync)",
         })}
       </AlertTitle>
       <AlertDescription className="space-y-2">
         <p>
           {kind === "convertible_metrics"
             ? tl({
-                zh: "数据来自 research_data_sync 后台任务：转债日线随行情同步进入缓存，转股价等条款快照走 convertible_profiles 数据集；本页不直接触发联网拉取。",
-                en: "Data comes from the research_data_sync background job: convertible daily bars enter the cache via market data sync, while terms snapshots (conversion price etc.) come from the convertible_profiles dataset; this page never fetches online directly.",
+                zh: "数据来自 dataset_sync 后台任务：转债日线随行情同步进入缓存，转股价等条款快照走 convertible_profiles 数据集；本页不直接触发联网拉取。",
+                en: "Data comes from the dataset_sync background job: convertible daily bars enter the cache via market data sync, while terms snapshots (conversion price etc.) come from the convertible_profiles dataset; this page never fetches online directly.",
               })
             : tl({
-                zh: "数据来自 research_data_sync 后台任务（按数据集定时/手动摄取进 research_* 表）；本页不直接触发联网拉取。",
-                en: "Data comes from the research_data_sync background job (scheduled or manual ingestion into the research_* tables); this page never fetches online directly.",
+                zh: "数据来自 dataset_sync 后台任务（按数据集定时/手动摄取进 research_* 表）；本页不直接触发联网拉取。",
+                en: "Data comes from the dataset_sync background job (scheduled or manual ingestion into the research_* tables); this page never fetches online directly.",
               })}
         </p>
         <p>
@@ -1917,12 +1917,12 @@ function ResearchIngestCard({ kind }: { kind: ResearchReleaseKind }) {
           })}
         </p>
         <Link
-          to="/jobs?kind=research_data_sync"
+          to="/jobs?kind=dataset_sync"
           className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
         >
           {tl({
-            zh: "前往任务中心查看 research_data_sync 任务",
-            en: "Open the job center for research_data_sync jobs",
+            zh: "前往任务中心查看 dataset_sync 任务",
+            en: "Open the job center for dataset_sync jobs",
           })}
           <ArrowUpRight className="h-3.5 w-3.5" />
         </Link>
@@ -2040,8 +2040,8 @@ function DatasetTypeTab({
             icon={<Database className="h-8 w-8" />}
             title={tl({ zh: "暂无该类型发布", en: "No releases of this kind yet" })}
             description={tl({
-              zh: "先在任务中心完成 research_data_sync 摄取，再通过上方表单创建该类型的不可变发布。",
-              en: "Finish the research_data_sync ingest in the job center first, then create an immutable release of this kind with the form above.",
+              zh: "先在任务中心完成 dataset_sync 摄取，再通过上方表单创建该类型的不可变发布。",
+              en: "Finish the dataset_sync ingest in the job center first, then create an immutable release of this kind with the form above.",
             })}
           />
         )}

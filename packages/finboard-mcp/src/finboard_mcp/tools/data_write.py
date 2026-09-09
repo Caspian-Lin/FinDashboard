@@ -1217,7 +1217,7 @@ def register(mcp: MCPServer) -> None:
             "冻结基本面/财务指标发布(issue #187),与 bars 发布联合供因子快照取数。"
             "release_kind=convertible_metrics(#265)只接受 A 股转债标的,从缓存 "
             "bars x 冻结转股价元数据计算转股价值/转股溢价率冻结为带日期观测"
-            "(非全历史 PIT;元数据缺失先跑 research_data_sync 的 "
+            "(非全历史 PIT;元数据缺失先跑 dataset_sync 的 "
             "convertible_profiles)。"
             "研究数据发布建议带 baseline=同区间 bars 主发布 + fail_on_mismatch=true,"
             "标的集用 symbols_from_release 复制该 bars 主发布。"

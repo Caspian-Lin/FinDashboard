@@ -95,14 +95,14 @@ def test_extra_fields_forbidden(client: TestClient) -> None:
 # ------------------------------------------------------- issue #260 payload 契约
 
 
-def test_research_data_sync_unknown_payload_key_rejected(
+def test_dataset_sync_unknown_payload_key_rejected(
     client: TestClient,
 ) -> None:
     """反馈原样复现:data_types 是不存在的键,入队即 422 而非静默忽略后跑全量。"""
     response = client.post(
         "/api/jobs",
         json={
-            "kind": "research_data_sync",
+            "kind": "dataset_sync",
             "idempotency_key": "idem-rds-unknown-key",
             "requested_by": "tester",
             "payload": {
@@ -118,13 +118,13 @@ def test_research_data_sync_unknown_payload_key_rejected(
     assert "datasets" in detail  # 指出正确参数名
 
 
-def test_research_data_sync_missing_start_date_rejected(
+def test_dataset_sync_missing_start_date_rejected(
     client: TestClient,
 ) -> None:
     response = client.post(
         "/api/jobs",
         json={
-            "kind": "research_data_sync",
+            "kind": "dataset_sync",
             "idempotency_key": "idem-rds-no-start",
             "requested_by": "tester",
             "payload": {
@@ -137,14 +137,14 @@ def test_research_data_sync_missing_start_date_rejected(
     assert "start_date" in response.json()["detail"]
 
 
-def test_research_data_sync_empty_symbol_pool_rejected(
+def test_dataset_sync_empty_symbol_pool_rejected(
     client: TestClient,
 ) -> None:
     """逐标的数据集缺 symbols 且缺 profiles(空 symbol 池静默零迭代)入队即拒。"""
     response = client.post(
         "/api/jobs",
         json={
-            "kind": "research_data_sync",
+            "kind": "dataset_sync",
             "idempotency_key": "idem-rds-empty-pool",
             "requested_by": "tester",
             "payload": {
@@ -158,7 +158,7 @@ def test_research_data_sync_empty_symbol_pool_rejected(
     assert "symbol 池" in response.json()["detail"]
 
 
-def test_research_data_sync_valid_payload_passes(
+def test_dataset_sync_valid_payload_passes(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """合法 payload 通过契约校验并成功入队(handler 走 mock repo,不触库)。"""
@@ -170,7 +170,7 @@ def test_research_data_sync_valid_payload_passes(
     now = datetime(2026, 9, 2, tzinfo=UTC)
     row = SimpleNamespace(
         job_id="BJ-1",
-        kind="research_data_sync",
+        kind="dataset_sync",
         queue="default",
         status="queued",
         priority=0,
@@ -207,7 +207,7 @@ def test_research_data_sync_valid_payload_passes(
     response = client.post(
         "/api/jobs",
         json={
-            "kind": "research_data_sync",
+            "kind": "dataset_sync",
             "idempotency_key": "idem-rds-valid",
             "requested_by": "tester",
             "payload": {
@@ -218,7 +218,7 @@ def test_research_data_sync_valid_payload_passes(
         },
     )
     assert response.status_code == 202
-    assert response.json()["kind"] == "research_data_sync"
+    assert response.json()["kind"] == "dataset_sync"
 
 
 # ---------------------------------------------------------------- issue #221

@@ -73,7 +73,7 @@ _NAMECHANGE_FIELDS = "ts_code,name,start_date,end_date,change_reason"
 #: namechange 单次返回上限以下的安全页大小;超过一页时按 offset 循环拉全。
 _NAMECHANGE_PAGE_SIZE = 5000
 #: 可转债基础条款字段白名单(issue #265,doc_id=185)。cb_basic 无评级字段,
-#: 评级由 akshare bond_zh_cov 兜底(research_data_sync 合并);swap_price 是
+#: 评级由 akshare bond_zh_cov 兜底(dataset_sync 合并);swap_price 是
 #: **当前**转股价快照(下修史不在覆盖范围)。
 _CB_BASIC_FIELDS = (
     "ts_code,bond_full_name,bond_short_name,stock_code,stock_name,list_date,"

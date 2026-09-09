@@ -206,7 +206,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   默认小规模同步运行(返回 metrics/equity/fills;equity_mode=summary 默认降采样,full
   返回完整曲线;selection.inputs_mode 支持 research_db(默认;必需数据集批次
   未发布时入队秒级拒绝,#255——`dataset_unpublished:{dataset}` 具名,先
-  research_data_sync 摄取并发布,核验步骤见 docs/research/data-ops.md)/bars(纯价格因子,
+  dataset_sync 摄取并发布,核验步骤见 docs/research/data-ops.md)/bars(纯价格因子,
   不要求 daily_metrics)/snapshot(snapshot_ids 冻结快照观测);selection.factor_version
   仅支持 "v1"(选股规则版本;因子目录已统一收敛,选股可用因子集是
   finboard_factor_catalog 所列因子中 FACTOR_CATALOG 投影的子集,见 Skill 文档;
@@ -272,9 +272,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   job list/get(只读)、job enqueue/cancel/archive/unarchive(写)。
   复用 background_jobs 表,enqueue kind 白名单全是研究/数据/回测域
   (echo/research_run/feature_snapshot/bulk_download/dataset_publish/
-  backtest_run/data_sync/fetch_all/quality_repair/research_data_sync);
+  backtest_run/data_sync/fetch_all/quality_repair/dataset_sync);
   实盘交易内核任务不进入队列。
-  research_data_sync payload 入队期契约(#260,REST /api/jobs 与 MCP 共用):
+  dataset_sync payload 入队期契约(#392,自 #260 的 research_data_sync 改名,
+  REST /api/jobs 与 MCP 共用):
   未知键(如误把 datasets 写成 data_types)/缺 start_date|end_date/
   datasets 枚举非法/逐标的数据集(financial_indicators|industry_memberships)
   缺 symbols 且缺 profiles(空 symbol 池静默零迭代)入队即 invalid_argument,
@@ -315,7 +316,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   转债链路(#265):sync_universe 经东财一览自动登记可转债
   (instrument_type=convertible,11xxxx.SH/12xxxx.SZ);bulk_download_start
   的 convertible 走 tushare cb_daily(2000 积分档,转债/股票均放行);
-  research_data_sync 的 convertible_profiles 数据集把 cb_basic 条款快照
+  dataset_sync 的 convertible_profiles 数据集把 cb_basic 条款快照
   upsert 进 convertible_metadata(转股价/到期日,评级与集思录强赎事件走
   akshare 兜底,失败降级为 warning);发布侧新增 convertible_metrics
   (转股价值/转股溢价率 = 快照转股价 x 同日正股收盘,非全历史 PIT,

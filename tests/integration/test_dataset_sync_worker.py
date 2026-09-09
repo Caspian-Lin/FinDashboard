@@ -1,11 +1,14 @@
-"""``research_data_sync`` worker 集成测试(issue #171)。
+"""``dataset_sync`` worker 集成测试(issue #171;#392 起自 research_data_sync
+改名迁移到数据集驱动框架)。
 
 fake research provider(实现 ``ResearchDataProvider`` 协议)验证:
 
-* 四类数据集(profiles / daily_metrics / financial / industry)编排摄取,
-  batch 达到 published;
+* 六类数据集(profiles / name_changes / daily_metrics / financial /
+  industry / convertible)按 SyncSpec 编排摄取,batch 达到 published;
 * 部分失败不覆盖已发布数据,重跑补齐未发布切片(断点续跑 / 幂等);
-* 幂等重跑:已发布切片跳过。
+* 幂等重跑:已发布切片跳过;
+* scope 四元组宇宙过滤(#392):exchange/instrument_type 从 instruments 表
+  解析逐标的同步池。
 
 依赖 PostgreSQL(``FINBOARD_TEST_DB_URL``)。不连 broker / 不下实盘单。
 """
@@ -21,9 +24,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from finboard_backtest.background_jobs.contracts import JobRecord
-from finboard_backtest.background_jobs.executors.research_data_sync import (
-    ResearchDataSyncExecutor,
-)
+from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 from finboard_data.research import (
     ConvertibleProfile,
     DailySecurityMetrics,
@@ -272,7 +273,7 @@ class FakeResearchProvider:
 def _job(payload: dict[str, object]) -> JobRecord:
     return JobRecord(
         job_id="BJ-RDS01",
-        kind="research_data_sync",
+        kind="dataset_sync",
         queue="data",
         payload=payload,
         attempt=1,
@@ -290,6 +291,7 @@ def _payload(**overrides: object) -> dict[str, object]:
         "datasets": [
             "profiles",
             "name_changes",
+            "convertible_profiles",
             "daily_metrics",
             "financial_indicators",
             "industry_memberships",
@@ -302,8 +304,8 @@ def _payload(**overrides: object) -> dict[str, object]:
     return base
 
 
-def _make_executor(engine: AsyncEngine, provider: FakeResearchProvider) -> ResearchDataSyncExecutor:
-    return ResearchDataSyncExecutor(
+def _make_executor(engine: AsyncEngine, provider: FakeResearchProvider) -> DatasetSyncExecutor:
+    return DatasetSyncExecutor(
         session_maker=session_factory(engine),
         provider_factory=lambda: provider,
     )
@@ -326,7 +328,7 @@ async def _batch_rows(engine: AsyncEngine) -> list[ResearchSyncBatchModel]:
 # ---- tests ------------------------------------------------------------------
 
 
-class TestResearchDataSyncWorker:
+class TestDatasetSyncWorker:
     async def test_syncs_all_datasets(self, engine: AsyncEngine) -> None:
         provider = FakeResearchProvider(
             empty_days={date(2026, 7, 25), date(2026, 7, 26)}  # 周末无行情
