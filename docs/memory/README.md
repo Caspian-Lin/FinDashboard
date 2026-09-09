@@ -43,3 +43,5 @@
 - [Issue #261:发布标的集来源三选一完成](issue-261-release-symbol-source-done.md) — 入队期解析成具体 symbols 执行器零改动;复制 verbatim 勿加 kind 过滤;mixed scope 门要求三类型齐备是 #184 遗留;非 bars 发布有 stock-scope 检查
 - [多 worktree 并行开发:本机落地参数与坑位(#289)](multi-worktree-parallel-dev.md) — wt2 已就位(junction 共享 data_cache/data_releases + 独立库/端口);删 junction 禁 rm -rf;vite 端口/代理可环境变量覆盖
 - [Issue #385/#386:publish full_market 板块过滤 + 发布质量门口径拆分](issue-385-386-publish-board-filter-quality-gate.md) — 920 系 64.8%「异常」=代码切换史早于 list_date(lifecycle 计数混入 anomaly),非坏数据;修复后 OHLCV=anomaly 仍拒、duplicate 独立仍拒、pre/post_list 可见不拒;boards 过滤仅 full_market 生效与内联清单互斥;spec 默认 required_capabilities 含四类 ETF,单股票冒烟须显式收窄
+- [tushare 因子清单调研:内部因子路线图(待拍板)](tushare-factor-roadmap-survey-20260909.md) — 2026-09-09:202 因子 9 类全清单含公式已浏览;202≈60-70 算子组合;数据缺口三层(量价零缺口/财务扩白名单/三表+分红新数据集);factor_series 无平台内置因子入口是核心工程项;分批 0-5 方案已给用户待确认后拆 issue
+- [统一数据链路方案:拉取重构+数据类型全景+因子批次整合(待拍板)](unified-data-pipeline-plan-20260909.md) — 2026-09-09:5 拉取路径盘点;≤2000 积分全纳入(新增 suspend_d/trade_cal/三表/dividend);数据集驱动 SyncSpec 统一框架(收编 research_data_sync、删 fetch_all);因子三分形态+预置因子通道批次 0-5;四项待拍板
