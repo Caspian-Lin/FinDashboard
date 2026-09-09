@@ -39,8 +39,10 @@
   symbols_from_release(复制既有可用发布的冻结标的集,免手工维护全市场
   清单)/ full_market(instruments 全活跃标的按 kind 展开);来源缺失 /
   不可用 / 展开为空入队即 invalid_argument 具名拒绝。
-  sync_universe 自动登记基准指数(#256,instrument_type=index);
-  bulk_download_start 的 instrument_type 支持 index 走 akshare 指数日线,
+  sync_universe 自动登记 A 股三所指数(#394 起登记源为 tushare index_basic
+  全量,#256 受控表收窄为基准资格白名单;instrument_type=index,base_date
+  回填 list_date);bulk_download_start 的 instrument_type=index 默认走
+  tushare index_daily 主源(显式 source=akshare 可选回 akshare 副源,#394),
   发布 multi_asset_mixed 含指数后 research_run 基准收益可用(#184 链路闭合)。
 * #57 验证实验(#138 + #233)—— ``finboard.validation_experiment.*``:create /
   list / get / reject / add_trial / delete + run(执行入队),暴露 REST
@@ -306,10 +308,13 @@ FinBoard 研究 MCP —— 量化研究工具集
   invalid_argument)、
   data_config_get/update(调度器配置)、etf_sync(默认 dry_run)/
   etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
-  指数链路(#256):sync_universe 自动登记基准指数(instrument_type=index,
-  受控登记表含沪深300/中证500/中证1000等 9 只),bulk_download_start 的
-  instrument_type=index:akshare 走指数接口、tushare 走 index_daily
-  (#341,2000 积分档实测可调;ETF/期货仍 tushare_scope_mismatch 拒绝);
+  指数链路(#256/#394):sync_universe 自动登记指数(instrument_type=index,
+  登记源 tushare index_basic 全量、按 is_index_code 收窄 A 股三所指数;
+  BENCHMARK_INDEX_REGISTRY 白名单只裁决「谁可作 benchmark」),
+  bulk_download_start 的 instrument_type=index:默认 tushare index_daily
+  主源(原始点位;未显式声明 source 且全指数域时自动覆盖,显式
+  source=akshare 恒优先,#394;2000 积分档实测可调;ETF/期货仍
+  tushare_scope_mismatch 拒绝);
   指数进 multi_asset_mixed 发布后
   research_run 可计算真实 benchmark_return,指数本身不进候选池
   (只做基准数据,不可撮合)。

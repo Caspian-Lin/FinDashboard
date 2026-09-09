@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import TYPE_CHECKING
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_backtest.background_jobs.contracts import (
@@ -33,6 +34,8 @@ from finboard_backtest.background_jobs.payload_contracts import (
     PayloadContractError,
     validate_job_payload,
 )
+
+logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from finboard_backtest.background_jobs.executors._providers import (
@@ -170,7 +173,9 @@ class BulkDownloadExecutor:
                 context={"job_id": job.job_id, "market": market},
             )
 
-        provider_name = resolve_provider_name(source, self._settings_factory)
+        provider_name = _resolve_bulk_provider_name(
+            source, instruments, self._settings_factory, job_id=job.job_id
+        )
         _validate_tushare_scope(provider_name, instruments)
         provider = build_bar_provider(provider_name, self._settings_factory)
 
@@ -229,6 +234,41 @@ class BulkDownloadExecutor:
             ),
             progress_total=len(sym_objs),
         )
+
+
+def _resolve_bulk_provider_name(
+    source: str | None,
+    instruments: Sequence[object],
+    settings_factory: SettingsFactory,
+    *,
+    job_id: str,
+) -> str:
+    """解析批量任务行情源,叠加指数主源偏好(issue #394)。
+
+    入队 payload **显式声明** ``source`` 时一律照旧(显式选择恒优先);
+    未声明(REST/MCP 默认写空串)且筛选域**全部为指数**时,默认源覆盖为
+    tushare —— index_daily 是指数日线的结构化主源(原始点位,无复权
+    概念,#341 实测 2000 积分档可调),akshare ``index_zh_a_hist`` 降为
+    副源(可显式 ``source=akshare`` 选回)。混合域(含股票 / ETF)不
+    覆盖 —— 全局默认源的切换归 ``settings.data_provider`` 管(#404),
+    本偏好只对指数专属任务生效,避免改动股票复权口径链路。
+    """
+    provider_name = resolve_provider_name(source, settings_factory)
+    if source is not None or provider_name == "tushare" or not instruments:
+        return provider_name
+    if all(
+        getattr(ins, "instrument_type", None) == "index" for ins in instruments
+    ):
+        logger.info(
+            "bulk_download.index_source_preference",
+            job_id=job_id,
+            default_provider=provider_name,
+            resolved_provider="tushare",
+            symbols=len(instruments),
+            message="指数专属批量任务默认走 tushare index_daily(#394 主源);显式 source 可覆盖",
+        )
+        return "tushare"
+    return provider_name
 
 
 def _validate_tushare_scope(provider_name: str, instruments: Sequence[object]) -> None:

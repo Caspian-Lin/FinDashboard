@@ -97,6 +97,9 @@ class _Client:
     def cb_basic(self, **kwargs: str) -> object:
         return self._rows("cb_basic", **kwargs)
 
+    def index_basic(self, **kwargs: str) -> object:
+        return self._rows("index_basic", **kwargs)
+
 
 def _provider(client: _Client) -> TushareResearchDataProvider:
     return TushareResearchDataProvider(
