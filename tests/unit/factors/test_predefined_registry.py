@@ -65,6 +65,7 @@ class _FakeInput(PredefinedFactorInput):
         value_universe: tuple[str, ...] | None = None,
         tradable: tuple[str, ...] | None = None,
         benchmark: frozenset[str] = frozenset(),
+        financial: dict[str, dict[str, SymbolSeries]] | None = None,
     ) -> None:
         super().__init__(
             factor_name="return_21d",
@@ -75,6 +76,7 @@ class _FakeInput(PredefinedFactorInput):
         )
         self._series = series_by_symbol
         self._universe = value_universe
+        self._financial = financial or {}
 
     def bars(self, field: str = "close") -> dict[str, SymbolSeries]:
         assert field == "close"
@@ -82,6 +84,9 @@ class _FakeInput(PredefinedFactorInput):
 
     def daily_metrics(self, field: str) -> dict[str, SymbolSeries]:
         return {}
+
+    def financial_indicators(self, field: str) -> dict[str, SymbolSeries]:
+        return self._financial.get(field, {})
 
     def industry_groups(self) -> dict[str, str | None]:
         return {}
