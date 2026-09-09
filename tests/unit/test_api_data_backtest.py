@@ -272,64 +272,6 @@ class TestDataRoutes:
         assert body["job_id"] == "BJ-TESTSYNC1"
         assert body["kind"] == "data_sync"
 
-    def test_fetch_all_enqueues_fetch_all_job(
-        self, client: TestClient, app: FastAPI
-    ) -> None:
-        """fetch-all 端点迁移到统一队列:返回 202 + job_id(#144)。"""
-        from finboard_data import SymbolEntry, SymbolPoolConfig
-
-        config = SymbolPoolConfig(symbols=[SymbolEntry(code="510300.SH")])
-
-        class _FakeSession:
-            async def __aenter__(self) -> _FakeSession:
-                return self
-
-            async def __aexit__(self, *args: object) -> None:
-                pass
-
-            async def commit(self) -> None:
-                pass
-
-        app.state.session_maker = lambda: _FakeSession()
-
-        fake_row = SimpleNamespace(
-            job_id="BJ-TESTFETCH1",
-            kind="fetch_all",
-            queue="data",
-            status="queued",
-            priority=0,
-            payload={},
-            payload_checksum="x" * 64,
-            idempotency_key="fetch_all:abc:5",
-            progress_total=0,
-            progress_done=0,
-            phase=None,
-            result_ref=None,
-            error_code=None,
-            error_summary=None,
-            attempt=0,
-            max_attempts=3,
-            worker_id=None,
-            heartbeat_at=None,
-            lease_until=None,
-            requested_by="api:fetch_all",
-            created_at=datetime(2026, 8, 13, tzinfo=UTC),
-            started_at=None,
-            finished_at=None,
-            updated_at=datetime(2026, 8, 13, tzinfo=UTC),
-        )
-        with (
-            patch("finboard_data.load_symbol_pool", return_value=config),
-            patch(
-                "finboard_api.job_helpers.BackgroundJobRepository.create_or_get",
-                new=AsyncMock(return_value=(fake_row, True)),
-            ),
-        ):
-            resp = client.post("/api/data/fetch-all")
-
-        assert resp.status_code == 202
-        assert resp.json()["kind"] == "fetch_all"
-
     def test_quality_repair_enqueues_quality_repair_job(
         self, client: TestClient, app: FastAPI
     ) -> None:

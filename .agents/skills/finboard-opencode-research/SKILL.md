@@ -28,7 +28,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-当前已实现 128 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+当前已实现 127 个工具(#392 删 finboard_data_fetch_all)。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|

@@ -33,7 +33,6 @@ export const JOB_KINDS: { value: string; label: LocalizedText }[] = [
   { value: "dataset_publish", label: { zh: "数据集发布", en: "Dataset publish" } },
   { value: "backtest_run", label: { zh: "回测", en: "Backtest" } },
   { value: "data_sync", label: { zh: "数据同步", en: "Data sync" } },
-  { value: "fetch_all", label: { zh: "全量拉取", en: "Fetch all" } },
   { value: "quality_repair", label: { zh: "质量修复", en: "Quality repair" } },
   { value: "dataset_sync", label: { zh: "数据集同步", en: "Dataset sync" } },
 ];

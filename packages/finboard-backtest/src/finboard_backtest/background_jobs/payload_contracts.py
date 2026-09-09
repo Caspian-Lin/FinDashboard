@@ -205,12 +205,18 @@ def validate_bulk_download_payload(payload: Mapping[str, Any]) -> None:
     * ``source`` 白名单(akshare/tushare/yfinance,大小写不敏感,与
       ``resolve_provider_name`` 的 ``strip().lower()`` 口径一致);
       空串 / 缺省 = 回落配置默认源(#341 跟进语义);
-    * ``instrument_type`` / ``exchange`` 须为字符串,``listing_boards`` /
-      ``symbols`` 须为字符串列表(``symbols`` 空列表拒绝 —— 缺省不传 =
+    * scope 四元组(``instrument_type`` / ``exchange`` / ``listing_boards`` /
+      ``symbols``)经共享解析 ``normalize_sync_scope`` 校验归一(#392:与
+      dataset_sync 同一函数,#385 口径;``symbols`` 空列表拒绝 —— 缺省不传 =
       全池,显式空列表几乎必然是调用方笔误,fail-visible);
     * ``tushare`` x ``etf|futures`` 字面量预检(执行器基于 DB 行的
       ``tushare_scope_mismatch`` 校验保留,#341/#267 边界不变)。
     """
+
+    from finboard_backtest.background_jobs.dataset_sync.scope import (
+        ScopeValueError,
+        normalize_sync_scope,
+    )
 
     unknown = sorted(set(payload) - _BULK_DOWNLOAD_ALLOWED_KEYS)
     if unknown:
@@ -241,37 +247,26 @@ def validate_bulk_download_payload(payload: Mapping[str, Any]) -> None:
 
     _require_date(payload, "start")
 
-    instrument_type = payload.get("instrument_type")
-    if instrument_type is not None and not isinstance(instrument_type, str):
-        raise PayloadContractError(
-            "invalid_field_value", "instrument_type 必须是字符串"
+    try:
+        scope = normalize_sync_scope(
+            exchange=payload.get("exchange"),
+            listing_boards=payload.get("listing_boards"),
+            instrument_type=payload.get("instrument_type"),
+            symbols=payload.get("symbols"),
         )
-    exchange = payload.get("exchange")
-    if exchange is not None and not isinstance(exchange, str):
-        raise PayloadContractError("invalid_field_value", "exchange 必须是字符串")
-    listing_boards = payload.get("listing_boards")
-    if listing_boards is not None and (
-        not isinstance(listing_boards, list)
-        or not all(isinstance(item, str) for item in listing_boards)
-    ):
-        raise PayloadContractError(
-            "invalid_field_value", "listing_boards 必须是字符串列表"
-        )
+    except ScopeValueError as exc:
+        raise PayloadContractError("invalid_field_value", str(exc)) from exc
 
     symbols = payload.get("symbols")
-    if symbols is not None:
-        if not isinstance(symbols, list) or not all(
-            isinstance(item, str) for item in symbols
-        ):
-            raise PayloadContractError("invalid_field_value", "symbols 必须是字符串列表")
-        if not symbols:
-            raise PayloadContractError(
-                "empty_symbol_pool",
-                "symbols 不能为空列表(缺省不传 = 全池不过滤子集;"
-                "子集重跑请列出失败标的代码,如 000001.SZ)",
-            )
+    if symbols is not None and not scope.symbols:
+        # 空列表(或全空串)拒绝;缺省不传 = 全池不过滤子集。
+        raise PayloadContractError(
+            "empty_symbol_pool",
+            "symbols 不能为空列表(缺省不传 = 全池不过滤子集;"
+            "子集重跑请列出失败标的代码,如 000001.SZ)",
+        )
 
-    if source == "tushare" and instrument_type in ("etf", "futures"):
+    if source == "tushare" and scope.instrument_type in ("etf", "futures"):
         raise PayloadContractError(
             "tushare_scope_mismatch",
             "Tushare 批量任务不支持 ETF(复权口径对齐未定稿,#341)与期货"

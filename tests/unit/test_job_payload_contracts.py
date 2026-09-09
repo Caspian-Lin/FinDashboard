@@ -261,3 +261,61 @@ class TestBulkDownloadPayloadContract:
         )
         with pytest.raises(PayloadContractError):
             validate_job_payload("bulk_download", {"market": "a_share"})
+
+
+class TestBulkDownloadSharedScopeNormalization:
+    """bulk_download 与 dataset_sync 共享 scope 解析(#392,#385 口径)。
+
+    归一行为由 ``normalize_sync_scope`` 单测锁定;这里锁定契约接入:类型
+    非法仍 invalid_field_value,大小写归一后放行,空 symbols 列表拒绝。
+    """
+
+    def test_scope_type_errors_rejected(self) -> None:
+        from finboard_backtest.background_jobs.payload_contracts import (
+            validate_bulk_download_payload,
+        )
+
+        for key, value in (
+            ("exchange", ["SSE"]),
+            ("listing_boards", "star"),
+            ("instrument_type", 1),
+            ("symbols", "000001.SZ"),
+        ):
+            with pytest.raises(PayloadContractError) as exc_info:
+                validate_bulk_download_payload({**_BULK_VALID, key: value})
+            assert exc_info.value.code == "invalid_field_value"
+
+    def test_mixed_case_scope_values_pass(self) -> None:
+        from finboard_backtest.background_jobs.payload_contracts import (
+            validate_bulk_download_payload,
+        )
+
+        validate_bulk_download_payload(
+            {
+                **_BULK_VALID,
+                "exchange": " sse ",
+                "listing_boards": ["STAR"],
+                "instrument_type": " Stock ",
+                "symbols": ["000001.sz"],
+            }
+        )
+
+    def test_symbols_all_blank_rejected_as_empty(self) -> None:
+        from finboard_backtest.background_jobs.payload_contracts import (
+            validate_bulk_download_payload,
+        )
+
+        with pytest.raises(PayloadContractError) as exc_info:
+            validate_bulk_download_payload({**_BULK_VALID, "symbols": ["", " "]})
+        assert exc_info.value.code == "empty_symbol_pool"
+
+    def test_tushare_literal_precheck_uses_normalized_type(self) -> None:
+        from finboard_backtest.background_jobs.payload_contracts import (
+            validate_bulk_download_payload,
+        )
+
+        with pytest.raises(PayloadContractError) as exc_info:
+            validate_bulk_download_payload(
+                {**_BULK_VALID, "source": "tushare", "instrument_type": " ETF "}
+            )
+        assert exc_info.value.code == "tushare_scope_mismatch"

@@ -4,8 +4,9 @@
   领取 → 执行 → 状态收口的端到端链路(#142 基础设施自检)。
 * ``research_run`` —— 把 ResearchRunCoordinator 接入统一队列(#143)。
 * ``bulk_download`` / ``feature_snapshot`` / ``dataset_publish`` /
-  ``backtest_run`` / ``data_sync`` / ``fetch_all`` / ``quality_repair``
-  —— 把 7 类数据域耗时任务从内存态/同步阻塞迁移到统一队列(#144)。
+  ``backtest_run`` / ``data_sync`` / ``quality_repair`` —— 把数据域耗时任务
+  从内存态/同步阻塞迁移到统一队列(#144;``fetch_all`` 已废弃删除,#392 ——
+  symbols.yaml 池改由 ``bulk_download`` 的 ``symbols`` 参数承担)。
 * ``dataset_sync`` —— 数据集驱动统一同步框架(issue #392,自 #171 的
   ``research_data_sync`` 改名迁移;SyncSpec 注册表见
   ``background_jobs.dataset_sync``,新数据集接入指南见包 docstring)。
@@ -36,7 +37,6 @@ from finboard_backtest.background_jobs.executors.factor_series_build import (
 from finboard_backtest.background_jobs.executors.feature_snapshot import (
     FeatureSnapshotExecutor,
 )
-from finboard_backtest.background_jobs.executors.fetch_all import DataFetchAllExecutor
 from finboard_backtest.background_jobs.executors.quality_repair import (
     QualityRepairExecutor,
 )
@@ -53,7 +53,6 @@ from finboard_backtest.background_jobs.executors.validation_experiment import (
 __all__ = [
     "BacktestRunExecutor",
     "BulkDownloadExecutor",
-    "DataFetchAllExecutor",
     "DataSyncExecutor",
     "DatasetPublishExecutor",
     "DatasetSyncExecutor",

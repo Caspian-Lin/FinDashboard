@@ -88,35 +88,38 @@ class BulkDownloadExecutor:
         # resolve_provider_name 的回落链(settings 默认 → env → akshare)。
         source = source_raw or None
         start = _parse_date(job, "start")
-        instrument_type_raw = job.payload.get("instrument_type")
-        exchange = job.payload.get("exchange")
-        listing_boards = job.payload.get("listing_boards")
-        symbols_filter = job.payload.get("symbols")
-        if instrument_type_raw is not None and not isinstance(instrument_type_raw, str):
+        # scope 四元组经共享解析重放(#392,#385 口径;与 dataset_sync 同一
+        # 函数 —— 大小写归一 / 去重 / 空串丢弃,契约层已验,此处兜底旁路入队)。
+        from finboard_backtest.background_jobs.dataset_sync.scope import (
+            ScopeValueError,
+            normalize_sync_scope,
+        )
+
+        try:
+            scope = normalize_sync_scope(
+                exchange=job.payload.get("exchange"),
+                listing_boards=job.payload.get("listing_boards"),
+                instrument_type=job.payload.get("instrument_type"),
+                symbols=job.payload.get("symbols"),
+            )
+        except ScopeValueError as exc:
             raise ExecutorError(
                 code="invalid_payload",
-                summary="instrument_type 必须是字符串",
+                summary=str(exc),
+                retryable=False,
+                context={"job_id": job.job_id},
+            ) from exc
+        if job.payload.get("symbols") is not None and not scope.symbols:
+            raise ExecutorError(
+                code="invalid_payload",
+                summary="symbols 不能为空列表(缺省不传 = 全池,#347)",
                 retryable=False,
                 context={"job_id": job.job_id},
             )
-        if listing_boards is not None and not isinstance(listing_boards, list):
-            raise ExecutorError(
-                code="invalid_payload",
-                summary="listing_boards 必须是列表",
-                retryable=False,
-                context={"job_id": job.job_id},
-            )
-        if symbols_filter is not None and (
-            not isinstance(symbols_filter, list)
-            or not symbols_filter
-            or not all(isinstance(code, str) for code in symbols_filter)
-        ):
-            raise ExecutorError(
-                code="invalid_payload",
-                summary="symbols 必须是非空字符串列表(缺省不传 = 全池,#347)",
-                retryable=False,
-                context={"job_id": job.job_id},
-            )
+        instrument_type = scope.instrument_type
+        exchange = scope.exchange
+        listing_boards = list(scope.listing_boards)
+        symbols_filter = list(scope.symbols) or None
 
         from finboard_data.cache import make_symbol
         from finboard_persistence import InstrumentRepository
@@ -128,9 +131,9 @@ class BulkDownloadExecutor:
             repo = InstrumentRepository(session)
             instruments, _ = await repo.list_active(
                 market=market,
-                instrument_type=instrument_type_raw,
-                exchange=exchange if isinstance(exchange, str) else None,
-                listing_boards=listing_boards if isinstance(listing_boards, list) else None,
+                instrument_type=instrument_type,
+                exchange=exchange,
+                listing_boards=listing_boards,
                 limit=999999,
             )
             await session.commit()

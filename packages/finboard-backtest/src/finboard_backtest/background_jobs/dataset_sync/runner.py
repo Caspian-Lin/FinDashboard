@@ -20,9 +20,10 @@
   服务层跳过。
 
 scope 四元组(exchange / listing_boards / instrument_type / symbols,#385
-语义,与 bulk_download 共享同一解析):``symbols`` 显式声明 > 宇宙过滤
-(exchange/boards/type 命中 ``instruments`` 表)> profiles 同步结果(未声明
-symbols 且选中 profiles 时,旧路径口径)> 空池(逐标的数据集 fail-visible)。
+语义,与 bulk_download 共享同一解析):``symbols`` ∩ 宇宙过滤
+(exchange/boards/type 命中 ``instruments`` 表;交集空才拒)> 仅 symbols >
+profiles 同步结果(未声明 symbols / 宇宙过滤且选中 profiles 时,旧路径
+口径)> 空池(逐标的数据集 fail-visible)。
 
 错误映射(与旧路径一致):预算耗尽 → ``tushare_budget_exhausted``(retryable);
 上游数据错误 → ``research_data_upstream``(配置错误 fail-fast,其余 retryable);
@@ -245,25 +246,36 @@ class DatasetSyncExecutor:
 
         await progress(0, None, "dataset_sync:start")
 
-        # 逐标的同步池(scope 四元组框架级语义,见模块 docstring)。
+        # 逐标的同步池(scope 四元组框架级语义,与 bulk_download #347/#385
+        # 同一叠加口径):symbols ∩ 宇宙过滤(exchange/boards/type 命中
+        # ``instruments`` 表;交集空才拒,域外标的静默剔除)>
+        # 仅 symbols > profiles 同步结果兜底(未声明 symbols / 宇宙过滤且
+        # 选中 profiles 时,旧路径口径)> 空池拒绝。
         per_symbol_names = [spec.name for spec in selected if spec.is_per_symbol]
         symbol_pool = scope.symbols
-        if not symbol_pool and scope.has_universe_filters:
-            symbol_pool = await _resolve_pool_from_instruments(
-                self._session_maker, scope
+        if scope.has_universe_filters:
+            db_pool = set(
+                await _resolve_pool_from_instruments(self._session_maker, scope)
             )
+            if symbol_pool:
+                symbol_pool = tuple(
+                    symbol for symbol in symbol_pool if symbol in db_pool
+                )
+            else:
+                symbol_pool = tuple(sorted(db_pool))
             if not symbol_pool and per_symbol_names:
                 raise ExecutorError(
                     code="no_instruments",
                     summary=(
-                        "scope 宇宙过滤(exchange / listing_boards / "
-                        f"instrument_type = {scope.exchange or '-'} / "
+                        "symbols 子集与 scope 宇宙过滤交集为空(exchange / "
+                        f"listing_boards / instrument_type = "
+                        f"{scope.exchange or '-'} / "
                         f"{list(scope.listing_boards) or '-'} / "
-                        f"{scope.instrument_type or '-'})在 instruments 表"
-                        "解析为空 —— 请先同步标的(data_sync),或放宽过滤条件"
+                        f"{scope.instrument_type or '-'};标的未登记或不在过滤"
+                        "范围内)—— 请先同步标的(data_sync),或放宽过滤条件"
                     ),
                     retryable=False,
-                    context={"job_id": job.job_id},
+                    context={"job_id": job.job_id, "symbols": list(scope.symbols)},
                 )
         # profiles 结果兜底池:仅当 payload 未声明 symbols / 宇宙过滤且选中
         # profiles(旧路径口径);profiles 切片完成后回填。

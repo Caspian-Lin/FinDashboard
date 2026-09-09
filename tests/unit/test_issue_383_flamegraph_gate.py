@@ -40,7 +40,6 @@ _ALL_WORKER_KINDS = frozenset(
         "dataset_publish",
         "backtest_run",
         "data_sync",
-        "fetch_all",
         "quality_repair",
         "dataset_sync",
         "research_code_run",

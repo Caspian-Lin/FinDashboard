@@ -325,7 +325,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 同步 ETF 元数据、读写调度器配置。写操作尊重 `mcp_readonly_only` 开关。
 不连 broker / 账户 / 订单 / 持仓。
 
-任务化工具(fetch_all / sync_universe / bulk_download_start / quality_repair /
+任务化工具(sync_universe / bulk_download_start / quality_repair /
 dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 worker 消费;
 进度 / 状态 / 取消统一用 `finboard_job_get(job_id)` / `finboard_job_cancel(job_id)`
 轮询(#136)。idempotency_key 与 REST 语义端点完全一致,因此 agent 与 REST 提交
@@ -338,11 +338,8 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   fallback_source, lifecycle_events, lifecycle_sync_failed, lifecycle_sync_error}`
 - 错误:`invalid_argument`(未知行情源)/ `unavailable`(主源及备用源均不可用)
 
-### finboard_data_fetch_all **[写,任务化]**
-登记标的池批量缓存更新任务(symbols.yaml),返回 202 + `job_id`(不等待执行)。
-- 参数:无
-- 返回:`JobOut`(`kind=fetch_all`,`queue=data`)+ `created`(首次提交 true / 幂等命中 false)
-- 进度:用 `finboard_job_get(job_id)` 轮询
+(已删 `finboard_data_fetch_all`(#392):symbols.yaml 池改由
+`finboard_bulk_download_start` 的 `symbols` 参数承担,子集过滤语义一致)
 
 ### finboard_data_sync_universe **[写,任务化]**
 登记全市场标的同步任务(akshare 发现 → 写 instruments 表),返回 202 + `job_id`。
@@ -1220,8 +1217,7 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 
 `enqueue` 的 kind 白名单:`echo` / `research_run` / `feature_snapshot` /
 `bulk_download` / `dataset_publish` / `backtest_run` / `data_sync` /
-`fetch_all` / `quality_repair` / `dataset_sync`(全是研究/数据域,
-不含实盘能力)。
+`quality_repair` / `dataset_sync`(全是研究/数据域,不含实盘能力)。
 
 `dataset_sync`(issue #392,自 #171 的 research_data_sync 改名迁移;#251/#265
 扩展):数据集驱动统一同步框架(SyncSpec 注册表)编排研究数据集(档案 / 估值 /

@@ -40,7 +40,6 @@ FLAMEGRAPH_REPLAYABLE_KINDS: dict[str, str] = {
 FLAMEGRAPH_REJECTED_KINDS: dict[str, str] = {
     "bulk_download": "网络摄取:重放会重复消耗数据源配额/限流",
     "data_sync": "网络摄取:重放会重复消耗数据源配额/限流",
-    "fetch_all": "网络摄取:重放会重复消耗数据源配额/限流",
     "dataset_sync": "网络摄取:重放会重复消耗数据源配额/限流",
     "quality_repair": "重放会改写真实数据缓存文件",
     "research_code_run": "计算在一次性 Docker 容器内,py-spy 采样不到",

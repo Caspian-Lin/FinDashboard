@@ -452,3 +452,95 @@ class TestDatasetSyncWorker:
                 )
             ).scalar_one()
         assert daily_count == 4  # 未重复写入
+
+
+class TestScopeUniverseFilter:
+    """scope 四元组宇宙过滤(#392):逐标的池从 instruments 表按
+    exchange/listing_boards/instrument_type 解析(#385 语义,与 bulk_download
+    共享 normalize_sync_scope)。"""
+
+    @staticmethod
+    def _instrument(code: str, instrument_type: str, exchange: str) -> dict[str, object]:
+        return {
+            "code": code,
+            "name": f"标的-{code}",
+            "market": "a_share",
+            "instrument_type": instrument_type,
+            "exchange": exchange,
+            "listing_board": "unknown",
+            "status": "active",
+        }
+
+    async def _register(self, engine: AsyncEngine) -> None:
+        from finboard_persistence import InstrumentRepository
+
+        instruments: list[dict[str, object]] = [
+            self._instrument("000001.SZ", "stock", "SZSE"),
+            self._instrument("600000.SH", "stock", "SSE"),
+            self._instrument("510300.SH", "etf", "SSE"),
+        ]
+        async with session_factory(engine)() as session:
+            await InstrumentRepository(session).upsert_many(instruments)
+            await session.commit()
+
+    async def test_universe_filter_resolves_pool_from_instruments(
+        self, engine: AsyncEngine
+    ) -> None:
+        await self._register(engine)
+        provider = FakeResearchProvider(symbols=())
+        executor = _make_executor(engine, provider)
+        payload: dict[str, object] = {
+            "datasets": ["industry_memberships"],
+            "start_date": START_DATE.isoformat(),
+            "end_date": END_DATE.isoformat(),
+            "instrument_type": "stock",
+        }
+        result = await executor.execute(_job(payload), _noop_progress)
+
+        assert result.status == "succeeded"
+        # 逐标的池 = instruments 表 stock 过滤结果(ETF 510300.SH 被剔除)。
+        industry_calls = [c for c in provider.calls if c.startswith("industry:")]
+        assert sorted(industry_calls) == [
+            "industry:000001.SZ",
+            "industry:600000.SH",
+        ]
+        assert "profiles" not in provider.calls  # 未选中 profiles,不发档案请求
+
+    async def test_symbols_intersected_with_universe_filter(
+        self, engine: AsyncEngine
+    ) -> None:
+        await self._register(engine)
+        provider = FakeResearchProvider(symbols=())
+        executor = _make_executor(engine, provider)
+        payload: dict[str, object] = {
+            "datasets": ["financial_indicators"],
+            "start_date": START_DATE.isoformat(),
+            "end_date": END_DATE.isoformat(),
+            "symbols": ["510300.SH", "000001.SZ"],  # 510300 不在 stock 过滤内
+            "instrument_type": "stock",
+        }
+        result = await executor.execute(_job(payload), _noop_progress)
+
+        assert result.status == "succeeded"
+        financial_calls = [c for c in provider.calls if c.startswith("financial:")]
+        assert sorted(financial_calls) == ["financial:000001.SZ"]
+
+    async def test_empty_universe_filter_rejected_named(
+        self, engine: AsyncEngine
+    ) -> None:
+        """宇宙过滤在 instruments 表解析为空 → 具名 no_instruments 拒绝。"""
+        await self._register(engine)
+        provider = FakeResearchProvider(symbols=())
+        executor = _make_executor(engine, provider)
+        payload: dict[str, object] = {
+            "datasets": ["industry_memberships"],
+            "start_date": START_DATE.isoformat(),
+            "end_date": END_DATE.isoformat(),
+            "exchange": "CFFEX",  # 登记的标的均非 CFFEX
+        }
+
+        from finboard_backtest.background_jobs.contracts import ExecutorError
+
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(_job(payload), _noop_progress)
+        assert exc_info.value.code == "no_instruments"
