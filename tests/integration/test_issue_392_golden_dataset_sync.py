@@ -442,10 +442,10 @@ def _fake_enrichment() -> (
     return _inner
 
 
-def _job() -> JobRecord:
+def _job(*, kind: str = "research_data_sync") -> JobRecord:
     return JobRecord(
         job_id="BJ-GOLDEN392",
-        kind="research_data_sync",
+        kind=kind,
         queue="data",
         payload={
             "datasets": [
@@ -600,6 +600,54 @@ async def _run_old_upstream_failure(engine: AsyncEngine) -> tuple[_FakeBudget, o
     return budget, error
 
 
+async def _run_new_all_six(engine: AsyncEngine, client: FakeTushareClient, budget: _FakeBudget) -> None:
+    """新路径:dataset_sync 框架(SyncSpec)全量同步 6 数据集。"""
+
+    from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
+    from finboard_backtest.background_jobs.dataset_sync import specs as specs_module
+
+    executor = DatasetSyncExecutor(
+        session_maker=session_factory(engine),
+        provider_factory=lambda: _build_provider(client, budget),
+    )
+    original = specs_module._fetch_convertible_enrichment
+    specs_module._fetch_convertible_enrichment = _fake_enrichment()  # type: ignore[assignment]
+    try:
+        result = await executor.execute(_job(kind="dataset_sync"), _noop_progress)
+    finally:
+        specs_module._fetch_convertible_enrichment = original
+    assert result.status == "succeeded"
+
+
+async def _run_new_upstream_failure(engine: AsyncEngine) -> _FakeBudget:
+    """新路径:financial_indicators 对 600000.SH 上游失败(死点记账对照)。"""
+
+    from finboard_backtest.background_jobs.contracts import ExecutorError
+    from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
+    from finboard_backtest.background_jobs.dataset_sync import specs as specs_module
+
+    client = FakeTushareClient(fail_financial_symbol="600000.SH")
+    budget = _FakeBudget()
+    executor = DatasetSyncExecutor(
+        session_maker=session_factory(engine),
+        provider_factory=lambda: _build_provider(client, budget),
+    )
+    original = specs_module._fetch_convertible_enrichment
+    specs_module._fetch_convertible_enrichment = _fake_enrichment()  # type: ignore[assignment]
+    try:
+        error: ExecutorError | None = None
+        try:
+            await executor.execute(_job(kind="dataset_sync"), _noop_progress)
+        except ExecutorError as exc:
+            error = exc
+    finally:
+        specs_module._fetch_convertible_enrichment = original
+    assert error is not None
+    assert error.code == "research_data_upstream"
+    assert error.retryable is True
+    return budget
+
+
 # ---- tests -------------------------------------------------------------------
 
 
@@ -662,4 +710,52 @@ class TestGoldenOldPathUpstreamFailure:
         assert failed[0]["dataset_version"] == (
             f"financial:600000.SH:{START_DATE.isoformat()}:{END_DATE.isoformat()}"
         )
+        _compare_with_golden("upstream_failure", snapshot)
+
+
+class TestGoldenNewPathEquivalence:
+    """dataset_sync 框架(SyncSpec)与旧路径产物逐值等值(同一批 mock)。"""
+
+    async def test_all_six_products_identical(
+        self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FINBOARD_CODE_VERSION", "golden392")
+        client = FakeTushareClient()
+        budget = _FakeBudget()
+        await _run_new_all_six(engine, client, budget)
+        # 预算共享计数与旧路径一致(provider 调用次数不变)。
+        assert budget.acquires == 11
+
+        snapshot = await _snapshot(engine, tables=_SNAPSHOT_TABLES)
+        batch_status = {
+            (row["dataset"], row["dataset_version"]): row["status"]
+            for row in snapshot["research_sync_batches"]
+        }
+        assert set(batch_status.values()) == {"published"}
+        assert len(snapshot["research_instrument_profiles"]) == 3  # 脏行已跳过
+        _compare_with_golden("all_six", snapshot)
+
+    async def test_upstream_failure_accounting_identical(
+        self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FINBOARD_CODE_VERSION", "golden392")
+        await _run_new_upstream_failure(engine)
+
+        snapshot = await _snapshot(engine, tables=(ResearchSyncBatchModel,))
+        failed = [
+            row
+            for row in snapshot["research_sync_batches"]
+            if row["status"] == "failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0]["dataset_version"] == (
+            f"financial:600000.SH:{START_DATE.isoformat()}:{END_DATE.isoformat()}"
+        )
+        assert failed[0]["error_summary"] == (
+            "ResearchDataUpstreamError: upstream fetch failed"
+        )
+        assert failed[0]["parameters"] == {
+            "start_date": START_DATE.isoformat(),
+            "end_date": END_DATE.isoformat(),
+        }
         _compare_with_golden("upstream_failure", snapshot)

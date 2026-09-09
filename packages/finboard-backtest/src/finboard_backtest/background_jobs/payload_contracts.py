@@ -17,10 +17,29 @@ from collections.abc import Callable, Mapping
 from datetime import date
 from typing import Any
 
-#: ``research_data_sync`` 数据集白名单(唯一事实来源;执行器从这里 re-export,
-#: 对应 ResearchDataset 枚举的摄取入口,#251 加 name_changes,#265 加
-#: convertible_profiles —— 转债条款快照,写主数据 convertible_metadata,
-#: 不走 research_* 批次,与 name_changes 同风格)。
+
+def _dataset_sync_names() -> frozenset[str]:
+    """``dataset_sync`` 数据集白名单(唯一事实来源 = SyncSpec 注册表,#392)。
+
+    经函数延迟解析(模块 import 即触发内置六集注册),避免 payload_contracts
+    在 import 期依赖 dataset_sync 包的初始化顺序。
+    """
+
+    from finboard_backtest.background_jobs.dataset_sync.spec import SYNC_SPECS
+
+    return SYNC_SPECS.names
+
+
+def _dataset_sync_per_symbol() -> frozenset[str]:
+    from finboard_backtest.background_jobs.dataset_sync.spec import SYNC_SPECS
+
+    return frozenset(
+        spec.name for spec in SYNC_SPECS.specs if spec.is_per_symbol
+    )
+
+
+#: ``research_data_sync``(旧 kind,#392 起 dataset_sync 取代;常量仅为旧
+#: 执行器 / 存量测试的过渡 re-export,随旧执行器一并删除)。
 RESEARCH_DATA_SYNC_DATASETS: frozenset[str] = frozenset(
     {
         "profiles",
@@ -34,6 +53,20 @@ RESEARCH_DATA_SYNC_DATASETS: frozenset[str] = frozenset(
 
 _RESEARCH_DATA_SYNC_ALLOWED_KEYS: frozenset[str] = frozenset(
     {"datasets", "start_date", "end_date", "symbols"}
+)
+
+#: ``dataset_sync`` 合法 payload 键(issue #392):旧 research_data_sync 键集
+#: + scope 四元组(#385 过滤语义升为框架级公共参数,与 bulk_download 共享解析)。
+_DATASET_SYNC_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {
+        "datasets",
+        "start_date",
+        "end_date",
+        "symbols",
+        "exchange",
+        "listing_boards",
+        "instrument_type",
+    }
 )
 
 #: ``bulk_download`` 合法 payload 键(issue #347)。
@@ -91,6 +124,95 @@ def _require_date(payload: Mapping[str, Any], key: str) -> date:
             "missing_required_field", f"{key} 必填(ISO 日期 YYYY-MM-DD)"
         )
     return _contract_date(payload[key], key)
+
+
+def validate_dataset_sync_payload(payload: Mapping[str, Any]) -> None:
+    """校验 ``kind=dataset_sync`` 的 payload(入队期契约,issue #392)。
+
+    * 未知键拒绝(常见拼写错误 ``data_types`` 不存在,参数名为 ``datasets``);
+    * ``start_date`` / ``end_date`` 必填且为 ISO 日期,``start <= end``;
+    * ``datasets`` 按 SyncSpec 注册表枚举校验(缺省 = 全部注册数据集);
+    * scope 四元组(``exchange`` / ``listing_boards`` / ``instrument_type`` /
+      ``symbols``)经共享解析 ``normalize_sync_scope`` 校验归一(#385 语义,
+      与 bulk_download 同一函数);
+    * 逐标的数据集在「未提供 symbols、未声明宇宙过滤、且 datasets 不含
+      profiles」时拒绝 —— symbol 池将解析为空、任务静默零迭代。
+    """
+
+    from finboard_backtest.background_jobs.dataset_sync.scope import (
+        ScopeValueError,
+        normalize_sync_scope,
+    )
+
+    unknown = sorted(set(payload) - _DATASET_SYNC_ALLOWED_KEYS)
+    if unknown:
+        raise PayloadContractError(
+            "unknown_payload_key",
+            f"未知 payload 键: {unknown};已知键: "
+            f"{sorted(_DATASET_SYNC_ALLOWED_KEYS)}"
+            "(常见拼写错误:data_types 不存在,数据集参数名为 datasets)",
+        )
+
+    names = _dataset_sync_names()
+    raw_datasets = payload.get("datasets")
+    if raw_datasets is None:
+        datasets = names
+    else:
+        if not isinstance(raw_datasets, list) or not all(
+            isinstance(item, str) for item in raw_datasets
+        ):
+            raise PayloadContractError(
+                "invalid_field_value", "datasets 必须是字符串列表"
+            )
+        unknown_datasets = sorted(set(raw_datasets) - names)
+        if unknown_datasets:
+            raise PayloadContractError(
+                "invalid_field_value",
+                f"不支持的 datasets: {unknown_datasets};"
+                f" 可用: {sorted(names)}",
+            )
+        datasets = frozenset(raw_datasets)
+
+    start = _require_date(payload, "start_date")
+    end = _require_date(payload, "end_date")
+    if start > end:
+        raise PayloadContractError(
+            "invalid_field_value",
+            f"start_date({start}) 不能晚于 end_date({end})",
+        )
+
+    symbols = payload.get("symbols")
+    if symbols is not None and (
+        not isinstance(symbols, list) or not all(isinstance(i, str) for i in symbols)
+    ):
+        raise PayloadContractError("invalid_field_value", "symbols 必须是字符串列表")
+
+    # scope 四元组与 bulk_download 共享同一解析(#392:不复制两份语义)。
+    try:
+        scope = normalize_sync_scope(
+            exchange=payload.get("exchange"),
+            listing_boards=payload.get("listing_boards"),
+            instrument_type=payload.get("instrument_type"),
+            symbols=payload.get("symbols"),
+        )
+    except ScopeValueError as exc:
+        raise PayloadContractError("invalid_field_value", str(exc)) from exc
+
+    per_symbol = _dataset_sync_per_symbol() & datasets
+    if (
+        per_symbol
+        and not scope.symbols
+        and not scope.has_universe_filters
+        and "profiles" not in datasets
+    ):
+        raise PayloadContractError(
+            "empty_symbol_pool",
+            f"datasets 含逐标的同步 {sorted(per_symbol)} 但未提供 symbols、"
+            "未声明 exchange/listing_boards/instrument_type 宇宙过滤,且"
+            " datasets 不含 profiles —— symbol 池将解析为空,任务静默零迭代;"
+            "修复:提供 symbols 列表,声明宇宙过滤,或把 profiles 加入 "
+            "datasets(以其同步结果作为全市场 symbol 池)",
+        )
 
 
 def validate_research_data_sync_payload(payload: Mapping[str, Any]) -> None:
@@ -242,6 +364,7 @@ def validate_bulk_download_payload(payload: Mapping[str, Any]) -> None:
 #: 重放三方共用。
 PAYLOAD_CONTRACTS: dict[str, Callable[[Mapping[str, Any]], None]] = {
     "research_data_sync": validate_research_data_sync_payload,
+    "dataset_sync": validate_dataset_sync_payload,
     "bulk_download": validate_bulk_download_payload,
 }
 
@@ -262,6 +385,7 @@ __all__ = [
     "RESEARCH_DATA_SYNC_DATASETS",
     "PayloadContractError",
     "validate_bulk_download_payload",
+    "validate_dataset_sync_payload",
     "validate_job_payload",
     "validate_research_data_sync_payload",
 ]

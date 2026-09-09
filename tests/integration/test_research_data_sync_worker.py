@@ -108,7 +108,9 @@ class FakeResearchProvider:
         self.empty_days = empty_days
         self.calls: list[str] = []
 
-    async def fetch_convertible_profiles(self) -> list[ConvertibleProfile]:
+    async def fetch_convertible_profiles(
+        self, *, dirty_row_policy: str | None = None
+    ) -> list[ConvertibleProfile]:
         # #265:本测试不覆盖转债段(datasets 显式声明),协议要求空实现。
         return []
 
@@ -198,14 +200,16 @@ class FakeResearchProvider:
         )
 
     async def fetch_instrument_profiles(
-        self, *, list_status: str = "L"
+        self, *, list_status: str = "L", dirty_row_policy: str | None = None
     ) -> list[InstrumentProfile]:
         self.calls.append("profiles")
         if list_status != "L":
             return []  # fake 数据集全部为在市标的;#251 退市档案请求返回空
         return [self._profile(symbol) for symbol in self.symbols]
 
-    async def fetch_name_changes(self) -> list[InstrumentNameChange]:
+    async def fetch_name_changes(
+        self, *, dirty_row_policy: str | None = None
+    ) -> list[InstrumentNameChange]:
         """#251:历史名称变更(单标的两段区间,含去重排序由仓储处理)。"""
         self.calls.append("name_changes")
         return [
@@ -232,7 +236,7 @@ class FakeResearchProvider:
         ]
 
     async def fetch_daily_metrics(
-        self, trade_date: date
+        self, trade_date: date, *, dirty_row_policy: str | None = None
     ) -> list[DailySecurityMetrics]:
         self.calls.append(f"daily:{trade_date}")
         if trade_date in self.empty_days:
@@ -245,6 +249,7 @@ class FakeResearchProvider:
         *,
         start_period: date,
         end_period: date,
+        dirty_row_policy: str | None = None,
     ) -> list[FinancialIndicator]:
         self.calls.append(f"financial:{symbol}")
         if symbol in self.fail_symbols:
@@ -256,6 +261,7 @@ class FakeResearchProvider:
         *,
         symbol: str,
         current_only: bool = True,
+        dirty_row_policy: str | None = None,
     ) -> list[IndustryMembership]:
         self.calls.append(f"industry:{symbol}")
         if symbol in self.fail_symbols:
