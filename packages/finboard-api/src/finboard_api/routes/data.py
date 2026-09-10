@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from datetime import date as parse_date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -101,8 +100,9 @@ def _resolve_provider_name(
     import os
 
     configured = settings.data_provider if settings is not None else None
+    # 缺省主源 tushare(issue #393):股票 bars 主源切换,akshare 降副源。
     provider_name = (
-        (source or configured or os.getenv("FINBOARD_DATA_PROVIDER") or "akshare").strip().lower()
+        (source or configured or os.getenv("FINBOARD_DATA_PROVIDER") or "tushare").strip().lower()
     )
     if provider_name not in _SUPPORTED_BAR_PROVIDERS:
         supported = ", ".join(sorted(_SUPPORTED_BAR_PROVIDERS))
@@ -160,40 +160,14 @@ async def _persist_tushare_lifecycle_events(
     session: AsyncSession,
     events: list[Any],
 ) -> int:
-    """幂等写入 Tushare 停复牌事件,返回本次新增数量。"""
-    if not events:
-        return 0
+    """幂等写入 Tushare 停复牌事件,返回本次新增数量。
 
-    from sqlalchemy.dialects.postgresql import insert
+    实现收敛到 finboard_persistence 单一事实源(#393):与 bulk_download
+    执行器 / MCP fetch 共用同一行形状与幂等键。
+    """
+    from finboard_persistence import persist_tushare_lifecycle_events
 
-    from finboard_persistence import InstrumentLifecycleEventModel
-
-    observed_at = datetime.now(UTC)
-    values = [
-        {
-            "symbol": event.symbol,
-            "event_type": event.event_type,
-            "effective_date": event.effective_date,
-            # 历史事件是现在从 API 观测到的,不能倒填成当时已知。
-            "available_at": observed_at,
-            "source": "tushare",
-            "dataset_version": "suspend_d-v1",
-            "details": {
-                "suspend_type": "R" if event.event_type == "resumption" else "S",
-                "suspend_timing": event.suspend_timing,
-            },
-            "observed_at": observed_at,
-        }
-        for event in events
-    ]
-    statement = (
-        insert(InstrumentLifecycleEventModel)
-        .values(values)
-        .on_conflict_do_nothing(constraint="uq_instrument_lifecycle_event")
-        .returning(InstrumentLifecycleEventModel.id)
-    )
-    result = await session.execute(statement)
-    return len(result.scalars().all())
+    return await persist_tushare_lifecycle_events(session, events)
 
 
 @router.get("/status", response_model=list[DataStatusOut])
@@ -976,7 +950,7 @@ async def get_scheduler_config(request: Request) -> SchedulerConfigOut:
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=settings.data_provider if settings is not None else "akshare",
+        data_provider=settings.data_provider if settings is not None else "tushare",
     )
 
 
@@ -1000,5 +974,5 @@ async def update_scheduler_config(
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=settings.data_provider if settings is not None else "akshare",
+        data_provider=settings.data_provider if settings is not None else "tushare",
     )

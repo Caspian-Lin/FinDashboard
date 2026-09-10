@@ -48,8 +48,12 @@ class Settings(BaseSettings):
     db_max_overflow: int = 10
 
     # ---- 历史行情数据源 ----
-    data_provider: Literal["akshare", "yfinance", "tushare"] = "akshare"
-    data_fallback_provider: Literal["akshare", "yfinance", "tushare"] | None = None
+    # 主源默认 tushare(issue #393):股票 daily+adj_factor+suspend_d 路由
+    # 已就绪(#341 实测 2000 积分档可调),akshare 降级为副源(回落链语义
+    # 保持 #257:primary 空结果 / 异常才回退)。回退默认 akshare:tushare
+    # 不覆盖的 ETF / 期货(#341/#267)由 akshare 兜底。
+    data_provider: Literal["akshare", "yfinance", "tushare"] = "tushare"
+    data_fallback_provider: Literal["akshare", "yfinance", "tushare"] | None = "akshare"
     tushare_token: str = Field(default="", repr=False)
     tushare_requests_per_minute: int = 200
     tushare_daily_request_limit: int = 100_000
