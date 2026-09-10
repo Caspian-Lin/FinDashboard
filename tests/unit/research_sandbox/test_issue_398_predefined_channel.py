@@ -62,6 +62,7 @@ class _Inst:
     code: str
     market: str = "SH"
     instrument_type: str = "stock"
+    industry: str | None = None
 
 
 @dataclass
@@ -168,8 +169,11 @@ DAILY_RELEASE = "DR-daily-398"
 
 
 def _instruments() -> list[_Inst]:
-    return [_Inst(code) for code in SYMBOLS] + [
-        _Inst(INDEX_SYMBOL, instrument_type="index")
+    return [
+        _Inst("600000.SH", industry="银行"),
+        _Inst("000001.SZ", industry="银行"),
+        _Inst("600519.SH", industry="食品饮料"),
+        _Inst(INDEX_SYMBOL, instrument_type="index"),
     ]
 
 
@@ -661,3 +665,186 @@ class TestExecutorPredefinedKind:
         assert result.error_code == LOOKAHEAD_DETECTED
         assert "首个分歧日期" in (result.error_summary or "")
         assert getattr(_FakeSeriesRepo, "upserted", None) is None
+
+
+# --------------------------------------------------------------------- #
+# 行业分组装配(issue #400:inp.industry_groups() 接线)
+# --------------------------------------------------------------------- #
+
+
+class TestIndustryGroupsAssembly:
+    async def test_industry_groups_derived_from_release_excluding_benchmark(self) -> None:
+        """分组自 bars 主发布 instruments.industry 装配;基准标的剔除。"""
+        result = await run_predefined_factor_series(
+            _spec(), settings=_settings(), release_provider_factory=_provider_factory
+        )
+        assert result.industry_groups == {
+            "600000.SH": "银行",
+            "000001.SZ": "银行",
+            "600519.SH": "食品饮料",
+        }
+        assert INDEX_SYMBOL not in result.industry_groups
+        assert result.metrics["industry_groups_mapped"] == 3
+        assert result.metrics["industry_groups_missing"] == 0
+
+    async def test_missing_industry_counted_not_fatal(self) -> None:
+        """缺行业标的 → 映射缺失(None)+ metrics 计数,构建不炸。"""
+        provider = _StubProvider(
+            release=_Release(
+                BARS_RELEASE,
+                _Kind("bars"),
+                [
+                    _Inst("600000.SH", industry="银行"),
+                    _Inst("000001.SZ", industry=None),
+                    _Inst("600519.SH"),
+                    _Inst(INDEX_SYMBOL, instrument_type="index"),
+                ],
+            ),
+            bars=_bars(),
+        )
+        result = await run_predefined_factor_series(
+            _spec(),
+            settings=_settings(),
+            release_provider_factory=lambda _rid: provider,
+        )
+        assert result.industry_groups["000001.SZ"] is None
+        assert result.industry_groups.get("600519.SH") is None
+        assert result.metrics["industry_groups_missing"] == 2
+        assert result.metrics["industry_groups_mapped"] == 1
+
+    async def test_industry_groups_visible_to_factor_compute(self) -> None:
+        """因子 compute 经 inp.industry_groups() 拿到装配后的分组。"""
+        from finboard_backtest.factors.predefined.operators import cs_neutralize
+
+        seen: dict[str, dict[str, str | None]] = {}
+
+        def neutral_compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+            closes = inp.bars("close")
+            seen["groups"] = inp.industry_groups()
+            frame = inp.sample(
+                closes,
+                {symbol: series.values.copy() for symbol, series in closes.items()},
+            )
+            groups = seen["groups"]
+            return {
+                day: cs_neutralize(cross, groups) for day, cross in frame.items()
+            }
+
+        entry = PredefinedFactorDefinition(
+            name="zz_industry_test",
+            title="临时行业中性测试因子(组内去均值 close)",
+            family="test",
+            direction=get_predefined_factor("return_21d").direction,
+            signal_eligible=True,
+            data_dependencies=("bars.close",),
+            window=1,
+            implementation_version="1",
+            compute=neutral_compute,
+            cross_section=True,
+        )
+        import finboard_backtest.factors.predefined.registry as registry_module
+
+        registry_module.PREDEFINED_FACTORS[entry.name] = entry
+        try:
+            result = await run_predefined_factor_series(
+                _spec(entry.name),
+                settings=_settings(),
+                release_provider_factory=_provider_factory,
+            )
+        finally:
+            registry_module.PREDEFINED_FACTORS.pop(entry.name, None)
+        # 分组透传到因子(基准不在映射中)
+        assert seen["groups"] == {
+            "600000.SH": "银行",
+            "000001.SZ": "银行",
+            "600519.SH": "食品饮料",
+        }
+        # 组内去均值生效:两银行标的之和 ≈ 0(组内均值),食品饮料单标的 → 0
+        day = result.dates[-1]
+        bank_sum = (result.values[day]["600000.SH"] or 0.0) + (
+            result.values[day]["000001.SZ"] or 0.0
+        )
+        assert bank_sum == pytest.approx(0.0, abs=1e-9)
+        assert result.values[day]["600519.SH"] == pytest.approx(0.0)
+
+    async def test_mount_override_requires_explicit_industry_groups(self) -> None:
+        """mount_override 路径必须显式传 industry_groups(审计变体继承语义)。"""
+        spec = _spec()
+        baseline = await run_predefined_factor_series(
+            spec, settings=_settings(), release_provider_factory=_provider_factory
+        )
+        from pathlib import Path
+
+        from finboard_backtest.research_sandbox.data_mount import (
+            filter_window_data_mount,
+        )
+
+        assert baseline.mount is not None
+        variant_mount = await filter_window_data_mount(
+            baseline.mount,
+            new_window_end=spec.dates[3],
+            dates=spec.dates[:4],
+            out_root=Path(baseline.workspace_dir) / "data-cut-industry-test",
+        )
+        with pytest.raises(Exception, match="industry_groups") as exc_info:
+            await run_predefined_factor_series(
+                replace(spec, dates=spec.dates[:4], window_end=spec.dates[3]),
+                settings=_settings(),
+                mount_override=variant_mount,
+                benchmark_only_symbols=baseline.benchmark_only_symbols,
+                workspace_root=baseline.workspace_dir,
+            )
+        assert getattr(exc_info.value, "code", "") == "mount_spec_mismatch"
+
+    async def test_audit_inherits_industry_groups(self) -> None:
+        """审计变体继承基线行业分组:分组敏感因子的截断重算不产生假阳性。"""
+
+        def neutral_compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+            from finboard_backtest.factors.predefined.operators import cs_neutralize
+
+            closes = inp.bars("close")
+            frame = inp.sample(
+                closes,
+                {symbol: series.values.copy() for symbol, series in closes.items()},
+            )
+            groups = inp.industry_groups()
+            return {
+                day: cs_neutralize(cross, groups) for day, cross in frame.items()
+            }
+
+        entry = PredefinedFactorDefinition(
+            name="zz_industry_audit_test",
+            title="临时行业分组敏感因子(审计继承验证)",
+            family="test",
+            direction=get_predefined_factor("return_21d").direction,
+            signal_eligible=True,
+            data_dependencies=("bars.close",),
+            window=1,
+            implementation_version="1",
+            compute=neutral_compute,
+            cross_section=True,
+        )
+        import finboard_backtest.factors.predefined.registry as registry_module
+
+        registry_module.PREDEFINED_FACTORS[entry.name] = entry
+        try:
+            spec = FactorSeriesRunSpec(
+                code_artifact=entry.name,
+                code_commit=predefined_factor_commit(entry.name),
+                release_id=BARS_RELEASE,
+                dataset_release_ids=(DAILY_RELEASE,),
+                params={},
+                window_start=date(2023, 8, 30),
+                window_end=date(2023, 9, 4),
+                dates=tuple(date(2023, 8, 30) + timedelta(days=k) for k in range(6)),
+            )
+            baseline = await run_predefined_factor_series(
+                spec, settings=_settings(), release_provider_factory=_provider_factory
+            )
+            # 审计期间临时条目仍在目录中(build_fn 需解析)
+            report = await default_predefined_prefix_audit(
+                spec, baseline, truncate_at=spec.dates[3]
+            )
+        finally:
+            registry_module.PREDEFINED_FACTORS.pop(entry.name, None)
+        assert report.passed
