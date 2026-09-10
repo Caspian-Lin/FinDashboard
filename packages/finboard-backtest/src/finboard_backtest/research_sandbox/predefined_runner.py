@@ -644,6 +644,137 @@ def _validate_frame(frame: FactorSeriesFrame, spec: FactorSeriesRunSpec) -> None
         )
 
 
+@dataclass(frozen=True)
+class MountEvalBundle:
+    """一次窗口挂载 x 全目录评估的共享数据面(issue #403)。
+
+    与 :func:`run_predefined_factor_series` 的差异只在使用形态:主构建
+    通道一次跑一个因子并各自物化挂载;评估面把**同一份挂载**复用于
+    全目录逐因子计算(:func:`input_for` 按目录条目装配输入面,
+    ``cross_section`` 采样面收窄与主通道同口径)。``close_panel`` 是
+    评估引擎前向收益的全交易日收盘价面板(bars close,PIT 上界 =
+    窗口挂载上界);``decision_dates`` = spec 声明的评估决策日。
+    """
+
+    mount: WindowDataMount
+    bars_table: Any
+    daily_table: Any | None
+    dataset_tables: dict[str, Any]
+    mount_symbols: tuple[str, ...]
+    tradable_symbols: tuple[str, ...]
+    benchmark_only_symbols: frozenset[str]
+    industry_groups: dict[str, str | None]
+    close_panel: dict[date, dict[str, float]]
+    decision_dates: tuple[date, ...]
+
+    def input_for(self, definition: PredefinedFactorDefinition) -> _MountFactorInput:
+        """按目录条目装配评估输入面(采样面口径与主构建通道一致)。"""
+        value_universe = (
+            self.tradable_symbols
+            if definition.cross_section
+            else self.mount_symbols
+        )
+        return _MountFactorInput(
+            definition=definition,
+            bars_table=self.bars_table,
+            daily_table=self.daily_table,
+            dataset_tables=self.dataset_tables,
+            mount_symbols=self.mount_symbols,
+            decision_dates=self.decision_dates,
+            value_universe=value_universe,
+            tradable_symbols=self.tradable_symbols,
+            benchmark_only_symbols=self.benchmark_only_symbols,
+            industry_groups=self.industry_groups,
+        )
+
+
+async def build_window_eval_bundle(
+    spec: FactorSeriesRunSpec,
+    *,
+    settings: Any | None = None,
+    release_provider_factory: Any | None = None,
+) -> MountEvalBundle:
+    """物化一次窗口挂载并装配全目录评估共享面(issue #403)。
+
+    挂载物化 / PIT 防线 / 基准与行业分组派生与
+    :func:`run_predefined_factor_series` 完全同源(同一批原语:``_series_providers``
+    → ``build_window_data_mount`` → ``_read_mount_table``);刻意**不**
+    重构主构建路径改用本函数(主通道逐因子挂载 + 审计变体语义被
+    #371/#374/#378 大量测试钉死,重构风险 > 少量装配重复)。
+    """
+    if settings is None:
+        settings = _default_series_settings()
+    if settings is None:
+        raise SandboxError(
+            "sandbox_unavailable", "无法加载 settings,评估挂载构建不可用"
+        )
+    import math
+
+    from finboard_backtest.strategy_spec.universe_precheck import (
+        is_benchmark_only_instrument,
+    )
+
+    providers, _release_checksums = await _series_providers(
+        spec, release_provider_factory, settings
+    )
+    workspace = Path(settings.research_sandbox_workspace_root)
+    run_dir = workspace / f"FSE-{uuid.uuid4().hex[:12]}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    mount = await build_window_data_mount(
+        providers=providers,
+        window_start=spec.window_start,
+        window_end=spec.window_end,
+        dates=spec.dates,
+        out_root=run_dir / "data",
+        code_artifact=spec.code_artifact,
+        code_commit=spec.code_commit,
+        release_id=spec.release_id,
+        dataset_release_ids=spec.dataset_release_ids,
+    )
+    benchmark = frozenset(
+        str(item.code)
+        for item in providers[0].release.instruments
+        if is_benchmark_only_instrument(item)
+    )
+    industry = {
+        str(item.code): getattr(item, "industry", None)
+        for item in providers[0].release.instruments
+        if not is_benchmark_only_instrument(item)
+    }
+
+    bars_table = _read_mount_table(mount.root / "bars.parquet")
+    daily_path = mount.root / "daily_metrics.parquet"
+    daily_table = _read_mount_table(daily_path) if daily_path.exists() else None
+    dataset_tables: dict[str, Any] = {}
+    for dataset_kind in _ANNOUNCED_MOUNT_KINDS:
+        table_path = mount.root / f"{dataset_kind}.parquet"
+        if table_path.exists():
+            dataset_tables[dataset_kind] = _read_mount_table(table_path)
+
+    close_series = _symbol_series_from_table(bars_table, "close")
+    mount_symbols = tuple(sorted(close_series))
+    close_panel: dict[date, dict[str, float]] = {}
+    for symbol, series in close_series.items():
+        for position, day in enumerate(series.dates):
+            value = float(series.values[position])
+            if math.isfinite(value):
+                close_panel.setdefault(day, {})[symbol] = value
+    tradable = tuple(s for s in mount_symbols if s not in benchmark)
+
+    return MountEvalBundle(
+        mount=mount,
+        bars_table=bars_table,
+        daily_table=daily_table,
+        dataset_tables=dataset_tables,
+        mount_symbols=mount_symbols,
+        tradable_symbols=tradable,
+        benchmark_only_symbols=benchmark,
+        industry_groups=industry,
+        close_panel=close_panel,
+        decision_dates=tuple(spec.dates),
+    )
+
+
 def _default_series_settings() -> Any | None:
     from finboard_backtest.background_jobs.executors._providers import (
         default_settings_factory,
