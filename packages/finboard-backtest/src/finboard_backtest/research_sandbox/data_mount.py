@@ -39,7 +39,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -172,10 +179,9 @@ async def build_data_mount(
             bars_schema = _bars_schema(include_available_at=False)
             start_rows = bars_writer.rows
             provider_max: date | None = None
-            batches = await _fetch_bars_batches(
+            async for rows in _iter_bars_batches(
                 provider, instruments, decision_at, include_available_at=False
-            )
-            for rows in batches:
+            ):
                 if not rows:
                     continue
                 universe.update(r["symbol"] for r in rows)
@@ -196,10 +202,9 @@ async def build_data_mount(
             daily_schema: pa.Schema | None = None
             start_rows = daily_writer.rows
             provider_max_daily: date | None = None
-            batches = await _fetch_daily_rows_batches(
+            async for rows in _iter_daily_rows_batches(
                 provider, instruments, decision_at, include_available_at=False
-            )
-            for rows in batches:
+            ):
                 if not rows:
                     continue
                 if daily_schema is None:
@@ -571,10 +576,9 @@ async def build_window_data_mount(
             bars_schema = _bars_schema(include_available_at=True)
             start_rows = bars_writer.rows
             provider_max: date | None = None
-            batches = await _fetch_bars_batches(
+            async for rows in _iter_bars_batches(
                 provider, instruments, ceiling, include_available_at=True
-            )
-            for rows in batches:
+            ):
                 if not rows:
                     continue
                 universe.update(r["symbol"] for r in rows)
@@ -595,10 +599,9 @@ async def build_window_data_mount(
             daily_schema: pa.Schema | None = None
             start_rows = daily_writer.rows
             provider_max_daily: date | None = None
-            batches = await _fetch_daily_mixed_batches(
+            async for batch in _iter_daily_mixed_batches(
                 provider, instruments, ceiling
-            )
-            for batch in batches:
+            ):
                 if isinstance(batch, pa.Table):
                     # 列式快路径(#371):provider 支持列式读取时逐标的
                     # Arrow 直通,免整行对象税。
@@ -705,42 +708,49 @@ async def build_window_data_mount(
 _MOUNT_FETCH_CONCURRENCY = 8
 
 
-async def _fetch_instrument_batches(
+async def _iter_instrument_batches(
     collect: Callable[[Any], Awaitable[Any]],
     instruments: Sequence[Any],
-) -> list[Any]:
-    """分块并发采集逐标的批次,结果按 ``instruments`` 原序归位。"""
-    batches: list[Any] = []
+) -> AsyncIterator[Any]:
+    """分块并发采集逐标的批次,**逐块产出**(issue #375 块内并发)。
+
+    块内 ``gather`` 保序归位、块间按 ``instruments`` 原序产出,行序与串行
+    逐值一致;消费端边收边写(#371 流式语义),内存上界 = 单块批次,
+    而非全部标的批次的全量驻留(#375 曾实现为先全采后消费,全市场挂载
+    在 worker 进程内全量物化数 GB)。块内首个异常在该块边界原样传播
+    (与串行首个失败一致)。
+    """
     for start in range(0, len(instruments), _MOUNT_FETCH_CONCURRENCY):
         chunk = instruments[start : start + _MOUNT_FETCH_CONCURRENCY]
-        batches.extend(await asyncio.gather(*(collect(item) for item in chunk)))
-    return batches
+        for batch in await asyncio.gather(*(collect(item) for item in chunk)):
+            yield batch
 
 
-async def _fetch_bars_batches(
+async def _iter_bars_batches(
     provider: Any,
     instruments: Sequence[Any],
     gate: datetime,
     *,
     include_available_at: bool,
-) -> list[Any]:
-    """单 provider 的逐标的 bars 批次(#375 分块并发)。"""
+) -> AsyncIterator[Any]:
+    """单 provider 的逐标的 bars 批次(#375 分块并发,#371 流式消费)。"""
 
     async def collect(item: Any) -> list[dict[str, Any]]:
         return await _collect_bars(
             provider, [item], gate, include_available_at=include_available_at
         )
 
-    return await _fetch_instrument_batches(collect, instruments)
+    async for batch in _iter_instrument_batches(collect, instruments):
+        yield batch
 
 
-async def _fetch_daily_rows_batches(
+async def _iter_daily_rows_batches(
     provider: Any,
     instruments: Sequence[Any],
     gate: datetime,
     *,
     include_available_at: bool,
-) -> list[Any]:
+) -> AsyncIterator[Any]:
     """单 provider 的逐标的 daily_metrics 行批次(对象路径)。"""
 
     async def collect(item: Any) -> list[dict[str, Any]]:
@@ -748,14 +758,15 @@ async def _fetch_daily_rows_batches(
             provider, [item], gate, include_available_at=include_available_at
         )
 
-    return await _fetch_instrument_batches(collect, instruments)
+    async for batch in _iter_instrument_batches(collect, instruments):
+        yield batch
 
 
-async def _fetch_daily_mixed_batches(
+async def _iter_daily_mixed_batches(
     provider: Any,
     instruments: Sequence[Any],
     gate: datetime,
-) -> list[Any]:
+) -> AsyncIterator[Any]:
     """单 provider 的逐标的 daily_metrics 批次(列式优先,对象回退)。"""
     columnar = hasattr(provider, "fetch_daily_metrics_columns")
 
@@ -766,7 +777,8 @@ async def _fetch_daily_mixed_batches(
             provider, [item], gate, include_available_at=True
         )
 
-    return await _fetch_instrument_batches(collect, instruments)
+    async for batch in _iter_instrument_batches(collect, instruments):
+        yield batch
 
 
 async def _collect_bars(
