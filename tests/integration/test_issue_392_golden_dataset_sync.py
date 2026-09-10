@@ -51,8 +51,12 @@ from finboard_persistence import (
     ConvertibleMetadataModel,
     InstrumentLifecycleEventModel,
     InstrumentNameModel,
+    ResearchBalanceSheetModel,
+    ResearchCashflowStatementModel,
     ResearchDailyMetricModel,
+    ResearchDividendModel,
     ResearchFinancialIndicatorModel,
+    ResearchIncomeStatementModel,
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
@@ -131,6 +135,10 @@ async def _clean(engine: AsyncEngine) -> None:
             "research_financial_indicators",
             "research_industry_classifications",
             "research_industry_memberships",
+            "research_income_statements",
+            "research_balance_sheets",
+            "research_cashflow_statements",
+            "research_dividends",
             "instrument_names",
             "convertible_metadata",
             "instrument_lifecycle_events",
@@ -354,6 +362,156 @@ def _cb_basic_rows(list_status: str) -> list[dict[str, object]]:
     ]
 
 
+# ---- #397 固定 mock:三表 + dividend(修订版本 / 报告口径 / 进展行)----------
+
+
+def _income_rows(symbol: str) -> list[dict[str, object]]:
+    def _base(**overrides: object) -> dict[str, object]:
+        row: dict[str, object] = {
+            "basic_eps": None,
+            "diluted_eps": None,
+            "total_revenue": None,
+            "revenue": None,
+            "int_income": None,
+            "int_exp": None,
+            "fv_value_chg_gain": None,
+            "invest_income": None,
+            "total_cogs": None,
+            "oper_cost": None,
+            "biz_tax_surchg": None,
+            "sell_exp": None,
+            "admin_exp": None,
+            "fin_exp": None,
+            "rd_exp": None,
+            "assets_impair_loss": None,
+            "operate_profit": None,
+            "non_oper_income": None,
+            "non_oper_exp": None,
+            "total_profit": None,
+            "income_tax": None,
+            "n_income": None,
+            "n_income_attr_p": None,
+            "minority_gain": None,
+            "oth_compr_income": None,
+            "t_compr_income": None,
+            "compr_inc_attr_p": None,
+            "ebit": None,
+            "ebitda": None,
+            "distable_profit": None,
+            "continued_net_profit": None,
+        }
+        row.update(
+            {
+                "ts_code": symbol,
+                # ann_date 落在 golden 窗口(2026-07-24..27)内:真实服务端按
+                # 公告日窗过滤,mock 行与「切片行 ⊆ 窗口」契约一致(#397)。
+                "ann_date": "20260724",
+                "f_ann_date": "20260724",
+                "end_date": "20251231",
+                "report_type": "1",
+                "comp_type": "1",
+                "update_flag": "0",
+                "total_revenue": 1200.5,
+                "n_income_attr_p": 300.25,
+                "ebitda": 420.75,
+            }
+        )
+        row.update(overrides)
+        return row
+
+    return [
+        _base(),
+        # 修订版本:update_flag=1,数值修正。
+        _base(update_flag="1", ann_date="20260725", f_ann_date="20260725", basic_eps=2.5),
+    ]
+
+
+def _balancesheet_rows(symbol: str) -> list[dict[str, object]]:
+    from finboard_data.tushare_provider import _BALANCE_FIELDS
+
+    row: dict[str, object] = dict.fromkeys(_BALANCE_FIELDS.split(","))
+    row.update(
+        {
+            "ts_code": symbol,
+            "ann_date": "20260724",
+            "f_ann_date": "20260724",
+            "end_date": "20251231",
+            "report_type": "1",
+            "comp_type": "1",
+            "update_flag": "0",
+            "money_cap": 500.0,
+            "inventories": 120.0,
+            "total_cur_assets": 900.0,
+            "total_cur_liab": 300.0,
+            "total_assets": 2000.0,
+            "total_hldr_eqy_exc_min_int": 1500.0,
+        }
+    )
+    return [row]
+
+
+def _cashflow_rows(symbol: str) -> list[dict[str, object]]:
+    from finboard_data.tushare_provider import _CASHFLOW_FIELDS
+
+    row: dict[str, object] = dict.fromkeys(_CASHFLOW_FIELDS.split(","))
+    row.update(
+        {
+            "ts_code": symbol,
+            "ann_date": "20260724",
+            "f_ann_date": "20260724",
+            "end_date": "20251231",
+            "report_type": "1",
+            "comp_type": "1",
+            "update_flag": "1",
+            "n_cashflow_act": 360.0,
+            "c_pay_acq_const_fiolta": 60.0,
+            "free_cashflow": 300.0,
+        }
+    )
+    return [row]
+
+
+def _dividend_rows(symbol: str) -> list[dict[str, object]]:
+    # ann_date 落在 golden 窗口(2026-07-24..27)内:上游 dividend 接口没有
+    # 区间参数,窗口过滤在 provider 客户端执行(#397),mock 行与切片契约
+    # (切片行 ⊆ 窗口)保持一致。
+    return [
+        # 同一(分红年度, 公告日)两条进展行:div_proc 进身份键全保留。
+        {
+            "ts_code": symbol,
+            "end_date": "20251231",
+            "ann_date": "20260724",
+            "div_proc": "预案",
+            "stk_div": 0.0,
+            "stk_bo_rate": None,
+            "stk_co_rate": None,
+            "cash_div": 3.0,
+            "cash_div_tax": 2.85,
+            "record_date": None,
+            "ex_date": None,
+            "pay_date": None,
+            "div_listdate": None,
+            "imp_ann_date": None,
+        },
+        {
+            "ts_code": symbol,
+            "end_date": "20251231",
+            "ann_date": "20260725",
+            "div_proc": "实施",
+            "stk_div": 0.0,
+            "stk_bo_rate": None,
+            "stk_co_rate": None,
+            "cash_div": 3.0,
+            "cash_div_tax": 2.85,
+            "record_date": "20260726",
+            "ex_date": "20260727",
+            "pay_date": "20260727",
+            "div_listdate": "20260728",
+            "imp_ann_date": "20260721",
+        },
+    ]
+
+
 class _FakeBudget:
     """预算桩:只计数,不限流、不落 usage 文件(共享预算口径的计数断言)。"""
 
@@ -393,6 +551,18 @@ class FakeTushareClient:
 
     def suspend_d(self, **kwargs: str) -> list[dict[str, object]]:
         return []
+
+    def income(self, **kwargs: str) -> list[dict[str, object]]:
+        return _income_rows(kwargs["ts_code"])
+
+    def balancesheet(self, **kwargs: str) -> list[dict[str, object]]:
+        return _balancesheet_rows(kwargs["ts_code"])
+
+    def cashflow(self, **kwargs: str) -> list[dict[str, object]]:
+        return _cashflow_rows(kwargs["ts_code"])
+
+    def dividend(self, **kwargs: str) -> list[dict[str, object]]:
+        return _dividend_rows(kwargs["ts_code"])
 
 
 def _build_provider(
@@ -445,13 +615,18 @@ def _fake_enrichment() -> (
     return _inner
 
 
-def _job(*, kind: str = "dataset_sync") -> JobRecord:
+def _job(
+    *,
+    kind: str = "dataset_sync",
+    datasets: list[str] | None = None,
+) -> JobRecord:
     return JobRecord(
         job_id="BJ-GOLDEN392",
         kind=kind,
         queue="data",
         payload={
-            "datasets": [
+            "datasets": datasets
+            or [
                 "profiles",
                 "name_changes",
                 "convertible_profiles",
@@ -666,3 +841,74 @@ class TestGoldenDatasetSync:
             "end_date": END_DATE.isoformat(),
         }
         _compare_with_golden("upstream_failure", snapshot)
+
+    async def test_three_statements_dividends_match_golden(
+        self, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#397 场景:三表 + dividend 固定 mock 行 → 产物与 golden 对照。
+
+        锁定:dataset_version 形状(``income|balance|cashflow|dividend:
+        <symbol>:<start>:<end>``)、批次 parameters、修订/进展行全保留
+        (income update_flag 0/1 两版;dividend 预案+实施两行)、
+        PIT available_at = ann_date+1 零点(上海)。
+        """
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
+
+        monkeypatch.setenv("FINBOARD_CODE_VERSION", "golden397")
+        budget = _FakeBudget()
+        executor = DatasetSyncExecutor(
+            session_maker=session_factory(engine),
+            provider_factory=lambda: _build_provider(FakeTushareClient(), budget),
+        )
+        result = await executor.execute(
+            _job(
+                datasets=[
+                    "income_statements",
+                    "balance_sheets",
+                    "cashflow_statements",
+                    "dividends",
+                ]
+            ),
+            _noop_progress,
+        )
+        assert result.status == "succeeded"
+        # 4 数据集 x 2 标的,每切片一次预算获取。
+        assert budget.acquires == 8
+
+        snapshot = await _snapshot(
+            engine,
+            tables=(
+                ResearchIncomeStatementModel,
+                ResearchBalanceSheetModel,
+                ResearchCashflowStatementModel,
+                ResearchDividendModel,
+                ResearchSyncBatchModel,
+            ),
+        )
+        batch_status = {
+            (row["dataset"], row["dataset_version"]): row["status"]
+            for row in snapshot["research_sync_batches"]
+        }
+        assert len(batch_status) == 8
+        assert set(batch_status.values()) == {"published"}
+        assert (
+            "income_statements",
+            f"income:000001.SZ:{START_DATE.isoformat()}:{END_DATE.isoformat()}",
+        ) in batch_status
+        assert len(snapshot["research_income_statements"]) == 4  # 2 标的 x 2 版
+        assert len(snapshot["research_balance_sheets"]) == 2
+        assert len(snapshot["research_cashflow_statements"]) == 2
+        assert len(snapshot["research_dividends"]) == 4  # 2 标的 x 2 进展行
+        # PIT:公告日 2026-07-24 → 2026-07-25 零点(上海)= 2026-07-24 16:00 UTC。
+        assert all(
+            row["available_at"] == "2026-07-24T16:00:00"
+            for row in snapshot["research_income_statements"]
+            if row["update_flag"] == "0"
+        )
+        # 修订公告(update_flag=1,2026-07-25)次日零点可见。
+        assert all(
+            row["available_at"] == "2026-07-25T16:00:00"
+            for row in snapshot["research_income_statements"]
+            if row["update_flag"] == "1"
+        )
+        _compare_with_golden("three_statements_dividends_397", snapshot)

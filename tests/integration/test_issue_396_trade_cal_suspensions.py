@@ -25,9 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from finboard_backtest.background_jobs.contracts import JobRecord
 from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
     ConvertibleProfile,
     DailySecurityMetrics,
+    DividendRecord,
     FinancialIndicator,
+    IncomeStatement,
     IndustryMembership,
     InstrumentNameChange,
     InstrumentProfile,
@@ -163,6 +167,47 @@ class SuspensionsOnlyProvider:
     async def fetch_convertible_profiles(
         self, *, dirty_row_policy: str | None = None
     ) -> list[ConvertibleProfile]:
+        return []
+
+
+    async def fetch_income_statements(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[IncomeStatement]:
+        return []
+
+    async def fetch_balance_sheets(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[BalanceSheet]:
+        return []
+
+    async def fetch_cashflow_statements(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[CashflowStatement]:
+        return []
+
+    async def fetch_dividends(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[DividendRecord]:
         return []
 
 

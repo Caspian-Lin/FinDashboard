@@ -22,7 +22,8 @@ pytestmark = pytest.mark.unit
 
 class TestRegistry:
     def test_builtin_seven_datasets_registered(self) -> None:
-        # #396:第七集 suspensions(停复牌,DAILY_MARKET)注册。
+        # #396:第七集 suspensions(停复牌,DAILY_MARKET)注册;
+        # #397:第八至十一集 = 三表 income/balance/cashflow + dividends。
         assert SYNC_SPECS.names == frozenset(
             {
                 "profiles",
@@ -32,13 +33,18 @@ class TestRegistry:
                 "suspensions",
                 "financial_indicators",
                 "industry_memberships",
+                "income_statements",
+                "balance_sheets",
+                "cashflow_statements",
+                "dividends",
             }
         )
 
     def test_declaration_order_is_default_execution_order(self) -> None:
         # 编排顺序:旧六集保持原相对序(profiles → name_changes →
         # convertible → daily → financial → industry,golden 依赖此序),
-        # #396 suspensions 插在 daily_metrics 之后。
+        # #396 suspensions 插在 daily_metrics 之后,#397 四集追加在尾部
+        # (不影响既有数据集的默认执行序)。
         assert SYNC_SPECS.default_names() == (
             "profiles",
             "name_changes",
@@ -47,7 +53,42 @@ class TestRegistry:
             "suspensions",
             "financial_indicators",
             "industry_memberships",
+            "income_statements",
+            "balance_sheets",
+            "cashflow_statements",
+            "dividends",
         )
+
+    def test_three_statements_dividends_shapes_and_versions(self) -> None:
+        # #397:四集均为 PER_SYMBOL_RANGE(REJECT 行级口径按形态推导),
+        # dataset_version 形状 = <前缀>:<symbol>:<start>:<end>。
+        from finboard_backtest.background_jobs.dataset_sync.spec import SliceQuery
+
+        query = SliceQuery(
+            dataset="income_statements",
+            row_policy="reject",
+            symbol="600519.SH",
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 6, 30),
+        )
+        for name, prefix in (
+            ("income_statements", "income"),
+            ("balance_sheets", "balance"),
+            ("cashflow_statements", "cashflow"),
+            ("dividends", "dividend"),
+        ):
+            spec = SYNC_SPECS.get(name)
+            assert spec.shape is EnumShape.PER_SYMBOL_RANGE
+            assert spec.row_policy is RowPolicy.REJECT
+            assert spec.is_per_symbol
+            assert spec.slice_version(query) == (
+                f"{prefix}:600519.SH:2026-01-01:2026-06-30"
+            )
+            assert spec.slice_parameters(query) == {
+                "symbol": "600519.SH",
+                "start_date": "2026-01-01",
+                "end_date": "2026-06-30",
+            }
 
     def test_duplicate_registration_rejected(self) -> None:
         from finboard_backtest.background_jobs.dataset_sync.spec import SyncSpec

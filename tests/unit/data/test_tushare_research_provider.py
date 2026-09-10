@@ -180,6 +180,23 @@ class FakeTushareClient:
         return self.suspend_d_rows
 
 
+    def income(self, **kwargs: str) -> object:
+        """调用 ``income``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def balancesheet(self, **kwargs: str) -> object:
+        """调用 ``balancesheet``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def cashflow(self, **kwargs: str) -> object:
+        """调用 ``cashflow``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def dividend(self, **kwargs: str) -> object:
+        """调用 ``dividend``(#397;本测试不触达,返回空)。"""
+        return []
+
+
 def _provider(
     client: FakeTushareClient | None = None,
 ) -> TushareResearchDataProvider:
