@@ -1182,6 +1182,476 @@ class ResearchSuspensionModel(Base, IdMixin):
     )
 
 
+class _AnnouncedStatementModelMixin:
+    """三表 ORM 共用的身份/PIT 列(issue #397;列序对齐领域契约基类)。"""
+
+    batch_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("research_sync_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(32))
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(20))
+    announcement_date: Mapped[date] = mapped_column(Date)
+    report_period: Mapped[date] = mapped_column(Date)
+    formal_announcement_date: Mapped[date | None] = mapped_column(
+        Date, nullable=True
+    )
+    report_type: Mapped[str] = mapped_column(String(16), default="")
+    comp_type: Mapped[str] = mapped_column(String(16), default="")
+    update_flag: Mapped[str] = mapped_column(String(16), default="")
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+
+
+class ResearchIncomeStatementModel(_AnnouncedStatementModelMixin, Base, IdMixin):
+    """利润表公告版本(tushare ``income``,issue #397)。
+
+    同一报告期的修订与报告口径行(update_flag/report_type/comp_type)不互相
+    覆盖;PIT=公告日次日零点(上海)。金额单位人民币元(_research_numeric)。"""
+
+    __tablename__ = "research_income_statements"
+
+    basic_eps: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    diluted_eps: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_revenue: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    revenue: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    int_income: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    int_exp: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    fv_value_chg_gain: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    invest_income: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_cogs: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    oper_cost: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    biz_tax_surchg: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    sell_exp: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    admin_exp: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    fin_exp: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    rd_exp: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    assets_impair_loss: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    operate_profit: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    non_oper_income: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    non_oper_exp: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_profit: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    income_tax: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    n_income: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    n_income_attr_p: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    minority_gain: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    oth_compr_income: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    t_compr_income: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    compr_inc_attr_p: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    ebit: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    ebitda: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    distable_profit: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    continued_net_profit: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "symbol",
+            "report_period",
+            "announcement_date",
+            "update_flag",
+            "report_type",
+            "comp_type",
+            name="uq_research_income_revision",
+        ),
+        Index("ix_research_income_symbol_period", "symbol", "report_period"),
+        Index("ix_research_income_period_symbol", "report_period", "symbol"),
+    )
+
+
+
+class ResearchBalanceSheetModel(_AnnouncedStatementModelMixin, Base, IdMixin):
+    """资产负债表公告版本(tushare ``balancesheet``,issue #397)。流动性/杠杆/
+    营运资本与周转原料字段;PIT 与修订语义同利润表。"""
+
+    __tablename__ = "research_balance_sheets"
+
+    total_share: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    money_cap: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    trading_fl: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    notes_receiv: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    accounts_receiv: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    oth_receiv: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    prepayment: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    inventories: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_cur_assets: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    lt_eqt_invest: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    fix_assets: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    cip: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    intan_assets: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    goodwill: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    defer_tax_assets: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_nca: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_assets: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    st_borr: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    notes_payable: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    acct_payable: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    adv_receipts: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    contract_liab: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    payroll_payable: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    taxes_payable: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    non_cur_liab_due_1y: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    oth_cur_liab: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_cur_liab: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    lt_borr: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    bond_payable: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_ncl: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_liab: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    cap_rese: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    surplus_rese: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    undistr_porfit: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    treasury_share: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    minority_int: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_hldr_eqy_exc_min_int: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_hldr_eqy_inc_min_int: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "symbol",
+            "report_period",
+            "announcement_date",
+            "update_flag",
+            "report_type",
+            "comp_type",
+            name="uq_research_balance_revision",
+        ),
+        Index("ix_research_balance_symbol_period", "symbol", "report_period"),
+        Index("ix_research_balance_period_symbol", "report_period", "symbol"),
+    )
+
+
+
+class ResearchCashflowStatementModel(_AnnouncedStatementModelMixin, Base, IdMixin):
+    """现金流量表公告版本(tushare ``cashflow``,issue #397)。OCF/FCF/capex 与
+    盈利质量交叉验证字段;PIT 与修订语义同利润表。"""
+
+    __tablename__ = "research_cashflow_statements"
+
+    net_profit: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    finan_exp: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_fr_sale_sg: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    recp_tax_rends: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_inf_fr_operate_a: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_paid_goods_s: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_paid_to_for_empl: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_paid_for_taxes: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    oth_cash_pay_oper_act: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    st_cash_out_act: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    n_cashflow_act: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_recp_return_invest: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    n_recp_disp_fiolta: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    stot_inflows_inv_act: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_pay_acq_const_fiolta: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_paid_invest: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    stot_out_inv_act: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    n_cashflow_inv_act: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_recp_borrow: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    proc_issue_bonds: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    stot_cash_in_fnc_act: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_prepay_amt_borr: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_pay_dist_dpcp_int_exp: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    incl_dvd_profit_paid_sc_ms: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    stot_cashout_fnc_act: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    n_cash_flows_fnc_act: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    eff_fx_flu_cash: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    n_incr_cash_cash_equ: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_cash_equ_beg_period: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    c_cash_equ_end_period: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    free_cashflow: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    depr_fa_coga_dpba: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    amort_intang_assets: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    credit_impa_loss: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    loss_fv_chg: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    invest_loss: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "symbol",
+            "report_period",
+            "announcement_date",
+            "update_flag",
+            "report_type",
+            "comp_type",
+            name="uq_research_cashflow_revision",
+        ),
+        Index("ix_research_cashflow_symbol_period", "symbol", "report_period"),
+        Index("ix_research_cashflow_period_symbol", "report_period", "symbol"),
+    )
+
+
+class ResearchDividendModel(Base, IdMixin):
+    """分红送股进展记录(tushare ``dividend``,issue #397)。
+
+    上游无 update_flag;同一(分红年度, 公告日)的预案/股东大会通过/实施
+    多条进展行以 ``div_proc`` 区分并全保留。PIT=公告日次日零点(上海)。
+    """
+
+    __tablename__ = "research_dividends"
+
+    batch_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("research_sync_batches.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(32))
+    dataset_version: Mapped[str] = mapped_column(String(128))
+    symbol: Mapped[str] = mapped_column(String(20))
+    announcement_date: Mapped[date] = mapped_column(Date)
+    report_period: Mapped[date] = mapped_column(Date)
+    div_proc: Mapped[str] = mapped_column(String(32), default="")
+    stk_div: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    stk_bo_rate: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    stk_co_rate: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    cash_div: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    cash_div_tax: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    record_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    ex_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    pay_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    div_listdate: Mapped[date | None] = mapped_column(Date, nullable=True)
+    imp_ann_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "dataset_version",
+            "symbol",
+            "report_period",
+            "announcement_date",
+            "div_proc",
+            name="uq_research_dividend_revision",
+        ),
+        Index("ix_research_dividend_symbol_period", "symbol", "report_period"),
+        Index("ix_research_dividend_ex_date", "ex_date"),
+    )
+
+
 class FactorValueModel(Base, IdMixin):
     """快照内的规范化因子值与全市场/行业排名。"""
 

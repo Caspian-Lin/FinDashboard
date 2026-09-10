@@ -16,8 +16,12 @@ from finboard_data.quality import (
     ResearchDataQualityValidator,
 )
 from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
     DailySecurityMetrics,
+    DividendRecord,
     FinancialIndicator,
+    IncomeStatement,
     IndustryMembership,
     InstrumentProfile,
     SuspensionRecord,
@@ -220,6 +224,138 @@ class ResearchDataSyncService:
 
         return await self._sync(
             dataset=ResearchDataset.SUSPENSIONS,
+            source=source,
+            dataset_version=dataset_version,
+            code_version=code_version,
+            parameters=parameters,
+            raw_payload=raw_payload,
+            report=report,
+            writer=writer,
+        )
+
+    async def sync_income_statements(
+        self,
+        *,
+        source: str,
+        dataset_version: str,
+        code_version: str,
+        parameters: Mapping[str, object],
+        raw_payload: object | None,
+        records: list[IncomeStatement],
+    ) -> ResearchSyncBatchModel:
+        """校验并同步利润表公告修订(issue #397)。"""
+        report = self._validator_factory().validate_income_statements(
+            records,
+            expected_source=source,
+        )
+
+        async def writer(
+            repo: ResearchDatasetRepository,
+            batch: ResearchSyncBatchModel,
+        ) -> int:
+            return await repo.upsert_income_statements(batch, records)
+
+        return await self._sync(
+            dataset=ResearchDataset.INCOME_STATEMENTS,
+            source=source,
+            dataset_version=dataset_version,
+            code_version=code_version,
+            parameters=parameters,
+            raw_payload=raw_payload,
+            report=report,
+            writer=writer,
+        )
+
+    async def sync_balance_sheets(
+        self,
+        *,
+        source: str,
+        dataset_version: str,
+        code_version: str,
+        parameters: Mapping[str, object],
+        raw_payload: object | None,
+        records: list[BalanceSheet],
+    ) -> ResearchSyncBatchModel:
+        """校验并同步资产负债表公告修订(issue #397)。"""
+        report = self._validator_factory().validate_balance_sheets(
+            records,
+            expected_source=source,
+        )
+
+        async def writer(
+            repo: ResearchDatasetRepository,
+            batch: ResearchSyncBatchModel,
+        ) -> int:
+            return await repo.upsert_balance_sheets(batch, records)
+
+        return await self._sync(
+            dataset=ResearchDataset.BALANCE_SHEETS,
+            source=source,
+            dataset_version=dataset_version,
+            code_version=code_version,
+            parameters=parameters,
+            raw_payload=raw_payload,
+            report=report,
+            writer=writer,
+        )
+
+    async def sync_cashflow_statements(
+        self,
+        *,
+        source: str,
+        dataset_version: str,
+        code_version: str,
+        parameters: Mapping[str, object],
+        raw_payload: object | None,
+        records: list[CashflowStatement],
+    ) -> ResearchSyncBatchModel:
+        """校验并同步现金流量表公告修订(issue #397)。"""
+        report = self._validator_factory().validate_cashflow_statements(
+            records,
+            expected_source=source,
+        )
+
+        async def writer(
+            repo: ResearchDatasetRepository,
+            batch: ResearchSyncBatchModel,
+        ) -> int:
+            return await repo.upsert_cashflow_statements(batch, records)
+
+        return await self._sync(
+            dataset=ResearchDataset.CASHFLOW_STATEMENTS,
+            source=source,
+            dataset_version=dataset_version,
+            code_version=code_version,
+            parameters=parameters,
+            raw_payload=raw_payload,
+            report=report,
+            writer=writer,
+        )
+
+    async def sync_dividends(
+        self,
+        *,
+        source: str,
+        dataset_version: str,
+        code_version: str,
+        parameters: Mapping[str, object],
+        raw_payload: object | None,
+        records: list[DividendRecord],
+    ) -> ResearchSyncBatchModel:
+        """校验并同步分红送股进展记录(issue #397)。"""
+        report = self._validator_factory().validate_dividends(
+            records,
+            expected_source=source,
+        )
+
+        async def writer(
+            repo: ResearchDatasetRepository,
+            batch: ResearchSyncBatchModel,
+        ) -> int:
+            return await repo.upsert_dividends(batch, records)
+
+        return await self._sync(
+            dataset=ResearchDataset.DIVIDENDS,
             source=source,
             dataset_version=dataset_version,
             code_version=code_version,
