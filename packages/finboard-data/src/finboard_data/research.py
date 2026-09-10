@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field as _dc_field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -90,6 +91,41 @@ class FinancialIndicator:
     revenue_yoy: Decimal | None
     net_profit_yoy: Decimal | None
     operating_cash_flow_yoy: Decimal | None
+    # ---- issue #401 批次 3 扩展字段(新字段带默认 None,旧构造零破坏)----
+    # 增长(YoY / 单季 YoY / 单季 QoQ)
+    operating_revenue_yoy: Decimal | None = _dc_field(default=None, kw_only=True)
+    basic_eps_yoy: Decimal | None = _dc_field(default=None, kw_only=True)
+    deducted_netprofit_yoy: Decimal | None = _dc_field(default=None, kw_only=True)
+    operating_profit_yoy: Decimal | None = _dc_field(default=None, kw_only=True)
+    revenue_yoy_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    revenue_qoq: Decimal | None = _dc_field(default=None, kw_only=True)
+    netprofit_yoy_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    netprofit_qoq: Decimal | None = _dc_field(default=None, kw_only=True)
+    # 盈利质量(ROA / ROIC / 扣非 / 单季盈利 / 期间费用率)
+    return_on_assets: Decimal | None = _dc_field(default=None, kw_only=True)
+    return_on_assets_np: Decimal | None = _dc_field(default=None, kw_only=True)
+    roe_deducted: Decimal | None = _dc_field(default=None, kw_only=True)
+    roic: Decimal | None = _dc_field(default=None, kw_only=True)
+    roe_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    return_on_assets_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    grossprofit_margin_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    netprofit_margin_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    expense_to_revenue: Decimal | None = _dc_field(default=None, kw_only=True)
+    # 营运效率(周转率族,上游为「次/报告期」倍数,原值小数)
+    inventory_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    receivables_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    current_assets_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    fixed_assets_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    total_assets_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    # 流动性 / 偿债(上游为倍数或比率,原值小数)
+    current_ratio: Decimal | None = _dc_field(default=None, kw_only=True)
+    quick_ratio: Decimal | None = _dc_field(default=None, kw_only=True)
+    debt_to_equity: Decimal | None = _dc_field(default=None, kw_only=True)
+    interest_coverage: Decimal | None = _dc_field(default=None, kw_only=True)
+    equity_multiplier: Decimal | None = _dc_field(default=None, kw_only=True)
+    # 现金流质量(上游为比率,原值小数)
+    ocf_to_revenue: Decimal | None = _dc_field(default=None, kw_only=True)
+    ocf_to_debt: Decimal | None = _dc_field(default=None, kw_only=True)
     source: str
     observed_at: datetime
     available_at: datetime
@@ -170,6 +206,27 @@ class ConvertibleProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class SuspensionRecord:
+    """单标的单日停复牌记录(tushare ``suspend_d``,issue #396)。
+
+    ``suspend_kind`` 与缓存侧 ``TushareLifecycleEvent.event_type`` 同词表:
+    ``suspension_day``(全天停牌)/ ``intraday_suspension``(盘中停牌)/
+    ``resumption``(复牌)。PIT=当日:``available_at`` = 交易日 09:30
+    (上海)—— 全天停牌开盘即可观察,计划停复牌按生效日可见(不早于
+    生效日看到,保守方向)。
+    """
+
+    symbol: str
+    trade_date: date
+    suspend_kind: str
+    suspend_type: str
+    suspend_timing: str | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class IndexProfile:
     """指数基础信息快照(tushare ``index_basic``,issue #394)。
 
@@ -194,6 +251,9 @@ class IndexProfile:
     base_date: date | None
     list_date: date | None
     list_status: str | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
     source: str
     observed_at: datetime
     available_at: datetime
@@ -244,27 +304,6 @@ class FuturesTradeCalendarDay:
     cal_date: date
     is_open: bool
     pretrade_date: date | None
-    source: str
-    observed_at: datetime
-    available_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class SuspensionRecord:
-    """单标的单日停复牌记录(tushare ``suspend_d``,issue #396)。
-
-    ``suspend_kind`` 与缓存侧 ``TushareLifecycleEvent.event_type`` 同词表:
-    ``suspension_day``(全天停牌)/ ``intraday_suspension``(盘中停牌)/
-    ``resumption``(复牌)。PIT=当日:``available_at`` = 交易日 09:30
-    (上海)—— 全天停牌开盘即可观察,计划停复牌按生效日可见(不早于
-    生效日看到,保守方向)。
-    """
-
-    symbol: str
-    trade_date: date
-    suspend_kind: str
-    suspend_type: str
-    suspend_timing: str | None
     source: str
     observed_at: datetime
     available_at: datetime

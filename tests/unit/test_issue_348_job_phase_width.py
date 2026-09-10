@@ -191,15 +191,11 @@ class TestDataSyncDonePhaseShort:
                 )
 
             async def backfill_listing_dates(
-                self, records: object
+                self, listing: dict[str, tuple[object, object | None]]
             ) -> dict[str, int]:
-                # #394 起执行器在发现后恒调用(空映射 = 无可回填域)。
                 return {
-                    "scoped": 0,
-                    "backfilled_list_date": 0,
-                    "backfilled_delist_date": 0,
+                    "backfilled_list_date": len(listing),
                     "missing_list_date": 0,
-                    "missing_delist_date": 0,
                 }
 
         monkeypatch.setattr(discovery_mod, "UniverseDiscovery", _FakeDiscovery)

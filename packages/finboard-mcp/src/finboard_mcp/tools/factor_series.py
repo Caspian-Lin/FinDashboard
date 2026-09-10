@@ -1,11 +1,16 @@
-"""``finboard.factor_series.*`` 工具 —— 因子序列构建入队与查询(issue #360)。
+"""``finboard.factor_series.*`` 工具 —— 因子序列构建入队与查询(issue #360;
+#398 放行平台预置因子 kind=predefined_factor)。
 
 内容寻址因子序列(FS- 前缀,``research_factor_series``)的两个工具:
 
 * ``finboard_factor_series_build``(写)—— 入队 ``kind=factor_series_build``
   后台任务(worker 并发 2,#375;入队前同步做缓存检查:``series_key``(由
-  resolved commit x bars 主发布 x 研究发布联合集 x params x 窗口 内容寻址)
+  代码锚 x bars 主发布 x 研究发布联合集 x params x 窗口 内容寻址)
   已存在且 ``content_checksum`` 一致 → 直接返回 ``unchanged``,不创建 job。
+  ``kind=factor``(用户沙箱因子)的代码锚 = 已晋级 active 产物的 git
+  commit;``kind=predefined_factor``(#398)的代码锚 = 预置因子目录的
+  实现版本锚,进程内执行免容器(无 Docker 前置),commit/artifact_id/
+  params 不可传。
 * ``finboard_factor_series_get``(只读)—— ``view=summary|detail`` 默认
   summary(#206 瘦身先例:头部 + 覆盖统计,不含逐日 values;detail 才给
   dates + values 全量)。
@@ -29,6 +34,11 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
 from finboard_backtest.research_code import is_promoted_artifact, promotion_status
+from finboard_data.factor_lab import (
+    PREDEFINED_FACTOR_KIND,
+    USER_FACTOR_KIND,
+    series_factor_name,
+)
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
@@ -45,7 +55,6 @@ from finboard_shared.background_jobs import (
 )
 
 _AGENT_ACTOR = "agent:mcp"
-_USER_FACTOR_KIND = "factor"
 
 
 async def _require_write_enabled(app: McpAppContext) -> None:
@@ -85,7 +94,9 @@ def _series_summary(record: Any) -> dict[str, Any]:
                 "code_artifact": record.code_artifact,
                 "code_commit": record.code_commit,
                 "kind": record.kind,
-                "factor_name": f"u_{record.code_artifact}",
+                "factor_name": series_factor_name(
+                    str(record.kind), str(record.code_artifact)
+                ),
                 "release_id": record.release_id,
                 "dataset_release_ids": list(record.dataset_release_ids),
                 "params": record.params,
@@ -114,17 +125,37 @@ async def build_enqueue(
     commit: str | None = None,
     artifact_id: str | None = None,
     params: dict[str, Any] | None = None,
+    kind: str = USER_FACTOR_KIND,
 ) -> ToolEnvelope:
     """预检 + 缓存检查通过后入队 ``kind=factor_series_build``。"""
 
     async def _do() -> dict[str, Any]:
         await _require_write_enabled(app)
+        if kind not in (USER_FACTOR_KIND, PREDEFINED_FACTOR_KIND):
+            raise McpToolError(
+                "invalid_argument",
+                "kind 须为 factor(用户沙箱因子)或 predefined_factor"
+                f"(平台预置因子,#398),收到 {kind!r}",
+            )
+        # 预置因子允许以 p_ 引用名传入,统一归一为目录裸名。
+        bare_name = name.removeprefix("p_") if kind == PREDEFINED_FACTOR_KIND else name
         settings = app.settings
-        if not getattr(settings, "research_sandbox_enabled", False):
+        if kind == USER_FACTOR_KIND and not getattr(
+            settings, "research_sandbox_enabled", False
+        ):
+            # predefined 进程内执行无 Docker 前置(#398),沙箱门只锁用户因子。
             raise McpToolError(
                 "invalid_argument",
                 "研究沙箱未启用(research_sandbox_enabled=false);"
                 "启用前置:Docker Desktop 运行 + 构建镜像 docker/research-sandbox",
+            )
+        if kind == PREDEFINED_FACTOR_KIND and (
+            commit is not None or artifact_id is not None or params
+        ):
+            raise McpToolError(
+                "invalid_argument",
+                "kind=predefined_factor 不接受 commit/artifact_id/params"
+                "(实现版本由预置因子目录锚定;参数化因子按窗口变体展开注册)",
             )
         start = _parse_date_field(window_start, "window_start")
         end = _parse_date_field(window_end, "window_end")
@@ -141,53 +172,68 @@ async def build_enqueue(
             )
 
         async with app.session_maker() as session:
-            artifact_repo = ResearchCodeArtifactRepository(session)
-            if artifact_id is not None:
-                artifact = await artifact_repo.get(artifact_id)
-                if artifact is None:
-                    raise McpToolError(
-                        "not_found", f"研究代码产物不存在: {artifact_id}"
-                    )
-                if artifact.kind != _USER_FACTOR_KIND or artifact.name != name:
-                    raise McpToolError(
-                        "invalid_argument",
-                        f"artifact_id 与 (factor,{name}) 不一致: {artifact_id}",
-                    )
-                if artifact.status == "retired":
-                    raise McpToolError(
-                        "invalid_argument",
-                        f"artifact 已 retired,不能构建新序列: {artifact_id}",
-                    )
-                if artifact.status == "active" and not is_promoted_artifact(artifact):
-                    raise McpToolError(
-                        "invalid_argument",
-                        f"artifact active 但未通过 screen+OOS 晋级门: {artifact_id}"
-                        f" promotion_status={promotion_status(artifact)}",
-                    )
-            else:
-                artifact = await artifact_repo.get_active(
-                    kind=_USER_FACTOR_KIND, name=name
+            if kind == PREDEFINED_FACTOR_KIND:
+                from finboard_backtest.factors.predefined.registry import (
+                    is_registered_predefined_factor,
+                    predefined_factor_commit,
+                    predefined_factor_names,
                 )
-                if artifact is None:
+
+                if not is_registered_predefined_factor(bare_name):
                     raise McpToolError(
                         "not_found",
-                        f"没有 active+passed 的因子研究代码: name={name}"
-                        "(先 finboard_research_code_submit 并完成晋级)",
+                        f"未注册的平台预置因子: {bare_name!r};可用: "
+                        f"{list(predefined_factor_names())}",
                     )
-                if not is_promoted_artifact(artifact):
+                resolved_commit = predefined_factor_commit(bare_name)
+            else:
+                artifact_repo = ResearchCodeArtifactRepository(session)
+                if artifact_id is not None:
+                    artifact = await artifact_repo.get(artifact_id)
+                    if artifact is None:
+                        raise McpToolError(
+                            "not_found", f"研究代码产物不存在: {artifact_id}"
+                        )
+                    if artifact.kind != kind or artifact.name != bare_name:
+                        raise McpToolError(
+                            "invalid_argument",
+                            f"artifact_id 与 ({kind},{bare_name}) 不一致: {artifact_id}",
+                        )
+                    if artifact.status == "retired":
+                        raise McpToolError(
+                            "invalid_argument",
+                            f"artifact 已 retired,不能构建新序列: {artifact_id}",
+                        )
+                    if artifact.status == "active" and not is_promoted_artifact(artifact):
+                        raise McpToolError(
+                            "invalid_argument",
+                            f"artifact active 但未通过 screen+OOS 晋级门: {artifact_id}"
+                            f" promotion_status={promotion_status(artifact)}",
+                        )
+                else:
+                    artifact = await artifact_repo.get_active(
+                        kind=kind, name=bare_name
+                    )
+                    if artifact is None:
+                        raise McpToolError(
+                            "not_found",
+                            f"没有 active+passed 的因子研究代码: name={bare_name}"
+                            "(先 finboard_research_code_submit 并完成晋级)",
+                        )
+                    if not is_promoted_artifact(artifact):
+                        raise McpToolError(
+                            "invalid_argument",
+                            f"artifact 未通过 screen+OOS 晋级门: {artifact.artifact_id}"
+                            f" promotion_status={promotion_status(artifact)}",
+                        )
+                if commit is not None and commit != artifact.commit:
                     raise McpToolError(
                         "invalid_argument",
-                        f"artifact 未通过 screen+OOS 晋级门: {artifact.artifact_id}"
-                        f" promotion_status={promotion_status(artifact)}",
+                        f"指定 commit {commit[:12]} 不是该 artifact 的 active 引用"
+                        f"(artifact={artifact.commit[:12]});历史版本先 "
+                        "finboard_research_code_rollback",
                     )
-            if commit is not None and commit != artifact.commit:
-                raise McpToolError(
-                    "invalid_argument",
-                    f"指定 commit {commit[:12]} 不是该 artifact 的 active 引用"
-                    f"(artifact={artifact.commit[:12]});历史版本先 "
-                    "finboard_research_code_rollback",
-                )
-            resolved_commit = commit or artifact.commit
+                resolved_commit = commit or artifact.commit
 
             release_repo = ResearchDatasetReleaseRepository(session)
             if await release_repo.get(release_id) is None:
@@ -201,7 +247,7 @@ async def build_enqueue(
             # 缓存检查:series_key 已存在且 checksum 一致 → unchanged,不建 job。
             series_repo = FactorSeriesRepository(session)
             cached = await series_repo.find_matching(
-                code_artifact=name,
+                code_artifact=bare_name,
                 release_id=release_id,
                 dataset_release_ids=joint,
                 params=params or {},
@@ -226,14 +272,17 @@ async def build_enqueue(
                 )
 
             payload: dict[str, Any] = {
-                "kind": _USER_FACTOR_KIND,
-                "name": name,
-                "commit": resolved_commit,
+                "kind": kind,
+                "name": bare_name,
                 "release_id": release_id,
                 "dataset_release_ids": joint,
                 "window_start": start.isoformat(),
                 "window_end": end.isoformat(),
             }
+            if kind == USER_FACTOR_KIND:
+                # 用户因子 payload 形状零变化(commit 恒在);predefined 的
+                # 实现锚由执行器从目录解析,payload 不携带。
+                payload["commit"] = resolved_commit
             if artifact_id is not None:
                 payload["artifact_id"] = artifact_id
             if params is not None:
@@ -331,24 +380,28 @@ def register(mcp: MCPServer) -> None:
         name="finboard_factor_series_build",
         description=(
             "入队因子序列构建(kind=factor_series_build 后台任务,worker 并发 2):"
-            "已晋级 active 因子代码按窗口逐决策日在沙箱容器构建内容寻址序列"
-            "(series_key = sha256(commit|bars 主发布|研究发布联合集|params|窗口)),"
-            "窗口内逐决策日截面 values + 质量归档冻结进 research_factor_series"
-            "(FS- 前缀),供 research run 的 factor_series_ids 引用(u_ 因子按"
-            "决策日索引,multi_period 可用)。release_id 为 bars 主发布,自动"
+            "kind=factor(默认,用户沙箱因子)按窗口在沙箱容器逐决策日构建内容"
+            "寻址序列(series_key = sha256(commit|bars 主发布|研究发布联合集|"
+            "params|窗口)),kind=predefined_factor(#398,平台预置因子)按目录"
+            "实现锚在 worker 进程内构建(免容器,无 Docker 前置;name 须为注册"
+            "的目录裸名,如 return_21d/return_63d/return_126d/return_252d,"
+            "不接受 commit/artifact_id/params),序列冻结进 research_factor_series"
+            "(FS- 前缀),供 research run 的 factor_series_ids 引用(u_ / p_ 因子"
+            "按决策日索引,multi_period 可用)。release_id 为 bars 主发布,自动"
             "进挂载(必须为 bars 类发布,否则秒拒);dataset_release_ids 是"
-            "研究数据发布联合集,不得含 bars 主发布。入队预检:sandbox 开启、"
-            "(factor,name) 有 active 产物(显式 artifact_id 也可,但未通过晋级门"
-            "拒绝)、release 均已登记。缓存命中(series_key 已存在且 content_checksum"
-            " 一致)直接返回 unchanged,不创建任务;同参数任务此前 failed/"
-            "cancelled 时重提交会新建任务(#371),不会命中失败尸体。构建完成后"
-            "抽 2 个截断点做前缀不变性审计(基线复用主构建产物,变体挂载由"
-            "基线 Arrow 过滤派生),检出前视即 failed=lookahead_detected。"
-            "换 bars 发布的托管批量重建 = 对每个失效序列逐条调用本工具(内容"
-            "寻址缓存使未受影响的组合自动 unchanged)。失败分类:sandbox_disabled /"
-            " static 类 / runtime_error / timeout / oom_killed / "
-            "output_contract_violation / lookahead_detected / "
-            "quality_gate_failed。返回 job_id,finboard_job_get 轮询"
+            "研究数据发布联合集,不得含 bars 主发布。入队预检:factor 需 sandbox "
+            "开启且 (factor,name) 有 active 产物(显式 artifact_id 也可,但未通过"
+            "晋级门拒绝);predefined 只需名称已注册;release 均已登记。缓存命中"
+            "(series_key 已存在且 content_checksum 一致)直接返回 unchanged,不"
+            "创建任务;同参数任务此前 failed/cancelled 时重提交会新建任务(#371),"
+            "不会命中失败尸体。构建完成后抽 2 个截断点做前缀不变性审计(基线复用"
+            "主构建产物,变体挂载由基线 Arrow 过滤派生),检出前视即 "
+            "failed=lookahead_detected。换 bars 发布的托管批量重建 = 对每个失效"
+            "序列逐条调用本工具(内容寻址缓存使未受影响的组合自动 unchanged)。"
+            "失败分类:sandbox_disabled / static 类 / runtime_error / timeout / "
+            "oom_killed / output_contract_violation / lookahead_detected / "
+            "quality_gate_failed / unknown_predefined_factor / "
+            "predefined_version_mismatch。返回 job_id,finboard_job_get 轮询"
             "(result_ref=FS-...),终态后 finboard_factor_series_get 取内容。"
             "纯离线研究域,不连 broker 不下单。"
         ),
@@ -362,6 +415,7 @@ def register(mcp: MCPServer) -> None:
         commit: str | None = None,
         artifact_id: str | None = None,
         params: dict[str, Any] | None = None,
+        kind: str = USER_FACTOR_KIND,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await build_enqueue(
@@ -374,6 +428,7 @@ def register(mcp: MCPServer) -> None:
             commit=commit,
             artifact_id=artifact_id,
             params=params,
+            kind=kind,
         )
 
     @mcp.tool(

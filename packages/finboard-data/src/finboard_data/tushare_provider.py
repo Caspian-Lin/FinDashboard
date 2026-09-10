@@ -67,9 +67,67 @@ _DAILY_BASIC_FIELDS = (
     "pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,total_share,float_share,"
     "free_share,total_mv,circ_mv,limit_status"
 )
+#: fina_indicator 字段映射表(issue #401 批次 3 扩展,单一事实源):
+#: ``(tushare 列名, 领域字段名, 换算方式)``。换算方式:
+#: * ``"percent"`` —— 上游百分数,``_percentage`` 归一为小数(3.2 → 0.032),
+#:   同比/环比/利润率/回报率/费用率族;
+#: * ``"decimal"`` —— 上游原值小数(2026-09 实测口径):周转率(次/报告期)、
+#:   流动/速动比率、产权比率、ICR(倍数)、权益乘数、现金流比率
+#:   (ocf_to_or ≈ 0.54 即 54%,上游给的是比率不是百分数)。
+#: 发布白名单 ``FINANCIAL_INDICATORS_FIELDS`` 与表列(迁移 #401)以领域
+#: 字段名为准,三方一致性由单测锁定。
+_FINANCIAL_FIELD_MAP: tuple[tuple[str, str, str], ...] = (
+    # 基础每股/回报(#171 既有 12 字段)
+    ("eps", "eps", "decimal"),
+    ("dt_eps", "diluted_eps", "decimal"),
+    ("bps", "book_value_per_share", "decimal"),
+    ("ocfps", "operating_cash_flow_per_share", "decimal"),
+    ("roe", "return_on_equity", "percent"),
+    ("roe_waa", "weighted_return_on_equity", "percent"),
+    ("grossprofit_margin", "gross_profit_margin", "percent"),
+    ("netprofit_margin", "net_profit_margin", "percent"),
+    ("debt_to_assets", "debt_to_assets", "percent"),
+    ("tr_yoy", "revenue_yoy", "percent"),
+    ("netprofit_yoy", "net_profit_yoy", "percent"),
+    ("ocf_yoy", "operating_cash_flow_yoy", "percent"),
+    # 增长:YoY / 单季 YoY / 单季 QoQ(#401)
+    ("or_yoy", "operating_revenue_yoy", "percent"),
+    ("basic_eps_yoy", "basic_eps_yoy", "percent"),
+    ("dt_netprofit_yoy", "deducted_netprofit_yoy", "percent"),
+    ("op_yoy", "operating_profit_yoy", "percent"),
+    ("q_gr_yoy", "revenue_yoy_q", "percent"),
+    ("q_gr_qoq", "revenue_qoq", "percent"),
+    ("q_netprofit_yoy", "netprofit_yoy_q", "percent"),
+    ("q_netprofit_qoq", "netprofit_qoq", "percent"),
+    # 盈利质量:ROA / ROIC / 扣非 / 单季盈利 / 期间费用率(#401)
+    ("roa", "return_on_assets", "percent"),
+    ("npta", "return_on_assets_np", "percent"),
+    ("roe_dt", "roe_deducted", "percent"),
+    ("roic", "roic", "percent"),
+    ("q_roe", "roe_q", "percent"),
+    ("q_npta", "return_on_assets_q", "percent"),
+    ("q_gsprofit_margin", "grossprofit_margin_q", "percent"),
+    ("q_netprofit_margin", "netprofit_margin_q", "percent"),
+    ("expense_of_sales", "expense_to_revenue", "percent"),
+    # 营运效率:周转率族(次/报告期,原值小数,#401)
+    ("inv_turn", "inventory_turnover", "decimal"),
+    ("ar_turn", "receivables_turnover", "decimal"),
+    ("ca_turn", "current_assets_turnover", "decimal"),
+    ("fa_turn", "fixed_assets_turnover", "decimal"),
+    ("assets_turn", "total_assets_turnover", "decimal"),
+    # 流动性 / 偿债(倍数或比率,原值小数,#401)
+    ("current_ratio", "current_ratio", "decimal"),
+    ("quick_ratio", "quick_ratio", "decimal"),
+    ("debt_to_eqt", "debt_to_equity", "decimal"),
+    ("ebit_to_interest", "interest_coverage", "decimal"),
+    ("assets_to_eqt", "equity_multiplier", "decimal"),
+    # 现金流质量(比率,原值小数,#401)
+    ("ocf_to_or", "ocf_to_revenue", "decimal"),
+    ("ocf_to_debt", "ocf_to_debt", "decimal"),
+)
 _FINANCIAL_FIELDS = (
-    "ts_code,ann_date,end_date,update_flag,eps,dt_eps,bps,ocfps,roe,roe_waa,"
-    "grossprofit_margin,netprofit_margin,debt_to_assets,tr_yoy,netprofit_yoy,ocf_yoy"
+    "ts_code,ann_date,end_date,update_flag,"
+    + ",".join(column for column, _, _ in _FINANCIAL_FIELD_MAP)
 )
 _INDUSTRY_FIELDS = (
     "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,in_date,out_date,is_new"
@@ -86,6 +144,19 @@ _CB_BASIC_FIELDS = (
 )
 #: cb_basic 在市 + 摘牌合计千级;远低于该值的安全截断护栏。
 _CB_BASIC_LIMIT = 5000
+#: suspend_d 单日停复牌字段白名单(issue #396,doc_id=214,2000 积分档)。
+_SUSPEND_D_FIELDS = "ts_code,trade_date,suspend_timing,suspend_type"
+#: suspend_d 按日全市场单日行数的安全截断护栏(全市场 ~5400 只,单日停复牌
+#: 枚举远低于该值)。
+_SUSPEND_D_LIMIT = 6000
+#: suspend_type 词表(S=停牌,R=复牌);suspend_timing 非空表示盘中停牌。
+_SUSPEND_TYPE_SUSPEND = "S"
+_SUSPEND_TYPE_RESUME = "R"
+#: 停复牌 kind 词表(与缓存侧 TushareLifecycleEvent.event_type 同词表,
+#: 便于 research_suspensions 与缓存侧 suspension_events 对账)。
+SUSPEND_KIND_SUSPENSION_DAY = "suspension_day"
+SUSPEND_KIND_INTRADAY = "intraday_suspension"
+SUSPEND_KIND_RESUMPTION = "resumption"
 #: 指数基础信息请求字段白名单(issue #394;2026-09-10 实测)。**list_status
 #: 不在请求列**:上游按返回分片动态裁列,CSI 等市场整批缺失该列(请求了也
 #: 不回),请求里去掉、解析按可选处理;在市/退市判断交 lifecycle diff。
@@ -101,39 +172,6 @@ _INDEX_BASIC_PAGE_SIZE = 5000
 #: ``930955.CSI`` / ``H30269.CSI`` / ``.MSCI`` 等编外市场代码(#394),不能
 #: 复用股票 6 位数字契约,否则编外市场全被当脏行跳过、对账口径失真。
 _INDEX_SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{2,12}\.[A-Z0-9]{2,8}$")
-#: 期货合约基础信息请求字段白名单(issue #395;2026-09-09 实测列形态)。
-#: multiplier 上游文档标注「只适用于国债期货、指数期货」;quote_unit_desc
-#: 是最小变动价位描述(如 ``0.2指数点``);**上游无保证金率列**(保证金率
-#: 仍由受控登记表 / FuturesRule 承载,#267 口径)。
-_FUT_BASIC_FIELDS = (
-    "ts_code,name,fut_code,multiplier,quote_unit_desc,list_date,delist_date"
-)
-#: fut_basic 单次调用返回全部行(CFFEX 全历史 720 行 / SHFE 3613 行,
-#: 2026-09-09 实测;无文档化分页参数),护栏按全历史单所上限宽松取值。
-_FUT_BASIC_LIMIT = 5000
-#: 具体月份合约代码形制:品种字母段 + 3~4 位年月数字(``IF2601`` /
-#: ``TA1001`` / ``LC2602``);主力 / 当月等连续合约形制(``IF`` / ``IFL`` /
-#: ``IFL1`` / ``TSL``)不匹配 —— 连续序列是 tushare vendor 产物,不是
-#: 可成交合约,不进合约登记(本仓主连由受控登记表承载,#267)。
-_FUTURES_CONTRACT_SYMBOL_PATTERN = re.compile(r"^[A-Z]+\d{3,4}$")
-#: 期货交易日历请求字段白名单(issue #395;与 #396 股票 trade_cal 同构)。
-_FUT_TRADE_CAL_FIELDS = "exchange,cal_date,is_open,pretrade_date"
-#: fut_trade_cal 单年 ~365 行;多年窗口护栏按 30 年上限宽松取值。
-_FUT_TRADE_CAL_LIMIT = 12000
-#: suspend_d 单日停复牌字段白名单(issue #396,doc_id=214,2000 积分档)。
-_SUSPEND_D_FIELDS = "ts_code,trade_date,suspend_timing,suspend_type"
-#: suspend_d 按日全市场单日行数的安全截断护栏(全市场 ~5400 只,单日停复牌
-#: 枚举远低于该值)。
-_SUSPEND_D_LIMIT = 6000
-#: suspend_type 词表(S=停牌,R=复牌);suspend_timing 非空表示盘中停牌。
-_SUSPEND_TYPE_SUSPEND = "S"
-_SUSPEND_TYPE_RESUME = "R"
-#: 停复牌 kind 词表(与缓存侧 TushareLifecycleEvent.event_type 同词表,
-#: 便于 research_suspensions 与缓存侧 suspension_events 对账)。
-SUSPEND_KIND_SUSPENSION_DAY = "suspension_day"
-SUSPEND_KIND_INTRADAY = "intraday_suspension"
-SUSPEND_KIND_RESUMPTION = "resumption"
-
 
 def _resolve_skip_dirty_rows(policy: str | None, *, default: bool) -> bool:
     """归一行级口径:None 回落方法默认,非法值具名拒绝(fail-closed)。"""
@@ -185,17 +223,46 @@ class TushareClient(Protocol):
         """调用 ``cb_basic``(可转债基础条款,#265)。"""
         ...
 
-    def index_basic(self, **kwargs: str) -> object:
-        """调用 ``index_basic``(指数基础信息,#394)。"""
-        ...
-
     def suspend_d(self, **kwargs: str) -> object:
         """调用 ``suspend_d``(每日停复牌信息,#396)。"""
         ...
 
-    # ``fut_basic`` / ``fut_trade_cal``(#395)不进本 Protocol:端点调用走
-    # ``_call`` 的 getattr 探测(缺失具名报错),fake client 只需实现被测
-    # 端点 —— Protocol 列全端点会迫使全部离线 stub 空实现。
+    def index_basic(self, **kwargs: str) -> object:
+        """调用 ``index_basic``(指数基础信息,#394)。"""
+        ...
+
+
+
+_FUT_BASIC_FIELDS = (
+    "ts_code,name,fut_code,multiplier,quote_unit_desc,list_date,delist_date"
+)
+
+_FUT_BASIC_LIMIT = 5000
+
+_FUTURES_CONTRACT_SYMBOL_PATTERN = re.compile(r"^[A-Z]+\d{3,4}$")
+
+_FUT_TRADE_CAL_FIELDS = "exchange,cal_date,is_open,pretrade_date"
+
+_FUT_TRADE_CAL_LIMIT = 12000
+
+_PRICE_TICK_PATTERN = re.compile(r"^\d+(?:\.\d+)?")
+
+def _parse_price_tick(quote_unit_desc: str | None) -> Decimal | None:
+    """从 ``quote_unit_desc`` 解析最小变动价位(issue #395)。
+
+    实测形制 ``0.2指数点`` / ``0.005人民币元``:取前导数字;无前导数字或
+    缺列返回 None(缺失可见,不虚构)。
+    """
+    if not quote_unit_desc:
+        return None
+    match = _PRICE_TICK_PATTERN.match(quote_unit_desc.strip())
+    if match is None:
+        return None
+    try:
+        value = Decimal(match.group(0))
+    except InvalidOperation:
+        return None
+    return value if value.is_finite() and value > 0 else None
 
 
 class TushareResearchDataProvider:
@@ -447,6 +514,78 @@ class TushareResearchDataProvider:
                     by_symbol[item.symbol] = item
         return sorted(by_symbol.values(), key=lambda item: item.symbol)
 
+    async def fetch_suspensions(
+        self,
+        trade_date: date,
+        *,
+        dirty_row_policy: str | None = None,
+    ) -> list[SuspensionRecord]:
+        """读取指定交易日的全市场停复牌枚举(issue #396,2000 积分档)。
+
+        按日全市场枚举(#392 统一口径):默认整批拒;``dirty_row_policy="skip"``
+        时单行契约违规跳过并具名告警(截断防护与交易日一致性检查仍整批拒)。
+        非交易日上游返回空列表(框架按空切片跳过,不产生批次行)。
+        ``suspend_kind`` 与缓存侧 ``TushareLifecycleEvent.event_type`` 同词表;
+        PIT=当日:``available_at`` = 交易日 09:30(上海,开盘即可观察)。
+        """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=False)
+        observed_at = self._observed_at()
+        rows = await self._call(
+            "suspend_d",
+            trade_date=_format_date(trade_date),
+            fields=_SUSPEND_D_FIELDS,
+        )
+        _reject_possible_truncation(rows, "suspend_d", limit=_SUSPEND_D_LIMIT)
+        records = self._parse_rows(
+            rows,
+            self._parse_suspension,
+            observed_at=observed_at,
+            endpoint="suspend_d",
+            skip_dirty_rows=skip_dirty,
+        )
+        if any(item.trade_date != trade_date for item in records):
+            raise ResearchDataContractError(
+                "Tushare suspend_d 返回了请求交易日之外的记录"
+            )
+        return sorted(records, key=lambda item: (item.symbol, item.suspend_kind))
+
+    @staticmethod
+    def _parse_suspension(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> SuspensionRecord:
+        endpoint = "suspend_d"
+        _require_fields(row, _SUSPEND_D_FIELDS, endpoint, index)
+        business_date = _required_date(row, "trade_date", endpoint, index)
+        suspend_type = _required_text(row, "suspend_type", endpoint, index).upper()
+        suspend_timing = _optional_text(row, "suspend_timing")
+        if suspend_type == _SUSPEND_TYPE_SUSPEND:
+            kind = (
+                SUSPEND_KIND_INTRADAY
+                if suspend_timing
+                else SUSPEND_KIND_SUSPENSION_DAY
+            )
+        elif suspend_type == _SUSPEND_TYPE_RESUME:
+            kind = SUSPEND_KIND_RESUMPTION
+        else:
+            raise _field_error(
+                endpoint, index, "suspend_type", "必须是 S(停牌)或 R(复牌)"
+            )
+        return SuspensionRecord(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            trade_date=business_date,
+            suspend_kind=kind,
+            suspend_type=suspend_type,
+            suspend_timing=suspend_timing,
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=datetime.combine(
+                business_date,
+                time(hour=9, minute=30),
+                tzinfo=_SHANGHAI,
+            ),
+        )
     async def fetch_index_profiles(
         self,
         *,
@@ -489,7 +628,287 @@ class TushareResearchDataProvider:
                 break
             offset += _INDEX_BASIC_PAGE_SIZE
         return sorted(profiles, key=lambda item: item.symbol)
+    def _create_client(self, explicit_token: str | None) -> TushareClient:
+        token = (
+            explicit_token if explicit_token is not None else os.getenv("FINBOARD_TUSHARE_TOKEN")
+        )
+        if token is None or not token.strip():
+            raise ResearchDataConfigurationError(
+                "未配置 Tushare token;请设置 FINBOARD_TUSHARE_TOKEN"
+            )
+        try:
+            module = importlib.import_module("tushare")
+        except ImportError:
+            raise ResearchDataDependencyError(
+                "未安装 Tushare SDK;请安装 finboard-data[tushare]"
+            ) from None
 
+        factory_object = getattr(module, "pro_api", None)
+        if not callable(factory_object):
+            raise ResearchDataDependencyError("已安装的 Tushare SDK 不提供 pro_api")
+        factory = cast(Callable[[str], object], factory_object)
+        try:
+            client = factory(token.strip())
+        except Exception:
+            raise ResearchDataUpstreamError("Tushare client 初始化失败") from None
+        return cast(TushareClient, client)
+
+    def _observed_at(self) -> datetime:
+        value = self._now()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ResearchDataConfigurationError("Tushare Provider 时钟必须返回带时区的 datetime")
+        return value
+
+    def _parse_rows[T](
+        self,
+        rows: Sequence[Mapping[str, object]],
+        parse: Callable[[Mapping[str, object], int, datetime], T],
+        *,
+        observed_at: datetime,
+        endpoint: str,
+        skip_dirty_rows: bool,
+    ) -> list[T]:
+        """按行级口径解析(#389 固化、#392 框架按 SyncSpec 形态分发)。
+
+        ``skip_dirty_rows=True``(全市场枚举):单行契约违规跳过并具名告警
+        ``tushare.dirty_row_skipped`` —— 全市场档案覆盖含历史前缀代码的退市
+        老股(T600018.SH 等),单条脏行不值得炸整批同步;但「全部行被跳过」
+        意味着上游 schema 破坏而非孤立脏数据,仍按整批拒绝处理。
+        ``skip_dirty_rows=False``(按 symbol 精确查询 / 默认整批拒):单行
+        违规直接抛出。
+        """
+        parsed: list[T] = []
+        for index, row in enumerate(rows):
+            try:
+                parsed.append(parse(row, index, observed_at))
+            except ResearchDataContractError as exc:
+                if not skip_dirty_rows:
+                    raise
+                logger.warning(
+                    "tushare.dirty_row_skipped",
+                    endpoint=endpoint,
+                    index=index,
+                    ts_code=row.get("ts_code"),
+                    name=row.get("name"),
+                    reason=str(exc),
+                )
+        if skip_dirty_rows and rows and not parsed:
+            raise ResearchDataContractError(
+                f"Tushare {endpoint} 全部 {len(rows)} 行均违反契约,疑似上游 schema 变更"
+            )
+        return parsed
+
+    async def _call(self, endpoint: str, **kwargs: str) -> list[Mapping[str, object]]:
+        method_object = getattr(self._client, endpoint, None)
+        if not callable(method_object):
+            raise ResearchDataDependencyError(f"Tushare client 不支持 {endpoint}")
+        method = cast(Callable[..., object], method_object)
+        await self._budget.acquire()
+        try:
+            payload = await asyncio.to_thread(method, **kwargs)
+        except Exception:
+            raise ResearchDataUpstreamError(f"Tushare {endpoint} 调用失败") from None
+        return _records(payload, endpoint)
+
+    @staticmethod
+    def _parse_instrument(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> InstrumentProfile:
+        endpoint = "stock_basic"
+        _require_fields(row, _STOCK_BASIC_FIELDS, endpoint, index)
+        return InstrumentProfile(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            name=_required_text(row, "name", endpoint, index),
+            exchange=_required_text(row, "exchange", endpoint, index),
+            market=_required_text(row, "market", endpoint, index),
+            list_status=_required_text(row, "list_status", endpoint, index),
+            list_date=_required_date(row, "list_date", endpoint, index),
+            delist_date=_optional_date(row, "delist_date", endpoint, index),
+            industry=_optional_text(row, "industry"),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+
+    @staticmethod
+    def _parse_daily_metric(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> DailySecurityMetrics:
+        endpoint = "daily_basic"
+        _require_fields(row, _DAILY_BASIC_FIELDS, endpoint, index)
+        business_date = _required_date(row, "trade_date", endpoint, index)
+        return DailySecurityMetrics(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            trade_date=business_date,
+            close=_optional_decimal(row, "close", endpoint, index),
+            turnover_rate=_percentage(row, "turnover_rate", endpoint, index),
+            turnover_rate_free=_percentage(row, "turnover_rate_f", endpoint, index),
+            volume_ratio=_optional_decimal(row, "volume_ratio", endpoint, index),
+            pe=_optional_decimal(row, "pe", endpoint, index),
+            pe_ttm=_optional_decimal(row, "pe_ttm", endpoint, index),
+            pb=_optional_decimal(row, "pb", endpoint, index),
+            ps=_optional_decimal(row, "ps", endpoint, index),
+            ps_ttm=_optional_decimal(row, "ps_ttm", endpoint, index),
+            dividend_yield=_percentage(row, "dv_ratio", endpoint, index),
+            dividend_yield_ttm=_percentage(row, "dv_ttm", endpoint, index),
+            total_shares=_scaled_decimal(row, "total_share", _TEN_THOUSAND, endpoint, index),
+            float_shares=_scaled_decimal(row, "float_share", _TEN_THOUSAND, endpoint, index),
+            free_shares=_scaled_decimal(row, "free_share", _TEN_THOUSAND, endpoint, index),
+            total_market_cap=_scaled_decimal(row, "total_mv", _TEN_THOUSAND, endpoint, index),
+            circulating_market_cap=_scaled_decimal(row, "circ_mv", _TEN_THOUSAND, endpoint, index),
+            limit_status=_optional_integer(row, "limit_status", endpoint, index),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=datetime.combine(
+                business_date,
+                time(hour=17),
+                tzinfo=_SHANGHAI,
+            ),
+        )
+
+    @staticmethod
+    def _parse_financial(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> FinancialIndicator:
+        endpoint = "fina_indicator"
+        _require_fields(row, _FINANCIAL_FIELDS, endpoint, index)
+        announcement_date = _required_date(row, "ann_date", endpoint, index)
+        # 字段换算随 _FINANCIAL_FIELD_MAP 单一事实源驱动(percent → 小数,
+        # decimal 原值);映射表与领域字段/白名单/表列的一致性由单测锁定。
+        values = {
+            name: (
+                _percentage(row, column, endpoint, index)
+                if kind == "percent"
+                else _optional_decimal(row, column, endpoint, index)
+            )
+            for column, name, kind in _FINANCIAL_FIELD_MAP
+        }
+        return FinancialIndicator(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            announcement_date=announcement_date,
+            report_period=_required_date(row, "end_date", endpoint, index),
+            update_flag=_optional_text(row, "update_flag"),
+            **values,
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=datetime.combine(
+                announcement_date + timedelta(days=1),
+                time.min,
+                tzinfo=_SHANGHAI,
+            ),
+        )
+
+    @staticmethod
+    def _parse_industry(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> IndustryMembership:
+        endpoint = "index_member_all"
+        _require_fields(row, _INDUSTRY_FIELDS, endpoint, index)
+        current_flag = _required_text(row, "is_new", endpoint, index).upper()
+        if current_flag not in {"Y", "N"}:
+            raise _field_error(endpoint, index, "is_new", "必须是 Y 或 N")
+        return IndustryMembership(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            security_name=_required_text(row, "name", endpoint, index),
+            taxonomy="SW2021",
+            level1_code=_required_text(row, "l1_code", endpoint, index),
+            level1_name=_required_text(row, "l1_name", endpoint, index),
+            level2_code=_required_text(row, "l2_code", endpoint, index),
+            level2_name=_required_text(row, "l2_name", endpoint, index),
+            level3_code=_required_text(row, "l3_code", endpoint, index),
+            level3_name=_required_text(row, "l3_name", endpoint, index),
+            effective_from=_required_date(row, "in_date", endpoint, index),
+            effective_to=_optional_date(row, "out_date", endpoint, index),
+            is_current=current_flag == "Y",
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+
+    @staticmethod
+    def _parse_name_change(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> InstrumentNameChange:
+        endpoint = "namechange"
+        _require_fields(row, _NAMECHANGE_FIELDS, endpoint, index)
+        return InstrumentNameChange(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            name=_required_text(row, "name", endpoint, index),
+            start_date=_required_date(row, "start_date", endpoint, index),
+            end_date=_optional_date(row, "end_date", endpoint, index),
+            change_reason=_optional_text(row, "change_reason"),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+
+    @staticmethod
+    def _parse_convertible_profile(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> ConvertibleProfile:
+        endpoint = "cb_basic"
+        _require_fields(row, _CB_BASIC_FIELDS, endpoint, index)
+        swap_price = _optional_decimal(row, "swap_price", endpoint, index)
+        # 转债转股价必须为正;0/负值视同缺失(缺失在下游质量报告可见)。
+        if swap_price is not None and swap_price <= 0:
+            swap_price = None
+        return ConvertibleProfile(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            name=_required_text(row, "bond_short_name", endpoint, index),
+            underlying_symbol=_normalize_symbol(
+                _required_text(row, "stock_code", endpoint, index)
+            ),
+            underlying_name=_optional_text(row, "stock_name"),
+            list_date=_optional_date(row, "list_date", endpoint, index),
+            delist_date=_optional_date(row, "delist_date", endpoint, index),
+            conversion_price=swap_price,
+            issue_date=_optional_date(row, "value_date", endpoint, index),
+            maturity_date=_optional_date(row, "mature_date", endpoint, index),
+            coupon_rate=_percentage(row, "coupon_rate", endpoint, index),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+
+    @staticmethod
+    def _parse_index_profile(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> IndexProfile:
+        endpoint = "index_basic"
+        # 只硬性要求核心两列;fullname/market/base_date/list_date/list_status
+        # 按可选解析(2026-09-10 实测:上游按市场分片裁列,CSI 批次缺
+        # list_status 列,裁列行不应炸整批登记同步,#394)。
+        _require_fields(row, _INDEX_BASIC_REQUIRED_FIELDS, endpoint, index)
+        return IndexProfile(
+            symbol=_normalize_index_symbol(
+                _required_text(row, "ts_code", endpoint, index)
+            ),
+            name=_required_text(row, "name", endpoint, index),
+            full_name=_optional_text(row, "fullname"),
+            publisher=_optional_text(row, "publisher"),
+            category=_optional_text(row, "category"),
+            market=_optional_text(row, "market"),
+            base_date=_optional_date(row, "base_date", endpoint, index),
+            list_date=_optional_date(row, "list_date", endpoint, index),
+            list_status=_optional_text(row, "list_status"),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
     async def fetch_futures_contract_profiles(
         self,
         *,
@@ -645,361 +1064,6 @@ class TushareResearchDataProvider:
             available_at=observed_at,
         )
 
-    async def fetch_suspensions(
-        self,
-        trade_date: date,
-        *,
-        dirty_row_policy: str | None = None,
-    ) -> list[SuspensionRecord]:
-        """读取指定交易日的全市场停复牌枚举(issue #396,2000 积分档)。
-
-        按日全市场枚举(#392 统一口径):默认整批拒;``dirty_row_policy="skip"``
-        时单行契约违规跳过并具名告警(截断防护与交易日一致性检查仍整批拒)。
-        非交易日上游返回空列表(框架按空切片跳过,不产生批次行)。
-        ``suspend_kind`` 与缓存侧 ``TushareLifecycleEvent.event_type`` 同词表;
-        PIT=当日:``available_at`` = 交易日 09:30(上海,开盘即可观察)。
-        """
-        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=False)
-        observed_at = self._observed_at()
-        rows = await self._call(
-            "suspend_d",
-            trade_date=_format_date(trade_date),
-            fields=_SUSPEND_D_FIELDS,
-        )
-        _reject_possible_truncation(rows, "suspend_d", limit=_SUSPEND_D_LIMIT)
-        records = self._parse_rows(
-            rows,
-            self._parse_suspension,
-            observed_at=observed_at,
-            endpoint="suspend_d",
-            skip_dirty_rows=skip_dirty,
-        )
-        if any(item.trade_date != trade_date for item in records):
-            raise ResearchDataContractError(
-                "Tushare suspend_d 返回了请求交易日之外的记录"
-            )
-        return sorted(records, key=lambda item: (item.symbol, item.suspend_kind))
-
-    @staticmethod
-    def _parse_suspension(
-        row: Mapping[str, object],
-        index: int,
-        observed_at: datetime,
-    ) -> SuspensionRecord:
-        endpoint = "suspend_d"
-        _require_fields(row, _SUSPEND_D_FIELDS, endpoint, index)
-        business_date = _required_date(row, "trade_date", endpoint, index)
-        suspend_type = _required_text(row, "suspend_type", endpoint, index).upper()
-        suspend_timing = _optional_text(row, "suspend_timing")
-        if suspend_type == _SUSPEND_TYPE_SUSPEND:
-            kind = (
-                SUSPEND_KIND_INTRADAY
-                if suspend_timing
-                else SUSPEND_KIND_SUSPENSION_DAY
-            )
-        elif suspend_type == _SUSPEND_TYPE_RESUME:
-            kind = SUSPEND_KIND_RESUMPTION
-        else:
-            raise _field_error(
-                endpoint, index, "suspend_type", "必须是 S(停牌)或 R(复牌)"
-            )
-        return SuspensionRecord(
-            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
-            trade_date=business_date,
-            suspend_kind=kind,
-            suspend_type=suspend_type,
-            suspend_timing=suspend_timing,
-            source=_SOURCE,
-            observed_at=observed_at,
-            available_at=datetime.combine(
-                business_date,
-                time(hour=9, minute=30),
-                tzinfo=_SHANGHAI,
-            ),
-        )
-
-    def _create_client(self, explicit_token: str | None) -> TushareClient:
-        token = (
-            explicit_token if explicit_token is not None else os.getenv("FINBOARD_TUSHARE_TOKEN")
-        )
-        if token is None or not token.strip():
-            raise ResearchDataConfigurationError(
-                "未配置 Tushare token;请设置 FINBOARD_TUSHARE_TOKEN"
-            )
-        try:
-            module = importlib.import_module("tushare")
-        except ImportError:
-            raise ResearchDataDependencyError(
-                "未安装 Tushare SDK;请安装 finboard-data[tushare]"
-            ) from None
-
-        factory_object = getattr(module, "pro_api", None)
-        if not callable(factory_object):
-            raise ResearchDataDependencyError("已安装的 Tushare SDK 不提供 pro_api")
-        factory = cast(Callable[[str], object], factory_object)
-        try:
-            client = factory(token.strip())
-        except Exception:
-            raise ResearchDataUpstreamError("Tushare client 初始化失败") from None
-        return cast(TushareClient, client)
-
-    def _observed_at(self) -> datetime:
-        value = self._now()
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ResearchDataConfigurationError("Tushare Provider 时钟必须返回带时区的 datetime")
-        return value
-
-    def _parse_rows[T](
-        self,
-        rows: Sequence[Mapping[str, object]],
-        parse: Callable[[Mapping[str, object], int, datetime], T],
-        *,
-        observed_at: datetime,
-        endpoint: str,
-        skip_dirty_rows: bool,
-    ) -> list[T]:
-        """按行级口径解析(#389 固化、#392 框架按 SyncSpec 形态分发)。
-
-        ``skip_dirty_rows=True``(全市场枚举):单行契约违规跳过并具名告警
-        ``tushare.dirty_row_skipped`` —— 全市场档案覆盖含历史前缀代码的退市
-        老股(T600018.SH 等),单条脏行不值得炸整批同步;但「全部行被跳过」
-        意味着上游 schema 破坏而非孤立脏数据,仍按整批拒绝处理。
-        ``skip_dirty_rows=False``(按 symbol 精确查询 / 默认整批拒):单行
-        违规直接抛出。
-        """
-        parsed: list[T] = []
-        for index, row in enumerate(rows):
-            try:
-                parsed.append(parse(row, index, observed_at))
-            except ResearchDataContractError as exc:
-                if not skip_dirty_rows:
-                    raise
-                logger.warning(
-                    "tushare.dirty_row_skipped",
-                    endpoint=endpoint,
-                    index=index,
-                    ts_code=row.get("ts_code"),
-                    name=row.get("name"),
-                    reason=str(exc),
-                )
-        if skip_dirty_rows and rows and not parsed:
-            raise ResearchDataContractError(
-                f"Tushare {endpoint} 全部 {len(rows)} 行均违反契约,疑似上游 schema 变更"
-            )
-        return parsed
-
-    async def _call(self, endpoint: str, **kwargs: str) -> list[Mapping[str, object]]:
-        method_object = getattr(self._client, endpoint, None)
-        if not callable(method_object):
-            raise ResearchDataDependencyError(f"Tushare client 不支持 {endpoint}")
-        method = cast(Callable[..., object], method_object)
-        await self._budget.acquire()
-        try:
-            payload = await asyncio.to_thread(method, **kwargs)
-        except Exception:
-            raise ResearchDataUpstreamError(f"Tushare {endpoint} 调用失败") from None
-        return _records(payload, endpoint)
-
-    @staticmethod
-    def _parse_instrument(
-        row: Mapping[str, object],
-        index: int,
-        observed_at: datetime,
-    ) -> InstrumentProfile:
-        endpoint = "stock_basic"
-        _require_fields(row, _STOCK_BASIC_FIELDS, endpoint, index)
-        return InstrumentProfile(
-            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
-            name=_required_text(row, "name", endpoint, index),
-            exchange=_required_text(row, "exchange", endpoint, index),
-            market=_required_text(row, "market", endpoint, index),
-            list_status=_required_text(row, "list_status", endpoint, index),
-            list_date=_required_date(row, "list_date", endpoint, index),
-            delist_date=_optional_date(row, "delist_date", endpoint, index),
-            industry=_optional_text(row, "industry"),
-            source=_SOURCE,
-            observed_at=observed_at,
-            available_at=observed_at,
-        )
-
-    @staticmethod
-    def _parse_daily_metric(
-        row: Mapping[str, object],
-        index: int,
-        observed_at: datetime,
-    ) -> DailySecurityMetrics:
-        endpoint = "daily_basic"
-        _require_fields(row, _DAILY_BASIC_FIELDS, endpoint, index)
-        business_date = _required_date(row, "trade_date", endpoint, index)
-        return DailySecurityMetrics(
-            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
-            trade_date=business_date,
-            close=_optional_decimal(row, "close", endpoint, index),
-            turnover_rate=_percentage(row, "turnover_rate", endpoint, index),
-            turnover_rate_free=_percentage(row, "turnover_rate_f", endpoint, index),
-            volume_ratio=_optional_decimal(row, "volume_ratio", endpoint, index),
-            pe=_optional_decimal(row, "pe", endpoint, index),
-            pe_ttm=_optional_decimal(row, "pe_ttm", endpoint, index),
-            pb=_optional_decimal(row, "pb", endpoint, index),
-            ps=_optional_decimal(row, "ps", endpoint, index),
-            ps_ttm=_optional_decimal(row, "ps_ttm", endpoint, index),
-            dividend_yield=_percentage(row, "dv_ratio", endpoint, index),
-            dividend_yield_ttm=_percentage(row, "dv_ttm", endpoint, index),
-            total_shares=_scaled_decimal(row, "total_share", _TEN_THOUSAND, endpoint, index),
-            float_shares=_scaled_decimal(row, "float_share", _TEN_THOUSAND, endpoint, index),
-            free_shares=_scaled_decimal(row, "free_share", _TEN_THOUSAND, endpoint, index),
-            total_market_cap=_scaled_decimal(row, "total_mv", _TEN_THOUSAND, endpoint, index),
-            circulating_market_cap=_scaled_decimal(row, "circ_mv", _TEN_THOUSAND, endpoint, index),
-            limit_status=_optional_integer(row, "limit_status", endpoint, index),
-            source=_SOURCE,
-            observed_at=observed_at,
-            available_at=datetime.combine(
-                business_date,
-                time(hour=17),
-                tzinfo=_SHANGHAI,
-            ),
-        )
-
-    @staticmethod
-    def _parse_financial(
-        row: Mapping[str, object],
-        index: int,
-        observed_at: datetime,
-    ) -> FinancialIndicator:
-        endpoint = "fina_indicator"
-        _require_fields(row, _FINANCIAL_FIELDS, endpoint, index)
-        announcement_date = _required_date(row, "ann_date", endpoint, index)
-        return FinancialIndicator(
-            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
-            announcement_date=announcement_date,
-            report_period=_required_date(row, "end_date", endpoint, index),
-            update_flag=_optional_text(row, "update_flag"),
-            eps=_optional_decimal(row, "eps", endpoint, index),
-            diluted_eps=_optional_decimal(row, "dt_eps", endpoint, index),
-            book_value_per_share=_optional_decimal(row, "bps", endpoint, index),
-            operating_cash_flow_per_share=_optional_decimal(row, "ocfps", endpoint, index),
-            return_on_equity=_percentage(row, "roe", endpoint, index),
-            weighted_return_on_equity=_percentage(row, "roe_waa", endpoint, index),
-            gross_profit_margin=_percentage(row, "grossprofit_margin", endpoint, index),
-            net_profit_margin=_percentage(row, "netprofit_margin", endpoint, index),
-            debt_to_assets=_percentage(row, "debt_to_assets", endpoint, index),
-            revenue_yoy=_percentage(row, "tr_yoy", endpoint, index),
-            net_profit_yoy=_percentage(row, "netprofit_yoy", endpoint, index),
-            operating_cash_flow_yoy=_percentage(row, "ocf_yoy", endpoint, index),
-            source=_SOURCE,
-            observed_at=observed_at,
-            available_at=datetime.combine(
-                announcement_date + timedelta(days=1),
-                time.min,
-                tzinfo=_SHANGHAI,
-            ),
-        )
-
-    @staticmethod
-    def _parse_industry(
-        row: Mapping[str, object],
-        index: int,
-        observed_at: datetime,
-    ) -> IndustryMembership:
-        endpoint = "index_member_all"
-        _require_fields(row, _INDUSTRY_FIELDS, endpoint, index)
-        current_flag = _required_text(row, "is_new", endpoint, index).upper()
-        if current_flag not in {"Y", "N"}:
-            raise _field_error(endpoint, index, "is_new", "必须是 Y 或 N")
-        return IndustryMembership(
-            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
-            security_name=_required_text(row, "name", endpoint, index),
-            taxonomy="SW2021",
-            level1_code=_required_text(row, "l1_code", endpoint, index),
-            level1_name=_required_text(row, "l1_name", endpoint, index),
-            level2_code=_required_text(row, "l2_code", endpoint, index),
-            level2_name=_required_text(row, "l2_name", endpoint, index),
-            level3_code=_required_text(row, "l3_code", endpoint, index),
-            level3_name=_required_text(row, "l3_name", endpoint, index),
-            effective_from=_required_date(row, "in_date", endpoint, index),
-            effective_to=_optional_date(row, "out_date", endpoint, index),
-            is_current=current_flag == "Y",
-            source=_SOURCE,
-            observed_at=observed_at,
-            available_at=observed_at,
-        )
-
-    @staticmethod
-    def _parse_name_change(
-        row: Mapping[str, object],
-        index: int,
-        observed_at: datetime,
-    ) -> InstrumentNameChange:
-        endpoint = "namechange"
-        _require_fields(row, _NAMECHANGE_FIELDS, endpoint, index)
-        return InstrumentNameChange(
-            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
-            name=_required_text(row, "name", endpoint, index),
-            start_date=_required_date(row, "start_date", endpoint, index),
-            end_date=_optional_date(row, "end_date", endpoint, index),
-            change_reason=_optional_text(row, "change_reason"),
-            source=_SOURCE,
-            observed_at=observed_at,
-            available_at=observed_at,
-        )
-
-    @staticmethod
-    def _parse_convertible_profile(
-        row: Mapping[str, object],
-        index: int,
-        observed_at: datetime,
-    ) -> ConvertibleProfile:
-        endpoint = "cb_basic"
-        _require_fields(row, _CB_BASIC_FIELDS, endpoint, index)
-        swap_price = _optional_decimal(row, "swap_price", endpoint, index)
-        # 转债转股价必须为正;0/负值视同缺失(缺失在下游质量报告可见)。
-        if swap_price is not None and swap_price <= 0:
-            swap_price = None
-        return ConvertibleProfile(
-            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
-            name=_required_text(row, "bond_short_name", endpoint, index),
-            underlying_symbol=_normalize_symbol(
-                _required_text(row, "stock_code", endpoint, index)
-            ),
-            underlying_name=_optional_text(row, "stock_name"),
-            list_date=_optional_date(row, "list_date", endpoint, index),
-            delist_date=_optional_date(row, "delist_date", endpoint, index),
-            conversion_price=swap_price,
-            issue_date=_optional_date(row, "value_date", endpoint, index),
-            maturity_date=_optional_date(row, "mature_date", endpoint, index),
-            coupon_rate=_percentage(row, "coupon_rate", endpoint, index),
-            source=_SOURCE,
-            observed_at=observed_at,
-            available_at=observed_at,
-        )
-
-    @staticmethod
-    def _parse_index_profile(
-        row: Mapping[str, object],
-        index: int,
-        observed_at: datetime,
-    ) -> IndexProfile:
-        endpoint = "index_basic"
-        # 只硬性要求核心两列;fullname/market/base_date/list_date/list_status
-        # 按可选解析(2026-09-10 实测:上游按市场分片裁列,CSI 批次缺
-        # list_status 列,裁列行不应炸整批登记同步,#394)。
-        _require_fields(row, _INDEX_BASIC_REQUIRED_FIELDS, endpoint, index)
-        return IndexProfile(
-            symbol=_normalize_index_symbol(
-                _required_text(row, "ts_code", endpoint, index)
-            ),
-            name=_required_text(row, "name", endpoint, index),
-            full_name=_optional_text(row, "fullname"),
-            publisher=_optional_text(row, "publisher"),
-            category=_optional_text(row, "category"),
-            market=_optional_text(row, "market"),
-            base_date=_optional_date(row, "base_date", endpoint, index),
-            list_date=_optional_date(row, "list_date", endpoint, index),
-            list_status=_optional_text(row, "list_status"),
-            source=_SOURCE,
-            observed_at=observed_at,
-            available_at=observed_at,
-        )
 
 
 def _records(payload: object, endpoint: str) -> list[Mapping[str, object]]:
@@ -1062,27 +1126,6 @@ def _normalize_symbol(value: str) -> str:
     if not _SYMBOL_PATTERN.fullmatch(normalized):
         raise ResearchDataContractError("股票代码必须是 6 位数字并使用 .SH、.SZ 或 .BJ 后缀")
     return normalized
-
-
-_PRICE_TICK_PATTERN = re.compile(r"^\d+(?:\.\d+)?")
-
-
-def _parse_price_tick(quote_unit_desc: str | None) -> Decimal | None:
-    """从 ``quote_unit_desc`` 解析最小变动价位(issue #395)。
-
-    实测形制 ``0.2指数点`` / ``0.005人民币元``:取前导数字;无前导数字或
-    缺列返回 None(缺失可见,不虚构)。
-    """
-    if not quote_unit_desc:
-        return None
-    match = _PRICE_TICK_PATTERN.match(quote_unit_desc.strip())
-    if match is None:
-        return None
-    try:
-        value = Decimal(match.group(0))
-    except InvalidOperation:
-        return None
-    return value if value.is_finite() and value > 0 else None
 
 
 def _normalize_index_symbol(value: str) -> str:

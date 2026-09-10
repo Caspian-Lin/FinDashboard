@@ -48,6 +48,11 @@ from finboard_backtest.research_code import (
     user_factor_reference_gate_error,
     user_factor_series_coverage_gate_error,
 )
+from finboard_backtest.research_code.predefined_factors import (
+    predefined_factor_reference_gate_error,
+    predefined_factor_series_coverage_gate_error,
+    referenced_predefined_factors,
+)
 from finboard_backtest.research_run import (
     REPLAYABLE_SOURCE_STATUSES,
     FrozenArtifactRef,
@@ -166,6 +171,21 @@ async def queue_research_run(
         for node in spec.feature_graph.nodes
         if node.source is not None and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
+    # issue #398:平台预置因子(p_ 前缀)引用门控(规格形态错误,先于
+    # #203/#217 具名拒绝)—— 目录注册存在性 + single_shot 必须以
+    # factor_series_ids 声明(p_ 因子无快照路径)。multi_period 的覆盖检查
+    # 在交易日历可读之后进行(下方)。
+    uncovered_predefined = referenced_predefined_factors(
+        required_factor_sources,
+        series_covered_factors=series_covered,
+    )
+    predefined_gate_error = predefined_factor_reference_gate_error(
+        required_factor_sources=required_factor_sources,
+        series_covered_factors=series_covered,
+        multi_period=resolve_decision_schedule(body.parameters) is not None,
+    )
+    if predefined_gate_error is not None:
+        raise HTTPException(status_code=422, detail=predefined_gate_error)
     # issue #234:screen 绑定实绑校验(REST+MCP 共用)—— 声明了
     # screen_artifact_bindings 的规格按 DB 逐条校验(存在/非 retired/name/
     # commit 一致),通过后把绑定名并入可引用名单、绑定 commit/ID 冻结进
@@ -240,6 +260,23 @@ async def queue_research_run(
         )
         if series_gate_error is not None:
             raise HTTPException(status_code=422, detail=series_gate_error)
+    if schedule is not None and uncovered_predefined:
+        if trading_days is None:
+            trading_days = await _enqueue_trading_days(primary)
+        predefined_series_error = await predefined_factor_series_coverage_gate_error(
+            referenced_predefined=uncovered_predefined,
+            series_lookup=default_series_lookup(session),
+            bars_release_id=primary.release_id,
+            dataset_release_ids=[release.release_id for release in releases],
+            decision_dates=enqueue_decision_dates(
+                parameters=body.parameters,
+                trading_days=trading_days,
+            ),
+            window_start=primary.start_date,
+            window_end=primary.end_date,
+        )
+        if predefined_series_error is not None:
+            raise HTTPException(status_code=422, detail=predefined_series_error)
     # issue #253:multi_period 特征可用性入队门控(与 MCP 共用同一函数)——
     # 规格 identity 源必须 ⊆ 多期可解析集合(标准价格特征 / close / attached
     # 研究发布派生特征 / 快照观测),否则执行期才报「identity 节点缺少数据源」。

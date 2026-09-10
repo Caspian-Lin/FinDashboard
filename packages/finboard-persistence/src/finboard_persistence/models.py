@@ -959,6 +959,73 @@ class ResearchFinancialIndicatorModel(Base, IdMixin):
     operating_cash_flow_yoy: Mapped[Decimal | None] = mapped_column(
         _research_numeric(), nullable=True
     )
+    # ---- issue #401 批次 3 扩展列(新增列全部 nullable,存量行零影响)----
+    # 增长(YoY / 单季 YoY / 单季 QoQ)
+    operating_revenue_yoy: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    basic_eps_yoy: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    deducted_netprofit_yoy: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    operating_profit_yoy: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    revenue_yoy_q: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    revenue_qoq: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    netprofit_yoy_q: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    netprofit_qoq: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    # 盈利质量
+    return_on_assets: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    return_on_assets_np: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    roe_deducted: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    roic: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    roe_q: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    return_on_assets_q: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    grossprofit_margin_q: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    netprofit_margin_q: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    expense_to_revenue: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    # 营运效率(周转率族)
+    inventory_turnover: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    receivables_turnover: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    current_assets_turnover: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    fixed_assets_turnover: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    total_assets_turnover: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    # 流动性 / 偿债
+    current_ratio: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    quick_ratio: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    debt_to_equity: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    interest_coverage: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    equity_multiplier: Mapped[Decimal | None] = mapped_column(
+        _research_numeric(), nullable=True
+    )
+    # 现金流质量
+    ocf_to_revenue: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
+    ocf_to_debt: Mapped[Decimal | None] = mapped_column(_research_numeric(), nullable=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     ingested_at: Mapped[datetime] = mapped_column(
@@ -2018,7 +2085,9 @@ class ResearchFactorSeriesModel(Base, IdMixin):
     # 代码三向引用(与 research_code_runs 同口径:kind=factor)
     code_artifact: Mapped[str] = mapped_column(String(64), index=True)
     code_commit: Mapped[str] = mapped_column(String(40))
-    kind: Mapped[str] = mapped_column(String(16))
+    # #398 起容纳 'predefined_factor'(平台预置因子通道;原宽 16 承载
+    # 用户因子 kind='factor' 的历史字面量)
+    kind: Mapped[str] = mapped_column(String(32))
     # bars 主发布锚定 + 研究发布联合集(排序冻结,入 series_key)
     release_id: Mapped[str] = mapped_column(String(128), index=True)
     dataset_release_ids: Mapped[list[str]] = mapped_column(JSONB)

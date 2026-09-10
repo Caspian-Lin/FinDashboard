@@ -148,6 +148,9 @@ class TestFactoryConfigGate:
                     "strategy": "ma_cross",
                     "symbols": ["510300.SH"],
                     "capital": "200000",
+                    # 显式声明免凭据源:缺省主源已切 tushare(#393),CI 无
+                    # token 时 provider 构建会具名失败,与本测试意图无关。
+                    "provider": "akshare",
                 }
             }
         )

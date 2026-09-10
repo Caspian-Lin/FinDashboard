@@ -40,7 +40,7 @@ def resolve_provider_name(
         source
         or configured
         or os.getenv("FINBOARD_DATA_PROVIDER")
-        or "akshare"
+        or "tushare"
     ).strip().lower()
     if name not in SUPPORTED_BAR_PROVIDERS:
         supported = ", ".join(sorted(SUPPORTED_BAR_PROVIDERS))
