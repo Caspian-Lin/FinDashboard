@@ -28,6 +28,13 @@ from finboard_backtest.factors.predefined.operators import (
     cs_scale,
     cs_winsorize,
     cs_zscore,
+    ew_div,
+    ew_gt,
+    ew_log,
+    ew_lt,
+    ew_sign,
+    ew_signed_power,
+    ew_where,
     rolling_ols_resid,
     ts_argmax,
     ts_argmin,
@@ -36,10 +43,14 @@ from finboard_backtest.factors.predefined.operators import (
     ts_decay,
     ts_delay,
     ts_delta,
+    ts_downside_std,
+    ts_ema,
+    ts_kurt,
     ts_max,
     ts_mean,
     ts_min,
     ts_rank,
+    ts_skew,
     ts_std,
     ts_sum,
 )
@@ -214,6 +225,84 @@ class TestTimeseriesNanDiscipline:
         with pytest.raises(ValueError, match="window"):
             ts_mean(np.arange(5.0), 0)
 
+    def test_ts_ema_hand_computed_and_state_carry(self) -> None:
+        # 手算:span=2 → alpha=2/3;[1, nan, 2, 3]:
+        # i0 种子 1;i1 NaN(状态保持);i2 = 1/3*1 + 2/3*2 = 5/3;
+        # i3 = 1/3*(5/3) + 2/3*3 = 23/9
+        x = np.array([1.0, np.nan, 2.0, 3.0])
+        out = ts_ema(x, 2)
+        assert out[0] == pytest.approx(1.0)
+        assert math.isnan(out[1])
+        assert out[2] == pytest.approx(5.0 / 3.0)
+        assert out[3] == pytest.approx(23.0 / 9.0)
+        # 无 NaN 序列与 pandas ewm(adjust=False) 逐值一致
+        rng = np.random.default_rng(21)
+        y = 100.0 * np.cumprod(1.0 + rng.normal(0.0005, 0.02, size=80))
+        expected = pd.Series(y).ewm(span=12, adjust=False).mean().to_numpy()
+        assert _nan_equal(ts_ema(y, 12), expected)
+        with pytest.raises(ValueError, match="span"):
+            ts_ema(y, 0)
+
+    def test_ts_skew_matches_pandas_and_edge_cases(self) -> None:
+        rng = np.random.default_rng(31)
+        x = rng.normal(size=90)
+        expected = pd.Series(x).rolling(20).skew().to_numpy()
+        assert _nan_equal(ts_skew(x, 20), expected)
+        # 对称窗口偏度 0
+        symmetric = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        assert ts_skew(symmetric, 5)[4] == pytest.approx(0.0, abs=1e-12)
+        # 窗口不足(<3)/序列不足 → 全 NaN
+        assert np.isnan(ts_skew(x, 2)).all()
+        assert np.isnan(ts_skew(x[:5], 20)).all()
+        # 常数窗口 m2=0 → NaN
+        assert np.isnan(ts_skew(np.ones(10), 5)[5:]).all()
+        # 窗口内 NaN 传播
+        with_nan = np.array([1.0, np.nan, 3.0, 4.0, 5.0])
+        assert np.isnan(ts_skew(with_nan, 5)[4])
+
+    def test_ts_kurt_matches_pandas_and_edge_cases(self) -> None:
+        rng = np.random.default_rng(41)
+        x = rng.normal(size=90)
+        expected = pd.Series(x).rolling(20).kurt().to_numpy()
+        assert _nan_equal(ts_kurt(x, 20), expected)
+        # 手算:n=5,[0,2,0,2,1] → 偏差 [-1,1,-1,1,0],m2=0.8,m4=0.8,
+        # ratio=1.25,term1=4,term2=8 → 4*1.25 - 8 = -3
+        spike = np.array([0.0, 2.0, 0.0, 2.0, 1.0])
+        assert ts_kurt(spike, 5)[4] == pytest.approx(-3.0)
+        # 窗口不足(<4)→ 全 NaN
+        assert np.isnan(ts_kurt(x, 3)).all()
+        # 常数窗口 m2=0 → NaN
+        assert np.isnan(ts_kurt(np.ones(10), 5)[5:]).all()
+
+    def test_ts_downside_std_hand_computed(self) -> None:
+        # 负值子集 [-1,-3,-5]:mean=-3,Σ(x-x̄)²=8,k=3 → var=8/2=4
+        x = np.array([-1.0, 2.0, -3.0, 4.0, -5.0])
+        out = ts_downside_std(x, 5)
+        assert out[4] == pytest.approx(2.0)
+        # 负值个数 <= ddof → NaN
+        two_values = np.array([1.0, -2.0, 3.0, 4.0, 5.0])
+        assert np.isnan(ts_downside_std(two_values, 5)[4])
+        # 全正窗口 → NaN
+        assert np.isnan(ts_downside_std(np.abs(x), 5)[4])
+        # 窗口内 NaN 传播(严格纪律)
+        with_nan = np.array([-1.0, np.nan, -3.0, 4.0, -5.0])
+        assert np.isnan(ts_downside_std(with_nan, 5)[4])
+        # 独立循环参照
+        rng = np.random.default_rng(51)
+        y = rng.normal(size=60)
+        for i in range(9, 60):
+            window_values = y[i - 9 : i + 1]
+            negatives = window_values[window_values < 0]
+            if negatives.size <= 1:
+                expected: float = math.nan
+            else:
+                expected = float(np.std(negatives, ddof=1))
+            got = ts_downside_std(y, 10)[i]
+            if math.isnan(expected):
+                assert math.isnan(got)
+            else:
+                assert got == pytest.approx(expected)
+
 
 class TestCrossSectionOperators:
     """cs_* 逐值:#380 缺测不进分母契约 + 手算参考。"""
@@ -337,3 +426,62 @@ class TestCrossSectionOperators:
         out = cs_rank({"a": 1.0, "b": math.inf})
         assert out["b"] is None
         assert out["a"] == pytest.approx(1.0)
+
+
+class TestElementwiseOperators:
+    """ew_* 逐点算子逐值(#400 Alpha101 批次所需;NaN 纪律同 ts_*)。"""
+
+    X = np.array([1.0, -2.0, 0.0, 3.5, np.nan])
+
+    def test_ew_sign_hand_computed(self) -> None:
+        out = ew_sign(self.X)
+        assert _nan_equal(out, np.array([1.0, -1.0, 0.0, 1.0, np.nan]))
+
+    def test_ew_signed_power_hand_computed(self) -> None:
+        out = ew_signed_power(self.X, 2.0)
+        # sign(x) * |x|^2:负值平方后保持负号(WQ SignedPower 语义)
+        assert _nan_equal(out, np.array([1.0, -4.0, 0.0, 12.25, np.nan]))
+        half = ew_signed_power(np.array([-8.0, 4.0, np.nan]), 1.0 / 3.0)
+        assert _nan_equal(half, np.array([-2.0, 4.0 ** (1.0 / 3.0), np.nan]))
+
+    def test_ew_log_nonpositive_is_nan(self) -> None:
+        out = ew_log(np.array([1.0, np.e, 0.0, -3.0, np.nan]))
+        assert _nan_equal(out, np.array([0.0, 1.0, np.nan, np.nan, np.nan]))
+
+    def test_ew_where_nan_condition_propagates(self) -> None:
+        cond = np.array([1.0, 0.0, np.nan, 1.0])
+        x = np.array([10.0, 20.0, 30.0, np.nan])
+        y = np.array([-1.0, -2.0, -3.0, -4.0])
+        out = ew_where(cond, x, y)
+        assert _nan_equal(out, np.array([10.0, -2.0, np.nan, np.nan]))
+        with pytest.raises(ValueError, match="等长"):
+            ew_where(cond, np.array([1.0]), y)
+
+    def test_ew_lt_gt_nan_aware(self) -> None:
+        a = np.array([1.0, 5.0, np.nan])
+        assert _nan_equal(ew_gt(a, 2.0), np.array([0.0, 1.0, np.nan]))
+        assert _nan_equal(ew_lt(a, 2.0), np.array([1.0, 0.0, np.nan]))
+        assert _nan_equal(
+            ew_gt(a, np.array([2.0, np.nan, 0.0])), np.array([0.0, np.nan, np.nan])
+        )
+
+    def test_ew_div_zero_denominator_is_nan(self) -> None:
+        a = np.array([1.0, 8.0, 3.0, np.inf, np.nan])
+        b = np.array([2.0, 0.0, np.nan, 2.0, 5.0])
+        out = ew_div(a, b)
+        assert _nan_equal(out, np.array([0.5, np.nan, np.nan, np.nan, np.nan]))
+        assert _nan_equal(ew_div(a, 2.0), np.array([0.5, 4.0, 1.5, np.nan, np.nan]))
+
+    def test_elementwise_causal_trivially(self) -> None:
+        """逐点变换天然因果:截断前缀与全量前缀逐值相等。"""
+        rng = np.random.default_rng(7)
+        x = rng.normal(size=40)
+        transforms: list[Callable[[np.ndarray], np.ndarray]] = [
+            lambda v: ew_sign(v),
+            lambda v: ew_signed_power(v, 2.0),
+            lambda v: ew_log(np.abs(v) + 1.0),
+        ]
+        for fn in transforms:
+            full = fn(x)
+            cut = fn(x[:25])
+            assert _nan_equal(full[:25], cut)

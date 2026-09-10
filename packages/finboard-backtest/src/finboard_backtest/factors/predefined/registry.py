@@ -1,4 +1,4 @@
-"""平台预置因子目录(issue #398,批次 0;批次 #399-#402 的注册地基)。
+"""平台预置因子目录(issue #398 批次 0 基座;#399 批次 1 量价 74 个)。
 
 目录条目 = 「公式即代码」:name / 公式描述 / 数据依赖 / 方向 /
 signal_eligible / 参数化窗口,``compute`` 是平台可信代码 —— 构建走
@@ -9,8 +9,47 @@ signal_eligible / 参数化窗口,``compute`` 是平台可信代码 —— 构�
 ``u_`` 对称,见 ``finboard_data.factor_lab``);目录内部只存裸名。
 
 **批次 0 样板族** ``return_{21,63,126,252}d``:同一参数化实现按 tushare
-命名展开注册(动量族 return_N;批次 1 起的 ~75 个量价因子照此模式批量
-注册,注册指南见 PR「新预置因子注册指南」)。
+命名展开注册(动量族 return_N)。
+
+**批次 2:Alpha101 量价因子族** ``alpha101_{N}``(issue #400,31 个):
+WorldQuant《101 Formulaic Alphas》(Kakushadze 2015)经 tushare
+``factor_list`` 口径圈定的 31 个纯 OHLCV 截面因子,公式逐条直译为 C0
+算子组合。批次级共享口径(逐因子 docstring 只写差异):
+
+* ``Returns`` = ``close / ts_delay(close, 1) - 1``(qfq 收盘日收益);
+* ``VWAP`` = ``amount / volume``(issue 验收口径的近似;量纲 = 缓存
+  两列原生单位比,非保证「元/股」——akshare 股票(元/手)下为
+  100x VWAP、tushare(千元/手)下为 10x;排名类公式对恒定缩放不敏感,
+  与价格做差比较的因子(#5/#11/#19/#25/#41/#57)受量纲影响,属已知
+  近似,跨源量纲归一留后续);
+* ``ADV20`` = ``ts_mean(volume, 20)`(与主流复现一致取成交量而非成交额);
+* ``Rank(x)`` = 逐日截面百分位 ``cs_rank``,分母 = 可交易域
+  (#380:benchmark-only 不进截面分母,``_cs_rank_series`` 收窄);
+* ``Ts_*`` = operators 时序算子(因果 trailing 窗口,前缀不变性审计
+  兜底);条件 ``IF / ?:`` 经 ``ew_where``(条件不可判 → NaN);
+* **行业中性化**:论文与 tushare 口径下本批次 31 条公式**均不含**
+  ``indneutralize`` 项(论文仅 Alpha#47/#99 使用,不在本批次);行业
+  分组装配(``inp.industry_groups()``,冻结发布 instruments.industry
+  近似 #185/#212 分组)与 :func:`industry_neutralize` 助手(缺组 →
+  缺测 + 计数)随本批次交付,供分组 sanity 与后续批次消费。
+**家族清单**(批次 0:return_{21,63,126,252}d 动量样板;#399 批次 1
+量价 74 个,同族窗口变体一份参数化实现展开注册):
+
+* ``momentum`` —— 区间收益(批次 0 样板)/ 回归 alpha / 残差动量 /
+  MACD / RSRS / 价格位置 / 相对强弱,17 个;
+* ``reversal`` —— RSI / 乖离率,2 个;
+* ``risk`` —— 已实现波动 / 波动率比 / beta / 特异波动 / 市场相关 /
+  Sharpe / 偏度 / 峰度 / 下行波动 / 回撤深度,24 个(beta / 特异波动 /
+  市场相关 / Sharpe 依赖 ``index_bars`` 市场收益;3 个 1320d 长窗口
+  声明 ``min_history_bars`` 覆盖起点);
+* ``liquidity`` —— 换手率 MA/STD/乖离/Z/比值、成交额 / 成交量均值、
+  Amihud 非流动性、VWAP 偏离、量价相关,32 个;
+* ``size`` —— 对数总市值 / 对数流通市值 / 流通股占比,3 个
+  (signal_eligible=False,#214 风险暴露定位)。
+
+调研清单(202 因子路线图)对照与增删差异见 PR #399 注册清单总表;
+``log_price`` / ``ma_20d`` / ``price_dist`` / ``days_down_up`` 经总览
+拍板不注册(变换非因子 / 原料 / 文献弱)。
 
 **批次 3(#401)财务因子族** ``fin_*``(40 个 Growth / Quality):
 数据依赖 = ``financial_indicators.<field>``,输入是**公告序列**(每行
@@ -38,10 +77,12 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
+
+import numpy as np
 
 from finboard_backtest.factors.predefined.context import (
     DividendEventHistory,
@@ -50,9 +91,33 @@ from finboard_backtest.factors.predefined.context import (
     SymbolSeries,
 )
 from finboard_backtest.factors.predefined.operators import (
+    CrossSection,
+    cs_neutralize,
     cs_rank,
+    ew_div,
+    ew_gt,
+    ew_log,
+    ew_lt,
+    ew_sign,
+    ew_signed_power,
+    ew_where,
+    rolling_ols_resid,
+    ts_argmax,
+    ts_corr,
+    ts_cov,
+    ts_decay,
     ts_delay,
     ts_delta,
+    ts_downside_std,
+    ts_ema,
+    ts_kurt,
+    ts_max,
+    ts_mean,
+    ts_min,
+    ts_rank,
+    ts_skew,
+    ts_std,
+    ts_sum,
 )
 from finboard_data.factor_lab import FactorPreference
 
@@ -83,7 +148,14 @@ class PredefinedFactorDefinition:
       重建命中缓存,版本变化 → 新序列);
     * ``cross_section`` —— 最终值是截面算子产物:构建采样面收窄到
       可交易域(#380:截面分母不得混入 benchmark-only);时序因子
-      False(全挂载标的,消费端统一剔除基准)。
+      False(全挂载标的,消费端统一剔除基准);
+    * ``min_history_bars`` —— **覆盖起点声明**(可选,issue #399):因子
+      值非缺测需要至少 N 根 bar 历史(如 1320d 长窗口 ≈5.5 年)。声明后
+      #361 覆盖检查消费:序列在首个决策日全缺测 → 入队具名拒绝
+      (``predefined_factor_series_coverage_start_missing``),杜绝长窗口
+      因子在短历史发布上构建出全 None 序列静默进 run(#255 教训)。
+      None = 未声明(批次 0 语义,覆盖检查零变化);声明值进 commit 锚
+      (None 时省略键,批次 0 锚逐字节稳定)。
     """
 
     name: str
@@ -96,6 +168,7 @@ class PredefinedFactorDefinition:
     implementation_version: str
     compute: PredefinedFactorCompute
     cross_section: bool = False
+    min_history_bars: int | None = None
 
     def __post_init__(self) -> None:
         if not _NAME_RE.match(self.name):
@@ -113,6 +186,14 @@ class PredefinedFactorDefinition:
             if "." not in item:
                 raise ValueError(
                     f"{self.name}: 数据依赖 {item!r} 须为 '<dataset>.<field>' 形态"
+                )
+        if self.min_history_bars is not None:
+            if self.min_history_bars < 1:
+                raise ValueError(f"{self.name}: min_history_bars 须 >= 1 或 None")
+            if self.window is not None and self.min_history_bars < self.window:
+                raise ValueError(
+                    f"{self.name}: min_history_bars({self.min_history_bars}) "
+                    f"不得小于 window({self.window})(覆盖起点不早于主窗口)"
                 )
 
 
@@ -196,6 +277,558 @@ def _financial_definition(
         implementation_version="1",
         compute=compute or _financial_level(field),
     )
+# --------------------------------------------------------------------- #
+# 批次 1(#399)公共件:市场收益对齐与区间收益
+# --------------------------------------------------------------------- #
+
+#: Risk 族市场收益的基准指数(#256/#341 链路:指数与候选池同处一份
+#: mixed bars 主发布,经 ``PredefinedFactorInput.index_bars`` 取数)。
+MARKET_INDEX_SYMBOL = "000300.SH"
+
+#: Sharpe 类日频年化常数(A 股年交易日惯例口径)。
+_TRADING_DAYS_PER_YEAR = 250.0
+
+
+def _interval_returns(closes: np.ndarray, window: int) -> np.ndarray:
+    """N 根 bar 区间收益 ``close[t] / close[t-N] - 1``(与 return_Nd 同式)。"""
+    base = ts_delay(closes, window)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result: np.ndarray = closes / base - 1.0
+    return result
+
+
+def _daily_returns(closes: np.ndarray) -> np.ndarray:
+    """日简单收益 ``close[i] / close[i-1] - 1``(首位置 NaN)。"""
+    return _interval_returns(closes, 1)
+
+
+def _aligned_pair(
+    a: SymbolSeries, b: SymbolSeries
+) -> tuple[SymbolSeries, np.ndarray]:
+    """按业务日期交集对齐两条序列(a 轴为基准)。
+
+    返回 (a 的重建子序列, b 的对齐值数组):只在两条序列**都有行**的
+    日期保留(a 原行序的时间升序子序列,截断变体保序,前缀不变性结构
+    性成立)。任一侧行缺失(停牌 / 数据缺口)的日期不进窗口——
+    「窗口 = 共同交易日根数」,与 ts_* 的「window 根 bar」口径一致。
+    """
+    b_by_date = dict(zip(b.dates, b.values.tolist(), strict=True))
+    keep = [i for i, day in enumerate(a.dates) if day in b_by_date]
+    aligned_b = np.array([b_by_date[a.dates[i]] for i in keep], dtype=np.float64)
+    aligned_a = SymbolSeries(
+        dates=tuple(a.dates[i] for i in keep),
+        values=a.values[keep],
+        available_at=tuple(a.available_at[i] for i in keep),
+    )
+    return aligned_a, aligned_b
+
+
+def _market_pair_frame(
+    inp: PredefinedFactorInput,
+    closes: Mapping[str, SymbolSeries],
+    pair_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+) -> FactorSeriesFrame:
+    """市场收益依赖因子的通用驱动(批次 1 Risk / 回归 alpha 族)。
+
+    逐标的与基准指数(:data:`MARKET_INDEX_SYMBOL`)按日期交集对齐后应用
+    ``pair_fn(标的对齐值, 市场对齐值)``,再按**对齐后的序列轴**采样。
+    发布不含基准指数 → 全缺测帧(采样为 None,fail-visible;
+    ``min_history_bars`` 声明在入队期具名拒绝,#361 覆盖检查消费)。
+    """
+    market = inp.index_bars("close").get(MARKET_INDEX_SYMBOL)
+    if market is None:
+        nan_values: dict[str, np.ndarray] = {
+            symbol: np.full(series.values.size, np.nan)
+            for symbol, series in closes.items()
+        }
+        return inp.sample(closes, nan_values)
+    series_axis: dict[str, SymbolSeries] = {}
+    per_symbol_values: dict[str, np.ndarray] = {}
+    for symbol, series in closes.items():
+        aligned, market_values = _aligned_pair(series, market)
+        series_axis[symbol] = aligned
+        per_symbol_values[symbol] = pair_fn(aligned.values, market_values)
+    return inp.sample(series_axis, per_symbol_values)
+
+
+# --------------------------------------------------------------------- #
+# 批次 1(#399)compute 工厂(同族窗口变体一份实现)
+# --------------------------------------------------------------------- #
+
+
+def _reg_alpha(window: int) -> PredefinedFactorCompute:
+    """回归 alpha 族:日收益对市场收益 trailing 窗口 OLS 的截距
+    (市场模型 Jensen's alpha,日频;beta = cov/var 组合既有算子)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_ret = _daily_returns(stock_values)
+            market_ret = _daily_returns(market_values)
+            market_var = ts_cov(market_ret, market_ret, window)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                beta = ts_cov(stock_ret, market_ret, window) / market_var
+                result: np.ndarray = ts_mean(stock_ret, window) - beta * ts_mean(
+                    market_ret, window
+                )
+            return result
+
+        return _market_pair_frame(inp, inp.bars("close"), pair)
+
+    return compute
+
+
+def _resid_momentum(window: int) -> PredefinedFactorCompute:
+    """残差动量:市场模型日残差(:func:`rolling_ols_resid`)在窗口内求和。
+
+    需 ``2*window - 1`` 根 bar 历史(残差自 ``window-1`` 起,再求和
+    ``window`` 根),``min_history_bars`` 据此声明。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_ret = _daily_returns(stock_values)
+            market_ret = _daily_returns(market_values)
+            return ts_sum(rolling_ols_resid(stock_ret, market_ret, window), window)
+
+        return _market_pair_frame(inp, inp.bars("close"), pair)
+
+    return compute
+
+
+def _macd_hist_norm() -> PredefinedFactorCompute:
+    """MACD 柱(收盘价归一):``(DIF - DEA) * 2 / close``;DIF = EMA12 -
+    EMA26,DEA = EMA9(DIF)(A 股 MACD 惯例 2 倍柱)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            close = series.values
+            dif = ts_ema(close, 12) - ts_ema(close, 26)
+            dea = ts_ema(dif, 9)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = (dif - dea) * 2.0 / close
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _rsrs(window: int, *, r2_weighted: bool) -> PredefinedFactorCompute:
+    """RSRS 相对强度:high 对 low 的 trailing 窗口 OLS 斜率(阻力位相对
+    支撑位的强度);``r2_weighted=True`` 时乘以拟合 R²(斜率置信度加权,
+    标准 RSRS 指标)。high / low 同表逐行对齐,无需交集。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        highs = inp.bars("high")
+        lows = inp.bars("low")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, high_series in highs.items():
+            high = high_series.values
+            low = lows[symbol].values
+            slope = ts_cov(high, low, window) / ts_cov(low, low, window)
+            if r2_weighted:
+                rho = ts_corr(high, low, window)
+                slope = slope * rho * rho
+            per_symbol[symbol] = slope
+        return inp.sample(highs, per_symbol)
+
+    return compute
+
+
+def _price_position(window: int) -> PredefinedFactorCompute:
+    """价格位置:``(close - min_N) / (max_N - min_N)``(窗口内相对位置,
+    52 周高点邻近效应;区间持平 → 0/0 → 缺测)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            close = series.values
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = (close - ts_min(close, window)) / (
+                    ts_max(close, window) - ts_min(close, window)
+                )
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _ema_ratio(fast: int, slow: int) -> PredefinedFactorCompute:
+    """快慢 EMA 之比减一(趋势强度,价格量纲自由)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            close = series.values
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = ts_ema(close, fast) / ts_ema(close, slow) - 1.0
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _rs_vs_index(window: int) -> PredefinedFactorCompute:
+    """相对强弱:股票 N 根 bar 区间收益 - 基准指数同窗区间收益。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            result: np.ndarray = _interval_returns(
+                stock_values, window
+            ) - _interval_returns(market_values, window)
+            return result
+
+        return _market_pair_frame(inp, inp.bars("close"), pair)
+
+    return compute
+
+
+def _momentum_skip_month(long_window: int, short_window: int) -> PredefinedFactorCompute:
+    """12-1 动量:长窗区间收益 - 近期短窗区间收益(剔除近月反转效应)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            per_symbol[symbol] = _interval_returns(
+                series.values, long_window
+            ) - _interval_returns(series.values, short_window)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _rsi(window: int) -> PredefinedFactorCompute:
+    """RSI:``100 x MA(涨幅, N) / (MA(涨幅, N) + MA(跌幅, N))``(简单
+    均值口径;全平窗口 0/0 → 缺测)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            change = ts_delta(series.values, 1)
+            avg_gain = ts_mean(np.maximum(change, 0.0), window)
+            avg_loss = ts_mean(np.maximum(-change, 0.0), window)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = 100.0 * avg_gain / (avg_gain + avg_loss)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _bias(window: int) -> PredefinedFactorCompute:
+    """乖离率:``close / MA(close, N) - 1``(反转语义:高乖离看空)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            close = series.values
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = close / ts_mean(close, window) - 1.0
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _realized_vol(window: int) -> PredefinedFactorCompute:
+    """已实现波动率:日收益的 trailing 窗口样本标准差(未年化)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            per_symbol[symbol] = ts_std(_daily_returns(series.values), window)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _vol_ratio(fast: int, slow: int) -> PredefinedFactorCompute:
+    """波动率比:短窗波动 / 长窗波动(>1 = 波动放大)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            returns = _daily_returns(series.values)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = ts_std(returns, fast) / ts_std(returns, slow)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _beta(window: int) -> PredefinedFactorCompute:
+    """市场 beta:日收益对市场收益 trailing 窗口 OLS 斜率
+    (cov(r, m) / var(m);低 beta 异象 → direction LOWER)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_ret = _daily_returns(stock_values)
+            market_ret = _daily_returns(market_values)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                result: np.ndarray = ts_cov(stock_ret, market_ret, window) / ts_cov(
+                    market_ret, market_ret, window
+                )
+            return result
+
+        return _market_pair_frame(inp, inp.bars("close"), pair)
+
+    return compute
+
+
+def _specific_vol(window: int) -> PredefinedFactorCompute:
+    """特异波动:``总波动 x sqrt(max(0, 1 - rho^2))``(市场模型残差方差
+    开方;corr 缺测窗口整窗 NaN 传播)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_ret = _daily_returns(stock_values)
+            market_ret = _daily_returns(market_values)
+            total = ts_std(stock_ret, window)
+            rho = ts_corr(stock_ret, market_ret, window)
+            with np.errstate(invalid="ignore"):
+                result: np.ndarray = total * np.sqrt(
+                    np.clip(1.0 - rho * rho, 0.0, None)
+                )
+            return result
+
+        return _market_pair_frame(inp, inp.bars("close"), pair)
+
+    return compute
+
+
+def _corr_market(window: int) -> PredefinedFactorCompute:
+    """市场相关:日收益与市场收益的 trailing 窗口相关系数(低相关 =
+    分散价值,弱先验 direction LOWER)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            return ts_corr(
+                _daily_returns(stock_values), _daily_returns(market_values), window
+            )
+
+        return _market_pair_frame(inp, inp.bars("close"), pair)
+
+    return compute
+
+
+def _sharpe(window: int) -> PredefinedFactorCompute:
+    """窗口 Sharpe:``mean(日收益) / std(日收益) x √250``(无风险利率 0)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            returns = _daily_returns(series.values)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = (
+                    ts_mean(returns, window)
+                    / ts_std(returns, window)
+                    * _TRADING_DAYS_PER_YEAR**0.5
+                )
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _return_skew(window: int) -> PredefinedFactorCompute:
+    """日收益偏度(trailing 窗口,修正 Fisher-Pearson)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            per_symbol[symbol] = ts_skew(_daily_returns(series.values), window)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _return_kurt(window: int) -> PredefinedFactorCompute:
+    """日收益超额峰度(trailing 窗口,pandas rolling.kurt 同式)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            per_symbol[symbol] = ts_kurt(_daily_returns(series.values), window)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _downside_vol(window: int) -> PredefinedFactorCompute:
+    """下行波动:窗口内负日收益的样本标准差(:func:`ts_downside_std`)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            per_symbol[symbol] = ts_downside_std(
+                _daily_returns(series.values), window
+            )
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _drawdown(window: int) -> PredefinedFactorCompute:
+    """窗口回撤深度:``(max_N - close) / max_N``(≥0;距窗口最高收盘的
+    回撤,深度越大越深)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            close = series.values
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = (ts_max(close, window) - close) / ts_max(
+                    close, window
+                )
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _turnover_stat(
+    kind: str, window: int, *, fast: int | None = None
+) -> PredefinedFactorCompute:
+    """换手率族统计量(``daily_metrics.turnover_rate``,单位 %)。
+
+    ``kind``:``ma``(均值)/ ``std``(样本标准差)/ ``bias``(乖离
+    t/MA-1)/ ``z``((t-MA)/STD)/ ``ratio``(fast 日均值 / window 日均值)。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        turnover = inp.daily_metrics("turnover_rate")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in turnover.items():
+            values = series.values
+            if kind == "ma":
+                per_symbol[symbol] = ts_mean(values, window)
+            elif kind == "std":
+                per_symbol[symbol] = ts_std(values, window)
+            else:
+                mean = ts_mean(values, window)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    if kind == "bias":
+                        per_symbol[symbol] = values / mean - 1.0
+                    elif kind == "z":
+                        per_symbol[symbol] = (values - mean) / ts_std(values, window)
+                    else:  # ratio
+                        per_symbol[symbol] = ts_mean(values, fast or window) / mean
+        return inp.sample(turnover, per_symbol)
+
+    return compute
+
+
+def _bars_field_mean(field: str, window: int) -> PredefinedFactorCompute:
+    """bars 数值字段的 trailing 窗口均值(成交额 / 成交量流动性规模)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        series_by_symbol = inp.bars(field)
+        per_symbol: dict[str, np.ndarray] = {
+            symbol: ts_mean(series.values, window)
+            for symbol, series in series_by_symbol.items()
+        }
+        return inp.sample(series_by_symbol, per_symbol)
+
+    return compute
+
+
+def _amihud(window: int) -> PredefinedFactorCompute:
+    """Amihud 非流动性:``|日收益| / 成交额`` 的 trailing 窗口均值
+    (原始量纲;成交额 0 → inf → 采样归一 None,fail-visible)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        amounts = inp.bars("amount")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            returns = _daily_returns(series.values)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                illiq = np.abs(returns) / amounts[symbol].values
+            per_symbol[symbol] = ts_mean(illiq, window)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _vwap_dev(window: int) -> PredefinedFactorCompute:
+    """收盘价对窗口 VWAP 的偏离:``close / (Σamount / Σvolume) - 1``
+    (VWAP 用 amount/volume 近似,issue #399;量纲自由)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        amounts = inp.bars("amount")
+        volumes = inp.bars("volume")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            amount_sum = ts_sum(amounts[symbol].values, window)
+            volume_sum = ts_sum(volumes[symbol].values, window)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                vwap = amount_sum / volume_sum
+                per_symbol[symbol] = series.values / vwap - 1.0
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _turnover_return_corr(window: int) -> PredefinedFactorCompute:
+    """量价相关:换手率与日收益的 trailing 窗口相关系数(对齐 = bars
+    与 daily_metrics 的日期交集,见 :func:`_aligned_pair`)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        turnover = inp.daily_metrics("turnover_rate")
+        closes = inp.bars("close")
+        series_axis: dict[str, SymbolSeries] = {}
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, turnover_series in turnover.items():
+            close_series = closes.get(symbol)
+            if close_series is None:
+                continue
+            aligned_close, turnover_values = _aligned_pair(close_series, turnover_series)
+            series_axis[symbol] = aligned_close
+            per_symbol[symbol] = ts_corr(
+                turnover_values, _daily_returns(aligned_close.values), window
+            )
+        return inp.sample(series_axis, per_symbol)
+
+    return compute
+
+
+def _log_field(field: str) -> PredefinedFactorCompute:
+    """daily_metrics 数值字段的自然对数(规模因子;非正值 → 缺测)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        series_by_symbol = inp.daily_metrics(field)
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in series_by_symbol.items():
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = np.log(series.values)
+        return inp.sample(series_by_symbol, per_symbol)
+
+    return compute
+
+
+def _float_share_ratio() -> PredefinedFactorCompute:
+    """流通股占比:``float_shares / total_shares``(流通结构暴露)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        float_shares = inp.daily_metrics("float_shares")
+        total_shares = inp.daily_metrics("total_shares")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in float_shares.items():
+            total = total_shares.get(symbol)
+            if total is None:
+                continue
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = series.values / total.values
+        return inp.sample(float_shares, per_symbol)
+
+    return compute
 
 
 # --------------------------------------------------------------------- #
@@ -704,7 +1337,1452 @@ def _raw_cross_frame(raw: _RawCross) -> PredefinedFactorCompute:
         }
 
     return compute
+# --------------------------------------------------------------------- #
+# Alpha101 批次(issue #400)——共享口径辅助
+# --------------------------------------------------------------------- #
 
+
+def _values(
+    series_by_symbol: Mapping[str, SymbolSeries],
+) -> dict[str, np.ndarray]:
+    """{symbol: SymbolSeries} → {symbol: 1-D float64 值数组}(逐行对齐)。"""
+    return {symbol: series.values for symbol, series in series_by_symbol.items()}
+
+
+def _per_symbol(
+    values: Mapping[str, np.ndarray],
+    fn: Callable[[np.ndarray], np.ndarray],
+) -> dict[str, np.ndarray]:
+    """逐标的套用一元时序/逐点算子(输入与输出逐行对齐)。"""
+    return {symbol: fn(item) for symbol, item in values.items()}
+
+
+def _per_symbol_pair(
+    left: Mapping[str, np.ndarray],
+    right: Mapping[str, np.ndarray],
+    fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+) -> dict[str, np.ndarray]:
+    """逐标的套用二元算子(两字段序列同一挂载表逐行对齐)。"""
+    return {symbol: fn(left[symbol], right[symbol]) for symbol in left}
+
+
+def _returns_values(closes: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """``Returns = close / delay(close, 1) - 1``(qfq 收盘;首行缺测)。"""
+    return _per_symbol(
+        closes, lambda c: ew_div(ts_delta(c, 1), ts_delay(c, 1))
+    )
+
+
+def _adv20_values(volumes: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """``ADV20`` = 20 日成交量均值(主流复现口径,量纲自洽)。"""
+    return _per_symbol(volumes, lambda v: ts_mean(v, 20))
+
+
+def _vwap_values(inp: PredefinedFactorInput) -> dict[str, np.ndarray]:
+    """``VWAP ≈ amount / volume``(issue #400 验收口径;volume<=0 → NaN)。"""
+    amounts = _values(inp.bars("amount"))
+    volumes = _values(inp.bars("volume"))
+    return _per_symbol_pair(amounts, volumes, lambda a, v: ew_div(a, v))
+
+
+def _cs_transform(
+    axis: Mapping[str, SymbolSeries],
+    per_symbol: Mapping[str, np.ndarray],
+    transform: Callable[[CrossSection], Mapping[str, float | None]],
+    *,
+    universe: Collection[str],
+) -> dict[str, np.ndarray]:
+    """逐自然日截面变换回填(Alpha101 的 ``Rank(x)`` 输入装配)。
+
+    对每个业务日,取 ``universe`` 内标的当日有限值组截面喂给 ``transform``
+    (如 :func:`cs_rank`),结果回填到各标的行序;非有限/缺测 → NaN。
+    只用同日截面值 → 因果(截断前缀不变);``universe`` 外的标的
+    (benchmark-only)全行 NaN,不进截面分母(#380)。
+    """
+    members = set(universe) & set(axis)
+    by_date: dict[Any, list[tuple[str, int, float]]] = {}
+    for symbol in sorted(members):
+        series = axis[symbol]
+        values = per_symbol[symbol]
+        for position, day in enumerate(series.dates):
+            value = float(values[position])
+            if math.isfinite(value):
+                by_date.setdefault(day, []).append((symbol, position, value))
+    out = {s: np.full(v.size, np.nan) for s, v in per_symbol.items()}
+    for items in by_date.values():
+        cross = {symbol: value for symbol, _position, value in items}
+        transformed = transform(cross)
+        for symbol, position, _value in items:
+            mapped = transformed.get(symbol)
+            if mapped is not None and math.isfinite(mapped):
+                out[symbol][position] = mapped
+    return out
+
+
+def _cs_rank_series(
+    axis: Mapping[str, SymbolSeries],
+    per_symbol: Mapping[str, np.ndarray],
+    inp: PredefinedFactorInput,
+) -> dict[str, np.ndarray]:
+    """Alpha101 的 ``Rank(x)``:逐日截面百分位(分母 = 可交易域,#380)。"""
+    return _cs_transform(axis, per_symbol, cs_rank, universe=inp.tradable_symbols)
+
+
+def _signed_momentum_rule(delta: np.ndarray, window: int) -> np.ndarray:
+    """Alpha101#9/#10 的条件符号规则:
+    ``(0 < Ts_Min(d, w)) ? d : ((Ts_Max(d, w) < 0) ? d : -d)``。"""
+    cond_rising = ew_gt(ts_min(delta, window), 0.0)
+    cond_falling = ew_lt(ts_max(delta, window), 0.0)
+    return ew_where(cond_rising, delta, ew_where(cond_falling, delta, -delta))
+
+
+def _compute_alpha101_1(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``Rank(Ts_ArgMax(SignedPower(IF(Returns<0, StdDev(Returns,20), Close), 2), 5)) - 0.5``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    returns = _returns_values(closes)
+    inner = {
+        symbol: ew_where(
+            ew_lt(item, 0.0), ts_std(item, 20), closes[symbol]
+        )
+        for symbol, item in returns.items()
+    }
+    positioned = _per_symbol(
+        _per_symbol(inner, lambda x: ew_signed_power(x, 2.0)),
+        lambda x: ts_argmax(x, 5),
+    )
+    ranked = _cs_rank_series(axis, positioned, inp)
+    return inp.sample(axis, _per_symbol(ranked, lambda x: x - 0.5))
+
+
+def _compute_alpha101_2(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Corr(Rank(Delta(Log(Volume), 2)), Rank((Close-Open)/Open), 6)``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    opens = _values(inp.bars("open"))
+    volumes = _values(inp.bars("volume"))
+    left = _cs_rank_series(
+        axis, _per_symbol(volumes, lambda v: ts_delta(ew_log(v), 2)), inp
+    )
+    right = _cs_rank_series(
+        axis,
+        _per_symbol_pair(closes, opens, lambda c, o: ew_div(c - o, o)),
+        inp,
+    )
+    return inp.sample(
+        axis, _per_symbol_pair(left, right, lambda a, b: -ts_corr(a, b, 6))
+    )
+
+
+def _compute_alpha101_3(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Corr(Rank(Open), Rank(Volume), 10)``。"""
+    axis = inp.bars("open")
+    ranked_open = _cs_rank_series(axis, _values(axis), inp)
+    ranked_volume = _cs_rank_series(
+        inp.bars("close"), _values(inp.bars("volume")), inp
+    )
+    return inp.sample(
+        axis,
+        _per_symbol_pair(ranked_open, ranked_volume, lambda a, b: -ts_corr(a, b, 10)),
+    )
+
+
+def _compute_alpha101_4(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Ts_Rank(Rank(Low), 9)``。"""
+    axis = inp.bars("low")
+    ranked_low = _cs_rank_series(axis, _values(axis), inp)
+    return inp.sample(axis, _per_symbol(ranked_low, lambda x: -ts_rank(x, 9)))
+
+
+def _compute_alpha101_5(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``Rank(Open - Sum(VWAP,10)/10) * (-1 * Abs(Rank(Close - VWAP)))``。
+
+    VWAP = amount/volume 近似(模块 docstring 量纲注记)。
+    """
+    axis = inp.bars("open")
+    opens = _values(axis)
+    closes = _values(inp.bars("close"))
+    vwap = _vwap_values(inp)
+    left = _cs_rank_series(
+        axis,
+        _per_symbol_pair(opens, vwap, lambda o, v: o - ts_sum(v, 10) / 10.0),
+        inp,
+    )
+    right = _cs_rank_series(
+        axis,
+        _per_symbol_pair(closes, vwap, lambda c, v: c - v),
+        inp,
+    )
+    return inp.sample(
+        axis,
+        _per_symbol_pair(left, right, lambda a, b: a * -np.abs(b)),
+    )
+
+
+def _compute_alpha101_6(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Corr(Open, Volume, 10)``。"""
+    axis = inp.bars("open")
+    volumes = _values(inp.bars("volume"))
+    return inp.sample(
+        axis,
+        _per_symbol_pair(_values(axis), volumes, lambda o, v: -ts_corr(o, v, 10)),
+    )
+
+
+def _compute_alpha101_7(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``IF(ADV20 < Volume, -Ts_Rank(Abs(Delta(Close,7)), 60) * Sign(Delta(Close,7)), -1)``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    volumes = _values(inp.bars("volume"))
+    adv20 = _adv20_values(volumes)
+    delta7 = _per_symbol(closes, lambda c: ts_delta(c, 7))
+    body = _per_symbol(
+        delta7, lambda d: -ts_rank(np.abs(d), 60) * ew_sign(d)
+    )
+    condition = _per_symbol_pair(volumes, adv20, lambda v, a: ew_gt(v, a))
+    fallback = {symbol: np.full(v.size, -1.0) for symbol, v in condition.items()}
+    return inp.sample(
+        axis,
+        {
+            symbol: ew_where(condition[symbol], body[symbol], fallback[symbol])
+            for symbol in condition
+        },
+    )
+
+
+def _compute_alpha101_8(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Rank(Sum(Open,5) * Sum(Returns,5) - Delay(Sum(Open,5) * Sum(Returns,5), 10))``。"""
+    axis = inp.bars("close")
+    opens = _values(inp.bars("open"))
+    returns = _returns_values(_values(axis))
+    combined = _per_symbol_pair(
+        opens, returns, lambda o, r: ts_sum(o, 5) * ts_sum(r, 5)
+    )
+    diff = _per_symbol(combined, lambda x: x - ts_delay(x, 10))
+    ranked = _cs_rank_series(axis, diff, inp)
+    return inp.sample(axis, _per_symbol(ranked, lambda x: -x))
+
+
+def _compute_alpha101_9(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``IF(0 < Ts_Min(Delta(Close,1),5), Delta(Close,1), IF(Ts_Max(Delta(Close,1),5) < 0, Delta(Close,1), -Delta(Close,1)))``。"""
+    axis = inp.bars("close")
+    delta1 = _per_symbol(_values(axis), lambda c: ts_delta(c, 1))
+    return inp.sample(
+        axis, _per_symbol(delta1, lambda d: _signed_momentum_rule(d, 5))
+    )
+
+
+def _compute_alpha101_10(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``Rank(IF(0 < Ts_Min(Delta(Close,1),4), Delta(Close,1), IF(Ts_Max(Delta(Close,1),4) < 0, Delta(Close,1), -Delta(Close,1))))``。"""
+    axis = inp.bars("close")
+    delta1 = _per_symbol(_values(axis), lambda c: ts_delta(c, 1))
+    ruled = _per_symbol(delta1, lambda d: _signed_momentum_rule(d, 4))
+    return inp.sample(axis, _cs_rank_series(axis, ruled, inp))
+
+
+def _compute_alpha101_11(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``(Rank(Ts_Max(VWAP-Close,3)) + Rank(Ts_Min(VWAP-Close,3))) * Rank(Delta(Volume,3))``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    volumes = _values(inp.bars("volume"))
+    vwap = _vwap_values(inp)
+    deviation = _per_symbol_pair(vwap, closes, lambda v, c: v - c)
+    upper = _cs_rank_series(axis, _per_symbol(deviation, lambda x: ts_max(x, 3)), inp)
+    lower = _cs_rank_series(axis, _per_symbol(deviation, lambda x: ts_min(x, 3)), inp)
+    volume_rank = _cs_rank_series(
+        axis, _per_symbol(volumes, lambda v: ts_delta(v, 3)), inp
+    )
+    return inp.sample(
+        axis,
+        {
+            symbol: (upper[symbol] + lower[symbol]) * volume_rank[symbol]
+            for symbol in upper
+        },
+    )
+
+
+def _compute_alpha101_12(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``Sign(Delta(Volume,1)) * (-1 * Delta(Close,1))``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    volumes = _values(inp.bars("volume"))
+    return inp.sample(
+        axis,
+        {
+            symbol: ew_sign(ts_delta(volumes[symbol], 1))
+            * -ts_delta(closes[symbol], 1)
+            for symbol in closes
+        },
+    )
+
+
+def _compute_alpha101_13(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Rank(Covariance(Rank(Close), Rank(Volume), 5))``。"""
+    axis = inp.bars("close")
+    ranked_close = _cs_rank_series(axis, _values(axis), inp)
+    ranked_volume = _cs_rank_series(
+        inp.bars("volume"), _values(inp.bars("volume")), inp
+    )
+    covariance = _per_symbol_pair(
+        ranked_close, ranked_volume, lambda a, b: ts_cov(a, b, 5)
+    )
+    ranked = _cs_rank_series(axis, covariance, inp)
+    return inp.sample(axis, _per_symbol(ranked, lambda x: -x))
+
+
+def _compute_alpha101_14(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Rank(Delta(Returns,3)) * Corr(Open, Volume, 10)``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    opens = _values(inp.bars("open"))
+    volumes = _values(inp.bars("volume"))
+    ranked_delta = _cs_rank_series(
+        axis,
+        _per_symbol(_returns_values(closes), lambda r: ts_delta(r, 3)),
+        inp,
+    )
+    correlation = _per_symbol_pair(opens, volumes, lambda o, v: ts_corr(o, v, 10))
+    return inp.sample(
+        axis,
+        _per_symbol_pair(ranked_delta, correlation, lambda a, b: -a * b),
+    )
+
+
+def _compute_alpha101_15(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Sum(Rank(Corr(Rank(High), Rank(Volume), 3)), 3)``。"""
+    axis = inp.bars("high")
+    ranked_high = _cs_rank_series(axis, _values(axis), inp)
+    ranked_volume = _cs_rank_series(
+        inp.bars("volume"), _values(inp.bars("volume")), inp
+    )
+    correlation = _per_symbol_pair(
+        ranked_high, ranked_volume, lambda a, b: ts_corr(a, b, 3)
+    )
+    ranked = _cs_rank_series(axis, correlation, inp)
+    return inp.sample(axis, _per_symbol(ranked, lambda x: -ts_sum(x, 3)))
+
+
+def _compute_alpha101_16(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Rank(Covariance(Rank(High), Rank(Volume), 5))``。"""
+    axis = inp.bars("high")
+    ranked_high = _cs_rank_series(axis, _values(axis), inp)
+    ranked_volume = _cs_rank_series(
+        inp.bars("volume"), _values(inp.bars("volume")), inp
+    )
+    covariance = _per_symbol_pair(
+        ranked_high, ranked_volume, lambda a, b: ts_cov(a, b, 5)
+    )
+    ranked = _cs_rank_series(axis, covariance, inp)
+    return inp.sample(axis, _per_symbol(ranked, lambda x: -x))
+
+
+def _compute_alpha101_17(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-Rank(Ts_Rank(Close,10)) * Rank(Delta(Delta(Close,1),1)) * Rank(Ts_Rank(Volume/ADV20,5))``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    volumes = _values(inp.bars("volume"))
+    adv20 = _adv20_values(volumes)
+    rank_price = _cs_rank_series(
+        axis, _per_symbol(closes, lambda c: ts_rank(c, 10)), inp
+    )
+    rank_accel = _cs_rank_series(
+        axis,
+        _per_symbol(closes, lambda c: ts_delta(ts_delta(c, 1), 1)),
+        inp,
+    )
+    relative_volume = _per_symbol_pair(volumes, adv20, lambda v, a: ew_div(v, a))
+    rank_volume = _cs_rank_series(
+        axis, _per_symbol(relative_volume, lambda r: ts_rank(r, 5)), inp
+    )
+    return inp.sample(
+        axis,
+        {
+            symbol: -rank_price[symbol] * rank_accel[symbol] * rank_volume[symbol]
+            for symbol in rank_price
+        },
+    )
+
+
+def _compute_alpha101_18(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-1 * Rank(StdDev(Abs(Close-Open),5) + (Close-Open) + Corr(Close,Open,10))``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    opens = _values(inp.bars("open"))
+    body = _per_symbol_pair(
+        closes,
+        opens,
+        lambda c, o: ts_std(np.abs(c - o), 5) + (c - o) + ts_corr(c, o, 10),
+    )
+    ranked = _cs_rank_series(axis, body, inp)
+    return inp.sample(axis, _per_symbol(ranked, lambda x: -x))
+
+
+def _compute_alpha101_19(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-Sign((Close-Delay(Close,7))+Delta(Close,7)) * (1+Rank(1+Sum(Returns,250))) - Rank(X)^2``;
+
+    其中 ``X = Corr(Rank(VWAP-Close), Rank(Volume), 12) * Rank(Corr(Rank(Close),
+    Rank(ADV20), 12))``(tushare 口径把论文的 scale/indneutralize 项写为
+    ``-Rank(X) * Rank(X)``,逐字直译;注意 tushare 文本中第二个 Correlation
+    外层有 ``Rank(...)``,与论文「两 Correlation 各自 Rank 后相乘」不同)。
+    """
+    axis = inp.bars("close")
+    closes = _values(axis)
+    volumes = _values(inp.bars("volume"))
+    returns = _returns_values(closes)
+    vwap = _vwap_values(inp)
+    adv20 = _adv20_values(volumes)
+    momentum_sign = _per_symbol(
+        closes, lambda c: ew_sign((c - ts_delay(c, 7)) + ts_delta(c, 7))
+    )
+    long_return_rank = _cs_rank_series(
+        axis,
+        _per_symbol(returns, lambda r: 1.0 + ts_sum(r, 250)),
+        inp,
+    )
+    term1 = _per_symbol_pair(
+        momentum_sign, long_return_rank, lambda s, r: -s * (1.0 + r)
+    )
+    left_corr = _per_symbol_pair(
+        _cs_rank_series(
+            axis,
+            _per_symbol_pair(vwap, closes, lambda v, c: v - c),
+            inp,
+        ),
+        _cs_rank_series(inp.bars("volume"), volumes, inp),
+        lambda a, b: ts_corr(a, b, 12),
+    )
+    right_corr = _per_symbol_pair(
+        _cs_rank_series(axis, closes, inp),
+        _cs_rank_series(axis, adv20, inp),
+        lambda a, b: ts_corr(a, b, 12),
+    )
+    ranked_right_corr = _cs_rank_series(axis, right_corr, inp)
+    product = _per_symbol_pair(
+        left_corr, ranked_right_corr, lambda a, b: a * b
+    )
+    term2_rank = _cs_rank_series(axis, product, inp)
+    return inp.sample(
+        axis,
+        _per_symbol_pair(
+            term1, term2_rank, lambda a, r: a + (-r * r)
+        ),
+    )
+
+
+def _compute_alpha101_20(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-Rank(Open-Delay(High,1)) * Rank(Open-Delay(Close,1)) * Rank(Open-Delay(Low,1))``。"""
+    axis = inp.bars("open")
+    opens = _values(axis)
+    highs = _values(inp.bars("high"))
+    closes = _values(inp.bars("close"))
+    lows = _values(inp.bars("low"))
+    gap_high = _cs_rank_series(
+        axis,
+        _per_symbol_pair(opens, highs, lambda o, h: o - ts_delay(h, 1)),
+        inp,
+    )
+    gap_close = _cs_rank_series(
+        axis,
+        _per_symbol_pair(opens, closes, lambda o, c: o - ts_delay(c, 1)),
+        inp,
+    )
+    gap_low = _cs_rank_series(
+        axis,
+        _per_symbol_pair(opens, lows, lambda o, low: o - ts_delay(low, 1)),
+        inp,
+    )
+    return inp.sample(
+        axis,
+        {
+            symbol: -gap_high[symbol] * gap_close[symbol] * gap_low[symbol]
+            for symbol in gap_high
+        },
+    )
+
+
+def _compute_alpha101_22(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-Delta(Corr(High, Volume, 5), 5) * Rank(StdDev(Close, 20))``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    highs = _values(inp.bars("high"))
+    volumes = _values(inp.bars("volume"))
+    correlation_delta = _per_symbol_pair(
+        highs, volumes, lambda h, v: ts_delta(ts_corr(h, v, 5), 5)
+    )
+    volatility_rank = _cs_rank_series(
+        axis, _per_symbol(closes, lambda c: ts_std(c, 20)), inp
+    )
+    return inp.sample(
+        axis,
+        _per_symbol_pair(
+            correlation_delta, volatility_rank, lambda a, b: -(a * b)
+        ),
+    )
+
+
+def _compute_alpha101_23(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``IF(Sum(High,20)/20 < High, -Delta(High,2), 0)``。"""
+    axis = inp.bars("high")
+    highs = _values(axis)
+    return inp.sample(
+        axis,
+        {
+            symbol: ew_where(
+                ew_lt(ts_sum(highs[symbol], 20) / 20.0, highs[symbol]),
+                -ts_delta(highs[symbol], 2),
+                np.zeros(highs[symbol].size),
+            )
+            for symbol in highs
+        },
+    )
+
+
+def _compute_alpha101_25(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``Rank(-1 * Returns * ADV20 * VWAP * (High - Close))``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    highs = _values(inp.bars("high"))
+    volumes = _values(inp.bars("volume"))
+    returns = _returns_values(closes)
+    adv20 = _adv20_values(volumes)
+    vwap = _vwap_values(inp)
+    body = {
+        symbol: -returns[symbol]
+        * adv20[symbol]
+        * vwap[symbol]
+        * (highs[symbol] - closes[symbol])
+        for symbol in closes
+    }
+    return inp.sample(axis, _cs_rank_series(axis, body, inp))
+
+
+def _compute_alpha101_33(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``Rank(-1 * (1 - Open/Close))``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    opens = _values(inp.bars("open"))
+    body = _per_symbol_pair(opens, closes, lambda o, c: -(1.0 - ew_div(o, c)))
+    return inp.sample(axis, _cs_rank_series(axis, body, inp))
+
+
+def _compute_alpha101_34(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``Rank((1 - Rank(StdDev(Returns,2)/StdDev(Returns,5))) + (1 - Rank(Delta(Close,1))))``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    returns = _returns_values(closes)
+    volatility_ratio = _per_symbol(
+        returns, lambda r: ew_div(ts_std(r, 2), ts_std(r, 5))
+    )
+    rank_ratio = _cs_rank_series(axis, volatility_ratio, inp)
+    rank_delta = _cs_rank_series(
+        axis, _per_symbol(closes, lambda c: ts_delta(c, 1)), inp
+    )
+    combined = {
+        symbol: (1.0 - rank_ratio[symbol]) + (1.0 - rank_delta[symbol])
+        for symbol in rank_ratio
+    }
+    return inp.sample(axis, _cs_rank_series(axis, combined, inp))
+
+
+def _compute_alpha101_41(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``(High*Low)^0.5 - VWAP``(VWAP = amount/volume 近似,量纲注记见模块 docstring)。"""
+    axis = inp.bars("close")
+    highs = _values(inp.bars("high"))
+    lows = _values(inp.bars("low"))
+    vwap = _vwap_values(inp)
+    with np.errstate(invalid="ignore"):
+        body = {
+            symbol: np.sqrt(highs[symbol] * lows[symbol]) - vwap[symbol]
+            for symbol in highs
+        }
+    return inp.sample(axis, body)
+
+
+def _compute_alpha101_52(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``(-Ts_Min(Low,5) + Delay(Ts_Min(Low,5),5)) * Rank((Sum(Returns,240)-Sum(Returns,20))/220) * Ts_Rank(Volume,5)``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    lows = _values(inp.bars("low"))
+    volumes = _values(inp.bars("volume"))
+    returns = _returns_values(closes)
+    low_trough = _per_symbol(lows, lambda low: ts_min(low, 5))
+    head = _per_symbol(low_trough, lambda m: -m + ts_delay(m, 5))
+    momentum_spread = _per_symbol(
+        returns, lambda r: (ts_sum(r, 240) - ts_sum(r, 20)) / 220.0
+    )
+    ranked_spread = _cs_rank_series(axis, momentum_spread, inp)
+    volume_rank = _per_symbol(volumes, lambda v: ts_rank(v, 5))
+    return inp.sample(
+        axis,
+        {
+            symbol: (head[symbol] * ranked_spread[symbol]) * volume_rank[symbol]
+            for symbol in head
+        },
+    )
+
+
+def _compute_alpha101_53(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-Delta(((Close-Low)-(High-Close))/(Close-Low), 9)``(分母 0 → NaN,#400 除法纪律)。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    highs = _values(inp.bars("high"))
+    lows = _values(inp.bars("low"))
+    body = {
+        symbol: ew_div(
+            (closes[symbol] - lows[symbol]) - (highs[symbol] - closes[symbol]),
+            closes[symbol] - lows[symbol],
+        )
+        for symbol in closes
+    }
+    return inp.sample(
+        axis, _per_symbol(body, lambda x: -ts_delta(x, 9))
+    )
+
+
+def _compute_alpha101_54(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``(-1 * (Low-Close) * Open^5) / ((Low-High) * Close^5)``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    opens = _values(inp.bars("open"))
+    highs = _values(inp.bars("high"))
+    lows = _values(inp.bars("low"))
+    body = {
+        symbol: ew_div(
+            -1.0 * (lows[symbol] - closes[symbol]) * opens[symbol] ** 5,
+            (lows[symbol] - highs[symbol]) * closes[symbol] ** 5,
+        )
+        for symbol in closes
+    }
+    return inp.sample(axis, body)
+
+
+def _compute_alpha101_57(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``-(Close - VWAP) / Decay_Linear(Rank(Ts_ArgMax(Close,30)), 2)``。
+
+    VWAP = amount/volume 近似(量纲注记见模块 docstring)。
+    """
+    axis = inp.bars("close")
+    closes = _values(axis)
+    vwap = _vwap_values(inp)
+    positioned = _per_symbol(closes, lambda c: ts_argmax(c, 30))
+    ranked = _cs_rank_series(axis, positioned, inp)
+    denominator = _per_symbol(ranked, lambda r: ts_decay(r, 2))
+    body = {
+        symbol: ew_div(vwap[symbol] - closes[symbol], denominator[symbol])
+        for symbol in closes
+    }
+    return inp.sample(axis, body)
+
+
+def _compute_alpha101_101(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+    """``(Close - Open) / ((High - Low) + 0.001)``。"""
+    axis = inp.bars("close")
+    closes = _values(axis)
+    opens = _values(inp.bars("open"))
+    highs = _values(inp.bars("high"))
+    lows = _values(inp.bars("low"))
+    body = {
+        symbol: ew_div(
+            closes[symbol] - opens[symbol],
+            (highs[symbol] - lows[symbol]) + 0.001,
+        )
+        for symbol in closes
+    }
+    return inp.sample(axis, body)
+
+
+def industry_neutralize(
+    values: CrossSection,
+    groups: Mapping[str, str | None],
+) -> tuple[dict[str, float | None], int]:
+    """行业中性化(issue #400 口径):组内去均值,**缺组标签 → 缺测 + 计数**。
+
+    与 :func:`operators.cs_neutralize`(缺组标的归入合成组一起去均值)
+    的差异是本 issue 的验收口径:缺行业数据的标的宁可缺测(可见、
+    可计数、由质量门把关)也不静默归组 —— 用法 = 因子 compute 经
+    ``inp.industry_groups()`` 取 ``{symbol: 行业}`` 后传入本助手。
+    组标签 = 冻结发布 ``instruments.industry``(#185,stock_basic 行业
+    字符串近似 research_industry_memberships 一级分组;非 WQ
+    ``indneutralize`` 的 rank 中性语义——组内原始值去均值)。
+    返回 ``(中性化截面, 缺组标的数)``。
+    """
+    grouped = {
+        symbol: (values[symbol] if (groups.get(symbol) or "") else None)
+        for symbol in values
+    }
+    missing = sum(1 for symbol in values if not (groups.get(symbol) or ""))
+    return cs_neutralize(grouped, groups), missing
+
+
+def _alpha_definition(
+    number: int,
+    *,
+    title: str,
+    window: int | None,
+    compute: PredefinedFactorCompute,
+    cross_section: bool,
+    data_dependencies: tuple[str, ...],
+) -> PredefinedFactorDefinition:
+    """Alpha101 批次条目工厂(issue #400)。
+
+    方向 = 文献构建约定:WQ 论文按「因子值越高 → 预期收益越高」构造
+    (负号已在公式内),故统一 ``HIGHER``;个别量纲敏感因子(41/54/57)
+    的方向稳健性由 IC sanity 复核(PR 清单表标注)。
+    """
+    return PredefinedFactorDefinition(
+        name=f"alpha101_{number}",
+        title=title,
+        family="alpha101",
+        direction=FactorPreference.HIGHER,
+        signal_eligible=True,
+        data_dependencies=data_dependencies,
+        window=window,
+        implementation_version="1",
+        compute=compute,
+        cross_section=cross_section,
+    )
+
+
+#: Alpha101 批次(tushare ``factor_list`` 圈定的 31 个;编号即 WQ 论文
+#: 原始编号,缺号为论文中依赖行业/市值数据或非截面语义的未收录因子)。
+#: ``cross_section=True`` = 公式含 ``Rank`` 类截面算子(构建期采样面
+#: 收窄到可交易域,#380);纯时序条件公式 False。
+_ALPHA101_FACTORS: tuple[PredefinedFactorDefinition, ...] = (
+    _alpha_definition(
+        1,
+        title=(
+            "Alpha101#1: Rank(Ts_ArgMax(SignedPower(IF(Returns<0, "
+            "StdDev(Returns,20), Close), 2), 5)) - 0.5"
+            "(负收益时段波动放大的极值位置排名)"
+        ),
+        window=20,
+        compute=_compute_alpha101_1,
+        cross_section=True,
+        data_dependencies=("bars.close",),
+    ),
+    _alpha_definition(
+        2,
+        title=(
+            "Alpha101#2: -1 * Corr(Rank(Delta(Log(Volume), 2)), "
+            "Rank((Close-Open)/Open), 6)(量变排名与日内动量排名的负相关)"
+        ),
+        window=6,
+        compute=_compute_alpha101_2,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.open", "bars.volume"),
+    ),
+    _alpha_definition(
+        3,
+        title=(
+            "Alpha101#3: -1 * Corr(Rank(Open), Rank(Volume), 10)"
+            "(开盘价排名与成交量排名的负相关)"
+        ),
+        window=10,
+        compute=_compute_alpha101_3,
+        cross_section=True,
+        data_dependencies=("bars.open", "bars.volume"),
+    ),
+    _alpha_definition(
+        4,
+        title="Alpha101#4: -1 * Ts_Rank(Rank(Low), 9)(低价排名时序百分位的负值)",
+        window=9,
+        compute=_compute_alpha101_4,
+        cross_section=True,
+        data_dependencies=("bars.low",),
+    ),
+    _alpha_definition(
+        5,
+        title=(
+            "Alpha101#5: Rank(Open - Sum(VWAP,10)/10) * "
+            "(-1 * Abs(Rank(Close - VWAP)))(开盘对 VWAP 均值偏离 x 收盘对 VWAP 偏离)"
+        ),
+        window=10,
+        compute=_compute_alpha101_5,
+        cross_section=True,
+        data_dependencies=(
+            "bars.close",
+            "bars.open",
+            "bars.volume",
+            "bars.amount",
+        ),
+    ),
+    _alpha_definition(
+        6,
+        title=(
+            "Alpha101#6: -1 * Corr(Open, Volume, 10)"
+            "(开盘价与成交量的负相关;纯时序无截面算子)"
+        ),
+        window=10,
+        compute=_compute_alpha101_6,
+        cross_section=False,
+        data_dependencies=("bars.open", "bars.volume"),
+    ),
+    _alpha_definition(
+        7,
+        title=(
+            "Alpha101#7: IF(ADV20 < Volume, -Ts_Rank(Abs(Delta(Close,7)), 60) "
+            "* Sign(Delta(Close,7)), -1)(放量日的 7 日动量符号加权)"
+        ),
+        window=60,
+        compute=_compute_alpha101_7,
+        cross_section=False,
+        data_dependencies=("bars.close", "bars.volume"),
+    ),
+    _alpha_definition(
+        8,
+        title=(
+            "Alpha101#8: -1 * Rank(Sum(Open,5) * Sum(Returns,5) - "
+            "Delay(Sum(Open,5) * Sum(Returns,5), 10))(开盘-收益联合动量反转)"
+        ),
+        window=10,
+        compute=_compute_alpha101_8,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.open"),
+    ),
+    _alpha_definition(
+        9,
+        title=(
+            "Alpha101#9: IF(0 < Ts_Min(Delta(Close,1),5), Delta(Close,1), "
+            "IF(Ts_Max(Delta(Close,1),5) < 0, Delta(Close,1), -Delta(Close,1)))"
+            "(短期动量方向确认)"
+        ),
+        window=5,
+        compute=_compute_alpha101_9,
+        cross_section=False,
+        data_dependencies=("bars.close",),
+    ),
+    _alpha_definition(
+        10,
+        title=(
+            "Alpha101#10: Rank(IF(0 < Ts_Min(Delta(Close,1),4), Delta(Close,1), "
+            "IF(Ts_Max(Delta(Close,1),4) < 0, Delta(Close,1), -Delta(Close,1))))"
+            "(#9 的截面排名版,4 日窗)"
+        ),
+        window=4,
+        compute=_compute_alpha101_10,
+        cross_section=True,
+        data_dependencies=("bars.close",),
+    ),
+    _alpha_definition(
+        11,
+        title=(
+            "Alpha101#11: (Rank(Ts_Max(VWAP-Close,3)) + Rank(Ts_Min(VWAP-Close,3))) "
+            "* Rank(Delta(Volume,3))(VWAP 偏离极值 x 量变排名)"
+        ),
+        window=3,
+        compute=_compute_alpha101_11,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.volume", "bars.amount"),
+    ),
+    _alpha_definition(
+        12,
+        title=(
+            "Alpha101#12: Sign(Delta(Volume,1)) * (-1 * Delta(Close,1))"
+            "(量变方向加权的价格反转)"
+        ),
+        window=1,
+        compute=_compute_alpha101_12,
+        cross_section=False,
+        data_dependencies=("bars.close", "bars.volume"),
+    ),
+    _alpha_definition(
+        13,
+        title=(
+            "Alpha101#13: -1 * Rank(Covariance(Rank(Close), Rank(Volume), 5))"
+            "(量价排名协方差的负值)"
+        ),
+        window=5,
+        compute=_compute_alpha101_13,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.volume"),
+    ),
+    _alpha_definition(
+        14,
+        title=(
+            "Alpha101#14: -1 * Rank(Delta(Returns,3)) * Corr(Open, Volume, 10)"
+            "(收益加速反转 x 量价相关)"
+        ),
+        window=10,
+        compute=_compute_alpha101_14,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.open", "bars.volume"),
+    ),
+    _alpha_definition(
+        15,
+        title=(
+            "Alpha101#15: -1 * Sum(Rank(Corr(Rank(High), Rank(Volume), 3)), 3)"
+            "(高价-量相关排名的 3 日和)"
+        ),
+        window=3,
+        compute=_compute_alpha101_15,
+        cross_section=True,
+        data_dependencies=("bars.high", "bars.volume"),
+    ),
+    _alpha_definition(
+        16,
+        title=(
+            "Alpha101#16: -1 * Rank(Covariance(Rank(High), Rank(Volume), 5))"
+            "(高价-量排名协方差的负值)"
+        ),
+        window=5,
+        compute=_compute_alpha101_16,
+        cross_section=True,
+        data_dependencies=("bars.high", "bars.volume"),
+    ),
+    _alpha_definition(
+        17,
+        title=(
+            "Alpha101#17: -Rank(Ts_Rank(Close,10)) * Rank(Delta(Delta(Close,1),1)) "
+            "* Rank(Ts_Rank(Volume/ADV20,5))(价格时序位置 x 二阶动量 x 相对量)"
+        ),
+        window=10,
+        compute=_compute_alpha101_17,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.volume"),
+    ),
+    _alpha_definition(
+        18,
+        title=(
+            "Alpha101#18: -1 * Rank(StdDev(Abs(Close-Open),5) + (Close-Open) "
+            "+ Corr(Close,Open,10))(日内波动与动量组合的负值)"
+        ),
+        window=10,
+        compute=_compute_alpha101_18,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.open"),
+    ),
+    _alpha_definition(
+        19,
+        title=(
+            "Alpha101#19: -Sign((Close-Delay(Close,7))+Delta(Close,7)) * "
+            "(1+Rank(1+Sum(Returns,250))) - Rank(X)^2, X = Corr(Rank(VWAP-Close), "
+            "Rank(Volume), 12) * Corr(Rank(Close), Rank(ADV20), 12)"
+            "(长周期动量符号 x VWAP 偏离-量相关联合排名)"
+        ),
+        window=250,
+        compute=_compute_alpha101_19,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.volume", "bars.amount"),
+    ),
+    _alpha_definition(
+        20,
+        title=(
+            "Alpha101#20: -Rank(Open-Delay(High,1)) * Rank(Open-Delay(Close,1)) "
+            "* Rank(Open-Delay(Low,1))(开盘跳空三重排名反转)"
+        ),
+        window=1,
+        compute=_compute_alpha101_20,
+        cross_section=True,
+        data_dependencies=(
+            "bars.close",
+            "bars.open",
+            "bars.high",
+            "bars.low",
+        ),
+    ),
+    _alpha_definition(
+        22,
+        title=(
+            "Alpha101#22: -Delta(Corr(High, Volume, 5), 5) * Rank(StdDev(Close, 20))"
+            "(量价相关变化 x 波动排名)"
+        ),
+        window=20,
+        compute=_compute_alpha101_22,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.high", "bars.volume"),
+    ),
+    _alpha_definition(
+        23,
+        title=(
+            "Alpha101#23: IF(Sum(High,20)/20 < High, -Delta(High,2), 0)"
+            "(突破 20 日高价均线后的短期回落)"
+        ),
+        window=20,
+        compute=_compute_alpha101_23,
+        cross_section=False,
+        data_dependencies=("bars.high",),
+    ),
+    _alpha_definition(
+        25,
+        title=(
+            "Alpha101#25: Rank(-1 * Returns * ADV20 * VWAP * (High - Close))"
+            "(放量长上影反转)"
+        ),
+        window=20,
+        compute=_compute_alpha101_25,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.high", "bars.volume", "bars.amount"),
+    ),
+    _alpha_definition(
+        33,
+        title=(
+            "Alpha101#33: Rank(-1 * (1 - Open/Close))(日内开盘-收盘反向排名)"
+        ),
+        window=None,
+        compute=_compute_alpha101_33,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.open"),
+    ),
+    _alpha_definition(
+        34,
+        title=(
+            "Alpha101#34: Rank((1 - Rank(StdDev(Returns,2)/StdDev(Returns,5))) "
+            "+ (1 - Rank(Delta(Close,1))))(短波动比与价格动量的组合排名)"
+        ),
+        window=5,
+        compute=_compute_alpha101_34,
+        cross_section=True,
+        data_dependencies=("bars.close",),
+    ),
+    _alpha_definition(
+        41,
+        title=(
+            "Alpha101#41: (High*Low)^0.5 - VWAP(几何均价对 VWAP 的偏离;"
+            "量纲敏感因子,方向待 IC 确认)"
+        ),
+        window=None,
+        compute=_compute_alpha101_41,
+        cross_section=False,
+        data_dependencies=("bars.high", "bars.low", "bars.volume", "bars.amount"),
+    ),
+    _alpha_definition(
+        52,
+        title=(
+            "Alpha101#52: (-Ts_Min(Low,5) + Delay(Ts_Min(Low,5),5)) * "
+            "Rank((Sum(Returns,240)-Sum(Returns,20))/220) * Ts_Rank(Volume,5)"
+            "(低价改善 x 长短期动量差 x 量时序位置)"
+        ),
+        window=240,
+        compute=_compute_alpha101_52,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.low", "bars.volume"),
+    ),
+    _alpha_definition(
+        53,
+        title=(
+            "Alpha101#53: -Delta(((Close-Low)-(High-Close))/(Close-Low), 9)"
+            "(日内位置指标的 9 日反转)"
+        ),
+        window=9,
+        compute=_compute_alpha101_53,
+        cross_section=False,
+        data_dependencies=("bars.close", "bars.high", "bars.low"),
+    ),
+    _alpha_definition(
+        54,
+        title=(
+            "Alpha101#54: (-1 * (Low-Close) * Open^5) / ((Low-High) * Close^5)"
+            "(日内位置与开收盘比的极值组合;量纲敏感,方向待 IC 确认)"
+        ),
+        window=None,
+        compute=_compute_alpha101_54,
+        cross_section=False,
+        data_dependencies=("bars.close", "bars.open", "bars.high", "bars.low"),
+    ),
+    _alpha_definition(
+        57,
+        title=(
+            "Alpha101#57: -(Close - VWAP) / Decay_Linear(Rank(Ts_ArgMax(Close,30)), 2)"
+            "(收盘-VWAP 偏离除以极值位置线性衰减;量纲敏感,方向待 IC 确认)"
+        ),
+        window=30,
+        compute=_compute_alpha101_57,
+        cross_section=True,
+        data_dependencies=("bars.close", "bars.volume", "bars.amount"),
+    ),
+    _alpha_definition(
+        101,
+        title=(
+            "Alpha101#101: (Close - Open) / ((High - Low) + 0.001)(日内动量归一)"
+        ),
+        window=None,
+        compute=_compute_alpha101_101,
+        cross_section=False,
+        data_dependencies=("bars.close", "bars.open", "bars.high", "bars.low"),
+    ),
+)
+def _entry(
+    name: str,
+    *,
+    title: str,
+    family: str,
+    compute: PredefinedFactorCompute,
+    window: int | None = None,
+    direction: FactorPreference = FactorPreference.HIGHER,
+    signal_eligible: bool = True,
+    cross_section: bool = False,
+    data_dependencies: tuple[str, ...] = ("bars.close",),
+    implementation_version: str = "1",
+    min_history_bars: int | None = None,
+) -> PredefinedFactorDefinition:
+    """批次 1(#399)通用条目工厂:参数化 compute + 显式目录字段。"""
+    return PredefinedFactorDefinition(
+        name=name,
+        title=title,
+        family=family,
+        direction=direction,
+        signal_eligible=signal_eligible,
+        data_dependencies=data_dependencies,
+        window=window,
+        implementation_version=implementation_version,
+        compute=compute,
+        cross_section=cross_section,
+        min_history_bars=min_history_bars,
+    )
+
+
+def _vol_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """risk 族 24 个(波动率窗口展开 / beta / 特异波动 / 市场相关 /
+    Sharpe / 高阶矩 / 回撤;指数依赖因子声明 ``index_bars.close``,
+    3 个 1320d 长窗口声明 ``min_history_bars`` 覆盖起点)。"""
+    vol_windows = (20, 60, 120, 250)
+    entries: list[PredefinedFactorDefinition] = [
+        _entry(
+            f"vol_{window}d",
+            title=f"vol_{window}d = 日收益 trailing {window} 根 bar 样本标准差"
+            "(已实现波动,未年化;低波动异象 direction LOWER)",
+            family="risk",
+            compute=_realized_vol(window),
+            window=window,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+        )
+        for window in vol_windows
+    ]
+    entries.append(
+        _entry(
+            "vol_ratio_20_60d",
+            title="vol_ratio_20_60d = vol_20d / vol_60d(>1 波动放大)",
+            family="risk",
+            compute=_vol_ratio(20, 60),
+            window=60,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+        )
+    )
+    for window in (60, 120, 250):
+        entries.append(
+            _entry(
+                f"beta_{window}d",
+                title=f"beta_{window}d = 日收益对市场收益(000300.SH)trailing "
+                f"{window} 根 bar OLS 斜率(低 beta 异象 direction LOWER)",
+                family="risk",
+                compute=_beta(window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "index_bars.close"),
+            )
+        )
+    entries.append(
+        _entry(
+            "beta_1320d",
+            title="beta_1320d = 日收益对市场收益 trailing 1320 根 bar OLS 斜率"
+            "(5 年长窗;min_history_bars=1320 声明覆盖起点)",
+            family="risk",
+            compute=_beta(1320),
+            window=1320,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("bars.close", "index_bars.close"),
+            min_history_bars=1320,
+        )
+    )
+    for window in (60, 120, 250):
+        entries.append(
+            _entry(
+                f"specific_vol_{window}d",
+                title=f"specific_vol_{window}d = 总波动 x sqrt(max(0, 1 - ρ²))"
+                f"({window} 根 bar 市场模型特异波动)",
+                family="risk",
+                compute=_specific_vol(window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "index_bars.close"),
+            )
+        )
+    for window in (60, 120, 250):
+        entries.append(
+            _entry(
+                f"corr_market_{window}d",
+                title=f"corr_market_{window}d = 日收益与市场收益 trailing {window}"
+                " 根 bar 相关系数(低相关 = 分散价值)",
+                family="risk",
+                compute=_corr_market(window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "index_bars.close"),
+            )
+        )
+    entries.append(
+        _entry(
+            "corr_market_1320d",
+            title="corr_market_1320d = 日收益与市场收益 trailing 1320 根 bar 相关"
+            "系数(5 年长窗;min_history_bars=1320 声明覆盖起点)",
+            family="risk",
+            compute=_corr_market(1320),
+            window=1320,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("bars.close", "index_bars.close"),
+            min_history_bars=1320,
+        )
+    )
+    for window in (60, 120, 250):
+        entries.append(
+            _entry(
+                f"sharpe_{window}d",
+                title=f"sharpe_{window}d = 日收益均值 / 日收益标准差 x √250"
+                f"({window} 根 bar,无风险利率 0)",
+                family="risk",
+                compute=_sharpe(window),
+                window=window,
+                signal_eligible=False,
+            )
+        )
+    entries.append(
+        _entry(
+            "sharpe_1320d",
+            title="sharpe_1320d = 日收益均值 / 日收益标准差 x √250(5 年长窗;"
+            "min_history_bars=1320 声明覆盖起点)",
+            family="risk",
+            compute=_sharpe(1320),
+            window=1320,
+            signal_eligible=False,
+            min_history_bars=1320,
+        )
+    )
+    entries.extend(
+        (
+            _entry(
+                "skew_250d",
+                title="skew_250d = 日收益 trailing 250 根 bar 偏度(修正 "
+                "Fisher-Pearson;彩票偏好 direction LOWER)",
+                family="risk",
+                compute=_return_skew(250),
+                window=250,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+            ),
+            _entry(
+                "kurt_250d",
+                title="kurt_250d = 日收益 trailing 250 根 bar 超额峰度(尾部"
+                "风险 direction LOWER)",
+                family="risk",
+                compute=_return_kurt(250),
+                window=250,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+            ),
+            _entry(
+                "downside_vol_250d",
+                title="downside_vol_250d = 窗口内负日收益的样本标准差(下行波动)",
+                family="risk",
+                compute=_downside_vol(250),
+                window=250,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+            ),
+            _entry(
+                "drawdown_250d",
+                title="drawdown_250d = (max_250 - close) / max_250(距窗口最高"
+                "收盘的回撤深度)",
+                family="risk",
+                compute=_drawdown(250),
+                window=250,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+            ),
+        )
+    )
+    return tuple(entries)
+
+
+def _liquidity_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """liquidity 族 32 个(换手率 MA/STD/乖离/Z/比值 x 窗口展开,原料
+    ``daily_metrics.turnover_rate``;成交额 / 成交量均值;Amihud 非流动
+    性;VWAP 偏离;量价相关)。"""
+    entries: list[PredefinedFactorDefinition] = []
+    for window in (5, 10, 20, 60, 120, 250):
+        entries.append(
+            _entry(
+                f"turnover_ma_{window}d",
+                title=f"turnover_ma_{window}d = 换手率 trailing {window} 日均值"
+                "(daily_metrics.turnover_rate)",
+                family="liquidity",
+                compute=_turnover_stat("ma", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            )
+        )
+    for window in (10, 20, 60, 120, 250):
+        entries.append(
+            _entry(
+                f"turnover_std_{window}d",
+                title=f"turnover_std_{window}d = 换手率 trailing {window} 日样本"
+                "标准差(换手波动)",
+                family="liquidity",
+                compute=_turnover_stat("std", window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            )
+        )
+    for window in (20, 60, 250):
+        entries.append(
+            _entry(
+                f"turnover_bias_{window}d",
+                title=f"turnover_bias_{window}d = 换手率 / {window} 日均值 - 1"
+                "(换手乖离,放量异常)",
+                family="liquidity",
+                compute=_turnover_stat("bias", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            )
+        )
+    for window in (60, 250):
+        entries.append(
+            _entry(
+                f"turnover_z_{window}d",
+                title=f"turnover_z_{window}d = (换手率 - {window} 日均值) / "
+                f"{window} 日标准差(标准化异常换手)",
+                family="liquidity",
+                compute=_turnover_stat("z", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            )
+        )
+    entries.extend(
+        (
+            _entry(
+                "turnover_ratio_5_20d",
+                title="turnover_ratio_5_20d = 5 日换手均值 / 20 日换手均值"
+                "(短期换手趋势)",
+                family="liquidity",
+                compute=_turnover_stat("ratio", 20, fast=5),
+                window=20,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            ),
+            _entry(
+                "turnover_ratio_20_60d",
+                title="turnover_ratio_20_60d = 20 日换手均值 / 60 日换手均值",
+                family="liquidity",
+                compute=_turnover_stat("ratio", 60, fast=20),
+                window=60,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            ),
+        )
+    )
+    for window in (20, 60, 250):
+        entries.append(
+            _entry(
+                f"amount_ma_{window}d",
+                title=f"amount_ma_{window}d = 成交额 trailing {window} 根 bar 均值"
+                "(流动性规模)",
+                family="liquidity",
+                compute=_bars_field_mean("amount", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("bars.amount",),
+            )
+        )
+    for window in (20, 60, 250):
+        entries.append(
+            _entry(
+                f"volume_ma_{window}d",
+                title=f"volume_ma_{window}d = 成交量 trailing {window} 根 bar 均值",
+                family="liquidity",
+                compute=_bars_field_mean("volume", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("bars.volume",),
+            )
+        )
+    for window in (20, 60, 120, 250):
+        entries.append(
+            _entry(
+                f"amihud_{window}d",
+                title=f"amihud_{window}d = |日收益| / 成交额 的 {window} 根 bar "
+                "均值(Amihud 非流动性,原始量纲)",
+                family="liquidity",
+                compute=_amihud(window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "bars.amount"),
+            )
+        )
+    for window in (20, 60):
+        entries.append(
+            _entry(
+                f"vwap_dev_{window}d",
+                title=f"vwap_dev_{window}d = close / (Σamount / Σvolume) - 1"
+                f"({window} 根 bar VWAP 偏离,amount/volume 近似)",
+                family="liquidity",
+                compute=_vwap_dev(window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "bars.amount", "bars.volume"),
+            )
+        )
+    for window in (20, 60):
+        entries.append(
+            _entry(
+                f"turnover_ret_corr_{window}d",
+                title=f"turnover_ret_corr_{window}d = 换手率与日收益 {window} 根"
+                " bar 相关系数(量价确认/背离)",
+                family="liquidity",
+                compute=_turnover_return_corr(window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate", "bars.close"),
+            )
+        )
+    return tuple(entries)
+
+
+def _size_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """size 族 3 个(规模暴露,signal_eligible=False,#214;小市值溢价
+    → direction LOWER;window=None,逐日截面原料值/变换)。"""
+    return (
+        _entry(
+            "log_total_market_cap",
+            title="log_total_market_cap = ln(总市值)(规模暴露;daily_metrics."
+            "total_market_cap)",
+            family="size",
+            compute=_log_field("total_market_cap"),
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("daily_metrics.total_market_cap",),
+        ),
+        _entry(
+            "log_circulating_market_cap",
+            title="log_circulating_market_cap = ln(流通市值)(daily_metrics."
+            "circulating_market_cap)",
+            family="size",
+            compute=_log_field("circulating_market_cap"),
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("daily_metrics.circulating_market_cap",),
+        ),
+        _entry(
+            "float_share_ratio",
+            title="float_share_ratio = 流通股本 / 总股本(流通结构暴露)",
+            family="size",
+            compute=_float_share_ratio(),
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("daily_metrics.float_shares", "daily_metrics.total_shares"),
+        ),
+    )
 
 #: 目录(裸名 → 条目)。批次 0 样板:return_Nd 动量族(4 窗口变体);
 #: 批次 1-4(~150+ 因子)按同一模式在此追加注册。
@@ -717,7 +2795,8 @@ def _raw_cross_frame(raw: _RawCross) -> PredefinedFactorCompute:
 #: 批次 4(#402):三表 + dividend 消费 —— ``val_*``(11 个经典价值)、
 #: ``qlt_*``(9 个质量补全)、``qmj_*``(AQR QMJ 四支柱 + 综合,截面
 #: rank 合成口径见 :func:`_qmj_components` / 各条目 title)。
-PREDEFINED_FACTORS: dict[str, PredefinedFactorDefinition] = {
+#: 批次 2(#400):Alpha101 量价 31 因子;后续批次按同一模式追加注册。
+PREDEFINED_FACTORS = {
     item.name: item
     for item in (
         _definition(
@@ -1199,6 +3278,144 @@ PREDEFINED_FACTORS: dict[str, PredefinedFactorDefinition] = {
             compute=_raw_cross_frame(_payout_ratio_raw),
         ),
         *_pillar_and_qmj_entries(),
+        *_ALPHA101_FACTORS,
+        # ---------------- 批次 1(#399):量价 74 个 ----------------
+        # momentum 族(回归 alpha / 残差动量 / MACD / RSRS / 位置 / 相对强弱)
+        _entry(
+            "reg_alpha_63d",
+            title="reg_alpha_63d = 日收益对市场收益(000300.SH)trailing 63 根"
+            " bar OLS 截距(市场模型 Jensen's alpha,日频)",
+            family="momentum",
+            compute=_reg_alpha(63),
+            window=63,
+            data_dependencies=("bars.close", "index_bars.close"),
+        ),
+        _entry(
+            "reg_alpha_120d",
+            title="reg_alpha_120d = 日收益对市场收益 trailing 120 根 bar OLS 截距",
+            family="momentum",
+            compute=_reg_alpha(120),
+            window=120,
+            data_dependencies=("bars.close", "index_bars.close"),
+        ),
+        _entry(
+            "reg_alpha_250d",
+            title="reg_alpha_250d = 日收益对市场收益 trailing 250 根 bar OLS 截距",
+            family="momentum",
+            compute=_reg_alpha(250),
+            window=250,
+            data_dependencies=("bars.close", "index_bars.close"),
+        ),
+        _entry(
+            "resid_momentum_120d",
+            title="resid_momentum_120d = 市场模型日残差(120 根 bar 滚动 OLS)"
+            " 在 120 根 bar 内求和(残差动量;需 239 根 bar 历史)",
+            family="momentum",
+            compute=_resid_momentum(120),
+            window=120,
+            data_dependencies=("bars.close", "index_bars.close"),
+            min_history_bars=239,
+        ),
+        _entry(
+            "resid_momentum_250d",
+            title="resid_momentum_250d = 市场模型日残差(250 根 bar 滚动 OLS)"
+            " 在 250 根 bar 内求和(需 499 根 bar 历史)",
+            family="momentum",
+            compute=_resid_momentum(250),
+            window=250,
+            data_dependencies=("bars.close", "index_bars.close"),
+            min_history_bars=499,
+        ),
+        _entry(
+            "macd_hist_norm",
+            title="macd_hist_norm = (DIF - DEA) * 2 / close;DIF = EMA12 - EMA26,"
+            " DEA = EMA9(DIF)(MACD 柱,收盘价归一)",
+            family="momentum",
+            compute=_macd_hist_norm(),
+            window=26,
+        ),
+        _entry(
+            "rsrs_beta_600d",
+            title="rsrs_beta_600d = high 对 low 的 trailing 600 根 bar OLS 斜率"
+            "(RSRS 阻力/支撑相对强度)",
+            family="momentum",
+            compute=_rsrs(600, r2_weighted=False),
+            window=600,
+            data_dependencies=("bars.high", "bars.low"),
+            min_history_bars=600,
+        ),
+        _entry(
+            "rsrs_r2_600d",
+            title="rsrs_r2_600d = RSRS 斜率 x 拟合 R²(斜率置信度加权的标准"
+            " RSRS 指标)",
+            family="momentum",
+            compute=_rsrs(600, r2_weighted=True),
+            window=600,
+            data_dependencies=("bars.high", "bars.low"),
+            min_history_bars=600,
+        ),
+        _entry(
+            "momentum_12_1d",
+            title="momentum_12_1d = return_252d - return_21d(12-1 动量:剔除"
+            "近月反转效应)",
+            family="momentum",
+            compute=_momentum_skip_month(252, 21),
+            window=252,
+        ),
+        _entry(
+            "price_pos_252d",
+            title="price_pos_252d = (close - min_252) / (max_252 - min_252)"
+            "(52 周价格位置)",
+            family="momentum",
+            compute=_price_position(252),
+            window=252,
+        ),
+        _entry(
+            "price_pos_120d",
+            title="price_pos_120d = (close - min_120) / (max_120 - min_120)",
+            family="momentum",
+            compute=_price_position(120),
+            window=120,
+        ),
+        _entry(
+            "ema_ratio_20_60d",
+            title="ema_ratio_20_60d = EMA20 / EMA60 - 1(快慢趋势强度)",
+            family="momentum",
+            compute=_ema_ratio(20, 60),
+            window=60,
+        ),
+        _entry(
+            "rs_vs_index_252d",
+            title="rs_vs_index_252d = 股票 252 根 bar 区间收益 - 000300.SH 同窗"
+            "区间收益(相对强弱)",
+            family="momentum",
+            compute=_rs_vs_index(252),
+            window=252,
+            data_dependencies=("bars.close", "index_bars.close"),
+        ),
+        # reversal 族
+        _entry(
+            "rsi_14d",
+            title="rsi_14d = 100 * MA(涨幅,14) / (MA(涨幅,14) + MA(跌幅,14))"
+            "(超买看空,direction LOWER)",
+            family="reversal",
+            compute=_rsi(14),
+            window=14,
+            direction=FactorPreference.LOWER,
+        ),
+        _entry(
+            "bias_20d",
+            title="bias_20d = close / MA20 - 1(20 根 bar 乖离率,高乖离看空)",
+            family="reversal",
+            compute=_bias(20),
+            window=20,
+            direction=FactorPreference.LOWER,
+        ),
+        # risk 族(波动 / beta / 特异波动 / 市场相关 / Sharpe / 高阶矩 / 回撤;
+        # 风险暴露定位 signal_eligible=False,direction 记录弱研究先验)
+        *_vol_entries(),
+        *_liquidity_entries(),
+        *_size_entries(),
     )
 }
 
@@ -1241,6 +3458,9 @@ def predefined_factor_commit(name: str) -> str:
         "cross_section": item.cross_section,
         "implementation_version": item.implementation_version,
     }
+    if item.min_history_bars is not None:
+        # 覆盖起点声明是语义字段(#399):None 省略键,批次 0 因子锚逐字节稳定
+        payload["min_history_bars"] = item.min_history_bars
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -1260,11 +3480,13 @@ def _validate_catalog() -> None:
 _validate_catalog()
 
 __all__ = [
+    "MARKET_INDEX_SYMBOL",
     "PREDEFINED_FACTORS",
     "PREDEFINED_FACTORS_SCHEMA_VERSION",
     "PredefinedFactorCompute",
     "PredefinedFactorDefinition",
     "get_predefined_factor",
+    "industry_neutralize",
     "is_registered_predefined_factor",
     "predefined_factor_commit",
     "predefined_factor_names",

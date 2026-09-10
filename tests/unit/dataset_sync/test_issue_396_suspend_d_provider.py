@@ -88,7 +88,6 @@ class _Client:
     def dividend(self, **kwargs: str) -> object:
         raise AssertionError("dividend 不应被调用")
 
-
 def _provider(client: _Client) -> TushareResearchDataProvider:
     return TushareResearchDataProvider(
         client=client,

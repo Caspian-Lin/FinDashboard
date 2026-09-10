@@ -48,6 +48,13 @@ __all__ = [
     "cs_scale",
     "cs_winsorize",
     "cs_zscore",
+    "ew_div",
+    "ew_gt",
+    "ew_log",
+    "ew_lt",
+    "ew_sign",
+    "ew_signed_power",
+    "ew_where",
     "rolling_ols_resid",
     "ts_argmax",
     "ts_argmin",
@@ -56,10 +63,14 @@ __all__ = [
     "ts_decay",
     "ts_delay",
     "ts_delta",
+    "ts_downside_std",
+    "ts_ema",
+    "ts_kurt",
     "ts_max",
     "ts_mean",
     "ts_min",
     "ts_rank",
+    "ts_skew",
     "ts_std",
     "ts_sum",
 ]
@@ -231,6 +242,106 @@ def ts_decay(x: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
+def ts_ema(x: np.ndarray, span: int) -> np.ndarray:
+    """指数移动平均(``adjust=False`` 语义:首有效值种子,``alpha = 2/(span+1)``)。
+
+    NaN 行为(与 ts_* 严格传播不同,EMA 是递推算子,纪律单独定义):
+
+    * NaN 位置输出 NaN(缺测可见),但递推**状态保持**——下一个有效值
+      从上一有效状态续算(等价 pandas ``ewm(span, adjust=False,
+      ignore_na=True)`` 在有效位置上的取值);
+    * 首个有效值之前(或输入空)全 NaN。
+    """
+    if span < 1:
+        raise ValueError(f"span 须 >= 1,收到 {span}")
+    alpha = 2.0 / (float(span) + 1.0)
+    n = x.size
+    out = np.full(n, np.nan)
+    state = math.nan
+    for i in range(n):
+        xi = float(x[i])
+        if math.isnan(xi):
+            continue
+        state = xi if math.isnan(state) else alpha * xi + (1.0 - alpha) * state
+        out[i] = state
+    return out
+
+
+def ts_skew(x: np.ndarray, window: int) -> np.ndarray:
+    """trailing window 偏度(修正 Fisher-Pearson,pandas ``rolling.skew`` 同式)。
+
+    ``window < 3`` 或窗口内有 NaN → NaN;窗口内常数(m2=0)→ NaN。
+    """
+    _check_window(window)
+    n = x.size
+    out = np.full(n, np.nan)
+    if n < window or window < 3:
+        return out
+    w = _windows(x, window)
+    centered = w - w.mean(axis=1, keepdims=True)
+    m2 = (centered * centered).mean(axis=1)
+    m3 = (centered * centered * centered).mean(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        g1 = m3 / m2**1.5
+    adjustment = np.sqrt(window * (window - 1.0)) / (window - 2.0)
+    out[window - 1 :] = np.where(
+        _window_mask(x, window), g1 * adjustment, np.nan
+    )
+    return out
+
+
+def ts_kurt(x: np.ndarray, window: int) -> np.ndarray:
+    """trailing window 超额峰度(样本口径,pandas ``rolling.kurt`` 同式)。
+
+    ``window < 4`` 或窗口内有 NaN → NaN;窗口内常数(m2=0)→ NaN。
+    """
+    _check_window(window)
+    n = x.size
+    out = np.full(n, np.nan)
+    if n < window or window < 4:
+        return out
+    w = _windows(x, window)
+    centered = w - w.mean(axis=1, keepdims=True)
+    m2 = (centered * centered).mean(axis=1)
+    m4 = (centered**4).mean(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio = m4 / (m2 * m2)
+    term1 = ((window - 1.0) * (window + 1.0)) / ((window - 2.0) * (window - 3.0))
+    term2 = (3.0 * (window - 1.0) ** 2) / ((window - 2.0) * (window - 3.0))
+    out[window - 1 :] = np.where(
+        _window_mask(x, window), term1 * ratio - term2, np.nan
+    )
+    return out
+
+
+def ts_downside_std(x: np.ndarray, window: int, ddof: int = 1) -> np.ndarray:
+    """trailing window 下行波动:仅统计窗口内**严格为负**元素的样本标准差。
+
+    负值个数 ``<= ddof`` → NaN;窗口内有 NaN → NaN(严格传播);
+    非负元素计 0 参与均值口径(下行偏差惯例)。
+    """
+    _check_window(window)
+    n = x.size
+    out = np.full(n, np.nan)
+    if n < window:
+        return out
+    w = _windows(x, window)
+    negative = w < 0.0
+    counts = negative.sum(axis=1)
+    wn = np.where(negative, w, 0.0)
+    s1 = wn.sum(axis=1)
+    s2 = (wn * wn).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        k = counts.astype(np.float64)
+        variance = (s2 - s1 * s1 / k) / (k - ddof)
+    out[window - 1 :] = np.where(
+        _window_mask(x, window) & (counts > ddof),
+        np.sqrt(np.maximum(variance, 0.0)),
+        np.nan,
+    )
+    return out
+
+
 def _pair_windows(
     x: np.ndarray, y: np.ndarray, window: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -304,6 +415,104 @@ def rolling_ols_resid(y: np.ndarray, x: np.ndarray, window: int) -> np.ndarray:
     intercept = wy.mean(axis=1) - slope * wx.mean(axis=1)
     resid = wy[:, -1] - intercept - slope * wx[:, -1]
     out[window - 1 :] = np.where(valid, resid, np.nan)
+    return out
+
+
+# --------------------------------------------------------------------- #
+# 逐点算子(逐元素变换;无窗口,天然因果;NaN 纪律与时序算子一致)
+# --------------------------------------------------------------------- #
+
+
+def ew_sign(x: np.ndarray) -> np.ndarray:
+    """符号函数 ``sign(x)``(x>0 → 1,x<0 → -1,x=0 → 0);NaN → NaN。
+
+    Alpha101 的 ``Sign``(alpha7/12/19);逐点变换,不引入前视。
+    """
+    out: np.ndarray = np.sign(x)
+    out = np.asarray(out, dtype=np.float64)
+    out[np.isnan(x)] = np.nan
+    return out
+
+
+def ew_signed_power(x: np.ndarray, power: float) -> np.ndarray:
+    """保留符号的幂 ``sign(x) * |x|^power``(Alpha101 的 ``SignedPower``)。
+
+    NaN → NaN;``|x|^power`` 溢出 → ±inf(采样层归一缺测)。
+    """
+    with np.errstate(invalid="ignore", over="ignore"):
+        out: np.ndarray = np.sign(x) * np.abs(x) ** float(power)
+    out = np.asarray(out, dtype=np.float64)
+    out[np.isnan(x)] = np.nan
+    return out
+
+
+def ew_log(x: np.ndarray) -> np.ndarray:
+    """自然对数;``x <= 0`` 或 NaN → NaN(宁缺毋假:不允许 ±inf 进算子链)。
+
+    Alpha101 的 ``Log(Volume)`(alpha2)。
+    """
+    out = np.full(x.size, np.nan)
+    positive = np.isfinite(x) & (x > 0.0)
+    out[positive] = np.log(x[positive])
+    return out
+
+
+def ew_where(
+    cond: np.ndarray, x: np.ndarray, y: np.ndarray
+) -> np.ndarray:
+    """NaN 感知的三元条件 ``cond ? x : y``(Alpha101 的 ``IF / ?: ``)。
+
+    ``cond`` 为 0/1 浮点掩码(NaN 表示条件不可判——任一操作数缺测):
+    cond=NaN → 输出 NaN(严格传播,与 ts_ 算子「窗口内 NaN → NaN」
+    同纪律);cond=1 → x;cond=0 → y。三序列等长逐行对齐。
+    """
+    if cond.size != x.size or cond.size != y.size:
+        raise ValueError(
+            f"ew_where 要求等长输入,收到 cond={cond.size} x={x.size} y={y.size}"
+        )
+    known = ~np.isnan(cond)
+    out = np.full(cond.size, np.nan)
+    picked_x = known & (cond == 1.0)
+    picked_y = known & (cond == 0.0)
+    out[picked_x] = x[picked_x]
+    out[picked_y] = y[picked_y]
+    return out
+
+
+def _ew_compare(a: np.ndarray, b: np.ndarray | float, raw: np.ndarray) -> np.ndarray:
+    """比较结果 0/1 浮点化 + 任一操作数 NaN → NaN(条件不可判 → NaN)。"""
+    b_arr = np.asarray(b, dtype=np.float64)
+    out = np.asarray(raw, dtype=np.float64)
+    out[np.isnan(a) | np.isnan(b_arr)] = np.nan
+    return out
+
+
+def ew_lt(a: np.ndarray, b: np.ndarray | float) -> np.ndarray:
+    """NaN 感知比较 ``a < b``:输出 1/0 浮点掩码,任一侧 NaN → NaN。
+
+    供 :func:`ew_where` 作条件输入(Alpha101 的 ``0 < x`` / ``x < y`` 判式)。
+    """
+    with np.errstate(invalid="ignore"):
+        return _ew_compare(a, b, a < b)
+
+
+def ew_gt(a: np.ndarray, b: np.ndarray | float) -> np.ndarray:
+    """NaN 感知比较 ``a > b``(语义同 :func:`ew_lt`)。"""
+    with np.errstate(invalid="ignore"):
+        return _ew_compare(a, b, a > b)
+
+
+def ew_div(a: np.ndarray, b: np.ndarray | float) -> np.ndarray:
+    """NaN 感知除法:分母 0 / 非有限 → NaN(宁缺毋假,不允许 inf 进算子链)。
+
+    Alpha101 的价格比(如 ``(Close-Open)/(High-Low+0.001)``)与 VWAP
+    (``amount / volume``,volume=0 停牌行)共用。
+    """
+    b_arr = np.asarray(b, dtype=np.float64)
+    out = np.full(a.size, np.nan)
+    valid = np.isfinite(b_arr) & (b_arr != 0.0)
+    out[valid] = a[valid] / b_arr[valid]
+    out[~np.isfinite(a)] = np.nan
     return out
 
 

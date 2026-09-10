@@ -3,7 +3,8 @@
 #184 读取端能力的运营化:打通「指数登记 → 同步 → mixed 发布 →
 benchmark_return 非 null」全链路:
 
-* ``discover_indices``(受控登记表)→ ``InstrumentRepository.sync_with_diff``
+* ``discover_indices``(tushare index_basic 源,#394;#256 受控表收窄为基准
+  资格白名单)→ ``InstrumentRepository.sync_with_diff`` + list_date 回填
   → instruments 表出现 ``instrument_type=index`` 行(断点①,登记写入者);
 * 指数 + 股票 bars 进 ParquetCache → ``multi_asset_mixed`` 发布 —— manifest
   只允许一个 bars 主发布,基准行情必须与候选池同处一份发布(#184);
@@ -23,7 +24,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import pytest_asyncio
@@ -81,6 +82,9 @@ from finboard_shared.background_jobs import (
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
 
+if TYPE_CHECKING:
+    from finboard_data.tushare_provider import TushareResearchDataProvider
+
 pytestmark = pytest.mark.asyncio
 
 _RELEASE_ID = "mixed-index-r256"
@@ -132,16 +136,95 @@ async def _clean(engine: AsyncEngine) -> None:
         )
 
 
-# ---- 步骤①:登记(受控登记表 → instruments 表)--------------------------------
+# ---- 步骤①:登记(tushare index_basic → instruments 表,#394)------------------
+
+
+_BASE_DATES = {
+    "000001.SH": "19901219",
+    "000016.SH": "20040102",
+    "000300.SH": "20050408",
+    "000688.SH": "20191231",
+    "000905.SH": "20040102",
+    "000852.SH": "20040102",
+    "399001.SZ": "19910403",
+    "399006.SZ": "20100531",
+    "899050.BJ": "20221104",
+}
+
+
+class _FakeIndexBasicClient:
+    """离线 index_basic:返回基准资格白名单形制的指数行(#394)。
+
+    其余 ``TushareClient`` 成员按「未预期调用」失败(本链路只打 index_basic)。
+    """
+
+    def __init__(self) -> None:
+        from finboard_data.discovery import BENCHMARK_INDEX_REGISTRY
+
+        self.rows: list[dict[str, object]] = [
+            {
+                "ts_code": code,
+                "name": name,
+                "fullname": name,
+                "publisher": "",
+                "category": "",
+                "market": code.rpartition(".")[2],
+                "base_date": _BASE_DATES.get(code, ""),
+                "list_date": "",
+                "list_status": "L",
+            }
+            for code, name in BENCHMARK_INDEX_REGISTRY
+        ]
+
+    def index_basic(self, **kwargs: str) -> object:
+        return self.rows
+
+    def stock_basic(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
+    def daily_basic(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
+    def fina_indicator(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
+    def index_member_all(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
+    def namechange(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
+    def cb_basic(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
+    def suspend_d(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
+
+class NoopBudget:
+    async def acquire(self) -> None:
+        return None
+
+
+def _offline_index_provider() -> TushareResearchDataProvider:
+    """离线 index_basic provider(注入 discover_indices,#394)。"""
+    from finboard_data.tushare_provider import TushareResearchDataProvider
+
+    return TushareResearchDataProvider(
+        client=_FakeIndexBasicClient(),
+        now=lambda: datetime.now(UTC),
+        budget=NoopBudget(),
+    )
 
 
 async def test_index_registration_via_sync_with_diff(engine: AsyncEngine) -> None:
-    """discover_indices 经 sync_with_diff 写入 instruments(issue #256 断点①)。"""
+    """discover_indices(tushare index_basic 源)经 sync_with_diff 写入
+    instruments(issue #256 断点①,#394 登记扩大 + base_date 随登记携带)。"""
     from finboard_data.discovery import UniverseDiscovery
     from finboard_persistence import InstrumentRepository
 
     discovery = UniverseDiscovery()
-    indices = await discovery.discover_indices()
+    indices = await discovery.discover_indices(_offline_index_provider())
     dicts: list[dict[str, object]] = [
         {
             "code": ins.code,
@@ -163,7 +246,8 @@ async def test_index_registration_via_sync_with_diff(engine: AsyncEngine) -> Non
     assert result.new + result.updated >= len(indices)
 
     async with session_factory(engine)() as session:
-        rows, _ = await InstrumentRepository(session).list_page(
+        repo = InstrumentRepository(session)
+        rows, _ = await repo.list_page(
             instrument_type="index", status=None, limit=100
         )
         by_code = {row.code: row for row in rows}
@@ -173,8 +257,24 @@ async def test_index_registration_via_sync_with_diff(engine: AsyncEngine) -> Non
         assert row.market == "a_share"
         assert row.instrument_type == "index"
         assert row.exchange == "SSE"
-        # 指数无 list_date 结构化上游:保持 null(可见缺失,不虚构元数据)。
+        # sync_with_diff 本身不写 list_date:登记与回填是两步(#185 语义)。
         assert row.list_date is None
+        # #394:base_date 经 backfill_listing_dates 回填(只补 null)——
+        # data_sync 执行器的后置步骤,消除 mixed 发布 list_date 恒缺失噪音。
+        listing = await repo.backfill_listing_dates(
+            {
+                ins.code: (ins.list_date, None)
+                for ins in indices
+                if ins.list_date is not None
+            }
+        )
+        await session.commit()
+        assert listing["backfilled_list_date"] >= 1
+        refreshed_rows, _ = await repo.list_page(
+            instrument_type="index", status=None, limit=100
+        )
+        refreshed_by_code = {row.code: row for row in refreshed_rows}
+        assert refreshed_by_code[_BENCHMARK].list_date == date(2005, 4, 8)
 
 
 # ---- 步骤②③④:缓存 → mixed 发布 → research_run benchmark_return --------------
@@ -274,7 +374,7 @@ async def _register_instruments(engine: AsyncEngine) -> None:
         }
         for index, code in enumerate(_STOCKS)
     ]
-    for ins in await UniverseDiscovery().discover_indices():
+    for ins in await UniverseDiscovery().discover_indices(_offline_index_provider()):
         if ins.code != _BENCHMARK:
             continue
         dicts.append(

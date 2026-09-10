@@ -57,7 +57,7 @@ async def run_backtest(
     provider_name = (
         settings.data_provider
         if settings is not None
-        else os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
+        else os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
     )
     # issue #255:research_db 选股必需数据集批次未发布 → 入队秒级 422,
     # 不再让任务排队跑完后以「0 交易成功」收场(与 #186 秒级失败风格对齐)。
