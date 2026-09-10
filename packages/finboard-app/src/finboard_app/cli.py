@@ -1685,16 +1685,21 @@ async def _sync_universe() -> None:
         )
         # issue #394:指数登记携带 index_basic base_date,回填
         # instruments.list_date(只补 null,#185/#265 同语义)。
+        # issue #395:期货合约登记携带 fut_basic list_date / delist_date,
+        # 同通道回填(只补 null)。
         from finboard_shared.types import InstrumentType
 
-        listing_backfill = await repo.backfill_listing_dates(
-            {
-                ins.code: (ins.list_date, None)
-                for ins in instruments
-                if ins.instrument_type is InstrumentType.INDEX
-                and ins.list_date is not None
-            }
-        )
+        listing_records: dict[str, tuple[date | None, date | None]] = {}
+        for ins in instruments:
+            if ins.instrument_type is InstrumentType.INDEX:
+                if ins.list_date is not None:
+                    listing_records[ins.code] = (ins.list_date, None)
+            elif (
+                ins.instrument_type is InstrumentType.FUTURES
+                and (ins.list_date is not None or ins.delist_date is not None)
+            ):
+                listing_records[ins.code] = (ins.list_date, ins.delist_date)
+        listing_backfill = await repo.backfill_listing_dates(listing_records)
         await session.commit()
 
     typer.echo(

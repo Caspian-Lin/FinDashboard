@@ -1114,6 +1114,32 @@ class FactorSnapshotModel(Base, IdMixin):
     )
 
 
+class TradeCalModel(Base):
+    """交易日历(按 exchange 存交易日,issue #395;与 #396 股票 trade_cal 同构)。
+
+    schema 与 #396 分支(A 股 SSE/SZSE 行集 + ``TradingCalendarStore``
+    读路径)**逐列一致** —— 同一张 ``trade_cal`` 表靠 ``exchange`` 主键段
+    区分市场:本 issue 从 tushare ``fut_trade_cal`` 写入 CFFEX 行集(含
+    ``is_open=0`` 休市行,tushare 上游自带完整日历),#396 从 akshare 回源
+    写入 SSE/SZSE 行集(只产交易日行)。两分支各自携带建表迁移时,后到者
+    依赖迁移内 ``has_table`` 守卫幂等跳过(schema 一致,先到者建表即可)。
+    """
+
+    __tablename__ = "trade_cal"
+
+    exchange: Mapped[str] = mapped_column(String(16), primary_key=True)
+    cal_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    is_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    source: Mapped[str] = mapped_column(String(32))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_trade_cal_open_date", "exchange", "is_open", "cal_date"),
+    )
+
+
 class FactorValueModel(Base, IdMixin):
     """快照内的规范化因子值与全市场/行业排名。"""
 

@@ -95,6 +95,7 @@ from finboard_persistence.models import (
     SimulationPositionModel,
     SimulationSessionModel,
     StrategyPresetModel,
+    TradeCalModel,
     WatchlistItemModel,
     WatchlistModel,
 )
@@ -145,6 +146,10 @@ from finboard_persistence.strategy_spec_repo import (
     StrategySpecTransitionError,
     StrategySpecVersionConflictError,
 )
+from finboard_persistence.trade_calendar_repo import (
+    CalendarDayLike,
+    TradeCalRepository,
+)
 from finboard_persistence.validation_repo import (
     ResearchExperimentRepository,
     ResearchTrialRepository,
@@ -165,6 +170,7 @@ __all__ = [
     "BacktestRunRepository",
     "Base",
     "BondMetadataModel",
+    "CalendarDayLike",
     "ContinuousFuturesRuleModel",
     "ConvertibleMetadataModel",
     "ConvertibleMetadataRepository",
@@ -258,6 +264,8 @@ __all__ = [
     "StrategySpecTransitionError",
     "StrategySpecVersionConflictError",
     "SyncBatchStatus",
+    "TradeCalModel",
+    "TradeCalRepository",
     "WatchlistItemModel",
     "WatchlistModel",
     "WatchlistRepository",

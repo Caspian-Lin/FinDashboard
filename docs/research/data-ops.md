@@ -176,8 +176,9 @@ warning(release_id + 缺失清单),与 factor_lab #212 容忍语义一致;bars �
    未显式声明 source 且筛选域全指数时默认源覆盖为 tushare,显式
    `source=akshare` 恒优先,akshare `index_zh_a_hist` 降为副源)。
    #341 起 tushare 源放行指数(`index_daily` 专属接口,2000 积分档
-   实测可调;无复权概念,缓存键沿用请求 adjust no-op);ETF/期货仍
-   `tushare_scope_mismatch` 拒绝(不静默换源)。
+   实测可调;无复权概念,缓存键沿用请求 adjust no-op);#395 起期货
+   同样放行(`fut_daily`,见下节);ETF 仍 `tushare_scope_mismatch`
+   拒绝(复权口径对齐未定稿,不静默换源)。
 3. `dataset_release_publish`(release_kind=`multi_asset_mixed`)—— **指数代码
    必须与股票放进同一份发布**(manifest 只允许一个 bars 主发布,基准行情与
    候选池同源);`adjustment` 用默认 `qfq`(与 bulk_download 缓存键一致;
@@ -314,20 +315,33 @@ cb_daily / cb_basic → 登记 → 缓存 → convertible_profiles 同步 → �
 ## 期货 EOD 数据链路(#267)
 
 **背景**:路线 C(市场中性对冲:股票多头 + 股指空头)的数据面前置。此前
-期货既无登记写入者也无行情接入(akshare 全市场列表接口不覆盖期货,tushare
-`fut_daily` 属另档积分)。#267 打通「主连登记 → 新浪主连日线 → 冻结发布 →
-研究数据可读」全链路。**范围只做数据面**:对冲组合回测工程(换月展期 /
+期货既无登记写入者也无行情接入(akshare 全市场列表接口不覆盖期货,
+#267 时点 tushare `fut_daily` 误记为「另档积分」)。#267 打通「主连登记 →
+新浪主连日线 → 冻结发布 → 研究数据可读」全链路;**#395 起 tushare 期货
+链路接线**(`fut_basic` / `fut_daily` / `fut_trade_cal` 均为 2000 积分档
+实测可调)。**范围只做数据面**:对冲组合回测工程(换月展期 /
 贴水成本 / 保证金占用)另行立项;期货不可撮合,通用回测引擎不做期货撮合
 (`asset_rules.py` docstring 明示)。
 
 **主连 vs 具体合约(核心语义,不混淆)**:
 
 - **主连**(品种+`0`,如 `IF0.CFFEX`):换月拼接的连续序列,**仅用于研究
-  信号 / 基准数据,不可当作可成交合约**。v1 只登记 / 只缓存主连。
-- **具体合约**(如 `IF2406.CFFEX`):不进逐标的缓存(无结构化合约链上游,
-  合约链另行立项);EOD 按日全市场表可经 `fetch_futures_official_daily`
-  读取(交易所官网 `get_futures_daily`,v1 仅供研究脚本直读)。非主连代码
-  在缓存层 fail-visible 拒绝,防止两种语义的数据混进同一条权益曲线。
+  信号 / 基准数据,不可当作可成交合约**。
+- **具体合约**(如 `IF2612.CFFEX`):#395 起经 tushare `fut_basic` 登记
+  在市合约(见下),日线走 `fut_daily` 可进逐标的缓存;akshare 源对具体
+  合约仍 fail-visible 拒绝(新浪 `futures_main_sina` 只有主连),EOD 按
+  日全市场表 `fetch_futures_official_daily`(交易所官网
+  `get_futures_daily`)仅供研究脚本直读。主连与合约语义不混进同一条
+  权益曲线。
+
+**主连 tushare 口径(#395 拍板记录)**:主连 `IF0.CFFEX` 映射为 tushare
+主力连续 `IF.CFX` **连续合约代码直取**(零拼接;`fut_mapping` 仅作换月
+审计)。与 akshare 新浪主连的双源逐值对照(2025 全年 243 交易日 × IF/IH/
+IC/IM):共同交易日全一致,close 最大相对差 1.6%~4.2%、超 ε(1e-4)天
+数 8~63/243,换月日两源主力选择基本一致(IC 有 2/7 天换月日分歧)——
+差异源于两源主力/换月规则细节与结算口径,**是否把期货主连默认源从
+akshare 切到 tushare 留待拍板**(当前不切默认,显式 `source=tushare`
+可用)。
 
 **标准运营步骤**:
 
@@ -337,18 +351,30 @@ cb_daily / cb_basic → 登记 → 缓存 → convertible_profiles 同步 → �
    CFFEX;乘数 / 保证金率与 `FuturesRule` 同口径)。扩展新品种直接在登记表
    加一行;未登记品种 fail-closed 拒绝。主连无 list_date 上游,保持 null
    可见缺失(主连是连续序列,不是单一上市合约)。
-2. `bulk_download` 带 `instrument_type=future`、`source=akshare` —— 主连
-   日线走新浪 `futures_main_sina` 进 parquet 缓存(无复权概念,缓存键沿用
-   默认 `qfq` 但语义为 no-op,发布 adjustment 与下载键一致;新浪无成交额
-   列 amount=0)。**tushare 源对期货拒绝**(fut_daily 属另档积分,具名
-   提示另建 akshare 任务,不静默换源)。
+   **#395 起同任务并入**:① `discover_futures_contracts` 从 tushare
+   `fut_basic` 登记 CFFEX 股指四品种**当前在市合约**(合约级
+   `instrument_type=futures`;list_date/delist_date 携带并回填,只补 null;
+   退市合约不回补登记,预上市留待后续 sync);合约乘数 / 最小变动价位与
+   受控表逐品种对账(`reconcile_futures_contract_profiles`,实测零不一致;
+   保证金率上游无列,受控表口径仍是唯一权威)。② 期货交易日历
+   `fut_trade_cal`(CFFEX 行集,2015 起至明年年末,含休市行)幂等落库
+   `trade_cal` 表(与 #396 股票 trade_cal 同表同构,`exchange` 区分);
+   日历同步尽力而为,token 缺失 / 上游失败具名告警不阻断标的同步。
+2. `bulk_download` 带 `instrument_type=futures`(配 `market=future`)——
+   默认源走 akshare 新浪 `futures_main_sina`(仅主连;无复权概念,缓存键
+   沿用默认 `qfq` 但语义为 no-op,发布 adjustment 与下载键一致;新浪无
+   成交额列 amount=0)。**#395 起显式 `source=tushare` 放行**(`fut_daily`
+   2000 积分档实测可调):主连 `IF0.CFFEX` → 主力连续 `IF.CFX` 连续直取、
+   具体合约 `IF2612.CFFEX` → `IF2612.CFX`;vol 单位手 → 张 1:1、amount
+   单位**万元 → 元**(×10000,与股票 daily 的千元口径不同)。
 3. `dataset_release_publish` —— 期货 bars 建议与股票 / 债券基准同处一份
    `multi_asset_mixed` 发布(mixed 展开含 futures 五类之一),或独立 BARS
-   发布(source=akshare)。发布候选从登记表读取乘数 / 保证金率 / 最小变动
-   价位 / `allows_short`;质量报告 `futures_instruments` 块:期货标的数 /
-   continuous / missing_list_date / with_lifecycle_events 计数。期货事件
-   硬门降级(#58 换月 / 到期事件在主连日线上无结构化上游,同 #265 转债
-   决策),已同步事件仍随 manifest 冻结。
+   发布。发布候选从登记表读取乘数 / 保证金率 / 最小变动价位 /
+   `allows_short`(主连与合约统一品种层口径);质量报告
+   `futures_instruments` 块:期货标的数 / continuous / missing_list_date /
+   with_lifecycle_events 计数。期货事件硬门降级(#58 换月 / 到期事件在
+   主连日线上无结构化上游,同 #265 转债决策),已同步事件仍随 manifest
+   冻结。
 4. 消费 —— 研究运行 / 回测把期货主连当**基准数据**用(`benchmark_config`
    / 研究发布引用):`is_benchmark_only_instrument` 扩为 index + futures,
    静态预检与运行时候选一致排除(不进候选池、不撮合)。缓存 `make_symbol`
@@ -358,10 +384,13 @@ cb_daily / cb_basic → 登记 → 缓存 → convertible_profiles 同步 → �
 验证 SQL:
 
 ```sql
--- 期货主连登记
+-- 期货主连 + 合约登记(#395 起合约级在市合约同表)
 SELECT code, name, exchange FROM instruments WHERE instrument_type = 'futures';
+-- 期货交易日历(CFFEX 行集,#395)
+SELECT count(*) FROM trade_cal WHERE exchange = 'CFFEX' AND is_open;
 ```
 
 端到端回归:`tests/integration/test_futures_chain.py`(受控登记 → mock
 futures_main_sina → 缓存 → BARS 发布 → 真实 FrozenReleaseProvider 读回;
-主连 / 合约语义守卫)。
+主连 / 合约语义守卫;#395 起 tushare 合约登记 → fut_daily 缓存 → 发布 →
+读回 + fut_trade_cal 落库用例)。

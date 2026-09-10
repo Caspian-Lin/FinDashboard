@@ -223,12 +223,25 @@ class TestDiscoverIndices:
                 for code, name in BENCHMARK_INDEX_REGISTRY
             ]
 
+        async def _fake_futures_contracts() -> list[InstrumentInfo]:
+            return [
+                InstrumentInfo(
+                    code="IF2601.CFFEX",
+                    name="IF2601",
+                    market=Market.FUTURE,
+                    instrument_type=InstrumentType.FUTURES,
+                    exchange="CFFEX",
+                )
+            ]
+
         monkeypatch.setattr(d, "discover_a_shares", _fake_stocks)
         monkeypatch.setattr(d, "discover_a_etfs", _fake_etfs)
         # #265:discover_all 并入转债段,同样打桩保持测试离线。
         monkeypatch.setattr(d, "discover_convertibles", _fake_convertibles)
         # #394:指数段改 tushare index_basic 源,打桩保持 discover_all 离线。
         monkeypatch.setattr(d, "discover_indices", _fake_indices)
+        # #395:discover_all 并入期货合约段(fut_basic 源),打桩保持离线。
+        monkeypatch.setattr(d, "discover_futures_contracts", _fake_futures_contracts)
         all_instruments = await d.discover_all()
         by_type = {item.instrument_type for item in all_instruments}
         # #267:discover_all 并入期货主连段(受控登记表,无网络)。
@@ -240,7 +253,10 @@ class TestDiscoverIndices:
             InstrumentType.FUTURES,
         }
         assert len(all_instruments) == (
-            3 + len(BENCHMARK_INDEX_REGISTRY) + len(FUTURES_MAIN_SERIES_REGISTRY)
+            3
+            + len(BENCHMARK_INDEX_REGISTRY)
+            + len(FUTURES_MAIN_SERIES_REGISTRY)
+            + 1  # #395 期货合约段(打桩 1 只)
         )
 
 
@@ -302,6 +318,8 @@ class TestDiscoverConvertibles:
         monkeypatch.setattr(d, "discover_a_etfs", _empty)
         # #394:指数段改 tushare 源,打桩保持离线(本测试只盯转债并入)。
         monkeypatch.setattr(d, "discover_indices", _empty)
+        # #395:期货合约段(fut_basic 源)同样打桩保持离线。
+        monkeypatch.setattr(d, "discover_futures_contracts", _empty)
         monkeypatch.setattr("akshare.bond_zh_cov", lambda: frame)
 
         all_instruments = await d.discover_all()

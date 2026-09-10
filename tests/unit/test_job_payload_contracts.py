@@ -213,22 +213,20 @@ class TestBulkDownloadPayloadContract:
         assert exc_info.value.code == "tushare_scope_mismatch"
         assert "akshare" in exc_info.value.summary  # 指路替代源
 
-    def test_tushare_futures_literal_precheck_rejected(self) -> None:
-        """tushare x 期货字面量预检(fut_daily 未接线,#267)。"""
+    def test_tushare_futures_literal_precheck_passes(self) -> None:
+        """tushare x 期货放行(fut_daily 2000 积分档接线,#395;#267 旧拒绝作废)。"""
         from finboard_backtest.background_jobs.payload_contracts import (
             validate_bulk_download_payload,
         )
 
-        with pytest.raises(PayloadContractError) as exc_info:
-            validate_bulk_download_payload(
-                {
-                    "market": "future",
-                    "source": "tushare",
-                    "start": "2024-01-01",
-                    "instrument_type": "futures",
-                }
-            )
-        assert exc_info.value.code == "tushare_scope_mismatch"
+        validate_bulk_download_payload(
+            {
+                "market": "future",
+                "source": "tushare",
+                "start": "2024-01-01",
+                "instrument_type": "futures",
+            }
+        )
 
     def test_tushare_stock_and_index_pass(self) -> None:
         from finboard_backtest.background_jobs.payload_contracts import (
