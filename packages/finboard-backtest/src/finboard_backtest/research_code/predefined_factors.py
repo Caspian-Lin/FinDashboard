@@ -14,7 +14,10 @@
      逐日观测只能来自序列声明(对齐 #203 single_shot 缺快照秒拒风格);
   3. multi_period 未声明覆盖的 ``p_`` 因子 → series 覆盖检查(拒绝的是
      「数据没备齐」):无序列 / 锚定发布不一致 / 覆盖不足均具名拒绝,
-     附 ``finboard_factor_series_build`` 重建命令。
+     附 ``finboard_factor_series_build`` 重建命令;#399 起对声明
+     ``min_history_bars`` 的长窗口因子追加覆盖起点检查
+     (``predefined_factor_series_coverage_start_missing``,首个决策日
+     全缺测 = 发布历史不足)。
 
 纯离线研究域,不连 broker 不下单。
 """
@@ -25,6 +28,7 @@ from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 from finboard_backtest.factors.predefined import (
+    get_predefined_factor,
     is_registered_predefined_factor,
     predefined_factor_names,
 )
@@ -46,6 +50,10 @@ PREDEFINED_SERIES_UNDECLARED_CODE = "predefined_factor_series_undeclared"
 
 #: multi_period 覆盖不足的具名标记(issue #398)
 PREDEFINED_COVERAGE_MISSING_CODE = "predefined_factor_series_coverage_missing"
+
+#: 覆盖起点缺失的具名标记(issue #399:min_history_bars 声明的长窗口因子
+#: 在首个决策日全缺测——发布历史不足,构建窗口须前移)
+PREDEFINED_COVERAGE_START_MISSING_CODE = "predefined_factor_series_coverage_start_missing"
 
 #: 序列锚定发布与 run bars 主发布不一致的具名标记(issue #398)
 PREDEFINED_ANCHOR_MISMATCH_CODE = "predefined_factor_series_anchor_mismatch"
@@ -205,13 +213,71 @@ async def predefined_factor_series_coverage_gate_error(
                 f"({PREDEFINED_COVERAGE_MISSING_CODE}):缺失 {len(missing)} 个"
                 f"决策日{more}: {preview}。{rebuild_hint}"
             )
+        coverage_start_error = _coverage_start_error(
+            name, series, decision_dates, rebuild_hint
+        )
+        if coverage_start_error is not None:
+            return coverage_start_error
     return None
+
+
+def _coverage_start_error(
+    name: str,
+    series: Any,
+    decision_dates: Sequence[date],
+    rebuild_hint: str,
+) -> str | None:
+    """``min_history_bars`` 覆盖起点检查(issue #399,#361 覆盖检查的消费点)。
+
+    声明了覆盖起点的因子(如 1320d 长窗口族)在**首个决策日**必须已有
+    非缺测值:窗口挂载对发布历史不设下界,首个决策日全缺测 = 发布历史
+    不足 ``min_history_bars`` 根 bar,序列前段(乃至全部)为设计内缺测,
+    消费端拿到全 None 特征会静默 0 信号(#255 教训)——入队具名拒绝,
+    指路「构建窗口前移 / 改用短窗口变体」。未声明 ``min_history_bars``
+    的因子不做值检查(批次 0 语义零变化)。
+    """
+    definition = get_predefined_factor(name.removeprefix(PREDEFINED_FACTOR_PREFIX))
+    warmup = definition.min_history_bars
+    if warmup is None or not decision_dates:
+        return None
+    values: dict[str, dict[str, float | None]] = getattr(series, "values", None) or {}
+    first_day = min(decision_dates)
+    first_day_values = values.get(first_day.isoformat())
+    if first_day_values and any(
+        value is not None for value in first_day_values.values()
+    ):
+        return None
+    realized_start = next(
+        (
+            day
+            for day in getattr(series, "dates", ())
+            if any(
+                value is not None
+                for value in (values.get(day.isoformat()) or {}).values()
+            )
+        ),
+        None,
+    )
+    realized_note = (
+        f"首个非缺测决策日 {realized_start.isoformat()}"
+        if realized_start is not None
+        else "窗口内无任何非缺测值"
+    )
+    return (
+        f"平台预置因子 {name} 声明需要 >= {warmup} 根 bar 历史"
+        f"(min_history_bars),但序列在首个决策日 {first_day.isoformat()} "
+        f"全部缺测({realized_note};{PREDEFINED_COVERAGE_START_MISSING_CODE})"
+        "——发布历史不足,覆盖起点晚于构建窗口起点。请把构建窗口 "
+        "window_start 前移到覆盖所需历史之前,或改用短窗口变体;"
+        f"{rebuild_hint}"
+    )
 
 
 __all__ = [
     "PREDEFINED_ANCHOR_MISMATCH_CODE",
     "PREDEFINED_COVERAGE_MISSING_CODE",
     "PREDEFINED_COVERAGE_PREVIEW_LIMIT",
+    "PREDEFINED_COVERAGE_START_MISSING_CODE",
     "PREDEFINED_SERIES_UNDECLARED_CODE",
     "PREDEFINED_UNREGISTERED_CODE",
     "SeriesCoverageProbe",
