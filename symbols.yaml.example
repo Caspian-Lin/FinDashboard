@@ -1,7 +1,8 @@
-# 标的池配置 —— 定时批量拉取行情的目标标的
+# 标的池配置 —— 关注标的清单(fetch-all 命令已删,#392:池拉取改由
+# bulk_download 的 symbols 参数承担;本文件仍作为 REST /api/data/symbols
+# 的标的池配置源)
 # 用法:
-#   finboard data fetch-all --config symbols.yaml   # 批量拉取
-#   finboard data status                             # 查看缓存
+#   finboard data status                # 查看缓存
 
 fetch_symbols:
   - code: "510300.SH"

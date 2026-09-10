@@ -117,7 +117,6 @@ _EXPECTED_TOOLS = {
     "finboard_job_unarchive",
     # #137 数据写操作工具(10 写 + 2 只读)
     "finboard_data_fetch",
-    "finboard_data_fetch_all",
     "finboard_data_sync_universe",
     "finboard_data_bulk_download_start",
     "finboard_data_quality_repair",

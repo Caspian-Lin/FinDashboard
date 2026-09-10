@@ -2,7 +2,7 @@
 
 用 ``AsyncMock`` 模拟 ``AsyncSession`` + monkeypatch repository / 依赖,验证:
 
-* 任务化工具(fetch_all/sync/bulk_download/quality_repair/dataset_publish):
+* 任务化工具(sync/bulk_download/quality_repair/dataset_publish):
   写禁用拒绝;成功返回 JobOut + created;conflict 映射;idempotency_key 上送信封;
   审计记录。
 * data_fetch(同步):写禁用拒绝;provider 全失败 → unavailable;成功写入。
@@ -166,7 +166,7 @@ def _etf_row(code: str = "159915", review_status: str = "needs_review") -> Any:
 
 
 # --------------------------------------------------------------------------- #
-# 任务化工具:fetch_all / sync_universe / bulk_download / quality_repair /
+# 任务化工具:sync_universe / bulk_download / quality_repair /
 #             dataset_publish
 # --------------------------------------------------------------------------- #
 
@@ -219,34 +219,6 @@ class TestEnqueueBasedTools:
         assert env.status == "error"
         assert env.error is not None
         assert env.error.kind == "conflict"
-
-    async def test_fetch_all_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        app = _make_app()
-        monkeypatch.setattr(
-            BackgroundJobRepository, "create_or_get", _make_echo_create_or_get()
-        )
-        # load_symbol_pool 在 _do 内通过 `from finboard_data import load_symbol_pool`
-        # lazy import,patch finboard_data 模块级符号即可。
-        import finboard_data
-
-        monkeypatch.setattr(
-            finboard_data,
-            "load_symbol_pool",
-            lambda _f: SimpleNamespace(
-                symbols=[SimpleNamespace(code="000001")],
-                fetch_lookback_days=30,
-            ),
-        )
-        env = await dw.data_fetch_all(app)
-        assert env.status == "ok"
-        assert env.data["kind"] == "fetch_all"
-        assert env.data["idempotency_key"].startswith("fetch_all:")
-        assert env.data["payload"]["lookback_days"] == 30
-
-    async def test_fetch_all_write_disabled(self) -> None:
-        app = _make_app(write_enabled=False)
-        env = await dw.data_fetch_all(app)
-        assert env.status == "denied"
 
     async def test_bulk_download_ok(
         self, monkeypatch: pytest.MonkeyPatch

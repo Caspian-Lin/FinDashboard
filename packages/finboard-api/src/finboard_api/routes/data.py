@@ -638,55 +638,6 @@ async def repair_cache_quality(
     return job
 
 
-@router.post("/fetch-all", response_model=JobOut, status_code=202)
-async def fetch_all_data(
-    response: Response,
-    request: Request,
-) -> JobOut:
-    """登记标的池批量缓存更新任务,立即返回 202 + job_id(issue #144)。
-
-    实际执行由 worker 消费 ``kind=fetch_all`` 任务。进度 / 状态 / 取消统一通过
-    ``/api/jobs/{job_id}`` 轮询。
-    """
-    import hashlib
-
-    from finboard_api.job_helpers import enqueue_job
-    from finboard_data import load_symbol_pool
-
-    config = load_symbol_pool(_SYMBOLS_FILE)
-    lookback = config.fetch_lookback_days if config.symbols else 0
-    pool_digest = hashlib.sha256(
-        ",".join(s.code for s in config.symbols).encode("utf-8")
-    ).hexdigest()[:16]
-    payload: dict[str, Any] = {
-        "lookback_days": lookback,
-        "symbol_pool_file": _SYMBOLS_FILE,
-    }
-    idempotency_key = f"fetch_all:{pool_digest}:{lookback}"
-    # fetch_all 不需要 DB session,但 enqueue_job 需要;用 request 上的 session_maker。
-    session_maker = getattr(request.app.state, "session_maker", None)
-    if session_maker is None:
-        raise HTTPException(
-            status_code=503,
-            detail="数据库会话未初始化,无法登记任务",
-        )
-    try:
-        async with session_maker() as session:
-            job = await enqueue_job(
-                session,
-                response,
-                kind="fetch_all",
-                queue="data",
-                idempotency_key=idempotency_key,
-                payload=payload,
-                requested_by="api:fetch_all",
-            )
-            await session.commit()
-    except BackgroundJobPersistenceConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return job
-
-
 @router.get("/symbols", response_model=SymbolPoolOut)
 async def get_symbol_pool() -> SymbolPoolOut:
     """获取标的池配置。"""

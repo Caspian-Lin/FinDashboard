@@ -1,11 +1,14 @@
-"""``research_data_sync`` worker 集成测试(issue #171)。
+"""``dataset_sync`` worker 集成测试(issue #171;#392 起自 research_data_sync
+改名迁移到数据集驱动框架)。
 
 fake research provider(实现 ``ResearchDataProvider`` 协议)验证:
 
-* 四类数据集(profiles / daily_metrics / financial / industry)编排摄取,
-  batch 达到 published;
+* 六类数据集(profiles / name_changes / daily_metrics / financial /
+  industry / convertible)按 SyncSpec 编排摄取,batch 达到 published;
 * 部分失败不覆盖已发布数据,重跑补齐未发布切片(断点续跑 / 幂等);
-* 幂等重跑:已发布切片跳过。
+* 幂等重跑:已发布切片跳过;
+* scope 四元组宇宙过滤(#392):exchange/instrument_type 从 instruments 表
+  解析逐标的同步池。
 
 依赖 PostgreSQL(``FINBOARD_TEST_DB_URL``)。不连 broker / 不下实盘单。
 """
@@ -21,9 +24,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from finboard_backtest.background_jobs.contracts import JobRecord
-from finboard_backtest.background_jobs.executors.research_data_sync import (
-    ResearchDataSyncExecutor,
-)
+from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 from finboard_data.research import (
     ConvertibleProfile,
     DailySecurityMetrics,
@@ -108,7 +109,9 @@ class FakeResearchProvider:
         self.empty_days = empty_days
         self.calls: list[str] = []
 
-    async def fetch_convertible_profiles(self) -> list[ConvertibleProfile]:
+    async def fetch_convertible_profiles(
+        self, *, dirty_row_policy: str | None = None
+    ) -> list[ConvertibleProfile]:
         # #265:本测试不覆盖转债段(datasets 显式声明),协议要求空实现。
         return []
 
@@ -198,14 +201,16 @@ class FakeResearchProvider:
         )
 
     async def fetch_instrument_profiles(
-        self, *, list_status: str = "L"
+        self, *, list_status: str = "L", dirty_row_policy: str | None = None
     ) -> list[InstrumentProfile]:
         self.calls.append("profiles")
         if list_status != "L":
             return []  # fake 数据集全部为在市标的;#251 退市档案请求返回空
         return [self._profile(symbol) for symbol in self.symbols]
 
-    async def fetch_name_changes(self) -> list[InstrumentNameChange]:
+    async def fetch_name_changes(
+        self, *, dirty_row_policy: str | None = None
+    ) -> list[InstrumentNameChange]:
         """#251:历史名称变更(单标的两段区间,含去重排序由仓储处理)。"""
         self.calls.append("name_changes")
         return [
@@ -232,7 +237,7 @@ class FakeResearchProvider:
         ]
 
     async def fetch_daily_metrics(
-        self, trade_date: date
+        self, trade_date: date, *, dirty_row_policy: str | None = None
     ) -> list[DailySecurityMetrics]:
         self.calls.append(f"daily:{trade_date}")
         if trade_date in self.empty_days:
@@ -245,6 +250,7 @@ class FakeResearchProvider:
         *,
         start_period: date,
         end_period: date,
+        dirty_row_policy: str | None = None,
     ) -> list[FinancialIndicator]:
         self.calls.append(f"financial:{symbol}")
         if symbol in self.fail_symbols:
@@ -256,6 +262,7 @@ class FakeResearchProvider:
         *,
         symbol: str,
         current_only: bool = True,
+        dirty_row_policy: str | None = None,
     ) -> list[IndustryMembership]:
         self.calls.append(f"industry:{symbol}")
         if symbol in self.fail_symbols:
@@ -266,7 +273,7 @@ class FakeResearchProvider:
 def _job(payload: dict[str, object]) -> JobRecord:
     return JobRecord(
         job_id="BJ-RDS01",
-        kind="research_data_sync",
+        kind="dataset_sync",
         queue="data",
         payload=payload,
         attempt=1,
@@ -284,6 +291,7 @@ def _payload(**overrides: object) -> dict[str, object]:
         "datasets": [
             "profiles",
             "name_changes",
+            "convertible_profiles",
             "daily_metrics",
             "financial_indicators",
             "industry_memberships",
@@ -296,8 +304,8 @@ def _payload(**overrides: object) -> dict[str, object]:
     return base
 
 
-def _make_executor(engine: AsyncEngine, provider: FakeResearchProvider) -> ResearchDataSyncExecutor:
-    return ResearchDataSyncExecutor(
+def _make_executor(engine: AsyncEngine, provider: FakeResearchProvider) -> DatasetSyncExecutor:
+    return DatasetSyncExecutor(
         session_maker=session_factory(engine),
         provider_factory=lambda: provider,
     )
@@ -320,7 +328,7 @@ async def _batch_rows(engine: AsyncEngine) -> list[ResearchSyncBatchModel]:
 # ---- tests ------------------------------------------------------------------
 
 
-class TestResearchDataSyncWorker:
+class TestDatasetSyncWorker:
     async def test_syncs_all_datasets(self, engine: AsyncEngine) -> None:
         provider = FakeResearchProvider(
             empty_days={date(2026, 7, 25), date(2026, 7, 26)}  # 周末无行情
@@ -444,3 +452,95 @@ class TestResearchDataSyncWorker:
                 )
             ).scalar_one()
         assert daily_count == 4  # 未重复写入
+
+
+class TestScopeUniverseFilter:
+    """scope 四元组宇宙过滤(#392):逐标的池从 instruments 表按
+    exchange/listing_boards/instrument_type 解析(#385 语义,与 bulk_download
+    共享 normalize_sync_scope)。"""
+
+    @staticmethod
+    def _instrument(code: str, instrument_type: str, exchange: str) -> dict[str, object]:
+        return {
+            "code": code,
+            "name": f"标的-{code}",
+            "market": "a_share",
+            "instrument_type": instrument_type,
+            "exchange": exchange,
+            "listing_board": "unknown",
+            "status": "active",
+        }
+
+    async def _register(self, engine: AsyncEngine) -> None:
+        from finboard_persistence import InstrumentRepository
+
+        instruments: list[dict[str, object]] = [
+            self._instrument("000001.SZ", "stock", "SZSE"),
+            self._instrument("600000.SH", "stock", "SSE"),
+            self._instrument("510300.SH", "etf", "SSE"),
+        ]
+        async with session_factory(engine)() as session:
+            await InstrumentRepository(session).upsert_many(instruments)
+            await session.commit()
+
+    async def test_universe_filter_resolves_pool_from_instruments(
+        self, engine: AsyncEngine
+    ) -> None:
+        await self._register(engine)
+        provider = FakeResearchProvider(symbols=())
+        executor = _make_executor(engine, provider)
+        payload: dict[str, object] = {
+            "datasets": ["industry_memberships"],
+            "start_date": START_DATE.isoformat(),
+            "end_date": END_DATE.isoformat(),
+            "instrument_type": "stock",
+        }
+        result = await executor.execute(_job(payload), _noop_progress)
+
+        assert result.status == "succeeded"
+        # 逐标的池 = instruments 表 stock 过滤结果(ETF 510300.SH 被剔除)。
+        industry_calls = [c for c in provider.calls if c.startswith("industry:")]
+        assert sorted(industry_calls) == [
+            "industry:000001.SZ",
+            "industry:600000.SH",
+        ]
+        assert "profiles" not in provider.calls  # 未选中 profiles,不发档案请求
+
+    async def test_symbols_intersected_with_universe_filter(
+        self, engine: AsyncEngine
+    ) -> None:
+        await self._register(engine)
+        provider = FakeResearchProvider(symbols=())
+        executor = _make_executor(engine, provider)
+        payload: dict[str, object] = {
+            "datasets": ["financial_indicators"],
+            "start_date": START_DATE.isoformat(),
+            "end_date": END_DATE.isoformat(),
+            "symbols": ["510300.SH", "000001.SZ"],  # 510300 不在 stock 过滤内
+            "instrument_type": "stock",
+        }
+        result = await executor.execute(_job(payload), _noop_progress)
+
+        assert result.status == "succeeded"
+        financial_calls = [c for c in provider.calls if c.startswith("financial:")]
+        assert sorted(financial_calls) == ["financial:000001.SZ"]
+
+    async def test_empty_universe_filter_rejected_named(
+        self, engine: AsyncEngine
+    ) -> None:
+        """宇宙过滤在 instruments 表解析为空 → 具名 no_instruments 拒绝。"""
+        await self._register(engine)
+        provider = FakeResearchProvider(symbols=())
+        executor = _make_executor(engine, provider)
+        payload: dict[str, object] = {
+            "datasets": ["industry_memberships"],
+            "start_date": START_DATE.isoformat(),
+            "end_date": END_DATE.isoformat(),
+            "exchange": "CFFEX",  # 登记的标的均非 CFFEX
+        }
+
+        from finboard_backtest.background_jobs.contracts import ExecutorError
+
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(_job(payload), _noop_progress)
+        assert exc_info.value.code == "no_instruments"

@@ -890,9 +890,8 @@ _KIND_CONCURRENCY: dict[str, int] = {
     "feature_snapshot": 1,
     "bulk_download": 1,
     "data_sync": 1,
-    "fetch_all": 1,
     "quality_repair": 1,
-    "research_data_sync": 1,
+    "dataset_sync": 1,
     "research_code_run": 1,
     "factor_series_build": 2,
     "validation_experiment": 1,
@@ -1030,10 +1029,10 @@ def build_executor_registry(
     """
 
     from finboard_backtest.background_jobs import JobExecutorRegistry
+    from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
     from finboard_backtest.background_jobs.executors import (
         BacktestRunExecutor,
         BulkDownloadExecutor,
-        DataFetchAllExecutor,
         DatasetPublishExecutor,
         DataSyncExecutor,
         EchoExecutor,
@@ -1041,7 +1040,6 @@ def build_executor_registry(
         FeatureSnapshotExecutor,
         QualityRepairExecutor,
         ResearchCodeRunExecutor,
-        ResearchDataSyncExecutor,
         ResearchRunExecutor,
         ValidationExperimentExecutor,
     )
@@ -1104,23 +1102,17 @@ def build_executor_registry(
         DataSyncExecutor(session_maker=session_maker),
     )
     registry.register(
-        "fetch_all",
-        DataFetchAllExecutor(
-            session_maker=session_maker,
-            settings_factory=settings_factory,
-        ),
-    )
-    registry.register(
         "quality_repair",
         QualityRepairExecutor(
             session_maker=session_maker,
             settings_factory=settings_factory,
         ),
     )
-    # issue #171:research 数据表(估值 / 财务 / 行业)摄取编排。
+    # issue #171 → #392:数据集驱动统一同步框架(SyncSpec 注册表,kind 由
+    # research_data_sync 改名 dataset_sync)。
     registry.register(
-        "research_data_sync",
-        ResearchDataSyncExecutor(
+        "dataset_sync",
+        DatasetSyncExecutor(
             session_maker=session_maker,
             settings_factory=settings_factory,
         ),
@@ -1237,7 +1229,7 @@ async def _recover_research_runs(
     该任务,口径一致。
     """
 
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
 
     from finboard_app.research_run_store import SqlAlchemyResearchRunStore
     from finboard_backtest.research_run import JobOwnershipProbe, ResearchRunCoordinator
@@ -1344,20 +1336,6 @@ def data_fetch(
     )
 
 
-@data_app.command(name="fetch-all")
-def data_fetch_all(
-    config_file: Annotated[
-        str,
-        typer.Option(
-            "--config",
-            help="标的池配置文件路径(YAML/JSON,默认 symbols.yaml)",
-        ),
-    ] = "symbols.yaml",
-) -> None:
-    """批量拉取标的池中所有标的的行情数据(带限流)。"""
-    asyncio.run(_fetch_all_data(config_file=config_file))
-
-
 @data_app.command(name="status")
 def data_status(
     symbol: Annotated[
@@ -1424,49 +1402,6 @@ async def _fetch_data(
     if bars:
         typer.echo(f"  起始: {bars[0].timestamp.date()} close={bars[0].close}")
         typer.echo(f"  结束: {bars[-1].timestamp.date()} close={bars[-1].close}")
-
-
-async def _fetch_all_data(*, config_file: str) -> None:
-    import os
-
-    from finboard_data import load_symbol_pool
-    from finboard_data.cache import make_symbol
-    from finboard_shared.types import BarPeriod
-
-    config = load_symbol_pool(config_file)
-    if not config.symbols:
-        typer.echo(f"标的池为空: {config_file}", err=True)
-        raise typer.Exit(1)
-
-    end = date.today()
-    start = end - timedelta(days=config.fetch_lookback_days)
-    period = (
-        BarPeriod[config.fetch_period]
-        if config.fetch_period in BarPeriod.__members__
-        else BarPeriod(config.fetch_period)
-    )
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
-    provider = _cli_bar_provider(provider_name)
-    sym_objs = [make_symbol(s.code) for s in config.symbols]
-
-    typer.echo(
-        f"批量拉取 {len(sym_objs)} 个标的 ({start} ~ {end}) {period.value} {config.fetch_adjust}"
-    )
-
-    def on_progress(code: str, done: int, total: int) -> None:
-        typer.echo(f"  [{done}/{total}] {code}")
-
-    results = await provider.update_cache_batch(
-        sym_objs,
-        period,
-        start,
-        end,
-        adjust=config.fetch_adjust,
-        on_progress=on_progress,
-    )
-
-    success = sum(results.values())
-    typer.echo(f"\n完成: {success}/{len(sym_objs)} 成功, {len(sym_objs) - success} 失败")
 
 
 async def _data_status(*, symbol: str | None, cache_dir: str) -> None:

@@ -22,7 +22,7 @@ benchmark_return」链路的唯一登记写入者。
 见 :func:`finboard_data.akshare_provider.is_convertible_code`),并入
 ``discover_all()``;data_sync 经 ``sync_with_diff`` 自动登记。
 转债无 list_date 的结构化上游(东财一览无上市日列),保持 null,由
-research_data_sync ``convertible_profiles`` 数据集从 tushare cb_basic 回填。
+dataset_sync ``convertible_profiles`` 数据集从 tushare cb_basic 回填。
 
 期货主连登记(issue #267):akshare 全市场列表接口不覆盖期货,
 ``discover_futures_main`` 从受控登记表
