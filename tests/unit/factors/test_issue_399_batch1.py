@@ -306,9 +306,13 @@ class TestCatalogBatch1:
     """目录不变量:家族计数 / 声明 / 批次 0 锚稳定。"""
 
     def test_family_counts_and_total(self) -> None:
+        """家族计数按批次 scope 断言(目录并集后含批次 2-4,#403 收口)。"""
+        batch0 = {"return_21d", "return_63d", "return_126d", "return_252d"}
+        batch_scope = BATCH1_NAMES | batch0
         families: dict[str, int] = {}
-        for item in PREDEFINED_FACTORS.values():
-            families[item.family] = families.get(item.family, 0) + 1
+        for name, item in PREDEFINED_FACTORS.items():
+            if name in batch_scope:
+                families[item.family] = families.get(item.family, 0) + 1
         assert families == {
             "momentum": 17,
             "reversal": 2,
@@ -316,12 +320,9 @@ class TestCatalogBatch1:
             "liquidity": 32,
             "size": 3,
         }
-        assert len(predefined_factor_names()) == 78
-        assert {
-            name
-            for name in PREDEFINED_FACTORS
-            if name not in {"return_21d", "return_63d", "return_126d", "return_252d"}
-        } == BATCH1_NAMES
+        registered = set(predefined_factor_names())
+        assert len(batch_scope & registered) == 78
+        assert registered >= BATCH1_NAMES
 
     def test_index_dependencies_declared(self) -> None:
         expected = {

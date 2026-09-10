@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from datetime import time as dt_time
@@ -104,6 +104,7 @@ class PredefinedFactorSeriesOutput:
     workspace_dir: Path
     mount: WindowDataMount | None = None
     benchmark_only_symbols: frozenset[str] = field(default_factory=frozenset)
+    industry_groups: dict[str, str | None] = field(default_factory=dict)
 
     @property
     def run_id(self) -> None:
@@ -125,6 +126,7 @@ class _MountFactorInput(PredefinedFactorInput):
         value_universe: tuple[str, ...],
         tradable_symbols: tuple[str, ...],
         benchmark_only_symbols: frozenset[str],
+        industry_groups: Mapping[str, str | None] | None = None,
     ) -> None:
         super().__init__(
             factor_name=definition.name,
@@ -136,6 +138,7 @@ class _MountFactorInput(PredefinedFactorInput):
         self._bars_table = bars_table
         self._daily_table = daily_table
         self._value_universe = value_universe
+        self._industry_groups: Mapping[str, str | None] = industry_groups or {}
         self._series_cache: dict[tuple[str, str], dict[str, SymbolSeries]] = {}
 
     # ---- 数据面(字段级惰性:因子不触碰的字段零物化,#378 精神) ----
@@ -149,10 +152,13 @@ class _MountFactorInput(PredefinedFactorInput):
         return self._series_for("daily_metrics", field, self._daily_table)
 
     def industry_groups(self) -> dict[str, str | None]:
-        # v1(#398):行业分组观测自研究发布的装配接线随基本面批次
-        # (#401/#402)落地;当前返回空映射 —— cs_neutralize 在全缺组
-        # 语义下退化为整体截面去均值(算子层支持显式传入分组序列)。
-        return {}
+        """行业分组(#400:自 bars 主发布 instruments.industry 装配)。
+
+        组标签 = 冻结发布 instruments 的 ``industry`` 字段(#185,#212
+        research_industry_memberships 分组的冻结发布近似);benchmark-only
+        标的与缺失行业的标的不在映射中(取值 None,因子侧可见、可计数)。
+        """
+        return dict(self._industry_groups)
 
     def sample(
         self,
@@ -265,12 +271,20 @@ async def run_predefined_factor_series(
     workspace_root: Path | None = None,
     mount_override: WindowDataMount | None = None,
     benchmark_only_symbols: frozenset[str] | None = None,
+    industry_groups: Mapping[str, str | None] | None = None,
 ) -> PredefinedFactorSeriesOutput:
     """进程内执行一次预置因子区间构建(与容器入口同构)。
 
     ``spec`` 复用 :class:`FactorSeriesRunSpec`(``code_artifact`` = 因子
     裸名,``code_commit`` = :func:`predefined_factor_commit` 锚 —— 不一致
     即 :data:`PREDEFINED_VERSION_MISMATCH` 秒拒,防过期锚混入内容寻址)。
+
+    ``industry_groups``(#400)为 symbol → 行业标签映射;缺省时自 bars
+    主发布 instruments 的 ``industry`` 字段装配(剔除 benchmark-only,
+    #185/#212 冻结发布近似口径);``mount_override`` 路径无 provider 可
+    装配,与 ``benchmark_only_symbols`` 同样要求显式传入(审计变体从基线
+    产物继承,行业分组不随挂载重派生 —— 否则中性化类因子的截断变体会
+    因分组缺失产生假阳性分歧)。
     """
     _validate_series_spec(spec)
     try:
@@ -298,6 +312,9 @@ async def run_predefined_factor_series(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     benchmark = benchmark_only_symbols
+    industry: dict[str, str | None] | None = (
+        dict(industry_groups) if industry_groups is not None else None
+    )
     release_checksums: dict[str, str] = {}
     if mount_override is not None:
         _validate_mount_override(spec, mount_override)
@@ -307,6 +324,12 @@ async def run_predefined_factor_series(
                 "mount_spec_mismatch",
                 "mount_override 路径须显式传入 benchmark_only_symbols"
                 "(审计变体从基线产物继承,#380 基准集不随挂载重派生)",
+            )
+        if industry is None:
+            raise SandboxError(
+                "mount_spec_mismatch",
+                "mount_override 路径须显式传入 industry_groups"
+                "(审计变体从基线产物继承,#400 行业分组不随挂载重派生)",
             )
     else:
         providers, release_checksums = await _series_providers(
@@ -323,7 +346,7 @@ async def run_predefined_factor_series(
             release_id=spec.release_id,
             dataset_release_ids=spec.dataset_release_ids,
         )
-        if benchmark is None:
+        if benchmark is None or industry is None:
             from finboard_backtest.strategy_spec.universe_precheck import (
                 is_benchmark_only_instrument,
             )
@@ -333,6 +356,14 @@ async def run_predefined_factor_series(
                 for item in providers[0].release.instruments
                 if is_benchmark_only_instrument(item)
             )
+            # 行业标签自冻结发布 instruments.industry(#185);getattr
+            # 探针兼容无该字段的 provider/测试 stub(#304 先例),缺失
+            # 视为 None → 因子侧缺组缺测可计数。
+            industry = {
+                str(item.code): getattr(item, "industry", None)
+                for item in providers[0].release.instruments
+                if not is_benchmark_only_instrument(item)
+            }
 
     bars_table = _read_mount_table(mount.root / "bars.parquet")
     needs_daily = any(
@@ -347,6 +378,9 @@ async def run_predefined_factor_series(
         symbol for symbol in mount_symbols if symbol not in benchmark
     )
     value_universe = tradable if definition.cross_section else mount_symbols
+    industry_map = industry or {}
+    # 缺组计数只覆盖可交易域(基准标的刻意不在分组映射中,不算缺失)
+    industry_missing = sum(1 for symbol in tradable if not industry_map.get(symbol))
 
     inp = _MountFactorInput(
         definition=definition,
@@ -357,6 +391,7 @@ async def run_predefined_factor_series(
         value_universe=value_universe,
         tradable_symbols=tradable,
         benchmark_only_symbols=benchmark,
+        industry_groups=industry_map,
     )
     frame = definition.compute(inp)
     _validate_frame(frame, spec)
@@ -389,6 +424,10 @@ async def run_predefined_factor_series(
             "value_symbols": len(value_universe),
             "mount_symbols": len(mount_symbols),
             "benchmark_only_excluded": definition.cross_section,
+            "industry_groups_mapped": sum(
+                1 for symbol in tradable if industry_map.get(symbol)
+            ),
+            "industry_groups_missing": industry_missing,
             "elapsed_seconds": elapsed,
             "release_checksums": release_checksums,
         },
@@ -397,6 +436,7 @@ async def run_predefined_factor_series(
         workspace_dir=run_dir,
         mount=mount,
         benchmark_only_symbols=benchmark,
+        industry_groups=industry_map,
     )
 
 
@@ -439,6 +479,7 @@ async def default_predefined_prefix_audit(
     baseline_mount = getattr(baseline, "mount", None)
     workspace_dir = getattr(baseline, "workspace_dir", None)
     benchmark = getattr(baseline, "benchmark_only_symbols", None)
+    industry = getattr(baseline, "industry_groups", None)
 
     async def build_fn(
         dates: Sequence[date], perturb_from: date | None = None
@@ -458,6 +499,7 @@ async def default_predefined_prefix_audit(
             variant_spec,
             mount_override=variant_mount,
             benchmark_only_symbols=benchmark,
+            industry_groups=industry,
             workspace_root=Path(workspace_dir),
         )
 
