@@ -174,6 +174,10 @@ class FakeTushareClient:
         self.calls.append(("cb_basic", kwargs))
         return self.cb_basic_rows.get(kwargs.get("list_status", "L"), [])
 
+    def index_basic(self, **kwargs: str) -> object:
+        self.calls.append(("index_basic", kwargs))
+        return []
+
 
 def _provider(
     client: FakeTushareClient | None = None,

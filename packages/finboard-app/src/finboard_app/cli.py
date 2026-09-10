@@ -1710,6 +1710,18 @@ async def _sync_universe() -> None:
         backfill = await repo.backfill_metadata_from_profiles(
             symbols=[ins.code for ins in instruments]
         )
+        # issue #394:指数登记携带 index_basic base_date,回填
+        # instruments.list_date(只补 null,#185/#265 同语义)。
+        from finboard_shared.types import InstrumentType
+
+        listing_backfill = await repo.backfill_listing_dates(
+            {
+                ins.code: (ins.list_date, None)
+                for ins in instruments
+                if ins.instrument_type is InstrumentType.INDEX
+                and ins.list_date is not None
+            }
+        )
         await session.commit()
 
     typer.echo(
@@ -1728,6 +1740,10 @@ async def _sync_universe() -> None:
         )
     else:
         typer.echo("无已发布研究档案批次,跳过 list_date/industry 回填")
+    typer.echo(
+        f"指数 list_date 回填 {listing_backfill['backfilled_list_date']} 只"
+        f"(仍缺失 {listing_backfill['missing_list_date']} 只,#394)"
+    )
     await engine.dispose()
 
 

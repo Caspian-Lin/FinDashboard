@@ -819,8 +819,9 @@ async def sync_universe(
 
     实际执行由 worker 消费 ``kind=data_sync`` 任务;上游 akshare 不可用会在 worker
     端映射为 ``failed(data_source_unavailable)``。进度 / 状态 / 取消统一通过
-    ``/api/jobs/{job_id}`` 轮询。同步范围含基准指数登记(issue #256):
-    ``discover_indices`` 受控登记表自动写入 ``instrument_type=index`` 行。
+    ``/api/jobs/{job_id}`` 轮询。同步范围含指数登记(issue #256;#394 起
+    ``discover_indices`` 走 tushare ``index_basic`` 全量,登记 A 股三所指数并
+    回填 base_date → list_date,``FINBOARD_TUSHARE_TOKEN`` 未配置时具名失败)。
     """
     from datetime import date
 
