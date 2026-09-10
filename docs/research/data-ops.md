@@ -361,9 +361,10 @@ cb_daily / cb_basic → 登记 → 缓存 → convertible_profiles 同步 → �
 审计)。与 akshare 新浪主连的双源逐值对照(2025 全年 243 交易日 × IF/IH/
 IC/IM):共同交易日全一致,close 最大相对差 1.6%~4.2%、超 ε(1e-4)天
 数 8~63/243,换月日两源主力选择基本一致(IC 有 2/7 天换月日分歧)——
-差异源于两源主力/换月规则细节与结算口径,**是否把期货主连默认源从
-akshare 切到 tushare 留待拍板**(当前不切默认,显式 `source=tushare`
-可用)。
+差异源于两源主力/换月规则细节与结算口径,**#391 起(2026-09-10 用户
+拍板)期货主连批量默认源切 tushare**(与 #394 指数偏好同构:未显式
+声明 `source` 且筛选域全为 futures 时覆盖为 tushare;显式
+`source=akshare` 可选回新浪主连副源)。
 
 **标准运营步骤**:
 
@@ -383,12 +384,14 @@ akshare 切到 tushare 留待拍板**(当前不切默认,显式 `source=tushare`
    `trade_cal` 表(与 #396 股票 trade_cal 同表同构,`exchange` 区分);
    日历同步尽力而为,token 缺失 / 上游失败具名告警不阻断标的同步。
 2. `bulk_download` 带 `instrument_type=futures`(配 `market=future`)——
-   默认源走 akshare 新浪 `futures_main_sina`(仅主连;无复权概念,缓存键
-   沿用默认 `qfq` 但语义为 no-op,发布 adjustment 与下载键一致;新浪无
-   成交额列 amount=0)。**#395 起显式 `source=tushare` 放行**(`fut_daily`
-   2000 积分档实测可调):主连 `IF0.CFFEX` → 主力连续 `IF.CFX` 连续直取、
-   具体合约 `IF2612.CFFEX` → `IF2612.CFX`;vol 单位手 → 张 1:1、amount
-   单位**万元 → 元**(×10000,与股票 daily 的千元口径不同)。
+   **#391 起默认源走 tushare `fut_daily`**(与 #394 指数偏好同构:入队未
+   显式声明 `source` 且筛选域全为 futures 时覆盖;全局默认已是 tushare
+   时该偏好短路幂等;显式 `source=akshare` 选回新浪主连副源——仅主连,
+   无复权概念,缓存键沿用默认 `qfq` 但语义为 no-op,发布 adjustment 与
+   下载键一致,新浪无成交额列 amount=0)。主连 `IF0.CFFEX` → 主力连续
+   `IF.CFX` 连续直取、具体合约 `IF2612.CFFEX` → `IF2612.CFX`;vol 单位
+   手 → 张 1:1、amount 单位**万元 → 元**(×10000,与股票 daily 的千元
+   口径不同)。
 3. `dataset_release_publish` —— 期货 bars 建议与股票 / 债券基准同处一份
    `multi_asset_mixed` 发布(mixed 展开含 futures 五类之一),或独立 BARS
    发布。发布候选从登记表读取乘数 / 保证金率 / 最小变动价位 /

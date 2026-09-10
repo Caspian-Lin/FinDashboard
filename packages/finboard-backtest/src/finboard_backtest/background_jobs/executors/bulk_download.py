@@ -47,8 +47,6 @@ if TYPE_CHECKING:
         SettingsFactory,
     )
 
-logger = structlog.get_logger(__name__)
-
 #: 部分失败报告里逐标的列出的上限(#347):error_summary 是单行文本字段,
 #: 全市场任务可能有几千个失败标的,超出部分聚合计数(完整清单在 worker 日志
 #: ``*.cache_update_failed``),防止超长摘要撑爆任务详情。
@@ -263,6 +261,22 @@ class BulkDownloadExecutor:
         )
 
 
+#: 类型专属域的默认源偏好(#394 指数 / #391 期货,期货默认源切换经 #395
+#: 双源对照后用户拍板 2026-09-10):instrument_type -> (偏好源, 日志文案)。
+#: 仅对「未显式声明 source 且筛选域全部为同一 instrument_type」的批量任务
+#: 生效;混合域 / 显式 source 不在此列。
+_DOMAIN_SOURCE_PREFERENCE: dict[str, tuple[str, str]] = {
+    "index": (
+        "tushare",
+        "指数专属批量任务默认走 tushare index_daily(#394 主源);显式 source 可覆盖",
+    ),
+    "futures": (
+        "tushare",
+        "期货专属批量任务默认走 tushare fut_daily(#395 主源,用户拍板);显式 source 可覆盖",
+    ),
+}
+
+
 def _resolve_bulk_provider_name(
     source: str | None,
     instruments: Sequence[object],
@@ -270,32 +284,51 @@ def _resolve_bulk_provider_name(
     *,
     job_id: str,
 ) -> str:
-    """解析批量任务行情源,叠加指数主源偏好(issue #394)。
+    """解析批量任务行情源,叠加类型专属域主源偏好(#394 指数 / #391 期货)。
 
     入队 payload **显式声明** ``source`` 时一律照旧(显式选择恒优先);
-    未声明(REST/MCP 默认写空串)且筛选域**全部为指数**时,默认源覆盖为
-    tushare —— index_daily 是指数日线的结构化主源(原始点位,无复权
-    概念,#341 实测 2000 积分档可调),akshare ``index_zh_a_hist`` 降为
-    副源(可显式 ``source=akshare`` 选回)。混合域(含股票 / ETF)不
-    覆盖 —— 全局默认源的切换归 ``settings.data_provider`` 管(#404),
-    本偏好只对指数专属任务生效,避免改动股票复权口径链路。
+    未声明(REST/MCP 默认写空串)且筛选域**全部为同一 instrument_type**
+    且该类型登记了具名偏好时,默认源覆盖为偏好源:
+
+    - 指数 → tushare ``index_daily``(原始点位、无复权概念,#341 实测
+      2000 积分档可调),akshare ``index_zh_a_hist`` 降为副源(可显式
+      ``source=akshare`` 选回);
+    - 期货 → tushare ``fut_daily``(主连 ``IF.CFX`` 连续合约直取、零拼接,
+      #395 双源对照后用户拍板 2026-09-10),akshare 新浪
+      ``futures_main_sina`` 降为副源(可显式 ``source=akshare`` 选回)。
+
+    混合域(含股票 / ETF)不覆盖 —— 全局默认源的切换归
+    ``settings.data_provider`` 管(#404),本偏好只对类型专属任务生效,
+    避免改动股票复权口径链路。``provider_name == "tushare"`` 时提前短路
+    (全局默认已是 tushare,偏好幂等);显式日志路径保留给全局默认
+    非 tushare 的部署。
     """
     provider_name = resolve_provider_name(source, settings_factory)
     if source is not None or provider_name == "tushare" or not instruments:
         return provider_name
-    if all(
-        getattr(ins, "instrument_type", None) == "index" for ins in instruments
+    domain = getattr(instruments[0], "instrument_type", None)
+    preference = (
+        _DOMAIN_SOURCE_PREFERENCE.get(domain)
+        if isinstance(domain, str)
+        else None
+    )
+    if preference is not None and all(
+        getattr(ins, "instrument_type", None) == domain for ins in instruments
     ):
+        preferred, message = preference
         logger.info(
-            "bulk_download.index_source_preference",
+            f"bulk_download.{domain}_source_preference",
             job_id=job_id,
+            domain=domain,
             default_provider=provider_name,
-            resolved_provider="tushare",
+            resolved_provider=preferred,
             symbols=len(instruments),
-            message="指数专属批量任务默认走 tushare index_daily(#394 主源);显式 source 可覆盖",
+            message=message,
         )
-        return "tushare"
+        return preferred
     return provider_name
+
+
 async def _sync_suspension_events(
     provider: object,
     provider_name: str,

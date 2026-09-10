@@ -356,12 +356,15 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 ### finboard_data_bulk_download_start **[写,任务化]**
 登记批量历史数据拉取任务(按市场/类型/交易所筛选),返回 202 + `job_id`。
 - 参数:`market?`(默认 a_share;期货用 future)/ `instrument_type?`(`stock|etf|index|
-  convertible|futures`;index=#256 基准指数,日线走 akshare 指数接口;convertible=
+  convertible|futures`;index=#256/#394 基准指数,默认源 tushare `index_daily`(
+  #394 偏好,显式 `source=akshare` 选回指数接口);convertible=
   #265 转债,走 tushare `cb_daily`,akshare 源 fail-visible 拒绝;futures=
-  #267 期货主连(如 IF0.CFFEX),需配 market=future,走 akshare 新浪
-  `futures_main_sina`,tushare 源 fail-visible 拒绝,主连仅研究信号/基准
-  不可当作可成交合约;
-  `source=tushare` 对 stock/convertible 之外报 `tushare_scope_mismatch`)/
+  #267/#395 期货主连与合约(如 IF0.CFFEX/IF2601.CFFEX),需配 market=future,
+  #391 起默认源走 tushare `fut_daily`(与 #394 指数偏好同构:未显式声明
+  source 且筛选域全为 futures 时覆盖;显式 `source=akshare` 选回新浪
+  `futures_main_sina` 主连副源),主连仅研究信号/基准不可当作可成交合约;
+  `source=tushare` 仅 ETF 拒绝(`tushare_scope_mismatch`),股票/转债/指数/
+  期货放行)/
   `exchange?` /
   `listing_boards?` / `start?`(默认 2015-01-01)/ `source?` /
   `symbols?`(#347 子集重跑:与 market/instrument_type 过滤叠加,交集为空按
