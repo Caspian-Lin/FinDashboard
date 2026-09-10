@@ -531,3 +531,79 @@ TTM,#401 诚实取数同边界);分红进展行按「同分红年度取决策日
 一致,建议 `consistency_baseline_release_id` 对齐)→
 `finboard_factor_series_build(kind=predefined_factor, name=<裸名>)` 逐因子
 构建序列(联合集 = bars 主发布 + 对应研究发布)→ 入队引用。
+
+## 因子质量评估闭环(#403)
+
+**背景**:因子批次 1-4(C0 量价 74 / Alpha101 31 / 财务 40 / Value+QMJ 25)
+后预置目录 ~174 个因子,「坏因子静默进入评分组合」需要可见的量化证据。
+`finboard_backtest.factors.eval` 提供逐因子评估引擎 + `finboard factor-eval`
+CLI,产出结构化 JSON 报告(不落库,产物即档案)。
+
+**评估怎么跑**:
+
+```bash
+# 合成模式(免 DB,全目录机制冒烟;IC 数值无研究含义,可入 CI 口径)
+uv run finboard factor-eval --mode synthetic
+
+# 真实冻结发布小窗口(数据只读;horizon/step 为交易日口径)
+uv run finboard factor-eval --mode release \
+  --release-id DR-<bars 主发布> \
+  --dataset-release-ids DR-<daily_metrics>,DR-<financial_indicators> \
+  --window-start 2025-01-01 --window-end 2025-12-31 \
+  --horizon 5 --step 5
+```
+
+报告缺省落 `data_cache/factor_evals/factor-eval-<mode>-<日期>-<N>.json`
+(`--output` 可覆盖)。`--factors p_a,return_21d` 可抽样(p_ 前缀与裸名
+等价);缺省 = 全目录。
+
+**报告怎么读**(schema_version=v1):
+
+* 顶层:`data_face`(数据口径声明,release 模式带 release_id)/
+  `config`(评估口径:horizon/n_groups/min_cross_section/min_ic_dates/
+  decay_lags)/ `window` / `summary`(status_counts、|RankIC| 最强/最弱
+  3 名、signal_eligible 疑似数)/ `signal_eligible_governance` /
+  `factors`(逐因子条目)/ `elapsed_seconds`;
+* 逐因子:`status` ∈ `ok` / `no_data`(面板全缺测)/
+  `insufficient_cross_section`(可评估日期不足 `min_ic_dates`);
+  `flags`:`coverage_start_missing`(声明了 min_history_bars 但首个决策日
+  全缺测 = 发布历史不足)/ `window_shorter_than_declaration`(评估窗
+  交易日数 < 声明)/ `low_coverage`(覆盖率 < 50%,信息性)/
+  `ic_near_zero`(|IC| 与 |RankIC| 均值 < 0.01);
+* 指标:`ic_mean`/`rank_ic_mean`/`ic_ir`/`rank_ic_ir`/`ic_positive_ratio`
+  (Pearson / Spearman,方向语义保持原始值:LOWER 因子 IC 预期为负,
+  按 |IC| 与 direction 联合解读)/ `group_returns` + `group_monotonicity`
+  (分位组平均前向收益与组序 Spearman,|值| 接近 1 = 分组单调)/
+  `rank_autocorr_lag1` + `turnover` = 1 − lag1(截面排名翻转比例,高换手
+  因子扣成本后净收益显著低于 IC 表面值)/ `autocorr_decay`(lag 1/4/13
+  衰减,信号寿命参考);
+* 诚实边界:末端不足一个 horizon 的决策日不进统计;截面 < 
+  `min_cross_section` 的日子跳过;常数截面相关退化为 None 不虚构数字;
+  合成模式只证明机制跑通,研究结论以 release 模式为准。
+
+**signal_eligible 标注治理流程(#214 规则化)**:
+
+1. 规则:暴露 / 风险 / 流动性三族(`size` / `risk` / `liquidity`)条目
+   默认 `signal_eligible=False`(规模/波动/换手是风险暴露或选域变量,
+   不直接转换为多头信号);
+2. 评估报告的 `signal_eligible_governance.suspected` 列出全部违例
+   (当前目录 = `vwap_dev_20d` / `vwap_dev_60d`,liquidity 族标 True);
+3. **处置人工拍板,工具不批量改目录**:逐条确认后,确属信号的在
+   `factors/predefined/registry.py` 改标注并留豁免理由;确属暴露的改
+   False。改后重跑评估,`suspected` 清零即治理完成。
+
+**覆盖起点声明冻结(#399 续)**:声明 `min_history_bars` 的长窗口因子
+(1320d 三兄弟 / 残差动量 / RSRS 600),`finboard_factor_series_build`
+构建时把 `{min_history_bars, window}` 声明冻结进 series 记录的
+`quality.catalog_declaration` 键(未声明省略键,既有 quality 逐字节
+稳定;不进 content_checksum,缓存命中语义零变化)——序列产物自描述
+构建时刻的目录声明,事后审计无需回放历史目录。
+
+**评分目录投影(#226 续)**:`PREDEFINED_SCORING_CATALOG`(键 = 
+`p_<裸名>`)把全目录投影进评分消费面(direction / category=family /
+economic_hypothesis=title 剥名,家族级 winsorize/standardize/
+missing_strategy 入 `_PREDEFINED_FAMILY_SCORING`,缺省 = 1%/99% + zscore
++ exclude 与既有行为一致);`get_factor_meta` 双命名空间(裸名走 #226
+13 因子目录、p_ 走投影,未知各自具名拒绝);新家族未登记投影规则 =
+导入期 RuntimeError(fail-loud 防漂移)。`MultiFactorScorer` 可直接引用
+治理后 p_ 目录组合评分。

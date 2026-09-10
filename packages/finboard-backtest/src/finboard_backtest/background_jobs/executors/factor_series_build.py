@@ -322,6 +322,22 @@ class FactorSeriesBuildExecutor:
             self._predefined_runner if is_predefined else self._container_runner
         )
         result = await runner(spec)
+        # 覆盖起点声明冻结入 series manifest(issue #403,继 #399):声明
+        # ``min_history_bars`` 的预置因子,把声明随 quality 归档(构建时刻
+        # 的目录语义);commit 锚已含声明(声明变化 → 新锚 → 新序列),
+        # 归档使其**在产物上自描述**——事后审计无需回放历史目录即可核对
+        # 该序列按哪份覆盖起点声明构建。未声明(min_history_bars=None)
+        # 省略键,既有 quality payload 逐字节稳定。
+        declaration: dict[str, Any] | None = None
+        if is_predefined and result is not None:
+            from finboard_backtest.factors.predefined import get_predefined_factor
+
+            item = get_predefined_factor(payload.name)
+            if item.min_history_bars is not None:
+                declaration = {
+                    "min_history_bars": item.min_history_bars,
+                    "window": item.window,
+                }
         record = _record_from_result(
             result,
             code_artifact=payload.name,
@@ -332,6 +348,7 @@ class FactorSeriesBuildExecutor:
             params=payload.params or {},
             window_start=payload.window_start,
             window_end=payload.window_end,
+            catalog_declaration=declaration,
         )
         await progress(4, _TOTAL_STAGES, "factor_series_build:audit")
 
@@ -698,16 +715,21 @@ def _record_from_result(
     code_commit: str,
     kind: str,
     release_id: str,
-    dataset_release_ids: tuple[str, ...],
+    dataset_release_ids: Sequence[str],
     params: dict[str, Any],
     window_start: date,
     window_end: date,
+    catalog_declaration: dict[str, Any] | None = None,
 ) -> FactorSeriesRecord:
     """把容器产出(#359 结果契约)装配为内容寻址 Record。
 
     结果契约(与 #359 钉死):``dates``(升序决策日)、``values``
     (``{date|ISO: {symbol: float|null}}``,date/ISO 两态均可)、``quality``
     (可选质量门归档)、``run_id``(产出 RCR,可空)。
+
+    ``catalog_declaration``(#403,可空):预置因子声明的覆盖起点语义
+    (``min_history_bars``/``window``),非空时并入 quality 的
+    ``catalog_declaration`` 键冻结归档——产物自描述构建时刻的目录声明。
     """
     raw_dates = getattr(result, "dates", None)
     if not raw_dates:
@@ -744,6 +766,9 @@ def _record_from_result(
     if quality is not None and not isinstance(quality, dict):
         # #359 产出 SeriesQualityReport dataclass,归档为普通 dict
         quality = asdict(quality)
+    if catalog_declaration:
+        frozen = {"catalog_declaration": dict(catalog_declaration)}
+        quality = {**(quality or {}), **frozen}
     source_run_id = getattr(result, "run_id", None)
     return FactorSeriesRecord.build(
         code_artifact=code_artifact,
