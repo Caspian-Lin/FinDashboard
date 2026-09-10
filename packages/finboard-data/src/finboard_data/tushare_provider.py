@@ -64,9 +64,67 @@ _DAILY_BASIC_FIELDS = (
     "pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,total_share,float_share,"
     "free_share,total_mv,circ_mv,limit_status"
 )
+#: fina_indicator 字段映射表(issue #401 批次 3 扩展,单一事实源):
+#: ``(tushare 列名, 领域字段名, 换算方式)``。换算方式:
+#: * ``"percent"`` —— 上游百分数,``_percentage`` 归一为小数(3.2 → 0.032),
+#:   同比/环比/利润率/回报率/费用率族;
+#: * ``"decimal"`` —— 上游原值小数(2026-09 实测口径):周转率(次/报告期)、
+#:   流动/速动比率、产权比率、ICR(倍数)、权益乘数、现金流比率
+#:   (ocf_to_or ≈ 0.54 即 54%,上游给的是比率不是百分数)。
+#: 发布白名单 ``FINANCIAL_INDICATORS_FIELDS`` 与表列(迁移 #401)以领域
+#: 字段名为准,三方一致性由单测锁定。
+_FINANCIAL_FIELD_MAP: tuple[tuple[str, str, str], ...] = (
+    # 基础每股/回报(#171 既有 12 字段)
+    ("eps", "eps", "decimal"),
+    ("dt_eps", "diluted_eps", "decimal"),
+    ("bps", "book_value_per_share", "decimal"),
+    ("ocfps", "operating_cash_flow_per_share", "decimal"),
+    ("roe", "return_on_equity", "percent"),
+    ("roe_waa", "weighted_return_on_equity", "percent"),
+    ("grossprofit_margin", "gross_profit_margin", "percent"),
+    ("netprofit_margin", "net_profit_margin", "percent"),
+    ("debt_to_assets", "debt_to_assets", "percent"),
+    ("tr_yoy", "revenue_yoy", "percent"),
+    ("netprofit_yoy", "net_profit_yoy", "percent"),
+    ("ocf_yoy", "operating_cash_flow_yoy", "percent"),
+    # 增长:YoY / 单季 YoY / 单季 QoQ(#401)
+    ("or_yoy", "operating_revenue_yoy", "percent"),
+    ("basic_eps_yoy", "basic_eps_yoy", "percent"),
+    ("dt_netprofit_yoy", "deducted_netprofit_yoy", "percent"),
+    ("op_yoy", "operating_profit_yoy", "percent"),
+    ("q_gr_yoy", "revenue_yoy_q", "percent"),
+    ("q_gr_qoq", "revenue_qoq", "percent"),
+    ("q_netprofit_yoy", "netprofit_yoy_q", "percent"),
+    ("q_netprofit_qoq", "netprofit_qoq", "percent"),
+    # 盈利质量:ROA / ROIC / 扣非 / 单季盈利 / 期间费用率(#401)
+    ("roa", "return_on_assets", "percent"),
+    ("npta", "return_on_assets_np", "percent"),
+    ("roe_dt", "roe_deducted", "percent"),
+    ("roic", "roic", "percent"),
+    ("q_roe", "roe_q", "percent"),
+    ("q_npta", "return_on_assets_q", "percent"),
+    ("q_gsprofit_margin", "grossprofit_margin_q", "percent"),
+    ("q_netprofit_margin", "netprofit_margin_q", "percent"),
+    ("expense_of_sales", "expense_to_revenue", "percent"),
+    # 营运效率:周转率族(次/报告期,原值小数,#401)
+    ("inv_turn", "inventory_turnover", "decimal"),
+    ("ar_turn", "receivables_turnover", "decimal"),
+    ("ca_turn", "current_assets_turnover", "decimal"),
+    ("fa_turn", "fixed_assets_turnover", "decimal"),
+    ("assets_turn", "total_assets_turnover", "decimal"),
+    # 流动性 / 偿债(倍数或比率,原值小数,#401)
+    ("current_ratio", "current_ratio", "decimal"),
+    ("quick_ratio", "quick_ratio", "decimal"),
+    ("debt_to_eqt", "debt_to_equity", "decimal"),
+    ("ebit_to_interest", "interest_coverage", "decimal"),
+    ("assets_to_eqt", "equity_multiplier", "decimal"),
+    # 现金流质量(比率,原值小数,#401)
+    ("ocf_to_or", "ocf_to_revenue", "decimal"),
+    ("ocf_to_debt", "ocf_to_debt", "decimal"),
+)
 _FINANCIAL_FIELDS = (
-    "ts_code,ann_date,end_date,update_flag,eps,dt_eps,bps,ocfps,roe,roe_waa,"
-    "grossprofit_margin,netprofit_margin,debt_to_assets,tr_yoy,netprofit_yoy,ocf_yoy"
+    "ts_code,ann_date,end_date,update_flag,"
+    + ",".join(column for column, _, _ in _FINANCIAL_FIELD_MAP)
 )
 _INDUSTRY_FIELDS = (
     "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,in_date,out_date,is_new"
@@ -686,23 +744,22 @@ class TushareResearchDataProvider:
         endpoint = "fina_indicator"
         _require_fields(row, _FINANCIAL_FIELDS, endpoint, index)
         announcement_date = _required_date(row, "ann_date", endpoint, index)
+        # 字段换算随 _FINANCIAL_FIELD_MAP 单一事实源驱动(percent → 小数,
+        # decimal 原值);映射表与领域字段/白名单/表列的一致性由单测锁定。
+        values = {
+            name: (
+                _percentage(row, column, endpoint, index)
+                if kind == "percent"
+                else _optional_decimal(row, column, endpoint, index)
+            )
+            for column, name, kind in _FINANCIAL_FIELD_MAP
+        }
         return FinancialIndicator(
             symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
             announcement_date=announcement_date,
             report_period=_required_date(row, "end_date", endpoint, index),
             update_flag=_optional_text(row, "update_flag"),
-            eps=_optional_decimal(row, "eps", endpoint, index),
-            diluted_eps=_optional_decimal(row, "dt_eps", endpoint, index),
-            book_value_per_share=_optional_decimal(row, "bps", endpoint, index),
-            operating_cash_flow_per_share=_optional_decimal(row, "ocfps", endpoint, index),
-            return_on_equity=_percentage(row, "roe", endpoint, index),
-            weighted_return_on_equity=_percentage(row, "roe_waa", endpoint, index),
-            gross_profit_margin=_percentage(row, "grossprofit_margin", endpoint, index),
-            net_profit_margin=_percentage(row, "netprofit_margin", endpoint, index),
-            debt_to_assets=_percentage(row, "debt_to_assets", endpoint, index),
-            revenue_yoy=_percentage(row, "tr_yoy", endpoint, index),
-            net_profit_yoy=_percentage(row, "netprofit_yoy", endpoint, index),
-            operating_cash_flow_yoy=_percentage(row, "ocf_yoy", endpoint, index),
+            **values,
             source=_SOURCE,
             observed_at=observed_at,
             available_at=datetime.combine(

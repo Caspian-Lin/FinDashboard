@@ -148,6 +148,28 @@ run**——缺失标的的研究因子值为 null,发具名 `research_release_mi
 warning(release_id + 缺失清单),与 factor_lab #212 容忍语义一致;bars 主
 发布缺标的仍 fail-closed。
 
+## fina_indicator 白名单扩展后的增量补拉与重发布(#401)
+
+**背景**:#401 把 `fina_indicator` 白名单从 15 扩到 44 字段(ROA / 周转率族 /
+流动速动比率 / ICR / 单季 QoQ 等),解锁 40 个 Growth/Quality 预置因子
+(`p_fin_*`,批次 3)。既有财务发布冻结于扩列前——新字段在旧发布中为 NULL,
+属预期缺测,不回填(发布不可变)。
+
+**标准运营步骤**(解锁新字段因子):
+
+1. `dataset_sync`(datasets 含 `financial_indicators`)增量重跑——provider
+   字段映射扩列后重跑即幂等补拉新字段(修订幂等/批次记账框架白拿);
+   全市场约 5534 标的 × 1 次 `fina_indicator` 调用,RPM 200/分 ≈ 28 分钟/轮,
+   可按报告期窗口收窄;
+2. 重新发布 `financial_indicators`:字段集合变化必须递增
+   `schema_version`(如 `schema_version=v2`,REST `ResearchDatasetReleaseCreate`
+   / MCP `finboard_dataset_release_publish` / executor payload 均已透传),
+   否则 builder 具名拒绝「字段集合发生变化但 schema_version 未递增」;
+   建议 `symbols_from_release` 复制旧发布标的集 +
+   `consistency_baseline_release_id` 对齐 bars 主发布;
+3. 新发布的 release_id 进 research_run / factor_series_build 的
+   `dataset_release_ids` 联合集,`p_fin_*` 因子即取到新字段。
+
 ## 指数基准数据链路(#256,#184 运营化)
 
 **背景**:2026-09-01 所有 research run 的 `benchmark_return`/`excess_return`

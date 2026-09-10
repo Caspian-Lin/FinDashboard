@@ -592,6 +592,7 @@ async def dataset_release_publish(
     listing_boards: list[str] | None = None,
     consistency_baseline_release_id: str | None = None,
     consistency_fail_on_mismatch: bool = False,
+    schema_version: str | None = None,
 ) -> ToolEnvelope:
     """登记数据集冻结发布任务,返回 202 + job_id(研究闭环关键节点)。
 
@@ -612,6 +613,9 @@ async def dataset_release_publish(
     ``consistency_baseline_release_id``(#252):指定基线发布(如 bars 主发布)
     做标的集一致性校验,差集具名;默认只 warning,``fail_on_mismatch`` 时秒级
     失败(code=symbol_set_mismatch),避免并集不一致拖到执行期才暴露。
+
+    ``schema_version``(#401):冻结字段集合变化(白名单扩展)时递增,缺省
+    沿用服务端默认;字段变化而版本未递增会被 builder 具名拒绝(#187)。
     """
 
     async def _do() -> dict[str, Any]:
@@ -627,6 +631,7 @@ async def dataset_release_publish(
             release_kind=release_kind,  # type: ignore[arg-type]
             source=source,  # type: ignore[arg-type]
             version=version,
+            schema_version=schema_version,
             symbols=normalized_symbols,
             symbols_from_release=symbols_from_release,
             full_market=full_market,
@@ -674,6 +679,8 @@ async def dataset_release_publish(
             "dataset_name": body.dataset_name,
             "release_kind": body.release_kind,
             "version": body.version,
+            # issue #401:schema_version 透传(缺省 None 执行器回落默认)。
+            "schema_version": body.schema_version,
             "start_date": body.start_date.isoformat(),
             "end_date": body.end_date.isoformat(),
             "adjustment": body.adjustment,
@@ -1135,7 +1142,9 @@ def register(mcp: MCPServer) -> None:
             "etf:cross_border|etf:commodity|etf:bond)/ "
             "consistency_baseline_release_id(#252:基线发布做标的集一致性校验,"
             "差集具名;默认 warning)/ consistency_fail_on_mismatch(默认 false,"
-            "true 时不一致秒级失败 code=symbol_set_mismatch)。"
+            "true 时不一致秒级失败 code=symbol_set_mismatch)/ "
+            "schema_version(#401:冻结字段集合变化时递增,如 financial_indicators "
+            "扩列后新发布 schema_version=v2;字段变化而版本未递增被 builder 具名拒绝)。"
             "release_kind=daily_metrics|financial_indicators 时从 research_* 表"
             "冻结基本面/财务指标发布(issue #187),与 bars 发布联合供因子快照取数。"
             "release_kind=convertible_metrics(#265)只接受 A 股转债标的,从缓存 "
@@ -1164,6 +1173,7 @@ def register(mcp: MCPServer) -> None:
         required_capabilities: list[str] | None = None,
         consistency_baseline_release_id: str | None = None,
         consistency_fail_on_mismatch: bool = False,
+        schema_version: str | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await dataset_release_publish(
@@ -1184,6 +1194,7 @@ def register(mcp: MCPServer) -> None:
             required_capabilities=required_capabilities,
             consistency_baseline_release_id=consistency_baseline_release_id,
             consistency_fail_on_mismatch=consistency_fail_on_mismatch,
+            schema_version=schema_version,
         )
 
     @mcp.tool(
