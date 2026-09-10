@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -432,5 +432,51 @@ describe("ResearchData 数据发布闭环", () => {
     );
     expect(await screen.findByText("数据发布成功")).toBeInTheDocument();
     expect(datasetApiMock.createRelease).toHaveBeenCalledTimes(2);
+  });
+
+  it("新发布 kind（利润表 #397）默认 full_market 且固定 tushare/none/stock", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ResearchData />);
+
+    await user.click(screen.getByRole("tab", { name: "利润表" }));
+    await user.click(screen.getByRole("button", { name: "创建数据发布" }));
+
+    fireEvent.change(screen.getByLabelText("开始日期"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.change(screen.getByLabelText("结束日期"), {
+      target: { value: "2024-12-31" },
+    });
+    await user.click(screen.getByRole("button", { name: "冻结并发布" }));
+
+    await waitFor(() =>
+      expect(datasetApiMock.createRelease).toHaveBeenCalledOnce(),
+    );
+    expect(datasetApiMock.createRelease).toHaveBeenCalledWith(
+      expect.objectContaining({
+        release_kind: "income_statements",
+        dataset_name: "a_share_income_statements",
+        source: "tushare",
+        full_market: true,
+        adjustment: "none",
+        required_capabilities: ["stock"],
+      }),
+    );
+    expect(await screen.findByText("数据发布成功")).toBeInTheDocument();
+  });
+
+  it("新页签展示对应 dataset_sync 数据集名与字段示例（#392/#397 清单）", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<ResearchData />);
+
+    await user.click(screen.getByRole("tab", { name: "分红送股" }));
+    expect(await screen.findByText("a_share_dividends")).toBeInTheDocument();
+    expect(screen.getByText("div_proc")).toBeInTheDocument();
+    expect(screen.getByText("ex_date")).toBeInTheDocument();
+    expect(screen.getByText(/按标的 × 公告日窗摄取分红明细/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "现金流量表" }));
+    expect(await screen.findByText("a_share_cashflow_statements")).toBeInTheDocument();
+    expect(screen.getByText("n_cashflow_act")).toBeInTheDocument();
   });
 });
