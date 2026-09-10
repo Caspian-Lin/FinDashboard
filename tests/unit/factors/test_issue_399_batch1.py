@@ -335,7 +335,7 @@ class TestCatalogBatch1:
         }
         registered = set(predefined_factor_names())
         assert len(batch_scope & registered) == 78
-        assert BATCH1_NAMES <= registered
+        assert registered >= BATCH1_NAMES
 
     def test_index_dependencies_declared(self) -> None:
         expected = {
