@@ -19,7 +19,11 @@ from finboard_backtest.strategy_spec.contracts import (
     migrate_strategy_payload,
 )
 from finboard_backtest.strategy_spec.universe_precheck import UniversePoolPreview
-from finboard_data.factor_lab import is_user_factor_name, sandbox_factor_name
+from finboard_data.factor_lab import (
+    is_predefined_factor_name,
+    is_user_factor_name,
+    sandbox_factor_name,
+)
 from finboard_data.factors import FACTOR_CATALOG
 
 LIFECYCLE_STAGES = (
@@ -292,6 +296,29 @@ def compile_strategy_spec(
             if node.kind is not FeatureKind.FACTOR:
                 raise StrategySpecError(
                     f"用户因子节点 {node.node_id} kind 须为 factor,实际 {node.kind.value}"
+                )
+            if node.source in disabled_factors:
+                raise StrategySpecError(f"策略依赖已停用因子: {node.source}")
+            required_sources.add(node.source)
+            continue
+        if is_predefined_factor_name(node.source):
+            # issue #398:平台预置因子(p_ 前缀)引用完整性 —— 未注册名
+            # fail-visible(与未注册目录因子同一防线);数据可用性由入队期
+            # series 覆盖检查(#398 门控)承担,编译期只看注册存在性。
+            from finboard_backtest.factors.predefined import (
+                is_registered_predefined_factor,
+                predefined_factor_names,
+            )
+
+            if not is_registered_predefined_factor(node.source):
+                raise StrategySpecError(
+                    f"未注册的平台预置因子: {node.source};"
+                    f"可用: {list(predefined_factor_names())}"
+                )
+            if node.kind is not FeatureKind.FACTOR:
+                raise StrategySpecError(
+                    f"预置因子节点 {node.node_id} kind 须为 factor,"
+                    f"实际 {node.kind.value}"
                 )
             if node.source in disabled_factors:
                 raise StrategySpecError(f"策略依赖已停用因子: {node.source}")

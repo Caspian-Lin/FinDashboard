@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field as _dc_field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -90,6 +91,41 @@ class FinancialIndicator:
     revenue_yoy: Decimal | None
     net_profit_yoy: Decimal | None
     operating_cash_flow_yoy: Decimal | None
+    # ---- issue #401 批次 3 扩展字段(新字段带默认 None,旧构造零破坏)----
+    # 增长(YoY / 单季 YoY / 单季 QoQ)
+    operating_revenue_yoy: Decimal | None = _dc_field(default=None, kw_only=True)
+    basic_eps_yoy: Decimal | None = _dc_field(default=None, kw_only=True)
+    deducted_netprofit_yoy: Decimal | None = _dc_field(default=None, kw_only=True)
+    operating_profit_yoy: Decimal | None = _dc_field(default=None, kw_only=True)
+    revenue_yoy_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    revenue_qoq: Decimal | None = _dc_field(default=None, kw_only=True)
+    netprofit_yoy_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    netprofit_qoq: Decimal | None = _dc_field(default=None, kw_only=True)
+    # 盈利质量(ROA / ROIC / 扣非 / 单季盈利 / 期间费用率)
+    return_on_assets: Decimal | None = _dc_field(default=None, kw_only=True)
+    return_on_assets_np: Decimal | None = _dc_field(default=None, kw_only=True)
+    roe_deducted: Decimal | None = _dc_field(default=None, kw_only=True)
+    roic: Decimal | None = _dc_field(default=None, kw_only=True)
+    roe_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    return_on_assets_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    grossprofit_margin_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    netprofit_margin_q: Decimal | None = _dc_field(default=None, kw_only=True)
+    expense_to_revenue: Decimal | None = _dc_field(default=None, kw_only=True)
+    # 营运效率(周转率族,上游为「次/报告期」倍数,原值小数)
+    inventory_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    receivables_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    current_assets_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    fixed_assets_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    total_assets_turnover: Decimal | None = _dc_field(default=None, kw_only=True)
+    # 流动性 / 偿债(上游为倍数或比率,原值小数)
+    current_ratio: Decimal | None = _dc_field(default=None, kw_only=True)
+    quick_ratio: Decimal | None = _dc_field(default=None, kw_only=True)
+    debt_to_equity: Decimal | None = _dc_field(default=None, kw_only=True)
+    interest_coverage: Decimal | None = _dc_field(default=None, kw_only=True)
+    equity_multiplier: Decimal | None = _dc_field(default=None, kw_only=True)
+    # 现金流质量(上游为比率,原值小数)
+    ocf_to_revenue: Decimal | None = _dc_field(default=None, kw_only=True)
+    ocf_to_debt: Decimal | None = _dc_field(default=None, kw_only=True)
     source: str
     observed_at: datetime
     available_at: datetime
@@ -381,6 +417,89 @@ class SuspensionRecord:
     suspend_kind: str
     suspend_type: str
     suspend_timing: str | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IndexProfile:
+    """指数基础信息快照(tushare ``index_basic``,issue #394)。
+
+    PIT 语义(诚实边界):与 ``cb_basic`` 同为**当前时点**快照,不含指数
+    更名 / 编码迁移史;``available_at`` = 本次观察时间。``symbol`` 保留上游
+    原始代码形制(SSE/SZSE/BSE 之外还有 CSI/CIC/MSCI 等编外市场,代码段
+    不止 ``6 位数字.沪深北`` 形制),登记域(哪些进 ``instruments`` 表)由
+    discovery 层按 ``is_index_code`` 裁决,本记录不做 narrowing。
+
+    ``base_date`` 是指数基日(发布机构选定的基准计算起点)——A 股三所
+    指数在 ``instruments.list_date`` 上的结构化上游(issue #394:回填后
+    mixed 发布的 ``missing_list_date`` 不再被指数恒 null 抬高)。上游另有
+    ``list_date`` 列但大量为 null,故回填优先取 ``base_date``。
+    """
+
+    symbol: str
+    name: str
+    full_name: str | None
+    publisher: str | None
+    category: str | None
+    market: str | None
+    base_date: date | None
+    list_date: date | None
+    list_status: str | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesContractProfile:
+    """期货合约基础信息快照(tushare ``fut_basic``,issue #395)。
+
+    PIT 语义(诚实边界):与 ``index_basic`` / ``cb_basic`` 同为**当前时点**
+    快照,不含合约参数变更史(交易所调整保证金率 / 乘数公告不回溯);
+    ``available_at`` = 本次观察时间。``symbol`` 是**本仓归一形制**
+    (``IF2601.CFFEX``):上游 ts_code 后缀是交易所简写(``IF2601.CFX``),
+    provider 归一时已映射到本仓 :data:`~finboard_data.akshare_provider.FUTURES_EXCHANGES`
+    后缀,与 ``make_symbol`` / 冻结发布逐标的校验同一口径。
+
+    ``multiplier`` / ``price_tick``:上游文档标注 multiplier 只对国债 /
+    指数期货适用;``price_tick`` 从 ``quote_unit_desc``(如 ``0.2指数点``)
+    解析最小变动价位,解析失败保持 None 可见缺失。**上游无保证金率列**
+    —— 保证金率仍由受控登记表 / ``FuturesRule`` 承载(#267 口径),不虚构。
+    """
+
+    symbol: str
+    name: str
+    product: str
+    exchange: str
+    multiplier: Decimal | None
+    price_tick: Decimal | None
+    quote_unit_desc: str | None
+    list_date: date | None
+    delist_date: date | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesTradeCalendarDay:
+    """期货交易日历单日观测(tushare ``fut_trade_cal``,issue #395)。
+
+    与 #396 股票 ``trade_cal`` 表同构(exchange 区分):``is_open`` 保留
+    0/1 双值(休市行同样落库,与 akshare 回源只产 ``is_open=true`` 行的
+    股票口径不同 —— tushare 上游自带完整日历);``pretrade_date`` 是上一
+    个交易日,供推导消费。
+    """
+
+    exchange: str
+    cal_date: date
+    is_open: bool
+    pretrade_date: date | None
     source: str
     observed_at: datetime
     available_at: datetime

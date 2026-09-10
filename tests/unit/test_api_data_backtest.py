@@ -56,7 +56,7 @@ class TestDataRoutes:
 
         with pytest.raises(ExecutorError) as exc_info:
             _validate_tushare_scope("tushare", instruments)
-        assert "支持 A 股股票、可转债与指数" in exc_info.value.summary
+        assert "支持 A 股股票、可转债、指数与期货" in exc_info.value.summary
 
     def test_tushare_bulk_scope_accepts_a_share_stock(self) -> None:
         """Tushare 股票批量任务接受纯 A 股股票集合(scope 校验迁移到 executor, #144)。"""
