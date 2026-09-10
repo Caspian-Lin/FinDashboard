@@ -26,9 +26,11 @@ from typing import Any
 
 from finboard_backtest.research_run.contracts import FrozenArtifactRef
 from finboard_data.factor_lab import (
+    PREDEFINED_FACTOR_PREFIX,
     USER_FACTOR_PREFIX,
+    is_predefined_factor_name,
     is_user_factor_name,
-    sandbox_factor_name,
+    series_factor_name,
 )
 
 #: 入队拒绝文案的具名标记(issue #360,供测试 / agent 检索)
@@ -67,12 +69,15 @@ def series_release_mismatches(
 
     全匹配返回空列表(零噪音);失配方向为「series 锚定发布失效」——
     换 bars 主发布后既有序列不在新发布上,须托管重建后以新 series_id 引用。
+    因子名按序列 kind 派生(#398:predefined → p_,用户因子 → u_)。
     """
     requested = set(requested_release_ids)
     return [
         FactorSeriesReleaseMismatch(
             series_id=str(record.series_id),
-            factor_name=sandbox_factor_name(str(record.code_artifact)),
+            factor_name=series_factor_name(
+                str(getattr(record, "kind", "factor")), str(record.code_artifact)
+            ),
             anchored_release_id=str(record.release_id),
             window_start=str(record.window_start),
             window_end=str(record.window_end),
@@ -114,9 +119,16 @@ def factor_series_rebuild_error(
 
 
 def series_covered_factor_names(records: Sequence[Any]) -> frozenset[str]:
-    """声明序列覆盖的 u_ 因子名集合(``u_<code_artifact>``)。"""
+    """声明序列覆盖的因子名集合(#398 起按 kind 派生前缀)。
+
+    ``kind=predefined_factor`` → ``p_<code_artifact>``;用户因子(其余)
+    → ``u_<code_artifact>``(既有语义零变化)。
+    """
     return frozenset(
-        sandbox_factor_name(str(record.code_artifact)) for record in records
+        series_factor_name(
+            str(getattr(record, "kind", "factor")), str(record.code_artifact)
+        )
+        for record in records
     )
 
 
@@ -130,7 +142,7 @@ def build_factor_series_refs(
             version=FACTORS_SERIES_REF_VERSION,
             checksum=str(record.content_checksum),
             capabilities=(
-                f"factor:{sandbox_factor_name(str(record.code_artifact))}",
+                f"factor:{series_factor_name(str(getattr(record, 'kind', 'factor')), str(record.code_artifact))}",
             ),
         )
         for record in sorted(records, key=lambda item: str(item.series_id))
@@ -163,12 +175,16 @@ async def factor_series_anchor_warnings(
     required_factor_sources: Collection[str],
     dataset_release_ids: Collection[str],
 ) -> tuple[FactorSeriesAnchorWarning, ...]:
-    """validate 通道锚定预检:引用的 u_ 因子若存在锚定其它发布的既有
-    序列,逐序列给具名提示(修复路径与 :func:`factor_series_rebuild_error`
+    """validate 通道锚定预检:引用的 u_ / p_ 因子若存在锚定其它发布的
+    既有序列,逐序列给具名提示(修复路径与 :func:`factor_series_rebuild_error`
     一致)。全匹配 / 无引用返回空元组(零噪音)。纯提示层,不改变任何约束。
     """
     referenced = sorted(
-        {name for name in required_factor_sources if is_user_factor_name(name)}
+        {
+            name
+            for name in required_factor_sources
+            if is_user_factor_name(name) or is_predefined_factor_name(name)
+        }
     )
     if not referenced or not dataset_release_ids:
         return ()
@@ -177,7 +193,12 @@ async def factor_series_anchor_warnings(
     repo = FactorSeriesRepository(session)
     warnings: list[FactorSeriesAnchorWarning] = []
     for name in referenced:
-        records = await repo.list_for_artifact(name.removeprefix(USER_FACTOR_PREFIX))
+        prefix = (
+            PREDEFINED_FACTOR_PREFIX
+            if is_predefined_factor_name(name)
+            else USER_FACTOR_PREFIX
+        )
+        records = await repo.list_for_artifact(name.removeprefix(prefix))
         mismatches = series_release_mismatches(records, dataset_release_ids)
         for item in mismatches:
             warnings.append(

@@ -88,7 +88,8 @@ def test_stock_scope_keeps_default_provider() -> None:
     name = _resolve_bulk_provider_name(
         None, instruments, _settings_factory(None), job_id="J1"
     )
-    assert name == "akshare"
+    # 默认源无偏置(#404 起默认即 tushare,股票 qfq 链路归 settings 管)
+    assert name == resolve_provider_name(None, _settings_factory(None))
 
 
 @pytest.mark.unit
@@ -97,17 +98,17 @@ def test_empty_scope_keeps_default_provider() -> None:
     name = _resolve_bulk_provider_name(
         None, [], _settings_factory(None), job_id="J1"
     )
-    assert name == "akshare"
+    assert name == resolve_provider_name(None, _settings_factory(None))
 
 
 @pytest.mark.unit
 def test_futures_scope_not_preferred_to_tushare() -> None:
-    """期货主连不在 tushare scope(#267),偏好不生效(否则 scope 拒绝)。"""
+    """偏好函数只认指数域:期货域不因偏好改源(源选择维持默认解析)。"""
     instruments = [_ins("IF0.CFFEX", "futures")]
     name = _resolve_bulk_provider_name(
         None, instruments, _settings_factory(None), job_id="J1"
     )
-    assert name == "akshare"
+    assert name == resolve_provider_name(None, _settings_factory(None))
 
 
 @pytest.mark.unit
