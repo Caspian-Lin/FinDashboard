@@ -1,4 +1,4 @@
-"""六个研究数据集的 SyncSpec 注册(issue #392;#171/#251/#265 迁移)。
+"""内置研究数据集的 SyncSpec 注册(issue #392;#171/#251/#265/#396/#397 迁移/扩展)。
 
 行为等值边界(golden 对照锁定,``tests/integration/test_issue_392_golden_dataset_sync.py``):
 
@@ -373,6 +373,133 @@ async def _persist_suspensions(
     return PersistResult(accepted_rows=batch.accepted_rows)
 
 
+# ---- 三表 + dividend(PER_SYMBOL_RANGE,issue #397)--------------------------
+
+
+async def _fetch_income_statements(
+    provider: ResearchDataProvider, query: SliceQuery
+) -> list[Any]:
+    assert query.symbol is not None
+    assert query.start_date is not None
+    assert query.end_date is not None
+    return await provider.fetch_income_statements(
+        query.symbol,
+        start_announced=query.start_date,
+        end_announced=query.end_date,
+        dirty_row_policy=query.row_policy,
+    )
+
+
+async def _persist_income_statements(
+    context: PersistContext, records: list[Any]
+) -> PersistResult:
+    from finboard_persistence.research_sync import ResearchDataSyncService
+
+    service = ResearchDataSyncService(context.session_maker)
+    batch = await service.sync_income_statements(
+        source=context.source,
+        dataset_version=context.dataset_version,
+        code_version=context.code_version,
+        parameters=_statement_parameters(context.query),
+        raw_payload=None,
+        records=list(records),
+    )
+    return PersistResult(accepted_rows=batch.accepted_rows)
+
+
+async def _fetch_balance_sheets(
+    provider: ResearchDataProvider, query: SliceQuery
+) -> list[Any]:
+    assert query.symbol is not None
+    assert query.start_date is not None
+    assert query.end_date is not None
+    return await provider.fetch_balance_sheets(
+        query.symbol,
+        start_announced=query.start_date,
+        end_announced=query.end_date,
+        dirty_row_policy=query.row_policy,
+    )
+
+
+async def _persist_balance_sheets(
+    context: PersistContext, records: list[Any]
+) -> PersistResult:
+    from finboard_persistence.research_sync import ResearchDataSyncService
+
+    service = ResearchDataSyncService(context.session_maker)
+    batch = await service.sync_balance_sheets(
+        source=context.source,
+        dataset_version=context.dataset_version,
+        code_version=context.code_version,
+        parameters=_statement_parameters(context.query),
+        raw_payload=None,
+        records=list(records),
+    )
+    return PersistResult(accepted_rows=batch.accepted_rows)
+
+
+async def _fetch_cashflow_statements(
+    provider: ResearchDataProvider, query: SliceQuery
+) -> list[Any]:
+    assert query.symbol is not None
+    assert query.start_date is not None
+    assert query.end_date is not None
+    return await provider.fetch_cashflow_statements(
+        query.symbol,
+        start_announced=query.start_date,
+        end_announced=query.end_date,
+        dirty_row_policy=query.row_policy,
+    )
+
+
+async def _persist_cashflow_statements(
+    context: PersistContext, records: list[Any]
+) -> PersistResult:
+    from finboard_persistence.research_sync import ResearchDataSyncService
+
+    service = ResearchDataSyncService(context.session_maker)
+    batch = await service.sync_cashflow_statements(
+        source=context.source,
+        dataset_version=context.dataset_version,
+        code_version=context.code_version,
+        parameters=_statement_parameters(context.query),
+        raw_payload=None,
+        records=list(records),
+    )
+    return PersistResult(accepted_rows=batch.accepted_rows)
+
+
+async def _fetch_dividends(
+    provider: ResearchDataProvider, query: SliceQuery
+) -> list[Any]:
+    assert query.symbol is not None
+    assert query.start_date is not None
+    assert query.end_date is not None
+    return await provider.fetch_dividends(
+        query.symbol,
+        start_announced=query.start_date,
+        end_announced=query.end_date,
+        dirty_row_policy=query.row_policy,
+    )
+
+
+async def _persist_dividends(
+    context: PersistContext, records: list[Any]
+) -> PersistResult:
+    from finboard_persistence.research_sync import ResearchDataSyncService
+
+    service = ResearchDataSyncService(context.session_maker)
+    batch = await service.sync_dividends(
+        source=context.source,
+        dataset_version=context.dataset_version,
+        code_version=context.code_version,
+        parameters=_statement_parameters(context.query),
+        raw_payload=None,
+        records=list(records),
+    )
+    return PersistResult(accepted_rows=batch.accepted_rows)
+
+
 # ---- 注册(声明序 = 默认执行序,与旧路径编排顺序一致)--------------------------
 
 #: 切片键 → dataset_version / parameters(与旧路径逐字节一致,golden 锁定)。
@@ -427,6 +554,24 @@ def _industry_version(query: SliceQuery) -> str:
 def _industry_parameters(query: SliceQuery) -> dict[str, object]:
     assert query.symbol is not None
     return {"symbol": query.symbol, "current_only": True}
+
+
+def _statement_version(query: SliceQuery, dataset: str) -> str:
+    assert query.symbol is not None
+    assert query.start_date is not None
+    assert query.end_date is not None
+    return f"{dataset}:{query.symbol}:{query.start_date.isoformat()}:{query.end_date.isoformat()}"
+
+
+def _statement_parameters(query: SliceQuery) -> dict[str, object]:
+    assert query.symbol is not None
+    assert query.start_date is not None
+    assert query.end_date is not None
+    return {
+        "symbol": query.symbol,
+        "start_date": query.start_date.isoformat(),
+        "end_date": query.end_date.isoformat(),
+    }
 
 
 def register_default_specs() -> None:
@@ -497,6 +642,42 @@ def register_default_specs() -> None:
             persist=_persist_industry_memberships,
             slice_version=_industry_version,
             slice_parameters=_industry_parameters,
+        ),
+        SyncSpec(
+            name="income_statements",
+            shape=EnumShape.PER_SYMBOL_RANGE,
+            title="利润表修订(tushare income,按标的 x 公告日窗,PIT=ann_date+1,#397)",
+            fetch=_fetch_income_statements,
+            persist=_persist_income_statements,
+            slice_version=lambda query: _statement_version(query, "income"),
+            slice_parameters=_statement_parameters,
+        ),
+        SyncSpec(
+            name="balance_sheets",
+            shape=EnumShape.PER_SYMBOL_RANGE,
+            title="资产负债表修订(tushare balancesheet,按标的 x 公告日窗,PIT=ann_date+1,#397)",
+            fetch=_fetch_balance_sheets,
+            persist=_persist_balance_sheets,
+            slice_version=lambda query: _statement_version(query, "balance"),
+            slice_parameters=_statement_parameters,
+        ),
+        SyncSpec(
+            name="cashflow_statements",
+            shape=EnumShape.PER_SYMBOL_RANGE,
+            title="现金流量表修订(tushare cashflow,按标的 x 公告日窗,PIT=ann_date+1,#397)",
+            fetch=_fetch_cashflow_statements,
+            persist=_persist_cashflow_statements,
+            slice_version=lambda query: _statement_version(query, "cashflow"),
+            slice_parameters=_statement_parameters,
+        ),
+        SyncSpec(
+            name="dividends",
+            shape=EnumShape.PER_SYMBOL_RANGE,
+            title="分红送股进展(tushare dividend,按标的 x 公告日窗,div_proc 进身份键,#397)",
+            fetch=_fetch_dividends,
+            persist=_persist_dividends,
+            slice_version=lambda query: _statement_version(query, "dividend"),
+            slice_parameters=_statement_parameters,
         ),
     ):
         SYNC_SPECS.register(spec)

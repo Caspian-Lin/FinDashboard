@@ -4,9 +4,9 @@
 
 * :mod:`spec` —— :class:`SyncSpec` 规格 + :data:`SYNC_SPECS` 注册表 +
   枚举形态 / 行级口径推导(#389 口径固化)与切片生成;
-* :mod:`specs` —— 内置七集(profiles / name_changes / convertible_profiles /
-  daily_metrics / suspensions(#396)/ financial_indicators / industry_memberships)
-  的规格注册;
+* :mod:`specs` —— 内置十一集(profiles / name_changes / convertible_profiles /
+  daily_metrics / suspensions(#396)/ financial_indicators / industry_memberships /
+  三表 income/balance/cashflow + dividends(#397))的规格注册;
 * :mod:`runner` —— :class:`DatasetSyncExecutor`(``kind=dataset_sync``),
   框架统一消费注册表:进度上报 / #383 timing(worker 通用层)/ 行级口径
   分发 / TushareBudget 共享 / ``research_sync_batches`` 记账;

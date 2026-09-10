@@ -299,7 +299,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   sync_universe / bulk_download_start / quality_repair / dataset_release_publish
   (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询;
   release_kind 支持 a_share_tushare|multi_asset_mixed|daily_metrics|
-  financial_indicators|convertible_metrics(#265 转债派生指标),
+  financial_indicators|convertible_metrics(#265 转债派生指标)|
+  income_statements|balance_sheets|cashflow_statements|dividends
+  (#397 财务三表与分红明细,先 dataset_sync 摄取同名数据集),
   研究数据发布与 bars 联合供因子快照 #187;
   标的集三选一 #261:symbols / symbols_from_release 复制既有可用发布 /
   full_market 全市场按 kind 展开,来源缺失/不可用/展开为空入队即
