@@ -4,17 +4,19 @@
 
 * :mod:`spec` —— :class:`SyncSpec` 规格 + :data:`SYNC_SPECS` 注册表 +
   枚举形态 / 行级口径推导(#389 口径固化)与切片生成;
-* :mod:`specs` —— 内置六集(profiles / name_changes / convertible_profiles /
-  daily_metrics / financial_indicators / industry_memberships)的规格注册;
+* :mod:`specs` —— 内置七集(profiles / name_changes / convertible_profiles /
+  daily_metrics / suspensions(#396)/ financial_indicators / industry_memberships)
+  的规格注册;
 * :mod:`runner` —— :class:`DatasetSyncExecutor`(``kind=dataset_sync``),
   框架统一消费注册表:进度上报 / #383 timing(worker 通用层)/ 行级口径
   分发 / TushareBudget 共享 / ``research_sync_batches`` 记账;
 * :mod:`scope` —— scope 四元组(exchange / listing_boards / instrument_type /
   symbols)归一解析,#385 语义与 bulk_download 共享同一函数。
 
-## 新增数据集 SyncSpec 接入指南(#394/#395/#396/#397 照此接入)
+## 新增数据集 SyncSpec 接入指南(#394/#395/#397 照此接入;#396 suspensions
+## 已按本指南接入,可作参照)
 
-最小可抄示例(以未来的 ``suspensions`` 停复牌为例,tushare ``suspend_d``,
+最小示例(= 已接入的 ``suspensions`` 停复牌,tushare ``suspend_d``,
 按日全市场):
 
 1. **声明规格**(在 :mod:`specs` 里加一段;通用逻辑全部复用框架,不要在

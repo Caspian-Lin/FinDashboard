@@ -39,6 +39,7 @@ from finboard_data.research import (
     ResearchDataContractError,
     ResearchDataDependencyError,
     ResearchDataUpstreamError,
+    SuspensionRecord,
 )
 from finboard_data.tushare_budget import TushareBudget, shared_tushare_budget
 
@@ -82,6 +83,19 @@ _CB_BASIC_FIELDS = (
 )
 #: cb_basic 在市 + 摘牌合计千级;远低于该值的安全截断护栏。
 _CB_BASIC_LIMIT = 5000
+#: suspend_d 单日停复牌字段白名单(issue #396,doc_id=214,2000 积分档)。
+_SUSPEND_D_FIELDS = "ts_code,trade_date,suspend_timing,suspend_type"
+#: suspend_d 按日全市场单日行数的安全截断护栏(全市场 ~5400 只,单日停复牌
+#: 枚举远低于该值)。
+_SUSPEND_D_LIMIT = 6000
+#: suspend_type 词表(S=停牌,R=复牌);suspend_timing 非空表示盘中停牌。
+_SUSPEND_TYPE_SUSPEND = "S"
+_SUSPEND_TYPE_RESUME = "R"
+#: 停复牌 kind 词表(与缓存侧 TushareLifecycleEvent.event_type 同词表,
+#: 便于 research_suspensions 与缓存侧 suspension_events 对账)。
+SUSPEND_KIND_SUSPENSION_DAY = "suspension_day"
+SUSPEND_KIND_INTRADAY = "intraday_suspension"
+SUSPEND_KIND_RESUMPTION = "resumption"
 #: 指数基础信息请求字段白名单(issue #394;2026-09-10 实测)。**list_status
 #: 不在请求列**:上游按返回分片动态裁列,CSI 等市场整批缺失该列(请求了也
 #: 不回),请求里去掉、解析按可选处理;在市/退市判断交 lifecycle diff。
@@ -97,7 +111,6 @@ _INDEX_BASIC_PAGE_SIZE = 5000
 #: ``930955.CSI`` / ``H30269.CSI`` / ``.MSCI`` 等编外市场代码(#394),不能
 #: 复用股票 6 位数字契约,否则编外市场全被当脏行跳过、对账口径失真。
 _INDEX_SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{2,12}\.[A-Z0-9]{2,8}$")
-
 
 def _resolve_skip_dirty_rows(policy: str | None, *, default: bool) -> bool:
     """归一行级口径:None 回落方法默认,非法值具名拒绝(fail-closed)。"""
@@ -149,9 +162,14 @@ class TushareClient(Protocol):
         """调用 ``cb_basic``(可转债基础条款,#265)。"""
         ...
 
+    def suspend_d(self, **kwargs: str) -> object:
+        """调用 ``suspend_d``(每日停复牌信息,#396)。"""
+        ...
+
     def index_basic(self, **kwargs: str) -> object:
         """调用 ``index_basic``(指数基础信息,#394)。"""
         ...
+
 
 
 class TushareResearchDataProvider:
@@ -403,6 +421,78 @@ class TushareResearchDataProvider:
                     by_symbol[item.symbol] = item
         return sorted(by_symbol.values(), key=lambda item: item.symbol)
 
+    async def fetch_suspensions(
+        self,
+        trade_date: date,
+        *,
+        dirty_row_policy: str | None = None,
+    ) -> list[SuspensionRecord]:
+        """读取指定交易日的全市场停复牌枚举(issue #396,2000 积分档)。
+
+        按日全市场枚举(#392 统一口径):默认整批拒;``dirty_row_policy="skip"``
+        时单行契约违规跳过并具名告警(截断防护与交易日一致性检查仍整批拒)。
+        非交易日上游返回空列表(框架按空切片跳过,不产生批次行)。
+        ``suspend_kind`` 与缓存侧 ``TushareLifecycleEvent.event_type`` 同词表;
+        PIT=当日:``available_at`` = 交易日 09:30(上海,开盘即可观察)。
+        """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=False)
+        observed_at = self._observed_at()
+        rows = await self._call(
+            "suspend_d",
+            trade_date=_format_date(trade_date),
+            fields=_SUSPEND_D_FIELDS,
+        )
+        _reject_possible_truncation(rows, "suspend_d", limit=_SUSPEND_D_LIMIT)
+        records = self._parse_rows(
+            rows,
+            self._parse_suspension,
+            observed_at=observed_at,
+            endpoint="suspend_d",
+            skip_dirty_rows=skip_dirty,
+        )
+        if any(item.trade_date != trade_date for item in records):
+            raise ResearchDataContractError(
+                "Tushare suspend_d 返回了请求交易日之外的记录"
+            )
+        return sorted(records, key=lambda item: (item.symbol, item.suspend_kind))
+
+    @staticmethod
+    def _parse_suspension(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> SuspensionRecord:
+        endpoint = "suspend_d"
+        _require_fields(row, _SUSPEND_D_FIELDS, endpoint, index)
+        business_date = _required_date(row, "trade_date", endpoint, index)
+        suspend_type = _required_text(row, "suspend_type", endpoint, index).upper()
+        suspend_timing = _optional_text(row, "suspend_timing")
+        if suspend_type == _SUSPEND_TYPE_SUSPEND:
+            kind = (
+                SUSPEND_KIND_INTRADAY
+                if suspend_timing
+                else SUSPEND_KIND_SUSPENSION_DAY
+            )
+        elif suspend_type == _SUSPEND_TYPE_RESUME:
+            kind = SUSPEND_KIND_RESUMPTION
+        else:
+            raise _field_error(
+                endpoint, index, "suspend_type", "必须是 S(停牌)或 R(复牌)"
+            )
+        return SuspensionRecord(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            trade_date=business_date,
+            suspend_kind=kind,
+            suspend_type=suspend_type,
+            suspend_timing=suspend_timing,
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=datetime.combine(
+                business_date,
+                time(hour=9, minute=30),
+                tzinfo=_SHANGHAI,
+            ),
+        )
     async def fetch_index_profiles(
         self,
         *,
@@ -445,7 +535,6 @@ class TushareResearchDataProvider:
                 break
             offset += _INDEX_BASIC_PAGE_SIZE
         return sorted(profiles, key=lambda item: item.symbol)
-
     def _create_client(self, explicit_token: str | None) -> TushareClient:
         token = (
             explicit_token if explicit_token is not None else os.getenv("FINBOARD_TUSHARE_TOKEN")
