@@ -30,6 +30,13 @@
 * 质量门复用 ``check_series_quality``(阈值 ``research_sandbox_*``,
   归档不阻断,与用户因子编排同语义)。
 
+公告类研究数据集(issue #402):``financial_indicators`` 之外,
+``income_statements`` / ``balance_sheets`` / ``cashflow_statements`` /
+``dividends`` 四个 kind 同构进挂载(文件名 = ``<kind>.parquet``),按目录
+条目 ``data_dependencies`` 的 kind 前缀惰性读表;``research_dataset(kind,
+field)`` 供给公告步进序列,``dividend_events()`` 供给分红事件史(除权
+除息日对齐的精确股息率原料)。
+
 纯离线研究域,不连 broker 不下单。
 """
 
@@ -45,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from finboard_backtest.factors.predefined.context import (
+    DividendEventHistory,
     FactorSeriesFrame,
     PredefinedFactorInput,
     SymbolSeries,
@@ -124,6 +132,26 @@ class PredefinedFactorSeriesOutput:
         return None
 
 
+#: 公告类数据集 kind(挂载文件名 = <kind>.parquet,#402 与
+#: ``data_mount.ANNOUNCED_DATASETS`` 同表;此处独立常量避免私有跨模块耦合)
+_ANNOUNCED_MOUNT_KINDS: tuple[str, ...] = (
+    "financial_indicators",
+    "income_statements",
+    "balance_sheets",
+    "cashflow_statements",
+    "dividends",
+)
+
+
+#: bars/daily 挂载长表的行日期轴列(#402 修正:此前 daily_metrics 因子
+#: 未注册过,该读取路径未被 exercised;三表/dividend 公告类走
+#: ``announcement_date``,见 :func:`_announced_series_from_table`)
+_SERIES_DATE_COLUMN: dict[str, str] = {
+    "bars": "date",
+    "daily_metrics": "trade_date",
+}
+
+
 class _MountFactorInput(PredefinedFactorInput):
     """自窗口挂载 Arrow 表装配的因子输入(字段级惰性物化)。"""
 
@@ -133,7 +161,7 @@ class _MountFactorInput(PredefinedFactorInput):
         definition: PredefinedFactorDefinition,
         bars_table: Any,
         daily_table: Any | None,
-        financial_table: Any | None,
+        dataset_tables: Mapping[str, Any],
         mount_symbols: tuple[str, ...],
         decision_dates: tuple[date, ...],
         value_universe: tuple[str, ...],
@@ -150,10 +178,11 @@ class _MountFactorInput(PredefinedFactorInput):
         self._definition = definition
         self._bars_table = bars_table
         self._daily_table = daily_table
-        self._financial_table = financial_table
+        self._dataset_tables = dict(dataset_tables)
         self._value_universe = value_universe
         self._industry_groups: Mapping[str, str | None] = industry_groups or {}
         self._series_cache: dict[tuple[str, str], dict[str, SymbolSeries]] = {}
+        self._events_cache: dict[str, Any] | None = None
 
     # ---- 数据面(字段级惰性:因子不触碰的字段零物化,#378 精神) ----
 
@@ -166,9 +195,49 @@ class _MountFactorInput(PredefinedFactorInput):
         return self._series_for("daily_metrics", field, self._daily_table)
 
     def financial_indicators(self, field: str) -> dict[str, SymbolSeries]:
-        if self._financial_table is None:
+        return self.research_dataset("financial_indicators", field)
+
+    def research_dataset(self, kind: str, field: str) -> dict[str, SymbolSeries]:
+        """公告频率研究数据集的公告序列取数(#401/#402)。
+
+        挂载行无 ``date`` 列(与 bars/daily 不同):行日期轴取
+        ``announcement_date``,PIT 门控仍走逐行 ``available_at`` ——
+        采样语义 = 「决策日可见的最近一次公告」的步进函数。值列全 None
+        (上游该字段整体缺失)按 float64 归一,整列 NaN。未挂载对应
+        数据集(联合发布未声明)→ 空映射。
+        """
+        table = self._dataset_tables.get(kind)
+        if table is None:
             return {}
-        return self._financial_series_for(field)
+        if kind not in _ANNOUNCED_MOUNT_KINDS:
+            raise SandboxError(
+                "output_contract_violation",
+                f"research_dataset 不支持的数据集 kind: {kind!r}"
+                f"(bars/daily_metrics 请用专属取数口;公告类: "
+                f"{list(_ANNOUNCED_MOUNT_KINDS)})",
+            )
+        cache_key = (kind, field)
+        cached = self._series_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if field not in table.column_names:
+            raise SandboxError(
+                "output_contract_violation",
+                f"挂载 {kind} 缺少因子请求的字段: {field}"
+                f"(可用: {table.column_names[:20]})",
+            )
+        series = _announced_series_from_table(table, field)
+        self._series_cache[cache_key] = series
+        return series
+
+    def dividend_events(self) -> dict[str, DividendEventHistory]:
+        """dividends 发布的分红事件史取数(#402;未挂载 → 空映射)。"""
+        if self._events_cache is None:
+            table = self._dataset_tables.get("dividends")
+            self._events_cache = (
+                _dividend_events_from_table(table) if table is not None else {}
+            )
+        return self._events_cache
 
     def industry_groups(self) -> dict[str, str | None]:
         """行业分组(#400:自 bars 主发布 instruments.industry 装配)。
@@ -204,29 +273,6 @@ class _MountFactorInput(PredefinedFactorInput):
 
     # ---- 内部 ----------------------------------------------------------
 
-    def _financial_series_for(self, field: str) -> dict[str, SymbolSeries]:
-        """financial_indicators 公告序列取数(#401)。
-
-        挂载行无 ``date`` 列(与 bars/daily 不同):行日期轴取
-        ``announcement_date``,PIT 门控仍走逐行 ``available_at`` ——
-        采样语义 = 「决策日可见的最近一次公告」的步进函数。值列全 None
-        (上游该字段整体缺失)按 float64 归一,整列 NaN。
-        """
-        assert self._financial_table is not None
-        cache_key = ("financial_indicators", field)
-        cached = self._series_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        if field not in self._financial_table.column_names:
-            raise SandboxError(
-                "output_contract_violation",
-                f"挂载 financial_indicators 缺少因子请求的字段: {field}"
-                f"(可用: {self._financial_table.column_names[:20]})",
-            )
-        series = _financial_series_from_table(self._financial_table, field)
-        self._series_cache[cache_key] = series
-        return series
-
     def _series_for(
         self, dataset: str, field: str, table: Any
     ) -> dict[str, SymbolSeries]:
@@ -240,7 +286,11 @@ class _MountFactorInput(PredefinedFactorInput):
                 f"挂载 {dataset} 缺少因子请求的字段: {field}"
                 f"(可用: {table.column_names[:20]})",
             )
-        series = _symbol_series_from_table(table, field)
+        series = _symbol_series_from_table(
+            table,
+            field,
+            date_column=_SERIES_DATE_COLUMN.get(dataset, "date"),
+        )
         self._series_cache[cache_key] = series
         return series
 
@@ -322,17 +372,74 @@ def _symbol_series_from_table(
     return series_by_symbol
 
 
-def _financial_series_from_table(
+def _announced_series_from_table(
     table: Any, field: str
 ) -> dict[str, SymbolSeries]:
-    """financial_indicators 挂载表 → {symbol: 公告序列}(#401)。
+    """公告类挂载表(financial/三表)→ {symbol: 公告序列}(#401/#402)。
 
     与 bars/daily 同一排序与 PIT 口径,差异只在行日期轴 = ``announcement_date``
-    (公告频率步进序列,语义见 :meth:`PredefinedFactorInput.financial_indicators`)。
+    (公告频率步进序列,语义见 :meth:`PredefinedFactorInput.research_dataset`)。
     """
     return _symbol_series_from_table(
         table, field, date_column="announcement_date"
     )
+
+
+def _dividend_events_from_table(table: Any) -> dict[str, DividendEventHistory]:
+    """dividends 挂载表 → {symbol: 分红事件史}(#402)。
+
+    与公告序列同一 ``(symbol, available_at)`` 稳定排序;逐行携带
+    ``report_period`` / ``ex_date``(日期列原样,None 保持 None)与
+    ``cash_div``(float64,缺测 NaN)。非数值列(div_proc 等)不进
+    事件史 —— 因子聚合按「同 report_period 取最新可见行」消解进展
+    口径(预案/股东大会/实施),见 registry 精确股息率因子。
+    """
+    import numpy as np
+    import pyarrow.compute as pc
+
+    indices = pc.sort_indices(
+        table,
+        sort_keys=[
+            ("symbol", "ascending"),
+            ("available_at", "ascending"),
+        ],
+    )
+    ordered = table.take(indices)
+    symbols = np.asarray(ordered.column("symbol").to_pylist(), dtype=object)
+    announcement_dates = ordered.column("announcement_date").to_pylist()
+    available_micros = np.asarray(
+        ordered.column("available_at").cast("int64").to_pylist(),
+        dtype=np.int64,
+    )
+    report_periods = ordered.column("report_period").to_pylist()
+    ex_dates = ordered.column("ex_date").to_pylist()
+    cash_div = ordered.column("cash_div")
+    if cash_div.type == _null_type():
+        cash_div = cash_div.cast("float64")
+    cash_values = np.asarray(
+        cash_div.fill_null(float("nan")).to_pylist(), dtype=np.float64
+    )
+    available_at = tuple(
+        datetime.fromtimestamp(micros / 1_000_000, tz=UTC)
+        for micros in available_micros
+    )
+    boundaries = np.unique(symbols, return_index=True)
+    events_by_symbol: dict[str, DividendEventHistory] = {}
+    for position, symbol in enumerate(boundaries[0].tolist()):
+        start = int(boundaries[1][position])
+        stop = (
+            int(boundaries[1][position + 1])
+            if position + 1 < len(boundaries[0])
+            else symbols.size
+        )
+        events_by_symbol[str(symbol)] = DividendEventHistory(
+            announcement_dates=tuple(announcement_dates[start:stop]),
+            available_at=available_at[start:stop],
+            report_periods=tuple(report_periods[start:stop]),
+            ex_dates=tuple(ex_dates[start:stop]),
+            cash_div=cash_values[start:stop],
+        )
+    return events_by_symbol
 
 
 async def run_predefined_factor_series(
@@ -443,17 +550,19 @@ async def run_predefined_factor_series(
     )
     daily_path = mount.root / "daily_metrics.parquet"
     daily_table = _read_mount_table(daily_path) if needs_daily and daily_path.exists() else None
-    # issue #401:声明 financial_indicators.<field> 依赖的因子自财务发布
-    # 挂载装配公告序列;未挂载(无财务发布联合)→ None,因子取到空映射。
-    needs_financial = any(
-        dep.startswith("financial_indicators.") for dep in definition.data_dependencies
-    )
-    financial_path = mount.root / "financial_indicators.parquet"
-    financial_table = (
-        _read_mount_table(financial_path)
-        if needs_financial and financial_path.exists()
-        else None
-    )
+    # issue #401/#402:声明公告类数据集依赖的因子自对应发布挂载装配公告
+    # 序列 / 分红事件史;未挂载(联合发布未声明该 kind)→ 空表缺省,因子
+    # 取数口返回空映射(与财务因子「未挂载 → 空映射」同语义)。
+    dataset_tables: dict[str, Any] = {}
+    needed_kinds = {
+        dep.split(".", 1)[0]
+        for dep in definition.data_dependencies
+        if dep.split(".", 1)[0] in _ANNOUNCED_MOUNT_KINDS
+    }
+    for dataset_kind in needed_kinds:
+        table_path = mount.root / f"{dataset_kind}.parquet"
+        if table_path.exists():
+            dataset_tables[dataset_kind] = _read_mount_table(table_path)
 
     mount_series = _symbol_series_from_table(bars_table, "close")
     mount_symbols = tuple(sorted(mount_series))
@@ -469,7 +578,7 @@ async def run_predefined_factor_series(
         definition=definition,
         bars_table=bars_table,
         daily_table=daily_table,
-        financial_table=financial_table,
+        dataset_tables=dataset_tables,
         mount_symbols=mount_symbols,
         decision_dates=tuple(spec.dates),
         value_universe=value_universe,

@@ -18,6 +18,7 @@ import functools
 import math
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -158,6 +159,18 @@ class _BatchInput(PredefinedFactorInput):
     def daily_metrics(self, field: str) -> dict[str, SymbolSeries]:
         return dict(self._daily.get(field, {}))
 
+    def financial_indicators(self, field: str) -> dict[str, SymbolSeries]:
+        # 批次 1 因子不消费公告序列;#402 契约「未挂载 → 空映射」。
+        return {}
+
+    def research_dataset(self, kind: str, field: str) -> dict[str, SymbolSeries]:
+        if kind == "daily_metrics":
+            return self.daily_metrics(field)
+        return {}
+
+    def dividend_events(self) -> dict[str, Any]:
+        return {}
+
     def industry_groups(self) -> dict[str, str | None]:
         return {}
 
@@ -172,9 +185,6 @@ class _BatchInput(PredefinedFactorInput):
             decision_dates=self.decision_dates,
         )
 
-    def financial_indicators(self, field: str) -> dict[str, SymbolSeries]:
-        """本测试域无财务发布:空映射(#401 未挂载降级语义)。"""
-        return {}
 
 def _series(values: pd.Series, *, available_hour: int = 15) -> SymbolSeries:
     """pandas 序列(业务日索引)→ SymbolSeries。"""
@@ -390,10 +400,8 @@ class TestCatalogBatch1:
             item = PREDEFINED_FACTORS[name]
             if item.family in {"momentum", "reversal"}:
                 assert item.signal_eligible, name
-            elif item.family in {"risk", "size"}:
+            elif item.family in {"risk", "size"} or item.family == "liquidity":
                 assert not item.signal_eligible, name
-            elif item.family == "liquidity":
-                assert item.signal_eligible == name.startswith("vwap_dev_"), name
         # direction 口径:风险暴露族记录弱先验(波动/回撤 LOWER,Sharpe HIGHER)
         assert PREDEFINED_FACTORS["vol_60d"].direction.value == "lower"
         assert PREDEFINED_FACTORS["sharpe_120d"].direction.value == "higher"

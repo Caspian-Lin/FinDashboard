@@ -36,7 +36,14 @@ from finboard_data.releases import (
     _financial_indicator_from_release_row,
     _validate_schema_compatibility,
 )
-from finboard_data.research import DailySecurityMetrics, FinancialIndicator
+from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
+    DailySecurityMetrics,
+    DividendRecord,
+    FinancialIndicator,
+    IncomeStatement,
+)
 from finboard_data.tushare_provider import (
     _FINANCIAL_FIELD_MAP,
     TushareResearchDataProvider,
@@ -268,6 +275,32 @@ class _StubResearchSource:
             ]
             for symbol in symbols
         }
+
+    # issue #402:补齐 Protocol 其余方法签名(mypy 结构化契约;
+    # 本文件用例只走 financial_indicators 通道,其余恒空)。
+    async def income_statements(
+        self, *, symbols: Sequence[str], start_date: date, end_date: date
+    ) -> dict[str, list[IncomeStatement]]:
+        del symbols, start_date, end_date
+        return {}
+
+    async def balance_sheets(
+        self, *, symbols: Sequence[str], start_date: date, end_date: date
+    ) -> dict[str, list[BalanceSheet]]:
+        del symbols, start_date, end_date
+        return {}
+
+    async def cashflow_statements(
+        self, *, symbols: Sequence[str], start_date: date, end_date: date
+    ) -> dict[str, list[CashflowStatement]]:
+        del symbols, start_date, end_date
+        return {}
+
+    async def dividends(
+        self, *, symbols: Sequence[str], start_date: date, end_date: date
+    ) -> dict[str, list[DividendRecord]]:
+        del symbols, start_date, end_date
+        return {}
 
 
 def _spec(release_id: str, fields: tuple[str, ...], schema_version: str = "v1") -> DatasetReleaseSpec:
