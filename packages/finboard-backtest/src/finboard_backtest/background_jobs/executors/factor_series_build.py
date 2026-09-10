@@ -311,6 +311,12 @@ class FactorSeriesBuildExecutor:
             _artifact_id, commit = await self._resolve_code(payload)
         await progress(3, _TOTAL_STAGES, "factor_series_build:execute")
 
+        # issue #396:交易日历 DB 优先(缺失回源 akshare 并回写 trade_cal),
+        # 执行期不再依赖 akshare 可用性;预热失败不阻断(_build_spec 内同步
+        # 读取回退原路径)。
+        from finboard_data.trading_calendar import ensure_calendar_loaded
+
+        await ensure_calendar_loaded()
         spec = self._build_spec(payload, commit=commit)
         runner = (
             self._predefined_runner if is_predefined else self._container_runner

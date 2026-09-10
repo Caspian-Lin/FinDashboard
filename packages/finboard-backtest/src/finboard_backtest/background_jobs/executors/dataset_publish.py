@@ -353,7 +353,7 @@ _RELEASE_KIND_TO_DATASET_KIND: dict[str, str] = {
     "a_share_tushare": "bars",
     "multi_asset_mixed": "bars",
     # issue #187:研究数据发布。daily_metrics / financial_indicators 由
-    # research_data_sync(#171)摄取进 research_* 表,发布从表冻结而非本地缓存。
+    # dataset_sync(#171;#392 前称 research_data_sync)摄取进 research_* 表,发布从表冻结而非本地缓存。
     "daily_metrics": "daily_metrics",
     "financial_indicators": "financial_indicators",
     # issue #265:可转债派生指标发布(转股价值/转股溢价率),发布执行时从

@@ -8,7 +8,7 @@
 
 实现策略(复用现有 service / repository,不裸 SQL,不连 broker):
 
-* **任务化长耗时工具(5)** —— ``fetch_all`` / ``data_sync`` / ``bulk_download`` /
+* **任务化长耗时工具(4)** —— ``data_sync`` / ``bulk_download`` /
   ``quality_repair`` / ``dataset_publish`` 复用 ``BackgroundJobRepository.create_or_get``
   登记 ``queued`` 任务并立即返回 202 + ``job_id``,与 REST 语义端点口径一致
   (idempotency_key 公式相同 → agent 与 REST 提交同一任务命中同一 job_id)。
@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
@@ -221,40 +221,15 @@ async def _store_fetched_bars(
 async def _persist_tushare_lifecycle_events(
     session: Any, events: list[Any]
 ) -> int:
-    """幂等写入 Tushare 停复牌事件,返回本次新增数量。"""
+    """幂等写入 Tushare 停复牌事件,返回本次新增数量。
 
-    if not events:
-        return 0
+    实现收敛到 finboard_persistence 单一事实源(#393):与 bulk_download
+    执行器 / REST fetch 共用同一行形状与幂等键。
+    """
 
-    from sqlalchemy.dialects.postgresql import insert
+    from finboard_persistence import persist_tushare_lifecycle_events
 
-    from finboard_persistence import InstrumentLifecycleEventModel
-
-    observed_at = datetime.now(UTC)
-    values = [
-        {
-            "symbol": event.symbol,
-            "event_type": event.event_type,
-            "effective_date": event.effective_date,
-            "available_at": observed_at,
-            "source": "tushare",
-            "dataset_version": "suspend_d-v1",
-            "details": {
-                "suspend_type": "R" if event.event_type == "resumption" else "S",
-                "suspend_timing": event.suspend_timing,
-            },
-            "observed_at": observed_at,
-        }
-        for event in events
-    ]
-    statement = (
-        insert(InstrumentLifecycleEventModel)
-        .values(values)
-        .on_conflict_do_nothing(constraint="uq_instrument_lifecycle_event")
-        .returning(InstrumentLifecycleEventModel.id)
-    )
-    result = await session.execute(statement)
-    return len(result.scalars().all())
+    return await persist_tushare_lifecycle_events(session, events)
 
 
 # --------------------------------------------------------------------------- #
@@ -433,45 +408,7 @@ async def data_fetch(
 
 
 # --------------------------------------------------------------------------- #
-# 2. data_fetch_all(任务化,kind=fetch_all)
-# --------------------------------------------------------------------------- #
-
-
-async def data_fetch_all(app: McpAppContext) -> ToolEnvelope:
-    """登记标的池批量缓存更新任务,返回 202 + job_id(不等待执行)。"""
-
-    async def _do() -> dict[str, Any]:
-        await _require_write_enabled(app)
-        from finboard_data import load_symbol_pool
-
-        config = load_symbol_pool(_SYMBOLS_FILE)
-        lookback = config.fetch_lookback_days if config.symbols else 0
-        pool_digest = hashlib.sha256(
-            ",".join(s.code for s in config.symbols).encode("utf-8")
-        ).hexdigest()[:16]
-        payload: dict[str, Any] = {
-            "lookback_days": lookback,
-            "symbol_pool_file": _SYMBOLS_FILE,
-        }
-        idempotency_key = f"fetch_all:{pool_digest}:{lookback}"
-        return await _enqueue_data_job(
-            app,
-            kind="fetch_all",
-            idempotency_key=idempotency_key,
-            payload=payload,
-            requested_by="mcp:fetch_all",
-        )
-
-    return await run_tool(
-        audit=app.audit,
-        tool_name="finboard.data.fetch_all",
-        arguments={},
-        handler=_do,
-    )
-
-
-# --------------------------------------------------------------------------- #
-# 3. data_sync_universe(任务化,kind=data_sync)
+# 2. data_sync_universe(任务化,kind=data_sync)
 # --------------------------------------------------------------------------- #
 
 
@@ -1087,20 +1024,6 @@ def register(mcp: MCPServer) -> None:
         )
 
     @mcp.tool(
-        name="finboard_data_fetch_all",
-        description=(
-            "[写] 登记标的池批量缓存更新任务(symbols.yaml),返回 202 + job_id。"
-            "实际执行由 worker 消费 kind=fetch_all 任务;进度/状态/取消用 "
-            "finboard_job_get(job_id) 轮询。无参数。"
-            "写操作,mcp_readonly_only=true 时拒绝。"
-        ),
-    )
-    async def _data_fetch_all(
-        ctx: Context = None,  # type: ignore[assignment]
-    ) -> ToolEnvelope:
-        return await data_fetch_all(app_context(ctx))
-
-    @mcp.tool(
         name="finboard_data_sync_universe",
         description=(
             "[写] 登记全市场标的同步任务(akshare 发现 → 写 instruments 表,"
@@ -1217,7 +1140,7 @@ def register(mcp: MCPServer) -> None:
             "冻结基本面/财务指标发布(issue #187),与 bars 发布联合供因子快照取数。"
             "release_kind=convertible_metrics(#265)只接受 A 股转债标的,从缓存 "
             "bars x 冻结转股价元数据计算转股价值/转股溢价率冻结为带日期观测"
-            "(非全历史 PIT;元数据缺失先跑 research_data_sync 的 "
+            "(非全历史 PIT;元数据缺失先跑 dataset_sync 的 "
             "convertible_profiles)。"
             "研究数据发布建议带 baseline=同区间 bars 主发布 + fail_on_mismatch=true,"
             "标的集用 symbols_from_release 复制该 bars 主发布。"
@@ -1400,7 +1323,6 @@ __all__ = [
     "data_config_get",
     "data_config_update",
     "data_fetch",
-    "data_fetch_all",
     "data_quality_repair",
     "data_sync_universe",
     "dataset_release_publish",

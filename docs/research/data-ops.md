@@ -6,7 +6,7 @@
 ## v1 选股(research_db)必需数据集的发布状态(#255)
 
 **背景**:2026-09-01 runs 273-275(ROE / PB / 换手率 top-N)全部 0 交易
-「成功」。根因:**摄取 ≠ 发布**——`research_data_sync` 会在质量门通过后自动
+「成功」。根因:**摄取 ≠ 发布**——`dataset_sync` 会在质量门通过后自动
 `mark_published`(批次 `status=published`),但 profiles 批次的**同步+发布**
 步骤从未进入运行手册;`selection.inputs_mode=research_db`(默认)必需
 `instrument_profiles` 批次已发布,未发布时旧链路逐期 SKIPPED、引擎 0 交易收场。
@@ -39,7 +39,7 @@
    `instrument_profiles`;配置了市值/PB/换手过滤或排名再加 `daily_metrics`,
    ROE/毛利率/营收增速再加 `financial_indicators`)。
 
-2. 缺失或 `status != 'published'` 时:`finboard_job_enqueue(kind=research_data_sync,
+2. 缺失或 `status != 'published'` 时:`finboard_job_enqueue(kind=dataset_sync,
    payload={datasets: [...], symbols: [...], start_date: ..., end_date: ...})`
    摄取;质量门通过即自动发布(见任务 phase 摘要);质量门失败看批次
    `quality_report` 修复后重跑。
@@ -64,11 +64,11 @@ delist_date 的结构化上游都在 tushare:
 | --- | --- | --- | --- |
 | list_date / industry | `stock_basic`(list_status=L) | `research_instrument_profiles` | data_sync 后置回填 |
 | delist_date | `stock_basic`(list_status=D 退市档案) | 同上 | 同上 |
-| 名称历史(PIT) | `namechange` | `instrument_names` 主数据表 | research_data_sync `name_changes` dataset 直接重建 |
+| 名称历史(PIT) | `namechange` | `instrument_names` 主数据表 | dataset_sync `name_changes` dataset 直接重建 |
 
 **标准同步顺序**(每次刷新全市场主数据时):
 
-1. `research_data_sync`(默认全部 datasets,或显式 `["profiles", "name_changes"]`)
+1. `dataset_sync`(默认全部 datasets,或显式 `["profiles", "name_changes"]`)
    —— profiles 段同时拉取在市(L)与退市(D)档案合并进同一批次;
    name_changes 段全市场分页拉取名称变更并按半开区间重建 `instrument_names`
    (未提及 symbol 保留既有记录,重跑幂等)。
@@ -136,7 +136,7 @@ star|chinext|bse|cdr)缩小展开范围(仅 full_market 模式生效,与其他�
 
 **002889.SZ 补齐运营步骤**(历史缺口的修复路径):
 
-1. `research_data_sync`(datasets 含 `financial_indicators`,symbols 含
+1. `dataset_sync`(datasets 含 `financial_indicators`,symbols 含
    002889.SZ,报告期区间覆盖该股全部历史)补齐摄取;
 2. 用全市场 symbols 清单重发布 `financial_indicators`(带
    `consistency_baseline_release_id` + `fail_on_mismatch=true`);
@@ -157,15 +157,25 @@ warning(release_id + 缺失清单),与 factor_lab #212 容忍语义一致;bars �
 **标准运营步骤**(以 000300.SH 基准为例):
 
 1. `data_sync`(REST `POST /api/data/sync` / MCP `finboard_data_sync_universe`)
-   —— `discover_indices` 从受控登记表 `BENCHMARK_INDEX_REGISTRY`(沪深300 /
-   中证500 / 中证1000 / 上证50 / 科创50 / 创业板指 / 深证成指 / 北证50 等 9 只)
-   自动登记 `instrument_type=index` 行。扩展新指数直接在
-   `finboard_data/discovery.py` 的登记表加一行(代码必须满足 `is_index_code`,
-   导入期断言)。指数无 list_date/industry 上游,保持 null(data_sync 统计可见)。
+   —— **#394 起登记源为 tushare `index_basic` 全量**:`discover_indices`
+   按 `is_index_code`(000xxx.SH / 399xxx.SZ / 899xxx.BJ)收窄登记域,
+   A 股三所指数自动登记 `instrument_type=index` 行(编外市场 CSI/CIC/MSCI
+   无行情上游,不登记);只登记在市(L)指数,退市交生命周期 diff。
+   `BENCHMARK_INDEX_REGISTRY` 收窄为**基准资格白名单**(`is_benchmark_index`
+   只认白名单;沪深300 / 中证500 / 中证1000 / 上证50 / 科创50 / 创业板指 /
+   深证成指 / 北证50 等 9 只)—— 白名单外的指数照常登记 / 可缓存 / 可发布,
+   但不是基准资格资产;扩展新基准指数直接在 `finboard_data/discovery.py`
+   白名单加一行(代码必须满足 `is_index_code`,导入期断言)。
+   **`data_sync` 现在依赖 `FINBOARD_TUSHARE_TOKEN`**(未配置具名失败不重试);
+   index_basic `base_date`(基日)随登记携带,由执行器后置
+   `backfill_listing_dates` 回填 `instruments.list_date`(只补 null,
+   #185 语义),mixed 发布的 `missing_list_date` 不再被指数恒 null 抬高。
 2. `bulk_download`(REST `POST /api/data/bulk-download` / MCP
-   `finboard_data_bulk_download_start`)带 `instrument_type=index`、
-   `source=akshare` —— 指数日线走 akshare `index_zh_a_hist` 进 parquet 缓存。
-   #341 起 tushare 源亦放行指数(`index_daily` 专属接口,2000 积分档
+   `finboard_data_bulk_download_start`)带 `instrument_type=index` ——
+   **#394 起指数 bars 默认 tushare**(`index_daily` 主源,原始点位;
+   未显式声明 source 且筛选域全指数时默认源覆盖为 tushare,显式
+   `source=akshare` 恒优先,akshare `index_zh_a_hist` 降为副源)。
+   #341 起 tushare 源放行指数(`index_daily` 专属接口,2000 积分档
    实测可调;无复权概念,缓存键沿用请求 adjust no-op);ETF/期货仍
    `tushare_scope_mismatch` 拒绝(不静默换源)。
 3. `dataset_release_publish`(release_kind=`multi_asset_mixed`)—— **指数代码
@@ -248,7 +258,7 @@ parquet 缓存 → tushare 源引擎回测拿到 bars 并出成交)。
    `tushare_scope_mismatch` 边界相反);akshare 源对转债日线 fail-visible
    拒绝(股票接口会把 1 开头误路由,#257 同源缺陷)。正股日线照常同步
    (溢价率计算的另一输入,必须与转债同区间同缓存)。
-3. `research_data_sync` 带 `datasets=["convertible_profiles"]`(默认全数据集
+3. `dataset_sync` 带 `datasets=["convertible_profiles"]`(默认全数据集
    已包含)—— tushare `cb_basic`(在市 L + 摘牌 D 合并)快照 upsert 主数据
    `convertible_metadata`(转股价 `swap_price` / 起息日 / 到期日 / 票面利率;
    `conversion_price NOT NULL`,无转股价的行跳过并计数),顺带回填
@@ -355,3 +365,43 @@ SELECT code, name, exchange FROM instruments WHERE instrument_type = 'futures';
 端到端回归:`tests/integration/test_futures_chain.py`(受控登记 → mock
 futures_main_sina → 缓存 → BARS 发布 → 真实 FrozenReleaseProvider 读回;
 主连 / 合约语义守卫)。
+
+## 交易日历落库与停复牌数据集(#396)
+
+### trade_cal 交易日历(免费接口口径)
+
+交易日历读取口径为「DB 优先,缺失回源 akshare 并回写」:
+
+* PG `trade_cal` 表按 exchange 存交易日(akshare `tool_trade_date_hist_sina`
+  为沪深统一日历,回源按 SSE / SZSE 两行集写入同一天集,幂等 upsert);
+* 异步执行域(数据集发布覆盖率审计、factor_series_build 决策日推导)入口
+  调 `ensure_calendar_loaded()`:进程缓存 → PG → 空/过期(跨年)回源
+  akshare 并回写 → exchange_calendars 兜底;全部失败缓存空集,消费方按
+  `TradingCalendarError` 收口;
+* composition root(`build_kernel_components`)安装
+  `PgTradingCalendarStore`,未安装(纯同步消费、测试)时走历史同步路径,
+  行为不变;
+* research_run 发布交易日(`#334` 并集日历)切换为 DB 优先:trade_cal 有
+  日历 → 按发布窗口过滤 + `#334` 间隙哨兵 fail-closed;DB 无日历回退既有
+  bar 并集推导(信息缺失行为不变)。
+
+对账基线(2026-09-09):akshare 现拉 8797 天(1990-12-19 → 2026-12-31)
+与 `trade_cal`(SSE)逐日一致,差集为空。
+
+### research_suspensions 停复牌数据集(dataset_sync 第七集)
+
+* 入队:`finboard_job_enqueue(kind=dataset_sync,
+  payload={datasets: ["suspensions"], start_date, end_date})`;DAILY_MARKET
+  形态按工作日切片(非交易日上游空响应不产生批次行),dataset_version =
+  `suspensions:<trade_date>`,行级跳过口径(`tushare.dirty_row_skipped`);
+* 落点:`research_suspensions`(独立表——停牌是交易状态不是条款事件,
+  不入 `instrument_lifecycle_events`);`suspend_kind` 词表与缓存侧
+  `TushareLifecycleEvent.event_type` 一致(`suspension_day` /
+  `intraday_suspension` / `resumption`),便于两侧对账;
+* PIT=当日:`available_at` = 交易日 09:30(上海)—— 全天停牌开盘即可
+  观察,计划停复牌按生效日可见(不早于生效日看到);
+* 消费:research_run 执行期一次性加载发布窗口内已发布停复牌记录——
+  universe 候选对决策日停牌标的标注不可撮合(叠加发布快照静态近似);
+  执行日全天停牌的标的不产出新信号、当日指令拒单(fail-visible,
+  `停牌日拒绝成交(execution_suspended)`),持仓保留至复牌;停牌数据缺失
+  时全部行为与历史一致。发布 kind 扩展(冻结 parquet)另议。

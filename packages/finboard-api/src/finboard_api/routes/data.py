@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from datetime import date as parse_date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -101,8 +100,9 @@ def _resolve_provider_name(
     import os
 
     configured = settings.data_provider if settings is not None else None
+    # 缺省主源 tushare(issue #393):股票 bars 主源切换,akshare 降副源。
     provider_name = (
-        (source or configured or os.getenv("FINBOARD_DATA_PROVIDER") or "akshare").strip().lower()
+        (source or configured or os.getenv("FINBOARD_DATA_PROVIDER") or "tushare").strip().lower()
     )
     if provider_name not in _SUPPORTED_BAR_PROVIDERS:
         supported = ", ".join(sorted(_SUPPORTED_BAR_PROVIDERS))
@@ -160,40 +160,14 @@ async def _persist_tushare_lifecycle_events(
     session: AsyncSession,
     events: list[Any],
 ) -> int:
-    """幂等写入 Tushare 停复牌事件,返回本次新增数量。"""
-    if not events:
-        return 0
+    """幂等写入 Tushare 停复牌事件,返回本次新增数量。
 
-    from sqlalchemy.dialects.postgresql import insert
+    实现收敛到 finboard_persistence 单一事实源(#393):与 bulk_download
+    执行器 / MCP fetch 共用同一行形状与幂等键。
+    """
+    from finboard_persistence import persist_tushare_lifecycle_events
 
-    from finboard_persistence import InstrumentLifecycleEventModel
-
-    observed_at = datetime.now(UTC)
-    values = [
-        {
-            "symbol": event.symbol,
-            "event_type": event.event_type,
-            "effective_date": event.effective_date,
-            # 历史事件是现在从 API 观测到的,不能倒填成当时已知。
-            "available_at": observed_at,
-            "source": "tushare",
-            "dataset_version": "suspend_d-v1",
-            "details": {
-                "suspend_type": "R" if event.event_type == "resumption" else "S",
-                "suspend_timing": event.suspend_timing,
-            },
-            "observed_at": observed_at,
-        }
-        for event in events
-    ]
-    statement = (
-        insert(InstrumentLifecycleEventModel)
-        .values(values)
-        .on_conflict_do_nothing(constraint="uq_instrument_lifecycle_event")
-        .returning(InstrumentLifecycleEventModel.id)
-    )
-    result = await session.execute(statement)
-    return len(result.scalars().all())
+    return await persist_tushare_lifecycle_events(session, events)
 
 
 @router.get("/status", response_model=list[DataStatusOut])
@@ -664,55 +638,6 @@ async def repair_cache_quality(
     return job
 
 
-@router.post("/fetch-all", response_model=JobOut, status_code=202)
-async def fetch_all_data(
-    response: Response,
-    request: Request,
-) -> JobOut:
-    """登记标的池批量缓存更新任务,立即返回 202 + job_id(issue #144)。
-
-    实际执行由 worker 消费 ``kind=fetch_all`` 任务。进度 / 状态 / 取消统一通过
-    ``/api/jobs/{job_id}`` 轮询。
-    """
-    import hashlib
-
-    from finboard_api.job_helpers import enqueue_job
-    from finboard_data import load_symbol_pool
-
-    config = load_symbol_pool(_SYMBOLS_FILE)
-    lookback = config.fetch_lookback_days if config.symbols else 0
-    pool_digest = hashlib.sha256(
-        ",".join(s.code for s in config.symbols).encode("utf-8")
-    ).hexdigest()[:16]
-    payload: dict[str, Any] = {
-        "lookback_days": lookback,
-        "symbol_pool_file": _SYMBOLS_FILE,
-    }
-    idempotency_key = f"fetch_all:{pool_digest}:{lookback}"
-    # fetch_all 不需要 DB session,但 enqueue_job 需要;用 request 上的 session_maker。
-    session_maker = getattr(request.app.state, "session_maker", None)
-    if session_maker is None:
-        raise HTTPException(
-            status_code=503,
-            detail="数据库会话未初始化,无法登记任务",
-        )
-    try:
-        async with session_maker() as session:
-            job = await enqueue_job(
-                session,
-                response,
-                kind="fetch_all",
-                queue="data",
-                idempotency_key=idempotency_key,
-                payload=payload,
-                requested_by="api:fetch_all",
-            )
-            await session.commit()
-    except BackgroundJobPersistenceConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return job
-
-
 @router.get("/symbols", response_model=SymbolPoolOut)
 async def get_symbol_pool() -> SymbolPoolOut:
     """获取标的池配置。"""
@@ -894,8 +819,9 @@ async def sync_universe(
 
     实际执行由 worker 消费 ``kind=data_sync`` 任务;上游 akshare 不可用会在 worker
     端映射为 ``failed(data_source_unavailable)``。进度 / 状态 / 取消统一通过
-    ``/api/jobs/{job_id}`` 轮询。同步范围含基准指数登记(issue #256):
-    ``discover_indices`` 受控登记表自动写入 ``instrument_type=index`` 行。
+    ``/api/jobs/{job_id}`` 轮询。同步范围含指数登记(issue #256;#394 起
+    ``discover_indices`` 走 tushare ``index_basic`` 全量,登记 A 股三所指数并
+    回填 base_date → list_date,``FINBOARD_TUSHARE_TOKEN`` 未配置时具名失败)。
     """
     from datetime import date
 
@@ -1025,7 +951,7 @@ async def get_scheduler_config(request: Request) -> SchedulerConfigOut:
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=settings.data_provider if settings is not None else "akshare",
+        data_provider=settings.data_provider if settings is not None else "tushare",
     )
 
 
@@ -1049,5 +975,5 @@ async def update_scheduler_config(
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=settings.data_provider if settings is not None else "akshare",
+        data_provider=settings.data_provider if settings is not None else "tushare",
     )

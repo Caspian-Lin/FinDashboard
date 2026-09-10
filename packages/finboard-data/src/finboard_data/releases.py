@@ -85,7 +85,7 @@ RELEASE_KINDS = frozenset(kind.value for kind in ReleaseDatasetKind)
 
 # 各数据集类型的字段白名单(fields 只能是白名单子集)。列名与
 # ``research_daily_metrics`` / ``research_financial_indicators`` 表一致,
-# 数据来源是 research_data_sync(#171)摄取的研究数据。
+# 数据来源是 dataset_sync(#171;#392 前称 research_data_sync)摄取的研究数据。
 DAILY_METRICS_FIELDS = (
     "trade_date",
     "close",
@@ -1352,6 +1352,11 @@ class FrozenDatasetReleaseBuilder:
     ) -> ResearchDatasetRelease:
         """冻结并发布;失败不会覆盖已有发布或留下可读的半成品。"""
 
+        # issue #396:发布覆盖率审计消费交易日历,DB 优先(缺失回源 akshare
+        # 并回写 trade_cal);预热失败不阻断 —— 审计内的同步读取回退原路径。
+        from finboard_data.trading_calendar import ensure_calendar_loaded
+
+        await ensure_calendar_loaded()
         _validate_schema_compatibility(previous_release, spec)
         if not instruments:
             raise DatasetReleaseQualityError("发布标的不能为空")
@@ -1810,7 +1815,7 @@ class FrozenDatasetReleaseBuilder:
         meta = instrument.convertible
         if meta is None:
             raise DatasetReleaseQualityError(
-                f"{instrument.code}:convertible_metadata_missing(先执行 research_data_sync "
+                f"{instrument.code}:convertible_metadata_missing(先执行 dataset_sync "
                 "convertible_profiles 回填条款元数据)"
             )
 

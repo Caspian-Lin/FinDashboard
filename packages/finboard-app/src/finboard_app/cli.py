@@ -63,7 +63,12 @@ if TYPE_CHECKING:
     from finboard_api.schemas import BacktestRunRequest
     from finboard_app.bootstrap import KernelComponents
     from finboard_backtest.background_jobs import JobExecutorRegistry
-    from finboard_data import ResearchDatasetRelease
+    from finboard_data import (
+        AkShareProvider,
+        ResearchDatasetRelease,
+        TushareBarProvider,
+        YFinanceProvider,
+    )
     from finboard_persistence import BackgroundJobModel
     from finboard_reconcile import ReconciliationReport
     from finboard_scheduler import Scheduler
@@ -885,9 +890,8 @@ _KIND_CONCURRENCY: dict[str, int] = {
     "feature_snapshot": 1,
     "bulk_download": 1,
     "data_sync": 1,
-    "fetch_all": 1,
     "quality_repair": 1,
-    "research_data_sync": 1,
+    "dataset_sync": 1,
     "research_code_run": 1,
     "factor_series_build": 2,
     "validation_experiment": 1,
@@ -1025,10 +1029,10 @@ def build_executor_registry(
     """
 
     from finboard_backtest.background_jobs import JobExecutorRegistry
+    from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
     from finboard_backtest.background_jobs.executors import (
         BacktestRunExecutor,
         BulkDownloadExecutor,
-        DataFetchAllExecutor,
         DatasetPublishExecutor,
         DataSyncExecutor,
         EchoExecutor,
@@ -1036,7 +1040,6 @@ def build_executor_registry(
         FeatureSnapshotExecutor,
         QualityRepairExecutor,
         ResearchCodeRunExecutor,
-        ResearchDataSyncExecutor,
         ResearchRunExecutor,
         ValidationExperimentExecutor,
     )
@@ -1099,23 +1102,17 @@ def build_executor_registry(
         DataSyncExecutor(session_maker=session_maker),
     )
     registry.register(
-        "fetch_all",
-        DataFetchAllExecutor(
-            session_maker=session_maker,
-            settings_factory=settings_factory,
-        ),
-    )
-    registry.register(
         "quality_repair",
         QualityRepairExecutor(
             session_maker=session_maker,
             settings_factory=settings_factory,
         ),
     )
-    # issue #171:research 数据表(估值 / 财务 / 行业)摄取编排。
+    # issue #171 → #392:数据集驱动统一同步框架(SyncSpec 注册表,kind 由
+    # research_data_sync 改名 dataset_sync)。
     registry.register(
-        "research_data_sync",
-        ResearchDataSyncExecutor(
+        "dataset_sync",
+        DatasetSyncExecutor(
             session_maker=session_maker,
             settings_factory=settings_factory,
         ),
@@ -1232,7 +1229,7 @@ async def _recover_research_runs(
     该任务,口径一致。
     """
 
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
 
     from finboard_app.research_run_store import SqlAlchemyResearchRunStore
     from finboard_backtest.research_run import JobOwnershipProbe, ResearchRunCoordinator
@@ -1339,20 +1336,6 @@ def data_fetch(
     )
 
 
-@data_app.command(name="fetch-all")
-def data_fetch_all(
-    config_file: Annotated[
-        str,
-        typer.Option(
-            "--config",
-            help="标的池配置文件路径(YAML/JSON,默认 symbols.yaml)",
-        ),
-    ] = "symbols.yaml",
-) -> None:
-    """批量拉取标的池中所有标的的行情数据(带限流)。"""
-    asyncio.run(_fetch_all_data(config_file=config_file))
-
-
 @data_app.command(name="status")
 def data_status(
     symbol: Annotated[
@@ -1368,6 +1351,32 @@ def data_status(
     asyncio.run(_data_status(symbol=symbol, cache_dir=cache_dir))
 
 
+def _cli_bar_provider(
+    provider_name: str,
+    *,
+    max_concurrency: int | None = None,
+    request_interval: float | None = None,
+) -> AkShareProvider | TushareBarProvider | YFinanceProvider:
+    """CLI 数据命令的行情 provider 构造(issue #393:默认主源 tushare)。
+
+    复用 executor 侧 ``build_bar_provider`` 作为单一事实源:三源路由、
+    tushare token / 预算参数读 settings,与 REST / MCP / worker 三入口
+    保持同一构造口径。``provider_name`` 解析沿用 CLI 既有 env 直读语义
+    (缺省 tushare,#393)。
+    """
+    from finboard_backtest.background_jobs.executors._providers import (
+        build_bar_provider,
+        default_settings_factory,
+    )
+
+    return build_bar_provider(
+        provider_name.strip().lower(),
+        default_settings_factory,
+        max_concurrency=max_concurrency,
+        request_interval=request_interval,
+    )
+
+
 async def _fetch_data(
     *,
     symbol: str,
@@ -1377,15 +1386,11 @@ async def _fetch_data(
 ) -> None:
     import os
 
-    from finboard_data import AkShareProvider, YFinanceProvider
     from finboard_shared.models import Symbol as Sym
     from finboard_shared.types import BarPeriod, Market
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
-    else:
-        provider = YFinanceProvider()
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
+    provider = _cli_bar_provider(provider_name)
     bars = await provider.fetch_bars(
         Sym(code=symbol, market=Market.A_SHARE),
         BarPeriod.D1,
@@ -1397,52 +1402,6 @@ async def _fetch_data(
     if bars:
         typer.echo(f"  起始: {bars[0].timestamp.date()} close={bars[0].close}")
         typer.echo(f"  结束: {bars[-1].timestamp.date()} close={bars[-1].close}")
-
-
-async def _fetch_all_data(*, config_file: str) -> None:
-    import os
-
-    from finboard_data import AkShareProvider, YFinanceProvider, load_symbol_pool
-    from finboard_data.cache import make_symbol
-    from finboard_shared.types import BarPeriod
-
-    config = load_symbol_pool(config_file)
-    if not config.symbols:
-        typer.echo(f"标的池为空: {config_file}", err=True)
-        raise typer.Exit(1)
-
-    end = date.today()
-    start = end - timedelta(days=config.fetch_lookback_days)
-    period = (
-        BarPeriod[config.fetch_period]
-        if config.fetch_period in BarPeriod.__members__
-        else BarPeriod(config.fetch_period)
-    )
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
-    else:
-        provider = YFinanceProvider()
-    sym_objs = [make_symbol(s.code) for s in config.symbols]
-
-    typer.echo(
-        f"批量拉取 {len(sym_objs)} 个标的 ({start} ~ {end}) {period.value} {config.fetch_adjust}"
-    )
-
-    def on_progress(code: str, done: int, total: int) -> None:
-        typer.echo(f"  [{done}/{total}] {code}")
-
-    results = await provider.update_cache_batch(
-        sym_objs,
-        period,
-        start,
-        end,
-        adjust=config.fetch_adjust,
-        on_progress=on_progress,
-    )
-
-    success = sum(results.values())
-    typer.echo(f"\n完成: {success}/{len(sym_objs)} 成功, {len(sym_objs) - success} 失败")
 
 
 async def _data_status(*, symbol: str | None, cache_dir: str) -> None:
@@ -1751,6 +1710,18 @@ async def _sync_universe() -> None:
         backfill = await repo.backfill_metadata_from_profiles(
             symbols=[ins.code for ins in instruments]
         )
+        # issue #394:指数登记携带 index_basic base_date,回填
+        # instruments.list_date(只补 null,#185/#265 同语义)。
+        from finboard_shared.types import InstrumentType
+
+        listing_backfill = await repo.backfill_listing_dates(
+            {
+                ins.code: (ins.list_date, None)
+                for ins in instruments
+                if ins.instrument_type is InstrumentType.INDEX
+                and ins.list_date is not None
+            }
+        )
         await session.commit()
 
     typer.echo(
@@ -1769,6 +1740,10 @@ async def _sync_universe() -> None:
         )
     else:
         typer.echo("无已发布研究档案批次,跳过 list_date/industry 回填")
+    typer.echo(
+        f"指数 list_date 回填 {listing_backfill['backfilled_list_date']} 只"
+        f"(仍缺失 {listing_backfill['missing_list_date']} 只,#394)"
+    )
     await engine.dispose()
 
 
@@ -1782,7 +1757,6 @@ async def _bulk_download(
     import os
 
     from finboard_app.config import load_settings
-    from finboard_data import AkShareProvider, YFinanceProvider
     from finboard_data.cache import make_symbol
     from finboard_persistence import InstrumentRepository, create_async_engine, session_factory
     from finboard_shared.types import BarPeriod
@@ -1806,13 +1780,8 @@ async def _bulk_download(
 
     typer.echo(f"开始批量拉取 {len(instruments)} 个标的 ({start_date} ~ today)")
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider(
-            max_concurrency=2, request_interval=0.5
-        )
-    else:
-        provider = YFinanceProvider(max_concurrency=3, request_interval=0.3)
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
+    provider = _cli_bar_provider(provider_name, max_concurrency=2, request_interval=0.5)
 
     end = date.today()
     sym_objs = [make_symbol(ins.code) for ins in instruments]

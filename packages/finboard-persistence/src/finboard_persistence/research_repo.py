@@ -24,6 +24,7 @@ from finboard_data.research import (
     FinancialIndicator,
     IndustryMembership,
     InstrumentProfile,
+    SuspensionRecord,
 )
 from finboard_persistence.models import (
     ResearchDailyMetricModel,
@@ -31,6 +32,7 @@ from finboard_persistence.models import (
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
+    ResearchSuspensionModel,
     ResearchSyncBatchModel,
 )
 
@@ -42,6 +44,7 @@ class ResearchDataset(StrEnum):
     DAILY_METRICS = "daily_metrics"
     FINANCIAL_INDICATORS = "financial_indicators"
     INDUSTRY_MEMBERSHIPS = "industry_memberships"
+    SUSPENSIONS = "suspensions"
 
 
 class SyncBatchStatus(StrEnum):
@@ -480,6 +483,87 @@ class ResearchDatasetRepository:
             _copy_financial_fields(row, item)
         await self._session.flush()
         return len(records)
+
+    async def upsert_suspensions(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[SuspensionRecord],
+    ) -> int:
+        """按来源、版本、标的、交易日幂等写入停复牌记录(issue #396)。"""
+        existing = {
+            (row.symbol, row.trade_date, row.suspend_kind): row
+            for row in (
+                await self._session.execute(
+                    select(ResearchSuspensionModel).where(
+                        ResearchSuspensionModel.source == batch.source,
+                        ResearchSuspensionModel.dataset_version
+                        == batch.dataset_version,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
+        for item in records:
+            key = (item.symbol, item.trade_date, item.suspend_kind)
+            row = existing.get(key)
+            if row is None:
+                row = ResearchSuspensionModel(
+                    batch_id=batch.id,
+                    source=batch.source,
+                    dataset_version=batch.dataset_version,
+                    symbol=item.symbol,
+                    trade_date=item.trade_date,
+                    suspend_kind=item.suspend_kind,
+                )
+                self._session.add(row)
+            row.batch_id = batch.id
+            row.suspend_type = item.suspend_type
+            row.suspend_timing = item.suspend_timing
+            row.observed_at = item.observed_at
+            row.available_at = item.available_at
+        await self._session.flush()
+        return len(records)
+
+    async def list_suspensions_as_of(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        decision_at: datetime,
+        source: str,
+        dataset_version: str | None = None,
+    ) -> list[SuspensionRecord]:
+        """读取 ``[start_date, end_date]`` 内决策时点可见的停复牌记录。
+
+        PIT 门控按 ``available_at <= decision_at``;PIT=当日语义下,同一
+        交易日的记录在当日 09:30(上海)后可见。
+        """
+        _require_aware_datetime(decision_at, "decision_at")
+        if start_date > end_date:
+            return []
+        batch = await self._resolve_batch(
+            ResearchDataset.SUSPENSIONS,
+            source,
+            dataset_version,
+        )
+        if batch is None:
+            return []
+        stmt = (
+            select(ResearchSuspensionModel)
+            .where(
+                ResearchSuspensionModel.batch_id == batch.id,
+                ResearchSuspensionModel.trade_date >= start_date,
+                ResearchSuspensionModel.trade_date <= end_date,
+                ResearchSuspensionModel.available_at <= decision_at,
+            )
+            .order_by(
+                ResearchSuspensionModel.trade_date,
+                ResearchSuspensionModel.symbol,
+            )
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_suspension_from_orm(row) for row in rows]
 
     async def upsert_industry_memberships(
         self,
@@ -1049,6 +1133,19 @@ def _industry_from_orm(
         effective_from=row.valid_from,
         effective_to=row.valid_to,
         is_current=row.is_current,
+        source=row.source,
+        observed_at=row.observed_at,
+        available_at=row.available_at,
+    )
+
+
+def _suspension_from_orm(row: ResearchSuspensionModel) -> SuspensionRecord:
+    return SuspensionRecord(
+        symbol=row.symbol,
+        trade_date=row.trade_date,
+        suspend_kind=row.suspend_kind,
+        suspend_type=row.suspend_type,
+        suspend_timing=row.suspend_timing,
         source=row.source,
         observed_at=row.observed_at,
         available_at=row.available_at,

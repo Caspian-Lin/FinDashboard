@@ -3,10 +3,13 @@
 SDK 在显式构造 Provider 且未注入 client 时才加载。外部响应会先完整规范化,
 任意一行不满足契约都会拒绝整批结果,避免把部分坏数据伪装成有效快照。
 
-例外:``stock_basic`` / ``namechange`` 两个全市场档案接口按行解析,单行
-契约违规(如退市档案的历史前缀代码 T600018.SH、namechange 的 X19363.SH)
-跳过并具名告警,不再炸整批同步;批级护栏(截断防护、状态一致性、全部行
-被跳过)仍 fail-closed。
+例外:全市场枚举接口(``stock_basic`` / ``namechange``,#389 起 daily_basic /
+cb_basic 亦然,#392 统一口径)按行解析,单行契约违规(如退市档案的历史前缀
+代码 T600018.SH、namechange 的 X19363.SH)跳过并具名告警,不再炸整批同步;
+批级护栏(截断防护、状态一致性、全部行被跳过)仍 fail-closed。行级口径不再
+由方法隐含,而是经 ``dirty_row_policy`` 显式声明(#392,dataset_sync 框架按
+SyncSpec 枚举形态分发):``None`` = 各方法历史默认;``"skip"`` = 行级跳过
+(仅全市场枚举方法);``"reject"`` = 整批拒(按 symbol 精确查询恒为此)。
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from finboard_data.research import (
     ConvertibleProfile,
     DailySecurityMetrics,
     FinancialIndicator,
+    IndexProfile,
     IndustryMembership,
     InstrumentNameChange,
     InstrumentProfile,
@@ -35,6 +39,7 @@ from finboard_data.research import (
     ResearchDataContractError,
     ResearchDataDependencyError,
     ResearchDataUpstreamError,
+    SuspensionRecord,
 )
 from finboard_data.tushare_budget import TushareBudget, shared_tushare_budget
 
@@ -44,6 +49,12 @@ _SYMBOL_PATTERN = re.compile(r"^\d{6}\.(SH|SZ|BJ)$")
 _VALID_LIST_STATUSES = frozenset({"L", "D", "P", "G"})
 _TEN_THOUSAND = Decimal("10000")
 _ONE_HUNDRED = Decimal("100")
+
+#: 行级质量口径策略(#389 固化、#392 框架分发):"skip" 行级跳过 +
+#: 具名告警;"reject" 整批拒;None = 各方法历史默认。
+_ROW_POLICY_SKIP = "skip"
+_ROW_POLICY_REJECT = "reject"
+_ROW_POLICIES = frozenset({_ROW_POLICY_SKIP, _ROW_POLICY_REJECT})
 
 logger = structlog.get_logger(__name__)
 
@@ -64,7 +75,7 @@ _NAMECHANGE_FIELDS = "ts_code,name,start_date,end_date,change_reason"
 #: namechange 单次返回上限以下的安全页大小;超过一页时按 offset 循环拉全。
 _NAMECHANGE_PAGE_SIZE = 5000
 #: 可转债基础条款字段白名单(issue #265,doc_id=185)。cb_basic 无评级字段,
-#: 评级由 akshare bond_zh_cov 兜底(research_data_sync 合并);swap_price 是
+#: 评级由 akshare bond_zh_cov 兜底(dataset_sync 合并);swap_price 是
 #: **当前**转股价快照(下修史不在覆盖范围)。
 _CB_BASIC_FIELDS = (
     "ts_code,bond_full_name,bond_short_name,stock_code,stock_name,list_date,"
@@ -72,6 +83,56 @@ _CB_BASIC_FIELDS = (
 )
 #: cb_basic 在市 + 摘牌合计千级;远低于该值的安全截断护栏。
 _CB_BASIC_LIMIT = 5000
+#: suspend_d 单日停复牌字段白名单(issue #396,doc_id=214,2000 积分档)。
+_SUSPEND_D_FIELDS = "ts_code,trade_date,suspend_timing,suspend_type"
+#: suspend_d 按日全市场单日行数的安全截断护栏(全市场 ~5400 只,单日停复牌
+#: 枚举远低于该值)。
+_SUSPEND_D_LIMIT = 6000
+#: suspend_type 词表(S=停牌,R=复牌);suspend_timing 非空表示盘中停牌。
+_SUSPEND_TYPE_SUSPEND = "S"
+_SUSPEND_TYPE_RESUME = "R"
+#: 停复牌 kind 词表(与缓存侧 TushareLifecycleEvent.event_type 同词表,
+#: 便于 research_suspensions 与缓存侧 suspension_events 对账)。
+SUSPEND_KIND_SUSPENSION_DAY = "suspension_day"
+SUSPEND_KIND_INTRADAY = "intraday_suspension"
+SUSPEND_KIND_RESUMPTION = "resumption"
+#: 指数基础信息请求字段白名单(issue #394;2026-09-10 实测)。**list_status
+#: 不在请求列**:上游按返回分片动态裁列,CSI 等市场整批缺失该列(请求了也
+#: 不回),请求里去掉、解析按可选处理;在市/退市判断交 lifecycle diff。
+_INDEX_BASIC_FIELDS = (
+    "ts_code,name,fullname,publisher,category,market,base_date,list_date"
+)
+#: 行级必需核心列(其余列按可选解析 —— 上游裁列不应炸登记同步,#394)。
+_INDEX_BASIC_REQUIRED_FIELDS = "ts_code,name"
+#: index_basic 单页大小(全市场全量分页拉取,#394;全市场含 CSI/CIC/MSCI
+#: 等编外市场约数万行,数页取尽)。与 namechange 同款分页语义。
+_INDEX_BASIC_PAGE_SIZE = 5000
+#: index_basic 的 ts_code 形制比股票宽:除 ``000300.SH`` 沪深北指数外还有
+#: ``930955.CSI`` / ``H30269.CSI`` / ``.MSCI`` 等编外市场代码(#394),不能
+#: 复用股票 6 位数字契约,否则编外市场全被当脏行跳过、对账口径失真。
+_INDEX_SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{2,12}\.[A-Z0-9]{2,8}$")
+
+def _resolve_skip_dirty_rows(policy: str | None, *, default: bool) -> bool:
+    """归一行级口径:None 回落方法默认,非法值具名拒绝(fail-closed)。"""
+
+    if policy is None:
+        return default
+    normalized = policy.strip().lower()
+    if normalized not in _ROW_POLICIES:
+        raise ResearchDataConfigurationError(
+            f"dirty_row_policy 必须是 {_ROW_POLICY_SKIP} 或 {_ROW_POLICY_REJECT},收到: {policy!r}"
+        )
+    return normalized == _ROW_POLICY_SKIP
+
+
+def _reject_skip_for_symbol_query(policy: str | None, endpoint: str) -> None:
+    """按 symbol 精确查询不支持行级跳过(坏行意味着该标的数据异常)。"""
+
+    if policy is not None and policy.strip().lower() == _ROW_POLICY_SKIP:
+        raise ResearchDataConfigurationError(
+            f"{endpoint} 按 symbol 精确查询不支持 dirty_row_policy=skip;"
+            "单行契约违规一律整批拒"
+        )
 
 
 class TushareClient(Protocol):
@@ -100,6 +161,15 @@ class TushareClient(Protocol):
     def cb_basic(self, **kwargs: str) -> object:
         """调用 ``cb_basic``(可转债基础条款,#265)。"""
         ...
+
+    def suspend_d(self, **kwargs: str) -> object:
+        """调用 ``suspend_d``(每日停复牌信息,#396)。"""
+        ...
+
+    def index_basic(self, **kwargs: str) -> object:
+        """调用 ``index_basic``(指数基础信息,#394)。"""
+        ...
+
 
 
 class TushareResearchDataProvider:
@@ -137,12 +207,15 @@ class TushareResearchDataProvider:
         self,
         *,
         list_status: str = "L",
+        dirty_row_policy: str | None = None,
     ) -> list[InstrumentProfile]:
         """读取股票档案;不把当前快照伪装成历史时点数据。
 
-        单行契约违规(退市档案的历史前缀代码等)跳过并具名告警
-        ``tushare.dirty_row_skipped``;截断防护与状态一致性检查仍整批拒绝。
+        全市场枚举:单行契约违规(退市档案的历史前缀代码等)默认跳过并具名
+        告警 ``tushare.dirty_row_skipped``(``dirty_row_policy="reject"`` 可显式
+        收紧为整批拒);截断防护与状态一致性检查仍整批拒绝。
         """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=True)
         normalized_status = list_status.strip().upper()
         if normalized_status not in _VALID_LIST_STATUSES:
             raise ResearchDataConfigurationError("list_status 必须是 L、D、P 或 G")
@@ -154,11 +227,12 @@ class TushareResearchDataProvider:
             fields=_STOCK_BASIC_FIELDS,
         )
         _reject_possible_truncation(rows, "stock_basic", limit=6000)
-        profiles = _parse_rows_skipping_dirty(
+        profiles = self._parse_rows(
             rows,
             self._parse_instrument,
             observed_at=observed_at,
             endpoint="stock_basic",
+            skip_dirty_rows=skip_dirty,
         )
         if any(item.list_status != normalized_status for item in profiles):
             raise ResearchDataContractError("Tushare stock_basic 返回了请求状态之外的记录")
@@ -167,8 +241,15 @@ class TushareResearchDataProvider:
     async def fetch_daily_metrics(
         self,
         trade_date: date,
+        *,
+        dirty_row_policy: str | None = None,
     ) -> list[DailySecurityMetrics]:
-        """读取全市场每日指标,最早可用时间固定为交易日 17:00(上海时区)。"""
+        """读取全市场每日指标,最早可用时间固定为交易日 17:00(上海时区)。
+
+        按日全市场枚举(#392 统一口径):默认整批拒;``dirty_row_policy="skip"``
+        时单行契约违规跳过并具名告警(截断防护与交易日一致性检查仍整批拒)。
+        """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=False)
         observed_at = self._observed_at()
         rows = await self._call(
             "daily_basic",
@@ -177,9 +258,13 @@ class TushareResearchDataProvider:
             fields=_DAILY_BASIC_FIELDS,
         )
         _reject_possible_truncation(rows, "daily_basic", limit=6000)
-        metrics = [
-            self._parse_daily_metric(row, index, observed_at) for index, row in enumerate(rows)
-        ]
+        metrics = self._parse_rows(
+            rows,
+            self._parse_daily_metric,
+            observed_at=observed_at,
+            endpoint="daily_basic",
+            skip_dirty_rows=skip_dirty,
+        )
         if any(item.trade_date != trade_date for item in metrics):
             raise ResearchDataContractError("Tushare daily_basic 返回了请求交易日之外的记录")
         return sorted(metrics, key=lambda item: item.symbol)
@@ -190,8 +275,14 @@ class TushareResearchDataProvider:
         *,
         start_period: date,
         end_period: date,
+        dirty_row_policy: str | None = None,
     ) -> list[FinancialIndicator]:
-        """读取单只股票的财务指标,保留公告修订版本。"""
+        """读取单只股票的财务指标,保留公告修订版本。
+
+        按 symbol 精确查询:单行契约违规整批拒;``dirty_row_policy="skip"``
+        被显式拒绝(参数仅为框架统一透传而接受,#392)。
+        """
+        _reject_skip_for_symbol_query(dirty_row_policy, "fina_indicator")
         normalized_symbol = _normalize_symbol(symbol)
         if start_period > end_period:
             raise ResearchDataConfigurationError("start_period 不能晚于 end_period")
@@ -224,8 +315,14 @@ class TushareResearchDataProvider:
         *,
         symbol: str,
         current_only: bool = True,
+        dirty_row_policy: str | None = None,
     ) -> list[IndustryMembership]:
-        """读取申万 2021 行业成员;无历史发布时间时按本次观察时间可用。"""
+        """读取申万 2021 行业成员;无历史发布时间时按本次观察时间可用。
+
+        按 symbol 精确查询:单行契约违规整批拒;``dirty_row_policy="skip"``
+        被显式拒绝(参数仅为框架统一透传而接受,#392)。
+        """
+        _reject_skip_for_symbol_query(dirty_row_policy, "index_member_all")
         normalized_symbol = _normalize_symbol(symbol)
         kwargs = {"fields": _INDUSTRY_FIELDS, "ts_code": normalized_symbol}
         if current_only:
@@ -244,16 +341,22 @@ class TushareResearchDataProvider:
             key=lambda item: (item.symbol, item.effective_from, item.level3_code),
         )
 
-    async def fetch_name_changes(self) -> list[InstrumentNameChange]:
+    async def fetch_name_changes(
+        self,
+        *,
+        dirty_row_policy: str | None = None,
+    ) -> list[InstrumentNameChange]:
         """读取全市场历史名称变更(分页拉全;#251 名称历史 PIT 导入)。
 
         ``namechange`` 每行自带 ``start_date``/``end_date`` 业务有效区间,直接
         对应 ``instrument_names`` 的半开区间,供 #213 ST-PIT 按决策日取名称。
         接口单次返回有上限,按 ``offset`` 循环直到取尽,每页各自消耗限流预算;
         名称变更支持 Pit(tushare 提供的就是历史区间),``available_at`` 取本次
-        观察时间(上游无历史发布时间)。单行契约违规(历史前缀代码等)跳过
-        并具名告警 ``tushare.dirty_row_skipped``,页级护栏照常生效。
+        观察时间(上游无历史发布时间)。全市场枚举:单行契约违规(历史前缀
+        代码等)默认跳过并具名告警 ``tushare.dirty_row_skipped``,页级护栏
+        照常生效。
         """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=True)
         observed_at = self._observed_at()
         changes: list[InstrumentNameChange] = []
         offset = 0
@@ -267,11 +370,12 @@ class TushareResearchDataProvider:
             if not rows:
                 break
             changes.extend(
-                _parse_rows_skipping_dirty(
+                self._parse_rows(
                     rows,
                     self._parse_name_change,
                     observed_at=observed_at,
                     endpoint="namechange",
+                    skip_dirty_rows=skip_dirty,
                 )
             )
             if len(rows) < _NAMECHANGE_PAGE_SIZE:
@@ -279,14 +383,21 @@ class TushareResearchDataProvider:
             offset += _NAMECHANGE_PAGE_SIZE
         return sorted(changes, key=lambda item: (item.symbol, item.start_date))
 
-    async def fetch_convertible_profiles(self) -> list[ConvertibleProfile]:
+    async def fetch_convertible_profiles(
+        self,
+        *,
+        dirty_row_policy: str | None = None,
+    ) -> list[ConvertibleProfile]:
         """读取全市场可转债基础条款(issue #265,2000 积分档)。
 
         在市(L)+ 摘牌(D)档案分两次拉取合并进同一批(与 #251 股票档案
         同风格,摘牌档案携带 delist_date);同 symbol 去重保留在市记录。
         cb_basic 是当前快照,``available_at`` = 本次观察时间;限流经
-        ``tushare_budget`` 与其他接口共享配额。
+        ``tushare_budget`` 与其他接口共享配额。全市场枚举(#392 统一口径):
+        默认整批拒;``dirty_row_policy="skip"`` 时单行契约违规跳过并具名告警
+        (截断防护与同 symbol 去重语义不变)。
         """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=False)
         observed_at = self._observed_at()
         by_symbol: dict[str, ConvertibleProfile] = {}
         # 先 D 后 L:L(在市)记录对同 symbol 权威(真实数据两态互斥,这里
@@ -298,15 +409,132 @@ class TushareResearchDataProvider:
                 fields=_CB_BASIC_FIELDS,
             )
             _reject_possible_truncation(rows, "cb_basic", limit=_CB_BASIC_LIMIT)
-            parsed = [
-                self._parse_convertible_profile(row, index, observed_at)
-                for index, row in enumerate(rows)
-            ]
+            parsed = self._parse_rows(
+                rows,
+                self._parse_convertible_profile,
+                observed_at=observed_at,
+                endpoint="cb_basic",
+                skip_dirty_rows=skip_dirty,
+            )
             for item in parsed:
                 if list_status == "L" or item.symbol not in by_symbol:
                     by_symbol[item.symbol] = item
         return sorted(by_symbol.values(), key=lambda item: item.symbol)
 
+    async def fetch_suspensions(
+        self,
+        trade_date: date,
+        *,
+        dirty_row_policy: str | None = None,
+    ) -> list[SuspensionRecord]:
+        """读取指定交易日的全市场停复牌枚举(issue #396,2000 积分档)。
+
+        按日全市场枚举(#392 统一口径):默认整批拒;``dirty_row_policy="skip"``
+        时单行契约违规跳过并具名告警(截断防护与交易日一致性检查仍整批拒)。
+        非交易日上游返回空列表(框架按空切片跳过,不产生批次行)。
+        ``suspend_kind`` 与缓存侧 ``TushareLifecycleEvent.event_type`` 同词表;
+        PIT=当日:``available_at`` = 交易日 09:30(上海,开盘即可观察)。
+        """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=False)
+        observed_at = self._observed_at()
+        rows = await self._call(
+            "suspend_d",
+            trade_date=_format_date(trade_date),
+            fields=_SUSPEND_D_FIELDS,
+        )
+        _reject_possible_truncation(rows, "suspend_d", limit=_SUSPEND_D_LIMIT)
+        records = self._parse_rows(
+            rows,
+            self._parse_suspension,
+            observed_at=observed_at,
+            endpoint="suspend_d",
+            skip_dirty_rows=skip_dirty,
+        )
+        if any(item.trade_date != trade_date for item in records):
+            raise ResearchDataContractError(
+                "Tushare suspend_d 返回了请求交易日之外的记录"
+            )
+        return sorted(records, key=lambda item: (item.symbol, item.suspend_kind))
+
+    @staticmethod
+    def _parse_suspension(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> SuspensionRecord:
+        endpoint = "suspend_d"
+        _require_fields(row, _SUSPEND_D_FIELDS, endpoint, index)
+        business_date = _required_date(row, "trade_date", endpoint, index)
+        suspend_type = _required_text(row, "suspend_type", endpoint, index).upper()
+        suspend_timing = _optional_text(row, "suspend_timing")
+        if suspend_type == _SUSPEND_TYPE_SUSPEND:
+            kind = (
+                SUSPEND_KIND_INTRADAY
+                if suspend_timing
+                else SUSPEND_KIND_SUSPENSION_DAY
+            )
+        elif suspend_type == _SUSPEND_TYPE_RESUME:
+            kind = SUSPEND_KIND_RESUMPTION
+        else:
+            raise _field_error(
+                endpoint, index, "suspend_type", "必须是 S(停牌)或 R(复牌)"
+            )
+        return SuspensionRecord(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            trade_date=business_date,
+            suspend_kind=kind,
+            suspend_type=suspend_type,
+            suspend_timing=suspend_timing,
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=datetime.combine(
+                business_date,
+                time(hour=9, minute=30),
+                tzinfo=_SHANGHAI,
+            ),
+        )
+    async def fetch_index_profiles(
+        self,
+        *,
+        dirty_row_policy: str | None = None,
+    ) -> list[IndexProfile]:
+        """读取全市场指数基础信息(分页拉全;issue #394 登记扩大上游)。
+
+        ``index_basic`` 覆盖 SSE / SZSE / BSE 及 CSI / CIC / MSCI 等编外市场
+        (合计数万行),按 ``offset`` 循环拉全,每页各自消耗限流预算;登记域
+        收窄(A 股三所指数)由消费方 discovery 按 ``is_index_code`` 裁决——
+        provider 层保留全量快照,编外市场代码不视为脏行(对账口径保真)。
+        ``index_basic`` 是当前时点快照,``available_at`` = 本次观察时间。
+        全市场枚举(#392 统一口径):单行契约违规默认跳过并具名告警
+        ``tushare.dirty_row_skipped``(``dirty_row_policy="reject"`` 可显式
+        收紧为整批拒;「全部行被跳过」仍整批拒)。
+        """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=True)
+        observed_at = self._observed_at()
+        profiles: list[IndexProfile] = []
+        offset = 0
+        while True:
+            rows = await self._call(
+                "index_basic",
+                fields=_INDEX_BASIC_FIELDS,
+                limit=str(_INDEX_BASIC_PAGE_SIZE),
+                offset=str(offset),
+            )
+            if not rows:
+                break
+            profiles.extend(
+                self._parse_rows(
+                    rows,
+                    self._parse_index_profile,
+                    observed_at=observed_at,
+                    endpoint="index_basic",
+                    skip_dirty_rows=skip_dirty,
+                )
+            )
+            if len(rows) < _INDEX_BASIC_PAGE_SIZE:
+                break
+            offset += _INDEX_BASIC_PAGE_SIZE
+        return sorted(profiles, key=lambda item: item.symbol)
     def _create_client(self, explicit_token: str | None) -> TushareClient:
         token = (
             explicit_token if explicit_token is not None else os.getenv("FINBOARD_TUSHARE_TOKEN")
@@ -337,6 +565,45 @@ class TushareResearchDataProvider:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ResearchDataConfigurationError("Tushare Provider 时钟必须返回带时区的 datetime")
         return value
+
+    def _parse_rows[T](
+        self,
+        rows: Sequence[Mapping[str, object]],
+        parse: Callable[[Mapping[str, object], int, datetime], T],
+        *,
+        observed_at: datetime,
+        endpoint: str,
+        skip_dirty_rows: bool,
+    ) -> list[T]:
+        """按行级口径解析(#389 固化、#392 框架按 SyncSpec 形态分发)。
+
+        ``skip_dirty_rows=True``(全市场枚举):单行契约违规跳过并具名告警
+        ``tushare.dirty_row_skipped`` —— 全市场档案覆盖含历史前缀代码的退市
+        老股(T600018.SH 等),单条脏行不值得炸整批同步;但「全部行被跳过」
+        意味着上游 schema 破坏而非孤立脏数据,仍按整批拒绝处理。
+        ``skip_dirty_rows=False``(按 symbol 精确查询 / 默认整批拒):单行
+        违规直接抛出。
+        """
+        parsed: list[T] = []
+        for index, row in enumerate(rows):
+            try:
+                parsed.append(parse(row, index, observed_at))
+            except ResearchDataContractError as exc:
+                if not skip_dirty_rows:
+                    raise
+                logger.warning(
+                    "tushare.dirty_row_skipped",
+                    endpoint=endpoint,
+                    index=index,
+                    ts_code=row.get("ts_code"),
+                    name=row.get("name"),
+                    reason=str(exc),
+                )
+        if skip_dirty_rows and rows and not parsed:
+            raise ResearchDataContractError(
+                f"Tushare {endpoint} 全部 {len(rows)} 行均违反契约,疑似上游 schema 变更"
+            )
+        return parsed
 
     async def _call(self, endpoint: str, **kwargs: str) -> list[Mapping[str, object]]:
         method_object = getattr(self._client, endpoint, None)
@@ -523,6 +790,34 @@ class TushareResearchDataProvider:
             available_at=observed_at,
         )
 
+    @staticmethod
+    def _parse_index_profile(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> IndexProfile:
+        endpoint = "index_basic"
+        # 只硬性要求核心两列;fullname/market/base_date/list_date/list_status
+        # 按可选解析(2026-09-10 实测:上游按市场分片裁列,CSI 批次缺
+        # list_status 列,裁列行不应炸整批登记同步,#394)。
+        _require_fields(row, _INDEX_BASIC_REQUIRED_FIELDS, endpoint, index)
+        return IndexProfile(
+            symbol=_normalize_index_symbol(
+                _required_text(row, "ts_code", endpoint, index)
+            ),
+            name=_required_text(row, "name", endpoint, index),
+            full_name=_optional_text(row, "fullname"),
+            publisher=_optional_text(row, "publisher"),
+            category=_optional_text(row, "category"),
+            market=_optional_text(row, "market"),
+            base_date=_optional_date(row, "base_date", endpoint, index),
+            list_date=_optional_date(row, "list_date", endpoint, index),
+            list_status=_optional_text(row, "list_status"),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+
 
 def _records(payload: object, endpoint: str) -> list[Mapping[str, object]]:
     if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
@@ -586,37 +881,18 @@ def _normalize_symbol(value: str) -> str:
     return normalized
 
 
-def _parse_rows_skipping_dirty[T](
-    rows: Sequence[Mapping[str, object]],
-    parse: Callable[[Mapping[str, object], int, datetime], T],
-    *,
-    observed_at: datetime,
-    endpoint: str,
-) -> list[T]:
-    """逐行解析全市场档案;单行契约违规跳过并具名告警。
+def _normalize_index_symbol(value: str) -> str:
+    """index_basic 的 ts_code 归一(#394):比股票宽,含 CSI/MSCI 等编外市场。
 
-    全市场档案(stock_basic / namechange)覆盖含历史前缀代码的退市老股
-    (T600018.SH 等),单条脏行不值得炸整批同步;但「全部行被跳过」意味
-    着上游 schema 破坏而非孤立脏数据,仍按整批拒绝处理。
+    只要求 ``主体.市场`` 的通用形制;登记域收窄(A 股三所)由 discovery 的
+    ``is_index_code`` 裁决——provider 层保留全量,编外代码不是契约违规。
     """
-    parsed: list[T] = []
-    for index, row in enumerate(rows):
-        try:
-            parsed.append(parse(row, index, observed_at))
-        except ResearchDataContractError as exc:
-            logger.warning(
-                "tushare.dirty_row_skipped",
-                endpoint=endpoint,
-                index=index,
-                ts_code=row.get("ts_code"),
-                name=row.get("name"),
-                reason=str(exc),
-            )
-    if rows and not parsed:
+    normalized = value.strip().upper()
+    if not _INDEX_SYMBOL_PATTERN.fullmatch(normalized):
         raise ResearchDataContractError(
-            f"Tushare {endpoint} 全部 {len(rows)} 行均违反契约,疑似上游 schema 变更"
+            "指数代码必须是 「主体.市场」 形制(如 000300.SH / 930955.CSI)"
         )
-    return parsed
+    return normalized
 
 
 def _format_date(value: date) -> str:
@@ -634,7 +910,10 @@ def _is_missing(value: object) -> bool:
 
 
 def _optional_text(row: Mapping[str, object], field: str) -> str | None:
-    value = row[field]
+    # .get 容忍上游裁列(index_basic 按市场分片动态缺列,#394);键缺失
+    # 与值缺失同义。必需列由 _require_fields 在前拦截,该放宽不影响既有
+    # endpoint 的契约强度。
+    value = row.get(field)
     if _is_missing(value):
         return None
     return str(value).strip()
@@ -658,7 +937,7 @@ def _optional_date(
     endpoint: str,
     index: int,
 ) -> date | None:
-    value = row[field]
+    value = row.get(field)
     if _is_missing(value):
         return None
     if isinstance(value, datetime):

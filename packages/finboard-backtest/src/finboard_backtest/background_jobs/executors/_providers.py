@@ -1,6 +1,6 @@
 """行情 provider 构造助手(issue #144)。
 
-数据域 executor(bulk_download / fetch_all / backtest_run / quality_repair)需要
+数据域 executor(bulk_download / backtest_run / quality_repair)需要
 按 ``source`` + ``settings`` 构造行情 provider。本模块抽出与
 ``finboard_api.routes.data._get_provider`` 等价的工厂,供 executor 与 CLI 复用,
 避免 ``finboard-backtest`` 反向依赖 ``finboard-api``。
@@ -40,7 +40,7 @@ def resolve_provider_name(
         source
         or configured
         or os.getenv("FINBOARD_DATA_PROVIDER")
-        or "akshare"
+        or "tushare"
     ).strip().lower()
     if name not in SUPPORTED_BAR_PROVIDERS:
         supported = ", ".join(sorted(SUPPORTED_BAR_PROVIDERS))
