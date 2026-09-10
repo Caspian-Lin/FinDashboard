@@ -22,15 +22,19 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import structlog
 
 from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
     ConvertibleProfile,
     DailySecurityMetrics,
+    DividendRecord,
     FinancialIndicator,
+    IncomeStatement,
     IndustryMembership,
     InstrumentNameChange,
     InstrumentProfile,
@@ -67,6 +71,57 @@ _FINANCIAL_FIELDS = (
     "ts_code,ann_date,end_date,update_flag,eps,dt_eps,bps,ocfps,roe,roe_waa,"
     "grossprofit_margin,netprofit_margin,debt_to_assets,tr_yoy,netprofit_yoy,ocf_yoy"
 )
+# issue #397:三表 + dividend 字段白名单(2000 积分档;上游列名原样透传,
+# 领域记录属性名与上游列名一致,仅身份/时间字段改名)。契约 required 检查
+# 只要求身份列(ts_code/ann_date/end_date),值列缺失走 _optional_* → None
+# (财报字段稀疏是常态,见 #187 all_null_fields 语义)。
+_INCOME_FIELDS = (
+    "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,update_flag,"
+    "basic_eps,diluted_eps,total_revenue,revenue,int_income,int_exp,"
+    "fv_value_chg_gain,invest_income,total_cogs,oper_cost,biz_tax_surchg,"
+    "sell_exp,admin_exp,fin_exp,rd_exp,assets_impair_loss,operate_profit,"
+    "non_oper_income,non_oper_exp,total_profit,income_tax,n_income,"
+    "n_income_attr_p,minority_gain,oth_compr_income,t_compr_income,"
+    "compr_inc_attr_p,ebit,ebitda,distable_profit,continued_net_profit"
+)
+_BALANCE_FIELDS = (
+    "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,update_flag,"
+    "total_share,money_cap,trading_fl,notes_receiv,accounts_receiv,oth_receiv,"
+    "prepayment,inventories,total_cur_assets,lt_eqt_invest,fix_assets,cip,"
+    "intan_assets,goodwill,defer_tax_assets,total_nca,total_assets,st_borr,"
+    "notes_payable,acct_payable,adv_receipts,contract_liab,payroll_payable,"
+    "taxes_payable,non_cur_liab_due_1y,oth_cur_liab,total_cur_liab,lt_borr,"
+    "bond_payable,total_ncl,total_liab,cap_rese,surplus_rese,undistr_porfit,"
+    "treasury_share,minority_int,total_hldr_eqy_exc_min_int,"
+    "total_hldr_eqy_inc_min_int"
+)
+_CASHFLOW_FIELDS = (
+    "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,update_flag,"
+    "net_profit,finan_exp,c_fr_sale_sg,recp_tax_rends,c_inf_fr_operate_a,"
+    "c_paid_goods_s,c_paid_to_for_empl,c_paid_for_taxes,oth_cash_pay_oper_act,"
+    "st_cash_out_act,n_cashflow_act,c_recp_return_invest,n_recp_disp_fiolta,"
+    "stot_inflows_inv_act,c_pay_acq_const_fiolta,c_paid_invest,"
+    "stot_out_inv_act,n_cashflow_inv_act,c_recp_borrow,proc_issue_bonds,"
+    "stot_cash_in_fnc_act,c_prepay_amt_borr,c_pay_dist_dpcp_int_exp,"
+    "incl_dvd_profit_paid_sc_ms,stot_cashout_fnc_act,n_cash_flows_fnc_act,"
+    "eff_fx_flu_cash,n_incr_cash_cash_equ,c_cash_equ_beg_period,"
+    "c_cash_equ_end_period,free_cashflow,depr_fa_coga_dpba,"
+    "amort_intang_assets,credit_impa_loss,loss_fv_chg,invest_loss"
+)
+#: dividend 上游无 update_flag;``div_proc``(预案/股东大会通过/实施/不分配…)
+#: 是同一(分红年度, 公告日)多行进展的判别符并进身份键(600519.SH 实测:
+#: 同日同年度「预案」与「股东大会通过」两行并存)。列名 ``div_listdate``
+#: 是上游拼写的股份到账日。
+_DIVIDEND_FIELDS = (
+    "ts_code,end_date,ann_date,div_proc,stk_div,stk_bo_rate,stk_co_rate,"
+    "cash_div,cash_div_tax,record_date,ex_date,pay_date,div_listdate,"
+    "imp_ann_date"
+)
+#: 三表按 symbol + 公告日窗查询,单窗行数 = 报告期数 x 报告口径数;即便
+#: 跨十年窗口也在数百行量级,1000 行截断护栏足够宽且能挡 schema 突变。
+_STATEMENT_LIMIT = 1000
+#: dividend 单标的全历史(分红年度数 x 进展行数)同样远低于该值。
+_DIVIDEND_LIMIT = 1000
 _INDUSTRY_FIELDS = (
     "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,in_date,out_date,is_new"
 )
@@ -133,6 +188,22 @@ class TushareClient(Protocol):
 
     def fina_indicator(self, **kwargs: str) -> object:
         """调用 ``fina_indicator``。"""
+        ...
+
+    def income(self, **kwargs: str) -> object:
+        """调用 ``income``(利润表,#397)。"""
+        ...
+
+    def balancesheet(self, **kwargs: str) -> object:
+        """调用 ``balancesheet``(资产负债表,#397)。"""
+        ...
+
+    def cashflow(self, **kwargs: str) -> object:
+        """调用 ``cashflow``(现金流量表,#397)。"""
+        ...
+
+    def dividend(self, **kwargs: str) -> object:
+        """调用 ``dividend``(分红送股,#397)。"""
         ...
 
     def index_member_all(self, **kwargs: str) -> object:
@@ -287,6 +358,173 @@ class TushareResearchDataProvider:
                 item.report_period,
                 item.announcement_date,
                 item.update_flag or "",
+            ),
+        )
+
+    async def fetch_income_statements(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[IncomeStatement]:
+        """读取单只股票公告日窗内的利润表修订(issue #397,2000 积分档)。
+
+        ``start_date``/``end_date`` 按 tushare 语义过滤**公告日期**(与
+        fina_indicator 切片键同口径);保留全部修订版本与报告口径行。
+        按 symbol 精确查询:单行契约违规整批拒;``dirty_row_policy="skip"``
+        被显式拒绝(参数仅为框架统一透传而接受,#392)。
+        """
+        _reject_skip_for_symbol_query(dirty_row_policy, "income")
+        normalized_symbol = _normalize_symbol(symbol)
+        if start_announced > end_announced:
+            raise ResearchDataConfigurationError("start_announced 不能晚于 end_announced")
+        observed_at = self._observed_at()
+        rows = await self._call(
+            "income",
+            ts_code=normalized_symbol,
+            fields=_INCOME_FIELDS,
+            start_date=_format_date(start_announced),
+            end_date=_format_date(end_announced),
+        )
+        _reject_possible_truncation(rows, "income", limit=_STATEMENT_LIMIT)
+        parsed = [
+            _parse_announced_statement(
+                row,
+                index,
+                observed_at,
+                endpoint="income",
+                fields=_INCOME_FIELDS,
+                build=lambda kw: IncomeStatement(**kw),
+            )
+            for index, row in enumerate(rows)
+        ]
+        if any(item.symbol != normalized_symbol for item in parsed):
+            raise ResearchDataContractError("Tushare income 返回了请求标的之外的记录")
+        return sorted(parsed, key=_statement_sort_key)
+
+    async def fetch_balance_sheets(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[BalanceSheet]:
+        """读取单只股票公告日窗内的资产负债表修订(issue #397)。"""
+        _reject_skip_for_symbol_query(dirty_row_policy, "balancesheet")
+        normalized_symbol = _normalize_symbol(symbol)
+        if start_announced > end_announced:
+            raise ResearchDataConfigurationError("start_announced 不能晚于 end_announced")
+        observed_at = self._observed_at()
+        rows = await self._call(
+            "balancesheet",
+            ts_code=normalized_symbol,
+            fields=_BALANCE_FIELDS,
+            start_date=_format_date(start_announced),
+            end_date=_format_date(end_announced),
+        )
+        _reject_possible_truncation(rows, "balancesheet", limit=_STATEMENT_LIMIT)
+        parsed = [
+            _parse_announced_statement(
+                row,
+                index,
+                observed_at,
+                endpoint="balancesheet",
+                fields=_BALANCE_FIELDS,
+                build=lambda kw: BalanceSheet(**kw),
+            )
+            for index, row in enumerate(rows)
+        ]
+        if any(item.symbol != normalized_symbol for item in parsed):
+            raise ResearchDataContractError(
+                "Tushare balancesheet 返回了请求标的之外的记录"
+            )
+        return sorted(parsed, key=_statement_sort_key)
+
+    async def fetch_cashflow_statements(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[CashflowStatement]:
+        """读取单只股票公告日窗内的现金流量表修订(issue #397)。"""
+        _reject_skip_for_symbol_query(dirty_row_policy, "cashflow")
+        normalized_symbol = _normalize_symbol(symbol)
+        if start_announced > end_announced:
+            raise ResearchDataConfigurationError("start_announced 不能晚于 end_announced")
+        observed_at = self._observed_at()
+        rows = await self._call(
+            "cashflow",
+            ts_code=normalized_symbol,
+            fields=_CASHFLOW_FIELDS,
+            start_date=_format_date(start_announced),
+            end_date=_format_date(end_announced),
+        )
+        _reject_possible_truncation(rows, "cashflow", limit=_STATEMENT_LIMIT)
+        parsed = [
+            _parse_announced_statement(
+                row,
+                index,
+                observed_at,
+                endpoint="cashflow",
+                fields=_CASHFLOW_FIELDS,
+                build=lambda kw: CashflowStatement(**kw),
+            )
+            for index, row in enumerate(rows)
+        ]
+        if any(item.symbol != normalized_symbol for item in parsed):
+            raise ResearchDataContractError("Tushare cashflow 返回了请求标的之外的记录")
+        return sorted(parsed, key=_statement_sort_key)
+
+    async def fetch_dividends(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[DividendRecord]:
+        """读取单只股票公告日窗内的分红送股进展(issue #397,2000 积分档)。
+
+        同一(分红年度, 公告日)存在预案 / 股东大会通过 / 实施多条进展行,
+        ``div_proc`` 进身份键全保留(不取最新,读端按需筛选进展)。
+
+        上游 ``dividend`` 接口**没有** start_date/end_date 区间参数(2026-09
+        真实 API 实测:传了也被服务端忽略,返回该标的全历史),窗口过滤在
+        客户端按 ``ann_date`` 执行 —— 切片键(dataset_version)与实际返回
+        范围保持一致,跨窗口批次不重复携带窗外的行。
+        """
+        _reject_skip_for_symbol_query(dirty_row_policy, "dividend")
+        normalized_symbol = _normalize_symbol(symbol)
+        if start_announced > end_announced:
+            raise ResearchDataConfigurationError("start_announced 不能晚于 end_announced")
+        observed_at = self._observed_at()
+        rows = await self._call(
+            "dividend",
+            ts_code=normalized_symbol,
+            fields=_DIVIDEND_FIELDS,
+        )
+        _reject_possible_truncation(rows, "dividend", limit=_DIVIDEND_LIMIT)
+        parsed = [
+            self._parse_dividend(row, index, observed_at)
+            for index, row in enumerate(rows)
+        ]
+        if any(item.symbol != normalized_symbol for item in parsed):
+            raise ResearchDataContractError("Tushare dividend 返回了请求标的之外的记录")
+        return sorted(
+            (
+                item
+                for item in parsed
+                if start_announced <= item.announcement_date <= end_announced
+            ),
+            key=lambda item: (
+                item.report_period,
+                item.announcement_date,
+                item.div_proc,
             ),
         )
 
@@ -472,6 +710,35 @@ class TushareResearchDataProvider:
                 time(hour=9, minute=30),
                 tzinfo=_SHANGHAI,
             ),
+        )
+
+    @staticmethod
+    def _parse_dividend(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> DividendRecord:
+        endpoint = "dividend"
+        _require_fields(row, _DIVIDEND_FIELDS, endpoint, index)
+        announcement_date = _required_date(row, "ann_date", endpoint, index)
+        return DividendRecord(
+            symbol=_normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+            announcement_date=announcement_date,
+            report_period=_required_date(row, "end_date", endpoint, index),
+            div_proc=_required_text(row, "div_proc", endpoint, index),
+            stk_div=_optional_decimal(row, "stk_div", endpoint, index),
+            stk_bo_rate=_optional_decimal(row, "stk_bo_rate", endpoint, index),
+            stk_co_rate=_optional_decimal(row, "stk_co_rate", endpoint, index),
+            cash_div=_optional_decimal(row, "cash_div", endpoint, index),
+            cash_div_tax=_optional_decimal(row, "cash_div_tax", endpoint, index),
+            record_date=_optional_date(row, "record_date", endpoint, index),
+            ex_date=_optional_date(row, "ex_date", endpoint, index),
+            pay_date=_optional_date(row, "pay_date", endpoint, index),
+            div_listdate=_optional_date(row, "div_listdate", endpoint, index),
+            imp_ann_date=_optional_date(row, "imp_ann_date", endpoint, index),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=_announced_available_at(announcement_date),
         )
 
     def _create_client(self, explicit_token: str | None) -> TushareClient:
@@ -728,6 +995,64 @@ class TushareResearchDataProvider:
             observed_at=observed_at,
             available_at=observed_at,
         )
+
+
+def _announced_available_at(announcement_date: date) -> datetime:
+    """公告类研究数据的 PIT 可见时间:ann_date+1 零点(上海,#212 口径)。"""
+
+    return datetime.combine(
+        announcement_date + timedelta(days=1),
+        time.min,
+        tzinfo=_SHANGHAI,
+    )
+
+
+def _statement_sort_key(item: object) -> tuple[date, date, str, str, str]:
+    """三表修订行的稳定排序(与 fina_indicator 同风格,多两列报告口径)。"""
+    return (
+        item.report_period,  # type: ignore[attr-defined]
+        item.announcement_date,  # type: ignore[attr-defined]
+        item.update_flag or "",  # type: ignore[attr-defined]
+        item.report_type or "",  # type: ignore[attr-defined]
+        item.comp_type or "",  # type: ignore[attr-defined]
+    )
+
+
+def _parse_announced_statement[T](
+    row: Mapping[str, object],
+    index: int,
+    observed_at: datetime,
+    *,
+    endpoint: str,
+    fields: str,
+    build: Callable[[dict[str, Any]], T],
+) -> T:
+    """三表共享解析:身份列必填,值列全部 optional(财报稀疏是常态,#187)。
+
+    ``build`` 把扁平关键字字典构造成具体数据类;字段名与白名单一致,值列
+    统一 ``_optional_decimal``(金额单位人民币元,无单位换算)。
+    """
+    _require_fields(row, fields, endpoint, index)
+    announcement_date = _required_date(row, "ann_date", endpoint, index)
+    kwargs: dict[str, Any] = {
+        "symbol": _normalize_symbol(_required_text(row, "ts_code", endpoint, index)),
+        "announcement_date": announcement_date,
+        "report_period": _required_date(row, "end_date", endpoint, index),
+        "formal_announcement_date": _optional_date(
+            row, "f_ann_date", endpoint, index
+        ),
+        "report_type": _optional_text(row, "report_type"),
+        "comp_type": _optional_text(row, "comp_type"),
+        "update_flag": _optional_text(row, "update_flag"),
+        "source": _SOURCE,
+        "observed_at": observed_at,
+        "available_at": _announced_available_at(announcement_date),
+    }
+    for name in _field_names(fields):
+        if name in {"ts_code", "ann_date", "f_ann_date", "end_date", "report_type", "comp_type", "update_flag"}:
+            continue
+        kwargs[name] = _optional_decimal(row, name, endpoint, index)
+    return build(kwargs)
 
 
 def _records(payload: object, endpoint: str) -> list[Mapping[str, object]]:
