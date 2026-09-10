@@ -117,6 +117,7 @@ class DatasetPublishExecutor:
         mismatch_suffix = ""
 
         from finboard_data import (
+            RELEASE_SCHEMA_VERSION,
             DatasetReleaseError,
             DatasetReleaseSpec,
             ImmutableReleaseError,
@@ -263,6 +264,21 @@ class DatasetPublishExecutor:
         # 物化成功而登记失败时,重试经 builder 的 final_dir 幂等路径
         # (校验同一性后返回既有发布)不重复冻结。
         await progress(1, None, "dataset_publish:publishing")
+        # issue #401:schema_version 透传(默认 v1 零变化)。冻结字段集合
+        # 变化(如 financial_indicators 白名单扩展)时按 #187 机制递增,
+        # 否则 builder 对同名数据集的新发布具名拒绝「字段集合发生变化但
+        # schema_version 未递增」。
+        schema_version = job.payload.get("schema_version")
+        if schema_version is not None and (
+            not isinstance(schema_version, str)
+            or not schema_version.strip()
+        ):
+            raise ExecutorError(
+                code="invalid_payload",
+                summary="dataset_publish 任务 payload 的 schema_version 必须是非空字符串",
+                retryable=False,
+                context={"job_id": job.job_id},
+            )
         service = ResearchDatasetReleaseService(
             None,
             session_factory=self._session_maker,
@@ -282,6 +298,7 @@ class DatasetPublishExecutor:
                     adjustment=adjustment,
                     fields=fields,
                     dataset_kind=ReleaseDatasetKind(kind),
+                    schema_version=schema_version or RELEASE_SCHEMA_VERSION,
                     minimum_release_coverage=(
                         # issue #212:研究数据发布级阈值放宽到 0.95——停牌日
                         # 无截面、最新报告期未公告是常态(全市场 daily 实测

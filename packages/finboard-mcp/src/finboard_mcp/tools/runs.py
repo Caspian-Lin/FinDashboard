@@ -414,6 +414,10 @@ async def _build_queued_manifest(
         series_covered_factor_names,
         series_release_mismatches,
     )
+    from finboard_backtest.research_code.predefined_factors import (
+        predefined_factor_reference_gate_error,
+        referenced_predefined_factors,
+    )
     from finboard_persistence import FactorSeriesRepository
 
     series_repo = FactorSeriesRepository(session)
@@ -430,6 +434,21 @@ async def _build_queued_manifest(
         if node.source is not None
         and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
+    # issue #398:平台预置因子(p_ 前缀)引用门控(规格形态错误,先于
+    # #203/#217 具名拒绝)—— 目录注册存在性 + single_shot 必须以
+    # factor_series_ids 声明(p_ 因子无快照路径)。multi_period 的覆盖检查
+    # 在交易日历可读之后进行(下方)。与 REST 路由共用同一门控函数。
+    uncovered_predefined = referenced_predefined_factors(
+        required_factor_sources,
+        series_covered_factors=series_covered,
+    )
+    predefined_gate_error = predefined_factor_reference_gate_error(
+        required_factor_sources=required_factor_sources,
+        series_covered_factors=series_covered,
+        multi_period=resolve_decision_schedule(body.parameters) is not None,
+    )
+    if predefined_gate_error is not None:
+        raise McpToolError("invalid_argument", predefined_gate_error)
     # issue #203:入队期 single_shot 缺快照秒级拒绝(与 REST 路由共用同一门控
     # 函数,对齐 #186 预检风格)。multi_period 声明 decision_schedule(#361,
     # 含 legacy rebalance_frequency)后不受影响。issue #360:被声明因子序列
@@ -456,6 +475,9 @@ async def _build_queued_manifest(
         snapshot_anchor_mismatches,
         user_factor_reference_gate_error,
         user_factor_series_coverage_gate_error,
+    )
+    from finboard_backtest.research_code.predefined_factors import (
+        predefined_factor_series_coverage_gate_error,
     )
 
     # issue #234:screen 绑定实绑校验(REST+MCP 共用同一门控)—— 声明了
@@ -528,6 +550,23 @@ async def _build_queued_manifest(
         )
         if series_gate_error is not None:
             raise McpToolError("invalid_argument", series_gate_error)
+    if schedule is not None and uncovered_predefined:
+        if trading_days is None:
+            trading_days = await _enqueue_trading_days(primary)
+        predefined_series_error = await predefined_factor_series_coverage_gate_error(
+            referenced_predefined=uncovered_predefined,
+            series_lookup=default_series_lookup(session),
+            bars_release_id=primary.release_id,
+            dataset_release_ids=[release.release_id for release in releases],
+            decision_dates=enqueue_decision_dates(
+                parameters=body.parameters,
+                trading_days=trading_days,
+            ),
+            window_start=primary.start_date,
+            window_end=primary.end_date,
+        )
+        if predefined_series_error is not None:
+            raise McpToolError("invalid_argument", predefined_series_error)
     # issue #253:multi_period 特征可用性入队门控(与 REST 路由共用同一函数)。
     # 放在用户因子门控之后:multi_period 引用 u_ 因子先按 #217 具名拒绝。
     feature_gate_error = multi_period_feature_gate_error(
