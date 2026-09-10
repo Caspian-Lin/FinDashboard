@@ -52,6 +52,9 @@ class _Client:
     def __init__(self, rows: list[dict[str, object]]) -> None:
         self._rows = rows
 
+    def index_basic(self, **kwargs: str) -> list[dict[str, object]]:
+        return []
+
     def suspend_d(self, **kwargs: str) -> list[dict[str, object]]:
         assert kwargs["trade_date"] == "20260724"
         assert kwargs["fields"] == "ts_code,trade_date,suspend_timing,suspend_type"
