@@ -8,6 +8,30 @@ signal_eligible / 参数化窗口,``compute`` 是平台可信代码 —— 构�
 **引用命名** ``p_<name>``(``PREDEFINED_FACTOR_PREFIX``,与用户因子
 ``u_`` 对称,见 ``finboard_data.factor_lab``);目录内部只存裸名。
 
+**批次 0 样板族** ``return_{21,63,126,252}d``:同一参数化实现按 tushare
+命名展开注册(动量族 return_N)。
+
+**批次 2:Alpha101 量价因子族** ``alpha101_{N}``(issue #400,31 个):
+WorldQuant《101 Formulaic Alphas》(Kakushadze 2015)经 tushare
+``factor_list`` 口径圈定的 31 个纯 OHLCV 截面因子,公式逐条直译为 C0
+算子组合。批次级共享口径(逐因子 docstring 只写差异):
+
+* ``Returns`` = ``close / ts_delay(close, 1) - 1``(qfq 收盘日收益);
+* ``VWAP`` = ``amount / volume``(issue 验收口径的近似;量纲 = 缓存
+  两列原生单位比,非保证「元/股」——akshare 股票(元/手)下为
+  100x VWAP、tushare(千元/手)下为 10x;排名类公式对恒定缩放不敏感,
+  与价格做差比较的因子(#5/#11/#19/#25/#41/#57)受量纲影响,属已知
+  近似,跨源量纲归一留后续);
+* ``ADV20`` = ``ts_mean(volume, 20)`(与主流复现一致取成交量而非成交额);
+* ``Rank(x)`` = 逐日截面百分位 ``cs_rank``,分母 = 可交易域
+  (#380:benchmark-only 不进截面分母,``_cs_rank_series`` 收窄);
+* ``Ts_*`` = operators 时序算子(因果 trailing 窗口,前缀不变性审计
+  兜底);条件 ``IF / ?:`` 经 ``ew_where``(条件不可判 → NaN);
+* **行业中性化**:论文与 tushare 口径下本批次 31 条公式**均不含**
+  ``indneutralize`` 项(论文仅 Alpha#47/#99 使用,不在本批次);行业
+  分组装配(``inp.industry_groups()``,冻结发布 instruments.industry
+  近似 #185/#212 分组)与 :func:`industry_neutralize` 助手(缺组 →
+  缺测 + 计数)随本批次交付,供分组 sanity 与后续批次消费。
 **家族清单**(批次 0:return_{21,63,126,252}d 动量样板;#399 批次 1
 量价 74 个,同族窗口变体一份参数化实现展开注册):
 
@@ -43,30 +67,6 @@ PIT)与 ``dividend_events()``(事件史);分子 = 决策日可见的最近一次
 表流量科目为**报告期累计值**(未年化 / 未 TTM,#401 同边界);
 ``qmj_*`` 支柱与合成为截面算子产物(``cross_section=True``,采样面
 收窄到可交易域),合成口径见各条目 title/docstring。
-**批次 0 样板族** ``return_{21,63,126,252}d``:同一参数化实现按 tushare
-命名展开注册(动量族 return_N)。
-
-**批次 2:Alpha101 量价因子族** ``alpha101_{N}``(issue #400,31 个):
-WorldQuant《101 Formulaic Alphas》(Kakushadze 2015)经 tushare
-``factor_list`` 口径圈定的 31 个纯 OHLCV 截面因子,公式逐条直译为 C0
-算子组合。批次级共享口径(逐因子 docstring 只写差异):
-
-* ``Returns`` = ``close / ts_delay(close, 1) - 1``(qfq 收盘日收益);
-* ``VWAP`` = ``amount / volume``(issue 验收口径的近似;量纲 = 缓存
-  两列原生单位比,非保证「元/股」——akshare 股票(元/手)下为
-  100x VWAP、tushare(千元/手)下为 10x;排名类公式对恒定缩放不敏感,
-  与价格做差比较的因子(#5/#11/#19/#25/#41/#57)受量纲影响,属已知
-  近似,跨源量纲归一留后续);
-* ``ADV20`` = ``ts_mean(volume, 20)`(与主流复现一致取成交量而非成交额);
-* ``Rank(x)`` = 逐日截面百分位 ``cs_rank``,分母 = 可交易域
-  (#380:benchmark-only 不进截面分母,``_cs_rank_series`` 收窄);
-* ``Ts_*`` = operators 时序算子(因果 trailing 窗口,前缀不变性审计
-  兜底);条件 ``IF / ?:`` 经 ``ew_where``(条件不可判 → NaN);
-* **行业中性化**:论文与 tushare 口径下本批次 31 条公式**均不含**
-  ``indneutralize`` 项(论文仅 Alpha#47/#99 使用,不在本批次);行业
-  分组装配(``inp.industry_groups()``,冻结发布 instruments.industry
-  近似 #185/#212 分组)与 :func:`industry_neutralize` 助手(缺组 →
-  缺测 + 计数)随本批次交付,供分组 sanity 与后续批次消费。
 
 纯离线研究域,不连 broker 不下单。
 """
@@ -277,285 +277,6 @@ def _financial_definition(
         implementation_version="1",
         compute=compute or _financial_level(field),
     )
-
-
-# --------------------------------------------------------------------- #
-# 批次 4(#402):三表 / dividend 消费的价值 / 质量因子机制
-# --------------------------------------------------------------------- #
-
-#: 精确股息率的滚动窗口长度(「近 12 个月」= 决策日往前 365 天,半开
-#: 区间 ``(day - 365, day]``,按除权除息日归属)
-_DPS_WINDOW_DAYS = 365
-
-#: 逐标的原始截面(``{symbol: float}``,缺测 NaN;供支柱 rank 合成)
-_RawCross = Callable[[PredefinedFactorInput, date], dict[str, float]]
-
-
-def _safe_div(numerator: float, denominator: float) -> float:
-    """缺测纪律除法:任一端 NaN、分母 <= 0 → NaN(采样层统一归一 None)。
-
-    分母(市值 / 收盘价 / 收入 / 利润等)在本族比值里均为正量:
-    负值与 0 一样按数据异常缺测处理(不虚构反号比值;「亏损每股收益
-    分母」类语义由调用方先行具名拒绝,见 ``_payout_ratio_raw``)。
-    """
-    if not math.isfinite(numerator) or not math.isfinite(denominator):
-        return math.nan
-    if denominator <= 0.0:
-        return math.nan
-    return numerator / denominator
-
-
-def _dataset_series(
-    inp: PredefinedFactorInput, kind: str, field: str
-) -> dict[str, SymbolSeries]:
-    """按 kind 分发到对应取数口(daily_metrics 专属口 / 公告类通用口)。"""
-    if kind == "daily_metrics":
-        return inp.daily_metrics(field)
-    return inp.research_dataset(kind, field)
-
-
-@dataclass(frozen=True)
-class _NumComponent:
-    """比值分子的一项:``sign * value``;缺测按可选/必选两种语义。
-
-    * ``required=True`` —— 该项缺测 → 整个分子缺测(差值/单科目语义,
-      如应计 = 净利润 - 经营现金流,缺一不可);
-    * ``required=False`` —— 该项缺测按 0 计(合计语义:预收款项 +
-      合同负债新旧准则并存、商誉/无形资产未报告常态为空;全部分子
-      项均缺测仍 → None)。
-    """
-
-    kind: str
-    field: str
-    sign: float = 1.0
-    required: bool = False
-
-
-def _ratio_compute(
-    numerator: tuple[_NumComponent, ...],
-    denominator: tuple[str, str],
-) -> PredefinedFactorCompute:
-    """公告步进比值因子的通用实现(#402)。
-
-    每个决策日:分子 = 各公告序列「决策日可见最近公告」的带符号合成,
-    分母 = ``denominator`` 序列同日可见值(市值 / 收盘价等日频或公告
-    序列);任意一端不可见 / 分母非正 → None。universe = 分子任一序列
-    覆盖的标的(无分子数据 = 结构性缺测,不入截面,#401 同语义)。
-    """
-
-    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
-        num_series = [
-            _dataset_series(inp, item.kind, item.field) for item in numerator
-        ]
-        den_kind, den_field = denominator
-        den_series = _dataset_series(inp, den_kind, den_field)
-        universe = tuple(dict.fromkeys(
-            symbol for series in num_series for symbol in series
-        ))
-        frame: FactorSeriesFrame = {}
-        for day in inp.decision_dates:
-            cross: dict[str, float | None] = {}
-            for symbol in universe:
-                total = 0.0
-                any_value = False
-                blocked = False
-                for series, item in zip(num_series, numerator, strict=True):
-                    value = (
-                        series[symbol].asof(day)
-                        if symbol in series
-                        else math.nan
-                    )
-                    if not math.isfinite(value):
-                        if item.required:
-                            blocked = True
-                        continue
-                    total += item.sign * value
-                    any_value = True
-                if blocked or not any_value:
-                    cross[symbol] = None
-                    continue
-                den = (
-                    den_series[symbol].asof(day)
-                    if symbol in den_series
-                    else math.nan
-                )
-                value = _safe_div(total, den)
-                cross[symbol] = value if math.isfinite(value) else None
-            frame[day] = cross
-        return frame
-
-    return compute
-
-
-def _ratio_definition(
-    name: str,
-    *,
-    title: str,
-    family: str,
-    numerator: tuple[_NumComponent, ...],
-    denominator: tuple[str, str],
-    direction: FactorPreference = FactorPreference.HIGHER,
-) -> PredefinedFactorDefinition:
-    return PredefinedFactorDefinition(
-        name=name,
-        title=title,
-        family=family,
-        direction=direction,
-        signal_eligible=True,
-        data_dependencies=tuple(
-            dict.fromkeys(
-                [f"{item.kind}.{item.field}" for item in numerator]
-                + [f"{denominator[0]}.{denominator[1]}"]
-            )
-        ),
-        window=None,
-        implementation_version="1",
-        compute=_ratio_compute(numerator, denominator),
-    )
-
-
-def _dps_ttm_at(history: DividendEventHistory, day: date) -> float:
-    """近 12 个月每股现金分红(税前,元/股;除权除息日归属)。
-
-    * 决策日可见行 = ``available_at <= 决策日日终``(PIT;迟到公告在
-      可见前不计,可见后补进窗口 —— 除息日已过的分红照常计入,与
-      「除权除息日对齐」一致);
-    * 同一 ``report_period``(分红年度)的多条进展行(预案/股东大会/
-      实施)取**决策日可见的最新一行**的 (cash_div, ex_date),消除
-      进展口径重复计数;
-    * 窗口 = ``(day - 365, day]``:最新行 ``ex_date`` 落入窗口才计入
-      (未到实施阶段 ex_date 为空 → 不计;已公告但尚未除息 → 不计,
-      价格尚未除息调整)。
-    """
-    rows = history.visible_rows(day)
-    if not rows:
-        # 决策日无任何可见分红进展 → 缺测(不是 0:未知 ≠ 零分红)
-        return math.nan
-    latest: dict[date, int] = {}
-    for row in history.visible_rows(day):
-        period = history.report_periods[row]
-        if period is not None:
-            latest[period] = row
-    window_start = day - timedelta(days=_DPS_WINDOW_DAYS)
-    total = 0.0
-    for row in latest.values():
-        ex_date = history.ex_dates[row]
-        if ex_date is None or not (window_start < ex_date <= day):
-            continue
-        cash = float(history.cash_div[row])
-        if math.isfinite(cash):
-            total += cash
-    return total
-
-
-def _dps_ttm_cross(inp: PredefinedFactorInput, day: date) -> dict[str, float]:
-    """分红事件史 → 决策日近 12 个月每股分红截面(缺测 NaN)。"""
-    return {
-        symbol: _dps_ttm_at(history, day)
-        for symbol, history in inp.dividend_events().items()
-    }
-
-
-def _dividend_yield_raw(inp: PredefinedFactorInput, day: date) -> dict[str, float]:
-    """精确股息率原始截面:近 12 个月每股分红 / 决策日可见收盘价。"""
-    dps = _dps_ttm_cross(inp, day)
-    closes = inp.daily_metrics("close")
-    return {
-        symbol: _safe_div(value, closes[symbol].asof(day) if symbol in closes else math.nan)
-        for symbol, value in dps.items()
-    }
-
-
-def _payout_ratio_raw(inp: PredefinedFactorInput, day: date) -> dict[str, float]:
-    """现金分红率原始截面:近 12 个月每股分红 / 最新公告每股收益。
-
-    每股收益 ``<= 0``(亏损)→ NaN(分红率无意义,缺测不虚构);
-    分子为 0(不分红)→ 0(有效值:零分红)。
-    """
-    dps = _dps_ttm_cross(inp, day)
-    eps = inp.research_dataset("financial_indicators", "eps")
-    out: dict[str, float] = {}
-    for symbol, value in dps.items():
-        eps_value = eps[symbol].asof(day) if symbol in eps else math.nan
-        if not math.isfinite(eps_value) or eps_value <= 0.0:
-            out[symbol] = math.nan
-            continue
-        out[symbol] = _safe_div(value, eps_value)
-    return out
-
-
-@dataclass(frozen=True)
-class _PillarComponent:
-    """QMJ 支柱成分:原始截面 + 方向(LOWER-better 成分 rank 反转)。"""
-
-    raw: _RawCross
-    invert: bool = False
-
-
-def _field_cross(kind: str, field: str) -> _RawCross:
-    """公告字段 → 原始截面取数(QMJ 支柱成分的缺省形态)。"""
-
-    def cross(inp: PredefinedFactorInput, day: date) -> dict[str, float]:
-        series = _dataset_series(inp, kind, field)
-        return {
-            symbol: item.asof(day) for symbol, item in series.items()
-        }
-
-    return cross
-
-
-def _pillar_rank_cross(
-    components: tuple[_PillarComponent, ...],
-    inp: PredefinedFactorInput,
-    day: date,
-) -> dict[str, float | None]:
-    """单支柱合成:成分截面 rank 的等权均值(#380 截面契约)。
-
-    * 截面 = 可交易域(``inp.tradable_symbols``,#380:截面分母不得混入
-      benchmark-only);缺测成分不入 rank 分母(cs_rank 契约);
-    * LOWER-better 成分 rank 反转(1 - rank,值域 [0, 1));
-    * 成分 rank 的等权均值;全部成分缺测 → None(不入截面)。
-    """
-    rank_maps: list[dict[str, float | None]] = []
-    for component in components:
-        raw = {
-            symbol: value if math.isfinite(value) else None
-            for symbol, value in component.raw(inp, day).items()
-            if symbol in inp.tradable_symbols
-        }
-        ranked = cs_rank(raw)
-        if component.invert:
-            ranked = {
-                symbol: (None if value is None else 1.0 - value)
-                for symbol, value in ranked.items()
-            }
-        rank_maps.append(ranked)
-    out: dict[str, float | None] = {}
-    for symbol in inp.tradable_symbols:
-        values: list[float] = []
-        for ranks in rank_maps:
-            value = ranks.get(symbol)
-            if value is not None:
-                values.append(value)
-        if values:
-            out[symbol] = sum(values, 0.0) / len(values)
-    return out
-
-
-def _pillar_compute(
-    components: tuple[_PillarComponent, ...],
-) -> PredefinedFactorCompute:
-    """QMJ 支柱因子实现(截面 rank 均值,per 决策日)。"""
-
-    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
-        return {
-            day: _pillar_rank_cross(components, inp, day)
-            for day in inp.decision_dates
-        }
-
-    return compute
-
-
 # --------------------------------------------------------------------- #
 # 批次 1(#399)公共件:市场收益对齐与区间收益
 # --------------------------------------------------------------------- #
@@ -1017,6 +738,376 @@ def _bars_field_mean(field: str, window: int) -> PredefinedFactorCompute:
     return compute
 
 
+def _amihud(window: int) -> PredefinedFactorCompute:
+    """Amihud 非流动性:``|日收益| / 成交额`` 的 trailing 窗口均值
+    (原始量纲;成交额 0 → inf → 采样归一 None,fail-visible)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        amounts = inp.bars("amount")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            returns = _daily_returns(series.values)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                illiq = np.abs(returns) / amounts[symbol].values
+            per_symbol[symbol] = ts_mean(illiq, window)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _vwap_dev(window: int) -> PredefinedFactorCompute:
+    """收盘价对窗口 VWAP 的偏离:``close / (Σamount / Σvolume) - 1``
+    (VWAP 用 amount/volume 近似,issue #399;量纲自由)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        amounts = inp.bars("amount")
+        volumes = inp.bars("volume")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            amount_sum = ts_sum(amounts[symbol].values, window)
+            volume_sum = ts_sum(volumes[symbol].values, window)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                vwap = amount_sum / volume_sum
+                per_symbol[symbol] = series.values / vwap - 1.0
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _turnover_return_corr(window: int) -> PredefinedFactorCompute:
+    """量价相关:换手率与日收益的 trailing 窗口相关系数(对齐 = bars
+    与 daily_metrics 的日期交集,见 :func:`_aligned_pair`)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        turnover = inp.daily_metrics("turnover_rate")
+        closes = inp.bars("close")
+        series_axis: dict[str, SymbolSeries] = {}
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, turnover_series in turnover.items():
+            close_series = closes.get(symbol)
+            if close_series is None:
+                continue
+            aligned_close, turnover_values = _aligned_pair(close_series, turnover_series)
+            series_axis[symbol] = aligned_close
+            per_symbol[symbol] = ts_corr(
+                turnover_values, _daily_returns(aligned_close.values), window
+            )
+        return inp.sample(series_axis, per_symbol)
+
+    return compute
+
+
+def _log_field(field: str) -> PredefinedFactorCompute:
+    """daily_metrics 数值字段的自然对数(规模因子;非正值 → 缺测)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        series_by_symbol = inp.daily_metrics(field)
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in series_by_symbol.items():
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = np.log(series.values)
+        return inp.sample(series_by_symbol, per_symbol)
+
+    return compute
+
+
+def _float_share_ratio() -> PredefinedFactorCompute:
+    """流通股占比:``float_shares / total_shares``(流通结构暴露)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        float_shares = inp.daily_metrics("float_shares")
+        total_shares = inp.daily_metrics("total_shares")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in float_shares.items():
+            total = total_shares.get(symbol)
+            if total is None:
+                continue
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = series.values / total.values
+        return inp.sample(float_shares, per_symbol)
+
+    return compute
+
+
+# --------------------------------------------------------------------- #
+# 批次 4(#402):三表 / dividend 消费的价值 / 质量因子机制
+# --------------------------------------------------------------------- #
+
+#: 精确股息率的滚动窗口长度(「近 12 个月」= 决策日往前 365 天,半开
+#: 区间 ``(day - 365, day]``,按除权除息日归属)
+_DPS_WINDOW_DAYS = 365
+
+#: 逐标的原始截面(``{symbol: float}``,缺测 NaN;供支柱 rank 合成)
+_RawCross = Callable[[PredefinedFactorInput, date], dict[str, float]]
+
+
+def _safe_div(numerator: float, denominator: float) -> float:
+    """缺测纪律除法:任一端 NaN、分母 <= 0 → NaN(采样层统一归一 None)。
+
+    分母(市值 / 收盘价 / 收入 / 利润等)在本族比值里均为正量:
+    负值与 0 一样按数据异常缺测处理(不虚构反号比值;「亏损每股收益
+    分母」类语义由调用方先行具名拒绝,见 ``_payout_ratio_raw``)。
+    """
+    if not math.isfinite(numerator) or not math.isfinite(denominator):
+        return math.nan
+    if denominator <= 0.0:
+        return math.nan
+    return numerator / denominator
+
+
+def _dataset_series(
+    inp: PredefinedFactorInput, kind: str, field: str
+) -> dict[str, SymbolSeries]:
+    """按 kind 分发到对应取数口(daily_metrics 专属口 / 公告类通用口)。"""
+    if kind == "daily_metrics":
+        return inp.daily_metrics(field)
+    return inp.research_dataset(kind, field)
+
+
+@dataclass(frozen=True)
+class _NumComponent:
+    """比值分子的一项:``sign * value``;缺测按可选/必选两种语义。
+
+    * ``required=True`` —— 该项缺测 → 整个分子缺测(差值/单科目语义,
+      如应计 = 净利润 - 经营现金流,缺一不可);
+    * ``required=False`` —— 该项缺测按 0 计(合计语义:预收款项 +
+      合同负债新旧准则并存、商誉/无形资产未报告常态为空;全部分子
+      项均缺测仍 → None)。
+    """
+
+    kind: str
+    field: str
+    sign: float = 1.0
+    required: bool = False
+
+
+def _ratio_compute(
+    numerator: tuple[_NumComponent, ...],
+    denominator: tuple[str, str],
+) -> PredefinedFactorCompute:
+    """公告步进比值因子的通用实现(#402)。
+
+    每个决策日:分子 = 各公告序列「决策日可见最近公告」的带符号合成,
+    分母 = ``denominator`` 序列同日可见值(市值 / 收盘价等日频或公告
+    序列);任意一端不可见 / 分母非正 → None。universe = 分子任一序列
+    覆盖的标的(无分子数据 = 结构性缺测,不入截面,#401 同语义)。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        num_series = [
+            _dataset_series(inp, item.kind, item.field) for item in numerator
+        ]
+        den_kind, den_field = denominator
+        den_series = _dataset_series(inp, den_kind, den_field)
+        universe = tuple(dict.fromkeys(
+            symbol for series in num_series for symbol in series
+        ))
+        frame: FactorSeriesFrame = {}
+        for day in inp.decision_dates:
+            cross: dict[str, float | None] = {}
+            for symbol in universe:
+                total = 0.0
+                any_value = False
+                blocked = False
+                for series, item in zip(num_series, numerator, strict=True):
+                    value = (
+                        series[symbol].asof(day)
+                        if symbol in series
+                        else math.nan
+                    )
+                    if not math.isfinite(value):
+                        if item.required:
+                            blocked = True
+                        continue
+                    total += item.sign * value
+                    any_value = True
+                if blocked or not any_value:
+                    cross[symbol] = None
+                    continue
+                den = (
+                    den_series[symbol].asof(day)
+                    if symbol in den_series
+                    else math.nan
+                )
+                value = _safe_div(total, den)
+                cross[symbol] = value if math.isfinite(value) else None
+            frame[day] = cross
+        return frame
+
+    return compute
+
+
+def _ratio_definition(
+    name: str,
+    *,
+    title: str,
+    family: str,
+    numerator: tuple[_NumComponent, ...],
+    denominator: tuple[str, str],
+    direction: FactorPreference = FactorPreference.HIGHER,
+) -> PredefinedFactorDefinition:
+    return PredefinedFactorDefinition(
+        name=name,
+        title=title,
+        family=family,
+        direction=direction,
+        signal_eligible=True,
+        data_dependencies=tuple(
+            dict.fromkeys(
+                [f"{item.kind}.{item.field}" for item in numerator]
+                + [f"{denominator[0]}.{denominator[1]}"]
+            )
+        ),
+        window=None,
+        implementation_version="1",
+        compute=_ratio_compute(numerator, denominator),
+    )
+
+
+def _dps_ttm_at(history: DividendEventHistory, day: date) -> float:
+    """近 12 个月每股现金分红(税前,元/股;除权除息日归属)。
+
+    * 决策日可见行 = ``available_at <= 决策日日终``(PIT;迟到公告在
+      可见前不计,可见后补进窗口 —— 除息日已过的分红照常计入,与
+      「除权除息日对齐」一致);
+    * 同一 ``report_period``(分红年度)的多条进展行(预案/股东大会/
+      实施)取**决策日可见的最新一行**的 (cash_div, ex_date),消除
+      进展口径重复计数;
+    * 窗口 = ``(day - 365, day]``:最新行 ``ex_date`` 落入窗口才计入
+      (未到实施阶段 ex_date 为空 → 不计;已公告但尚未除息 → 不计,
+      价格尚未除息调整)。
+    """
+    rows = history.visible_rows(day)
+    if not rows:
+        # 决策日无任何可见分红进展 → 缺测(不是 0:未知 ≠ 零分红)
+        return math.nan
+    latest: dict[date, int] = {}
+    for row in history.visible_rows(day):
+        period = history.report_periods[row]
+        if period is not None:
+            latest[period] = row
+    window_start = day - timedelta(days=_DPS_WINDOW_DAYS)
+    total = 0.0
+    for row in latest.values():
+        ex_date = history.ex_dates[row]
+        if ex_date is None or not (window_start < ex_date <= day):
+            continue
+        cash = float(history.cash_div[row])
+        if math.isfinite(cash):
+            total += cash
+    return total
+
+
+def _dps_ttm_cross(inp: PredefinedFactorInput, day: date) -> dict[str, float]:
+    """分红事件史 → 决策日近 12 个月每股分红截面(缺测 NaN)。"""
+    return {
+        symbol: _dps_ttm_at(history, day)
+        for symbol, history in inp.dividend_events().items()
+    }
+
+
+def _dividend_yield_raw(inp: PredefinedFactorInput, day: date) -> dict[str, float]:
+    """精确股息率原始截面:近 12 个月每股分红 / 决策日可见收盘价。"""
+    dps = _dps_ttm_cross(inp, day)
+    closes = inp.daily_metrics("close")
+    return {
+        symbol: _safe_div(value, closes[symbol].asof(day) if symbol in closes else math.nan)
+        for symbol, value in dps.items()
+    }
+
+
+def _payout_ratio_raw(inp: PredefinedFactorInput, day: date) -> dict[str, float]:
+    """现金分红率原始截面:近 12 个月每股分红 / 最新公告每股收益。
+
+    每股收益 ``<= 0``(亏损)→ NaN(分红率无意义,缺测不虚构);
+    分子为 0(不分红)→ 0(有效值:零分红)。
+    """
+    dps = _dps_ttm_cross(inp, day)
+    eps = inp.research_dataset("financial_indicators", "eps")
+    out: dict[str, float] = {}
+    for symbol, value in dps.items():
+        eps_value = eps[symbol].asof(day) if symbol in eps else math.nan
+        if not math.isfinite(eps_value) or eps_value <= 0.0:
+            out[symbol] = math.nan
+            continue
+        out[symbol] = _safe_div(value, eps_value)
+    return out
+
+
+@dataclass(frozen=True)
+class _PillarComponent:
+    """QMJ 支柱成分:原始截面 + 方向(LOWER-better 成分 rank 反转)。"""
+
+    raw: _RawCross
+    invert: bool = False
+
+
+def _field_cross(kind: str, field: str) -> _RawCross:
+    """公告字段 → 原始截面取数(QMJ 支柱成分的缺省形态)。"""
+
+    def cross(inp: PredefinedFactorInput, day: date) -> dict[str, float]:
+        series = _dataset_series(inp, kind, field)
+        return {
+            symbol: item.asof(day) for symbol, item in series.items()
+        }
+
+    return cross
+
+
+def _pillar_rank_cross(
+    components: tuple[_PillarComponent, ...],
+    inp: PredefinedFactorInput,
+    day: date,
+) -> dict[str, float | None]:
+    """单支柱合成:成分截面 rank 的等权均值(#380 截面契约)。
+
+    * 截面 = 可交易域(``inp.tradable_symbols``,#380:截面分母不得混入
+      benchmark-only);缺测成分不入 rank 分母(cs_rank 契约);
+    * LOWER-better 成分 rank 反转(1 - rank,值域 [0, 1));
+    * 成分 rank 的等权均值;全部成分缺测 → None(不入截面)。
+    """
+    rank_maps: list[dict[str, float | None]] = []
+    for component in components:
+        raw = {
+            symbol: value if math.isfinite(value) else None
+            for symbol, value in component.raw(inp, day).items()
+            if symbol in inp.tradable_symbols
+        }
+        ranked = cs_rank(raw)
+        if component.invert:
+            ranked = {
+                symbol: (None if value is None else 1.0 - value)
+                for symbol, value in ranked.items()
+            }
+        rank_maps.append(ranked)
+    out: dict[str, float | None] = {}
+    for symbol in inp.tradable_symbols:
+        values: list[float] = []
+        for ranks in rank_maps:
+            value = ranks.get(symbol)
+            if value is not None:
+                values.append(value)
+        if values:
+            out[symbol] = sum(values, 0.0) / len(values)
+    return out
+
+
+def _pillar_compute(
+    components: tuple[_PillarComponent, ...],
+) -> PredefinedFactorCompute:
+    """QMJ 支柱因子实现(截面 rank 均值,per 决策日)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        return {
+            day: _pillar_rank_cross(components, inp, day)
+            for day in inp.decision_dates
+        }
+
+    return compute
+
+
 def _pillar_definition(
     name: str,
     *,
@@ -1140,24 +1231,6 @@ def _qmj_compute() -> PredefinedFactorCompute:
     return compute
 
 
-def _amihud(window: int) -> PredefinedFactorCompute:
-    """Amihud 非流动性:``|日收益| / 成交额`` 的 trailing 窗口均值
-    (原始量纲;成交额 0 → inf → 采样归一 None,fail-visible)。"""
-
-    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
-        closes = inp.bars("close")
-        amounts = inp.bars("amount")
-        per_symbol: dict[str, np.ndarray] = {}
-        for symbol, series in closes.items():
-            returns = _daily_returns(series.values)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                illiq = np.abs(returns) / amounts[symbol].values
-            per_symbol[symbol] = ts_mean(illiq, window)
-        return inp.sample(closes, per_symbol)
-
-    return compute
-
-
 def _pillar_and_qmj_entries() -> tuple[PredefinedFactorDefinition, ...]:
     """AQR QMJ 四支柱 + 综合因子的目录条目(#402)。
 
@@ -1222,79 +1295,6 @@ def _pillar_and_qmj_entries() -> tuple[PredefinedFactorDefinition, ...]:
         cross_section=True,
     )
     return (*pillar_entries, qmj_entry)
-def _vwap_dev(window: int) -> PredefinedFactorCompute:
-    """收盘价对窗口 VWAP 的偏离:``close / (Σamount / Σvolume) - 1``
-    (VWAP 用 amount/volume 近似,issue #399;量纲自由)。"""
-
-    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
-        closes = inp.bars("close")
-        amounts = inp.bars("amount")
-        volumes = inp.bars("volume")
-        per_symbol: dict[str, np.ndarray] = {}
-        for symbol, series in closes.items():
-            amount_sum = ts_sum(amounts[symbol].values, window)
-            volume_sum = ts_sum(volumes[symbol].values, window)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                vwap = amount_sum / volume_sum
-                per_symbol[symbol] = series.values / vwap - 1.0
-        return inp.sample(closes, per_symbol)
-
-    return compute
-
-
-def _turnover_return_corr(window: int) -> PredefinedFactorCompute:
-    """量价相关:换手率与日收益的 trailing 窗口相关系数(对齐 = bars
-    与 daily_metrics 的日期交集,见 :func:`_aligned_pair`)。"""
-
-    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
-        turnover = inp.daily_metrics("turnover_rate")
-        closes = inp.bars("close")
-        series_axis: dict[str, SymbolSeries] = {}
-        per_symbol: dict[str, np.ndarray] = {}
-        for symbol, turnover_series in turnover.items():
-            close_series = closes.get(symbol)
-            if close_series is None:
-                continue
-            aligned_close, turnover_values = _aligned_pair(close_series, turnover_series)
-            series_axis[symbol] = aligned_close
-            per_symbol[symbol] = ts_corr(
-                turnover_values, _daily_returns(aligned_close.values), window
-            )
-        return inp.sample(series_axis, per_symbol)
-
-    return compute
-
-
-def _log_field(field: str) -> PredefinedFactorCompute:
-    """daily_metrics 数值字段的自然对数(规模因子;非正值 → 缺测)。"""
-
-    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
-        series_by_symbol = inp.daily_metrics(field)
-        per_symbol: dict[str, np.ndarray] = {}
-        for symbol, series in series_by_symbol.items():
-            with np.errstate(invalid="ignore", divide="ignore"):
-                per_symbol[symbol] = np.log(series.values)
-        return inp.sample(series_by_symbol, per_symbol)
-
-    return compute
-
-
-def _float_share_ratio() -> PredefinedFactorCompute:
-    """流通股占比:``float_shares / total_shares``(流通结构暴露)。"""
-
-    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
-        float_shares = inp.daily_metrics("float_shares")
-        total_shares = inp.daily_metrics("total_shares")
-        per_symbol: dict[str, np.ndarray] = {}
-        for symbol, series in float_shares.items():
-            total = total_shares.get(symbol)
-            if total is None:
-                continue
-            with np.errstate(invalid="ignore", divide="ignore"):
-                per_symbol[symbol] = series.values / total.values
-        return inp.sample(float_shares, per_symbol)
-
-    return compute
 
 
 def _definition(
@@ -1337,401 +1337,6 @@ def _raw_cross_frame(raw: _RawCross) -> PredefinedFactorCompute:
         }
 
     return compute
-def _entry(
-    name: str,
-    *,
-    title: str,
-    family: str,
-    compute: PredefinedFactorCompute,
-    window: int | None = None,
-    direction: FactorPreference = FactorPreference.HIGHER,
-    signal_eligible: bool = True,
-    cross_section: bool = False,
-    data_dependencies: tuple[str, ...] = ("bars.close",),
-    implementation_version: str = "1",
-    min_history_bars: int | None = None,
-) -> PredefinedFactorDefinition:
-    """批次 1(#399)通用条目工厂:参数化 compute + 显式目录字段。"""
-    return PredefinedFactorDefinition(
-        name=name,
-        title=title,
-        family=family,
-        direction=direction,
-        signal_eligible=signal_eligible,
-        data_dependencies=data_dependencies,
-        window=window,
-        implementation_version=implementation_version,
-        compute=compute,
-        cross_section=cross_section,
-        min_history_bars=min_history_bars,
-    )
-
-
-def _vol_entries() -> tuple[PredefinedFactorDefinition, ...]:
-    """risk 族 24 个(波动率窗口展开 / beta / 特异波动 / 市场相关 /
-    Sharpe / 高阶矩 / 回撤;指数依赖因子声明 ``index_bars.close``,
-    3 个 1320d 长窗口声明 ``min_history_bars`` 覆盖起点)。"""
-    vol_windows = (20, 60, 120, 250)
-    entries: list[PredefinedFactorDefinition] = [
-        _entry(
-            f"vol_{window}d",
-            title=f"vol_{window}d = 日收益 trailing {window} 根 bar 样本标准差"
-            "(已实现波动,未年化;低波动异象 direction LOWER)",
-            family="risk",
-            compute=_realized_vol(window),
-            window=window,
-            direction=FactorPreference.LOWER,
-            signal_eligible=False,
-        )
-        for window in vol_windows
-    ]
-    entries.append(
-        _entry(
-            "vol_ratio_20_60d",
-            title="vol_ratio_20_60d = vol_20d / vol_60d(>1 波动放大)",
-            family="risk",
-            compute=_vol_ratio(20, 60),
-            window=60,
-            direction=FactorPreference.LOWER,
-            signal_eligible=False,
-        )
-    )
-    for window in (60, 120, 250):
-        entries.append(
-            _entry(
-                f"beta_{window}d",
-                title=f"beta_{window}d = 日收益对市场收益(000300.SH)trailing "
-                f"{window} 根 bar OLS 斜率(低 beta 异象 direction LOWER)",
-                family="risk",
-                compute=_beta(window),
-                window=window,
-                direction=FactorPreference.LOWER,
-                signal_eligible=False,
-                data_dependencies=("bars.close", "index_bars.close"),
-            )
-        )
-    entries.append(
-        _entry(
-            "beta_1320d",
-            title="beta_1320d = 日收益对市场收益 trailing 1320 根 bar OLS 斜率"
-            "(5 年长窗;min_history_bars=1320 声明覆盖起点)",
-            family="risk",
-            compute=_beta(1320),
-            window=1320,
-            direction=FactorPreference.LOWER,
-            signal_eligible=False,
-            data_dependencies=("bars.close", "index_bars.close"),
-            min_history_bars=1320,
-        )
-    )
-    for window in (60, 120, 250):
-        entries.append(
-            _entry(
-                f"specific_vol_{window}d",
-                title=f"specific_vol_{window}d = 总波动 x sqrt(max(0, 1 - ρ²))"
-                f"({window} 根 bar 市场模型特异波动)",
-                family="risk",
-                compute=_specific_vol(window),
-                window=window,
-                direction=FactorPreference.LOWER,
-                signal_eligible=False,
-                data_dependencies=("bars.close", "index_bars.close"),
-            )
-        )
-    for window in (60, 120, 250):
-        entries.append(
-            _entry(
-                f"corr_market_{window}d",
-                title=f"corr_market_{window}d = 日收益与市场收益 trailing {window}"
-                " 根 bar 相关系数(低相关 = 分散价值)",
-                family="risk",
-                compute=_corr_market(window),
-                window=window,
-                direction=FactorPreference.LOWER,
-                signal_eligible=False,
-                data_dependencies=("bars.close", "index_bars.close"),
-            )
-        )
-    entries.append(
-        _entry(
-            "corr_market_1320d",
-            title="corr_market_1320d = 日收益与市场收益 trailing 1320 根 bar 相关"
-            "系数(5 年长窗;min_history_bars=1320 声明覆盖起点)",
-            family="risk",
-            compute=_corr_market(1320),
-            window=1320,
-            direction=FactorPreference.LOWER,
-            signal_eligible=False,
-            data_dependencies=("bars.close", "index_bars.close"),
-            min_history_bars=1320,
-        )
-    )
-    for window in (60, 120, 250):
-        entries.append(
-            _entry(
-                f"sharpe_{window}d",
-                title=f"sharpe_{window}d = 日收益均值 / 日收益标准差 x √250"
-                f"({window} 根 bar,无风险利率 0)",
-                family="risk",
-                compute=_sharpe(window),
-                window=window,
-                signal_eligible=False,
-            )
-        )
-    entries.append(
-        _entry(
-            "sharpe_1320d",
-            title="sharpe_1320d = 日收益均值 / 日收益标准差 x √250(5 年长窗;"
-            "min_history_bars=1320 声明覆盖起点)",
-            family="risk",
-            compute=_sharpe(1320),
-            window=1320,
-            signal_eligible=False,
-            min_history_bars=1320,
-        )
-    )
-    entries.extend(
-        (
-            _entry(
-                "skew_250d",
-                title="skew_250d = 日收益 trailing 250 根 bar 偏度(修正 "
-                "Fisher-Pearson;彩票偏好 direction LOWER)",
-                family="risk",
-                compute=_return_skew(250),
-                window=250,
-                direction=FactorPreference.LOWER,
-                signal_eligible=False,
-            ),
-            _entry(
-                "kurt_250d",
-                title="kurt_250d = 日收益 trailing 250 根 bar 超额峰度(尾部"
-                "风险 direction LOWER)",
-                family="risk",
-                compute=_return_kurt(250),
-                window=250,
-                direction=FactorPreference.LOWER,
-                signal_eligible=False,
-            ),
-            _entry(
-                "downside_vol_250d",
-                title="downside_vol_250d = 窗口内负日收益的样本标准差(下行波动)",
-                family="risk",
-                compute=_downside_vol(250),
-                window=250,
-                direction=FactorPreference.LOWER,
-                signal_eligible=False,
-            ),
-            _entry(
-                "drawdown_250d",
-                title="drawdown_250d = (max_250 - close) / max_250(距窗口最高"
-                "收盘的回撤深度)",
-                family="risk",
-                compute=_drawdown(250),
-                window=250,
-                direction=FactorPreference.LOWER,
-                signal_eligible=False,
-            ),
-        )
-    )
-    return tuple(entries)
-
-
-def _liquidity_entries() -> tuple[PredefinedFactorDefinition, ...]:
-    """liquidity 族 32 个(换手率 MA/STD/乖离/Z/比值 x 窗口展开,原料
-    ``daily_metrics.turnover_rate``;成交额 / 成交量均值;Amihud 非流动
-    性;VWAP 偏离;量价相关)。"""
-    entries: list[PredefinedFactorDefinition] = []
-    for window in (5, 10, 20, 60, 120, 250):
-        entries.append(
-            _entry(
-                f"turnover_ma_{window}d",
-                title=f"turnover_ma_{window}d = 换手率 trailing {window} 日均值"
-                "(daily_metrics.turnover_rate)",
-                family="liquidity",
-                compute=_turnover_stat("ma", window),
-                window=window,
-                signal_eligible=False,
-                data_dependencies=("daily_metrics.turnover_rate",),
-            )
-        )
-    for window in (10, 20, 60, 120, 250):
-        entries.append(
-            _entry(
-                f"turnover_std_{window}d",
-                title=f"turnover_std_{window}d = 换手率 trailing {window} 日样本"
-                "标准差(换手波动)",
-                family="liquidity",
-                compute=_turnover_stat("std", window),
-                window=window,
-                direction=FactorPreference.LOWER,
-                signal_eligible=False,
-                data_dependencies=("daily_metrics.turnover_rate",),
-            )
-        )
-    for window in (20, 60, 250):
-        entries.append(
-            _entry(
-                f"turnover_bias_{window}d",
-                title=f"turnover_bias_{window}d = 换手率 / {window} 日均值 - 1"
-                "(换手乖离,放量异常)",
-                family="liquidity",
-                compute=_turnover_stat("bias", window),
-                window=window,
-                signal_eligible=False,
-                data_dependencies=("daily_metrics.turnover_rate",),
-            )
-        )
-    for window in (60, 250):
-        entries.append(
-            _entry(
-                f"turnover_z_{window}d",
-                title=f"turnover_z_{window}d = (换手率 - {window} 日均值) / "
-                f"{window} 日标准差(标准化异常换手)",
-                family="liquidity",
-                compute=_turnover_stat("z", window),
-                window=window,
-                signal_eligible=False,
-                data_dependencies=("daily_metrics.turnover_rate",),
-            )
-        )
-    entries.extend(
-        (
-            _entry(
-                "turnover_ratio_5_20d",
-                title="turnover_ratio_5_20d = 5 日换手均值 / 20 日换手均值"
-                "(短期换手趋势)",
-                family="liquidity",
-                compute=_turnover_stat("ratio", 20, fast=5),
-                window=20,
-                signal_eligible=False,
-                data_dependencies=("daily_metrics.turnover_rate",),
-            ),
-            _entry(
-                "turnover_ratio_20_60d",
-                title="turnover_ratio_20_60d = 20 日换手均值 / 60 日换手均值",
-                family="liquidity",
-                compute=_turnover_stat("ratio", 60, fast=20),
-                window=60,
-                signal_eligible=False,
-                data_dependencies=("daily_metrics.turnover_rate",),
-            ),
-        )
-    )
-    for window in (20, 60, 250):
-        entries.append(
-            _entry(
-                f"amount_ma_{window}d",
-                title=f"amount_ma_{window}d = 成交额 trailing {window} 根 bar 均值"
-                "(流动性规模)",
-                family="liquidity",
-                compute=_bars_field_mean("amount", window),
-                window=window,
-                signal_eligible=False,
-                data_dependencies=("bars.amount",),
-            )
-        )
-    for window in (20, 60, 250):
-        entries.append(
-            _entry(
-                f"volume_ma_{window}d",
-                title=f"volume_ma_{window}d = 成交量 trailing {window} 根 bar 均值",
-                family="liquidity",
-                compute=_bars_field_mean("volume", window),
-                window=window,
-                signal_eligible=False,
-                data_dependencies=("bars.volume",),
-            )
-        )
-    for window in (20, 60, 120, 250):
-        entries.append(
-            _entry(
-                f"amihud_{window}d",
-                title=f"amihud_{window}d = |日收益| / 成交额 的 {window} 根 bar "
-                "均值(Amihud 非流动性,原始量纲)",
-                family="liquidity",
-                compute=_amihud(window),
-                window=window,
-                signal_eligible=False,
-                data_dependencies=("bars.close", "bars.amount"),
-            )
-        )
-    for window in (20, 60):
-        entries.append(
-            _entry(
-                f"vwap_dev_{window}d",
-                title=f"vwap_dev_{window}d = close / (Σamount / Σvolume) - 1"
-                f"({window} 根 bar VWAP 偏离,amount/volume 近似)",
-                family="liquidity",
-                compute=_vwap_dev(window),
-                window=window,
-                signal_eligible=False,
-                data_dependencies=("bars.close", "bars.amount", "bars.volume"),
-            )
-        )
-    for window in (20, 60):
-        entries.append(
-            _entry(
-                f"turnover_ret_corr_{window}d",
-                title=f"turnover_ret_corr_{window}d = 换手率与日收益 {window} 根"
-                " bar 相关系数(量价确认/背离)",
-                family="liquidity",
-                compute=_turnover_return_corr(window),
-                window=window,
-                direction=FactorPreference.LOWER,
-                signal_eligible=False,
-                data_dependencies=("daily_metrics.turnover_rate", "bars.close"),
-            )
-        )
-    return tuple(entries)
-
-
-def _size_entries() -> tuple[PredefinedFactorDefinition, ...]:
-    """size 族 3 个(规模暴露,signal_eligible=False,#214;小市值溢价
-    → direction LOWER;window=None,逐日截面原料值/变换)。"""
-    return (
-        _entry(
-            "log_total_market_cap",
-            title="log_total_market_cap = ln(总市值)(规模暴露;daily_metrics."
-            "total_market_cap)",
-            family="size",
-            compute=_log_field("total_market_cap"),
-            direction=FactorPreference.LOWER,
-            signal_eligible=False,
-            data_dependencies=("daily_metrics.total_market_cap",),
-        ),
-        _entry(
-            "log_circulating_market_cap",
-            title="log_circulating_market_cap = ln(流通市值)(daily_metrics."
-            "circulating_market_cap)",
-            family="size",
-            compute=_log_field("circulating_market_cap"),
-            direction=FactorPreference.LOWER,
-            signal_eligible=False,
-            data_dependencies=("daily_metrics.circulating_market_cap",),
-        ),
-        _entry(
-            "float_share_ratio",
-            title="float_share_ratio = 流通股本 / 总股本(流通结构暴露)",
-            family="size",
-            compute=_float_share_ratio(),
-            direction=FactorPreference.LOWER,
-            signal_eligible=False,
-            data_dependencies=("daily_metrics.float_shares", "daily_metrics.total_shares"),
-        ),
-    )
-
-
-#: 目录(裸名 → 条目)。批次 0 样板:return_Nd 动量族(4 窗口变体);
-#: 批次 1-4(~150+ 因子)按同一模式在此追加注册。
-#:
-#: 批次 3(#401):fina_indicator 白名单扩展解锁的 40 个 Growth / Quality
-#: 财务因子 —— 数据依赖 = ``financial_indicators.<field>``,公告频率步进
-#: 序列(采样取决策日可见的最近一次公告),字段由 #401 扩展白名单提供
-#: (announcement_date PIT,available_at = 公告次日零点上海时区)。
-#:
-#: 批次 4(#402):三表 + dividend 消费 —— ``val_*``(11 个经典价值)、
-#: ``qlt_*``(9 个质量补全)、``qmj_*``(AQR QMJ 四支柱 + 综合,截面
-#: rank 合成口径见 :func:`_qmj_components` / 各条目 title)。
 # --------------------------------------------------------------------- #
 # Alpha101 批次(issue #400)——共享口径辅助
 # --------------------------------------------------------------------- #
@@ -2796,11 +2401,402 @@ _ALPHA101_FACTORS: tuple[PredefinedFactorDefinition, ...] = (
         data_dependencies=("bars.close", "bars.open", "bars.high", "bars.low"),
     ),
 )
+def _entry(
+    name: str,
+    *,
+    title: str,
+    family: str,
+    compute: PredefinedFactorCompute,
+    window: int | None = None,
+    direction: FactorPreference = FactorPreference.HIGHER,
+    signal_eligible: bool = True,
+    cross_section: bool = False,
+    data_dependencies: tuple[str, ...] = ("bars.close",),
+    implementation_version: str = "1",
+    min_history_bars: int | None = None,
+) -> PredefinedFactorDefinition:
+    """批次 1(#399)通用条目工厂:参数化 compute + 显式目录字段。"""
+    return PredefinedFactorDefinition(
+        name=name,
+        title=title,
+        family=family,
+        direction=direction,
+        signal_eligible=signal_eligible,
+        data_dependencies=data_dependencies,
+        window=window,
+        implementation_version=implementation_version,
+        compute=compute,
+        cross_section=cross_section,
+        min_history_bars=min_history_bars,
+    )
 
+
+def _vol_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """risk 族 24 个(波动率窗口展开 / beta / 特异波动 / 市场相关 /
+    Sharpe / 高阶矩 / 回撤;指数依赖因子声明 ``index_bars.close``,
+    3 个 1320d 长窗口声明 ``min_history_bars`` 覆盖起点)。"""
+    vol_windows = (20, 60, 120, 250)
+    entries: list[PredefinedFactorDefinition] = [
+        _entry(
+            f"vol_{window}d",
+            title=f"vol_{window}d = 日收益 trailing {window} 根 bar 样本标准差"
+            "(已实现波动,未年化;低波动异象 direction LOWER)",
+            family="risk",
+            compute=_realized_vol(window),
+            window=window,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+        )
+        for window in vol_windows
+    ]
+    entries.append(
+        _entry(
+            "vol_ratio_20_60d",
+            title="vol_ratio_20_60d = vol_20d / vol_60d(>1 波动放大)",
+            family="risk",
+            compute=_vol_ratio(20, 60),
+            window=60,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+        )
+    )
+    for window in (60, 120, 250):
+        entries.append(
+            _entry(
+                f"beta_{window}d",
+                title=f"beta_{window}d = 日收益对市场收益(000300.SH)trailing "
+                f"{window} 根 bar OLS 斜率(低 beta 异象 direction LOWER)",
+                family="risk",
+                compute=_beta(window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "index_bars.close"),
+            )
+        )
+    entries.append(
+        _entry(
+            "beta_1320d",
+            title="beta_1320d = 日收益对市场收益 trailing 1320 根 bar OLS 斜率"
+            "(5 年长窗;min_history_bars=1320 声明覆盖起点)",
+            family="risk",
+            compute=_beta(1320),
+            window=1320,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("bars.close", "index_bars.close"),
+            min_history_bars=1320,
+        )
+    )
+    for window in (60, 120, 250):
+        entries.append(
+            _entry(
+                f"specific_vol_{window}d",
+                title=f"specific_vol_{window}d = 总波动 x sqrt(max(0, 1 - ρ²))"
+                f"({window} 根 bar 市场模型特异波动)",
+                family="risk",
+                compute=_specific_vol(window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "index_bars.close"),
+            )
+        )
+    for window in (60, 120, 250):
+        entries.append(
+            _entry(
+                f"corr_market_{window}d",
+                title=f"corr_market_{window}d = 日收益与市场收益 trailing {window}"
+                " 根 bar 相关系数(低相关 = 分散价值)",
+                family="risk",
+                compute=_corr_market(window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "index_bars.close"),
+            )
+        )
+    entries.append(
+        _entry(
+            "corr_market_1320d",
+            title="corr_market_1320d = 日收益与市场收益 trailing 1320 根 bar 相关"
+            "系数(5 年长窗;min_history_bars=1320 声明覆盖起点)",
+            family="risk",
+            compute=_corr_market(1320),
+            window=1320,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("bars.close", "index_bars.close"),
+            min_history_bars=1320,
+        )
+    )
+    for window in (60, 120, 250):
+        entries.append(
+            _entry(
+                f"sharpe_{window}d",
+                title=f"sharpe_{window}d = 日收益均值 / 日收益标准差 x √250"
+                f"({window} 根 bar,无风险利率 0)",
+                family="risk",
+                compute=_sharpe(window),
+                window=window,
+                signal_eligible=False,
+            )
+        )
+    entries.append(
+        _entry(
+            "sharpe_1320d",
+            title="sharpe_1320d = 日收益均值 / 日收益标准差 x √250(5 年长窗;"
+            "min_history_bars=1320 声明覆盖起点)",
+            family="risk",
+            compute=_sharpe(1320),
+            window=1320,
+            signal_eligible=False,
+            min_history_bars=1320,
+        )
+    )
+    entries.extend(
+        (
+            _entry(
+                "skew_250d",
+                title="skew_250d = 日收益 trailing 250 根 bar 偏度(修正 "
+                "Fisher-Pearson;彩票偏好 direction LOWER)",
+                family="risk",
+                compute=_return_skew(250),
+                window=250,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+            ),
+            _entry(
+                "kurt_250d",
+                title="kurt_250d = 日收益 trailing 250 根 bar 超额峰度(尾部"
+                "风险 direction LOWER)",
+                family="risk",
+                compute=_return_kurt(250),
+                window=250,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+            ),
+            _entry(
+                "downside_vol_250d",
+                title="downside_vol_250d = 窗口内负日收益的样本标准差(下行波动)",
+                family="risk",
+                compute=_downside_vol(250),
+                window=250,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+            ),
+            _entry(
+                "drawdown_250d",
+                title="drawdown_250d = (max_250 - close) / max_250(距窗口最高"
+                "收盘的回撤深度)",
+                family="risk",
+                compute=_drawdown(250),
+                window=250,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+            ),
+        )
+    )
+    return tuple(entries)
+
+
+def _liquidity_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """liquidity 族 32 个(换手率 MA/STD/乖离/Z/比值 x 窗口展开,原料
+    ``daily_metrics.turnover_rate``;成交额 / 成交量均值;Amihud 非流动
+    性;VWAP 偏离;量价相关)。"""
+    entries: list[PredefinedFactorDefinition] = []
+    for window in (5, 10, 20, 60, 120, 250):
+        entries.append(
+            _entry(
+                f"turnover_ma_{window}d",
+                title=f"turnover_ma_{window}d = 换手率 trailing {window} 日均值"
+                "(daily_metrics.turnover_rate)",
+                family="liquidity",
+                compute=_turnover_stat("ma", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            )
+        )
+    for window in (10, 20, 60, 120, 250):
+        entries.append(
+            _entry(
+                f"turnover_std_{window}d",
+                title=f"turnover_std_{window}d = 换手率 trailing {window} 日样本"
+                "标准差(换手波动)",
+                family="liquidity",
+                compute=_turnover_stat("std", window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            )
+        )
+    for window in (20, 60, 250):
+        entries.append(
+            _entry(
+                f"turnover_bias_{window}d",
+                title=f"turnover_bias_{window}d = 换手率 / {window} 日均值 - 1"
+                "(换手乖离,放量异常)",
+                family="liquidity",
+                compute=_turnover_stat("bias", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            )
+        )
+    for window in (60, 250):
+        entries.append(
+            _entry(
+                f"turnover_z_{window}d",
+                title=f"turnover_z_{window}d = (换手率 - {window} 日均值) / "
+                f"{window} 日标准差(标准化异常换手)",
+                family="liquidity",
+                compute=_turnover_stat("z", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            )
+        )
+    entries.extend(
+        (
+            _entry(
+                "turnover_ratio_5_20d",
+                title="turnover_ratio_5_20d = 5 日换手均值 / 20 日换手均值"
+                "(短期换手趋势)",
+                family="liquidity",
+                compute=_turnover_stat("ratio", 20, fast=5),
+                window=20,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            ),
+            _entry(
+                "turnover_ratio_20_60d",
+                title="turnover_ratio_20_60d = 20 日换手均值 / 60 日换手均值",
+                family="liquidity",
+                compute=_turnover_stat("ratio", 60, fast=20),
+                window=60,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate",),
+            ),
+        )
+    )
+    for window in (20, 60, 250):
+        entries.append(
+            _entry(
+                f"amount_ma_{window}d",
+                title=f"amount_ma_{window}d = 成交额 trailing {window} 根 bar 均值"
+                "(流动性规模)",
+                family="liquidity",
+                compute=_bars_field_mean("amount", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("bars.amount",),
+            )
+        )
+    for window in (20, 60, 250):
+        entries.append(
+            _entry(
+                f"volume_ma_{window}d",
+                title=f"volume_ma_{window}d = 成交量 trailing {window} 根 bar 均值",
+                family="liquidity",
+                compute=_bars_field_mean("volume", window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("bars.volume",),
+            )
+        )
+    for window in (20, 60, 120, 250):
+        entries.append(
+            _entry(
+                f"amihud_{window}d",
+                title=f"amihud_{window}d = |日收益| / 成交额 的 {window} 根 bar "
+                "均值(Amihud 非流动性,原始量纲)",
+                family="liquidity",
+                compute=_amihud(window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "bars.amount"),
+            )
+        )
+    for window in (20, 60):
+        entries.append(
+            _entry(
+                f"vwap_dev_{window}d",
+                title=f"vwap_dev_{window}d = close / (Σamount / Σvolume) - 1"
+                f"({window} 根 bar VWAP 偏离,amount/volume 近似)",
+                family="liquidity",
+                compute=_vwap_dev(window),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "bars.amount", "bars.volume"),
+            )
+        )
+    for window in (20, 60):
+        entries.append(
+            _entry(
+                f"turnover_ret_corr_{window}d",
+                title=f"turnover_ret_corr_{window}d = 换手率与日收益 {window} 根"
+                " bar 相关系数(量价确认/背离)",
+                family="liquidity",
+                compute=_turnover_return_corr(window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("daily_metrics.turnover_rate", "bars.close"),
+            )
+        )
+    return tuple(entries)
+
+
+def _size_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """size 族 3 个(规模暴露,signal_eligible=False,#214;小市值溢价
+    → direction LOWER;window=None,逐日截面原料值/变换)。"""
+    return (
+        _entry(
+            "log_total_market_cap",
+            title="log_total_market_cap = ln(总市值)(规模暴露;daily_metrics."
+            "total_market_cap)",
+            family="size",
+            compute=_log_field("total_market_cap"),
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("daily_metrics.total_market_cap",),
+        ),
+        _entry(
+            "log_circulating_market_cap",
+            title="log_circulating_market_cap = ln(流通市值)(daily_metrics."
+            "circulating_market_cap)",
+            family="size",
+            compute=_log_field("circulating_market_cap"),
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("daily_metrics.circulating_market_cap",),
+        ),
+        _entry(
+            "float_share_ratio",
+            title="float_share_ratio = 流通股本 / 总股本(流通结构暴露)",
+            family="size",
+            compute=_float_share_ratio(),
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("daily_metrics.float_shares", "daily_metrics.total_shares"),
+        ),
+    )
 
 #: 目录(裸名 → 条目)。批次 0 样板:return_Nd 动量族(4 窗口变体);
+#: 批次 1-4(~150+ 因子)按同一模式在此追加注册。
+#:
+#: 批次 3(#401):fina_indicator 白名单扩展解锁的 40 个 Growth / Quality
+#: 财务因子 —— 数据依赖 = ``financial_indicators.<field>``,公告频率步进
+#: 序列(采样取决策日可见的最近一次公告),字段由 #401 扩展白名单提供
+#: (announcement_date PIT,available_at = 公告次日零点上海时区)。
+#:
+#: 批次 4(#402):三表 + dividend 消费 —— ``val_*``(11 个经典价值)、
+#: ``qlt_*``(9 个质量补全)、``qmj_*``(AQR QMJ 四支柱 + 综合,截面
+#: rank 合成口径见 :func:`_qmj_components` / 各条目 title)。
 #: 批次 2(#400):Alpha101 量价 31 因子;后续批次按同一模式追加注册。
-PREDEFINED_FACTORS: dict[str, PredefinedFactorDefinition] = {
+PREDEFINED_FACTORS = {
     item.name: item
     for item in (
         _definition(
@@ -3282,6 +3278,7 @@ PREDEFINED_FACTORS: dict[str, PredefinedFactorDefinition] = {
             compute=_raw_cross_frame(_payout_ratio_raw),
         ),
         *_pillar_and_qmj_entries(),
+        *_ALPHA101_FACTORS,
         # ---------------- 批次 1(#399):量价 74 个 ----------------
         # momentum 族(回归 alpha / 残差动量 / MACD / RSRS / 位置 / 相对强弱)
         _entry(
@@ -3419,7 +3416,6 @@ PREDEFINED_FACTORS: dict[str, PredefinedFactorDefinition] = {
         *_vol_entries(),
         *_liquidity_entries(),
         *_size_entries(),
-        *_ALPHA101_FACTORS,
     )
 }
 

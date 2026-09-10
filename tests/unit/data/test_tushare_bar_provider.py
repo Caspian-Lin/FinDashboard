@@ -182,7 +182,7 @@ async def test_missing_adjustment_factor_fails_closed() -> None:
 async def test_non_daily_period_is_rejected_without_request() -> None:
     provider, budget = _provider()
 
-    with pytest.raises(ValueError, match="只支持 A 股日线"):
+    with pytest.raises(ValueError, match="只支持日线"):
         await provider.fetch_bars(
             make_symbol("000001.SZ"),
             BarPeriod.M5,

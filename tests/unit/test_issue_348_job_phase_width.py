@@ -190,6 +190,14 @@ class TestDataSyncDonePhaseShort:
                     missing_industry=len(symbols),
                 )
 
+            async def backfill_listing_dates(
+                self, listing: dict[str, tuple[object, object | None]]
+            ) -> dict[str, int]:
+                return {
+                    "backfilled_list_date": len(listing),
+                    "missing_list_date": 0,
+                }
+
         monkeypatch.setattr(discovery_mod, "UniverseDiscovery", _FakeDiscovery)
         monkeypatch.setattr(
             persistence_pkg, "InstrumentRepository", _FakeInstrumentRepository

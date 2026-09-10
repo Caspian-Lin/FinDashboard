@@ -594,7 +594,6 @@ class FakeTushareClient:
     def dividend(self, **kwargs: str) -> list[dict[str, object]]:
         return _dividend_rows(kwargs["ts_code"])
 
-
 def _build_provider(
     client: FakeTushareClient, budget: _FakeBudget
 ) -> ResearchDataProvider:

@@ -208,6 +208,9 @@ class FakeTushareClient:
     def suspend_d(self, **kwargs: str) -> object:
         self.calls.append(("suspend_d", kwargs))
         return self.suspend_d_rows
+    def index_basic(self, **kwargs: str) -> object:
+        self.calls.append(("index_basic", kwargs))
+        return []
 
 
     def income(self, **kwargs: str) -> object:
