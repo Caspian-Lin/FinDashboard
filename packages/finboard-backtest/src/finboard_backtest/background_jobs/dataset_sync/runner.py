@@ -142,6 +142,11 @@ def _research_dataset_for(name: str) -> ResearchDataset | None:
         "financial_indicators": ResearchDataset.FINANCIAL_INDICATORS,
         "industry_memberships": ResearchDataset.INDUSTRY_MEMBERSHIPS,
         "suspensions": ResearchDataset.SUSPENSIONS,
+        # issue #397:财务面扩展(三表 + dividend)。
+        "income_statements": ResearchDataset.INCOME_STATEMENTS,
+        "balance_sheets": ResearchDataset.BALANCE_SHEETS,
+        "cashflow_statements": ResearchDataset.CASHFLOW_STATEMENTS,
+        "dividends": ResearchDataset.DIVIDENDS,
     }.get(name)
 
 

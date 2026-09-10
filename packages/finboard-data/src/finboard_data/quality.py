@@ -12,11 +12,15 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from itertools import pairwise
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
     DailySecurityMetrics,
+    DividendRecord,
     FinancialIndicator,
+    IncomeStatement,
     IndustryMembership,
     InstrumentProfile,
     SuspensionRecord,
@@ -192,6 +196,135 @@ class ResearchDataQualityValidator:
                 )
                 for item in records
             ],
+            expected_source=expected_source,
+            expected_symbols=None,
+        )
+        invalid_times = sum(
+            item.report_period > item.announcement_date
+            or item.available_at.date() <= item.announcement_date
+            for item in records
+        )
+        if invalid_times:
+            issues.append(
+                QualityIssue(
+                    code="invalid_financial_time",
+                    severity=QualitySeverity.ERROR,
+                    message="报告期或 available_at 与公告日期矛盾",
+                    count=invalid_times,
+                )
+            )
+        return _report(records, None, issues)
+
+    def validate_income_statements(
+        self,
+        records: list[IncomeStatement],
+        *,
+        expected_source: str,
+    ) -> QualityReport:
+        """校验利润表公告修订(issue #397,语义同 validate_financial_indicators)。"""
+        return self._validate_announced_statements(
+            records,
+            expected_source=expected_source,
+            keys=[
+                (
+                    item.source,
+                    item.symbol,
+                    item.report_period,
+                    item.announcement_date,
+                    item.update_flag or "",
+                    item.report_type or "",
+                    item.comp_type or "",
+                )
+                for item in records
+            ],
+        )
+
+    def validate_balance_sheets(
+        self,
+        records: list[BalanceSheet],
+        *,
+        expected_source: str,
+    ) -> QualityReport:
+        """校验资产负债表公告修订(issue #397)。"""
+        return self._validate_announced_statements(
+            records,
+            expected_source=expected_source,
+            keys=[
+                (
+                    item.source,
+                    item.symbol,
+                    item.report_period,
+                    item.announcement_date,
+                    item.update_flag or "",
+                    item.report_type or "",
+                    item.comp_type or "",
+                )
+                for item in records
+            ],
+        )
+
+    def validate_cashflow_statements(
+        self,
+        records: list[CashflowStatement],
+        *,
+        expected_source: str,
+    ) -> QualityReport:
+        """校验现金流量表公告修订(issue #397)。"""
+        return self._validate_announced_statements(
+            records,
+            expected_source=expected_source,
+            keys=[
+                (
+                    item.source,
+                    item.symbol,
+                    item.report_period,
+                    item.announcement_date,
+                    item.update_flag or "",
+                    item.report_type or "",
+                    item.comp_type or "",
+                )
+                for item in records
+            ],
+        )
+
+    def validate_dividends(
+        self,
+        records: list[DividendRecord],
+        *,
+        expected_source: str,
+    ) -> QualityReport:
+        """校验分红送股进展记录(issue #397;身份键含 div_proc)。"""
+        return self._validate_announced_statements(
+            records,
+            expected_source=expected_source,
+            keys=[
+                (
+                    item.source,
+                    item.symbol,
+                    item.report_period,
+                    item.announcement_date,
+                    item.div_proc or "",
+                )
+                for item in records
+            ],
+        )
+
+    def _validate_announced_statements(
+        self,
+        records: list[Any],
+        *,
+        expected_source: str,
+        keys: list[tuple[object, ...]],
+    ) -> QualityReport:
+        """公告类研究数据(三表/dividend)共享的批次质量门。
+
+        与 ``validate_financial_indicators`` 同语义:重复业务键 / 报告期晚于
+        公告日 / available_at 不晚于公告日(PIT=ann_date+1 被破坏)均为
+        ERROR;值字段稀疏不是质量问题(#187 all_null_fields 同精神)。
+        """
+        issues = self._common_issues(
+            records,
+            keys=keys,
             expected_source=expected_source,
             expected_symbols=None,
         )

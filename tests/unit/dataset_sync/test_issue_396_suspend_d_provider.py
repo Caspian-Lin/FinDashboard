@@ -76,9 +76,17 @@ class _Client:
     def cb_basic(self, **kwargs: str) -> object:
         raise AssertionError("cb_basic 不应被调用")
 
-    def index_basic(self, **kwargs: str) -> object:
-        raise AssertionError("index_basic 不应被调用")
+    def income(self, **kwargs: str) -> object:
+        raise AssertionError("income 不应被调用")
 
+    def balancesheet(self, **kwargs: str) -> object:
+        raise AssertionError("balancesheet 不应被调用")
+
+    def cashflow(self, **kwargs: str) -> object:
+        raise AssertionError("cashflow 不应被调用")
+
+    def dividend(self, **kwargs: str) -> object:
+        raise AssertionError("dividend 不应被调用")
 
 def _provider(client: _Client) -> TushareResearchDataProvider:
     return TushareResearchDataProvider(

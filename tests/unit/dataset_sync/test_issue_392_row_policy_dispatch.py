@@ -17,6 +17,10 @@ from finboard_backtest.background_jobs.contracts import JobRecord
 from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 from finboard_data import TushareResearchDataProvider
 from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
+    DividendRecord,
+    IncomeStatement,
     ResearchDataConfigurationError,
     ResearchDataContractError,
 )
@@ -101,6 +105,23 @@ class _Client:
         return self._rows("suspend_d", **kwargs)
     def index_basic(self, **kwargs: str) -> object:
         return self._rows("index_basic", **kwargs)
+
+
+    def income(self, **kwargs: str) -> object:
+        """调用 ``income``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def balancesheet(self, **kwargs: str) -> object:
+        """调用 ``balancesheet``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def cashflow(self, **kwargs: str) -> object:
+        """调用 ``cashflow``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def dividend(self, **kwargs: str) -> object:
+        """调用 ``dividend``(#397;本测试不触达,返回空)。"""
+        return []
 
 
 def _provider(client: _Client) -> TushareResearchDataProvider:
@@ -331,6 +352,47 @@ class _RecordingProvider:
         self, trade_date: date, *, dirty_row_policy: str | None = None
     ) -> list[Any]:
         return self._record("suspensions", dirty_row_policy)
+
+
+    async def fetch_income_statements(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[IncomeStatement]:
+        return []
+
+    async def fetch_balance_sheets(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[BalanceSheet]:
+        return []
+
+    async def fetch_cashflow_statements(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[CashflowStatement]:
+        return []
+
+    async def fetch_dividends(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[DividendRecord]:
+        return []
 
 
 def _job(datasets: list[str]) -> JobRecord:

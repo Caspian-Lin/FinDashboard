@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,20 +21,51 @@ from finboard_data.factors import (
     InputsMode,
 )
 from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
     DailySecurityMetrics,
+    DividendRecord,
     FinancialIndicator,
+    IncomeStatement,
     IndustryMembership,
     InstrumentProfile,
     SuspensionRecord,
 )
 from finboard_persistence.models import (
+    ResearchBalanceSheetModel,
+    ResearchCashflowStatementModel,
     ResearchDailyMetricModel,
+    ResearchDividendModel,
     ResearchFinancialIndicatorModel,
+    ResearchIncomeStatementModel,
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
     ResearchSuspensionModel,
     ResearchSyncBatchModel,
+)
+
+#: 三表 / dividend 表中在 ``_upsert_announced_rows`` 里**显式赋值**的列 ——
+#: 值列拷贝按表列反射时排除(其余全部列名 = 领域记录同名属性,setattr 拷贝;
+#: dividend 的 record_date/ex_date 等日期列走通用拷贝,不在此列)。
+_STATEMENT_IDENTITY_COLUMNS = frozenset(
+    {
+        "id",
+        "batch_id",
+        "source",
+        "dataset_version",
+        "symbol",
+        "announcement_date",
+        "report_period",
+        "formal_announcement_date",
+        "report_type",
+        "comp_type",
+        "update_flag",
+        "div_proc",
+        "observed_at",
+        "available_at",
+        "ingested_at",
+    }
 )
 
 
@@ -45,6 +77,11 @@ class ResearchDataset(StrEnum):
     FINANCIAL_INDICATORS = "financial_indicators"
     INDUSTRY_MEMBERSHIPS = "industry_memberships"
     SUSPENSIONS = "suspensions"
+    # issue #397:财务面扩展(三表 + dividend 分红明细)。
+    INCOME_STATEMENTS = "income_statements"
+    BALANCE_SHEETS = "balance_sheets"
+    CASHFLOW_STATEMENTS = "cashflow_statements"
+    DIVIDENDS = "dividends"
 
 
 class SyncBatchStatus(StrEnum):
@@ -564,6 +601,173 @@ class ResearchDatasetRepository:
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_suspension_from_orm(row) for row in rows]
+
+    async def upsert_income_statements(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[IncomeStatement],
+    ) -> int:
+        """幂等写入利润表公告版本,修订/报告口径行并存不互相覆盖(#397)。"""
+        return await self._upsert_announced_rows(
+            batch,
+            records,
+            model=ResearchIncomeStatementModel,
+            keys=lambda row: (
+                row.symbol,
+                row.report_period,
+                row.announcement_date,
+                row.update_flag,
+                row.report_type,
+                row.comp_type,
+            ),
+            record_keys=lambda item: (
+                item.symbol,
+                item.report_period,
+                item.announcement_date,
+                item.update_flag or "",
+                item.report_type or "",
+                item.comp_type or "",
+            ),
+        )
+
+    async def upsert_balance_sheets(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[BalanceSheet],
+    ) -> int:
+        """幂等写入资产负债表公告版本(修订语义同利润表,#397)。"""
+        return await self._upsert_announced_rows(
+            batch,
+            records,
+            model=ResearchBalanceSheetModel,
+            keys=lambda row: (
+                row.symbol,
+                row.report_period,
+                row.announcement_date,
+                row.update_flag,
+                row.report_type,
+                row.comp_type,
+            ),
+            record_keys=lambda item: (
+                item.symbol,
+                item.report_period,
+                item.announcement_date,
+                item.update_flag or "",
+                item.report_type or "",
+                item.comp_type or "",
+            ),
+        )
+
+    async def upsert_cashflow_statements(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[CashflowStatement],
+    ) -> int:
+        """幂等写入现金流量表公告版本(修订语义同利润表,#397)。"""
+        return await self._upsert_announced_rows(
+            batch,
+            records,
+            model=ResearchCashflowStatementModel,
+            keys=lambda row: (
+                row.symbol,
+                row.report_period,
+                row.announcement_date,
+                row.update_flag,
+                row.report_type,
+                row.comp_type,
+            ),
+            record_keys=lambda item: (
+                item.symbol,
+                item.report_period,
+                item.announcement_date,
+                item.update_flag or "",
+                item.report_type or "",
+                item.comp_type or "",
+            ),
+        )
+
+    async def upsert_dividends(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[DividendRecord],
+    ) -> int:
+        """幂等写入分红送股进展记录;``div_proc`` 进身份键全保留(#397)。"""
+        return await self._upsert_announced_rows(
+            batch,
+            records,
+            model=ResearchDividendModel,
+            keys=lambda row: (
+                row.symbol,
+                row.report_period,
+                row.announcement_date,
+                row.div_proc,
+            ),
+            record_keys=lambda item: (
+                item.symbol,
+                item.report_period,
+                item.announcement_date,
+                item.div_proc or "",
+            ),
+        )
+
+    async def _upsert_announced_rows(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[Any],
+        *,
+        model: Any,
+        keys: Callable[[Any], tuple[object, ...]],
+        record_keys: Callable[[Any], tuple[object, ...]],
+    ) -> int:
+        """三表/dividend 共用的幂等写入(身份键由调用方声明,值列按表列
+        反射拷贝 —— 模型 ↔ 领域记录 ↔ 白名单三处同名,加列零改动)。"""
+        identity_columns = _STATEMENT_IDENTITY_COLUMNS
+        value_columns = tuple(
+            column.name
+            for column in model.__table__.columns
+            if column.name not in identity_columns
+        )
+        existing = {
+            keys(row): row
+            for row in (
+                await self._session.execute(
+                    select(model).where(
+                        model.source == batch.source,
+                        model.dataset_version == batch.dataset_version,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
+        for item in records:
+            row = existing.get(record_keys(item))
+            if row is None:
+                row = model(
+                    batch_id=batch.id,
+                    source=batch.source,
+                    dataset_version=batch.dataset_version,
+                    symbol=item.symbol,
+                    report_period=item.report_period,
+                    announcement_date=item.announcement_date,
+                )
+                self._session.add(row)
+            row.batch_id = batch.id
+            if hasattr(item, "update_flag"):
+                row.update_flag = item.update_flag or ""
+            if hasattr(item, "report_type"):
+                row.report_type = item.report_type or ""
+                row.comp_type = item.comp_type or ""
+            if hasattr(item, "div_proc"):
+                row.div_proc = item.div_proc or ""
+            if hasattr(item, "formal_announcement_date"):
+                row.formal_announcement_date = item.formal_announcement_date
+            for name in value_columns:
+                setattr(row, name, getattr(item, name))
+            row.observed_at = item.observed_at
+            row.available_at = item.available_at
+        await self._session.flush()
+        return len(records)
 
     async def upsert_industry_memberships(
         self,

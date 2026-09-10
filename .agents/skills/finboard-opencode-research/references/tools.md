@@ -400,9 +400,9 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 其他参数:`release_id` / `version` / `start_date` / `end_date` /
   `dataset_name?`(默认 multi_asset_daily_bars)/ `release_kind?`
   (a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators|
-  convertible_metrics,默认 a_share_tushare)/ `source?` /
-  `adjustment?`(qfq|hqfq|none,默认 qfq;daily_metrics/financial_indicators/
-  convertible_metrics 固定 none)/
+  convertible_metrics|income_statements|balance_sheets|cashflow_statements|
+  dividends,默认 a_share_tushare)/ `source?` /
+  `adjustment?`(qfq|hqfq|none,默认 qfq;研究数据发布各 kind 固定 none)/
   `required_capabilities?`
   (stock|bond|convertible|futures|etf:index|etf:cross_border|etf:commodity|etf:bond)
 - 返回:`JobOut`(`kind=dataset_publish`)
@@ -413,6 +413,13 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - `release_kind=daily_metrics|financial_indicators` 时从 research_* 表冻结
   基本面/财务指标发布(issue #187),与 bars 发布(dataset_release_ids 含 bars 主发布 +
   research 发布)联合供因子快照取数;schedule(data_sync)与发布任务报告缺失字段统计。
+- `release_kind=income_statements|balance_sheets|cashflow_statements|dividends`
+  (#397)从 research_* 表冻结利润表/资产负债表/现金流量表公告修订与分红送股
+  进展(先跑 dataset_sync 同名数据集摄取);修订可见性列(announcement_date/
+  update_flag/report_type/comp_type)进默认白名单,PIT=ann_date+1 零点(上海);
+  只接受 A 股股票标的。FrozenReleaseProvider.fetch_income_statements /
+  fetch_balance_sheets / fetch_cashflow_statements / fetch_dividends 提供
+  decision_at 门控读取端(#402 C0 因子通道原料)。
 - `release_kind=convertible_metrics`(#265)只接受 A 股可转债标的(非转债
   `convertible_scope_violation`),从本地缓存 bars x 冻结转股价元数据
   (`convertible_metadata`)计算转股价值/转股溢价率并冻结为带日期观测;
@@ -1222,8 +1229,9 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 `dataset_sync`(issue #392,自 #171 的 research_data_sync 改名迁移;#251/#265
 扩展):数据集驱动统一同步框架(SyncSpec 注册表)编排研究数据集(档案 / 估值 /
 财务 / 行业 / 名称历史 / 转债条款)摄取。payload:`{datasets?: [profiles,
-name_changes, convertible_profiles, daily_metrics, financial_indicators,
-industry_memberships](默认全部), start_date, end_date(ISO), symbols?: [str],
+name_changes, convertible_profiles, daily_metrics, suspensions(#396),
+financial_indicators, industry_memberships, income_statements, balance_sheets,
+cashflow_statements, dividends(#397)](默认全部十一类), start_date, end_date(ISO), symbols?: [str],
 exchange?: str, listing_boards?: [str], instrument_type?: str}`。
 scope 四元组决定逐标的同步池:symbols 显式声明 > exchange/listing_boards/
 instrument_type 宇宙过滤(instruments 表 list_active,#385 语义)>
@@ -1302,8 +1310,11 @@ SDK fail-fast。
   - `backtest_run`:`{request, provider_name}` → `result_ref=str(run_id)`
   - `dataset_sync`:`{start_date: "YYYY-MM-DD"(必填), end_date:
     "YYYY-MM-DD"(必填), datasets?: [profiles|name_changes|convertible_profiles|
-    daily_metrics|financial_indicators|industry_memberships](缺省=全部六类;
-    convertible_profiles=#265 转债条款快照), symbols?:
+    daily_metrics|suspensions|financial_indicators|industry_memberships|
+    income_statements|balance_sheets|cashflow_statements|dividends]
+    (缺省=全部十一类;convertible_profiles=#265 转债条款快照,
+    suspensions=#396 停复牌,三表+dividends=#397 财务面按标的 x 公告日窗),
+    symbols?:
     ["000001.SZ",...], exchange?: "SSE", listing_boards?: ["sse_main"],
     instrument_type?: "stock"(scope 四元组:逐标的池 symbols > 宇宙过滤 >
     profiles 结果,此时 datasets 须含 profiles)}` → 研究数据表摄取

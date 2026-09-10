@@ -132,6 +132,202 @@ class FinancialIndicator:
 
 
 @dataclass(frozen=True, slots=True)
+class _AnnouncedStatement:
+    """三表(利润表/资产负债表/现金流量表)共用的身份与 PIT 语义基类(issue #397)。
+
+    PIT=ann_date(#212 已核实 ann_date+1 无前视):``available_at`` = 公告日
+    次日零点(上海)。同一报告期的修订版本以 ``(announcement_date,
+    update_flag, report_type, comp_type)`` 区分,不互相覆盖(fina_indicator
+    先例);``report_type``/``comp_type`` 进身份是三表特有的——income 等
+    接口对同一报告期可能返回合并/单季/母公司等多口径行,缺了会撞修订键。
+    金额单位均为人民币元(上游原样,不做缩放)。
+    """
+
+    symbol: str
+    announcement_date: date
+    report_period: date
+    formal_announcement_date: date | None
+    report_type: str | None
+    comp_type: str | None
+    update_flag: str | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IncomeStatement(_AnnouncedStatement):
+    """一版已公告的利润表(tushare ``income``,issue #397,2000 积分档)。
+
+    覆盖 QMJ 盈利性/成长性支柱与 EBITDA 原料:收入/成本/三费/研发、营业利润
+    到净利润全链条、ebit/ebitda(上游直接给出)、每股收益与综合收益。
+    金额单位人民币元;每股字段单位元/股。
+    """
+
+    basic_eps: Decimal | None
+    diluted_eps: Decimal | None
+    total_revenue: Decimal | None
+    revenue: Decimal | None
+    int_income: Decimal | None
+    int_exp: Decimal | None
+    fv_value_chg_gain: Decimal | None
+    invest_income: Decimal | None
+    total_cogs: Decimal | None
+    oper_cost: Decimal | None
+    biz_tax_surchg: Decimal | None
+    sell_exp: Decimal | None
+    admin_exp: Decimal | None
+    fin_exp: Decimal | None
+    rd_exp: Decimal | None
+    assets_impair_loss: Decimal | None
+    operate_profit: Decimal | None
+    non_oper_income: Decimal | None
+    non_oper_exp: Decimal | None
+    total_profit: Decimal | None
+    income_tax: Decimal | None
+    n_income: Decimal | None
+    n_income_attr_p: Decimal | None
+    minority_gain: Decimal | None
+    oth_compr_income: Decimal | None
+    t_compr_income: Decimal | None
+    compr_inc_attr_p: Decimal | None
+    ebit: Decimal | None
+    ebitda: Decimal | None
+    distable_profit: Decimal | None
+    continued_net_profit: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class BalanceSheet(_AnnouncedStatement):
+    """一版已公告的资产负债表(tushare ``balancesheet``,issue #397)。
+
+    覆盖 QMJ 安全性支柱与营运资本/周转原料:货币资金/存货/应收应付/流动与
+    非流动合计、有息负债(短借/长借/应付债券)、归母与含少数股东权益。
+    流动比率 = total_cur_assets / total_cur_liab、速动比率剔除 inventories,
+    均可由白名单字段直接派生。金额单位人民币元。
+    """
+
+    total_share: Decimal | None
+    money_cap: Decimal | None
+    trading_fl: Decimal | None
+    notes_receiv: Decimal | None
+    accounts_receiv: Decimal | None
+    oth_receiv: Decimal | None
+    prepayment: Decimal | None
+    inventories: Decimal | None
+    total_cur_assets: Decimal | None
+    lt_eqt_invest: Decimal | None
+    fix_assets: Decimal | None
+    cip: Decimal | None
+    intan_assets: Decimal | None
+    goodwill: Decimal | None
+    defer_tax_assets: Decimal | None
+    total_nca: Decimal | None
+    total_assets: Decimal | None
+    st_borr: Decimal | None
+    notes_payable: Decimal | None
+    acct_payable: Decimal | None
+    adv_receipts: Decimal | None
+    contract_liab: Decimal | None
+    payroll_payable: Decimal | None
+    taxes_payable: Decimal | None
+    non_cur_liab_due_1y: Decimal | None
+    oth_cur_liab: Decimal | None
+    total_cur_liab: Decimal | None
+    lt_borr: Decimal | None
+    bond_payable: Decimal | None
+    total_ncl: Decimal | None
+    total_liab: Decimal | None
+    cap_rese: Decimal | None
+    surplus_rese: Decimal | None
+    undistr_porfit: Decimal | None
+    treasury_share: Decimal | None
+    minority_int: Decimal | None
+    total_hldr_eqy_exc_min_int: Decimal | None
+    total_hldr_eqy_inc_min_int: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class CashflowStatement(_AnnouncedStatement):
+    """一版已公告的现金流量表(tushare ``cashflow``,issue #397)。
+
+    覆盖 FCF/OCF 原料与盈利质量交叉验证:经营/投资/筹资三大净额、购建固定
+    资产支出(capex)、上游直接给出的 free_cashflow、销售收现(c_fr_sale_sg
+    对收入的质量验证)、折旧摊销(EBITDA 交叉验证)。金额单位人民币元。
+    """
+
+    net_profit: Decimal | None
+    finan_exp: Decimal | None
+    c_fr_sale_sg: Decimal | None
+    recp_tax_rends: Decimal | None
+    c_inf_fr_operate_a: Decimal | None
+    c_paid_goods_s: Decimal | None
+    c_paid_to_for_empl: Decimal | None
+    c_paid_for_taxes: Decimal | None
+    oth_cash_pay_oper_act: Decimal | None
+    st_cash_out_act: Decimal | None
+    n_cashflow_act: Decimal | None
+    c_recp_return_invest: Decimal | None
+    n_recp_disp_fiolta: Decimal | None
+    stot_inflows_inv_act: Decimal | None
+    c_pay_acq_const_fiolta: Decimal | None
+    c_paid_invest: Decimal | None
+    stot_out_inv_act: Decimal | None
+    n_cashflow_inv_act: Decimal | None
+    c_recp_borrow: Decimal | None
+    proc_issue_bonds: Decimal | None
+    stot_cash_in_fnc_act: Decimal | None
+    c_prepay_amt_borr: Decimal | None
+    c_pay_dist_dpcp_int_exp: Decimal | None
+    incl_dvd_profit_paid_sc_ms: Decimal | None
+    stot_cashout_fnc_act: Decimal | None
+    n_cash_flows_fnc_act: Decimal | None
+    eff_fx_flu_cash: Decimal | None
+    n_incr_cash_cash_equ: Decimal | None
+    c_cash_equ_beg_period: Decimal | None
+    c_cash_equ_end_period: Decimal | None
+    free_cashflow: Decimal | None
+    depr_fa_coga_dpba: Decimal | None
+    amort_intang_assets: Decimal | None
+    credit_impa_loss: Decimal | None
+    loss_fv_chg: Decimal | None
+    invest_loss: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class DividendRecord:
+    """一条分红送股进展记录(tushare ``dividend``,issue #397)。
+
+    与三表不同:上游**没有 update_flag**,同一(报告期=分红年度,公告日)可
+    以有预案 / 股东大会通过 / 实施多条进展行,``div_proc`` 是进展口径判别符
+    并进身份键(600519.SH 20230630 实测:同日同年度「预案」与「股东大会
+    通过」两行并存)。PIT=ann_date 同三表:``available_at`` = 公告日次日
+    零点(上海)—— 预案公告即可见,除权除息日/派息日等未来业务日期随预案
+    公告进入可视域,无前视。现金股利单位元/股(cash_div 税前、cash_div_tax
+    税后);stk_div/stk_bo_rate/stk_co_rate 为每股口径的送转/送股/转增数量。
+    精确股息率因子原料(#397);过渡期 dividend_yield_ttm 滚动近似保留。
+    """
+
+    symbol: str
+    announcement_date: date
+    report_period: date
+    div_proc: str
+    stk_div: Decimal | None
+    stk_bo_rate: Decimal | None
+    stk_co_rate: Decimal | None
+    cash_div: Decimal | None
+    cash_div_tax: Decimal | None
+    record_date: date | None
+    ex_date: date | None
+    pay_date: date | None
+    div_listdate: date | None
+    imp_ann_date: date | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class IndustryMembership:
     """申万 2021 行业分类成员关系。
 
@@ -355,6 +551,50 @@ class ResearchDataProvider(Protocol):
         dirty_row_policy: str | None = None,
     ) -> list[FinancialIndicator]:
         """读取单只股票、指定报告期范围内的财务指标。"""
+        ...
+
+    async def fetch_income_statements(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[IncomeStatement]:
+        """读取单只股票、公告日窗内已公告的利润表修订(issue #397)。"""
+        ...
+
+    async def fetch_balance_sheets(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[BalanceSheet]:
+        """读取单只股票、公告日窗内已公告的资产负债表修订(issue #397)。"""
+        ...
+
+    async def fetch_cashflow_statements(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[CashflowStatement]:
+        """读取单只股票、公告日窗内已公告的现金流量表修订(issue #397)。"""
+        ...
+
+    async def fetch_dividends(
+        self,
+        symbol: str,
+        *,
+        start_announced: date,
+        end_announced: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[DividendRecord]:
+        """读取单只股票、公告日窗内的分红送股进展明细(issue #397)。"""
         ...
 
     async def fetch_industry_memberships(

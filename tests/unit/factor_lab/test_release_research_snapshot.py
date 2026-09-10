@@ -29,7 +29,14 @@ from finboard_data.releases import (
     ReleaseDatasetKind,
     ReleaseInstrumentSpec,
 )
-from finboard_data.research import DailySecurityMetrics, FinancialIndicator
+from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
+    DailySecurityMetrics,
+    DividendRecord,
+    FinancialIndicator,
+    IncomeStatement,
+)
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import (
     AssetClass,
@@ -81,6 +88,43 @@ class _StubResearchSource:
             ]
             for symbol in symbols
         }
+
+
+    async def income_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[IncomeStatement]]:
+        return {symbol: [] for symbol in symbols}
+
+    async def balance_sheets(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[BalanceSheet]]:
+        return {symbol: [] for symbol in symbols}
+
+    async def cashflow_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[CashflowStatement]]:
+        return {symbol: [] for symbol in symbols}
+
+    async def dividends(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[DividendRecord]]:
+        return {symbol: [] for symbol in symbols}
 
 
 def _stock(code: str) -> ReleaseInstrumentSpec:
