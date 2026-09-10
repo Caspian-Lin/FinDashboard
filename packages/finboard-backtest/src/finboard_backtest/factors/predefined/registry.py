@@ -77,7 +77,6 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Callable, Mapping
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -92,21 +91,6 @@ from finboard_backtest.factors.predefined.context import (
     SymbolSeries,
 )
 from finboard_backtest.factors.predefined.operators import (
-    cs_rank,
-    ts_delay,
-    ts_delta,
-    rolling_ols_resid,
-    ts_corr,
-    ts_cov,
-    ts_delay,
-    ts_delta,
-    ts_downside_std,
-    ts_ema,
-    ts_kurt,
-    ts_max,
-    ts_mean,
-    ts_min,
-    ts_skew,
     CrossSection,
     cs_neutralize,
     cs_rank,
@@ -117,16 +101,21 @@ from finboard_backtest.factors.predefined.operators import (
     ew_sign,
     ew_signed_power,
     ew_where,
+    rolling_ols_resid,
     ts_argmax,
     ts_corr,
     ts_cov,
     ts_decay,
     ts_delay,
     ts_delta,
+    ts_downside_std,
+    ts_ema,
+    ts_kurt,
     ts_max,
     ts_mean,
     ts_min,
     ts_rank,
+    ts_skew,
     ts_std,
     ts_sum,
 )
@@ -563,6 +552,10 @@ def _pillar_compute(
             day: _pillar_rank_cross(components, inp, day)
             for day in inp.decision_dates
         }
+
+    return compute
+
+
 # --------------------------------------------------------------------- #
 # 批次 1(#399)公共件:市场收益对齐与区间收益
 # --------------------------------------------------------------------- #
@@ -1143,6 +1136,10 @@ def _qmj_compute() -> PredefinedFactorCompute:
                     cross[symbol] = sum(values, 0.0) / len(values)
             frame[day] = cross
         return frame
+
+    return compute
+
+
 def _amihud(window: int) -> PredefinedFactorCompute:
     """Amihud 非流动性:``|日收益| / 成交额`` 的 trailing 窗口均值
     (原始量纲;成交额 0 → inf → 采样归一 None,fail-visible)。"""

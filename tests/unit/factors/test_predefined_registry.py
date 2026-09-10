@@ -393,6 +393,16 @@ class _AlphaInput(PredefinedFactorInput):
     def daily_metrics(self, field: str) -> dict[str, SymbolSeries]:
         return {}
 
+    def financial_indicators(self, field: str) -> dict[str, SymbolSeries]:
+        # Alpha101 因子不消费公告序列;#402 契约「未挂载 → 空映射」。
+        return {}
+
+    def research_dataset(self, kind: str, field: str) -> dict[str, SymbolSeries]:
+        return {}
+
+    def dividend_events(self) -> dict[str, Any]:
+        return {}
+
     def industry_groups(self) -> dict[str, str | None]:
         return dict(self._industry)
 
