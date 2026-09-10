@@ -6,6 +6,7 @@ bulk_download 任务失败。写入侧短退避重试收敛。
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ def _install_flaky_replace(
     real = Path.replace
     state = {"calls": 0}
 
-    def fake(self: Path, target: object) -> None:
+    def fake(self: Path, target: str | os.PathLike[str]) -> None:
         state["calls"] += 1
         if state["calls"] <= fail_times:
             raise PermissionError(5, "拒绝访问。")
