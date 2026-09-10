@@ -100,6 +100,9 @@ class _Client:
     def index_basic(self, **kwargs: str) -> object:
         return self._rows("index_basic", **kwargs)
 
+    def suspend_d(self, **kwargs: str) -> object:
+        return self._rows("suspend_d", **kwargs)
+
 
 def _provider(client: _Client) -> TushareResearchDataProvider:
     return TushareResearchDataProvider(
@@ -324,6 +327,11 @@ class _RecordingProvider:
         self, *, dirty_row_policy: str | None = None
     ) -> list[Any]:
         return self._record("convertible_profiles", dirty_row_policy)
+
+    async def fetch_suspensions(
+        self, trade_date: date, *, dirty_row_policy: str | None = None
+    ) -> list[Any]:
+        return self._record("suspensions", dirty_row_policy)
 
 
 def _job(datasets: list[str]) -> JobRecord:

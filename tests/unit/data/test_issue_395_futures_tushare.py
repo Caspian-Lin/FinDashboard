@@ -154,6 +154,9 @@ class FakeFuturesClient:
     def cb_basic(self, **kwargs: str) -> object:
         raise AssertionError("unexpected call")
 
+    def suspend_d(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
 
 def _futures_provider(client: FakeFuturesClient) -> TushareResearchDataProvider:
     return TushareResearchDataProvider(

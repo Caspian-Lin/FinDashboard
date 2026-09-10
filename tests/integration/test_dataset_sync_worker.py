@@ -33,6 +33,7 @@ from finboard_data.research import (
     InstrumentNameChange,
     InstrumentProfile,
     ResearchDataUpstreamError,
+    SuspensionRecord,
 )
 from finboard_persistence import (
     InstrumentNameModel,
@@ -268,6 +269,15 @@ class FakeResearchProvider:
         if symbol in self.fail_symbols:
             raise ResearchDataUpstreamError(f"上游失败: {symbol}")
         return [self._industry(symbol)]
+
+    async def fetch_suspensions(
+        self,
+        trade_date: date,
+        *,
+        dirty_row_policy: str | None = None,
+    ) -> list[SuspensionRecord]:
+        self.calls.append(f"suspensions:{trade_date.isoformat()}")
+        return []
 
 
 def _job(payload: dict[str, object]) -> JobRecord:

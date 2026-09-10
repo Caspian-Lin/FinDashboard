@@ -197,6 +197,9 @@ class _FakeIndexBasicClient:
     def cb_basic(self, **kwargs: str) -> object:
         raise AssertionError("unexpected call")
 
+    def suspend_d(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
 
 class NoopBudget:
     async def acquire(self) -> None:

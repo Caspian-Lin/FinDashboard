@@ -20,6 +20,7 @@ from finboard_data.research import (
     FinancialIndicator,
     IndustryMembership,
     InstrumentProfile,
+    SuspensionRecord,
 )
 from finboard_persistence.models import ResearchSyncBatchModel
 from finboard_persistence.research_repo import (
@@ -182,6 +183,43 @@ class ResearchDataSyncService:
 
         return await self._sync(
             dataset=ResearchDataset.INDUSTRY_MEMBERSHIPS,
+            source=source,
+            dataset_version=dataset_version,
+            code_version=code_version,
+            parameters=parameters,
+            raw_payload=raw_payload,
+            report=report,
+            writer=writer,
+        )
+
+    async def sync_suspensions(
+        self,
+        *,
+        source: str,
+        dataset_version: str,
+        code_version: str,
+        parameters: Mapping[str, object],
+        raw_payload: object | None,
+        records: list[SuspensionRecord],
+        expected_trade_date: date,
+        expected_symbols: set[str] | None = None,
+    ) -> ResearchSyncBatchModel:
+        """校验并同步单日全市场停复牌枚举(issue #396)。"""
+        report = self._validator_factory().validate_suspensions(
+            records,
+            expected_trade_date=expected_trade_date,
+            expected_source=source,
+            expected_symbols=expected_symbols,
+        )
+
+        async def writer(
+            repo: ResearchDatasetRepository,
+            batch: ResearchSyncBatchModel,
+        ) -> int:
+            return await repo.upsert_suspensions(batch, records)
+
+        return await self._sync(
+            dataset=ResearchDataset.SUSPENSIONS,
             source=source,
             dataset_version=dataset_version,
             code_version=code_version,

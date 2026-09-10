@@ -110,6 +110,13 @@ def build_kernel_components(settings: Settings) -> KernelComponents:
     broker = create_broker(settings.broker, **creds)
     risk_checker = PreTradeChecker(config=_build_risk_config(settings))
 
+    # issue #396:交易日历 DB 优先存储钩子 —— 发布覆盖率审计 / 决策日推导
+    # 等 DB 优先读取经此落库回写;未安装(测试等)时日历模块走历史同步路径。
+    from finboard_data.trading_calendar import install_calendar_store
+    from finboard_persistence import PgTradingCalendarStore
+
+    install_calendar_store(PgTradingCalendarStore(smaker))
+
     return KernelComponents(
         settings=settings,
         broker=broker,

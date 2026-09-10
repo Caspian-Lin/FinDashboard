@@ -342,6 +342,37 @@ async def _persist_industry_memberships(
     return PersistResult(accepted_rows=batch.accepted_rows)
 
 
+# ---- suspensions(DAILY_MARKET,issue #396)------------------------------------
+
+
+async def _fetch_suspensions(
+    provider: ResearchDataProvider, query: SliceQuery
+) -> list[Any]:
+    assert query.trade_date is not None
+    return await provider.fetch_suspensions(
+        query.trade_date, dirty_row_policy=query.row_policy
+    )
+
+
+async def _persist_suspensions(
+    context: PersistContext, records: list[Any]
+) -> PersistResult:
+    from finboard_persistence.research_sync import ResearchDataSyncService
+
+    assert context.query.trade_date is not None
+    service = ResearchDataSyncService(context.session_maker)
+    batch = await service.sync_suspensions(
+        source=context.source,
+        dataset_version=context.dataset_version,
+        code_version=context.code_version,
+        parameters={"trade_date": context.query.trade_date.isoformat()},
+        raw_payload=None,
+        records=list(records),
+        expected_trade_date=context.query.trade_date,
+    )
+    return PersistResult(accepted_rows=batch.accepted_rows)
+
+
 # ---- 注册(声明序 = 默认执行序,与旧路径编排顺序一致)--------------------------
 
 #: 切片键 → dataset_version / parameters(与旧路径逐字节一致,golden 锁定)。
@@ -353,6 +384,16 @@ def _daily_version(query: SliceQuery) -> str:
 
 
 def _daily_parameters(query: SliceQuery) -> dict[str, object]:
+    assert query.trade_date is not None
+    return {"trade_date": query.trade_date.isoformat()}
+
+
+def _suspensions_version(query: SliceQuery) -> str:
+    assert query.trade_date is not None
+    return f"suspensions:{query.trade_date.isoformat()}"
+
+
+def _suspensions_parameters(query: SliceQuery) -> dict[str, object]:
     assert query.trade_date is not None
     return {"trade_date": query.trade_date.isoformat()}
 
@@ -429,6 +470,15 @@ def register_default_specs() -> None:
             persist=_persist_daily_metrics,
             slice_version=_daily_version,
             slice_parameters=_daily_parameters,
+        ),
+        SyncSpec(
+            name="suspensions",
+            shape=EnumShape.DAILY_MARKET,
+            title="停复牌枚举(tushare suspend_d,按交易日全市场,PIT=当日 09:30 上海,#396)",
+            fetch=_fetch_suspensions,
+            persist=_persist_suspensions,
+            slice_version=_suspensions_version,
+            slice_parameters=_suspensions_parameters,
         ),
         SyncSpec(
             name="financial_indicators",

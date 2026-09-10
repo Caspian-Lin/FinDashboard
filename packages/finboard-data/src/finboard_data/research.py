@@ -249,6 +249,27 @@ class FuturesTradeCalendarDay:
     available_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class SuspensionRecord:
+    """单标的单日停复牌记录(tushare ``suspend_d``,issue #396)。
+
+    ``suspend_kind`` 与缓存侧 ``TushareLifecycleEvent.event_type`` 同词表:
+    ``suspension_day``(全天停牌)/ ``intraday_suspension``(盘中停牌)/
+    ``resumption``(复牌)。PIT=当日:``available_at`` = 交易日 09:30
+    (上海)—— 全天停牌开盘即可观察,计划停复牌按生效日可见(不早于
+    生效日看到,保守方向)。
+    """
+
+    symbol: str
+    trade_date: date
+    suspend_kind: str
+    suspend_type: str
+    suspend_timing: str | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
 @runtime_checkable
 class ResearchDataProvider(Protocol):
     """研究数据读取边界;公共接口不暴露 DataFrame 或数据源 SDK 类型。
@@ -313,6 +334,15 @@ class ResearchDataProvider(Protocol):
         dirty_row_policy: str | None = None,
     ) -> list[ConvertibleProfile]:
         """读取全市场可转债基础条款快照(在市 + 摘牌,issue #265)。"""
+        ...
+
+    async def fetch_suspensions(
+        self,
+        trade_date: date,
+        *,
+        dirty_row_policy: str | None = None,
+    ) -> list[SuspensionRecord]:
+        """读取指定交易日的全市场停复牌枚举(issue #396)。"""
         ...
 
 
