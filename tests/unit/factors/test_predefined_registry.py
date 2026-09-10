@@ -404,7 +404,6 @@ class _AlphaInput(PredefinedFactorInput):
         """本测试域无财务发布:空映射(#401 未挂载降级语义)。"""
         return {}
 
-
 def _alpha_universe(
     *,
     n_days: int = 260,

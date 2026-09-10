@@ -176,7 +176,6 @@ class _BatchInput(PredefinedFactorInput):
         """本测试域无财务发布:空映射(#401 未挂载降级语义)。"""
         return {}
 
-
 def _series(values: pd.Series, *, available_hour: int = 15) -> SymbolSeries:
     """pandas 序列(业务日索引)→ SymbolSeries。"""
     dates = tuple(values.index)

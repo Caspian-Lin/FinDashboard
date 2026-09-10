@@ -533,6 +533,8 @@ async def create_dataset_release(
         "dataset_name": request.dataset_name,
         "release_kind": request.release_kind,
         "version": request.version,
+        # issue #401:schema_version 透传(缺省 None 执行器回落默认)。
+        "schema_version": request.schema_version,
         "start_date": request.start_date.isoformat(),
         "end_date": request.end_date.isoformat(),
         "adjustment": request.adjustment,

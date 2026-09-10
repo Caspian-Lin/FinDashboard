@@ -77,6 +77,18 @@ PREDEFINED_VERSION_MISMATCH = "predefined_version_mismatch"
 #: 未注册因子名的失败分类
 UNKNOWN_PREDEFINED_FACTOR = "unknown_predefined_factor"
 
+#: dict 推断 schema 下全 None 值列的 Arrow null 类型(pyarrow 无公共常量)
+_NULL_TYPE: Any = None
+
+
+def _null_type() -> Any:
+    global _NULL_TYPE
+    if _NULL_TYPE is None:
+        import pyarrow as pa
+
+        _NULL_TYPE = pa.null()
+    return _NULL_TYPE
+
 
 @dataclass(frozen=True)
 class PredefinedFactorSeriesOutput:
@@ -121,6 +133,7 @@ class _MountFactorInput(PredefinedFactorInput):
         definition: PredefinedFactorDefinition,
         bars_table: Any,
         daily_table: Any | None,
+        financial_table: Any | None,
         mount_symbols: tuple[str, ...],
         decision_dates: tuple[date, ...],
         value_universe: tuple[str, ...],
@@ -137,6 +150,7 @@ class _MountFactorInput(PredefinedFactorInput):
         self._definition = definition
         self._bars_table = bars_table
         self._daily_table = daily_table
+        self._financial_table = financial_table
         self._value_universe = value_universe
         self._industry_groups: Mapping[str, str | None] = industry_groups or {}
         self._series_cache: dict[tuple[str, str], dict[str, SymbolSeries]] = {}
@@ -150,6 +164,11 @@ class _MountFactorInput(PredefinedFactorInput):
         if self._daily_table is None:
             return {}
         return self._series_for("daily_metrics", field, self._daily_table)
+
+    def financial_indicators(self, field: str) -> dict[str, SymbolSeries]:
+        if self._financial_table is None:
+            return {}
+        return self._financial_series_for(field)
 
     def industry_groups(self) -> dict[str, str | None]:
         """行业分组(#400:自 bars 主发布 instruments.industry 装配)。
@@ -165,15 +184,48 @@ class _MountFactorInput(PredefinedFactorInput):
         series_by_symbol: Any,
         per_symbol_values: Any,
     ) -> FactorSeriesFrame:
-        """按目录条目决定采样面(cross_section → 可交易域,#380)。"""
+        """按目录条目决定采样面(cross_section → 可交易域,#380)。
+
+        值域取目录 universe 与**本次因子实际产出序列**的交集(#401):
+        bars/daily 因子对全挂载标的逐标的产出(交集 = 原 universe,零
+        变化);财务公告序列只覆盖有公告的标的(无公告 = 结构性缺测,
+        与停牌缺行同语义),不因个别标的缺公告拒采样。
+        """
         return sample_series_frame(
             series_by_symbol,
             per_symbol_values,
             decision_dates=self.decision_dates,
-            value_universe=self._value_universe,
+            value_universe=tuple(
+                symbol
+                for symbol in self._value_universe
+                if symbol in per_symbol_values
+            ),
         )
 
     # ---- 内部 ----------------------------------------------------------
+
+    def _financial_series_for(self, field: str) -> dict[str, SymbolSeries]:
+        """financial_indicators 公告序列取数(#401)。
+
+        挂载行无 ``date`` 列(与 bars/daily 不同):行日期轴取
+        ``announcement_date``,PIT 门控仍走逐行 ``available_at`` ——
+        采样语义 = 「决策日可见的最近一次公告」的步进函数。值列全 None
+        (上游该字段整体缺失)按 float64 归一,整列 NaN。
+        """
+        assert self._financial_table is not None
+        cache_key = ("financial_indicators", field)
+        cached = self._series_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if field not in self._financial_table.column_names:
+            raise SandboxError(
+                "output_contract_violation",
+                f"挂载 financial_indicators 缺少因子请求的字段: {field}"
+                f"(可用: {self._financial_table.column_names[:20]})",
+            )
+        series = _financial_series_from_table(self._financial_table, field)
+        self._series_cache[cache_key] = series
+        return series
 
     def _series_for(
         self, dataset: str, field: str, table: Any
@@ -200,7 +252,9 @@ def _read_mount_table(path: Path) -> Any:
     return pq.read_table(path, memory_map=True, pre_buffer=False)
 
 
-def _symbol_series_from_table(table: Any, field: str) -> dict[str, SymbolSeries]:
+def _symbol_series_from_table(
+    table: Any, field: str, *, date_column: str = "date"
+) -> dict[str, SymbolSeries]:
     """Arrow 长表 → {symbol: SymbolSeries}(按 (symbol, available_at) 稳定排序)。
 
     available_at 升序是因子输入契约;稳定排序使截断变体(行子序列)
@@ -218,7 +272,7 @@ def _symbol_series_from_table(table: Any, field: str) -> dict[str, SymbolSeries]
     )
     ordered = table.take(indices)
     symbols = np.asarray(ordered.column("symbol").to_pylist(), dtype=object)
-    dates = ordered.column("date").to_pylist()
+    dates = ordered.column(date_column).to_pylist()
     if "available_at" in ordered.column_names:
         available_micros = np.asarray(
             ordered.column("available_at").cast("int64").to_pylist(),
@@ -239,8 +293,13 @@ def _symbol_series_from_table(table: Any, field: str) -> dict[str, SymbolSeries]
             ],
             dtype=np.int64,
         )
+    field_column = ordered.column(field)
+    if field_column.type == _null_type():
+        # 全 None 值列(上游该字段整体缺失)在 dict 推断 schema 下为 null
+        # 类型,统一 float64 归一(与 #371 全 None 列口径一致)。
+        field_column = field_column.cast("float64")
     values = np.asarray(
-        ordered.column(field).fill_null(float("nan")).to_pylist(),
+        field_column.fill_null(float("nan")).to_pylist(),
         dtype=np.float64,
     )
     boundaries = np.unique(symbols, return_index=True)
@@ -261,6 +320,19 @@ def _symbol_series_from_table(table: Any, field: str) -> dict[str, SymbolSeries]
             ),
         )
     return series_by_symbol
+
+
+def _financial_series_from_table(
+    table: Any, field: str
+) -> dict[str, SymbolSeries]:
+    """financial_indicators 挂载表 → {symbol: 公告序列}(#401)。
+
+    与 bars/daily 同一排序与 PIT 口径,差异只在行日期轴 = ``announcement_date``
+    (公告频率步进序列,语义见 :meth:`PredefinedFactorInput.financial_indicators`)。
+    """
+    return _symbol_series_from_table(
+        table, field, date_column="announcement_date"
+    )
 
 
 async def run_predefined_factor_series(
@@ -371,6 +443,17 @@ async def run_predefined_factor_series(
     )
     daily_path = mount.root / "daily_metrics.parquet"
     daily_table = _read_mount_table(daily_path) if needs_daily and daily_path.exists() else None
+    # issue #401:声明 financial_indicators.<field> 依赖的因子自财务发布
+    # 挂载装配公告序列;未挂载(无财务发布联合)→ None,因子取到空映射。
+    needs_financial = any(
+        dep.startswith("financial_indicators.") for dep in definition.data_dependencies
+    )
+    financial_path = mount.root / "financial_indicators.parquet"
+    financial_table = (
+        _read_mount_table(financial_path)
+        if needs_financial and financial_path.exists()
+        else None
+    )
 
     mount_series = _symbol_series_from_table(bars_table, "close")
     mount_symbols = tuple(sorted(mount_series))
@@ -386,6 +469,7 @@ async def run_predefined_factor_series(
         definition=definition,
         bars_table=bars_table,
         daily_table=daily_table,
+        financial_table=financial_table,
         mount_symbols=mount_symbols,
         decision_dates=tuple(spec.dates),
         value_universe=value_universe,

@@ -1120,6 +1120,15 @@ class ResearchDatasetReleaseCreate(BaseSchema):
         max_length=64,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
+    # issue #401:冻结字段集合变化(白名单扩展)时按 #187 机制递增(如
+    # financial_indicators 扩列后新发布 schema_version=v2);缺省 None 沿用
+    # 服务端默认,既有发布身份零变化。
+    schema_version: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
     # #261:标的集来源三选一(互斥)——内联 symbols / 从既有发布复制 /
     # instruments 全活跃展开。入队期由 ``resolve_release_symbols`` 解析成
     # 具体 symbols 进任务 payload,执行器零改动。

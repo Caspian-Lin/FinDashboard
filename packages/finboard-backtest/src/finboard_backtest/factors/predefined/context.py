@@ -104,6 +104,13 @@ class PredefinedFactorInput(ABC):
       issue #399);
     * ``daily_metrics(field)`` —— daily_metrics 发布列式取数(惰性:
       因子不触碰的研究数据集零读取,#378 同精神);未挂载 → 空映射;
+    * ``financial_indicators(field)`` —— financial_indicators 发布的
+      **公告序列**取数(#401):每行 = 一次公告修订,``dates`` 为公告日、
+      ``available_at`` 为 PIT 可见时刻(公告日次日零点,上海时区),
+      序列按 available_at 升序;``sample`` 按「决策日可见的最近一次
+      公告」取值 —— 财务因子天然是公告频率的**步进函数**(公告间持仓
+      上一期值,停牌日自然延续);同一报告期的修订(多次公告)各自成
+      行,采样取修订后最新值;未挂载 → 空映射;
     * ``industry_groups()`` —— 行业分组装配(symbol → 一级行业代码,
       缺失 → ``None``,供 ``cs_neutralize``;v1 自研究发布观测装配,
       因子层允许显式分组语义见算子 docstring);
@@ -153,6 +160,15 @@ class PredefinedFactorInput(ABC):
     @abstractmethod
     def daily_metrics(self, field: str) -> dict[str, SymbolSeries]:
         """daily_metrics 发布列式取数(未挂载 → 空映射)。"""
+
+    @abstractmethod
+    def financial_indicators(self, field: str) -> dict[str, SymbolSeries]:
+        """financial_indicators 发布公告序列取数(#401;未挂载 → 空映射)。
+
+        序列 = 该标的的公告修订史(每行一次公告,按 available_at 升序);
+        ``sample`` 经 ``position_asof`` 天然实现「决策日可见的最近一次
+        公告」的步进取值。
+        """
 
     @abstractmethod
     def industry_groups(self) -> dict[str, str | None]:

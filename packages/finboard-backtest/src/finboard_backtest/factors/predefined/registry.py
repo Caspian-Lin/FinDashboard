@@ -51,6 +51,12 @@ WorldQuant《101 Formulaic Alphas》(Kakushadze 2015)经 tushare
 ``log_price`` / ``ma_20d`` / ``price_dist`` / ``days_down_up`` 经总览
 拍板不注册(变换非因子 / 原料 / 文献弱)。
 
+**批次 3(#401)财务因子族** ``fin_*``(40 个 Growth / Quality):
+数据依赖 = ``financial_indicators.<field>``,输入是**公告序列**(每行
+一次公告修订,按 available_at 升序),采样取「决策日可见的最近一次
+公告」→ 公告频率步进函数;单季 QoQ 直接用上游 q_ 前缀单季字段(诚实
+取数,不做跨报告期自推导),加速度族为同比增速的公告序一阶差分。
+
 纯离线研究域,不连 broker 不下单。
 """
 
@@ -197,6 +203,67 @@ def _momentum_return(window: int) -> PredefinedFactorCompute:
     return compute
 
 
+def _financial_level(field: str) -> PredefinedFactorCompute:
+    """财务公告水平因子实现(#401):公告字段原值直接作为因子值。
+
+    值 = 该标的财务公告序列(每行一次公告修订)的字段值,采样取
+    「决策日可见的最近一次公告」—— 财务指标天然是公告频率的步进函数
+    (公告之间持有上一期值);比率字段已由摄取层归一为小数
+    (percent 类 ÷100,倍数/比率类原值)。因子必须因果:位置 ``i`` 的
+    输出就是公告 ``i`` 自身,天然只依赖 ``<= i`` 的行。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        financial = inp.financial_indicators(field)
+        return inp.sample(
+            financial, {s: series.values for s, series in financial.items()}
+        )
+
+    return compute
+
+
+def _financial_accel(field: str) -> PredefinedFactorCompute:
+    """财务公告加速度因子实现(#401):同比增速的公告序一阶差分。
+
+    ``value[i] = growth[i] - growth[i-1]``——最新公告的同比增速相对
+    **上一条公告**(即上一报告期)的变化,衡量增长动量(加速/减速)。
+    诚实边界:分母是「上一条公告」而非严格「去年同报告期」——上游
+    修订公告(同报告期二次公告)会作为独立行插入序列,该位置差分值
+    为修订前后增速之差(通常接近 0);首条公告 → NaN(缺测)。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        financial = inp.financial_indicators(field)
+        per_symbol = {
+            symbol: ts_delta(series.values, 1)
+            for symbol, series in financial.items()
+        }
+        return inp.sample(financial, per_symbol)
+
+    return compute
+
+
+def _financial_definition(
+    name: str,
+    *,
+    title: str,
+    family: str,
+    field: str,
+    direction: FactorPreference = FactorPreference.HIGHER,
+    compute: PredefinedFactorCompute | None = None,
+) -> PredefinedFactorDefinition:
+    """财务因子条目工厂(#401):公告频率步进序列,无参数化窗口。"""
+    return PredefinedFactorDefinition(
+        name=name,
+        title=title,
+        family=family,
+        direction=direction,
+        signal_eligible=True,
+        data_dependencies=(f"financial_indicators.{field}",),
+        window=None,
+        implementation_version="1",
+        compute=compute or _financial_level(field),
+    )
 # --------------------------------------------------------------------- #
 # 批次 1(#399)公共件:市场收益对齐与区间收益
 # --------------------------------------------------------------------- #
@@ -2226,6 +2293,12 @@ def _size_entries() -> tuple[PredefinedFactorDefinition, ...]:
 
 
 #: 目录(裸名 → 条目)。批次 0 样板:return_Nd 动量族(4 窗口变体);
+#: 批次 1-4(~150+ 因子)按同一模式在此追加注册。
+#:
+#: 批次 3(#401):fina_indicator 白名单扩展解锁的 40 个 Growth / Quality
+#: 财务因子 —— 数据依赖 = ``financial_indicators.<field>``,公告频率步进
+#: 序列(采样取决策日可见的最近一次公告),字段由 #401 扩展白名单提供
+#: (announcement_date PIT,available_at = 公告次日零点上海时区)。
 #: 批次 2(#400):Alpha101 量价 31 因子;后续批次按同一模式追加注册。
 PREDEFINED_FACTORS: dict[str, PredefinedFactorDefinition] = {
     item.name: item
@@ -2253,6 +2326,257 @@ PREDEFINED_FACTORS: dict[str, PredefinedFactorDefinition] = {
             title="return_252d = close / close[-252] - 1(年度动量)",
             family="momentum",
             window=252,
+        ),
+        # ---- 批次 3(#401):Growth 族(13)--------------------------------
+        _financial_definition(
+            "fin_revenue_yoy",
+            title="fin_revenue_yoy = 营业总收入同比增长率(累计口径,公告步进)",
+            family="growth",
+            field="revenue_yoy",
+        ),
+        _financial_definition(
+            "fin_operating_revenue_yoy",
+            title="fin_operating_revenue_yoy = 营业收入同比增长率(or_yoy)",
+            family="growth",
+            field="operating_revenue_yoy",
+        ),
+        _financial_definition(
+            "fin_basic_eps_yoy",
+            title="fin_basic_eps_yoy = 基本每股收益同比增长率",
+            family="growth",
+            field="basic_eps_yoy",
+        ),
+        _financial_definition(
+            "fin_deducted_np_yoy",
+            title="fin_deducted_np_yoy = 扣非归母净利润同比增长率(dt_netprofit_yoy)",
+            family="growth",
+            field="deducted_netprofit_yoy",
+        ),
+        _financial_definition(
+            "fin_operating_profit_yoy",
+            title="fin_operating_profit_yoy = 营业利润同比增长率(op_yoy)",
+            family="growth",
+            field="operating_profit_yoy",
+        ),
+        _financial_definition(
+            "fin_netprofit_yoy",
+            title="fin_netprofit_yoy = 归母净利润同比增长率(累计口径)",
+            family="growth",
+            field="net_profit_yoy",
+        ),
+        _financial_definition(
+            "fin_ocf_yoy",
+            title="fin_ocf_yoy = 经营活动现金流净额同比增长率(ocf_yoy)",
+            family="growth",
+            field="operating_cash_flow_yoy",
+        ),
+        _financial_definition(
+            "fin_revenue_yoy_q",
+            title="fin_revenue_yoy_q = 营业总收入同比增长率(单季度)",
+            family="growth",
+            field="revenue_yoy_q",
+        ),
+        _financial_definition(
+            "fin_revenue_qoq",
+            title="fin_revenue_qoq = 营业总收入环比增长率(单季度)",
+            family="growth",
+            field="revenue_qoq",
+        ),
+        _financial_definition(
+            "fin_netprofit_yoy_q",
+            title="fin_netprofit_yoy_q = 归母净利润同比增长率(单季度)",
+            family="growth",
+            field="netprofit_yoy_q",
+        ),
+        _financial_definition(
+            "fin_netprofit_qoq",
+            title="fin_netprofit_qoq = 归母净利润环比增长率(单季度)",
+            family="growth",
+            field="netprofit_qoq",
+        ),
+        _financial_definition(
+            "fin_np_yoy_accel",
+            title="fin_np_yoy_accel = 归母净利润同比增速的公告序一阶差分(增长加速度)",
+            family="growth",
+            field="net_profit_yoy",
+            compute=_financial_accel("net_profit_yoy"),
+        ),
+        _financial_definition(
+            "fin_revenue_yoy_accel",
+            title="fin_revenue_yoy_accel = 营业总收入同比增速的公告序一阶差分(增长加速度)",
+            family="growth",
+            field="revenue_yoy",
+            compute=_financial_accel("revenue_yoy"),
+        ),
+        # ---- 批次 3(#401):Quality 盈利族(12)---------------------------
+        _financial_definition(
+            "fin_roe",
+            title="fin_roe = 净资产收益率(摊薄)",
+            family="quality",
+            field="return_on_equity",
+        ),
+        _financial_definition(
+            "fin_roe_waa",
+            title="fin_roe_waa = 加权平均净资产收益率",
+            family="quality",
+            field="weighted_return_on_equity",
+        ),
+        _financial_definition(
+            "fin_roe_deducted",
+            title="fin_roe_deducted = 净资产收益率(扣除非经常损益)",
+            family="quality",
+            field="roe_deducted",
+        ),
+        _financial_definition(
+            "fin_roe_q",
+            title="fin_roe_q = 净资产收益率(单季度)",
+            family="quality",
+            field="roe_q",
+        ),
+        _financial_definition(
+            "fin_roa",
+            title="fin_roa = 总资产报酬率(roa)",
+            family="quality",
+            field="return_on_assets",
+        ),
+        _financial_definition(
+            "fin_roa_np",
+            title="fin_roa_np = 总资产净利率(npta)",
+            family="quality",
+            field="return_on_assets_np",
+        ),
+        _financial_definition(
+            "fin_roa_q",
+            title="fin_roa_q = 总资产净利率(单季度,q_npta)",
+            family="quality",
+            field="return_on_assets_q",
+        ),
+        _financial_definition(
+            "fin_roic",
+            title="fin_roic = 投入资本回报率(roic)",
+            family="quality",
+            field="roic",
+        ),
+        _financial_definition(
+            "fin_gross_margin",
+            title="fin_gross_margin = 销售毛利率",
+            family="quality",
+            field="gross_profit_margin",
+        ),
+        _financial_definition(
+            "fin_net_margin",
+            title="fin_net_margin = 销售净利率",
+            family="quality",
+            field="net_profit_margin",
+        ),
+        _financial_definition(
+            "fin_gross_margin_q",
+            title="fin_gross_margin_q = 销售毛利率(单季度)",
+            family="quality",
+            field="grossprofit_margin_q",
+        ),
+        _financial_definition(
+            "fin_net_margin_q",
+            title="fin_net_margin_q = 销售净利率(单季度)",
+            family="quality",
+            field="netprofit_margin_q",
+        ),
+        # ---- 批次 3(#401):Quality 营运效率族(5)------------------------
+        _financial_definition(
+            "fin_inventory_turnover",
+            title="fin_inventory_turnover = 存货周转率(次/报告期)",
+            family="quality",
+            field="inventory_turnover",
+        ),
+        _financial_definition(
+            "fin_receivables_turnover",
+            title="fin_receivables_turnover = 应收账款周转率(次/报告期)",
+            family="quality",
+            field="receivables_turnover",
+        ),
+        _financial_definition(
+            "fin_current_assets_turnover",
+            title="fin_current_assets_turnover = 流动资产周转率(次/报告期)",
+            family="quality",
+            field="current_assets_turnover",
+        ),
+        _financial_definition(
+            "fin_fixed_assets_turnover",
+            title="fin_fixed_assets_turnover = 固定资产周转率(次/报告期)",
+            family="quality",
+            field="fixed_assets_turnover",
+        ),
+        _financial_definition(
+            "fin_total_assets_turnover",
+            title="fin_total_assets_turnover = 总资产周转率(次/报告期)",
+            family="quality",
+            field="total_assets_turnover",
+        ),
+        # ---- 批次 3(#401):Quality 流动性 / 偿债族(6)-------------------
+        _financial_definition(
+            "fin_current_ratio",
+            title="fin_current_ratio = 流动比率(流动资产/流动负债)",
+            family="quality",
+            field="current_ratio",
+        ),
+        _financial_definition(
+            "fin_quick_ratio",
+            title="fin_quick_ratio = 速动比率",
+            family="quality",
+            field="quick_ratio",
+        ),
+        _financial_definition(
+            "fin_debt_to_assets",
+            title="fin_debt_to_assets = 资产负债率(越高越看空)",
+            family="quality",
+            field="debt_to_assets",
+            direction=FactorPreference.LOWER,
+        ),
+        _financial_definition(
+            "fin_debt_to_equity",
+            title="fin_debt_to_equity = 产权比率(负债/股东权益,越高越看空)",
+            family="quality",
+            field="debt_to_equity",
+            direction=FactorPreference.LOWER,
+        ),
+        _financial_definition(
+            "fin_interest_coverage",
+            title="fin_interest_coverage = 已获利息倍数(EBIT/利息费用,ICR)",
+            family="quality",
+            field="interest_coverage",
+        ),
+        _financial_definition(
+            "fin_equity_multiplier",
+            title="fin_equity_multiplier = 权益乘数(总资产/股东权益,越高越看空)",
+            family="quality",
+            field="equity_multiplier",
+            direction=FactorPreference.LOWER,
+        ),
+        # ---- 批次 3(#401):Quality 费用 / 现金流质量族(4)---------------
+        _financial_definition(
+            "fin_expense_ratio",
+            title="fin_expense_ratio = 销售期间费用率(期间费用/营业总收入,越高越看空)",
+            family="quality",
+            field="expense_to_revenue",
+            direction=FactorPreference.LOWER,
+        ),
+        _financial_definition(
+            "fin_ocf_to_revenue",
+            title="fin_ocf_to_revenue = 经营现金流净额/营业收入(盈利现金含量)",
+            family="quality",
+            field="ocf_to_revenue",
+        ),
+        _financial_definition(
+            "fin_ocf_to_debt",
+            title="fin_ocf_to_debt = 经营现金流净额/负债合计(偿债现金保障)",
+            family="quality",
+            field="ocf_to_debt",
+        ),
+        _financial_definition(
+            "fin_ocfps",
+            title="fin_ocfps = 每股经营活动现金流净额",
+            family="quality",
+            field="operating_cash_flow_per_share",
         ),
         *_ALPHA101_FACTORS,
         # ---------------- 批次 1(#399):量价 74 个 ----------------
