@@ -30,12 +30,19 @@ from decimal import Decimal
 from enum import StrEnum
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from finboard_data.cache import CacheMetadata, CloseColumns, ParquetCache
 from finboard_data.quality import BarQualityChecker
-from finboard_data.research import DailySecurityMetrics, FinancialIndicator
+from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
+    DailySecurityMetrics,
+    DividendRecord,
+    FinancialIndicator,
+    IncomeStatement,
+)
 from finboard_data.trading_calendar import trading_days as _trading_days
 from finboard_shared.instruments import ASSET_METADATA_VERSION, DatasetManifest
 from finboard_shared.models import Bar, Symbol
@@ -79,6 +86,12 @@ class ReleaseDatasetKind(StrEnum):
     DAILY_METRICS = "daily_metrics"
     FINANCIAL_INDICATORS = "financial_indicators"
     CONVERTIBLE_METRICS = "convertible_metrics"
+    # issue #397:财务面扩展 —— income/balance/cashflow 三表与 dividend
+    # 分红明细独立 kind 独立白名单(从 research_* 表冻结,机制同 #187)。
+    INCOME_STATEMENTS = "income_statements"
+    BALANCE_SHEETS = "balance_sheets"
+    CASHFLOW_STATEMENTS = "cashflow_statements"
+    DIVIDENDS = "dividends"
 
 
 RELEASE_KINDS = frozenset(kind.value for kind in ReleaseDatasetKind)
@@ -134,6 +147,189 @@ CONVERTIBLE_METRICS_FIELDS = (
     "conversion_premium",
     "underlying_symbol",
     "underlying_close",
+)
+
+# issue #397:三表 + dividend 的冻结字段白名单(独立 kind 独立白名单)。
+# 值列名与领域记录属性名一致(= tushare 上游列名,provider 层不改名);
+# 金额单位人民币元。修订可见性字段(announcement_date/update_flag/
+# report_type/comp_type/formal_announcement_date)进白名单,PIT 门控按
+# available_at 列(发布元数据,自动写入)。
+_ANNOUNCED_STATEMENT_IDENTITY_FIELDS = (
+    "announcement_date",
+    "report_period",
+    "formal_announcement_date",
+    "update_flag",
+    "report_type",
+    "comp_type",
+)
+INCOME_STATEMENTS_FIELDS = (
+    *_ANNOUNCED_STATEMENT_IDENTITY_FIELDS,
+    "basic_eps",
+    "diluted_eps",
+    "total_revenue",
+    "revenue",
+    "int_income",
+    "int_exp",
+    "fv_value_chg_gain",
+    "invest_income",
+    "total_cogs",
+    "oper_cost",
+    "biz_tax_surchg",
+    "sell_exp",
+    "admin_exp",
+    "fin_exp",
+    "rd_exp",
+    "assets_impair_loss",
+    "operate_profit",
+    "non_oper_income",
+    "non_oper_exp",
+    "total_profit",
+    "income_tax",
+    "n_income",
+    "n_income_attr_p",
+    "minority_gain",
+    "oth_compr_income",
+    "t_compr_income",
+    "compr_inc_attr_p",
+    "ebit",
+    "ebitda",
+    "distable_profit",
+    "continued_net_profit",
+)
+BALANCE_SHEETS_FIELDS = (
+    *_ANNOUNCED_STATEMENT_IDENTITY_FIELDS,
+    "total_share",
+    "money_cap",
+    "trading_fl",
+    "notes_receiv",
+    "accounts_receiv",
+    "oth_receiv",
+    "prepayment",
+    "inventories",
+    "total_cur_assets",
+    "lt_eqt_invest",
+    "fix_assets",
+    "cip",
+    "intan_assets",
+    "goodwill",
+    "defer_tax_assets",
+    "total_nca",
+    "total_assets",
+    "st_borr",
+    "notes_payable",
+    "acct_payable",
+    "adv_receipts",
+    "contract_liab",
+    "payroll_payable",
+    "taxes_payable",
+    "non_cur_liab_due_1y",
+    "oth_cur_liab",
+    "total_cur_liab",
+    "lt_borr",
+    "bond_payable",
+    "total_ncl",
+    "total_liab",
+    "cap_rese",
+    "surplus_rese",
+    "undistr_porfit",
+    "treasury_share",
+    "minority_int",
+    "total_hldr_eqy_exc_min_int",
+    "total_hldr_eqy_inc_min_int",
+)
+CASHFLOW_STATEMENTS_FIELDS = (
+    *_ANNOUNCED_STATEMENT_IDENTITY_FIELDS,
+    "net_profit",
+    "finan_exp",
+    "c_fr_sale_sg",
+    "recp_tax_rends",
+    "c_inf_fr_operate_a",
+    "c_paid_goods_s",
+    "c_paid_to_for_empl",
+    "c_paid_for_taxes",
+    "oth_cash_pay_oper_act",
+    "st_cash_out_act",
+    "n_cashflow_act",
+    "c_recp_return_invest",
+    "n_recp_disp_fiolta",
+    "stot_inflows_inv_act",
+    "c_pay_acq_const_fiolta",
+    "c_paid_invest",
+    "stot_out_inv_act",
+    "n_cashflow_inv_act",
+    "c_recp_borrow",
+    "proc_issue_bonds",
+    "stot_cash_in_fnc_act",
+    "c_prepay_amt_borr",
+    "c_pay_dist_dpcp_int_exp",
+    "incl_dvd_profit_paid_sc_ms",
+    "stot_cashout_fnc_act",
+    "n_cash_flows_fnc_act",
+    "eff_fx_flu_cash",
+    "n_incr_cash_cash_equ",
+    "c_cash_equ_beg_period",
+    "c_cash_equ_end_period",
+    "free_cashflow",
+    "depr_fa_coga_dpba",
+    "amort_intang_assets",
+    "credit_impa_loss",
+    "loss_fv_chg",
+    "invest_loss",
+)
+# dividend:上游无 update_flag,``div_proc``(预案/股东大会通过/实施/不分配…)
+# 是进展口径判别符;精确股息率因子消费 ex_date/cash_div/stk_div 等列。
+DIVIDENDS_FIELDS = (
+    "announcement_date",
+    "report_period",
+    "div_proc",
+    "stk_div",
+    "stk_bo_rate",
+    "stk_co_rate",
+    "cash_div",
+    "cash_div_tax",
+    "record_date",
+    "ex_date",
+    "pay_date",
+    "div_listdate",
+    "imp_ann_date",
+)
+
+#: 读取端还原领域记录时,发布行 → 构造关键字的身份/元数据键(值列之外)。
+_ANNOUNCED_IDENTITY_FIELDS = frozenset(
+    {
+        "announcement_date",
+        "report_period",
+        "formal_announcement_date",
+        "update_flag",
+        "report_type",
+        "comp_type",
+        "div_proc",
+        "stk_div",
+        "stk_bo_rate",
+        "stk_co_rate",
+        "cash_div",
+        "cash_div_tax",
+        "record_date",
+        "ex_date",
+        "pay_date",
+        "div_listdate",
+        "imp_ann_date",
+    }
+)
+_INCOME_VALUE_FIELDS = tuple(
+    name
+    for name in INCOME_STATEMENTS_FIELDS
+    if name not in _ANNOUNCED_IDENTITY_FIELDS
+)
+_BALANCE_VALUE_FIELDS = tuple(
+    name
+    for name in BALANCE_SHEETS_FIELDS
+    if name not in _ANNOUNCED_IDENTITY_FIELDS
+)
+_CASHFLOW_VALUE_FIELDS = tuple(
+    name
+    for name in CASHFLOW_STATEMENTS_FIELDS
+    if name not in _ANNOUNCED_IDENTITY_FIELDS
 )
 
 # 研究数据冻结字段白名单:symbol 单独成列,available_at/observed_at/source
@@ -705,6 +901,14 @@ def _fields_whitelist(kind: ReleaseDatasetKind) -> frozenset[str]:
         return frozenset(FINANCIAL_INDICATORS_FIELDS)
     if kind is ReleaseDatasetKind.CONVERTIBLE_METRICS:
         return frozenset(CONVERTIBLE_METRICS_FIELDS)
+    if kind is ReleaseDatasetKind.INCOME_STATEMENTS:
+        return frozenset(INCOME_STATEMENTS_FIELDS)
+    if kind is ReleaseDatasetKind.BALANCE_SHEETS:
+        return frozenset(BALANCE_SHEETS_FIELDS)
+    if kind is ReleaseDatasetKind.CASHFLOW_STATEMENTS:
+        return frozenset(CASHFLOW_STATEMENTS_FIELDS)
+    if kind is ReleaseDatasetKind.DIVIDENDS:
+        return frozenset(DIVIDENDS_FIELDS)
     return frozenset(RELEASE_FIELDS)
 
 
@@ -1317,6 +1521,46 @@ class ResearchDataReleaseSource(Protocol):
         """返回 {symbol: [PIT 时点化的财务公告修订]},按 available_at 升序。"""
         ...
 
+    async def income_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[IncomeStatement]]:
+        """返回 {symbol: [PIT 时点化的利润表修订]}(#397),按 available_at 升序。"""
+        ...
+
+    async def balance_sheets(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[BalanceSheet]]:
+        """返回 {symbol: [PIT 时点化的资产负债表修订]}(#397),按 available_at 升序。"""
+        ...
+
+    async def cashflow_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[CashflowStatement]]:
+        """返回 {symbol: [PIT 时点化的现金流量表修订]}(#397),按 available_at 升序。"""
+        ...
+
+    async def dividends(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[DividendRecord]]:
+        """返回 {symbol: [PIT 时点化的分红送股进展]}(#397),按 available_at 升序。"""
+        ...
+
 
 class FrozenDatasetReleaseBuilder:
     """把可变 Parquet 缓存原子冻结为不可变研究发布。"""
@@ -1786,6 +2030,42 @@ class FrozenDatasetReleaseBuilder:
             return sorted(
                 indicator_records[instrument.code],
                 key=_research_record_available_at,
+            )
+        if spec.dataset_kind is ReleaseDatasetKind.INCOME_STATEMENTS:
+            income_records = await self._research_source.income_statements(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(
+                income_records[instrument.code], key=_research_record_available_at
+            )
+        if spec.dataset_kind is ReleaseDatasetKind.BALANCE_SHEETS:
+            balance_records = await self._research_source.balance_sheets(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(
+                balance_records[instrument.code], key=_research_record_available_at
+            )
+        if spec.dataset_kind is ReleaseDatasetKind.CASHFLOW_STATEMENTS:
+            cashflow_records = await self._research_source.cashflow_statements(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(
+                cashflow_records[instrument.code], key=_research_record_available_at
+            )
+        if spec.dataset_kind is ReleaseDatasetKind.DIVIDENDS:
+            dividend_records = await self._research_source.dividends(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(
+                dividend_records[instrument.code], key=_research_record_available_at
             )
         raise DatasetReleaseQualityError(f"不支持的发布数据集类型: {spec.dataset_kind}")
 
@@ -2494,6 +2774,98 @@ def _financial_indicator_from_release_row(
     )
 
 
+def _announced_statement_identity(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> dict[str, Any]:
+    """三表发布行 → 领域记录共用的身份/元数据关键字段(#397)。"""
+    value = row.get("available_at") or row.get("observed_at")
+    available_at = _coerce_datetime(value)
+    announcement_date = _coerce_date(row.get("announcement_date"))
+    report_period = _coerce_date(row.get("report_period"))
+    if announcement_date is None or report_period is None:
+        raise DatasetReleaseQualityError("研究数据记录缺少公告日或报告期")
+    return {
+        "symbol": symbol,
+        "announcement_date": announcement_date,
+        "report_period": report_period,
+        "formal_announcement_date": _coerce_date(
+            row.get("formal_announcement_date")
+        ),
+        "report_type": str(row.get("report_type") or "") or None,
+        "comp_type": str(row.get("comp_type") or "") or None,
+        "update_flag": str(row.get("update_flag") or "") or None,
+        "source": str(row.get("source") or ""),
+        "observed_at": available_at,
+        "available_at": available_at,
+    }
+
+
+def _income_statement_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> IncomeStatement:
+    """把 income_statements 发布行还原为领域记录(未冻结字段为 None,#397)。"""
+    kwargs = _announced_statement_identity(row, symbol=symbol)
+    kwargs.update(
+        {name: _coerce_decimal(row.get(name)) for name in _INCOME_VALUE_FIELDS}
+    )
+    return IncomeStatement(**kwargs)
+
+
+def _balance_sheet_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> BalanceSheet:
+    """把 balance_sheets 发布行还原为领域记录(未冻结字段为 None,#397)。"""
+    kwargs = _announced_statement_identity(row, symbol=symbol)
+    kwargs.update(
+        {name: _coerce_decimal(row.get(name)) for name in _BALANCE_VALUE_FIELDS}
+    )
+    return BalanceSheet(**kwargs)
+
+
+def _cashflow_statement_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> CashflowStatement:
+    """把 cashflow_statements 发布行还原为领域记录(未冻结字段为 None,#397)。"""
+    kwargs = _announced_statement_identity(row, symbol=symbol)
+    kwargs.update(
+        {name: _coerce_decimal(row.get(name)) for name in _CASHFLOW_VALUE_FIELDS}
+    )
+    return CashflowStatement(**kwargs)
+
+
+def _dividend_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> DividendRecord:
+    """把 dividends 发布行还原为领域记录(未冻结字段为 None,#397)。"""
+    kwargs = _announced_statement_identity(row, symbol=symbol)
+    kwargs.pop("formal_announcement_date")
+    kwargs.pop("report_type")
+    kwargs.pop("comp_type")
+    kwargs.pop("update_flag")
+    kwargs["div_proc"] = str(row.get("div_proc") or "")
+    kwargs["stk_div"] = _coerce_decimal(row.get("stk_div"))
+    kwargs["stk_bo_rate"] = _coerce_decimal(row.get("stk_bo_rate"))
+    kwargs["stk_co_rate"] = _coerce_decimal(row.get("stk_co_rate"))
+    kwargs["cash_div"] = _coerce_decimal(row.get("cash_div"))
+    kwargs["cash_div_tax"] = _coerce_decimal(row.get("cash_div_tax"))
+    kwargs["record_date"] = _coerce_date(row.get("record_date"))
+    kwargs["ex_date"] = _coerce_date(row.get("ex_date"))
+    kwargs["pay_date"] = _coerce_date(row.get("pay_date"))
+    kwargs["div_listdate"] = _coerce_date(row.get("div_listdate"))
+    kwargs["imp_ann_date"] = _coerce_date(row.get("imp_ann_date"))
+    return DividendRecord(**kwargs)
+
+
 def _coerce_datetime(value: object) -> datetime:
     if isinstance(value, datetime):
         return value
@@ -2891,6 +3263,82 @@ class FrozenReleaseProvider:
         )
         return [
             _financial_indicator_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def fetch_income_statements(
+        self,
+        symbol: Symbol,
+        *,
+        decision_at: datetime,
+    ) -> list[IncomeStatement]:
+        """读取 ``income_statements`` 发布在决策时点可见的全部公告修订(#397)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.INCOME_STATEMENTS,
+            symbol,
+            start=None,
+            end=None,
+            decision_at=decision_at,
+        )
+        return [
+            _income_statement_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def fetch_balance_sheets(
+        self,
+        symbol: Symbol,
+        *,
+        decision_at: datetime,
+    ) -> list[BalanceSheet]:
+        """读取 ``balance_sheets`` 发布在决策时点可见的全部公告修订(#397)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.BALANCE_SHEETS,
+            symbol,
+            start=None,
+            end=None,
+            decision_at=decision_at,
+        )
+        return [
+            _balance_sheet_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def fetch_cashflow_statements(
+        self,
+        symbol: Symbol,
+        *,
+        decision_at: datetime,
+    ) -> list[CashflowStatement]:
+        """读取 ``cashflow_statements`` 发布在决策时点可见的全部公告修订(#397)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.CASHFLOW_STATEMENTS,
+            symbol,
+            start=None,
+            end=None,
+            decision_at=decision_at,
+        )
+        return [
+            _cashflow_statement_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def fetch_dividends(
+        self,
+        symbol: Symbol,
+        *,
+        decision_at: datetime,
+    ) -> list[DividendRecord]:
+        """读取 ``dividends`` 发布在决策时点可见的全部分红进展(#397)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.DIVIDENDS,
+            symbol,
+            start=None,
+            end=None,
+            decision_at=decision_at,
+        )
+        return [
+            _dividend_from_release_row(row, symbol=symbol.code)
             for row in rows
         ]
 
