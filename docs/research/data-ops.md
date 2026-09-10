@@ -395,3 +395,38 @@ futures_main_sina → 缓存 → BARS 发布 → 真实 FrozenReleaseProvider �
   执行日全天停牌的标的不产出新信号、当日指令拒单(fail-visible,
   `停牌日拒绝成交(execution_suspended)`),持仓保留至复牌;停牌数据缺失
   时全部行为与历史一致。发布 kind 扩展(冻结 parquet)另议。
+
+## 财务面扩展:三表 + 分红明细(#397)
+
+### research_income/balance/cashflow/dividends(dataset_sync 第八至十一集)
+
+四张新表 `research_income_statements` / `research_balance_sheets` /
+`research_cashflow_statements` / `research_dividends`(迁移
+`c159fcd63f94`,批次发布语义挂 `research_sync_batches.id`):
+
+* 入队:`finboard_job_enqueue(kind=dataset_sync, payload={datasets:
+  ["income_statements"|"balance_sheets"|"cashflow_statements"|"dividends"],
+  start_date, end_date, symbols?})`;PER_SYMBOL_RANGE 形态按标的 x 公告日窗
+  切片(行级 REJECT 口径,坏行整批拒),dataset_version =
+  `<income|balance|cashflow|dividend>:<symbol>:<start>:<end>`;窗口按公告日
+  (tushare `start_date`/`end_date` 语义)过滤,**不是**报告期窗;
+* 上游接口(2000 积分档):`income` / `balancesheet` / `cashflow` /
+  `dividend`;字段白名单见 `finboard_data.tushare_provider` 的
+  `_INCOME_FIELDS` / `_BALANCE_FIELDS` / `_CASHFLOW_FIELDS` / `_DIVIDEND_FIELDS`;
+* PIT=ann_date+1 零点(上海,#212 fina_indicator 同口径):`available_at`
+  承载,公告前不可见;修订版本 `(update_flag, report_type, comp_type)` 进
+  身份键全保留不互相覆盖;dividend 上游无 update_flag,`div_proc`
+  (预案/股东大会通过/实施…)进身份键全保留,**注意上游 `dividend` 接口
+  没有 start_date/end_date 参数(实测忽略),窗口过滤在客户端按 ann_date
+  执行**;
+* 全市场预算参考:5534 标的 x 4 接口 = 22136 次调用(每标的每接口一切片),
+  RPM 200/分共享预算下约 111 分钟纯调用墙钟(不含落库),建议按
+  exchange/listing_boards 宇宙过滤或分批 symbols 入队;
+* 发布:`dataset_release_publish(release_kind=同名)`(REST/MCP 同 schema)
+  从 research_* 表冻结为独立 kind 独立白名单的 parquet 发布(机制同 #187,
+  A 股股票域,发布级覆盖率阈值 0.95,full_market 展开仅股票);
+* 消费:`FrozenReleaseProvider.fetch_income_statements` /
+  `fetch_balance_sheets` / `fetch_cashflow_statements` / `fetch_dividends`
+  按 `available_at <= decision_at` PIT 门控读取(#402 将经 C0 因子通道消费:
+  QMJ 综合、FCF/OCF/EBITDA、存货/应收应付周转、流动/速动比率、精确股息率;
+  过渡期 dividend_yield_ttm 滚动近似保留)。
