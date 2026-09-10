@@ -209,8 +209,9 @@ def validate_bulk_download_payload(payload: Mapping[str, Any]) -> None:
       ``symbols``)经共享解析 ``normalize_sync_scope`` 校验归一(#392:与
       dataset_sync 同一函数,#385 口径;``symbols`` 空列表拒绝 —— 缺省不传 =
       全池,显式空列表几乎必然是调用方笔误,fail-visible);
-    * ``tushare`` x ``etf|futures`` 字面量预检(执行器基于 DB 行的
-      ``tushare_scope_mismatch`` 校验保留,#341/#267 边界不变)。
+    * ``tushare`` x ``etf`` 字面量预检(执行器基于 DB 行的
+      ``tushare_scope_mismatch`` 校验保留,#341 边界不变;期货 #395 起放行
+      —— fut_daily 2000 积分档实测可调,#267「另档积分」旧记录作废)。
     """
 
     from finboard_backtest.background_jobs.dataset_sync.scope import (
@@ -266,11 +267,11 @@ def validate_bulk_download_payload(payload: Mapping[str, Any]) -> None:
             "子集重跑请列出失败标的代码,如 000001.SZ)",
         )
 
-    if source == "tushare" and scope.instrument_type in ("etf", "futures"):
+    if source == "tushare" and scope.instrument_type == "etf":
         raise PayloadContractError(
             "tushare_scope_mismatch",
-            "Tushare 批量任务不支持 ETF(复权口径对齐未定稿,#341)与期货"
-            "(fut_daily 未接线,#267);请选 akshare 源",
+            "Tushare 批量任务不支持 ETF(复权口径对齐未定稿,#341);"
+            "请选 akshare 源(期货已放行:fut_daily,#395)",
         )
 
 

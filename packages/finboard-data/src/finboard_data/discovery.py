@@ -41,6 +41,14 @@ dataset_sync ``convertible_profiles`` 数据集从 tushare cb_basic 回填。
 写入者。登记的是**主连序列**(continuous 语义),不是可成交合约;
 主连仅用于研究信号 / 基准数据。合约 → 品种映射显式维护在登记表
 (乘数 / 保证金率与 finboard-backtest ``FuturesRule`` 同口径,单测锁定)。
+
+期货合约级登记(issue #395):``discover_futures_contracts`` 从 tushare
+``fut_basic`` 登记具体月份合约(CFFEX 股指四品种 IF/IH/IC/IM,与主连
+受控登记表同品种),``instrument_type=futures`` 与主连同型但语义不同:
+合约是真实可成交标的(交易所/乘数/最小变动价位来自接口实测,保证金率
+上游无列、仍由受控表承载)。**主连受控登记表保留**,主连序列语义与
+合约登记并存;只登记当前在市合约(退市合约不回补登记,存量行保留
+``delist_date`` 可见)。
 """
 
 from __future__ import annotations
@@ -109,6 +117,14 @@ def is_benchmark_index(code: str) -> bool:
     return code.strip().upper() in _BENCHMARK_INDEX_CODES
 
 
+#: 期货合约级登记域(issue #395):CFFEX 股指四品种,与
+#: :data:`FUTURES_MAIN_SERIES_REGISTRY`(主连受控登记表)同品种 ——
+#: 合约级乘数 / 最小变动价位与受控表 / finboard-backtest ``FuturesRule``
+#: 的对账基准只覆盖这四个品种。国债(T/TF/TS/TL)与商品五所不登记;
+#: 扩域 = 先扩受控表(乘数 / 保证金率口径)再加一行。
+FUTURES_CONTRACT_PRODUCTS: frozenset[str] = frozenset({"IF", "IH", "IC", "IM"})
+
+
 def _index_exchange(code: str) -> str:
     """指数代码后缀 → 交易所主数据标识(与股票 / ETF 同一口径)。"""
     suffix = code.rpartition(".")[2]
@@ -128,10 +144,14 @@ class InstrumentInfo:
     instrument_type: InstrumentType  # stock / etf
     exchange: str | None = None      # SSE / SZSE / BSE
     listing_board: ListingBoard = ListingBoard.UNKNOWN
-    # issue #394:指数登记携带 index_basic base_date(基日),data_sync
+    # issue #394:指数登记携带 index_basic base_date,data_sync
     # 后置回填 instruments.list_date(只补 null)。其余发现路径无结构化
     # 上游,保持 None(#185 口径:缺失可见,不虚构元数据)。
     list_date: date | None = None
+    # issue #395:期货合约登记携带 fut_basic delist_date(最后交易日),
+    # 与 list_date 同走 backfill_listing_dates 只补 null 通道。其余发现
+    # 路径无结构化上游,保持 None。
+    delist_date: date | None = None
 
 
 def infer_a_share_listing_board(code: str) -> ListingBoard:
@@ -419,21 +439,101 @@ class UniverseDiscovery:
         logger.info("discovery.futures_main", count=len(result))
         return result
 
+    async def discover_futures_contracts(
+        self,
+        provider: TushareResearchDataProvider | None = None,
+        *,
+        today: date | None = None,
+    ) -> list[InstrumentInfo]:
+        """期货合约级登记(tushare ``fut_basic``,issue #395)。
+
+        登记域 = :data:`FUTURES_CONTRACT_PRODUCTS`(CFFEX 股指四品种,
+        与 :data:`FUTURES_MAIN_SERIES_REGISTRY` 同品种)—— 合约级乘数 /
+        最小变动价位的对账受控基准(#267 受控表 + finboard-backtest
+        ``FuturesRule``)只覆盖这四个品种;国债(T/TF/TS/TL)与商品五所
+        扩域 = 扩受控表后加一行。**只登记当前在市合约**(``list_date``
+        已到且 ``delist_date`` 未过;退市合约不回补登记 —— 存量行保留
+        ``delist_date`` 可见,避免 instruments 表随全历史合约无限膨胀、
+        full_market mixed 发布展开随之放大);预上市(list_date 在未来)
+        合约留待后续 sync 登记。list_date / delist_date 经
+        ``backfill_listing_dates`` 回填(只补 null,#265/#394 同语义)。
+
+        :param provider: 可注入的 tushare 研究数据 provider(测试离线注入);
+            缺省从环境构造(token 缺失具名拒绝 —— 登记源即 tushare)。
+        :param today: 可注入时钟(在市窗口判定;缺省 ``date.today()``)。
+        """
+        if provider is None:
+            from finboard_data.tushare_provider import TushareResearchDataProvider
+
+            provider = TushareResearchDataProvider()
+        reference_day = today or date.today()
+        profiles = await provider.fetch_futures_contract_profiles()
+        result: list[InstrumentInfo] = []
+        skipped_other_product = 0
+        skipped_not_listed = 0
+        for item in profiles:
+            if item.product not in FUTURES_CONTRACT_PRODUCTS:
+                skipped_other_product += 1
+                continue
+            listed = (item.list_date is None or item.list_date <= reference_day) and (
+                item.delist_date is None or item.delist_date >= reference_day
+            )
+            if not listed:
+                skipped_not_listed += 1
+                continue
+            result.append(
+                InstrumentInfo(
+                    code=item.symbol,
+                    name=item.name,
+                    market=Market.FUTURE,
+                    instrument_type=InstrumentType.FUTURES,
+                    exchange=item.exchange,
+                    listing_board=ListingBoard.UNKNOWN,
+                    list_date=item.list_date,
+                    delist_date=item.delist_date,
+                )
+            )
+        if not result:
+            raise RuntimeError(
+                f"tushare fut_basic 返回 {len(profiles)} 行但无可登记的 CFFEX 股指"
+                f"在市合约({sorted(FUTURES_CONTRACT_PRODUCTS)}),疑似上游 schema 变更"
+            )
+        logger.info(
+            "discovery.futures_contracts",
+            count=len(result),
+            source_rows=len(profiles),
+            products=sorted(FUTURES_CONTRACT_PRODUCTS),
+            skipped_other_product=skipped_other_product,
+            skipped_not_listed=skipped_not_listed,
+        )
+        return result
+
     async def discover_all(self) -> list[InstrumentInfo]:
-        """发现全部可用标的(A 股股票 + ETF + 基准指数 + 可转债 + 期货主连)。"""
-        stocks, etfs, indices, convertibles, futures = await asyncio.gather(
+        """发现全部可用标的(A 股股票 + ETF + 基准指数 + 可转债 + 期货主连 + 期货合约)。"""
+        (
+            stocks,
+            etfs,
+            indices,
+            convertibles,
+            futures,
+            futures_contracts,
+        ) = await asyncio.gather(
             self.discover_a_shares(),
             self.discover_a_etfs(),
             self.discover_indices(),
             self.discover_convertibles(),
             self.discover_futures_main(),
+            self.discover_futures_contracts(),
         )
-        all_instruments = stocks + etfs + indices + convertibles + futures
+        all_instruments = (
+            stocks + etfs + indices + convertibles + futures + futures_contracts
+        )
         logger.info(
             "discovery.all",
             total=len(all_instruments),
             indices=len(indices),
             convertibles=len(convertibles),
             futures=len(futures),
+            futures_contracts=len(futures_contracts),
         )
         return all_instruments

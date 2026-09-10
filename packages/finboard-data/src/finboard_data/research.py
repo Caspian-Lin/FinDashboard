@@ -259,6 +259,56 @@ class IndexProfile:
     available_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class FuturesContractProfile:
+    """期货合约基础信息快照(tushare ``fut_basic``,issue #395)。
+
+    PIT 语义(诚实边界):与 ``index_basic`` / ``cb_basic`` 同为**当前时点**
+    快照,不含合约参数变更史(交易所调整保证金率 / 乘数公告不回溯);
+    ``available_at`` = 本次观察时间。``symbol`` 是**本仓归一形制**
+    (``IF2601.CFFEX``):上游 ts_code 后缀是交易所简写(``IF2601.CFX``),
+    provider 归一时已映射到本仓 :data:`~finboard_data.akshare_provider.FUTURES_EXCHANGES`
+    后缀,与 ``make_symbol`` / 冻结发布逐标的校验同一口径。
+
+    ``multiplier`` / ``price_tick``:上游文档标注 multiplier 只对国债 /
+    指数期货适用;``price_tick`` 从 ``quote_unit_desc``(如 ``0.2指数点``)
+    解析最小变动价位,解析失败保持 None 可见缺失。**上游无保证金率列**
+    —— 保证金率仍由受控登记表 / ``FuturesRule`` 承载(#267 口径),不虚构。
+    """
+
+    symbol: str
+    name: str
+    product: str
+    exchange: str
+    multiplier: Decimal | None
+    price_tick: Decimal | None
+    quote_unit_desc: str | None
+    list_date: date | None
+    delist_date: date | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesTradeCalendarDay:
+    """期货交易日历单日观测(tushare ``fut_trade_cal``,issue #395)。
+
+    与 #396 股票 ``trade_cal`` 表同构(exchange 区分):``is_open`` 保留
+    0/1 双值(休市行同样落库,与 akshare 回源只产 ``is_open=true`` 行的
+    股票口径不同 —— tushare 上游自带完整日历);``pretrade_date`` 是上一
+    个交易日,供推导消费。
+    """
+
+    exchange: str
+    cal_date: date
+    is_open: bool
+    pretrade_date: date | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
 @runtime_checkable
 class ResearchDataProvider(Protocol):
     """研究数据读取边界;公共接口不暴露 DataFrame 或数据源 SDK 类型。

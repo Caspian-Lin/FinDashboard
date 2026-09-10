@@ -27,10 +27,13 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
+from finboard_data.akshare_provider import from_tushare_futures_code
 from finboard_data.research import (
     ConvertibleProfile,
     DailySecurityMetrics,
     FinancialIndicator,
+    FuturesContractProfile,
+    FuturesTradeCalendarDay,
     IndexProfile,
     IndustryMembership,
     InstrumentNameChange,
@@ -228,6 +231,38 @@ class TushareClient(Protocol):
         """调用 ``index_basic``(指数基础信息,#394)。"""
         ...
 
+
+
+_FUT_BASIC_FIELDS = (
+    "ts_code,name,fut_code,multiplier,quote_unit_desc,list_date,delist_date"
+)
+
+_FUT_BASIC_LIMIT = 5000
+
+_FUTURES_CONTRACT_SYMBOL_PATTERN = re.compile(r"^[A-Z]+\d{3,4}$")
+
+_FUT_TRADE_CAL_FIELDS = "exchange,cal_date,is_open,pretrade_date"
+
+_FUT_TRADE_CAL_LIMIT = 12000
+
+_PRICE_TICK_PATTERN = re.compile(r"^\d+(?:\.\d+)?")
+
+def _parse_price_tick(quote_unit_desc: str | None) -> Decimal | None:
+    """从 ``quote_unit_desc`` 解析最小变动价位(issue #395)。
+
+    实测形制 ``0.2指数点`` / ``0.005人民币元``:取前导数字;无前导数字或
+    缺列返回 None(缺失可见,不虚构)。
+    """
+    if not quote_unit_desc:
+        return None
+    match = _PRICE_TICK_PATTERN.match(quote_unit_desc.strip())
+    if match is None:
+        return None
+    try:
+        value = Decimal(match.group(0))
+    except InvalidOperation:
+        return None
+    return value if value.is_finite() and value > 0 else None
 
 
 class TushareResearchDataProvider:
@@ -874,6 +909,161 @@ class TushareResearchDataProvider:
             observed_at=observed_at,
             available_at=observed_at,
         )
+    async def fetch_futures_contract_profiles(
+        self,
+        *,
+        exchange: str = "CFFEX",
+        dirty_row_policy: str | None = None,
+    ) -> list[FuturesContractProfile]:
+        """读取期货合约基础信息(单次全量;issue #395 合约登记上游)。
+
+        ``fut_basic`` 按交易所一次返回全部历史合约(CFFEX 720 行,2026-09-09
+        实测;无文档化分页参数),截断护栏 fail-closed。``symbol`` 归一为本仓
+        内部形制(ts_code 后缀 ``IF2601.CFX`` → ``IF2601.CFFEX``,见
+        :func:`~finboard_data.akshare_provider.from_tushare_futures_code`)。
+
+        主力 / 当月等**连续合约形制**(``IF.CFX`` / ``IFL.CFX``,上游
+        vendor 序列)与未知后缀行按脏行跳过并具名告警 —— 连续序列不是
+        可成交合约,本仓主连由受控登记表承载(#267);登记域(哪些品种 /
+        哪些在市状态进 ``instruments`` 表)由 discovery 层裁决,provider
+        保留全部具体合约快照(对账口径保真,#394 同风格)。全市场枚举
+        (#392 统一口径):单行契约违规默认跳过并具名告警,「全部行被跳过」
+        仍整批拒;``dirty_row_policy="reject"`` 可显式收紧。
+        """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=True)
+        normalized_exchange = exchange.strip().upper()
+        if not normalized_exchange:
+            raise ResearchDataConfigurationError("exchange 不能为空")
+        observed_at = self._observed_at()
+        rows = await self._call(
+            "fut_basic",
+            exchange=normalized_exchange,
+            fields=_FUT_BASIC_FIELDS,
+        )
+        _reject_possible_truncation(rows, "fut_basic", limit=_FUT_BASIC_LIMIT)
+        profiles = self._parse_rows(
+            rows,
+            self._parse_futures_contract,
+            observed_at=observed_at,
+            endpoint="fut_basic",
+            skip_dirty_rows=skip_dirty,
+        )
+        return sorted(profiles, key=lambda item: item.symbol)
+
+    async def fetch_futures_trade_cal(
+        self,
+        *,
+        exchange: str = "CFFEX",
+        start_date: date,
+        end_date: date,
+        dirty_row_policy: str | None = None,
+    ) -> list[FuturesTradeCalendarDay]:
+        """读取期货交易日历(与 #396 股票 trade_cal 同构;issue #395)。
+
+        ``fut_trade_cal`` 返回窗口内全部日历日(含 ``is_open=0`` 休市行,
+        与 akshare 回源只产交易日的股票口径不同)。``exchange`` 取 tushare
+        交易所全名(CFFEX / SHFE / DCE / CZCE / INE;GFEX 未在上游文档
+        列出,实测 fut_basic 有数据、日历未验证,调用失败会具名报错),
+        落库前原样透传(与 ``instruments.exchange`` 的 ``CFFEX`` 主数据
+        标识同一词表)。窗口必填(不给窗口的全历史拉取是不可控预算)。
+        """
+        skip_dirty = _resolve_skip_dirty_rows(dirty_row_policy, default=False)
+        if start_date > end_date:
+            raise ResearchDataConfigurationError("start_date 不能晚于 end_date")
+        normalized_exchange = exchange.strip().upper()
+        if not normalized_exchange:
+            raise ResearchDataConfigurationError("exchange 不能为空")
+        observed_at = self._observed_at()
+        rows = await self._call(
+            "fut_trade_cal",
+            exchange=normalized_exchange,
+            start_date=_format_date(start_date),
+            end_date=_format_date(end_date),
+            fields=_FUT_TRADE_CAL_FIELDS,
+        )
+        _reject_possible_truncation(
+            rows, "fut_trade_cal", limit=_FUT_TRADE_CAL_LIMIT
+        )
+        days = self._parse_rows(
+            rows,
+            self._parse_futures_trade_cal_day,
+            observed_at=observed_at,
+            endpoint="fut_trade_cal",
+            skip_dirty_rows=skip_dirty,
+        )
+        if any(item.exchange != normalized_exchange for item in days):
+            raise ResearchDataContractError(
+                "Tushare fut_trade_cal 返回了请求交易所之外的记录"
+            )
+        if any(not (start_date <= item.cal_date <= end_date) for item in days):
+            raise ResearchDataContractError(
+                "Tushare fut_trade_cal 返回了请求窗口之外的日期"
+            )
+        return sorted(days, key=lambda item: item.cal_date)
+
+    @staticmethod
+    def _parse_futures_contract(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> FuturesContractProfile:
+        endpoint = "fut_basic"
+        _require_fields(row, "ts_code,name,fut_code", endpoint, index)
+        product = _required_text(row, "fut_code", endpoint, index)
+        symbol = from_tushare_futures_code(
+            _required_text(row, "ts_code", endpoint, index)
+        )
+        bare = symbol.split(".", 1)[0]
+        if not _FUTURES_CONTRACT_SYMBOL_PATTERN.fullmatch(bare):
+            raise _field_error(
+                endpoint,
+                index,
+                "ts_code",
+                "不是具体月份合约形制(品种字母段+3~4 位年月数字;"
+                "主力/连续合约形制不进合约登记)",
+            )
+        quote_unit_desc = _optional_text(row, "quote_unit_desc")
+        return FuturesContractProfile(
+            symbol=symbol,
+            name=_required_text(row, "name", endpoint, index),
+            product=product,
+            exchange=symbol.rpartition(".")[2],
+            multiplier=_optional_decimal(row, "multiplier", endpoint, index),
+            price_tick=_parse_price_tick(quote_unit_desc),
+            quote_unit_desc=quote_unit_desc,
+            list_date=_optional_date(row, "list_date", endpoint, index),
+            delist_date=_optional_date(row, "delist_date", endpoint, index),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+
+    @staticmethod
+    def _parse_futures_trade_cal_day(
+        row: Mapping[str, object],
+        index: int,
+        observed_at: datetime,
+    ) -> FuturesTradeCalendarDay:
+        endpoint = "fut_trade_cal"
+        _require_fields(row, _FUT_TRADE_CAL_FIELDS, endpoint, index)
+        raw_open = row.get("is_open")
+        if isinstance(raw_open, bool):
+            is_open = raw_open
+        else:
+            open_value = _optional_integer(row, "is_open", endpoint, index)
+            if open_value not in (0, 1):
+                raise _field_error(endpoint, index, "is_open", "必须是 0 或 1")
+            is_open = open_value == 1
+        return FuturesTradeCalendarDay(
+            exchange=_required_text(row, "exchange", endpoint, index),
+            cal_date=_required_date(row, "cal_date", endpoint, index),
+            is_open=is_open,
+            pretrade_date=_optional_date(row, "pretrade_date", endpoint, index),
+            source=_SOURCE,
+            observed_at=observed_at,
+            available_at=observed_at,
+        )
+
 
 
 def _records(payload: object, endpoint: str) -> list[Mapping[str, object]]:

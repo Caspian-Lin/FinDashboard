@@ -313,8 +313,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   BENCHMARK_INDEX_REGISTRY 白名单只裁决「谁可作 benchmark」),
   bulk_download_start 的 instrument_type=index:默认 tushare index_daily
   主源(原始点位;未显式声明 source 且全指数域时自动覆盖,显式
-  source=akshare 恒优先,#394;2000 积分档实测可调;ETF/期货仍
+  source=akshare 恒优先,#394;2000 积分档实测可调;ETF 仍
   tushare_scope_mismatch 拒绝);
+  期货链路(#267/#395):sync_universe 登记 IF/IH/IC/IM 期货主连
+  (受控登记表,连续序列语义)+ tushare fut_basic 在市合约
+  (CFFEX 股指四品种,合约级可成交标的);bulk_download_start 的
+  instrument_type=futures(配 market=future)默认走 akshare 新浪主连,
+  显式 source=tushare 走 fut_daily(主连 IF0.CFFEX → 主力连续 IF.CFX
+  连续直取、具体合约 IF2601.CFX;2000 积分档实测可调,#395);
   指数进 multi_asset_mixed 发布后
   research_run 可计算真实 benchmark_return,指数本身不进候选池
   (只做基准数据,不可撮合)。

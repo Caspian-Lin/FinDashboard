@@ -76,6 +76,9 @@ class _Client:
     def cb_basic(self, **kwargs: str) -> object:
         raise AssertionError("cb_basic 不应被调用")
 
+    def index_basic(self, **kwargs: str) -> object:
+        raise AssertionError("index_basic 不应被调用")
+
 
 def _provider(client: _Client) -> TushareResearchDataProvider:
     return TushareResearchDataProvider(

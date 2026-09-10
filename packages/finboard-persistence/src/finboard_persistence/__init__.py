@@ -99,6 +99,7 @@ from finboard_persistence.models import (
     SimulationPositionModel,
     SimulationSessionModel,
     StrategyPresetModel,
+    TradeCalModel,
     WatchlistItemModel,
     WatchlistModel,
 )
@@ -151,6 +152,7 @@ from finboard_persistence.strategy_spec_repo import (
 )
 from finboard_persistence.trade_calendar_repo import (
     PRIMARY_EXCHANGE,
+    CalendarDayLike,
     PgTradingCalendarStore,
     TradeCalRepository,
 )
@@ -176,6 +178,7 @@ __all__ = [
     "BacktestRunRepository",
     "Base",
     "BondMetadataModel",
+    "CalendarDayLike",
     "ContinuousFuturesRuleModel",
     "ConvertibleMetadataModel",
     "ConvertibleMetadataRepository",

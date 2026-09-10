@@ -389,28 +389,33 @@ async def _sync_suspension_events(
 
 
 def _validate_tushare_scope(provider_name: str, instruments: Sequence[object]) -> None:
-    """复刻 ``data._validate_bulk_provider_scope``:tushare 批量支持股票/转债/指数。
+    """复刻 ``data._validate_bulk_provider_scope``:tushare 批量支持股票/转债/指数/期货。
 
-    可转债(issue #265)与指数(issue #341,2026-09-06 实测 2000 积分档
-    可调)各走 ``cb_daily`` / ``index_daily`` 专属接口(TushareBarProvider
-    按代码规则分流);期货(issue #267)tushare 侧不接线(fut_daily 属另档
-    积分),走 akshare 新浪主连;ETF(issue #341,复权口径对齐未定稿)仍仅
-    akshare|yfinance。拒绝行为具名 tushare_scope_mismatch,不静默换源。
+    可转债(issue #265)、指数(issue #341,2026-09-06 实测 2000 积分档
+    可调)与期货(issue #395,拍板更新 #267「fut_daily 属另档积分」旧记录)
+    各走 ``cb_daily`` / ``index_daily`` / ``fut_daily`` 专属接口
+    (TushareBarProvider 按代码规则分流);ETF(issue #341,复权口径对齐
+    未定稿)仍仅 akshare|yfinance。拒绝行为具名 tushare_scope_mismatch,
+    不静默换源。
     """
     if provider_name != "tushare":
         return
-    incompatible = [
-        getattr(ins, "code", "?")
-        for ins in instruments
-        if getattr(ins, "market", None) != "a_share"
-        or getattr(ins, "instrument_type", None) not in ("stock", "convertible", "index")
-    ]
+    incompatible: list[str] = []
+    for ins in instruments:
+        market = getattr(ins, "market", None)
+        instrument_type = getattr(ins, "instrument_type", None)
+        scope_ok = (
+            market == "a_share"
+            and instrument_type in ("stock", "convertible", "index")
+        ) or (market == "future" and instrument_type == "futures")
+        if not scope_ok:
+            incompatible.append(getattr(ins, "code", "?"))
     if incompatible:
         raise ExecutorError(
             code="tushare_scope_mismatch",
             summary=(
-                "Tushare 批量任务支持 A 股股票、可转债与指数;"
-                "ETF / 期货请另建任务选 akshare"
+                "Tushare 批量任务支持 A 股股票、可转债、指数与期货;"
+                "ETF 请另建任务选 akshare"
             ),
             retryable=False,
             context={"sample": incompatible[:5]},

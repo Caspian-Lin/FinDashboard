@@ -1182,13 +1182,19 @@ class FactorSnapshotModel(Base, IdMixin):
 
 
 class TradeCalModel(Base):
-    """A 股交易日历(按 exchange 存交易日,issue #396)。
+    """交易日历(按 exchange 存交易日;issue #395 期货 + #396 A 股共用同表)。
 
-    读取口径「DB 优先,缺失回源 akshare 并回写」:交易日是公开知识,落库后
-    发布覆盖率审计 / 决策日推导不再依赖 akshare 启动期可用性。akshare
-    ``tool_trade_date_hist_sina`` 是沪深统一日历,回源按 SSE / SZSE 两行
-    写入同一天集;``is_open`` 预留非交易日行(tushare ``trade_cal`` 口径),
-    akshare 回源只产生 ``is_open=true`` 行。
+    同一张 ``trade_cal`` 表靠 ``exchange`` 主键段区分市场(schema 在两并行
+    分支逐列一致,合并后以 #396 迁移 ``e5f6a7b8c9d0`` 为唯一建表迁移):
+    #395 从 tushare ``fut_trade_cal`` 写入 CFFEX 行集(含 ``is_open=0``
+    休市行,tushare 上游自带完整日历),#396 从 akshare 回源写入 SSE/SZSE
+    行集(只产 ``is_open=true`` 交易日行)。
+
+    #396 的读取口径「DB 优先,缺失回源 akshare 并回写」:交易日是公开
+    知识,落库后发布覆盖率审计 / 决策日推导不再依赖 akshare 启动期可用性。
+    akshare ``tool_trade_date_hist_sina`` 是沪深统一日历,回源按 SSE /
+    SZSE 两行写入同一天集;``is_open`` 预留非交易日行(tushare
+    ``trade_cal`` 口径)。
     """
 
     __tablename__ = "trade_cal"

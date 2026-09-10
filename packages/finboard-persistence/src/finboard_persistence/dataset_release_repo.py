@@ -11,7 +11,11 @@ from typing import Any
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from finboard_data.akshare_provider import futures_series_entry
+from finboard_data.akshare_provider import (
+    futures_product_entry,
+    futures_series_entry,
+    is_futures_main_code,
+)
 from finboard_data.releases import (
     ConvertibleReleaseMetadata,
     DatasetReleaseSpec,
@@ -873,14 +877,16 @@ def _futures_main_candidate(
     lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
     name_history: tuple[tuple[str, date, date | None], ...],
 ) -> ReleaseInstrumentSpec:
-    """期货**主连**标的候选(issue #267,登记来自 instruments 表)。
+    """期货标的候选(instruments 表登记:主连 #267 + 合约 #395)。
 
     与 :func:`_future_candidate`(futures_contracts 表的具体月份合约,
-    #58 合约链)是两条不同通道:主连登记在 instruments
-    (``market=future`` / ``instrument_type=futures``),乘数 / 保证金率 /
-    最小变动价位从受控登记表 ``FUTURES_MAIN_SERIES_REGISTRY`` 读取
-    (与 finboard-backtest ``FuturesRule`` 同口径),未登记品种
-    fail-closed 拒绝,禁止猜测。
+    #58 合约链)是两条不同通道:instruments 表的 ``market=future`` /
+    ``instrument_type=futures`` 行承载两种语义 —— 主连(受控登记表,
+    连续序列)与具体月份合约(#395 起 fut_basic 合约级登记)。乘数 /
+    保证金率 / 最小变动价位统一从受控登记表 ``FUTURES_MAIN_SERIES_REGISTRY``
+    读取:主连按主连代码、合约按品种代码(:func:`futures_product_entry`),
+    与 finboard-backtest ``FuturesRule`` 同口径,未登记品种 fail-closed
+    拒绝,禁止猜测。
 
     语义标注(诚实边界):主连是换月拼接产物,**仅用于研究信号 / 基准
     数据,不可当作可成交合约**(对齐 #184「指数不可撮合只做基准」)。
@@ -890,7 +896,14 @@ def _futures_main_candidate(
     就没有「单份合约到期」语义。已同步事件仍随 manifest 冻结
     (present_event_types + quality_report.futures_instruments 可见)。
     """
-    entry = futures_series_entry(row.code)
+    if is_futures_main_code(row.code):
+        entry = futures_series_entry(row.code)
+    else:
+        # #395 合约级登记:品种层成本口径派生(与主连同源受控表);
+        # 合约身份(代码 / 名称 / 上市退市日)来自 fut_basic 快照。
+        bare = row.code.split(".", 1)[0].upper()
+        product = bare.rstrip("0123456789")
+        entry = futures_product_entry(product)
     return ReleaseInstrumentSpec(
         code=row.code,
         name=row.name or entry.name,

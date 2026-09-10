@@ -332,9 +332,11 @@ class _NoopBudget:
 
 @pytest.mark.unit
 async def test_tushare_provider_futures_fail_visible(tmp_path: Path) -> None:
-    """tushare 源期货 fail-visible 拒绝(不接线),不静默走股票 daily 误路由。"""
+    """tushare 期货代码路由到 fut_daily 专属接口(#395),不触达股票 daily。"""
 
     class _Client:
+        # #395:期货改走 fut_daily 专属接口;未提供该方法的 client 在路由
+        # 到期货分支时具名报错(不再触达股票 daily / cb_daily)。
         def daily(self, **kwargs: str) -> object:  # pragma: no cover - 不应被调用
             raise AssertionError("期货代码不得触达 tushare daily")
 
@@ -353,7 +355,7 @@ async def test_tushare_provider_futures_fail_visible(tmp_path: Path) -> None:
         cache_dir=tmp_path / "cache",
         max_retries=0,
     )
-    with pytest.raises(ValueError, match="issue #267"):
+    with pytest.raises(RuntimeError, match="不支持 fut_daily"):
         await provider.fetch_bars(
             make_symbol("IF0.CFFEX"),
             BarPeriod.D1,
