@@ -452,3 +452,43 @@ futures_main_sina → 缓存 → BARS 发布 → 真实 FrozenReleaseProvider �
   按 `available_at <= decision_at` PIT 门控读取(#402 将经 C0 因子通道消费:
   QMJ 综合、FCF/OCF/EBITDA、存货/应收应付周转、流动/速动比率、精确股息率;
   过渡期 dividend_yield_ttm 滚动近似保留)。
+
+## 因子批次 4:三表 + dividend 消费的价值 / 质量因子(#402)
+
+**内容**:预置因子目录(#398 C0 通道)新增 25 个因子,消费 #397 的四张
+财务面发布:
+
+* `p_val_*`(11,Value 族):FCF / OCF / EBITDA / EBIT 总市值比、精确账面
+  市值比(BM,归母权益/总市值)、有形 BM、E/P、S/P(销收价格比)、经营
+  现金流价格比(流通市值)、**精确股息率**(dividend 明细,除权除息日
+  归属滚动 12 月窗口,替代 `dividend_yield_ttm` 滚动近似)、近 12 个月
+  每股分红(`val_dps_ttm`);
+* `p_qlt_*`(9,Quality 补全):预收(含合同负债)收入占比、预付占比、
+  明细周转率族(存货/应收/应付,三表科目直接派生)、应计比率(Sloan)、
+  利润现金含量、销售收现比、现金分红率;
+* `p_qmj*`(5,AQR QMJ):盈利/成长/安全/支付四支柱(`qmj_profitability`
+  / `qmj_growth` / `qmj_safety` / `qmj_payout`,组内成分截面 rank 等权
+  均值,均 `cross_section=True` 采样面收窄到可交易域)+ 综合
+  `qmj`(四支柱等权均值,缺测支柱按可用支柱均值合成),支柱与综合均
+  入目录可单独引用。
+
+**解锁前提**(全部就绪才能构建对应因子序列):
+
+| 因子族 | 必需发布(#397 数据集) |
+| --- | --- |
+| `val_fcf/ocf/ebitda/ebit_to_market`、`val_ocf_to_price` | cashflow_statements + daily_metrics |
+| `val_bm`、`val_tangible_bm` | balance_sheets + daily_metrics |
+| `val_earnings_to_price`、`val_sales_to_price` | income_statements + daily_metrics |
+| `val_dividend_yield`、`val_dps_ttm` | dividends + daily_metrics |
+| `qlt_*`、`qmj_*` | 上表组合(payout 支柱另需 dividends;盈利/成长/安全支柱仅需 #401 的 financial_indicators) |
+
+**口径要点**:分子取「决策日可见的最近一次公告」(announcement_date
+PIT,available_at = 公告次日零点上海);分母 = 同日可见的 daily_metrics
+市值/收盘价;利润表/现金流量表流量科目为**报告期累计值**(未年化/未
+TTM,#401 诚实取数同边界);分红进展行按「同分红年度取决策日可见最新
+一行」去重,除息日落在 `(决策日-365, 决策日]` 才计入。
+
+**运营步骤**:按 #397 小节同步并发布四张数据集(symbols 与 bars 主发布
+一致,建议 `consistency_baseline_release_id` 对齐)→
+`finboard_factor_series_build(kind=predefined_factor, name=<裸名>)` 逐因子
+构建序列(联合集 = bars 主发布 + 对应研究发布)→ 入队引用。

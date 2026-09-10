@@ -142,6 +142,15 @@ _ANNOUNCED_MOUNT_KINDS: tuple[str, ...] = (
 )
 
 
+#: bars/daily 挂载长表的行日期轴列(#402 修正:此前 daily_metrics 因子
+#: 未注册过,该读取路径未被 exercised;三表/dividend 公告类走
+#: ``announcement_date``,见 :func:`_announced_series_from_table`)
+_SERIES_DATE_COLUMN: dict[str, str] = {
+    "bars": "date",
+    "daily_metrics": "trade_date",
+}
+
+
 class _MountFactorInput(PredefinedFactorInput):
     """自窗口挂载 Arrow 表装配的因子输入(字段级惰性物化)。"""
 
@@ -271,7 +280,11 @@ class _MountFactorInput(PredefinedFactorInput):
                 f"挂载 {dataset} 缺少因子请求的字段: {field}"
                 f"(可用: {table.column_names[:20]})",
             )
-        series = _symbol_series_from_table(table, field)
+        series = _symbol_series_from_table(
+            table,
+            field,
+            date_column=_SERIES_DATE_COLUMN.get(dataset, "date"),
+        )
         self._series_cache[cache_key] = series
         return series
 
