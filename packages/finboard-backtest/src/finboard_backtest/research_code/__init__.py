@@ -30,6 +30,15 @@ from finboard_backtest.research_code.git_repo import (
     ResearchCodeError,
     ResearchCodeRepo,
 )
+from finboard_backtest.research_code.predefined_factors import (
+    PREDEFINED_ANCHOR_MISMATCH_CODE,
+    PREDEFINED_COVERAGE_MISSING_CODE,
+    PREDEFINED_SERIES_UNDECLARED_CODE,
+    PREDEFINED_UNREGISTERED_CODE,
+    predefined_factor_reference_gate_error,
+    predefined_factor_series_coverage_gate_error,
+    referenced_predefined_factors,
+)
 from finboard_backtest.research_code.promotion import (
     CHECK_FAIL,
     CHECK_NOT_EVALUATED,
@@ -174,6 +183,10 @@ __all__ = [
     "KIND_STRATEGY",
     "MAX_FILES",
     "MAX_FILE_BYTES",
+    "PREDEFINED_ANCHOR_MISMATCH_CODE",
+    "PREDEFINED_COVERAGE_MISSING_CODE",
+    "PREDEFINED_SERIES_UNDECLARED_CODE",
+    "PREDEFINED_UNREGISTERED_CODE",
     "PROMOTION_FAILED",
     "PROMOTION_PASSED",
     "PROMOTION_PENDING",
@@ -207,7 +220,10 @@ __all__ = [
     "factor_series_rebuild_error",
     "freeze_user_code_commit",
     "is_promoted_artifact",
+    "predefined_factor_reference_gate_error",
+    "predefined_factor_series_coverage_gate_error",
     "promotion_status",
+    "referenced_predefined_factors",
     "require_promotion_gates",
     "resolve_screen_bindings",
     "screen_factor_snapshot_gate_error",

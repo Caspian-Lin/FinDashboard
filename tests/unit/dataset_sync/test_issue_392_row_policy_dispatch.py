@@ -99,6 +99,8 @@ class _Client:
 
     def suspend_d(self, **kwargs: str) -> object:
         return self._rows("suspend_d", **kwargs)
+    def index_basic(self, **kwargs: str) -> object:
+        return self._rows("index_basic", **kwargs)
 
 
 def _provider(client: _Client) -> TushareResearchDataProvider:

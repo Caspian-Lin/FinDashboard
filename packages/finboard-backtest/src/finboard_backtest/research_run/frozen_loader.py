@@ -648,8 +648,11 @@ class FrozenInputLoader:
         观测缺失沿既有 missing 语义(null / 下游 warning),不 fail-closed。
         逐序列 ``available_at = decision_at``:序列由前缀不变性审计保证
         「决策日观测只用决策日之前的数据」,该时点可见性是审计结论。
+
+        因子名按序列 ``kind`` 派生(issue #398):``predefined_factor`` →
+        ``p_<artifact>``,其余(用户因子)→ ``u_<artifact>``(语义零变化)。
         """
-        from finboard_data.factor_lab import sandbox_factor_name
+        from finboard_data.factor_lab import series_factor_name
 
         values: list[FeatureValue] = []
         covered: set[str] = set()
@@ -658,7 +661,9 @@ class FrozenInputLoader:
             record = await self.series_provider(series_ref.artifact_id)
             if record is None:
                 raise ValueError(f"因子序列缺失: {series_ref.artifact_id}")
-            factor_name = sandbox_factor_name(record.code_artifact)
+            factor_name = series_factor_name(
+                str(getattr(record, "kind", "factor")), str(record.code_artifact)
+            )
             covered.add(factor_name)
             day_values = record.values.get(decision_at.date().isoformat())
             if day_values is None:

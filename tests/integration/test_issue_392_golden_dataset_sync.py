@@ -394,6 +394,9 @@ class FakeTushareClient:
     def suspend_d(self, **kwargs: str) -> list[dict[str, object]]:
         return []
 
+    def index_basic(self, **kwargs: str) -> list[dict[str, object]]:
+        return []
+
 
 def _build_provider(
     client: FakeTushareClient, budget: _FakeBudget

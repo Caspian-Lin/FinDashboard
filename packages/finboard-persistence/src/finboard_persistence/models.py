@@ -2012,7 +2012,9 @@ class ResearchFactorSeriesModel(Base, IdMixin):
     # 代码三向引用(与 research_code_runs 同口径:kind=factor)
     code_artifact: Mapped[str] = mapped_column(String(64), index=True)
     code_commit: Mapped[str] = mapped_column(String(40))
-    kind: Mapped[str] = mapped_column(String(16))
+    # #398 起容纳 'predefined_factor'(平台预置因子通道;原宽 16 承载
+    # 用户因子 kind='factor' 的历史字面量)
+    kind: Mapped[str] = mapped_column(String(32))
     # bars 主发布锚定 + 研究发布联合集(排序冻结,入 series_key)
     release_id: Mapped[str] = mapped_column(String(128), index=True)
     dataset_release_ids: Mapped[list[str]] = mapped_column(JSONB)

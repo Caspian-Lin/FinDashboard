@@ -157,15 +157,25 @@ warning(release_id + 缺失清单),与 factor_lab #212 容忍语义一致;bars �
 **标准运营步骤**(以 000300.SH 基准为例):
 
 1. `data_sync`(REST `POST /api/data/sync` / MCP `finboard_data_sync_universe`)
-   —— `discover_indices` 从受控登记表 `BENCHMARK_INDEX_REGISTRY`(沪深300 /
-   中证500 / 中证1000 / 上证50 / 科创50 / 创业板指 / 深证成指 / 北证50 等 9 只)
-   自动登记 `instrument_type=index` 行。扩展新指数直接在
-   `finboard_data/discovery.py` 的登记表加一行(代码必须满足 `is_index_code`,
-   导入期断言)。指数无 list_date/industry 上游,保持 null(data_sync 统计可见)。
+   —— **#394 起登记源为 tushare `index_basic` 全量**:`discover_indices`
+   按 `is_index_code`(000xxx.SH / 399xxx.SZ / 899xxx.BJ)收窄登记域,
+   A 股三所指数自动登记 `instrument_type=index` 行(编外市场 CSI/CIC/MSCI
+   无行情上游,不登记);只登记在市(L)指数,退市交生命周期 diff。
+   `BENCHMARK_INDEX_REGISTRY` 收窄为**基准资格白名单**(`is_benchmark_index`
+   只认白名单;沪深300 / 中证500 / 中证1000 / 上证50 / 科创50 / 创业板指 /
+   深证成指 / 北证50 等 9 只)—— 白名单外的指数照常登记 / 可缓存 / 可发布,
+   但不是基准资格资产;扩展新基准指数直接在 `finboard_data/discovery.py`
+   白名单加一行(代码必须满足 `is_index_code`,导入期断言)。
+   **`data_sync` 现在依赖 `FINBOARD_TUSHARE_TOKEN`**(未配置具名失败不重试);
+   index_basic `base_date`(基日)随登记携带,由执行器后置
+   `backfill_listing_dates` 回填 `instruments.list_date`(只补 null,
+   #185 语义),mixed 发布的 `missing_list_date` 不再被指数恒 null 抬高。
 2. `bulk_download`(REST `POST /api/data/bulk-download` / MCP
-   `finboard_data_bulk_download_start`)带 `instrument_type=index`、
-   `source=akshare` —— 指数日线走 akshare `index_zh_a_hist` 进 parquet 缓存。
-   #341 起 tushare 源亦放行指数(`index_daily` 专属接口,2000 积分档
+   `finboard_data_bulk_download_start`)带 `instrument_type=index` ——
+   **#394 起指数 bars 默认 tushare**(`index_daily` 主源,原始点位;
+   未显式声明 source 且筛选域全指数时默认源覆盖为 tushare,显式
+   `source=akshare` 恒优先,akshare `index_zh_a_hist` 降为副源)。
+   #341 起 tushare 源放行指数(`index_daily` 专属接口,2000 积分档
    实测可调;无复权概念,缓存键沿用请求 adjust no-op);ETF/期货仍
    `tushare_scope_mismatch` 拒绝(不静默换源)。
 3. `dataset_release_publish`(release_kind=`multi_asset_mixed`)—— **指数代码
