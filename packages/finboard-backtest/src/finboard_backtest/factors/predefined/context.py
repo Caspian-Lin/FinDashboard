@@ -5,7 +5,8 @@
 * :class:`SymbolSeries` —— 单标的按 ``available_at`` 升序的列式历史
   (日期轴 + float64 值 + 逐行 available_at);
 * :class:`PredefinedFactorInput` —— 引擎装配的输入面(bars / daily_metrics
-  列式取数、行业分组、决策日采样);
+  列式取数、公告频率研究数据集取数(#401/#402)、分红事件史取数(#402)、
+  行业分组、决策日采样);
 * :func:`sample_series_frame` —— 标准采样(把逐标的 1-D 因子序列按决策日
   对齐成 ``{date: {symbol: float | None}}`` 截面帧)。
 
@@ -37,6 +38,7 @@ import numpy as np
 FactorSeriesFrame = dict[date, dict[str, float | None]]
 
 __all__ = [
+    "DividendEventHistory",
     "FactorSeriesFrame",
     "PredefinedFactorInput",
     "SymbolSeries",
@@ -48,6 +50,58 @@ __all__ = [
 def end_of_day(day: date) -> datetime:
     """决策日日终(UTC)——采样与审计共用的 PIT 上界(与挂载 v3 同口径)。"""
     return datetime.combine(day, time(23, 59, 59, 999999), tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class DividendEventHistory:
+    """单标的的分红进展事件史(issue #402,``dividend_events`` 取数口)。
+
+    分红是**事件型明细**而非财报序列:同一 ``report_period``(分红年度)
+    有预案 / 股东大会通过 / 实施多条进展行,``available_at`` 升序排列;
+    精确股息率因子据此做「除权除息日对齐」的滚动 12 月聚合(见
+    ``registry._dps_ttm``)。行序与 :class:`SymbolSeries` 同契约:按
+    ``available_at`` 升序(引擎装配时稳定排序保证)。
+
+    * ``cash_div`` —— 每股现金股利(税前,元/股),缺测 NaN;
+    * ``ex_date`` —— 除权除息日(未到实施阶段为 None,不可按除息归属);
+    * ``report_periods`` —— 分红年度(去重聚合键:同年度多进展行取
+      决策日可见的最新一行)。
+    """
+
+    announcement_dates: tuple[date, ...]
+    available_at: tuple[datetime, ...]
+    report_periods: tuple[date | None, ...]
+    ex_dates: tuple[date | None, ...]
+    cash_div: np.ndarray
+    _bounds: list[float] = field(default_factory=list, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        n = len(self.announcement_dates)
+        if not (n == len(self.available_at) == len(self.report_periods) == len(self.ex_dates)):
+            raise ValueError(
+                "DividendEventHistory 行数不一致: "
+                f"{n}/{len(self.available_at)}/{len(self.report_periods)}/"
+                f"{len(self.ex_dates)}"
+            )
+        if self.cash_div.size != n:
+            raise ValueError(
+                "DividendEventHistory cash_div 长度不一致: "
+                f"{self.cash_div.size} vs {n}"
+            )
+        object.__setattr__(
+            self,
+            "_bounds",
+            [item.timestamp() for item in self.available_at],
+        )
+
+    def __len__(self) -> int:
+        return len(self.announcement_dates)
+
+    def visible_rows(self, day: date) -> range:
+        """决策日可见行下标(``available_at <= 决策日日终``,前缀)。"""
+        import bisect
+
+        return range(bisect.bisect_right(self._bounds, end_of_day(day).timestamp()))
 
 
 @dataclass(frozen=True)
@@ -144,6 +198,31 @@ class PredefinedFactorInput(ABC):
         序列 = 该标的的公告修订史(每行一次公告,按 available_at 升序);
         ``sample`` 经 ``position_asof`` 天然实现「决策日可见的最近一次
         公告」的步进取值。
+        """
+
+    @abstractmethod
+    def research_dataset(self, kind: str, field: str) -> dict[str, SymbolSeries]:
+        """公告频率研究数据集的通用列式取数(issue #402;未挂载 → 空映射)。
+
+        ``kind`` 为发布数据集 kind(``financial_indicators`` /
+        ``income_statements`` / ``balance_sheets`` / ``cashflow_statements``
+        / ``dividends``),与目录条目 ``data_dependencies`` 的
+        ``"<kind>.<field>"`` 形态同构(#401 的 ``financial_indicators(field)``
+        即 ``research_dataset("financial_indicators", field)``)。序列契约与
+        :meth:`financial_indicators` 一致:行日期轴 = ``announcement_date``,
+        PIT 走逐行 ``available_at``,采样 = 「决策日可见的最近一次公告」
+        步进函数;同一报告期的修订(多次公告)各自成行。bars /
+        daily_metrics 有专属取数口,传入即具名拒绝。
+        """
+
+    @abstractmethod
+    def dividend_events(self) -> dict[str, DividendEventHistory]:
+        """dividends 发布的分红事件史取数(issue #402;未挂载 → 空映射)。
+
+        分红是事件型明细(进展行而非单值序列),与 :meth:`research_dataset`
+        的单字段序列不同:精确股息率需要逐行 ``ex_date``(除权除息日)与
+        ``cash_div``(每股现金股利)成对聚合,故给专用取数口。行序按
+        ``available_at`` 升序,PIT 过滤经 :meth:`DividendEventHistory.visible_rows`。
         """
 
     @abstractmethod

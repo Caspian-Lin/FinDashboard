@@ -24,7 +24,11 @@ v2 单日/策略挂载(``build_data_mount``)原样不动。
 
     <root>/bars.parquet                    # 全部 bars 类发布合并的长表
     <root>/daily_metrics.parquet           # daily_metrics 类发布合并
-    <root>/financial_indicators.parquet    # financial_indicators 类发布合并
+    <root>/financial_indicators.parquet    # 公告类发布合并(#402 起含
+    <root>/income_statements.parquet       #  三表与 dividend 五个 kind,
+    <root>/balance_sheets.parquet          #  行结构同构:公告日轴 +
+    <root>/cashflow_statements.parquet     #  逐行 available_at(v3))
+    <root>/dividends.parquet
     <root>/mount_manifest.json             # 挂载清单(PIT 审计锚点)
 
 列契约与 :mod:`finboard_research_kit.context` 的 docstring 一致。
@@ -143,10 +147,10 @@ async def build_data_mount(
 
     await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
     # 流式写入器(#371):与窗口挂载同构,bars / daily_metrics 逐标的落盘;
-    # financial_indicators 公告量小,保留整集累积旧路径。
+    # 公告类数据集(三表/dividend/#402)公告量小,保留整集累积旧路径。
     bars_writer = _DatasetStreamWriter(out_root / "bars.parquet")
     daily_writer = _DatasetStreamWriter(out_root / "daily_metrics.parquet")
-    fin_rows: list[dict[str, Any]] = []
+    announced_rows: dict[str, list[dict[str, Any]]] = {kind: [] for kind in ANNOUNCED_DATASETS}
     contributions: list[MountDataset] = []
     universe: set[str] = set()
 
@@ -217,17 +221,21 @@ async def build_data_mount(
                     max_data_date=provider_max_daily,
                 )
             )
-        elif kind.value == "financial_indicators":
-            rows = await _collect_financial(
-                provider, instruments, decision_at, include_available_at=False
+        elif kind.value in ANNOUNCED_DATASETS:
+            rows = await _collect_announced(
+                provider,
+                instruments,
+                decision_at,
+                fetch_attr=ANNOUNCED_DATASETS[kind.value],
+                include_available_at=False,
             )
             _guard_pit(rows, "announcement_date", release_id, decision_day)
-            fin_rows.extend(rows)
+            announced_rows[kind.value].extend(rows)
             contributions.append(
                 MountDataset(
                     release_id=release_id,
                     dataset_kind=kind.value,
-                    file="financial_indicators.parquet",
+                    file=f"{kind.value}.parquet",
                     row_count=len(rows),
                     max_data_date=_max_date(rows, "announcement_date"),
                 )
@@ -244,9 +252,12 @@ async def build_data_mount(
         )
     bars_writer.finish()
     daily_writer.finish()
-    await asyncio.to_thread(
-        _write_parquet, out_root / "financial_indicators.parquet", fin_rows
-    )
+    for announced_kind, rows in announced_rows.items():
+        await asyncio.to_thread(
+            _write_parquet,
+            out_root / f"{announced_kind}.parquet",
+            rows,
+        )
 
     ordered = tuple(sorted(universe))
     frozen_weights: Mapping[str, float] = dict(current_weights or {})
@@ -346,6 +357,22 @@ _DATASET_DATE_FIELD: dict[str, str] = {
     "bars": "date",
     "daily_metrics": "trade_date",
     "financial_indicators": "announcement_date",
+    # issue #402:三表 + dividend 公告类数据集(行日期轴同为公告日)
+    "income_statements": "announcement_date",
+    "balance_sheets": "announcement_date",
+    "cashflow_statements": "announcement_date",
+    "dividends": "announcement_date",
+}
+
+#: 公告频率研究数据集 kind → (provider 取数方法名, 挂载文件名)(#402)。
+#: 与 financial_indicators 同构:公告量小,保留整集累积旧路径;挂载文件
+#: 名 = kind + .parquet,预置因子通道按同名读回(``predefined_runner``)。
+ANNOUNCED_DATASETS: dict[str, str] = {
+    "financial_indicators": "fetch_financial_indicators",
+    "income_statements": "fetch_income_statements",
+    "balance_sheets": "fetch_balance_sheets",
+    "cashflow_statements": "fetch_cashflow_statements",
+    "dividends": "fetch_dividends",
 }
 
 
@@ -518,10 +545,11 @@ async def build_window_data_mount(
 
     await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
     # 流式写入器(#371):bars / daily_metrics 逐标的批次落盘,内存只持
-    # row group 缓冲;financial_indicators 公告量小,保留整集累积旧路径。
+    # row group 缓冲;公告类数据集(三表/dividend/#402)公告量小,保留
+    # 整集累积旧路径。
     bars_writer = _DatasetStreamWriter(out_root / "bars.parquet")
     daily_writer = _DatasetStreamWriter(out_root / "daily_metrics.parquet")
-    fin_rows: list[dict[str, Any]] = []
+    announced_rows: dict[str, list[dict[str, Any]]] = {kind: [] for kind in ANNOUNCED_DATASETS}
     contributions: list[MountDataset] = []
     universe: set[str] = set()
 
@@ -603,17 +631,21 @@ async def build_window_data_mount(
                     max_data_date=provider_max_daily,
                 )
             )
-        elif kind.value == "financial_indicators":
-            rows = await _collect_financial(
-                provider, instruments, ceiling, include_available_at=True
+        elif kind.value in ANNOUNCED_DATASETS:
+            rows = await _collect_announced(
+                provider,
+                instruments,
+                ceiling,
+                fetch_attr=ANNOUNCED_DATASETS[kind.value],
+                include_available_at=True,
             )
             _guard_window_pit(rows, "announcement_date", rel_id, window_end)
-            fin_rows.extend(rows)
+            announced_rows[kind.value].extend(rows)
             contributions.append(
                 MountDataset(
                     release_id=rel_id,
                     dataset_kind=kind.value,
-                    file="financial_indicators.parquet",
+                    file=f"{kind.value}.parquet",
                     row_count=len(rows),
                     max_data_date=_max_date(rows, "announcement_date"),
                 )
@@ -630,9 +662,12 @@ async def build_window_data_mount(
         )
     bars_writer.finish()
     daily_writer.finish()
-    await asyncio.to_thread(
-        _write_parquet, out_root / "financial_indicators.parquet", fin_rows
-    )
+    for announced_kind, rows in announced_rows.items():
+        await asyncio.to_thread(
+            _write_parquet,
+            out_root / f"{announced_kind}.parquet",
+            rows,
+        )
 
     mount = WindowDataMount(
         root=out_root,
@@ -903,19 +938,27 @@ def _date_from_value(value: Any) -> date | None:
     return date.fromisoformat(str(value))
 
 
-async def _collect_financial(
+async def _collect_announced(
     provider: Any,
     instruments: list[Any],
     decision_at: datetime,
     *,
+    fetch_attr: str,
     include_available_at: bool = False,
 ) -> list[dict[str, Any]]:
+    """公告类研究数据集(三表/dividend/#402)的逐标的采集。
+
+    ``fetch_attr`` 为 provider 的取数方法名(``ANNOUNCED_DATASETS`` 映射,
+    如 ``fetch_income_statements``);领域记录均为 dataclass(真实
+    ``FrozenReleaseProvider`` 与测试 stub 同构),行 = 除 symbol /
+    available_at / observed_at / source 外的全部字段 + available_at 末列
+    (v3 窗口挂载;v2 单日挂载无 available_at 列)。
+    """
     rows: list[dict[str, Any]] = []
+    fetch = getattr(provider, fetch_attr)
     for item in instruments:
         symbol = _symbol(item)
-        records = await provider.fetch_financial_indicators(
-            symbol, decision_at=decision_at
-        )
+        records = await fetch(symbol, decision_at=decision_at)
         for record in records:
             if include_available_at:
                 row = {

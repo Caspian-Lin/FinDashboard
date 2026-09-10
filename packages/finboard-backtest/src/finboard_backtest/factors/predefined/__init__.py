@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 from finboard_backtest.factors.predefined.context import (
+    DividendEventHistory,
     FactorSeriesFrame,
     PredefinedFactorInput,
     SymbolSeries,
@@ -61,6 +62,7 @@ from finboard_backtest.factors.predefined.registry import (
 __all__ = [
     "PREDEFINED_FACTORS",
     "PREDEFINED_FACTORS_SCHEMA_VERSION",
+    "DividendEventHistory",
     "FactorSeriesFrame",
     "PredefinedFactorCompute",
     "PredefinedFactorDefinition",

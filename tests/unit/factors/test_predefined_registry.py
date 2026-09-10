@@ -88,6 +88,14 @@ class _FakeInput(PredefinedFactorInput):
     def financial_indicators(self, field: str) -> dict[str, SymbolSeries]:
         return self._financial.get(field, {})
 
+    def research_dataset(self, kind: str, field: str) -> dict[str, SymbolSeries]:
+        if kind == "financial_indicators":
+            return self.financial_indicators(field)
+        return {}
+
+    def dividend_events(self) -> dict[str, Any]:
+        return {}
+
     def industry_groups(self) -> dict[str, str | None]:
         return {}
 
