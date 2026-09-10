@@ -153,6 +153,9 @@ class PredefinedFactorInput(ABC):
     * ``bars(field)`` —— 窗口挂载 bars 列式取数(字段:``close`` /
       ``open`` / ``high`` / ``low`` / ``volume`` / ``amount``);缺字段的
       标的整条序列缺测(NaN);
+    * ``index_bars(field)`` —— 基准(不可撮合)标的行情(v1 派生自
+      ``bars`` 按 ``benchmark_only_symbols`` 过滤,Risk 族市场收益用,
+      issue #399);
     * ``daily_metrics(field)`` —— daily_metrics 发布列式取数(惰性:
       因子不触碰的研究数据集零读取,#378 同精神);未挂载 → 空映射;
     * ``financial_indicators(field)`` —— financial_indicators 发布的
@@ -186,6 +189,27 @@ class PredefinedFactorInput(ABC):
     @abstractmethod
     def bars(self, field: str = "close") -> dict[str, SymbolSeries]:
         """窗口挂载 bars 列式取数(全挂载标的,含 benchmark-only)。"""
+
+    def index_bars(self, field: str = "close") -> dict[str, SymbolSeries]:
+        """基准(不可撮合)标的的行情列式取数(issue #399,Risk 族市场收益)。
+
+        v1 派生实现:#256/#341 链路下指数行情与候选池**同处一份 mixed
+        bars 主发布**,挂载没有独立 index 数据集——本方法按
+        ``benchmark_only_symbols`` 过滤 ``bars(field)``(指数 / 期货主连;
+        消费具体指数的因子按代码自取,如 ``000300.SH``)。发布不含指数
+        → 空映射 → 因子缺测(None,fail-visible;配合 registry 的
+        ``min_history_bars`` 覆盖起点声明在入队期具名拒绝)。
+
+        数据依赖声明形态 ``"index_bars.close"``(纯声明:引擎不加载
+        独立数据集,commit 锚随依赖变化)。带默认实现保持向批次 0
+        子类兼容;需要独立加载路径时子类覆写。
+        """
+        benchmark = self.benchmark_only_symbols
+        return {
+            symbol: series
+            for symbol, series in self.bars(field).items()
+            if symbol in benchmark
+        }
 
     @abstractmethod
     def daily_metrics(self, field: str) -> dict[str, SymbolSeries]:
