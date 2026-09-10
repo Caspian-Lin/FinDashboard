@@ -30,7 +30,7 @@ from datetime import date, timedelta
 from datetime import date as parse_date
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
@@ -534,6 +534,147 @@ def kill_switch(
         f" 若交易内核在另一进程运行,请通过信号 / API 转发(P0 暂未实现)。"
         f" 若要下次启动即生效,在 .env 中设置 FINBOARD_KILL_SWITCH_INITIAL={level.value}。"
     )
+
+
+@app.command(name="factor-eval")
+def factor_eval(
+    ctx: typer.Context,
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            help="评估数据面:synthetic(合成,全目录冒烟,免 DB)/ release(真实冻结发布小窗口)",
+        ),
+    ] = "synthetic",
+    factors: Annotated[
+        str,
+        typer.Option("--factors", help="因子清单,逗号分隔(p_ 名或裸名);缺省 = 全目录"),
+    ] = "",
+    release_id: Annotated[
+        str, typer.Option("--release-id", help="[release] bars 主发布 ID(DR-...)")
+    ] = "",
+    dataset_release_ids: Annotated[
+        str,
+        typer.Option("--dataset-release-ids", help="[release] 研究发布联合集,逗号分隔"),
+    ] = "",
+    window_start: Annotated[
+        str, typer.Option("--window-start", help="[release] 窗口起点 YYYY-MM-DD")
+    ] = "",
+    window_end: Annotated[
+        str, typer.Option("--window-end", help="[release] 窗口终点 YYYY-MM-DD")
+    ] = "",
+    horizon: Annotated[
+        int, typer.Option("--horizon", help="前向收益持有期(交易日)")
+    ] = 5,
+    step: Annotated[
+        int, typer.Option("--step", help="决策日步长(交易日)")
+    ] = 5,
+    output: Annotated[
+        str, typer.Option("--output", "-o", help="报告 JSON 路径")
+    ] = "",
+) -> None:
+    """因子质量评估(#403):逐因子 IC/RankIC/ICIR、分组单调性、换手衰减、覆盖起点。
+
+    报告落 JSON(缺省 ``data_cache/factor_evals/``),含逐因子结论 flag 与
+    signal_eligible 治理清单(#214 规则校验,疑似标注错误人工拍板)。
+    合成模式仅证明机制跑通(IC 数值无研究含义);研究结论以 release 模式为准。
+    """
+    if mode not in ("synthetic", "release"):
+        typer.echo(f"未知评估模式: {mode!r}(可用: synthetic / release)", err=True)
+        raise typer.Exit(code=2)
+    if mode == "release" and (not release_id or not window_start or not window_end):
+        typer.echo(
+            "release 模式需要 --release-id 与 --window-start/--window-end", err=True
+        )
+        raise typer.Exit(code=2)
+    factor_list = (
+        [item.strip() for item in factors.split(",") if item.strip()]
+        if factors
+        else None
+    )
+    dataset_ids = (
+        tuple(item.strip() for item in dataset_release_ids.split(",") if item.strip())
+        if dataset_release_ids
+        else ()
+    )
+    settings = load_settings()
+    report = asyncio.run(
+        _run_factor_eval(
+            settings=settings,
+            mode=mode,
+            factors=factor_list,
+            release_id=release_id or None,
+            dataset_release_ids=dataset_ids,
+            window_start=window_start or None,
+            window_end=window_end or None,
+            horizon=horizon,
+            step=step,
+        )
+    )
+    out_path = (
+        Path(output)
+        if output
+        else Path(settings.research_sandbox_workspace_root).parent
+        / "factor_evals"
+        / (
+            f"factor-eval-{mode}-"
+            f"{date.today().isoformat()}-{report['summary']['factor_count']}.json"
+        )
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    summary = report["summary"]
+    typer.echo(
+        f"评估完成: {summary['factor_count']} 因子"
+        f"(ic_available={summary['ic_available']}, "
+        f"status={summary['status_counts']}, "
+        f"signal_eligible 疑似标注错误={summary['signal_eligible_suspected']})"
+    )
+    typer.echo(f"最强 |RankIC|: {summary['strongest_abs_rank_ic']}")
+    typer.echo(f"报告已写入: {out_path}")
+
+
+async def _run_factor_eval(
+    *,
+    settings: Settings,
+    mode: str,
+    factors: list[str] | None,
+    release_id: str | None,
+    dataset_release_ids: tuple[str, ...],
+    window_start: str | None,
+    window_end: str | None,
+    horizon: int,
+    step: int,
+) -> dict[str, Any]:
+    from finboard_backtest.factors.eval import (
+        FactorEvalConfig,
+        evaluate_catalog_on_release,
+        evaluate_catalog_synthetic,
+    )
+
+    config = FactorEvalConfig(horizon=horizon)
+    if mode == "synthetic":
+        synthetic: dict[str, Any] = evaluate_catalog_synthetic(
+            factors=factors, config=config, step=step
+        )
+        return synthetic
+    # 入口已校验(mode=release 时 release_id/window 非空)
+    assert release_id is not None
+    assert window_start
+    assert window_end
+    release_report: dict[str, Any] = await evaluate_catalog_on_release(
+        release_id=release_id,
+        dataset_release_ids=dataset_release_ids,
+        window_start=parse_date.fromisoformat(window_start),
+        window_end=parse_date.fromisoformat(window_end),
+        factors=factors,
+        config=config,
+        decision_step=step,
+        settings=settings,
+    )
+    return release_report
 
 
 scheduler_app = typer.Typer(
