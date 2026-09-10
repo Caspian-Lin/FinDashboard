@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_backtest.background_jobs.contracts import JobRecord
+from finboard_backtest.background_jobs.executors import data_sync as data_sync_mod
 from finboard_backtest.background_jobs.executors.data_sync import DataSyncExecutor
 from finboard_backtest.background_jobs.executors.dataset_publish import (
     DatasetPublishExecutor,
@@ -140,6 +141,10 @@ def _fake_instrument() -> SimpleNamespace:
     )
 
 
+async def _no_calendar(*, job_id: str) -> None:
+    return None
+
+
 class _CommitSession:
     async def __aenter__(self) -> _CommitSession:
         return self
@@ -148,6 +153,12 @@ class _CommitSession:
         pass
 
     async def commit(self) -> None:
+        pass
+
+    async def execute(self, stmt: object) -> object:
+        return SimpleNamespace(rowcount=0)
+
+    async def flush(self) -> None:
         pass
 
 
@@ -196,9 +207,15 @@ class TestDataSyncDonePhaseShort:
                 return {
                     "backfilled_list_date": len(listing),
                     "missing_list_date": 0,
+                    "backfilled_delist_date": 0,
                 }
 
         monkeypatch.setattr(discovery_mod, "UniverseDiscovery", _FakeDiscovery)
+        # 期货交易日历尽力而为拉取在单测里隔离(有 token 的开发机不打真实接口;
+        # CI 无 token 本就返回 None,与生产失败降级同路径)。
+        monkeypatch.setattr(
+            data_sync_mod, "_fetch_futures_trade_calendar", _no_calendar
+        )
         monkeypatch.setattr(
             persistence_pkg, "InstrumentRepository", _FakeInstrumentRepository
         )
