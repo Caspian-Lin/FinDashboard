@@ -496,7 +496,7 @@ class ResearchDatasetReleaseService:
         ):
             raise ReleaseCapabilityError(
                 f"{spec.dataset_kind.value} 发布要求 source=tushare "
-                f"(研究数据来自 research_data_sync 摄取)"
+                f"(研究数据来自 dataset_sync 摄取)"
             )
         if not symbols:  # pragma: no cover - 调用方已校验非空
             raise ReleaseCapabilityError("发布标的不能为空")

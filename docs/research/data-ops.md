@@ -6,7 +6,7 @@
 ## v1 选股(research_db)必需数据集的发布状态(#255)
 
 **背景**:2026-09-01 runs 273-275(ROE / PB / 换手率 top-N)全部 0 交易
-「成功」。根因:**摄取 ≠ 发布**——`research_data_sync` 会在质量门通过后自动
+「成功」。根因:**摄取 ≠ 发布**——`dataset_sync` 会在质量门通过后自动
 `mark_published`(批次 `status=published`),但 profiles 批次的**同步+发布**
 步骤从未进入运行手册;`selection.inputs_mode=research_db`(默认)必需
 `instrument_profiles` 批次已发布,未发布时旧链路逐期 SKIPPED、引擎 0 交易收场。
@@ -39,7 +39,7 @@
    `instrument_profiles`;配置了市值/PB/换手过滤或排名再加 `daily_metrics`,
    ROE/毛利率/营收增速再加 `financial_indicators`)。
 
-2. 缺失或 `status != 'published'` 时:`finboard_job_enqueue(kind=research_data_sync,
+2. 缺失或 `status != 'published'` 时:`finboard_job_enqueue(kind=dataset_sync,
    payload={datasets: [...], symbols: [...], start_date: ..., end_date: ...})`
    摄取;质量门通过即自动发布(见任务 phase 摘要);质量门失败看批次
    `quality_report` 修复后重跑。
@@ -64,11 +64,11 @@ delist_date 的结构化上游都在 tushare:
 | --- | --- | --- | --- |
 | list_date / industry | `stock_basic`(list_status=L) | `research_instrument_profiles` | data_sync 后置回填 |
 | delist_date | `stock_basic`(list_status=D 退市档案) | 同上 | 同上 |
-| 名称历史(PIT) | `namechange` | `instrument_names` 主数据表 | research_data_sync `name_changes` dataset 直接重建 |
+| 名称历史(PIT) | `namechange` | `instrument_names` 主数据表 | dataset_sync `name_changes` dataset 直接重建 |
 
 **标准同步顺序**(每次刷新全市场主数据时):
 
-1. `research_data_sync`(默认全部 datasets,或显式 `["profiles", "name_changes"]`)
+1. `dataset_sync`(默认全部 datasets,或显式 `["profiles", "name_changes"]`)
    —— profiles 段同时拉取在市(L)与退市(D)档案合并进同一批次;
    name_changes 段全市场分页拉取名称变更并按半开区间重建 `instrument_names`
    (未提及 symbol 保留既有记录,重跑幂等)。
@@ -136,7 +136,7 @@ star|chinext|bse|cdr)缩小展开范围(仅 full_market 模式生效,与其他�
 
 **002889.SZ 补齐运营步骤**(历史缺口的修复路径):
 
-1. `research_data_sync`(datasets 含 `financial_indicators`,symbols 含
+1. `dataset_sync`(datasets 含 `financial_indicators`,symbols 含
    002889.SZ,报告期区间覆盖该股全部历史)补齐摄取;
 2. 用全市场 symbols 清单重发布 `financial_indicators`(带
    `consistency_baseline_release_id` + `fail_on_mismatch=true`);
@@ -248,7 +248,7 @@ parquet 缓存 → tushare 源引擎回测拿到 bars 并出成交)。
    `tushare_scope_mismatch` 边界相反);akshare 源对转债日线 fail-visible
    拒绝(股票接口会把 1 开头误路由,#257 同源缺陷)。正股日线照常同步
    (溢价率计算的另一输入,必须与转债同区间同缓存)。
-3. `research_data_sync` 带 `datasets=["convertible_profiles"]`(默认全数据集
+3. `dataset_sync` 带 `datasets=["convertible_profiles"]`(默认全数据集
    已包含)—— tushare `cb_basic`(在市 L + 摘牌 D 合并)快照 upsert 主数据
    `convertible_metadata`(转股价 `swap_price` / 起息日 / 到期日 / 票面利率;
    `conversion_price NOT NULL`,无转股价的行跳过并计数),顺带回填

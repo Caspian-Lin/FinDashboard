@@ -64,9 +64,8 @@ _ALLOWED_KINDS: frozenset[str] = frozenset(
         "dataset_publish",
         "backtest_run",
         "data_sync",
-        "fetch_all",
         "quality_repair",
-        "research_data_sync",
+        "dataset_sync",
         "research_code_run",
         "validation_experiment",
     }
@@ -578,21 +577,24 @@ def register(mcp: MCPServer) -> None:
             "[写] 登记一个 queued 后台任务并立即返回 202 + job_id(不等待执行,"
             "由独立 worker 进程消费)。"
             "参数:kind(白名单:echo/research_run/feature_snapshot/bulk_download/"
-            "dataset_publish/backtest_run/data_sync/fetch_all/quality_repair/"
-            "research_data_sync/research_code_run/validation_experiment),"
+            "dataset_publish/backtest_run/data_sync/quality_repair/"
+            "dataset_sync/research_code_run/validation_experiment),"
             "queue(默认 default)、idempotency_key(8-128 字符,幂等键)、"
             "payload(任务参数,具体结构取决于 kind)、priority(-1000..1000,默认 0)、"
             "max_attempts(1..10,默认 3)、requested_by。"
-            "research_data_sync payload 模板(#260 起入队期契约校验,违规秒级 "
+            "dataset_sync payload 模板(issue #392 起入队期契约校验,违规秒级 "
             "invalid_argument):{start_date: 'YYYY-MM-DD'(必填), "
             "end_date: 'YYYY-MM-DD'(必填), datasets: ['profiles'|'name_changes'|"
             "'convertible_profiles'|'daily_metrics'|'financial_indicators'|"
             "'industry_memberships']"
             "(可选,缺省=全部六类;convertible_profiles=#265 转债条款快照,"
             "tushare cb_basic→convertible_metadata + akshare 评级/强赎兜底), "
-            "symbols: ['000001.SZ', ...](可选,字符串列表;"
-            "省略时逐标的数据集以 profiles 同步结果为 symbol 池,此时 datasets "
-            "须含 profiles,否则入队即拒)}。未知键(如误把 datasets 写成 "
+            "symbols: ['000001.SZ', ...](可选,字符串列表;逐标的同步池优先级:"
+            "symbols > exchange/listing_boards/instrument_type 宇宙过滤"
+            "(instruments 表 list_active,#385 语义)> profiles 同步结果"
+            "(此时 datasets 须含 profiles,否则入队即拒)}, "
+            "exchange: 'SSE'(可选), listing_boards: ['sse_main'](可选), "
+            "instrument_type: 'stock'(可选)}。未知键(如误把 datasets 写成 "
             "data_types)入队即拒,不会被静默忽略。"
             "返回 JobOut + created(首次提交 true / 幂等命中 false)。"
             "实盘交易内核任务不进入队列。写操作,mcp_readonly_only=true 时拒绝。"

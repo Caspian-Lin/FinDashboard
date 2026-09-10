@@ -151,7 +151,7 @@ class ConvertibleProfile:
     字段映射:``conversion_price`` ← ``swap_price``(当前转股价,可空);
     ``issue_date`` ← ``value_date``(起息日,转债语境下近似发行日);
     ``maturity_date`` ← ``mature_date``。评级不在 cb_basic 字段内,
-    由 akshare ``bond_zh_cov`` 债券评级列兜底(research_data_sync 合并)。
+    由 akshare ``bond_zh_cov`` 债券评级列兜底(dataset_sync 合并)。
     """
 
     symbol: str
@@ -171,18 +171,28 @@ class ConvertibleProfile:
 
 @runtime_checkable
 class ResearchDataProvider(Protocol):
-    """研究数据读取边界;公共接口不暴露 DataFrame 或数据源 SDK 类型。"""
+    """研究数据读取边界;公共接口不暴露 DataFrame 或数据源 SDK 类型。
+
+    ``dirty_row_policy``(#392,dataset_sync 框架按 SyncSpec 形态分发):
+    * ``None`` —— 各方法历史默认(全市场档案枚举跳脏行,其余整批拒);
+    * ``"skip"`` —— 单行契约违规跳过 + 具名告警 ``tushare.dirty_row_skipped``
+      (全市场枚举形态;按 symbol 精确查询的方法拒绝该策略);
+    * ``"reject"`` —— 单行契约违规整批拒(按 symbol 精确查询恒为此)。
+    """
 
     async def fetch_instrument_profiles(
         self,
         *,
         list_status: str = "L",
+        dirty_row_policy: str | None = None,
     ) -> list[InstrumentProfile]:
         """读取指定上市状态的股票档案。"""
         ...
 
     async def fetch_name_changes(
         self,
+        *,
+        dirty_row_policy: str | None = None,
     ) -> list[InstrumentNameChange]:
         """读取全市场历史名称变更(分页拉全;#251 名称历史 PIT 导入)。"""
         ...
@@ -190,6 +200,8 @@ class ResearchDataProvider(Protocol):
     async def fetch_daily_metrics(
         self,
         trade_date: date,
+        *,
+        dirty_row_policy: str | None = None,
     ) -> list[DailySecurityMetrics]:
         """读取指定交易日的全市场每日指标。"""
         ...
@@ -200,6 +212,7 @@ class ResearchDataProvider(Protocol):
         *,
         start_period: date,
         end_period: date,
+        dirty_row_policy: str | None = None,
     ) -> list[FinancialIndicator]:
         """读取单只股票、指定报告期范围内的财务指标。"""
         ...
@@ -209,12 +222,15 @@ class ResearchDataProvider(Protocol):
         *,
         symbol: str,
         current_only: bool = True,
+        dirty_row_policy: str | None = None,
     ) -> list[IndustryMembership]:
         """读取申万行业成员关系。"""
         ...
 
     async def fetch_convertible_profiles(
         self,
+        *,
+        dirty_row_policy: str | None = None,
     ) -> list[ConvertibleProfile]:
         """读取全市场可转债基础条款快照(在市 + 摘牌,issue #265)。"""
         ...

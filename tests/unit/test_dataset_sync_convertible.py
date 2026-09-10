@@ -1,4 +1,4 @@
-"""``research_data_sync`` convertible_profiles 数据集单元测试(issue #265)。
+"""``dataset_sync`` convertible_profiles 数据集单元测试(issue #265)。
 
 不依赖 DB:repo / enrichment 均以假对象注入,验证执行器编排、akshare 兜底
 失败降级与强赎事件的 available_at 领域不变量。真实落库由集成测试覆盖
@@ -20,7 +20,7 @@ from finboard_data.akshare_provider import ConvertibleRedemptionEvent
 def _make_job(payload: dict[str, object]) -> JobRecord:
     return JobRecord(
         job_id="BJ-CONV01",
-        kind="research_data_sync",
+        kind="dataset_sync",
         queue="data",
         payload=payload,
         attempt=1,
@@ -130,11 +130,9 @@ class _RecordingRepos:
 
 
 def _build_executor(provider: object, monkeypatch: pytest.MonkeyPatch) -> Any:
-    from finboard_backtest.background_jobs.executors.research_data_sync import (
-        ResearchDataSyncExecutor,
-    )
+    from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 
-    return ResearchDataSyncExecutor(
+    return DatasetSyncExecutor(
         session_maker=_CommitSessionMaker(),  # type: ignore[arg-type]
         provider_factory=lambda: provider,  # type: ignore[arg-type,return-value]
     )
@@ -155,8 +153,8 @@ class TestConvertibleProfilesDataset:
     ) -> None:
         """#265 主链路:cb_basic → convertible_metadata upsert + 上市日期回填
         + 强赎事件导入;评级映射与 dataset_version 正确透传。"""
-        from finboard_backtest.background_jobs.executors import (
-            research_data_sync as sync_mod,
+        from finboard_backtest.background_jobs.dataset_sync import (
+            specs as sync_mod,
         )
 
         profiles = [
@@ -165,7 +163,9 @@ class TestConvertibleProfilesDataset:
         ]
 
         class _Provider:
-            async def fetch_convertible_profiles(self) -> list[object]:
+            async def fetch_convertible_profiles(
+                self, *, dirty_row_policy: str | None = None
+            ) -> list[object]:
                 return profiles
 
         async def _fake_enrichment() -> tuple[dict[str, str], list[Any]]:
@@ -211,12 +211,14 @@ class TestConvertibleProfilesDataset:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """akshare 兜底失败 → 主链路不阻断:空评级、零事件,任务成功。"""
-        from finboard_backtest.background_jobs.executors import (
-            research_data_sync as sync_mod,
+        from finboard_backtest.background_jobs.dataset_sync import (
+            specs as sync_mod,
         )
 
         class _Provider:
-            async def fetch_convertible_profiles(self) -> list[object]:
+            async def fetch_convertible_profiles(
+                self, *, dirty_row_policy: str | None = None
+            ) -> list[object]:
                 return [_profile_record("113050.SH")]
 
         async def _boom() -> tuple[dict[str, str], list[Any]]:
@@ -244,7 +246,7 @@ class TestConvertibleProfilesDataset:
 class TestRedemptionEventConversion:
     def test_available_at_never_precedes_effective_date(self) -> None:
         """领域不变量:未来生效的强赎按生效日可见,真实观察时间留 details。"""
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
+        from finboard_backtest.background_jobs.dataset_sync.specs import (
             _redemption_to_lifecycle_event,
         )
 
@@ -267,7 +269,7 @@ class TestRedemptionEventConversion:
 
     def test_past_effective_date_keeps_observed_at(self) -> None:
         """历史生效日:available_at = 观察时间,不被追溯放大。"""
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
+        from finboard_backtest.background_jobs.dataset_sync.specs import (
             _redemption_to_lifecycle_event,
         )
 

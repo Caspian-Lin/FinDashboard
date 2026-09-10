@@ -1,0 +1,704 @@
+{
+  "all_six": {
+    "convertible_metadata": [
+      {
+        "code": "127001.SZ",
+        "conversion_premium": null,
+        "conversion_price": "10.5000",
+        "conversion_ratio": null,
+        "coupon_schedule": [],
+        "dataset_version": "convertible_profiles:<TODAY>",
+        "downward_revision_trigger": null,
+        "forced_redeem_trigger": null,
+        "issue_date": "2019-12-01",
+        "maturity_date": "2026-01-01",
+        "put_back_trigger": null,
+        "rating": null,
+        "redemption_yield": null,
+        "source": "tushare",
+        "underlying_stock_code": "000001.SZ"
+      },
+      {
+        "code": "127012.SZ",
+        "conversion_premium": null,
+        "conversion_price": "12.8000",
+        "conversion_ratio": null,
+        "coupon_schedule": [],
+        "dataset_version": "convertible_profiles:<TODAY>",
+        "downward_revision_trigger": null,
+        "forced_redeem_trigger": null,
+        "issue_date": "2020-12-01",
+        "maturity_date": "2026-12-01",
+        "put_back_trigger": null,
+        "rating": "AA+",
+        "redemption_yield": null,
+        "source": "tushare",
+        "underlying_stock_code": "600000.SH"
+      }
+    ],
+    "instrument_lifecycle_events": [
+      {
+        "available_at": "2026-07-27T12:00:00",
+        "dataset_version": "jsl_redeem_v1",
+        "details": {
+          "observed_at": "2026-07-27T12:00:00+00:00",
+          "redemption_date": "2025-01-10",
+          "redemption_price": "100.00",
+          "stop_transfer_date": null,
+          "underlying_symbol": "000001.SZ"
+        },
+        "effective_date": "2025-01-10",
+        "event_type": "forced_redemption",
+        "observed_at": "2026-07-27T12:00:00",
+        "source": "akshare",
+        "symbol": "127001.SZ"
+      },
+      {
+        "available_at": "2026-08-15T00:00:00",
+        "dataset_version": "jsl_redeem_v1",
+        "details": {
+          "observed_at": "2026-07-27T12:00:00+00:00",
+          "redemption_date": "2026-08-15",
+          "redemption_price": "100.50",
+          "stop_transfer_date": null,
+          "underlying_symbol": "600000.SH"
+        },
+        "effective_date": "2026-08-15",
+        "event_type": "forced_redemption",
+        "observed_at": "2026-07-27T12:00:00",
+        "source": "akshare",
+        "symbol": "127012.SZ"
+      }
+    ],
+    "instrument_names": [
+      {
+        "instrument_code": "000001.SZ",
+        "name": "平安银行",
+        "valid_from": "2012-04-09",
+        "valid_to": null
+      },
+      {
+        "instrument_code": "000001.SZ",
+        "name": "深圳发展银行",
+        "valid_from": "1991-04-03",
+        "valid_to": "2012-04-09"
+      }
+    ],
+    "research_daily_metrics": [
+      {
+        "available_at": "2026-07-24T09:00:00",
+        "circulating_market_cap": "231500000000.00000000",
+        "close": "7.89000000",
+        "dataset_version": "daily:2026-07-24",
+        "dividend_yield": "0.05100000",
+        "dividend_yield_ttm": "0.05300000",
+        "float_shares": "29350000000.00000000",
+        "free_shares": "28000000000.00000000",
+        "limit_status": null,
+        "observed_at": "<NOW>",
+        "pb": "0.45000000",
+        "pe": "5.60000000",
+        "pe_ttm": "6.10000000",
+        "ps": "1.40000000",
+        "ps_ttm": "1.50000000",
+        "source": "tushare",
+        "symbol": "600000.SH",
+        "total_market_cap": "231600000000.00000000",
+        "total_shares": "29352000000.00000000",
+        "trade_date": "2026-07-24",
+        "turnover_rate": "0.01800000",
+        "turnover_rate_free": "0.02200000",
+        "volume_ratio": "0.90000000"
+      },
+      {
+        "available_at": "2026-07-24T09:00:00",
+        "circulating_market_cap": "239000000000.00000000",
+        "close": "12.34000000",
+        "dataset_version": "daily:2026-07-24",
+        "dividend_yield": "0.03000000",
+        "dividend_yield_ttm": "0.03200000",
+        "float_shares": "19400000000.00000000",
+        "free_shares": "15000000000.00000000",
+        "limit_status": 0,
+        "observed_at": "<NOW>",
+        "pb": "0.92000000",
+        "pe": "8.50000000",
+        "pe_ttm": "9.10000000",
+        "ps": "1.10000000",
+        "ps_ttm": "1.20000000",
+        "source": "tushare",
+        "symbol": "000001.SZ",
+        "total_market_cap": "239500000000.00000000",
+        "total_shares": "19410000000.00000000",
+        "trade_date": "2026-07-24",
+        "turnover_rate": "0.02500000",
+        "turnover_rate_free": "0.03100000",
+        "volume_ratio": "1.20000000"
+      },
+      {
+        "available_at": "2026-07-27T09:00:00",
+        "circulating_market_cap": "231500000000.00000000",
+        "close": "8.02000000",
+        "dataset_version": "daily:2026-07-27",
+        "dividend_yield": "0.05100000",
+        "dividend_yield_ttm": "0.05300000",
+        "float_shares": "29350000000.00000000",
+        "free_shares": "28000000000.00000000",
+        "limit_status": null,
+        "observed_at": "<NOW>",
+        "pb": "0.45000000",
+        "pe": "5.60000000",
+        "pe_ttm": "6.10000000",
+        "ps": "1.40000000",
+        "ps_ttm": "1.50000000",
+        "source": "tushare",
+        "symbol": "600000.SH",
+        "total_market_cap": "231600000000.00000000",
+        "total_shares": "29352000000.00000000",
+        "trade_date": "2026-07-27",
+        "turnover_rate": "0.01800000",
+        "turnover_rate_free": "0.02200000",
+        "volume_ratio": "0.90000000"
+      },
+      {
+        "available_at": "2026-07-27T09:00:00",
+        "circulating_market_cap": "239000000000.00000000",
+        "close": "12.56000000",
+        "dataset_version": "daily:2026-07-27",
+        "dividend_yield": "0.03000000",
+        "dividend_yield_ttm": "0.03200000",
+        "float_shares": "19400000000.00000000",
+        "free_shares": "15000000000.00000000",
+        "limit_status": 0,
+        "observed_at": "<NOW>",
+        "pb": "0.92000000",
+        "pe": "8.50000000",
+        "pe_ttm": "9.10000000",
+        "ps": "1.10000000",
+        "ps_ttm": "1.20000000",
+        "source": "tushare",
+        "symbol": "000001.SZ",
+        "total_market_cap": "239500000000.00000000",
+        "total_shares": "19410000000.00000000",
+        "trade_date": "2026-07-27",
+        "turnover_rate": "0.02500000",
+        "turnover_rate_free": "0.03100000",
+        "volume_ratio": "1.20000000"
+      }
+    ],
+    "research_financial_indicators": [
+      {
+        "announcement_date": "2026-04-30",
+        "available_at": "2026-04-30T16:00:00",
+        "book_value_per_share": "15.20000000",
+        "dataset_version": "financial:000001.SZ:2026-07-24:2026-07-27",
+        "debt_to_assets": "0.46500000",
+        "diluted_eps": "2.05000000",
+        "eps": "2.10000000",
+        "gross_profit_margin": "0.45200000",
+        "net_profit_margin": "0.30100000",
+        "net_profit_yoy": "0.08300000",
+        "observed_at": "<NOW>",
+        "operating_cash_flow_per_share": "3.10000000",
+        "operating_cash_flow_yoy": "0.12400000",
+        "report_period": "2026-03-31",
+        "return_on_equity": "0.11500000",
+        "revenue_yoy": "0.05200000",
+        "source": "tushare",
+        "symbol": "000001.SZ",
+        "update_flag": "0",
+        "weighted_return_on_equity": "0.11200000"
+      },
+      {
+        "announcement_date": "2026-04-30",
+        "available_at": "2026-04-30T16:00:00",
+        "book_value_per_share": "15.20000000",
+        "dataset_version": "financial:600000.SH:2026-07-24:2026-07-27",
+        "debt_to_assets": "0.46500000",
+        "diluted_eps": "2.05000000",
+        "eps": "2.10000000",
+        "gross_profit_margin": "0.45200000",
+        "net_profit_margin": "0.30100000",
+        "net_profit_yoy": "0.08300000",
+        "observed_at": "<NOW>",
+        "operating_cash_flow_per_share": "3.10000000",
+        "operating_cash_flow_yoy": "0.12400000",
+        "report_period": "2026-03-31",
+        "return_on_equity": "0.11500000",
+        "revenue_yoy": "0.05200000",
+        "source": "tushare",
+        "symbol": "600000.SH",
+        "update_flag": "0",
+        "weighted_return_on_equity": "0.11200000"
+      },
+      {
+        "announcement_date": "2026-05-15",
+        "available_at": "2026-05-15T16:00:00",
+        "book_value_per_share": "15.20000000",
+        "dataset_version": "financial:000001.SZ:2026-07-24:2026-07-27",
+        "debt_to_assets": "0.46500000",
+        "diluted_eps": "2.11000000",
+        "eps": "2.15000000",
+        "gross_profit_margin": "0.45200000",
+        "net_profit_margin": "0.30100000",
+        "net_profit_yoy": "0.08300000",
+        "observed_at": "<NOW>",
+        "operating_cash_flow_per_share": "3.10000000",
+        "operating_cash_flow_yoy": "0.12400000",
+        "report_period": "2026-03-31",
+        "return_on_equity": "0.11500000",
+        "revenue_yoy": "0.05200000",
+        "source": "tushare",
+        "symbol": "000001.SZ",
+        "update_flag": "1",
+        "weighted_return_on_equity": "0.11200000"
+      },
+      {
+        "announcement_date": "2026-05-15",
+        "available_at": "2026-05-15T16:00:00",
+        "book_value_per_share": "15.20000000",
+        "dataset_version": "financial:600000.SH:2026-07-24:2026-07-27",
+        "debt_to_assets": "0.46500000",
+        "diluted_eps": "2.11000000",
+        "eps": "2.15000000",
+        "gross_profit_margin": "0.45200000",
+        "net_profit_margin": "0.30100000",
+        "net_profit_yoy": "0.08300000",
+        "observed_at": "<NOW>",
+        "operating_cash_flow_per_share": "3.10000000",
+        "operating_cash_flow_yoy": "0.12400000",
+        "report_period": "2026-03-31",
+        "return_on_equity": "0.11500000",
+        "revenue_yoy": "0.05200000",
+        "source": "tushare",
+        "symbol": "600000.SH",
+        "update_flag": "1",
+        "weighted_return_on_equity": "0.11200000"
+      }
+    ],
+    "research_industry_classifications": [
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "industry:000001.SZ",
+        "industry_code": "480000",
+        "industry_name": "银行",
+        "level": 1,
+        "observed_at": "<NOW>",
+        "source": "tushare",
+        "taxonomy": "SW2021"
+      },
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "industry:000001.SZ",
+        "industry_code": "480100",
+        "industry_name": "银行Ⅱ",
+        "level": 2,
+        "observed_at": "<NOW>",
+        "source": "tushare",
+        "taxonomy": "SW2021"
+      },
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "industry:000001.SZ",
+        "industry_code": "480101",
+        "industry_name": "国有大型银行",
+        "level": 3,
+        "observed_at": "<NOW>",
+        "source": "tushare",
+        "taxonomy": "SW2021"
+      },
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "industry:600000.SH",
+        "industry_code": "480000",
+        "industry_name": "银行",
+        "level": 1,
+        "observed_at": "<NOW>",
+        "source": "tushare",
+        "taxonomy": "SW2021"
+      },
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "industry:600000.SH",
+        "industry_code": "480100",
+        "industry_name": "银行Ⅱ",
+        "level": 2,
+        "observed_at": "<NOW>",
+        "source": "tushare",
+        "taxonomy": "SW2021"
+      },
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "industry:600000.SH",
+        "industry_code": "480102",
+        "industry_name": "股份制银行",
+        "level": 3,
+        "observed_at": "<NOW>",
+        "source": "tushare",
+        "taxonomy": "SW2021"
+      }
+    ],
+    "research_industry_memberships": [
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "industry:000001.SZ",
+        "is_current": true,
+        "level1_code": "480000",
+        "level2_code": "480100",
+        "level3_code": "480101",
+        "observed_at": "<NOW>",
+        "security_name": "平安银行",
+        "source": "tushare",
+        "symbol": "000001.SZ",
+        "taxonomy": "SW2021",
+        "valid_from": "2021-12-13",
+        "valid_to": null
+      },
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "industry:600000.SH",
+        "is_current": true,
+        "level1_code": "480000",
+        "level2_code": "480100",
+        "level3_code": "480102",
+        "observed_at": "<NOW>",
+        "security_name": "浦发银行",
+        "source": "tushare",
+        "symbol": "600000.SH",
+        "taxonomy": "SW2021",
+        "valid_from": "2021-12-13",
+        "valid_to": null
+      }
+    ],
+    "research_instrument_profiles": [
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "profiles:<TODAY>",
+        "delist_date": "2002-05-21",
+        "exchange": "SZSE",
+        "industry": "综合",
+        "list_date": "1991-07-03",
+        "list_status": "D",
+        "market": "主板",
+        "name": "PT金田A",
+        "observed_at": "<NOW>",
+        "source": "tushare",
+        "symbol": "000003.SZ"
+      },
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "profiles:<TODAY>",
+        "delist_date": null,
+        "exchange": "SSE",
+        "industry": "银行",
+        "list_date": "1999-11-10",
+        "list_status": "L",
+        "market": "主板",
+        "name": "浦发银行",
+        "observed_at": "<NOW>",
+        "source": "tushare",
+        "symbol": "600000.SH"
+      },
+      {
+        "available_at": "<NOW>",
+        "dataset_version": "profiles:<TODAY>",
+        "delist_date": null,
+        "exchange": "SZSE",
+        "industry": "银行",
+        "list_date": "1991-04-03",
+        "list_status": "L",
+        "market": "主板",
+        "name": "平安银行",
+        "observed_at": "<NOW>",
+        "source": "tushare",
+        "symbol": "000001.SZ"
+      }
+    ],
+    "research_sync_batches": [
+      {
+        "accepted_rows": 1,
+        "code_version": "golden392",
+        "dataset": "industry_memberships",
+        "dataset_version": "industry:000001.SZ",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "current_only": true,
+          "symbol": "000001.SZ"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 1,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 1,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      },
+      {
+        "accepted_rows": 1,
+        "code_version": "golden392",
+        "dataset": "industry_memberships",
+        "dataset_version": "industry:600000.SH",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "current_only": true,
+          "symbol": "600000.SH"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 1,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 1,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      },
+      {
+        "accepted_rows": 2,
+        "code_version": "golden392",
+        "dataset": "daily_metrics",
+        "dataset_version": "daily:2026-07-24",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "trade_date": "2026-07-24"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 2,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 2,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      },
+      {
+        "accepted_rows": 2,
+        "code_version": "golden392",
+        "dataset": "daily_metrics",
+        "dataset_version": "daily:2026-07-27",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "trade_date": "2026-07-27"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 2,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 2,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      },
+      {
+        "accepted_rows": 2,
+        "code_version": "golden392",
+        "dataset": "financial_indicators",
+        "dataset_version": "financial:000001.SZ:2026-07-24:2026-07-27",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "end_period": "2026-07-27",
+          "start_period": "2026-07-24",
+          "symbol": "000001.SZ"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 2,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 2,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      },
+      {
+        "accepted_rows": 2,
+        "code_version": "golden392",
+        "dataset": "financial_indicators",
+        "dataset_version": "financial:600000.SH:2026-07-24:2026-07-27",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "end_period": "2026-07-27",
+          "start_period": "2026-07-24",
+          "symbol": "600000.SH"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 2,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 2,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      },
+      {
+        "accepted_rows": 3,
+        "code_version": "golden392",
+        "dataset": "instrument_profiles",
+        "dataset_version": "profiles:<TODAY>",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "list_status": "L+D"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 3,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 3,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      }
+    ]
+  },
+  "upstream_failure": {
+    "research_sync_batches": [
+      {
+        "accepted_rows": 0,
+        "code_version": "golden392",
+        "dataset": "financial_indicators",
+        "dataset_version": "financial:600000.SH:2026-07-24:2026-07-27",
+        "error_summary": "ResearchDataUpstreamError: upstream fetch failed",
+        "expected_rows": null,
+        "parameters": {
+          "end_date": "2026-07-27",
+          "start_date": "2026-07-24"
+        },
+        "quality_report": null,
+        "quality_status": null,
+        "raw_payload": null,
+        "received_rows": 0,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "failed"
+      },
+      {
+        "accepted_rows": 2,
+        "code_version": "golden392",
+        "dataset": "daily_metrics",
+        "dataset_version": "daily:2026-07-24",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "trade_date": "2026-07-24"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 2,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 2,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      },
+      {
+        "accepted_rows": 2,
+        "code_version": "golden392",
+        "dataset": "daily_metrics",
+        "dataset_version": "daily:2026-07-27",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "trade_date": "2026-07-27"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 2,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 2,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      },
+      {
+        "accepted_rows": 2,
+        "code_version": "golden392",
+        "dataset": "financial_indicators",
+        "dataset_version": "financial:000001.SZ:2026-07-24:2026-07-27",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "end_period": "2026-07-27",
+          "start_period": "2026-07-24",
+          "symbol": "000001.SZ"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 2,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 2,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      },
+      {
+        "accepted_rows": 3,
+        "code_version": "golden392",
+        "dataset": "instrument_profiles",
+        "dataset_version": "profiles:<TODAY>",
+        "error_summary": null,
+        "expected_rows": null,
+        "parameters": {
+          "list_status": "L+D"
+        },
+        "quality_report": {
+          "expected_count": null,
+          "issues": [],
+          "row_count": 3,
+          "status": "passed"
+        },
+        "quality_status": "passed",
+        "raw_payload": null,
+        "received_rows": 3,
+        "rejected_rows": 0,
+        "source": "tushare",
+        "status": "published"
+      }
+    ]
+  }
+}

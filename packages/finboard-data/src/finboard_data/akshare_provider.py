@@ -869,7 +869,7 @@ class AkShareProvider:
     async def fetch_convertible_overview(self) -> list[ConvertibleOverviewEntry]:
         """拉取东财可转债一览(``bond_zh_cov``,免费)。
 
-        用途:cb_basic 的交叉验证 / 评级兜底(research_data_sync
+        用途:cb_basic 的交叉验证 / 评级兜底(dataset_sync
         ``convertible_profiles`` 数据集消费)。退避/间隔遵循本 provider
         既有约定(信号量 + 请求间隔 + 指数退避重试)。
         """

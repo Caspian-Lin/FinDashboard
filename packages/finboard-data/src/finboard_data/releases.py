@@ -85,7 +85,7 @@ RELEASE_KINDS = frozenset(kind.value for kind in ReleaseDatasetKind)
 
 # 各数据集类型的字段白名单(fields 只能是白名单子集)。列名与
 # ``research_daily_metrics`` / ``research_financial_indicators`` 表一致,
-# 数据来源是 research_data_sync(#171)摄取的研究数据。
+# 数据来源是 dataset_sync(#171;#392 前称 research_data_sync)摄取的研究数据。
 DAILY_METRICS_FIELDS = (
     "trade_date",
     "close",
@@ -1810,7 +1810,7 @@ class FrozenDatasetReleaseBuilder:
         meta = instrument.convertible
         if meta is None:
             raise DatasetReleaseQualityError(
-                f"{instrument.code}:convertible_metadata_missing(先执行 research_data_sync "
+                f"{instrument.code}:convertible_metadata_missing(先执行 dataset_sync "
                 "convertible_profiles 回填条款元数据)"
             )
 

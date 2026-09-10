@@ -331,8 +331,8 @@ export const INFO_HINTS = {
     kind: {
       title: { zh: "任务类型", en: "Job kind" },
       description: {
-        zh: "data_sync/bulk_download/fetch_all=行情数据；dataset_publish/research_data_sync=研究数据；research_run/backtest_run/validation_experiment/research_code_run=研究与回测。",
-        en: "data_sync/bulk_download/fetch_all=market data; dataset_publish/research_data_sync=research data; research_run/backtest_run/validation_experiment/research_code_run=research & backtesting.",
+        zh: "data_sync/bulk_download=行情数据；dataset_publish/dataset_sync=研究数据；research_run/backtest_run/validation_experiment/research_code_run=研究与回测。",
+        en: "data_sync/bulk_download=market data; dataset_publish/dataset_sync=research data; research_run/backtest_run/validation_experiment/research_code_run=research & backtesting.",
       },
     },
   },

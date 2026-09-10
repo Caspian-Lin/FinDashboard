@@ -513,7 +513,7 @@ async def backtest_run(
 
     selection.inputs_mode=research_db(默认)必需数据集批次未发布时入队/运行
     秒级拒绝 ``dataset_unpublished:{dataset}``(issue #255,防「0 交易成功」);
-    先 research_data_sync 摄取并发布,核验步骤见 docs/research/data-ops.md。
+    先 dataset_sync 摄取并发布,核验步骤见 docs/research/data-ops.md。
     """
 
     async def _do() -> dict[str, Any]:

@@ -325,7 +325,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 同步 ETF 元数据、读写调度器配置。写操作尊重 `mcp_readonly_only` 开关。
 不连 broker / 账户 / 订单 / 持仓。
 
-任务化工具(fetch_all / sync_universe / bulk_download_start / quality_repair /
+任务化工具(sync_universe / bulk_download_start / quality_repair /
 dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 worker 消费;
 进度 / 状态 / 取消统一用 `finboard_job_get(job_id)` / `finboard_job_cancel(job_id)`
 轮询(#136)。idempotency_key 与 REST 语义端点完全一致,因此 agent 与 REST 提交
@@ -338,11 +338,8 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   fallback_source, lifecycle_events, lifecycle_sync_failed, lifecycle_sync_error}`
 - 错误:`invalid_argument`(未知行情源)/ `unavailable`(主源及备用源均不可用)
 
-### finboard_data_fetch_all **[写,任务化]**
-登记标的池批量缓存更新任务(symbols.yaml),返回 202 + `job_id`(不等待执行)。
-- 参数:无
-- 返回:`JobOut`(`kind=fetch_all`,`queue=data`)+ `created`(首次提交 true / 幂等命中 false)
-- 进度:用 `finboard_job_get(job_id)` 轮询
+(已删 `finboard_data_fetch_all`(#392):symbols.yaml 池改由
+`finboard_bulk_download_start` 的 `symbols` 参数承担,子集过滤语义一致)
 
 ### finboard_data_sync_universe **[写,任务化]**
 登记全市场标的同步任务(akshare 发现 → 写 instruments 表),返回 202 + `job_id`。
@@ -419,7 +416,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - `release_kind=convertible_metrics`(#265)只接受 A 股可转债标的(非转债
   `convertible_scope_violation`),从本地缓存 bars x 冻结转股价元数据
   (`convertible_metadata`)计算转股价值/转股溢价率并冻结为带日期观测;
-  元数据缺失 `convertible_metadata_missing`(先跑 research_data_sync 的
+  元数据缺失 `convertible_metadata_missing`(先跑 dataset_sync 的
   convertible_profiles)。质量报告 `convertible_instruments` 块可见转债标的数
   与评级/到期日缺失计数。
 
@@ -848,7 +845,7 @@ research_run 管线轻路由(#174)。
     - `research_db`(默认):从 research 数据表读 profile/daily_metrics/
       financial_indicators/industry_memberships。**必需数据集批次未发布时
       入队秒级拒绝(#255)**:`dataset_unpublished:{dataset}` 具名
-      `invalid_argument`(摄取 ≠ 发布——`research_data_sync` 质量门通过才
+      `invalid_argument`(摄取 ≠ 发布——`dataset_sync` 质量门通过才
       自动发布;发布状态核验 SQL 与修复步骤见 `docs/research/data-ops.md`);
       执行端(grid 旁路)由 worker 以 `selection_dataset_unpublished` 具名拒绝
     - `bars`:纯价格因子(momentum/volatility_20d)从回测行情计算,不要求
@@ -1220,19 +1217,25 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 
 `enqueue` 的 kind 白名单:`echo` / `research_run` / `feature_snapshot` /
 `bulk_download` / `dataset_publish` / `backtest_run` / `data_sync` /
-`fetch_all` / `quality_repair` / `research_data_sync`(全是研究/数据域,
-不含实盘能力)。
+`quality_repair` / `dataset_sync`(全是研究/数据域,不含实盘能力)。
 
-`research_data_sync`(issue #171;#251/#265 扩展):research 数据表(档案 / 估值 /
-财务 / 行业 / 名称历史 / 转债条款)摄取编排。payload:`{datasets?: [profiles,
+`dataset_sync`(issue #392,自 #171 的 research_data_sync 改名迁移;#251/#265
+扩展):数据集驱动统一同步框架(SyncSpec 注册表)编排研究数据集(档案 / 估值 /
+财务 / 行业 / 名称历史 / 转债条款)摄取。payload:`{datasets?: [profiles,
 name_changes, convertible_profiles, daily_metrics, financial_indicators,
-industry_memberships](默认全部), start_date, end_date(ISO), symbols?: [str]}`。
+industry_memberships](默认全部), start_date, end_date(ISO), symbols?: [str],
+exchange?: str, listing_boards?: [str], instrument_type?: str}`。
+scope 四元组决定逐标的同步池:symbols 显式声明 > exchange/listing_boards/
+instrument_type 宇宙过滤(instruments 表 list_active,#385 语义)>
+profiles 同步结果(此时 datasets 须含 profiles,否则入队即拒)。
 profiles 同时拉取在市(L)与退市(D)档案(delist_date 上游);name_changes
 全市场历史名称变更直接重建 `instrument_names`(半开区间,供 ST-PIT);
 convertible_profiles(#265)tushare cb_basic 条款快照 upsert 主数据
 `convertible_metadata`(转股价/到期日,评级与集思录强赎事件走 akshare 兜底,
 失败降级为 warning 不阻断),顺带回填 `instruments.list_date/delist_date`。
-逐标的接口自动限流(tushare_budget)
+行级质量口径按数据集枚举形态分发(#389 固化):全市场枚举=单行契约违规跳过
++ 具名告警 `tushare.dirty_row_skipped`(全脏行整批拒),按 symbol 精确查询
+=整批拒。逐标的接口自动限流(tushare_budget 进程内共享)
 并按确定性 dataset_version 断点续跑;预算耗尽退避重试,未配 token / 未装
 SDK fail-fast。
 
@@ -1279,13 +1282,13 @@ SDK fail-fast。
 - 参数:`kind: str`(白名单)、`idempotency_key: str`(8-128 字符)、
   `requested_by: str`、`queue?: str = "default"`、`payload?: dict`(任务参数,
   结构取决于 kind)、`priority?: int = 0`(-1000..1000)、`max_attempts?: int = 3`(1..10)
-- 入队期 payload 契约(#260,REST `POST /api/jobs` 与本工具共用同一校验):
-  已注册 `research_data_sync` —— **未知键拒绝**(如误传 `data_types`,
+- 入队期 payload 契约(#260;#392 起 `dataset_sync`,REST `POST /api/jobs`
+  与本工具共用同一校验):**未知键拒绝**(如误传 `data_types`,
   正确参数名为 `datasets`)、`start_date`/`end_date` 必填(ISO 日期)、
-  `datasets` 枚举校验、逐标的数据集(`financial_indicators`/
-  `industry_memberships`)在未提供 `symbols` 且 `datasets` 不含 `profiles`
-  时拒绝(否则 symbol 池解析为空、任务静默零迭代);执行器入口重放同一契约,
-  覆盖旁路入队的存量行
+  `datasets` 枚举校验、scope 四元组类型校验、逐标的数据集(`financial_indicators`/
+  `industry_memberships`)在未提供 `symbols`、未声明宇宙过滤且 `datasets`
+  不含 `profiles` 时拒绝(否则 symbol 池解析为空、任务静默零迭代);
+  执行器入口重放同一契约,覆盖旁路入队的存量行
 - 返回:`JobOut + created`(首次提交 true / 幂等命中 false)
 - 错误:`permission_denied`(只读模式)、`invalid_argument`(kind 不在白名单 /
   schema 校验失败 / payload 契约失败`[unknown_payload_key|
@@ -1297,12 +1300,14 @@ SDK fail-fast。
   - `bulk_download`:`{market, source, start, instrument_type}`
   - `dataset_publish`:`{release_id, release_kind, symbols, version, start_date, end_date}`
   - `backtest_run`:`{request, provider_name}` → `result_ref=str(run_id)`
-  - `research_data_sync`:`{start_date: "YYYY-MM-DD"(必填), end_date:
+  - `dataset_sync`:`{start_date: "YYYY-MM-DD"(必填), end_date:
     "YYYY-MM-DD"(必填), datasets?: [profiles|name_changes|convertible_profiles|
     daily_metrics|financial_indicators|industry_memberships](缺省=全部六类;
     convertible_profiles=#265 转债条款快照), symbols?:
-    ["000001.SZ",...](省略时逐标的数据集以 profiles 同步结果为池,此时
-    datasets 须含 profiles)}` → 研究数据表摄取(batch 发布后 selection 可命中)
+    ["000001.SZ",...], exchange?: "SSE", listing_boards?: ["sse_main"],
+    instrument_type?: "stock"(scope 四元组:逐标的池 symbols > 宇宙过滤 >
+    profiles 结果,此时 datasets 须含 profiles)}` → 研究数据表摄取
+    (batch 发布后 selection 可命中)
 
 ### finboard_job_cancel **[写]**
 请求协作式取消后台任务(running → cancel_requested,executor checkpoint 时退出)。

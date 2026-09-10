@@ -1,7 +1,7 @@
 """可转债条款元数据 Repository(issue #265)。
 
 ``convertible_metadata`` 表(#58 建表)的第一个**自动写入者**:tushare
-cb_basic 快照(research_data_sync ``convertible_profiles`` 数据集)upsert
+cb_basic 快照(dataset_sync ``convertible_profiles`` 数据集)upsert
 转股价 / 起息日 / 到期日 / 评级(评级来自 akshare bond_zh_cov 兜底)。
 
 语义:
