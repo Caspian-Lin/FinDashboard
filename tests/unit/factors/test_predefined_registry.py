@@ -404,11 +404,6 @@ class _AlphaInput(PredefinedFactorInput):
         """本测试域无财务发布:空映射(#401 未挂载降级语义)。"""
         return {}
 
-    def industry_groups(self) -> dict[str, str | None]:
-        """本测试域无行业分组:空映射。"""
-        return {}
-
-
 def _alpha_universe(
     *,
     n_days: int = 260,
