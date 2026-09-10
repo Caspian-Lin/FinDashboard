@@ -1387,6 +1387,11 @@ class FrozenDatasetReleaseBuilder:
     ) -> ResearchDatasetRelease:
         """冻结并发布;失败不会覆盖已有发布或留下可读的半成品。"""
 
+        # issue #396:发布覆盖率审计消费交易日历,DB 优先(缺失回源 akshare
+        # 并回写 trade_cal);预热失败不阻断 —— 审计内的同步读取回退原路径。
+        from finboard_data.trading_calendar import ensure_calendar_loaded
+
+        await ensure_calendar_loaded()
         _validate_schema_compatibility(previous_release, spec)
         if not instruments:
             raise DatasetReleaseQualityError("发布标的不能为空")

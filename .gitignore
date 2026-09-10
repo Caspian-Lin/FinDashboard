@@ -39,6 +39,7 @@ htmlcov/
 .pytest_cache/
 # pytest 临时目录(Windows ACL 根除:pyproject.toml addopts 固定 --basetemp 到此处)
 .pytest-tmp/
+.tmp/
 .mypy_cache/
 .ruff_cache/
 .pyre/
@@ -92,3 +93,6 @@ desktop.ini
 .opencode/auth.json
 # #157:容器启动时渲染的运行时 opencode.json(mcp.finboard.url ← opencode_mcp_remote_url)
 .opencode/runtime/
+
+# 对账 / 草稿脚本(#396 起各 worktree 本地使用,不入库)
+.tmp/

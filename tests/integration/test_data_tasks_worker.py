@@ -368,11 +368,12 @@ class TestBulkDownloadEndToEnd:
     async def test_bulk_download_index_instrument_type(
         self, engine: AsyncEngine
     ) -> None:
-        """instrument_type=index 选中指数标的走 akshare 源(issue #256)。
+        """instrument_type=index 选中指数标的批量拉取(issue #256)。
 
         bulk_download 按 instrument_type 从 instruments 表筛出指数标的
         (生产路径由 data_sync 经 discover_indices + sync_with_diff 写入),
-        交给 provider 拉取日线(akshare 指数接口,#184 分流)。
+        交给 provider 拉取日线。显式 ``source=akshare`` 恒优先(#394:
+        指数主源偏好只覆盖「未显式声明 source」的默认解析)。
         """
         from sqlalchemy import delete as sa_delete
         from sqlalchemy import select
@@ -466,7 +467,11 @@ class TestBulkDownloadEndToEnd:
     async def test_bulk_download_empty_source_resolves_to_default(
         self, engine: AsyncEngine
     ) -> None:
-        """「默认源」入队写空串 source(#341 跟进):不再 invalid_payload,回落配置默认源。"""
+        """「默认源」入队写空串 source(#341 跟进):不再 invalid_payload。
+
+        #394:筛选域全为指数且未显式声明 source 时,默认解析覆盖为
+        tushare(index_daily 主源;指数基日行 OHLC 缺口由 #346 宽容)。
+        """
         from sqlalchemy import delete as sa_delete
         from sqlalchemy import select
 
@@ -512,11 +517,19 @@ class TestBulkDownloadEndToEnd:
 
         mock_provider = AsyncMock()
         mock_provider.update_cache_batch.return_value = {"000852.SH": True}
+        built_with: dict[str, object] = {}
+
+        def _recording_build(name: str, *args: object, **kwargs: object) -> AsyncMock:
+            built_with["provider_name"] = name
+            return mock_provider
+
         with patch(
             "finboard_backtest.background_jobs.executors.bulk_download.build_bar_provider",
-            return_value=mock_provider,
+            side_effect=_recording_build,
         ):
             await _drain(worker)
+        # #394:全指数域 + 未显式声明 source → 主源偏好 tushare。
+        assert built_with["provider_name"] == "tushare"
 
         async with session_factory(engine)() as session:
             row = (
@@ -667,11 +680,19 @@ class TestBulkDownloadEndToEnd:
 
         mock_provider = AsyncMock()
         mock_provider.update_cache_batch.return_value = {"000852.SH": True}
+        built_with: dict[str, object] = {}
+
+        def _recording_build(name: str, *args: object, **kwargs: object) -> AsyncMock:
+            built_with["provider_name"] = name
+            return mock_provider
+
         with patch(
             "finboard_backtest.background_jobs.executors.bulk_download.build_bar_provider",
-            return_value=mock_provider,
+            side_effect=_recording_build,
         ):
             await _drain(worker)
+        # #394:全指数域 + 未显式声明 source → 主源偏好 tushare。
+        assert built_with["provider_name"] == "tushare"
 
         async with session_factory(engine)() as session:
             row = (

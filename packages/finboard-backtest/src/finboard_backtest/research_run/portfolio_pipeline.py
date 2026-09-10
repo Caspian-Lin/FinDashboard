@@ -117,6 +117,10 @@ class PortfolioDecisionInput:
     atr: dict[str, float] = field(default_factory=dict)
     fill_ratio_by_symbol: dict[str, float] = field(default_factory=dict)
     rejected_symbols: frozenset[str] = frozenset()
+    # issue #396:执行日全天停牌的标的 —— 当日指令一律拒单(fail-visible),
+    # 不再按停牌前最后一个可见 close 静默「昨收成交」。空集 = 无停牌信息,
+    # 行为与历史一致;checksum 按「空键省略」语义,存量 run 零漂移。
+    suspended_symbols: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -179,28 +183,31 @@ class PortfolioDecisionInput:
                 "n_observations": self.covariance.n_observations,
                 "method": self.covariance.method,
             }
-        return stable_checksum(
-            {
-                "business_date": self.business_date,
-                "decision_at": self.decision_at,
-                "execution_at": self.execution_at,
-                "candidates": self.candidates,
-                "features": self.features,
-                "signals": self.signals,
-                "prices": self.prices,
-                "execution_prices": self.execution_prices,
-                "lot_info": self.lot_info,
-                "input_artifact_ids": self.input_artifact_ids,
-                "covariance": covariance_payload,
-                "sleeve_map": self.sleeve_map,
-                "disabled_symbols": sorted(self.disabled_symbols),
-                "betas": self.betas,
-                "realized_volatility": self.realized_volatility,
-                "atr": self.atr,
-                "fill_ratio_by_symbol": self.fill_ratio_by_symbol,
-                "rejected_symbols": sorted(self.rejected_symbols),
-            }
-        )
+        checksum_payload: dict[str, object] = {
+            "business_date": self.business_date,
+            "decision_at": self.decision_at,
+            "execution_at": self.execution_at,
+            "candidates": self.candidates,
+            "features": self.features,
+            "signals": self.signals,
+            "prices": self.prices,
+            "execution_prices": self.execution_prices,
+            "lot_info": self.lot_info,
+            "input_artifact_ids": self.input_artifact_ids,
+            "covariance": covariance_payload,
+            "sleeve_map": self.sleeve_map,
+            "disabled_symbols": sorted(self.disabled_symbols),
+            "betas": self.betas,
+            "realized_volatility": self.realized_volatility,
+            "atr": self.atr,
+            "fill_ratio_by_symbol": self.fill_ratio_by_symbol,
+            "rejected_symbols": sorted(self.rejected_symbols),
+        }
+        # issue #396:空集省略键 —— 未消费停牌数据的 run 与旧版本逐字节一致
+        # (replay_source_status / factor_series 条件键同先例)。
+        if self.suspended_symbols:
+            checksum_payload["suspended_symbols"] = sorted(self.suspended_symbols)
+        return stable_checksum(checksum_payload)
 
 
 @dataclass(slots=True)
@@ -1056,8 +1063,14 @@ def _execute_research_plan(
         fill_quantity = (
             raw_fill_quantity // info.lot_size * info.lot_size
         )
+        # issue #396:执行日全天停牌 → 拒单(fail-visible),持仓保留至复牌,
+        # 不再按停牌前最后一个可见 close 静默成交。优先级在显式拒单清单之后
+        # (冻结输入指定拒单的语义不变);shortfall 与其他拒单分支同口径。
         if instruction.symbol in item.rejected_symbols:
             reject_reason = "冻结研究输入指定拒单"
+            fill_quantity = 0
+        elif instruction.symbol in item.suspended_symbols:
+            reject_reason = "停牌日拒绝成交(execution_suspended)"
             fill_quantity = 0
         elif fill_quantity <= 0:
             reject_reason = "成交比例不足一个合法交易单位"

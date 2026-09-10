@@ -205,6 +205,60 @@ class ConvertibleProfile:
     available_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class SuspensionRecord:
+    """单标的单日停复牌记录(tushare ``suspend_d``,issue #396)。
+
+    ``suspend_kind`` 与缓存侧 ``TushareLifecycleEvent.event_type`` 同词表:
+    ``suspension_day``(全天停牌)/ ``intraday_suspension``(盘中停牌)/
+    ``resumption``(复牌)。PIT=当日:``available_at`` = 交易日 09:30
+    (上海)—— 全天停牌开盘即可观察,计划停复牌按生效日可见(不早于
+    生效日看到,保守方向)。
+    """
+
+    symbol: str
+    trade_date: date
+    suspend_kind: str
+    suspend_type: str
+    suspend_timing: str | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IndexProfile:
+    """指数基础信息快照(tushare ``index_basic``,issue #394)。
+
+    PIT 语义(诚实边界):与 ``cb_basic`` 同为**当前时点**快照,不含指数
+    更名 / 编码迁移史;``available_at`` = 本次观察时间。``symbol`` 保留上游
+    原始代码形制(SSE/SZSE/BSE 之外还有 CSI/CIC/MSCI 等编外市场,代码段
+    不止 ``6 位数字.沪深北`` 形制),登记域(哪些进 ``instruments`` 表)由
+    discovery 层按 ``is_index_code`` 裁决,本记录不做 narrowing。
+
+    ``base_date`` 是指数基日(发布机构选定的基准计算起点)——A 股三所
+    指数在 ``instruments.list_date`` 上的结构化上游(issue #394:回填后
+    mixed 发布的 ``missing_list_date`` 不再被指数恒 null 抬高)。上游另有
+    ``list_date`` 列但大量为 null,故回填优先取 ``base_date``。
+    """
+
+    symbol: str
+    name: str
+    full_name: str | None
+    publisher: str | None
+    category: str | None
+    market: str | None
+    base_date: date | None
+    list_date: date | None
+    list_status: str | None
+    source: str
+    observed_at: datetime
+    available_at: datetime
+    source: str
+    observed_at: datetime
+    available_at: datetime
+
+
 @runtime_checkable
 class ResearchDataProvider(Protocol):
     """研究数据读取边界;公共接口不暴露 DataFrame 或数据源 SDK 类型。
@@ -269,6 +323,15 @@ class ResearchDataProvider(Protocol):
         dirty_row_policy: str | None = None,
     ) -> list[ConvertibleProfile]:
         """读取全市场可转债基础条款快照(在市 + 摘牌,issue #265)。"""
+        ...
+
+    async def fetch_suspensions(
+        self,
+        trade_date: date,
+        *,
+        dirty_row_policy: str | None = None,
+    ) -> list[SuspensionRecord]:
+        """读取指定交易日的全市场停复牌枚举(issue #396)。"""
         ...
 
 

@@ -114,12 +114,44 @@ class TestBenchmarkIndexRegistry:
 
 
 class TestDiscoverIndices:
-    """discover_indices:登记表 → instrument_type=index(issue #256)。"""
+    """discover_indices:tushare index_basic → instrument_type=index(#394)。"""
+
+    @staticmethod
+    def _stub_provider(
+        rows: list[dict[str, object]],
+    ) -> object:
+        """离线注入:构造 TushareResearchDataProvider(fake client)。"""
+        from tests.unit.data.test_issue_394_index_registration import (
+            FakeIndexBasicClient,
+            _provider,
+        )
+
+        return _provider(FakeIndexBasicClient([rows]))
+
+    @staticmethod
+    def _index_row(code: str, name: str) -> dict[str, object]:
+        return {
+            "ts_code": code,
+            "name": name,
+            "fullname": name,
+            "publisher": "",
+            "category": "",
+            "market": code.rpartition(".")[2],
+            "base_date": "20050408",
+            "list_date": "",
+            "list_status": "L",
+        }
 
     async def test_discover_indices_returns_index_instruments(self) -> None:
         from finboard_data.discovery import BENCHMARK_INDEX_REGISTRY, UniverseDiscovery
 
-        instruments = await UniverseDiscovery().discover_indices()
+        rows = [
+            self._index_row(code, name)
+            for code, name in BENCHMARK_INDEX_REGISTRY
+        ]
+        instruments = await UniverseDiscovery().discover_indices(
+            self._stub_provider(rows)  # type: ignore[arg-type]
+        )
         assert len(instruments) == len(BENCHMARK_INDEX_REGISTRY)
         by_code = {item.code: item for item in instruments}
         for code, name in BENCHMARK_INDEX_REGISTRY:
@@ -133,8 +165,10 @@ class TestDiscoverIndices:
             ]
             assert info.exchange == expected_exchange
 
-    async def test_discover_all_includes_indices(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """discover_all = 股票 + ETF + 指数;akshare 依赖被打桩(不联网)。"""
+    async def test_discover_all_includes_indices(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """discover_all = 股票 + ETF + 指数;akshare / tushare 依赖被打桩(不联网)。"""
         from finboard_data import FUTURES_MAIN_SERIES_REGISTRY
         from finboard_data.discovery import (
             BENCHMARK_INDEX_REGISTRY,
@@ -177,10 +211,24 @@ class TestDiscoverIndices:
                 )
             ]
 
+        async def _fake_indices() -> list[InstrumentInfo]:
+            return [
+                InstrumentInfo(
+                    code=code,
+                    name=name,
+                    market=Market.A_SHARE,
+                    instrument_type=InstrumentType.INDEX,
+                    exchange="SSE",
+                )
+                for code, name in BENCHMARK_INDEX_REGISTRY
+            ]
+
         monkeypatch.setattr(d, "discover_a_shares", _fake_stocks)
         monkeypatch.setattr(d, "discover_a_etfs", _fake_etfs)
         # #265:discover_all 并入转债段,同样打桩保持测试离线。
         monkeypatch.setattr(d, "discover_convertibles", _fake_convertibles)
+        # #394:指数段改 tushare index_basic 源,打桩保持 discover_all 离线。
+        monkeypatch.setattr(d, "discover_indices", _fake_indices)
         all_instruments = await d.discover_all()
         by_type = {item.instrument_type for item in all_instruments}
         # #267:discover_all 并入期货主连段(受控登记表,无网络)。
@@ -236,11 +284,7 @@ class TestDiscoverConvertibles:
         import pandas as pd
 
         from finboard_data import FUTURES_MAIN_SERIES_REGISTRY
-        from finboard_data.discovery import (
-            BENCHMARK_INDEX_REGISTRY,
-            InstrumentInfo,
-            UniverseDiscovery,
-        )
+        from finboard_data.discovery import InstrumentInfo, UniverseDiscovery
 
         d = UniverseDiscovery()
 
@@ -256,15 +300,16 @@ class TestDiscoverConvertibles:
         )
         monkeypatch.setattr(d, "discover_a_shares", _empty)
         monkeypatch.setattr(d, "discover_a_etfs", _empty)
+        # #394:指数段改 tushare 源,打桩保持离线(本测试只盯转债并入)。
+        monkeypatch.setattr(d, "discover_indices", _empty)
         monkeypatch.setattr("akshare.bond_zh_cov", lambda: frame)
 
         all_instruments = await d.discover_all()
         by_type = {item.instrument_type for item in all_instruments}
         assert by_type == {
             InstrumentType.CONVERTIBLE,
-            InstrumentType.INDEX,
             InstrumentType.FUTURES,
         }
         assert len(all_instruments) == (
-            1 + len(BENCHMARK_INDEX_REGISTRY) + len(FUTURES_MAIN_SERIES_REGISTRY)
+            1 + len(FUTURES_MAIN_SERIES_REGISTRY)
         )

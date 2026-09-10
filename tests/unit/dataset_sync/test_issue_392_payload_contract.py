@@ -86,8 +86,11 @@ class TestRejections:
             )
 
     def test_unknown_dataset_rejected(self) -> None:
-        with pytest.raises(PayloadContractError, match="suspensions"):
-            validate_dataset_sync_payload({**_VALID, "datasets": ["suspensions"]})
+        # #396:suspensions 已注册为第七集,未知数据集改用占位名锁定拒绝。
+        with pytest.raises(PayloadContractError, match="no_such_dataset"):
+            validate_dataset_sync_payload(
+                {**_VALID, "datasets": ["no_such_dataset"]}
+            )
 
     @pytest.mark.parametrize(
         ("key", "value"),

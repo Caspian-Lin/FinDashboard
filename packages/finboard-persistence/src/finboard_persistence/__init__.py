@@ -42,6 +42,10 @@ from finboard_persistence.factor_series_repo import (
     series_coverage_missing,
     series_id_for,
 )
+from finboard_persistence.lifecycle_sync import (
+    TUSHARE_SUSPEND_DATASET_VERSION,
+    persist_tushare_lifecycle_events,
+)
 from finboard_persistence.mcp_audit_repo import McpAuditRepository
 from finboard_persistence.models import (
     AccountModel,
@@ -145,12 +149,19 @@ from finboard_persistence.strategy_spec_repo import (
     StrategySpecTransitionError,
     StrategySpecVersionConflictError,
 )
+from finboard_persistence.trade_calendar_repo import (
+    PRIMARY_EXCHANGE,
+    PgTradingCalendarStore,
+    TradeCalRepository,
+)
 from finboard_persistence.validation_repo import (
     ResearchExperimentRepository,
     ResearchTrialRepository,
 )
 
 __all__ = [
+    "PRIMARY_EXCHANGE",
+    "TUSHARE_SUSPEND_DATASET_VERSION",
     "AccountModel",
     "AccountRepository",
     "AuditLogModel",
@@ -202,6 +213,7 @@ __all__ = [
     "McpAuditRepository",
     "OrderModel",
     "OrderRepository",
+    "PgTradingCalendarStore",
     "PositionModel",
     "PositionRepository",
     "ReconciliationLogModel",
@@ -237,6 +249,7 @@ __all__ = [
     "ResearchRunRepository",
     "ResearchStrategySpecModel",
     "ResearchStrategySpecRepository",
+    "ResearchSuspensionModel",
     "ResearchSyncBatchModel",
     "ResearchSyncBatchRepository",
     "ResearchTrialModel",
@@ -258,6 +271,8 @@ __all__ = [
     "StrategySpecTransitionError",
     "StrategySpecVersionConflictError",
     "SyncBatchStatus",
+    "TradeCalModel",
+    "TradeCalRepository",
     "WatchlistItemModel",
     "WatchlistModel",
     "WatchlistRepository",
@@ -265,6 +280,7 @@ __all__ = [
     "compute_series_key",
     "create_async_engine",
     "generate_run_id",
+    "persist_tushare_lifecycle_events",
     "release_symbol_check",
     "resolve_release_symbols",
     "series_coverage_missing",

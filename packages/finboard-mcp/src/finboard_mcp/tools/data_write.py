@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
@@ -221,40 +221,15 @@ async def _store_fetched_bars(
 async def _persist_tushare_lifecycle_events(
     session: Any, events: list[Any]
 ) -> int:
-    """幂等写入 Tushare 停复牌事件,返回本次新增数量。"""
+    """幂等写入 Tushare 停复牌事件,返回本次新增数量。
 
-    if not events:
-        return 0
+    实现收敛到 finboard_persistence 单一事实源(#393):与 bulk_download
+    执行器 / REST fetch 共用同一行形状与幂等键。
+    """
 
-    from sqlalchemy.dialects.postgresql import insert
+    from finboard_persistence import persist_tushare_lifecycle_events
 
-    from finboard_persistence import InstrumentLifecycleEventModel
-
-    observed_at = datetime.now(UTC)
-    values = [
-        {
-            "symbol": event.symbol,
-            "event_type": event.event_type,
-            "effective_date": event.effective_date,
-            "available_at": observed_at,
-            "source": "tushare",
-            "dataset_version": "suspend_d-v1",
-            "details": {
-                "suspend_type": "R" if event.event_type == "resumption" else "S",
-                "suspend_timing": event.suspend_timing,
-            },
-            "observed_at": observed_at,
-        }
-        for event in events
-    ]
-    statement = (
-        insert(InstrumentLifecycleEventModel)
-        .values(values)
-        .on_conflict_do_nothing(constraint="uq_instrument_lifecycle_event")
-        .returning(InstrumentLifecycleEventModel.id)
-    )
-    result = await session.execute(statement)
-    return len(result.scalars().all())
+    return await persist_tushare_lifecycle_events(session, events)
 
 
 # --------------------------------------------------------------------------- #

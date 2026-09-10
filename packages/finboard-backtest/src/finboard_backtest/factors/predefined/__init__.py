@@ -40,14 +40,19 @@ from finboard_backtest.factors.predefined.operators import (
     ts_decay,
     ts_delay,
     ts_delta,
+    ts_downside_std,
+    ts_ema,
+    ts_kurt,
     ts_max,
     ts_mean,
     ts_min,
     ts_rank,
+    ts_skew,
     ts_std,
     ts_sum,
 )
 from finboard_backtest.factors.predefined.registry import (
+    MARKET_INDEX_SYMBOL,
     PREDEFINED_FACTORS,
     PREDEFINED_FACTORS_SCHEMA_VERSION,
     PredefinedFactorCompute,
@@ -59,6 +64,7 @@ from finboard_backtest.factors.predefined.registry import (
 )
 
 __all__ = [
+    "MARKET_INDEX_SYMBOL",
     "PREDEFINED_FACTORS",
     "PREDEFINED_FACTORS_SCHEMA_VERSION",
     "FactorSeriesFrame",
@@ -87,10 +93,14 @@ __all__ = [
     "ts_decay",
     "ts_delay",
     "ts_delta",
+    "ts_downside_std",
+    "ts_ema",
+    "ts_kurt",
     "ts_max",
     "ts_mean",
     "ts_min",
     "ts_rank",
+    "ts_skew",
     "ts_std",
     "ts_sum",
 ]
