@@ -3,7 +3,7 @@
 * 纯指标引擎:IC / RankIC / ICIR、分位组收益单调性、换手(截面 rank
   自相关)与衰减、覆盖率与覆盖起点声明,手算面板逐值对照;
 * signal_eligible 治理(#214 规则化):暴露/风险/流动性族默认 False,
-  违例出疑似标注错误清单(当前目录 = vwap_dev_20d/60d,人工拍板);
+  违例出疑似标注错误清单(vwap_dev_20d/60d 已于 2026-09-10 人工拍板改 False,现零违例);
 * 评分目录投影(#403 继 #226):p_ 全目录 direction/category/hypothesis
   投影 + 家族级评分参数,MultiFactorScorer 消费回归,未知家族 fail-loud;
 * 快照特征注册表双轨防漂移(#253 先例):RESEARCH_RELEASE_FEATURE_NAMES
@@ -308,16 +308,9 @@ class TestEvalEngine:
 
 class TestSignalEligibleGovernance:
     def test_exposure_family_violations_listed(self) -> None:
-        """流动性族的 vwap_dev 两条 = 当前目录全部疑似标注错误。"""
+        """人工拍板后(2026-09-10,vwap_dev 改 False)暴露族零违例。"""
         findings = signal_eligible_governance_findings()
-        assert {item["factor"] for item in findings} == {
-            "vwap_dev_20d",
-            "vwap_dev_60d",
-        }
-        for item in findings:
-            assert item["family"] == "liquidity"
-            assert item["signal_eligible"] is True
-            assert "signal_eligible=False" in item["rule"]
+        assert findings == []
 
     def test_exposure_families_declaration(self) -> None:
         """#214 语义:规模/风险/流动性三族默认不进信号。"""
@@ -565,9 +558,7 @@ class TestSyntheticFullCatalog:
     ) -> None:
         governance = synthetic_report["signal_eligible_governance"]
         assert "#214" in governance["rule"]
-        assert {
-            item["factor"] for item in governance["suspected"]
-        } == {"vwap_dev_20d", "vwap_dev_60d"}
+        assert governance["suspected"] == []
 
     def test_summary_extremes_consistent(
         self, synthetic_report: dict[str, Any]

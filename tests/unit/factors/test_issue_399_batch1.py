@@ -400,10 +400,8 @@ class TestCatalogBatch1:
             item = PREDEFINED_FACTORS[name]
             if item.family in {"momentum", "reversal"}:
                 assert item.signal_eligible, name
-            elif item.family in {"risk", "size"}:
+            elif item.family in {"risk", "size"} or item.family == "liquidity":
                 assert not item.signal_eligible, name
-            elif item.family == "liquidity":
-                assert item.signal_eligible == name.startswith("vwap_dev_"), name
         # direction 口径:风险暴露族记录弱先验(波动/回撤 LOWER,Sharpe HIGHER)
         assert PREDEFINED_FACTORS["vol_60d"].direction.value == "lower"
         assert PREDEFINED_FACTORS["sharpe_120d"].direction.value == "higher"

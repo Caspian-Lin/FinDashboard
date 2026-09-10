@@ -1664,6 +1664,7 @@ def _liquidity_entries() -> tuple[PredefinedFactorDefinition, ...]:
                 family="liquidity",
                 compute=_vwap_dev(window),
                 window=window,
+                signal_eligible=False,
                 data_dependencies=("bars.close", "bars.amount", "bars.volume"),
             )
         )
