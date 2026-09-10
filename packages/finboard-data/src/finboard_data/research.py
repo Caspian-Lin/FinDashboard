@@ -450,9 +450,6 @@ class IndexProfile:
     source: str
     observed_at: datetime
     available_at: datetime
-    source: str
-    observed_at: datetime
-    available_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
