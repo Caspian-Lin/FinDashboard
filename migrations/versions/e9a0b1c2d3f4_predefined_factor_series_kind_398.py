@@ -1,7 +1,7 @@
 """predefined_factor_series_kind_398
 
 Revision ID: e9a0b1c2d3f4
-Revises: d8e9f0a1b2c3
+Revises: c159fcd63f94
 Create Date: 2026-09-09 12:00:00.000000
 
 issue #398:``research_factor_series.kind`` 列扩宽(String(16) → String(32))。
@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "e9a0b1c2d3f4"
-down_revision = "d8e9f0a1b2c3"
+down_revision = "c159fcd63f94"
 branch_labels = None
 depends_on = None
 
