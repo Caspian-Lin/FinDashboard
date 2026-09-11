@@ -71,12 +71,14 @@ class YFinanceProvider:
         max_retries: int = 3,
         retry_backoff: float = 2.0,
         max_cache_io_concurrency: int = 1,
+        read_cache_max_bytes: int | None = None,
     ) -> None:
         if use_cache:
             dir_path = str(cache_dir) if cache_dir else "data_cache"
             self._cache: ParquetCache | None = ParquetCache(
                 dir_path,
                 max_io_concurrency=max_cache_io_concurrency,
+                read_cache_max_bytes=read_cache_max_bytes,
             )
         else:
             self._cache = None

@@ -109,6 +109,7 @@ class TushareBarProvider(AkShareProvider):
         daily_request_limit: int = 100_000,
         usage_file: str | Path = "data_cache/tushare_usage.json",
         max_cache_io_concurrency: int = 1,
+        read_cache_max_bytes: int | None = None,
     ) -> None:
         super().__init__(
             cache_dir=cache_dir,
@@ -118,6 +119,7 @@ class TushareBarProvider(AkShareProvider):
             max_retries=max_retries,
             retry_backoff=retry_backoff,
             max_cache_io_concurrency=max_cache_io_concurrency,
+            read_cache_max_bytes=read_cache_max_bytes,
         )
         self._client = client if client is not None else self._create_client(token)
         self._budget = budget or shared_tushare_budget(
