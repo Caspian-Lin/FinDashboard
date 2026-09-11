@@ -70,8 +70,11 @@ def _get_provider(
     from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
 
     provider_name = _resolve_provider_name(source, settings=settings)
+    read_cache_max_bytes = (
+        settings.read_cache_max_bytes if settings is not None else None
+    )
     if provider_name == "akshare":
-        return AkShareProvider(use_cache=use_cache)
+        return AkShareProvider(use_cache=use_cache, read_cache_max_bytes=read_cache_max_bytes)
     if provider_name == "tushare":
         return TushareBarProvider(
             token=settings.tushare_token if settings is not None else None,
@@ -87,8 +90,9 @@ def _get_provider(
                 if settings is not None
                 else "data_cache/tushare_usage.json"
             ),
+            read_cache_max_bytes=read_cache_max_bytes,
         )
-    return YFinanceProvider(use_cache=use_cache)
+    return YFinanceProvider(use_cache=use_cache, read_cache_max_bytes=read_cache_max_bytes)
 
 
 def _resolve_provider_name(

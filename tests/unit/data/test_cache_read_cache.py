@@ -15,7 +15,7 @@ import structlog
 from structlog.testing import capture_logs
 
 import finboard_data.cache as finboard_cache_module
-from finboard_data.cache import ParquetCache
+from finboard_data.cache import _READ_CACHE_BYTES_PER_BAR, ParquetCache
 from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
 
@@ -144,7 +144,13 @@ class TestReadCacheBounds:
         # 被逐出后重新直读,值与首次读取逐值相等。
         assert first == third == fourth
         assert len(second) == 4
-        assert cache.read_cache_info() == {"entries": 1, "elements": 4, "hits": 1}
+        # issue #440:info dict 新增近似字节键(4 根 Bar x 每元素常数)。
+        assert cache.read_cache_info() == {
+            "entries": 1,
+            "elements": 4,
+            "bytes": 4 * _READ_CACHE_BYTES_PER_BAR,
+            "hits": 1,
+        }
 
     async def test_zero_budget_disables_cache(self, tmp_path: Path) -> None:
         await _seed(tmp_path, _bars(5))

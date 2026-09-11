@@ -60,11 +60,16 @@ def build_bar_provider(
     from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
 
     settings = settings_factory()
+    # issue #440:读缓存近似字节上限随 settings 透传(None = 不限)。
+    read_cache_max_bytes = (
+        settings.read_cache_max_bytes if settings is not None else None
+    )
     if name == "akshare":
         return AkShareProvider(
             use_cache=use_cache,
             max_concurrency=max_concurrency or 2,
             request_interval=request_interval if request_interval is not None else 0.5,
+            read_cache_max_bytes=read_cache_max_bytes,
         )
     if name == "tushare":
         return TushareBarProvider(
@@ -82,11 +87,13 @@ def build_bar_provider(
                 else "data_cache/tushare_usage.json"
             ),
             max_concurrency=max_concurrency or 16,
+            read_cache_max_bytes=read_cache_max_bytes,
         )
     return YFinanceProvider(
         use_cache=use_cache,
         max_concurrency=max_concurrency or 3,
         request_interval=request_interval if request_interval is not None else 0.3,
+        read_cache_max_bytes=read_cache_max_bytes,
     )
 
 

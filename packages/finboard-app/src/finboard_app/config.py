@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     tushare_requests_per_minute: int = 200
     tushare_daily_request_limit: int = 100_000
     tushare_usage_file: str = "data_cache/tushare_usage.json"
+    # ParquetCache 进程内读缓存的近似字节上限(issue #440):默认 None = 不限
+    # (行为与 issue #287 元素数上限一致)。条目按「元素数 x 每元素实测平均
+    # 字节」近似计量,非精确深度量;超预算按 LRU 从最旧淘汰,单条目超预算
+    # 不缓存。全市场日频工作集可到数百 MB,长 run 建议设 512MB(536870912)。
+    read_cache_max_bytes: int | None = None
     # 研究特征快照的跨标的读取并发;不影响实盘交易线程。
     feature_snapshot_max_concurrency: int = Field(default=8, ge=1, le=64)
     # 特征快照使用的独立计算进程数;0 表示只使用旧的进程内 worker。
