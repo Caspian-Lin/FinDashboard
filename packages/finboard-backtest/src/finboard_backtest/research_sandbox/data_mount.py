@@ -127,6 +127,34 @@ class _MountProvider(Protocol):
     def release(self) -> Any: ...
 
 
+#: 挂载逐批进度回调(issue #441):``(done, total)`` = 累计已处理批次数 /
+#: 批次总数,同步调用,消费方自行做单飞合并等节流。
+MountBatchReporter = Callable[[int, int], None]
+
+
+def _mount_batch_total(
+    providers: Sequence[Any], wanted: frozenset[str] | None
+) -> int:
+    """挂载构建的逐标的批次总数(进度分母,#441)。
+
+    bars / daily_metrics 每标的产出一批(``_iter_instrument_batches`` 逐
+    标的 yield),公告类数据集(#402)整集采集计 1 批;与主循环的 kind
+    分支同口径,不支持的 kind 不计(主循环随即具名拒绝)。
+    """
+    total = 0
+    for provider in providers:
+        kind = provider.release.dataset_kind.value
+        if kind in ("bars", "daily_metrics"):
+            total += sum(
+                1
+                for item in provider.release.instruments
+                if wanted is None or item.code in wanted
+            )
+        elif kind in ANNOUNCED_DATASETS:
+            total += 1
+    return total
+
+
 async def build_data_mount(
     *,
     providers: Iterable[Any],
@@ -135,6 +163,7 @@ async def build_data_mount(
     symbols: Iterable[str] | None = None,
     current_weights: Mapping[str, float] | None = None,
     strategy_constraints: Mapping[str, Any] | None = None,
+    on_batch: MountBatchReporter | None = None,
 ) -> DataMount:
     """把若干冻结发布物化为一个只读挂载目录。
 
@@ -146,11 +175,23 @@ async def build_data_mount(
     上一决策成交后实际持仓市值占比)/ ``strategy_constraints``(组合约束
     只读视图)—— 落入挂载清单 v2,容器内 decide 可见;两者不影响 PIT
     防线(不是按日期门控的数据行)。
+
+    ``on_batch``(issue #441,可选):逐标的批次进度 ``(done, total)``,
+    缺省 None 零行为变化;计数跨发布累计(分母 = :func:`_mount_batch_total`)。
     """
     if decision_at.tzinfo is None:
         raise SandboxMountError("decision_at 必须带时区")
     decision_day = decision_at.date()
     wanted = frozenset(symbols) if symbols is not None else None
+    provider_list = list(providers)
+    batches_total = _mount_batch_total(provider_list, wanted)
+    batches_done = 0
+
+    def _bump_batch() -> None:
+        nonlocal batches_done
+        batches_done += 1
+        if on_batch is not None:
+            on_batch(batches_done, batches_total)
 
     await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
     # 流式写入器(#371):与窗口挂载同构,bars / daily_metrics 逐标的落盘;
@@ -161,7 +202,7 @@ async def build_data_mount(
     contributions: list[MountDataset] = []
     universe: set[str] = set()
 
-    for provider in providers:
+    for provider in provider_list:
         release = provider.release
         kind = release.dataset_kind
         release_id = release.release_id
@@ -182,6 +223,7 @@ async def build_data_mount(
             async for rows in _iter_bars_batches(
                 provider, instruments, decision_at, include_available_at=False
             ):
+                _bump_batch()
                 if not rows:
                     continue
                 universe.update(r["symbol"] for r in rows)
@@ -205,6 +247,7 @@ async def build_data_mount(
             async for rows in _iter_daily_rows_batches(
                 provider, instruments, decision_at, include_available_at=False
             ):
+                _bump_batch()
                 if not rows:
                     continue
                 if daily_schema is None:
@@ -234,6 +277,7 @@ async def build_data_mount(
                 fetch_attr=ANNOUNCED_DATASETS[kind.value],
                 include_available_at=False,
             )
+            _bump_batch()
             _guard_pit(rows, "announcement_date", release_id, decision_day)
             announced_rows[kind.value].extend(rows)
             contributions.append(
@@ -510,6 +554,7 @@ async def build_window_data_mount(
     release_id: str,
     dataset_release_ids: Sequence[str],
     symbols: Iterable[str] | None = None,
+    on_batch: MountBatchReporter | None = None,
 ) -> WindowDataMount:
     """把冻结发布物化为**窗口**挂载(清单 v3,issue #359)。
 
@@ -525,6 +570,9 @@ async def build_window_data_mount(
 
     fail-closed:任何数据日期晚于 ``window_end`` 当日的行**具名拒绝**
     (``窗口外数据``),杜绝 provider 门控缺陷把窗口之后的未来泄进容器。
+
+    ``on_batch``(issue #441,可选):逐标的批次进度 ``(done, total)``,
+    缺省 None 零行为变化;计数跨发布累计(分母 = :func:`_mount_batch_total`)。
     """
     ordered_dates = tuple(dates)
     if not ordered_dates:
@@ -547,6 +595,15 @@ async def build_window_data_mount(
         )
     ceiling = _end_of_window(window_end)
     wanted = frozenset(symbols) if symbols is not None else None
+    provider_list = list(providers)
+    batches_total = _mount_batch_total(provider_list, wanted)
+    batches_done = 0
+
+    def _bump_batch() -> None:
+        nonlocal batches_done
+        batches_done += 1
+        if on_batch is not None:
+            on_batch(batches_done, batches_total)
 
     await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
     # 流式写入器(#371):bars / daily_metrics 逐标的批次落盘,内存只持
@@ -558,7 +615,7 @@ async def build_window_data_mount(
     contributions: list[MountDataset] = []
     universe: set[str] = set()
 
-    for provider in providers:
+    for provider in provider_list:
         release = provider.release
         kind = release.dataset_kind
         rel_id = release.release_id
@@ -579,6 +636,7 @@ async def build_window_data_mount(
             async for rows in _iter_bars_batches(
                 provider, instruments, ceiling, include_available_at=True
             ):
+                _bump_batch()
                 if not rows:
                     continue
                 universe.update(r["symbol"] for r in rows)
@@ -602,6 +660,7 @@ async def build_window_data_mount(
             async for batch in _iter_daily_mixed_batches(
                 provider, instruments, ceiling
             ):
+                _bump_batch()
                 if isinstance(batch, pa.Table):
                     # 列式快路径(#371):provider 支持列式读取时逐标的
                     # Arrow 直通,免整行对象税。
@@ -642,6 +701,7 @@ async def build_window_data_mount(
                 fetch_attr=ANNOUNCED_DATASETS[kind.value],
                 include_available_at=True,
             )
+            _bump_batch()
             _guard_window_pit(rows, "announcement_date", rel_id, window_end)
             announced_rows[kind.value].extend(rows)
             contributions.append(

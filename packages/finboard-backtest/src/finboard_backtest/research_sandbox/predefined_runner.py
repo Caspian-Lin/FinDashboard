@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from datetime import time as dt_time
@@ -451,6 +451,7 @@ async def run_predefined_factor_series(
     mount_override: WindowDataMount | None = None,
     benchmark_only_symbols: frozenset[str] | None = None,
     industry_groups: Mapping[str, str | None] | None = None,
+    mount_on_batch: Callable[[int, int], None] | None = None,
 ) -> PredefinedFactorSeriesOutput:
     """进程内执行一次预置因子区间构建(与容器入口同构)。
 
@@ -464,6 +465,10 @@ async def run_predefined_factor_series(
     装配,与 ``benchmark_only_symbols`` 同样要求显式传入(审计变体从基线
     产物继承,行业分组不随挂载重派生 —— 否则中性化类因子的截断变体会
     因分组缺失产生假阳性分歧)。
+
+    ``mount_on_batch``(issue #441,可选):主构建挂载逐标的批次进度
+    ``(done, total)``,透传给 :func:`build_window_data_mount`;缺省 None
+    零行为变化,``mount_override`` 路径无物化不产生批次事件。
     """
     _validate_series_spec(spec)
     try:
@@ -524,6 +529,7 @@ async def run_predefined_factor_series(
             code_commit=spec.code_commit,
             release_id=spec.release_id,
             dataset_release_ids=spec.dataset_release_ids,
+            on_batch=mount_on_batch,
         )
         if benchmark is None or industry is None:
             from finboard_backtest.strategy_spec.universe_precheck import (

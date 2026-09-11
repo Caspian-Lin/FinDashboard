@@ -392,7 +392,12 @@ def _make_executor(
         window_end: Any
         dates: tuple[Any, ...]
 
-    async def _run_container(spec: Any) -> Any:
+    async def _run_container(
+        spec: Any, *, mount_on_batch: Any = None
+    ) -> Any:
+        # #441 起默认 runner 透传挂载逐批进度回调(可选 kwarg),mock 与
+        # 生产入口同签名接受并忽略
+        del mount_on_batch
         observed["specs"].append(spec)
         observed["runner_results"].append(runner_result)
         return runner_result
