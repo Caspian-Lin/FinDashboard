@@ -375,7 +375,21 @@ class TestCatalogBatch1:
             for name, item in PREDEFINED_FACTORS.items()
             if item.min_history_bars is not None
         }
-        assert declared == {
+        # 批次 1 基线 7 个长窗声明精确到值;后续批次(#429 等)的声明集合在
+        # 各自测试文件内做批次 scope 精确断言,此处只锁定基线与通用不变量
+        # (声明覆盖起点 >= window),避免每加一批就改历史断言。
+        assert {
+            name: declared.get(name)
+            for name in (
+                "resid_momentum_120d",
+                "resid_momentum_250d",
+                "rsrs_beta_600d",
+                "rsrs_r2_600d",
+                "beta_1320d",
+                "corr_market_1320d",
+                "sharpe_1320d",
+            )
+        } == {
             "resid_momentum_120d": 239,
             "resid_momentum_250d": 499,
             "rsrs_beta_600d": 600,
@@ -384,6 +398,10 @@ class TestCatalogBatch1:
             "corr_market_1320d": 1320,
             "sharpe_1320d": 1320,
         }
+        for name, warmup in declared.items():
+            item = PREDEFINED_FACTORS[name]
+            assert item.window is not None, name
+            assert warmup >= item.window, name
 
     def test_min_history_bars_validation(self) -> None:
         from dataclasses import replace

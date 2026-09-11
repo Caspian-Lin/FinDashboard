@@ -1034,13 +1034,28 @@ class TestDeclarationFreezeInRecord:
 
 class TestDeclarationConsistency:
     def test_min_history_bars_declared_only_for_long_windows(self) -> None:
-        """声明集合 = 1320d 三兄弟 + 残差动量(2w-1)+ RSRS 600(#399 语义)。"""
+        """#399 基线 7 个长窗声明精确到值;#429 起按批次 scope 追加。
+
+        后续批次的声明集合在各自测试文件内精确断言(批次隔离),此处只锁定
+        基线与通用不变量(声明覆盖起点 >= window),避免每加一批就改历史断言。
+        """
         declared = {
             name: item.min_history_bars
             for name, item in PREDEFINED_FACTORS.items()
             if item.min_history_bars is not None
         }
-        assert declared == {
+        assert {
+            name: declared.get(name)
+            for name in (
+                "beta_1320d",
+                "corr_market_1320d",
+                "sharpe_1320d",
+                "resid_momentum_120d",
+                "resid_momentum_250d",
+                "rsrs_beta_600d",
+                "rsrs_r2_600d",
+            )
+        } == {
             "beta_1320d": 1320,
             "corr_market_1320d": 1320,
             "sharpe_1320d": 1320,
@@ -1049,6 +1064,10 @@ class TestDeclarationConsistency:
             "rsrs_beta_600d": 600,
             "rsrs_r2_600d": 600,
         }
+        for name, warmup in declared.items():
+            item = PREDEFINED_FACTORS[name]
+            assert item.window is not None, name
+            assert warmup >= item.window, name
 
     def test_direction_enum_values_report_friendly(self) -> None:
         for item in PREDEFINED_FACTORS.values():

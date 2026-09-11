@@ -184,7 +184,12 @@ class TestCoverageStartGate:
         assert PREDEFINED_UNREGISTERED_CODE in error
 
     def test_registry_declaration_consistency(self) -> None:
-        """目录声明与文档一致:恰好 7 个因子声明覆盖起点,且 >= window。"""
+        """目录声明不变量:每个声明覆盖起点的因子 warmup >= window。
+
+        #399 基线 7 个精确到值;后续批次(#429 等)按同一不变量追加自己的
+        声明集合,各批次在其测试文件内做批次 scope 精确断言 —— 此处不再
+        断言全局总数(每加一批都会破)。
+        """
         from finboard_backtest.factors.predefined import PREDEFINED_FACTORS
 
         declared = {
@@ -192,7 +197,26 @@ class TestCoverageStartGate:
             for name, item in PREDEFINED_FACTORS.items()
             if item.min_history_bars is not None
         }
-        assert len(declared) == 7
+        assert {
+            name: declared.get(name)
+            for name in (
+                "resid_momentum_120d",
+                "resid_momentum_250d",
+                "rsrs_beta_600d",
+                "rsrs_r2_600d",
+                "beta_1320d",
+                "corr_market_1320d",
+                "sharpe_1320d",
+            )
+        } == {
+            "resid_momentum_120d": 239,
+            "resid_momentum_250d": 499,
+            "rsrs_beta_600d": 600,
+            "rsrs_r2_600d": 600,
+            "beta_1320d": 1320,
+            "corr_market_1320d": 1320,
+            "sharpe_1320d": 1320,
+        }
         for name, warmup in declared.items():
             item = PREDEFINED_FACTORS[name]
             assert item.min_history_bars == warmup
