@@ -247,3 +247,45 @@ def test_available_at_at_roundtrip_exact() -> None:
     assert naive is not None
     assert naive.available_at_at(0) == datetime(2024, 5, 13, 15, 30)
     assert naive.available_at_at(0).tzinfo is None
+
+
+@pytest.mark.asyncio
+async def test_precompute_cancel_probe_aborts_matrix_build(tmp_path: Path) -> None:
+    """预计算打点器上的取消探针:命中即中止预建(#450 追续取消空白区)。
+
+    此前预建段只报进度不查取消,cancel_requested 要等首个分块边界才被
+    看见——全市场预建 3-5 分钟,取消延迟为分钟级。
+    """
+    from finboard_backtest.research_run.contracts import ResearchRunInterruptedError
+    from finboard_backtest.research_run.frozen_loader import (
+        _load_close_histories,
+        _make_precompute_ticker,
+    )
+
+    calls: list[int] = []
+    reports: list[str] = []
+
+    async def probe() -> None:
+        calls.append(1)
+        raise ResearchRunInterruptedError("cancel_requested")
+
+    async def reporter(message: str) -> None:
+        reports.append(message)
+
+    tick = _make_precompute_ticker(reporter, "close", 4, probe)
+    with pytest.raises(ResearchRunInterruptedError):
+        await tick()
+    assert reports == []  # 取消异常先于进度上报,进度帧不再写出
+
+    # 端到端:真实发布 + raise 探针 → _load_close_histories 中止且不产出矩阵
+    provider = await _publish_bars_release(tmp_path)
+
+    async def probe2() -> None:
+        raise ResearchRunInterruptedError("cancel_requested")
+
+    with pytest.raises(ResearchRunInterruptedError):
+        await _load_close_histories(provider, _candidates(provider), cancel_probe=probe2)
+
+    # 无探针时行为不变:矩阵正常构建
+    histories = await _load_close_histories(provider, _candidates(provider))
+    assert histories and all(item is not None for item in histories.values())

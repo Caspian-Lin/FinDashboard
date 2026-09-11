@@ -1715,6 +1715,48 @@ _DECISION_LOAD_CHUNK = 4
 LoadChunkProbe = Callable[[int, int], Awaitable[None]]
 
 
+def build_run_cancel_probe(
+    session_maker: async_sessionmaker[Any],
+    run_id: str,
+) -> Callable[[], Awaitable[None]]:
+    """构造预计算段取消探针(#450 追续):只轮询不写进度。
+
+    与 :func:`build_run_interrupt_probe` 同一判定(run 非 RUNNING /
+    job cancel_requested 即抛 :class:`ResearchRunInterruptedError`),但
+    **不写任何 phase/进度**——供 :func:`_make_precompute_ticker` 在预计算
+    打点步长上调用,补齐预建段(3-5 分钟)的取消检查空白区。DB 会话按次
+    开关,毫秒级只读查询。
+    """
+
+    async def _probe() -> None:
+        from finboard_persistence import (
+            BackgroundJobRepository,
+            ResearchRunRepository,
+        )
+
+        async with session_maker() as session:
+            row = await ResearchRunRepository(session).get(run_id)
+            if row is None:
+                raise ResearchRunInterruptedError(f"运行记录在加载期消失: {run_id}")
+            if row.status == "cancelled":
+                raise ResearchRunInterruptedError(f"运行已被取消(cancelled),中止加载: {run_id}")
+            if row.status != "running":
+                raise ResearchRunInterruptedError(
+                    f"运行状态已变为 {row.status}(外部打断),中止加载: {run_id}"
+                )
+            job_id = row.job_id
+            job_status: str | None = None
+            if job_id is not None:
+                job_row = await BackgroundJobRepository(session).get(job_id)
+                job_status = None if job_row is None else job_row.status
+        if job_status == "cancel_requested":
+            raise ResearchRunInterruptedError(
+                f"后台任务被请求取消(cancel_requested),中止加载: {run_id}"
+            )
+
+    return _probe
+
+
 def build_run_interrupt_probe(
     session_maker: async_sessionmaker[Any],
     run_id: str,
@@ -1865,6 +1907,7 @@ async def build_decision_load_contexts(
     suspension_view: SuspensionView | None = None,
     trading_days_loader: TradingDaysLoader | None = None,
     precompute_phase_reporter: LoadPhaseReporter | None = None,
+    precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[DecisionLoadContext, ...]:
     """按执行模式加载全部决策的机械上下文(不含信号,issue #218)。
 
@@ -1962,7 +2005,10 @@ async def build_decision_load_contexts(
                 "research_run:decision_load precompute start"
             )
     await loader.ensure_close_histories(
-        manifest, process_pool=pool, progress=precompute_phase_reporter
+        manifest,
+        process_pool=pool,
+        progress=precompute_phase_reporter,
+        cancel_probe=precompute_cancel_probe,
     )
     # issue #438:研究观测(daily_metrics)run 级预建与 close 矩阵同类——决策日
     # 全集在分块前已冻结,每标的一次列式读取覆盖全部决策期;逐期消费查矩阵,
@@ -1971,6 +2017,7 @@ async def build_decision_load_contexts(
         manifest,
         tuple(decision_at for decision_at, _ in decision_days),
         progress=precompute_phase_reporter,
+        cancel_probe=precompute_cancel_probe,
     )
     if precompute_phase_reporter is not None:
         with contextlib.suppress(Exception):
@@ -2104,6 +2151,7 @@ async def build_decision_inputs(
     suspension_view: SuspensionView | None = None,
     trading_days_loader: TradingDaysLoader | None = None,
     precompute_phase_reporter: LoadPhaseReporter | None = None,
+    precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[PortfolioDecisionInput, ...]:
     """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
 
@@ -2135,6 +2183,7 @@ async def build_decision_inputs(
         suspension_view=suspension_view,
         trading_days_loader=trading_days_loader,
         precompute_phase_reporter=precompute_phase_reporter,
+        precompute_cancel_probe=precompute_cancel_probe,
     ):
         signals = await asyncio.to_thread(
             build_normalized_signals,
@@ -2248,6 +2297,7 @@ class SignalEnginePipelineAdapter:
         | None = None,
         trading_days_loader: TradingDaysLoader | None = None,
         precompute_phase_reporter: LoadPhaseReporter | None = None,
+        precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
             raise ValueError(
@@ -2274,6 +2324,7 @@ class SignalEnginePipelineAdapter:
         # issue #450:预计算段 phase 进度上报器(只写 phase 文本,与探针
         # 分开传参,#306/#308 探针调用序列契约不受影响)。
         self._precompute_phase_reporter = precompute_phase_reporter
+        self._precompute_cancel_probe = precompute_cancel_probe
         self._inputs: tuple[PortfolioDecisionInput, ...] | None = None
         self._equity_curve: tuple[EquityPoint, ...] = ()
         self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
@@ -2385,6 +2436,7 @@ class SignalEnginePipelineAdapter:
                 suspension_view=suspension_view,
                 trading_days_loader=self._trading_days_loader,
                 precompute_phase_reporter=self._precompute_phase_reporter,
+                precompute_cancel_probe=self._precompute_cancel_probe,
             )
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
@@ -2642,6 +2694,11 @@ def build_signal_engine_adapter_factory(
         precompute_phase_reporter = build_run_phase_reporter(
             session_maker, manifest.run_id
         )
+        # issue #450 追续:预计算段取消探针(只查不报)——预建长段此前是
+        # 取消检查空白区,cancel_requested 要等首个分块边界才被看见。
+        precompute_cancel_probe = build_run_cancel_probe(
+            session_maker, manifest.run_id
+        )
 
         # issue #396:停复牌视图 + trade_cal 日历 DB 优先回调(与 provider
         # memo 同生命周期 = 单次 run)。两个回调都尽力而为:research_suspensions
@@ -2720,6 +2777,7 @@ def build_signal_engine_adapter_factory(
                 chunk_probe=chunk_probe,
                 series_provider=_series_provider,  # type: ignore[arg-type]
                 precompute_phase_reporter=precompute_phase_reporter,
+                precompute_cancel_probe=precompute_cancel_probe,
             )
 
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:

@@ -45,6 +45,7 @@ from finboard_backtest.portfolio.contracts import AssetLotInfo
 from finboard_backtest.research_run.contracts import (
     FeatureValue,
     FrozenArtifactRef,
+    ResearchRunInterruptedError,
     ResearchRunManifest,
     UniverseCandidate,
 )
@@ -113,6 +114,10 @@ class FactorSeriesProvider(Protocol):
 #: 见 ``build_run_phase_reporter``)尽力而为写 job 的 phase 字段,失败不阻断
 #: 加载;本模块只在预建循环内按节流调用,done/total 数值列不动(#308 口径)。
 PrecomputeProgressReporter = Callable[[str], Awaitable[None]]
+#: 预计算段的取消探针(#450 追续):每次进度打点时轮询 run status /
+#: job cancel_requested,被取消即抛 ResearchRunInterruptedError(实现方
+#: :func:`build_run_cancel_probe`,毫秒级只读查询)。
+PrecomputeCancelProbe = Callable[[], Awaitable[None]]
 
 #: 预计算进度帧节流(issue #450):逐标的完成计数每达到该步长上报一帧
 #: (首帧与末帧强制)。全市场 5534 标的 x close/daily 两段 ≈ 每段 ~22 帧,
@@ -124,16 +129,23 @@ def _make_precompute_ticker(
     progress: PrecomputeProgressReporter | None,
     label: str,
     total: int,
+    cancel_probe: PrecomputeCancelProbe | None = None,
 ) -> Callable[[], Awaitable[None]]:
     """构造逐标的完成打点器(issue #450):按节流上报预计算进度帧。
 
     每个标的构建完成后调用返回的打点器一次;``done`` 为 1、达到步长或等于
     ``total`` 时上报 ``research_run:decision_load precompute <label>
-    <done>/<total>``(其余静默返回)。``progress`` 为 None 或 total 为 0 时
-    返回 no-op,零开销。上报异常一律吞掉 —— 进度是纯可观测性,不改变
-    预建结果与失败语义。
+    <done>/<total>``(其余静默返回)。``progress`` 为 None 且无
+    ``cancel_probe`` 或 total 为 0 时返回 no-op,零开销。上报异常一律吞掉
+    —— 进度是纯可观测性,不改变预建结果与失败语义。
+
+    issue #450 追续:``cancel_probe`` 非空时在每次上报点(步长节流,全市场
+    ≈ 每 200ms 一次)先轮询取消/run 状态,被取消即抛
+    :class:`ResearchRunInterruptedError` 中止预建——预计算段此前是取消
+    检查的空白区(整段 3-5 分钟只报进度不查取消),取消信号要等首个分块
+    边界才被看见。探针异常**不吞**(与进度上报相反)。
     """
-    if progress is None or total <= 0:
+    if (progress is None and cancel_probe is None) or total <= 0:
 
         async def _noop() -> None:
             return None
@@ -147,10 +159,13 @@ def _make_precompute_ticker(
         done += 1
         if done != 1 and done != total and done % _PRECOMPUTE_PROGRESS_STEP != 0:
             return
-        with contextlib.suppress(Exception):
-            await progress(
-                f"research_run:decision_load precompute {label} {done}/{total}"
-            )
+        if cancel_probe is not None:
+            await cancel_probe()
+        if progress is not None:
+            with contextlib.suppress(Exception):
+                await progress(
+                    f"research_run:decision_load precompute {label} {done}/{total}"
+                )
 
     return _tick
 
@@ -661,6 +676,7 @@ class FrozenInputLoader:
         *,
         process_pool: PriceFeatureProcessPool | None = None,
         progress: PrecomputeProgressReporter | None = None,
+        cancel_probe: PrecomputeCancelProbe | None = None,
     ) -> None:
         """一次性预建 close 矩阵(幂等;issue #288 分块并行加载的前置步骤)。
 
@@ -699,6 +715,7 @@ class FrozenInputLoader:
                 included_candidates,
                 include_open=include_open,
                 progress=progress,
+                cancel_probe=cancel_probe,
             )
             if built is not None:
                 self._close_histories_built = True
@@ -709,6 +726,7 @@ class FrozenInputLoader:
             included_candidates,
             include_open=include_open,
             progress=progress,
+            cancel_probe=cancel_probe,
         )
 
     async def _ensure_close_histories(
@@ -718,6 +736,7 @@ class FrozenInputLoader:
         *,
         include_open: bool = False,
         progress: PrecomputeProgressReporter | None = None,
+        cancel_probe: PrecomputeCancelProbe | None = None,
     ) -> None:
         """构建 close 矩阵(只尝试一次;失败不缓存,逐期回退读取)。"""
         if self._close_histories_built:
@@ -725,7 +744,11 @@ class FrozenInputLoader:
         self._close_histories_built = True
         self._close_histories.update(
             await _load_close_histories(
-                provider, candidates, include_open=include_open, progress=progress
+                provider,
+                candidates,
+                include_open=include_open,
+                progress=progress,
+                cancel_probe=cancel_probe,
             )
         )
 
@@ -735,6 +758,7 @@ class FrozenInputLoader:
         decision_ats: Sequence[datetime],
         *,
         progress: PrecomputeProgressReporter | None = None,
+        cancel_probe: PrecomputeCancelProbe | None = None,
     ) -> None:
         """一次性预建全部 daily_metrics 发布的研究观测矩阵(幂等,#438)。
 
@@ -754,6 +778,8 @@ class FrozenInputLoader:
 
         issue #450:``progress`` 非空时逐标的完成按节流上报预计算进度帧
         (计数跨发布累积,帧内 done/total 覆盖全部 daily_metrics 发布)。
+        ``cancel_probe`` 非空时逐打点轮询取消(#450 追续,预计算段取消
+        检查空白区补齐)。
         """
         if self._daily_precompute_built or not decision_ats:
             return
@@ -777,7 +803,10 @@ class FrozenInputLoader:
         # 进度计数跨发布累积(#450):帧内 done/total 覆盖本 ensure 全部
         # 标的 x 发布,不随发布切换回退。
         tick = _make_precompute_ticker(
-            progress, "daily", len(candidates) * len(daily_releases)
+            progress,
+            "daily",
+            len(candidates) * len(daily_releases),
+            cancel_probe,
         )
         for release_ref in daily_releases:
             provider = self.release_provider_factory(release_ref.artifact_id)
@@ -1594,6 +1623,7 @@ async def _load_close_histories(
     *,
     include_open: bool = False,
     progress: PrecomputeProgressReporter | None = None,
+    cancel_probe: PrecomputeCancelProbe | None = None,
 ) -> dict[str, SymbolCloseHistory | None]:
     """并发读取各标的冻结全区间 close 历史,构建 close 矩阵(issue #287)。
 
@@ -1615,7 +1645,7 @@ async def _load_close_histories(
     if not candidates or not isinstance(provider, FrozenReleaseProvider):
         return {}
     semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
-    tick = _make_precompute_ticker(progress, "close", len(candidates))
+    tick = _make_precompute_ticker(progress, "close", len(candidates), cancel_probe)
 
     async def _one(candidate: UniverseCandidate) -> SymbolCloseHistory | None:
         async with semaphore:
@@ -1779,6 +1809,7 @@ async def _load_close_histories_via_pool(
     *,
     include_open: bool = False,
     progress: PrecomputeProgressReporter | None = None,
+    cancel_probe: PrecomputeCancelProbe | None = None,
 ) -> dict[str, SymbolCloseHistory | None] | None:
     """经常驻进程池预建 close 矩阵(issue #301);不可用时返回 ``None``。
 
@@ -1813,7 +1844,7 @@ async def _load_close_histories_via_pool(
         )
         for candidate in candidates
     ]
-    tick = _make_precompute_ticker(progress, "close", len(candidates))
+    tick = _make_precompute_ticker(progress, "close", len(candidates), cancel_probe)
 
     async def _run_one(
         task: _CloseHistoryProcessTask,
@@ -1829,6 +1860,10 @@ async def _load_close_histories_via_pool(
             *(_run_one(task) for task in tasks),
             return_exceptions=True,
         )
+    except ResearchRunInterruptedError:
+        # 取消/打断探针异常不是池故障:原样上抛交给上层收口(#450 追续),
+        # 降级成进程内路径会无视取消继续整段预建。
+        raise
     except Exception as exc:
         logger.warning(
             "frozen_loader.close_matrix_pool_failed",
@@ -1842,6 +1877,8 @@ async def _load_close_histories_via_pool(
     built: dict[str, SymbolCloseHistory | None] = {}
     for candidate, result in zip(candidates, results, strict=True):
         if isinstance(result, BaseException):
+            if isinstance(result, ResearchRunInterruptedError):
+                raise result
             logger.warning(
                 "frozen_loader.close_matrix_pool_failed",
                 stage="decision_load",
