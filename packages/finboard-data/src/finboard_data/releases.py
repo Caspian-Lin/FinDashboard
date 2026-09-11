@@ -2688,6 +2688,83 @@ def _read_research_records(
     return rows
 
 
+#: daily_metrics 发布行中 :func:`_daily_metrics_from_release_row` 消费的
+#: float payload 列(逐字段对应;#438 预计算矩阵按此抽取 float64)。
+_DAILY_METRICS_FLOAT_PAYLOAD_FIELDS: tuple[str, ...] = (
+    "close",
+    "turnover_rate",
+    "turnover_rate_free",
+    "volume_ratio",
+    "pe",
+    "pe_ttm",
+    "pb",
+    "ps",
+    "ps_ttm",
+    "dividend_yield",
+    "dividend_yield_ttm",
+    "total_shares",
+    "float_shares",
+    "free_shares",
+    "total_market_cap",
+    "circulating_market_cap",
+)
+
+#: daily_metrics 发布行中经 ``_coerce_int`` 消费的 int payload 列——
+#: ``int(str(value))`` 对 float 输入会变义,预计算须独立 int64 存储(#438)。
+_DAILY_METRICS_INT_PAYLOAD_FIELDS: tuple[str, ...] = ("limit_status",)
+
+#: available_at ISO 串是否携带时区偏移(尾缀 Z / ±HH:MM / ±HHMM)。
+_AVAILABLE_AT_TZ_SUFFIX = re.compile(r"(?:[Zz]|[+-]\d{2}:?\d{2})$")
+
+
+def _epoch_micros(value: datetime) -> int:
+    """aware/naive datetime → epoch 微秒(整数精确,不经 float timestamp)。"""
+    epoch = datetime(1970, 1, 1, tzinfo=UTC) if value.tzinfo else datetime(1970, 1, 1)
+    delta = value - epoch
+    return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+
+
+def _available_at_timestamp_column(column: pa.ChunkedArray) -> pa.ChunkedArray:
+    """available_at 列整列一次转换为 ``timestamp[us]``(#438 门控原生化)。
+
+    兼容 string(ISO 8601,与对象路径逐行 ``fromisoformat`` 同一解析语义)与
+    timestamp 两种物理类型:带时区偏移的值统一 cast 到 UTC——aware datetime
+    比较即瞬时比较,逐值等价;naive 列 cast 为 naive timestamp(对 aware
+    decision_at 的比较语义由调用方保持)。空值在对象路径是
+    ``fromisoformat(str(None))`` 的 ValueError,这里保持 ValueError。
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    if pa.types.is_timestamp(column.type):
+        if column.type.unit == "us":
+            return column
+        return pc.cast(column, pa.timestamp("us", tz=column.type.tz))
+    if not (pa.types.is_string(column.type) or pa.types.is_large_string(column.type)):
+        raise ValueError(f"available_at 列物理类型不可解析: {column.type}")
+    if column.null_count:
+        raise ValueError("available_at 列含空值(等价旧路径 fromisoformat(None) 失败)")
+    sample = column.drop_null()[0].as_py()
+    target = (
+        pa.timestamp("us", tz="UTC")
+        if _AVAILABLE_AT_TZ_SUFFIX.search(sample)
+        else pa.timestamp("us")
+    )
+    return pc.cast(column, target)
+
+
+def _trade_date_day_column(column: pa.ChunkedArray) -> pa.ChunkedArray:
+    """trade_date 列整列一次转换为 ``date32``(#438;兼容 date/timestamp/string)。"""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    if pa.types.is_date(column.type) or pa.types.is_timestamp(column.type):
+        return pc.cast(column, pa.date32())
+    if pa.types.is_string(column.type) or pa.types.is_large_string(column.type):
+        return pc.cast(column, pa.date32())
+    raise ValueError(f"trade_date 列物理类型不可解析: {column.type}")
+
+
 def _read_daily_metrics_columns(
     path: Path,
     *,
@@ -2697,40 +2774,93 @@ def _read_daily_metrics_columns(
     decision_at: datetime,
 ) -> pa.Table:
     """:func:`_read_research_records` + ``_fetch_research_records`` 门控的
-    列式合并版(issue #371):Arrow 读 + 门控过滤,不产生整行 Python 对象。
+    列式合并版(issue #371;门控 Arrow 原生化 #438):Arrow 读 + 门控过滤,
+    不产生整行 Python 对象。
 
-    门控语义逐值一致:``available_at`` > decision_at 的行跳过;PIT 可见行
-    缺 ``trade_date`` 具名 :class:`ReleaseIntegrityError`;其余按
-    ``start <= trade_date <= end`` 保留。仅日期/时间两小列逐行解析(与对象
-    路径同一 fromisoformat 语义),payload 列全程 Arrow。
+    门控语义逐值一致:``available_at`` > decision_at 的行跳过(available_at
+    整列一次 timestamp cast 后比较,C 内核——此前逐行 ``fromisoformat`` 持
+    GIL,每文件 ~2800 行 x 全市场 x 每期在多线程下仍串行,是加载期单核瓶颈);
+    PIT 可见行缺 ``trade_date`` 具名 :class:`ReleaseIntegrityError`(对可见
+    子集做 null 检查,不可见行照旧跳过);其余按 ``start <= trade_date <= end``
+    保留。payload 列全程 Arrow,函数体内无逐行 Python 循环。
     """
     import pyarrow as pa
+    import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
     table = pq.read_table(path, use_threads=False, pre_buffer=False)
     if table.num_rows == 0:
         return table
-    keep: list[bool] = []
-    for available_raw, trade_raw in zip(
-        table.column("available_at").to_pylist(),
-        table.column("trade_date").to_pylist(),
-        strict=True,
-    ):
-        available = (
-            available_raw
-            if isinstance(available_raw, datetime)
-            else datetime.fromisoformat(str(available_raw))
-        )
-        if available > decision_at:
-            keep.append(False)
-            continue
-        if trade_raw is None:
-            raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
-        record_date = _coerce_date(trade_raw)
-        if record_date is None:
-            raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
-        keep.append(start <= record_date <= end)
-    return table.filter(pa.array(keep))
+    available = _available_at_timestamp_column(table.column("available_at"))
+    if (available.type.tz is None) != (decision_at.tzinfo is None):
+        # naive/aware 混比:对象路径在比较处抛 TypeError,这里前置保持。
+        raise TypeError("can't compare offset-naive and offset-aware datetimes")
+    visible = pc.less_equal(available, pa.scalar(decision_at, type=available.type))
+    trade = table.column("trade_date")
+    # PIT 可见行缺 trade_date 具名拒绝(对可见子集;不可见行不检查,照旧跳过)。
+    if pc.any(pc.and_(visible, pc.is_null(trade))).as_py():
+        raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
+    trade_days = _trade_date_day_column(trade)
+    keep = pc.and_(
+        visible,
+        pc.and_(
+            pc.greater_equal(trade_days, pa.scalar(start, type=pa.date32())),
+            pc.less_equal(trade_days, pa.scalar(end, type=pa.date32())),
+        ),
+    )
+    return table.filter(keep)
+
+
+def _daily_metrics_latest_visible_indices(
+    table: pa.Table,
+    *,
+    decision_at_micros: np.ndarray,
+    decision_day_ends: np.ndarray,
+    range_start_day: int,
+    release_id: str,
+) -> np.ndarray:
+    """对已门控(全区间可见)表一次性定位各决策期「最新可见行」(#438)。
+
+    输入 ``decision_at_micros`` 为全部冻结决策时的 epoch 微秒(int64)、
+    ``decision_day_ends`` 为对应决策日 epoch 天数(int32),``range_start_day``
+    为发布区间起点天数。输出 int64 数组(每期选中行下标,-1 = 无可见行),
+    选择语义与逐期 :func:`_read_daily_metrics_columns` + ``sorted()[-1]``
+    逐值等值:可见 = ``available_at <= decision_at`` 且
+    ``start <= trade_date <= decision_at 日``;并列取原顺序最后一条(稳定
+    排序)。全程 numpy 向量化,零逐行 Python;PIT 可见行缺 ``trade_date``
+    按最大决策期可见子集具名拒绝(可见集随决策期单调扩大,任一期可见即
+    迟早具名失败,与逐期路径同一 fail-closed 结论)。
+    """
+    import numpy as np
+    import pyarrow as pa
+
+    n_periods = int(decision_at_micros.shape[0])
+    if table.num_rows == 0 or n_periods == 0:
+        return np.full(n_periods, -1, dtype=np.int64)
+    available = _available_at_timestamp_column(table.column("available_at"))
+    if available.type.tz is None:
+        # 逐期路径对 naive available_at x aware decision_at 同样抛 TypeError。
+        raise TypeError("can't compare offset-naive and offset-aware datetimes")
+    avail_us = available.cast(pa.int64()).to_numpy(zero_copy_only=False)
+    trade_days = _trade_date_day_column(table.column("trade_date")).cast(pa.int32())
+    trade_raw = trade_days.to_numpy(zero_copy_only=False).astype(np.float64)
+    trade_null = np.isnan(trade_raw)
+    if trade_null.any() and bool((avail_us[trade_null] <= int(decision_at_micros.max())).any()):
+        raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
+    # 不可见的 null trade_date 行永不入选:哨兵天数 > 一切决策日上界。
+    day_numbers = np.where(trade_null, np.int32(np.iinfo(np.int32).max), trade_raw).astype(np.int32)
+    keep = (
+        (avail_us[None, :] <= decision_at_micros[:, None])
+        & (day_numbers[None, :] >= np.int32(range_start_day))
+        & (day_numbers[None, :] <= decision_day_ends[:, None])
+    )
+    has_any = keep.any(axis=1)
+    masked = np.where(keep, avail_us[None, :], np.iinfo(np.int64).min)
+    best = masked.max(axis=1)
+    # available_at 并列取原顺序最后一条(与旧稳定排序语义逐值一致)。
+    candidates = keep & (avail_us[None, :] == best[:, None])
+    selected = candidates.shape[1] - 1 - np.argmax(candidates[:, ::-1], axis=1)
+    return np.where(has_any, selected, -1).astype(np.int64)
 
 
 def _daily_metrics_from_release_row(

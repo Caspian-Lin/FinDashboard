@@ -632,11 +632,12 @@ class TestGatherEqualsSerial:
             _Point(bar=_BarStub(close=Decimal(index), day=day), at=day)
             for index, day in enumerate(SESSIONS)
         ]
-        history = SymbolCloseHistory(
-            available_at=tuple(_point_available_at(point) for point in points),
-            dates=tuple(point.at for point in points),
-            closes=tuple(float(point.bar.close) for point in points),
+        history = SymbolCloseHistory.from_sequences(
+            available_at=[_point_available_at(point) for point in points],
+            dates=[point.at for point in points],
+            closes=[float(point.bar.close) for point in points],
         )
+        assert history is not None
         for day in SESSIONS:
             for hour in (14, 15, 16):
                 as_of = datetime.combine(day, time(hour, 0), tzinfo=_CST)

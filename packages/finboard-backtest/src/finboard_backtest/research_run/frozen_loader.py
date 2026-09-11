@@ -32,13 +32,12 @@ manifest 冻结多个 release 时,一个 bars 主发布 + 若干研究数据发�
 from __future__ import annotations
 
 import asyncio
-from bisect import bisect_right
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time
-from itertools import pairwise
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Protocol
 
+import numpy as np
 import structlog
 
 from finboard_backtest.portfolio.contracts import AssetLotInfo
@@ -54,12 +53,13 @@ if TYPE_CHECKING:
 
     from finboard_backtest.factor_lab import PriceFeatureProcessPool
     from finboard_data.factor_lab import FeatureSnapshot
-    from finboard_data.factors import FactorInputBatch
+    from finboard_data.factors import FactorInputBatch, FactorInputRecord
     from finboard_data.releases import (
         FrozenReleaseProvider,
         PointInTimeBar,
         ReleasedInstrument,
     )
+    from finboard_data.research import DailySecurityMetrics
     from finboard_shared.types import Market
 
 logger = structlog.get_logger(__name__)
@@ -166,29 +166,101 @@ def _end_of_day(at: datetime) -> datetime:
     return datetime.combine(at.date(), time(23, 59), tzinfo=at.tzinfo)
 
 
+def _datetime_epoch_micros(value: datetime) -> int:
+    """aware/naive datetime → epoch 微秒(整数精确,不经 float timestamp)。
+
+    aware 即 UTC 瞬时(naive/aware 互比由查询方按构建期记忆的时区属性
+    前置拒绝,保持旧「直接比较」的 TypeError 语义,#439)。
+    """
+    epoch = datetime(1970, 1, 1, tzinfo=UTC) if value.tzinfo else datetime(1970, 1, 1)
+    delta = value - epoch
+    return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+
+
 @dataclass(frozen=True, slots=True)
 class SymbolCloseHistory:
     """单标的冻结全区间 close 历史(close 矩阵切片底座,issue #287)。
 
-    三个序列都按 bar 时间升序且构建时校验非递减:``available_at`` 是 provider
-    的 PIT 门控键(真实 provider 由发布元数据确定性派生),``dates`` 是逐期
-    读取原有的日期上界过滤键。两个键的「可见集合」都是时间升序前缀,取二者
-    较小边界即与「逐期 PIT 过滤后取末根 / 全序列」逐值等价。
+    三个序列都按 bar 时间升序且构建时校验非递减。内部表示为原生数组
+    (#439,替代 Python 对象元组:每 (天, 标的) 的 datetime/date/装箱 float
+    ≈150B 降到 int64/float64 ≈24B,全市场 5534 标的 x ~2800 天从 ~2.5GB
+    降到 ~400MB):``available_at_us`` 是 provider 的 PIT 门控键(epoch 微秒,
+    aware 即 UTC 瞬时),``date_days`` 是逐期读取原有的日期上界过滤键
+    (epoch 天数)。两个键的「可见集合」都是时间升序前缀,``visible_index``
+    对两键各做一次 ``searchsorted(side="right")`` 取较小边界,与「逐期
+    PIT 过滤后取末根 / 全序列」逐值等价(bisect_right 语义)。
+
+    公开四方法(:meth:`visible_index` / :meth:`close_at` / :meth:`open_at` /
+    :meth:`series_until`)签名与返回类型与元组表示时代逐值一致;datetime
+    只在查询入参 / 返回值边界按需转换,不在构建期物化整列 Python 对象。
     """
 
-    available_at: tuple[datetime, ...]
-    dates: tuple[date, ...]
-    closes: tuple[float, ...]
+    #: epoch 微秒 int64(单调不减;与 ``date_days`` 同长)
+    available_at_us: np.ndarray
+    #: epoch 天数 int64
+    date_days: np.ndarray
+    #: float64
+    closes: np.ndarray
+    #: available_at 序列的时区属性(取构建期首元素;查询 as_of 的
+    #: naive/aware 与之不匹配时保持旧直接比较的 TypeError)
+    available_tz_aware: bool = False
     #: 可选携带的 open 平行序列(issue #336):仅 timing=next_open 的 run 在
-    #: 矩阵预建时附带,与 available_at/dates/closes 严格同长;``None`` 表示
-    #: 未携带(close-only 矩阵),open 查询由调用方回退逐期对象路径读取。
-    opens: tuple[float, ...] | None = None
+    #: 矩阵预建时附带,与 close 严格同长;``None`` 表示未携带(close-only
+    #: 矩阵),open 查询由调用方回退逐期对象路径读取。
+    opens: np.ndarray | None = None
+
+    @classmethod
+    def from_sequences(
+        cls,
+        *,
+        available_at: Sequence[datetime],
+        dates: Sequence[date],
+        closes: Sequence[float] | np.ndarray,
+        opens: Sequence[float] | np.ndarray | None = None,
+    ) -> SymbolCloseHistory | None:
+        """从 Python 序列构建(一次性转原生数组;int64 上校验非递减)。
+
+        ``available_at`` / ``dates`` 任一序列出现回退(异常数据,非递减被
+        破坏)时返回 ``None``:前缀切片不再与逐期过滤等价,调用方对该标的
+        回退逐期读取(对象路径与列式路径同一防御语义,#439)。空序列合法
+        (无可见 bar 语义)。
+        """
+        available_us = np.fromiter(
+            (_datetime_epoch_micros(value) for value in available_at),
+            dtype=np.int64,
+            count=len(available_at),
+        )
+        day_numbers = np.fromiter(
+            (day.toordinal() - _EPOCH_ORDINAL for day in dates),
+            dtype=np.int64,
+            count=len(dates),
+        )
+        if (np.diff(available_us) < 0).any() or (np.diff(day_numbers) < 0).any():
+            return None
+        tz_aware = bool(available_at[0].tzinfo) if available_at else False
+        return cls(
+            available_at_us=available_us,
+            date_days=day_numbers,
+            closes=np.asarray(closes, dtype=np.float64),
+            available_tz_aware=tz_aware,
+            opens=None if opens is None else np.asarray(opens, dtype=np.float64),
+        )
 
     def visible_index(self, as_of: datetime) -> int:
         """``as_of`` 时点可见最后一根的索引;-1 表示无可见 bar。"""
+        if self.available_at_us.size and (
+            (as_of.tzinfo is not None) != self.available_tz_aware
+        ):
+            raise TypeError("can't compare offset-naive and offset-aware datetimes")
         index = min(
-            bisect_right(self.available_at, as_of),
-            bisect_right(self.dates, as_of.date()),
+            int(np.searchsorted(self.available_at_us, _datetime_epoch_micros(as_of), side="right")),
+            int(
+                np.searchsorted(
+                    self.date_days,
+                    as_of.date().toordinal() - _EPOCH_ORDINAL,
+                    side="right",
+                )
+            ),
         )
         return index - 1
 
@@ -197,7 +269,7 @@ class SymbolCloseHistory:
         index = self.visible_index(as_of)
         if index < 0:
             return None
-        return self.closes[index]
+        return float(self.closes[index])
 
     def open_at(self, as_of: datetime) -> float | None:
         """``as_of`` 时点可见最新 bar 的 open(issue #336 执行价基)。
@@ -210,14 +282,109 @@ class SymbolCloseHistory:
         index = self.visible_index(as_of)
         if index < 0:
             return None
-        return self.opens[index]
+        return float(self.opens[index])
 
     def series_until(self, as_of: datetime) -> list[float]:
         """``as_of`` 时点可见的完整 close 序列(时间升序;可能为空)。"""
         index = self.visible_index(as_of)
         if index < 0:
             return []
-        return list(self.closes[: index + 1])
+        return [float(value) for value in self.closes[: index + 1]]
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolDailyMetricsHistory:
+    """单标的全部决策期「最新可见 daily_metrics 行」预计算矩阵(#438)。
+
+    每标的对冻结发布做**一次**列式读取,在 numpy 里对 run 冻结的全部
+    decision_at 各定位「PIT 最新可见行」(选择语义与逐期
+    ``fetch_daily_metrics_columns`` + ``sorted()[-1]`` 逐值等值,见
+    :func:`finboard_data.releases._daily_metrics_latest_visible_indices`);
+    payload 以紧凑数组常驻(float64 + bool 掩码,int 列独立,预算
+    全市场 5534 x 75 期 x 16 列 < 200MB)。``available_at`` / ``source``
+    保留选中行的原串/原对象(仅 P 期规模),``record`` 在消费期按需重建
+    行 dict 并走 :func:`_daily_metrics_from_release_row`——领域对象的
+    Decimal 强转语义与旧路径逐值一致,只是从「每期全历史」降到「每期一行」。
+    """
+
+    #: float payload 列名(发布列 ∷ ``_DAILY_METRICS_FLOAT_PAYLOAD_FIELDS`` 序)
+    columns: tuple[str, ...]
+    #: (n_periods, n_cols) float64;无效格填 0,以 ``valid`` 掩码为准
+    values: np.ndarray
+    #: (n_periods, n_cols) bool;False → 重建行时该列为 None
+    valid: np.ndarray
+    #: (n_periods,) int64(int payload 单独存储,避免 float str 化变义)
+    limit_status: np.ndarray
+    #: (n_periods,) bool
+    limit_status_valid: np.ndarray
+    #: (n_periods,) int32,选中行 trade_date 的 epoch 天数(无选中行占位 0)
+    trade_date_days: np.ndarray
+    #: 选中行 available_at 原值(string 列即原 ISO 串);None = 该期无可见行
+    available_at: tuple[object, ...]
+    #: 选中行 source 原值(string 或 None)
+    source: tuple[object, ...]
+
+    @property
+    def n_periods(self) -> int:
+        return len(self.available_at)
+
+    @property
+    def nbytes(self) -> int:
+        """数组负载字节数(不含 str/None 元组;规模断言与容量规划用)。"""
+        return int(
+            self.values.nbytes
+            + self.valid.nbytes
+            + self.limit_status.nbytes
+            + self.limit_status_valid.nbytes
+            + self.trade_date_days.nbytes
+        )
+
+    def latest_row(self, period: int) -> dict[str, object] | None:
+        """重建该期选中行的发布行 dict(与旧 ``to_pylist()[0]`` 逐值等价)。
+
+        string/数值/日期逐列还原为旧对象路径行 dict 的同一形态:float 列
+        ``float(arr[i, j])``(与 Arrow double ``to_pylist`` 同值)、null 掩码
+        → None、trade_date 由 epoch 天数精确重建 ``date``。无可见行返回 None。
+        """
+        available = self.available_at[period]
+        if available is None:
+            return None
+        row: dict[str, object] = {
+            "available_at": available,
+            "trade_date": _EPOCH_DATE + timedelta(days=int(self.trade_date_days[period])),
+            "source": self.source[period],
+            "limit_status": (
+                int(self.limit_status[period]) if self.limit_status_valid[period] else None
+            ),
+        }
+        for j, name in enumerate(self.columns):
+            row[name] = float(self.values[period, j]) if self.valid[period, j] else None
+        return row
+
+    def record(self, period: int, *, symbol: str) -> DailySecurityMetrics | None:
+        """该期选中行 → 领域记录(Decimal 语义与旧路径一致;无可见行为 None)。"""
+        from finboard_data.releases import _daily_metrics_from_release_row
+
+        row = self.latest_row(period)
+        if row is None:
+            return None
+        return _daily_metrics_from_release_row(row, symbol=symbol)
+
+
+@dataclass(frozen=True, slots=True)
+class DailyMetricsPrecompute:
+    """一个 daily_metrics 发布在全部冻结决策期上的预计算(#438)。
+
+    ``histories`` 覆盖 run 候选池全体:标的值 ``None`` = 预建时
+    ``ReleaseCapabilityError``(标的不在该研究发布)→ 消费期按 #252 missing
+    语义报告,与逐期路径一致。
+    """
+
+    release_id: str
+    #: decision_at → 期序(冻结决策日全集;消费期按 decision_at 查期)
+    period_index: dict[datetime, int]
+    #: symbol → 预计算历史(None = 标的不在该发布,#252 missing)
+    histories: dict[str, SymbolDailyMetricsHistory | None]
 
 
 @dataclass(slots=True)
@@ -305,6 +472,13 @@ class FrozenInputLoader:
     )
     # 矩阵构建只尝试一次(候选集逐期不变);失败不缓存,逐期回退。
     _close_histories_built: bool = field(default=False, init=False, repr=False)
+    # #438:daily_metrics 发布 → run 级预计算(release_id 键;多研究发布并存)。
+    # 空映射 = 未预建(未调用 ensure / 无真实 provider),消费走逐期路径。
+    _daily_precompute: dict[str, DailyMetricsPrecompute] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    # 预建只尝试一次(决策日全集冻结,候选域逐期不变)。
+    _daily_precompute_built: bool = field(default=False, init=False, repr=False)
 
     @property
     def close_histories(self) -> Mapping[str, SymbolCloseHistory | None]:
@@ -476,6 +650,50 @@ class FrozenInputLoader:
             )
         )
 
+    async def ensure_daily_metrics_histories(
+        self,
+        manifest: ResearchRunManifest,
+        decision_ats: Sequence[datetime],
+    ) -> None:
+        """一次性预建全部 daily_metrics 发布的研究观测矩阵(幂等,#438)。
+
+        与 :meth:`ensure_close_histories` 同类:加载前单一顺序点预建。决策日
+        全集(``build_decision_load_contexts`` 在分块前已冻结)一次传入,每
+        标的**一次**列式读取覆盖全部决策期——此前每 (标的 x 决策期) 独立
+        ``pq.read_table`` 整文件,同一标的文件被重复读 P 期(全市场 5534 x
+        75 期 ≈ 41.5 万次/run),且门控逐行 ``fromisoformat`` 持 GIL。预建后
+        逐期消费查 :class:`SymbolDailyMetricsHistory` 矩阵,零 IO 零逐行解析。
+
+        评估域与 close 矩阵同口径(#299/#380):候选池 = 发布可交易域,
+        ``explicit_symbols`` 声明时收窄到声明 ∩ 发布。仅对真实列式 provider
+        (``fetch_daily_metrics_columns`` getattr 探测,#371 同构)启用;stub
+        与对象路径 provider 不预建,逐期路径行为不变。读取失败(除标的不在
+        发布的 ``ReleaseCapabilityError`` → #252 missing 外)直接抛出,与
+        逐期路径同 fail-closed。
+        """
+        if self._daily_precompute_built or not decision_ats:
+            return
+        self._daily_precompute_built = True
+        from finboard_data.releases import ReleaseDatasetKind
+
+        bars_ref = self._bars_release_ref(manifest)
+        bars_provider = self.release_provider_factory(bars_ref.artifact_id)
+        candidates, _ = _build_candidates_and_lots(
+            _declared_domain_instruments(manifest, list(bars_provider.release.instruments))
+        )
+        ordered = sorted(decision_ats)
+        for release_ref in manifest.dataset_releases:
+            provider = self.release_provider_factory(release_ref.artifact_id)
+            if provider.release.dataset_kind is not ReleaseDatasetKind.DAILY_METRICS:
+                continue
+            if getattr(provider, "fetch_daily_metrics_columns", None) is None:
+                continue
+            self._daily_precompute[release_ref.artifact_id] = (
+                await _build_daily_metrics_precompute(
+                    provider, candidates, ordered, release_ref.artifact_id
+                )
+            )
+
     async def _load_execution_prices(
         self,
         provider: FrozenReleaseProvider,
@@ -591,7 +809,11 @@ class FrozenInputLoader:
             kind = provider.release.dataset_kind
             if kind is ReleaseDatasetKind.DAILY_METRICS:
                 metrics, missing = await _load_daily_metrics_features(
-                    provider, candidates, decision_at, release_ref.artifact_id
+                    provider,
+                    candidates,
+                    decision_at,
+                    release_ref.artifact_id,
+                    precompute=self._daily_precompute.get(release_ref.artifact_id),
                 )
                 values.extend(metrics)
             elif kind is ReleaseDatasetKind.FINANCIAL_INDICATORS:
@@ -685,28 +907,141 @@ class FrozenInputLoader:
         return tuple(values), frozenset(covered)
 
 
+_EPOCH_DATE = date(1970, 1, 1)
+_EPOCH_ORDINAL = _EPOCH_DATE.toordinal()
+
+
 def _latest_daily_metrics_row(table: pa.Table) -> dict[str, object] | None:
     """列式表中选 ``available_at`` 最大的行并物化为单个 dict(issue #371 同构)。
 
     与对象路径 ``sorted(records, key=available_at)[-1]`` 逐值等值:Python 排序
-    稳定,available_at 并列时取原读取顺序中最后一条——此处自表尾向前找第一个
-    最大值下标。比较用 datetime 与门控(``_read_daily_metrics_columns``)同一
-    ``fromisoformat`` 解析语义;全历史行只有选中这一行进 Python,后续
-    ``_daily_metrics_from_release_row`` 的 Decimal 强转成本只付这一行。
+    稳定,available_at 并列时取原读取顺序中最后一条——available_at 整列一次
+    cast 成 int64 微秒(#438,aware 即 UTC 瞬时,与旧逐行 ``fromisoformat``
+    解析比较同语义)后用 numpy 定位最大值末位下标,slice 1 行物化,零逐行
+    Python。后续 ``_daily_metrics_from_release_row`` 的 Decimal 强转成本只付
+    选中这一行。
     """
+    import pyarrow as pa
+
     if table.num_rows == 0:
         return None
-    available_values = [
-        value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
-        for value in table.column("available_at").to_pylist()
-    ]
-    max_available = max(available_values)
+    from finboard_data.releases import _available_at_timestamp_column
+
+    available = _available_at_timestamp_column(table.column("available_at"))
+    values = available.cast(pa.int64()).to_numpy(zero_copy_only=False)
+    max_available = int(values.max())
     # sorted()[-1] 的稳定排序等值选择:并列取原读取顺序最后一条。
-    index = len(available_values) - 1
-    while available_values[index] != max_available:
-        index -= 1
+    index = int(values.size - 1 - np.argmax(values[::-1] == max_available))
     row: dict[str, object] = table.slice(index, 1).to_pylist()[0]
     return row
+
+
+def _daily_history_from_table(
+    table: pa.Table,
+    *,
+    decision_at_micros: np.ndarray,
+    decision_day_ends: np.ndarray,
+    range_start_day: int,
+    release_id: str,
+) -> SymbolDailyMetricsHistory:
+    """对单标的已门控表做全部决策期的选行 + 紧凑列抽取(#438)。
+
+    选行语义由 :func:`finboard_data.releases._daily_metrics_latest_visible_indices`
+    保证(零逐行 Python);payload 列整列 ``to_numpy`` 后按选中行下标一次性
+    聚合成 (n_periods, n_cols) 矩阵——null/无效格以掩码表达,重建行 dict 时
+    还原为 None。``available_at``/``source`` 只对选中行 ``take`` 物化(P 期
+    规模),原值保留使 ``record`` 的领域对象重建与旧路径逐值一致。
+    """
+    import pyarrow as pa
+
+    from finboard_data.releases import (
+        _DAILY_METRICS_FLOAT_PAYLOAD_FIELDS,
+        _DAILY_METRICS_INT_PAYLOAD_FIELDS,
+        _daily_metrics_latest_visible_indices,
+    )
+
+    selected = _daily_metrics_latest_visible_indices(
+        table,
+        decision_at_micros=decision_at_micros,
+        decision_day_ends=decision_day_ends,
+        range_start_day=range_start_day,
+        release_id=release_id,
+    )
+    n_periods = int(decision_at_micros.shape[0])
+    # -1(无可见行)占位到行 0,取值后由 valid/available_at 掩码屏蔽。
+    rows = np.where(selected >= 0, selected, 0)
+    columns = tuple(
+        name for name in _DAILY_METRICS_FLOAT_PAYLOAD_FIELDS if name in table.column_names
+    )
+    values = np.zeros((n_periods, len(columns)), dtype=np.float64)
+    valid = np.zeros((n_periods, len(columns)), dtype=bool)
+    for j, name in enumerate(columns):
+        column = table.column(name)
+        null_mask = (
+            column.is_null().to_numpy(zero_copy_only=False).astype(dtype=bool, copy=False)
+        )
+        picked = np.asarray(
+            column.to_numpy(zero_copy_only=False), dtype=np.float64
+        )[rows]
+        keep = (selected >= 0) & ~null_mask[rows]
+        values[:, j] = np.where(keep, picked, 0.0)
+        valid[:, j] = keep
+    limit_status = np.zeros(n_periods, dtype=np.int64)
+    limit_status_valid = np.zeros(n_periods, dtype=bool)
+    for name in _DAILY_METRICS_INT_PAYLOAD_FIELDS:
+        if name not in table.column_names:
+            continue
+        column = table.column(name)
+        null_mask = (
+            column.is_null().to_numpy(zero_copy_only=False).astype(dtype=bool, copy=False)
+        )
+        limit_status = (
+            column.fill_null(0).cast(pa.int64()).to_numpy(zero_copy_only=False).astype(
+                dtype=np.int64, copy=False
+            )[rows]
+        )
+        limit_status_valid = (selected >= 0) & ~null_mask[rows]
+        break
+    # 选中行 trade_date 恒非空(可见子集 null 已在选行期具名拒绝)。
+    trade_raw = (
+        _trade_day_column_for_history(table).to_numpy(zero_copy_only=False).astype(np.float64)
+    )
+    trade_filled = np.where(np.isnan(trade_raw), 0, trade_raw).astype(np.int32)[rows]
+    available_at: list[object] = [None] * n_periods
+    source: list[object] = [None] * n_periods
+    selected_periods = np.flatnonzero(selected >= 0)
+    if selected_periods.size:
+        selected_rows = pa.array(selected[selected_periods])
+        taken_available = table.column("available_at").take(selected_rows).to_pylist()
+        taken_source = (
+            table.column("source").take(selected_rows).to_pylist()
+            if "source" in table.column_names
+            else [None] * selected_periods.size
+        )
+        for period, value, src in zip(
+            selected_periods.tolist(), taken_available, taken_source, strict=True
+        ):
+            available_at[period] = value
+            source[period] = src
+    return SymbolDailyMetricsHistory(
+        columns=columns,
+        values=values,
+        valid=valid,
+        limit_status=limit_status,
+        limit_status_valid=limit_status_valid,
+        trade_date_days=trade_filled,
+        available_at=tuple(available_at),
+        source=tuple(source),
+    )
+
+
+def _trade_day_column_for_history(table: pa.Table) -> pa.ChunkedArray:
+    """history 抽取用 trade_date → int32 epoch 天数(null 保持 null)。"""
+    import pyarrow as pa
+
+    from finboard_data.releases import _trade_date_day_column
+
+    return _trade_date_day_column(table.column("trade_date")).cast(pa.int32())
 
 
 async def _load_daily_metrics_features(
@@ -714,10 +1049,17 @@ async def _load_daily_metrics_features(
     candidates: Sequence[UniverseCandidate],
     decision_at: datetime,
     release_id: str,
+    *,
+    precompute: DailyMetricsPrecompute | None = None,
 ) -> tuple[list[FeatureValue], tuple[str, ...]]:
     """把 daily_metrics 发布观测映射为因子值(PIT 门控,复用 extract_factor_matrix)。
 
     #252:缺标的容忍语义同 :func:`_load_financial_features`。
+
+    #438:``precompute`` 命中(run 级预建,见
+    :meth:`FrozenInputLoader.ensure_daily_metrics_histories`)时直接查矩阵
+    装配本期观测——零 IO 零逐行解析;未预建(直接 ``load_context`` 调用 /
+    stub provider)走既有逐期路径。
 
     列式优先(issue #371 同构的 getattr 探测):provider 提供
     ``fetch_daily_metrics_columns``(``FrozenReleaseProvider`` 已实现,PIT/
@@ -728,12 +1070,19 @@ async def _load_daily_metrics_features(
     无该属性的 provider 回退对象路径,选择语义逐值一致(稳定排序并列取原顺序
     最后一条,PIT 边界 ``available_at == decision_at`` 两路径均可见)。
     """
-    from finboard_data.factors import FactorInputBatch, FactorInputRecord
+    from finboard_data.factors import FactorInputRecord
     from finboard_data.releases import (
         ReleaseCapabilityError,
         _daily_metrics_from_release_row,
     )
     from finboard_shared.models import Symbol
+
+    if precompute is not None:
+        period = precompute.period_index.get(decision_at)
+        if period is not None:
+            return _daily_metrics_features_from_precompute(
+                precompute, candidates, release_id, period
+            )
 
     semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
     # issue #371 同构(getattr 探测,``data_mount`` 挂载写入器 hasattr 同款):
@@ -802,10 +1151,132 @@ async def _load_daily_metrics_features(
             missing.append(candidate.symbol)
         elif record is not None:
             factor_rows.append(record)
+    return _daily_feature_values(factor_rows, missing, release_id)
+
+
+def _daily_metrics_features_from_precompute(
+    precompute: DailyMetricsPrecompute,
+    candidates: Sequence[UniverseCandidate],
+    release_id: str,
+    period: int,
+) -> tuple[list[FeatureValue], tuple[str, ...]]:
+    """查预计算矩阵装配单期 daily_metrics 观测(#438;与逐期路径逐值等值)。
+
+    候选顺序组装(与逐期路径一致):``histories`` 值 ``None`` = 预建期
+    ``ReleaseCapabilityError``(标的不在该研究发布)→ #252 missing;矩阵无
+    可见行 → 该标的无观测(非 missing);有行 → ``record`` 按需重建领域对象。
+    """
+    from finboard_data.factors import FactorInputRecord
+
+    factor_rows: list[FactorInputRecord] = []
+    missing: list[str] = []
+    for candidate in candidates:
+        history = precompute.histories.get(candidate.symbol)
+        if history is None:
+            missing.append(candidate.symbol)
+            continue
+        latest = history.record(period, symbol=candidate.symbol)
+        if latest is not None:
+            factor_rows.append(
+                FactorInputRecord(
+                    symbol=candidate.symbol,
+                    profile=None,
+                    daily=latest,
+                    financial=None,
+                    industry=None,
+                )
+            )
+    return _daily_feature_values(factor_rows, missing, release_id)
+
+
+def _daily_feature_values(
+    factor_rows: Sequence[FactorInputRecord],
+    missing: Sequence[str],
+    release_id: str,
+) -> tuple[list[FeatureValue], tuple[str, ...]]:
+    """factor 行 + missing 集合 → (FeatureValue 列表, missing 元组) 共用尾部。
+
+    ``FactorInputRecord`` 仅作窄化引用;批构造与矩阵提取与逐期路径共用。
+    """
+    from finboard_data.factors import FactorInputBatch
+
     if not factor_rows:
         return [], tuple(missing)
     batch = FactorInputBatch(records=tuple(factor_rows), source="tushare", dataset_versions={"research_release": "frozen"})
     return _matrix_to_feature_values(batch, release_id=release_id), tuple(missing)
+
+
+async def _build_daily_metrics_precompute(
+    provider: FrozenReleaseProvider,
+    candidates: Sequence[UniverseCandidate],
+    decision_ats: Sequence[datetime],
+    release_id: str,
+) -> DailyMetricsPrecompute:
+    """并发预建一个 daily_metrics 发布的全部决策期矩阵(#438)。
+
+    每标的以 ``decision_at=_PIT_UNBOUNDED`` 做一次列式读取(PIT/区间门控在
+    Arrow 内完成,全区间可见),选行与列抽取 numpy 化后置 ``to_thread``;
+    逐候选 ``gather`` + 信号量并发,异常按候选顺序抛出(与 close 矩阵构建
+    同语义)。标的不在发布(``ReleaseCapabilityError``)→ ``None``(#252
+    missing),其余异常原样传播(fail-closed)。
+    """
+    from finboard_data.releases import ReleaseCapabilityError, _epoch_micros
+    from finboard_shared.models import Symbol
+
+    semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
+    decision_at_micros = np.array(
+        [_epoch_micros(at) for at in decision_ats], dtype=np.int64
+    )
+    decision_day_ends = np.array(
+        [at.date().toordinal() - _EPOCH_ORDINAL for at in decision_ats],
+        dtype=np.int32,
+    )
+    range_start_day = provider.release.start_date.toordinal() - _EPOCH_ORDINAL
+
+    async def _one(candidate: UniverseCandidate) -> SymbolDailyMetricsHistory | None:
+        async with semaphore:
+            symbol = Symbol(
+                code=candidate.symbol, market=_market_from_value(candidate.market)
+            )
+            try:
+                table = await provider.fetch_daily_metrics_columns(
+                    symbol,
+                    start=provider.release.start_date,
+                    end=provider.release.end_date,
+                    decision_at=_PIT_UNBOUNDED,
+                )
+            except ReleaseCapabilityError:
+                return None
+        return await asyncio.to_thread(
+            _daily_history_from_table,
+            table,
+            decision_at_micros=decision_at_micros,
+            decision_day_ends=decision_day_ends,
+            range_start_day=range_start_day,
+            release_id=release_id,
+        )
+
+    results = await asyncio.gather(
+        *(_one(candidate) for candidate in candidates), return_exceptions=True
+    )
+    histories: dict[str, SymbolDailyMetricsHistory | None] = {}
+    for candidate, result in zip(candidates, results, strict=True):
+        if isinstance(result, BaseException):
+            raise result
+        histories[candidate.symbol] = result
+    logger.debug(
+        "frozen_loader.daily_metrics_history_built",
+        release_id=release_id,
+        candidates=len(candidates),
+        periods=len(decision_ats),
+        symbols_precomputed=sum(1 for item in histories.values() if item is not None),
+        precompute_bytes=sum(item.nbytes for item in histories.values() if item is not None),
+    )
+    return DailyMetricsPrecompute(
+        release_id=release_id,
+        period_index={at: index for index, at in enumerate(decision_ats)},
+        histories=histories,
+    )
 
 
 async def _load_financial_features(
@@ -996,16 +1467,14 @@ def _history_from_points(
     issue #300 后矩阵预建已走列式直出(:func:`_load_close_histories`),本函数
     保留给需要从对象序列构建历史的调用方(等值测试对照)。``available_at`` /
     bar 日期任一序列出现回退(异常数据,非递减被破坏)时返回 ``None``:前缀
-    切片不再与逐期过滤等价,调用方对该标的回退逐期读取。
+    切片不再与逐期过滤等价,调用方对该标的回退逐期读取(校验在
+    :meth:`SymbolCloseHistory.from_sequences` 的 int64 数组上进行,#439)。
     """
-    available = tuple(item.available_at for item in points)
-    dates = tuple(item.bar.timestamp.date() for item in points)
-    closes = tuple(float(item.bar.close) for item in points)
-    if any(later < earlier for earlier, later in pairwise(available)) or any(
-        later < earlier for earlier, later in pairwise(dates)
-    ):
-        return None
-    return SymbolCloseHistory(available_at=available, dates=dates, closes=closes)
+    return SymbolCloseHistory.from_sequences(
+        available_at=[item.available_at for item in points],
+        dates=[item.bar.timestamp.date() for item in points],
+        closes=[float(item.bar.close) for item in points],
+    )
 
 
 async def _load_close_histories(
@@ -1035,7 +1504,7 @@ async def _load_close_histories(
         return {}
     semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
 
-    async def _one(candidate: UniverseCandidate) -> SymbolCloseHistory:
+    async def _one(candidate: UniverseCandidate) -> SymbolCloseHistory | None:
         async with semaphore:
             columns = await provider.fetch_close_history(
                 Symbol(
@@ -1049,11 +1518,11 @@ async def _load_close_histories(
                 adjust=provider.release.adjustment,
                 include_open=include_open,
             )
-        return SymbolCloseHistory(
+        return SymbolCloseHistory.from_sequences(
             available_at=columns.available_at,
             dates=columns.dates,
-            closes=tuple(columns.closes),
-            opens=None if columns.opens is None else tuple(columns.opens),
+            closes=columns.closes,
+            opens=columns.opens,
         )
 
     results = await asyncio.gather(
@@ -1144,11 +1613,11 @@ async def _load_close_histories_via_pool(
             )
             return None
         code, columns = result
-        built[code] = SymbolCloseHistory(
+        built[code] = SymbolCloseHistory.from_sequences(
             available_at=columns.available_at,
             dates=columns.dates,
-            closes=tuple(columns.closes),
-            opens=None if columns.opens is None else tuple(columns.opens),
+            closes=columns.closes,
+            opens=columns.opens,
         )
     logger.debug(
         "frozen_loader.close_history_built_via_pool",
@@ -1310,6 +1779,7 @@ def _build_artifact_ids(manifest: ResearchRunManifest) -> tuple[str, ...]:
 
 
 __all__ = [
+    "DailyMetricsPrecompute",
     "FactorSeriesProvider",
     "FeatureSnapshotProvider",
     "FrozenInputLoader",
@@ -1317,5 +1787,6 @@ __all__ = [
     "ReleaseProviderFactory",
     "SuspensionView",
     "SymbolCloseHistory",
+    "SymbolDailyMetricsHistory",
     "series_feature_values",
 ]

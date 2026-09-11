@@ -21,6 +21,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import numpy as np
 import pytest
 import structlog
 
@@ -199,9 +200,14 @@ def _assert_histories_equal(
         a, b = left[code], right[code]
         assert isinstance(a, SymbolCloseHistory)
         assert isinstance(b, SymbolCloseHistory)
-        assert a.available_at == b.available_at
-        assert a.dates == b.dates
-        assert a.closes == b.closes
+        # #439:内部表示为原生数组,逐数组逐值比较(池与进程内同构)。
+        assert np.array_equal(a.available_at_us, b.available_at_us)
+        assert np.array_equal(a.date_days, b.date_days)
+        assert np.array_equal(a.closes, b.closes)
+        assert a.available_tz_aware == b.available_tz_aware
+        assert (a.opens is None) == (b.opens is None)
+        if a.opens is not None and b.opens is not None:
+            assert np.array_equal(a.opens, b.opens)
 
 
 def _assert_contexts_equal(

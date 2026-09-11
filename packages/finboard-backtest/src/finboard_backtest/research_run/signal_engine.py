@@ -1883,6 +1883,12 @@ async def build_decision_load_contexts(
         pool = await _start_period_feature_pool(provider, process_workers)
     await _release_trading_days(provider, trading_days_loader=trading_days_loader)
     await loader.ensure_close_histories(manifest, process_pool=pool)
+    # issue #438:研究观测(daily_metrics)run 级预建与 close 矩阵同类——决策日
+    # 全集在分块前已冻结,每标的一次列式读取覆盖全部决策期;逐期消费查矩阵,
+    # 零 IO 零逐行解析(stub / 对象路径 provider 不预建,逐期路径行为不变)。
+    await loader.ensure_daily_metrics_histories(
+        manifest, tuple(decision_at for decision_at, _ in decision_days)
+    )
 
     async def _load_one(decision_at: datetime, snapshot_id: str | None) -> DecisionLoadContext:
         execution_at = await _next_execution_at(
