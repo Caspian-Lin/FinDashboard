@@ -3,13 +3,14 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   api,
   type FlamegraphMeta,
   type FlamegraphSession,
   type JobOut,
 } from "../lib/api";
+import { LanguageProvider } from "@/i18n";
 import Jobs from "./Jobs";
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -522,5 +523,206 @@ describe("任务详情:诊断重放入口(issue #373)", () => {
       "/api/jobs/BJ-TEST000000000001/flamegraph/BJ-TEST000000000001-20260908-120000/flamegraph.svg",
     );
     expect(screen.getByText("下载火焰图")).toBeInTheDocument();
+  });
+});
+
+describe("任务进度可视化(issue #442)", () => {
+  afterEach(() => {
+    // en 用例写入的语言偏好不能泄漏给同文件其他用例(默认中文零破坏)。
+    localStorage.removeItem("finboard-lang");
+  });
+
+  /** 包 LanguageProvider 的渲染(语言从 localStorage 读入)。 */
+  function renderWithLang(ui: ReactElement, lang: "zh" | "en") {
+    localStorage.setItem("finboard-lang", lang);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <LanguageProvider>{ui}</LanguageProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it("done/total>0 渲染进度条与百分比(running)", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue(
+      listResult([
+        makeJob({
+          status: "running",
+          progress_total: 10,
+          progress_done: 4,
+          phase: "fetch",
+        }),
+      ]),
+    );
+    renderWithProviders(<Jobs />);
+    expect(await screen.findByText("BJ-TEST000000000001")).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "执行进度" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("4/10 · 40%")).toBeInTheDocument();
+  });
+
+  it("total=0 不渲染进度条,phase 缺失显示 —", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue(
+      listResult([
+        makeJob({
+          status: "running",
+          progress_total: 0,
+          progress_done: 0,
+          phase: null,
+          started_at: null,
+        }),
+      ]),
+    );
+    renderWithProviders(<Jobs />);
+    expect(await screen.findByText("BJ-TEST000000000001")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
+  it("已运行时长 = started_at → now,随轮询刷新(刷新按钮触发重取)", async () => {
+    const base = new Date("2026-09-11T04:00:00Z").getTime();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(base);
+    vi.mocked(api.listJobs).mockResolvedValue(
+      listResult([
+        makeJob({
+          status: "running",
+          progress_total: 10,
+          progress_done: 4,
+          started_at: "2026-09-11T03:59:00Z",
+        }),
+      ]),
+    );
+    renderWithProviders(<Jobs />);
+    expect(await screen.findByText(/已运行 1 分 0 秒/)).toBeInTheDocument();
+    // 轮询/刷新语义:now 前进 65 秒后重取,时长重算(60s → 125s)。
+    nowSpy.mockReturnValue(base + 65_000);
+    await userEvent.click(screen.getByRole("button", { name: "刷新任务列表" }));
+    await waitFor(() =>
+      expect(screen.getByText(/已运行 2 分 5 秒/)).toBeInTheDocument(),
+    );
+    nowSpy.mockRestore();
+  });
+
+  it("终态时长定格于 started_at → finished_at,不随墙钟增长", async () => {
+    const base = new Date("2026-09-11T04:00:00Z").getTime();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(base);
+    vi.mocked(api.listJobs).mockResolvedValue(
+      listResult([
+        makeJob({
+          status: "succeeded",
+          progress_total: 2,
+          progress_done: 2,
+          started_at: "2026-09-11T03:58:30Z",
+          finished_at: "2026-09-11T03:59:30Z",
+        }),
+      ]),
+    );
+    renderWithProviders(<Jobs />);
+    expect(await screen.findByText(/运行耗时 1 分 0 秒/)).toBeInTheDocument();
+    nowSpy.mockReturnValue(base + 600_000);
+    await userEvent.click(screen.getByRole("button", { name: "刷新任务列表" }));
+    await waitFor(() =>
+      expect(screen.getByText(/运行耗时 1 分 0 秒/)).toBeInTheDocument(),
+    );
+    nowSpy.mockRestore();
+  });
+
+  it("运行中/终态样式区分:终态进度条降灰、行打 terminal 标记", async () => {
+    vi.mocked(api.listJobs).mockResolvedValue(
+      listResult([
+        makeJob({
+          status: "running",
+          progress_total: 10,
+          progress_done: 4,
+          started_at: null,
+        }),
+        makeJob({
+          job_id: "BJ-TEST000000000002",
+          status: "succeeded",
+          progress_total: 2,
+          progress_done: 2,
+          started_at: null,
+        }),
+      ]),
+    );
+    const { container } = renderWithProviders(<Jobs />);
+    await screen.findByText("BJ-TEST000000000001");
+    const bars = screen.getAllByRole("progressbar", { name: "执行进度" });
+    expect(bars).toHaveLength(2);
+    const runningIndicator = bars[0].firstElementChild as HTMLElement;
+    expect(runningIndicator.className).toContain("bg-primary");
+    expect(runningIndicator.className).not.toContain("bg-muted-foreground");
+    const terminalIndicator = bars[1].firstElementChild as HTMLElement;
+    expect(terminalIndicator.className).toContain("bg-muted-foreground/40");
+    expect(terminalIndicator.className).not.toContain("bg-primary");
+    expect(
+      container.querySelector('[data-job-progress="running"]'),
+    ).toBeInTheDocument();
+    expect(
+      container.querySelector('[data-job-progress="terminal"]'),
+    ).toBeInTheDocument();
+  });
+
+  it("JobDetail 展开完整:phase 解析 + 缺失字段显示 — + 最后更新时龄", async () => {
+    const updated = new Date(Date.now() - 30_000).toISOString();
+    const job = makeJob({
+      kind: "research_run",
+      status: "running",
+      progress_total: 0,
+      progress_done: 0,
+      phase: "research_run:decision_load 4/36",
+      started_at: null,
+      updated_at: updated,
+    });
+    vi.mocked(api.listJobs).mockResolvedValue(listResult([job]));
+    // 单查透传(run_status)与列表同形;显式打桩避免用例间 mock 实现泄漏
+    // (clearAllMocks 不清 mockResolvedValue)。
+    vi.mocked(api.getJob).mockResolvedValue(job);
+    const { container } = renderWithProviders(<Jobs />);
+    await screen.findByText("BJ-TEST000000000001");
+    await userEvent.click(screen.getByRole("button", { name: "展开任务详情" }));
+    const detailProgress = container.querySelector('[data-variant="detail"]');
+    expect(detailProgress).not.toBeNull();
+    const scope = within(detailProgress as HTMLElement);
+    // 加载帧 phase 解析(issue #308 回归:详情同样走 parseJobPhase)。
+    expect(scope.getByText(/加载决策上下文 4\/36 期/)).toBeInTheDocument();
+    // total=0:进度条区域显示 —。
+    expect(scope.getByText("—")).toBeInTheDocument();
+    // started_at 缺失 → 已运行位置显示 —;updated_at 时龄(心跳代理)可见。
+    expect(scope.getByText(/^— · 最后更新 3\d 秒前/)).toBeInTheDocument();
+  });
+
+  it("zh/en 双语:en 显示 Running for / Updated … ago,中文默认零破坏", async () => {
+    const base = new Date("2026-09-11T04:00:00Z").getTime();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(base);
+    vi.mocked(api.listJobs).mockResolvedValue(
+      listResult([
+        makeJob({
+          status: "running",
+          progress_total: 10,
+          progress_done: 4,
+          started_at: "2026-09-11T03:59:00Z",
+          updated_at: new Date(base - 30_000).toISOString(),
+        }),
+      ]),
+    );
+    renderWithLang(<Jobs />, "en");
+    // 行内紧凑:done/total + 百分比 + 已运行时长(英文)。
+    expect(await screen.findByText("4/10 · 40%")).toBeInTheDocument();
+    expect(screen.getByText(/Running for 1m 0s/)).toBeInTheDocument();
+    // 时龄在展开详情里(完整形态):进度条 + 阶段 + 时长 + 最后更新。
+    await userEvent.click(screen.getByRole("button", { name: "Expand job details" }));
+    const scope = await screen
+      .findByText("Request payload")
+      .then(() => document.querySelector('[data-variant="detail"]'));
+    expect(scope).not.toBeNull();
+    expect(scope!.textContent).toContain("Running for 1m 0s");
+    expect(scope!.textContent).toContain("Updated 30s ago");
+    nowSpy.mockRestore();
   });
 });

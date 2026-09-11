@@ -24,12 +24,10 @@ import {
   JOB_STATUS_LABELS,
   JOB_STATUS_OPTIONS,
   jobKindLabel,
-  parseJobPhase,
 } from "@/lib/jobs";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
 import {
   Select,
   SelectContent,
@@ -40,6 +38,7 @@ import {
 import { StatusBadge } from "@/components/ui/status-badge";
 import { CopyButton } from "@/components/ui/copy-button";
 import { FlamegraphPanel } from "@/components/jobs/FlamegraphPanel";
+import { ProgressLine } from "@/components/jobs/ProgressLine";
 import { TimingLine } from "@/components/jobs/TimingLine";
 import InfoHint from "@/components/InfoHint";
 import { INFO_HINTS } from "@/lib/infoHints";
@@ -67,30 +66,6 @@ const RUN_STUCK_STATUSES: ReadonlySet<string> = new Set([
   "failed",
   "cancelled",
 ]);
-
-/**
- * phase 展示文本(issue #308):research_run 的加载 k/N 帧与决策级
- * `#序号@日期` 帧翻译为可读文案;其余(含其他 kind)原样返回。
- */
-function usePhaseText(phase: string | null): string | null {
-  const { t } = useT();
-  const info = parseJobPhase(phase);
-  if (!info) return phase;
-  if (info.load) {
-    return t("jobs.phaseLoad", {
-      done: info.load.done,
-      total: info.load.total,
-    });
-  }
-  if (info.decision) {
-    return t("jobs.phaseDecision", {
-      index: info.decision.index,
-      date: info.decision.date,
-      stage: info.stage,
-    });
-  }
-  return phase;
-}
 
 /** 任务中心:研究/数据/回测域统一后台任务的集中管理页(issue #161;#221 归档)。 */
 export default function Jobs() {
@@ -430,10 +405,6 @@ function JobRow({
   const { t, tl, lang } = useT();
   const active = isJobRunning(job);
   const archived = job.archived_at != null;
-  const total = job.progress_total;
-  const percent =
-    total > 0 ? Math.min(100, Math.round((job.progress_done / total) * 100)) : null;
-  const phaseText = usePhaseText(job.phase);
   return (
     <>
       <TableRow data-state={expanded ? "selected" : undefined} className={archived ? "opacity-60" : undefined}>
@@ -461,26 +432,9 @@ function JobRow({
             )}
           </div>
         </TableCell>
+        {/* 进度列(issue #442):条 + done/total·百分比 + 阶段/时长,ProgressLine 收口。 */}
         <TableCell className="min-w-40">
-          {job.status === "running" && total > 0 ? (
-            <div className="flex items-center gap-2">
-              <Progress value={percent ?? 0} className="w-24" aria-label={t("jobs.progressAria")} />
-              <span
-                className="text-xs text-muted-foreground whitespace-nowrap"
-                title={job.phase ?? undefined}
-              >
-                {job.progress_done}/{total}
-                {phaseText ? ` ${phaseText}` : ""}
-              </span>
-            </div>
-          ) : (
-            <span
-              className="text-xs text-muted-foreground"
-              title={job.phase ?? undefined}
-            >
-              {phaseText ?? "—"}
-            </span>
-          )}
+          <ProgressLine job={job} variant="row" />
         </TableCell>
         <TableCell className="text-xs text-muted-foreground">
           {job.attempt}/{job.max_attempts}
@@ -549,7 +503,6 @@ function JobDetail({ job }: { job: JobOut }) {
     refetchInterval: isJobRunning(job) ? POLL_MS : false,
   });
   const runStatus = live?.run_status ?? job.run_status ?? null;
-  const phaseInfo = parseJobPhase(live?.phase ?? job.phase);
   const mismatched =
     runStatus != null && RUN_STUCK_STATUSES.has(runStatus) && isJobRunning(job);
   const rows: [string, string][] = [
@@ -559,18 +512,6 @@ function JobDetail({ job }: { job: JobOut }) {
     [t("jobs.idempotencyKey"), job.idempotency_key],
     ...(isResearchRun
       ? ([[t("jobs.runStatus"), runStatus ?? "—"]] as [string, string][])
-      : []),
-    ...(phaseInfo?.decision
-      ? ([
-          [
-            t("jobs.decisionProgress"),
-            t("jobs.phaseDecision", {
-              index: phaseInfo.decision.index,
-              date: phaseInfo.decision.date,
-              stage: phaseInfo.stage,
-            }),
-          ],
-        ] as [string, string][])
       : []),
     [t("jobs.resultRef"), job.result_ref ?? "—"],
     [t("jobs.errorCode"), job.error_code ?? "—"],
@@ -593,6 +534,14 @@ function JobDetail({ job }: { job: JobOut }) {
           </AlertDescription>
         </Alert>
       )}
+      {/* 进度可视化(issue #442):phase 解析 + 进度条 + 已运行时长 + 最后更新
+          时龄;running 族时长取 started_at → now,随轮询刷新(单查 live 每
+          POLL_MS 一次、列表 refetch 翻转 isFetching 均带动重算),终态定格于
+          finished_at。决策级 phase 帧也在此展示(#308 原决策行并入)。 */}
+      <div>
+        <p className="mb-1 text-xs text-muted-foreground">{t("jobs.progress")}</p>
+        <ProgressLine job={live ?? job} variant="detail" />
+      </div>
       <div className="grid gap-6 lg:grid-cols-2">
         <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
           {rows.map(([label, value]) => (
