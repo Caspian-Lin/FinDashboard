@@ -1452,33 +1452,38 @@ def _matrix_to_feature_values(
     from finboard_backtest.factors.extract import extract_factor_matrix
 
     matrix = extract_factor_matrix(batch)
+    # symbol → 最新观测时点一次遍历预聚合(此前逐 (因子 x 标的) 全量扫描
+    # records,矩阵 75k 键 x 5000 记录 = 每期数亿次比较,是加载期主导热点;
+    # 映射后 O(records + 矩阵键数))。
+    latest_by_symbol: dict[str, datetime] = {}
+    for record in batch.records:
+        candidates = [
+            _require_aware(item.available_at)
+            for item in (record.daily, record.financial)
+            if item is not None
+        ]
+        if not candidates:
+            continue
+        latest = max(candidates)
+        current = latest_by_symbol.get(record.symbol)
+        if current is None or latest > current:
+            latest_by_symbol[record.symbol] = latest
     values: list[FeatureValue] = []
     for factor_name, by_symbol in sorted(matrix.items()):
         for symbol, value in sorted(by_symbol.items()):
+            available_at = latest_by_symbol.get(symbol)
+            if available_at is None:
+                available_at = datetime.now(UTC)
             values.append(
                 FeatureValue(
                     symbol=symbol,
                     feature_id=factor_name,
                     value=float(value),
                     source_artifact_ids=(release_id,),
-                    available_at=_latest_available_at(batch, symbol),
+                    available_at=available_at,
                 )
             )
     return values
-
-
-def _latest_available_at(batch: FactorInputBatch, symbol: str) -> datetime:
-    """取某标的在横截面中最新的观测时点(研究记录或特征观测)。"""
-    candidates: list[datetime] = []
-    for record in batch.records:
-        if record.symbol != symbol:
-            continue
-        for item in (record.daily, record.financial):
-            if item is not None:
-                candidates.append(_require_aware(item.available_at))
-    if not candidates:
-        return datetime.now(UTC)
-    return max(candidates)
 
 
 def _require_aware(value: datetime) -> datetime:
