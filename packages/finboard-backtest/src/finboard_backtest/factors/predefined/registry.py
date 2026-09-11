@@ -3463,6 +3463,399 @@ def _level_rank_entries() -> tuple[PredefinedFactorDefinition, ...]:
     )
 
 
+# --------------------------------------------------------------------- #
+# 批次 6(#429)P2:长窗市场回归族 + 规模非线性(市场模型 / 工具变量 / 截面回归)
+# --------------------------------------------------------------------- #
+
+#: 因子名后缀 → 基准指数代码(000300 = 沪深300,000001 = 上证指数)。
+#: 与 #256 指数登记白名单同码:发布不含该指数 → 因子全缺测(不换基准)。
+_BATCH6_MARKET_SUFFIX: Mapping[str, str] = {
+    "000300": "000300.SH",
+    "000001": "000001.SH",
+}
+
+
+def _market_pair_frame_for(
+    inp: PredefinedFactorInput,
+    series_by_symbol: Mapping[str, SymbolSeries],
+    pair_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    market_symbol: str,
+    *,
+    field: str = "close",
+) -> FactorSeriesFrame:
+    """市场依赖因子的通用驱动(批次 6):基准指数**可参数化**。
+
+    与批次 1 :func:`_market_pair_frame`(硬编码 ``000300.SH`` 与 close)同构,
+    差别只有两处:市场标的由 ``market_symbol`` 给出、字段由 ``field`` 给出
+    (成交量族走 ``volume``)。``pair_fn(标的对齐值, 市场对齐值)`` 按业务日期
+    交集对齐后应用,再按对齐后的序列轴采样。发布不含该指数 → 全缺测帧
+    (采样为 None,fail-visible;不 fallback 到别的指数),覆盖起点由
+    ``min_history_bars`` 在入队期具名拒绝(#361 覆盖检查消费)。
+    """
+    market = inp.index_bars(field).get(market_symbol)
+    if market is None:
+        nan_values: dict[str, np.ndarray] = {
+            symbol: np.full(series.values.size, np.nan)
+            for symbol, series in series_by_symbol.items()
+        }
+        return inp.sample(series_by_symbol, nan_values)
+    series_axis: dict[str, SymbolSeries] = {}
+    per_symbol_values: dict[str, np.ndarray] = {}
+    for symbol, series in series_by_symbol.items():
+        aligned, market_values = _aligned_pair(series, market)
+        series_axis[symbol] = aligned
+        per_symbol_values[symbol] = pair_fn(aligned.values, market_values)
+    return inp.sample(series_axis, per_symbol_values)
+
+
+def _market_reg_alpha(window: int, market_symbol: str) -> PredefinedFactorCompute:
+    """长窗市场模型 alpha:日收益对指定基准指数日收益 trailing ``window``
+    根 bar OLS 的截距(Jensen alpha;#399 ``_reg_alpha`` 同式,仅基准可选)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_ret = _daily_returns(stock_values)
+            market_ret = _daily_returns(market_values)
+            market_var = ts_cov(market_ret, market_ret, window)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                beta = ts_cov(stock_ret, market_ret, window) / market_var
+                result: np.ndarray = ts_mean(stock_ret, window) - beta * ts_mean(
+                    market_ret, window
+                )
+            return result
+
+        return _market_pair_frame_for(inp, inp.bars("close"), pair, market_symbol)
+
+    return compute
+
+
+def _market_beta(window: int, market_symbol: str) -> PredefinedFactorCompute:
+    """长窗市场 beta:日收益对指定基准指数日收益 trailing ``window`` 根 bar
+    OLS 斜率(``cov(r, m) / var(m)``;低 beta 异象 → direction LOWER)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_ret = _daily_returns(stock_values)
+            market_ret = _daily_returns(market_values)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                result: np.ndarray = ts_cov(stock_ret, market_ret, window) / ts_cov(
+                    market_ret, market_ret, window
+                )
+            return result
+
+        return _market_pair_frame_for(inp, inp.bars("close"), pair, market_symbol)
+
+    return compute
+
+
+def _market_resid_std(window: int, market_symbol: str) -> PredefinedFactorCompute:
+    """市场模型残差标准差(特质风险):``std(r) x sqrt(max(0, 1 - rho^2))``。
+
+    残差 = 同窗市场模型(带截距)拟合残差 —— ``std(e)^2 = var(r)(1 - rho^2)``
+    在样本口径下恒等,故单窗口即可算(``window`` 根 bar 起步),与
+    ``min_history_bars = window`` 的覆盖起点声明一致。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_ret = _daily_returns(stock_values)
+            market_ret = _daily_returns(market_values)
+            total = ts_std(stock_ret, window)
+            rho = ts_corr(stock_ret, market_ret, window)
+            with np.errstate(invalid="ignore"):
+                result: np.ndarray = total * np.sqrt(
+                    np.clip(1.0 - rho * rho, 0.0, None)
+                )
+            return result
+
+        return _market_pair_frame_for(inp, inp.bars("close"), pair, market_symbol)
+
+    return compute
+
+
+def _market_beta_consistency(
+    window: int, market_symbol: str
+) -> PredefinedFactorCompute:
+    """Beta 一致性:窗口回归 beta 与**同窗**市场模型残差之积的标准差。
+
+    窗口内 beta 是常数(beta_w),残差为同窗拟合残差 ``e``,故
+    ``std(beta_w x e) = |beta_w| x std(e) = |beta_w| x std(r) x sqrt(1-rho^2)``
+    —— 单窗口闭式(``window`` 根 bar 起步),不额外消耗第二个窗口。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_ret = _daily_returns(stock_values)
+            market_ret = _daily_returns(market_values)
+            total = ts_std(stock_ret, window)
+            rho = ts_corr(stock_ret, market_ret, window)
+            market_var = ts_cov(market_ret, market_ret, window)
+            resid_std = total * np.sqrt(np.clip(1.0 - rho * rho, 0.0, None))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                beta = ts_cov(stock_ret, market_ret, window) / market_var
+                result: np.ndarray = np.abs(beta) * resid_std
+            return result
+
+        return _market_pair_frame_for(inp, inp.bars("close"), pair, market_symbol)
+
+    return compute
+
+
+def _volume_momentum(volumes: np.ndarray) -> np.ndarray:
+    """成交量动量 ``VolMom = (sum_5(vol) - lag(sum_5(vol))) / lag(sum_5(vol))``。
+
+    5 日滚动和的一阶差分比率(量能放大 = 正);需 6 根 bar 才有首个值
+    (5 日滚动 + 1 日滞后),历史不足 / 滚动和为零 → 缺测。
+    """
+    rolling = ts_sum(volumes, 5)
+    lagged = ts_delay(rolling, 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result: np.ndarray = (rolling - lagged) / lagged
+    return result
+
+
+def _volume_reg_alpha(window: int, market_symbol: str) -> PredefinedFactorCompute:
+    """成交量动量 alpha:``VolMom`` 对指数同式动量的 trailing ``window`` 根
+    bar OLS 截距(量能同步性之外的个股量能水平)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_mom = _volume_momentum(stock_values)
+            market_mom = _volume_momentum(market_values)
+            market_var = ts_cov(market_mom, market_mom, window)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                beta = ts_cov(stock_mom, market_mom, window) / market_var
+                result: np.ndarray = ts_mean(stock_mom, window) - beta * ts_mean(
+                    market_mom, window
+                )
+            return result
+
+        return _market_pair_frame_for(
+            inp, inp.bars("volume"), pair, market_symbol, field="volume"
+        )
+
+    return compute
+
+
+def _volume_reg_beta(window: int, market_symbol: str) -> PredefinedFactorCompute:
+    """成交量动量 beta:``VolMom`` 对指数同式动量的 trailing ``window`` 根
+    bar OLS 斜率(量能放大的市场同步度,baseline 兑现 → direction LOWER)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        def pair(stock_values: np.ndarray, market_values: np.ndarray) -> np.ndarray:
+            stock_mom = _volume_momentum(stock_values)
+            market_mom = _volume_momentum(market_values)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                result: np.ndarray = ts_cov(stock_mom, market_mom, window) / ts_cov(
+                    market_mom, market_mom, window
+                )
+            return result
+
+        return _market_pair_frame_for(
+            inp, inp.bars("volume"), pair, market_symbol, field="volume"
+        )
+
+    return compute
+
+
+def _none_cross(cross: CrossSection) -> dict[str, float | None]:
+    """截面 → 全缺测映射(有限点不足 / 方差退化时的 fail-visible 输出)。"""
+    out: dict[str, float | None] = {}
+    for symbol in cross:
+        out[symbol] = None
+    return out
+
+
+def _nl_size_residuals(cross: CrossSection) -> dict[str, float | None]:
+    """规模非线性的逐(业务)日截面变换:``x^3`` 对 ``x`` 的闭式 OLS 残差。
+
+    ``x = size / mean(size)``(无量纲化:原始市值 1e10 量级下 ``size^3``
+    会到 1e30 并吃掉精度);``y = x^3``;``b = cov(x, y) / var(x)``、
+    ``a = mean(y) - b x mean(x)``,输出 ``r = y - (a + b x)``(不再 rank,
+    与上游 desc 口径一致)。有限点 < 3、均值非正或 ``var(x) <= 0`` →
+    该日全缺测(样本内秩不足,宁缺毋假)。
+    """
+    finite = {
+        symbol: float(value)
+        for symbol, value in cross.items()
+        if value is not None and math.isfinite(float(value))
+    }
+    if len(finite) < 3:
+        return _none_cross(cross)
+    sizes = np.array(list(finite.values()), dtype=np.float64)
+    mean_size = float(sizes.mean())
+    if not math.isfinite(mean_size) or mean_size <= 0.0:
+        return _none_cross(cross)
+    x = sizes / mean_size
+    y = x**3
+    centered_x = x - float(x.mean())
+    centered_y = y - float(y.mean())
+    sxx = float((centered_x * centered_x).sum())
+    if not math.isfinite(sxx) or sxx <= 0.0:
+        return _none_cross(cross)
+    slope = float((centered_x * centered_y).sum()) / sxx
+    intercept = float(y.mean()) - slope * float(x.mean())
+    residuals = y - (intercept + slope * x)
+    out: dict[str, float | None] = {}
+    for position, symbol in enumerate(finite):
+        value = float(residuals[position])
+        out[symbol] = value if math.isfinite(value) else None
+    return out
+
+
+def _nl_size_compute() -> PredefinedFactorCompute:
+    """``nl_size``:逐业务日总市值截面 cubic 回归残差(采样到决策日)。
+
+    截面分母 = 可交易域(#380:benchmark-only 不进截面回归),逐日独立
+    计算(只用同日截面值 → 因果);决策日取该标的最近可得行(停牌日自然
+    延续最近截面残差)。逐日截面 < 3 个有限点 → 该日全缺测。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        axis = inp.daily_metrics("total_market_cap")
+        return inp.sample(
+            axis,
+            _cs_transform(
+                axis,
+                _values(axis),
+                _nl_size_residuals,
+                universe=inp.tradable_symbols,
+            ),
+        )
+
+    return compute
+
+
+def _batch6_market_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """批次 6(#429)P2:长窗市场回归族 13 个 + 规模非线性 ``nl_size`` 1 个。
+
+    * 收益族(``alpha_*`` 5 / ``beta_*`` 2 / ``sigma_*`` 2 /
+      ``beta_consistency_*`` 1)—— 日收益对基准指数的市场模型回归(窗口
+      500 - 1320 根 bar),对标沪深300(``000300.SH``)或上证指数
+      (``000001.SH``),依赖 ``bars.close`` + ``index_bars.close``;
+      全部声明 ``min_history_bars = window``(覆盖起点 #361);
+    * 成交量族(``volume_*`` 3)—— 成交量动量(5 日滚动和 + 1 日滞后)对
+      指数同式动量的滚动 OLS,依赖 ``bars.volume`` + ``index_bars.volume``,
+      声明 ``min_history_bars = window + 6``(5 日滚动 + 1 日滞后 + 窗口);
+    * ``nl_size`` —— 逐业务日总市值截面 cubic 回归残差,依赖
+      ``daily_metrics.total_market_cap``(``cross_section=True``,无窗口)。
+    """
+    entries: list[PredefinedFactorDefinition] = []
+    for window, suffix in (
+        (500, "000300"),
+        (528, "000001"),
+        (792, "000001"),
+        (1000, "000300"),
+        (1320, "000001"),
+    ):
+        market_symbol = _BATCH6_MARKET_SUFFIX[suffix]
+        entries.append(
+            _entry(
+                f"alpha_{window}d_{suffix}",
+                title=f"alpha_{window}d_{suffix} = 日收益对 {market_symbol} 日收益 "
+                f"trailing {window} 根 bar OLS 截距(Jensen alpha 长窗;"
+                f"min_history_bars={window} 声明覆盖起点)",
+                family="momentum",
+                compute=_market_reg_alpha(window, market_symbol),
+                window=window,
+                data_dependencies=("bars.close", "index_bars.close"),
+                min_history_bars=window,
+            )
+        )
+    for window in (500, 1000):
+        entries.append(
+            _entry(
+                f"beta_{window}d_000300",
+                title=f"beta_{window}d_000300 = 日收益对 000300.SH 日收益 trailing "
+                f"{window} 根 bar OLS 斜率(cov/var;低 beta 异象 direction LOWER)",
+                family="risk",
+                compute=_market_beta(window, "000300.SH"),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "index_bars.close"),
+                min_history_bars=window,
+            )
+        )
+    for suffix in ("000001", "000300"):
+        market_symbol = _BATCH6_MARKET_SUFFIX[suffix]
+        entries.append(
+            _entry(
+                f"sigma_1320d_{suffix}",
+                title=f"sigma_1320d_{suffix} = 市场模型残差标准差 std(日收益) x "
+                f"sqrt(1 - rho^2)(对标 {market_symbol},trailing 1320 根 bar "
+                "特质风险)",
+                family="risk",
+                compute=_market_resid_std(1320, market_symbol),
+                window=1320,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                data_dependencies=("bars.close", "index_bars.close"),
+                min_history_bars=1320,
+            )
+        )
+    entries.append(
+        _entry(
+            "beta_consistency_1320d_000300",
+            title="beta_consistency_1320d_000300 = 同窗 beta 与市场模型残差之积的"
+            "标准差 |beta| x std(residual)(对标 000300.SH,1320 根 bar 长窗)",
+            family="risk",
+            compute=_market_beta_consistency(1320, "000300.SH"),
+            window=1320,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("bars.close", "index_bars.close"),
+            min_history_bars=1320,
+        )
+    )
+    for window, suffix in ((300, "000001"), (300, "000300")):
+        market_symbol = _BATCH6_MARKET_SUFFIX[suffix]
+        entries.append(
+            _entry(
+                f"volume_alpha_{window}d_{suffix}",
+                title=f"volume_alpha_{window}d_{suffix} = 成交量动量 VolMom(5 日滚动"
+                f"和 - 1 日滞后,除以滞后项)对 {market_symbol} 同式动量的 trailing "
+                f"{window} 根 bar OLS 截距(需 {window + 6} 根 bar)",
+                family="liquidity",
+                compute=_volume_reg_alpha(window, market_symbol),
+                window=window,
+                signal_eligible=False,
+                data_dependencies=("bars.volume", "index_bars.volume"),
+                min_history_bars=window + 6,
+            )
+        )
+    entries.append(
+        _entry(
+            "volume_beta_120d_000300",
+            title="volume_beta_120d_000300 = 成交量动量 VolMom(5 日滚动和 + 1 日"
+            "滞后)对 000300.SH 同式动量的 trailing 120 根 bar OLS 斜率"
+            "(需 126 根 bar)",
+            family="liquidity",
+            compute=_volume_reg_beta(120, "000300.SH"),
+            window=120,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            data_dependencies=("bars.volume", "index_bars.volume"),
+            min_history_bars=126,
+        )
+    )
+    entries.append(
+        _entry(
+            "nl_size",
+            title="nl_size = 总市值截面 cubic 回归残差:x = size / mean(size)"
+            "(无量纲化),残差 = x^3 - (a + b*x) 闭式 OLS;同日有限点 < 3 或"
+            "截面方差 <= 0 → 该日全缺测",
+            family="size",
+            compute=_nl_size_compute(),
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+            cross_section=True,
+            data_dependencies=("daily_metrics.total_market_cap",),
+        )
+    )
+    return tuple(entries)
+
+
 #: 目录(裸名 → 条目)。批次 0 样板:return_Nd 动量族(4 窗口变体);
 #: 批次 1-4(~150+ 因子)按同一模式在此追加注册。
 #:
@@ -4097,6 +4490,8 @@ PREDEFINED_FACTORS = {
         *_vol_entries(),
         *_liquidity_entries(),
         *_size_entries(),
+        # ---- 批次 6(#429)P2 市场回归族:长窗 alpha/beta/sigma + 成交量回归 + nl_size ----
+        *_batch6_market_entries(),
         # ---- 批次 6(P1 量价,#429):换手乖离/净值高低比/窗口变体/MACD 分量 ----
         *_batch6_quant_entries(),
         # ---- 批次 6(P1 财务,#429) ----
