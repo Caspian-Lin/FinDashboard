@@ -68,6 +68,18 @@ PIT)与 ``dividend_events()``(事件史);分子 = 决策日可见的最近一次
 ``qmj_*`` 支柱与合成为截面算子产物(``cross_section=True``,采样面
 收窄到可交易域),合成口径见各条目 title/docstring。
 
+**批次 6(#429)P1 财务族**(29 个,desc 均为 ``CrossSectionalRank``
+口径 → 全部 ``cross_section=True``):变化 / 同比 / 环比 / 加速度族在
+**公告序列上做 PIT 历史回看** —— 行 i 的回看基值 = 「公告日往前 N 根
+bar 的时点」可见(``available_at`` 门控)的最近一次公告值,严格无前视
+(回看时点早于公告可见锚,只消费更早的行);长回看因子声明
+``min_history_bars``(回看 + 滞后合计,#399 覆盖起点)。诚实边界:
+上游无 TTM / 单季预计算字段的条目(eaa/eap 的 EPS、npm_ttm_qoq、
+eps_ttm/eps_q/eps_y、opm_y/opm_ttm、opt_tpro)以 ``financial_indicators``
+公告步进累计口径或三表累计科目近似,#401 同边界;``npm_q_qoq`` /
+``asset_growth_qoq`` 的 desc 基期为 ``t-1``(上一条公告),按公告序
+一阶差分实现(修订公告对给出 ≈0 差值,``_financial_accel`` 同边界)。
+
 纯离线研究域,不连 broker 不下单。
 """
 
@@ -89,6 +101,7 @@ from finboard_backtest.factors.predefined.context import (
     FactorSeriesFrame,
     PredefinedFactorInput,
     SymbolSeries,
+    end_of_day,
 )
 from finboard_backtest.factors.predefined.operators import (
     CrossSection,
@@ -1337,6 +1350,252 @@ def _raw_cross_frame(raw: _RawCross) -> PredefinedFactorCompute:
         }
 
     return compute
+
+
+# --------------------------------------------------------------------- #
+# 批次 6(#429):公告序列的 PIT 历史回看机制
+# --------------------------------------------------------------------- #
+#
+# 「同比 / 环比 / 变化 / 加速度」族的技术方案(#429 拍板):预置因子通道
+# 的 ``compute`` 拿到的是**全量公告序列**(#401/#402 同契约)+ 全窗口 bars
+# 交易日历,历史回看在逐公告行上实现 —— 行 i(公告日 d_i)的回看基值 =
+# 「d_i 往前 lookback 根 bar 的时点」上可见(``available_at`` 门控)的
+# 最近一次公告值:
+#
+# * PIT 无前视:回看时点严格早于 d_i,可见行 j 满足
+#   ``available_at[j] <= 回看日终 < anchor(d_i) = available_at[i]``,即
+#   j < i(序列按 available_at 升序),只消费**更早**的行;
+# * 前缀不变性:截断变体按 ``available_at <= cut`` 过滤,行 i 留存则其
+#   回看消费的行与 bar 日历前缀同步留存,逐行值不变(结构性成立);
+# * 「N 根 bar」= 该标的自身 bar 日历上的 N 个交易日(停牌缺行使基期
+#   自然后移,与 return_Nd 同口径);bar 覆盖不足 → 缺测(NaN)。
+#
+# 长回看因子声明 ``min_history_bars``(#399 覆盖起点):回看 + 滞后合计。
+
+#: 同比 / 年度变化族的 bar 回看长度(≈ 一年交易日)
+_BATCH6_YEAR_BARS = 252
+
+#: 加速度族的滞后长度与环比族的季度近似(≈ 一季度交易日)
+_BATCH6_QUARTER_BARS = 63
+
+
+def _past_bar_date(
+    calendar: SymbolSeries, day: date, lookback: int
+) -> date | None:
+    """bar 日历上 ``day`` 的 as-of 位置前推 ``lookback`` 根 → 历史 PIT 日期。
+
+    ``day`` 之前无 bar、或前推后越出日历起点 → None(覆盖不足,缺测)。
+    """
+    import bisect
+
+    position = bisect.bisect_right(calendar.dates, day) - 1
+    if position < 0:
+        return None
+    past = position - lookback
+    if past < 0:
+        return None
+    return calendar.dates[past]
+
+
+def _lookback_values(
+    series: SymbolSeries, calendar: SymbolSeries, lookback: int
+) -> np.ndarray:
+    """逐公告行的回看基值:行 i = 「公告日往前 lookback 根 bar」时点的
+    PIT 可见公告值(见本节头注的无前视 / 前缀不变性论证)。"""
+    out = np.full(series.values.size, np.nan)
+    for position, day in enumerate(series.dates):
+        past_day = _past_bar_date(calendar, day, lookback)
+        if past_day is not None:
+            out[position] = series.asof(past_day)
+    return out
+
+
+def _change_values(
+    series: SymbolSeries, calendar: SymbolSeries, lookback: int, *, ratio: bool
+) -> np.ndarray:
+    """逐公告行变化值:``ratio=False`` 为差分(值 - 基值),``ratio=True``
+    为同比(值 / 基值 - 1,基期 <= 0 → 缺测,不虚构反号增速)。"""
+    base = _lookback_values(series, calendar, lookback)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if not ratio:
+            result: np.ndarray = series.values - base
+            return result
+        growth = series.values / base - 1.0
+    return np.where(base > 0.0, growth, np.nan)
+
+
+def _accel_values(
+    per_row: np.ndarray, series: SymbolSeries, calendar: SymbolSeries, lag: int
+) -> np.ndarray:
+    """逐公告行派生序列的加速度:行 i = 派生值 - 「公告日往前 lag 根 bar」
+    时点 PIT 可见的派生值(任一端缺测 → 缺测)。"""
+    out = np.full(per_row.size, np.nan)
+    for position, day in enumerate(series.dates):
+        past_day = _past_bar_date(calendar, day, lag)
+        if past_day is None:
+            continue
+        past_position = series.position_asof(end_of_day(past_day))
+        if past_position < 0:
+            continue
+        current = per_row[position]
+        past = per_row[past_position]
+        if math.isfinite(current) and math.isfinite(past):
+            out[position] = current - past
+    return out
+
+
+def _close_asof_values(calendar: SymbolSeries, days: tuple[date, ...]) -> np.ndarray:
+    """逐公告日的 as-of 收盘价(公告日当天或之前最近一根 bar 的 close)。"""
+    import bisect
+
+    out = np.full(len(days), np.nan)
+    for position, day in enumerate(days):
+        bar = bisect.bisect_right(calendar.dates, day) - 1
+        if bar >= 0:
+            out[position] = calendar.values[bar]
+    return out
+
+
+def _rank_frame(compute: PredefinedFactorCompute) -> PredefinedFactorCompute:
+    """决策日截面 rank 包裹(desc 的 ``CrossSectionalRank``;cross_section
+    条目的采样面已收窄到可交易域,rank 分母即该域,#380)。"""
+
+    def ranked(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        return {day: cs_rank(cross) for day, cross in compute(inp).items()}
+
+    return ranked
+
+
+def _financial_change_rank(
+    kind: str, field: str, lookback: int, *, ratio: bool
+) -> PredefinedFactorCompute:
+    """公告字段的历史回看变化族:逐公告行变化值 → 截面 rank。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        series = _dataset_series(inp, kind, field)
+        bars = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, item in series.items():
+            calendar = bars.get(symbol)
+            if calendar is None:
+                per_symbol[symbol] = np.full(item.values.size, np.nan)
+                continue
+            per_symbol[symbol] = _change_values(
+                item, calendar, lookback, ratio=ratio
+            )
+        return inp.sample(series, per_symbol)
+
+    return _rank_frame(compute)
+
+
+def _financial_accel_rank(
+    kind: str, field: str, lookback: int, lag: int, *, ratio: bool
+) -> PredefinedFactorCompute:
+    """变化族的加速度:逐公告行变化值相对「lag 根 bar 前 PIT 可见变化值」
+    的再差分(描述的 PG - PG_{t-lag} 形态)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        series = _dataset_series(inp, kind, field)
+        bars = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, item in series.items():
+            calendar = bars.get(symbol)
+            if calendar is None:
+                per_symbol[symbol] = np.full(item.values.size, np.nan)
+                continue
+            change = _change_values(item, calendar, lookback, ratio=ratio)
+            per_symbol[symbol] = _accel_values(change, item, calendar, lag)
+        return inp.sample(series, per_symbol)
+
+    return _rank_frame(compute)
+
+
+def _eps_growth_vs_price_rank() -> PredefinedFactorCompute:
+    """``eap``:EGP = (EPS_t - EPS_{t-252}) / close,``EAP = EGP - EGP_{t-63}``
+    (EPS 增量的价格标准化;close 取公告日 as-of 收盘)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        series = inp.research_dataset("financial_indicators", "eps")
+        bars = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, item in series.items():
+            calendar = bars.get(symbol)
+            if calendar is None:
+                per_symbol[symbol] = np.full(item.values.size, np.nan)
+                continue
+            base = _lookback_values(item, calendar, _BATCH6_YEAR_BARS)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                growth = (item.values - base) / _close_asof_values(
+                    calendar, item.dates
+                )
+            per_symbol[symbol] = _accel_values(
+                growth, item, calendar, _BATCH6_QUARTER_BARS
+            )
+        return inp.sample(series, per_symbol)
+
+    return _rank_frame(compute)
+
+
+def _financial_step_ratio_rank(kind: str, field: str) -> PredefinedFactorCompute:
+    """公告序一阶环比(desc 的 ``v_t / v_{t-1} - 1``):基期 = **上一条
+    公告**(#401 ``_financial_accel`` 同诚实边界 —— 修订公告对给出 ≈0 的
+    差值;基期 <= 0 → 缺测)。无 bar 回看,不声明 ``min_history_bars``。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        series = _dataset_series(inp, kind, field)
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, item in series.items():
+            base = ts_delay(item.values, 1)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                growth = item.values / base - 1.0
+            per_symbol[symbol] = np.where(base > 0.0, growth, np.nan)
+        return inp.sample(series, per_symbol)
+
+    return _rank_frame(compute)
+
+
+def _financial_level_rank(kind: str, field: str) -> PredefinedFactorCompute:
+    """公告字段水平值的截面 rank(desc 的 ``CrossSectionalRank(水平值)``;
+    采样取「决策日可见的最近一次公告」后逐日 rank)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        series = _dataset_series(inp, kind, field)
+        frame = inp.sample(series, {s: item.values for s, item in series.items()})
+        return {day: cs_rank(cross) for day, cross in frame.items()}
+
+    return compute
+
+
+def _ratio_rank_definition(
+    name: str,
+    *,
+    title: str,
+    family: str,
+    numerator: tuple[_NumComponent, ...],
+    denominator: tuple[str, str],
+    direction: FactorPreference = FactorPreference.HIGHER,
+) -> PredefinedFactorDefinition:
+    """:func:`_ratio_definition` 的截面 rank 变体(批次 6:desc 均为
+    ``CrossSectionalRatio`` 口径,``cross_section=True``)。"""
+    return PredefinedFactorDefinition(
+        name=name,
+        title=title,
+        family=family,
+        direction=direction,
+        signal_eligible=True,
+        data_dependencies=tuple(
+            dict.fromkeys(
+                [f"{item.kind}.{item.field}" for item in numerator]
+                + [f"{denominator[0]}.{denominator[1]}"]
+            )
+        ),
+        window=None,
+        implementation_version="1",
+        compute=_rank_frame(_ratio_compute(numerator, denominator)),
+        cross_section=True,
+    )
+
+
 # --------------------------------------------------------------------- #
 # Alpha101 批次(issue #400)——共享口径辅助
 # --------------------------------------------------------------------- #
@@ -3082,6 +3341,127 @@ def _batch6_quant_entries() -> tuple[PredefinedFactorDefinition, ...]:
 
 
 # ---- 批次 6(P1 量价,#429)结束 ----
+def _batch6_delta_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """变化族 9 个(#429):``Δ = 字段_t - 字段_{t-252 根 bar PIT}`` → 截面
+    rank;direction 随对应 ``fin_*`` 水平因子的方向(杠杆上升看空)。"""
+    specs: tuple[tuple[str, str, FactorPreference, str], ...] = (
+        ("delta_roe", "return_on_equity", FactorPreference.HIGHER, "ROE"),
+        ("delta_roa", "return_on_assets", FactorPreference.HIGHER, "ROA"),
+        ("delta_npm", "net_profit_margin", FactorPreference.HIGHER, "净利率"),
+        ("delta_gpm", "gross_profit_margin", FactorPreference.HIGHER, "毛利率"),
+        (
+            "delta_de",
+            "debt_to_equity",
+            FactorPreference.LOWER,
+            "产权比率(DE;杠杆上升看空)",
+        ),
+        ("delta_current_ratio", "current_ratio", FactorPreference.HIGHER, "流动比率"),
+        ("delta_quick_ratio", "quick_ratio", FactorPreference.HIGHER, "速动比率"),
+        (
+            "delta_asset_turnover",
+            "total_assets_turnover",
+            FactorPreference.HIGHER,
+            "总资产周转率",
+        ),
+        (
+            "delta_inventory_turnover",
+            "inventory_turnover",
+            FactorPreference.HIGHER,
+            "存货周转率",
+        ),
+    )
+    return tuple(
+        _entry(
+            name,
+            title=(
+                f"{name} = Δ{label} = {label}_t - {label}_t-252(252 根 bar 前"
+                " PIT 可见公告值,公告步进截面 rank)"
+            ),
+            family="quality",
+            compute=_financial_change_rank(
+                "financial_indicators", field, _BATCH6_YEAR_BARS, ratio=False
+            ),
+            window=_BATCH6_YEAR_BARS,
+            cross_section=True,
+            direction=direction,
+            data_dependencies=(
+                f"financial_indicators.{field}",
+                "bars.close",
+            ),
+            min_history_bars=_BATCH6_YEAR_BARS,
+        )
+        for name, field, direction, label in specs
+    )
+
+
+def _batch6_yoy_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """同比族 4 个(#429):``yoy = 值_t / 值_{t-252 根 bar PIT} - 1`` → 截面
+    rank(基期 <= 0 → 缺测,不虚构反号增速)。"""
+    specs: tuple[tuple[str, str, str, str], ...] = (
+        (
+            "yoy_roa",
+            "financial_indicators",
+            "return_on_assets",
+            "ROA(TTM 以报告期累计近似)",
+        ),
+        (
+            "yoy_roe",
+            "financial_indicators",
+            "return_on_equity",
+            "ROE(TTM 以报告期累计近似)",
+        ),
+        (
+            "yoy_net_asset",
+            "balance_sheets",
+            "total_hldr_eqy_exc_min_int",
+            "归母净资产",
+        ),
+        ("yoy_total_asset", "balance_sheets", "total_assets", "总资产"),
+    )
+    return tuple(
+        _entry(
+            name,
+            title=(
+                f"{name} = {label}同比 = 值_t / 值_t-252 - 1(252 根 bar 前"
+                " PIT 可见公告值;基期 <= 0 缺测,截面 rank)"
+            ),
+            family="growth",
+            compute=_financial_change_rank(
+                kind, field, _BATCH6_YEAR_BARS, ratio=True
+            ),
+            window=_BATCH6_YEAR_BARS,
+            cross_section=True,
+            data_dependencies=(f"{kind}.{field}", "bars.close"),
+            min_history_bars=_BATCH6_YEAR_BARS,
+        )
+        for name, kind, field, label in specs
+    )
+
+
+def _level_rank_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """基本每股收益水平 3 个(#429):desc 同为 ``CrossSectionalRank(BasicEPS)``
+    —— 上游无单季 / TTM 的 EPS 预计算字段,三口径统一以
+    ``financial_indicators.eps``(公告步进累计)近似,title 各自记边界。"""
+    specs: tuple[tuple[str, str], ...] = (
+        ("eps_ttm", "TTM 口径以公告步进累计近似,#401 边界"),
+        ("eps_q", "单季口径以公告步进累计近似(上游无单季 EPS 预计算字段)"),
+        ("eps_y", "年度口径以公告步进累计近似,#401 边界"),
+    )
+    return tuple(
+        _entry(
+            name,
+            title=(
+                f"{name} = 基本每股收益截面 rank({note};"
+                "financial_indicators.eps 公告步进取值)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_financial_level_rank("financial_indicators", "eps"),
+            data_dependencies=("financial_indicators.eps",),
+        )
+        for name, note in specs
+    )
+
 
 #: 目录(裸名 → 条目)。批次 0 样板:return_Nd 动量族(4 窗口变体);
 #: 批次 1-4(~150+ 因子)按同一模式在此追加注册。
@@ -3095,6 +3475,8 @@ def _batch6_quant_entries() -> tuple[PredefinedFactorDefinition, ...]:
 #: ``qlt_*``(9 个质量补全)、``qmj_*``(AQR QMJ 四支柱 + 综合,截面
 #: rank 合成口径见 :func:`_qmj_components` / 各条目 title)。
 #: 批次 2(#400):Alpha101 量价 31 因子;后续批次按同一模式追加注册。
+#: 批次 6(#429):P1 财务 29 因子 —— 公告序列 PIT 历史回看的变化 / 同比 /
+#: 环比 / 加速度 / 水平族(机制见模块 docstring「批次 6」节)。
 PREDEFINED_FACTORS = {
     item.name: item
     for item in (
@@ -3717,6 +4099,213 @@ PREDEFINED_FACTORS = {
         *_size_entries(),
         # ---- 批次 6(P1 量价,#429):换手乖离/净值高低比/窗口变体/MACD 分量 ----
         *_batch6_quant_entries(),
+        # ---- 批次 6(P1 财务,#429) ----
+        # 公告序列 PIT 历史回看机制见本模块「批次 6」节;desc 均为
+        # CrossSectionalRank 口径 → 全部 cross_section=True(rank 分母 =
+        # 可交易域,#380);长回看因子声明 min_history_bars(回看+滞后合计)。
+        *_batch6_delta_entries(),
+        *_batch6_yoy_entries(),
+        # 加速度 / 环比族(growth / quality)
+        _entry(
+            "pa",
+            title=(
+                "pa = ROA 增长加速度 = PG_t - PG_t-63,PG = ΔROA(252 根 bar"
+                " PIT 回看;需 315 根 bar 历史,截面 rank)"
+            ),
+            family="growth",
+            cross_section=True,
+            compute=_financial_accel_rank(
+                "financial_indicators",
+                "return_on_assets",
+                _BATCH6_YEAR_BARS,
+                _BATCH6_QUARTER_BARS,
+                ratio=False,
+            ),
+            window=_BATCH6_YEAR_BARS + _BATCH6_QUARTER_BARS,
+            data_dependencies=(
+                "financial_indicators.return_on_assets",
+                "bars.close",
+            ),
+            min_history_bars=_BATCH6_YEAR_BARS + _BATCH6_QUARTER_BARS,
+        ),
+        _entry(
+            "eaa",
+            title=(
+                "eaa = EPS 增长加速度 = EGA_t - EGA_t-63,EGA = EPS 同比"
+                "(EPS_t / EPS_t-252 - 1,252 根 bar PIT 回看;需 315 根 bar"
+                " 历史,累计口径近似单季 EPS,截面 rank)"
+            ),
+            family="growth",
+            cross_section=True,
+            compute=_financial_accel_rank(
+                "financial_indicators",
+                "eps",
+                _BATCH6_YEAR_BARS,
+                _BATCH6_QUARTER_BARS,
+                ratio=True,
+            ),
+            window=_BATCH6_YEAR_BARS + _BATCH6_QUARTER_BARS,
+            data_dependencies=("financial_indicators.eps", "bars.close"),
+            min_history_bars=_BATCH6_YEAR_BARS + _BATCH6_QUARTER_BARS,
+        ),
+        _entry(
+            "eap",
+            title=(
+                "eap = EPS 增长的价格标准化加速度 = EGP_t - EGP_t-63,EGP = "
+                "(EPS_t - EPS_t-252) / close(close 取公告日 as-of 收盘;"
+                "需 315 根 bar 历史,截面 rank)"
+            ),
+            family="growth",
+            cross_section=True,
+            compute=_eps_growth_vs_price_rank(),
+            window=_BATCH6_YEAR_BARS + _BATCH6_QUARTER_BARS,
+            data_dependencies=("financial_indicators.eps", "bars.close"),
+            min_history_bars=_BATCH6_YEAR_BARS + _BATCH6_QUARTER_BARS,
+        ),
+        _entry(
+            "asset_growth_qoq",
+            title=(
+                "asset_growth_qoq = 总资产环比增速 = 总资产_t / 总资产_t-1 - 1"
+                "(基期 = 上一条公告,#401 accel 同诚实边界;基期 <= 0 缺测,"
+                "截面 rank)"
+            ),
+            family="growth",
+            cross_section=True,
+            compute=_financial_step_ratio_rank("balance_sheets", "total_assets"),
+            data_dependencies=("balance_sheets.total_assets",),
+        ),
+        _entry(
+            "gpm_qoq",
+            title=(
+                "gpm_qoq = 毛利率(TTM)环比 = GPM_t / GPM_t-63 - 1(63 根 bar"
+                " ≈ 一季度;TTM 以公告步进累计毛利率近似,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_financial_change_rank(
+                "financial_indicators",
+                "gross_profit_margin",
+                _BATCH6_QUARTER_BARS,
+                ratio=True,
+            ),
+            window=_BATCH6_QUARTER_BARS,
+            data_dependencies=(
+                "financial_indicators.gross_profit_margin",
+                "bars.close",
+            ),
+            min_history_bars=_BATCH6_QUARTER_BARS,
+        ),
+        _entry(
+            "npm_q_qoq",
+            title=(
+                "npm_q_qoq = 单季净利率环比 = NPM_Q_t / NPM_Q_t-1 - 1(基期 = "
+                "上一条公告,#401 accel 同诚实边界;单季口径 = 上游 q_ 字段,"
+                "截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_financial_step_ratio_rank(
+                "financial_indicators", "netprofit_margin_q"
+            ),
+            data_dependencies=("financial_indicators.netprofit_margin_q",),
+        ),
+        _entry(
+            "npm_ttm_qoq",
+            title=(
+                "npm_ttm_qoq = 净利率(TTM)环比 = NPM_t / NPM_t-63 - 1(63 根"
+                " bar ≈ 一季度;TTM 以公告步进累计净利率近似,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_financial_change_rank(
+                "financial_indicators",
+                "net_profit_margin",
+                _BATCH6_QUARTER_BARS,
+                ratio=True,
+            ),
+            window=_BATCH6_QUARTER_BARS,
+            data_dependencies=("financial_indicators.net_profit_margin", "bars.close"),
+            min_history_bars=_BATCH6_QUARTER_BARS,
+        ),
+        # 水平族(quality;desc 均为 CrossSectionalRank(水平值) 口径)
+        _ratio_rank_definition(
+            "opm_y",
+            title=(
+                "opm_y = 营业利润率(年度口径)= 营业利润 / 营业收入(公告步进"
+                "累计口径,年度与 TTM 同源,截面 rank)"
+            ),
+            family="quality",
+            numerator=(
+                _NumComponent("income_statements", "operate_profit", required=True),
+            ),
+            denominator=("income_statements", "revenue"),
+        ),
+        _ratio_rank_definition(
+            "opm_ttm",
+            title=(
+                "opm_ttm = 营业利润率(TTM 口径)= 营业利润 / 营业收入(TTM 以"
+                "公告步进累计口径近似,#401 边界,截面 rank)"
+            ),
+            family="quality",
+            numerator=(
+                _NumComponent("income_statements", "operate_profit", required=True),
+            ),
+            denominator=("income_statements", "revenue"),
+        ),
+        *_level_rank_entries(),
+        _ratio_rank_definition(
+            "opt_tpro",
+            title=(
+                "opt_tpro = 营业利润 / 利润总额(单季口径以公告步进累计近似;"
+                "比率 ∈ [0,1] 反映利润的营业含量,截面 rank)"
+            ),
+            family="quality",
+            numerator=(
+                _NumComponent("income_statements", "operate_profit", required=True),
+            ),
+            denominator=("income_statements", "total_profit"),
+        ),
+        _ratio_rank_definition(
+            "equity_turnover",
+            title=(
+                "equity_turnover = 股东权益周转率 = 营业收入 / 股东权益合计"
+                "(含少数股东权益,TTM 以公告步进累计口径近似,截面 rank)"
+            ),
+            family="quality",
+            numerator=(_NumComponent("income_statements", "revenue", required=True),),
+            denominator=("balance_sheets", "total_hldr_eqy_inc_min_int"),
+        ),
+        _ratio_rank_definition(
+            "cfcr",
+            title=(
+                "cfcr = 现金流利息保障倍数 = 经营现金流净额 / 利息费用(利息"
+                "费用 <= 0 缺测不虚构,TTM 以公告步进累计口径近似,截面 rank)"
+            ),
+            family="quality",
+            numerator=(
+                _NumComponent("cashflow_statements", "n_cashflow_act", required=True),
+            ),
+            denominator=("income_statements", "int_exp"),
+        ),
+        _ratio_rank_definition(
+            "ncf_to_market",
+            title=(
+                "ncf_to_market = 净现金流市值比 = (经营 + 投资 + 筹资净现金流)"
+                "/ 总市值(三净额缺一不可,分母 = daily_metrics.total_market_cap"
+                " 同日可见口径,val_ocf_to_market 先例,截面 rank)"
+            ),
+            family="value",
+            numerator=(
+                _NumComponent("cashflow_statements", "n_cashflow_act", required=True),
+                _NumComponent(
+                    "cashflow_statements", "n_cashflow_inv_act", required=True
+                ),
+                _NumComponent(
+                    "cashflow_statements", "n_cash_flows_fnc_act", required=True
+                ),
+            ),
+            denominator=("daily_metrics", "total_market_cap"),
+        ),
     )
 }
 
