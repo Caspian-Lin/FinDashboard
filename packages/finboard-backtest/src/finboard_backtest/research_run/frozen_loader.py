@@ -561,11 +561,78 @@ class FrozenInputLoader:
     )
     # 预建只尝试一次(决策日全集冻结,候选域逐期不变)。
     _daily_precompute_built: bool = field(default=False, init=False, repr=False)
+    # #450 追续:价格特征 run 级预计算(每标的一次向量化计算覆盖全部决策期)。
+    _price_precompute: PriceFeaturePrecompute | None = field(
+        default=None, init=False, repr=False
+    )
+    _price_precompute_built: bool = field(default=False, init=False, repr=False)
 
     @property
     def close_histories(self) -> Mapping[str, SymbolCloseHistory | None]:
         """已构建的 close 矩阵(供价格序列等复用切片;未启用时为空)。"""
         return self._close_histories
+
+    @property
+    def price_feature_precompute(self) -> PriceFeaturePrecompute | None:
+        """已构建的价格特征预计算(#450 追续;未启用时为 None)。"""
+        return self._price_precompute
+
+    async def ensure_price_feature_precompute(
+        self,
+        manifest: ResearchRunManifest,
+        decision_ats: Sequence[datetime],
+        *,
+        progress: PrecomputeProgressReporter | None = None,
+        cancel_probe: PrecomputeCancelProbe | None = None,
+    ) -> None:
+        """一次性预建全部决策期的价格特征(幂等;#450 追续)。
+
+        与 :meth:`ensure_close_histories` 同类:分块前单一顺序点预建,每标的
+        一次向量化计算覆盖全部决策期(逐期矩阵切片也要 5000 次 per-symbol
+        Python 循环 + 快照 checksum,全市场 ≈ 30s/期)。矩阵未构建时先复用
+        :meth:`ensure_close_histories`(预计算以矩阵为底座);评估域与矩阵
+        同口径(#299/#380)。非真实 provider / 非 D1 发布不预建(逐期路径
+        行为不变)。``cancel_probe`` 语义同 close/daily 预建(#450 追续)。
+        """
+        if self._price_precompute_built or not decision_ats:
+            return
+        from finboard_shared.types import BarPeriod
+
+        release_ref = self._bars_release_ref(manifest)
+        if (
+            self.release_provider_factory(release_ref.artifact_id).release.period
+            is not BarPeriod.D1
+        ):
+            self._price_precompute_built = True
+            return
+        await self.ensure_close_histories(
+            manifest,
+            progress=progress,
+            cancel_probe=cancel_probe,
+        )
+        if not self._close_histories:
+            self._price_precompute_built = True
+            return
+        self._price_precompute_built = True
+        candidates, _ = _build_candidates_and_lots(
+            _declared_domain_instruments(
+                manifest,
+                list(
+                    self.release_provider_factory(release_ref.artifact_id).release.instruments
+                ),
+            )
+        )
+        symbols = tuple(item.symbol for item in candidates)
+        if not symbols:
+            self._price_precompute_built = True
+            return
+        self._price_precompute = await build_price_feature_precompute(
+            histories=self._close_histories,
+            provider=self.release_provider_factory(release_ref.artifact_id),
+            decision_ats=decision_ats,
+            symbols=symbols,
+            cancel_probe=cancel_probe,
+        )
 
     async def load_context(
         self,
@@ -1799,6 +1866,230 @@ async def build_price_feature_snapshot_from_close_matrix(
         observations=observations,
         momentum_lookback=lookback,
         volatility_windows=windows,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodPriceFeatures:
+    """单标的在单个决策期的价格特征集(#450 追续预计算形态)。
+
+    ``names``/``values`` 平行且同长(names 顺序 = 特征数学的构造顺序);
+    ``None`` 项表示该期无可见数据或历史不足。
+    """
+
+    available_at: datetime
+    observed_at: datetime
+    names: tuple[str, ...]
+    values: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PriceFeaturePrecompute:
+    """run 级价格特征预计算:每标的一次向量化计算覆盖全部决策期(#450 追续)。
+
+    逐期 ``build_price_feature_snapshot`` 即使走矩阵切片,仍要 5000 次
+    Python 级 per-symbol 循环 + 快照 checksum(全市场 ≈ 30s/期);预建后
+    逐期消费变查表 + ``FeatureValue`` 构造。内存 ≈ 75 期 x 5000 标的 x
+    ~250B ≈ 94MB。
+    """
+
+    release_id: str
+    decision_ats: tuple[datetime, ...]
+    by_symbol: dict[str, tuple[PeriodPriceFeatures | None, ...]]
+    symbols: tuple[str, ...]
+
+    def feature_values(
+        self, decision_at: datetime, release_id: str
+    ) -> tuple[FeatureValue, ...] | None:
+        """取该决策期的全部价格特征 ``FeatureValue``(无该期返回 None)。"""
+        try:
+            index = self.decision_ats.index(decision_at)
+        except ValueError:
+            return None
+        from finboard_backtest.research_run.contracts import FeatureValue
+
+        out: list[FeatureValue] = []
+        for code in self.symbols:
+            per_symbol = self.by_symbol.get(code)
+            if per_symbol is None:
+                continue
+            item = per_symbol[index]
+            if item is None:
+                continue
+            for name, value in zip(item.names, item.values, strict=True):
+                out.append(
+                    FeatureValue(
+                        symbol=code,
+                        feature_id=name,
+                        value=value,
+                        source_artifact_ids=(release_id,),
+                        available_at=item.available_at,
+                    )
+                )
+        return tuple(out)
+
+
+def _period_features_for_symbol(
+    history: SymbolCloseHistory,
+    decision_epochs: np.ndarray,
+    decision_ordinals: np.ndarray,
+    *,
+    lookback: int,
+    windows: tuple[int, ...],
+    tail_n: int,
+) -> tuple[PeriodPriceFeatures | None, ...]:
+    """单标的向量化计算全部决策期的价格特征(#450 追续)。
+
+    与 :func:`price_observations_from_closes` 逐值等值:可见索引是同一
+    双键 searchsorted;returns 在全序列上只算一次,各期窗口是它的连续
+    切片(元素与尾切片逐一相同,np.std 逐位等值)。
+    """
+    n = int(history.available_at_us.size)
+    idx = np.minimum(
+        np.searchsorted(history.available_at_us, decision_epochs, side="right"),
+        np.searchsorted(history.date_days, decision_ordinals, side="right"),
+    ).astype(np.int64) - 1
+    closes = history.closes
+    returns = np.diff(closes) / closes[:-1] if n >= 2 else np.empty(0)
+    max_w = max(windows) if windows else 0
+    out: list[PeriodPriceFeatures | None] = []
+    for k in range(decision_epochs.size):
+        ip = int(idx[k])
+        if ip < 0:
+            out.append(None)
+            continue
+        lo = max(0, ip + 1 - tail_n)
+        n_ret = ip - lo
+        names: list[str] = []
+        values: list[float] = []
+        if ip - lo >= lookback:
+            names.append("momentum")
+            # closes[-(lookback+1)] = c[ip-lookback](切片倒数第 lookback+1 个)
+            values.append(float(closes[ip] / closes[ip - lookback] - 1.0))
+        for window in windows:
+            if n_ret >= window:
+                names.append(f"volatility_{window}d")
+                values.append(float(np.std(returns[ip - window : ip], ddof=1)))
+        downside_window = min(60, n_ret)
+        if downside_window >= 10:
+            downside = returns[ip - downside_window : ip]
+            downside = downside[downside < 0]
+            if downside.size >= 3:
+                names.append("downside_volatility")
+                values.append(float(np.std(downside, ddof=1)))
+        if not names:
+            out.append(None)
+            continue
+        last_date = date.fromordinal(int(history.date_days[ip]) + _EPOCH_ORDINAL)
+        out.append(
+            PeriodPriceFeatures(
+                available_at=history.available_at_at(ip),
+                observed_at=datetime.combine(last_date, time(0, 0), tzinfo=UTC),
+                names=tuple(names),
+                values=tuple(values),
+            )
+        )
+    return tuple(out)
+
+
+async def build_price_feature_precompute(
+    *,
+    histories: Mapping[str, SymbolCloseHistory | None],
+    provider: FrozenReleaseProvider,
+    decision_ats: Sequence[datetime],
+    symbols: Sequence[str],
+    momentum_lookback: int | None = None,
+    volatility_windows: tuple[int, ...] | None = None,
+    cancel_probe: PrecomputeCancelProbe | None = None,
+) -> PriceFeaturePrecompute:
+    """run 级价格特征预计算(#450 追续):每标的一次覆盖全部决策期。
+
+    矩阵未覆盖的标的(``None`` / 缺键)经 provider 做一次全区间列式读取
+    (同 #371 门控语义)后走同一计算;产出按 ``symbols`` 顺序保留。
+    """
+    from finboard_backtest.factor_lab import DEFAULT_MOMENTUM_LOOKBACK
+    from finboard_shared.models import Symbol
+
+    lookback = momentum_lookback if momentum_lookback is not None else DEFAULT_MOMENTUM_LOOKBACK
+    windows = volatility_windows if volatility_windows is not None else (20, 60, 120)
+    release = provider.release
+    by_code = {item.code: item for item in release.instruments}
+    scoped = tuple(code for code in by_code if code in set(symbols))
+    ordered = sorted(decision_ats)
+    epochs = np.array([_datetime_epoch_micros(at) for at in ordered], dtype=np.int64)
+    ordinals = np.array(
+        [at.date().toordinal() - _EPOCH_ORDINAL for at in ordered], dtype=np.int64
+    )
+    tail_n = max(lookback + 1, max(windows) + 1, 61)
+
+    def _from_history(history: SymbolCloseHistory) -> tuple[PeriodPriceFeatures | None, ...]:
+        return _period_features_for_symbol(
+            history,
+            epochs,
+            ordinals,
+            lookback=lookback,
+            windows=windows,
+            tail_n=tail_n,
+        )
+
+    fallback_codes = [
+        code for code in scoped if histories.get(code) is None
+    ]
+
+    async def _fallback_history(code: str) -> SymbolCloseHistory | None:
+        columns = await provider.fetch_close_history(
+            Symbol(code, by_code[code].market),
+            release.period,
+            release.start_date,
+            release.end_date,
+            decision_at=_PIT_UNBOUNDED,
+            adjust=release.adjustment,
+        )
+        return SymbolCloseHistory.from_sequences(
+            available_at=columns.available_at,
+            dates=columns.dates,
+            closes=columns.closes,
+            opens=columns.opens,
+        )
+
+    def _build_batch() -> dict[str, tuple[PeriodPriceFeatures | None, ...]]:
+        out: dict[str, tuple[PeriodPriceFeatures | None, ...]] = {}
+        for code in scoped:
+            history = histories.get(code)
+            if history is None:
+                continue
+            out[code] = _from_history(history)
+        return out
+
+    if cancel_probe is not None:
+        await cancel_probe()
+    by_symbol = await asyncio.to_thread(_build_batch)
+    if cancel_probe is not None:
+        await cancel_probe()
+    if fallback_codes:
+        semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
+
+        async def _one(code: str) -> tuple[str, tuple[PeriodPriceFeatures | None, ...]]:
+            async with semaphore:
+                history = await _fallback_history(code)
+            if cancel_probe is not None:
+                await cancel_probe()
+            per = (
+                _from_history(history)
+                if history is not None
+                else tuple(None for _ in ordered)
+            )
+            return code, per
+
+        for code, per in await asyncio.gather(
+            *(_one(code) for code in fallback_codes)
+        ):
+            by_symbol[code] = per
+    return PriceFeaturePrecompute(
+        release_id=release.release_id,
+        decision_ats=tuple(ordered),
+        by_symbol=by_symbol,
+        symbols=scoped,
     )
 
 

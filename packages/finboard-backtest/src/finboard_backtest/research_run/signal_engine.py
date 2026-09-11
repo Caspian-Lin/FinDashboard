@@ -80,6 +80,7 @@ from finboard_backtest.research_run.frozen_loader import (
     FeatureSnapshotProvider,
     FrozenInputLoader,
     LoadedDecisionContext,
+    PriceFeaturePrecompute,
     ReleaseProviderFactory,
     SuspensionView,
     SymbolCloseHistory,
@@ -1264,6 +1265,7 @@ async def _compute_period_features(
     *,
     process_pool: PriceFeatureProcessPool | None = None,
     close_histories: Mapping[str, SymbolCloseHistory | None] | None = None,
+    price_precompute: PriceFeaturePrecompute | None = None,
 ) -> tuple[FeatureValue, ...]:
     """按单个决策时点从冻结发布重算价格特征(issue #183)。
 
@@ -1325,6 +1327,13 @@ async def _compute_period_features(
             for inst in provider.release.instruments
             if not is_benchmark_only_instrument(inst)
         )
+    if price_precompute is not None:
+        # issue #450 追续:预计算查表 + FeatureValue 构造(逐值等值于快照
+        # 路径;顺序同为 scoped 标的序 x 特征构造序)。
+        values = price_precompute.feature_values(decision_at, release_id)
+        if values:
+            return values
+        # 空集回落原路径:沿用「数据不足」的具名报错语义(fail-closed 不变)。
     if close_histories:
         # issue #450 追续:close 矩阵已构建时直接切片算价格特征,跳过进程池
         # 逐标的整文件重读(全市场 x 多期的主要加载成本);矩阵缺失标的在
@@ -2019,6 +2028,14 @@ async def build_decision_load_contexts(
         progress=precompute_phase_reporter,
         cancel_probe=precompute_cancel_probe,
     )
+    # issue #450 追续:价格特征 run 级预计算(逐期矩阵切片仍要 5000 次
+    # per-symbol 循环 + 快照 checksum,全市场 ≈ 30s/期;预建后逐期查表)。
+    await loader.ensure_price_feature_precompute(
+        manifest,
+        tuple(decision_at for decision_at, _ in decision_days),
+        progress=precompute_phase_reporter,
+        cancel_probe=precompute_cancel_probe,
+    )
     if precompute_phase_reporter is not None:
         with contextlib.suppress(Exception):
             await precompute_phase_reporter(
@@ -2043,6 +2060,7 @@ async def build_decision_load_contexts(
                 release_ref.artifact_id,
                 process_pool=pool,
                 close_histories=loader.close_histories or None,
+                price_precompute=loader.price_feature_precompute,
             )
             features = (*period_features, *context.features)
         else:

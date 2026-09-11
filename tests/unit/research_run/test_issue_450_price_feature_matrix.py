@@ -289,3 +289,44 @@ async def test_precompute_cancel_probe_aborts_matrix_build(tmp_path: Path) -> No
     # 无探针时行为不变:矩阵正常构建
     histories = await _load_close_histories(provider, _candidates(provider))
     assert histories and all(item is not None for item in histories.values())
+
+
+@pytest.mark.asyncio
+async def test_price_precompute_matches_snapshot_path(tmp_path: Path) -> None:
+    """run 级价格特征预计算与逐期快照路径逐值等值(#450 追续)。"""
+    from finboard_backtest.research_run.frozen_loader import (
+        build_price_feature_precompute,
+    )
+
+    provider = await _publish_bars_release(tmp_path)
+    histories = await _load_close_histories(provider, _candidates(provider))
+    days = [
+        datetime(2024, 4, 15, 23, 0, tzinfo=UTC),
+        datetime(2024, 6, 15, 23, 0, tzinfo=UTC),
+        datetime(2024, 8, 20, 23, 0, tzinfo=UTC),
+    ]
+    pre = await build_price_feature_precompute(
+        histories=histories,
+        provider=provider,
+        decision_ats=days,
+        symbols=list(_CODES),
+    )
+    assert set(pre.symbols) == set(_CODES)  # 顺序 = 发布 instruments 序(与快照路径一致)
+    for day in days:
+        values = pre.feature_values(day, "rel-x")
+        assert values is not None and values
+        reference = await build_price_feature_snapshot(
+            provider=provider,
+            decision_at=day,
+            code_version="c0",
+            symbols=list(_CODES),
+        )
+        ref_map = {
+            (item.symbol, item.feature_name): (item.value, item.available_at)
+            for item in reference.observations
+        }
+        val_map = {
+            (item.symbol, item.feature_id): (item.value, item.available_at)
+            for item in values
+        }
+        assert val_map == ref_map, day
