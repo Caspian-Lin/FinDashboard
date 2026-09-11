@@ -1263,8 +1263,14 @@ async def _compute_period_features(
     release_id: str,
     *,
     process_pool: PriceFeatureProcessPool | None = None,
+    close_histories: Mapping[str, SymbolCloseHistory | None] | None = None,
 ) -> tuple[FeatureValue, ...]:
     """按单个决策时点从冻结发布重算价格特征(issue #183)。
+
+    ``close_histories``(#450 追续)非空时价格特征直接从 close 矩阵切片
+    计算(:func:`build_price_feature_snapshot_from_close_matrix`),跳过进程
+    池逐标的整文件重读;矩阵缺失标的在函数内回退 provider 读取,产出与池
+    路径逐值一致。
 
     复用 ``build_price_feature_snapshot``(与 feature_snapshot 任务同一实现,
     避免双源漂移):PIT 门控读取各标的收盘价,计算 momentum / volatility_Nd /
@@ -1284,6 +1290,9 @@ async def _compute_period_features(
         DEFAULT_MOMENTUM_LOOKBACK,
         FactorAnalysisError,
         build_price_feature_snapshot,
+    )
+    from finboard_backtest.research_run.frozen_loader import (
+        build_price_feature_snapshot_from_close_matrix,
     )
 
     async def _data_error(exc: FactorAnalysisError) -> ValueError:
@@ -1316,6 +1325,22 @@ async def _compute_period_features(
             for inst in provider.release.instruments
             if not is_benchmark_only_instrument(inst)
         )
+    if close_histories:
+        # issue #450 追续:close 矩阵已构建时直接切片算价格特征,跳过进程池
+        # 逐标的整文件重读(全市场 x 多期的主要加载成本);矩阵缺失标的在
+        # 内部回退 provider 读取,产出与池路径逐值一致。
+        assert symbols_argument is not None  # 上述两分支必赋具体元组
+        try:
+            matrix_snapshot = await build_price_feature_snapshot_from_close_matrix(
+                histories=close_histories,
+                provider=provider,
+                decision_at=decision_at,
+                code_version=manifest.code_version,
+                symbols=symbols_argument,
+            )
+        except FactorAnalysisError as exc:
+            raise await _data_error(exc) from exc
+        return _period_feature_values(matrix_snapshot, release_id)
     if process_pool is not None and not process_pool.broken:
         try:
             pool_snapshot = await build_price_feature_snapshot(
@@ -1970,6 +1995,7 @@ async def build_decision_load_contexts(
                 decision_at,
                 release_ref.artifact_id,
                 process_pool=pool,
+                close_histories=loader.close_histories or None,
             )
             features = (*period_features, *context.features)
         else:

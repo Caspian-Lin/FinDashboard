@@ -35,7 +35,7 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
     from finboard_backtest.factor_lab import PriceFeatureProcessPool
-    from finboard_data.factor_lab import FeatureSnapshot
+    from finboard_data.factor_lab import FeatureObservation, FeatureSnapshot
     from finboard_data.factors import FactorInputBatch, FactorInputRecord
     from finboard_data.releases import (
         FrozenReleaseProvider,
@@ -251,6 +251,9 @@ class SymbolCloseHistory:
     #: available_at 序列的时区属性(取构建期首元素;查询 as_of 的
     #: naive/aware 与之不匹配时保持旧直接比较的 TypeError)
     available_tz_aware: bool = False
+    #: available_at 的时区(构建期首元素原样保留;末根观测时点按需重建时
+    #: 保证与列式路径同一 instant + 同一 wall-clock 表示,#450 追续)
+    available_tz: tzinfo | None = None
     #: 可选携带的 open 平行序列(issue #336):仅 timing=next_open 的 run 在
     #: 矩阵预建时附带,与 close 严格同长;``None`` 表示未携带(close-only
     #: 矩阵),open 查询由调用方回退逐期对象路径读取。
@@ -290,8 +293,25 @@ class SymbolCloseHistory:
             date_days=day_numbers,
             closes=np.asarray(closes, dtype=np.float64),
             available_tz_aware=tz_aware,
+            available_tz=available_at[0].tzinfo if available_at else None,
             opens=None if opens is None else np.asarray(opens, dtype=np.float64),
         )
+
+    def available_at_at(self, index: int) -> datetime:
+        """重建 ``index`` 处 bar 的 available_at(与构建期值逐值相等)。
+
+        epoch 微秒整数精确逆变换(``_datetime_epoch_micros`` 的逆):aware
+        序列从 UTC 锚点出发再 astimezone 到保留时区(同一 instant + 同一
+        wall-clock 表示);naive 序列按其「即 UTC」锚定语义原样还原。
+        供矩阵切片路径构造特征观测的观测时点(#450 追续)。
+        """
+        micros = int(self.available_at_us[index])
+        tz = self.available_tz
+        if tz is None:
+            return datetime(1970, 1, 1) + timedelta(microseconds=micros)
+        return (
+            datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=micros)
+        ).astimezone(tz)
 
     def visible_index(self, as_of: datetime) -> int:
         """``as_of`` 时点可见最后一根的索引;-1 表示无可见 bar。"""
@@ -1635,6 +1655,121 @@ async def _load_close_histories(
         sliceable=sum(1 for item in built.values() if item is not None),
     )
     return built
+
+
+async def build_price_feature_snapshot_from_close_matrix(
+    *,
+    histories: Mapping[str, SymbolCloseHistory | None],
+    provider: FrozenReleaseProvider,
+    decision_at: datetime,
+    code_version: str,
+    symbols: Sequence[str],
+    momentum_lookback: int | None = None,
+    volatility_windows: tuple[int, ...] | None = None,
+) -> FeatureSnapshot:
+    """从 close 矩阵切片直接构建逐期价格特征快照(#450 追续)。
+
+    逐期 ``build_price_feature_snapshot`` 在进程池对每标的整文件重读 close
+    历史(全市场 x 多期 = 数十万次重复读盘),而 close 矩阵(#287/#439)已
+    持有同一发布的全区间 close——特征数学(:func:`price_observations_from_
+    closes`)只依赖序列尾部连续元素,尾切片与全序列计算逐位等值,直接切片
+    供数即可。切片/重建在单次 ``to_thread`` 内完成(纯 numpy + 少量
+    datetime,秒级);矩阵未覆盖的标的(``None`` / 缺键)回退 provider
+    逐标的读取(与原路径同 PIT/边界语义);FeatureSnapshot 装配与列式路径
+    共用 :func:`_assemble_price_snapshot_from_observations`(单一样本源)。
+    仅支持 D1 发布(矩阵只对日线构建);``decision_at`` 需带时区。
+    """
+    from finboard_backtest.factor_lab import (
+        DEFAULT_MOMENTUM_LOOKBACK,
+        FactorAnalysisError,
+        _assemble_price_snapshot_from_observations,
+        _build_price_observations,
+        price_observations_from_closes,
+    )
+    from finboard_shared.models import Symbol
+
+    if decision_at.tzinfo is None:
+        raise ValueError("decision_at 必须带时区")
+    lookback = momentum_lookback if momentum_lookback is not None else DEFAULT_MOMENTUM_LOOKBACK
+    windows = volatility_windows if volatility_windows is not None else (20, 60, 120)
+    release = provider.release
+    by_code = {item.code: item for item in release.instruments}
+    scoped = [code for code in by_code if code in set(symbols)]
+    tail_n = max(lookback + 1, max(windows) + 1, 61)
+
+    async def _fallback(code: str) -> list[FeatureObservation]:
+        columns = await provider.fetch_close_history(
+            Symbol(code, by_code[code].market),
+            release.period,
+            release.start_date,
+            min(decision_at.date(), release.end_date),
+            decision_at=decision_at,
+            adjust=release.adjustment,
+        )
+        return _build_price_observations(
+            source=release.source,
+            source_version=release.version,
+            symbol=code,
+            market=by_code[code].market,
+            asset_class=by_code[code].asset_class,
+            columns=columns,
+            momentum_lookback=lookback,
+            volatility_windows=windows,
+        )
+
+    def _slice_one(code: str) -> list[FeatureObservation]:
+        history = histories[code]
+        assert history is not None  # 调用方已按矩阵覆盖过滤
+        item = by_code[code]
+        index = history.visible_index(decision_at)
+        if index < 0:
+            return []
+        lo = max(0, index + 1 - tail_n)
+        closes = history.closes[lo : index + 1]
+        last_date = date.fromordinal(int(history.date_days[index]) + _EPOCH_ORDINAL)
+        return price_observations_from_closes(
+            source=release.source,
+            source_version=release.version,
+            symbol=code,
+            market=item.market,
+            asset_class=item.asset_class,
+            closes=closes,
+            last_timestamp=datetime.combine(last_date, time(0, 0), tzinfo=UTC),
+            last_available_at=history.available_at_at(index),
+            momentum_lookback=lookback,
+            volatility_windows=windows,
+        )
+
+    results: dict[str, list[FeatureObservation]] = {}
+    matrix_codes = [code for code in scoped if histories.get(code) is not None]
+    fallback_codes = [code for code in scoped if histories.get(code) is None]
+    if matrix_codes:
+        def _slice_batch() -> dict[str, list[FeatureObservation]]:
+            return {code: _slice_one(code) for code in matrix_codes}
+
+        results.update(await asyncio.to_thread(_slice_batch))
+    if fallback_codes:
+        semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
+
+        async def _one(code: str) -> tuple[str, list[FeatureObservation]]:
+            async with semaphore:
+                return code, await _fallback(code)
+
+        for code, obs in await asyncio.gather(
+            *(_one(code) for code in fallback_codes)
+        ):
+            results[code] = obs
+    observations = [item for code in scoped for item in results.get(code, [])]
+    if not observations:
+        raise FactorAnalysisError("冻结发布在决策时点没有足够数据计算价格特征")
+    return _assemble_price_snapshot_from_observations(
+        release=release,
+        decision_at=decision_at,
+        code_version=code_version,
+        observations=observations,
+        momentum_lookback=lookback,
+        volatility_windows=windows,
+    )
 
 
 async def _load_close_histories_via_pool(
