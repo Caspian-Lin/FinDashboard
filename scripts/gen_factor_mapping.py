@@ -12,8 +12,8 @@ C = "covered"; A = "approx"; MISS = "missing"
 BADGE = {C: "✅", A: "🟡", MISS: "❌"}
 TIER = {"P1": "P1 数据上游已有,低成本可补", "P2": "P2 需组合构造/长窗口/新列组合", "P3": "P3 冷门或上游覆盖存疑,不建议近期补"}
 
-MAP = {}  # name -> (status, our, note, tier_if_missing)
-def m(name, status, our="", note="", tier=""):
+MAP: dict[str, tuple[str, str, str, str]] = {}  # name -> (status, our, note, tier_if_missing)
+def m(name: str, status: str, our: str = "", note: str = "", tier: str = "") -> None:
     MAP[name] = (status, our, note, tier)
 
 # ---------------- Alpha101 (31) ----------------
@@ -213,15 +213,15 @@ for cat in data["order"]:
     for it in data["sections"][cat]["items"]:
         assert it["name"] in MAP, f"缺映射: {cat}/{it['name']}"
 
-tally = Counter()
-per_cat = {}
-lines = []
+tally: Counter[str] = Counter()
+per_cat: dict[str, Counter[str]] = {}
+lines: list[str] = []
 for cat in data["order"]:
     sec = data["sections"][cat]
     lines.append(f"\n## {cat}（{sec['declared']} 个）\n")
     lines.append("| # | Tushare 因子 | 状态 | 平台因子 | 说明 |")
     lines.append("|---|---|---|---|---|")
-    c = Counter()
+    c: Counter[str] = Counter()
     for it in sec["items"]:
         status, our, note, tier = MAP[it["name"]]
         c[status] += 1
@@ -236,7 +236,9 @@ for cat in data["order"]:
     lines.append("")
 
 total_cov = tally[C] + tally[A]
-tiers = Counter(MAP[k][3].split(" ")[0] for k in MAP if MAP[k][0] == MISS)
+tiers: Counter[str] = Counter(
+    MAP[k][3].split(" ")[0] for k in MAP if MAP[k][0] == MISS
+)
 header = f"""# 预置因子对账:Tushare 202 因子清单 × 平台预置因子
 
 > 来源:Tushare `factor_list` 文档页(https://tushare.pro/document/2?doc_id=486,公开,抓取于 2026-09-11)。
@@ -276,14 +278,16 @@ tail = f"""
 /*TIERS*/
 ## 维护
 - 新增预置因子时同步更新本表(状态列与注册表一致);
-- 表由 `.tmp/gen_factor_mapping.py` 生成(清单 JSON 抓取自源页),手工编辑请改生成器避免漂移。
+- 表由 `scripts/gen_factor_mapping.py` 生成(清单 JSON 快照 `scripts/tushare_factor_list_20260911.json` 抓取自源页),手工编辑请改生成器避免漂移。
 """
 
 
 # ---- tier 段自动枚举 ----
-def tier_names(t):
+def tier_names(t: str) -> list[str]:
     return sorted(k for k, v in MAP.items() if v[0] == MISS and v[3].startswith(t))
-def fmt(names):
+
+
+def fmt(names: list[str]) -> str:
     return "、".join(f"`{n}`" for n in names)
 t1, t2, t3 = tier_names("P1"), tier_names("P2"), tier_names("P3")
 tiers_md = f"""### P1 数据上游已有、低成本可补({len(t1)} 项)
