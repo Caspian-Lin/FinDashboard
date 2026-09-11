@@ -372,6 +372,32 @@ export const zh = {
     notSuccessful: "任务未成功",
     noErrorDetail: "服务端未返回失败原因",
   },
+  predefinedFactors: {
+    tab: "平台因子",
+    summaryCount: "共 {count} 个平台预置因子 · 显示 {shown} 个",
+    filterPlaceholder: "按名称或说明过滤…",
+    filterLabel: "过滤平台因子",
+    alertTitle: "平台预置因子是「公式即代码」的可信因子",
+    alertDesc:
+      "这些因子由平台实现并冻结公式（不接受用户代码），经 factor_series_build 构建为序列后在策略规格中以 p_<名称> 引用；目录只读，不触发任何计算或交易。",
+    colName: "名称",
+    colFamily: "族",
+    colDirection: "方向",
+    colSignal: "可信号",
+    colDeps: "数据依赖",
+    colWindow: "窗口",
+    colTitle: "说明",
+    directionHigher: "值高看多",
+    directionLower: "值低看多",
+    signalEligible: "可做信号",
+    signalIneligible: "仅暴露",
+    noWindow: "—",
+    minHistory: "≥{n} 根历史",
+    empty: "没有匹配的平台因子",
+    emptyFilterHint: "换个关键词试试，或清空过滤条件查看全部 {count} 个因子。",
+    loadFailed: "无法加载平台因子目录",
+    crossSection: "截面",
+  },
 };
 
 export type Dict = typeof zh;

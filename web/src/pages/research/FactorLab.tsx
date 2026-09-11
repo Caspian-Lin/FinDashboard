@@ -68,6 +68,7 @@ import {
   type FactorExperiment,
   type FactorExperimentCreate,
   type DatasetReleaseSummary,
+  type PredefinedFactorEntry,
   featureSnapshotCreatedAt,
   featureSnapshotNames,
   featureSnapshotObservationCount,
@@ -1815,8 +1816,185 @@ function ExperimentsTab() {
   );
 }
 
+/** 平台预置因子 family 的展示名(与后端注册表 family 值一致,#427)。 */
+const PREDEFINED_FAMILY_LABELS: Record<string, LocalizedText> = {
+  momentum: { zh: "动量", en: "Momentum" },
+  reversal: { zh: "反转", en: "Reversal" },
+  risk: { zh: "风险", en: "Risk" },
+  liquidity: { zh: "流动性", en: "Liquidity" },
+  size: { zh: "规模", en: "Size" },
+  alpha101: { zh: "Alpha101 量价", en: "Alpha101" },
+  growth: { zh: "成长", en: "Growth" },
+  quality: { zh: "质量", en: "Quality" },
+  value: { zh: "价值", en: "Value" },
+};
+
+/** 平台预置因子目录(#427):只读表格 + 名称/说明子串过滤。
+ * 消费路径说明见页内提示 —— 因子本身经 MCP factor_series_build
+ * (kind=predefined_factor)构建,本页不触发任何计算。 */
+function PredefinedTab() {
+  const { t, tl } = useT();
+  const [filter, setFilter] = React.useState("");
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+    queryKey: ["predefined-factors"],
+    queryFn: () => factorLabApi.predefined(),
+  });
+
+  const keyword = filter.trim().toLowerCase();
+  const filtered = React.useMemo(() => {
+    if (!data) return [];
+    if (!keyword) return data;
+    return data.filter(
+      (factor: PredefinedFactorEntry) =>
+        factor.name.toLowerCase().includes(keyword) ||
+        factor.title.toLowerCase().includes(keyword),
+    );
+  }, [data, keyword]);
+
+  return (
+    <div>
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-muted-foreground">
+          {data
+            ? t("predefinedFactors.summaryCount", {
+                count: data.length,
+                shown: filtered.length,
+              })
+            : tl({ zh: "加载中…", en: "Loading…" })}
+        </p>
+        <div className="flex items-center gap-2">
+          <Input
+            aria-label={t("predefinedFactors.filterLabel")}
+            placeholder={t("predefinedFactors.filterPlaceholder")}
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            className="h-8 w-full sm:w-64"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => refetch()}
+            disabled={isFetching}
+          >
+            <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
+            {tl({ zh: "刷新", en: "Refresh" })}
+          </Button>
+        </div>
+      </div>
+
+      <Alert className="mb-4">
+        <Info className="h-4 w-4" />
+        <AlertTitle>{t("predefinedFactors.alertTitle")}</AlertTitle>
+        <AlertDescription>{t("predefinedFactors.alertDesc")}</AlertDescription>
+      </Alert>
+
+      {isLoading ? (
+        <LoadingState rows={6} />
+      ) : isError ? (
+        <EmptyState
+          icon={<Atom className="h-8 w-8" />}
+          title={tl({ zh: "加载失败", en: "Failed to load" })}
+          description={
+            error instanceof Error
+              ? error.message
+              : t("predefinedFactors.loadFailed")
+          }
+        />
+      ) : filtered.length > 0 ? (
+        <div className="overflow-hidden rounded-lg border border-border">
+          <ScrollArea className="max-h-[600px]">
+            <Table>
+              <TableHeader className="sticky top-0 bg-card">
+                <TableRow>
+                  <TableHead>{t("predefinedFactors.colName")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colFamily")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colDirection")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colSignal")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colDeps")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colWindow")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colTitle")}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((factor: PredefinedFactorEntry) => (
+                  <TableRow key={factor.name} className="align-top">
+                    <TableCell className="whitespace-nowrap font-mono text-xs">
+                      p_{factor.name}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm">
+                      {PREDEFINED_FAMILY_LABELS[factor.family]
+                        ? tl(PREDEFINED_FAMILY_LABELS[factor.family])
+                        : factor.family}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+                      {factor.direction === "lower"
+                        ? t("predefinedFactors.directionLower")
+                        : t("predefinedFactors.directionHigher")}
+                    </TableCell>
+                    <TableCell>
+                      {factor.signal_eligible ? (
+                        <Badge variant="secondary" className="text-[10px]">
+                          {t("predefinedFactors.signalEligible")}
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px]">
+                          {t("predefinedFactors.signalIneligible")}
+                        </Badge>
+                      )}
+                      {factor.cross_section && (
+                        <Badge variant="outline" className="ml-1 text-[10px]">
+                          {t("predefinedFactors.crossSection")}
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="min-w-[180px] whitespace-normal break-words font-mono text-[11px] leading-5 text-muted-foreground">
+                      {factor.data_dependencies.join(" · ")}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm tabular-nums">
+                      {factor.window != null ? (
+                        <span>
+                          {factor.window}
+                          {tl({ zh: " 日", en: "d" })}
+                          {factor.min_history_bars != null && (
+                            <span className="ml-1 text-[11px] text-muted-foreground">
+                              {t("predefinedFactors.minHistory", {
+                                n: factor.min_history_bars,
+                              })}
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">
+                          {t("predefinedFactors.noWindow")}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell className="min-w-[260px] max-w-[420px] whitespace-normal break-words text-sm leading-5">
+                      {factor.title}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </ScrollArea>
+        </div>
+      ) : (
+        <EmptyState
+          icon={<Atom className="h-8 w-8" />}
+          title={t("predefinedFactors.empty")}
+          description={
+            data && data.length > 0
+              ? t("predefinedFactors.emptyFilterHint", { count: data.length })
+              : t("predefinedFactors.loadFailed")
+          }
+        />
+      )}
+    </div>
+  );
+}
+
 export default function FactorLab() {
-  const { tl } = useT();
+  const { t, tl } = useT();
   // 页签进 URL(?tab=):刷新/分享不再跳回默认目录页。
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = searchParams.get("tab") ?? "catalog";
@@ -1834,6 +2012,8 @@ export default function FactorLab() {
         <TabsList className="h-auto flex-wrap gap-1">
           <TabsTrigger value="catalog">{tl({ zh: "因子目录", en: "Factor catalog" })}</TabsTrigger>
           <ResearchHint hint={RESEARCH_HINTS.factors.catalog} />
+          <TabsTrigger value="predefined">{t("predefinedFactors.tab")}</TabsTrigger>
+          <ResearchHint hint={RESEARCH_HINTS.factors.predefined} />
           <TabsTrigger value="features">{tl({ zh: "特征快照", en: "Feature snapshots" })}</TabsTrigger>
           <ResearchHint hint={RESEARCH_HINTS.factors.features} />
           <TabsTrigger value="signals">{tl({ zh: "因子信号", en: "Factor signals" })}</TabsTrigger>
@@ -1844,6 +2024,9 @@ export default function FactorLab() {
 
         <TabsContent value="catalog">
           <CatalogTab />
+        </TabsContent>
+        <TabsContent value="predefined">
+          <PredefinedTab />
         </TabsContent>
         <TabsContent value="features">
           <FeaturesTab />

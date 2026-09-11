@@ -146,6 +146,23 @@ export interface FactorCatalogEntry {
   source_datasets?: string[];
 }
 
+/** 平台预置因子目录条目(GET /research/factors/predefined,#427)。
+ * 「公式即代码」的平台可信因子;引用名 = p_<name>,消费路径 =
+ * MCP factor_series_build(kind=predefined_factor)。 */
+export interface PredefinedFactorEntry {
+  name: string;
+  /** 因子说明,含公式片段,原样返回。 */
+  title: string;
+  family: string;
+  /** 研究语义方向:higher = 值越大越看多 / lower 反之。 */
+  direction: string;
+  signal_eligible: boolean;
+  data_dependencies: string[];
+  window: number | null;
+  min_history_bars: number | null;
+  cross_section: boolean;
+}
+
 export interface FeatureObservation {
   symbol: string;
   feature_name: string;
@@ -241,6 +258,8 @@ export const factorLabApi = {
       `/research/factors/catalog${q.toString() ? "?" + q : ""}`,
     );
   },
+  /** 平台预置因子只读目录(GET /research/factors/predefined,#427)。 */
+  predefined: () => fetchJSON<PredefinedFactorEntry[]>(`/research/factors/predefined`),
   createFeatureSnapshot: (body: FeatureSnapshotCreate) =>
     fetchJSON<FeatureSnapshot>(`/research/factors/features`, {
       method: "POST",

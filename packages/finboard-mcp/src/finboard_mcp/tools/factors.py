@@ -30,7 +30,7 @@ import os
 import subprocess
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
@@ -140,16 +140,69 @@ async def _validate_snapshot_input(
 
 
 # ---------------------------------------------------------------------------
-# finboard.factor.catalog(混合视图:builtin 目录 + user_defined artifacts)
+# finboard.factor.catalog(混合视图:builtin 目录 + user_defined artifacts
+#                         + predefined 平台预置因子目录,#427)
 # ---------------------------------------------------------------------------
+
+# predefined 摘要里 title 截断上限(公式片段可能很长,目录场景只需可读前缀)。
+_PREDEFINED_TITLE_TRUNCATE = 120
+
+
+def _predefined_catalog_items() -> list[dict[str, Any]]:
+    """平台预置因子只读摘要(#427,与注册表同构)。
+
+    数据源 = ``finboard_backtest.factors.predefined.PREDEFINED_FACTORS``;
+    引用名 = ``p_<name>``(与用户因子 ``u_`` 对称),消费路径 =
+    ``factor_series_build``(kind=predefined_factor)按名构建序列后在
+    策略规格中引用。``title`` 含公式片段,超长截断到 120 字符。
+    """
+
+    from finboard_backtest.factors.predefined import (
+        PREDEFINED_FACTORS,
+        predefined_factor_names,
+    )
+
+    items: list[dict[str, Any]] = []
+    for name in predefined_factor_names():
+        definition = PREDEFINED_FACTORS[name]
+        title = definition.title
+        if len(title) > _PREDEFINED_TITLE_TRUNCATE:
+            title = title[: _PREDEFINED_TITLE_TRUNCATE - 3] + "..."
+        items.append(
+            {
+                "name": definition.name,
+                "family": definition.family,
+                "direction": definition.direction.value,
+                "signal_eligible": definition.signal_eligible,
+                "title": title,
+                "window": definition.window,
+                "min_history_bars": definition.min_history_bars,
+                "origin": "predefined",
+            }
+        )
+    return items
 
 
 async def factor_catalog(
-    app: McpAppContext, *, role: str | None = None, include_user_defined: bool = True
+    app: McpAppContext,
+    *,
+    role: str | None = None,
+    include_user_defined: bool = True,
+    source: str | None = None,
 ) -> ToolEnvelope:
-    """混合目录:builtin(FACTOR_LAB_CATALOG)+ user_defined(#217)。"""
+    """混合目录:builtin(FACTOR_LAB_CATALOG)+ user_defined(#217)
+    + predefined 平台预置因子(#427,source="predefined")。"""
 
     async def _do() -> list[dict[str, Any]]:
+        if source == "predefined":
+            return _predefined_catalog_items()
+        if source not in (None, "lab"):
+            raise McpToolError(
+                "invalid_argument",
+                f"source 参数非法: {source!r}(可选 lab | predefined;"
+                "缺省与 lab 等价 = 实验室目录 builtin + user_defined)",
+            )
+
         from finboard_data.factor_lab import FactorRole, factor_lab_catalog, sandbox_factor_name
         from finboard_persistence import ResearchCodeArtifactRepository
 
@@ -193,7 +246,11 @@ async def factor_catalog(
     return await run_tool(
         audit=app.audit,
         tool_name="finboard.factor.catalog",
-        arguments={"role": role, "include_user_defined": include_user_defined},
+        arguments={
+            "role": role,
+            "include_user_defined": include_user_defined,
+            "source": source,
+        },
         handler=_do,
     )
 
@@ -684,24 +741,35 @@ def register(mcp: MCPServer) -> None:
     @mcp.tool(
         name="finboard_factor_catalog",
         description=(
-            "查询因子混合目录:builtin(26 个 alpha/risk/market_input 因子,"
-            "每条含 name/version/role/preference/source_fields/"
-            "economic_hypothesis/checksum 等,标注 origin=builtin)+ "
+            "查询因子目录(三源,source 参数选择):"
+            "source 缺省或 \"lab\" = 实验室混合目录——builtin(26 个 "
+            "alpha/risk/market_input 因子,每条含 name/version/role/preference/"
+            "source_fields/economic_hypothesis/checksum 等,标注 origin=builtin)+ "
             "user_defined(沙箱执行的自定义因子,标注 origin=user_defined 与 "
             "artifact commit/status/promotion_status;仅 status=active 且 "
             "promotion_status=passed 可被规格引用,引用名为 "
-            "u_<artifact_name>,观测来自 finboard_research_code_run 快照)。"
-            "可选过滤 role(仅过滤 builtin);include_user_defined=false 只看内置。"
+            "u_<artifact_name>,观测来自 finboard_research_code_run 快照);"
+            "source=\"predefined\" = 平台预置因子只读目录(#427,174 条,与注册表"
+            "同构摘要 name/family/direction/signal_eligible/title(截断 120 字符)/"
+            "window/min_history_bars)——预置因子是「公式即代码」的平台可信因子,"
+            "引用名 = p_<name>(与用户因子 u_ 对称),消费路径 = "
+            "finboard_factor_series_build(kind=predefined_factor)按 name 批量"
+            "构建序列后在策略规格中以 p_<name> 引用。"
+            "role/include_user_defined 只作用于 lab 分支。"
             "用于了解系统与 agent 各自提供哪些因子。"
         ),
     )
     async def _factor_catalog(
         role: str | None = None,
         include_user_defined: bool = True,
+        source: Literal["lab", "predefined"] | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await factor_catalog(
-            app_context(ctx), role=role, include_user_defined=include_user_defined
+            app_context(ctx),
+            role=role,
+            include_user_defined=include_user_defined,
+            source=source,
         )
 
     @mcp.tool(

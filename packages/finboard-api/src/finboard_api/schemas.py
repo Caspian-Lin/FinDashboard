@@ -753,6 +753,26 @@ class FactorDefinitionOut(BaseSchema):
     source_datasets: list[str] = Field(default_factory=list)
 
 
+class PredefinedFactorOut(BaseSchema):
+    """平台预置因子目录条目(``GET /api/research/factors/predefined``,#427)。
+
+    只读投影自 ``finboard_backtest.factors.predefined.PREDEFINED_FACTORS``
+    (公式即代码的平台可信因子);引用名 = ``p_<name>``,消费路径 =
+    MCP ``factor_series_build``(kind=predefined_factor)。
+    ``title`` 含公式片段,原样返回不做改写。
+    """
+
+    name: str
+    title: str
+    family: str
+    direction: str
+    signal_eligible: bool
+    data_dependencies: list[str]
+    window: int | None = None
+    min_history_bars: int | None = None
+    cross_section: bool = False
+
+
 class FeatureSnapshotCreate(BaseSchema):
     """从一个已发布数据版本显式生成价格特征快照。"""
 
