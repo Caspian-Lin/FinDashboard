@@ -41,6 +41,7 @@ from finboard_api.schemas import (
     FeatureSnapshotCreate,
     FeatureSnapshotHeaderOut,
     FeatureSnapshotOut,
+    PredefinedFactorOut,
     RobustnessPlanSchema,
     TrialCreate,
     TrialOut,
@@ -485,6 +486,41 @@ async def get_factor_catalog(
             [str(field) for field in cast(list[object], raw_fields)]
         )
         items.append(FactorDefinitionOut.model_validate(data))
+    return items
+
+
+@router.get("/factors/predefined", response_model=list[PredefinedFactorOut])
+async def get_predefined_factor_catalog() -> list[PredefinedFactorOut]:
+    """平台预置因子只读目录(issue #427)。
+
+    数据源 = ``finboard_backtest.factors.predefined.PREDEFINED_FACTORS``
+    (「公式即代码」的平台可信因子,compute 不接受用户代码);引用名 =
+    ``p_<name>``,消费路径 = MCP ``factor_series_build``
+    (kind=predefined_factor)按名构建序列后在策略规格中引用。
+    只读内存投影:不触 DB、不触发布文件、不触交易。
+    """
+
+    from finboard_backtest.factors.predefined import (
+        PREDEFINED_FACTORS,
+        predefined_factor_names,
+    )
+
+    items: list[PredefinedFactorOut] = []
+    for name in predefined_factor_names():
+        definition = PREDEFINED_FACTORS[name]
+        items.append(
+            PredefinedFactorOut(
+                name=definition.name,
+                title=definition.title,
+                family=definition.family,
+                direction=definition.direction.value,
+                signal_eligible=definition.signal_eligible,
+                data_dependencies=list(definition.data_dependencies),
+                window=definition.window,
+                min_history_bars=definition.min_history_bars,
+                cross_section=definition.cross_section,
+            )
+        )
     return items
 
 

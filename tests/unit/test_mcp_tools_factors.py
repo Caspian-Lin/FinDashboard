@@ -227,6 +227,77 @@ class TestFactorCatalog:
         assert env.error is not None
         assert env.error.kind == "invalid_argument"
 
+    async def test_source_predefined_returns_registry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """source="predefined" 返回注册表 174 条同构摘要,不查 DB。"""
+        from finboard_backtest.factors.predefined import PREDEFINED_FACTORS
+
+        _no_user_artifacts(monkeypatch)
+        app = _make_app()
+        env = await factor_tools.factor_catalog(app, source="predefined")
+        assert env.status == "ok"
+        assert isinstance(env.data, list)
+        # 当前注册表规模(新批次注册时同步更新此数字)。
+        assert len(env.data) == 174
+        assert len(env.data) == len(PREDEFINED_FACTORS)
+        first = env.data[0]
+        assert set(first) == {
+            "name",
+            "family",
+            "direction",
+            "signal_eligible",
+            "title",
+            "window",
+            "min_history_bars",
+            "origin",
+        }
+        assert all(item["origin"] == "predefined" for item in env.data)
+        assert all(isinstance(item["signal_eligible"], bool) for item in env.data)
+        assert all(item["direction"] in {"higher", "lower"} for item in env.data)
+        # title 截断 120 字符(注册表里有 6 条超长公式片段)。
+        assert all(len(item["title"]) <= 120 for item in env.data)
+        assert any(len(item["title"]) == 120 for item in env.data)
+
+    async def test_source_lab_excludes_predefined(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """source="lab" 只含 builtin + user_defined,绝无 predefined。"""
+        _no_user_artifacts(monkeypatch)
+        app = _make_app()
+        env = await factor_tools.factor_catalog(app, source="lab")
+        assert env.status == "ok"
+        assert len(env.data) > 0
+        assert all(
+            item["origin"] in ("builtin", "user_defined") for item in env.data
+        )
+
+    async def test_source_none_default_unchanged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """source=None(缺省)= 现状零变化:与 lab 分支同形。"""
+        _no_user_artifacts(monkeypatch)
+        app = _make_app()
+        default_env = await factor_tools.factor_catalog(app)
+        lab_env = await factor_tools.factor_catalog(app, source="lab")
+        assert default_env.status == "ok"
+        assert lab_env.status == "ok"
+        assert default_env.data == lab_env.data
+        assert all(
+            item["origin"] in ("builtin", "user_defined")
+            for item in default_env.data
+        )
+
+    async def test_source_invalid_rejected(self) -> None:
+        app = _make_app()
+        env = await factor_tools.factor_catalog(app, source="bogus")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "invalid_argument"
+
 
 # ---------------------------------------------------------------------------
 # finboard.feature_snapshot.list / get

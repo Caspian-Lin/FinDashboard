@@ -476,7 +476,8 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 因子实验室工具(8 只读 + 4 写,共 12 个)。写操作尊重 `mcp_readonly_only` 开关。
 
 ### finboard_factor_catalog
-查询因子混合目录:builtin(26 个 alpha/risk/market_input 因子)+
+查询因子目录(三源,`source` 参数选择,#427):`source` 缺省或 `"lab"` =
+实验室混合目录——builtin(26 个 alpha/risk/market_input 因子)+
 user_defined(沙箱执行的自定义因子,#217)。
 **builtin 目录(#214 起)是因子定义的唯一事实来源**——v1 选股规则目录
 (`finboard_data.factors.FACTOR_CATALOG`,8 因子)逐字段从这里投影生成,
@@ -486,12 +487,20 @@ user_defined 条目来自 `research_code_artifacts`(kind=factor),标注
 artifact commit、status 与 promotion_status;引用名为 `u_<artifact_name>`,**仅
 status=active 且 promotion_status=passed 可被规格引用**(retired/未晋级后入队秒级拒绝),观测来自
 `finboard_research_code_run` 落库的快照。
+`source="predefined"` = 平台预置因子只读目录(#427,174 条,同构摘要
+name/family/direction/signal_eligible/title(截断 120 字符)/window/
+min_history_bars)——「公式即代码」的平台可信因子,**引用名 = `p_<name>`**
+(与用户因子 `u_` 对称),消费路径 = `finboard_factor_series_build`
+(kind=predefined_factor)按 name 批量构建序列后在策略规格中以 `p_<name>` 引用。
 - 参数:`role?: str`(alpha|risk|market_input,仅过滤 builtin)、
-  `include_user_defined?: bool = true`
-- 返回:`list[{name, origin: builtin|user_defined, version, role, ...}]`;
+  `include_user_defined?: bool = true`、
+  `source?: "lab" | "predefined" | null`(缺省 = lab 语义,现状零变化)
+- 返回:`list[{name, origin: builtin|user_defined|predefined, version, role, ...}]`;
   user_defined 条目另含 `{artifact_name, status, commit, artifact_id,
-  code_checksum, created_at, note}`
-- builtin 部分无 DB 依赖;user_defined 查 `research_code_artifacts` 表。
+  code_checksum, created_at, note}`;predefined 条目不含 version/role
+  (预置因子无 artifact 版本,family 承担分组)。
+- builtin 部分无 DB 依赖;user_defined 查 `research_code_artifacts` 表;
+  predefined 无 DB 依赖(内存注册表投影)。
 
 ### finboard_feature_snapshot_list
 列出特征快照(版本化、时点化、不可变)。**默认 header-only(#309)**:
