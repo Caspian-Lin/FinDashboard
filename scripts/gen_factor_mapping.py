@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# ruff: noqa: E702, RUF001, SIM115
 """生成 docs/research/predefined-factor-mapping.md(数据源 scripts/tushare_factor_list_20260911.json,抓取自 factor_list 文档页):tushare 202 因子逐项对账。
 
 MAPPING: tushare 因子名 -> (status, 平台因子, 说明)
