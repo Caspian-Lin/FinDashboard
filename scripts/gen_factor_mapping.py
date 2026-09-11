@@ -5,12 +5,20 @@ MAPPING: tushare 因子名 -> (status, 平台因子, 说明)
   status: "covered" ✅实现 / "approx" 🟡近似或口径变体 / "missing" ❌未实现
 """
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
 C = "covered"; A = "approx"; MISS = "missing"
 BADGE = {C: "✅", A: "🟡", MISS: "❌"}
 TIER = {"P1": "P1 数据上游已有,低成本可补", "P2": "P2 需组合构造/长窗口/新列组合", "P3": "P3 冷门或上游覆盖存疑,不建议近期补"}
+
+# 注册表驱动的自动翻转:清单名已入注册表的 ❌ 翻 ✅(批次 6/#429 起生效,
+# 此后新增批次只需改 FLIP_NOTE 与注册表,映射表本体不再逐条手改)。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages" / "finboard-backtest" / "src"))
+from finboard_backtest.factors.predefined import PREDEFINED_FACTORS  # noqa: E402
+
+FLIP_NOTE = "批次 6(#429) 实现"
 
 MAP: dict[str, tuple[str, str, str, str]] = {}  # name -> (status, our, note, tier_if_missing)
 def m(name: str, status: str, our: str = "", note: str = "", tier: str = "") -> None:
@@ -207,6 +215,15 @@ m("earnings_cut_to_market", MISS, "", "扣非净利 TTM 水平;上游扣非增�
 m("ocf_to_market", C, "val_ocf_to_market", "")
 m("sales_to_market", C, "val_sales_to_price", "")
 
+# ================= 自动翻转(注册表为准) =================
+flipped = [
+    name
+    for name, (status, our, note, tier) in MAP.items()
+    if status == MISS and name in PREDEFINED_FACTORS
+]
+for name in flipped:
+    MAP[name] = (C, name, FLIP_NOTE, "")
+
 # ================= 生成 =================
 data = json.load(open("scripts/tushare_factor_list_20260911.json", encoding="utf-8"))
 for cat in data["order"]:
@@ -239,10 +256,18 @@ total_cov = tally[C] + tally[A]
 tiers: Counter[str] = Counter(
     MAP[k][3].split(" ")[0] for k in MAP if MAP[k][0] == MISS
 )
+_TIER_LABELS = {
+    "P1": "P1 可低成本补",
+    "P2": "P2 需组合/长窗",
+    "P3": "P3 冷门不建议",
+}
+tier_summary = " · ".join(
+    f"{_TIER_LABELS[t]} {tiers[t]}" for t in ("P1", "P2", "P3") if tiers[t]
+)
 header = f"""# 预置因子对账:Tushare 202 因子清单 × 平台预置因子
 
 > 来源:Tushare `factor_list` 文档页(https://tushare.pro/document/2?doc_id=486,公开,抓取于 2026-09-11)。
-> 平台侧:`finboard_backtest/factors/predefined/registry.py` 共 **174** 个 `p_` 预置因子(#398 通道,批次 #399/#400/#401/#402/#415 交付)。
+> 平台侧:`finboard_backtest/factors/predefined/registry.py` 共 **{len(PREDEFINED_FACTORS)}** 个 `p_` 预置因子(#398 通道,批次 #399/#400/#401/#402/#415/#429 交付)。
 
 ## 结论摘要
 
@@ -252,12 +277,12 @@ header = f"""# 预置因子对账:Tushare 202 因子清单 × 平台预置因子
 | ✅ 严格实现(同名/同式) | {tally[C]} |
 | 🟡 近似/口径变体(已实现,窗口或构造有差) | {tally[A]} |
 | **清单覆盖合计(✅+🟡)** | **{total_cov} / 202** |
-| ❌ 未实现 | {tally[MISS]}(P1 可低成本补 {tiers['P1']} · P2 需组合/长窗 {tiers['P2']} · P3 冷门不建议 {tiers['P3']}) |
+| ❌ 未实现 | {tally[MISS]}({tier_summary}) |
 
 说明:
 
 - **窗口口径约定**:平台统一用 20/60/120/250(≈自然月/季/半年/年取整),Tushare 用 21/42/63/126/252(精确月×21)。🟡 中大量条目仅差在此,语义同族。
-- **注册表 174 ≠ 清单覆盖 {total_cov}**:注册表另含 ~68 个平台自研因子(QMJ 四支柱、resid_momentum、corr_market、amihud、turnover_z、单季财务族等),不在 Tushare 清单内。
+- **注册表 {len(PREDEFINED_FACTORS)} ≠ 清单覆盖 {total_cov}**:注册表另含 ~{len(PREDEFINED_FACTORS) - total_cov} 个平台自研因子(QMJ 四支柱、resid_momentum、corr_market、amihud、turnover_z、单季财务族等),不在 Tushare 清单内。
 - 🟡/❌ 的逐项原因见下表;❌ 的 [P1]/[P2]/[P3] 为补齐优先级评估(见文末)。
 - 预置因子消费路径:MCP `finboard_factor_series_build`(kind=predefined_factor)、research_run 引用门;目录可见性见 #427。
 
@@ -273,11 +298,12 @@ for cat in data["order"]:
 tail = f"""
 ## 补齐评估(#426 第 3 项交付)
 
-❌ 共 {tally[MISS]} 项,分层如下;**本期不实现任何因子**,此处仅为批次 6+ 的选型输入(新因子须经 #415 质量评估闭环:IC/分组/signal_eligible 达标才入册)。
+批次 6(#429,2026-09)已补齐原评估的 P1/P2 共 {len(flipped)} 项——P1 量价 28(#431)+ P1 财务 29(#432)+ P2 市场回归/规模非线性 14(#433)+ P2 三表/其余 15(#434),全部经 #415 质量评估闭环入册。
+剩余 ❌ 共 {tally[MISS]} 项:
 
 /*TIERS*/
 ## 维护
-- 新增预置因子时同步更新本表(状态列与注册表一致);
+- 新增预置因子时同步更新本表(状态列与注册表一致;生成器按注册表自动翻转 ❌→✅);
 - 表由 `scripts/gen_factor_mapping.py` 生成(清单 JSON 快照 `scripts/tushare_factor_list_20260911.json` 抓取自源页),手工编辑请改生成器避免漂移。
 """
 
@@ -290,19 +316,25 @@ def tier_names(t: str) -> list[str]:
 def fmt(names: list[str]) -> str:
     return "、".join(f"`{n}`" for n in names)
 t1, t2, t3 = tier_names("P1"), tier_names("P2"), tier_names("P3")
-tiers_md = f"""### P1 数据上游已有、低成本可补({len(t1)} 项)
+tiers_md = ""
+if t1:
+    tiers_md += f"""### P1 数据上游已有、低成本可补({len(t1)} 项)
 
 多为参数化/同比变化族——同一公式换窗口或做 t vs t-252 差分,算子与数据全部就绪:
 {fmt(t1)}
 
-### P2 需组合构造/长窗口/多列({len(t2)} 项)
+"""
+if t2:
+    tiers_md += f"""### P2 需组合构造/长窗口/多列({len(t2)} 项)
 
 长窗回归族(alpha/beta/sigma 500-1320)、三表细分列族(#397 已同步但需覆盖率核查,银行/保险缺列多)、成交量回归族(需指数成交量进因子上下文)、交互构造(peg/small_cap_reversal/nl_size):
 {fmt(t2)}
 
-### P3 冷门或上游存疑,不建议近期补({len(t3)} 项)
+"""
+if t3:
+    tiers_md += f"""### P3 冷门或上游存疑,不建议近期补({len(t3)} 项)
 
-`log_price`、`ma_20d`、`price_dist`、`days_down_up` 为调研即列为排除候选的平凡因子:
+`log_price`、`ma_20d`、`price_dist`、`days_down_up` 为调研即列为排除候选的平凡因子;其余为上游列覆盖存疑(递延所得税/长期应收/平均总股本)或冷门统计量(异常波动天数/调整夏普):
 {fmt(t3)}
 
 """
