@@ -2784,6 +2784,305 @@ def _size_entries() -> tuple[PredefinedFactorDefinition, ...]:
         ),
     )
 
+# ---- 批次 6(P1 量价,#429) ----
+# 28 个平台预置因子,公式以 tushare factor_list(2026-09-11 快照)为准,
+# 全部只用 bars(close/open/high/low/amount)+ 换手率(daily_metrics.
+# turnover_rate,与 turnover_* 族同列同口径),无新数据依赖:
+#
+# * ``bias_turn_{21,42,63,126}d_{252,504}d`` x8 —— 短窗日均换手 / 长窗
+#   日均换手 - 1(换手乖离 BIAS 的双窗形态;近期换手相对长期越高越活跃,
+#   direction 与 turnover_ratio 族一致 HIGHER);
+# * ``bias_std_turn_{21,42,63,126}d_{252,504}d`` x8 —— 短窗换手标准差 /
+#   长窗换手标准差 - 1(换手波动乖离;相对活跃度口径 direction HIGHER,
+#   与绝对换手波动 turnover_std 的 LOWER 风险口径区分);
+# * ``high_low_{21,42,63,126,252}d`` x5 —— 窗口内净值曲线(1+日收益
+#   累计)最高/最低比值(衡量区间趋势强度/振幅;高值 = 区间振幅大 =
+#   波动风险高,按同族 vol/corr 处理 direction LOWER 并在条目注明);
+# * ``return_5d`` / ``return_42d`` —— N 期累计收益(动量,复用批次 0
+#   return_Nd 参数化实现改窗口);
+# * ``return_std_42d`` —— 42 日日收益标准差(risk,vol 族同式窗口变体);
+# * ``price_position_ir_60d`` —— 60 日内 (close-open)/(high-low) 的
+#   均值/标准差(日内位置信息比率);
+# * ``sum_abs_rtn_amount_20d`` —— 20 日 Σ|日收益| / Σ成交额(Amihud
+#   非流动性的求和形态,单位成交额驱动的价格波动);
+# * ``dif`` / ``dea`` —— MACD 分量:DIF = EMA12 - EMA26,DEA =
+#   EMA9(DIF)(与 macd_hist_norm 共享口径,该因子 = (DIF-DEA)*2/close
+#   收盘价归一柱;本批次输出未归一的原始分量)。
+#
+# 长窗(252/504)因子声明 ``min_history_bars`` 覆盖起点(#361 入队具名
+# 拒绝短历史发布上的全缺测序列)。
+
+
+def _turnover_window_bias(
+    short_window: int, long_window: int, *, stat: str
+) -> PredefinedFactorCompute:
+    """换手率短窗统计对长窗统计的乖离(#429):``stat_short / stat_long - 1``。
+
+    ``stat``:``ma``(均值)/ ``std``(样本标准差)—— 前者 = 近期换手
+    相对长期的偏离(换手乖离 BIAS 双窗形态,放量活跃度),后者 = 近期
+    换手波动相对长期的偏离(波动乖离,投机活跃度)。原料与 turnover_*
+    族同列:``daily_metrics.turnover_rate``(单位 %)。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        turnover = inp.daily_metrics("turnover_rate")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in turnover.items():
+            values = series.values
+            if stat == "ma":
+                short_stat = ts_mean(values, short_window)
+                long_stat = ts_mean(values, long_window)
+            else:
+                short_stat = ts_std(values, short_window)
+                long_stat = ts_std(values, long_window)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = short_stat / long_stat - 1.0
+        return inp.sample(turnover, per_symbol)
+
+    return compute
+
+
+def _high_low(window: int) -> PredefinedFactorCompute:
+    """窗口内净值曲线最高/最低比值(#429,Tushare high_low 口径)。
+
+    净值 ``nv[i] = Π(1 + r_j)`` 自挂载序列首根 bar 锚定 —— Tushare 的
+    「fixed start point」:起点选择在 max/min **比值**中作为正常数缩放
+    消去,任意固定起点同值(因子只依赖日收益,与价格绝对水平无关)。
+    窗口内净值恒定 → 比值 1(区间无运动);分母 0(净值归零,理论边界)
+    → 缺测;窗口不足 → 缺测。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            returns = _daily_returns(series.values)
+            nav = np.ones_like(returns)
+            nav[1:] = np.cumprod(1.0 + returns[1:])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = ts_max(nav, window) / ts_min(nav, window)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _price_position_ir(window: int) -> PredefinedFactorCompute:
+    """日内位置信息比率(#429):窗口内 ``mean(ratio) / std(ratio)``,
+
+    ``ratio = (close - open) / (high - low)`` = 收盘相对开盘的涨幅占
+    日内区间的比例(≈1 收在最高、≈-1 收在最低、0 平收);均值/标准差
+    = 位置方向性 x 稳定性(信息比率形态,高 = 持续收在高位的动量确认)。
+    high == low(一字板)→ 0/0 → 缺测。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        opens = inp.bars("open")
+        highs = inp.bars("high")
+        lows = inp.bars("low")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, close_series in closes.items():
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ratio = (close_series.values - opens[symbol].values) / (
+                    highs[symbol].values - lows[symbol].values
+                )
+                per_symbol[symbol] = ts_mean(ratio, window) / ts_std(ratio, window)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _sum_abs_return_per_amount(window: int) -> PredefinedFactorCompute:
+    """``Σ|日收益| / Σ成交额``(#429):单位成交额驱动的价格波动。
+
+    Tushare sum_abs_rtn_amount 口径(Amihud 非流动性的求和形态):
+    值越高 = 相对较小的成交额产生了较大的价格波动(流动性调整波动率);
+    窗口内成交额合计 0 → 缺测。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        amounts = inp.bars("amount")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            abs_returns = np.abs(_daily_returns(series.values))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                per_symbol[symbol] = ts_sum(abs_returns, window) / ts_sum(
+                    amounts[symbol].values, window
+                )
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _macd_dif() -> PredefinedFactorCompute:
+    """MACD DIF 分量(#429):``EMA12 - EMA26``(快慢线差,趋势方向)。
+
+    原始价格量纲(未归一);与 ``macd_hist_norm`` 共享 DIF/DEA 口径。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            per_symbol[symbol] = ts_ema(series.values, 12) - ts_ema(
+                series.values, 26
+            )
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _macd_dea() -> PredefinedFactorCompute:
+    """MACD DEA 分量(#429):``EMA9(DIF)``,``DIF = EMA12 - EMA26``(信号线)。
+
+    原始价格量纲;与 ``macd_hist_norm`` 共享 DIF/DEA 口径。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            dif = ts_ema(series.values, 12) - ts_ema(series.values, 26)
+            per_symbol[symbol] = ts_ema(dif, 9)
+        return inp.sample(closes, per_symbol)
+
+    return compute
+
+
+def _batch6_quant_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """批次 6(#429)P1 量价 28 个的目录条目(家族与方向口径见块注释)。"""
+    entries: list[PredefinedFactorDefinition] = []
+    # momentum(6):return 窗口变体 + 价格位置 IR + MACD 分量
+    for window in (5, 42):
+        entries.append(
+            _definition(
+                f"return_{window}d",
+                title=f"return_{window}d = close / close[-{window}] - 1"
+                f"({window} 根 bar 区间收益,动量;return_Nd 族窗口变体)",
+                family="momentum",
+                window=window,
+            )
+        )
+    entries.append(
+        _entry(
+            "price_position_ir_60d",
+            title="price_position_ir_60d = 60 日内 (close-open)/(high-low) 的"
+            "均值/标准差(日内位置信息比率:收盘在日内区间的方向性 x 稳定性,"
+            "高 = 持续收在高位的动量确认)",
+            family="momentum",
+            compute=_price_position_ir(60),
+            window=60,
+            data_dependencies=("bars.close", "bars.open", "bars.high", "bars.low"),
+        )
+    )
+    entries.append(
+        _entry(
+            "dif",
+            title="dif = EMA12 - EMA26(MACD 快慢线差,趋势方向;原始价格量纲,"
+            "与 macd_hist_norm 共享口径——该因子为 (DIF-DEA)*2/close 归一柱)",
+            family="momentum",
+            compute=_macd_dif(),
+            window=26,
+        )
+    )
+    entries.append(
+        _entry(
+            "dea",
+            title="dea = EMA9(DIF),DIF = EMA12 - EMA26(MACD 信号线;原始价格"
+            "量纲,与 macd_hist_norm 共享 DIF/DEA 口径)",
+            family="momentum",
+            compute=_macd_dea(),
+            window=26,
+        )
+    )
+    # risk(6):净值高低比窗口展开 + 收益波动窗口变体
+    # (高值 = 区间振幅大 = 波动风险高,按同族 vol/corr 处理 direction LOWER;
+    # 风险暴露定位 signal_eligible=False)
+    for window in (21, 42, 63, 126, 252):
+        months = window // 21
+        entries.append(
+            _entry(
+                f"high_low_{window}d",
+                title=f"high_low_{window}d = 窗口内净值曲线(1+日收益累计)最高/"
+                f"最低比值(近 {months} 个月趋势强度/振幅;高值 = 区间波动大,"
+                "方向按同族 vol/corr 的风险口径 LOWER;净值起点缩放在比值中消去)",
+                family="risk",
+                compute=_high_low(window),
+                window=window,
+                direction=FactorPreference.LOWER,
+                signal_eligible=False,
+                min_history_bars=252 if window == 252 else None,
+            )
+        )
+    entries.append(
+        _entry(
+            "return_std_42d",
+            title="return_std_42d = 日收益 trailing 42 根 bar 样本标准差"
+            "(近两月已实现波动;vol 族同式窗口变体,风险口径 direction LOWER)",
+            family="risk",
+            compute=_realized_vol(42),
+            window=42,
+            direction=FactorPreference.LOWER,
+            signal_eligible=False,
+        )
+    )
+    # liquidity(16):换手乖离 / 换手波动乖离 x8+8 + 单位成交额波动
+    for short_window in (21, 42, 63, 126):
+        for long_window in (252, 504):
+            entries.append(
+                _entry(
+                    f"bias_turn_{short_window}d_{long_window}d",
+                    title=f"bias_turn_{short_window}d_{long_window}d = "
+                    f"{short_window} 日换手均值 / {long_window} 日换手均值 - 1"
+                    "(换手乖离 BIAS 双窗形态:近期换手相对长期越高越活跃,"
+                    "direction 与 turnover_ratio 族一致)",
+                    family="liquidity",
+                    compute=_turnover_window_bias(
+                        short_window, long_window, stat="ma"
+                    ),
+                    window=long_window,
+                    signal_eligible=False,
+                    data_dependencies=("daily_metrics.turnover_rate",),
+                    min_history_bars=long_window,
+                )
+            )
+            entries.append(
+                _entry(
+                    f"bias_std_turn_{short_window}d_{long_window}d",
+                    title=f"bias_std_turn_{short_window}d_{long_window}d = "
+                    f"{short_window} 日换手标准差 / {long_window} 日换手标准差 - 1"
+                    "(换手波动乖离:近期换手波动相对长期放大 = 异常活跃;相对"
+                    "活跃度口径 direction HIGHER,与绝对换手波动 turnover_std "
+                    "的 LOWER 风险口径区分)",
+                    family="liquidity",
+                    compute=_turnover_window_bias(
+                        short_window, long_window, stat="std"
+                    ),
+                    window=long_window,
+                    signal_eligible=False,
+                    data_dependencies=("daily_metrics.turnover_rate",),
+                    min_history_bars=long_window,
+                )
+            )
+    entries.append(
+        _entry(
+            "sum_abs_rtn_amount_20d",
+            title="sum_abs_rtn_amount_20d = 20 日 Σ|日收益| / Σ成交额(单位"
+            "成交额驱动的价格波动,Amihud 非流动性的求和形态;高 = 小成交额"
+            "大波动)",
+            family="liquidity",
+            compute=_sum_abs_return_per_amount(20),
+            window=20,
+            signal_eligible=False,
+            data_dependencies=("bars.close", "bars.amount"),
+        )
+    )
+    return tuple(entries)
+
+
+# ---- 批次 6(P1 量价,#429)结束 ----
+
 #: 目录(裸名 → 条目)。批次 0 样板:return_Nd 动量族(4 窗口变体);
 #: 批次 1-4(~150+ 因子)按同一模式在此追加注册。
 #:
@@ -3416,6 +3715,8 @@ PREDEFINED_FACTORS = {
         *_vol_entries(),
         *_liquidity_entries(),
         *_size_entries(),
+        # ---- 批次 6(P1 量价,#429):换手乖离/净值高低比/窗口变体/MACD 分量 ----
+        *_batch6_quant_entries(),
     )
 }
 
