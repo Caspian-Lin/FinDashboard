@@ -1751,6 +1751,45 @@ def build_run_interrupt_probe(
     return _probe
 
 
+#: 预计算段进度上报器(issue #450):phase 文本 → None。与 LoadChunkProbe
+#: 同源同库写入约定(见 :func:`build_run_phase_reporter`),但只写 phase 文本、
+#: 不做 run status / cancel 轮询 —— 打断判定仍由分块边界的探针承担,二者
+#: 分开传参使既有 #306/#308 探针调用序列契约不受预计算帧影响。
+LoadPhaseReporter = Callable[[str], Awaitable[None]]
+
+
+def build_run_phase_reporter(
+    session_maker: async_sessionmaker[Any],
+    run_id: str,
+) -> LoadPhaseReporter:
+    """构造预计算段 phase 文本上报器(issue #450;与 #306 探针同库写入约定)。
+
+    逐条解析 run → job_id 后把任意 phase 文本写入 background_jobs(单条
+    UPDATE,失败静默 —— 纯可观测性不阻断加载);done/total 数值列不动
+    (#308 口径),``update_progress`` 顺带刷新 heartbeat_at,预计算长段
+    (close / daily 矩阵预建)不再是无帧盲区。
+    """
+
+    async def _report(phase: str) -> None:
+        from finboard_persistence import (
+            BackgroundJobRepository,
+            ResearchRunRepository,
+        )
+
+        async with session_maker() as session:
+            row = await ResearchRunRepository(session).get(run_id)
+            job_id = None if row is None else row.job_id
+        if job_id is None:
+            return
+        with contextlib.suppress(Exception):
+            async with session_maker() as session:
+                repo = BackgroundJobRepository(session)
+                await repo.update_progress(job_id, done=0, total=None, phase=phase)
+                await repo.checkpoint()
+
+    return _report
+
+
 async def _start_period_feature_pool(
     provider: FrozenReleaseProvider,
     process_workers: int,
@@ -1800,6 +1839,7 @@ async def build_decision_load_contexts(
     series_provider: FactorSeriesProvider | None = None,
     suspension_view: SuspensionView | None = None,
     trading_days_loader: TradingDaysLoader | None = None,
+    precompute_phase_reporter: LoadPhaseReporter | None = None,
 ) -> tuple[DecisionLoadContext, ...]:
     """按执行模式加载全部决策的机械上下文(不含信号,issue #218)。
 
@@ -1826,6 +1866,12 @@ async def build_decision_load_contexts(
     phase 字段(k=已完成期数、N=推导出的决策期总数,multi_period 与
     single_shot 同机制);首帧(k=0)在 close 矩阵预建**之前**上报,覆盖
     预建这段此前零进度的空白窗。
+
+    issue #450:``precompute_phase_reporter``(可选)承担预计算段的细粒度
+    进度帧 —— close / daily 矩阵预建逐标的按节流上报
+    ``research_run:decision_load precompute <段> <done>/<total>``,段前后各
+    一帧 ``precompute start`` / ``precompute done``;只写 phase 文本,
+    done/total 数值列与分块探针调用序列(#306/#308 契约)均不受影响。
     """
     if not manifest.dataset_releases:
         raise ValueError("manifest 必须冻结至少一个数据发布")
@@ -1882,13 +1928,30 @@ async def build_decision_load_contexts(
     if schedule is not None and process_workers > 0:
         pool = await _start_period_feature_pool(provider, process_workers)
     await _release_trading_days(provider, trading_days_loader=trading_days_loader)
-    await loader.ensure_close_histories(manifest, process_pool=pool)
+    # issue #450:预计算段进度帧(尽力而为)。首帧 0/N 之后到首个分块边界
+    # 之间是 close / daily 矩阵预建的长段,逐标的节流帧只写 phase 文本,
+    # #306 僵尸指纹(逐 phase 变化)在预建期间保持活跃。上报失败一律吞掉。
+    if precompute_phase_reporter is not None:
+        with contextlib.suppress(Exception):
+            await precompute_phase_reporter(
+                "research_run:decision_load precompute start"
+            )
+    await loader.ensure_close_histories(
+        manifest, process_pool=pool, progress=precompute_phase_reporter
+    )
     # issue #438:研究观测(daily_metrics)run 级预建与 close 矩阵同类——决策日
     # 全集在分块前已冻结,每标的一次列式读取覆盖全部决策期;逐期消费查矩阵,
     # 零 IO 零逐行解析(stub / 对象路径 provider 不预建,逐期路径行为不变)。
     await loader.ensure_daily_metrics_histories(
-        manifest, tuple(decision_at for decision_at, _ in decision_days)
+        manifest,
+        tuple(decision_at for decision_at, _ in decision_days),
+        progress=precompute_phase_reporter,
     )
+    if precompute_phase_reporter is not None:
+        with contextlib.suppress(Exception):
+            await precompute_phase_reporter(
+                "research_run:decision_load precompute done"
+            )
 
     async def _load_one(decision_at: datetime, snapshot_id: str | None) -> DecisionLoadContext:
         execution_at = await _next_execution_at(
@@ -2014,6 +2077,7 @@ async def build_decision_inputs(
     series_provider: FactorSeriesProvider | None = None,
     suspension_view: SuspensionView | None = None,
     trading_days_loader: TradingDaysLoader | None = None,
+    precompute_phase_reporter: LoadPhaseReporter | None = None,
 ) -> tuple[PortfolioDecisionInput, ...]:
     """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
 
@@ -2044,6 +2108,7 @@ async def build_decision_inputs(
         series_provider=series_provider,
         suspension_view=suspension_view,
         trading_days_loader=trading_days_loader,
+        precompute_phase_reporter=precompute_phase_reporter,
     ):
         signals = await asyncio.to_thread(
             build_normalized_signals,
@@ -2156,6 +2221,7 @@ class SignalEnginePipelineAdapter:
         suspension_view_factory: Callable[[], Awaitable[SuspensionView | None]]
         | None = None,
         trading_days_loader: TradingDaysLoader | None = None,
+        precompute_phase_reporter: LoadPhaseReporter | None = None,
     ) -> None:
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
             raise ValueError(
@@ -2179,6 +2245,9 @@ class SignalEnginePipelineAdapter:
         self._process_workers = max(0, process_workers)
         # issue #306:加载期分块探针(run status / cancel 轮询 + 进度上报)。
         self._chunk_probe = chunk_probe
+        # issue #450:预计算段 phase 进度上报器(只写 phase 文本,与探针
+        # 分开传参,#306/#308 探针调用序列契约不受影响)。
+        self._precompute_phase_reporter = precompute_phase_reporter
         self._inputs: tuple[PortfolioDecisionInput, ...] | None = None
         self._equity_curve: tuple[EquityPoint, ...] = ()
         self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
@@ -2289,6 +2358,7 @@ class SignalEnginePipelineAdapter:
                 series_provider=self._series_provider,
                 suspension_view=suspension_view,
                 trading_days_loader=self._trading_days_loader,
+                precompute_phase_reporter=self._precompute_phase_reporter,
             )
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
@@ -2514,17 +2584,38 @@ def build_signal_engine_adapter_factory(
 
         # issue #360:因子序列工件读取回调(与 _snapshot_provider 同域;
         # 未声明 series 的 run 不触发任何读取)。
+        # issue #450:序列工件按 series_id 在本 run(工厂闭包)内 memoize
+        # (#287 provider_memo 同构)。序列记录是不可变 frozen dataclass 且
+        # 内容寻址(同 series_id 必然同内容),跨决策期共享安全;``get`` 每次拉
+        # 整行(values JSON 可达数十 MB)+ 全量反序列化,逐期 x 逐序列的重复
+        # 读取此前是加载期主导热点 —— memo 后每 run 每序列至多一次 DB 读取。
+        # 缓存生命周期 = 闭包生命周期 = 单次 run 适配器,无跨 run 共享。
+        series_memo: dict[str, object] = {}
+
         async def _series_provider(series_id: str) -> object:
+            cached = series_memo.get(series_id)
+            if cached is not None:
+                logger.debug("research_run.series_record_reused", series_id=series_id)
+                return cached
             from finboard_persistence import FactorSeriesRepository
 
             async with session_maker() as session:
-                return await FactorSeriesRepository(session).get(series_id)
+                record = await FactorSeriesRepository(session).get(series_id)
+            if record is not None:
+                series_memo[series_id] = record
+                logger.debug("research_run.series_record_created", series_id=series_id)
+            return record
 
         # issue #306:加载期分块探针 —— run status / job cancel_requested 轮询 +
         # 加载进度上报。打断路径(run 被外部标 interrupted 等)在此秒级感知,
         # 不再出现「run 已 interrupted、job 靠心跳续租僵死 7.5 小时」的僵尸。
         # 按 manifest.run_id 在工厂闭包内构造,与 provider memo 同生命周期。
         chunk_probe = build_run_interrupt_probe(session_maker, manifest.run_id)
+        # issue #450:预计算段 phase 进度上报器(与探针同生命周期 = 单次 run;
+        # 覆盖 close / daily 矩阵预建长段的 0/N 盲区)。
+        precompute_phase_reporter = build_run_phase_reporter(
+            session_maker, manifest.run_id
+        )
 
         # issue #396:停复牌视图 + trade_cal 日历 DB 优先回调(与 provider
         # memo 同生命周期 = 单次 run)。两个回调都尽力而为:research_suspensions
@@ -2602,6 +2693,7 @@ def build_signal_engine_adapter_factory(
                 settings_factory=settings_factory,
                 chunk_probe=chunk_probe,
                 series_provider=_series_provider,  # type: ignore[arg-type]
+                precompute_phase_reporter=precompute_phase_reporter,
             )
 
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
@@ -2625,6 +2717,7 @@ def build_signal_engine_adapter_factory(
             series_provider=_series_provider,  # type: ignore[arg-type]
             suspension_view_factory=_suspension_view_factory,
             trading_days_loader=_trading_days_loader,
+            precompute_phase_reporter=precompute_phase_reporter,
         )
 
     return _factory
@@ -2634,6 +2727,7 @@ __all__ = [
     "SIGNAL_ENGINE_STRATEGY_KINDS",
     "DecisionLoadContext",
     "LoadChunkProbe",
+    "LoadPhaseReporter",
     "SignalEnginePipelineAdapter",
     "TradingDaysLoader",
     "build_daily_equity_curve",
@@ -2641,6 +2735,7 @@ __all__ = [
     "build_decision_load_contexts",
     "build_normalized_signals",
     "build_run_interrupt_probe",
+    "build_run_phase_reporter",
     "build_signal_engine_adapter_factory",
     "decision_schedule_dates_gate_error",
     "enqueue_decision_dates",

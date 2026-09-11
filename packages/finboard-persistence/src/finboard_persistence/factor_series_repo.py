@@ -124,6 +124,15 @@ class FactorSeriesRecord:
     source_run_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # issue #450:content_checksum 校验开关(仅 __post_init__ 行为,不属于
+    # 内容 —— compare/repr 均排除,不影响相等性与序列化)。写入路径与用户
+    # 直接构造保持默认 True(逐位不变);持久化读取行经 _record_from_row 传
+    # False —— 写入时已校验过,读取路径重算需对全量 dates+values 做
+    # canonical json dumps(75 期 x 4 序列的 run 每期重复这份数秒级开销),
+    # 信任已落库内容。series_key 校验廉价,读取路径保留。
+    verify_content_checksum: bool = field(
+        default=True, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         expected_key = compute_series_key(
@@ -145,8 +154,8 @@ class FactorSeriesRecord:
                 f"series_id 必须为 {expected_id}(FS- + series_key[:12]),"
                 f"got {self.series_id}"
             )
-        if self.content_checksum != compute_content_checksum(
-            self.dates, self.values
+        if self.verify_content_checksum and self.content_checksum != (
+            compute_content_checksum(self.dates, self.values)
         ):
             raise ValueError("content_checksum 与 dates/values 内容不一致")
 
@@ -400,6 +409,9 @@ class FactorSeriesRepository:
             source_run_id=row.source_run_id,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            # issue #450:持久化读取信任写入时已校验的 content_checksum,
+            # 跳过全量 canonical json 重算(读取路径主导开销)。
+            verify_content_checksum=False,
         )
 
 

@@ -32,7 +32,8 @@ manifest 冻结多个 release 时,一个 bars 主发布 + 若干研究数据发�
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection, Mapping, Sequence
+import contextlib
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -106,6 +107,52 @@ class FactorSeriesProvider(Protocol):
     """按 series_id 读取因子序列工件的回调(注入点,issue #360)。"""
 
     async def __call__(self, series_id: str) -> FactorSeriesRecordLike | None: ...
+
+
+#: 预计算段进度回调(issue #450):phase 文本 → None。实现方(适配器工厂,
+#: 见 ``build_run_phase_reporter``)尽力而为写 job 的 phase 字段,失败不阻断
+#: 加载;本模块只在预建循环内按节流调用,done/total 数值列不动(#308 口径)。
+PrecomputeProgressReporter = Callable[[str], Awaitable[None]]
+
+#: 预计算进度帧节流(issue #450):逐标的完成计数每达到该步长上报一帧
+#: (首帧与末帧强制)。全市场 5534 标的 x close/daily 两段 ≈ 每段 ~22 帧,
+#: DB 写入量可忽略;不节流的逐标的写入既无必要也不可读。
+_PRECOMPUTE_PROGRESS_STEP = 256
+
+
+def _make_precompute_ticker(
+    progress: PrecomputeProgressReporter | None,
+    label: str,
+    total: int,
+) -> Callable[[], Awaitable[None]]:
+    """构造逐标的完成打点器(issue #450):按节流上报预计算进度帧。
+
+    每个标的构建完成后调用返回的打点器一次;``done`` 为 1、达到步长或等于
+    ``total`` 时上报 ``research_run:decision_load precompute <label>
+    <done>/<total>``(其余静默返回)。``progress`` 为 None 或 total 为 0 时
+    返回 no-op,零开销。上报异常一律吞掉 —— 进度是纯可观测性,不改变
+    预建结果与失败语义。
+    """
+    if progress is None or total <= 0:
+
+        async def _noop() -> None:
+            return None
+
+        return _noop
+
+    done = 0
+
+    async def _tick() -> None:
+        nonlocal done
+        done += 1
+        if done != 1 and done != total and done % _PRECOMPUTE_PROGRESS_STEP != 0:
+            return
+        with contextlib.suppress(Exception):
+            await progress(
+                f"research_run:decision_load precompute {label} {done}/{total}"
+            )
+
+    return _tick
 
 
 #: 逐标的并发加载的信号量上限(实际磁盘读仍受 provider 内 ParquetCache
@@ -593,6 +640,7 @@ class FrozenInputLoader:
         manifest: ResearchRunManifest,
         *,
         process_pool: PriceFeatureProcessPool | None = None,
+        progress: PrecomputeProgressReporter | None = None,
     ) -> None:
         """一次性预建 close 矩阵(幂等;issue #288 分块并行加载的前置步骤)。
 
@@ -610,6 +658,9 @@ class FrozenInputLoader:
         进程池——worker 内完成 parquet 解码 + 列式转换,主进程只收列式数据;
         池未启动 / 启动失败 / 任务损坏一律具名降级为进程内线程路径(结果逐值
         一致),不改变池自身状态(特征路径的降级语义由 #288 自行处理)。
+
+        issue #450:``progress`` 非空时逐标的完成按节流上报预计算进度帧
+        (只写 phase 文本,数值列不动);None = 无进度上报(逐期惰性路径)。
         """
         if self._close_histories_built:
             return
@@ -623,14 +674,21 @@ class FrozenInputLoader:
         include_open = _wants_execution_open(manifest)
         if process_pool is not None and not process_pool.broken:
             built = await _load_close_histories_via_pool(
-                process_pool, provider, included_candidates, include_open=include_open
+                process_pool,
+                provider,
+                included_candidates,
+                include_open=include_open,
+                progress=progress,
             )
             if built is not None:
                 self._close_histories_built = True
                 self._close_histories.update(built)
                 return
         await self._ensure_close_histories(
-            provider, included_candidates, include_open=include_open
+            provider,
+            included_candidates,
+            include_open=include_open,
+            progress=progress,
         )
 
     async def _ensure_close_histories(
@@ -639,6 +697,7 @@ class FrozenInputLoader:
         candidates: Sequence[UniverseCandidate],
         *,
         include_open: bool = False,
+        progress: PrecomputeProgressReporter | None = None,
     ) -> None:
         """构建 close 矩阵(只尝试一次;失败不缓存,逐期回退读取)。"""
         if self._close_histories_built:
@@ -646,7 +705,7 @@ class FrozenInputLoader:
         self._close_histories_built = True
         self._close_histories.update(
             await _load_close_histories(
-                provider, candidates, include_open=include_open
+                provider, candidates, include_open=include_open, progress=progress
             )
         )
 
@@ -654,6 +713,8 @@ class FrozenInputLoader:
         self,
         manifest: ResearchRunManifest,
         decision_ats: Sequence[datetime],
+        *,
+        progress: PrecomputeProgressReporter | None = None,
     ) -> None:
         """一次性预建全部 daily_metrics 发布的研究观测矩阵(幂等,#438)。
 
@@ -670,6 +731,9 @@ class FrozenInputLoader:
         与对象路径 provider 不预建,逐期路径行为不变。读取失败(除标的不在
         发布的 ``ReleaseCapabilityError`` → #252 missing 外)直接抛出,与
         逐期路径同 fail-closed。
+
+        issue #450:``progress`` 非空时逐标的完成按节流上报预计算进度帧
+        (计数跨发布累积,帧内 done/total 覆盖全部 daily_metrics 发布)。
         """
         if self._daily_precompute_built or not decision_ats:
             return
@@ -682,15 +746,30 @@ class FrozenInputLoader:
             _declared_domain_instruments(manifest, list(bars_provider.release.instruments))
         )
         ordered = sorted(decision_ats)
-        for release_ref in manifest.dataset_releases:
+        daily_releases = [
+            release_ref
+            for release_ref in manifest.dataset_releases
+            if self.release_provider_factory(
+                release_ref.artifact_id
+            ).release.dataset_kind
+            is ReleaseDatasetKind.DAILY_METRICS
+        ]
+        # 进度计数跨发布累积(#450):帧内 done/total 覆盖本 ensure 全部
+        # 标的 x 发布,不随发布切换回退。
+        tick = _make_precompute_ticker(
+            progress, "daily", len(candidates) * len(daily_releases)
+        )
+        for release_ref in daily_releases:
             provider = self.release_provider_factory(release_ref.artifact_id)
-            if provider.release.dataset_kind is not ReleaseDatasetKind.DAILY_METRICS:
-                continue
             if getattr(provider, "fetch_daily_metrics_columns", None) is None:
                 continue
             self._daily_precompute[release_ref.artifact_id] = (
                 await _build_daily_metrics_precompute(
-                    provider, candidates, ordered, release_ref.artifact_id
+                    provider,
+                    candidates,
+                    ordered,
+                    release_ref.artifact_id,
+                    tick=tick,
                 )
             )
 
@@ -1211,6 +1290,8 @@ async def _build_daily_metrics_precompute(
     candidates: Sequence[UniverseCandidate],
     decision_ats: Sequence[datetime],
     release_id: str,
+    *,
+    tick: Callable[[], Awaitable[None]] | None = None,
 ) -> DailyMetricsPrecompute:
     """并发预建一个 daily_metrics 发布的全部决策期矩阵(#438)。
 
@@ -1218,7 +1299,9 @@ async def _build_daily_metrics_precompute(
     Arrow 内完成,全区间可见),选行与列抽取 numpy 化后置 ``to_thread``;
     逐候选 ``gather`` + 信号量并发,异常按候选顺序抛出(与 close 矩阵构建
     同语义)。标的不在发布(``ReleaseCapabilityError``)→ ``None``(#252
-    missing),其余异常原样传播(fail-closed)。
+    missing),其余异常原样传播(fail-closed)。``tick`` 非空时逐标的构建
+    完成后调用一次(issue #450 预计算进度打点,节流见
+    :func:`_make_precompute_ticker`)。
     """
     from finboard_data.releases import ReleaseCapabilityError, _epoch_micros
     from finboard_shared.models import Symbol
@@ -1247,7 +1330,7 @@ async def _build_daily_metrics_precompute(
                 )
             except ReleaseCapabilityError:
                 return None
-        return await asyncio.to_thread(
+        history = await asyncio.to_thread(
             _daily_history_from_table,
             table,
             decision_at_micros=decision_at_micros,
@@ -1255,6 +1338,9 @@ async def _build_daily_metrics_precompute(
             range_start_day=range_start_day,
             release_id=release_id,
         )
+        if tick is not None:
+            await tick()
+        return history
 
     results = await asyncio.gather(
         *(_one(candidate) for candidate in candidates), return_exceptions=True
@@ -1482,6 +1568,7 @@ async def _load_close_histories(
     candidates: Sequence[UniverseCandidate],
     *,
     include_open: bool = False,
+    progress: PrecomputeProgressReporter | None = None,
 ) -> dict[str, SymbolCloseHistory | None]:
     """并发读取各标的冻结全区间 close 历史,构建 close 矩阵(issue #287)。
 
@@ -1503,6 +1590,7 @@ async def _load_close_histories(
     if not candidates or not isinstance(provider, FrozenReleaseProvider):
         return {}
     semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
+    tick = _make_precompute_ticker(progress, "close", len(candidates))
 
     async def _one(candidate: UniverseCandidate) -> SymbolCloseHistory | None:
         async with semaphore:
@@ -1518,12 +1606,14 @@ async def _load_close_histories(
                 adjust=provider.release.adjustment,
                 include_open=include_open,
             )
-        return SymbolCloseHistory.from_sequences(
+        history = SymbolCloseHistory.from_sequences(
             available_at=columns.available_at,
             dates=columns.dates,
             closes=columns.closes,
             opens=columns.opens,
         )
+        await tick()
+        return history
 
     results = await asyncio.gather(
         *(_one(candidate) for candidate in candidates), return_exceptions=True
@@ -1548,6 +1638,7 @@ async def _load_close_histories_via_pool(
     candidates: Sequence[UniverseCandidate],
     *,
     include_open: bool = False,
+    progress: PrecomputeProgressReporter | None = None,
 ) -> dict[str, SymbolCloseHistory | None] | None:
     """经常驻进程池预建 close 矩阵(issue #301);不可用时返回 ``None``。
 
@@ -1563,6 +1654,7 @@ async def _load_close_histories_via_pool(
         _CloseHistoryProcessTask,
         _compute_close_history_process_task,
     )
+    from finboard_data.releases import CloseHistoryColumns
 
     if not candidates or pool.broken:
         return None
@@ -1581,12 +1673,20 @@ async def _load_close_histories_via_pool(
         )
         for candidate in candidates
     ]
+    tick = _make_precompute_ticker(progress, "close", len(candidates))
+
+    async def _run_one(
+        task: _CloseHistoryProcessTask,
+    ) -> tuple[str, CloseHistoryColumns]:
+        result = await loop.run_in_executor(
+            executor, _compute_close_history_process_task, task
+        )
+        await tick()
+        return result
+
     try:
         results = await asyncio.gather(
-            *(
-                loop.run_in_executor(executor, _compute_close_history_process_task, task)
-                for task in tasks
-            ),
+            *(_run_one(task) for task in tasks),
             return_exceptions=True,
         )
     except Exception as exc:
