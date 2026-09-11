@@ -27,8 +27,8 @@
 * ``finboard.research_code.*``(#215/#219)—— 研究代码仓库(submit / rollback /
   promote 写 + list / get 只读);提交先进入 draft,必须通过 screen + #57 OOS
   晋级门后才进入 active 正式白名单,只存储与版本化,不执行代码。
-* ``finboard.job.*``(#136;#221 归档)—— 统一后台任务队列监控与提交
-  (list / get 只读 + enqueue / cancel / archive / unarchive 写,
+* ``finboard.job.*``(#136;#221 归档;#443 等待)—— 统一后台任务队列监控与提交
+  (list / get / wait 只读 + enqueue / cancel / archive / unarchive 写,
   复用 ``background_jobs`` 表)。
 * 数据写操作(#137)—— ``finboard.data_write.*`` / ``finboard.etf.*``:
   data_fetch(同步单标的)/ sync_universe / bulk_download_start /
@@ -107,7 +107,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(127 个,已实现;#392 删 finboard_data_fetch_all)==
+== 当前可用工具(128 个,已实现;#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -270,8 +270,8 @@ FinBoard 研究 MCP —— 量化研究工具集
   暴露缺失降级为具名 warning 审计行(risk_factor_neutralization_skipped),
   不可满足 fail_closed 拒绝;research_run 侧经 portfolio_config.overrides
   声明同一约束(risk_factor_limits,因子名与冻结 feature_id 同名)。
-- finboard.job.*(6,✅ #136+#221)—— 统一后台任务队列监控与提交:
-  job list/get(只读)、job enqueue/cancel/archive/unarchive(写)。
+- finboard.job.*(7,✅ #136+#221+#443)—— 统一后台任务队列监控与提交:
+  job list/get/wait(只读)、job enqueue/cancel/archive/unarchive(写)。
   复用 background_jobs 表,enqueue kind 白名单全是研究/数据/回测域
   (echo/research_run/feature_snapshot/bulk_download/dataset_publish/
   backtest_run/data_sync/quality_repair/dataset_sync);
@@ -285,7 +285,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   feature_snapshot/bulk_download 等异步任务的进度
   统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id;
   view=none 轮询最小集 / summary 默认剥 payload / detail 全量;返回附
-  data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206)。
+  data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206);
+  等待任务终态优先用 finboard_job_wait(#443,有界阻塞最长 timeout_seconds,
+  超时回当前快照 + completed=false 可续期,替代循环轮询省对话轮次)。
   kind=research_run 的 job_get 附 run_status(#306:关联 research_runs.status,
   「run interrupted 但 job 仍 running」的两表不一致一眼可见;REST
   GET /api/jobs/{id} 同口径,列表不 join 为 null)。research_run 的 phase
