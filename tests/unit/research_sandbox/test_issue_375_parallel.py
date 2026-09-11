@@ -1,10 +1,10 @@
 """issue #375:factor_series_build 三层并行编排,检出语义零变化。
 
-* **审计截断容器并发** —— ``_audit_sample`` 对 2 个截断点 ``gather``:
-  各自从基线挂载过滤出变体挂载 + 独立容器,并发执行使审计段墙钟近半;
-  失败报告仍取最早分歧日期,异常按截断点顺序重抛第一个(与串行一致);
-* **kind 并发 = 2** —— ``factor_series_build`` 从单并发提升(沙箱内存
-  4096 档后,并发受 Docker Desktop WSL2 可用内存约束);
+* **审计截断点串行**(原 #375 并发,后因 Docker Desktop WSL2 VM 总量
+  ~8GB 扛不住双审计容器并发峰值、全市场挂载下实测成对 OOM 而改串行,
+  见 #424)—— ``_audit_sample`` 逐截断点执行:各自从基线挂载过滤出
+  变体挂载 + 独立容器;失败报告仍取最早分歧日期,异常按截断点顺序
+  传播;
 * **挂载逐标的读取并行** —— 分块 gather(块内并发、块间保序消费流式
   writer),落盘 parquet 与串行逐表逐行一致。
 
@@ -80,9 +80,9 @@ def _executor(
     )
 
 
-class TestAuditConcurrency:
-    async def test_two_cuts_run_concurrently(self) -> None:
-        """两个截断点并发执行(墙钟近半),全部通过返回 None。"""
+class TestAuditSerial:
+    async def test_cuts_run_serially(self) -> None:
+        """截断点串行执行(单容器内存足迹,#424),全部通过返回 None。"""
         inflight = {"n": 0, "max": 0}
         seen_cuts: list[date] = []
 
@@ -98,7 +98,7 @@ class TestAuditConcurrency:
         executor = _executor(audit)
         result = await executor._audit_sample(object(), _record(), object())
         assert result is None
-        assert inflight["max"] == 2
+        assert inflight["max"] == 1
         assert seen_cuts == audit_truncation_points(list(_DECISION_DATES))
 
     async def test_divergence_summary_takes_earliest(self) -> None:
