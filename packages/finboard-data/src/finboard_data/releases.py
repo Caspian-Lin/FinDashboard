@@ -4078,11 +4078,27 @@ def _cache_path(
     return path
 
 
-def _safe_release_artifact(root: Path, relative_path: str) -> Path:
+@cache
+def _safe_release_artifact_cached(
+    root_str: str, relative_path: str
+) -> tuple[str, bool]:
+    """resolve + 越界 + 存在检查的缓存体(#450 追续)。
+
+    ``(root, relative)`` 的 resolve/realpath/is_file 在 Windows 上每次
+    ~1ms 且全在事件循环线程,逐标的 x 逐期访问下是几十万次系统调用风暴;
+    发布工件不可变,首查后缓存即安全。
+    """
+    root = Path(root_str)
     path = (root / relative_path).resolve()
-    if not path.is_relative_to(root.resolve()) or not path.is_file():
+    ok = path.is_relative_to(root.resolve()) and path.is_file()
+    return str(path), ok
+
+
+def _safe_release_artifact(root: Path, relative_path: str) -> Path:
+    path_str, ok = _safe_release_artifact_cached(str(root), relative_path)
+    if not ok:
         raise ReleaseIntegrityError(f"发布文件不存在或路径越界: {relative_path}")
-    return path
+    return Path(path_str)
 
 
 def _sha256_file(path: Path) -> str:
