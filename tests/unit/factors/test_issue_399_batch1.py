@@ -362,7 +362,9 @@ class TestCatalogBatch1:
             for name, item in PREDEFINED_FACTORS.items()
             if any(dep.startswith("index_bars.") for dep in item.data_dependencies)
         }
-        assert declared == expected
+        # 批次 1 基线精确到名;后续批次(#429 等)新增的 index 依赖在各自测试
+        # 文件内做批次 scope 精确断言,避免每加一批就改历史断言。
+        assert declared & BATCH1_NAMES == expected
         # 指数依赖因子同时声明 bars.close(标的行情)
         assert all(
             "bars.close" in PREDEFINED_FACTORS[name].data_dependencies
