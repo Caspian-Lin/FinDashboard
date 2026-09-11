@@ -1,0 +1,1079 @@
+{
+ "order": [
+  "Alpha101",
+  "Growth",
+  "Liquidity",
+  "Momentum",
+  "Quality",
+  "Reversal",
+  "Risk",
+  "Size",
+  "Value"
+ ],
+ "sections": {
+  "Alpha101": {
+   "declared": 31,
+   "parsed": 31,
+   "items": [
+    {
+     "n": 1,
+     "name": "alpha101_1",
+     "desc": "基于负收益时段波动放大的极值位置排名因子。 数学表达式: Alpha = Rank(Ts_ArgMax(SignedPower(IF(Returns < 0, StdDev(Returns, 20), Close), 2), 5)) - 0.5"
+    },
+    {
+     "n": 2,
+     "name": "alpha101_2",
+     "desc": "世坤 alpha101 第 2 号因子。 数学表达式: Alpha = -1 * Correlation(Rank(Delta(Log(Volume), 2)), Rank((Close - Open) / Open), 6)"
+    },
+    {
+     "n": 3,
+     "name": "alpha101_3",
+     "desc": "开盘价排名与成交量排名相关性的负值。 数学表达式: Alpha = -1 * Correlation(Rank(Open), Rank(Volume), 10)"
+    },
+    {
+     "n": 4,
+     "name": "alpha101_4",
+     "desc": "最低价排名的 9 日时间序列排名的负值。 数学表达式: Alpha = -1 * Ts_Rank(Rank(Low), 9)"
+    },
+    {
+     "n": 5,
+     "name": "alpha101_5",
+     "desc": "开盘价偏离 VWAP 排名与收盘价偏离 VWAP 排名绝对值的组合。 数学表达式: Alpha = Rank(Open - (Sum(VWAP, 10) / 10)) * (-1 * Abs(Rank(Close - VWAP)))"
+    },
+    {
+     "n": 6,
+     "name": "alpha101_6",
+     "desc": "世坤 alpha101 第 6 号因子。 数学表达式: Alpha = -1 * Correlation(Open, Volume, 10)"
+    },
+    {
+     "n": 7,
+     "name": "alpha101_7",
+     "desc": "世坤 alpha101 第 7 号因子。 数学表达式: Alpha = (ADV20 < Volume) ? (-1 * Ts_Rank(Abs(Delta(Close, 7)), 60) * Sign(Delta(Close, 7))) : -1"
+    },
+    {
+     "n": 8,
+     "name": "alpha101_8",
+     "desc": "5 日开盘价与收益率乘积和相对其 10 日延迟值之差的排名负值。 数学表达式: Alpha = -1 * Rank((Sum(Open, 5) * Sum(Returns, 5)) - Delay((Sum(Open, 5) * Sum(Returns, 5)), 10))"
+    },
+    {
+     "n": 9,
+     "name": "alpha101_9",
+     "desc": "世坤 alpha101 第 9 号因子。 数学表达式: Alpha = (0 < Ts_Min(Delta(Close, 1), 5)) ? Delta(Close, 1) : ((Ts_Max(Delta(Close, 1), 5) < 0) ? Delta(Close, 1) : -1 * Delta(Close, 1))"
+    },
+    {
+     "n": 10,
+     "name": "alpha101_10",
+     "desc": "世坤 alpha101 第 10 号因子。 数学表达式: Alpha = Rank((0 < Ts_Min(Delta(Close, 1), 4)) ? Delta(Close, 1) : ((Ts_Max(Delta(Close, 1), 4) < 0) ? Delta(Close, 1) : -1 * Delta(Close, 1)))"
+    },
+    {
+     "n": 11,
+     "name": "alpha101_11",
+     "desc": "世坤 alpha101 第 11 号因子。 数学表达式: Alpha = (Rank(Ts_Max(VWAP - Close, 3)) + Rank(Ts_Min(VWAP - Close, 3))) * Rank(Delta(Volume, 3))"
+    },
+    {
+     "n": 12,
+     "name": "alpha101_12",
+     "desc": "世坤 alpha101 第 12 号因子。 数学表达式: Alpha = Sign(Delta(Volume, 1)) * (-1 * Delta(Close, 1))"
+    },
+    {
+     "n": 13,
+     "name": "alpha101_13",
+     "desc": "世坤 alpha101 第 13 号因子。 数学表达式: Alpha = -1 * Rank(Covariance(Rank(Close), Rank(Volume), 5))"
+    },
+    {
+     "n": 14,
+     "name": "alpha101_14",
+     "desc": "世坤 alpha101 第 14 号因子。 数学表达式: Alpha = -1 * Rank(Delta(Returns, 3)) * Correlation(Open, Volume, 10)"
+    },
+    {
+     "n": 15,
+     "name": "alpha101_15",
+     "desc": "世坤 alpha101 第 15 号因子。 数学表达式: Alpha = -1 * Sum(Rank(Correlation(Rank(High), Rank(Volume), 3)), 3)"
+    },
+    {
+     "n": 16,
+     "name": "alpha101_16",
+     "desc": "世坤 alpha101 第 16 号因子。 数学表达式: Alpha = -1 * Rank(Covariance(Rank(High), Rank(Volume), 5))"
+    },
+    {
+     "n": 17,
+     "name": "alpha101_17",
+     "desc": "世坤 alpha101 第 17 号因子。 数学表达式: Alpha = (-1 * Rank(Ts_Rank(Close, 10))) * Rank(Delta(Delta(Close, 1), 1)) * Rank(Ts_Rank(Volume / ADV20, 5))"
+    },
+    {
+     "n": 18,
+     "name": "alpha101_18",
+     "desc": "世坤 alpha101 第 18 号因子。 数学表达式: Alpha = -1 * Rank(StdDev(Abs(Close - Open), 5) + (Close - Open) + Correlation(Close, Open, 10))"
+    },
+    {
+     "n": 19,
+     "name": "alpha101_19",
+     "desc": "世坤 alpha101 第 19 号因子。 数学表达式: Alpha = ((-1 * Sign((Close - Delay(Close, 7)) + Delta(Close, 7))) * (1 + Rank(1 + Sum(Returns, 250)))) + ((Rank(Correlation(Rank(VWAP - Close), Rank(Volume), 12) * Rank(Co"
+    },
+    {
+     "n": 20,
+     "name": "alpha101_20",
+     "desc": "世坤 alpha101 第 20 号因子。 数学表达式: Alpha = -1 * Rank(Open - Delay(High, 1)) * Rank(Open - Delay(Close, 1)) * Rank(Open - Delay(Low, 1))"
+    },
+    {
+     "n": 21,
+     "name": "alpha101_22",
+     "desc": "世坤 alpha101 第 22 号因子。 数学表达式: Alpha = -1 * Delta(Correlation(High, Volume, 5), 5) * Rank(StdDev(Close, 20))"
+    },
+    {
+     "n": 22,
+     "name": "alpha101_23",
+     "desc": "世坤 alpha101 第 23 号因子。 数学表达式: Alpha = (Sum(High, 20) / 20 < High) ? -1 * Delta(High, 2) : 0"
+    },
+    {
+     "n": 23,
+     "name": "alpha101_25",
+     "desc": "世坤 alpha101 第 25 号因子。 数学表达式: Alpha = Rank(-1 * Returns * ADV20 * VWAP * (High - Close))"
+    },
+    {
+     "n": 24,
+     "name": "alpha101_33",
+     "desc": "世坤 alpha101 第 33 号因子。 数学表达式: Alpha = Rank(-1 * (1 - Open / Close))"
+    },
+    {
+     "n": 25,
+     "name": "alpha101_34",
+     "desc": "世坤 alpha101 第 34 号因子。 数学表达式: Alpha = Rank(1 - Rank(StdDev(Returns, 2) / StdDev(Returns, 5)) + 1 - Rank(Delta(Close, 1)))"
+    },
+    {
+     "n": 26,
+     "name": "alpha101_41",
+     "desc": "世坤 alpha101 第 41 号因子。 数学表达式: Alpha = (High * Low) ^ 0.5 - VWAP"
+    },
+    {
+     "n": 27,
+     "name": "alpha101_52",
+     "desc": "世坤 alpha101 第 52 号因子。 数学表达式: Alpha = ((-1 * Ts_Min(Low, 5) + Delay(Ts_Min(Low, 5), 5)) * Rank((Sum(Returns, 240) - Sum(Returns, 20)) / 220)) * Ts_Rank(Volume, 5)"
+    },
+    {
+     "n": 28,
+     "name": "alpha101_53",
+     "desc": "世坤 alpha101 第 53 号因子。 数学表达式: Alpha = -1 * Delta(((Close - Low) - (High - Close)) / (Close - Low), 9)"
+    },
+    {
+     "n": 29,
+     "name": "alpha101_54",
+     "desc": "世坤 alpha101 第 54 号因子。 数学表达式: Alpha = (-1 * (Low - Close) * Open^5) / ((Low - High) * Close^5)"
+    },
+    {
+     "n": 30,
+     "name": "alpha101_57",
+     "desc": "世坤 alpha101 第 57 号因子。 数学表达式: Alpha = -(Close - VWAP) / Decay_Linear(Rank(Ts_ArgMax(Close, 30)), 2)"
+    },
+    {
+     "n": 31,
+     "name": "alpha101_101",
+     "desc": "世坤 alpha101 第 101 号因子。 数学表达式: Alpha = (Close - Open) / ((High - Low) + 0.001)"
+    }
+   ]
+  },
+  "Growth": {
+   "declared": 15,
+   "parsed": 15,
+   "items": [
+    {
+     "n": 1,
+     "name": "peg_252d",
+     "desc": "PEG因子 PEG = PE / (EPS增长率 * 100)。用于衡量估值与成长性的匹配。 PE由收盘价/基本每股收益(TTM)计算得到。 数学表达式: 1. PE = Close / EPS_TTM 2. EPS_Growth = ts_returns(EPS, window, mode='simple') 3. PEG = PE / (EPS_Growth * 100) 参数: window"
+    },
+    {
+     "n": 2,
+     "name": "np_ttm_qoq",
+     "desc": "净利润（TTM）环比增速，截面排名。 数学表达式: Growth = NetProfit_TTM_t / NetProfit_TTM_{t-1} - 1 Factor = CrossSectionalRank(Growth)"
+    },
+    {
+     "n": 3,
+     "name": "yoy_net_profit",
+     "desc": "净利润同比增长因子 Mathematical expression: YoY = Value_t / Value_{t-252} - 1"
+    },
+    {
+     "n": 4,
+     "name": "yoy_ocf",
+     "desc": "经营现金流同比增长率因子，截面排名。 Mathematical expression: YoY = OCF_TTM_t / OCF_TTM_{t-252} - 1 Factor = CrossSectionalRank(YoY)"
+    },
+    {
+     "n": 5,
+     "name": "sa",
+     "desc": "每股销售收入增长加速度因子，截面排名。 每股销售收入增长率的变化量。 Mathematical expression: 1. SPS = OperatingRevenue_Q / TotalShares 2. SG = SPS_t / SPS_{t-252} - 1 3. SA = SG - SG_{t-63} Factor = CrossSectionalRank(SA)"
+    },
+    {
+     "n": 6,
+     "name": "gross_margin_qoq",
+     "desc": "毛利率TTM环比增长率因子，截面排名。 对应原faclib/growth/GPR1因子。 Mathematical expression: 1. GrossMargin = (Revenue_TTM - Cost_TTM) / Revenue_TTM 2. GPR = GrossMargin / GrossMargin_{t-63} - 1 Factor = CrossSectionalRank("
+    },
+    {
+     "n": 7,
+     "name": "pa",
+     "desc": "ROA增长加速度因子，截面排名。 ROA变化量的变化，衡量盈利能力加速改善的趋势。 Mathematical expression: 1. PG = ROA_t - ROA_{t-252} 2. PA = PG - PG_{t-63} Factor = CrossSectionalRank(PA)"
+    },
+    {
+     "n": 8,
+     "name": "yoy_roa",
+     "desc": "ROA同比增长率因子，截面排名。 Mathematical expression: YoY = ROA_TTM_t / ROA_TTM_{t-252} - 1 Factor = CrossSectionalRank(YoY)"
+    },
+    {
+     "n": 9,
+     "name": "yoy_net_asset",
+     "desc": "净资产同比增长率因子，截面排名。 Mathematical expression: YoY = NetAsset_t / NetAsset_{t-252} - 1 Factor = CrossSectionalRank(YoY)"
+    },
+    {
+     "n": 10,
+     "name": "yoy_revenue",
+     "desc": "营业收入同比增长因子 Mathematical expression: YoY = Value_t / Value_{t-252} - 1"
+    },
+    {
+     "n": 11,
+     "name": "yoy_roe",
+     "desc": "ROE同比增长率因子，截面排名。 Mathematical expression: YoY = ROE_TTM_t / ROE_TTM_{t-252} - 1 Factor = CrossSectionalRank(YoY)"
+    },
+    {
+     "n": 12,
+     "name": "yoy_total_asset",
+     "desc": "总资产同比增长率因子，截面排名。 Mathematical expression: YoY = TotalAsset_t / TotalAsset_{t-252} - 1 Factor = CrossSectionalRank(YoY)"
+    },
+    {
+     "n": 13,
+     "name": "eaa",
+     "desc": "EPS增长加速度因子，截面排名。 EPS增长率的变化量，衡量增长动能的变化趋势。 Mathematical expression: 1. EGA = EPS_Q / EPS_Q_{t-252} - 1 2. EAA = EGA - EGA_{t-63} Factor = CrossSectionalRank(EAA)"
+    },
+    {
+     "n": 14,
+     "name": "eap",
+     "desc": "EPS相对于价格的增长加速度因子，截面排名。 使用收盘价作为分母，标准化EPS增量。 Mathematical expression: 1. EGP = (EPS_Q_t - EPS_Q_{t-252}) / Close 2. EAP = EGP - EGP_{t-63} Factor = CrossSectionalRank(EAP)"
+    },
+    {
+     "n": 15,
+     "name": "asset_growth_qoq",
+     "desc": "总资产环比增速，截面排名。 数学表达式: Growth = TotalAssets_t / TotalAssets_{t-1} - 1 Factor = CrossSectionalRank(Growth)"
+    }
+   ]
+  },
+  "Liquidity": {
+   "declared": 35,
+   "parsed": 35,
+   "items": [
+    {
+     "n": 1,
+     "name": "avg_turnover_5d",
+     "desc": "平均换手率因子 计算过去5天的平均换手率。 数学表达式: 1. DailyTurnoverRate = Volume / AShares 2. Factor = ts_mean(DailyTurnoverRate, 5) 参数: window: 窗口天数"
+    },
+    {
+     "n": 2,
+     "name": "avg_turnover_10d",
+     "desc": "平均换手率因子 计算过去10天的平均换手率。 数学表达式: 1. DailyTurnoverRate = Volume / AShares 2. Factor = ts_mean(DailyTurnoverRate, 10) 参数: window: 窗口天数"
+    },
+    {
+     "n": 3,
+     "name": "avg_turnover_20d",
+     "desc": "平均换手率因子 计算过去20天的平均换手率。 数学表达式: 1. DailyTurnoverRate = Volume / AShares 2. Factor = ts_mean(DailyTurnoverRate, 20) 参数: window: 窗口天数"
+    },
+    {
+     "n": 4,
+     "name": "amount_ma_20d",
+     "desc": "计算 20 日成交额移动平均。 该因子衡量市场的活跃程度和流动性。 数学表达式: AmountMA = Mean(TurnoverAmount, 20) 参数: window: 移动平均窗口，默认为 20"
+    },
+    {
+     "n": 5,
+     "name": "turnover_ma_20d",
+     "desc": "计算成交量与流通市值比率的移动平均。 当 long>0 时，计算短期/长期均值比值；否则仅计算短期均值。 结果取负值，符合原始因子设计。 数学表达式: 1. VolCapRatio = TurnoverVolume / FloatMarketCap 2. FloatMarketCap = ClosePrice × FloatShares 3. If long > 0: Factor = -MA(V"
+    },
+    {
+     "n": 6,
+     "name": "sum_abs_rtn_amount_20d",
+     "desc": "计算 20 日累计绝对收益率与累计成交额的比值。 该因子衡量\"单位成交额所产生的波动性\"， 可以看作是一种流动性调整后的波动率指标。 值越高，代表在相对较小的成交量下产生了较大的价格波动。 数学表达式: Factor = Sum(|Return|, 20) / Sum(TurnoverAmount, 20) 参数: window: 滚动窗口，默认为 20"
+    },
+    {
+     "n": 7,
+     "name": "turnover_ma_20d_120d",
+     "desc": "计算成交量与流通市值比率的移动平均。 当 long>0 时，计算短期/长期均值比值；否则仅计算短期均值。 结果取负值，符合原始因子设计。 数学表达式: 1. VolCapRatio = TurnoverVolume / FloatMarketCap 2. FloatMarketCap = ClosePrice × FloatShares 3. If long > 0: Factor = -MA(V"
+    },
+    {
+     "n": 8,
+     "name": "avg_turnover_21d",
+     "desc": "计算过去1个月（w=1 21个交易日）的平均换手率。 换手率是衡量股票流动性和市场活跃度的重要指标。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = MA(DailyTurnoverRate, w=1 21)"
+    },
+    {
+     "n": 9,
+     "name": "std_turnover_21d",
+     "desc": "计算过去1个月（w=1 21个交易日）的换手率滚动标准差。 衡量换手率的波动性，反映交易活跃度的稳定性。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = StdDev(DailyTurnoverRate, w=1 21)"
+    },
+    {
+     "n": 10,
+     "name": "bias_std_turn_21d_252d",
+     "desc": "计算1个月换手率标准差与12个月换手率标准差的乖离率。 衡量近期换手率波动性相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Std_short = StdDev(DailyTurnoverRate, w=1 21) 3. Std_long = StdDev(DailyTurnoverRate, w=12 2"
+    },
+    {
+     "n": 11,
+     "name": "bias_turn_21d_252d",
+     "desc": "计算1个月平均换手率与12个月平均换手率的乖离率（BIAS）。 衡量近期换手率相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. MA_short = MA(DailyTurnoverRate, w=1 21) 3. MA_long = MA(DailyTurnoverRate, w=12 21) 4. Fac"
+    },
+    {
+     "n": 12,
+     "name": "bias_std_turn_21d_504d",
+     "desc": "计算1个月换手率标准差与24个月换手率标准差的乖离率。 衡量近期换手率波动性相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Std_short = StdDev(DailyTurnoverRate, w=1 21) 3. Std_long = StdDev(DailyTurnoverRate, w=24 2"
+    },
+    {
+     "n": 13,
+     "name": "bias_turn_21d_504d",
+     "desc": "计算1个月平均换手率与24个月平均换手率的乖离率（BIAS）。 衡量近期换手率相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. MA_short = MA(DailyTurnoverRate, w=1 21) 3. MA_long = MA(DailyTurnoverRate, w=24 21) 4. Fac"
+    },
+    {
+     "n": 14,
+     "name": "std_turnover_42d",
+     "desc": "计算过去2个月（w=2 21个交易日）的换手率滚动标准差。 衡量换手率的波动性，反映交易活跃度的稳定性。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = StdDev(DailyTurnoverRate, w=2 21)"
+    },
+    {
+     "n": 15,
+     "name": "avg_turnover_42d",
+     "desc": "计算过去2个月（w=2 21个交易日）的平均换手率。 换手率是衡量股票流动性和市场活跃度的重要指标。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = MA(DailyTurnoverRate, w=2 21)"
+    },
+    {
+     "n": 16,
+     "name": "bias_turn_42d_252d",
+     "desc": "计算2个月平均换手率与12个月平均换手率的乖离率（BIAS）。 衡量近期换手率相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. MA_short = MA(DailyTurnoverRate, w=2 21) 3. MA_long = MA(DailyTurnoverRate, w=12 21) 4. Fac"
+    },
+    {
+     "n": 17,
+     "name": "bias_std_turn_42d_252d",
+     "desc": "计算2个月换手率标准差与12个月换手率标准差的乖离率。 衡量近期换手率波动性相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Std_short = StdDev(DailyTurnoverRate, w=2 21) 3. Std_long = StdDev(DailyTurnoverRate, w=12 2"
+    },
+    {
+     "n": 18,
+     "name": "bias_std_turn_42d_504d",
+     "desc": "计算2个月换手率标准差与24个月换手率标准差的乖离率。 衡量近期换手率波动性相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Std_short = StdDev(DailyTurnoverRate, w=2 21) 3. Std_long = StdDev(DailyTurnoverRate, w=24 2"
+    },
+    {
+     "n": 19,
+     "name": "bias_turn_42d_504d",
+     "desc": "计算2个月平均换手率与24个月平均换手率的乖离率（BIAS）。 衡量近期换手率相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. MA_short = MA(DailyTurnoverRate, w=2 21) 3. MA_long = MA(DailyTurnoverRate, w=24 21) 4. Fac"
+    },
+    {
+     "n": 20,
+     "name": "std_turnover_63d",
+     "desc": "计算过去3个月（w=3 21个交易日）的换手率滚动标准差。 衡量换手率的波动性，反映交易活跃度的稳定性。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = StdDev(DailyTurnoverRate, w=3 21)"
+    },
+    {
+     "n": 21,
+     "name": "avg_turnover_63d",
+     "desc": "计算过去3个月（w=3 21个交易日）的平均换手率。 换手率是衡量股票流动性和市场活跃度的重要指标。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = MA(DailyTurnoverRate, w=3 21)"
+    },
+    {
+     "n": 22,
+     "name": "bias_turn_63d_252d",
+     "desc": "计算3个月平均换手率与12个月平均换手率的乖离率（BIAS）。 衡量近期换手率相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. MA_short = MA(DailyTurnoverRate, w=3 21) 3. MA_long = MA(DailyTurnoverRate, w=12 21) 4. Fac"
+    },
+    {
+     "n": 23,
+     "name": "bias_std_turn_63d_252d",
+     "desc": "计算3个月换手率标准差与12个月换手率标准差的乖离率。 衡量近期换手率波动性相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Std_short = StdDev(DailyTurnoverRate, w=3 21) 3. Std_long = StdDev(DailyTurnoverRate, w=12 2"
+    },
+    {
+     "n": 24,
+     "name": "bias_std_turn_63d_504d",
+     "desc": "计算3个月换手率标准差与24个月换手率标准差的乖离率。 衡量近期换手率波动性相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Std_short = StdDev(DailyTurnoverRate, w=3 21) 3. Std_long = StdDev(DailyTurnoverRate, w=24 2"
+    },
+    {
+     "n": 25,
+     "name": "bias_turn_63d_504d",
+     "desc": "计算3个月平均换手率与24个月平均换手率的乖离率（BIAS）。 衡量近期换手率相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. MA_short = MA(DailyTurnoverRate, w=3 21) 3. MA_long = MA(DailyTurnoverRate, w=24 21) 4. Fac"
+    },
+    {
+     "n": 26,
+     "name": "avg_turnover_126d",
+     "desc": "计算过去6个月（w=6 21个交易日）的平均换手率。 换手率是衡量股票流动性和市场活跃度的重要指标。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = MA(DailyTurnoverRate, w=6 21)"
+    },
+    {
+     "n": 27,
+     "name": "std_turnover_126d",
+     "desc": "计算过去6个月（w=6 21个交易日）的换手率滚动标准差。 衡量换手率的波动性，反映交易活跃度的稳定性。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = StdDev(DailyTurnoverRate, w=6 21)"
+    },
+    {
+     "n": 28,
+     "name": "bias_turn_126d_252d",
+     "desc": "计算6个月平均换手率与12个月平均换手率的乖离率（BIAS）。 衡量近期换手率相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. MA_short = MA(DailyTurnoverRate, w=6 21) 3. MA_long = MA(DailyTurnoverRate, w=12 21) 4. Fac"
+    },
+    {
+     "n": 29,
+     "name": "bias_std_turn_126d_252d",
+     "desc": "计算6个月换手率标准差与12个月换手率标准差的乖离率。 衡量近期换手率波动性相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Std_short = StdDev(DailyTurnoverRate, w=6 21) 3. Std_long = StdDev(DailyTurnoverRate, w=12 2"
+    },
+    {
+     "n": 30,
+     "name": "bias_turn_126d_504d",
+     "desc": "计算6个月平均换手率与24个月平均换手率的乖离率（BIAS）。 衡量近期换手率相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. MA_short = MA(DailyTurnoverRate, w=6 21) 3. MA_long = MA(DailyTurnoverRate, w=24 21) 4. Fac"
+    },
+    {
+     "n": 31,
+     "name": "bias_std_turn_126d_504d",
+     "desc": "计算6个月换手率标准差与24个月换手率标准差的乖离率。 衡量近期换手率波动性相对于长期的偏离程度。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Std_short = StdDev(DailyTurnoverRate, w=6 21) 3. Std_long = StdDev(DailyTurnoverRate, w=24 2"
+    },
+    {
+     "n": 32,
+     "name": "std_turnover_252d",
+     "desc": "计算过去12个月（w=12 21个交易日）的换手率滚动标准差。 衡量换手率的波动性，反映交易活跃度的稳定性。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = StdDev(DailyTurnoverRate, w=12 21)"
+    },
+    {
+     "n": 33,
+     "name": "avg_turnover_252d",
+     "desc": "计算过去12个月（w=12 21个交易日）的平均换手率。 换手率是衡量股票流动性和市场活跃度的重要指标。 数学表达式: 1. DailyTurnoverRate = TurnoverVolume / AShares 2. Factor = MA(DailyTurnoverRate, w=12 21)"
+    },
+    {
+     "n": 34,
+     "name": "volume_alpha_300d_000001",
+     "desc": "计算个股成交量变化率相对于上证指数成交量变化率的300日滚动 Alpha。 成交量 Alpha 衡量个股成交量中无法被市场成交量解释的部分。 数学表达式: VolMomentum = (RollingSum(Volume, 5) - Lag(RollingSum(Volume, 5), 1)) / Lag(RollingSum(Volume, 5), 1) StockVolMomentum = A"
+    },
+    {
+     "n": 35,
+     "name": "volume_alpha_300d_000300",
+     "desc": "计算个股成交量变化率相对于沪深300指数成交量变化率的300日滚动 Alpha。 成交量 Alpha 衡量个股成交量中无法被市场成交量解释的部分。 数学表达式: VolMomentum = (RollingSum(Volume, 5) - Lag(RollingSum(Volume, 5), 1)) / Lag(RollingSum(Volume, 5), 1) StockVolMomentum "
+    }
+   ]
+  },
+  "Momentum": {
+   "declared": 20,
+   "parsed": 20,
+   "items": [
+    {
+     "n": 1,
+     "name": "return_5d",
+     "desc": "N期收益率 (N-Period Return) 计算过去5个交易日的累计收益率。 数学表达式: Return = Product(1 + DailyReturn, window=5) - 1 参数: window: 窗口天数，默认值 21"
+    },
+    {
+     "n": 2,
+     "name": "ma_20d",
+     "desc": "计算 20 日移动平均线 (Simple Moving Average)。 MA 是最基础的趋势指标，通过平滑价格波动来识别趋势方向。 数学表达式: MA = Mean(Close, 20) 参数: window: 移动平均窗口，默认为 20"
+    },
+    {
+     "n": 3,
+     "name": "return_21d",
+     "desc": "N期收益率 (N-Period Return) 计算过去21个交易日的累计收益率。 数学表达式: Return = Product(1 + DailyReturn, window=21) - 1 参数: window: 窗口天数，默认值 21"
+    },
+    {
+     "n": 4,
+     "name": "return_42d",
+     "desc": "N期收益率 (N-Period Return) 计算过去42个交易日的累计收益率。 数学表达式: Return = Product(1 + DailyReturn, window=42) - 1 参数: window: 窗口天数，默认值 21"
+    },
+    {
+     "n": 5,
+     "name": "price_position_ir_60d",
+     "desc": "价格位置动量因子。 计算过去60日 (收盘-开盘)/(最高-最低) 比率的信息比率（均值/标准差）。 衡量价格在日内区间的相对位置及其稳定性。 数学表达式: Ratio = (Close - Open) / (High - Low) Factor = Mean(Ratio, 60) / StdDev(Ratio, 60) 参数: window: 窗口天数，默认 60"
+    },
+    {
+     "n": 6,
+     "name": "return_63d",
+     "desc": "N期收益率 (N-Period Return) 计算过去63个交易日的累计收益率。 数学表达式: Return = Product(1 + DailyReturn, window=63) - 1 参数: window: 窗口天数，默认值 21"
+    },
+    {
+     "n": 7,
+     "name": "alpha_125d_000300",
+     "desc": "Alpha因子 (日频版本，对标沪深300指数) 使用日频数据计算滚动回归的截距项（alpha）。 原周度版本使用周频数据，现改为日频数据，窗口调整为等价交易日数。 数学表达式: Alpha_t = Intercept from OLS(DailyStockReturn_{t-d+1:t} ~ DailyIndexReturn_{t-d+1:t}) Factor = Alpha_t 参数: win"
+    },
+    {
+     "n": 8,
+     "name": "return_126d",
+     "desc": "N期收益率 (N-Period Return) 计算过去126个交易日的累计收益率。 数学表达式: Return = Product(1 + DailyReturn, window=126) - 1 参数: window: 窗口天数，默认值 21"
+    },
+    {
+     "n": 9,
+     "name": "alpha_250d_000300",
+     "desc": "Alpha因子 (日频版本，对标沪深300指数) 使用日频数据计算滚动回归的截距项（alpha）。 原周度版本使用周频数据，现改为日频数据，窗口调整为等价交易日数。 数学表达式: Alpha_t = Intercept from OLS(DailyStockReturn_{t-d+1:t} ~ DailyIndexReturn_{t-d+1:t}) Factor = Alpha_t 参数: win"
+    },
+    {
+     "n": 10,
+     "name": "return_252d",
+     "desc": "N期收益率 (N-Period Return) 计算过去252个交易日的累计收益率。 数学表达式: Return = Product(1 + DailyReturn, window=252) - 1 参数: window: 窗口天数，默认值 21"
+    },
+    {
+     "n": 11,
+     "name": "alpha_500d_000300",
+     "desc": "Alpha因子 (日频版本，对标沪深300指数) 使用日频数据计算滚动回归的截距项（alpha）。 原周度版本使用周频数据，现改为日频数据，窗口调整为等价交易日数。 数学表达式: Alpha_t = Intercept from OLS(DailyStockReturn_{t-d+1:t} ~ DailyIndexReturn_{t-d+1:t}) Factor = Alpha_t 参数: win"
+    },
+    {
+     "n": 12,
+     "name": "alpha_528d_000001",
+     "desc": "Alpha因子 (日频版本，对标上证指数) 使用日频数据计算滚动回归的截距项（alpha）。 数学表达式: Alpha_t = Intercept from OLS(DailyStockReturn_{t-d+1:t} ~ DailyIndexReturn_{t-d+1:t}) Factor = Alpha_t 参数: window: 回归窗口天数"
+    },
+    {
+     "n": 13,
+     "name": "alpha_792d_000001",
+     "desc": "Alpha因子 (日频版本，对标上证指数) 使用日频数据计算滚动回归的截距项（alpha）。 数学表达式: Alpha_t = Intercept from OLS(DailyStockReturn_{t-d+1:t} ~ DailyIndexReturn_{t-d+1:t}) Factor = Alpha_t 参数: window: 回归窗口天数"
+    },
+    {
+     "n": 14,
+     "name": "alpha_1000d_000300",
+     "desc": "Alpha因子 (日频版本，对标沪深300指数) 使用日频数据计算滚动回归的截距项（alpha）。 原周度版本使用周频数据，现改为日频数据，窗口调整为等价交易日数。 数学表达式: Alpha_t = Intercept from OLS(DailyStockReturn_{t-d+1:t} ~ DailyIndexReturn_{t-d+1:t}) Factor = Alpha_t 参数: win"
+    },
+    {
+     "n": 15,
+     "name": "alpha_1320d_000001",
+     "desc": "Alpha因子 (日频版本，对标上证指数) 使用日频数据计算滚动回归的截距项（alpha）。 数学表达式: Alpha_t = Intercept from OLS(DailyStockReturn_{t-d+1:t} ~ DailyIndexReturn_{t-d+1:t}) Factor = Alpha_t 参数: window: 回归窗口天数"
+    },
+    {
+     "n": 16,
+     "name": "rsrs",
+     "desc": "计算 RSRS (Resistance Support Relative Strength) 指标。 RSRS 通过回归最高价和最低价得到斜率，再对斜率进行标准化， 以判断趋势强度。该指标常用于识别市场阻力与支撑的相对强度。 本因子使用 18 日回归窗口和 200 日标准化窗口。 数学表达式: 1. Slope_t = Beta from OLS(Low_{t-N+1:t} ~ High_{t-N"
+    },
+    {
+     "n": 17,
+     "name": "MACD",
+     "desc": "计算 MACD (Moving Average Convergence Divergence) 指标。 MACD 是一种趋势跟踪动量指标，显示两条移动平均线之间的关系。 本因子使用 12 日快线、26 日慢线和 9 日信号线。 数学表达式: 1. DIF = EMA(Close, 12) - EMA(Close, 26) 2. DEA = EMA(DIF, 9) 3. MACD = 2 × (DI"
+    },
+    {
+     "n": 18,
+     "name": "dif",
+     "desc": "计算 DIF (Difference) 指标，即快慢速指数移动平均线的差值。 DIF 是 MACD 指标的组成部分，用于判断趋势方向。 本因子使用 12 日快线和 26 日慢线。 数学表达式: DIF = EMA(Close, 12) - EMA(Close, 26) 参数: fast: 快线周期，默认为 12 slow: 慢线周期，默认为 26"
+    },
+    {
+     "n": 19,
+     "name": "dea",
+     "desc": "计算 DEA (Signal Line) 指标，即 DIF 的指数移动平均。 DEA 是 MACD 指标的信号线，用于生成交易信号。 本因子使用 12 日快线、26 日慢线和 9 日信号线。 数学表达式: 1. DIF = EMA(Close, 12) - EMA(Close, 26) 2. DEA = EMA(DIF, 9) 参数: fast: 快线周期，默认为 12 slow: 慢线周期，默认"
+    },
+    {
+     "n": 20,
+     "name": "days_down_up",
+     "desc": "连续涨跌天数因子 计算连续上涨天数与连续下跌天数之差的绝对值减1。 该因子衡量当前价格趋势的持续性。 数学表达式: Factor = |ConsecutiveUp - ConsecutiveDown - 1|"
+    }
+   ]
+  },
+  "Quality": {
+   "declared": 59,
+   "parsed": 59,
+   "items": [
+    {
+     "n": 1,
+     "name": "roe_ttm_lag63d",
+     "desc": "ROE因子 (净资产收益率, TTM口径) 直接使用预计算字段 lake.financial_derivative.fin_roe_ttm。 Mathematical expression: ROE = NetProfit_Parent / TotalEquity 参数: lag: 交易日滞后天数，默认值 0"
+    },
+    {
+     "n": 2,
+     "name": "debt_asset_ratio",
+     "desc": "资产负债率因子 直接使用预计算字段 lake.financial_derivative.fin_debt_asset_ratio_y。 Mathematical expression: DebtAssetRatio = TotalDebt / TotalAssets"
+    },
+    {
+     "n": 3,
+     "name": "eps_ttm",
+     "desc": "基本每股收益因子，截面排名。 Mathematical expression: Factor = CrossSectionalRank(BasicEPS)"
+    },
+    {
+     "n": 4,
+     "name": "financial_leverage",
+     "desc": "财务杠杆因子，截面排名。 Mathematical expression: FinancialLeverage = TotalAssets / TotalShareholderEquity Factor = CrossSectionalRank(FinancialLeverage)"
+    },
+    {
+     "n": 5,
+     "name": "gpm_ttm",
+     "desc": "毛利率因子，截面排名。 Mathematical expression: GPM = (Revenue_TTM - Cost_TTM) / Revenue_TTM Factor = CrossSectionalRank(GPM)"
+    },
+    {
+     "n": 6,
+     "name": "icr",
+     "desc": "利息保障倍数因子，截面排名。 Mathematical expression: ICR = EBIT_TTM / InterestExpense_TTM Factor = CrossSectionalRank(ICR)"
+    },
+    {
+     "n": 7,
+     "name": "income_tax_yoy",
+     "desc": "所得税费用TTM同比增速，截面排名。 数学表达式: Growth = IncomeTaxCost_TTM_t / IncomeTaxCost_TTM_{t-4} - 1 Factor = CrossSectionalRank(Growth)"
+    },
+    {
+     "n": 8,
+     "name": "np_to_inventory_yoy",
+     "desc": "单位存货创造的净利润同比增速，截面排名。 数学表达式: Ratio = NetProfit_Q / Inventories Growth = Ratio_t / Ratio_{t-4} - 1 Factor = CrossSectionalRank(Growth)"
+    },
+    {
+     "n": 9,
+     "name": "npm_q",
+     "desc": "净利率因子，截面排名。 Mathematical expression: NPM = NetProfit / OperatingRevenue Factor = CrossSectionalRank(NPM)"
+    },
+    {
+     "n": 10,
+     "name": "quality_composite",
+     "desc": "AQR Quality-Minus-Junk 质量综合因子。 计算6项盈利能力指标之和。 op.add 使用 filter=True 处理 FinMatrix 层面 NaN 和除零产生的 ±inf。 1. TotalProfit / TotalAssets 2. NetProfit / TotalShareholderEquity 3. NetProfit / TotalAssets 4. (Op"
+    },
+    {
+     "n": 11,
+     "name": "ar_ap_to_revenue",
+     "desc": "（预收-预付）/ 营业收入，截面排名。 数学表达式: Ratio = (AdvanceReceipts - AdvancePayment) / OperatingRevenue Factor = CrossSectionalRank(Ratio)"
+    },
+    {
+     "n": 12,
+     "name": "asset_turnover",
+     "desc": "总资产周转率因子，截面排名。 Mathematical expression: AssetTurnover = OperatingRevenue_TTM / TotalAssets Factor = CrossSectionalRank(AssetTurnover)"
+    },
+    {
+     "n": 13,
+     "name": "delta_current_ratio",
+     "desc": "流动比率同比变化因子，截面排名。 Mathematical expression: Delta = CurrentRatio_t - CurrentRatio_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 14,
+     "name": "delta_de",
+     "desc": "DE同比变化因子，截面排名。 Mathematical expression: DE = TotalLiability / TotalShareholderEquity Delta = DE_t - DE_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 15,
+     "name": "gpm_q",
+     "desc": "毛利率因子，截面排名。 Mathematical expression: GPM = (Revenue_TTM - Cost_TTM) / Revenue_TTM Factor = CrossSectionalRank(GPM)"
+    },
+    {
+     "n": 16,
+     "name": "cash_profit_ratio",
+     "desc": "利润现金比率，截面排名。 数学表达式: Ratio = (NetOperateCashFlow_TTM - NetProfit_TTM) / NetProfit_TTM Factor = CrossSectionalRank(Ratio)"
+    },
+    {
+     "n": 17,
+     "name": "delta_opm",
+     "desc": "营业利润率同比变化因子，截面排名。 Mathematical expression: OPM = OperatingProfit / OperatingRevenue Delta = OPM_t - OPM_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 18,
+     "name": "eps_q",
+     "desc": "基本每股收益因子，截面排名。 Mathematical expression: Factor = CrossSectionalRank(BasicEPS)"
+    },
+    {
+     "n": 19,
+     "name": "eps_y",
+     "desc": "基本每股收益因子，截面排名。 Mathematical expression: Factor = CrossSectionalRank(BasicEPS)"
+    },
+    {
+     "n": 20,
+     "name": "delta_npm",
+     "desc": "净利率同比变化因子，截面排名。 Mathematical expression: Delta = NPM_t - NPM_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 21,
+     "name": "market_value_leverage",
+     "desc": "市值杠杆因子，截面排名。 Mathematical expression: MkvLev = (MarketCap - NonCurrentLiability) / MarketCap Factor = CrossSectionalRank(MkvLev)"
+    },
+    {
+     "n": 22,
+     "name": "npm_y",
+     "desc": "净利率因子，截面排名。 Mathematical expression: NPM = NetProfit / OperatingRevenue Factor = CrossSectionalRank(NPM)"
+    },
+    {
+     "n": 23,
+     "name": "opm_y",
+     "desc": "营业利润率因子，截面排名。 Mathematical expression: OPM = OperatingProfit / OperatingRevenue Factor = CrossSectionalRank(OPM)"
+    },
+    {
+     "n": 24,
+     "name": "quick_ratio",
+     "desc": "速动比率因子 直接使用预计算字段 lake.financial_derivative.fin_quick_ratio_y。 Mathematical expression: QuickRatio = (CurrentAssets - Inventory) / CurrentLiabilities"
+    },
+    {
+     "n": 25,
+     "name": "delta_gpm",
+     "desc": "毛利率同比变化因子，截面排名。 Mathematical expression: Delta = GPM_t - GPM_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 26,
+     "name": "gpm_y",
+     "desc": "毛利率因子，截面排名。 Mathematical expression: GPM = (Revenue_TTM - Cost_TTM) / Revenue_TTM Factor = CrossSectionalRank(GPM)"
+    },
+    {
+     "n": 27,
+     "name": "np_to_total_expenses_yoy",
+     "desc": "单位三费创造的净利润同比增速，截面排名。 数学表达式: TotalExpenses = OperatingExpense_Q + AdministrationExpense_Q + FinancialExpense_Q Ratio = NetProfit_Q / TotalExpenses Growth = Ratio_t / Ratio_{t-4} - 1 Factor = CrossSecti"
+    },
+    {
+     "n": 28,
+     "name": "np_to_deferred_tax_yoy",
+     "desc": "单位递延所得税资产创造的净利润同比增速，截面排名。 数学表达式: Ratio = NetProfit_Q / DeferredTaxAssets Growth = Ratio_t / Ratio_{t-4} - 1 Factor = CrossSectionalRank(Growth)"
+    },
+    {
+     "n": 29,
+     "name": "roe_y",
+     "desc": "ROE因子 (净资产收益率, 年度口径) 直接使用预计算字段 lake.financial_derivative.fin_roe_y。 Mathematical expression: ROE = NetProfit_Parent / TotalEquity 参数: lag: 交易日滞后天数，默认值 0"
+    },
+    {
+     "n": 30,
+     "name": "roa_q",
+     "desc": "总资产收益率因子，截面排名。 Mathematical expression: ROA = NetProfit / TotalAssets Factor = CrossSectionalRank(ROA)"
+    },
+    {
+     "n": 31,
+     "name": "gpm_qoq",
+     "desc": "毛利率（TTM）环比增速，截面排名。 直接使用预计算字段 lake.financial_derivative.fin_gpm_ttm。 Mathematical expression: GPM = (Revenue_TTM - Cost_TTM) / Revenue_TTM Growth = GPM_t / GPM_{t-63} - 1 Factor = CrossSectionalRank(Gr"
+    },
+    {
+     "n": 32,
+     "name": "delta_inventory_turnover",
+     "desc": "存货周转率同比变化因子，截面排名。 Mathematical expression: IT = Cost_TTM / Inventories Delta = IT_t - IT_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 33,
+     "name": "delta_roa",
+     "desc": "ROA同比变化因子，截面排名。 Mathematical expression: Delta = ROA_t - ROA_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 34,
+     "name": "fixed_asset_turnover",
+     "desc": "固定资产周转率因子，截面排名。 Mathematical expression: FixedAssetTurnover = OperatingRevenue_TTM / FixedAssets Factor = CrossSectionalRank(FixedAssetTurnover)"
+    },
+    {
+     "n": 35,
+     "name": "npm_ttm",
+     "desc": "净利率因子，截面排名。 Mathematical expression: NPM = NetProfit / OperatingRevenue Factor = CrossSectionalRank(NPM)"
+    },
+    {
+     "n": 36,
+     "name": "opm_ttm",
+     "desc": "营业利润率因子，截面排名。 Mathematical expression: OPM = OperatingProfit / OperatingRevenue Factor = CrossSectionalRank(OPM)"
+    },
+    {
+     "n": 37,
+     "name": "receivable_turnover",
+     "desc": "应收账款周转率因子，截面排名。 Mathematical expression: ReceivableTurnover = OperatingRevenue_TTM / AccountsReceivable Factor = CrossSectionalRank(ReceivableTurnover)"
+    },
+    {
+     "n": 38,
+     "name": "cfcr",
+     "desc": "现金流利息保障倍数因子，截面排名。 Mathematical expression: CFCR = NetOperateCashFlow_TTM / InterestExpense_TTM Factor = CrossSectionalRank(CFCR)"
+    },
+    {
+     "n": 39,
+     "name": "delta_cash_ratio",
+     "desc": "现金比率同比变化因子，截面排名。 Mathematical expression: CashRatio = (Cash + TradingAssets) / CurrentLiability Delta = CashRatio_t - CashRatio_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 40,
+     "name": "lra_yoy",
+     "desc": "长期应收账款同比增速，截面排名。 数学表达式: Growth = LongtermReceivableAccount_t / LongtermReceivableAccount_{t-4} - 1 Factor = CrossSectionalRank(Growth)"
+    },
+    {
+     "n": 41,
+     "name": "np_to_fixed_assets_yoy",
+     "desc": "单位固定资产创造的净利润同比增速，截面排名。 数学表达式: Ratio = NetProfit_Q / FixedAssets Growth = Ratio_t / Ratio_{t-4} - 1 Factor = CrossSectionalRank(Growth)"
+    },
+    {
+     "n": 42,
+     "name": "np_to_salary_yoy",
+     "desc": "单位薪酬创造的净利润同比增速，截面排名。 数学表达式: Ratio = NetProfit_TTM / StaffBehalfPaid_TTM Growth = Ratio_t / Ratio_{t-4} - 1 Factor = CrossSectionalRank(Growth)"
+    },
+    {
+     "n": 43,
+     "name": "npm_q_qoq",
+     "desc": "净利润率（单季）环比增速，截面排名。 数学表达式: NPM = NetProfit_Q / OperatingRevenue_Q Growth = NPM_t / NPM_{t-1} - 1 Factor = CrossSectionalRank(Growth)"
+    },
+    {
+     "n": 44,
+     "name": "npm_tsh",
+     "desc": "归母净利润/平均总股本因子，截面排名。 Mathematical expression: AvgShares = (TotalShareholderEquity_t + TotalShareholderEquity_{t-63}) / 2 Ratio = NPParentCompanyOwners_TTM / AvgShares Factor = CrossSectionalRank(Ratio)"
+    },
+    {
+     "n": 45,
+     "name": "npm_ttm_qoq",
+     "desc": "净利润率（TTM）环比增速，截面排名。 直接使用预计算字段 lake.financial_derivative.fin_npm_ttm。 Mathematical expression: NPM = NetProfit_TTM / OperatingRevenue_TTM Growth = NPM_t / NPM_{t-63} - 1 Factor = CrossSectionalRank(Gro"
+    },
+    {
+     "n": 46,
+     "name": "cash_ratio",
+     "desc": "现金比率因子，截面排名。 Mathematical expression: CashRatio = (CashEquivalents + TradingAssets) / TotalCurrentLiability Factor = CrossSectionalRank(CashRatio)"
+    },
+    {
+     "n": 47,
+     "name": "current_ratio",
+     "desc": "流动比率因子 直接使用预计算字段 lake.financial_derivative.fin_current_ratio_y。 Mathematical expression: CurrentRatio = CurrentAssets / CurrentLiabilities"
+    },
+    {
+     "n": 48,
+     "name": "de",
+     "desc": "DE因子 (Debt-to-Equity) 计算负债权益比：总负债/股东权益。 Mathematical expression: DE = TotalDebt / Equity"
+    },
+    {
+     "n": 49,
+     "name": "delta_asset_turnover",
+     "desc": "总资产周转率同比变化因子，截面排名。 Mathematical expression: AT = Revenue_TTM / TotalAssets Delta = AT_t - AT_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 50,
+     "name": "delta_quick_ratio",
+     "desc": "速动比率同比变化因子，截面排名。 Mathematical expression: Delta = QuickRatio_t - QuickRatio_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 51,
+     "name": "delta_roe",
+     "desc": "ROE同比变化因子，截面排名。 Mathematical expression: Delta = ROE_t - ROE_{t-252} Factor = CrossSectionalRank(Delta)"
+    },
+    {
+     "n": 52,
+     "name": "inventory_turnover",
+     "desc": "存货周转率因子，截面排名。 Mathematical expression: InventoryTurnover = OperatingCost_TTM / Inventories Factor = CrossSectionalRank(InventoryTurnover)"
+    },
+    {
+     "n": 53,
+     "name": "roa_ttm",
+     "desc": "总资产收益率因子，截面排名。 Mathematical expression: ROA = NetProfit / TotalAssets Factor = CrossSectionalRank(ROA)"
+    },
+    {
+     "n": 54,
+     "name": "roe_ttm",
+     "desc": "ROE因子 (净资产收益率, TTM口径) 直接使用预计算字段 lake.financial_derivative.fin_roe_ttm。 Mathematical expression: ROE = NetProfit_Parent / TotalEquity 参数: lag: 交易日滞后天数，默认值 0"
+    },
+    {
+     "n": 55,
+     "name": "tax_surcharge_yoy",
+     "desc": "营业税金及附加TTM同比增速，截面排名。 数学表达式: Growth = OperatingTaxSurcharges_TTM_t / OperatingTaxSurcharges_TTM_{t-4} - 1 Factor = CrossSectionalRank(Growth)"
+    },
+    {
+     "n": 56,
+     "name": "equity_turnover",
+     "desc": "股东权益周转率因子，截面排名。 Mathematical expression: EquityTurnover = OperatingRevenue_TTM / TotalShareholderEquity Factor = CrossSectionalRank(EquityTurnover)"
+    },
+    {
+     "n": 57,
+     "name": "expenses_to_equity_yoy",
+     "desc": "三费占净资产比率同比增速，截面排名。 数学表达式: TotalExpenses = OperatingExpense_Q + AdministrationExpense_Q + FinancialExpense_Q Ratio = TotalExpenses / SEWithoutMI Growth = Ratio_t / Ratio_{t-4} - 1 Factor = CrossSection"
+    },
+    {
+     "n": 58,
+     "name": "roa_y",
+     "desc": "总资产收益率因子，截面排名。 Mathematical expression: ROA = NetProfit / TotalAssets Factor = CrossSectionalRank(ROA)"
+    },
+    {
+     "n": 59,
+     "name": "opt_tpro",
+     "desc": "营业利润/利润总额比率因子，截面排名。 Mathematical expression: Ratio = OperatingProfit_Q / TotalProfit_Q Factor = CrossSectionalRank(Ratio)"
+    }
+   ]
+  },
+  "Reversal": {
+   "declared": 3,
+   "parsed": 3,
+   "items": [
+    {
+     "n": 1,
+     "name": "small_cap_reversal_21d",
+     "desc": "小盘反转因子。 选市值最小的股票，取过去21日累计收益的反转信号。 市值越小、前期涨幅越低的股票得分越高。 数学表达式: CumReturn = Product(1 + DailyReturn, 21) - 1 Reversal = -CumReturn Factor = CrossSectionalRank(Reversal) / Sum(Rank) 参数: window: 累计收益窗口天数，默"
+    },
+    {
+     "n": 2,
+     "name": "rsi",
+     "desc": "计算 RSI (Relative Strength Index) 相对强弱指标。 RSI 是一种动量振荡器，衡量价格变动的速度和变化， 用于识别超买或超卖条件。本因子使用 14 日周期。 数学表达式: 1. Gain = Max(Close - PrevClose, 0) 2. Loss = Max(PrevClose - Close, 0) 3. AvgGain = EMA(Gain, 14) "
+    },
+    {
+     "n": 3,
+     "name": "price_dist",
+     "desc": "计算股价与其下一个整数（或10、100的倍数）的距离。 该因子捕捉价格的心理整数关口效应。 当 window > 0 时，计算 0 日移动平均。 计算逻辑: - 价格 < 10: 距离下一个整数的距离 - 10 <= 价格 < 100: 价格/10 后，距离下一个整数的距离 - 价格 >= 100: 价格/100 后，距离下一个整数的距离 参数: window: 移动平均窗口，默认为 0（不计算移"
+    }
+   ]
+  },
+  "Risk": {
+   "declared": 25,
+   "parsed": 25,
+   "items": [
+    {
+     "n": 1,
+     "name": "days_beyond_upper_lower_21d",
+     "desc": "计算过去 21 日内，价格超越均值+标准差的天数与超越均值-标准差的天数之差。 该因子衡量价格偏离均值的程度和频率，可用于识别异常波动。 数学表达式: 1. Z = (Close - MA(Close, 21)) / Std(Close, 21) 2. Upper = 统计 Z > 1 的天数 3. Lower = 统计 Z < -1 的天数 4. Factor = Upper - Lower 参"
+    },
+    {
+     "n": 2,
+     "name": "return_std_21d",
+     "desc": "计算过去1个月的日收益率滚动标准差。 收益率标准差衡量股票价格变动的剧烈程度。 数学表达式: ReturnStd = StdDev(DailyReturn) over 1*21 trading days 参数: month: 月数 (如 1 表示 21 个交易日)"
+    },
+    {
+     "n": 3,
+     "name": "high_low_21d",
+     "desc": "计算过去1个月（w=1*21个交易日）内，净值曲线的最高点与最低点的比值。 这个因子衡量了近期价格走势的波动范围或趋势强度。 数学表达式: 1. NetValue_t = CumulativeProduct(1 + DailyReturn_i) from a fixed start point. 2. Factor = Max(NetValue_{t-w+1:t}) / Min(NetValue_"
+    },
+    {
+     "n": 4,
+     "name": "high_low_42d",
+     "desc": "计算过去2个月（w=2*21个交易日）内，净值曲线的最高点与最低点的比值。 这个因子衡量了近期价格走势的波动范围或趋势强度。 数学表达式: 1. NetValue_t = CumulativeProduct(1 + DailyReturn_i) from a fixed start point. 2. Factor = Max(NetValue_{t-w+1:t}) / Min(NetValue_"
+    },
+    {
+     "n": 5,
+     "name": "return_std_42d",
+     "desc": "计算过去2个月的日收益率滚动标准差。 收益率标准差衡量股票价格变动的剧烈程度。 数学表达式: ReturnStd = StdDev(DailyReturn) over 2*21 trading days 参数: month: 月数 (如 1 表示 21 个交易日)"
+    },
+    {
+     "n": 6,
+     "name": "sharpe_60d",
+     "desc": "Sharpe比率因子 计算过去60天的Sharpe比率（风险调整收益）。 数学表达式: Sharpe = ts_mean(Return, 60) / ts_std_dev(Return, 60) 参数: window: 窗口天数"
+    },
+    {
+     "n": 7,
+     "name": "beta_60d_000300",
+     "desc": "计算个股相对于沪深300指数的60日滚动 Beta 值。 Beta 值衡量了股票相对于整个市场的系统性风险。 标准数学表达式: StockReturn = Alpha + Beta * IndexReturn + Epsilon Beta = Cov(StockReturn, IndexReturn) / Var(IndexReturn) over a rolling window. 参数: wi"
+    },
+    {
+     "n": 8,
+     "name": "return_std_63d",
+     "desc": "计算过去3个月的日收益率滚动标准差。 收益率标准差衡量股票价格变动的剧烈程度。 数学表达式: ReturnStd = StdDev(DailyReturn) over 3*21 trading days 参数: month: 月数 (如 1 表示 21 个交易日)"
+    },
+    {
+     "n": 9,
+     "name": "high_low_63d",
+     "desc": "计算过去3个月（w=3*21个交易日）内，净值曲线的最高点与最低点的比值。 这个因子衡量了近期价格走势的波动范围或趋势强度。 数学表达式: 1. NetValue_t = CumulativeProduct(1 + DailyReturn_i) from a fixed start point. 2. Factor = Max(NetValue_{t-w+1:t}) / Min(NetValue_"
+    },
+    {
+     "n": 10,
+     "name": "volume_beta_120d_000300",
+     "desc": "计算个股成交量变化率相对于沪深300指数成交量变化率的120日滚动 Beta。 成交量 Beta 衡量个股成交量对市场成交量的敏感度。 数学表达式: VolMomentum = (RollingSum(Volume, 5) - RollingSum(Volume, 5)[t-1]) / RollingSum(Volume, 5)[t-1] VolumeBeta = Cov(StockVolMome"
+    },
+    {
+     "n": 11,
+     "name": "beta_125d_000300",
+     "desc": "计算个股相对于沪深300指数的125日滚动 Beta 值。 Beta 值衡量了股票相对于整个市场的系统性风险。 标准数学表达式: StockReturn = Alpha + Beta * IndexReturn + Epsilon Beta = Cov(StockReturn, IndexReturn) / Var(IndexReturn) over a rolling window. 参数: w"
+    },
+    {
+     "n": 12,
+     "name": "high_low_126d",
+     "desc": "计算过去6个月（w=6*21个交易日）内，净值曲线的最高点与最低点的比值。 这个因子衡量了近期价格走势的波动范围或趋势强度。 数学表达式: 1. NetValue_t = CumulativeProduct(1 + DailyReturn_i) from a fixed start point. 2. Factor = Max(NetValue_{t-w+1:t}) / Min(NetValue_"
+    },
+    {
+     "n": 13,
+     "name": "return_std_126d",
+     "desc": "计算过去6个月的日收益率滚动标准差。 收益率标准差衡量股票价格变动的剧烈程度。 数学表达式: ReturnStd = StdDev(DailyReturn) over 6*21 trading days 参数: month: 月数 (如 1 表示 21 个交易日)"
+    },
+    {
+     "n": 14,
+     "name": "beta_250d_000300",
+     "desc": "计算个股相对于沪深300指数的250日滚动 Beta 值。 Beta 值衡量了股票相对于整个市场的系统性风险。 标准数学表达式: StockReturn = Alpha + Beta * IndexReturn + Epsilon Beta = Cov(StockReturn, IndexReturn) / Var(IndexReturn) over a rolling window. 参数: w"
+    },
+    {
+     "n": 15,
+     "name": "return_std_252d",
+     "desc": "计算过去12个月的日收益率滚动标准差。 收益率标准差衡量股票价格变动的剧烈程度。 数学表达式: ReturnStd = StdDev(DailyReturn) over 12*21 trading days 参数: month: 月数 (如 1 表示 21 个交易日)"
+    },
+    {
+     "n": 16,
+     "name": "high_low_252d",
+     "desc": "计算过去12个月（w=12*21个交易日）内，净值曲线的最高点与最低点的比值。 这个因子衡量了近期价格走势的波动范围或趋势强度。 数学表达式: 1. NetValue_t = CumulativeProduct(1 + DailyReturn_i) from a fixed start point. 2. Factor = Max(NetValue_{t-w+1:t}) / Min(NetValu"
+    },
+    {
+     "n": 17,
+     "name": "beta_500d_000300",
+     "desc": "计算个股相对于沪深300指数的500日滚动 Beta 值。 Beta 值衡量了股票相对于整个市场的系统性风险。 标准数学表达式: StockReturn = Alpha + Beta * IndexReturn + Epsilon Beta = Cov(StockReturn, IndexReturn) / Var(IndexReturn) over a rolling window. 参数: w"
+    },
+    {
+     "n": 18,
+     "name": "sharpe_750d",
+     "desc": "Sharpe比率因子 计算过去750天的Sharpe比率（风险调整收益）。 数学表达式: Sharpe = ts_mean(Return, 750) / ts_std_dev(Return, 750) 参数: window: 窗口天数"
+    },
+    {
+     "n": 19,
+     "name": "adjusted_sharpe_750d",
+     "desc": "调整夏普率因子。 计算过去750天收益率的 mean / std^4，用于衡量风险调整后收益。 与标准夏普率(mean/std)相比，对高波动性惩罚更重。 数学表达式: AdjustedSharpe = Mean(DailyReturn, 750) / StdDev(DailyReturn, 750)^4 参数: window: 窗口天数，默认 750"
+    },
+    {
+     "n": 20,
+     "name": "beta_1000d_000300",
+     "desc": "计算个股相对于沪深300指数的1000日滚动 Beta 值。 Beta 值衡量了股票相对于整个市场的系统性风险。 标准数学表达式: StockReturn = Alpha + Beta * IndexReturn + Epsilon Beta = Cov(StockReturn, IndexReturn) / Var(IndexReturn) over a rolling window. 参数: "
+    },
+    {
+     "n": 21,
+     "name": "sigma_1320d_000001",
+     "desc": "计算个股相对于上证指数的特质性风险（Idiosyncratic Risk），1320日滚动窗口。 特质性风险衡量个股收益中无法被市场解释的部分的波动程度。 数学表达式: StockReturn = Alpha + Beta * IndexReturn + Residual Sigma = StdDev(Residual) over 1320 days 参数: window: 回归和滚动窗口天数"
+    },
+    {
+     "n": 22,
+     "name": "beta_1320d_000001",
+     "desc": "计算个股相对于上证指数的1320日滚动 Beta 值。 Beta 值衡量了股票相对于整个市场的系统性风险。 标准数学表达式: StockReturn = Alpha + Beta * IndexReturn + Epsilon Beta = Cov(StockReturn, IndexReturn) / Var(IndexReturn) over a rolling window. 参数: win"
+    },
+    {
+     "n": 23,
+     "name": "beta_consistency_1320d_000300",
+     "desc": "计算个股相对于沪深300指数 Beta 的稳定性/一致性指标，1320日滚动窗口。 衡量 Beta 调整后特质性收益的波动程度，反映 Beta 的可靠性。 数学表达式: StockReturn = Alpha + Beta * IndexReturn + Residual BetaConsistency = StdDev(Beta * Residual) over 1320 days 参数: wi"
+    },
+    {
+     "n": 24,
+     "name": "sigma_1320d_000300",
+     "desc": "计算个股相对于沪深300指数的特质性风险（Idiosyncratic Risk），1320日滚动窗口。 特质性风险衡量个股收益中无法被市场解释的部分的波动程度。 数学表达式: StockReturn = Alpha + Beta * IndexReturn + Residual Sigma = StdDev(Residual) over 1320 days 参数: window: 回归和滚动窗口天"
+    },
+    {
+     "n": 25,
+     "name": "log_price",
+     "desc": "计算收盘价的自然对数。 这是一种常用的价格转换方式，可以使数据更接近正态分布。 数学表达式: Factor = log(ClosePrice)"
+    }
+   ]
+  },
+  "Size": {
+   "declared": 3,
+   "parsed": 3,
+   "items": [
+    {
+     "n": 1,
+     "name": "float_size",
+     "desc": "流通市值因子 计算流通市值的负对数，用于衡量公司可交易部分的规模。 数学表达式: FloatSize = -log(FloatShares * ClosePrice / 1e6) 该因子值为负对数形式，值越小表示流通市值越大。"
+    },
+    {
+     "n": 2,
+     "name": "nl_size",
+     "desc": "市值非线性因子 对市值进行非线性中性化处理，通过截面回归去除线性市值成分。 数学表达式: nlSize = Residual(Size^3 ~ Size) 该因子是size^3对size截面回归后的残差，代表市值非线性部分， 用于捕捉市值效应中的非线性成分。 该因子通过截面回归计算残差，每个截面上回归一次 因子值与size的正交，消除了线性市值的影响"
+    },
+    {
+     "n": 3,
+     "name": "size",
+     "desc": "总市值因子 计算总市值的负对数，用于衡量公司规模。 数学表达式: Size = -log(TotalShares * ClosePrice / 1e6) 该因子值为负对数形式，值越小表示市值越大。"
+    }
+   ]
+  },
+  "Value": {
+   "declared": 11,
+   "parsed": 11,
+   "items": [
+    {
+     "n": 1,
+     "name": "dividend_yield_3y_avg",
+     "desc": "股息率_3年平均 (Dividend Yield - 3 Year Average) 计算公式: 近3年平均现金红利 / 最新股价 = SUM(ActualCashDiviRMB, 245×3日) / (3 × 收盘价) 这是一个长期股息价值因子，反映近3年现金分红的平均水平与当前股价的关系。 使用每股实派分红数据。 时间窗口为245×3个交易日（约3年）。 数学表达式: dividend_yie"
+    },
+    {
+     "n": 2,
+     "name": "pegh5",
+     "desc": "PEG历史因子 (5年EPS增长, 取负值)。 使用5年EPS复合增长率计算PEG。PEG越低（估值相对于成长性越便宜）得分越高。 Mathematical expression: 1. EPS_Growth_5Y = (BasicEPS_Y_t / BasicEPS_Y_{t-1260})^(1/5) - 1 2. PEGH5 = ClosePrice / (EPS_Growth_5Y * Ba"
+    },
+    {
+     "n": 3,
+     "name": "etp5",
+     "desc": "五年平均净利润 / 五年平均年末市值因子，截面排名。 使用5年滚动均值近似：净利润(年度口径)的5年滚动和除以总市值的5年滚动均值。 Mathematical expression: ETP5 = RollingMean(NetProfit_Y, 1260) / RollingMean(MarketCap, 1260) Factor = CrossSectionalRank(ETP5)"
+    },
+    {
+     "n": 4,
+     "name": "ncf_to_market",
+     "desc": "净现金流市值比 (Net Cash Flow-to-Market Ratio) 计算公式: 净现金流 / 市值 = (筹资净现金流 + 投资净现金流 + 经营净现金流) / (收盘价 × 总股本) 其中: - 筹资净现金流 = 筹资现金流入 - 筹资现金流出 - 投资净现金流 = 投资现金流入 - 投资现金流出 - 经营净现金流 = 经营现金流入 - 经营现金流出 这是一个价值因子，反映每单位市值"
+    },
+    {
+     "n": 5,
+     "name": "fcf_to_market",
+     "desc": "自由现金流市值比 (Free Cash Flow-to-Market Ratio) 计算公式: fcf_to_market = 自由现金流TTM / 市值 = (经营现金流净额TTM - 投资现金流出TTM) / (收盘价 × 总股本) = (NetOperateCashFlow_TTM - SubtotalInvestCashOutflow_TTM) / MarketCap 这是一个经典的价值因"
+    },
+    {
+     "n": 6,
+     "name": "ebitda_to_market",
+     "desc": "EBITDA市值比 (EBITDA-to-Market Ratio) 计算公式: EBITDA / 市值 = 息税折旧摊销前利润 / (收盘价 × 总股本) 这是一个价值因子，反映每单位市值对应的经营性现金流能力。 EBITDA越高，说明公司的经营现金流创造能力越强。 数学表达式: ebitda_to_market = EBITDA / (ClosePrice × TotalShares)"
+    },
+    {
+     "n": 7,
+     "name": "earnings_to_price",
+     "desc": "市盈率倒数 (Earnings-to-Price Ratio) 计算公式: earnings_to_price = 归母净利润TTM / 市值 = 归母净利润TTM / (收盘价 × 总股本) = EPS_TTM / 收盘价 这是一个经典的价值因子，反映每单位价格所能获得的收益。 earnings_to_price越高，说明股票越\"便宜\"（价值越高）。 数学表达式: earnings_to_pri"
+    },
+    {
+     "n": 8,
+     "name": "book_to_market",
+     "desc": "账面市值比 (Book-to-Market Ratio) 计算公式: book_to_market = 账面价值 / 市值 = (归母股东权益 + 递延所得税资产) / (收盘价 × 总股本) = (SE_without_MI + DeferredTaxAssets) / MarketCap 这是一个经典的价值因子，反映每单位市值对应的账面价值。 book_to_market越高，说明股票越\"便宜"
+    },
+    {
+     "n": 9,
+     "name": "earnings_cut_to_market",
+     "desc": "扣非净利润市值比 (Earnings Cut-to-Market Ratio) 计算公式: 扣非净利润TTM / 市值 = 扣除非经常性损益后净利润TTM / (收盘价 × 总股本) 这是一个价值因子，反映每单位市值对应的扣非净利润。 与earnings_to_price类似，但排除了非经常性损益的影响，更能反映公司主营业务的盈利能力。 使用归母净利润作为扣非净利润的替代（如果缺少专门的扣非字段）"
+    },
+    {
+     "n": 10,
+     "name": "ocf_to_market",
+     "desc": "经营现金流市值比 (Operating Cash Flow-to-Market Ratio) 计算公式: 经营现金流净额 / 市值 = NetOperateCashFlow_TTM / (收盘价 × 总股本) 这是一个经典的价值因子，反映每单位市值对应的经营活动现金流。 与fcf_to_market不同，ocf_to_market不包含投资活动的影响，更能反映主营业务的现金创造能力。 数学表达式:"
+    },
+    {
+     "n": 11,
+     "name": "sales_to_market",
+     "desc": "营业收入市值比 (Sales-to-Market Ratio) 计算公式: 营业收入 / 市值 = 营业收入Q / (收盘价 × 总股本) 这是一个价值因子，反映每单位市值对应的营业收入。 适用于收入驱动型行业的估值，如零售、制造业等。 数学表达式: sales_to_market = OperatingRevenue_Q / (ClosePrice × TotalShares)"
+    }
+   ]
+  }
+ }
+}
