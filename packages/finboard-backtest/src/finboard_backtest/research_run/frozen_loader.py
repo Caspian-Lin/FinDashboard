@@ -32,11 +32,9 @@ manifest 冻结多个 release 时,一个 bars 主发布 + 若干研究数据发�
 from __future__ import annotations
 
 import asyncio
-from bisect import bisect_right
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
-from itertools import pairwise
 from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
@@ -168,29 +166,101 @@ def _end_of_day(at: datetime) -> datetime:
     return datetime.combine(at.date(), time(23, 59), tzinfo=at.tzinfo)
 
 
+def _datetime_epoch_micros(value: datetime) -> int:
+    """aware/naive datetime → epoch 微秒(整数精确,不经 float timestamp)。
+
+    aware 即 UTC 瞬时(naive/aware 互比由查询方按构建期记忆的时区属性
+    前置拒绝,保持旧「直接比较」的 TypeError 语义,#439)。
+    """
+    epoch = datetime(1970, 1, 1, tzinfo=UTC) if value.tzinfo else datetime(1970, 1, 1)
+    delta = value - epoch
+    return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+
+
 @dataclass(frozen=True, slots=True)
 class SymbolCloseHistory:
     """单标的冻结全区间 close 历史(close 矩阵切片底座,issue #287)。
 
-    三个序列都按 bar 时间升序且构建时校验非递减:``available_at`` 是 provider
-    的 PIT 门控键(真实 provider 由发布元数据确定性派生),``dates`` 是逐期
-    读取原有的日期上界过滤键。两个键的「可见集合」都是时间升序前缀,取二者
-    较小边界即与「逐期 PIT 过滤后取末根 / 全序列」逐值等价。
+    三个序列都按 bar 时间升序且构建时校验非递减。内部表示为原生数组
+    (#439,替代 Python 对象元组:每 (天, 标的) 的 datetime/date/装箱 float
+    ≈150B 降到 int64/float64 ≈24B,全市场 5534 标的 x ~2800 天从 ~2.5GB
+    降到 ~400MB):``available_at_us`` 是 provider 的 PIT 门控键(epoch 微秒,
+    aware 即 UTC 瞬时),``date_days`` 是逐期读取原有的日期上界过滤键
+    (epoch 天数)。两个键的「可见集合」都是时间升序前缀,``visible_index``
+    对两键各做一次 ``searchsorted(side="right")`` 取较小边界,与「逐期
+    PIT 过滤后取末根 / 全序列」逐值等价(bisect_right 语义)。
+
+    公开四方法(:meth:`visible_index` / :meth:`close_at` / :meth:`open_at` /
+    :meth:`series_until`)签名与返回类型与元组表示时代逐值一致;datetime
+    只在查询入参 / 返回值边界按需转换,不在构建期物化整列 Python 对象。
     """
 
-    available_at: tuple[datetime, ...]
-    dates: tuple[date, ...]
-    closes: tuple[float, ...]
+    #: epoch 微秒 int64(单调不减;与 ``date_days`` 同长)
+    available_at_us: np.ndarray
+    #: epoch 天数 int64
+    date_days: np.ndarray
+    #: float64
+    closes: np.ndarray
+    #: available_at 序列的时区属性(取构建期首元素;查询 as_of 的
+    #: naive/aware 与之不匹配时保持旧直接比较的 TypeError)
+    available_tz_aware: bool = False
     #: 可选携带的 open 平行序列(issue #336):仅 timing=next_open 的 run 在
-    #: 矩阵预建时附带,与 available_at/dates/closes 严格同长;``None`` 表示
-    #: 未携带(close-only 矩阵),open 查询由调用方回退逐期对象路径读取。
-    opens: tuple[float, ...] | None = None
+    #: 矩阵预建时附带,与 close 严格同长;``None`` 表示未携带(close-only
+    #: 矩阵),open 查询由调用方回退逐期对象路径读取。
+    opens: np.ndarray | None = None
+
+    @classmethod
+    def from_sequences(
+        cls,
+        *,
+        available_at: Sequence[datetime],
+        dates: Sequence[date],
+        closes: Sequence[float] | np.ndarray,
+        opens: Sequence[float] | np.ndarray | None = None,
+    ) -> SymbolCloseHistory | None:
+        """从 Python 序列构建(一次性转原生数组;int64 上校验非递减)。
+
+        ``available_at`` / ``dates`` 任一序列出现回退(异常数据,非递减被
+        破坏)时返回 ``None``:前缀切片不再与逐期过滤等价,调用方对该标的
+        回退逐期读取(对象路径与列式路径同一防御语义,#439)。空序列合法
+        (无可见 bar 语义)。
+        """
+        available_us = np.fromiter(
+            (_datetime_epoch_micros(value) for value in available_at),
+            dtype=np.int64,
+            count=len(available_at),
+        )
+        day_numbers = np.fromiter(
+            (day.toordinal() - _EPOCH_ORDINAL for day in dates),
+            dtype=np.int64,
+            count=len(dates),
+        )
+        if (np.diff(available_us) < 0).any() or (np.diff(day_numbers) < 0).any():
+            return None
+        tz_aware = bool(available_at[0].tzinfo) if available_at else False
+        return cls(
+            available_at_us=available_us,
+            date_days=day_numbers,
+            closes=np.asarray(closes, dtype=np.float64),
+            available_tz_aware=tz_aware,
+            opens=None if opens is None else np.asarray(opens, dtype=np.float64),
+        )
 
     def visible_index(self, as_of: datetime) -> int:
         """``as_of`` 时点可见最后一根的索引;-1 表示无可见 bar。"""
+        if self.available_at_us.size and (
+            (as_of.tzinfo is not None) != self.available_tz_aware
+        ):
+            raise TypeError("can't compare offset-naive and offset-aware datetimes")
         index = min(
-            bisect_right(self.available_at, as_of),
-            bisect_right(self.dates, as_of.date()),
+            int(np.searchsorted(self.available_at_us, _datetime_epoch_micros(as_of), side="right")),
+            int(
+                np.searchsorted(
+                    self.date_days,
+                    as_of.date().toordinal() - _EPOCH_ORDINAL,
+                    side="right",
+                )
+            ),
         )
         return index - 1
 
@@ -199,7 +269,7 @@ class SymbolCloseHistory:
         index = self.visible_index(as_of)
         if index < 0:
             return None
-        return self.closes[index]
+        return float(self.closes[index])
 
     def open_at(self, as_of: datetime) -> float | None:
         """``as_of`` 时点可见最新 bar 的 open(issue #336 执行价基)。
@@ -212,14 +282,14 @@ class SymbolCloseHistory:
         index = self.visible_index(as_of)
         if index < 0:
             return None
-        return self.opens[index]
+        return float(self.opens[index])
 
     def series_until(self, as_of: datetime) -> list[float]:
         """``as_of`` 时点可见的完整 close 序列(时间升序;可能为空)。"""
         index = self.visible_index(as_of)
         if index < 0:
             return []
-        return list(self.closes[: index + 1])
+        return [float(value) for value in self.closes[: index + 1]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1397,16 +1467,14 @@ def _history_from_points(
     issue #300 后矩阵预建已走列式直出(:func:`_load_close_histories`),本函数
     保留给需要从对象序列构建历史的调用方(等值测试对照)。``available_at`` /
     bar 日期任一序列出现回退(异常数据,非递减被破坏)时返回 ``None``:前缀
-    切片不再与逐期过滤等价,调用方对该标的回退逐期读取。
+    切片不再与逐期过滤等价,调用方对该标的回退逐期读取(校验在
+    :meth:`SymbolCloseHistory.from_sequences` 的 int64 数组上进行,#439)。
     """
-    available = tuple(item.available_at for item in points)
-    dates = tuple(item.bar.timestamp.date() for item in points)
-    closes = tuple(float(item.bar.close) for item in points)
-    if any(later < earlier for earlier, later in pairwise(available)) or any(
-        later < earlier for earlier, later in pairwise(dates)
-    ):
-        return None
-    return SymbolCloseHistory(available_at=available, dates=dates, closes=closes)
+    return SymbolCloseHistory.from_sequences(
+        available_at=[item.available_at for item in points],
+        dates=[item.bar.timestamp.date() for item in points],
+        closes=[float(item.bar.close) for item in points],
+    )
 
 
 async def _load_close_histories(
@@ -1436,7 +1504,7 @@ async def _load_close_histories(
         return {}
     semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
 
-    async def _one(candidate: UniverseCandidate) -> SymbolCloseHistory:
+    async def _one(candidate: UniverseCandidate) -> SymbolCloseHistory | None:
         async with semaphore:
             columns = await provider.fetch_close_history(
                 Symbol(
@@ -1450,11 +1518,11 @@ async def _load_close_histories(
                 adjust=provider.release.adjustment,
                 include_open=include_open,
             )
-        return SymbolCloseHistory(
+        return SymbolCloseHistory.from_sequences(
             available_at=columns.available_at,
             dates=columns.dates,
-            closes=tuple(columns.closes),
-            opens=None if columns.opens is None else tuple(columns.opens),
+            closes=columns.closes,
+            opens=columns.opens,
         )
 
     results = await asyncio.gather(
@@ -1545,11 +1613,11 @@ async def _load_close_histories_via_pool(
             )
             return None
         code, columns = result
-        built[code] = SymbolCloseHistory(
+        built[code] = SymbolCloseHistory.from_sequences(
             available_at=columns.available_at,
             dates=columns.dates,
-            closes=tuple(columns.closes),
-            opens=None if columns.opens is None else tuple(columns.opens),
+            closes=columns.closes,
+            opens=columns.opens,
         )
     logger.debug(
         "frozen_loader.close_history_built_via_pool",
