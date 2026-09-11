@@ -96,3 +96,6 @@ desktop.ini
 
 # 对账 / 草稿脚本(#396 起各 worktree 本地使用,不入库)
 .tmp/
+
+# docker compose 的 postgres 数据目录(本机实际用 WSL 原生 PG,compose 仅作回退)
+.docker-data/

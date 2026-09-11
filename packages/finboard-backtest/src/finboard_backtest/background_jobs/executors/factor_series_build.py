@@ -42,7 +42,6 @@ worker 领取 ``kind=factor_series_build`` 任务(单并发,复用 research_code
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -613,21 +612,20 @@ class FactorSeriesBuildExecutor:
 
         ``baseline`` 为主构建阶段产物(结果契约见 ``_record_from_result``),
         传入审计回调复用(#371,免每截断点重建基线)。两个截断点相互独立
-        (各自从基线挂载过滤出变体挂载 + 独立构建),并发执行(#375):
-        检出语义零变化(失败报告仍取最早分歧日期),成功场景审计段墙钟
-        近半;异常按截断点顺序重抛第一个(与串行一致)。审计本体由
-        kind 对应的默认回调提供(factor=容器 #359 / predefined=进程内
-        #398),经构造注入可 mock。
+        (各自从基线挂载过滤出变体挂载 + 独立构建),**串行执行**(原 #375
+        为并发:两个审计容器并发各自逼近 4096m 限额时,Docker Desktop
+        WSL2 VM 总量(~8GB)扛不住双容器峰值,实测全市场挂载下审计容器
+        成对 OOM(exit=137)——串行后单任务任意时刻至多 1 个容器;检出
+        语义零变化(失败报告仍取最早分歧日期),代价是审计段墙钟近倍)。
+        异常在截断点顺序上原样传播(与串行一致)。审计本体由 kind 对应的
+        默认回调提供(factor=容器 #359 / predefined=进程内 #398),经构造
+        注入可 mock。
         """
         audit_fn = audit or self._prefix_audit
         cuts = audit_truncation_points(list(record.dates))
-        outcomes = await asyncio.gather(
-            *(
-                audit_fn(spec, baseline, truncate_at=cut)
-                for cut in cuts
-            ),
-            return_exceptions=True,
-        )
+        outcomes: list[Any] = []
+        for cut in cuts:
+            outcomes.append(await audit_fn(spec, baseline, truncate_at=cut))
         divergences: list[date] = []
         for cut, outcome in zip(cuts, outcomes, strict=True):
             if isinstance(outcome, BaseException):
