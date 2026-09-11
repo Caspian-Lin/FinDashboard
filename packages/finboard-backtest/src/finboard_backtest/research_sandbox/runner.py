@@ -438,6 +438,7 @@ async def run_factor_series_container(
     release_provider_factory: Callable[[str], Any] | None = None,
     workspace_root: Path | None = None,
     mount_override: WindowDataMount | None = None,
+    mount_on_batch: Callable[[int, int], None] | None = None,
 ) -> FactorSeriesOutput:
     """执行一次区间因子沙箱容器(issue #359;#360 编排调用)。
 
@@ -451,6 +452,10 @@ async def run_factor_series_container(
     ``mount_override``(issue #371,审计变体路径):传入已构建的窗口挂载
     时跳过 provider 物化,直接以该挂载运行容器——挂载与 spec 的一致性经
     :func:`_validate_mount_override` fail-closed 校验。缺省 None 走原路径。
+
+    ``mount_on_batch``(issue #441,可选):主构建挂载逐标的批次进度
+    ``(done, total)``,透传给 :func:`build_window_data_mount`;缺省 None
+    零行为变化。``mount_override`` 路径无物化,不产生批次事件。
 
     依赖注入(测试与 #360 编排用,均可缺省走默认):``settings`` 缺省经
     ``finboard_app.config.load_settings`` 延迟加载;``driver`` 缺省走
@@ -500,6 +505,7 @@ async def run_factor_series_container(
             code_commit=spec.code_commit,
             release_id=spec.release_id,
             dataset_release_ids=spec.dataset_release_ids,
+            on_batch=mount_on_batch,
         )
 
     result = await ResearchSandboxRunner(driver).run(

@@ -31,6 +31,13 @@ worker 领取 ``kind=factor_series_build`` 任务(单并发,复用 research_code
 自检;换 bars 发布的托管批量重建 = 一次入队 N 个本 job(内容寻址缓存使
 未受影响的输入组合自动 unchanged,不新造编排器)。
 
+进度(issue #441):阶段档位与终态 phase 不变(5 档 + succeeded /
+cache_hit),execute / audit 长阶段内部增细粒度帧 —— 挂载逐批计数
+(phase ``factor_series_build:mount k/n``,经 ``make_stage_phase_progress``
+单飞合并)、容器边界(``container:start`` / ``container:done``)、审计逐
+截断点(``audit i/n``);k/n 只进 phase 文本,数值列停在阶段档位,
+done 单调不减、total 只增(worker ``update_progress`` 夹紧规则)。
+
 容器执行与审计本体由 #359 提供(``runner.FactorSeriesRunSpec`` /
 ``runner.run_factor_series_container`` / ``research_sandbox.audit`` 前缀不变性
 引擎);predefined 的进程内执行与审计由 #398 的
@@ -43,6 +50,7 @@ worker 领取 ``kind=factor_series_build`` 任务(单并发,复用 research_code
 from __future__ import annotations
 
 import hashlib
+import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import date
@@ -58,11 +66,16 @@ from finboard_backtest.background_jobs.contracts import (
     JobResult,
     ProgressCallback,
 )
+from finboard_backtest.background_jobs.executors._progress import (
+    make_stage_phase_progress,
+)
 from finboard_persistence import FactorSeriesRecord
 
 SettingsFactory = Callable[[], Any]
 #: 容器执行回调:(spec) -> result(dates / values / quality / run_id)。
-ContainerRunner = Callable[[Any], Awaitable[Any]]
+#: 声明可选关键字 ``mount_on_batch``(issue #441)的 runner 额外获得
+#: 挂载逐批进度;注入的旧式 ``(spec)`` runner(测试 seam)照常可用。
+ContainerRunner = Callable[..., Awaitable[Any]]
 #: 审计回调:(spec, truncate_at) -> outcome(passed / first_divergence_date)。
 PrefixAudit = Callable[..., Awaitable[Any]]
 
@@ -120,20 +133,43 @@ class FactorSeriesBuildPayload:
         return h.hexdigest()[:16]
 
 
-async def _default_container_runner(spec: Any) -> Any:
-    """#359 钉死的容器执行入口。"""
+async def _default_container_runner(
+    spec: Any, *, mount_on_batch: Callable[[int, int], None] | None = None
+) -> Any:
+    """#359 钉死的容器执行入口(mount_on_batch 透传挂载逐批进度,#441)。"""
     from finboard_backtest.research_sandbox import runner
 
-    return await runner.run_factor_series_container(spec)
+    return await runner.run_factor_series_container(
+        spec, mount_on_batch=mount_on_batch
+    )
 
 
-async def _default_predefined_runner(spec: Any) -> Any:
+async def _default_predefined_runner(
+    spec: Any, *, mount_on_batch: Callable[[int, int], None] | None = None
+) -> Any:
     """#398 预置因子的进程内执行入口(免容器,同构结果契约)。"""
     from finboard_backtest.research_sandbox.predefined_runner import (
         run_predefined_factor_series,
     )
 
-    return await run_predefined_factor_series(spec)
+    return await run_predefined_factor_series(
+        spec, mount_on_batch=mount_on_batch
+    )
+
+
+def _accepts_mount_on_batch(runner: ContainerRunner) -> bool:
+    """runner 是否接受 ``mount_on_batch`` 关键字(可选能力探测,#441)。
+
+    与 #304 getattr 探针同精神:签名探测,注入的旧式 ``(spec)`` runner
+    (测试 seam)保持原契约,静默退化(无挂载逐批进度);默认 runner 与
+    新式 runner 声明该参后透传。``signature().bind`` 只做形参拟合,不执行
+    被探测对象。
+    """
+    try:
+        inspect.signature(runner).bind(object(), mount_on_batch=None)
+    except TypeError:
+        return False
+    return True
 
 
 async def _default_predefined_prefix_audit(
@@ -320,7 +356,23 @@ class FactorSeriesBuildExecutor:
         runner = (
             self._predefined_runner if is_predefined else self._container_runner
         )
-        result = await runner(spec)
+        # execute 长阶段内部进度(#441):挂载逐批计数经单飞合并进 phase
+        # 文本(k/n),数值列停在 execute 档位保全局单调(done 不减、total
+        # 只增);旧式 runner 探测不支持时静默退化(不透传,行为同此前)。
+        mount_on_batch: Callable[[int, int], None] | None = None
+        if _accepts_mount_on_batch(runner):
+            mount_on_batch = make_stage_phase_progress(
+                progress,
+                phase_prefix="factor_series_build:mount",
+                done=3,
+                total=_TOTAL_STAGES,
+            )
+        await progress(3, _TOTAL_STAGES, "factor_series_build:container:start")
+        if mount_on_batch is None:
+            result = await runner(spec)
+        else:
+            result = await runner(spec, mount_on_batch=mount_on_batch)
+        await progress(3, _TOTAL_STAGES, "factor_series_build:container:done")
         # 覆盖起点声明冻结入 series manifest(issue #403,继 #399):声明
         # ``min_history_bars`` 的预置因子,把声明随 quality 归档(构建时刻
         # 的目录语义);commit 锚已含声明(声明变化 → 新锚 → 新序列),
@@ -358,8 +410,17 @@ class FactorSeriesBuildExecutor:
             if is_predefined
             else self._prefix_audit
         )
+
+        async def report_cut(index: int, cuts_total: int) -> None:
+            # 逐截断点一帧(#441):k/n 进 phase 文本,数值列停在 audit 档位。
+            await progress(
+                4,
+                _TOTAL_STAGES,
+                f"factor_series_build:audit {index}/{cuts_total}",
+            )
+
         audit_failure = await self._audit_sample(
-            spec, record, result, audit=audit
+            spec, record, result, audit=audit, report_cut=report_cut
         )
         if audit_failure is not None:
             return JobResult(
@@ -607,6 +668,7 @@ class FactorSeriesBuildExecutor:
         baseline: Any,
         *,
         audit: PrefixAudit | None = None,
+        report_cut: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> str | None:
         """抽 2 个截断点跑前缀不变性审计;返回失败文案或 None(通过)。
 
@@ -619,12 +681,15 @@ class FactorSeriesBuildExecutor:
         语义零变化(失败报告仍取最早分歧日期),代价是审计段墙钟近倍)。
         异常在截断点顺序上原样传播(与串行一致)。审计本体由 kind 对应的
         默认回调提供(factor=容器 #359 / predefined=进程内 #398),经构造
-        注入可 mock。
+        注入可 mock。``report_cut``(#441,可选):每个截断点执行前回调
+        ``(index, cuts_total)``,长审计段逐点可见。
         """
         audit_fn = audit or self._prefix_audit
         cuts = audit_truncation_points(list(record.dates))
         outcomes: list[Any] = []
-        for cut in cuts:
+        for index, cut in enumerate(cuts, start=1):
+            if report_cut is not None:
+                await report_cut(index, len(cuts))
             outcomes.append(await audit_fn(spec, baseline, truncate_at=cut))
         divergences: list[date] = []
         for cut, outcome in zip(cuts, outcomes, strict=True):
