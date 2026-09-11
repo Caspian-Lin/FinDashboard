@@ -50,6 +50,8 @@ from finboard_backtest.research_run.contracts import (
 )
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
     from finboard_backtest.factor_lab import PriceFeatureProcessPool
     from finboard_data.factor_lab import FeatureSnapshot
     from finboard_data.factors import FactorInputBatch
@@ -683,6 +685,30 @@ class FrozenInputLoader:
         return tuple(values), frozenset(covered)
 
 
+def _latest_daily_metrics_row(table: pa.Table) -> dict[str, object] | None:
+    """列式表中选 ``available_at`` 最大的行并物化为单个 dict(issue #371 同构)。
+
+    与对象路径 ``sorted(records, key=available_at)[-1]`` 逐值等值:Python 排序
+    稳定,available_at 并列时取原读取顺序中最后一条——此处自表尾向前找第一个
+    最大值下标。比较用 datetime 与门控(``_read_daily_metrics_columns``)同一
+    ``fromisoformat`` 解析语义;全历史行只有选中这一行进 Python,后续
+    ``_daily_metrics_from_release_row`` 的 Decimal 强转成本只付这一行。
+    """
+    if table.num_rows == 0:
+        return None
+    available_values = [
+        value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+        for value in table.column("available_at").to_pylist()
+    ]
+    max_available = max(available_values)
+    # sorted()[-1] 的稳定排序等值选择:并列取原读取顺序最后一条。
+    index = len(available_values) - 1
+    while available_values[index] != max_available:
+        index -= 1
+    row: dict[str, object] = table.slice(index, 1).to_pylist()[0]
+    return row
+
+
 async def _load_daily_metrics_features(
     provider: FrozenReleaseProvider,
     candidates: Sequence[UniverseCandidate],
@@ -692,12 +718,27 @@ async def _load_daily_metrics_features(
     """把 daily_metrics 发布观测映射为因子值(PIT 门控,复用 extract_factor_matrix)。
 
     #252:缺标的容忍语义同 :func:`_load_financial_features`。
+
+    列式优先(issue #371 同构的 getattr 探测):provider 提供
+    ``fetch_daily_metrics_columns``(``FrozenReleaseProvider`` 已实现,PIT/
+    区间门控在 Arrow 内完成)时,只把每标的 ``available_at`` 最新的一条可见行
+    物化为 dict 并复用 ``_daily_metrics_from_release_row`` 强转——对象路径会把
+    「发布起点→决策日」的全部历史行逐行强转成领域对象后仅取最新一条,全市场
+    发布 x 多期下 99.9% 强转被扔掉、纯 Python 单线程成为加载瓶颈。测试 stub 等
+    无该属性的 provider 回退对象路径,选择语义逐值一致(稳定排序并列取原顺序
+    最后一条,PIT 边界 ``available_at == decision_at`` 两路径均可见)。
     """
     from finboard_data.factors import FactorInputBatch, FactorInputRecord
-    from finboard_data.releases import ReleaseCapabilityError
+    from finboard_data.releases import (
+        ReleaseCapabilityError,
+        _daily_metrics_from_release_row,
+    )
     from finboard_shared.models import Symbol
 
     semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
+    # issue #371 同构(getattr 探测,``data_mount`` 挂载写入器 hasattr 同款):
+    # 列式优先,无 ``fetch_daily_metrics_columns`` 属性的 provider 回退对象路径。
+    fetch_columns = getattr(provider, "fetch_daily_metrics_columns", None)
 
     async def _one(
         candidate: UniverseCandidate,
@@ -705,18 +746,36 @@ async def _load_daily_metrics_features(
         async with semaphore:
             symbol = Symbol(code=candidate.symbol, market=_market_from_value(candidate.market))
             try:
-                records = await provider.fetch_daily_metrics(
-                    symbol,
-                    start=provider.release.start_date,
-                    end=decision_at.date(),
-                    decision_at=decision_at,
-                )
+                if fetch_columns is not None:
+                    row = _latest_daily_metrics_row(
+                        await fetch_columns(
+                            symbol,
+                            start=provider.release.start_date,
+                            end=decision_at.date(),
+                            decision_at=decision_at,
+                        )
+                    )
+                    latest = (
+                        _daily_metrics_from_release_row(row, symbol=symbol.code)
+                        if row is not None
+                        else None
+                    )
+                else:
+                    records = await provider.fetch_daily_metrics(
+                        symbol,
+                        start=provider.release.start_date,
+                        end=decision_at.date(),
+                        decision_at=decision_at,
+                    )
+                    if not records:
+                        latest = None
+                    else:
+                        # 取决策时点可见的最新一条(同一 trade_date 理论上一条;排序保最新)。
+                        latest = sorted(records, key=lambda item: item.available_at)[-1]
             except ReleaseCapabilityError:
                 return None, True
-        if not records:
+        if latest is None:
             return None, False
-        # 取决策时点可见的最新一条(同一 trade_date 理论上一条;排序保最新)。
-        latest = sorted(records, key=lambda item: item.available_at)[-1]
         return (
             FactorInputRecord(
                 symbol=candidate.symbol,
