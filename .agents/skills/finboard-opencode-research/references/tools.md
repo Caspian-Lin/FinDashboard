@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 128 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 128 个工具(✅;#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -20,7 +20,7 @@
 | 模拟盘(sim.*,✅ #127+#139) | ✅(账户/会话/决策/行情投递/评估/归档/订单/报告) | |
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
-| 后台任务队列(job.*,✅ #136+#221) | ✅(list/get 只读 + enqueue/cancel/archive/unarchive 写) | |
+| 后台任务队列(job.*,✅ #136+#221) | ✅(list/get/wait 只读 + enqueue/cancel/archive/unarchive 写) | |
 | 数据写操作(data_write.* / etf.*,✅ #137) | ✅(拉取/同步/发布/修复/ETF/配置) | |
 | #57 验证实验(validation_experiment.*,✅ #138+#233) | ✅(create/reject/add_trial/delete/run 写) | |
 | 自选股(watchlist.*,✅ #140) | ✅(create/update/delete/add_symbols/remove_symbol 写) | |
@@ -1296,6 +1296,20 @@ SDK fail-fast。
   total 随已发现决策递增)。轮询 phase 变化即可区分「正常计算 / 加载中 /
   卡死」,不再只能靠 `(done-1)//13` 反推决策序号
 - 错误:`not_found`、`invalid_argument`(view 非法)
+
+### finboard_job_wait(只读,#443)
+有界阻塞等待后台任务进入终态,替代循环调 `finboard_job_get` 轮询。
+- 参数:`job_id: str`、`timeout_seconds?: int = 60`(上限 300,超限夹 300)、
+  `poll_interval_seconds?: int = 2`(下限 1s 防轮询风暴)
+- 返回:`finboard_job_get(view=summary)` 同形状(JobOut 剥离 payload,附
+  `run_status`/`data_hash`)+ 等待元信息 `completed` / `waited_seconds`。
+  进入终态(succeeded/failed/cancelled/interrupted)立即返回
+  `completed: true`;**超时不抛错**:返回当前快照 + `completed: false`,
+  调用方可再次调用续期等待
+- 注意:服务端不主动断开连接,客户端应自带调用超时(OpenCode `mcp.timeout`
+  只管工具列表抓取不管调用时长);服务端 asyncio.sleep 轮询实现,单次调用
+  最长阻塞 `timeout_seconds`,不阻塞服务端事件循环
+- 错误:`not_found`
 
 ### finboard_job_enqueue **[写]**
 登记一个 queued 后台任务并立即返回 202 + job_id(不等待执行,由独立 worker 消费)。

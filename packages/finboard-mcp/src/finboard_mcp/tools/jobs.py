@@ -3,7 +3,8 @@
 把 #117/#142/#143/#144 建立的持久化 ``background_jobs`` 队列以受控 MCP 工具形式
 暴露给外置 Agent(OpenCode):
 
-* 只读(2):list / get —— 直接调 :class:`~finboard_persistence.BackgroundJobRepository`;
+* 只读(3):list / get / wait(#443 有界阻塞等待)—— 直接调
+  :class:`~finboard_persistence.BackgroundJobRepository`;
 * 写(4):enqueue / cancel / archive / unarchive —— 受 ``_require_write_enabled`` 守卫。
 
 ``enqueue`` 复用 ``JobIn`` schema 校验(kind / queue / idempotency_key / payload /
@@ -24,8 +25,10 @@ priority / max_attempts / requested_by),kind 白名单只放研究 / 数据 / �
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import time
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -148,8 +151,34 @@ def _payload_checksum(payload: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+#: ``job_wait`` 有界等待参数夹紧边界(issue #443):timeout 上限 300s
+#: (服务端最长阻塞 5 分钟,更久由调用方续期再等),poll 下限 1s(防轮询风暴)。
+_JOB_WAIT_MAX_TIMEOUT_SECONDS = 300
+_JOB_WAIT_MIN_POLL_INTERVAL_SECONDS = 1
+
+
+def _clamp_wait_params(
+    timeout_seconds: int, poll_interval_seconds: int
+) -> tuple[int, int]:
+    """夹紧 ``job_wait`` 参数:timeout ∈ [1, 300],poll ≥ 1。"""
+
+    return (
+        max(1, min(_JOB_WAIT_MAX_TIMEOUT_SECONDS, timeout_seconds)),
+        max(_JOB_WAIT_MIN_POLL_INTERVAL_SECONDS, poll_interval_seconds),
+    )
+
+
+def _job_summary_out(row: Any, *, run_status: str | None) -> dict[str, Any]:
+    """``job_get(view=summary)`` 同形状:JobOut 剥离 payload,附 run_status/data_hash。"""
+
+    out = {key: item for key, item in _job_out(row).items() if key != "payload"}
+    out["run_status"] = run_status
+    out["data_hash"] = _job_state_hash(row, run_status=run_status)
+    return out
+
+
 # --------------------------------------------------------------------------- #
-# 只读:list / get
+# 只读:list / get / wait
 # --------------------------------------------------------------------------- #
 
 
@@ -259,6 +288,68 @@ async def job_get(
         audit=app.audit,
         tool_name="finboard.job.get",
         arguments={"job_id": job_id, "view": view, "data_hash": data_hash},
+        handler=_do,
+    )
+
+
+async def job_wait(
+    app: McpAppContext,
+    job_id: str,
+    *,
+    timeout_seconds: int = 60,
+    poll_interval_seconds: int = 2,
+) -> ToolEnvelope:
+    """有界阻塞等待任务进入终态(issue #443),替代循环调 ``job_get`` 轮询。
+
+    * 进入终态(succeeded/failed/cancelled/interrupted)立即返回;
+    * 超时未终态**不抛错**:返回当前快照 + ``completed: false`` /
+      ``waited_seconds``,调用方可续期再等;
+    * ``asyncio.sleep`` 轮询(不引 LISTEN/NOTIFY),不阻塞事件循环;
+      每次查询独立短会话,不跨 sleep 持有会话 / 事务。
+    服务端不主动断开连接,客户端应自带调用超时。
+    """
+
+    async def _do() -> dict[str, Any]:
+        safe_timeout, safe_poll = _clamp_wait_params(
+            timeout_seconds, poll_interval_seconds
+        )
+        started = time.monotonic()
+        while True:
+            # 会话在 sleep 前关闭:等待期间不持有 DB 连接 / 事务。
+            async with app.session_maker() as session:
+                row = await BackgroundJobRepository(session).get(job_id)
+                if row is None:
+                    raise McpToolError("not_found", f"后台任务不存在: {job_id}")
+                # issue #306:kind=research_run 时透传关联 research_runs 状态,
+                # 与 job_get 的轮询口径一致。
+                run_status: str | None = None
+                if row.kind == "research_run":
+                    from finboard_persistence import ResearchRunRepository
+
+                    run_status = await ResearchRunRepository(
+                        session
+                    ).get_status_by_job_id(job_id)
+            out = _job_summary_out(row, run_status=run_status)
+            waited = time.monotonic() - started
+            if row.status in TERMINAL_STATUSES:
+                out["completed"] = True
+                out["waited_seconds"] = round(waited)
+                return out
+            if waited >= safe_timeout:
+                # 超时不是错误:交还当前快照,由调用方决定是否续期。
+                out["completed"] = False
+                out["waited_seconds"] = round(waited)
+                return out
+            await asyncio.sleep(safe_poll)
+
+    return await run_tool(
+        audit=app.audit,
+        tool_name="finboard.job.wait",
+        arguments={
+            "job_id": job_id,
+            "timeout_seconds": timeout_seconds,
+            "poll_interval_seconds": poll_interval_seconds,
+        },
         handler=_do,
     )
 
@@ -508,7 +599,7 @@ async def job_unarchive(app: McpAppContext, job_id: str) -> ToolEnvelope:
 
 
 def register(mcp: MCPServer) -> None:
-    """把任务队列工具注册到 MCP server(2 只读 + 4 写)。"""
+    """把任务队列工具注册到 MCP server(3 只读 + 4 写)。"""
 
     @mcp.tool(
         name="finboard_job_list",
@@ -569,6 +660,36 @@ def register(mcp: MCPServer) -> None:
     ) -> ToolEnvelope:
         return await job_get(
             app_context(ctx), job_id, view=view, data_hash=data_hash
+        )
+
+    @mcp.tool(
+        name="finboard_job_wait",
+        description=(
+            "有界阻塞等待后台任务进入终态(issue #443),替代循环调 "
+            "finboard_job_get 轮询。参数:job_id、timeout_seconds(1..300,"
+            "超限夹 300,默认 60)、poll_interval_seconds(下限 1s 防轮询风暴,"
+            "默认 2)。任务进入终态(succeeded/failed/cancelled/interrupted)"
+            "立即返回 finboard_job_get(view=summary) 同形状(JobOut 剥离 "
+            "payload,附 run_status/data_hash)+ completed: true + "
+            "waited_seconds;超时未终态**不抛错**,返回当前快照 + "
+            "completed: false + waited_seconds,调用方可再次调用续期等待。"
+            "注意:服务端不主动断开连接,客户端应自带调用超时(如 OpenCode "
+            "mcp.timeout 只管工具列表抓取不管调用时长);服务端为 asyncio "
+            "轮询实现,单次调用最长阻塞 timeout_seconds,不阻塞事件循环。"
+            "未找到返回 not_found。只读。"
+        ),
+    )
+    async def _wait(
+        job_id: str,
+        timeout_seconds: int = 60,
+        poll_interval_seconds: int = 2,
+        ctx: Context = None,  # type: ignore[assignment]
+    ) -> ToolEnvelope:
+        return await job_wait(
+            app_context(ctx),
+            job_id,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
         )
 
     @mcp.tool(
@@ -699,5 +820,6 @@ __all__ = [
     "job_get",
     "job_list",
     "job_unarchive",
+    "job_wait",
     "register",
 ]
