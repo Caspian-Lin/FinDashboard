@@ -329,4 +329,4 @@
 
 ## 维护
 - 新增预置因子时同步更新本表(状态列与注册表一致);
-- 表由 `.tmp/gen_factor_mapping.py` 生成(清单 JSON 抓取自源页),手工编辑请改生成器避免漂移。
+- 表由 `scripts/gen_factor_mapping.py` 生成(清单 JSON 快照 `scripts/tushare_factor_list_20260911.json` 抓取自源页),手工编辑请改生成器避免漂移。
