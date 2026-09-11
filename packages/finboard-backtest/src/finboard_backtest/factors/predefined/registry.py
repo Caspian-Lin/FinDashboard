@@ -1536,16 +1536,22 @@ def _eps_growth_vs_price_rank() -> PredefinedFactorCompute:
     return _rank_frame(compute)
 
 
-def _financial_step_ratio_rank(kind: str, field: str) -> PredefinedFactorCompute:
+def _financial_step_ratio_rank(
+    kind: str, field: str, lag: int = 1
+) -> PredefinedFactorCompute:
     """公告序一阶环比(desc 的 ``v_t / v_{t-1} - 1``):基期 = **上一条
     公告**(#401 ``_financial_accel`` 同诚实边界 —— 修订公告对给出 ≈0 的
-    差值;基期 <= 0 → 缺测)。无 bar 回看,不声明 ``min_history_bars``。"""
+    差值;基期 <= 0 → 缺测)。无 bar 回看,不声明 ``min_history_bars``。
+
+    ``lag`` 为公告序滞后行数(默认 1 = 环比,存量条目行为不变;批次 6 P2
+    同比族用 ``lag=4`` = 公告序去年同期,基期 <= 0 同缺测)。
+    """
 
     def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
         series = _dataset_series(inp, kind, field)
         per_symbol: dict[str, np.ndarray] = {}
         for symbol, item in series.items():
-            base = ts_delay(item.values, 1)
+            base = ts_delay(item.values, lag)
             with np.errstate(invalid="ignore", divide="ignore"):
                 growth = item.values / base - 1.0
             per_symbol[symbol] = np.where(base > 0.0, growth, np.nan)
@@ -3464,6 +3470,542 @@ def _level_rank_entries() -> tuple[PredefinedFactorDefinition, ...]:
 
 
 # --------------------------------------------------------------------- #
+# 批次 6(#429)P2:三表新列消费与其余 —— 同比/变化/水平比值 + 反转/PEG/ETP5
+# --------------------------------------------------------------------- #
+#
+# 行轴比值族(同比 / Δ)的取数口径:以「驱动数据集」(分子来源,如
+# income_statements 的行轴)为准,逐驱动行按「该行自身可见锚」做 PIT 对齐
+# (``available_at <= 驱动行锚`` 的最近一行 —— 驱动行自身与同日披露的其它
+# 科目行可见,披露更晚的行一律不可见,严格无前视;截断变体按
+# ``available_at <= cut`` 过滤 → 前缀不变性结构性成立),逐行算比值(任一端
+# 缺测 / 分母 <= 0 → NaN),再在驱动行轴上做同比(往前 4 行 = 公告序去年
+# 同期)或 Δ(复用 #429 P1 的 252 根 bar PIT 回看 :func:`_change_values`)。
+#
+# 同比族不依赖 bar 回看 → ``window`` / ``min_history_bars`` 均 None;
+# Δ 族与 PEG 声明 252、ETP5 声明 1260(#399 覆盖起点)。
+
+#: 公告序同比的公告行滞后(往前 4 条公告 ≈ 去年同期)
+_BATCH6_P2_YOY_ROWS = 4
+
+#: ETP5 的滚动均值窗口(≈ 5 年交易日)
+_BATCH6_P2_ETP5_BARS = 1260
+
+
+def _batch6_p2_row_component_values(
+    inp: PredefinedFactorInput,
+    symbol: str,
+    driver: SymbolSeries,
+    components: tuple[_NumComponent, ...],
+) -> np.ndarray:
+    """按驱动行轴对齐公告类科目并按符号合成(缺测语义同 ``_NumComponent``)。
+
+    逐驱动行 i 取「该行自身可见锚(``driver.available_at[i]``)」时点 PIT 可见
+    (``available_at <= 锚``)的最近一行科目值 —— 驱动行自身的行在同一锚可见
+    (取到行 i 自身),同一公告日披露的其它科目行同样可见(同日对齐 = 同期
+    口径);披露更晚的行一律不可见(消费行 ``available_at <= 驱动行锚``,
+    严格无前视;截断变体保序 → 前缀不变性结构性成立)。``required=True``
+    的成分缺测 → 整体缺测;全部成分缺测 → 缺测(不虚构 0)。
+    """
+    size = driver.values.size
+    total = np.zeros(size, dtype=np.float64)
+    any_value = np.zeros(size, dtype=bool)
+    blocked = np.zeros(size, dtype=bool)
+    for item in components:
+        series = _dataset_series(inp, item.kind, item.field).get(symbol)
+        if series is None:
+            if item.required:
+                blocked = np.ones(size, dtype=bool)
+            continue
+        aligned = np.full(size, np.nan)
+        for position, anchor in enumerate(driver.available_at):
+            row = series.position_asof(anchor)
+            if row >= 0:
+                aligned[position] = float(series.values[row])
+        finite = np.isfinite(aligned)
+        if item.required:
+            blocked = blocked | ~finite
+        total = total + np.where(finite, item.sign * aligned, 0.0)
+        any_value = any_value | finite
+    return np.where(blocked | ~any_value, np.nan, total)
+
+
+def _batch6_p2_row_ratio_series(
+    inp: PredefinedFactorInput,
+    symbol: str,
+    driver: SymbolSeries,
+    numerator: tuple[_NumComponent, ...],
+    denominator: tuple[_NumComponent, ...],
+) -> SymbolSeries:
+    """行轴比值序列:dates / available_at 取驱动序列,values = 逐行比值。
+
+    行 i 的分子与分母均按该行的可见锚对齐(见
+    :func:`_batch6_p2_row_component_values`:驱动行自身 + 同日披露的其它
+    科目行);任一端缺测 / 分母 <= 0 → NaN(不虚构反号比值,``_safe_div``
+    同纪律)。
+    """
+    numerator_values = _batch6_p2_row_component_values(
+        inp, symbol, driver, numerator
+    )
+    denominator_values = _batch6_p2_row_component_values(
+        inp, symbol, driver, denominator
+    )
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio = numerator_values / denominator_values
+    return SymbolSeries(
+        dates=driver.dates,
+        values=np.where(denominator_values > 0.0, ratio, np.nan),
+        available_at=driver.available_at,
+    )
+
+
+def _batch6_p2_row_ratio_axes(
+    inp: PredefinedFactorInput,
+    driver: tuple[str, str],
+    numerator: tuple[_NumComponent, ...],
+    denominator: tuple[_NumComponent, ...],
+) -> dict[str, SymbolSeries]:
+    """逐标的行轴比值序列(universe = 驱动数据集覆盖的标的,#401 同语义)。"""
+    return {
+        symbol: _batch6_p2_row_ratio_series(
+            inp, symbol, item, numerator, denominator
+        )
+        for symbol, item in _dataset_series(inp, *driver).items()
+    }
+
+
+def _batch6_p2_ratio_yoy_rank(
+    driver: tuple[str, str],
+    numerator: tuple[_NumComponent, ...],
+    denominator: tuple[_NumComponent, ...],
+    lag: int = _BATCH6_P2_YOY_ROWS,
+) -> PredefinedFactorCompute:
+    """行轴比值序列的公告序同比(``lag`` 行滞后,默认 4 = 去年同期)→ rank。
+
+    基期 <= 0 → 缺测(不虚构反号增速);公告行不足 ``lag`` 行 → 全缺测。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        axes = _batch6_p2_row_ratio_axes(inp, driver, numerator, denominator)
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, item in axes.items():
+            base = ts_delay(item.values, lag)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                growth = item.values / base - 1.0
+            per_symbol[symbol] = np.where(base > 0.0, growth, np.nan)
+        return inp.sample(axes, per_symbol)
+
+    return _rank_frame(compute)
+
+
+def _batch6_p2_ratio_delta_rank(
+    driver: tuple[str, str],
+    numerator: tuple[_NumComponent, ...],
+    denominator: tuple[_NumComponent, ...],
+    lookback: int,
+) -> PredefinedFactorCompute:
+    """行轴比值序列的 Δ(#429 P1 ``_change_values`` 同口径:行 i 基值 =
+    「公告日往前 lookback 根 bar」时点 PIT 可见的最近一行行轴比值)。"""
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        axes = _batch6_p2_row_ratio_axes(inp, driver, numerator, denominator)
+        bars = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, item in axes.items():
+            calendar = bars.get(symbol)
+            per_symbol[symbol] = (
+                np.full(item.values.size, np.nan)
+                if calendar is None
+                else _change_values(item, calendar, lookback, ratio=False)
+            )
+        return inp.sample(axes, per_symbol)
+
+    return _rank_frame(compute)
+
+
+def _batch6_p2_reversal_rank(window: int) -> PredefinedFactorCompute:
+    """``small_cap_reversal_21d``:21 根 bar 累计收益的**反向**截面 rank。
+
+    Reversal = -(close / close[-21] - 1) → rank;小盘池是 universe 语义
+    (选股域),因子值只做反转本身(#429 拍板,title 记边界)。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        closes = inp.bars("close")
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, series in closes.items():
+            base = ts_delay(series.values, window)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                cumulative = series.values / base - 1.0
+            per_symbol[symbol] = -cumulative
+        return inp.sample(closes, per_symbol)
+
+    return _rank_frame(compute)
+
+
+def _batch6_p2_peg_rank(lookback: int) -> PredefinedFactorCompute:
+    """``peg_252d``:PEG = PE / (EPS 增速 x 100) → 截面 rank。
+
+    * PE = 决策日 close / 「决策日可见的最近一次公告」EPS(公告步进
+      asof;EPS <= 0 或取不到 → 缺测);
+    * EPS 增速 = 行锚定 bar 回看同比(:func:`_change_values` ``ratio=True``,
+      ``lookback`` = 252 根 bar;基期 <= 0 → 缺测);
+    * 增速 <= 0 → 缺测(负增长 / 零增长的 PEG 无意义,不虚构符号)。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        eps_series = inp.research_dataset("financial_indicators", "eps")
+        bars = inp.bars("close")
+        tradable = frozenset(inp.tradable_symbols)
+        symbols = [symbol for symbol in eps_series if symbol in tradable]
+        growth_rows: dict[str, np.ndarray] = {}
+        for symbol in symbols:
+            item = eps_series[symbol]
+            calendar = bars.get(symbol)
+            growth_rows[symbol] = (
+                _change_values(item, calendar, lookback, ratio=True)
+                if calendar is not None
+                else np.full(item.values.size, np.nan)
+            )
+        frame: FactorSeriesFrame = {}
+        for day in inp.decision_dates:
+            cross: dict[str, float | None] = {}
+            for symbol in symbols:
+                item = eps_series[symbol]
+                calendar = bars.get(symbol)
+                position = item.position_asof(end_of_day(day))
+                if position < 0 or calendar is None:
+                    cross[symbol] = None
+                    continue
+                eps = float(item.values[position])
+                growth = float(growth_rows[symbol][position])
+                close = calendar.asof(day)
+                if not (eps > 0.0 and growth > 0.0 and close > 0.0):
+                    cross[symbol] = None
+                    continue
+                value = (close / eps) / (growth * 100.0)
+                cross[symbol] = value if math.isfinite(value) else None
+            frame[day] = cross
+        return frame
+
+    return _rank_frame(compute)
+
+
+def _batch6_p2_etp5(window: int) -> PredefinedFactorCompute:
+    """``etp5`` = RollingMean(净利润, 1260) / RollingMean(总市值, 1260)。
+
+    净利润先按 bar 日历做公告步进(逐 bar ``asof`` 可见值),与
+    daily_metrics.total_market_cap 按日期交集对齐(:func:`_aligned_pair`)
+    后各自 ``ts_mean``;分母 <= 0 → 缺测。输出原始比值(不做截面 rank)。
+    """
+
+    def compute(inp: PredefinedFactorInput) -> FactorSeriesFrame:
+        income = inp.research_dataset("income_statements", "n_income")
+        market_cap = inp.daily_metrics("total_market_cap")
+        bars = inp.bars("close")
+        axes: dict[str, SymbolSeries] = {}
+        per_symbol: dict[str, np.ndarray] = {}
+        for symbol, calendar in bars.items():
+            cap = market_cap.get(symbol)
+            if cap is None:
+                continue
+            aligned, cap_values = _aligned_pair(calendar, cap)
+            announcement = income.get(symbol)
+            if announcement is None:
+                income_steps = np.full(aligned.values.size, np.nan)
+            else:
+                income_steps = np.array(
+                    [announcement.asof(day) for day in aligned.dates],
+                    dtype=np.float64,
+                )
+            income_mean = ts_mean(income_steps, window)
+            cap_mean = ts_mean(cap_values, window)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ratio = income_mean / cap_mean
+            axes[symbol] = aligned
+            per_symbol[symbol] = np.where(cap_mean > 0.0, ratio, np.nan)
+        return inp.sample(axes, per_symbol)
+
+    return compute
+
+
+def _batch6_threetable_entries() -> tuple[PredefinedFactorDefinition, ...]:
+    """批次 6(#429)P2 15 个:三表新列消费(同比 / Δ / 水平比值)与其余
+    (反转 / PEG / ETP5)。诚实边界(累计 vs 单季 / 薪酬代理 / 扣非代理 /
+    ETP5 累计近似年度)逐条见各 title;同比族基期 <= 0 一律缺测。"""
+    income_expenses = (
+        _NumComponent("income_statements", "sell_exp", required=True),
+        _NumComponent("income_statements", "admin_exp", required=True),
+        _NumComponent("income_statements", "fin_exp", required=True),
+    )
+    return (
+        # 同比族 7(公告序 t-4 = 去年同期 → 截面 rank)
+        _entry(
+            "income_tax_yoy",
+            title=(
+                "income_tax_yoy = 所得税费用同比 = 值_t / 值_t-4 - 1(公告序 4"
+                " 行 = 去年同期;累计口径近似 TTM;基期 <= 0 缺测,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_financial_step_ratio_rank(
+                "income_statements", "income_tax", lag=_BATCH6_P2_YOY_ROWS
+            ),
+            data_dependencies=("income_statements.income_tax",),
+        ),
+        _entry(
+            "np_to_inventory_yoy",
+            title=(
+                "np_to_inventory_yoy = 净利润 / 存货同比(累计口径近似单季;"
+                "分母按行可见锚 PIT 对齐;基期 <= 0 缺测,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_batch6_p2_ratio_yoy_rank(
+                ("income_statements", "n_income"),
+                (_NumComponent("income_statements", "n_income", required=True),),
+                (_NumComponent("balance_sheets", "inventories", required=True),),
+            ),
+            data_dependencies=(
+                "income_statements.n_income",
+                "balance_sheets.inventories",
+            ),
+        ),
+        _entry(
+            "np_to_total_expenses_yoy",
+            title=(
+                "np_to_total_expenses_yoy = 净利润 / 三费(销售 + 管理 + 财务)"
+                "同比(三费科目缺一不可;累计口径近似;基期 <= 0 缺测,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_batch6_p2_ratio_yoy_rank(
+                ("income_statements", "n_income"),
+                (_NumComponent("income_statements", "n_income", required=True),),
+                income_expenses,
+            ),
+            data_dependencies=(
+                "income_statements.n_income",
+                "income_statements.sell_exp",
+                "income_statements.admin_exp",
+                "income_statements.fin_exp",
+            ),
+        ),
+        _entry(
+            "tax_surcharge_yoy",
+            title=(
+                "tax_surcharge_yoy = 营业税金及附加同比 = 值_t / 值_t-4 - 1"
+                "(公告序 4 行 = 去年同期;累计口径;基期 <= 0 缺测,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_financial_step_ratio_rank(
+                "income_statements",
+                "biz_tax_surchg",
+                lag=_BATCH6_P2_YOY_ROWS,
+            ),
+            data_dependencies=("income_statements.biz_tax_surchg",),
+        ),
+        _entry(
+            "expenses_to_equity_yoy",
+            title=(
+                "expenses_to_equity_yoy = 三费(销售 + 管理 + 财务)/ 归母净资产"
+                "同比(三费缺一不可;累计口径近似;基期 <= 0 缺测,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_batch6_p2_ratio_yoy_rank(
+                ("income_statements", "sell_exp"),
+                income_expenses,
+                (
+                    _NumComponent(
+                        "balance_sheets",
+                        "total_hldr_eqy_exc_min_int",
+                        required=True,
+                    ),
+                ),
+            ),
+            data_dependencies=(
+                "income_statements.sell_exp",
+                "income_statements.admin_exp",
+                "income_statements.fin_exp",
+                "balance_sheets.total_hldr_eqy_exc_min_int",
+            ),
+        ),
+        _entry(
+            "np_to_fixed_assets_yoy",
+            title=(
+                "np_to_fixed_assets_yoy = 净利润 / 固定资产同比(累计口径近似;"
+                "分母按行可见锚 PIT 对齐;基期 <= 0 缺测,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_batch6_p2_ratio_yoy_rank(
+                ("income_statements", "n_income"),
+                (_NumComponent("income_statements", "n_income", required=True),),
+                (_NumComponent("balance_sheets", "fix_assets", required=True),),
+            ),
+            data_dependencies=(
+                "income_statements.n_income",
+                "balance_sheets.fix_assets",
+            ),
+        ),
+        _entry(
+            "np_to_salary_yoy",
+            title=(
+                "np_to_salary_yoy = 净利润 / 薪酬现金同比(薪酬用现金流量表「支付"
+                "给职工…的现金」代理,非专门科目;基期 <= 0 缺测,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_batch6_p2_ratio_yoy_rank(
+                ("income_statements", "n_income"),
+                (_NumComponent("income_statements", "n_income", required=True),),
+                (
+                    _NumComponent(
+                        "cashflow_statements", "c_paid_to_for_empl", required=True
+                    ),
+                ),
+            ),
+            data_dependencies=(
+                "income_statements.n_income",
+                "cashflow_statements.c_paid_to_for_empl",
+            ),
+        ),
+        # 变化族 2(Δ = 行轴比值_t - 行轴比值_{t-252 根 bar PIT})
+        _entry(
+            "delta_opm",
+            title=(
+                "delta_opm = Δ营业利润率 = OPM_t - OPM_t-252(OPM = 营业利润 /"
+                " 营业收入逐公告行比值;252 根 bar 前 PIT 可见值,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_batch6_p2_ratio_delta_rank(
+                ("income_statements", "operate_profit"),
+                (_NumComponent("income_statements", "operate_profit", required=True),),
+                (_NumComponent("income_statements", "revenue", required=True),),
+                _BATCH6_YEAR_BARS,
+            ),
+            window=_BATCH6_YEAR_BARS,
+            data_dependencies=(
+                "income_statements.operate_profit",
+                "income_statements.revenue",
+                "bars.close",
+            ),
+            min_history_bars=_BATCH6_YEAR_BARS,
+        ),
+        _entry(
+            "delta_cash_ratio",
+            title=(
+                "delta_cash_ratio = Δ现金比率 = CR_t - CR_t-252(CR = (货币资金"
+                " + 交易性金融资产)/ 流动负债;交易性金融资产缺测按 0,截面 rank)"
+            ),
+            family="quality",
+            cross_section=True,
+            compute=_batch6_p2_ratio_delta_rank(
+                ("balance_sheets", "money_cap"),
+                (
+                    _NumComponent("balance_sheets", "money_cap", required=True),
+                    _NumComponent("balance_sheets", "trading_fl"),
+                ),
+                (_NumComponent("balance_sheets", "total_cur_liab", required=True),),
+                _BATCH6_YEAR_BARS,
+            ),
+            window=_BATCH6_YEAR_BARS,
+            data_dependencies=(
+                "balance_sheets.money_cap",
+                "balance_sheets.trading_fl",
+                "balance_sheets.total_cur_liab",
+                "bars.close",
+            ),
+            min_history_bars=_BATCH6_YEAR_BARS,
+        ),
+        # 水平 / 比值族 3(决策日两端 asof 后比值 → 截面 rank)
+        _ratio_rank_definition(
+            "market_value_leverage",
+            title=(
+                "market_value_leverage = (总市值 - 非流动负债)/ 总市值(市值"
+                "杠杆;同日可见口径,非流动负债缺测则整体缺测,截面 rank)"
+            ),
+            family="quality",
+            numerator=(
+                _NumComponent("daily_metrics", "total_market_cap"),
+                _NumComponent("balance_sheets", "total_ncl", sign=-1.0, required=True),
+            ),
+            denominator=("daily_metrics", "total_market_cap"),
+        ),
+        _ratio_rank_definition(
+            "cash_ratio",
+            title=(
+                "cash_ratio = (货币资金 + 交易性金融资产)/ 流动负债(现金比率;"
+                "货币资金缺测则整体缺测,交易性金融资产缺测按 0,截面 rank)"
+            ),
+            family="quality",
+            numerator=(
+                _NumComponent("balance_sheets", "money_cap", required=True),
+                _NumComponent("balance_sheets", "trading_fl"),
+            ),
+            denominator=("balance_sheets", "total_cur_liab"),
+        ),
+        _ratio_rank_definition(
+            "earnings_cut_to_market",
+            title=(
+                "earnings_cut_to_market = 归母净利润 / 总市值(以归母净利润"
+                "代理扣非,上游无扣非字段;分母 <= 0 缺测,截面 rank)"
+            ),
+            family="value",
+            numerator=(
+                _NumComponent("income_statements", "n_income_attr_p", required=True),
+            ),
+            denominator=("daily_metrics", "total_market_cap"),
+        ),
+        # 其余 3(反转 / PEG / ETP5)
+        _entry(
+            "small_cap_reversal_21d",
+            title=(
+                "small_cap_reversal_21d = 21 根 bar 累计收益的反向截面 rank"
+                "(小盘池由 universe 决定,因子值只做反转;rank 高 = 跌得多)"
+            ),
+            family="reversal",
+            cross_section=True,
+            compute=_batch6_p2_reversal_rank(21),
+            window=21,
+            data_dependencies=("bars.close",),
+        ),
+        _entry(
+            "peg_252d",
+            title=(
+                "peg_252d = PE / (EPS 增速 x 100)(PE = 决策日 close / 最新公告"
+                " EPS;增速 = 252 根 bar PIT 回看同比;EPS 或增速 <= 0 缺测,rank)"
+            ),
+            family="growth",
+            cross_section=True,
+            compute=_batch6_p2_peg_rank(_BATCH6_YEAR_BARS),
+            window=_BATCH6_YEAR_BARS,
+            direction=FactorPreference.LOWER,
+            data_dependencies=("financial_indicators.eps", "bars.close"),
+            min_history_bars=_BATCH6_YEAR_BARS,
+        ),
+        _entry(
+            "etp5",
+            title=(
+                "etp5 = 1260 根 bar 净利润均值 / 总市值均值(净利润按 bar 日历"
+                "公告步进,累计口径近似年度;分母 <= 0 缺测,输出原始比值)"
+            ),
+            family="value",
+            compute=_batch6_p2_etp5(_BATCH6_P2_ETP5_BARS),
+            window=_BATCH6_P2_ETP5_BARS,
+            data_dependencies=(
+                "income_statements.n_income",
+                "daily_metrics.total_market_cap",
+                "bars.close",
+            ),
+            min_history_bars=_BATCH6_P2_ETP5_BARS,
+        ),
+    )
+
+
+# --------------------------------------------------------------------- #
 # 批次 6(#429)P2:长窗市场回归族 + 规模非线性(市场模型 / 工具变量 / 截面回归)
 # --------------------------------------------------------------------- #
 
@@ -4491,6 +5033,8 @@ PREDEFINED_FACTORS = {
         *_liquidity_entries(),
         *_size_entries(),
         # ---- 批次 6(#429)P2 市场回归族:长窗 alpha/beta/sigma + 成交量回归 + nl_size ----
+        # ---- 批次 6(#429)P2 三表列族与其余:同比/Δ/水平比值 + 反转/PEG/ETP5 ----
+        *_batch6_threetable_entries(),
         *_batch6_market_entries(),
         # ---- 批次 6(P1 量价,#429):换手乖离/净值高低比/窗口变体/MACD 分量 ----
         *_batch6_quant_entries(),
