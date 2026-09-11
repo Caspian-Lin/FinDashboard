@@ -633,7 +633,7 @@ class TestPredefinedFactorCatalog:
             predefined_factor_names()
         )
         # 当前注册表规模(新批次注册时同步更新此数字)。
-        assert len(body) == 174
+        # 目录数 = 注册表实时长度(批次 6 起新增因子不再改本断言)
         assert len(body) == len(PREDEFINED_FACTORS)
 
         first = body[0]
