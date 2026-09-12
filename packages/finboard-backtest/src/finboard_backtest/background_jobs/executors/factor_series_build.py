@@ -527,11 +527,22 @@ class FactorSeriesBuildExecutor:
     async def _resolve_code(
         self, payload: FactorSeriesBuildPayload
     ) -> tuple[str | None, str]:
-        """解析 (artifact_id, commit);规则与 research_code_run 同口径。"""
+        """解析 (artifact_id, commit);规则与 research_code_run 同口径。
+
+        issue #461(用户拍板 2026-09-13):序列构建仅接受协议 v2 入口
+        ``compute_series`` —— v1 ``compute`` 的逐日回退对每个决策日做全
+        历史面板重算(O(决策日数 x 面板行数)),全市场全历史窗口不可行。
+        门禁在 resolve 档位秒拒(先于挂载),具名 ``v1_series_deprecated``
+        附迁移路径;单日快照路径(research_code_run)不受影响。
+        """
         from finboard_backtest.research_code import (
             ResearchCodeService,
             is_promoted_artifact,
             promotion_status,
+        )
+        from finboard_backtest.research_code.factor_series import (
+            V1_SERIES_DEPRECATED_CODE,
+            factor_series_v2_entry_error,
         )
         from finboard_persistence import ResearchCodeArtifactRepository
 
@@ -606,6 +617,17 @@ class FactorSeriesBuildExecutor:
                         f"git 仓库中不存在该版本: {payload.kind}/"
                         f"{payload.name}@{commit[:12]}"
                     ),
+                    retryable=False,
+                )
+            gate_error = factor_series_v2_entry_error(
+                service.repo.read(
+                    kind=payload.kind, name=payload.name, commit=commit
+                )
+            )
+            if gate_error is not None:
+                raise ExecutorError(
+                    code=V1_SERIES_DEPRECATED_CODE,
+                    summary=gate_error,
                     retryable=False,
                 )
             return artifact.artifact_id, commit

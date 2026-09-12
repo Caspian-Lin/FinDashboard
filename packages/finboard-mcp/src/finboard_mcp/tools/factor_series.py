@@ -36,6 +36,9 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
 from finboard_backtest.research_code import is_promoted_artifact, promotion_status
+from finboard_backtest.research_code.factor_series import (
+    factor_series_v2_entry_error,
+)
 from finboard_data.factor_lab import (
     PREDEFINED_FACTOR_KIND,
     USER_FACTOR_KIND,
@@ -241,6 +244,28 @@ async def build_enqueue(
                         "finboard_research_code_rollback",
                     )
                 resolved_commit = commit or artifact.commit
+                # issue #461(用户拍板):序列构建仅接受协议 v2 入口,
+                # 入队期秒拒 v1(先于 job 创建,agent 即时得到迁移路径)。
+                # 代码仓不可读时跳过(尽力而为预检)——权威检查在 executor
+                # 的 exists/read,产物不存在由其具名 missing_research_code。
+                from finboard_backtest.research_code import (
+                    ResearchCodeError,
+                    ResearchCodeService,
+                )
+
+                code_service = ResearchCodeService.from_path(
+                    settings.research_code_repo_path
+                )
+                try:
+                    gate_error = factor_series_v2_entry_error(
+                        code_service.repo.read(
+                            kind=kind, name=bare_name, commit=resolved_commit
+                        )
+                    )
+                except ResearchCodeError:
+                    gate_error = None
+                if gate_error is not None:
+                    raise McpToolError("invalid_argument", gate_error)
 
             release_repo = ResearchDatasetReleaseRepository(session)
             if await release_repo.get(release_id) is None:
@@ -420,14 +445,17 @@ def register(mcp: MCPServer) -> None:
             "进挂载(必须为 bars 类发布,否则秒拒);dataset_release_ids 是"
             "研究数据发布联合集,不得含 bars 主发布。入队预检:factor 需 sandbox "
             "开启且 (factor,name) 有 active 产物(显式 artifact_id 也可,但未通过"
-            "晋级门拒绝);predefined 只需名称已注册;release 均已登记。缓存命中"
+            "晋级门拒绝),且 manifest.entry 须为 factor.compute_series —— v1 "
+            "factor.compute 逐日入口已废弃(#461,全历史面板逐日重算不可行),"
+            "违规具名 v1_series_deprecated 拒绝;predefined 只需名称已注册;release 均已登记。缓存命中"
             "(series_key 已存在且 content_checksum 一致)直接返回 unchanged,不"
             "创建任务;同参数任务此前 failed/cancelled 时重提交会新建任务(#371),"
             "不会命中失败尸体。构建完成后抽 2 个截断点做前缀不变性审计(基线复用"
             "主构建产物,变体挂载由基线 Arrow 过滤派生),检出前视即 "
             "failed=lookahead_detected。换 bars 发布的托管批量重建 = 对每个失效"
             "序列逐条调用本工具(内容寻址缓存使未受影响的组合自动 unchanged)。"
-            "失败分类:sandbox_disabled / static 类 / runtime_error / timeout / "
+            "失败分类:sandbox_disabled / static 类 / v1_series_deprecated / "
+            "runtime_error / timeout / "
             "oom_killed / output_contract_violation / lookahead_detected / "
             "quality_gate_failed / unknown_predefined_factor / "
             "predefined_version_mismatch。返回 job_id,finboard_job_get 轮询"
