@@ -1773,7 +1773,7 @@ async def _publish_dataset_release(
     required_capabilities: tuple[str, ...],
     code_version: str,
 ) -> ResearchDatasetRelease:
-    from finboard_app.config import load_settings
+    from finboard_app.config import load_settings, postgres_connect_args
     from finboard_data import DatasetReleaseSpec
     from finboard_persistence import (
         ResearchDatasetReleaseService,
@@ -1782,7 +1782,10 @@ async def _publish_dataset_release(
     )
 
     settings = load_settings()
-    engine = create_async_engine(settings.db_url)
+    engine = create_async_engine(
+        settings.db_url,
+        connect_args=postgres_connect_args(settings.db_url),
+    )
     try:
         # 分段短事务(元数据 prep / 物化 / 登记):物化是分钟级纯文件 I/O,
         # 不能在打开的 PG 事务内进行,否则全市场规模发布会被

@@ -299,3 +299,21 @@ def load_settings(env_file: str | None = None) -> Settings:
     if env_file is not None:
         return Settings(_env_file=env_file)  # type: ignore[call-arg]
     return Settings()
+
+
+#: psycopg(libpq)连接黑洞加固参数(#450)。WSL2 NAT 转发下的长驻连接池
+#: 实测会被静默黑洞化(对端无 RST,本地 send 成功、recv 永不返回):worker
+#: 事件循环上的任务全体冻结在 ``await`` 上、心跳停摆、相位不动,僵尸检测与
+#: 协作取消同循环同死。TCP keepalive 让死连接在 ~keepalives_idle + count x
+#: interval(默认 ~60s)内显式报错,由调用方(逐操作短会话等)按连接级
+#: 失败处理;非 postgres 驱动(sqlite 等)返回空 dict 不影响测试。
+def postgres_connect_args(db_url: str) -> dict[str, int]:
+    if not db_url.startswith(("postgresql://", "postgresql+psycopg://", "postgres://")):
+        return {}
+    return {
+        "connect_timeout": 10,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 3,
+    }
