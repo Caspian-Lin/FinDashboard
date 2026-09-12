@@ -61,9 +61,18 @@ class _FakeStore:
         self.checkpoint_calls += 1
 
 
+class _FakeSession:
+    """issue #450 追续:包装会话关闭前 commit,假会话需提供该方法。"""
+
+    commit_calls: int = 0
+
+    async def commit(self) -> None:
+        _FakeSession.commit_calls += 1
+
+
 class _FakeSessionCM:
     async def __aenter__(self) -> object:
-        return object()
+        return _FakeSession()
 
     async def __aexit__(self, *exc: object) -> None:
         return None
@@ -139,7 +148,9 @@ class TestExecuteReplay:
         ).hexdigest()[:24]
         assert kwargs["new_run_id"] == expected_id
         assert kwargs["idempotency_key"].startswith(f"job-flamegraph:{_SRC}:")
-        assert store.checkpoint_calls == 1
+        # issue #450 追续:store 改逐操作短会话(关闭前 commit),checkpoint
+        # 变 no-op——持久性由 _FakeSession.commit 计数承载。
+        assert _FakeSession.commit_calls >= 1
 
     async def test_idempotency_key_varies_per_invocation(self, monkeypatch) -> None:
         """带时间戳的幂等键:重复诊断重放产生新 run,不被 COMPLETED 短路。"""

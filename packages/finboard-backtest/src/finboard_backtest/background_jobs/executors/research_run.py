@@ -27,9 +27,9 @@ Coordinator,后者在 ``stage x decision`` 粒度逐阶段回调
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -43,11 +43,15 @@ from finboard_backtest.background_jobs.contracts import (
     truncate_summary,
 )
 from finboard_backtest.research_run import (
+    ResearchArtifact,
     ResearchRunCoordinator,
     ResearchRunManifest,
+    ResearchRunRecord,
+    ResearchRunReport,
     ResearchRunStatus,
 )
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
+from finboard_backtest.research_run.contracts import JsonValue
 
 if TYPE_CHECKING:
     from finboard_backtest.research_run.store import ResearchRunStore
@@ -55,6 +59,118 @@ if TYPE_CHECKING:
 #: 把一个 AsyncSession 包成 ResearchRunStore(注入点,避免 finboard-backtest
 #: 反向依赖 finboard-app 的 SqlAlchemyResearchRunStore 实现)。
 StoreFactory = Callable[[AsyncSession], "ResearchRunStore"]
+
+_R = TypeVar("_R")
+
+
+class SessionPerOperationResearchRunStore:
+    """逐操作短会话的 store 包装(#450 追续正确性修复)。
+
+    此前 executor 把**单一 AsyncSession** 包成 store 交给 coordinator 复用
+    整个 run(可达数小时):任一次连接中断(WSL2 转发 PG 长跑实测
+    ``SSL SYSCALL error 10053``)都会把该会话事务打进 invalid 态,后续全部
+    store 操作 ``PendingRollbackError``——原始错误被掩盖、run 行卡 running
+    (attempt 重试撞状态机秒败)、`_safe_terminal_transition` 也救不回来。
+    改为逐操作短会话:连接断开只损失当次操作(attempt 重试兜底),存活
+    连接由 ``pool_pre_ping`` 检出。写操作在会话关闭前 commit(原 checkpoint()
+    的批量提交语义变为逐操作即时持久化,#314 续算以「逐决策 13 stage 全齐
+    + checksum 复验」为界,不受影响);``checkpoint()`` 相应变为 no-op。
+    """
+
+    def __init__(
+        self,
+        session_maker: async_sessionmaker[AsyncSession],
+        store_factory: StoreFactory,
+    ) -> None:
+        self._session_maker = session_maker
+        self._store_factory = store_factory
+
+    async def _with_store(
+        self, operation: Callable[[ResearchRunStore], Awaitable[_R]]
+    ) -> _R:
+        async with self._session_maker() as session:
+            store = self._store_factory(session)
+            result = await operation(store)
+            await session.commit()
+            return result
+
+    async def create_or_get(
+        self, manifest: ResearchRunManifest
+    ) -> tuple[ResearchRunRecord, bool]:
+        async def op(store: ResearchRunStore) -> tuple[ResearchRunRecord, bool]:
+            return await store.create_or_get(manifest)
+
+        return await self._with_store(op)
+
+    async def get(self, run_id: str) -> ResearchRunRecord | None:
+        async def op(store: ResearchRunStore) -> ResearchRunRecord | None:
+            return await store.get(run_id)
+
+        return await self._with_store(op)
+
+    async def list_by_status(
+        self, statuses: Iterable[ResearchRunStatus]
+    ) -> list[ResearchRunRecord]:
+        async def op(store: ResearchRunStore) -> list[ResearchRunRecord]:
+            return await store.list_by_status(statuses)
+
+        return await self._with_store(op)
+
+    async def transition(
+        self,
+        run_id: str,
+        *,
+        expected: frozenset[ResearchRunStatus],
+        target: ResearchRunStatus,
+        error_code: str | None = None,
+        error_summary: str | None = None,
+    ) -> ResearchRunRecord:
+        async def op(store: ResearchRunStore) -> ResearchRunRecord:
+            return await store.transition(
+                run_id,
+                expected=expected,
+                target=target,
+                error_code=error_code,
+                error_summary=error_summary,
+            )
+
+        return await self._with_store(op)
+
+    async def save_result(
+        self,
+        run_id: str,
+        *,
+        report: ResearchRunReport,
+        result_checksum: str,
+        timing: dict[str, JsonValue] | None = None,
+        partial_failure: dict[str, JsonValue] | None = None,
+    ) -> ResearchRunRecord:
+        async def op(store: ResearchRunStore) -> ResearchRunRecord:
+            return await store.save_result(
+                run_id,
+                report=report,
+                result_checksum=result_checksum,
+                timing=timing,
+                partial_failure=partial_failure,
+            )
+
+        return await self._with_store(op)
+
+    async def append_artifact(self, artifact: ResearchArtifact) -> bool:
+        async def op(store: ResearchRunStore) -> bool:
+            return await store.append_artifact(artifact)
+
+        return await self._with_store(op)
+
+    async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]:
+        async def op(store: ResearchRunStore) -> list[ResearchArtifact]:
+            return await store.list_artifacts(run_id)
+
+        return await self._with_store(op)
+
+    async def checkpoint(self) -> None:
+        """no-op:逐操作短会话已即时持久化(原批量提交边界消失)。"""
+        return None
 
 #: 按 manifest 构造策略适配器(注入点)。本期 CLI 提供固定样本工厂;真实工厂
 #: 接 FrozenInputLoader + 策略信号引擎后注入。
@@ -82,30 +198,28 @@ class ResearchRunExecutor:
     ) -> JobResult:
         run_id = _extract_run_id(job)
         await progress(0, None, "research_run:start")
-        async with self._session_maker() as session:
-            store = self._store_factory(session)
-            manifest = await _reconstruct_manifest(store, run_id)
-            try:
-                adapter = self._adapter_factory(manifest)
-            except Exception as exc:
-                # 伴生缺陷 A(issue #170):适配器工厂失败不能只落在
-                # background_jobs 行 —— research_runs 必须同步 FAILED,
-                # 否则 finboard_run_get 查不到失败原因。
-                await _mark_run_failed(store, run_id, exc)
-                raise ExecutorError(
-                    code=getattr(exc, "code", type(exc).__name__),
-                    summary=truncate_summary(str(exc)) or type(exc).__name__,
-                    retryable=False,
-                ) from exc
-            coordinator = ResearchRunCoordinator(store)
-            record = await coordinator.execute(
-                manifest,
-                adapter,
-                # issue #188:worker 的进度回调原样透传,Coordinator 在其
-                # stage x decision 持久化路径上逐阶段回调。
-                progress=progress,
-            )
-            await store.checkpoint()
+        store = SessionPerOperationResearchRunStore(self._session_maker, self._store_factory)
+        manifest = await _reconstruct_manifest(store, run_id)
+        try:
+            adapter = self._adapter_factory(manifest)
+        except Exception as exc:
+            # 伴生缺陷 A(issue #170):适配器工厂失败不能只落在
+            # background_jobs 行 —— research_runs 必须同步 FAILED,
+            # 否则 finboard_run_get 查不到失败原因。
+            await _mark_run_failed(store, run_id, exc)
+            raise ExecutorError(
+                code=getattr(exc, "code", type(exc).__name__),
+                summary=truncate_summary(str(exc)) or type(exc).__name__,
+                retryable=False,
+            ) from exc
+        coordinator = ResearchRunCoordinator(store)
+        record = await coordinator.execute(
+            manifest,
+            adapter,
+            # issue #188:worker 的进度回调原样透传,Coordinator 在其
+            # stage x decision 持久化路径上逐阶段回调。
+            progress=progress,
+        )
         await progress(1, 1, f"research_run:{record.status.value}")
         return _record_to_result(record)
 
@@ -125,47 +239,48 @@ class ResearchRunExecutor:
 
         from finboard_backtest.research_run import ResearchRunConflictError
 
-        async with self._session_maker() as session:
-            store = self._store_factory(session)
-            record = await store.get(source_run_id)
-            if record is None:
-                raise ExecutorError(
-                    code="missing_research_run",
-                    summary=f"研究运行 {source_run_id} 不存在,可能已被清理",
-                    retryable=False,
-                    context={"run_id": source_run_id},
-                )
-            try:
-                adapter = self._adapter_factory(record.manifest)
-            except Exception as exc:
-                raise ExecutorError(
-                    code=getattr(exc, "code", type(exc).__name__),
-                    summary=truncate_summary(str(exc)) or type(exc).__name__,
-                    retryable=False,
-                ) from exc
-            coordinator = ResearchRunCoordinator(store)
-            # 幂等键 = 可读时间戳 + uuid 后缀:同一时钟粒度内的两次诊断重放
-            # 也不会撞键(撞键会让 create_or_get 返回已 COMPLETED 的新 run,
-            # 第二次采样扑空;Windows datetime.now 粒度可达 ~15ms)。
-            stamp = f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
-            idempotency_key = f"job-flamegraph:{source_run_id}:{stamp}"
-            digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
-            try:
-                new_record = await coordinator.replay(
-                    source_run_id=source_run_id,
-                    new_run_id=f"RR-{digest}",
-                    idempotency_key=idempotency_key,
-                    requested_by="job-flamegraph",
-                    adapter=adapter,
-                )
-            except ResearchRunConflictError as exc:
-                raise ExecutorError(
-                    code="replay_guard_rejected",
-                    summary=str(exc),
-                    retryable=False,
-                    context={"run_id": source_run_id},
-                ) from exc
-            await store.checkpoint()
+        # 同 execute:逐操作短会话(#450 追续),诊断重放同样不受长会话
+        # 事务毒化影响。
+        store = SessionPerOperationResearchRunStore(self._session_maker, self._store_factory)
+        record = await store.get(source_run_id)
+        if record is None:
+            raise ExecutorError(
+                code="missing_research_run",
+                summary=f"研究运行 {source_run_id} 不存在,可能已被清理",
+                retryable=False,
+                context={"run_id": source_run_id},
+            )
+        try:
+            adapter = self._adapter_factory(record.manifest)
+        except Exception as exc:
+            raise ExecutorError(
+                code=getattr(exc, "code", type(exc).__name__),
+                summary=truncate_summary(str(exc)) or type(exc).__name__,
+                retryable=False,
+            ) from exc
+        coordinator = ResearchRunCoordinator(store)
+        # 幂等键 = 可读时间戳 + uuid 后缀:同一时钟粒度内的两次诊断重放
+        # 也不会撞键(撞键会让 create_or_get 返回已 COMPLETED 的新 run,
+        # 第二次采样扑空;Windows datetime.now 粒度可达 ~15ms)。
+        stamp = f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+        idempotency_key = f"job-flamegraph:{source_run_id}:{stamp}"
+        digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
+        try:
+            new_record = await coordinator.replay(
+                source_run_id=source_run_id,
+                new_run_id=f"RR-{digest}",
+                idempotency_key=idempotency_key,
+                requested_by="job-flamegraph",
+                adapter=adapter,
+            )
+        except ResearchRunConflictError as exc:
+            raise ExecutorError(
+                code="replay_guard_rejected",
+                summary=str(exc),
+                retryable=False,
+                context={"run_id": source_run_id},
+            ) from exc
+        await store.checkpoint()
         return _record_to_result(new_record)
 
 
