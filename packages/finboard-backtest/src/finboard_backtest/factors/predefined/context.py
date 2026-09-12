@@ -52,6 +52,20 @@ def end_of_day(day: date) -> datetime:
     return datetime.combine(day, time(23, 59, 59, 999999), tzinfo=UTC)
 
 
+def _bounds_from(available_at: tuple[datetime, ...]) -> np.ndarray:
+    """``available_at`` → float64 秒界数组(#462)。
+
+    ``position_asof`` / ``visible_rows`` 的 searchsorted(side="right") 与
+    bisect_right 同语义;数组替代逐行 float 对象列表,全历史窗口(1500 万
+    行)省 ~480MB 对象内存。
+    """
+    return np.fromiter(
+        (item.timestamp() for item in available_at),
+        dtype=np.float64,
+        count=len(available_at),
+    )
+
+
 @dataclass(frozen=True)
 class DividendEventHistory:
     """单标的的分红进展事件史(issue #402,``dividend_events`` 取数口)。
@@ -73,7 +87,7 @@ class DividendEventHistory:
     report_periods: tuple[date | None, ...]
     ex_dates: tuple[date | None, ...]
     cash_div: np.ndarray
-    _bounds: list[float] = field(default_factory=list, repr=False, compare=False)
+    _bounds: np.ndarray = field(default_factory=lambda: np.empty(0), repr=False, compare=False)
 
     def __post_init__(self) -> None:
         n = len(self.announcement_dates)
@@ -88,20 +102,16 @@ class DividendEventHistory:
                 "DividendEventHistory cash_div 长度不一致: "
                 f"{self.cash_div.size} vs {n}"
             )
-        object.__setattr__(
-            self,
-            "_bounds",
-            [item.timestamp() for item in self.available_at],
-        )
+        object.__setattr__(self, "_bounds", _bounds_from(self.available_at))
 
     def __len__(self) -> int:
         return len(self.announcement_dates)
 
     def visible_rows(self, day: date) -> range:
         """决策日可见行下标(``available_at <= 决策日日终``,前缀)。"""
-        import bisect
-
-        return range(bisect.bisect_right(self._bounds, end_of_day(day).timestamp()))
+        return range(
+            int(np.searchsorted(self._bounds, end_of_day(day).timestamp(), side="right"))
+        )
 
 
 @dataclass(frozen=True)
@@ -116,7 +126,7 @@ class SymbolSeries:
     dates: tuple[date, ...]
     values: np.ndarray
     available_at: tuple[datetime, ...]
-    _bounds: list[float] = field(default_factory=list, repr=False, compare=False)
+    _bounds: np.ndarray = field(default_factory=lambda: np.empty(0), repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not (len(self.dates) == len(self.available_at) == self.values.size):
@@ -124,11 +134,7 @@ class SymbolSeries:
                 "SymbolSeries dates/available_at/values 长度不一致: "
                 f"{len(self.dates)}/{len(self.available_at)}/{self.values.size}"
             )
-        object.__setattr__(
-            self,
-            "_bounds",
-            [item.timestamp() for item in self.available_at],
-        )
+        object.__setattr__(self, "_bounds", _bounds_from(self.available_at))
 
     def __len__(self) -> int:
         return len(self.dates)
@@ -142,9 +148,10 @@ class SymbolSeries:
 
     def position_asof(self, visible_until: datetime) -> int:
         """``available_at <= visible_until`` 的最后一行下标;-1 = 无可见行。"""
-        import bisect
-
-        return bisect.bisect_right(self._bounds, visible_until.timestamp()) - 1
+        return (
+            int(np.searchsorted(self._bounds, visible_until.timestamp(), side="right"))
+            - 1
+        )
 
 
 class PredefinedFactorInput(ABC):
