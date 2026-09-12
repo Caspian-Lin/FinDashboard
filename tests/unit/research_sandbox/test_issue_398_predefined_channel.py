@@ -431,6 +431,10 @@ class _FakeReleaseRow:
     def __init__(self) -> None:
         self.dataset_kind = ReleaseDatasetKind.BARS
         self.release_checksum = "c" * 64
+        # issue #460:_require_releases 返回主发布起点(容器失败零预热诊断)
+        from datetime import date
+
+        self.start_date = date(2022, 1, 4)
 
 
 class _FakeReleaseRepo:

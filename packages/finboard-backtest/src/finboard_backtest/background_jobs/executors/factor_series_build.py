@@ -232,6 +232,37 @@ async def _default_prefix_audit(spec: Any, baseline: Any, *, truncate_at: date) 
     )
 
 
+def _enrich_container_failure(
+    exc: Exception,
+    payload: FactorSeriesBuildPayload,
+    *,
+    bars_release_start: date | None,
+) -> Exception:
+    """容器失败但窗口头部零预热时,把诊断提示附到原异常后重抛。
+
+    窗口挂载的行情行来自 bars 主发布的**全发布区间**(发布起点即历史
+    上界),``window_start`` 不晚于发布起点时,窗口头部决策日的可见历史
+    只有 0-1 根 bar——带最小历史守卫的因子(如 RSI/MACD 类)会在窗口
+    头部 raise,炸掉整个构建。此时把可操作的修复路径附到错误摘要;
+    其余失败原样重抛(错误类型 / code / retryable 语义零变化)。
+    """
+    if (
+        bars_release_start is None
+        or payload.window_start > bars_release_start
+    ):
+        return exc
+    code = getattr(exc, "code", type(exc).__name__)
+    summary = getattr(exc, "summary", None) or str(exc) or type(exc).__name__
+    hint = (
+        f"{summary};诊断提示:window_start({payload.window_start.isoformat()})"
+        f"不晚于 bars 主发布起点({bars_release_start.isoformat()}),"
+        "窗口头部决策日的挂载可见历史为 0-1 根 bar,带最小历史守卫的因子"
+        "会在窗口头部 raise;修复:把 window_start 后移预留预热期,"
+        "或将因子改写为 compute_series 在头部产出缺测。"
+    )
+    return ExecutorError(code=code, summary=hint, retryable=getattr(exc, "retryable", False))
+
+
 def audit_truncation_points(dates: list[date]) -> list[date]:
     """抽样 2 个截断点(确定性,issue #360)。
 
@@ -318,7 +349,7 @@ class FactorSeriesBuildExecutor:
         is_predefined = payload.kind == _PREDEFINED_FACTOR_KIND
         await progress(1, _TOTAL_STAGES, "factor_series_build:resolve")
 
-        await self._require_releases(payload)
+        bars_release_start = await self._require_releases(payload)
         await progress(2, _TOTAL_STAGES, "factor_series_build:cache_check")
 
         # 缓存检查先行(内容寻址,不依赖 artifact 当前 active 指向——find_matching
@@ -368,10 +399,17 @@ class FactorSeriesBuildExecutor:
                 total=_TOTAL_STAGES,
             )
         await progress(3, _TOTAL_STAGES, "factor_series_build:container:start")
-        if mount_on_batch is None:
-            result = await runner(spec)
-        else:
-            result = await runner(spec, mount_on_batch=mount_on_batch)
+        try:
+            if mount_on_batch is None:
+                result = await runner(spec)
+            else:
+                result = await runner(spec, mount_on_batch=mount_on_batch)
+        except ExecutorError:
+            raise
+        except Exception as exc:
+            raise _enrich_container_failure(
+                exc, payload, bars_release_start=bars_release_start
+            ) from exc
         await progress(3, _TOTAL_STAGES, "factor_series_build:container:done")
         # 覆盖起点声明冻结入 series manifest(issue #403,继 #399):声明
         # ``min_history_bars`` 的预置因子,把声明随 quality 归档(构建时刻
@@ -572,12 +610,16 @@ class FactorSeriesBuildExecutor:
                 )
             return artifact.artifact_id, commit
 
-    async def _require_releases(self, payload: FactorSeriesBuildPayload) -> None:
+    async def _require_releases(
+        self, payload: FactorSeriesBuildPayload
+    ) -> date | None:
         """bars 主发布与联合集逐个存在性检查(fail-visible)。
 
         ``release_id`` 须锚定 **bars** 类发布(issue #371):挂载的全部
         行情行来自它;此前不校验 kind,错锚会在走完全量挂载物化(真实
         发布 ~20 分钟)后才以「窗口挂载不含任何行情行」失败——这里秒拒。
+        返回 bars 主发布的 ``start_date``(容器失败时的零预热诊断依据,
+        见 :func:`_enrich_container_failure`)。
         """
         from finboard_data.releases import ReleaseDatasetKind
         from finboard_persistence import ResearchDatasetReleaseRepository
@@ -608,6 +650,7 @@ class FactorSeriesBuildExecutor:
                         summary=f"研究数据发布不存在: {release_id}",
                         retryable=False,
                     )
+            return main_release.start_date
 
     async def _find_cached(
         self, payload: FactorSeriesBuildPayload

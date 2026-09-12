@@ -2811,6 +2811,98 @@ def _read_daily_metrics_columns(
     return table.filter(keep)
 
 
+#: D1 ``available_at`` 的固定 UTC 偏移(微秒):业务日零点(UTC)+ 偏移。
+#: 沪/期货 15:30 上海 = 07:30 UTC;港股 16:30 香港 = 08:30 UTC。其余市场
+#: (美东等夏令时市场)走 :func:`_read_bars_columns` 内的唯一业务日小表
+#: 精确派生回退。
+_D1_AVAILABLE_AT_FIXED_OFFSET_US = {
+    Market.A_SHARE: (7 * 60 + 30) * 60_000_000,
+    Market.FUTURE: (7 * 60 + 30) * 60_000_000,
+    Market.HK: (8 * 60 + 30) * 60_000_000,
+}
+
+
+def _read_bars_columns(
+    path: Path,
+    *,
+    code: str,
+    market: Market,
+    period: BarPeriod,
+    start: date,
+    end: date,
+    decision_at: datetime,
+) -> pa.Table:
+    """:func:`fetch_bars_columns` 的同步读取体:Arrow 读 + 门控过滤,
+    不产生逐行 Python 对象。
+
+    门控语义与对象路径逐值一致:``date`` = timestamp 的 UTC 墙钟日期
+    (与 aware UTC datetime 的 ``.date()`` 相同);``available_at`` 按市场
+    收盘规则派生(D1 固定偏移市场整列算术;其余市场按唯一业务日小表走
+    :func:`_timestamp_available_at`;非日线 = timestamp 本体,naive 列
+    具名拒绝与对象路径同口径),``> decision_at`` 的行不可见;
+    ``start <= date <= end`` 保留。输出列序 = 挂载 bars schema。
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path, use_threads=False, pre_buffer=False)
+    timestamps = table.column("timestamp")
+    if period is not BarPeriod.D1 and timestamps.type.tz is None:
+        raise ReleaseIntegrityError("冻结 Bar timestamp 必须带时区")
+    if (timestamps.type.tz is None) != (decision_at.tzinfo is None):
+        # naive/aware 混比:对象路径在比较处抛 TypeError,这里前置保持。
+        raise TypeError("can't compare offset-naive and offset-aware datetimes")
+    days = timestamps.cast(pa.date32())
+    if period is BarPeriod.D1:
+        offset_us = _D1_AVAILABLE_AT_FIXED_OFFSET_US.get(market)
+        if offset_us is not None:
+            day_start_us = pc.cast(
+                pc.cast(days, pa.timestamp("us", tz="UTC")), pa.int64()
+            )
+            available = pc.add(
+                day_start_us, pa.scalar(offset_us, type=pa.int64())
+            ).cast(pa.timestamp("us", tz="UTC"))
+        else:
+            unique_days = pc.unique(days)
+            per_day = pa.array(
+                [
+                    _timestamp_available_at(
+                        datetime(item.year, item.month, item.day, tzinfo=UTC),
+                        period,
+                        market,
+                    )
+                    for item in unique_days.to_pylist()
+                ],
+                type=pa.timestamp("us", tz="UTC"),
+            )
+            available = per_day.take(pc.index_in(days, unique_days))
+    else:
+        available = timestamps
+    visible = pc.less_equal(available, pa.scalar(decision_at, type=available.type))
+    keep = pc.and_(
+        visible,
+        pc.and_(
+            pc.greater_equal(days, pa.scalar(start, type=pa.date32())),
+            pc.less_equal(days, pa.scalar(end, type=pa.date32())),
+        ),
+    )
+    filtered = table.filter(keep)
+    return pa.table(
+        {
+            "symbol": pa.array([code] * filtered.num_rows, type=pa.string()),
+            "date": days.filter(keep),
+            "open": filtered.column("open"),
+            "high": filtered.column("high"),
+            "low": filtered.column("low"),
+            "close": filtered.column("close"),
+            "volume": filtered.column("volume"),
+            "amount": filtered.column("amount"),
+            "available_at": available.filter(keep),
+        }
+    )
+
+
 def _daily_metrics_latest_visible_indices(
     table: pa.Table,
     *,
@@ -3316,6 +3408,43 @@ class FrozenReleaseProvider:
             )
             for point in bars
         ]
+
+    async def fetch_bars_columns(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+        *,
+        decision_at: datetime,
+        adjust: str = "qfq",
+    ) -> pa.Table:
+        """:meth:`fetch_point_in_time_bars` 的列式版本(挂载 bars 直通)。
+
+        语义逐值一致(PIT 门控 ``available_at <= decision_at`` + 日期区间
+        过滤),但跳过整行 ``Bar`` / ``PointInTimeBar`` / dict 的对象税,
+        直接返回 Arrow 表——列序与挂载 bars schema 一致(symbol/date/
+        OHLCV/amount/available_at)。``available_at`` 按业务日 + 市场收盘
+        规则整列 Arrow 派生(沪/期 15:30、港 16:30 收盘 = 固定 UTC 偏移;
+        其余市场按唯一业务日小表回退 :func:`_timestamp_available_at` 精确
+        派生),与对象路径逐值相等。校验错误与对象路径同口径
+        (:meth:`_validate_fetch_request`)。
+        """
+
+        if decision_at.tzinfo is None:
+            raise ValueError("decision_at 必须带时区")
+        item = self._validate_fetch_request(symbol, period, start, end, adjust)
+        artifact = await self._verified_artifact(item)
+        return await asyncio.to_thread(
+            _read_bars_columns,
+            artifact,
+            code=item.code,
+            market=item.market,
+            period=period,
+            start=start,
+            end=end,
+            decision_at=decision_at,
+        )
 
     async def fetch_close_history(
         self,

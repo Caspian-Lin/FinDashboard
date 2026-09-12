@@ -220,17 +220,17 @@ async def build_data_mount(
             bars_schema = _bars_schema(include_available_at=False)
             start_rows = bars_writer.rows
             provider_max: date | None = None
-            async for rows in _iter_bars_batches(
+            async for batch in _iter_bars_batches(
                 provider, instruments, decision_at, include_available_at=False
             ):
                 _bump_batch()
-                if not rows:
+                table = _bars_batch_table(batch, bars_schema)
+                if table.num_rows == 0:
                     continue
-                universe.update(r["symbol"] for r in rows)
-                table = pa.Table.from_pylist(rows, schema=bars_schema)
+                universe.update(table.column("symbol").unique().to_pylist())
                 _guard_pit_table(table, "date", release_id, decision_day)
                 bars_writer.write(table)
-                provider_max = _max_date_optional(provider_max, rows, "date")
+                provider_max = _max_date_optional_table(provider_max, table, "date")
             contributions.append(
                 MountDataset(
                     release_id=release_id,
@@ -633,17 +633,17 @@ async def build_window_data_mount(
             bars_schema = _bars_schema(include_available_at=True)
             start_rows = bars_writer.rows
             provider_max: date | None = None
-            async for rows in _iter_bars_batches(
+            async for batch in _iter_bars_batches(
                 provider, instruments, ceiling, include_available_at=True
             ):
                 _bump_batch()
-                if not rows:
+                table = _bars_batch_table(batch, bars_schema)
+                if table.num_rows == 0:
                     continue
-                universe.update(r["symbol"] for r in rows)
-                table = pa.Table.from_pylist(rows, schema=bars_schema)
+                universe.update(table.column("symbol").unique().to_pylist())
                 _guard_window_pit_table(table, "date", rel_id, window_end)
                 bars_writer.write(table)
-                provider_max = _max_date_optional(provider_max, rows, "date")
+                provider_max = _max_date_optional_table(provider_max, table, "date")
             contributions.append(
                 MountDataset(
                     release_id=rel_id,
@@ -793,15 +793,57 @@ async def _iter_bars_batches(
     *,
     include_available_at: bool,
 ) -> AsyncIterator[Any]:
-    """单 provider 的逐标的 bars 批次(#375 分块并发,#371 流式消费)。"""
+    """单 provider 的逐标的 bars 批次(#375 分块并发,#371 流式消费)。
 
-    async def collect(item: Any) -> list[dict[str, Any]]:
+    provider 支持 ``fetch_bars_columns`` 时列式直通(批次 = Arrow 表,
+    免整行 Bar/PointInTimeBar/dict 对象税;全市场挂载 ~1000 万行的对象
+    构造曾把挂载段钉在 GIL 单核上 ~28 分钟),否则回退对象路径
+    (测试 stub 等,逐值等值)。
+    """
+    columnar = hasattr(provider, "fetch_bars_columns")
+
+    async def collect(item: Any) -> Any:
+        if columnar:
+            return await _collect_bars_columns(provider, item, gate)
         return await _collect_bars(
             provider, [item], gate, include_available_at=include_available_at
         )
 
     async for batch in _iter_instrument_batches(collect, instruments):
         yield batch
+
+
+async def _collect_bars_columns(
+    provider: Any,
+    item: Any,
+    decision_at: datetime,
+) -> Any:
+    """单标的 bars 列式采集(:meth:`FrozenReleaseProvider.fetch_bars_columns`)。"""
+
+    from finboard_shared.models import Symbol
+
+    symbol = Symbol(code=item.code, market=item.market)
+    release = provider.release
+    return await provider.fetch_bars_columns(
+        symbol,
+        release.period,
+        release.start_date,
+        release.end_date,
+        decision_at=decision_at,
+        adjust=release.adjustment,
+    )
+
+
+def _bars_batch_table(batch: Any, schema: pa.Schema) -> pa.Table:
+    """bars 批次归一为目标 schema 的 Arrow 表。
+
+    列式批次(``pa.Table``,可能多 available_at 列)按 schema 列名选取后
+    cast;对象路径批次(dict 列表)走 ``from_pylist``。两者对同一数据的
+    产物逐值一致(#371 列式/对象等值测试同口径)。
+    """
+    if isinstance(batch, pa.Table):
+        return batch.select(schema.names).cast(schema)
+    return pa.Table.from_pylist(batch, schema=schema)
 
 
 async def _iter_daily_rows_batches(
