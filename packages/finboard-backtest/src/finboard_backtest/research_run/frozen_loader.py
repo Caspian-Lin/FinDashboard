@@ -515,6 +515,14 @@ class FrozenInputLoader:
         included_candidates, lot_info_by_symbol = _build_candidates_and_lots(
             _declared_domain_instruments(manifest, list(release.instruments))
         )
+        # issue #454:矩阵未预建时(直接调用 load_context 的路径),首次构建即按
+        # 执行价基携带 open 平行序列——此后 close 查询先行触发构建会把 next_open
+        # run 的矩阵建成 close-only,执行价只能逐标的回退全历史读取。
+        await self._ensure_close_histories(
+            provider,
+            included_candidates,
+            include_open=_wants_execution_open(manifest),
+        )
         prices = await self._load_close_prices(
             provider, included_candidates, decision_at
         )
@@ -711,17 +719,26 @@ class FrozenInputLoader:
           ``decision_at``,与本读取无关)。此前实现按 15:00 门控,执行日 bar
           (available_at = 15:30)不可见,成交价退化为**决策日收盘**。
 
-        矩阵未携带 opens / 无可见 bar / 不可切片的标的回退逐期对象路径读取;
-        执行日无 bar(停牌 / 数据缺口)的标的沿用「最后可见 bar」价格(与
-        close 路径同一降级语义)。
+        回退纪律(issue #454):矩阵**无法回答**该标的时才回退逐期对象路径
+        读取——(1)矩阵条目缺失 / 不可切片;(2)请求 open 而矩阵未携带
+        opens(close-only 矩阵)。矩阵已携带对应序列却返回 ``None`` 是对
+        「``read_as_of`` 无可见 bar」(未上市 / 数据缺口)的**权威回答**:
+        对象路径在同一门控下必然同样为空(#439 切片等值),不再回退读盘——
+        r11 实测全市场发布下未上市标的每期 ~600 只 x 75 期 ≈ 4.65 万次
+        全文件回退读 / 2.13GB,即此项纯浪费。执行日无 bar 但**存在**更早
+        可见 bar 的标的(停牌降级)仍取最后可见 bar 的价格(语义不变)。
         """
         read_as_of = _end_of_day(execution_at)
-        await self._ensure_close_histories(provider, candidates)
+        await self._ensure_close_histories(provider, candidates, include_open=want_open)
         prices: dict[str, float] = {}
         fallback: list[UniverseCandidate] = []
         for candidate in candidates:
             history = self._close_histories.get(candidate.symbol)
             if history is None:
+                fallback.append(candidate)
+                continue
+            if want_open and history.opens is None:
+                # close-only 矩阵遇到 open 请求 → 该标的回退对象路径读取。
                 fallback.append(candidate)
                 continue
             value = (
@@ -731,10 +748,14 @@ class FrozenInputLoader:
             )
             if value is not None:
                 prices[candidate.symbol] = value
-            else:
-                # close-only 矩阵遇到 open 请求 → 该标的回退对象路径读取。
-                fallback.append(candidate)
+            # else:矩阵对「无可见 bar」的权威 None,不回退(issue #454)。
         if fallback:
+            logger.debug(
+                "frozen_loader.execution_price_fallback",
+                release_id=provider.release.release_id,
+                read_as_of=read_as_of.isoformat(),
+                fallback_count=len(fallback),
+            )
             prices.update(
                 await _load_execution_prices_from_bars(
                     provider, fallback, read_as_of, want_open=want_open
