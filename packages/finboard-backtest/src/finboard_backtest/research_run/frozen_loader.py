@@ -515,6 +515,14 @@ class FrozenInputLoader:
         included_candidates, lot_info_by_symbol = _build_candidates_and_lots(
             _declared_domain_instruments(manifest, list(release.instruments))
         )
+        # issue #454:矩阵未预建时(直接调用 load_context 的路径),首次构建即按
+        # 执行价基携带 open 平行序列——此后 close 查询先行触发构建会把 next_open
+        # run 的矩阵建成 close-only,执行价只能逐标的回退全历史读取。
+        await self._ensure_close_histories(
+            provider,
+            included_candidates,
+            include_open=_wants_execution_open(manifest),
+        )
         prices = await self._load_close_prices(
             provider, included_candidates, decision_at
         )
@@ -711,17 +719,26 @@ class FrozenInputLoader:
           ``decision_at``,与本读取无关)。此前实现按 15:00 门控,执行日 bar
           (available_at = 15:30)不可见,成交价退化为**决策日收盘**。
 
-        矩阵未携带 opens / 无可见 bar / 不可切片的标的回退逐期对象路径读取;
-        执行日无 bar(停牌 / 数据缺口)的标的沿用「最后可见 bar」价格(与
-        close 路径同一降级语义)。
+        回退纪律(issue #454):矩阵**无法回答**该标的时才回退逐期对象路径
+        读取——(1)矩阵条目缺失 / 不可切片;(2)请求 open 而矩阵未携带
+        opens(close-only 矩阵)。矩阵已携带对应序列却返回 ``None`` 是对
+        「``read_as_of`` 无可见 bar」(未上市 / 数据缺口)的**权威回答**:
+        对象路径在同一门控下必然同样为空(#439 切片等值),不再回退读盘——
+        r11 实测全市场发布下未上市标的每期 ~600 只 x 75 期 ≈ 4.65 万次
+        全文件回退读 / 2.13GB,即此项纯浪费。执行日无 bar 但**存在**更早
+        可见 bar 的标的(停牌降级)仍取最后可见 bar 的价格(语义不变)。
         """
         read_as_of = _end_of_day(execution_at)
-        await self._ensure_close_histories(provider, candidates)
+        await self._ensure_close_histories(provider, candidates, include_open=want_open)
         prices: dict[str, float] = {}
         fallback: list[UniverseCandidate] = []
         for candidate in candidates:
             history = self._close_histories.get(candidate.symbol)
             if history is None:
+                fallback.append(candidate)
+                continue
+            if want_open and history.opens is None:
+                # close-only 矩阵遇到 open 请求 → 该标的回退对象路径读取。
                 fallback.append(candidate)
                 continue
             value = (
@@ -731,10 +748,14 @@ class FrozenInputLoader:
             )
             if value is not None:
                 prices[candidate.symbol] = value
-            else:
-                # close-only 矩阵遇到 open 请求 → 该标的回退对象路径读取。
-                fallback.append(candidate)
+            # else:矩阵对「无可见 bar」的权威 None,不回退(issue #454)。
         if fallback:
+            logger.debug(
+                "frozen_loader.execution_price_fallback",
+                release_id=provider.release.release_id,
+                read_as_of=read_as_of.isoformat(),
+                fallback_count=len(fallback),
+            )
             prices.update(
                 await _load_execution_prices_from_bars(
                     provider, fallback, read_as_of, want_open=want_open
@@ -1362,10 +1383,20 @@ def _matrix_to_feature_values(
     只提取 universe 过滤依赖的日频/财务因子(pb / 市值 / 换手 / ROE /
     毛利率 / 负债率 / 营收增速),与 ``extract_factor_matrix`` 输出一致,
     避免因子映射逻辑在加载器与快照构建之间漂移。
+
+    issue #454(对象税预构建):每标的最新 ``available_at`` 只计算一次
+    (旧实现逐 (因子, 标的) 重扫全部 records,O(因子数 x 标的数²) 的主进程
+    纯 Python 扫描,全市场 7 因子 x 5215 标的每期 ≈ 1.9 亿次记录比较);
+    ``source_artifact_ids`` 按标的共享同一元组实例,字段逐值相等。
     """
     from finboard_backtest.factors.extract import extract_factor_matrix
 
     matrix = extract_factor_matrix(batch)
+    latest_available_at: dict[str, datetime] = {
+        record.symbol: _latest_available_at(batch, record.symbol)
+        for record in batch.records
+    }
+    artifact_ids = (release_id,)
     values: list[FeatureValue] = []
     for factor_name, by_symbol in sorted(matrix.items()):
         for symbol, value in sorted(by_symbol.items()):
@@ -1374,8 +1405,8 @@ def _matrix_to_feature_values(
                     symbol=symbol,
                     feature_id=factor_name,
                     value=float(value),
-                    source_artifact_ids=(release_id,),
-                    available_at=_latest_available_at(batch, symbol),
+                    source_artifact_ids=artifact_ids,
+                    available_at=latest_available_at[symbol],
                 )
             )
     return values
@@ -1751,12 +1782,14 @@ def series_feature_values(
     day_values = record.values.get(decision_at.date().isoformat())
     if day_values is None:
         return ()
+    # issue #454:source_artifact_ids / available_at 全截面共享实例(等值压缩)。
+    artifact_ids = (record.series_id,)
     return tuple(
         FeatureValue(
             symbol=symbol,
             feature_id=factor_name,
             value=None if value is None else float(value),
-            source_artifact_ids=(record.series_id,),
+            source_artifact_ids=artifact_ids,
             available_at=decision_at,
         )
         for symbol, value in sorted(day_values.items())

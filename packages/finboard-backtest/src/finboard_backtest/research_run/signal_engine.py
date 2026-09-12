@@ -1359,17 +1359,37 @@ def _period_feature_values(
     snapshot: FeatureSnapshot,
     release_id: str,
 ) -> tuple[FeatureValue, ...]:
-    """把价格特征快照观测映射为 ``FeatureValue``(两种执行路径共用,零漂移)。"""
-    return tuple(
-        FeatureValue(
-            symbol=observation.symbol,
-            feature_id=observation.feature_name,
-            value=observation.value,
-            source_artifact_ids=(release_id,),
-            available_at=observation.available_at,
+    """把价格特征快照观测映射为 ``FeatureValue``(两种执行路径共用,零漂移)。
+
+    issue #454(对象税预构建):``source_artifact_ids`` 全期共享同一元组实例、
+    值相等的 ``available_at`` 共享同一 datetime 实例(键含 tzinfo,保证时区
+    表示逐位一致)——全市场 75 期 x ~15k 观测 ≈ 110 万个 FeatureValue,此前
+    每实例各配一个 ``(release_id,)`` 元组与各自的 post-pickle datetime 副本;
+    共享后字段逐值相等(:data:`FeatureValue` 契约与校验不变,外部构造路径
+    照常逐实例校验),内存与纯 Python 构造开销同步下降。
+    """
+    artifact_ids = (release_id,)
+    # (tzinfo, value) → 共享实例;datetime 相等对跨时区同瞬间也为 True,
+    # 键带 tzinfo 避免把 +08:00 实例替换成 UTC 实例这类表示漂移。
+    shared_available_at: dict[tuple[object, datetime], datetime] = {}
+    values: list[FeatureValue] = []
+    for observation in snapshot.observations:
+        available_at = observation.available_at
+        key = (available_at.tzinfo, available_at)
+        shared = shared_available_at.get(key)
+        if shared is None:
+            shared_available_at[key] = available_at
+            shared = available_at
+        values.append(
+            FeatureValue(
+                symbol=observation.symbol,
+                feature_id=observation.feature_name,
+                value=observation.value,
+                source_artifact_ids=artifact_ids,
+                available_at=shared,
+            )
         )
-        for observation in snapshot.observations
-    )
+    return tuple(values)
 
 
 async def _market_close_map(
