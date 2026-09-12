@@ -288,7 +288,8 @@ async def test_precompute_cancel_probe_aborts_matrix_build(tmp_path: Path) -> No
 
     # 无探针时行为不变:矩阵正常构建
     histories = await _load_close_histories(provider, _candidates(provider))
-    assert histories and all(item is not None for item in histories.values())
+    assert histories
+    assert all(item is not None for item in histories.values())
 
 
 @pytest.mark.asyncio
@@ -314,7 +315,8 @@ async def test_price_precompute_matches_snapshot_path(tmp_path: Path) -> None:
     assert set(pre.symbols) == set(_CODES)  # 顺序 = 发布 instruments 序(与快照路径一致)
     for day in days:
         values = pre.feature_values(day, "rel-x")
-        assert values is not None and values
+        assert values is not None
+        assert values
         reference = await build_price_feature_snapshot(
             provider=provider,
             decision_at=day,
