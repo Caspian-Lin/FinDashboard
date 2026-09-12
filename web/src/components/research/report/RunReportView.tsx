@@ -118,6 +118,36 @@ function shortDate(iso: string): string {
   return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
 }
 
+function fullDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
+function monthYearDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit" });
+}
+
+const DAY_MS = 24 * 3600 * 1000;
+
+/**
+ * 序列跨度超过一年时,横轴刻度必须带年份:纯「月/日」刻度会把 11 年的
+ * 2015/03 → 2026/09 读成「03/10 → 09/04」的倒序半年区间(用户走查实测误读)。
+ */
+export function spansOverAYear(timestamps: string[]): boolean {
+  if (timestamps.length < 2) return false;
+  const first = new Date(timestamps[0]).getTime();
+  const last = new Date(timestamps[timestamps.length - 1]).getTime();
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return false;
+  return last - first > 366 * DAY_MS;
+}
+
 export function getMetric(
   result: Record<string, unknown> | undefined,
   key: string | string[],
@@ -218,7 +248,7 @@ function EquityTooltip({ active, payload, label }: ChartTooltipProps) {
   return (
     <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs">
       <p className="text-muted-foreground">
-        {typeof label === "string" ? shortDate(label) : label}
+        {typeof label === "string" ? fullDate(label) : label}
       </p>
       {payload.map((p, i) => {
         const raw = p.value;
@@ -243,7 +273,7 @@ function DrawdownTooltip({ active, payload, label }: ChartTooltipProps) {
   return (
     <div className="rounded-md border border-border bg-popover px-3 py-2 text-xs">
       <p className="text-muted-foreground">
-        {typeof label === "string" ? shortDate(label) : label}
+        {typeof label === "string" ? fullDate(label) : label}
       </p>
       {payload.map((p, i) => {
         const raw = p.value;
@@ -263,6 +293,10 @@ function DrawdownTooltip({ active, payload, label }: ChartTooltipProps) {
 
 export function EquityChart({ data }: { data: EquityPoint[] }) {
   const { tl } = useT();
+  const tickFormatter = useMemo(
+    () => (spansOverAYear(data.map((p) => p.timestamp)) ? monthYearDate : shortDate),
+    [data],
+  );
   if (data.length === 0) {
     return (
       <EmptyState
@@ -286,7 +320,7 @@ export function EquityChart({ data }: { data: EquityPoint[] }) {
           />
           <XAxis
             dataKey="timestamp"
-            tickFormatter={shortDate}
+            tickFormatter={tickFormatter}
             stroke="hsl(var(--border))"
             tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
             minTickGap={24}
@@ -321,6 +355,10 @@ export function DrawdownChart({
   data: { timestamp: string; drawdown: number }[];
 }) {
   const { tl } = useT();
+  const tickFormatter = useMemo(
+    () => (spansOverAYear(data.map((p) => p.timestamp)) ? monthYearDate : shortDate),
+    [data],
+  );
   if (data.length === 0) {
     return (
       <EmptyState
@@ -358,7 +396,7 @@ export function DrawdownChart({
           />
           <XAxis
             dataKey="timestamp"
-            tickFormatter={shortDate}
+            tickFormatter={tickFormatter}
             stroke="hsl(var(--border))"
             tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }}
             minTickGap={24}
@@ -519,6 +557,16 @@ export function ReportContent({
   );
   const realizedMaxDrawdown =
     maxDrawdown > 0 ? maxDrawdown : metrics.max_drawdown;
+  // 运行区间:权益曲线首末点即策略起止交易日,直接可见省得从刻度反推。
+  const curveInterval = useMemo(() => {
+    if (equityCurve.length < 2) return null;
+    return {
+      range: `${fullDate(equityCurve[0].timestamp)} ~ ${fullDate(
+        equityCurve[equityCurve.length - 1].timestamp,
+      )}`,
+      points: formatNumber(equityCurve.length, 0),
+    };
+  }, [equityCurve]);
 
   return (
     <div className="space-y-4">
@@ -577,7 +625,19 @@ export function ReportContent({
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">{tl({ zh: "权益曲线", en: "Equity curve" })}</CardTitle>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle className="text-base">{tl({ zh: "权益曲线", en: "Equity curve" })}</CardTitle>
+            {curveInterval && (
+              <p className="text-xs tabular-nums text-muted-foreground">
+                {curveInterval.range}
+                {" · "}
+                {tl({
+                  zh: `${curveInterval.points} 交易日`,
+                  en: `${curveInterval.points} trading days`,
+                })}
+              </p>
+            )}
+          </div>
         </CardHeader>
         <CardContent>
           <EquityChart data={equityCurve} />
