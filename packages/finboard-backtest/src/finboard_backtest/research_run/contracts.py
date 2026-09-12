@@ -373,6 +373,12 @@ class ConstraintOutcome:
     limit: float | None
     reason: str
     hard: bool = True
+    # issue #452:标的维度约束(investable_universe / max_weight_per_asset /
+    # rebalance_band 等)记录命中的 symbol,供 runner 从已持久化的约束审计导出
+    # 「再平衡带保留」标的;组合级约束(gross_leverage / volatility 等)恒为
+    # None。序列化时 None 省略键(存量 artifact payload 逐字节不变,#386 零值
+    # 省略键先例),反序列化缺键回退 None。
+    symbol: str | None = None
 
     def __post_init__(self) -> None:
         if not self.constraint or not self.reason:
@@ -1058,7 +1064,13 @@ def to_json_value(value: object) -> JsonValue:
     if isinstance(value, ResearchStrategySpec):
         return to_json_value(value.model_dump(mode="json"))
     if is_dataclass(value):
-        return to_json_value(asdict(cast(Any, value)))
+        payload = asdict(cast(Any, value))
+        # issue #452:``ConstraintOutcome.symbol`` 为 None 时省略键(#386 零值
+        # 省略键先例)—— 存量 artifact payload 与 pipeline checksum 逐字节
+        # 不变;非 None 才落键,读回端(checkpoint_resume)缺键回退 None。
+        if isinstance(value, ConstraintOutcome) and value.symbol is None:
+            payload.pop("symbol", None)
+        return to_json_value(payload)
     if isinstance(value, tuple | list):
         return [to_json_value(item) for item in value]
     if isinstance(value, dict):

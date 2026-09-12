@@ -693,6 +693,9 @@ def to_research_constraint_outcomes(
                 limit=item.limit,
                 reason=item.reason,
                 hard=hard,
+                # issue #452:透传标的维度(逐标的约束命中哪个 symbol),供
+                # runner 从约束审计导出「再平衡带保留」标的;组合级约束恒 None。
+                symbol=item.symbol,
             )
         )
     return tuple(outcomes)

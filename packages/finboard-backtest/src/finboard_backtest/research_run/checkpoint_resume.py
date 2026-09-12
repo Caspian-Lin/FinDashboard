@@ -470,6 +470,8 @@ def _rebuild_constraint(value: object, label: str) -> ConstraintOutcome:
         limit=_as_optional_float(_field(item, "limit", label), f"{label}.limit"),
         reason=_as_str(_field(item, "reason", label), f"{label}.reason"),
         hard=_as_bool(_field(item, "hard", label), f"{label}.hard"),
+        # issue #452:存量 payload 与 symbol=None 的行均无 symbol 键,缺键回退 None。
+        symbol=_as_optional_str(item.get("symbol"), f"{label}.symbol"),
     )
 
 
