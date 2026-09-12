@@ -93,20 +93,52 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+#: detail 视图载荷硬上限(issue #458):估计字节数超过即具名拒绝
+#: (``payload_too_large``),不静默截断。估计口径见
+#: :func:`estimate_run_detail_bytes`(repr 长度与 JSON 体量同数量级)。
+RUN_DETAIL_MAX_ESTIMATED_BYTES = 64 * 1024 * 1024
+
+
+def estimate_run_detail_bytes(
+    artifacts: list[ResearchRunArtifactModel],
+) -> int:
+    """廉价估计 detail 视图载荷体量(逐 artifact ``len(str(payload))`` 累计,#458)。
+
+    payload 在 DB 读取时已反序列化为 dict,``str()`` 是 C 级实现且逐 artifact
+    计完长度即弃 —— 峰值内存为最大单个 artifact 的字符串化结果;合计值与
+    JSON 序列化体量同数量级(repr 引号 / 转义差异不影响量级判断)。
+    """
+    total = 0
+    for item in artifacts:
+        payload = item.payload
+        if payload:
+            total += len(str(payload))
+    return total
+
+
 def aggregate_run_report(
     row: ResearchRunModel,
     artifacts: list[ResearchRunArtifactModel],
     *,
     view: str = "summary",
+    decision_id: str | None = None,
 ) -> dict[str, Any]:
     """聚合 ResearchRun:run 元信息 + result(ResearchRunReport 扁平字段)+ 全部 artifacts。
 
     issue #206:``view=summary``(默认)不序列化 UNIVERSE/FILLS 等逐标的全量
     payload —— universe 判定聚合为计数,fills 按决策计数;``view=detail``
     保留全量 artifacts(诊断 / 导出用)。纯展示层变换,不修改落库数据。
+
+    issue #458:``decision_id``(仅 detail)把 artifacts 过滤为单个决策的
+    13 stage 产物 —— 大 run 的诊断下钻通道;summary 视图传 ``decision_id``
+    抛 ``ValueError``(调用方映射为 invalid_argument,不静默忽略)。过滤时
+    ``artifact_count`` 保持 run 全量计数,新增 ``decision_id`` 与
+    ``filtered_artifact_count`` 两个键;不过滤时输出与旧版本逐键一致。
     """
     if view not in ("summary", "detail"):
         raise ValueError(f"未知视图: {view}")
+    if decision_id is not None and view != "detail":
+        raise ValueError("decision_id 仅支持 view=detail(summary 视图为聚合计数)")
     base: dict[str, Any] = {
         "run_id": row.run_id,
         "status": row.status,
@@ -125,6 +157,13 @@ def aggregate_run_report(
         base["metrics"] = metrics_without_equity_curve(base["metrics"])
         base.update(summarize_run_artifacts(artifacts))
         return base
+    selected = artifacts
+    if decision_id is not None:
+        selected = [
+            item for item in artifacts if item.decision_id == decision_id
+        ]
+        base["decision_id"] = decision_id
+        base["filtered_artifact_count"] = len(selected)
     base["artifacts"] = [
         {
             "artifact_id": item.artifact_id,
@@ -135,7 +174,7 @@ def aggregate_run_report(
             "checksum": item.checksum,
             "payload": item.payload,
         }
-        for item in artifacts
+        for item in selected
     ]
     return base
 
@@ -456,8 +495,10 @@ __all__ = [
     "DEFAULT_FILLS_LIMIT",
     "EXPORT_FORMATS",
     "REPORT_KINDS",
+    "RUN_DETAIL_MAX_ESTIMATED_BYTES",
     "aggregate_backtest_report",
     "aggregate_run_report",
+    "estimate_run_detail_bytes",
     "export_dir",
     "export_report",
     "metrics_without_equity_curve",
