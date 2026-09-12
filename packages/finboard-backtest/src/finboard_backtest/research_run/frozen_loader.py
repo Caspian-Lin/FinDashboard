@@ -1383,10 +1383,20 @@ def _matrix_to_feature_values(
     只提取 universe 过滤依赖的日频/财务因子(pb / 市值 / 换手 / ROE /
     毛利率 / 负债率 / 营收增速),与 ``extract_factor_matrix`` 输出一致,
     避免因子映射逻辑在加载器与快照构建之间漂移。
+
+    issue #454(对象税预构建):每标的最新 ``available_at`` 只计算一次
+    (旧实现逐 (因子, 标的) 重扫全部 records,O(因子数 x 标的数²) 的主进程
+    纯 Python 扫描,全市场 7 因子 x 5215 标的每期 ≈ 1.9 亿次记录比较);
+    ``source_artifact_ids`` 按标的共享同一元组实例,字段逐值相等。
     """
     from finboard_backtest.factors.extract import extract_factor_matrix
 
     matrix = extract_factor_matrix(batch)
+    latest_available_at: dict[str, datetime] = {
+        record.symbol: _latest_available_at(batch, record.symbol)
+        for record in batch.records
+    }
+    artifact_ids = (release_id,)
     values: list[FeatureValue] = []
     for factor_name, by_symbol in sorted(matrix.items()):
         for symbol, value in sorted(by_symbol.items()):
@@ -1395,8 +1405,8 @@ def _matrix_to_feature_values(
                     symbol=symbol,
                     feature_id=factor_name,
                     value=float(value),
-                    source_artifact_ids=(release_id,),
-                    available_at=_latest_available_at(batch, symbol),
+                    source_artifact_ids=artifact_ids,
+                    available_at=latest_available_at[symbol],
                 )
             )
     return values
@@ -1772,12 +1782,14 @@ def series_feature_values(
     day_values = record.values.get(decision_at.date().isoformat())
     if day_values is None:
         return ()
+    # issue #454:source_artifact_ids / available_at 全截面共享实例(等值压缩)。
+    artifact_ids = (record.series_id,)
     return tuple(
         FeatureValue(
             symbol=symbol,
             feature_id=factor_name,
             value=None if value is None else float(value),
-            source_artifact_ids=(record.series_id,),
+            source_artifact_ids=artifact_ids,
             available_at=decision_at,
         )
         for symbol, value in sorted(day_values.items())
