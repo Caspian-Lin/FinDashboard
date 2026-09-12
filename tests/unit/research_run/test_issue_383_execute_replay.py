@@ -10,6 +10,7 @@ execute 短路」挡住)、异常映射。coordinator 内部状态机由
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -32,9 +33,25 @@ if TYPE_CHECKING:
 _SRC = "RR-source0000000000000000000000000000"
 
 
+@dataclass(frozen=True)
+class _ReplayableManifest:
+    """可 ``dataclasses.replace`` 的最小 manifest 替身(issue #455 起)。
+
+    execute_replay 按新 run 身份预替换 manifest(#455 探针目标修正),
+    替身必须携带身份字段集才能走真实 replace 路径;冻结输入在编排契约
+    测试中不消费,省略。
+    """
+
+    run_id: str
+    idempotency_key: str = ""
+    requested_by: str = ""
+    replay_of_run_id: str | None = None
+    replay_source_status: str | None = None
+
+
 def _source_record() -> SimpleNamespace:
     return SimpleNamespace(
-        manifest=SimpleNamespace(run_id=_SRC),
+        manifest=_ReplayableManifest(run_id=_SRC),
         status=ResearchRunStatus.COMPLETED,
         result_checksum="a" * 64,
     )
