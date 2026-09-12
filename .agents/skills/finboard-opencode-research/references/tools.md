@@ -1435,7 +1435,9 @@ REST PUT 是全量语义,这里更安全)。
 
 ### finboard_report_run(只读)
 聚合单个 ResearchRun 报告。
-- 参数:`run_id: str`(RR-)、`view?: "summary"|"detail" = "summary"`
+- 参数:`run_id: str`(RR-)、`view?: "summary"|"detail" = "summary"`、
+  `decision_id?: str = null`(#458,仅 view=detail;summary 传它返回
+  `invalid_argument`)
 - 返回(默认 summary,#206):`{run_id, status, strategy_id, strategy_kind,
   created_at, completed_at, metrics(剔 equity_curve), artifact_count, view,
   universe: {total, included, excluded_by_reason}, fills: {total, by_decision}}`
@@ -1443,7 +1445,15 @@ REST PUT 是全量语义,这里更安全)。
 - 返回(view=detail):`{..., artifacts: [{artifact_id, sequence, stage,
   decision_id, trace_id, checksum, payload}]}`(含 report / equity / decisions
   各阶段 payload,可达 MB 级,诊断用)
-- 错误:`not_found`(研究运行不存在)、`invalid_argument`(view 非法)
+- 返回(view=detail + decision_id,#458):artifacts 只含该决策的产物
+  (单决策 13 stage 有界,大 run 诊断下钻通道,豁免护栏);`artifact_count`
+  保持 run 全量,另附 `decision_id` 与 `filtered_artifact_count`;run 级
+  artifact(report 等)decision_id 为 null 不参与匹配
+- 载荷护栏(#458):detail 未下钻时先做廉价规模估计(逐 artifact
+  `len(str(payload))` 累计),估计超 64MB → `payload_too_large`(附估计
+  规模与替代路径,**不静默截断**;替代路径 = summary / decision_id 下钻)
+- 错误:`not_found`(研究运行不存在;detail 下钻 decision_id 无匹配)、
+  `invalid_argument`(view 非法;summary 传 decision_id)
 
 ### finboard_report_backtest(只读)
 聚合单条回测历史报告:运行元信息 + metrics + equity_curve + fills + summary
@@ -1476,12 +1486,17 @@ REST PUT 是全量语义,这里更安全)。
 ### finboard_report_export(只读)
 把报告聚合后导出为文件,返回绝对路径 + 元信息。
 - 参数:`kind: str`(run|backtest)、`id: str`(run_id 或回测记录 id)、
-  `format: str`(csv|markdown)
+  `format: str`(csv|markdown)、`decision_id?: str = null`(#458,仅
+  kind=run,过滤导出单个决策的 artifacts;kind=backtest 传它返回
+  `invalid_argument`)
 - 返回:`{path(绝对路径), kind, id, format, size_bytes, lines}`
 - CSV:UTF-8 BOM(Excel 打开中文不乱码),每节 `# 标题` 注释行 + 表头 + 行,
   节间空行;Markdown:`#` 标题 + `##` 分节表格
-- 错误:`invalid_argument`(未知 kind / format / 非整数回测 id)、
-  `not_found`(run/backtest 不存在)
+- 载荷护栏(#458):kind=run 的全量导出与 `finboard_report_run(view=detail)`
+  同护栏,估计超 64MB → `payload_too_large`(不静默截断;替代路径 =
+  `decision_id` 过滤导出单决策)
+- 错误:`invalid_argument`(未知 kind / format / 非整数回测 id / backtest
+  传 decision_id)、`not_found`(run/backtest 不存在)、`payload_too_large`
 
 ## 研究代码仓库与晋级(#215/#219,agent 代码入口:只存储与版本化)
 
@@ -1727,7 +1742,9 @@ missing 具名拒绝 + 重建命令)。
 - 返回 summary:三向代码引用(code_artifact/commit/kind)、release 锚定
   与联合集、窗口、date_count/symbol_count、content_checksum、quality
   (#217 质量门归档)、source_run_id(RCR-);**不含逐日 values**(#206 瘦身)
-- 返回 detail:另附 dates(升序)与 values 全量
+- 返回 detail:另附 dates(升序)与 values 全量;估计超 64MB →
+  `payload_too_large`(#458,不静默截断;summary 不受影响,全量消费走
+  research_run 的 factor_series_ids 加载通道)
 
 ### 换 bars 发布的托管重建(解反馈 #8 本体)
 入队/validate 发现引用序列的 `release_id` 不在本次 `dataset_release_ids`

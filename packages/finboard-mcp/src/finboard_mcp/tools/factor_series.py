@@ -13,7 +13,8 @@
   params 不可传。
 * ``finboard_factor_series_get``(只读)—— ``view=summary|detail`` 默认
   summary(#206 瘦身先例:头部 + 覆盖统计,不含逐日 values;detail 才给
-  dates + values 全量)。
+  dates + values 全量,#458 起估计超 64MB 具名 payload_too_large 拒绝,
+  载荷组装挪 asyncio.to_thread 防毒化事件循环)。
 
 换 bars 发布的托管批量重建 = 一次入队 N 个 build job(内容寻址缓存使未受
 影响的输入组合自动 unchanged);入队/validate 的失配守卫见
@@ -25,6 +26,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import date
@@ -45,6 +47,7 @@ from finboard_mcp.execution import McpToolError, run_tool
 from finboard_mcp.tools._serde import to_jsonable
 from finboard_persistence import (
     BackgroundJobRepository,
+    FactorSeriesRecord,
     FactorSeriesRepository,
     ResearchCodeArtifactRepository,
     ResearchDatasetReleaseRepository,
@@ -55,6 +58,10 @@ from finboard_shared.background_jobs import (
 )
 
 _AGENT_ACTOR = "agent:mcp"
+
+#: detail 视图载荷硬上限(issue #458):逐日 values 全量返口的估计字节上限,
+#: 超过即具名 ``payload_too_large`` 拒绝(不静默截断);summary 不受影响。
+SERIES_DETAIL_MAX_ESTIMATED_BYTES = 64 * 1024 * 1024
 
 
 async def _require_write_enabled(app: McpAppContext) -> None:
@@ -343,13 +350,40 @@ async def build_enqueue(
     )
 
 
+def _series_payload(record: FactorSeriesRecord, view: str) -> dict[str, Any]:
+    """线程池内组装 series 查询载荷(summary 投影遍历全量 values 求标的集;
+    detail 附全量 values,#458)。detail 估计超限时具名拒绝,不静默截断。"""
+    data = _series_summary(record)
+    data["view"] = view
+    if view == "detail":
+        estimated = len(str(record.values))
+        if estimated > SERIES_DETAIL_MAX_ESTIMATED_BYTES:
+            estimated_mb = estimated / (1024 * 1024)
+            limit_mb = SERIES_DETAIL_MAX_ESTIMATED_BYTES / (1024 * 1024)
+            raise McpToolError(
+                "payload_too_large",
+                f"因子序列 {record.series_id} 的 detail 逐日 values 估计约 "
+                f"{estimated_mb:.1f}MB,超过上限 {limit_mb:.0f}MB,拒绝序列化"
+                "(不静默截断)。替代路径:view=summary 看头部与覆盖统计"
+                "(date_count/symbol_count/content_checksum);全量消费走 "
+                "research_run 的 factor_series_ids 加载通道。",
+            )
+        data["dates"] = [item.isoformat() for item in record.dates]
+        data["values"] = record.values
+    return data
+
+
 async def series_get(
     app: McpAppContext,
     series_id: str,
     *,
     view: str = "summary",
 ) -> ToolEnvelope:
-    """查询因子序列;detail 附 dates + 逐日 values 全量。"""
+    """查询因子序列;detail 附 dates + 逐日 values 全量(#458:超限具名拒绝)。
+
+    载荷组装(summary 投影 + detail values)是 O(values) 的同步 CPU 段,
+    挪 ``asyncio.to_thread`` 执行,重调用不毒化事件循环。
+    """
 
     async def _do() -> dict[str, Any]:
         if view not in ("summary", "detail"):
@@ -358,12 +392,7 @@ async def series_get(
             record = await FactorSeriesRepository(session).get(series_id)
         if record is None:
             raise McpToolError("not_found", f"因子序列不存在: {series_id}")
-        data = _series_summary(record)
-        data["view"] = view
-        if view == "detail":
-            data["dates"] = [item.isoformat() for item in record.dates]
-            data["values"] = record.values
-        return data
+        return await asyncio.to_thread(_series_payload, record, view)
 
     return await run_tool(
         audit=app.audit,
@@ -438,7 +467,9 @@ def register(mcp: MCPServer) -> None:
             "(code_artifact/commit/kind)、bars 主发布锚定与研究发布联合集、窗口、"
             "decision 日数与标的数、content_checksum、质量门归档(quality)。"
             "view=summary 默认(#206 瘦身,不含逐日 values);view=detail 附 dates"
-            " 与逐日 values({date:{symbol:float|null}})全量。该序列可被 research"
+            " 与逐日 values({date:{symbol:float|null}})全量,估计超过 64MB 时"
+            "返回 payload_too_large(不静默截断,summary 不受影响;全量消费走 "
+            "research_run 的 factor_series_ids 加载通道)。该序列可被 research"
             " run 入队 payload 的 factor_series_ids 引用(换发布失配将被入队秒拒,"
             "见 series_release_mismatch)。"
         ),
