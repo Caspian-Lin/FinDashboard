@@ -20,6 +20,7 @@ import dataclasses
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -30,6 +31,7 @@ from finboard_backtest.research_run.frozen_loader import (
     _matrix_to_feature_values,
 )
 from finboard_backtest.research_run.signal_engine import _period_feature_values
+from finboard_data.factor_lab import FeatureSnapshot
 from finboard_data.factors import FactorInputBatch, FactorInputRecord
 from finboard_data.research import DailySecurityMetrics
 
@@ -41,18 +43,18 @@ _CST = ZoneInfo("Asia/Shanghai")
 
 
 def _reference_period_feature_values(
-    snapshot: object,
+    snapshot: FeatureSnapshot,
     release_id: str,
 ) -> tuple[FeatureValue, ...]:
     return tuple(
         FeatureValue(
-            symbol=observation.symbol,  # type: ignore[attr-defined]
-            feature_id=observation.feature_name,  # type: ignore[attr-defined]
-            value=observation.value,  # type: ignore[attr-defined]
+            symbol=observation.symbol,
+            feature_id=observation.feature_name,
+            value=observation.value,
             source_artifact_ids=(release_id,),
-            available_at=observation.available_at,  # type: ignore[attr-defined]
+            available_at=observation.available_at,
         )
-        for observation in snapshot.observations  # type: ignore[attr-defined]
+        for observation in snapshot.observations
     )
 
 
@@ -151,8 +153,8 @@ def _sample_observations() -> tuple[_Observation, ...]:
 class TestPeriodFeatureValuesEquivalence:
     def test_fieldwise_equals_reference(self) -> None:
         snapshot = _Snapshot(observations=_sample_observations())
-        result = _period_feature_values(snapshot, _RELEASE_ID)
-        reference = _reference_period_feature_values(snapshot, _RELEASE_ID)
+        result = _period_feature_values(cast(FeatureSnapshot, snapshot), _RELEASE_ID)
+        reference = _reference_period_feature_values(cast(FeatureSnapshot, snapshot), _RELEASE_ID)
         assert len(result) == len(reference)
         for actual, expected in zip(result, reference, strict=True):
             assert actual.symbol == expected.symbol
@@ -164,12 +166,12 @@ class TestPeriodFeatureValuesEquivalence:
 
     def test_source_artifact_ids_shared_single_instance(self) -> None:
         snapshot = _Snapshot(observations=_sample_observations())
-        result = _period_feature_values(snapshot, _RELEASE_ID)
+        result = _period_feature_values(cast(FeatureSnapshot, snapshot), _RELEASE_ID)
         assert len({id(item.source_artifact_ids) for item in result}) == 1
 
     def test_equal_available_at_shares_instance_same_tz(self) -> None:
         snapshot = _Snapshot(observations=_sample_observations())
-        result = _period_feature_values(snapshot, _RELEASE_ID)
+        result = _period_feature_values(cast(FeatureSnapshot, snapshot), _RELEASE_ID)
         by_tz_value: dict[tuple[object, datetime], list[datetime]] = {}
         for item in result:
             key = (item.available_at.tzinfo, item.available_at)
@@ -181,7 +183,7 @@ class TestPeriodFeatureValuesEquivalence:
     def test_same_instant_different_tz_not_interchanged(self) -> None:
         """跨时区同瞬间:值相等但 tzinfo 表示不同,不互换实例。"""
         snapshot = _Snapshot(observations=_sample_observations())
-        result = _period_feature_values(snapshot, _RELEASE_ID)
+        result = _period_feature_values(cast(FeatureSnapshot, snapshot), _RELEASE_ID)
         late_cst = next(
             item.available_at
             for item in result
@@ -198,7 +200,7 @@ class TestPeriodFeatureValuesEquivalence:
         assert late_cst is not late_utc
 
     def test_empty_observations(self) -> None:
-        assert _period_feature_values(_Snapshot(observations=()), _RELEASE_ID) == ()
+        assert _period_feature_values(cast(FeatureSnapshot, _Snapshot(observations=())), _RELEASE_ID) == ()
 
 
 # ---- _matrix_to_feature_values ---------------------------------------------
