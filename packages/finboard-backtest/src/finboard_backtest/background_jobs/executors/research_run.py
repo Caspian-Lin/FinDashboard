@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -43,6 +44,7 @@ from finboard_backtest.background_jobs.contracts import (
     truncate_summary,
 )
 from finboard_backtest.research_run import (
+    REPLAYABLE_SOURCE_STATUSES,
     ResearchRunCoordinator,
     ResearchRunManifest,
     ResearchRunStatus,
@@ -121,6 +123,11 @@ class ResearchRunExecutor:
         → execute 短路」挡住)。对 COMPLETED 源 run 走普通 ``execute`` 是
         瞬时 no-op(终态直接返回),采样不到计算 —— 这正是需要本方法的原因。
         源状态 CANCELLED / 不存在等由 replay 守卫 / store 具名拒绝。
+
+        issue #455:适配器以「新 run 身份」的 manifest 预构造(身份字段与
+        coordinator.replay 的 replace 同构)—— #306 加载期打断探针闭包按
+        构造期 manifest.run_id 轮询,按源 manifest 构造会让重放被自己的
+        探针在首块边界杀死(源 run 已终态 ≠ running)。
         """
 
         from finboard_backtest.research_run import ResearchRunConflictError
@@ -136,7 +143,43 @@ class ResearchRunExecutor:
                     context={"run_id": source_run_id},
                 )
             try:
-                adapter = self._adapter_factory(record.manifest)
+                # 幂等键 = 可读时间戳 + uuid 后缀:同一时钟粒度内的两次诊断重放
+                # 也不会撞键(撞键会让 create_or_get 返回已 COMPLETED 的新 run,
+                # 第二次采样扑空;Windows datetime.now 粒度可达 ~15ms)。
+                # issue #455:幂等键 / 新 run_id 必须在适配器构造**之前**生成
+                # —— #306 加载期打断探针在适配器工厂闭包内按 manifest.run_id
+                # 轮询 run status(signal_engine.build_run_interrupt_probe,
+                # 构造于 build_signal_engine_adapter_factory 的 _factory)。
+                # 此前适配器按源 manifest 构造,探针闭包捕获的是**源 run id**;
+                # coordinator.replay 新建 run 后,探针看到源 run 终态 status
+                # != running,重放在加载期首块边界被自己的探针杀死(实测
+                # 0.515s 自打断,火焰图只采到进程启动栈)。
+                stamp = (
+                    f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+                )
+                idempotency_key = f"job-flamegraph:{source_run_id}:{stamp}"
+                digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
+                new_run_id = f"RR-{digest}"
+                requested_by = "job-flamegraph"
+                if record.status in REPLAYABLE_SOURCE_STATUSES:
+                    # #455:按 coordinator.replay 的同构字段集预声明新 run 身份,
+                    # 适配器(及其探针闭包)以「新建 replay run」构造;coordinator
+                    # 再 replace 一次得到逐字段相同的 manifest。仅身份字段不同,
+                    # 冻结输入与 result checksum 零影响(replay_source_status
+                    # 不入 input_checksum,#305)。非可重放源(CANCELLED 等)
+                    # 不预替换 —— 交给 coordinator.replay 既有守卫具名拒绝,
+                    # 错误口径与常规通道逐字节一致。
+                    adapter_manifest = replace(
+                        record.manifest,
+                        run_id=new_run_id,
+                        idempotency_key=idempotency_key,
+                        requested_by=requested_by,
+                        replay_of_run_id=source_run_id,
+                        replay_source_status=record.status.value,
+                    )
+                else:
+                    adapter_manifest = record.manifest
+                adapter = self._adapter_factory(adapter_manifest)
             except Exception as exc:
                 raise ExecutorError(
                     code=getattr(exc, "code", type(exc).__name__),
@@ -144,18 +187,12 @@ class ResearchRunExecutor:
                     retryable=False,
                 ) from exc
             coordinator = ResearchRunCoordinator(store)
-            # 幂等键 = 可读时间戳 + uuid 后缀:同一时钟粒度内的两次诊断重放
-            # 也不会撞键(撞键会让 create_or_get 返回已 COMPLETED 的新 run,
-            # 第二次采样扑空;Windows datetime.now 粒度可达 ~15ms)。
-            stamp = f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
-            idempotency_key = f"job-flamegraph:{source_run_id}:{stamp}"
-            digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:24]
             try:
                 new_record = await coordinator.replay(
                     source_run_id=source_run_id,
-                    new_run_id=f"RR-{digest}",
+                    new_run_id=new_run_id,
                     idempotency_key=idempotency_key,
-                    requested_by="job-flamegraph",
+                    requested_by=requested_by,
                     adapter=adapter,
                 )
             except ResearchRunConflictError as exc:

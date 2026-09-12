@@ -503,6 +503,10 @@ class ResearchRunCoordinator:
         # cancelled 是显式用户意图,仍拒绝;completed 重放行为不变。
         if source.status not in REPLAYABLE_SOURCE_STATUSES:
             raise ResearchRunConflictError(replay_guard_error(source.status))
+        # 调用方契约(issue #455):``adapter`` 必须以与本 replace 同身份的
+        # manifest 预构造(run_id 等身份字段一致)—— #306 加载期打断探针按
+        # 适配器构造期 manifest.run_id 轮询,源身份适配器会在加载期把重放
+        # 误判为「外部打断」。唯一调用方 execute_replay 已按同构字段集预替换。
         manifest = replace(
             source.manifest,
             run_id=new_run_id,
