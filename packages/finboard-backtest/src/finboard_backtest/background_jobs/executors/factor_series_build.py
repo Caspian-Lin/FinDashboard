@@ -53,7 +53,7 @@ import hashlib
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -261,6 +261,17 @@ def _enrich_container_failure(
         "或将因子改写为 compute_series 在头部产出缺测。"
     )
     return ExecutorError(code=code, summary=hint, retryable=getattr(exc, "retryable", False))
+
+
+def _jsonable(value: Any) -> Any:
+    """递归把 date/datetime 转 ISO 字符串(JSONB 归档兜底;psycopg 不收 date)。"""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def audit_truncation_points(dates: list[date]) -> list[date]:
@@ -927,8 +938,12 @@ def _record_from_result(
         }
     quality = getattr(result, "quality", None)
     if quality is not None and not isinstance(quality, dict):
-        # #359 产出 SeriesQualityReport dataclass,归档为普通 dict
-        quality = asdict(quality)
+        # #359 产出 SeriesQualityReport dataclass,归档为普通 dict:优先其
+        # 自带 ``as_dict()``(worst_day 已 ISO 化,psycopg JSONB 可序列化);
+        # 未知 dataclass 兜底 asdict + date/datetime 递归转 ISO —— JSONB
+        # 序列化不接受 date 对象(#463 预置因子首次走到落库时暴露)。
+        as_dict = getattr(quality, "as_dict", None)
+        quality = as_dict() if callable(as_dict) else _jsonable(asdict(quality))
     if catalog_declaration:
         frozen = {"catalog_declaration": dict(catalog_declaration)}
         quality = {**(quality or {}), **frozen}

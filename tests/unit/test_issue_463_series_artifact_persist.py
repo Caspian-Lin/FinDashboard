@@ -122,3 +122,54 @@ class TestPersistTransform:
         # 读取端(repo _record_from_row 同构):LazySeriesValues 逐值等值
         values = read_series_values(tmp_path, meta.relpath, meta.checksum)
         assert values == dict(inline.values)
+
+    def test_record_from_result_quality_json_safe(self) -> None:
+        """预置因子 SeriesQualityReport.worst_day(date)→ 落库 dict 已 ISO 化。
+
+        #463 实测回归:预置因子首次走通审计到落库时,``asdict()`` 保留的
+        ``date`` 对象让 psycopg JSONB 序列化炸 TypeError,整批构建在审计
+        通过后全灭。
+        """
+        from dataclasses import dataclass as _dc
+        from dataclasses import field as _field
+
+        from finboard_backtest.background_jobs.executors.factor_series_build import (
+            _record_from_result,
+        )
+        from finboard_backtest.research_sandbox.factor_publish import (
+            SeriesQualityReport,
+        )
+
+        @_dc
+        class _Result:
+            dates: tuple[date, ...] = ()
+            values: dict[str, dict[str, float | None]] = _field(default_factory=dict)
+            quality: object = None
+            run_id: str | None = None
+
+        report = SeriesQualityReport(
+            passed=True,
+            n_dates=2,
+            universe_size=2,
+            nan_ratio=0.0,
+            coverage=1.0,
+            worst_day=date(2024, 1, 31),
+            worst_day_nan_ratio=0.0,
+            max_nan_ratio=0.5,
+            min_coverage=0.5,
+        )
+        import json as _json
+
+        kwargs = _kwargs()
+        kwargs.pop("dates")
+        record = _record_from_result(
+            _Result(
+                dates=(date(2024, 1, 31), date(2024, 2, 29)),
+                values=_values(),
+                quality=report,
+            ),
+            **kwargs,
+        )
+        assert isinstance(record.quality, dict)
+        assert record.quality["worst_day"] == "2024-01-31"
+        _json.dumps(record.quality)  # 不抛即 JSONB 可序列化
