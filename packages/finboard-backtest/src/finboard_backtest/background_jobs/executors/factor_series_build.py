@@ -468,6 +468,41 @@ class FactorSeriesBuildExecutor:
                 error_summary=audit_failure,
             )
 
+        # issue #463:values 落 canonical parquet 工件(sha256 锚定),
+        # DB 行只留 relpath + checksum;record 由行内模式换为工件模式
+        # (审计已完成,record 此后只读 dates/quality/source_run_id/series_key)。
+        import asyncio as _asyncio
+
+        from finboard_data.factor_series_store import (
+            resolve_artifact_root,
+            write_series_artifact,
+        )
+        from finboard_persistence import FactorSeriesRecord
+
+        artifact_root = resolve_artifact_root(
+            getattr(settings, "factor_series_artifact_root", None)
+        )
+        meta = await _asyncio.to_thread(
+            write_series_artifact,
+            artifact_root,
+            record.series_key,
+            record.values,
+        )
+        record = FactorSeriesRecord.build_artifact(
+            code_artifact=payload.name,
+            code_commit=commit,
+            kind=payload.kind,
+            release_id=payload.release_id,
+            dataset_release_ids=payload.dataset_release_ids,
+            params=payload.params or {},
+            window_start=payload.window_start,
+            window_end=payload.window_end,
+            dates=record.dates,
+            quality=record.quality,
+            source_run_id=record.source_run_id,
+            artifact_relpath=meta.relpath,
+            artifact_checksum=meta.checksum,
+        )
         async with self._session_maker() as session:
             from finboard_persistence import FactorSeriesRepository
 

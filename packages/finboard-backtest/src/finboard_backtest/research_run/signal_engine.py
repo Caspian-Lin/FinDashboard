@@ -2706,6 +2706,20 @@ def build_signal_engine_adapter_factory(
         # 整行(values JSON 可达数十 MB)+ 全量反序列化,逐期 x 逐序列的重复
         # 读取此前是加载期主导热点 —— memo 后每 run 每序列至多一次 DB 读取。
         # 缓存生命周期 = 闭包生命周期 = 单次 run 适配器,无跨 run 共享。
+        # issue #463:工件根目录随 settings 传递(缺省/解析失败回退 repo
+        # 默认);工件行的 record.values 为惰性映射,单日 get 首访才读
+        # parquet 并验 sha256(同步段毫秒~百毫秒级,加载期一次性)。
+        settings_artifact_root: str | Path | None = None
+        if settings_factory is not None:
+            try:
+                candidate = getattr(
+                    settings_factory(), "factor_series_artifact_root", None
+                )
+            except Exception:
+                candidate = None
+            if isinstance(candidate, (str, Path)):
+                settings_artifact_root = candidate
+
         series_memo: dict[str, object] = {}
 
         async def _series_provider(series_id: str) -> object:
@@ -2716,7 +2730,13 @@ def build_signal_engine_adapter_factory(
             from finboard_persistence import FactorSeriesRepository
 
             async with session_maker() as session:
-                record = await FactorSeriesRepository(session).get(series_id)
+                # settings 未提供 root 时按旧签名构造(注入的替身 repo 兼容)
+                repo = (
+                    FactorSeriesRepository(session, artifact_root=settings_artifact_root)
+                    if settings_artifact_root is not None
+                    else FactorSeriesRepository(session)
+                )
+                record = await repo.get(series_id)
             if record is not None:
                 series_memo[series_id] = record
                 logger.debug("research_run.series_record_created", series_id=series_id)

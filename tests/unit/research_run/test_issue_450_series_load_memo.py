@@ -33,7 +33,7 @@ import re
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -299,7 +299,9 @@ def test_read_path_skips_content_checksum_recompute(
 
     record = _series_record("mom450", offset=0.5)
     counter = _counting_checksum(monkeypatch)
-    loaded = FactorSeriesRepository._record_from_row(_row_from_record(record))
+    loaded = FactorSeriesRepository(cast(Any, None))._record_from_row(
+        _row_from_record(record)
+    )
 
     assert counter["count"] == 0
     assert loaded.verify_content_checksum is False
@@ -320,7 +322,7 @@ def test_series_key_tamper_still_rejected_on_read(
     counter = _counting_checksum(monkeypatch)
 
     with pytest.raises(ValueError, match="series_key 与内容寻址规则不一致"):
-        FactorSeriesRepository._record_from_row(row)
+        FactorSeriesRepository(cast(Any, None))._record_from_row(row)
     assert counter["count"] == 0
 
 

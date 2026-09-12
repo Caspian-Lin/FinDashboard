@@ -29,7 +29,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import date
+from pathlib import Path
 from typing import Any, cast
 
 from mcp.server import MCPServer
@@ -43,6 +45,12 @@ from finboard_data.factor_lab import (
     PREDEFINED_FACTOR_KIND,
     USER_FACTOR_KIND,
     series_factor_name,
+)
+from finboard_data.factor_series_store import (
+    artifact_file_size,
+    read_series_symbols,
+    read_series_values,
+    resolve_artifact_root,
 )
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
@@ -90,11 +98,27 @@ def _payload_checksum(payload: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def _series_summary(record: Any) -> dict[str, Any]:
-    """series 头部投影(#206 瘦身:不含逐日 values)。"""
-    symbols = sorted(
-        {symbol for day in record.values.values() for symbol in day}
-    )
+def _series_summary(record: Any, *, artifact_root: Path) -> dict[str, Any]:
+    """series 头部投影(#206 瘦身:不含逐日 values)。
+
+    工件行(#463)的标的集走 symbol 列投影(不物化全量 values),并附
+    工件路径与字节数;行内旧行沿 values 遍历。
+    """
+    if getattr(record, "artifact_relpath", None):
+        symbols = set(
+            read_series_symbols(
+                artifact_root,
+                str(record.artifact_relpath),
+                str(record.content_checksum),
+            )
+        )
+        artifact_info: dict[str, Any] | None = {
+            "relpath": str(record.artifact_relpath),
+            "bytes": artifact_file_size(artifact_root, str(record.artifact_relpath)),
+        }
+    else:
+        symbols = {symbol for day in record.values.values() for symbol in day}
+        artifact_info = None
     return cast(
         dict[str, Any],
         to_jsonable(
@@ -115,6 +139,7 @@ def _series_summary(record: Any) -> dict[str, Any]:
                 "date_count": len(record.dates),
                 "symbol_count": len(symbols),
                 "content_checksum": record.content_checksum,
+                "artifact": artifact_info,
                 "quality": record.quality,
                 "source_run_id": record.source_run_id,
                 "created_at": record.created_at,
@@ -375,13 +400,27 @@ async def build_enqueue(
     )
 
 
-def _series_payload(record: FactorSeriesRecord, view: str) -> dict[str, Any]:
-    """线程池内组装 series 查询载荷(summary 投影遍历全量 values 求标的集;
-    detail 附全量 values,#458)。detail 估计超限时具名拒绝,不静默截断。"""
-    data = _series_summary(record)
+def _series_payload(
+    record: FactorSeriesRecord, view: str, artifact_root: Path
+) -> dict[str, Any]:
+    """线程池内组装 series 查询载荷(summary 投影走标的集;detail 附全量
+    values,#458)。detail 估计超限时具名拒绝,不静默截断。
+
+    工件行(#463)的 detail values 经 ``read_series_values`` 校验 sha256
+    后物化(与旧行内 JSONB 解析同成本级);summary 不物化。
+    """
+    data = _series_summary(record, artifact_root=artifact_root)
     data["view"] = view
     if view == "detail":
-        estimated = len(str(record.values))
+        if getattr(record, "artifact_relpath", None):
+            values: Mapping[str, Mapping[str, float | None]] = read_series_values(
+                artifact_root,
+                str(record.artifact_relpath),
+                str(record.content_checksum),
+            )
+        else:
+            values = record.values
+        estimated = len(str(values))
         if estimated > SERIES_DETAIL_MAX_ESTIMATED_BYTES:
             estimated_mb = estimated / (1024 * 1024)
             limit_mb = SERIES_DETAIL_MAX_ESTIMATED_BYTES / (1024 * 1024)
@@ -394,7 +433,9 @@ def _series_payload(record: FactorSeriesRecord, view: str) -> dict[str, Any]:
                 "research_run 的 factor_series_ids 加载通道。",
             )
         data["dates"] = [item.isoformat() for item in record.dates]
-        data["values"] = record.values
+        data["values"] = {
+            day: dict(day_values) for day, day_values in values.items()
+        }
     return data
 
 
@@ -417,7 +458,10 @@ async def series_get(
             record = await FactorSeriesRepository(session).get(series_id)
         if record is None:
             raise McpToolError("not_found", f"因子序列不存在: {series_id}")
-        return await asyncio.to_thread(_series_payload, record, view)
+        artifact_root = resolve_artifact_root(
+            getattr(app.settings, "factor_series_artifact_root", None)
+        )
+        return await asyncio.to_thread(_series_payload, record, view, artifact_root)
 
     return await run_tool(
         audit=app.audit,
@@ -494,12 +538,14 @@ def register(mcp: MCPServer) -> None:
             "查询内容寻址因子序列(research_factor_series,FS- 前缀):三向审计引用"
             "(code_artifact/commit/kind)、bars 主发布锚定与研究发布联合集、窗口、"
             "decision 日数与标的数、content_checksum、质量门归档(quality)。"
-            "view=summary 默认(#206 瘦身,不含逐日 values);view=detail 附 dates"
-            " 与逐日 values({date:{symbol:float|null}})全量,估计超过 64MB 时"
-            "返回 payload_too_large(不静默截断,summary 不受影响;全量消费走 "
-            "research_run 的 factor_series_ids 加载通道)。该序列可被 research"
-            " run 入队 payload 的 factor_series_ids 引用(换发布失配将被入队秒拒,"
-            "见 series_release_mismatch)。"
+            "#463 起新序列 values 落 canonical parquet 工件(content_checksum = "
+            "工件文件 sha256,summary 附 artifact 路径与字节数),旧行内 JSONB 行"
+            "不受影响。view=summary 默认(#206 瘦身,不含逐日 values);view=detail "
+            "附 dates 与逐日 values({date:{symbol:float|null}})全量(工件行经 "
+            "sha256 校验后物化),估计超过 64MB 时返回 payload_too_large(不静默"
+            "截断,summary 不受影响;全量消费走 research_run 的 factor_series_ids "
+            "加载通道)。该序列可被 research run 入队 payload 的 factor_series_ids "
+            "引用(换发布失配将被入队秒拒,见 series_release_mismatch)。"
         ),
     )
     async def _get(

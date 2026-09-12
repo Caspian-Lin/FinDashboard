@@ -148,6 +148,10 @@ class Settings(BaseSettings):
     # 单次提交文件数 / 单文件字节数上限(静态校验,纵深防御第一层)。
     research_code_max_files: int = Field(default=32, ge=1)
     research_code_max_file_bytes: int = Field(default=262144, ge=1024)
+    # 因子序列 parquet 工件根目录(issue #463):research_factor_series 的
+    # values 改存工件(content_checksum = 文件 sha256)。相对路径按进程
+    # 工作目录解析;读取端(repo)缺省回退同一默认值。
+    factor_series_artifact_root: str = "data_cache/factor_series"
 
     # ---- 研究代码沙箱(issue #216)----
     # 一次性 Docker 容器执行 agent 因子代码(单形态:开发/生产统一 Docker,
