@@ -431,6 +431,10 @@ class _FakeReleaseRow:
     def __init__(self) -> None:
         self.dataset_kind = ReleaseDatasetKind.BARS
         self.release_checksum = "c" * 64
+        # issue #460:_require_releases 返回主发布起点(容器失败零预热诊断)
+        from datetime import date
+
+        self.start_date = date(2022, 1, 4)
 
 
 class _FakeReleaseRepo:
@@ -533,8 +537,13 @@ class TestExecutorPredefinedKind:
     async def test_end_to_end_with_real_engine(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
-        """真实引擎 + 真实审计 + Fake 持久层:构建 → 审计 → record。"""
+        """真实引擎 + 真实审计 + Fake 持久层:构建 → 审计 → record(#463 工件落盘)。"""
         _FakeSeriesRepo.upserted = None
+        # issue #463:values 落 canonical parquet 工件,根目录指到测试临时区
+        artifact_root = str(tmp_path / "artifacts")
+        monkeypatch.setattr(
+            _Settings, "factor_series_artifact_root", artifact_root, raising=False
+        )
 
         async def runner(spec: Any) -> Any:
             return await run_predefined_factor_series(
@@ -570,6 +579,19 @@ class TestExecutorPredefinedKind:
         )
         assert record.dates == expected_dates
         assert record.quality is not None
+        # issue #463:落库 record 为工件模式 —— values 不再行内,工件文件
+        # 经 sha256 锚定,读回的逐日截面与决策日集一致
+        assert record.artifact_relpath is not None
+        from finboard_data.factor_series_store import read_series_values
+
+        values = read_series_values(
+            artifact_root, record.artifact_relpath, record.content_checksum
+        )
+        assert set(values) == {day.isoformat() for day in expected_dates}
+        assert all(
+            isinstance(day_values, dict) and day_values
+            for day_values in values.values()
+        )
 
     async def test_sandbox_gate_skipped_but_unknown_factor_rejected(
         self, monkeypatch: pytest.MonkeyPatch

@@ -309,8 +309,16 @@ def _symbol_series_from_table(
 
     available_at 升序是因子输入契约;稳定排序使截断变体(行子序列)
     保序 —— 前缀不变性结构性成立。缺测数值行归一为 NaN。
+
+    唯一值驻留(issue #462):date / available_at / symbol 列经
+    dictionary 编码后唯一对象只构造一次,逐行 tuple 持共享指针 ——
+    全历史窗口(~1500 万行)此前逐行物化 date / datetime / str 对象
+    (~3GB 且构造慢);唯一交易日 / 收盘时刻仅数千个,驻留后内存
+    ~600MB。values 列 Arrow→numpy 直取,免逐行 Python float 瞬态。
+    行序、切片语义与逐行物化逐值一致。
     """
     import numpy as np
+    import pyarrow as pa
     import pyarrow.compute as pc
 
     indices = pc.sort_indices(
@@ -321,53 +329,59 @@ def _symbol_series_from_table(
         ],
     )
     ordered = table.take(indices)
-    symbols = np.asarray(ordered.column("symbol").to_pylist(), dtype=object)
-    dates = ordered.column(date_column).to_pylist()
-    if "available_at" in ordered.column_names:
-        available_micros = np.asarray(
-            ordered.column("available_at").cast("int64").to_pylist(),
-            dtype=np.int64,
+
+    def _interned_objects(column: Any) -> tuple[np.ndarray, np.ndarray]:
+        """列 → (唯一对象 object 数组, 逐行字典下标 int 数组)。"""
+        combined = column.combine_chunks()
+        array = combined.chunk(0) if isinstance(combined, pa.ChunkedArray) else combined
+        encoded = pc.dictionary_encode(array)
+        return (
+            np.asarray(encoded.dictionary.to_pylist(), dtype=object),
+            np.asarray(encoded.indices),
         )
+
+    sym_unique, sym_idx = _interned_objects(ordered.column("symbol"))
+    date_unique, date_idx = _interned_objects(ordered.column(date_column))
+    if "available_at" in ordered.column_names:
+        avail_unique, avail_idx = _interned_objects(ordered.column("available_at"))
     else:
         # 无逐行 available_at(理论不可达:窗口挂载 v3 恒带该列)按
-        # 业务日期日终回退(与 kit D1 回退语义一致)。
-        available_micros = np.asarray(
+        # 业务日期日终回退(与 kit D1 回退语义一致);逐唯一日期构造。
+        avail_unique = np.asarray(
             [
-                int(
-                    datetime.combine(
-                        day, dt_time(23, 59, 59, 999999), tzinfo=UTC
-                    ).timestamp()
-                    * 1_000_000
-                )
-                for day in dates
+                datetime.combine(day, dt_time(23, 59, 59, 999999), tzinfo=UTC)
+                for day in date_unique.tolist()
             ],
-            dtype=np.int64,
+            dtype=object,
         )
+        avail_idx = date_idx
+
     field_column = ordered.column(field)
     if field_column.type == _null_type():
         # 全 None 值列(上游该字段整体缺失)在 dict 推断 schema 下为 null
         # 类型,统一 float64 归一(与 #371 全 None 列口径一致)。
         field_column = field_column.cast("float64")
-    values = np.asarray(
-        field_column.fill_null(float("nan")).to_pylist(),
-        dtype=np.float64,
-    )
-    boundaries = np.unique(symbols, return_index=True)
+    elif field_column.type != pa.float64():
+        field_column = field_column.cast("float64")
+    values = np.asarray(field_column.fill_null(float("nan")).to_numpy())
+
+    # 行已按 (symbol, available_at) 稳定排序 → symbol 块连续且字符串
+    # 升序;差分取块边界,O(n),免全量 np.unique 重排。
+    if sym_idx.size == 0:
+        return {}
+    boundaries = np.flatnonzero(np.diff(sym_idx)) + 1
+    starts = np.concatenate(([0], boundaries))
+    stops = np.concatenate((boundaries, [sym_idx.size]))
+
     series_by_symbol: dict[str, SymbolSeries] = {}
-    for position, symbol in enumerate(boundaries[0].tolist()):
-        start = int(boundaries[1][position])
-        stop = (
-            int(boundaries[1][position + 1])
-            if position + 1 < len(boundaries[0])
-            else symbols.size
-        )
-        series_by_symbol[str(symbol)] = SymbolSeries(
-            dates=tuple(dates[start:stop]),
+    for block in range(starts.size):
+        start = int(starts[block])
+        stop = int(stops[block])
+        symbol = str(sym_unique[int(sym_idx[start])])
+        series_by_symbol[symbol] = SymbolSeries(
+            dates=tuple(date_unique[date_idx[start:stop]]),
             values=values[start:stop],
-            available_at=tuple(
-                datetime.fromtimestamp(micros / 1_000_000, tz=UTC)
-                for micros in available_micros[start:stop]
-            ),
+            available_at=tuple(avail_unique[avail_idx[start:stop]]),
         )
     return series_by_symbol
 

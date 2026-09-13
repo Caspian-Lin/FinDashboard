@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from finboard_app.config import Settings
+from finboard_app.config import Settings, postgres_connect_args
 from finboard_broker import BrokerAdapter, create_broker
 from finboard_persistence import (
     AccountRepository,
@@ -104,6 +104,9 @@ def build_kernel_components(settings: Settings) -> KernelComponents:
         settings.db_url,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
+        # #450:WSL2 NAT 会把池中空闲连接静默黑洞化(无 RST),pre_ping 的
+        # ping 自身也会挂死;keepalive 让死连接 ~60s 内显式报错。
+        connect_args=postgres_connect_args(settings.db_url),
     )
     smaker = session_factory(engine)
     creds = broker_credentials(settings)

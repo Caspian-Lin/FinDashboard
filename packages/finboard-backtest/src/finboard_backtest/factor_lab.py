@@ -1062,32 +1062,31 @@ def _snapshot_definition_neutralization(feature_name: str) -> tuple[str, ...]:
         return ()
 
 
-def _build_price_observations(
+def price_observations_from_closes(
     *,
     source: str,
     source_version: str,
     symbol: str,
     market: Market,
     asset_class: AssetClass,
-    columns: CloseHistoryColumns,
+    closes: np.ndarray,
+    last_timestamp: datetime | None,
+    last_available_at: datetime,
     momentum_lookback: int,
     volatility_windows: tuple[int, ...],
 ) -> list[FeatureObservation]:
-    """把单个标的的列式 PIT close(#300)转换为价格特征观测。
+    """价格特征观测数学段(close 序列尾部窗口的纯函数,issue #450 追续)。
 
-    与对象路径逐值等价:``closes`` float64 直出与
-    ``np.asarray([float(item.close) for item in points])`` 逐值相等,
-    ``last_timestamp`` / ``last available_at`` 即旧路径 ``points[-1]`` 的
-    timestamp / available_at,特征数学段不变。
+    从 :func:`_build_price_observations` 抽出:输入收窄为 close 序列 +
+    末根 timestamp + 末根 available_at 三个原语,使 close 矩阵切片(#439)
+    能直接供数,跳过逐期整文件重读;特征数学(momenta / 滚动窗口std /
+    下行波动)只依赖序列尾部的连续元素,尾部切片与全序列计算逐位等值。
+    ``closes`` 为空返回 ``[]``(与列式空表同语义)。
     """
-
-    closes = columns.closes
     if closes.size == 0:
         return []
+    assert last_timestamp is not None  # 非空序列必有末根 timestamp(原列式路径语义)
     returns = np.diff(closes) / closes[:-1]
-    last_timestamp = columns.last_timestamp
-    last_available_at = columns.available_at[-1]
-    assert last_timestamp is not None
 
     def _observation(feature_name: str, value: float) -> FeatureObservation:
         return FeatureObservation(
@@ -1130,6 +1129,43 @@ def _build_price_observations(
                 )
             )
     return observations
+
+
+def _build_price_observations(
+    *,
+    source: str,
+    source_version: str,
+    symbol: str,
+    market: Market,
+    asset_class: AssetClass,
+    columns: CloseHistoryColumns,
+    momentum_lookback: int,
+    volatility_windows: tuple[int, ...],
+) -> list[FeatureObservation]:
+    """把单个标的的列式 PIT close(#300)转换为价格特征观测。
+
+    与对象路径逐值等值:``closes`` float64 直出与
+    ``np.asarray([float(item.close) for item in points])`` 逐值相等,
+    ``last_timestamp`` / ``last available_at`` 即旧路径 ``points[-1]`` 的
+    timestamp / available_at。数学段委托 :func:`price_observations_from_closes`
+    (矩阵切片路径共用同一实现,避免双源漂移)。
+    """
+
+    closes = columns.closes
+    if closes.size == 0:
+        return []
+    return price_observations_from_closes(
+        source=source,
+        source_version=source_version,
+        symbol=symbol,
+        market=market,
+        asset_class=asset_class,
+        closes=closes,
+        last_timestamp=columns.last_timestamp,
+        last_available_at=columns.available_at[-1],
+        momentum_lookback=momentum_lookback,
+        volatility_windows=volatility_windows,
+    )
 
 
 def _init_price_feature_process(
@@ -1708,6 +1744,30 @@ async def build_price_feature_snapshot(
     ]
     if not observations:
         raise FactorAnalysisError("冻结发布在决策时点没有足够数据计算价格特征")
+    windows = {"momentum": momentum_lookback, "downside_volatility": 60}
+    windows.update(
+        {f"volatility_{window}d": window for window in volatility_windows}
+    )
+    return _assemble_price_snapshot_from_observations(
+        release=release,
+        decision_at=decision_at,
+        code_version=code_version,
+        observations=observations,
+        momentum_lookback=momentum_lookback,
+        volatility_windows=volatility_windows,
+    )
+
+
+def _assemble_price_snapshot_from_observations(
+    *,
+    release: ResearchDatasetRelease,
+    decision_at: datetime,
+    code_version: str,
+    observations: list[FeatureObservation],
+    momentum_lookback: int,
+    volatility_windows: tuple[int, ...],
+) -> FeatureSnapshot:
+    """按发布元数据装配价格特征快照(列式/矩阵两条产出路径共用,防漂移)。"""
     windows = {"momentum": momentum_lookback, "downside_volatility": 60}
     windows.update(
         {f"volatility_{window}d": window for window in volatility_windows}

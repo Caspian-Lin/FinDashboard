@@ -159,6 +159,9 @@ def test_factor_series_build_kind_concurrency_is_two() -> None:
 
     assert _KIND_CONCURRENCY["factor_series_build"] == 2
     assert _KIND_CONCURRENCY["research_code_run"] == 1
+    # 2026-09-13 全市场 556 期双 run 并发把 40GB 宿主推到 98.8%:research_run
+    # 串行化(#424 同理由)。
+    assert _KIND_CONCURRENCY["research_run"] == 1
 
 
 # ------------------------------------------------------------- 挂载读取并行

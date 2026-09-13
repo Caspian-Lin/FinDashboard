@@ -32,9 +32,10 @@ manifest 冻结多个 release 时,一个 bars 主发布 + 若干研究数据发�
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection, Mapping, Sequence
+import contextlib
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
@@ -44,6 +45,7 @@ from finboard_backtest.portfolio.contracts import AssetLotInfo
 from finboard_backtest.research_run.contracts import (
     FeatureValue,
     FrozenArtifactRef,
+    ResearchRunInterruptedError,
     ResearchRunManifest,
     UniverseCandidate,
 )
@@ -52,7 +54,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
     from finboard_backtest.factor_lab import PriceFeatureProcessPool
-    from finboard_data.factor_lab import FeatureSnapshot
+    from finboard_data.factor_lab import FeatureObservation, FeatureSnapshot
     from finboard_data.factors import FactorInputBatch, FactorInputRecord
     from finboard_data.releases import (
         FrozenReleaseProvider,
@@ -106,6 +108,66 @@ class FactorSeriesProvider(Protocol):
     """按 series_id 读取因子序列工件的回调(注入点,issue #360)。"""
 
     async def __call__(self, series_id: str) -> FactorSeriesRecordLike | None: ...
+
+
+#: 预计算段进度回调(issue #450):phase 文本 → None。实现方(适配器工厂,
+#: 见 ``build_run_phase_reporter``)尽力而为写 job 的 phase 字段,失败不阻断
+#: 加载;本模块只在预建循环内按节流调用,done/total 数值列不动(#308 口径)。
+PrecomputeProgressReporter = Callable[[str], Awaitable[None]]
+#: 预计算段的取消探针(#450 追续):每次进度打点时轮询 run status /
+#: job cancel_requested,被取消即抛 ResearchRunInterruptedError(实现方
+#: :func:`build_run_cancel_probe`,毫秒级只读查询)。
+PrecomputeCancelProbe = Callable[[], Awaitable[None]]
+
+#: 预计算进度帧节流(issue #450):逐标的完成计数每达到该步长上报一帧
+#: (首帧与末帧强制)。全市场 5534 标的 x close/daily 两段 ≈ 每段 ~22 帧,
+#: DB 写入量可忽略;不节流的逐标的写入既无必要也不可读。
+_PRECOMPUTE_PROGRESS_STEP = 256
+
+
+def _make_precompute_ticker(
+    progress: PrecomputeProgressReporter | None,
+    label: str,
+    total: int,
+    cancel_probe: PrecomputeCancelProbe | None = None,
+) -> Callable[[], Awaitable[None]]:
+    """构造逐标的完成打点器(issue #450):按节流上报预计算进度帧。
+
+    每个标的构建完成后调用返回的打点器一次;``done`` 为 1、达到步长或等于
+    ``total`` 时上报 ``research_run:decision_load precompute <label>
+    <done>/<total>``(其余静默返回)。``progress`` 为 None 且无
+    ``cancel_probe`` 或 total 为 0 时返回 no-op,零开销。上报异常一律吞掉
+    —— 进度是纯可观测性,不改变预建结果与失败语义。
+
+    issue #450 追续:``cancel_probe`` 非空时在每次上报点(步长节流,全市场
+    ≈ 每 200ms 一次)先轮询取消/run 状态,被取消即抛
+    :class:`ResearchRunInterruptedError` 中止预建——预计算段此前是取消
+    检查的空白区(整段 3-5 分钟只报进度不查取消),取消信号要等首个分块
+    边界才被看见。探针异常**不吞**(与进度上报相反)。
+    """
+    if (progress is None and cancel_probe is None) or total <= 0:
+
+        async def _noop() -> None:
+            return None
+
+        return _noop
+
+    done = 0
+
+    async def _tick() -> None:
+        nonlocal done
+        done += 1
+        if done != 1 and done != total and done % _PRECOMPUTE_PROGRESS_STEP != 0:
+            return
+        if cancel_probe is not None:
+            await cancel_probe()
+        if progress is not None:
+            with contextlib.suppress(Exception):
+                await progress(
+                    f"research_run:decision_load precompute {label} {done}/{total}"
+                )
+
+    return _tick
 
 
 #: 逐标的并发加载的信号量上限(实际磁盘读仍受 provider 内 ParquetCache
@@ -204,6 +266,9 @@ class SymbolCloseHistory:
     #: available_at 序列的时区属性(取构建期首元素;查询 as_of 的
     #: naive/aware 与之不匹配时保持旧直接比较的 TypeError)
     available_tz_aware: bool = False
+    #: available_at 的时区(构建期首元素原样保留;末根观测时点按需重建时
+    #: 保证与列式路径同一 instant + 同一 wall-clock 表示,#450 追续)
+    available_tz: tzinfo | None = None
     #: 可选携带的 open 平行序列(issue #336):仅 timing=next_open 的 run 在
     #: 矩阵预建时附带,与 close 严格同长;``None`` 表示未携带(close-only
     #: 矩阵),open 查询由调用方回退逐期对象路径读取。
@@ -243,8 +308,25 @@ class SymbolCloseHistory:
             date_days=day_numbers,
             closes=np.asarray(closes, dtype=np.float64),
             available_tz_aware=tz_aware,
+            available_tz=available_at[0].tzinfo if available_at else None,
             opens=None if opens is None else np.asarray(opens, dtype=np.float64),
         )
+
+    def available_at_at(self, index: int) -> datetime:
+        """重建 ``index`` 处 bar 的 available_at(与构建期值逐值相等)。
+
+        epoch 微秒整数精确逆变换(``_datetime_epoch_micros`` 的逆):aware
+        序列从 UTC 锚点出发再 astimezone 到保留时区(同一 instant + 同一
+        wall-clock 表示);naive 序列按其「即 UTC」锚定语义原样还原。
+        供矩阵切片路径构造特征观测的观测时点(#450 追续)。
+        """
+        micros = int(self.available_at_us[index])
+        tz = self.available_tz
+        if tz is None:
+            return datetime(1970, 1, 1) + timedelta(microseconds=micros)
+        return (
+            datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=micros)
+        ).astimezone(tz)
 
     def visible_index(self, as_of: datetime) -> int:
         """``as_of`` 时点可见最后一根的索引;-1 表示无可见 bar。"""
@@ -479,11 +561,84 @@ class FrozenInputLoader:
     )
     # 预建只尝试一次(决策日全集冻结,候选域逐期不变)。
     _daily_precompute_built: bool = field(default=False, init=False, repr=False)
+    # #450 追续:价格特征 run 级预计算(每标的一次向量化计算覆盖全部决策期)。
+    _price_precompute: PriceFeaturePrecompute | None = field(
+        default=None, init=False, repr=False
+    )
+    _price_precompute_built: bool = field(default=False, init=False, repr=False)
 
     @property
     def close_histories(self) -> Mapping[str, SymbolCloseHistory | None]:
         """已构建的 close 矩阵(供价格序列等复用切片;未启用时为空)。"""
         return self._close_histories
+
+    @property
+    def price_feature_precompute(self) -> PriceFeaturePrecompute | None:
+        """已构建的价格特征预计算(#450 追续;未启用时为 None)。"""
+        return self._price_precompute
+
+    async def ensure_price_feature_precompute(
+        self,
+        manifest: ResearchRunManifest,
+        decision_ats: Sequence[datetime],
+        *,
+        progress: PrecomputeProgressReporter | None = None,
+        cancel_probe: PrecomputeCancelProbe | None = None,
+        process_pool: PriceFeatureProcessPool | None = None,
+    ) -> None:
+        """一次性预建全部决策期的价格特征(幂等;#450 追续)。
+
+        与 :meth:`ensure_close_histories` 同类:分块前单一顺序点预建,每标的
+        一次向量化计算覆盖全部决策期(逐期矩阵切片也要 5000 次 per-symbol
+        Python 循环 + 快照 checksum,全市场 ≈ 30s/期)。矩阵未构建时先复用
+        :meth:`ensure_close_histories`(预计算以矩阵为底座);评估域与矩阵
+        同口径(#299/#380)。非真实 provider / 非 D1 发布不预建(逐期路径
+        行为不变)。``cancel_probe`` 语义同 close/daily 预建(#450 追续)。
+        issue #464:``process_pool`` 分发主批计算(单线程批处理在全市场 x
+        全历史实测 ~17 分钟,池分发 ≈ worker_count 倍);``progress`` 此前
+        未接通,该段零进度帧使 job phase 冻结在 daily 段最后一帧。
+        """
+        if self._price_precompute_built or not decision_ats:
+            return
+        from finboard_shared.types import BarPeriod
+
+        release_ref = self._bars_release_ref(manifest)
+        if (
+            self.release_provider_factory(release_ref.artifact_id).release.period
+            is not BarPeriod.D1
+        ):
+            self._price_precompute_built = True
+            return
+        await self.ensure_close_histories(
+            manifest,
+            progress=progress,
+            cancel_probe=cancel_probe,
+        )
+        if not self._close_histories:
+            self._price_precompute_built = True
+            return
+        self._price_precompute_built = True
+        candidates, _ = _build_candidates_and_lots(
+            _declared_domain_instruments(
+                manifest,
+                list(
+                    self.release_provider_factory(release_ref.artifact_id).release.instruments
+                ),
+            )
+        )
+        symbols = tuple(item.symbol for item in candidates)
+        if not symbols:
+            self._price_precompute_built = True
+            return
+        self._price_precompute = await build_price_feature_precompute(
+            histories=self._close_histories,
+            provider=self.release_provider_factory(release_ref.artifact_id),
+            decision_ats=decision_ats,
+            symbols=symbols,
+            cancel_probe=cancel_probe,
+            progress=progress,
+            process_pool=process_pool,
+        )
 
     async def load_context(
         self,
@@ -601,6 +756,8 @@ class FrozenInputLoader:
         manifest: ResearchRunManifest,
         *,
         process_pool: PriceFeatureProcessPool | None = None,
+        progress: PrecomputeProgressReporter | None = None,
+        cancel_probe: PrecomputeCancelProbe | None = None,
     ) -> None:
         """一次性预建 close 矩阵(幂等;issue #288 分块并行加载的前置步骤)。
 
@@ -618,6 +775,9 @@ class FrozenInputLoader:
         进程池——worker 内完成 parquet 解码 + 列式转换,主进程只收列式数据;
         池未启动 / 启动失败 / 任务损坏一律具名降级为进程内线程路径(结果逐值
         一致),不改变池自身状态(特征路径的降级语义由 #288 自行处理)。
+
+        issue #450:``progress`` 非空时逐标的完成按节流上报预计算进度帧
+        (只写 phase 文本,数值列不动);None = 无进度上报(逐期惰性路径)。
         """
         if self._close_histories_built:
             return
@@ -631,14 +791,23 @@ class FrozenInputLoader:
         include_open = _wants_execution_open(manifest)
         if process_pool is not None and not process_pool.broken:
             built = await _load_close_histories_via_pool(
-                process_pool, provider, included_candidates, include_open=include_open
+                process_pool,
+                provider,
+                included_candidates,
+                include_open=include_open,
+                progress=progress,
+                cancel_probe=cancel_probe,
             )
             if built is not None:
                 self._close_histories_built = True
                 self._close_histories.update(built)
                 return
         await self._ensure_close_histories(
-            provider, included_candidates, include_open=include_open
+            provider,
+            included_candidates,
+            include_open=include_open,
+            progress=progress,
+            cancel_probe=cancel_probe,
         )
 
     async def _ensure_close_histories(
@@ -647,6 +816,8 @@ class FrozenInputLoader:
         candidates: Sequence[UniverseCandidate],
         *,
         include_open: bool = False,
+        progress: PrecomputeProgressReporter | None = None,
+        cancel_probe: PrecomputeCancelProbe | None = None,
     ) -> None:
         """构建 close 矩阵(只尝试一次;失败不缓存,逐期回退读取)。"""
         if self._close_histories_built:
@@ -654,7 +825,11 @@ class FrozenInputLoader:
         self._close_histories_built = True
         self._close_histories.update(
             await _load_close_histories(
-                provider, candidates, include_open=include_open
+                provider,
+                candidates,
+                include_open=include_open,
+                progress=progress,
+                cancel_probe=cancel_probe,
             )
         )
 
@@ -662,6 +837,9 @@ class FrozenInputLoader:
         self,
         manifest: ResearchRunManifest,
         decision_ats: Sequence[datetime],
+        *,
+        progress: PrecomputeProgressReporter | None = None,
+        cancel_probe: PrecomputeCancelProbe | None = None,
     ) -> None:
         """一次性预建全部 daily_metrics 发布的研究观测矩阵(幂等,#438)。
 
@@ -678,6 +856,11 @@ class FrozenInputLoader:
         与对象路径 provider 不预建,逐期路径行为不变。读取失败(除标的不在
         发布的 ``ReleaseCapabilityError`` → #252 missing 外)直接抛出,与
         逐期路径同 fail-closed。
+
+        issue #450:``progress`` 非空时逐标的完成按节流上报预计算进度帧
+        (计数跨发布累积,帧内 done/total 覆盖全部 daily_metrics 发布)。
+        ``cancel_probe`` 非空时逐打点轮询取消(#450 追续,预计算段取消
+        检查空白区补齐)。
         """
         if self._daily_precompute_built or not decision_ats:
             return
@@ -690,15 +873,33 @@ class FrozenInputLoader:
             _declared_domain_instruments(manifest, list(bars_provider.release.instruments))
         )
         ordered = sorted(decision_ats)
-        for release_ref in manifest.dataset_releases:
+        daily_releases = [
+            release_ref
+            for release_ref in manifest.dataset_releases
+            if self.release_provider_factory(
+                release_ref.artifact_id
+            ).release.dataset_kind
+            is ReleaseDatasetKind.DAILY_METRICS
+        ]
+        # 进度计数跨发布累积(#450):帧内 done/total 覆盖本 ensure 全部
+        # 标的 x 发布,不随发布切换回退。
+        tick = _make_precompute_ticker(
+            progress,
+            "daily",
+            len(candidates) * len(daily_releases),
+            cancel_probe,
+        )
+        for release_ref in daily_releases:
             provider = self.release_provider_factory(release_ref.artifact_id)
-            if provider.release.dataset_kind is not ReleaseDatasetKind.DAILY_METRICS:
-                continue
             if getattr(provider, "fetch_daily_metrics_columns", None) is None:
                 continue
             self._daily_precompute[release_ref.artifact_id] = (
                 await _build_daily_metrics_precompute(
-                    provider, candidates, ordered, release_ref.artifact_id
+                    provider,
+                    candidates,
+                    ordered,
+                    release_ref.artifact_id,
+                    tick=tick,
                 )
             )
 
@@ -910,7 +1111,12 @@ class FrozenInputLoader:
                 str(getattr(record, "kind", "factor")), str(record.code_artifact)
             )
             covered.add(factor_name)
-            day_values = record.values.get(decision_at.date().isoformat())
+            # issue #464:工件行的 values 是惰性映射(首访读盘+验签,单日
+            # get 走 numpy 二分切片)——取数挪 to_thread,事件循环线程不再
+            # 被同步文件 IO/首访解析阻塞(心跳/并发 job/取消探针全靠循环)。
+            day_values = await asyncio.to_thread(
+                record.values.get, decision_at.date().isoformat()
+            )
             if day_values is None:
                 logger.warning(
                     "research_run.factor_series_date_missing",
@@ -922,7 +1128,10 @@ class FrozenInputLoader:
                 continue
             values.extend(
                 series_feature_values(
-                    record, decision_at, factor_name=factor_name
+                    record,
+                    decision_at,
+                    factor_name=factor_name,
+                    day_values=day_values,
                 )
             )
         return tuple(values), frozenset(covered)
@@ -1232,6 +1441,8 @@ async def _build_daily_metrics_precompute(
     candidates: Sequence[UniverseCandidate],
     decision_ats: Sequence[datetime],
     release_id: str,
+    *,
+    tick: Callable[[], Awaitable[None]] | None = None,
 ) -> DailyMetricsPrecompute:
     """并发预建一个 daily_metrics 发布的全部决策期矩阵(#438)。
 
@@ -1239,7 +1450,9 @@ async def _build_daily_metrics_precompute(
     Arrow 内完成,全区间可见),选行与列抽取 numpy 化后置 ``to_thread``;
     逐候选 ``gather`` + 信号量并发,异常按候选顺序抛出(与 close 矩阵构建
     同语义)。标的不在发布(``ReleaseCapabilityError``)→ ``None``(#252
-    missing),其余异常原样传播(fail-closed)。
+    missing),其余异常原样传播(fail-closed)。``tick`` 非空时逐标的构建
+    完成后调用一次(issue #450 预计算进度打点,节流见
+    :func:`_make_precompute_ticker`)。
     """
     from finboard_data.releases import ReleaseCapabilityError, _epoch_micros
     from finboard_shared.models import Symbol
@@ -1268,7 +1481,7 @@ async def _build_daily_metrics_precompute(
                 )
             except ReleaseCapabilityError:
                 return None
-        return await asyncio.to_thread(
+        history = await asyncio.to_thread(
             _daily_history_from_table,
             table,
             decision_at_micros=decision_at_micros,
@@ -1276,6 +1489,9 @@ async def _build_daily_metrics_precompute(
             range_start_day=range_start_day,
             release_id=release_id,
         )
+        if tick is not None:
+            await tick()
+        return history
 
     results = await asyncio.gather(
         *(_one(candidate) for candidate in candidates), return_exceptions=True
@@ -1373,6 +1589,22 @@ async def _load_financial_features(
     return _matrix_to_feature_values(batch, release_id=release_id), tuple(missing)
 
 
+def _latest_available_at(batch: FactorInputBatch, symbol: str) -> datetime:
+    """单标的最新观测时点(逐对查询的参照语义,#454 等值测试基线)。
+
+    生产路径走 :func:`_matrix_to_feature_values` 的一次遍历预聚合
+    (``latest_by_symbol``);本函数保留逐对查询形态供测试参照使用。
+    """
+    candidates = [
+        _require_aware(item.available_at)
+        for record in batch.records
+        if record.symbol == symbol
+        for item in (record.daily, record.financial)
+        if item is not None
+    ]
+    return max(candidates)
+
+
 def _matrix_to_feature_values(
     batch: FactorInputBatch,
     *,
@@ -1392,38 +1624,39 @@ def _matrix_to_feature_values(
     from finboard_backtest.factors.extract import extract_factor_matrix
 
     matrix = extract_factor_matrix(batch)
-    latest_available_at: dict[str, datetime] = {
-        record.symbol: _latest_available_at(batch, record.symbol)
-        for record in batch.records
-    }
+    # symbol → 最新观测时点一次遍历预聚合(此前逐 (因子 x 标的) 全量扫描
+    # records,矩阵 75k 键 x 5000 记录 = 每期数亿次比较,是加载期主导热点;
+    # 映射后 O(records + 矩阵键数))。#454:source_artifact_ids 按期共享实例。
+    latest_by_symbol: dict[str, datetime] = {}
+    for record in batch.records:
+        candidates = [
+            _require_aware(item.available_at)
+            for item in (record.daily, record.financial)
+            if item is not None
+        ]
+        if not candidates:
+            continue
+        latest = max(candidates)
+        current = latest_by_symbol.get(record.symbol)
+        if current is None or latest > current:
+            latest_by_symbol[record.symbol] = latest
     artifact_ids = (release_id,)
     values: list[FeatureValue] = []
     for factor_name, by_symbol in sorted(matrix.items()):
         for symbol, value in sorted(by_symbol.items()):
+            available_at = latest_by_symbol.get(symbol)
+            if available_at is None:
+                available_at = datetime.now(UTC)
             values.append(
                 FeatureValue(
                     symbol=symbol,
                     feature_id=factor_name,
                     value=float(value),
                     source_artifact_ids=artifact_ids,
-                    available_at=latest_available_at[symbol],
+                    available_at=available_at,
                 )
             )
     return values
-
-
-def _latest_available_at(batch: FactorInputBatch, symbol: str) -> datetime:
-    """取某标的在横截面中最新的观测时点(研究记录或特征观测)。"""
-    candidates: list[datetime] = []
-    for record in batch.records:
-        if record.symbol != symbol:
-            continue
-        for item in (record.daily, record.financial):
-            if item is not None:
-                candidates.append(_require_aware(item.available_at))
-    if not candidates:
-        return datetime.now(UTC)
-    return max(candidates)
 
 
 def _require_aware(value: datetime) -> datetime:
@@ -1513,6 +1746,8 @@ async def _load_close_histories(
     candidates: Sequence[UniverseCandidate],
     *,
     include_open: bool = False,
+    progress: PrecomputeProgressReporter | None = None,
+    cancel_probe: PrecomputeCancelProbe | None = None,
 ) -> dict[str, SymbolCloseHistory | None]:
     """并发读取各标的冻结全区间 close 历史,构建 close 矩阵(issue #287)。
 
@@ -1534,6 +1769,7 @@ async def _load_close_histories(
     if not candidates or not isinstance(provider, FrozenReleaseProvider):
         return {}
     semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
+    tick = _make_precompute_ticker(progress, "close", len(candidates), cancel_probe)
 
     async def _one(candidate: UniverseCandidate) -> SymbolCloseHistory | None:
         async with semaphore:
@@ -1549,12 +1785,14 @@ async def _load_close_histories(
                 adjust=provider.release.adjustment,
                 include_open=include_open,
             )
-        return SymbolCloseHistory.from_sequences(
+        history = SymbolCloseHistory.from_sequences(
             available_at=columns.available_at,
             dates=columns.dates,
             closes=columns.closes,
             opens=columns.opens,
         )
+        await tick()
+        return history
 
     results = await asyncio.gather(
         *(_one(candidate) for candidate in candidates), return_exceptions=True
@@ -1573,12 +1811,527 @@ async def _load_close_histories(
     return built
 
 
+async def build_price_feature_snapshot_from_close_matrix(
+    *,
+    histories: Mapping[str, SymbolCloseHistory | None],
+    provider: FrozenReleaseProvider,
+    decision_at: datetime,
+    code_version: str,
+    symbols: Sequence[str],
+    momentum_lookback: int | None = None,
+    volatility_windows: tuple[int, ...] | None = None,
+) -> FeatureSnapshot:
+    """从 close 矩阵切片直接构建逐期价格特征快照(#450 追续)。
+
+    逐期 ``build_price_feature_snapshot`` 在进程池对每标的整文件重读 close
+    历史(全市场 x 多期 = 数十万次重复读盘),而 close 矩阵(#287/#439)已
+    持有同一发布的全区间 close——特征数学(:func:`price_observations_from_
+    closes`)只依赖序列尾部连续元素,尾切片与全序列计算逐位等值,直接切片
+    供数即可。切片/重建在单次 ``to_thread`` 内完成(纯 numpy + 少量
+    datetime,秒级);矩阵未覆盖的标的(``None`` / 缺键)回退 provider
+    逐标的读取(与原路径同 PIT/边界语义);FeatureSnapshot 装配与列式路径
+    共用 :func:`_assemble_price_snapshot_from_observations`(单一样本源)。
+    仅支持 D1 发布(矩阵只对日线构建);``decision_at`` 需带时区。
+    """
+    from finboard_backtest.factor_lab import (
+        DEFAULT_MOMENTUM_LOOKBACK,
+        FactorAnalysisError,
+        _assemble_price_snapshot_from_observations,
+        _build_price_observations,
+        price_observations_from_closes,
+    )
+    from finboard_shared.models import Symbol
+
+    if decision_at.tzinfo is None:
+        raise ValueError("decision_at 必须带时区")
+    lookback = momentum_lookback if momentum_lookback is not None else DEFAULT_MOMENTUM_LOOKBACK
+    windows = volatility_windows if volatility_windows is not None else (20, 60, 120)
+    release = provider.release
+    by_code = {item.code: item for item in release.instruments}
+    scoped = [code for code in by_code if code in set(symbols)]
+    tail_n = max(lookback + 1, max(windows) + 1, 61)
+
+    async def _fallback(code: str) -> list[FeatureObservation]:
+        columns = await provider.fetch_close_history(
+            Symbol(code, by_code[code].market),
+            release.period,
+            release.start_date,
+            min(decision_at.date(), release.end_date),
+            decision_at=decision_at,
+            adjust=release.adjustment,
+        )
+        return _build_price_observations(
+            source=release.source,
+            source_version=release.version,
+            symbol=code,
+            market=by_code[code].market,
+            asset_class=by_code[code].asset_class,
+            columns=columns,
+            momentum_lookback=lookback,
+            volatility_windows=windows,
+        )
+
+    def _slice_one(code: str) -> list[FeatureObservation]:
+        history = histories[code]
+        assert history is not None  # 调用方已按矩阵覆盖过滤
+        item = by_code[code]
+        index = history.visible_index(decision_at)
+        if index < 0:
+            return []
+        lo = max(0, index + 1 - tail_n)
+        closes = history.closes[lo : index + 1]
+        last_date = date.fromordinal(int(history.date_days[index]) + _EPOCH_ORDINAL)
+        return price_observations_from_closes(
+            source=release.source,
+            source_version=release.version,
+            symbol=code,
+            market=item.market,
+            asset_class=item.asset_class,
+            closes=closes,
+            last_timestamp=datetime.combine(last_date, time(0, 0), tzinfo=UTC),
+            last_available_at=history.available_at_at(index),
+            momentum_lookback=lookback,
+            volatility_windows=windows,
+        )
+
+    results: dict[str, list[FeatureObservation]] = {}
+    matrix_codes = [code for code in scoped if histories.get(code) is not None]
+    fallback_codes = [code for code in scoped if histories.get(code) is None]
+    if matrix_codes:
+        def _slice_batch() -> dict[str, list[FeatureObservation]]:
+            return {code: _slice_one(code) for code in matrix_codes}
+
+        results.update(await asyncio.to_thread(_slice_batch))
+    if fallback_codes:
+        semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
+
+        async def _one(code: str) -> tuple[str, list[FeatureObservation]]:
+            async with semaphore:
+                return code, await _fallback(code)
+
+        for code, obs in await asyncio.gather(
+            *(_one(code) for code in fallback_codes)
+        ):
+            results[code] = obs
+    observations = [item for code in scoped for item in results.get(code, [])]
+    if not observations:
+        raise FactorAnalysisError("冻结发布在决策时点没有足够数据计算价格特征")
+    return _assemble_price_snapshot_from_observations(
+        release=release,
+        decision_at=decision_at,
+        code_version=code_version,
+        observations=observations,
+        momentum_lookback=lookback,
+        volatility_windows=windows,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodPriceFeatures:
+    """单标的在单个决策期的价格特征集(#450 追续预计算形态)。
+
+    ``names``/``values`` 平行且同长(names 顺序 = 特征数学的构造顺序);
+    ``None`` 项表示该期无可见数据或历史不足。
+    """
+
+    available_at: datetime
+    observed_at: datetime
+    names: tuple[str, ...]
+    values: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PriceFeaturePrecompute:
+    """run 级价格特征预计算:每标的一次向量化计算覆盖全部决策期(#450 追续)。
+
+    逐期 ``build_price_feature_snapshot`` 即使走矩阵切片,仍要 5000 次
+    Python 级 per-symbol 循环 + 快照 checksum(全市场 ≈ 30s/期);预建后
+    逐期消费变查表 + ``FeatureValue`` 构造。内存 ≈ 75 期 x 5000 标的 x
+    ~250B ≈ 94MB。
+    """
+
+    release_id: str
+    decision_ats: tuple[datetime, ...]
+    by_symbol: dict[str, tuple[PeriodPriceFeatures | None, ...]]
+    symbols: tuple[str, ...]
+
+    def feature_values(
+        self, decision_at: datetime, release_id: str
+    ) -> tuple[FeatureValue, ...] | None:
+        """取该决策期的全部价格特征 ``FeatureValue``(无该期返回 None)。"""
+        try:
+            index = self.decision_ats.index(decision_at)
+        except ValueError:
+            return None
+        from finboard_backtest.research_run.contracts import FeatureValue
+
+        # 来源元组全期共享(2026-09-13 内存事故):全市场 x 556 期 ≈ 千万级
+        # FeatureValue,逐实例各造一个 (release_id,) 元组白付 ~60B/个。
+        src = (release_id,)
+        out: list[FeatureValue] = []
+        for code in self.symbols:
+            per_symbol = self.by_symbol.get(code)
+            if per_symbol is None:
+                continue
+            item = per_symbol[index]
+            if item is None:
+                continue
+            for name, value in zip(item.names, item.values, strict=True):
+                out.append(
+                    FeatureValue(
+                        symbol=code,
+                        feature_id=name,
+                        value=value,
+                        source_artifact_ids=src,
+                        available_at=item.available_at,
+                    )
+                )
+        return tuple(out)
+
+
+def _period_features_for_symbol(
+    history: SymbolCloseHistory,
+    decision_epochs: np.ndarray,
+    decision_ordinals: np.ndarray,
+    *,
+    lookback: int,
+    windows: tuple[int, ...],
+    tail_n: int,
+) -> tuple[PeriodPriceFeatures | None, ...]:
+    """单标的向量化计算全部决策期的价格特征(#450 追续)。
+
+    与 :func:`price_observations_from_closes` 逐值等值:可见索引是同一
+    双键 searchsorted;returns 在全序列上只算一次,各期窗口是它的连续
+    切片(元素与尾切片逐一相同,np.std 逐位等值)。
+    """
+    n = int(history.available_at_us.size)
+    idx = np.minimum(
+        np.searchsorted(history.available_at_us, decision_epochs, side="right"),
+        np.searchsorted(history.date_days, decision_ordinals, side="right"),
+    ).astype(np.int64) - 1
+    closes = history.closes
+    returns = np.diff(closes) / closes[:-1] if n >= 2 else np.empty(0)
+    out: list[PeriodPriceFeatures | None] = []
+    for k in range(decision_epochs.size):
+        ip = int(idx[k])
+        if ip < 0:
+            out.append(None)
+            continue
+        lo = max(0, ip + 1 - tail_n)
+        n_ret = ip - lo
+        names: list[str] = []
+        values: list[float] = []
+        if ip - lo >= lookback:
+            names.append("momentum")
+            # closes[-(lookback+1)] = c[ip-lookback](切片倒数第 lookback+1 个)
+            values.append(float(closes[ip] / closes[ip - lookback] - 1.0))
+        for window in windows:
+            if n_ret >= window:
+                names.append(f"volatility_{window}d")
+                values.append(float(np.std(returns[ip - window : ip], ddof=1)))
+        downside_window = min(60, n_ret)
+        if downside_window >= 10:
+            downside = returns[ip - downside_window : ip]
+            downside = downside[downside < 0]
+            if downside.size >= 3:
+                names.append("downside_volatility")
+                values.append(float(np.std(downside, ddof=1)))
+        if not names:
+            out.append(None)
+            continue
+        last_date = date.fromordinal(int(history.date_days[ip]) + _EPOCH_ORDINAL)
+        out.append(
+            PeriodPriceFeatures(
+                available_at=history.available_at_at(ip),
+                observed_at=datetime.combine(last_date, time(0, 0), tzinfo=UTC),
+                names=tuple(names),
+                values=tuple(values),
+            )
+        )
+    return tuple(out)
+
+
+@dataclass(frozen=True, slots=True)
+class _PricePrecomputeTask:
+    """价格特征预计算的进程池任务载荷(issue #464,字段全部可 pickle)。
+
+    ``history`` 为冻结 close 历史的 numpy 底座(:class:`SymbolCloseHistory`,
+    #439 原生数组表示使跨进程搬运 ≈ 2834 天 x 24B/标的);worker 进程内
+    跑 :func:`_period_features_for_symbol`,只回逐期小结果元组。
+    """
+
+    code: str
+    history: SymbolCloseHistory
+    decision_epochs: np.ndarray
+    decision_ordinals: np.ndarray
+    lookback: int
+    windows: tuple[int, ...]
+    tail_n: int
+
+
+def _price_precompute_process_task(
+    task: _PricePrecomputeTask,
+) -> tuple[str, tuple[PeriodPriceFeatures | None, ...]]:
+    """进程池 worker 入口(模块级函数,spawn 可 pickle;#464)。"""
+    return (
+        task.code,
+        _period_features_for_symbol(
+            task.history,
+            task.decision_epochs,
+            task.decision_ordinals,
+            lookback=task.lookback,
+            windows=task.windows,
+            tail_n=task.tail_n,
+        ),
+    )
+
+
+async def build_price_feature_precompute(
+    *,
+    histories: Mapping[str, SymbolCloseHistory | None],
+    provider: FrozenReleaseProvider,
+    decision_ats: Sequence[datetime],
+    symbols: Sequence[str],
+    momentum_lookback: int | None = None,
+    volatility_windows: tuple[int, ...] | None = None,
+    cancel_probe: PrecomputeCancelProbe | None = None,
+    progress: PrecomputeProgressReporter | None = None,
+    process_pool: PriceFeatureProcessPool | None = None,
+) -> PriceFeaturePrecompute:
+    """run 级价格特征预计算(#450 追续):每标的一次覆盖全部决策期。
+
+    矩阵未覆盖的标的(``None`` / 缺键)经 provider 做一次全区间列式读取
+    (同 #371 门控语义)后走同一计算;产出按 ``symbols`` 顺序保留。
+
+    issue #464:主批计算分发给常驻进程池(``process_pool``,#288/#301 同
+    池)——全市场 x 全历史(周频 ~600 期 x 5215 标的)的单标的循环是
+    ~1800 次小 numpy 运算/标的,GIL 内 per-call 开销使单线程批处理实测
+    ~17 分钟;池分发后 ≈ worker_count 倍。池不可用/任务异常降级进程内
+    分块路径(结果逐值一致,close 矩阵预建 #301 同语义)。``progress``
+    按 :func:`_make_precompute_ticker` 节流上报 ``precompute price
+    k/n`` 帧——该段此前零进度帧,job phase 冻结在 daily 段最后一帧
+    (5120/5215 形态)造成「卡死」观感。
+    """
+    from finboard_backtest.factor_lab import DEFAULT_MOMENTUM_LOOKBACK
+    from finboard_shared.models import Symbol
+
+    lookback = momentum_lookback if momentum_lookback is not None else DEFAULT_MOMENTUM_LOOKBACK
+    windows = volatility_windows if volatility_windows is not None else (20, 60, 120)
+    release = provider.release
+    by_code = {item.code: item for item in release.instruments}
+    scoped = tuple(code for code in by_code if code in set(symbols))
+    ordered = sorted(decision_ats)
+    epochs = np.array([_datetime_epoch_micros(at) for at in ordered], dtype=np.int64)
+    ordinals = np.array(
+        [at.date().toordinal() - _EPOCH_ORDINAL for at in ordered], dtype=np.int64
+    )
+    tail_n = max(lookback + 1, max(windows) + 1, 61)
+    tick = _make_precompute_ticker(progress, "price", len(scoped), cancel_probe)
+
+    def _from_history(history: SymbolCloseHistory) -> tuple[PeriodPriceFeatures | None, ...]:
+        return _period_features_for_symbol(
+            history,
+            epochs,
+            ordinals,
+            lookback=lookback,
+            windows=windows,
+            tail_n=tail_n,
+        )
+
+    fallback_codes = [
+        code for code in scoped if histories.get(code) is None
+    ]
+
+    async def _fallback_history(code: str) -> SymbolCloseHistory | None:
+        columns = await provider.fetch_close_history(
+            Symbol(code, by_code[code].market),
+            release.period,
+            release.start_date,
+            release.end_date,
+            decision_at=_PIT_UNBOUNDED,
+            adjust=release.adjustment,
+        )
+        return SymbolCloseHistory.from_sequences(
+            available_at=columns.available_at,
+            dates=columns.dates,
+            closes=columns.closes,
+            opens=columns.opens,
+        )
+
+    batch_codes = [code for code in scoped if histories.get(code) is not None]
+    by_symbol: dict[str, tuple[PeriodPriceFeatures | None, ...]] | None = None
+
+    if process_pool is not None and not process_pool.broken and batch_codes:
+        by_symbol = await _price_precompute_with_pool(
+            batch_codes,
+            histories,
+            process_pool,
+            epochs=epochs,
+            ordinals=ordinals,
+            lookback=lookback,
+            windows=windows,
+            tail_n=tail_n,
+            tick=tick,
+        )
+        if by_symbol is None:
+            logger.warning(
+                "frozen_loader.price_precompute_pool_failed",
+                stage="decision_load",
+                release_id=release.release_id,
+                symbols=len(batch_codes),
+                message="价格特征预计算池分发失败,降级进程内路径",
+            )
+    if by_symbol is None:
+        by_symbol = await _price_precompute_inprocess(
+            batch_codes,
+            histories,
+            _from_history,
+            tick=tick,
+        )
+
+    if cancel_probe is not None:
+        await cancel_probe()
+    if fallback_codes:
+        semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
+
+        async def _one(code: str) -> tuple[str, tuple[PeriodPriceFeatures | None, ...]]:
+            async with semaphore:
+                history = await _fallback_history(code)
+            if cancel_probe is not None:
+                await cancel_probe()
+            per = (
+                _from_history(history)
+                if history is not None
+                else tuple(None for _ in ordered)
+            )
+            return code, per
+
+        for code, per in await asyncio.gather(
+            *(_one(code) for code in fallback_codes)
+        ):
+            by_symbol[code] = per
+    return PriceFeaturePrecompute(
+        release_id=release.release_id,
+        decision_ats=tuple(ordered),
+        by_symbol=by_symbol,
+        symbols=scoped,
+    )
+
+
+async def _price_precompute_with_pool(
+    batch_codes: Sequence[str],
+    histories: Mapping[str, SymbolCloseHistory | None],
+    pool: PriceFeatureProcessPool,
+    *,
+    epochs: np.ndarray,
+    ordinals: np.ndarray,
+    lookback: int,
+    windows: tuple[int, ...],
+    tail_n: int,
+    tick: Callable[[], Awaitable[None]],
+) -> dict[str, tuple[PeriodPriceFeatures | None, ...]] | None:
+    """价格特征预计算主批分发进程池(#464);失败返回 None 交进程内降级。
+
+    每标的一个池任务(任务载荷 = 冻结 close 历史的 numpy 底座 + 决策期
+    键,worker 内跑 :func:`_period_features_for_symbol` 后只回小结果元
+    组);取消/打断探针异常原样上抛(#450 追续语义),其余任务异常整体
+    降级(close 矩阵预建 #301 同语义)。
+    """
+    if not batch_codes or pool.broken:
+        return None
+    try:
+        executor = pool.executor
+    except RuntimeError:
+        return None
+    loop = asyncio.get_running_loop()
+
+    def _task_for(code: str) -> _PricePrecomputeTask:
+        history = histories[code]
+        assert history is not None  # batch_codes 已过滤缺矩阵标的
+        return _PricePrecomputeTask(
+            code=code,
+            history=history,
+            decision_epochs=epochs,
+            decision_ordinals=ordinals,
+            lookback=lookback,
+            windows=windows,
+            tail_n=tail_n,
+        )
+
+    tasks = [_task_for(code) for code in batch_codes]
+
+    async def _run_one(
+        task: _PricePrecomputeTask,
+    ) -> tuple[str, tuple[PeriodPriceFeatures | None, ...]]:
+        result = await loop.run_in_executor(
+            executor, _price_precompute_process_task, task
+        )
+        await tick()
+        return result
+
+    try:
+        results = await asyncio.gather(
+            *(_run_one(task) for task in tasks),
+            return_exceptions=True,
+        )
+    except ResearchRunInterruptedError:
+        raise
+    except Exception:
+        return None
+    built: dict[str, tuple[PeriodPriceFeatures | None, ...]] = {}
+    for _task, result in zip(tasks, results, strict=True):
+        if isinstance(result, BaseException):
+            if isinstance(result, ResearchRunInterruptedError):
+                raise result
+            return None
+        built[result[0]] = result[1]
+    return built
+
+
+async def _price_precompute_inprocess(
+    batch_codes: Sequence[str],
+    histories: Mapping[str, SymbolCloseHistory | None],
+    from_history: Callable[[SymbolCloseHistory], tuple[PeriodPriceFeatures | None, ...]],
+    *,
+    tick: Callable[[], Awaitable[None]],
+) -> dict[str, tuple[PeriodPriceFeatures | None, ...]]:
+    """进程内分块批处理(池不可用时的降级;每块一个 to_thread,块间打点)。
+
+    与旧单批 ``to_thread(_build_batch)`` 逐值一致;分块只为让事件循环周
+    期性回到 async 侧逐标的打点(节流器自决是否上报)——此前整段一个阻
+    塞调用,零帧零取消检查。
+    """
+    by_symbol: dict[str, tuple[PeriodPriceFeatures | None, ...]] = {}
+    chunk_size = 256
+    for start in range(0, len(batch_codes), chunk_size):
+        chunk = list(batch_codes[start : start + chunk_size])
+
+        def _compute_chunk(
+            codes: list[str],
+        ) -> list[tuple[str, tuple[PeriodPriceFeatures | None, ...]]]:
+            out: list[tuple[str, tuple[PeriodPriceFeatures | None, ...]]] = []
+            for code in codes:
+                history = histories.get(code)
+                if history is None:
+                    continue
+                out.append((code, from_history(history)))
+            return out
+
+        for code, per in await asyncio.to_thread(_compute_chunk, chunk):
+            by_symbol[code] = per
+        for _ in chunk:
+            await tick()
+    return by_symbol
+
+
 async def _load_close_histories_via_pool(
     pool: PriceFeatureProcessPool,
     provider: FrozenReleaseProvider,
     candidates: Sequence[UniverseCandidate],
     *,
     include_open: bool = False,
+    progress: PrecomputeProgressReporter | None = None,
+    cancel_probe: PrecomputeCancelProbe | None = None,
 ) -> dict[str, SymbolCloseHistory | None] | None:
     """经常驻进程池预建 close 矩阵(issue #301);不可用时返回 ``None``。
 
@@ -1594,6 +2347,7 @@ async def _load_close_histories_via_pool(
         _CloseHistoryProcessTask,
         _compute_close_history_process_task,
     )
+    from finboard_data.releases import CloseHistoryColumns
 
     if not candidates or pool.broken:
         return None
@@ -1612,14 +2366,26 @@ async def _load_close_histories_via_pool(
         )
         for candidate in candidates
     ]
+    tick = _make_precompute_ticker(progress, "close", len(candidates), cancel_probe)
+
+    async def _run_one(
+        task: _CloseHistoryProcessTask,
+    ) -> tuple[str, CloseHistoryColumns]:
+        result = await loop.run_in_executor(
+            executor, _compute_close_history_process_task, task
+        )
+        await tick()
+        return result
+
     try:
         results = await asyncio.gather(
-            *(
-                loop.run_in_executor(executor, _compute_close_history_process_task, task)
-                for task in tasks
-            ),
+            *(_run_one(task) for task in tasks),
             return_exceptions=True,
         )
+    except ResearchRunInterruptedError:
+        # 取消/打断探针异常不是池故障:原样上抛交给上层收口(#450 追续),
+        # 降级成进程内路径会无视取消继续整段预建。
+        raise
     except Exception as exc:
         logger.warning(
             "frozen_loader.close_matrix_pool_failed",
@@ -1633,6 +2399,8 @@ async def _load_close_histories_via_pool(
     built: dict[str, SymbolCloseHistory | None] = {}
     for candidate, result in zip(candidates, results, strict=True):
         if isinstance(result, BaseException):
+            if isinstance(result, ResearchRunInterruptedError):
+                raise result
             logger.warning(
                 "frozen_loader.close_matrix_pool_failed",
                 stage="decision_load",
@@ -1771,6 +2539,7 @@ def series_feature_values(
     decision_at: datetime,
     *,
     factor_name: str,
+    day_values: Mapping[str, float | None] | None = None,
 ) -> tuple[FeatureValue, ...]:
     """把序列在 ``decision_at`` 决策日的截面映射为 ``FeatureValue``(#360)。
 
@@ -1778,8 +2547,12 @@ def series_feature_values(
     ``FeatureValue`` 形态;``available_at = decision_at`` 由前缀不变性审计
     背书(序列构建即审计,决策日观测只用决策日之前的数据)。调用方负责
     判定决策日已被序列覆盖(缺失日发具名 warning 后跳过)。
+    ``day_values``(#464):调用方已经 ``record.values.get`` 过的截面 ——
+    传入则免二次查表(工件行惰性映射的单日切片不必重复做);缺省保持
+    旧自取行为。
     """
-    day_values = record.values.get(decision_at.date().isoformat())
+    if day_values is None:
+        day_values = record.values.get(decision_at.date().isoformat())
     if day_values is None:
         return ()
     # issue #454:source_artifact_ids / available_at 全截面共享实例(等值压缩)。

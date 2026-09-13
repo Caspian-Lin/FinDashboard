@@ -43,7 +43,9 @@ export function MasterList({
       <CardContent className="p-2 pt-0">
         {/* overflow-auto 而非 x-hidden(issue #373):横向空间不足时出滚动条
             而非静默裁切;内容不超宽时与原行为无差异。 */}
-        <div className="max-h-[560px] space-y-2 overflow-auto scrollbar-thin">
+        {/* 高度跟随视口(calc)而非写死:固定 560px 在高分屏上列表只占卡片
+            一小截,下方大片空白;360px 下限防极矮视口退化为不可用。 */}
+        <div className="max-h-[max(360px,calc(100vh-320px))] space-y-2 overflow-auto scrollbar-thin">
           {children}
         </div>
       </CardContent>

@@ -582,6 +582,8 @@ class TestSeriesProviderWiring:
         class _ReleaseRow:
             def __init__(self, kind: ReleaseDatasetKind) -> None:
                 self.dataset_kind = kind
+                # issue #460:_require_releases 返回主发布起点(零预热诊断)
+                self.start_date = date(2024, 1, 1)
 
         class _Repo:
             def __init__(self, session: Any) -> None:

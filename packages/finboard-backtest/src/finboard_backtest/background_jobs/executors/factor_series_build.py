@@ -53,7 +53,7 @@ import hashlib
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -232,6 +232,48 @@ async def _default_prefix_audit(spec: Any, baseline: Any, *, truncate_at: date) 
     )
 
 
+def _enrich_container_failure(
+    exc: Exception,
+    payload: FactorSeriesBuildPayload,
+    *,
+    bars_release_start: date | None,
+) -> Exception:
+    """容器失败但窗口头部零预热时,把诊断提示附到原异常后重抛。
+
+    窗口挂载的行情行来自 bars 主发布的**全发布区间**(发布起点即历史
+    上界),``window_start`` 不晚于发布起点时,窗口头部决策日的可见历史
+    只有 0-1 根 bar——带最小历史守卫的因子(如 RSI/MACD 类)会在窗口
+    头部 raise,炸掉整个构建。此时把可操作的修复路径附到错误摘要;
+    其余失败原样重抛(错误类型 / code / retryable 语义零变化)。
+    """
+    if (
+        bars_release_start is None
+        or payload.window_start > bars_release_start
+    ):
+        return exc
+    code = getattr(exc, "code", type(exc).__name__)
+    summary = getattr(exc, "summary", None) or str(exc) or type(exc).__name__
+    hint = (
+        f"{summary};诊断提示:window_start({payload.window_start.isoformat()})"
+        f"不晚于 bars 主发布起点({bars_release_start.isoformat()}),"
+        "窗口头部决策日的挂载可见历史为 0-1 根 bar,带最小历史守卫的因子"
+        "会在窗口头部 raise;修复:把 window_start 后移预留预热期,"
+        "或将因子改写为 compute_series 在头部产出缺测。"
+    )
+    return ExecutorError(code=code, summary=hint, retryable=getattr(exc, "retryable", False))
+
+
+def _jsonable(value: Any) -> Any:
+    """递归把 date/datetime 转 ISO 字符串(JSONB 归档兜底;psycopg 不收 date)。"""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
 def audit_truncation_points(dates: list[date]) -> list[date]:
     """抽样 2 个截断点(确定性,issue #360)。
 
@@ -318,7 +360,7 @@ class FactorSeriesBuildExecutor:
         is_predefined = payload.kind == _PREDEFINED_FACTOR_KIND
         await progress(1, _TOTAL_STAGES, "factor_series_build:resolve")
 
-        await self._require_releases(payload)
+        bars_release_start = await self._require_releases(payload)
         await progress(2, _TOTAL_STAGES, "factor_series_build:cache_check")
 
         # 缓存检查先行(内容寻址,不依赖 artifact 当前 active 指向——find_matching
@@ -368,10 +410,17 @@ class FactorSeriesBuildExecutor:
                 total=_TOTAL_STAGES,
             )
         await progress(3, _TOTAL_STAGES, "factor_series_build:container:start")
-        if mount_on_batch is None:
-            result = await runner(spec)
-        else:
-            result = await runner(spec, mount_on_batch=mount_on_batch)
+        try:
+            if mount_on_batch is None:
+                result = await runner(spec)
+            else:
+                result = await runner(spec, mount_on_batch=mount_on_batch)
+        except ExecutorError:
+            raise
+        except Exception as exc:
+            raise _enrich_container_failure(
+                exc, payload, bars_release_start=bars_release_start
+            ) from exc
         await progress(3, _TOTAL_STAGES, "factor_series_build:container:done")
         # 覆盖起点声明冻结入 series manifest(issue #403,继 #399):声明
         # ``min_history_bars`` 的预置因子,把声明随 quality 归档(构建时刻
@@ -430,6 +479,41 @@ class FactorSeriesBuildExecutor:
                 error_summary=audit_failure,
             )
 
+        # issue #463:values 落 canonical parquet 工件(sha256 锚定),
+        # DB 行只留 relpath + checksum;record 由行内模式换为工件模式
+        # (审计已完成,record 此后只读 dates/quality/source_run_id/series_key)。
+        import asyncio as _asyncio
+
+        from finboard_data.factor_series_store import (
+            resolve_artifact_root,
+            write_series_artifact,
+        )
+        from finboard_persistence import FactorSeriesRecord
+
+        artifact_root = resolve_artifact_root(
+            getattr(settings, "factor_series_artifact_root", None)
+        )
+        meta = await _asyncio.to_thread(
+            write_series_artifact,
+            artifact_root,
+            record.series_key,
+            record.values,
+        )
+        record = FactorSeriesRecord.build_artifact(
+            code_artifact=payload.name,
+            code_commit=commit,
+            kind=payload.kind,
+            release_id=payload.release_id,
+            dataset_release_ids=payload.dataset_release_ids,
+            params=payload.params or {},
+            window_start=payload.window_start,
+            window_end=payload.window_end,
+            dates=record.dates,
+            quality=record.quality,
+            source_run_id=record.source_run_id,
+            artifact_relpath=meta.relpath,
+            artifact_checksum=meta.checksum,
+        )
         async with self._session_maker() as session:
             from finboard_persistence import FactorSeriesRepository
 
@@ -489,11 +573,22 @@ class FactorSeriesBuildExecutor:
     async def _resolve_code(
         self, payload: FactorSeriesBuildPayload
     ) -> tuple[str | None, str]:
-        """解析 (artifact_id, commit);规则与 research_code_run 同口径。"""
+        """解析 (artifact_id, commit);规则与 research_code_run 同口径。
+
+        issue #461(用户拍板 2026-09-13):序列构建仅接受协议 v2 入口
+        ``compute_series`` —— v1 ``compute`` 的逐日回退对每个决策日做全
+        历史面板重算(O(决策日数 x 面板行数)),全市场全历史窗口不可行。
+        门禁在 resolve 档位秒拒(先于挂载),具名 ``v1_series_deprecated``
+        附迁移路径;单日快照路径(research_code_run)不受影响。
+        """
         from finboard_backtest.research_code import (
             ResearchCodeService,
             is_promoted_artifact,
             promotion_status,
+        )
+        from finboard_backtest.research_code.factor_series import (
+            V1_SERIES_DEPRECATED_CODE,
+            factor_series_v2_entry_error,
         )
         from finboard_persistence import ResearchCodeArtifactRepository
 
@@ -570,14 +665,29 @@ class FactorSeriesBuildExecutor:
                     ),
                     retryable=False,
                 )
+            gate_error = factor_series_v2_entry_error(
+                service.repo.read(
+                    kind=payload.kind, name=payload.name, commit=commit
+                )
+            )
+            if gate_error is not None:
+                raise ExecutorError(
+                    code=V1_SERIES_DEPRECATED_CODE,
+                    summary=gate_error,
+                    retryable=False,
+                )
             return artifact.artifact_id, commit
 
-    async def _require_releases(self, payload: FactorSeriesBuildPayload) -> None:
+    async def _require_releases(
+        self, payload: FactorSeriesBuildPayload
+    ) -> date | None:
         """bars 主发布与联合集逐个存在性检查(fail-visible)。
 
         ``release_id`` 须锚定 **bars** 类发布(issue #371):挂载的全部
         行情行来自它;此前不校验 kind,错锚会在走完全量挂载物化(真实
         发布 ~20 分钟)后才以「窗口挂载不含任何行情行」失败——这里秒拒。
+        返回 bars 主发布的 ``start_date``(容器失败时的零预热诊断依据,
+        见 :func:`_enrich_container_failure`)。
         """
         from finboard_data.releases import ReleaseDatasetKind
         from finboard_persistence import ResearchDatasetReleaseRepository
@@ -608,6 +718,7 @@ class FactorSeriesBuildExecutor:
                         summary=f"研究数据发布不存在: {release_id}",
                         retryable=False,
                     )
+            return main_release.start_date
 
     async def _find_cached(
         self, payload: FactorSeriesBuildPayload
@@ -827,8 +938,12 @@ def _record_from_result(
         }
     quality = getattr(result, "quality", None)
     if quality is not None and not isinstance(quality, dict):
-        # #359 产出 SeriesQualityReport dataclass,归档为普通 dict
-        quality = asdict(quality)
+        # #359 产出 SeriesQualityReport dataclass,归档为普通 dict:优先其
+        # 自带 ``as_dict()``(worst_day 已 ISO 化,psycopg JSONB 可序列化);
+        # 未知 dataclass 兜底 asdict + date/datetime 递归转 ISO —— JSONB
+        # 序列化不接受 date 对象(#463 预置因子首次走到落库时暴露)。
+        as_dict = getattr(quality, "as_dict", None)
+        quality = as_dict() if callable(as_dict) else _jsonable(asdict(quality))
     if catalog_declaration:
         frozen = {"catalog_declaration": dict(catalog_declaration)}
         quality = {**(quality or {}), **frozen}

@@ -72,10 +72,17 @@ _RELEASE_ID = "replay_probe_455_release"
 
 
 class _FakeProbeSessionCM:
-    async def __aenter__(self) -> object:
-        return object()
+    """会话替身:支持逐操作短会话包装的 commit(#450 会话语义合并后需要)。"""
+
+    async def __aenter__(self) -> _FakeProbeSession:
+        return _FakeProbeSession()
 
     async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeProbeSession:
+    async def commit(self) -> None:
         return None
 
 

@@ -46,6 +46,53 @@ ESTIMATED_REBUILD_MINUTES_PER_SERIES = 2
 #: manifest 冻结引用的 version 标记(= series_key 的内容寻址版本前缀)
 FACTORS_SERIES_REF_VERSION = "v2"
 
+#: v1 逐日入口在序列构建路径的废弃具名标记(issue #461,用户拍板
+#: 2026-09-13;单日快照路径的 v1 不受影响)
+V1_SERIES_DEPRECATED_CODE = "v1_series_deprecated"
+
+
+def factor_series_v2_entry_error(files: dict[str, str] | None) -> str | None:
+    """序列构建的 v2 入口门禁:manifest.entry 非 ``compute_series`` 时返回
+    具名拒绝文案,None = 通过(executor 与 MCP 入队预检共用,#461)。
+
+    v1 ``compute`` 的逐日回退(#359 双轨)对每个决策日做全历史面板重算
+    (O(决策日数 x 面板行数)),全市场全历史窗口单因子数小时且窗口头部
+    零预热易炸(#460 取证);序列构建路径自本门禁起仅接受协议 v2。
+    ``files`` 为 ``ResearchCodeRepo.read(kind, name, commit)`` 的产物。
+    """
+    import tomllib
+
+    if files is None or "manifest.toml" not in files:
+        return (
+            f"{V1_SERIES_DEPRECATED_CODE}: 因子代码缺少 manifest.toml,无法确认 "
+            "序列入口;factor_series_build 仅接受协议 v2 "
+            "manifest.entry='factor.compute_series'(一次容器执行覆盖整个决策"
+            "窗口,头部历史不足产出缺测)。"
+        )
+    try:
+        doc = tomllib.loads(files["manifest.toml"])
+    except tomllib.TOMLDecodeError as exc:
+        return (
+            f"{V1_SERIES_DEPRECATED_CODE}: manifest.toml 解析失败({exc});"
+            "factor_series_build 仅接受协议 v2 "
+            "manifest.entry='factor.compute_series'。"
+        )
+    top = doc.get("manifest", doc)
+    entry = top.get("entry") if isinstance(top, dict) else None
+    func = (
+        entry.split(".", 1)[1] if isinstance(entry, str) and "." in entry else None
+    )
+    if func == "compute_series":
+        return None
+    return (
+        f"{V1_SERIES_DEPRECATED_CODE}: factor_series_build 已废弃协议 v1 逐日"
+        f"入口(收到 manifest.entry={entry!r}):逐日回退对每个决策日做全历史"
+        "面板重算(O(决策日数 x 面板行数)),全市场全历史窗口单因子数小时"
+        "且窗口头部零预热必然炸守卫(#460)。修复:实现 compute_series(ctx)"
+        "——挂载 Arrow 数据一次读入,向量化计算整段序列,头部历史不足产出"
+        "缺测;finboard_research_code_submit 重新提交并完成晋级链后重建。"
+    )
+
 
 @dataclass(frozen=True)
 class FactorSeriesReleaseMismatch:

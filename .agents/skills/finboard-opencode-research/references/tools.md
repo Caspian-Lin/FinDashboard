@@ -1717,7 +1717,11 @@ missing 具名拒绝 + 重建命令)。
   `kind?: "factor"|"predefined_factor" = "factor"`
 - **kind=factor(用户沙箱因子)**:sandbox 开启 + (factor,name) 有已晋级
   active+passed 产物(显式 artifact_id 同样要求非 retired;指定 commit 须
-  等于 active 引用),容器执行
+  等于 active 引用),容器执行;**manifest.entry 须为
+  `factor.compute_series` —— v1 `factor.compute` 逐日入口已废弃**(#461,
+  逐日全历史面板重算 O(决策日数 × 面板行数) 不可行;违规入队/执行具名
+  `v1_series_deprecated` 拒绝,迁移 = 实现 compute_series(ctx) 向量化
+  整段序列、头部历史不足产出缺测 → 重新 submit → 晋级链 → 重建)
 - **kind=predefined_factor(平台预置因子,#398)**:`name` 须为注册目录
   裸名(当前:return_{21,63,126,252}d + alpha101_{N} 31 个,#400),不接受
   commit/artifact_id/params(实现版本由目录锚定),**进程内执行免容器
@@ -1729,7 +1733,8 @@ missing 具名拒绝 + 重建命令)。
   `unchanged=true`(不创建任务,不启动容器);同参数任务此前
   failed/cancelled 时重提交**新建任务**(#371,不会命中失败尸体);否则
   入队返回 job_id
-- 执行:窗口内逐决策日沙箱执行 factor.compute(#359 容器执行本体)→
+- 执行:一次容器执行覆盖整个决策窗口(协议 v2,manifest.entry 须为
+  `factor.compute_series`,v1 逐日入口 #461 起废弃)→
   抽 2 个截断点做前缀不变性审计(基线复用主构建产物,变体挂载由基线
   Arrow 过滤派生,#371;检出前视 → failed=`lookahead_detected`,错误具名
   首个分歧日期,与 output_contract_violation 同级)→ 内容寻址落库

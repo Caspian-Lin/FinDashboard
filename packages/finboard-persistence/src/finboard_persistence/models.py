@@ -2564,9 +2564,15 @@ class ResearchFactorSeriesModel(Base, IdMixin):
     params: Mapped[dict[str, object]] = mapped_column(JSONB)
     window_start: Mapped[date] = mapped_column(Date)
     window_end: Mapped[date] = mapped_column(Date)
-    # 升序决策日数组 + 逐日截面值(dates 与 values 的键一一对应)
+    # 升序决策日数组(dates 恒行内;coverage 检查/summary 不触工件文件)
     dates: Mapped[list[str]] = mapped_column(JSONB)
-    values: Mapped[dict[str, object]] = mapped_column(JSONB)
+    # 逐日截面值。#463 起新写入路径为 parquet 工件(content_checksum =
+    # 工件文件 sha256,values 为 NULL);旧行内 JSONB 行 checksum 语义不变,
+    # 两模式按 artifact_relpath 是否为空判别。
+    values: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    # #463 工件存储:canonical parquet 相对路径(根 = settings
+    # factor_series_artifact_root,默认 data_cache/factor_series);NULL = 行内 JSONB 旧行。
+    artifact_relpath: Mapped[str | None] = mapped_column(String(260), nullable=True)
     content_checksum: Mapped[str] = mapped_column(String(64))
     # 质量门结果归档(NaN 比例 / 覆盖率等)
     quality: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
