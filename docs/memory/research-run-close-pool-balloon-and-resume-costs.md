@@ -1,17 +1,20 @@
-# 研究运行内存:close 池合并肥结果尖峰 + #314 大前缀续跑三重成本
+# 研究运行内存:close 池合并肥结果尖峰 + #314 大前缀续跑三重成本 + 投影/预取/arrow 表
 
-**主题**:全市场研究 run 的两个内存结构性问题——close 矩阵池分发的 gather-all 瞬时尖峰(已修,#468)与 #314 断点续算通道的 O(prefix) 成本(#470,未修)。
+**主题**:全市场研究 run 的内存结构性问题全集——close 池 gather-all 尖峰(已修,#468)、#314 续跑通道 O(prefix) 三重成本(前半场已修 #470)、无用户因子 run 的投影/预取浪费(已修)、factor_series arrow 表常驻(#470 后半场待修)。
 
-**结论 / 事实**(2026-09-14 实测,556 期全历史 5215 标的 run):
+**结论 / 事实**(2026-09-14 活体六次重启对照,556 期全历史 5215 标的 run):
 
-- `_load_close_histories_via_pool` 原实现 `asyncio.gather` 把全部标的的列式肥结果(每标的 4 列 × 全历史 ≈0.7MB Python 对象)攒在一个 list,5215 全部完成后才开始转紧凑 numpy → 主进程瞬时 +3.5GB(受控实验:close 阶段 RSS 尖峰 4.36GB)。此前生产观测的「precompute done 前后 +3.3GB 台阶」即此;**单点低频 RSS 采样会把尖峰+回落伪装成台阶**。
-- 修复 = 有界在途(信号量 64)+ `as_completed` 逐个到达逐个转换,尖峰 0.68GB;语义保持:全部任务仍被消费、任一异常整体降级进程内路径、打断异常优先上抛。daily/price 池路径结果本身紧凑(gather-all 无害),未动。
-- 大前缀(272 期)续跑实测:`store.list_artifacts` 一次性回读全量 payload(272 期 × 9.35MB JSON)物化 ≈8GB 且 arena 残留贯穿全 run(峰值 20-22GB);种子肥 bundle 被 runner 局部变量 / signal_engine 局部变量 / `_resume_bundles` 元组三处钉死(features 置空会使重持久化 checksum 漂移,构造契约也不允许);`aprefetch_inputs` 还要把整个前缀的期输入重新装配一遍(~2.5s/期)。三者和都与「已完成决策数」成正比——**越到 run 尾部重启越危险**,40GB 机器在 500+ 期重启会拒绝服务。→ issue #470。
-- numpy 数值数组不参与 GC 追踪(`PyObject_GC_UnTrack`),`gc.get_objects()` 普查**看不见**常驻 ndarray——内存归因别用 gc 普查找 numpy,用 RSS 轨迹 + 分阶段差分。
+- close 池合并 `asyncio.gather` 攒全量列式肥结果(每标的 ≈0.7MB)→ 主进程瞬时 +3.5GB;有界在途(信号量 64 + as_completed 逐个转换)后尖峰 4.36→0.68GB。**单点低频 RSS 采样会把尖峰+回落伪装成台阶**。
+- #314 大前缀(272 期)续跑三重成本:`list_artifacts` 全量物化(~8GB,arena 残留全程)、种子 bundle 四处引用钉死、`aprefetch_inputs` 缓冲 273 期完整输入(期均数十 MB)。修复 = 读回流式化 + 种子破坏性消费 + `_ResumeReplayStub` 五字段瘦记录(lot_info/prices/execution_prices/business_date/decision_at 是 resume 校验与账本重放的**全部**消费面);种子被拒的全量重算经**流重建**兜底(预取已消费流,回放不可能)。
+- 无 `u_` 用户因子的 run,factor screen 恒为 None,但横截面投影仍每期驻留 `others` 全特征截面(~15MB × 556 期 ≈ 8GB)——manifest canonical JSON 扫描 `"u_..."` 门控,当期出现 u_ 观测时逐期兜底回退全量。
+- **`LazySeriesValues._ensure_table` 把每条 factor_series parquet(盘上 10-15MB)读成常驻 arrow 表 ~365MB**(4 条 ≈1.5GB);arrow 缓冲不参与 GC 追踪,**gc 普查看不见**,是历次「说不清的台阶」的共同盲区。紧凑化(读后转 numpy 列、弃 arrow 表)在 #470 后半场。
+- loader 层本身是干净的(离线受控复现 40 期,每期驻留 ~1.6MB)——「每期几十 MB」的累积全在 signal_engine/pipeline/持久化包装层。
+- numpy/arrow 缓冲均不可见 gc 普查;内存归因别用 gc 普查找数组,用分相位 RSS 轨迹 + 受控复现差分。
 
-**Why**:这三个形态都藏在大 run 的低频观测盲区里:watcher 只采主进程单点 RSS(池子进程、20s 间隔)、gc 普查看不见数组、resume 固定开销只在真重启时付。不专门造受控复现(进程内逐相位 RSS 采样 + 分阶段差分)就永远只看到「说不清的台阶」。
+**Why**:这些形态都藏在观测盲区:watcher 只采主进程单点 RSS、gc 普查看不见 arrow/numpy、resume 固定开销只在真重启时付、投影浪费只在高 symbol 数日期(2020+)显著。不造受控复现就永远只看到「说不清的台阶」。
 
 **How to apply**:
-1. 给池分发路径加新消费形态时,先问「结果对象全量攒住会多大」——肥结果(全历史列式/逐期对象)必须流式转换,紧凑结果(矩阵)才可以 gather。
-2. 重启大 run 前先看已完成决策数:>200 期先评估 #470 的 resume 税(固定 ~35 分钟 + 数 GB),必要时先修 #470 再重启。
-3. 离线归因脚本模式见 `.tmp/diag/pool_mem2.py`(分相位计时 + 进程树 RSS 采样;注意 spawn worker 必须有 `__main__` 守卫,否则 8 worker 递归重跑实验本身,树 RSS 18GB 假象)。
+1. 池分发/流式包装新增消费形态时,先问「结果对象全量攒住会多大」——肥结果必须流式转换;给包装层(捕获/预取/缓存)加容器前先审计**全部下游消费字段**,只留消费面。
+2. 重启大 run 前看已完成决策数:>200 期评估 resume 税(修复后 ≈ precompute + 分钟级,修复前 35 分钟 + ~14GB)。
+3. 离线归因脚本模式:`.tmp/diag/pool_mem2.py`(分相位 + 进程树 RSS)/`pool_mem4.py`(逐期 census 差分);spawn worker 的脚本必须有 `__main__` 守卫(否则 8 worker 递归重跑实验,树 RSS 18GB 假象)。
+4. py-spy attach 生产 worker 后若异常死亡,先怀疑采样器(本案 01:36 死亡无法证实/证伪);采样期尽量短 + nonblocking。
