@@ -112,10 +112,15 @@ class TestWindowCollapse:
         assert events[0]["samples"] == ["300999.SZ"]
         assert events[0]["window_points"] == 40
 
-    def test_two_point_symbol_row_is_zero_variance(self) -> None:
-        """历史不足标的以零方差/零协方差行并入,矩阵仍正定过校验。"""
+    def test_two_point_symbol_row_is_conservative_imputation(self) -> None:
+        """历史不足标的以「中位方差 + 零相关」并入(不视为无风险),矩阵仍正定。
+
+        零方差行会让风险贡献投影把它当无风险资产 → 组合方差塌到 1e-9 以下
+        → builder「组合方差必须为正且有限」fail-closed(RR-aec3ca74 决策 79)。
+        中位方差取同池真实尺度,方向保守(零相关下单标的风险占比偏大)。
+        """
         price_series: dict[str, list[float]] = {
-            f"{index:06d}.SZ": _prices(30, seed=index) for index in range(4)
+            f"{index:06d}.SZ": _prices(60, seed=index) for index in range(4)
         }
         price_series["300999.SZ"] = _prices(2, seed=5)
 
@@ -124,8 +129,10 @@ class TestWindowCollapse:
         assert estimate is not None
         index = list(estimate.tickers).index("300999.SZ")
         row = estimate.matrix[index]
-        assert abs(float(row[index])) <= PSD_MIN_EIGENVALUE * 2.0
-        assert float(np.abs(np.delete(row, index)).max()) <= PSD_MIN_EIGENVALUE * 2.0
+        others = np.delete(np.diag(estimate.matrix), index)
+        assert float(row[index]) == pytest.approx(float(np.median(others)), rel=1e-9)
+        assert float(row[index]) > 1e-8  # 不是「无风险」
+        assert float(np.abs(np.delete(row, index)).max()) <= PSD_MIN_EIGENVALUE * 4.0
         assert _min_eigenvalue(estimate.matrix) >= PSD_MIN_EIGENVALUE - 1e-15
         assert _covariance_problem(estimate, {"300999.SZ"}) is None
 

@@ -424,6 +424,7 @@ def _rule_matches(
     value: float,
     finals: Mapping[str, NodeValue],
     series: Mapping[str, NodeSeries],
+    rank_ratios: Mapping[str, Mapping[str, float]],
 ) -> bool:
     comparator = rule.comparator
     if comparator is SignalComparator.GREATER_THAN:
@@ -444,7 +445,7 @@ def _rule_matches(
         return rule.lower_bound <= value <= rule.upper_bound
     if comparator in {SignalComparator.RANK_TOP, SignalComparator.RANK_BOTTOM}:
         assert rule.threshold is not None
-        ratio = _rank_ratios(finals[rule.feature_id]).get(symbol)
+        ratio = rank_ratios.get(rule.feature_id, {}).get(symbol)
         if ratio is None:
             return False
         if comparator is SignalComparator.RANK_TOP:
@@ -482,6 +483,21 @@ def evaluate_signal_rules(
     policy = spec.signal_rules.conflict_policy
     default_action = spec.signal_rules.default_action
 
+    # 2026-09-13 性能(决策段 CPU 22% 热点):排名类规则的横截面排名只依赖
+    # 当期 ``node_finals``,此前在 ``_rule_matches`` 内**逐标的**重算
+    # (:func:`_rank_ratios` 每次全截面排序,O(n² log n):n=200 标的 x 2 条
+    # 排名规则 ≈ 每期 400 次全排序)。这里按 feature_id 预计算一次复用,值与
+    # 逐标的重算逐位相同(同一函数、同一输入)。
+    rank_ratios: dict[str, dict[str, float]] = {}
+    for rule in rules:
+        if rule.comparator in {
+            SignalComparator.RANK_TOP,
+            SignalComparator.RANK_BOTTOM,
+        } and rule.feature_id not in rank_ratios:
+            rank_ratios[rule.feature_id] = _rank_ratios(
+                node_finals.get(rule.feature_id, {})
+            )
+
     hits: dict[str, list[tuple[SignalRule, float]]] = {}
     for symbol in sorted(included_symbols):
         for rule in rules:
@@ -494,6 +510,7 @@ def evaluate_signal_rules(
                 value=value,
                 finals=node_finals,
                 series=node_series,
+                rank_ratios=rank_ratios,
             ):
                 hits.setdefault(symbol, []).append((rule, value))
 
@@ -859,6 +876,11 @@ async def _next_execution_at(
     )
 
 
+#: 无法估计风险标的的兜底方差(估计矩阵整体退化时使用;与
+#: ``portfolio.covariance.PSD_MIN_EIGENVALUE`` 同量级的保守下限)。
+PSD_FLOOR_VARIANCE = 1e-12
+
+
 def _estimate_covariance(
     price_series: Mapping[str, Sequence[float]],
 ) -> CovarianceEstimate | None:
@@ -889,29 +911,39 @@ def _estimate_covariance(
     零方差(全常数)序列 fail-visible:计数 + 最多 10 个样例以具名 warning
     打出,标的仍留在估计域内(Ledoit-Wolf 收缩 + PD 修复保证正定)。
 
-    窗口表决排除「历史不足」标的(2026-09-13 事故):窗口 = **可估计标的**
-    (≥3 个价点 → ≥2 期收益,与 ``min_observations=2`` 对齐)上的最短序列;
-    恰好 2 个价点的标的(新上市)不参与窗口表决、以零方差/零协方差行保留在
-    估计域内(矩阵扩展 + PD clip,与常数序列同形),具名 warning 可见。
-    此前窗口 = 全池最短序列,全市场小市值池(bottom market_cap 选股天然纳入
-    次新股)只要有一只 2 价点标的就把窗口压到 2 → 观测 1 期 → 协方差 None →
-    组合风险贡献硬约束 fail-closed 拒绝整条 run(RR-0c2aa 决策 6 取证:
-    2015-03-20 池内存在 2 个价点的新上市标的)。可估计标的不足 2 只时仍
-    返回 None(消费端 fail-closed 语义不变)。
+    窗口表决排除「历史不足」标的(2026-09-13 事故):窗口只在**可估计
+    标的**(≥31 个价点 → ≥30 期观测,与 ``MIN_OBS_FOR_FULL_COVARIANCE``
+    对齐)上取最短;历史不足标的(含恰好 2 个价点的新上市标的)不参与窗口
+    表决,以「中位方差 + 零相关」行保守并入估计域(矩阵扩展 + PD clip),
+    具名 warning 可见。此前窗口 = 全池最短序列,全市场小市值池(bottom
+    market_cap 选股天然纳入次新股)只要有一只 2-3 价点标的就把窗口压到
+    2 期观测 → Ledoit-Wolf 收缩强度 → 1.0 → 个别标的样本方差 ~1e-10 →
+    组合方差塌到 1e-9 以下 → builder「组合方差必须为正且有限」fail-closed
+    拒整条 run(RR-aec3ca74 决策 79 取证:池内 3 价点标的把 n_obs 压到 2,
+    持仓 600101.SH 方差 3.2e-10)。池内可估计标的不足 2 只时退化为旧
+    min-length 语义;标的 < 2 个或公共窗口观测 < 2 期返回 ``None``,由
+    组合流水线按 fail_closed 拒绝(风险贡献硬约束启用时缺协方差必须失败)。
     """
     import numpy as np
     import numpy.typing as npt
 
     from finboard_backtest.portfolio import estimate_covariance
+    from finboard_backtest.portfolio.covariance import MIN_OBS_FOR_FULL_COVARIANCE
 
     symbols = sorted(symbol for symbol, values in price_series.items() if len(values) >= 2)
     if len(symbols) < 2:
         return None
-    estimable = [symbol for symbol in symbols if len(price_series[symbol]) >= 3]
-    short_history = [symbol for symbol in symbols if len(price_series[symbol]) < 3]
+    min_points = MIN_OBS_FOR_FULL_COVARIANCE + 1
+    estimable = [symbol for symbol in symbols if len(price_series[symbol]) >= min_points]
+    short_history = [symbol for symbol in symbols if len(price_series[symbol]) < min_points]
     if len(estimable) < 2:
-        # 可估计标的不足:退化标的无法单独构成一致估计(与旧实现同折)。
-        return None
+        # 可估计(≥30 期观测)标的不足:退化为旧的最短序列语义 —— 全部标的
+        # 按 ≥2 价点取最短公共窗口;仍不足 2 只可估计时返回 None。
+        estimable = [symbol for symbol in symbols if len(price_series[symbol]) >= 3]
+        short_history = [symbol for symbol in symbols if len(price_series[symbol]) < 3]
+        if len(estimable) < 2:
+            return None
+        min_points = 3
     window = min(len(price_series[symbol]) for symbol in estimable)
     n_obs = window - 1
     if n_obs < 2:
@@ -938,41 +970,58 @@ def _estimate_covariance(
             n_observations=n_obs,
         )
     estimate = estimate_covariance(returns_by_ticker, min_observations=2)
-    if short_history:
-        estimate = _append_zero_variance_assets(estimate, short_history)
+    # 退化标的可能同时落在可估计组(价点足够但序列恒定):取并集去重,避免
+    # tickers 出现重复行(builder 覆盖校验会把重复判为坏矩阵)。
+    imputed = sorted(set(short_history) | set(degenerate))
+    if imputed:
+        estimate = _impute_unestimable_assets(estimate, imputed)
         logger.warning(
             "research_run.covariance_short_history_symbols",
-            count=len(short_history),
-            samples=short_history[:10],
+            count=len(imputed),
+            samples=sorted(imputed)[:10],
             n_observations=n_obs,
             window_points=window,
+            imputed_variance=float(np.median(np.diag(estimate.matrix))),
+            min_points=min_points,
         )
     return estimate
 
 
-def _append_zero_variance_assets(
+def _impute_unestimable_assets(
     estimate: CovarianceEstimate,
     symbols: Sequence[str],
 ) -> CovarianceEstimate:
-    """把历史不足标的以零方差/零协方差行并入估计(2026-09-13 事故)。
+    """把无法估计风险的标的以「中位方差 + 零相关」并入估计(2026-09-13)。
 
-    这些标的(2 个价点,收益仅 1 期)无法估计任何风险量,但必须留在
+    覆盖两类:(1) 历史不足(价点数 < 最小估计窗口;样本方差是 2-3 期噪声,
+    甚至 ~1e-10);(2) 零方差退化序列(Ledoit-Wolf 目标矩阵对 ``std=0``
+    的 ``std_safe=1.0`` 替换会给出与真实尺度无关的方差)。两者都必须留在
     ``tickers`` 内 —— builder 的信号标的覆盖校验与风险贡献投影的目标覆盖
-    校验都按 ``tickers`` 判定。零行在 ``_ensure_positive_definite`` 里被
-    clip 到 ``PSD_MIN_EIGENVALUE``,矩阵保持正定过校验;零方差语义 = 该标的
-    对组合风险无已知贡献(与常数序列 degenerate 处理同形,fail-visible)。
+    校验都按 ``tickers`` 判定。
+
+    方差取估计矩阵的**中位对角**(同池真实尺度),相关性置零:既不把它们
+    当无风险资产(零方差行会让风险贡献投影放行任意权重、组合方差塌到
+    1e-9 以下触发「组合方差必须为正且有限」fail-closed),也不虚构相关性
+    (零相关下单标的风险占比偏大 → 风险贡献上限更紧,方向保守)。
+    矩阵经 ``_ensure_positive_definite`` clip 保持正定过校验。
     """
     import numpy as np
 
     from finboard_backtest.portfolio import CovarianceEstimate as _CovarianceEstimate
     from finboard_backtest.portfolio.covariance import _ensure_positive_definite
 
-    merged = sorted([*estimate.tickers, *symbols])
+    median_variance = float(np.median(np.diag(estimate.matrix)))
+    if not np.isfinite(median_variance) or median_variance <= 0.0:
+        # 估计矩阵本身已退化(全零方差等):退化为 clip 下限,保持 PD 语义。
+        median_variance = PSD_FLOOR_VARIANCE
+    merged = sorted({*estimate.tickers, *symbols})
     size = len(merged)
     matrix = np.zeros((size, size), dtype=np.float64)
     position = {ticker: index for index, ticker in enumerate(merged)}
     source = [position[ticker] for ticker in estimate.tickers]
     matrix[np.ix_(source, source)] = estimate.matrix
+    imputed_index = [position[ticker] for ticker in symbols]
+    matrix[imputed_index, imputed_index] = median_variance
     return _CovarianceEstimate(
         matrix=_ensure_positive_definite(matrix),
         tickers=merged,
