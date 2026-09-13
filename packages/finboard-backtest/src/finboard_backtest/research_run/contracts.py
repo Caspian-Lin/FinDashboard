@@ -1076,6 +1076,20 @@ def _optional_json_dict(value: object) -> dict[str, JsonValue] | None:
 
 
 def to_json_value(value: object) -> JsonValue:
+    """把研究域对象转换为 JSON 可序列化结构(冻结产物 / artifact 契约)。
+
+    2026-09-13 性能(决策段 CPU 25% 热点):dataclass 分支不再经
+    ``dataclasses.asdict`` —— ``asdict`` 先 ``copy.deepcopy`` 整棵对象树
+    (每个嵌套对象 / 元组 / 字典都复制一遍),再由本函数对副本走第二遍;
+    对 UNIVERSE(全候选池,数千对象)与 FEATURES(数千 FeatureValue)这类
+    大 payload,两遍 + 深拷贝是纯开销。改为按字段直接递归,输出**逐值
+    不变**(字段序 = dataclass 定义序,与 ``asdict`` 一致;
+    ``ConstraintOutcome`` 的 None 省略键语义保持)。
+    """
+    return _to_json_value(value)
+
+
+def _to_json_value(value: object) -> JsonValue:
     if isinstance(value, StrEnum):
         return value.value
     if value is None or isinstance(value, (bool, int, float, str)):
@@ -1085,19 +1099,24 @@ def to_json_value(value: object) -> JsonValue:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     if isinstance(value, ResearchStrategySpec):
-        return to_json_value(value.model_dump(mode="json"))
-    if is_dataclass(value):
-        payload = asdict(cast(Any, value))
+        return _to_json_value(value.model_dump(mode="json"))
+    if is_dataclass(value) and not isinstance(value, type):
+        fields = getattr(value, "__dataclass_fields__", None)
+        if fields is None:
+            raise TypeError(f"不支持序列化的研究值: {type(value)!r}")
+        payload: dict[str, JsonValue] = {
+            name: _to_json_value(getattr(value, name)) for name in fields
+        }
         # issue #452:``ConstraintOutcome.symbol`` 为 None 时省略键(#386 零值
         # 省略键先例)—— 存量 artifact payload 与 pipeline checksum 逐字节
         # 不变;非 None 才落键,读回端(checkpoint_resume)缺键回退 None。
         if isinstance(value, ConstraintOutcome) and value.symbol is None:
             payload.pop("symbol", None)
-        return to_json_value(payload)
+        return payload
     if isinstance(value, tuple | list):
-        return [to_json_value(item) for item in value]
+        return [_to_json_value(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): to_json_value(child) for key, child in value.items()}
+        return {str(key): _to_json_value(child) for key, child in value.items()}
     raise TypeError(f"不支持序列化的研究值: {type(value)!r}")
 
 
