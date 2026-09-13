@@ -273,10 +273,11 @@ class TestSignalEnginePartialEvidence:
         adapter = _adapter(
             manifest, _closes_provider(n_days=60), snapshots
         )
-        # 只驱动加载(等价于决策循环已跑过 1 期),然后模拟中期失败定位
-        await adapter._load()
-        assert adapter._inputs is not None
-        assert len(adapter._inputs) == 2
+        # issue #463:输入不再由 _load 预物化,改为逐期拉取时捕获 ——
+        # 驱动决策循环产出全部期次,等价旧「全部冻结输入已就绪」。
+        decisions = [item async for item in adapter.decisions(manifest)]
+        assert len(decisions) == 2
+        assert len(adapter._business_dates) == 2
 
         marker = await adapter.compute_partial_evidence(manifest, completed_decisions=1)
 
@@ -295,7 +296,13 @@ class TestSignalEnginePartialEvidence:
         具名 warning,build_report 无 factor_screen。"""
         manifest = _manifest(_spec(rank_threshold=0.5))
         adapter = _adapter(manifest, _closes_provider(), {"factor-v1": _snapshot(DECISION_AT)})
+        # issue #463:输入改为逐期拉取即捕获 —— 只拉一期(不产出决策、
+        # 不触发决策循环末尾的 screen 计算),等价旧「_load 后立即补算」。
         await adapter._load()
+        assert adapter._input_iterator is not None
+        item = await adapter._input_iterator.__anext__()
+        assert item is not None
+        assert len(adapter._business_dates) == 1
 
         def broken_factory(release_id: str) -> _StubProvider:
             raise RuntimeError(f"release io exploded: {release_id}")
@@ -518,7 +525,10 @@ class TestUserCodePartialEvidence:
         from types import SimpleNamespace
 
         from finboard_backtest.portfolio.contracts import AssetLotInfo
-        from finboard_backtest.research_run.factor_screen import QUANTILES
+        from finboard_backtest.research_run.factor_screen import (
+            QUANTILES,
+            _period_cross_section,
+        )
         from finboard_backtest.research_run.portfolio_pipeline import (
             PortfolioDecisionInput,
         )
@@ -570,15 +580,13 @@ class TestUserCodePartialEvidence:
                 input_artifact_ids=("release-v1",),
             )
 
-        adapter._contexts = (  # type: ignore[assignment]
-            SimpleNamespace(context=SimpleNamespace(business_date=decision_at.date())),
-            SimpleNamespace(
-                context=SimpleNamespace(business_date=DECISION_AT_2.date())
-            ),
-        )
-        adapter._screen_inputs = [
-            _input(decision_at, 6.0),
-            _input(DECISION_AT_2, 3.0),
+        # issue #463:直接注入逐期捕获产物(等价于决策循环对前两期的捕获:
+        # 失败期次(第 2 期)的投影 / 决策日 / target_weights 均在 build 前
+        # 捕获),不再驻留全量上下文 / 输入。
+        adapter._context_dates = [decision_at.date(), DECISION_AT_2.date()]
+        adapter._screen_periods = [
+            _period_cross_section(_input(decision_at, 6.0)),
+            _period_cross_section(_input(DECISION_AT_2, 3.0)),
         ]
         adapter._target_weights = [
             {symbols[0]: 0.5, symbols[1]: 0.5},

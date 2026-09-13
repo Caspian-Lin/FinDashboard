@@ -4,8 +4,8 @@
 
 1. 决策日推导 / PIT 特征 / universe 过滤 / 价格序列与协方差:与
    ``multi_factor`` 信号引擎**共用同一加载路径**
-   (:func:`build_decision_load_contexts`)—— 决策时点、候选池、执行元数据
-   的口径完全一致,报告可同屏对比;
+   (:func:`iter_decision_load_contexts`,issue #463 起逐期流式拉取)——
+   决策时点、候选池、执行元数据的口径完全一致,报告可同屏对比;
 2. 每个决策日:引擎回显**当前组合权重**(上一决策成交后的实际账本状态,
    :func:`_current_weights_view` 只读视图)→ 沙箱一次性容器执行
    ``strategy.decide(ctx)``(PIT 由挂载物理隔离保证,#216 原语)→
@@ -29,7 +29,7 @@ before/after),单一截断权威。
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
@@ -72,7 +72,7 @@ from finboard_backtest.research_run.signal_engine import (
     _bars_release_ref,
     _load_benchmark_curve,
     build_daily_equity_curve,
-    build_decision_load_contexts,
+    iter_decision_load_contexts,
 )
 from finboard_backtest.research_sandbox.strategy_exec import (
     StrategyDecisionOutcome,
@@ -169,10 +169,14 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         self._precompute_phase_reporter = precompute_phase_reporter
         # issue #450 追续:预计算段取消探针(只查不报)。
         self._precompute_cancel_probe = precompute_cancel_probe
-        self._contexts: tuple[DecisionLoadContext, ...] | None = None
+        # issue #463:流式决策上下文(惰性创建于 _ensure_loaded,逐期拉取,
+        # 不再全量物化);决策日与 screen 投影在逐期消费时捕获(#304 partial
+        # 证据失败期也在内)。
+        self._context_stream: AsyncIterator[DecisionLoadContext] | None = None
+        self._context_dates: list[date] = []
         self._sandbox: StrategySandboxCaller | None = None
         self._decision_records: list[dict[str, Any]] = []
-        self._screen_inputs: list[PortfolioDecisionInput] = []
+        self._screen_periods: list[dict[str, Any]] = []
         self._target_weights: list[Mapping[str, float]] = []
         self._strategy_screen: dict[str, Any] | None = None
         self._equity_curve: tuple[EquityPoint, ...] = ()
@@ -182,8 +186,17 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
     def execution_mode(self) -> ResearchExecutionMode:
         return execution_mode_for(self._manifest.parameters)
 
-    async def _ensure_loaded(self) -> tuple[Any, StrategySandboxCaller]:
-        if self._contexts is None or self._sandbox is None:
+    async def _ensure_loaded(
+        self,
+    ) -> tuple[AsyncIterator[DecisionLoadContext], StrategySandboxCaller]:
+        """惰性初始化:流式决策上下文生成器 + 沙箱调用方(#463)。
+
+        上下文生成器在首次 ``__anext__`` 前不执行任何加载(异步生成器惰性
+        语义),加载失败落在决策循环首拉处 —— 与 coordinator 的
+        decision_load 失败分流语义一致。调用方负责在消费结束后关闭生成器
+        (finally → 特征进程池即时释放)。
+        """
+        if self._context_stream is None or self._sandbox is None:
             spec = self._manifest.strategy_spec
             if spec.code_artifact is None:
                 raise ValueError("user_code 规格 manifest 未冻结 code_artifact(入队路径异常)")
@@ -194,7 +207,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                     "user_code 策略执行需要 settings(沙箱镜像/资源限制/代码仓库"
                     "路径);worker 未注入 settings_factory",
                 )
-            self._contexts = await build_decision_load_contexts(
+            self._context_stream = iter_decision_load_contexts(
                 self._manifest,
                 release_provider_factory=self._release_provider_factory,
                 snapshot_provider=self._snapshot_provider,
@@ -212,13 +225,17 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 run_id=self._manifest.run_id,
                 params=self._manifest.parameters,
             )
-        return self._contexts, self._sandbox
+        return self._context_stream, self._sandbox
 
     async def decisions(
         self,
         manifest: ResearchRunManifest,
     ) -> AsyncIterator[DecisionBundle]:
-        contexts, sandbox = await self._ensure_loaded()
+        from finboard_backtest.research_run.factor_screen import (
+            _period_cross_section,
+        )
+
+        context_stream, sandbox = await self._ensure_loaded()
         state = _PipelineState(
             cash=manifest.initial_capital,
             equity_high_water=manifest.initial_capital,
@@ -238,62 +255,79 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         )
         constraints_echo = _constraints_echo(manifest)
         collected: list[DecisionBundle] = []
-
-        for index, loaded in enumerate(contexts):
-            context = loaded.context
-            # 引擎回显当前权重:decide 看到上一决策成交后的真实账本状态。
-            current_weights = _current_weights_view(
-                state, prices=context.prices, lot_info=context.lot_info
-            )
-            outcome: StrategyDecisionOutcome = await sandbox.decide(
-                decision_index=index,
-                decision_at=context.decision_at,
-                symbols=tuple(sorted(loaded.signalable)),
-                current_weights=current_weights,
-                strategy_constraints=constraints_echo,
-            )
-            self._decision_records.append(outcome.record)
-            self._target_weights.append(dict(outcome.weights))
-            signals = targets_to_signals(
-                outcome.weights, loaded.signalable, decision_at=context.business_date
-            )
-            item = PortfolioDecisionInput(
-                business_date=context.business_date,
-                decision_at=context.decision_at,
-                execution_at=context.execution_at,
-                # issue #254:candidates 语义与 multi_factor 引擎对齐 —— 用
-                # universe 过滤后的候选池(loaded.candidates),不再把发布全
-                # ready 标的(context.candidates,全部 included=True)透传。
-                # decide 输出的池外标的仍由 targets_to_signals 丢弃 + 具名
-                # warning 兜底(#218),但候选池本身受 UniverseSpec 控制。
-                candidates=loaded.candidates,
-                features=loaded.features,
-                signals=signals,
-                prices=context.prices,
-                execution_prices=context.execution_prices,
-                lot_info=context.lot_info,
-                input_artifact_ids=context.input_artifact_ids,
-                covariance=loaded.covariance,
-            )
-            self._screen_inputs.append(item)
-            try:
-                decision = self._build_decision(
-                    manifest=manifest,
-                    item=item,
-                    index=index,
-                    state=state,
-                    constraints=constraints,
-                    risk_exit_policy=risk_exit_policy,
-                    allocation_method=_DIRECT_WEIGHTS_METHOD,
-                    conflict_policy=conflict_policy,
-                    # direct_weights 路径不消费 target_gross(builder 显式
-                    # 跳过重缩放);传规格声明值仅为满足管线签名。
-                    target_gross=manifest.strategy_spec.portfolio_policy.target_gross_exposure,
+        index = 0
+        try:
+            # issue #463:逐期拉取决策上下文(不再全量物化),每期流程与
+            # 流式化前一致:回显权重 → 沙箱 decide → 权重映射信号 → 组装
+            # 输入(捕获 screen 投影与决策日)→ 管线构建 → yield。
+            while True:
+                try:
+                    loaded = await context_stream.__anext__()
+                except StopAsyncIteration:
+                    break
+                context = loaded.context
+                # 引擎回显当前权重:decide 看到上一决策成交后的真实账本状态。
+                current_weights = _current_weights_view(
+                    state, prices=context.prices, lot_info=context.lot_info
                 )
-            except (AllocationError, SizingError, ValueError) as exc:
-                raise ResearchConstraintViolationError(str(exc)) from exc
-            yield decision
-            collected.append(decision)
+                outcome: StrategyDecisionOutcome = await sandbox.decide(
+                    decision_index=index,
+                    decision_at=context.decision_at,
+                    symbols=tuple(sorted(loaded.signalable)),
+                    current_weights=current_weights,
+                    strategy_constraints=constraints_echo,
+                )
+                self._decision_records.append(outcome.record)
+                self._target_weights.append(dict(outcome.weights))
+                signals = targets_to_signals(
+                    outcome.weights, loaded.signalable, decision_at=context.business_date
+                )
+                item = PortfolioDecisionInput(
+                    business_date=context.business_date,
+                    decision_at=context.decision_at,
+                    execution_at=context.execution_at,
+                    # issue #254:candidates 语义与 multi_factor 引擎对齐 —— 用
+                    # universe 过滤后的候选池(loaded.candidates),不再把发布全
+                    # ready 标的(context.candidates,全部 included=True)透传。
+                    # decide 输出的池外标的仍由 targets_to_signals 丢弃 + 具名
+                    # warning 兜底(#218),但候选池本身受 UniverseSpec 控制。
+                    candidates=loaded.candidates,
+                    features=loaded.features,
+                    signals=signals,
+                    prices=context.prices,
+                    execution_prices=context.execution_prices,
+                    lot_info=context.lot_info,
+                    input_artifact_ids=context.input_artifact_ids,
+                    covariance=loaded.covariance,
+                )
+                # issue #463:逐期捕获 screen 投影与决策日(流式化前等价位置
+                # 为 _screen_inputs 逐期 append;不再驻留全量输入)。
+                self._screen_periods.append(_period_cross_section(item))
+                self._context_dates.append(context.business_date)
+                try:
+                    decision = self._build_decision(
+                        manifest=manifest,
+                        item=item,
+                        index=index,
+                        state=state,
+                        constraints=constraints,
+                        risk_exit_policy=risk_exit_policy,
+                        allocation_method=_DIRECT_WEIGHTS_METHOD,
+                        conflict_policy=conflict_policy,
+                        # direct_weights 路径不消费 target_gross(builder 显式
+                        # 跳过重缩放);传规格声明值仅为满足管线签名。
+                        target_gross=manifest.strategy_spec.portfolio_policy.target_gross_exposure,
+                    )
+                except (AllocationError, SizingError, ValueError) as exc:
+                    raise ResearchConstraintViolationError(str(exc)) from exc
+                yield decision
+                collected.append(decision)
+                index += 1
+        finally:
+            # issue #463:上下文生成器随本生成器退出(耗尽 / 关闭 / 抛错)
+            # 即关闭,级联收尾加载生成器 → 特征进程池(即时释放)。
+            if isinstance(context_stream, AsyncGenerator):
+                await context_stream.aclose()
 
         # screen 是治理/展示证据,不改变组合管线的机械结果。若计算因数据
         # 缺失失败,保留带 issues 的空证据,让晋级门明确 fail-closed。
@@ -321,12 +355,12 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
             return None
         try:
             from finboard_backtest.research_run.factor_screen import (
-                build_strategy_screen,
+                build_strategy_screen_from_periods,
             )
 
-            self._strategy_screen = await build_strategy_screen(
+            self._strategy_screen = await build_strategy_screen_from_periods(
                 manifest,
-                self._screen_inputs,
+                self._screen_periods,
                 self._target_weights,
                 self._release_provider_factory,
             )
@@ -338,7 +372,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 run_id=manifest.run_id,
             )
             self._strategy_screen = {
-                "n_periods": len(self._screen_inputs),
+                "n_periods": len(self._screen_periods),
                 "issues": [f"strategy_screen_computation_failed: {exc}"],
             }
             return f"strategy_screen_computation_failed: {exc}"
@@ -351,23 +385,22 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
     ) -> dict[str, JsonValue] | None:
         """组合阶段硬约束拒绝后的部分证据补算(issue #304,与信号引擎同构)。
 
-        strategy_screen 的输入(``_screen_inputs`` / ``_target_weights``)在
-        每期 ``_build_decision`` 之前就已收集,失败期次的权重也在内;这里基于
-        已构建的冻结上下文尽力补算并暂存,``build_report`` 照常携带。返回
-        partial 标记(失败决策 1-based 定位 + 补算 warning),冻结上下文尚未
-        加载时返回 None。
+        strategy_screen 的输入(逐期捕获的 ``_screen_periods`` /
+        ``_target_weights``,#463:失败期次的投影 / 权重在 ``_build_decision``
+        前就已捕获)与组合阶段结果无关;这里基于已捕获数据尽力补算并暂存,
+        ``build_report`` 照常携带。返回 partial 标记(失败决策 1-based 定位 +
+        补算 warning),尚无已捕获上下文(未开始逐期消费)时返回 None。
         """
-        contexts = self._contexts
-        if contexts is None or not contexts:
+        if not self._context_dates:
             return None
         marker: dict[str, JsonValue] = {
             "completed_decisions": completed_decisions,
             "failed_decision_index": completed_decisions + 1,
         }
-        if completed_decisions < len(contexts):
-            marker["decision_date"] = contexts[
+        if completed_decisions < len(self._context_dates):
+            marker["decision_date"] = self._context_dates[
                 completed_decisions
-            ].context.business_date.isoformat()
+            ].isoformat()
         warnings: list[JsonValue] = []
         screen_failure = await self._compute_strategy_screen(manifest)
         if screen_failure is not None:

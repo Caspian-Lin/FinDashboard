@@ -56,10 +56,28 @@ async def build_factor_screen(
     inputs: Sequence[PortfolioDecisionInput],
     release_provider_factory: Any,
 ) -> dict[str, Any] | None:
-    """对 run 引用的用户因子计算 screen 指标;无用户因子返回 None。"""
-    if not inputs:
+    """对 run 引用的用户因子计算 screen 指标;无用户因子返回 None。
+
+    issue #463 兼容入口:逐期投影横截面后转调
+    :func:`build_factor_screen_from_periods`;流式调用方(signal_engine
+    逐期拉取输入)应直接捕获投影并调用后者。
+    """
+    return await build_factor_screen_from_periods(
+        manifest,
+        [_period_cross_section(item) for item in inputs],
+        release_provider_factory,
+    )
+
+
+async def build_factor_screen_from_periods(
+    manifest: ResearchRunManifest,
+    periods: Sequence[dict[str, Any]],
+    release_provider_factory: Any,
+) -> dict[str, Any] | None:
+    """对预投影横截面(issue #463:``_period_cross_section`` 产物)计算
+    screen 指标;无期次或无用户因子返回 None。"""
+    if not periods:
         return None
-    periods = [_period_cross_section(item) for item in inputs]
     user_factors: set[str] = set()
     for period in periods:
         user_factors.update(period["user"])
@@ -67,7 +85,7 @@ async def build_factor_screen(
         return None
 
     forward_closes = await _forward_close_series(
-        manifest, inputs, periods, release_provider_factory
+        manifest, periods, release_provider_factory
     )
     forward_returns = _forward_returns(periods, forward_closes)
 
@@ -97,10 +115,27 @@ async def build_strategy_screen(
     策略没有单独的因子观测列,这里把每期 ``targets`` 视为一个截面评分
     ``__strategy__`` 后复用 IC/换手/相关性实现。目标权重只是研究输入,
     不会在本函数中生成订单或修改组合状态。
+
+    issue #463 兼容入口:逐期投影横截面后转调
+    :func:`build_strategy_screen_from_periods`。
     """
-    if not inputs or len(inputs) != len(target_weights):
+    return await build_strategy_screen_from_periods(
+        manifest,
+        [_period_cross_section(item) for item in inputs],
+        target_weights,
+        release_provider_factory,
+    )
+
+
+async def build_strategy_screen_from_periods(
+    manifest: ResearchRunManifest,
+    periods: Sequence[dict[str, Any]],
+    target_weights: Sequence[Mapping[str, float]],
+    release_provider_factory: Any,
+) -> dict[str, Any] | None:
+    """对预投影横截面 + user_code 每期目标权重计算 screen 指标(#463)。"""
+    if not periods or len(periods) != len(target_weights):
         return None
-    periods = [_period_cross_section(item) for item in inputs]
     strategy_symbols = {
         str(symbol)
         for weights in target_weights
@@ -116,7 +151,6 @@ async def build_strategy_screen(
 
     forward_closes = await _forward_close_series(
         manifest,
-        inputs,
         periods,
         release_provider_factory,
         symbols=strategy_symbols,
@@ -143,7 +177,11 @@ async def build_strategy_screen(
 def _period_cross_section(
     item: PortfolioDecisionInput,
 ) -> dict[str, Any]:
-    """把一期决策输入按 user / 其他特征重组为横截面字典。"""
+    """把一期决策输入按 user / 其他特征重组为横截面字典(#463 投影)。
+
+    投影只保留 screen 计算所需的小数据(features 派生值 / 决策时点 /
+    决策价 / 候选池 symbol→market),供流式调用方逐期捕获后丢弃全量输入。
+    """
     user: dict[str, dict[str, tuple[float, datetime]]] = {}
     others: dict[str, dict[str, tuple[float, datetime]]] = {}
     for value in item.features:
@@ -166,12 +204,16 @@ def _period_cross_section(
         "user": cleaned_user,
         "others": cleaned_others,
         "prices": dict(item.prices),
+        # issue #463:候选池 symbol→market(_release_end_closes 的期末价
+        # 读取需要;候选池内 symbol 唯一,跨期由消费方首见优先合并)。
+        "markets": {
+            candidate.symbol: candidate.market for candidate in item.candidates
+        },
     }
 
 
 async def _forward_close_series(
     manifest: ResearchRunManifest,
-    inputs: Sequence[PortfolioDecisionInput],
     periods: Sequence[dict[str, Any]],
     release_provider_factory: Any,
     *,
@@ -180,14 +222,14 @@ async def _forward_close_series(
     """每期 forward 锚点 close:下一期决策可见 close;末期为发布区间末。"""
     closes = [dict(period["prices"]) for period in periods[1:]]
     closes.append(
-        await _release_end_closes(manifest, inputs, release_provider_factory, symbols=symbols)
+        await _release_end_closes(manifest, periods, release_provider_factory, symbols=symbols)
     )
     return closes
 
 
 async def _release_end_closes(
     manifest: ResearchRunManifest,
-    inputs: Sequence[PortfolioDecisionInput],
+    periods: Sequence[dict[str, Any]],
     release_provider_factory: Any,
     *,
     symbols: set[str] | None = None,
@@ -199,9 +241,9 @@ async def _release_end_closes(
     provider = release_provider_factory(release_ref.artifact_id)
     release = provider.release
     as_of = datetime.combine(release.end_date + timedelta(days=1), time(0, 0), tzinfo=UTC)
-    markets = _symbol_markets(inputs)
+    markets = _symbol_markets(periods)
     prices: dict[str, float] = {}
-    for symbol in sorted(symbols if symbols is not None else _screen_symbols(inputs)):
+    for symbol in sorted(symbols if symbols is not None else _screen_symbols(periods)):
         market = markets.get(symbol)
         if market is None:
             continue
@@ -218,28 +260,25 @@ async def _release_end_closes(
     return prices
 
 
-def _screen_symbols(inputs: Sequence[PortfolioDecisionInput]) -> set[str]:
-    """出现 user 因子观测的标的集合(screen 只关心这些)。"""
+def _screen_symbols(periods: Sequence[dict[str, Any]]) -> set[str]:
+    """出现 user 因子观测的标的集合(screen 只关心这些)。
+
+    投影的 ``user`` 桶只含有限值观测(#463:与逐 value 校验
+    ``is_user_factor_name ∧ 非空 ∧ isfinite`` 的旧口径等值)。
+    """
     symbols: set[str] = set()
-    for item in inputs:
-        for value in item.features:
-            if (
-                is_user_factor_name(value.feature_id)
-                and value.value is not None
-                and math.isfinite(value.value)
-            ):
-                symbols.add(value.symbol)
+    for period in periods:
+        for series in period["user"].values():
+            symbols.update(series)
     return symbols
 
 
-def _symbol_markets(
-    inputs: Sequence[PortfolioDecisionInput],
-) -> dict[str, str]:
-    """从候选池收集 symbol → market 映射(发布 instrument 口径)。"""
+def _symbol_markets(periods: Sequence[dict[str, Any]]) -> dict[str, str]:
+    """从各期投影候选池收集 symbol → market 映射(首见优先,跨期一致)。"""
     markets: dict[str, str] = {}
-    for item in inputs:
-        for candidate in item.candidates:
-            markets.setdefault(candidate.symbol, candidate.market)
+    for period in periods:
+        for symbol, market in period["markets"].items():
+            markets.setdefault(symbol, market)
     return markets
 
 
@@ -429,4 +468,10 @@ def _finite_weight(value: object) -> bool:
     )
 
 
-__all__ = ["QUANTILES", "build_factor_screen", "build_strategy_screen"]
+__all__ = [
+    "QUANTILES",
+    "build_factor_screen",
+    "build_factor_screen_from_periods",
+    "build_strategy_screen",
+    "build_strategy_screen_from_periods",
+]

@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import time
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import cast
@@ -263,51 +263,60 @@ class ResearchRunCoordinator:
             # 发生在首次迭代内,失败时尚无任何决策 —— 决策日期由 signal_engine
             # 的加载期标记补全。async for 等价展开为 __anext__ 手工迭代,把
             # 「产出下一条决策」的耗时计入 decision_load(issue #285)。
+            # issue #463:适配器决策迭代已生成器化(逐期拉取,任一时刻常驻
+            # O(1) 个期次的重对象)—— 主循环外层 try/finally 在任意退出路径
+            # (耗尽 / 正常 return / cancel return / 异常)上 aclose 决策迭代,
+            # 经生成器 finally 链级联关闭输入流 → 加载生成器 → 常驻特征进程池
+            # (不等 GC);计时块在 finally 之外,#285 计时语义不变。
             failure_ctx.stage = "decision_load"
             decision_iterator = adapter.decisions(manifest)
-            with collect_parquet_read_stats() as parquet_stats:
-                while True:
-                    load_started = time.monotonic()
-                    try:
-                        raw_decision = await decision_iterator.__anext__()
-                    except StopAsyncIteration:
-                        break
-                    finally:
-                        decision_load_elapsed += time.monotonic() - load_started
-                    execute_started = time.monotonic()
-                    live_record = await self._store.get(manifest.run_id)
-                    if live_record is None:
-                        raise ResearchRunConflictError("运行记录在执行中消失")
-                    if live_record.status is ResearchRunStatus.CANCELLED:
-                        return live_record
-                    if live_record.status is not ResearchRunStatus.RUNNING:
-                        raise ResearchRunInterruptedError(
-                            f"运行状态变为 {live_record.status.value}"
+            try:
+                with collect_parquet_read_stats() as parquet_stats:
+                    while True:
+                        load_started = time.monotonic()
+                        try:
+                            raw_decision = await decision_iterator.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        finally:
+                            decision_load_elapsed += time.monotonic() - load_started
+                        execute_started = time.monotonic()
+                        live_record = await self._store.get(manifest.run_id)
+                        if live_record is None:
+                            raise ResearchRunConflictError("运行记录在执行中消失")
+                        if live_record.status is ResearchRunStatus.CANCELLED:
+                            return live_record
+                        if live_record.status is not ResearchRunStatus.RUNNING:
+                            raise ResearchRunInterruptedError(
+                                f"运行状态变为 {live_record.status.value}"
+                            )
+                        decision = self._with_decision_id(
+                            manifest.run_id, len(decisions), raw_decision
                         )
-                    decision = self._with_decision_id(
-                        manifest.run_id, len(decisions), raw_decision
-                    )
-                    failure_ctx.stage = "decision_execute"
-                    failure_ctx.decision_date = decision.business_date
-                    failure_ctx.decision_index = len(decisions) + 1
-                    self._validate_decision(
-                        decision,
-                        manifest=manifest,
-                        position_quantities=position_quantities,
-                        seen_fill_ids=seen_fill_ids,
-                    )
-                    await self._persist_decision(
-                        manifest.run_id,
-                        len(decisions),
-                        decision,
-                        progress=progress,
-                        failure_ctx=failure_ctx,
-                    )
-                    await self._store.checkpoint()
-                    decisions.append(decision)
-                    decision_timing.record(
-                        decision.business_date, time.monotonic() - execute_started
-                    )
+                        failure_ctx.stage = "decision_execute"
+                        failure_ctx.decision_date = decision.business_date
+                        failure_ctx.decision_index = len(decisions) + 1
+                        self._validate_decision(
+                            decision,
+                            manifest=manifest,
+                            position_quantities=position_quantities,
+                            seen_fill_ids=seen_fill_ids,
+                        )
+                        await self._persist_decision(
+                            manifest.run_id,
+                            len(decisions),
+                            decision,
+                            progress=progress,
+                            failure_ctx=failure_ctx,
+                        )
+                        await self._store.checkpoint()
+                        decisions.append(decision)
+                        decision_timing.record(
+                            decision.business_date, time.monotonic() - execute_started
+                        )
+            finally:
+                if isinstance(decision_iterator, AsyncGenerator):
+                    await decision_iterator.aclose()
 
             failure_ctx.stage = "report"
             report_started = time.monotonic()
