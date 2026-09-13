@@ -28,7 +28,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-当前已实现 126 个工具。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+当前已实现 128 个工具(#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
@@ -41,13 +41,13 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | 回测(双形态:strategy 事件驱动回测——默认小规模同步,run_async=true 或规模达阈值自动入队后台任务返回 job_id(#189,避免 MCP 30s 超时后响应丢失);strategy_spec 路由已发布规格入队 research_run 多期再平衡回放;benchmark_symbol 显式基准(指数日线 akshare 免积分),基准缺失返回 null 不静默 0.0;selection.factor_version 仅 "v1"(可用因子集=因子目录投影子集,#214);批量网格提交/聚合对比——params 维度(params_list/params_grid 互斥)× selection_grid 选股维度笛卡尔积(#259,可单独做纯选股扫描如因子×窗口,逐组合过 FactorSelectionParams 校验),grid_get 默认不返回曲线,显式 equity_mode=summary/full 才返回,公共字段(含基础 selection)在网格头部只出现一次(#190/#206/#259);history CRUD——history_get fills 默认有界 200 条分页、history_list symbols 前 10 只+计数(#206)) | `finboard.backtest.*`(7 个) | ✅ #127+#174+#175+#183+#184+#189+#190 | 4 只读 + 3 自主执行 |
 | 模拟盘(账户/会话生命周期/决策/行情投递/晋级评估/归档/订单/成交/持仓/账本/审计/报告) | `finboard.sim.*`(21 个) | ✅ #127+#139 | 10 只读 + 11 自主执行 |
 | portfolio 计算(allocate/sizing/feasibility/attribution) | `finboard.portfolio.*`(4 个) | ✅ #128 | 纯计算,自主执行 |
-| 后台任务队列监控与提交/归档 | `finboard.job.*`(list/get 只读 + enqueue/cancel/archive/unarchive 写,6 个) | ✅ #136+#221 | 2 只读 + 4 自主执行 |
+| 后台任务队列监控与提交/归档/等待 | `finboard.job.*`(list/get/wait 只读 + enqueue/cancel/archive/unarchive 写,7 个) | ✅ #136+#221+#443 | 3 只读 + 4 自主执行 |
 | #57 验证实验(创建/列表/详情/拒绝/登记 trial/删除) | `finboard.validation_experiment.*`(6 个) | ✅ #138 | 2 只读 + 4 自主执行 |
 | 自选股(创建/查询标的组、增删标的) | `finboard.watchlist.*`(7 个) | ✅ #140 | 2 只读 + 5 自主执行 |
 | 报告聚合与导出(ResearchRun/回测报告、导出 CSV/Markdown 文件;report_run 默认 summary 聚合计数、report_backtest fills 分页有界,#206) | `finboard.report.*`(3 个) | ✅ #141+#206 | 3 只读 |
 | 研究代码提交与晋级(agent 策略/因子代码入口;静态校验+draft 版本化存储;screen + #57 OOS 晋级门;web 通道仍禁代码) | `finboard.research_code.*`(5 个) | ✅ #215/#219 | 2 只读 + 3 自主执行 |
 | 研究代码沙箱执行(一次性 Docker 容器跑 factor.compute;PIT 物理隔离挂载、断网/只读/限额/超时 kill;run 三向引用审计;成功输出过质量门后落库为 `u_<name>` 因子快照,可被 research run 引用,run report 携带 factor_screen 筛选指标(#217);需 research_sandbox_enabled + Docker 镜像) | `finboard.research_code_run` / `_get`(2 个) | ✅ #216+#217 | 1 只读 + 1 自主执行 |
-| 用户代码策略执行(agent 编写的策略代码进入回测:spec `strategy_kind=user_code` + `code_artifact` 引用 active+passed artifact;`finboard_run_queue` 声明 `rebalance_frequency=multi_period` 走逐决策日沙箱 `decide(ctx)→目标权重`(当前权重回显 + 约束视图),复用 #91 组合管线;report 附 `sandbox_provenance`(commit+镜像 digest);与 multi_factor 同屏可比;入队门控 active+passed/commit/沙箱开关,#218/#219) | `finboard_run_queue` + `finboard_strategy_*`(复用,无新工具) | ✅ #218/#219 | 复用 run_queue 写权限 |
+| 用户代码策略执行(agent 编写的策略代码进入回测:spec `strategy_kind=user_code` + `code_artifact` 引用 active+passed artifact;`finboard_run_queue` 声明 `decision_schedule` 走 multi_period(legacy `rebalance_frequency` 仍接受)逐决策日沙箱 `decide(ctx)→目标权重`(当前权重回显 + 约束视图),复用 #91 组合管线;report 附 `sandbox_provenance`(commit+镜像 digest);与 multi_factor 同屏可比;入队门控 active+passed/commit/沙箱开关,#218/#219) | `finboard_run_queue` + `finboard_strategy_*`(复用,无新工具) | ✅ #218/#219 | 复用 run_queue 写权限 |
 
 > 详细工具契约见 `references/tools.md`;扩展计划见
 > `packages/finboard-mcp/ROADMAP.md`。

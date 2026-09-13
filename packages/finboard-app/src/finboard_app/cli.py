@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import signal
@@ -29,13 +30,26 @@ from datetime import date, timedelta
 from datetime import date as parse_date
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
 from finboard_app.bootstrap import build_kernel_components
 from finboard_app.config import Settings, load_settings
+from finboard_app.dev_cleanup import sweep_stale_workers
 from finboard_app.logging import setup_logging
+
+# ``as`` 同名别名 = 显式再导出(no_implicit_reexport):测试与 #373 REST
+# 触发侧经 cli.<名> 引用,与 diagnostics 单一事实源同一,防两入口口径漂移。
+from finboard_backtest.background_jobs.diagnostics import (
+    FLAMEGRAPH_REPLAYABLE_KINDS as FLAMEGRAPH_REPLAYABLE_KINDS,
+)
+from finboard_backtest.background_jobs.diagnostics import (
+    flamegraph_gate_error as flamegraph_gate_error,
+)
+from finboard_backtest.background_jobs.diagnostics import (
+    resolve_py_spy as resolve_py_spy,
+)
 from finboard_shared.identifiers import AccountId
 from finboard_shared.types import KillSwitchLevel
 
@@ -48,7 +62,14 @@ if TYPE_CHECKING:
 
     from finboard_api.schemas import BacktestRunRequest
     from finboard_app.bootstrap import KernelComponents
-    from finboard_data import ResearchDatasetRelease
+    from finboard_backtest.background_jobs import JobExecutorRegistry
+    from finboard_data import (
+        AkShareProvider,
+        ResearchDatasetRelease,
+        TushareBarProvider,
+        YFinanceProvider,
+    )
+    from finboard_persistence import BackgroundJobModel
     from finboard_reconcile import ReconciliationReport
     from finboard_scheduler import Scheduler
 
@@ -436,6 +457,15 @@ def dev(
         typer.echo("已自动唤醒 WSL PostgreSQL。")
     if _ensure_sandbox_image(settings):
         typer.echo("已自动构建研究沙箱镜像。")
+    # issue #339:启动前清扫本工作区残留 worker(上一会话孤儿)——
+    # 防止旧代码 worker 与本次 spawn 的新 worker 赛跑抢队列。
+    swept_workers = sweep_stale_workers()
+    if swept_workers:
+        typer.echo(
+            "已清理残留 worker 进程: "
+            + ", ".join(f"PID {item.pid}" for item in swept_workers)
+            + "(其 in-flight 任务由 lease 过期回收后自动重排)。"
+        )
 
     stop_event = threading.Event()
     frontend_holder: list[subprocess.Popen[bytes]] = []
@@ -509,6 +539,147 @@ def kill_switch(
         f" 若交易内核在另一进程运行,请通过信号 / API 转发(P0 暂未实现)。"
         f" 若要下次启动即生效,在 .env 中设置 FINBOARD_KILL_SWITCH_INITIAL={level.value}。"
     )
+
+
+@app.command(name="factor-eval")
+def factor_eval(
+    ctx: typer.Context,
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            help="评估数据面:synthetic(合成,全目录冒烟,免 DB)/ release(真实冻结发布小窗口)",
+        ),
+    ] = "synthetic",
+    factors: Annotated[
+        str,
+        typer.Option("--factors", help="因子清单,逗号分隔(p_ 名或裸名);缺省 = 全目录"),
+    ] = "",
+    release_id: Annotated[
+        str, typer.Option("--release-id", help="[release] bars 主发布 ID(DR-...)")
+    ] = "",
+    dataset_release_ids: Annotated[
+        str,
+        typer.Option("--dataset-release-ids", help="[release] 研究发布联合集,逗号分隔"),
+    ] = "",
+    window_start: Annotated[
+        str, typer.Option("--window-start", help="[release] 窗口起点 YYYY-MM-DD")
+    ] = "",
+    window_end: Annotated[
+        str, typer.Option("--window-end", help="[release] 窗口终点 YYYY-MM-DD")
+    ] = "",
+    horizon: Annotated[
+        int, typer.Option("--horizon", help="前向收益持有期(交易日)")
+    ] = 5,
+    step: Annotated[
+        int, typer.Option("--step", help="决策日步长(交易日)")
+    ] = 5,
+    output: Annotated[
+        str, typer.Option("--output", "-o", help="报告 JSON 路径")
+    ] = "",
+) -> None:
+    """因子质量评估(#403):逐因子 IC/RankIC/ICIR、分组单调性、换手衰减、覆盖起点。
+
+    报告落 JSON(缺省 ``data_cache/factor_evals/``),含逐因子结论 flag 与
+    signal_eligible 治理清单(#214 规则校验,疑似标注错误人工拍板)。
+    合成模式仅证明机制跑通(IC 数值无研究含义);研究结论以 release 模式为准。
+    """
+    if mode not in ("synthetic", "release"):
+        typer.echo(f"未知评估模式: {mode!r}(可用: synthetic / release)", err=True)
+        raise typer.Exit(code=2)
+    if mode == "release" and (not release_id or not window_start or not window_end):
+        typer.echo(
+            "release 模式需要 --release-id 与 --window-start/--window-end", err=True
+        )
+        raise typer.Exit(code=2)
+    factor_list = (
+        [item.strip() for item in factors.split(",") if item.strip()]
+        if factors
+        else None
+    )
+    dataset_ids = (
+        tuple(item.strip() for item in dataset_release_ids.split(",") if item.strip())
+        if dataset_release_ids
+        else ()
+    )
+    settings = load_settings()
+    report = asyncio.run(
+        _run_factor_eval(
+            settings=settings,
+            mode=mode,
+            factors=factor_list,
+            release_id=release_id or None,
+            dataset_release_ids=dataset_ids,
+            window_start=window_start or None,
+            window_end=window_end or None,
+            horizon=horizon,
+            step=step,
+        )
+    )
+    out_path = (
+        Path(output)
+        if output
+        else Path(settings.research_sandbox_workspace_root).parent
+        / "factor_evals"
+        / (
+            f"factor-eval-{mode}-"
+            f"{date.today().isoformat()}-{report['summary']['factor_count']}.json"
+        )
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    summary = report["summary"]
+    typer.echo(
+        f"评估完成: {summary['factor_count']} 因子"
+        f"(ic_available={summary['ic_available']}, "
+        f"status={summary['status_counts']}, "
+        f"signal_eligible 疑似标注错误={summary['signal_eligible_suspected']})"
+    )
+    typer.echo(f"最强 |RankIC|: {summary['strongest_abs_rank_ic']}")
+    typer.echo(f"报告已写入: {out_path}")
+
+
+async def _run_factor_eval(
+    *,
+    settings: Settings,
+    mode: str,
+    factors: list[str] | None,
+    release_id: str | None,
+    dataset_release_ids: tuple[str, ...],
+    window_start: str | None,
+    window_end: str | None,
+    horizon: int,
+    step: int,
+) -> dict[str, Any]:
+    from finboard_backtest.factors.eval import (
+        FactorEvalConfig,
+        evaluate_catalog_on_release,
+        evaluate_catalog_synthetic,
+    )
+
+    config = FactorEvalConfig(horizon=horizon)
+    if mode == "synthetic":
+        synthetic: dict[str, Any] = evaluate_catalog_synthetic(
+            factors=factors, config=config, step=step
+        )
+        return synthetic
+    # 入口已校验(mode=release 时 release_id/window 非空)
+    assert release_id is not None
+    assert window_start
+    assert window_end
+    release_report: dict[str, Any] = await evaluate_catalog_on_release(
+        release_id=release_id,
+        dataset_release_ids=dataset_release_ids,
+        window_start=parse_date.fromisoformat(window_start),
+        window_end=parse_date.fromisoformat(window_end),
+        factors=factors,
+        config=config,
+        decision_step=step,
+        settings=settings,
+    )
+    return release_report
 
 
 scheduler_app = typer.Typer(
@@ -848,6 +1019,30 @@ def _supervise_worker_processes(
     return 0
 
 
+#: worker per-kind 并发上限(issue #144 claim_next max_per_kind)。
+#: 数据源压力敏感的 kind 单并发;dataset_publish / backtest_run 不限。
+#: research_code_run 单并发(#216,沙箱容器本机资源受限);factor_series_build
+#: 为 2(#375,#360 曾单并发)—— 单因子 build 的 3 个容器(主构建 + 2 审计
+#: 截断)本就两两并发,双 job 并行使 4 因子队列墙钟近半;并发受
+#: 「并发数 x research_sandbox_memory_mb(默认 4096,#374)<= Docker Desktop
+#: WSL2 可用内存」约束,内存不足时经 env/配置回落。validation_experiment
+#: 单并发(#233,揭盲一次性门,并发重入只会重复消耗试验预算)。research_run
+#: 单并发(2026-09-13 全市场 556 期双 run 并发实测:加载期全量驻留的特征
+#: 截面 ~5-6GB/run,双并发把 40GB 宿主推到 98.8% 靠 swap 硬撑,#424 审计
+#: 容器并发改串行同理由 —— 代价为 research 队列墙钟串行)。
+_KIND_CONCURRENCY: dict[str, int] = {
+    "feature_snapshot": 1,
+    "bulk_download": 1,
+    "data_sync": 1,
+    "quality_repair": 1,
+    "dataset_sync": 1,
+    "research_code_run": 1,
+    "factor_series_build": 2,
+    "validation_experiment": 1,
+    "research_run": 1,
+}
+
+
 @worker_app.command(name="run")
 def worker_run(
     ctx: typer.Context,
@@ -968,21 +1163,28 @@ def worker_recover(ctx: typer.Context) -> None:
     asyncio.run(_recover_stale(ctx.obj))
 
 
-async def _run_worker(settings: Settings) -> None:
-    setup_logging(settings)
-    components = build_kernel_components(settings)
+def build_executor_registry(
+    settings: Settings, session_maker: async_sessionmaker[AsyncSession]
+) -> JobExecutorRegistry:
+    """装配全部 job kind 的执行器注册表(issue #383 抽取为共享工厂)。
+
+    单一事实源:``worker run`` 主循环(:func:`_run_worker`)与 ``job-flamegraph``
+    的诊断重放子进程(``job-replay-exec``)都经此构造,保证两边执行器 wiring
+    一致 —— 此前装配内联在 ``_run_worker`` 里,诊断进程无法复用。
+    """
+
     from finboard_backtest.background_jobs import JobExecutorRegistry
+    from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
     from finboard_backtest.background_jobs.executors import (
         BacktestRunExecutor,
         BulkDownloadExecutor,
-        DataFetchAllExecutor,
         DatasetPublishExecutor,
         DataSyncExecutor,
         EchoExecutor,
+        FactorSeriesBuildExecutor,
         FeatureSnapshotExecutor,
         QualityRepairExecutor,
         ResearchCodeRunExecutor,
-        ResearchDataSyncExecutor,
         ResearchRunExecutor,
         ValidationExperimentExecutor,
     )
@@ -992,6 +1194,112 @@ async def _run_worker(settings: Settings) -> None:
     from finboard_backtest.background_jobs.executors.research_run import (
         default_store_factory,
     )
+    from finboard_backtest.research_run.signal_engine import (
+        build_signal_engine_adapter_factory,
+    )
+
+    settings_factory = default_settings_factory
+    registry = JobExecutorRegistry()
+    registry.register("echo", EchoExecutor())
+    # issue #143:research_run 执行器接入统一队列;#170:multi_factor 规格接入
+    # 真实信号引擎适配器工厂;#218:user_code 规格经同一工厂分发到沙箱
+    # decide 适配器(需要 settings 解析镜像/资源限制/代码仓库路径)。
+    registry.register(
+        "research_run",
+        ResearchRunExecutor(
+            session_maker=session_maker,
+            store_factory=default_store_factory,
+            adapter_factory=build_signal_engine_adapter_factory(
+                session_maker,
+                settings_factory=settings_factory,
+            ),
+        ),
+    )
+    # issue #144:7 类数据域任务迁移到统一队列。
+    registry.register(
+        "bulk_download",
+        BulkDownloadExecutor(
+            session_maker=session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    registry.register(
+        "feature_snapshot",
+        FeatureSnapshotExecutor(
+            session_maker=session_maker,
+            max_concurrency=getattr(settings, "feature_snapshot_max_concurrency", 8),
+            process_workers=getattr(settings, "feature_snapshot_process_workers", 0),
+        ),
+    )
+    registry.register(
+        "dataset_publish",
+        DatasetPublishExecutor(session_maker=session_maker),
+    )
+    registry.register(
+        "backtest_run",
+        BacktestRunExecutor(
+            session_maker=session_maker,
+            runner=_backtest_runner,
+        ),
+    )
+    registry.register(
+        "data_sync",
+        DataSyncExecutor(session_maker=session_maker),
+    )
+    registry.register(
+        "quality_repair",
+        QualityRepairExecutor(
+            session_maker=session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    # issue #171 → #392:数据集驱动统一同步框架(SyncSpec 注册表,kind 由
+    # research_data_sync 改名 dataset_sync)。
+    registry.register(
+        "dataset_sync",
+        DatasetSyncExecutor(
+            session_maker=session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    # issue #216:研究代码沙箱执行(一次性 Docker 容器;settings 工厂沿用
+    # executors._providers 默认实现,镜像/超时/限额取 research_sandbox_* 配置)。
+    registry.register(
+        "research_code_run",
+        ResearchCodeRunExecutor(
+            session_maker=session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    # issue #360:内容寻址因子序列构建(单并发,复用 research_code_run 的
+    # 沙箱容器槽位约定;容器执行本体由 #359 runner 提供,缓存命中不启动容器)。
+    registry.register(
+        "factor_series_build",
+        FactorSeriesBuildExecutor(
+            session_maker=session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
+    # issue #233:#57 验证实验执行(walk-forward + 一次性揭盲)。runner 工厂
+    # 按实验 selection_config 声明构建注册表策略回测;单并发 —— 揭盲是一次性
+    # 门,并发重入只会重复消耗试验预算。
+    from finboard_backtest.background_jobs.executors.validation_experiment import (
+        default_trial_runner_factory,
+    )
+
+    registry.register(
+        "validation_experiment",
+        ValidationExperimentExecutor(
+            session_maker=session_maker,
+            runner_factory=default_trial_runner_factory,
+        ),
+    )
+    return registry
+
+
+async def _run_worker(settings: Settings) -> None:
+    setup_logging(settings)
+    components = build_kernel_components(settings)
     from finboard_backtest.background_jobs.worker import (
         WorkerConfig,
         default_worker_id,
@@ -1009,103 +1317,7 @@ async def _run_worker(settings: Settings) -> None:
         lease_active_seconds=settings.worker_lease_timeout_seconds,
     )
 
-    settings_factory = default_settings_factory
-    registry = JobExecutorRegistry()
-    registry.register("echo", EchoExecutor())
-    # issue #143:research_run 执行器接入统一队列;#170:multi_factor 规格接入
-    # 真实信号引擎适配器工厂;#218:user_code 规格经同一工厂分发到沙箱
-    # decide 适配器(需要 settings 解析镜像/资源限制/代码仓库路径)。
-    from finboard_backtest.research_run.signal_engine import (
-        build_signal_engine_adapter_factory,
-    )
-
-    registry.register(
-        "research_run",
-        ResearchRunExecutor(
-            session_maker=components.session_maker,
-            store_factory=default_store_factory,
-            adapter_factory=build_signal_engine_adapter_factory(
-                components.session_maker,
-                settings_factory=settings_factory,
-            ),
-        ),
-    )
-    # issue #144:7 类数据域任务迁移到统一队列。
-    registry.register(
-        "bulk_download",
-        BulkDownloadExecutor(
-            session_maker=components.session_maker,
-            settings_factory=settings_factory,
-        ),
-    )
-    registry.register(
-        "feature_snapshot",
-        FeatureSnapshotExecutor(
-            session_maker=components.session_maker,
-            max_concurrency=getattr(settings, "feature_snapshot_max_concurrency", 8),
-            process_workers=getattr(settings, "feature_snapshot_process_workers", 0),
-        ),
-    )
-    registry.register(
-        "dataset_publish",
-        DatasetPublishExecutor(session_maker=components.session_maker),
-    )
-    registry.register(
-        "backtest_run",
-        BacktestRunExecutor(
-            session_maker=components.session_maker,
-            runner=_backtest_runner,
-        ),
-    )
-    registry.register(
-        "data_sync",
-        DataSyncExecutor(session_maker=components.session_maker),
-    )
-    registry.register(
-        "fetch_all",
-        DataFetchAllExecutor(
-            session_maker=components.session_maker,
-            settings_factory=settings_factory,
-        ),
-    )
-    registry.register(
-        "quality_repair",
-        QualityRepairExecutor(
-            session_maker=components.session_maker,
-            settings_factory=settings_factory,
-        ),
-    )
-    # issue #171:research 数据表(估值 / 财务 / 行业)摄取编排。
-    registry.register(
-        "research_data_sync",
-        ResearchDataSyncExecutor(
-            session_maker=components.session_maker,
-            settings_factory=settings_factory,
-        ),
-    )
-    # issue #216:研究代码沙箱执行(一次性 Docker 容器;settings 工厂沿用
-    # executors._providers 默认实现,镜像/超时/限额取 research_sandbox_* 配置)。
-    registry.register(
-        "research_code_run",
-        ResearchCodeRunExecutor(
-            session_maker=components.session_maker,
-            settings_factory=settings_factory,
-        ),
-    )
-    # issue #233:#57 验证实验执行(walk-forward + 一次性揭盲)。runner 工厂
-    # 按实验 selection_config 声明构建注册表策略回测;单并发 —— 揭盲是一次性
-    # 门,并发重入只会重复消耗试验预算。
-    from finboard_backtest.background_jobs.executors.validation_experiment import (
-        default_trial_runner_factory,
-    )
-
-    registry.register(
-        "validation_experiment",
-        ValidationExperimentExecutor(
-            session_maker=components.session_maker,
-            runner_factory=default_trial_runner_factory,
-        ),
-    )
+    registry = build_executor_registry(settings, components.session_maker)
     queue_list = [
         q.strip() for q in settings.worker_queues.split(",") if q.strip()
     ] or None
@@ -1124,22 +1336,8 @@ async def _run_worker(settings: Settings) -> None:
         shutdown_grace_seconds=settings.worker_shutdown_grace_seconds,
         # issue #306:僵尸无进展检测阈值(0 = 关闭;默认 3600s 见 settings 注释)。
         zombie_no_progress_seconds=settings.worker_zombie_no_progress_seconds,
-        # issue #144:per-kind 全局并发上限(SQL 层 claim_next max_per_kind 实现)。
-        # 数据源压力敏感的 kind 限制为单并发;dataset_publish / backtest_run 不限。
-        # issue #216:research_code_run 单并发(沙箱容器本机资源受限,
-        # 多容器并发只会互相挤占内存限额)。
-        # issue #233:validation_experiment 单并发(揭盲一次性门,并发重入
-        # 只会重复消耗试验预算)。
-        kind_concurrency={
-            "feature_snapshot": 1,
-            "bulk_download": 1,
-            "data_sync": 1,
-            "fetch_all": 1,
-            "quality_repair": 1,
-            "research_data_sync": 1,
-            "research_code_run": 1,
-            "validation_experiment": 1,
-        },
+        # per-kind 全局并发上限见模块级 _KIND_CONCURRENCY(#144/#375)。
+        kind_concurrency=dict(_KIND_CONCURRENCY),
     )
     await run_bg_worker(
         engine=components.engine,
@@ -1176,7 +1374,7 @@ async def _recover_research_runs(
     该任务,口径一致。
     """
 
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
 
     from finboard_app.research_run_store import SqlAlchemyResearchRunStore
     from finboard_backtest.research_run import JobOwnershipProbe, ResearchRunCoordinator
@@ -1283,20 +1481,6 @@ def data_fetch(
     )
 
 
-@data_app.command(name="fetch-all")
-def data_fetch_all(
-    config_file: Annotated[
-        str,
-        typer.Option(
-            "--config",
-            help="标的池配置文件路径(YAML/JSON,默认 symbols.yaml)",
-        ),
-    ] = "symbols.yaml",
-) -> None:
-    """批量拉取标的池中所有标的的行情数据(带限流)。"""
-    asyncio.run(_fetch_all_data(config_file=config_file))
-
-
 @data_app.command(name="status")
 def data_status(
     symbol: Annotated[
@@ -1312,6 +1496,32 @@ def data_status(
     asyncio.run(_data_status(symbol=symbol, cache_dir=cache_dir))
 
 
+def _cli_bar_provider(
+    provider_name: str,
+    *,
+    max_concurrency: int | None = None,
+    request_interval: float | None = None,
+) -> AkShareProvider | TushareBarProvider | YFinanceProvider:
+    """CLI 数据命令的行情 provider 构造(issue #393:默认主源 tushare)。
+
+    复用 executor 侧 ``build_bar_provider`` 作为单一事实源:三源路由、
+    tushare token / 预算参数读 settings,与 REST / MCP / worker 三入口
+    保持同一构造口径。``provider_name`` 解析沿用 CLI 既有 env 直读语义
+    (缺省 tushare,#393)。
+    """
+    from finboard_backtest.background_jobs.executors._providers import (
+        build_bar_provider,
+        default_settings_factory,
+    )
+
+    return build_bar_provider(
+        provider_name.strip().lower(),
+        default_settings_factory,
+        max_concurrency=max_concurrency,
+        request_interval=request_interval,
+    )
+
+
 async def _fetch_data(
     *,
     symbol: str,
@@ -1321,15 +1531,11 @@ async def _fetch_data(
 ) -> None:
     import os
 
-    from finboard_data import AkShareProvider, YFinanceProvider
     from finboard_shared.models import Symbol as Sym
     from finboard_shared.types import BarPeriod, Market
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
-    else:
-        provider = YFinanceProvider()
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
+    provider = _cli_bar_provider(provider_name)
     bars = await provider.fetch_bars(
         Sym(code=symbol, market=Market.A_SHARE),
         BarPeriod.D1,
@@ -1341,52 +1547,6 @@ async def _fetch_data(
     if bars:
         typer.echo(f"  起始: {bars[0].timestamp.date()} close={bars[0].close}")
         typer.echo(f"  结束: {bars[-1].timestamp.date()} close={bars[-1].close}")
-
-
-async def _fetch_all_data(*, config_file: str) -> None:
-    import os
-
-    from finboard_data import AkShareProvider, YFinanceProvider, load_symbol_pool
-    from finboard_data.cache import make_symbol
-    from finboard_shared.types import BarPeriod
-
-    config = load_symbol_pool(config_file)
-    if not config.symbols:
-        typer.echo(f"标的池为空: {config_file}", err=True)
-        raise typer.Exit(1)
-
-    end = date.today()
-    start = end - timedelta(days=config.fetch_lookback_days)
-    period = (
-        BarPeriod[config.fetch_period]
-        if config.fetch_period in BarPeriod.__members__
-        else BarPeriod(config.fetch_period)
-    )
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider()
-    else:
-        provider = YFinanceProvider()
-    sym_objs = [make_symbol(s.code) for s in config.symbols]
-
-    typer.echo(
-        f"批量拉取 {len(sym_objs)} 个标的 ({start} ~ {end}) {period.value} {config.fetch_adjust}"
-    )
-
-    def on_progress(code: str, done: int, total: int) -> None:
-        typer.echo(f"  [{done}/{total}] {code}")
-
-    results = await provider.update_cache_batch(
-        sym_objs,
-        period,
-        start,
-        end,
-        adjust=config.fetch_adjust,
-        on_progress=on_progress,
-    )
-
-    success = sum(results.values())
-    typer.echo(f"\n完成: {success}/{len(sym_objs)} 成功, {len(sym_objs) - success} 失败")
 
 
 async def _data_status(*, symbol: str | None, cache_dir: str) -> None:
@@ -1617,7 +1777,7 @@ async def _publish_dataset_release(
     required_capabilities: tuple[str, ...],
     code_version: str,
 ) -> ResearchDatasetRelease:
-    from finboard_app.config import load_settings
+    from finboard_app.config import load_settings, postgres_connect_args
     from finboard_data import DatasetReleaseSpec
     from finboard_persistence import (
         ResearchDatasetReleaseService,
@@ -1626,35 +1786,39 @@ async def _publish_dataset_release(
     )
 
     settings = load_settings()
-    engine = create_async_engine(settings.db_url)
+    engine = create_async_engine(
+        settings.db_url,
+        connect_args=postgres_connect_args(settings.db_url),
+    )
     try:
-        async with session_factory(engine)() as session:
-            service = ResearchDatasetReleaseService(
-                session,
-                cache_dir=cache_dir,
-                release_root=release_root,
-            )
-            release = await service.publish(
-                DatasetReleaseSpec(
-                    release_id=release_id,
-                    dataset_name=dataset_name,
-                    source=source,
-                    version=version,
-                    start_date=start_date,
-                    end_date=end_date,
-                    code_version=code_version,
-                    adjustment=adjust,
-                    required_capabilities=required_capabilities,
-                    known_limitations=(
-                        "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
-                        "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
-                        "首期仅发布本地缓存已有字段,不回退到联网数据源",
-                    ),
+        # 分段短事务(元数据 prep / 物化 / 登记):物化是分钟级纯文件 I/O,
+        # 不能在打开的 PG 事务内进行,否则全市场规模发布会被
+        # idle_in_transaction_session_timeout 杀连接。
+        service = ResearchDatasetReleaseService(
+            None,
+            session_factory=session_factory(engine),
+            cache_dir=cache_dir,
+            release_root=release_root,
+        )
+        return await service.publish(
+            DatasetReleaseSpec(
+                release_id=release_id,
+                dataset_name=dataset_name,
+                source=source,
+                version=version,
+                start_date=start_date,
+                end_date=end_date,
+                code_version=code_version,
+                adjustment=adjust,
+                required_capabilities=required_capabilities,
+                known_limitations=(
+                    "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
+                    "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
+                    "首期仅发布本地缓存已有字段,不回退到联网数据源",
                 ),
-                symbols,
-            )
-            await session.commit()
-            return release
+            ),
+            symbols,
+        )
     finally:
         await engine.dispose()
 
@@ -1694,6 +1858,23 @@ async def _sync_universe() -> None:
         backfill = await repo.backfill_metadata_from_profiles(
             symbols=[ins.code for ins in instruments]
         )
+        # issue #394:指数登记携带 index_basic base_date,回填
+        # instruments.list_date(只补 null,#185/#265 同语义)。
+        # issue #395:期货合约登记携带 fut_basic list_date / delist_date,
+        # 同通道回填(只补 null)。
+        from finboard_shared.types import InstrumentType
+
+        listing_records: dict[str, tuple[date | None, date | None]] = {}
+        for ins in instruments:
+            if ins.instrument_type is InstrumentType.INDEX:
+                if ins.list_date is not None:
+                    listing_records[ins.code] = (ins.list_date, None)
+            elif (
+                ins.instrument_type is InstrumentType.FUTURES
+                and (ins.list_date is not None or ins.delist_date is not None)
+            ):
+                listing_records[ins.code] = (ins.list_date, ins.delist_date)
+        listing_backfill = await repo.backfill_listing_dates(listing_records)
         await session.commit()
 
     typer.echo(
@@ -1712,6 +1893,10 @@ async def _sync_universe() -> None:
         )
     else:
         typer.echo("无已发布研究档案批次,跳过 list_date/industry 回填")
+    typer.echo(
+        f"指数 list_date 回填 {listing_backfill['backfilled_list_date']} 只"
+        f"(仍缺失 {listing_backfill['missing_list_date']} 只,#394)"
+    )
     await engine.dispose()
 
 
@@ -1725,7 +1910,6 @@ async def _bulk_download(
     import os
 
     from finboard_app.config import load_settings
-    from finboard_data import AkShareProvider, YFinanceProvider
     from finboard_data.cache import make_symbol
     from finboard_persistence import InstrumentRepository, create_async_engine, session_factory
     from finboard_shared.types import BarPeriod
@@ -1749,13 +1933,8 @@ async def _bulk_download(
 
     typer.echo(f"开始批量拉取 {len(instruments)} 个标的 ({start_date} ~ today)")
 
-    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "akshare")
-    if provider_name == "akshare":
-        provider: AkShareProvider | YFinanceProvider = AkShareProvider(
-            max_concurrency=2, request_interval=0.5
-        )
-    else:
-        provider = YFinanceProvider(max_concurrency=3, request_interval=0.3)
+    provider_name = os.getenv("FINBOARD_DATA_PROVIDER", "tushare")
+    provider = _cli_bar_provider(provider_name, max_concurrency=2, request_interval=0.5)
 
     end = date.today()
     sym_objs = [make_symbol(ins.code) for ins in instruments]
@@ -1869,6 +2048,295 @@ async def _run_reconcile(settings: Settings) -> ReconciliationReport:
             await components.broker.disconnect()
             await session.commit()
             await components.engine.dispose()
+
+
+# ---- 诊断重放 + py-spy 火焰图(issue #383) ----
+# 门控纯函数 / 放行-拒绝 kind 集合 / py-spy 解析在
+# finboard_backtest.background_jobs.diagnostics(#373 起与 REST 触发侧共用)。
+
+
+async def _load_job_row(settings: Settings, job_id: str) -> BackgroundJobModel | None:
+    """读一行 background_jobs(诊断进程独立 engine,用完即弃)。"""
+
+    from finboard_persistence import (
+        BackgroundJobRepository,
+        create_async_engine,
+        session_factory,
+    )
+
+    engine = create_async_engine(settings.db_url)
+    try:
+        async with session_factory(engine)() as session:
+            return await BackgroundJobRepository(session).get(job_id)
+    finally:
+        await engine.dispose()
+
+
+@app.command(name="job-flamegraph")
+def job_flamegraph(
+    ctx: typer.Context,
+    job_id: str = typer.Argument(help="background_jobs.job_id(须为终态)"),
+    fmt: str = typer.Option(
+        "flamegraph", "--format", help="输出格式:flamegraph(svg)| speedscope(json)"
+    ),
+    rate: int = typer.Option(50, "--rate", min=10, max=500, help="采样频率 Hz"),
+    out: Path | None = typer.Option(
+        None, "--out", help="输出目录(默认 data_cache/job_profiles/<job_id>-<时间戳>)"
+    ),
+) -> None:
+    """对一个终态 job 起独立诊断进程重放,并用 py-spy 生成火焰图(issue #383)。
+
+    诊断进程完全独立于 dev / worker —— 不占队列、不写 background_jobs。
+    重放副作用因 kind 而异(启动时明示)。读图口径:火焰图宽帧 = CPU 采样
+    占比高;IO 等待在本图上「看不见」,IO/CPU 归因请配合 job 行 timing 列的
+    parquet_reads 占比(``finboard_job_get`` / GET /api/jobs/{id})。
+    """
+
+    settings: Settings = ctx.obj
+    fmt_normalized = fmt.strip().lower()
+    if fmt_normalized not in {"flamegraph", "speedscope"}:
+        raise typer.BadParameter("--format 只接受 flamegraph|speedscope")
+    from datetime import UTC, datetime
+
+    pyspy = resolve_py_spy()
+    if pyspy is None:
+        typer.echo(
+            "未找到 py-spy(dev 依赖组已包含)。请在仓库根执行:\n"
+            "  uv sync\n"
+            "或确认 venv 完整(.venv/Scripts/py-spy.exe)。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    import asyncio as _asyncio
+
+    row = _asyncio.run(_load_job_row(settings, job_id))
+    if row is None:
+        typer.echo(f"job {job_id} 不存在", err=True)
+        raise typer.Exit(code=1)
+    kind = row.kind
+    status = row.status
+    gate_error = flamegraph_gate_error(kind, status)
+    if gate_error is not None:
+        typer.echo(gate_error, err=True)
+        raise typer.Exit(code=1)
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    session_dir = out or Path("data_cache/job_profiles") / f"{job_id}-{stamp}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    outfile = session_dir / (
+        "flamegraph.svg" if fmt_normalized == "flamegraph" else "profile.json"
+    )
+    meta = {
+        "job_id": job_id,
+        "kind": kind,
+        "source_status": status,
+        "replay_side_effect": FLAMEGRAPH_REPLAYABLE_KINDS[kind],
+        "format": fmt_normalized,
+        "rate_hz": rate,
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    (session_dir / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    child_cmd = [
+        sys.executable,
+        "-m",
+        "finboard_app.cli",
+        "job-replay-exec",
+        job_id,
+        "--out-dir",
+        str(session_dir),
+    ]
+    cmd = [
+        pyspy,
+        "record",
+        "--format",
+        fmt_normalized,
+        "--rate",
+        str(rate),
+        "--subprocesses",
+        "-o",
+        str(outfile),
+        "--",
+        *child_cmd,
+    ]
+    typer.echo(f"诊断重放 kind={kind}:{FLAMEGRAPH_REPLAYABLE_KINDS[kind]}")
+    typer.echo("采样中 —— Ctrl-C 可提前结束(py-spy 仍会写出已采集部分)。")
+    completed = subprocess.run(cmd, check=False)
+
+    timing_path = session_dir / "timing.json"
+    if timing_path.exists():
+        timing = json.loads(timing_path.read_text(encoding="utf-8"))
+        reads = timing.get("parquet_reads", {})
+        typer.echo(
+            f"重放耗时 {timing.get('execute_elapsed_seconds')}s;"
+            f"parquet 读 {reads.get('read_ops', 0)} 次 /"
+            f" {reads.get('read_elapsed_ms', 0.0):.0f}ms /"
+            f" {(reads.get('read_bytes', 0) or 0) / 1e6:.1f}MB"
+            "(读耗时占 wall-clock 比例高 ≈ IO 瓶颈,低 ≈ CPU 瓶颈;"
+            "配合火焰图定位 CPU 热点)"
+        )
+    result_path = session_dir / "result.json"
+    if result_path.exists():
+        replay = json.loads(result_path.read_text(encoding="utf-8"))
+        typer.echo(f"重放终态: {replay.get('status')}(result_ref={replay.get('result_ref')})")
+    if completed.returncode != 0:
+        typer.echo(
+            f"诊断子进程退出码 {completed.returncode}(py-spy 退出码);"
+            "详情见 replay.log / result.json",
+            err=True,
+        )
+    typer.echo(f"火焰图: {outfile}")
+    typer.echo(f"会话目录: {session_dir}")
+
+
+async def _job_replay_async(settings: Settings, job_id: str, out_dir: Path) -> int:
+    """诊断重放子进程主体(不经 worker 领取,直接执行终态 job)。
+
+    边界:Path/文件 IO 只允许经同步助手调用(ASYNC240),目录创建在同步
+    包装器完成。
+    """
+
+    from finboard_backtest.background_jobs.contracts import JobRecord, JobResult
+    from finboard_backtest.background_jobs.executors.research_run import (
+        ResearchRunExecutor,
+    )
+    from finboard_backtest.background_jobs.registry import UnknownJobKindError
+    from finboard_backtest.background_jobs.worker import build_job_timing
+    from finboard_data.cache import collect_parquet_read_stats
+    from finboard_persistence import BackgroundJobRepository
+
+    components = build_kernel_components(settings)
+    scratch: Path | None = None
+    try:
+        async with components.session_maker() as session:
+            row = await BackgroundJobRepository(session).get(job_id)
+        if row is None:
+            typer.echo(f"job {job_id} 不存在", err=True)
+            return 1
+        registry = build_executor_registry(settings, components.session_maker)
+        try:
+            executor = registry.get(row.kind)
+        except UnknownJobKindError:
+            typer.echo(f"未知 job kind: {row.kind}", err=True)
+            return 1
+        job_record = JobRecord(
+            job_id=row.job_id,
+            kind=row.kind,
+            queue=row.queue,
+            payload=dict(row.payload),
+            attempt=row.attempt,
+            max_attempts=row.max_attempts,
+            requested_by=row.requested_by,
+            progress_total=row.progress_total,
+            progress_done=row.progress_done,
+            phase=row.phase,
+        )
+
+        async def _noop_progress(
+            done: int, total: int | None, phase: str | None
+        ) -> None:
+            return None
+
+        if row.kind == "dataset_publish":
+            # scratch release_root(issue #383):强制重新冻结(计算全量执行);
+            # release_root() 在 execute 内逐次读 env,执行前设置即可生效。
+            # DB 层身份命中返回已有行,不插新行;会话结束删除 scratch。
+            scratch = _make_scratch_release_root(out_dir)
+
+        started = time.monotonic()
+        result: JobResult | None = None
+        crash: BaseException | None = None
+        with collect_parquet_read_stats() as stats:
+            try:
+                if isinstance(executor, ResearchRunExecutor):
+                    # COMPLETED 源走普通 execute 是瞬时 no-op(终态短路),
+                    # 采样不到计算 —— 必须走 #305 replay 语义新建 run。
+                    run_id = job_record.payload.get("run_id")
+                    if not isinstance(run_id, str) or not run_id.startswith("RR-"):
+                        typer.echo("payload.run_id 缺失或非法(RR- 前缀)", err=True)
+                        return 1
+                    result = await executor.execute_replay(run_id)
+                else:
+                    result = await executor.execute(job_record, _noop_progress)
+            except Exception as exc:
+                # 重放失败也照常落 timing / result(火焰图 + 失败现场同为
+                # 诊断产物);不吞退出码。
+                crash = exc
+        timing = build_job_timing(started, stats)
+
+        if crash is not None or result is None:
+            result_payload: dict[str, object] = {
+                "status": "crashed",
+                "result_ref": None,
+                "error_code": type(crash).__name__ if crash else "unknown",
+                "error_summary": str(crash) if crash else None,
+            }
+        else:
+            result_payload = {
+                "status": result.status,
+                "result_ref": result.result_ref,
+                "error_code": result.error_code,
+                "error_summary": result.error_summary,
+            }
+        (out_dir / "timing.json").write_text(
+            json.dumps(timing, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (out_dir / "result.json").write_text(
+            json.dumps(result_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        from typing import cast
+
+        reads = cast("dict[str, object]", timing["parquet_reads"])
+        typer.echo(
+            f"重放终态: {result_payload['status']};"
+            f"耗时 {timing['execute_elapsed_seconds']}s,"
+            f" parquet 读 {reads.get('read_ops', 0)} 次"
+        )
+        if crash is not None:
+            return 2
+        return 0 if result is not None and result.status == "succeeded" else 2
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
+        await components.engine.dispose()
+
+
+def _make_scratch_release_root(out_dir: Path) -> Path:
+    """为 dataset_publish 重放准备一次性 scratch release_root 并设 env。
+
+    同步助手(ASYNC240):重算发布冻结文件落到 scratch,真实 data_releases
+    不被触碰;DB 层身份命中返回已有行,scratch 会话结束即删。
+    """
+
+    scratch = out_dir / "scratch-release-root"
+    scratch.mkdir(parents=True, exist_ok=True)
+    os.environ["FINBOARD_DATA_RELEASE_ROOT"] = str(scratch)
+    return scratch
+
+
+@app.command(name="job-replay-exec", hidden=True)
+def job_replay_exec(
+    ctx: typer.Context,
+    job_id: str = typer.Argument(),
+    out_dir: Path = typer.Option(..., "--out-dir"),
+) -> None:
+    """诊断重放子进程(issue #383):不经 worker 领取,直接执行一个终态 job。
+
+    由 ``job-flamegraph`` 在 py-spy launch 模式下作为子进程拉起,一般不
+    直接调用。全程套 parquet 读取聚合 + wall-clock 计时,timing.json /
+    result.json 写入 --out-dir 供父进程展示;退出码 0=重放 succeeded,
+    2=重放终态非 succeeded(诊断数据仍有效),1=基础设施错误。
+    """
+
+    settings: Settings = ctx.obj
+    out_dir.mkdir(parents=True, exist_ok=True)
+    exit_code = asyncio.run(_job_replay_async(settings, job_id, out_dir))
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
 
 
 def main() -> None:

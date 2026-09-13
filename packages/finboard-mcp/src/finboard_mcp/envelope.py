@@ -31,6 +31,8 @@ ErrorKind = Literal[
     "invalid_argument",
     "cancelled",
     "unavailable",
+    # issue #458:响应载荷估计超过硬上限时具名拒绝(fail-visible,不静默截断)。
+    "payload_too_large",
 ]
 
 

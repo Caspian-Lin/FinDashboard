@@ -11,10 +11,19 @@
   - ``92`` / ``8x`` / ``4x`` → ``.BJ`` (北交所)
 * 带 prefix 的 ETF 代码(``sz159998`` / ``sh510300``)→ 去掉 prefix + 大写后缀
 
-指数登记(issue #256):akshare 全市场列表接口(stock / fund ETF)不覆盖指数,
-``discover_indices`` 从受控登记表 :data:`BENCHMARK_INDEX_REGISTRY` 产出
+指数登记(issue #256,#394 起 tushare index_basic 主源):akshare 全市场列表
+接口(stock / fund ETF)不覆盖指数,``discover_indices`` 产出
 ``instrument_type=index`` 的标的——这是「指数登记 → 同步 → 发布 →
-benchmark_return」链路的唯一登记写入者。
+benchmark_return」链路的唯一登记写入者。#394 起登记源从受控登记表
+(9 只)扩大为 tushare ``index_basic`` 全量(A 股三所指数按
+:func:`finboard_data.akshare_provider.is_index_code` 收窄;编外市场
+CSI / CIC / MSCI 无行情上游,不登记);:data:`BENCHMARK_INDEX_REGISTRY`
+保留并收窄为「基准资格白名单」(:func:`is_benchmark_index` 只认白名单,
+哪些指数可作 benchmark 的受控语义不变,#256 边界:指数一律不可撮合,
+只做基准 / 研究数据)。index_basic 的 ``base_date`` 随登记携带
+(``InstrumentInfo.list_date``),由 data_sync 后置回填
+``instruments.list_date``(#185 只补 null 语义),消除 mixed 发布的
+list_date 恒缺失噪音。
 
 可转债登记(issue #265):akshare 股票 / ETF / 指数列表接口同样不覆盖转债,
 ``discover_convertibles`` 从东财可转债一览 ``bond_zh_cov`` 产出
@@ -22,7 +31,7 @@ benchmark_return」链路的唯一登记写入者。
 见 :func:`finboard_data.akshare_provider.is_convertible_code`),并入
 ``discover_all()``;data_sync 经 ``sync_with_diff`` 自动登记。
 转债无 list_date 的结构化上游(东财一览无上市日列),保持 null,由
-research_data_sync ``convertible_profiles`` 数据集从 tushare cb_basic 回填。
+dataset_sync ``convertible_profiles`` 数据集从 tushare cb_basic 回填。
 
 期货主连登记(issue #267):akshare 全市场列表接口不覆盖期货,
 ``discover_futures_main`` 从受控登记表
@@ -32,12 +41,21 @@ research_data_sync ``convertible_profiles`` 数据集从 tushare cb_basic 回填
 写入者。登记的是**主连序列**(continuous 语义),不是可成交合约;
 主连仅用于研究信号 / 基准数据。合约 → 品种映射显式维护在登记表
 (乘数 / 保证金率与 finboard-backtest ``FuturesRule`` 同口径,单测锁定)。
+
+期货合约级登记(issue #395):``discover_futures_contracts`` 从 tushare
+``fut_basic`` 登记具体月份合约(CFFEX 股指四品种 IF/IH/IC/IM,与主连
+受控登记表同品种),``instrument_type=futures`` 与主连同型但语义不同:
+合约是真实可成交标的(交易所/乘数/最小变动价位来自接口实测,保证金率
+上游无列、仍由受控表承载)。**主连受控登记表保留**,主连序列语义与
+合约登记并存;只登记当前在市合约(退市合约不回补登记,存量行保留
+``delist_date`` 可见)。
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING
 
 import structlog
@@ -51,19 +69,19 @@ from finboard_data.akshare_provider import (
 from finboard_shared.types import InstrumentType, ListingBoard, Market
 
 if TYPE_CHECKING:
-    pass
+    from finboard_data.tushare_provider import TushareResearchDataProvider
 
 logger = structlog.get_logger(__name__)
 
 
-#: 常用基准指数受控登记表 ``(code, name)``(issue #256)。
+#: 基准指数资格白名单 ``(code, name)``(issue #256 受控登记;#394 收窄语义)。
 #:
-#: 指数无 akshare 全市场列表接口(股票 / ETF 各有列表 API,指数没有同口径
-#: 的稳定列表),这里维护一张显式登记表,覆盖 A 股主要宽基 / 基准指数;
-#: 全部条目必须满足 ``is_index_code`` 代码规则(模块导入期即断言,防止
-#: 登记表漂移把股票代码混进来)。扩展新指数直接加一行;data_sync 经
-#: ``sync_with_diff`` 自动写入 instruments 表。指数无 list_date / 行业的
-#: 结构化上游,保持 null(缺失在 data_sync 统计中可见,不虚构元数据)。
+#: #394 起指数**登记**源是 tushare ``index_basic`` 全量(discover_indices),
+#: 本表不再承担登记职责,收窄为「哪些指数可作 benchmark」的受控白名单:
+#: :func:`is_benchmark_index` 只认表内代码,白名单外的指数照常登记 /
+#: 可缓存 / 可发布,但只做数据资产。全部条目必须满足 ``is_index_code``
+#: 代码规则(模块导入期即断言,防止白名单漂移把股票代码混进来)。
+#: 扩展新基准指数直接加一行。
 BENCHMARK_INDEX_REGISTRY: tuple[tuple[str, str], ...] = (
     ("000001.SH", "上证指数"),
     ("000016.SH", "上证50"),
@@ -85,6 +103,27 @@ if _INVALID_INDEX_CODES:
         + ", ".join(_INVALID_INDEX_CODES)
     )
 
+#: 白名单代码集(模块级冻结,``is_benchmark_index`` 查表用)。
+_BENCHMARK_INDEX_CODES = frozenset(code for code, _ in BENCHMARK_INDEX_REGISTRY)
+
+
+def is_benchmark_index(code: str) -> bool:
+    """基准资格白名单判定(issue #394,#256 受控语义保留)。
+
+    只认 :data:`BENCHMARK_INDEX_REGISTRY` 表内代码(大小写不敏感);
+    白名单外的指数(含 index_basic 登记扩大的全部 A 股三所指数)返回
+    False —— 它们可登记 / 可缓存 / 可发布,但不是基准资格资产。
+    """
+    return code.strip().upper() in _BENCHMARK_INDEX_CODES
+
+
+#: 期货合约级登记域(issue #395):CFFEX 股指四品种,与
+#: :data:`FUTURES_MAIN_SERIES_REGISTRY`(主连受控登记表)同品种 ——
+#: 合约级乘数 / 最小变动价位与受控表 / finboard-backtest ``FuturesRule``
+#: 的对账基准只覆盖这四个品种。国债(T/TF/TS/TL)与商品五所不登记;
+#: 扩域 = 先扩受控表(乘数 / 保证金率口径)再加一行。
+FUTURES_CONTRACT_PRODUCTS: frozenset[str] = frozenset({"IF", "IH", "IC", "IM"})
+
 
 def _index_exchange(code: str) -> str:
     """指数代码后缀 → 交易所主数据标识(与股票 / ETF 同一口径)。"""
@@ -105,6 +144,14 @@ class InstrumentInfo:
     instrument_type: InstrumentType  # stock / etf
     exchange: str | None = None      # SSE / SZSE / BSE
     listing_board: ListingBoard = ListingBoard.UNKNOWN
+    # issue #394:指数登记携带 index_basic base_date,data_sync
+    # 后置回填 instruments.list_date(只补 null)。其余发现路径无结构化
+    # 上游,保持 None(#185 口径:缺失可见,不虚构元数据)。
+    list_date: date | None = None
+    # issue #395:期货合约登记携带 fut_basic delist_date(最后交易日),
+    # 与 list_date 同走 backfill_listing_dates 只补 null 通道。其余发现
+    # 路径无结构化上游,保持 None。
+    delist_date: date | None = None
 
 
 def infer_a_share_listing_board(code: str) -> ListingBoard:
@@ -256,25 +303,77 @@ class UniverseDiscovery:
             )
         return [(str(row[code_col]), str(row[name_col])) for _, row in df.iterrows()]
 
-    async def discover_indices(self) -> list[InstrumentInfo]:
-        """基准指数(受控登记表,issue #256,无网络调用)。
+    async def discover_indices(
+        self,
+        provider: TushareResearchDataProvider | None = None,
+    ) -> list[InstrumentInfo]:
+        """A 股指数全量登记(tushare ``index_basic``,issue #394)。
 
-        ``instrument_type=index``;交易所按代码后缀推导,listing_board 恒为
-        UNKNOWN(指数无上市板块)。同步链路对其做 (a_share, index) 作用域的
-        生命周期 diff,与其他资产类型一致。
+        #256 的受控登记表(9 只)从 #394 起收窄为基准资格白名单
+        (:func:`is_benchmark_index`),登记写入者扩大为 ``index_basic``
+        全量:provider 保留全部市场快照,本方法按 ``is_index_code``
+        (000xxx.SH / 399xxx.SZ / 899xxx.BJ)收窄登记域 —— 与行情路由 /
+        冻结发布 / benchmark 消费口径同域;编外市场(CSI / CIC / MSCI
+        等)无行情上游,登记即噪音,不进 instruments 表。
+
+        只登记在市指数(``list_status`` 缺省或 L);上游按市场分片动态裁列,
+        ``list_status`` 实测经常整批缺失(2026-09-10 复核)—— 缺失按在市
+        处理,退市交 sync_with_diff 的生命周期 diff(缺席二次确认)语义。
+        ``base_date``(基日)映射 ``InstrumentInfo.list_date``,由 data_sync
+        后置回填 ``instruments.list_date``(只补 null,#185)。
+
+        :param provider: 可注入的 tushare 研究数据 provider(测试离线注入);
+            缺省从环境构造(token 缺失具名拒绝 —— 登记源已切换,不静默
+            回退白名单)。
         """
-        result = [
-            InstrumentInfo(
-                code=code,
-                name=name,
-                market=Market.A_SHARE,
-                instrument_type=InstrumentType.INDEX,
-                exchange=_index_exchange(code),
-                listing_board=ListingBoard.UNKNOWN,
+        if provider is None:
+            from finboard_data.tushare_provider import TushareResearchDataProvider
+
+            provider = TushareResearchDataProvider()
+        profiles = await provider.fetch_index_profiles()
+        result: list[InstrumentInfo] = []
+        skipped_out_of_scope = 0
+        skipped_not_listed = 0
+        for item in profiles:
+            if not is_index_code(item.symbol):
+                skipped_out_of_scope += 1
+                continue
+            if item.list_status is not None and item.list_status.upper() not in {
+                "",
+                "L",
+            }:
+                skipped_not_listed += 1
+                continue
+            result.append(
+                InstrumentInfo(
+                    code=item.symbol,
+                    name=item.name,
+                    market=Market.A_SHARE,
+                    instrument_type=InstrumentType.INDEX,
+                    exchange=_index_exchange(item.symbol),
+                    listing_board=ListingBoard.UNKNOWN,
+                    # 基日是指数「自何时存在」的结构化上游;上游 list_date
+                    # 大量为 null,回填口径 base_date 优先(#394)。
+                    list_date=item.base_date or item.list_date,
+                )
             )
-            for code, name in BENCHMARK_INDEX_REGISTRY
-        ]
-        logger.info("discovery.indices", count=len(result))
+        if not result:
+            raise RuntimeError(
+                f"tushare index_basic 返回 {len(profiles)} 行但无可登记的 "
+                "A 股指数(000xxx.SH / 399xxx.SZ / 899xxx.BJ),疑似上游 schema 变更"
+            )
+        logger.info(
+            "discovery.indices",
+            count=len(result),
+            source_rows=len(profiles),
+            skipped_out_of_scope=skipped_out_of_scope,
+            skipped_not_listed=skipped_not_listed,
+            whitelist=sorted(
+                item.code
+                for item in result
+                if is_benchmark_index(item.code)
+            ),
+        )
         return result
 
     async def discover_convertibles(self) -> list[InstrumentInfo]:
@@ -340,21 +439,101 @@ class UniverseDiscovery:
         logger.info("discovery.futures_main", count=len(result))
         return result
 
+    async def discover_futures_contracts(
+        self,
+        provider: TushareResearchDataProvider | None = None,
+        *,
+        today: date | None = None,
+    ) -> list[InstrumentInfo]:
+        """期货合约级登记(tushare ``fut_basic``,issue #395)。
+
+        登记域 = :data:`FUTURES_CONTRACT_PRODUCTS`(CFFEX 股指四品种,
+        与 :data:`FUTURES_MAIN_SERIES_REGISTRY` 同品种)—— 合约级乘数 /
+        最小变动价位的对账受控基准(#267 受控表 + finboard-backtest
+        ``FuturesRule``)只覆盖这四个品种;国债(T/TF/TS/TL)与商品五所
+        扩域 = 扩受控表后加一行。**只登记当前在市合约**(``list_date``
+        已到且 ``delist_date`` 未过;退市合约不回补登记 —— 存量行保留
+        ``delist_date`` 可见,避免 instruments 表随全历史合约无限膨胀、
+        full_market mixed 发布展开随之放大);预上市(list_date 在未来)
+        合约留待后续 sync 登记。list_date / delist_date 经
+        ``backfill_listing_dates`` 回填(只补 null,#265/#394 同语义)。
+
+        :param provider: 可注入的 tushare 研究数据 provider(测试离线注入);
+            缺省从环境构造(token 缺失具名拒绝 —— 登记源即 tushare)。
+        :param today: 可注入时钟(在市窗口判定;缺省 ``date.today()``)。
+        """
+        if provider is None:
+            from finboard_data.tushare_provider import TushareResearchDataProvider
+
+            provider = TushareResearchDataProvider()
+        reference_day = today or date.today()
+        profiles = await provider.fetch_futures_contract_profiles()
+        result: list[InstrumentInfo] = []
+        skipped_other_product = 0
+        skipped_not_listed = 0
+        for item in profiles:
+            if item.product not in FUTURES_CONTRACT_PRODUCTS:
+                skipped_other_product += 1
+                continue
+            listed = (item.list_date is None or item.list_date <= reference_day) and (
+                item.delist_date is None or item.delist_date >= reference_day
+            )
+            if not listed:
+                skipped_not_listed += 1
+                continue
+            result.append(
+                InstrumentInfo(
+                    code=item.symbol,
+                    name=item.name,
+                    market=Market.FUTURE,
+                    instrument_type=InstrumentType.FUTURES,
+                    exchange=item.exchange,
+                    listing_board=ListingBoard.UNKNOWN,
+                    list_date=item.list_date,
+                    delist_date=item.delist_date,
+                )
+            )
+        if not result:
+            raise RuntimeError(
+                f"tushare fut_basic 返回 {len(profiles)} 行但无可登记的 CFFEX 股指"
+                f"在市合约({sorted(FUTURES_CONTRACT_PRODUCTS)}),疑似上游 schema 变更"
+            )
+        logger.info(
+            "discovery.futures_contracts",
+            count=len(result),
+            source_rows=len(profiles),
+            products=sorted(FUTURES_CONTRACT_PRODUCTS),
+            skipped_other_product=skipped_other_product,
+            skipped_not_listed=skipped_not_listed,
+        )
+        return result
+
     async def discover_all(self) -> list[InstrumentInfo]:
-        """发现全部可用标的(A 股股票 + ETF + 基准指数 + 可转债 + 期货主连)。"""
-        stocks, etfs, indices, convertibles, futures = await asyncio.gather(
+        """发现全部可用标的(A 股股票 + ETF + 基准指数 + 可转债 + 期货主连 + 期货合约)。"""
+        (
+            stocks,
+            etfs,
+            indices,
+            convertibles,
+            futures,
+            futures_contracts,
+        ) = await asyncio.gather(
             self.discover_a_shares(),
             self.discover_a_etfs(),
             self.discover_indices(),
             self.discover_convertibles(),
             self.discover_futures_main(),
+            self.discover_futures_contracts(),
         )
-        all_instruments = stocks + etfs + indices + convertibles + futures
+        all_instruments = (
+            stocks + etfs + indices + convertibles + futures + futures_contracts
+        )
         logger.info(
             "discovery.all",
             total=len(all_instruments),
             indices=len(indices),
             convertibles=len(convertibles),
             futures=len(futures),
+            futures_contracts=len(futures_contracts),
         )
         return all_instruments

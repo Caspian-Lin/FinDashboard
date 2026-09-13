@@ -23,10 +23,12 @@ import contextlib
 import logging
 import signal
 import sys
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -41,6 +43,7 @@ from finboard_backtest.background_jobs.registry import (
     JobExecutorRegistry,
     UnknownJobKindError,
 )
+from finboard_data.cache import ParquetReadJobStats, collect_parquet_read_stats
 from finboard_persistence import (
     BackgroundJobPersistenceConflictError,
     BackgroundJobRepository,
@@ -57,6 +60,24 @@ WORKER_FORCE_EXIT_CODE = 130
 #: 处理器只在主线程从 select 返回后的字节码边界执行 —— 等待按短窗口分片,
 #: 保证第二次停止信号的反应延迟有界(≤ ~0.4s),而不是被整个宽限窗口卡住。
 _DRAIN_POLL_SECONDS = 0.2
+
+
+def build_job_timing(
+    started_monotonic: float, stats: ParquetReadJobStats
+) -> dict[str, object]:
+    """job 级耗时/IO 聚合(issue #383),所有 job kind 通用。
+
+    ``execute_elapsed_seconds`` 是 ``_execute_with_heart`` 全程 wall-clock;
+    ``parquet_reads`` 是该窗口内 ``ParquetCache`` 全部读取入口的聚合(#285
+    计数器,经 #383 嵌套句柄栈在外层全程激活)。IO 归因读法:读耗时占
+    wall-clock 比例高 ≈ IO 瓶颈,低 ≈ CPU/DB/网络瓶颈。纯函数,诊断重放
+    (``job-replay-exec``)复用同一构造。
+    """
+
+    return {
+        "execute_elapsed_seconds": round(time.monotonic() - started_monotonic, 3),
+        "parquet_reads": stats.as_dict(),
+    }
 
 
 @dataclass
@@ -361,6 +382,10 @@ class BackgroundWorker:
             early_result: JobResult | None = None
             record: JobRecord | None = None
             executor: JobExecutor | None = None
+            # issue #383:计时哨兵先置 None —— 领取 session 块不计时;异常
+            # 兜底路径也要能构造 timing(execute 中途抛错时句柄仍可读)。
+            execute_started: float | None = None
+            parquet_stats: ParquetReadJobStats | None = None
             async with self._session_maker() as session:
                 repo = BackgroundJobRepository(session)
                 row = await repo.get(job_id, for_update=True)
@@ -397,7 +422,25 @@ class BackgroundWorker:
                 return
             assert executor is not None
             assert record is not None
-            result = await self._execute_with_heart(job_id, executor, record)
+            # issue #383:所有 job kind 通用的计时窗口 —— wall-clock + parquet
+            # 读取聚合(#285 计数器,经嵌套句柄栈在外层全程激活,引擎内层
+            # 既有激活不再遮蔽)。成功与失败兜底路径都落 timing;句柄在执行
+            # 体首行绑定到外层哨兵(先于 await,执行中途抛错时异常兜底同样可读)。
+            execute_started = time.monotonic()
+            with collect_parquet_read_stats() as stats_handle:
+                parquet_stats = stats_handle
+                result = await self._execute_with_heart(job_id, executor, record)
+            job_timing = build_job_timing(execute_started, parquet_stats)
+            result.timing = job_timing
+            logger.info(
+                "background_worker.job_timing job_id=%s kind=%s elapsed=%.3fs"
+                " read_ops=%d read_ms=%.1f",
+                job_id,
+                record.kind,
+                cast("float", job_timing["execute_elapsed_seconds"]),
+                parquet_stats.read_ops,
+                parquet_stats.read_elapsed_ms,
+            )
             await self._finalize(job_id, result)
         except asyncio.CancelledError:
             # 进程关闭时取消 in-flight task:把任务留在 running,由 lease 过期回收。
@@ -410,6 +453,10 @@ class BackgroundWorker:
                 if isinstance(exc, ExecutorError) and exc.retryable
                 else BackgroundJobStatus.FAILED.value
             )
+            # issue #383:执行中途崩溃也带 timing(句柄与起点在异常前已建)。
+            timing: dict[str, object] | None = None
+            if execute_started is not None and parquet_stats is not None:
+                timing = build_job_timing(execute_started, parquet_stats)
             await self._finalize(
                 job_id,
                 JobResult(
@@ -421,6 +468,7 @@ class BackgroundWorker:
                     error_summary=truncate_summary(
                         getattr(exc, "summary", None) or str(exc) or type(exc).__name__
                     ),
+                    timing=timing,
                 ),
             )
 
@@ -514,6 +562,7 @@ class BackgroundWorker:
                     result_ref=result.result_ref,
                     error_code=result.error_code,
                     error_summary=result.error_summary,
+                    timing=result.timing,
                 )
                 await repo.checkpoint()
             except BackgroundJobPersistenceConflictError as exc:

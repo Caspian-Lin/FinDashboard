@@ -248,7 +248,7 @@ def test_ensure_sandbox_image_noop_when_image_present() -> None:
     settings = MagicMock()
     settings.research_sandbox_enabled = True
     settings.research_sandbox_docker_bin = "docker"
-    settings.research_sandbox_image = "finboard-research-sandbox:0.2.0"
+    settings.research_sandbox_image = "finboard-research-sandbox:0.3.0"
     with patch(
         "finboard_app.cli.subprocess.run",
         return_value=MagicMock(returncode=0),
@@ -266,7 +266,7 @@ def test_ensure_sandbox_image_builds_when_missing() -> None:
     settings = MagicMock()
     settings.research_sandbox_enabled = True
     settings.research_sandbox_docker_bin = "docker"
-    settings.research_sandbox_image = "finboard-research-sandbox:0.2.0"
+    settings.research_sandbox_image = "finboard-research-sandbox:0.3.0"
     results = [MagicMock(returncode=1), MagicMock(returncode=0)]
     with patch("finboard_app.cli.subprocess.run", side_effect=results) as run:
         assert _ensure_sandbox_image(settings) is True
@@ -274,7 +274,7 @@ def test_ensure_sandbox_image_builds_when_missing() -> None:
     build_cmd = run.call_args.args[0]
     assert build_cmd[0:2] == ["docker", "build"]
     assert "docker/research-sandbox/Dockerfile" in build_cmd
-    assert "finboard-research-sandbox:0.2.0" in build_cmd
+    assert "finboard-research-sandbox:0.3.0" in build_cmd
 
 
 @pytest.mark.unit
@@ -285,7 +285,7 @@ def test_ensure_sandbox_image_build_failure_warns_not_raises() -> None:
     settings = MagicMock()
     settings.research_sandbox_enabled = True
     settings.research_sandbox_docker_bin = "docker"
-    settings.research_sandbox_image = "finboard-research-sandbox:0.2.0"
+    settings.research_sandbox_image = "finboard-research-sandbox:0.3.0"
     results = [MagicMock(returncode=1), MagicMock(returncode=2)]
     with patch("finboard_app.cli.subprocess.run", side_effect=results):
         assert _ensure_sandbox_image(settings) is False
@@ -299,7 +299,7 @@ def test_ensure_sandbox_image_docker_missing_warns_not_raises() -> None:
     settings = MagicMock()
     settings.research_sandbox_enabled = True
     settings.research_sandbox_docker_bin = "docker"
-    settings.research_sandbox_image = "finboard-research-sandbox:0.2.0"
+    settings.research_sandbox_image = "finboard-research-sandbox:0.3.0"
     with patch(
         "finboard_app.cli.subprocess.run", side_effect=FileNotFoundError("docker")
     ):

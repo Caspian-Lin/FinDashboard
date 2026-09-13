@@ -185,8 +185,11 @@ class ParquetReadJobStats:
         }
 
 
-_PARQUET_READ_STATS: ContextVar[ParquetReadJobStats | None] = ContextVar(
-    "finboard_parquet_read_stats", default=None
+#: 活跃句柄栈(issue #383 前为单句柄):外层句柄 = 全程聚合,内层句柄 = 自身
+#: 段聚合,读取向全部活跃句柄累加。worker 层全程激活(issue #383)后,引擎内
+#: 既有激活(#285 backtest/research_run)不再遮蔽外层的 job 级总数。
+_PARQUET_READ_STATS: ContextVar[tuple[ParquetReadJobStats, ...]] = ContextVar(
+    "finboard_parquet_read_stats", default=()
 )
 
 
@@ -201,11 +204,12 @@ def collect_parquet_read_stats() -> Iterator[ParquetReadJobStats]:
         print(stats.as_dict())
 
     asyncio task 创建时复制 contextvar,worker 每 job 一个 task,天然按 job
-    隔离;嵌套激活以内层为准(当前无嵌套使用方)。
+    隔离;嵌套激活(issue #383)时每个句柄独立聚合、读取向全部活跃句柄累加
+    ——外层句柄覆盖全程,内层句柄只覆盖自身段,单层使用方行为不变。
     """
 
     stats = ParquetReadJobStats()
-    token = _PARQUET_READ_STATS.set(stats)
+    token = _PARQUET_READ_STATS.set((*_PARQUET_READ_STATS.get(), stats))
     try:
         yield stats
     finally:
@@ -213,10 +217,9 @@ def collect_parquet_read_stats() -> Iterator[ParquetReadJobStats]:
 
 
 def _record_job_read(entry: str, *, elapsed_ms: float, size_bytes: int) -> None:
-    """读取入口处向已激活的 job 级聚合句柄累加(未激活时静默跳过)。"""
+    """读取入口处向全部活跃的 job 级聚合句柄累加(未激活时静默跳过)。"""
 
-    stats = _PARQUET_READ_STATS.get()
-    if stats is not None:
+    for stats in _PARQUET_READ_STATS.get():
         stats.record(entry, elapsed_ms=elapsed_ms, size_bytes=size_bytes)
 
 
@@ -226,10 +229,22 @@ def _record_job_read(entry: str, *, elapsed_ms: float, size_bytes: int) -> None:
 #: 缓存容量须 ≥ 工作集才不抖动)。置 0 关闭缓存。
 DEFAULT_READ_CACHE_MAX_ELEMENTS = 2_000_000
 
+#: 读缓存条目的每元素近似字节成本(issue #440)。条目是 Python 领域对象,
+#: 精确深度量不可行(``sys.getsizeof`` 不含引用字段,逐对象遍历成本不可接受)
+#: ——按「元素数 x 每元素实测平均字节」近似计量。实测方法:64 位 CPython
+#: 3.12 下用 ``tracemalloc`` 构造 10 万个代表对象,取增量 / 元素数;Bar 的
+#: symbol/period 等跨条目共享引用只计一次。列式条目常数取含 opens 的上界
+#: (close-only 实测 ~48B,带 open ~64B)。
+_READ_CACHE_BYTES_PER_BAR = 800
+_READ_CACHE_BYTES_PER_POINT = 224
+_READ_CACHE_BYTES_PER_CLOSE_COLUMN = 64
+
 #: 读缓存条目种类(bars / close 点位 / 列式 close),参与缓存键。
 _READ_CACHE_KIND_BARS = "bars"
 _READ_CACHE_KIND_CLOSE_POINTS = "close_points"
 _READ_CACHE_KIND_CLOSE_COLUMNS = "close_columns"
+#: issue #336:带 open 列的条目与 close-only 条目分键缓存,互不混用。
+_READ_CACHE_KIND_CLOSE_COLUMNS_OPEN = "close_columns_open"
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +255,9 @@ class _ReadCacheEntry:
     points: list[tuple[datetime, Decimal]] | None
     elements: int
     columns: CloseColumns | None = None
+    #: 近似字节成本(issue #440):elements x 每元素常数,见
+    #: ``_READ_CACHE_BYTES_PER_*``;仅用于字节上限驱逐与观测。
+    approx_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,10 +272,16 @@ class CloseColumns:
 
     仅支持日线:列式形态依赖 D1 timestamp 归一化后恒为当日 00:00 UTC 的
     性质,``dates`` 与归一化 timestamp 无损互相推导。
+
+    ``opens`` 为可选携带的 float64 开盘价平行序列(issue #336,执行价基
+    next_open 用):仅 ``include_open=True`` 时读取,与 dates/closes 严格
+    同长——请求 opens 时 open 为 null 的行与 null close 行一并跳过。
+    默认 ``None``(close-only 消费方零额外读取/内存)。
     """
 
     dates: tuple[date, ...]
     closes: np.ndarray
+    opens: np.ndarray | None = None
 
 
 def _d1_midnight_us(timestamps: pa.ChunkedArray, symbol: Symbol) -> np.ndarray:
@@ -305,6 +329,7 @@ def _slice_close_columns(
     return CloseColumns(
         dates=columns.dates[lo:hi],
         closes=columns.closes[lo:hi],
+        opens=None if columns.opens is None else columns.opens[lo:hi],
     )
 
 
@@ -321,6 +346,7 @@ class ParquetCache:
         *,
         max_io_concurrency: int = 1,
         read_cache_max_elements: int | None = None,
+        read_cache_max_bytes: int | None = None,
     ) -> None:
         if max_io_concurrency < 1:
             raise ValueError("max_io_concurrency 必须 >= 1")
@@ -328,6 +354,8 @@ class ParquetCache:
             read_cache_max_elements = DEFAULT_READ_CACHE_MAX_ELEMENTS
         if read_cache_max_elements < 0:
             raise ValueError("read_cache_max_elements 必须 >= 0")
+        if read_cache_max_bytes is not None and read_cache_max_bytes < 0:
+            raise ValueError("read_cache_max_bytes 必须 >= 0")
         self._dir = Path(cache_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._io_semaphore = asyncio.Semaphore(max_io_concurrency)
@@ -339,10 +367,14 @@ class ParquetCache:
         # 任何写入(本实例 write / 外部进程改写)都会因键变化自然失效;
         # write 后再显式丢弃同路径条目,避免陈旧条目占用内存等 LRU 驱逐。
         self._read_cache_max_elements = read_cache_max_elements
+        # issue #440:近似字节总量上限(None = 不限,行为与 #287 一致)。
+        # 计量口径见 ``_READ_CACHE_BYTES_PER_*`` 常数注释。
+        self._read_cache_max_bytes = read_cache_max_bytes
         self._read_cache: OrderedDict[
             tuple[str, int, int, str], _ReadCacheEntry
         ] = OrderedDict()
         self._read_cache_elements = 0
+        self._read_cache_bytes = 0
         self._read_cache_hits = 0
 
     # ---- 进程内读缓存(LRU)------------------------------------------------
@@ -367,14 +399,31 @@ class ParquetCache:
         if entry.elements > self._read_cache_max_elements:
             # 单文件超过整个缓存预算:不缓存(避免把其它条目全部挤掉)。
             return
+        if (
+            self._read_cache_max_bytes is not None
+            and entry.approx_bytes > self._read_cache_max_bytes
+        ):
+            # 单条目超过字节总预算:同样不缓存(issue #440,与 elements 口径
+            # 同语义;近似计量见 _READ_CACHE_BYTES_PER_* 常数注释)。
+            return
         while (
             self._read_cache
-            and self._read_cache_elements + entry.elements > self._read_cache_max_elements
+            and (
+                self._read_cache_elements + entry.elements
+                > self._read_cache_max_elements
+                or (
+                    self._read_cache_max_bytes is not None
+                    and self._read_cache_bytes + entry.approx_bytes
+                    > self._read_cache_max_bytes
+                )
+            )
         ):
             _, evicted = self._read_cache.popitem(last=False)
             self._read_cache_elements -= evicted.elements
+            self._read_cache_bytes -= evicted.approx_bytes
         self._read_cache[key] = entry
         self._read_cache_elements += entry.elements
+        self._read_cache_bytes += entry.approx_bytes
 
     def _read_cache_drop_path(self, path: Path) -> None:
         """丢弃某路径的全部缓存条目(write 后调用,防陈旧条目滞留)。"""
@@ -382,12 +431,14 @@ class ParquetCache:
         for key in [item for item in self._read_cache if item[0] == prefix]:
             entry = self._read_cache.pop(key)
             self._read_cache_elements -= entry.elements
+            self._read_cache_bytes -= entry.approx_bytes
 
     def read_cache_info(self) -> dict[str, int]:
-        """进程内读缓存概况(观测 / 测试用):条目数、元素数、命中次数。"""
+        """进程内读缓存概况(观测 / 测试用):条目数、元素数、近似字节、命中次数。"""
         return {
             "entries": len(self._read_cache),
             "elements": self._read_cache_elements,
+            "bytes": self._read_cache_bytes,
             "hits": self._read_cache_hits,
         }
 
@@ -436,7 +487,13 @@ class ParquetCache:
         async with self._io_semaphore:
             bars = await asyncio.to_thread(self._read_sync, path, symbol, period)
         self._read_cache_put(
-            key, _ReadCacheEntry(bars=bars, points=None, elements=len(bars))
+            key,
+            _ReadCacheEntry(
+                bars=bars,
+                points=None,
+                elements=len(bars),
+                approx_bytes=len(bars) * _READ_CACHE_BYTES_PER_BAR,
+            ),
         )
         self._read_ops += 1
         self._read_bytes += size
@@ -517,7 +574,12 @@ class ParquetCache:
             )
         self._read_cache_put(
             key,
-            _ReadCacheEntry(bars=None, points=full_points, elements=len(full_points)),
+            _ReadCacheEntry(
+                bars=None,
+                points=full_points,
+                elements=len(full_points),
+                approx_bytes=len(full_points) * _READ_CACHE_BYTES_PER_POINT,
+            ),
         )
         points = [
             item
@@ -552,12 +614,17 @@ class ParquetCache:
         *,
         start: date | None = None,
         end: date | None = None,
+        include_open: bool = False,
     ) -> CloseColumns:
         """列式直出 D1 close 序列(issue #300),供 close 矩阵 / 价格特征消费。
 
         与 :meth:`read_close_points` 同一读取与缓存语义(timestamp/close 两列、
         进程内读缓存、区间内存裁剪),但输出为 :class:`CloseColumns`——日期与
         float64 数组,不再逐行构造 ``Decimal`` / tuple 对象。仅支持日线。
+
+        issue #336:``include_open=True`` 时额外读取 open 列(``opens`` 平行
+        序列,next_open 执行价基用);缓存键携带该开关,close-only 与带 open
+        的条目互不混用。open 为 null 的行与 null close 行一并跳过。
         """
 
         if period is not BarPeriod.D1:
@@ -566,7 +633,12 @@ class ParquetCache:
         if not path.exists():
             return CloseColumns(dates=(), closes=_empty_float64())
         stat = path.stat()
-        key = self._read_cache_key(path, stat, _READ_CACHE_KIND_CLOSE_COLUMNS)
+        kind = (
+            _READ_CACHE_KIND_CLOSE_COLUMNS
+            if not include_open
+            else _READ_CACHE_KIND_CLOSE_COLUMNS_OPEN
+        )
+        key = self._read_cache_key(path, stat, kind)
         started = time.monotonic()
         entry = self._read_cache_get(key)
         if entry is not None and entry.columns is not None:
@@ -592,12 +664,13 @@ class ParquetCache:
         async with self._io_semaphore:
             # 未命中时一次读取整文件点位并整份进缓存(区间裁剪在内存做)。
             full_columns = await asyncio.to_thread(
-                self._read_close_columns_sync,
+                ParquetCache.read_close_columns_sync,
                 path,
                 symbol,
                 period,
                 None,
                 None,
+                include_open,
             )
         self._read_cache_put(
             key,
@@ -606,6 +679,7 @@ class ParquetCache:
                 points=None,
                 columns=full_columns,
                 elements=len(full_columns.dates),
+                approx_bytes=len(full_columns.dates) * _READ_CACHE_BYTES_PER_CLOSE_COLUMN,
             ),
         )
         columns = _slice_close_columns(full_columns, start, end)
@@ -622,18 +696,6 @@ class ParquetCache:
             cache_hit=False,
         )
         return columns
-
-    @staticmethod
-    def _read_close_columns_sync(
-        path: Path,
-        symbol: Symbol,
-        period: BarPeriod,
-        start: date | None,
-        end: date | None,
-    ) -> CloseColumns:
-        """兼容旧的线程读取入口。"""
-
-        return ParquetCache.read_close_columns_sync(path, symbol, period, start, end)
 
     @staticmethod
     def read_bars_sync(path: Path, symbol: Symbol, period: BarPeriod) -> list[Bar]:
@@ -733,13 +795,18 @@ class ParquetCache:
         period: BarPeriod,
         start: date | None,
         end: date | None,
+        include_open: bool = False,
     ) -> CloseColumns:
-        """同步列式读取 D1 close 序列(#300),供独立进程 worker 复用。
+        """同步列式读取 D1 close 序列(#300),供线程/进程 worker 复用。
 
         与 :meth:`read_close_points_sync` 逐值等价:同一 null-close 跳过语义、
         同一稳定排序口径(按归一化 timestamp,同值保留文件内原序),close 以
         float64 直出不经 ``Decimal`` 往返。请求区间裁剪按 ``dates`` 二分定位
         (升序序列上的窗口切片与逐行日期过滤等价)。
+
+        issue #336:``include_open=True`` 时同步读取 open 列,与 close 同一
+        行过滤(null open 行一并跳过)与排序,``opens`` 与 dates/closes 严格
+        同长。
         """
 
         import numpy as np
@@ -747,22 +814,34 @@ class ParquetCache:
 
         if period is not BarPeriod.D1:
             raise ValueError("列式 close 直出仅支持日线(period 必须为 D1)")
+        columns_wanted = (
+            ["timestamp", "close"] if not include_open else ["timestamp", "open", "close"]
+        )
         table = pq.read_table(
             path,
-            columns=["timestamp", "close"],
+            columns=columns_wanted,
             use_threads=False,
             pre_buffer=False,
         )
         import pyarrow.compute as pc
 
-        table = table.filter(pc.is_valid(table.column("close")))
+        valid = pc.is_valid(table.column("close"))
+        if include_open:
+            valid = pc.and_(valid, pc.is_valid(table.column("open")))
+        table = table.filter(valid)
         midnight_us = _d1_midnight_us(table.column("timestamp"), symbol)
         close_arr = table.column("close").to_numpy(zero_copy_only=False)
         # 与 read_close_points_sync / read_bars_sync 同一稳定排序口径。
         order = np.argsort(midnight_us, kind="stable")
         day_numbers = midnight_us[order] // 86_400_000_000
         dates_np = day_numbers.astype("datetime64[D]")
-        columns = CloseColumns(dates=tuple(dates_np.tolist()), closes=close_arr[order])
+        columns = CloseColumns(
+            dates=tuple(dates_np.tolist()),
+            closes=close_arr[order],
+            opens=None
+            if not include_open
+            else table.column("open").to_numpy(zero_copy_only=False)[order],
+        )
         return _slice_close_columns(columns, start, end)
 
     async def write(

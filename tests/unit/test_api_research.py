@@ -575,3 +575,127 @@ class TestFactorLaboratory:
             ).status_code
             == 404
         )
+
+
+class TestFactorSourceDatasets:
+    """因子目录 source_datasets 展示注记(因子实验室可观测性)。
+
+    目录 source_fields 存在两种形态:裸字段名与 ``<dataset>.<field>``
+    带来源前缀形式,还可能出现变体后缀(dividend_yield_ttm);
+    注记只做展示,不参与任何门控。
+    """
+
+    def test_prefixed_and_bare_fields(self) -> None:
+        from finboard_api.routes.research import _factor_source_datasets
+
+        assert _factor_source_datasets(["financial_indicators.roe"]) == [
+            "financial_indicators"
+        ]
+        assert _factor_source_datasets(["close"]) == ["bars"]
+        assert _factor_source_datasets(["daily_metrics.pb"]) == ["daily_metrics"]
+
+    def test_variant_suffix_matches_by_substring(self) -> None:
+        from finboard_api.routes.research import _factor_source_datasets
+
+        assert _factor_source_datasets(["daily_metrics.dividend_yield_ttm"]) == [
+            "daily_metrics"
+        ]
+
+    def test_unknown_field_stays_empty(self) -> None:
+        from finboard_api.routes.research import _factor_source_datasets
+
+        assert _factor_source_datasets(["release.instruments.asset_class"]) == []
+
+
+class TestPredefinedFactorCatalog:
+    """平台预置因子只读目录(``GET /api/research/factors/predefined``,#427)。
+
+    数据源 = ``finboard_backtest.factors.predefined.PREDEFINED_FACTORS``
+    内存注册表,不触 DB;引用名 = ``p_<name>``,消费路径 =
+    MCP ``factor_series_build``(kind=predefined_factor)。
+    """
+
+    def test_returns_full_registry_with_field_shape(
+        self,
+        client: TestClient,
+    ) -> None:
+        from finboard_backtest.factors.predefined import (
+            PREDEFINED_FACTORS,
+            predefined_factor_names,
+        )
+
+        response = client.get("/api/research/factors/predefined")
+        assert response.status_code == 200
+        body = response.json()
+
+        # 逐条对齐注册表(顺序 = 注册表插入序,批次/家族分组)。
+        assert [item["name"] for item in body] == list(
+            predefined_factor_names()
+        )
+        # 当前注册表规模(新批次注册时同步更新此数字)。
+        # 目录数 = 注册表实时长度(批次 6 起新增因子不再改本断言)
+        assert len(body) == len(PREDEFINED_FACTORS)
+
+        first = body[0]
+        assert set(first) == {
+            "name",
+            "title",
+            "family",
+            "direction",
+            "signal_eligible",
+            "data_dependencies",
+            "window",
+            "min_history_bars",
+            "cross_section",
+        }
+        assert all(
+            isinstance(item["signal_eligible"], bool) for item in body
+        )
+        assert all(isinstance(item["cross_section"], bool) for item in body)
+        assert all(isinstance(item["title"], str) and item["title"] for item in body)
+        assert all(
+            isinstance(item["data_dependencies"], list)
+            and all(isinstance(dep, str) for dep in item["data_dependencies"])
+            for item in body
+        )
+        assert all(
+            item["window"] is None or isinstance(item["window"], int)
+            for item in body
+        )
+        assert all(
+            item["min_history_bars"] is None
+            or isinstance(item["min_history_bars"], int)
+            for item in body
+        )
+        assert all(item["direction"] in {"higher", "lower"} for item in body)
+
+    def test_known_entry_round_trip(self, client: TestClient) -> None:
+        """样板族条目字段与注册表逐值一致(含公式片段 title 原样返回)。"""
+        from finboard_backtest.factors.predefined import PREDEFINED_FACTORS
+
+        body = client.get("/api/research/factors/predefined").json()
+        by_name = {item["name"]: item for item in body}
+
+        entry = by_name["return_21d"]
+        definition = PREDEFINED_FACTORS["return_21d"]
+        assert entry["title"] == definition.title
+        assert entry["family"] == "momentum"
+        assert entry["window"] == 21
+        assert entry["signal_eligible"] is True
+        assert entry["cross_section"] is False
+        assert "bars" in {
+            dep.split(".")[0] for dep in entry["data_dependencies"]
+        }
+
+        # size 族是 signal_eligible=False 的风险暴露定位(#214)。
+        size_entries = [e for e in body if e["family"] == "size"]
+        assert size_entries
+        assert all(e["signal_eligible"] is False for e in size_entries)
+        # 长窗口风险因子声明 min_history_bars 覆盖起点(#399)。
+        assert any(e["min_history_bars"] == 1320 for e in body)
+
+    def test_readonly_no_db_dependency(self, client: TestClient) -> None:
+        """端点是内存投影:mock session 不被触碰也能 200。"""
+        response = client.get("/api/research/factors/predefined")
+        assert response.status_code == 200
+        assert response.json()

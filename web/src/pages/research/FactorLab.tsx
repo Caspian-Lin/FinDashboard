@@ -15,7 +15,7 @@ import {
   Check,
 } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Tabs,
   TabsList,
@@ -56,8 +56,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   ResearchHint,
-  WorkflowIndicator,
-  NextStepCTA,
 } from "@/components/research/ResearchHint";
 import { FeatureSnapshotProgress } from "@/components/research/FeatureSnapshotProgress";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
@@ -70,6 +68,7 @@ import {
   type FactorExperiment,
   type FactorExperimentCreate,
   type DatasetReleaseSummary,
+  type PredefinedFactorEntry,
   featureSnapshotCreatedAt,
   featureSnapshotNames,
   featureSnapshotObservationCount,
@@ -151,6 +150,18 @@ function formatFactorWindow(window: number | null): LocalizedText {
     : { zh: "单期值", en: "Single-period value" };
 }
 
+/** 发布数据集 kind 的展示名(与后端 ReleaseDatasetKind 枚举值一致)。 */
+const DATASET_KIND_LABELS: Record<string, LocalizedText> = {
+  bars: { zh: "行情日线", en: "Bars" },
+  daily_metrics: { zh: "每日指标", en: "Daily metrics" },
+  financial_indicators: { zh: "财务指标", en: "Financial indicators" },
+  convertible_metrics: { zh: "可转债指标", en: "Convertible metrics" },
+};
+
+function datasetKindLabel(kind: string): LocalizedText {
+  return DATASET_KIND_LABELS[kind] ?? { zh: kind, en: kind };
+}
+
 function CatalogTab() {
   const { tl } = useT();
   const [expandedName, setExpandedName] = React.useState<string | null>(null);
@@ -222,13 +233,14 @@ function CatalogTab() {
       ) : data && data.length > 0 ? (
         <div className="overflow-hidden rounded-lg border border-border">
           <div className="max-h-[560px] overflow-auto scrollbar-thin">
-            <Table className="min-w-[900px]">
+            <Table className="min-w-[1040px]">
               <TableHeader className="sticky top-0 bg-card">
                 <TableRow>
                   <TableHead className="w-8" />
                   <TableHead>{tl({ zh: "因子", en: "Factor" })}</TableHead>
                   <TableHead>{tl({ zh: "经济含义", en: "Economic rationale" })}</TableHead>
                   <TableHead>{tl({ zh: "计算口径", en: "Calculation" })}</TableHead>
+                  <TableHead>{tl({ zh: "数据来源", en: "Data sources" })}</TableHead>
                   <TableHead>{tl({ zh: "预期失效", en: "Expected failure" })}</TableHead>
                 </TableRow>
               </TableHeader>
@@ -278,13 +290,26 @@ function CatalogTab() {
                           </p>
                           <p className="mt-1 break-all font-mono">{factor.source_fields.join(" · ")}</p>
                         </TableCell>
+                        <TableCell className="min-w-[130px] whitespace-normal break-words text-xs leading-5">
+                          {(factor.source_datasets ?? []).length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {factor.source_datasets!.map((kind) => (
+                                <Badge key={kind} variant="outline" className="text-[10px]">
+                                  {tl(datasetKindLabel(kind))}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
                         <TableCell className="min-w-[260px] max-w-[360px] whitespace-normal break-words text-sm leading-5 text-muted-foreground">
                           {factor.expected_failure}
                         </TableCell>
                       </TableRow>
                       {open && (
                         <TableRow className="bg-muted/30 hover:bg-muted/30">
-                          <TableCell colSpan={5} className="p-4">
+                          <TableCell colSpan={6} className="p-4">
                             <div className="grid gap-4 text-xs md:grid-cols-2 xl:grid-cols-4">
                               <div>
                                 <p className="font-medium text-foreground">{tl({ zh: "数据可用规则", en: "Data availability rule" })}</p>
@@ -316,6 +341,24 @@ function CatalogTab() {
                                     ? tl({ zh: "可在 OOS 通过后进入信号", en: "Eligible for signals after passing OOS" })
                                     : tl({ zh: "不可直接生成信号", en: "Cannot generate signals directly" })}
                                 </p>
+                              </div>
+                              <div>
+                                <p className="font-medium text-foreground">{tl({ zh: "数据来源发布", en: "Source datasets" })}</p>
+                                <p className="mt-1 leading-5 text-muted-foreground">
+                                  {(factor.source_datasets ?? []).length > 0
+                                    ? factor.source_datasets!.map((kind) => tl(datasetKindLabel(kind))).join(" · ")
+                                    : "—"}
+                                </p>
+                                <p className="mt-1 leading-5 text-muted-foreground">
+                                  {tl({
+                                    zh: "因子观测最终冻结自这些数据集的已发布版本,运行时按 decision_at 做 PIT 读取。",
+                                    en: "Observations are frozen from published versions of these datasets and read PIT at decision_at.",
+                                  })}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="font-medium text-foreground">{tl({ zh: "实现位置", en: "Implementation" })}</p>
+                                <p className="mt-1 break-all font-mono text-muted-foreground">{factor.implementation}</p>
                               </div>
                             </div>
                           </TableCell>
@@ -536,8 +579,9 @@ function GenerateFeatureSnapshotDialog({
               {selectedRelease && (
                 <p className="text-xs text-muted-foreground">
                   {tl({
-                    zh: `范围 ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} 个标的 · 覆盖 ${selectedRelease.coverage_pct}`,
-                    en: `Range ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} symbols · coverage ${selectedRelease.coverage_pct}`,
+                    // issue #349:coverage_pct 兼容字符串通道,归一为数值展示。
+                    zh: `范围 ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} 个标的 · 覆盖 ${Number(selectedRelease.coverage_pct)}`,
+                    en: `Range ${selectedRelease.start_date} ~ ${selectedRelease.end_date} · ${selectedRelease.symbol_count} symbols · coverage ${Number(selectedRelease.coverage_pct)}`,
                   })}
                 </p>
               )}
@@ -588,8 +632,89 @@ function GenerateFeatureSnapshotDialog({
   );
 }
 
+/** 快照观测值样例(默认 header-only 列表,#309):按需单查快照详情取前 N 行。 */
+function SnapshotObservationSample({ snapshotId }: { snapshotId: string }) {
+  const { tl } = useT();
+  const [open, setOpen] = React.useState(false);
+  const detailQuery = useQuery({
+    queryKey: ["feature-snapshot-detail", snapshotId],
+    queryFn: () => factorLabApi.featureDetail(snapshotId),
+    enabled: open,
+  });
+  const observations = detailQuery.data?.observations ?? [];
+  const sample = observations.slice(0, 20);
+
+  return (
+    <div className="rounded-md border border-border">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+        onClick={() => setOpen((current) => !current)}
+      >
+        {tl({ zh: "观测值样例(PIT)", en: "Observation sample (PIT)" })}
+        <span className="text-[11px] font-normal">
+          {open
+            ? tl({ zh: "收起", en: "Collapse" })
+            : tl({ zh: "加载前 20 行", en: "Load first 20 rows" })}
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-border p-3">
+          {detailQuery.isLoading ? (
+            <LoadingState rows={3} />
+          ) : detailQuery.isError ? (
+            <p className="text-xs text-destructive">
+              {detailQuery.error instanceof Error ? detailQuery.error.message : tl({ zh: "加载失败", en: "Failed to load" })}
+            </p>
+          ) : sample.length === 0 ? (
+            <p className="text-xs text-muted-foreground">{tl({ zh: "快照无观测值。", en: "The snapshot has no observations." })}</p>
+          ) : (
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>symbol</TableHead>
+                    <TableHead>feature</TableHead>
+                    <TableHead className="text-right">{tl({ zh: "值", en: "Value" })}</TableHead>
+                    <TableHead>observed_at</TableHead>
+                    <TableHead>available_at</TableHead>
+                    <TableHead>{tl({ zh: "来源", en: "Source" })}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sample.map((obs, i) => (
+                    <TableRow key={`${obs.symbol}-${obs.feature_name}-${i}`}>
+                      <TableCell className="font-mono text-xs">{obs.symbol}</TableCell>
+                      <TableCell className="font-mono text-xs">{obs.feature_name}</TableCell>
+                      <TableCell className="text-right font-mono text-xs tabular-nums">
+                        {formatNumber(obs.value, 6)}
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{formatDateTime(obs.observed_at)}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{formatDateTime(obs.available_at)}</TableCell>
+                      <TableCell className="font-mono text-[11px] text-muted-foreground">{obs.source}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {observations.length > sample.length && (
+                <p className="mt-2 text-[11px] text-muted-foreground">
+                  {tl({
+                    zh: `仅显示前 ${sample.length} 行 / 共 ${observations.length} 行观测。`,
+                    en: `Showing first ${sample.length} of ${observations.length} observations.`,
+                  })}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FeaturesTab() {
   const { tl } = useT();
+  const [searchParams] = useSearchParams();
   const [expandedId, setExpandedId] = React.useState<string | null>(null);
   const [generateOpen, setGenerateOpen] = React.useState(false);
   const [generatedSnapshot, setGeneratedSnapshot] = React.useState<import("@/lib/research").FeatureSnapshot | null>(null);
@@ -598,6 +723,25 @@ function FeaturesTab() {
     queryKey: ["feature-snapshots", { limit: 50 }],
     queryFn: () => factorLabApi.features(undefined, 50),
   });
+  // 发布 ID → 摘要映射:把裸 dataset_release_id 翻译成名称/类型/版本。
+  const releasesQuery = useQuery({
+    queryKey: ["dataset-releases", { forSnapshotJoin: true }],
+    queryFn: () => datasetApi.releases(),
+  });
+  const releaseById = React.useMemo(() => {
+    const map = new Map<string, DatasetReleaseSummary>();
+    for (const rel of releasesQuery.data ?? []) map.set(rel.release_id, rel);
+    return map;
+  }, [releasesQuery.data]);
+
+  // 研究运行「冻结输入」深链(?snapshot=FS-xxx):列表到位后自动展开。
+  const snapshotParam = searchParams.get("snapshot");
+  React.useEffect(() => {
+    if (!snapshotParam || !data) return;
+    if (data.some((snap) => snap.snapshot_id === snapshotParam)) {
+      setExpandedId(snapshotParam);
+    }
+  }, [snapshotParam, data]);
 
   return (
     <div>
@@ -694,9 +838,29 @@ function FeaturesTab() {
                           </span>
                         </TableCell>
                         <TableCell>
-                          <span className="font-mono text-xs text-muted-foreground">
-                            {snap.dataset_release_id}
-                          </span>
+                          {snap.dataset_release_id ? (
+                            <Link
+                              to={`/research/data?release=${encodeURIComponent(snap.dataset_release_id)}`}
+                              className="block underline-offset-2 hover:underline"
+                            >
+                              <span className="font-mono text-xs text-muted-foreground">
+                                {snap.dataset_release_id}
+                              </span>
+                              {(() => {
+                                const rel = releaseById.get(snap.dataset_release_id as string);
+                                if (!rel) return null;
+                                return (
+                                  <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                                    {rel.dataset_name}
+                                    {rel.dataset_kind ? ` · ${tl(datasetKindLabel(rel.dataset_kind))}` : ""}
+                                    {` · v${rel.version}`}
+                                  </span>
+                                );
+                              })()}
+                            </Link>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
                         </TableCell>
                         <TableCell className="tabular-nums text-right">
                           {featureSnapshotNames(snap).length}
@@ -775,6 +939,20 @@ function FeaturesTab() {
                                   .join(" · ") || tl({ zh: "无", en: "none" })}
                                 {tl({ zh: "· 代码版本 ", en: "· code version " })}<span className="font-mono">{snap.code_version}</span>
                               </p>
+                              {snap.dataset_release_id && (
+                                <p className="text-xs text-muted-foreground">
+                                  {tl({ zh: "数据来源:", en: "Data source: " })}
+                                  <Link
+                                    to={`/research/data?release=${encodeURIComponent(snap.dataset_release_id)}`}
+                                    className="ml-1 underline underline-offset-2 hover:text-foreground"
+                                  >
+                                    {releaseById.get(snap.dataset_release_id)
+                                      ? `${releaseById.get(snap.dataset_release_id)!.dataset_name} (${snap.dataset_release_id})`
+                                      : snap.dataset_release_id}
+                                  </Link>
+                                </p>
+                              )}
+                              <SnapshotObservationSample snapshotId={snap.snapshot_id} />
                             </div>
                           </TableCell>
                         </TableRow>
@@ -1412,6 +1590,143 @@ function CreateExperimentDialog({
   );
 }
 
+/** 因子实验可展开行:展开后单查详情(冻结引用/计划/结果/失败原因)。 */
+function ExperimentRow({ experiment: exp }: { experiment: FactorExperiment }) {
+  const { tl } = useT();
+  const [open, setOpen] = React.useState(false);
+  const detailQuery = useQuery({
+    queryKey: ["factor-experiment-detail", exp.experiment_id],
+    queryFn: () => factorLabApi.factorExperimentDetail(exp.experiment_id),
+    enabled: open,
+  });
+  const detail = detailQuery.data;
+
+  return (
+    <React.Fragment>
+      <TableRow
+        className="cursor-pointer hover:bg-muted/50"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <TableCell>
+          <div className="flex items-center gap-1.5">
+            <ChevronRight
+              className={cn(
+                "h-4 w-4 shrink-0 text-muted-foreground transition-transform",
+                open && "rotate-90",
+              )}
+            />
+            <span className="font-mono text-xs text-muted-foreground">
+              {exp.experiment_id}
+            </span>
+          </div>
+        </TableCell>
+        <TableCell className="max-w-xs truncate text-muted-foreground">
+          {exp.hypothesis}
+        </TableCell>
+        <TableCell>
+          <div className="flex flex-wrap gap-1">
+            {exp.factor_names.map((f) => (
+              <Badge
+                key={f}
+                variant="secondary"
+                className="font-mono"
+              >
+                {f}
+              </Badge>
+            ))}
+          </div>
+        </TableCell>
+        <TableCell>
+          <span className="font-mono text-xs text-muted-foreground">
+            {exp.dataset_release_id}
+          </span>
+        </TableCell>
+        <TableCell>
+          <StatusBadge status={exp.status} />
+        </TableCell>
+        <TableCell className="tabular-nums text-muted-foreground">
+          {formatDateTime(exp.created_at)}
+        </TableCell>
+      </TableRow>
+      {open && (
+        <TableRow className="bg-muted/30 hover:bg-muted/30">
+          <TableCell colSpan={6} className="p-4">
+            {detailQuery.isLoading ? (
+              <LoadingState rows={3} />
+            ) : detailQuery.isError ? (
+              <p className="text-xs text-destructive">
+                {detailQuery.error instanceof Error
+                  ? detailQuery.error.message
+                  : tl({ zh: "详情加载失败", en: "Failed to load details" })}
+              </p>
+            ) : detail ? (
+              <div className="space-y-3 text-xs">
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-muted-foreground">
+                  <span>
+                    {tl({ zh: "特征快照:", en: "Feature snapshot: " })}
+                    <Link
+                      to={`/research/factors?snapshot=${encodeURIComponent(detail.feature_snapshot_id)}`}
+                      className="ml-1 font-mono text-foreground underline underline-offset-2"
+                    >
+                      {detail.feature_snapshot_id}
+                    </Link>
+                  </span>
+                  <span>
+                    {tl({ zh: "数据发布:", en: "Data release: " })}
+                    <Link
+                      to={`/research/data?release=${encodeURIComponent(detail.dataset_release_id)}`}
+                      className="ml-1 font-mono text-foreground underline underline-offset-2"
+                    >
+                      {detail.dataset_release_id}
+                    </Link>
+                  </span>
+                  {detail.comparison_group && (
+                    <span>
+                      {tl({ zh: "对照组:", en: "Comparison group: " })}
+                      <span className="ml-1 font-mono text-foreground">{detail.comparison_group}</span>
+                    </span>
+                  )}
+                  {detail.validation_experiment_id && (
+                    <span>
+                      {tl({ zh: "关联验证实验:", en: "Validation experiment: " })}
+                      <Link
+                        to={`/research/experiments`}
+                        className="ml-1 font-mono text-foreground underline underline-offset-2"
+                      >
+                        {detail.validation_experiment_id}
+                      </Link>
+                    </span>
+                  )}
+                </div>
+                {detail.failure_reason && (
+                  <Alert variant="warning">
+                    <AlertTitle>{tl({ zh: "失败原因", en: "Failure reason" })}</AlertTitle>
+                    <AlertDescription>{detail.failure_reason}</AlertDescription>
+                  </Alert>
+                )}
+                <div>
+                  <p className="font-medium text-foreground">{tl({ zh: "实验计划 (plan)", en: "Plan" })}</p>
+                  <pre className="mt-1 max-h-48 overflow-auto rounded-md border border-border bg-muted/30 p-3 font-mono text-[11px] leading-relaxed">
+                    {JSON.stringify(detail.plan, null, 2)}
+                  </pre>
+                </div>
+                {detail.result && (
+                  <div>
+                    <p className="font-medium text-foreground">{tl({ zh: "实验结果 (result)", en: "Result" })}</p>
+                    <pre className="mt-1 max-h-64 overflow-auto rounded-md border border-border bg-muted/30 p-3 font-mono text-[11px] leading-relaxed">
+                      {JSON.stringify(detail.result, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </TableCell>
+        </TableRow>
+      )}
+    </React.Fragment>
+  );
+}
+
 function ExperimentsTab() {
   const { tl } = useT();
   const [createOpen, setCreateOpen] = React.useState(false);
@@ -1473,40 +1788,7 @@ function ExperimentsTab() {
               </TableHeader>
               <TableBody>
                 {data.map((exp: FactorExperiment) => (
-                  <TableRow key={exp.factor_experiment_id}>
-                    <TableCell>
-                      <span className="font-mono text-xs text-muted-foreground">
-                        {exp.factor_experiment_id}
-                      </span>
-                    </TableCell>
-                    <TableCell className="max-w-xs truncate text-muted-foreground">
-                      {exp.hypothesis}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1">
-                        {exp.factor_names.map((f) => (
-                          <Badge
-                            key={f}
-                            variant="secondary"
-                            className="font-mono"
-                          >
-                            {f}
-                          </Badge>
-                        ))}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <span className="font-mono text-xs text-muted-foreground">
-                        {exp.dataset_release_id}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={exp.status} />
-                    </TableCell>
-                    <TableCell className="tabular-nums text-muted-foreground">
-                      {formatDateTime(exp.created_at)}
-                    </TableCell>
-                  </TableRow>
+                  <ExperimentRow key={exp.experiment_id} experiment={exp} />
                 ))}
               </TableBody>
             </Table>
@@ -1534,25 +1816,204 @@ function ExperimentsTab() {
   );
 }
 
+/** 平台预置因子 family 的展示名(与后端注册表 family 值一致,#427)。 */
+const PREDEFINED_FAMILY_LABELS: Record<string, LocalizedText> = {
+  momentum: { zh: "动量", en: "Momentum" },
+  reversal: { zh: "反转", en: "Reversal" },
+  risk: { zh: "风险", en: "Risk" },
+  liquidity: { zh: "流动性", en: "Liquidity" },
+  size: { zh: "规模", en: "Size" },
+  alpha101: { zh: "Alpha101 量价", en: "Alpha101" },
+  growth: { zh: "成长", en: "Growth" },
+  quality: { zh: "质量", en: "Quality" },
+  value: { zh: "价值", en: "Value" },
+};
+
+/** 平台预置因子目录(#427):只读表格 + 名称/说明子串过滤。
+ * 消费路径说明见页内提示 —— 因子本身经 MCP factor_series_build
+ * (kind=predefined_factor)构建,本页不触发任何计算。 */
+function PredefinedTab() {
+  const { t, tl } = useT();
+  const [filter, setFilter] = React.useState("");
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+    queryKey: ["predefined-factors"],
+    queryFn: () => factorLabApi.predefined(),
+  });
+
+  const keyword = filter.trim().toLowerCase();
+  const filtered = React.useMemo(() => {
+    if (!data) return [];
+    if (!keyword) return data;
+    return data.filter(
+      (factor: PredefinedFactorEntry) =>
+        factor.name.toLowerCase().includes(keyword) ||
+        factor.title.toLowerCase().includes(keyword),
+    );
+  }, [data, keyword]);
+
+  return (
+    <div>
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-muted-foreground">
+          {data
+            ? t("predefinedFactors.summaryCount", {
+                count: data.length,
+                shown: filtered.length,
+              })
+            : tl({ zh: "加载中…", en: "Loading…" })}
+        </p>
+        <div className="flex items-center gap-2">
+          <Input
+            aria-label={t("predefinedFactors.filterLabel")}
+            placeholder={t("predefinedFactors.filterPlaceholder")}
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            className="h-8 w-full sm:w-64"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => refetch()}
+            disabled={isFetching}
+          >
+            <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
+            {tl({ zh: "刷新", en: "Refresh" })}
+          </Button>
+        </div>
+      </div>
+
+      <Alert className="mb-4">
+        <Info className="h-4 w-4" />
+        <AlertTitle>{t("predefinedFactors.alertTitle")}</AlertTitle>
+        <AlertDescription>{t("predefinedFactors.alertDesc")}</AlertDescription>
+      </Alert>
+
+      {isLoading ? (
+        <LoadingState rows={6} />
+      ) : isError ? (
+        <EmptyState
+          icon={<Atom className="h-8 w-8" />}
+          title={tl({ zh: "加载失败", en: "Failed to load" })}
+          description={
+            error instanceof Error
+              ? error.message
+              : t("predefinedFactors.loadFailed")
+          }
+        />
+      ) : filtered.length > 0 ? (
+        <div className="overflow-hidden rounded-lg border border-border">
+          <ScrollArea className="max-h-[600px]">
+            <Table>
+              <TableHeader className="sticky top-0 bg-card">
+                <TableRow>
+                  <TableHead>{t("predefinedFactors.colName")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colFamily")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colDirection")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colSignal")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colDeps")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colWindow")}</TableHead>
+                  <TableHead>{t("predefinedFactors.colTitle")}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.map((factor: PredefinedFactorEntry) => (
+                  <TableRow key={factor.name} className="align-top">
+                    <TableCell className="whitespace-nowrap font-mono text-xs">
+                      p_{factor.name}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm">
+                      {PREDEFINED_FAMILY_LABELS[factor.family]
+                        ? tl(PREDEFINED_FAMILY_LABELS[factor.family])
+                        : factor.family}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+                      {factor.direction === "lower"
+                        ? t("predefinedFactors.directionLower")
+                        : t("predefinedFactors.directionHigher")}
+                    </TableCell>
+                    <TableCell>
+                      {factor.signal_eligible ? (
+                        <Badge variant="secondary" className="text-[10px]">
+                          {t("predefinedFactors.signalEligible")}
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px]">
+                          {t("predefinedFactors.signalIneligible")}
+                        </Badge>
+                      )}
+                      {factor.cross_section && (
+                        <Badge variant="outline" className="ml-1 text-[10px]">
+                          {t("predefinedFactors.crossSection")}
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="min-w-[180px] whitespace-normal break-words font-mono text-[11px] leading-5 text-muted-foreground">
+                      {factor.data_dependencies.join(" · ")}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm tabular-nums">
+                      {factor.window != null ? (
+                        <span>
+                          {factor.window}
+                          {tl({ zh: " 日", en: "d" })}
+                          {factor.min_history_bars != null && (
+                            <span className="ml-1 text-[11px] text-muted-foreground">
+                              {t("predefinedFactors.minHistory", {
+                                n: factor.min_history_bars,
+                              })}
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">
+                          {t("predefinedFactors.noWindow")}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell className="min-w-[260px] max-w-[420px] whitespace-normal break-words text-sm leading-5">
+                      {factor.title}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </ScrollArea>
+        </div>
+      ) : (
+        <EmptyState
+          icon={<Atom className="h-8 w-8" />}
+          title={t("predefinedFactors.empty")}
+          description={
+            data && data.length > 0
+              ? t("predefinedFactors.emptyFilterHint", { count: data.length })
+              : t("predefinedFactors.loadFailed")
+          }
+        />
+      )}
+    </div>
+  );
+}
+
 export default function FactorLab() {
-  const { tl } = useT();
+  const { t, tl } = useT();
+  // 页签进 URL(?tab=):刷新/分享不再跳回默认目录页。
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = searchParams.get("tab") ?? "catalog";
+  const setActiveTab = (value: string) => {
+    setSearchParams(value === "catalog" ? {} : { tab: value }, { replace: true });
+  };
   return (
     <div>
       <PageHeader
         title={tl({ zh: "因子实验室", en: "Factor Lab" })}
         description={tl({ zh: "因子发现、信号预览与实验验证", en: "Factor discovery, signal preview, and experiment validation" })}
-        breadcrumbs={[
-          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
-          { label: tl({ zh: "因子实验室", en: "Factor Lab" }) },
-        ]}
       />
 
-      <WorkflowIndicator currentPath="/research/factors" />
-
-      <Tabs defaultValue="catalog">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="h-auto flex-wrap gap-1">
           <TabsTrigger value="catalog">{tl({ zh: "因子目录", en: "Factor catalog" })}</TabsTrigger>
           <ResearchHint hint={RESEARCH_HINTS.factors.catalog} />
+          <TabsTrigger value="predefined">{t("predefinedFactors.tab")}</TabsTrigger>
+          <ResearchHint hint={RESEARCH_HINTS.factors.predefined} />
           <TabsTrigger value="features">{tl({ zh: "特征快照", en: "Feature snapshots" })}</TabsTrigger>
           <ResearchHint hint={RESEARCH_HINTS.factors.features} />
           <TabsTrigger value="signals">{tl({ zh: "因子信号", en: "Factor signals" })}</TabsTrigger>
@@ -1564,6 +2025,9 @@ export default function FactorLab() {
         <TabsContent value="catalog">
           <CatalogTab />
         </TabsContent>
+        <TabsContent value="predefined">
+          <PredefinedTab />
+        </TabsContent>
         <TabsContent value="features">
           <FeaturesTab />
         </TabsContent>
@@ -1574,12 +2038,6 @@ export default function FactorLab() {
           <ExperimentsTab />
         </TabsContent>
       </Tabs>
-
-      <NextStepCTA
-        nextPath="/research/strategy"
-        nextLabel={{ zh: "策略 Studio", en: "Strategy Studio" }}
-        description={{ zh: "将因子组合为完整的交易策略", en: "Combine factors into a complete trading strategy" }}
-      />
     </div>
   );
 }

@@ -29,7 +29,11 @@ import {
 } from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
 
-export default function Strategies() {
+/**
+ * 策略预设面板(原独立「策略预设」页,现嵌入回测页侧边抽屉):
+ * 配置内置策略参数并保存为可复用预设,供回测快速带入。
+ */
+export function StrategyPresetsPanel({ onLoadedPreset }: { onLoadedPreset?: () => void }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { tl } = useT();
@@ -148,6 +152,7 @@ export default function Strategies() {
   }
 
   function openBacktest() {
+    onLoadedPreset?.();
     if (selectedPresetId !== null) {
       navigate(`/backtest?preset=${selectedPresetId}`);
       return;
@@ -171,11 +176,8 @@ export default function Strategies() {
 
   if (strategiesQuery.error || !definition) {
     return (
-      <div className="mx-auto max-w-7xl">
-        <h1 className="text-2xl font-bold text-foreground">
-          {tl({ zh: "策略配置", en: "Strategy configuration" })}
-        </h1>
-        <p className="mt-3 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
+      <div>
+        <p className="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
           {tl({ zh: "无法加载内置策略：", en: "Unable to load built-in strategies: " })}
           {(strategiesQuery.error as Error | null)?.message ??
             tl({ zh: "没有可用策略", en: "No strategies available" })}
@@ -185,21 +187,16 @@ export default function Strategies() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-7xl space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">
-            {tl({ zh: "策略配置", en: "Strategy configuration" })}
-          </h1>
-          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-            {tl({
-              zh: "配置经过测试的内置策略参数，并保存为可复用预设。参数由后端 schema 自动生成，页面不接收或执行策略代码。",
-              en: "Configure parameters for tested built-in strategies and save them as reusable presets. Parameters are generated from the backend schema; the page never receives or executes strategy code.",
-            })}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 rounded-md bg-success/10 px-3 py-2 text-xs font-medium text-success">
-          <ShieldCheck size={16} aria-hidden="true" />
+    <div className="w-full space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="max-w-xl text-sm leading-6 text-muted-foreground">
+          {tl({
+            zh: "配置经过测试的内置策略参数，并保存为可复用预设。参数由后端 schema 自动生成，页面不接收或执行策略代码。",
+            en: "Configure parameters for tested built-in strategies and save them as reusable presets. Parameters are generated from the backend schema; the panel never receives or executes strategy code.",
+          })}
+        </p>
+        <div className="flex shrink-0 items-center gap-1.5 rounded-md bg-success/10 px-2.5 py-1.5 text-xs font-medium text-success">
+          <ShieldCheck size={14} aria-hidden="true" />
           {tl({ zh: "保存预设不会启动策略", en: "Saving a preset does not start a strategy" })}
         </div>
       </div>

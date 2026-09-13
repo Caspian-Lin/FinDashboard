@@ -1,11 +1,13 @@
-"""研究代码静态校验 —— 纵深防御第一层(issue #215)。
+"""研究代码静态校验 —— 纵深防御第一层(issue #215;#359 增
+factor.compute_series 入口)。
 
 在代码进入仓库前做纯静态检查(不 import、不执行):
 
 * manifest 必填字段与入口声明(entry 须为 ``module.function`` 且指向
-  提交内的入口文件与 kind 约定函数,factor.compute / strategy.decide);
-* 入口函数存在且签名可调用(factor.compute / strategy.decide,至少一个
-  位置参数接收输入数据,不接受 ``*args`` 转发);
+  提交内的入口文件与 kind 约定函数,factor.compute / factor.compute_series /
+  strategy.decide);
+* 入口函数存在且签名可调用(至少一个位置参数接收输入数据,不接受
+  ``*args`` 转发);
 * AST import 白名单(pandas / numpy / polars / math / statistics /
   finboard_research_kit);
 * 危险调用黑名单(subprocess / socket / os.system / eval / exec /
@@ -46,7 +48,12 @@ FORBIDDEN_CALLS: frozenset[str] = frozenset(
 )
 
 _ENTRY_FILE = {"factor": "factor.py", "strategy": "strategy.py"}
-_ENTRY_FUNC = {"factor": "compute", "strategy": "decide"}
+# kind 允许的入口函数(issue #359:factor 增协议 v2 的 compute_series,
+# v1 的 compute 完整保留 —— manifest 声明哪个就校验哪个)。
+_ENTRY_FUNCS: dict[str, tuple[str, ...]] = {
+    "factor": ("compute", "compute_series"),
+    "strategy": ("decide",),
+}
 _TEXT_SUFFIXES = (".py", ".toml", ".md", ".txt", ".json")
 # kit harness 契约(entry.partition(".")):module 对应 <module>.py,
 # function 为模块级入口函数;两侧都必须是合法标识符。
@@ -142,13 +149,38 @@ def validate_submission(
     if entry not in normalized:
         issues.append(ValidationIssue(entry, "entry_missing", f"缺少入口文件 {entry}"))
     else:
-        issues.extend(_validate_entry(entry, normalized[entry], _ENTRY_FUNC[kind]))
+        # issue #359:入口签名校验对象 = manifest 声明的入口函数
+        # (factor 允许 compute / compute_series 双轨);manifest 缺失或
+        # 声明不合法时回退校验 kind 的首个约定函数(既有行为)。
+        declared = (
+            _declared_entry_func(normalized[manifest_name])
+            if manifest_name in normalized
+            else None
+        )
+        allowed = _ENTRY_FUNCS[kind]
+        check_func = declared if declared in allowed else allowed[0]
+        issues.extend(_validate_entry(entry, normalized[entry], check_func))
 
     for rel, data in normalized.items():
         if rel.endswith(".py"):
             issues.extend(_validate_python(rel, data))
 
     return issues
+
+
+def _declared_entry_func(manifest_data: bytes) -> str | None:
+    """从 manifest.toml 提取声明入口的函数名(解析失败返回 None)。"""
+    try:
+        doc = tomllib.loads(manifest_data.decode("utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return None
+    top = doc.get("manifest", doc)
+    if not isinstance(top, dict):
+        return None
+    entry = top.get("entry")
+    if not isinstance(entry, str) or "." not in entry:
+        return None
+    return entry.split(".", 1)[1]
 
 
 def _validate_manifest(
@@ -178,18 +210,20 @@ def _validate_manifest(
     if params is not None and not isinstance(params, dict):
         issues.append(ValidationIssue(rel, "manifest_invalid", "manifest.params 须为表"))
 
-    # entry 契约(issue #236):沙箱 harness 按 `module.function` 加载,
-    # 格式错要等到容器里才报 output_contract_violation,这里提前到提交期。
+    # entry 契约(issue #236 / #359):沙箱 harness 按 `module.function`
+    # 加载,格式错要等到容器里才报 output_contract_violation,这里提前到
+    # 提交期;factor 允许 compute(v1 单日)/ compute_series(v2 区间)双轨。
     entry = top.get("entry")
     if isinstance(entry, str) and entry:
-        expected_func = _ENTRY_FUNC.get(kind)
+        allowed_funcs = _ENTRY_FUNCS.get(kind, ())
+        expected_hint = "|".join(allowed_funcs) if allowed_funcs else "?"
         if not _ENTRY_PATTERN.match(entry):
             issues.append(
                 ValidationIssue(
                     rel,
                     "manifest_entry_invalid",
                     f"manifest.entry {entry!r} 须形如 'module.function'"
-                    f"(如 {_ENTRY_FILE[kind].removesuffix('.py')}.{expected_func}),"
+                    f"(如 {_ENTRY_FILE[kind].removesuffix('.py')}.{expected_hint}),"
                     "不要带 .py 后缀或冒号",
                 )
             )
@@ -204,13 +238,13 @@ def _validate_manifest(
                         "不在本次提交文件中",
                     )
                 )
-            if expected_func is not None and func_name != expected_func:
+            if allowed_funcs and func_name not in allowed_funcs:
                 issues.append(
                     ValidationIssue(
                         rel,
                         "manifest_entry_mismatch",
                         f"manifest.entry 函数 {func_name!r} 与 kind={kind} "
-                        f"的约定入口 {expected_func!r} 不一致",
+                        f"的约定入口 {list(allowed_funcs)} 不一致",
                     )
                 )
     return issues

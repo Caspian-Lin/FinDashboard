@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -78,6 +79,77 @@ class TestBulkDownloadPayload:
         )
         job = _make_job(
             {"market": "a_share", "source": "akshare", "start": "not-a-date"},
+            "bulk_download",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+
+    @pytest.mark.asyncio
+    async def test_unknown_source_replayed_at_execute(self) -> None:
+        """>#347 契约重放:未知 source 执行期同样 fail-fast(覆盖旁路入队)。"""
+        from finboard_backtest.background_jobs.executors.bulk_download import (
+            BulkDownloadExecutor,
+        )
+
+        executor = BulkDownloadExecutor(
+            session_maker=_fake_session_maker(),
+            settings_factory=lambda: None,
+        )
+        job = _make_job(
+            {"market": "a_share", "source": "wind", "start": "2024-01-01"},
+            "bulk_download",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+        assert "wind" in exc_info.value.summary
+
+    @pytest.mark.asyncio
+    async def test_tushare_etf_literal_replayed_at_execute(self) -> None:
+        """>#347 契约重放:tushare x etf 字面量预检在 scope 校验(需 DB)之前。"""
+        from finboard_backtest.background_jobs.executors.bulk_download import (
+            BulkDownloadExecutor,
+        )
+
+        executor = BulkDownloadExecutor(
+            session_maker=_fake_session_maker(),
+            settings_factory=lambda: None,
+        )
+        job = _make_job(
+            {
+                "market": "a_share",
+                "source": "tushare",
+                "start": "2024-01-01",
+                "instrument_type": "etf",
+            },
+            "bulk_download",
+        )
+        with pytest.raises(ExecutorError) as exc_info:
+            await executor.execute(job, _noop_progress)
+        assert exc_info.value.code == "invalid_payload"
+        # 重放把 PayloadContractError 收敛为 invalid_payload,具名根因保留在
+        # summary 文案里(与 dataset_sync 重放同风格)。
+        assert "不支持 ETF" in exc_info.value.summary
+
+    @pytest.mark.asyncio
+    async def test_empty_symbols_list_replayed_at_execute(self) -> None:
+        """>#347:显式空 symbols 列表执行期拒绝(缺省不传 = 全池)。"""
+        from finboard_backtest.background_jobs.executors.bulk_download import (
+            BulkDownloadExecutor,
+        )
+
+        executor = BulkDownloadExecutor(
+            session_maker=_fake_session_maker(),
+            settings_factory=lambda: None,
+        )
+        job = _make_job(
+            {
+                "market": "a_share",
+                "source": "akshare",
+                "start": "2024-01-01",
+                "symbols": [],
+            },
             "bulk_download",
         )
         with pytest.raises(ExecutorError) as exc_info:
@@ -317,33 +389,29 @@ class TestProgressBridge:
 
 
 
-class TestResearchDataSyncPayload:
+class TestDatasetSyncPayload:
     @pytest.mark.asyncio
     async def test_missing_dates_raises(self) -> None:
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
-            ResearchDataSyncExecutor,
-        )
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 
-        executor = ResearchDataSyncExecutor(session_maker=_fake_session_maker())
-        job = _make_job({"datasets": ["profiles"]}, "research_data_sync")
+        executor = DatasetSyncExecutor(session_maker=_fake_session_maker())
+        job = _make_job({"datasets": ["profiles"]}, "dataset_sync")
         with pytest.raises(ExecutorError) as exc_info:
             await executor.execute(job, _noop_progress)
         assert exc_info.value.code == "invalid_payload"
 
     @pytest.mark.asyncio
     async def test_bad_date_raises(self) -> None:
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
-            ResearchDataSyncExecutor,
-        )
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 
-        executor = ResearchDataSyncExecutor(session_maker=_fake_session_maker())
+        executor = DatasetSyncExecutor(session_maker=_fake_session_maker())
         job = _make_job(
             {
                 "datasets": ["daily_metrics"],
                 "start_date": "not-a-date",
                 "end_date": "2026-01-31",
             },
-            "research_data_sync",
+            "dataset_sync",
         )
         with pytest.raises(ExecutorError) as exc_info:
             await executor.execute(job, _noop_progress)
@@ -351,18 +419,16 @@ class TestResearchDataSyncPayload:
 
     @pytest.mark.asyncio
     async def test_unknown_dataset_raises(self) -> None:
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
-            ResearchDataSyncExecutor,
-        )
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 
-        executor = ResearchDataSyncExecutor(session_maker=_fake_session_maker())
+        executor = DatasetSyncExecutor(session_maker=_fake_session_maker())
         job = _make_job(
             {
                 "datasets": ["orders"],
                 "start_date": "2026-01-01",
                 "end_date": "2026-01-31",
             },
-            "research_data_sync",
+            "dataset_sync",
         )
         with pytest.raises(ExecutorError) as exc_info:
             await executor.execute(job, _noop_progress)
@@ -372,18 +438,16 @@ class TestResearchDataSyncPayload:
     async def test_unknown_payload_key_replayed_at_execute(self) -> None:
         """#260:执行器入口重放入队期契约 —— 未知键(data_types)fail-visible,
         不再被静默忽略后按缺省全数据集执行。"""
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
-            ResearchDataSyncExecutor,
-        )
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 
-        executor = ResearchDataSyncExecutor(session_maker=_fake_session_maker())
+        executor = DatasetSyncExecutor(session_maker=_fake_session_maker())
         job = _make_job(
             {
                 "data_types": ["daily_metrics"],  # 拼写错误,正确为 datasets
                 "start_date": "2026-01-01",
                 "end_date": "2026-01-31",
             },
-            "research_data_sync",
+            "dataset_sync",
         )
         with pytest.raises(ExecutorError) as exc_info:
             await executor.execute(job, _noop_progress)
@@ -397,14 +461,12 @@ class TestResearchDataSyncPayload:
         """#260:逐标的数据集缺 symbols 且缺 profiles → 执行端重放契约即拒
         (契约层拦截;不触 provider)。"""
 
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
-            ResearchDataSyncExecutor,
-        )
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 
         def _boom_factory() -> object:
             raise AssertionError("契约失败不应构造 provider")
 
-        executor = ResearchDataSyncExecutor(
+        executor = DatasetSyncExecutor(
             session_maker=_fake_session_maker(),
             provider_factory=_boom_factory,  # type: ignore[arg-type]
         )
@@ -414,7 +476,7 @@ class TestResearchDataSyncPayload:
                 "start_date": "2026-01-01",
                 "end_date": "2026-03-31",
             },
-            "research_data_sync",
+            "dataset_sync",
         )
         with pytest.raises(ExecutorError) as exc_info:
             await executor.execute(job, _noop_progress)
@@ -428,9 +490,7 @@ class TestResearchDataSyncPayload:
         """#260 静默 no-op 治理:profiles 在 datasets 但上游返回空池 →
         逐标的段落前抛具名 empty_symbol_pool,任务不再「零迭代成功」。"""
 
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
-            ResearchDataSyncExecutor,
-        )
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 
         class _EmptyProfilesProvider:
             async def fetch_instrument_profiles(self, **kwargs: object) -> list[object]:
@@ -440,7 +500,7 @@ class TestResearchDataSyncPayload:
             async def sync_instrument_profiles(self, **kwargs: object) -> object:
                 return object()
 
-        executor = ResearchDataSyncExecutor(
+        executor = DatasetSyncExecutor(
             session_maker=_fake_session_maker(),
             provider_factory=lambda: _EmptyProfilesProvider(),  # type: ignore[arg-type,return-value]
         )
@@ -457,7 +517,7 @@ class TestResearchDataSyncPayload:
                 "start_date": "2026-01-01",
                 "end_date": "2026-01-31",
             },
-            "research_data_sync",
+            "dataset_sync",
         )
         phases: list[str | None] = []
 
@@ -471,9 +531,9 @@ class TestResearchDataSyncPayload:
         assert exc_info.value.code == "empty_symbol_pool"
         assert exc_info.value.retryable is False
         # profiles 段已完成(工作不浪费),失败发生在逐标的段落之前
-        assert "research_data_sync:profiles" in phases
+        assert "dataset_sync:profiles" in phases
         assert not any(
-            p and p.startswith("research_data_sync:financial") for p in phases
+            p and p.startswith("dataset_sync:financial") for p in phases
         )
 
     @pytest.mark.asyncio
@@ -482,9 +542,7 @@ class TestResearchDataSyncPayload:
     ) -> None:
         """预算耗尽 → record_upstream_failure + retryable ExecutorError。"""
 
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
-            ResearchDataSyncExecutor,
-        )
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 
         class _ExhaustedProvider:
             async def fetch_instrument_profiles(self, **kwargs: object) -> list[object]:
@@ -499,7 +557,7 @@ class TestResearchDataSyncPayload:
                 record_calls.append(tuple(kwargs.items()))
                 return object()
 
-        executor = ResearchDataSyncExecutor(
+        executor = DatasetSyncExecutor(
             session_maker=_fake_session_maker(),
             provider_factory=lambda: _ExhaustedProvider(),  # type: ignore[arg-type,return-value]
         )
@@ -509,7 +567,7 @@ class TestResearchDataSyncPayload:
                 "start_date": "2026-01-01",
                 "end_date": "2026-01-02",
             },
-            "research_data_sync",
+            "dataset_sync",
         )
         # 替换 ResearchDataSyncService 构造,避免触碰 DB。
         import finboard_persistence.research_sync as persistence_mod
@@ -573,21 +631,19 @@ def _profile_record(symbol: str, list_status: str) -> object:
     )
 
 
-class TestResearchDataSyncInstrumentGovernance:
+class TestDatasetSyncInstrumentGovernance:
     @pytest.mark.asyncio
     async def test_profiles_fetches_delisted_and_merges(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """#251:profiles 段同时拉取退市档案(D)并合并进同一批次。"""
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
-            ResearchDataSyncExecutor,
-        )
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 
         fetch_statuses: list[str] = []
 
         class _Provider:
             async def fetch_instrument_profiles(
-                self, *, list_status: str = "L"
+                self, *, list_status: str = "L", dirty_row_policy: str | None = None
             ) -> list[object]:
                 fetch_statuses.append(list_status)
                 if list_status == "L":
@@ -599,7 +655,9 @@ class TestResearchDataSyncInstrumentGovernance:
         class _Service:
             async def sync_instrument_profiles(self, **kwargs: object) -> object:
                 sync_calls.append(kwargs)
-                return object()
+                raw_records = kwargs.get("records")
+                records = list(raw_records) if isinstance(raw_records, list) else []
+                return SimpleNamespace(accepted_rows=len(records))
 
         import finboard_persistence.research_sync as persistence_mod
 
@@ -608,7 +666,7 @@ class TestResearchDataSyncInstrumentGovernance:
             "ResearchDataSyncService",
             lambda *a, **kw: _Service(),
         )
-        executor = ResearchDataSyncExecutor(
+        executor = DatasetSyncExecutor(
             session_maker=_fake_session_maker(),
             provider_factory=lambda: _Provider(),  # type: ignore[arg-type,return-value]
         )
@@ -618,7 +676,7 @@ class TestResearchDataSyncInstrumentGovernance:
                 "start_date": "2026-01-01",
                 "end_date": "2026-01-02",
             },
-            "research_data_sync",
+            "dataset_sync",
         )
         result = await executor.execute(job, _noop_progress)
 
@@ -637,15 +695,15 @@ class TestResearchDataSyncInstrumentGovernance:
         """#251:name_changes dataset 拉取历史名称并写入主数据表。"""
         from datetime import UTC, date, datetime
 
-        from finboard_backtest.background_jobs.executors.research_data_sync import (
-            ResearchDataSyncExecutor,
-        )
+        from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
         from finboard_data.research import InstrumentNameChange
 
         observed = datetime(2026, 9, 1, tzinfo=UTC)
 
         class _Provider:
-            async def fetch_name_changes(self) -> list[InstrumentNameChange]:
+            async def fetch_name_changes(
+                self, *, dirty_row_policy: str | None = None
+            ) -> list[InstrumentNameChange]:
                 return [
                     InstrumentNameChange(
                         symbol="000001.SZ",
@@ -701,7 +759,7 @@ class TestResearchDataSyncInstrumentGovernance:
             def __call__(self) -> _CommitSession:
                 return _CommitSession()
 
-        executor = ResearchDataSyncExecutor(
+        executor = DatasetSyncExecutor(
             session_maker=_CommitSessionMaker(),  # type: ignore[arg-type]
             provider_factory=lambda: _Provider(),  # type: ignore[arg-type,return-value]
         )
@@ -711,7 +769,7 @@ class TestResearchDataSyncInstrumentGovernance:
                 "start_date": "2026-01-01",
                 "end_date": "2026-01-02",
             },
-            "research_data_sync",
+            "dataset_sync",
         )
         result = await executor.execute(job, _noop_progress)
 

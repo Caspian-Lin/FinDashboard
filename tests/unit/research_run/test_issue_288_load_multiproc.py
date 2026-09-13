@@ -717,6 +717,8 @@ class _StubPitBar:
 class _StubBarBody:
     close: Decimal
     timestamp: datetime
+    # issue #336:next_open 执行价基读取 bar.open;测试桩与 close 相同。
+    open: Decimal | None = None
 
 
 @dataclass
@@ -757,6 +759,7 @@ class _StubProvider:
                 _StubBarBody(
                     close=value,
                     timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+                    open=value,
                 ),
                 self._available_at(day),
             )
@@ -1001,11 +1004,13 @@ class TestCloseMatrixPrebuild:
         # issue #300:矩阵构建读取入口改为列式 fetch_close_history。
         async def counting_pit(symbol: Symbol, period: BarPeriod, start: date,
                                end: date, *, decision_at: datetime,
-                               adjust: str = "qfq") -> object:
+                               adjust: str = "qfq",
+                               include_open: bool = False) -> object:
             counter["pit"] += 1
             return await FrozenReleaseProvider.fetch_close_history(
                 provider, symbol, period, start, end,
                 decision_at=decision_at, adjust=adjust,
+                include_open=include_open,
             )
 
         provider.fetch_close_history = counting_pit  # type: ignore[assignment]
@@ -1031,10 +1036,10 @@ class TestCloseMatrixPrebuild:
         """分块加载全程:每标的只发生 1 次全区间 PIT 读取(矩阵构建)。
 
         若矩阵惰性首建遇并发(无预建),同分块其它期会看到空矩阵而回退逐期
-        读取,PIT 计数将远超标的数。issue #300 后 ``fetch_close_history`` 同时
-        是矩阵构建与逐期价格特征重算的读取入口:期望计数 = 矩阵构建 1 次 +
-        每期特征重算 1 次(均按标的数);矩阵被打穿回退全区间读取时计数显著
-        超过该值。
+        读取,PIT 计数将远超标的数。issue #300 后 ``fetch_close_history`` 是
+        矩阵构建的读取入口;issue #450 追续后逐期价格特征直接吃矩阵切片,
+        不再按期重读——期望计数 = 矩阵构建每标的恰 1 次;计数显著超过该值
+        即矩阵被打穿回退全区间读取。
         """
         provider, _ = await _build_release(tmp_path)
         counter = {"pit": 0}
@@ -1042,11 +1047,13 @@ class TestCloseMatrixPrebuild:
         # issue #300:矩阵构建读取入口改为列式 fetch_close_history。
         async def counting_pit(symbol: Symbol, period: BarPeriod, start: date,
                                end: date, *, decision_at: datetime,
-                               adjust: str = "qfq") -> object:
+                               adjust: str = "qfq",
+                               include_open: bool = False) -> object:
             counter["pit"] += 1
             return await FrozenReleaseProvider.fetch_close_history(
                 provider, symbol, period, start, end,
                 decision_at=decision_at, adjust=adjust,
+                include_open=include_open,
             )
 
         provider.fetch_close_history = counting_pit  # type: ignore[assignment]
@@ -1062,7 +1069,6 @@ class TestCloseMatrixPrebuild:
             process_workers=0,
         )
         assert len(contexts) == len(_month_end_decisions())
-        # issue #300 后 fetch_close_history 同时覆盖矩阵构建(每标的 1 次)与
-        # 逐期价格特征重算(每期 x 每标的各 1 次);矩阵被打穿回退全区间
-        # 逐期读取时,计数将显著超过该值。
-        assert counter["pit"] == len(_SYMBOLS) * (1 + len(_month_end_decisions()))
+        # issue #450 追续:矩阵构建每标的恰 1 次,逐期价格特征直接吃矩阵
+        # 切片零重读;计数超过标的数即矩阵被打穿回退全区间逐期读取。
+        assert counter["pit"] == len(_SYMBOLS)

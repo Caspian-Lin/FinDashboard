@@ -6,19 +6,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_api._preview import (
+    MAX_PREVIEW_LIMIT,
+    read_parquet_tail,
+    validate_preview_symbol,
+)
 from finboard_api.deps import get_db_session
 from finboard_api.job_schemas import JobOut
 from finboard_api.schemas import (
     BondMetadataOut,
     ConvertibleMetadataOut,
+    DataPreviewOut,
     DatasetManifestOut,
     DatasetReleaseCapabilityOut,
     DatasetReleaseSymbolCheckOut,
@@ -89,6 +97,9 @@ def _current_code_version() -> str:
 def _release_detail_payload(release: Any) -> dict[str, object]:
     """把领域对象转换成详情响应,同时补齐列表摘要字段。"""
     # 这里不把摘要字段写入 manifest,避免改变已有发布的 checksum 契约。
+    # issue #349:manifest as_dict 的 coverage_pct 保持 str(Decimal)(checksum
+    # 语义不动);本层 coverage_pct 覆盖为 Decimal 数值,由响应模型声明为
+    # float 归一,JSON 序列化输出数值而非字符串。
     dataset_release = release
     payload = cast(dict[str, object], dataset_release.as_dict())
     payload.update(
@@ -441,7 +452,8 @@ async def list_dataset_releases(
             published_at=release.published_at,
             symbol_count=release.symbol_count,
             row_count=release.row_count,
-            coverage_pct=release.coverage_pct,
+            # issue #349:Decimal→float,JSON 序列化输出数值而非字符串。
+            coverage_pct=float(release.coverage_pct),
             capabilities=[
                 DatasetReleaseCapabilityOut(
                     key=item.key,
@@ -480,6 +492,8 @@ async def create_dataset_release(
     #261:标的集来源三选一(内联 symbols / symbols_from_release 复制既有
     发布 / full_market 全市场展开),入队期解析成具体 symbols 进 payload;
     来源发布缺失 / 不可用 / 展开为空 422 具名拒绝。
+    #385:full_market 展开支持 exchange / listing_boards 过滤(仅该模式
+    生效,与其他来源混用 422),用于从全市场发布中剔除特定板块(如北交所)。
     """
 
     from finboard_api.job_helpers import enqueue_job
@@ -491,6 +505,8 @@ async def create_dataset_release(
             symbols=request.symbols,
             symbols_from_release=request.symbols_from_release,
             full_market=request.full_market,
+            exchange=request.exchange,
+            listing_boards=request.listing_boards,
         )
     except ReleaseSymbolSourceError as exc:
         raise HTTPException(
@@ -504,6 +520,11 @@ async def create_dataset_release(
         }
     elif request.full_market:
         symbols_source = {"mode": "full_market"}
+        # #385:板块/交易所过滤溯源(归一化后记录;未声明保持旧 payload 形状)。
+        if request.exchange is not None:
+            symbols_source["exchange"] = request.exchange
+        if request.listing_boards:
+            symbols_source["listing_boards"] = list(request.listing_boards)
     else:
         symbols_source = {"mode": "inline"}
 
@@ -512,6 +533,8 @@ async def create_dataset_release(
         "dataset_name": request.dataset_name,
         "release_kind": request.release_kind,
         "version": request.version,
+        # issue #401:schema_version 透传(缺省 None 执行器回落默认)。
+        "schema_version": request.schema_version,
         "start_date": request.start_date.isoformat(),
         "end_date": request.end_date.isoformat(),
         "adjustment": request.adjustment,
@@ -555,6 +578,67 @@ async def get_dataset_release(
     if release is None:
         raise HTTPException(status_code=404, detail=f"未找到研究数据发布: {release_id}")
     return ResearchDatasetReleaseOut.model_validate(_release_detail_payload(release))
+
+
+@router.get(
+    "/datasets/releases/{release_id}/preview",
+    response_model=DataPreviewOut,
+)
+async def preview_dataset_release(
+    release_id: str,
+    symbol: str | None = Query(default=None, description="发布内标的代码,默认第一只"),
+    limit: int = Query(default=20, ge=1, le=MAX_PREVIEW_LIMIT, description="尾部行数"),
+    session: AsyncSession = Depends(get_db_session),
+) -> DataPreviewOut:
+    """只读预览冻结发布内某标的的 parquet 尾部行(数据页可观测性)。
+
+    读取路径按逐标的 artifact_path(冻结 manifest 承载)解析,复用
+    ``_safe_release_artifact`` 做目录 containment 校验;纯读,无写路径。
+    """
+
+    from finboard_data.releases import ReleaseIntegrityError, _safe_release_artifact
+
+    release = await ResearchDatasetReleaseRepository(session).get(release_id)
+    if release is None:
+        raise HTTPException(status_code=404, detail=f"未找到研究数据发布: {release_id}")
+    if not release.instruments:
+        raise HTTPException(status_code=404, detail=f"发布 {release_id} 冻结清单中没有任何标的")
+    target = symbol or release.instruments[0].code
+    try:
+        normalized = validate_preview_symbol(target)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # 只读预览故意绕过 release.instrument 的就绪门:排查「为什么未就绪」
+    # 恰恰需要先看到数据;文件缺失由下方 _safe_release_artifact fail-visible。
+    item = next(
+        (candidate for candidate in release.instruments if candidate.code == normalized),
+        None,
+    )
+    if item is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"标的 {normalized} 不在发布 {release_id} 的冻结清单内",
+        )
+    release_root = Path(os.getenv("FINBOARD_DATA_RELEASE_ROOT", _DEFAULT_RELEASE_ROOT))
+    try:
+        artifact = _safe_release_artifact(release_root / release.release_id, item.artifact_path)
+        columns, rows, total = await asyncio.to_thread(read_parquet_tail, artifact, limit)
+    except ReleaseIntegrityError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"发布文件缺失: {item.artifact_path}(release_root={release_root});"
+                "发布目录可能未部署在当前实例"
+            ),
+        ) from exc
+    return DataPreviewOut(
+        label=f"{normalized} · {release.dataset_name} v{release.version}",
+        columns=columns,
+        rows=rows,
+        total_rows=total,
+        truncated=total > len(rows),
+        artifact=str(item.artifact_path),
+    )
 
 
 @router.get(
@@ -731,7 +815,8 @@ def _manifest_to_out(row: DatasetManifestModel) -> DatasetManifestOut:
         end_date=row.end_date,
         row_count=row.row_count,
         symbol_count=row.symbol_count,
-        coverage_pct=row.coverage_pct,
+        # issue #349:DB Numeric(Decimal)→float,响应序列化为 JSON 数值。
+        coverage_pct=float(row.coverage_pct),
         gaps=row.gaps,
         checksum=row.checksum,
         quality_status=row.quality_status,

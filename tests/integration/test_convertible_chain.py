@@ -9,7 +9,7 @@ convertible_double_low 回测」全链路:
 * ``TushareBarProvider``(mock cb_daily / daily 客户端)把转债 + 正股日线
   同步进 parquet 缓存(转债走 2000 积分档 ``cb_daily`` 专属接口,#257 反例
   对照:tushare 拉得到);
-* ``research_data_sync`` ``convertible_profiles`` 数据集:tushare cb_basic
+* ``dataset_sync`` ``convertible_profiles`` 数据集:tushare cb_basic
   (mock)→ ``convertible_metadata`` upsert + instruments.list_date 回填 +
   akshare 评级 / 集思录强赎事件兜底(mock);
 * ``multi_asset_mixed`` bars 发布(转债与正股同处一份发布)+
@@ -37,9 +37,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from finboard_backtest.background_jobs.contracts import JobRecord
-from finboard_backtest.background_jobs.executors.research_data_sync import (
-    ResearchDataSyncExecutor,
-)
+from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
 from finboard_backtest.convertible_double_low.backtest import run_backtest
 from finboard_backtest.convertible_double_low.config import ConvertibleDoubleLowConfig
 from finboard_backtest.convertible_double_low.universe import ConvertibleSnapshot
@@ -358,7 +356,9 @@ def _redeem_frame() -> pd.DataFrame:
 class _CbBasicProvider:
     """离线 tushare 研究数据 provider:只提供 cb_basic 快照。"""
 
-    async def fetch_convertible_profiles(self) -> list[object]:
+    async def fetch_convertible_profiles(
+        self, *, dirty_row_policy: str | None = None
+    ) -> list[object]:
         from finboard_data.research import ConvertibleProfile
 
         observed = datetime(2026, 8, 1, tzinfo=UTC)
@@ -386,7 +386,7 @@ async def _run_convertible_profiles_sync(engine: AsyncEngine) -> None:
     def _job() -> JobRecord:
         return JobRecord(
             job_id="BJ-CONVE2E",
-            kind="research_data_sync",
+            kind="dataset_sync",
             queue="data",
             payload={
                 "datasets": ["convertible_profiles"],
@@ -401,7 +401,7 @@ async def _run_convertible_profiles_sync(engine: AsyncEngine) -> None:
     async def _noop(_done: int, _total: int | None, _phase: str | None) -> None:
         return None
 
-    executor = ResearchDataSyncExecutor(
+    executor = DatasetSyncExecutor(
         session_maker=session_factory(engine),
         provider_factory=lambda: _CbBasicProvider(),  # type: ignore[arg-type,return-value]
     )

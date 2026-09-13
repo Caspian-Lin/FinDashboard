@@ -245,6 +245,73 @@ _FUTURES_REGISTRY_BY_CODE = {entry.code: entry for entry in FUTURES_MAIN_SERIES_
 if len(_FUTURES_REGISTRY_BY_CODE) != len(FUTURES_MAIN_SERIES_REGISTRY):
     raise RuntimeError("FUTURES_MAIN_SERIES_REGISTRY 存在重复主连代码")
 
+_FUTURES_REGISTRY_BY_PRODUCT = {
+    entry.product: entry for entry in FUTURES_MAIN_SERIES_REGISTRY
+}
+if len(_FUTURES_REGISTRY_BY_PRODUCT) != len(FUTURES_MAIN_SERIES_REGISTRY):
+    raise RuntimeError("FUTURES_MAIN_SERIES_REGISTRY 存在重复品种代码")
+
+
+def futures_product_entry(product: str) -> FuturesSeriesEntry:
+    """按品种代码查主连登记表(合约级口径派生 / 对账用,issue #395)。
+
+    合约级登记不新增乘数 / 保证金率权威:instruments 行只携带合约身份
+    (代码 / 名称 / 上市退市日),品种级成本口径(乘数 / 保证金率 /
+    最小变动价位)统一由受控登记表派生 —— 未登记品种 raise(fail-closed,
+    不猜测,#267 同语义)。
+    """
+    entry = _FUTURES_REGISTRY_BY_PRODUCT.get(product.strip().upper())
+    if entry is None:
+        raise ValueError(
+            f"期货品种 {product} 未在 FUTURES_MAIN_SERIES_REGISTRY 登记;"
+            "品种乘数 / 保证金率禁止猜测,请先扩登记表(issue #267)"
+        )
+    return entry
+
+
+def reconcile_futures_contract_profiles(
+    profiles: Sequence[object],
+) -> list[str]:
+    """fut_basic 合约快照 vs 受控登记表逐品种对账(issue #395)。
+
+    对每只主连登记品种下的合约,比对 ``multiplier``(上游文档:只对国债 /
+    指数期货适用,股指四品种必有值)与 ``price_tick``(从
+    ``quote_unit_desc`` 解析的最小变动价位);返回不一致描述列表
+    (空 = 逐项一致)。字段缺失跳过该字段比对(缺失本身可见,不在对账里
+    虚构)。**保证金率上游无列,不参与对账** —— 受控表口径仍是唯一权威
+    (#267);对账口径 = 受控表乘数/tick 是回测成本语义,与交易所公告的
+    「保证金率下限」本就不同(登记表是成本口径非交易所下限,#267)。
+    """
+    from finboard_data.research import FuturesContractProfile
+
+    mismatches: list[str] = []
+    seen_products: set[str] = set()
+    for profile in profiles:
+        if not isinstance(profile, FuturesContractProfile):
+            continue
+        try:
+            entry = futures_product_entry(profile.product)
+        except ValueError:
+            continue  # 未登记品种不在对账域(登记域收窄由 discovery 裁决)
+        seen_products.add(entry.product)
+        if (
+            profile.multiplier is not None
+            and profile.multiplier != entry.multiplier
+        ):
+            mismatches.append(
+                f"{profile.symbol} multiplier={profile.multiplier} "
+                f"!= registry {entry.product} {entry.multiplier}"
+            )
+        if profile.price_tick is not None and profile.price_tick != entry.price_tick:
+            mismatches.append(
+                f"{profile.symbol} price_tick={profile.price_tick} "
+                f"!= registry {entry.product} {entry.price_tick}"
+            )
+    for product in _FUTURES_REGISTRY_BY_PRODUCT:
+        if product not in seen_products:
+            mismatches.append(f"{product}: fut_basic 快照中无该品种合约行")
+    return mismatches
+
 
 def futures_series_entry(code: str) -> FuturesSeriesEntry:
     """按归一化主连代码查登记表;未登记 raise(fail-closed,不猜测乘数)。"""
@@ -255,6 +322,68 @@ def futures_series_entry(code: str) -> FuturesSeriesEntry:
             "品种乘数 / 保证金率禁止猜测,请先扩登记表(issue #267)"
         )
     return entry
+
+
+#: 本仓期货交易所后缀 → tushare 期货 ts_code 后缀(issue #395)。
+#:
+#: 2026-09-09 实测 ``fut_basic`` 各所返回行的 ts_code 后缀:CFFEX→CFX、
+#: SHFE→SHF、DCE→DCE、CZCE→ZCE、INE→INE、GFEX→GFE。键值与
+#: :data:`FUTURES_EXCHANGES`(内部后缀)一一对应;模块导入期断言防漂移。
+TUSHARE_FUTURES_SUFFIX: dict[str, str] = {
+    "CFFEX": "CFX",
+    "SHFE": "SHF",
+    "DCE": "DCE",
+    "CZCE": "ZCE",
+    "INE": "INE",
+    "GFEX": "GFE",
+}
+_TUSHARE_FUTURES_SUFFIX_REVERSE = {v: k for k, v in TUSHARE_FUTURES_SUFFIX.items()}
+_UNMAPPED_TUSHARE_SUFFIXES = tuple(
+    suffix
+    for suffix in TUSHARE_FUTURES_SUFFIX
+    if suffix not in FUTURES_EXCHANGES
+)
+if _UNMAPPED_TUSHARE_SUFFIXES:
+    raise RuntimeError(
+        "TUSHARE_FUTURES_SUFFIX 存在不属于 FUTURES_EXCHANGES 的内部后缀: "
+        + ", ".join(_UNMAPPED_TUSHARE_SUFFIXES)
+    )
+
+
+def to_tushare_futures_code(internal_code: str) -> str:
+    """本仓期货代码 → tushare 期货 ts_code(issue #395)。
+
+    * 具体合约 ``IF2601.CFFEX`` → ``IF2601.CFX``(裸代码不变,后缀映射);
+    * 主连 ``IF0.CFFEX`` → ``IF.CFX`` —— tushare 主力连续合约代码形制是
+      品种字母段(**连续合约代码直取**,零拼接;实测 ``fut_daily`` 接受
+      ``IF.CFX`` 且 ``fut_mapping`` 给出其逐日主力映射)。主连尾缀 ``0``
+      是新浪形制,仅在 :func:`is_futures_main_code` 命中时剥去。
+    * 未知交易所后缀 raise(fail-visible,不猜测)。
+    """
+    upper = internal_code.strip().upper()
+    bare, _, suffix = upper.partition(".")
+    tushare_suffix = TUSHARE_FUTURES_SUFFIX.get(suffix)
+    if tushare_suffix is None:
+        raise ValueError(
+            f"未知期货交易所后缀,无法映射 tushare ts_code: {internal_code}"
+        )
+    if is_futures_main_code(upper):
+        bare = bare[:-1]
+    return f"{bare}.{tushare_suffix}"
+
+
+def from_tushare_futures_code(ts_code: str) -> str:
+    """tushare 期货 ts_code → 本仓期货代码(后缀映射回内部形制,issue #395)。
+
+    只做后缀映射,不回填主连 ``0``(tushare 连续合约形制如 ``IF.CFX`` /
+    ``IFL.CFX`` 不是本仓登记对象;本仓主连恒为 ``IF0.CFFEX`` 形制,由
+    调用方显式构造)。未知后缀 raise(fail-visible)。
+    """
+    bare, _, suffix = ts_code.strip().upper().partition(".")
+    internal_suffix = _TUSHARE_FUTURES_SUFFIX_REVERSE.get(suffix)
+    if internal_suffix is None:
+        raise ValueError(f"未知 tushare 期货交易所后缀,无法归一: {ts_code}")
+    return f"{bare}.{internal_suffix}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -728,12 +857,14 @@ class AkShareProvider:
         max_retries: int = 3,
         retry_backoff: float = 2.0,
         max_cache_io_concurrency: int = 1,
+        read_cache_max_bytes: int | None = None,
     ) -> None:
         if use_cache:
             dir_path = str(cache_dir) if cache_dir else "data_cache"
             self._cache: ParquetCache | None = ParquetCache(
                 dir_path,
                 max_io_concurrency=max_cache_io_concurrency,
+                read_cache_max_bytes=read_cache_max_bytes,
             )
         else:
             self._cache = None
@@ -869,7 +1000,7 @@ class AkShareProvider:
     async def fetch_convertible_overview(self) -> list[ConvertibleOverviewEntry]:
         """拉取东财可转债一览(``bond_zh_cov``,免费)。
 
-        用途:cb_basic 的交叉验证 / 评级兜底(research_data_sync
+        用途:cb_basic 的交叉验证 / 评级兜底(dataset_sync
         ``convertible_profiles`` 数据集消费)。退避/间隔遵循本 provider
         既有约定(信号量 + 请求间隔 + 指数退避重试)。
         """
@@ -951,7 +1082,8 @@ class AkShareProvider:
         if not is_futures_main_code(symbol.code):
             raise ValueError(
                 f"akshare 期货日线缓存只支持主连代码(品种+0,如 IF0.CFFEX): {symbol.code};"
-                "具体合约 EOD 走 fetch_futures_official_daily(交易所官网按日全市场表,"
+                "具体合约日线请使用 tushare 源(fut_daily,#395)或 "
+                "fetch_futures_official_daily(交易所官网按日全市场表,"
                 "v1 不进逐标的缓存,主连/具体合约语义不混淆,issue #267)"
             )
         frame = ak.futures_main_sina(
@@ -1094,8 +1226,15 @@ class AkShareProvider:
         adjust: str = "qfq",
         on_progress: Callable[[str, int, int], None] | None = None,
         on_status: Callable[[str, str], None] | None = None,
+        on_error: Callable[[str, str], None] | None = None,
     ) -> dict[str, bool]:
-        """有界并发批量更新缓存,不在内存中保留历史 bars。"""
+        """有界并发批量更新缓存,不在内存中保留历史 bars。
+
+        ``on_error(code, reason)``(可选,#347):逐标的失败摘要回调 ——
+        异常路径上报「异常类型: 截断消息」,``update_cache`` 返回 False
+        (上游无新数据且无既有缓存)时上报文字原因。返回值仍是
+        ``dict[code, bool]``,失败原因只经该回调透出,既有调用方零影响。
+        """
         total = len(symbols)
         if total == 0:
             return {}
@@ -1114,6 +1253,7 @@ class AkShareProvider:
                     sym = queue.get_nowait()
                 except asyncio.QueueEmpty:
                     return
+                reported = False
                 try:
                     ok = await self.update_cache(
                         sym,
@@ -1127,10 +1267,15 @@ class AkShareProvider:
                             else None
                         ),
                     )
-                except Exception:
+                except Exception as exc:
                     logger.exception("akshare.cache_update_failed", symbol=sym.code)
                     ok = False
+                    if on_error is not None:
+                        reported = True
+                        on_error(sym.code, f"{type(exc).__name__}: {exc}"[:200])
                 results[sym.code] = ok
+                if on_error is not None and not ok and not reported:
+                    on_error(sym.code, "update_cache 返回 False(上游无新数据且无既有缓存)")
                 if on_status is not None:
                     on_status(sym.code, "completed" if ok else "failed")
                 done_count += 1

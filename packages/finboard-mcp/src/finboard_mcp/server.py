@@ -27,11 +27,11 @@
 * ``finboard.research_code.*``(#215/#219)—— 研究代码仓库(submit / rollback /
   promote 写 + list / get 只读);提交先进入 draft,必须通过 screen + #57 OOS
   晋级门后才进入 active 正式白名单,只存储与版本化,不执行代码。
-* ``finboard.job.*``(#136;#221 归档)—— 统一后台任务队列监控与提交
-  (list / get 只读 + enqueue / cancel / archive / unarchive 写,
+* ``finboard.job.*``(#136;#221 归档;#443 等待)—— 统一后台任务队列监控与提交
+  (list / get / wait 只读 + enqueue / cancel / archive / unarchive 写,
   复用 ``background_jobs`` 表)。
 * 数据写操作(#137)—— ``finboard.data_write.*`` / ``finboard.etf.*``:
-  data_fetch(同步单标的)/ fetch_all / sync_universe / bulk_download_start /
+  data_fetch(同步单标的)/ sync_universe / bulk_download_start /
   quality_repair / dataset_release_publish(任务化,返回 job_id,用
   ``finboard_job_get`` 轮询)、config_get/update、etf_sync/batch_confirm/update/
   review_queue。补全「数据→因子→策略」闭环的数据准备第一步。
@@ -39,8 +39,10 @@
   symbols_from_release(复制既有可用发布的冻结标的集,免手工维护全市场
   清单)/ full_market(instruments 全活跃标的按 kind 展开);来源缺失 /
   不可用 / 展开为空入队即 invalid_argument 具名拒绝。
-  sync_universe 自动登记基准指数(#256,instrument_type=index);
-  bulk_download_start 的 instrument_type 支持 index 走 akshare 指数日线,
+  sync_universe 自动登记 A 股三所指数(#394 起登记源为 tushare index_basic
+  全量,#256 受控表收窄为基准资格白名单;instrument_type=index,base_date
+  回填 list_date);bulk_download_start 的 instrument_type=index 默认走
+  tushare index_daily 主源(显式 source=akshare 可选回 akshare 副源,#394),
   发布 multi_asset_mixed 含指数后 research_run 基准收益可用(#184 链路闭合)。
 * #57 验证实验(#138 + #233)—— ``finboard.validation_experiment.*``:create /
   list / get / reject / add_trial / delete + run(执行入队),暴露 REST
@@ -77,6 +79,7 @@ from finboard_mcp.tools import (
     register_backtest_tools,
     register_data_tools,
     register_data_write_tools,
+    register_factor_series_tools,
     register_factor_tools,
     register_grid_tools,
     register_jobs_tools,
@@ -104,7 +107,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(126 个,已实现)==
+== 当前可用工具(128 个,已实现;#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -122,11 +125,19 @@ FinBoard 研究 MCP —— 量化研究工具集
   (strategy_spec 形态)入队时对主数据发布做 universe 候选池非空校验,
   空池秒级 invalid_argument(不再等执行期跑完后报泛化错误),错误信息附
   各过滤条件的排除统计与缺失字段名(如 list_date)。single_shot 缺快照
-  同样入队秒级拒绝(#203):未声明 rebalance_frequency 时决策时点只能来自
-  冻结因子快照,报错附 execution_mode 与缺失因子源。用户自定义因子
-  (u_ 前缀,#217)同样入队秒级拒绝:引用的因子 artifact 非 active
-  (retired/不存在),或 multi_period(rebalance_frequency)引用用户因子
-  (观测绑定单一 decision_at,不支持每期重算)。multi_period 特征可用性
+  同样入队秒级拒绝(#203):未声明决策日历(decision_schedule /
+  rebalance_frequency)时决策时点只能来自冻结因子快照,报错附
+  execution_mode 与缺失因子源。决策日历(#361):
+  parameters.decision_schedule={kind:
+  daily|weekly|monthly|quarterly|custom} 泛化决策频率(weekly=每周最后
+  交易日,custom 显式 dates 须 ⊆ 发布交易日且升序去重);legacy
+  rebalance_frequency 扩展接受 daily|weekly(旧值零变化,映射进
+  schedule;两键不可同时声明)。用户自定义因子(u_ 前缀,#217)同样
+  入队秒级拒绝:引用的因子 artifact 非 active(retired/不存在);而
+  multi_period(decision_schedule)引用用户因子改为 series 覆盖检查
+  (#361):无 series / 覆盖不足 / series 锚定发布与 bars 主发布不一致
+  → invalid_argument(附缺失决策日期预览与 finboard_factor_series_build
+  重建命令;single_shot 仍走快照门控)。multi_period 特征可用性
   同样入队秒级判定(#253):规格 identity 源必须可由多期供给派生(标准
   价格特征 momentum/volatility_Nd/downside_volatility、close、attached
   daily_metrics / financial_indicators 发布按 kind 派生的特征、快照观测),
@@ -197,7 +208,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   默认小规模同步运行(返回 metrics/equity/fills;equity_mode=summary 默认降采样,full
   返回完整曲线;selection.inputs_mode 支持 research_db(默认;必需数据集批次
   未发布时入队秒级拒绝,#255——`dataset_unpublished:{dataset}` 具名,先
-  research_data_sync 摄取并发布,核验步骤见 docs/research/data-ops.md)/bars(纯价格因子,
+  dataset_sync 摄取并发布,核验步骤见 docs/research/data-ops.md)/bars(纯价格因子,
   不要求 daily_metrics)/snapshot(snapshot_ids 冻结快照观测);selection.factor_version
   仅支持 "v1"(选股规则版本;因子目录已统一收敛,选股可用因子集是
   finboard_factor_catalog 所列因子中 FACTOR_CATALOG 投影的子集,见 Skill 文档;
@@ -217,8 +228,10 @@ FinBoard 研究 MCP —— 量化研究工具集
   benchmark_return/excess_return 为 null + 具名 warning,不再静默 0.0。
   无显式基准的回退链跟随选股池(#254):每期选股池动态等权 > 静态候选池
   等权 > 首个标的,实际来源在 metrics.benchmark_source 与 summary() 可见。
-  多期回放(#183):queue_payload.parameters 声明
-  rebalance_frequency=monthly|quarterly 时,按冻结发布交易日历每期重算
+  多期回放(#183/#361):queue_payload.parameters 声明
+  decision_schedule={kind: daily|weekly|monthly|quarterly|custom} 或 legacy
+  rebalance_frequency=daily|weekly|monthly|quarterly 时,按冻结发布交易日历
+  每期重算
   universe/features/signals 与组合,决策间每日 mark-to-market 产出全区间
   equity_curve(报告含 annualized_return,最终权 益=曲线末点);「不要求预建
   快照」仅限决策日推导与价格因子,基本面因子(pb/ROE 等)仍 PIT 取自冻结
@@ -257,13 +270,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   暴露缺失降级为具名 warning 审计行(risk_factor_neutralization_skipped),
   不可满足 fail_closed 拒绝;research_run 侧经 portfolio_config.overrides
   声明同一约束(risk_factor_limits,因子名与冻结 feature_id 同名)。
-- finboard.job.*(6,✅ #136+#221)—— 统一后台任务队列监控与提交:
-  job list/get(只读)、job enqueue/cancel/archive/unarchive(写)。
+- finboard.job.*(7,✅ #136+#221+#443)—— 统一后台任务队列监控与提交:
+  job list/get/wait(只读)、job enqueue/cancel/archive/unarchive(写)。
   复用 background_jobs 表,enqueue kind 白名单全是研究/数据/回测域
   (echo/research_run/feature_snapshot/bulk_download/dataset_publish/
-  backtest_run/data_sync/fetch_all/quality_repair/research_data_sync);
+  backtest_run/data_sync/quality_repair/dataset_sync);
   实盘交易内核任务不进入队列。
-  research_data_sync payload 入队期契约(#260,REST /api/jobs 与 MCP 共用):
+  dataset_sync payload 入队期契约(#392,自 #260 的 research_data_sync 改名,
+  REST /api/jobs 与 MCP 共用):
   未知键(如误把 datasets 写成 data_types)/缺 start_date|end_date/
   datasets 枚举非法/逐标的数据集(financial_indicators|industry_memberships)
   缺 symbols 且缺 profiles(空 symbol 池静默零迭代)入队即 invalid_argument,
@@ -271,7 +285,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   feature_snapshot/bulk_download 等异步任务的进度
   统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id;
   view=none 轮询最小集 / summary 默认剥 payload / detail 全量;返回附
-  data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206)。
+  data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206);
+  等待任务终态优先用 finboard_job_wait(#443,有界阻塞最长 timeout_seconds,
+  超时回当前快照 + completed=false 可续期,替代循环轮询省对话轮次)。
   kind=research_run 的 job_get 附 run_status(#306:关联 research_runs.status,
   「run interrupted 但 job 仍 running」的两表不一致一眼可见;REST
   GET /api/jobs/{id} 同口径,列表不 join 为 null)。research_run 的 phase
@@ -283,27 +299,39 @@ FinBoard 研究 MCP —— 量化研究工具集
   finished_before 批量,只回 archived_count)隐藏出默认列表但不删除,
   job_list 的 archived=exclude(默认)/only/all 控制可见性,finboard_job_get
   单查不受影响,job_unarchive 可恢复;仅终态可归档,归档即冻结不重排。
-- 数据写操作(12,✅ #137):data_fetch(同步单标的拉取)、fetch_all /
+- 数据写操作(11,✅ #137;#392 删 fetch_all):data_fetch(同步单标的拉取)、
   sync_universe / bulk_download_start / quality_repair / dataset_release_publish
   (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询;
   release_kind 支持 a_share_tushare|multi_asset_mixed|daily_metrics|
-  financial_indicators|convertible_metrics(#265 转债派生指标),
+  financial_indicators|convertible_metrics(#265 转债派生指标)|
+  income_statements|balance_sheets|cashflow_statements|dividends
+  (#397 财务三表与分红明细,先 dataset_sync 摄取同名数据集),
   研究数据发布与 bars 联合供因子快照 #187;
   标的集三选一 #261:symbols / symbols_from_release 复制既有可用发布 /
   full_market 全市场按 kind 展开,来源缺失/不可用/展开为空入队即
   invalid_argument)、
   data_config_get/update(调度器配置)、etf_sync(默认 dry_run)/
   etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
-  指数链路(#256):sync_universe 自动登记基准指数(instrument_type=index,
-  受控登记表含沪深300/中证500/中证1000等 9 只),bulk_download_start 的
-  instrument_type=index 走 akshare 指数日线(tushare 源保持
-  tushare_scope_mismatch 拒绝);指数进 multi_asset_mixed 发布后
+  指数链路(#256/#394):sync_universe 自动登记指数(instrument_type=index,
+  登记源 tushare index_basic 全量、按 is_index_code 收窄 A 股三所指数;
+  BENCHMARK_INDEX_REGISTRY 白名单只裁决「谁可作 benchmark」),
+  bulk_download_start 的 instrument_type=index:默认 tushare index_daily
+  主源(原始点位;未显式声明 source 且全指数域时自动覆盖,显式
+  source=akshare 恒优先,#394;2000 积分档实测可调;ETF 仍
+  tushare_scope_mismatch 拒绝);
+  期货链路(#267/#395):sync_universe 登记 IF/IH/IC/IM 期货主连
+  (受控登记表,连续序列语义)+ tushare fut_basic 在市合约
+  (CFFEX 股指四品种,合约级可成交标的);bulk_download_start 的
+  instrument_type=futures(配 market=future)默认走 akshare 新浪主连,
+  显式 source=tushare 走 fut_daily(主连 IF0.CFFEX → 主力连续 IF.CFX
+  连续直取、具体合约 IF2601.CFX;2000 积分档实测可调,#395);
+  指数进 multi_asset_mixed 发布后
   research_run 可计算真实 benchmark_return,指数本身不进候选池
   (只做基准数据,不可撮合)。
   转债链路(#265):sync_universe 经东财一览自动登记可转债
   (instrument_type=convertible,11xxxx.SH/12xxxx.SZ);bulk_download_start
   的 convertible 走 tushare cb_daily(2000 积分档,转债/股票均放行);
-  research_data_sync 的 convertible_profiles 数据集把 cb_basic 条款快照
+  dataset_sync 的 convertible_profiles 数据集把 cb_basic 条款快照
   upsert 进 convertible_metadata(转股价/到期日,评级与集思录强赎事件走
   akshare 兜底,失败降级为 warning);发布侧新增 convertible_metrics
   (转股价值/转股溢价率 = 快照转股价 x 同日正股收盘,非全历史 PIT,
@@ -393,13 +421,30 @@ FinBoard 研究 MCP —— 量化研究工具集
   且错误指明阈值)后落库为 feature snapshot(u_<name> 因子观测,
   run_get 可见 output_snapshot_id),可被 research run 的
   factor_snapshot_ids 引用、规格按 u_<name> 引用(仅 active+passed;入队期
-  retired 拦截,multi_period 引用用户因子秒级拒绝)。需
+  retired 拦截,multi_period 引用用户因子走 series 覆盖检查 #361)。需
   research_sandbox_enabled=true + Docker Desktop + docker/research-sandbox
   镜像;纯离线研究域,不连 broker 不下单。
+- 因子序列工件(2,✅ #360):factor_series_build(写,入队)/
+  factor_series_get(只读)。内容寻址派生工件(research_factor_series,FS-
+  前缀):series_key = sha256(代码 commit x bars 主发布 x 研究发布联合集 x
+  params x 窗口),values 为逐决策日截面 —— u_ 因子观测从「绑定单一
+  decision_at 的点快照」升级为可 multi_period 引用的序列(research run
+  入队 payload 新键 factor_series_ids,声明时加载器按决策日索引 series.values,
+  被覆盖的 u_ 因子跳过 multi_period 拒绝;manifest 冻结
+  {series_id, content_checksum} 并入 input_checksum)。build job(worker
+  单并发,复用沙箱槽位)窗口内逐决策日沙箱执行 + 抽 2 个截断点做前缀不变性
+  审计(检出前视 failed=lookahead_detected);series_key 已存在且 checksum
+  一致直接 unchanged(不启动容器)。换 bars 发布:入队/validate 发现
+  series.release_id 不在冻结清单即具名拒绝(series_release_mismatch,附
+  失效清单与重建代价预估);托管批量重建 = 一次入队 N 个 factor_series_build
+  (内容寻址缓存使未受影响的组合自动 unchanged),不新造编排器。
+  factor_series_get 默认 view=summary(#206 瘦身,不含逐日 values),detail
+  才给 dates+values 全量。纯离线研究域,不连 broker 不下单。
 - 用户代码策略执行(✅ #218/#219):strategy_spec ``strategy_kind=user_code`` +
   ``code_artifact={name, commit?}`` 引用 kind=strategy 的 active+passed artifact
   (feature_graph/signal_rules 允许为空)。research_run(建议
-  ``parameters.rebalance_frequency=monthly|quarterly`` 走 multi_period;
+  ``parameters.decision_schedule`` 走 multi_period(四频 + custom,#361;legacy
+  ``rebalance_frequency`` 仍接受);
   single_shot 需冻结快照提供决策时点)逐决策日在一次性容器执行
   ``strategy.decide(ctx) -> targets``:输入 = PIT 数据视图 + **当前权重回显**
   (上一决策成交后的实际持仓)+ 组合约束只读视图;输出目标权重映射为信号,
@@ -450,6 +495,7 @@ def build_mcp_server() -> MCPServer:
     register_data_tools(mcp)
     register_data_write_tools(mcp)
     register_factor_tools(mcp)
+    register_factor_series_tools(mcp)
     register_strategy_tools(mcp)
     register_backtest_tools(mcp)
     register_grid_tools(mcp)

@@ -11,6 +11,11 @@ import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/s
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
 import { navGroups } from "./nav-config";
+import {
+  WorkflowHelpPopover,
+  workflowNextForPath,
+  isResearchWorkflowPath,
+} from "@/components/research/ResearchHint";
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
@@ -25,7 +30,7 @@ function ThemeToggle() {
 function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
   const { tl } = useT();
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* Logo:与顶栏同高(56px),图标/文字在同一对齐线上 */}
       <div className={cn("flex h-14 items-center border-b border-border px-4", collapsed && "justify-center px-2")}>
         <div className="flex items-center gap-2">
@@ -39,7 +44,7 @@ function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavig
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 overflow-y-auto scrollbar-thin py-3" aria-label={tl({ zh: "主导航", en: "Main navigation" })}>
+      <nav className="min-h-0 flex-1 overflow-y-auto scrollbar-thin py-3" aria-label={tl({ zh: "主导航", en: "Main navigation" })}>
         {navGroups.map((group) => (
           <div key={group.label.en} className="mb-4">
             {!collapsed && (
@@ -83,7 +88,7 @@ function SidebarContent({ collapsed, onNavigate }: { collapsed: boolean; onNavig
   );
 }
 
-function SystemStatus() {
+function SystemStatus({ collapsed = false }: { collapsed?: boolean }) {
   const { t } = useT();
   const wsConnected = useWebSocket();
   const healthQuery = useQuery({
@@ -100,8 +105,30 @@ function SystemStatus() {
       ? t("shell.kernelReady")
       : t("shell.kernelNotReady");
 
+  if (collapsed) {
+    // 折叠态(w-16)放不下文字标签:只渲染状态点,title 承载语义,防止逐字竖排换行挤出框。
+    return (
+      <div className="flex flex-col items-center gap-2 border-t border-border py-2">
+        <span className="flex items-center" title={kernelLabel}>
+          <StatusDot status={kernelOk ? "online" : "offline"} />
+          <span className="sr-only">{kernelLabel}</span>
+        </span>
+        <span className="flex items-center" title="WS">
+          <StatusDot status={wsConnected ? "online" : "idle"} />
+          <span className="sr-only">WS</span>
+        </span>
+        {ksLevel !== "off" && (
+          <span className="flex items-center text-warning" title={`KS: ${ksLevel}`}>
+            <AlertTriangle className="h-3 w-3" />
+            <span className="sr-only">KS: {ksLevel}</span>
+          </span>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="flex items-center gap-4 px-4 py-2 border-t border-border">
+    <div className="flex items-center gap-4 whitespace-nowrap border-t border-border px-4 py-2">
       <div className="flex items-center gap-1.5 text-xs">
         <StatusDot status={kernelOk ? "online" : "offline"} />
         <span className="text-muted-foreground" title={healthQuery.isError ? t("shell.healthCheckFailed") : undefined}>
@@ -149,7 +176,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
       >
         <SidebarContent collapsed={collapsed} />
-        <SystemStatus />
+        <SystemStatus collapsed={collapsed} />
         <div className="border-t border-border p-2">
           <Button
             variant="ghost"
@@ -203,6 +230,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex items-center gap-1">
+            {isResearchWorkflowPath(location.pathname) && (
+              <WorkflowHelpPopover next={workflowNextForPath(location.pathname)} />
+            )}
             <ThemeToggle />
           </div>
         </header>

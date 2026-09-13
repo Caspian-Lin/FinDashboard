@@ -13,6 +13,7 @@ from typing import cast
 
 import structlog
 
+from finboard_backtest.portfolio.contracts import MAX_WEIGHT_EPSILON
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.checkpoint_resume import (
     completed_decision_prefix,
@@ -20,6 +21,7 @@ from finboard_backtest.research_run.checkpoint_resume import (
 from finboard_backtest.research_run.contracts import (
     REPLAYABLE_SOURCE_STATUSES,
     RESEARCH_PORTFOLIO_PIPELINE_VERSION,
+    ConstraintOutcome,
     DecisionBundle,
     JsonValue,
     ResearchArtifact,
@@ -501,6 +503,10 @@ class ResearchRunCoordinator:
         # cancelled 是显式用户意图,仍拒绝;completed 重放行为不变。
         if source.status not in REPLAYABLE_SOURCE_STATUSES:
             raise ResearchRunConflictError(replay_guard_error(source.status))
+        # 调用方契约(issue #455):``adapter`` 必须以与本 replace 同身份的
+        # manifest 预构造(run_id 等身份字段一致)—— #306 加载期打断探针按
+        # 适配器构造期 manifest.run_id 轮询,源身份适配器会在加载期把重放
+        # 误判为「外部打断」。唯一调用方 execute_replay 已按同构字段集预替换。
         manifest = replace(
             source.manifest,
             run_id=new_run_id,
@@ -904,9 +910,22 @@ class ResearchRunCoordinator:
                 *decision.targets_after_risk,
             )
         }
-        if not target_symbols <= signal_symbols:
+        # issue #452:再平衡带保留的无信号持仓是设计意图(控制换手、维持已
+        # 成交持仓),不算「来历不明」—— 校验放宽为 targets ⊆ signals 与
+        # band_retained 的并集;既无信号又无带保留记录的目标仍 fail-closed
+        # 拒绝(防线收窄而非取消)。
+        unexplained = target_symbols - signal_symbols
+        if unexplained - _band_retained_symbols(decision.constraints):
             raise ResearchConstraintViolationError(
                 "目标仓位包含没有标准化信号的标的"
+            )
+        if unexplained:
+            logger.warning(
+                "research_run.band_retained_without_signal",
+                run_id=manifest.run_id,
+                business_date=decision.business_date.isoformat(),
+                symbols=sorted(unexplained),
+                message="目标仓位含再平衡带保留的无信号持仓,校验按 #452 豁免",
             )
 
         instruction_by_id = {
@@ -1092,6 +1111,28 @@ class ResearchRunCoordinator:
         if record is None:
             raise ResearchRunConflictError(f"研究运行不存在: {run_id}")
         return record
+
+
+def _band_retained_symbols(
+    constraints: tuple[ConstraintOutcome, ...],
+) -> frozenset[str]:
+    """从已持久化的约束审计导出「再平衡带保留且有权重」的标的(issue #452)。
+
+    口径依据 ``build_portfolio`` 带块:真正保留的充要条件是
+    ``hold ∧ abs(current) <= max_weight_per_asset ∧ abs(current) > eps``
+    —— 对应 outcome ``passed=True ∧ after_value > MAX_WEIGHT_EPSILON``;
+    被否决(超 max_weight 或近零持仓)时 ``banded`` 不写入 current,
+    ``after_value`` 保持 desired(通常 0),不会进入豁免集。
+    不引入新的数据通道,全部读 ``decision.constraints`` 既有审计结构。
+    """
+    return frozenset(
+        outcome.symbol
+        for outcome in constraints
+        if outcome.constraint == "rebalance_band"
+        and outcome.passed
+        and outcome.symbol is not None
+        and (outcome.after_value or 0.0) > MAX_WEIGHT_EPSILON
+    )
 
 
 def _decision_phase(stage_value: str, decision_index: int, business_date: object) -> str:

@@ -1,4 +1,3 @@
-import { WorkflowIndicator, NextStepCTA } from "@/components/research/ResearchHint";
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
@@ -1221,12 +1220,7 @@ export default function PortfolioRisk() {
           zh: "目标权重分配、离散交易求解与资金可行性分析",
           en: "Target weight allocation, discrete trade solving and capital feasibility analysis",
         })}
-        breadcrumbs={[
-          { label: tl({ zh: "研究", en: "Research" }), href: "/research" },
-          { label: tl({ zh: "组合与风险", en: "Portfolio & Risk" }) },
-        ]}
       />
-      <WorkflowIndicator currentPath="/research/portfolio" />
 
       <Tabs defaultValue="allocate">
         <TabsList>
@@ -1263,14 +1257,6 @@ export default function PortfolioRisk() {
           />
         </TabsContent>
       </Tabs>
-      <NextStepCTA
-        nextPath="/research/simulation"
-        nextLabel={{ zh: "模拟盘", en: "Paper Trading" }}
-        description={{
-          zh: "用纸面撮合验证策略在真实交易环境下的表现",
-          en: "Validate strategy performance in a realistic trading environment via paper matching.",
-        }}
-      />
     </div>
   );
 }

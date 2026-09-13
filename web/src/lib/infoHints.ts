@@ -206,8 +206,8 @@ export const INFO_HINTS = {
         en: "Chooses the bar provider for this bulk job; leave empty to use the system default.",
       },
       detail: {
-        zh: "Tushare 批量任务仅处理 A 股股票，并保持缓存为单一来源。",
-        en: "Tushare bulk jobs only process A-share stocks and keep the cache single-source.",
+        zh: "Tushare 批量任务支持 A 股股票与指数（缓存保持单一来源），指数走 index_daily 专属接口、2000 积分档实测可调；ETF 暂仅支持 akshare/yfinance（复权口径对齐设计中，#341）。",
+        en: "Tushare bulk jobs cover A-share stocks and indices (single-source cache); indices use the dedicated index_daily endpoint, verified callable at the 2000-point tier. ETF is still akshare/yfinance-only while adjustment semantics are being aligned (#341).",
       },
     },
     cachedData: {
@@ -313,6 +313,26 @@ export const INFO_HINTS = {
       detail: {
         zh: "删除预设不会删除回测历史，也不会影响正在运行的策略。",
         en: "Deleting a preset never deletes backtest history nor affects running strategies.",
+      },
+    },
+  },
+  jobs: {
+    status: {
+      title: { zh: "任务状态", en: "Job status" },
+      description: {
+        zh: "queued=排队；running=执行中；retry_waiting=等待自动重试；succeeded/failed/cancelled/interrupted=终态。",
+        en: "queued=waiting; running=executing; retry_waiting=awaiting automatic retry; succeeded/failed/cancelled/interrupted=terminal.",
+      },
+      detail: {
+        zh: "失败任务的 error_summary 头部带 [stage=...; decision=...] 定位信息；终态任务可归档隐藏但不会删除。",
+        en: "A failed job's error_summary starts with [stage=...; decision=...] locating context; archived terminal jobs are hidden but never deleted.",
+      },
+    },
+    kind: {
+      title: { zh: "任务类型", en: "Job kind" },
+      description: {
+        zh: "data_sync/bulk_download=行情数据；dataset_publish/dataset_sync=研究数据；research_run/backtest_run/validation_experiment/research_code_run=研究与回测。",
+        en: "data_sync/bulk_download=market data; dataset_publish/dataset_sync=research data; research_run/backtest_run/validation_experiment/research_code_run=research & backtesting.",
       },
     },
   },

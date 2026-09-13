@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useSearchParams } from "react-router-dom";
+import { Bookmark, ChevronDown } from "lucide-react";
 import {
   LineChart,
   Line,
@@ -14,6 +15,18 @@ import {
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import FactorSelectionForm from "../components/FactorSelectionForm";
 import StrategyParamForm from "../components/StrategyParamForm";
+import { StrategyPresetsPanel } from "./Strategies";
+import { PageHeader } from "@/components/ui/page-header";
+import { Button } from "@/components/ui/button";
+import { MasterList, MasterListItem } from "@/components/ui/master-list";
+import { EmptyState } from "@/components/ui/states";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { SelectAllResultsButton } from "../components/selection/SelectAllResultsButton";
 import {
   defaultStrategyParams,
@@ -83,6 +96,10 @@ export default function Backtest() {
   // 结果视图: 当前结果或历史记录
   const [activeResult, setActiveResult] = useState<BacktestResult | null>(null);
   const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null);
+  // 策略预设抽屉(原独立「策略预设」页并入)
+  const [presetsOpen, setPresetsOpen] = useState(false);
+  // 回测配置卡默认折叠:结果优先,摘要行常驻可一键运行
+  const [configOpen, setConfigOpen] = useState(false);
   // 回测已迁移到统一任务队列(#144):POST /backtest/run 返回 JobOut,前端轮询
   // /api/jobs/{job_id},succeeded 后用 result_ref(run_id) 查历史详情拿 BacktestResult。
   const [backtestJobId, setBacktestJobId] = useState<string | null>(null);
@@ -255,6 +272,7 @@ export default function Backtest() {
       dataset_versions: backtestDetail.dataset_versions,
       factor_version: backtestDetail.factor_version,
     });
+    setFillsPage(0);
     setActiveHistoryId(backtestDetail.id);
     qc.invalidateQueries({ queryKey: ["backtest-history"] });
   }, [backtestDetail, qc]);
@@ -272,6 +290,7 @@ export default function Backtest() {
         dataset_versions: detail.dataset_versions,
         factor_version: detail.factor_version,
       });
+      setFillsPage(0);
       setActiveHistoryId(detail.id);
       setStrategy(detail.strategy);
       const definition = backtestStrategies.find(
@@ -317,6 +336,15 @@ export default function Backtest() {
 
   const result = activeResult;
   const m = result?.metrics;
+
+  // 交易明细分页:10 条/页;新结果载入时回第一页,越界由 clamp 兜底
+  const FILLS_PAGE_SIZE = 10;
+  const [fillsPage, setFillsPage] = useState(0);
+  const fillsPageCount = Math.max(
+    1,
+    Math.ceil((result?.fills.length ?? 0) / FILLS_PAGE_SIZE),
+  );
+  const fillsPageClamped = Math.min(fillsPage, fillsPageCount - 1);
   const backtestRunning = runBacktest.isPending || isJobRunning(backtestJob);
   const backtestFailed =
     backtestJob && !isJobRunning(backtestJob) && backtestJob.status !== "succeeded"
@@ -338,29 +366,77 @@ export default function Backtest() {
     if (!strategyDefinition) return;
     const errors = validateStrategyParams(strategyDefinition, strategyParams);
     setStrategyErrors(errors);
-    if (Object.keys(errors).length > 0) return;
+    if (Object.keys(errors).length > 0) {
+      // 校验失败时展开配置卡,让字段级错误可见(错误展示在 StrategyParamForm 内)
+      setConfigOpen(true);
+      return;
+    }
     runBacktest.mutate(
       normalizeStrategyParams(strategyDefinition, strategyParams),
     );
   };
 
-  return (
-    <div className="flex flex-col gap-6 lg:flex-row">
-      {/* Main column */}
-      <div className="min-w-0 flex-1">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">{tl({ zh: "回测", en: "Backtest" })}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {tl({
-              zh: "历史行情回放 + 纸面撮合;回测任务进入统一队列,可在「任务中心」跟踪。",
-              en: "Historical bar replay + paper matching; backtest jobs enter the unified queue and can be tracked in the Task Center.",
-            })}
-          </p>
-        </div>
+  // 配置摘要(折叠态也可见):策略名 / 标的数 / 区间 / 资金
+  const strategyName = strategyDefinition?.name ?? strategy;
+  const capitalNum = Number(capital);
+  const capitalDisplay = Number.isFinite(capitalNum) ? capitalNum.toLocaleString() : capital;
+  const configSummary = [
+    strategyName,
+    tl({ zh: `${selectedSymbols.length} 标的`, en: `${selectedSymbols.length} symbols` }),
+    `${start} ~ ${end}`,
+    `¥${capitalDisplay}`,
+  ].join(" · ");
 
-        {/* Config form */}
-        <div className="rounded-lg border border-border bg-card p-5">
-          <h2 className="text-lg font-semibold mb-4">{tl({ zh: "回测配置", en: "Backtest Configuration" })}</h2>
+  // 回测配置卡(可折叠,默认折叠):摘要行常驻,折叠态也能一键运行
+  const configCard = (
+    <div className="rounded-lg border border-border bg-card">
+      <div className="flex flex-wrap items-center gap-2 px-5 py-4">
+        <button
+          type="button"
+          onClick={() => setConfigOpen((v) => !v)}
+          aria-expanded={configOpen}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+        >
+          <ChevronDown
+            className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
+              configOpen ? "" : "-rotate-90"
+            }`}
+          />
+          <h2 className="text-base font-semibold text-foreground">
+            {tl({ zh: "回测配置", en: "Backtest Configuration" })}
+          </h2>
+          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+            {configSummary}
+          </span>
+        </button>
+        <Button
+          size="sm"
+          onClick={startBacktest}
+          disabled={backtestRunning || selectedSymbols.length === 0}
+        >
+          {backtestRunning
+            ? tl({
+                zh: `回测中…${backtestJob?.phase ? `（${backtestJob.phase}）` : ""}`,
+                en: `Running…${backtestJob?.phase ? ` (${backtestJob.phase})` : ""}`,
+              })
+            : tl({ zh: "运行回测", en: "Run backtest" })}
+        </Button>
+      </div>
+      {(runBacktest.error || backtestFailed) && (
+        <div className="space-y-1 px-5 pb-4">
+          {runBacktest.error && (
+            <p className="text-sm text-destructive">{(runBacktest.error as Error).message}</p>
+          )}
+          {backtestFailed && (
+            <p className="text-sm text-destructive">
+              {tl({ zh: "回测任务失败: ", en: "Backtest job failed: " })}
+              {backtestFailed.error_summary ?? backtestFailed.status}
+            </p>
+          )}
+        </div>
+      )}
+      {configOpen && (
+        <div className="border-t border-border p-5">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
             <div>
               <HintLabel htmlFor="backtest-strategy" hint={INFO_HINTS.backtest.strategy}>
@@ -570,34 +646,14 @@ export default function Backtest() {
             onSymbolsLoaded={(codes) => setSelectedSymbols(codes)}
           />
 
-          <button
-            onClick={startBacktest}
-            disabled={backtestRunning || selectedSymbols.length === 0}
-            className="mt-4 bg-primary text-primary-foreground rounded-md px-6 py-2 text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
-          >
-            {backtestRunning
-              ? tl({
-                  zh: `回测中…${backtestJob?.phase ? `（${backtestJob.phase}）` : ""}`,
-                  en: `Running…${backtestJob?.phase ? ` (${backtestJob.phase})` : ""}`,
-                })
-              : tl({ zh: "运行回测", en: "Run backtest" })}
-          </button>
-          {runBacktest.error && (
-            <p className="mt-2 text-sm text-destructive">
-              {(runBacktest.error as Error).message}
-            </p>
-          )}
-          {backtestFailed && (
-            <p className="mt-2 text-sm text-destructive">
-              {tl({ zh: "回测任务失败: ", en: "Backtest job failed: " })}
-              {backtestFailed.error_summary ?? backtestFailed.status}
-            </p>
-          )}
         </div>
+      )}
+    </div>
+  );
 
-        {/* Results */}
-        {m && (
-          <>
+  // 结果区:指标卡 / 候选池审计 / 权益曲线 / 成交明细(主列首位,配置卡之前)
+  const resultsSection = m ? (
+    <>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <MetricCard label={tl({ zh: "总收益", en: "Total return" })} value={`${(m.total_return * 100).toFixed(2)}%`} positive={m.total_return >= 0} />
               <MetricCard label={tl({ zh: "年化", en: "Annualized" })} value={`${(m.annualized_return * 100).toFixed(2)}%`} positive={m.annualized_return >= 0} />
@@ -706,8 +762,13 @@ export default function Backtest() {
                     </tr>
                   </thead>
                   <tbody>
-                    {result.fills.map((f, i) => (
-                      <tr key={i} className="border-t">
+                    {result.fills
+                      .slice(
+                        fillsPageClamped * FILLS_PAGE_SIZE,
+                        (fillsPageClamped + 1) * FILLS_PAGE_SIZE,
+                      )
+                      .map((f, i) => (
+                      <tr key={fillsPageClamped * FILLS_PAGE_SIZE + i} className="border-t">
                         <td className="px-4 py-2 text-muted-foreground">{f.date}</td>
                         <td className="px-4 py-2 font-mono">{f.symbol}</td>
                         <td className={`px-4 py-2 ${f.side === "buy" ? "text-up" : "text-down"}`}>
@@ -721,31 +782,123 @@ export default function Backtest() {
                   </tbody>
                 </table>
                 </div>
+                {fillsPageCount > 1 && (
+                  <div className="flex items-center justify-end gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2"
+                      disabled={fillsPageClamped === 0}
+                      onClick={() => setFillsPage(fillsPageClamped - 1)}
+                    >
+                      {tl({ zh: "上一页", en: "Prev" })}
+                    </Button>
+                    <span className="tabular-nums">
+                      {tl({
+                        zh: `第 ${fillsPageClamped + 1} / ${fillsPageCount} 页`,
+                        en: `Page ${fillsPageClamped + 1} / ${fillsPageCount}`,
+                      })}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2"
+                      disabled={fillsPageClamped >= fillsPageCount - 1}
+                      onClick={() => setFillsPage(fillsPageClamped + 1)}
+                    >
+                      {tl({ zh: "下一页", en: "Next" })}
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
-          </>
-        )}
-      </div>
+    </>
+  ) : null;
 
-      {/* History sidebar */}
-      <div className="w-full shrink-0 lg:w-72">
-        <h2 className="mb-3 text-sm font-semibold text-muted-foreground">{tl({ zh: "回测历史", en: "Backtest History" })}</h2>
-        <div className="space-y-2 lg:max-h-[calc(100vh-16rem)] lg:overflow-y-auto lg:scrollbar-thin lg:pr-1">
-          {history && history.length === 0 && (
-            <p className="text-xs text-muted-foreground/70">{tl({ zh: "暂无历史记录", en: "No history yet" })}</p>
-          )}
-          {history?.map((h) => (
-            <HistoryCard
-              key={h.id}
-              item={h}
-              active={h.id === activeHistoryId}
-              loading={loadHistory.isPending && loadHistory.variables === h.id}
-              onClick={() => loadHistory.mutate(h.id)}
-              onDelete={() => deleteHistory.mutate(h.id)}
+  return (
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title={tl({ zh: "回测", en: "Backtest" })}
+        description={tl({
+          zh: "历史行情回放 + 纸面撮合;回测任务进入统一队列,可在「任务中心」跟踪。",
+          en: "Historical bar replay + paper matching; backtest jobs enter the unified queue and can be tracked in the Task Center.",
+        })}
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setPresetsOpen(true)}>
+              <Bookmark className="h-4 w-4" />
+              {tl({ zh: "策略预设", en: "Strategy presets" })}
+            </Button>
+          </div>
+        }
+      />
+
+      <div className="flex flex-col gap-6 lg:flex-row">
+        {/* 历史侧栏:DOM 首位 = lg+ 左列并吸附;移动端 order 排到主列之后 */}
+        <div className="order-2 w-full shrink-0 lg:order-1 lg:w-80 lg:self-start lg:sticky lg:top-16">
+          <MasterList
+            title={tl({ zh: "回测历史", en: "Backtest History" })}
+            count={history?.length}
+          >
+            {history && history.length === 0 && (
+              <p className="text-xs text-muted-foreground/70">{tl({ zh: "暂无历史记录", en: "No history yet" })}</p>
+            )}
+            {history?.map((h) => (
+              <HistoryCard
+                key={h.id}
+                item={h}
+                active={h.id === activeHistoryId}
+                loading={loadHistory.isPending && loadHistory.variables === h.id}
+                onClick={() => loadHistory.mutate(h.id)}
+                onDelete={() => deleteHistory.mutate(h.id)}
+              />
+            ))}
+          </MasterList>
+        </div>
+
+        {/* 主列:结果优先,其后是折叠的配置卡与空态引导 */}
+        <div className="order-1 flex min-w-0 flex-1 flex-col gap-6 lg:order-2">
+          {resultsSection}
+          {configCard}
+          {!m && (
+            <EmptyState
+              title={
+                backtestRunning
+                  ? tl({ zh: "回测运行中…", en: "Backtest running…" })
+                  : tl({ zh: "尚无回测结果", en: "No backtest result yet" })
+              }
+              description={
+                backtestRunning
+                  ? tl({
+                      zh: `任务已进入统一队列${backtestJob?.phase ? `（${backtestJob.phase}）` : ""},完成后结果会自动展示;可在「任务中心」跟踪进度。`,
+                      en: `The job is in the unified queue${backtestJob?.phase ? ` (${backtestJob.phase})` : ""}; the result will appear here when it completes. Track progress in the Task Center.`,
+                    })
+                  : tl({
+                      zh: "展开「回测配置」设置参数后点击「运行回测」,或从左侧回测历史载入一次运行。",
+                      en: "Expand Backtest Configuration, set parameters and press \"Run backtest\", or load a previous run from the history list.",
+                    })
+              }
             />
-          ))}
+          )}
         </div>
       </div>
+
+      <Sheet open={presetsOpen} onOpenChange={setPresetsOpen}>
+        <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl">
+          <SheetHeader>
+            <SheetTitle>{tl({ zh: "策略预设", en: "Strategy presets" })}</SheetTitle>
+            <SheetDescription>
+              {tl({
+                zh: "内置策略的参数预设库;选择预设后点「带入回测」即可填充到当前配置。",
+                en: "Parameter presets for built-in strategies; pick one and press \"Load into backtest\" to fill the current configuration.",
+              })}
+            </SheetDescription>
+          </SheetHeader>
+          <div className="pb-6">
+            <StrategyPresetsPanel onLoadedPreset={() => setPresetsOpen(false)} />
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }
@@ -996,14 +1149,11 @@ function HistoryCard({
   const { tl } = useT();
   const ret = item.metrics?.total_return;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={loading}
-      className={`block w-full border text-left rounded-lg p-3 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-        active ? "border-primary bg-primary/10" : "bg-card hover:border-primary/50"
-      }`}
-      aria-pressed={active}
+    <MasterListItem
+      selected={active}
+      onClick={() => {
+        if (!loading) onClick();
+      }}
     >
       <div className="flex items-start justify-between">
         <div className="min-w-0">
@@ -1042,7 +1192,7 @@ function HistoryCard({
         </div>
       </div>
       {loading && <div className="text-xs text-primary mt-1">{tl({ zh: "加载中...", en: "Loading..." })}</div>}
-    </button>
+    </MasterListItem>
   );
 }
 

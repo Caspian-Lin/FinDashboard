@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from datetime import date as parse_date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -13,12 +12,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_api._preview import (
+    MAX_PREVIEW_LIMIT,
+    read_parquet_tail,
+    validate_preview_symbol,
+)
 from finboard_api.deps import get_db_session
 from finboard_api.job_schemas import JobOut
 from finboard_api.schemas import (
     BarAnomalyOut,
     BulkDownloadRequest,
     DataFetchRequest,
+    DataPreviewOut,
     DataStatusListOut,
     DataStatusOut,
     DataStatusSelectionOut,
@@ -65,8 +70,11 @@ def _get_provider(
     from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
 
     provider_name = _resolve_provider_name(source, settings=settings)
+    read_cache_max_bytes = (
+        settings.read_cache_max_bytes if settings is not None else None
+    )
     if provider_name == "akshare":
-        return AkShareProvider(use_cache=use_cache)
+        return AkShareProvider(use_cache=use_cache, read_cache_max_bytes=read_cache_max_bytes)
     if provider_name == "tushare":
         return TushareBarProvider(
             token=settings.tushare_token if settings is not None else None,
@@ -82,8 +90,9 @@ def _get_provider(
                 if settings is not None
                 else "data_cache/tushare_usage.json"
             ),
+            read_cache_max_bytes=read_cache_max_bytes,
         )
-    return YFinanceProvider(use_cache=use_cache)
+    return YFinanceProvider(use_cache=use_cache, read_cache_max_bytes=read_cache_max_bytes)
 
 
 def _resolve_provider_name(
@@ -95,8 +104,9 @@ def _resolve_provider_name(
     import os
 
     configured = settings.data_provider if settings is not None else None
+    # 缺省主源 tushare(issue #393):股票 bars 主源切换,akshare 降副源。
     provider_name = (
-        (source or configured or os.getenv("FINBOARD_DATA_PROVIDER") or "akshare").strip().lower()
+        (source or configured or os.getenv("FINBOARD_DATA_PROVIDER") or "tushare").strip().lower()
     )
     if provider_name not in _SUPPORTED_BAR_PROVIDERS:
         supported = ", ".join(sorted(_SUPPORTED_BAR_PROVIDERS))
@@ -154,40 +164,14 @@ async def _persist_tushare_lifecycle_events(
     session: AsyncSession,
     events: list[Any],
 ) -> int:
-    """幂等写入 Tushare 停复牌事件,返回本次新增数量。"""
-    if not events:
-        return 0
+    """幂等写入 Tushare 停复牌事件,返回本次新增数量。
 
-    from sqlalchemy.dialects.postgresql import insert
+    实现收敛到 finboard_persistence 单一事实源(#393):与 bulk_download
+    执行器 / MCP fetch 共用同一行形状与幂等键。
+    """
+    from finboard_persistence import persist_tushare_lifecycle_events
 
-    from finboard_persistence import InstrumentLifecycleEventModel
-
-    observed_at = datetime.now(UTC)
-    values = [
-        {
-            "symbol": event.symbol,
-            "event_type": event.event_type,
-            "effective_date": event.effective_date,
-            # 历史事件是现在从 API 观测到的,不能倒填成当时已知。
-            "available_at": observed_at,
-            "source": "tushare",
-            "dataset_version": "suspend_d-v1",
-            "details": {
-                "suspend_type": "R" if event.event_type == "resumption" else "S",
-                "suspend_timing": event.suspend_timing,
-            },
-            "observed_at": observed_at,
-        }
-        for event in events
-    ]
-    statement = (
-        insert(InstrumentLifecycleEventModel)
-        .values(values)
-        .on_conflict_do_nothing(constraint="uq_instrument_lifecycle_event")
-        .returning(InstrumentLifecycleEventModel.id)
-    )
-    result = await session.execute(statement)
-    return len(result.scalars().all())
+    return await persist_tushare_lifecycle_events(session, events)
 
 
 @router.get("/status", response_model=list[DataStatusOut])
@@ -376,6 +360,41 @@ async def get_cache_status(symbol: str) -> DataStatusOut:
         last_date=str(metadata.last_date) if metadata and metadata.last_date else None,
         last_close=None,
         source=metadata.source if metadata else None,
+    )
+
+
+@router.get("/cache/preview", response_model=DataPreviewOut)
+async def preview_cache_bars(
+    symbol: str = Query(..., description="含交易所后缀的标的代码,如 510300.SH"),
+    limit: int = Query(default=20, ge=1, le=MAX_PREVIEW_LIMIT, description="尾部 bar 数"),
+    adjust: str = Query(default="qfq", description="复权键(qfq/none)"),
+) -> DataPreviewOut:
+    """只读预览单标的本地缓存 parquet 的尾部 bar(数据页可观测性)。
+
+    直接按缓存文件名定位(与 /status 系列同一 D1/qfq 口径),pyarrow 读
+    尾部行,不走 Bar 对象构造;纯读,无写路径。
+    """
+    from finboard_data.cache import make_symbol
+
+    try:
+        normalized = validate_preview_symbol(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    sym = make_symbol(normalized)
+    artifact = Path(_CACHE_DIR) / f"{sym.code}_1d_{adjust}.parquet"
+    if not artifact.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"缓存文件不存在: {artifact}(请先在行情拉取页同步该标的)",
+        )
+    columns, rows, total = await asyncio.to_thread(read_parquet_tail, artifact, limit)
+    return DataPreviewOut(
+        label=f"{normalized} · 本地缓存 (1d/{adjust})",
+        columns=columns,
+        rows=rows,
+        total_rows=total,
+        truncated=total > len(rows),
+        artifact=artifact.name,
     )
 
 
@@ -623,55 +642,6 @@ async def repair_cache_quality(
     return job
 
 
-@router.post("/fetch-all", response_model=JobOut, status_code=202)
-async def fetch_all_data(
-    response: Response,
-    request: Request,
-) -> JobOut:
-    """登记标的池批量缓存更新任务,立即返回 202 + job_id(issue #144)。
-
-    实际执行由 worker 消费 ``kind=fetch_all`` 任务。进度 / 状态 / 取消统一通过
-    ``/api/jobs/{job_id}`` 轮询。
-    """
-    import hashlib
-
-    from finboard_api.job_helpers import enqueue_job
-    from finboard_data import load_symbol_pool
-
-    config = load_symbol_pool(_SYMBOLS_FILE)
-    lookback = config.fetch_lookback_days if config.symbols else 0
-    pool_digest = hashlib.sha256(
-        ",".join(s.code for s in config.symbols).encode("utf-8")
-    ).hexdigest()[:16]
-    payload: dict[str, Any] = {
-        "lookback_days": lookback,
-        "symbol_pool_file": _SYMBOLS_FILE,
-    }
-    idempotency_key = f"fetch_all:{pool_digest}:{lookback}"
-    # fetch_all 不需要 DB session,但 enqueue_job 需要;用 request 上的 session_maker。
-    session_maker = getattr(request.app.state, "session_maker", None)
-    if session_maker is None:
-        raise HTTPException(
-            status_code=503,
-            detail="数据库会话未初始化,无法登记任务",
-        )
-    try:
-        async with session_maker() as session:
-            job = await enqueue_job(
-                session,
-                response,
-                kind="fetch_all",
-                queue="data",
-                idempotency_key=idempotency_key,
-                payload=payload,
-                requested_by="api:fetch_all",
-            )
-            await session.commit()
-    except BackgroundJobPersistenceConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return job
-
-
 @router.get("/symbols", response_model=SymbolPoolOut)
 async def get_symbol_pool() -> SymbolPoolOut:
     """获取标的池配置。"""
@@ -853,8 +823,9 @@ async def sync_universe(
 
     实际执行由 worker 消费 ``kind=data_sync`` 任务;上游 akshare 不可用会在 worker
     端映射为 ``failed(data_source_unavailable)``。进度 / 状态 / 取消统一通过
-    ``/api/jobs/{job_id}`` 轮询。同步范围含基准指数登记(issue #256):
-    ``discover_indices`` 受控登记表自动写入 ``instrument_type=index`` 行。
+    ``/api/jobs/{job_id}`` 轮询。同步范围含指数登记(issue #256;#394 起
+    ``discover_indices`` 走 tushare ``index_basic`` 全量,登记 A 股三所指数并
+    回填 base_date → list_date,``FINBOARD_TUSHARE_TOKEN`` 未配置时具名失败)。
     """
     from datetime import date
 
@@ -890,8 +861,18 @@ async def start_bulk_download(
 
     实际执行由独立 worker 进程(``finboard worker run``)消费 ``kind=bulk_download``
     任务。进度 / 状态 / 取消统一通过 ``/api/jobs/{job_id}`` 轮询。
+    ``symbols``(#347)可选 —— 失败标的子集重跑,与 market / instrument_type /
+    exchange / listing_boards 过滤叠加,交集为空执行器按 no_instruments 拒。
+    入队期 payload 契约校验(#347,#260 风格):非法 source / 坏日期 /
+    tushare x etf|futures 秒级 422,不再等 worker 执行期才失败。
     """
+    import hashlib
+
     from finboard_api.job_helpers import enqueue_job
+    from finboard_backtest.background_jobs.payload_contracts import (
+        PayloadContractError,
+        validate_job_payload,
+    )
 
     payload: dict[str, Any] = {
         "market": req.market,
@@ -901,10 +882,30 @@ async def start_bulk_download(
         "exchange": req.exchange,
         "listing_boards": list(req.listing_boards),
     }
+    # symbols 只在显式提供时进入 payload:缺省 payload 与 #347 之前逐字节
+    # 一致(payload_checksum 稳定,同 idempotency_key 重提交不因新增键冲突)。
+    symbols_digest = ""
+    if req.symbols:
+        deduped = list(dict.fromkeys(req.symbols))
+        payload["symbols"] = deduped
+        symbols_digest = hashlib.sha256(
+            ",".join(deduped).encode("utf-8")
+        ).hexdigest()[:16]
+    # 入队期契约(#347):REST 与 MCP 语义化端点共用同一校验函数。
+    try:
+        validate_job_payload("bulk_download", payload)
+    except PayloadContractError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"payload 契约校验失败[{exc.code}]: {exc.summary}",
+        ) from exc
     idempotency_key = (
         f"bulk_download:{req.market}:{req.source or 'auto'}:{req.start}:"
         f"{req.instrument_type or 'all'}"
     )
+    if symbols_digest:
+        # 子集重跑的幂等键带 symbols 摘要:不同子集不互相命中旧任务。
+        idempotency_key += f":sub:{symbols_digest}"
     try:
         job = await enqueue_job(
             session,
@@ -954,7 +955,7 @@ async def get_scheduler_config(request: Request) -> SchedulerConfigOut:
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=settings.data_provider if settings is not None else "akshare",
+        data_provider=settings.data_provider if settings is not None else "tushare",
     )
 
 
@@ -978,5 +979,5 @@ async def update_scheduler_config(
         download_lookback_days=cfg.get("download_lookback_days", 5),
         download_markets=cfg.get("download_markets", ["a_share"]),
         download_types=cfg.get("download_types", ["stock", "etf"]),
-        data_provider=settings.data_provider if settings is not None else "akshare",
+        data_provider=settings.data_provider if settings is not None else "tushare",
     )

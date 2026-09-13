@@ -35,6 +35,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapp
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -57,6 +58,7 @@ from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.contracts import (
     REBALANCE_FREQUENCIES,
     DecisionBundle,
+    DecisionSchedule,
     EquityPoint,
     FeatureValue,
     FrozenArtifactRef,
@@ -68,15 +70,19 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunReport,
     UniverseCandidate,
     execution_mode_for,
+    resolve_decision_schedule,
 )
 from finboard_backtest.research_run.failure_context import (
     attach_decision_load_context,
 )
 from finboard_backtest.research_run.frozen_loader import (
+    FactorSeriesProvider,
     FeatureSnapshotProvider,
     FrozenInputLoader,
     LoadedDecisionContext,
+    PriceFeaturePrecompute,
     ReleaseProviderFactory,
+    SuspensionView,
     SymbolCloseHistory,
 )
 from finboard_backtest.research_run.portfolio_pipeline import (
@@ -84,6 +90,7 @@ from finboard_backtest.research_run.portfolio_pipeline import (
     PortfolioPipelineAdapter,
 )
 from finboard_backtest.strategy_spec.contracts import (
+    ExecutionTiming,
     FeatureNode,
     FeatureOperator,
     ResearchStrategySpec,
@@ -100,6 +107,7 @@ from finboard_backtest.strategy_spec.universe_precheck import (
     RESEARCH_RELEASE_FEATURE_NAMES,
     STANDARD_PRICE_FEATURE_NAMES,
     explicit_symbol_domain,
+    is_benchmark_only_instrument,
     is_st_at_decision,
     research_release_derived_features,
     resolvable_feature_names,
@@ -607,9 +615,7 @@ async def _load_price_series(
             )
         return [float(bar.bar.close) for bar in bars]
 
-    results = await asyncio.gather(
-        *(_fetch(code) for code in pending), return_exceptions=True
-    )
+    results = await asyncio.gather(*(_fetch(code) for code in pending), return_exceptions=True)
     fetched: dict[str, list[float]] = {}
     for code, result in zip(pending, results, strict=True):
         if isinstance(result, BaseException):
@@ -673,11 +679,73 @@ async def _load_benchmark_curve(
     return ()
 
 
-async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
-    """读取发布交易日历(首个 ready 标的的已发布 bars,升序去重)。
+#: 交易日历采样并集的标的数上限(issue #334):对 ready 标的等距采样
+#: (含首尾)取 bar 日期并集,单标的(尤其代码排序恰好的第一只)的大段
+#: 数据缺失由其余采样标的补齐,不再偏移决策 / 成交时点。
+_TRADING_CALENDAR_SAMPLE_INSTRUMENTS = 8
 
-    交易日历是公开知识,用非 PIT 的 ``fetch_bars`` 读取发布全范围;决策与
-    成交发生在发布日期之后,不构成未来函数。
+#: 交易日历相邻间隔哨兵(issue #334):A 股市场级最长休市为春节 + 周末
+#: (实测约 10-11 个自然日,含 2020 年疫情延长休市);多标的并集日历仍
+#: 出现超过 14 个自然日的空洞只可能是发布数据整体缺口,fail-closed 拒绝
+#: 在其上推导决策 / 成交时点。
+_MAX_TRADING_CALENDAR_GAP_DAYS = 14
+
+
+def _spread_sample_indices(count: int, size: int) -> list[int]:
+    """在 ``[0, count)`` 内等距取 ``size`` 个下标(含首尾,去重升序)。"""
+    if count <= size:
+        return list(range(count))
+    return sorted({round(index * (count - 1) / (size - 1)) for index in range(size)})
+
+
+def _validate_calendar_contiguity(days: Sequence[date]) -> None:
+    """交易日历相邻间隔哨兵(issue #334):超市场最长休市即数据缺口。
+
+    正常长假(春节 + 周末 ≈ 10-11 天)不触发;多标的并集日历仍出现超过
+    :data:`_MAX_TRADING_CALENDAR_GAP_DAYS` 的空洞,说明发布数据整体大段
+    缺失(如 RR-26e5640 的 000001.SZ 缺 2020-07→2024-01),旧实现会在其上
+    静默跳洞,把全部决策的成交时点推到空洞之后的单一 bar。
+    """
+    for previous, following in pairwise(days):
+        gap = (following - previous).days
+        if gap > _MAX_TRADING_CALENDAR_GAP_DAYS:
+            logger.error(
+                "research_run.trading_calendar_gap",
+                previous=previous.isoformat(),
+                following=following.isoformat(),
+                gap_days=gap,
+            )
+            raise ValueError(
+                f"发布交易日历存在异常空洞:{previous.isoformat()} → "
+                f"{following.isoformat()}(间隔 {gap} 个自然日,超过 A 股最长"
+                f"休市约 {_MAX_TRADING_CALENDAR_GAP_DAYS} 天的合理范围)。"
+                "多标的并集仍出现大段缺失说明发布数据整体缺口,禁止在其上"
+                "推导决策/成交时点;请重跑 data_sync 补齐后重新发布"
+                "(发布审计按逐标的覆盖率会拦截缺口标的)。"
+            )
+
+
+#: 交易日历 DB 优先读取回调(issue #396):返回 trade_cal 全量交易日;
+#: ``None`` = DB 无日历或读取失败(回退发布 bar 并集推导,行为不变)。
+type TradingDaysLoader = Callable[[], Awaitable[list[date] | None]]
+
+
+async def _release_trading_days(
+    provider: FrozenReleaseProvider,
+    *,
+    trading_days_loader: TradingDaysLoader | None = None,
+) -> list[date]:
+    """读取发布交易日历(升序去重,fail-closed;issue #396 起 DB 优先)。
+
+    issue #396:``trade_cal`` 落库后,发布窗口内的市场交易日历优先于 bar
+    日期并集 —— 单标的(乃至采样标的集体)的数据洞不再偏移决策 / 成交
+    时点;DB 无日历或加载失败回退既有并集推导(信息缺失行为不变)。DB
+    日历按发布窗口过滤后同样过 :func:`_validate_calendar_contiguity` 间隙
+    哨兵(fail-closed 语义不放松)。
+
+    issue #334(fallback 路径):对 ready 标的等距采样(含首尾)取 bar
+    日期并集,单标的的大段数据缺失由其余采样标的补齐;逐标的读取失败降级
+    具名 warning 跳过(全部失败返回空,由调用方按既有语义报错)。
 
     issue #287:日历按 provider 进程内缓存(N 期回放此前每期重读完整
     parquet)。只对真实 ``FrozenReleaseProvider`` 启用 —— 其发布不可变、
@@ -698,38 +766,84 @@ async def _release_trading_days(provider: FrozenReleaseProvider) -> list[date]:
             )
             return cached
 
-    for instrument in provider.release.instruments:
-        if not instrument.ready:
+    if trading_days_loader is not None:
+        db_days = await trading_days_loader()
+        if db_days:
+            window = [
+                day
+                for day in sorted(db_days)
+                if provider.release.start_date <= day <= provider.release.end_date
+            ]
+            if window:
+                _validate_calendar_contiguity(window)
+                logger.debug(
+                    "research_run.trading_calendar_source",
+                    source="trade_cal",
+                    release_id=provider.release.release_id,
+                    days=len(window),
+                )
+                if cacheable:
+                    _TRADING_DAYS_CACHE[provider] = window
+                return window
+
+    ready = [item for item in provider.release.instruments if item.ready]
+    sample = [
+        ready[index]
+        for index in _spread_sample_indices(len(ready), _TRADING_CALENDAR_SAMPLE_INSTRUMENTS)
+    ]
+    days: set[date] = set()
+    for instrument in sample:
+        try:
+            bars = await provider.fetch_bars(
+                Symbol(
+                    code=instrument.code,
+                    market=_market_from_value(instrument.code),
+                ),
+                provider.release.period,
+                provider.release.start_date,
+                provider.release.end_date,
+                adjust=provider.release.adjustment,
+            )
+        except Exception:
+            # 采样单标的读取失败不掩盖其余标的 —— 并集只增不减,具名可见
+            # 后继续;全部失败由下方空日历的既有调用方语义收口。
+            logger.warning(
+                "research_run.trading_calendar_instrument_unreadable",
+                symbol=instrument.code,
+                exc_info=True,
+            )
             continue
-        bars = await provider.fetch_bars(
-            Symbol(
-                code=instrument.code,
-                market=_market_from_value(instrument.code),
-            ),
-            provider.release.period,
-            provider.release.start_date,
-            provider.release.end_date,
-            adjust=provider.release.adjustment,
-        )
-        if bars:
-            days = sorted({bar.timestamp.date() for bar in bars})
-            if cacheable:
-                _TRADING_DAYS_CACHE[provider] = days
-            return days
-    return []
+        days.update(bar.timestamp.date() for bar in bars)
+    calendar = sorted(days)
+    _validate_calendar_contiguity(calendar)
+    if calendar and cacheable:
+        _TRADING_DAYS_CACHE[provider] = calendar
+    return calendar
 
 
 async def _next_execution_at(
     provider: FrozenReleaseProvider,
     decision_at: datetime,
+    *,
+    timing: ExecutionTiming | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
 ) -> datetime:
-    """推断决策时点之后最近的交易日(发布交易日历,超限 fail-closed)。"""
-    calendar = await _release_trading_days(provider)
+    """推断决策时点之后最近的交易日(#396 起 DB 优先,超限 fail-closed)。
+
+    issue #336:成交时间戳按执行假设分派——``next_open`` 为该日 **09:30**
+    (A 股连续竞价首时点,开盘成交),``next_close`` 为该日 **15:00**(收盘)。
+    此前恒为 15:00,与规格声明的 ``timing=next_open`` 不符。``timing`` 缺省
+    保持 15:00(兼容既有调用方)。
+    """
+    calendar = await _release_trading_days(
+        provider, trading_days_loader=trading_days_loader
+    )
     if not calendar:
         raise ValueError("发布无可用行情,无法推断成交交易日")
+    fill_time = time(9, 30) if timing is ExecutionTiming.NEXT_OPEN else time(15, 0)
     for day in calendar:
         if day > decision_at.date():
-            return datetime.combine(day, time(15, 0), tzinfo=decision_at.tzinfo)
+            return datetime.combine(day, fill_time, tzinfo=decision_at.tzinfo)
     raise ValueError(
         f"决策时点 {decision_at.date().isoformat()} 之后无可用成交日"
         f"(发布交易日历止于 {calendar[-1].isoformat()})"
@@ -773,14 +887,21 @@ def _estimate_covariance(
     )
 
 
-def _rebalance_frequency(manifest: ResearchRunManifest) -> str | None:
-    """读取 ``parameters.rebalance_frequency``,非法值 fail-closed。"""
-    value = manifest.parameters.get("rebalance_frequency")
-    if value is None:
-        return None
-    if not isinstance(value, str) or value not in REBALANCE_FREQUENCIES:
-        raise ValueError(f"rebalance_frequency 仅支持 {sorted(REBALANCE_FREQUENCIES)}: {value!r}")
-    return value
+def _declared_multi_period(parameters: Mapping[str, object]) -> str | None:
+    """读取决策日历声明并渲染入队报错用的短标签;single_shot 返回 ``None``。
+
+    issue #361:multi_period 的判定口径 = 声明 ``decision_schedule``(含
+    custom)或 legacy ``rebalance_frequency``(daily/weekly/monthly/
+    quarterly)。非法值在这里按未声明处理(入队侧 schema 先拒,执行期由
+    ``resolve_decision_schedule`` fail-closed),与 ``execution_mode_for``
+    的容错语义一致。
+    """
+    if isinstance(parameters.get("decision_schedule"), Mapping):
+        return "decision_schedule=已声明"
+    frequency = parameters.get("rebalance_frequency")
+    if isinstance(frequency, str) and frequency in REBALANCE_FREQUENCIES:
+        return f"rebalance_frequency={frequency}"
+    return None
 
 
 def single_shot_snapshot_gate_error(
@@ -794,43 +915,46 @@ def single_shot_snapshot_gate_error(
 
     REST 与 MCP 入队共用本口径(报错文案单一来源,不双份漂移):
 
-    * multi_period(显式声明 ``rebalance_frequency=monthly|quarterly``;非法值
-      已被 ``ResearchRunQueueIn`` schema 在入队时拒绝)不要求预建快照 ——
-      价格因子按发布每日重算,基本面因子仍 PIT 取自冻结快照/研究数据发布;
-    * 未声明频率即 single_shot,其决策时点**只能**来自冻结因子快照:依赖
+    * multi_period(显式声明 ``decision_schedule``(含 custom,issue #361)
+      或 legacy ``rebalance_frequency``;非法值已被 ``ResearchRunQueueIn``
+      schema 在入队时拒绝)不要求预建快照 —— 价格因子按发布每期重算,
+      基本面因子仍 PIT 取自冻结快照/研究数据发布;
+    * 未声明日历即 single_shot,其决策时点**只能**来自冻结因子快照:依赖
       因子输入或可执行(multi_factor)的策略缺快照时入队秒级拒绝,报错附
       ``execution_mode`` 与缺失因子源,不再等执行期才失败;
     * 其余 kind 由 worker 报 not_implemented,这里不拦截以免遮蔽真正根因。
     """
-    frequency = parameters.get("rebalance_frequency")
-    if isinstance(frequency, str) and frequency in REBALANCE_FREQUENCIES:
+    if _declared_multi_period(parameters) is not None:
         return None
     if frozen_snapshot_count > 0:
         return None
     sources = sorted(required_factor_sources)
     if sources:
         return (
-            "execution_mode=single_shot(未声明 parameters.rebalance_frequency):"
+            "execution_mode=single_shot(未声明 parameters.decision_schedule):"
             f"策略依赖因子输入 {sources} 但未冻结 factor_snapshot_ids。"
             "请提供覆盖上述因子源的特征快照,或显式声明 "
-            "rebalance_frequency=monthly|quarterly 走多期回放"
-            "(多期仅价格因子按发布每日重算,基本面因子仍需冻结快照/研究数据发布提供)"
+            "parameters.decision_schedule(或 legacy rebalance_frequency="
+            f"{sorted(REBALANCE_FREQUENCIES)})走多期回放"
+            "(多期仅价格因子按发布每期重算,基本面因子仍需冻结快照/研究数据发布提供)"
         )
     if strategy_kind in SIGNAL_ENGINE_STRATEGY_KINDS:
         return (
-            "execution_mode=single_shot(未声明 parameters.rebalance_frequency):"
+            "execution_mode=single_shot(未声明 parameters.decision_schedule):"
             "该路径的决策时点只能来自冻结因子快照,但 factor_snapshot_ids 为空。"
-            "请冻结至少一份特征快照,或声明 rebalance_frequency=monthly|quarterly"
+            "请冻结至少一份特征快照,或声明 parameters.decision_schedule"
+            f"(或 legacy rebalance_frequency={sorted(REBALANCE_FREQUENCIES)})"
             " 走多期回放"
         )
     if strategy_kind == "user_code":
         # issue #218:user_code 的 decide 数据面来自冻结发布,决策时点与
         # 信号引擎同口径 —— single_shot 取快照 decision_at,缺快照即无决策日。
         return (
-            "execution_mode=single_shot(未声明 parameters.rebalance_frequency):"
+            "execution_mode=single_shot(未声明 parameters.decision_schedule):"
             "user_code 策略该路径的决策时点只能来自冻结因子快照,但 "
-            "factor_snapshot_ids 为空。请声明 rebalance_frequency="
-            "monthly|quarterly 走多期回放(decide 每期从冻结发布重算),"
+            "factor_snapshot_ids 为空。请声明 parameters.decision_schedule"
+            f"(或 legacy rebalance_frequency={sorted(REBALANCE_FREQUENCIES)})"
+            "走多期回放(decide 每期从冻结发布重算),"
             "或冻结至少一份特征快照以提供决策时点"
         )
     return None
@@ -864,15 +988,16 @@ def multi_period_feature_gate_error(
     """入队期 multi_period 特征可用性校验:拒绝原因或 None(放行,issue #253)。
 
     REST 与 MCP 入队共用本口径(#186/#203 风格):multi_period(显式声明
+    ``decision_schedule``(issue #361,含 custom)或 legacy
     ``rebalance_frequency``)的财务 / 自定义因子只能来自 attached 研究数据
     发布或冻结快照,此前「identity 节点缺少数据源」拖到执行期才爆 —— run
     已排队、worker 已开跑。本门控在入队秒级判定:规格 identity 源 ⊆ 多期
     可解析集合,否则具名缺失特征与所需发布 kind。single_shot 不受影响
     (决策时点与特征全部来自快照,由 :func:`single_shot_snapshot_gate_error`
-    把关);非法频率值由 ``ResearchRunQueueIn`` schema 拒绝,这里不重复拦。
+    把关);非法声明值由 ``ResearchRunQueueIn`` schema 拒绝,这里不重复拦。
     """
-    frequency = parameters.get("rebalance_frequency")
-    if not (isinstance(frequency, str) and frequency in REBALANCE_FREQUENCIES):
+    declared = _declared_multi_period(parameters)
+    if declared is None:
         return None
     resolvable = _multi_period_resolvable_features(
         research_release_kinds=research_release_kinds,
@@ -899,11 +1024,9 @@ def multi_period_feature_gate_error(
             f"({', '.join(sorted(STANDARD_PRICE_FEATURE_NAMES))}),close 来自"
             "行情;请改用标准价格特征或移除该节点"
         )
-    attached = sorted(
-        str(getattr(kind, "value", kind)) for kind in research_release_kinds
-    )
+    attached = sorted(str(getattr(kind, "value", kind)) for kind in research_release_kinds)
     return (
-        f"execution_mode=multi_period(已声明 rebalance_frequency={frequency}):"
+        f"execution_mode=multi_period(已声明 {declared}):"
         f"策略引用的特征 {sorted(missing)} 无法由当前冻结发布派生,多期回放"
         "执行期将报「identity 节点缺少数据源」。"
         f"缺失特征所需数据源: {'; '.join(lines)}。"
@@ -921,29 +1044,217 @@ def _period_bucket(day: date, frequency: str) -> tuple[int, int]:
     raise ValueError(f"未知调仓频率: {frequency}")
 
 
-async def _derive_rebalance_decision_days(
-    provider: FrozenReleaseProvider,
-    frequency: str,
-) -> list[tuple[datetime, str | None]]:
-    """从发布交易日历推导多期回放的决策时点。
+def _derive_decision_dates(
+    trading_days: Sequence[date],
+    schedule: DecisionSchedule,
+) -> list[date]:
+    """从发布交易日历推导决策日(issue #361 泛化 #183 的 monthly/quarterly)。
 
-    每期(月 / 季)取该期最后一个交易日收盘后 15:00 决策,``factor_snapshot_id``
-    恒为 ``None``(决策日与 features 由管线按冻结发布重算,不绑定单一快照)。
-    成交发生在决策后的下一交易日,因此发布末尾没有后续交易日的期末不产生
+    纯函数(确定性重放的单一事实来源,manifest 冻结 schedule 原文):
+
+    * ``daily`` —— 每个交易日;
+    * ``weekly`` —— 每个 ISO 周的**最后一个交易日**(周内跳过周末/休市,
+      交易日历本身已排除非交易日);
+    * ``monthly`` / ``quarterly`` —— 每月 / 每季最后一个交易日(#183 既有
+      语义,逐值不变);
+    * ``custom`` —— ``schedule.dates`` 原样(入队期已校验 ⊆ 发布交易日且
+      升序去重;此处对不在交易日历的日期 fail-closed,防御手工构造的
+      manifest)。
+
+    所有 kind 统一应用「决策日之后必须存在下一交易日」过滤:成交发生在
+    决策后的下一交易日,发布末尾交易日之后的期次无法成交,直接排除。
+    """
+    days = sorted(set(trading_days))
+    if not days:
+        return []
+    if schedule.kind == "daily":
+        selected = days
+    elif schedule.kind == "weekly":
+        week_ends: dict[tuple[int, int], date] = {}
+        for day in days:
+            iso = day.isocalendar()
+            week_ends[(iso[0], iso[1])] = day
+        selected = sorted(week_ends.values())
+    elif schedule.kind in ("monthly", "quarterly"):
+        period_ends: dict[tuple[int, int], date] = {}
+        for day in days:
+            period_ends[_period_bucket(day, schedule.kind)] = day
+        selected = sorted(period_ends.values())
+    else:  # custom
+        calendar = set(days)
+        invalid = [day for day in schedule.dates if day not in calendar]
+        if invalid:
+            preview = ", ".join(day.isoformat() for day in invalid[:5])
+            raise ValueError(
+                "decision_schedule.custom 声明的日期不在发布交易日历中"
+                f"(首个 {len(invalid)} 个: {preview})。custom dates 必须"
+                "⊆ 发布交易日且为有效交易日;请修正 decision_schedule.dates"
+                " 后重新入队"
+            )
+        selected = list(schedule.dates)
+    last_day = days[-1]
+    return [day for day in selected if day < last_day]
+
+
+async def _derive_schedule_decision_days(
+    provider: FrozenReleaseProvider,
+    schedule: DecisionSchedule,
+    *,
+    trading_days_loader: TradingDaysLoader | None = None,
+) -> list[tuple[datetime, str | None]]:
+    """从发布交易日历推导多期回放的决策时点(issue #361 泛化)。
+
+    决策日推导全部委托 :func:`_derive_decision_dates`(四频 + custom 同一
+    实现);每个决策日收盘后 15:00 决策,``factor_snapshot_id`` 恒为
+    ``None``(决策日与 features 由管线按冻结发布重算,不绑定单一快照)。
+    成交发生在决策后的下一交易日,因此发布末尾没有后续交易日的期次不产生
     决策(该期无法成交,fail-closed 语义下直接排除)。
     """
-    calendar = await _release_trading_days(provider)
+    calendar = await _release_trading_days(
+        provider, trading_days_loader=trading_days_loader
+    )
     if not calendar:
         raise ValueError("发布无可用行情,无法推导多期决策时点")
-    period_ends: dict[tuple[int, int], date] = {}
-    for day in calendar:
-        period_ends[_period_bucket(day, frequency)] = day
-    decisions: list[tuple[datetime, str | None]] = []
-    for day in sorted(period_ends.values()):
-        # 期末之后必须存在下一交易日才能执行成交。
-        if any(item > day for item in calendar):
-            decisions.append((datetime.combine(day, time(15, 0), tzinfo=UTC), None))
-    return decisions
+    return [
+        (datetime.combine(day, time(15, 0), tzinfo=UTC), None)
+        for day in _derive_decision_dates(calendar, schedule)
+    ]
+
+
+async def enqueue_trading_days(
+    *,
+    bars_release_id: str,
+    bars_release_checksum: str,
+    release_root: str | Path,
+    trading_days_loader: TradingDaysLoader | None = None,
+) -> list[date]:
+    """入队期读取 bars 主发布交易日历(issue #361,REST+MCP 共用)。
+
+    复用 #334 的多点采样并集日历 + 间隙哨兵(``_release_trading_days``);
+    ``trading_days_loader``(#396,可选)提供 trade_cal DB 日历时 DB 优先。
+    供 custom dates ⊆ 发布交易日校验与 u_ 因子 series 覆盖检查的决策日推
+    导消费。发布文件不可读 / 校验失败原样上抛,由调用方渲染入队错误
+    (不吞错)。注意:未提供 loader 的调用方(现状)走 bar 并集 —— 并集
+    ⊆ 市场日历,校验方向保守(入队通过的日期执行期必然存在)。
+    """
+    from finboard_data.releases import FrozenReleaseProvider
+
+    provider = FrozenReleaseProvider(
+        release_root=Path(release_root),
+        release_id=bars_release_id,
+        expected_checksum=bars_release_checksum,
+    )
+    return await _release_trading_days(
+        provider, trading_days_loader=trading_days_loader
+    )
+
+
+def decision_schedule_dates_gate_error(
+    schedule: DecisionSchedule,
+    trading_days: Sequence[date],
+) -> str | None:
+    """custom dates ⊆ 发布交易日校验(入队期,REST+MCP 共用,issue #361)。"""
+    if schedule.kind != "custom":
+        return None
+    calendar = set(trading_days)
+    missing = [day for day in schedule.dates if day not in calendar]
+    if not missing:
+        return None
+    preview = ", ".join(day.isoformat() for day in missing[:10])
+    more = f"(共 {len(missing)} 天,仅列前 10)" if len(missing) > 10 else ""
+    return (
+        f"decision_schedule.custom 声明的日期不在发布交易日历中"
+        f"(decision_schedule_dates_not_trading_days):{more} {preview}。"
+        "custom dates 必须是发布区间内的有效交易日(升序去重已在 schema "
+        "校验);请对照发布交易日历修正 dates 后重新入队"
+    )
+
+
+def enqueue_decision_dates(
+    *,
+    parameters: Mapping[str, object],
+    trading_days: Sequence[date],
+) -> list[date]:
+    """入队期按声明推导决策日(issue #361,供 u_ 因子 series 覆盖检查)。
+
+    与执行期 :func:`_derive_schedule_decision_days` 消费同一推导实现
+    (:func:`_derive_decision_dates`),single_shot / 未声明日历返回空列表。
+    非法声明值抛 ``ValueError``(入队侧 schema 先行拦截,此处防御)。
+    """
+    schedule = resolve_decision_schedule(parameters)
+    if schedule is None:
+        return []
+    return _derive_decision_dates(trading_days, schedule)
+
+
+async def _earliest_feasible_decision_start(
+    provider: FrozenReleaseProvider,
+) -> date | None:
+    """动量类价格特征可用的最早决策日(#368 方案 A,best effort)。
+
+    判定与 :func:`build_price_feature_snapshot` 的不足判定同源:决策日须为
+    发布交易日历上第 ``DEFAULT_MOMENTUM_LOOKBACK + 1`` 个交易日(0 基下标
+    ``>=`` lookback;不足回看时全部标的都算不出动量,观测为空即被拒绝)。
+    日历读取失败返回 None——错误提示降级为原文,不掩盖原始异常。
+    """
+    from finboard_backtest.factor_lab import DEFAULT_MOMENTUM_LOOKBACK
+
+    try:
+        days = await _release_trading_days(provider)
+    except Exception:
+        return None
+    if len(days) > DEFAULT_MOMENTUM_LOOKBACK:
+        return days[DEFAULT_MOMENTUM_LOOKBACK]
+    return None
+
+
+def _benchmark_only_symbols(
+    provider: FrozenReleaseProvider,
+    exempt: frozenset[str] = frozenset(),
+) -> frozenset[str]:
+    """发布中基准专用(index / futures 主连)标的符号集(issue #380)。
+
+    与候选池(``_build_candidates_and_lots``)共用 :func:`is_benchmark_only_instrument`
+    同一谓词,两阶段口径一致;``explicit_symbols`` 显式声明的标的豁免
+    (#254/#299 声明域优先——显式引用如指数动量特征是用户明确意图,
+    但其不可撮合属性不变,依旧进不了候选池与目标仓位)。
+    """
+    return frozenset(
+        inst.code
+        for inst in provider.release.instruments
+        if inst.code not in exempt and is_benchmark_only_instrument(inst)
+    )
+
+
+def _exclude_benchmark_only_features(
+    features: tuple[FeatureValue, ...],
+    provider: FrozenReleaseProvider,
+    manifest: ResearchRunManifest,
+) -> tuple[FeatureValue, ...]:
+    """把信号引擎特征截面收窄到发布可交易域(issue #380)。
+
+    基准 / 主连按设计「不进候选池、不可撮合」,其特征观测进截面只会污染
+    rank_top / rank_bottom 的排名分母(universe 阶段已排除,此前 feature /
+    signal 阶段没同步,截面从 40 涨到 51 后 rank 边界滑动曾把无信号持仓经
+    再平衡带保留进目标仓位触发 hard_constraint_rejected)。逐期重算路径已在
+    :func:`_compute_period_features` 源头收窄,这里对冻结快照 / 研究发布观测
+    兜底(single_shot 与 multi_period 统一)。只影响信号引擎消费面;后台
+    快照任务仍忠实记录发布全量观测,存量快照 checksum 零漂移。
+    """
+    exempt = frozenset(manifest.strategy_spec.universe.explicit_symbols or ())
+    banned = _benchmark_only_symbols(provider, exempt)
+    if not banned:
+        return features
+    kept = tuple(item for item in features if item.symbol not in banned)
+    excluded = sorted({item.symbol for item in features} & banned)
+    if excluded:
+        logger.debug(
+            "research_run.benchmark_features_excluded",
+            count=len(excluded),
+            symbols=excluded[:20],
+            message="基准专用标的特征观测不进信号排名截面",
+        )
+    return kept
 
 
 async def _compute_period_features(
@@ -953,8 +1264,15 @@ async def _compute_period_features(
     release_id: str,
     *,
     process_pool: PriceFeatureProcessPool | None = None,
+    close_histories: Mapping[str, SymbolCloseHistory | None] | None = None,
+    price_precompute: PriceFeaturePrecompute | None = None,
 ) -> tuple[FeatureValue, ...]:
     """按单个决策时点从冻结发布重算价格特征(issue #183)。
+
+    ``close_histories``(#450 追续)非空时价格特征直接从 close 矩阵切片
+    计算(:func:`build_price_feature_snapshot_from_close_matrix`),跳过进程
+    池逐标的整文件重读;矩阵缺失标的在函数内回退 provider 读取,产出与池
+    路径逐值一致。
 
     复用 ``build_price_feature_snapshot``(与 feature_snapshot 任务同一实现,
     避免双源漂移):PIT 门控读取各标的收盘价,计算 momentum / volatility_Nd /
@@ -970,18 +1288,68 @@ async def _compute_period_features(
     """
     from concurrent.futures.process import BrokenProcessPool
 
-    from finboard_backtest.factor_lab import FactorAnalysisError, build_price_feature_snapshot
+    from finboard_backtest.factor_lab import (
+        DEFAULT_MOMENTUM_LOOKBACK,
+        FactorAnalysisError,
+        build_price_feature_snapshot,
+    )
+    from finboard_backtest.research_run.frozen_loader import (
+        build_price_feature_snapshot_from_close_matrix,
+    )
 
-    def _data_error(exc: FactorAnalysisError) -> ValueError:
+    async def _data_error(exc: FactorAnalysisError) -> ValueError:
+        # issue #368 方案 A:保持 fail-closed,报错具名最早可行决策起点
+        # (best effort,日历读不出时降级为原文),拒绝语义零变化。
+        earliest = await _earliest_feasible_decision_start(provider)
+        hint = ""
+        if earliest is not None:
+            hint = (
+                f";动量类价格特征需发布内前 {DEFAULT_MOMENTUM_LOOKBACK + 1} "
+                f"个交易日收盘,最早可行决策起点 {earliest.isoformat()}"
+                "(请将决策窗口起点后移到该日或之后)"
+            )
         return ValueError(
             f"决策时点 {decision_at.date().isoformat()} 无法从发布重算价格特征"
-            f"(通常发布起点历史不足): {exc}"
+            f"(通常发布起点历史不足): {exc}{hint}"
         )
 
     explicit_symbols = manifest.strategy_spec.universe.explicit_symbols
-    symbols_argument: tuple[str, ...] | None = (
-        tuple(explicit_symbols) if explicit_symbols else None
-    )
+    if explicit_symbols:
+        symbols_argument: tuple[str, ...] | None = tuple(explicit_symbols)
+    else:
+        # issue #380:未声明 explicit_symbols 时特征截面收窄到发布可交易域——
+        # 基准 / 主连(index/futures)不进候选池、不可撮合,其价格特征进截面
+        # 只会污染 rank_top/rank_bottom 的排名分母;与候选池
+        # (_build_candidates_and_lots)同一谓词,universe 与 feature/signal
+        # 两阶段口径对齐。
+        symbols_argument = tuple(
+            inst.code
+            for inst in provider.release.instruments
+            if not is_benchmark_only_instrument(inst)
+        )
+    if price_precompute is not None:
+        # issue #450 追续:预计算查表 + FeatureValue 构造(逐值等值于快照
+        # 路径;顺序同为 scoped 标的序 x 特征构造序)。
+        values = price_precompute.feature_values(decision_at, release_id)
+        if values:
+            return values
+        # 空集回落原路径:沿用「数据不足」的具名报错语义(fail-closed 不变)。
+    if close_histories:
+        # issue #450 追续:close 矩阵已构建时直接切片算价格特征,跳过进程池
+        # 逐标的整文件重读(全市场 x 多期的主要加载成本);矩阵缺失标的在
+        # 内部回退 provider 读取,产出与池路径逐值一致。
+        assert symbols_argument is not None  # 上述两分支必赋具体元组
+        try:
+            matrix_snapshot = await build_price_feature_snapshot_from_close_matrix(
+                histories=close_histories,
+                provider=provider,
+                decision_at=decision_at,
+                code_version=manifest.code_version,
+                symbols=symbols_argument,
+            )
+        except FactorAnalysisError as exc:
+            raise await _data_error(exc) from exc
+        return _period_feature_values(matrix_snapshot, release_id)
     if process_pool is not None and not process_pool.broken:
         try:
             pool_snapshot = await build_price_feature_snapshot(
@@ -1006,7 +1374,7 @@ async def _compute_period_features(
                 message="常驻特征计算进程池损坏,本期及后续期降级为进程内协程路径重算",
             )
         except FactorAnalysisError as exc:
-            raise _data_error(exc) from exc
+            raise await _data_error(exc) from exc
         else:
             return _period_feature_values(pool_snapshot, release_id)
     try:
@@ -1017,7 +1385,7 @@ async def _compute_period_features(
             symbols=symbols_argument,
         )
     except FactorAnalysisError as exc:
-        raise _data_error(exc) from exc
+        raise await _data_error(exc) from exc
     return _period_feature_values(snapshot, release_id)
 
 
@@ -1025,17 +1393,37 @@ def _period_feature_values(
     snapshot: FeatureSnapshot,
     release_id: str,
 ) -> tuple[FeatureValue, ...]:
-    """把价格特征快照观测映射为 ``FeatureValue``(两种执行路径共用,零漂移)。"""
-    return tuple(
-        FeatureValue(
-            symbol=observation.symbol,
-            feature_id=observation.feature_name,
-            value=observation.value,
-            source_artifact_ids=(release_id,),
-            available_at=observation.available_at,
+    """把价格特征快照观测映射为 ``FeatureValue``(两种执行路径共用,零漂移)。
+
+    issue #454(对象税预构建):``source_artifact_ids`` 全期共享同一元组实例、
+    值相等的 ``available_at`` 共享同一 datetime 实例(键含 tzinfo,保证时区
+    表示逐位一致)——全市场 75 期 x ~15k 观测 ≈ 110 万个 FeatureValue,此前
+    每实例各配一个 ``(release_id,)`` 元组与各自的 post-pickle datetime 副本;
+    共享后字段逐值相等(:data:`FeatureValue` 契约与校验不变,外部构造路径
+    照常逐实例校验),内存与纯 Python 构造开销同步下降。
+    """
+    artifact_ids = (release_id,)
+    # (tzinfo, value) → 共享实例;datetime 相等对跨时区同瞬间也为 True,
+    # 键带 tzinfo 避免把 +08:00 实例替换成 UTC 实例这类表示漂移。
+    shared_available_at: dict[tuple[object, datetime], datetime] = {}
+    values: list[FeatureValue] = []
+    for observation in snapshot.observations:
+        available_at = observation.available_at
+        key = (available_at.tzinfo, available_at)
+        shared = shared_available_at.get(key)
+        if shared is None:
+            shared_available_at[key] = available_at
+            shared = available_at
+        values.append(
+            FeatureValue(
+                symbol=observation.symbol,
+                feature_id=observation.feature_name,
+                value=observation.value,
+                source_artifact_ids=artifact_ids,
+                available_at=shared,
+            )
         )
-        for observation in snapshot.observations
-    )
+    return tuple(values)
 
 
 async def _market_close_map(
@@ -1063,9 +1451,7 @@ async def _market_close_map(
             )
         return {bar.timestamp.date(): bar.close for bar in bars}
 
-    results = await asyncio.gather(
-        *(_fetch(code) for code in symbols), return_exceptions=True
-    )
+    results = await asyncio.gather(*(_fetch(code) for code in symbols), return_exceptions=True)
     fetched: dict[str, dict[date, Decimal]] = {}
     for code, result in zip(symbols, results, strict=True):
         if isinstance(result, BaseException):
@@ -1142,10 +1528,14 @@ def _spec_universe_candidates(
 ) -> tuple[SpecUniverseCandidate, ...]:
     """把发布标的映射为 ``UniverseSpec`` 候选(近似字段见函数体)。
 
-    字段近似:listing_days 来自 list_date;price 来自决策日 close;停牌按
-    发布快照静态近似(suspended_sessions);``is_st`` 按发布 instruments 的
-    ``name_history`` 区间取决策日名称 PIT 判定(issue #213,无覆盖区间回退
-    当前名称近似);``market_cap`` 来自 daily_metrics 的特征观测。
+    字段近似:listing_days 来自 list_date;price 来自决策日 close;``is_st``
+    按发布 instruments 的 ``name_history`` 区间取决策日名称 PIT 判定
+    (issue #213,无覆盖区间回退当前名称近似);``market_cap`` 来自
+    daily_metrics 的特征观测。
+
+    issue #396:``suspended`` 在发布快照静态近似(``suspended_sessions``)
+    之上叠加决策日全天停牌标注(research_suspensions,PIT=当日)—— 决策
+    日停牌的标的标注不可撮合;无停牌数据时维持静态近似(信息缺失不阻塞)。
 
     ``instruments`` 由调用方按 ``explicit_symbols`` 收窄(issue #254)。
     """
@@ -1174,10 +1564,11 @@ def _spec_universe_candidates(
                     float(average_amount) if isinstance(average_amount, (int, float)) else None
                 ),
                 price=price,
-                market_cap=(
-                    float(market_cap) if isinstance(market_cap, (int, float)) else None
+                market_cap=(float(market_cap) if isinstance(market_cap, (int, float)) else None),
+                suspended=(
+                    instrument.suspended_sessions > 0
+                    or instrument.code in context.decision_suspended
                 ),
-                suspended=instrument.suspended_sessions > 0,
                 delisted=delisted,
                 is_st=is_st_at_decision(instrument, decision_date),
                 data_completeness=float(instrument.coverage_pct),
@@ -1199,9 +1590,7 @@ def _apply_universe_filter(
     标的(与静态预检共用 ``explicit_symbol_domain``,两边一致);声明但
     发布中缺失的标的随降级 warning 具名声明,不静默。
     """
-    domain, missing_explicit = explicit_symbol_domain(
-        spec.universe, provider.release.instruments
-    )
+    domain, missing_explicit = explicit_symbol_domain(spec.universe, provider.release.instruments)
     if missing_explicit:
         logger.warning(
             "research_run.universe_explicit_symbol_missing",
@@ -1355,6 +1744,48 @@ _DECISION_LOAD_CHUNK = 4
 LoadChunkProbe = Callable[[int, int], Awaitable[None]]
 
 
+def build_run_cancel_probe(
+    session_maker: async_sessionmaker[Any],
+    run_id: str,
+) -> Callable[[], Awaitable[None]]:
+    """构造预计算段取消探针(#450 追续):只轮询不写进度。
+
+    与 :func:`build_run_interrupt_probe` 同一判定(run 非 RUNNING /
+    job cancel_requested 即抛 :class:`ResearchRunInterruptedError`),但
+    **不写任何 phase/进度**——供 :func:`_make_precompute_ticker` 在预计算
+    打点步长上调用,补齐预建段(3-5 分钟)的取消检查空白区。DB 会话按次
+    开关,毫秒级只读查询。
+    """
+
+    async def _probe() -> None:
+        from finboard_persistence import (
+            BackgroundJobRepository,
+            ResearchRunRepository,
+        )
+
+        async with session_maker() as session:
+            row = await ResearchRunRepository(session).get(run_id)
+            if row is None:
+                raise ResearchRunInterruptedError(f"运行记录在加载期消失: {run_id}")
+            if row.status == "cancelled":
+                raise ResearchRunInterruptedError(f"运行已被取消(cancelled),中止加载: {run_id}")
+            if row.status != "running":
+                raise ResearchRunInterruptedError(
+                    f"运行状态已变为 {row.status}(外部打断),中止加载: {run_id}"
+                )
+            job_id = row.job_id
+            job_status: str | None = None
+            if job_id is not None:
+                job_row = await BackgroundJobRepository(session).get(job_id)
+                job_status = None if job_row is None else job_row.status
+        if job_status == "cancel_requested":
+            raise ResearchRunInterruptedError(
+                f"后台任务被请求取消(cancel_requested),中止加载: {run_id}"
+            )
+
+    return _probe
+
+
 def build_run_interrupt_probe(
     session_maker: async_sessionmaker[Any],
     run_id: str,
@@ -1382,9 +1813,7 @@ def build_run_interrupt_probe(
             if row is None:
                 raise ResearchRunInterruptedError(f"运行记录在加载期消失: {run_id}")
             if row.status == "cancelled":
-                raise ResearchRunInterruptedError(
-                    f"运行已被取消(cancelled),中止加载: {run_id}"
-                )
+                raise ResearchRunInterruptedError(f"运行已被取消(cancelled),中止加载: {run_id}")
             if row.status != "running":
                 raise ResearchRunInterruptedError(
                     f"运行状态已变为 {row.status}(外部打断),中止加载: {run_id}"
@@ -1416,6 +1845,45 @@ def build_run_interrupt_probe(
                 await repo.checkpoint()
 
     return _probe
+
+
+#: 预计算段进度上报器(issue #450):phase 文本 → None。与 LoadChunkProbe
+#: 同源同库写入约定(见 :func:`build_run_phase_reporter`),但只写 phase 文本、
+#: 不做 run status / cancel 轮询 —— 打断判定仍由分块边界的探针承担,二者
+#: 分开传参使既有 #306/#308 探针调用序列契约不受预计算帧影响。
+LoadPhaseReporter = Callable[[str], Awaitable[None]]
+
+
+def build_run_phase_reporter(
+    session_maker: async_sessionmaker[Any],
+    run_id: str,
+) -> LoadPhaseReporter:
+    """构造预计算段 phase 文本上报器(issue #450;与 #306 探针同库写入约定)。
+
+    逐条解析 run → job_id 后把任意 phase 文本写入 background_jobs(单条
+    UPDATE,失败静默 —— 纯可观测性不阻断加载);done/total 数值列不动
+    (#308 口径),``update_progress`` 顺带刷新 heartbeat_at,预计算长段
+    (close / daily 矩阵预建)不再是无帧盲区。
+    """
+
+    async def _report(phase: str) -> None:
+        from finboard_persistence import (
+            BackgroundJobRepository,
+            ResearchRunRepository,
+        )
+
+        async with session_maker() as session:
+            row = await ResearchRunRepository(session).get(run_id)
+            job_id = None if row is None else row.job_id
+        if job_id is None:
+            return
+        with contextlib.suppress(Exception):
+            async with session_maker() as session:
+                repo = BackgroundJobRepository(session)
+                await repo.update_progress(job_id, done=0, total=None, phase=phase)
+                await repo.checkpoint()
+
+    return _report
 
 
 async def _start_period_feature_pool(
@@ -1464,13 +1932,19 @@ async def build_decision_load_contexts(
     snapshot_provider: FeatureSnapshotProvider,
     process_workers: int = 0,
     chunk_probe: LoadChunkProbe | None = None,
+    series_provider: FactorSeriesProvider | None = None,
+    suspension_view: SuspensionView | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
+    precompute_phase_reporter: LoadPhaseReporter | None = None,
+    precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[DecisionLoadContext, ...]:
     """按执行模式加载全部决策的机械上下文(不含信号,issue #218)。
 
     single_shot:决策日序列 = manifest.factor_snapshots 的 ``decision_at``
-    排序去重;multi_period:决策日由 ``parameters.rebalance_frequency``
-    按冻结发布交易日历推导,每期重算 price features 并合并冻结快照 PIT
-    观测。universe 过滤 / 空池根因 / 降级 warning 语义与信号引擎一致。
+    排序去重;multi_period:决策日由 ``parameters.decision_schedule``
+    (issue #361,含 legacy ``rebalance_frequency`` 映射)按冻结发布交易日历
+    推导,每期重算 price features 并合并冻结快照 PIT 观测。universe 过滤 /
+    空池根因 / 降级 warning 语义与信号引擎一致。
 
     issue #288:逐期加载按 ``_DECISION_LOAD_CHUNK`` 分块 ``gather`` 并行 ——
     纯读,结果按原始期序归位(contexts 顺序 / 产物 checksum 不变);
@@ -1489,6 +1963,12 @@ async def build_decision_load_contexts(
     phase 字段(k=已完成期数、N=推导出的决策期总数,multi_period 与
     single_shot 同机制);首帧(k=0)在 close 矩阵预建**之前**上报,覆盖
     预建这段此前零进度的空白窗。
+
+    issue #450:``precompute_phase_reporter``(可选)承担预计算段的细粒度
+    进度帧 —— close / daily 矩阵预建逐标的按节流上报
+    ``research_run:decision_load precompute <段> <done>/<total>``,段前后各
+    一帧 ``precompute start`` / ``precompute done``;只写 phase 文本,
+    done/total 数值列与分块探针调用序列(#306/#308 契约)均不受影响。
     """
     if not manifest.dataset_releases:
         raise ValueError("manifest 必须冻结至少一个数据发布")
@@ -1497,16 +1977,21 @@ async def build_decision_load_contexts(
     loader = FrozenInputLoader(
         release_provider_factory=release_provider_factory,
         snapshot_provider=snapshot_provider,
+        series_provider=series_provider,
+        suspension_view=suspension_view,
     )
-    frequency = _rebalance_frequency(manifest)
+    schedule = resolve_decision_schedule(manifest.parameters)
 
-    if frequency is not None:
-        decision_days = await _derive_rebalance_decision_days(provider, frequency)
+    if schedule is not None:
+        decision_days = await _derive_schedule_decision_days(
+            provider, schedule, trading_days_loader=trading_days_loader
+        )
         if not decision_days:
-            # issue #203:区分根因 —— 频率已声明(multi_period)但发布日历推导不出
-            # 任何决策时点,与「未声明频率缺快照」是两回事,不能混报。
+            # issue #203:区分根因 —— 日历声明已给出(multi_period)但发布日历
+            # 推导不出任何决策时点,与「未声明日历缺快照」是两回事,不能混报。
             raise ValueError(
-                f"execution_mode=multi_period:已声明 rebalance_frequency={frequency},"
+                "execution_mode=multi_period:已声明 "
+                f"decision_schedule(kind={schedule.kind}),"
                 "但冻结发布交易日历未能推导出任何决策时点(每期期末之后必须存在"
                 "下一交易日才能执行成交)。请检查发布区间是否覆盖至少一个完整"
                 "周期期末,或延长发布区间后重新入队。"
@@ -1515,11 +2000,13 @@ async def build_decision_load_contexts(
         decision_days = await _snapshot_decision_days(manifest, snapshot_provider)
         if not decision_days:
             raise ValueError(
-                "execution_mode=single_shot:未声明 parameters.rebalance_frequency,"
+                "execution_mode=single_shot:未声明 parameters.decision_schedule,"
                 "该路径的决策时点只能来自冻结因子快照,但 manifest.factor_snapshots"
                 " 为空。请入队时冻结 factor_snapshot_ids,或显式声明 "
-                "rebalance_frequency=monthly|quarterly 走多期回放(多期仅价格因子"
-                "按发布每日重算,基本面因子仍 PIT 取自冻结快照/研究数据发布)。"
+                "parameters.decision_schedule(或 legacy "
+                f"rebalance_frequency={sorted(REBALANCE_FREQUENCIES)})走多期回放"
+                "(多期仅价格因子按发布每日重算,基本面因子仍 PIT 取自冻结快照/"
+                "研究数据发布)。"
             )
 
     # issue #288:日历与 close 矩阵(#287 的惰性进程内缓存)在进入分块并行
@@ -1535,29 +2022,75 @@ async def build_decision_load_contexts(
     # 池是纯性能优化:启动失败返回 None(#288 语义),矩阵预建随即降级进程内
     # 线程路径;multi_period 才启用池(#288 门槛,single_shot 维持线程路径)。
     pool: PriceFeatureProcessPool | None = None
-    if frequency is not None and process_workers > 0:
+    if schedule is not None and process_workers > 0:
         pool = await _start_period_feature_pool(provider, process_workers)
-    await _release_trading_days(provider)
-    await loader.ensure_close_histories(manifest, process_pool=pool)
+    await _release_trading_days(provider, trading_days_loader=trading_days_loader)
+    # issue #450:预计算段进度帧(尽力而为)。首帧 0/N 之后到首个分块边界
+    # 之间是 close / daily 矩阵预建的长段,逐标的节流帧只写 phase 文本,
+    # #306 僵尸指纹(逐 phase 变化)在预建期间保持活跃。上报失败一律吞掉。
+    if precompute_phase_reporter is not None:
+        with contextlib.suppress(Exception):
+            await precompute_phase_reporter(
+                "research_run:decision_load precompute start"
+            )
+    await loader.ensure_close_histories(
+        manifest,
+        process_pool=pool,
+        progress=precompute_phase_reporter,
+        cancel_probe=precompute_cancel_probe,
+    )
+    # issue #438:研究观测(daily_metrics)run 级预建与 close 矩阵同类——决策日
+    # 全集在分块前已冻结,每标的一次列式读取覆盖全部决策期;逐期消费查矩阵,
+    # 零 IO 零逐行解析(stub / 对象路径 provider 不预建,逐期路径行为不变)。
+    await loader.ensure_daily_metrics_histories(
+        manifest,
+        tuple(decision_at for decision_at, _ in decision_days),
+        progress=precompute_phase_reporter,
+        cancel_probe=precompute_cancel_probe,
+    )
+    # issue #450 追续:价格特征 run 级预计算(逐期矩阵切片仍要 5000 次
+    # per-symbol 循环 + 快照 checksum,全市场 ≈ 30s/期;预建后逐期查表)。
+    # issue #464:进程池分发 + 进度帧接通(该段此前单线程零帧,全市场 x
+    # 全历史实测 ~17 分钟且 phase 冻结在 daily 段最后一帧)。
+    await loader.ensure_price_feature_precompute(
+        manifest,
+        tuple(decision_at for decision_at, _ in decision_days),
+        progress=precompute_phase_reporter,
+        cancel_probe=precompute_cancel_probe,
+        process_pool=pool,
+    )
+    if precompute_phase_reporter is not None:
+        with contextlib.suppress(Exception):
+            await precompute_phase_reporter(
+                "research_run:decision_load precompute done"
+            )
 
-    async def _load_one(
-        decision_at: datetime, snapshot_id: str | None
-    ) -> DecisionLoadContext:
-        execution_at = await _next_execution_at(provider, decision_at)
+    async def _load_one(decision_at: datetime, snapshot_id: str | None) -> DecisionLoadContext:
+        execution_at = await _next_execution_at(
+            provider,
+            decision_at,
+            timing=manifest.strategy_spec.execution_model.timing,
+            trading_days_loader=trading_days_loader,
+        )
         context = await loader.load_context(
             manifest, decision_at=decision_at, execution_at=execution_at
         )
-        if frequency is not None:
+        if schedule is not None:
             period_features = await _compute_period_features(
                 provider,
                 manifest,
                 decision_at,
                 release_ref.artifact_id,
                 process_pool=pool,
+                close_histories=loader.close_histories or None,
+                price_precompute=loader.price_feature_precompute,
             )
             features = (*period_features, *context.features)
         else:
             features = context.features
+        # issue #380:信号引擎特征截面统一收窄到发布可交易域(逐期重算已在
+        # 源头收窄,这里对快照 / 研究发布观测兜底,single_shot 同样覆盖)。
+        features = _exclude_benchmark_only_features(features, provider, manifest)
         features_by_source = _features_by_source(features)
         candidates = _apply_universe_filter(
             manifest.strategy_spec, provider, context, features_by_source
@@ -1590,8 +2123,13 @@ async def build_decision_load_contexts(
             & frozenset(context.execution_prices)
             & frozenset(context.lot_info)
         )
+        # issue #396:执行日全天停牌的标的不可撮合,不产出新信号(卖出由
+        # 组合管线按停牌拒单 fail-visible 处理,持仓保留)。
+        signalable -= context.execution_suspended
         price_series = await _load_price_series(
-            provider, tuple(signalable), decision_at,
+            provider,
+            tuple(signalable),
+            decision_at,
             close_histories=loader.close_histories,
         )
         signalable = frozenset(
@@ -1627,7 +2165,7 @@ async def build_decision_load_contexts(
             # issue #263:按原始期序收集 —— 第一个失败期(与串行首个失败一致)
             # 在 bare raise 前挂决策标记;异常类型 / 消息 / traceback 不被改写,
             # runner 通用收口经 read_decision_load_context 读回失败期次。
-            for ((decision_at, _), result) in zip(chunk, results, strict=True):
+            for (decision_at, _), result in zip(chunk, results, strict=True):
                 if isinstance(result, BaseException):
                     if isinstance(result, Exception):
                         attach_decision_load_context(
@@ -1650,22 +2188,28 @@ async def build_decision_inputs(
     snapshot_provider: FeatureSnapshotProvider,
     process_workers: int = 0,
     chunk_probe: LoadChunkProbe | None = None,
+    series_provider: FactorSeriesProvider | None = None,
+    suspension_view: SuspensionView | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
+    precompute_phase_reporter: LoadPhaseReporter | None = None,
+    precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[PortfolioDecisionInput, ...]:
     """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
 
     * single_shot(默认):决策日序列 = manifest.factor_snapshots 的
       ``decision_at`` 排序去重,每个决策日由 ``FrozenInputLoader`` 加载机械
       字段 → 价格序列 → universe 过滤 → 信号引擎求值 → 组装输入;
-    * multi_period:决策日由 ``parameters.rebalance_frequency``(monthly/
-      quarterly)按冻结发布交易日历推导,每期由管线重算 price features →
-      合并冻结快照 PIT 观测 → 同样的 universe 过滤 / 信号求值;
+    * multi_period:决策日由 ``parameters.decision_schedule``(issue #361,
+      四频 + custom;含 legacy ``rebalance_frequency`` 映射)按冻结发布
+      交易日历推导,每期由管线重算 price features → 合并冻结快照 PIT 观测
+      → 同样的 universe 过滤 / 信号求值;
     * 信号只对「included 且决策 / 成交价格齐备」的标的产出(组合流水线要求
       信号标的必须有价格与执行元数据)。
 
     ``process_workers``(issue #288)> 0 且 multi_period 时,逐期价格特征
     经常驻 spawn 进程池计算;结果与进程内路径逐值相等。
     """
-    frequency = _rebalance_frequency(manifest)
+    schedule = resolve_decision_schedule(manifest.parameters)
     # 信号求值(特征图 + 规则)是逐决策的纯 CPU 密集段,经 asyncio.to_thread
     # 卸载(issue #286):长计算不再阻塞事件循环线程,worker 心跳可续约。
     # build_normalized_signals 为模块级纯函数,普通数据入参,线程间无共享可变态。
@@ -1676,6 +2220,11 @@ async def build_decision_inputs(
         snapshot_provider=snapshot_provider,
         process_workers=process_workers,
         chunk_probe=chunk_probe,
+        series_provider=series_provider,
+        suspension_view=suspension_view,
+        trading_days_loader=trading_days_loader,
+        precompute_phase_reporter=precompute_phase_reporter,
+        precompute_cancel_probe=precompute_cancel_probe,
     ):
         signals = await asyncio.to_thread(
             build_normalized_signals,
@@ -1683,7 +2232,7 @@ async def build_decision_inputs(
             features=loaded.features,
             prices=loaded.context.prices,
             included_symbols=loaded.signalable,
-            factor_snapshot_id=None if frequency is not None else loaded.snapshot_id,
+            factor_snapshot_id=None if schedule is not None else loaded.snapshot_id,
             price_series=loaded.price_series,
         )
         inputs.append(
@@ -1699,6 +2248,7 @@ async def build_decision_inputs(
                 lot_info=loaded.context.lot_info,
                 input_artifact_ids=loaded.context.input_artifact_ids,
                 covariance=loaded.covariance,
+                suspended_symbols=loaded.context.execution_suspended,
             )
         )
     return tuple(inputs)
@@ -1732,14 +2282,33 @@ async def _snapshot_decision_days(
     manifest: ResearchRunManifest,
     snapshot_provider: FeatureSnapshotProvider,
 ) -> list[tuple[datetime, str | None]]:
-    """按冻结因子快照的 ``decision_at`` 推导单时点决策序列(排序去重)。"""
-    decision_days: list[tuple[datetime, str | None]] = []
+    """按冻结因子快照的 ``decision_at`` 推导单时点决策序列。
+
+    issue #356:**按业务日期去重**(``decision_at.date()``,与
+    ``LoadedDecisionContext.business_date`` 同口径)。此前按
+    ``(decision_at, snapshot_id)`` 元组去重,同一业务日期冻结多个快照
+    (不同 snapshot_id,甚至同日不同时点)时逐个展开成多条重复决策 ——
+    同一日期的同一决策被重复加载 / 执行 / 落库(实测 x4)。
+
+    去重不改变决策输入:特征按**全部**冻结快照 PIT 合并(``_load_features``
+    不绑定单一快照),决策价与成交日只取决于业务日期(``_next_execution_at``
+    读 ``decision_at.date()``),同日重复决策的输入完全一致 —— 重复执行只是
+    把同一组合构建(同一约束投影 / 同一再平衡解)重做多次;费用 / 手数取整
+    下重复执行还可能产生有界矫正单,同属应消除的浪费。每个业务日期保留
+    ``decision_at`` 最晚的代表项(并列取 snapshot_id 最大;排序遍历后者覆盖,
+    顺序确定)—— 晚时点的 PIT 可见性是同日早时点的超集,与去重前「当日
+    最后一个决策收敛出最终组合状态」的语义一致。
+    """
+    entries: list[tuple[datetime, str | None]] = []
     for ref in manifest.factor_snapshots:
         snapshot = await snapshot_provider(ref.artifact_id)
         if snapshot is None:
             raise ValueError(f"因子快照缺失: {ref.artifact_id}")
-        decision_days.append((snapshot.decision_at, snapshot.snapshot_id))
-    return sorted(set(decision_days))
+        entries.append((snapshot.decision_at, snapshot.snapshot_id))
+    deduped: dict[date, tuple[datetime, str | None]] = {}
+    for decision_at, snapshot_id in sorted(entries):
+        deduped[decision_at.date()] = (decision_at, snapshot_id)
+    return sorted(deduped.values())
 
 
 class SignalEnginePipelineAdapter:
@@ -1750,7 +2319,8 @@ class SignalEnginePipelineAdapter:
     ``research_runs`` 状态正确迁移为 FAILED(issue #170 伴生缺陷 A)。
 
     * single_shot:决策日来自冻结因子快照,``execution_mode=single_shot``;
-    * multi_period:``parameters.rebalance_frequency`` 按发布交易日历推导
+    * multi_period:``parameters.decision_schedule``(issue #361 四频 +
+      custom;含 legacy ``rebalance_frequency`` 映射)按发布交易日历推导
       多期决策,每期重算 features,signal_engine 决策间按冻结行情每日
       mark-to-market 产出 ``equity_curve``(issue #183)。
     """
@@ -1763,6 +2333,12 @@ class SignalEnginePipelineAdapter:
         snapshot_provider: FeatureSnapshotProvider,
         process_workers: int = 0,
         chunk_probe: LoadChunkProbe | None = None,
+        series_provider: FactorSeriesProvider | None = None,
+        suspension_view_factory: Callable[[], Awaitable[SuspensionView | None]]
+        | None = None,
+        trading_days_loader: TradingDaysLoader | None = None,
+        precompute_phase_reporter: LoadPhaseReporter | None = None,
+        precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
             raise ValueError(
@@ -1773,11 +2349,23 @@ class SignalEnginePipelineAdapter:
         self._manifest = manifest
         self._release_provider_factory = release_provider_factory
         self._snapshot_provider = snapshot_provider
+        # issue #360:因子序列工件读取回调(未声明 series 的 run 为 None,
+        # 加载器走纯快照路径,历史行为不变)。
+        self._series_provider = series_provider
+        # issue #396:停复牌视图工厂(research_suspensions;None = 无停牌
+        # 信息,行为不变)与交易日历 DB 优先读取回调(trade_cal;None =
+        # 回退发布 bar 并集推导)。
+        self._suspension_view_factory = suspension_view_factory
+        self._trading_days_loader = trading_days_loader
         # issue #288:multi_period 逐期价格特征使用的常驻进程池 worker 数
         # (settings ``research_price_feature_process_workers``;0 = 进程内)。
         self._process_workers = max(0, process_workers)
         # issue #306:加载期分块探针(run status / cancel 轮询 + 进度上报)。
         self._chunk_probe = chunk_probe
+        # issue #450:预计算段 phase 进度上报器(只写 phase 文本,与探针
+        # 分开传参,#306/#308 探针调用序列契约不受影响)。
+        self._precompute_phase_reporter = precompute_phase_reporter
+        self._precompute_cancel_probe = precompute_cancel_probe
         self._inputs: tuple[PortfolioDecisionInput, ...] | None = None
         self._equity_curve: tuple[EquityPoint, ...] = ()
         self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
@@ -1808,9 +2396,7 @@ class SignalEnginePipelineAdapter:
         self._resume_bundles = tuple(completed)
         return True
 
-    async def _resume_all_completed(
-        self, resume: tuple[DecisionBundle, ...]
-    ) -> bool:
+    async def _resume_all_completed(self, resume: tuple[DecisionBundle, ...]) -> bool:
         """全部决策均已落库时允许跳过整段加载(issue #314)。
 
         快速路径的两个前置:(1) 报告构建不依赖冻结输入 —— 引用用户因子
@@ -1836,18 +2422,18 @@ class SignalEnginePipelineAdapter:
         """轻量推导当前冻结输入的决策总数(不做特征/价格/协方差加载)。"""
 
         try:
-            frequency = _rebalance_frequency(self._manifest)
-            if frequency is not None:
-                release_ref = _bars_release_ref(
-                    self._manifest, self._release_provider_factory
-                )
+            schedule = resolve_decision_schedule(self._manifest.parameters)
+            if schedule is not None:
+                release_ref = _bars_release_ref(self._manifest, self._release_provider_factory)
                 provider = self._release_provider_factory(release_ref.artifact_id)
                 return len(
-                    await _derive_rebalance_decision_days(provider, frequency)
+                    await _derive_schedule_decision_days(
+                        provider,
+                        schedule,
+                        trading_days_loader=self._trading_days_loader,
+                    )
                 )
-            return len(
-                await _snapshot_decision_days(self._manifest, self._snapshot_provider)
-            )
+            return len(await _snapshot_decision_days(self._manifest, self._snapshot_provider))
         except Exception:
             logger.warning(
                 "research_run.resume_schedule_probe_failed",
@@ -1870,12 +2456,28 @@ class SignalEnginePipelineAdapter:
 
     async def _load(self) -> PortfolioPipelineAdapter:
         if self._inputs is None:
+            # issue #396:停复牌视图一次性加载(读取失败 → None,行为不变)。
+            suspension_view: SuspensionView | None = None
+            if self._suspension_view_factory is not None:
+                try:
+                    suspension_view = await self._suspension_view_factory()
+                except Exception:
+                    logger.warning(
+                        "research_run.suspension_view_unavailable",
+                        run_id=self._manifest.run_id,
+                        exc_info=True,
+                    )
             self._inputs = await build_decision_inputs(
                 self._manifest,
                 release_provider_factory=self._release_provider_factory,
                 snapshot_provider=self._snapshot_provider,
                 process_workers=self._process_workers,
                 chunk_probe=self._chunk_probe,
+                series_provider=self._series_provider,
+                suspension_view=suspension_view,
+                trading_days_loader=self._trading_days_loader,
+                precompute_phase_reporter=self._precompute_phase_reporter,
+                precompute_cancel_probe=self._precompute_cancel_probe,
             )
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
@@ -1987,9 +2589,7 @@ class SignalEnginePipelineAdapter:
             "failed_decision_index": completed_decisions + 1,
         }
         if completed_decisions < len(self._inputs):
-            marker["decision_date"] = self._inputs[
-                completed_decisions
-            ].business_date.isoformat()
+            marker["decision_date"] = self._inputs[completed_decisions].business_date.isoformat()
         warnings: list[JsonValue] = []
         screen_failure = await self._compute_factor_screen(manifest)
         if screen_failure is not None:
@@ -2073,9 +2673,7 @@ def build_signal_engine_adapter_factory(
 
         # manifest 冻结的 release checksum 即 DB release_checksum(issue #202):
         # 锚定校验替代代码版本敏感的整清单重算,worker 与发布端代码漂移不误伤。
-        release_checksums = {
-            ref.artifact_id: ref.checksum for ref in manifest.dataset_releases
-        }
+        release_checksums = {ref.artifact_id: ref.checksum for ref in manifest.dataset_releases}
 
         # issue #287:provider 按 release_id 在本 run(工厂闭包)内 memoize。
         # 发布不可变且 checksum 已由 manifest 锚定,实例复用使逐文件 SHA256
@@ -2088,9 +2686,7 @@ def build_signal_engine_adapter_factory(
         def _release_factory(release_id: str) -> FrozenReleaseProvider:
             provider = provider_memo.get(release_id)
             if provider is not None:
-                logger.debug(
-                    "research_run.release_provider_reused", release_id=release_id
-                )
+                logger.debug("research_run.release_provider_reused", release_id=release_id)
                 return provider
             provider = FrozenReleaseProvider(
                 release_root=root,
@@ -2105,11 +2701,129 @@ def build_signal_engine_adapter_factory(
             async with session_maker() as session:
                 return await FeatureSnapshotRepository(session).get(snapshot_id)
 
+        # issue #360:因子序列工件读取回调(与 _snapshot_provider 同域;
+        # 未声明 series 的 run 不触发任何读取)。
+        # issue #450:序列工件按 series_id 在本 run(工厂闭包)内 memoize
+        # (#287 provider_memo 同构)。序列记录是不可变 frozen dataclass 且
+        # 内容寻址(同 series_id 必然同内容),跨决策期共享安全;``get`` 每次拉
+        # 整行(values JSON 可达数十 MB)+ 全量反序列化,逐期 x 逐序列的重复
+        # 读取此前是加载期主导热点 —— memo 后每 run 每序列至多一次 DB 读取。
+        # 缓存生命周期 = 闭包生命周期 = 单次 run 适配器,无跨 run 共享。
+        # issue #463:工件根目录随 settings 传递(缺省/解析失败回退 repo
+        # 默认);工件行的 record.values 为惰性映射,单日 get 首访才读
+        # parquet 并验 sha256(同步段毫秒~百毫秒级,加载期一次性)。
+        settings_artifact_root: str | Path | None = None
+        if settings_factory is not None:
+            try:
+                candidate = getattr(
+                    settings_factory(), "factor_series_artifact_root", None
+                )
+            except Exception:
+                candidate = None
+            if isinstance(candidate, (str, Path)):
+                settings_artifact_root = candidate
+
+        series_memo: dict[str, object] = {}
+
+        async def _series_provider(series_id: str) -> object:
+            cached = series_memo.get(series_id)
+            if cached is not None:
+                logger.debug("research_run.series_record_reused", series_id=series_id)
+                return cached
+            from finboard_persistence import FactorSeriesRepository
+
+            async with session_maker() as session:
+                # settings 未提供 root 时按旧签名构造(注入的替身 repo 兼容)
+                repo = (
+                    FactorSeriesRepository(session, artifact_root=settings_artifact_root)
+                    if settings_artifact_root is not None
+                    else FactorSeriesRepository(session)
+                )
+                record = await repo.get(series_id)
+            if record is not None:
+                series_memo[series_id] = record
+                logger.debug("research_run.series_record_created", series_id=series_id)
+            return record
+
         # issue #306:加载期分块探针 —— run status / job cancel_requested 轮询 +
         # 加载进度上报。打断路径(run 被外部标 interrupted 等)在此秒级感知,
         # 不再出现「run 已 interrupted、job 靠心跳续租僵死 7.5 小时」的僵尸。
         # 按 manifest.run_id 在工厂闭包内构造,与 provider memo 同生命周期。
         chunk_probe = build_run_interrupt_probe(session_maker, manifest.run_id)
+        # issue #450:预计算段 phase 进度上报器(与探针同生命周期 = 单次 run;
+        # 覆盖 close / daily 矩阵预建长段的 0/N 盲区)。
+        precompute_phase_reporter = build_run_phase_reporter(
+            session_maker, manifest.run_id
+        )
+        # issue #450 追续:预计算段取消探针(只查不报)——预建长段此前是
+        # 取消检查空白区,cancel_requested 要等首个分块边界才被看见。
+        precompute_cancel_probe = build_run_cancel_probe(
+            session_maker, manifest.run_id
+        )
+
+        # issue #396:停复牌视图 + trade_cal 日历 DB 优先回调(与 provider
+        # memo 同生命周期 = 单次 run)。两个回调都尽力而为:research_suspensions
+        # 批次不存在 / trade_cal 表不可用时返回 None,消费端行为与历史一致。
+        suspension_memo: dict[str, SuspensionView | None] = {}
+
+        async def _suspension_view_factory() -> SuspensionView | None:
+            if "view" in suspension_memo:
+                return suspension_memo["view"]
+            from finboard_persistence import ResearchDatasetRepository
+
+            view: SuspensionView | None = None
+            try:
+                release_ref = _bars_release_ref(manifest, _release_factory)
+                release = _release_factory(release_ref.artifact_id).release
+                async with session_maker() as session:
+                    records = await ResearchDatasetRepository(
+                        session
+                    ).list_suspensions_as_of(
+                        start_date=release.start_date,
+                        end_date=release.end_date,
+                        decision_at=datetime.now(UTC),
+                        source="tushare",
+                    )
+                    await session.commit()
+                view = SuspensionView(
+                    [
+                        (item.trade_date, item.symbol, item.available_at)
+                        for item in records
+                        if item.suspend_kind == "suspension_day"
+                    ]
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_run.suspension_view_unavailable",
+                    run_id=manifest.run_id,
+                    error=str(exc),
+                    message="停复牌研究数据不可用,本次 run 不做停牌标注/拒单(行为不变)",
+                )
+            suspension_memo["view"] = view
+            return view
+
+        trading_days_memo: dict[str, list[date] | None] = {}
+
+        async def _trading_days_loader() -> list[date] | None:
+            if "days" in trading_days_memo:
+                return trading_days_memo["days"]
+            from finboard_persistence import TradeCalRepository
+
+            days: list[date] | None = None
+            try:
+                async with session_maker() as session:
+                    db_days = await TradeCalRepository(session).list_trading_days()
+                    await session.commit()
+                days = sorted(db_days) or None
+            except Exception as exc:
+                logger.warning(
+                    "research_run.trade_cal_unavailable",
+                    run_id=manifest.run_id,
+                    error=str(exc),
+                    message="trade_cal 日历不可用,发布交易日回退 bar 并集推导(行为不变)",
+                )
+            trading_days_memo["days"] = days
+            return days
 
         if manifest.strategy_kind == "user_code":
             from finboard_backtest.research_run.user_code_engine import (
@@ -2122,6 +2836,9 @@ def build_signal_engine_adapter_factory(
                 snapshot_provider=_snapshot_provider,  # type: ignore[arg-type]
                 settings_factory=settings_factory,
                 chunk_probe=chunk_probe,
+                series_provider=_series_provider,  # type: ignore[arg-type]
+                precompute_phase_reporter=precompute_phase_reporter,
+                precompute_cancel_probe=precompute_cancel_probe,
             )
 
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
@@ -2142,6 +2859,10 @@ def build_signal_engine_adapter_factory(
             snapshot_provider=_snapshot_provider,  # type: ignore[arg-type]
             process_workers=_resolve_period_feature_process_workers(settings_factory),
             chunk_probe=chunk_probe,
+            series_provider=_series_provider,  # type: ignore[arg-type]
+            suspension_view_factory=_suspension_view_factory,
+            trading_days_loader=_trading_days_loader,
+            precompute_phase_reporter=precompute_phase_reporter,
         )
 
     return _factory
@@ -2151,13 +2872,19 @@ __all__ = [
     "SIGNAL_ENGINE_STRATEGY_KINDS",
     "DecisionLoadContext",
     "LoadChunkProbe",
+    "LoadPhaseReporter",
     "SignalEnginePipelineAdapter",
+    "TradingDaysLoader",
     "build_daily_equity_curve",
     "build_decision_inputs",
     "build_decision_load_contexts",
     "build_normalized_signals",
     "build_run_interrupt_probe",
+    "build_run_phase_reporter",
     "build_signal_engine_adapter_factory",
+    "decision_schedule_dates_gate_error",
+    "enqueue_decision_dates",
+    "enqueue_trading_days",
     "evaluate_feature_graph",
     "evaluate_signal_rules",
     "single_shot_snapshot_gate_error",

@@ -12,13 +12,18 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from itertools import pairwise
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
     DailySecurityMetrics,
+    DividendRecord,
     FinancialIndicator,
+    IncomeStatement,
     IndustryMembership,
     InstrumentProfile,
+    SuspensionRecord,
 )
 from finboard_shared.models import Bar
 
@@ -87,6 +92,7 @@ _Record = TypeVar(
     DailySecurityMetrics,
     FinancialIndicator,
     IndustryMembership,
+    SuspensionRecord,
 )
 
 
@@ -209,6 +215,135 @@ class ResearchDataQualityValidator:
             )
         return _report(records, None, issues)
 
+    def validate_income_statements(
+        self,
+        records: list[IncomeStatement],
+        *,
+        expected_source: str,
+    ) -> QualityReport:
+        """校验利润表公告修订(issue #397,语义同 validate_financial_indicators)。"""
+        return self._validate_announced_statements(
+            records,
+            expected_source=expected_source,
+            keys=[
+                (
+                    item.source,
+                    item.symbol,
+                    item.report_period,
+                    item.announcement_date,
+                    item.update_flag or "",
+                    item.report_type or "",
+                    item.comp_type or "",
+                )
+                for item in records
+            ],
+        )
+
+    def validate_balance_sheets(
+        self,
+        records: list[BalanceSheet],
+        *,
+        expected_source: str,
+    ) -> QualityReport:
+        """校验资产负债表公告修订(issue #397)。"""
+        return self._validate_announced_statements(
+            records,
+            expected_source=expected_source,
+            keys=[
+                (
+                    item.source,
+                    item.symbol,
+                    item.report_period,
+                    item.announcement_date,
+                    item.update_flag or "",
+                    item.report_type or "",
+                    item.comp_type or "",
+                )
+                for item in records
+            ],
+        )
+
+    def validate_cashflow_statements(
+        self,
+        records: list[CashflowStatement],
+        *,
+        expected_source: str,
+    ) -> QualityReport:
+        """校验现金流量表公告修订(issue #397)。"""
+        return self._validate_announced_statements(
+            records,
+            expected_source=expected_source,
+            keys=[
+                (
+                    item.source,
+                    item.symbol,
+                    item.report_period,
+                    item.announcement_date,
+                    item.update_flag or "",
+                    item.report_type or "",
+                    item.comp_type or "",
+                )
+                for item in records
+            ],
+        )
+
+    def validate_dividends(
+        self,
+        records: list[DividendRecord],
+        *,
+        expected_source: str,
+    ) -> QualityReport:
+        """校验分红送股进展记录(issue #397;身份键含 div_proc)。"""
+        return self._validate_announced_statements(
+            records,
+            expected_source=expected_source,
+            keys=[
+                (
+                    item.source,
+                    item.symbol,
+                    item.report_period,
+                    item.announcement_date,
+                    item.div_proc or "",
+                )
+                for item in records
+            ],
+        )
+
+    def _validate_announced_statements(
+        self,
+        records: list[Any],
+        *,
+        expected_source: str,
+        keys: list[tuple[object, ...]],
+    ) -> QualityReport:
+        """公告类研究数据(三表/dividend)共享的批次质量门。
+
+        与 ``validate_financial_indicators`` 同语义:重复业务键 / 报告期晚于
+        公告日 / available_at 不晚于公告日(PIT=ann_date+1 被破坏)均为
+        ERROR;值字段稀疏不是质量问题(#187 all_null_fields 同精神)。
+        """
+        issues = self._common_issues(
+            records,
+            keys=keys,
+            expected_source=expected_source,
+            expected_symbols=None,
+        )
+        invalid_times = sum(
+            item.report_period > item.announcement_date
+            or item.available_at.date() <= item.announcement_date
+            for item in records
+        )
+        if invalid_times:
+            issues.append(
+                QualityIssue(
+                    code="invalid_financial_time",
+                    severity=QualitySeverity.ERROR,
+                    message="报告期或 available_at 与公告日期矛盾",
+                    count=invalid_times,
+                )
+            )
+        return _report(records, None, issues)
+
     def validate_industry_memberships(
         self,
         records: list[IndustryMembership],
@@ -254,6 +389,68 @@ class ResearchDataQualityValidator:
                     severity=QualitySeverity.ERROR,
                     message="行业层级为空或成员有效区间无效",
                     count=invalid_ranges,
+                )
+            )
+        return _report(records, expected_symbols, issues)
+
+    def validate_suspensions(
+        self,
+        records: list[SuspensionRecord],
+        *,
+        expected_trade_date: date,
+        expected_source: str,
+        expected_symbols: set[str] | None = None,
+    ) -> QualityReport:
+        """校验单日全市场停复牌枚举(issue #396)。"""
+        issues = self._common_issues(
+            records,
+            keys=[(item.source, item.symbol, item.trade_date) for item in records],
+            expected_source=expected_source,
+            expected_symbols=expected_symbols,
+        )
+        wrong_dates = sum(item.trade_date != expected_trade_date for item in records)
+        if wrong_dates:
+            issues.append(
+                QualityIssue(
+                    code="business_date_mismatch",
+                    severity=QualitySeverity.ERROR,
+                    message="记录交易日与批次参数不一致",
+                    count=wrong_dates,
+                )
+            )
+        invalid_kinds = sum(
+            item.suspend_kind
+            not in {
+                "suspension_day",
+                "intraday_suspension",
+                "resumption",
+            }
+            or (item.suspend_type == "S" and item.suspend_kind == "resumption")
+            or (item.suspend_type == "R" and item.suspend_kind != "resumption")
+            for item in records
+        )
+        if invalid_kinds:
+            issues.append(
+                QualityIssue(
+                    code="invalid_suspend_kind",
+                    severity=QualitySeverity.ERROR,
+                    message="停复牌 kind 与 suspend_type 矛盾",
+                    count=invalid_kinds,
+                )
+            )
+        invalid_visibility = sum(
+            item.available_at < datetime.combine(
+                item.trade_date, datetime.min.time(), tzinfo=item.available_at.tzinfo
+            )
+            for item in records
+        )
+        if invalid_visibility:
+            issues.append(
+                QualityIssue(
+                    code="invalid_available_at",
+                    severity=QualitySeverity.ERROR,
+                    message="available_at 早于交易日(PIT=当日语义被破坏)",
+                    count=invalid_visibility,
                 )
             )
         return _report(records, expected_symbols, issues)

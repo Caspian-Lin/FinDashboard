@@ -456,6 +456,8 @@ SYMBOLS = ("A.SH", "B.SH", "C.SH", "D.SH", "E.SH", "F.SH")
 class _StubBar:
     close: Decimal
     timestamp: datetime | None = None
+    # issue #336:next_open 执行价基读取 bar.open;测试桩与 close 相同。
+    open: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,6 +553,7 @@ class _SlowStubProvider:
                 _StubBar(
                     close,
                     timestamp=datetime.combine(day, datetime.min.time(), tzinfo=UTC),
+                    open=close,
                 ),
                 datetime.combine(day, datetime.min.time(), tzinfo=UTC),
             )
@@ -1106,16 +1109,22 @@ class TestJobViewRunStatus:
     ) -> None:
         """列表端点不 join(范围外):run_status 恒 None,单查才有。"""
 
+        from fastapi import Response
+
         from finboard_api.routes.jobs import list_jobs
 
         manifest = _manifest("view-list")
         await _queue_double_write(engine, manifest)
         async with session_factory(engine)() as session:
             rows = await list_jobs(
+                Response(),
                 kind=None,
                 status=None,
                 queue=None,
                 limit=10,
+                # 直调不经 FastAPI 依赖注入:Query 默认值不会解析,
+                # offset(#373)须显式传,否则 Query 对象透传进 repo 才炸。
+                offset=0,
                 archived="exclude",
                 session=session,
             )

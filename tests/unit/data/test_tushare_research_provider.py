@@ -71,6 +71,36 @@ def _financial_row(**overrides: object) -> dict[str, object]:
         "tr_yoy": 6.5,
         "netprofit_yoy": -2.5,
         "ocf_yoy": 8.1,
+        # issue #401 批次 3 扩展字段(29 个)
+        "or_yoy": 5.8,
+        "basic_eps_yoy": -4.4,
+        "dt_netprofit_yoy": -3.4,
+        "op_yoy": -4.7,
+        "q_gr_yoy": -5.3,
+        "q_gr_qoq": 1.9,
+        "q_netprofit_yoy": -29.9,
+        "q_netprofit_qoq": -65.5,
+        "roa": 3.6,
+        "npta": 2.9,
+        "roe_dt": 3.0,
+        "roic": 4.1,
+        "q_roe": 2.8,
+        "q_npta": 0.7,
+        "q_gsprofit_margin": 43.1,
+        "q_netprofit_margin": 18.9,
+        "expense_of_sales": 21.3,
+        "inv_turn": 1.2,
+        "ar_turn": 8.4,
+        "ca_turn": 0.3,
+        "fa_turn": 3.7,
+        "assets_turn": 0.03,
+        "current_ratio": None,
+        "quick_ratio": None,
+        "debt_to_eqt": 10.66,
+        "ebit_to_interest": None,
+        "assets_to_eqt": 11.66,
+        "ocf_to_or": 0.43,
+        "ocf_to_debt": 0.01,
     }
     row.update(overrides)
     return row
@@ -135,6 +165,7 @@ class FakeTushareClient:
         self.industry_rows = [_industry_row()]
         self.namechange_rows: list[dict[str, object]] = []
         # cb_basic 按 list_status 分桶(L=在市 / D=摘牌)。
+        self.suspend_d_rows: list[dict[str, object]] = []
         self.cb_basic_rows: dict[str, list[dict[str, object]]] = {
             "L": [_cb_basic_row()],
             "D": [
@@ -173,6 +204,30 @@ class FakeTushareClient:
     def cb_basic(self, **kwargs: str) -> object:
         self.calls.append(("cb_basic", kwargs))
         return self.cb_basic_rows.get(kwargs.get("list_status", "L"), [])
+
+    def suspend_d(self, **kwargs: str) -> object:
+        self.calls.append(("suspend_d", kwargs))
+        return self.suspend_d_rows
+    def index_basic(self, **kwargs: str) -> object:
+        self.calls.append(("index_basic", kwargs))
+        return []
+
+
+    def income(self, **kwargs: str) -> object:
+        """调用 ``income``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def balancesheet(self, **kwargs: str) -> object:
+        """调用 ``balancesheet``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def cashflow(self, **kwargs: str) -> object:
+        """调用 ``cashflow``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def dividend(self, **kwargs: str) -> object:
+        """调用 ``dividend``(#397;本测试不触达,返回空)。"""
+        return []
 
 
 def _provider(

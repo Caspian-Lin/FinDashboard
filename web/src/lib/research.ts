@@ -1,4 +1,4 @@
-import { fetchJSON, type ApiError, type JobOut } from "./api";
+import { fetchJSON, type ApiError, type DataPreview, type JobOut } from "./api";
 
 /* ============================================================ */
 /* Research Runs                                                */
@@ -57,7 +57,8 @@ export interface ResearchRunQueueIn {
 
 export interface ResearchArtifact {
   artifact_id: string;
-  decision_id: string;
+  /** 血缘/决策未关联的 artifact(partial evidence 等)为 null。 */
+  decision_id: string | null;
   sequence: number;
   stage: string;
   trace_id: string;
@@ -141,6 +142,25 @@ export interface FactorCatalogEntry {
   implementation: string;
   signal_eligible: boolean;
   checksum: string;
+  /** 展示注记:输入字段来自哪些发布数据集(bars/daily_metrics/...),由后端从发布映射派生。 */
+  source_datasets?: string[];
+}
+
+/** 平台预置因子目录条目(GET /research/factors/predefined,#427)。
+ * 「公式即代码」的平台可信因子;引用名 = p_<name>,消费路径 =
+ * MCP factor_series_build(kind=predefined_factor)。 */
+export interface PredefinedFactorEntry {
+  name: string;
+  /** 因子说明,含公式片段,原样返回。 */
+  title: string;
+  family: string;
+  /** 研究语义方向:higher = 值越大越看多 / lower 反之。 */
+  direction: string;
+  signal_eligible: boolean;
+  data_dependencies: string[];
+  window: number | null;
+  min_history_bars: number | null;
+  cross_section: boolean;
 }
 
 export interface FeatureObservation {
@@ -199,7 +219,8 @@ export interface FactorSignal {
 }
 
 export interface FactorExperiment {
-  factor_experiment_id: string;
+  /** 后端 FactorExperimentOut.experiment_id(历史前端误写 factor_experiment_id 导致 ID 列为空)。 */
+  experiment_id: string;
   hypothesis: string;
   factor_names: string[];
   dataset_release_id: string;
@@ -208,6 +229,15 @@ export interface FactorExperiment {
   comparison_group?: string;
   validation_experiment_id?: string;
   created_at: string;
+}
+
+/** GET /research/factors/experiments/{id}(比列表多冻结引用与结果/失败原因)。 */
+export interface FactorExperimentDetail extends FactorExperiment {
+  dataset_release_checksum: string;
+  plan: Record<string, unknown>;
+  result?: Record<string, unknown> | null;
+  failure_reason?: string | null;
+  updated_at: string;
 }
 
 export interface FactorExperimentCreate {
@@ -228,6 +258,8 @@ export const factorLabApi = {
       `/research/factors/catalog${q.toString() ? "?" + q : ""}`,
     );
   },
+  /** 平台预置因子只读目录(GET /research/factors/predefined,#427)。 */
+  predefined: () => fetchJSON<PredefinedFactorEntry[]>(`/research/factors/predefined`),
   createFeatureSnapshot: (body: FeatureSnapshotCreate) =>
     fetchJSON<FeatureSnapshot>(`/research/factors/features`, {
       method: "POST",
@@ -270,7 +302,7 @@ export const factorLabApi = {
     return fetchJSON<FactorExperiment[]>(`/research/factors/experiments${q.toString() ? "?" + q : ""}`);
   },
   factorExperimentDetail: (id: string) =>
-    fetchJSON<FactorExperiment>(`/research/factors/experiments/${id}`),
+    fetchJSON<FactorExperimentDetail>(`/research/factors/experiments/${id}`),
   syncValidation: (id: string, validationExperimentId: string) =>
     fetchJSON<FactorExperiment>(
       `/research/factors/experiments/${id}/sync-validation`,
@@ -492,14 +524,47 @@ export interface DatasetReleaseSummary {
   end_date: string;
   period: string;
   adjustment: string;
+  dataset_kind?: string;
+  code_version?: string;
   symbol_count: number;
   row_count: number;
-  coverage_pct: number;
+  /**
+   * 覆盖率(issue #349):后端已数值化,旧实例 / MCP 通道可能仍下发字符串
+   * (如 "1"),按 number | string 如实声明,展示层经 formatPercent 归一。
+   */
+  coverage_pct: number | string;
   capabilities: DatasetReleaseCapability[];
   quality_status: string;
   known_limitations: string[];
   published_at: string;
   release_checksum: string;
+}
+
+/** GET /instruments/datasets/releases/{id}:发布详情(含逐标的冻结清单)。 */
+export interface DatasetReleaseInstrumentInfo {
+  code: string;
+  name: string;
+  market: string;
+  instrument_type: string;
+  asset_class: string;
+  artifact_path: string;
+  row_count: number;
+  start_date: string;
+  end_date: string;
+  missing_sessions: number;
+  suspended_sessions: number;
+  ready?: boolean;
+  issues?: string[];
+  listing_board?: string;
+}
+
+export interface DatasetReleaseDetail extends DatasetReleaseSummary {
+  dataset_kind?: string;
+  availability_rules?: Record<string, string>[];
+  instruments: DatasetReleaseInstrumentInfo[];
+  quality_report?: Record<string, unknown>;
+  storage_uri?: string;
+  metadata_version?: string;
 }
 
 export interface DatasetReleaseCapability {
@@ -510,13 +575,43 @@ export interface DatasetReleaseCapability {
   missing_requirements: string[];
 }
 
+/**
+ * 数据集发布类型(与后端 ResearchDatasetReleaseCreate.release_kind 一致):
+ * - a_share_tushare / multi_asset_mixed → bars 主发布(dataset_kind=bars);
+ * - daily_metrics / financial_indicators → 从 research_* 表冻结的研究数据发布;
+ * - convertible_metrics → 转债派生指标(转股价值/转股溢价率)发布;
+ * - income_statements / balance_sheets / cashflow_statements / dividends →
+ *   财务三表与分红送股进展发布(#397,从 research_* 表冻结,先跑 dataset_sync
+ *   同名数据集摄取)。
+ */
+export type DatasetReleaseKind =
+  | "a_share_tushare"
+  | "multi_asset_mixed"
+  | "daily_metrics"
+  | "financial_indicators"
+  | "convertible_metrics"
+  | "income_statements"
+  | "balance_sheets"
+  | "cashflow_statements"
+  | "dividends";
+
 export interface DatasetReleaseCreate {
   release_id: string;
   dataset_name: string;
-  release_kind: "a_share_tushare" | "multi_asset_mixed";
+  release_kind: DatasetReleaseKind;
   source?: "akshare" | "yfinance" | "tushare" | "mixed" | "manual";
   version: string;
-  symbols: string[];
+  /**
+   * 标的集三选一(与后端 #261 一致,恰好声明一种):
+   * - symbols:内联标的列表;
+   * - symbols_from_release:复制既有可用发布冻结的标的集;
+   * - full_market:instruments 表全活跃标的按 release_kind 语义展开
+   *   (股票单源/研究数据发布只取 A 股股票,convertible_metrics 只取转债),
+   *   展开发生在入队期,展开为空 422 拒绝。
+   */
+  symbols?: string[];
+  symbols_from_release?: string;
+  full_market?: boolean;
   start_date: string;
   end_date: string;
   adjustment: "qfq" | "hqfq" | "none";
@@ -531,7 +626,8 @@ export interface DatasetManifest {
   end_date?: string;
   row_count: number;
   symbol_count: number;
-  coverage_pct: number;
+  /** 覆盖率(issue #349):历史通道可能下发字符串,展示层需容错。 */
+  coverage_pct: number | string;
   gaps: unknown[];
   checksum: string;
   quality_status: string;
@@ -701,7 +797,14 @@ export const datasetApi = {
     );
   },
   releaseDetail: (releaseId: string) =>
-    fetchJSON<Record<string, unknown>>(`/instruments/datasets/releases/${releaseId}`),
+    fetchJSON<DatasetReleaseDetail>(`/instruments/datasets/releases/${releaseId}`),
+  releasePreview: (releaseId: string, symbol?: string, limit = 20) => {
+    const q = new URLSearchParams({ limit: String(limit) });
+    if (symbol) q.set("symbol", symbol);
+    return fetchJSON<DataPreview>(
+      `/instruments/datasets/releases/${releaseId}/preview?${q.toString()}`,
+    );
+  },
   createRelease: (body: DatasetReleaseCreate) =>
     fetchJSON<JobOut>("/instruments/datasets/releases", {
       method: "POST",
@@ -837,3 +940,29 @@ export function featureSnapshotCreatedAt(snapshot: FeatureSnapshot): string {
 }
 
 export type { ApiError };
+
+/* ---------------------------------------------------------------------------
+ * 研究记录(docs/research 三件套,只读)
+ * 后端: GET /api/research/docs + GET /api/research/docs/{path}
+ * canonical 仍是仓库文件(经 PR 维护),前端只读展示。
+ * ------------------------------------------------------------------------- */
+
+export type ResearchDocKind = "overview" | "roadmap" | "findings" | "round" | "other";
+
+export interface ResearchDocSummary {
+  path: string;
+  kind: ResearchDocKind;
+  title: string;
+  size_bytes: number;
+  updated_at: string;
+}
+
+export interface ResearchDocDetail extends ResearchDocSummary {
+  content: string;
+}
+
+export const researchDocsApi = {
+  list: () => fetchJSON<{ docs: ResearchDocSummary[] }>(`/research/docs`),
+  get: (path: string) =>
+    fetchJSON<ResearchDocDetail>(`/research/docs/${path.split("/").map(encodeURIComponent).join("/")}`),
+};

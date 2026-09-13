@@ -52,6 +52,16 @@ class _PITBar:
     close: float
     day: date
     code: str
+    # issue #359:窗口挂载(v3)读取逐行 available_at;缺省按 D1 语义
+    # 派生为业务日 15:30 UTC(FrozenReleaseProvider 的确定性规则)。
+    available_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.available_at is None:
+            self.available_at = datetime(
+                self.day.year, self.day.month, self.day.day, 15, 30,
+                tzinfo=UTC,
+            )
 
     @property
     def bar(self) -> _Bar:
@@ -80,6 +90,8 @@ class _DailyRecord:
     symbol: str
     trade_date: date
     pb: Decimal | None = None
+    # issue #359:窗口挂载(v3)读取逐行 available_at
+    available_at: datetime | None = None
 
 
 @dataclass
@@ -90,6 +102,8 @@ class _FinRecord:
     announcement_date: date
     report_period: date
     eps: Decimal | None = None
+    # issue #359:窗口挂载(v3)读取逐行 available_at
+    available_at: datetime | None = None
 
 
 @dataclass
@@ -102,7 +116,8 @@ class _StubProvider:
 
     release: _Release
     bars: list[_PITBar] = field(default_factory=list)
-    daily: list[_DailyRecord] = field(default_factory=list)
+    # item 类型放宽:回归测试(#366)注入真实 DailySecurityMetrics
+    daily: list[Any] = field(default_factory=list)
     financial: list[_FinRecord] = field(default_factory=list)
     gate_slack_days: int = 0
 
@@ -303,6 +318,62 @@ class TestBuildDataMount:
         for dataset in manifest["datasets"]:
             if dataset["max_data_date"]:
                 assert dataset["max_data_date"] <= "2024-06-03"
+
+    async def test_real_daily_record_metadata_not_floatized(
+        self, tmp_path: Path
+    ) -> None:
+        """真实形状 DailySecurityMetrics 过 v2 单日挂载不崩(#366)。
+
+        真实记录的 ``source`` 是 str、``observed_at`` / ``available_at`` 是
+        datetime——既有 stub 投影没有这三个字段,掩盖了 v2 数值白名单对它们
+        float 化必崩的缺陷。修复后元数据不进白名单,行形状与 stub 投影一致
+        (kit 端无 available_at 列时按 trade_date 回退 PIT 过滤)。
+        """
+        from finboard_data.research import DailySecurityMetrics
+
+        record = DailySecurityMetrics(
+            symbol="600000.SH",
+            trade_date=date(2024, 6, 3),
+            close=Decimal("10.5"),
+            turnover_rate=Decimal("0.012"),
+            turnover_rate_free=Decimal("0.018"),
+            volume_ratio=Decimal("1.1"),
+            pe=Decimal("8.2"),
+            pe_ttm=Decimal("7.9"),
+            pb=Decimal("0.9"),
+            ps=Decimal("1.3"),
+            ps_ttm=Decimal("1.2"),
+            dividend_yield=Decimal("0.04"),
+            dividend_yield_ttm=Decimal("0.041"),
+            total_shares=Decimal("1e10"),
+            float_shares=Decimal("8e9"),
+            free_shares=Decimal("7e9"),
+            total_market_cap=Decimal("1.05e11"),
+            circulating_market_cap=Decimal("8.4e10"),
+            limit_status=None,
+            source="tushare",
+            observed_at=datetime(2024, 6, 4, 0, 0, tzinfo=UTC),
+            available_at=datetime(2024, 6, 4, 7, 30, tzinfo=UTC),
+        )
+        daily = _StubProvider(
+            release=_Release(
+                "DR-daily", _Kind("daily_metrics"), [_Inst("600000.SH")]
+            ),
+            daily=[record],
+        )
+        mount = await build_data_mount(
+            providers=[_bars_provider(), daily],
+            decision_at=_DECISION_AT,
+            out_root=tmp_path / "data",
+        )
+        table = pq.read_table(tmp_path / "data" / "daily_metrics.parquet")
+        names = set(table.column_names)
+        assert "source" not in names
+        assert "observed_at" not in names
+        assert "available_at" not in names
+        assert table.column("pb").to_pylist() == [0.9]
+        assert table.column("close").to_pylist() == [10.5]
+        assert {d.release_id for d in mount.datasets} == {"DR-bars", "DR-daily"}
 
     async def test_unsupported_kind_rejected(self, tmp_path: Path) -> None:
         bogus = _StubProvider(release=_Release("DR-x", _Kind("widgets")))

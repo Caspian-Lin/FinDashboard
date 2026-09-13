@@ -323,6 +323,9 @@ class BulkDownloadRequest(BaseSchema):
     listing_boards: list[str] = Field(default_factory=list)
     start: str = "2015-01-01"
     source: str | None = None
+    # symbols 子集重跑(#347):与 market/instrument_type/exchange/listing_boards
+    # 过滤叠加(交集为空执行器按 no_instruments 拒);失败清单可直接回填。
+    symbols: list[str] | None = None
 
 
 class SchedulerConfigOut(BaseSchema):
@@ -745,6 +748,29 @@ class FactorDefinitionOut(BaseSchema):
     implementation: str
     signal_eligible: bool
     checksum: str
+    # 展示注记:该因子输入字段来自哪些发布数据集(bars/daily_metrics/...),
+    # 由 RESEARCH_RELEASE_FEATURE_NAMES 唯一事实来源派生,不属于目录 checksum。
+    source_datasets: list[str] = Field(default_factory=list)
+
+
+class PredefinedFactorOut(BaseSchema):
+    """平台预置因子目录条目(``GET /api/research/factors/predefined``,#427)。
+
+    只读投影自 ``finboard_backtest.factors.predefined.PREDEFINED_FACTORS``
+    (公式即代码的平台可信因子);引用名 = ``p_<name>``,消费路径 =
+    MCP ``factor_series_build``(kind=predefined_factor)。
+    ``title`` 含公式片段,原样返回不做改写。
+    """
+
+    name: str
+    title: str
+    family: str
+    direction: str
+    signal_eligible: bool
+    data_dependencies: list[str]
+    window: int | None = None
+    min_history_bars: int | None = None
+    cross_section: bool = False
 
 
 class FeatureSnapshotCreate(BaseSchema):
@@ -1060,7 +1086,9 @@ class DatasetManifestOut(BaseSchema):
     end_date: date | None = None
     row_count: int = 0
     symbol_count: int = 0
-    coverage_pct: Decimal = Decimal("0")
+    # issue #349:coverage_pct 用 float 声明,pydantic 会把 Decimal / manifest
+    # 里的字符串("1")归一为数值序列化,避免 JSON/前端显示成字符串 "1"。
+    coverage_pct: float = 0.0
     gaps: list[Any] = Field(default_factory=list)
     checksum: str = ""
     quality_status: str = "unknown"
@@ -1105,9 +1133,24 @@ class ResearchDatasetReleaseCreate(BaseSchema):
         # issue #265:可转债派生指标发布(转股价值/转股溢价率,从本地缓存
         # bars x 冻结转股价元数据计算)。
         "convertible_metrics",
+        # issue #397:财务面扩展(三表 + dividend 分红明细,从 research_*
+        # 表冻结,独立 kind 独立白名单)。
+        "income_statements",
+        "balance_sheets",
+        "cashflow_statements",
+        "dividends",
     ] = "a_share_tushare"
     source: Literal["akshare", "yfinance", "tushare", "mixed", "manual"] | None = None
     version: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    # issue #401:冻结字段集合变化(白名单扩展)时按 #187 机制递增(如
+    # financial_indicators 扩列后新发布 schema_version=v2);缺省 None 沿用
+    # 服务端默认,既有发布身份零变化。
+    schema_version: str | None = Field(
+        default=None,
         min_length=1,
         max_length=64,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
@@ -1122,6 +1165,13 @@ class ResearchDatasetReleaseCreate(BaseSchema):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
     )
     full_market: bool = False
+    # #385:full_market 展开的交易所/板块过滤(与 bulk_download 同词表;
+    # exchange 实际取值 SSE/SZSE/BSE/CFFEX,listing_board 实际取值
+    # sse_main/szse_main/star/chinext/bse/cdr,ETF/指数/转债恒为 unknown)。
+    # 仅 full_market 模式生效,与 symbols / symbols_from_release 同时声明
+    # 入队即拒(schema 与 resolve_release_symbols 兜底双层校验)。
+    exchange: str | None = Field(default=None, max_length=16)
+    listing_boards: list[str] = Field(default_factory=list, max_length=8)
     start_date: date
     end_date: date
     adjustment: Literal["qfq", "hqfq", "none"] = "qfq"
@@ -1160,6 +1210,23 @@ class ResearchDatasetReleaseCreate(BaseSchema):
             raise ValueError("发布标的不能重复")
         return normalized
 
+    @field_validator("exchange")
+    @classmethod
+    def normalize_exchange(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        return normalized or None
+
+    @field_validator("listing_boards")
+    @classmethod
+    def normalize_listing_boards(cls, value: list[str]) -> list[str]:
+        # 归一到 instruments.listing_board 小写词表并去重排序(确定性 payload)。
+        normalized = sorted(
+            {board.strip().lower() for board in value if board.strip()}
+        )
+        return normalized
+
     @model_validator(mode="after")
     def validate_symbol_source(self) -> ResearchDatasetReleaseCreate:
         # #261:标的集来源必须恰好声明一种;来源解析(存在 / 可用 / 展开非空)
@@ -1182,6 +1249,13 @@ class ResearchDatasetReleaseCreate(BaseSchema):
                 "symbols / symbols_from_release / full_market 只能三选一,"
                 f"同时声明: {declared}"
             )
+        # #385:板块/交易所过滤只对 full_market 展开有意义;与内联清单或
+        # 来源发布复制混用语义歧义,fail-closed 而非静默叠加。
+        if (self.exchange or self.listing_boards) and declared != ["full_market"]:
+            raise ValueError(
+                "exchange / listing_boards 过滤仅支持 full_market 展开,"
+                "与 symbols / symbols_from_release 互斥"
+            )
         return self
 
     @model_validator(mode="after")
@@ -1202,6 +1276,10 @@ _RELEASE_KIND_SOURCE: dict[str, str] = {
     "daily_metrics": "tushare",
     "financial_indicators": "tushare",
     "convertible_metrics": "tushare",
+    "income_statements": "tushare",
+    "balance_sheets": "tushare",
+    "cashflow_statements": "tushare",
+    "dividends": "tushare",
 }
 
 
@@ -1223,9 +1301,16 @@ class DatasetReleaseInstrumentOut(BaseSchema):
     missing_sessions: int
     suspended_sessions: int
     anomaly_count: int
-    coverage_pct: Decimal
+    # issue #349:manifest 逐标的 coverage_pct 冻结为 str(Decimal),这里只在
+    # API 层归一为 float 数值,manifest checksum 语义不受影响。
+    coverage_pct: float
     category: str
     ready: bool
+    # issue #386:异常口径拆分——anomaly_count 只含 OHLCV 异常,重复与
+    # lifecycle(早于 list_date / 晚于 delist_date)独立计数(可见不阻断)。
+    duplicate_count: int = 0
+    pre_list_bars: int = 0
+    post_delist_bars: int = 0
     issues: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
     exchange: str | None = None
@@ -1263,7 +1348,8 @@ class ResearchDatasetReleaseOut(BaseSchema):
     quality_report: dict[str, Any]
     symbol_count: int
     row_count: int
-    coverage_pct: Decimal
+    # issue #349:数值化序列化,避免 pydantic 把 Decimal 输出成 JSON 字符串。
+    coverage_pct: float
     known_limitations: list[str] = Field(default_factory=list)
     storage_uri: str
     metadata_version: str
@@ -1285,12 +1371,24 @@ class ResearchDatasetReleaseSummaryOut(BaseSchema):
     published_at: datetime
     symbol_count: int
     row_count: int
-    coverage_pct: Decimal
+    # issue #349:数值化序列化,避免 pydantic 把 Decimal 输出成 JSON 字符串。
+    coverage_pct: float
     capabilities: list[DatasetReleaseCapabilityOut]
     quality_status: str
     known_limitations: list[str] = Field(default_factory=list)
     metadata_version: str
     release_checksum: str
+
+
+class DataPreviewOut(BaseSchema):
+    """数据预览(只读):缓存/冻结发布 parquet 的尾部行采样。"""
+
+    label: str
+    columns: list[str]
+    rows: list[dict[str, Any]]
+    total_rows: int
+    truncated: bool
+    artifact: str
 
 
 class DatasetReleaseSymbolCheckOut(BaseSchema):

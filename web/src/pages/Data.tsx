@@ -1,5 +1,13 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "../components/ui/dialog";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api } from "../lib/api";
 import type { JobOut, QualityReport } from "../lib/api";
@@ -30,10 +38,12 @@ function formatDuration(sec: number, lang: "zh" | "en"): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export default function Data() {
+export default function Data({ embedded = false }: { embedded?: boolean }) {
   const { tl } = useT();
   const { lang } = useLanguage();
   const queryClient = useQueryClient();
+  // 缓存预览对话框选中的标的(null=关闭)
+  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null);
   const [fetchSymbol, setFetchSymbol] = useState("000001.SZ");
   const [fetchStart, setFetchStart] = useState("2024-01-01");
   const [fetchEnd, setFetchEnd] = useState(
@@ -257,17 +267,19 @@ export default function Data() {
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">{tl({ zh: "行情数据", en: "Market Data" })}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {tl({
-              zh: "标的池、单标的拉取与缓存管理;耗时任务进入统一队列,可在「任务中心」跟踪。",
-              en: "Universe, single-symbol fetch and cache management; long-running jobs enter the unified queue and can be tracked in the Task Center.",
-            })}
-          </p>
+      {!embedded && (
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">{tl({ zh: "行情数据", en: "Market Data" })}</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {tl({
+                zh: "标的池、单标的拉取与缓存管理;耗时任务进入统一队列,可在「任务中心」跟踪。",
+                en: "Universe, single-symbol fetch and cache management; long-running jobs enter the unified queue and can be tracked in the Task Center.",
+              })}
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Stats row */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -391,7 +403,7 @@ export default function Data() {
                 className="w-full border border-input bg-card text-foreground rounded px-3 py-2 text-sm"
               >
                 <option value="">{tl({ zh: `默认 (${defaultProvider})`, en: `Default (${defaultProvider})` })}</option>
-                <option value="tushare">{tl({ zh: "tushare（A股股票）", en: "tushare (A-share stocks)" })}</option>
+                <option value="tushare">{tl({ zh: "tushare（A股股票/指数）", en: "tushare (A-share stocks & indices)" })}</option>
                 <option value="akshare">akshare</option>
                 <option value="yfinance">yfinance</option>
               </select>
@@ -475,7 +487,7 @@ export default function Data() {
               <option value="" disabled={tushareBulk}>{tl({ zh: "全部", en: "All" })}</option>
               <option value="stock">{tl({ zh: "股票", en: "Stocks" })}</option>
               <option value="etf" disabled={tushareBulk}>ETF</option>
-              <option value="index" disabled={tushareBulk}>{tl({ zh: "指数", en: "Index" })}</option>
+              <option value="index">{tl({ zh: "指数", en: "Index" })}</option>
             </select>
           </div>
           <div>
@@ -507,7 +519,7 @@ export default function Data() {
               onChange={(e) => {
                 const nextSource = e.target.value;
                 setDlSource(nextSource);
-                if ((nextSource || defaultProvider) === "tushare") {
+                if ((nextSource || defaultProvider) === "tushare" && dlType === "etf") {
                   setDlType("stock");
                 }
               }}
@@ -515,7 +527,7 @@ export default function Data() {
               className="h-10 w-full rounded border border-input bg-card px-3 text-sm text-foreground"
             >
               <option value="">{tl({ zh: `默认 (${defaultProvider})`, en: `Default (${defaultProvider})` })}</option>
-              <option value="tushare">{tl({ zh: "tushare（A股股票）", en: "tushare (A-share stocks)" })}</option>
+              <option value="tushare">{tl({ zh: "tushare（A股股票/指数）", en: "tushare (A-share stocks & indices)" })}</option>
               <option value="akshare">akshare</option>
               <option value="yfinance">yfinance</option>
             </select>
@@ -553,11 +565,26 @@ export default function Data() {
           </div>
         </div>
 
+        {bulkJobId && (
+          <p className="mb-4 text-sm text-muted-foreground">
+            {tl({ zh: "任务 ID：", en: "Job ID: " })}
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground">
+              {bulkJobId}
+            </code>{" "}
+            <Link
+              to={`/jobs?job=${encodeURIComponent(bulkJobId)}`}
+              className="text-primary underline underline-offset-4 hover:text-primary/80"
+            >
+              {tl({ zh: "在任务中心查看", en: "View in Jobs" })}
+            </Link>
+          </p>
+        )}
+
         <p className="mb-4 text-sm text-muted-foreground">
           {tushareBulk
             ? tl({
-                zh: "Tushare 任务只拉取 A 股股票，并保持缓存为单一来源；失败标的可重跑，不会自动换源。",
-                en: "Tushare jobs fetch A-share stocks only and keep the cache single-source; failed symbols can be re-run and never switch sources automatically.",
+                zh: "Tushare 任务支持 A 股股票与指数，并保持缓存为单一来源；失败标的可重跑，不会自动换源。ETF 因复权口径对齐仍在设计中（#341），请暂用 akshare 拉取。",
+                en: "Tushare jobs cover A-share stocks and indices and keep the cache single-source; failed symbols can be re-run and never switch sources automatically. ETF is still akshare-only while adjustment semantics are being aligned (#341).",
               })
             : tl({
                 zh: "ETF 与其他资产请单独拉取。发布时可与 Tushare 股票缓存组合为多资产混合来源数据集。",
@@ -886,21 +913,19 @@ export default function Data() {
                 <th className="px-4 py-2 text-right">{tl({ zh: "Bar 数", en: "Bars" })}</th>
                 <th className="px-4 py-2 text-left">{tl({ zh: "范围", en: "Range" })}</th>
                 <th className="px-4 py-2 text-left">{tl({ zh: "来源", en: "Source" })}</th>
-                <th className="px-4 py-2 text-right">{tl({ zh: "最新收盘", en: "Last close" })}</th>
+                <th className="px-4 py-2 text-right">{tl({ zh: "预览", en: "Preview" })}</th>
               </tr>
             </thead>
             <tbody>
               {status.items.map((s) => (
-                <tr key={`${s.symbol}-${s.period}-${s.adjust}`} className="border-t">
+                <tr key={`${s.symbol}-${s.period}-${s.adjust}`} className="cursor-pointer border-t hover:bg-muted/50" onClick={() => setPreviewSymbol(s.symbol)}>
                   <td className="px-4 py-2 font-mono">{s.symbol}</td>
                   <td className="px-4 py-2 text-right">{s.bar_count}</td>
                   <td className="px-4 py-2 text-muted-foreground">
                     {s.first_date ?? "—"} ~ {s.last_date ?? "—"}
                   </td>
                   <td className="px-4 py-2 text-muted-foreground">{s.source ?? tl({ zh: "未记录", en: "Not recorded" })}</td>
-                  <td className="px-4 py-2 text-right font-mono">
-                    {s.last_close ? Number(s.last_close).toFixed(2) : "—"}
-                  </td>
+                  <td className="px-4 py-2 text-right text-xs text-primary">{tl({ zh: "查看", en: "View" })}</td>
                 </tr>
               ))}
             </tbody>
@@ -931,7 +956,80 @@ export default function Data() {
           </div>
         )}
       </div>
+
+      <CachePreviewDialog symbol={previewSymbol} onClose={() => setPreviewSymbol(null)} />
     </div>
+  );
+}
+
+/** 缓存数据预览对话框:只读展示本地 parquet 尾部 bar(GET /data/cache/preview)。 */
+function CachePreviewDialog({ symbol, onClose }: { symbol: string | null; onClose: () => void }) {
+  const { tl } = useT();
+  const previewQuery = useQuery({
+    queryKey: ["cache-preview", symbol],
+    queryFn: () => api.previewCacheBars(symbol as string, 20),
+    enabled: symbol !== null,
+  });
+
+  return (
+    <Dialog open={symbol !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="font-mono text-sm">{symbol ?? ""}</DialogTitle>
+          <DialogDescription>
+            {tl({
+              zh: "本地缓存尾部 20 根 bar(只读);数据以本地缓存为准,非券商口径。",
+              en: "Last 20 bars of the local cache (read-only); data reflects the local cache, not the broker.",
+            })}
+          </DialogDescription>
+        </DialogHeader>
+        {previewQuery.isLoading ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">{tl({ zh: "加载中…", en: "Loading…" })}</p>
+        ) : previewQuery.isError ? (
+          <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {previewQuery.error instanceof Error ? previewQuery.error.message : tl({ zh: "预览加载失败", en: "Failed to load preview" })}
+          </p>
+        ) : previewQuery.data ? (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              {previewQuery.data.label} ·{" "}
+              {tl({
+                zh: `尾部 ${previewQuery.data.rows.length} 行 / 共 ${previewQuery.data.total_rows} 行`,
+                en: `last ${previewQuery.data.rows.length} of ${previewQuery.data.total_rows} rows`,
+              })}
+            </p>
+            <div className="max-h-80 overflow-auto rounded-md border border-border scrollbar-thin">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-background text-muted-foreground">
+                  <tr>
+                    {previewQuery.data.columns.map((column) => (
+                      <th key={column} className="whitespace-nowrap px-2 py-1.5 text-left font-mono">
+                        {column}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {previewQuery.data.rows.map((row, i) => (
+                    <tr key={i} className="border-t">
+                      {previewQuery.data.columns.map((column) => (
+                        <td key={column} className="whitespace-nowrap px-2 py-1.5 font-mono">
+                          {row[column] === null || row[column] === undefined ? (
+                            <span className="text-muted-foreground/50">null</span>
+                          ) : (
+                            String(row[column])
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
   );
 }
 

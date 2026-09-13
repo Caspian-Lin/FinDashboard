@@ -1,6 +1,6 @@
 """行情 provider 构造助手(issue #144)。
 
-数据域 executor(bulk_download / fetch_all / backtest_run / quality_repair)需要
+数据域 executor(bulk_download / backtest_run / quality_repair)需要
 按 ``source`` + ``settings`` 构造行情 provider。本模块抽出与
 ``finboard_api.routes.data._get_provider`` 等价的工厂,供 executor 与 CLI 复用,
 避免 ``finboard-backtest`` 反向依赖 ``finboard-api``。
@@ -40,7 +40,7 @@ def resolve_provider_name(
         source
         or configured
         or os.getenv("FINBOARD_DATA_PROVIDER")
-        or "akshare"
+        or "tushare"
     ).strip().lower()
     if name not in SUPPORTED_BAR_PROVIDERS:
         supported = ", ".join(sorted(SUPPORTED_BAR_PROVIDERS))
@@ -60,11 +60,16 @@ def build_bar_provider(
     from finboard_data import AkShareProvider, TushareBarProvider, YFinanceProvider
 
     settings = settings_factory()
+    # issue #440:读缓存近似字节上限随 settings 透传(None = 不限)。
+    read_cache_max_bytes = (
+        settings.read_cache_max_bytes if settings is not None else None
+    )
     if name == "akshare":
         return AkShareProvider(
             use_cache=use_cache,
             max_concurrency=max_concurrency or 2,
             request_interval=request_interval if request_interval is not None else 0.5,
+            read_cache_max_bytes=read_cache_max_bytes,
         )
     if name == "tushare":
         return TushareBarProvider(
@@ -82,11 +87,13 @@ def build_bar_provider(
                 else "data_cache/tushare_usage.json"
             ),
             max_concurrency=max_concurrency or 16,
+            read_cache_max_bytes=read_cache_max_bytes,
         )
     return YFinanceProvider(
         use_cache=use_cache,
         max_concurrency=max_concurrency or 3,
         request_interval=request_interval if request_interval is not None else 0.3,
+        read_cache_max_bytes=read_cache_max_bytes,
     )
 
 

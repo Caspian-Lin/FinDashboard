@@ -66,7 +66,8 @@ class DatasetPublishExecutor:
                 code="invalid_payload",
                 summary=(
                     "release_kind 必须是 a_share_tushare / multi_asset_mixed / "
-                    "daily_metrics / financial_indicators / convertible_metrics"
+                    "daily_metrics / financial_indicators / convertible_metrics / "
+                    "income_statements / balance_sheets / cashflow_statements / dividends"
                 ),
                 retryable=False,
                 context={"job_id": job.job_id},
@@ -111,8 +112,12 @@ class DatasetPublishExecutor:
                 retryable=False,
                 context={"job_id": job.job_id},
             )
+        # #348:容忍路径的完成语只保留具名标记(不含 baseline id 与计数明细),
+        # ``dataset_publish:done symbol_set_mismatch`` 共 41 字符,旧列宽 64 内安全。
+        mismatch_suffix = ""
 
         from finboard_data import (
+            RELEASE_SCHEMA_VERSION,
             DatasetReleaseError,
             DatasetReleaseSpec,
             ImmutableReleaseError,
@@ -124,7 +129,6 @@ class DatasetPublishExecutor:
         source = _RELEASE_KIND_TO_SOURCE[release_kind]
 
         await progress(0, None, "dataset_publish:validating")
-        mismatch_summary = ""
         async with self._session_maker() as session:
             # #252:与基线发布的标的集 diff(在 scope 校验之前,失败不写任何数据)。
             if baseline_release_id is not None:
@@ -175,10 +179,7 @@ class DatasetPublishExecutor:
                     logger.warning(
                         "dataset_publish.symbol_set_mismatch", **mismatch_context
                     )
-                    mismatch_summary = (
-                        f" symbol_set_mismatch vs {baseline_release_id}:"
-                        f" -{len(missing_in_release)}/+{len(extra_in_release)}"
-                    )
+                    mismatch_suffix = " symbol_set_mismatch"
             rows = await session.execute(
                 select(InstrumentModel).where(InstrumentModel.code.in_(symbols))
             )
@@ -192,7 +193,7 @@ class DatasetPublishExecutor:
                     retryable=False,
                     context={"job_id": job.job_id},
                 )
-            if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators"):
+            if release_kind in ("a_share_tushare",) or release_kind in _RESEARCH_STOCK_KINDS:
                 invalid = sorted(
                     item.code
                     for item in selected
@@ -231,17 +232,23 @@ class DatasetPublishExecutor:
                 # benchmark 数据集,也可与股票/ETF 混发);issue #265 放行
                 # convertible 转债(转债 bars 与正股/基准同处一份发布);
                 # issue #267 放行 futures 期货主连(仅基准/研究数据,
-                # 不可撮合,对齐 index 先例)。至少含五者之一。
-                missing_types = (
-                    {"stock", "etf", "index", "convertible", "futures"} - selected_types
-                )
-                if missing_types:
+                # 不可撮合,对齐 index 先例)。五种类型任意非空子集均合法
+                # (基准行情本就可以只发指数/期货);只拒绝白名单之外的
+                # 类型,防未来新增 instrument_type 静默混入 bars 发布。
+                disallowed_types = selected_types - {
+                    "stock",
+                    "etf",
+                    "index",
+                    "convertible",
+                    "futures",
+                }
+                if disallowed_types:
                     raise ExecutorError(
                         code="mixed_scope_violation",
                         summary=(
-                            "多资产混合源发布必须至少包含股票、ETF、指数、可转债或期货主连,"
-                            "缺少: "
-                            + ", ".join(sorted(missing_types))
+                            "多资产混合源发布只允许股票、ETF、指数、可转债、期货主连,"
+                            "包含未放行类型: "
+                            + ", ".join(sorted(disallowed_types))
                         ),
                         retryable=False,
                         context={"job_id": job.job_id},
@@ -249,86 +256,114 @@ class DatasetPublishExecutor:
 
             fields = _default_release_fields(kind)
 
-            await progress(1, None, "dataset_publish:publishing")
-            service = ResearchDatasetReleaseService(
-                session,
-                cache_dir=cache_dir(),
-                release_root=release_root(),
+        # 校验段到此结束(以上全部只读):session 随 with 退出结束 DB 事务。
+        # 物化(7000+ 符号 x 全历史流式冻结,分钟级纯文件 I/O)不能在打开的
+        # PG 事务内进行 —— 全市场发布 BJ-2307A2188D1645BA 因此被
+        # idle_in_transaction_session_timeout 杀连接。发布改走
+        # session_factory 分段短事务:元数据 prep / 物化 / 登记各自独立;
+        # 物化成功而登记失败时,重试经 builder 的 final_dir 幂等路径
+        # (校验同一性后返回既有发布)不重复冻结。
+        await progress(1, None, "dataset_publish:publishing")
+        # issue #401:schema_version 透传(默认 v1 零变化)。冻结字段集合
+        # 变化(如 financial_indicators 白名单扩展)时按 #187 机制递增,
+        # 否则 builder 对同名数据集的新发布具名拒绝「字段集合发生变化但
+        # schema_version 未递增」。
+        schema_version = job.payload.get("schema_version")
+        if schema_version is not None and (
+            not isinstance(schema_version, str)
+            or not schema_version.strip()
+        ):
+            raise ExecutorError(
+                code="invalid_payload",
+                summary="dataset_publish 任务 payload 的 schema_version 必须是非空字符串",
+                retryable=False,
+                context={"job_id": job.job_id},
             )
-            try:
-                release = await service.publish(
-                    DatasetReleaseSpec(
-                        release_id=release_id,
-                        dataset_name=dataset_name,
-                        source=source,
-                        version=version,
-                        start_date=start_date,
-                        end_date=end_date,
-                        code_version=code_version(),
-                        adjustment=adjustment,
-                        fields=fields,
-                        dataset_kind=ReleaseDatasetKind(kind),
-                        minimum_release_coverage=(
-                            # issue #212:研究数据发布级阈值放宽到 0.95——停牌日
-                            # 无截面、最新报告期未公告是常态(全市场 daily 实测
-                            # 跨度口径平均 coverage≈0.972),0.98 会让任何真实全市场
-                            # 研究发布不可发布;0.95 仍拦系统性丢失。逐标的缺口
-                            # 已在 builder 侧降级为可见 warning。#265 转债派生
-                            # 指标同口径(转债停牌/正股停牌日溢价缺观测)。
-                            Decimal("0.95")
-                            if release_kind
-                            in ("daily_metrics", "financial_indicators", "convertible_metrics")
-                            else Decimal("0.98")
+        service = ResearchDatasetReleaseService(
+            None,
+            session_factory=self._session_maker,
+            cache_dir=cache_dir(),
+            release_root=release_root(),
+        )
+        try:
+            release = await service.publish(
+                DatasetReleaseSpec(
+                    release_id=release_id,
+                    dataset_name=dataset_name,
+                    source=source,
+                    version=version,
+                    start_date=start_date,
+                    end_date=end_date,
+                    code_version=code_version(),
+                    adjustment=adjustment,
+                    fields=fields,
+                    dataset_kind=ReleaseDatasetKind(kind),
+                    schema_version=schema_version or RELEASE_SCHEMA_VERSION,
+                    minimum_release_coverage=(
+                        # issue #212:研究数据发布级阈值放宽到 0.95——停牌日
+                        # 无截面、最新报告期未公告是常态(全市场 daily 实测
+                        # 跨度口径平均 coverage≈0.972),0.98 会让任何真实全市场
+                        # 研究发布不可发布;0.95 仍拦系统性丢失。逐标的缺口
+                        # 已在 builder 侧降级为可见 warning。#265 转债派生
+                        # 指标同口径(转债停牌/正股停牌日溢价缺观测)。
+                        Decimal("0.95")
+                        if release_kind in _RESEARCH_RELEASE_KINDS
+                        else Decimal("0.98")
+                    ),
+                    required_capabilities=(
+                        ("stock",)
+                        if release_kind in ("a_share_tushare",)
+                        or release_kind in _RESEARCH_STOCK_KINDS
+                        # issue #265:转债派生指标发布固定要求 convertible 能力。
+                        else ("convertible",)
+                        if release_kind == "convertible_metrics"
+                        else tuple(required_capabilities)
+                    ),
+                    known_limitations=(
+                        "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
+                        "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
+                        "只冻结本地缓存已有字段,不会回退到联网数据源",
+                        (
+                            "A股单源发布严格要求所有 Bar 来源为 tushare"
+                            if release_kind == "a_share_tushare"
+                            else "多资产发布允许按标的混合来源,实际来源写入质量报告"
                         ),
-                        required_capabilities=(
-                            ("stock",)
-                            if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators")
-                            # issue #265:转债派生指标发布固定要求 convertible 能力。
-                            else ("convertible",)
-                            if release_kind == "convertible_metrics"
-                            else tuple(required_capabilities)
-                        ),
-                        known_limitations=(
-                            "交易日覆盖使用 akshare/exchange_calendars 真实 A 股交易日历",
-                            "停牌优先使用停复牌生命周期事件;缺少事件时按本地缓存的已查询区间(covered_ranges)对齐批量拉取口径",
-                            "只冻结本地缓存已有字段,不会回退到联网数据源",
+                        *(
                             (
-                                "A股单源发布严格要求所有 Bar 来源为 tushare"
-                                if release_kind == "a_share_tushare"
-                                else "多资产发布允许按标的混合来源,实际来源写入质量报告"
-                            ),
-                            *(
-                                (
-                                    "转股溢价率 = 转债收盘 / (100/快照转股价x同日正股收盘) - 1;"
-                                    "转股价取 cb_basic 当前快照(下修史不在覆盖范围),"
-                                    "非全历史 PIT(#265)"
-                                )
-                                if release_kind == "convertible_metrics"
-                                else ()
-                            ),
+                                "转股溢价率 = 转债收盘 / (100/快照转股价x同日正股收盘) - 1;"
+                                "转股价取 cb_basic 当前快照(下修史不在覆盖范围),"
+                                "非全历史 PIT(#265)"
+                            )
+                            if release_kind == "convertible_metrics"
+                            else ()
                         ),
                     ),
-                    symbols,
-                )
-                await session.commit()
-            except ImmutableReleaseError as exc:
-                await session.rollback()
-                raise ExecutorError(
-                    code="release_identity_conflict",
-                    summary=f"发布身份冲突: {exc}",
-                    retryable=False,
-                    context={"job_id": job.job_id, "release_id": release_id},
-                ) from exc
-            except (DatasetReleaseError, ValueError) as exc:
-                await session.rollback()
-                raise ExecutorError(
-                    code="quality_gate_failed",
-                    summary=f"数据质量门未通过: {exc}",
-                    retryable=False,
-                    context={"job_id": job.job_id},
-                ) from exc
+                ),
+                symbols,
+            )
+        except ImmutableReleaseError as exc:
+            raise ExecutorError(
+                code="release_identity_conflict",
+                summary=f"发布身份冲突: {exc}",
+                retryable=False,
+                context={"job_id": job.job_id, "release_id": release_id},
+            ) from exc
+        except (DatasetReleaseError, ValueError) as exc:
+            raise ExecutorError(
+                code="quality_gate_failed",
+                summary=f"数据质量门未通过: {exc}",
+                retryable=False,
+                context={"job_id": job.job_id},
+            ) from exc
 
-        await progress(1, 1, f"dataset_publish:done{mismatch_summary}")
+        # issue #348:完成语收短为 ``dataset_publish:done[ symbol_set_mismatch]``
+        # —— 旧完成语拼上 mismatch 摘要(含 baseline release_id 与双向计数)
+        # 约 75-85 字符,可超旧列宽 64,收尾写 phase 触发
+        # StringDataRightTruncation。具名标记保留(任务时间线可见不一致发生,
+        # test_baseline_mismatch_warns_by_default 锁定),差集明细由上面的
+        # ``dataset_publish.symbol_set_mismatch`` 结构化 warning(mismatch_context
+        # 含基线 id / 双向计数 / 预览清单)承载,不丢信息。
+        await progress(1, 1, f"dataset_publish:done{mismatch_suffix}")
         return JobResult(status="succeeded", result_ref=release.release_id)
 
 
@@ -336,12 +371,18 @@ _RELEASE_KIND_TO_DATASET_KIND: dict[str, str] = {
     "a_share_tushare": "bars",
     "multi_asset_mixed": "bars",
     # issue #187:研究数据发布。daily_metrics / financial_indicators 由
-    # research_data_sync(#171)摄取进 research_* 表,发布从表冻结而非本地缓存。
+    # dataset_sync(#171;#392 前称 research_data_sync)摄取进 research_* 表,发布从表冻结而非本地缓存。
     "daily_metrics": "daily_metrics",
     "financial_indicators": "financial_indicators",
     # issue #265:可转债派生指标发布(转股价值/转股溢价率),发布执行时从
     # 本地缓存 bars x 冻结转股价元数据计算。
     "convertible_metrics": "convertible_metrics",
+    # issue #397:财务面扩展(三表 + dividend),dataset_sync 摄取进
+    # research_* 表后按独立 kind 独立白名单冻结。
+    "income_statements": "income_statements",
+    "balance_sheets": "balance_sheets",
+    "cashflow_statements": "cashflow_statements",
+    "dividends": "dividends",
 }
 
 _RELEASE_KIND_TO_SOURCE: dict[str, str] = {
@@ -350,15 +391,48 @@ _RELEASE_KIND_TO_SOURCE: dict[str, str] = {
     "daily_metrics": "tushare",
     "financial_indicators": "tushare",
     "convertible_metrics": "tushare",
+    "income_statements": "tushare",
+    "balance_sheets": "tushare",
+    "cashflow_statements": "tushare",
+    "dividends": "tushare",
 }
+
+#: 研究数据发布 kind(#187/#397):A 股股票域 + 发布级覆盖率阈值 0.95。
+_RESEARCH_RELEASE_KINDS = frozenset(
+    {
+        "daily_metrics",
+        "financial_indicators",
+        "convertible_metrics",
+        "income_statements",
+        "balance_sheets",
+        "cashflow_statements",
+        "dividends",
+    }
+)
+
+#: 研究数据发布里「A 股股票域」的 kind 子集(convertible_metrics 例外)。
+_RESEARCH_STOCK_KINDS = frozenset(
+    {
+        "daily_metrics",
+        "financial_indicators",
+        "income_statements",
+        "balance_sheets",
+        "cashflow_statements",
+        "dividends",
+    }
+)
 
 
 def _default_release_fields(kind_value: str) -> tuple[str, ...]:
     """按数据集类型返回默认冻结字段白名单(全部字段)。"""
     from finboard_data import (
+        BALANCE_SHEETS_FIELDS,
+        CASHFLOW_STATEMENTS_FIELDS,
         CONVERTIBLE_METRICS_FIELDS,
         DAILY_METRICS_FIELDS,
+        DIVIDENDS_FIELDS,
         FINANCIAL_INDICATORS_FIELDS,
+        INCOME_STATEMENTS_FIELDS,
         RELEASE_FIELDS,
     )
 
@@ -368,6 +442,14 @@ def _default_release_fields(kind_value: str) -> tuple[str, ...]:
         return FINANCIAL_INDICATORS_FIELDS
     if kind_value == "convertible_metrics":
         return CONVERTIBLE_METRICS_FIELDS
+    if kind_value == "income_statements":
+        return INCOME_STATEMENTS_FIELDS
+    if kind_value == "balance_sheets":
+        return BALANCE_SHEETS_FIELDS
+    if kind_value == "cashflow_statements":
+        return CASHFLOW_STATEMENTS_FIELDS
+    if kind_value == "dividends":
+        return DIVIDENDS_FIELDS
     return RELEASE_FIELDS
 
 

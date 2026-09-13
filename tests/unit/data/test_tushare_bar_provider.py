@@ -10,7 +10,10 @@ from pathlib import Path
 from threading import Event, Lock
 
 import pytest
+import structlog
+from structlog.testing import capture_logs
 
+import finboard_data.tushare_bar_provider as tushare_bar_provider_module
 from finboard_data import (
     HistoricalDataProvider,
     TushareBarProvider,
@@ -179,7 +182,7 @@ async def test_missing_adjustment_factor_fails_closed() -> None:
 async def test_non_daily_period_is_rejected_without_request() -> None:
     provider, budget = _provider()
 
-    with pytest.raises(ValueError, match="只支持 A 股日线"):
+    with pytest.raises(ValueError, match="只支持日线"):
         await provider.fetch_bars(
             make_symbol("000001.SZ"),
             BarPeriod.M5,
@@ -650,13 +653,17 @@ class TestForeignCacheStrategy:
 
     @pytest.mark.unit
     async def test_foreign_cache_falls_back_when_tushare_empty(self, tmp_path: Path) -> None:
-        """缺口区间 tushare 拉不到(ETF/指数):具名回退返回异源缓存,不改写缓存。"""
+        """缺口区间 tushare 拉不到(股票上游为空):具名回退返回异源缓存,不改写缓存。
+
+        #341 起 ETF 在 provider 层 fail-visible 拒绝(不再静默空结果回退),
+        空拉回退语义改用上游为空的股票标的锁定。
+        """
         client = FakeTushareBarClient()
         client.daily_rows = []
         client.factor_rows = []
         provider, _ = self._provider(tmp_path, client)
         assert provider._cache is not None
-        symbol = make_symbol("510300.SH")
+        symbol = make_symbol("000001.SZ")
         foreign = [_foreign_bar(date(2024, 1, 2)), _foreign_bar(date(2024, 1, 3))]
         await provider._cache.write(symbol, BarPeriod.D1, "qfq", foreign)
 
@@ -809,3 +816,262 @@ async def test_convertible_daily_cache_key_follows_requested_adjust(
     assert metadata.source == "tushare"
     cached = await provider._cache.read(symbol, BarPeriod.D1, "qfq")
     assert [bar.close for bar in cached] == [Decimal("100.5"), Decimal("101.5")]
+
+
+# ---------------------------------------------------------------------------
+# #341:指数日线(index_daily 专属接口,无复权)+ ETF fail-visible
+# ---------------------------------------------------------------------------
+
+
+class FakeIndexTushareClient(FakeTushareBarClient):
+    """index_daily 桩:记录调用并可断言股票/复权接口未被触碰。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.index_daily_rows: list[dict[str, object]] = [
+            {
+                "ts_code": "000852.SH",
+                "trade_date": "20240103",
+                "open": 7000,
+                "high": 7100,
+                "low": 6950,
+                "close": 7050.5,
+                "vol": 300,
+                "amount": 492508.5,
+            },
+            {
+                "ts_code": "000852.SH",
+                "trade_date": "20240102",
+                "open": 6900,
+                "high": 7020,
+                "low": 6880,
+                "close": 6980.25,
+                "vol": 280,
+                "amount": 460001.0,
+            },
+        ]
+
+    def index_daily(self, **kwargs: str) -> object:
+        self.calls.append(("index_daily", kwargs))
+        return self.index_daily_rows
+
+
+@pytest.mark.unit
+async def test_index_daily_uses_index_daily_without_adjustment() -> None:
+    """指数按代码规则分流 index_daily:不调 daily/adj_factor,原始指数点落盘。"""
+    client = FakeIndexTushareClient()
+    provider, budget = _provider(client)
+
+    bars = await provider.fetch_bars(
+        make_symbol("000852.SH"),
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        adjust="qfq",
+    )
+
+    assert [bar.timestamp.date() for bar in bars] == [date(2024, 1, 2), date(2024, 1, 3)]
+    # 无复权:收盘价 = 上游原始指数点(qfq 请求下不做因子换算)。
+    assert bars[0].close == Decimal("6980.25")
+    assert bars[1].close == Decimal("7050.5")
+    # vol/amount 单位与股票 daily 相同(手 x100 / 千元 x1000)。
+    assert bars[0].volume == Decimal("28000")
+    assert bars[0].amount == Decimal("460001000")
+    assert {bar.source for bar in bars} == {"tushare"}
+    # 只调 index_daily,不碰股票 daily / 复权因子接口;两天同 chunk 一次取回。
+    assert [name for name, _ in client.calls] == ["index_daily"]
+    assert client.calls[0][1]["ts_code"] == "000852.SH"
+    assert budget.calls == 1
+
+
+@pytest.mark.unit
+async def test_index_daily_cache_key_follows_requested_adjust(tmp_path: Path) -> None:
+    """缓存键沿用请求 adjust(qfq 键存在但语义为 no-op),与发布口径一致。"""
+    provider = TushareBarProvider(
+        client=FakeIndexTushareClient(),
+        cache_dir=tmp_path,
+        max_retries=0,
+    )
+    assert provider._cache is not None
+    symbol = make_symbol("000852.SH")
+
+    ok = await provider.update_cache(
+        symbol,
+        BarPeriod.D1,
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        adjust="qfq",
+    )
+    assert ok is True
+    metadata = await provider._cache.metadata_for(symbol, BarPeriod.D1, "qfq")
+    assert metadata is not None
+    assert metadata.bar_count == 2
+    assert metadata.source == "tushare"
+    cached = await provider._cache.read(symbol, BarPeriod.D1, "qfq")
+    assert [bar.close for bar in cached] == [Decimal("6980.25"), Decimal("7050.5")]
+
+
+@pytest.mark.unit
+async def test_etf_code_fails_visible_instead_of_silent_empty() -> None:
+    """ETF 走股票 daily 会静默返回空(#341):fail-visible 指路 akshare。"""
+    client = FakeIndexTushareClient()
+    provider, _ = _provider(client)
+
+    with pytest.raises(ValueError, match="tushare 源暂不提供 ETF 行情"):
+        await provider.fetch_bars(
+            make_symbol("510300.SH"),
+            BarPeriod.D1,
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            adjust="qfq",
+        )
+    # 未触碰任何行情接口。
+    assert client.calls == []
+
+
+# ---------------------------------------------------------------------------
+# #346:指数基日行 open/high/low 非有限值单行跳过(仅 index_daily 路径)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _unfiltered_structlog_for_provider():
+    """隔离 ``setup_logging`` 对 structlog 的全局污染(#301/#315 同款)。
+
+    CI 从仓库根跑全量(集成测试按字母序先于 unit),任何先行的测试调用
+    ``setup_logging``(级别过滤 + ``cache_logger_on_first_use=True``)后,
+    tushare_bar_provider 的模块 logger 已缓存,``capture_logs`` 永远抓空。
+    本节断言具名 warning,测试期重置为不缓存并重建模块 logger,结束恢复。
+    """
+    saved_config = structlog.get_config()
+    saved_logger = tushare_bar_provider_module.logger
+    structlog.reset_defaults()
+    structlog.configure(cache_logger_on_first_use=False)
+    tushare_bar_provider_module.logger = structlog.get_logger(
+        "finboard_data.tushare_bar_provider"
+    )
+    yield
+    tushare_bar_provider_module.logger = saved_logger
+    structlog.configure(**saved_config)
+
+
+def _index_row(
+    trade_date: str,
+    *,
+    open_: object = 1000,
+    high: object = 1010,
+    low: object = 990,
+    close: object = 1005.5,
+) -> dict[str, object]:
+    return {
+        "ts_code": "000688.SH",
+        "trade_date": trade_date,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "vol": 200,
+        "amount": 300000.0,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("_unfiltered_structlog_for_provider")
+async def test_index_base_day_nonfinite_ohlc_row_is_skipped_with_named_warning() -> None:
+    """基日坏行(open/high/low=NaN、close 正常)单行跳过,好行照常落盘。"""
+    client = FakeIndexTushareClient()
+    client.index_daily_rows = [
+        # 基日行(实测 000688.SH=2019-12-31、899050.BJ=2022-04-29 同形态):
+        # close 正常,open/high/low 全 NaN。
+        _index_row(
+            "20191231",
+            open_=float("nan"),
+            high=float("nan"),
+            low=float("nan"),
+            close=988.5,
+        ),
+        _index_row("20200102"),
+        # 部分 NaN(仅 high):同样属于「OHLC 含非有限值」的坏行。
+        _index_row("20200103", high=float("nan")),
+    ]
+    provider, _ = _provider(client)
+
+    with capture_logs() as logs:
+        bars = await provider.fetch_bars(
+            make_symbol("000688.SH"),
+            BarPeriod.D1,
+            date(2019, 12, 31),
+            date(2020, 1, 3),
+            adjust="qfq",
+        )
+
+    # 两根坏行被跳过,好行照常落盘(无复权,qfq 请求下原始指数点直落)。
+    assert [bar.timestamp.date() for bar in bars] == [date(2020, 1, 2)]
+    assert bars[0].close == Decimal("1005.5")
+    assert bars[0].volume == Decimal("20000")
+    assert {bar.source for bar in bars} == {"tushare"}
+    # 具名 warning 带 symbol 与跳过日期列表。
+    warnings = [
+        entry
+        for entry in logs
+        if entry.get("event") == "tushare.index_row_skipped_nonfinite_ohlc"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning"
+    assert warnings[0]["symbol"] == "000688.SH"
+    assert warnings[0]["skipped_dates"] == ["2019-12-31", "2020-01-03"]
+    assert warnings[0]["skipped_count"] == 2
+    assert warnings[0]["total_rows"] == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_close", [float("nan"), 0])
+@pytest.mark.usefixtures("_unfiltered_structlog_for_provider")
+async def test_index_close_bad_row_still_rejects_whole_segment(bad_close: object) -> None:
+    """index 路径 close 非有限或 ≤ 0 仍整段拒绝(fail-visible 不变)。"""
+    client = FakeIndexTushareClient()
+    client.index_daily_rows = [
+        _index_row("20200102"),
+        _index_row("20200103", close=bad_close),
+    ]
+    provider, _ = _provider(client)
+
+    with capture_logs() as logs, pytest.raises(ValueError, match=r"close|无效价格"):
+        await provider.fetch_bars(
+            make_symbol("000688.SH"),
+            BarPeriod.D1,
+            date(2020, 1, 2),
+            date(2020, 1, 3),
+            adjust="qfq",
+        )
+
+    # 整段拒绝不是单行跳过:不得发出跳过 warning。
+    assert not [
+        entry
+        for entry in logs
+        if entry.get("event") == "tushare.index_row_skipped_nonfinite_ohlc"
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("_unfiltered_structlog_for_provider")
+async def test_stock_single_nonfinite_ohlc_row_still_rejects_whole_segment() -> None:
+    """股票 / 转债口径回归:一行坏仍整段拒,lenient_ohlc 不外溢。"""
+    client = FakeTushareBarClient()
+    client.daily_rows[0]["open"] = float("nan")
+    provider, _ = _provider(client)
+
+    with capture_logs() as logs, pytest.raises(ValueError, match="字段 open 不是有限数字"):
+        await provider.fetch_bars(
+            make_symbol("000001.SZ"),
+            BarPeriod.D1,
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            adjust="none",
+        )
+
+    assert not [
+        entry
+        for entry in logs
+        if entry.get("event") == "tushare.index_row_skipped_nonfinite_ohlc"
+    ]

@@ -117,6 +117,10 @@ class PortfolioDecisionInput:
     atr: dict[str, float] = field(default_factory=dict)
     fill_ratio_by_symbol: dict[str, float] = field(default_factory=dict)
     rejected_symbols: frozenset[str] = frozenset()
+    # issue #396:执行日全天停牌的标的 —— 当日指令一律拒单(fail-visible),
+    # 不再按停牌前最后一个可见 close 静默「昨收成交」。空集 = 无停牌信息,
+    # 行为与历史一致;checksum 按「空键省略」语义,存量 run 零漂移。
+    suspended_symbols: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -179,28 +183,31 @@ class PortfolioDecisionInput:
                 "n_observations": self.covariance.n_observations,
                 "method": self.covariance.method,
             }
-        return stable_checksum(
-            {
-                "business_date": self.business_date,
-                "decision_at": self.decision_at,
-                "execution_at": self.execution_at,
-                "candidates": self.candidates,
-                "features": self.features,
-                "signals": self.signals,
-                "prices": self.prices,
-                "execution_prices": self.execution_prices,
-                "lot_info": self.lot_info,
-                "input_artifact_ids": self.input_artifact_ids,
-                "covariance": covariance_payload,
-                "sleeve_map": self.sleeve_map,
-                "disabled_symbols": sorted(self.disabled_symbols),
-                "betas": self.betas,
-                "realized_volatility": self.realized_volatility,
-                "atr": self.atr,
-                "fill_ratio_by_symbol": self.fill_ratio_by_symbol,
-                "rejected_symbols": sorted(self.rejected_symbols),
-            }
-        )
+        checksum_payload: dict[str, object] = {
+            "business_date": self.business_date,
+            "decision_at": self.decision_at,
+            "execution_at": self.execution_at,
+            "candidates": self.candidates,
+            "features": self.features,
+            "signals": self.signals,
+            "prices": self.prices,
+            "execution_prices": self.execution_prices,
+            "lot_info": self.lot_info,
+            "input_artifact_ids": self.input_artifact_ids,
+            "covariance": covariance_payload,
+            "sleeve_map": self.sleeve_map,
+            "disabled_symbols": sorted(self.disabled_symbols),
+            "betas": self.betas,
+            "realized_volatility": self.realized_volatility,
+            "atr": self.atr,
+            "fill_ratio_by_symbol": self.fill_ratio_by_symbol,
+            "rejected_symbols": sorted(self.rejected_symbols),
+        }
+        # issue #396:空集省略键 —— 未消费停牌数据的 run 与旧版本逐字节一致
+        # (replay_source_status / factor_series 条件键同先例)。
+        if self.suspended_symbols:
+            checksum_payload["suspended_symbols"] = sorted(self.suspended_symbols)
+        return stable_checksum(checksum_payload)
 
 
 @dataclass(slots=True)
@@ -314,7 +321,11 @@ class PortfolioPipelineAdapter:
         validate_strategy_dataset_capabilities(self.strategy_kind, available)
         frozen_ids = {
             item.artifact_id
-            for item in (*manifest.dataset_releases, *manifest.factor_snapshots)
+            for item in (
+                *manifest.dataset_releases,
+                *manifest.factor_snapshots,
+                *manifest.factor_series,
+            )
         }
         factor_snapshot_ids = {
             item.artifact_id for item in manifest.factor_snapshots
@@ -1052,8 +1063,14 @@ def _execute_research_plan(
         fill_quantity = (
             raw_fill_quantity // info.lot_size * info.lot_size
         )
+        # issue #396:执行日全天停牌 → 拒单(fail-visible),持仓保留至复牌,
+        # 不再按停牌前最后一个可见 close 静默成交。优先级在显式拒单清单之后
+        # (冻结输入指定拒单的语义不变);shortfall 与其他拒单分支同口径。
         if instruction.symbol in item.rejected_symbols:
             reject_reason = "冻结研究输入指定拒单"
+            fill_quantity = 0
+        elif instruction.symbol in item.suspended_symbols:
+            reject_reason = "停牌日拒绝成交(execution_suspended)"
             fill_quantity = 0
         elif fill_quantity <= 0:
             reject_reason = "成交比例不足一个合法交易单位"
@@ -1076,7 +1093,67 @@ def _execute_research_plan(
             )
             continue
 
+        fill_price = Decimal(str(item.execution_prices[instruction.symbol]))
+        commission_rate = (
+            info.commission_rate
+            if info.commission_rate is not None
+            else manifest.strategy_spec.execution_model.commission_rate
+        )
+        commission_min = (
+            info.commission_min
+            if info.commission_min is not None
+            else manifest.strategy_spec.execution_model.minimum_commission
+        )
+        slippage_bps = (
+            info.slippage_bps
+            if info.slippage_bps > 0
+            else manifest.strategy_spec.execution_model.slippage_bps
+        )
+        # issue #337:末端买入按可用现金裁剪 —— sizing 按决策价预算、成交按
+        # 执行价结算,价差漂移逐笔累积会把现金缓冲吃穿;削减不足一手的末端
+        # 买入并记入 fill_shortfall,而不是让整条 run 被「现金为负」拒绝。
         filled = Decimal(fill_quantity)
+        if instruction.action is ResearchFillAction.OPEN_LONG:
+            clipped_quantity = _clip_buy_quantity_to_cash(
+                fill_quantity=fill_quantity,
+                price=fill_price,
+                info=info,
+                available_cash=state.cash,
+                commission_rate=commission_rate,
+                commission_min=commission_min,
+                slippage_bps=float(slippage_bps),
+            )
+            if clipped_quantity > 0:
+                logger.warning(
+                    "research_run.fill_clipped_by_cash",
+                    symbol=instruction.symbol,
+                    decision_index=index,
+                    business_date=item.business_date.isoformat(),
+                    ordered_shares=fill_quantity,
+                    clipped_shares=clipped_quantity,
+                    available_cash=str(state.cash),
+                    message="末端买入按可用现金裁剪,削减部分计入 fill_shortfall",
+                )
+                filled -= Decimal(clipped_quantity)
+        if filled <= 0:
+            # 裁剪后不足一手:整单拒单(现金不足),记全额 shortfall。
+            orders.append(
+                ResearchOrder(
+                    research_order_id=order_id,
+                    instruction_id=instruction.instruction_id,
+                    symbol=instruction.symbol,
+                    action=instruction.action,
+                    quantity=order_quantity,
+                    status=ResearchOrderStatus.REJECTED,
+                    reject_reason="可用现金不足一手,末端买入按现金裁剪拒单",
+                )
+            )
+            state.fill_shortfall += _notional(
+                order_quantity,
+                item.execution_prices[instruction.symbol],
+                info,
+            )
+            continue
         status = (
             ResearchOrderStatus.FILLED
             if filled == order_quantity
@@ -1095,29 +1172,13 @@ def _execute_research_plan(
         if filled < order_quantity:
             state.fill_shortfall += _notional(
                 order_quantity - filled,
-                item.execution_prices[instruction.symbol],
+                float(fill_price),
                 info,
             )
-        fill_price = Decimal(str(item.execution_prices[instruction.symbol]))
         notional = _notional(filled, float(fill_price), info)
-        commission_rate = (
-            info.commission_rate
-            if info.commission_rate is not None
-            else manifest.strategy_spec.execution_model.commission_rate
-        )
-        commission_min = (
-            info.commission_min
-            if info.commission_min is not None
-            else manifest.strategy_spec.execution_model.minimum_commission
-        )
         commission = max(
             notional * Decimal(str(commission_rate)),
             Decimal(str(commission_min)),
-        )
-        slippage_bps = (
-            info.slippage_bps
-            if info.slippage_bps > 0
-            else manifest.strategy_spec.execution_model.slippage_bps
         )
         # Pydantic JSON 重载可能把 ``5`` 还原为 ``5.0``;先归一为 float,
         # 避免 Decimal 指数差异让等值金额产生不同的重放 checksum。
@@ -1166,6 +1227,56 @@ def _notional(
         * Decimal(str(price))
         * Decimal(str(info.multiplier))
     )
+
+
+def _clip_buy_quantity_to_cash(
+    *,
+    fill_quantity: int,
+    price: Decimal,
+    info: AssetLotInfo,
+    available_cash: Decimal,
+    commission_rate: float,
+    commission_min: float,
+    slippage_bps: float,
+) -> int:
+    """末端买入按可用现金裁剪,返回应削减的股数(issue #337;0 = 零削减)。
+
+    买入总成本上界 = notional x (1 + commission_rate + slippage_frac)
+    + commission_min(佣金取 max(比例, 最低佣金) 的保守放缩)。按可用现金
+    反解可负担 notional,向下取整到手数 —— 手数粒度天然构成现金的漂移
+    余量,保证成交后 ``cash >= 0``:账本的「现金为负」fail-closed 检查
+    保留作账本 bug 兜底,不再被正常的决策价/执行价漂移触发。现金充裕时
+    零削减,正常路径行为不变。
+    """
+
+    def _cost_upper_bound(notional: Decimal) -> Decimal:
+        return notional * (
+            Decimal("1")
+            + Decimal(str(commission_rate))
+            + Decimal(str(slippage_bps)) / Decimal("10000")
+        ) + Decimal(str(commission_min))
+
+    notional = _notional(Decimal(fill_quantity), float(price), info)
+    if available_cash >= _cost_upper_bound(notional):
+        return 0
+    unit = price * Decimal(str(info.multiplier))
+    if unit <= 0:
+        return 0
+    affordable_notional = (
+        available_cash - Decimal(str(commission_min))
+    ) / (
+        Decimal("1")
+        + Decimal(str(commission_rate))
+        + Decimal(str(slippage_bps)) / Decimal("10000")
+    )
+    if affordable_notional <= 0:
+        return fill_quantity
+    affordable_shares = (
+        int(affordable_notional / unit) // info.lot_size * info.lot_size
+    )
+    if affordable_shares >= fill_quantity:
+        return 0
+    return fill_quantity - affordable_shares
 
 
 def _apply_research_fill(

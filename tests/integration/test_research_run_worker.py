@@ -603,3 +603,65 @@ class TestResearchRunWorkerEndToEnd:
             assert job_row.status == BackgroundJobStatus.SUCCEEDED.value
             # 终态 phase 保持与既有消费方兼容的 ``research_run:<status>``。
             assert job_row.phase == "research_run:completed"
+
+
+# ---- 2026-09-13 事故回归:worker 被强杀 → lease 回收重排 → attempt 2 续跑 ----
+
+
+class TestHardKillResidueResume:
+    async def test_hard_kill_residue_run_resumes_on_next_attempt(
+        self, engine: AsyncEngine
+    ) -> None:
+        """强杀残留(run 行 RUNNING + job 已重排 queued)→ attempt 2 自动续跑。
+
+        事故链(2026-09-13):worker 被 taskkill 强杀 → attempt 1 无标注死亡
+        (run 行残留 RUNNING、lease 过期)→ reclaim+requeue 后 attempt 2 领取
+        → coordinator 的 RUNNING 重入门禁原样返回未执行 record → job 以
+        failed + 空错误码收口、run 行永久悬挂 RUNNING。修复:执行器持有
+        claim 时先把残留 RUNNING 收敛为 INTERRUPTED(process_restart 语义),
+        coordinator 走 #305/#314 恢复通道续跑。
+        """
+        manifest = _manifest("hardkill")
+        run_id = await _queue_double_write(engine, manifest)
+
+        # attempt 1「被硬杀」:run 行置 RUNNING、job 行置 RUNNING(无任何标注)。
+        async with session_factory(engine)() as session:
+            store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            await store.transition(
+                run_id,
+                expected=frozenset({ResearchRunStatus.QUEUED}),
+                target=ResearchRunStatus.RUNNING,
+            )
+            await store.checkpoint()
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.job_id is not None
+            job_row = await BackgroundJobRepository(session).get(run_row.job_id)
+            assert job_row is not None
+            job_row.status = BackgroundJobStatus.RUNNING.value
+            await session.commit()
+
+        # lease 过期回收 + 重排的合成效果:job 回到 queued 等待重领,run 行
+        # 仍残留 RUNNING(事故的关键形态)。
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.job_id is not None
+            job_row = await BackgroundJobRepository(session).get(run_row.job_id)
+            assert job_row is not None
+            job_row.status = BackgroundJobStatus.QUEUED.value
+            await session.commit()
+
+        # attempt 2:执行器收敛残留 → coordinator 恢复通道 → COMPLETED。
+        worker = _build_worker(engine)
+        await _drain_worker(worker)
+
+        async with session_factory(engine)() as session:
+            run_row = await ResearchRunRepository(session).get(run_id)
+            assert run_row is not None
+            assert run_row.status == ResearchRunStatus.COMPLETED.value
+            assert run_row.job_id is not None
+            job_row = await BackgroundJobRepository(session).get(run_row.job_id)
+            assert job_row is not None
+            assert job_row.status == BackgroundJobStatus.SUCCEEDED.value

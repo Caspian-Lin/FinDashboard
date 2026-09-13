@@ -22,6 +22,8 @@ SUCCEEDED = "succeeded"
 FAILED = "failed"
 _VALID_STATUSES = {RUNNING, SUCCEEDED, FAILED}
 _VALID_KINDS = {"factor", "strategy"}
+#: issue #359:factor 双轨执行协议(kind=factor 下的 mode 维度)
+_VALID_MODES = {"factor", "factor_series"}
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,8 @@ class ResearchCodeRun:
     run_id: str
     job_id: str | None
     kind: str
+    #: factor(单日截面 v1)| factor_series(区间执行 v2,issue #359)
+    mode: str
     name: str
     commit: str
     code_checksum: str
@@ -77,6 +81,7 @@ class ResearchCodeRunRepository:
         image: str,
         image_digest: str,
         artifact_dir: str,
+        mode: str = "factor",
         job_id: str | None = None,
         artifact_id: str | None = None,
         params: dict[str, Any] | None = None,
@@ -85,11 +90,14 @@ class ResearchCodeRunRepository:
         """登记一次沙箱执行(status=running),返回 run 记录。"""
         if kind not in _VALID_KINDS:
             raise ValueError(f"非法 kind {kind!r},允许: {sorted(_VALID_KINDS)}")
+        if mode not in _VALID_MODES:
+            raise ValueError(f"非法 mode {mode!r},允许: {sorted(_VALID_MODES)}")
         now = datetime.now(UTC)
         model = ResearchCodeRunModel(
             run_id=run_id or generate_run_id(),
             job_id=job_id,
             kind=kind,
+            mode=mode,
             name=name,
             commit=commit,
             code_checksum=code_checksum,
@@ -196,6 +204,7 @@ def _to_record(model: ResearchCodeRunModel) -> ResearchCodeRun:
         run_id=model.run_id,
         job_id=model.job_id,
         kind=model.kind,
+        mode=model.mode,
         name=model.name,
         commit=model.commit,
         code_checksum=model.code_checksum,

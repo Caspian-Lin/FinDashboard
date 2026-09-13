@@ -44,10 +44,10 @@ from finboard_shared.background_jobs import (
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
-#: 允许通过 API 直接提交的 kind 白名单(只放 echo 自检与研究数据摄取;
-#: 其余业务 kind 由 #143/#144/#171 在各自语义化端点 / MCP 里创建,
+#: 允许通过 API 直接提交的 kind 白名单(只放 echo 自检与数据集同步;
+#: 其余业务 kind 由 #143/#144/#392 在各自语义化端点 / MCP 里创建,
 #: 避免前端任意起 job)。
-_ALLOWED_KINDS: frozenset[str] = frozenset({"echo", "research_data_sync"})
+_ALLOWED_KINDS: frozenset[str] = frozenset({"echo", "dataset_sync"})
 
 
 @router.post("", response_model=JobOut, status_code=202)
@@ -103,10 +103,12 @@ async def create_job(
 
 @router.get("", response_model=list[JobOut])
 async def list_jobs(
+    response: Response,
     kind: list[str] | None = Query(default=None),
     status: list[str] | None = Query(default=None),
     queue: list[str] | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     archived: str = Query(default="exclude"),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[JobOut]:
@@ -118,13 +120,20 @@ async def list_jobs(
             status_code=422,
             detail=f"未知归档过滤值: {archived}(合法 {sorted(ARCHIVE_FILTER_VALUES)})",
         )
-    rows = await BackgroundJobRepository(session).list_recent(
+    repo = BackgroundJobRepository(session)
+    rows = await repo.list_recent(
         kinds=kind,
         statuses=status,
         queues=queue,
         limit=limit,
+        offset=offset,
         archived=archived,
     )
+    # 总数经响应头透出(issue #373 分页):与 body 分离,旧调用方零感知。
+    total = await repo.count_recent(
+        kinds=kind, statuses=status, queues=queue, archived=archived
+    )
+    response.headers["X-Total-Count"] = str(total)
     return [JobOut.model_validate(row) for row in rows]
 
 

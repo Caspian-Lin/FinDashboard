@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, desc, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,9 +31,28 @@ from finboard_shared.background_jobs import (
 #: 「临界区串行化」,堵住并发 claimer 双双通过计数检查的 TOCTOU 竞态。
 _CLAIM_ADVISORY_LOCK_KEY = 0x46696E44  # "FinD"
 
+#: phase 写入上限(issue #348):与 ``background_jobs.phase`` 列宽(迁移
+#: d4e5f6a7b8c9 加宽至 256)一致。超长完成语在收尾写 phase 时曾触发
+#: ``StringDataRightTruncation``,把实际已完成的任务误报 failed —— 列加宽
+#: 之外,``update_progress`` 写入前再按此上限硬截兜底,防未来更长的文案
+#: 复发。phase 是短标签,就地截断即可;error_summary 的保头保尾截断见
+#: ``finboard_backtest.background_jobs.contracts.truncate_summary``(#263,
+#: persistence 不反向依赖 backtest,故不共用)。
+_PHASE_MAX_LENGTH = 256
+
 
 class BackgroundJobPersistenceConflictError(RuntimeError):
     """数据库中的幂等内容或状态与请求冲突。"""
+
+
+#: 幂等键「可被同键新建取代」的死状态(issue #371)。failed/cancelled 是状态机
+#: 永不回访的终态:同 payload 重试不再返回尸体,而是新建 job(此前同参数重试
+#: 被失败记录以 conflict 挡死,修复后的任务无法重新入队)。succeeded 仍返回旧
+#: 记录(幂等命中;对内容寻址的 factor_series_build 即缓存命中);interrupted
+#: 保留单行语义(lease 回收自动重排与 #305 replay 通道依赖它)。
+_RECREATABLE_STATUSES = frozenset(
+    {BackgroundJobStatus.FAILED.value, BackgroundJobStatus.CANCELLED.value}
+)
 
 
 class BackgroundJobRepository:
@@ -65,7 +84,9 @@ class BackgroundJobRepository:
         max_attempts: int,
         requested_by: str,
     ) -> tuple[BackgroundJobModel, bool]:
-        """幂等创建。同 idempotency_key 已存在则返回旧记录(created=False)。"""
+        """幂等创建。同 idempotency_key 的活跃任务已存在则返回旧记录
+        (created=False);旧记录为 failed/cancelled 死行时放行同键新建
+        (issue #371,同参数重试不再被失败尸体挡死)。"""
 
         existing = await self.get_by_idempotency_key(idempotency_key)
         if existing is None:
@@ -75,7 +96,9 @@ class BackgroundJobRepository:
                 raise BackgroundJobPersistenceConflictError(
                     "相同 job_id/idempotency_key 对应不同 payload"
                 )
-            return existing, False
+            if existing.status not in _RECREATABLE_STATUSES:
+                return existing, False
+            # failed/cancelled 死行:部分唯一索引只约束活跃行,落新行。
         row = BackgroundJobModel(
             job_id=job_id,
             idempotency_key=idempotency_key,
@@ -97,7 +120,12 @@ class BackgroundJobRepository:
             existing = await self.get_by_idempotency_key(idempotency_key)
             if existing is None:
                 existing = await self.get(job_id)
-            if existing is None:
+            if (
+                existing is None
+                or existing.status in _RECREATABLE_STATUSES
+            ):
+                # 部分唯一索引只可能撞活跃行;查不到活跃行说明是 job_id
+                # 冲突等异常,原样上抛。
                 raise
             if existing.payload_checksum != payload_checksum:
                 raise BackgroundJobPersistenceConflictError(
@@ -117,8 +145,23 @@ class BackgroundJobRepository:
     async def get_by_idempotency_key(
         self, idempotency_key: str
     ) -> BackgroundJobModel | None:
-        stmt = select(BackgroundJobModel).where(
-            BackgroundJobModel.idempotency_key == idempotency_key
+        """按幂等键取「当前」任务(#371):活跃行优先,其余取创建时间最新。
+
+        死行(failed/cancelled)放行同键新建后,同键可能有多行 —— 查询语义
+        固定为:活跃行(含 succeeded/interrupted)优先,无活跃行时取最新的
+        死行。
+        """
+        stmt = (
+            select(BackgroundJobModel)
+            .where(BackgroundJobModel.idempotency_key == idempotency_key)
+            .order_by(
+                case(
+                    (BackgroundJobModel.status.in_(_RECREATABLE_STATUSES), 1),
+                    else_=0,
+                ),
+                desc(BackgroundJobModel.created_at),
+            )
+            .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
@@ -129,13 +172,15 @@ class BackgroundJobRepository:
         statuses: Iterable[str] | None = None,
         queues: Iterable[str] | None = None,
         limit: int = 100,
+        offset: int = 0,
         archived: str = "exclude",
     ) -> list[BackgroundJobModel]:
         """最近任务列表(issue #221:``archived`` 维度过滤)。
 
         ``archived`` 取值见 ``ARCHIVE_FILTER_VALUES``:``exclude``(默认)只看
         未归档;``only`` 只看已归档;``all`` 不区分。归档行数据不删除,
-        单查 ``get`` 不受此参数影响。
+        单查 ``get`` 不受此参数影响。``offset`` 供 REST 分页(issue #373):
+        与 ``count_recent`` 同过滤条件配对使用。
         """
 
         if archived not in ARCHIVE_FILTER_VALUES:
@@ -156,7 +201,36 @@ class BackgroundJobRepository:
         stmt = stmt.order_by(
             BackgroundJobModel.created_at.desc(), BackgroundJobModel.id.desc()
         ).limit(limit)
+        if offset:
+            stmt = stmt.offset(offset)
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def count_recent(
+        self,
+        *,
+        kinds: Iterable[str] | None = None,
+        statuses: Iterable[str] | None = None,
+        queues: Iterable[str] | None = None,
+        archived: str = "exclude",
+    ) -> int:
+        """与 :meth:`list_recent` 同过滤条件的总行数(issue #373 分页 total)。"""
+
+        if archived not in ARCHIVE_FILTER_VALUES:
+            raise BackgroundJobPersistenceConflictError(
+                f"未知归档过滤值: {archived}(合法 {sorted(ARCHIVE_FILTER_VALUES)})"
+            )
+        stmt = select(func.count()).select_from(BackgroundJobModel)
+        if archived == "only":
+            stmt = stmt.where(BackgroundJobModel.archived_at.is_not(None))
+        elif archived == "exclude":
+            stmt = stmt.where(BackgroundJobModel.archived_at.is_(None))
+        if kinds is not None:
+            stmt = stmt.where(BackgroundJobModel.kind.in_(tuple(kinds)))
+        if statuses is not None:
+            stmt = stmt.where(BackgroundJobModel.status.in_(tuple(statuses)))
+        if queues is not None:
+            stmt = stmt.where(BackgroundJobModel.queue.in_(tuple(queues)))
+        return int((await self._session.execute(stmt)).scalar_one())
 
     # --------------------------------------------------------------- transition
     async def transition(
@@ -323,7 +397,9 @@ class BackgroundJobRepository:
             row.progress_done, done
         )
         if phase is not None:
-            row.phase = phase
+            # issue #348:超长 phase 截断兜底,宁截标签不炸写库(任务被误报
+            # failed 比丢一段展示文案严重得多)。
+            row.phase = phase[:_PHASE_MAX_LENGTH]
         row.heartbeat_at = datetime.now(UTC)
         row.updated_at = row.heartbeat_at
         await self._session.flush()
@@ -513,6 +589,7 @@ class BackgroundJobRepository:
         result_ref: str | None = None,
         error_code: str | None = None,
         error_summary: str | None = None,
+        timing: dict[str, object] | None = None,
     ) -> BackgroundJobModel:
         """worker 在 executor 返回后统一收口(running → succeeded/failed/cancelled)。"""
 
@@ -530,6 +607,9 @@ class BackgroundJobRepository:
         )
         if result_ref is not None:
             row.result_ref = result_ref
+        if timing is not None:
+            # job 级耗时/IO 聚合(issue #383);成功与失败路径都可携带。
+            row.timing = timing
         await self._session.flush()
         return row
 

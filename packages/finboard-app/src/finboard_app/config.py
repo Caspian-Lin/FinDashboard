@@ -48,12 +48,21 @@ class Settings(BaseSettings):
     db_max_overflow: int = 10
 
     # ---- 历史行情数据源 ----
-    data_provider: Literal["akshare", "yfinance", "tushare"] = "akshare"
-    data_fallback_provider: Literal["akshare", "yfinance", "tushare"] | None = None
+    # 主源默认 tushare(issue #393):股票 daily+adj_factor+suspend_d 路由
+    # 已就绪(#341 实测 2000 积分档可调),akshare 降级为副源(回落链语义
+    # 保持 #257:primary 空结果 / 异常才回退)。回退默认 akshare:tushare
+    # 不覆盖的 ETF / 期货(#341/#267)由 akshare 兜底。
+    data_provider: Literal["akshare", "yfinance", "tushare"] = "tushare"
+    data_fallback_provider: Literal["akshare", "yfinance", "tushare"] | None = "akshare"
     tushare_token: str = Field(default="", repr=False)
     tushare_requests_per_minute: int = 200
     tushare_daily_request_limit: int = 100_000
     tushare_usage_file: str = "data_cache/tushare_usage.json"
+    # ParquetCache 进程内读缓存的近似字节上限(issue #440):默认 None = 不限
+    # (行为与 issue #287 元素数上限一致)。条目按「元素数 x 每元素实测平均
+    # 字节」近似计量,非精确深度量;超预算按 LRU 从最旧淘汰,单条目超预算
+    # 不缓存。全市场日频工作集可到数百 MB,长 run 建议设 512MB(536870912)。
+    read_cache_max_bytes: int | None = None
     # 研究特征快照的跨标的读取并发;不影响实盘交易线程。
     feature_snapshot_max_concurrency: int = Field(default=8, ge=1, le=64)
     # 特征快照使用的独立计算进程数;0 表示只使用旧的进程内 worker。
@@ -139,6 +148,10 @@ class Settings(BaseSettings):
     # 单次提交文件数 / 单文件字节数上限(静态校验,纵深防御第一层)。
     research_code_max_files: int = Field(default=32, ge=1)
     research_code_max_file_bytes: int = Field(default=262144, ge=1024)
+    # 因子序列 parquet 工件根目录(issue #463):research_factor_series 的
+    # values 改存工件(content_checksum = 文件 sha256)。相对路径按进程
+    # 工作目录解析;读取端(repo)缺省回退同一默认值。
+    factor_series_artifact_root: str = "data_cache/factor_series"
 
     # ---- 研究代码沙箱(issue #216)----
     # 一次性 Docker 容器执行 agent 因子代码(单形态:开发/生产统一 Docker,
@@ -147,11 +160,16 @@ class Settings(BaseSettings):
     research_sandbox_enabled: bool = False
     # 沙箱镜像(tag 与 finboard-research-kit 版本绑定,构建见
     # docker/research-sandbox/;run 记录同时归档镜像 digest)。
-    research_sandbox_image: str = "finboard-research-sandbox:0.2.0"
+    research_sandbox_image: str = "finboard-research-sandbox:0.3.2"
     # 整跑墙钟超时(秒),超时 docker kill;内存 MB(memory-swap 同值禁 swap);
     # CPU 配额;进程数上限;容器内非 root uid(镜像内 sandbox 用户)。
-    research_sandbox_timeout_seconds: float = Field(default=300.0, ge=1.0)
-    research_sandbox_memory_mb: int = Field(default=2048, ge=256)
+    # 容量规划(issue #374):容器内存 ≈ 2GB 基线 + 挂载行数 x ~0.3KB(pandas
+    # 整表加载对象开销)——4096 档覆盖全市场 daily_metrics ~18 个月窗口
+    # (≈700 万行,2026-09-07 BJ-CF3D90915A75443C 在 2048 档实测 OOM);
+    # 更长窗口(如 3 年 ≈ 1100 万行)经 env 提到 8192。无 swap,并发 build
+    # 时并发数 x 本值须 ≤ Docker Desktop WSL2 可用内存。
+    research_sandbox_timeout_seconds: float = Field(default=600.0, ge=1.0)
+    research_sandbox_memory_mb: int = Field(default=4096, ge=256)
     research_sandbox_cpus: float = Field(default=2.0, ge=0.5)
     research_sandbox_pids_limit: int = Field(default=256, ge=16)
     research_sandbox_user: str = "65532"
@@ -216,6 +234,9 @@ class Settings(BaseSettings):
     opencode_web_cors_origins: str = ""
     # 宿主机侧工作目录(仓库根;含 ``.opencode`` / ``.agents``,bind mount 进容器)。
     opencode_workdir: str = "."
+    # 研究记录目录(仓库 ``docs/research/`` 三件套 + rounds/,只读暴露给前端,
+    # 见 finboard_api.routes.research_docs;canonical 仍是仓库文件)。
+    research_docs_dir: str = "docs/research"
     # 子进程日志路径。
     opencode_log_path: str = ".opencode/logs/opencode-web.log"
     # 额外注入子进程的环境变量(LLM provider Key 等;逗号分隔 KEY=VAL)。
@@ -282,3 +303,21 @@ def load_settings(env_file: str | None = None) -> Settings:
     if env_file is not None:
         return Settings(_env_file=env_file)  # type: ignore[call-arg]
     return Settings()
+
+
+#: psycopg(libpq)连接黑洞加固参数(#450)。WSL2 NAT 转发下的长驻连接池
+#: 实测会被静默黑洞化(对端无 RST,本地 send 成功、recv 永不返回):worker
+#: 事件循环上的任务全体冻结在 ``await`` 上、心跳停摆、相位不动,僵尸检测与
+#: 协作取消同循环同死。TCP keepalive 让死连接在 ~keepalives_idle + count x
+#: interval(默认 ~60s)内显式报错,由调用方(逐操作短会话等)按连接级
+#: 失败处理;非 postgres 驱动(sqlite 等)返回空 dict 不影响测试。
+def postgres_connect_args(db_url: str) -> dict[str, int]:
+    if not db_url.startswith(("postgresql://", "postgresql+psycopg://", "postgres://")):
+        return {}
+    return {
+        "connect_timeout": 10,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 3,
+    }

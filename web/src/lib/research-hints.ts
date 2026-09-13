@@ -202,6 +202,17 @@ export const RESEARCH_HINTS = {
         en: "A factor experiment answers: does this factor truly predict future returns? Evaluated via IC analysis, layered backtests and more.",
       },
     },
+    predefined: {
+      title: { zh: "平台因子", en: "Platform factors" },
+      description: {
+        zh: "平台预置的「公式即代码」因子目录（动量/风险/流动性/基本面等族），只读。",
+        en: "The read-only catalog of platform-defined formula-as-code factors (momentum / risk / liquidity / fundamental families and more).",
+      },
+      detail: {
+        zh: "预置因子由平台实现并冻结公式，不接受用户代码；经 factor_series_build 构建为序列后在策略规格中以 p_<名称> 引用。",
+        en: "Platform factors are implemented with frozen formulas and accept no user code; build them into series via factor_series_build and reference them as p_<name> in strategy specs.",
+      },
+    },
   },
   strategy: {
     studio: {
@@ -316,6 +327,35 @@ export const RESEARCH_HINTS = {
       detail: {
         zh: "冻结是可复现的基础。即使数据源更新了，已冻结的运行仍使用旧版本数据重算。",
         en: "Freezing is the foundation of reproducibility. Even after the data source updates, a frozen run recomputes with the old versions.",
+      },
+    },
+    statusFilter: {
+      title: { zh: "运行状态", en: "Run status" },
+      description: {
+        zh: "queued=排队等待 worker；running=执行中；completed/failed/interrupted/rejected/cancelled=终态。",
+        en: "queued=waiting for a worker; running=executing; completed/failed/interrupted/rejected/cancelled=terminal.",
+      },
+      detail: {
+        zh: "interrupted 表示进程中断(可经重放恢复)；rejected 表示风控/约束校验拒绝(重放也不会通过)。",
+        en: "interrupted means the process was cut off (replay to resume); rejected means a risk/constraint check refused (replay will not pass).",
+      },
+    },
+    jobProgress: {
+      title: { zh: "后台任务进度", en: "Background job progress" },
+      description: {
+        zh: "研究运行由离线 worker 消费统一任务队列执行；此处展示阶段(phase)、逐决策进度与心跳。",
+        en: "Runs are executed by an offline worker consuming the unified job queue; this shows phase, per-decision progress and heartbeat.",
+      },
+      detail: {
+        zh: "phase 形如 research_run:<stage>#序号@日期；数据加载期显示 decision_load k/N。进度长时间不动而心跳仍在刷新可能是卡死。",
+        en: "phase looks like research_run:<stage>#n@date; loading shows decision_load k/N. Stalled progress with a live heartbeat may indicate a hang.",
+      },
+    },
+    artifacts: {
+      title: { zh: "决策产物", en: "Decision artifacts" },
+      description: {
+        zh: "每个决策时点的逐阶段产物,带 trace_id 血缘与内容校验和;点击行展开 payload 原始内容。",
+        en: "Per-decision stage artifacts with trace_id lineage and content checksums; click a row to expand its raw payload.",
       },
     },
   },

@@ -108,16 +108,16 @@ _EXPECTED_TOOLS = {
     "finboard_portfolio_sizing",
     "finboard_portfolio_feasibility",
     "finboard_portfolio_attribution",
-    # #136 任务队列工具(2 只读 + 2 写)+ #221 归档(2 写)
+    # #136 任务队列工具(2 只读 + 2 写)+ #221 归档(2 写)+ #443 等待(1 只读)
     "finboard_job_list",
     "finboard_job_get",
+    "finboard_job_wait",
     "finboard_job_enqueue",
     "finboard_job_cancel",
     "finboard_job_archive",
     "finboard_job_unarchive",
     # #137 数据写操作工具(10 写 + 2 只读)
     "finboard_data_fetch",
-    "finboard_data_fetch_all",
     "finboard_data_sync_universe",
     "finboard_data_bulk_download_start",
     "finboard_data_quality_repair",
@@ -157,6 +157,9 @@ _EXPECTED_TOOLS = {
     # #216 研究代码沙箱执行工具(1 只读 + 1 写;一次性 Docker 容器)
     "finboard_research_code_run",
     "finboard_research_code_run_get",
+    # #360 因子序列工件工具(1 只读 + 1 写;内容寻址缓存 + 托管重建)
+    "finboard_factor_series_get",
+    "finboard_factor_series_build",
 }
 
 # 永久不得暴露的实盘 / 凭证能力关键字。

@@ -65,6 +65,11 @@ class FactorAnalysisError(RuntimeError):
     """Alpha 分析输入不满足最小样本或时点约束。"""
 
 
+#: 动量特征默认回看窗口——签名默认与 research_run 预热报错提示(#368)
+#: 共用单一事实来源,防两处漂移。
+DEFAULT_MOMENTUM_LOOKBACK = 20
+
+
 class RiskModelError(RuntimeError):
     """风险模型缺少必要数据或无法得到稳定估计。"""
 
@@ -108,6 +113,8 @@ class _CloseHistoryProcessTask:
     start: date
     end: date
     decision_at: datetime
+    #: issue #336:next_open 执行价基的 run 附带 open 平行序列;特征任务恒 False。
+    include_open: bool = False
 
 
 #: worker 进程本地已校验的 artifact 集合(spawn 后为空集,按进程记忆化)。
@@ -718,7 +725,7 @@ async def build_cross_section_feature_snapshot_from_releases(
     providers: Mapping[str, FrozenReleaseProvider],
     decision_at: datetime,
     code_version: str,
-    momentum_lookback: int = 20,
+    momentum_lookback: int = DEFAULT_MOMENTUM_LOOKBACK,
     volatility_windows: tuple[int, ...] = (20, 60, 120),
     max_concurrency: int = 8,
     on_progress: Callable[[str, int, int], None] | None = None,
@@ -917,7 +924,7 @@ def build_cross_section_feature_snapshot(
     code_version: str,
     price_history: dict[str, list[float]] | None = None,
     price_available_at: dict[str, datetime] | None = None,
-    momentum_lookback: int = 20,
+    momentum_lookback: int = DEFAULT_MOMENTUM_LOOKBACK,
     volatility_windows: tuple[int, ...] = (20, 60, 120),
 ) -> FeatureSnapshot:
     """把 A 股时点化横截面输入转换为统一 FeatureSnapshot。"""
@@ -1055,32 +1062,31 @@ def _snapshot_definition_neutralization(feature_name: str) -> tuple[str, ...]:
         return ()
 
 
-def _build_price_observations(
+def price_observations_from_closes(
     *,
     source: str,
     source_version: str,
     symbol: str,
     market: Market,
     asset_class: AssetClass,
-    columns: CloseHistoryColumns,
+    closes: np.ndarray,
+    last_timestamp: datetime | None,
+    last_available_at: datetime,
     momentum_lookback: int,
     volatility_windows: tuple[int, ...],
 ) -> list[FeatureObservation]:
-    """把单个标的的列式 PIT close(#300)转换为价格特征观测。
+    """价格特征观测数学段(close 序列尾部窗口的纯函数,issue #450 追续)。
 
-    与对象路径逐值等价:``closes`` float64 直出与
-    ``np.asarray([float(item.close) for item in points])`` 逐值相等,
-    ``last_timestamp`` / ``last available_at`` 即旧路径 ``points[-1]`` 的
-    timestamp / available_at,特征数学段不变。
+    从 :func:`_build_price_observations` 抽出:输入收窄为 close 序列 +
+    末根 timestamp + 末根 available_at 三个原语,使 close 矩阵切片(#439)
+    能直接供数,跳过逐期整文件重读;特征数学(momenta / 滚动窗口std /
+    下行波动)只依赖序列尾部的连续元素,尾部切片与全序列计算逐位等值。
+    ``closes`` 为空返回 ``[]``(与列式空表同语义)。
     """
-
-    closes = columns.closes
     if closes.size == 0:
         return []
+    assert last_timestamp is not None  # 非空序列必有末根 timestamp(原列式路径语义)
     returns = np.diff(closes) / closes[:-1]
-    last_timestamp = columns.last_timestamp
-    last_available_at = columns.available_at[-1]
-    assert last_timestamp is not None
 
     def _observation(feature_name: str, value: float) -> FeatureObservation:
         return FeatureObservation(
@@ -1123,6 +1129,43 @@ def _build_price_observations(
                 )
             )
     return observations
+
+
+def _build_price_observations(
+    *,
+    source: str,
+    source_version: str,
+    symbol: str,
+    market: Market,
+    asset_class: AssetClass,
+    columns: CloseHistoryColumns,
+    momentum_lookback: int,
+    volatility_windows: tuple[int, ...],
+) -> list[FeatureObservation]:
+    """把单个标的的列式 PIT close(#300)转换为价格特征观测。
+
+    与对象路径逐值等值:``closes`` float64 直出与
+    ``np.asarray([float(item.close) for item in points])`` 逐值相等,
+    ``last_timestamp`` / ``last available_at`` 即旧路径 ``points[-1]`` 的
+    timestamp / available_at。数学段委托 :func:`price_observations_from_closes`
+    (矩阵切片路径共用同一实现,避免双源漂移)。
+    """
+
+    closes = columns.closes
+    if closes.size == 0:
+        return []
+    return price_observations_from_closes(
+        source=source,
+        source_version=source_version,
+        symbol=symbol,
+        market=market,
+        asset_class=asset_class,
+        closes=closes,
+        last_timestamp=columns.last_timestamp,
+        last_available_at=columns.available_at[-1],
+        momentum_lookback=momentum_lookback,
+        volatility_windows=volatility_windows,
+    )
 
 
 def _init_price_feature_process(
@@ -1170,12 +1213,15 @@ def _read_close_history_in_worker(
     start: date,
     end: date,
     decision_at: datetime,
+    *,
+    include_open: bool = False,
 ) -> CloseHistoryColumns:
     """worker 进程内读取单标的列式 PIT close 历史(#301)。
 
     特征任务与 close 矩阵任务共用的读半段:artifact 校验按 worker 进程本地
     记忆化(冻结文件不可变,与主进程 provider 的每实例一次语义一致),
     D1 走列式直出,其它周期回退对象路径后转列式容器。
+    issue #336:``include_open=True`` 时附带 open 平行序列。
     """
 
     item = context.instruments.get(code)
@@ -1200,6 +1246,7 @@ def _read_close_history_in_worker(
                 context.period,
                 start,
                 end,
+                include_open,
             ),
             market=item.market,
             decision_at=decision_at,
@@ -1220,6 +1267,9 @@ def _read_close_history_in_worker(
         ),
         closes=np.array([float(bar.close) for bar in visible], dtype=np.float64),
         last_timestamp=visible[-1].timestamp if visible else None,
+        opens=np.array([float(bar.open) for bar in visible], dtype=np.float64)
+        if include_open
+        else None,
     )
 
 
@@ -1232,7 +1282,12 @@ def _compute_close_history_process_task(
     if context is None:
         raise RuntimeError("特征计算进程未初始化")
     columns = _read_close_history_in_worker(
-        context, task.code, task.start, task.end, task.decision_at
+        context,
+        task.code,
+        task.start,
+        task.end,
+        task.decision_at,
+        include_open=task.include_open,
     )
     return task.code, columns
 
@@ -1580,7 +1635,7 @@ async def build_price_feature_snapshot(
     provider: FrozenReleaseProvider,
     decision_at: datetime,
     code_version: str,
-    momentum_lookback: int = 20,
+    momentum_lookback: int = DEFAULT_MOMENTUM_LOOKBACK,
     volatility_windows: tuple[int, ...] = (20, 60, 120),
     max_concurrency: int = 8,
     process_workers: int = 0,
@@ -1689,6 +1744,30 @@ async def build_price_feature_snapshot(
     ]
     if not observations:
         raise FactorAnalysisError("冻结发布在决策时点没有足够数据计算价格特征")
+    windows = {"momentum": momentum_lookback, "downside_volatility": 60}
+    windows.update(
+        {f"volatility_{window}d": window for window in volatility_windows}
+    )
+    return _assemble_price_snapshot_from_observations(
+        release=release,
+        decision_at=decision_at,
+        code_version=code_version,
+        observations=observations,
+        momentum_lookback=momentum_lookback,
+        volatility_windows=volatility_windows,
+    )
+
+
+def _assemble_price_snapshot_from_observations(
+    *,
+    release: ResearchDatasetRelease,
+    decision_at: datetime,
+    code_version: str,
+    observations: list[FeatureObservation],
+    momentum_lookback: int,
+    volatility_windows: tuple[int, ...],
+) -> FeatureSnapshot:
+    """按发布元数据装配价格特征快照(列式/矩阵两条产出路径共用,防漂移)。"""
     windows = {"momentum": momentum_lookback, "downside_volatility": 60}
     windows.update(
         {f"volatility_{window}d": window for window in volatility_windows}

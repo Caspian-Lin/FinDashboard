@@ -27,6 +27,7 @@ from finboard_backtest.factors.analysis import (
 )
 from finboard_backtest.factors.catalog import (
     FACTOR_FRAMEWORK_VERSION,
+    PREDEFINED_SCORING_CATALOG,
     RESEARCH_FACTOR_CATALOG,
     FactorCategory,
     FactorDirection,
@@ -41,6 +42,16 @@ from finboard_backtest.factors.combine import (
     CombinationMethod,
     FactorWeight,
     combine_scores,
+)
+from finboard_backtest.factors.eval import (
+    EVAL_REPORT_SCHEMA_VERSION,
+    EXPOSURE_FAMILIES,
+    FactorEvalConfig,
+    FactorEvalReport,
+    evaluate_catalog_on_release,
+    evaluate_catalog_synthetic,
+    evaluate_factor_values,
+    signal_eligible_governance_findings,
 )
 from finboard_backtest.factors.extract import extract_factor_matrix
 from finboard_backtest.factors.scorer import (
@@ -66,8 +77,12 @@ from finboard_backtest.factors.standardize import (
 )
 
 __all__ = [
+    # eval (#403)
+    "EVAL_REPORT_SCHEMA_VERSION",
+    "EXPOSURE_FAMILIES",
     # catalog
     "FACTOR_FRAMEWORK_VERSION",
+    "PREDEFINED_SCORING_CATALOG",
     "RESEARCH_FACTOR_CATALOG",
     # combine
     "CombinationConfig",
@@ -76,6 +91,8 @@ __all__ = [
     "FactorAnalysisReport",
     "FactorCategory",
     "FactorDirection",
+    "FactorEvalConfig",
+    "FactorEvalReport",
     # scorer
     "FactorMatrix",
     "FactorMeta",
@@ -92,6 +109,9 @@ __all__ = [
     "apply_direction",
     "combine_scores",
     "compute_factor_analysis",
+    "evaluate_catalog_on_release",
+    "evaluate_catalog_synthetic",
+    "evaluate_factor_values",
     # extract
     "extract_factor_matrix",
     "fill_missing",
@@ -101,6 +121,7 @@ __all__ = [
     "rank_normalize",
     "regression_neutralize",
     "select_portfolio",
+    "signal_eligible_governance_findings",
     "standardize_series",
     "winsorize",
     "zscore",

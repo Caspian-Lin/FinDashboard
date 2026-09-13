@@ -1,7 +1,7 @@
 [project]
 name = "finboard-research-kit"
-version = "0.1.0"
-description = "研究代码沙箱工具包 —— 因子执行协议 v1(FactorContext / FactorResult / harness)。"
+version = "0.3.2"
+description = "研究代码沙箱工具包 —— 因子执行协议 v1/v2(FactorContext / FactorSeriesContext / harness)。"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }

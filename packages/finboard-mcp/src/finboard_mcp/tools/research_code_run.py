@@ -106,8 +106,9 @@ async def run_enqueue(
                 "invalid_argument",
                 f"research_code_run v1 仅支持 kind=factor,收到 {kind!r};"
                 "策略代码(kind=strategy)不走独立沙箱 run,经 strategy_spec "
-                "code_artifact 引用后由 finboard_run_queue(rebalance_frequency"
-                "=multi_period)逐决策日执行 decide(issue #218)",
+                "code_artifact 引用后由 finboard_run_queue(声明 "
+                "decision_schedule/rebalance_frequency 走 multi_period)"
+                "逐决策日执行 decide(issue #218)",
             )
         if not dataset_release_ids:
             raise McpToolError(

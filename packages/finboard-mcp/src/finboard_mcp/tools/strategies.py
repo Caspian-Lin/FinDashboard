@@ -15,6 +15,8 @@ draft / supersede / publish / rollback / diff / preset CRUD。
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from mcp.server import MCPServer
@@ -91,7 +93,12 @@ def _version_ack(row: Any) -> dict[str, Any]:
     }
 
 
-def _validation_to_dict(plan: Any) -> dict[str, Any]:
+def _validation_to_dict(
+    plan: Any,
+    *,
+    anchor_warnings: Sequence[Any] = (),
+    series_warnings: Sequence[Any] = (),
+) -> dict[str, Any]:
     """把 ``ResolvedStrategyPlan`` 映射为 validate 工具返回字典。"""
     preview = getattr(plan, "universe_precheck", None)
     return {
@@ -105,6 +112,18 @@ def _validation_to_dict(plan: Any) -> dict[str, Any]:
         "can_execute": plan.can_execute,
         # issue #186:universe 预检(universe_precheck.as_dict);无发布信息时为空。
         "universe_precheck": preview.as_dict() if preview is not None else None,
+        # issue #355:引用 u_ 因子的既有沙箱快照锚定发布 ⊄ 本次
+        # dataset_release_ids 的具名提示(不阻断;全匹配为空列表,零噪音)。
+        "user_factor_anchor_warnings": [
+            cast(dict[str, Any], to_jsonable(item.as_dict()))
+            for item in anchor_warnings
+        ],
+        # issue #360:引用 u_ 因子的既有因子序列锚定发布不在本次
+        # dataset_release_ids 的具名提示(修复 = factor_series_build 托管重建)。
+        "factor_series_anchor_warnings": [
+            cast(dict[str, Any], to_jsonable(item.as_dict()))
+            for item in series_warnings
+        ],
     }
 
 
@@ -316,7 +335,11 @@ async def strategy_list(
             rows = await ResearchStrategySpecRepository(session).list_latest(
                 limit=limit
             )
-            return [_version_to_dict(row) for row in rows]
+            # spec 校验 + canonical payload + JSON 化是逐行同步 CPU 段,
+            # 挪线程池,重调用不毒化事件循环(issue #458)。
+            return await asyncio.to_thread(
+                lambda: [_version_to_dict(row) for row in rows]
+            )
 
     return await run_tool(
         audit=app.audit,
@@ -340,7 +363,10 @@ async def strategy_history(
             )
         if not rows:
             raise McpToolError("not_found", f"策略规格不存在: {strategy_id}")
-        return [_version_to_dict(row) for row in rows]
+        # issue #458:逐行 spec 校验 + 序列化挪线程池(同 strategy_list)。
+        return await asyncio.to_thread(
+            lambda: [_version_to_dict(row) for row in rows]
+        )
 
     return await run_tool(
         audit=app.audit,
@@ -367,7 +393,8 @@ async def strategy_version_get(
                 "not_found",
                 f"策略版本不存在: {strategy_id} v{version}",
             )
-        return _version_to_dict(row)
+        # issue #458:spec 校验 + canonical payload + JSON 化挪线程池。
+        return await asyncio.to_thread(_version_to_dict, row)
 
     return await run_tool(
         audit=app.audit,
@@ -396,7 +423,10 @@ async def strategy_diff(
             after = await repo.get_version(strategy_id, to_version)
         if before is None or after is None:
             raise McpToolError("not_found", "对比版本不存在")
-        changes = structured_diff(before.payload, after.payload)
+        # issue #458:结构化 diff 是 O(payload) 的同步 CPU 段,挪线程池。
+        changes = await asyncio.to_thread(
+            structured_diff, before.payload, after.payload
+        )
         return {
             "strategy_id": strategy_id,
             "from_version": from_version,
@@ -487,7 +517,29 @@ async def strategy_validate(
                 session,
                 disabled_factors=frozenset(disabled_factors or []),
             )
-        return _validation_to_dict(plan)
+            # issue #355:引用 u_ 因子的既有沙箱快照若锚定发布 ⊄ 本次
+            # dataset_release_ids,给具名 warning 提示(不阻断;入队期由
+            # snapshot_anchor_mismatches 秒级拒绝,REST 同口径)。
+            from finboard_backtest.research_code import (
+                factor_series_anchor_warnings,
+                user_factor_anchor_warnings,
+            )
+
+            anchor_warnings = await user_factor_anchor_warnings(
+                session,
+                required_factor_sources=plan.required_factor_sources,
+                dataset_release_ids=plan.dataset_release_ids,
+            )
+            # issue #360:既有序列锚定发布失配提示(修复 = factor_series_build
+            # 托管重建;入队期由 series_release_mismatches 秒级拒绝)。
+            series_warnings = await factor_series_anchor_warnings(
+                session,
+                required_factor_sources=plan.required_factor_sources,
+                dataset_release_ids=plan.dataset_release_ids,
+            )
+        return _validation_to_dict(
+            plan, anchor_warnings=anchor_warnings, series_warnings=series_warnings
+        )
 
     return await run_tool(
         audit=app.audit,
@@ -1023,6 +1075,10 @@ def register(mcp: MCPServer) -> None:
             "required_factor_sources/required_datasets/dataset_release_ids/"
             "lifecycle_stages/can_execute。**不持久化**,agent 可反复修改规格 → "
             "validate 预览 → 满意后 strategy_draft_create。"
+            "引用 u_ 用户因子时返回 user_factor_anchor_warnings(#355):"
+            "该因子既有沙箱快照锚定发布 ⊄ 本次 dataset_release_ids 则逐因子"
+            "具名提示(不阻断)—— 直接引用入队会被 snapshot_anchor_mismatch "
+            "秒拒,须把锚定发布加入 dataset_release_ids 或对新发布重算 RCR。"
             "研究写操作(#122,自主执行)。对应 POST /api/research/strategy-specs/validate。"
         ),
     )

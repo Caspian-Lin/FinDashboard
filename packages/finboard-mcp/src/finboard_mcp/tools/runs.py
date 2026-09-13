@@ -286,6 +286,35 @@ async def _require_write_enabled(app: McpAppContext) -> None:
         )
 
 
+async def _enqueue_trading_days(release: Any) -> list[Any]:
+    """入队期读取 bars 主发布交易日历(issue #361;读失败具名 invalid_argument)。
+
+    与 REST 路由共用同一读取实现(``enqueue_trading_days``,#334 并集日历
+    + 间隙哨兵);仅 custom dates 校验与 multi_period x u_ 因子覆盖检查触达。
+    """
+    import os
+    from datetime import date
+    from pathlib import Path
+
+    from finboard_backtest.research_run.signal_engine import enqueue_trading_days
+
+    try:
+        days: list[date] = await enqueue_trading_days(
+            bars_release_id=release.release_id,
+            bars_release_checksum=release.release_checksum,
+            release_root=Path(os.getenv("FINBOARD_DATA_RELEASE_ROOT", "data_releases")),
+        )
+        return days
+    except McpToolError:
+        raise
+    except Exception as exc:
+        raise McpToolError(
+            "invalid_argument",
+            "无法读取 bars 主发布交易日历以校验 decision_schedule / 用户因子"
+            f" series 覆盖(release {release.release_id}): {exc}",
+        ) from exc
+
+
 async def _build_queued_manifest(
     body: Any,
     session: Any,
@@ -297,6 +326,7 @@ async def _build_queued_manifest(
     返回 ``(manifest, strategy_row)``。校验失败抛 ``McpToolError``。
     """
     import hashlib
+    from datetime import date
     from typing import cast as _cast
 
     from finboard_backtest.research_run import (
@@ -304,6 +334,7 @@ async def _build_queued_manifest(
         ResearchActorType,
         ResearchRunManifest,
         UnsupportedResearchCapabilityError,
+        resolve_decision_schedule,
         validate_strategy_dataset_capabilities,
     )
     from finboard_backtest.research_run.config_overrides import (
@@ -311,6 +342,8 @@ async def _build_queued_manifest(
     )
     from finboard_backtest.research_run.contracts import JsonValue
     from finboard_backtest.research_run.signal_engine import (
+        decision_schedule_dates_gate_error,
+        enqueue_decision_dates,
         multi_period_feature_gate_error,
         single_shot_snapshot_gate_error,
     )
@@ -321,7 +354,8 @@ async def _build_queued_manifest(
         preview_universe_pool,
         resolvable_feature_names,
     )
-    from finboard_data.releases import ReleaseCapabilityError
+    from finboard_data.factor_lab import is_user_factor_name
+    from finboard_data.releases import ReleaseCapabilityError, ReleaseDatasetKind
     from finboard_persistence import (
         FeatureSnapshotRepository,
         ResearchDatasetReleaseRepository,
@@ -371,31 +405,79 @@ async def _build_queued_manifest(
                 "invalid_argument", f"因子快照不存在: {snapshot_id}"
             )
         snapshots.append(snapshot)
+    # issue #360:因子序列工件解析(内容寻址 FS-);声明时 u_ 因子观测按
+    # 决策日从 series.values 取,被覆盖因子跳过 single_shot 缺快照清单与
+    # #217 multi_period 拒绝(与 REST 路由同口径)。
+    from finboard_backtest.research_code import (
+        build_factor_series_refs,
+        factor_series_rebuild_error,
+        series_covered_factor_names,
+        series_release_mismatches,
+    )
+    from finboard_backtest.research_code.predefined_factors import (
+        predefined_factor_reference_gate_error,
+        referenced_predefined_factors,
+    )
+    from finboard_persistence import FactorSeriesRepository
+
+    series_repo = FactorSeriesRepository(session)
+    series_records: list[Any] = []
+    for series_id in body.factor_series_ids:
+        record = await series_repo.get(series_id)
+        if record is None:
+            raise McpToolError("invalid_argument", f"因子序列不存在: {series_id}")
+        series_records.append(record)
+    series_covered = series_covered_factor_names(series_records)
     required_factor_sources = {
         node.source
         for node in spec.feature_graph.nodes
         if node.source is not None
         and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
+    # issue #398:平台预置因子(p_ 前缀)引用门控(规格形态错误,先于
+    # #203/#217 具名拒绝)—— 目录注册存在性 + single_shot 必须以
+    # factor_series_ids 声明(p_ 因子无快照路径)。multi_period 的覆盖检查
+    # 在交易日历可读之后进行(下方)。与 REST 路由共用同一门控函数。
+    uncovered_predefined = referenced_predefined_factors(
+        required_factor_sources,
+        series_covered_factors=series_covered,
+    )
+    predefined_gate_error = predefined_factor_reference_gate_error(
+        required_factor_sources=required_factor_sources,
+        series_covered_factors=series_covered,
+        multi_period=resolve_decision_schedule(body.parameters) is not None,
+    )
+    if predefined_gate_error is not None:
+        raise McpToolError("invalid_argument", predefined_gate_error)
     # issue #203:入队期 single_shot 缺快照秒级拒绝(与 REST 路由共用同一门控
-    # 函数,对齐 #186 预检风格)。multi_period 声明 rebalance_frequency 后不受影响。
+    # 函数,对齐 #186 预检风格)。multi_period 声明 decision_schedule(#361,
+    # 含 legacy rebalance_frequency)后不受影响。issue #360:被声明因子序列
+    # 覆盖的因子源不再要求快照(序列提供逐日观测;决策时点仍需快照提供,
+    # 零快照拒绝分支保持)。
     gate_error = single_shot_snapshot_gate_error(
         strategy_kind=spec.strategy_kind,
-        required_factor_sources=required_factor_sources,
+        required_factor_sources=required_factor_sources - series_covered,
         frozen_snapshot_count=len(snapshots),
         parameters=body.parameters,
     )
     if gate_error is not None:
         raise McpToolError("invalid_argument", gate_error)
     # issue #217:用户因子(u_ 前缀)入队门控(与 REST 路由共用同一函数)。
+    # issue #360:被声明因子序列覆盖的 u_ 因子跳过名单检查(序列按决策日
+    # 索引,不绑定单一 decision_at;冻结工件不受 artifact 生命周期影响)。
+    # issue #361:multi_period x u_ 改为 series 覆盖检查(不再一刀切秒拒)。
     from finboard_backtest.research_code import (
         active_user_factor_names,
+        default_series_lookup,
         resolve_screen_bindings,
         screen_factor_snapshot_gate_error,
+        snapshot_anchor_mismatch_error,
+        snapshot_anchor_mismatches,
         user_factor_reference_gate_error,
+        user_factor_series_coverage_gate_error,
     )
-    from finboard_backtest.research_sandbox.factor_publish import (
-        sandbox_snapshot_dataset_release_ids,
+    from finboard_backtest.research_code.predefined_factors import (
+        predefined_factor_series_coverage_gate_error,
     )
 
     # issue #234:screen 绑定实绑校验(REST+MCP 共用同一门控)—— 声明了
@@ -411,10 +493,80 @@ async def _build_queued_manifest(
     user_gate_error = user_factor_reference_gate_error(
         required_factor_sources=required_factor_sources,
         active_user_factors=active_factors,
-        parameters=body.parameters,
+        series_covered_factors=series_covered,
     )
     if user_gate_error is not None:
         raise McpToolError("invalid_argument", user_gate_error)
+
+    # issue #361:decision_schedule(四频 + custom)——custom dates 必须落在
+    # bars 主发布交易日历内;multi_period x u_ 因子做 series 覆盖检查
+    #(拒的是「数据没备齐」,不再是「这个组合不许存在」)。与 REST 路由
+    # 共用同一门控函数与日历读取实现(两口径一致)。
+    schedule = resolve_decision_schedule(body.parameters)
+    bars_releases = [
+        release
+        for release in releases
+        if release.dataset_kind is ReleaseDatasetKind.BARS
+    ]
+    if len(bars_releases) != 1:
+        raise McpToolError(
+            "invalid_argument",
+            "联合发布必须恰好包含一个 bars 主发布(行情/候选池来源): "
+            + ", ".join(
+                f"{release.release_id}({release.dataset_kind.value})"
+                for release in releases
+            ),
+        )
+    primary = bars_releases[0]
+    trading_days: list[date] | None = None
+    if schedule is not None and schedule.kind == "custom":
+        trading_days = await _enqueue_trading_days(primary)
+        dates_error = decision_schedule_dates_gate_error(schedule, trading_days)
+        if dates_error is not None:
+            raise McpToolError("invalid_argument", dates_error)
+    # issue #360:已按 factor_series_ids 声明的因子由 ID 直查校验(上游已
+    # 完成),不进入 find_matching 反查——反查以运行参数计算期望 series_key,
+    # 与构建期因子参数不同会误报「未构建」。
+    referenced_user_factors = {
+        name
+        for name in required_factor_sources
+        if is_user_factor_name(name) and name not in series_covered
+    }
+    if schedule is not None and referenced_user_factors:
+        if trading_days is None:
+            trading_days = await _enqueue_trading_days(primary)
+        series_gate_error = await user_factor_series_coverage_gate_error(
+            referenced_user_factors=referenced_user_factors,
+            series_lookup=default_series_lookup(session),
+            bars_release_id=primary.release_id,
+            dataset_release_ids=[release.release_id for release in releases],
+            parameters=body.parameters,
+            decision_dates=enqueue_decision_dates(
+                parameters=body.parameters,
+                trading_days=trading_days,
+            ),
+            window_start=primary.start_date,
+            window_end=primary.end_date,
+        )
+        if series_gate_error is not None:
+            raise McpToolError("invalid_argument", series_gate_error)
+    if schedule is not None and uncovered_predefined:
+        if trading_days is None:
+            trading_days = await _enqueue_trading_days(primary)
+        predefined_series_error = await predefined_factor_series_coverage_gate_error(
+            referenced_predefined=uncovered_predefined,
+            series_lookup=default_series_lookup(session),
+            bars_release_id=primary.release_id,
+            dataset_release_ids=[release.release_id for release in releases],
+            decision_dates=enqueue_decision_dates(
+                parameters=body.parameters,
+                trading_days=trading_days,
+            ),
+            window_start=primary.start_date,
+            window_end=primary.end_date,
+        )
+        if predefined_series_error is not None:
+            raise McpToolError("invalid_argument", predefined_series_error)
     # issue #253:multi_period 特征可用性入队门控(与 REST 路由共用同一函数)。
     # 放在用户因子门控之后:multi_period 引用 u_ 因子先按 #217 具名拒绝。
     feature_gate_error = multi_period_feature_gate_error(
@@ -429,7 +581,8 @@ async def _build_queued_manifest(
             observation.feature_name
             for snapshot in snapshots
             for observation in snapshot.observations
-        ],
+        ]
+        + sorted(series_covered),
     )
     if feature_gate_error is not None:
         raise McpToolError("invalid_argument", feature_gate_error)
@@ -473,24 +626,25 @@ async def _build_queued_manifest(
             spec_checksum = stable_checksum(frozen_spec.canonical_payload())
             spec = frozen_spec
     release_ids = {release.release_id for release in releases}
-    for snapshot in snapshots:
-        # issue #217:沙箱快照(dataset_release_id=None)按其锚定 run 冻结的
-        # 发布集合校验 ⊆ 本次冻结清单。
-        sandbox_release_ids = await sandbox_snapshot_dataset_release_ids(
-            session, snapshot
+    # issue #360:换发布守卫 —— 引用序列锚定的 bars 主发布不在本次冻结清单
+    # 即具名拒绝(失效 series 清单 + 重建代价预估;与 REST 路由共用函数)。
+    series_mismatches = series_release_mismatches(series_records, release_ids)
+    if series_mismatches:
+        raise McpToolError(
+            "invalid_argument",
+            factor_series_rebuild_error(series_mismatches),
         )
-        if sandbox_release_ids is None:
-            if snapshot.dataset_release_id not in release_ids:
-                raise McpToolError(
-                    "invalid_argument",
-                    f"因子快照 {snapshot.snapshot_id} 绑定的数据发布不在本次冻结清单中",
-                )
-        elif not sandbox_release_ids <= release_ids:
-            raise McpToolError(
-                "invalid_argument",
-                f"沙箱因子快照 {snapshot.snapshot_id} 锚定 run 的数据发布 "
-                f"{sorted(sandbox_release_ids - release_ids)} 不在本次冻结清单中",
-            )
+    # issue #217:#355 —— 快照锚定发布 ⊆ 本次冻结清单(数据一致性 fail-visible,
+    # 约束零放松);失配改为逐快照全量收集后一次性具名拒绝(名称 / 锚定发布 /
+    # 失配方向 + 两条修复路径),与 REST 路由共用同一收集与文案函数。
+    anchor_mismatches = await snapshot_anchor_mismatches(
+        session, snapshots=snapshots, requested_release_ids=release_ids
+    )
+    if anchor_mismatches:
+        raise McpToolError(
+            "invalid_argument",
+            snapshot_anchor_mismatch_error(anchor_mismatches),
+        )
 
     # issue #234:factor 通道 screen 运行的快照证据预检(与 REST 共用)——
     # 绑定的 draft 产物必须已有其 RCR 产出的快照进入 factor_snapshot_ids。
@@ -516,7 +670,8 @@ async def _build_queued_manifest(
                 observation.feature_name
                 for snapshot in snapshots
                 for observation in snapshot.observations
-            ],
+            ]
+            + sorted(series_covered),
             research_release_kinds=[release.dataset_kind for release in releases],
         ),
     )
@@ -576,6 +731,11 @@ async def _build_queued_manifest(
                 ),
             )
             for snapshot in snapshots
+        ),
+        # issue #360:因子序列冻结引用({series_id, content_checksum});
+        # 空集合传空元组(不入 checksum,历史 manifest 零漂移)。
+        factor_series=(
+            build_factor_series_refs(series_records) if series_records else ()
         ),
         parameters=_cast(dict[str, JsonValue], body.parameters),
         validation_config=_cast(
@@ -983,15 +1143,23 @@ def register(mcp: MCPServer) -> None:
             "验证计划完全一致(finboard_dataset_release_list 查询)\n"
             '- "factor_snapshot_ids": 冻结特征快照 snapshot_id 列表'
             "(finboard_feature_snapshot_list 查询);single_shot 必填(决策时点"
-            "只能来自快照,缺快照入队即拒 #203);multi_period 声明频率后价格"
+            "只能来自快照,缺快照入队即拒 #203);multi_period 声明决策日历后价格"
             "因子不需要,基本面因子(pb/ROE 等)仍需快照/研究数据发布\n"
             '- "parameters": {} —— 不声明即 single_shot;声明 '
-            "rebalance_frequency=monthly|quarterly 触发多期再平衡回放(#183,"
-            "仅价格因子按发布每期重算;非法值入队即拒)。multi_period 特征"
+            "decision_schedule={kind: daily|weekly|monthly|quarterly|custom"
+            "(,dates: [YYYY-MM-DD...] 仅 custom 必填)} 触发多期回放"
+            "(#361;weekly=每周最后交易日,custom dates 须 ⊆ 发布交易日且"
+            "升序去重,非法值入队即拒);legacy "
+            "rebalance_frequency=daily|weekly|monthly|quarterly 仍接受"
+            "(等价同名 kind,旧值零变化)。multi_period 特征"
             "可用性入队即判(#253):规格引用的特征必须可由多期供给派生"
             "(标准价格特征/close/attached daily_metrics 与 financial_indicators"
             " 发布/快照观测),声明 pb/roe 等财务因子而未附加对应研究数据发布"
-            " → invalid_argument 具名缺失特征与所需发布 kind\n"
+            " → invalid_argument 具名缺失特征与所需发布 kind。multi_period 引用"
+            "用户因子(u_ 前缀)不再一刀切拒绝(#361):入队检查因子 series"
+            " 覆盖 —— 无 series / 覆盖不足 / series 锚定发布与 bars 主发布"
+            "不一致 → invalid_argument(附缺失决策日期预览与"
+            " finboard_factor_series_build 重建命令)\n"
             '- "validation_config"/"execution_config"/"fee_config"/'
             '"benchmark_config": {} —— 政策覆盖,一般留空\n'
             '- "portfolio_config"/"risk_config": {} —— 组合约束 / 风险退出'
@@ -1014,6 +1182,12 @@ def register(mcp: MCPServer) -> None:
             "schema)。入队预检(#186):universe 候选池为空秒级 invalid_argument,"
             "错误附各过滤条件排除统计与缺失字段名。single_shot 缺冻结快照同样"
             "入队秒级拒绝(#203,报错附 execution_mode 与缺失因子源)。"
+            "快照锚定预检(#355):引用快照锚定的数据发布 ⊄ 本次 "
+            "dataset_release_ids(典型场景:更换 bars 主发布后未重算沙箱因子)"
+            "秒级 invalid_argument,具名 snapshot_anchor_mismatch,逐快照列出"
+            "因子名/锚定发布/缺失清单,修复路径二选一:把缺失发布一并加入 "
+            "dataset_release_ids,或 finboard_research_code_run 对新发布重算"
+            "(RCR → 质量门 → 新快照)后引用。"
             "组合可行性预检(#303):静态候选池 < ceil(1/生效 "
             "max_risk_contribution)秒级 invalid_argument(错误附排除统计、"
             "生效阈值与 portfolio_config.overrides 键位修复路径),"

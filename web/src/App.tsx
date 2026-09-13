@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, Navigate } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -14,6 +14,7 @@ const ResearchRuns = React.lazy(() => import("@/pages/research/ResearchRuns"));
 const PortfolioRisk = React.lazy(() => import("@/pages/research/PortfolioRisk"));
 const Simulation = React.lazy(() => import("@/pages/research/Simulation"));
 const ResearchWorkbench = React.lazy(() => import("@/pages/research/ResearchWorkbench"));
+const ResearchDocs = React.lazy(() => import("@/pages/research/ResearchDocs"));
 const Reports = React.lazy(() => import("@/pages/research/Reports"));
 
 /* Live trading domain (lazy) */
@@ -25,9 +26,7 @@ const Control = React.lazy(() => import("@/pages/Control"));
 
 /* Tools (lazy) */
 const Backtest = React.lazy(() => import("@/pages/Backtest"));
-const Strategies = React.lazy(() => import("@/pages/Strategies"));
 const Settings = React.lazy(() => import("@/pages/Settings"));
-const Data = React.lazy(() => import("@/pages/Data"));
 const Jobs = React.lazy(() => import("@/pages/Jobs"));
 const NotFound = React.lazy(() => import("@/pages/NotFound"));
 
@@ -61,6 +60,7 @@ export default function App() {
             <Route path="/research/portfolio" element={<PortfolioRisk />} />
             <Route path="/research/simulation" element={<Simulation />} />
             <Route path="/research/workbench" element={<ResearchWorkbench />} />
+            <Route path="/research/docs" element={<ResearchDocs />} />
             <Route path="/research/reports" element={<Reports />} />
 
             {/* Live Trading */}
@@ -71,9 +71,11 @@ export default function App() {
             <Route path="/control" element={<Control />} />
 
             {/* Tools */}
-            <Route path="/data" element={<Data />} />
+            {/* 旧 /data 独立页已并入研究数据页的「行情拉取」页签 */}
+            <Route path="/data" element={<Navigate to="/research/data" replace />} />
             <Route path="/backtest" element={<Backtest />} />
-            <Route path="/strategies" element={<Strategies />} />
+            {/* 策略预设已并入回测页的预设库面板 */}
+            <Route path="/strategies" element={<Navigate to="/backtest" replace />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/jobs" element={<Jobs />} />
 
