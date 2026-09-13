@@ -174,6 +174,11 @@ def _make_precompute_ticker(
 #: 信号量约束;这里限制的是同时在途的任务数与结果占用的峰值内存)。
 _LOAD_CONCURRENCY = 8
 
+#: close 矩阵池分发的有界在途窗口(2026-09-14 内存):列式肥结果每标的
+#: ≈0.7MB Python 对象,在途数 x 窗口即合并段的瞬时驻留上界;64 ≈ 45MB,
+#: 远大于 8 个池 worker 的消费速度,不构成吞吐瓶颈。
+_CLOSE_POOL_MAX_INFLIGHT = 64
+
 
 def _declared_domain_instruments(
     manifest: ResearchRunManifest,
@@ -2524,49 +2529,41 @@ async def _load_close_histories_via_pool(
     ]
     tick = _make_precompute_ticker(progress, "close", len(candidates), cancel_probe)
 
+    # 2026-09-14 内存(全市场全历史 run 实测:close 阶段主进程 RSS 冲到
+    # 4.36GB 后才回落):此前 ``asyncio.gather`` 把全部标的的**列式肥结果**
+    # (每标的 4 列 x 全历史 ≈ 0.7MB Python 对象)攒在一个 list 里,5215
+    # 标的全部完成后才开始逐个转紧凑 numpy —— 全部肥载荷同时驻留 ≈ 3.5GB
+    # 纯瞬时。改为有界在途(信号量) + ``as_completed`` 逐个到达逐个转换:
+    # 任意时刻在途肥载荷 ≈ 窗口 x 0.7MB,驻留只有紧凑矩阵本身。语义保持:
+    # 全部任务仍会被消费(与 gather 等价,不提前打死池队列);任一任务异常
+    # → 整体返回 None 降级进程内路径(记录第一个异常);打断异常优先上抛。
+    inflight = asyncio.Semaphore(_CLOSE_POOL_MAX_INFLIGHT)
+
     async def _run_one(
         task: _CloseHistoryProcessTask,
-    ) -> tuple[str, CloseHistoryColumns]:
-        result = await loop.run_in_executor(
-            executor, _compute_close_history_process_task, task
-        )
-        await tick()
-        return result
+    ) -> tuple[str, CloseHistoryColumns] | BaseException:
+        async with inflight:
+            try:
+                result = await loop.run_in_executor(
+                    executor, _compute_close_history_process_task, task
+                )
+            except BaseException as exc:  # gather(return_exceptions=True) 等价语义:异常作为结果回传,不中断其余任务
+                return exc
+            await tick()
+            return result
 
-    try:
-        results = await asyncio.gather(
-            *(_run_one(task) for task in tasks),
-            return_exceptions=True,
-        )
-    except ResearchRunInterruptedError:
-        # 取消/打断探针异常不是池故障:原样上抛交给上层收口(#450 追续),
-        # 降级成进程内路径会无视取消继续整段预建。
-        raise
-    except Exception as exc:
-        logger.warning(
-            "frozen_loader.close_matrix_pool_failed",
-            stage="decision_load",
-            release_id=provider.release.release_id,
-            candidates=len(candidates),
-            error=str(exc),
-            message="close 矩阵池分发失败,降级进程内路径",
-        )
-        return None
     built: dict[str, SymbolCloseHistory | None] = {}
-    for candidate, result in zip(candidates, results, strict=True):
+    failure: BaseException | None = None
+    interrupted: ResearchRunInterruptedError | None = None
+    for coro in asyncio.as_completed([_run_one(task) for task in tasks]):
+        result = await coro
         if isinstance(result, BaseException):
             if isinstance(result, ResearchRunInterruptedError):
-                raise result
-            logger.warning(
-                "frozen_loader.close_matrix_pool_failed",
-                stage="decision_load",
-                release_id=provider.release.release_id,
-                candidates=len(candidates),
-                symbol=candidate.symbol,
-                error=str(result),
-                message="close 矩阵池任务异常,降级进程内路径",
-            )
-            return None
+                interrupted = result
+                continue
+            if failure is None:
+                failure = result
+            continue
         code, columns = result
         built[code] = SymbolCloseHistory.from_sequences(
             available_at=columns.available_at,
@@ -2574,6 +2571,26 @@ async def _load_close_histories_via_pool(
             closes=columns.closes,
             opens=columns.opens,
         )
+    if interrupted is not None:
+        raise interrupted
+    if failure is not None:
+        logger.warning(
+            "frozen_loader.close_matrix_pool_failed",
+            stage="decision_load",
+            release_id=provider.release.release_id,
+            candidates=len(candidates),
+            symbol=next(
+                (
+                    candidate.symbol
+                    for candidate in candidates
+                    if candidate.symbol not in built
+                ),
+                None,
+            ),
+            error=str(failure),
+            message="close 矩阵池任务异常,降级进程内路径",
+        )
+        return None
     logger.debug(
         "frozen_loader.close_history_built_via_pool",
         release_id=provider.release.release_id,
