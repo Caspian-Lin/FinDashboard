@@ -1952,7 +1952,10 @@ class PriceFeaturePrecompute:
 
     release_id: str
     decision_ats: tuple[datetime, ...]
-    by_symbol: dict[str, tuple[PeriodPriceFeatures | None, ...]]
+    # issue #463 下半场:值为 list(可变)—— 期次消费完成后由
+    # :meth:`release_period` 逐期置 None 释放槽位,驻留与期数解耦;
+    # frozen dataclass 只锁字段绑定,dict/list 内容仍可原地更新。
+    by_symbol: dict[str, list[PeriodPriceFeatures | None]]
     symbols: tuple[str, ...]
 
     def feature_values(
@@ -1987,6 +1990,26 @@ class PriceFeaturePrecompute:
                     )
                 )
         return tuple(out)
+
+    def release_period(self, decision_at: datetime) -> int:
+        """释放单个决策期的预计算槽位(issue #463 下半场),返回释放的标的数。
+
+        该期 ``feature_values`` 的 ``FeatureValue`` 已在调用前构造完成(独立
+        对象,不引用槽位),置 None 只是丢掉 ``PeriodPriceFeatures`` 的表内
+        引用。重复释放 / 未知决策期为 no-op(计数 0);被释放期若被复读
+        (现审计范围内不存在),消费口得到空集并回落快照重算路径,值语义
+        不变、只是多付一次计算。
+        """
+        try:
+            index = self.decision_ats.index(decision_at)
+        except ValueError:
+            return 0
+        released = 0
+        for per_symbol in self.by_symbol.values():
+            if per_symbol[index] is not None:
+                per_symbol[index] = None
+                released += 1
+        return released
 
 
 def _period_features_for_symbol(
@@ -2213,7 +2236,9 @@ async def build_price_feature_precompute(
     return PriceFeaturePrecompute(
         release_id=release.release_id,
         decision_ats=tuple(ordered),
-        by_symbol=by_symbol,
+        # issue #463 下半场:逐标的 tuple 转 list —— 支持逐期槽位释放
+        # (:meth:`PriceFeaturePrecompute.release_period`)。
+        by_symbol={code: list(per) for code, per in by_symbol.items()},
         symbols=scoped,
     )
 

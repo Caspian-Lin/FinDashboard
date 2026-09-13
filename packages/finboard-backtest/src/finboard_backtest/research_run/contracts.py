@@ -10,7 +10,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -788,6 +788,29 @@ def pipeline_output_checksum(decision: DecisionBundle) -> str:
             "ledger": decision.ledger,
         }
     )
+
+
+def _slim_decision(bundle: DecisionBundle) -> DecisionBundle:
+    """持久化后的驻留瘦身副本(issue #463 下半场)。
+
+    ``features`` 与决策输入截面共享同一批 ``FeatureValue`` 对象引用,是全市场
+    多期 run 的驻留重头(556 期 ≈ 千万级 ``FeatureValue`` ≈ 2-3GB,被
+    coordinator / 适配器的决策列表钉住到 run 结束)。消费审计(issue #463)
+    确认:持久化之后的全部消费点 —— ``build_report``(只读 ``ledger`` /
+    ``constraints`` / orders / fills 计数)、``_validate_report``(同前)、
+    ``build_daily_equity_curve``(只读 fills / positions / ``ledger.cash``)、
+    result_checksum(只读 artifact 行)、factor_screen(只读输入期拉取时
+    捕获的投影)—— 均不读 ``features``,落库完成后即可置空。
+
+    ``candidates`` 保留:构造契约「每个决策必须记录候选池」是 fail-closed
+    领域不变量(``__post_init__`` 非空校验,#314 反序列化共用同一构造器),
+    置空需放松构造防线,不在本 issue 收益范围内放松。
+
+    必须发生在 ``_persist_decision`` 之后(artifacts 载荷逐字节零变化);
+    ``dataclasses.replace`` 产出独立副本,不突变原 bundle —— yield 出去的
+    仍是完整 bundle,#305 确定性重放 result_checksum 与 #314 续算不受影响。
+    """
+    return replace(bundle, features=())
 
 
 @dataclass(frozen=True, slots=True)

@@ -77,6 +77,7 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunManifest,
     ResearchRunReport,
     UniverseCandidate,
+    _slim_decision,
     execution_mode_for,
     resolve_decision_schedule,
 )
@@ -2224,6 +2225,16 @@ async def iter_decision_load_contexts(
                     raise result
                 loaded.append(result)
             produced += len(loaded)
+            # issue #463 下半场:块内全部期次的 context 构建完成后,价格特征
+            # 预计算表中本块各期槽位即刻释放。安全前提(消费审计):预计算表
+            # 的唯一消费口 ``feature_values(decision_at, release_id)`` 只发生在
+            # 各期 ``_load_one`` 构建期内(#288 池损坏降级「本期重算一次」同样
+            # 在构建期内完成),每期恰好消费一次;#304 拒绝路径的第二次全量
+            # 重拉会新建 loader 并重建预计算表,不受首趟释放影响。
+            precompute = loader.price_feature_precompute
+            if precompute is not None:
+                for decision_at, _ in chunk:
+                    precompute.release_period(decision_at)
             # issue #306/#463:分块边界探针在本块 gather 完成**之后、产出之前**
             # 触发(与流式化前相同的取值序列与加载相对位置 —— 探针 done 计数
             # 是「已加载期数」;流式化后决策持久化与下一块加载交错,探针必须
@@ -2711,14 +2722,20 @@ class SignalEnginePipelineAdapter:
             if resume_all is not None:
                 for decision in resume_all:
                     yield decision
-                    collected.append(decision)
+                    # issue #463 下半场:append 瘦身副本 —— yield 出去的仍是
+                    # 完整 bundle(coordinator 校验/持久化用),列表只留落库
+                    # 后的轻副本(消费审计:equity 曲线 / report 只读
+                    # fills/positions/ledger)。
+                    collected.append(_slim_decision(decision))
             else:
                 if pipeline is None:
                     pipeline = await self._load()
                 pipeline_iter = pipeline.decisions(manifest)
                 async for decision in pipeline_iter:
                     yield decision
-                    collected.append(decision)
+                    # issue #463 下半场:同上 —— 落库后即弃 features 重引用;
+                    # factor_screen 投影在输入拉取时已捕获,与本列表无关。
+                    collected.append(_slim_decision(decision))
                 # issue #463:输入流正常耗尽 —— 捕获已覆盖全部期次。
                 self._captures_complete = True
             # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(离线圈内,

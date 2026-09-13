@@ -36,6 +36,7 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunStage,
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
+    _slim_decision,
     execution_mode_for,
     pipeline_output_checksum,
     replay_guard_error,
@@ -310,7 +311,12 @@ class ResearchRunCoordinator:
                             failure_ctx=failure_ctx,
                         )
                         await self._store.checkpoint()
-                        decisions.append(decision)
+                        # issue #463 下半场:持久化完成后即可丢弃期级重对象 ——
+                        # decisions 列表改存 features 置空的瘦身副本(_slim_
+                        # decision 的消费审计见 contracts),使驻留与期数解耦;
+                        # yield / 持久化 / 校验拿到的仍是完整 bundle,report /
+                        # checksum 逐字节不变。
+                        decisions.append(_slim_decision(decision))
                         decision_timing.record(
                             decision.business_date, time.monotonic() - execute_started
                         )
@@ -733,36 +739,7 @@ class ResearchRunCoordinator:
         progress: ProgressHook | None = None,
         failure_ctx: FailureContext | None = None,
     ) -> None:
-        stage_payloads: dict[ResearchRunStage, dict[str, object]] = {
-            ResearchRunStage.UNIVERSE: {"candidates": decision.candidates},
-            ResearchRunStage.FEATURES: {"features": decision.features},
-            ResearchRunStage.SIGNALS: {"signals": decision.signals},
-            ResearchRunStage.TARGETS_BEFORE_CONSTRAINTS: {
-                "targets": decision.targets_before_constraints
-            },
-            ResearchRunStage.CONSTRAINTS: {"constraints": decision.constraints},
-            ResearchRunStage.TARGETS_AFTER_CONSTRAINTS: {
-                "targets": decision.targets_after_constraints
-            },
-            ResearchRunStage.RISK_EXITS: {
-                "outcomes": decision.risk_exits,
-                "state": decision.risk_state,
-            },
-            ResearchRunStage.TARGETS_AFTER_RISK: {
-                "targets": decision.targets_after_risk
-            },
-            ResearchRunStage.CAPITAL_FEASIBILITY: {
-                "tiers": decision.capital_feasibility
-            },
-            ResearchRunStage.REBALANCE_PLAN: {"instructions": decision.rebalance_plan},
-            ResearchRunStage.ORDERS: {"orders": decision.orders},
-            ResearchRunStage.FILLS: {"fills": decision.fills},
-            ResearchRunStage.LEDGER: {
-                "positions": decision.positions,
-                "ledger": decision.ledger,
-                "pipeline_evidence": decision.pipeline_evidence,
-            },
-        }
+        stage_payloads = _decision_stage_payloads(decision)
         parent: tuple[str, ...] = ()
         for offset, stage in enumerate(_DECISION_STAGES):
             if failure_ctx is not None:
@@ -1120,6 +1097,47 @@ class ResearchRunCoordinator:
         if record is None:
             raise ResearchRunConflictError(f"研究运行不存在: {run_id}")
         return record
+
+
+def _decision_stage_payloads(
+    decision: DecisionBundle,
+) -> dict[ResearchRunStage, dict[str, object]]:
+    """单个决策按 13 stage 的 artifact 载荷映射(persist 与测试共用)。
+
+    模块级纯函数:``_persist_decision`` 逐 stage 落库与
+    ``test_issue_463_shedding`` 的「瘦身 vs 全量」逐字节对照消费同一映射,
+    避免测试镜像 runner 内部结构形成双份漂移源。
+    """
+    return {
+        ResearchRunStage.UNIVERSE: {"candidates": decision.candidates},
+        ResearchRunStage.FEATURES: {"features": decision.features},
+        ResearchRunStage.SIGNALS: {"signals": decision.signals},
+        ResearchRunStage.TARGETS_BEFORE_CONSTRAINTS: {
+            "targets": decision.targets_before_constraints
+        },
+        ResearchRunStage.CONSTRAINTS: {"constraints": decision.constraints},
+        ResearchRunStage.TARGETS_AFTER_CONSTRAINTS: {
+            "targets": decision.targets_after_constraints
+        },
+        ResearchRunStage.RISK_EXITS: {
+            "outcomes": decision.risk_exits,
+            "state": decision.risk_state,
+        },
+        ResearchRunStage.TARGETS_AFTER_RISK: {
+            "targets": decision.targets_after_risk
+        },
+        ResearchRunStage.CAPITAL_FEASIBILITY: {
+            "tiers": decision.capital_feasibility
+        },
+        ResearchRunStage.REBALANCE_PLAN: {"instructions": decision.rebalance_plan},
+        ResearchRunStage.ORDERS: {"orders": decision.orders},
+        ResearchRunStage.FILLS: {"fills": decision.fills},
+        ResearchRunStage.LEDGER: {
+            "positions": decision.positions,
+            "ledger": decision.ledger,
+            "pipeline_evidence": decision.pipeline_evidence,
+        },
+    }
 
 
 def _band_retained_symbols(

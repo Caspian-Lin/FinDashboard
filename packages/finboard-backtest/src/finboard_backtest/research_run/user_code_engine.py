@@ -49,6 +49,7 @@ from finboard_backtest.research_run.contracts import (
     ResearchExecutionMode,
     ResearchRunManifest,
     ResearchRunReport,
+    _slim_decision,
     execution_mode_for,
     stable_checksum,
 )
@@ -321,7 +322,10 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 except (AllocationError, SizingError, ValueError) as exc:
                     raise ResearchConstraintViolationError(str(exc)) from exc
                 yield decision
-                collected.append(decision)
+                # issue #463 下半场:append 瘦身副本 —— yield 出去的仍是完整
+                # bundle;列表只留落库后的轻副本(equity 曲线 / report 消费
+                # 审计见 contracts._slim_decision)。
+                collected.append(_slim_decision(decision))
                 index += 1
         finally:
             # issue #463:上下文生成器随本生成器退出(耗尽 / 关闭 / 抛错)
