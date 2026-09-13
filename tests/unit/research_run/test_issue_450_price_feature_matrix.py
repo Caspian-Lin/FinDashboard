@@ -374,11 +374,20 @@ async def test_price_precompute_pool_path_value_equal(tmp_path: Path) -> None:
         await pool.aclose()
     assert pooled.symbols == baseline.symbols
     assert pooled.by_symbol.keys() == baseline.by_symbol.keys()
+    # 2026-09-13 内存优化:常驻为紧凑矩阵,逐期展开比较池路径与进程内路径
+    # 的值等价(以及矩阵数组本身的一致性检查)。
     for code in baseline.symbols:
-        for per_pooled, per_base in zip(
-            pooled.by_symbol[code], baseline.by_symbol[code], strict=True
-        ):
-            assert per_pooled == per_base
+        pooled_history = pooled.by_symbol[code]
+        baseline_history = baseline.by_symbol[code]
+        assert pooled_history is not None
+        assert baseline_history is not None
+        assert pooled_history.columns == baseline_history.columns
+        assert np.array_equal(pooled_history.valid, baseline_history.valid)
+        assert np.array_equal(
+            pooled_history.available_at_us, baseline_history.available_at_us
+        )
+        for index in range(len(baseline.decision_ats)):
+            assert pooled_history.period(index) == baseline_history.period(index)
 
 
 @pytest.mark.asyncio
@@ -442,8 +451,15 @@ def test_price_precompute_process_task_matches_history_fn() -> None:
         windows=(20, 60),
         tail_n=61,
     )
-    code, per = _price_precompute_process_task(task)
+    code, compact = _price_precompute_process_task(task)
     assert code == "600001.SH"
+    # 2026-09-13 内存优化:任务回传紧凑矩阵(SymbolPriceFeatureHistory),
+    # 逐期展开后与进程内逐标的应用同一计算结果逐值一致。
+    from finboard_backtest.research_run.frozen_loader import (
+        SymbolPriceFeatureHistory,
+    )
+
+    assert isinstance(compact, SymbolPriceFeatureHistory)
     expected = _period_features_for_symbol(
         history,
         epochs,
@@ -452,7 +468,7 @@ def test_price_precompute_process_task_matches_history_fn() -> None:
         windows=(20, 60),
         tail_n=61,
     )
-    assert per == expected
+    assert tuple(compact.period(index) for index in range(len(expected))) == expected
 
 
 @pytest.mark.asyncio
@@ -489,3 +505,51 @@ async def test_feature_values_share_source_tuple(tmp_path: Path) -> None:
     assert first[0].source_artifact_ids is first[-1].source_artifact_ids
     assert first[0].source_artifact_ids == second[0].source_artifact_ids
     assert first[0].source_artifact_ids == ("rel-x",)
+
+
+# --------------------------------------------------------------------- #
+# 2026-09-13 内存优化:价格特征预计算常驻形态紧凑矩阵化
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_price_precompute_compact_residency(tmp_path: Path) -> None:
+    """常驻形态为每标的固定列矩阵:每标的字节数与期数成线性(不造逐期对象)。
+
+    旧形态每标的逐期一个 ``PeriodPriceFeatures``(2 个 datetime + 2 个 tuple
+    + 若干 float 对象 ≈ 450B/期),全市场 5215 标的 x 556 期 ≈ 290 万实例
+    ≈ 1.5GB(run 期内存最大头);紧凑矩阵为
+    ``n_periods x (n_cols x 9B + 12B)``(556 期 x 5 列 ≈ 32KB/标的,
+    全市场 ≈ 140MB)。本用例以真实构建路径断言每标的字节数上界 ——
+    旧形态同规模必然超过该上界(450B x n_periods)。
+    """
+    from finboard_backtest.research_run.frozen_loader import (
+        build_price_feature_precompute,
+    )
+
+    provider = await _publish_bars_release(tmp_path)
+    histories = await _load_close_histories(provider, _candidates(provider))
+    n_periods = 300
+    days = [
+        datetime(2024, 1, 2, 15, 0, tzinfo=UTC) + timedelta(days=index)
+        for index in range(n_periods)
+    ]
+    precompute = await build_price_feature_precompute(
+        histories=histories,
+        provider=provider,
+        decision_ats=days,
+        symbols=list(_CODES),
+    )
+
+    symbols_with_history = [
+        item for item in precompute.by_symbol.values() if item is not None
+    ]
+    assert len(symbols_with_history) == len(_CODES)
+    per_symbol_limit = n_periods * (5 * 9 + 12) + 4096  # 5 列 x (float64 + bool) + 双索引
+    for history in symbols_with_history:
+        assert history.nbytes <= per_symbol_limit
+        # 旧形态对照:逐期对象(按 2 个 datetime + 2 个 tuple + 4 float 保守
+        # 估 400B/期)在同等期数下至少 4 倍于紧凑矩阵(真实全市场 run 实测
+        # 约 1.5GB → 0.14GB,≈10 倍;本用例期数/可见期比例更低故取保守下界)。
+        assert history.nbytes * 4 < n_periods * 400
+    assert precompute.nbytes <= len(_CODES) * per_symbol_limit

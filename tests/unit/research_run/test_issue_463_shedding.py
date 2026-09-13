@@ -515,8 +515,9 @@ class TestPrecomputePeriodRelease:
         # 重复释放 / 未知决策期为 no-op。
         assert precompute.release_period(first_period) == 0
         assert precompute.release_period(datetime(1990, 1, 1, tzinfo=UTC)) == 0
-        # 槽位已置 None:已构造的 FeatureValue 不受影响(独立对象)。
-        assert all(per[0] is None for per in precompute.by_symbol.values())
+        # 2026-09-13 内存优化:常驻形态改为每标的紧凑矩阵(≈26KB/标的),
+        # 释放不再置 None 槽位,而是登记已释放期次;已构造的 FeatureValue
+        # 不受影响(独立对象),复读由 feature_values 返回 None。
         assert len(consumed) > 0
         # 释放期复读得到空集(现消费审计范围内不存在复读;值语义兜底为
         # 快照重算路径)。
