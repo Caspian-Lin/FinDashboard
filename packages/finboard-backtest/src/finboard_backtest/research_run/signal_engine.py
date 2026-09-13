@@ -888,6 +888,16 @@ def _estimate_covariance(
 
     零方差(全常数)序列 fail-visible:计数 + 最多 10 个样例以具名 warning
     打出,标的仍留在估计域内(Ledoit-Wolf 收缩 + PD 修复保证正定)。
+
+    窗口表决排除「历史不足」标的(2026-09-13 事故):窗口 = **可估计标的**
+    (≥3 个价点 → ≥2 期收益,与 ``min_observations=2`` 对齐)上的最短序列;
+    恰好 2 个价点的标的(新上市)不参与窗口表决、以零方差/零协方差行保留在
+    估计域内(矩阵扩展 + PD clip,与常数序列同形),具名 warning 可见。
+    此前窗口 = 全池最短序列,全市场小市值池(bottom market_cap 选股天然纳入
+    次新股)只要有一只 2 价点标的就把窗口压到 2 → 观测 1 期 → 协方差 None →
+    组合风险贡献硬约束 fail-closed 拒绝整条 run(RR-0c2aa 决策 6 取证:
+    2015-03-20 池内存在 2 个价点的新上市标的)。可估计标的不足 2 只时仍
+    返回 None(消费端 fail-closed 语义不变)。
     """
     import numpy as np
     import numpy.typing as npt
@@ -897,14 +907,19 @@ def _estimate_covariance(
     symbols = sorted(symbol for symbol, values in price_series.items() if len(values) >= 2)
     if len(symbols) < 2:
         return None
-    window = min(len(price_series[symbol]) for symbol in symbols)
+    estimable = [symbol for symbol in symbols if len(price_series[symbol]) >= 3]
+    short_history = [symbol for symbol in symbols if len(price_series[symbol]) < 3]
+    if len(estimable) < 2:
+        # 可估计标的不足:退化标的无法单独构成一致估计(与旧实现同折)。
+        return None
+    window = min(len(price_series[symbol]) for symbol in estimable)
     n_obs = window - 1
     if n_obs < 2:
         return None
 
     returns_by_ticker: dict[str, npt.NDArray[np.float64]] = {}
     degenerate: list[str] = []
-    for symbol in symbols:
+    for symbol in estimable:
         values = np.asarray(price_series[symbol][-window:], dtype=np.float64)
         prev = values[:-1]
         # 零前价跳点以 0.0 收益占位(旧实现按条件跳过 → ragged 长度不齐)。
@@ -922,7 +937,49 @@ def _estimate_covariance(
             samples=degenerate[:10],
             n_observations=n_obs,
         )
-    return estimate_covariance(returns_by_ticker, min_observations=2)
+    estimate = estimate_covariance(returns_by_ticker, min_observations=2)
+    if short_history:
+        estimate = _append_zero_variance_assets(estimate, short_history)
+        logger.warning(
+            "research_run.covariance_short_history_symbols",
+            count=len(short_history),
+            samples=short_history[:10],
+            n_observations=n_obs,
+            window_points=window,
+        )
+    return estimate
+
+
+def _append_zero_variance_assets(
+    estimate: CovarianceEstimate,
+    symbols: Sequence[str],
+) -> CovarianceEstimate:
+    """把历史不足标的以零方差/零协方差行并入估计(2026-09-13 事故)。
+
+    这些标的(2 个价点,收益仅 1 期)无法估计任何风险量,但必须留在
+    ``tickers`` 内 —— builder 的信号标的覆盖校验与风险贡献投影的目标覆盖
+    校验都按 ``tickers`` 判定。零行在 ``_ensure_positive_definite`` 里被
+    clip 到 ``PSD_MIN_EIGENVALUE``,矩阵保持正定过校验;零方差语义 = 该标的
+    对组合风险无已知贡献(与常数序列 degenerate 处理同形,fail-visible)。
+    """
+    import numpy as np
+
+    from finboard_backtest.portfolio import CovarianceEstimate as _CovarianceEstimate
+    from finboard_backtest.portfolio.covariance import _ensure_positive_definite
+
+    merged = sorted([*estimate.tickers, *symbols])
+    size = len(merged)
+    matrix = np.zeros((size, size), dtype=np.float64)
+    position = {ticker: index for index, ticker in enumerate(merged)}
+    source = [position[ticker] for ticker in estimate.tickers]
+    matrix[np.ix_(source, source)] = estimate.matrix
+    return _CovarianceEstimate(
+        matrix=_ensure_positive_definite(matrix),
+        tickers=merged,
+        shrinkage=estimate.shrinkage,
+        n_observations=estimate.n_observations,
+        method=estimate.method,
+    )
 
 
 def _declared_multi_period(parameters: Mapping[str, object]) -> str | None:
@@ -1758,6 +1815,13 @@ class DecisionLoadContext:
     price_series: dict[str, list[float]]
     covariance: CovarianceEstimate | None
     snapshot_id: str | None
+    #: 决策日 close 序列按需读取回调(close 矩阵前缀切片,纯同步零 IO);
+    #: 组合阶段协方差覆盖回退用(2026-09-13 事故修复,见
+    #: ``portfolio_pipeline._covariance_with_target_coverage``)。None =
+    #: 矩阵未启用 / stub provider,组合阶段行为与历史一致。
+    close_series_provider: (
+        Callable[[Sequence[str]], Mapping[str, Sequence[float]]] | None
+    ) = None
 
 
 #: 加载期分块大小(issue #288):分块内的期次并发 gather,分块之间顺序推进,
@@ -1971,6 +2035,34 @@ async def _aclose_asyncgen(stream: AsyncIterator[Any]) -> None:
     """
     if isinstance(stream, AsyncGenerator):
         await stream.aclose()
+
+
+def _make_close_series_provider(
+    loader: FrozenInputLoader,
+    decision_at: datetime,
+) -> Callable[[Sequence[str]], Mapping[str, Sequence[float]]]:
+    """构造目标标的 close 序列读取回调(close 矩阵前缀切片,零 IO)。
+
+    2026-09-13 事故修复:组合阶段协方差覆盖回退用 —— 仅供
+    :func:`portfolio_pipeline._covariance_with_target_coverage` 在池内估计
+    未覆盖全部目标标的(持仓掉出选股池 / 停牌 / 历史不足)时按需调用。
+    闭包只持有 loader 引用与决策时点,close 矩阵是不可变数据,构建期与
+    组合期(``asyncio.to_thread`` 工作线程)任意线程切片读取无共享可变态。
+    """
+
+    def _provider(symbols: Sequence[str]) -> dict[str, list[float]]:
+        histories = loader.close_histories
+        out: dict[str, list[float]] = {}
+        for code in symbols:
+            history = histories.get(code) if histories else None
+            if history is None:
+                continue
+            values = history.series_until(decision_at)
+            if values:
+                out[code] = values
+        return out
+
+    return _provider
 
 
 async def iter_decision_load_contexts(
@@ -2200,6 +2292,10 @@ async def iter_decision_load_contexts(
             # 分块 gather(issue #288)下各期的卸载调用互不共享状态,安全。
             covariance=await asyncio.to_thread(_estimate_covariance, price_series),
             snapshot_id=snapshot_id,
+            # 2026-09-13 事故修复:组合阶段按需补齐目标标的覆盖(持仓掉出
+            # 选股池 / 停牌);闭包只captured loader 引用与决策时点,矩阵是
+            # 不可变数据,构建期/组合期任意线程切片读取无共享可变态。
+            close_series_provider=_make_close_series_provider(loader, decision_at),
         )
 
     produced = 0
@@ -2367,6 +2463,9 @@ async def iter_decision_inputs(
                 input_artifact_ids=loaded.context.input_artifact_ids,
                 covariance=loaded.covariance,
                 suspended_symbols=loaded.context.execution_suspended,
+                # 2026-09-13 事故修复:组合阶段协方差覆盖回退的 close 序列
+                # 来源(close 矩阵切片;None = 矩阵未启用,不启用回退)。
+                close_series_provider=loaded.close_series_provider,
             )
     finally:
         await _aclose_asyncgen(source)

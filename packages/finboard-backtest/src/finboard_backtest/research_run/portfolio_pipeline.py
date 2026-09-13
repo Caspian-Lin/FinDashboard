@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -121,6 +128,14 @@ class PortfolioDecisionInput:
     # 不再按停牌前最后一个可见 close 静默「昨收成交」。空集 = 无停牌信息,
     # 行为与历史一致;checksum 按「空键省略」语义,存量 run 零漂移。
     suspended_symbols: frozenset[str] = frozenset()
+    #: 决策日 close 序列读取回调(close 矩阵前缀切片,纯同步零 IO,2026-09-13
+    #: 事故修复):协方差覆盖回退用 —— 池内估计的 ``tickers`` 未覆盖全部目标
+    #: 标的(持仓掉出选股池 / 停牌 / 历史不足)或池内估计为 None 时,按
+    #: 「信号标的与当前持仓」重建协方差。None = 不启用回退(矩阵缺失仍由
+    #: fail_closed 拒绝,行为与历史一致)。
+    close_series_provider: Callable[[Sequence[str]], Mapping[str, Sequence[float]]] | None = (
+        None
+    )
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -660,7 +675,9 @@ class PortfolioPipelineAdapter:
                 signals=signals,
                 method=allocation_method,
                 constraints=constraints,
-                covariance=item.covariance,
+                covariance=_covariance_with_target_coverage(
+                    item, current_weights=current_weights
+                ),
                 sleeve_map=item.sleeve_map,
                 disabled_symbols=item.disabled_symbols,
                 current_weights=current_weights,
@@ -1032,6 +1049,66 @@ def _curve_metrics(
         if peak > 0:
             drawdown = max(drawdown, (peak - equity) / peak)
     return strategy_return, annualized, sharpe, drawdown
+
+
+def _covariance_with_target_coverage(
+    item: PortfolioDecisionInput,
+    *,
+    current_weights: Mapping[str, float],
+) -> CovarianceEstimate | None:
+    """按「信号标的与当前持仓」补齐协方差覆盖(2026-09-13 事故修复)。
+
+    ``item.covariance`` 由加载期在**选股池**(universe 过滤后 included 标的)
+    上估计,而组合阶段的目标集合是它的超集:再平衡带保留的持仓可能已掉出当期
+    选股池(市值排名 / 选股上限轮换)、执行日停牌或历史不足。builder 的两处
+    覆盖校验(``_covariance_problem`` 对信号标的、``enforce_risk_contribution_cap``
+    对目标标的)对缺覆盖一律 fail-closed —— 全历史 run 在 2015-02-27
+    (RR-bff0 决策 3)因一只掉出选股池的持仓报「协方差缺少目标标的」被拒整条
+    run;同族的窗口塌缩(RR-0c2aa 决策 6)让池内估计为 None 同样拒绝。
+
+    回退策略:仅当覆盖不全(或池内估计为 None)且 ``close_series_provider``
+    能提供**全部**目标标的的决策日序列时,用同一估计器
+    (:func:`_estimate_covariance`,Ledoit-Wolf + PD 修复)在目标集合上重建,
+    并具名 warning;任一标的序列不可得则保持原样(矩阵缺失照旧由 builder
+    fail_closed 拒绝,语义零变化)。重建只替换本期组合阶段的协方差输入
+    (artifact 审计如实记录替换后的矩阵);触发场景此前必然拒绝整条 run,
+    故不触发场景的行为逐位不变。
+    """
+    covariance = item.covariance
+    needed = {signal.symbol for signal in item.signals} | set(current_weights)
+    missing = needed if covariance is None else needed - set(covariance.tickers)
+    provider = item.close_series_provider
+    if not missing or provider is None:
+        return covariance
+    # signal_engine 反向导入本模块:模块级互相导入会构成环,惰性导入
+    # (与 _features_by_source 同处理)。
+    from finboard_backtest.research_run.signal_engine import _estimate_covariance
+
+    series = provider(sorted(needed))
+    if set(series) != needed:
+        logger.warning(
+            "research_run.covariance_coverage_unavailable",
+            missing=sorted(missing)[:10],
+            missing_count=len(missing),
+            resolved=len(series),
+        )
+        return covariance
+    rebuilt = _estimate_covariance(series)
+    if rebuilt is None:
+        logger.warning(
+            "research_run.covariance_coverage_rebuild_failed",
+            needed=len(needed),
+        )
+        return covariance
+    logger.warning(
+        "research_run.covariance_coverage_rebuilt",
+        missing=sorted(missing)[:10],
+        missing_count=len(missing),
+        target_symbols=len(needed),
+        n_observations=rebuilt.n_observations,
+        shrinkage=round(rebuilt.shrinkage, 6),
+    )
+    return rebuilt
 
 
 def _mark_current_book(
