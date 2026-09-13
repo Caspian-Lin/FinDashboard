@@ -853,38 +853,67 @@ async def _next_execution_at(
 def _estimate_covariance(
     price_series: Mapping[str, Sequence[float]],
 ) -> CovarianceEstimate | None:
-    """从决策日前价格序列估计样本协方差(日收益率尺度)。
+    """从决策日前价格序列估计协方差(Ledoit-Wolf 收缩 + PD 修复,日收益率尺度)。
 
-    全部标的取对齐后的共同窗口;观测不足 2 期时返回 ``None``,由组合流水线按
-    fail_closed 拒绝(issue #91 语义:风险贡献硬约束启用时缺协方差必须失败)。
+    issue #465:此前是手写裸 ``np.cov`` 样本协方差(``shrinkage=0.0``、无 PD
+    修复),而回测选股路径走 ``portfolio.covariance.estimate_covariance``
+    (Ledoit-Wolf 收缩 + ``_ensure_positive_definite`` 特征值 clip)。全市场
+    池在窗口初期 T≪N(次新股最短序列只有几十根)时样本协方差结构性秩亏
+    (min 特征值 ≈ 0⁻ 即浮点零),builder 的 fail-closed PSD 校验把第 1 期
+    组合构建整条 run 杀掉(RR-bfce655159c976931cca8c10)。现在统一走引擎路径
+    的同一估计器,数值结果与回测选股路径同口径。
+
+    对齐语义(与旧实现对齐,issue #91 的 fail-closed 不放松):
+
+    * ≥2 个价点的标的**全部保留** —— ``pairwise_aligned_returns`` 默认
+      ``min_overlap=30`` 会剔除观测不足的标的,而 builder 对「协方差缺少
+      信号标的」同样 fail-closed,直接透传会把秩亏拒绝变成缺标的拒绝。
+      这里先把全部标的预对齐到全池最短公共窗口(保持旧 min-length 语义,
+      等长序列下估计器内部对齐是 no-op),再以 ``min_observations=2`` 喂
+      估计器,产物 ``tickers`` 覆盖全部输入标的;
+    * 标的 < 2 个或公共窗口观测 < 2 期返回 ``None``,由组合流水线按
+      fail_closed 拒绝(风险贡献硬约束启用时缺协方差必须失败);
+    * 旧实现按 ``values[index-1] != 0`` 跳过零前价跳点,各标的 returns
+      长度不齐(ragged → ``np.asarray`` 出 object 数组);现在零前价跳点
+      以 0.0 收益占位,全部序列严格等长。
+
+    零方差(全常数)序列 fail-visible:计数 + 最多 10 个样例以具名 warning
+    打出,标的仍留在估计域内(Ledoit-Wolf 收缩 + PD 修复保证正定)。
     """
     import numpy as np
+    import numpy.typing as npt
+
+    from finboard_backtest.portfolio import estimate_covariance
 
     symbols = sorted(symbol for symbol, values in price_series.items() if len(values) >= 2)
     if len(symbols) < 2:
         return None
-    n_obs = min(len(price_series[symbol]) for symbol in symbols) - 1
+    window = min(len(price_series[symbol]) for symbol in symbols)
+    n_obs = window - 1
     if n_obs < 2:
         return None
-    from finboard_backtest.portfolio import CovarianceEstimate as CovarianceEstimate
 
-    returns: list[list[float]] = []
+    returns_by_ticker: dict[str, npt.NDArray[np.float64]] = {}
+    degenerate: list[str] = []
     for symbol in symbols:
-        values = price_series[symbol][-(n_obs + 1) :]
-        series_returns = [
-            values[index] / values[index - 1] - 1
-            for index in range(1, len(values))
-            if values[index - 1] != 0
-        ]
-        returns.append(series_returns)
-    matrix = np.cov(np.asarray(returns, dtype=np.float64))
-    return CovarianceEstimate(
-        matrix=matrix,
-        tickers=symbols,
-        shrinkage=0.0,
-        n_observations=n_obs,
-        method="sample",
-    )
+        values = np.asarray(price_series[symbol][-window:], dtype=np.float64)
+        prev = values[:-1]
+        # 零前价跳点以 0.0 收益占位(旧实现按条件跳过 → ragged 长度不齐)。
+        safe_prev = np.where(prev == 0.0, 1.0, prev)
+        series_returns = np.where(prev == 0.0, 0.0, values[1:] / safe_prev - 1.0)
+        if float(np.var(series_returns)) == 0.0:
+            degenerate.append(symbol)
+        returns_by_ticker[symbol] = series_returns
+    if degenerate:
+        # fail-visible 不 fail-closed:常数序列不剔除(Ledoit-Wolf 收缩 +
+        # PD 修复保证矩阵正定),只把退化可见化。
+        logger.warning(
+            "research_run.covariance_degenerate_symbols",
+            count=len(degenerate),
+            samples=degenerate[:10],
+            n_observations=n_obs,
+        )
+    return estimate_covariance(returns_by_ticker, min_observations=2)
 
 
 def _declared_multi_period(parameters: Mapping[str, object]) -> str | None:
