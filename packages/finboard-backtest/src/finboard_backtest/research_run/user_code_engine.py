@@ -391,9 +391,13 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
 
         strategy_screen 的输入(逐期捕获的 ``_screen_periods`` /
         ``_target_weights``,#463:失败期次的投影 / 权重在 ``_build_decision``
-        前就已捕获)与组合阶段结果无关;这里基于已捕获数据尽力补算并暂存,
-        ``build_report`` 照常携带。返回 partial 标记(失败决策 1-based 定位 +
-        补算 warning),尚无已捕获上下文(未开始逐期消费)时返回 None。
+        前就已捕获)与组合阶段结果无关;这里基于已捕获的**前缀**数据尽力
+        补算并暂存(#463 前缀口径:拒绝路径不重拉任何输入,user_code 流式
+        消费本就只捕获到失败期次),``build_report`` 照常携带 —— screen 有
+        真实产出时 marker.warnings 追加 ``strategy_screen_prefix_scope`` 具名
+        条目说明覆盖 0..N 期而非全期次。返回 partial 标记(失败决策 1-based
+        定位 + 补算 warning),尚无已捕获上下文(未开始逐期消费)时返回
+        None。
         """
         if not self._context_dates:
             return None
@@ -409,6 +413,19 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         screen_failure = await self._compute_strategy_screen(manifest)
         if screen_failure is not None:
             warnings.append(screen_failure)
+        elif self._strategy_screen is not None:
+            # screen 有真实产出时,其口径是已捕获的前缀期次(0..N)而非
+            # 全期次 —— 拒绝路径的证据照实标注(与信号引擎同构)。
+            warnings.append(
+                {
+                    "strategy_screen_prefix_scope": True,
+                    "screen_periods": len(self._screen_periods),
+                    "message": (
+                        "strategy_screen 基于拒绝时已拉取的前缀期次(0..N)计算,"
+                        "不代表全期次口径(issue #463:拒绝路径不再重拉输入)"
+                    ),
+                }
+            )
         if warnings:
             marker["warnings"] = warnings
         return marker

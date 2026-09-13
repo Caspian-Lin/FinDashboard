@@ -2528,12 +2528,11 @@ class SignalEnginePipelineAdapter:
         self._input_iterator: AsyncIterator[PortfolioDecisionInput] | None = None
         # issue #463:逐期捕获的 factor_screen 投影与决策日 —— 输入经
         # :meth:`_iter_captured_inputs` 拉取时登记(拉取即捕获,组合阶段
-        # 失败期(#304 partial)的投影 / 日期也在内),报告阶段取用。
+        # 失败期(#304 partial)的投影 / 日期也在内),报告阶段取用。捕获
+        # 即前缀口径:拒绝路径的证据(compute_partial_evidence)也只消费
+        # 这里已捕获的期次,不再全量重拉输入流。
         self._period_cross_sections: list[dict[str, Any]] = []
         self._business_dates: list[date] = []
-        # issue #463:捕获是否已覆盖全部期次 —— 决策循环正常耗尽输入流时置位;
-        # #304 拒绝路径补算 screen 前若未置位(提前失败),先补全捕获。
-        self._captures_complete = False
         # issue #314 + #463:全部决策已落库的快速路径 —— 不再以
         # ``self._inputs = ()`` 表达,改用等价标志让 factor_screen 显式跳过
         # (快速路径前置已排除需要 screen 的 run,screen 恒为 None)。
@@ -2736,8 +2735,6 @@ class SignalEnginePipelineAdapter:
                     # issue #463 下半场:同上 —— 落库后即弃 features 重引用;
                     # factor_screen 投影在输入拉取时已捕获,与本列表无关。
                     collected.append(_slim_decision(decision))
-                # issue #463:输入流正常耗尽 —— 捕获已覆盖全部期次。
-                self._captures_complete = True
             # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(离线圈内,
             # 只在 coordinator 完整消费决策后执行;中断时曲线保持为空)。
             if (
@@ -2802,72 +2799,32 @@ class SignalEnginePipelineAdapter:
             )
             return f"factor_screen_computation_failed: {exc}"
 
-    async def _ensure_full_captures(self) -> None:
-        """拒绝路径证据补全(issue #304 x #463,尽力而为)。
-
-        流式加载只拉到失败期次的输入;而 factor_screen 证据的口径(与
-        流式化前一致)是**全部冻结输入**。这里重新拉取一次输入流(冻结
-        输入确定性重放,已捕获前缀与之逐值一致)补全捕获;补全失败保留
-        已捕获的部分口径(具名 warning 可见),不掩盖原硬约束错误。
-        """
-        if self._captures_complete:
-            return
-        from finboard_backtest.research_run.factor_screen import (
-            _period_cross_section,
-        )
-
-        try:
-            suspension_view = await self._load_suspension_view()
-            periods: list[dict[str, Any]] = []
-            dates: list[date] = []
-            source = iter_decision_inputs(
-                self._manifest,
-                release_provider_factory=self._release_provider_factory,
-                snapshot_provider=self._snapshot_provider,
-                process_workers=self._process_workers,
-                chunk_probe=None,
-                series_provider=self._series_provider,
-                suspension_view=suspension_view,
-                trading_days_loader=self._trading_days_loader,
-                precompute_phase_reporter=self._precompute_phase_reporter,
-                precompute_cancel_probe=self._precompute_cancel_probe,
-            )
-            try:
-                async for item in source:
-                    periods.append(_period_cross_section(item))
-                    dates.append(item.business_date)
-            finally:
-                await _aclose_asyncgen(source)
-        except Exception:
-            logger.warning(
-                "research_run.partial_capture_completion_failed",
-                run_id=self._manifest.run_id,
-                exc_info=True,
-            )
-            return
-        self._period_cross_sections = periods
-        self._business_dates = dates
-        self._captures_complete = True
-
     async def compute_partial_evidence(
         self,
         manifest: ResearchRunManifest,
         *,
         completed_decisions: int,
     ) -> dict[str, JsonValue] | None:
-        """组合阶段硬约束拒绝后的部分证据补算(issue #304)。
+        """组合阶段硬约束拒绝后的部分证据补算(issue #304,#463 前缀口径)。
 
         factor_screen 只依赖冻结决策输入的投影(与组合阶段是否失败无关);
-        在 run 被拒绝前尽力补算并暂存,``build_report`` 照常携带。返回
-        partial 标记(失败决策 1-based 定位 + 补算 warning),无输入可补算
-        时返回 None。本方法不改变失败语义,只保留不依赖组合阶段的证据;
-        失败决策的日期取自同序号的冻结输入(该决策未产出,runner 只知道
-        已完成期数)。issue #463:补算前先补全捕获(流式加载只拉到失败
-        期次,screen 口径保持全期次)。
+        这里基于**已拉取的前缀捕获**(#463:输入经 :meth:`_iter_captured_inputs`
+        拉取即登记,失败期次在内)尽力补算并暂存,``build_report`` 照常携带。
+        拒绝路径不再全量重拉输入流(旧行为 ``_ensure_full_captures`` 对 556 期
+        全市场 run 意味着重建 loader / close 矩阵 / 特征预计算的 3-6 小时
+        单核重算,而多数 run 无 u_ 用户因子、screen 产物为 None,毫无产出,
+        期间 phase 指纹冻结还会撞 #306 僵尸击杀形成重试死循环)。引用 u_
+        用户因子(screen 有真实产出)的 run,前缀 screen 口径与全期次不同
+        —— marker.warnings 追加 ``factor_screen_prefix_scope`` 具名条目说明
+        覆盖 0..N 期;无 u_ 因子时 screen 本就 None,零额外动作。
+
+        返回 partial 标记(失败决策 1-based 定位 + 补算 warning),无已拉取
+        输入可补算时返回 None。本方法不改变失败语义,只保留不依赖组合阶段
+        的证据;失败决策的日期取自同序号的前缀捕获(该决策未产出,runner
+        只知道已完成期数)。
         """
         if self._fast_path:
             return None
-        await self._ensure_full_captures()
         if not self._business_dates:
             return None
         marker: dict[str, JsonValue] = {
@@ -2880,6 +2837,19 @@ class SignalEnginePipelineAdapter:
         screen_failure = await self._compute_factor_screen(manifest)
         if screen_failure is not None:
             warnings.append(screen_failure)
+        if self._factor_screen is not None:
+            # u_ 因子分档:screen 有真实产出时,其口径是已拉取的前缀期次
+            # (0..N)而非全期次 —— 拒绝路径的证据照实标注,不冒充全量。
+            warnings.append(
+                {
+                    "factor_screen_prefix_scope": True,
+                    "screen_periods": len(self._period_cross_sections),
+                    "message": (
+                        "factor_screen 基于拒绝时已拉取的前缀期次(0..N)计算,"
+                        "不代表全期次口径(issue #463:拒绝路径不再全量重拉输入)"
+                    ),
+                }
+            )
         if warnings:
             marker["warnings"] = warnings
         return marker
