@@ -27,7 +27,7 @@ Coordinator,后者在 ``stage x decision`` 粒度逐阶段回调
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeVar
@@ -45,6 +45,7 @@ from finboard_backtest.background_jobs.contracts import (
 )
 from finboard_backtest.research_run import (
     REPLAYABLE_SOURCE_STATUSES,
+    ArtifactDigest,
     ResearchArtifact,
     ResearchRunCoordinator,
     ResearchRunManifest,
@@ -181,6 +182,30 @@ class SessionPerOperationResearchRunStore:
     async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]:
         async def op(store: ResearchRunStore) -> list[ResearchArtifact]:
             return await store.list_artifacts(run_id)
+
+        return await self._with_store(op)
+
+    def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]:
+        """流式遍历 artifact(#470 前半场);会话生命周期覆盖整个迭代。
+
+        与逐操作短会话同构:单一专属会话服务整个流(断点续算读回期间独占),
+        迭代结束 / 提前截断(aclose)即关闭 —— 连接断开只损失本次读回,
+        调用方(coordinator)按既有语义回退全量重算。
+        """
+
+        async def _stream() -> AsyncIterator[ResearchArtifact]:
+            async with self._session_maker() as session:
+                store = self._store_factory(session)
+                async for artifact in store.iter_artifacts(run_id):
+                    yield artifact
+
+        return _stream()
+
+    async def list_artifact_digests(
+        self, run_id: str
+    ) -> list[ArtifactDigest]:
+        async def op(store: ResearchRunStore) -> list[ArtifactDigest]:
+            return await store.list_artifact_digests(run_id)
 
         return await self._with_store(op)
 

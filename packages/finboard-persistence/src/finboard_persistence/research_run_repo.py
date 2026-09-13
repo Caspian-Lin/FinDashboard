@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from finboard_persistence.models import (
     ResearchRunArtifactModel,
     ResearchRunModel,
 )
+
+#: artifact 流式读取的行缓冲(#470 前半场):决策级 13 行/决策,26 行 ≈ 2 决策。
+_ARTIFACT_STREAM_CHUNK = 26
 
 
 class ResearchRunPersistenceConflictError(RuntimeError):
@@ -189,9 +193,18 @@ class ResearchRunRepository:
         payload: dict[str, object],
         checksum: str,
     ) -> tuple[ResearchRunArtifactModel, bool]:
-        stmt = select(ResearchRunArtifactModel).where(
-            ResearchRunArtifactModel.run_id == run_id,
-            ResearchRunArtifactModel.artifact_id == artifact_id,
+        # 幂等命中分支只比对 checksum,不消费 payload —— load_only 让既有行
+        # 的 payload 列保持 deferred(#470 前半场:断点续算种子逐决策重持久化
+        # 时,每个命中行省掉一次全量 payload JSONB → Python 物化,features
+        # 期均 ~8.5MB)。命中行除 checksum 外的字段未加载,调用方只读 created
+        # 标志;新插入行不受影响。
+        stmt = (
+            select(ResearchRunArtifactModel)
+            .where(
+                ResearchRunArtifactModel.run_id == run_id,
+                ResearchRunArtifactModel.artifact_id == artifact_id,
+            )
+            .options(load_only(ResearchRunArtifactModel.checksum))
         )
         existing = (await self._session.execute(stmt)).scalar_one_or_none()
         if existing is not None:
@@ -222,6 +235,53 @@ class ResearchRunRepository:
             .order_by(ResearchRunArtifactModel.sequence)
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+    def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchRunArtifactModel]:
+        """按 sequence 流式遍历 artifact 行(#470 前半场)。
+
+        服务端游标 + ``yield_per`` 分块:全历史 run 的 payload 总量达数 GB
+        (features 期均 ~8.5MB),一次性 ``list_artifacts`` 物化会在断点续算
+        读回时把整个前缀的 payload 钉进内存(272 期前缀实测 ≈8GB)。流式
+        读取让消费方(逐决策分组 → 复验 → 重建 bundle → 释放)任意时刻只
+        持有 O(1) 个决策的载荷。行序与 ``list_artifacts`` 一致(sequence
+        升序)。
+        """
+
+        async def _stream() -> AsyncIterator[ResearchRunArtifactModel]:
+            stmt = (
+                select(ResearchRunArtifactModel)
+                .where(ResearchRunArtifactModel.run_id == run_id)
+                .order_by(ResearchRunArtifactModel.sequence)
+            )
+            result = await self._session.stream(
+                stmt, execution_options={"yield_per": _ARTIFACT_STREAM_CHUNK}
+            )
+            async for row in result:
+                yield row[0]
+
+        return _stream()
+
+    async def list_artifact_digests(
+        self, run_id: str
+    ) -> list[tuple[str, str | None, str]]:
+        """artifact 瘦指纹(stage, decision_id, checksum),不取 payload 列。
+
+        result_checksum / 拒绝路径归档只消费这三个字段(#470 前半场);列级
+        SELECT 避免 run 收尾把全量 payload 再物化一遍(556 期全历史 run
+        ≈ 5GB JSON 文本)。行序与 ``list_artifacts`` 一致。
+        """
+
+        stmt = (
+            select(
+                ResearchRunArtifactModel.stage,
+                ResearchRunArtifactModel.decision_id,
+                ResearchRunArtifactModel.checksum,
+            )
+            .where(ResearchRunArtifactModel.run_id == run_id)
+            .order_by(ResearchRunArtifactModel.sequence)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(stage, decision_id, checksum) for stage, decision_id, checksum in rows]
 
     async def get_artifact_by_trace(
         self, run_id: str, trace_id: str

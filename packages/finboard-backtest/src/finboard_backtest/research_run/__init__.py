@@ -12,6 +12,7 @@ from finboard_backtest.research_run.checkpoint_resume import (
     completed_decision_prefix,
     decision_artifact_index,
     group_decision_artifacts,
+    iter_completed_decision_prefix,
     rebuild_decision,
 )
 from finboard_backtest.research_run.contracts import (
@@ -22,6 +23,7 @@ from finboard_backtest.research_run.contracts import (
     REPLAYABLE_SOURCE_STATUSES,
     RESEARCH_PORTFOLIO_PIPELINE_VERSION,
     RESEARCH_RUN_SCHEMA_VERSION,
+    ArtifactDigest,
     CapitalTierOutcome,
     ConstraintOutcome,
     DecisionBundle,
@@ -89,6 +91,7 @@ __all__ = [
     "RESEARCH_PORTFOLIO_PIPELINE_VERSION",
     "RESEARCH_RUN_SCHEMA_VERSION",
     "SUPPORTED_RESEARCH_STRATEGIES",
+    "ArtifactDigest",
     "CapitalTierOutcome",
     "ConstraintOutcome",
     "DecisionBundle",
@@ -135,6 +138,7 @@ __all__ = [
     "decision_artifact_index",
     "execution_mode_for",
     "group_decision_artifacts",
+    "iter_completed_decision_prefix",
     "manifest_from_json",
     "parse_decision_schedule",
     "pipeline_output_checksum",

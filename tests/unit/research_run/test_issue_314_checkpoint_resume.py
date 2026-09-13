@@ -847,8 +847,9 @@ class TestSignalEngineResume:
         assert resumed_adapter.load_calls == 1
         assert resumed_adapter.last_pipeline is not None
         assert resumed_adapter.last_pipeline.build_calls == 2
-        assert resumed_adapter._resume_bundles is not None
-        assert len(resumed_adapter._resume_bundles) == 1
+        # #470 前半场:种子消费完毕即释放(signal_engine 侧属性清空),
+        # 断言改为「已消费且不再驻留」
+        assert resumed_adapter._resume_bundles is None
 
         # 对照:一次跑完
         control_manifest, _ = _signal_setup(
@@ -903,8 +904,8 @@ class TestSignalEngineResume:
         assert resumed_adapter.last_pipeline is None
         assert resumed_adapter._input_iterator is None
         assert resumed_adapter._fast_path is True
-        assert resumed_adapter._resume_bundles is not None
-        assert len(resumed_adapter._resume_bundles) == 3
+        # #470 前半场:快速路径种子消费完毕即释放,不再驻留
+        assert resumed_adapter._resume_bundles is None
 
         control_manifest, _ = _signal_setup(
             "RR-issue314-fast-ctrl", "issue314-fast-ctrl"

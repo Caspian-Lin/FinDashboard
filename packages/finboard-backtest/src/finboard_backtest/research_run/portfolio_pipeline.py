@@ -483,13 +483,21 @@ class PortfolioPipelineAdapter:
         )
         target_gross = manifest.strategy_spec.portfolio_policy.target_gross_exposure
 
-        # issue #314:已落库的决策前缀原样产出(零重算),其内容已由
-        # coordinator 读回校验并将再次通过 _validate_decision + 幂等持久化。
-        start_index = 0
         try:
-            for bundle in self._resume_bundles or ():
-                yield bundle
-                start_index += 1
+            # issue #314:已落库的决策前缀原样产出(零重算),其内容已由
+            # coordinator 读回校验并将再次通过 _validate_decision + 幂等持久化。
+            # #470 前半场:种子破坏性消费 —— 逐期 pop 产出,产出一期释放一
+            # 期;种子(含全量 features,期均数万 FeatureValue)不再被
+            # ``_resume_bundles`` 钉到 run 结束。
+            start_index = 0
+            seeds = self._resume_bundles
+            if seeds is not None:
+                self._resume_bundles = None
+                pending = list(seeds)
+                del seeds
+                while pending:
+                    yield pending.pop(0)
+                    start_index += 1
 
             # issue #463:决策输入支持 Sequence(按索引读取,旧行为)或
             # AsyncIterator(逐期拉取,任一时刻常驻 O(1) 期次)。从

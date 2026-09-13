@@ -2865,6 +2865,11 @@ class SignalEnginePipelineAdapter:
                         # 种子被拒(数量/时序与冻结输入不一致):整段回退全量
                         # 重算(#314 fail-closed 兜底,宁重算不漂移)。
                         self._resume_bundles = None
+                # #470 前半场:种子已移交快速路径本地变量或组合管线(后者
+                # 消费期破坏性释放);signal_engine 侧两处引用(实例属性 +
+                # 本地变量)即刻放空,不再把整个前缀钉到 run 结束。
+                self._resume_bundles = None
+                resume = None
             collected: list[DecisionBundle] = []
             if resume_all is not None:
                 for decision in resume_all:
@@ -2874,6 +2879,8 @@ class SignalEnginePipelineAdapter:
                     # 后的轻副本(消费审计:equity 曲线 / report 只读
                     # fills/positions/ledger)。
                     collected.append(_slim_decision(decision))
+                # 快速路径种子消费完毕,末个整前缀引用随之释放(#470)。
+                resume_all = None
             else:
                 if pipeline is None:
                     pipeline = await self._load()

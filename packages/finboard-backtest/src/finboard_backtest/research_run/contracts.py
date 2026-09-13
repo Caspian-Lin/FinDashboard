@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from finboard_backtest.strategy_spec.contracts import (
     ResearchStrategySpec,
@@ -912,6 +912,20 @@ class ResearchArtifact:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
+class ArtifactDigest(NamedTuple):
+    """artifact 瘦指纹(2026-09-14,#470 前半场)。
+
+    result_checksum / 报告归档只消费 stage / decision_id / checksum 三个字段,
+    却曾走 ``list_artifacts`` 把全部 payload JSONB(全历史 run ≈ 数 GB)物化
+    进内存;本投影让收尾路径按列读取,不再拉 payload。字段值与
+    ``ResearchArtifact`` 同名同义,顺序(sequence)语义由 store 实现保证。
+    """
+
+    stage: ResearchRunStage
+    decision_id: str | None
+    checksum: str
+
+
 @dataclass(slots=True)
 class ResearchRunRecord:
     manifest: ResearchRunManifest
@@ -1160,6 +1174,7 @@ __all__ = [
     "REPLAYABLE_SOURCE_STATUSES",
     "RESEARCH_PORTFOLIO_PIPELINE_VERSION",
     "RESEARCH_RUN_SCHEMA_VERSION",
+    "ArtifactDigest",
     "CapitalTierOutcome",
     "ConstraintOutcome",
     "DecisionBundle",

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from typing import cast
 
 from finboard_backtest.research_run import (
+    ArtifactDigest,
     ResearchArtifact,
     ResearchRunConflictError,
     ResearchRunManifest,
@@ -182,6 +183,36 @@ class SqlAlchemyResearchRunStore(ResearchRunStore):
                 created_at=row.created_at,
             )
             for row in rows
+        ]
+
+    def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]:
+        """流式遍历 artifact(#470 前半场;行序 = sequence 升序)。
+
+        repo 侧服务端游标 + 分块;本层只做行 → 契约对象映射,不物化整表。
+        """
+
+        async def _stream() -> AsyncIterator[ResearchArtifact]:
+            async for row in self._repository.iter_artifacts(run_id):
+                yield ResearchArtifact(
+                    artifact_id=row.artifact_id,
+                    run_id=row.run_id,
+                    decision_id=row.decision_id,
+                    sequence=row.sequence,
+                    stage=ResearchRunStage(row.stage),
+                    trace_id=row.trace_id,
+                    parent_trace_ids=tuple(row.parent_trace_ids),
+                    payload=cast(dict[str, JsonValue], row.payload),
+                    checksum=row.checksum,
+                    created_at=row.created_at,
+                )
+
+        return _stream()
+
+    async def list_artifact_digests(self, run_id: str) -> list[ArtifactDigest]:
+        rows = await self._repository.list_artifact_digests(run_id)
+        return [
+            ArtifactDigest(stage=ResearchRunStage(stage), decision_id=decision_id, checksum=checksum)
+            for stage, decision_id, checksum in rows
         ]
 
     async def checkpoint(self) -> None:

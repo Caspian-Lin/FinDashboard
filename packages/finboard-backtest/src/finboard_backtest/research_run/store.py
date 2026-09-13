@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Protocol
 
 from finboard_backtest.research_run.contracts import (
+    ArtifactDigest,
     JsonValue,
     ResearchArtifact,
     ResearchRunConflictError,
@@ -56,6 +57,10 @@ class ResearchRunStore(Protocol):
     ) -> list[bool]: ...
 
     async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]: ...
+
+    def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]: ...
+
+    async def list_artifact_digests(self, run_id: str) -> list[ArtifactDigest]: ...
 
     async def checkpoint(self) -> None: ...
 
@@ -201,6 +206,18 @@ class InMemoryResearchRunStore:
     async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]:
         values = self._artifacts.get(run_id, {}).values()
         return sorted(values, key=lambda item: item.sequence)
+
+    async def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]:
+        for item in await self.list_artifacts(run_id):
+            yield item
+
+    async def list_artifact_digests(self, run_id: str) -> list[ArtifactDigest]:
+        return [
+            ArtifactDigest(
+                stage=item.stage, decision_id=item.decision_id, checksum=item.checksum
+            )
+            for item in await self.list_artifacts(run_id)
+        ]
 
     async def checkpoint(self) -> None:
         return None

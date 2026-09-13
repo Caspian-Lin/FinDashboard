@@ -16,7 +16,7 @@ import structlog
 from finboard_backtest.portfolio.contracts import MAX_WEIGHT_EPSILON
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.checkpoint_resume import (
-    completed_decision_prefix,
+    iter_completed_decision_prefix,
 )
 from finboard_backtest.research_run.contracts import (
     REPLAYABLE_SOURCE_STATUSES,
@@ -254,6 +254,10 @@ class ResearchRunCoordinator:
             resume_prefix = await self._load_resume_prefix(manifest.run_id)
             if resume_prefix:
                 self._offer_resume(manifest.run_id, adapter, resume_prefix)
+                # #470 前半场:种子引用即刻移交 —— 适配器接受后自行持有
+                # (消费期破坏性释放),拒绝时无人持有;runner 侧局部变量不再
+                # 把整个前缀钉到 run 结束。
+                resume_prefix = []
             position_quantities: dict[tuple[str, ResearchPositionSide], Decimal] = (
                 defaultdict(Decimal)
             )
@@ -341,7 +345,11 @@ class ResearchRunCoordinator:
             )
             report_elapsed = time.monotonic() - report_started
             await self._store.checkpoint()
-            artifacts = await self._store.list_artifacts(manifest.run_id)
+            # #470 前半场:result_checksum 只消费 stage/decision_id/checksum,
+            # 走瘦指纹读取 —— 不再把全量 artifact payload(556 期全历史 run
+            # ≈5GB JSON)在 run 收尾物化一遍。指纹行序 = sequence 升序,与
+            # 旧 list_artifacts 一致,checksum 逐字节不变。
+            digests = await self._store.list_artifact_digests(manifest.run_id)
             result_checksum = stable_checksum(
                 [
                     {
@@ -349,7 +357,7 @@ class ResearchRunCoordinator:
                         "decision_id": _stable_decision_suffix(item.decision_id),
                         "checksum": item.checksum,
                     }
-                    for item in artifacts
+                    for item in digests
                 ]
             )
             if (
@@ -595,9 +603,10 @@ class ResearchRunCoordinator:
                     partial_failure=marker,
                 )
                 await self._store.checkpoint()
-                artifacts = await self._store.list_artifacts(manifest.run_id)
+                digests = await self._store.list_artifact_digests(manifest.run_id)
                 # partial run 不参与确定性重放(重放只允许 completed 源),
-                # 无 expected_result_checksum 可比,直接归档 artifact 指纹。
+                # 无 expected_result_checksum 可比,直接归档 artifact 指纹
+                # (#470 前半场:瘦指纹读取,不物化全量 payload)。
                 result_checksum = stable_checksum(
                     [
                         {
@@ -605,7 +614,7 @@ class ResearchRunCoordinator:
                             "decision_id": _stable_decision_suffix(item.decision_id),
                             "checksum": item.checksum,
                         }
-                        for item in artifacts
+                        for item in digests
                     ]
                 )
                 await self._store.save_result(
@@ -657,16 +666,31 @@ class ResearchRunCoordinator:
         return marker if isinstance(marker, dict) else None
 
     async def _load_resume_prefix(self, run_id: str) -> list[DecisionBundle]:
-        """读回已完整落库的决策前缀(issue #314);任何意外都回退空列表。
+        """读回已完整落库的决策前缀(issue #314 入口;流式,#470 前半场)。
 
-        前缀判定与重建见 ``checkpoint_resume.completed_decision_prefix``:
-        从 0 开始的最长连续决策,每决策既有全部 13 stage artifact、逐
-        artifact 复验载荷校验和、且能无损重建为 ``DecisionBundle``;任何
-        缺失 / 不一致在该决策处截断,被截断的决策由适配器照常重算。
+        前缀判定与重建见 ``checkpoint_resume.iter_completed_decision_prefix``:
+        从 0 开始的最长连续决策,artifact 按 sequence 流式读回(store 服务端
+        游标 + 分块),逐决策「凑齐 13 stage → 复验 → 重建 → 释放载荷」——
+        前缀 payload 不再全量物化(272 期前缀实测曾把 ≈8GB Python 对象钉进
+        内存并残留到 run 结束)。任何缺失 / 不一致在该决策处截断,被截断的
+        决策由适配器照常重算;读回流中途异常回退空前缀(全量重算,与旧
+        ``list_artifacts`` 失败语义一致)。
         """
 
+        prefix: list[DecisionBundle] = []
         try:
-            artifacts = await self._store.list_artifacts(run_id)
+            rows = self._store.iter_artifacts(run_id)
+            bundles = iter_completed_decision_prefix(run_id, rows)
+            try:
+                async for bundle in bundles:
+                    prefix.append(bundle)
+            finally:
+                # 提前截断(不完整前缀)或中途异常时关闭上游流,释放服务端
+                # 游标;对已耗尽 / 无 aclose 的迭代器为尽力而为。
+                for stream in (bundles, rows):
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        await close()
         except Exception:
             logger.warning(
                 "research_run.resume_artifacts_unreadable",
@@ -674,9 +698,6 @@ class ResearchRunCoordinator:
                 exc_info=True,
             )
             return []
-        if not artifacts:
-            return []
-        prefix = completed_decision_prefix(run_id, artifacts)
         if prefix:
             logger.info(
                 "research_run.resume_prefix_loaded",
