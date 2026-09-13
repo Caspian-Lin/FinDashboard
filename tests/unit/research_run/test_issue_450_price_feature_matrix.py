@@ -332,3 +332,124 @@ async def test_price_precompute_matches_snapshot_path(tmp_path: Path) -> None:
             for item in values
         }
         assert val_map == ref_map, day
+
+
+# --------------------------------------------------------------------- #
+# issue #464:价格特征预计算进程池分发 + 进度帧
+# --------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_price_precompute_pool_path_value_equal(tmp_path: Path) -> None:
+    """池分发路径与进程内路径逐值等值(#464)。"""
+    from finboard_backtest.factor_lab import PriceFeatureProcessPool
+    from finboard_backtest.research_run.frozen_loader import (
+        build_price_feature_precompute,
+    )
+
+    provider = await _publish_bars_release(tmp_path)
+    histories = await _load_close_histories(provider, _candidates(provider))
+    days = [
+        datetime(2024, 4, 15, 23, 0, tzinfo=UTC),
+        datetime(2024, 6, 15, 23, 0, tzinfo=UTC),
+        datetime(2024, 8, 20, 23, 0, tzinfo=UTC),
+    ]
+    baseline = await build_price_feature_precompute(
+        histories=histories,
+        provider=provider,
+        decision_ats=days,
+        symbols=list(_CODES),
+    )
+    pool = PriceFeatureProcessPool(provider=provider, worker_count=2)
+    await pool.start()
+    try:
+        pooled = await build_price_feature_precompute(
+            histories=histories,
+            provider=provider,
+            decision_ats=days,
+            symbols=list(_CODES),
+            process_pool=pool,
+        )
+    finally:
+        await pool.aclose()
+    assert pooled.symbols == baseline.symbols
+    assert pooled.by_symbol.keys() == baseline.by_symbol.keys()
+    for code in baseline.symbols:
+        for per_pooled, per_base in zip(
+            pooled.by_symbol[code], baseline.by_symbol[code], strict=True
+        ):
+            assert per_pooled == per_base
+
+
+@pytest.mark.asyncio
+async def test_price_precompute_progress_frames(tmp_path: Path) -> None:
+    """进度帧接通:首帧 1/n、末帧 n/n(#464;此前该段零帧冻住 phase)。"""
+    from finboard_backtest.research_run.frozen_loader import (
+        build_price_feature_precompute,
+    )
+
+    provider = await _publish_bars_release(tmp_path)
+    histories = await _load_close_histories(provider, _candidates(provider))
+    days = [datetime(2024, 6, 15, 23, 0, tzinfo=UTC)]
+    reports: list[str] = []
+
+    async def reporter(message: str) -> None:
+        reports.append(message)
+
+    await build_price_feature_precompute(
+        histories=histories,
+        provider=provider,
+        decision_ats=days,
+        symbols=list(_CODES),
+        progress=reporter,
+    )
+    assert reports[0] == "research_run:decision_load precompute price 1/3"
+    assert reports[-1] == "research_run:decision_load precompute price 3/3"
+
+
+def test_price_precompute_process_task_matches_history_fn() -> None:
+    """进程池任务函数与进程内逐标的应用同一计算(逐值一致)。"""
+    import numpy as np
+
+    from finboard_backtest.research_run.frozen_loader import (
+        _period_features_for_symbol,
+        _price_precompute_process_task,
+        _PricePrecomputeTask,
+    )
+
+    rng = np.arange(120, dtype=np.float64)
+    history = SymbolCloseHistory.from_sequences(
+        available_at=[
+            datetime(2024, 1, 2, 15, 30, tzinfo=UTC) + timedelta(days=i)
+            for i in range(120)
+        ],
+        dates=[date(2024, 1, 2) + timedelta(days=i) for i in range(120)],
+        closes=[float(v) for v in rng],
+    )
+    assert history is not None
+    epochs = np.array([1_710_000_000_000_000 + k * 86_400_000_000 for k in range(4)], dtype=np.int64)
+    ordinals = np.array(
+        [(date(2024, 3, 10) + timedelta(days=k)).toordinal() - date(1970, 1, 1).toordinal()
+         for k in range(4)],
+        dtype=np.int64,
+    )
+    task = _PricePrecomputeTask(
+        code="600001.SH",
+        history=history,
+        decision_epochs=epochs,
+        decision_ordinals=ordinals,
+        lookback=20,
+        windows=(20, 60),
+        tail_n=61,
+    )
+    code, per = _price_precompute_process_task(task)
+    assert code == "600001.SH"
+    expected = _period_features_for_symbol(
+        history,
+        epochs,
+        ordinals,
+        lookback=20,
+        windows=(20, 60),
+        tail_n=61,
+    )
+    assert per == expected

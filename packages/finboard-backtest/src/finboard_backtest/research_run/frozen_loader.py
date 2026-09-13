@@ -584,6 +584,7 @@ class FrozenInputLoader:
         *,
         progress: PrecomputeProgressReporter | None = None,
         cancel_probe: PrecomputeCancelProbe | None = None,
+        process_pool: PriceFeatureProcessPool | None = None,
     ) -> None:
         """一次性预建全部决策期的价格特征(幂等;#450 追续)。
 
@@ -593,6 +594,9 @@ class FrozenInputLoader:
         :meth:`ensure_close_histories`(预计算以矩阵为底座);评估域与矩阵
         同口径(#299/#380)。非真实 provider / 非 D1 发布不预建(逐期路径
         行为不变)。``cancel_probe`` 语义同 close/daily 预建(#450 追续)。
+        issue #464:``process_pool`` 分发主批计算(单线程批处理在全市场 x
+        全历史实测 ~17 分钟,池分发 ≈ worker_count 倍);``progress`` 此前
+        未接通,该段零进度帧使 job phase 冻结在 daily 段最后一帧。
         """
         if self._price_precompute_built or not decision_ats:
             return
@@ -632,6 +636,8 @@ class FrozenInputLoader:
             decision_ats=decision_ats,
             symbols=symbols,
             cancel_probe=cancel_probe,
+            progress=progress,
+            process_pool=process_pool,
         )
 
     async def load_context(
@@ -2034,6 +2040,41 @@ def _period_features_for_symbol(
     return tuple(out)
 
 
+@dataclass(frozen=True, slots=True)
+class _PricePrecomputeTask:
+    """价格特征预计算的进程池任务载荷(issue #464,字段全部可 pickle)。
+
+    ``history`` 为冻结 close 历史的 numpy 底座(:class:`SymbolCloseHistory`,
+    #439 原生数组表示使跨进程搬运 ≈ 2834 天 x 24B/标的);worker 进程内
+    跑 :func:`_period_features_for_symbol`,只回逐期小结果元组。
+    """
+
+    code: str
+    history: SymbolCloseHistory
+    decision_epochs: np.ndarray
+    decision_ordinals: np.ndarray
+    lookback: int
+    windows: tuple[int, ...]
+    tail_n: int
+
+
+def _price_precompute_process_task(
+    task: _PricePrecomputeTask,
+) -> tuple[str, tuple[PeriodPriceFeatures | None, ...]]:
+    """进程池 worker 入口(模块级函数,spawn 可 pickle;#464)。"""
+    return (
+        task.code,
+        _period_features_for_symbol(
+            task.history,
+            task.decision_epochs,
+            task.decision_ordinals,
+            lookback=task.lookback,
+            windows=task.windows,
+            tail_n=task.tail_n,
+        ),
+    )
+
+
 async def build_price_feature_precompute(
     *,
     histories: Mapping[str, SymbolCloseHistory | None],
@@ -2043,11 +2084,22 @@ async def build_price_feature_precompute(
     momentum_lookback: int | None = None,
     volatility_windows: tuple[int, ...] | None = None,
     cancel_probe: PrecomputeCancelProbe | None = None,
+    progress: PrecomputeProgressReporter | None = None,
+    process_pool: PriceFeatureProcessPool | None = None,
 ) -> PriceFeaturePrecompute:
     """run 级价格特征预计算(#450 追续):每标的一次覆盖全部决策期。
 
     矩阵未覆盖的标的(``None`` / 缺键)经 provider 做一次全区间列式读取
     (同 #371 门控语义)后走同一计算;产出按 ``symbols`` 顺序保留。
+
+    issue #464:主批计算分发给常驻进程池(``process_pool``,#288/#301 同
+    池)——全市场 x 全历史(周频 ~600 期 x 5215 标的)的单标的循环是
+    ~1800 次小 numpy 运算/标的,GIL 内 per-call 开销使单线程批处理实测
+    ~17 分钟;池分发后 ≈ worker_count 倍。池不可用/任务异常降级进程内
+    分块路径(结果逐值一致,close 矩阵预建 #301 同语义)。``progress``
+    按 :func:`_make_precompute_ticker` 节流上报 ``precompute price
+    k/n`` 帧——该段此前零进度帧,job phase 冻结在 daily 段最后一帧
+    (5120/5215 形态)造成「卡死」观感。
     """
     from finboard_backtest.factor_lab import DEFAULT_MOMENTUM_LOOKBACK
     from finboard_shared.models import Symbol
@@ -2063,6 +2115,7 @@ async def build_price_feature_precompute(
         [at.date().toordinal() - _EPOCH_ORDINAL for at in ordered], dtype=np.int64
     )
     tail_n = max(lookback + 1, max(windows) + 1, 61)
+    tick = _make_precompute_ticker(progress, "price", len(scoped), cancel_probe)
 
     def _from_history(history: SymbolCloseHistory) -> tuple[PeriodPriceFeatures | None, ...]:
         return _period_features_for_symbol(
@@ -2094,18 +2147,37 @@ async def build_price_feature_precompute(
             opens=columns.opens,
         )
 
-    def _build_batch() -> dict[str, tuple[PeriodPriceFeatures | None, ...]]:
-        out: dict[str, tuple[PeriodPriceFeatures | None, ...]] = {}
-        for code in scoped:
-            history = histories.get(code)
-            if history is None:
-                continue
-            out[code] = _from_history(history)
-        return out
+    batch_codes = [code for code in scoped if histories.get(code) is not None]
+    by_symbol: dict[str, tuple[PeriodPriceFeatures | None, ...]] | None = None
 
-    if cancel_probe is not None:
-        await cancel_probe()
-    by_symbol = await asyncio.to_thread(_build_batch)
+    if process_pool is not None and not process_pool.broken and batch_codes:
+        by_symbol = await _price_precompute_with_pool(
+            batch_codes,
+            histories,
+            process_pool,
+            epochs=epochs,
+            ordinals=ordinals,
+            lookback=lookback,
+            windows=windows,
+            tail_n=tail_n,
+            tick=tick,
+        )
+        if by_symbol is None:
+            logger.warning(
+                "frozen_loader.price_precompute_pool_failed",
+                stage="decision_load",
+                release_id=release.release_id,
+                symbols=len(batch_codes),
+                message="价格特征预计算池分发失败,降级进程内路径",
+            )
+    if by_symbol is None:
+        by_symbol = await _price_precompute_inprocess(
+            batch_codes,
+            histories,
+            _from_history,
+            tick=tick,
+        )
+
     if cancel_probe is not None:
         await cancel_probe()
     if fallback_codes:
@@ -2133,6 +2205,112 @@ async def build_price_feature_precompute(
         by_symbol=by_symbol,
         symbols=scoped,
     )
+
+
+async def _price_precompute_with_pool(
+    batch_codes: Sequence[str],
+    histories: Mapping[str, SymbolCloseHistory | None],
+    pool: PriceFeatureProcessPool,
+    *,
+    epochs: np.ndarray,
+    ordinals: np.ndarray,
+    lookback: int,
+    windows: tuple[int, ...],
+    tail_n: int,
+    tick: Callable[[], Awaitable[None]],
+) -> dict[str, tuple[PeriodPriceFeatures | None, ...]] | None:
+    """价格特征预计算主批分发进程池(#464);失败返回 None 交进程内降级。
+
+    每标的一个池任务(任务载荷 = 冻结 close 历史的 numpy 底座 + 决策期
+    键,worker 内跑 :func:`_period_features_for_symbol` 后只回小结果元
+    组);取消/打断探针异常原样上抛(#450 追续语义),其余任务异常整体
+    降级(close 矩阵预建 #301 同语义)。
+    """
+    if not batch_codes or pool.broken:
+        return None
+    try:
+        executor = pool.executor
+    except RuntimeError:
+        return None
+    loop = asyncio.get_running_loop()
+
+    def _task_for(code: str) -> _PricePrecomputeTask:
+        history = histories[code]
+        assert history is not None  # batch_codes 已过滤缺矩阵标的
+        return _PricePrecomputeTask(
+            code=code,
+            history=history,
+            decision_epochs=epochs,
+            decision_ordinals=ordinals,
+            lookback=lookback,
+            windows=windows,
+            tail_n=tail_n,
+        )
+
+    tasks = [_task_for(code) for code in batch_codes]
+
+    async def _run_one(
+        task: _PricePrecomputeTask,
+    ) -> tuple[str, tuple[PeriodPriceFeatures | None, ...]]:
+        result = await loop.run_in_executor(
+            executor, _price_precompute_process_task, task
+        )
+        await tick()
+        return result
+
+    try:
+        results = await asyncio.gather(
+            *(_run_one(task) for task in tasks),
+            return_exceptions=True,
+        )
+    except ResearchRunInterruptedError:
+        raise
+    except Exception:
+        return None
+    built: dict[str, tuple[PeriodPriceFeatures | None, ...]] = {}
+    for _task, result in zip(tasks, results, strict=True):
+        if isinstance(result, BaseException):
+            if isinstance(result, ResearchRunInterruptedError):
+                raise result
+            return None
+        built[result[0]] = result[1]
+    return built
+
+
+async def _price_precompute_inprocess(
+    batch_codes: Sequence[str],
+    histories: Mapping[str, SymbolCloseHistory | None],
+    from_history: Callable[[SymbolCloseHistory], tuple[PeriodPriceFeatures | None, ...]],
+    *,
+    tick: Callable[[], Awaitable[None]],
+) -> dict[str, tuple[PeriodPriceFeatures | None, ...]]:
+    """进程内分块批处理(池不可用时的降级;每块一个 to_thread,块间打点)。
+
+    与旧单批 ``to_thread(_build_batch)`` 逐值一致;分块只为让事件循环周
+    期性回到 async 侧逐标的打点(节流器自决是否上报)——此前整段一个阻
+    塞调用,零帧零取消检查。
+    """
+    by_symbol: dict[str, tuple[PeriodPriceFeatures | None, ...]] = {}
+    chunk_size = 256
+    for start in range(0, len(batch_codes), chunk_size):
+        chunk = list(batch_codes[start : start + chunk_size])
+
+        def _compute_chunk(
+            codes: list[str],
+        ) -> list[tuple[str, tuple[PeriodPriceFeatures | None, ...]]]:
+            out: list[tuple[str, tuple[PeriodPriceFeatures | None, ...]]] = []
+            for code in codes:
+                history = histories.get(code)
+                if history is None:
+                    continue
+                out.append((code, from_history(history)))
+            return out
+
+        for code, per in await asyncio.to_thread(_compute_chunk, chunk):
+            by_symbol[code] = per
+        for _ in chunk:
+            await tick()
+    return by_symbol
 
 
 async def _load_close_histories_via_pool(

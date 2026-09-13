@@ -2050,11 +2050,14 @@ async def build_decision_load_contexts(
     )
     # issue #450 追续:价格特征 run 级预计算(逐期矩阵切片仍要 5000 次
     # per-symbol 循环 + 快照 checksum,全市场 ≈ 30s/期;预建后逐期查表)。
+    # issue #464:进程池分发 + 进度帧接通(该段此前单线程零帧,全市场 x
+    # 全历史实测 ~17 分钟且 phase 冻结在 daily 段最后一帧)。
     await loader.ensure_price_feature_precompute(
         manifest,
         tuple(decision_at for decision_at, _ in decision_days),
         progress=precompute_phase_reporter,
         cancel_probe=precompute_cancel_probe,
+        process_pool=pool,
     )
     if precompute_phase_reporter is not None:
         with contextlib.suppress(Exception):
