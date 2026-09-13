@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -50,6 +50,10 @@ class ResearchRunStore(Protocol):
     ) -> ResearchRunRecord: ...
 
     async def append_artifact(self, artifact: ResearchArtifact) -> bool: ...
+
+    async def append_artifacts(
+        self, artifacts: Sequence[ResearchArtifact]
+    ) -> list[bool]: ...
 
     async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]: ...
 
@@ -157,28 +161,42 @@ class InMemoryResearchRunStore:
 
     async def append_artifact(self, artifact: ResearchArtifact) -> bool:
         async with self._lock:
-            run_artifacts = self._artifacts[artifact.run_id]
-            existing = run_artifacts.get(artifact.artifact_id)
-            if existing is not None:
-                if existing.checksum != artifact.checksum:
-                    raise ResearchRunConflictError(
-                        f"artifact {artifact.artifact_id} 断点重放内容不一致"
-                    )
-                return False
-            duplicate_sequence = next(
-                (
-                    item
-                    for item in run_artifacts.values()
-                    if item.sequence == artifact.sequence
-                ),
-                None,
-            )
-            if duplicate_sequence is not None:
+            return self._append_artifact_locked(artifact)
+
+    async def append_artifacts(
+        self, artifacts: Sequence[ResearchArtifact]
+    ) -> list[bool]:
+        """批量幂等追加(2026-09-14 决策段性能:逐 artifact session/commit
+        开销 ≈ 决策墙钟 10%)。单锁覆盖整批,保持与逐个追加完全相同的
+        去重 / 冲突 / sequence 占用语义;批内任一 artifact 冲突即整批抛错。
+        """
+
+        async with self._lock:
+            return [self._append_artifact_locked(artifact) for artifact in artifacts]
+
+    def _append_artifact_locked(self, artifact: ResearchArtifact) -> bool:
+        run_artifacts = self._artifacts[artifact.run_id]
+        existing = run_artifacts.get(artifact.artifact_id)
+        if existing is not None:
+            if existing.checksum != artifact.checksum:
                 raise ResearchRunConflictError(
-                    f"artifact sequence {artifact.sequence} 已被占用"
+                    f"artifact {artifact.artifact_id} 断点重放内容不一致"
                 )
-            run_artifacts[artifact.artifact_id] = artifact
-            return True
+            return False
+        duplicate_sequence = next(
+            (
+                item
+                for item in run_artifacts.values()
+                if item.sequence == artifact.sequence
+            ),
+            None,
+        )
+        if duplicate_sequence is not None:
+            raise ResearchRunConflictError(
+                f"artifact sequence {artifact.sequence} 已被占用"
+            )
+        run_artifacts[artifact.artifact_id] = artifact
+        return True
 
     async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]:
         values = self._artifacts.get(run_id, {}).values()

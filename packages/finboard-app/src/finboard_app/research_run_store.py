@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import cast
 
 from finboard_backtest.research_run import (
@@ -135,6 +135,33 @@ class SqlAlchemyResearchRunStore(ResearchRunStore):
                 payload=cast(dict[str, object], artifact.payload),
                 checksum=artifact.checksum,
             )
+        except ResearchRunPersistenceConflictError as exc:
+            raise ResearchRunConflictError(str(exc)) from exc
+        return created
+
+    async def append_artifacts(
+        self, artifacts: Sequence[ResearchArtifact]
+    ) -> list[bool]:
+        """批内逐 artifact 幂等追加(同一 session,不逐个 commit;提交边界
+        由调用方决定 —— SessionPerOperation 包装在批后一次 commit)。语义
+        与逐个调用 :meth:`append_artifact` 完全一致:批内任一冲突即整批
+        抛错(该 session 已 flush 的前序行随会话终结一并回滚)。"""
+
+        created: list[bool] = []
+        try:
+            for artifact in artifacts:
+                _, artifact_created = await self._repository.append_artifact(
+                    run_id=artifact.run_id,
+                    artifact_id=artifact.artifact_id,
+                    decision_id=artifact.decision_id,
+                    sequence=artifact.sequence,
+                    stage=artifact.stage.value,
+                    trace_id=artifact.trace_id,
+                    parent_trace_ids=list(artifact.parent_trace_ids),
+                    payload=cast(dict[str, object], artifact.payload),
+                    checksum=artifact.checksum,
+                )
+                created.append(artifact_created)
         except ResearchRunPersistenceConflictError as exc:
             raise ResearchRunConflictError(str(exc)) from exc
         return created

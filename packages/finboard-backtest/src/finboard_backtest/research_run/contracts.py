@@ -932,9 +932,20 @@ class ResearchRunRecord:
     timing: dict[str, JsonValue] | None = None
 
 
-def canonical_json(value: object) -> str:
+def canonical_json_normalized(value: JsonValue) -> str:
+    """对**已规范化**结构(``to_json_value`` 的输出)做 canonical dumps。
+
+    2026-09-14 决策段性能(py-spy 实证 ``_to_json_value`` 占决策墙钟 ~33%):
+    ``_persist_decision`` 先 ``to_json_value`` 得到规范化 payload,再
+    ``stable_checksum`` 对同一 payload **重新遍历一遍** ``to_json_value`` ——
+    对 FEATURES 这类全市场截面(单期 ~50 万 JSON 节点)该二次遍历是纯开销。
+    本函数跳过二次遍历直接 dumps;输出与 ``canonical_json(同一输入)``
+    **逐字节一致** —— 规范化输出只含 dict/list/str/int/float/None/bool,
+    键已全为 str,tuple 已全为 list,``sort_keys`` 与分隔符同参。
+    """
+
     return json.dumps(
-        to_json_value(value),
+        value,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -942,8 +953,18 @@ def canonical_json(value: object) -> str:
     )
 
 
+def stable_checksum_normalized(value: JsonValue) -> str:
+    """``stable_checksum`` 的「输入已规范化」变体(语义同上,省二次遍历)。"""
+
+    return hashlib.sha256(canonical_json_normalized(value).encode("utf-8")).hexdigest()
+
+
+def canonical_json(value: object) -> str:
+    return canonical_json_normalized(to_json_value(value))
+
+
 def stable_checksum(value: object) -> str:
-    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+    return stable_checksum_normalized(to_json_value(value))
 
 
 def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
@@ -1175,6 +1196,7 @@ __all__ = [
     "UniverseCandidate",
     "UnsupportedResearchCapabilityError",
     "canonical_json",
+    "canonical_json_normalized",
     "execution_mode_for",
     "manifest_from_json",
     "parse_decision_schedule",
@@ -1183,5 +1205,6 @@ __all__ = [
     "report_from_json",
     "resolve_decision_schedule",
     "stable_checksum",
+    "stable_checksum_normalized",
     "to_json_value",
 ]

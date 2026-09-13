@@ -41,6 +41,7 @@ from finboard_backtest.research_run.contracts import (
     pipeline_output_checksum,
     replay_guard_error,
     stable_checksum,
+    stable_checksum_normalized,
     to_json_value,
 )
 from finboard_backtest.research_run.failure_context import (
@@ -739,8 +740,19 @@ class ResearchRunCoordinator:
         progress: ProgressHook | None = None,
         failure_ctx: FailureContext | None = None,
     ) -> None:
+        # 2026-09-14 决策段性能(py-spy 实证:序列化占决策墙钟 ~45%,其中
+        # 「checksum 二次 to_json_value 遍历」≈20 个百分点;逐 artifact 一次
+        # session+commit ≈10 个百分点)。两处收敛:每 stage 只走一遍
+        # to_json_value,checksum 走已规范化变体(输出逐字节一致);13 个
+        # artifact 经 ``append_artifacts`` 批量落库(store 侧单 session 单
+        # commit)。持久化粒度从「artifact」变为「决策」:中断时该决策要么
+        # 13 artifact 全在、要么全不在 —— #314 续算以「逐决策 13 artifact
+        # 全齐 + checksum 复验」为界,半截决策本来就会被截断,可观测语义
+        # 不变。
         stage_payloads = _decision_stage_payloads(decision)
         parent: tuple[str, ...] = ()
+        artifacts: list[ResearchArtifact] = []
+        stage_phases: list[tuple[int, str]] = []
         for offset, stage in enumerate(_DECISION_STAGES):
             if failure_ctx is not None:
                 failure_ctx.stage = stage.value
@@ -752,7 +764,7 @@ class ResearchRunCoordinator:
                 }
             )
             assert isinstance(payload_value, dict)
-            payload_checksum = stable_checksum(payload_value)
+            payload_checksum = stable_checksum_normalized(payload_value)
             stable_suffix = f"{decision_index:08d}:{stage.value}"
             trace_id = f"RRT-{stable_checksum(stable_suffix)[:24]}"
             artifact = ResearchArtifact(
@@ -766,20 +778,23 @@ class ResearchRunCoordinator:
                 payload=payload_value,
                 checksum=payload_checksum,
             )
-            await self._store.append_artifact(artifact)
-            if progress is not None:
-                # 单位 = 已完成的 (decision x stage) 工件数;total 随当前已发现的
-                # 决策递增(见 DECISION_STAGE_COUNT 注释)。phase 携带决策级
-                # 上下文(issue #308):序号 1-based + business_date。
-                done = decision_index * DECISION_STAGE_COUNT + offset + 1
-                total = (decision_index + 1) * DECISION_STAGE_COUNT
-                await _report_progress(
-                    progress,
-                    done,
-                    total,
+            artifacts.append(artifact)
+            # 单位 = 已完成的 (decision x stage) 工件数;total 随当前已发现的
+            # 决策递增(见 DECISION_STAGE_COUNT 注释)。phase 携带决策级
+            # 上下文(issue #308):序号 1-based + business_date。批量落库后
+            # 逐 stage 上报序列保持不变(仅整体后移到落库之后)。
+            stage_phases.append(
+                (
+                    decision_index * DECISION_STAGE_COUNT + offset + 1,
                     _decision_phase(stage.value, decision_index, decision.business_date),
                 )
+            )
             parent = (trace_id,)
+        await self._store.append_artifacts(artifacts)
+        if progress is not None:
+            total = (decision_index + 1) * DECISION_STAGE_COUNT
+            for done, phase in stage_phases:
+                await _report_progress(progress, done, total, phase)
 
     async def _persist_report(
         self,
@@ -795,6 +810,7 @@ class ResearchRunCoordinator:
             failure_ctx.stage = ResearchRunStage.REPORT.value
         payload = to_json_value({"report": report})
         assert isinstance(payload, dict)
+        report_checksum = stable_checksum_normalized(payload)
         if partial_failure is not None:
             # issue #304:report JSON 内标注 partial 与失败决策定位。成功路径
             # 不注入任何键,report artifact 的 checksum 逐字节零漂移。
@@ -812,7 +828,7 @@ class ResearchRunCoordinator:
                 trace_id=f"RRT-{stable_checksum('report')[:24]}",
                 parent_trace_ids=(),
                 payload=payload,
-                checksum=stable_checksum(payload),
+                checksum=report_checksum,
             )
         )
         if progress is not None:

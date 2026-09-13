@@ -27,7 +27,7 @@ Coordinator,后者在 ``stage x decision`` 粒度逐阶段回调
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeVar
@@ -161,6 +161,20 @@ class SessionPerOperationResearchRunStore:
     async def append_artifact(self, artifact: ResearchArtifact) -> bool:
         async def op(store: ResearchRunStore) -> bool:
             return await store.append_artifact(artifact)
+
+        return await self._with_store(op)
+
+    async def append_artifacts(
+        self, artifacts: Sequence[ResearchArtifact]
+    ) -> list[bool]:
+        """整批 artifact 走**同一个**短会话(coordinator 逐决策批量落库,
+        2026-09-14 决策段性能:此前 13 artifact = 13 次 session 打开/提交,
+        psycopg + connect 占决策墙钟 ~10%)。批内全在或全不在,一次 commit;
+        连接断开只损失本决策,attempt 重试按 #314 续算语义截断半截决策。
+        """
+
+        async def op(store: ResearchRunStore) -> list[bool]:
+            return await store.append_artifacts(artifacts)
 
         return await self._with_store(op)
 
