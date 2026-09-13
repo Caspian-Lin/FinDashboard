@@ -2674,6 +2674,9 @@ class SignalEnginePipelineAdapter:
         # 不再全量物化 ``self._inputs``);加载失败 / 打断经 runner 的
         # ``aclose`` 兜底级联关闭(生成器 finally → 特征进程池即时释放)。
         self._input_iterator: AsyncIterator[PortfolioDecisionInput] | None = None
+        # #470:停复牌视图随首建流缓存,流重建(种子被拒)时复用
+        self._suspension_view: SuspensionView | None = None
+        self._suspension_loaded = False
         # issue #463:逐期捕获的 factor_screen 投影与决策日 —— 输入经
         # :meth:`_iter_captured_inputs` 拉取时登记(拉取即捕获,组合阶段
         # 失败期(#304 partial)的投影 / 日期也在内),报告阶段取用。捕获
@@ -2842,12 +2845,31 @@ class SignalEnginePipelineAdapter:
 
     async def _load(self) -> PortfolioPipelineAdapter:
         if self._input_iterator is None:
-            suspension_view = await self._load_suspension_view()
-            self._input_iterator = self._iter_captured_inputs(suspension_view)
+            if not self._suspension_loaded:
+                self._suspension_view = await self._load_suspension_view()
+                self._suspension_loaded = True
+            self._input_iterator = self._iter_captured_inputs(self._suspension_view)
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
             decision_inputs=self._input_iterator,
         )
+
+    async def _reset_input_stream(self) -> None:
+        """关闭并重建流式输入(#470 前半场:种子被拒的全量重算兜底)。
+
+        预取瘦身后(``aprefetch_inputs`` 只留 stub),种子被拒的「全量重算」
+        无法再回放已消费的输入流 —— 关闭旧流(级联收尾加载生成器与特征
+        进程池)、重置捕获投影(重算路径按期重新捕获)、下次 ``_load`` 建
+        全新流从第 0 期重拉。代价 = 预计算重建(分钟级);该路径仅在种子
+        与冻结输入漂移的病态场景触发(#314 fail-closed,宁重算不漂移)。
+        """
+
+        iterator = self._input_iterator
+        self._input_iterator = None
+        if iterator is not None:
+            await _aclose_asyncgen(iterator)
+        self._period_cross_sections = []
+        self._business_dates = []
 
     async def decisions(
         self,
@@ -2871,14 +2893,18 @@ class SignalEnginePipelineAdapter:
                 else:
                     pipeline = await self._load()
                     # issue #463:流式输入下 resume_from 的种子校验需要前缀
-                    # 冻结输入 —— 先从输入流预取 len(resume) 期(经捕获包装
-                    # 逐期登记投影 / 日期,与决策期推进语义一致)。种子被拒
-                    # 时预取前缀由管线按期序照常消费(全量重算,语义不变)。
+                    # 冻结输入 —— 先从输入流预取 len(resume) 期(#470 前半场:
+                    # 预取只保留 resume 校验/账本重放所需的瘦 stub,完整输入
+                    # 拉取期即释放;投影捕获照常逐期登记)。种子被拒时输入流
+                    # 已被预取消费,全量重算经流重建从第 0 期重拉(fail-closed,
+                    # 代价 = 预计算重建,罕见路径)。
                     await pipeline.aprefetch_inputs(len(resume))
                     if not pipeline.resume_from(resume):
                         # 种子被拒(数量/时序与冻结输入不一致):整段回退全量
                         # 重算(#314 fail-closed 兜底,宁重算不漂移)。
                         self._resume_bundles = None
+                        await self._reset_input_stream()
+                        pipeline = await self._load()
                 # #470 前半场:种子已移交快速路径本地变量或组合管线(后者
                 # 消费期破坏性释放);signal_engine 侧两处引用(实例属性 +
                 # 本地变量)即刻放空,不再把整个前缀钉到 run 结束。

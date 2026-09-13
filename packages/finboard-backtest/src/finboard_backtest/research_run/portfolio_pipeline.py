@@ -19,7 +19,7 @@ from collections.abc import (
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import structlog
@@ -277,9 +277,16 @@ class PortfolioPipelineAdapter:
                 decision_inputs
             )
             self._inputs: tuple[PortfolioDecisionInput, ...] = ()
+            # #470 前半场:流式模式下 resume 校验缓冲只保留 5 个瘦字段
+            # (business_date/decision_at/lot_info/prices/execution_prices),
+            # 完整输入(features/candidates/signals/covariance,全市场期均
+            # 数万 FeatureValue)在拉取期即时释放 —— 此前 273 期完整输入被
+            # ``self._inputs`` 钉到 run 结束(实测 ≈5-9GB)。
+            self._prefetch_stubs: list[_ResumeReplayStub] = []
         else:
             self._input_stream = None
             self._inputs = tuple(decision_inputs)
+            self._prefetch_stubs = []
         self._required_capabilities = tuple(
             sorted(set(required_capabilities))
         )
@@ -293,22 +300,36 @@ class PortfolioPipelineAdapter:
 
         :meth:`resume_from` 是同步契约(validate-then-mutate),无法拉取异步
         迭代器;种子校验所需的逐期 ``business_date`` / ``decision_at`` /
-        ``lot_info`` 由调用方(signal_engine 决策循环)先经本方法从输入流
-        预取进 ``self._inputs`` 缓冲。Sequence 输入为 no-op;流被提前耗尽时
-        取到多少算多少(不足即由 ``resume_from`` 以数量不符拒绝,与旧
+        账本重放所需的 ``lot_info`` / 决策价 / 执行价由调用方(signal_engine
+        决策循环)先经本方法从输入流预取。Sequence 输入为 no-op;流被提前
+        耗尽时取到多少算多少(不足即由 ``resume_from`` 以数量不符拒绝,与旧
         「种子超过冻结输入数即拒绝」语义等值)。
+
+        #470 前半场:缓冲只保留 :class:`_ResumeReplayStub` 瘦记录(~MB/期),
+        完整输入在返回前释放 —— 校验与账本重放只消费这五个字段(消费面
+        见 :func:`_pipeline_state_from_resume`),features/candidates 等重
+        对象不再驻留。
         """
 
         stream = self._input_stream
         if stream is None or count <= 0:
             return
-        pulled: list[PortfolioDecisionInput] = list(self._inputs)
+        pulled: list[_ResumeReplayStub] = list(self._prefetch_stubs)
         while len(pulled) < count:
             try:
-                pulled.append(await stream.__anext__())
+                item = await stream.__anext__()
             except StopAsyncIteration:
                 break
-        self._inputs = tuple(pulled)
+            pulled.append(
+                _ResumeReplayStub(
+                    business_date=item.business_date,
+                    decision_at=item.decision_at,
+                    lot_info=item.lot_info,
+                    prices=item.prices,
+                    execution_prices=item.execution_prices,
+                )
+            )
+        self._prefetch_stubs = pulled
 
     async def _close_input_stream(self) -> None:
         """关闭流式输入(级联收尾加载生成器与特征进程池,#463)。
@@ -324,17 +345,15 @@ class PortfolioPipelineAdapter:
     async def _next_input(self, index: int) -> PortfolioDecisionInput | None:
         """第 ``index`` 期冻结输入;``None`` = 输入耗尽(#463)。
 
-        Sequence 输入按索引读取(旧行为);流式输入优先消费 resume 预取
-        缓冲(``self._inputs``,按期序对齐),缓冲用尽后从迭代器续拉 ——
-        续拉结果不回填缓冲,保持 O(1) 常驻。
+        Sequence 输入按索引读取(旧行为);流式输入直接从迭代器续拉
+        (#470:预取期已瘦身为 stub 只服务 resume 校验,不再回放完整输入,
+        种子被拒的全量重算由 signal_engine 重建全新输入流兜底)。
         """
 
         stream = self._input_stream
         if stream is None:
             if index >= len(self._inputs):
                 return None
-            return self._inputs[index]
-        if index < len(self._inputs):
             return self._inputs[index]
         try:
             return await stream.__anext__()
@@ -353,7 +372,13 @@ class PortfolioPipelineAdapter:
 
         if self._resume_bundles is not None or not completed:
             return False
-        if len(completed) > len(self._inputs):
+        # #470 前半场:校验源 = 流式模式的瘦预取缓冲或 Sequence 模式的
+        # 完整输入(两者都提供 resume 校验/账本重放所需的五个字段)。
+        if self._input_stream is not None:
+            validation_inputs: Sequence[Any] = self._prefetch_stubs
+        else:
+            validation_inputs = self._inputs
+        if len(completed) > len(validation_inputs):
             return False
         previous_at: datetime | None = None
         for index, bundle in enumerate(completed):
@@ -362,14 +387,14 @@ class PortfolioPipelineAdapter:
             previous_at = bundle.decision_at
             # 种子重放的 lot_info / business_date 取自对应期冻结输入,
             # 输入-决策错位(理论上不可能,漂移防护)一律拒绝。
-            item = self._inputs[index]
+            item = validation_inputs[index]
             if (
                 item.business_date != bundle.business_date
                 or item.decision_at != bundle.decision_at
             ):
                 return False
         try:
-            seeded = _pipeline_state_from_resume(completed, self._inputs)
+            seeded = _pipeline_state_from_resume(completed, validation_inputs)
         except Exception:
             logger.warning(
                 "research_run.resume_seed_rejected",
@@ -1552,11 +1577,31 @@ def _mark_after_execution(
     return tuple(positions), ledger
 
 
+class _ResumeReplayStub(NamedTuple):
+    """resume 校验 / 账本重放所需的逐期瘦记录(#470 前半场)。
+
+    :func:`_pipeline_state_from_resume` 与 ``resume_from`` 的时序校验只消费
+    这五个字段;完整 ``PortfolioDecisionInput`` 的重对象(features /
+    candidates / signals / covariance,全市场期均数万 FeatureValue)由
+    :meth:`aprefetch_inputs` 在抽取 stub 后即时释放。
+    """
+
+    business_date: date
+    decision_at: datetime
+    lot_info: Mapping[str, AssetLotInfo]
+    prices: Mapping[str, float]
+    execution_prices: Mapping[str, float]
+
+
 def _pipeline_state_from_resume(
     completed: Sequence[DecisionBundle],
-    inputs: Sequence[PortfolioDecisionInput],
+    inputs: Sequence[Any],
 ) -> _PipelineState:
     """从已完成决策前缀精确重建组合管线账本状态(issue #314)。
+
+    输入序列可以是完整 ``PortfolioDecisionInput``(Sequence 模式 / 测试)
+    或 :class:`_ResumeReplayStub` 瘦记录(流式模式,#470)—— 两者只消费
+    ``lot_info`` / ``business_date`` / ``prices`` / ``execution_prices``。
 
     数值面三条线,全部与全新执行**逐位等值**(Decimal 的 str 表示参与
     checksum,数值相等但刻度不同也会漂移,不能只做数值恢复):
