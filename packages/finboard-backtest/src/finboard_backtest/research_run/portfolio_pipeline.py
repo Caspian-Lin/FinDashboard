@@ -1654,6 +1654,18 @@ def _verify_resume_state(state: _PipelineState, last: DecisionBundle) -> None:
             raise ValueError(f"{symbol} 重放账本与决策记录不一致")
         if book.opened_on != last.risk_state.opened_on.get(symbol):
             raise ValueError(f"{symbol} 重放 opened_on 与风险状态不一致")
+        if book.quantity <= 0:
+            # #314 种子校验修正(2026-09-13):``_risk_state`` 的价格高水位
+            # 只记录 ``quantity > 0`` 的标的,而**已平仓账面**(quantity=0 且
+            # realized_pnl != 0,故仍出现在 ``positions`` 记录中)没有对应
+            # 记录值 —— 拿 None 比较必然误判「重放价格高水位与风险状态不
+            # 一致」,种子被拒 → 每次重试从零重算(生产形态:最后一个已
+            # 完成决策恰好平仓且平仓价 != 建仓价;单测价格恒定
+            # realized_pnl=0 时记账不入 positions,故未暴露)。平仓账面的
+            # quantity / average_price / realized_pnl / opened_on 已在上方
+            # 逐项校验;高水位在 quantity=0 时无风险语义(平仓分支已重置),
+            # 跳过该项比较。
+            continue
         recorded_high_water = last.risk_state.high_water_prices.get(symbol)
         if (
             recorded_high_water is None

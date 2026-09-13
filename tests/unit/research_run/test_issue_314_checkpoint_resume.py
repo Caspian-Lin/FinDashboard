@@ -103,8 +103,17 @@ def _artifact_fingerprint(
     ]
 
 
-def _multi_input(day_index: int, scores: tuple[float, ...] = (1.0, 1.0, 1.0)) -> PortfolioDecisionInput:
-    """三标的、逐日决策的固定组合输入(与集成测试同构)。"""
+def _multi_input(
+    day_index: int,
+    scores: tuple[float, ...] = (1.0, 1.0, 1.0),
+    *,
+    price: float = 10.0,
+) -> PortfolioDecisionInput:
+    """三标的、逐日决策的固定组合输入(与集成测试同构)。
+
+    ``price`` 同时作为决策价与执行价(逐日可变,用于制造平仓价 != 建仓价
+    的 realized_pnl != 0 场景,见 ``test_resume_accepts_prefix_ending_with_closed_book``)。
+    """
 
     decision_at = datetime(2024, 1, 2 + day_index, 15, tzinfo=UTC)
     return PortfolioDecisionInput(
@@ -141,8 +150,8 @@ def _multi_input(day_index: int, scores: tuple[float, ...] = (1.0, 1.0, 1.0)) ->
             )
             for symbol, score in zip(SYMBOLS, scores, strict=True)
         ),
-        prices=dict.fromkeys(SYMBOLS, 10.0),
-        execution_prices=dict.fromkeys(SYMBOLS, 10.0),
+        prices=dict.fromkeys(SYMBOLS, price),
+        execution_prices=dict.fromkeys(SYMBOLS, price),
         lot_info={symbol: AssetLotInfo(code=symbol, lot_size=100) for symbol in SYMBOLS},
         input_artifact_ids=("release-v1",),
         covariance=CovarianceEstimate(
@@ -500,6 +509,45 @@ class TestPipelineResumeFrom:
         ]
         assert instruction_ids
         assert all(":I:00000002:" in item for item in instruction_ids)
+
+    async def test_resume_accepts_prefix_ending_with_closed_book(
+        self, manifest_factory
+    ) -> None:
+        """前缀最后决策平仓且平仓价 != 建仓价时种子仍被接受(2026-09-13 修复)。
+
+        生产形态(RR-bff0):重放的 prefix 最后决策清仓 300308.SZ
+        (``realized_pnl=1126.47``),记账后 ``quantity=0`` 但
+        ``realized_pnl != 0``,故仍出现在 ``DecisionBundle.positions`` 里;
+        而 ``_risk_state.high_water_prices`` 只记录 ``quantity > 0`` 标的 →
+        旧校验取到 None 必抛「重放价格高水位与风险状态不一致」→ 种子被拒、
+        每次重试从零重算。既有用例价格恒定(``realized_pnl=0``,平仓账面不
+        入 positions)故未暴露。
+        """
+        manifest = manifest_factory()
+        inputs = (
+            _multi_input(0, (1.0, 1.0, 1.0), price=10.0),
+            _multi_input(1, (-1.0, -1.0, -1.0), price=12.0),  # 平仓且有盈亏
+        )
+        fresh = [
+            item
+            async for item in PortfolioPipelineAdapter(
+                strategy_kind="ma_cross", decision_inputs=inputs
+            ).decisions(manifest)
+        ]
+        # 前提:第二期平仓产生非零 realized_pnl(平仓账面进入 positions 记录)。
+        closed = [
+            position
+            for position in fresh[1].positions
+            if position.quantity == 0 and position.realized_pnl != 0
+        ]
+        assert closed, fresh[1].positions
+
+        resumed = PortfolioPipelineAdapter(
+            strategy_kind="ma_cross", decision_inputs=inputs
+        )
+        assert resumed.resume_from(fresh) is True
+        rebuilt = [item async for item in resumed.decisions(manifest)]
+        assert rebuilt == fresh
 
     async def test_resume_state_seeding_matches_fresh_run_exactly(
         self, manifest_factory
