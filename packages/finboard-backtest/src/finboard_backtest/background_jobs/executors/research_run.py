@@ -202,6 +202,7 @@ class ResearchRunExecutor:
         await progress(0, None, "research_run:start")
         store = SessionPerOperationResearchRunStore(self._session_maker, self._store_factory)
         manifest = await _reconstruct_manifest(store, run_id)
+        await _converge_stale_running(store, run_id)
         try:
             adapter = self._adapter_factory(manifest)
         except Exception as exc:
@@ -346,6 +347,38 @@ async def _reconstruct_manifest(
             context={"run_id": run_id},
         )
     return record.manifest
+
+
+async def _converge_stale_running(
+    store: ResearchRunStore,
+    run_id: str,
+) -> None:
+    """把「job 已被本 attempt 领取但 run 行仍 RUNNING」的硬杀残留收敛为
+    INTERRUPTED(2026-09-13 事故:worker 被 taskkill 强杀 → lease 过期回收
+    → attempt 2 领取后 coordinator 的 RUNNING 重入门禁原样返回未执行
+    record → job 以 failed + 空错误码收口,run 行永久悬挂 RUNNING)。
+
+    本执行器必然持有该 job 的 attempt claim:能再次被领取,前次 attempt 的
+    lease 必已被 reclaim 过期回收(#161)—— RUNNING 行是硬杀残留而非活
+    跃兄弟 worker(#306 属主守卫在 worker 启动扫描时已按当时 lease 保护过;
+    reclaim 之后 lease 已过期,不再构成误标风险)。收敛语义与
+    ``mark_stale_running_as_interrupted`` 的 process_restart 分支一致:
+    coordinator 的 start_states 含 INTERRUPTED → 走 #305/#314 恢复通道续跑。
+    """
+    record = await store.get(run_id)
+    if record is None or record.status is not ResearchRunStatus.RUNNING:
+        return
+    await store.transition(
+        run_id,
+        expected=frozenset({ResearchRunStatus.RUNNING}),
+        target=ResearchRunStatus.INTERRUPTED,
+        error_code="process_restart",
+        error_summary=(
+            "前次 attempt 的 worker 被强制终止(lease 过期回收),checkpoint"
+            " 已保留;本次 attempt 按恢复通道自动续跑"
+        ),
+    )
+    await store.checkpoint()
 
 
 async def _mark_run_failed(
