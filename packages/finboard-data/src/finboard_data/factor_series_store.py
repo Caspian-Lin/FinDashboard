@@ -244,8 +244,15 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
     """按日惰性取数的 ``record.values`` 后端(工件行;loader/MCP 零改动)。
 
     首次访问才读文件并校验 sha256(构造零 IO,入队缓存检查等不触 values
-    的路径零开销);单日 ``get`` 走 Arrow 谓词过滤(常数毫秒级),全量
-    迭代(``items``/``values``)一次性物化并缓存。构造后不可变。
+    的路径零开销);单日 ``get`` 走日期列上的 numpy 二分定位行区间后切片
+    (O(log n) + 单日 to_pylist,毫秒级),全量迭代(``items``/``values``)
+    一次性物化并缓存。构造后不可变。
+
+    issue #464 实测教训:首版首访构建 ``_dates`` 用「整列 to_pylist +
+    逐日 isoformat」——全历史 1470 万行 = 分钟级纯对象开销,且 loader 在
+    事件循环线程同步调用会阻塞整个 worker(心跳/并发 job 全停)。现首访
+    只做「验签 + 读表 + date32 列转 int32 numpy(零对象)」,全量迭代才
+    物化;loader 侧取值经 ``asyncio.to_thread``(#464 配套改动)。
     """
 
     def __init__(self, root: str | Path, relpath: str, expected_checksum: str) -> None:
@@ -254,32 +261,47 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
         self._expected_checksum = expected_checksum
         self._table: pa.Table | None = None
         self._materialised: dict[str, dict[str, float | None]] | None = None
-        self._dates: tuple[str, ...] | None = None
+        #: date32 列的零对象 numpy 表示(自 1970-01-01 的天数;文件即升序)
+        self._date_ints: Any = None
 
     def _ensure_table(self) -> pa.Table:
         if self._table is None:
+            import numpy as np
+            import pyarrow as pa
+
             path = _open_verified(self._root, self._relpath, self._expected_checksum)
             table = _read_table(path)
             self._table = table
-            self._dates = tuple(
-                dict.fromkeys(
-                    day.isoformat() for day in table.column("date").to_pylist()
-                )  # 文件即升序,去重保序
+            # date32 cast int32 后零拷贝语义明确(to_numpy 原生日期表示因
+            # 版本而异);文件即升序,后续全部 numpy 二分,零 Python 对象。
+            self._date_ints = np.asarray(
+                table.column("date")
+                .cast(pa.int32())
+                .combine_chunks()
+                .to_numpy(zero_copy_only=False),
+                dtype=np.int32,
             )
         return self._table
 
-    def __getitem__(self, key: str) -> dict[str, float | None]:
-        import pyarrow as pa
+    def _day_bounds(self, day: date) -> tuple[int, int]:
+        """单日行区间 [lo, hi)(date 列升序;numpy 二分,零对象)。"""
+        import numpy as np
 
+        self._ensure_table()
+        assert self._date_ints is not None
+        key = day.toordinal() - date(1970, 1, 1).toordinal()
+        lo = int(np.searchsorted(self._date_ints, key, side="left"))
+        hi = int(np.searchsorted(self._date_ints, key, side="right"))
+        return lo, hi
+
+    def __getitem__(self, key: str) -> dict[str, float | None]:
         if self._materialised is not None:
             return self._materialised[key]
-        table = self._ensure_table()
         day = date.fromisoformat(str(key))
-        sliced = table.filter(
-            pa.compute.equal(table.column("date"), pa.scalar(day, pa.date32()))
-        )
-        if sliced.num_rows == 0:
+        lo, hi = self._day_bounds(day)
+        if hi <= lo:
             raise KeyError(key)
+        sliced = self._ensure_table().slice(lo, hi - lo)
         return dict(
             zip(
                 sliced.column("symbol").to_pylist(),
@@ -289,19 +311,26 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
         )
 
     def __iter__(self) -> Iterator[str]:
-        self._ensure_table()
-        assert self._dates is not None
-        return iter(self._dates)
+        return iter(self._materialise())
 
     def __len__(self) -> int:
+        if self._materialised is not None:
+            return len(self._materialised)
+        import numpy as np
+
         self._ensure_table()
-        assert self._dates is not None
-        return len(self._dates)
+        assert self._date_ints is not None
+        return int(np.unique(self._date_ints).size)
 
     def __contains__(self, key: object) -> bool:
-        self._ensure_table()
-        assert self._dates is not None
-        return key in self._dates
+        if self._materialised is not None:
+            return key in self._materialised
+        try:
+            day = date.fromisoformat(str(key))
+        except ValueError:
+            return False
+        lo, hi = self._day_bounds(day)
+        return hi > lo
 
     def items(self) -> Any:
         materialised = self._materialise()

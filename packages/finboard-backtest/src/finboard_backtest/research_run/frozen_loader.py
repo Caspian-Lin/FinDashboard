@@ -1111,7 +1111,12 @@ class FrozenInputLoader:
                 str(getattr(record, "kind", "factor")), str(record.code_artifact)
             )
             covered.add(factor_name)
-            day_values = record.values.get(decision_at.date().isoformat())
+            # issue #464:工件行的 values 是惰性映射(首访读盘+验签,单日
+            # get 走 numpy 二分切片)——取数挪 to_thread,事件循环线程不再
+            # 被同步文件 IO/首访解析阻塞(心跳/并发 job/取消探针全靠循环)。
+            day_values = await asyncio.to_thread(
+                record.values.get, decision_at.date().isoformat()
+            )
             if day_values is None:
                 logger.warning(
                     "research_run.factor_series_date_missing",
@@ -1123,7 +1128,10 @@ class FrozenInputLoader:
                 continue
             values.extend(
                 series_feature_values(
-                    record, decision_at, factor_name=factor_name
+                    record,
+                    decision_at,
+                    factor_name=factor_name,
+                    day_values=day_values,
                 )
             )
         return tuple(values), frozenset(covered)
@@ -2528,6 +2536,7 @@ def series_feature_values(
     decision_at: datetime,
     *,
     factor_name: str,
+    day_values: Mapping[str, float | None] | None = None,
 ) -> tuple[FeatureValue, ...]:
     """把序列在 ``decision_at`` 决策日的截面映射为 ``FeatureValue``(#360)。
 
@@ -2535,8 +2544,12 @@ def series_feature_values(
     ``FeatureValue`` 形态;``available_at = decision_at`` 由前缀不变性审计
     背书(序列构建即审计,决策日观测只用决策日之前的数据)。调用方负责
     判定决策日已被序列覆盖(缺失日发具名 warning 后跳过)。
+    ``day_values``(#464):调用方已经 ``record.values.get`` 过的截面 ——
+    传入则免二次查表(工件行惰性映射的单日切片不必重复做);缺省保持
+    旧自取行为。
     """
-    day_values = record.values.get(decision_at.date().isoformat())
+    if day_values is None:
+        day_values = record.values.get(decision_at.date().isoformat())
     if day_values is None:
         return ()
     # issue #454:source_artifact_ids / available_at 全截面共享实例(等值压缩)。
