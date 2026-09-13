@@ -154,3 +154,90 @@ async def test_iter_artifacts_order_matches_list(manifest_factory, decision_fact
     # to_json_value 往返可用(流式行是完整契约对象)
     streamed_first = await store.iter_artifacts(run_id).__anext__()
     assert isinstance(to_json_value(streamed_first), dict)
+
+
+async def test_cross_section_capture_gate(manifest_factory) -> None:
+    """#470 前半场:无用户因子 run 的投影瘦身;u_ 观测兜底回退全量。"""
+
+    from datetime import UTC, datetime
+
+    from finboard_backtest.portfolio import AssetLotInfo
+    from finboard_backtest.research_run.contracts import (
+        FeatureValue,
+        NormalizedSignal,
+        UniverseCandidate,
+    )
+    from finboard_backtest.research_run.factor_screen import (
+        _period_cross_section,
+        manifest_declares_user_factors,
+    )
+    from finboard_backtest.research_run.portfolio_pipeline import PortfolioDecisionInput
+
+    def _input(feature_ids: tuple[str, ...]) -> PortfolioDecisionInput:
+        decision_at = datetime(2024, 1, 2, 15, tzinfo=UTC)
+        return PortfolioDecisionInput(
+            business_date=decision_at.date(),
+            decision_at=decision_at,
+            execution_at=datetime(2024, 1, 3, 9, 30, tzinfo=UTC),
+            candidates=(
+                UniverseCandidate(
+                    symbol="A.SH",
+                    included=True,
+                    reasons=("t",),
+                    asset_class="equity",
+                    market="a_share",
+                ),
+            ),
+            features=tuple(
+                FeatureValue(
+                    symbol="A.SH",
+                    feature_id=name,
+                    value=1.0,
+                    source_artifact_ids=("release-v1",),
+                    available_at=decision_at,
+                )
+                for name in feature_ids
+            ),
+            signals=(
+                NormalizedSignal(
+                    symbol="A.SH",
+                    score=1.0,
+                    action="buy",
+                    rule_id="t",
+                    rationale="t",
+                ),
+            ),
+            prices={"A.SH": 10.0},
+            execution_prices={"A.SH": 10.0},
+            lot_info={"A.SH": AssetLotInfo(code="A.SH", lot_size=100)},
+            input_artifact_ids=("release-v1",),
+            covariance=None,
+        )
+
+    plain = _input(("momentum", "pb"))
+    gated = _period_cross_section(plain, include_series=False)
+    assert gated["others"] == {}
+    assert gated["prices"] == {}
+    assert gated["user"] == {}
+    assert gated["markets"] == {"A.SH": "a_share"}
+
+    full = _period_cross_section(plain, include_series=True)
+    assert set(full["others"]) == {"momentum", "pb"}
+    assert full["prices"] == {"A.SH": 10.0}
+
+    # 兜底:开关关闭但当期出现 u_ 观测 → 仍构建全量投影(screen 结果与开关无关)
+    with_user = _input(("momentum", "u_sandbox1"))
+    fallback = _period_cross_section(with_user, include_series=False)
+    assert set(fallback["user"]) == {"u_sandbox1"}
+    assert set(fallback["others"]) == {"momentum"}
+    assert fallback["prices"] == {"A.SH": 10.0}
+
+    # manifest 判定:典型无 u_ 声明 → False;parameters 带引用 → True
+    assert manifest_declares_user_factors(manifest_factory()) is False
+    from dataclasses import replace as _replace
+
+    referenced = _replace(
+        manifest_factory(),
+        parameters={"screen_factor": "u_sandbox_alpha"},
+    )
+    assert manifest_declares_user_factors(referenced) is True

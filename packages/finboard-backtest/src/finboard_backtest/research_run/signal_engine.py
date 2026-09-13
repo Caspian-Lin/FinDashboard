@@ -2679,6 +2679,16 @@ class SignalEnginePipelineAdapter:
         # 失败期(#304 partial)的投影 / 日期也在内),报告阶段取用。捕获
         # 即前缀口径:拒绝路径的证据(compute_partial_evidence)也只消费
         # 这里已捕获的期次,不再全量重拉输入流。
+        # #470 前半场:manifest 未声明用户因子(u_ 前缀)的 run,factor
+        # screen 恒为 None —— 投影捕获降级为瘦身形态(跳过 others/prices,
+        # 全市场 run 省下 ~15MB/期 x 556 期 ≈ 8GB 驻留);当期出现 u_ 观测
+        # 时逐期兜底回退全量投影(factor_screen 内),screen 结果与开关无关。
+        # (延迟导入:factor_screen 反向引用本模块,模块级互导成环。)
+        from finboard_backtest.research_run.factor_screen import (
+            manifest_declares_user_factors,
+        )
+
+        self._cross_section_series_capture = manifest_declares_user_factors(manifest)
         self._period_cross_sections: list[dict[str, Any]] = []
         self._business_dates: list[date] = []
         # issue #314 + #463:全部决策已落库的快速路径 —— 不再以
@@ -2818,7 +2828,11 @@ class SignalEnginePipelineAdapter:
             )
             try:
                 async for item in source:
-                    self._period_cross_sections.append(_period_cross_section(item))
+                    self._period_cross_sections.append(
+                        _period_cross_section(
+                            item, include_series=self._cross_section_series_capture
+                        )
+                    )
                     self._business_dates.append(item.business_date)
                     yield item
             finally:
