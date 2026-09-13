@@ -1026,7 +1026,10 @@ def _supervise_worker_processes(
 #: 截断)本就两两并发,双 job 并行使 4 因子队列墙钟近半;并发受
 #: 「并发数 x research_sandbox_memory_mb(默认 4096,#374)<= Docker Desktop
 #: WSL2 可用内存」约束,内存不足时经 env/配置回落。validation_experiment
-#: 单并发(#233,揭盲一次性门,并发重入只会重复消耗试验预算)。
+#: 单并发(#233,揭盲一次性门,并发重入只会重复消耗试验预算)。research_run
+#: 单并发(2026-09-13 全市场 556 期双 run 并发实测:加载期全量驻留的特征
+#: 截面 ~5-6GB/run,双并发把 40GB 宿主推到 98.8% 靠 swap 硬撑,#424 审计
+#: 容器并发改串行同理由 —— 代价为 research 队列墙钟串行)。
 _KIND_CONCURRENCY: dict[str, int] = {
     "feature_snapshot": 1,
     "bulk_download": 1,
@@ -1036,6 +1039,7 @@ _KIND_CONCURRENCY: dict[str, int] = {
     "research_code_run": 1,
     "factor_series_build": 2,
     "validation_experiment": 1,
+    "research_run": 1,
 }
 
 

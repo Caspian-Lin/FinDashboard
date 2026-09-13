@@ -453,3 +453,39 @@ def test_price_precompute_process_task_matches_history_fn() -> None:
         tail_n=61,
     )
     assert per == expected
+
+
+@pytest.mark.asyncio
+async def test_feature_values_share_source_tuple(tmp_path: Path) -> None:
+    """feature_values 的来源元组跨标的/跨期共享(2026-09-13 内存事故)。
+
+    全市场 x 556 期 ≈ 千万级 FeatureValue,逐实例各造 (release_id,) 元组
+    白付 ~60B/个;共享后同一 run 内所有实例持有同一元组对象。
+    """
+    from finboard_backtest.research_run.frozen_loader import (
+        build_price_feature_precompute,
+    )
+
+    provider = await _publish_bars_release(tmp_path)
+    histories = await _load_close_histories(provider, _candidates(provider))
+    days = [
+        datetime(2024, 4, 15, 23, 0, tzinfo=UTC),
+        datetime(2024, 6, 15, 23, 0, tzinfo=UTC),
+    ]
+    pre = await build_price_feature_precompute(
+        histories=histories,
+        provider=provider,
+        decision_ats=days,
+        symbols=list(_CODES),
+    )
+    first = pre.feature_values(days[0], "rel-x")
+    second = pre.feature_values(days[1], "rel-x")
+    assert first is not None
+    assert second is not None
+    assert first
+    assert second
+    # 同期内跨标的共享同一来源元组;跨期各一个元组但等值(元组不可变,
+    # 值语义不变 —— 省的是每 FV 一份,而非每期一份)。
+    assert first[0].source_artifact_ids is first[-1].source_artifact_ids
+    assert first[0].source_artifact_ids == second[0].source_artifact_ids
+    assert first[0].source_artifact_ids == ("rel-x",)

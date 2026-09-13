@@ -1965,6 +1965,9 @@ class PriceFeaturePrecompute:
             return None
         from finboard_backtest.research_run.contracts import FeatureValue
 
+        # 来源元组全期共享(2026-09-13 内存事故):全市场 x 556 期 ≈ 千万级
+        # FeatureValue,逐实例各造一个 (release_id,) 元组白付 ~60B/个。
+        src = (release_id,)
         out: list[FeatureValue] = []
         for code in self.symbols:
             per_symbol = self.by_symbol.get(code)
@@ -1979,7 +1982,7 @@ class PriceFeaturePrecompute:
                         symbol=code,
                         feature_id=name,
                         value=value,
-                        source_artifact_ids=(release_id,),
+                        source_artifact_ids=src,
                         available_at=item.available_at,
                     )
                 )
