@@ -86,6 +86,7 @@ from finboard_backtest.research_run.contracts import (
     RiskExitOutcome,
     UniverseCandidate,
     UnsupportedResearchCapabilityError,
+    canonical_json_digest,
     execution_mode_for,
     pipeline_output_checksum,
     stable_checksum,
@@ -188,7 +189,14 @@ class PortfolioDecisionInput:
             raise ValueError("fill ratio 必须落在 [0, 1]")
 
     @property
-    def checksum(self) -> str:
+    def checksum_payload(self) -> dict[str, object]:
+        """输入 checksum 载荷(键序无关;canonical 组装按 key 排序)。
+
+        issue #472:与 ``checksum`` 拆开 —— ``_build_decision`` 需要在同一次
+        编码里捕获截面 canonical 片段(capture)供 artifact 落库复用,
+        不能只拿最终 hex。
+        """
+
         covariance_payload: object = None
         if self.covariance is not None:
             covariance_payload = {
@@ -222,7 +230,13 @@ class PortfolioDecisionInput:
         # (replay_source_status / factor_series 条件键同先例)。
         if self.suspended_symbols:
             checksum_payload["suspended_symbols"] = sorted(self.suspended_symbols)
-        return stable_checksum(checksum_payload)
+        return checksum_payload
+
+    @property
+    def checksum(self) -> str:
+        # issue #472:走流式 canonical 组装(截面分块编码,全文不常驻);
+        # 输出与 ``stable_checksum(checksum_payload)`` 逐字节一致(回归测试钉死)。
+        return canonical_json_digest(self.checksum_payload)
 
 
 @dataclass(slots=True)
@@ -862,13 +876,25 @@ class PortfolioPipelineAdapter:
             positions=positions,
             ledger=ledger,
         )
+        # issue #472:输入 checksum 的 canonical 编码在此发生一次,顺带捕获
+        # features/candidates 截面的 canonical 文本片段 —— 随 bundle 交给
+        # persist 阶段直接拼接,artifact 落库不再对同一截面二次编码
+        # (checksum 值不变:同一份文本的 sha256,回归测试逐字节钉死)。
+        input_fragments: dict[str, str] = {}
+        input_checksum = canonical_json_digest(
+            item.checksum_payload, capture=input_fragments
+        )
         evidence = ResearchPipelineEvidence(
             manifest_input_checksum=manifest.input_checksum,
-            input_checksum=item.checksum,
+            input_checksum=input_checksum,
             output_checksum=pipeline_output_checksum(decision),
             hard_constraints_passed=True,
         )
-        return replace(decision, pipeline_evidence=evidence)
+        return replace(
+            decision,
+            pipeline_evidence=evidence,
+            canonical_fragments=input_fragments or None,
+        )
 
 
 def _constraints_from_manifest(

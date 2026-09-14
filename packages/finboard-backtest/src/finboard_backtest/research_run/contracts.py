@@ -752,6 +752,15 @@ class DecisionBundle:
     ledger: LedgerSnapshot
     pipeline_evidence: ResearchPipelineEvidence | None = None
     decision_id: str = ""
+    # issue #472:输入 checksum 组装时顺带捕获的全市场截面 canonical 文本
+    # (键 = 载荷 section 名,值 = 该列表的 canonical JSON 文本)。落库阶段直接
+    # 拼接复用 —— 同一截面一期只编码一次(输入 checksum 那次),artifact 落库
+    # 不再二次编码。不是领域数据:不参与任何 checksum / 序列化
+    # (``_to_json_value`` 显式剔除该字段)、不参与相等性(compare=False),
+    # 持久化后由 ``_slim_decision`` 清除,不驻留。
+    canonical_fragments: dict[str, str] | None = field(
+        default=None, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         _require_aware(self.decision_at, "DecisionBundle.decision_at")
@@ -809,8 +818,11 @@ def _slim_decision(bundle: DecisionBundle) -> DecisionBundle:
     必须发生在 ``_persist_decision`` 之后(artifacts 载荷逐字节零变化);
     ``dataclasses.replace`` 产出独立副本,不突变原 bundle —— yield 出去的
     仍是完整 bundle,#305 确定性重放 result_checksum 与 #314 续算不受影响。
+
+    issue #472:同时清掉 ``canonical_fragments``(截面 canonical 文本 ~10MB/期,
+    落库后无人再读),与 features 一起使驻留与期数解耦。
     """
-    return replace(bundle, features=())
+    return replace(bundle, features=(), canonical_fragments=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -909,6 +921,11 @@ class ResearchArtifact:
     parent_trace_ids: tuple[str, ...]
     payload: dict[str, JsonValue]
     checksum: str
+    # issue #472:canonical JSON 文本(canonical_json_text 输出,sha256 = checksum)。
+    # 非 None 时是权威编码形态:持久化层直写该文本,不再对 payload 二次
+    # ``json.dumps``(流式路径下 payload 为空占位,需要 dict 的存储实现按需
+    # 物化 —— InMemoryResearchRunStore 即如此)。保持 None 的调用方语义不变。
+    payload_json: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -971,6 +988,134 @@ def stable_checksum_normalized(value: JsonValue) -> str:
     """``stable_checksum`` 的「输入已规范化」变体(语义同上,省二次遍历)。"""
 
     return hashlib.sha256(canonical_json_normalized(value).encode("utf-8")).hexdigest()
+
+
+def stable_checksum_text(text: str) -> str:
+    """已编码 canonical 文本的 sha256(与 :func:`stable_checksum` 同口径)。
+
+    issue #472:流式编码路径一次产出 canonical 文本,checksum 与落库文本
+    共用同一份字节 —— 文本层面的「编码一次、多处消费」。
+    """
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+#: 决策载荷中的全市场截面键(issue #472):canonical 组装时按块编码,
+#: 片段(键 → canonical 文本)可在输入 checksum 与 artifact 落库之间复用。
+CANONICAL_SECTION_KEYS = frozenset({"features", "candidates"})
+
+#: 截面列表分块编码的块元素数上限。块内 ``to_json_value`` 的规范化树在块
+#: 编码完成后即可回收,全量截面树不再整棵常驻(单期 ~50 万 JSON 节点的
+#: churn 波被压到块级)。
+CANONICAL_CHUNK_SIZE = 4096
+
+
+def canonical_json_list_text(
+    items: Sequence[object], *, chunk_size: int = CANONICAL_CHUNK_SIZE
+) -> str:
+    """列表的 canonical JSON 文本,按 ``chunk_size`` 分块编码后拼接。
+
+    输出与 ``json.dumps(to_json_value(list(items)), ensure_ascii=False,
+    sort_keys=True, separators=(",", ":"), allow_nan=False)`` **逐字节一致**:
+    标准 JSON 编码上下文无关(字符串转义 / 数字渲染 / 键排序都只取决于值
+    本身),``"[" + Σ块内文本 + 逗号 + ... + "]"`` 等价于整树一次 dumps。
+    回归测试用真实 run 语料(逐期全量 features/candidates)钉死该等价性。
+    """
+
+    parts: list[str] = []
+    position = 0
+    total = len(items)
+    while position < total:
+        chunk = items[position : position + chunk_size]
+        position += chunk_size
+        # 块内文本必为 "[...]"(块非空、元素为 JSON 值):剥外括号拼大列表
+        parts.append(canonical_json_normalized(to_json_value(chunk))[1:-1])
+    return "[" + ",".join(parts) + "]"
+
+
+def canonical_json_parts(
+    payload: Mapping[str, object],
+    *,
+    fragments: Mapping[str, str] | None = None,
+    capture: dict[str, str] | None = None,
+    chunk_size: int = CANONICAL_CHUNK_SIZE,
+) -> list[str]:
+    """canonical JSON 文本的分片列表(``"".join(...)`` 即全文,见下函数)。
+
+    输出与 ``canonical_json_normalized(to_json_value(payload))`` **逐字节一致**
+    —— 键排序 / 紧凑分隔符 / ``ensure_ascii=False`` / ``allow_nan=False``
+    与既有 canonical dumps 同参,仅改变「树何时存在」:
+
+    * ``CANONICAL_SECTION_KEYS`` 命中的顶层列表走
+      :func:`canonical_json_list_text` 分块编码,块内树即时回收;
+    * ``fragments`` 已给出某键的 canonical 文本时直接拼接(该键 0 次编码)
+      —— 输入 checksum 组装时捕获的片段在 artifact 落库阶段复用(issue #472);
+    * ``capture`` 非 None 时,把本次分块编码得到的片段写回(键 → 文本),供
+      同一 payload 的后续编码复用。
+
+    非截面键仍走 ``canonical_json_normalized(to_json_value(value))``(小对象,
+    树构造成本可忽略)。分片形态让「只算 checksum 不落库」的调用方
+    (:func:`canonical_json_digest`)不必拼出全文。
+    """
+
+    reuse = fragments or {}
+    parts: list[str] = ["{"]
+    for index, key in enumerate(sorted(payload)):
+        if index:
+            parts.append(",")
+        parts.append(json.dumps(key, ensure_ascii=False))
+        parts.append(":")
+        fragment = reuse.get(key)
+        if fragment is not None:
+            parts.append(fragment)
+            continue
+        value = payload[key]
+        if key in CANONICAL_SECTION_KEYS and isinstance(value, tuple | list):
+            text = canonical_json_list_text(value, chunk_size=chunk_size)
+            if capture is not None:
+                capture[key] = text
+            parts.append(text)
+            continue
+        parts.append(canonical_json_normalized(to_json_value(value)))
+    parts.append("}")
+    return parts
+
+
+def canonical_json_text(
+    payload: Mapping[str, object],
+    *,
+    fragments: Mapping[str, str] | None = None,
+    capture: dict[str, str] | None = None,
+    chunk_size: int = CANONICAL_CHUNK_SIZE,
+) -> str:
+    """:func:`canonical_json_parts` 的拼接形态(canonical JSON 全文)。"""
+
+    return "".join(
+        canonical_json_parts(
+            payload, fragments=fragments, capture=capture, chunk_size=chunk_size
+        )
+    )
+
+
+def canonical_json_digest(
+    payload: Mapping[str, object],
+    *,
+    fragments: Mapping[str, str] | None = None,
+    capture: dict[str, str] | None = None,
+    chunk_size: int = CANONICAL_CHUNK_SIZE,
+) -> str:
+    """canonical 文本的 sha256,**不拼接全文**(逐分片 update)。
+
+    等价于 ``stable_checksum_text(canonical_json_text(...))``;供只需要
+    checksum 的调用方(输入 checksum)省掉一次全文常驻(issue #472)。
+    """
+
+    digest = hashlib.sha256()
+    for part in canonical_json_parts(
+        payload, fragments=fragments, capture=capture, chunk_size=chunk_size
+    ):
+        digest.update(part.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def canonical_json(value: object) -> str:
@@ -1147,6 +1292,11 @@ def _to_json_value(value: object) -> JsonValue:
         # 不变;非 None 才落键,读回端(checkpoint_resume)缺键回退 None。
         if isinstance(value, ConstraintOutcome) and value.symbol is None:
             payload.pop("symbol", None)
+        # issue #472:``canonical_fragments`` 是编码缓存(见 DecisionBundle
+        # 字段注释),不是领域字段 —— 进不了任何序列化输出,checksum 逐字节
+        # 与历史一致(None 与空 dict 两种形态都剔除键)。
+        if isinstance(value, DecisionBundle):
+            payload.pop("canonical_fragments", None)
         return payload
     if isinstance(value, tuple | list):
         return [_to_json_value(item) for item in value]
@@ -1167,6 +1317,8 @@ def _require_aware(value: datetime, name: str) -> None:
 
 
 __all__ = [
+    "CANONICAL_CHUNK_SIZE",
+    "CANONICAL_SECTION_KEYS",
     "DECISION_SCHEDULE_KINDS",
     "MAX_RESEARCH_CAPITAL",
     "MIN_RESEARCH_CAPITAL",
@@ -1211,7 +1363,11 @@ __all__ = [
     "UniverseCandidate",
     "UnsupportedResearchCapabilityError",
     "canonical_json",
+    "canonical_json_digest",
+    "canonical_json_list_text",
     "canonical_json_normalized",
+    "canonical_json_parts",
+    "canonical_json_text",
     "execution_mode_for",
     "manifest_from_json",
     "parse_decision_schedule",
@@ -1221,5 +1377,6 @@ __all__ = [
     "resolve_decision_schedule",
     "stable_checksum",
     "stable_checksum_normalized",
+    "stable_checksum_text",
     "to_json_value",
 ]

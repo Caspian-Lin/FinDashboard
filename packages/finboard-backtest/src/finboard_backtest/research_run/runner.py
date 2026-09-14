@@ -37,11 +37,14 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
     _slim_decision,
+    canonical_json_normalized,
+    canonical_json_text,
     execution_mode_for,
     pipeline_output_checksum,
     replay_guard_error,
     stable_checksum,
     stable_checksum_normalized,
+    stable_checksum_text,
     to_json_value,
 )
 from finboard_backtest.research_run.failure_context import (
@@ -770,22 +773,32 @@ class ResearchRunCoordinator:
         # 13 artifact 全在、要么全不在 —— #314 续算以「逐决策 13 artifact
         # 全齐 + checksum 复验」为界,半截决策本来就会被截断,可观测语义
         # 不变。
+        #
+        # issue #472:同一 payload 一期编码一次 ——
+        # ① features/candidates 截面走 ``decision.canonical_fragments``
+        #    (输入 checksum 组装时已编码的 canonical 文本,直接拼接);
+        # ② 其余键/其余 stage 走 ``canonical_json_text`` 流式组装(截面分块
+        #    编码,小键一次 dumps),checksum = 同一份文本的 sha256;
+        # ③ 文本经 ``payload_json`` 直写 JSON 列,驱动不再对 dict 二次
+        #    ``json.dumps``(``payload`` 置空占位,需要 dict 的存储实现按需
+        #    物化)。checksum / 落库字节逐字节与历史一致(#472 回归测试)。
         stage_payloads = _decision_stage_payloads(decision)
+        fragments = decision.canonical_fragments or {}
         parent: tuple[str, ...] = ()
         artifacts: list[ResearchArtifact] = []
         stage_phases: list[tuple[int, str]] = []
         for offset, stage in enumerate(_DECISION_STAGES):
             if failure_ctx is not None:
                 failure_ctx.stage = stage.value
-            payload_value = to_json_value(
+            payload_text = canonical_json_text(
                 {
                     "business_date": decision.business_date,
                     "decision_at": decision.decision_at,
                     **stage_payloads[stage],
-                }
+                },
+                fragments=fragments,
             )
-            assert isinstance(payload_value, dict)
-            payload_checksum = stable_checksum_normalized(payload_value)
+            payload_checksum = stable_checksum_text(payload_text)
             stable_suffix = f"{decision_index:08d}:{stage.value}"
             trace_id = f"RRT-{stable_checksum(stable_suffix)[:24]}"
             artifact = ResearchArtifact(
@@ -796,7 +809,8 @@ class ResearchRunCoordinator:
                 stage=stage,
                 trace_id=trace_id,
                 parent_trace_ids=parent,
-                payload=payload_value,
+                payload={},
+                payload_json=payload_text,
                 checksum=payload_checksum,
             )
             artifacts.append(artifact)
@@ -839,6 +853,10 @@ class ResearchRunCoordinator:
             assert isinstance(report_payload, dict)
             report_payload["partial"] = True
             report_payload["constraint_failure"] = partial_failure
+        # issue #472:payload_json 直写 JSON 列(driver 不再对 dict 二次
+        # json.dumps);文本取自注入 partial 之后的最终 payload,与 payload
+        # 语义一致;checksum 仍按 #304 口径取自注入之前(既有语义不变)。
+        report_text = canonical_json_normalized(payload)
         await self._store.append_artifact(
             ResearchArtifact(
                 artifact_id=f"{run_id}:A:report",
@@ -849,6 +867,7 @@ class ResearchRunCoordinator:
                 trace_id=f"RRT-{stable_checksum('report')[:24]}",
                 parent_trace_ids=(),
                 payload=payload,
+                payload_json=report_text,
                 checksum=report_checksum,
             )
         )

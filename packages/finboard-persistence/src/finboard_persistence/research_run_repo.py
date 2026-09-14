@@ -6,7 +6,8 @@ from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from psycopg.types.json import Json
+from sqlalchemy import insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
@@ -18,6 +19,12 @@ from finboard_persistence.models import (
 
 #: artifact 流式读取的行缓冲(#470 前半场):决策级 13 行/决策,26 行 ≈ 2 决策。
 _ARTIFACT_STREAM_CHUNK = 26
+
+
+def _identity_json_dumps(obj: Any) -> Any:
+    """驱动级 Json 包装的直写 dumps(#472):入参已是 canonical JSON 文本。"""
+
+    return obj
 
 
 class ResearchRunPersistenceConflictError(RuntimeError):
@@ -192,7 +199,8 @@ class ResearchRunRepository:
         parent_trace_ids: list[str],
         payload: dict[str, object],
         checksum: str,
-    ) -> tuple[ResearchRunArtifactModel, bool]:
+        payload_json: str | None = None,
+    ) -> tuple[ResearchRunArtifactModel | None, bool]:
         # 幂等命中分支只比对 checksum,不消费 payload —— load_only 让既有行
         # 的 payload 列保持 deferred(#470 前半场:断点续算种子逐决策重持久化
         # 时,每个命中行省掉一次全量 payload JSONB → Python 物化,features
@@ -213,6 +221,27 @@ class ResearchRunRepository:
                     f"artifact {artifact_id} checkpoint 内容冲突"
                 )
             return existing, False
+        # issue #472:payload_json 为 canonical JSON 文本时直写 —— 驱动级
+        # ``Json(text, dumps=identity)`` 由 CanonicalPayloadJson 列放行,不再对
+        # dict 二次 ``json.dumps``(文本已由研究域编码,checksum 即该文本的
+        # sha256)。直写路径走 Core INSERT:驱动包装值不进 identity map(ORM
+        # 对象属性会把 ``Json`` 包装物回吐给同 session 的读方),也无 dict 树
+        # 物化;返回的首元素为 None(批次调用方只消费 created 标志)。
+        if payload_json is not None:
+            await self._session.execute(
+                insert(ResearchRunArtifactModel).values(
+                    run_id=run_id,
+                    artifact_id=artifact_id,
+                    decision_id=decision_id,
+                    sequence=sequence,
+                    stage=stage,
+                    trace_id=trace_id,
+                    parent_trace_ids=parent_trace_ids,
+                    payload=Json(payload_json, dumps=_identity_json_dumps),
+                    checksum=checksum,
+                )
+            )
+            return None, True
         row = ResearchRunArtifactModel(
             run_id=run_id,
             artifact_id=artifact_id,

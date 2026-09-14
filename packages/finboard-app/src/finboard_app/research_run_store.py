@@ -135,6 +135,9 @@ class SqlAlchemyResearchRunStore(ResearchRunStore):
                 parent_trace_ids=list(artifact.parent_trace_ids),
                 payload=cast(dict[str, object], artifact.payload),
                 checksum=artifact.checksum,
+                # issue #472:canonical 文本直写(非 None 时权威),落库不再
+                # 对 dict 二次 json.dumps。
+                payload_json=artifact.payload_json,
             )
         except ResearchRunPersistenceConflictError as exc:
             raise ResearchRunConflictError(str(exc)) from exc
@@ -161,6 +164,7 @@ class SqlAlchemyResearchRunStore(ResearchRunStore):
                     parent_trace_ids=list(artifact.parent_trace_ids),
                     payload=cast(dict[str, object], artifact.payload),
                     checksum=artifact.checksum,
+                    payload_json=artifact.payload_json,
                 )
                 created.append(artifact_created)
         except ResearchRunPersistenceConflictError as exc:

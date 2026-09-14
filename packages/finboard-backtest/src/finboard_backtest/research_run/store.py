@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Iterable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Protocol, cast
 
 from finboard_backtest.research_run.contracts import (
     ArtifactDigest,
@@ -17,6 +19,26 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunReport,
     ResearchRunStatus,
 )
+
+
+def _materialized_artifact(artifact: ResearchArtifact) -> ResearchArtifact:
+    """内存 store 的物化形态(#472):payload_json 不驻留,payload dict 权威。
+
+    PostgreSQL 持久化层直写 canonical 文本(不物化 dict);内存 store 没有
+    序列化层,读回方(pytest 断言 / #314 续算)直接消费 ``payload``。这里把
+    文本按需解析成 dict 并丢弃 —— 内存形态与 #472 之前逐值一致(对象相等性
+    也一致:``payload_json`` 回 None),不留文本驻留。
+    """
+
+    if artifact.payload_json is None:
+        return artifact
+    if artifact.payload:
+        # 已有 dict(如 report 载荷):文本只是落库快照,内存形态不留双份
+        return replace(artifact, payload_json=None)
+    payload = json.loads(artifact.payload_json)
+    return replace(
+        artifact, payload=cast("dict[str, JsonValue]", payload), payload_json=None
+    )
 
 
 class ResearchRunStore(Protocol):
@@ -180,6 +202,7 @@ class InMemoryResearchRunStore:
             return [self._append_artifact_locked(artifact) for artifact in artifacts]
 
     def _append_artifact_locked(self, artifact: ResearchArtifact) -> bool:
+        artifact = _materialized_artifact(artifact)
         run_artifacts = self._artifacts[artifact.run_id]
         existing = run_artifacts.get(artifact.artifact_id)
         if existing is not None:
