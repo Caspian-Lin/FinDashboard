@@ -378,3 +378,51 @@ def test_openblas_explicit_override_is_preserved() -> None:
     env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
     env["OPENBLAS_NUM_THREADS"] = "8"
     assert _run_probe(env) == "8"
+
+
+# ---------------------------------------------------------------------------
+# Arrow system 内存池(cli 导入级 setdefault;<3GB 收官:mimalloc 缓存
+# 已释放页不归还 OS,parquet 大瞬态缓冲留 ~3GB 死页)
+# ---------------------------------------------------------------------------
+
+_ARROW_CLI_IMPORT_PROBE = (
+    "import os, sys\n"
+    "import finboard_app.cli\n"
+    "sys.stdout.write(os.environ.get('ARROW_DEFAULT_MEMORY_POOL', '<unset>'))\n"
+)
+
+
+def _run_arrow_probe(env: dict[str, str]) -> str:
+    result = subprocess.run(
+        [sys.executable, "-c", _ARROW_CLI_IMPORT_PROBE],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=True,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    return result.stdout
+
+
+def test_arrow_system_pool_applies_on_cli_import() -> None:
+    """子进程干净环境导入 cli → ARROW_DEFAULT_MEMORY_POOL == 'system'。"""
+
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k != "ARROW_DEFAULT_MEMORY_POOL"
+    }
+    assert _run_arrow_probe(env) == "system"
+
+
+def test_arrow_pool_explicit_override_is_preserved() -> None:
+    """用户显式设置(如 jemalloc)不被 setdefault 剥离。"""
+
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k != "ARROW_DEFAULT_MEMORY_POOL"
+    }
+    env["ARROW_DEFAULT_MEMORY_POOL"] = "jemalloc"
+    assert _run_arrow_probe(env) == "jemalloc"
