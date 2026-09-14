@@ -2259,6 +2259,20 @@ async def iter_decision_load_contexts(
             await precompute_phase_reporter(
                 "research_run:decision_load precompute done"
             )
+    # 内存预算(2026-09-14 归因):预计算段结束后池再无消费方 —— 逐期价格
+    # 特征查 price_precompute 表,未命中走 close 矩阵切片,再退进程内协程
+    # 路径(#288 降级语义,结果逐值一致)。8 个 spawn worker 各 ~160MB 在
+    # 整个决策段(数百期)常驻是纯浪费,即刻退役收回;生成器 finally 的
+    # aclose 幂等,生成器提前关闭也安全。
+    if pool is not None and not pool.broken:
+        pool.retire()
+        await pool.aclose()
+        logger.info(
+            "research_run.process_pool_retired",
+            stage="decision_load",
+            release_id=release_ref.artifact_id,
+            message="预计算完成,特征计算进程池即刻退役(决策段零子进程驻留)",
+        )
 
     async def _load_one(decision_at: datetime, snapshot_id: str | None) -> DecisionLoadContext:
         execution_at = await _next_execution_at(
@@ -2380,6 +2394,12 @@ async def iter_decision_load_contexts(
             if precompute is not None:
                 for decision_at, _ in chunk:
                     precompute.release_period(decision_at)
+            # daily_metrics 预计算槽位同契约释放(#438 v2):单期槽位是独立
+            # numpy 大数组,置空即归还 OS(全市场 x 全期常驻 0.45GB/发布 →
+            # 决策段后期衰减到 ~0);被释放期复读回落逐期读取路径,值语义不变。
+            loader.release_daily_precompute_periods(
+                [decision_at for decision_at, _ in chunk]
+            )
             # issue #306/#463:分块边界探针在本块 gather 完成**之后、产出之前**
             # 触发(与流式化前相同的取值序列与加载相对位置 —— 探针 done 计数
             # 是「已加载期数」;流式化后决策持久化与下一块加载交错,探针必须

@@ -1423,6 +1423,18 @@ class PriceFeatureProcessPool:
     def mark_broken(self) -> None:
         self._broken = True
 
+    def retire(self) -> None:
+        """预计算完成后主动退役(区别于 ``mark_broken`` 的故障语义)。
+
+        multi_period run 的池只在预计算段(close 矩阵 / 价格特征主批)有真实
+        消费方;逐期价格特征此后查 ``price_precompute`` 表,未命中走 close
+        矩阵切片,再退进程内协程路径,均不碰池。每 worker 进程 ~160MB 的
+        spawn 常驻在整个决策段是纯内存浪费,调用方 ``retire()`` 后应立即
+        ``await aclose()`` 收回进程树;此后任何提交路径按 ``broken`` 语义
+        静默跳过池(降级路径逐值一致,见 #288)。
+        """
+        self._broken = True
+
     @property
     def executor(self) -> ProcessPoolExecutor:
         if self._executor is None:
