@@ -44,15 +44,11 @@ from typing import TYPE_CHECKING, Annotated, Any
 # ProcessPoolExecutor,未显式传 env)经环境继承自动继承本值。
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-# Arrow 默认内存池切到 system(全流程 <3GB 收官):pyarrow 默认的 mimalloc
-# 池**缓存已释放页不归还 OS** —— parquet 解压的大瞬态缓冲(factor_series
-# 装载、close/daily/price 预计算构建)在真实 run 里留下 ~3GB 死页驻留
-# (2026-09-14 实测:4 条 LazySeriesValues 紧凑常驻期望 ~1000MB,mimalloc
-# 下 RSS +1667MB、system 池下 +1064MB;预计算构建的瞬态量更大)。system
-# 池走 CRT 堆,大块释放即归还 OS。必须在 pyarrow 首次 import(**库初始
-# 化时读该环境变量**)之前生效;``setdefault`` 不剥夺用户显式覆盖;spawn
-# 池子进程经环境继承自动生效。
-os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
+# 注意:不要把 ARROW_DEFAULT_MEMORY_POOL 切到 system —— 2026-09-14 实测
+# Windows 上 pyarrow system 池在研究 run 决策 ~120 处原生段错误(exit 139,
+# 无 Python 异常;mimalloc 默认池同代码 3h+ 无恙)。mimalloc 缓存已释放页
+# 不归还 OS 的 ~3GB 死页问题,改由 factor_series_store 的逐批流式装载
+# 根治(瞬态从 ~GB 降到 ~MB,池内无可缓存的大块)。
 
 import typer
 
