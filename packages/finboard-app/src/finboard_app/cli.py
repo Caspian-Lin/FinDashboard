@@ -40,9 +40,9 @@ from typing import TYPE_CHECKING, Annotated, Any
 # chunk 级并发与进程池,BLAS 自身多线程属超额订阅 —— 单线程化即消除该类
 # 卡死面,计算并行度不受影响。必须在 numpy 首次 import(**库初始化时读该
 # 环境变量,本模块任何 finboard_* 导入都会传递拉起 numpy**)之前生效;
-# ``setdefault`` 不剥夺用户显式覆盖。spawn 池子进程(factor_lab
+# 生产路径不接受用户线程覆盖。spawn 池子进程(factor_lab
 # ProcessPoolExecutor,未显式传 env)经环境继承自动继承本值。
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 # 注意:不要把 ARROW_DEFAULT_MEMORY_POOL 切到 system —— 2026-09-14 实测
 # Windows 上 pyarrow system 池在研究 run 决策 ~120 处原生段错误(exit 139,

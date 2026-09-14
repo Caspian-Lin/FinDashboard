@@ -31,11 +31,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import numpy as np
 import pyarrow.parquet as pq
 import pytest
 
-import finboard_backtest.portfolio.covariance as covariance_module
 import finboard_persistence.engine as engine_module
 from finboard_backtest.background_jobs.executors.research_run import (
     DEFAULT_RESEARCH_STORE_OPERATION_TIMEOUT_SECONDS,
@@ -45,6 +43,7 @@ from finboard_backtest.background_jobs.executors.research_run import (
 )
 from finboard_backtest.background_jobs.worker import _StallWatchdog
 from finboard_backtest.research_run import ResearchRunInterruptedError
+from finboard_backtest.research_run.signal_engine import _estimate_covariance
 from finboard_data.factor_series_store import LazySeriesValues, write_series_artifact
 from finboard_persistence.engine import create_async_engine, postgres_connect_args
 
@@ -379,12 +378,12 @@ def test_openblas_thread_cap_applies_on_cli_import() -> None:
     assert _run_probe(env) == "1"
 
 
-def test_openblas_explicit_override_is_preserved() -> None:
-    """用户显式设置(如 8)不被 setdefault 剥离。"""
+def test_openblas_explicit_override_is_rejected() -> None:
+    """用户显式设置(如 8)不得绕过生产安全界。"""
 
     env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
     env["OPENBLAS_NUM_THREADS"] = "8"
-    assert _run_probe(env) == "8"
+    assert _run_probe(env) == "1"
 
 
 _BLAS_RUNTIME_PROBE = (
@@ -414,6 +413,26 @@ def test_openblas_runtime_thread_count_is_capped() -> None:
     assert {item["num_threads"] for item in runtime} == {1}
 
 
+def test_preimported_numpy_and_explicit_override_are_capped() -> None:
+    """NumPy 先导入且环境误设为 8 时,FinBoard 仍强制实际 BLAS=1。"""
+
+    env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
+    env["OPENBLAS_NUM_THREADS"] = "8"
+    preimport_probe = "import numpy\n" + _BLAS_RUNTIME_PROBE
+    result = subprocess.run(
+        [sys.executable, "-c", preimport_probe, "finboard_app.cli"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=True,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    runtime = json.loads(result.stdout)
+    assert runtime, "预导入 NumPy 后未加载 OpenBLAS"
+    assert {item["num_threads"] for item in runtime} == {1}
+
+
 def test_direct_backtest_import_caps_openblas_before_numpy() -> None:
     """直接进入研究包时也必须在包内 NumPy 导入前设置线程界。"""
 
@@ -437,37 +456,22 @@ def test_direct_backtest_import_caps_openblas_before_numpy() -> None:
     assert {item["num_threads"] for item in runtime} == {1}
 
 
-def test_concurrent_eigh_is_serialized(monkeypatch) -> None:
-    """协方差决策并发只允许一个原生 eigh,避免 Windows LAPACK 并发崩溃。"""
+def test_concurrent_covariance_completes() -> None:
+    """真实 4 路协方差调用在单线程 BLAS 下完成且结果有效。"""
 
-    original = np.linalg.eigh
-    state_lock = threading.Lock()
-    active = 0
-    maximum = 0
-
-    def tracked(matrix, *args, **kwargs):
-        nonlocal active, maximum
-        with state_lock:
-            active += 1
-            maximum = max(maximum, active)
-        try:
-            time.sleep(0.03)
-            return original(matrix, *args, **kwargs)
-        finally:
-            with state_lock:
-                active -= 1
-
-    monkeypatch.setattr(np.linalg, "eigh", tracked)
-    matrices = [np.eye(24, dtype=np.float64) for _ in range(4)]
+    price_series = {
+        f"S{symbol}": [1.0 + symbol * 0.01 + day * 0.02 for day in range(40)]
+        for symbol in range(6)
+    }
     with ThreadPoolExecutor(max_workers=4) as executor:
-        list(executor.map(covariance_module._ensure_positive_definite, matrices))
-    assert maximum == 1
+        estimates = list(executor.map(_estimate_covariance, [price_series] * 4))
+    assert all(estimate is not None and estimate.n_assets == 6 for estimate in estimates)
 
 
 def test_lazy_series_values_concurrent_first_load_once(tmp_path: Path, monkeypatch) -> None:
     """共享 record 的并发首访只验签/解压一次,结果仍逐值一致。"""
 
-    values = {
+    values: dict[str, dict[str, float | None]] = {
         "2024-01-31": {"000001.SZ": 1.0, "000002.SZ": None},
         "2024-02-29": {"000001.SZ": 2.0},
     }
@@ -490,6 +494,53 @@ def test_lazy_series_values_concurrent_first_load_once(tmp_path: Path, monkeypat
         results = list(executor.map(lambda _: lazy["2024-01-31"], range(4)))
     assert calls == 1
     assert results == [values["2024-01-31"]] * 4
+
+
+def test_lazy_series_values_retry_after_load_failure(tmp_path: Path, monkeypatch) -> None:
+    """首访异常释放锁且不污染状态,下一次访问可以重试。"""
+
+    meta = write_series_artifact(tmp_path, "471-retry", {"2024-01-31": {"S": 1.0}})
+    lazy = LazySeriesValues(tmp_path, meta.relpath, meta.checksum)
+    original = pq.ParquetFile
+    calls = 0
+
+    def flaky_parquet_file(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("transient parquet read failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pq, "ParquetFile", flaky_parquet_file)
+    with pytest.raises(OSError, match="transient"):
+        lazy["2024-01-31"]
+    assert lazy["2024-01-31"] == {"S": 1.0}
+    assert calls == 2
+
+
+def test_lazy_series_values_concurrent_materialise_once(tmp_path: Path, monkeypatch) -> None:
+    """并发全量物化共享同一缓存,不会重复读 parquet。"""
+
+    values: dict[str, dict[str, float | None]] = {
+        "2024-01-31": {"S": 1.0},
+        "2024-02-29": {"S": 2.0},
+    }
+    meta = write_series_artifact(tmp_path, "471-materialise", values)
+    lazy = LazySeriesValues(tmp_path, meta.relpath, meta.checksum)
+    original = pq.ParquetFile
+    calls = 0
+
+    def tracked_parquet_file(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        time.sleep(0.05)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pq, "ParquetFile", tracked_parquet_file)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _: dict(lazy.items()), range(4)))
+    assert calls == 1
+    assert results == [values] * 4
 
 
 _ARROW_CLI_IMPORT_PROBE = (
