@@ -123,6 +123,25 @@ class TestLazySeriesValues:
         assert list(lazy.values()) == [_values()["2024-01-31"], _values()["2024-02-29"]]
         assert list(iter(lazy)) == ["2024-01-31", "2024-02-29"]
 
+    def test_compact_arrays_replace_arrow_table(self, tmp_path: Path) -> None:
+        """首访后紧凑 numpy 底座就位,arrow 表不再常驻(#470 后半场)。"""
+        meta = _write(tmp_path)
+        lazy = LazySeriesValues(tmp_path, meta.relpath, meta.checksum)
+        assert "loaded=False" in repr(lazy)
+        assert lazy.get("2024-01-31") == _values()["2024-01-31"]
+        # 首访后:紧凑数组形态加载完成(arrow 表已丢弃,不再有 _table 属性),
+        # 逐值语义与整表物化逐值等值(显式 None 保留、缺行标的区分)。
+        assert "loaded=True" in repr(lazy)
+        assert lazy._loaded is True
+        assert lazy._dates is not None
+        assert lazy._symbol_codes.shape == lazy._dates.shape
+        assert lazy._value_values.shape == lazy._dates.shape
+        assert dict(lazy.items()) == read_series_values(
+            tmp_path, meta.relpath, meta.checksum
+        )
+        # 显式 null 单元 → None(不与数值 NaN 混同)。
+        assert lazy["2024-01-31"]["000001.SZ"] is None
+
     def test_repr_does_not_read_file(self, tmp_path: Path) -> None:
         # 校验和故意错误:repr 若触发读盘会抛错,以此锁定 repr 零 IO
         lazy = LazySeriesValues(tmp_path, artifact_relpath_for(_SERIES_KEY), "d" * 64)

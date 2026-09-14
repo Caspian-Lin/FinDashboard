@@ -253,45 +253,75 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
     事件循环线程同步调用会阻塞整个 worker(心跳/并发 job 全停)。现首访
     只做「验签 + 读表 + date32 列转 int32 numpy(零对象)」,全量迭代才
     物化;loader 侧取值经 ``asyncio.to_thread``(#464 配套改动)。
+
+    2026-09-14 内存归因(#470 后半场):首访后 arrow 表整表常驻
+    (date/symbol/value 三列缓冲,全历史序列 ~0.3GB+ 且对 gc 不可见,
+    run 级多序列叠加是决策段驻留大头)。现首访一次性把三列抽成紧凑
+    numpy(date int32 + symbol 字典索引 int32 + value float64/null 掩码)
+    后**丢弃 arrow 表**,常驻 ≈ 17B/行且逐列可回收;``value`` 的 null 语义
+    经布尔掩码保留(显式缺测 None 不与数值 NaN 混同,与 ``to_pylist``
+    逐值一致)。
     """
 
     def __init__(self, root: str | Path, relpath: str, expected_checksum: str) -> None:
         self._root = root
         self._relpath = relpath
         self._expected_checksum = expected_checksum
-        self._table: pa.Table | None = None
+        self._loaded = False
+        #: date32 → int32(自 1970-01-01 的天数;文件即升序)
+        self._dates: Any = None
+        #: symbol 字典索引 int32(行序)与字典表
+        self._symbol_codes: Any = None
+        self._symbol_dict: list[str] = []
+        #: value float64(null 位填 NaN,以 ``_value_valid`` 掩码为准)
+        self._value_values: Any = None
+        self._value_valid: Any = None
         self._materialised: dict[str, dict[str, float | None]] | None = None
-        #: date32 列的零对象 numpy 表示(自 1970-01-01 的天数;文件即升序)
-        self._date_ints: Any = None
 
-    def _ensure_table(self) -> pa.Table:
-        if self._table is None:
-            import numpy as np
-            import pyarrow as pa
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.compute as pc
 
-            path = _open_verified(self._root, self._relpath, self._expected_checksum)
-            table = _read_table(path)
-            self._table = table
-            # date32 cast int32 后零拷贝语义明确(to_numpy 原生日期表示因
-            # 版本而异);文件即升序,后续全部 numpy 二分,零 Python 对象。
-            self._date_ints = np.asarray(
-                table.column("date")
-                .cast(pa.int32())
-                .combine_chunks()
-                .to_numpy(zero_copy_only=False),
-                dtype=np.int32,
-            )
-        return self._table
+        path = _open_verified(self._root, self._relpath, self._expected_checksum)
+        table = _read_table(path)
+        # date32 cast int32 后零拷贝语义明确(to_numpy 原生日期表示因
+        # 版本而异);文件即升序,后续全部 numpy 二分,零 Python 对象。
+        self._dates = np.asarray(
+            table.column("date")
+            .cast(pa.int32())
+            .combine_chunks()
+            .to_numpy(zero_copy_only=False),
+            dtype=np.int32,
+        )
+        # symbol 列字典编码(read_series_symbols 同构):字典表 list[str]
+        # + 行级 int32 索引,字符串本体只在字典表存在一份。
+        encoded = pc.dictionary_encode(table.column("symbol").combine_chunks())
+        self._symbol_dict = list(encoded.dictionary.to_pylist())
+        self._symbol_codes = np.asarray(
+            encoded.indices.to_numpy(zero_copy_only=False), dtype=np.int32
+        )
+        # value 列:null(显式缺测)→ NaN 占位 + 布尔掩码,None 语义不丢。
+        value_col = table.column("value").combine_chunks()
+        self._value_values = np.asarray(
+            value_col.fill_null(float("nan")).to_numpy(zero_copy_only=False),
+            dtype=np.float64,
+        )
+        self._value_valid = np.asarray(
+            pc.is_valid(value_col).to_numpy(zero_copy_only=False), dtype=bool
+        )
+        self._loaded = True
 
     def _day_bounds(self, day: date) -> tuple[int, int]:
         """单日行区间 [lo, hi)(date 列升序;numpy 二分,零对象)。"""
         import numpy as np
 
-        self._ensure_table()
-        assert self._date_ints is not None
+        self._ensure_loaded()
         key = day.toordinal() - date(1970, 1, 1).toordinal()
-        lo = int(np.searchsorted(self._date_ints, key, side="left"))
-        hi = int(np.searchsorted(self._date_ints, key, side="right"))
+        lo = int(np.searchsorted(self._dates, key, side="left"))
+        hi = int(np.searchsorted(self._dates, key, side="right"))
         return lo, hi
 
     def __getitem__(self, key: str) -> dict[str, float | None]:
@@ -301,14 +331,15 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
         lo, hi = self._day_bounds(day)
         if hi <= lo:
             raise KeyError(key)
-        sliced = self._ensure_table().slice(lo, hi - lo)
-        return dict(
-            zip(
-                sliced.column("symbol").to_pylist(),
-                sliced.column("value").to_pylist(),
-                strict=True,
-            )
-        )
+        self._ensure_loaded()
+        symbols = self._symbol_dict
+        out: dict[str, float | None] = {}
+        codes = self._symbol_codes[lo:hi].tolist()
+        values = self._value_values[lo:hi].tolist()
+        valid = self._value_valid[lo:hi].tolist()
+        for i, code in enumerate(codes):
+            out[symbols[code]] = values[i] if valid[i] else None
+        return out
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._materialise())
@@ -318,9 +349,8 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
             return len(self._materialised)
         import numpy as np
 
-        self._ensure_table()
-        assert self._date_ints is not None
-        return int(np.unique(self._date_ints).size)
+        self._ensure_loaded()
+        return int(np.unique(self._dates).size)
 
     def __contains__(self, key: object) -> bool:
         if self._materialised is not None:
@@ -348,13 +378,23 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
 
     def _materialise(self) -> dict[str, dict[str, float | None]]:
         if self._materialised is None:
-            self._materialised = _frame_from_table(self._ensure_table())
+            self._ensure_loaded()
+            frame: dict[str, dict[str, float | None]] = {}
+            symbols = self._symbol_dict
+            codes = self._symbol_codes.tolist()
+            values = self._value_values.tolist()
+            valid = self._value_valid.tolist()
+            epoch_day = date(1970, 1, 1).toordinal()
+            for i, day_int in enumerate(self._dates.tolist()):
+                row = frame.setdefault(date.fromordinal(epoch_day + day_int).isoformat(), {})
+                row[symbols[codes[i]]] = values[i] if valid[i] else None
+            self._materialised = frame
         return self._materialised
 
     def __repr__(self) -> str:  # 不触发读盘(防 str()/repr() 意外物化)
         return (
             f"<LazySeriesValues relpath={self._relpath!r} "
-            f"loaded={self._table is not None}>"
+            f"loaded={self._loaded}>"
         )
 
 
