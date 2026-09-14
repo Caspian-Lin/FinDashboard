@@ -1318,6 +1318,13 @@ def build_executor_registry(
 
 
 async def _run_worker(settings: Settings) -> None:
+    # #471 终验教训:worker 两次原生死亡(exit 139,无 Python 异常)而 WER
+    # 无记录 —— faulthandler 常开,原生崩溃(段错误/栈溢出)瞬间把全部线程
+    # 的 Python 栈打到 stderr(启动器已重定向到 worker 日志文件),崩溃
+    # 取证不再依赖复现运气。
+    import faulthandler
+
+    faulthandler.enable(all_threads=True)
     setup_logging(settings)
     components = build_kernel_components(settings)
     from finboard_backtest.background_jobs.worker import (
