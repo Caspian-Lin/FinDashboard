@@ -27,6 +27,7 @@ import psycopg
 import pytest
 from sqlalchemy import text
 
+from finboard_app.research_run_store import SqlAlchemyResearchRunStore
 from finboard_backtest.research_run.checkpoint_resume import rebuild_decision
 from finboard_backtest.research_run.contracts import (
     ResearchArtifact,
@@ -262,6 +263,27 @@ async def test_repository_payload_json_writes_canonical_text_verbatim(db_session
     by_id = {row.artifact_id: row for row in rows}
     assert by_id[f"{run_id}:A:00000000:features"].payload == canonical_payload
     assert by_id[f"{run_id}:A:00000000:signals"].payload == fallback_payload
+    # 组装层端口(app store)同样把 payload_json 透传到直写路径
+    store = SqlAlchemyResearchRunStore(repository)
+    artifact = ResearchArtifact(
+        artifact_id=f"{run_id}:A:00000001:features",
+        run_id=run_id,
+        decision_id=f"{run_id}:D:00000001",
+        sequence=13,
+        stage=ResearchRunStage.FEATURES,
+        trace_id="RRT-472-store",
+        parent_trace_ids=(),
+        payload={},
+        payload_json=canonical_text,
+        checksum=stable_checksum_text(canonical_text),
+    )
+    assert await store.append_artifact(artifact) is True
+    assert await store.append_artifact(artifact) is False  # 幂等命中
+    listed = {
+        item.artifact_id: item for item in await store.list_artifacts(run_id)
+    }
+    assert listed[artifact.artifact_id].payload == canonical_payload
+    assert listed[artifact.artifact_id].checksum == artifact.checksum
     stored_text = (
         await db_session.execute(
             text("select payload::text from research_run_artifacts where run_id = :run_id"),
