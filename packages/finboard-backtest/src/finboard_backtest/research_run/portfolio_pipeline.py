@@ -68,6 +68,7 @@ from finboard_backtest.research_run.config_overrides import (
 from finboard_backtest.research_run.contracts import (
     CapitalTierOutcome,
     DecisionBundle,
+    DecisionLedgerView,
     EquityPoint,
     FeatureValue,
     LedgerSnapshot,
@@ -585,11 +586,13 @@ class PortfolioPipelineAdapter:
     def build_report(
         self,
         manifest: ResearchRunManifest,
-        decisions: Sequence[DecisionBundle],
+        decisions: Sequence[DecisionLedgerView],
         *,
         equity_curve: tuple[EquityPoint, ...] = (),
         benchmark_curve: tuple[tuple[date, Decimal], ...] = (),
     ) -> ResearchRunReport:
+        # issue #473:只消费账本视图字段(ledger/constraints/orders/fills 计数),
+        # 完整 DecisionBundle 与落库后驻留的 DecisionLedgerRecord 皆可传入。
         execution_mode = execution_mode_for(manifest.parameters)
         if decisions:
             final = decisions[-1].ledger

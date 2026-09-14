@@ -8,7 +8,8 @@
   空列表/块边界(chunk_size 1/2/3/默认);
 * ``fragments`` 复用路径与整树编码一致(0 次编码的截面文本拼接不变形);
 * ``DecisionBundle.canonical_fragments`` 是纯编码缓存:不进 ``to_json_value``、
-  不进任何 checksum、不参与相等性,``_slim_decision`` 落地清除;
+  不进任何 checksum、不参与相等性,且不被落库后的账本级驻留记录
+  (``decision_ledger_record``,issue #473)引用;
 * ``ResearchArtifact.payload_json`` 权威形态在内存 store 侧按需物化,读回
   ``payload`` 与 #472 之前逐值一致。
 
@@ -29,12 +30,12 @@ from finboard_backtest.research_run.contracts import (
     CANONICAL_CHUNK_SIZE,
     ResearchArtifact,
     ResearchRunStage,
-    _slim_decision,
     canonical_json_digest,
     canonical_json_list_text,
     canonical_json_normalized,
     canonical_json_parts,
     canonical_json_text,
+    decision_ledger_record,
     pipeline_output_checksum,
     stable_checksum,
     stable_checksum_text,
@@ -174,12 +175,18 @@ def test_bundle_fragments_excluded_from_serialization_and_checksum(decision_fact
     assert framed == decision  # compare=False:编码缓存不参与相等性
 
 
-def test_slim_decision_clears_fragments(decision_factory) -> None:
+def test_ledger_record_does_not_pin_fragments(decision_factory) -> None:
+    """issue #473:账本级驻留记录不引用 ``canonical_fragments``(与
+    candidates/features 同理,随完整 bundle 生命周期结束即释放,原 bundle
+    不被突变)。"""
     decision = decision_factory()
     framed = replace(decision, canonical_fragments={"features": "[1,2]"})
-    slim = _slim_decision(framed)
-    assert slim.canonical_fragments is None
-    assert slim.features == ()
+    record = decision_ledger_record(framed)
+    # 记录字段面(DecisionLedgerView 消费集)不含编码缓存与重输入。
+    assert not hasattr(record, "canonical_fragments")
+    assert not hasattr(record, "features")
+    assert not hasattr(record, "candidates")
+    assert record.ledger is framed.ledger
     assert framed.canonical_fragments == {"features": "[1,2]"}  # 原 bundle 不被突变
 
 

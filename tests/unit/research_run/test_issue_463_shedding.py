@@ -1,4 +1,4 @@
-"""issue #463 下半场:决策产物落库后瘦身 —— 重对象驻留与期数解耦。
+"""issue #463 下半场 + #473:决策产物落库后瘦身 —— 重对象驻留与期数解耦。
 
 锁定五组不变量:
 
@@ -7,16 +7,21 @@
   13 stage artifact 载荷 / checksum、report artifact、result_checksum 口径
   全部一致;#305 确定性重放 result_checksum 逐字节不变;
 * coordinator 侧瘦身生效:``build_report`` 收到的决策列表(runner 主循环
-  的 ``decisions`` 列表)每期 ``features == ()``,而 candidates / ledger /
-  orders / fills / positions 与全量对照逐值一致;
+  的 ``decisions`` 列表,#473 起为 ``DecisionLedgerRecord`` 账本级记录)只
+  携带消费面字段(ledger / constraints / orders / fills / positions 与标识),
+  不含 candidates / features;轻字段与全量对照逐值一致;
 * adapter 侧瘦身生效:``SignalEnginePipelineAdapter.decisions()`` 的
-  ``collected`` 列表传入 ``build_daily_equity_curve`` 时已瘦身为轻副本,
+  ``collected`` 列表传入 ``build_daily_equity_curve`` 时已是账本级记录,
   而 yield 出去的仍是完整 bundle(校验 / 持久化语义不变);
 * 内存解耦:≥13 期合成 run 结束后,存活 ``FeatureValue`` 数量远低于
   「chunk 期数 x 每期对象数 x 3 倍冗余」阈值 —— 未瘦身形态必然钉住
   ``期数 x 每期对象数`` 全量,断言成立即证明驻留与期数解耦;
 * 价格特征预计算表逐期释放:每期 context 构建完成后对应槽位置 None,
   ``feature_values`` 消费值不受影响(释放前后同值)。
+
+#473 增补:账本级记录不钉住 candidates(完整 bundle 释放后候选池对象随之
+回收,gc 普查判别)—— ``DecisionBundle`` 构造契约(候选池非空 fail-closed)
+零改动零放松。
 
 纯离线研究域,不连 broker 不下单。
 """
@@ -39,10 +44,13 @@ from finboard_backtest.research_run import (
     ResearchRunStatus,
 )
 from finboard_backtest.research_run.contracts import (
+    DecisionBundle,
+    DecisionLedgerRecord,
     FeatureValue,
     FrozenArtifactRef,
     ResearchRunManifest,
-    _slim_decision,
+    UniverseCandidate,
+    decision_ledger_record,
     pipeline_output_checksum,
     stable_checksum,
     to_json_value,
@@ -224,8 +232,9 @@ class TestSlimmingEquivalence:
     async def test_coordinator_decision_list_is_slimmed_after_persist(
         self, tmp_path
     ) -> None:
-        """coordinator 侧:build_report 收到的决策列表每期 features == (),
-        其余字段与全量对照逐值一致(candidates 保留)。"""
+        """coordinator 侧:build_report 收到的决策列表每期为
+        ``DecisionLedgerRecord`` 账本级记录(#473),轻字段与全量对照逐值
+        一致,candidates / features 不驻留。"""
         provider = await _build_release(tmp_path)
         manifest = _run_manifest("RR-issue463bslm0003", "issue463-b-slim-0003")
         spy = _ReportDecisionsSpy(
@@ -245,10 +254,13 @@ class TestSlimmingEquivalence:
         for index, (actual, expected) in enumerate(
             zip(slimmed, control_bundles, strict=True)
         ):
-            # 瘦身生效:重字段置空。
-            assert actual.features == ()
-            # 轻字段与全量对照逐值一致(报告 / 校验的消费面)。
-            assert actual.candidates == expected.candidates
+            # 瘦身生效:列表驻留形态是账本级记录,不是 DecisionBundle
+            # (candidates / features / 截面缓存全部不驻留)。
+            assert type(actual) is DecisionLedgerRecord
+            assert not isinstance(actual, DecisionBundle)
+            assert not hasattr(actual, "candidates")
+            assert not hasattr(actual, "features")
+            # 轻字段与全量对照逐值一致(报告 / 校验 / 权益曲线消费面)。
             assert actual.ledger == expected.ledger
             assert actual.orders == expected.orders
             assert actual.fills == expected.fills
@@ -288,34 +300,73 @@ class TestSlimmingEquivalence:
         assert captured
         assert len(captured[0]) == 6
         for collected_item, full in zip(captured[0], yielded, strict=True):
-            assert collected_item.features == ()
-            assert collected_item.candidates == full.candidates
+            # collected 列表驻留形态是账本级记录(#473),不再携带候选池。
+            assert type(collected_item) is DecisionLedgerRecord
+            assert not hasattr(collected_item, "candidates")
             assert collected_item.ledger is full.ledger
             assert collected_item.fills is full.fills
 
 
-class TestSlimDecisionPurity:
-    async def test_slim_copy_does_not_mutate_original(
+class TestDecisionLedgerRecordPurity:
+    async def test_record_does_not_mutate_original_or_perturb_checksums(
         self, decision_factory, manifest_factory
     ) -> None:
-        """``_slim_decision`` 产出独立副本:原 bundle 不被突变,输出校验和
-        不变(证据 / 重放语义零影响)。"""
+        """``decision_ledger_record`` 只读提取字段引用:原 bundle 不被突变,
+        输出校验和不变(证据 / 重放语义零影响),记录与 bundle 共享轻对象
+        (不复制 ledger / orders 等值)。"""
         manifest = manifest_factory()
         bundle = decision_factory(manifest=manifest)
         assert bundle.features
+        checksum_before = pipeline_output_checksum(bundle)
 
-        slimmed = _slim_decision(bundle)
-        assert slimmed.features == ()
+        record = decision_ledger_record(bundle)
         assert bundle.features  # 原 bundle 完好
-        assert slimmed.candidates == bundle.candidates
-        assert slimmed.ledger is bundle.ledger
-        assert slimmed.decision_id == bundle.decision_id
-        # 管线证据的 output_checksum 不含 features → 瘦身副本校验和一致。
-        evidence = bundle.pipeline_evidence
-        assert evidence is not None
-        assert slimmed.pipeline_evidence is not None
-        assert slimmed.pipeline_evidence.output_checksum == evidence.output_checksum
-        assert pipeline_output_checksum(slimmed) == pipeline_output_checksum(bundle)
+        assert record.ledger is bundle.ledger
+        assert record.orders is bundle.orders
+        assert record.fills is bundle.fills
+        assert record.positions is bundle.positions
+        assert record.constraints is bundle.constraints
+        assert record.business_date == bundle.business_date
+        assert record.decision_id == bundle.decision_id
+        # 记录化不扰动完整 bundle 的输出校验和(证据 / 重放语义零影响)。
+        assert pipeline_output_checksum(bundle) == checksum_before
+
+    async def test_record_does_not_pin_candidates(
+        self, decision_factory, manifest_factory
+    ) -> None:
+        """#473 结构断言:完整 bundle 释放后,仅持有账本级记录时候选池对象
+        随之回收(gc 普查判别)—— 决策列表驻留不再钉住 candidates。
+
+        判别力对照:人为钉住同一批候选对象时普查计数同步增长,证明断言
+        对「未释放」形态有判别力,非恒真。跨测试注记:普查用不等式口径
+        (其它测试遗留对象的滞后回收只会让计数更低,不构成污染)。"""
+        manifest = manifest_factory()
+        baseline = _live_candidate_count()
+        bundle = decision_factory(manifest=manifest)
+        n_candidates = len(bundle.candidates)
+        assert bundle.candidates
+        assert _live_candidate_count() >= baseline + n_candidates
+
+        record = decision_ledger_record(bundle)
+        del bundle
+        gc.collect()
+        # 记录存活且字段仍可消费,但本测分配的候选对象已全部回收 ——
+        # 决策列表形态不再钉住候选池(仅持有记录)。
+        assert record.ledger.cash >= 0
+        assert record.decision_id is not None
+        after = _live_candidate_count()
+        assert after <= baseline
+
+        # 判别力对照:人为钉住候选对象,计数立即超过释放后水平。
+        pinned = decision_factory(manifest=manifest).candidates
+        gc.collect()
+        assert _live_candidate_count() >= after + len(pinned)
+        del pinned
+        gc.collect()
+
+
+def _live_candidate_count() -> int:
+    return sum(1 for obj in gc.get_objects() if type(obj) is UniverseCandidate)
 
 
 # ---------------------------------------------------------------------------

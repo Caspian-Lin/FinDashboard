@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import time
 from collections import defaultdict
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import cast
@@ -23,6 +23,8 @@ from finboard_backtest.research_run.contracts import (
     RESEARCH_PORTFOLIO_PIPELINE_VERSION,
     ConstraintOutcome,
     DecisionBundle,
+    DecisionLedgerRecord,
+    DecisionLedgerView,
     JsonValue,
     ResearchArtifact,
     ResearchConstraintViolationError,
@@ -36,9 +38,9 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunStage,
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
-    _slim_decision,
     canonical_json_normalized,
     canonical_json_text,
+    decision_ledger_record,
     execution_mode_for,
     pipeline_output_checksum,
     replay_guard_error,
@@ -228,7 +230,9 @@ class ResearchRunCoordinator:
         # issue #304:在 try 外初始化 —— 组合阶段硬约束分支(#304)在异常
         # 处理器里仍要读已完成决策数,适配器 validate_manifest 若抛硬约束
         # 错误时该变量必须已绑定。
-        decisions: list[DecisionBundle] = []
+        # issue #473:落库后改存账本级记录(只携带消费面字段,见
+        # DecisionLedgerView),candidates/features 不再被列表钉住。
+        decisions: list[DecisionLedgerRecord] = []
         # issue #285:分段耗时(decision_load / 逐决策 execute / report),
         # 只观测,不改变 artifact/checkpoint/进度上报语义。
         run_started = time.monotonic()
@@ -319,12 +323,14 @@ class ResearchRunCoordinator:
                             failure_ctx=failure_ctx,
                         )
                         await self._store.checkpoint()
-                        # issue #463 下半场:持久化完成后即可丢弃期级重对象 ——
-                        # decisions 列表改存 features 置空的瘦身副本(_slim_
-                        # decision 的消费审计见 contracts),使驻留与期数解耦;
-                        # yield / 持久化 / 校验拿到的仍是完整 bundle,report /
-                        # checksum 逐字节不变。
-                        decisions.append(_slim_decision(decision))
+                        # issue #473(#463 下半场续):持久化完成后决策列表改存
+                        # 账本级记录 —— 消费面(build_report / _validate_report /
+                        # 权益曲线)只读 ledger/constraints/orders/fills/
+                        # positions(消费审计见 contracts.DecisionLedgerView),
+                        # candidates/features/截面缓存不再驻留,驻留与候选池
+                        # 规模及期数解耦;yield / 持久化 / 校验拿到的仍是完整
+                        # bundle,report / checksum 逐字节不变。
+                        decisions.append(decision_ledger_record(decision))
                         decision_timing.record(
                             decision.business_date, time.monotonic() - execute_started
                         )
@@ -577,7 +583,7 @@ class ResearchRunCoordinator:
         self,
         manifest: ResearchRunManifest,
         adapter: ResearchStrategyAdapter,
-        decisions: list[DecisionBundle],
+        decisions: Sequence[DecisionLedgerRecord],
         exc: ResearchConstraintViolationError,
         *,
         progress: ProgressHook | None = None,
@@ -1059,7 +1065,7 @@ class ResearchRunCoordinator:
     @staticmethod
     def _validate_report(
         manifest: ResearchRunManifest,
-        decisions: list[DecisionBundle],
+        decisions: Sequence[DecisionLedgerView],
         report: object,
     ) -> None:
         from finboard_backtest.research_run.contracts import ResearchRunReport

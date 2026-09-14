@@ -34,6 +34,7 @@ from finboard_backtest.research_run import (
 )
 from finboard_backtest.research_run.contracts import (
     DecisionBundle,
+    DecisionLedgerView,
     FrozenArtifactRef,
     JsonValue,
     ResearchRunManifest,
@@ -372,7 +373,7 @@ class _GeneratorRejectAdapter:
         )
 
     def build_report(
-        self, manifest: ResearchRunManifest, decisions: Sequence[DecisionBundle]
+        self, manifest: ResearchRunManifest, decisions: Sequence[DecisionLedgerView]
     ) -> ResearchRunReport:
         del manifest
         if not decisions:

@@ -66,6 +66,8 @@ from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.contracts import (
     REBALANCE_FREQUENCIES,
     DecisionBundle,
+    DecisionLedgerRecord,
+    DecisionLedgerView,
     DecisionSchedule,
     EquityPoint,
     FeatureValue,
@@ -77,7 +79,7 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunManifest,
     ResearchRunReport,
     UniverseCandidate,
-    _slim_decision,
+    decision_ledger_record,
     execution_mode_for,
     resolve_decision_schedule,
 )
@@ -1660,7 +1662,7 @@ async def _market_close_map(
 async def build_daily_equity_curve(
     provider: FrozenReleaseProvider,
     manifest: ResearchRunManifest,
-    decisions: Sequence[DecisionBundle],
+    decisions: Sequence[DecisionLedgerView],
 ) -> tuple[EquityPoint, ...]:
     """决策间每日 mark-to-market 权益曲线(issue #183)。
 
@@ -1669,6 +1671,9 @@ async def build_daily_equity_curve(
     权益 = 初始资金。覆盖发布交易日历的全部交易日;期末持仓按最后行情持续
     计值(纯回放不强制平仓)。
     边界:纯离线研究域,只读冻结发布,不连 broker / 不下单。
+    issue #473:``decisions`` 只消费账本视图(fills 执行日 / positions /
+    ``ledger.cash``),完整 bundle 与落库后驻留的 ``DecisionLedgerRecord``
+    (适配器 ``collected`` 列表,#463 起为瘦形态、#473 起为账本级记录)皆可。
     """
     from bisect import bisect_right
 
@@ -3207,15 +3212,15 @@ class SignalEnginePipelineAdapter:
                 # 本地变量)即刻放空,不再把整个前缀钉到 run 结束。
                 self._resume_bundles = None
                 resume = None
-            collected: list[DecisionBundle] = []
+            collected: list[DecisionLedgerRecord] = []
             if resume_all is not None:
                 for decision in resume_all:
                     yield decision
-                    # issue #463 下半场:append 瘦身副本 —— yield 出去的仍是
-                    # 完整 bundle(coordinator 校验/持久化用),列表只留落库
-                    # 后的轻副本(消费审计:equity 曲线 / report 只读
-                    # fills/positions/ledger)。
-                    collected.append(_slim_decision(decision))
+                    # issue #473:append 账本级记录 —— yield 出去的仍是完整
+                    # bundle(coordinator 校验/持久化用),列表只留落库后的
+                    # 账本投影(消费审计:equity 曲线只读 fills/positions/
+                    # ledger.cash,candidates 不再钉住)。
+                    collected.append(decision_ledger_record(decision))
                 # 快速路径种子消费完毕,末个整前缀引用随之释放(#470)。
                 resume_all = None
             else:
@@ -3224,9 +3229,10 @@ class SignalEnginePipelineAdapter:
                 pipeline_iter = pipeline.decisions(manifest)
                 async for decision in pipeline_iter:
                     yield decision
-                    # issue #463 下半场:同上 —— 落库后即弃 features 重引用;
-                    # factor_screen 投影在输入拉取时已捕获,与本列表无关。
-                    collected.append(_slim_decision(decision))
+                    # issue #473:同上 —— 落库后即弃 candidates/features 重引用,
+                    # 列表只留账本级记录;factor_screen 投影在输入拉取时已
+                    # 捕获,与本列表无关。
+                    collected.append(decision_ledger_record(decision))
             # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(离线圈内,
             # 只在 coordinator 完整消费决策后执行;中断时曲线保持为空)。
             if (
@@ -3365,10 +3371,11 @@ class SignalEnginePipelineAdapter:
     def build_report(
         self,
         manifest: ResearchRunManifest,
-        decisions: Sequence[DecisionBundle],
+        decisions: Sequence[DecisionLedgerView],
     ) -> ResearchRunReport:
         # issue #463:delegate 只读 decisions 与权益 / 基准曲线,不读决策
         # 输入 —— 传空元组,流式化后适配器不再持有全量输入。
+        # issue #473:decisions 为账本视图(runner 传 DecisionLedgerRecord)。
         delegate = PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
             decision_inputs=(),

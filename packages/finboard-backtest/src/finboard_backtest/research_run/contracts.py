@@ -10,11 +10,11 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple, Protocol, cast
 
 from finboard_backtest.strategy_spec.contracts import (
     ResearchStrategySpec,
@@ -757,7 +757,8 @@ class DecisionBundle:
     # 拼接复用 —— 同一截面一期只编码一次(输入 checksum 那次),artifact 落库
     # 不再二次编码。不是领域数据:不参与任何 checksum / 序列化
     # (``_to_json_value`` 显式剔除该字段)、不参与相等性(compare=False),
-    # 持久化后由 ``_slim_decision`` 清除,不驻留。
+    # 不被落库后的账本级驻留记录(:func:`decision_ledger_record`)引用,
+    # 完整 bundle 生命周期结束即释放。
     canonical_fragments: dict[str, str] | None = field(
         default=None, compare=False, repr=False
     )
@@ -799,30 +800,89 @@ def pipeline_output_checksum(decision: DecisionBundle) -> str:
     )
 
 
-def _slim_decision(bundle: DecisionBundle) -> DecisionBundle:
-    """持久化后的驻留瘦身副本(issue #463 下半场)。
+class DecisionLedgerView(Protocol):
+    """决策列表落库后驻留消费面的只读视图(issue #473)。
 
-    ``features`` 与决策输入截面共享同一批 ``FeatureValue`` 对象引用,是全市场
-    多期 run 的驻留重头(556 期 ≈ 千万级 ``FeatureValue`` ≈ 2-3GB,被
-    coordinator / 适配器的决策列表钉住到 run 结束)。消费审计(issue #463)
-    确认:持久化之后的全部消费点 —— ``build_report``(只读 ``ledger`` /
-    ``constraints`` / orders / fills 计数)、``_validate_report``(同前)、
-    ``build_daily_equity_curve``(只读 fills / positions / ``ledger.cash``)、
-    result_checksum(只读 artifact 行)、factor_screen(只读输入期拉取时
-    捕获的投影)—— 均不读 ``features``,落库完成后即可置空。
+    消费审计(#463 建立、#473 复核)确认:持久化之后的全部消费点 ——
+    ``build_report``(``ledger`` / ``constraints`` / orders / fills 计数)、
+    runner ``_validate_report``(同前 + 期末账本)、``build_daily_equity_curve``
+    (fills 执行日 / positions / ``ledger.cash``)、result_checksum(只读
+    artifact 指纹行)、factor_screen / strategy_screen(逐期捕获投影)——
+    实际读取的字段集合即本视图;``DecisionBundle`` 与 ``DecisionLedgerRecord``
+    都结构性满足,适配器 ``build_report`` / 权益曲线按本视图收参,
+    既能接收完整 bundle(测试 / 对照路径)也能接收账本级记录(run 主链路)。
+    """
 
-    ``candidates`` 保留:构造契约「每个决策必须记录候选池」是 fail-closed
-    领域不变量(``__post_init__`` 非空校验,#314 反序列化共用同一构造器),
-    置空需放松构造防线,不在本 issue 收益范围内放松。
+    @property
+    def business_date(self) -> date: ...
+
+    @property
+    def decision_id(self) -> str: ...
+
+    @property
+    def ledger(self) -> LedgerSnapshot: ...
+
+    @property
+    def constraints(self) -> tuple[ConstraintOutcome, ...]: ...
+
+    @property
+    def orders(self) -> tuple[ResearchOrder, ...]: ...
+
+    @property
+    def fills(self) -> tuple[ResearchFill, ...]: ...
+
+    @property
+    def positions(self) -> tuple[ResearchPosition, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionLedgerRecord:
+    """落库后决策列表驻留的账本级记录(issue #473)。
+
+    只携带 :class:`DecisionLedgerView` 消费面字段与定位标识 —— candidates /
+    features / signals / targets / risk_exits / capital_feasibility /
+    rebalance_plan / pipeline_evidence / canonical_fragments 一概不引用,
+    全历史 run(5215 标的 x 556 期 ≈ 1.5GB candidates)的决策列表驻留与
+    候选池规模解耦。这是**驻留副本**不是领域对象:构造校验(候选池非空、
+    重复键)与持久化仍以完整 ``DecisionBundle`` 为准,本类型不参与任何
+    校验 / checksum / 序列化。
+    """
+
+    business_date: date
+    decision_id: str
+    ledger: LedgerSnapshot
+    constraints: tuple[ConstraintOutcome, ...]
+    orders: tuple[ResearchOrder, ...]
+    fills: tuple[ResearchFill, ...]
+    positions: tuple[ResearchPosition, ...]
+
+
+def decision_ledger_record(bundle: DecisionBundle) -> DecisionLedgerRecord:
+    """持久化后的决策列表驻留记录(issue #473,#463 下半场的 candidates 脱驻)。
+
+    #463 消费审计确认落库后无人读 ``features``(置空瘦身);#473 复核进一步
+    确认 ``candidates`` 同样无消费点 —— 此前的瘦身副本(``replace(bundle,
+    features=())``)继续保留 candidates 只因 ``DecisionBundle.__post_init__``
+    的候选池非空校验是 fail-closed 构造防线(#314 反序列化共用构造器),
+    不在 bundle 上放松。改为独立的账本级记录类型后,bundle 构造契约零改动
+    零放松,决策列表(runner 主循环 + 适配器 collected)不再钉住候选池。
 
     必须发生在 ``_persist_decision`` 之后(artifacts 载荷逐字节零变化);
-    ``dataclasses.replace`` 产出独立副本,不突变原 bundle —— yield 出去的
-    仍是完整 bundle,#305 确定性重放 result_checksum 与 #314 续算不受影响。
-
-    issue #472:同时清掉 ``canonical_fragments``(截面 canonical 文本 ~10MB/期,
-    落库后无人再读),与 features 一起使驻留与期数解耦。
+    本函数只读提取字段引用、不突变原 bundle —— yield / 持久化 / 校验拿到
+    的仍是完整 bundle,#305 确定性重放 result_checksum(只读 artifact 指纹)
+    与 #314 续算种子(从 DB 读回完整 bundle)不受影响。#472 的
+    ``canonical_fragments`` 截面缓存(~10MB/期)同样不被记录引用,随完整
+    bundle 生命周期结束即释放。
     """
-    return replace(bundle, features=(), canonical_fragments=None)
+    return DecisionLedgerRecord(
+        business_date=bundle.business_date,
+        decision_id=bundle.decision_id,
+        ledger=bundle.ledger,
+        constraints=bundle.constraints,
+        orders=bundle.orders,
+        fills=bundle.fills,
+        positions=bundle.positions,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1330,6 +1390,8 @@ __all__ = [
     "CapitalTierOutcome",
     "ConstraintOutcome",
     "DecisionBundle",
+    "DecisionLedgerRecord",
+    "DecisionLedgerView",
     "DecisionSchedule",
     "EquityPoint",
     "FeatureValue",
@@ -1368,6 +1430,7 @@ __all__ = [
     "canonical_json_normalized",
     "canonical_json_parts",
     "canonical_json_text",
+    "decision_ledger_record",
     "execution_mode_for",
     "manifest_from_json",
     "parse_decision_schedule",

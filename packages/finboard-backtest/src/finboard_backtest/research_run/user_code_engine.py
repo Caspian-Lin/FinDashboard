@@ -42,6 +42,8 @@ from finboard_backtest.portfolio.builder import SignalConflictPolicy
 from finboard_backtest.portfolio.sizing import SizingError
 from finboard_backtest.research_run.contracts import (
     DecisionBundle,
+    DecisionLedgerRecord,
+    DecisionLedgerView,
     EquityPoint,
     JsonValue,
     NormalizedSignal,
@@ -49,7 +51,7 @@ from finboard_backtest.research_run.contracts import (
     ResearchExecutionMode,
     ResearchRunManifest,
     ResearchRunReport,
-    _slim_decision,
+    decision_ledger_record,
     execution_mode_for,
     stable_checksum,
 )
@@ -255,7 +257,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
             else SignalConflictPolicy.NET
         )
         constraints_echo = _constraints_echo(manifest)
-        collected: list[DecisionBundle] = []
+        collected: list[DecisionLedgerRecord] = []
         index = 0
         try:
             # issue #463:逐期拉取决策上下文(不再全量物化),每期流程与
@@ -322,10 +324,10 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 except (AllocationError, SizingError, ValueError) as exc:
                     raise ResearchConstraintViolationError(str(exc)) from exc
                 yield decision
-                # issue #463 下半场:append 瘦身副本 —— yield 出去的仍是完整
-                # bundle;列表只留落库后的轻副本(equity 曲线 / report 消费
-                # 审计见 contracts._slim_decision)。
-                collected.append(_slim_decision(decision))
+                # issue #473:append 账本级记录 —— yield 出去的仍是完整
+                # bundle;列表只留落库后的账本投影(equity 曲线 / report
+                # 消费审计见 contracts.DecisionLedgerView,candidates 不驻留)。
+                collected.append(decision_ledger_record(decision))
                 index += 1
         finally:
             # issue #463:上下文生成器随本生成器退出(耗尽 / 关闭 / 抛错)
@@ -433,7 +435,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
     def build_report(
         self,
         manifest: ResearchRunManifest,
-        decisions: Sequence[DecisionBundle],
+        decisions: Sequence[DecisionLedgerView],
         *,
         equity_curve: tuple[EquityPoint, ...] = (),
         benchmark_curve: tuple[tuple[date, Decimal], ...] = (),
