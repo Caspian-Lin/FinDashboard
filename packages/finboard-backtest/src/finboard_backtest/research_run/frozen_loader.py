@@ -36,7 +36,7 @@ import contextlib
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 import numpy as np
 import structlog
@@ -528,6 +528,36 @@ class DailyMetricsPrecompute:
         return len(self.symbol_rows)
 
 
+class ResumeInputStub(NamedTuple):
+    """resume 前缀的轻量装载结果(#470 后半场)。
+
+    :meth:`FrozenInputLoader.load_resume_stub` 的产物 —— 只含 ``#314``
+    种子校验(``resume_from``)与账本重放(组合管线
+    ``_pipeline_state_from_resume``)消费的五个字段,不含 features /
+    candidates / signals / price_series / covariance 与周期价格特征。
+    消费审计(全仓 grep):这五个字段是
+
+    * ``business_date`` / ``decision_at`` —— 种子时序与输入-决策错位校验;
+
+    * ``lot_info`` —— 逐成交重放的乘数(``AssetLotInfo.multiplier``);
+
+    * ``prices`` —— 决策前盯市的价格高水位(只对重放账本中
+      ``quantity > 0`` 的标的取值);
+
+    * ``execution_prices`` —— 成交后盯市的价格高水位(``.get(symbol, 0.0)``)。
+
+    装载域可经 ``symbols`` 收窄到前缀成交/持仓涉及的标的(逐标的 PIT 读取
+    语义与全量装载一致);域外标的不会被任何消费点读取,缺失即
+    fail-closed(重放抛错 → 拒绝种子 → 全量重算),不静默。
+    """
+
+    business_date: date
+    decision_at: datetime
+    lot_info: dict[str, AssetLotInfo]
+    prices: dict[str, float]
+    execution_prices: dict[str, float]
+
+
 @dataclass(slots=True)
 class LoadedDecisionContext:
     """单个决策时点的机械加载结果(不含信号)。
@@ -625,6 +655,15 @@ class FrozenInputLoader:
         default=None, init=False, repr=False
     )
     _price_precompute_built: bool = field(default=False, init=False, repr=False)
+    # #470 后半场:stub-only 装载的发布级候选池 / 执行元数据缓存(与期次
+    # 无关,loader 实例内一次构建;只服务 :meth:`load_resume_stub`,全量
+    # ``load_context`` 逐期重建的历史行为不变)。
+    _stub_candidates: tuple[UniverseCandidate, ...] | None = field(
+        default=None, init=False, repr=False
+    )
+    _stub_lot_info: dict[str, AssetLotInfo] | None = field(
+        default=None, init=False, repr=False
+    )
 
     @property
     def close_histories(self) -> Mapping[str, SymbolCloseHistory | None]:
@@ -823,6 +862,79 @@ class FrozenInputLoader:
             research_release_missing_symbols=research_missing,
             decision_suspended=decision_suspended,
             execution_suspended=execution_suspended,
+        )
+
+    async def load_resume_stub(
+        self,
+        manifest: ResearchRunManifest,
+        *,
+        decision_at: datetime,
+        execution_at: datetime,
+        symbols: frozenset[str] | None = None,
+    ) -> ResumeInputStub:
+        """stub-only 装载一期 resume 前缀记录(#470 后半场)。
+
+        与 :meth:`load_context` 同源同语义地取机械字段,但只保留 resume
+        校验 / 账本重放消费的五个字段(见 :class:`ResumeInputStub`),跳过
+        features / 研究观测 / price_series / 周期价格特征 / 协方差 —— 那些
+        重对象在前缀期零消费,构建它们纯属把续跑的峰值与耗时抬到全量装载
+        水平(实测 256 期前缀峰值 12GB+、重放 ~20 分钟)。
+
+        取数路径(逐项与全量装载一致,逐值等价的构造性保证):
+
+        * ``lot_info`` —— 发布 instruments 的执行元数据映射
+          (:func:`_build_candidates_and_lots`,与 ``load_context`` 同函数),
+          期次无关(标的时间不变量),``FrozenInputLoader`` 实例内一次构建
+          后逐期复用;
+        * ``prices`` / ``execution_prices`` —— close 矩阵 PIT 切片,分别按
+          ``decision_at`` 与 ``execution_at``(执行假设 next_open → open,
+          next_close → close);矩阵条目缺失的标的按既有回退语义走逐期对象
+          读取(#287/#454)。
+
+        ``symbols`` 非空时把装载域收窄到该标的集(调用方 = 种子成交/持仓
+        涉及标的):close 矩阵因此只读这些标的的全区间历史(秒级、MB 级),
+        而不是全市场矩阵;域外标的不被任何消费点读取,缺失即 fail-closed。
+        矩阵预建失败 / 非真实 provider 时回退逐期读取的语义不变。
+        """
+
+        if execution_at <= decision_at:
+            raise ValueError("execution_at 必须晚于 decision_at")
+        release_ref = self._bars_release_ref(manifest)
+        provider = self.release_provider_factory(release_ref.artifact_id)
+        if self._stub_lot_info is None:
+            # 候选池 / 执行元数据只取决于发布 instruments 与声明域,与决策
+            # 期次无关 —— stub 路径按 loader 实例一次构建(全量 load_context
+            # 逐期重建的历史行为不变)。
+            release = provider.release
+            self._stub_candidates, self._stub_lot_info = _build_candidates_and_lots(
+                _declared_domain_instruments(manifest, list(release.instruments))
+            )
+        candidates = self._stub_candidates or ()
+        lot_info = dict(self._stub_lot_info or {})
+        if symbols is not None:
+            # 收窄只作用于价格装载域:lot_info 是逐成交乘数查询,同样只被
+            # ``symbols`` 内的标的消费(fail-closed:缺键 → 重放抛错 →
+            # 拒绝种子 → 全量重算,不静默)。
+            candidates = tuple(
+                item for item in candidates if item.symbol in symbols
+            )
+            lot_info = {
+                symbol: info for symbol, info in lot_info.items() if symbol in symbols
+            }
+        want_open = _wants_execution_open(manifest)
+        await self._ensure_close_histories(
+            provider, candidates, include_open=want_open
+        )
+        prices = await self._load_close_prices(provider, candidates, decision_at)
+        execution_prices = await self._load_execution_prices(
+            provider, candidates, execution_at=execution_at, want_open=want_open
+        )
+        return ResumeInputStub(
+            business_date=decision_at.date(),
+            decision_at=decision_at,
+            lot_info=lot_info,
+            prices=prices,
+            execution_prices=execution_prices,
         )
 
     async def ensure_close_histories(

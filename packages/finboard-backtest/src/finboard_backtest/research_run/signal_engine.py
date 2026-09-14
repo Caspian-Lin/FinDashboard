@@ -91,12 +91,14 @@ from finboard_backtest.research_run.frozen_loader import (
     LoadedDecisionContext,
     PriceFeaturePrecompute,
     ReleaseProviderFactory,
+    ResumeInputStub,
     SuspensionView,
     SymbolCloseHistory,
 )
 from finboard_backtest.research_run.portfolio_pipeline import (
     PortfolioDecisionInput,
     PortfolioPipelineAdapter,
+    _ResumeReplayStub,
 )
 from finboard_backtest.strategy_spec.contracts import (
     ExecutionTiming,
@@ -845,6 +847,57 @@ async def _release_trading_days(
     if calendar and cacheable:
         _TRADING_DAYS_CACHE[provider] = calendar
     return calendar
+
+
+async def _resolve_decision_days(
+    manifest: ResearchRunManifest,
+    *,
+    provider: FrozenReleaseProvider,
+    snapshot_provider: FeatureSnapshotProvider,
+    trading_days_loader: TradingDaysLoader | None = None,
+) -> list[tuple[datetime, str | None]]:
+    """决策日序列推导(单一实现,#470 后半场两流共用,防漂移)。
+
+    multi_period 由 ``parameters.decision_schedule``(issue #361)按冻结发布
+    交易日历推导;single_shot 由 ``manifest.factor_snapshots`` 的
+    ``decision_at`` 去重推导(issue #356)。全量装载流
+    (:func:`iter_decision_load_contexts`)与 resume 前缀 stub 流
+    (:func:`iter_resume_stub_inputs`)共用本函数 —— 前缀 stub 期数与续算流
+    ``skip_prefix`` 是对同一序列同一前缀的两种消费,推导分头实现就会漂移
+    (错位期 / 漏期),故只保留一处。
+
+    错误分派与旧实现逐字一致(#203:日历声明已给出但推导不出期次,与
+    「未声明日历缺快照」区分根因)。
+    """
+
+    schedule = resolve_decision_schedule(manifest.parameters)
+    if schedule is not None:
+        decision_days = await _derive_schedule_decision_days(
+            provider, schedule, trading_days_loader=trading_days_loader
+        )
+        if not decision_days:
+            # issue #203:区分根因 —— 日历声明已给出(multi_period)但发布日历
+            # 推导不出任何决策时点,与「未声明日历缺快照」是两回事,不能混报。
+            raise ValueError(
+                "execution_mode=multi_period:已声明 "
+                f"decision_schedule(kind={schedule.kind}),"
+                "但冻结发布交易日历未能推导出任何决策时点(每期期末之后必须存在"
+                "下一交易日才能执行成交)。请检查发布区间是否覆盖至少一个完整"
+                "周期期末,或延长发布区间后重新入队。"
+            )
+    else:
+        decision_days = await _snapshot_decision_days(manifest, snapshot_provider)
+        if not decision_days:
+            raise ValueError(
+                "execution_mode=single_shot:未声明 parameters.decision_schedule,"
+                "该路径的决策时点只能来自冻结因子快照,但 manifest.factor_snapshots"
+                " 为空。请入队时冻结 factor_snapshot_ids,或显式声明 "
+                "parameters.decision_schedule(或 legacy "
+                f"rebalance_frequency={sorted(REBALANCE_FREQUENCIES)})走多期回放"
+                "(多期仅价格因子按发布每日重算,基本面因子仍 PIT 取自冻结快照/"
+                "研究数据发布)。"
+            )
+    return decision_days
 
 
 async def _next_execution_at(
@@ -2126,6 +2179,7 @@ async def iter_decision_load_contexts(
     trading_days_loader: TradingDaysLoader | None = None,
     precompute_phase_reporter: LoadPhaseReporter | None = None,
     precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
+    skip_prefix: int = 0,
 ) -> AsyncIterator[DecisionLoadContext]:
     """逐期流式产出决策的机械上下文(不含信号,issue #218 / #463)。
 
@@ -2134,6 +2188,16 @@ async def iter_decision_load_contexts(
     的 ``DecisionLoadContext`` 元组;输出与 :func:`build_decision_load_contexts`
     兼容包装逐字节等值(期序 / 内容 / checksum 不变)。生成器被关闭
     (``aclose``)或抛出异常时,``finally`` 立即关闭常驻特征进程池。
+
+    issue #470 后半场:``skip_prefix`` > 0(断点续算,前缀期已由
+    ``resume_from`` 种子覆盖)时前 ``skip_prefix`` 期**零构建** —— 不进入
+    ``_load_one``(features / 周期价格特征 / 价格序列 / 协方差全部不构建),
+    本流从第 ``skip_prefix`` 期起按原分块与期序产出;前置预建(close /
+    daily / 价格特征)仍按全决策日构建(续算期需要,期次口径与 checksum
+    不变),前缀期的预计算槽位在预建后即刻释放(本流不再消费)。运行级
+    进度帧的 k 从 ``skip_prefix`` 起报(种子前缀已落库 —— 「已完成期数」
+    的真实值)。前缀 stub 与 ``skip_prefix`` 期数必须同源(见
+    :func:`_resolve_decision_days`)。
 
     single_shot:决策日序列 = manifest.factor_snapshots 的 ``decision_at``
     排序去重;multi_period:决策日由 ``parameters.decision_schedule``
@@ -2176,33 +2240,16 @@ async def iter_decision_load_contexts(
         suspension_view=suspension_view,
     )
     schedule = resolve_decision_schedule(manifest.parameters)
-
-    if schedule is not None:
-        decision_days = await _derive_schedule_decision_days(
-            provider, schedule, trading_days_loader=trading_days_loader
-        )
-        if not decision_days:
-            # issue #203:区分根因 —— 日历声明已给出(multi_period)但发布日历
-            # 推导不出任何决策时点,与「未声明日历缺快照」是两回事,不能混报。
-            raise ValueError(
-                "execution_mode=multi_period:已声明 "
-                f"decision_schedule(kind={schedule.kind}),"
-                "但冻结发布交易日历未能推导出任何决策时点(每期期末之后必须存在"
-                "下一交易日才能执行成交)。请检查发布区间是否覆盖至少一个完整"
-                "周期期末,或延长发布区间后重新入队。"
-            )
-    else:
-        decision_days = await _snapshot_decision_days(manifest, snapshot_provider)
-        if not decision_days:
-            raise ValueError(
-                "execution_mode=single_shot:未声明 parameters.decision_schedule,"
-                "该路径的决策时点只能来自冻结因子快照,但 manifest.factor_snapshots"
-                " 为空。请入队时冻结 factor_snapshot_ids,或显式声明 "
-                "parameters.decision_schedule(或 legacy "
-                f"rebalance_frequency={sorted(REBALANCE_FREQUENCIES)})走多期回放"
-                "(多期仅价格因子按发布每日重算,基本面因子仍 PIT 取自冻结快照/"
-                "研究数据发布)。"
-            )
+    # #470 后半场:决策日推导经 _resolve_decision_days(与 resume 前缀
+    # stub 流共用同一实现 —— 两流的期次序列必须逐位一致)。
+    decision_days = await _resolve_decision_days(
+        manifest,
+        provider=provider,
+        snapshot_provider=snapshot_provider,
+        trading_days_loader=trading_days_loader,
+    )
+    # #470 后半场:续跑前缀期(种子已覆盖,本流从 skip_prefix 期起产出)。
+    skip = min(max(int(skip_prefix), 0), len(decision_days))
 
     # issue #288:日历与 close 矩阵(#287 的惰性进程内缓存)在进入分块并行
     # 前预建 —— 并发首建只会重复读盘且打穿矩阵收益,预建收敛到单一顺序点。
@@ -2210,8 +2257,10 @@ async def iter_decision_load_contexts(
     # issue #308:首帧探针在预建**之前**触发 —— 决策日总数已推导完成,先把
     # ``decision_load 0/N`` 透出到 job 视图,覆盖日历预热 + close 矩阵全区间
     # 读取这段此前完全无进度的最长空白窗(RR-7a74 的「数小时 0/0」)。
+    # #470 后半场:续跑时 k 的语义是「已完成期数」——种子前缀已落库,
+    # 首帧即从 skip 起报(与后续帧、与 resume 的真实完成度一致)。
     if chunk_probe is not None and decision_days:
-        await chunk_probe(0, len(decision_days))
+        await chunk_probe(skip, len(decision_days))
     # issue #301:池启动提前到 close 矩阵预建之前——矩阵预建的 parquet 解码 +
     # 列式转换同样分发到常驻池(反序列化并行),预建与逐期特征共用一个池。
     # 池是纯性能优化:启动失败返回 None(#288 语义),矩阵预建随即降级进程内
@@ -2272,6 +2321,18 @@ async def iter_decision_load_contexts(
             stage="decision_load",
             release_id=release_ref.artifact_id,
             message="预计算完成,特征计算进程池即刻退役(决策段零子进程驻留)",
+        )
+    if skip:
+        # #470 后半场:前缀期(种子已覆盖)的预计算槽位本流不再消费 ——
+        # 预建后即刻释放(#438 v2 / #463 下半场同契约:被释放期复读回落
+        # 逐期路径,值语义不变)。daily 槽位是独立 numpy 大数组(全市场
+        # 0.45GB/发布),前缀占比按 skip/总期数即时归还 OS。
+        precompute = loader.price_feature_precompute
+        if precompute is not None:
+            for decision_at, _ in decision_days[:skip]:
+                precompute.release_period(decision_at)
+        loader.release_daily_precompute_periods(
+            [decision_at for decision_at, _ in decision_days[:skip]]
         )
 
     async def _load_one(decision_at: datetime, snapshot_id: str | None) -> DecisionLoadContext:
@@ -2361,19 +2422,28 @@ async def iter_decision_load_contexts(
             close_series_provider=_make_close_series_provider(loader, decision_at),
         )
 
-    produced = 0
+    # #470 后半场:前缀期已由种子覆盖 —— produced 从 skip 起报(加载帧的
+    # k 保持「已完成期数」语义:种子前缀 + 本流已加载期)。
+    produced = skip
     try:
         for chunk_start in range(0, len(decision_days), _DECISION_LOAD_CHUNK):
             chunk = decision_days[chunk_start : chunk_start + _DECISION_LOAD_CHUNK]
+            if chunk_start + len(chunk) <= skip:
+                # 整块落在续跑前缀内:零构建、零探针(本块无加载工作),
+                # 槽位已在预建后释放。
+                continue
+            # 跨前缀边界的块只构建后半(块切分与期序保持与全新 run 同源,
+            # #288 gather 分组 / #263 首个失败期语义不变)。
+            build = chunk[max(0, skip - chunk_start) :]
             results = await asyncio.gather(
-                *(_load_one(decision_at, snapshot_id) for decision_at, snapshot_id in chunk),
+                *(_load_one(decision_at, snapshot_id) for decision_at, snapshot_id in build),
                 return_exceptions=True,
             )
             # issue #263:按原始期序收集 —— 第一个失败期(与串行首个失败一致)
             # 在 bare raise 前挂决策标记;异常类型 / 消息 / traceback 不被改写,
             # runner 通用收口经 read_decision_load_context 读回失败期次。
             loaded: list[DecisionLoadContext] = []
-            for (decision_at, _), result in zip(chunk, results, strict=True):
+            for (decision_at, _), result in zip(build, results, strict=True):
                 if isinstance(result, BaseException):
                     if isinstance(result, Exception):
                         attach_decision_load_context(
@@ -2429,6 +2499,7 @@ async def build_decision_load_contexts(
     trading_days_loader: TradingDaysLoader | None = None,
     precompute_phase_reporter: LoadPhaseReporter | None = None,
     precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
+    skip_prefix: int = 0,
 ) -> tuple[DecisionLoadContext, ...]:
     """按执行模式加载全部决策的机械上下文(issue #463 兼容包装)。
 
@@ -2437,7 +2508,7 @@ async def build_decision_load_contexts(
     一次性物化全部期次 —— 行为与流式化前逐字节一致(#288 等值 / 失败 /
     探针测试原样通过),新调用方应直接消费生成器。加载语义(docstring 详
     述:#288 分块 / #263 失败标记 / #306 边界探针 / #308 首帧与 k/N /
-    #450 预计算帧)见生成器版本。
+    #450 预计算帧 / #470 后半场 skip_prefix 前缀零构建)见生成器版本。
     """
     return tuple(
         [
@@ -2453,6 +2524,7 @@ async def build_decision_load_contexts(
                 trading_days_loader=trading_days_loader,
                 precompute_phase_reporter=precompute_phase_reporter,
                 precompute_cancel_probe=precompute_cancel_probe,
+                skip_prefix=skip_prefix,
             )
         ]
     )
@@ -2470,6 +2542,7 @@ async def iter_decision_inputs(
     trading_days_loader: TradingDaysLoader | None = None,
     precompute_phase_reporter: LoadPhaseReporter | None = None,
     precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
+    skip_prefix: int = 0,
 ) -> AsyncIterator[PortfolioDecisionInput]:
     """逐期流式产出 ``PortfolioDecisionInput``(issue #170 / #183 / #463)。
 
@@ -2491,6 +2564,11 @@ async def iter_decision_inputs(
 
     ``process_workers``(issue #288)> 0 且 multi_period 时,逐期价格特征
     经常驻 spawn 进程池计算;结果与进程内路径逐值相等。
+
+    issue #470 后半场:``skip_prefix`` > 0(断点续算)时前 ``skip_prefix``
+    期零构建直接从第 ``skip_prefix`` 期起产出 —— 前缀五字段由 stub-only
+    流提供(:func:`iter_resume_stub_inputs`),两流共用
+    :func:`_resolve_decision_days` 的同一期次序列。
     """
     schedule = resolve_decision_schedule(manifest.parameters)
     # 信号求值(特征图 + 规则)是逐决策的纯 CPU 密集段,经 asyncio.to_thread
@@ -2507,6 +2585,7 @@ async def iter_decision_inputs(
         trading_days_loader=trading_days_loader,
         precompute_phase_reporter=precompute_phase_reporter,
         precompute_cancel_probe=precompute_cancel_probe,
+        skip_prefix=skip_prefix,
     )
     try:
         async for loaded in source:
@@ -2552,6 +2631,7 @@ async def build_decision_inputs(
     trading_days_loader: TradingDaysLoader | None = None,
     precompute_phase_reporter: LoadPhaseReporter | None = None,
     precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
+    skip_prefix: int = 0,
 ) -> tuple[PortfolioDecisionInput, ...]:
     """按执行模式组装全部 ``PortfolioDecisionInput``(issue #463 兼容包装)。
 
@@ -2573,9 +2653,72 @@ async def build_decision_inputs(
                 trading_days_loader=trading_days_loader,
                 precompute_phase_reporter=precompute_phase_reporter,
                 precompute_cancel_probe=precompute_cancel_probe,
+                skip_prefix=skip_prefix,
             )
         ]
     )
+
+
+async def iter_resume_stub_inputs(
+    manifest: ResearchRunManifest,
+    *,
+    release_provider_factory: ReleaseProviderFactory,
+    snapshot_provider: FeatureSnapshotProvider,
+    count: int,
+    symbols: frozenset[str] | None = None,
+    suspension_view: SuspensionView | None = None,
+    series_provider: FactorSeriesProvider | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
+) -> AsyncIterator[ResumeInputStub]:
+    """断点续算前缀的 stub-only 装载流(issue #470 后半场)。
+
+    逐期产出 :class:`ResumeInputStub`(五字段,见其 docstring 的消费审计),
+    期次序列取 :func:`_resolve_decision_days` 的前 ``count`` 期 —— 与全量
+    装载流(:func:`iter_decision_load_contexts`,续算时 ``skip_prefix`` 同值)
+    共用同一推导,两流拼出的期次序列与全新 run 逐位一致(防漂移)。
+
+    与全量装载的差异只在「装载什么」:每期只取 close 矩阵 PIT 切片
+    (决策价 / 执行价)与发布 instruments 执行元数据,不构建 features /
+    研究观测 / 价格序列 / 周期价格特征 / 协方差 —— 那些对象在前缀期零消费
+    (:meth:`FrozenInputLoader.load_resume_stub` 与
+    ``_pipeline_state_from_resume`` 的消费面对齐)。``symbols`` 收窄装载域
+    到种子成交 / 持仓涉及的标的(调用方从读回种子推导)。
+
+    计数语义与「种子超过冻结输入数即拒绝」契约保持:冻结输入不足 ``count``
+    期时按实际期数产出,由 ``resume_from`` 的数量校验拒绝(回退全量重算)。
+    单期推导失败 / 发布不可读与全量装载同错同型(不吞错)。
+    """
+
+    if count <= 0:
+        return
+    release_ref = _bars_release_ref(manifest, release_provider_factory)
+    provider = release_provider_factory(release_ref.artifact_id)
+    decision_days = await _resolve_decision_days(
+        manifest,
+        provider=provider,
+        snapshot_provider=snapshot_provider,
+        trading_days_loader=trading_days_loader,
+    )
+    loader = FrozenInputLoader(
+        release_provider_factory=release_provider_factory,
+        snapshot_provider=snapshot_provider,
+        series_provider=series_provider,
+        suspension_view=suspension_view,
+    )
+    timing = manifest.strategy_spec.execution_model.timing
+    for decision_at, _snapshot_id in decision_days[:count]:
+        execution_at = await _next_execution_at(
+            provider,
+            decision_at,
+            timing=timing,
+            trading_days_loader=trading_days_loader,
+        )
+        yield await loader.load_resume_stub(
+            manifest,
+            decision_at=decision_at,
+            execution_at=execution_at,
+            symbols=symbols,
+        )
 
 
 def _bars_release_ref(
@@ -2694,6 +2837,13 @@ class SignalEnginePipelineAdapter:
         # 不再全量物化 ``self._inputs``);加载失败 / 打断经 runner 的
         # ``aclose`` 兜底级联关闭(生成器 finally → 特征进程池即时释放)。
         self._input_iterator: AsyncIterator[PortfolioDecisionInput] | None = None
+        # #470 后半场:resume 前缀的 stub-only 装载流(仅续跑且 run 未声明
+        # u_ 用户因子时创建,见 ``_load``);由组合管线经 ``aprefetch_inputs``
+        # 消费,种子被拒时随 ``_reset_input_stream`` 丢弃。
+        self._stub_input_iterator: AsyncIterator[_ResumeReplayStub] | None = None
+        #: #470 后半场:stub 前缀期数(0 = 本流未走 stub 路径)。只服务
+        #: factor_screen 口径可见性告警(见 ``_compute_factor_screen``)。
+        self._stub_prefix_periods = 0
         # #470:停复牌视图随首建流缓存,流重建(种子被拒)时复用
         self._suspension_view: SuspensionView | None = None
         self._suspension_loaded = False
@@ -2820,7 +2970,7 @@ class SignalEnginePipelineAdapter:
             return None
 
     def _iter_captured_inputs(
-        self, suspension_view: SuspensionView | None
+        self, suspension_view: SuspensionView | None, *, skip_prefix: int = 0
     ) -> AsyncIterator[PortfolioDecisionInput]:
         """流式决策输入 + 逐期捕获包装(issue #463)。
 
@@ -2830,6 +2980,10 @@ class SignalEnginePipelineAdapter:
         定位失败期日期与该期投影)。bundle 与 input 的 ``features`` 共享
         同一引用,投影结果只读 ``features``/``prices``/``candidates``,
         常驻为小 dict,不持有全量输入。
+
+        #470 后半场:``skip_prefix`` > 0(续跑)时前若干期不经过本流
+        (由 stub 前缀流登记 business_date),本流从第 ``skip_prefix`` 期起
+        产出与捕获。
         """
 
         async def _stream() -> AsyncIterator[PortfolioDecisionInput]:
@@ -2848,6 +3002,7 @@ class SignalEnginePipelineAdapter:
                 trading_days_loader=self._trading_days_loader,
                 precompute_phase_reporter=self._precompute_phase_reporter,
                 precompute_cancel_probe=self._precompute_cancel_probe,
+                skip_prefix=skip_prefix,
             )
             try:
                 async for item in source:
@@ -2863,31 +3018,148 @@ class SignalEnginePipelineAdapter:
 
         return _stream()
 
-    async def _load(self) -> PortfolioPipelineAdapter:
+    def _resume_prefix_needs_full_load(
+        self, resume: tuple[DecisionBundle, ...]
+    ) -> bool:
+        """前缀是否必须走全量装载(#470 后半场消费审计结论,两道门)。
+
+        factor_screen 投影(``_period_cross_sections``)是前缀期唯一的重输入
+        消费点:``others`` / ``prices`` 参与 screen 的 forward return 与相关性
+        对照,缺期即 screen 口径漂移(期数 / 决策点 / 换手跨期都可能变)。因此
+        只要前缀**可能**被 screen 消费,就不走 stub 路径:
+
+        * 门一(manifest 声明):``_cross_section_series_capture`` —— 声明了
+          ``u_`` 用户因子的 run 恒走全量(#470 前半场门控,保守超集);
+        * 门二(种子实测):seed bundle 的 features 里出现 ``u_`` 观测 ——
+          manifest 扫描是保守超集但**可能漏报**(u_ 名只出现在冻结快照观测、
+          未写进 manifest 的 run);这类 run 的 ``_period_cross_section`` 靠
+          「当期 user 桶非空即回退全量投影」兜底,兜底只能对**已拉取**的期次
+          生效,前缀不拉取就兜不住 —— 前缀出现 u_ 观测时必须全量装载。
+
+        两道门都不过 = 前缀无任何 u_ 观测残留可能 → 投影恒不被 screen 消费
+        (无 u_ 观测时 ``build_factor_screen_from_periods`` 返回 None),stub
+        路径零语义影响。残余情形(前缀干净、续算期出现 u_ 观测)由
+        ``_compute_factor_screen`` 的 ``factor_screen_stub_prefix_scope``
+        warning 具名记录,不静默。
+        """
+
+        if self._cross_section_series_capture:
+            return True
+        from finboard_data.factor_lab import is_user_factor_name
+
+        return any(
+            is_user_factor_name(feature.feature_id)
+            for bundle in resume
+            for feature in bundle.features
+        )
+
+    def _iter_resume_stub_inputs(
+        self, resume: tuple[DecisionBundle, ...]
+    ) -> AsyncIterator[_ResumeReplayStub]:
+        """stub-only 前缀装载流 + business_date 登记(#470 后半场)。
+
+        装载域收窄到种子成交 / 持仓涉及的标的(重放只读这些标的的价格与
+        乘数;域外标的零消费)。逐期登记 ``business_date`` 而不登记
+        factor_screen 投影 —— 消费审计结论:投影(``_period_cross_sections``)
+        只有引用 ``u_`` 用户因子的 run 会消费(``others`` / ``prices`` 参与
+        screen 的 forward return 与相关性对照),那类 run 不走 stub 路径
+        (``_cross_section_series_capture`` 为真时前缀走全量装载,见
+        ``decisions()``);无 ``u_`` 因子的 run 投影恒不被消费,登记的
+        business_date 只为 #304 partial 证据的期次定位(``compute_partial_
+        evidence`` 按 1-based 失败决策序号索引本列表 —— 前缀不登记就会
+        错位 / 丢失失败日期)。
+        """
+
+        symbols = frozenset(
+            symbol
+            for bundle in resume
+            for symbol in (
+                *(fill.symbol for fill in bundle.fills),
+                *(position.symbol for position in bundle.positions),
+            )
+        )
+
+        async def _stream() -> AsyncIterator[_ResumeReplayStub]:
+            source = iter_resume_stub_inputs(
+                self._manifest,
+                release_provider_factory=self._release_provider_factory,
+                snapshot_provider=self._snapshot_provider,
+                count=len(resume),
+                symbols=symbols,
+                suspension_view=self._suspension_view,
+                series_provider=self._series_provider,
+                trading_days_loader=self._trading_days_loader,
+            )
+            try:
+                async for stub in source:
+                    self._business_dates.append(stub.business_date)
+                    yield _ResumeReplayStub(
+                        business_date=stub.business_date,
+                        decision_at=stub.decision_at,
+                        lot_info=stub.lot_info,
+                        prices=stub.prices,
+                        execution_prices=stub.execution_prices,
+                    )
+            finally:
+                await _aclose_asyncgen(source)
+
+        return _stream()
+
+    async def _load(
+        self, *, resume: tuple[DecisionBundle, ...] | None = None
+    ) -> PortfolioPipelineAdapter:
+        """装配管线与输入流;``resume`` 非空时按消费审计选择前缀装载方式。
+
+        #470 后半场:``resume`` 非空且 run 未声明 u_ 用户因子时创建 stub
+        only 前缀流,主线输入流 ``skip_prefix`` 与之同值 —— 两者必须同生同灭
+        (前缀只覆盖一处:要么 stub 流 + 主线跳过,要么全量流从第 0 期起;
+        任何「跳过前缀但无人提供前缀」的组合都会让种子校验错位而被拒)。
+        声明 u_ 用户因子的 run 保留前缀全量装载 —— factor_screen 的
+        ``others`` / ``prices`` 投影必须覆盖前缀期(screen 是 run 产物,
+        口径不能因续跑变化),这类 run 的前缀成本本就被 screen 真实消费
+        (消费审计见 ``_iter_resume_stub_inputs``)。
+        """
+
         if self._input_iterator is None:
             if not self._suspension_loaded:
                 self._suspension_view = await self._load_suspension_view()
                 self._suspension_loaded = True
-            self._input_iterator = self._iter_captured_inputs(self._suspension_view)
+            skip_prefix = 0
+            if resume and not self._resume_prefix_needs_full_load(resume):
+                if self._stub_input_iterator is None:
+                    self._stub_input_iterator = self._iter_resume_stub_inputs(resume)
+                self._stub_prefix_periods = len(resume)
+                skip_prefix = len(resume)
+            self._input_iterator = self._iter_captured_inputs(
+                self._suspension_view, skip_prefix=skip_prefix
+            )
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
             decision_inputs=self._input_iterator,
+            resume_stub_inputs=self._stub_input_iterator,
         )
 
     async def _reset_input_stream(self) -> None:
-        """关闭并重建流式输入(#470 前半场:种子被拒的全量重算兜底)。
+        """关闭并重建流式输入(#470:种子被拒的全量重算兜底)。
 
         预取瘦身后(``aprefetch_inputs`` 只留 stub),种子被拒的「全量重算」
         无法再回放已消费的输入流 —— 关闭旧流(级联收尾加载生成器与特征
-        进程池)、重置捕获投影(重算路径按期重新捕获)、下次 ``_load`` 建
-        全新流从第 0 期重拉。代价 = 预计算重建(分钟级);该路径仅在种子
-        与冻结输入漂移的病态场景触发(#314 fail-closed,宁重算不漂移)。
+        进程池)、**丢弃 stub 前缀流**(#470 后半场:重建后从第 0 期全量
+        装载,skip_prefix 归零)、重置捕获投影(重算路径按期重新捕获)、
+        下次 ``_load`` 建全新流从第 0 期重拉。代价 = 预计算重建(分钟级);
+        该路径仅在种子与冻结输入漂移的病态场景触发(#314 fail-closed,
+        宁重算不漂移)。
         """
 
         iterator = self._input_iterator
         self._input_iterator = None
+        stub_iterator = self._stub_input_iterator
+        self._stub_input_iterator = None
+        self._stub_prefix_periods = 0
         if iterator is not None:
             await _aclose_asyncgen(iterator)
+        if stub_iterator is not None:
+            await _aclose_asyncgen(stub_iterator)
         self._period_cross_sections = []
         self._business_dates = []
 
@@ -2911,13 +3183,18 @@ class SignalEnginePipelineAdapter:
                     self._fast_path = True
                     resume_all = resume
                 else:
-                    pipeline = await self._load()
+                    # #470 后半场:续跑时主线输入流从第 len(resume) 期起产出
+                    # (skip_prefix),前缀五字段改由 stub-only 装载流预取 ——
+                    # 前缀期不再构建完整输入(协方差 / 特征 / 价格序列),
+                    # 预计算段(close / daily / 价格特征)仍按全决策日构建,
+                    # 前缀期槽位预建后即刻释放。
+                    pipeline = await self._load(resume=resume)
                     # issue #463:流式输入下 resume_from 的种子校验需要前缀
                     # 冻结输入 —— 先从输入流预取 len(resume) 期(#470 前半场:
-                    # 预取只保留 resume 校验/账本重放所需的瘦 stub,完整输入
-                    # 拉取期即释放;投影捕获照常逐期登记)。种子被拒时输入流
-                    # 已被预取消费,全量重算经流重建从第 0 期重拉(fail-closed,
-                    # 代价 = 预计算重建,罕见路径)。
+                    # 预取只保留 resume 校验/账本重放所需的瘦 stub;后半场:
+                    # 五字段由 close 矩阵 + 发布元数据直接构造,完整输入根本
+                    # 不构建)。种子被拒时输入流已被预取消费,全量重算经流重建
+                    # 从第 0 期重拉(fail-closed,代价 = 预计算重建,罕见路径)。
                     await pipeline.aprefetch_inputs(len(resume))
                     if not pipeline.resume_from(resume):
                         # 种子被拒(数量/时序与冻结输入不一致):整段回退全量
@@ -3005,6 +3282,22 @@ class SignalEnginePipelineAdapter:
                 self._period_cross_sections,
                 self._release_provider_factory,
             )
+            if self._factor_screen is not None and self._stub_prefix_periods:
+                # #470 后半场防御性可见性:stub 前缀路径只在 manifest 扫描
+                # 判定「无 u_ 用户因子」时启用(那时 screen 恒为 None);这里
+                # 出现非空 screen 说明有 u_ 观测绕过了扫描(理论不可能),
+                # 其口径只覆盖续算期次 —— 具名 warning 记录,不静默。
+                logger.warning(
+                    "research_run.factor_screen_stub_prefix_scope",
+                    run_id=manifest.run_id,
+                    stub_prefix_periods=self._stub_prefix_periods,
+                    screen_periods=len(self._period_cross_sections),
+                    message=(
+                        "stub 前缀路径下 factor_screen 仅覆盖续算期次:"
+                        "manifest 未声明 u_ 用户因子但观测中出现 u_ 特征,"
+                        "前缀期投影未捕获(不冒充全期次口径)"
+                    ),
+                )
             return None
         except Exception as exc:
             logger.warning(

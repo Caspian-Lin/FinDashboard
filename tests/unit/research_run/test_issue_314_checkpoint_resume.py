@@ -284,10 +284,18 @@ class _CountingSignalAdapter(SignalEnginePipelineAdapter):
         self.load_calls = 0
         self.last_pipeline: _CountingPipeline | None = None
 
-    async def _load(self) -> PortfolioPipelineAdapter:
+    async def _load(
+        self,
+        *,
+        resume: Any = None,
+    ) -> PortfolioPipelineAdapter:
         self.load_calls += 1
         # issue #463:与生产 _load 同构 —— 输入迭代器经 _iter_captured_inputs
         # 包装(逐期捕获 screen 投影 / 决策日),仅管线类型换成计数桩。
+        # #470 后半场:签名对齐生产 _load(resume);本桩不建 stub 前缀流
+        # (这些用例的 run 引用 u_ 用户因子,生产同路径也不建 —— 前缀全量
+        # 装载、skip_prefix 保持 0)。
+        del resume
         if self._input_iterator is None:
             self._input_iterator = self._iter_captured_inputs(None)
         pipeline = _CountingPipeline(

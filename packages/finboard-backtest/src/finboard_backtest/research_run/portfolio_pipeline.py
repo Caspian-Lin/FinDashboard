@@ -275,6 +275,7 @@ class PortfolioPipelineAdapter:
         decision_inputs: Iterable[PortfolioDecisionInput]
         | AsyncIterator[PortfolioDecisionInput],
         required_capabilities: Iterable[str] = (),
+        resume_stub_inputs: AsyncIterator[_ResumeReplayStub] | None = None,
     ) -> None:
         if strategy_kind not in SUPPORTED_RESEARCH_STRATEGIES:
             raise UnsupportedResearchCapabilityError(
@@ -282,6 +283,12 @@ class PortfolioPipelineAdapter:
             )
         get_strategy_capability(strategy_kind)
         self.strategy_kind = strategy_kind
+        # #470 后半场:resume 前缀的 stub-only 装载流(可选)。提供时
+        # :meth:`aprefetch_inputs` 只从这里拉瘦记录,主线
+        # ``decision_inputs`` 从第 ``len(种子)`` 期起产出(signal_engine
+        # 侧 skip_prefix)—— 前缀期不再构建完整输入(协方差 / 特征 / 价格
+        # 序列),续跑峰值与重放耗时回到「全新 run + 续算增量」。
+        self._resume_stub_stream = resume_stub_inputs
         # issue #463:decision_inputs 支持 Sequence(归一为 tuple,旧行为)或
         # AsyncIterator(流式逐期拉取,原样保存)。流式模式下 ``self._inputs``
         # 只作 resume 种子预取缓冲(:meth:`aprefetch_inputs` 填充,长度 =
@@ -323,9 +330,15 @@ class PortfolioPipelineAdapter:
         完整输入在返回前释放 —— 校验与账本重放只消费这五个字段(消费面
         见 :func:`_pipeline_state_from_resume`),features/candidates 等重
         对象不再驻留。
+
+        #470 后半场:``resume_stub_inputs`` 非空(前缀 stub-only 装载流)
+        时改从该流拉取,连「先构建完整输入再瘦身」都不再发生 —— 五字段由
+        close 矩阵 + 发布 instruments 元数据直接构造;主线输入流的
+        ``skip_prefix`` 与之同源(同一次决策日推导),两流按序恰好拼出
+        全期次序列(前缀期由 stub 流登记、续算期由主线登记)。
         """
 
-        stream = self._input_stream
+        stream = self._resume_stub_stream or self._input_stream
         if stream is None or count <= 0:
             return
         pulled: list[_ResumeReplayStub] = list(self._prefetch_stubs)
@@ -334,15 +347,7 @@ class PortfolioPipelineAdapter:
                 item = await stream.__anext__()
             except StopAsyncIteration:
                 break
-            pulled.append(
-                _ResumeReplayStub(
-                    business_date=item.business_date,
-                    decision_at=item.decision_at,
-                    lot_info=item.lot_info,
-                    prices=item.prices,
-                    execution_prices=item.execution_prices,
-                )
-            )
+            pulled.append(_resume_stub_of(item))
         self._prefetch_stubs = pulled
 
     async def _close_input_stream(self) -> None:
@@ -350,11 +355,14 @@ class PortfolioPipelineAdapter:
 
         Sequence 输入无流可关;AsyncGenerator 之外的迭代器不可关闭,静默跳过
         (交给 GC)。对已耗尽 / 已关闭的生成器重复关闭是 no-op。
+
+        #470 后半场:stub 前缀流一并关闭 —— 预取次数取满后它停在最后一次
+        yield 上,不关会钉住 loader(含窄化 close 矩阵)直到 GC。
         """
 
-        stream = self._input_stream
-        if isinstance(stream, AsyncGenerator):
-            await stream.aclose()
+        for stream in (self._input_stream, self._resume_stub_stream):
+            if isinstance(stream, AsyncGenerator):
+                await stream.aclose()
 
     async def _next_input(self, index: int) -> PortfolioDecisionInput | None:
         """第 ``index`` 期冻结输入;``None`` = 输入耗尽(#463)。
@@ -1610,6 +1618,11 @@ class _ResumeReplayStub(NamedTuple):
     这五个字段;完整 ``PortfolioDecisionInput`` 的重对象(features /
     candidates / signals / covariance,全市场期均数万 FeatureValue)由
     :meth:`aprefetch_inputs` 在抽取 stub 后即时释放。
+
+    #470 后半场:流式续跑的前缀记录改由 stub-only 装载流提供
+    (:meth:`FrozenInputLoader.load_resume_stub`,装载域收窄到种子成交 /
+    持仓涉及的标的)—— 前缀期连完整输入都不再构建,五字段直接由 close
+    矩阵 + 发布 instruments 元数据构造。
     """
 
     business_date: date
@@ -1617,6 +1630,27 @@ class _ResumeReplayStub(NamedTuple):
     lot_info: Mapping[str, AssetLotInfo]
     prices: Mapping[str, float]
     execution_prices: Mapping[str, float]
+
+
+def _resume_stub_of(item: Any) -> _ResumeReplayStub:
+    """resume 装载流的当期记录归一化为瘦记录(#470)。
+
+    两个来源结构兼容(五个字段,消费面见 :func:`_pipeline_state_from_resume`):
+
+    * stub-only 装载流 —— 已是 :class:`_ResumeReplayStub`,原样返回;
+    * 主线完整输入 ``PortfolioDecisionInput``(无 stub 流的调用方 / 测试)
+      —— 抽取五字段即时释放重对象(#470 前半场语义)。
+    """
+
+    if isinstance(item, _ResumeReplayStub):
+        return item
+    return _ResumeReplayStub(
+        business_date=item.business_date,
+        decision_at=item.decision_at,
+        lot_info=item.lot_info,
+        prices=item.prices,
+        execution_prices=item.execution_prices,
+    )
 
 
 def _pipeline_state_from_resume(
