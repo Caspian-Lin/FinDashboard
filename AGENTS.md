@@ -42,6 +42,7 @@
 - **幂等键部分唯一索引**：failed/cancelled 放行同键重建，succeeded 幂等命中，interrupted 保持单行（lease 重排与 run replay 依赖此语义）。
 - **checksum / manifest 漂移防护**：新增可选字段 None 省略键，保持旧 payload 字节稳定；语义变更走 `schema_version`；禁止直接改既有 `as_dict` 已有字段的输出。
 - **数据单位口径（对账锁定，改动 = 口径事故）**：股票 daily `amount` 千元；期货 `fut_daily` amount 万元→元 ×10000、vol 手→张；可转债 vol 手→张 ×10；指数 amount 千元↔元按源对齐。
+- **研究运行活性防线（#450/#471，三层不可缺一）**：①连接级 —— postgres 引擎统一经 `finboard_persistence.create_async_engine` 创建，工厂默认注入 TCP keepalive（调用方同名键可覆盖，勿再裸建引擎）；②操作级 —— 研究运行 store 每操作 `SET statement_timeout=120s` + 客户端 `asyncio.timeout`（×1.25）兜底，超时抛 `ResearchRunStoreOperationTimeoutError`（走 interrupted 重试语义），`iter_artifacts` 流只设服务端界；③执行段 —— worker 心跳线程侧 stall watchdog（`worker_stall_timeout_seconds` 默认 900s，无 progress 回调即取消执行任务 → `retry_waiting` 具名收敛）；BLAS 原生调用卡死面由 `cli.py` 顶层 `OPENBLAS_NUM_THREADS=1` setdefault 消除（并行度由 chunk/进程池提供）。
 - **迁移 revision id 全局唯一不复用**（撞号先例：c1d2e3f4a5b6 已被 #215 占用）。
 
 ### 研究治理边界

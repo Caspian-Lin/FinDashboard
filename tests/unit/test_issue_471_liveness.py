@@ -1,20 +1,30 @@
 """issue #471 研究运行决策段挂死:三层活性防线的单元可测部分。
 
-覆盖(不依赖 PostgreSQL 的纯逻辑):
+覆盖(不依赖 PostgreSQL 的纯逻辑;全链路 worker 侧见
+``tests/integration/test_issue_471_stall_watchdog.py``):
 
 * P1.1 引擎工厂:postgres URL 默认注入 #450 keepalive 全套、调用方同名键
   覆盖、非 postgres URL 不注入、``finboard_app.config`` 别名委托;
 * P1.2 ``SessionPerOperationResearchRunStore`` 操作级双层界:挂死操作抛
   ``ResearchRunStoreOperationTimeoutError``(继承 ``ResearchRunInterruptedError``
   → interrupted 重试语义)、statement_timeout 的 postgres 方言门控
-  (sqlite 跳过)、``iter_artifacts`` 流只设服务端界不设客户端界。
+  (sqlite 跳过)、``iter_artifacts`` 流只设服务端界不设客户端界;
+* P1.3 ``_StallWatchdog`` 纯线程逻辑:静默超阈值击杀并取消任务、progress
+  持续重置不误杀、stop 停表后不再击杀、0 阈值关闭;
+* OpenBLAS 单线程界:``finboard_app.cli`` 导入级 ``setdefault`` 生效且
+  不剥夺用户显式覆盖(子进程验证,避免测试进程已载 numpy 的顺序污染)。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import subprocess
+import sys
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -27,6 +37,7 @@ from finboard_backtest.background_jobs.executors.research_run import (
     SessionPerOperationResearchRunStore,
     _postgres_statement_timeout_ms,
 )
+from finboard_backtest.background_jobs.worker import _StallWatchdog
 from finboard_backtest.research_run import ResearchRunInterruptedError
 from finboard_persistence.engine import create_async_engine, postgres_connect_args
 
@@ -250,3 +261,120 @@ class TestStoreOperationTimeout:
         """默认操作界 120s(健康路径毫秒到秒级,两个数量级余量)。"""
 
         assert DEFAULT_RESEARCH_STORE_OPERATION_TIMEOUT_SECONDS == 120.0
+
+
+# ---------------------------------------------------------------------------
+# P1.3 _StallWatchdog 纯线程逻辑
+# ---------------------------------------------------------------------------
+
+
+async def _hang_forever(started: asyncio.Future[None]) -> None:
+    started.set_result(None)
+    await asyncio.sleep(999)
+
+
+async def _ticker(watchdog: _StallWatchdog, *, seconds: float, interval: float) -> None:
+    """模拟持续上报 progress 的健康执行体。"""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(interval)
+        watchdog.note_progress()
+
+
+class TestStallWatchdog:
+    async def test_fires_and_cancels_task_after_silence(self) -> None:
+        """静默超过阈值 → 击杀并经 call_soon_threadsafe 取消执行任务。"""
+
+        loop = asyncio.get_running_loop()
+        started: asyncio.Future[None] = loop.create_future()
+        task: asyncio.Task[None] = asyncio.create_task(_hang_forever(started))
+        await started
+        watchdog = _StallWatchdog(job_id="BJ-471-unit", timeout_seconds=0.3)
+        watchdog.start(loop, task)
+        try:
+            _done, pending = await asyncio.wait({task}, timeout=5.0)
+            assert not pending, "看门狗未在有界时间内取消挂死任务"
+            assert task.cancelled()
+            assert watchdog.fired
+            assert watchdog.silence_seconds is not None
+            assert watchdog.silence_seconds >= 0.3
+        finally:
+            watchdog.stop()
+
+    async def test_progress_resets_silence_no_false_kill(self) -> None:
+        """对照:progress 持续触达(阈值同样紧张)不被误杀。"""
+
+        loop = asyncio.get_running_loop()
+        watchdog = _StallWatchdog(job_id="BJ-471-unit2", timeout_seconds=0.3)
+        task: asyncio.Task[None] = asyncio.create_task(
+            _ticker(watchdog, seconds=1.2, interval=0.1)
+        )
+        watchdog.start(loop, task)
+        try:
+            await asyncio.sleep(1.5)  # 远超阈值;progress 每 0.1s 重置计时
+            assert not watchdog.fired
+            assert not task.cancelled()
+        finally:
+            watchdog.stop()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_stop_terminates_watchdog_before_firing(self) -> None:
+        """job 终态停表:stop 后即使超过阈值也不再击杀(生命周期干净)。"""
+
+        loop = asyncio.get_running_loop()
+        watchdog = _StallWatchdog(job_id="BJ-471-unit3", timeout_seconds=0.2)
+        task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(999))
+        watchdog.start(loop, task)
+        watchdog.stop()
+        await asyncio.sleep(0.5)  # 超过阈值:线程已停,不得击杀
+        assert not watchdog.fired
+        assert not task.cancelled()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    def test_disabled_when_timeout_zero(self) -> None:
+        """0 = 关闭(与 zombie_no_progress_seconds=0 同口径)。"""
+
+        assert not _StallWatchdog(job_id="BJ-471-unit4", timeout_seconds=0).enabled
+
+
+# ---------------------------------------------------------------------------
+# OpenBLAS 单线程界(cli 导入级 setdefault)
+# ---------------------------------------------------------------------------
+
+_CLI_IMPORT_PROBE = (
+    "import os, sys\n"
+    "import finboard_app.cli\n"
+    "sys.stdout.write(os.environ.get('OPENBLAS_NUM_THREADS', '<unset>'))\n"
+)
+
+
+def _run_probe(env: dict[str, str]) -> str:
+    result = subprocess.run(
+        [sys.executable, "-c", _CLI_IMPORT_PROBE],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=True,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    return result.stdout
+
+
+def test_openblas_thread_cap_applies_on_cli_import() -> None:
+    """子进程干净环境导入 cli → OPENBLAS_NUM_THREADS == '1'(#471)。"""
+
+    env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
+    assert _run_probe(env) == "1"
+
+
+def test_openblas_explicit_override_is_preserved() -> None:
+    """用户显式设置(如 8)不被 setdefault 剥离。"""
+
+    env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
+    env["OPENBLAS_NUM_THREADS"] = "8"
+    assert _run_probe(env) == "8"

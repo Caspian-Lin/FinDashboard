@@ -32,6 +32,18 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
+# OpenBLAS 单线程界(issue #471 次级活性隐患防线):BLAS 原生调用在
+# to_thread / 进程池并发下可被永久卡死(#471 冻结转储:两个 _load_one 任务
+# 的 await 停在 ``asyncio.to_thread(_estimate_covariance, ...)``,工作线程
+# 卡死在 numpy eigh → ``covariance.py _ensure_positive_definite`` 原生区不
+# 返回;OpenBLAS 多线程并发调用死锁是同类已知问题)。研究运行的并行度来自
+# chunk 级并发与进程池,BLAS 自身多线程属超额订阅 —— 单线程化即消除该类
+# 卡死面,计算并行度不受影响。必须在 numpy 首次 import(**库初始化时读该
+# 环境变量,本模块任何 finboard_* 导入都会传递拉起 numpy**)之前生效;
+# ``setdefault`` 不剥夺用户显式覆盖。spawn 池子进程(factor_lab
+# ProcessPoolExecutor,未显式传 env)经环境继承自动继承本值。
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import typer
 
 from finboard_app.bootstrap import build_kernel_components
@@ -1338,6 +1350,10 @@ async def _run_worker(settings: Settings) -> None:
         shutdown_grace_seconds=settings.worker_shutdown_grace_seconds,
         # issue #306:僵尸无进展检测阈值(0 = 关闭;默认 3600s 见 settings 注释)。
         zombie_no_progress_seconds=settings.worker_zombie_no_progress_seconds,
+        # issue #471:执行段停滞看门狗阈值(0 = 关闭;默认 900s 见 settings
+        # 注释)—— 心跳线程侧独立看门狗,无 progress 回调且未返回即取消
+        # 执行任务并具名转 retry_waiting。
+        stall_timeout_seconds=settings.worker_stall_timeout_seconds,
         # per-kind 全局并发上限见模块级 _KIND_CONCURRENCY(#144/#375)。
         kind_concurrency=dict(_KIND_CONCURRENCY),
     )
