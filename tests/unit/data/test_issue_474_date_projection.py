@@ -7,12 +7,19 @@ import math
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pyarrow.parquet as pq
 import pytest
 
 from finboard_backtest.research_run.contracts import FrozenArtifactRef
-from finboard_backtest.research_run.frozen_loader import FrozenInputLoader
+from finboard_backtest.research_run.frozen_loader import (
+    FactorSeriesProvider,
+    FactorSeriesRecordLike,
+    FeatureSnapshotProvider,
+    FrozenInputLoader,
+    ReleaseProviderFactory,
+)
 from finboard_data.factor_series_store import (
     FactorSeriesArtifactError,
     LazySeriesValues,
@@ -94,7 +101,7 @@ def test_projection_uses_arrow_filter_without_full_batch_scan(
     calls: list[object] = []
     real_read_table = pq.read_table
 
-    def read_table(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+    def read_table(*args: object, **kwargs: object):
         calls.append(kwargs.get("filters"))
         return real_read_table(*args, **kwargs)
 
@@ -112,7 +119,7 @@ def test_projection_is_one_time_and_concurrent_gets_do_not_reload(
     real_read_table = pq.read_table
     calls = 0
 
-    def read_table(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+    def read_table(*args: object, **kwargs: object):
         nonlocal calls
         calls += 1
         return real_read_table(*args, **kwargs)
@@ -140,7 +147,7 @@ def test_concurrent_projection_installs_once(tmp_path: Path, monkeypatch: pytest
     real_read_table = pq.read_table
     calls = 0
 
-    def read_table(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+    def read_table(*args: object, **kwargs: object):
         nonlocal calls
         calls += 1
         return real_read_table(*args, **kwargs)
@@ -170,7 +177,7 @@ def test_projection_failure_can_retry_without_partial_state(
     real_read_table = pq.read_table
     calls = 0
 
-    def flaky(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+    def flaky(*args: object, **kwargs: object):
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -193,13 +200,13 @@ def test_loader_rejects_checksum_mismatch_and_metadata_missing_date(
     ref = FrozenArtifactRef("FS-projection", "v1", checksum)
 
     async def run(record: object) -> None:
-        async def provider(_series_id: str) -> object:
-            return record
+        async def provider(_series_id: str) -> FactorSeriesRecordLike:
+            return cast(FactorSeriesRecordLike, record)
 
         loader = FrozenInputLoader(
-            release_provider_factory=lambda _release_id: None,  # type: ignore[return-value]
-            snapshot_provider=lambda _snapshot_id: None,  # type: ignore[return-value]
-            series_provider=provider,  # type: ignore[arg-type]
+            release_provider_factory=cast(ReleaseProviderFactory, lambda _release_id: None),
+            snapshot_provider=cast(FeatureSnapshotProvider, lambda _snapshot_id: None),
+            series_provider=cast(FactorSeriesProvider, provider),
         )
         await loader.project_factor_series_dates((ref,), (date(2024, 1, 1),))
 
@@ -226,15 +233,15 @@ def test_loader_caches_record_when_provider_returns_new_instances() -> None:
     async def scenario() -> None:
         nonlocal calls
 
-        async def provider(_series_id: str) -> object:
+        async def provider(_series_id: str) -> FactorSeriesRecordLike:
             nonlocal calls
             calls += 1
-            return SimpleNamespace()
+            return cast(FactorSeriesRecordLike, SimpleNamespace())
 
         loader = FrozenInputLoader(
-            release_provider_factory=lambda _release_id: None,  # type: ignore[return-value]
-            snapshot_provider=lambda _snapshot_id: None,  # type: ignore[return-value]
-            series_provider=provider,  # type: ignore[arg-type]
+            release_provider_factory=cast(ReleaseProviderFactory, lambda _release_id: None),
+            snapshot_provider=cast(FeatureSnapshotProvider, lambda _snapshot_id: None),
+            series_provider=cast(FactorSeriesProvider, provider),
         )
         assert await loader._get_series_record("FS-new-instance") is not None
         assert await loader._get_series_record("FS-new-instance") is not None
