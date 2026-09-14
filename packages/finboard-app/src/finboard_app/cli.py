@@ -248,11 +248,13 @@ def _stop_dev_process(
 async def _check_dev_database(settings: Settings) -> None:
     """在启动 Vite 前验证数据库,避免前端对未就绪 API 持续代理报错。"""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import create_async_engine
 
+    from finboard_persistence import create_async_engine
+
+    # #471:经 persistence 工厂创建 —— postgres URL 默认注入 #450 keepalive,
+    # connect_timeout 保持 3s 快速失败(同名键覆盖默认 10s),预检不等满窗口。
     engine = create_async_engine(
         settings.db_url,
-        pool_pre_ping=True,
         connect_args={"connect_timeout": 3},
     )
     try:

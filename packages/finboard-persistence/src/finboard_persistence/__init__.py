@@ -19,7 +19,7 @@ from finboard_persistence.dataset_release_repo import (
     resolve_release_symbols,
     symbol_set_diff,
 )
-from finboard_persistence.engine import create_async_engine
+from finboard_persistence.engine import create_async_engine, postgres_connect_args
 from finboard_persistence.etf_metadata_repo import (
     EtfMetadataRepository,
     EtfMetadataSummary,
@@ -292,6 +292,7 @@ __all__ = [
     "create_async_engine",
     "generate_run_id",
     "persist_tushare_lifecycle_events",
+    "postgres_connect_args",
     "release_symbol_check",
     "resolve_release_symbols",
     "series_coverage_missing",
