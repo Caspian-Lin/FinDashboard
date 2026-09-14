@@ -32,9 +32,9 @@ import hashlib
 import os
 import threading
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -282,6 +282,107 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
         self._value_values: Any = None
         self._value_valid: Any = None
         self._materialised: dict[str, dict[str, float | None]] | None = None
+        #: run-scoped date projection; None means the historical full Mapping
+        #: behaviour.  A projection is immutable once installed.
+        self._projected_dates: frozenset[date] | None = None
+
+    def project_dates(self, dates: Collection[date]) -> None:
+        """Freeze this artifact to the requested dates for one research run.
+
+        The filtered Parquet read uses Arrow's row-group statistics and keeps
+        the existing compact numpy representation.  It never builds Python
+        objects for rows outside ``dates``.  Calling this on an already
+        projected object with the same set is idempotent; a different set is
+        rejected so a shared record cannot silently change semantics.
+        """
+        requested = frozenset(dates)
+        with self._load_lock:
+            if self._projected_dates is not None:
+                if requested != self._projected_dates:
+                    raise FactorSeriesArtifactError(
+                        "因子序列工件已冻结到另一组决策日期,拒绝改变投影"
+                    )
+                return
+            if self._loaded:
+                # A caller has already selected a date through the legacy
+                # Mapping API.  Do not replace its full view underneath it.
+                raise FactorSeriesArtifactError(
+                    "因子序列工件已开始全量加载,无法再安装日期投影"
+                )
+            import pyarrow.parquet as pq
+
+            path = _open_verified(self._root, self._relpath, self._expected_checksum)
+            if requested:
+                table = pq.read_table(
+                    path,
+                    schema=_series_schema(),
+                    columns=["date", "symbol", "value"],
+                    filters=[("date", "in", sorted(requested))],
+                )
+                import numpy as np
+                import pyarrow as pa
+                import pyarrow.compute as pc
+
+                actual = pc.unique(table.column("date").combine_chunks())
+                actual_days = actual.cast(pa.int32()).to_numpy(
+                    zero_copy_only=False
+                )
+                requested_days = np.fromiter(
+                    (
+                        day.toordinal() - date(1970, 1, 1).toordinal()
+                        for day in requested
+                    ),
+                    dtype=np.int32,
+                    count=len(requested),
+                )
+                missing = requested_days[~np.isin(requested_days, actual_days)]
+                if missing.size:
+                    missing_dates = [
+                        date(1970, 1, 1)
+                        + timedelta(days=int(day))
+                        for day in missing
+                    ]
+                    raise FactorSeriesArtifactError(
+                        "因子序列工件缺少投影决策日期: "
+                        + ",".join(item.isoformat() for item in missing_dates[:20])
+                    )
+                self._install_table(table)
+            else:
+                import numpy as np
+
+                self._dates = np.empty(0, dtype=np.int32)
+                self._symbol_codes = np.empty(0, dtype=np.int32)
+                self._value_values = np.empty(0, dtype=np.float64)
+                self._value_valid = np.empty(0, dtype=bool)
+                self._symbol_dict = []
+            self._projected_dates = requested
+            self._loaded = True
+
+    def _install_table(self, table: pa.Table) -> None:
+        """Install a selected Arrow table without materialising Python rows."""
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        dates = np.asarray(
+            table.column("date").cast(pa.int32()).to_numpy(zero_copy_only=False),
+            dtype=np.int32,
+        )
+        encoded = pc.dictionary_encode(table.column("symbol").combine_chunks())
+        symbol_dict = encoded.dictionary.to_pylist()
+        value_col = table.column("value")
+        self._dates = dates
+        self._symbol_dict = list(symbol_dict)
+        self._symbol_codes = np.asarray(
+            encoded.indices.to_numpy(zero_copy_only=False), dtype=np.int32
+        )
+        self._value_values = np.asarray(
+            value_col.fill_null(float("nan")).to_numpy(zero_copy_only=False),
+            dtype=np.float64,
+        )
+        self._value_valid = np.asarray(
+            pc.is_valid(value_col).to_numpy(zero_copy_only=False), dtype=bool
+        )
 
     def _ensure_loaded(self) -> None:
         if self._loaded:

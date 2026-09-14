@@ -664,6 +664,15 @@ class FrozenInputLoader:
     _stub_lot_info: dict[str, AssetLotInfo] | None = field(
         default=None, init=False, repr=False
     )
+    # Run-scoped series record cache.  The projection pass and concurrent
+    # decision loads must address the same immutable record even when an
+    # injected provider does not memoize its own results.
+    _series_records: dict[str, FactorSeriesRecordLike] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _series_record_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
 
     @property
     def close_histories(self) -> Mapping[str, SymbolCloseHistory | None]:
@@ -674,6 +683,24 @@ class FrozenInputLoader:
     def price_feature_precompute(self) -> PriceFeaturePrecompute | None:
         """已构建的价格特征预计算(#450 追续;未启用时为 None)。"""
         return self._price_precompute
+
+    async def _get_series_record(
+        self, series_id: str
+    ) -> FactorSeriesRecordLike | None:
+        """Load each immutable series record at most once per loader run."""
+        cached = self._series_records.get(series_id)
+        if cached is not None:
+            return cached
+        if self.series_provider is None:
+            return None
+        async with self._series_record_lock:
+            cached = self._series_records.get(series_id)
+            if cached is not None:
+                return cached
+            record = await self.series_provider(series_id)
+            if record is not None:
+                self._series_records[series_id] = record
+            return record
 
     def release_daily_precompute_periods(self, decision_ats: Sequence[datetime]) -> int:
         """释放已消费决策期的 daily 预计算槽位(#438 v2,分块边界调用)。
@@ -689,6 +716,44 @@ class FrozenInputLoader:
                 if precompute.release_period(decision_at):
                     released += 1
         return released
+
+    async def project_factor_series_dates(
+        self,
+        series: Sequence[FrozenArtifactRef],
+        decision_dates: Sequence[date],
+    ) -> None:
+        """Install one run-scoped Parquet date projection, if supported.
+
+        Legacy JSON-backed ``Mapping`` values are intentionally untouched.
+        Artifact-backed values expose ``project_dates`` and therefore read
+        only the frozen schedule dates before any concurrent decision loads.
+        The provider is called once per series here; a provider failure keeps
+        the record unprojected so a caller may retry with identical inputs.
+        """
+        if not series or self.series_provider is None:
+            return
+        dates = tuple(sorted(set(decision_dates)))
+        if not dates:
+            return
+        for series_ref in series:
+            record = await self._get_series_record(series_ref.artifact_id)
+            if record is None:
+                raise ValueError(f"因子序列缺失: {series_ref.artifact_id}")
+            project = getattr(record.values, "project_dates", None)
+            if project is not None:
+                if str(getattr(record, "content_checksum", "")) != series_ref.checksum:
+                    raise ValueError(
+                        "因子序列校验和与冻结引用不一致,拒绝运行: "
+                        f"{series_ref.artifact_id}"
+                    )
+                missing = sorted(set(dates).difference(record.dates))
+                if missing:
+                    raise ValueError(
+                        "因子序列缺少冻结决策日期,拒绝运行: "
+                        f"{series_ref.artifact_id} "
+                        + ",".join(item.isoformat() for item in missing[:20])
+                    )
+                await asyncio.to_thread(project, dates)
 
     async def ensure_price_feature_precompute(
         self,
@@ -1291,7 +1356,7 @@ class FrozenInputLoader:
         covered: set[str] = set()
         for series_ref in series:
             assert self.series_provider is not None  # 调用点已判空
-            record = await self.series_provider(series_ref.artifact_id)
+            record = await self._get_series_record(series_ref.artifact_id)
             if record is None:
                 raise ValueError(f"因子序列缺失: {series_ref.artifact_id}")
             factor_name = series_factor_name(

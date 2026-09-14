@@ -2253,6 +2253,13 @@ async def iter_decision_load_contexts(
         snapshot_provider=snapshot_provider,
         trading_days_loader=trading_days_loader,
     )
+    # issue #474: freeze the run schedule before concurrent decision loads.
+    # Artifact-backed series then use Arrow row-group date filtering and keep
+    # only requested dates; legacy Mapping rows remain byte-for-byte unchanged.
+    await loader.project_factor_series_dates(
+        manifest.factor_series,
+        [decision_at.date() for decision_at, _ in decision_days],
+    )
     # #470 后半场:续跑前缀期(种子已覆盖,本流从 skip_prefix 期起产出)。
     skip = min(max(int(skip_prefix), 0), len(decision_days))
 
