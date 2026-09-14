@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -145,7 +146,7 @@ async def test_iter_artifacts_order_matches_list(manifest_factory, decision_fact
     store, run_id = await _completed_run(manifest_factory, decision_factory)
     listed = await store.list_artifacts(run_id)
 
-    async def _collect(rows: AsyncIterator) -> list[int]:
+    async def _collect(rows: AsyncIterator[Any]) -> list[int]:
         return [item.sequence async for item in rows]
 
     assert await _collect(store.iter_artifacts(run_id)) == [

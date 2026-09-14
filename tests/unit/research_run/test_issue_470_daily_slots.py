@@ -21,10 +21,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from finboard_backtest.research_run.frozen_loader import FrozenInputLoader
+from finboard_backtest.research_run.contracts import ResearchRunManifest
+from finboard_backtest.research_run.frozen_loader import (
+    DailyMetricsPrecompute,
+    FrozenInputLoader,
+)
 
 from .test_issue_438_daily_precompute import (
     _CODES,
@@ -43,7 +48,7 @@ _DECISIONS = (
 )
 
 
-def _daily_records() -> dict[str, list]:
+def _daily_records() -> dict[str, list[Any]]:
     return {
         code: [
             _daily(
@@ -58,7 +63,9 @@ def _daily_records() -> dict[str, list]:
     }
 
 
-async def _prepared_loader(tmp_path: Path) -> tuple[FrozenInputLoader, object]:
+async def _prepared_loader(
+    tmp_path: Path,
+) -> tuple[FrozenInputLoader, DailyMetricsPrecompute]:
     providers = await _publish_bars_and_daily(tmp_path, _daily_records())
 
     def factory(release_id: str):
@@ -85,7 +92,7 @@ async def test_release_period_frees_slot_and_refetch_falls_back(
     )
 
     loader, precompute = await _prepared_loader(tmp_path)
-    manifest = _precompute_manifest()
+    manifest: ResearchRunManifest = _precompute_manifest()
     candidates, _ = _build_candidates_and_lots(
         list(loader.release_provider_factory(_RELEASE_ID).release.instruments)
     )
@@ -133,7 +140,7 @@ async def test_unreleased_period_consumption_unaffected(tmp_path: Path) -> None:
     )
 
     loader, precompute = await _prepared_loader(tmp_path)
-    manifest = _precompute_manifest()
+    manifest: ResearchRunManifest = _precompute_manifest()
     candidates, _ = _build_candidates_and_lots(
         list(loader.release_provider_factory(_RELEASE_ID).release.instruments)
     )
@@ -144,7 +151,8 @@ async def test_unreleased_period_consumption_unaffected(tmp_path: Path) -> None:
     second, _ = await loader._load_research_features(
         manifest, candidates, _DECISIONS[1]
     )
-    assert first and second
+    assert first
+    assert second
     loader.release_daily_precompute_periods([_DECISIONS[0]])
     # 第二期槽位仍在:再次消费走槽位路径,值不变。
     second_again, _ = await loader._load_research_features(
