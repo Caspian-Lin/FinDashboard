@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -268,6 +269,10 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
         self._relpath = relpath
         self._expected_checksum = expected_checksum
         self._loaded = False
+        # ``values`` is consumed from ``asyncio.to_thread`` by concurrent
+        # decision loaders.  Guard the check-then-load transition so a shared
+        # record verifies/decompresses its parquet artifact exactly once.
+        self._load_lock = threading.RLock()
         #: date32 → int32(自 1970-01-01 的天数;文件即升序)
         self._dates: Any = None
         #: symbol 字典索引 int32(行序)与字典表
@@ -281,66 +286,69 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
-        import numpy as np
-        import pyarrow as pa
-        import pyarrow.compute as pc
-        import pyarrow.parquet as pq
+        with self._load_lock:
+            if self._loaded:
+                return
+            import numpy as np
+            import pyarrow as pa
+            import pyarrow.compute as pc
+            import pyarrow.parquet as pq
 
-        path = _open_verified(self._root, self._relpath, self._expected_checksum)
-        # 逐批流式装载(<3GB 收官):整表 read_table 的解压瞬态(单表 ~1GB,
-        # 多条全历史序列首访部分重叠)是 run 期 RSS 尖峰主源(2026-09-14
-        # 实测:决策段平台 2.44GB + 首访装载尖峰 2.17GB = 峰值 4.61GB)。
-        # 改按行批流式解压、预分配紧凑数组直填,瞬态降到 ~MB 级;产出数组
-        # 与整表路径逐值一致(日期 int32 升序、symbol 全局首现字典、
-        # null→NaN+掩码),等值由 #470 紧凑化测试锁定。
-        parquet_file = pq.ParquetFile(path)
-        total_rows = parquet_file.metadata.num_rows
-        dates = np.empty(total_rows, dtype=np.int32)
-        symbol_codes = np.empty(total_rows, dtype=np.int32)
-        value_values = np.empty(total_rows, dtype=np.float64)
-        value_valid = np.empty(total_rows, dtype=bool)
-        # symbol 列字典编码(read_series_symbols 同构):字典表 list[str]
-        # + 行级 int32 索引,字符串本体只在字典表存在一份;批内字典重映射
-        # 到全局首现序,与整表 dictionary_encode 的字典序一致。
-        symbol_dict: dict[str, int] = {}
-        offset = 0
-        for batch in parquet_file.iter_batches(batch_size=65536):
-            rows = batch.num_rows
-            dates[offset : offset + rows] = np.asarray(
-                batch.column("date").cast(pa.int32()).to_numpy(zero_copy_only=False),
-                dtype=np.int32,
-            )
-            encoded = pc.dictionary_encode(batch.column("symbol"))
-            batch_dict = encoded.dictionary.to_pylist()
-            remap = np.asarray(
-                [symbol_dict.setdefault(name, len(symbol_dict)) for name in batch_dict],
-                dtype=np.int32,
-            )
-            symbol_codes[offset : offset + rows] = remap[
-                np.asarray(
-                    encoded.indices.to_numpy(zero_copy_only=False), dtype=np.int32
+            path = _open_verified(self._root, self._relpath, self._expected_checksum)
+            # 逐批流式装载(<3GB 收官):整表 read_table 的解压瞬态(单表 ~1GB,
+            # 多条全历史序列首访部分重叠)是 run 期 RSS 尖峰主源(2026-09-14
+            # 实测:决策段平台 2.44GB + 首访装载尖峰 2.17GB = 峰值 4.61GB)。
+            # 改按行批流式解压、预分配紧凑数组直填,瞬态降到 ~MB 级;产出数组
+            # 与整表路径逐值一致(日期 int32 升序、symbol 全局首现字典、
+            # null→NaN+掩码),等值由 #470 紧凑化测试锁定。
+            parquet_file = pq.ParquetFile(path)
+            total_rows = parquet_file.metadata.num_rows
+            dates = np.empty(total_rows, dtype=np.int32)
+            symbol_codes = np.empty(total_rows, dtype=np.int32)
+            value_values = np.empty(total_rows, dtype=np.float64)
+            value_valid = np.empty(total_rows, dtype=bool)
+            # symbol 列字典编码(read_series_symbols 同构):字典表 list[str]
+            # + 行级 int32 索引,字符串本体只在字典表存在一份;批内字典重映射
+            # 到全局首现序,与整表 dictionary_encode 的字典序一致。
+            symbol_dict: dict[str, int] = {}
+            offset = 0
+            for batch in parquet_file.iter_batches(batch_size=65536):
+                rows = batch.num_rows
+                dates[offset : offset + rows] = np.asarray(
+                    batch.column("date").cast(pa.int32()).to_numpy(zero_copy_only=False),
+                    dtype=np.int32,
                 )
-            ]
-            value_col = batch.column("value")
-            # value 列:null(显式缺测)→ NaN 占位 + 布尔掩码,None 语义不丢。
-            value_values[offset : offset + rows] = np.asarray(
-                value_col.fill_null(float("nan")).to_numpy(zero_copy_only=False),
-                dtype=np.float64,
-            )
-            value_valid[offset : offset + rows] = np.asarray(
-                pc.is_valid(value_col).to_numpy(zero_copy_only=False), dtype=bool
-            )
-            offset += rows
-        if offset != total_rows:
-            raise FactorSeriesArtifactError(
-                f"series 工件行数与 parquet 元数据不符: 实读 {offset} / {total_rows}"
-            )
-        self._dates = dates
-        self._symbol_dict = list(symbol_dict)
-        self._symbol_codes = symbol_codes
-        self._value_values = value_values
-        self._value_valid = value_valid
-        self._loaded = True
+                encoded = pc.dictionary_encode(batch.column("symbol"))
+                batch_dict = encoded.dictionary.to_pylist()
+                remap = np.asarray(
+                    [symbol_dict.setdefault(name, len(symbol_dict)) for name in batch_dict],
+                    dtype=np.int32,
+                )
+                symbol_codes[offset : offset + rows] = remap[
+                    np.asarray(
+                        encoded.indices.to_numpy(zero_copy_only=False), dtype=np.int32
+                    )
+                ]
+                value_col = batch.column("value")
+                # value 列:null(显式缺测)→ NaN 占位 + 布尔掩码,None 语义不丢。
+                value_values[offset : offset + rows] = np.asarray(
+                    value_col.fill_null(float("nan")).to_numpy(zero_copy_only=False),
+                    dtype=np.float64,
+                )
+                value_valid[offset : offset + rows] = np.asarray(
+                    pc.is_valid(value_col).to_numpy(zero_copy_only=False), dtype=bool
+                )
+                offset += rows
+            if offset != total_rows:
+                raise FactorSeriesArtifactError(
+                    f"series 工件行数与 parquet 元数据不符: 实读 {offset} / {total_rows}"
+                )
+            self._dates = dates
+            self._symbol_dict = list(symbol_dict)
+            self._symbol_codes = symbol_codes
+            self._value_values = value_values
+            self._value_valid = value_valid
+            self._loaded = True
 
     def _day_bounds(self, day: date) -> tuple[int, int]:
         """单日行区间 [lo, hi)(date 列升序;numpy 二分,零对象)。"""
@@ -406,17 +414,21 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
 
     def _materialise(self) -> dict[str, dict[str, float | None]]:
         if self._materialised is None:
-            self._ensure_loaded()
-            frame: dict[str, dict[str, float | None]] = {}
-            symbols = self._symbol_dict
-            codes = self._symbol_codes.tolist()
-            values = self._value_values.tolist()
-            valid = self._value_valid.tolist()
-            epoch_day = date(1970, 1, 1).toordinal()
-            for i, day_int in enumerate(self._dates.tolist()):
-                row = frame.setdefault(date.fromordinal(epoch_day + day_int).isoformat(), {})
-                row[symbols[codes[i]]] = values[i] if valid[i] else None
-            self._materialised = frame
+            with self._load_lock:
+                if self._materialised is None:
+                    self._ensure_loaded()
+                    frame: dict[str, dict[str, float | None]] = {}
+                    symbols = self._symbol_dict
+                    codes = self._symbol_codes.tolist()
+                    values = self._value_values.tolist()
+                    valid = self._value_valid.tolist()
+                    epoch_day = date(1970, 1, 1).toordinal()
+                    for i, day_int in enumerate(self._dates.tolist()):
+                        row = frame.setdefault(
+                            date.fromordinal(epoch_day + day_int).isoformat(), {}
+                        )
+                        row[symbols[codes[i]]] = values[i] if valid[i] else None
+                    self._materialised = frame
         return self._materialised
 
     def __repr__(self) -> str:  # 不触发读盘(防 str()/repr() 意外物化)

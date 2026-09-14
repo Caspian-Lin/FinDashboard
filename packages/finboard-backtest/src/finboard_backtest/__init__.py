@@ -3,6 +3,15 @@
 策略代码在回测和实盘中完全一致,无需感知运行环境。
 """
 
+from __future__ import annotations
+
+import os
+
+# 研究模块在包初始化阶段即导入 NumPy;直接导入
+# ``finboard_backtest.research_run`` 不会经过 ``finboard_app.cli``,所以
+# BLAS 界必须在此处也覆盖(#471)。显式环境值仍由调用方保留。
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 from finboard_backtest.asset_rules import (
     ASSET_RULES_VERSION,
     AssetRule,

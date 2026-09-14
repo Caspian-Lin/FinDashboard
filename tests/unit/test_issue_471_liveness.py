@@ -19,17 +19,23 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
+import pyarrow.parquet as pq
 import pytest
 
+import finboard_backtest.portfolio.covariance as covariance_module
 import finboard_persistence.engine as engine_module
 from finboard_backtest.background_jobs.executors.research_run import (
     DEFAULT_RESEARCH_STORE_OPERATION_TIMEOUT_SECONDS,
@@ -39,6 +45,7 @@ from finboard_backtest.background_jobs.executors.research_run import (
 )
 from finboard_backtest.background_jobs.worker import _StallWatchdog
 from finboard_backtest.research_run import ResearchRunInterruptedError
+from finboard_data.factor_series_store import LazySeriesValues, write_series_artifact
 from finboard_persistence.engine import create_async_engine, postgres_connect_args
 
 # ---------------------------------------------------------------------------
@@ -378,6 +385,111 @@ def test_openblas_explicit_override_is_preserved() -> None:
     env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
     env["OPENBLAS_NUM_THREADS"] = "8"
     assert _run_probe(env) == "8"
+
+
+_BLAS_RUNTIME_PROBE = (
+    "import json, importlib, sys\n"
+    "importlib.import_module(sys.argv[1])\n"
+    "from threadpoolctl import threadpool_info\n"
+    "blas = [item for item in threadpool_info() if item.get('internal_api') == 'openblas']\n"
+    "sys.stdout.write(json.dumps(blas))\n"
+)
+
+
+def test_openblas_runtime_thread_count_is_capped() -> None:
+    """验证已加载 OpenBLAS 的实际运行时线程数,而非只检查环境变量。"""
+
+    env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
+    result = subprocess.run(
+        [sys.executable, "-c", _BLAS_RUNTIME_PROBE, "finboard_app.cli"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=True,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    runtime = json.loads(result.stdout)
+    assert runtime, "子进程未加载 OpenBLAS,运行时线程验证无效"
+    assert {item["num_threads"] for item in runtime} == {1}
+
+
+def test_direct_backtest_import_caps_openblas_before_numpy() -> None:
+    """直接进入研究包时也必须在包内 NumPy 导入前设置线程界。"""
+
+    env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _BLAS_RUNTIME_PROBE,
+            "finboard_backtest.research_run.signal_engine",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=True,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    runtime = json.loads(result.stdout)
+    assert runtime, "直接研究包导入未加载 OpenBLAS"
+    assert {item["num_threads"] for item in runtime} == {1}
+
+
+def test_concurrent_eigh_is_serialized(monkeypatch) -> None:
+    """协方差决策并发只允许一个原生 eigh,避免 Windows LAPACK 并发崩溃。"""
+
+    original = np.linalg.eigh
+    state_lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def tracked(matrix, *args, **kwargs):
+        nonlocal active, maximum
+        with state_lock:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            time.sleep(0.03)
+            return original(matrix, *args, **kwargs)
+        finally:
+            with state_lock:
+                active -= 1
+
+    monkeypatch.setattr(np.linalg, "eigh", tracked)
+    matrices = [np.eye(24, dtype=np.float64) for _ in range(4)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(covariance_module._ensure_positive_definite, matrices))
+    assert maximum == 1
+
+
+def test_lazy_series_values_concurrent_first_load_once(tmp_path: Path, monkeypatch) -> None:
+    """共享 record 的并发首访只验签/解压一次,结果仍逐值一致。"""
+
+    values = {
+        "2024-01-31": {"000001.SZ": 1.0, "000002.SZ": None},
+        "2024-02-29": {"000001.SZ": 2.0},
+    }
+    meta = write_series_artifact(tmp_path, "471-concurrent", values)
+    lazy = LazySeriesValues(tmp_path, meta.relpath, meta.checksum)
+    original = pq.ParquetFile
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def tracked_parquet_file(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        # 让无锁实现的多个首访有机会同时进入,使回归测试可稳定复现。
+        time.sleep(0.05)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pq, "ParquetFile", tracked_parquet_file)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _: lazy["2024-01-31"], range(4)))
+    assert calls == 1
+    assert results == [values["2024-01-31"]] * 4
 
 
 _ARROW_CLI_IMPORT_PROBE = (

@@ -15,6 +15,7 @@ Ledoit-Wolf 收缩目标为常数相关系数矩阵,强度由样本量驱动;当
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
 
 import numpy as np
 import numpy.typing as npt
@@ -36,6 +37,13 @@ PSD_MIN_EIGENVALUE / 2)`` —— 此前纯数值容差在大 N(N≈5000)时约 1
 修复过的矩阵(最小特征值 >= 1e-12)恒过校验,真坏矩阵(最小特征值 <= 0
 或 NaN / 不对称)照旧被拦。"""
 
+# ``_ensure_positive_definite`` is called by concurrent research decision
+# loaders.  Even with the process-level OpenBLAS cap, an operator may provide
+# an explicit BLAS thread count; serialising the native LAPACK eigensolver
+# removes the Windows-specific concurrent ``eigh`` crash surface while leaving
+# the surrounding vectorised work parallel.
+_EIGH_LOCK = Lock()
+
 
 class CovarianceError(RuntimeError):
     """协方差估计失败 —— 标的为空、窗口不足或矩阵非正定。"""
@@ -52,7 +60,7 @@ class CovarianceEstimate:
             1 = 纯目标矩阵。
         n_observations: 有效观测数(对齐后)。
         method: 估计方法标识("ledoit_wolf")。
-    """
+"""
 
     matrix: npt.NDArray[np.float64]
     tickers: list[str]
@@ -266,7 +274,8 @@ def _ensure_positive_definite(
     这里将所有 < min_eigenvalue 的特征值提升到 min_eigenvalue。
     """
     sym = (matrix + matrix.T) / 2.0
-    eigenvalues, eigenvectors = np.linalg.eigh(sym)
+    with _EIGH_LOCK:
+        eigenvalues, eigenvectors = np.linalg.eigh(sym)
 
     if eigenvalues.min() >= min_eigenvalue:
         return sym
