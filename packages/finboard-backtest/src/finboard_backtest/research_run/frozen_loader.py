@@ -459,19 +459,73 @@ class SymbolDailyMetricsHistory:
 
 
 @dataclass(frozen=True, slots=True)
+class _DailyMetricsPeriodSlot:
+    """单个决策期、全体候选标的的「最新可见 daily_metrics 行」槽位。
+
+    逐期槽位是 #438 预计算的存储形态 v2(2026-09-14 内存归因):此前每标的
+    一个 (n_periods, n_cols) 矩阵常驻整条 run(全市场 5215 x 556 期 ≈
+    0.45GB/发布,驻留是 run 级非期数级);行序转置为「期 → (行=标的, 列)」
+    后,单期槽位是独立 numpy 大数组(>512KB 走 VirtualAlloc,释放即归还
+    OS),分块消费完成后逐期 :meth:`DailyMetricsPrecompute.release_period`
+    真释放,决策段后期驻留衰减到 ~0。行语义与旧矩阵逐值一致。
+    """
+
+    #: (n_rows, n_cols) float64;无效格填 0,以 ``valid`` 掩码为准
+    values: np.ndarray
+    #: (n_rows, n_cols) bool;False → 重建行时该列为 None
+    valid: np.ndarray
+    #: (n_rows,) int64(int 列独立存储,避免 float str 化变义)
+    limit_status: np.ndarray
+    #: (n_rows,) bool
+    limit_status_valid: np.ndarray
+    #: (n_rows,) int32,选中行 trade_date 的 epoch 天数(无选中行占位 0)
+    trade_date_days: np.ndarray
+    #: 选中行 available_at 原值(构建期经 memo 去重共享;None = 该期无可见行)
+    available_at: list[object]
+    #: 选中行 source 原值(string 或 None,memo 去重)
+    source: list[object]
+
+    def row_payload(self, row: int) -> int:
+        return int(
+            self.values[row].nbytes
+            + self.valid[row].nbytes
+            + self.limit_status[row].nbytes
+            + self.limit_status_valid[row].nbytes
+            + self.trade_date_days[row].nbytes
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DailyMetricsPrecompute:
     """一个 daily_metrics 发布在全部冻结决策期上的预计算(#438)。
 
-    ``histories`` 覆盖 run 候选池全体:标的值 ``None`` = 预建时
-    ``ReleaseCapabilityError``(标的不在该研究发布)→ 消费期按 #252 missing
-    语义报告,与逐期路径一致。
+    存储形态 v2(2026-09-14):逐期槽位(:class:`_DailyMetricsPeriodSlot`,
+    下标 = 期序),分块消费完成后逐期真释放;``symbol_rows`` 值 ``None`` =
+    预建时 ``ReleaseCapabilityError``(标的不在该研究发布)→ 消费期按
+    #252 missing 语义报告,与逐期路径一致。被释放期复读由
+    :meth:`release_period` 的契约承接:槽位置空,消费口回落逐期读取路径
+    (值语义不变,多付一次 IO)。
     """
 
     release_id: str
     #: decision_at → 期序(冻结决策日全集;消费期按 decision_at 查期)
     period_index: dict[datetime, int]
-    #: symbol → 预计算历史(None = 标的不在该发布,#252 missing)
-    histories: dict[str, SymbolDailyMetricsHistory | None]
+    #: 逐期槽位;``None`` = 该期已释放(消费回落逐期路径)
+    slots: list[_DailyMetricsPeriodSlot | None]
+    #: symbol → 槽位行序(None = 标的不在该发布,#252 missing)
+    symbol_rows: dict[str, int | None]
+    #: float payload 列名(与旧矩阵 ``SymbolDailyMetricsHistory.columns`` 同序)
+    columns: tuple[str, ...]
+
+    def release_period(self, decision_at: datetime) -> int:
+        """释放单个决策期槽位(分块边界调用;重复/未知决策期为 no-op)。"""
+        index = self.period_index.get(decision_at)
+        if index is None or index >= len(self.slots):
+            return 0
+        if self.slots[index] is None:
+            return 0
+        self.slots[index] = None
+        return len(self.symbol_rows)
 
 
 @dataclass(slots=True)
@@ -581,6 +635,21 @@ class FrozenInputLoader:
     def price_feature_precompute(self) -> PriceFeaturePrecompute | None:
         """已构建的价格特征预计算(#450 追续;未启用时为 None)。"""
         return self._price_precompute
+
+    def release_daily_precompute_periods(self, decision_ats: Sequence[datetime]) -> int:
+        """释放已消费决策期的 daily 预计算槽位(#438 v2,分块边界调用)。
+
+        与价格特征预计算的逐期释放(#463 下半场)同契约:每期槽位是独立
+        numpy 大数组,置 ``None`` 即归还 OS;被释放期复读回落逐期读取路径
+        (值语义不变)。调用方须保证传入的期次在本分块内**已全部消费完成**
+        (分块 gather 返回之后),同块并发消费不会读到置空槽位。
+        """
+        released = 0
+        for precompute in self._daily_precompute.values():
+            for decision_at in decision_ats:
+                if precompute.release_period(decision_at):
+                    released += 1
+        return released
 
     async def ensure_price_feature_precompute(
         self,
@@ -853,7 +922,8 @@ class FrozenInputLoader:
         标的**一次**列式读取覆盖全部决策期——此前每 (标的 x 决策期) 独立
         ``pq.read_table`` 整文件,同一标的文件被重复读 P 期(全市场 5534 x
         75 期 ≈ 41.5 万次/run),且门控逐行 ``fromisoformat`` 持 GIL。预建后
-        逐期消费查 :class:`SymbolDailyMetricsHistory` 矩阵,零 IO 零逐行解析。
+        逐期消费查逐期槽位(:class:`_DailyMetricsPeriodSlot`,#438 v2),
+        零 IO 零逐行解析,分块消费完成后逐期真释放。
 
         评估域与 close 矩阵同口径(#299/#380):候选池 = 发布可交易域,
         ``explicit_symbols`` 声明时收窄到声明 ∩ 发布。仅对真实列式 provider
@@ -1314,10 +1384,14 @@ async def _load_daily_metrics_features(
 
     if precompute is not None:
         period = precompute.period_index.get(decision_at)
-        if period is not None:
-            return _daily_metrics_features_from_precompute(
+        if period is not None and precompute.slots[period] is not None:
+            assembled = _daily_metrics_features_from_precompute(
                 precompute, candidates, release_id, period
             )
+            if assembled is not None:
+                return assembled
+        # 期槽位已释放(分块消费契约)/ 期不在预建集 → 回落逐期路径,值语义
+        # 不变,多付一次 IO(与 stub provider 同一读取实现)。
 
     semaphore = asyncio.Semaphore(_LOAD_CONCURRENCY)
     # issue #371 同构(getattr 探测,``data_mount`` 挂载写入器 hasattr 同款):
@@ -1394,33 +1468,58 @@ def _daily_metrics_features_from_precompute(
     candidates: Sequence[UniverseCandidate],
     release_id: str,
     period: int,
-) -> tuple[list[FeatureValue], tuple[str, ...]]:
-    """查预计算矩阵装配单期 daily_metrics 观测(#438;与逐期路径逐值等值)。
+) -> tuple[list[FeatureValue], tuple[str, ...]] | None:
+    """查预计算槽位装配单期 daily_metrics 观测(#438;与逐期路径逐值等值)。
 
-    候选顺序组装(与逐期路径一致):``histories`` 值 ``None`` = 预建期
-    ``ReleaseCapabilityError``(标的不在该研究发布)→ #252 missing;矩阵无
-    可见行 → 该标的无观测(非 missing);有行 → ``record`` 按需重建领域对象。
+    候选顺序组装(与逐期路径一致):``symbol_rows`` 值 ``None`` = 预建期
+    ``ReleaseCapabilityError``(标的不在该研究发布)→ #252 missing;槽位无
+    可见行 → 该标的无观测(非 missing);有行 → 槽位行按需重建领域对象
+    (Decimal 强转语义与旧矩阵 ``latest_row`` 路径逐值一致)。期槽位已释放
+    (分块消费契约,见 :meth:`DailyMetricsPrecompute.release_period`)返回
+    ``None``,调用方回落逐期读取路径。
     """
     from finboard_data.factors import FactorInputRecord
+    from finboard_data.releases import _daily_metrics_from_release_row
 
+    slot = precompute.slots[period]
+    if slot is None:
+        return None
+    columns = precompute.columns
     factor_rows: list[FactorInputRecord] = []
     missing: list[str] = []
     for candidate in candidates:
-        history = precompute.histories.get(candidate.symbol)
-        if history is None:
+        row = precompute.symbol_rows.get(candidate.symbol)
+        if row is None:
             missing.append(candidate.symbol)
             continue
-        latest = history.record(period, symbol=candidate.symbol)
-        if latest is not None:
-            factor_rows.append(
-                FactorInputRecord(
-                    symbol=candidate.symbol,
-                    profile=None,
-                    daily=latest,
-                    financial=None,
-                    industry=None,
-                )
+        available = slot.available_at[row]
+        if available is None:
+            continue
+        row_dict: dict[str, object] = {
+            "available_at": available,
+            "trade_date": _EPOCH_DATE
+            + timedelta(days=int(slot.trade_date_days[row])),
+            "source": slot.source[row],
+            "limit_status": (
+                int(slot.limit_status[row])
+                if slot.limit_status_valid[row]
+                else None
+            ),
+        }
+        for j, name in enumerate(columns):
+            row_dict[name] = (
+                float(slot.values[row, j]) if slot.valid[row, j] else None
             )
+        latest = _daily_metrics_from_release_row(row_dict, symbol=candidate.symbol)
+        factor_rows.append(
+            FactorInputRecord(
+                symbol=candidate.symbol,
+                profile=None,
+                daily=latest,
+                financial=None,
+                industry=None,
+            )
+        )
     return _daily_feature_values(factor_rows, missing, release_id)
 
 
@@ -1449,7 +1548,7 @@ async def _build_daily_metrics_precompute(
     *,
     tick: Callable[[], Awaitable[None]] | None = None,
 ) -> DailyMetricsPrecompute:
-    """并发预建一个 daily_metrics 发布的全部决策期矩阵(#438)。
+    """并发预建一个 daily_metrics 发布的全部决策期槽位矩阵(#438)。
 
     每标的以 ``decision_at=_PIT_UNBOUNDED`` 做一次列式读取(PIT/区间门控在
     Arrow 内完成,全区间可见),选行与列抽取 numpy 化后置 ``to_thread``;
@@ -1458,6 +1557,13 @@ async def _build_daily_metrics_precompute(
     missing),其余异常原样传播(fail-closed)。``tick`` 非空时逐标的构建
     完成后调用一次(issue #450 预计算进度打点,节流见
     :func:`_make_precompute_ticker`)。
+
+    存储形态 v2(2026-09-14 内存归因):每标的矩阵建出后**立即散转**进
+    逐期槽位(行=标的、期=槽位下标)并丢弃——per-symbol (n_periods, n_cols)
+    矩阵不再常驻整条 run,单期槽位是可独立释放的 numpy 大数组,分块消费
+    完成后逐期真释放(见 :meth:`DailyMetricsPrecompute.release_period`)。
+    ``available_at`` / ``source`` 经 memo 去重(同一期跨标的取值高度重复,
+    ~556 期 x 每期一个串对象,不再逐标的复制)。
     """
     from finboard_data.releases import ReleaseCapabilityError, _epoch_micros
     from finboard_shared.models import Symbol
@@ -1472,7 +1578,56 @@ async def _build_daily_metrics_precompute(
     )
     range_start_day = provider.release.start_date.toordinal() - _EPOCH_ORDINAL
 
-    async def _one(candidate: UniverseCandidate) -> SymbolDailyMetricsHistory | None:
+    n_periods = len(decision_ats)
+    n_rows = len(candidates)
+    symbol_rows: dict[str, int | None] = {
+        candidate.symbol: row for row, candidate in enumerate(candidates)
+    }
+    # 槽位负载惰性分配(列数来自首个成功标的;同一发布 schema 唯一,不一致
+    # fail-closed)。available_at / source 槽位与 ``None``(该期无可见行)先占位。
+    slot_arrays: list[list[np.ndarray] | None] = [None] * n_periods
+    slot_columns: list[tuple[str, ...]] = []
+    slot_available_at: list[list[object]] = [[None] * n_rows for _ in range(n_periods)]
+    slot_source: list[list[object]] = [[None] * n_rows for _ in range(n_periods)]
+    value_memo: dict[object, object] = {}
+
+    def _scatter(row: int, history: SymbolDailyMetricsHistory) -> None:
+        if not slot_columns:
+            n_cols = len(history.columns)
+            for p in range(n_periods):
+                slot_arrays[p] = [
+                    np.zeros((n_rows, n_cols), dtype=np.float64),
+                    np.zeros((n_rows, n_cols), dtype=np.bool_),
+                    np.zeros(n_rows, dtype=np.int64),
+                    np.zeros(n_rows, dtype=np.bool_),
+                    np.zeros(n_rows, dtype=np.int32),
+                ]
+            slot_columns.append(history.columns)
+        elif slot_columns[0] != history.columns:
+            raise ValueError(
+                "daily_metrics 预建列序不一致: "
+                f"{slot_columns[0]!r} vs {history.columns!r}"
+            )
+        assert len(slot_available_at[0]) == n_rows  # 占位已建
+        arrays = slot_arrays
+        for p in range(n_periods):
+            group = arrays[p]
+            assert group is not None  # 上面已全量分配
+            group[0][row] = history.values[p]
+            group[1][row] = history.valid[p]
+            group[2][row] = history.limit_status[p]
+            group[3][row] = history.limit_status_valid[p]
+            group[4][row] = history.trade_date_days[p]
+            available = history.available_at[p]
+            if available is not None:
+                slot_available_at[p][row] = value_memo.setdefault(
+                    available, available
+                )
+            source = history.source[p]
+            if source is not None:
+                slot_source[p][row] = value_memo.setdefault(source, source)
+
+    async def _one(row: int, candidate: UniverseCandidate) -> None:
         async with semaphore:
             symbol = Symbol(
                 code=candidate.symbol, market=_market_from_value(candidate.market)
@@ -1485,39 +1640,70 @@ async def _build_daily_metrics_precompute(
                     decision_at=_PIT_UNBOUNDED,
                 )
             except ReleaseCapabilityError:
-                return None
-        history = await asyncio.to_thread(
-            _daily_history_from_table,
-            table,
-            decision_at_micros=decision_at_micros,
-            decision_day_ends=decision_day_ends,
-            range_start_day=range_start_day,
-            release_id=release_id,
-        )
+                symbol_rows[candidate.symbol] = None
+                return
+            history = await asyncio.to_thread(
+                _daily_history_from_table,
+                table,
+                decision_at_micros=decision_at_micros,
+                decision_day_ends=decision_day_ends,
+                range_start_day=range_start_day,
+                release_id=release_id,
+            )
+        if history is None:
+            symbol_rows[candidate.symbol] = None
+            return
+        _scatter(row, history)
         if tick is not None:
             await tick()
-        return history
 
     results = await asyncio.gather(
-        *(_one(candidate) for candidate in candidates), return_exceptions=True
+        *(_one(row, candidate) for row, candidate in enumerate(candidates)),
+        return_exceptions=True,
     )
-    histories: dict[str, SymbolDailyMetricsHistory | None] = {}
-    for candidate, result in zip(candidates, results, strict=True):
+    for result in results:
         if isinstance(result, BaseException):
             raise result
-        histories[candidate.symbol] = result
+    slots: list[_DailyMetricsPeriodSlot | None] = []
+    for p in range(n_periods):
+        group = slot_arrays[p]
+        slots.append(
+            None
+            if group is None
+            else _DailyMetricsPeriodSlot(
+                values=group[0],
+                valid=group[1],
+                limit_status=group[2],
+                limit_status_valid=group[3],
+                trade_date_days=group[4],
+                available_at=slot_available_at[p],
+                source=slot_source[p],
+            )
+        )
     logger.debug(
         "frozen_loader.daily_metrics_history_built",
         release_id=release_id,
         candidates=len(candidates),
         periods=len(decision_ats),
-        symbols_precomputed=sum(1 for item in histories.values() if item is not None),
-        precompute_bytes=sum(item.nbytes for item in histories.values() if item is not None),
+        symbols_precomputed=sum(
+            1 for value in symbol_rows.values() if value is not None
+        ),
+        precompute_bytes=sum(
+            slot.values.nbytes
+            + slot.valid.nbytes
+            + slot.limit_status.nbytes
+            + slot.limit_status_valid.nbytes
+            + slot.trade_date_days.nbytes
+            for slot in slots
+            if slot is not None
+        ),
     )
     return DailyMetricsPrecompute(
         release_id=release_id,
         period_index={at: index for index, at in enumerate(decision_ats)},
-        histories=histories,
+        slots=slots,
+        symbol_rows=symbol_rows,
+        columns=slot_columns[0] if slot_columns else (),
     )
 
 
