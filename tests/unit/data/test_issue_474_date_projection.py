@@ -57,11 +57,9 @@ def test_projection_matches_full_mapping_and_preserves_missing_and_null(
     projected = LazySeriesValues(root, relpath, checksum)
 
     _assert_value_equal(dict(full.items()), values)
-    with pytest.raises(FactorSeriesArtifactError, match="缺少投影决策日期"):
-        projected.project_dates(
-            [date(2024, 1, 2), date(2024, 1, 4), date(2024, 2, 1)]
-        )
-    projected.project_dates([date(2024, 1, 2), date(2024, 1, 4)])
+    projected.project_dates(
+        [date(2024, 1, 2), date(2024, 1, 4), date(2024, 2, 1)]
+    )
     _assert_value_equal(
         dict(projected.items()),
         {
@@ -71,7 +69,22 @@ def test_projection_matches_full_mapping_and_preserves_missing_and_null(
     )
     assert len(projected) == 2
     assert "2024-02-01" not in projected
+    assert projected.get("2024-02-01") is None
     assert projected["2024-01-02"]["000001.SZ"] is None
+
+
+def test_projection_keeps_declared_empty_cross_section_as_missing(
+    tmp_path: Path,
+) -> None:
+    meta = write_series_artifact(
+        tmp_path,
+        "v2-empty-cross-section",
+        {"2024-01-01": {}, "2024-01-02": {"000001.SZ": 1.0}},
+    )
+    projected = LazySeriesValues(tmp_path, meta.relpath, meta.checksum)
+    projected.project_dates([date(2024, 1, 1), date(2024, 1, 2)])
+    assert projected.get("2024-01-01") is None
+    assert projected.get("2024-01-02") == {"000001.SZ": 1.0}
 
 
 def test_projection_uses_arrow_filter_without_full_batch_scan(

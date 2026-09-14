@@ -34,7 +34,7 @@ import threading
 import uuid
 from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -319,33 +319,11 @@ class LazySeriesValues(Mapping[str, dict[str, float | None]]):
                     columns=["date", "symbol", "value"],
                     filters=[("date", "in", sorted(requested))],
                 )
-                import numpy as np
-                import pyarrow as pa
-                import pyarrow.compute as pc
-
-                actual = pc.unique(table.column("date").combine_chunks())
-                actual_days = actual.cast(pa.int32()).to_numpy(
-                    zero_copy_only=False
-                )
-                requested_days = np.fromiter(
-                    (
-                        day.toordinal() - date(1970, 1, 1).toordinal()
-                        for day in requested
-                    ),
-                    dtype=np.int32,
-                    count=len(requested),
-                )
-                missing = requested_days[~np.isin(requested_days, actual_days)]
-                if missing.size:
-                    missing_dates = [
-                        date(1970, 1, 1)
-                        + timedelta(days=int(day))
-                        for day in missing
-                    ]
-                    raise FactorSeriesArtifactError(
-                        "因子序列工件缺少投影决策日期: "
-                        + ",".join(item.isoformat() for item in missing_dates[:20])
-                    )
+                # An explicitly declared date may legitimately have an empty
+                # cross-section.  The legacy Mapping path warns and skips
+                # that date, so physical row presence must not turn it into a
+                # new fail-closed condition; the run loader checks metadata
+                # coverage before reaching this point.
                 self._install_table(table)
             else:
                 import numpy as np
