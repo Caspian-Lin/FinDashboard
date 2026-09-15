@@ -43,6 +43,9 @@ from finboard_backtest.research_run import (
     UniverseCandidate,
 )
 from finboard_backtest.research_run import (
+    portfolio_pipeline as portfolio_pipeline_module,
+)
+from finboard_backtest.research_run import (
     signal_engine as signal_engine_module,
 )
 from finboard_backtest.research_run.portfolio_pipeline import (
@@ -66,6 +69,16 @@ def _uncached_signal_engine_logger():
     yield
     signal_engine_module.logger = saved_logger
     structlog.configure(**saved_config)
+
+
+@pytest.fixture
+def pipeline_logger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> structlog.testing.CapturingLogger:
+    """用调用捕获器隔离 pipeline 日志,不依赖全套测试的 structlog 状态。"""
+    logger = structlog.testing.CapturingLogger()
+    monkeypatch.setattr(portfolio_pipeline_module, "logger", logger)
+    return logger
 
 
 def _prices(n: int, *, seed: int, start: float = 10.0, scale: float = 0.02) -> list[float]:
@@ -238,7 +251,9 @@ class TestTargetCoverageFallback:
         assert result is covariance
         assert not [e for e in logs if "covariance_coverage" in str(e.get("event"))]
 
-    def test_missing_holding_triggers_rebuild(self) -> None:
+    def test_missing_holding_triggers_rebuild(
+        self, pipeline_logger: structlog.testing.CapturingLogger
+    ) -> None:
         """持仓掉出选股池 → 用目标集合序列重建(tickers 覆盖目标)。"""
         covariance = _diagonal(("A.SH",))
         series = {
@@ -251,23 +266,26 @@ class TestTargetCoverageFallback:
             provider=lambda codes: {c: series[c] for c in codes if c in series},
         )
 
-        with structlog.testing.capture_logs() as logs:
-            result = _covariance_with_target_coverage(
-                item, current_weights={"Z.SH": 0.02}
-            )
+        result = _covariance_with_target_coverage(
+            item, current_weights={"Z.SH": 0.02}
+        )
 
         assert result is not None
         assert set(result.tickers) == {"A.SH", "B.SH", "Z.SH"}
         assert _covariance_problem(result, {"A.SH"}) is None
         events = [
-            e for e in logs if e.get("event") == "research_run.covariance_coverage_rebuilt"
+            call
+            for call in pipeline_logger.calls
+            if call.args == ("research_run.covariance_coverage_rebuilt",)
         ]
         assert len(events) == 1
         # 信号标的 B.SH 与持仓 Z.SH 都未被池内估计覆盖。
-        assert events[0]["missing"] == ["B.SH", "Z.SH"]
-        assert events[0]["target_symbols"] == 3
+        assert events[0].kwargs["missing"] == ["B.SH", "Z.SH"]
+        assert events[0].kwargs["target_symbols"] == 3
 
-    def test_partial_provider_keeps_original(self) -> None:
+    def test_partial_provider_keeps_original(
+        self, pipeline_logger: structlog.testing.CapturingLogger
+    ) -> None:
         """序列不全:保持原样(矩阵缺失照旧 fail-closed,不静默补零)。"""
         covariance = _diagonal(("A.SH",))
         item = _item(
@@ -275,33 +293,40 @@ class TestTargetCoverageFallback:
             provider=lambda codes: {"A.SH": _prices(40, seed=0)},
         )
 
-        with structlog.testing.capture_logs() as logs:
-            result = _covariance_with_target_coverage(
-                item, current_weights={"Z.SH": 0.02}
-            )
+        result = _covariance_with_target_coverage(
+            item, current_weights={"Z.SH": 0.02}
+        )
 
         assert result is covariance
         events = [
-            e
-            for e in logs
-            if e.get("event") == "research_run.covariance_coverage_unavailable"
+            call
+            for call in pipeline_logger.calls
+            if call.args == ("research_run.covariance_coverage_unavailable",)
         ]
         assert len(events) == 1
-        assert events[0]["missing"] == ["B.SH", "Z.SH"]
+        assert events[0].kwargs["missing"] == ["B.SH", "Z.SH"]
+        assert events[0].kwargs["missing_count"] == 2
+        assert events[0].kwargs["resolved"] == 1
 
-    def test_none_covariance_rebuilt_from_targets(self) -> None:
+    def test_none_covariance_rebuilt_from_targets(
+        self, pipeline_logger: structlog.testing.CapturingLogger
+    ) -> None:
         """池内估计为 None(窗口塌缩消费端):目标集合可估时重建。"""
         series = {"A.SH": _prices(30, seed=1), "B.SH": _prices(30, seed=2)}
         item = _item(covariance=None, provider=lambda codes: series)
 
-        with structlog.testing.capture_logs() as logs:
-            result = _covariance_with_target_coverage(item, current_weights={})
+        result = _covariance_with_target_coverage(item, current_weights={})
 
         assert result is not None
         assert set(result.tickers) == {"A.SH", "B.SH"}
-        assert [
-            e for e in logs if e.get("event") == "research_run.covariance_coverage_rebuilt"
+        events = [
+            call
+            for call in pipeline_logger.calls
+            if call.args == ("research_run.covariance_coverage_rebuilt",)
         ]
+        assert len(events) == 1
+        assert events[0].kwargs["missing_count"] == 2
+        assert events[0].kwargs["target_symbols"] == 2
 
     def test_none_covariance_without_provider_unchanged(self) -> None:
         """无 provider(矩阵未启用 / stub):行为与历史一致(None 透传)。"""
