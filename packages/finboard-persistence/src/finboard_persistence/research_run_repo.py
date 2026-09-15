@@ -2,19 +2,30 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, text
+from psycopg.types.json import Json
+from sqlalchemy import insert, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from finboard_persistence.models import (
     ResearchRunArtifactModel,
     ResearchRunModel,
 )
+
+#: artifact 流式读取的行缓冲(#470 前半场):决策级 13 行/决策,26 行 ≈ 2 决策。
+_ARTIFACT_STREAM_CHUNK = 26
+
+
+def _identity_json_dumps(obj: Any) -> Any:
+    """驱动级 Json 包装的直写 dumps(#472):入参已是 canonical JSON 文本。"""
+
+    return obj
 
 
 class ResearchRunPersistenceConflictError(RuntimeError):
@@ -285,10 +296,20 @@ class ResearchRunRepository:
         parent_trace_ids: list[str],
         payload: dict[str, object],
         checksum: str,
-    ) -> tuple[ResearchRunArtifactModel, bool]:
-        stmt = select(ResearchRunArtifactModel).where(
-            ResearchRunArtifactModel.run_id == run_id,
-            ResearchRunArtifactModel.artifact_id == artifact_id,
+        payload_json: str | None = None,
+    ) -> tuple[ResearchRunArtifactModel | None, bool]:
+        # 幂等命中分支只比对 checksum,不消费 payload —— load_only 让既有行
+        # 的 payload 列保持 deferred(#470 前半场:断点续算种子逐决策重持久化
+        # 时,每个命中行省掉一次全量 payload JSONB → Python 物化,features
+        # 期均 ~8.5MB)。命中行除 checksum 外的字段未加载,调用方只读 created
+        # 标志;新插入行不受影响。
+        stmt = (
+            select(ResearchRunArtifactModel)
+            .where(
+                ResearchRunArtifactModel.run_id == run_id,
+                ResearchRunArtifactModel.artifact_id == artifact_id,
+            )
+            .options(load_only(ResearchRunArtifactModel.checksum))
         )
         existing = (await self._session.execute(stmt)).scalar_one_or_none()
         if existing is not None:
@@ -297,6 +318,27 @@ class ResearchRunRepository:
                     f"artifact {artifact_id} checkpoint 内容冲突"
                 )
             return existing, False
+        # issue #472:payload_json 为 canonical JSON 文本时直写 —— 驱动级
+        # ``Json(text, dumps=identity)`` 由 CanonicalPayloadJson 列放行,不再对
+        # dict 二次 ``json.dumps``(文本已由研究域编码,checksum 即该文本的
+        # sha256)。直写路径走 Core INSERT:驱动包装值不进 identity map(ORM
+        # 对象属性会把 ``Json`` 包装物回吐给同 session 的读方),也无 dict 树
+        # 物化;返回的首元素为 None(批次调用方只消费 created 标志)。
+        if payload_json is not None:
+            await self._session.execute(
+                insert(ResearchRunArtifactModel).values(
+                    run_id=run_id,
+                    artifact_id=artifact_id,
+                    decision_id=decision_id,
+                    sequence=sequence,
+                    stage=stage,
+                    trace_id=trace_id,
+                    parent_trace_ids=parent_trace_ids,
+                    payload=Json(payload_json, dumps=_identity_json_dumps),
+                    checksum=checksum,
+                )
+            )
+            return None, True
         row = ResearchRunArtifactModel(
             run_id=run_id,
             artifact_id=artifact_id,
@@ -358,6 +400,53 @@ class ResearchRunRepository:
                 str(row.decision_key): int(row.fill_count) for row in fills_rows
             },
         )
+
+    def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchRunArtifactModel]:
+        """按 sequence 流式遍历 artifact 行(#470 前半场)。
+
+        服务端游标 + ``yield_per`` 分块:全历史 run 的 payload 总量达数 GB
+        (features 期均 ~8.5MB),一次性 ``list_artifacts`` 物化会在断点续算
+        读回时把整个前缀的 payload 钉进内存(272 期前缀实测 ≈8GB)。流式
+        读取让消费方(逐决策分组 → 复验 → 重建 bundle → 释放)任意时刻只
+        持有 O(1) 个决策的载荷。行序与 ``list_artifacts`` 一致(sequence
+        升序)。
+        """
+
+        async def _stream() -> AsyncIterator[ResearchRunArtifactModel]:
+            stmt = (
+                select(ResearchRunArtifactModel)
+                .where(ResearchRunArtifactModel.run_id == run_id)
+                .order_by(ResearchRunArtifactModel.sequence)
+            )
+            result = await self._session.stream(
+                stmt, execution_options={"yield_per": _ARTIFACT_STREAM_CHUNK}
+            )
+            async for row in result:
+                yield row[0]
+
+        return _stream()
+
+    async def list_artifact_digests(
+        self, run_id: str
+    ) -> list[tuple[str, str | None, str]]:
+        """artifact 瘦指纹(stage, decision_id, checksum),不取 payload 列。
+
+        result_checksum / 拒绝路径归档只消费这三个字段(#470 前半场);列级
+        SELECT 避免 run 收尾把全量 payload 再物化一遍(556 期全历史 run
+        ≈ 5GB JSON 文本)。行序与 ``list_artifacts`` 一致。
+        """
+
+        stmt = (
+            select(
+                ResearchRunArtifactModel.stage,
+                ResearchRunArtifactModel.decision_id,
+                ResearchRunArtifactModel.checksum,
+            )
+            .where(ResearchRunArtifactModel.run_id == run_id)
+            .order_by(ResearchRunArtifactModel.sequence)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(stage, decision_id, checksum) for stage, decision_id, checksum in rows]
 
     async def get_artifact_by_trace(
         self, run_id: str, trace_id: str

@@ -81,8 +81,21 @@ class _RecordingStore(ResearchRunStore):
         self.calls.append("append_artifact")
         return False
 
+    async def append_artifacts(self, artifacts: Any) -> list[bool]:
+        self.calls.append("append_artifacts")
+        return [False] * len(artifacts)
+
     async def list_artifacts(self, run_id: str):
         self.calls.append("list_artifacts")
+        return []
+
+    async def iter_artifacts(self, run_id: str):
+        self.calls.append("iter_artifacts")
+        return
+        yield
+
+    async def list_artifact_digests(self, run_id: str):
+        self.calls.append("list_artifact_digests")
         return []
 
     async def checkpoint(self) -> None:

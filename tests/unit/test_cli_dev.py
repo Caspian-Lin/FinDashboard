@@ -16,7 +16,12 @@ def test_dev_keeps_api_in_foreground_and_always_stops_frontend(tmp_path: Path) -
 
     ctx = MagicMock()
     ctx.obj = MagicMock()
-    thread = MagicMock()
+    threads: list[tuple[MagicMock, dict[str, object]]] = []
+
+    def _thread_factory(*_: object, **kwargs: object) -> MagicMock:
+        thread = MagicMock()
+        threads.append((thread, kwargs))
+        return thread
 
     with (
         patch("finboard_app.cli.shutil.which", return_value="npm.cmd"),
@@ -24,14 +29,19 @@ def test_dev_keeps_api_in_foreground_and_always_stops_frontend(tmp_path: Path) -
         patch("finboard_app.cli._ensure_sandbox_image", return_value=False),
         patch("finboard_app.cli._spawn_dev_worker") as spawn_worker,
         patch("finboard_app.cli._stop_dev_process"),
-        patch("finboard_app.cli.threading.Thread", return_value=thread),
+        patch("finboard_app.cli.threading.Thread", side_effect=_thread_factory),
         patch("finboard_app.cli.serve", side_effect=KeyboardInterrupt) as serve,
         pytest.raises(KeyboardInterrupt),
     ):
         dev(ctx, host="127.0.0.1", port=8000, web_dir=tmp_path)
 
-    thread.start.assert_called_once_with()
-    thread.join.assert_called_once_with(timeout=1.0)
+    frontend_thread = next(
+        thread
+        for thread, kwargs in threads
+        if kwargs.get("name") == "finboard-vite-launcher"
+    )
+    frontend_thread.start.assert_called_once_with()
+    frontend_thread.join.assert_called_once_with(timeout=1.0)
     serve.assert_called_once_with(ctx, host="127.0.0.1", port=8000, reload=False)
     spawn_worker.assert_called_once_with()
 

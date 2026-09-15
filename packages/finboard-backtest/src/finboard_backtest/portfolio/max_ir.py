@@ -37,7 +37,10 @@ from finboard_backtest.portfolio.contracts import (
     Signal,
     TargetWeight,
 )
-from finboard_backtest.portfolio.covariance import CovarianceEstimate
+from finboard_backtest.portfolio.covariance import (
+    PSD_MIN_EIGENVALUE,
+    CovarianceEstimate,
+)
 
 DEFAULT_MAX_ITER = 2000
 """投影梯度最大迭代次数;O(n^2)/迭代,组合规模下开销可忽略。"""
@@ -210,8 +213,11 @@ def solve_max_ir(
 
     sym = (cov + cov.T) / 2.0
     min_eigenvalue = float(np.linalg.eigvalsh(sym).min())
-    eigenvalue_tolerance = (
-        np.finfo(np.float64).eps * max(1.0, float(np.abs(cov).max())) * n
+    # issue #465:与 builder._covariance_problem 同口径 —— 容差取纯数值容差
+    # 与 PSD_MIN_EIGENVALUE / 2 的较小者,PD 修复过的矩阵恒过校验。
+    eigenvalue_tolerance = min(
+        np.finfo(np.float64).eps * max(1.0, float(np.abs(cov).max())) * n,
+        PSD_MIN_EIGENVALUE / 2.0,
     )
     if min_eigenvalue <= eigenvalue_tolerance:
         raise AllocationError(

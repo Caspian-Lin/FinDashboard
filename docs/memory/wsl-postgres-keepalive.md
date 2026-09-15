@@ -8,13 +8,22 @@
 只会 ConnectionTimeout 长时间重试(2026-08-15 排查确认,曾误判为「契约测试在
 数据库调用测试处超时」)。
 
+2026-09-15 又确认一种独立形态:`networkingMode=mirrored` 下 WSL 内
+`systemctl is-active postgresql` / `pg_isready` 均正常,但 Windows 侧
+`127.0.0.1:5432` 仍超时且 PostgreSQL 看不到连接。此时不是数据库锁；须先正常
+停止 PostgreSQL,执行 `wsl.exe --shutdown` 重建网络层,再启动发行版与 PostgreSQL。
+
 **Why**:psycopg 默认没有快速失败,连接超时前看起来像卡死。
 
 **How to apply**(跑集成测试前):
 
 1. 唤醒:`wsl.exe -u root -e sh -lc "systemctl start postgresql; pg_isready -h 127.0.0.1 -p 5432"`
-2. 保活(后台):`wsl.exe -u root -e sh -lc "sleep 900"`(命令间隙 VM 可能又睡)
+2. 保活(后台):启动隐藏的 `wsl.exe -d Ubuntu -- tail -f /dev/null` 长驻进程；固定
+   `sleep 900` 只适合短测试,超时后 VM 仍会再次自动关机。
 3. Windows 侧用 `.env` 里的真实密码验证 psycopg 可连,才算真的通。
+4. 若 WSL 内健康而 Windows 侧仍超时:先 `systemctl stop postgresql`,再
+   `wsl.exe --shutdown`;重启后重复第 1-3 步。不要用 WSL 内 `pg_isready` 代替
+   Windows 侧验证。
 
 **本机其它环境坑**(同一次排查发现):
 

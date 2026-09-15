@@ -13,6 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from psycopg.types.json import Json, Jsonb
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -25,6 +26,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
     func,
 )
@@ -39,6 +41,35 @@ from finboard_persistence.base import Base, IdMixin
 
 def _numeric() -> Any:
     return Numeric(20, 4, decimal_return_scale=4)
+
+
+class CanonicalPayloadJson(TypeDecorator[Any]):
+    """artifact payload 列(issue #472):与默认 ``JSON`` 同语义,但放行直写。
+
+    默认 ``JSON`` 在 psycopg 方言下的 bind 处理器会把值再包一层驱动级
+    ``psycopg Json``(即对传入 dict 再做一次 ``json.dumps``)。本类型唯一的
+    差异:值已经是 psycopg 的 JSON 包装(``psycopg.types.json.Json`` /
+    ``Jsonb``,如 ``Json(canonical_text, dumps=identity)``,由持久化层为
+    「已编码 canonical 文本」构造)时原样透传 —— 驱动直出字节,不再重编码;
+    其余值(dict / list / None 等)完全走原包装路径,读写语义与默认 ``JSON``
+    逐值一致。
+
+    ``impl = JSON``(泛型):DDL 与方言映射(postgresql ``json``)保持不变,
+    生产列类型不做迁移。
+    """
+
+    impl = JSON
+    cache_ok = True
+
+    def bind_processor(self, dialect: Any) -> Any:
+        default = self.load_dialect_impl(dialect).bind_processor(dialect)
+
+        def process(value: Any) -> Any:
+            if isinstance(value, (Json, Jsonb)):
+                return value
+            return default(value) if default is not None else value
+
+        return process
 
 
 def _research_numeric() -> Any:
@@ -455,7 +486,9 @@ class ResearchRunArtifactModel(Base, IdMixin):
     parent_trace_ids: Mapped[list[str]] = mapped_column(
         JSON, default=list, server_default=sql_text("'[]'::json")
     )
-    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    # issue #472:CanonicalPayloadJson 放行「已编码 canonical 文本 + identity
+    # dumps」的驱动级 Json 包装(直写、不重编码),dict 路径语义不变。
+    payload: Mapped[dict[str, object]] = mapped_column(CanonicalPayloadJson)
     checksum: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

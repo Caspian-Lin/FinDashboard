@@ -64,7 +64,6 @@ from finboard_backtest.research_run.runner import (
 )
 from finboard_backtest.research_run.signal_engine import (
     SignalEnginePipelineAdapter,
-    build_decision_inputs,
 )
 
 from .conftest import fixed_report
@@ -104,8 +103,17 @@ def _artifact_fingerprint(
     ]
 
 
-def _multi_input(day_index: int, scores: tuple[float, ...] = (1.0, 1.0, 1.0)) -> PortfolioDecisionInput:
-    """三标的、逐日决策的固定组合输入(与集成测试同构)。"""
+def _multi_input(
+    day_index: int,
+    scores: tuple[float, ...] = (1.0, 1.0, 1.0),
+    *,
+    price: float = 10.0,
+) -> PortfolioDecisionInput:
+    """三标的、逐日决策的固定组合输入(与集成测试同构)。
+
+    ``price`` 同时作为决策价与执行价(逐日可变,用于制造平仓价 != 建仓价
+    的 realized_pnl != 0 场景,见 ``test_resume_accepts_prefix_ending_with_closed_book``)。
+    """
 
     decision_at = datetime(2024, 1, 2 + day_index, 15, tzinfo=UTC)
     return PortfolioDecisionInput(
@@ -142,8 +150,8 @@ def _multi_input(day_index: int, scores: tuple[float, ...] = (1.0, 1.0, 1.0)) ->
             )
             for symbol, score in zip(SYMBOLS, scores, strict=True)
         ),
-        prices=dict.fromkeys(SYMBOLS, 10.0),
-        execution_prices=dict.fromkeys(SYMBOLS, 10.0),
+        prices=dict.fromkeys(SYMBOLS, price),
+        execution_prices=dict.fromkeys(SYMBOLS, price),
         lot_info={symbol: AssetLotInfo(code=symbol, lot_size=100) for symbol in SYMBOLS},
         input_artifact_ids=("release-v1",),
         covariance=CovarianceEstimate(
@@ -276,19 +284,23 @@ class _CountingSignalAdapter(SignalEnginePipelineAdapter):
         self.load_calls = 0
         self.last_pipeline: _CountingPipeline | None = None
 
-    async def _load(self) -> PortfolioPipelineAdapter:
+    async def _load(
+        self,
+        *,
+        resume: Any = None,
+    ) -> PortfolioPipelineAdapter:
         self.load_calls += 1
-        if self._inputs is None:
-            self._inputs = await build_decision_inputs(
-                self._manifest,
-                release_provider_factory=self._release_provider_factory,
-                snapshot_provider=self._snapshot_provider,
-                process_workers=self._process_workers,
-                chunk_probe=self._chunk_probe,
-            )
+        # issue #463:与生产 _load 同构 —— 输入迭代器经 _iter_captured_inputs
+        # 包装(逐期捕获 screen 投影 / 决策日),仅管线类型换成计数桩。
+        # #470 后半场:签名对齐生产 _load(resume);本桩不建 stub 前缀流
+        # (这些用例的 run 引用 u_ 用户因子,生产同路径也不建 —— 前缀全量
+        # 装载、skip_prefix 保持 0)。
+        del resume
+        if self._input_iterator is None:
+            self._input_iterator = self._iter_captured_inputs(None)
         pipeline = _CountingPipeline(
             strategy_kind=self.strategy_kind,
-            decision_inputs=self._inputs,
+            decision_inputs=self._input_iterator,
         )
         self.last_pipeline = pipeline
         return pipeline
@@ -505,6 +517,45 @@ class TestPipelineResumeFrom:
         ]
         assert instruction_ids
         assert all(":I:00000002:" in item for item in instruction_ids)
+
+    async def test_resume_accepts_prefix_ending_with_closed_book(
+        self, manifest_factory
+    ) -> None:
+        """前缀最后决策平仓且平仓价 != 建仓价时种子仍被接受(2026-09-13 修复)。
+
+        生产形态(RR-bff0):重放的 prefix 最后决策清仓 300308.SZ
+        (``realized_pnl=1126.47``),记账后 ``quantity=0`` 但
+        ``realized_pnl != 0``,故仍出现在 ``DecisionBundle.positions`` 里;
+        而 ``_risk_state.high_water_prices`` 只记录 ``quantity > 0`` 标的 →
+        旧校验取到 None 必抛「重放价格高水位与风险状态不一致」→ 种子被拒、
+        每次重试从零重算。既有用例价格恒定(``realized_pnl=0``,平仓账面不
+        入 positions)故未暴露。
+        """
+        manifest = manifest_factory()
+        inputs = (
+            _multi_input(0, (1.0, 1.0, 1.0), price=10.0),
+            _multi_input(1, (-1.0, -1.0, -1.0), price=12.0),  # 平仓且有盈亏
+        )
+        fresh = [
+            item
+            async for item in PortfolioPipelineAdapter(
+                strategy_kind="ma_cross", decision_inputs=inputs
+            ).decisions(manifest)
+        ]
+        # 前提:第二期平仓产生非零 realized_pnl(平仓账面进入 positions 记录)。
+        closed = [
+            position
+            for position in fresh[1].positions
+            if position.quantity == 0 and position.realized_pnl != 0
+        ]
+        assert closed, fresh[1].positions
+
+        resumed = PortfolioPipelineAdapter(
+            strategy_kind="ma_cross", decision_inputs=inputs
+        )
+        assert resumed.resume_from(fresh) is True
+        rebuilt = [item async for item in resumed.decisions(manifest)]
+        assert rebuilt == fresh
 
     async def test_resume_state_seeding_matches_fresh_run_exactly(
         self, manifest_factory
@@ -804,8 +855,9 @@ class TestSignalEngineResume:
         assert resumed_adapter.load_calls == 1
         assert resumed_adapter.last_pipeline is not None
         assert resumed_adapter.last_pipeline.build_calls == 2
-        assert resumed_adapter._resume_bundles is not None
-        assert len(resumed_adapter._resume_bundles) == 1
+        # #470 前半场:种子消费完毕即释放(signal_engine 侧属性清空),
+        # 断言改为「已消费且不再驻留」
+        assert resumed_adapter._resume_bundles is None
 
         # 对照:一次跑完
         control_manifest, _ = _signal_setup(
@@ -854,12 +906,14 @@ class TestSignalEngineResume:
         )
         resumed = await coordinator.execute(manifest, resumed_adapter)
         assert resumed.status is ResearchRunStatus.COMPLETED, resumed.error_summary
-        # 快速路径:加载整段与组合构建全部跳过
+        # 快速路径:加载整段与组合构建全部跳过(输入迭代器从未创建、
+        # _fast_path 置位 —— 旧断言「_inputs == ()」的等价新形态,#463)
         assert resumed_adapter.load_calls == 0
         assert resumed_adapter.last_pipeline is None
-        assert resumed_adapter._inputs == ()
-        assert resumed_adapter._resume_bundles is not None
-        assert len(resumed_adapter._resume_bundles) == 3
+        assert resumed_adapter._input_iterator is None
+        assert resumed_adapter._fast_path is True
+        # #470 前半场:快速路径种子消费完毕即释放,不再驻留
+        assert resumed_adapter._resume_bundles is None
 
         control_manifest, _ = _signal_setup(
             "RR-issue314-fast-ctrl", "issue314-fast-ctrl"

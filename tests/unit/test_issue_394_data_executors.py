@@ -279,6 +279,12 @@ class _FakeSession:
     async def commit(self) -> None:
         return None
 
+    async def execute(self, statement: object) -> None:
+        return None
+
+    async def flush(self) -> None:
+        return None
+
 
 def _job_record() -> object:
     from finboard_backtest.background_jobs.contracts import JobRecord
