@@ -2434,27 +2434,28 @@ async def iter_decision_load_contexts(
             close_series_provider=_make_close_series_provider(loader, decision_at),
         )
 
-    # #470 后半场:前缀期已由种子覆盖 —— produced 从 skip 起报(加载帧的
-    # k 保持「已完成期数」语义:种子前缀 + 本流已加载期)。
-    produced = skip
-    try:
-        for chunk_start in range(0, len(decision_days), _DECISION_LOAD_CHUNK):
-            chunk = decision_days[chunk_start : chunk_start + _DECISION_LOAD_CHUNK]
-            if chunk_start + len(chunk) <= skip:
-                # 整块落在续跑前缀内:零构建、零探针(本块无加载工作),
-                # 槽位已在预建后释放。
-                continue
-            # 跨前缀边界的块只构建后半(块切分与期序保持与全新 run 同源,
-            # #288 gather 分组 / #263 首个失败期语义不变)。
-            build = chunk[max(0, skip - chunk_start) :]
-            results = await asyncio.gather(
-                *(_load_one(decision_at, snapshot_id) for decision_at, snapshot_id in build),
-                return_exceptions=True,
-            )
+    async def _load_chunk(
+        chunk_start: int,
+        chunk: Sequence[tuple[datetime, str | None]],
+    ) -> list[DecisionLoadContext]:
+        """加载并释放一个决策批次,供当前批或单个预取任务使用。
+
+        预取只允许存在一个任务,因此调用方最多同时持有「当前批 + 下一批」
+        两组上下文。异常仍按批内原始期序检查;批次资源在成功、失败、取消
+        三条路径都释放,避免预取任务的异常 traceback 把半成品输入钉住。
+        """
+
+        build = chunk[max(0, skip - chunk_start) :]
+        if not build:
+            return []
+        results = await asyncio.gather(
+            *(_load_one(decision_at, snapshot_id) for decision_at, snapshot_id in build),
+            return_exceptions=True,
+        )
+        loaded: list[DecisionLoadContext] = []
+        try:
             # issue #263:按原始期序收集 —— 第一个失败期(与串行首个失败一致)
-            # 在 bare raise 前挂决策标记;异常类型 / 消息 / traceback 不被改写,
-            # runner 通用收口经 read_decision_load_context 读回失败期次。
-            loaded: list[DecisionLoadContext] = []
+            # 在 bare raise 前挂决策标记;异常类型 / 消息 / traceback 不被改写。
             for (decision_at, _), result in zip(build, results, strict=True):
                 if isinstance(result, BaseException):
                     if isinstance(result, Exception):
@@ -2463,25 +2464,63 @@ async def iter_decision_load_contexts(
                             decision_at=decision_at,
                             release_id=release_ref.artifact_id,
                         )
+                    # 不让 task 的异常 traceback 继续持有此前已成功加载的
+                    # 上下文或 gather 结果;首异常对象本身仍原样重抛。
+                    loaded.clear()
+                    results = []
                     raise result
                 loaded.append(result)
-            produced += len(loaded)
-            # issue #463 下半场:块内全部期次的 context 构建完成后,价格特征
-            # 预计算表中本块各期槽位即刻释放。安全前提(消费审计):预计算表
-            # 的唯一消费口 ``feature_values(decision_at, release_id)`` 只发生在
-            # 各期 ``_load_one`` 构建期内(#288 池损坏降级「本期重算一次」同样
-            # 在构建期内完成),每期恰好消费一次;#304 拒绝路径的第二次全量
-            # 重拉会新建 loader 并重建预计算表,不受首趟释放影响。
+            return loaded
+        finally:
+            # issue #463:每批上下文构建完即释放对应预计算槽位。预取批次
+            # 也必须在 task 内完成释放,否则「当前批 + 下一批」之外会继续
+            # 持有全市场 daily / price feature 大数组。
             precompute = loader.price_feature_precompute
             if precompute is not None:
                 for decision_at, _ in chunk:
                     precompute.release_period(decision_at)
-            # daily_metrics 预计算槽位同契约释放(#438 v2):单期槽位是独立
-            # numpy 大数组,置空即归还 OS(全市场 x 全期常驻 0.45GB/发布 →
-            # 决策段后期衰减到 ~0);被释放期复读回落逐期读取路径,值语义不变。
             loader.release_daily_precompute_periods(
                 [decision_at for decision_at, _ in chunk]
             )
+
+    async def _take_prefetched(
+        task: asyncio.Task[list[DecisionLoadContext]],
+    ) -> list[DecisionLoadContext]:
+        """取得预取结果,并在等待被取消时显式收口子任务。"""
+
+        try:
+            return await task
+        except BaseException:
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            raise
+
+    # #470 后半场:前缀期已由种子覆盖 —— produced 从 skip 起报(加载帧的
+    # k 保持「已完成期数」语义:种子前缀 + 本流已加载期)。
+    produced = skip
+    prefetch_task: asyncio.Task[list[DecisionLoadContext]] | None = None
+    try:
+        for chunk_start in range(0, len(decision_days), _DECISION_LOAD_CHUNK):
+            chunk = decision_days[chunk_start : chunk_start + _DECISION_LOAD_CHUNK]
+            if chunk_start + len(chunk) <= skip:
+                # 整块落在续跑前缀内:零构建、零探针(本块无加载工作),
+                # 槽位已在预建后释放。
+                continue
+            if prefetch_task is None:
+                # 首批没有可复用的预取结果,沿用原有批内 gather。
+                loaded = await _load_chunk(chunk_start, chunk)
+            else:
+                # 当前批消费期间后台只加载了下一批;先取得并从 task 中
+                # 脱离结果,随后才允许创建再下一批,严格保持双批上限。
+                task = prefetch_task
+                try:
+                    loaded = await _take_prefetched(task)
+                finally:
+                    if prefetch_task is task:
+                        prefetch_task = None
+            produced += len(loaded)
             # issue #306/#463:分块边界探针在本块 gather 完成**之后、产出之前**
             # 触发(与流式化前相同的取值序列与加载相对位置 —— 探针 done 计数
             # 是「已加载期数」;流式化后决策持久化与下一块加载交错,探针必须
@@ -2489,10 +2528,36 @@ async def iter_decision_load_contexts(
             # 否则 #306 的「加载期 cancel → run INTERRUPTED」语义被抢跑)。
             if chunk_start + len(chunk) < len(decision_days) and chunk_probe is not None:
                 await chunk_probe(produced, len(decision_days))
+            # issue #475:探针确认当前批完成后,至多预取下一批。下一批的
+            # 纯读 / 协方差计算与调用方当前批的信号、组合状态和持久化相重叠;
+            # 只有在下一批被取走后才创建再下一批,内存上限为两批。
+            next_start = chunk_start + _DECISION_LOAD_CHUNK
+            if next_start < len(decision_days):
+                next_chunk = decision_days[
+                    next_start : next_start + _DECISION_LOAD_CHUNK
+                ]
+                if next_chunk and prefetch_task is None:
+                    prefetch_task = asyncio.create_task(
+                        _load_chunk(next_start, next_chunk),
+                        name="research_run.decision_load_prefetch",
+                    )
             # issue #463:块内全部期次加载完成后逐期 yield(期序不变)。
             for result in loaded:
                 yield result
+            # 不把已消费批次的列表留到下一轮;最后一个循环变量只保留
+            # 一个 context,不会突破「当前批 + 下一批」的双批上限。
+            loaded.clear()
     finally:
+        # issue #475:消费者提前关闭 / 下游抛错时,预取任务必须显式
+        # cancel + await;否则其 gather 子任务可能继续读盘并把半批对象
+        # 留在事件循环中,形成 task 泄漏和额外内存驻留。
+        if prefetch_task is not None:
+            task = prefetch_task
+            prefetch_task = None
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         # issue #463:生成器耗尽 / 被关闭(aclose)/ 抛错任一路径都立即
         # 关闭常驻特征进程池 —— 流式化后池生命周期跟随生成器而非全量加载。
         if pool is not None:
