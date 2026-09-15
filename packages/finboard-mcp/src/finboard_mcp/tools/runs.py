@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from finboard_persistence.models import ResearchRunArtifactModel, ResearchRunModel
+    from finboard_persistence.research_run_repo import ResearchRunArtifactSummary
 
 
 def _run_summary(row: ResearchRunModel) -> dict[str, Any]:
@@ -92,12 +93,17 @@ def _run_view(
     artifacts: list[ResearchRunArtifactModel] | None = None,
     *,
     view: str = "summary",
+    artifact_summary: ResearchRunArtifactSummary | None = None,
 ) -> dict[str, Any]:
     """run 详情视图(issue #206):summary 默认聚合计数,detail 全量。
 
     summary 在 detail 的头部字段之上,把 result 剔除 equity_curve(以点数
     提示),并附 universe / fills 服务端聚合计数,不序列化 manifest/result
     与逐标的全量 payload。
+
+    issue #478:``artifact_summary`` 提供数据库侧聚合计数时优先消费,
+    summary 不再要求物化全量 artifacts(两者都缺省时保持旧调用形态,
+    不输出 artifact_count / universe / fills 键)。
     """
     if view not in ("summary", "detail"):
         raise McpToolError("invalid_argument", f"未知视图: {view}")
@@ -126,6 +132,9 @@ def _run_view(
     if artifacts is not None:
         payload["artifact_count"] = len(artifacts)
         payload.update(summarize_run_artifacts(artifacts))
+    elif artifact_summary is not None:
+        payload["artifact_count"] = artifact_summary.artifact_count
+        payload.update(artifact_summary.summary_dict())
     return cast(dict[str, Any], to_jsonable(payload))
 
 
@@ -244,10 +253,13 @@ async def get_run(
             row = await repo.get(run_id)
             if row is None:
                 raise McpToolError("not_found", f"研究运行不存在: {run_id}")
-            artifacts = (
-                await repo.list_artifacts(run_id) if view == "summary" else None
-            )
-            return _run_view(row, artifacts, view=view)
+            if view != "summary":
+                return _run_view(row, view=view)
+            # issue #478:summary 聚合下沉 PostgreSQL —— 旧路径先全量物化
+            # artifacts(真实 run 7203 artifacts / ≈5.9GB JSON 曾把进程顶到
+            # 13GB 后 MCP 超时);现在只取回几十个计数字段。
+            summary = await repo.summarize_artifacts(run_id)
+            return _run_view(row, view=view, artifact_summary=summary)
 
     return await run_tool(
         audit=app.audit,

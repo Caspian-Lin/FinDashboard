@@ -142,6 +142,7 @@ from finboard_persistence.research_repo import (
     SyncBatchStatus,
 )
 from finboard_persistence.research_run_repo import (
+    ResearchRunArtifactSummary,
     ResearchRunPersistenceConflictError,
     ResearchRunRepository,
 )
@@ -255,6 +256,7 @@ __all__ = [
     "ResearchMemoryModel",
     "ResearchMemoryRepository",
     "ResearchRunArtifactModel",
+    "ResearchRunArtifactSummary",
     "ResearchRunModel",
     "ResearchRunPersistenceConflictError",
     "ResearchRunRepository",

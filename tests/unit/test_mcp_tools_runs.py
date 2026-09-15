@@ -111,6 +111,38 @@ def _make_app(session_maker: async_sessionmaker[AsyncSession]) -> McpAppContext:
     )
 
 
+def _patch_db_summary(
+    monkeypatch: Any,
+    artifacts: list[ResearchRunArtifactModel],
+) -> None:
+    """把 ``summarize_artifacts`` 桩为 Python 参考聚合的等价返回(#478)。
+
+    summary 路径改走数据库侧聚合后,``get_run`` 不再消费 list_artifacts 的
+    session 结果;单元层用参考实现构造等价计数,两边语义一致性由 #478
+    集成测试与真实 run 复测保证。
+    """
+    from finboard_mcp import reporting
+    from finboard_persistence import (
+        ResearchRunArtifactSummary,
+        ResearchRunRepository,
+    )
+
+    aggregate = reporting.summarize_run_artifacts(artifacts)
+    summary = ResearchRunArtifactSummary(
+        artifact_count=len(artifacts),
+        universe_total=aggregate["universe"]["total"],
+        universe_included=aggregate["universe"]["included"],
+        universe_excluded_by_reason=dict(aggregate["universe"]["excluded_by_reason"]),
+        fills_total=aggregate["fills"]["total"],
+        fills_by_decision=dict(aggregate["fills"]["by_decision"]),
+    )
+    monkeypatch.setattr(
+        ResearchRunRepository,
+        "summarize_artifacts",
+        lambda self, rid: _async_return(summary),
+    )
+
+
 class TestListRuns:
     async def test_returns_summaries(self) -> None:
         app = _make_app(_session_maker(list_rows=[_run_model()]))
@@ -129,7 +161,7 @@ class TestListRuns:
 
 
 class TestGetRun:
-    async def test_default_view_is_summary(self) -> None:
+    async def test_default_view_is_summary(self, monkeypatch: Any) -> None:
         """issue #206:默认 summary —— 不序列化 manifest/result,附聚合计数。"""
         artifacts = [
             _artifact_model(
@@ -146,7 +178,8 @@ class TestGetRun:
                 stage="fills", payload={"fills": [{"symbol": "A"}]}, decision_id="D-1"
             ),
         ]
-        app = _make_app(_session_maker(get_row=_run_model(), artifact_rows=artifacts))
+        _patch_db_summary(monkeypatch, artifacts)
+        app = _make_app(_session_maker(get_row=_run_model()))
         env = await runs.get_run(app, "RR-1")
         assert env.status == "ok"
         data = env.data
@@ -183,13 +216,14 @@ class TestGetRun:
         assert env.error is not None
         assert env.error.kind == "invalid_argument"
 
-    async def test_returns_detail_multi_period(self) -> None:
+    async def test_returns_detail_multi_period(self, monkeypatch: Any) -> None:
         row = _run_model()
         row.manifest = {"parameters": {"rebalance_frequency": "monthly"}}
         row.result = {
             "strategy_return": 0.5,
             "equity_curve": [{"date": "2026-01-01", "equity": 1.0}] * 3,
         }
+        _patch_db_summary(monkeypatch, [])
         app = _make_app(_session_maker(get_row=row))
         env = await runs.get_run(app, "RR-1")
         assert env.status == "ok"

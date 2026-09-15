@@ -47,6 +47,7 @@ from finboard_persistence import (
     FactorSeriesRecord,
     FactorSeriesRepository,
     ResearchRunArtifactModel,
+    ResearchRunArtifactSummary,
     ResearchRunModel,
     ResearchRunRepository,
     ResearchStrategySpecRepository,
@@ -244,6 +245,22 @@ def _patch_run_repos(
         "list_artifacts",
         lambda self, rid: _async_return(artifacts or []),
     )
+    # issue #478:summary 视图改走数据库侧聚合;单元层用 Python 参考实现
+    # 构造等价计数(两边语义一致性由 #478 集成测试与真实 run 复测保证)。
+    aggregate = reporting.summarize_run_artifacts(artifacts or [])
+    summary = ResearchRunArtifactSummary(
+        artifact_count=len(artifacts or []),
+        universe_total=aggregate["universe"]["total"],
+        universe_included=aggregate["universe"]["included"],
+        universe_excluded_by_reason=dict(aggregate["universe"]["excluded_by_reason"]),
+        fills_total=aggregate["fills"]["total"],
+        fills_by_decision=dict(aggregate["fills"]["by_decision"]),
+    )
+    monkeypatch.setattr(
+        ResearchRunRepository,
+        "summarize_artifacts",
+        lambda self, rid: _async_return(summary),
+    )
 
 
 def _patch_backtest_repos(monkeypatch: Any, row: BacktestRunModel | None) -> None:
@@ -400,12 +417,23 @@ class TestEventLoopNotPoisoned:
         original = reporting.aggregate_run_report
 
         def _slow_aggregate(
-            row: Any, artifacts: Any, *, view: str = "summary", decision_id: Any = None
+            row: Any,
+            artifacts: Any,
+            *,
+            view: str = "summary",
+            decision_id: Any = None,
+            artifact_summary: Any = None,
         ) -> Any:
             if view == "detail":
                 entered.set()
                 assert release.wait(timeout=10)
-            return original(row, artifacts, view=view, decision_id=decision_id)
+            return original(
+                row,
+                artifacts,
+                view=view,
+                decision_id=decision_id,
+                artifact_summary=artifact_summary,
+            )
 
         monkeypatch.setattr(reporting, "aggregate_run_report", _slow_aggregate)
         monkeypatch.setattr(

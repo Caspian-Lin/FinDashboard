@@ -142,7 +142,10 @@ def _patch_run_repos(
     row: ResearchRunModel | None,
     artifacts: list[ResearchRunArtifactModel] | None = None,
 ) -> None:
-    from finboard_persistence import ResearchRunRepository
+    from finboard_persistence import (
+        ResearchRunArtifactSummary,
+        ResearchRunRepository,
+    )
 
     monkeypatch.setattr(
         ResearchRunRepository, "get", lambda self, rid: _async_return(row)
@@ -151,6 +154,24 @@ def _patch_run_repos(
         ResearchRunRepository,
         "list_artifacts",
         lambda self, rid: _async_return(artifacts or []),
+    )
+    # issue #478:summary 视图改走数据库侧聚合;单元层用 Python 参考实现
+    # 构造等价计数(两边语义一致性由 #478 集成测试与真实 run 复测保证)。
+    from finboard_mcp import reporting
+
+    aggregate = reporting.summarize_run_artifacts(artifacts or [])
+    summary = ResearchRunArtifactSummary(
+        artifact_count=len(artifacts or []),
+        universe_total=aggregate["universe"]["total"],
+        universe_included=aggregate["universe"]["included"],
+        universe_excluded_by_reason=dict(aggregate["universe"]["excluded_by_reason"]),
+        fills_total=aggregate["fills"]["total"],
+        fills_by_decision=dict(aggregate["fills"]["by_decision"]),
+    )
+    monkeypatch.setattr(
+        ResearchRunRepository,
+        "summarize_artifacts",
+        lambda self, rid: _async_return(summary),
     )
 
 
