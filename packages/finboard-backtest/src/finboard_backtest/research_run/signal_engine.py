@@ -2448,12 +2448,15 @@ async def iter_decision_load_contexts(
         build = chunk[max(0, skip - chunk_start) :]
         if not build:
             return []
-        results = await asyncio.gather(
-            *(_load_one(decision_at, snapshot_id) for decision_at, snapshot_id in build),
-            return_exceptions=True,
-        )
+        results: list[DecisionLoadContext | BaseException] = []
         loaded: list[DecisionLoadContext] = []
         try:
+            # gather 也必须位于 finally 内:预取 task 在任一子任务尚未完成时
+            # 被取消,仍需释放本批已占用的 price/daily 预计算槽位。
+            results = await asyncio.gather(
+                *(_load_one(decision_at, snapshot_id) for decision_at, snapshot_id in build),
+                return_exceptions=True,
+            )
             # issue #263:按原始期序收集 —— 第一个失败期(与串行首个失败一致)
             # 在 bare raise 前挂决策标记;异常类型 / 消息 / traceback 不被改写。
             for (decision_at, _), result in zip(build, results, strict=True):

@@ -14,7 +14,10 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunManifest,
 )
 from finboard_backtest.research_run.failure_context import read_decision_load_context
-from finboard_backtest.research_run.frozen_loader import FrozenInputLoader
+from finboard_backtest.research_run.frozen_loader import (
+    FrozenInputLoader,
+    PriceFeaturePrecompute,
+)
 from finboard_backtest.research_run.signal_engine import (
     DecisionLoadContext,
     iter_decision_load_contexts,
@@ -172,6 +175,31 @@ class TestDecisionLoadPrefetch:
         decisions = _month_end_decisions()
         gate = _LoadGate(set(decisions[4:]))
         real_load = FrozenInputLoader.load_context
+        released_price: list[date] = []
+        released_daily: list[tuple[date, ...]] = []
+        real_release_price = PriceFeaturePrecompute.release_period
+        real_release_daily = FrozenInputLoader.release_daily_precompute_periods
+
+        def traced_release_price(
+            precompute: PriceFeaturePrecompute, decision_at: Any
+        ) -> int:
+            released_price.append(decision_at.date())
+            return real_release_price(precompute, decision_at)
+
+        def traced_release_daily(
+            loader: FrozenInputLoader, decision_ats: Any
+        ) -> int:
+            released_daily.append(tuple(item.date() for item in decision_ats))
+            return real_release_daily(loader, decision_ats)
+
+        monkeypatch.setattr(
+            PriceFeaturePrecompute, "release_period", traced_release_price
+        )
+        monkeypatch.setattr(
+            FrozenInputLoader,
+            "release_daily_precompute_periods",
+            traced_release_daily,
+        )
 
         async def wrapped_load(
             loader: FrozenInputLoader,
@@ -205,6 +233,12 @@ class TestDecisionLoadPrefetch:
         await asyncio.sleep(0)
         assert gate.cancelled >= 1
         assert _prefetch_tasks() == []
+        # gather 被取消时也必须走 _load_chunk.finally,释放预取批的所有
+        # price/daily 槽位,否则半批大数组会被 loader 一直持有。
+        assert set(decisions[4:]).issubset(set(released_price))
+        assert any(
+            set(decisions[4:]).issubset(set(batch)) for batch in released_daily
+        )
 
     async def test_skip_prefix_crossing_chunk_prefetches_only_suffix(
         self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
