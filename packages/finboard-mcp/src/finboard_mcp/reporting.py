@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         ResearchRunArtifactModel,
         ResearchRunModel,
     )
+    from finboard_persistence.research_run_repo import ResearchRunArtifactSummary
 
 REPORT_KINDS = ("run", "backtest")
 EXPORT_FORMATS = ("csv", "markdown")
@@ -118,10 +119,11 @@ def estimate_run_detail_bytes(
 
 def aggregate_run_report(
     row: ResearchRunModel,
-    artifacts: list[ResearchRunArtifactModel],
+    artifacts: list[ResearchRunArtifactModel] | None,
     *,
     view: str = "summary",
     decision_id: str | None = None,
+    artifact_summary: ResearchRunArtifactSummary | None = None,
 ) -> dict[str, Any]:
     """聚合 ResearchRun:run 元信息 + result(ResearchRunReport 扁平字段)+ 全部 artifacts。
 
@@ -134,11 +136,26 @@ def aggregate_run_report(
     抛 ``ValueError``(调用方映射为 invalid_argument,不静默忽略)。过滤时
     ``artifact_count`` 保持 run 全量计数,新增 ``decision_id`` 与
     ``filtered_artifact_count`` 两个键;不过滤时输出与旧版本逐键一致。
+
+    issue #478:``view=summary`` 可传 ``artifact_summary``(数据库侧聚合,
+    ``ResearchRunRepository.summarize_artifacts`` 的返回)替代全量
+    ``artifacts`` —— 输出与传 artifacts 的 Python 聚合逐字段一致;detail
+    视图仍必须传全量 artifacts。两者都缺省抛 ``ValueError``。
     """
     if view not in ("summary", "detail"):
         raise ValueError(f"未知视图: {view}")
     if decision_id is not None and view != "detail":
         raise ValueError("decision_id 仅支持 view=detail(summary 视图为聚合计数)")
+    if artifacts is None and artifact_summary is not None and (
+        view != "summary" or decision_id is not None
+    ):
+        raise ValueError("仅 view=summary 支持数据库侧聚合(detail 需全量 artifacts)")
+    if artifacts is not None:
+        artifact_count: int = len(artifacts)
+    elif artifact_summary is not None:
+        artifact_count = artifact_summary.artifact_count
+    else:
+        raise ValueError("artifacts 与 artifact_summary 至少提供一个")
     base: dict[str, Any] = {
         "run_id": row.run_id,
         "status": row.status,
@@ -150,13 +167,18 @@ def aggregate_run_report(
         "error_code": row.error_code,
         "error_summary": row.error_summary,
         "metrics": dict(row.result) if row.result else {},
-        "artifact_count": len(artifacts),
+        "artifact_count": artifact_count,
         "view": view,
     }
     if view == "summary":
         base["metrics"] = metrics_without_equity_curve(base["metrics"])
-        base.update(summarize_run_artifacts(artifacts))
+        if artifact_summary is not None:
+            base.update(artifact_summary.summary_dict())
+        else:
+            base.update(summarize_run_artifacts(artifacts or []))
         return base
+    if artifacts is None:
+        raise ValueError("detail 视图需要全量 artifacts(数据库侧聚合仅限 summary)")
     selected = artifacts
     if decision_id is not None:
         selected = [
@@ -201,6 +223,10 @@ def summarize_run_artifacts(
     * ``universe``:候选池逐标的判定聚合计数(total / included /
       ``excluded_by_reason``,与 UNIVERSE stage 全量判定一致);
     * ``fills``:按决策计数(``total`` + ``by_decision``)。
+
+    issue #478:大 run 的等价聚合下沉 PostgreSQL
+    (``ResearchRunRepository.summarize_artifacts``),不再物化 artifacts;
+    本函数保留为小 run 直读路径与两者语义一致性的对照基准。
     """
     total = 0
     included = 0

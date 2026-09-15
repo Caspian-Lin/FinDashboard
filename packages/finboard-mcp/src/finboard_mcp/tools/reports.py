@@ -34,6 +34,7 @@ if TYPE_CHECKING:
         ResearchRunArtifactModel,
         ResearchRunModel,
     )
+    from finboard_persistence.research_run_repo import ResearchRunArtifactSummary
 
 __all__ = ["register"]
 
@@ -54,10 +55,11 @@ def _payload_too_large_error(run_id: str, estimated_bytes: int) -> McpToolError:
 
 def _build_run_report(
     row: ResearchRunModel,
-    artifacts: list[ResearchRunArtifactModel],
+    artifacts: list[ResearchRunArtifactModel] | None,
     *,
     view: str,
     decision_id: str | None,
+    artifact_summary: ResearchRunArtifactSummary | None = None,
 ) -> dict[str, Any]:
     """聚合 run 报告;detail 未下钻时先过载荷护栏(#458)。
 
@@ -66,13 +68,25 @@ def _build_run_report(
     ``report_run`` 与 ``report_export(kind="run")`` 共用同一聚合出口。
     下钻 ``decision_id`` 无匹配 artifacts 时具名 ``not_found``(run 级
     artifact 如 report 的 decision_id 为 null,不参与下钻匹配)。
+
+    issue #478:``view=summary`` 可传 ``artifact_summary``(数据库侧聚合)
+    替代全量 artifacts,与 ``finboard_run_get`` 同源同口径;detail 仍需
+    全量 artifacts(护栏与序列化都消费 payload)。
     """
     if view == "detail" and decision_id is None:
+        if artifacts is None:
+            raise McpToolError(
+                "invalid_argument", "detail 视图需要全量 artifacts(数据库侧聚合仅限 summary)"
+            )
         estimated = reporting.estimate_run_detail_bytes(artifacts)
         if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
             raise _payload_too_large_error(row.run_id, estimated)
     report = reporting.aggregate_run_report(
-        row, artifacts, view=view, decision_id=decision_id
+        row,
+        artifacts,
+        view=view,
+        decision_id=decision_id,
+        artifact_summary=artifact_summary,
     )
     if decision_id is not None and not report["filtered_artifact_count"]:
         raise McpToolError(
@@ -86,13 +100,20 @@ def _build_run_report(
 
 def _run_report_jsonable(
     row: ResearchRunModel,
-    artifacts: list[ResearchRunArtifactModel],
+    artifacts: list[ResearchRunArtifactModel] | None,
     *,
     view: str,
     decision_id: str | None,
+    artifact_summary: ResearchRunArtifactSummary | None = None,
 ) -> dict[str, Any]:
     """:func:`_build_run_report` + JSON 兼容化(线程池内一次完成,#458)。"""
-    report = _build_run_report(row, artifacts, view=view, decision_id=decision_id)
+    report = _build_run_report(
+        row,
+        artifacts,
+        view=view,
+        decision_id=decision_id,
+        artifact_summary=artifact_summary,
+    )
     return cast(dict[str, Any], to_jsonable(report))
 
 
@@ -126,6 +147,18 @@ async def report_run(
             row = await repo.get(run_id)
             if row is None:
                 raise McpToolError("not_found", f"研究运行不存在: {run_id}")
+            if view == "summary":
+                # issue #478:与 finboard_run_get 同走数据库侧聚合,不再
+                # 为计数摘要物化全量 payload(真实 run 曾 13GB OOM)。
+                summary = await repo.summarize_artifacts(run_id)
+                return await asyncio.to_thread(
+                    _run_report_jsonable,
+                    row,
+                    None,
+                    view=view,
+                    decision_id=None,
+                    artifact_summary=summary,
+                )
             artifacts = await repo.list_artifacts(run_id)
             # 聚合 + JSON 化挪线程池:GB 级 payload 的同步 CPU 段不再阻塞
             # 事件循环,重调用期间其它工具请求照常响应(#458)。
