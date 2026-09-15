@@ -16,6 +16,8 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, NamedTuple, Protocol, cast
 
+import orjson
+
 from finboard_backtest.strategy_spec.contracts import (
     ResearchStrategySpec,
     reject_executable_payload,
@@ -1070,6 +1072,77 @@ CANONICAL_SECTION_KEYS = frozenset({"features", "candidates"})
 CANONICAL_CHUNK_SIZE = 4096
 
 
+def _native_canonical_chunk(items: Sequence[object]) -> str | None:
+    """Encode a supported homogeneous frozen cross-section with ``orjson``.
+
+    ``orjson`` is a required runtime dependency of ``finboard-backtest``.  The
+    mapper is deliberately contract-specific: using ``orjson`` on dataclasses
+    directly would retain declaration order, and using its native float writer
+    changes Python's canonical exponent spelling.  ``Fragment`` is therefore
+    used only with finite values produced by Python ``repr``; all other values
+    remain on the established recursive path.
+    """
+
+    if len(items) == 0:
+        return None
+    item_type = type(items[0])
+    mapped: list[dict[str, object]] = []
+    if item_type is UniverseCandidate and all(
+        type(item) is UniverseCandidate for item in items
+    ):
+        for candidate in cast(Sequence[UniverseCandidate], items):
+            if not (
+                isinstance(candidate.symbol, str)
+                and type(candidate.included) is bool
+                and isinstance(candidate.reasons, tuple | list)
+                and all(isinstance(reason, str) for reason in candidate.reasons)
+                and isinstance(candidate.asset_class, str)
+                and isinstance(candidate.market, str)
+            ):
+                return None
+            mapped.append(
+                {
+                    "symbol": candidate.symbol,
+                    "included": candidate.included,
+                    "reasons": list(candidate.reasons),
+                    "asset_class": candidate.asset_class,
+                    "market": candidate.market,
+                }
+            )
+    elif item_type is FeatureValue and all(type(item) is FeatureValue for item in items):
+        for feature in cast(Sequence[FeatureValue], items):
+            if not (
+                isinstance(feature.symbol, str)
+                and isinstance(feature.feature_id, str)
+                and (feature.value is None or type(feature.value) is float)
+                and isinstance(feature.source_artifact_ids, tuple | list)
+                and all(isinstance(source_id, str) for source_id in feature.source_artifact_ids)
+                and isinstance(feature.available_at, datetime)
+            ):
+                return None
+            if feature.value is not None:
+                if not math.isfinite(feature.value):
+                    # The generic encoder uses allow_nan=False.  Preserve that
+                    # fail-closed behavior rather than letting Fragment inject
+                    # invalid JSON.
+                    raise ValueError("feature value 必须有限或为 None")
+                encoded_value: object = orjson.Fragment(repr(feature.value).encode("ascii"))
+            else:
+                encoded_value = None
+            mapped.append(
+                {
+                    "symbol": feature.symbol,
+                    "feature_id": feature.feature_id,
+                    "value": encoded_value,
+                    "source_artifact_ids": list(feature.source_artifact_ids),
+                    "available_at": feature.available_at.isoformat(),
+                }
+            )
+    else:
+        return None
+    return orjson.dumps(mapped, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+
+
 def canonical_json_list_text(
     items: Sequence[object], *, chunk_size: int = CANONICAL_CHUNK_SIZE
 ) -> str:
@@ -1082,6 +1155,11 @@ def canonical_json_list_text(
     回归测试用真实 run 语料(逐期全量 features/candidates)钉死该等价性。
     """
 
+    if chunk_size <= 0:
+        raise ValueError("chunk_size 必须为正数")
+    # Keep the transient native/stdlib tree bounded even when an old caller
+    # supplies a larger value; the concatenated output remains identical.
+    chunk_size = min(chunk_size, CANONICAL_CHUNK_SIZE)
     parts: list[str] = []
     position = 0
     total = len(items)
@@ -1089,7 +1167,10 @@ def canonical_json_list_text(
         chunk = items[position : position + chunk_size]
         position += chunk_size
         # 块内文本必为 "[...]"(块非空、元素为 JSON 值):剥外括号拼大列表
-        parts.append(canonical_json_normalized(to_json_value(chunk))[1:-1])
+        native_text = _native_canonical_chunk(chunk)
+        if native_text is None:
+            native_text = canonical_json_normalized(to_json_value(chunk))
+        parts.append(native_text[1:-1])
     return "[" + ",".join(parts) + "]"
 
 
