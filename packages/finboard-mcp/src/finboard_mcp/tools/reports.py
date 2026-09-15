@@ -34,7 +34,10 @@ if TYPE_CHECKING:
         ResearchRunArtifactModel,
         ResearchRunModel,
     )
-    from finboard_persistence.research_run_repo import ResearchRunArtifactSummary
+    from finboard_persistence.research_run_repo import (
+        ResearchRunArtifactSummary,
+        ResearchRunRepository,
+    )
 
 __all__ = ["register"]
 
@@ -46,11 +49,31 @@ def _payload_too_large_error(run_id: str, estimated_bytes: int) -> McpToolError:
     return McpToolError(
         "payload_too_large",
         f"run {run_id} 的 detail 载荷估计约 {estimated_mb:.1f}MB,超过上限 "
-        f"{limit_mb:.0f}MB,拒绝序列化(不静默截断)。替代路径:view=summary "
+        f"{limit_mb:.0f}MB,拒绝加载与序列化(不静默截断)。替代路径:view=summary "
         '看聚合计数;view="detail" + decision_id=... 按决策下钻(单决策 '
         'artifacts 有界);report_export(kind="run", decision_id=...) 导出'
         "单决策。",
     )
+
+
+async def _require_detail_payload_within_limit(
+    repo: ResearchRunRepository,
+    run_id: str,
+    decision_id: str | None,
+) -> None:
+    """detail 未下钻时,加载前用数据库侧估计做载荷护栏(#480)。
+
+    旧口径(#458)在 ``list_artifacts`` 全量物化之后才估计,只能拒绝序列化、
+    挡不住加载本身 —— 真实 run 实测加载阶段就把进程顶到 10GB+。现在先
+    ``estimate_artifact_payload_bytes``(SQL 侧 SUM(octet_length),不取回
+    payload),超限直接具名 ``payload_too_large``,根本不加载;下钻单决策
+    artifacts 有界,维持豁免。
+    """
+    if decision_id is not None:
+        return
+    estimated = await repo.estimate_artifact_payload_bytes(run_id)
+    if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
+        raise _payload_too_large_error(run_id, estimated)
 
 
 def _build_run_report(
@@ -61,9 +84,8 @@ def _build_run_report(
     decision_id: str | None,
     artifact_summary: ResearchRunArtifactSummary | None = None,
 ) -> dict[str, Any]:
-    """聚合 run 报告;detail 未下钻时先过载荷护栏(#458)。
+    """聚合 run 报告(线程池内执行,O(payload) 的同步 CPU 段,#458)。
 
-    在线程池内执行(护栏估计与聚合都是 O(payload) 的同步 CPU 段);
     ``McpToolError`` 经 ``await`` 透传,``run_tool`` 的异常映射语义不变。
     ``report_run`` 与 ``report_export(kind="run")`` 共用同一聚合出口。
     下钻 ``decision_id`` 无匹配 artifacts 时具名 ``not_found``(run 级
@@ -71,16 +93,12 @@ def _build_run_report(
 
     issue #478:``view=summary`` 可传 ``artifact_summary``(数据库侧聚合)
     替代全量 artifacts,与 ``finboard_run_get`` 同源同口径;detail 仍需
-    全量 artifacts(护栏与序列化都消费 payload)。
+    全量 artifacts(序列化消费 payload)。
+
+    issue #480:载荷护栏前移到加载之前(``report_run`` / ``report_export``
+    先经 ``estimate_artifact_payload_bytes`` 数据库侧估计再决定是否加载,
+    超限根本不把 payload 拉进进程);本函数不再做加载后估计。
     """
-    if view == "detail" and decision_id is None:
-        if artifacts is None:
-            raise McpToolError(
-                "invalid_argument", "detail 视图需要全量 artifacts(数据库侧聚合仅限 summary)"
-            )
-        estimated = reporting.estimate_run_detail_bytes(artifacts)
-        if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
-            raise _payload_too_large_error(row.run_id, estimated)
     report = reporting.aggregate_run_report(
         row,
         artifacts,
@@ -159,6 +177,8 @@ async def report_run(
                     decision_id=None,
                     artifact_summary=summary,
                 )
+            # issue #480:护栏前移 —— 超限在加载前拒绝,不把 payload 拉进进程。
+            await _require_detail_payload_within_limit(repo, run_id, decision_id)
             artifacts = await repo.list_artifacts(run_id)
             # 聚合 + JSON 化挪线程池:GB 级 payload 的同步 CPU 段不再阻塞
             # 事件循环,重调用期间其它工具请求照常响应(#458)。
@@ -261,6 +281,8 @@ async def report_export(
                 run_row = await run_repo.get(id)
                 if run_row is None:
                     raise McpToolError("not_found", f"研究运行不存在: {id}")
+                # issue #480:与 report_run 同款加载前护栏(下钻豁免)。
+                await _require_detail_payload_within_limit(run_repo, id, decision_id)
                 artifacts = await run_repo.list_artifacts(id)
                 # 聚合(含 #458 载荷护栏)挪线程池,与 report_run 同出口。
                 report = await asyncio.to_thread(

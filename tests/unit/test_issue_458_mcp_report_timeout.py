@@ -15,8 +15,9 @@
 * ``report_export``:kind=run 同护栏 + ``decision_id`` 过滤导出;
   kind=backtest 行为零变化(backtest 不接受 decision_id);
 * 回归:``aggregate_run_report(view=summary)`` 输出与改动前逐字段相等;
-  detail 未下钻不新增键(旧消费方零漂移);``estimate_run_detail_bytes``
-  口径;``factor_series_get`` detail 同款护栏。
+  detail 未下钻不新增键(旧消费方零漂移);issue #480 起载荷估计前移到
+  数据库侧(``estimate_artifact_payload_bytes``,超限在加载前拒绝、绝不
+  全量物化 payload);``factor_series_get`` detail 同款护栏。
 """
 
 from __future__ import annotations
@@ -234,33 +235,45 @@ def _patch_run_repos(
     monkeypatch: Any,
     row: ResearchRunModel | None,
     artifacts: list[ResearchRunArtifactModel] | None = None,
-) -> None:
+) -> dict[str, int]:
+    """桩掉 get / summarize / estimate / list,返回调用计数(#480 回归断言用)。"""
+    calls = {"get": 0, "summarize": 0, "estimate": 0, "list": 0}
+
+    async def _get(self: Any, rid: Any) -> ResearchRunModel | None:
+        calls["get"] += 1
+        return row
+
+    async def _list(self: Any, rid: Any) -> list[ResearchRunArtifactModel]:
+        calls["list"] += 1
+        return artifacts or []
+
+    async def _estimate(self: Any, rid: Any) -> int:
+        calls["estimate"] += 1
+        # 与数据库侧 octet_length(payload::text) 同数量级的廉价口径。
+        return sum(len(str(a.payload)) for a in (artifacts or []) if a.payload)
+
+    monkeypatch.setattr(ResearchRunRepository, "get", _get)
+    monkeypatch.setattr(ResearchRunRepository, "list_artifacts", _list)
     monkeypatch.setattr(
-        ResearchRunRepository,
-        "get",
-        lambda self, rid: _async_return(row),
-    )
-    monkeypatch.setattr(
-        ResearchRunRepository,
-        "list_artifacts",
-        lambda self, rid: _async_return(artifacts or []),
+        ResearchRunRepository, "estimate_artifact_payload_bytes", _estimate
     )
     # issue #478:summary 视图改走数据库侧聚合;单元层用 Python 参考实现
     # 构造等价计数(两边语义一致性由 #478 集成测试与真实 run 复测保证)。
     aggregate = reporting.summarize_run_artifacts(artifacts or [])
-    summary = ResearchRunArtifactSummary(
-        artifact_count=len(artifacts or []),
-        universe_total=aggregate["universe"]["total"],
-        universe_included=aggregate["universe"]["included"],
-        universe_excluded_by_reason=dict(aggregate["universe"]["excluded_by_reason"]),
-        fills_total=aggregate["fills"]["total"],
-        fills_by_decision=dict(aggregate["fills"]["by_decision"]),
-    )
-    monkeypatch.setattr(
-        ResearchRunRepository,
-        "summarize_artifacts",
-        lambda self, rid: _async_return(summary),
-    )
+
+    async def _summarize(self: Any, rid: Any) -> ResearchRunArtifactSummary:
+        calls["summarize"] += 1
+        return ResearchRunArtifactSummary(
+            artifact_count=len(artifacts or []),
+            universe_total=aggregate["universe"]["total"],
+            universe_included=aggregate["universe"]["included"],
+            universe_excluded_by_reason=dict(aggregate["universe"]["excluded_by_reason"]),
+            fills_total=aggregate["fills"]["total"],
+            fills_by_decision=dict(aggregate["fills"]["by_decision"]),
+        )
+
+    monkeypatch.setattr(ResearchRunRepository, "summarize_artifacts", _summarize)
+    return calls
 
 
 def _patch_backtest_repos(monkeypatch: Any, row: BacktestRunModel | None) -> None:
@@ -290,7 +303,7 @@ class TestDetailPayloadGuard:
                 payload={"blob": "x" * 200},
             ),
         ]
-        _patch_run_repos(monkeypatch, _run_row(), artifacts)
+        calls = _patch_run_repos(monkeypatch, _run_row(), artifacts)
         env = await rp_tools.report_run(app, _RUN_ID, view="detail")
         assert env.status == "error"
         assert env.error is not None
@@ -301,6 +314,9 @@ class TestDetailPayloadGuard:
         assert "MB" in message  # 实际规模
         assert "summary" in message  # 替代路径 1
         assert "decision_id" in message  # 替代路径 2
+        # issue #480:超限在加载前拒绝,绝不把全量 payload 拉进进程。
+        assert calls["estimate"] == 1
+        assert calls["list"] == 0
 
     async def test_detail_under_limit_unchanged(self, monkeypatch: Any) -> None:
         """默认 64MB 上限下小 run detail 行为不变(护栏不误伤)。"""
@@ -486,12 +502,15 @@ class TestReportExportGuard:
                 payload={"blob": "y" * 64},
             ),
         ]
-        _patch_run_repos(monkeypatch, _run_row(), artifacts)
+        calls = _patch_run_repos(monkeypatch, _run_row(), artifacts)
         env = await rp_tools.report_export(app, "run", _RUN_ID, "csv")
         assert env.status == "error"
         assert env.error is not None
         assert env.error.kind == "payload_too_large"
         assert list(tmp_path.iterdir()) == []  # 不写半成品文件
+        # issue #480:超限在加载前拒绝。
+        assert calls["estimate"] == 1
+        assert calls["list"] == 0
 
     async def test_export_run_decision_id_filters_and_bypasses_guard(
         self, monkeypatch: Any, tmp_path: Any
@@ -641,31 +660,10 @@ class TestReportingRegression:
                 _run_row(), [], view="summary", decision_id="D1"
             )
 
-    def test_estimate_run_detail_bytes(self) -> None:
-        artifacts = [
-            _artifact(
-                artifact_id="a1",
-                sequence=1,
-                stage="features",
-                payload={"x": "y" * 10},
-            ),
-            # payload 为 null 的行不参与估计(estimate 跳过 falsy payload)。
-            ResearchRunArtifactModel(
-                run_id=_RUN_ID,
-                artifact_id="a2",
-                decision_id=None,
-                sequence=2,
-                stage="report",
-                trace_id="RRT-0002",
-                parent_trace_ids=[],
-                payload=None,
-                checksum="c2",
-                created_at=datetime(2026, 1, 15, 8, 35, tzinfo=UTC),
-            ),
-        ]
-        assert reporting.estimate_run_detail_bytes(artifacts) == len(
-            str({"x": "y" * 10})
-        )
+    def test_estimate_run_detail_bytes_removed(self) -> None:
+        """issue #480:加载后内存估计已移除,护栏统一走数据库侧估计。"""
+        assert not hasattr(reporting, "estimate_run_detail_bytes")
+        assert hasattr(ResearchRunRepository, "estimate_artifact_payload_bytes")
 
 
 # ---------------------------------------------------------------------------
