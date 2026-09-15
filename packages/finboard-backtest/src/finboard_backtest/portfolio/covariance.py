@@ -36,7 +36,6 @@ PSD_MIN_EIGENVALUE / 2)`` —— 此前纯数值容差在大 N(N≈5000)时约 1
 修复过的矩阵(最小特征值 >= 1e-12)恒过校验,真坏矩阵(最小特征值 <= 0
 或 NaN / 不对称)照旧被拦。"""
 
-
 class CovarianceError(RuntimeError):
     """协方差估计失败 —— 标的为空、窗口不足或矩阵非正定。"""
 
@@ -52,7 +51,7 @@ class CovarianceEstimate:
             1 = 纯目标矩阵。
         n_observations: 有效观测数(对齐后)。
         method: 估计方法标识("ledoit_wolf")。
-    """
+"""
 
     matrix: npt.NDArray[np.float64]
     tickers: list[str]

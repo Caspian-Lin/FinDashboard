@@ -238,3 +238,65 @@ def test_report_benchmark_pair_must_match() -> None:
             order_count=0,
             fill_count=0,
         )
+
+
+def test_stable_checksum_normalized_matches_full_path_byte_for_byte(
+    manifest_factory,
+) -> None:
+    """「先规范化再算 checksum」的 fast path 与 canonical_json 逐字节一致。
+
+    2026-09-14 决策段性能:`_persist_decision` 对同一 payload 此前要走两遍
+    ``to_json_value``(一遍造 payload、一遍藏在 ``stable_checksum`` 里)。
+    fast path 的正确性前提:规范化输出只含 dict/list/str/int/float/None,
+    二次遍历是恒等变换 —— 本测试用含 Decimal / date / 枚举 / 嵌套 dataclass
+    / None 省键(ConstraintOutcome)的代表性结构锁死该前提。
+    """
+
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from finboard_backtest.research_run import (
+        ConstraintOutcome,
+        NormalizedSignal,
+        TargetPosition,
+    )
+    from finboard_backtest.research_run.contracts import (
+        canonical_json,
+        canonical_json_normalized,
+        stable_checksum,
+        stable_checksum_normalized,
+    )
+
+    raw = {
+        "business_date": date(2020, 3, 6),
+        "decision_at": datetime(2020, 3, 6, 1, 0, tzinfo=UTC),
+        "signals": (
+            NormalizedSignal(
+                symbol="000001.SZ",
+                score=0.42,
+                action="buy",
+                rule_id="r1",
+                rationale="momentum",
+            ),
+        ),
+        "targets": (TargetPosition(symbol="000001.SZ", weight=0.05),),
+        "constraints": (
+            ConstraintOutcome(
+                constraint="max_weight",
+                passed=True,
+                before_value=0.5,
+                after_value=0.42,
+                limit=0.1,
+                reason="ok",
+                symbol=None,
+            ),
+        ),
+        "nested": {"a": [Decimal("1.5"), None, True], "b": (1, 2, 3)},
+    }
+    normalized = to_json_value(raw)
+    assert isinstance(normalized, dict)
+
+    assert canonical_json_normalized(normalized) == canonical_json(raw)
+    assert stable_checksum_normalized(normalized) == stable_checksum(raw)
+    # 双重规范化是恒等变换(fast path 可安全叠加在任意已规范化载荷上)。
+    assert canonical_json_normalized(normalized) == canonical_json(normalized)

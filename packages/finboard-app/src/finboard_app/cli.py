@@ -32,6 +32,24 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
+# OpenBLAS 单线程界(issue #471 次级活性隐患防线):BLAS 原生调用在
+# to_thread / 进程池并发下可被永久卡死(#471 冻结转储:两个 _load_one 任务
+# 的 await 停在 ``asyncio.to_thread(_estimate_covariance, ...)``,工作线程
+# 卡死在 numpy eigh → ``covariance.py _ensure_positive_definite`` 原生区不
+# 返回;OpenBLAS 多线程并发调用死锁是同类已知问题)。研究运行的并行度来自
+# chunk 级并发与进程池,BLAS 自身多线程属超额订阅 —— 单线程化即消除该类
+# 卡死面,计算并行度不受影响。必须在 numpy 首次 import(**库初始化时读该
+# 环境变量,本模块任何 finboard_* 导入都会传递拉起 numpy**)之前生效;
+# 生产路径不接受用户线程覆盖。spawn 池子进程(factor_lab
+# ProcessPoolExecutor,未显式传 env)经环境继承自动继承本值。
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
+# 注意:不要把 ARROW_DEFAULT_MEMORY_POOL 切到 system —— 2026-09-14 实测
+# Windows 上 pyarrow system 池在研究 run 决策 ~120 处原生段错误(exit 139,
+# 无 Python 异常;mimalloc 默认池同代码 3h+ 无恙)。mimalloc 缓存已释放页
+# 不归还 OS 的 ~3GB 死页问题,改由 factor_series_store 的逐批流式装载
+# 根治(瞬态从 ~GB 降到 ~MB,池内无可缓存的大块)。
+
 import typer
 
 from finboard_app.bootstrap import build_kernel_components
@@ -248,11 +266,13 @@ def _stop_dev_process(
 async def _check_dev_database(settings: Settings) -> None:
     """在启动 Vite 前验证数据库,避免前端对未就绪 API 持续代理报错。"""
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import create_async_engine
 
+    from finboard_persistence import create_async_engine
+
+    # #471:经 persistence 工厂创建 —— postgres URL 默认注入 #450 keepalive,
+    # connect_timeout 保持 3s 快速失败(同名键覆盖默认 10s),预检不等满窗口。
     engine = create_async_engine(
         settings.db_url,
-        pool_pre_ping=True,
         connect_args={"connect_timeout": 3},
     )
     try:
@@ -1298,6 +1318,13 @@ def build_executor_registry(
 
 
 async def _run_worker(settings: Settings) -> None:
+    # #471 终验教训:worker 两次原生死亡(exit 139,无 Python 异常)而 WER
+    # 无记录 —— faulthandler 常开,原生崩溃(段错误/栈溢出)瞬间把全部线程
+    # 的 Python 栈打到 stderr(启动器已重定向到 worker 日志文件),崩溃
+    # 取证不再依赖复现运气。
+    import faulthandler
+
+    faulthandler.enable(all_threads=True)
     setup_logging(settings)
     components = build_kernel_components(settings)
     from finboard_backtest.background_jobs.worker import (
@@ -1336,6 +1363,10 @@ async def _run_worker(settings: Settings) -> None:
         shutdown_grace_seconds=settings.worker_shutdown_grace_seconds,
         # issue #306:僵尸无进展检测阈值(0 = 关闭;默认 3600s 见 settings 注释)。
         zombie_no_progress_seconds=settings.worker_zombie_no_progress_seconds,
+        # issue #471:执行段停滞看门狗阈值(0 = 关闭;默认 900s 见 settings
+        # 注释)—— 心跳线程侧独立看门狗,无 progress 回调且未返回即取消
+        # 执行任务并具名转 retry_waiting。
+        stall_timeout_seconds=settings.worker_stall_timeout_seconds,
         # per-kind 全局并发上限见模块级 _KIND_CONCURRENCY(#144/#375)。
         kind_concurrency=dict(_KIND_CONCURRENCY),
     )

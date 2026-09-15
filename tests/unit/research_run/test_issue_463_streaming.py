@@ -545,14 +545,17 @@ class TestGeneratorCloseReleasesPool:
     async def test_aclose_closes_pool_promptly(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """拉取 1 期后 aclose 加载生成器:finally 立即关闭常驻进程池
-        (真实 spawn 池,关闭计数经由包装的 aclose)。"""
+        """池生命周期(#470 收紧):预计算完成后**首个 context 产出前**池已
+        retire+aclose(决策段零子进程驻留);生成器 finally 的 aclose 幂等
+        (executor 已 None,无第二次真实关闭)。真实 spawn 池,关闭计数经由
+        包装的 aclose。"""
         import finboard_backtest.research_run.signal_engine as signal_engine
 
         provider = await _build_release(tmp_path)
         manifest = _multi_period_manifest()
         real_start = signal_engine._start_period_feature_pool
         closed = {"count": 0}
+        pool_ref: dict[str, Any] = {}
 
         async def wrapped_start(pool_provider: Any, workers: int) -> Any:
             pool = await real_start(pool_provider, workers)
@@ -564,6 +567,7 @@ class TestGeneratorCloseReleasesPool:
                 await original()
 
             pool.aclose = counting  # type: ignore[method-assign]
+            pool_ref["pool"] = pool
             return pool
 
         monkeypatch.setattr(signal_engine, "_start_period_feature_pool", wrapped_start)
@@ -579,9 +583,12 @@ class TestGeneratorCloseReleasesPool:
         )
         first = await gen.__anext__()
         assert first.context.business_date is not None
-        assert closed["count"] == 0
-        await gen.aclose()
+        # 预计算段结束即退役:决策段(数百期)不再有子进程常驻。
         assert closed["count"] == 1
+        assert pool_ref["pool"].broken is True
+        await gen.aclose()
+        # finally 的 aclose 仍会调用一次,但 executor 已 None(幂等 no-op)。
+        assert closed["count"] == 2
 
 
 # ---------------------------------------------------------------------------

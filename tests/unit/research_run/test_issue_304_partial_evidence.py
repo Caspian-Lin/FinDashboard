@@ -34,6 +34,7 @@ from finboard_backtest.research_run import (
 )
 from finboard_backtest.research_run.contracts import (
     DecisionBundle,
+    DecisionLedgerView,
     FrozenArtifactRef,
     JsonValue,
     ResearchRunManifest,
@@ -240,7 +241,8 @@ class TestSignalEnginePartialEvidence:
         assert failure["completed_decisions"] == 0
         assert failure["failed_decision_index"] == 1
         assert failure["decision_date"] == DECISION_AT.date().isoformat()
-        # factor_screen 证据与成功路径同构(只依赖冻结输入,与组合阶段无关)
+        # factor_screen 证据与成功路径同构(只依赖前缀捕获的冻结输入投影,
+        # 与组合阶段无关;#463 前缀口径 —— 首期失败时前缀 = 该期)
         screen = report_payload["factor_screen"]
         assert isinstance(screen, dict)
         raw_factors = screen["factors"]
@@ -258,7 +260,7 @@ class TestSignalEnginePartialEvidence:
 
     async def test_partial_hook_reports_mid_run_position(self) -> None:
         """验收(中期失败定位):hook 按 completed_decisions 给出 1-based
-        失败期序号与同序号冻结输入的决策日。"""
+        失败期序号与同序号前缀捕获的决策日。"""
         spec = _spec(rank_threshold=0.5)  # 阈值放宽,决策本身可构建
         snapshots = {
             "factor-v1": _snapshot(DECISION_AT),
@@ -285,10 +287,22 @@ class TestSignalEnginePartialEvidence:
         assert marker["completed_decisions"] == 1
         assert marker["failed_decision_index"] == 2
         assert marker["decision_date"] == DECISION_AT_2.date().isoformat()
-        assert "warnings" not in marker
-        # screen 已补算暂存,build_report 照常携带
+        # issue #463 前缀口径:run 引用 u_ 用户因子(screen 有真实产出),
+        # marker.warnings 具名标注 screen 只覆盖已捕获的 0..N 期 —— 这里
+        # 期次被完整驱动,前缀恰好等于全期次,但口径标注照常携带。
+        warnings = marker.get("warnings")
+        assert isinstance(warnings, list)
+        prefix_scopes = [
+            item
+            for item in warnings
+            if isinstance(item, dict) and item.get("factor_screen_prefix_scope")
+        ]
+        assert len(prefix_scopes) == 1
+        assert prefix_scopes[0]["screen_periods"] == 2
+        # screen 已按前缀捕获补算暂存,build_report 照常携带
         report = adapter.build_report(manifest, ())
         assert report.factor_screen is not None
+        # n_periods 是前缀捕获期数(本用例完整驱动,前缀 = 全部 2 期)
         assert report.factor_screen["n_periods"] == 2
 
     async def test_partial_hook_reports_screen_computation_warning(self) -> None:
@@ -359,7 +373,7 @@ class _GeneratorRejectAdapter:
         )
 
     def build_report(
-        self, manifest: ResearchRunManifest, decisions: Sequence[DecisionBundle]
+        self, manifest: ResearchRunManifest, decisions: Sequence[DecisionLedgerView]
     ) -> ResearchRunReport:
         del manifest
         if not decisions:

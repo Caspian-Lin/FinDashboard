@@ -112,6 +112,15 @@ class Settings(BaseSettings):
     # 逐 symbol 进度、回测引擎至少每小时推进一次;RR-7a74 类「心跳续租型僵尸」
     # 7.5h 才被人肉发现,1h 阈值已能兜底且远离健康长任务的误杀线。0 = 关闭。
     worker_zombie_no_progress_seconds: float = Field(default=3600.0, ge=0)
+    # 执行段停滞看门狗阈值(issue #471,FINBOARD_WORKER_STALL_TIMEOUT_SECONDS):
+    # worker 心跳线程侧的独立看门狗线程,超过该秒数无任何 progress 回调且执行
+    # 未返回 → 取消执行任务,job 具名收敛 retry_waiting(error_code=
+    # stall_watchdog)。默认 900s(15 分钟):已知最长合法无回调段(单决策
+    # 13 stage 帧、#464 预计算节流帧)均为秒到分钟级,15 分钟只截杀「永不
+    # 返回」类挂死(to_thread 内 BLAS 原生调用卡死 / 黑洞连接 recv / 休眠
+    # 唤醒后 await 不完成),不误伤正常慢段。0 = 关闭(关闭后仍由 #306
+    # 僵尸检测在 DB 侧兜底)。
+    worker_stall_timeout_seconds: float = Field(default=900.0, ge=0)
 
     # ---- Broker ----
     broker: BrokerKind = BrokerKind.MOCK
@@ -305,19 +314,11 @@ def load_settings(env_file: str | None = None) -> Settings:
     return Settings()
 
 
-#: psycopg(libpq)连接黑洞加固参数(#450)。WSL2 NAT 转发下的长驻连接池
-#: 实测会被静默黑洞化(对端无 RST,本地 send 成功、recv 永不返回):worker
-#: 事件循环上的任务全体冻结在 ``await`` 上、心跳停摆、相位不动,僵尸检测与
-#: 协作取消同循环同死。TCP keepalive 让死连接在 ~keepalives_idle + count x
-#: interval(默认 ~60s)内显式报错,由调用方(逐操作短会话等)按连接级
-#: 失败处理;非 postgres 驱动(sqlite 等)返回空 dict 不影响测试。
+#: psycopg(libpq)连接黑洞加固参数(#450;#471 起权威实现收敛到
+#: ``finboard_persistence.engine`` 并作为引擎工厂默认值注入)。
+#: 保留本别名仅为既有导入(``bootstrap`` / ``cli`` / #450 测试)兼容:
+#: 语义 = 委托 persistence 实现,勿在此复制参数表(会漂移)。
 def postgres_connect_args(db_url: str) -> dict[str, int]:
-    if not db_url.startswith(("postgresql://", "postgresql+psycopg://", "postgres://")):
-        return {}
-    return {
-        "connect_timeout": 10,
-        "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 3,
-    }
+    from finboard_persistence.engine import postgres_connect_args as _impl
+
+    return _impl(db_url)

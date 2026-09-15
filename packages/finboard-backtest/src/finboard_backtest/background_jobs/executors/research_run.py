@@ -26,13 +26,15 @@ Coordinator,后者在 ``stage x decision`` 粒度逐阶段回调
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_backtest.background_jobs.contracts import (
@@ -45,6 +47,7 @@ from finboard_backtest.background_jobs.contracts import (
 )
 from finboard_backtest.research_run import (
     REPLAYABLE_SOURCE_STATUSES,
+    ArtifactDigest,
     ResearchArtifact,
     ResearchRunCoordinator,
     ResearchRunManifest,
@@ -53,7 +56,10 @@ from finboard_backtest.research_run import (
     ResearchRunStatus,
 )
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
-from finboard_backtest.research_run.contracts import JsonValue
+from finboard_backtest.research_run.contracts import (
+    JsonValue,
+    ResearchRunInterruptedError,
+)
 
 if TYPE_CHECKING:
     from finboard_backtest.research_run.store import ResearchRunStore
@@ -64,9 +70,47 @@ StoreFactory = Callable[[AsyncSession], "ResearchRunStore"]
 
 _R = TypeVar("_R")
 
+#: 研究运行 store 单操作超时上界(#471):服务端 ``statement_timeout`` 与
+#: 客户端 ``wait_for`` 兜底共用该基准(客户端界再放 25% 缓冲,让服务端
+#: 的 QueryCanceled 先行——它保持连接可用,客户端取消只作黑洞兜底)。
+#: 120s 的理由:研究运行 store 的单操作都是本机(WSL2)PG 上的短读写 ——
+#: 逐决策 artifact 批量提交(13 条 JSON,数 MB 级)、manifest / run 行
+#: 读写,健康路径毫秒到秒级;#285/#383 实测最重的逐期持久化亦在秒级。
+#: 120s ≈ 两个数量级余量,只截杀「永不返回」类挂死(#471 黑洞 / 服务端
+#: 悬挂查询),不误伤任何已知的慢而有限的操作。bulk_download 等数据任务
+#: **不走本 store**(各自 executor 独立 session),不受该值影响。
+DEFAULT_RESEARCH_STORE_OPERATION_TIMEOUT_SECONDS = 120.0
+
+
+class ResearchRunStoreOperationTimeoutError(ResearchRunInterruptedError):
+    """研究运行 store 单操作超过上界(#471 活性防线第二层)。
+
+    继承 :class:`ResearchRunInterruptedError`:coordinator 既有异常分流会把
+    run 收敛为 INTERRUPTED(而非 FAILED)—— 挂死/黑洞属瞬态基础设施故障,
+    attempt 重试按 #314 断点续算语义恢复,与 #450「连接断开只损失当次
+    操作」同口径。
+    """
+
+
+def _postgres_statement_timeout_ms(
+    session: AsyncSession, timeout_seconds: float
+) -> int | None:
+    """postgresql 会话返回 statement_timeout 毫秒值;其余方言返回 None。
+
+    SET 只对本会话生效(逐操作短会话即逐操作界),sqlite 等测试后端跳过。
+    逐层 getattr 带默认值:测试假会话(#450 桩)可能连 ``sync_session`` 都
+    没有 —— 任何缺层都按「非 postgres」处理,不因探测本身抛错。
+    """
+    sync_session = getattr(session, "sync_session", None)
+    bind = getattr(sync_session, "bind", None)
+    dialect_name = getattr(getattr(bind, "dialect", None), "name", None)
+    if dialect_name != "postgresql":
+        return None
+    return int(timeout_seconds * 1000)
+
 
 class SessionPerOperationResearchRunStore:
-    """逐操作短会话的 store 包装(#450 追续正确性修复)。
+    """逐操作短会话的 store 包装(#450 追续正确性修复;#471 活性界)。
 
     此前 executor 把**单一 AsyncSession** 包成 store 交给 coordinator 复用
     整个 run(可达数小时):任一次连接中断(WSL2 转发 PG 长跑实测
@@ -77,24 +121,54 @@ class SessionPerOperationResearchRunStore:
     连接由 ``pool_pre_ping`` 检出。写操作在会话关闭前 commit(原 checkpoint()
     的批量提交语义变为逐操作即时持久化,#314 续算以「逐决策 13 stage 全齐
     + checksum 复验」为界,不受影响);``checkpoint()`` 相应变为 no-op。
+
+    #471 双层活性界(挂死签名:协程 await 永不返回、心跳照常续租):
+    连接级 —— 引擎工厂默认注入 #450 keepalive(死连接 ~60s 显式报错);
+    操作级 —— 每操作会话先 ``SET statement_timeout``(服务端界,慢查询
+    在 120s 处以 QueryCanceled 显式失败),再整操作 ``asyncio.timeout``
+    客户端兜底(黑洞连接上「查询从未送达服务端」时 statement_timeout
+    永不触发,客户端界是唯一上界)。超时统一抛
+    :class:`ResearchRunStoreOperationTimeoutError`,走 interrupted 重试语义。
     """
 
     def __init__(
         self,
         session_maker: async_sessionmaker[AsyncSession],
         store_factory: StoreFactory,
+        *,
+        operation_timeout_seconds: float = DEFAULT_RESEARCH_STORE_OPERATION_TIMEOUT_SECONDS,
     ) -> None:
         self._session_maker = session_maker
         self._store_factory = store_factory
+        self._operation_timeout_seconds = operation_timeout_seconds
 
     async def _with_store(
-        self, operation: Callable[[ResearchRunStore], Awaitable[_R]]
+        self,
+        operation_name: str,
+        operation: Callable[[ResearchRunStore], Awaitable[_R]],
     ) -> _R:
-        async with self._session_maker() as session:
-            store = self._store_factory(session)
-            result = await operation(store)
-            await session.commit()
-            return result
+        client_bound = self._operation_timeout_seconds * 1.25
+        try:
+            async with asyncio.timeout(client_bound):
+                async with self._session_maker() as session:
+                    store = self._store_factory(session)
+                    timeout_ms = _postgres_statement_timeout_ms(
+                        session, self._operation_timeout_seconds
+                    )
+                    if timeout_ms is not None:
+                        await session.execute(
+                            text(f"SET statement_timeout = {timeout_ms}")
+                        )
+                    result = await operation(store)
+                    await session.commit()
+                    return result
+        except TimeoutError as exc:
+            raise ResearchRunStoreOperationTimeoutError(
+                f"研究运行 store 操作 {operation_name} 超过 "
+                f"{self._operation_timeout_seconds:.0f}s 上界"
+                f"(客户端兜底 {client_bound:.0f}s 触发;服务端 statement_timeout "
+                "未先行报错 —— 疑似连接黑洞或查询未送达,#471)"
+            ) from exc
 
     async def create_or_get(
         self, manifest: ResearchRunManifest
@@ -102,13 +176,13 @@ class SessionPerOperationResearchRunStore:
         async def op(store: ResearchRunStore) -> tuple[ResearchRunRecord, bool]:
             return await store.create_or_get(manifest)
 
-        return await self._with_store(op)
+        return await self._with_store("create_or_get", op)
 
     async def get(self, run_id: str) -> ResearchRunRecord | None:
         async def op(store: ResearchRunStore) -> ResearchRunRecord | None:
             return await store.get(run_id)
 
-        return await self._with_store(op)
+        return await self._with_store("get", op)
 
     async def list_by_status(
         self, statuses: Iterable[ResearchRunStatus]
@@ -116,7 +190,7 @@ class SessionPerOperationResearchRunStore:
         async def op(store: ResearchRunStore) -> list[ResearchRunRecord]:
             return await store.list_by_status(statuses)
 
-        return await self._with_store(op)
+        return await self._with_store("list_by_status", op)
 
     async def transition(
         self,
@@ -136,7 +210,7 @@ class SessionPerOperationResearchRunStore:
                 error_summary=error_summary,
             )
 
-        return await self._with_store(op)
+        return await self._with_store("transition", op)
 
     async def save_result(
         self,
@@ -156,19 +230,65 @@ class SessionPerOperationResearchRunStore:
                 partial_failure=partial_failure,
             )
 
-        return await self._with_store(op)
+        return await self._with_store("save_result", op)
 
     async def append_artifact(self, artifact: ResearchArtifact) -> bool:
         async def op(store: ResearchRunStore) -> bool:
             return await store.append_artifact(artifact)
 
-        return await self._with_store(op)
+        return await self._with_store("append_artifact", op)
+
+    async def append_artifacts(
+        self, artifacts: Sequence[ResearchArtifact]
+    ) -> list[bool]:
+        """整批 artifact 走**同一个**短会话(coordinator 逐决策批量落库,
+        2026-09-14 决策段性能:此前 13 artifact = 13 次 session 打开/提交,
+        psycopg + connect 占决策墙钟 ~10%)。批内全在或全不在,一次 commit;
+        连接断开只损失本决策,attempt 重试按 #314 续算语义截断半截决策。
+        """
+
+        async def op(store: ResearchRunStore) -> list[bool]:
+            return await store.append_artifacts(artifacts)
+
+        return await self._with_store("append_artifacts", op)
 
     async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]:
         async def op(store: ResearchRunStore) -> list[ResearchArtifact]:
             return await store.list_artifacts(run_id)
 
-        return await self._with_store(op)
+        return await self._with_store("list_artifacts", op)
+
+    def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]:
+        """流式遍历 artifact(#470 前半场);会话生命周期覆盖整个迭代。
+
+        与逐操作短会话同构:单一专属会话服务整个流(断点续算读回期间独占),
+        迭代结束 / 提前截断(aclose)即关闭 —— 连接断开只损失本次读回,
+        调用方(coordinator)按既有语义回退全量重算。#471:流内只设服务端
+        ``statement_timeout``(界的是单条 fetch,不是整条流;客户端整流
+        ``asyncio.timeout`` 会误杀合法的长读回,活性兜底交给 worker 侧
+        stall watchdog)。
+        """
+
+        async def _stream() -> AsyncIterator[ResearchArtifact]:
+            async with self._session_maker() as session:
+                store = self._store_factory(session)
+                timeout_ms = _postgres_statement_timeout_ms(
+                    session, self._operation_timeout_seconds
+                )
+                if timeout_ms is not None:
+                    await session.execute(text(f"SET statement_timeout = {timeout_ms}"))
+                async for artifact in store.iter_artifacts(run_id):
+                    yield artifact
+
+        return _stream()
+
+    async def list_artifact_digests(
+        self, run_id: str
+    ) -> list[ArtifactDigest]:
+        async def op(store: ResearchRunStore) -> list[ArtifactDigest]:
+            return await store.list_artifact_digests(run_id)
+
+        return await self._with_store("list_artifact_digests", op)
 
     async def checkpoint(self) -> None:
         """no-op:逐操作短会话已即时持久化(原批量提交边界消失)。"""

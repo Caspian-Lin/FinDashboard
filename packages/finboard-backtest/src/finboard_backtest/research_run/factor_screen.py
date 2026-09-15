@@ -174,14 +174,59 @@ async def build_strategy_screen_from_periods(
 # --------------------------------------------------------------------------- #
 
 
+def manifest_declares_user_factors(manifest: ResearchRunManifest) -> bool:
+    """manifest 是否声明了用户因子(``u_`` 前缀;保守超集判定,#470 前半场)。
+
+    ``u_`` 因子名只可能来自 manifest 携带的声明(策略 spec / 因子快照 /
+    因子序列引用 / 组合风险因子限制等),对其 canonical JSON 做标记扫描即
+    得保守超集:误报只多付横截面投影的捕获成本(正确性不变 —— 无 ``u_``
+    观测时 screen 照旧返回 None),漏报由 ``_period_cross_section`` 的
+    「当期 ``user`` 桶非空即回退全量投影」兜底。全市场 run 的 ``others``
+    投影 ~15MB/期(30 特征 x 5000+ 标的),556 期 ≈ 8GB —— 无用户因子的
+    run 不该为恒为 None 的 screen 付这笔驻留。
+    """
+
+    import re
+
+    from finboard_backtest.research_run.contracts import canonical_json
+
+    return re.search(r'"u_[A-Za-z0-9_.\-]+"', canonical_json(manifest)) is not None
+
+
 def _period_cross_section(
     item: PortfolioDecisionInput,
+    *,
+    include_series: bool = True,
 ) -> dict[str, Any]:
     """把一期决策输入按 user / 其他特征重组为横截面字典(#463 投影)。
 
     投影只保留 screen 计算所需的小数据(features 派生值 / 决策时点 /
     决策价 / 候选池 symbol→market),供流式调用方逐期捕获后丢弃全量输入。
+
+    #470 前半场:``include_series=False``(run 未声明用户因子)时跳过
+    ``others`` / ``prices`` 的构建 —— 这两块是投影的内存大头(~15MB/期,
+    全市场 run 556 期 ≈ 8GB),而 screen 对无 ``u_`` 观测的 run 恒返回
+    None,根本不消费它们。防御性兜底:当期 ``user`` 桵非空时无论开关如何
+    都构建全量投影(漏报通道的最后一道防线),保证 screen 结果与开关
+    无关。
     """
+
+    capture_full = include_series or any(
+        is_user_factor_name(value.feature_id) for value in item.features
+    )
+    if not capture_full:
+        # user 桶此时必空(any 探测已排除),others/prices 的构建整体跳过
+        return {
+            "decision_at": item.decision_at,
+            "user": {},
+            "others": {},
+            "prices": {},
+            # issue #463:候选池 symbol→market(_release_end_closes 的期末价
+            # 读取需要;候选池内 symbol 唯一,跨期由消费方首见优先合并)。
+            "markets": {
+                candidate.symbol: candidate.market for candidate in item.candidates
+            },
+        }
     user: dict[str, dict[str, tuple[float, datetime]]] = {}
     others: dict[str, dict[str, tuple[float, datetime]]] = {}
     for value in item.features:

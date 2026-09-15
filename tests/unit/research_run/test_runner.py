@@ -576,8 +576,8 @@ async def test_persistence_fault_does_not_mark_run_complete(
     manifest_factory, decision_factory
 ) -> None:
     class FaultingStore(InMemoryResearchRunStore):
-        async def append_artifact(self, artifact):
-            del artifact
+        async def append_artifacts(self, artifacts):
+            del artifacts
             raise OSError("checkpoint storage unavailable")
 
     decision = decision_factory()

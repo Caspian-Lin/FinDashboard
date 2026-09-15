@@ -188,8 +188,10 @@ class TestAlignmentCoverage:
         assert estimate is not None
         assert set(estimate.tickers) == set(price_series)
         assert "300999.SZ" in estimate.tickers
-        # 全池最短公共窗口语义保持:10 个价点 → 9 期收益。
-        assert estimate.n_observations == 9
+        # 2026-09-13 最小估计窗口:窗口只在可估计标的(>=31 价点)上取最短
+        # —— 5 只 60 价点 → 59 期观测;10 价点的次新股不再把全池窗口压到
+        # 9 期,而是以中位方差 + 零相关并入(conservative,fail-visible)。
+        assert estimate.n_observations == 59
         assert _covariance_problem(estimate, set(price_series)) is None
 
     def test_zero_price_jumps_equal_length(self) -> None:
