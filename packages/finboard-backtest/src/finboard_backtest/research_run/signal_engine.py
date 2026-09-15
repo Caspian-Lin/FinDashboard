@@ -31,7 +31,15 @@ import math
 import os
 import weakref
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -1954,7 +1962,17 @@ async def _start_period_feature_pool(
     return pool
 
 
-async def build_decision_load_contexts(
+async def _aclose_asyncgen(stream: AsyncIterator[Any]) -> None:
+    """尽力关闭异步生成器(#463 级联收口辅助)。
+
+    非生成器的 ``AsyncIterator``(测试桩 / 包装对象)不可关闭,交给 GC;
+    对已耗尽 / 已关闭的生成器重复关闭是 no-op。
+    """
+    if isinstance(stream, AsyncGenerator):
+        await stream.aclose()
+
+
+async def iter_decision_load_contexts(
     manifest: ResearchRunManifest,
     *,
     release_provider_factory: ReleaseProviderFactory,
@@ -1966,8 +1984,14 @@ async def build_decision_load_contexts(
     trading_days_loader: TradingDaysLoader | None = None,
     precompute_phase_reporter: LoadPhaseReporter | None = None,
     precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
-) -> tuple[DecisionLoadContext, ...]:
-    """按执行模式加载全部决策的机械上下文(不含信号,issue #218)。
+) -> AsyncIterator[DecisionLoadContext]:
+    """逐期流式产出决策的机械上下文(不含信号,issue #218 / #463)。
+
+    issue #463:生成器化 —— 调用方逐期拉取,任一时刻常驻 O(1) 个期次的
+    重对象(features / price_series / covariance),不再一次性物化全部期次
+    的 ``DecisionLoadContext`` 元组;输出与 :func:`build_decision_load_contexts`
+    兼容包装逐字节等值(期序 / 内容 / checksum 不变)。生成器被关闭
+    (``aclose``)或抛出异常时,``finally`` 立即关闭常驻特征进程池。
 
     single_shot:决策日序列 = manifest.factor_snapshots 的 ``decision_at``
     排序去重;multi_period:决策日由 ``parameters.decision_schedule``
@@ -2177,15 +2201,9 @@ async def build_decision_load_contexts(
             snapshot_id=snapshot_id,
         )
 
-    contexts: list[DecisionLoadContext] = []
+    produced = 0
     try:
         for chunk_start in range(0, len(decision_days), _DECISION_LOAD_CHUNK):
-            # issue #306:分块边界探针 —— 打断(外部 interrupted / cancel_requested)
-            # 在进入下一块前秒级感知;加载进度 k/N 尽力上报(#308 phase 编码)。
-            # 首块边界跳过(k=0 已由预建前的首帧上报,见上),避免重复帧;
-            # 探针自身抛错原样透传,不经 #263 数据失败标记路径。
-            if chunk_probe is not None and contexts:
-                await chunk_probe(len(contexts), len(decision_days))
             chunk = decision_days[chunk_start : chunk_start + _DECISION_LOAD_CHUNK]
             results = await asyncio.gather(
                 *(_load_one(decision_at, snapshot_id) for decision_at, snapshot_id in chunk),
@@ -2194,6 +2212,7 @@ async def build_decision_load_contexts(
             # issue #263:按原始期序收集 —— 第一个失败期(与串行首个失败一致)
             # 在 bare raise 前挂决策标记;异常类型 / 消息 / traceback 不被改写,
             # runner 通用收口经 read_decision_load_context 读回失败期次。
+            loaded: list[DecisionLoadContext] = []
             for (decision_at, _), result in zip(chunk, results, strict=True):
                 if isinstance(result, BaseException):
                     if isinstance(result, Exception):
@@ -2203,14 +2222,26 @@ async def build_decision_load_contexts(
                             release_id=release_ref.artifact_id,
                         )
                     raise result
-                contexts.append(result)
+                loaded.append(result)
+            produced += len(loaded)
+            # issue #306/#463:分块边界探针在本块 gather 完成**之后、产出之前**
+            # 触发(与流式化前相同的取值序列与加载相对位置 —— 探针 done 计数
+            # 是「已加载期数」;流式化后决策持久化与下一块加载交错,探针必须
+            # 先于本块的决策产出,加载期打断才能先于 worker 协作取消被感知,
+            # 否则 #306 的「加载期 cancel → run INTERRUPTED」语义被抢跑)。
+            if chunk_start + len(chunk) < len(decision_days) and chunk_probe is not None:
+                await chunk_probe(produced, len(decision_days))
+            # issue #463:块内全部期次加载完成后逐期 yield(期序不变)。
+            for result in loaded:
+                yield result
     finally:
+        # issue #463:生成器耗尽 / 被关闭(aclose)/ 抛错任一路径都立即
+        # 关闭常驻特征进程池 —— 流式化后池生命周期跟随生成器而非全量加载。
         if pool is not None:
             await pool.aclose()
-    return tuple(contexts)
 
 
-async def build_decision_inputs(
+async def build_decision_load_contexts(
     manifest: ResearchRunManifest,
     *,
     release_provider_factory: ReleaseProviderFactory,
@@ -2222,8 +2253,55 @@ async def build_decision_inputs(
     trading_days_loader: TradingDaysLoader | None = None,
     precompute_phase_reporter: LoadPhaseReporter | None = None,
     precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
-) -> tuple[PortfolioDecisionInput, ...]:
-    """按执行模式组装全部 ``PortfolioDecisionInput``(issue #170 / #183)。
+) -> tuple[DecisionLoadContext, ...]:
+    """按执行模式加载全部决策的机械上下文(issue #463 兼容包装)。
+
+    主体已移入生成器 :func:`iter_decision_load_contexts`(issue #463 流式
+    化:逐期产出,任一时刻常驻 O(1) 个期次的重对象)。本函数保留原签名,
+    一次性物化全部期次 —— 行为与流式化前逐字节一致(#288 等值 / 失败 /
+    探针测试原样通过),新调用方应直接消费生成器。加载语义(docstring 详
+    述:#288 分块 / #263 失败标记 / #306 边界探针 / #308 首帧与 k/N /
+    #450 预计算帧)见生成器版本。
+    """
+    return tuple(
+        [
+            context
+            async for context in iter_decision_load_contexts(
+                manifest,
+                release_provider_factory=release_provider_factory,
+                snapshot_provider=snapshot_provider,
+                process_workers=process_workers,
+                chunk_probe=chunk_probe,
+                series_provider=series_provider,
+                suspension_view=suspension_view,
+                trading_days_loader=trading_days_loader,
+                precompute_phase_reporter=precompute_phase_reporter,
+                precompute_cancel_probe=precompute_cancel_probe,
+            )
+        ]
+    )
+
+
+async def iter_decision_inputs(
+    manifest: ResearchRunManifest,
+    *,
+    release_provider_factory: ReleaseProviderFactory,
+    snapshot_provider: FeatureSnapshotProvider,
+    process_workers: int = 0,
+    chunk_probe: LoadChunkProbe | None = None,
+    series_provider: FactorSeriesProvider | None = None,
+    suspension_view: SuspensionView | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
+    precompute_phase_reporter: LoadPhaseReporter | None = None,
+    precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
+) -> AsyncIterator[PortfolioDecisionInput]:
+    """逐期流式产出 ``PortfolioDecisionInput``(issue #170 / #183 / #463)。
+
+    issue #463:生成器化 —— 逐期拉取 :class:`DecisionLoadContext` →
+    ``to_thread`` 信号求值 → yield 组装好的输入;任一时刻常驻 O(1) 个期次
+    的重对象。``features`` 与加载上下文共享同一引用(与流式化前一致),
+    输出与 :func:`build_decision_inputs` 兼容包装逐字节等值。生成器被关闭
+    / 抛错时 ``finally`` 级联关闭底层加载生成器(进而关闭特征进程池)。
 
     * single_shot(默认):决策日序列 = manifest.factor_snapshots 的
       ``decision_at`` 排序去重,每个决策日由 ``FrozenInputLoader`` 加载机械
@@ -2242,8 +2320,7 @@ async def build_decision_inputs(
     # 信号求值(特征图 + 规则)是逐决策的纯 CPU 密集段,经 asyncio.to_thread
     # 卸载(issue #286):长计算不再阻塞事件循环线程,worker 心跳可续约。
     # build_normalized_signals 为模块级纯函数,普通数据入参,线程间无共享可变态。
-    inputs: list[PortfolioDecisionInput] = []
-    for loaded in await build_decision_load_contexts(
+    source = iter_decision_load_contexts(
         manifest,
         release_provider_factory=release_provider_factory,
         snapshot_provider=snapshot_provider,
@@ -2254,18 +2331,19 @@ async def build_decision_inputs(
         trading_days_loader=trading_days_loader,
         precompute_phase_reporter=precompute_phase_reporter,
         precompute_cancel_probe=precompute_cancel_probe,
-    ):
-        signals = await asyncio.to_thread(
-            build_normalized_signals,
-            manifest.strategy_spec,
-            features=loaded.features,
-            prices=loaded.context.prices,
-            included_symbols=loaded.signalable,
-            factor_snapshot_id=None if schedule is not None else loaded.snapshot_id,
-            price_series=loaded.price_series,
-        )
-        inputs.append(
-            PortfolioDecisionInput(
+    )
+    try:
+        async for loaded in source:
+            signals = await asyncio.to_thread(
+                build_normalized_signals,
+                manifest.strategy_spec,
+                features=loaded.features,
+                prices=loaded.context.prices,
+                included_symbols=loaded.signalable,
+                factor_snapshot_id=None if schedule is not None else loaded.snapshot_id,
+                price_series=loaded.price_series,
+            )
+            yield PortfolioDecisionInput(
                 business_date=loaded.context.business_date,
                 decision_at=loaded.context.decision_at,
                 execution_at=loaded.context.execution_at,
@@ -2279,8 +2357,46 @@ async def build_decision_inputs(
                 covariance=loaded.covariance,
                 suspended_symbols=loaded.context.execution_suspended,
             )
-        )
-    return tuple(inputs)
+    finally:
+        await _aclose_asyncgen(source)
+
+
+async def build_decision_inputs(
+    manifest: ResearchRunManifest,
+    *,
+    release_provider_factory: ReleaseProviderFactory,
+    snapshot_provider: FeatureSnapshotProvider,
+    process_workers: int = 0,
+    chunk_probe: LoadChunkProbe | None = None,
+    series_provider: FactorSeriesProvider | None = None,
+    suspension_view: SuspensionView | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
+    precompute_phase_reporter: LoadPhaseReporter | None = None,
+    precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
+) -> tuple[PortfolioDecisionInput, ...]:
+    """按执行模式组装全部 ``PortfolioDecisionInput``(issue #463 兼容包装)。
+
+    主体已移入生成器 :func:`iter_decision_inputs`(issue #463 流式化)。
+    本函数保留原签名一次性物化全部期次,行为与流式化前逐字节一致;新调用
+    方应直接消费生成器。执行模式与信号求值语义见生成器版本 docstring。
+    """
+    return tuple(
+        [
+            item
+            async for item in iter_decision_inputs(
+                manifest,
+                release_provider_factory=release_provider_factory,
+                snapshot_provider=snapshot_provider,
+                process_workers=process_workers,
+                chunk_probe=chunk_probe,
+                series_provider=series_provider,
+                suspension_view=suspension_view,
+                trading_days_loader=trading_days_loader,
+                precompute_phase_reporter=precompute_phase_reporter,
+                precompute_cancel_probe=precompute_cancel_probe,
+            )
+        ]
+    )
 
 
 def _bars_release_ref(
@@ -2395,7 +2511,22 @@ class SignalEnginePipelineAdapter:
         # 分开传参,#306/#308 探针调用序列契约不受影响)。
         self._precompute_phase_reporter = precompute_phase_reporter
         self._precompute_cancel_probe = precompute_cancel_probe
-        self._inputs: tuple[PortfolioDecisionInput, ...] | None = None
+        # issue #463:流式决策输入(惰性创建于 _load,由组合管线逐期拉取,
+        # 不再全量物化 ``self._inputs``);加载失败 / 打断经 runner 的
+        # ``aclose`` 兜底级联关闭(生成器 finally → 特征进程池即时释放)。
+        self._input_iterator: AsyncIterator[PortfolioDecisionInput] | None = None
+        # issue #463:逐期捕获的 factor_screen 投影与决策日 —— 输入经
+        # :meth:`_iter_captured_inputs` 拉取时登记(拉取即捕获,组合阶段
+        # 失败期(#304 partial)的投影 / 日期也在内),报告阶段取用。
+        self._period_cross_sections: list[dict[str, Any]] = []
+        self._business_dates: list[date] = []
+        # issue #463:捕获是否已覆盖全部期次 —— 决策循环正常耗尽输入流时置位;
+        # #304 拒绝路径补算 screen 前若未置位(提前失败),先补全捕获。
+        self._captures_complete = False
+        # issue #314 + #463:全部决策已落库的快速路径 —— 不再以
+        # ``self._inputs = ()`` 表达,改用等价标志让 factor_screen 显式跳过
+        # (快速路径前置已排除需要 screen 的 run,screen 恒为 None)。
+        self._fast_path = False
         self._equity_curve: tuple[EquityPoint, ...] = ()
         self._benchmark_curve: tuple[tuple[date, Decimal], ...] = ()
         # issue #217:用户因子 screen 指标(决策消费后计算,report 阶段取用)。
@@ -2418,7 +2549,7 @@ class SignalEnginePipelineAdapter:
         resume_from` 一致 —— 拒绝 / 异常时零突变,coordinator 回退全量重算。
         """
 
-        if self._inputs is not None or self._resume_bundles is not None:
+        if self._input_iterator is not None or self._resume_bundles is not None:
             return False
         if not completed:
             return False
@@ -2483,20 +2614,39 @@ class SignalEnginePipelineAdapter:
         )
         delegate.validate_manifest(manifest)
 
-    async def _load(self) -> PortfolioPipelineAdapter:
-        if self._inputs is None:
-            # issue #396:停复牌视图一次性加载(读取失败 → None,行为不变)。
-            suspension_view: SuspensionView | None = None
-            if self._suspension_view_factory is not None:
-                try:
-                    suspension_view = await self._suspension_view_factory()
-                except Exception:
-                    logger.warning(
-                        "research_run.suspension_view_unavailable",
-                        run_id=self._manifest.run_id,
-                        exc_info=True,
-                    )
-            self._inputs = await build_decision_inputs(
+    async def _load_suspension_view(self) -> SuspensionView | None:
+        """停复牌视图一次性加载(读取失败 → None,行为不变,issue #396)。"""
+        if self._suspension_view_factory is None:
+            return None
+        try:
+            return await self._suspension_view_factory()
+        except Exception:
+            logger.warning(
+                "research_run.suspension_view_unavailable",
+                run_id=self._manifest.run_id,
+                exc_info=True,
+            )
+            return None
+
+    def _iter_captured_inputs(
+        self, suspension_view: SuspensionView | None
+    ) -> AsyncIterator[PortfolioDecisionInput]:
+        """流式决策输入 + 逐期捕获包装(issue #463)。
+
+        对 :func:`iter_decision_inputs` 的每期产出,在**拉取时**登记
+        factor_screen 投影与 business_date(捕获点在拉取而非决策产出 ——
+        #304 组合阶段失败期未产出决策,但输入已拉取,partial 证据仍能
+        定位失败期日期与该期投影)。bundle 与 input 的 ``features`` 共享
+        同一引用,投影结果只读 ``features``/``prices``/``candidates``,
+        常驻为小 dict,不持有全量输入。
+        """
+
+        async def _stream() -> AsyncIterator[PortfolioDecisionInput]:
+            from finboard_backtest.research_run.factor_screen import (
+                _period_cross_section,
+            )
+
+            source = iter_decision_inputs(
                 self._manifest,
                 release_provider_factory=self._release_provider_factory,
                 snapshot_provider=self._snapshot_provider,
@@ -2508,9 +2658,23 @@ class SignalEnginePipelineAdapter:
                 precompute_phase_reporter=self._precompute_phase_reporter,
                 precompute_cancel_probe=self._precompute_cancel_probe,
             )
+            try:
+                async for item in source:
+                    self._period_cross_sections.append(_period_cross_section(item))
+                    self._business_dates.append(item.business_date)
+                    yield item
+            finally:
+                await _aclose_asyncgen(source)
+
+        return _stream()
+
+    async def _load(self) -> PortfolioPipelineAdapter:
+        if self._input_iterator is None:
+            suspension_view = await self._load_suspension_view()
+            self._input_iterator = self._iter_captured_inputs(suspension_view)
         return PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
-            decision_inputs=self._inputs,
+            decision_inputs=self._input_iterator,
         )
 
     async def decisions(
@@ -2520,71 +2684,96 @@ class SignalEnginePipelineAdapter:
         resume = self._resume_bundles
         resume_all: tuple[DecisionBundle, ...] | None = None
         pipeline: PortfolioPipelineAdapter | None = None
-        if resume is not None:
-            if await self._resume_all_completed(resume):
-                # issue #314:全部决策已落库 —— 跳过整段加载
-                # (build_decision_load_contexts),报告构建只消费读回的决策
-                # (inputs 置空同时让 factor_screen 显式跳过;快速路径前置
-                # 已排除需要 screen 的 run)。加载期探针(#306)与 k/N phase
-                # (#308)随之不触发 —— 无加载即无加载进度,phase 直接进入
-                # 决策执行段。
-                self._inputs = ()
-                resume_all = resume
+        pipeline_iter: AsyncIterator[DecisionBundle] | None = None
+        try:
+            if resume is not None:
+                if await self._resume_all_completed(resume):
+                    # issue #314:全部决策已落库 —— 跳过整段加载
+                    # (iter_decision_load_contexts),报告构建只消费读回的
+                    # 决策(快速路径标志让 factor_screen 显式跳过;快速路径
+                    # 前置已排除需要 screen 的 run)。加载期探针(#306)与
+                    # k/N phase(#308)随之不触发 —— 无加载即无加载进度,
+                    # phase 直接进入决策执行段。
+                    self._fast_path = True
+                    resume_all = resume
+                else:
+                    pipeline = await self._load()
+                    # issue #463:流式输入下 resume_from 的种子校验需要前缀
+                    # 冻结输入 —— 先从输入流预取 len(resume) 期(经捕获包装
+                    # 逐期登记投影 / 日期,与决策期推进语义一致)。种子被拒
+                    # 时预取前缀由管线按期序照常消费(全量重算,语义不变)。
+                    await pipeline.aprefetch_inputs(len(resume))
+                    if not pipeline.resume_from(resume):
+                        # 种子被拒(数量/时序与冻结输入不一致):整段回退全量
+                        # 重算(#314 fail-closed 兜底,宁重算不漂移)。
+                        self._resume_bundles = None
+            collected: list[DecisionBundle] = []
+            if resume_all is not None:
+                for decision in resume_all:
+                    yield decision
+                    collected.append(decision)
             else:
-                pipeline = await self._load()
-                if not pipeline.resume_from(resume):
-                    # 种子被拒(数量/时序与冻结输入不一致):整段回退全量重算
-                    # (#314 fail-closed 兜底,宁重算不漂移)。
-                    self._resume_bundles = None
-        collected: list[DecisionBundle] = []
-        if resume_all is not None:
-            for decision in resume_all:
-                yield decision
-                collected.append(decision)
-        else:
-            if pipeline is None:
-                pipeline = await self._load()
-            async for decision in pipeline.decisions(manifest):
-                yield decision
-                collected.append(decision)
-        # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(离线圈内,
-        # 只在 coordinator 完整消费决策后执行;中断时曲线保持为空)。
-        if (
-            # 这里用执行时 manifest 判定,避免 replica 的 manifest 与
-            # 构造期 manifest 不一致(重放时参数不变,两者等价)。
-            execution_mode_for(manifest.parameters) is ResearchExecutionMode.MULTI_PERIOD
-            and collected
-        ):
-            release_ref = _bars_release_ref(manifest, self._release_provider_factory)
-            provider = self._release_provider_factory(release_ref.artifact_id)
-            self._equity_curve = await build_daily_equity_curve(provider, manifest, collected)
-        # 基准曲线(issue #184):两种执行模式都按 benchmark_config.symbol
-        # 从冻结发布取行情;缺失落空曲线,由 build_report 记 warning。
-        self._benchmark_curve = await _load_benchmark_curve(
-            manifest, self._release_provider_factory
-        )
-        # issue #217:用户因子 screen 指标 —— 尽力而为,计算失败只记
-        # warning 不把 run 打挂(展示层指标,不影响决策/账本语义)。
-        # issue #304:组合阶段拒绝时由 compute_partial_evidence 走同一补算。
-        await self._compute_factor_screen(manifest)
+                if pipeline is None:
+                    pipeline = await self._load()
+                pipeline_iter = pipeline.decisions(manifest)
+                async for decision in pipeline_iter:
+                    yield decision
+                    collected.append(decision)
+                # issue #463:输入流正常耗尽 —— 捕获已覆盖全部期次。
+                self._captures_complete = True
+            # 多期回放:决策全部产出后按冻结行情构建每日权益曲线(离线圈内,
+            # 只在 coordinator 完整消费决策后执行;中断时曲线保持为空)。
+            if (
+                # 这里用执行时 manifest 判定,避免 replica 的 manifest 与
+                # 构造期 manifest 不一致(重放时参数不变,两者等价)。
+                execution_mode_for(manifest.parameters)
+                is ResearchExecutionMode.MULTI_PERIOD
+                and collected
+            ):
+                release_ref = _bars_release_ref(manifest, self._release_provider_factory)
+                provider = self._release_provider_factory(release_ref.artifact_id)
+                self._equity_curve = await build_daily_equity_curve(
+                    provider, manifest, collected
+                )
+            # 基准曲线(issue #184):两种执行模式都按 benchmark_config.symbol
+            # 从冻结发布取行情;缺失落空曲线,由 build_report 记 warning。
+            self._benchmark_curve = await _load_benchmark_curve(
+                manifest, self._release_provider_factory
+            )
+            # issue #217:用户因子 screen 指标 —— 尽力而为,计算失败只记
+            # warning 不把 run 打挂(展示层指标,不影响决策/账本语义)。
+            # issue #304:组合阶段拒绝时由 compute_partial_evidence 走同一补算。
+            await self._compute_factor_screen(manifest)
+        finally:
+            # issue #463:组合管线生成器随本生成器退出(耗尽 / 关闭 / 抛错)
+            # 即关闭,级联收尾输入流 → 加载生成器 → 特征进程池(aclose 对
+            # 已耗尽 / 已关闭的生成器为 no-op)。
+            if pipeline_iter is not None:
+                await _aclose_asyncgen(pipeline_iter)
 
     async def _compute_factor_screen(self, manifest: ResearchRunManifest) -> str | None:
         """用户因子 screen 指标(issue #217/#304):尽力而为,幂等。
 
         成功把结果暂存 ``self._factor_screen``(report 阶段取用)并返回
         None;失败记具名 warning 并返回失败原因(不把 run 打挂)。已有
-        结果不重算。
+        结果不重算。issue #463:计算只消费逐期捕获的横截面投影(不再持有
+        全量冻结输入);快速路径(#314)前置已排除需要 screen 的 run,
+        经 ``_fast_path`` 显式跳过,行为与旧「inputs 置空即跳过」等值。
         """
-        if self._factor_screen is not None or not self._inputs:
+        if (
+            self._factor_screen is not None
+            or self._fast_path
+            or not self._period_cross_sections
+        ):
             return None
         try:
             from finboard_backtest.research_run.factor_screen import (
-                build_factor_screen,
+                build_factor_screen_from_periods,
             )
 
-            self._factor_screen = await build_factor_screen(
+            self._factor_screen = await build_factor_screen_from_periods(
                 manifest,
-                self._inputs,
+                self._period_cross_sections,
                 self._release_provider_factory,
             )
             return None
@@ -2596,6 +2785,53 @@ class SignalEnginePipelineAdapter:
             )
             return f"factor_screen_computation_failed: {exc}"
 
+    async def _ensure_full_captures(self) -> None:
+        """拒绝路径证据补全(issue #304 x #463,尽力而为)。
+
+        流式加载只拉到失败期次的输入;而 factor_screen 证据的口径(与
+        流式化前一致)是**全部冻结输入**。这里重新拉取一次输入流(冻结
+        输入确定性重放,已捕获前缀与之逐值一致)补全捕获;补全失败保留
+        已捕获的部分口径(具名 warning 可见),不掩盖原硬约束错误。
+        """
+        if self._captures_complete:
+            return
+        from finboard_backtest.research_run.factor_screen import (
+            _period_cross_section,
+        )
+
+        try:
+            suspension_view = await self._load_suspension_view()
+            periods: list[dict[str, Any]] = []
+            dates: list[date] = []
+            source = iter_decision_inputs(
+                self._manifest,
+                release_provider_factory=self._release_provider_factory,
+                snapshot_provider=self._snapshot_provider,
+                process_workers=self._process_workers,
+                chunk_probe=None,
+                series_provider=self._series_provider,
+                suspension_view=suspension_view,
+                trading_days_loader=self._trading_days_loader,
+                precompute_phase_reporter=self._precompute_phase_reporter,
+                precompute_cancel_probe=self._precompute_cancel_probe,
+            )
+            try:
+                async for item in source:
+                    periods.append(_period_cross_section(item))
+                    dates.append(item.business_date)
+            finally:
+                await _aclose_asyncgen(source)
+        except Exception:
+            logger.warning(
+                "research_run.partial_capture_completion_failed",
+                run_id=self._manifest.run_id,
+                exc_info=True,
+            )
+            return
+        self._period_cross_sections = periods
+        self._business_dates = dates
+        self._captures_complete = True
+
     async def compute_partial_evidence(
         self,
         manifest: ResearchRunManifest,
@@ -2604,21 +2840,25 @@ class SignalEnginePipelineAdapter:
     ) -> dict[str, JsonValue] | None:
         """组合阶段硬约束拒绝后的部分证据补算(issue #304)。
 
-        factor_screen 只依赖已构建的冻结决策输入(``self._inputs``),与组合
-        阶段是否失败无关;在 run 被拒绝前尽力补算并暂存,``build_report``
-        照常携带。返回 partial 标记(失败决策 1-based 定位 + 补算 warning),
-        无冻结输入可补算时返回 None。本方法不改变失败语义,只保留不依赖
-        组合阶段的证据;失败决策的日期取自同序号的冻结输入(该决策未产出,
-        runner 只知道已完成期数)。
+        factor_screen 只依赖冻结决策输入的投影(与组合阶段是否失败无关);
+        在 run 被拒绝前尽力补算并暂存,``build_report`` 照常携带。返回
+        partial 标记(失败决策 1-based 定位 + 补算 warning),无输入可补算
+        时返回 None。本方法不改变失败语义,只保留不依赖组合阶段的证据;
+        失败决策的日期取自同序号的冻结输入(该决策未产出,runner 只知道
+        已完成期数)。issue #463:补算前先补全捕获(流式加载只拉到失败
+        期次,screen 口径保持全期次)。
         """
-        if not self._inputs:
+        if self._fast_path:
+            return None
+        await self._ensure_full_captures()
+        if not self._business_dates:
             return None
         marker: dict[str, JsonValue] = {
             "completed_decisions": completed_decisions,
             "failed_decision_index": completed_decisions + 1,
         }
-        if completed_decisions < len(self._inputs):
-            marker["decision_date"] = self._inputs[completed_decisions].business_date.isoformat()
+        if completed_decisions < len(self._business_dates):
+            marker["decision_date"] = self._business_dates[completed_decisions].isoformat()
         warnings: list[JsonValue] = []
         screen_failure = await self._compute_factor_screen(manifest)
         if screen_failure is not None:
@@ -2632,9 +2872,11 @@ class SignalEnginePipelineAdapter:
         manifest: ResearchRunManifest,
         decisions: Sequence[DecisionBundle],
     ) -> ResearchRunReport:
+        # issue #463:delegate 只读 decisions 与权益 / 基准曲线,不读决策
+        # 输入 —— 传空元组,流式化后适配器不再持有全量输入。
         delegate = PortfolioPipelineAdapter(
             strategy_kind=self.strategy_kind,
-            decision_inputs=self._inputs or (),
+            decision_inputs=(),
         )
         report = delegate.build_report(
             manifest,
@@ -2916,5 +3158,7 @@ __all__ = [
     "enqueue_trading_days",
     "evaluate_feature_graph",
     "evaluate_signal_rules",
+    "iter_decision_inputs",
+    "iter_decision_load_contexts",
     "single_shot_snapshot_gate_error",
 ]

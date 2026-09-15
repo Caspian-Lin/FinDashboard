@@ -175,18 +175,18 @@ def _patch_caller(monkeypatch: pytest.MonkeyPatch, caller: FakeSandboxCaller) ->
     ))
     # 工厂侧直接构造适配器并注入 caller(_ensure_loaded 会跳过 create)。
     async def _ensure(self: UserCodeStrategyAdapter) -> tuple[Any, Any]:
-        if self._contexts is None:
+        if self._context_stream is None:
             from finboard_backtest.research_run.signal_engine import (
-                build_decision_load_contexts,
+                iter_decision_load_contexts,
             )
 
-            self._contexts = await build_decision_load_contexts(
+            self._context_stream = iter_decision_load_contexts(
                 self._manifest,
                 release_provider_factory=self._release_provider_factory,
                 snapshot_provider=self._snapshot_provider,
             )
             self._sandbox = caller  # type: ignore[assignment]
-        return self._contexts, self._sandbox
+        return self._context_stream, self._sandbox
 
     monkeypatch.setattr(UserCodeStrategyAdapter, "_ensure_loaded", _ensure)
 

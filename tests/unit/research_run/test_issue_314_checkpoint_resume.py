@@ -64,7 +64,6 @@ from finboard_backtest.research_run.runner import (
 )
 from finboard_backtest.research_run.signal_engine import (
     SignalEnginePipelineAdapter,
-    build_decision_inputs,
 )
 
 from .conftest import fixed_report
@@ -278,17 +277,13 @@ class _CountingSignalAdapter(SignalEnginePipelineAdapter):
 
     async def _load(self) -> PortfolioPipelineAdapter:
         self.load_calls += 1
-        if self._inputs is None:
-            self._inputs = await build_decision_inputs(
-                self._manifest,
-                release_provider_factory=self._release_provider_factory,
-                snapshot_provider=self._snapshot_provider,
-                process_workers=self._process_workers,
-                chunk_probe=self._chunk_probe,
-            )
+        # issue #463:与生产 _load 同构 —— 输入迭代器经 _iter_captured_inputs
+        # 包装(逐期捕获 screen 投影 / 决策日),仅管线类型换成计数桩。
+        if self._input_iterator is None:
+            self._input_iterator = self._iter_captured_inputs(None)
         pipeline = _CountingPipeline(
             strategy_kind=self.strategy_kind,
-            decision_inputs=self._inputs,
+            decision_inputs=self._input_iterator,
         )
         self.last_pipeline = pipeline
         return pipeline
@@ -854,10 +849,12 @@ class TestSignalEngineResume:
         )
         resumed = await coordinator.execute(manifest, resumed_adapter)
         assert resumed.status is ResearchRunStatus.COMPLETED, resumed.error_summary
-        # 快速路径:加载整段与组合构建全部跳过
+        # 快速路径:加载整段与组合构建全部跳过(输入迭代器从未创建、
+        # _fast_path 置位 —— 旧断言「_inputs == ()」的等价新形态,#463)
         assert resumed_adapter.load_calls == 0
         assert resumed_adapter.last_pipeline is None
-        assert resumed_adapter._inputs == ()
+        assert resumed_adapter._input_iterator is None
+        assert resumed_adapter._fast_path is True
         assert resumed_adapter._resume_bundles is not None
         assert len(resumed_adapter._resume_bundles) == 3
 

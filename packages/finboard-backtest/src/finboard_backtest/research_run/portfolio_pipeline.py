@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -243,7 +243,8 @@ class PortfolioPipelineAdapter:
         self,
         *,
         strategy_kind: str,
-        decision_inputs: Iterable[PortfolioDecisionInput],
+        decision_inputs: Iterable[PortfolioDecisionInput]
+        | AsyncIterator[PortfolioDecisionInput],
         required_capabilities: Iterable[str] = (),
     ) -> None:
         if strategy_kind not in SUPPORTED_RESEARCH_STRATEGIES:
@@ -252,7 +253,18 @@ class PortfolioPipelineAdapter:
             )
         get_strategy_capability(strategy_kind)
         self.strategy_kind = strategy_kind
-        self._inputs = tuple(decision_inputs)
+        # issue #463:decision_inputs 支持 Sequence(归一为 tuple,旧行为)或
+        # AsyncIterator(流式逐期拉取,原样保存)。流式模式下 ``self._inputs``
+        # 只作 resume 种子预取缓冲(:meth:`aprefetch_inputs` 填充,长度 =
+        # 种子前缀),不再全量物化。
+        if isinstance(decision_inputs, AsyncIterator):
+            self._input_stream: AsyncIterator[PortfolioDecisionInput] | None = (
+                decision_inputs
+            )
+            self._inputs: tuple[PortfolioDecisionInput, ...] = ()
+        else:
+            self._input_stream = None
+            self._inputs = tuple(decision_inputs)
         self._required_capabilities = tuple(
             sorted(set(required_capabilities))
         )
@@ -260,6 +272,59 @@ class PortfolioPipelineAdapter:
         # 原样产出前缀(零重算),再从其后继续组合构建,账本状态由种子接续。
         self._resume_bundles: tuple[DecisionBundle, ...] | None = None
         self._resume_state: _PipelineState | None = None
+
+    async def aprefetch_inputs(self, count: int) -> None:
+        """从流式输入预取前 ``count`` 期到缓冲(resume 种子校验用,#463)。
+
+        :meth:`resume_from` 是同步契约(validate-then-mutate),无法拉取异步
+        迭代器;种子校验所需的逐期 ``business_date`` / ``decision_at`` /
+        ``lot_info`` 由调用方(signal_engine 决策循环)先经本方法从输入流
+        预取进 ``self._inputs`` 缓冲。Sequence 输入为 no-op;流被提前耗尽时
+        取到多少算多少(不足即由 ``resume_from`` 以数量不符拒绝,与旧
+        「种子超过冻结输入数即拒绝」语义等值)。
+        """
+
+        stream = self._input_stream
+        if stream is None or count <= 0:
+            return
+        pulled: list[PortfolioDecisionInput] = list(self._inputs)
+        while len(pulled) < count:
+            try:
+                pulled.append(await stream.__anext__())
+            except StopAsyncIteration:
+                break
+        self._inputs = tuple(pulled)
+
+    async def _close_input_stream(self) -> None:
+        """关闭流式输入(级联收尾加载生成器与特征进程池,#463)。
+
+        Sequence 输入无流可关;AsyncGenerator 之外的迭代器不可关闭,静默跳过
+        (交给 GC)。对已耗尽 / 已关闭的生成器重复关闭是 no-op。
+        """
+
+        stream = self._input_stream
+        if isinstance(stream, AsyncGenerator):
+            await stream.aclose()
+
+    async def _next_input(self, index: int) -> PortfolioDecisionInput | None:
+        """第 ``index`` 期冻结输入;``None`` = 输入耗尽(#463)。
+
+        Sequence 输入按索引读取(旧行为);流式输入优先消费 resume 预取
+        缓冲(``self._inputs``,按期序对齐),缓冲用尽后从迭代器续拉 ——
+        续拉结果不回填缓冲,保持 O(1) 常驻。
+        """
+
+        stream = self._input_stream
+        if stream is None:
+            if index >= len(self._inputs):
+                return None
+            return self._inputs[index]
+        if index < len(self._inputs):
+            return self._inputs[index]
+        try:
+            return await stream.__anext__()
+        except StopAsyncIteration:
+            return None
 
     def resume_from(self, completed: Sequence[DecisionBundle]) -> bool:
         """断点续算种子(issue #314):接受已落库的决策前缀,跳过其重算。
@@ -406,31 +471,46 @@ class PortfolioPipelineAdapter:
         # issue #314:已落库的决策前缀原样产出(零重算),其内容已由
         # coordinator 读回校验并将再次通过 _validate_decision + 幂等持久化。
         start_index = 0
-        for bundle in self._resume_bundles or ():
-            yield bundle
-            start_index += 1
+        try:
+            for bundle in self._resume_bundles or ():
+                yield bundle
+                start_index += 1
 
-        for index in range(start_index, len(self._inputs)):
-            item = self._inputs[index]
-            try:
-                # 逐决策 CPU 密集段(组合构建 / 约束 / 风险退出 / 资金可行性 /
-                # sizing / 账本)是纯同步计算,经 asyncio.to_thread 卸载
-                # (issue #286):事件循环线程被解放,worker 心跳不被饿死。
-                # 无 session / 数据 IO 触碰;state 由本协程独占,线程间无竞争。
-                yield await asyncio.to_thread(
-                    self._build_decision,
-                    manifest=manifest,
-                    item=item,
-                    index=index,
-                    state=state,
-                    constraints=constraints,
-                    risk_exit_policy=risk_exit_policy,
-                    allocation_method=allocation_method,
-                    conflict_policy=conflict_policy,
-                    target_gross=target_gross,
-                )
-            except (AllocationError, SizingError, ValueError) as exc:
-                raise ResearchConstraintViolationError(str(exc)) from exc
+            # issue #463:决策输入支持 Sequence(按索引读取,旧行为)或
+            # AsyncIterator(逐期拉取,任一时刻常驻 O(1) 期次)。从
+            # start_index 继续:Sequence 越界即结束;流式耗尽(StopAsyncIteration)
+            # 即结束 —— 两种输入的产出序列逐字节一致。
+            index = start_index
+            while True:
+                item = await self._next_input(index)
+                if item is None:
+                    break
+                try:
+                    # 逐决策 CPU 密集段(组合构建 / 约束 / 风险退出 / 资金
+                    # 可行性 / sizing / 账本)是纯同步计算,经 asyncio.to_thread
+                    # 卸载(issue #286):事件循环线程被解放,worker 心跳不被
+                    # 饿死。无 session / 数据 IO 触碰;state 由本协程独占,
+                    # 线程间无竞争。
+                    yield await asyncio.to_thread(
+                        self._build_decision,
+                        manifest=manifest,
+                        item=item,
+                        index=index,
+                        state=state,
+                        constraints=constraints,
+                        risk_exit_policy=risk_exit_policy,
+                        allocation_method=allocation_method,
+                        conflict_policy=conflict_policy,
+                        target_gross=target_gross,
+                    )
+                except (AllocationError, SizingError, ValueError) as exc:
+                    raise ResearchConstraintViolationError(str(exc)) from exc
+                index += 1
+        finally:
+            # issue #463:本生成器退出(耗尽 / 关闭 / 抛错)即关闭流式输入,
+            # 级联收尾输入捕获包装 → 加载生成器 → 特征进程池(即时释放,
+            # 不等 GC);对 Sequence 输入与已关闭流均为 no-op。
+            await self._close_input_stream()
 
     def build_report(
         self,
