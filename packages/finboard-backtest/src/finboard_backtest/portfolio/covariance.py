@@ -25,6 +25,17 @@ MIN_OBS_FOR_FULL_COVARIANCE = 30
 DEFAULT_LOOKBACK_DAYS = 252
 """默认回看窗口:约 1 年交易日。"""
 
+PSD_MIN_EIGENVALUE = 1e-12
+"""PD 修复的特征值下限:``_ensure_positive_definite`` 把低于该值的特征值
+clip 到该值。
+
+同时也是 PSD 校验容差的对齐锚(issue #465):``builder._covariance_problem``
+与 ``max_ir`` 的同公式校验容差取 ``min(eps * max(1, ‖A‖∞) * N,
+PSD_MIN_EIGENVALUE / 2)`` —— 此前纯数值容差在大 N(N≈5000)时约 1.1e-12,
+反而高于 clip 下限 1e-12,存在「修复过的矩阵仍被校验拒绝」的边界;对齐后
+修复过的矩阵(最小特征值 >= 1e-12)恒过校验,真坏矩阵(最小特征值 <= 0
+或 NaN / 不对称)照旧被拦。"""
+
 
 class CovarianceError(RuntimeError):
     """协方差估计失败 —— 标的为空、窗口不足或矩阵非正定。"""
@@ -247,7 +258,7 @@ def estimate_covariance(
 def _ensure_positive_definite(
     matrix: npt.NDArray[np.float64],
     *,
-    min_eigenvalue: float = 1e-12,
+    min_eigenvalue: float = PSD_MIN_EIGENVALUE,
 ) -> npt.NDArray[np.float64]:
     """确保矩阵正定:对小特征值做 clipping。
 
@@ -268,6 +279,7 @@ def _ensure_positive_definite(
 __all__ = [
     "DEFAULT_LOOKBACK_DAYS",
     "MIN_OBS_FOR_FULL_COVARIANCE",
+    "PSD_MIN_EIGENVALUE",
     "CovarianceError",
     "CovarianceEstimate",
     "estimate_covariance",

@@ -61,6 +61,7 @@ from finboard_backtest.portfolio.contracts import (
     TargetWeight,
 )
 from finboard_backtest.portfolio.covariance import (
+    PSD_MIN_EIGENVALUE,
     CovarianceError,
     CovarianceEstimate,
     estimate_covariance,
@@ -119,6 +120,7 @@ __all__ = [
     "NEUTRALIZATION_INACTIVE_WARNING",
     "NEUTRALIZATION_SKIPPED_CONSTRAINT",
     "PORTFOLIO_CONTRACT_VERSION",
+    "PSD_MIN_EIGENVALUE",
     "RISK_EXIT_EXECUTOR_VERSION",
     "AllocationContext",
     "AllocationError",
