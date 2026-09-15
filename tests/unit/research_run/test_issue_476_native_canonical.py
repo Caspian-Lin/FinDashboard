@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import UTC, datetime
 
 import pytest
@@ -77,6 +79,60 @@ def test_nonfinite_feature_value_fails_closed() -> None:
     object.__setattr__(item, "available_at", datetime(2020, 1, 2, tzinfo=UTC))
     with pytest.raises(ValueError, match="有限"):
         canonical_json_list_text([item])
+
+
+@pytest.mark.parametrize("surrogate", [chr(0xD800), chr(0xDFFF)])
+def test_candidate_surrogates_match_legacy_fallback(surrogate: str) -> None:
+    item = UniverseCandidate(
+        symbol=surrogate,
+        included=True,
+        reasons=(surrogate,),
+        asset_class=surrogate,
+        market=surrogate,
+    )
+    assert canonical_json_list_text([item]) == _legacy([item])
+
+
+@pytest.mark.parametrize("surrogate", [chr(0xD800), chr(0xDFFF)])
+def test_feature_surrogates_match_legacy_fallback(surrogate: str) -> None:
+    item = FeatureValue(
+        symbol=surrogate,
+        feature_id=surrogate,
+        value=1e-5,
+        source_artifact_ids=(surrogate,),
+        available_at=datetime(2020, 1, 2, tzinfo=UTC),
+    )
+    assert canonical_json_list_text([item]) == _legacy([item])
+
+
+def test_missing_orjson_import_keeps_stdlib_path_in_isolated_process() -> None:
+    script = """
+import builtins
+from datetime import UTC, datetime
+
+original_import = builtins.__import__
+def import_without_orjson(name, *args, **kwargs):
+    if name == "orjson":
+        raise ImportError("test: orjson unavailable")
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = import_without_orjson
+
+from finboard_backtest.research_run.contracts import (
+    UniverseCandidate,
+    canonical_json_list_text,
+)
+
+item = UniverseCandidate("000001.SZ", True, ("ok",), "equity", "SZ")
+assert canonical_json_list_text([item]) == (
+    '[{"asset_class":"equity","included":true,"market":"SZ",'
+    '"reasons":["ok"],"symbol":"000001.SZ"}]'
+)
+print("isolated stdlib fallback passed")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script], check=True, capture_output=True, text=True
+    )
+    assert "isolated stdlib fallback passed" in completed.stdout
 
 
 def test_real_artifact_payload_and_checksum_are_unchanged() -> None:

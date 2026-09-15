@@ -16,7 +16,10 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, NamedTuple, Protocol, cast
 
-import orjson
+try:
+    import orjson
+except ImportError:  # pragma: no cover - exercised in isolated import test
+    orjson = None  # type: ignore[assignment]
 
 from finboard_backtest.strategy_spec.contracts import (
     ResearchStrategySpec,
@@ -1083,6 +1086,10 @@ def _native_canonical_chunk(items: Sequence[object]) -> str | None:
     remain on the established recursive path.
     """
 
+    if orjson is None:
+        # The package declares orjson directly, but keeping this import
+        # optional lets older/minimal environments retain the stdlib contract.
+        return None
     if len(items) == 0:
         return None
     item_type = type(items[0])
@@ -1140,7 +1147,15 @@ def _native_canonical_chunk(items: Sequence[object]) -> str | None:
             )
     else:
         return None
-    return orjson.dumps(mapped, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+    try:
+        encoded = orjson.dumps(mapped, option=orjson.OPT_SORT_KEYS)
+    except orjson.JSONEncodeError:
+        # In particular, orjson rejects isolated UTF-16 surrogates while the
+        # established ensure_ascii=False stdlib path preserves them.  Only
+        # this encoder-specific unsupported-input error is eligible for
+        # fallback; resource/system exceptions must remain visible.
+        return None
+    return encoded.decode("utf-8")
 
 
 def canonical_json_list_text(
