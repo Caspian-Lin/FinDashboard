@@ -270,12 +270,26 @@ async def get_run(
 
 
 async def list_artifacts(app: McpAppContext, run_id: str) -> ToolEnvelope:
+    """run 全量 artifacts(含 payload;逐 artifact 体量见 #206 P0 有界约定)。
+
+    issue #480:加载前先数据库侧估计载荷(``SUM(octet_length)``),超限
+    具名 ``payload_too_large``,绝不把全量 payload 拉进进程(真实 run
+    7203 artifacts / ≈5.9GB 曾把进程顶到 10GB+);单决策有界数据走
+    ``finboard_report_run(view="detail", decision_id=...)`` 下钻。
+    """
+
     async def _do() -> list[dict[str, Any]]:
+        from finboard_mcp import reporting
+        from finboard_mcp.tools.reports import _payload_too_large_error
+
         async with app.session_maker() as session:
             repo = ResearchRunRepository(session)
             row = await repo.get(run_id)
             if row is None:
                 raise McpToolError("not_found", f"研究运行不存在: {run_id}")
+            estimated = await repo.estimate_artifact_payload_bytes(run_id)
+            if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
+                raise _payload_too_large_error(run_id, estimated)
             artifacts = await repo.list_artifacts(run_id)
             return [_artifact_summary(item) for item in artifacts]
 
@@ -1057,7 +1071,16 @@ async def lineage_run(
         from finboard_backtest.research_run import ResearchRunCoordinator
 
         async with app.session_maker() as session:
-            store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            repo = ResearchRunRepository(session)
+            store = SqlAlchemyResearchRunStore(repo)
+            # issue #480:coordinator.lineage 内部全量物化 artifacts 再按
+            # trace 图过滤,与 artifacts / detail 同款加载前护栏。
+            from finboard_mcp import reporting
+            from finboard_mcp.tools.reports import _payload_too_large_error
+
+            estimated = await repo.estimate_artifact_payload_bytes(run_id)
+            if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
+                raise _payload_too_large_error(run_id, estimated)
             coordinator = ResearchRunCoordinator(store)
             artifacts = await coordinator.lineage(run_id, trace_id)
             if not artifacts:

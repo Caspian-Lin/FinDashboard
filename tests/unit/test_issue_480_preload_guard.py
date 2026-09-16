@@ -29,6 +29,7 @@ from finboard_mcp import reporting
 from finboard_mcp.audit import AuditRecorder
 from finboard_mcp.context import McpAppContext
 from finboard_mcp.tools import reports as rp_tools
+from finboard_mcp.tools import runs
 from finboard_persistence import (
     ResearchRunArtifactModel,
     ResearchRunArtifactSummary,
@@ -236,3 +237,60 @@ class TestReportExportPreloadGuard:
         # 豁免估计,但仍需加载做下钻过滤。
         assert calls["estimate"] == 0
         assert calls["list"] == 1
+
+
+class TestRunArtifactsPreloadGuard:
+    """``finboard_run_artifacts`` 全量 payload 列表的加载前护栏(#480)。"""
+
+    async def test_over_limit_refuses_before_load(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(reporting, "RUN_DETAIL_MAX_ESTIMATED_BYTES", 128)
+        calls = _patch_repos(monkeypatch, _run_row(), _big_artifacts())
+        env = await runs.list_artifacts(_make_app(), _RUN_ID)
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "payload_too_large"
+        assert calls == {"get": 1, "summarize": 0, "estimate": 1, "list": 0}
+
+    async def test_under_limit_lists_with_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _patch_repos(monkeypatch, _run_row(), _small_artifacts())
+        env = await runs.list_artifacts(_make_app(), _RUN_ID)
+        assert env.status == "ok", env.error
+        assert calls == {"get": 1, "summarize": 0, "estimate": 1, "list": 1}
+        assert isinstance(env.data, list)
+        assert env.data[0]["payload"] == {"report": {"strategy_return": 0.5}}
+
+    async def test_not_found_short_circuits_before_estimate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _patch_repos(monkeypatch, None, [])
+        env = await runs.list_artifacts(_make_app(), "RR-missing")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "not_found"
+        assert calls == {"get": 1, "summarize": 0, "estimate": 0, "list": 0}
+
+
+class TestLineagePreloadGuard:
+    """``finboard_run_lineage`` 的加载前护栏(#480;coordinator 内部全量物化)。"""
+
+    async def test_over_limit_refuses_before_lineage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(reporting, "RUN_DETAIL_MAX_ESTIMATED_BYTES", 128)
+        calls = _patch_repos(monkeypatch, _run_row(), _big_artifacts())
+
+        async def _boom(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError("超限时不应触达 coordinator.lineage")
+
+        monkeypatch.setattr(
+            "finboard_backtest.research_run.ResearchRunCoordinator.lineage", _boom
+        )
+        env = await runs.lineage_run(_make_app(), _RUN_ID, "RRT-0001")
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "payload_too_large"
+        assert calls == {"get": 0, "summarize": 0, "estimate": 1, "list": 0}

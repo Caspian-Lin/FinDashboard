@@ -57,6 +57,9 @@
 列出某 ResearchRun 的逐阶段 artifact。
 - 参数:`run_id: str`
 - 返回:`list[{artifact_id, sequence, stage, trace_id, payload}]`
+- 载荷护栏(#480):加载前数据库侧估计全量 payload,超 64MB 具名
+  `payload_too_large` 拒绝(不加载,不拖死进程);单决策有界数据走
+  `finboard_report_run(view="detail", decision_id=...)` 下钻。
 
 ### finboard_run_queue(✅ #127 + #170 + #183,写)
 冻结输入 + 登记 queued ResearchRun(**不执行回测**,执行由离线 worker 完成)。
