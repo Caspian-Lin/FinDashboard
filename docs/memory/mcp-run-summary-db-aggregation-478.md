@@ -56,9 +56,23 @@ PASS;语义锚点测试防「两个实现一起错」)。
 护栏单一来源。修后曲线:detail 8.3s / export 7.5s,峰值均 140MB。
 
 **教训:护栏/估计必须在加载之前(数据库侧)做——「先加载再判断」的任何
-护栏都救不了内存。** 遗留:REST `GET /research-runs/{id}/report/export` 与
-MCP `finboard_run_artifacts` 仍按契约全量加载 payload,需分页/裁剪的契约
-讨论(见 issue #480「遗留」节)。
+护栏都救不了内存。**
+
+### 二次事故(2026-09-16,#480 修复分支上复现 ~15GB)
+
+用户重启 dev 后仍暴涨:`pg_stat_activity` 抓到 11 分钟的全实体 payload
+SELECT,dev server 驻留 20.6GB;经线上 MCP 端口复现锁定肇事工具 =
+`finboard_run_artifacts`(当时列为「遗留」未修),lineage(MCP+REST)同款
+内部全量物化。修复随 PR #481 b2c4470:四个剩余入口(`finboard_run_artifacts`
+/ `finboard_run_lineage` / REST `/{id}/artifacts` / REST `/{id}/report/export`
++ `/{id}/lineage/{trace}`)全部加同款估计护栏,线上实测 4-5s 具名拒绝、
+峰值 181MB。
+
+**教训 2:修「一类问题」时按 `list_artifacts` 的全部调用方枚举收口,不要留
+「遗留待讨论」的活口——用户/agent 不会知道哪个工具是安全的。** 止血:
+`pg_cancel_backend` + 重启 dev;重启时确认 8765 端口已释放(残留 MCP 子进程
+占端口会让新实例静默无 MCP)。剩余遗留仅契约层分页/裁剪设计(见 issue
+#480 评论)。
 
 ## How to apply
 
