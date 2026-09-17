@@ -102,8 +102,10 @@ export function pnlColor(v: number | null | undefined): string {
 
 export function runVersion(run: ResearchRunSummary): number | null {
   if (typeof run.strategy_version === "number") return run.strategy_version;
-  const value = run.manifest?.strategy_spec_version;
-  return typeof value === "number" ? value : null;
+  const frozenVersion = run.manifest?.strategy_version;
+  if (typeof frozenVersion === "number") return frozenVersion;
+  const legacyVersion = run.manifest?.strategy_spec_version;
+  return typeof legacyVersion === "number" ? legacyVersion : null;
 }
 
 export function runCapital(run: ResearchRunSummary): number | null {
@@ -112,7 +114,7 @@ export function runCapital(run: ResearchRunSummary): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
-function shortDate(iso: string): string {
+export function shortDate(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
@@ -731,7 +733,7 @@ export function RunReportView({ runId }: { runId: string }) {
       metrics={metrics}
       equityCurve={equityCurve}
       extras={extras}
-      sourceHref="/research/runs"
+      sourceHref={`/research/runs?run=${encodeURIComponent(detail.run_id)}`}
       sourceLabel={tl({ zh: "研究运行", en: "research run" })}
       sourceId={detail.run_id}
       exportBasePath={`/api/research/runs/${encodeURIComponent(detail.run_id)}/report/export`}

@@ -184,8 +184,8 @@ export default function ResearchDocs() {
                 icon={<BookOpen className="h-8 w-8" />}
                 title={tl({ zh: "暂无研究记录", en: "No research notes" })}
                 description={tl({
-                  zh: "仓库 docs/research/ 目录不存在或为空;由研究 agent 按 issue #268 协议写入。",
-                  en: "The repo docs/research/ directory is missing or empty; written by the research agent per issue #268.",
+                  zh: "本页只读展示仓库 docs/research/ 下的文档;canonical 是仓库文件本身——ROADMAP(路线)、FINDINGS(结论)与 rounds/(轮次日志),经 PR 维护。该目录不存在或为空时,此处即无内容可展示。",
+                  en: "This page is a read-only view of the repository's docs/research/ directory; the canonical source is the repo files themselves — ROADMAP, FINDINGS and rounds/ — maintained via pull requests. If that directory is missing or empty, there is nothing to show here.",
                 })}
               />
             ) : (

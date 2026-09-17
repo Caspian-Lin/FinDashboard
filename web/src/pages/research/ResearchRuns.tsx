@@ -62,6 +62,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import {
   factorLabApi,
   researchRunApi,
+  runningRunLabel,
   strategySpecApi,
   featureSnapshotNames,
   featureSnapshotSymbolCount,
@@ -798,34 +799,51 @@ export default function ResearchRuns() {
               onRetry={() => listQuery.refetch()}
             />
           ) : filteredRuns.length > 0 ? (
-            filteredRuns.map((run: ResearchRunSummary) => (
-              <MasterListItem
-                key={run.run_id}
-                selected={selectedId === run.run_id}
-                onClick={() => setSelectedId(run.run_id)}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <StatusBadge status={run.status} />
-                  <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-                    {run.run_id}
-                  </span>
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-2">
-                  <span className="min-w-0 truncate font-mono text-xs text-foreground">
-                    {run.strategy_id}
-                  </span>
-                  <Badge variant="secondary" className="font-mono">
-                    {tl(strategyVersionLabel(run))}
-                  </Badge>
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <span className="tabular-nums">
-                    ¥{formatCurrency(initialCapital(run), 0)}
-                  </span>
-                  <span>{timeAgo(run.created_at, lang)}</span>
-                </div>
-              </MasterListItem>
-            ))
+            filteredRuns.map((run: ResearchRunSummary) => {
+              const live = runningRunLabel(run);
+              return (
+                <MasterListItem
+                  key={run.run_id}
+                  selected={selectedId === run.run_id}
+                  onClick={() => setSelectedId(run.run_id)}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <StatusBadge status={run.status} />
+                    <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+                      {run.run_id}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <span className="min-w-0 truncate font-mono text-xs text-foreground">
+                      {run.strategy_id}
+                    </span>
+                    <Badge variant="secondary" className="font-mono">
+                      {tl(strategyVersionLabel(run))}
+                    </Badge>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span className="tabular-nums">
+                      ¥{formatCurrency(initialCapital(run), 0)}
+                    </span>
+                    <span>{timeAgo(run.created_at, lang)}</span>
+                  </div>
+                  {live && (
+                    <div className="mt-2 flex items-center gap-1.5 text-xs text-info">
+                      <Activity className="h-3.5 w-3.5 shrink-0" />
+                      <span className="tabular-nums">{tl(live)}</span>
+                    </div>
+                  )}
+                  {run.status === "failed" && run.error_summary && (
+                    <p
+                      className="mt-2 truncate text-xs text-destructive"
+                      title={run.error_summary}
+                    >
+                      {run.error_summary}
+                    </p>
+                  )}
+                </MasterListItem>
+              );
+            })
           ) : (
             <EmptyState
               icon={<Activity className="h-8 w-8" />}
@@ -990,13 +1008,13 @@ export default function ResearchRuns() {
                                         </span>
                                       </span>
                                       <span>
-                                        {tl({ zh: "阶段:", en: "Phase:" })}
+                                        {tl({ zh: "当前阶段(含阶段内进度):", en: "Current phase (in-phase progress):" })}
                                         <span className="ml-1 font-mono text-foreground">
                                           {jobQuery.data.phase ?? "—"}
                                         </span>
                                       </span>
                                       <span>
-                                        {tl({ zh: "进度:", en: "Progress:" })}
+                                        {tl({ zh: "作业整体进度:", en: "Overall job progress:" })}
                                         <span className="ml-1 tabular-nums text-foreground">
                                           {jobQuery.data.progress_done}/
                                           {jobQuery.data.progress_total}

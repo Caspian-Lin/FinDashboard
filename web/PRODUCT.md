@@ -13,6 +13,7 @@
 ├── 组合与风险    /research/portfolio  — 目标权重分配、离散交易、资金可行性
 ├── 模拟盘        /research/simulation — 纸面撮合、目标仓位决策、绩效报告
 ├── 研究工作台    /research/workbench  — OpenCode Web 研究交互（iframe 直连，AI 能力由 OpenCode 承担）
+├── 研究记录      /research/docs       — 仓库 docs/research/ 的只读展示（canonical 在仓库，经 PR 维护）
 └── 研究报告      /research/reports     — 聚合展示运行结果与绩效归因、CSV/Markdown 导出
 
 实盘交易（受控区域）
@@ -23,7 +24,7 @@
 └── 控制台        /control             — Kill Switch、核对、审计
 
 工具
-├── 回测          /backtest            — 策略回测、历史记录
+├── 回测          /backtest            — 策略回测、历史记录（快速探索工具，不入晋级链）
 ├── 策略预设      /strategies          — 预设管理
 └── 设置          /settings            — 定时任务配置
 ```
@@ -44,6 +45,14 @@
 6. **组合构建**：在「组合与风险」分配权重、离散交易求解、三档资金可行性
 7. **模拟交易**：在「模拟盘」创建账户与会话、提交目标仓位决策、查看绩效
 8. **报告分析**：在「研究报告」聚合查看绩效指标、权益曲线与归因
+
+### 探索工具（不入晋级链）
+
+顶栏「研究流程」帮助弹层在 8 步主流程之外单列探索工具，避免把探索动作误读为晋级步骤：
+
+- **回测** `/backtest`：快速探索，单次运行看结果，不产生可晋级的验证结论
+- **研究工作台** `/research/workbench`：OpenCode 研究交互入口
+- **研究记录** `/research/docs`：仓库 `docs/research/`（ROADMAP / FINDINGS / rounds）的只读展示，canonical 在仓库、经 PR 维护
 
 ### AI 辅助流程
 

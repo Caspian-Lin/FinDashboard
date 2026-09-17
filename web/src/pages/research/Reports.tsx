@@ -43,6 +43,7 @@ import {
   errorMessage,
   pnlColor,
   runVersion,
+  shortDate,
   ReportContent,
   RunReportView,
   type EquityPoint,
@@ -298,7 +299,9 @@ export default function Reports() {
                         <SelectItem key={r.run_id} value={r.run_id}>
                           <span className="font-mono">{r.strategy_id}</span>
                           <span className="text-muted-foreground">
-                            · v{runVersion(r) ?? "—"} · {r.run_id.slice(0, 10)}…
+                            · v{runVersion(r) ?? "—"} · {tl({ zh: "完成", en: "done" })}{" "}
+                            {shortDate(r.completed_at ?? r.created_at)} ·{" "}
+                            {r.run_id.slice(0, 10)}…
                           </span>
                         </SelectItem>
                       ))
