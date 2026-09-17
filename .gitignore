@@ -93,6 +93,7 @@ desktop.ini
 .opencode/auth.json
 # #157:容器启动时渲染的运行时 opencode.json(mcp.finboard.url ← opencode_mcp_remote_url)
 .opencode/runtime/
+.opencode/logs/
 
 # 对账 / 草稿脚本(#396 起各 worktree 本地使用,不入库)
 .tmp/
