@@ -53,6 +53,32 @@ export interface WorkflowNextStep {
   description?: LocalizedText | string;
 }
 
+/* 探索工具(issue #484):回测只做快速探索、不入研究晋级链;工作台与研究记录
+   同为辅助入口,故与 8 步主流程分开展示,不参与步骤序号与当前步高亮。 */
+const EXPLORE_TOOLS: { path: string; label: LocalizedText; description: LocalizedText }[] = [
+  {
+    path: "/backtest",
+    label: { zh: "回测", en: "Backtest" },
+    description: {
+      zh: "快速探索:单次运行看结果,不入晋级链",
+      en: "Quick exploration: one run for results, outside the promotion chain",
+    },
+  },
+  {
+    path: "/research/workbench",
+    label: { zh: "研究工作台", en: "Research Workbench" },
+    description: { zh: "OpenCode 研究交互入口", en: "OpenCode research interaction entry" },
+  },
+  {
+    path: "/research/docs",
+    label: { zh: "研究记录", en: "Research Notes" },
+    description: {
+      zh: "仓库 docs/research/ 的只读展示(经 PR 维护)",
+      en: "Read-only mirror of the repo's docs/research/ (maintained via PRs)",
+    },
+  },
+];
+
 /** 各研究页在流程中的「下一步」引导(原先每页页底 NextStepCTA 的文案)。 */
 export const WORKFLOW_NEXT: Record<string, WorkflowNextStep> = {
   data: {
@@ -175,6 +201,33 @@ export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
               </Link>
             );
           })}
+        </div>
+        <div className="mt-3 border-t border-border pt-3">
+          <p className="px-2 text-xs font-medium text-foreground">
+            {tl({ zh: "探索工具", en: "Exploration tools" })}
+          </p>
+          <p className="mt-0.5 px-2 text-xs text-muted-foreground">
+            {tl({
+              zh: "不参与上述晋级链:回测用于快速探索,工作台与研究记录是辅助入口。",
+              en: "Not part of the promotion chain above: backtests are for quick exploration, while the workbench and research notes are auxiliary entries.",
+            })}
+          </p>
+          <div className="mt-1 space-y-0.5">
+            {EXPLORE_TOOLS.map((tool) => (
+              <Link
+                key={tool.path}
+                to={tool.path}
+                className="block rounded-md px-2 py-1.5 transition-colors hover:bg-accent"
+              >
+                <span className="block text-xs font-medium text-muted-foreground">
+                  {tl(tool.label)}
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground/70">
+                  {tl(tool.description)}
+                </span>
+              </Link>
+            ))}
+          </div>
         </div>
         {next && (
           <div className="mt-3 border-t border-border pt-3">

@@ -26,7 +26,7 @@ import { researchRunApi } from "@/lib/research";
 import { experimentApi } from "@/lib/research";
 import { datasetApi } from "@/lib/research";
 import { simulationApi } from "@/lib/simulation";
-import { timeAgo } from "@/lib/utils";
+import { formatDateTime, timeAgo } from "@/lib/utils";
 import { useLanguage, useT, type LocalizedText } from "@/i18n";
 
 const workflowSteps: { to: string; label: LocalizedText; icon: LucideIcon; desc: LocalizedText }[] = [
@@ -169,13 +169,16 @@ export default function ResearchHome() {
                   <Link
                     key={rel.release_id}
                     to="/research/data"
-                    className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent"
+                    className="flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent"
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
                       <StatusBadge status={rel.quality_status} />
-                      <span className="text-xs">{rel.dataset_name} v{rel.version}</span>
+                      <span className="min-w-0 truncate text-xs">{rel.dataset_name} v{rel.version}</span>
                     </div>
-                    <span className="text-xs text-muted-foreground">{tl({ zh: `${rel.symbol_count} 标的`, en: `${rel.symbol_count} symbols` })}</span>
+                    <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                      {tl({ zh: `${rel.symbol_count} 标的`, en: `${rel.symbol_count} symbols` })} ·{" "}
+                      {formatDateTime(rel.published_at)}
+                    </span>
                   </Link>
                 ))}
               </div>
