@@ -330,9 +330,11 @@ class TestFeePolicySummary:
             }
         )
         assert summary["overrides_applied"] is True
-        assert summary["effective"]["commission_rate"] == 0.0006
-        assert summary["effective"]["slippage_bps"] == model.slippage_bps
-        assert summary["spec"]["commission_rate"] == model.commission_rate
+        effective = cast(dict[str, object], summary["effective"])
+        assert effective["commission_rate"] == 0.0006
+        assert effective["slippage_bps"] == model.slippage_bps
+        spec = cast(dict[str, object], summary["spec"])
+        assert spec["commission_rate"] == model.commission_rate
 
     def test_legacy_unknown_keys_not_in_effective(self) -> None:
         """接线前静默存储的未知键:仅留在 overrides,不进 effective。"""
