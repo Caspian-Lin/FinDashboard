@@ -231,7 +231,7 @@ class TestFactorCatalog:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """source="predefined" 返回注册表 174 条同构摘要,不查 DB。"""
+        """source="predefined" 返回注册表全量同构摘要(实时长度),不查 DB。"""
         from finboard_backtest.factors.predefined import PREDEFINED_FACTORS
 
         _no_user_artifacts(monkeypatch)
