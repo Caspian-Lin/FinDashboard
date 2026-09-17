@@ -15,8 +15,10 @@ AGENTS.md git 历史承载，仅留档备查；活跃记忆只保留「不读代
 - [PostgreSQL 僵尸锁卡死测试的根因与防护](pg-lock-hygiene.md) — idle-in-transaction 僵尸事务让测试无限等锁；conftest 已设 lock_timeout，附 pg_stat_activity 排查命令
 - [测试基建关键坑：pytest-timeout / SQLAlchemy URL / 守卫注入](test-infra-timeout-and-testdb.md) — thread 方式 os._exit 杀进程、pytest-asyncio 1.4 无内置超时、str(URL) 脱敏密码、循环闭包 late-binding
 - [测试库 schema 漂移：create_all 不 ALTER 已有表](test-db-create-all-schema-drift.md) — 模型加列后测试库须手动 ALTER（跑 alembic 撞 DuplicateTable）；.env URL 提取用 Python 勿用 sed
+- [test_releases.py 在 coverage 下偶发失败（非回归信号）](test-releases-flaky-under-coverage.md) — 并行发布/staging 清理两用例被 coverage tracer 放大竞态偶发失败；--no-cov 或重跑即过，勿误判为回归去改业务代码
 - [本机 akshare 复现实验的 ProxyError 陷阱](akshare-em-proxy-error-repro-trap.md) — 系统代理对 push2his.eastmoney.com 偶发 ProxyError（真股票也失败），接口行为判定以源码+请求 URL secid 参数为准；集成测试一律 mock 网络
 - [多 worktree 并行开发：本机落地参数与坑位（#289）](multi-worktree-parallel-dev.md) — junction 共享 data_cache/data_releases + 独立库/端口；删 junction 禁 rm -rf；vite 端口/代理可环境变量覆盖
+- [里程碑分支别名与 dev/main 集成时点](milestone-alias-and-dev-integration.md) — 「m/opencode-research-mcp」是别名，实名 m/opencode-research-agent；2026-09-17 起 dev/main/里程碑三者同树，先后关系 git fetch + merge-base 现算不凭印象
 - [OpenCode Web 工作台：SPA 状态与容器环境踩坑](opencode-web-state-and-home.md) — 项目/最近会话在浏览器 IndexedDB，服务端无法预置；HOME/XDG 决定文件选择器与数据落点；坏路径会话清理方法
 - [OpenCode provider 持久化与模型目录合并](opencode-provider-persistence-and-model-sync.md) — UI 连接=auth.json（data 卷），config provider=仓库文件；agent 定义以 .opencode/agent/*.md 为准；UI 写配置落 ：ro 挂载必失，重启回落仓库冻结态
 - [OpenCode finboard-researcher：bash 放行 + exa 搜索 MCP](opencode-agent-bash-exa-mcp.md) — 容器无 JS 运行时，local MCP 不可行只能 remote；exa 托管端点匿名可用；改权限须重启容器
