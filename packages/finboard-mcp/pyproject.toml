@@ -1,0 +1,27 @@
+[project]
+name = "finboard-mcp"
+version = "0.1.0"
+description = "FinBoard MCP Server — 向外置 Agent(OpenCode)暴露受控研究工具的 MCP 服务。"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+  "finboard-shared",
+  "finboard-app",
+  "finboard-backtest",
+  "finboard-persistence",
+  "mcp>=2.0",
+  "httpx>=0.27",
+  "structlog>=24.1",
+  # HTTP 传输(streamable-http/sse)由 mcp SDK 内部用 starlette/uvicorn 启动;
+  # 这里显式声明 uvicorn,因为 __main__ 在 HTTP 模式下直接 import uvicorn
+  # 以包裹 Bearer 鉴权中间件(issue #xxx Docker 隔离前置)。
+  "uvicorn>=0.30",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/finboard_mcp"]

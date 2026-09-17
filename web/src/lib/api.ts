@@ -1,5 +1,125 @@
 const BASE = "/api";
 
+// ---- 统一后台任务队列(background_jobs, BJ- ID) ----
+// 与后端 JobOut(job_schemas.py)逐字段对齐;POST 提交端点统一返回 202 + JobOut,
+// 前端拿到 job_id 后用 getJob 轮询 /api/jobs/{job_id} 直到终态再按 result_ref 取详情。
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "retry_waiting"
+  | "succeeded"
+  | "failed"
+  | "cancel_requested"
+  | "cancelled"
+  | "interrupted";
+
+export const TERMINAL_JOB_STATUSES: ReadonlySet<JobStatus> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+// job 级耗时/IO 聚合(issue #383):worker 收口时写入,timing=null 表示
+// 旧行 / 未走到收口。IO 占比 = read_elapsed_ms / execute 墙钟,占比高 ≈
+// IO 瓶颈、低 ≈ CPU 瓶颈(配合火焰图定位热点)。
+export interface JobTiming {
+  execute_elapsed_seconds: number;
+  parquet_reads: {
+    read_ops: number;
+    read_elapsed_ms: number;
+    read_bytes: number;
+    ops_by_entry: Record<string, number>;
+  };
+}
+
+export interface JobOut {
+  job_id: string;
+  kind: string;
+  queue: string;
+  status: JobStatus;
+  priority: number;
+  payload: Record<string, unknown>;
+  payload_checksum: string;
+  idempotency_key: string;
+  progress_total: number;
+  progress_done: number;
+  phase: string | null;
+  result_ref: string | null;
+  error_code: string | null;
+  error_summary: string | null;
+  attempt: number;
+  max_attempts: number;
+  worker_id: string | null;
+  heartbeat_at: string | null;
+  lease_until: string | null;
+  requested_by: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  archived_at: string | null;
+  updated_at: string;
+  // 关联 research_runs 的状态(issue #306/#308):kind=research_run 且单查
+  // GET /api/jobs/{id} 时服务端填充;列表端点不 join,恒为 null。
+  // 「run interrupted 但 job 仍 running」的两表不一致一眼可见。
+  run_status: string | null;
+  // job 级耗时/IO 聚合(issue #383):列表与单查都带;null 兼容旧行/测试桩。
+  timing: JobTiming | null;
+}
+
+export function isJobRunning(job: Pick<JobOut, "status"> | undefined | null): boolean {
+  if (!job) return false;
+  return job.status === "queued" || job.status === "running" || job.status === "retry_waiting" || job.status === "cancel_requested";
+}
+
+export function isJobTerminal(job: Pick<JobOut, "status"> | undefined | null): boolean {
+  return Boolean(job && TERMINAL_JOB_STATUSES.has(job.status));
+}
+
+// 归档维度过滤(issue #221):exclude 默认只看未归档 / only 只看已归档 / all 不区分。
+export type JobArchivedFilter = "exclude" | "only" | "all";
+
+// ---- 任务诊断重放(火焰图,issue #373 服务化) ----
+
+export type FlamegraphSessionStatus = "running" | "done" | "failed" | "orphaned";
+
+export interface FlamegraphSessionMeta {
+  job_id: string;
+  kind: string;
+  source_status: string;
+  replay_side_effect: string;
+  format: string;
+  rate_hz: number;
+  started_at: string;
+}
+
+export interface FlamegraphReplayResult {
+  status: string;
+  result_ref: string | null;
+  error_code: string | null;
+  error_summary: string | null;
+}
+
+/** 服务端产物目录视图;meta/timing/result 为 null = 未就绪(轮询中)。 */
+export interface FlamegraphSession {
+  session_id: string;
+  status: FlamegraphSessionStatus;
+  meta: FlamegraphSessionMeta | null;
+  timing: JobTiming | null;
+  result: FlamegraphReplayResult | null;
+}
+
+/** 诊断重放能力表:放行 kind → 副作用说明 / 拒绝 kind → 原因。 */
+export interface FlamegraphMeta {
+  replayable_kinds: Record<string, string>;
+  rejected_kinds: Record<string, string>;
+}
+
+/** 产物 svg 的直链(<img>/<a> 引用)。 */
+export function flamegraphSvgUrl(jobId: string, sessionId: string): string {
+  return `${BASE}/jobs/${encodeURIComponent(jobId)}/flamegraph/${encodeURIComponent(sessionId)}/flamegraph.svg`;
+}
+
 export class ApiError extends Error {
   status: number;
   detail: unknown;
@@ -23,10 +143,20 @@ function errorMessage(detail: unknown, fallback: string): string {
       )
       .join("；");
   }
+  if (detail && typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    if (typeof record.message === "string") return record.message;
+    if (typeof record.msg === "string") return record.msg;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return fallback;
+    }
+  }
   return fallback;
 }
 
-async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
+export async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
@@ -47,6 +177,8 @@ export interface Health {
   status: string;
   kernel_ready: boolean;
   kill_switch_level: string;
+  broker_connected?: boolean;
+  broker_kind?: string;
 }
 
 export interface Account {
@@ -168,18 +300,22 @@ export const api = {
   getDataStatus: () => fetchJSON<DataStatus[]>("/data/status"),
   getDataStatusPage: (limit = 200, offset = 0) =>
     fetchJSON<DataStatusList>(`/data/status-page?limit=${limit}&offset=${offset}`),
+  getTushareQuota: () => fetchJSON<TushareQuota>("/data/tushare-quota"),
   fetchData: (body: DataFetchRequest) =>
     fetchJSON<FetchResult>("/data/fetch", { method: "POST", body: JSON.stringify(body) }),
-  fetchAllData: () =>
-    fetchJSON<BatchFetchResult>("/data/fetch-all", { method: "POST" }),
   getSymbolPool: () => fetchJSON<SymbolPool>("/data/symbols"),
   updateSymbolPool: (body: SymbolPoolUpdate) =>
     fetchJSON<SymbolPool>("/data/symbols", { method: "PUT", body: JSON.stringify(body) }),
+  /** 只读预览单标的本地缓存 parquet 尾部 bar(数据页可观测性)。 */
+  previewCacheBars: (symbol: string, limit = 20, adjust = "qfq") =>
+    fetchJSON<DataPreview>(
+      `/data/cache/preview?symbol=${encodeURIComponent(symbol)}&limit=${limit}&adjust=${encodeURIComponent(adjust)}`,
+    ),
 
   // ---- Backtest ----
   getStrategies: () => fetchJSON<StrategyInfo[]>("/backtest/strategies"),
   runBacktest: (body: BacktestRunRequest) =>
-    fetchJSON<BacktestResult>("/backtest/run", { method: "POST", body: JSON.stringify(body) }),
+    fetchJSON<JobOut>("/backtest/run", { method: "POST", body: JSON.stringify(body) }),
   getBacktestHistory: (limit = 50) =>
     fetchJSON<BacktestHistoryItem[]>(`/backtest/history?limit=${limit}`),
   getBacktestHistoryDetail: (id: number) =>
@@ -225,6 +361,8 @@ export const api = {
   getInstruments: (params?: {
     market?: string;
     instrument_type?: string;
+    exchange?: string;
+    listing_boards?: string[];
     q?: string;
     limit?: number;
     offset?: number;
@@ -232,6 +370,8 @@ export const api = {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.exchange) q.set("exchange", params.exchange);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     if (params?.q) q.set("q", params.q);
     q.set("limit", String(params?.limit ?? 200));
     q.set("offset", String(params?.offset ?? 0));
@@ -239,33 +379,124 @@ export const api = {
   },
   searchInstruments: (query: string) =>
     fetchJSON<InstrumentItem[]>(`/data/instruments/search?q=${encodeURIComponent(query)}`),
-  getInstrumentCodes: (params?: { market?: string; instrument_type?: string; q?: string }) => {
+  getInstrumentCodes: (params?: { market?: string; instrument_type?: string; exchange?: string; listing_boards?: string[]; q?: string }) => {
     const q = new URLSearchParams();
     if (params?.market) q.set("market", params.market);
     if (params?.instrument_type) q.set("instrument_type", params.instrument_type);
+    if (params?.exchange) q.set("exchange", params.exchange);
+    params?.listing_boards?.forEach((board) => q.append("listing_board", board));
     if (params?.q) q.set("q", params.q);
     return fetchJSON<string[]>(`/data/instruments/codes?${q}`);
   },
 
   // ---- Data Sync & Bulk Download ----
   syncUniverse: () =>
-    fetchJSON<{ total: number; new: number; updated: number }>("/data/sync", { method: "POST" }),
+    fetchJSON<JobOut>("/data/sync", { method: "POST" }),
   startBulkDownload: (body: {
     market?: string;
     instrument_type?: string;
+    exchange?: string;
+    listing_boards?: string[];
     start?: string;
+    source?: string;
   }) =>
-    fetchJSON<BulkDownloadStatus>("/data/bulk-download", {
+    fetchJSON<JobOut>("/data/bulk-download", {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  getBulkDownloadStatus: () =>
-    fetchJSON<BulkDownloadStatus>("/data/bulk-download/status"),
+  // GET /data/bulk-download/status 已随 #144 删除;前端统一用 getJob 轮询 /api/jobs/{job_id}。
+  checkQuality: (symbols?: string, adjust?: string) => {
+    const q = new URLSearchParams();
+    if (symbols) q.set("symbols", symbols);
+    if (adjust) q.set("adjust", adjust);
+    const qs = q.toString();
+    return fetchJSON<QualityReport[]>(`/data/quality${qs ? `?${qs}` : ""}`);
+  },
+  repairQuality: (body: { symbols: string[]; source: "akshare" | "yfinance" | "tushare"; adjust?: string }) =>
+    fetchJSON<JobOut>("/data/quality/repair", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  // ---- Unified Job Queue (background_jobs) ----
+  getJob: (jobId: string) => fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}`),
+  // 服务端分页(issue #373):offset + X-Total-Count 响应头,total 为与过滤
+  // 条件匹配的全量行数(翻页 total 不变,页面内轮询/操作刷新自然保页)。
+  listJobs: async (params?: {
+    kind?: string[];
+    status?: JobStatus[];
+    queue?: string[];
+    limit?: number;
+    offset?: number;
+    archived?: JobArchivedFilter;
+  }) => {
+    const q = new URLSearchParams();
+    params?.kind?.forEach((k) => q.append("kind", k));
+    params?.status?.forEach((s) => q.append("status", s));
+    params?.queue?.forEach((qq) => q.append("queue", qq));
+    if (params?.limit) q.set("limit", String(params.limit));
+    if (params?.offset) q.set("offset", String(params.offset));
+    if (params?.archived) q.set("archived", params.archived);
+    const resp = await fetch(`${BASE}/jobs${q.toString() ? "?" + q : ""}`, {
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new ApiError(
+        resp.status,
+        body.detail,
+        errorMessage(body.detail, resp.statusText || `${resp.status}`),
+      );
+    }
+    const items = (await resp.json()) as JobOut[];
+    const total = Number.parseInt(resp.headers.get("x-total-count") ?? "0", 10);
+    return { items, total: Number.isNaN(total) ? items.length : total };
+  },
+  // ---- 任务诊断重放(火焰图,issue #373 服务化;CLI 见 #383) ----
+  // 能力表:放行 kind → 重放副作用说明 / 拒绝 kind → 原因(静态,可长缓存)。
+  flamegraphMeta: () =>
+    fetchJSON<FlamegraphMeta>(`/jobs/flamegraph/meta`),
+  listFlamegraphSessions: (jobId: string) =>
+    fetchJSON<FlamegraphSession[]>(
+      `/jobs/${encodeURIComponent(jobId)}/flamegraph`,
+    ),
+  startFlamegraph: (jobId: string) =>
+    fetchJSON<{ session: FlamegraphSession }>(
+      `/jobs/${encodeURIComponent(jobId)}/flamegraph`,
+      { method: "POST" },
+    ),
+  // 产物 svg 直接以 <img>/<a> 引用(前端只拼 URL,不做鉴权 fetch)。
+  cancelJob: (jobId: string, reason?: string) =>
+    fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason ?? null }),
+    }),
+  archiveJob: (jobId: string) =>
+    fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}/archive`, {
+      method: "POST",
+    }),
+  unarchiveJob: (jobId: string) =>
+    fetchJSON<JobOut>(`/jobs/${encodeURIComponent(jobId)}/unarchive`, {
+      method: "POST",
+    }),
+  // 批量归档终态任务(issue #221):statuses 省略 = 全部终态;只回计数。
+  bulkArchiveJobs: (body: {
+    kinds?: string[];
+    statuses?: JobStatus[];
+    finished_before?: string;
+    limit?: number;
+  }) =>
+    fetchJSON<{ archived_count: number }>(`/jobs/archive`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   // ---- Scheduler Config ----
   getConfig: () => fetchJSON<SchedulerConfig>("/data/config"),
   updateConfig: (body: Partial<SchedulerConfig>) =>
     fetchJSON<SchedulerConfig>("/data/config", { method: "PUT", body: JSON.stringify(body) }),
+
+  // ---- LLM Provider Config (persisted to .env) ----
 };
 
 // ---- Data types ----
@@ -277,6 +508,7 @@ export interface DataStatus {
   first_date: string | null;
   last_date: string | null;
   last_close: string | null;
+  source: string | null;
 }
 
 export interface DataStatusList {
@@ -286,11 +518,22 @@ export interface DataStatusList {
   offset: number;
 }
 
+/** 数据预览(只读):缓存/冻结发布 parquet 尾部行采样(数据页可观测性)。 */
+export interface DataPreview {
+  label: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  total_rows: number;
+  truncated: boolean;
+  artifact: string;
+}
+
 export interface DataFetchRequest {
   symbol: string;
   start: string;
   end: string;
   adjust?: string;
+  source?: string;
 }
 
 export interface FetchResult {
@@ -298,6 +541,12 @@ export interface FetchResult {
   bar_count: number;
   first_date: string | null;
   last_date: string | null;
+  source: string | null;
+  fallback_used: boolean;
+  fallback_source: string | null;
+  lifecycle_events: number;
+  lifecycle_sync_failed: boolean;
+  lifecycle_sync_error: string | null;
 }
 
 export interface BatchFetchResult {
@@ -452,8 +701,9 @@ export interface BacktestMetrics {
   turnover: number;
   commission_paid: string;
   stamp_tax_paid: string;
-  benchmark_return: number;
-  excess_return: number;
+  // issue #184:基准缺失时 benchmark_return/excess_return 为 null
+  benchmark_return: number | null;
+  excess_return: number | null;
   initial_capital: string;
   final_equity: string;
 }
@@ -550,6 +800,7 @@ export interface InstrumentItem {
   market: string;
   instrument_type: string;
   exchange: string | null;
+  listing_board: string;
   status: string;
 }
 
@@ -560,8 +811,50 @@ export interface InstrumentList {
   offset: number;
 }
 
+export interface BarAnomaly {
+  date: string;
+  source: string;
+  reasons: string[];
+}
+
+export interface QualityReport {
+  symbol: string;
+  total_bars: number;
+  anomaly_count: number;
+  duplicate_count: number;
+  sources: string[];
+  anomalies: BarAnomaly[];
+  passed: boolean;
+  primary_source: string;
+  fallback_used: boolean;
+  fallback_source: string | null;
+  corrected_dates: string[];
+  error: string | null;
+}
+
+export interface QualityRepairResult {
+  total: number;
+  repaired: number;
+  failed: number;
+  corrected_bars: number;
+  reports: QualityReport[];
+}
+
+export interface ActiveSymbol {
+  code: string;
+  reason: string;
+}
+
+export interface BulkDownloadLog {
+  seq: number;
+  timestamp: string;
+  event: "fetching" | "completed" | "cache_hit" | "failed";
+  code: string;
+  reason: string | null;
+}
+
 export interface BulkDownloadStatus {
-  status: string;  // idle / running / done / error
+  status: string;  // idle / running / done / error / cancelled
   done: number;
   total: number;
   success: number;
@@ -569,6 +862,25 @@ export interface BulkDownloadStatus {
   current_symbol: string | null;
   phase: string | null;
   error: string | null;
+  quality_passed?: number;
+  quality_failed?: number;
+  fallback_used?: number;
+  lifecycle_events?: number;
+  lifecycle_sync_failed?: number;
+  cache_hits?: number;
+  cache_misses?: number;
+  started_at?: string | null;
+  active_symbols?: ActiveSymbol[];
+  logs?: BulkDownloadLog[];
+  quality_reports?: QualityReport[];
+}
+
+export interface TushareQuota {
+  date: string;
+  requests_per_minute: number;
+  daily_limit: number;
+  used: number;
+  remaining: number;
 }
 
 export interface SchedulerConfig {
@@ -581,3 +893,6 @@ export interface SchedulerConfig {
   download_types: string[];
   data_provider: string;
 }
+
+// ---- LLM Provider types ----
+// api_key: GET 返回固定掩码 "********"(已设置时);PUT 回传 "********" 表示不改。

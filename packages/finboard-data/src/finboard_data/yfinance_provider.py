@@ -71,12 +71,14 @@ class YFinanceProvider:
         max_retries: int = 3,
         retry_backoff: float = 2.0,
         max_cache_io_concurrency: int = 1,
+        read_cache_max_bytes: int | None = None,
     ) -> None:
         if use_cache:
             dir_path = str(cache_dir) if cache_dir else "data_cache"
             self._cache: ParquetCache | None = ParquetCache(
                 dir_path,
                 max_io_concurrency=max_cache_io_concurrency,
+                read_cache_max_bytes=read_cache_max_bytes,
             )
         else:
             self._cache = None
@@ -155,6 +157,8 @@ class YFinanceProvider:
             and metadata.last_date is not None
             and metadata.last_date >= expected_end
         ):
+            if on_status is not None:
+                on_status("cache_hit")
             return True
 
         fetch_start = start
@@ -256,8 +260,14 @@ class YFinanceProvider:
         adjust: str = "qfq",
         on_progress: Callable[[str, int, int], None] | None = None,
         on_status: Callable[[str, str], None] | None = None,
+        on_error: Callable[[str, str], None] | None = None,
     ) -> dict[str, bool]:
-        """有界并发批量更新缓存,不在内存中保留历史 bars。"""
+        """有界并发批量更新缓存,不在内存中保留历史 bars。
+
+        ``on_error(code, reason)``(可选,#347):逐标的失败摘要回调,与
+        ``AkShareProvider.update_cache_batch`` 同约定;返回值仍是
+        ``dict[code, bool]``,既有调用方零影响。
+        """
         total = len(symbols)
         if total == 0:
             return {}
@@ -276,6 +286,7 @@ class YFinanceProvider:
                     sym = queue.get_nowait()
                 except asyncio.QueueEmpty:
                     return
+                reported = False
                 try:
                     ok = await self.update_cache(
                         sym,
@@ -289,10 +300,17 @@ class YFinanceProvider:
                             else None
                         ),
                     )
-                except Exception:
+                except Exception as exc:
                     logger.exception("yfinance.cache_update_failed", symbol=sym.code)
                     ok = False
+                    if on_error is not None:
+                        reported = True
+                        on_error(sym.code, f"{type(exc).__name__}: {exc}"[:200])
                 results[sym.code] = ok
+                if on_error is not None and not ok and not reported:
+                    on_error(sym.code, "update_cache 返回 False(上游无新数据且无既有缓存)")
+                if on_status is not None:
+                    on_status(sym.code, "completed" if ok else "failed")
                 done_count += 1
                 if on_progress is not None:
                     on_progress(sym.code, done_count, total)
@@ -427,6 +445,7 @@ class YFinanceProvider:
                     close=Decimal(str(row["Close"])),
                     volume=Decimal(str(row.get("Volume", 0))),
                     amount=Decimal("0"),
+                    source="yfinance",
                 )
             )
         bars.sort(key=lambda b: b.timestamp)

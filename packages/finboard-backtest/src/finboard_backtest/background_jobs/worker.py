@@ -1,0 +1,873 @@
+"""后台任务 worker 进程主循环(issue #117 / #142)。
+
+独立进程(``finboard worker run``)从 PostgreSQL ``background_jobs`` 队列用
+``FOR UPDATE SKIP LOCKED`` 领取任务,按 ``kind`` 分发到执行器,
+执行期间周期性续约心跳并在每个 checkpoint 重读任务状态以支持协作式取消。
+
+停机语义(issue #307):第一次停止信号(POSIX SIGINT/SIGTERM,Windows
+Ctrl-C / CTRL_BREAK)停止领新任务并收尾 in-flight —— ``shutdown_grace_seconds``
+为 0 立即取消(现状语义),>0 先等任务完成至宽限上限再取消;等待中第二次
+停止信号立即强退(退出码 130)。优雅退出码 0,未完成任务统一由 lease 过期
+回收 → interrupted → 退避重排兜底。
+
+session 隔离红线:**每个 job 用一个独立 session**,绝不复用 kernel / 请求 session,
+避免一个任务的长事务阻塞另一个任务 / 污染 kernel 交易域。
+
+边界:不连 broker / 账户 / 订单 / 持仓 / Kill Switch;payload 不含敏感凭据。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import signal
+import sys
+import threading
+import time
+import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
+
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from finboard_backtest.background_jobs.contracts import (
+    ExecutorError,
+    JobExecutor,
+    JobRecord,
+    JobResult,
+    truncate_summary,
+)
+from finboard_backtest.background_jobs.registry import (
+    JobExecutorRegistry,
+    UnknownJobKindError,
+)
+from finboard_data.cache import ParquetReadJobStats, collect_parquet_read_stats
+from finboard_persistence import (
+    BackgroundJobPersistenceConflictError,
+    BackgroundJobRepository,
+)
+from finboard_shared.background_jobs import BackgroundJobStatus
+
+logger = logging.getLogger(__name__)
+
+#: 第二次停止信号(优雅宽限等待中)强退时的进程退出码(128 + SIGINT = 130,
+#: 约定俗成;正常优雅退出为 0,issue #307 退出码约定)。
+WORKER_FORCE_EXIT_CODE = 130
+
+#: grace>0 的 drain 等待轮询粒度(秒):Windows 上 ``signal.signal`` 注册的
+#: 处理器只在主线程从 select 返回后的字节码边界执行 —— 等待按短窗口分片,
+#: 保证第二次停止信号的反应延迟有界(≤ ~0.4s),而不是被整个宽限窗口卡住。
+_DRAIN_POLL_SECONDS = 0.2
+
+#: 停滞看门狗线程的轮询粒度上界(秒):实际取 ``阈值/4`` 与本值的小者 ——
+#: 15 分钟阈值下每 5s 醒一次(开销可忽略),测试注入亚秒级阈值时同步收缩,
+#: 保证击杀延迟 ≈ 阈值 + 一个轮询窗口。
+_STALL_WATCHDOG_MAX_POLL_SECONDS = 5.0
+
+
+def build_job_timing(
+    started_monotonic: float, stats: ParquetReadJobStats
+) -> dict[str, object]:
+    """job 级耗时/IO 聚合(issue #383),所有 job kind 通用。
+
+    ``execute_elapsed_seconds`` 是 ``_execute_with_heart`` 全程 wall-clock;
+    ``parquet_reads`` 是该窗口内 ``ParquetCache`` 全部读取入口的聚合(#285
+    计数器,经 #383 嵌套句柄栈在外层全程激活)。IO 归因读法:读耗时占
+    wall-clock 比例高 ≈ IO 瓶颈,低 ≈ CPU/DB/网络瓶颈。纯函数,诊断重放
+    (``job-replay-exec``)复用同一构造。
+    """
+
+    return {
+        "execute_elapsed_seconds": round(time.monotonic() - started_monotonic, 3),
+        "parquet_reads": stats.as_dict(),
+    }
+
+
+@dataclass
+class WorkerConfig:
+    """worker 运行参数。"""
+
+    worker_id: str
+    poll_interval_seconds: float
+    max_concurrent: int
+    lease_timeout_seconds: float
+    heartbeat_interval_seconds: float
+    queues: Sequence[str] | None = None
+    #: 按 ``kind`` 限制全局并发(issue #144)。key=kind, value=最大同时 running 数。
+    #: 仅对列出的 kind 生效;未列出的 kind 不限制。空 / None 表示不限制。
+    kind_concurrency: Mapping[str, int] | None = None
+    #: 周期性维护(回收过期租约 + 重试任务自动重排)的间隔(issue #161)。
+    maintenance_interval_seconds: float = 10.0
+    #: retry_waiting / interrupted 自动重排前必须等待的退避秒数。
+    retry_backoff_seconds: float = 30.0
+    #: 停机优雅宽限秒数(issue #307)。0(默认)= 收到停止信号立即取消
+    #: in-flight(现状语义,任务留给 lease 过期回收);>0 = 先等 in-flight
+    #: 自然完成至该上限、超时才取消(兜底语义与 0 相同)。等待中第二次停止
+    #: 信号立即强退(退出码 :data:`WORKER_FORCE_EXIT_CODE`)。与 settings
+    #: ``worker_shutdown_grace_seconds`` 对齐,``finboard dev`` /
+    #: ``--workers N`` supervisor 的子进程收敛宽限共用同一值。
+    shutdown_grace_seconds: float = 0.0
+    #: 僵尸无进展检测阈值(issue #306):heartbeat 正常续租但 progress_done /
+    #: phase 持续无变化超过该秒数 → job 具名失败 ``zombie_no_progress`` 并转
+    #: retry_waiting 走重试。默认 3600s(1 小时)—— 宽松值:健康的长任务
+    #: (研究加载分块探针 / 数据摄取逐 symbol / 回测引擎)至少每小时推进一次
+    #: 进度或阶段,再紧就开始有误杀长尾任务的风险;RR-7a74 类僵尸 7.5h 才被
+    #: 人肉发现,1h 已能把它压缩到十分之一。0 = 关闭检测。
+    zombie_no_progress_seconds: float = 3600.0
+    #: 执行段停滞看门狗阈值(issue #471 活性防线第三层):超过该秒数无任何
+    #: progress 回调且执行未返回 → 看门狗线程取消执行任务,job 具名收敛
+    #: ``retry_waiting``(``error_code=stall_watchdog``)。默认 900s(15 分钟)
+    #: —— 已知最长的合法无回调段(单决策 13 个 stage 帧、#464 预计算节流
+    #: 帧、加载期分块探针)都是秒到分钟级,15 分钟只可能截杀「永不返回」类
+    #: 挂死(#471 签名:to_thread 内 BLAS 原生调用卡死 / 黑洞连接 recv 挂起 /
+    #: 休眠唤醒后 await 永不完成),对正常慢段保留量级余量、不误杀。与 #306
+    #: 分层:本看门狗在进程内秒级动手,#306 是 DB 侧的最后防线(且看门狗
+    #: 0 = 关闭时仍由 #306 兜底)。
+    stall_timeout_seconds: float = 900.0
+
+
+class _ZombieProgressWatch:
+    """进程内「心跳在续但进度不动」监视器(issue #306,纯逻辑可单测)。
+
+    维护路径每轮对全部 running job 观察一次指纹 ``(progress_done, phase)``:
+
+    * 指纹变化(或首次见到)→ 记为基准点,不判僵尸;
+    * 指纹不变且距基准点超过阈值 → 判僵尸(True);
+    * :meth:`retain_only` 清掉本轮不在 running 列表的监视项,防字典无界增长。
+
+    时间源由调用方注入(:func:`asyncio.get_running_loop().time` 单调钟),
+    本类不做任何 IO;并发安全由维护路径的 ``transition(expected={running})``
+    行锁 + 状态守卫保证(多 worker 同时判定时只有一个完成失败转移,另一方
+    收到 conflict 后静默跳过),无需额外 advisory lock。
+    """
+
+    def __init__(self, threshold_seconds: float) -> None:
+        self._threshold = threshold_seconds
+        self._baseline: dict[str, tuple[tuple[object, object], float]] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return self._threshold > 0
+
+    def observe(self, job_id: str, fingerprint: tuple[object, object], now: float) -> bool:
+        """记录一次观察;指纹超阈值未变化返回 True(建议按僵尸失败)。"""
+
+        entry = self._baseline.get(job_id)
+        if entry is None or entry[0] != fingerprint:
+            self._baseline[job_id] = (fingerprint, now)
+            return False
+        return (now - entry[1]) >= self._threshold
+
+    def retain_only(self, job_ids: set[str]) -> None:
+        self._baseline = {
+            key: value for key, value in self._baseline.items() if key in job_ids
+        }
+
+
+class _StallWatchdog:
+    """执行段停滞看门狗(issue #471 活性防线第三层,独立 OS 线程)。
+
+    #471 挂死签名(两次生产事故 + 进程内复现一致):事件循环 park 在
+    ``selectors._select``、心跳/租约照常续期、executor 协程的 await 永不
+    返回(冻结转储:``asyncio.to_thread`` 里的 numpy eigh → OpenBLAS 原生
+    调用不返回;休眠唤醒后的黑洞连接 recv 同签名)。事件循环本身是活的
+    (心跳定时器照常唤醒),只是无人发起协程级取消 —— #306 的 DB 侧僵尸
+    检测要 1 小时才收敛,且只能改 DB 状态、救不回本进程内卡死的执行协程。
+
+    本看门狗是**独立守护线程**:worker 内唯一不依赖事件循环调度的执行体
+    (事件循环 park 死时唯一还在运行的东西)。周期检查「距上次 progress
+    回调的静默时长」,超阈值即经 ``loop.call_soon_threadsafe`` 取消执行
+    任务 —— 该调用写事件循环的自管道(self-pipe),把 park 在 ``_select``
+    的 selector 直接唤醒,取消随后在循环线程投递;被 await 的 future 是否
+    完成不影响 CancelledError 注入(asyncio 取消不依赖被等对象返回)。
+
+    生命周期:每次 ``_execute_with_heart`` 一个实例、一条线程,job 走到任何
+    终态(成功/失败/取消/停滞击杀)都在 finally 停表 —— 多 job 顺序/并发
+    执行互不共享状态,天然无交叉污染。线程内不做任何 IO,只读一个
+    monotonic 时间戳与一个事件。
+    """
+
+    def __init__(self, *, job_id: str, timeout_seconds: float) -> None:
+        self._job_id = job_id
+        self._timeout_seconds = timeout_seconds
+        self._poll_seconds = min(
+            timeout_seconds / 4.0, _STALL_WATCHDOG_MAX_POLL_SECONDS
+        )
+        self._stop_event = threading.Event()
+        # 事件循环线程写(progress 回调首行)、看门狗线程读:单 float 赋值
+        # 在 GIL 下原子,无需加锁;偶见旧值只让判定晚一拍,无害。
+        self._last_progress_monotonic = time.monotonic()
+        self._fired = False
+        self._silence_seconds: float | None = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._timeout_seconds > 0
+
+    @property
+    def fired(self) -> bool:
+        """是否已判定停滞并投递取消(``await`` 侧据此区分外部取消)。"""
+        return self._fired
+
+    @property
+    def silence_seconds(self) -> float | None:
+        """击杀时记录的静默时长(未击杀为 None),写入错误摘要供取证。"""
+        return self._silence_seconds
+
+    def note_progress(self) -> None:
+        """progress 回调触达(事件循环线程调用):重置静默计时。"""
+        self._last_progress_monotonic = time.monotonic()
+
+    def start(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        # 只用到 .cancel()(不读结果),Task[Any] 让测试可注入任意返回型任务。
+        execute_task: asyncio.Task[Any],
+    ) -> None:
+        """起看门狗线程,盯住 ``execute_task`` 直到 :meth:`stop`。"""
+
+        def _watch() -> None:
+            while not self._stop_event.wait(self._poll_seconds):
+                silence = time.monotonic() - self._last_progress_monotonic
+                if silence < self._timeout_seconds:
+                    continue
+                # 先置 fired 再投递取消:call_soon_threadsafe 的自管道写入
+                # 构成 happens-before,await 侧观察到 CancelledError 时
+                # fired 必已可见 —— 二者配对才认定停滞击杀。
+                self._fired = True
+                self._silence_seconds = silence
+                logger.warning(
+                    "background_worker.stall_watchdog job_id=%s silence=%.0fs "
+                    "threshold=%.0fs(无任何 progress 回调且执行未返回,判挂死)",
+                    self._job_id,
+                    silence,
+                    self._timeout_seconds,
+                )
+                try:
+                    loop.call_soon_threadsafe(execute_task.cancel)
+                except RuntimeError:
+                    # 事件循环已关闭(进程收尾竞态):本进程救不了,DB 侧
+                    # #306 僵尸检测 + lease 过期回收兜底。
+                    logger.warning(
+                        "background_worker.stall_watchdog_loop_closed job_id=%s",
+                        self._job_id,
+                    )
+                return
+
+        self._thread = threading.Thread(
+            target=_watch,
+            name=f"stall-watchdog:{self._job_id}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        """job 终态停表:置停并限时 join(线程最多再睡一个轮询窗口)。"""
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=self._poll_seconds + 1.0)
+
+
+def default_worker_id() -> str:
+    return f"worker-{uuid.uuid4().hex[:8]}"
+
+
+class BackgroundWorker:
+    """worker 主循环;构造后 :func:`run` 直到收到停止信号。"""
+
+    def __init__(
+        self,
+        *,
+        engine: AsyncEngine,
+        session_maker: async_sessionmaker[AsyncSession],
+        registry: JobExecutorRegistry,
+        config: WorkerConfig,
+    ) -> None:
+        self._engine = engine
+        self._session_maker = session_maker
+        self._registry = registry
+        self._config = config
+        self._stop_event = asyncio.Event()
+        self._force_stop_event = asyncio.Event()
+        self._inflight: set[asyncio.Task[None]] = set()
+        # issue #306:僵尸无进展监视(仅本进程观察到的指纹;判定动作的并发
+        # 安全由 DB 行锁 + 状态守卫承担,见 _ZombieProgressWatch 文档)。
+        self._zombie_watch = _ZombieProgressWatch(config.zombie_no_progress_seconds)
+
+    @property
+    def stop_requested(self) -> bool:
+        """是否已收到(第一次)停止信号。"""
+        return self._stop_event.is_set()
+
+    @property
+    def force_stop_requested(self) -> bool:
+        """是否已收到第二次停止信号(立即强退)。"""
+        return self._force_stop_event.is_set()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+
+    def request_force_stop(self) -> None:
+        """第二次停止信号:跳过剩余优雅宽限,立即强退(issue #307)。
+
+        in-flight 任务照旧取消、留给 lease 过期回收(兜底语义不变);区别
+        仅在于 ``run`` 返回 True,由 ``run_worker`` 以非 0 退出码结束进程。
+        """
+        self._stop_event.set()
+        self._force_stop_event.set()
+
+    async def run(self) -> bool:
+        """主循环:领取任务直到停止信号,收尾后返回是否因第二次信号强退。"""
+        logger.info(
+            "background_worker.start worker_id=%s queues=%s max_concurrent=%d",
+            self._config.worker_id,
+            list(self._config.queues) if self._config.queues else "all",
+            self._config.max_concurrent,
+        )
+        await self._recover_stale()
+        next_maintenance = asyncio.get_running_loop().time() + (
+            self._config.maintenance_interval_seconds
+        )
+        while not self._stop_event.is_set():
+            await self._fill_concurrency()
+            now = asyncio.get_running_loop().time()
+            if now >= next_maintenance:
+                # 维护是尽力而为:单次失败(如瞬时连接池耗尽)只记日志并顺延
+                # 到下一周期,绝不让维护异常杀死整个 worker 进程(issue #212
+                # 实测 QueuePool TimeoutError 曾把维护循环连同 worker 一起掀翻)。
+                try:
+                    await self._maintenance()
+                except TimeoutError:
+                    logger.warning("background_worker.maintenance_timeout")
+                except Exception:
+                    logger.exception("background_worker.maintenance_failed")
+                next_maintenance = now + self._config.maintenance_interval_seconds
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=self._config.poll_interval_seconds,
+                )
+        force = await self._drain()
+        logger.info(
+            "background_worker.stop worker_id=%s force=%s",
+            self._config.worker_id,
+            force,
+        )
+        return force
+
+    # ------------------------------------------------------------- 内部流程
+    async def _recover_stale(self) -> None:
+        """回收 lease 已过期的 running / cancel_requested 任务(interrupted)。
+
+        启动时与周期性维护都会调用 —— 长期存活的 worker 不再依赖崩溃后重启
+        才回收,僵尸 running 不会永久占用 per-kind 并发额度(issue #161)。
+        """
+
+        async with self._session_maker() as session:
+            repo = BackgroundJobRepository(session)
+            reclaimed = await repo.reclaim_stale(datetime.now(UTC))
+            if reclaimed:
+                await repo.checkpoint()
+                logger.info("background_worker.reclaim count=%d", len(reclaimed))
+
+    async def _maintenance(self) -> None:
+        """周期性维护:回收过期租约 + 重排重试任务 + 僵尸无进展检测(issue #161/#306)。"""
+
+        await self._recover_stale()
+        async with self._session_maker() as session:
+            repo = BackgroundJobRepository(session)
+            requeued, exhausted = await repo.requeue_due(
+                datetime.now(UTC),
+                backoff_seconds=self._config.retry_backoff_seconds,
+            )
+            if requeued or exhausted:
+                await repo.checkpoint()
+                logger.info(
+                    "background_worker.requeue requeued=%d exhausted=%d",
+                    len(requeued),
+                    len(exhausted),
+                )
+        await self._detect_zombie_jobs()
+
+    async def _detect_zombie_jobs(self) -> None:
+        """无进展僵尸检测(issue #306):heartbeat 在续但进度/阶段长期不动。
+
+        活跃续租的 job 永远不会被 :meth:`_recover_stale` 回收(lease 每次心跳
+        都被推远)—— 若 executor 卡死(如研究加载期阻塞、下游 IO 悬挂),任务
+        会以「running + 新鲜 lease」的形态永久占坑。本检测在维护路径对全部
+        ``running`` 且 heartbeat 新鲜的 job 观察指纹 ``(progress_done, phase)``:
+        超过 ``zombie_no_progress_seconds`` 无任何变化 → ``transition(expected=
+        {running}, target=retry_waiting, error_code=zombie_no_progress)`` 走既有
+        重试语义(attempt 预算耗尽可能由 requeue_due 转 failed)。
+
+        并发安全:``transition`` 的行锁 + ``expected={running}`` 状态守卫是唯一
+        串行化点 —— 多 worker 同时判定同一僵尸时只有一个完成转移,另一方收到
+        conflict 静默跳过(参考 claim_next 先例,但无需 advisory lock:无
+        「计数 + 领取」式两段逻辑,单条守卫转移天然原子)。被转移 job 的原属主
+        worker 心跳见状态已非 running 即停止续租(见心跳循环守卫),其 executor
+        若日后自行完成,``_finalize`` 亦因状态冲突被跳过,不会覆盖重试结果。
+        """
+
+        if not self._zombie_watch.enabled:
+            return
+        now = datetime.now(UTC)
+        loop_now = asyncio.get_running_loop().time()
+        # heartbeat 新鲜判定:正常续租间隔为 heartbeat_interval,留 4 倍 +
+        # 120s 下限余量吸收 Windows 调度抖动(#286 实测唤醒延迟可达 ~0.4s,
+        # 放大余量避免把「心跳稍慢」误判为「心跳已死」—— 后者由 lease 回收兜底)。
+        heartbeat_cutoff = now - timedelta(
+            seconds=max(120.0, 4.0 * self._config.heartbeat_interval_seconds)
+        )
+        async with self._session_maker() as session:
+            repo = BackgroundJobRepository(session)
+            rows = await repo.list_recent(
+                statuses=(BackgroundJobStatus.RUNNING.value,), limit=500
+            )
+            candidates = [
+                row
+                for row in rows
+                if row.heartbeat_at is not None and row.heartbeat_at >= heartbeat_cutoff
+            ]
+            killed: list[str] = []
+            for row in candidates:
+                fingerprint = (row.progress_done, row.phase)
+                if not self._zombie_watch.observe(row.job_id, fingerprint, loop_now):
+                    continue
+                try:
+                    await repo.transition(
+                        row.job_id,
+                        expected=frozenset({BackgroundJobStatus.RUNNING.value}),
+                        target=BackgroundJobStatus.RETRY_WAITING.value,
+                        error_code="zombie_no_progress",
+                        error_summary=(
+                            f"僵尸检测:heartbeat 正常续租但 progress/phase 超过 "
+                            f"{self._config.zombie_no_progress_seconds:.0f}s 无变化"
+                            f"(done={row.progress_done}, phase={row.phase!r}),"
+                            "按无进展失败并自动重试"
+                        ),
+                    )
+                except BackgroundJobPersistenceConflictError:
+                    # 另一 worker 的维护路径已处理(或状态已变)—— 只认赢家。
+                    continue
+                killed.append(row.job_id)
+                logger.warning(
+                    "background_worker.zombie_no_progress job_id=%s kind=%s "
+                    "progress_done=%d phase=%s threshold=%.0fs",
+                    row.job_id,
+                    row.kind,
+                    row.progress_done or 0,
+                    row.phase,
+                    self._config.zombie_no_progress_seconds,
+                )
+            if killed:
+                await repo.checkpoint()
+            # 清掉已不在 running 列表的监视项(终态 / 被本检测击杀 / 被回收)。
+            self._zombie_watch.retain_only({row.job_id for row in rows} - set(killed))
+
+    async def _fill_concurrency(self) -> None:
+        """把空闲的并发槽填满:领取任务并为每个任务起一个独立 task。"""
+
+        free = self._config.max_concurrent - len(self._inflight)
+        if free <= 0:
+            return
+        async with self._session_maker() as session:
+            repo = BackgroundJobRepository(session)
+            rows = await repo.claim_next(
+                worker_id=self._config.worker_id,
+                lease_until=datetime.now(UTC)
+                + timedelta(seconds=self._config.lease_timeout_seconds),
+                queues=self._config.queues,
+                limit=free,
+                max_per_kind=self._config.kind_concurrency,
+            )
+            if rows:
+                await repo.checkpoint()
+        for row in rows:
+            task = asyncio.create_task(self._run_one(row.job_id), name=f"job:{row.job_id}")
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
+
+    async def _run_one(self, job_id: str) -> None:
+        """单个任务的完整生命周期:取 executor → 执行 → 收口。每 job 一个 session。
+
+        关键:任何 ``_finalize`` / ``_execute_with_heart`` 调用都**必须在外层
+        领取 session 关闭之后**进行 —— 否则外层 ``get(for_update=True)`` 持有的
+        行锁会与 finalize 内部再次 ``get(for_update=True)`` 互相等待,造成死锁。
+        """
+
+        try:
+            early_result: JobResult | None = None
+            record: JobRecord | None = None
+            executor: JobExecutor | None = None
+            # issue #383:计时哨兵先置 None —— 领取 session 块不计时;异常
+            # 兜底路径也要能构造 timing(execute 中途抛错时句柄仍可读)。
+            execute_started: float | None = None
+            parquet_stats: ParquetReadJobStats | None = None
+            async with self._session_maker() as session:
+                repo = BackgroundJobRepository(session)
+                row = await repo.get(job_id, for_update=True)
+                if row is None or row.status != BackgroundJobStatus.RUNNING.value:
+                    # 在排队后被取消 / 被其他 worker 抢走 —— 直接放弃。
+                    return
+                if row.status == BackgroundJobStatus.CANCEL_REQUESTED.value:
+                    early_result = JobResult(status=BackgroundJobStatus.CANCELLED.value)
+                else:
+                    try:
+                        executor = self._registry.get(row.kind)
+                    except UnknownJobKindError:
+                        early_result = JobResult(
+                            status=BackgroundJobStatus.FAILED.value,
+                            error_code="unknown_kind",
+                            error_summary=f"无注册执行器: {row.kind}",
+                        )
+                    else:
+                        record = JobRecord(
+                            job_id=row.job_id,
+                            kind=row.kind,
+                            queue=row.queue,
+                            payload=dict(row.payload),
+                            attempt=row.attempt,
+                            max_attempts=row.max_attempts,
+                            requested_by=row.requested_by,
+                            progress_total=row.progress_total,
+                            progress_done=row.progress_done,
+                            phase=row.phase,
+                        )
+            # 外层领取 session 已关闭,行锁释放 —— 此后才能开新 session 收口。
+            if early_result is not None:
+                await self._finalize(job_id, early_result)
+                return
+            assert executor is not None
+            assert record is not None
+            # issue #383:所有 job kind 通用的计时窗口 —— wall-clock + parquet
+            # 读取聚合(#285 计数器,经嵌套句柄栈在外层全程激活,引擎内层
+            # 既有激活不再遮蔽)。成功与失败兜底路径都落 timing;句柄在执行
+            # 体首行绑定到外层哨兵(先于 await,执行中途抛错时异常兜底同样可读)。
+            execute_started = time.monotonic()
+            with collect_parquet_read_stats() as stats_handle:
+                parquet_stats = stats_handle
+                result = await self._execute_with_heart(job_id, executor, record)
+            job_timing = build_job_timing(execute_started, parquet_stats)
+            result.timing = job_timing
+            logger.info(
+                "background_worker.job_timing job_id=%s kind=%s elapsed=%.3fs"
+                " read_ops=%d read_ms=%.1f",
+                job_id,
+                record.kind,
+                cast("float", job_timing["execute_elapsed_seconds"]),
+                parquet_stats.read_ops,
+                parquet_stats.read_elapsed_ms,
+            )
+            await self._finalize(job_id, result)
+        except asyncio.CancelledError:
+            # 进程关闭时取消 in-flight task:把任务留在 running,由 lease 过期回收。
+            raise
+        except Exception as exc:
+            # worker 不得让单任务崩溃带垮主循环 —— 兜底为 failed/retry_waiting。
+            logger.exception("background_worker.job_crash job_id=%s", job_id)
+            status = (
+                BackgroundJobStatus.RETRY_WAITING.value
+                if isinstance(exc, ExecutorError) and exc.retryable
+                else BackgroundJobStatus.FAILED.value
+            )
+            # issue #383:执行中途崩溃也带 timing(句柄与起点在异常前已建)。
+            timing: dict[str, object] | None = None
+            if execute_started is not None and parquet_stats is not None:
+                timing = build_job_timing(execute_started, parquet_stats)
+            await self._finalize(
+                job_id,
+                JobResult(
+                    status=status,
+                    error_code=getattr(exc, "code", type(exc).__name__),
+                    # ExecutorError 是 dataclass,str() 为空 —— 优先取 .summary,
+                    # 保证失败原因写入任务行(grid 聚合可见)。截断保头保尾
+                    # (issue #263):头部 stage/决策日上下文与尾部根因均保留。
+                    error_summary=truncate_summary(
+                        getattr(exc, "summary", None) or str(exc) or type(exc).__name__
+                    ),
+                    timing=timing,
+                ),
+            )
+
+    async def _execute_with_heart(
+        self,
+        job_id: str,
+        executor: JobExecutor,
+        record: JobRecord,
+    ) -> JobResult:
+        """跑 executor,后台心跳 + 协作式取消检测 + 停滞看门狗(#471)。"""
+
+        cancel_state = {"cancelled": False, "aborted_by_progress": False}
+        watchdog = _StallWatchdog(
+            job_id=job_id,
+            timeout_seconds=self._config.stall_timeout_seconds,
+        )
+
+        async def progress(done: int, total: int | None, phase: str | None) -> None:
+            # #471:progress 回调是执行体活性的唯一信号,先喂看门狗再做 DB
+            # 写 —— 回调自身若在黑洞连接上挂死,计时已重置、下一个窗口仍会
+            # 截杀(连接级防线由引擎 keepalive 先行,不依赖此路径)。
+            watchdog.note_progress()
+            async with self._session_maker() as session:
+                repo = BackgroundJobRepository(session)
+                row = await repo.get(job_id, for_update=True)
+                if row is None:
+                    return
+                if row.status == BackgroundJobStatus.CANCEL_REQUESTED.value:
+                    cancel_state["cancelled"] = True
+                    # issue #306:标记「执行器经 progress 回调自愿中止」,让
+                    # _execute_with_heart 把这次 CancelledError 收口为 cancelled
+                    # 终态,而不是把孤儿 cancel_requested 行留给 lease 回收
+                    # (旧路径最长悬挂一个 lease 周期,且 reclaim+requeue 会把
+                    # 被取消的任务原样重放)。
+                    cancel_state["aborted_by_progress"] = True
+                    raise asyncio.CancelledError()
+                await repo.update_progress(job_id, done=done, total=total, phase=phase)
+                await repo.checkpoint()
+
+        async def heartbeat() -> None:
+            while not cancel_state["cancelled"]:
+                await asyncio.sleep(self._config.heartbeat_interval_seconds)
+                async with self._session_maker() as session:
+                    repo = BackgroundJobRepository(session)
+                    row = await repo.get(job_id, for_update=True)
+                    if row is None:
+                        return
+                    if row.status == BackgroundJobStatus.CANCEL_REQUESTED.value:
+                        cancel_state["cancelled"] = True
+                        return
+                    # issue #306:任务已离开本 worker 名下(僵尸检测转
+                    # retry_waiting / reclaim 回收 / 重试被其他 worker 重新领取)
+                    # 时停止续租 —— 否则僵尸检测击杀任务后,旧心跳仍把 lease
+                    # 不断推远,重试编排与属主判定(research_run 启动恢复的
+                    # job_ownership 探针)都会被污染。
+                    if (
+                        row.status != BackgroundJobStatus.RUNNING.value
+                        or row.worker_id != self._config.worker_id
+                    ):
+                        return
+                    await repo.update_heartbeat(
+                        job_id,
+                        worker_id=self._config.worker_id,
+                        lease_until=datetime.now(UTC)
+                        + timedelta(seconds=self._config.lease_timeout_seconds),
+                    )
+                    await repo.checkpoint()
+
+        heart = asyncio.create_task(heartbeat(), name=f"heart:{job_id}")
+        # #471:执行体独立成 task —— 看门狗线程需要可取消的任务句柄,直接
+        # await 协程拿不到引用、call_soon_threadsafe 无从投递取消。行为等价:
+        # 异常(含 CancelledError)经 await 原样透传,与直接 await 无差别。
+        execute_task = asyncio.create_task(
+            executor.execute(record, progress), name=f"exec:{job_id}"
+        )
+        result: JobResult | None = None
+        try:
+            if watchdog.enabled:
+                watchdog.start(asyncio.get_running_loop(), execute_task)
+            try:
+                result = await execute_task
+            except asyncio.CancelledError:
+                if watchdog.fired:
+                    # #471 停滞击杀:挂死原因具名落 error_summary,job 收敛
+                    # retry_waiting(与 #306 僵尸击杀同语义,requeue_due 自动
+                    # 重排;research_run 的 run 行残留 RUNNING 由下次 attempt
+                    # 的 _converge_stale_running 按 #305 恢复通道收敛)。
+                    silence = watchdog.silence_seconds
+                    result = JobResult(
+                        status=BackgroundJobStatus.RETRY_WAITING.value,
+                        error_code="stall_watchdog",
+                        error_summary=(
+                            f"停滞看门狗:执行段超过 "
+                            f"{self._config.stall_timeout_seconds:.0f}s 无任何 "
+                            f"progress 回调且未返回(本轮静默 "
+                            f"{silence:.0f}s),按挂死取消并转重试 —— "
+                            "签名匹配 #471(to_thread 原生调用卡死 / 黑洞连接 "
+                            "recv 挂起 / 休眠唤醒后 await 永不完成)"
+                        ),
+                    )
+                elif not cancel_state["aborted_by_progress"]:
+                    # 外部(task/进程级)取消原样上抛,维持「留在 running 由
+                    # lease 回收」的停机语义不变。
+                    raise
+                else:
+                    # issue #306:协作式取消经 progress 回调中止执行器 —— 立即按
+                    # cancelled 收口。
+                    result = JobResult(status=BackgroundJobStatus.CANCELLED.value)
+        finally:
+            watchdog.stop()
+            heart.cancel()
+            if not execute_task.done():
+                # 外部取消路径:execute_task 可能尚未走完取消链,补一发并
+                # 等它落地,避免进程收尾时留下 pending task 警告。
+                execute_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await execute_task
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await heart
+        if cancel_state["cancelled"]:
+            return JobResult(status=BackgroundJobStatus.CANCELLED.value)
+        if watchdog.fired and result is not None and result.error_code != "stall_watchdog":
+            # 击杀竞态:取消投递前 executor 已正常返回 —— 保留原结果,只留痕。
+            logger.info(
+                "background_worker.stall_watchdog_race job_id=%s "
+                "executor 在取消投递前完成,保留原结果",
+                job_id,
+            )
+        assert result is not None  # executor.execute 正常返回即非 None
+        return result
+
+    async def _finalize(self, job_id: str, result: JobResult) -> None:
+        """把执行结果落库(running/cancel_requested → succeeded/failed/cancelled)。"""
+
+        async with self._session_maker() as session:
+            repo = BackgroundJobRepository(session)
+            try:
+                await repo.finish(
+                    job_id,
+                    target=result.status,
+                    result_ref=result.result_ref,
+                    error_code=result.error_code,
+                    error_summary=result.error_summary,
+                    timing=result.timing,
+                )
+                await repo.checkpoint()
+            except BackgroundJobPersistenceConflictError as exc:
+                # 状态已被取消 / 回收等流转改变 —— 不强行覆盖,保留真实终态。
+                logger.warning(
+                    "background_worker.finalize_skipped job_id=%s reason=%s",
+                    job_id,
+                    exc,
+                )
+
+    async def _drain(self) -> bool:
+        """关闭流程:按 ``shutdown_grace_seconds`` 收尾 in-flight tasks(#307)。
+
+        * grace = 0(默认):立即取消全部 in-flight —— 任务留在 running,由
+          lease 过期回收 → interrupted → 退避重排(现状语义,行为零回归);
+        * grace > 0:先等 in-flight 自然完成至宽限上限;超时才取消剩余任务
+          (兜底语义与 grace=0 相同);
+        * 等待期间收到第二次停止信号(或进入 drain 前已收到):立即取消剩余
+          任务并返回 True —— ``run_worker`` 据此以 :data:`WORKER_FORCE_EXIT_CODE`
+          强退。
+        """
+
+        inflight = [task for task in self._inflight if not task.done()]
+        if not inflight:
+            self._inflight.clear()
+            return False
+        grace = self._config.shutdown_grace_seconds
+        if grace <= 0 and not self._force_stop_event.is_set():
+            for task in inflight:
+                task.cancel()
+            await asyncio.gather(*inflight, return_exceptions=True)
+            self._inflight.clear()
+            return False
+
+        pending: set[asyncio.Task[None]] = set(inflight)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + grace if grace > 0 else 0.0
+        while pending and not self._force_stop_event.is_set():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            _done, pending = await asyncio.wait(
+                pending, timeout=min(remaining, _DRAIN_POLL_SECONDS)
+            )
+        if not pending:
+            self._inflight.clear()
+            return False
+        if self._force_stop_event.is_set():
+            logger.warning(
+                "background_worker.force_stop inflight=%d (任务留给 lease 回收)",
+                len(pending),
+            )
+        else:
+            logger.warning(
+                "background_worker.drain_timeout grace_seconds=%.1f inflight=%d",
+                grace,
+                len(pending),
+            )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        self._inflight.clear()
+        return self._force_stop_event.is_set()
+
+
+def route_stop_signal(worker: BackgroundWorker) -> None:
+    """停止信号路由(issue #307):第一次 → 优雅停止,第二次 → 立即强退。"""
+
+    if worker.stop_requested:
+        worker.request_force_stop()
+    else:
+        worker.request_stop()
+
+
+async def run_worker(
+    *,
+    engine: AsyncEngine,
+    session_maker: async_sessionmaker[AsyncSession],
+    registry: JobExecutorRegistry,
+    config: WorkerConfig,
+) -> None:
+    """便捷入口:注册停止信号并阻塞运行,直到停止信号收尾完成。
+
+    信号语义与退出码约定(issue #307):
+
+    * **第一次停止信号**(POSIX SIGINT/SIGTERM;Windows Ctrl-C / CTRL_BREAK)——
+      停止领取新任务并进入 :meth:`BackgroundWorker._drain`:grace=0 立即取消
+      in-flight(现状语义),grace>0 先等 in-flight 完成至
+      ``config.shutdown_grace_seconds`` 上限 —— 优雅完成退出码 0(宽限超时后
+      的取消兜底同为 0,与 grace=0 同一终点语义);
+    * **宽限等待中第二次停止信号** —— 立即强退,进程退出码
+      :data:`WORKER_FORCE_EXIT_CODE`(130);未完成任务照旧由 lease 过期回收。
+    """
+
+    worker = BackgroundWorker(
+        engine=engine, session_maker=session_maker, registry=registry, config=config
+    )
+    loop = asyncio.get_running_loop()
+    win_restored: list[tuple[int, object]] = []
+    if sys.platform == "win32":
+        # Windows 的 asyncio 不支持 add_signal_handler(NotImplementedError):
+        # 经 signal.signal 在主线程注册,回调里 call_soon_threadsafe 唤醒事件
+        # 循环。注意:子进程按 CREATE_NEW_PROCESS_GROUP 托管时 Ctrl-C 被禁用,
+        # 优雅信号是 CTRL_BREAK(映射为 SIGBREAK)—— 必须一并注册。
+        def _on_stop_signal(signum: int, frame: object) -> None:
+            loop.call_soon_threadsafe(route_stop_signal, worker)
+
+        for sig in (signal.SIGINT, signal.SIGBREAK):
+            # 非主线程(嵌入运行)或无控制台 —— 与既有 NotImplementedError
+            # 抑制同口径:注册失败不阻断 worker 运行。
+            with contextlib.suppress(OSError, ValueError):
+                win_restored.append((sig, signal.signal(sig, _on_stop_signal)))
+    else:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, route_stop_signal, worker)
+    try:
+        force = await worker.run()
+    finally:
+        # 恢复既有 handler,避免嵌入调用方(如测试)残留全局信号状态。
+        for restored_sig, restored_handler in win_restored:
+            with contextlib.suppress(OSError, ValueError):
+                signal.signal(restored_sig, restored_handler)  # type: ignore[arg-type]
+        await engine.dispose()
+    if force:
+        raise SystemExit(WORKER_FORCE_EXIT_CODE)
+
+
+__all__ = [
+    "WORKER_FORCE_EXIT_CODE",
+    "BackgroundWorker",
+    "WorkerConfig",
+    "default_worker_id",
+    "route_stop_signal",
+    "run_worker",
+]

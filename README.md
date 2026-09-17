@@ -1,297 +1,137 @@
 # FinDashboard
 
-可实盘交易的模块化单体量化交易系统。设计目标见 [`phase1_doc.md`](./phase1_doc.md),
-agent 必读约束见 [`AGENTS.md`](./AGENTS.md)。
+[![CI](https://github.com/Caspian-Lin/FinDashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/Caspian-Lin/FinDashboard/actions/workflows/ci.yml)
 
-> **当前阶段:P2 — 重启恢复 + 行情接入 + 策略运行器 + 人工交易控制台已完成。**
-> 端到端真实交易链路(MockBroker + QMT)、行情数据接入、策略 ABC 框架、
-> FastAPI REST + WebSocket API + React 前端控制台均已就绪。
+简体中文 | [English](./README.en.md)
 
----
+**一个生产级量化研究平台:LLM agent 在其中真实地做研究 —— 安全、可审计、可复现。**
 
-## 技术栈
+FinDashboard 是一个面向中国 A 股市场的模块化单体交易与研究系统。人类工程师掌控交易内核;LLM 研究 agent 获得一个受控的、最小权限的工具面(126 个 MCP 工具),独立完成完整研究闭环 —— 数据接入 → point-in-time 因子计算 → 回测 → 样本外验证 → 模拟交易 —— 且每一步操作都被沙箱隔离并留有审计记录。
 
-| 维度 | 选型 |
-|------|------|
-| 语言 / 运行时 | Python 3.12 |
-| 包管理 / monorepo | [uv](https://github.com/astral-sh/uv) workspace |
-| 形态 | 模块化单体(asyncio 全异步单进程) |
-| 持久化 | PostgreSQL 16 + SQLAlchemy 2.0 + Alembic |
-| 日志 / 可观测性 | structlog(JSON) |
-| Broker 接口 | QMT(A股 / xtquant)、CTP(期货)、Mock(本地/CI) |
-| API 后端 | FastAPI + WebSocket(目录 `packages/finboard-api/`) |
-| 前端 | React 19 + Vite + TypeScript + Tailwind CSS + TanStack Query(目录 `web/`) |
-| 测试 | pytest + pytest-asyncio |
-| 静态检查 | ruff(lint+format)、mypy(strict) |
-| CI | GitHub Actions(lint + typecheck + unit test) |
+> ⚠️ **免责声明** — 本项目是研究与工程实践项目,不是产品。不构成任何投资建议;不进行任何实盘交易,实盘链路(QMT 券商对接)刻意保持在人工验证门之后;不提供任何公开部署。本项目按「现状」发布,不含任何形式的保证。许可证为 **AGPL-3.0**(见文末)。
 
----
+## 为什么做这个项目
+
+大多数「AI + 量化」项目让 LLM 生成一个策略然后听天由命。FinDashboard 从相反的前提出发:**agent 是否可信,取决于它所运行的系统。** 因此系统在基础设施层面强制保证:
+
+- **可复现** —— 研究数据以冻结、带 checksum 的发布(release)落盘;每个回测结果携带 `result_checksum`,可确定性重放。
+- **杜绝前视偏差** —— point-in-time 纪律贯穿全链路:因子观测由 `available_at` 门控,财务数据按 `ann_date + 1` 可用,代码沙箱获得**物理隔离**的数据挂载 —— 容器内根本不存在决策时点之后的数据文件。
+- **agent 最小权限** —— agent 只能看到 126 个 MCP 工具,全部位于研究/数据域。下单、改持仓、Kill Switch **永不注册为工具**;权限模型默认全拒绝(deny-all),仅显式放行白名单。
+- **负结果制度化** —— agent 维护一份研究结论注册表(`docs/research/FINDINGS.md`),被证伪的假设连同证据一起登记,并触发「重测禁令」,避免后续 agent 会话浪费算力重复验证。
+
+目前的结果:研究 agent 独立完成 A 股截面动量因子的多轮研究后**将其证伪**,并把完整的证伪证据链写入了注册表。这个负结果,以及让它值得信赖的整套系统,就是本项目的招牌 demo。
+
+## 架构
+
+```mermaid
+flowchart TB
+    subgraph AGENT["Agent 层(OpenCode 运行时)"]
+        A1["研究 agent —— 权限白名单,默认全拒绝"]
+        A2["126 个 MCP 工具 —— 仅研究/数据域"]
+        A3["Docker 沙箱 —— 无网络 · 只读根 · PIT 物理隔离挂载"]
+    end
+    subgraph RESEARCH["研究层"]
+        R1["数据同步(tushare / akshare)+ 质量门"]
+        R2["冻结数据发布 —— PIT + manifest checksum"]
+        R3["因子实验室 · 回测引擎 · 样本外验证"]
+        R4["模拟交易 —— 隔离的 simulation 表"]
+    end
+    subgraph TRADING["交易内核(人类掌控,实盘门控)"]
+        T1["交易内核 —— 订单 / 持仓 / 风控"]
+        T2["券商适配器 —— QMT · CTP · Mock"]
+        T3["核对 · 恢复 · Kill Switch"]
+    end
+    subgraph INFRA["基础设施"]
+        I1[("PostgreSQL 16")]
+        I2["持久化任务队列 + Worker 池"]
+        I3["审计事件 + 结构化日志"]
+    end
+    A1 --> A2
+    A2 --> R1
+    A3 --> R3
+    R1 --> R2 --> R3 --> R4
+    RESEARCH --> I1
+    TRADING --> I1
+    AGENT --> I3
+    A2 -. "永不暴露为工具" .- T1
+```
+
+虚线边是这个设计的核心承诺:agent 工具面到交易内核**没有任何通路**。交易代码先行建成(issue #1–#26)并在 mock 券商上充分验证,然后刻意冻结,研究平台在其周边生长。
+
+## 核心亮点
+
+**1. Point-in-Time 数据治理。** 一条把「知识的时点」当作一等公民的管线:数据集以 `available_at` / `observed_at` 摄取,以不可变的发布 + manifest checksum + schema 版本号落盘,只能经 PIT 门控的加载器消费;跨数据集一致性校验在发布阶段就能拦住标的集漂移,不让它污染回测。
+
+**2. Agent 治理。** agent 提交的研究代码在一次性 Docker 容器中执行:无网络、只读根、drop 全部 capabilities、非 root、CPU/内存限额、墙钟超时强杀,以及 PIT 强制的只读数据挂载。晋级是一条状态机而非一句口号:`draft → screen → 样本外验证 → active`,每个 artifact、checksum、容器日志全部归档。每次工具调用落入审计表,入参经脱敏。
+
+**3. agent 作为持续的研究主体。** agent 维护研究路线图、带置信度与失效条件的结论注册表、逐会话轮次日志和长期记忆 —— 全部是走 PR 评审的文档,由人类、编码 agent、研究 agent 三方共享。每个会话从阅读既有结论开始;重测一个已证伪的假设需要新证据并显式引用旧结论。
+
+**4. 生产级工程质量。** 约 10.6 万行 Python、17 个包、285 个测试文件(单元 / 集成 / 故障注入)、严格 mypy、ruff、每次推送跑 CI。PostgreSQL 持久化任务队列(9 种任务类型)带租约恢复、advisory lock 串行化的任务领取、多进程 worker。性能工作有度量、有等值锁定:研究加载从 871s 降到 52.8s(16.5×),测试断言输出逐值一致。
+
+## 数字一览
+
+| | |
+|---|---|
+| Python | 约 10.6 万行,314 个文件,17 个包 |
+| 测试 | 285 个文件(单元 / 集成 / 故障注入) |
+| Agent 工具面 | 126 个 MCP 工具,仅研究域 |
+| 任务队列 | 9 种持久化任务类型,租约恢复,N 进程 worker |
+| 前端 | React 19 + TypeScript,93 个文件(交易控制台 + 研究工作台) |
+| 历史 | 550+ 次提交,issue → PR 全程留有决策记录 |
+| 研究加载性能 | 871s → 52.8s(16.5×),有等值单测锁定 |
+
+## Demo
+
+> 随公开发布一起提供:端到端录屏(agent 接收研究指令 → 运行管线 → 带审计轨迹的报告)与招牌研究 run 的交互式只读档案 —— 均由真实系统数据重建。
+
+## 快速开始
+
+前置:Python 3.12+、[uv](https://docs.astral.sh/uv/)、Node 18+、PostgreSQL 16(本机或 `docker compose`)。
+
+```bash
+git clone https://github.com/Caspian-Lin/FinDashboard && cd FinDashboard
+make install                  # uv sync --all-packages
+make web-install              # 前端依赖
+docker compose up -d          # 或使用本机已有的 PostgreSQL
+cp .env.example .env          # 设置 FINBOARD_DB_URL 的密码
+make migrate                  # alembic upgrade head
+make test                     # 单元测试(与 CI 一致)
+make dev                      # API :8000 + 前端 :5173 + 后台 Worker
+```
+
+打开 `http://localhost:5173`。交易控制台默认连接 **mock 券商**;启用研究 agent(MCP + OpenCode 运行时)与代码沙箱的步骤见运维文档(`docs/research/data-ops.md`)。
 
 ## 仓库结构
 
 ```
-FinDashboard/
-├── packages/                      # uv workspace 成员
-│   ├── finboard-shared/           # 跨模块的枚举、数据模型、ID 类型
-│   ├── finboard-broker/           # BrokerAdapter / MarketDataAdapter 抽象 + Mock 实现
-│   ├── finboard-broker-qmt/       # QMT (xtquant) 交易 + 行情实现
-│   ├── finboard-broker-ctp/       # CTP (期货) 实现
-│   ├── finboard-persistence/      # SQLAlchemy ORM + Repository
-│   ├── finboard-core/             # 事件总线 / 订单 / 持仓 / 账户 / 状态机 / 策略运行器
-│   ├── finboard-risk/             # 下单前检查 / Kill Switch
-│   ├── finboard-reconcile/        # 本地 ↔ 券商核对 + 重启恢复
-│   ├── finboard-app/              # 进程入口 + CLI + 配置 + 策略工厂
-│   └── finboard-api/             # FastAPI REST + WebSocket API(人工交易控制台后端)
-├── web/                           # React 前端(Vite + Tailwind + TanStack Query)
-├── migrations/                    # Alembic 迁移脚本
-├── tests/                         # 跨包测试(unit / integration)
-├── docker/                        # 构建镜像
-├── .github/                       # issue / PR 模板 + CI
-├── pyproject.toml                 # workspace 根 + 工具配置
-├── alembic.ini
-├── Makefile
-└── phase1_doc.md / AGENTS.md
+packages/
+  finboard-core/              交易内核:事件总线、订单、持仓、策略运行器
+  finboard-broker(-qmt/-ctp)/ 券商适配器:QMT(A股)、CTP(期货)、Mock
+  finboard-risk/              下单前检查、Kill Switch
+  finboard-reconcile/         本地↔券商核对、重启恢复
+  finboard-simulation/        隔离的模拟盘账户(SIM-* 表)
+  finboard-scheduler/         交易日定时任务(不进入研究队列)
+  finboard-data/              行情同步、PIT 冻结发布、质量门
+  finboard-backtest/          回放引擎、因子实验室、样本外验证
+  finboard-research-kit/      沙箱侧 SDK(agent 提交代码用)
+  finboard-mcp/               126 工具的 agent 面(最小权限、可审计)
+  finboard-opencode/          agent 运行时集成(Docker 隔离的 Web UI)
+  finboard-api/               FastAPI REST + WebSocket
+  finboard-app/               组装根、CLI、配置
+  finboard-persistence/       SQLAlchemy ORM、Repository、迁移
+  finboard-shared/            领域模型、ID、异常
+web/                          React 19 控制台(交易 + 研究工作台)
+docs/research/                agent 的知识库:ROADMAP、FINDINGS、轮次日志
+docs/memory/                  跨会话工程记忆(39 篇)
+docs/dev-guide.md             内部开发指南(完整运维细节)
 ```
 
----
+## 项目状态
 
-## 快速开始
+- **实盘交易内核**:已完成并通过 mock 券商验证(订单、持仓、恢复、Kill Switch)。真实券商激活刻意门控在 QMT 验证之后 —— 见 `phase1_doc.md` 路线图。
+- **研究平台**:已投运 —— 数据运维、冻结发布、因子实验室、多期再平衡回测、验证门、模拟交易。
+- **Agent 层**:已投运 —— 最小权限 MCP 工具面、沙箱代码执行、晋级链、审计轨迹、知识沉淀。
 
-### 0. 前置
+## 许可证
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- Node.js 18+(前端开发)
-- PostgreSQL 16+(任选其一):
-  - 本机已装 PostgreSQL(推荐,启动快)
-  - Docker / Docker Desktop(`make db-up` 用)
-
-### 1. 安装依赖
-
-```bash
-make install          # 后端: uv sync --all-packages
-make web-install      # 前端: cd web && npm install
-```
-
-### 2. 准备数据库
-
-#### 方式 A:本机已装 PostgreSQL(推荐)
-
-用 `postgres` 超级用户创建专用账户与库:
-
-```bash
-sudo -u postgres psql <<'SQL'
-CREATE USER findashboard WITH PASSWORD 'CHANGE_ME';
-CREATE DATABASE findashboard
-    OWNER findashboard
-    ENCODING 'UTF8'
-    LC_COLLATE 'C.UTF-8'
-    LC_CTYPE 'C.UTF-8'
-    TEMPLATE template0;
-GRANT ALL PRIVILEGES ON DATABASE findashboard TO findashboard;
-\c findashboard
-GRANT ALL ON SCHEMA public TO findashboard;
-ALTER SCHEMA public OWNER TO findashboard;
-SQL
-```
-
-把 `CHANGE_ME` 换成强密码,然后填入 `.env`(见下)。
-
-#### 方式 B:docker compose
-
-```bash
-make db-up            # 起 postgres:16 容器,用户/密码/库默认 findashboard
-```
-
-#### 配置 `.env`
-
-```bash
-cp .env.example .env
-# 编辑 .env,把 FINBOARD_DB_URL 里的 CHANGE_ME 替换为上面设置的密码
-```
-
-### 3. 应用迁移 + 跑测试
-
-```bash
-make migrate          # alembic upgrade head
-make lint             # ruff check
-make typecheck        # mypy strict
-make test             # unit + smoke(默认跳过 integration)
-make test-integration # 需要 PostgreSQL 已就绪
-```
-
-### 4. 一键启动前后端开发服务器
-
-```bash
-make dev              # 后端 FastAPI(:8000) + 前端 Vite(:5173),Ctrl-C 同时退出
-```
-
-打开浏览器访问 `http://localhost:5173` 即可使用交易控制台。
-Vite dev server 自动代理 `/api` 和 `/ws` 到后端。
-
-也可以分别启动:
-
-```bash
-make serve            # 仅后端(带 --reload 热重载)
-make web-dev          # 仅前端
-```
-
-### 5. 启动交易核心(CLI 模式,不带 API)
-
-```bash
-make run              # 等同于 uv run finboard run
-```
-
-CLI 入口(`uv run finboard --help`)提供 `run / serve / reconcile / migrate / kill-switch` 等子命令。
-
----
-
-## 策略参数与预设
-
-控制台的“策略配置”页面只管理随应用发布、经过测试的内置策略。它不会上传或执行
-Python 代码,保存预设也不会启动策略或修改实盘运行配置。
-
-策略参数的单一真值来源位于
-`packages/finboard-app/src/finboard_app/strategies/schema.py`:
-
-1. 每个内置策略使用 Pydantic 模型声明参数类型、默认值、必填项、范围/枚举和跨字段约束。
-2. `strategies/__init__.py` 的 `StrategyDefinition` 将策略类与参数模型、展示信息和
-   `supports_backtest` 能力关联。
-3. `GET /api/backtest/strategies` 自动把模型 JSON Schema 转换成前端表单契约;
-   策略实例化、回测运行和预设保存复用同一模型校验。
-
-新增内置策略时,只需新增参数模型并登记 `StrategyDefinition`,不要在 API 或 React
-页面中按策略名称添加条件分支。未知字段、类型/范围错误和跨字段错误会以结构化
-HTTP 422 返回。
-
-策略预设保存在 PostgreSQL `strategy_presets` 表中,应用 `0004_strategy_presets`
-迁移后可使用以下 API:
-
-| 方法 | 路径 | 作用 |
-|------|------|------|
-| `GET` | `/api/strategy-presets` | 列出预设 |
-| `POST` | `/api/strategy-presets` | 校验并创建预设 |
-| `GET` | `/api/strategy-presets/{id}` | 获取单个预设 |
-| `PUT` | `/api/strategy-presets/{id}` | 校验并更新预设 |
-| `DELETE` | `/api/strategy-presets/{id}` | 删除预设 |
-
-预设还可保存独立的 `selection` 因子候选池配置。它不混入具体策略参数,因此同一套
-过滤和排名规则可供不同内置回测策略消费。该配置默认关闭,保存或载入预设都不会
-启动策略。
-
-`POST /api/backtest/run` 接受同样的 `selection` 对象。响应及历史详情包含
-`selection_snapshots`、聚合后的 `dataset_versions` 和 `factor_version`;
-每个快照给出决策/生效日期、入选标的、发布或跳过状态、跳过原因和校验和。启用
-选股但研究数据质量不足时会跳过当日调仓,不会使用部分数据。
-
-在线代码编辑、动态模块导入和运行时执行用户代码不在当前能力范围内。此类能力必须
-另行设计隔离与审批,并经过研究、回测、样本外、行情回放、模拟/影子交易和小资金
-实盘验证,不能从网页直接进入实盘进程。
-
-### 配置项说明（InfoHint）
-
-回测、行情数据、设置和策略配置页使用
-`web/src/components/InfoHint.tsx` 展示就地说明。公共说明文案集中在
-`web/src/lib/infoHints.ts`;后端 schema 生成的策略参数则根据字段描述和约束自动
-生成说明。
-
-新增说明时遵循以下约定:
-
-1. 使用 `InfoHint` 展示术语说明,或使用 `HintLabel` 将表单标签、控件和说明关联;
-   不在页面中复制自定义 tooltip 定位逻辑。
-2. `title` 使用用户看到的术语,`description` 说明作用与操作逻辑,`detail` 补充单位、
-   典型范围或安全边界。典型值是示例而不是投资或交易建议。
-3. 触发器必须保留可访问名称和原生 `button` 键盘行为。组件支持 hover、focus、
-   Enter/Space、Escape 和 click/touch,浮层通过 portal 渲染以避免被滚动容器裁剪。
-4. 说明只用于展示,不得在打开/关闭时修改字段、提交表单、启动策略或触发交易动作。
-5. 长文案应保持简洁;需要多段操作指南时使用页面正文或文档,不要把 tooltip 变成
-   可交互面板。
-
----
-
-## QMT(迅投 xtquant)实盘接入
-
-> **仅 Windows + miniQMT 环境**。Linux/macOS/CI 使用 mock broker。
-
-### 前置条件
-
-1. 安装 QMT 客户端(券商提供),启动 **miniQMT** 模式并登录资金账号
-2. 确认 `xtquant` 可导入:QMT 安装目录下的 `userdata_mini` 文件夹包含 `xtquant` 包
-3. 将 `userdata_mini` 路径加入 `PYTHONPATH`,或安装 `xtquant` 到 Python 环境
-
-### 配置
-
-编辑 `.env`:
-
-```ini
-FINBOARD_BROKER=qmt
-FINBOARD_ACCOUNT_ID=12345678        # QMT 资金账号
-FINBOARD_QMT_PATH=C:\QMT\userdata_mini  # userdata_mini 完整路径
-FINBOARD_QMT_SESSION_ID=1            # 会话号,多进程须唯一
-```
-
-### 运行
-
-```bash
-# Windows PowerShell / cmd
-uv run finboard run           # 启动 → 连接 → 查询 → reconcile → 等待 Ctrl-C
-uv run finboard reconcile     # 单独执行一次本地 ↔ 券商核对
-```
-
-### A 股交易规则提醒
-
-- **T+1**:当日买入的股票次日才能卖出;系统通过 `available_quantity`(券商查询)自动校验
-- **最小单位**:买入须为 100 股整数倍;卖出可不足 100 股(零股)
-- **价格变动单位**:A 股 0.01 元;ETF 0.001 元
-- **涨跌停**:超出涨跌停价的订单会被券商拒单
-- **集合竞价**:9:15-9:25 / 14:57-15:00,不支持撤单
-
-### session_id 选取规则
-
-`session_id` 是 xtquant 用来区分不同策略进程的标识:
-
-- 同一台机器上同时运行多个进程时,每个进程用不同的 `session_id`
-- 单进程重启可以复用同一 `session_id`
-- 取值范围:正整数(建议 1-999)
-
----
-
-## 交易链路
-
-```
-Strategy (P5) → Order Intent
-        ↓
-Risk Manager (下单前检查 + Kill Switch)
-        ↓
-Order Manager (本地订单状态机 + client_order_id 唯一性)
-        ↓
-Broker Adapter (QMT / CTP / Mock)
-        ↓
-券商 / 交易所
-        ↓
-回报(委托/成交/拒单) → 更新订单 → 更新持仓/资金 → Reconcile
-```
-
-**交易安全红线**(改动须先与用户确认,详见 `AGENTS.md`):
-
-- `client_order_id` 必须本地生成且全局唯一
-- 下单请求超时禁止无条件重试,须先进入 `UNKNOWN` 再查券商确认
-- 持仓的真实来源是券商查询,禁止策略直接改持仓
-- 重启后须先完成核对,通过前禁止发新单
-- Kill Switch 由交易内核执行,不能只依赖网页按钮
-
----
-
-## Git 工作流
-
-详见 `AGENTS.md` 的 *Git 工作流* 与 *Issue / PR 规范* 章节。简要:
-
-- 从 `dev` 切 `feat/<issue-slug-id>`,本地通过 CI 后用 `gh pr create` 提 PR
-- **合并 PR 是唯一需要用户确认的步骤**
-- 提交信息格式 `<分类>: <修改点描述>`,禁用任何 `Co-Authored-By` 署名
-
----
-
-## License
-
-Proprietary. 内部使用,未获得授权不得外传。
+本项目以 [GNU AGPL-3.0](./LICENSE) 发布。这意味着:你可以自由使用、修改、分发本项目,但**若你基于本项目提供网络服务,必须按同一协议公开修改后的完整源码**。本软件不提供任何担保;量化研究涉及真实市场风险,使用本代码产生的任何后果由使用者自行承担。

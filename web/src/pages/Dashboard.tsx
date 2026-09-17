@@ -1,72 +1,129 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { PageHeader } from "../components/ui/page-header";
+import { PageContainer } from "../components/ui/page-container";
+import { StatCard } from "../components/ui/stat-card";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
+import { useT } from "@/i18n";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table";
 
 export default function Dashboard() {
-  const { data: health } = useQuery({ queryKey: ["health"], queryFn: api.health });
-  const { data: account } = useQuery({ queryKey: ["account"], queryFn: api.getAccount });
+  const { t } = useT();
+  const { data: health } = useQuery({
+    queryKey: ["health"],
+    queryFn: api.health,
+    refetchInterval: 5000,
+  });
+  const {
+    data: account,
+    isError: accountIsError,
+    error: accountError,
+    refetch: refetchAccount,
+    isFetching: accountFetching,
+  } = useQuery({
+    queryKey: ["account"],
+    queryFn: api.getAccount,
+    refetchInterval: 5000,
+  });
   const { data: orders } = useQuery({
     queryKey: ["orders", "active"],
     queryFn: () => api.getOrders({ limit: 500 }),
+    refetchInterval: 5000,
   });
 
   const activeOrders = orders?.items.filter((o) => o.is_active) ?? [];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">仪表盘</h1>
-      <div className="grid grid-cols-4 gap-4">
-        <StatCard label="内核状态" value={health?.kernel_ready ? "就绪" : "未就绪"} color={health?.kernel_ready ? "green" : "red"} />
-        <StatCard label="Kill Switch" value={health?.kill_switch_level ?? "—"} color={health?.kill_switch_level === "off" ? "green" : "red"} />
-        <StatCard label="活动订单" value={String(activeOrders.length)} />
-        <StatCard label="总资产" value={account ? `¥${Number(account.total_asset).toLocaleString()}` : "—"} />
-        <StatCard label="可用资金" value={account ? `¥${Number(account.cash).toLocaleString()}` : "—"} />
-        <StatCard label="冻结资金" value={account ? `¥${Number(account.frozen_cash).toLocaleString()}` : "—"} />
-        <StatCard label="券商" value={account?.broker_kind ?? "—"} />
-        <StatCard label="账户" value={account?.account_id ?? "—"} />
+    <PageContainer>
+      <PageHeader
+        title={t("dashboard.title")}
+        description={t("dashboard.description")}
+      />
+      {accountIsError && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("dashboard.accountErrorTitle")}</AlertTitle>
+          <AlertDescription className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
+            <span>
+              {accountError?.message ?? t("dashboard.accountErrorFallback")}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() => refetchAccount()}
+              disabled={accountFetching}
+            >
+              {t("common.retry")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label={t("dashboard.kernelStatus")}
+          value={health?.kernel_ready ? t("dashboard.ready") : t("dashboard.notReady")}
+          trend={health?.kernel_ready ? { value: t("dashboard.online"), positive: true } : { value: t("dashboard.offline"), positive: false }}
+        />
+        <StatCard
+          label={t("dashboard.killSwitch")}
+          value={health?.kill_switch_level ?? "—"}
+          trend={
+            health?.kill_switch_level === "off"
+              ? { value: t("dashboard.ksNotTriggered"), positive: true }
+              : { value: t("dashboard.ksTriggered"), positive: false }
+          }
+        />
+        <StatCard label={t("dashboard.activeOrders")} value={String(activeOrders.length)} />
+        <StatCard label={t("dashboard.totalAsset")} value={account ? `¥${Number(account.total_asset).toLocaleString()}` : "—"} />
+        <StatCard label={t("dashboard.availableCash")} value={account ? `¥${Number(account.cash).toLocaleString()}` : "—"} />
+        <StatCard label={t("dashboard.frozenCash")} value={account ? `¥${Number(account.frozen_cash).toLocaleString()}` : "—"} />
+        <StatCard label={t("dashboard.broker")} value={account?.broker_kind ?? health?.broker_kind ?? "—"} />
+        <StatCard label={t("dashboard.account")} value={account?.account_id ?? "—"} />
       </div>
 
       {activeOrders.length > 0 && (
-        <div className="mt-8">
-          <h2 className="text-lg font-semibold mb-3">活动订单</h2>
-          <table className="w-full bg-white rounded-lg shadow text-sm">
-            <thead className="bg-gray-100 text-gray-600">
-              <tr>
-                <th className="px-4 py-2 text-left">标的</th>
-                <th className="px-4 py-2 text-left">方向</th>
-                <th className="px-4 py-2 text-right">数量</th>
-                <th className="px-4 py-2 text-right">价格</th>
-                <th className="px-4 py-2 text-left">状态</th>
-                <th className="px-4 py-2 text-left">下单时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {activeOrders.map((o) => (
-                <tr key={o.client_order_id} className="border-t">
-                  <td className="px-4 py-2 font-mono">{o.symbol}</td>
-                  <td className={`px-4 py-2 ${o.side === "buy" ? "text-red-500" : "text-green-500"}`}>
-                    {o.side === "buy" ? "买入" : "卖出"}
-                  </td>
-                  <td className="px-4 py-2 text-right">{o.quantity}</td>
-                  <td className="px-4 py-2 text-right">{o.price ?? "—"}</td>
-                  <td className="px-4 py-2">{o.status}</td>
-                  <td className="px-4 py-2 text-gray-500">{new Date(o.created_at).toLocaleTimeString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <section aria-label={t("dashboard.activeOrders")}>
+          <h2 className="mb-3 text-lg font-semibold">{t("dashboard.activeOrders")}</h2>
+          <div className="overflow-hidden rounded-lg border border-border bg-card">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t("common.symbol")}</TableHead>
+                  <TableHead>{t("common.direction")}</TableHead>
+                  <TableHead className="text-right">{t("common.quantity")}</TableHead>
+                  <TableHead className="text-right">{t("common.price")}</TableHead>
+                  <TableHead>{t("common.status")}</TableHead>
+                  <TableHead>{t("dashboard.orderTime")}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {activeOrders.map((o) => (
+                  <TableRow key={o.client_order_id}>
+                    <TableCell className="font-mono">{o.symbol}</TableCell>
+                    <TableCell className={o.side === "buy" ? "text-up" : "text-down"}>
+                      {o.side === "buy" ? t("common.buy") : t("common.sell")}
+                    </TableCell>
+                    <TableCell className="text-right">{o.quantity}</TableCell>
+                    <TableCell className="text-right">{o.price ?? "—"}</TableCell>
+                    <TableCell>{o.status}</TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {new Date(o.created_at).toLocaleTimeString()}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </section>
       )}
-    </div>
-  );
-}
-
-function StatCard({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div className="bg-white rounded-lg shadow p-4">
-      <div className="text-gray-500 text-sm">{label}</div>
-      <div className={`text-xl font-bold mt-1 ${color === "green" ? "text-green-600" : color === "red" ? "text-red-600" : ""}`}>
-        {value}
-      </div>
-    </div>
+    </PageContainer>
   );
 }

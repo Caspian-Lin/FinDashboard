@@ -22,6 +22,11 @@ from finboard_data import (
 OBSERVED_AT = datetime(2026, 7, 27, 2, 30, tzinfo=UTC)
 
 
+class NoopBudget:
+    async def acquire(self) -> None:
+        return None
+
+
 def _daily_row(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
         "ts_code": "000001.SZ",
@@ -66,6 +71,36 @@ def _financial_row(**overrides: object) -> dict[str, object]:
         "tr_yoy": 6.5,
         "netprofit_yoy": -2.5,
         "ocf_yoy": 8.1,
+        # issue #401 批次 3 扩展字段(29 个)
+        "or_yoy": 5.8,
+        "basic_eps_yoy": -4.4,
+        "dt_netprofit_yoy": -3.4,
+        "op_yoy": -4.7,
+        "q_gr_yoy": -5.3,
+        "q_gr_qoq": 1.9,
+        "q_netprofit_yoy": -29.9,
+        "q_netprofit_qoq": -65.5,
+        "roa": 3.6,
+        "npta": 2.9,
+        "roe_dt": 3.0,
+        "roic": 4.1,
+        "q_roe": 2.8,
+        "q_npta": 0.7,
+        "q_gsprofit_margin": 43.1,
+        "q_netprofit_margin": 18.9,
+        "expense_of_sales": 21.3,
+        "inv_turn": 1.2,
+        "ar_turn": 8.4,
+        "ca_turn": 0.3,
+        "fa_turn": 3.7,
+        "assets_turn": 0.03,
+        "current_ratio": None,
+        "quick_ratio": None,
+        "debt_to_eqt": 10.66,
+        "ebit_to_interest": None,
+        "assets_to_eqt": 11.66,
+        "ocf_to_or": 0.43,
+        "ocf_to_debt": 0.01,
     }
     row.update(overrides)
     return row
@@ -84,6 +119,25 @@ def _industry_row(**overrides: object) -> dict[str, object]:
         "in_date": "20211213",
         "out_date": "",
         "is_new": "Y",
+    }
+    row.update(overrides)
+    return row
+
+
+def _cb_basic_row(**overrides: object) -> dict[str, object]:
+    """tushare cb_basic 单行(issue #265,默认在市转债)。"""
+    row: dict[str, object] = {
+        "ts_code": "113050.SH",
+        "bond_full_name": "南银转债",
+        "bond_short_name": "南银转债",
+        "stock_code": "601009.SH",
+        "stock_name": "南京银行",
+        "list_date": "20210628",
+        "delist_date": "",
+        "swap_price": 8.5,
+        "value_date": "20210621",
+        "mature_date": "20270621",
+        "coupon_rate": 0.3,
     }
     row.update(overrides)
     return row
@@ -109,6 +163,23 @@ class FakeTushareClient:
         self.daily_rows = [_daily_row()]
         self.financial_rows = [_financial_row()]
         self.industry_rows = [_industry_row()]
+        self.namechange_rows: list[dict[str, object]] = []
+        # cb_basic 按 list_status 分桶(L=在市 / D=摘牌)。
+        self.suspend_d_rows: list[dict[str, object]] = []
+        self.cb_basic_rows: dict[str, list[dict[str, object]]] = {
+            "L": [_cb_basic_row()],
+            "D": [
+                _cb_basic_row(
+                    ts_code="110059.SH",
+                    bond_short_name="浦发转债",
+                    stock_code="600000.SH",
+                    stock_name="浦发银行",
+                    list_date="20191101",
+                    delist_date="20251028",
+                    swap_price=12.3,
+                )
+            ],
+        }
 
     def stock_basic(self, **kwargs: str) -> object:
         self.calls.append(("stock_basic", kwargs))
@@ -126,6 +197,38 @@ class FakeTushareClient:
         self.calls.append(("index_member_all", kwargs))
         return self.industry_rows
 
+    def namechange(self, **kwargs: str) -> object:
+        self.calls.append(("namechange", kwargs))
+        return self.namechange_rows
+
+    def cb_basic(self, **kwargs: str) -> object:
+        self.calls.append(("cb_basic", kwargs))
+        return self.cb_basic_rows.get(kwargs.get("list_status", "L"), [])
+
+    def suspend_d(self, **kwargs: str) -> object:
+        self.calls.append(("suspend_d", kwargs))
+        return self.suspend_d_rows
+    def index_basic(self, **kwargs: str) -> object:
+        self.calls.append(("index_basic", kwargs))
+        return []
+
+
+    def income(self, **kwargs: str) -> object:
+        """调用 ``income``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def balancesheet(self, **kwargs: str) -> object:
+        """调用 ``balancesheet``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def cashflow(self, **kwargs: str) -> object:
+        """调用 ``cashflow``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def dividend(self, **kwargs: str) -> object:
+        """调用 ``dividend``(#397;本测试不触达,返回空)。"""
+        return []
+
 
 def _provider(
     client: FakeTushareClient | None = None,
@@ -133,6 +236,7 @@ def _provider(
     return TushareResearchDataProvider(
         client=client or FakeTushareClient(),
         now=lambda: OBSERVED_AT,
+        budget=NoopBudget(),
     )
 
 
@@ -319,3 +423,164 @@ def test_naive_clock_is_rejected() -> None:
 
     with pytest.raises(ResearchDataConfigurationError, match="带时区"):
         provider._observed_at()
+
+
+# ---------------------------------------------------------------------------
+# #251:历史名称变更(namechange 分页拉全)
+# ---------------------------------------------------------------------------
+
+
+def _namechange_row(
+    *,
+    ts_code: str,
+    name: str = "平安银行",
+    start_date: str,
+    end_date: str = "",
+) -> dict[str, object]:
+    return {
+        "ts_code": ts_code,
+        "name": name,
+        "start_date": start_date,
+        "end_date": end_date,
+        "change_reason": "其他",
+    }
+
+
+@pytest.mark.unit
+async def test_fetch_name_changes_paginates_until_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#251:namechange 满页继续按 offset 取,不满页停;结果按 symbol+起始日排序。"""
+    from finboard_data import tushare_provider as provider_mod
+
+    monkeypatch.setattr(provider_mod, "_NAMECHANGE_PAGE_SIZE", 2)
+
+    class PagingClient(FakeTushareClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pages = [
+                [
+                    _namechange_row(
+                        ts_code="000001.SZ",
+                        name="深发展A",
+                        start_date="19910403",
+                        end_date="19920309",
+                    ),
+                    _namechange_row(
+                        ts_code="600000.SH",
+                        name="浦发银行",
+                        start_date="19991110",
+                    ),
+                ],
+                [
+                    _namechange_row(
+                        ts_code="000001.SZ",
+                        name="平安银行",
+                        start_date="20120507",
+                    ),
+                ],
+            ]
+
+        def namechange(self, **kwargs: str) -> object:
+            self.calls.append(("namechange", kwargs))
+            page_index = int(kwargs.get("offset", "0")) // 2
+            return self.pages[page_index] if page_index < len(self.pages) else []
+
+    client = PagingClient()
+    changes = await _provider(client).fetch_name_changes()
+
+    # 按 (symbol, start_date) 排序,与摄取顺序无关。
+    assert [(item.symbol, item.start_date) for item in changes] == [
+        ("000001.SZ", date(1991, 4, 3)),
+        ("000001.SZ", date(2012, 5, 7)),
+        ("600000.SH", date(1999, 11, 10)),
+    ]
+    assert [kwargs["offset"] for _, kwargs in client.calls] == ["0", "2"]
+    assert changes[0].end_date == date(1992, 3, 9)
+    assert changes[1].end_date is None  # 当前名称保持开区间
+    assert changes[0].available_at == OBSERVED_AT
+
+
+# ---------------------------------------------------------------------------
+# #265:可转债基础条款(cb_basic,在市 + 摘牌合并)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_fetch_convertible_profiles_merges_listed_and_delisted() -> None:
+    """在市 + 摘牌档案合并;字段映射 swap_price→conversion_price 等;快照语义。"""
+    client = FakeTushareClient()
+    profiles = await _provider(client).fetch_convertible_profiles()
+
+    # 在市与摘牌档案各一只,按 symbol 排序。
+    assert [item.symbol for item in profiles] == ["110059.SH", "113050.SH"]
+    listed = profiles[1]
+    assert listed.name == "南银转债"
+    assert listed.underlying_symbol == "601009.SH"
+    assert listed.underlying_name == "南京银行"
+    assert listed.conversion_price == Decimal("8.5")
+    assert listed.list_date == date(2021, 6, 28)
+    assert listed.delist_date is None
+    assert listed.issue_date == date(2021, 6, 21)
+    assert listed.maturity_date == date(2027, 6, 21)
+    # coupon_rate 百分比归一(0.3 → 0.003),与 daily_metrics 同口径。
+    assert listed.coupon_rate == Decimal("0.003")
+    # cb_basic 是当前快照:available_at = 观察时间,不含历史版本。
+    assert listed.available_at == OBSERVED_AT
+    assert listed.observed_at == OBSERVED_AT
+    assert listed.source == "tushare"
+
+    delisted = profiles[0]
+    assert delisted.delist_date == date(2025, 10, 28)
+
+
+@pytest.mark.unit
+async def test_convertible_profiles_query_both_list_status_with_whitelist() -> None:
+    """先 D 后 L 各查一次;字段白名单随请求下发。"""
+    client = FakeTushareClient()
+    await _provider(client).fetch_convertible_profiles()
+
+    cb_calls = [kwargs for name, kwargs in client.calls if name == "cb_basic"]
+    assert [kwargs["list_status"] for kwargs in cb_calls] == ["D", "L"]
+    for kwargs in cb_calls:
+        assert kwargs["fields"].startswith("ts_code,bond_full_name,bond_short_name")
+        assert "swap_price" in kwargs["fields"]
+        assert "mature_date" in kwargs["fields"]
+
+
+@pytest.mark.unit
+async def test_convertible_profile_zero_swap_price_treated_as_missing() -> None:
+    """转股价必须为正:0/负值视同缺失(null),由下游质量报告可见。"""
+    client = FakeTushareClient()
+    client.cb_basic_rows = {
+        "L": [
+            _cb_basic_row(swap_price=0),
+            _cb_basic_row(ts_code="128095.SZ", swap_price=-1),
+        ],
+        "D": [],
+    }
+    profiles = await _provider(client).fetch_convertible_profiles()
+
+    assert len(profiles) == 2
+    assert all(item.conversion_price is None for item in profiles)
+
+
+@pytest.mark.unit
+async def test_convertible_profiles_truncation_guard_rejects() -> None:
+    """返回行数达到护栏值(5000)时拒绝,防上游静默截断。"""
+    client = FakeTushareClient()
+    client.cb_basic_rows = {"L": [_cb_basic_row() for _ in range(5000)], "D": []}
+
+    with pytest.raises(ResearchDataContractError, match="结果可能被截断"):
+        await _provider(client).fetch_convertible_profiles()
+
+
+@pytest.mark.unit
+async def test_convertible_profiles_missing_upstream_field_is_actionable() -> None:
+    client = FakeTushareClient()
+    row = _cb_basic_row()
+    del row["mature_date"]
+    client.cb_basic_rows = {"L": [row], "D": []}
+
+    with pytest.raises(ResearchDataContractError, match="缺少字段: mature_date"):
+        await _provider(client).fetch_convertible_profiles()

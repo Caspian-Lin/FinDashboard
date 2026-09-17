@@ -1,0 +1,1369 @@
+"""研究数据集发布登记与发布候选元数据快照(issue #77)。"""
+
+from __future__ import annotations
+
+import dataclasses
+from collections.abc import Callable, Sequence
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import Select, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from finboard_data.akshare_provider import (
+    futures_product_entry,
+    futures_series_entry,
+    is_futures_main_code,
+)
+from finboard_data.releases import (
+    ConvertibleReleaseMetadata,
+    DatasetReleaseSpec,
+    ExecutionMetadata,
+    FrozenDatasetReleaseBuilder,
+    ImmutableReleaseError,
+    ReleaseCapabilityError,
+    ReleaseDatasetKind,
+    ReleaseInstrumentSpec,
+    ReleaseLifecycleEvent,
+    ResearchDatasetRelease,
+    ResearchEtfCatalogEntry,
+    default_execution_metadata,
+    research_etf_catalog_entry,
+    symbol_set_diff,
+)
+from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
+    DailySecurityMetrics,
+    DividendRecord,
+    FinancialIndicator,
+    IncomeStatement,
+)
+from finboard_persistence.models import (
+    ConvertibleMetadataModel,
+    EtfMetadataModel,
+    FuturesContractModel,
+    InstrumentLifecycleEventModel,
+    InstrumentModel,
+    InstrumentNameModel,
+    ResearchBalanceSheetModel,
+    ResearchCashflowStatementModel,
+    ResearchDailyMetricModel,
+    ResearchDatasetReleaseModel,
+    ResearchDividendModel,
+    ResearchFinancialIndicatorModel,
+    ResearchIncomeStatementModel,
+    ResearchInstrumentProfileModel,
+)
+from finboard_persistence.profile_metadata import ProfileMetadataLookup
+from finboard_persistence.repo import InstrumentRepository
+from finboard_shared.types import (
+    AssetClass,
+    DatasetQualityStatus,
+    EtfCategory,
+    EtfExecutionProfile,
+    FuturesEventType,
+    InstrumentType,
+    ListingStatus,
+    Market,
+    ReviewStatus,
+    etf_category_from_execution_profile,
+)
+
+_FUTURES_REQUIRED_EVENTS = (
+    FuturesEventType.ROLL.value,
+    FuturesEventType.EXPIRATION.value,
+    FuturesEventType.DELIVERY.value,
+)
+
+
+class ResearchDatasetReleaseRepository:
+    """不可变研究发布仓储。
+
+    相同 release/checksum 可幂等登记;任何同 ID 或同版本的内容漂移都拒绝。
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def publish(
+        self,
+        release: ResearchDatasetRelease,
+    ) -> ResearchDatasetReleaseModel:
+        existing = await self._find_identity(
+            release.release_id,
+            release.dataset_name,
+            release.source,
+            release.version,
+        )
+        if existing is not None:
+            if existing.release_checksum != release.release_checksum:
+                raise ImmutableReleaseError(f"发布身份已登记但 checksum 不同: {release.release_id}")
+            return existing
+        if not release.is_usable:
+            raise ValueError("仅允许登记通过质量门的研究数据发布")
+
+        row = ResearchDatasetReleaseModel(
+            release_id=release.release_id,
+            dataset_name=release.dataset_name,
+            source=release.source,
+            version=release.version,
+            schema_version=release.schema_version,
+            start_date=release.start_date,
+            end_date=release.end_date,
+            period=release.period.value,
+            adjustment=release.adjustment,
+            code_version=release.code_version,
+            metadata_version=release.metadata_version,
+            symbol_count=release.symbol_count,
+            row_count=release.row_count,
+            coverage_pct=release.coverage_pct,
+            quality_status=release.quality_status.value,
+            capabilities=[item.as_dict() for item in release.capabilities],
+            quality_report=release.quality_report,
+            known_limitations=list(release.known_limitations),
+            storage_uri=release.storage_uri,
+            release_checksum=release.release_checksum,
+            manifest=release.as_dict(),
+            published_at=release.published_at,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def get(self, release_id: str) -> ResearchDatasetRelease | None:
+        stmt = select(ResearchDatasetReleaseModel).where(
+            ResearchDatasetReleaseModel.release_id == release_id
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _release_from_row(row) if row is not None else None
+
+    async def require_usable(
+        self,
+        release_id: str,
+        *,
+        capabilities: tuple[str, ...] = (),
+    ) -> ResearchDatasetRelease:
+        release = await self.get(release_id)
+        if release is None:
+            raise ReleaseCapabilityError(f"研究数据发布不存在: {release_id}")
+        if not release.is_usable:
+            raise ReleaseCapabilityError(
+                f"研究数据发布不可用: {release_id} quality={release.quality_status.value}"
+            )
+        for capability in capabilities:
+            release.require_capability(capability)
+        return release
+
+    async def latest_usable(
+        self,
+        *,
+        dataset_name: str,
+        source: str | None = None,
+    ) -> ResearchDatasetRelease | None:
+        stmt = select(ResearchDatasetReleaseModel).where(
+            ResearchDatasetReleaseModel.dataset_name == dataset_name,
+            ResearchDatasetReleaseModel.quality_status.in_(
+                (
+                    DatasetQualityStatus.PASSED.value,
+                    DatasetQualityStatus.WARNINGS.value,
+                )
+            ),
+        )
+        if source is not None:
+            stmt = stmt.where(ResearchDatasetReleaseModel.source == source)
+        stmt = stmt.order_by(ResearchDatasetReleaseModel.published_at.desc()).limit(1)
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _release_from_row(row) if row is not None else None
+
+    async def list(
+        self,
+        *,
+        dataset_name: str | None = None,
+        source: str | None = None,
+        quality_status: str | None = None,
+        limit: int = 50,
+    ) -> list[ResearchDatasetRelease]:
+        stmt = select(ResearchDatasetReleaseModel)
+        if dataset_name is not None:
+            stmt = stmt.where(ResearchDatasetReleaseModel.dataset_name == dataset_name)
+        if source is not None:
+            stmt = stmt.where(ResearchDatasetReleaseModel.source == source)
+        if quality_status is not None:
+            stmt = stmt.where(ResearchDatasetReleaseModel.quality_status == quality_status)
+        stmt = stmt.order_by(ResearchDatasetReleaseModel.published_at.desc()).limit(limit)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_release_from_row(row) for row in rows]
+
+    async def _find_identity(
+        self,
+        release_id: str,
+        dataset_name: str,
+        source: str,
+        version: str,
+    ) -> ResearchDatasetReleaseModel | None:
+        stmt = select(ResearchDatasetReleaseModel).where(
+            (ResearchDatasetReleaseModel.release_id == release_id)
+            | (
+                (ResearchDatasetReleaseModel.dataset_name == dataset_name)
+                & (ResearchDatasetReleaseModel.source == source)
+                & (ResearchDatasetReleaseModel.version == version)
+            )
+        )
+        return (await self._session.execute(stmt)).scalars().first()
+
+
+class ReleaseInstrumentCatalogRepository:
+    """把 #35/#58 元数据表冻结为 ``ReleaseInstrumentSpec``。"""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_candidates(
+        self,
+        symbols: list[str],
+    ) -> list[ReleaseInstrumentSpec]:
+        normalized = [symbol.strip().upper() for symbol in symbols if symbol.strip()]
+        if not normalized:
+            raise ValueError("symbols 不能为空")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("symbols 包含重复代码")
+
+        instrument_rows = await self._instrument_map(normalized)
+        etf_rows = await self._etf_map(normalized)
+        convertible_rows = await self._convertible_map(normalized)
+        futures_rows = await self._futures_map(normalized)
+        names = await self._name_history(normalized)
+        events = await self._events(normalized)
+        # 兜底源(issue #185):instruments 的 list_date/industry 为 null 时,
+        # 用最近一次已发布档案(research_instrument_profiles)补齐,不新建读路径。
+        profiles = await ProfileMetadataLookup(self._session).profiles(normalized)
+
+        result: list[ReleaseInstrumentSpec] = []
+        missing: list[str] = []
+        # ETF 分类元数据门(issue #345):单只 ETF 缺元数据 / 待复核不再
+        # 「首错即拒」,逐标的收集失败原因,循环结束后与 missing 一起一次性
+        # 聚合抛出,让操作者一次拿到完整缺口清单。
+        etf_failures: list[str] = []
+        for code in normalized:
+            row = instrument_rows.get(code)
+            future = futures_rows.get(code)
+            if future is not None:
+                lifecycle_events = events.get(code, ())
+                result.append(
+                    _future_candidate(
+                        future,
+                        lifecycle_events=lifecycle_events,
+                    )
+                )
+                continue
+            catalog = research_etf_catalog_entry(code)
+            if row is None and catalog is None:
+                missing.append(code)
+                continue
+            if row is None:
+                assert catalog is not None
+                result.append(_catalog_etf_candidate(catalog))
+                continue
+
+            instrument_type = InstrumentType(row.instrument_type)
+            if instrument_type is InstrumentType.ETF:
+                bare = code.split(".", 1)[0] if "." in code else code
+                try:
+                    result.append(
+                        _etf_candidate(
+                            row,
+                            etf_rows.get(code) or etf_rows.get(bare),
+                            profile=profiles.get(code),
+                            lifecycle_events=events.get(code, ()),
+                            name_history=names.get(code, ()),
+                        )
+                    )
+                except ReleaseCapabilityError as exc:
+                    etf_failures.append(str(exc))
+                    continue
+            elif instrument_type is InstrumentType.CONVERTIBLE:
+                lifecycle_events = events.get(code, ())
+                result.append(
+                    _convertible_candidate(
+                        row,
+                        convertible_rows.get(code),
+                        lifecycle_events=lifecycle_events,
+                        name_history=names.get(code, ()),
+                    )
+                )
+            elif instrument_type is InstrumentType.FUTURES:
+                result.append(
+                    _futures_main_candidate(
+                        row,
+                        lifecycle_events=events.get(code, ()),
+                        name_history=names.get(code, ()),
+                    )
+                )
+            else:
+                result.append(
+                    _plain_candidate(
+                        row,
+                        instrument_type=instrument_type,
+                        profile=profiles.get(code),
+                        lifecycle_events=events.get(code, ()),
+                        name_history=names.get(code, ()),
+                    )
+                )
+        if missing or etf_failures:
+            parts = []
+            if missing:
+                parts.append(
+                    f"以下标的缺少 #35/#58 元数据,禁止猜测: {','.join(missing)}"
+                )
+            if etf_failures:
+                parts.append(
+                    f"以下 {len(etf_failures)} 个标的发布元数据缺失/待复核,"
+                    "禁止猜测: " + "; ".join(etf_failures)
+                )
+            raise ReleaseCapabilityError("; ".join(parts))
+        return result
+
+    async def _instrument_map(self, symbols: list[str]) -> dict[str, InstrumentModel]:
+        stmt = select(InstrumentModel).where(InstrumentModel.code.in_(symbols))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {row.code: row for row in rows}
+
+    async def _etf_map(self, symbols: list[str]) -> dict[str, EtfMetadataModel]:
+        lookup = set(symbols)
+        lookup.update({s.split(".", 1)[0] for s in symbols if "." in s})
+        stmt = select(EtfMetadataModel).where(EtfMetadataModel.code.in_(lookup))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        result: dict[str, EtfMetadataModel] = {}
+        for row in rows:
+            result[row.code] = row
+            bare = row.code.split(".", 1)[0]
+            if bare != row.code:
+                result[bare] = row
+        return result
+
+    async def _convertible_map(
+        self,
+        symbols: list[str],
+    ) -> dict[str, ConvertibleMetadataModel]:
+        stmt = select(ConvertibleMetadataModel).where(ConvertibleMetadataModel.code.in_(symbols))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {row.code: row for row in rows}
+
+    async def _futures_map(
+        self,
+        symbols: list[str],
+    ) -> dict[str, FuturesContractModel]:
+        stmt = select(FuturesContractModel).where(FuturesContractModel.contract_code.in_(symbols))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {row.contract_code: row for row in rows}
+
+    async def _name_history(
+        self,
+        symbols: list[str],
+    ) -> dict[str, tuple[tuple[str, date, date | None], ...]]:
+        stmt = (
+            select(InstrumentNameModel)
+            .where(InstrumentNameModel.instrument_code.in_(symbols))
+            .order_by(
+                InstrumentNameModel.instrument_code,
+                InstrumentNameModel.valid_from,
+            )
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        result: dict[str, list[tuple[str, date, date | None]]] = {}
+        for row in rows:
+            result.setdefault(row.instrument_code, []).append(
+                (row.name, row.valid_from, row.valid_to)
+            )
+        return {code: tuple(items) for code, items in result.items()}
+
+    async def _events(
+        self,
+        symbols: list[str],
+    ) -> dict[str, tuple[ReleaseLifecycleEvent, ...]]:
+        stmt = (
+            select(InstrumentLifecycleEventModel)
+            .where(InstrumentLifecycleEventModel.symbol.in_(symbols))
+            .order_by(
+                InstrumentLifecycleEventModel.symbol,
+                InstrumentLifecycleEventModel.effective_date,
+                InstrumentLifecycleEventModel.available_at,
+            )
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        result: dict[str, list[ReleaseLifecycleEvent]] = {}
+        for row in rows:
+            available_at = row.available_at
+            if available_at.tzinfo is None:
+                available_at = available_at.replace(tzinfo=UTC)
+            result.setdefault(row.symbol, []).append(
+                ReleaseLifecycleEvent(
+                    event_type=row.event_type,
+                    effective_date=row.effective_date,
+                    available_at=available_at,
+                    source=row.source,
+                    dataset_version=row.dataset_version,
+                    details=row.details,
+                )
+            )
+        return {code: tuple(items) for code, items in result.items()}
+
+
+class ResearchDatasetReleaseService:
+    """文件原子发布 + 数据库不可变登记的应用服务。
+
+    传入 ``session_factory`` 时走**分段短事务**模式:元数据准备、物化、
+    登记拆成互不重叠的 DB 段,物化阶段(7000+ 符号 x 全历史流式冻结,
+    分钟级纯文件 I/O)不再悬挂任何打开的 PG 事务,避免
+    ``idle_in_transaction_session_timeout`` 在长发布中途杀连接
+    (全市场发布事故 BJ-2307A2188D1645BA)。不传时沿用单 session 行为,
+    事务边界由调用方控制(向后兼容)。
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession | None,
+        *,
+        cache_dir: str | Path,
+        release_root: str | Path,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
+        if session is None and session_factory is None:
+            raise ValueError("session 与 session_factory 至少提供一个")
+        self._release_repo = ResearchDatasetReleaseRepository(session)  # type: ignore[arg-type]
+        self._catalog_repo = ReleaseInstrumentCatalogRepository(session)  # type: ignore[arg-type]
+        self._session_factory = session_factory
+        self._builder = FrozenDatasetReleaseBuilder(
+            cache_dir=cache_dir,
+            release_root=release_root,
+            research_source=ResearchTableReleaseSource(
+                session,
+                session_factory=session_factory,
+            ),
+        )
+
+    async def publish(
+        self,
+        spec: DatasetReleaseSpec,
+        symbols: list[str],
+    ) -> ResearchDatasetRelease:
+        if self._session_factory is None:
+            previous = await self._release_repo.latest_usable(
+                dataset_name=spec.dataset_name,
+                source=spec.source,
+            )
+            if spec.dataset_kind is not ReleaseDatasetKind.BARS:
+                self._require_a_share_stock_scope(spec, symbols)
+            candidates = await self._catalog_repo.list_candidates(symbols)
+        else:
+            previous, candidates = await self._prepare_metadata(spec, symbols)
+        release = await self._builder.publish(
+            spec,
+            candidates,
+            previous_release=previous,
+        )
+        if self._session_factory is None:
+            await self._release_repo.publish(release)
+            return release
+        factory = self._session_factory
+        async with factory() as session:
+            row = await ResearchDatasetReleaseRepository(session).publish(release)
+            await session.commit()
+            return _release_from_row(row)
+
+    async def _prepare_metadata(
+        self,
+        spec: DatasetReleaseSpec,
+        symbols: list[str],
+    ) -> tuple[ResearchDatasetRelease | None, list[ReleaseInstrumentSpec]]:
+        """段 1:一个短事务里读齐 previous release 与标的元数据候选。"""
+        assert self._session_factory is not None  # 仅分段模式调用
+        if spec.dataset_kind is not ReleaseDatasetKind.BARS:
+            self._require_a_share_stock_scope(spec, symbols)
+        async with self._session_factory() as session:
+            previous = await ResearchDatasetReleaseRepository(session).latest_usable(
+                dataset_name=spec.dataset_name,
+                source=spec.source,
+            )
+            candidates = await ReleaseInstrumentCatalogRepository(
+                session
+            ).list_candidates(symbols)
+            await session.commit()
+        return previous, candidates
+
+    @staticmethod
+    def _require_a_share_stock_scope(
+        spec: DatasetReleaseSpec,
+        symbols: list[str],
+    ) -> None:
+        """研究数据(非 bars)的来源与标的域校验。
+
+        daily_metrics / financial_indicators 只支持 A 股股票(#187);
+        convertible_metrics(#265)只支持 A 股可转债,数据输入是缓存中的
+        转债/正股日线(cb_daily 2000 积分上游),source 同样要求 tushare。
+        """
+        if spec.source != "tushare" or spec.dataset_kind not in (
+            ReleaseDatasetKind.DAILY_METRICS,
+            ReleaseDatasetKind.FINANCIAL_INDICATORS,
+            ReleaseDatasetKind.CONVERTIBLE_METRICS,
+            # issue #397:三表 + dividend 研究数据发布。
+            ReleaseDatasetKind.INCOME_STATEMENTS,
+            ReleaseDatasetKind.BALANCE_SHEETS,
+            ReleaseDatasetKind.CASHFLOW_STATEMENTS,
+            ReleaseDatasetKind.DIVIDENDS,
+        ):
+            raise ReleaseCapabilityError(
+                f"{spec.dataset_kind.value} 发布要求 source=tushare "
+                f"(研究数据来自 dataset_sync 摄取)"
+            )
+        if not symbols:  # pragma: no cover - 调用方已校验非空
+            raise ReleaseCapabilityError("发布标的不能为空")
+
+
+class ResearchTableReleaseSource:
+    """从 ``research_*`` 表读取研究数据作为发布冻结输入的注入实现。
+
+    传入 ``session_factory`` 时每次读取自开一个**短事务**,查询完成立即
+    结束(物化期间不再悬挂长事务);否则复用构造传入的 session(旧模式)。
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession | None,
+        *,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
+        if session is None and session_factory is None:
+            raise ValueError("session 与 session_factory 至少提供一个")
+        self._session = session
+        self._session_factory = session_factory
+
+    async def _rows(
+        self,
+        stmt: Select[Any],
+    ) -> list[Any]:
+        if self._session_factory is not None:
+            async with self._session_factory() as session:
+                rows = (await session.execute(stmt)).scalars().all()
+                await session.commit()
+                return list(rows)
+        assert self._session is not None  # 构造已保证
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows)
+
+    async def daily_metrics(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[DailySecurityMetrics]]:
+        stmt = (
+            select(ResearchDailyMetricModel)
+            .where(
+                ResearchDailyMetricModel.symbol.in_(symbols),
+                ResearchDailyMetricModel.trade_date >= start_date,
+                ResearchDailyMetricModel.trade_date <= end_date,
+            )
+            .order_by(
+                ResearchDailyMetricModel.symbol,
+                ResearchDailyMetricModel.trade_date,
+            )
+        )
+        rows = await self._rows(stmt)
+        result: dict[str, list[DailySecurityMetrics]] = {}
+        for row in rows:
+            result.setdefault(row.symbol, []).append(_daily_metrics_from_row(row))
+        return result
+
+    async def financial_indicators(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[FinancialIndicator]]:
+        stmt = (
+            select(ResearchFinancialIndicatorModel)
+            .where(
+                ResearchFinancialIndicatorModel.symbol.in_(symbols),
+                ResearchFinancialIndicatorModel.report_period >= start_date,
+                ResearchFinancialIndicatorModel.report_period <= end_date,
+            )
+            .order_by(
+                ResearchFinancialIndicatorModel.symbol,
+                ResearchFinancialIndicatorModel.report_period,
+                ResearchFinancialIndicatorModel.announcement_date,
+            )
+        )
+        rows = await self._rows(stmt)
+        result: dict[str, list[FinancialIndicator]] = {}
+        for row in rows:
+            result.setdefault(row.symbol, []).append(
+                _financial_indicators_from_row(row)
+            )
+        return result
+
+    async def income_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[IncomeStatement]]:
+        """按报告期窗读取全部利润表公告修订(#397;发布冻结输入)。"""
+        return await self._announced_rows(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            model=ResearchIncomeStatementModel,
+            convert=_income_statements_from_row,
+        )
+
+    async def balance_sheets(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[BalanceSheet]]:
+        """按报告期窗读取全部资产负债表公告修订(#397)。"""
+        return await self._announced_rows(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            model=ResearchBalanceSheetModel,
+            convert=_balance_sheets_from_row,
+        )
+
+    async def cashflow_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[CashflowStatement]]:
+        """按报告期窗读取全部现金流量表公告修订(#397)。"""
+        return await self._announced_rows(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            model=ResearchCashflowStatementModel,
+            convert=_cashflow_statements_from_row,
+        )
+
+    async def dividends(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[DividendRecord]]:
+        """按分红年度窗读取全部分红送股进展(#397)。"""
+        return await self._announced_rows(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            model=ResearchDividendModel,
+            convert=_dividends_from_row,
+        )
+
+    async def _announced_rows(
+        self,
+        symbols: Sequence[str],
+        *,
+        start_date: date,
+        end_date: date,
+        model: Any,
+        convert: Callable[[Any], Any],
+    ) -> dict[str, list[Any]]:
+        """三表/dividend 共用的批量读取(symbol → available_at 升序记录)。"""
+        stmt = (
+            select(model)
+            .where(
+                model.symbol.in_(symbols),
+                model.report_period >= start_date,
+                model.report_period <= end_date,
+            )
+            .order_by(
+                model.symbol,
+                model.report_period,
+                model.announcement_date,
+            )
+        )
+        rows = await self._rows(stmt)
+        result: dict[str, list[Any]] = {}
+        for row in rows:
+            result.setdefault(row.symbol, []).append(convert(row))
+        return result
+
+
+def _daily_metrics_from_row(row: ResearchDailyMetricModel) -> DailySecurityMetrics:
+    return DailySecurityMetrics(
+        symbol=row.symbol,
+        trade_date=row.trade_date,
+        close=row.close,
+        turnover_rate=row.turnover_rate,
+        turnover_rate_free=row.turnover_rate_free,
+        volume_ratio=row.volume_ratio,
+        pe=row.pe,
+        pe_ttm=row.pe_ttm,
+        pb=row.pb,
+        ps=row.ps,
+        ps_ttm=row.ps_ttm,
+        dividend_yield=row.dividend_yield,
+        dividend_yield_ttm=row.dividend_yield_ttm,
+        total_shares=row.total_shares,
+        float_shares=row.float_shares,
+        free_shares=row.free_shares,
+        total_market_cap=row.total_market_cap,
+        circulating_market_cap=row.circulating_market_cap,
+        limit_status=row.limit_status,
+        source=row.source,
+        observed_at=row.observed_at,
+        available_at=row.available_at,
+    )
+
+
+def _financial_indicators_from_row(
+    row: ResearchFinancialIndicatorModel,
+) -> FinancialIndicator:
+    return FinancialIndicator(
+        symbol=row.symbol,
+        announcement_date=row.announcement_date,
+        report_period=row.report_period,
+        update_flag=row.update_flag,
+        eps=row.eps,
+        diluted_eps=row.diluted_eps,
+        book_value_per_share=row.book_value_per_share,
+        operating_cash_flow_per_share=row.operating_cash_flow_per_share,
+        return_on_equity=row.return_on_equity,
+        weighted_return_on_equity=row.weighted_return_on_equity,
+        gross_profit_margin=row.gross_profit_margin,
+        net_profit_margin=row.net_profit_margin,
+        debt_to_assets=row.debt_to_assets,
+        revenue_yoy=row.revenue_yoy,
+        net_profit_yoy=row.net_profit_yoy,
+        operating_cash_flow_yoy=row.operating_cash_flow_yoy,
+        source=row.source,
+        observed_at=row.observed_at,
+        available_at=row.available_at,
+    )
+
+
+def _announced_from_row(
+    record_type: type[IncomeStatement]
+    | type[BalanceSheet]
+    | type[CashflowStatement]
+    | type[DividendRecord],
+    row: Any,
+) -> object:
+    """三表/dividend ORM 行 → 领域记录(#397;字段按 dataclass 反射拷贝)。
+
+    模型列名与领域记录字段名一致(加列零改动);空字符串口径列还原为
+    ``None``(领域契约用 ``str | None``)。
+    """
+    available_at = row.available_at
+    is_dividend = record_type is DividendRecord
+    kwargs: dict[str, Any] = {
+        "symbol": row.symbol,
+        "announcement_date": row.announcement_date,
+        "report_period": row.report_period,
+        "formal_announcement_date": getattr(
+            row, "formal_announcement_date", None
+        ),
+        "report_type": getattr(row, "report_type", None) or None,
+        "comp_type": getattr(row, "comp_type", None) or None,
+        "update_flag": getattr(row, "update_flag", None) or None,
+        "source": row.source,
+        "observed_at": row.observed_at,
+        "available_at": available_at,
+    }
+    if is_dividend:
+        for name in (
+            "formal_announcement_date",
+            "report_type",
+            "comp_type",
+            "update_flag",
+        ):
+            kwargs.pop(name)
+        kwargs["div_proc"] = row.div_proc or ""
+    for field in dataclasses.fields(record_type):
+        if field.name in kwargs:
+            continue
+        kwargs[field.name] = getattr(row, field.name)
+    return record_type(**kwargs)
+
+
+def _income_statements_from_row(row: Any) -> IncomeStatement:
+    return _announced_from_row(IncomeStatement, row)  # type: ignore[return-value]
+
+
+def _balance_sheets_from_row(row: Any) -> BalanceSheet:
+    return _announced_from_row(BalanceSheet, row)  # type: ignore[return-value]
+
+
+def _cashflow_statements_from_row(row: Any) -> CashflowStatement:
+    return _announced_from_row(CashflowStatement, row)  # type: ignore[return-value]
+
+
+def _dividends_from_row(row: Any) -> DividendRecord:
+    return _announced_from_row(DividendRecord, row)  # type: ignore[return-value]
+
+
+def _release_from_row(row: ResearchDatasetReleaseModel) -> ResearchDatasetRelease:
+    return ResearchDatasetRelease.from_dict(row.manifest)
+
+
+def _available_at(row: InstrumentModel) -> datetime:
+    if row.list_date is not None:
+        return datetime(row.list_date.year, row.list_date.month, row.list_date.day, tzinfo=UTC)
+    if row.updated_at.tzinfo is None:
+        return row.updated_at.replace(tzinfo=UTC)
+    return row.updated_at
+
+
+def _status(value: str) -> ListingStatus:
+    try:
+        return ListingStatus(value)
+    except ValueError:
+        return ListingStatus.UNKNOWN
+
+
+def _plain_candidate(
+    row: InstrumentModel,
+    *,
+    instrument_type: InstrumentType,
+    profile: ResearchInstrumentProfileModel | None,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
+    name_history: tuple[tuple[str, date, date | None], ...],
+) -> ReleaseInstrumentSpec:
+    market = Market(row.market)
+    if instrument_type is InstrumentType.STOCK:
+        asset_class = AssetClass.EQUITY
+    elif instrument_type is InstrumentType.BOND:
+        asset_class = AssetClass.FIXED_INCOME
+    elif instrument_type is InstrumentType.INDEX:
+        # 指数基准资产(issue #184):只进数据/发布通道,不可撮合。
+        asset_class = AssetClass.EQUITY
+    else:
+        raise ReleaseCapabilityError(f"{row.code}: 不支持的普通资产类型 {instrument_type.value}")
+    # 兜底(issue #185;#251 扩展 delist_date):instruments 由 akshare 发现链路
+    # 写入,list_date/industry/delist_date 可能为 null;
+    # research_instrument_profiles(tushare stock_basic,含退市档案)是兜底源。
+    list_date = row.list_date or (profile.list_date if profile is not None else None)
+    industry = row.industry or (profile.industry if profile is not None else None)
+    delist_date = row.delist_date or (
+        profile.delist_date if profile is not None else None
+    )
+    return ReleaseInstrumentSpec(
+        code=row.code,
+        name=row.name,
+        market=market,
+        instrument_type=instrument_type,
+        asset_class=asset_class,
+        available_at=_available_at(row),
+        execution=default_execution_metadata(
+            market=market,
+            instrument_type=instrument_type,
+        ),
+        exchange=row.exchange,
+        listing_board=row.listing_board,
+        list_date=list_date,
+        delist_date=delist_date,
+        industry=industry,
+        status=_status(row.status),
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(
+            sorted({event.event_type for event in lifecycle_events})
+        ),
+        name_history=name_history,
+    )
+
+
+def _etf_candidate(
+    row: InstrumentModel,
+    metadata: EtfMetadataModel | None,
+    *,
+    profile: ResearchInstrumentProfileModel | None,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
+    name_history: tuple[tuple[str, date, date | None], ...],
+) -> ReleaseInstrumentSpec:
+    catalog = research_etf_catalog_entry(row.code)
+    list_date: date | None
+    if catalog is not None:
+        category = catalog.category
+        asset_class = catalog.asset_class
+        list_date = row.list_date or catalog.list_date
+    elif metadata is not None:
+        category, asset_class = _resolve_etf_classification(row.code, metadata)
+        list_date = row.list_date or metadata.listing_date
+    else:
+        raise ReleaseCapabilityError(f"{row.code}: ETF 缺少分类元数据")
+    # 兜底(issue #185):profiles 是 list_date/industry 的兜底源。ETF 优先
+    # catalog/metadata 的 list_date,仅在都缺时用档案;industry 只来自档案。
+    if list_date is None and profile is not None:
+        list_date = profile.list_date
+    industry = row.industry or (profile.industry if profile is not None else None)
+    return ReleaseInstrumentSpec(
+        code=row.code,
+        name=row.name or (catalog.name if catalog else row.code),
+        market=Market(row.market),
+        instrument_type=InstrumentType.ETF,
+        asset_class=asset_class,
+        available_at=_available_at(row),
+        execution=default_execution_metadata(
+            market=Market(row.market),
+            instrument_type=InstrumentType.ETF,
+            etf_category=category,
+        ),
+        exchange=row.exchange,
+        etf_category=category,
+        list_date=list_date,
+        delist_date=row.delist_date,
+        industry=industry,
+        status=_status(row.status),
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(
+            sorted({event.event_type for event in lifecycle_events})
+        ),
+        name_history=name_history,
+    )
+
+
+def _resolve_etf_classification(
+    code: str,
+    metadata: EtfMetadataModel,
+) -> tuple[EtfCategory, AssetClass]:
+    """从 ``execution_profile``(优先)或旧 ``category`` 派生发布用分类。
+
+    fail-closed:``review_status=needs_review`` 的记录禁止通过发布质量门,
+    防止低置信度分类静默影响成交规则(issue #97)。
+    """
+    review = metadata.review_status or ReviewStatus.NEEDS_REVIEW.value
+    if review == ReviewStatus.NEEDS_REVIEW.value:
+        raise ReleaseCapabilityError(
+            f"{code}: ETF 分类待复核(review_status=needs_review),"
+            "请先在元数据页确认或修正后发布"
+        )
+    try:
+        asset_class = AssetClass(metadata.underlying_asset_class)
+    except ValueError as exc:
+        raise ReleaseCapabilityError(f"{code}: ETF 资产类别无效") from exc
+    if metadata.execution_profile:
+        try:
+            profile = EtfExecutionProfile(metadata.execution_profile)
+        except ValueError as exc:
+            raise ReleaseCapabilityError(f"{code}: ETF execution_profile 无效") from exc
+        return etf_category_from_execution_profile(profile), asset_class
+    try:
+        return EtfCategory(metadata.category), asset_class
+    except ValueError as exc:
+        raise ReleaseCapabilityError(f"{code}: ETF 分类无效") from exc
+
+
+def _catalog_etf_candidate(
+    catalog: ResearchEtfCatalogEntry,
+) -> ReleaseInstrumentSpec:
+    return ReleaseInstrumentSpec(
+        code=catalog.code,
+        name=catalog.name,
+        market=Market.A_SHARE,
+        instrument_type=InstrumentType.ETF,
+        asset_class=catalog.asset_class,
+        available_at=datetime(
+            catalog.list_date.year,
+            catalog.list_date.month,
+            catalog.list_date.day,
+            tzinfo=UTC,
+        ),
+        execution=default_execution_metadata(
+            market=Market.A_SHARE,
+            instrument_type=InstrumentType.ETF,
+            etf_category=catalog.category,
+        ),
+        exchange="SSE" if catalog.code.endswith(".SH") else "SZSE",
+        etf_category=catalog.category,
+        list_date=catalog.list_date,
+        status=ListingStatus.ACTIVE,
+    )
+
+
+def _convertible_candidate(
+    row: InstrumentModel,
+    metadata: ConvertibleMetadataModel | None,
+    *,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
+    name_history: tuple[tuple[str, date, date | None], ...],
+) -> ReleaseInstrumentSpec:
+    # 事件要求(issue #265 修订):v1 数据上游只有集思录强赎兜底,无法为
+    # 每只转债凑齐 #58 预想的四类条款事件(强赎/回售/下修/转股价调整),
+    # 沿用「逐券全事件才 ready」会让真实转债发布永远不可发布。事件要求
+    # 降级为不设硬门:已同步的事件仍随 manifest 冻结(present_event_types +
+    # quality_report.convertible_instruments.with_lifecycle_events 可见),
+    # 强赎风险过滤由 convertible_double_low 的事件层承担。
+    convertible: ConvertibleReleaseMetadata | None = None
+    if metadata is not None:
+        updated_at = metadata.updated_at or datetime.now(UTC)
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=UTC)
+        convertible = ConvertibleReleaseMetadata(
+            underlying_stock_code=metadata.underlying_stock_code,
+            conversion_price=metadata.conversion_price,
+            observed_at=updated_at,
+            issue_date=metadata.issue_date,
+            maturity_date=metadata.maturity_date,
+            rating=metadata.rating,
+        )
+    return ReleaseInstrumentSpec(
+        code=row.code,
+        name=row.name,
+        market=Market(row.market),
+        instrument_type=InstrumentType.CONVERTIBLE,
+        asset_class=AssetClass.CONVERTIBLE,
+        available_at=_available_at(row),
+        execution=default_execution_metadata(
+            market=Market(row.market),
+            instrument_type=InstrumentType.CONVERTIBLE,
+        ),
+        exchange=row.exchange,
+        list_date=row.list_date,
+        delist_date=row.delist_date,
+        status=_status(row.status),
+        convertible=convertible,
+        metadata_complete=metadata is not None,
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(sorted({event.event_type for event in lifecycle_events})),
+        name_history=name_history,
+    )
+
+
+def _futures_main_candidate(
+    row: InstrumentModel,
+    *,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
+    name_history: tuple[tuple[str, date, date | None], ...],
+) -> ReleaseInstrumentSpec:
+    """期货标的候选(instruments 表登记:主连 #267 + 合约 #395)。
+
+    与 :func:`_future_candidate`(futures_contracts 表的具体月份合约,
+    #58 合约链)是两条不同通道:instruments 表的 ``market=future`` /
+    ``instrument_type=futures`` 行承载两种语义 —— 主连(受控登记表,
+    连续序列)与具体月份合约(#395 起 fut_basic 合约级登记)。乘数 /
+    保证金率 / 最小变动价位统一从受控登记表 ``FUTURES_MAIN_SERIES_REGISTRY``
+    读取:主连按主连代码、合约按品种代码(:func:`futures_product_entry`),
+    与 finboard-backtest ``FuturesRule`` 同口径,未登记品种 fail-closed
+    拒绝,禁止猜测。
+
+    语义标注(诚实边界):主连是换月拼接产物,**仅用于研究信号 / 基准
+    数据,不可当作可成交合约**(对齐 #184「指数不可撮合只做基准」)。
+    事件硬门降级(#267,同 #265 转债决策):``required_event_types``
+    保持空 —— 换月 / 到期 / 交割事件(#58)在新浪主连日线上没有结构化
+    上游,逐合约全事件才 ready 会让真实期货发布永不可发布;主连本身
+    就没有「单份合约到期」语义。已同步事件仍随 manifest 冻结
+    (present_event_types + quality_report.futures_instruments 可见)。
+    """
+    if is_futures_main_code(row.code):
+        entry = futures_series_entry(row.code)
+    else:
+        # #395 合约级登记:品种层成本口径派生(与主连同源受控表);
+        # 合约身份(代码 / 名称 / 上市退市日)来自 fut_basic 快照。
+        bare = row.code.split(".", 1)[0].upper()
+        product = bare.rstrip("0123456789")
+        entry = futures_product_entry(product)
+    return ReleaseInstrumentSpec(
+        code=row.code,
+        name=row.name or entry.name,
+        market=Market.FUTURE,
+        instrument_type=InstrumentType.FUTURES,
+        asset_class=AssetClass.DERIVATIVE,
+        available_at=_available_at(row),
+        execution=ExecutionMetadata(
+            lot_size=Decimal("1"),
+            price_tick=entry.price_tick,
+            settlement_days=0,
+            multiplier=entry.multiplier,
+            margin_rate=entry.margin_rate,
+            stamp_tax_rate=Decimal("0"),
+            commission_min=Decimal("0"),
+            trading_calendar=entry.exchange,
+            allows_short=True,
+        ),
+        exchange=row.exchange or entry.exchange,
+        list_date=row.list_date,
+        delist_date=row.delist_date,
+        status=_status(row.status),
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(sorted({event.event_type for event in lifecycle_events})),
+        # required_event_types 保持空:事件硬门降级,见 docstring。
+        name_history=name_history,
+    )
+
+
+def _future_candidate(
+    row: FuturesContractModel,
+    *,
+    lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
+) -> ReleaseInstrumentSpec:
+    updated_at = row.updated_at
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=UTC)
+    return ReleaseInstrumentSpec(
+        code=row.contract_code,
+        name=row.contract_code,
+        market=Market.FUTURE,
+        instrument_type=InstrumentType.FUTURES,
+        asset_class=AssetClass.DERIVATIVE,
+        available_at=updated_at,
+        execution=ExecutionMetadata(
+            lot_size=Decimal("1"),
+            price_tick=row.price_tick,
+            settlement_days=0,
+            multiplier=row.multiplier,
+            margin_rate=row.margin_rate,
+            stamp_tax_rate=Decimal("0"),
+            commission_min=Decimal("0"),
+            trading_calendar=row.exchange,
+            allows_short=True,
+        ),
+        exchange=row.exchange,
+        list_date=row.listing_date,
+        delist_date=row.last_trade_date,
+        status=ListingStatus.ACTIVE,
+        lifecycle_events=lifecycle_events,
+        present_event_types=tuple(sorted({event.event_type for event in lifecycle_events})),
+        required_event_types=_FUTURES_REQUIRED_EVENTS,
+    )
+
+
+def _release_member_codes(release: ResearchDatasetRelease) -> set[str]:
+    """收集冻结发布清单的标的代码集(``Repository.get`` 的 instruments 元组)。"""
+    members: set[str] = set()
+    for item in getattr(release, "instruments", None) or ():
+        code = item.get("code") if isinstance(item, dict) else getattr(item, "code", None)
+        if code:
+            members.add(str(code))
+    return members
+
+
+def release_symbol_check(
+    release: ResearchDatasetRelease,
+    codes: Sequence[str],
+) -> dict[str, Any]:
+    """按冻结发布的逐标的成员核对标的(issue #238)。
+
+    ``Repository.get`` 返回的领域对象自带 ``instruments`` 元组(登记时
+    冻结,与 manifest 同源),成员核对无需读 parquet、无需回放全量清单。
+    matched/missing 均按请求顺序返回;matched 只含 code,详细元数据走
+    instrument_list。instruments 为空(理论上不可能,发布即冻结)按空集
+    处理 → 全部 missing(fail-visible)。
+    """
+    members = _release_member_codes(release)
+    requested = [str(code).strip() for code in codes if str(code).strip()]
+    matched = [code for code in requested if code in members]
+    missing = [code for code in requested if code not in members]
+    return {"requested": len(requested), "matched": matched, "missing": missing}
+
+
+class ReleaseSymbolSourceError(Exception):
+    """发布标的集来源解析失败(issue #261,入队期 fail-visible)。
+
+    ``code`` 为具名根因,便于测试与日志定位:``symbol_source_missing`` /
+    ``symbol_source_ambiguous`` / ``symbol_filter_requires_full_market`` /
+    ``source_release_not_found`` /
+    ``source_release_not_usable`` / ``source_release_empty`` /
+    ``full_market_empty`` / ``full_market_overflow``。
+    """
+
+    def __init__(self, code: str, summary: str) -> None:
+        super().__init__(summary)
+        self.code = code
+        self.summary = summary
+
+
+#: full_market 展开只覆盖既有发布语义允许的资产类型(#261):股票单源 kind
+#: (含研究数据发布——执行器 scope 门要求全部为 A 股股票)只展开股票;
+#: multi_asset_mixed 展开 stock + etf + index + convertible + futures
+#: (#184/#256/#265/#267:指数与期货主连只做基准/研究数据,不可撮合);
+#: convertible_metrics(#265)单独展开转债标的。债券不在行情缓存
+#: 同步范围,展开进发布必然触发覆盖率门失败,不纳入。
+_FULL_MARKET_STOCK_KINDS: frozenset[str] = frozenset(
+    {
+        "a_share_tushare",
+        "daily_metrics",
+        "financial_indicators",
+        # issue #397:财务面扩展的研究数据发布同样只接受 A 股股票。
+        "income_statements",
+        "balance_sheets",
+        "cashflow_statements",
+        "dividends",
+    }
+)
+_FULL_MARKET_MIXED_TYPES: tuple[str, ...] = (
+    "stock",
+    "etf",
+    "index",
+    "convertible",
+    "futures",
+)
+_FULL_MARKET_CONVERTIBLE_KINDS: frozenset[str] = frozenset({"convertible_metrics"})
+#: 与 REST ``ResearchDatasetReleaseCreate.symbols`` 的 max_length 同一上限。
+_MAX_RELEASE_SYMBOLS = 10_000
+
+
+async def resolve_release_symbols(
+    session: AsyncSession,
+    *,
+    release_kind: str,
+    symbols: Sequence[str] | None = None,
+    symbols_from_release: str | None = None,
+    full_market: bool = False,
+    exchange: str | None = None,
+    listing_boards: Sequence[str] | None = None,
+) -> list[str]:
+    """解析数据集发布的标的集来源(issue #261),REST 与 MCP 入队期共用。
+
+    三选一(REST/MCP schema 已校验互斥,此处兜底):
+
+    * ``symbols`` —— 内联清单,归一化后放行;
+    * ``symbols_from_release`` —— 复制既有可用发布(passed/warnings)冻结的
+      标的集,消灭人工维护全市场清单的漏配缺口(#252 前科;来源发布清单
+      冻结不可变,复制语义确定);
+    * ``full_market=True`` —— instruments 表全活跃标的按发布 kind 语义展开
+      (股票单源只取 A 股股票;multi_asset_mixed 取股票 + ETF + 指数)。
+
+    ``exchange`` / ``listing_boards``(#385,与 bulk_download 同词表)只对
+    ``full_market`` 展开生效,叠加为 SQL ``IN`` 过滤;与其他两种来源同时
+    声明语义歧义,入队即具名拒绝(不做静默叠加)。instruments 表
+    ``listing_board`` 实际取值:股票 ``sse_main`` / ``szse_main`` / ``star``
+    / ``chinext`` / ``bse`` / ``cdr``,ETF/指数/转债恒为 ``unknown``。
+
+    解析在**入队期**完成,结果以具体 symbols 进任务 payload,
+    ``DatasetPublishExecutor`` 零改动(unknown_symbols / scope / 覆盖率门
+    原样兜底);来源缺失 / 不可用 / 展开为空均抛
+    :class:`ReleaseSymbolSourceError`(REST 422 / MCP invalid_argument)。
+    """
+    declared = [
+        name
+        for name, value in (
+            ("symbols", symbols is not None),
+            ("symbols_from_release", symbols_from_release is not None),
+            ("full_market", bool(full_market)),
+        )
+        if value
+    ]
+    if not declared:
+        raise ReleaseSymbolSourceError(
+            "symbol_source_missing",
+            "必须提供 symbols / symbols_from_release / full_market 之一",
+        )
+    if len(declared) > 1:
+        raise ReleaseSymbolSourceError(
+            "symbol_source_ambiguous",
+            "symbols / symbols_from_release / full_market 只能三选一,"
+            f"同时声明: {declared}",
+        )
+
+    # #385:板块/交易所过滤仅对 full_market 展开有意义;与其他来源混用
+    # (如 inline symbols 再套 boards)语义歧义,fail-closed 而非静默叠加。
+    normalized_exchange = (exchange or "").strip().upper() or None
+    normalized_boards = sorted(
+        {board.strip().lower() for board in (listing_boards or []) if board.strip()}
+    ) or None
+    if (normalized_exchange or normalized_boards) and not full_market:
+        raise ReleaseSymbolSourceError(
+            "symbol_filter_requires_full_market",
+            "exchange / listing_boards 过滤仅支持 full_market 展开,"
+            "与 symbols / symbols_from_release 互斥",
+        )
+
+    if symbols is not None:
+        normalized = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        if not normalized:
+            raise ReleaseSymbolSourceError(
+                "symbol_source_missing", "至少选择一个已缓存标的"
+            )
+        return normalized
+
+    if symbols_from_release is not None:
+        release = await ResearchDatasetReleaseRepository(session).get(
+            symbols_from_release
+        )
+        if release is None:
+            raise ReleaseSymbolSourceError(
+                "source_release_not_found",
+                f"标的集来源发布不存在: {symbols_from_release}",
+            )
+        if not release.is_usable:
+            raise ReleaseSymbolSourceError(
+                "source_release_not_usable",
+                f"标的集来源发布不可用: {symbols_from_release} "
+                f"quality={release.quality_status.value}",
+            )
+        codes = sorted(_release_member_codes(release))
+        if not codes:
+            raise ReleaseSymbolSourceError(
+                "source_release_empty",
+                f"标的集来源发布没有冻结标的: {symbols_from_release}",
+            )
+        return codes
+
+    instrument_repo = InstrumentRepository(session)
+    expanded: set[str]
+    if release_kind in _FULL_MARKET_STOCK_KINDS:
+        expanded = set(
+            await instrument_repo.list_codes(
+                market="a_share",
+                instrument_type="stock",
+                exchange=normalized_exchange,
+                listing_boards=normalized_boards,
+            )
+        )
+    elif release_kind in _FULL_MARKET_CONVERTIBLE_KINDS:
+        # issue #265:转债派生指标发布按全市场活跃转债展开。
+        expanded = set(
+            await instrument_repo.list_codes(
+                market="a_share",
+                instrument_type="convertible",
+                exchange=normalized_exchange,
+                listing_boards=normalized_boards,
+            )
+        )
+    else:
+        expanded = set()
+        for instrument_type in _FULL_MARKET_MIXED_TYPES:
+            expanded.update(
+                await instrument_repo.list_codes(
+                    market="a_share",
+                    instrument_type=instrument_type,
+                    exchange=normalized_exchange,
+                    listing_boards=normalized_boards,
+                )
+            )
+    if not expanded:
+        raise ReleaseSymbolSourceError(
+            "full_market_empty",
+            "instruments 表没有匹配的活跃标的,full_market 展开为空"
+            "(先执行 universe 同步 / data_sync 登记标的元数据)",
+        )
+    if len(expanded) > _MAX_RELEASE_SYMBOLS:
+        raise ReleaseSymbolSourceError(
+            "full_market_overflow",
+            f"full_market 展开 {len(expanded)} 只,超过单次发布上限 "
+            f"{_MAX_RELEASE_SYMBOLS}",
+        )
+    return sorted(expanded)
+
+
+__all__ = [
+    "ReleaseInstrumentCatalogRepository",
+    "ReleaseSymbolSourceError",
+    "ResearchDatasetReleaseRepository",
+    "ResearchDatasetReleaseService",
+    "release_symbol_check",
+    "resolve_release_symbols",
+    "symbol_set_diff",
+]

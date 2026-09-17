@@ -3,8 +3,16 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import InfoHint, { HintLabel } from "../components/InfoHint";
 import { api, type SchedulerConfig } from "../lib/api";
 import { INFO_HINTS } from "../lib/infoHints";
+import { PageHeader } from "../components/ui/page-header";
+import { PageContainer } from "../components/ui/page-container";
+import { Input } from "../components/ui/input";
+import { Switch } from "../components/ui/switch";
+import { Button } from "../components/ui/button";
+import { useT, useLanguage, type Language } from "@/i18n";
 
 export default function Settings() {
+  const { t } = useT();
+  const { lang, setLanguage } = useLanguage();
   const queryClient = useQueryClient();
   const { data: config } = useQuery({
     queryKey: ["scheduler-config"],
@@ -23,71 +31,113 @@ export default function Settings() {
       queryClient.invalidateQueries({ queryKey: ["scheduler-config"] }),
   });
 
-  if (!form) return <div className="text-gray-400">加载中...</div>;
+  if (!form) return <div className="text-muted-foreground/70">{t("common.loading")}</div>;
 
   const marketOptions = [
-    { value: "a_share", label: "A股" },
-    { value: "hk", label: "港股" },
-    { value: "us", label: "美股" },
+    { value: "a_share", label: t("settings.marketAShare") },
+    { value: "hk", label: t("settings.marketHk") },
+    { value: "us", label: t("settings.marketUs") },
   ];
 
   const typeOptions = [
-    { value: "stock", label: "股票" },
-    { value: "etf", label: "ETF" },
-    { value: "index", label: "指数" },
+    { value: "stock", label: t("settings.typeStock") },
+    { value: "etf", label: t("settings.typeEtf") },
+    { value: "index", label: t("settings.typeIndex") },
   ];
 
+  const languageOptions: { value: Language; label: string }[] = [
+    { value: "zh", label: t("settings.languageZh") },
+    { value: "en", label: t("settings.languageEn") },
+  ];
+
+  const toggleMarket = (value: string, checked: boolean) =>
+    setForm({
+      ...form,
+      download_markets: checked
+        ? [...form.download_markets, value]
+        : form.download_markets.filter((m) => m !== value),
+    });
+
+  const toggleType = (value: string, checked: boolean) =>
+    setForm({
+      ...form,
+      download_types: checked
+        ? [...form.download_types, value]
+        : form.download_types.filter((item) => item !== value),
+    });
+
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">设置</h1>
+    <PageContainer>
+      <PageHeader title={t("settings.title")} description={t("settings.description")} />
+
+      {/* Interface Language */}
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-3 text-lg font-semibold">{t("settings.sectionLanguage")}</h2>
+        <div className="flex flex-wrap items-center gap-4">
+          <div>
+            <label htmlFor="settings-language" className="text-sm font-medium text-foreground">
+              {t("settings.languageLabel")}
+            </label>
+            <p className="mt-0.5 text-xs text-muted-foreground">{t("settings.languageHint")}</p>
+          </div>
+          <select
+            id="settings-language"
+            value={lang}
+            onChange={(e) => setLanguage(e.target.value as Language)}
+            className="h-9 w-44 rounded-md border border-input bg-transparent px-3 py-1.5 text-sm"
+          >
+            {languageOptions.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </section>
 
       {/* Data Source */}
-      <div className="bg-white rounded-lg shadow p-5 mb-6">
-        <h2 className="text-lg font-semibold mb-3">数据源</h2>
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-3 text-lg font-semibold">{t("settings.sectionDataSource")}</h2>
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-1 text-sm text-gray-600">
-            <span>当前数据源</span>
+          <div className="flex items-center gap-1 text-sm text-muted-foreground">
+            <span>{t("settings.currentProvider")}</span>
             <InfoHint content={INFO_HINTS.settings.dataProvider} />
           </div>
           <span
-            className={`px-3 py-1 rounded text-sm font-medium ${
+            className={`rounded-md px-3 py-1 text-sm font-medium ${
               form.data_provider === "yfinance"
-                ? "bg-blue-100 text-blue-700"
-                : "bg-orange-100 text-orange-700"
+                ? "bg-primary/10 text-primary"
+                : "bg-warning/10 text-warning"
             }`}
           >
             {form.data_provider}
           </span>
-          <span className="text-sm text-gray-400">
-            切换: FINBOARD_DATA_PROVIDER=akshare / yfinance 环境变量
+          <span className="text-sm text-muted-foreground/70">
+            {t("settings.providerSwitchHint")}
           </span>
         </div>
-      </div>
+      </section>
 
       {/* Scheduled Tasks */}
-      <div className="bg-white rounded-lg shadow p-5 mb-6">
-        <h2 className="text-lg font-semibold mb-4">定时任务</h2>
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-4 text-lg font-semibold">{t("settings.sectionScheduler")}</h2>
 
         {/* Universe Sync Task */}
-        <div className="border rounded-lg p-4 mb-4">
-          <div className="flex items-center justify-between mb-3">
+        <div className="mb-4 rounded-lg border border-border p-4">
+          <div className="mb-3 flex items-center justify-between gap-4">
             <div>
-              <h3 className="font-medium">标的池同步</h3>
-              <p className="text-sm text-gray-500 mt-0.5">
-                每日自动从 akshare 发现新上市/退市标的,更新 instruments 表
+              <h3 className="font-medium">{t("settings.universeSync")}</h3>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                {t("settings.universeSyncDesc")}
               </p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                className="sr-only peer"
-                checked={form.sync_enabled}
-                onChange={(e) =>
-                  setForm({ ...form, sync_enabled: e.target.checked })
-                }
-              />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
-            </label>
+            <Switch
+              checked={form.sync_enabled}
+              onCheckedChange={(checked) =>
+                setForm({ ...form, sync_enabled: checked })
+              }
+              aria-label={t("settings.universeSyncSwitch")}
+            />
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <HintLabel
@@ -95,39 +145,35 @@ export default function Settings() {
               hint={INFO_HINTS.settings.syncTime}
               className=""
             >
-              触发时间
+              {t("settings.triggerTime")}
             </HintLabel>
-            <input
+            <Input
               id="settings-sync-time"
               type="time"
               value={form.sync_time}
               onChange={(e) => setForm({ ...form, sync_time: e.target.value })}
-              className="border rounded px-3 py-1.5 text-sm"
+              className="w-auto"
             />
-            <span className="text-sm text-gray-400">(Asia/Shanghai, 仅交易日)</span>
+            <span className="text-sm text-muted-foreground/70">{t("settings.tradingDaysOnly")}</span>
           </div>
         </div>
 
         {/* Bulk Download Task */}
-        <div className="border rounded-lg p-4">
-          <div className="flex items-center justify-between mb-3">
+        <div className="rounded-lg border border-border p-4">
+          <div className="mb-3 flex items-center justify-between gap-4">
             <div>
-              <h3 className="font-medium">增量数据拉取</h3>
-              <p className="text-sm text-gray-500 mt-0.5">
-                每日盘后增量拉取所有活跃标的的最新行情数据到 parquet 缓存
+              <h3 className="font-medium">{t("settings.bulkDownload")}</h3>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                {t("settings.bulkDownloadDesc")}
               </p>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                className="sr-only peer"
-                checked={form.download_enabled}
-                onChange={(e) =>
-                  setForm({ ...form, download_enabled: e.target.checked })
-                }
-              />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
-            </label>
+            <Switch
+              checked={form.download_enabled}
+              onCheckedChange={(checked) =>
+                setForm({ ...form, download_enabled: checked })
+              }
+              aria-label={t("settings.bulkDownloadSwitch")}
+            />
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -136,16 +182,15 @@ export default function Settings() {
                 htmlFor="settings-download-time"
                 hint={INFO_HINTS.settings.downloadTime}
               >
-                触发时间
+                {t("settings.triggerTime")}
               </HintLabel>
-              <input
+              <Input
                 id="settings-download-time"
                 type="time"
                 value={form.download_time}
                 onChange={(e) =>
                   setForm({ ...form, download_time: e.target.value })
                 }
-                className="w-full border rounded px-3 py-1.5 text-sm"
               />
             </div>
             <div>
@@ -153,9 +198,9 @@ export default function Settings() {
                 htmlFor="settings-lookback-days"
                 hint={INFO_HINTS.settings.lookbackDays}
               >
-                回溯天数
+                {t("settings.lookbackDays")}
               </HintLabel>
-              <input
+              <Input
                 id="settings-lookback-days"
                 type="number"
                 value={form.download_lookback_days}
@@ -165,89 +210,65 @@ export default function Settings() {
                     download_lookback_days: Number(e.target.value),
                   })
                 }
-                className="w-full border rounded px-3 py-1.5 text-sm"
               />
             </div>
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">&nbsp;</label>
-              <span className="text-sm text-gray-400">天 (增量拉取)</span>
+            <div className="flex items-end">
+              <span className="text-sm text-muted-foreground/70">{t("settings.lookbackDaysUnit")}</span>
             </div>
           </div>
 
-          <div className="mt-3">
-            <div className="mb-1 flex items-center gap-1 text-sm text-gray-600">
-              <span>拉取市场</span>
+          <fieldset className="mt-3">
+            <legend className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
+              {t("settings.downloadMarkets")}
               <InfoHint content={INFO_HINTS.settings.downloadMarkets} />
-            </div>
-            <div className="flex gap-4">
+            </legend>
+            <div className="flex flex-wrap gap-4">
               {marketOptions.map((opt) => (
-                <label
-                  key={opt.value}
-                  className="flex items-center gap-2 text-sm"
-                >
+                <label key={opt.value} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
                     checked={form.download_markets.includes(opt.value)}
-                    onChange={(e) => {
-                      const markets = e.target.checked
-                        ? [...form.download_markets, opt.value]
-                        : form.download_markets.filter((m) => m !== opt.value);
-                      setForm({ ...form, download_markets: markets });
-                    }}
+                    onChange={(e) => toggleMarket(opt.value, e.target.checked)}
                   />
                   {opt.label}
                 </label>
               ))}
             </div>
-          </div>
+          </fieldset>
 
-          <div className="mt-3">
-            <div className="mb-1 flex items-center gap-1 text-sm text-gray-600">
-              <span>拉取类型</span>
+          <fieldset className="mt-3">
+            <legend className="mb-1 flex items-center gap-1 text-sm text-muted-foreground">
+              {t("settings.downloadTypes")}
               <InfoHint content={INFO_HINTS.settings.downloadTypes} />
-            </div>
-            <div className="flex gap-4">
+            </legend>
+            <div className="flex flex-wrap gap-4">
               {typeOptions.map((opt) => (
-                <label
-                  key={opt.value}
-                  className="flex items-center gap-2 text-sm"
-                >
+                <label key={opt.value} className="flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
                     checked={form.download_types.includes(opt.value)}
-                    onChange={(e) => {
-                      const types = e.target.checked
-                        ? [...form.download_types, opt.value]
-                        : form.download_types.filter((t) => t !== opt.value);
-                      setForm({ ...form, download_types: types });
-                    }}
+                    onChange={(e) => toggleType(opt.value, e.target.checked)}
                   />
                   {opt.label}
                 </label>
               ))}
             </div>
-          </div>
+          </fieldset>
         </div>
-      </div>
+      </section>
 
       {/* Save button */}
       <div className="flex items-center gap-4">
-        <button
-          onClick={() => save.mutate(form)}
-          disabled={save.isPending}
-          className="bg-blue-600 text-white rounded px-6 py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
-        >
-          {save.isPending ? "保存中..." : "保存配置"}
-        </button>
-        {save.isSuccess && (
-          <span className="text-sm text-green-600">已保存</span>
-        )}
+        <Button onClick={() => save.mutate(form)} disabled={save.isPending}>
+          {save.isPending ? t("common.saving") : t("settings.saveConfig")}
+        </Button>
+        {save.isSuccess && <span className="text-sm text-success">{t("common.saved")}</span>}
         {save.isError && (
-          <span className="text-sm text-red-600">
+          <span className="text-sm text-destructive">
             {(save.error as Error).message}
           </span>
         )}
       </div>
-    </div>
+    </PageContainer>
   );
 }

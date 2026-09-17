@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "FinDashboard Team" }]
+dependencies = [
+    "finboard-data[tushare]",
+]
 
 # 根包本身不打包发布,仅作为 workspace 元包
 [tool.uv.workspace]
@@ -24,8 +27,11 @@ finboard-reconcile = { workspace = true }
 finboard-app = { workspace = true }
 finboard-api = { workspace = true }
 finboard-scheduler = { workspace = true }
-finboard-data = { workspace = true }
 finboard-backtest = { workspace = true }
+finboard-simulation = { workspace = true }
+finboard-mcp = { workspace = true }
+finboard-opencode = { workspace = true }
+finboard-data = { workspace = true }
 
 # 开发期统一依赖,改用 PEP 735 dependency-groups(uv 推荐写法)
 [dependency-groups]
@@ -40,6 +46,12 @@ dev = [
   "ipython>=8.27",
   "httpx>=0.27",
   "pyarrow>=15.0",
+  "pytest-timeout>=2.4.0",
+  "threadpoolctl>=3.5",
+  "pandas-stubs>=3.0.5.260730",
+  # 采样式 profiler(#383):仅诊断用,``finboard job-flamegraph`` 优先从
+  # venv 同目录解析;生产镜像不装 dev 组,不受影响。
+  "py-spy>=0.4",
 ]
 
 # -----------------------------------------------------------------------------
@@ -49,7 +61,7 @@ dev = [
 target-version = "py312"
 line-length = 100
 src = ["packages/*/src", "tests", "migrations"]
-extend-exclude = ["packages/*/src/*/py.typed"]
+extend-exclude = ["packages/*/src/*/py.typed", ".tmp"]  # .tmp 为 gitignored 草稿/审计脚本目录
 
 [tool.ruff.lint]
 # 启用的检查集合:
@@ -82,6 +94,9 @@ known-first-party = [
   "finboard_scheduler",
   "finboard_data",
   "finboard_backtest",
+  "finboard_simulation",
+  "finboard_mcp",
+  "finboard_opencode",
 ]
 
 # -----------------------------------------------------------------------------
@@ -114,8 +129,11 @@ mypy_path = [
   "packages/finboard-scheduler/src",
   "packages/finboard-data/src",
   "packages/finboard-backtest/src",
+  "packages/finboard-simulation/src",
+  "packages/finboard-mcp/src",
+  "packages/finboard-opencode/src",
 ]
-exclude = ["migrations/versions/"]
+exclude = ["migrations/versions/", "data_releases/", "data_cache/"]  # 后两者为 gitignored 本地研究数据/沙箱运行工件(容器 root 写入,Windows ACL 拒绝遍历;data_cache 下的 RCR-* 内含用户 factor.py 会被当顶层模块重复检查)
 
 # 第三方券商 SDK(xtquant / CTP)没有类型存根,P1 实盘接入时按需在此添加
 # xtquant 仅 Windows + miniQMT 可用,Linux CI 无法安装;mypy 忽略其缺失。
@@ -146,6 +164,14 @@ addopts = [
   "-ra",
   "--strict-markers",
   "--strict-config",
+  # 挂死探针默认不跑(hang_guard marker 的验收运行见 README 测试章节)。
+  "-m", "not hang_guard",
+  # Windows 本机 ACL 根除(见 docs/memory/wsl-postgres-keepalive.md):临时目录
+  # 固定到仓库内 .pytest-tmp(已入 .gitignore),并禁用 .pytest_cache —— 二者
+  # 默认落在 %LOCALAPPDATA% 时偶发 WinError 5 拒绝访问,导致 tmp_path 系 fixture
+  # 报错。仓库内运行 pytest 时相对路径以仓库根为基准,勿从子目录裸跑。
+  "--basetemp", ".pytest-tmp",
+  "-p", "no:cacheprovider",
   "--cov=finboard_shared",
   "--cov=finboard_broker",
   "--cov=finboard_core",
@@ -154,13 +180,26 @@ addopts = [
   "--cov=finboard_scheduler",
   "--cov=finboard_data",
   "--cov=finboard_backtest",
+  "--cov=finboard_simulation",
+  "--cov=finboard_mcp",
+  "--cov=finboard_opencode",
   "--cov-report=term-missing",
 ]
 markers = [
   "unit: 快速、无 IO 的纯单元测试",
   "integration: 需要 DB / Mock Broker 的集成测试",
   "slow: 耗时较长的测试,默认在 CI 中可选跳过",
+  "hang_guard: 挂死守卫探针(预期在超时后 xfail,默认跳过;验收运行见 README)",
 ]
+
+# pytest-timeout:挂死兜底(issue #167)。Windows 无 signal,thread 方式由
+# watchdog 线程向主线程注入超时异常,可打断 time.sleep 等阻塞;asyncio 测试
+# 的事件循环阻塞在 C 层(select/IOCP)无法被注入打断,由 tests/conftest.py 的
+# asyncio.timeout 守卫兜底。单元测试经 tests/unit/conftest.py 的
+# pytestmark 收紧到 60s,个别长测试用 @pytest.mark.timeout(N) 调大或
+# @pytest.mark.timeout(None) 豁免。
+timeout = 300
+timeout_method = "thread"
 
 [tool.coverage.run]
 source = ["packages"]

@@ -1,74 +1,18 @@
 """API 集成测试 — FastAPI REST 端点。
 
 使用 httpx.AsyncClient + ASGITransport,直接驱动 FastAPI app(含 lifespan)。
-MockBroker + 真实 PG,验证完整 API 链路。
+MockBroker + 真实 PG,验证完整 API 链路。``api`` fixture 与 ``ApiTestApp``
+定义在 tests/integration/conftest.py(issue #167:共享给会话卫生等测试)。
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
-from collections.abc import AsyncIterator
 from decimal import Decimal
 
-import httpx
 import pytest
-import pytest_asyncio
-from httpx import ASGITransport
 
-from finboard_api.app import create_app
-from finboard_app.config import Settings
-from finboard_broker import BrokerAdapter
-from finboard_persistence import Base, create_async_engine, session_factory
-from finboard_shared.types import BrokerKind
-from tests.integration.conftest import clean_tables
-
-DB_URL = os.getenv(
-    "FINBOARD_DB_URL",
-    "postgresql+psycopg://findashboard:CHANGE_ME@127.0.0.1:5432/findashboard",
-)
-
-
-@pytest_asyncio.fixture(scope="module")
-async def _api_engine() -> AsyncIterator[object]:
-    engine = create_async_engine(DB_URL)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    async with engine.begin() as conn:
-        await clean_tables(conn)
-    await engine.dispose()
-
-
-class ApiTestApp:
-    """测试辅助:封装 httpx client + 可访问的 broker 引用。"""
-
-    def __init__(self, client: httpx.AsyncClient, broker: BrokerAdapter) -> None:
-        self.client = client
-        self.broker = broker
-
-
-@pytest_asyncio.fixture
-async def api(_api_engine: object) -> AsyncIterator[ApiTestApp]:
-    engine = _api_engine
-    smaker = session_factory(engine)  # type: ignore[arg-type]
-    async with smaker() as clean:
-        await clean_tables(clean)
-        await clean.commit()
-
-    settings = Settings(
-        broker=BrokerKind.MOCK,
-        account_id="test-account-api",
-        db_url=DB_URL,
-        risk_allow_market_order=True,
-    )
-    app = create_app(settings)
-    async with app.router.lifespan_context(app):
-        transport = ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as c:
-            yield ApiTestApp(client=c, broker=app.state.components.broker)
+from tests.integration.conftest import ApiTestApp
 
 
 # --------------------------------------------------------------------------- health
@@ -138,7 +82,7 @@ async def test_place_limit_order_match_and_list(api: ApiTestApp) -> None:
     assert order["symbol"] == "510300.SH"
 
     # 手工撮合(MockBroker 限价单不自动成交)
-    await api.broker.match_limit_order(cid, Decimal("3.48"))  # type: ignore[attr-defined]
+    await api.broker.match_limit_order(cid, Decimal("3.48"))
     await asyncio.sleep(0.2)
 
     # 列表
@@ -230,7 +174,7 @@ async def test_list_fills(api: ApiTestApp) -> None:
         },
     )
     cid = resp.json()["client_order_id"]
-    await api.broker.match_limit_order(cid, Decimal("3.49"))  # type: ignore[attr-defined]
+    await api.broker.match_limit_order(cid, Decimal("3.49"))
     await asyncio.sleep(0.2)
 
     resp = await api.client.get("/api/fills")
@@ -331,7 +275,7 @@ async def test_list_orders_filter_by_status(api: ApiTestApp) -> None:
         },
     )
     cid = resp.json()["client_order_id"]
-    await api.broker.match_limit_order(cid, Decimal("3.50"))  # type: ignore[attr-defined]
+    await api.broker.match_limit_order(cid, Decimal("3.50"))
     await asyncio.sleep(0.2)
 
     resp = await api.client.get("/api/orders?status=filled")

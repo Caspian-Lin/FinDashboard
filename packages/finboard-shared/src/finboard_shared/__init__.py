@@ -3,8 +3,12 @@
 只暴露稳定契约,不包含任何 IO / 业务逻辑。
 """
 
+from finboard_shared.background_jobs import (
+    TERMINAL_STATUSES,
+    BackgroundJobStatus,
+    generate_background_job_id,
+)
 from finboard_shared.exceptions import (
-    BrokerError,
     BrokerTimeoutError,
     FinboardError,
     KillSwitchActiveError,
@@ -18,6 +22,19 @@ from finboard_shared.identifiers import (
     StrategyId,
     generate_client_order_id,
 )
+from finboard_shared.instruments import (
+    ASSET_METADATA_VERSION,
+    BondMetadata,
+    ContinuousFuturesPoint,
+    ContinuousFuturesRule,
+    ContinuousFuturesSeries,
+    ConvertibleMetadata,
+    DatasetManifest,
+    EtfMetadata,
+    FuturesContract,
+    Instrument,
+    LifecycleEvent,
+)
 from finboard_shared.models import (
     Account,
     Fill,
@@ -27,33 +44,62 @@ from finboard_shared.models import (
     Symbol,
 )
 from finboard_shared.types import (
+    AdjustmentMethod,
+    AssetClass,
     BrokerKind,
+    CouponFrequency,
+    DatasetQualityStatus,
+    EtfCategory,
+    FuturesEventType,
+    InstrumentType,
     KillSwitchLevel,
+    LifecycleEventType,
+    ListingBoard,
+    ListingStatus,
     Market,
     OrderStatus,
     OrderType,
     PositionSide,
     RejectReason,
+    RollMethod,
     Side,
     TimeInForce,
     TradingPhase,
 )
 
 __all__ = [
-    # 数据模型
+    "ASSET_METADATA_VERSION",
+    "TERMINAL_STATUSES",
     "Account",
-    # 强类型 ID
     "AccountId",
-    # 异常
-    "BrokerError",
-    # 枚举
+    "AdjustmentMethod",
+    "AssetClass",
+    "BackgroundJobStatus",
+    "BondMetadata",
     "BrokerKind",
     "BrokerTimeoutError",
     "ClientOrderId",
+    "ContinuousFuturesPoint",
+    "ContinuousFuturesRule",
+    "ContinuousFuturesSeries",
+    "ConvertibleMetadata",
+    "CouponFrequency",
+    "DatasetManifest",
+    "DatasetQualityStatus",
+    "EtfCategory",
+    "EtfMetadata",
     "Fill",
     "FinboardError",
+    "FuturesContract",
+    "FuturesEventType",
+    "Instrument",
+    "InstrumentType",
     "KillSwitchActiveError",
     "KillSwitchLevel",
+    "LifecycleEvent",
+    "LifecycleEventType",
+    "ListingBoard",
+    "ListingStatus",
     "Market",
     "Order",
     "OrderNotFoundError",
@@ -65,10 +111,12 @@ __all__ = [
     "ReconcileMismatchError",
     "RejectReason",
     "RiskCheckError",
+    "RollMethod",
     "Side",
     "StrategyId",
     "Symbol",
     "TimeInForce",
     "TradingPhase",
+    "generate_background_job_id",
     "generate_client_order_id",
 ]

@@ -41,6 +41,8 @@ def test_create_ma_cross_coerces_and_validates_params() -> None:
     assert strategy._short_window == 8
     assert strategy._long_window == 30
     assert strategy._max_position_pct == Decimal("0.8")
+    # 默认 universe_mode=all 保持现有行为
+    assert strategy._universe.config.enabled() is False
 
 
 @pytest.mark.parametrize(
@@ -49,11 +51,36 @@ def test_create_ma_cross_coerces_and_validates_params() -> None:
         {"short_window": 20, "long_window": 5},
         {"short_window": 0, "long_window": 20},
         {"short_window": 5, "long_window": 20, "unknown": True},
+        {"universe_mode": "factor"},  # 非法模式
+        {"universe_lookback": 0},  # 窗口必须 >= 1
+        {"universe_min_avg_amount": "-1"},  # 不能为负
     ],
 )
 def test_ma_cross_rejects_invalid_params(params: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         create_strategy("ma_cross", "invalid", **params)
+
+
+def test_ma_cross_universe_params_round_trip_and_serialize() -> None:
+    """universe 参数经 schema 校验、序列化后再载入仍保持等价(预设可复用)。"""
+    raw = {
+        "short_window": 5,
+        "long_window": 20,
+        "universe_mode": "liquidity_momentum",
+        "universe_lookback": 30,
+        "universe_min_avg_amount": "10000000",
+        "universe_min_momentum": "0.05",
+        "universe_exit_clear": True,
+    }
+    strategy = create_strategy("ma_cross", "preset", **raw)
+    assert isinstance(strategy, MaCrossStrategy)
+    config = strategy._universe.config
+    assert config.mode.value == "liquidity_momentum"
+    assert config.lookback == 30
+    assert config.min_avg_amount == Decimal("10000000")
+    assert config.min_momentum == Decimal("0.05")
+    assert config.exit_clear is True
+    assert strategy._exit_clear is True
 
 
 def test_etf_dca_limit_order_requires_price() -> None:

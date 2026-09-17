@@ -37,6 +37,9 @@ env/
 htmlcov/
 .coverage_html/
 .pytest_cache/
+# pytest 临时目录(Windows ACL 根除:pyproject.toml addopts 固定 --basetemp 到此处)
+.pytest-tmp/
+.tmp/
 .mypy_cache/
 .ruff_cache/
 .pyre/
@@ -78,3 +81,22 @@ web/.vite/
 Thumbs.db
 desktop.ini
 /data_cache/
+/data_releases/
+
+.zcode/
+
+# --- OpenCode 运行时产物 ---
+# agent 配置 / opencode.json 入库,运行时 PID / 会话状态文件不入库
+.opencode/last-pid.txt
+.opencode/running-pid.txt
+.opencode/server.json
+.opencode/auth.json
+# #157:容器启动时渲染的运行时 opencode.json(mcp.finboard.url ← opencode_mcp_remote_url)
+.opencode/runtime/
+.opencode/logs/
+
+# 对账 / 草稿脚本(#396 起各 worktree 本地使用,不入库)
+.tmp/
+
+# docker compose 的 postgres 数据目录(本机实际用 WSL 原生 PG,compose 仅作回退)
+.docker-data/

@@ -1,0 +1,359 @@
+"""研究代码静态校验 —— 纵深防御第一层(issue #215;#359 增
+factor.compute_series 入口)。
+
+在代码进入仓库前做纯静态检查(不 import、不执行):
+
+* manifest 必填字段与入口声明(entry 须为 ``module.function`` 且指向
+  提交内的入口文件与 kind 约定函数,factor.compute / factor.compute_series /
+  strategy.decide);
+* 入口函数存在且签名可调用(至少一个位置参数接收输入数据,不接受
+  ``*args`` 转发);
+* AST import 白名单(pandas / numpy / polars / math / statistics /
+  finboard_research_kit);
+* 危险调用黑名单(subprocess / socket / os.system / eval / exec /
+  ``__import__`` / 文件写模式 ``open``);
+* 文件数与单文件大小上限、拒二进制(非 UTF-8 或含 NUL)。
+
+硬边界在后续沙箱容器 issue;本层目标是让明显非法的提交秒级可操作报错。
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+import tomllib
+from dataclasses import dataclass
+
+MAX_FILES = 32
+MAX_FILE_BYTES = 256 * 1024
+
+# import 白名单:仅数值/统计计算库 + 研究工具包(沙箱内可用集合的镜像)。
+IMPORT_WHITELIST: frozenset[str] = frozenset(
+    {
+        "pandas",
+        "numpy",
+        "polars",
+        "math",
+        "statistics",
+        "finboard_research_kit",
+    }
+)
+
+# 危险模块/函数:模块名完全匹配即拒(含 from X import Y)。
+FORBIDDEN_MODULES: frozenset[str] = frozenset(
+    {"subprocess", "socket", "ctypes", "sys", "os", "shutil", "importlib"}
+)
+FORBIDDEN_CALLS: frozenset[str] = frozenset(
+    {"eval", "exec", "compile", "__import__", "system", "popen"}
+)
+
+_ENTRY_FILE = {"factor": "factor.py", "strategy": "strategy.py"}
+# kind 允许的入口函数(issue #359:factor 增协议 v2 的 compute_series,
+# v1 的 compute 完整保留 —— manifest 声明哪个就校验哪个)。
+_ENTRY_FUNCS: dict[str, tuple[str, ...]] = {
+    "factor": ("compute", "compute_series"),
+    "strategy": ("decide",),
+}
+_TEXT_SUFFIXES = (".py", ".toml", ".md", ".txt", ".json")
+# kit harness 契约(entry.partition(".")):module 对应 <module>.py,
+# function 为模块级入口函数;两侧都必须是合法标识符。
+_ENTRY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$")
+
+
+@dataclass(frozen=True)
+class ValidationIssue:
+    """单条校验问题(可操作,面向 agent)。"""
+
+    file: str
+    code: str
+    message: str
+
+    def render(self) -> str:
+        return f"[{self.code}] {self.file}: {self.message}"
+
+
+def validate_submission(
+    *,
+    kind: str,
+    name: str,
+    files: dict[str, str],
+    max_files: int = MAX_FILES,
+    max_file_bytes: int = MAX_FILE_BYTES,
+) -> list[ValidationIssue]:
+    """校验一次提交的全部文件,返回问题清单(空 = 通过)。
+
+    ``files`` 键为相对 ``<kind_dir>/<name>/`` 的路径;上限可通过
+    settings(``research_code_max_files`` / ``research_code_max_file_bytes``)覆盖。
+    """
+    issues: list[ValidationIssue] = []
+
+    if kind not in _ENTRY_FILE:
+        issues.append(
+            ValidationIssue(
+                "(submission)",
+                "invalid_kind",
+                f"kind 须为 factor|strategy,收到 {kind!r}",
+            )
+        )
+        return issues
+
+    if not files:
+        issues.append(ValidationIssue("(submission)", "no_files", "提交不含任何文件"))
+        return issues
+
+    if len(files) > max_files:
+        issues.append(
+            ValidationIssue(
+                "(submission)",
+                "too_many_files",
+                f"文件数 {len(files)} 超过上限 {max_files}",
+            )
+        )
+
+    normalized: dict[str, bytes] = {}
+    for rel, content in files.items():
+        if ".." in rel.split("/") or rel.startswith(("/", "~")) or "\\" in rel:
+            issues.append(ValidationIssue(rel, "illegal_path", f"非法相对路径 {rel!r}"))
+            continue
+        if not rel.endswith(_TEXT_SUFFIXES):
+            issues.append(
+                ValidationIssue(rel, "binary_rejected", "仅接受文本文件(.py/.toml/.md/.txt/.json)")
+            )
+            continue
+        data = content.encode("utf-8", errors="strict") if isinstance(content, str) else content
+        if b"\x00" in data:
+            issues.append(ValidationIssue(rel, "binary_rejected", "内容含 NUL,疑似二进制"))
+            continue
+        if len(data) > max_file_bytes:
+            issues.append(
+                ValidationIssue(
+                    rel,
+                    "file_too_large",
+                    f"文件 {len(data)} 字节超过上限 {max_file_bytes}",
+                )
+            )
+            continue
+        normalized[rel] = data
+
+    manifest_name = "manifest.toml"
+    if manifest_name not in normalized:
+        issues.append(
+            ValidationIssue(manifest_name, "manifest_missing", "缺少 manifest.toml(必填)")
+        )
+    else:
+        issues.extend(
+            _validate_manifest(manifest_name, normalized[manifest_name], kind=kind, files=normalized)
+        )
+
+    entry = _ENTRY_FILE[kind]
+    if entry not in normalized:
+        issues.append(ValidationIssue(entry, "entry_missing", f"缺少入口文件 {entry}"))
+    else:
+        # issue #359:入口签名校验对象 = manifest 声明的入口函数
+        # (factor 允许 compute / compute_series 双轨);manifest 缺失或
+        # 声明不合法时回退校验 kind 的首个约定函数(既有行为)。
+        declared = (
+            _declared_entry_func(normalized[manifest_name])
+            if manifest_name in normalized
+            else None
+        )
+        allowed = _ENTRY_FUNCS[kind]
+        check_func = declared if declared in allowed else allowed[0]
+        issues.extend(_validate_entry(entry, normalized[entry], check_func))
+
+    for rel, data in normalized.items():
+        if rel.endswith(".py"):
+            issues.extend(_validate_python(rel, data))
+
+    return issues
+
+
+def _declared_entry_func(manifest_data: bytes) -> str | None:
+    """从 manifest.toml 提取声明入口的函数名(解析失败返回 None)。"""
+    try:
+        doc = tomllib.loads(manifest_data.decode("utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return None
+    top = doc.get("manifest", doc)
+    if not isinstance(top, dict):
+        return None
+    entry = top.get("entry")
+    if not isinstance(entry, str) or "." not in entry:
+        return None
+    return entry.split(".", 1)[1]
+
+
+def _validate_manifest(
+    rel: str,
+    data: bytes,
+    *,
+    kind: str,
+    files: dict[str, bytes],
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        return [ValidationIssue(rel, "manifest_invalid", f"TOML 解析失败: {exc}")]
+    top = doc.get("manifest", doc)
+    if not isinstance(top, dict):
+        return [ValidationIssue(rel, "manifest_invalid", "manifest 根节点须为表")]
+    for field in ("entry",):
+        if not top.get(field):
+            issues.append(
+                ValidationIssue(
+                    rel, "manifest_missing", f"manifest 缺少必填字段 {field!r}(manifest.entry)"
+                )
+            )
+    # params 声明为 schema 时须是表(浅校验,深校验在后续沙箱 issue)
+    params = top.get("params")
+    if params is not None and not isinstance(params, dict):
+        issues.append(ValidationIssue(rel, "manifest_invalid", "manifest.params 须为表"))
+
+    # entry 契约(issue #236 / #359):沙箱 harness 按 `module.function`
+    # 加载,格式错要等到容器里才报 output_contract_violation,这里提前到
+    # 提交期;factor 允许 compute(v1 单日)/ compute_series(v2 区间)双轨。
+    entry = top.get("entry")
+    if isinstance(entry, str) and entry:
+        allowed_funcs = _ENTRY_FUNCS.get(kind, ())
+        expected_hint = "|".join(allowed_funcs) if allowed_funcs else "?"
+        if not _ENTRY_PATTERN.match(entry):
+            issues.append(
+                ValidationIssue(
+                    rel,
+                    "manifest_entry_invalid",
+                    f"manifest.entry {entry!r} 须形如 'module.function'"
+                    f"(如 {_ENTRY_FILE[kind].removesuffix('.py')}.{expected_hint}),"
+                    "不要带 .py 后缀或冒号",
+                )
+            )
+        else:
+            module_name, func_name = entry.split(".", 1)
+            if f"{module_name}.py" not in files:
+                issues.append(
+                    ValidationIssue(
+                        rel,
+                        "manifest_entry_file_missing",
+                        f"manifest.entry 指向的模块文件 {module_name}.py "
+                        "不在本次提交文件中",
+                    )
+                )
+            if allowed_funcs and func_name not in allowed_funcs:
+                issues.append(
+                    ValidationIssue(
+                        rel,
+                        "manifest_entry_mismatch",
+                        f"manifest.entry 函数 {func_name!r} 与 kind={kind} "
+                        f"的约定入口 {list(allowed_funcs)} 不一致",
+                    )
+                )
+    return issues
+
+
+def _validate_entry(rel: str, data: bytes, func_name: str) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    try:
+        tree = ast.parse(data.decode("utf-8"))
+    except SyntaxError as exc:
+        return [ValidationIssue(rel, "syntax_error", f"Python 语法错误: {exc}")]
+    func = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == func_name),
+        None,
+    )
+    if func is None:
+        issues.append(
+            ValidationIssue(
+                rel,
+                "entry_signature",
+                f"入口文件未定义模块级函数 {func_name}()",
+            )
+        )
+        return issues
+    positional = list(func.args.posonlyargs) + list(func.args.args)
+    if not positional and not func.args.kwonlyargs:
+        issues.append(
+            ValidationIssue(
+                rel,
+                "entry_signature",
+                f"{func_name}() 至少须有一个输入参数(接收数据/上下文)",
+            )
+        )
+    if func.args.vararg is not None:
+        issues.append(
+            ValidationIssue(
+                rel,
+                "entry_signature",
+                f"{func_name}() 不接受 *args(签名须显式,便于沙箱静态装配)",
+            )
+        )
+    return issues
+
+
+def _validate_python(rel: str, data: bytes) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    try:
+        tree = ast.parse(data.decode("utf-8"))
+    except SyntaxError as exc:
+        return [ValidationIssue(rel, "syntax_error", f"Python 语法错误: {exc}")]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                issues.extend(_check_import(rel, root, alias.name))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                root = node.module.split(".")[0]
+                issues.extend(_check_import(rel, root, node.module))
+            else:
+                issues.append(ValidationIssue(rel, "forbidden_import", "禁止相对 import"))
+        elif isinstance(node, ast.Call):
+            issues.extend(_check_call(rel, node))
+    return issues
+
+
+def _check_import(rel: str, root: str, full: str) -> list[ValidationIssue]:
+    if root in FORBIDDEN_MODULES:
+        return [ValidationIssue(rel, "forbidden_import", f"禁止 import {full}")]
+    if root not in IMPORT_WHITELIST:
+        return [
+            ValidationIssue(
+                rel,
+                "import_not_whitelisted",
+                f"import {full} 不在白名单 {sorted(IMPORT_WHITELIST)}",
+            )
+        ]
+    return []
+
+
+def _check_call(rel: str, node: ast.Call) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    name = None
+    if isinstance(node.func, ast.Name):
+        name = node.func.id
+    elif isinstance(node.func, ast.Attribute):
+        name = node.func.attr
+    if name in FORBIDDEN_CALLS:
+        issues.append(ValidationIssue(rel, "forbidden_call", f"禁止调用 {name}()"))
+    if name == "open" and node.args:
+        mode = node.args[1] if len(node.args) > 1 else None
+        mode_s = None
+        if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+            mode_s = mode.value
+        elif isinstance(mode, ast.Constant) and mode.value is None:
+            mode_s = None
+        else:
+            mode_s = "?"  # 非字面量模式:按可疑处理
+        if mode_s is not None and any(c in mode_s for c in "wax+"):
+            issues.append(
+                ValidationIssue(rel, "forbidden_call", "open() 禁止写模式(w/a/x/+,代码仓库层只读)")
+            )
+    return issues
+
+
+__all__ = [
+    "IMPORT_WHITELIST",
+    "MAX_FILES",
+    "MAX_FILE_BYTES",
+    "ValidationIssue",
+    "validate_submission",
+]

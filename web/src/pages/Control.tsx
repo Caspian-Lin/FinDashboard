@@ -1,118 +1,312 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { PageHeader } from "../components/ui/page-header";
+import { PageContainer } from "../components/ui/page-container";
+import { Label } from "../components/ui/label";
+import { Input } from "../components/ui/input";
+import { Button } from "../components/ui/button";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { EmptyState } from "../components/ui/states";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "../components/ui/dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table";
+import { cn } from "../lib/utils";
+import { useT, type LocalizedText } from "@/i18n";
 
-const KS_LEVELS = [
-  { value: "off", label: "恢复正常", color: "green" },
-  { value: "no_new_orders", label: "暂停新单", color: "yellow" },
-  { value: "reduce_only", label: "仅减仓", color: "orange" },
-  { value: "cancel_all", label: "撤全部", color: "red" },
-  { value: "halt", label: "全局停止", color: "red" },
+interface KsLevel {
+  value: string;
+  label: LocalizedText;
+  variant: "success" | "warning" | "destructive";
+  impact: LocalizedText;
+  notice: LocalizedText;
+}
+
+const KS_LEVELS: KsLevel[] = [
+  {
+    value: "off",
+    label: { zh: "恢复正常", en: "Resume Normal" },
+    variant: "success",
+    impact: { zh: "恢复提交新订单的能力,解除当前中止状态。", en: "Restores the ability to submit new orders and lifts the current halt." },
+    notice: { zh: "解除限制后交易行为立即恢复,请确认当前已无风险。", en: "Trading resumes immediately once the restriction is lifted; please confirm there is no remaining risk." },
+  },
+  {
+    value: "no_new_orders",
+    label: { zh: "暂停新单", en: "Pause New Orders" },
+    variant: "warning",
+    impact: { zh: "禁止提交任何新订单;已提交订单不受影响,仍可撤单、查询与减仓。", en: "Blocks submitting any new orders; already-submitted orders are unaffected and can still be cancelled, queried, or reduced." },
+    notice: { zh: "可随时切换其他级别解除限制。", en: "You can switch to another level at any time to lift the restriction." },
+  },
+  {
+    value: "reduce_only",
+    label: { zh: "仅减仓", en: "Reduce Only" },
+    variant: "warning",
+    impact: { zh: "禁止开新仓,仅允许减少现有持仓的卖出操作。", en: "Blocks opening new positions; only sell operations that reduce existing positions are allowed." },
+    notice: { zh: "可随时切换其他级别解除限制。", en: "You can switch to another level at any time to lift the restriction." },
+  },
+  {
+    value: "cancel_all",
+    label: { zh: "撤全部", en: "Cancel All" },
+    variant: "destructive",
+    impact: { zh: "向券商撤销全部活动订单(不可撤销的订单除外),撤销动作由交易内核执行;随后进入仅减仓约束。", en: "Cancels all active orders at the broker (except non-cancellable ones); the cancellation is executed by the trading kernel, followed by a reduce-only constraint." },
+    notice: { zh: "撤单动作不可自动恢复;解除限制需人工确认后逐级切换。", en: "Cancellations cannot be undone automatically; lifting the restriction requires step-by-step manual confirmation." },
+  },
+  {
+    value: "halt",
+    label: { zh: "全局停止", en: "Global Halt" },
+    variant: "destructive",
+    impact: { zh: "立即停止一切交易行为:禁止新单、撤单与减仓,策略暂停,由交易内核强制生效。", en: "Immediately stops all trading: new orders, cancellations and position reduction are blocked and strategies pause, enforced by the trading kernel." },
+    notice: { zh: "不可自动恢复;恢复交易需人工确认后逐级解除。", en: "Cannot be resumed automatically; restoring trading requires step-by-step manual confirmation." },
+  },
 ];
 
+function ksColorClass(variant: KsLevel["variant"]) {
+  if (variant === "success") {
+    return "border-success text-success hover:bg-success/10";
+  }
+  if (variant === "destructive") {
+    return "border-destructive text-destructive hover:bg-destructive/10";
+  }
+  return "border-warning text-warning hover:bg-warning/10";
+}
+
+function levelValue(level: string | undefined) {
+  return KS_LEVELS.find((l) => l.value === level)?.label ?? undefined;
+}
+
+/** 审计条目跨天混排,时间列带日期(MM-DD HH:MM:SS),完整时间戳放 title。 */
+function formatAuditTime(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 export default function Control() {
+  const { t, tl } = useT();
   const qc = useQueryClient();
   const [reason, setReason] = useState("manual");
-  const { data: ks } = useQuery({ queryKey: ["kill-switch"], queryFn: api.getKillSwitch });
-  const { data: logs } = useQuery({ queryKey: ["audit-logs"], queryFn: () => api.getAuditLogs(50) });
+  const [confirmLevel, setConfirmLevel] = useState<string | null>(null);
+  // Radix modal 弹窗关闭时只把焦点还给 DialogTrigger;本页用普通按钮+状态控制弹窗,
+  // 需自己记录触发按钮并在 onCloseAutoFocus 中归还焦点,否则键盘用户会丢焦点。
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const { data: ks } = useQuery({
+    queryKey: ["kill-switch"],
+    queryFn: api.getKillSwitch,
+    refetchInterval: 5000,
+  });
+  const { data: logs } = useQuery({
+    queryKey: ["audit-logs"],
+    queryFn: () => api.getAuditLogs(50),
+    refetchInterval: 10000,
+  });
 
   const ksMut = useMutation({
     mutationFn: ({ level, reason }: { level: string; reason: string }) =>
       api.activateKillSwitch(level, reason),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["kill-switch"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["kill-switch"] });
+      setConfirmLevel(null);
+    },
   });
 
   const reconMut = useMutation({
     mutationFn: () => api.triggerReconcile(),
   });
 
+  const confirmTarget = KS_LEVELS.find((l) => l.value === confirmLevel) ?? null;
+  const busy = ksMut.isPending;
+
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">控制台</h1>
+    <PageContainer>
+      <PageHeader
+        title={t("control.title")}
+        description={t("control.description")}
+      />
 
       {/* Kill Switch */}
-      <div className="bg-white rounded-lg shadow p-5 mb-6">
-        <h2 className="font-semibold mb-4">Kill Switch</h2>
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-4 font-semibold">Kill Switch</h2>
         <div className="mb-4">
-          <span className="text-gray-500 text-sm">当前状态: </span>
-          <span className={`font-bold ${ks?.level === "off" ? "text-green-600" : "text-red-600"}`}>
+          <span className="text-sm text-muted-foreground">{t("control.currentLevel")}</span>
+          <span className={`font-bold ${ks?.level === "off" ? "text-success" : "text-destructive"}`}>
             {ks?.level ?? "—"}
           </span>
         </div>
-        <input
-          className="border rounded px-3 py-1.5 text-sm mb-3 w-full"
-          placeholder="原因"
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-        />
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2" role="group" aria-label={t("control.levelGroup")}>
           {KS_LEVELS.map((lvl) => (
-            <button
+            <Button
               key={lvl.value}
-              onClick={() => ksMut.mutate({ level: lvl.value, reason })}
-              className={`px-3 py-1.5 rounded text-sm border ${
-                lvl.color === "green"
-                  ? "border-green-500 text-green-600 hover:bg-green-50"
-                  : lvl.color === "red"
-                    ? "border-red-500 text-red-600 hover:bg-red-50"
-                    : "border-yellow-500 text-yellow-600 hover:bg-yellow-50"
-              }`}
+              variant="outline"
+              size="sm"
+              onClick={(e) => {
+                ksMut.reset();
+                triggerRef.current = e.currentTarget;
+                setConfirmLevel(lvl.value);
+              }}
+              disabled={busy}
+              className={ksColorClass(lvl.variant)}
             >
-              {lvl.label}
-            </button>
+              {tl(lvl.label)}
+            </Button>
           ))}
         </div>
-        {ksMut.isError && (
-          <div className="mt-2 text-red-500 text-sm">{ksMut.error?.message}</div>
-        )}
-      </div>
+        {/* 进行中/成功状态播报(aria-live),失败在弹窗内播报 */}
+        <p
+          role="status"
+          className={cn(
+            "mt-3 min-h-5 text-sm",
+            ksMut.isSuccess ? "text-success" : "text-muted-foreground",
+          )}
+        >
+          {busy && t("control.switching", { level: tl(levelValue(ksMut.variables?.level) ?? { zh: "", en: "" }) })}
+          {ksMut.isSuccess && t("control.switched", { level: tl(levelValue(ksMut.variables?.level) ?? { zh: "", en: "" }) })}
+        </p>
+      </section>
+
+      {/* Kill Switch 确认弹窗 */}
+      <Dialog
+        open={!!confirmTarget}
+        onOpenChange={(v) => {
+          if (!v && !busy) setConfirmLevel(null);
+        }}
+      >
+        <DialogContent
+          onEscapeKeyDown={(e) => busy && e.preventDefault()}
+          onPointerDownOutside={(e) => busy && e.preventDefault()}
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            triggerRef.current?.focus();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{t("control.confirmTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("control.confirmDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          {confirmTarget && (
+            <div className="space-y-3 text-sm">
+              <div className="space-y-2 rounded-lg bg-muted/50 p-3">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">{t("control.currentLevelLabel")}</span>
+                  <span className="font-semibold">{ks?.level ?? "—"}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">{t("control.targetLevel")}</span>
+                  <span className={`font-bold ${ksColorClass(confirmTarget.variant)}`}>
+                    {tl(confirmTarget.label)}
+                  </span>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <p className="font-medium">{t("control.impact")}</p>
+                <p className="text-muted-foreground">{tl(confirmTarget.impact)}</p>
+              </div>
+              <p
+                className={
+                  confirmTarget.variant === "destructive" ? "text-destructive" : "text-warning"
+                }
+              >
+                {tl(confirmTarget.notice)}
+              </p>
+              <div className="space-y-1.5">
+                <Label htmlFor="ks-confirm-reason">{t("control.reason")}</Label>
+                <Input
+                  id="ks-confirm-reason"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  placeholder={t("control.reasonPlaceholder")}
+                />
+              </div>
+              {ksMut.isError && (
+                <Alert variant="destructive">
+                  <AlertDescription>
+                    {ksMut.error?.message ?? t("control.requestFailed")}
+                  </AlertDescription>
+                </Alert>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmLevel(null)} disabled={busy}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => confirmTarget && ksMut.mutate({ level: confirmTarget.value, reason })}
+              disabled={busy}
+              className={ksColorClass(confirmTarget?.variant ?? "warning")}
+            >
+              {busy ? t("control.switchingShort") : t("control.confirmLevel", { level: confirmTarget ? tl(confirmTarget.label) : "" })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Reconcile */}
-      <div className="bg-white rounded-lg shadow p-5 mb-6">
-        <h2 className="font-semibold mb-4">核对</h2>
-        <button
-          onClick={() => reconMut.mutate()}
-          disabled={reconMut.isPending}
-          className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {reconMut.isPending ? "核对中..." : "触发核对"}
-        </button>
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-4 font-semibold">{t("control.reconcile")}</h2>
+        <Button onClick={() => reconMut.mutate()} disabled={reconMut.isPending}>
+          {reconMut.isPending ? t("control.reconciling") : t("control.triggerReconcile")}
+        </Button>
         {reconMut.data && (
-          <div className={`mt-3 text-sm ${reconMut.data.ok ? "text-green-600" : "text-red-600"}`}>
+          <p
+            className={`mt-3 text-sm ${reconMut.data.ok ? "text-success" : "text-destructive"}`}
+            role="status"
+          >
             {reconMut.data.ok ? "✓ " : "✗ "}
             {reconMut.data.summary}
-          </div>
+          </p>
         )}
-      </div>
+      </section>
 
       {/* Audit Logs */}
-      <div className="bg-white rounded-lg shadow p-5">
-        <h2 className="font-semibold mb-4">审计日志</h2>
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="mb-4 font-semibold">{t("control.auditLog")}</h2>
         {(logs?.items ?? []).length === 0 ? (
-          <div className="text-gray-400 text-sm">无日志</div>
+          <EmptyState title={t("control.noLogs")} />
         ) : (
-          <table className="w-full text-sm">
-            <thead className="text-gray-500">
-              <tr>
-                <th className="px-2 py-1 text-left">时间</th>
-                <th className="px-2 py-1 text-left">操作者</th>
-                <th className="px-2 py-1 text-left">动作</th>
-                <th className="px-2 py-1 text-left">目标</th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{t("common.time")}</TableHead>
+                <TableHead>{t("control.actor")}</TableHead>
+                <TableHead>{t("control.action")}</TableHead>
+                <TableHead>{t("control.target")}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {(logs?.items ?? []).map((log) => (
-                <tr key={log.id} className="border-t">
-                  <td className="px-2 py-1 text-gray-500">{new Date(log.created_at).toLocaleTimeString()}</td>
-                  <td className="px-2 py-1">{log.actor}</td>
-                  <td className="px-2 py-1 font-mono">{log.action}</td>
-                  <td className="px-2 py-1 font-mono text-gray-500">{log.target ?? "—"}</td>
-                </tr>
+                <TableRow key={log.id}>
+                  <TableCell
+                    className="whitespace-nowrap tabular-nums text-muted-foreground"
+                    title={new Date(log.created_at).toLocaleString()}
+                  >
+                    {formatAuditTime(log.created_at)}
+                  </TableCell>
+                  <TableCell>{log.actor}</TableCell>
+                  <TableCell className="font-mono">{log.action}</TableCell>
+                  <TableCell className="font-mono text-muted-foreground">{log.target ?? "—"}</TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
-      </div>
-    </div>
+      </section>
+    </PageContainer>
   );
 }

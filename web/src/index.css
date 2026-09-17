@@ -1,3 +1,154 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    /* 深色基础表面:低饱和中性灰阶(issue #162),不再带蓝色色相 */
+    --background: 0 0% 8%;
+    --foreground: 0 0% 93%;
+
+    --card: 0 0% 11%;
+    --card-foreground: 0 0% 93%;
+
+    --popover: 0 0% 13%;
+    --popover-foreground: 0 0% 93%;
+
+    --primary: 199 89% 48%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 15%;
+    --secondary-foreground: 0 0% 93%;
+
+    --muted: 0 0% 15%;
+    --muted-foreground: 0 0% 62%;
+
+    --accent: 0 0% 19%;
+    --accent-foreground: 0 0% 93%;
+
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+
+    --info: 199 89% 48%;
+    --info-foreground: 0 0% 100%;
+
+    /* A 股语义色:红涨绿跌(见 web/PRODUCT.md 颜色惯例) */
+    --up: 0 84% 62%;
+    --up-foreground: 0 0% 100%;
+    --down: 142 71% 45%;
+    --down-foreground: 0 0% 100%;
+
+    --border: 0 0% 24%;
+    --input: 0 0% 26%;
+    --ring: 199 89% 48%;
+
+    --radius: 0.5rem;
+
+    /* 图表调色板:跟随主题切换,禁止页面内 raw hex */
+    --chart-1: 199 89% 48%;
+    --chart-2: 0 84% 62%;
+    --chart-3: 142 71% 45%;
+    --chart-4: 38 92% 50%;
+    --chart-5: 262 83% 66%;
+    --chart-6: 160 84% 39%;
+    --chart-7: 24 95% 60%;
+    --chart-8: 330 81% 65%;
+  }
+
+  .light {
+    color-scheme: light;
+    --background: 0 0% 100%;
+    --foreground: 0 0% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 11%;
+
+    --primary: 199 89% 42%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 96%;
+    --secondary-foreground: 0 0% 11%;
+
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 47%;
+
+    --accent: 0 0% 94%;
+    --accent-foreground: 0 0% 11%;
+
+    --destructive: 0 84% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 142 71% 40%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 38 92% 45%;
+    --warning-foreground: 0 0% 100%;
+
+    --info: 199 89% 42%;
+    --info-foreground: 0 0% 100%;
+
+    /* A 股语义色:红涨绿跌 */
+    --up: 0 72% 48%;
+    --up-foreground: 0 0% 100%;
+    --down: 142 72% 35%;
+    --down-foreground: 0 0% 100%;
+
+    --border: 0 0% 88%;
+    --input: 0 0% 84%;
+    --ring: 199 89% 42%;
+
+    --chart-1: 199 89% 42%;
+    --chart-2: 0 72% 48%;
+    --chart-3: 142 72% 35%;
+    --chart-4: 38 92% 42%;
+    --chart-5: 262 83% 55%;
+    --chart-6: 160 84% 32%;
+    --chart-7: 24 95% 52%;
+    --chart-8: 330 81% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "tnum";
+    font-variant-numeric: tabular-nums;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  ::selection {
+    @apply bg-primary/30;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 3px;
+  }
+}

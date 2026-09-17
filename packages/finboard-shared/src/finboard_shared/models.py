@@ -225,3 +225,4 @@ class Bar:
     close: Decimal
     volume: Decimal = Decimal("0")
     amount: Decimal = Decimal("0")
+    source: str = ""

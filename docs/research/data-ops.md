@@ -1,0 +1,612 @@
+# 数据基座运营手册(研究数据同步与主数据治理)
+
+跨会话运营步骤的 canonical 事实源:研究 / 数据 agent 与主 coding agent 共享。
+与 `research_memories` 记忆冲突时以本文档为准(#268 约定)。
+
+## v1 选股(research_db)必需数据集的发布状态(#255)
+
+**背景**:2026-09-01 runs 273-275(ROE / PB / 换手率 top-N)全部 0 交易
+「成功」。根因:**摄取 ≠ 发布**——`dataset_sync` 会在质量门通过后自动
+`mark_published`(批次 `status=published`),但 profiles 批次的**同步+发布**
+步骤从未进入运行手册;`selection.inputs_mode=research_db`(默认)必需
+`instrument_profiles` 批次已发布,未发布时旧链路逐期 SKIPPED、引擎 0 交易收场。
+
+**已建的防线(#255)**:
+
+- 入队期:REST `POST /api/backtest/run` 与 MCP `finboard_backtest_run`(同步 +
+  异步入队)对 `enabled + inputs_mode=research_db` 的 selection 逐个检查
+  `required_datasets` 的已发布批次,缺失秒级 422 / `invalid_argument`
+  (`dataset_unpublished:{dataset}` 具名);
+- 执行端:`run_backtest_and_persist`(worker,覆盖 grid 提交等旁路)重放同一
+  检查,失败 `selection_dataset_unpublished` 具名错误,任务不重试;
+- 引擎:选股启用的 run 一律随结果携带 `selection_diagnostics`
+  (published/skipped 快照数、skip 原因计数、候选池是否曾生效),整期无候选
+  时打 `backtest.selection_pool_never_active` warning 并在 `summary()` 标注
+  「本 run 大概率 0 交易」。
+
+**运营步骤(选股回测前的核验清单)**:
+
+1. 核验批次发布状态(哪些 dataset、哪个 version、是否 published):
+
+   ```sql
+   SELECT dataset, source, dataset_version, status, published_at, accepted_rows
+   FROM research_sync_batches
+   WHERE source = 'tushare'
+   ORDER BY dataset, id DESC;
+   ```
+
+   选股回测要求的 datasets 按 selection 配置推导(默认 research_db 至少含
+   `instrument_profiles`;配置了市值/PB/换手过滤或排名再加 `daily_metrics`,
+   ROE/毛利率/营收增速再加 `financial_indicators`)。
+
+2. 缺失或 `status != 'published'` 时:`finboard_job_enqueue(kind=dataset_sync,
+   payload={datasets: [...], symbols: [...], start_date: ..., end_date: ...})`
+   摄取;质量门通过即自动发布(见任务 phase 摘要);质量门失败看批次
+   `quality_report` 修复后重跑。
+
+3. 若 selection 显式声明 `dataset_versions`,发布版本必须与之精确匹配
+   (`published_version` 口径);通常不声明即可(取最近发布)。
+
+4. 发布后入队仍有疑虑时:先跑 `finboard_strategy_validate`(research_run 侧
+   universe 预检)或小规模同步 `finboard_backtest_run` 验证选股出单,再放大区间。
+
+**边界**:粗粒度门只回答「是否存在已发布批次」;批次已发布但不覆盖具体
+交易日(如 daily_metrics 只发到 2023)仍由逐期 SKIPPED 的 `skip_reason`
+承载,配合 `selection_diagnostics.skip_reasons` 可见。
+
+## instruments 主数据元数据(list_date / industry / delist_date / 名称历史,#251)
+
+**背景**:`instruments` 主数据由 akshare 发现链路写入,只含
+code/name/market/instrument_type/exchange/listing_board。list_date、industry、
+delist_date 的结构化上游都在 tushare:
+
+| 字段 | 上游 | 落点 | 回填路径 |
+| --- | --- | --- | --- |
+| list_date / industry | `stock_basic`(list_status=L) | `research_instrument_profiles` | data_sync 后置回填 |
+| delist_date | `stock_basic`(list_status=D 退市档案) | 同上 | 同上 |
+| 名称历史(PIT) | `namechange` | `instrument_names` 主数据表 | dataset_sync `name_changes` dataset 直接重建 |
+
+**标准同步顺序**(每次刷新全市场主数据时):
+
+1. `dataset_sync`(默认全部 datasets,或显式 `["profiles", "name_changes"]`)
+   —— profiles 段同时拉取在市(L)与退市(D)档案合并进同一批次;
+   name_changes 段全市场分页拉取名称变更并按半开区间重建 `instrument_names`
+   (未提及 symbol 保留既有记录,重跑幂等)。
+2. `dataset_release_publish`(release_kind=`instrument_profiles` 或联合发布)
+   —— 发布 profiles 批次。发布构造器兜底(instruments 字段为 null 时从档案
+   补齐)**仍要求已发布批次**;回填不要求(见下)。
+3. `data_sync`(universe 全市场同步)—— 同步 `instruments` 并后置回填:
+   从最近一次**实际摄取过档案的批次**(不论发布状态,#251 修复)回填
+   list_date / industry / delist_date(只填 null,不覆盖)。
+   `status` 不随回填变更 —— 退市状态由缺席二次确认(sync_with_diff)推进。
+
+**验证 SQL**(回填效果):
+
+```sql
+-- 元数据非空率
+SELECT count(*) FILTER (WHERE list_date IS NULL)  AS missing_list_date,
+       count(*) FILTER (WHERE industry IS NULL)  AS missing_industry,
+       count(*) FILTER (WHERE delist_date IS NULL) AS missing_delist_date,
+       count(*) AS total
+FROM instruments;
+
+-- 名称历史覆盖(#213 ST-PIT 依赖)
+SELECT count(DISTINCT instrument_code) AS covered FROM instrument_names;
+```
+
+缺失统计同时出现在 `data_sync` 任务的 phase 摘要与 bars 发布的
+`quality_report.instrument_metadata`(missing_list_date / missing_industry /
+missing_delist_date / with_name_history / name_history_coverage)。
+
+**边界**:`sector` 无上游来源,保持 null;退市 `status` 变更只走缺席二次确认,
+档案回填不触碰。
+
+## 跨发布标的集一致性(#252)
+
+**背景**:2026-09-01 实测全市场 `financial_indicators` 发布缺单只标的
+002889.SZ(发布时点的 symbols 内联清单漏配),引用该发布的 multi_period
+research_run 在执行期才发现并整条失败。三发布(bars / daily_metrics /
+financial_indicators)的标的并集一致性必须自检。
+
+**发布期校验**(推荐,秒级拦截):`dataset_release_publish` 发布研究发布时带
+`consistency_baseline_release_id=<同区间 bars 主发布>` +
+`consistency_fail_on_mismatch=true`——差集非空即拒绝发布(code=
+`symbol_set_mismatch`,差集具名进错误 context);不带 fail 开关则只 warning。
+
+**标的集来源复制(#261,消灭漏配根因)**:发布/重发布时标的集用
+`symbols_from_release=<同区间 bars 主发布 release_id>` 直接复制其冻结标的集
+(与内联 `symbols` / `full_market=true` 三选一,同时声明即 `invalid_argument`
+拒绝),不再手工维护全市场清单——002889.SZ 这类内联清单漏配从源头消失;
+来源发布不存在/不可用(quality 非 passed/warnings)入队即 422/`invalid_argument`
+具名拒绝。REST `POST /api/datasets/releases` 同步支持
+(`ResearchDatasetReleaseCreate.symbols_from_release` / `.full_market`)。
+
+**full_market 板块/交易所过滤(#385)**:`full_market=true` 可叠加
+`exchange`(SSE|SZSE|BSE|CFFEX)与 `listing_boards`(sse_main|szse_main|
+star|chinext|bse|cdr)缩小展开范围(仅 full_market 模式生效,与其他标的来源
+混用入队即拒)。ETF/指数/转债的 listing_board 恒为 `unknown`,mixed 发布
+过滤后想保留它们须显式含 `unknown`。例:全市场股票发布剔除北交所 →
+`listing_boards=[sse_main,szse_main,star,chinext,cdr]`(不含 bse)。
+
+**发布后自检**(任一入口,同一实现):
+
+- MCP:`finboard_dataset_release_diff(release_id=<研究发布>,
+  other_release_id=<bars 主发布>)` → `consistent` 布尔 + 差集具名清单;
+- REST:`GET /api/instruments/datasets/releases/{id}/symbol-diff?other_release_id=...`。
+
+**002889.SZ 补齐运营步骤**(历史缺口的修复路径):
+
+1. `dataset_sync`(datasets 含 `financial_indicators`,symbols 含
+   002889.SZ,报告期区间覆盖该股全部历史)补齐摄取;
+2. 用全市场 symbols 清单重发布 `financial_indicators`(带
+   `consistency_baseline_release_id` + `fail_on_mismatch=true`);
+3. `finboard_dataset_release_diff` 复核 vs bars 主发布 → `consistent: true`;
+4. 引用旧发布的 research_run 用新 release_id 重新入队(发布不可变,不回填)。
+
+**执行期语义**(兜底):研究发布缺标的在 research_run 执行期**不再炸整条
+run**——缺失标的的研究因子值为 null,发具名 `research_release_missing_symbols`
+warning(release_id + 缺失清单),与 factor_lab #212 容忍语义一致;bars 主
+发布缺标的仍 fail-closed。
+
+## fina_indicator 白名单扩展后的增量补拉与重发布(#401)
+
+**背景**:#401 把 `fina_indicator` 白名单从 15 扩到 44 字段(ROA / 周转率族 /
+流动速动比率 / ICR / 单季 QoQ 等),解锁 40 个 Growth/Quality 预置因子
+(`p_fin_*`,批次 3)。既有财务发布冻结于扩列前——新字段在旧发布中为 NULL,
+属预期缺测,不回填(发布不可变)。
+
+**标准运营步骤**(解锁新字段因子):
+
+1. `dataset_sync`(datasets 含 `financial_indicators`)增量重跑——provider
+   字段映射扩列后重跑即幂等补拉新字段(修订幂等/批次记账框架白拿);
+   全市场约 5534 标的 × 1 次 `fina_indicator` 调用,RPM 200/分 ≈ 28 分钟/轮,
+   可按报告期窗口收窄;
+2. 重新发布 `financial_indicators`:字段集合变化必须递增
+   `schema_version`(如 `schema_version=v2`,REST `ResearchDatasetReleaseCreate`
+   / MCP `finboard_dataset_release_publish` / executor payload 均已透传),
+   否则 builder 具名拒绝「字段集合发生变化但 schema_version 未递增」;
+   建议 `symbols_from_release` 复制旧发布标的集 +
+   `consistency_baseline_release_id` 对齐 bars 主发布;
+3. 新发布的 release_id 进 research_run / factor_series_build 的
+   `dataset_release_ids` 联合集,`p_fin_*` 因子即取到新字段。
+
+## 指数基准数据链路(#256,#184 运营化)
+
+**背景**:2026-09-01 所有 research run 的 `benchmark_return`/`excess_return`
+全 null——#184 读取端完整,但全链路没有 `instrument_type=index` 的登记写入者,
+指数日线进不了缓存,也就进不了任何冻结发布。
+
+**标准运营步骤**(以 000300.SH 基准为例):
+
+1. `data_sync`(REST `POST /api/data/sync` / MCP `finboard_data_sync_universe`)
+   —— **#394 起登记源为 tushare `index_basic` 全量**:`discover_indices`
+   按 `is_index_code`(000xxx.SH / 399xxx.SZ / 899xxx.BJ)收窄登记域,
+   A 股三所指数自动登记 `instrument_type=index` 行(编外市场 CSI/CIC/MSCI
+   无行情上游,不登记);只登记在市(L)指数,退市交生命周期 diff。
+   `BENCHMARK_INDEX_REGISTRY` 收窄为**基准资格白名单**(`is_benchmark_index`
+   只认白名单;沪深300 / 中证500 / 中证1000 / 上证50 / 科创50 / 创业板指 /
+   深证成指 / 北证50 等 9 只)—— 白名单外的指数照常登记 / 可缓存 / 可发布,
+   但不是基准资格资产;扩展新基准指数直接在 `finboard_data/discovery.py`
+   白名单加一行(代码必须满足 `is_index_code`,导入期断言)。
+   **`data_sync` 现在依赖 `FINBOARD_TUSHARE_TOKEN`**(未配置具名失败不重试);
+   index_basic `base_date`(基日)随登记携带,由执行器后置
+   `backfill_listing_dates` 回填 `instruments.list_date`(只补 null,
+   #185 语义),mixed 发布的 `missing_list_date` 不再被指数恒 null 抬高。
+2. `bulk_download`(REST `POST /api/data/bulk-download` / MCP
+   `finboard_data_bulk_download_start`)带 `instrument_type=index` ——
+   **#394 起指数 bars 默认 tushare**(`index_daily` 主源,原始点位;
+   未显式声明 source 且筛选域全指数时默认源覆盖为 tushare,显式
+   `source=akshare` 恒优先,akshare `index_zh_a_hist` 降为副源)。
+   #341 起 tushare 源放行指数(`index_daily` 专属接口,2000 积分档
+   实测可调;无复权概念,缓存键沿用请求 adjust no-op);#395 起期货
+   同样放行(`fut_daily`,见下节);ETF 仍 `tushare_scope_mismatch`
+   拒绝(复权口径对齐未定稿,不静默换源)。
+3. `dataset_release_publish`(release_kind=`multi_asset_mixed`)—— **指数代码
+   必须与股票放进同一份发布**(manifest 只允许一个 bars 主发布,基准行情与
+   候选池同源);`adjustment` 用默认 `qfq`(与 bulk_download 缓存键一致;
+   指数本身无复权概念,键只是缓存/发布分区)。发布后指数 instrument ready
+   (asset_class=equity、零费用执行占位)。
+4. research_run 入队时 `benchmark_config={"symbol": "000300.SH"}` ——
+   `_load_benchmark_curve` 从同一 bars 发布 PIT 读取指数行情,
+   `benchmark_return`/`excess_return` 非真实行情不落值(缺失仍 null + 具名
+   warning,禁止静默 0.0,#184 不变量)。
+
+**边界**:指数**不进候选池**(只做基准数据、不可撮合)——静态预检 /
+入队空池门控 / 运行时候选构建三处共用 `is_benchmark_only_instrument`
+排除指数;UNIVERSE artifact 中只有股票。验证 SQL:
+
+```sql
+-- 指数登记行
+SELECT code, name, exchange, list_date FROM instruments WHERE instrument_type = 'index';
+```
+
+端到端回归:`tests/integration/test_index_benchmark_chain.py`(登记 → 混发
+发布 → 真实 FrozenReleaseProvider worker run → `benchmark_return` 非 null +
+UNIVERSE artifact 无指数)。
+
+## ETF 行情链路与缓存多源策略(#257)
+
+**背景**:2026-09-01 ETF 轮动 / 均值回归策略全链路空转。复现确认根因(本仓
+无任何 secid 拼接代码,EM secid 前缀是 akshare 库内部行为):akshare 1.18.78
+的股票日线接口内部按 ``6`` 开头判定沪市(``market_code = 1 if
+symbol.startswith("6") else 0``),SH-ETF(51/56/58 段)一律被拼成深市
+secid——实测 ``stock_zh_a_hist("510300")`` 请求 URL 携带 ``secid=0.510300``
+(正确应为 ``1.510300``);正确路由 ``fund_etf_hist_em`` 的 ``get_market_id``
+才能正确处理 5 开头沪市基金。第二个断点:引擎按注入 provider 读共享
+parquet 缓存,``data_provider=tushare`` 时 tushare provider 把异源(akshare)
+缓存视为全量缺口并丢弃 bars,指数/ETF 等不在 tushare scope 的标的 bars 恒空
+(scope 是设计决定而非积分硬约束:实测 index_daily/fund_daily 2000 积分档可调,#341)。
+
+**标准运营步骤**(以 510300.SH 为例):
+
+1. `bulk_download` 带 `instrument_type=etf`、`source=akshare` —— ETF 日线经
+   `fund_etf_hist_em` 进 parquet 缓存(缓存键与股票同为 `qfq`,列名一致)。
+   **tushare 源对 ETF 保持拒绝**(`tushare_scope_mismatch`,#256 起既有行为
+   ——scope 设计决定而非积分硬约束:2026-09-06 实测 `fund_daily` 2000
+   积分档可调,官方文档标 5000 与实测不符,#341)。
+2. 回测消费:`data_provider=tushare` 时,若异源缓存完整覆盖请求区间,
+   tushare provider 直接 read-through 返回缓存(具名 log
+   `tushare.foreign_cache_hit`,零 tushare 预算消耗);缺口区间 tushare
+   拉不到时具名回退(`tushare.foreign_cache_fallback`)返回异源已缓存 bars,
+   不再静默丢弃。缺口区间 tushare 拉得到(股票)时保持既有重建语义
+   (重建纯 tushare 缓存),避免两种复权口径混在同一条权益曲线。
+3. (可选)配置 `FINBOARD_DATA_FALLBACK_PROVIDER=akshare`:回测三入口
+   (REST 入队 / MCP 同步 / MCP 异步入队)主源对某标的返回空或抛错时,
+   在取数入口显式回退备用源(具名 log `fallback.using_fallback`)。默认
+   关闭;回退只解决「主源整体不覆盖该标的」,部分区间缺失由第 2 步的
+   缓存层策略处理,不在引擎层拼接异源曲线。
+
+端到端回归:`tests/integration/test_etf_bar_chain.py`(mock akshare 同步 →
+parquet 缓存 → tushare 源引擎回测拿到 bars 并出成交)。
+
+## 可转债数据链路(#265)
+
+**背景**:可转债双低策略(#63)此前只有策略引擎没有数据上游——转债既无登记
+写入者(`discover_a_shares` / ETF / 指数接口都不覆盖转债),也没有条款元数据
+(转股价/到期日/评级)和转股溢价率观测。#265 打通「转债登记 → cb_daily 日线
+→ cb_basic 条款 → 溢价率冻结发布 → 双低回测」全链路。
+
+**标准运营步骤**(转债 + 正股同链路):
+
+1. `data_sync`(REST `POST /api/data/sync` / MCP `finboard_data_sync_universe`)
+   —— `discover_convertibles` 从东财可转债一览 `bond_zh_cov` 登记
+   `instrument_type=convertible` 行(11xxxx.SH / 12xxxx.SZ,北交所暂无场内
+   转债不纳入)。**已知边界**:东财一览只覆盖当前存续转债,退市转债不在
+   列表(存续偏差由第 2 步 cb_basic 摘牌档案缓解);转债无 list_date 上游,
+   保持 null 等第 3 步回填。
+2. `bulk_download` 带 `instrument_type=convertible`、`source=tushare` ——
+   转债日线走 2000 积分档专属接口 `cb_daily` 进 parquet 缓存(无复权概念,
+   缓存键沿用默认 `qfq` 但语义为 no-op,发布 adjustment 与下载键一致;
+   1 手 = 10 张,vol 换算 ×10)。**tushare 源放行转债**(与 ETF/指数的
+   `tushare_scope_mismatch` 边界相反);akshare 源对转债日线 fail-visible
+   拒绝(股票接口会把 1 开头误路由,#257 同源缺陷)。正股日线照常同步
+   (溢价率计算的另一输入,必须与转债同区间同缓存)。
+3. `dataset_sync` 带 `datasets=["convertible_profiles"]`(默认全数据集
+   已包含)—— tushare `cb_basic`(在市 L + 摘牌 D 合并)快照 upsert 主数据
+   `convertible_metadata`(转股价 `swap_price` / 起息日 / 到期日 / 票面利率;
+   `conversion_price NOT NULL`,无转股价的行跳过并计数),顺带回填
+   `instruments.list_date/delist_date`(只补 null);评级(akshare
+   `bond_zh_cov` 债券评级列)与集思录强赎事件(`bond_cb_redeem_jsl` →
+   `instrument_lifecycle_events`,event_type=forced_redemption)走 akshare
+   兜底,**失败降级为 warning 不阻断 tushare 主链路**(评级缺失经
+   `missing_rating` 计数可见)。
+4. `dataset_release_publish`(release_kind=`convertible_metrics`)—— 只接受
+   A 股转债标的(非转债 `convertible_scope_violation`);发布执行时从本地
+   缓存 bars × 冻结转股价元数据计算转股价值(`100/转股价×正股收盘`)与
+   转股溢价率(`转债收盘/转股价值-1`),逐日冻结为带日期观测
+   (`available_at` = T 日 15:30 上海,与日线一致);整期无正股同日收盘时
+   fail-visible 拒绝(`no_underlying_close_for_premium`),部分缺口计入
+   `premium_missing_days` issue 可见。转债 bars 建议与正股/基准同处一份
+   `multi_asset_mixed` 发布(mixed 展开已含 convertible),供双低回测同源
+   消费;manifest instruments 携带 `convertible` 条款快照(含 observed_at)。
+   质量报告 `convertible_instruments` 块:转债标的数 / with_metadata /
+   missing_maturity_date / missing_rating / with_lifecycle_events 计数。
+
+**PIT 语义(诚实边界)**:`cb_basic` 是**当前时点**条款快照,不含转股价历史
+变动(下修史/除权除息调整史);评级与强赎是快照/当前公告(集思录无历史公告
+时间,历史公告回补需 5000 积分的 `cb_call`,后续 issue)。下游派生观测
+(转股溢价率)只能宣称「冻结快照转股价 × 同日正股收盘」的带日期冻结语义,
+**不得宣称全历史 PIT**。未来生效的强赎事件按生效日可见(领域不变量
+`available_at >= effective_date` 开盘,保守方向),真实观察时间保留在
+`details.observed_at`。
+
+**策略消费**:`convertible_double_low` 用真实 `FrozenReleaseProvider` 读
+mixed bars 发布(收盘/开盘/成交额 + manifest 条款)+ convertible_metrics
+发布(`fetch_convertible_metrics`,PIT 门控)构建逐日快照后回测;已同步的
+强赎事件经 `filter_event_risk` 按 `available_at` 门控参与事件风险过滤
+(#63 既有语义)。已知缺口(本 issue 不修):通用事件驱动回测引擎
+(`BacktestEngine`)的默认 resolver 把一切代码按 A 股股票撮合(engine.py 不传
+resolver),转债走通用引擎需 resolver 注入;`convertible_double_low` 独立
+模拟器路径不受影响。
+
+验证 SQL:
+
+```sql
+-- 转债登记与条款元数据
+SELECT code, name, list_date FROM instruments WHERE instrument_type = 'convertible';
+SELECT code, conversion_price, maturity_date, rating FROM convertible_metadata;
+-- 强赎事件
+SELECT symbol, effective_date, available_at FROM instrument_lifecycle_events
+WHERE event_type = 'forced_redemption' ORDER BY effective_date;
+```
+
+端到端回归:`tests/integration/test_convertible_chain.py`(mock bond_zh_cov /
+cb_daily / cb_basic → 登记 → 缓存 → convertible_profiles 同步 → 双发布 →
+双低回测出非空成交)。
+
+## 期货 EOD 数据链路(#267)
+
+**背景**:路线 C(市场中性对冲:股票多头 + 股指空头)的数据面前置。此前
+期货既无登记写入者也无行情接入(akshare 全市场列表接口不覆盖期货,
+#267 时点 tushare `fut_daily` 误记为「另档积分」)。#267 打通「主连登记 →
+新浪主连日线 → 冻结发布 → 研究数据可读」全链路;**#395 起 tushare 期货
+链路接线**(`fut_basic` / `fut_daily` / `fut_trade_cal` 均为 2000 积分档
+实测可调)。**范围只做数据面**:对冲组合回测工程(换月展期 /
+贴水成本 / 保证金占用)另行立项;期货不可撮合,通用回测引擎不做期货撮合
+(`asset_rules.py` docstring 明示)。
+
+**主连 vs 具体合约(核心语义,不混淆)**:
+
+- **主连**(品种+`0`,如 `IF0.CFFEX`):换月拼接的连续序列,**仅用于研究
+  信号 / 基准数据,不可当作可成交合约**。
+- **具体合约**(如 `IF2612.CFFEX`):#395 起经 tushare `fut_basic` 登记
+  在市合约(见下),日线走 `fut_daily` 可进逐标的缓存;akshare 源对具体
+  合约仍 fail-visible 拒绝(新浪 `futures_main_sina` 只有主连),EOD 按
+  日全市场表 `fetch_futures_official_daily`(交易所官网
+  `get_futures_daily`)仅供研究脚本直读。主连与合约语义不混进同一条
+  权益曲线。
+
+**主连 tushare 口径(#395 拍板记录)**:主连 `IF0.CFFEX` 映射为 tushare
+主力连续 `IF.CFX` **连续合约代码直取**(零拼接;`fut_mapping` 仅作换月
+审计)。与 akshare 新浪主连的双源逐值对照(2025 全年 243 交易日 × IF/IH/
+IC/IM):共同交易日全一致,close 最大相对差 1.6%~4.2%、超 ε(1e-4)天
+数 8~63/243,换月日两源主力选择基本一致(IC 有 2/7 天换月日分歧)——
+差异源于两源主力/换月规则细节与结算口径,**#391 起(2026-09-10 用户
+拍板)期货主连批量默认源切 tushare**(与 #394 指数偏好同构:未显式
+声明 `source` 且筛选域全为 futures 时覆盖为 tushare;显式
+`source=akshare` 可选回新浪主连副源)。
+
+**标准运营步骤**:
+
+1. `data_sync`(REST `POST /api/data/sync` / MCP `finboard_data_sync_universe`)
+   —— `discover_futures_main` 从受控登记表 `FUTURES_MAIN_SERIES_REGISTRY`
+   登记 IF/IH/IC/IM 主连(`market=future` / `instrument_type=futures`,
+   CFFEX;乘数 / 保证金率与 `FuturesRule` 同口径)。扩展新品种直接在登记表
+   加一行;未登记品种 fail-closed 拒绝。主连无 list_date 上游,保持 null
+   可见缺失(主连是连续序列,不是单一上市合约)。
+   **#395 起同任务并入**:① `discover_futures_contracts` 从 tushare
+   `fut_basic` 登记 CFFEX 股指四品种**当前在市合约**(合约级
+   `instrument_type=futures`;list_date/delist_date 携带并回填,只补 null;
+   退市合约不回补登记,预上市留待后续 sync);合约乘数 / 最小变动价位与
+   受控表逐品种对账(`reconcile_futures_contract_profiles`,实测零不一致;
+   保证金率上游无列,受控表口径仍是唯一权威)。② 期货交易日历
+   `fut_trade_cal`(CFFEX 行集,2015 起至明年年末,含休市行)幂等落库
+   `trade_cal` 表(与 #396 股票 trade_cal 同表同构,`exchange` 区分);
+   日历同步尽力而为,token 缺失 / 上游失败具名告警不阻断标的同步。
+2. `bulk_download` 带 `instrument_type=futures`(配 `market=future`)——
+   **#391 起默认源走 tushare `fut_daily`**(与 #394 指数偏好同构:入队未
+   显式声明 `source` 且筛选域全为 futures 时覆盖;全局默认已是 tushare
+   时该偏好短路幂等;显式 `source=akshare` 选回新浪主连副源——仅主连,
+   无复权概念,缓存键沿用默认 `qfq` 但语义为 no-op,发布 adjustment 与
+   下载键一致,新浪无成交额列 amount=0)。主连 `IF0.CFFEX` → 主力连续
+   `IF.CFX` 连续直取、具体合约 `IF2612.CFFEX` → `IF2612.CFX`;vol 单位
+   手 → 张 1:1、amount 单位**万元 → 元**(×10000,与股票 daily 的千元
+   口径不同)。
+3. `dataset_release_publish` —— 期货 bars 建议与股票 / 债券基准同处一份
+   `multi_asset_mixed` 发布(mixed 展开含 futures 五类之一),或独立 BARS
+   发布。发布候选从登记表读取乘数 / 保证金率 / 最小变动价位 /
+   `allows_short`(主连与合约统一品种层口径);质量报告
+   `futures_instruments` 块:期货标的数 / continuous / missing_list_date /
+   with_lifecycle_events 计数。期货事件硬门降级(#58 换月 / 到期事件在
+   主连日线上无结构化上游,同 #265 转债决策),已同步事件仍随 manifest
+   冻结。
+4. 消费 —— 研究运行 / 回测把期货主连当**基准数据**用(`benchmark_config`
+   / 研究发布引用):`is_benchmark_only_instrument` 扩为 index + futures,
+   静态预检与运行时候选一致排除(不进候选池、不撮合)。缓存 `make_symbol`
+   已支持期货后缀 → `Market.FUTURE`(此前未知后缀兜底 A_SHARE 会让冻结
+   发布 market 校验误拒)。
+
+验证 SQL:
+
+```sql
+-- 期货主连 + 合约登记(#395 起合约级在市合约同表)
+SELECT code, name, exchange FROM instruments WHERE instrument_type = 'futures';
+-- 期货交易日历(CFFEX 行集,#395)
+SELECT count(*) FROM trade_cal WHERE exchange = 'CFFEX' AND is_open;
+```
+
+端到端回归:`tests/integration/test_futures_chain.py`(受控登记 → mock
+futures_main_sina → 缓存 → BARS 发布 → 真实 FrozenReleaseProvider 读回;
+主连 / 合约语义守卫;#395 起 tushare 合约登记 → fut_daily 缓存 → 发布 →
+读回 + fut_trade_cal 落库用例)。
+
+## 交易日历落库与停复牌数据集(#396)
+
+### trade_cal 交易日历(免费接口口径)
+
+交易日历读取口径为「DB 优先,缺失回源 akshare 并回写」:
+
+* PG `trade_cal` 表按 exchange 存交易日(akshare `tool_trade_date_hist_sina`
+  为沪深统一日历,回源按 SSE / SZSE 两行集写入同一天集,幂等 upsert);
+* 异步执行域(数据集发布覆盖率审计、factor_series_build 决策日推导)入口
+  调 `ensure_calendar_loaded()`:进程缓存 → PG → 空/过期(跨年)回源
+  akshare 并回写 → exchange_calendars 兜底;全部失败缓存空集,消费方按
+  `TradingCalendarError` 收口;
+* composition root(`build_kernel_components`)安装
+  `PgTradingCalendarStore`,未安装(纯同步消费、测试)时走历史同步路径,
+  行为不变;
+* research_run 发布交易日(`#334` 并集日历)切换为 DB 优先:trade_cal 有
+  日历 → 按发布窗口过滤 + `#334` 间隙哨兵 fail-closed;DB 无日历回退既有
+  bar 并集推导(信息缺失行为不变)。
+
+对账基线(2026-09-09):akshare 现拉 8797 天(1990-12-19 → 2026-12-31)
+与 `trade_cal`(SSE)逐日一致,差集为空。
+
+### research_suspensions 停复牌数据集(dataset_sync 第七集)
+
+* 入队:`finboard_job_enqueue(kind=dataset_sync,
+  payload={datasets: ["suspensions"], start_date, end_date})`;DAILY_MARKET
+  形态按工作日切片(非交易日上游空响应不产生批次行),dataset_version =
+  `suspensions:<trade_date>`,行级跳过口径(`tushare.dirty_row_skipped`);
+* 落点:`research_suspensions`(独立表——停牌是交易状态不是条款事件,
+  不入 `instrument_lifecycle_events`);`suspend_kind` 词表与缓存侧
+  `TushareLifecycleEvent.event_type` 一致(`suspension_day` /
+  `intraday_suspension` / `resumption`),便于两侧对账;
+* PIT=当日:`available_at` = 交易日 09:30(上海)—— 全天停牌开盘即可
+  观察,计划停复牌按生效日可见(不早于生效日看到);
+* 消费:research_run 执行期一次性加载发布窗口内已发布停复牌记录——
+  universe 候选对决策日停牌标的标注不可撮合(叠加发布快照静态近似);
+  执行日全天停牌的标的不产出新信号、当日指令拒单(fail-visible,
+  `停牌日拒绝成交(execution_suspended)`),持仓保留至复牌;停牌数据缺失
+  时全部行为与历史一致。发布 kind 扩展(冻结 parquet)另议。
+
+## 财务面扩展:三表 + 分红明细(#397)
+
+### research_income/balance/cashflow/dividends(dataset_sync 第八至十一集)
+
+四张新表 `research_income_statements` / `research_balance_sheets` /
+`research_cashflow_statements` / `research_dividends`(迁移
+`c159fcd63f94`,批次发布语义挂 `research_sync_batches.id`):
+
+* 入队:`finboard_job_enqueue(kind=dataset_sync, payload={datasets:
+  ["income_statements"|"balance_sheets"|"cashflow_statements"|"dividends"],
+  start_date, end_date, symbols?})`;PER_SYMBOL_RANGE 形态按标的 x 公告日窗
+  切片(行级 REJECT 口径,坏行整批拒),dataset_version =
+  `<income|balance|cashflow|dividend>:<symbol>:<start>:<end>`;窗口按公告日
+  (tushare `start_date`/`end_date` 语义)过滤,**不是**报告期窗;
+* 上游接口(2000 积分档):`income` / `balancesheet` / `cashflow` /
+  `dividend`;字段白名单见 `finboard_data.tushare_provider` 的
+  `_INCOME_FIELDS` / `_BALANCE_FIELDS` / `_CASHFLOW_FIELDS` / `_DIVIDEND_FIELDS`;
+* PIT=ann_date+1 零点(上海,#212 fina_indicator 同口径):`available_at`
+  承载,公告前不可见;修订版本 `(update_flag, report_type, comp_type)` 进
+  身份键全保留不互相覆盖;dividend 上游无 update_flag,`div_proc`
+  (预案/股东大会通过/实施…)进身份键全保留,**注意上游 `dividend` 接口
+  没有 start_date/end_date 参数(实测忽略),窗口过滤在客户端按 ann_date
+  执行**;
+* 全市场预算参考:5534 标的 x 4 接口 = 22136 次调用(每标的每接口一切片),
+  RPM 200/分共享预算下约 111 分钟纯调用墙钟(不含落库),建议按
+  exchange/listing_boards 宇宙过滤或分批 symbols 入队;
+* 发布:`dataset_release_publish(release_kind=同名)`(REST/MCP 同 schema)
+  从 research_* 表冻结为独立 kind 独立白名单的 parquet 发布(机制同 #187,
+  A 股股票域,发布级覆盖率阈值 0.95,full_market 展开仅股票);
+* 消费:`FrozenReleaseProvider.fetch_income_statements` /
+  `fetch_balance_sheets` / `fetch_cashflow_statements` / `fetch_dividends`
+  按 `available_at <= decision_at` PIT 门控读取(#402 将经 C0 因子通道消费:
+  QMJ 综合、FCF/OCF/EBITDA、存货/应收应付周转、流动/速动比率、精确股息率;
+  过渡期 dividend_yield_ttm 滚动近似保留)。
+
+## 因子批次 4:三表 + dividend 消费的价值 / 质量因子(#402)
+
+**内容**:预置因子目录(#398 C0 通道)新增 25 个因子,消费 #397 的四张
+财务面发布:
+
+* `p_val_*`(11,Value 族):FCF / OCF / EBITDA / EBIT 总市值比、精确账面
+  市值比(BM,归母权益/总市值)、有形 BM、E/P、S/P(销收价格比)、经营
+  现金流价格比(流通市值)、**精确股息率**(dividend 明细,除权除息日
+  归属滚动 12 月窗口,替代 `dividend_yield_ttm` 滚动近似)、近 12 个月
+  每股分红(`val_dps_ttm`);
+* `p_qlt_*`(9,Quality 补全):预收(含合同负债)收入占比、预付占比、
+  明细周转率族(存货/应收/应付,三表科目直接派生)、应计比率(Sloan)、
+  利润现金含量、销售收现比、现金分红率;
+* `p_qmj*`(5,AQR QMJ):盈利/成长/安全/支付四支柱(`qmj_profitability`
+  / `qmj_growth` / `qmj_safety` / `qmj_payout`,组内成分截面 rank 等权
+  均值,均 `cross_section=True` 采样面收窄到可交易域)+ 综合
+  `qmj`(四支柱等权均值,缺测支柱按可用支柱均值合成),支柱与综合均
+  入目录可单独引用。
+
+**解锁前提**(全部就绪才能构建对应因子序列):
+
+| 因子族 | 必需发布(#397 数据集) |
+| --- | --- |
+| `val_fcf/ocf/ebitda/ebit_to_market`、`val_ocf_to_price` | cashflow_statements + daily_metrics |
+| `val_bm`、`val_tangible_bm` | balance_sheets + daily_metrics |
+| `val_earnings_to_price`、`val_sales_to_price` | income_statements + daily_metrics |
+| `val_dividend_yield`、`val_dps_ttm` | dividends + daily_metrics |
+| `qlt_*`、`qmj_*` | 上表组合(payout 支柱另需 dividends;盈利/成长/安全支柱仅需 #401 的 financial_indicators) |
+
+**口径要点**:分子取「决策日可见的最近一次公告」(announcement_date
+PIT,available_at = 公告次日零点上海);分母 = 同日可见的 daily_metrics
+市值/收盘价;利润表/现金流量表流量科目为**报告期累计值**(未年化/未
+TTM,#401 诚实取数同边界);分红进展行按「同分红年度取决策日可见最新
+一行」去重,除息日落在 `(决策日-365, 决策日]` 才计入。
+
+**运营步骤**:按 #397 小节同步并发布四张数据集(symbols 与 bars 主发布
+一致,建议 `consistency_baseline_release_id` 对齐)→
+`finboard_factor_series_build(kind=predefined_factor, name=<裸名>)` 逐因子
+构建序列(联合集 = bars 主发布 + 对应研究发布)→ 入队引用。
+
+## 因子质量评估闭环(#403)
+
+**背景**:因子批次 1-4(C0 量价 74 / Alpha101 31 / 财务 40 / Value+QMJ 25)
+后预置目录 ~174 个因子,「坏因子静默进入评分组合」需要可见的量化证据。
+`finboard_backtest.factors.eval` 提供逐因子评估引擎 + `finboard factor-eval`
+CLI,产出结构化 JSON 报告(不落库,产物即档案)。
+
+**评估怎么跑**:
+
+```bash
+# 合成模式(免 DB,全目录机制冒烟;IC 数值无研究含义,可入 CI 口径)
+uv run finboard factor-eval --mode synthetic
+
+# 真实冻结发布小窗口(数据只读;horizon/step 为交易日口径)
+uv run finboard factor-eval --mode release \
+  --release-id DR-<bars 主发布> \
+  --dataset-release-ids DR-<daily_metrics>,DR-<financial_indicators> \
+  --window-start 2025-01-01 --window-end 2025-12-31 \
+  --horizon 5 --step 5
+```
+
+报告缺省落 `data_cache/factor_evals/factor-eval-<mode>-<日期>-<N>.json`
+(`--output` 可覆盖)。`--factors p_a,return_21d` 可抽样(p_ 前缀与裸名
+等价);缺省 = 全目录。
+
+**报告怎么读**(schema_version=v1):
+
+* 顶层:`data_face`(数据口径声明,release 模式带 release_id)/
+  `config`(评估口径:horizon/n_groups/min_cross_section/min_ic_dates/
+  decay_lags)/ `window` / `summary`(status_counts、|RankIC| 最强/最弱
+  3 名、signal_eligible 疑似数)/ `signal_eligible_governance` /
+  `factors`(逐因子条目)/ `elapsed_seconds`;
+* 逐因子:`status` ∈ `ok` / `no_data`(面板全缺测)/
+  `insufficient_cross_section`(可评估日期不足 `min_ic_dates`);
+  `flags`:`coverage_start_missing`(声明了 min_history_bars 但首个决策日
+  全缺测 = 发布历史不足)/ `window_shorter_than_declaration`(评估窗
+  交易日数 < 声明)/ `low_coverage`(覆盖率 < 50%,信息性)/
+  `ic_near_zero`(|IC| 与 |RankIC| 均值 < 0.01);
+* 指标:`ic_mean`/`rank_ic_mean`/`ic_ir`/`rank_ic_ir`/`ic_positive_ratio`
+  (Pearson / Spearman,方向语义保持原始值:LOWER 因子 IC 预期为负,
+  按 |IC| 与 direction 联合解读)/ `group_returns` + `group_monotonicity`
+  (分位组平均前向收益与组序 Spearman,|值| 接近 1 = 分组单调)/
+  `rank_autocorr_lag1` + `turnover` = 1 − lag1(截面排名翻转比例,高换手
+  因子扣成本后净收益显著低于 IC 表面值)/ `autocorr_decay`(lag 1/4/13
+  衰减,信号寿命参考);
+* 诚实边界:末端不足一个 horizon 的决策日不进统计;截面 < 
+  `min_cross_section` 的日子跳过;常数截面相关退化为 None 不虚构数字;
+  合成模式只证明机制跑通,研究结论以 release 模式为准。
+
+**signal_eligible 标注治理流程(#214 规则化)**:
+
+1. 规则:暴露 / 风险 / 流动性三族(`size` / `risk` / `liquidity`)条目
+   默认 `signal_eligible=False`(规模/波动/换手是风险暴露或选域变量,
+   不直接转换为多头信号);
+2. 评估报告的 `signal_eligible_governance.suspected` 列出全部违例
+   (当前目录 = `vwap_dev_20d` / `vwap_dev_60d`,liquidity 族标 True);
+3. **处置人工拍板,工具不批量改目录**:逐条确认后,确属信号的在
+   `factors/predefined/registry.py` 改标注并留豁免理由;确属暴露的改
+   False。改后重跑评估,`suspected` 清零即治理完成。
+
+**覆盖起点声明冻结(#399 续)**:声明 `min_history_bars` 的长窗口因子
+(1320d 三兄弟 / 残差动量 / RSRS 600),`finboard_factor_series_build`
+构建时把 `{min_history_bars, window}` 声明冻结进 series 记录的
+`quality.catalog_declaration` 键(未声明省略键,既有 quality 逐字节
+稳定;不进 content_checksum,缓存命中语义零变化)——序列产物自描述
+构建时刻的目录声明,事后审计无需回放历史目录。
+
+**评分目录投影(#226 续)**:`PREDEFINED_SCORING_CATALOG`(键 = 
+`p_<裸名>`)把全目录投影进评分消费面(direction / category=family /
+economic_hypothesis=title 剥名,家族级 winsorize/standardize/
+missing_strategy 入 `_PREDEFINED_FAMILY_SCORING`,缺省 = 1%/99% + zscore
++ exclude 与既有行为一致);`get_factor_meta` 双命名空间(裸名走 #226
+13 因子目录、p_ 走投影,未知各自具名拒绝);新家族未登记投影规则 =
+导入期 RuntimeError(fail-loud 防漂移)。`MultiFactorScorer` 可直接引用
+治理后 p_ 目录组合评分。

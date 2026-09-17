@@ -9,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_app.bootstrap import KernelComponents
 from finboard_core import TradingKernel
+from finboard_opencode import (
+    AccessIssuer,
+    OpenCodeProcessManager,
+    OpenCodeRuntimeClient,
+)
 from finboard_shared.identifiers import AccountId
 
 
@@ -38,5 +43,30 @@ def get_account_id(request: Request) -> AccountId:
     return request.app.state.account_id  # type: ignore[no-any-return]
 
 
+
 def get_components(request: Request) -> KernelComponents:
     return request.app.state.components  # type: ignore[no-any-return]
+
+
+def get_opencode_runtime(request: Request) -> OpenCodeRuntimeClient | None:
+    """OpenCode 运行时客户端(issue #109)——lifespan 构建的单例。
+
+    未启用时返回 ``None``(路由据此返回 503)。
+    """
+    return getattr(request.app.state, "opencode_runtime", None)
+
+
+def get_opencode_process_manager(request: Request) -> OpenCodeProcessManager | None:
+    """OpenCode Web 进程管理器(issue #118)——lifespan 构建的单例。
+
+    未启用时返回 ``None``(网关路由据此返回 503)。
+    """
+    return getattr(request.app.state, "opencode_process_manager", None)
+
+
+def get_opencode_access_issuer(request: Request) -> AccessIssuer | None:
+    """OpenCode Web 访问信息签发器(issue #118;#157 无凭证)——lifespan 构建的单例。
+
+    依赖 :func:`get_opencode_process_manager`;未启用时返回 ``None``。
+    """
+    return getattr(request.app.state, "opencode_access_issuer", None)

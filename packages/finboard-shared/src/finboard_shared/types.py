@@ -17,10 +17,154 @@ class Market(StrEnum):
 
 
 class InstrumentType(StrEnum):
+    """资产类型。
+
+    决定撮合规则 / 费用 / 手数 / 持仓方向;与 ``Market`` 正交(同一市场内可含多种类型)。
+    研究 / 回测域接入新资产类(issue #58)时,**新增类型必须显式在
+    ``AssetRuleTable`` 中注册规则**,未注册的 (market, type) 在回测中 fail closed。
+    """
+
     STOCK = "stock"
     ETF = "etf"
     INDEX = "index"
     FUTURES = "futures"
+    BOND = "bond"  # 交易所债券(国债 / 政策金融债 / 企业债),#58
+    CONVERTIBLE = "convertible"  # 可转债,#58
+
+
+class ListingBoard(StrEnum):
+    """证券上市板块,与市场、交易所和行业分类正交。"""
+
+    SSE_MAIN = "sse_main"
+    SZSE_MAIN = "szse_main"
+    CHINEXT = "chinext"
+    STAR = "star"
+    BSE = "bse"
+    CDR = "cdr"
+    UNKNOWN = "unknown"
+
+
+class AssetClass(StrEnum):
+    """跨资产大类 —— 用于组合层风险预算和资产配置(issue #59 消费)。
+
+    一个 ``InstrumentType`` 唯一映射到一个 ``AssetClass``:
+    STOCK/ETF(股票 ETF) → EQUITY;BOND/BOND_ETF → FIXED_INCOME;
+    CONVERTIBLE → CONVERTIBLE;FUTURES → DERIVATIVE。
+    """
+
+    EQUITY = "equity"
+    FIXED_INCOME = "fixed_income"
+    CONVERTIBLE = "convertible"
+    COMMODITY = "commodity"
+    CASH = "cash"
+    DERIVATIVE = "derivative"
+
+
+class EtfCategory(StrEnum):
+    """ETF 子分类 —— 决定 T+0 / 印花税 / 涨跌停差异(issue #58)。
+
+    ``InstrumentType.ETF`` 之下进一步细分,与 ``AssetRule`` 一一对应。
+    """
+
+    EQUITY = "equity"  # 股票 ETF:T+1、卖出印花税万 5
+    CROSS_BORDER = "cross_border"  # 跨境 ETF:T+0、免印花税
+    BOND = "bond"  # 国债 / 政策金融债 ETF:免印花税、10 份/手
+    MONEY_MARKET = "money_market"  # 货币 ETF:T+0、无佣金
+    COMMODITY = "commodity"  # 黄金 / 商品 ETF
+    INDEX = "index"  # 指数 ETF(宽基 / 行业)
+
+
+class EtfExecutionProfile(StrEnum):
+    """ETF 执行档位(issue #97)—— 决定 T+N / 印花税 / 手数的权威维度。
+
+    与旧 :class:`EtfCategory` 的关键区别:``execution_profile`` 只描述**交易规则**,
+    不混入投资策略(指数/主动)或标的地理范围;多维分类由
+    :class:`UnderlyingMarket` / :class:`EtfStrategyType` 正交表达。
+    例如 159010(恒生港股通科技 ETF)执行档位为 ``cross_border_etf``,
+    策略为 ``index``,标的市场为 ``hk``。
+    """
+
+    DOMESTIC_EQUITY_ETF = "domestic_equity_etf"  # 国内股票 ETF:T+1
+    CROSS_BORDER_ETF = "cross_border_etf"  # 跨境 ETF:T+0、免印花税
+    BOND_ETF = "bond_etf"  # 债券 ETF:T+0、10 份/手、免印花税
+    MONEY_MARKET_ETF = "money_market_etf"  # 货币 ETF:T+0、无佣金
+    COMMODITY_ETF = "commodity_etf"  # 黄金 / 商品 ETF:T+0
+
+
+class UnderlyingMarket(StrEnum):
+    """ETF 标的地理范围(issue #97)。"""
+
+    DOMESTIC = "domestic"  # 国内(A 股)
+    HK = "hk"  # 港股通
+    OVERSEAS = "overseas"  # 海外(美股 / 日股 / 欧股)
+    GLOBAL = "global"  # 全球多市场
+
+
+class EtfStrategyType(StrEnum):
+    """ETF 策略类型(issue #97)—— 被动指数 vs 主动管理。"""
+
+    INDEX = "index"  # 指数型(被动跟踪)
+    ACTIVE = "active"  # 主动管理型
+
+
+class ReviewStatus(StrEnum):
+    """ETF 元数据分类审核状态(issue #97)。
+
+    只有 ``auto_adopted`` / ``manually_confirmed`` 的记录可参与研究发布;
+    ``needs_review`` 必须人工确认后才能采用,防止弱证据静默影响成交规则。
+    """
+
+    AUTO_ADOPTED = "auto_adopted"  # 高置信度自动采用
+    NEEDS_REVIEW = "needs_review"  # 低置信度 / 证据冲突,待人工复核
+    MANUALLY_CONFIRMED = "manually_confirmed"  # 人工确认(原自动结果正确)
+    MANUALLY_OVERRIDDEN = "manually_overridden"  # 人工覆盖(修正了自动结果)
+
+    @property
+    def is_adopted(self) -> bool:
+        """是否已可采用(可用于研究发布)。"""
+        return self in (
+            ReviewStatus.AUTO_ADOPTED,
+            ReviewStatus.MANUALLY_CONFIRMED,
+            ReviewStatus.MANUALLY_OVERRIDDEN,
+        )
+
+
+def etf_category_from_execution_profile(profile: EtfExecutionProfile) -> EtfCategory:
+    """从执行档位派生兼容旧版 :class:`EtfCategory`(issue #97 兼容迁移)。
+
+    旧发布链路(``default_execution_metadata`` / ``_etf_candidate``)仍消费
+    ``EtfCategory``,此函数保证多维分类落地后旧路径行为不变。
+    """
+    mapping = {
+        EtfExecutionProfile.DOMESTIC_EQUITY_ETF: EtfCategory.EQUITY,
+        EtfExecutionProfile.CROSS_BORDER_ETF: EtfCategory.CROSS_BORDER,
+        EtfExecutionProfile.BOND_ETF: EtfCategory.BOND,
+        EtfExecutionProfile.MONEY_MARKET_ETF: EtfCategory.MONEY_MARKET,
+        EtfExecutionProfile.COMMODITY_ETF: EtfCategory.COMMODITY,
+    }
+    return mapping[profile]
+
+
+def asset_class_from_execution_profile(profile: EtfExecutionProfile) -> AssetClass:
+    """从执行档位派生底层资产大类(issue #97)。"""
+    mapping = {
+        EtfExecutionProfile.DOMESTIC_EQUITY_ETF: AssetClass.EQUITY,
+        EtfExecutionProfile.CROSS_BORDER_ETF: AssetClass.EQUITY,
+        EtfExecutionProfile.BOND_ETF: AssetClass.FIXED_INCOME,
+        EtfExecutionProfile.MONEY_MARKET_ETF: AssetClass.CASH,
+        EtfExecutionProfile.COMMODITY_ETF: AssetClass.COMMODITY,
+    }
+    return mapping[profile]
+
+
+class ListingStatus(StrEnum):
+    """标的上市状态。"""
+
+    ACTIVE = "active"  # 正常交易
+    SUSPENDED = "suspended"  # 停牌(临时或长期)
+    DELISTED = "delisted"  # 已退市
+    PENDING = "pending"  # 待上市(已公告未挂牌)
+    UNKNOWN = "unknown"
 
 
 class Side(StrEnum):
@@ -153,3 +297,91 @@ class TradingPhase(StrEnum):
     CONTINUOUS = "continuous"  # 连续竞价
     POST_MARKET = "post_market"
     CLOSED = "closed"
+
+
+# ---------------------------------------------------------------------------
+# 多资产生命周期(issue #58)
+# ---------------------------------------------------------------------------
+
+
+class CouponFrequency(StrEnum):
+    """债券付息频率。"""
+
+    ANNUAL = "annual"
+    SEMI_ANNUAL = "semi_annual"
+    QUARTERLY = "quarterly"
+    MONTHLY = "monthly"
+    ZERO_COUPON = "zero_coupon"  # 零息债
+    AT_MATURITY = "at_maturity"  # 到期一次还本付息
+
+
+class ConvertibleEventType(StrEnum):
+    """可转债公司行为 / 事件类型 —— 时点化记录(issue #58)。"""
+
+    LISTING = "listing"  # 上市
+    DELISTING = "delisting"  # 退市
+    FORCED_REDEMPTION = "forced_redemption"  # 强赎触发 / 公告
+    SELL_BACK = "sell_back"  # 回售
+    DOWNWARD_REVISION = "downward_revision"  # 下修转股价
+    CONVERSION_PRICE_ADJUST = "conversion_price_adjust"  # 除权除息导致的转股价调整
+    REDEMPTION = "redemption"  # 到期赎回
+    INTEREST_PAYMENT = "interest_payment"  # 付息
+
+
+class FuturesEventType(StrEnum):
+    """期货合约事件 —— 时点化记录。"""
+
+    LISTING = "listing"
+    LAST_TRADING = "last_trading"  # 最后交易日
+    DELIVERY = "delivery"  # 交割日
+    ROLL = "roll"  # 主力换月
+    EXPIRATION = "expiration"  # 到期
+
+
+class RollMethod(StrEnum):
+    """连续期货主力换月判定方法。"""
+
+    VOLUME = "volume"  # 按成交量最大
+    OPEN_INTEREST = "open_interest"  # 按持仓量最大
+    SCHEDULED = "scheduled"  # 按预定日历(如交割月前 N 个交易日)
+    MANUAL = "manual"  # 人工指定换月表
+
+
+class AdjustmentMethod(StrEnum):
+    """连续期货拼接的调整方法 —— 影响 OOS 可比性。"""
+
+    NONE = "none"  # 原始价不调整(换月处有跳空)
+    RATIO = "ratio"  # 比例调整(回溯缩放,保持收益率连续)
+    DIFFERENCE = "difference"  # 差分调整(平移历史价格)
+    PANAMA = "panama"  # 巴拿马法(差分的变种)
+
+
+class DatasetQualityStatus(StrEnum):
+    """数据集质量门 —— 不合格数据集不能供回测使用(issue #58 验收)。"""
+
+    UNKNOWN = "unknown"
+    PENDING = "pending"  # 待校验
+    PASSED = "passed"  # 通过校验
+    WARNINGS = "warnings"  # 有警告但可用
+    FAILED = "failed"  # 不合格,禁止回测使用
+
+
+class LifecycleEventType(StrEnum):
+    """通用公司行为 / 合约事件(覆盖所有资产类型)。"""
+
+    LISTING = "listing"
+    DELISTING = "delisting"
+    DIVIDEND = "dividend"  # 分红(股 / ETF)
+    SPLIT = "split"  # 拆股 / 合股
+    COUPON = "coupon"  # 债券付息
+    FORCED_REDEMPTION = "forced_redemption"  # 可转债强赎
+    SELL_BACK = "sell_back"
+    DOWNWARD_REVISION = "downward_revision"
+    CONVERSION_PRICE_ADJUST = "conversion_price_adjust"
+    ROLL = "roll"  # 期货换月
+    EXPIRATION = "expiration"
+    DELIVERY = "delivery"
+    SUSPENSION = "suspension"  # 停牌
+    RESUMPTION = "resumption"  # 复牌
+    NAME_CHANGE = "name_change"  # 改名(issue #35)
+    OTHER = "other"

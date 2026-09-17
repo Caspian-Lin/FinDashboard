@@ -1,4 +1,7 @@
-"""回测结果。"""
+"""回测结果。
+
+issue #56 起归档撮合模型 / 资产规则 / 费用假设 / 基准选择,使历史 run 可复现。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
+from finboard_backtest.metrics import DEFAULT_RISK_FREE_ANNUAL
 from finboard_data.factors import FactorSnapshot
 from finboard_shared.models import Fill, Order
 
@@ -25,6 +29,10 @@ class BacktestResult:
     total_return: float = 0.0
     annualized_return: float = 0.0
     sharpe_ratio: float = 0.0
+    # issue #262:rf=0/ddof=1 对照口径 + 主口径 rf 取值标注(随指标序列化,
+    # 防止引擎默认 rf=3% 把低收益策略 Sharpe 拖近 0 后被误读为无风险调整价值)。
+    sharpe_rf0: float = 0.0
+    risk_free_annual: float = DEFAULT_RISK_FREE_ANNUAL
     max_drawdown: float = 0.0
     win_rate: float = 0.0
     trade_count: int = 0
@@ -32,9 +40,17 @@ class BacktestResult:
     commission_paid: Decimal = Decimal("0")
     stamp_tax_paid: Decimal = Decimal("0")
 
-    # 基准
-    benchmark_return: float = 0.0
-    excess_return: float = 0.0
+    # 基准(issue #184:基准缺失时为 None,禁止静默 0.0)
+    benchmark_return: float | None = None
+    excess_return: float | None = None
+    # issue #254:基准曲线的实际来源(explicit_symbol:<code> /
+    # equal_weight_selection_pool / equal_weight_static_pool / first_symbol),
+    # 回测配置与实际使用的基准口径可区分。
+    benchmark_source: str | None = None
+
+    # issue #255:选股启用的逐期诊断(快照/跳过统计 + skip 原因计数 +
+    # 候选池是否曾生效),整期 SKIPPED 的 0 交易 run 不再伪装成功。
+    selection_diagnostics: dict[str, object] | None = None
 
     # 元信息
     start_date: date | None = None
@@ -43,6 +59,16 @@ class BacktestResult:
     final_equity: Decimal = Decimal("0")
     dataset_versions: dict[str, list[str]] = field(default_factory=dict)
     factor_version: str | None = None
+
+    # 研究级成交语义归档(issue #56)
+    matching_model: dict[str, object] = field(default_factory=dict)
+    asset_rules: dict[str, object] | None = None
+    fee_assumptions: dict[str, object] = field(default_factory=dict)
+    benchmark_config: dict[str, object] = field(default_factory=dict)
+
+    # job 级分段耗时(issue #285):total_elapsed_seconds / data_load_elapsed_seconds
+    # / parquet_reads;纯可观测性,不参与任何 checksum。
+    timing: dict[str, object] | None = None
 
     def summary(self) -> str:
         """生成文本绩效摘要。"""
@@ -54,7 +80,9 @@ class BacktestResult:
             "",
             f"总收益率:   {self.total_return:+.2%}",
             f"年化收益率: {self.annualized_return:+.2%}",
-            f"夏普比率:   {self.sharpe_ratio:.2f}",
+            f"夏普比率:   {self.sharpe_ratio:.2f} (rf={self.risk_free_annual:.1%}/年,"
+            f"日频 rf/252,ddof=0)",
+            f"夏普(rf=0): {self.sharpe_rf0:.2f} (与研究报告 sharpe_ratio 同口径)",
             f"最大回撤:   {self.max_drawdown:.2%}",
             f"胜率:       {self.win_rate:.2%}",
             f"交易次数:   {self.trade_count}",
@@ -63,10 +91,50 @@ class BacktestResult:
             f"佣金支出:   ¥{self.commission_paid:,.2f}",
             f"印花税:     ¥{self.stamp_tax_paid:,.2f}",
         ]
-        if self.benchmark_curve:
+        if self.benchmark_curve and self.benchmark_return is not None:
             lines += [
                 "",
                 f"基准收益:   {self.benchmark_return:+.2%}",
                 f"超额收益:   {self.excess_return:+.2%}",
             ]
+            if self.benchmark_source:
+                lines += [f"基准来源:   {self.benchmark_source}"]
+        elif self.benchmark_curve:
+            lines += ["", "基准收益:   缺失(未计算)"]
+        if self.matching_model:
+            lines += [
+                "",
+                f"撮合模型:   {self.matching_model.get('matching_model_version', '?')}"
+                f" / fill={self.matching_model.get('fill_timing', '?')}",
+                f"规则版本:   {self.matching_model.get('asset_rules_version', '?')}",
+            ]
+        if self.selection_diagnostics is not None:
+            diag = self.selection_diagnostics
+            lines += [
+                "",
+                f"选股快照:   {diag.get('published_snapshots', 0)}/"
+                f"{diag.get('total_snapshots', 0)} published,"
+                f"候选池曾生效={diag.get('selection_pool_ever_active', False)}",
+            ]
+            reasons = diag.get("skip_reasons")
+            if isinstance(reasons, dict) and reasons:
+                stats = "、".join(
+                    f"{key}={count}" for key, count in sorted(reasons.items())
+                )
+                lines += [f"跳过原因:   {stats}"]
+            if diag.get("zero_trading_suspected"):
+                lines += [
+                    "⚠ 选股整期无候选生效:本 run 大概率 0 交易,"
+                    "请检查选股数据集发布状态与过滤条件"
+                ]
+        if self.timing:
+            total = self.timing.get("total_elapsed_seconds")
+            load = self.timing.get("data_load_elapsed_seconds")
+            if isinstance(total, (int, float)):
+                load_text = (
+                    f"(加载 {load:.2f}s)"
+                    if isinstance(load, (int, float))
+                    else ""
+                )
+                lines += ["", f"耗时:       {float(total):.2f}s{load_text}"]
         return "\n".join(lines)

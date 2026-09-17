@@ -34,10 +34,21 @@ jobs:
     env:
       FINBOARD_ENV: ci
       FINBOARD_DB_URL: postgresql+psycopg://findashboard:findashboard@127.0.0.1:5432/findashboard
+      # issue #167:集成测试跑在独立测试库(conftest 自动 CREATE DATABASE,
+      # postgres 服务用户是 superuser);alembic 迁移仍走 FINBOARD_DB_URL。
+      FINBOARD_TEST_DB_URL: postgresql+psycopg://findashboard:findashboard@127.0.0.1:5432/findashboard_test
       FINBOARD_BROKER: mock
+      # 强制 uv 使用 actions/setup-python 提供的解释器,避免 uv python install
+      # 去外部 python-build-standalone 源下载(该源偶发 404/超时导致 CI 卡在 setup)
+      UV_PYTHON_PREFERENCE: only-system
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -45,9 +56,6 @@ jobs:
           version: "latest"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --all-packages
@@ -64,6 +72,11 @@ jobs:
       - name: Test (pytest)
         run: uv run pytest -m "not slow"
 
+      - name: Hang-guard probes (issue #167)
+        # 挂死探针验收:sync 进程级兜底 + async 优雅失败,~10s 内结束。
+        # 任一守卫失效(探针 XPASS 或进程挂死)该步骤失败。
+        run: uv run pytest tests/unit/test_hang_guard.py -m hang_guard
+
       - name: Upload coverage
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v4
@@ -73,3 +86,44 @@ jobs:
             .coverage
             htmlcov/
           retention-days: 7
+
+  # issue #216:研究沙箱镜像进 CI(只构建 + 自检,不推 registry)。
+  # tag 与 finboard-research-kit __version__ 绑定;改版本时同步 bump。
+  sandbox-image:
+    name: research sandbox image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build docker/research-sandbox
+        run: |
+          docker build -f docker/research-sandbox/Dockerfile \
+            -t finboard-research-sandbox:ci .
+
+      - name: Smoke check kit import & version
+        run: |
+          docker run --rm --network none --read-only \
+            --cap-drop ALL --user 65532 \
+            finboard-research-sandbox:ci \
+            python -c "import finboard_research_kit as k; print(k.__version__)"
+
+  # issue #313:OpenCode 容器 JSON 工具衍生镜像进 CI(只构建 + smoke,不推
+  # registry)。base 官方镜像 pin 在 Dockerfile ARG BASE_IMAGE;bump 官方版本时
+  # 同步改(升级 / digest 锁定 / 回滚步骤见 docs/opencode-agent-image.md)。
+  opencode-agent-image:
+    name: opencode agent image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build docker/opencode-agent
+        run: |
+          docker build -f docker/opencode-agent/Dockerfile \
+            -t finboard-opencode-agent:ci docker/opencode-agent/
+
+      - name: Smoke check jq / python3 / entrypoint
+        run: |
+          # --version 走镜像默认 ENTRYPOINT,顺带验证 opencode 入口未被破坏
+          docker run --rm finboard-opencode-agent:ci --version
+          docker run --rm --entrypoint /bin/sh finboard-opencode-agent:ci \
+            -c 'jq --version && python3 --version'

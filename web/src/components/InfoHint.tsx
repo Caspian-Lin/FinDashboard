@@ -10,6 +10,7 @@ import {
 import { createPortal } from "react-dom";
 import { Info } from "lucide-react";
 import type { InfoHintDefinition } from "../lib/infoHints";
+import { useT } from "@/i18n";
 
 const VIEWPORT_GAP = 12;
 const ANCHOR_GAP = 8;
@@ -20,6 +21,7 @@ export interface InfoHintProps {
 }
 
 export default function InfoHint({ content, className = "" }: InfoHintProps) {
+  const { t, tl } = useT();
   const rawId = useId();
   const tooltipId = `info-hint-${rawId.replaceAll(":", "")}`;
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -128,8 +130,8 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
       <button
         ref={triggerRef}
         type="button"
-        className="inline-flex size-6 items-center justify-center rounded-full text-slate-400 transition-colors duration-150 hover:bg-blue-50 hover:text-blue-700 focus:outline-none focus-visible:bg-blue-50 focus-visible:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-300 motion-reduce:transition-none"
-        aria-label={`查看“${content.title}”说明`}
+        className="inline-flex size-5 items-center justify-center rounded-full text-muted-foreground/70 transition-colors duration-150 hover:bg-primary/10 hover:text-primary focus:outline-none focus-visible:bg-primary/10 focus-visible:text-primary focus-visible:ring-2 focus-visible:ring-primary/30 motion-reduce:transition-none -m-1.5"
+        aria-label={t("infoHint.aria", { title: tl(content.title) })}
         aria-describedby={open ? tooltipId : undefined}
         aria-expanded={open}
         onPointerEnter={() => {
@@ -156,7 +158,7 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
           setOpen(nextPinned);
         }}
       >
-        <Info size={14} strokeWidth={2.25} aria-hidden="true" />
+        <Info size={16} strokeWidth={2} aria-hidden="true" />
       </button>
 
       {open &&
@@ -165,7 +167,7 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
             ref={tooltipRef}
             id={tooltipId}
             role="tooltip"
-            className="fixed z-50 max-h-[calc(100vh-1.5rem)] w-[min(20rem,calc(100vw-1.5rem))] overflow-y-auto rounded-lg bg-slate-900 px-3.5 py-3 text-left text-slate-100 shadow-lg"
+            className="fixed z-50 max-h-[calc(100vh-1.5rem)] w-[min(20rem,calc(100vw-1.5rem))] overflow-y-auto rounded-lg bg-popover px-3.5 py-3 text-left text-popover-foreground"
             style={{ visibility: "hidden" }}
             onPointerEnter={() => {
               clearCloseTimer();
@@ -176,13 +178,13 @@ export default function InfoHint({ content, className = "" }: InfoHintProps) {
               scheduleClose();
             }}
           >
-            <div className="text-sm font-semibold">{content.title}</div>
-            <p className="mt-1 text-xs leading-5 text-slate-200">
-              {content.description}
+            <div className="text-sm font-semibold">{tl(content.title)}</div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {tl(content.description)}
             </p>
             {content.detail && (
-              <p className="mt-1.5 border-t border-slate-700 pt-1.5 text-xs leading-5 text-slate-300">
-                {content.detail}
+              <p className="mt-1.5 border-t border-border pt-1.5 text-xs leading-5 text-muted-foreground">
+                {tl(content.detail)}
               </p>
             )}
           </div>,
@@ -197,7 +199,7 @@ export function HintLabel({
   children,
   hint,
   className = "mb-1",
-  labelClassName = "text-sm text-gray-600",
+  labelClassName = "text-sm text-muted-foreground",
 }: {
   htmlFor?: string;
   children: ReactNode;

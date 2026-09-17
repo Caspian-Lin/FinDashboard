@@ -103,11 +103,17 @@ def test_strategy_preset_crud_and_schema_validation(client: TestClient) -> None:
         assert created.status_code == 201
         body = created.json()
         assert body["name"] == "中期趋势"
+        # 新增 universe_* 字段以默认值出现,保持向后兼容
         assert body["params"] == {
             "short_window": 10,
             "long_window": 30,
             "max_position_pct": 0.95,
             "symbol_code": None,
+            "universe_mode": "all",
+            "universe_lookback": 20,
+            "universe_min_avg_amount": None,
+            "universe_min_momentum": None,
+            "universe_exit_clear": False,
         }
         assert body["selection"]["enabled"] is False
         preset_id = body["id"]

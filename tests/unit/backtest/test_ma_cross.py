@@ -20,6 +20,7 @@ from finboard_shared.models import Bar, Symbol
 from finboard_shared.types import BarPeriod, Market
 
 SYMBOL = Symbol(code="510300.SH", market=Market.A_SHARE)
+SYMBOL_ALT = Symbol(code="510500.SH", market=Market.A_SHARE)
 
 
 def _make_bar(date_str: str, close: str, o: str | None = None) -> Bar:
@@ -33,6 +34,28 @@ def _make_bar(date_str: str, close: str, o: str | None = None) -> Bar:
         low=c - Decimal("0.05"),
         close=c,
         volume=Decimal("1000000"),
+    )
+
+
+def _make_bar_ex(
+    symbol: Symbol,
+    day: int,
+    close: str,
+    *,
+    volume: str = "1000000",
+    amount: str = "0",
+) -> Bar:
+    c = Decimal(close)
+    return Bar(
+        symbol=symbol,
+        period=BarPeriod.D1,
+        timestamp=datetime(2024, 1, day, tzinfo=UTC),
+        open=c,
+        high=c + Decimal("0.05"),
+        low=c - Decimal("0.05"),
+        close=c,
+        volume=Decimal(volume),
+        amount=Decimal(amount),
     )
 
 
@@ -57,8 +80,9 @@ class TestMaCrossSignal:
             account_id=AccountId("test"),
         )
 
-        # 构造金叉:前4根下跌(short < long),然后short快速回升上穿
-        prices = ["5.0", "4.5", "4.0", "3.5", "4.5", "5.5"]
+        # 构造金叉:前4根下跌(short < long),然后short快速回升上穿。
+        # issue #56 起订单在 next-bar 成交,所以需要第 7 根 bar 触发成交。
+        prices = ["5.0", "4.5", "4.0", "3.5", "4.5", "5.5", "5.5"]
         for i, p in enumerate(prices):
             d = f"2024-01-{i + 1:02d}"
             bar = _make_bar(d, p)
@@ -69,8 +93,19 @@ class TestMaCrossSignal:
 
             for _ev in await broker.drain_events():
                 pass
+            # 成交回报驱动策略 _positions 更新
+            from finboard_core.strategy import OrderEvent
 
-        # 应有买单
+            for fill in list(broker.fills):
+                order = broker.query_order_sync(str(fill.client_order_id))
+                if order is None:
+                    continue
+                await strategy.on_order_update(
+                    OrderEvent(order=order, kind="filled", fill=fill),
+                    ctx,  # type: ignore[arg-type]
+                )
+
+        # 应有买单(信号在 day 6 触发,day 7 成交)
         assert len(broker.fills) > 0
         assert broker.fills[0].side.value == "buy"
 
@@ -182,6 +217,11 @@ class TestEndToEndBacktest:
         assert result.initial_capital == Decimal("100000")
         # 至少有交易(价格先跌后涨应触发金叉)
         assert result.trade_count > 0
+        # fills 日期 = 实际交易日(合成 Bar 的日期集合),而非任务运行日(issue #205)
+        trading_days = {b.timestamp.date() for b in synthetic_bars}
+        assert result.fills, "先跌后涨应产生成交"
+        for fill in result.fills:
+            assert fill.filled_at.date() in trading_days
         # 权益应为正
         assert result.final_equity > 0
         # 应有佣金支出
@@ -246,3 +286,243 @@ class TestEndToEndBacktest:
         assert result.trade_count == 0
         # 权益不变(无费用)
         assert result.total_return == pytest.approx(0.0)
+
+
+class TestMaCrossUniverse:
+    """动态选股 (issue #43) —— 策略层 Bar 规则选股与退出清仓。"""
+
+    @pytest.mark.unit
+    async def test_default_all_mode_preserves_legacy_behaviour(self) -> None:
+        """默认 universe_mode=all 时,选股器不参与,所有标的均参与信号生成。"""
+        strategy = MaCrossStrategy(
+            strategy_id="legacy",
+            short_window=2,
+            long_window=4,
+        )
+        broker = BacktestBroker(initial_capital=Decimal("100000"))
+        await broker.connect(AccountId("test"), {})
+        clock = SimulatedClock()
+        ctx = BacktestContext(
+            strategy_id=strategy.strategy_id,
+            broker=broker,
+            clock=clock,
+            account_id=AccountId("test"),
+        )
+        # 直接走金叉触发序列,与未引入选股器时一致。
+        # issue #56:订单在 next-bar 成交,补一根 Bar 让订单落地。
+        prices = ["5.0", "4.5", "4.0", "3.5", "4.5", "5.5", "5.5"]
+        from finboard_core.strategy import OrderEvent
+
+        for i, p in enumerate(prices):
+            bar = _make_bar(f"2024-01-{i + 1:02d}", p)
+            clock.advance_to(bar.timestamp)
+            broker.on_new_bar(bar)
+            event = MarketDataEvent(type=MarketDataEventType.BAR, bar=bar)
+            await strategy.on_market_data(event, ctx)  # type: ignore[arg-type]
+            for _ev in await broker.drain_events():
+                pass
+            for fill in list(broker.fills):
+                order = broker.query_order_sync(str(fill.client_order_id))
+                if order is None:
+                    continue
+                await strategy.on_order_update(
+                    OrderEvent(order=order, kind="filled", fill=fill),
+                    ctx,  # type: ignore[arg-type]
+                )
+        assert len(broker.fills) > 0
+        assert strategy._universe.config.enabled() is False
+
+    @pytest.mark.unit
+    async def test_unselected_symbol_does_not_trigger_buy(self) -> None:
+        """未入选标的不参与金叉买入。
+
+        构造:lookback=10 + 强制成交额阈值很大 → 选股器永不入选;
+        即便价格序列触发金叉,策略也不下单。
+        """
+        strategy = MaCrossStrategy(
+            strategy_id="filtered",
+            short_window=2,
+            long_window=4,
+            universe_mode="liquidity_momentum",
+            universe_lookback=4,
+            universe_min_avg_amount=Decimal("1e12"),  # 永远不满足
+        )
+        broker = BacktestBroker(initial_capital=Decimal("100000"))
+        await broker.connect(AccountId("test"), {})
+        clock = SimulatedClock()
+        ctx = BacktestContext(
+            strategy_id=strategy.strategy_id,
+            broker=broker,
+            clock=clock,
+            account_id=AccountId("test"),
+        )
+        prices = ["5.0", "4.5", "4.0", "3.5", "4.5", "5.5"]
+        for i, p in enumerate(prices):
+            bar = _make_bar(f"2024-01-{i + 1:02d}", p)
+            clock.advance_to(bar.timestamp)
+            broker.on_new_bar(bar)
+            event = MarketDataEvent(type=MarketDataEventType.BAR, bar=bar)
+            await strategy.on_market_data(event, ctx)  # type: ignore[arg-type]
+            for _ev in await broker.drain_events():
+                pass
+        # 选股器永不入选,所以即便金叉也被屏蔽
+        assert len(broker.fills) == 0
+        assert strategy._universe.is_selected(SYMBOL.code) is False
+
+    @pytest.mark.unit
+    async def test_exit_clear_submits_sell_intent_through_context(self) -> None:
+        """退出转换时通过 ctx.submit_order 提交卖出意图。
+
+        策略记录了一笔内部持仓后,在标的退出选股池时,应通过 ctx 发出
+        卖出订单(走完整 Risk → OrderManager → Broker 链路,不直接改持仓)。
+        """
+        strategy = MaCrossStrategy(
+            strategy_id="exit-clear",
+            short_window=2,
+            long_window=4,
+            universe_mode="liquidity_momentum",
+            universe_lookback=1,
+            universe_min_avg_amount=Decimal("100"),
+            universe_exit_clear=True,
+        )
+        broker = BacktestBroker(initial_capital=Decimal("100000"))
+        await broker.connect(AccountId("test"), {})
+        clock = SimulatedClock()
+        ctx = BacktestContext(
+            strategy_id=strategy.strategy_id,
+            broker=broker,
+            clock=clock,
+            account_id=AccountId("test"),
+        )
+
+        # 直接模拟策略已持有标的(避免金叉触发的复杂性)。
+        # issue #56:策略内部状态与 broker 持仓分离,broker 持仓由 fill 驱动。
+        # 因此这里需要同时注入 broker 持仓,才能让卖出订单通过持仓校验。
+        strategy._positions[SYMBOL.code] = Decimal("100")
+        strategy._symbol_objs[SYMBOL.code] = SYMBOL
+        # 注入 broker 内部持仓(模拟先前已成交的 100 股,available_date 已过)
+        from finboard_backtest.asset_rules import DEFAULT_TABLE
+        from finboard_backtest.broker import _InternalPosition, _PositionLot
+        from finboard_shared.types import InstrumentType
+
+        rule = DEFAULT_TABLE.resolve(
+            market=Market.A_SHARE, instrument_type=InstrumentType.STOCK
+        )
+        prior_date = datetime(2023, 12, 31, tzinfo=UTC).date()
+        broker._positions[SYMBOL.code] = _InternalPosition(
+            symbol=SYMBOL,
+            rule=rule,
+            total=Decimal("100"),
+            available=Decimal("100"),
+            average_price=Decimal("10"),
+            lots=[_PositionLot(quantity=Decimal("100"), available_date=prior_date)],
+        )
+
+        # lookback=1 + amount=200 → 入选
+        enter_bar = _make_bar_ex(SYMBOL, 1, "10", volume="10", amount="200")
+        clock.advance_to(enter_bar.timestamp)
+        broker.on_new_bar(enter_bar)
+        await strategy.on_market_data(
+            MarketDataEvent(type=MarketDataEventType.BAR, bar=enter_bar),
+            ctx,  # type: ignore[arg-type]
+        )
+        for _ev in await broker.drain_events():
+            pass
+        assert strategy._universe.is_selected(SYMBOL.code) is True
+
+        # 滑入低成交额 → 退出,触发清仓
+        exit_bar = _make_bar_ex(SYMBOL, 2, "10", volume="10", amount="10")
+        clock.advance_to(exit_bar.timestamp)
+        broker.on_new_bar(exit_bar)
+        await strategy.on_market_data(
+            MarketDataEvent(type=MarketDataEventType.BAR, bar=exit_bar),
+            ctx,  # type: ignore[arg-type]
+        )
+        for _ev in await broker.drain_events():
+            pass
+
+        # issue #56:订单 next-bar 成交,补一根 Bar 触发 fill
+        from finboard_core.strategy import OrderEvent
+
+        # volume 必须足以成交 1 手(100 股)
+        fill_bar = _make_bar_ex(SYMBOL, 3, "10", volume="1000", amount="10000")
+        broker.on_new_bar(fill_bar)
+        for _ev in await broker.drain_events():
+            pass
+        for fill in list(broker.fills):
+            order = broker.query_order_sync(str(fill.client_order_id))
+            if order is None:
+                continue
+            await strategy.on_order_update(
+                OrderEvent(order=order, kind="filled", fill=fill),
+                ctx,  # type: ignore[arg-type]
+            )
+
+        # 应产生 1 笔卖出订单(100 股)
+        sells = [f for f in broker.fills if f.side.value == "sell"]
+        assert len(sells) == 1
+        assert sells[0].quantity == Decimal("100")
+        # 内部持仓记账也归零(on_order_update 由 fill 驱动)
+        assert strategy._positions[SYMBOL.code] == 0
+
+    @pytest.mark.unit
+    async def test_exit_clear_disabled_keeps_position(self) -> None:
+        """``exit_clear=False`` 时,退出仅停止新买入,不强制平仓。"""
+        strategy = MaCrossStrategy(
+            strategy_id="no-exit",
+            short_window=2,
+            long_window=4,
+            universe_mode="liquidity_momentum",
+            universe_lookback=1,
+            universe_min_avg_amount=Decimal("100"),
+            universe_exit_clear=False,
+        )
+        broker = BacktestBroker(initial_capital=Decimal("100000"))
+        await broker.connect(AccountId("test"), {})
+        clock = SimulatedClock()
+        ctx = BacktestContext(
+            strategy_id=strategy.strategy_id,
+            broker=broker,
+            clock=clock,
+            account_id=AccountId("test"),
+        )
+
+        strategy._positions[SYMBOL.code] = Decimal("100")
+        strategy._symbol_objs[SYMBOL.code] = SYMBOL
+        # 注入 broker 内部持仓,与上一个测试保持一致(issue #56 严格持仓校验)
+        from finboard_backtest.asset_rules import DEFAULT_TABLE
+        from finboard_backtest.broker import _InternalPosition, _PositionLot
+        from finboard_shared.types import InstrumentType
+
+        rule = DEFAULT_TABLE.resolve(
+            market=Market.A_SHARE, instrument_type=InstrumentType.STOCK
+        )
+        prior_date = datetime(2023, 12, 31, tzinfo=UTC).date()
+        broker._positions[SYMBOL.code] = _InternalPosition(
+            symbol=SYMBOL,
+            rule=rule,
+            total=Decimal("100"),
+            available=Decimal("100"),
+            average_price=Decimal("10"),
+            lots=[_PositionLot(quantity=Decimal("100"), available_date=prior_date)],
+        )
+
+        enter_bar = _make_bar_ex(SYMBOL, 1, "10", volume="10", amount="200")
+        broker.on_new_bar(enter_bar)
+        await strategy.on_market_data(
+            MarketDataEvent(type=MarketDataEventType.BAR, bar=enter_bar),
+            ctx,  # type: ignore[arg-type]
+        )
+        for _ev in await broker.drain_events():
+            pass
+
+        exit_bar = _make_bar_ex(SYMBOL, 2, "10", volume="10", amount="10")
+        broker.on_new_bar(exit_bar)
+        await strategy.on_market_data(
+            MarketDataEvent(type=MarketDataEventType.BAR, bar=exit_bar),
+            ctx,  # type: ignore[arg-type]
+        )
+        # 退出但没有清仓
+        assert strategy._universe.is_selected(SYMBOL.code) is False
+        assert strategy._positions[SYMBOL.code] == Decimal("100")
+        assert len(broker.fills) == 0

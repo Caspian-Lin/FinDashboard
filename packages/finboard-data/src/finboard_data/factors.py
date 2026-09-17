@@ -12,6 +12,13 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from finboard_data.factor_lab import (
+    FACTOR_LAB_CATALOG as _LAB_CATALOG,
+)
+from finboard_data.factor_lab import (
+    FeatureFrequency as _LabFrequency,
+)
+from finboard_data.factor_lab import FeatureObservation
 from finboard_data.research import (
     DailySecurityMetrics,
     FinancialIndicator,
@@ -29,9 +36,25 @@ class FactorName(StrEnum):
     PB = "pb"
     TURNOVER_RATE = "turnover_rate"
     MOMENTUM = "momentum"
+    VOLATILITY_20D = "volatility_20d"
     ROE = "roe"
     GROSS_PROFIT_MARGIN = "gross_profit_margin"
     REVENUE_YOY = "revenue_yoy"
+
+
+class InputsMode(StrEnum):
+    """选股因子输入的来源模式(issue #173)。
+
+    * ``RESEARCH_DB``(默认):从 research 数据表读取 profile / daily_metrics /
+      financial_indicators / industry_memberships;
+    * ``BARS``:纯价格因子从回测行情历史计算(动量 / 波动率),不要求
+      daily_metrics;instrument_profiles 缺失时 ST / 上市天数过滤降级为不生效;
+    * ``SNAPSHOT``:因子值直接来自冻结的 ``FeatureSnapshot`` 观测。
+    """
+
+    RESEARCH_DB = "research_db"
+    BARS = "bars"
+    SNAPSHOT = "snapshot"
 
 
 class FactorFrequency(StrEnum):
@@ -82,79 +105,68 @@ class FactorDefinition:
     description: str
 
 
-FACTOR_CATALOG: dict[FactorName, FactorDefinition] = {
-    FactorName.MARKET_CAP: FactorDefinition(
-        name=FactorName.MARKET_CAP,
-        version=FACTOR_VERSION,
-        frequency=FactorFrequency.DAILY,
-        unit=FactorUnit.CNY,
-        dependencies=("daily_metrics.total_market_cap",),
-        point_in_time_safety=PointInTimeSafety.STRICT,
-        description="总市值,单位为人民币元。",
-    ),
-    FactorName.PB: FactorDefinition(
-        name=FactorName.PB,
-        version=FACTOR_VERSION,
-        frequency=FactorFrequency.DAILY,
-        unit=FactorUnit.MULTIPLE,
-        dependencies=("daily_metrics.pb",),
-        point_in_time_safety=PointInTimeSafety.STRICT,
-        description="市净率。",
-    ),
-    FactorName.TURNOVER_RATE: FactorDefinition(
-        name=FactorName.TURNOVER_RATE,
-        version=FACTOR_VERSION,
-        frequency=FactorFrequency.DAILY,
-        unit=FactorUnit.RATIO,
-        dependencies=("daily_metrics.turnover_rate",),
-        point_in_time_safety=PointInTimeSafety.STRICT,
-        description="换手率,以小数表示。",
-    ),
-    FactorName.MOMENTUM: FactorDefinition(
-        name=FactorName.MOMENTUM,
-        version=FACTOR_VERSION,
-        frequency=FactorFrequency.DAILY,
-        unit=FactorUnit.RATIO,
-        dependencies=("bars.close",),
-        point_in_time_safety=PointInTimeSafety.STRICT,
-        description="决策日收盘价相对指定回看窗口起点的收益率。",
-    ),
-    FactorName.ROE: FactorDefinition(
-        name=FactorName.ROE,
-        version=FACTOR_VERSION,
-        frequency=FactorFrequency.REPORT,
-        unit=FactorUnit.RATIO,
-        dependencies=("financial_indicators.return_on_equity",),
-        point_in_time_safety=PointInTimeSafety.STRICT,
-        description="最近已公告财务修订的净资产收益率。",
-    ),
-    FactorName.GROSS_PROFIT_MARGIN: FactorDefinition(
-        name=FactorName.GROSS_PROFIT_MARGIN,
-        version=FACTOR_VERSION,
-        frequency=FactorFrequency.REPORT,
-        unit=FactorUnit.RATIO,
-        dependencies=("financial_indicators.gross_profit_margin",),
-        point_in_time_safety=PointInTimeSafety.STRICT,
-        description="最近已公告财务修订的毛利率。",
-    ),
-    FactorName.REVENUE_YOY: FactorDefinition(
-        name=FactorName.REVENUE_YOY,
-        version=FACTOR_VERSION,
-        frequency=FactorFrequency.REPORT,
-        unit=FactorUnit.RATIO,
-        dependencies=("financial_indicators.revenue_yoy",),
-        point_in_time_safety=PointInTimeSafety.STRICT,
-        description="最近已公告财务修订的营业收入同比增速。",
-    ),
-}
+def _project_v1_catalog() -> dict[FactorName, FactorDefinition]:
+    """从 ``FACTOR_LAB_CATALOG`` 投影生成 v1 选股规则目录(issue #214)。
+
+    因子定义(依赖字段 / 频率 / 经济假设)唯一注册点是 v2 的
+    ``FACTOR_LAB_CATALOG``;本目录只补 v1 selection 契约所需的展示映射
+    (原始值单位 cny/multiple/ratio——v2 目录登记的是标准化后的 z_score
+    单位)。v1 名称在 v2 目录缺失时导入期即失败,防止两套目录漂移。
+    """
+
+    units: dict[FactorName, FactorUnit] = {
+        FactorName.MARKET_CAP: FactorUnit.CNY,
+        FactorName.PB: FactorUnit.MULTIPLE,
+        FactorName.TURNOVER_RATE: FactorUnit.RATIO,
+        FactorName.MOMENTUM: FactorUnit.RATIO,
+        FactorName.VOLATILITY_20D: FactorUnit.RATIO,
+        FactorName.ROE: FactorUnit.RATIO,
+        FactorName.GROSS_PROFIT_MARGIN: FactorUnit.RATIO,
+        FactorName.REVENUE_YOY: FactorUnit.RATIO,
+    }
+    frequencies = {
+        _LabFrequency.DAILY: FactorFrequency.DAILY,
+        _LabFrequency.REPORT: FactorFrequency.REPORT,
+        _LabFrequency.EVENT: FactorFrequency.REPORT,
+    }
+    catalog: dict[FactorName, FactorDefinition] = {}
+    for name in FactorName:
+        try:
+            source = _LAB_CATALOG[name.value]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"v1 选股因子 {name.value} 在 FACTOR_LAB_CATALOG 中不存在;"
+                "因子目录已收敛为 v2 唯一事实来源,请先在 factor_lab 登记该因子"
+            ) from exc
+        catalog[name] = FactorDefinition(
+            name=name,
+            version=FACTOR_VERSION,
+            frequency=frequencies[source.frequency],
+            unit=units[name],
+            dependencies=source.source_fields,
+            point_in_time_safety=PointInTimeSafety.STRICT,
+            description=source.economic_hypothesis,
+        )
+    return catalog
+
+
+FACTOR_CATALOG: dict[FactorName, FactorDefinition] = _project_v1_catalog()
 
 
 @dataclass(frozen=True, slots=True)
 class FactorSelectionConfig:
-    """按日选股规则;默认关闭以保持旧回测行为。"""
+    """按日选股规则;默认关闭以保持旧回测行为。
+
+    ``factor_version`` 是**选股规则目录版本**(本文件 ``FACTOR_VERSION``,
+    目前仅 ``"v1"``)。因子定义自 ``FACTOR_LAB_CATALOG`` 投影而来(issue
+    #214,唯一事实来源),可用因子集即 ``FACTOR_CATALOG`` 的键;特征快照的
+    ``framework_version`` 是快照 schema 版本,与本字段无关。
+    """
 
     enabled: bool = False
     source: str = "tushare"
+    inputs_mode: InputsMode = InputsMode.RESEARCH_DB
+    snapshot_ids: tuple[str, ...] = ()
     factor_version: str = FACTOR_VERSION
     max_symbols: int = 20
     ranking_factor: FactorName = FactorName.MARKET_CAP
@@ -179,9 +191,18 @@ class FactorSelectionConfig:
 
     def __post_init__(self) -> None:
         if self.factor_version != FACTOR_VERSION:
-            raise ValueError(f"不支持的 factor_version: {self.factor_version}")
+            raise ValueError(
+                f"不支持的 factor_version: {self.factor_version},"
+                f"合法值仅 [{FACTOR_VERSION}]"
+            )
         if not self.source.strip():
             raise ValueError("source 不能为空")
+        if self.inputs_mode is InputsMode.SNAPSHOT and not self.snapshot_ids:
+            raise ValueError("snapshot 输入模式必须指定 snapshot_ids")
+        if self.snapshot_ids and self.inputs_mode is not InputsMode.SNAPSHOT:
+            raise ValueError("snapshot_ids 仅在 snapshot 输入模式下使用")
+        if len(set(self.snapshot_ids)) != len(self.snapshot_ids):
+            raise ValueError("snapshot_ids 不能重复")
         if self.max_symbols <= 0:
             raise ValueError("max_symbols 必须大于 0")
         if self.max_per_industry is not None and self.max_per_industry <= 0:
@@ -220,8 +241,25 @@ class FactorSelectionConfig:
 
     @property
     def required_datasets(self) -> frozenset[str]:
-        """为状态过滤和所选因子加载最小数据集集合。"""
-        datasets = {"instrument_profiles", "daily_metrics"}
+        """为状态过滤和所选因子加载最小数据集集合(issue #173)。
+
+        数据集按 ``required_factors`` 的依赖推导,而不是无条件包含
+        ``daily_metrics``:纯价格因子配置(momentum / volatility)不再要求
+        daily_metrics 已发布。``instrument_profiles`` 仅 research_db 模式必选;
+        bars / snapshot 模式下降级为可选(缺失只记录警告)。
+        """
+        datasets = (
+            {"instrument_profiles"}
+            if self.inputs_mode is InputsMode.RESEARCH_DB
+            else set()
+        )
+        daily_dependent = self.required_factors & {
+            FactorName.MARKET_CAP,
+            FactorName.PB,
+            FactorName.TURNOVER_RATE,
+        }
+        if daily_dependent:
+            datasets.add("daily_metrics")
         if self.required_factors & {
             FactorName.ROE,
             FactorName.GROSS_PROFIT_MARGIN,
@@ -240,6 +278,8 @@ class FactorSelectionConfig:
         return {
             "enabled": self.enabled,
             "source": self.source,
+            "inputs_mode": self.inputs_mode.value,
+            "snapshot_ids": list(self.snapshot_ids),
             "factor_version": self.factor_version,
             "max_symbols": self.max_symbols,
             "ranking_factor": self.ranking_factor.value,
@@ -268,13 +308,18 @@ class FactorSelectionConfig:
 
 @dataclass(frozen=True, slots=True)
 class FactorInputRecord:
-    """一个候选标的在决策时点可见的研究数据。"""
+    """一个候选标的在决策时点可见的研究数据。
+
+    ``features`` 仅在 snapshot 输入模式下非空:因子值直接来自冻结快照观测,
+    profile / daily / financial 恒为 None。
+    """
 
     symbol: str
     profile: InstrumentProfile | None
     daily: DailySecurityMetrics | None
     financial: FinancialIndicator | None
     industry: IndustryMembership | None
+    features: tuple[FeatureObservation, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +362,7 @@ class FactorSnapshot:
     config: dict[str, object]
     checksum: str
     snapshot_id: int | None = None
+    warnings: tuple[str, ...] = ()
 
 
 @runtime_checkable

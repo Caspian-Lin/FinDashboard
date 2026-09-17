@@ -6,27 +6,66 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from finboard_data.factors import FactorInputBatch, FactorInputRecord
+from finboard_data.factors import (
+    FactorInputBatch,
+    FactorInputRecord,
+    FactorSelectionConfig,
+    InputsMode,
+)
 from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
     DailySecurityMetrics,
+    DividendRecord,
     FinancialIndicator,
+    IncomeStatement,
     IndustryMembership,
     InstrumentProfile,
+    SuspensionRecord,
 )
 from finboard_persistence.models import (
+    ResearchBalanceSheetModel,
+    ResearchCashflowStatementModel,
     ResearchDailyMetricModel,
+    ResearchDividendModel,
     ResearchFinancialIndicatorModel,
+    ResearchIncomeStatementModel,
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
+    ResearchSuspensionModel,
     ResearchSyncBatchModel,
+)
+
+#: 三表 / dividend 表中在 ``_upsert_announced_rows`` 里**显式赋值**的列 ——
+#: 值列拷贝按表列反射时排除(其余全部列名 = 领域记录同名属性,setattr 拷贝;
+#: dividend 的 record_date/ex_date 等日期列走通用拷贝,不在此列)。
+_STATEMENT_IDENTITY_COLUMNS = frozenset(
+    {
+        "id",
+        "batch_id",
+        "source",
+        "dataset_version",
+        "symbol",
+        "announcement_date",
+        "report_period",
+        "formal_announcement_date",
+        "report_type",
+        "comp_type",
+        "update_flag",
+        "div_proc",
+        "observed_at",
+        "available_at",
+        "ingested_at",
+    }
 )
 
 
@@ -37,6 +76,12 @@ class ResearchDataset(StrEnum):
     DAILY_METRICS = "daily_metrics"
     FINANCIAL_INDICATORS = "financial_indicators"
     INDUSTRY_MEMBERSHIPS = "industry_memberships"
+    SUSPENSIONS = "suspensions"
+    # issue #397:财务面扩展(三表 + dividend 分红明细)。
+    INCOME_STATEMENTS = "income_statements"
+    BALANCE_SHEETS = "balance_sheets"
+    CASHFLOW_STATEMENTS = "cashflow_statements"
+    DIVIDENDS = "dividends"
 
 
 class SyncBatchStatus(StrEnum):
@@ -315,6 +360,42 @@ class ResearchDatasetRepository:
             issues=tuple(issues),
         )
 
+    async def selection_inputs_gate(
+        self,
+        config: FactorSelectionConfig,
+    ) -> tuple[str, ...]:
+        """v1 选股必需数据集的发布状态门(issue #255)。
+
+        research_db 选股在必需数据集批次从未发布时,旧链路会逐期 SKIPPED、
+        引擎 0 交易「成功」收场(runs 273-275)。本方法把检查前移:未启用
+        选股或非 research_db 模式(bars/snapshot 按设计降级)返回空元组;
+        research_db 模式逐个解析 ``required_datasets`` 的已发布批次
+        (声明 dataset_version 时查该版本,否则取最近发布),未发布的以
+        ``dataset_unpublished:{dataset}`` 具名返回。入队(REST/MCP)与执行端
+        (``run_backtest_and_persist``)共用同一检查,双保险。
+
+        注意这是「是否存在已发布批次」的粗粒度检查;批次已发布但不覆盖具体
+        交易日的场景仍由逐期 SKIPPED 快照的 skip_reason 承载(配合引擎的
+        selection_diagnostics 可见)。
+        """
+        if not config.enabled or config.inputs_mode is not InputsMode.RESEARCH_DB:
+            return ()
+        missing: list[str] = []
+        for name in sorted(config.required_datasets):
+            try:
+                dataset = ResearchDataset(name)
+            except ValueError:
+                missing.append(f"unknown_dataset:{name}")
+                continue
+            batch = await self._resolve_batch(
+                dataset,
+                config.source,
+                config.dataset_versions.get(name),
+            )
+            if batch is None:
+                missing.append(f"dataset_unpublished:{name}")
+        return tuple(missing)
+
     async def upsert_instrument_profiles(
         self,
         batch: ResearchSyncBatchModel,
@@ -437,6 +518,254 @@ class ResearchDatasetRepository:
                 self._session.add(row)
             row.batch_id = batch.id
             _copy_financial_fields(row, item)
+        await self._session.flush()
+        return len(records)
+
+    async def upsert_suspensions(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[SuspensionRecord],
+    ) -> int:
+        """按来源、版本、标的、交易日幂等写入停复牌记录(issue #396)。"""
+        existing = {
+            (row.symbol, row.trade_date, row.suspend_kind): row
+            for row in (
+                await self._session.execute(
+                    select(ResearchSuspensionModel).where(
+                        ResearchSuspensionModel.source == batch.source,
+                        ResearchSuspensionModel.dataset_version
+                        == batch.dataset_version,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
+        for item in records:
+            key = (item.symbol, item.trade_date, item.suspend_kind)
+            row = existing.get(key)
+            if row is None:
+                row = ResearchSuspensionModel(
+                    batch_id=batch.id,
+                    source=batch.source,
+                    dataset_version=batch.dataset_version,
+                    symbol=item.symbol,
+                    trade_date=item.trade_date,
+                    suspend_kind=item.suspend_kind,
+                )
+                self._session.add(row)
+            row.batch_id = batch.id
+            row.suspend_type = item.suspend_type
+            row.suspend_timing = item.suspend_timing
+            row.observed_at = item.observed_at
+            row.available_at = item.available_at
+        await self._session.flush()
+        return len(records)
+
+    async def list_suspensions_as_of(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+        decision_at: datetime,
+        source: str,
+        dataset_version: str | None = None,
+    ) -> list[SuspensionRecord]:
+        """读取 ``[start_date, end_date]`` 内决策时点可见的停复牌记录。
+
+        PIT 门控按 ``available_at <= decision_at``;PIT=当日语义下,同一
+        交易日的记录在当日 09:30(上海)后可见。
+        """
+        _require_aware_datetime(decision_at, "decision_at")
+        if start_date > end_date:
+            return []
+        batch = await self._resolve_batch(
+            ResearchDataset.SUSPENSIONS,
+            source,
+            dataset_version,
+        )
+        if batch is None:
+            return []
+        stmt = (
+            select(ResearchSuspensionModel)
+            .where(
+                ResearchSuspensionModel.batch_id == batch.id,
+                ResearchSuspensionModel.trade_date >= start_date,
+                ResearchSuspensionModel.trade_date <= end_date,
+                ResearchSuspensionModel.available_at <= decision_at,
+            )
+            .order_by(
+                ResearchSuspensionModel.trade_date,
+                ResearchSuspensionModel.symbol,
+            )
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_suspension_from_orm(row) for row in rows]
+
+    async def upsert_income_statements(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[IncomeStatement],
+    ) -> int:
+        """幂等写入利润表公告版本,修订/报告口径行并存不互相覆盖(#397)。"""
+        return await self._upsert_announced_rows(
+            batch,
+            records,
+            model=ResearchIncomeStatementModel,
+            keys=lambda row: (
+                row.symbol,
+                row.report_period,
+                row.announcement_date,
+                row.update_flag,
+                row.report_type,
+                row.comp_type,
+            ),
+            record_keys=lambda item: (
+                item.symbol,
+                item.report_period,
+                item.announcement_date,
+                item.update_flag or "",
+                item.report_type or "",
+                item.comp_type or "",
+            ),
+        )
+
+    async def upsert_balance_sheets(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[BalanceSheet],
+    ) -> int:
+        """幂等写入资产负债表公告版本(修订语义同利润表,#397)。"""
+        return await self._upsert_announced_rows(
+            batch,
+            records,
+            model=ResearchBalanceSheetModel,
+            keys=lambda row: (
+                row.symbol,
+                row.report_period,
+                row.announcement_date,
+                row.update_flag,
+                row.report_type,
+                row.comp_type,
+            ),
+            record_keys=lambda item: (
+                item.symbol,
+                item.report_period,
+                item.announcement_date,
+                item.update_flag or "",
+                item.report_type or "",
+                item.comp_type or "",
+            ),
+        )
+
+    async def upsert_cashflow_statements(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[CashflowStatement],
+    ) -> int:
+        """幂等写入现金流量表公告版本(修订语义同利润表,#397)。"""
+        return await self._upsert_announced_rows(
+            batch,
+            records,
+            model=ResearchCashflowStatementModel,
+            keys=lambda row: (
+                row.symbol,
+                row.report_period,
+                row.announcement_date,
+                row.update_flag,
+                row.report_type,
+                row.comp_type,
+            ),
+            record_keys=lambda item: (
+                item.symbol,
+                item.report_period,
+                item.announcement_date,
+                item.update_flag or "",
+                item.report_type or "",
+                item.comp_type or "",
+            ),
+        )
+
+    async def upsert_dividends(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[DividendRecord],
+    ) -> int:
+        """幂等写入分红送股进展记录;``div_proc`` 进身份键全保留(#397)。"""
+        return await self._upsert_announced_rows(
+            batch,
+            records,
+            model=ResearchDividendModel,
+            keys=lambda row: (
+                row.symbol,
+                row.report_period,
+                row.announcement_date,
+                row.div_proc,
+            ),
+            record_keys=lambda item: (
+                item.symbol,
+                item.report_period,
+                item.announcement_date,
+                item.div_proc or "",
+            ),
+        )
+
+    async def _upsert_announced_rows(
+        self,
+        batch: ResearchSyncBatchModel,
+        records: list[Any],
+        *,
+        model: Any,
+        keys: Callable[[Any], tuple[object, ...]],
+        record_keys: Callable[[Any], tuple[object, ...]],
+    ) -> int:
+        """三表/dividend 共用的幂等写入(身份键由调用方声明,值列按表列
+        反射拷贝 —— 模型 ↔ 领域记录 ↔ 白名单三处同名,加列零改动)。"""
+        identity_columns = _STATEMENT_IDENTITY_COLUMNS
+        value_columns = tuple(
+            column.name
+            for column in model.__table__.columns
+            if column.name not in identity_columns
+        )
+        existing = {
+            keys(row): row
+            for row in (
+                await self._session.execute(
+                    select(model).where(
+                        model.source == batch.source,
+                        model.dataset_version == batch.dataset_version,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
+        for item in records:
+            row = existing.get(record_keys(item))
+            if row is None:
+                row = model(
+                    batch_id=batch.id,
+                    source=batch.source,
+                    dataset_version=batch.dataset_version,
+                    symbol=item.symbol,
+                    report_period=item.report_period,
+                    announcement_date=item.announcement_date,
+                )
+                self._session.add(row)
+            row.batch_id = batch.id
+            if hasattr(item, "update_flag"):
+                row.update_flag = item.update_flag or ""
+            if hasattr(item, "report_type"):
+                row.report_type = item.report_type or ""
+                row.comp_type = item.comp_type or ""
+            if hasattr(item, "div_proc"):
+                row.div_proc = item.div_proc or ""
+            if hasattr(item, "formal_announcement_date"):
+                row.formal_announcement_date = item.formal_announcement_date
+            for name in value_columns:
+                setattr(row, name, getattr(item, name))
+            row.observed_at = item.observed_at
+            row.available_at = item.available_at
         await self._session.flush()
         return len(records)
 
@@ -918,6 +1247,36 @@ def _copy_financial_fields(
     row.revenue_yoy = item.revenue_yoy
     row.net_profit_yoy = item.net_profit_yoy
     row.operating_cash_flow_yoy = item.operating_cash_flow_yoy
+    # issue #401 批次 3 扩展字段
+    row.operating_revenue_yoy = item.operating_revenue_yoy
+    row.basic_eps_yoy = item.basic_eps_yoy
+    row.deducted_netprofit_yoy = item.deducted_netprofit_yoy
+    row.operating_profit_yoy = item.operating_profit_yoy
+    row.revenue_yoy_q = item.revenue_yoy_q
+    row.revenue_qoq = item.revenue_qoq
+    row.netprofit_yoy_q = item.netprofit_yoy_q
+    row.netprofit_qoq = item.netprofit_qoq
+    row.return_on_assets = item.return_on_assets
+    row.return_on_assets_np = item.return_on_assets_np
+    row.roe_deducted = item.roe_deducted
+    row.roic = item.roic
+    row.roe_q = item.roe_q
+    row.return_on_assets_q = item.return_on_assets_q
+    row.grossprofit_margin_q = item.grossprofit_margin_q
+    row.netprofit_margin_q = item.netprofit_margin_q
+    row.expense_to_revenue = item.expense_to_revenue
+    row.inventory_turnover = item.inventory_turnover
+    row.receivables_turnover = item.receivables_turnover
+    row.current_assets_turnover = item.current_assets_turnover
+    row.fixed_assets_turnover = item.fixed_assets_turnover
+    row.total_assets_turnover = item.total_assets_turnover
+    row.current_ratio = item.current_ratio
+    row.quick_ratio = item.quick_ratio
+    row.debt_to_equity = item.debt_to_equity
+    row.interest_coverage = item.interest_coverage
+    row.equity_multiplier = item.equity_multiplier
+    row.ocf_to_revenue = item.ocf_to_revenue
+    row.ocf_to_debt = item.ocf_to_debt
     row.observed_at = item.observed_at
     row.available_at = item.available_at
 
@@ -985,6 +1344,36 @@ def _financial_from_orm(
         revenue_yoy=row.revenue_yoy,
         net_profit_yoy=row.net_profit_yoy,
         operating_cash_flow_yoy=row.operating_cash_flow_yoy,
+        # issue #401 批次 3 扩展字段(存量行新列为 NULL,自然兼容)
+        operating_revenue_yoy=row.operating_revenue_yoy,
+        basic_eps_yoy=row.basic_eps_yoy,
+        deducted_netprofit_yoy=row.deducted_netprofit_yoy,
+        operating_profit_yoy=row.operating_profit_yoy,
+        revenue_yoy_q=row.revenue_yoy_q,
+        revenue_qoq=row.revenue_qoq,
+        netprofit_yoy_q=row.netprofit_yoy_q,
+        netprofit_qoq=row.netprofit_qoq,
+        return_on_assets=row.return_on_assets,
+        return_on_assets_np=row.return_on_assets_np,
+        roe_deducted=row.roe_deducted,
+        roic=row.roic,
+        roe_q=row.roe_q,
+        return_on_assets_q=row.return_on_assets_q,
+        grossprofit_margin_q=row.grossprofit_margin_q,
+        netprofit_margin_q=row.netprofit_margin_q,
+        expense_to_revenue=row.expense_to_revenue,
+        inventory_turnover=row.inventory_turnover,
+        receivables_turnover=row.receivables_turnover,
+        current_assets_turnover=row.current_assets_turnover,
+        fixed_assets_turnover=row.fixed_assets_turnover,
+        total_assets_turnover=row.total_assets_turnover,
+        current_ratio=row.current_ratio,
+        quick_ratio=row.quick_ratio,
+        debt_to_equity=row.debt_to_equity,
+        interest_coverage=row.interest_coverage,
+        equity_multiplier=row.equity_multiplier,
+        ocf_to_revenue=row.ocf_to_revenue,
+        ocf_to_debt=row.ocf_to_debt,
         source=row.source,
         observed_at=row.observed_at,
         available_at=row.available_at,
@@ -1008,6 +1397,19 @@ def _industry_from_orm(
         effective_from=row.valid_from,
         effective_to=row.valid_to,
         is_current=row.is_current,
+        source=row.source,
+        observed_at=row.observed_at,
+        available_at=row.available_at,
+    )
+
+
+def _suspension_from_orm(row: ResearchSuspensionModel) -> SuspensionRecord:
+    return SuspensionRecord(
+        symbol=row.symbol,
+        trade_date=row.trade_date,
+        suspend_kind=row.suspend_kind,
+        suspend_type=row.suspend_type,
+        suspend_timing=row.suspend_timing,
         source=row.source,
         observed_at=row.observed_at,
         available_at=row.available_at,

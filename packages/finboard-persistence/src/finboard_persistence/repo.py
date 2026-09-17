@@ -8,12 +8,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_persistence.models import (
@@ -21,7 +23,9 @@ from finboard_persistence.models import (
     AuditLogModel,
     BacktestRunModel,
     FillModel,
+    InstrumentLifecycleEventModel,
     InstrumentModel,
+    InstrumentNameModel,
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
@@ -30,9 +34,11 @@ from finboard_persistence.models import (
     WatchlistModel,
 )
 from finboard_shared.identifiers import AccountId, ClientOrderId, StrategyId
+from finboard_shared.instruments import LifecycleEvent
 from finboard_shared.models import Account, Fill, Order, Position, Symbol
 from finboard_shared.types import (
     BrokerKind,
+    ListingStatus,
     Market,
     OrderStatus,
     OrderType,
@@ -85,7 +91,10 @@ def fill_from_orm(row: FillModel) -> Fill:
     return Fill(
         fill_id=row.fill_id,
         client_order_id=ClientOrderId(row.client_order_id),
-        symbol=Symbol(code=row.symbol, market=Market.A_SHARE),  # FIXME: 加列后回填
+        symbol=Symbol(
+            code=row.symbol,
+            market=Market(row.market) if row.market else Market.A_SHARE,
+        ),
         side=Side(row.side),
         quantity=row.quantity,
         price=row.price,
@@ -100,7 +109,10 @@ def fill_from_orm(row: FillModel) -> Fill:
 def position_from_orm(row: PositionModel) -> Position:
     return Position(
         account_id=AccountId(row.account_id),
-        symbol=Symbol(code=row.symbol, market=Market.A_SHARE),  # FIXME: 加列后回填
+        symbol=Symbol(
+            code=row.symbol,
+            market=Market(row.market) if row.market else Market.A_SHARE,
+        ),
         position_side=PositionSide(row.position_side),
         total_quantity=row.total_quantity,
         available_quantity=row.available_quantity,
@@ -264,6 +276,7 @@ class FillRepository:
             client_order_id=str(fill.client_order_id),
             broker_order_id=fill.broker_order_id,
             symbol=fill.symbol.code,
+            market=fill.symbol.market.value,  # issue #58
             side=fill.side.value,
             position_side=fill.position_side.value,
             quantity=fill.quantity,
@@ -385,6 +398,7 @@ class PositionRepository:
             row = PositionModel(
                 account_id=str(position.account_id),
                 symbol=position.symbol.code,
+                market=position.symbol.market.value,  # issue #58
                 position_side=position.position_side.value,
                 source=source,
             )
@@ -529,6 +543,75 @@ class ReconciliationLogRepository:
         return row
 
 
+@dataclass
+class InstrumentSyncResult:
+    """``sync_with_diff`` 的变更摘要(issue #35 生命周期检测)。"""
+
+    new: int = 0
+    updated: int = 0
+    renamed: list[tuple[str, str, str]] = field(default_factory=list)
+    pending_delist: list[str] = field(default_factory=list)
+    delisted: list[str] = field(default_factory=list)
+    reactivated: list[str] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return self.new + self.updated
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentMetadataBackfillResult:
+    """profiles → instruments 元数据回填摘要(issue #185,#251 扩展)。
+
+    ``scoped`` 是本次审查的 instruments 行数(按入参 symbols 或全部未退市标的);
+    ``backfilled_*`` 是本次真实回填的行数;``missing_*`` 是回填完成后仍缺失的
+    行数 —— 让缺失可被发现而非静默。
+    """
+
+    profile_batch_available: bool
+    scoped: int = 0
+    backfilled_list_date: int = 0
+    backfilled_industry: int = 0
+    backfilled_delist_date: int = 0
+    missing_list_date: int = 0
+    missing_industry: int = 0
+    missing_delist_date: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "profile_batch_available": self.profile_batch_available,
+            "scoped": self.scoped,
+            "backfilled_list_date": self.backfilled_list_date,
+            "backfilled_industry": self.backfilled_industry,
+            "backfilled_delist_date": self.backfilled_delist_date,
+            "missing_list_date": self.missing_list_date,
+            "missing_industry": self.missing_industry,
+            "missing_delist_date": self.missing_delist_date,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NameHistoryImportResult:
+    """``instrument_names`` 历史名称导入摘要(issue #251)。
+
+    ``received_records`` 是上游记录数;``rebuilt_symbols`` / ``inserted_records``
+    是去重排序后实际重建的 symbol 数与落库行数。
+    """
+
+    source: str
+    received_records: int = 0
+    rebuilt_symbols: int = 0
+    inserted_records: int = 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "received_records": self.received_records,
+            "rebuilt_symbols": self.rebuilt_symbols,
+            "inserted_records": self.inserted_records,
+        }
+
+
 class InstrumentRepository:
     """标的元数据仓储(instruments 表)。
 
@@ -566,6 +649,7 @@ class InstrumentRepository:
                     market=str(ins.get("market", "a_share")),
                     instrument_type=str(ins.get("instrument_type", "stock")),
                     exchange=ins.get("exchange"),
+                    listing_board=str(ins.get("listing_board", "unknown")),
                     status=str(ins.get("status", "active")),
                 )
                 self._session.add(row)
@@ -573,6 +657,7 @@ class InstrumentRepository:
             else:
                 row.name = str(ins.get("name", row.name))
                 row.exchange = ins.get("exchange", row.exchange)  # type: ignore[assignment]
+                row.listing_board = str(ins.get("listing_board", row.listing_board))
                 if "status" in ins:
                     row.status = str(ins["status"])
 
@@ -590,16 +675,48 @@ class InstrumentRepository:
         *,
         market: str | None = None,
         instrument_type: str | None = None,
+        exchange: str | None = None,
+        listing_boards: list[str] | None = None,
         q: str | None = None,
         limit: int = 5000,
         offset: int = 0,
     ) -> tuple[list[InstrumentModel], int]:
         """查询活跃标的(分页,可选模糊搜索)。"""
-        conditions: list[Any] = [InstrumentModel.status == "active"]
+        return await self.list_page(
+            market=market,
+            instrument_type=instrument_type,
+            exchange=exchange,
+            listing_boards=listing_boards,
+            q=q,
+            limit=limit,
+            offset=offset,
+            status="active",
+        )
+
+    async def list_page(
+        self,
+        *,
+        market: str | None = None,
+        instrument_type: str | None = None,
+        exchange: str | None = None,
+        listing_boards: list[str] | None = None,
+        status: str | None = "active",
+        q: str | None = None,
+        limit: int = 5000,
+        offset: int = 0,
+    ) -> tuple[list[InstrumentModel], int]:
+        """分页查询标的, ``status=None`` 时包含全部生命周期状态。"""
+        conditions: list[Any] = []
+        if status:
+            conditions.append(InstrumentModel.status == status)
         if market:
             conditions.append(InstrumentModel.market == market)
         if instrument_type:
             conditions.append(InstrumentModel.instrument_type == instrument_type)
+        if exchange:
+            conditions.append(InstrumentModel.exchange == exchange)
+        if listing_boards:
+            conditions.append(InstrumentModel.listing_board.in_(listing_boards))
         if q:
             pattern = f"%{q}%"
             conditions.append(
@@ -644,6 +761,8 @@ class InstrumentRepository:
         *,
         market: str | None = None,
         instrument_type: str | None = None,
+        exchange: str | None = None,
+        listing_boards: list[str] | None = None,
         q: str | None = None,
     ) -> list[str]:
         """返回匹配条件的全部标的代码(不分页,轻量)。"""
@@ -652,6 +771,10 @@ class InstrumentRepository:
             conditions.append(InstrumentModel.market == market)
         if instrument_type:
             conditions.append(InstrumentModel.instrument_type == instrument_type)
+        if exchange:
+            conditions.append(InstrumentModel.exchange == exchange)
+        if listing_boards:
+            conditions.append(InstrumentModel.listing_board.in_(listing_boards))
         if q:
             pattern = f"%{q}%"
             conditions.append(
@@ -662,6 +785,423 @@ class InstrumentRepository:
             select(InstrumentModel.code).where(*conditions).order_by(InstrumentModel.code)
         )
         return [row[0] for row in (await self._session.execute(stmt)).all()]
+
+    # ----------------------------------------------------------------- 生命周期 (#35)
+
+    async def sync_with_diff(
+        self,
+        instruments: list[dict[str, object]],
+        *,
+        as_of: date,
+        delist_confirm_runs: int = 2,
+    ) -> InstrumentSyncResult:
+        """带反向 diff 的标的同步(issue #35)。
+
+        正向:新标的 INSERT;已有标的更新 name/exchange,检测改名。
+        反向:DB 有但本次发现列表中消失的标的,``missing_runs`` 累加;
+        连续 ``delist_confirm_runs`` 次消失才标记 ``status=delisted`` + ``delist_date``。
+
+        反向 diff 仅在本次入参覆盖的 ``(market, instrument_type)`` 组合范围内做,
+        避免只拉 A 股时误把 ETF / 港股标记为退市。改名同时写入
+        ``instrument_names`` 历史区间表。
+
+        :param as_of:               本次同步的基准日期(用于 valid_from/delist_date)
+        :param delist_confirm_runs: 连续消失多少次才确认退市(默认 2,二次确认)
+        """
+        result = InstrumentSyncResult()
+        if not instruments:
+            return result
+        if delist_confirm_runs < 1:
+            raise ValueError("delist_confirm_runs 必须 >= 1")
+
+        by_code: dict[str, dict[str, object]] = {}
+        discovered_keys: set[tuple[str, str]] = set()
+        for ins in instruments:
+            code = str(ins["code"])
+            by_code[code] = ins
+            discovered_keys.add(
+                (
+                    str(ins.get("market", "a_share")),
+                    str(ins.get("instrument_type", "stock")),
+                )
+            )
+
+        # 仅查本次发现覆盖的 (market, type) 组合,缩小反向 diff 范围
+        scope_conds = [
+            and_(
+                InstrumentModel.market == mk,
+                InstrumentModel.instrument_type == ty,
+            )
+            for mk, ty in discovered_keys
+        ]
+        db_rows = {
+            row.code: row
+            for row in (
+                await self._session.execute(select(InstrumentModel).where(or_(*scope_conds)))
+            ).scalars().all()
+        }
+
+        # ---- 正向:新增 / 更新 / 改名 / 复活计数归零 ----
+        for code, ins in by_code.items():
+            name = str(ins.get("name", ""))
+            row = db_rows.get(code)
+            if row is None:
+                row = InstrumentModel(
+                    code=code,
+                    name=name,
+                    market=str(ins.get("market", "a_share")),
+                    instrument_type=str(ins.get("instrument_type", "stock")),
+                    exchange=ins.get("exchange"),
+                    listing_board=str(ins.get("listing_board", "unknown")),
+                    status=ListingStatus.ACTIVE.value,
+                    missing_runs=0,
+                )
+                self._session.add(row)
+                db_rows[code] = row
+                result.new += 1
+                await self._open_name_record(code, name, as_of)
+            else:
+                result.updated += 1
+                if name and row.name != name:
+                    result.renamed.append((code, row.name, name))
+                    await self._close_name_record(code, as_of)
+                    await self._open_name_record(code, name, as_of)
+                    row.name = name
+                exchange = ins.get("exchange")
+                if exchange is not None:
+                    row.exchange = exchange  # type: ignore[assignment]
+                if "listing_board" in ins:
+                    row.listing_board = str(ins["listing_board"])
+                # 重新出现:未退市的归零计数并提示复活
+                if row.missing_runs > 0 and row.status != ListingStatus.DELISTED.value:
+                    result.reactivated.append(code)
+                row.missing_runs = 0
+
+        # ---- 反向:退市二次确认(仅当前 scope 内未发现的标的) ----
+        discovered_by_key: dict[tuple[str, str], set[str]] = {}
+        for code, ins in by_code.items():
+            key = (
+                str(ins.get("market", "a_share")),
+                str(ins.get("instrument_type", "stock")),
+            )
+            discovered_by_key.setdefault(key, set()).add(code)
+
+        for code, row in db_rows.items():
+            key = (row.market, row.instrument_type)
+            if code in discovered_by_key.get(key, set()):
+                continue
+            if row.status == ListingStatus.DELISTED.value:
+                continue
+            row.missing_runs += 1
+            if row.missing_runs >= delist_confirm_runs:
+                row.status = ListingStatus.DELISTED.value
+                row.delist_date = as_of
+                result.delisted.append(code)
+            else:
+                result.pending_delist.append(code)
+
+        await self._session.flush()
+        logger.info(
+            "instrument.sync_with_diff",
+            new=result.new,
+            updated=result.updated,
+            renamed=len(result.renamed),
+            pending_delist=len(result.pending_delist),
+            delisted=len(result.delisted),
+            reactivated=len(result.reactivated),
+        )
+        return result
+
+    async def backfill_metadata_from_profiles(
+        self,
+        *,
+        symbols: list[str] | None = None,
+        source: str | None = None,
+    ) -> InstrumentMetadataBackfillResult:
+        """从 ``research_instrument_profiles`` 回填 list_date / industry / delist_date。
+
+        只回填当前为 null 的字段,不覆盖已存在的主数据;profiles 是 tushare
+        ``stock_basic`` 的版本化快照,``instruments`` 的 akshare 发现链路不携带
+        这些字段。``symbols=None`` 时审查全部未退市标的(适合一次性修复)。
+
+        #251:取最近一次**实际摄取过档案的批次**(不论发布状态)—— 此前依赖
+        「已发布 profiles 批次」,profiles 摄取过但从未发布时永久短路、元数据
+        全空。``delist_date`` 回填自退市档案(list_status=D);``status`` 不在
+        此处变更 —— 缺席二次确认(sync_with_diff)是退市状态的唯一权威路径。
+        返回回填前后缺失统计,从未摄取过 profiles 时不视为错误。
+        """
+        from finboard_persistence.profile_metadata import ProfileMetadataLookup
+
+        lookup = ProfileMetadataLookup(self._session)
+        batch = await lookup.latest_batch(source=source, require_published=False)
+        if batch is None:
+            return InstrumentMetadataBackfillResult(profile_batch_available=False)
+
+        stmt = select(InstrumentModel)
+        if symbols is not None:
+            stmt = stmt.where(InstrumentModel.code.in_(symbols))
+        else:
+            stmt = stmt.where(InstrumentModel.status != ListingStatus.DELISTED.value)
+        rows = list((await self._session.execute(stmt)).scalars().all())
+
+        profiles = await lookup.profiles(
+            [row.code for row in rows], source=source, require_published=False
+        )
+        backfilled_list_date = 0
+        backfilled_industry = 0
+        backfilled_delist_date = 0
+        for row in rows:
+            profile = profiles.get(row.code)
+            if profile is None:
+                continue
+            if row.list_date is None and profile.list_date is not None:
+                row.list_date = profile.list_date
+                backfilled_list_date += 1
+            if row.industry is None and profile.industry:
+                row.industry = profile.industry
+                backfilled_industry += 1
+            if row.delist_date is None and profile.delist_date is not None:
+                row.delist_date = profile.delist_date
+                backfilled_delist_date += 1
+        await self._session.flush()
+        result = InstrumentMetadataBackfillResult(
+            profile_batch_available=True,
+            scoped=len(rows),
+            backfilled_list_date=backfilled_list_date,
+            backfilled_industry=backfilled_industry,
+            backfilled_delist_date=backfilled_delist_date,
+            missing_list_date=sum(1 for row in rows if row.list_date is None),
+            missing_industry=sum(1 for row in rows if row.industry is None),
+            missing_delist_date=sum(1 for row in rows if row.delist_date is None),
+        )
+        logger.info("instrument.backfill_from_profiles", **result.as_dict())
+        return result
+
+    async def import_name_history(
+        self,
+        records: Sequence[tuple[str, str, date, date | None]],
+        *,
+        source_name: str = "tushare namechange",
+    ) -> NameHistoryImportResult:
+        """以历史名称变更记录重建 ``instrument_names``(#251)。
+
+        ``records`` 是 ``(symbol, name, valid_from, valid_to)`` 元组(valid_to
+        为 None 表示当前名称,半开区间语义)。上游有记录的 symbol **整组重建**
+        —— 名称历史是纯衍生数据,以 tushare namechange 为准(历史区间从真实
+        变更日开始,而不是首次同步日);上游没有的 symbol 不动(保留
+        ``sync_with_diff`` 已建立的当前名称区间)。同名同起始日的重复行保留
+        最后一条(上游修订);非末行 ``valid_to`` 缺失时用下一行 ``valid_from``
+        补齐,保证区间连续。
+
+        ``status`` 与 ``instruments.name`` 不在此处变更 —— 名称历史的权威在
+        上游区间,主表名称仍由 ``sync_with_diff`` 维护。
+        """
+        by_symbol: dict[str, list[tuple[str, str, date, date | None]]] = {}
+        for record in records:
+            code, name, valid_from, valid_to = record
+            by_symbol.setdefault(code, []).append(
+                (code, name.strip(), valid_from, valid_to)
+            )
+
+        inserted_rows = 0
+        rebuilt_symbols = 0
+        for code, rows in by_symbol.items():
+            # 同 (start_date) 去重,保留最后一条;按 valid_from 排序。
+            deduped: dict[date, tuple[str, str, date, date | None]] = {}
+            for row in rows:
+                deduped[row[2]] = row
+            ordered = [deduped[k] for k in sorted(deduped)]
+            # 非末行缺 valid_to 时用下一行起始日补齐(半开区间连续)。
+            fixed: list[tuple[str, str, date, date | None]] = []
+            for index, row in enumerate(ordered):
+                if row[3] is None and index < len(ordered) - 1:
+                    row = (row[0], row[1], row[2], ordered[index + 1][2])
+                fixed.append(row)
+            await self._session.execute(
+                delete(InstrumentNameModel).where(
+                    InstrumentNameModel.instrument_code == code
+                )
+            )
+            for _, name, valid_from, valid_to in fixed:
+                self._session.add(
+                    InstrumentNameModel(
+                        instrument_code=code,
+                        name=name,
+                        valid_from=valid_from,
+                        valid_to=valid_to,
+                    )
+                )
+            inserted_rows += len(fixed)
+            rebuilt_symbols += 1
+        await self._session.flush()
+        result = NameHistoryImportResult(
+            source=source_name,
+            received_records=len(records),
+            rebuilt_symbols=rebuilt_symbols,
+            inserted_records=inserted_rows,
+        )
+        logger.info("instrument.name_history_imported", **result.as_dict())
+        return result
+
+    async def backfill_listing_dates(
+        self,
+        records: Mapping[str, tuple[date | None, date | None]],
+    ) -> dict[str, int]:
+        """从转债档案回填 ``instruments.list_date`` / ``delist_date``(#265)。
+
+        只回填当前为 null 的字段,不覆盖已有主数据(#251 同风格);来源是
+        tushare cb_basic(转债无 stock_basic 式档案,研究 profiles 表不覆盖
+        转债)。``records`` 是 ``{code: (list_date|None, delist_date|None)}``。
+        返回 scoped / backfilled / missing 计数,缺失可见而非静默。
+        """
+        if not records:
+            return {
+                "scoped": 0,
+                "backfilled_list_date": 0,
+                "backfilled_delist_date": 0,
+                "missing_list_date": 0,
+                "missing_delist_date": 0,
+            }
+        stmt = select(InstrumentModel).where(InstrumentModel.code.in_(list(records)))
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        backfilled_list = 0
+        backfilled_delist = 0
+        for row in rows:
+            list_date, delist_date = records[row.code]
+            if row.list_date is None and list_date is not None:
+                row.list_date = list_date
+                backfilled_list += 1
+            if row.delist_date is None and delist_date is not None:
+                row.delist_date = delist_date
+                backfilled_delist += 1
+        await self._session.flush()
+        result = {
+            "scoped": len(rows),
+            "backfilled_list_date": backfilled_list,
+            "backfilled_delist_date": backfilled_delist,
+            "missing_list_date": sum(1 for row in rows if row.list_date is None),
+            "missing_delist_date": sum(1 for row in rows if row.delist_date is None),
+        }
+        logger.info("instrument.backfill_listing_dates", **result)
+        return result
+
+    async def import_lifecycle_events(
+        self,
+        events: Sequence[LifecycleEvent],
+    ) -> dict[str, int]:
+        """导入时点化生命周期事件到 ``instrument_lifecycle_events``(#265)。
+
+        幂等:按唯一约束 ``(symbol, event_type, effective_date, source,
+        dataset_version)`` 跳过已存在事件(重跑同一上游快照零重复)。
+        ``available_at`` / ``effective_date`` 的一致性由领域模型
+        :class:`finboard_shared.instruments.LifecycleEvent` 的不变量保证。
+        返回 ``{received, inserted, skipped}``。
+        """
+        received = len(events)
+        inserted = 0
+        for event in events:
+            exists_stmt = (
+                select(InstrumentLifecycleEventModel.id)
+                .where(
+                    InstrumentLifecycleEventModel.symbol == event.symbol,
+                    InstrumentLifecycleEventModel.event_type == event.event_type.value,
+                    InstrumentLifecycleEventModel.effective_date == event.effective_date,
+                    InstrumentLifecycleEventModel.source == event.source,
+                    InstrumentLifecycleEventModel.dataset_version
+                    == event.dataset_version,
+                )
+                .limit(1)
+            )
+            if (await self._session.execute(exists_stmt)).scalar() is not None:
+                continue
+            self._session.add(
+                InstrumentLifecycleEventModel(
+                    symbol=event.symbol,
+                    event_type=event.event_type.value,
+                    effective_date=event.effective_date,
+                    available_at=event.available_at,
+                    source=event.source,
+                    dataset_version=event.dataset_version,
+                    details=dict(event.details),
+                    observed_at=event.observed_at or event.available_at,
+                )
+            )
+            inserted += 1
+        await self._session.flush()
+        logger.info(
+            "instrument.lifecycle_events_imported",
+            received=received,
+            inserted=inserted,
+            skipped=received - inserted,
+        )
+        return {"received": received, "inserted": inserted, "skipped": received - inserted}
+
+    async def update_listing_status(
+        self,
+        code: str,
+        status: ListingStatus,
+        *,
+        delist_date: date | None = None,
+        reset_missing_runs: bool = False,
+    ) -> bool:
+        """更新单个标的的上市状态(停牌检测 / 人工校准用)。
+
+        :returns: 标的是否存在
+        """
+        row = await self._get_by_code(code)
+        if row is None:
+            return False
+        row.status = status.value
+        if delist_date is not None:
+            row.delist_date = delist_date
+        if reset_missing_runs:
+            row.missing_runs = 0
+        await self._session.flush()
+        return True
+
+    async def get_by_code(self, code: str) -> InstrumentModel | None:
+        """按 code 查询单个标的(公开)。"""
+        return await self._get_by_code(code)
+
+    async def name_history(self, code: str) -> list[InstrumentNameModel]:
+        """查询某标的的名称变更历史(按 valid_from 升序)。"""
+        stmt = (
+            select(InstrumentNameModel)
+            .where(InstrumentNameModel.instrument_code == code)
+            .order_by(InstrumentNameModel.valid_from)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def get_status_map(self, codes: set[str]) -> dict[str, str]:
+        """批量返回 ``{code: status}``(停牌检测 / 同步 diff 用)。"""
+        if not codes:
+            return {}
+        stmt = select(InstrumentModel.code, InstrumentModel.status).where(
+            InstrumentModel.code.in_(codes)
+        )
+        return {str(c): str(s) for c, s in (await self._session.execute(stmt)).all()}
+
+    async def _get_by_code(self, code: str) -> InstrumentModel | None:
+        stmt = select(InstrumentModel).where(InstrumentModel.code == code)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def _close_name_record(self, code: str, as_of: date) -> None:
+        stmt = select(InstrumentNameModel).where(
+            InstrumentNameModel.instrument_code == code,
+            InstrumentNameModel.valid_to.is_(None),
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is not None:
+            row.valid_to = as_of
+
+    async def _open_name_record(self, code: str, name: str, as_of: date) -> None:
+        self._session.add(
+            InstrumentNameModel(
+                instrument_code=code,
+                name=name,
+                valid_from=as_of,
+            )
+        )
 
 
 class WatchlistRepository:
