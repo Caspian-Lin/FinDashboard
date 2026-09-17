@@ -177,6 +177,8 @@ export interface Health {
   status: string;
   kernel_ready: boolean;
   kill_switch_level: string;
+  broker_connected?: boolean;
+  broker_kind?: string;
 }
 
 export interface Account {

@@ -162,6 +162,8 @@ export const zh = {
     broker: "券商",
     account: "账户",
     orderTime: "下单时间",
+    accountErrorTitle: "账户数据加载失败",
+    accountErrorFallback: "后端未返回账户数据;总资产、可用资金、冻结资金与账户号暂不可用。",
   },
   positions: {
     title: "持仓",
