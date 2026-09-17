@@ -780,5 +780,117 @@ async def test_enqueue_accepts_valid_risk_config_stop_loss_override(
     response = await client.post("/api/research/runs", json=payload)
 
     assert response.status_code == 201, response.text
+
+
+# ---- issue #482:fee_config 接线与死分区具名拒绝的入队预检 ----
+
+
+async def test_enqueue_seconds_fail_when_fee_config_overrides_invalid(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """fee_config.overrides 未知键 / 越界值入队秒级 422,错误具名键位。
+
+    此前 fee_config 是死分区:任何覆盖入队照收、执行期静默丢弃,覆盖 run
+    与基线逐位相同(agent 做 B(2x成本)消融时实证)。
+    """
+    await _register_release(
+        db_session,
+        (
+            ("600001.SH", date(2020, 1, 1)),
+            ("600002.SH", date(2020, 1, 1)),
+            ("600003.SH", date(2020, 1, 1)),
+        ),
+    )
+    spec = await _register_published_spec(
+        db_session,
+        feature_graph=_price_only_feature_graph(),
+    )
+
+    payload = _queue_payload(spec)
+    payload["fee_config"] = {"no_such_fee_key": 1}
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "fee_config.overrides" in detail
+    assert "未知键" in detail
+
+    payload["fee_config"] = {"commission_rate": 5.0}
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "fee_config.overrides" in detail
+    # 快速失败:不产生 queued research_runs 行。
+    rows = await ResearchRunRepository(db_session).list_recent(limit=10)
+    assert all(row.strategy_kind != spec.strategy_kind for row in rows)
+
+
+async def test_enqueue_seconds_fail_when_dead_partition_overrides_non_empty(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """execution_config / validation_config 非空覆盖入队秒级 422(#482 具名拒绝)。
+
+    此前两分区入队照收、执行期静默 no-op;现在错误指明正确替代通道
+    (费用走 fee_config,验证门控 / timing 须发布新规格版本)。
+    """
+    await _register_release(
+        db_session,
+        (
+            ("600001.SH", date(2020, 1, 1)),
+            ("600002.SH", date(2020, 1, 1)),
+            ("600003.SH", date(2020, 1, 1)),
+        ),
+    )
+    spec = await _register_published_spec(
+        db_session,
+        feature_graph=_price_only_feature_graph(),
+    )
+
+    payload = _queue_payload(spec)
+    payload["execution_config"] = {"timing": "next_open"}
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "execution_config" in detail
+    assert "fee_config" in detail
+
+    payload = _queue_payload(spec)
+    payload["validation_config"] = {"trial_budget": 5}
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 422, response.text
+    detail = str(response.json()["detail"])
+    assert "validation_config" in detail
+
+
+async def test_enqueue_accepts_valid_fee_config_override(
+    client: httpx.AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    """合法费用覆盖(佣金率翻倍)放行,且冻结进 manifest 的 fee_config.overrides。"""
+    symbols = (
+        ("600001.SH", date(2020, 1, 1)),
+        ("600002.SH", date(2020, 1, 1)),
+        ("600003.SH", date(2020, 1, 1)),
+    )
+    await _register_release(db_session, symbols)
+    daily_id = await _register_daily_metrics_release(db_session, symbols)
+    spec = await _register_published_spec(
+        db_session,
+        dataset_release_ids=(RELEASE_ID, daily_id),
+    )
+    payload = _queue_payload(spec)
+    payload["fee_config"] = {"commission_rate": 0.0006}
+
+    response = await client.post("/api/research/runs", json=payload)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["manifest"]["fee_config"]["overrides"] == {"commission_rate": 0.0006}
     body = response.json()
     assert body["status"] == "queued"

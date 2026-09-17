@@ -149,12 +149,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   screen run 会白跑 1-2 小时才在组合阶段 REJECTED),错误附排除统计、生效
   阈值与 portfolio_config.overrides 键位修复路径;max_risk_contribution
   非法值与 risk_config.overrides 形态错误同样入队即拒。配置分区键位
-  (#303 起 risk_config 真实接线,此前是死分区):portfolio_config 管
-  组合约束(如 {"max_risk_contribution": 0.5}),risk_config 管风险退出
-  (如 {"rules": [{"rule_type": "price_stop_loss", "enabled": true,
-  "threshold": 0.08}]},按 rule_type 与规格策略同名合并覆盖),键位不可混;
-  manifest 原样冻结,覆盖只发生在消费端。逐期真实买入池入队期不可精确
-  预知,运行期 fail-closed 兜底不变。
+  (#303 起 risk_config、#482 起 fee_config 真实接线,此前是死分区):
+  portfolio_config 管组合约束(如 {"max_risk_contribution": 0.5}),risk_config
+  管风险退出(如 {"rules": [{"rule_type": "price_stop_loss", "enabled": true,
+  "threshold": 0.08}]},按 rule_type 与规格策略同名合并覆盖),fee_config 管
+  成交费用(overrides 按键名与规格 execution_model 同名合并:佣金率/最低佣金/
+  印花税/滑点),键位不可混;execution_config / validation_config 不接覆盖,
+  非空入队即拒(#482);manifest 原样冻结,覆盖只发生在消费端。逐期真实买入池
+  入队期不可精确预知,运行期 fail-closed 兜底不变。
   run_queue payload 模板与
   各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
   manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。写操作

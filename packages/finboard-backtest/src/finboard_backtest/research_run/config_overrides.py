@@ -1,4 +1,5 @@
-"""manifest 配置分区(portfolio_config / risk_config)消费与入队组合预检(issue #303)。
+"""manifest 配置分区(portfolio_config / risk_config / fee_config)消费与入
+队政策预检(issue #303 / #482)。
 
 manifest 配置分区的语义此前只有 portfolio_config 有真实消费者,risk_config 是
 死分区 —— 全仓仅 payload 守卫 / checksum 序列化 / from_payload 三处机械引用,
@@ -12,9 +13,16 @@ manifest 配置分区的语义此前只有 portfolio_config 有真实消费者,r
   波动止损 / 持有期 / 回撤降风险 / 冷却,读 ``risk_config["overrides"]``,形态
   ``{"rules": [{"rule_type": "price_stop_loss", "enabled": true,
   "threshold": 0.08}, ...]}``,按 ``rule_type`` 与
-  ``strategy_spec.risk_exit_policy`` 同名合并、overrides 覆盖同名键。
+  ``strategy_spec.risk_exit_policy`` 同名合并、overrides 覆盖同名键;
+* ``fee_config`` 管**成交费用**(issue #482 接线):佣金率 / 最低佣金 /
+  卖出印花税 / 滑点 bps,读 ``fee_config["overrides"]``,按键名与
+  ``strategy_spec.execution_model`` 同名合并、overrides 覆盖同名键(此前该
+  分区自 #127 起只存不用,任何覆盖都被静默丢弃)。
 
-两个分区的键位不可混(组合约束键写进 risk_config 不生效,反之亦然)。
+键位不可混(组合约束键写进 risk_config 不生效,反之亦然;费用键只在
+fee_config)。``execution_config`` / ``validation_config`` 自 #127 起是零消费
+者死分区,#482 起入队对非空覆盖具名拒绝(不再静默 no-op),需求引导到
+fee_config / 新规格版本。
 manifest 原样冻结(checksum 语义不变),merge / 覆盖只发生在消费端;运行期
 (``PortfolioPipelineAdapter``)与入队预检(REST 422 / MCP invalid_argument)
 共用本模块的解析函数,保证两边口径不漂移。所有非法配置 fail-closed:入队期
@@ -31,7 +39,10 @@ from datetime import date
 from pydantic import ValidationError
 
 from finboard_backtest.portfolio.contracts import MAX_WEIGHT_EPSILON
-from finboard_backtest.strategy_spec.contracts import RiskExitPolicy
+from finboard_backtest.strategy_spec.contracts import (
+    ExecutionModel,
+    RiskExitPolicy,
+)
 from finboard_backtest.strategy_spec.universe_precheck import UniversePoolPreview
 
 #: ``max_risk_contribution`` 的缺省值(``_constraints_from_manifest`` 既有默认,
@@ -162,6 +173,89 @@ def merge_risk_exit_policy(
         ) from exc
 
 
+#: ``fee_config.overrides`` 唯一合法的键(execute 模型的费用四键;timing 等
+#: 执行语义不支持队列覆盖)。
+_FEE_OVERRIDE_KEYS = frozenset(
+    {"commission_rate", "minimum_commission", "sell_tax_rate", "slippage_bps"}
+)
+
+#: fee_config.overrides 的合法形态说明(错误消息共用,单一来源)。
+_FEE_OVERRIDE_SHAPE = (
+    "fee_config.overrides 合法键: commission_rate(0<=值<=0.1)/"
+    "minimum_commission(>=0)/sell_tax_rate(0<=值<=0.1)/slippage_bps"
+    "(0<=值<=10000)—— 按键名与 strategy_spec.execution_model 同名合并,"
+    "overrides 覆盖同名键(未声明键继承规格值);timing 等执行语义不支持"
+    "队列覆盖。分区键位:成交费用在 fee_config,组合约束在 portfolio_config,"
+    "风险退出在 risk_config。"
+)
+
+#: ``execution_config`` / ``validation_config`` 非空覆盖的具名拒绝文案(#482):
+#: 两分区自 #127 起没有任何业务消费者(入队照收、执行期静默丢弃),接线它们
+#: 的合法覆盖面未定义,先以具名错误堵住静默 no-op。
+_DEAD_PARTITION_HINTS: dict[str, str] = {
+    "execution_config": (
+        "execution_config 分区不接受覆盖(issue #482 起入队即拒,此前为静默 "
+        "no-op 死分区):成交费用覆盖走 fee_config.overrides(合法键 "
+        "commission_rate / minimum_commission / sell_tax_rate / slippage_bps),"
+        "timing 等执行语义暂不支持队列覆盖,须发布新规格版本调整。"
+    ),
+    "validation_config": (
+        "validation_config 分区不接受覆盖(issue #482 起入队即拒,此前为静默 "
+        "no-op 死分区):验证门控来自 strategy_spec.validation_plan,"
+        "须发布新规格版本调整。"
+    ),
+}
+
+
+def merge_fee_overrides(
+    base: ExecutionModel,
+    fee_overrides: Mapping[str, object],
+) -> ExecutionModel:
+    """把 ``fee_config.overrides`` 合并进基准执行模型(issue #482)。
+
+    覆盖语义:按费用键名(佣金率 / 最低佣金 / 卖出印花税 / 滑点 bps)与
+    ``strategy_spec.execution_model`` 同名合并,未声明键继承规格值;合并结果
+    经 ``ExecutionModel`` 模型校验(值域 fail-closed)。overrides 为空时原样
+    返回基准(零行为变化)。未知键 / 非法值抛带键位与修复路径的
+    ``ValueError`` —— 入队期秒级拒绝,运行期经
+    ``ResearchConstraintViolationError`` 使 run REJECTED。
+    """
+    if not fee_overrides:
+        return base
+    unknown = sorted(set(fee_overrides) - _FEE_OVERRIDE_KEYS)
+    if unknown:
+        raise ValueError(
+            f"fee_config.overrides 含未知键 {unknown};{_FEE_OVERRIDE_SHAPE}"
+        )
+    merged = base.model_dump()
+    for key, value in fee_overrides.items():
+        merged[key] = value
+    try:
+        return ExecutionModel.model_validate(merged)
+    except ValidationError as exc:
+        raise ValueError(
+            f"fee_config.overrides 合并后未通过执行模型校验: {exc};"
+            f"{_FEE_OVERRIDE_SHAPE}"
+        ) from exc
+
+
+def reject_dead_policy_overrides(
+    execution_overrides: Mapping[str, object],
+    validation_overrides: Mapping[str, object],
+) -> None:
+    """``execution_config`` / ``validation_config`` 非空覆盖具名拒绝(#482)。
+
+    此前两分区入队照收、执行期静默丢弃(#127 起零消费者),外置 agent 按
+    工具文档传入覆盖会得到与基线逐位相同的结果。#482 拍板:接线语义不明
+    (执行 / 验证政策的合法覆盖面未定义)先具名拒绝并把需求引导到正确通道
+    (fee_config / 新规格版本);空 dict 的既有 payload 模板零影响。
+    """
+    if execution_overrides:
+        raise ValueError(_DEAD_PARTITION_HINTS["execution_config"])
+    if validation_overrides:
+        raise ValueError(_DEAD_PARTITION_HINTS["validation_config"])
+
+
 def research_portfolio_gate_error(
     *,
     preview: UniversePoolPreview,
@@ -220,11 +314,91 @@ def research_portfolio_gate_error(
     )
 
 
+#: ``fee_config`` 摘要展示的费用键(与 _FEE_OVERRIDE_KEYS 同一集合,顺序即
+#: 回显顺序)。
+_FEE_POLICY_KEYS = ("commission_rate", "minimum_commission", "sell_tax_rate", "slippage_bps")
+
+
+def fee_policy_summary(manifest: Mapping[str, object]) -> dict[str, object]:
+    """存储 manifest dict → 生效费用参数与来源摘要(读侧派生,issue #482)。
+
+    供 run 详情(MCP ``_run_detail``)回显「生效费用参数从哪来」:
+    ``spec`` 为规格快照、``overrides`` 为队列覆盖、``effective`` 为二者按键名
+    合并的生效值、``overrides_applied`` 标记覆盖是否存在。纯读侧派生,
+    不写入任何存储 payload、不参与 checksum;历史 manifest 中残留的未知键
+    (接线前被静默存储)不进入 effective,仅原样出现在 overrides。
+    """
+    spec_section = manifest.get("strategy_spec")
+    execution_section = (
+        spec_section.get("execution_model")
+        if isinstance(spec_section, Mapping)
+        else None
+    )
+    spec_values: dict[str, object] = {
+        key: execution_section.get(key) if isinstance(execution_section, Mapping) else None
+        for key in _FEE_POLICY_KEYS
+    }
+    fee_section = manifest.get("fee_config")
+    raw_overrides = (
+        fee_section.get("overrides") if isinstance(fee_section, Mapping) else None
+    )
+    overrides = (
+        {k: v for k, v in raw_overrides.items() if isinstance(v, (int, float))}
+        if isinstance(raw_overrides, Mapping)
+        else {}
+    )
+    effective = {
+        key: overrides.get(key, spec_values[key])
+        for key in _FEE_POLICY_KEYS
+        if overrides.get(key) is not None or spec_values[key] is not None
+    }
+    return {
+        "spec": spec_values,
+        "overrides": overrides,
+        "effective": effective,
+        "overrides_applied": bool(overrides),
+    }
+
+
+def research_policy_gate_error(
+    *,
+    execution_model: ExecutionModel,
+    fee_overrides: Mapping[str, object],
+    execution_overrides: Mapping[str, object],
+    validation_overrides: Mapping[str, object],
+) -> str | None:
+    """入队期政策覆盖预检:fee_config 接线 + 死分区具名拒绝(issue #482)。
+
+    REST(``POST /api/research/runs`` → 422)与 MCP(``finboard_run_queue`` /
+    ``finboard_backtest_run`` strategy 形态 → invalid_argument)共用本门控,
+    与 ``research_portfolio_gate_error`` 并列调用:
+
+    1. ``fee_config.overrides`` 未知键 / 非法值入队即拒(按规格的真实基准
+       execution_model 重放运行期同一 merge,费用覆盖错误不再等到执行期);
+    2. ``execution_config`` / ``validation_config`` 非空覆盖具名拒绝 ——
+       两分区自 #127 起为零消费者死分区,此前静默 no-op(覆盖 run 与基线
+       逐位相同),#482 起给出明确错误与替代通道而非假装生效。
+    """
+    try:
+        merge_fee_overrides(execution_model, fee_overrides)
+    except ValueError as exc:
+        return str(exc)
+    try:
+        reject_dead_policy_overrides(execution_overrides, validation_overrides)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
 __all__ = [
     "DEFAULT_MAX_RISK_CONTRIBUTION",
     "effective_max_risk_contribution",
+    "fee_policy_summary",
+    "merge_fee_overrides",
     "merge_risk_exit_policy",
     "min_pool_for_risk_cap",
+    "reject_dead_policy_overrides",
+    "research_policy_gate_error",
     "research_portfolio_gate_error",
     "section_overrides",
 ]
