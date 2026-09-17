@@ -123,6 +123,17 @@ export const INFO_HINTS = {
         en: "It differs from the bar cache count; after integration tests, sync failures, or before the first sync there may only be a few test/legacy records.",
       },
     },
+    statsScope: {
+      title: { zh: "顶部统计口径", en: "Top stats scope" },
+      description: {
+        zh: "标的字典（数据库标的数 / A股 / ETF）来自 PostgreSQL 元数据表；缓存标的数是本地 Parquet 行情缓存条数。",
+        en: "The instrument dictionary (Instruments in DB / A-shares / ETFs) comes from the PostgreSQL metadata table; Cached symbols counts local Parquet bar cache entries.",
+      },
+      detail: {
+        zh: "两者相互独立存储；缓存文件不会自动生成名称、市场、上市状态和生命周期资料。标的池同步只写元数据、不拉取行情，标的要进入缓存需在批量或单标的拉取中显式选择。",
+        en: "They are stored independently; cache files never gain name, market, listing status or lifecycle data automatically. Universe sync writes metadata only and pulls no bars, so a symbol enters the cache only when explicitly selected in a bulk or single-symbol fetch.",
+      },
+    },
     universeSync: {
       title: { zh: "标的池同步", en: "Universe sync" },
       description: {

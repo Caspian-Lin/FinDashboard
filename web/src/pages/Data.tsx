@@ -282,15 +282,27 @@ export default function Data({ embedded = false }: { embedded?: boolean }) {
       )}
 
       {/* Stats row */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          label={tl({ zh: "数据库标的数", en: "Instruments in DB" })}
-          value={String(totalInstruments)}
-          hint={INFO_HINTS.data.databaseUniverse}
-        />
-        <StatCard label={tl({ zh: "缓存标的数", en: "Cached symbols" })} value={String(status?.total ?? 0)} />
-        <StatCard label={tl({ zh: "A股", en: "A-shares" })} value={String(aShareStocks?.total ?? 0)} />
-        <StatCard label="ETF" value={String(etfs?.total ?? 0)} />
+      <div>
+        <p className="mb-2 text-xs text-muted-foreground">
+          {tl({
+            zh: "数据库标的数 / A股 / ETF 来自标的字典元数据;缓存标的数是本地行情缓存条数——两者独立存储,缓存不会自动生成名称、市场与上市状态。",
+            en: "Instruments in DB / A-shares / ETFs come from instrument dictionary metadata, while Cached symbols counts local bar cache entries. They are stored independently: cache files do not gain name, market or listing status.",
+          })}
+        </p>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard
+            label={tl({ zh: "数据库标的数", en: "Instruments in DB" })}
+            value={String(totalInstruments)}
+            hint={INFO_HINTS.data.databaseUniverse}
+          />
+          <StatCard
+            label={tl({ zh: "缓存标的数", en: "Cached symbols" })}
+            value={String(status?.total ?? 0)}
+            hint={INFO_HINTS.data.statsScope}
+          />
+          <StatCard label={tl({ zh: "A股", en: "A-shares" })} value={String(aShareStocks?.total ?? 0)} />
+          <StatCard label="ETF" value={String(etfs?.total ?? 0)} />
+        </div>
       </div>
 
       {/* Sync + Single fetch */}
