@@ -109,6 +109,16 @@ _UNIVERSE_SUMMARY_SQL = text(
     """
 )
 
+#: run 全部 artifact payload 的 JSON 文本体量(#480):``json`` 列的
+#: ``::text`` 只是 detoast + 计长,不做 JSON 解析,可在加载前给出有界估计。
+_ARTIFACT_PAYLOAD_BYTES_SQL = text(
+    """
+    SELECT COALESCE(SUM(octet_length(artifact.payload::text)), 0)
+    FROM research_run_artifacts AS artifact
+    WHERE artifact.run_id = :run_id
+    """
+)
+
 #: fills 按决策计数:``decision_id`` NULL 记空串;0 长度也保键,与 Python
 #: 聚合的无条件赋值一致;非数组 / 缺失 fills 记 0(jsonb 函数只在 CASE
 #: THEN 分支求值,非数组不抛错)。
@@ -399,6 +409,23 @@ class ResearchRunRepository:
             fills_by_decision={
                 str(row.decision_key): int(row.fill_count) for row in fills_rows
             },
+        )
+
+    async def estimate_artifact_payload_bytes(self, run_id: str) -> int:
+        """数据库侧估计 run 全部 payload 的 JSON 文本体量(#480),不取回 payload。
+
+        ``report_run(view=detail)`` / ``report_export(kind=run)`` 加载前的
+        载荷护栏口径(#458 阈值 ``RUN_DETAIL_MAX_ESTIMATED_BYTES`` 沿用);
+        与旧加载后 ``len(str(payload))`` 估计同数量级。``json`` 列的
+        ``::text`` 只做 detoast + 计长,真实 run(7203 artifacts / ≈5.9GB
+        JSON)实测 7.8s,远低于把同量数据拉进客户端的分钟级与 13GB 峰值。
+        """
+        return int(
+            (
+                await self._session.execute(
+                    _ARTIFACT_PAYLOAD_BYTES_SQL, {"run_id": run_id}
+                )
+            ).scalar_one()
         )
 
     def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchRunArtifactModel]:

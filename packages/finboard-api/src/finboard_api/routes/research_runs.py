@@ -583,6 +583,7 @@ async def list_research_artifacts(
     repo = ResearchRunRepository(session)
     if await repo.get(run_id) is None:
         raise HTTPException(status_code=404, detail="研究运行不存在")
+    await _require_artifact_payload_within_limit(repo, run_id)
     rows = await repo.list_artifacts(run_id)
     return [ResearchArtifactOut.model_validate(row) for row in rows]
 
@@ -596,9 +597,12 @@ async def get_research_lineage(
     trace_id: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> ResearchLineageOut:
-    store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+    repo = ResearchRunRepository(session)
+    store = SqlAlchemyResearchRunStore(repo)
     from finboard_backtest.research_run import ResearchRunCoordinator
 
+    # issue #480:lineage 内部全量物化 artifacts,同款加载前护栏。
+    await _require_artifact_payload_within_limit(repo, run_id)
     artifacts = await ResearchRunCoordinator(store).lineage(run_id, trace_id)
     if not artifacts:
         raise HTTPException(status_code=404, detail="血缘 trace 不存在")
@@ -805,6 +809,7 @@ async def export_research_run_report(
     row = await repo.get(run_id)
     if row is None:
         raise HTTPException(status_code=404, detail="研究运行不存在")
+    await _require_artifact_payload_within_limit(repo, run_id)
     artifacts = await repo.list_artifacts(run_id)
     report = reporting.aggregate_run_report(row, artifacts, view="detail")
     content = await asyncio.to_thread(reporting.render_report, "run", report, format)
@@ -817,6 +822,35 @@ async def export_research_run_report(
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+async def _require_artifact_payload_within_limit(
+    repo: ResearchRunRepository,
+    run_id: str,
+) -> None:
+    """全量 payload 路径加载前的数据库侧载荷护栏(issue #480)。
+
+    与 MCP 侧同口径:先 ``estimate_artifact_payload_bytes``
+    (``SUM(octet_length(payload::text))``,不取回 payload),超过
+    ``RUN_DETAIL_MAX_ESTIMATED_BYTES`` 以 413 具名拒绝 —— 旧口径直接
+    ``list_artifacts`` 全量物化,真实 run(7203 artifacts / ≈5.9GB JSON)
+    曾把 dev server 进程顶到 10GB+ 且拖到客户端超时。
+    """
+    from finboard_mcp import reporting
+
+    estimated = await repo.estimate_artifact_payload_bytes(run_id)
+    if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
+        estimated_mb = estimated / (1024 * 1024)
+        limit_mb = reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"run {run_id} 的 artifacts 载荷估计约 {estimated_mb:.1f}MB,"
+                f"超过上限 {limit_mb:.0f}MB,拒绝加载(不静默截断)。替代路径:"
+                "run 详情的聚合计数与 metrics;MCP finboard_report_run / "
+                "finboard_report_export 按 decision_id 按决策下钻。"
+            ),
+        )
 
 
 def _safe_filename(value: str) -> str:

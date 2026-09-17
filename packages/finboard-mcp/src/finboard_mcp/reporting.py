@@ -95,26 +95,10 @@ def _iso(value: Any) -> str | None:
 
 
 #: detail 视图载荷硬上限(issue #458):估计字节数超过即具名拒绝
-#: (``payload_too_large``),不静默截断。估计口径见
-#: :func:`estimate_run_detail_bytes`(repr 长度与 JSON 体量同数量级)。
+#: (``payload_too_large``),不静默截断。估计口径:数据库侧
+#: ``SUM(octet_length(payload::text))``(``ResearchRunRepository.
+#: estimate_artifact_payload_bytes``,#480),在加载之前执行。
 RUN_DETAIL_MAX_ESTIMATED_BYTES = 64 * 1024 * 1024
-
-
-def estimate_run_detail_bytes(
-    artifacts: list[ResearchRunArtifactModel],
-) -> int:
-    """廉价估计 detail 视图载荷体量(逐 artifact ``len(str(payload))`` 累计,#458)。
-
-    payload 在 DB 读取时已反序列化为 dict,``str()`` 是 C 级实现且逐 artifact
-    计完长度即弃 —— 峰值内存为最大单个 artifact 的字符串化结果;合计值与
-    JSON 序列化体量同数量级(repr 引号 / 转义差异不影响量级判断)。
-    """
-    total = 0
-    for item in artifacts:
-        payload = item.payload
-        if payload:
-            total += len(str(payload))
-    return total
 
 
 def aggregate_run_report(
@@ -524,7 +508,6 @@ __all__ = [
     "RUN_DETAIL_MAX_ESTIMATED_BYTES",
     "aggregate_backtest_report",
     "aggregate_run_report",
-    "estimate_run_detail_bytes",
     "export_dir",
     "export_report",
     "metrics_without_equity_curve",

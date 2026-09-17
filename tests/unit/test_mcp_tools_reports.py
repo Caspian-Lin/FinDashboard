@@ -173,6 +173,15 @@ def _patch_run_repos(
         "summarize_artifacts",
         lambda self, rid: _async_return(summary),
     )
+    # issue #480:detail / export 加载前先数据库侧估计载荷。
+    estimated = sum(
+        len(str(a.payload)) for a in (artifacts or []) if a.payload
+    )
+    monkeypatch.setattr(
+        ResearchRunRepository,
+        "estimate_artifact_payload_bytes",
+        lambda self, rid: _async_return(estimated),
+    )
 
 
 def _patch_backtest_repos(

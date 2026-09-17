@@ -241,8 +241,23 @@ class TestGetRun:
 
 
 class TestListArtifacts:
-    async def test_returns_artifacts(self) -> None:
-        app = _make_app(_session_maker(get_row=_run_model(), artifact_rows=[_artifact_model()]))
+    async def test_returns_artifacts(self, monkeypatch: Any) -> None:
+        artifacts = [_artifact_model()]
+        _patch_db_summary(monkeypatch, artifacts)
+        # estimate / list 桩:载荷未超限(集成测试覆盖真 SQL 口径)。
+        from finboard_persistence import ResearchRunRepository
+
+        monkeypatch.setattr(
+            ResearchRunRepository,
+            "estimate_artifact_payload_bytes",
+            lambda self, rid: _async_return(1),
+        )
+        monkeypatch.setattr(
+            ResearchRunRepository,
+            "list_artifacts",
+            lambda self, rid: _async_return(artifacts),
+        )
+        app = _make_app(_session_maker(get_row=_run_model()))
         env = await runs.list_artifacts(app, "RR-1")
         assert env.status == "ok"
         assert env.data[0]["artifact_id"] == "A-1"

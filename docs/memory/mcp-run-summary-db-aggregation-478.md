@@ -41,6 +41,39 @@ PASS;语义锚点测试防「两个实现一起错」)。
   (本次 `report_run(view=summary)` 与 `get_run` 同病灶),要按
   `list_artifacts` 的全部调用方逐个分诊。
 
+## 后续:#480 detail / export 护栏前移(2026-09-16)
+
+#458 的载荷护栏是「先 `list_artifacts` 全量物化 → Python `len(str(payload))`
+估计 → 拒绝序列化」,估计发生在加载之后,挡不住加载本身:#479 合并并重启后,
+`report_run(view=detail)` 与 `report_export` 在同一真实 run 上实测仍 110s 左右
+冲到 10.2GB+(0.25s 采样曲线,熔断中断)。
+
+修复(issue #480):`ResearchRunRepository.estimate_artifact_payload_bytes` ——
+`SUM(octet_length(payload::text))`,`json` 列 `::text` 仅 detoast + 计长、
+不做 JSON 解析,真实 run 实测 5666MB / 7.8s;`report_run(view=detail)` /
+`report_export(kind=run)` 加载前先估计,超限直接具名 `payload_too_large`
+(下钻单决策豁免不变);加载后的内存估计 `estimate_run_detail_bytes` 删除,
+护栏单一来源。修后曲线:detail 8.3s / export 7.5s,峰值均 140MB。
+
+**教训:护栏/估计必须在加载之前(数据库侧)做——「先加载再判断」的任何
+护栏都救不了内存。**
+
+### 二次事故(2026-09-16,#480 修复分支上复现 ~15GB)
+
+用户重启 dev 后仍暴涨:`pg_stat_activity` 抓到 11 分钟的全实体 payload
+SELECT,dev server 驻留 20.6GB;经线上 MCP 端口复现锁定肇事工具 =
+`finboard_run_artifacts`(当时列为「遗留」未修),lineage(MCP+REST)同款
+内部全量物化。修复随 PR #481 b2c4470:四个剩余入口(`finboard_run_artifacts`
+/ `finboard_run_lineage` / REST `/{id}/artifacts` / REST `/{id}/report/export`
++ `/{id}/lineage/{trace}`)全部加同款估计护栏,线上实测 4-5s 具名拒绝、
+峰值 181MB。
+
+**教训 2:修「一类问题」时按 `list_artifacts` 的全部调用方枚举收口,不要留
+「遗留待讨论」的活口——用户/agent 不会知道哪个工具是安全的。** 止血:
+`pg_cancel_backend` + 重启 dev;重启时确认 8765 端口已释放(残留 MCP 子进程
+占端口会让新实例静默无 MCP)。剩余遗留仅契约层分页/裁剪设计(见 issue
+#480 评论)。
+
 ## How to apply
 
 - 新增「按 run 聚合」类 MCP / REST 查询时,禁止

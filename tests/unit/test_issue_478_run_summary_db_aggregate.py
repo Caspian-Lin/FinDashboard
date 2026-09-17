@@ -191,8 +191,8 @@ def _patch_repos(
     row: ResearchRunModel | None,
     artifacts: list[ResearchRunArtifactModel],
 ) -> dict[str, int]:
-    """类级桩 get / summarize_artifacts / list_artifacts,并记录调用次数。"""
-    calls = {"get": 0, "summarize": 0, "list": 0}
+    """类级桩 get / summarize_artifacts / estimate / list_artifacts,记录调用次数。"""
+    calls = {"get": 0, "summarize": 0, "estimate": 0, "list": 0}
 
     async def _get(self: ResearchRunRepository, rid: str) -> ResearchRunModel | None:
         calls["get"] += 1
@@ -204,6 +204,10 @@ def _patch_repos(
         calls["summarize"] += 1
         return _db_summary_of(artifacts)
 
+    async def _estimate(self: ResearchRunRepository, rid: str) -> int:
+        calls["estimate"] += 1
+        return sum(len(str(a.payload)) for a in artifacts if a.payload)
+
     async def _list(
         self: ResearchRunRepository, rid: str
     ) -> list[ResearchRunArtifactModel]:
@@ -212,6 +216,9 @@ def _patch_repos(
 
     monkeypatch.setattr(ResearchRunRepository, "get", _get)
     monkeypatch.setattr(ResearchRunRepository, "summarize_artifacts", _summarize)
+    monkeypatch.setattr(
+        ResearchRunRepository, "estimate_artifact_payload_bytes", _estimate
+    )
     monkeypatch.setattr(ResearchRunRepository, "list_artifacts", _list)
     return calls
 
@@ -225,7 +232,7 @@ class TestGetRunWiring:
         calls = _patch_repos(monkeypatch, _run_row(), artifacts)
         env = await runs.get_run(_make_app(), _RUN_ID)
         assert env.status == "ok", env.error
-        assert calls == {"get": 1, "summarize": 1, "list": 0}
+        assert calls == {"get": 1, "summarize": 1, "estimate": 0, "list": 0}
         data = env.data
         assert data["view"] == "summary"
         assert data["artifact_count"] == len(artifacts)
@@ -256,7 +263,7 @@ class TestGetRunWiring:
         calls = _patch_repos(monkeypatch, _run_row(), _sample_artifacts())
         env = await runs.get_run(_make_app(), _RUN_ID, view="detail")
         assert env.status == "ok", env.error
-        assert calls == {"get": 1, "summarize": 0, "list": 0}
+        assert calls == {"get": 1, "summarize": 0, "estimate": 0, "list": 0}
         assert env.data["manifest"] == {"ok": True}
         assert "universe" not in env.data
 
@@ -268,7 +275,7 @@ class TestGetRunWiring:
         assert env.status == "error"
         assert env.error is not None
         assert env.error.kind == "not_found"
-        assert calls == {"get": 1, "summarize": 0, "list": 0}
+        assert calls == {"get": 1, "summarize": 0, "estimate": 0, "list": 0}
 
     async def test_invalid_view_named_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -279,7 +286,7 @@ class TestGetRunWiring:
         assert env.error is not None
         assert env.error.kind == "invalid_argument"
         # get 先行(与旧路径一致),聚合类调用零触发
-        assert calls == {"get": 1, "summarize": 0, "list": 0}
+        assert calls == {"get": 1, "summarize": 0, "estimate": 0, "list": 0}
 
     async def test_zero_artifact_run_zero_summary(
         self, monkeypatch: pytest.MonkeyPatch
@@ -304,7 +311,7 @@ class TestReportRunWiring:
         calls = _patch_repos(monkeypatch, _run_row(), artifacts)
         env = await rp_tools.report_run(_make_app(), _RUN_ID, view="summary")
         assert env.status == "ok", env.error
-        assert calls == {"get": 1, "summarize": 1, "list": 0}
+        assert calls == {"get": 1, "summarize": 1, "estimate": 0, "list": 0}
         assert env.data["artifact_count"] == len(artifacts)
         assert env.data["universe"]["total"] == 7
         assert "artifacts" not in env.data
@@ -316,7 +323,8 @@ class TestReportRunWiring:
         calls = _patch_repos(monkeypatch, _run_row(), artifacts)
         env = await rp_tools.report_run(_make_app(), _RUN_ID, view="detail")
         assert env.status == "ok", env.error
-        assert calls == {"get": 1, "summarize": 0, "list": 1}
+        # issue #480:detail 先数据库侧估计、未超限才加载。
+        assert calls == {"get": 1, "summarize": 0, "estimate": 1, "list": 1}
         assert len(env.data["artifacts"]) == len(artifacts)
 
 
