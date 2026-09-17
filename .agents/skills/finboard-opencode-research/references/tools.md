@@ -497,8 +497,10 @@ user_defined 条目来自 `research_code_artifacts`(kind=factor),标注
 artifact commit、status 与 promotion_status;引用名为 `u_<artifact_name>`,**仅
 status=active 且 promotion_status=passed 可被规格引用**(retired/未晋级后入队秒级拒绝),观测来自
 `finboard_research_code_run` 落库的快照。
-`source="predefined"` = 平台预置因子只读目录(#427,174 条,同构摘要
-name/family/direction/signal_eligible/title(截断 120 字符)/window/
+`source="predefined"` = 平台预置因子只读目录(#427,与注册表实时同构;
+批次 6/#429 起 260+ 条,覆盖量价/动量/换手/质量/价值/风险/规模/市场回归/
+三表等家族;全量清单对账见 `docs/research/predefined-factor-mapping.md`;
+同构摘要 name/family/direction/signal_eligible/title(截断 120 字符)/window/
 min_history_bars)——「公式即代码」的平台可信因子,**引用名 = `p_<name>`**
 (与用户因子 `u_` 对称),消费路径 = `finboard_factor_series_build`
 (kind=predefined_factor)按 name 批量构建序列后在策略规格中以 `p_<name>` 引用。
@@ -1733,7 +1735,9 @@ missing 具名拒绝 + 重建命令)。
   `v1_series_deprecated` 拒绝,迁移 = 实现 compute_series(ctx) 向量化
   整段序列、头部历史不足产出缺测 → 重新 submit → 晋级链 → 重建)
 - **kind=predefined_factor(平台预置因子,#398)**:`name` 须为注册目录
-  裸名(当前:return_{21,63,126,252}d + alpha101_{N} 31 个,#400),不接受
+  裸名(批次 6/#429 起 260+ 个,覆盖量价/动量/换手/质量/价值/风险/规模/
+  市场回归/三表等家族;全量以 `finboard_factor_catalog(source="predefined")`
+  为准),不接受
   commit/artifact_id/params(实现版本由目录锚定),**进程内执行免容器
   (无 Docker 前置)**;序列引用名 = `p_<name>`(与用户因子 `u_` 对称),
   multi_period run 引用前需先对目标发布+窗口构建 series(与 u_ 同一
