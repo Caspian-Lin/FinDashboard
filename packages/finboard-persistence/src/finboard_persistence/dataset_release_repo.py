@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import dataclasses
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -11,7 +12,11 @@ from typing import Any
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from finboard_data.akshare_provider import futures_series_entry
+from finboard_data.akshare_provider import (
+    futures_product_entry,
+    futures_series_entry,
+    is_futures_main_code,
+)
 from finboard_data.releases import (
     ConvertibleReleaseMetadata,
     DatasetReleaseSpec,
@@ -28,7 +33,14 @@ from finboard_data.releases import (
     research_etf_catalog_entry,
     symbol_set_diff,
 )
-from finboard_data.research import DailySecurityMetrics, FinancialIndicator
+from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
+    DailySecurityMetrics,
+    DividendRecord,
+    FinancialIndicator,
+    IncomeStatement,
+)
 from finboard_persistence.models import (
     ConvertibleMetadataModel,
     EtfMetadataModel,
@@ -36,9 +48,13 @@ from finboard_persistence.models import (
     InstrumentLifecycleEventModel,
     InstrumentModel,
     InstrumentNameModel,
+    ResearchBalanceSheetModel,
+    ResearchCashflowStatementModel,
     ResearchDailyMetricModel,
     ResearchDatasetReleaseModel,
+    ResearchDividendModel,
     ResearchFinancialIndicatorModel,
+    ResearchIncomeStatementModel,
     ResearchInstrumentProfileModel,
 )
 from finboard_persistence.profile_metadata import ProfileMetadataLookup
@@ -493,10 +509,15 @@ class ResearchDatasetReleaseService:
             ReleaseDatasetKind.DAILY_METRICS,
             ReleaseDatasetKind.FINANCIAL_INDICATORS,
             ReleaseDatasetKind.CONVERTIBLE_METRICS,
+            # issue #397:三表 + dividend 研究数据发布。
+            ReleaseDatasetKind.INCOME_STATEMENTS,
+            ReleaseDatasetKind.BALANCE_SHEETS,
+            ReleaseDatasetKind.CASHFLOW_STATEMENTS,
+            ReleaseDatasetKind.DIVIDENDS,
         ):
             raise ReleaseCapabilityError(
                 f"{spec.dataset_kind.value} 发布要求 source=tushare "
-                f"(研究数据来自 research_data_sync 摄取)"
+                f"(研究数据来自 dataset_sync 摄取)"
             )
         if not symbols:  # pragma: no cover - 调用方已校验非空
             raise ReleaseCapabilityError("发布标的不能为空")
@@ -586,6 +607,99 @@ class ResearchTableReleaseSource:
             )
         return result
 
+    async def income_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[IncomeStatement]]:
+        """按报告期窗读取全部利润表公告修订(#397;发布冻结输入)。"""
+        return await self._announced_rows(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            model=ResearchIncomeStatementModel,
+            convert=_income_statements_from_row,
+        )
+
+    async def balance_sheets(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[BalanceSheet]]:
+        """按报告期窗读取全部资产负债表公告修订(#397)。"""
+        return await self._announced_rows(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            model=ResearchBalanceSheetModel,
+            convert=_balance_sheets_from_row,
+        )
+
+    async def cashflow_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[CashflowStatement]]:
+        """按报告期窗读取全部现金流量表公告修订(#397)。"""
+        return await self._announced_rows(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            model=ResearchCashflowStatementModel,
+            convert=_cashflow_statements_from_row,
+        )
+
+    async def dividends(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[DividendRecord]]:
+        """按分红年度窗读取全部分红送股进展(#397)。"""
+        return await self._announced_rows(
+            symbols,
+            start_date=start_date,
+            end_date=end_date,
+            model=ResearchDividendModel,
+            convert=_dividends_from_row,
+        )
+
+    async def _announced_rows(
+        self,
+        symbols: Sequence[str],
+        *,
+        start_date: date,
+        end_date: date,
+        model: Any,
+        convert: Callable[[Any], Any],
+    ) -> dict[str, list[Any]]:
+        """三表/dividend 共用的批量读取(symbol → available_at 升序记录)。"""
+        stmt = (
+            select(model)
+            .where(
+                model.symbol.in_(symbols),
+                model.report_period >= start_date,
+                model.report_period <= end_date,
+            )
+            .order_by(
+                model.symbol,
+                model.report_period,
+                model.announcement_date,
+            )
+        )
+        rows = await self._rows(stmt)
+        result: dict[str, list[Any]] = {}
+        for row in rows:
+            result.setdefault(row.symbol, []).append(convert(row))
+        return result
+
 
 def _daily_metrics_from_row(row: ResearchDailyMetricModel) -> DailySecurityMetrics:
     return DailySecurityMetrics(
@@ -638,6 +752,66 @@ def _financial_indicators_from_row(
         observed_at=row.observed_at,
         available_at=row.available_at,
     )
+
+
+def _announced_from_row(
+    record_type: type[IncomeStatement]
+    | type[BalanceSheet]
+    | type[CashflowStatement]
+    | type[DividendRecord],
+    row: Any,
+) -> object:
+    """三表/dividend ORM 行 → 领域记录(#397;字段按 dataclass 反射拷贝)。
+
+    模型列名与领域记录字段名一致(加列零改动);空字符串口径列还原为
+    ``None``(领域契约用 ``str | None``)。
+    """
+    available_at = row.available_at
+    is_dividend = record_type is DividendRecord
+    kwargs: dict[str, Any] = {
+        "symbol": row.symbol,
+        "announcement_date": row.announcement_date,
+        "report_period": row.report_period,
+        "formal_announcement_date": getattr(
+            row, "formal_announcement_date", None
+        ),
+        "report_type": getattr(row, "report_type", None) or None,
+        "comp_type": getattr(row, "comp_type", None) or None,
+        "update_flag": getattr(row, "update_flag", None) or None,
+        "source": row.source,
+        "observed_at": row.observed_at,
+        "available_at": available_at,
+    }
+    if is_dividend:
+        for name in (
+            "formal_announcement_date",
+            "report_type",
+            "comp_type",
+            "update_flag",
+        ):
+            kwargs.pop(name)
+        kwargs["div_proc"] = row.div_proc or ""
+    for field in dataclasses.fields(record_type):
+        if field.name in kwargs:
+            continue
+        kwargs[field.name] = getattr(row, field.name)
+    return record_type(**kwargs)
+
+
+def _income_statements_from_row(row: Any) -> IncomeStatement:
+    return _announced_from_row(IncomeStatement, row)  # type: ignore[return-value]
+
+
+def _balance_sheets_from_row(row: Any) -> BalanceSheet:
+    return _announced_from_row(BalanceSheet, row)  # type: ignore[return-value]
+
+
+def _cashflow_statements_from_row(row: Any) -> CashflowStatement:
+    return _announced_from_row(CashflowStatement, row)  # type: ignore[return-value]
+
+
+def _dividends_from_row(row: Any) -> DividendRecord:
+    return _announced_from_row(DividendRecord, row)  # type: ignore[return-value]
 
 
 def _release_from_row(row: ResearchDatasetReleaseModel) -> ResearchDatasetRelease:
@@ -873,14 +1047,16 @@ def _futures_main_candidate(
     lifecycle_events: tuple[ReleaseLifecycleEvent, ...],
     name_history: tuple[tuple[str, date, date | None], ...],
 ) -> ReleaseInstrumentSpec:
-    """期货**主连**标的候选(issue #267,登记来自 instruments 表)。
+    """期货标的候选(instruments 表登记:主连 #267 + 合约 #395)。
 
     与 :func:`_future_candidate`(futures_contracts 表的具体月份合约,
-    #58 合约链)是两条不同通道:主连登记在 instruments
-    (``market=future`` / ``instrument_type=futures``),乘数 / 保证金率 /
-    最小变动价位从受控登记表 ``FUTURES_MAIN_SERIES_REGISTRY`` 读取
-    (与 finboard-backtest ``FuturesRule`` 同口径),未登记品种
-    fail-closed 拒绝,禁止猜测。
+    #58 合约链)是两条不同通道:instruments 表的 ``market=future`` /
+    ``instrument_type=futures`` 行承载两种语义 —— 主连(受控登记表,
+    连续序列)与具体月份合约(#395 起 fut_basic 合约级登记)。乘数 /
+    保证金率 / 最小变动价位统一从受控登记表 ``FUTURES_MAIN_SERIES_REGISTRY``
+    读取:主连按主连代码、合约按品种代码(:func:`futures_product_entry`),
+    与 finboard-backtest ``FuturesRule`` 同口径,未登记品种 fail-closed
+    拒绝,禁止猜测。
 
     语义标注(诚实边界):主连是换月拼接产物,**仅用于研究信号 / 基准
     数据,不可当作可成交合约**(对齐 #184「指数不可撮合只做基准」)。
@@ -890,7 +1066,14 @@ def _futures_main_candidate(
     就没有「单份合约到期」语义。已同步事件仍随 manifest 冻结
     (present_event_types + quality_report.futures_instruments 可见)。
     """
-    entry = futures_series_entry(row.code)
+    if is_futures_main_code(row.code):
+        entry = futures_series_entry(row.code)
+    else:
+        # #395 合约级登记:品种层成本口径派生(与主连同源受控表);
+        # 合约身份(代码 / 名称 / 上市退市日)来自 fut_basic 快照。
+        bare = row.code.split(".", 1)[0].upper()
+        product = bare.rstrip("0123456789")
+        entry = futures_product_entry(product)
     return ReleaseInstrumentSpec(
         code=row.code,
         name=row.name or entry.name,
@@ -1008,7 +1191,16 @@ class ReleaseSymbolSourceError(Exception):
 #: convertible_metrics(#265)单独展开转债标的。债券不在行情缓存
 #: 同步范围,展开进发布必然触发覆盖率门失败,不纳入。
 _FULL_MARKET_STOCK_KINDS: frozenset[str] = frozenset(
-    {"a_share_tushare", "daily_metrics", "financial_indicators"}
+    {
+        "a_share_tushare",
+        "daily_metrics",
+        "financial_indicators",
+        # issue #397:财务面扩展的研究数据发布同样只接受 A 股股票。
+        "income_statements",
+        "balance_sheets",
+        "cashflow_statements",
+        "dividends",
+    }
 )
 _FULL_MARKET_MIXED_TYPES: tuple[str, ...] = (
     "stock",

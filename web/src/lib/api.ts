@@ -301,8 +301,6 @@ export const api = {
   getTushareQuota: () => fetchJSON<TushareQuota>("/data/tushare-quota"),
   fetchData: (body: DataFetchRequest) =>
     fetchJSON<FetchResult>("/data/fetch", { method: "POST", body: JSON.stringify(body) }),
-  fetchAllData: () =>
-    fetchJSON<JobOut>("/data/fetch-all", { method: "POST" }),
   getSymbolPool: () => fetchJSON<SymbolPool>("/data/symbols"),
   updateSymbolPool: (body: SymbolPoolUpdate) =>
     fetchJSON<SymbolPool>("/data/symbols", { method: "PUT", body: JSON.stringify(body) }),

@@ -296,9 +296,11 @@ class TestCloseMatrixColumnarEquivalence:
             assert reference is not None
             built = loader.close_histories[code]
             assert isinstance(built, SymbolCloseHistory)
-            assert built.available_at == reference.available_at
-            assert built.dates == reference.dates
-            assert built.closes == reference.closes
+            # #439:内部表示为原生数组,逐数组逐值比较。
+            assert np.array_equal(built.available_at_us, reference.available_at_us)
+            assert np.array_equal(built.date_days, reference.date_days)
+            assert np.array_equal(built.closes, reference.closes)
+            assert built.available_tz_aware == reference.available_tz_aware
             # np.float64 与 float 的边界:切片取值与参照逐值相等且为 float 子类。
             assert built.close_at(
                 datetime.combine(SESSIONS[5], time(15, 0, tzinfo=_CST))

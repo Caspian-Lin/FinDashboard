@@ -8,11 +8,18 @@ from __future__ import annotations
 
 import asyncio
 import math
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import structlog
@@ -55,12 +62,14 @@ from finboard_backtest.research_run.adapters import (
 )
 from finboard_backtest.research_run.config_overrides import (
     effective_max_risk_contribution,
+    merge_fee_overrides,
     merge_risk_exit_policy,
     section_overrides,
 )
 from finboard_backtest.research_run.contracts import (
     CapitalTierOutcome,
     DecisionBundle,
+    DecisionLedgerView,
     EquityPoint,
     FeatureValue,
     LedgerSnapshot,
@@ -79,12 +88,14 @@ from finboard_backtest.research_run.contracts import (
     RiskExitOutcome,
     UniverseCandidate,
     UnsupportedResearchCapabilityError,
+    canonical_json_digest,
     execution_mode_for,
     pipeline_output_checksum,
     stable_checksum,
 )
 from finboard_backtest.strategy_spec.contracts import (
     AllocationMethod,
+    ExecutionModel,
     RiskExitPolicy,
 )
 from finboard_backtest.strategy_spec.contracts import (
@@ -117,6 +128,18 @@ class PortfolioDecisionInput:
     atr: dict[str, float] = field(default_factory=dict)
     fill_ratio_by_symbol: dict[str, float] = field(default_factory=dict)
     rejected_symbols: frozenset[str] = frozenset()
+    # issue #396:执行日全天停牌的标的 —— 当日指令一律拒单(fail-visible),
+    # 不再按停牌前最后一个可见 close 静默「昨收成交」。空集 = 无停牌信息,
+    # 行为与历史一致;checksum 按「空键省略」语义,存量 run 零漂移。
+    suspended_symbols: frozenset[str] = frozenset()
+    #: 决策日 close 序列读取回调(close 矩阵前缀切片,纯同步零 IO,2026-09-13
+    #: 事故修复):协方差覆盖回退用 —— 池内估计的 ``tickers`` 未覆盖全部目标
+    #: 标的(持仓掉出选股池 / 停牌 / 历史不足)或池内估计为 None 时,按
+    #: 「信号标的与当前持仓」重建协方差。None = 不启用回退(矩阵缺失仍由
+    #: fail_closed 拒绝,行为与历史一致)。
+    close_series_provider: Callable[[Sequence[str]], Mapping[str, Sequence[float]]] | None = (
+        None
+    )
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -169,7 +192,14 @@ class PortfolioDecisionInput:
             raise ValueError("fill ratio 必须落在 [0, 1]")
 
     @property
-    def checksum(self) -> str:
+    def checksum_payload(self) -> dict[str, object]:
+        """输入 checksum 载荷(键序无关;canonical 组装按 key 排序)。
+
+        issue #472:与 ``checksum`` 拆开 —— ``_build_decision`` 需要在同一次
+        编码里捕获截面 canonical 片段(capture)供 artifact 落库复用,
+        不能只拿最终 hex。
+        """
+
         covariance_payload: object = None
         if self.covariance is not None:
             covariance_payload = {
@@ -179,28 +209,37 @@ class PortfolioDecisionInput:
                 "n_observations": self.covariance.n_observations,
                 "method": self.covariance.method,
             }
-        return stable_checksum(
-            {
-                "business_date": self.business_date,
-                "decision_at": self.decision_at,
-                "execution_at": self.execution_at,
-                "candidates": self.candidates,
-                "features": self.features,
-                "signals": self.signals,
-                "prices": self.prices,
-                "execution_prices": self.execution_prices,
-                "lot_info": self.lot_info,
-                "input_artifact_ids": self.input_artifact_ids,
-                "covariance": covariance_payload,
-                "sleeve_map": self.sleeve_map,
-                "disabled_symbols": sorted(self.disabled_symbols),
-                "betas": self.betas,
-                "realized_volatility": self.realized_volatility,
-                "atr": self.atr,
-                "fill_ratio_by_symbol": self.fill_ratio_by_symbol,
-                "rejected_symbols": sorted(self.rejected_symbols),
-            }
-        )
+        checksum_payload: dict[str, object] = {
+            "business_date": self.business_date,
+            "decision_at": self.decision_at,
+            "execution_at": self.execution_at,
+            "candidates": self.candidates,
+            "features": self.features,
+            "signals": self.signals,
+            "prices": self.prices,
+            "execution_prices": self.execution_prices,
+            "lot_info": self.lot_info,
+            "input_artifact_ids": self.input_artifact_ids,
+            "covariance": covariance_payload,
+            "sleeve_map": self.sleeve_map,
+            "disabled_symbols": sorted(self.disabled_symbols),
+            "betas": self.betas,
+            "realized_volatility": self.realized_volatility,
+            "atr": self.atr,
+            "fill_ratio_by_symbol": self.fill_ratio_by_symbol,
+            "rejected_symbols": sorted(self.rejected_symbols),
+        }
+        # issue #396:空集省略键 —— 未消费停牌数据的 run 与旧版本逐字节一致
+        # (replay_source_status / factor_series 条件键同先例)。
+        if self.suspended_symbols:
+            checksum_payload["suspended_symbols"] = sorted(self.suspended_symbols)
+        return checksum_payload
+
+    @property
+    def checksum(self) -> str:
+        # issue #472:走流式 canonical 组装(截面分块编码,全文不常驻);
+        # 输出与 ``stable_checksum(checksum_payload)`` 逐字节一致(回归测试钉死)。
+        return canonical_json_digest(self.checksum_payload)
 
 
 @dataclass(slots=True)
@@ -236,8 +275,10 @@ class PortfolioPipelineAdapter:
         self,
         *,
         strategy_kind: str,
-        decision_inputs: Iterable[PortfolioDecisionInput],
+        decision_inputs: Iterable[PortfolioDecisionInput]
+        | AsyncIterator[PortfolioDecisionInput],
         required_capabilities: Iterable[str] = (),
+        resume_stub_inputs: AsyncIterator[_ResumeReplayStub] | None = None,
     ) -> None:
         if strategy_kind not in SUPPORTED_RESEARCH_STRATEGIES:
             raise UnsupportedResearchCapabilityError(
@@ -245,7 +286,31 @@ class PortfolioPipelineAdapter:
             )
         get_strategy_capability(strategy_kind)
         self.strategy_kind = strategy_kind
-        self._inputs = tuple(decision_inputs)
+        # #470 后半场:resume 前缀的 stub-only 装载流(可选)。提供时
+        # :meth:`aprefetch_inputs` 只从这里拉瘦记录,主线
+        # ``decision_inputs`` 从第 ``len(种子)`` 期起产出(signal_engine
+        # 侧 skip_prefix)—— 前缀期不再构建完整输入(协方差 / 特征 / 价格
+        # 序列),续跑峰值与重放耗时回到「全新 run + 续算增量」。
+        self._resume_stub_stream = resume_stub_inputs
+        # issue #463:decision_inputs 支持 Sequence(归一为 tuple,旧行为)或
+        # AsyncIterator(流式逐期拉取,原样保存)。流式模式下 ``self._inputs``
+        # 只作 resume 种子预取缓冲(:meth:`aprefetch_inputs` 填充,长度 =
+        # 种子前缀),不再全量物化。
+        if isinstance(decision_inputs, AsyncIterator):
+            self._input_stream: AsyncIterator[PortfolioDecisionInput] | None = (
+                decision_inputs
+            )
+            self._inputs: tuple[PortfolioDecisionInput, ...] = ()
+            # #470 前半场:流式模式下 resume 校验缓冲只保留 5 个瘦字段
+            # (business_date/decision_at/lot_info/prices/execution_prices),
+            # 完整输入(features/candidates/signals/covariance,全市场期均
+            # 数万 FeatureValue)在拉取期即时释放 —— 此前 273 期完整输入被
+            # ``self._inputs`` 钉到 run 结束(实测 ≈5-9GB)。
+            self._prefetch_stubs: list[_ResumeReplayStub] = []
+        else:
+            self._input_stream = None
+            self._inputs = tuple(decision_inputs)
+            self._prefetch_stubs = []
         self._required_capabilities = tuple(
             sorted(set(required_capabilities))
         )
@@ -253,6 +318,72 @@ class PortfolioPipelineAdapter:
         # 原样产出前缀(零重算),再从其后继续组合构建,账本状态由种子接续。
         self._resume_bundles: tuple[DecisionBundle, ...] | None = None
         self._resume_state: _PipelineState | None = None
+
+    async def aprefetch_inputs(self, count: int) -> None:
+        """从流式输入预取前 ``count`` 期到缓冲(resume 种子校验用,#463)。
+
+        :meth:`resume_from` 是同步契约(validate-then-mutate),无法拉取异步
+        迭代器;种子校验所需的逐期 ``business_date`` / ``decision_at`` /
+        账本重放所需的 ``lot_info`` / 决策价 / 执行价由调用方(signal_engine
+        决策循环)先经本方法从输入流预取。Sequence 输入为 no-op;流被提前
+        耗尽时取到多少算多少(不足即由 ``resume_from`` 以数量不符拒绝,与旧
+        「种子超过冻结输入数即拒绝」语义等值)。
+
+        #470 前半场:缓冲只保留 :class:`_ResumeReplayStub` 瘦记录(~MB/期),
+        完整输入在返回前释放 —— 校验与账本重放只消费这五个字段(消费面
+        见 :func:`_pipeline_state_from_resume`),features/candidates 等重
+        对象不再驻留。
+
+        #470 后半场:``resume_stub_inputs`` 非空(前缀 stub-only 装载流)
+        时改从该流拉取,连「先构建完整输入再瘦身」都不再发生 —— 五字段由
+        close 矩阵 + 发布 instruments 元数据直接构造;主线输入流的
+        ``skip_prefix`` 与之同源(同一次决策日推导),两流按序恰好拼出
+        全期次序列(前缀期由 stub 流登记、续算期由主线登记)。
+        """
+
+        stream = self._resume_stub_stream or self._input_stream
+        if stream is None or count <= 0:
+            return
+        pulled: list[_ResumeReplayStub] = list(self._prefetch_stubs)
+        while len(pulled) < count:
+            try:
+                item = await stream.__anext__()
+            except StopAsyncIteration:
+                break
+            pulled.append(_resume_stub_of(item))
+        self._prefetch_stubs = pulled
+
+    async def _close_input_stream(self) -> None:
+        """关闭流式输入(级联收尾加载生成器与特征进程池,#463)。
+
+        Sequence 输入无流可关;AsyncGenerator 之外的迭代器不可关闭,静默跳过
+        (交给 GC)。对已耗尽 / 已关闭的生成器重复关闭是 no-op。
+
+        #470 后半场:stub 前缀流一并关闭 —— 预取次数取满后它停在最后一次
+        yield 上,不关会钉住 loader(含窄化 close 矩阵)直到 GC。
+        """
+
+        for stream in (self._input_stream, self._resume_stub_stream):
+            if isinstance(stream, AsyncGenerator):
+                await stream.aclose()
+
+    async def _next_input(self, index: int) -> PortfolioDecisionInput | None:
+        """第 ``index`` 期冻结输入;``None`` = 输入耗尽(#463)。
+
+        Sequence 输入按索引读取(旧行为);流式输入直接从迭代器续拉
+        (#470:预取期已瘦身为 stub 只服务 resume 校验,不再回放完整输入,
+        种子被拒的全量重算由 signal_engine 重建全新输入流兜底)。
+        """
+
+        stream = self._input_stream
+        if stream is None:
+            if index >= len(self._inputs):
+                return None
+            return self._inputs[index]
+        try:
+            return await stream.__anext__()
+        except StopAsyncIteration:
+            return None
 
     def resume_from(self, completed: Sequence[DecisionBundle]) -> bool:
         """断点续算种子(issue #314):接受已落库的决策前缀,跳过其重算。
@@ -266,7 +397,13 @@ class PortfolioPipelineAdapter:
 
         if self._resume_bundles is not None or not completed:
             return False
-        if len(completed) > len(self._inputs):
+        # #470 前半场:校验源 = 流式模式的瘦预取缓冲或 Sequence 模式的
+        # 完整输入(两者都提供 resume 校验/账本重放所需的五个字段)。
+        if self._input_stream is not None:
+            validation_inputs: Sequence[Any] = self._prefetch_stubs
+        else:
+            validation_inputs = self._inputs
+        if len(completed) > len(validation_inputs):
             return False
         previous_at: datetime | None = None
         for index, bundle in enumerate(completed):
@@ -275,14 +412,14 @@ class PortfolioPipelineAdapter:
             previous_at = bundle.decision_at
             # 种子重放的 lot_info / business_date 取自对应期冻结输入,
             # 输入-决策错位(理论上不可能,漂移防护)一律拒绝。
-            item = self._inputs[index]
+            item = validation_inputs[index]
             if (
                 item.business_date != bundle.business_date
                 or item.decision_at != bundle.decision_at
             ):
                 return False
         try:
-            seeded = _pipeline_state_from_resume(completed, self._inputs)
+            seeded = _pipeline_state_from_resume(completed, validation_inputs)
         except Exception:
             logger.warning(
                 "research_run.resume_seed_rejected",
@@ -387,6 +524,13 @@ class PortfolioPipelineAdapter:
             risk_exit_policy = _risk_exit_policy_from_manifest(manifest)
         except ValueError as exc:
             raise ResearchConstraintViolationError(str(exc)) from exc
+        # issue #482:fee_config.overrides 在此解析为生效执行模型(此前该
+        # manifest 分区无任何业务消费者)。非法覆盖 fail-closed 转换为
+        # ResearchConstraintViolationError,与风险退出覆盖同走 REJECTED 语义。
+        try:
+            execution_model = _execution_model_from_manifest(manifest)
+        except ValueError as exc:
+            raise ResearchConstraintViolationError(str(exc)) from exc
         allocation_method = _allocation_method(manifest)
         conflict_policy = (
             SignalConflictPolicy.NEUTRALIZE
@@ -396,43 +540,69 @@ class PortfolioPipelineAdapter:
         )
         target_gross = manifest.strategy_spec.portfolio_policy.target_gross_exposure
 
-        # issue #314:已落库的决策前缀原样产出(零重算),其内容已由
-        # coordinator 读回校验并将再次通过 _validate_decision + 幂等持久化。
-        start_index = 0
-        for bundle in self._resume_bundles or ():
-            yield bundle
-            start_index += 1
+        try:
+            # issue #314:已落库的决策前缀原样产出(零重算),其内容已由
+            # coordinator 读回校验并将再次通过 _validate_decision + 幂等持久化。
+            # #470 前半场:种子破坏性消费 —— 逐期 pop 产出,产出一期释放一
+            # 期;种子(含全量 features,期均数万 FeatureValue)不再被
+            # ``_resume_bundles`` 钉到 run 结束。
+            start_index = 0
+            seeds = self._resume_bundles
+            if seeds is not None:
+                self._resume_bundles = None
+                pending = list(seeds)
+                del seeds
+                while pending:
+                    yield pending.pop(0)
+                    start_index += 1
 
-        for index in range(start_index, len(self._inputs)):
-            item = self._inputs[index]
-            try:
-                # 逐决策 CPU 密集段(组合构建 / 约束 / 风险退出 / 资金可行性 /
-                # sizing / 账本)是纯同步计算,经 asyncio.to_thread 卸载
-                # (issue #286):事件循环线程被解放,worker 心跳不被饿死。
-                # 无 session / 数据 IO 触碰;state 由本协程独占,线程间无竞争。
-                yield await asyncio.to_thread(
-                    self._build_decision,
-                    manifest=manifest,
-                    item=item,
-                    index=index,
-                    state=state,
-                    constraints=constraints,
-                    risk_exit_policy=risk_exit_policy,
-                    allocation_method=allocation_method,
-                    conflict_policy=conflict_policy,
-                    target_gross=target_gross,
-                )
-            except (AllocationError, SizingError, ValueError) as exc:
-                raise ResearchConstraintViolationError(str(exc)) from exc
+            # issue #463:决策输入支持 Sequence(按索引读取,旧行为)或
+            # AsyncIterator(逐期拉取,任一时刻常驻 O(1) 期次)。从
+            # start_index 继续:Sequence 越界即结束;流式耗尽(StopAsyncIteration)
+            # 即结束 —— 两种输入的产出序列逐字节一致。
+            index = start_index
+            while True:
+                item = await self._next_input(index)
+                if item is None:
+                    break
+                try:
+                    # 逐决策 CPU 密集段(组合构建 / 约束 / 风险退出 / 资金
+                    # 可行性 / sizing / 账本)是纯同步计算,经 asyncio.to_thread
+                    # 卸载(issue #286):事件循环线程被解放,worker 心跳不被
+                    # 饿死。无 session / 数据 IO 触碰;state 由本协程独占,
+                    # 线程间无竞争。
+                    yield await asyncio.to_thread(
+                        self._build_decision,
+                        manifest=manifest,
+                        item=item,
+                        index=index,
+                        state=state,
+                        constraints=constraints,
+                        risk_exit_policy=risk_exit_policy,
+                        execution_model=execution_model,
+                        allocation_method=allocation_method,
+                        conflict_policy=conflict_policy,
+                        target_gross=target_gross,
+                    )
+                except (AllocationError, SizingError, ValueError) as exc:
+                    raise ResearchConstraintViolationError(str(exc)) from exc
+                index += 1
+        finally:
+            # issue #463:本生成器退出(耗尽 / 关闭 / 抛错)即关闭流式输入,
+            # 级联收尾输入捕获包装 → 加载生成器 → 特征进程池(即时释放,
+            # 不等 GC);对 Sequence 输入与已关闭流均为 no-op。
+            await self._close_input_stream()
 
     def build_report(
         self,
         manifest: ResearchRunManifest,
-        decisions: Sequence[DecisionBundle],
+        decisions: Sequence[DecisionLedgerView],
         *,
         equity_curve: tuple[EquityPoint, ...] = (),
         benchmark_curve: tuple[tuple[date, Decimal], ...] = (),
     ) -> ResearchRunReport:
+        # issue #473:只消费账本视图字段(ledger/constraints/orders/fills 计数),
+        # 完整 DecisionBundle 与落库后驻留的 DecisionLedgerRecord 皆可传入。
         execution_mode = execution_mode_for(manifest.parameters)
         if decisions:
             final = decisions[-1].ledger
@@ -527,6 +697,7 @@ class PortfolioPipelineAdapter:
         state: _PipelineState,
         constraints: PortfolioConstraints,
         risk_exit_policy: RiskExitPolicy,
+        execution_model: ExecutionModel,
         allocation_method: str,
         conflict_policy: SignalConflictPolicy,
         target_gross: float,
@@ -573,7 +744,9 @@ class PortfolioPipelineAdapter:
                 signals=signals,
                 method=allocation_method,
                 constraints=constraints,
-                covariance=item.covariance,
+                covariance=_covariance_with_target_coverage(
+                    item, current_weights=current_weights
+                ),
                 sleeve_map=item.sleeve_map,
                 disabled_symbols=item.disabled_symbols,
                 current_weights=current_weights,
@@ -665,9 +838,11 @@ class PortfolioPipelineAdapter:
                 lot_info=item.lot_info,
                 prices=item.prices,
                 current_positions=current_positions,
-                commission_rate=manifest.strategy_spec.execution_model.commission_rate,
-                commission_min=manifest.strategy_spec.execution_model.minimum_commission,
-                stamp_tax_rate=manifest.strategy_spec.execution_model.sell_tax_rate,
+                # issue #482:费用参数读生效执行模型(fee_config.overrides
+                # 已并入),不再直读规格原值。
+                commission_rate=execution_model.commission_rate,
+                commission_min=execution_model.minimum_commission,
+                stamp_tax_rate=execution_model.sell_tax_rate,
             ),
             constraints=constraints,
         )
@@ -686,6 +861,7 @@ class PortfolioPipelineAdapter:
             plan=plan,
             instructions=instructions,
             state=state,
+            execution_model=execution_model,
         )
         positions, ledger = _mark_after_execution(state, item)
         risk_state = _risk_state(state, ledger)
@@ -725,13 +901,25 @@ class PortfolioPipelineAdapter:
             positions=positions,
             ledger=ledger,
         )
+        # issue #472:输入 checksum 的 canonical 编码在此发生一次,顺带捕获
+        # features/candidates 截面的 canonical 文本片段 —— 随 bundle 交给
+        # persist 阶段直接拼接,artifact 落库不再对同一截面二次编码
+        # (checksum 值不变:同一份文本的 sha256,回归测试逐字节钉死)。
+        input_fragments: dict[str, str] = {}
+        input_checksum = canonical_json_digest(
+            item.checksum_payload, capture=input_fragments
+        )
         evidence = ResearchPipelineEvidence(
             manifest_input_checksum=manifest.input_checksum,
-            input_checksum=item.checksum,
+            input_checksum=input_checksum,
             output_checksum=pipeline_output_checksum(decision),
             hard_constraints_passed=True,
         )
-        return replace(decision, pipeline_evidence=evidence)
+        return replace(
+            decision,
+            pipeline_evidence=evidence,
+            canonical_fragments=input_fragments or None,
+        )
 
 
 def _constraints_from_manifest(
@@ -791,6 +979,24 @@ def _risk_exit_policy_from_manifest(
     return merge_risk_exit_policy(
         manifest.strategy_spec.risk_exit_policy,
         overrides,
+    )
+
+
+def _execution_model_from_manifest(
+    manifest: ResearchRunManifest,
+) -> ExecutionModel:
+    """manifest → 生效执行模型,费用四键(issue #482)。
+
+    ``fee_config.overrides`` 按键名覆盖 ``strategy_spec.execution_model``
+    (佣金率 / 最低佣金 / 卖出印花税 / 滑点 bps 的 run 级覆盖从此真实生效;
+    此前该 manifest 分区自 #127 起只存不用,覆盖被静默丢弃)。timing 等
+    非费用字段不参与覆盖,仍读规格原值。未声明 overrides 时原样返回规格
+    模型,零行为变化。非法覆盖抛 ``ValueError``,由 ``decisions()`` 转换为
+    ``ResearchConstraintViolationError`` 使 run REJECTED。
+    """
+    return merge_fee_overrides(
+        manifest.strategy_spec.execution_model,
+        section_overrides(manifest.fee_config),
     )
 
 
@@ -947,6 +1153,66 @@ def _curve_metrics(
     return strategy_return, annualized, sharpe, drawdown
 
 
+def _covariance_with_target_coverage(
+    item: PortfolioDecisionInput,
+    *,
+    current_weights: Mapping[str, float],
+) -> CovarianceEstimate | None:
+    """按「信号标的与当前持仓」补齐协方差覆盖(2026-09-13 事故修复)。
+
+    ``item.covariance`` 由加载期在**选股池**(universe 过滤后 included 标的)
+    上估计,而组合阶段的目标集合是它的超集:再平衡带保留的持仓可能已掉出当期
+    选股池(市值排名 / 选股上限轮换)、执行日停牌或历史不足。builder 的两处
+    覆盖校验(``_covariance_problem`` 对信号标的、``enforce_risk_contribution_cap``
+    对目标标的)对缺覆盖一律 fail-closed —— 全历史 run 在 2015-02-27
+    (RR-bff0 决策 3)因一只掉出选股池的持仓报「协方差缺少目标标的」被拒整条
+    run;同族的窗口塌缩(RR-0c2aa 决策 6)让池内估计为 None 同样拒绝。
+
+    回退策略:仅当覆盖不全(或池内估计为 None)且 ``close_series_provider``
+    能提供**全部**目标标的的决策日序列时,用同一估计器
+    (:func:`_estimate_covariance`,Ledoit-Wolf + PD 修复)在目标集合上重建,
+    并具名 warning;任一标的序列不可得则保持原样(矩阵缺失照旧由 builder
+    fail_closed 拒绝,语义零变化)。重建只替换本期组合阶段的协方差输入
+    (artifact 审计如实记录替换后的矩阵);触发场景此前必然拒绝整条 run,
+    故不触发场景的行为逐位不变。
+    """
+    covariance = item.covariance
+    needed = {signal.symbol for signal in item.signals} | set(current_weights)
+    missing = needed if covariance is None else needed - set(covariance.tickers)
+    provider = item.close_series_provider
+    if not missing or provider is None:
+        return covariance
+    # signal_engine 反向导入本模块:模块级互相导入会构成环,惰性导入
+    # (与 _features_by_source 同处理)。
+    from finboard_backtest.research_run.signal_engine import _estimate_covariance
+
+    series = provider(sorted(needed))
+    if set(series) != needed:
+        logger.warning(
+            "research_run.covariance_coverage_unavailable",
+            missing=sorted(missing)[:10],
+            missing_count=len(missing),
+            resolved=len(series),
+        )
+        return covariance
+    rebuilt = _estimate_covariance(series)
+    if rebuilt is None:
+        logger.warning(
+            "research_run.covariance_coverage_rebuild_failed",
+            needed=len(needed),
+        )
+        return covariance
+    logger.warning(
+        "research_run.covariance_coverage_rebuilt",
+        missing=sorted(missing)[:10],
+        missing_count=len(missing),
+        target_symbols=len(needed),
+        n_observations=rebuilt.n_observations,
+        shrinkage=round(rebuilt.shrinkage, 6),
+    )
+    return rebuilt
+
+
 def _mark_current_book(
     state: _PipelineState,
     item: PortfolioDecisionInput,
@@ -1027,6 +1293,7 @@ def _execute_research_plan(
     plan: object,
     instructions: tuple[object, ...],
     state: _PipelineState,
+    execution_model: ExecutionModel,
 ) -> tuple[tuple[ResearchOrder, ...], tuple[ResearchFill, ...]]:
     from finboard_backtest.portfolio.contracts import RebalancePlan
     from finboard_backtest.research_run.contracts import RebalanceInstruction
@@ -1056,8 +1323,14 @@ def _execute_research_plan(
         fill_quantity = (
             raw_fill_quantity // info.lot_size * info.lot_size
         )
+        # issue #396:执行日全天停牌 → 拒单(fail-visible),持仓保留至复牌,
+        # 不再按停牌前最后一个可见 close 静默成交。优先级在显式拒单清单之后
+        # (冻结输入指定拒单的语义不变);shortfall 与其他拒单分支同口径。
         if instruction.symbol in item.rejected_symbols:
             reject_reason = "冻结研究输入指定拒单"
+            fill_quantity = 0
+        elif instruction.symbol in item.suspended_symbols:
+            reject_reason = "停牌日拒绝成交(execution_suspended)"
             fill_quantity = 0
         elif fill_quantity <= 0:
             reject_reason = "成交比例不足一个合法交易单位"
@@ -1081,20 +1354,21 @@ def _execute_research_plan(
             continue
 
         fill_price = Decimal(str(item.execution_prices[instruction.symbol]))
+        # issue #482:费用回退值读生效执行模型(fee_config.overrides 已并入)。
         commission_rate = (
             info.commission_rate
             if info.commission_rate is not None
-            else manifest.strategy_spec.execution_model.commission_rate
+            else execution_model.commission_rate
         )
         commission_min = (
             info.commission_min
             if info.commission_min is not None
-            else manifest.strategy_spec.execution_model.minimum_commission
+            else execution_model.minimum_commission
         )
         slippage_bps = (
             info.slippage_bps
             if info.slippage_bps > 0
-            else manifest.strategy_spec.execution_model.slippage_bps
+            else execution_model.slippage_bps
         )
         # issue #337:末端买入按可用现金裁剪 —— sizing 按决策价预算、成交按
         # 执行价结算,价差漂移逐笔累积会把现金缓冲吃穿;削减不足一手的末端
@@ -1179,7 +1453,7 @@ def _execute_research_plan(
             tax_rate = (
                 info.stamp_tax_rate
                 if info.stamp_tax_rate is not None
-                else manifest.strategy_spec.execution_model.sell_tax_rate
+                else execution_model.sell_tax_rate
             )
             tax = notional * Decimal(str(tax_rate))
         fill = ResearchFill(
@@ -1374,11 +1648,57 @@ def _mark_after_execution(
     return tuple(positions), ledger
 
 
+class _ResumeReplayStub(NamedTuple):
+    """resume 校验 / 账本重放所需的逐期瘦记录(#470 前半场)。
+
+    :func:`_pipeline_state_from_resume` 与 ``resume_from`` 的时序校验只消费
+    这五个字段;完整 ``PortfolioDecisionInput`` 的重对象(features /
+    candidates / signals / covariance,全市场期均数万 FeatureValue)由
+    :meth:`aprefetch_inputs` 在抽取 stub 后即时释放。
+
+    #470 后半场:流式续跑的前缀记录改由 stub-only 装载流提供
+    (:meth:`FrozenInputLoader.load_resume_stub`,装载域收窄到种子成交 /
+    持仓涉及的标的)—— 前缀期连完整输入都不再构建,五字段直接由 close
+    矩阵 + 发布 instruments 元数据构造。
+    """
+
+    business_date: date
+    decision_at: datetime
+    lot_info: Mapping[str, AssetLotInfo]
+    prices: Mapping[str, float]
+    execution_prices: Mapping[str, float]
+
+
+def _resume_stub_of(item: Any) -> _ResumeReplayStub:
+    """resume 装载流的当期记录归一化为瘦记录(#470)。
+
+    两个来源结构兼容(五个字段,消费面见 :func:`_pipeline_state_from_resume`):
+
+    * stub-only 装载流 —— 已是 :class:`_ResumeReplayStub`,原样返回;
+    * 主线完整输入 ``PortfolioDecisionInput``(无 stub 流的调用方 / 测试)
+      —— 抽取五字段即时释放重对象(#470 前半场语义)。
+    """
+
+    if isinstance(item, _ResumeReplayStub):
+        return item
+    return _ResumeReplayStub(
+        business_date=item.business_date,
+        decision_at=item.decision_at,
+        lot_info=item.lot_info,
+        prices=item.prices,
+        execution_prices=item.execution_prices,
+    )
+
+
 def _pipeline_state_from_resume(
     completed: Sequence[DecisionBundle],
-    inputs: Sequence[PortfolioDecisionInput],
+    inputs: Sequence[Any],
 ) -> _PipelineState:
     """从已完成决策前缀精确重建组合管线账本状态(issue #314)。
+
+    输入序列可以是完整 ``PortfolioDecisionInput``(Sequence 模式 / 测试)
+    或 :class:`_ResumeReplayStub` 瘦记录(流式模式,#470)—— 两者只消费
+    ``lot_info`` / ``business_date`` / ``prices`` / ``execution_prices``。
 
     数值面三条线,全部与全新执行**逐位等值**(Decimal 的 str 表示参与
     checksum,数值相等但刻度不同也会漂移,不能只做数值恢复):
@@ -1484,6 +1804,18 @@ def _verify_resume_state(state: _PipelineState, last: DecisionBundle) -> None:
             raise ValueError(f"{symbol} 重放账本与决策记录不一致")
         if book.opened_on != last.risk_state.opened_on.get(symbol):
             raise ValueError(f"{symbol} 重放 opened_on 与风险状态不一致")
+        if book.quantity <= 0:
+            # #314 种子校验修正(2026-09-13):``_risk_state`` 的价格高水位
+            # 只记录 ``quantity > 0`` 的标的,而**已平仓账面**(quantity=0 且
+            # realized_pnl != 0,故仍出现在 ``positions`` 记录中)没有对应
+            # 记录值 —— 拿 None 比较必然误判「重放价格高水位与风险状态不
+            # 一致」,种子被拒 → 每次重试从零重算(生产形态:最后一个已
+            # 完成决策恰好平仓且平仓价 != 建仓价;单测价格恒定
+            # realized_pnl=0 时记账不入 positions,故未暴露)。平仓账面的
+            # quantity / average_price / realized_pnl / opened_on 已在上方
+            # 逐项校验;高水位在 quantity=0 时无风险语义(平仓分支已重置),
+            # 跳过该项比较。
+            continue
         recorded_high_water = last.risk_state.high_water_prices.get(symbol)
         if (
             recorded_high_water is None

@@ -66,7 +66,8 @@ class DatasetPublishExecutor:
                 code="invalid_payload",
                 summary=(
                     "release_kind 必须是 a_share_tushare / multi_asset_mixed / "
-                    "daily_metrics / financial_indicators / convertible_metrics"
+                    "daily_metrics / financial_indicators / convertible_metrics / "
+                    "income_statements / balance_sheets / cashflow_statements / dividends"
                 ),
                 retryable=False,
                 context={"job_id": job.job_id},
@@ -116,6 +117,7 @@ class DatasetPublishExecutor:
         mismatch_suffix = ""
 
         from finboard_data import (
+            RELEASE_SCHEMA_VERSION,
             DatasetReleaseError,
             DatasetReleaseSpec,
             ImmutableReleaseError,
@@ -191,7 +193,7 @@ class DatasetPublishExecutor:
                     retryable=False,
                     context={"job_id": job.job_id},
                 )
-            if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators"):
+            if release_kind in ("a_share_tushare",) or release_kind in _RESEARCH_STOCK_KINDS:
                 invalid = sorted(
                     item.code
                     for item in selected
@@ -262,6 +264,21 @@ class DatasetPublishExecutor:
         # 物化成功而登记失败时,重试经 builder 的 final_dir 幂等路径
         # (校验同一性后返回既有发布)不重复冻结。
         await progress(1, None, "dataset_publish:publishing")
+        # issue #401:schema_version 透传(默认 v1 零变化)。冻结字段集合
+        # 变化(如 financial_indicators 白名单扩展)时按 #187 机制递增,
+        # 否则 builder 对同名数据集的新发布具名拒绝「字段集合发生变化但
+        # schema_version 未递增」。
+        schema_version = job.payload.get("schema_version")
+        if schema_version is not None and (
+            not isinstance(schema_version, str)
+            or not schema_version.strip()
+        ):
+            raise ExecutorError(
+                code="invalid_payload",
+                summary="dataset_publish 任务 payload 的 schema_version 必须是非空字符串",
+                retryable=False,
+                context={"job_id": job.job_id},
+            )
         service = ResearchDatasetReleaseService(
             None,
             session_factory=self._session_maker,
@@ -281,6 +298,7 @@ class DatasetPublishExecutor:
                     adjustment=adjustment,
                     fields=fields,
                     dataset_kind=ReleaseDatasetKind(kind),
+                    schema_version=schema_version or RELEASE_SCHEMA_VERSION,
                     minimum_release_coverage=(
                         # issue #212:研究数据发布级阈值放宽到 0.95——停牌日
                         # 无截面、最新报告期未公告是常态(全市场 daily 实测
@@ -289,13 +307,13 @@ class DatasetPublishExecutor:
                         # 已在 builder 侧降级为可见 warning。#265 转债派生
                         # 指标同口径(转债停牌/正股停牌日溢价缺观测)。
                         Decimal("0.95")
-                        if release_kind
-                        in ("daily_metrics", "financial_indicators", "convertible_metrics")
+                        if release_kind in _RESEARCH_RELEASE_KINDS
                         else Decimal("0.98")
                     ),
                     required_capabilities=(
                         ("stock",)
-                        if release_kind in ("a_share_tushare", "daily_metrics", "financial_indicators")
+                        if release_kind in ("a_share_tushare",)
+                        or release_kind in _RESEARCH_STOCK_KINDS
                         # issue #265:转债派生指标发布固定要求 convertible 能力。
                         else ("convertible",)
                         if release_kind == "convertible_metrics"
@@ -353,12 +371,18 @@ _RELEASE_KIND_TO_DATASET_KIND: dict[str, str] = {
     "a_share_tushare": "bars",
     "multi_asset_mixed": "bars",
     # issue #187:研究数据发布。daily_metrics / financial_indicators 由
-    # research_data_sync(#171)摄取进 research_* 表,发布从表冻结而非本地缓存。
+    # dataset_sync(#171;#392 前称 research_data_sync)摄取进 research_* 表,发布从表冻结而非本地缓存。
     "daily_metrics": "daily_metrics",
     "financial_indicators": "financial_indicators",
     # issue #265:可转债派生指标发布(转股价值/转股溢价率),发布执行时从
     # 本地缓存 bars x 冻结转股价元数据计算。
     "convertible_metrics": "convertible_metrics",
+    # issue #397:财务面扩展(三表 + dividend),dataset_sync 摄取进
+    # research_* 表后按独立 kind 独立白名单冻结。
+    "income_statements": "income_statements",
+    "balance_sheets": "balance_sheets",
+    "cashflow_statements": "cashflow_statements",
+    "dividends": "dividends",
 }
 
 _RELEASE_KIND_TO_SOURCE: dict[str, str] = {
@@ -367,15 +391,48 @@ _RELEASE_KIND_TO_SOURCE: dict[str, str] = {
     "daily_metrics": "tushare",
     "financial_indicators": "tushare",
     "convertible_metrics": "tushare",
+    "income_statements": "tushare",
+    "balance_sheets": "tushare",
+    "cashflow_statements": "tushare",
+    "dividends": "tushare",
 }
+
+#: 研究数据发布 kind(#187/#397):A 股股票域 + 发布级覆盖率阈值 0.95。
+_RESEARCH_RELEASE_KINDS = frozenset(
+    {
+        "daily_metrics",
+        "financial_indicators",
+        "convertible_metrics",
+        "income_statements",
+        "balance_sheets",
+        "cashflow_statements",
+        "dividends",
+    }
+)
+
+#: 研究数据发布里「A 股股票域」的 kind 子集(convertible_metrics 例外)。
+_RESEARCH_STOCK_KINDS = frozenset(
+    {
+        "daily_metrics",
+        "financial_indicators",
+        "income_statements",
+        "balance_sheets",
+        "cashflow_statements",
+        "dividends",
+    }
+)
 
 
 def _default_release_fields(kind_value: str) -> tuple[str, ...]:
     """按数据集类型返回默认冻结字段白名单(全部字段)。"""
     from finboard_data import (
+        BALANCE_SHEETS_FIELDS,
+        CASHFLOW_STATEMENTS_FIELDS,
         CONVERTIBLE_METRICS_FIELDS,
         DAILY_METRICS_FIELDS,
+        DIVIDENDS_FIELDS,
         FINANCIAL_INDICATORS_FIELDS,
+        INCOME_STATEMENTS_FIELDS,
         RELEASE_FIELDS,
     )
 
@@ -385,6 +442,14 @@ def _default_release_fields(kind_value: str) -> tuple[str, ...]:
         return FINANCIAL_INDICATORS_FIELDS
     if kind_value == "convertible_metrics":
         return CONVERTIBLE_METRICS_FIELDS
+    if kind_value == "income_statements":
+        return INCOME_STATEMENTS_FIELDS
+    if kind_value == "balance_sheets":
+        return BALANCE_SHEETS_FIELDS
+    if kind_value == "cashflow_statements":
+        return CASHFLOW_STATEMENTS_FIELDS
+    if kind_value == "dividends":
+        return DIVIDENDS_FIELDS
     return RELEASE_FIELDS
 
 

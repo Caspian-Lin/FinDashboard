@@ -24,7 +24,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import cast
@@ -154,6 +154,68 @@ def completed_decision_prefix(
             break
         index += 1
     return prefix
+
+
+async def iter_completed_decision_prefix(
+    run_id: str,
+    artifacts: AsyncIterator[ResearchArtifact],
+) -> AsyncIterator[DecisionBundle]:
+    """``completed_decision_prefix`` 的流式形态(#470 前半场)。
+
+    输入须按 ``sequence`` 升序(store 实现保证):决策级 artifact 的
+    sequence = 决策序号 x 13 + stage 序,升序流天然按决策分块。逐决策
+    「凑齐 13 stage → 复验 checksum → 重建 bundle → yield」,任一时刻
+    在途的只有当前决策的 13 份载荷 —— 前缀 payload(全历史 run 数 GB)不再
+    全量物化。截断语义与列表版完全一致(缺 stage / checksum 不一致 / 重建
+    失败在该决策处截断,记同名 WARNING),截断即停止消费上游流(调用方
+    aclose 释放游标)。
+    """
+
+    index = 0
+    current: dict[ResearchRunStage, ResearchArtifact] = {}
+
+    def _truncate_incomplete(message_index: int) -> None:
+        logger.warning(
+            "research_run.resume_incomplete_decision",
+            run_id=run_id,
+            decision_index=message_index,
+            stages=sorted(item.value for item in current),
+            message="决策 artifact 不完整,断点续算前缀在该决策处截断",
+        )
+
+    async for artifact in artifacts:
+        if artifact.run_id != run_id or artifact.decision_id is None:
+            continue
+        row_index = decision_artifact_index(run_id, artifact.artifact_id)
+        if row_index is None or artifact.stage not in DECISION_ARTIFACT_STAGES:
+            continue
+        if row_index < index:
+            # 防御:sequence 升序流不应回看已产出决策;真出现即脏行,忽略
+            continue
+        if row_index > index:
+            # 升序流出现跳号 = 当前决策 stage 缺失,截断
+            _truncate_incomplete(index)
+            return
+        current[artifact.stage] = artifact
+        if len(current) != _DECISION_ARTIFACT_STAGE_COUNT:
+            continue
+        try:
+            _verify_stage_checksums(run_id, index, current)
+            bundle = rebuild_decision(run_id, index, current)
+        except Exception as exc:
+            logger.warning(
+                "research_run.resume_readback_failed",
+                run_id=run_id,
+                decision_index=index,
+                error=str(exc),
+                message="决策 artifact 读回/重建失败,断点续算前缀在该决策处截断",
+            )
+            return
+        yield bundle
+        index += 1
+        current = {}
+    if current:
+        _truncate_incomplete(index)
 
 
 def _verify_stage_checksums(
@@ -470,6 +532,8 @@ def _rebuild_constraint(value: object, label: str) -> ConstraintOutcome:
         limit=_as_optional_float(_field(item, "limit", label), f"{label}.limit"),
         reason=_as_str(_field(item, "reason", label), f"{label}.reason"),
         hard=_as_bool(_field(item, "hard", label), f"{label}.hard"),
+        # issue #452:存量 payload 与 symbol=None 的行均无 symbol 键,缺键回退 None。
+        symbol=_as_optional_str(item.get("symbol"), f"{label}.symbol"),
     )
 
 
@@ -715,5 +779,6 @@ __all__ = [
     "completed_decision_prefix",
     "decision_artifact_index",
     "group_decision_artifacts",
+    "iter_completed_decision_prefix",
     "rebuild_decision",
 ]

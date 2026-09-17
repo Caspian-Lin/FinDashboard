@@ -1,12 +1,15 @@
-"""Tushare A 股日线行情 Provider。
+"""Tushare A 股 / 期货日线行情 Provider。
 
 2000 积分覆盖 ``daily`` 与 ``adj_factor``;2026-09-06 实测复核(issue
 #341)后按代码规则分流三类 2000 积分档接口:股票 ``daily`` +
-``adj_factor``、可转债(issue #265)``cb_daily``、指数 ``index_daily``,
-后两者无复权概念,原始价落盘。ETF(``fund_daily`` 2000 档实测可调,
-但复权口径与 akshare qfq 对齐未定稿)与期货(issue #267)fail-visible
-指路 akshare,不静默误路由。指数 ``index_daily`` 的基日行 open/high/low
-为 NaN、close 正常时单行跳过并发具名 warning(issue #346)。
+``adj_factor``、可转债(issue #265)``cb_daily``、指数 ``index_daily``;
+2026-09-09 起期货(issue #395,拍板更新 #267「fut_daily 属另档积分」
+旧记录)第四类:``fut_daily`` —— 主连 ``IF0.CFFEX`` 走 tushare 主力
+连续 ``IF.CFX``(连续合约代码直取,零拼接),具体合约
+``IF2601.CFFEX`` → ``IF2601.CFX``,无复权概念原始价落盘。ETF
+(``fund_daily`` 2000 档实测可调,但复权口径与 akshare qfq 对齐未定稿)
+fail-visible 指路 akshare,不静默误路由。指数 ``index_daily`` 的基日行
+open/high/low 为 NaN、close 正常时单行跳过并发具名 warning(issue #346)。
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from finboard_data.akshare_provider import (
     is_etf_code,
     is_futures_code,
     is_index_code,
+    to_tushare_futures_code,
 )
 from finboard_data.cache import CacheMetadata, ParquetCache, expected_last_bar_date
 from finboard_data.tushare_budget import TushareBudget, shared_tushare_budget
@@ -44,6 +48,9 @@ _VALID_ADJUSTMENTS = frozenset({"qfq", "hqfq", "none"})
 _DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,vol,amount"
 #: 可转债日线字段白名单(issue #265,doc_id=187,2000 积分档)。
 _CB_DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,vol,amount"
+#: 期货日线字段白名单(issue #395,doc_id=455,2000 积分档;2026-09-09
+#: 实测列形态)。pre_close/pre_settle/settle/oi 等列不进领域 Bar。
+_FUT_DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,vol,amount"
 _ADJ_FIELDS = "ts_code,trade_date,adj_factor"
 _SUSPEND_FIELDS = "ts_code,trade_date,suspend_timing,suspend_type"
 _MAX_CHUNK_DAYS = 15 * 366
@@ -72,6 +79,9 @@ class TushareBarClient(Protocol):
         """调用可转债日线接口(issue #265)。"""
         ...
 
+    # ``fut_daily``(#395)不进本 Protocol:端点调用走 ``_call`` 的
+    # getattr 探测(缺失具名报错),fake client 只需实现被测端点。
+
     def adj_factor(self, **kwargs: str) -> object:
         """调用 A 股复权因子接口。"""
         ...
@@ -99,6 +109,7 @@ class TushareBarProvider(AkShareProvider):
         daily_request_limit: int = 100_000,
         usage_file: str | Path = "data_cache/tushare_usage.json",
         max_cache_io_concurrency: int = 1,
+        read_cache_max_bytes: int | None = None,
     ) -> None:
         super().__init__(
             cache_dir=cache_dir,
@@ -108,6 +119,7 @@ class TushareBarProvider(AkShareProvider):
             max_retries=max_retries,
             retry_backoff=retry_backoff,
             max_cache_io_concurrency=max_cache_io_concurrency,
+            read_cache_max_bytes=read_cache_max_bytes,
         )
         self._client = client if client is not None else self._create_client(token)
         self._budget = budget or shared_tushare_budget(
@@ -313,19 +325,19 @@ class TushareBarProvider(AkShareProvider):
     ) -> list[Bar]:
         """覆盖父类远端入口;缓存与批量逻辑仍复用父类。"""
         if period is not BarPeriod.D1:
-            raise ValueError("Tushare 2000 积分行情源当前只支持 A 股日线")
+            raise ValueError("Tushare 2000 积分行情源当前只支持日线")
         if adjust not in _VALID_ADJUSTMENTS:
             raise ValueError(f"不支持的复权方式: {adjust}")
         if start > end:
             raise ValueError("start 不能晚于 end")
         if is_futures_code(symbol.code):
-            # 期货(issue #267):tushare 侧本 issue 不接线(fut_daily 属另
-            # 档积分),fail-visible 指路 akshare 源,不静默走股票 daily
-            # 误路由。
-            raise ValueError(
-                f"tushare 2000 积分源不提供期货行情: {symbol.code};"
-                "期货日线请使用 akshare 源(新浪主连,issue #267)"
-            )
+            # 期货日线(issue #395):tushare fut_daily 是期货日线的结构化
+            # 主源(2000 积分档实测可调,#395 拍板更新 #267「另档积分」旧
+            # 记录)。主连 IF0.CFFEX → 主力连续 IF.CFX(连续合约代码直取,
+            # 零拼接;口径记录见 issue #395);具体合约 IF2601.CFFEX →
+            # IF2601.CFX。无复权概念:缓存键沿用请求 adjust(键存在但语义
+            # 为 no-op,#265/#341 同策略)。
+            return await self._fetch_futures_daily(symbol, start, end)
         if is_etf_code(symbol.code):
             # ETF(issue #341):fund_daily 2000 积分档实测可调,但 akshare
             # fund_etf_hist_em 落 qfq 复权价、tushare fund_daily 是原始价,
@@ -426,6 +438,55 @@ class TushareBarProvider(AkShareProvider):
                 factor_rows.extend(await self._call("adj_factor", fields=_ADJ_FIELDS, **params))
             cursor = chunk_end + timedelta(days=1)
         return _build_bars(symbol, daily_rows, factor_rows, adjust)
+
+    async def _fetch_futures_daily(
+        self,
+        symbol: Symbol,
+        start: date,
+        end: date,
+    ) -> list[Bar]:
+        """期货日线(``fut_daily``,issue #395):主连连续直取 + 具体合约。
+
+        * 代码翻译走 :func:`to_tushare_futures_code`(主连剥新浪形制 ``0``
+          后缀 + 交易所后缀映射;未知后缀 fail-visible);
+        * vol 单位为手 → 领域 Bar 按张 1:1 落盘(与 akshare 新浪主连同口径,
+          #267);amount 单位为**万元** → 元(x10000;与股票 daily 的千元
+          口径不同,#395 实测对账锁定:40892 手 x 300 乘数 x ~3860 点 ≈
+          amount 列值 x 1e4 逐日吻合);
+        * 无复权概念:adjust 传 "none",缓存键沿用请求 adjust(键存在但
+          语义 no-op)。
+        """
+        tushare_code = to_tushare_futures_code(symbol.code)
+        fut_rows: list[Mapping[str, object]] = []
+        cursor = start
+        while cursor <= end:
+            chunk_end = min(end, cursor + timedelta(days=_MAX_CHUNK_DAYS - 1))
+            fut_rows.extend(
+                await self._call(
+                    "fut_daily",
+                    ts_code=tushare_code,
+                    start_date=cursor.strftime("%Y%m%d"),
+                    end_date=chunk_end.strftime("%Y%m%d"),
+                    fields=_FUT_DAILY_FIELDS,
+                )
+            )
+            cursor = chunk_end + timedelta(days=1)
+        bars = _build_bars(
+            symbol,
+            fut_rows,
+            [],
+            "none",
+            endpoint="fut_daily",
+            volume_multiplier=Decimal("1"),
+            amount_multiplier=Decimal("10000"),
+        )
+        logger.info(
+            "tushare.fetched_futures",
+            symbol=symbol.code,
+            tushare_code=tushare_code,
+            count=len(bars),
+        )
+        return bars
 
     async def fetch_suspension_events(
         self,
@@ -613,12 +674,18 @@ def _build_bars(
     *,
     endpoint: str = "daily",
     volume_multiplier: Decimal = Decimal("100"),
+    amount_multiplier: Decimal = Decimal("1000"),
     lenient_ohlc: bool = False,
 ) -> list[Bar]:
     """把 tushare 日线行规范化为领域 Bar。
 
     ``volume_multiplier``:daily 的 vol 单位为手(1 手=100 股);cb_daily
-    的 vol 单位亦为手,但可转债 1 手=10 张(issue #265),传 10。
+    的 vol 单位亦为手,但可转债 1 手=10 张(issue #265),传 10;fut_daily
+    的 vol 单位为手(1 手=1 张合约),传 1(issue #395)。
+
+    ``amount_multiplier``:daily / cb_daily / index_daily 的 amount 单位为
+    千元(x1000);fut_daily 的 amount 单位为**万元**(x10000,issue #395
+    实测对账锁定)。
 
     ``lenient_ohlc``(issue #346,仅 ``index_daily`` 路径传 True):对
     「close 有限且 > 0,但 open/high/low 含非有限值」的行(指数基日行)
@@ -685,9 +752,10 @@ def _build_bars(
                 high=prices["high"],
                 low=prices["low"],
                 close=prices["close"],
-                # Tushare vol 为手、amount 为千元;领域 Bar 使用股(张)和元。
+                # Tushare vol 为手;amount 单位按接口区分(股票系千元、
+                # 期货系万元)。领域 Bar 使用股(张)和元。
                 volume=_decimal(row, "vol", endpoint) * volume_multiplier,
-                amount=_decimal(row, "amount", endpoint) * Decimal("1000"),
+                amount=_decimal(row, "amount", endpoint) * amount_multiplier,
                 source="tushare",
             )
         )

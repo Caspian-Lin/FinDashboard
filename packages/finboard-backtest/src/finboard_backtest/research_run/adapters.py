@@ -8,6 +8,7 @@ from typing import Protocol
 
 from finboard_backtest.research_run.contracts import (
     DecisionBundle,
+    DecisionLedgerView,
     ResearchRunManifest,
     ResearchRunReport,
     UnsupportedResearchCapabilityError,
@@ -58,8 +59,11 @@ class ResearchStrategyAdapter(Protocol):
     def build_report(
         self,
         manifest: ResearchRunManifest,
-        decisions: Sequence[DecisionBundle],
+        decisions: Sequence[DecisionLedgerView],
     ) -> ResearchRunReport: ...
+    # issue #473:``decisions`` 收账本视图 —— run 主链路传 ``DecisionLedgerRecord``
+    # (落库后驻留形态,candidates/features 不再钉住),测试 / 对照路径传完整
+    # ``DecisionBundle`` 亦结构性满足(消费字段集见 DecisionLedgerView 审计)。
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +133,7 @@ class DecisionSequenceAdapter:
     def build_report(
         self,
         manifest: ResearchRunManifest,
-        decisions: Sequence[DecisionBundle],
+        decisions: Sequence[DecisionLedgerView],
     ) -> ResearchRunReport:
         del manifest, decisions
         return self.report

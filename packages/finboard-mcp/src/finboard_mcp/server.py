@@ -27,11 +27,11 @@
 * ``finboard.research_code.*``(#215/#219)—— 研究代码仓库(submit / rollback /
   promote 写 + list / get 只读);提交先进入 draft,必须通过 screen + #57 OOS
   晋级门后才进入 active 正式白名单,只存储与版本化,不执行代码。
-* ``finboard.job.*``(#136;#221 归档)—— 统一后台任务队列监控与提交
-  (list / get 只读 + enqueue / cancel / archive / unarchive 写,
+* ``finboard.job.*``(#136;#221 归档;#443 等待)—— 统一后台任务队列监控与提交
+  (list / get / wait 只读 + enqueue / cancel / archive / unarchive 写,
   复用 ``background_jobs`` 表)。
 * 数据写操作(#137)—— ``finboard.data_write.*`` / ``finboard.etf.*``:
-  data_fetch(同步单标的)/ fetch_all / sync_universe / bulk_download_start /
+  data_fetch(同步单标的)/ sync_universe / bulk_download_start /
   quality_repair / dataset_release_publish(任务化,返回 job_id,用
   ``finboard_job_get`` 轮询)、config_get/update、etf_sync/batch_confirm/update/
   review_queue。补全「数据→因子→策略」闭环的数据准备第一步。
@@ -39,8 +39,10 @@
   symbols_from_release(复制既有可用发布的冻结标的集,免手工维护全市场
   清单)/ full_market(instruments 全活跃标的按 kind 展开);来源缺失 /
   不可用 / 展开为空入队即 invalid_argument 具名拒绝。
-  sync_universe 自动登记基准指数(#256,instrument_type=index);
-  bulk_download_start 的 instrument_type 支持 index 走 akshare 指数日线,
+  sync_universe 自动登记 A 股三所指数(#394 起登记源为 tushare index_basic
+  全量,#256 受控表收窄为基准资格白名单;instrument_type=index,base_date
+  回填 list_date);bulk_download_start 的 instrument_type=index 默认走
+  tushare index_daily 主源(显式 source=akshare 可选回 akshare 副源,#394),
   发布 multi_asset_mixed 含指数后 research_run 基准收益可用(#184 链路闭合)。
 * #57 验证实验(#138 + #233)—— ``finboard.validation_experiment.*``:create /
   list / get / reject / add_trial / delete + run(执行入队),暴露 REST
@@ -105,12 +107,14 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(128 个,已实现)==
+== 当前可用工具(128 个,已实现;#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
   字段 + metrics(剔 equity_curve)+ universe 聚合计数 + fills 按决策计数,
   不序列化 manifest/result 全量;view=detail 才含全量(可达 MB 级)。
+  summary 聚合与全量 payload 路径(get/report/artifacts/export)均数据库侧
+  估计载荷、加载前具名拒绝超限(#478/#480,summary 聚合计数恒有界)。
   run 归属(#312):MCP 通道创建的 run(含 replay 与 backtest_run 的
   strategy_spec 形态)actor_type=agent,与 requested_by=agent:mcp 语义对齐
   (#122 agent 自主执行);REST 默认 human 不变,schema 放开 human|agent,
@@ -147,12 +151,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   screen run 会白跑 1-2 小时才在组合阶段 REJECTED),错误附排除统计、生效
   阈值与 portfolio_config.overrides 键位修复路径;max_risk_contribution
   非法值与 risk_config.overrides 形态错误同样入队即拒。配置分区键位
-  (#303 起 risk_config 真实接线,此前是死分区):portfolio_config 管
-  组合约束(如 {"max_risk_contribution": 0.5}),risk_config 管风险退出
-  (如 {"rules": [{"rule_type": "price_stop_loss", "enabled": true,
-  "threshold": 0.08}]},按 rule_type 与规格策略同名合并覆盖),键位不可混;
-  manifest 原样冻结,覆盖只发生在消费端。逐期真实买入池入队期不可精确
-  预知,运行期 fail-closed 兜底不变。
+  (#303 起 risk_config、#482 起 fee_config 真实接线,此前是死分区):
+  portfolio_config 管组合约束(如 {"max_risk_contribution": 0.5}),risk_config
+  管风险退出(如 {"rules": [{"rule_type": "price_stop_loss", "enabled": true,
+  "threshold": 0.08}]},按 rule_type 与规格策略同名合并覆盖),fee_config 管
+  成交费用(overrides 按键名与规格 execution_model 同名合并:佣金率/最低佣金/
+  印花税/滑点),键位不可混;execution_config / validation_config 不接覆盖,
+  非空入队即拒(#482);manifest 原样冻结,覆盖只发生在消费端。逐期真实买入池
+  入队期不可精确预知,运行期 fail-closed 兜底不变。
   run_queue payload 模板与
   各字段取值来源见工具描述(code_version 是本 run 自身代码版本标识,冻结进
   manifest 供追溯,与数据集发布的 code_version 同名但互不校验)。写操作
@@ -206,7 +212,7 @@ FinBoard 研究 MCP —— 量化研究工具集
   默认小规模同步运行(返回 metrics/equity/fills;equity_mode=summary 默认降采样,full
   返回完整曲线;selection.inputs_mode 支持 research_db(默认;必需数据集批次
   未发布时入队秒级拒绝,#255——`dataset_unpublished:{dataset}` 具名,先
-  research_data_sync 摄取并发布,核验步骤见 docs/research/data-ops.md)/bars(纯价格因子,
+  dataset_sync 摄取并发布,核验步骤见 docs/research/data-ops.md)/bars(纯价格因子,
   不要求 daily_metrics)/snapshot(snapshot_ids 冻结快照观测);selection.factor_version
   仅支持 "v1"(选股规则版本;因子目录已统一收敛,选股可用因子集是
   finboard_factor_catalog 所列因子中 FACTOR_CATALOG 投影的子集,见 Skill 文档;
@@ -268,13 +274,14 @@ FinBoard 研究 MCP —— 量化研究工具集
   暴露缺失降级为具名 warning 审计行(risk_factor_neutralization_skipped),
   不可满足 fail_closed 拒绝;research_run 侧经 portfolio_config.overrides
   声明同一约束(risk_factor_limits,因子名与冻结 feature_id 同名)。
-- finboard.job.*(6,✅ #136+#221)—— 统一后台任务队列监控与提交:
-  job list/get(只读)、job enqueue/cancel/archive/unarchive(写)。
+- finboard.job.*(7,✅ #136+#221+#443)—— 统一后台任务队列监控与提交:
+  job list/get/wait(只读)、job enqueue/cancel/archive/unarchive(写)。
   复用 background_jobs 表,enqueue kind 白名单全是研究/数据/回测域
   (echo/research_run/feature_snapshot/bulk_download/dataset_publish/
-  backtest_run/data_sync/fetch_all/quality_repair/research_data_sync);
+  backtest_run/data_sync/quality_repair/dataset_sync);
   实盘交易内核任务不进入队列。
-  research_data_sync payload 入队期契约(#260,REST /api/jobs 与 MCP 共用):
+  dataset_sync payload 入队期契约(#392,自 #260 的 research_data_sync 改名,
+  REST /api/jobs 与 MCP 共用):
   未知键(如误把 datasets 写成 data_types)/缺 start_date|end_date/
   datasets 枚举非法/逐标的数据集(financial_indicators|industry_memberships)
   缺 symbols 且缺 profiles(空 symbol 池静默零迭代)入队即 invalid_argument,
@@ -282,7 +289,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   feature_snapshot/bulk_download 等异步任务的进度
   统一用 finboard_job_get(job_id) 轮询(result_ref 携带产物引用如 snapshot_id;
   view=none 轮询最小集 / summary 默认剥 payload / detail 全量;返回附
-  data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206)。
+  data_hash,轮询回传未变即 {unchanged: true} 不重发全量,#206);
+  等待任务终态优先用 finboard_job_wait(#443,有界阻塞最长 timeout_seconds,
+  超时回当前快照 + completed=false 可续期,替代循环轮询省对话轮次)。
   kind=research_run 的 job_get 附 run_status(#306:关联 research_runs.status,
   「run interrupted 但 job 仍 running」的两表不一致一眼可见;REST
   GET /api/jobs/{id} 同口径,列表不 join 为 null)。research_run 的 phase
@@ -294,28 +303,39 @@ FinBoard 研究 MCP —— 量化研究工具集
   finished_before 批量,只回 archived_count)隐藏出默认列表但不删除,
   job_list 的 archived=exclude(默认)/only/all 控制可见性,finboard_job_get
   单查不受影响,job_unarchive 可恢复;仅终态可归档,归档即冻结不重排。
-- 数据写操作(12,✅ #137):data_fetch(同步单标的拉取)、fetch_all /
+- 数据写操作(11,✅ #137;#392 删 fetch_all):data_fetch(同步单标的拉取)、
   sync_universe / bulk_download_start / quality_repair / dataset_release_publish
   (任务化,登记 queued 返回 job_id,进度用 finboard_job_get 轮询;
   release_kind 支持 a_share_tushare|multi_asset_mixed|daily_metrics|
-  financial_indicators|convertible_metrics(#265 转债派生指标),
+  financial_indicators|convertible_metrics(#265 转债派生指标)|
+  income_statements|balance_sheets|cashflow_statements|dividends
+  (#397 财务三表与分红明细,先 dataset_sync 摄取同名数据集),
   研究数据发布与 bars 联合供因子快照 #187;
   标的集三选一 #261:symbols / symbols_from_release 复制既有可用发布 /
   full_market 全市场按 kind 展开,来源缺失/不可用/展开为空入队即
   invalid_argument)、
   data_config_get/update(调度器配置)、etf_sync(默认 dry_run)/
   etf_batch_confirm / etf_update(人工覆盖)/ etf_review_queue(只读)。
-  指数链路(#256):sync_universe 自动登记基准指数(instrument_type=index,
-  受控登记表含沪深300/中证500/中证1000等 9 只),bulk_download_start 的
-  instrument_type=index:akshare 走指数接口、tushare 走 index_daily
-  (#341,2000 积分档实测可调;ETF/期货仍 tushare_scope_mismatch 拒绝);
+  指数链路(#256/#394):sync_universe 自动登记指数(instrument_type=index,
+  登记源 tushare index_basic 全量、按 is_index_code 收窄 A 股三所指数;
+  BENCHMARK_INDEX_REGISTRY 白名单只裁决「谁可作 benchmark」),
+  bulk_download_start 的 instrument_type=index:默认 tushare index_daily
+  主源(原始点位;未显式声明 source 且全指数域时自动覆盖,显式
+  source=akshare 恒优先,#394;2000 积分档实测可调;ETF 仍
+  tushare_scope_mismatch 拒绝);
+  期货链路(#267/#395):sync_universe 登记 IF/IH/IC/IM 期货主连
+  (受控登记表,连续序列语义)+ tushare fut_basic 在市合约
+  (CFFEX 股指四品种,合约级可成交标的);bulk_download_start 的
+  instrument_type=futures(配 market=future)默认走 akshare 新浪主连,
+  显式 source=tushare 走 fut_daily(主连 IF0.CFFEX → 主力连续 IF.CFX
+  连续直取、具体合约 IF2601.CFX;2000 积分档实测可调,#395);
   指数进 multi_asset_mixed 发布后
   research_run 可计算真实 benchmark_return,指数本身不进候选池
   (只做基准数据,不可撮合)。
   转债链路(#265):sync_universe 经东财一览自动登记可转债
   (instrument_type=convertible,11xxxx.SH/12xxxx.SZ);bulk_download_start
   的 convertible 走 tushare cb_daily(2000 积分档,转债/股票均放行);
-  research_data_sync 的 convertible_profiles 数据集把 cb_basic 条款快照
+  dataset_sync 的 convertible_profiles 数据集把 cb_basic 条款快照
   upsert 进 convertible_metadata(转股价/到期日,评级与集思录强赎事件走
   akshare 兜底,失败降级为 warning);发布侧新增 convertible_metrics
   (转股价值/转股溢价率 = 快照转股价 x 同日正股收盘,非全历史 PIT,

@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from finboard_persistence.models import ResearchRunArtifactModel, ResearchRunModel
+    from finboard_persistence.research_run_repo import ResearchRunArtifactSummary
 
 
 def _run_summary(row: ResearchRunModel) -> dict[str, Any]:
@@ -68,6 +69,8 @@ def _execution_mode_from_manifest(manifest: object) -> str:
 
 
 def _run_detail(row: ResearchRunModel) -> dict[str, Any]:
+    from finboard_backtest.research_run.config_overrides import fee_policy_summary
+
     detail = _run_summary(row)
     detail.update(
         {
@@ -80,6 +83,13 @@ def _run_detail(row: ResearchRunModel) -> dict[str, Any]:
             "error_summary": row.error_summary,
             # issue #183:agent 用 execution_mode 区分单时点决策与全区间回放。
             "execution_mode": _execution_mode_from_manifest(row.manifest),
+            # issue #482:生效费用参数与来源(规格 vs 队列覆盖)读侧派生回显,
+            # 纯视图不参与 checksum;overrides 非空时 effective ≠ spec。
+            "fee_policy": (
+                fee_policy_summary(row.manifest)
+                if isinstance(row.manifest, dict)
+                else None
+            ),
             # issue #143:关联 background_jobs.job_id,agent 可用 finboard_job_* 轮询。
             "job_id": getattr(row, "job_id", None),
         }
@@ -92,12 +102,17 @@ def _run_view(
     artifacts: list[ResearchRunArtifactModel] | None = None,
     *,
     view: str = "summary",
+    artifact_summary: ResearchRunArtifactSummary | None = None,
 ) -> dict[str, Any]:
     """run 详情视图(issue #206):summary 默认聚合计数,detail 全量。
 
     summary 在 detail 的头部字段之上,把 result 剔除 equity_curve(以点数
     提示),并附 universe / fills 服务端聚合计数,不序列化 manifest/result
     与逐标的全量 payload。
+
+    issue #478:``artifact_summary`` 提供数据库侧聚合计数时优先消费,
+    summary 不再要求物化全量 artifacts(两者都缺省时保持旧调用形态,
+    不输出 artifact_count / universe / fills 键)。
     """
     if view not in ("summary", "detail"):
         raise McpToolError("invalid_argument", f"未知视图: {view}")
@@ -126,6 +141,9 @@ def _run_view(
     if artifacts is not None:
         payload["artifact_count"] = len(artifacts)
         payload.update(summarize_run_artifacts(artifacts))
+    elif artifact_summary is not None:
+        payload["artifact_count"] = artifact_summary.artifact_count
+        payload.update(artifact_summary.summary_dict())
     return cast(dict[str, Any], to_jsonable(payload))
 
 
@@ -244,10 +262,13 @@ async def get_run(
             row = await repo.get(run_id)
             if row is None:
                 raise McpToolError("not_found", f"研究运行不存在: {run_id}")
-            artifacts = (
-                await repo.list_artifacts(run_id) if view == "summary" else None
-            )
-            return _run_view(row, artifacts, view=view)
+            if view != "summary":
+                return _run_view(row, view=view)
+            # issue #478:summary 聚合下沉 PostgreSQL —— 旧路径先全量物化
+            # artifacts(真实 run 7203 artifacts / ≈5.9GB JSON 曾把进程顶到
+            # 13GB 后 MCP 超时);现在只取回几十个计数字段。
+            summary = await repo.summarize_artifacts(run_id)
+            return _run_view(row, view=view, artifact_summary=summary)
 
     return await run_tool(
         audit=app.audit,
@@ -258,12 +279,26 @@ async def get_run(
 
 
 async def list_artifacts(app: McpAppContext, run_id: str) -> ToolEnvelope:
+    """run 全量 artifacts(含 payload;逐 artifact 体量见 #206 P0 有界约定)。
+
+    issue #480:加载前先数据库侧估计载荷(``SUM(octet_length)``),超限
+    具名 ``payload_too_large``,绝不把全量 payload 拉进进程(真实 run
+    7203 artifacts / ≈5.9GB 曾把进程顶到 10GB+);单决策有界数据走
+    ``finboard_report_run(view="detail", decision_id=...)`` 下钻。
+    """
+
     async def _do() -> list[dict[str, Any]]:
+        from finboard_mcp import reporting
+        from finboard_mcp.tools.reports import _payload_too_large_error
+
         async with app.session_maker() as session:
             repo = ResearchRunRepository(session)
             row = await repo.get(run_id)
             if row is None:
                 raise McpToolError("not_found", f"研究运行不存在: {run_id}")
+            estimated = await repo.estimate_artifact_payload_bytes(run_id)
+            if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
+                raise _payload_too_large_error(run_id, estimated)
             artifacts = await repo.list_artifacts(run_id)
             return [_artifact_summary(item) for item in artifacts]
 
@@ -338,6 +373,7 @@ async def _build_queued_manifest(
         validate_strategy_dataset_capabilities,
     )
     from finboard_backtest.research_run.config_overrides import (
+        research_policy_gate_error,
         research_portfolio_gate_error,
     )
     from finboard_backtest.research_run.contracts import JsonValue
@@ -414,6 +450,10 @@ async def _build_queued_manifest(
         series_covered_factor_names,
         series_release_mismatches,
     )
+    from finboard_backtest.research_code.predefined_factors import (
+        predefined_factor_reference_gate_error,
+        referenced_predefined_factors,
+    )
     from finboard_persistence import FactorSeriesRepository
 
     series_repo = FactorSeriesRepository(session)
@@ -430,6 +470,21 @@ async def _build_queued_manifest(
         if node.source is not None
         and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
+    # issue #398:平台预置因子(p_ 前缀)引用门控(规格形态错误,先于
+    # #203/#217 具名拒绝)—— 目录注册存在性 + single_shot 必须以
+    # factor_series_ids 声明(p_ 因子无快照路径)。multi_period 的覆盖检查
+    # 在交易日历可读之后进行(下方)。与 REST 路由共用同一门控函数。
+    uncovered_predefined = referenced_predefined_factors(
+        required_factor_sources,
+        series_covered_factors=series_covered,
+    )
+    predefined_gate_error = predefined_factor_reference_gate_error(
+        required_factor_sources=required_factor_sources,
+        series_covered_factors=series_covered,
+        multi_period=resolve_decision_schedule(body.parameters) is not None,
+    )
+    if predefined_gate_error is not None:
+        raise McpToolError("invalid_argument", predefined_gate_error)
     # issue #203:入队期 single_shot 缺快照秒级拒绝(与 REST 路由共用同一门控
     # 函数,对齐 #186 预检风格)。multi_period 声明 decision_schedule(#361,
     # 含 legacy rebalance_frequency)后不受影响。issue #360:被声明因子序列
@@ -456,6 +511,9 @@ async def _build_queued_manifest(
         snapshot_anchor_mismatches,
         user_factor_reference_gate_error,
         user_factor_series_coverage_gate_error,
+    )
+    from finboard_backtest.research_code.predefined_factors import (
+        predefined_factor_series_coverage_gate_error,
     )
 
     # issue #234:screen 绑定实绑校验(REST+MCP 共用同一门控)—— 声明了
@@ -528,6 +586,23 @@ async def _build_queued_manifest(
         )
         if series_gate_error is not None:
             raise McpToolError("invalid_argument", series_gate_error)
+    if schedule is not None and uncovered_predefined:
+        if trading_days is None:
+            trading_days = await _enqueue_trading_days(primary)
+        predefined_series_error = await predefined_factor_series_coverage_gate_error(
+            referenced_predefined=uncovered_predefined,
+            series_lookup=default_series_lookup(session),
+            bars_release_id=primary.release_id,
+            dataset_release_ids=[release.release_id for release in releases],
+            decision_dates=enqueue_decision_dates(
+                parameters=body.parameters,
+                trading_days=trading_days,
+            ),
+            window_start=primary.start_date,
+            window_end=primary.end_date,
+        )
+        if predefined_series_error is not None:
+            raise McpToolError("invalid_argument", predefined_series_error)
     # issue #253:multi_period 特征可用性入队门控(与 REST 路由共用同一函数)。
     # 放在用户因子门控之后:multi_period 引用 u_ 因子先按 #217 具名拒绝。
     feature_gate_error = multi_period_feature_gate_error(
@@ -656,6 +731,19 @@ async def _build_queued_manifest(
     )
     if portfolio_gate_error is not None:
         raise McpToolError("invalid_argument", portfolio_gate_error)
+
+    # issue #482:入队政策覆盖预检(与 REST 路由共用同一门控函数)——
+    # fee_config.overrides 未知键 / 非法值秒级拒绝;execution_config /
+    # validation_config 非空具名拒绝(此前为静默 no-op 死分区,覆盖 run
+    # 与基线逐位相同)。
+    policy_gate_error = research_policy_gate_error(
+        execution_model=spec.execution_model,
+        fee_overrides=body.fee_config,
+        execution_overrides=body.execution_config,
+        validation_overrides=body.validation_config,
+    )
+    if policy_gate_error is not None:
+        raise McpToolError("invalid_argument", policy_gate_error)
 
     run_id = "RR-" + hashlib.sha256(
         body.idempotency_key.encode("utf-8")
@@ -1006,7 +1094,16 @@ async def lineage_run(
         from finboard_backtest.research_run import ResearchRunCoordinator
 
         async with app.session_maker() as session:
-            store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+            repo = ResearchRunRepository(session)
+            store = SqlAlchemyResearchRunStore(repo)
+            # issue #480:coordinator.lineage 内部全量物化 artifacts 再按
+            # trace 图过滤,与 artifacts / detail 同款加载前护栏。
+            from finboard_mcp import reporting
+            from finboard_mcp.tools.reports import _payload_too_large_error
+
+            estimated = await repo.estimate_artifact_payload_bytes(run_id)
+            if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
+                raise _payload_too_large_error(run_id, estimated)
             coordinator = ResearchRunCoordinator(store)
             artifacts = await coordinator.lineage(run_id, trace_id)
             if not artifacts:
@@ -1121,8 +1218,17 @@ def register(mcp: MCPServer) -> None:
             " 覆盖 —— 无 series / 覆盖不足 / series 锚定发布与 bars 主发布"
             "不一致 → invalid_argument(附缺失决策日期预览与"
             " finboard_factor_series_build 重建命令)\n"
-            '- "validation_config"/"execution_config"/"fee_config"/'
-            '"benchmark_config": {} —— 政策覆盖,一般留空\n'
+            '- "validation_config"/"execution_config": {} —— 留空;非空入队即拒'
+            "(#482,死分区不接覆盖):验证门控 / timing 等执行语义须发布新规格"
+            "版本调整\n"
+            '- "fee_config": {} —— 成交费用覆盖(#482 接线),overrides 按键名'
+            "与规格 execution_model 同名合并:{\"overrides\": {\"commission_rate\":"
+            " 0.0006, \"minimum_commission\": 10, \"sell_tax_rate\": 0.001, "
+            "\"slippage_bps\": 10}}(合法域 佣金/印花 0<=值<=0.1、最低佣金 >=0、"
+            "滑点 0<=值<=10000;未声明键继承规格值;未知键/非法值入队即拒;"
+            "timing 不支持队列覆盖);run 详情 fee_policy 字段回显生效值与来源\n"
+            '- "benchmark_config": {} —— 基准标的覆盖(如 {"symbol": '
+            '"000300.SH"})\n'
             '- "portfolio_config"/"risk_config": {} —— 组合约束 / 风险退出'
             "分区覆盖(#303,键位不可混):\n"
             "  · portfolio_config 管组合约束(overrides 直接就是键值),如 "

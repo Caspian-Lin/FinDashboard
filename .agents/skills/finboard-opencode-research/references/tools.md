@@ -5,7 +5,7 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 128 个工具(✅)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+当前已实现 128 个工具(✅;#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
 
 ## 权限矩阵(#122:研究写操作自主执行)
@@ -20,7 +20,7 @@
 | 模拟盘(sim.*,✅ #127+#139) | ✅(账户/会话/决策/行情投递/评估/归档/订单/报告) | |
 | ResearchRun 生命周期(run.* 写,✅ #127) | ✅(queue/cancel/replay/lineage) | |
 | portfolio(portfolio.*,✅ #128) | ✅(纯计算:allocate/sizing/feasibility/attribution) | |
-| 后台任务队列(job.*,✅ #136+#221) | ✅(list/get 只读 + enqueue/cancel/archive/unarchive 写) | |
+| 后台任务队列(job.*,✅ #136+#221) | ✅(list/get/wait 只读 + enqueue/cancel/archive/unarchive 写) | |
 | 数据写操作(data_write.* / etf.*,✅ #137) | ✅(拉取/同步/发布/修复/ETF/配置) | |
 | #57 验证实验(validation_experiment.*,✅ #138+#233) | ✅(create/reject/add_trial/delete/run 写) | |
 | 自选股(watchlist.*,✅ #140) | ✅(create/update/delete/add_symbols/remove_symbol 写) | |
@@ -57,6 +57,9 @@
 列出某 ResearchRun 的逐阶段 artifact。
 - 参数:`run_id: str`
 - 返回:`list[{artifact_id, sequence, stage, trace_id, payload}]`
+- 载荷护栏(#480):加载前数据库侧估计全量 payload,超 64MB 具名
+  `payload_too_large` 拒绝(不加载,不拖死进程);单决策有界数据走
+  `finboard_report_run(view="detail", decision_id=...)` 下钻。
 
 ### finboard_run_queue(✅ #127 + #170 + #183,写)
 冻结输入 + 登记 queued ResearchRun(**不执行回测**,执行由离线 worker 完成)。
@@ -106,8 +109,15 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
     触发多期回放(#361;custom 须给 `dates`,⊆ 发布交易日且升序去重);
     legacy `rebalance_frequency=daily|weekly|monthly|quarterly` 仍接受
     (等价同名 kind),非法值入队即拒
-  - `validation_config` / `execution_config` /
-    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空
+  - `validation_config` / `execution_config`: `{}` —— 留空;非空入队即拒
+    (#482,死分区不接覆盖):验证门控 / timing 等执行语义须发布新规格版本调整
+  - `fee_config`: `{}` —— 成交费用覆盖(#482 接线),overrides 按键名与规格
+    execution_model 同名合并,如 `{"overrides": {"commission_rate": 0.0006,
+    "minimum_commission": 10, "sell_tax_rate": 0.001, "slippage_bps": 10}}`
+    (合法域 佣金/印花 0<=值<=0.1、最低佣金 >=0、滑点 0<=值<=10000;未声明键
+    继承规格值;未知键/非法值入队即拒;timing 不支持队列覆盖);run 详情
+    `fee_policy` 字段回显生效值与来源(规格 vs 覆盖)
+  - `benchmark_config`: `{}` —— 基准标的覆盖,如 `{"symbol": "000300.SH"}`
   - `portfolio_config` / `risk_config`: `{}` —— 组合约束 / 风险退出分区覆盖
     (#303,键位不可混):
     `portfolio_config` 管组合约束(overrides 直接就是键值),如
@@ -325,7 +335,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 同步 ETF 元数据、读写调度器配置。写操作尊重 `mcp_readonly_only` 开关。
 不连 broker / 账户 / 订单 / 持仓。
 
-任务化工具(fetch_all / sync_universe / bulk_download_start / quality_repair /
+任务化工具(sync_universe / bulk_download_start / quality_repair /
 dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 worker 消费;
 进度 / 状态 / 取消统一用 `finboard_job_get(job_id)` / `finboard_job_cancel(job_id)`
 轮询(#136)。idempotency_key 与 REST 语义端点完全一致,因此 agent 与 REST 提交
@@ -338,11 +348,8 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
   fallback_source, lifecycle_events, lifecycle_sync_failed, lifecycle_sync_error}`
 - 错误:`invalid_argument`(未知行情源)/ `unavailable`(主源及备用源均不可用)
 
-### finboard_data_fetch_all **[写,任务化]**
-登记标的池批量缓存更新任务(symbols.yaml),返回 202 + `job_id`(不等待执行)。
-- 参数:无
-- 返回:`JobOut`(`kind=fetch_all`,`queue=data`)+ `created`(首次提交 true / 幂等命中 false)
-- 进度:用 `finboard_job_get(job_id)` 轮询
+(已删 `finboard_data_fetch_all`(#392):symbols.yaml 池改由
+`finboard_bulk_download_start` 的 `symbols` 参数承担,子集过滤语义一致)
 
 ### finboard_data_sync_universe **[写,任务化]**
 登记全市场标的同步任务(akshare 发现 → 写 instruments 表),返回 202 + `job_id`。
@@ -359,12 +366,15 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 ### finboard_data_bulk_download_start **[写,任务化]**
 登记批量历史数据拉取任务(按市场/类型/交易所筛选),返回 202 + `job_id`。
 - 参数:`market?`(默认 a_share;期货用 future)/ `instrument_type?`(`stock|etf|index|
-  convertible|futures`;index=#256 基准指数,日线走 akshare 指数接口;convertible=
+  convertible|futures`;index=#256/#394 基准指数,默认源 tushare `index_daily`(
+  #394 偏好,显式 `source=akshare` 选回指数接口);convertible=
   #265 转债,走 tushare `cb_daily`,akshare 源 fail-visible 拒绝;futures=
-  #267 期货主连(如 IF0.CFFEX),需配 market=future,走 akshare 新浪
-  `futures_main_sina`,tushare 源 fail-visible 拒绝,主连仅研究信号/基准
-  不可当作可成交合约;
-  `source=tushare` 对 stock/convertible 之外报 `tushare_scope_mismatch`)/
+  #267/#395 期货主连与合约(如 IF0.CFFEX/IF2601.CFFEX),需配 market=future,
+  #391 起默认源走 tushare `fut_daily`(与 #394 指数偏好同构:未显式声明
+  source 且筛选域全为 futures 时覆盖;显式 `source=akshare` 选回新浪
+  `futures_main_sina` 主连副源),主连仅研究信号/基准不可当作可成交合约;
+  `source=tushare` 仅 ETF 拒绝(`tushare_scope_mismatch`),股票/转债/指数/
+  期货放行)/
   `exchange?` /
   `listing_boards?` / `start?`(默认 2015-01-01)/ `source?` /
   `symbols?`(#347 子集重跑:与 market/instrument_type 过滤叠加,交集为空按
@@ -403,9 +413,9 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 其他参数:`release_id` / `version` / `start_date` / `end_date` /
   `dataset_name?`(默认 multi_asset_daily_bars)/ `release_kind?`
   (a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators|
-  convertible_metrics,默认 a_share_tushare)/ `source?` /
-  `adjustment?`(qfq|hqfq|none,默认 qfq;daily_metrics/financial_indicators/
-  convertible_metrics 固定 none)/
+  convertible_metrics|income_statements|balance_sheets|cashflow_statements|
+  dividends,默认 a_share_tushare)/ `source?` /
+  `adjustment?`(qfq|hqfq|none,默认 qfq;研究数据发布各 kind 固定 none)/
   `required_capabilities?`
   (stock|bond|convertible|futures|etf:index|etf:cross_border|etf:commodity|etf:bond)
 - 返回:`JobOut`(`kind=dataset_publish`)
@@ -416,10 +426,17 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - `release_kind=daily_metrics|financial_indicators` 时从 research_* 表冻结
   基本面/财务指标发布(issue #187),与 bars 发布(dataset_release_ids 含 bars 主发布 +
   research 发布)联合供因子快照取数;schedule(data_sync)与发布任务报告缺失字段统计。
+- `release_kind=income_statements|balance_sheets|cashflow_statements|dividends`
+  (#397)从 research_* 表冻结利润表/资产负债表/现金流量表公告修订与分红送股
+  进展(先跑 dataset_sync 同名数据集摄取);修订可见性列(announcement_date/
+  update_flag/report_type/comp_type)进默认白名单,PIT=ann_date+1 零点(上海);
+  只接受 A 股股票标的。FrozenReleaseProvider.fetch_income_statements /
+  fetch_balance_sheets / fetch_cashflow_statements / fetch_dividends 提供
+  decision_at 门控读取端(#402 C0 因子通道原料)。
 - `release_kind=convertible_metrics`(#265)只接受 A 股可转债标的(非转债
   `convertible_scope_violation`),从本地缓存 bars x 冻结转股价元数据
   (`convertible_metadata`)计算转股价值/转股溢价率并冻结为带日期观测;
-  元数据缺失 `convertible_metadata_missing`(先跑 research_data_sync 的
+  元数据缺失 `convertible_metadata_missing`(先跑 dataset_sync 的
   convertible_profiles)。质量报告 `convertible_instruments` 块可见转债标的数
   与评级/到期日缺失计数。
 
@@ -469,7 +486,8 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 因子实验室工具(8 只读 + 4 写,共 12 个)。写操作尊重 `mcp_readonly_only` 开关。
 
 ### finboard_factor_catalog
-查询因子混合目录:builtin(26 个 alpha/risk/market_input 因子)+
+查询因子目录(三源,`source` 参数选择,#427):`source` 缺省或 `"lab"` =
+实验室混合目录——builtin(26 个 alpha/risk/market_input 因子)+
 user_defined(沙箱执行的自定义因子,#217)。
 **builtin 目录(#214 起)是因子定义的唯一事实来源**——v1 选股规则目录
 (`finboard_data.factors.FACTOR_CATALOG`,8 因子)逐字段从这里投影生成,
@@ -479,12 +497,20 @@ user_defined 条目来自 `research_code_artifacts`(kind=factor),标注
 artifact commit、status 与 promotion_status;引用名为 `u_<artifact_name>`,**仅
 status=active 且 promotion_status=passed 可被规格引用**(retired/未晋级后入队秒级拒绝),观测来自
 `finboard_research_code_run` 落库的快照。
+`source="predefined"` = 平台预置因子只读目录(#427,174 条,同构摘要
+name/family/direction/signal_eligible/title(截断 120 字符)/window/
+min_history_bars)——「公式即代码」的平台可信因子,**引用名 = `p_<name>`**
+(与用户因子 `u_` 对称),消费路径 = `finboard_factor_series_build`
+(kind=predefined_factor)按 name 批量构建序列后在策略规格中以 `p_<name>` 引用。
 - 参数:`role?: str`(alpha|risk|market_input,仅过滤 builtin)、
-  `include_user_defined?: bool = true`
-- 返回:`list[{name, origin: builtin|user_defined, version, role, ...}]`;
+  `include_user_defined?: bool = true`、
+  `source?: "lab" | "predefined" | null`(缺省 = lab 语义,现状零变化)
+- 返回:`list[{name, origin: builtin|user_defined|predefined, version, role, ...}]`;
   user_defined 条目另含 `{artifact_name, status, commit, artifact_id,
-  code_checksum, created_at, note}`
-- builtin 部分无 DB 依赖;user_defined 查 `research_code_artifacts` 表。
+  code_checksum, created_at, note}`;predefined 条目不含 version/role
+  (预置因子无 artifact 版本,family 承担分组)。
+- builtin 部分无 DB 依赖;user_defined 查 `research_code_artifacts` 表;
+  predefined 无 DB 依赖(内存注册表投影)。
 
 ### finboard_feature_snapshot_list
 列出特征快照(版本化、时点化、不可变)。**默认 header-only(#309)**:
@@ -848,7 +874,7 @@ research_run 管线轻路由(#174)。
     - `research_db`(默认):从 research 数据表读 profile/daily_metrics/
       financial_indicators/industry_memberships。**必需数据集批次未发布时
       入队秒级拒绝(#255)**:`dataset_unpublished:{dataset}` 具名
-      `invalid_argument`(摄取 ≠ 发布——`research_data_sync` 质量门通过才
+      `invalid_argument`(摄取 ≠ 发布——`dataset_sync` 质量门通过才
       自动发布;发布状态核验 SQL 与修复步骤见 `docs/research/data-ops.md`);
       执行端(grid 旁路)由 worker 以 `selection_dataset_unpublished` 具名拒绝
     - `bars`:纯价格因子(momentum/volatility_20d)从回测行情计算,不要求
@@ -1220,19 +1246,26 @@ Kill Switch)由专用 Scheduler 执行,不进入统一队列。
 
 `enqueue` 的 kind 白名单:`echo` / `research_run` / `feature_snapshot` /
 `bulk_download` / `dataset_publish` / `backtest_run` / `data_sync` /
-`fetch_all` / `quality_repair` / `research_data_sync`(全是研究/数据域,
-不含实盘能力)。
+`quality_repair` / `dataset_sync`(全是研究/数据域,不含实盘能力)。
 
-`research_data_sync`(issue #171;#251/#265 扩展):research 数据表(档案 / 估值 /
-财务 / 行业 / 名称历史 / 转债条款)摄取编排。payload:`{datasets?: [profiles,
-name_changes, convertible_profiles, daily_metrics, financial_indicators,
-industry_memberships](默认全部), start_date, end_date(ISO), symbols?: [str]}`。
+`dataset_sync`(issue #392,自 #171 的 research_data_sync 改名迁移;#251/#265
+扩展):数据集驱动统一同步框架(SyncSpec 注册表)编排研究数据集(档案 / 估值 /
+财务 / 行业 / 名称历史 / 转债条款)摄取。payload:`{datasets?: [profiles,
+name_changes, convertible_profiles, daily_metrics, suspensions(#396),
+financial_indicators, industry_memberships, income_statements, balance_sheets,
+cashflow_statements, dividends(#397)](默认全部十一类), start_date, end_date(ISO), symbols?: [str],
+exchange?: str, listing_boards?: [str], instrument_type?: str}`。
+scope 四元组决定逐标的同步池:symbols 显式声明 > exchange/listing_boards/
+instrument_type 宇宙过滤(instruments 表 list_active,#385 语义)>
+profiles 同步结果(此时 datasets 须含 profiles,否则入队即拒)。
 profiles 同时拉取在市(L)与退市(D)档案(delist_date 上游);name_changes
 全市场历史名称变更直接重建 `instrument_names`(半开区间,供 ST-PIT);
 convertible_profiles(#265)tushare cb_basic 条款快照 upsert 主数据
 `convertible_metadata`(转股价/到期日,评级与集思录强赎事件走 akshare 兜底,
 失败降级为 warning 不阻断),顺带回填 `instruments.list_date/delist_date`。
-逐标的接口自动限流(tushare_budget)
+行级质量口径按数据集枚举形态分发(#389 固化):全市场枚举=单行契约违规跳过
++ 具名告警 `tushare.dirty_row_skipped`(全脏行整批拒),按 symbol 精确查询
+=整批拒。逐标的接口自动限流(tushare_budget 进程内共享)
 并按确定性 dataset_version 断点续跑;预算耗尽退避重试,未配 token / 未装
 SDK fail-fast。
 
@@ -1274,18 +1307,32 @@ SDK fail-fast。
   卡死」,不再只能靠 `(done-1)//13` 反推决策序号
 - 错误:`not_found`、`invalid_argument`(view 非法)
 
+### finboard_job_wait(只读,#443)
+有界阻塞等待后台任务进入终态,替代循环调 `finboard_job_get` 轮询。
+- 参数:`job_id: str`、`timeout_seconds?: int = 60`(上限 300,超限夹 300)、
+  `poll_interval_seconds?: int = 2`(下限 1s 防轮询风暴)
+- 返回:`finboard_job_get(view=summary)` 同形状(JobOut 剥离 payload,附
+  `run_status`/`data_hash`)+ 等待元信息 `completed` / `waited_seconds`。
+  进入终态(succeeded/failed/cancelled/interrupted)立即返回
+  `completed: true`;**超时不抛错**:返回当前快照 + `completed: false`,
+  调用方可再次调用续期等待
+- 注意:服务端不主动断开连接,客户端应自带调用超时(OpenCode `mcp.timeout`
+  只管工具列表抓取不管调用时长);服务端 asyncio.sleep 轮询实现,单次调用
+  最长阻塞 `timeout_seconds`,不阻塞服务端事件循环
+- 错误:`not_found`
+
 ### finboard_job_enqueue **[写]**
 登记一个 queued 后台任务并立即返回 202 + job_id(不等待执行,由独立 worker 消费)。
 - 参数:`kind: str`(白名单)、`idempotency_key: str`(8-128 字符)、
   `requested_by: str`、`queue?: str = "default"`、`payload?: dict`(任务参数,
   结构取决于 kind)、`priority?: int = 0`(-1000..1000)、`max_attempts?: int = 3`(1..10)
-- 入队期 payload 契约(#260,REST `POST /api/jobs` 与本工具共用同一校验):
-  已注册 `research_data_sync` —— **未知键拒绝**(如误传 `data_types`,
+- 入队期 payload 契约(#260;#392 起 `dataset_sync`,REST `POST /api/jobs`
+  与本工具共用同一校验):**未知键拒绝**(如误传 `data_types`,
   正确参数名为 `datasets`)、`start_date`/`end_date` 必填(ISO 日期)、
-  `datasets` 枚举校验、逐标的数据集(`financial_indicators`/
-  `industry_memberships`)在未提供 `symbols` 且 `datasets` 不含 `profiles`
-  时拒绝(否则 symbol 池解析为空、任务静默零迭代);执行器入口重放同一契约,
-  覆盖旁路入队的存量行
+  `datasets` 枚举校验、scope 四元组类型校验、逐标的数据集(`financial_indicators`/
+  `industry_memberships`)在未提供 `symbols`、未声明宇宙过滤且 `datasets`
+  不含 `profiles` 时拒绝(否则 symbol 池解析为空、任务静默零迭代);
+  执行器入口重放同一契约,覆盖旁路入队的存量行
 - 返回:`JobOut + created`(首次提交 true / 幂等命中 false)
 - 错误:`permission_denied`(只读模式)、`invalid_argument`(kind 不在白名单 /
   schema 校验失败 / payload 契约失败`[unknown_payload_key|
@@ -1297,12 +1344,17 @@ SDK fail-fast。
   - `bulk_download`:`{market, source, start, instrument_type}`
   - `dataset_publish`:`{release_id, release_kind, symbols, version, start_date, end_date}`
   - `backtest_run`:`{request, provider_name}` → `result_ref=str(run_id)`
-  - `research_data_sync`:`{start_date: "YYYY-MM-DD"(必填), end_date:
+  - `dataset_sync`:`{start_date: "YYYY-MM-DD"(必填), end_date:
     "YYYY-MM-DD"(必填), datasets?: [profiles|name_changes|convertible_profiles|
-    daily_metrics|financial_indicators|industry_memberships](缺省=全部六类;
-    convertible_profiles=#265 转债条款快照), symbols?:
-    ["000001.SZ",...](省略时逐标的数据集以 profiles 同步结果为池,此时
-    datasets 须含 profiles)}` → 研究数据表摄取(batch 发布后 selection 可命中)
+    daily_metrics|suspensions|financial_indicators|industry_memberships|
+    income_statements|balance_sheets|cashflow_statements|dividends]
+    (缺省=全部十一类;convertible_profiles=#265 转债条款快照,
+    suspensions=#396 停复牌,三表+dividends=#397 财务面按标的 x 公告日窗),
+    symbols?:
+    ["000001.SZ",...], exchange?: "SSE", listing_boards?: ["sse_main"],
+    instrument_type?: "stock"(scope 四元组:逐标的池 symbols > 宇宙过滤 >
+    profiles 结果,此时 datasets 须含 profiles)}` → 研究数据表摄取
+    (batch 发布后 selection 可命中)
 
 ### finboard_job_cancel **[写]**
 请求协作式取消后台任务(running → cancel_requested,executor checkpoint 时退出)。
@@ -1393,7 +1445,9 @@ REST PUT 是全量语义,这里更安全)。
 
 ### finboard_report_run(只读)
 聚合单个 ResearchRun 报告。
-- 参数:`run_id: str`(RR-)、`view?: "summary"|"detail" = "summary"`
+- 参数:`run_id: str`(RR-)、`view?: "summary"|"detail" = "summary"`、
+  `decision_id?: str = null`(#458,仅 view=detail;summary 传它返回
+  `invalid_argument`)
 - 返回(默认 summary,#206):`{run_id, status, strategy_id, strategy_kind,
   created_at, completed_at, metrics(剔 equity_curve), artifact_count, view,
   universe: {total, included, excluded_by_reason}, fills: {total, by_decision}}`
@@ -1401,7 +1455,15 @@ REST PUT 是全量语义,这里更安全)。
 - 返回(view=detail):`{..., artifacts: [{artifact_id, sequence, stage,
   decision_id, trace_id, checksum, payload}]}`(含 report / equity / decisions
   各阶段 payload,可达 MB 级,诊断用)
-- 错误:`not_found`(研究运行不存在)、`invalid_argument`(view 非法)
+- 返回(view=detail + decision_id,#458):artifacts 只含该决策的产物
+  (单决策 13 stage 有界,大 run 诊断下钻通道,豁免护栏);`artifact_count`
+  保持 run 全量,另附 `decision_id` 与 `filtered_artifact_count`;run 级
+  artifact(report 等)decision_id 为 null 不参与匹配
+- 载荷护栏(#458):detail 未下钻时先做廉价规模估计(逐 artifact
+  `len(str(payload))` 累计),估计超 64MB → `payload_too_large`(附估计
+  规模与替代路径,**不静默截断**;替代路径 = summary / decision_id 下钻)
+- 错误:`not_found`(研究运行不存在;detail 下钻 decision_id 无匹配)、
+  `invalid_argument`(view 非法;summary 传 decision_id)
 
 ### finboard_report_backtest(只读)
 聚合单条回测历史报告:运行元信息 + metrics + equity_curve + fills + summary
@@ -1434,12 +1496,17 @@ REST PUT 是全量语义,这里更安全)。
 ### finboard_report_export(只读)
 把报告聚合后导出为文件,返回绝对路径 + 元信息。
 - 参数:`kind: str`(run|backtest)、`id: str`(run_id 或回测记录 id)、
-  `format: str`(csv|markdown)
+  `format: str`(csv|markdown)、`decision_id?: str = null`(#458,仅
+  kind=run,过滤导出单个决策的 artifacts;kind=backtest 传它返回
+  `invalid_argument`)
 - 返回:`{path(绝对路径), kind, id, format, size_bytes, lines}`
 - CSV:UTF-8 BOM(Excel 打开中文不乱码),每节 `# 标题` 注释行 + 表头 + 行,
   节间空行;Markdown:`#` 标题 + `##` 分节表格
-- 错误:`invalid_argument`(未知 kind / format / 非整数回测 id)、
-  `not_found`(run/backtest 不存在)
+- 载荷护栏(#458):kind=run 的全量导出与 `finboard_report_run(view=detail)`
+  同护栏,估计超 64MB → `payload_too_large`(不静默截断;替代路径 =
+  `decision_id` 过滤导出单决策)
+- 错误:`invalid_argument`(未知 kind / format / 非整数回测 id / backtest
+  传 decision_id)、`not_found`(run/backtest 不存在)、`payload_too_large`
 
 ## 研究代码仓库与晋级(#215/#219,agent 代码入口:只存储与版本化)
 
@@ -1639,21 +1706,45 @@ manifest 冻结 `{series_id, content_checksum}` 并入 `input_checksum`;
 被覆盖的 u_ 因子**跳过 multi_period 拒绝**(序列按决策日索引,不再绑定
 单一 decision_at)—— 换发布从死墙变为托管批量重建。
 
+**平台预置因子(#398/#400)**:目录注册的因子(return_21d/63d/126d/252d
+动量族 + alpha101_1..101 31 个 Alpha101 量价因子等,实现 =
+finboard_backtest/factors/predefined 算子库组合,全名单以
+`predefined_factor_names()` 为唯一事实源)以
+kind=predefined_factor 走同一构建通道(**进程内执行,免容器**)、同一
+research_factor_series 落库,引用名 = `p_<name>`(与 u_ 对称)。
+消费规则:single_shot 引用 p_ 因子必须以 factor_series_ids 声明
+(predefined_factor_series_undeclared);multi_period 未声明则做覆盖检查
+反查(params={},预置因子构建恒无参数;predefined_factor_series_coverage_
+missing 具名拒绝 + 重建命令)。
+
 ### finboard_factor_series_build(写,入队)
 入队 `kind=factor_series_build` 后台任务(worker 并发 2;沙箱内存默认 4096MB,并发 x 4096MB 不得超 Docker Desktop 可用内存)。
-- 参数:`name: str`(因子产物名)、`release_id: str`(bars 主发布锚定,
-  **自动进挂载**且必须为 bars 类发布,非 bars 秒拒 #371)、
-  `window_start/window_end: ISO 日期`、`dataset_release_ids?: list[str]`
-  (研究发布联合集,排序冻结,不得含 bars 主发布)、`commit?`、
-  `artifact_id?`、`params?`
-- 入队预检:sandbox 开启、(factor,name) 有已晋级 active+passed 产物
-  (显式 artifact_id 同样要求非 retired;指定 commit 须等于 active 引用)、
-  release 均已登记
+- 参数:`name: str`(因子产物名 / 预置因子目录裸名)、
+  `release_id: str`(bars 主发布锚定,**自动进挂载**且必须为 bars 类发布,
+  非 bars 秒拒 #371)、`window_start/window_end: ISO 日期`、
+  `dataset_release_ids?: list[str]`(研究发布联合集,排序冻结,不得含
+  bars 主发布)、`commit?`、`artifact_id?`、`params?`、
+  `kind?: "factor"|"predefined_factor" = "factor"`
+- **kind=factor(用户沙箱因子)**:sandbox 开启 + (factor,name) 有已晋级
+  active+passed 产物(显式 artifact_id 同样要求非 retired;指定 commit 须
+  等于 active 引用),容器执行;**manifest.entry 须为
+  `factor.compute_series` —— v1 `factor.compute` 逐日入口已废弃**(#461,
+  逐日全历史面板重算 O(决策日数 × 面板行数) 不可行;违规入队/执行具名
+  `v1_series_deprecated` 拒绝,迁移 = 实现 compute_series(ctx) 向量化
+  整段序列、头部历史不足产出缺测 → 重新 submit → 晋级链 → 重建)
+- **kind=predefined_factor(平台预置因子,#398)**:`name` 须为注册目录
+  裸名(当前:return_{21,63,126,252}d + alpha101_{N} 31 个,#400),不接受
+  commit/artifact_id/params(实现版本由目录锚定),**进程内执行免容器
+  (无 Docker 前置)**;序列引用名 = `p_<name>`(与用户因子 `u_` 对称),
+  multi_period run 引用前需先对目标发布+窗口构建 series(与 u_ 同一
+  覆盖检查通道);未注册名 → not_found,版本锚漂移 → 
+  `predefined_version_mismatch`
 - **缓存检查**:series_key 已存在且 content_checksum 一致 → 直接返回
   `unchanged=true`(不创建任务,不启动容器);同参数任务此前
   failed/cancelled 时重提交**新建任务**(#371,不会命中失败尸体);否则
   入队返回 job_id
-- 执行:窗口内逐决策日沙箱执行 factor.compute(#359 容器执行本体)→
+- 执行:一次容器执行覆盖整个决策窗口(协议 v2,manifest.entry 须为
+  `factor.compute_series`,v1 逐日入口 #461 起废弃)→
   抽 2 个截断点做前缀不变性审计(基线复用主构建产物,变体挂载由基线
   Arrow 过滤派生,#371;检出前视 → failed=`lookahead_detected`,错误具名
   首个分歧日期,与 output_contract_violation 同级)→ 内容寻址落库
@@ -1666,7 +1757,9 @@ manifest 冻结 `{series_id, content_checksum}` 并入 `input_checksum`;
 - 返回 summary:三向代码引用(code_artifact/commit/kind)、release 锚定
   与联合集、窗口、date_count/symbol_count、content_checksum、quality
   (#217 质量门归档)、source_run_id(RCR-);**不含逐日 values**(#206 瘦身)
-- 返回 detail:另附 dates(升序)与 values 全量
+- 返回 detail:另附 dates(升序)与 values 全量;估计超 64MB →
+  `payload_too_large`(#458,不静默截断;summary 不受影响,全量消费走
+  research_run 的 factor_series_ids 加载通道)
 
 ### 换 bars 发布的托管重建(解反馈 #8 本体)
 入队/validate 发现引用序列的 `release_id` 不在本次 `dataset_release_ids`

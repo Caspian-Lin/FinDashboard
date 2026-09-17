@@ -19,7 +19,7 @@ from finboard_persistence.dataset_release_repo import (
     resolve_release_symbols,
     symbol_set_diff,
 )
-from finboard_persistence.engine import create_async_engine
+from finboard_persistence.engine import create_async_engine, postgres_connect_args
 from finboard_persistence.etf_metadata_repo import (
     EtfMetadataRepository,
     EtfMetadataSummary,
@@ -41,6 +41,10 @@ from finboard_persistence.factor_series_repo import (
     compute_series_key,
     series_coverage_missing,
     series_id_for,
+)
+from finboard_persistence.lifecycle_sync import (
+    TUSHARE_SUSPEND_DATASET_VERSION,
+    persist_tushare_lifecycle_events,
 )
 from finboard_persistence.mcp_audit_repo import McpAuditRepository
 from finboard_persistence.models import (
@@ -69,13 +73,17 @@ from finboard_persistence.models import (
     OrderModel,
     PositionModel,
     ReconciliationLogModel,
+    ResearchBalanceSheetModel,
+    ResearchCashflowStatementModel,
     ResearchCodeArtifactModel,
     ResearchCodeRunModel,
     ResearchDailyMetricModel,
     ResearchDatasetReleaseModel,
+    ResearchDividendModel,
     ResearchExperimentModel,
     ResearchFactorSeriesModel,
     ResearchFinancialIndicatorModel,
+    ResearchIncomeStatementModel,
     ResearchIndustryClassificationModel,
     ResearchIndustryMembershipModel,
     ResearchInstrumentProfileModel,
@@ -95,6 +103,7 @@ from finboard_persistence.models import (
     SimulationPositionModel,
     SimulationSessionModel,
     StrategyPresetModel,
+    TradeCalModel,
     WatchlistItemModel,
     WatchlistModel,
 )
@@ -133,6 +142,7 @@ from finboard_persistence.research_repo import (
     SyncBatchStatus,
 )
 from finboard_persistence.research_run_repo import (
+    ResearchRunArtifactSummary,
     ResearchRunPersistenceConflictError,
     ResearchRunRepository,
 )
@@ -145,12 +155,20 @@ from finboard_persistence.strategy_spec_repo import (
     StrategySpecTransitionError,
     StrategySpecVersionConflictError,
 )
+from finboard_persistence.trade_calendar_repo import (
+    PRIMARY_EXCHANGE,
+    CalendarDayLike,
+    PgTradingCalendarStore,
+    TradeCalRepository,
+)
 from finboard_persistence.validation_repo import (
     ResearchExperimentRepository,
     ResearchTrialRepository,
 )
 
 __all__ = [
+    "PRIMARY_EXCHANGE",
+    "TUSHARE_SUSPEND_DATASET_VERSION",
     "AccountModel",
     "AccountRepository",
     "AuditLogModel",
@@ -165,6 +183,7 @@ __all__ = [
     "BacktestRunRepository",
     "Base",
     "BondMetadataModel",
+    "CalendarDayLike",
     "ContinuousFuturesRuleModel",
     "ConvertibleMetadataModel",
     "ConvertibleMetadataRepository",
@@ -202,12 +221,15 @@ __all__ = [
     "McpAuditRepository",
     "OrderModel",
     "OrderRepository",
+    "PgTradingCalendarStore",
     "PositionModel",
     "PositionRepository",
     "ReconciliationLogModel",
     "ReconciliationLogRepository",
     "ReleaseInstrumentCatalogRepository",
     "ReleaseSymbolSourceError",
+    "ResearchBalanceSheetModel",
+    "ResearchCashflowStatementModel",
     "ResearchCodeArtifact",
     "ResearchCodeArtifactModel",
     "ResearchCodeArtifactRepository",
@@ -221,10 +243,12 @@ __all__ = [
     "ResearchDatasetReleaseRepository",
     "ResearchDatasetReleaseService",
     "ResearchDatasetRepository",
+    "ResearchDividendModel",
     "ResearchExperimentModel",
     "ResearchExperimentRepository",
     "ResearchFactorSeriesModel",
     "ResearchFinancialIndicatorModel",
+    "ResearchIncomeStatementModel",
     "ResearchIndustryClassificationModel",
     "ResearchIndustryMembershipModel",
     "ResearchInstrumentProfileModel",
@@ -232,11 +256,13 @@ __all__ = [
     "ResearchMemoryModel",
     "ResearchMemoryRepository",
     "ResearchRunArtifactModel",
+    "ResearchRunArtifactSummary",
     "ResearchRunModel",
     "ResearchRunPersistenceConflictError",
     "ResearchRunRepository",
     "ResearchStrategySpecModel",
     "ResearchStrategySpecRepository",
+    "ResearchSuspensionModel",
     "ResearchSyncBatchModel",
     "ResearchSyncBatchRepository",
     "ResearchTrialModel",
@@ -258,6 +284,8 @@ __all__ = [
     "StrategySpecTransitionError",
     "StrategySpecVersionConflictError",
     "SyncBatchStatus",
+    "TradeCalModel",
+    "TradeCalRepository",
     "WatchlistItemModel",
     "WatchlistModel",
     "WatchlistRepository",
@@ -265,6 +293,8 @@ __all__ = [
     "compute_series_key",
     "create_async_engine",
     "generate_run_id",
+    "persist_tushare_lifecycle_events",
+    "postgres_connect_args",
     "release_symbol_check",
     "resolve_release_symbols",
     "series_coverage_missing",

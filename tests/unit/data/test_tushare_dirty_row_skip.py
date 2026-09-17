@@ -59,8 +59,31 @@ class _ArchiveClient:
     def namechange(self, **kwargs: str) -> object:
         return self.namechange_rows
 
+    def index_basic(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
     def cb_basic(self, **kwargs: str) -> object:
         raise AssertionError("unexpected call")
+
+    def suspend_d(self, **kwargs: str) -> object:
+        raise AssertionError("unexpected call")
+
+
+    def income(self, **kwargs: str) -> object:
+        """调用 ``income``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def balancesheet(self, **kwargs: str) -> object:
+        """调用 ``balancesheet``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def cashflow(self, **kwargs: str) -> object:
+        """调用 ``cashflow``(#397;本测试不触达,返回空)。"""
+        return []
+
+    def dividend(self, **kwargs: str) -> object:
+        """调用 ``dividend``(#397;本测试不触达,返回空)。"""
+        return []
 
 
 def _provider(client: _ArchiveClient) -> TushareResearchDataProvider:

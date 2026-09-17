@@ -48,12 +48,21 @@ class Settings(BaseSettings):
     db_max_overflow: int = 10
 
     # ---- 历史行情数据源 ----
-    data_provider: Literal["akshare", "yfinance", "tushare"] = "akshare"
-    data_fallback_provider: Literal["akshare", "yfinance", "tushare"] | None = None
+    # 主源默认 tushare(issue #393):股票 daily+adj_factor+suspend_d 路由
+    # 已就绪(#341 实测 2000 积分档可调),akshare 降级为副源(回落链语义
+    # 保持 #257:primary 空结果 / 异常才回退)。回退默认 akshare:tushare
+    # 不覆盖的 ETF / 期货(#341/#267)由 akshare 兜底。
+    data_provider: Literal["akshare", "yfinance", "tushare"] = "tushare"
+    data_fallback_provider: Literal["akshare", "yfinance", "tushare"] | None = "akshare"
     tushare_token: str = Field(default="", repr=False)
     tushare_requests_per_minute: int = 200
     tushare_daily_request_limit: int = 100_000
     tushare_usage_file: str = "data_cache/tushare_usage.json"
+    # ParquetCache 进程内读缓存的近似字节上限(issue #440):默认 None = 不限
+    # (行为与 issue #287 元素数上限一致)。条目按「元素数 x 每元素实测平均
+    # 字节」近似计量,非精确深度量;超预算按 LRU 从最旧淘汰,单条目超预算
+    # 不缓存。全市场日频工作集可到数百 MB,长 run 建议设 512MB(536870912)。
+    read_cache_max_bytes: int | None = None
     # 研究特征快照的跨标的读取并发;不影响实盘交易线程。
     feature_snapshot_max_concurrency: int = Field(default=8, ge=1, le=64)
     # 特征快照使用的独立计算进程数;0 表示只使用旧的进程内 worker。
@@ -103,6 +112,15 @@ class Settings(BaseSettings):
     # 逐 symbol 进度、回测引擎至少每小时推进一次;RR-7a74 类「心跳续租型僵尸」
     # 7.5h 才被人肉发现,1h 阈值已能兜底且远离健康长任务的误杀线。0 = 关闭。
     worker_zombie_no_progress_seconds: float = Field(default=3600.0, ge=0)
+    # 执行段停滞看门狗阈值(issue #471,FINBOARD_WORKER_STALL_TIMEOUT_SECONDS):
+    # worker 心跳线程侧的独立看门狗线程,超过该秒数无任何 progress 回调且执行
+    # 未返回 → 取消执行任务,job 具名收敛 retry_waiting(error_code=
+    # stall_watchdog)。默认 900s(15 分钟):已知最长合法无回调段(单决策
+    # 13 stage 帧、#464 预计算节流帧)均为秒到分钟级,15 分钟只截杀「永不
+    # 返回」类挂死(to_thread 内 BLAS 原生调用卡死 / 黑洞连接 recv / 休眠
+    # 唤醒后 await 不完成),不误伤正常慢段。0 = 关闭(关闭后仍由 #306
+    # 僵尸检测在 DB 侧兜底)。
+    worker_stall_timeout_seconds: float = Field(default=900.0, ge=0)
 
     # ---- Broker ----
     broker: BrokerKind = BrokerKind.MOCK
@@ -139,6 +157,10 @@ class Settings(BaseSettings):
     # 单次提交文件数 / 单文件字节数上限(静态校验,纵深防御第一层)。
     research_code_max_files: int = Field(default=32, ge=1)
     research_code_max_file_bytes: int = Field(default=262144, ge=1024)
+    # 因子序列 parquet 工件根目录(issue #463):research_factor_series 的
+    # values 改存工件(content_checksum = 文件 sha256)。相对路径按进程
+    # 工作目录解析;读取端(repo)缺省回退同一默认值。
+    factor_series_artifact_root: str = "data_cache/factor_series"
 
     # ---- 研究代码沙箱(issue #216)----
     # 一次性 Docker 容器执行 agent 因子代码(单形态:开发/生产统一 Docker,
@@ -290,3 +312,13 @@ def load_settings(env_file: str | None = None) -> Settings:
     if env_file is not None:
         return Settings(_env_file=env_file)  # type: ignore[call-arg]
     return Settings()
+
+
+#: psycopg(libpq)连接黑洞加固参数(#450;#471 起权威实现收敛到
+#: ``finboard_persistence.engine`` 并作为引擎工厂默认值注入)。
+#: 保留本别名仅为既有导入(``bootstrap`` / ``cli`` / #450 测试)兼容:
+#: 语义 = 委托 persistence 实现,勿在此复制参数表(会漂移)。
+def postgres_connect_args(db_url: str) -> dict[str, int]:
+    from finboard_persistence.engine import postgres_connect_args as _impl
+
+    return _impl(db_url)

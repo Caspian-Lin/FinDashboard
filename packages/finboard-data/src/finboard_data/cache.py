@@ -229,6 +229,16 @@ def _record_job_read(entry: str, *, elapsed_ms: float, size_bytes: int) -> None:
 #: 缓存容量须 ≥ 工作集才不抖动)。置 0 关闭缓存。
 DEFAULT_READ_CACHE_MAX_ELEMENTS = 2_000_000
 
+#: 读缓存条目的每元素近似字节成本(issue #440)。条目是 Python 领域对象,
+#: 精确深度量不可行(``sys.getsizeof`` 不含引用字段,逐对象遍历成本不可接受)
+#: ——按「元素数 x 每元素实测平均字节」近似计量。实测方法:64 位 CPython
+#: 3.12 下用 ``tracemalloc`` 构造 10 万个代表对象,取增量 / 元素数;Bar 的
+#: symbol/period 等跨条目共享引用只计一次。列式条目常数取含 opens 的上界
+#: (close-only 实测 ~48B,带 open ~64B)。
+_READ_CACHE_BYTES_PER_BAR = 800
+_READ_CACHE_BYTES_PER_POINT = 224
+_READ_CACHE_BYTES_PER_CLOSE_COLUMN = 64
+
 #: 读缓存条目种类(bars / close 点位 / 列式 close),参与缓存键。
 _READ_CACHE_KIND_BARS = "bars"
 _READ_CACHE_KIND_CLOSE_POINTS = "close_points"
@@ -245,6 +255,9 @@ class _ReadCacheEntry:
     points: list[tuple[datetime, Decimal]] | None
     elements: int
     columns: CloseColumns | None = None
+    #: 近似字节成本(issue #440):elements x 每元素常数,见
+    #: ``_READ_CACHE_BYTES_PER_*``;仅用于字节上限驱逐与观测。
+    approx_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,6 +346,7 @@ class ParquetCache:
         *,
         max_io_concurrency: int = 1,
         read_cache_max_elements: int | None = None,
+        read_cache_max_bytes: int | None = None,
     ) -> None:
         if max_io_concurrency < 1:
             raise ValueError("max_io_concurrency 必须 >= 1")
@@ -340,6 +354,8 @@ class ParquetCache:
             read_cache_max_elements = DEFAULT_READ_CACHE_MAX_ELEMENTS
         if read_cache_max_elements < 0:
             raise ValueError("read_cache_max_elements 必须 >= 0")
+        if read_cache_max_bytes is not None and read_cache_max_bytes < 0:
+            raise ValueError("read_cache_max_bytes 必须 >= 0")
         self._dir = Path(cache_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._io_semaphore = asyncio.Semaphore(max_io_concurrency)
@@ -351,10 +367,14 @@ class ParquetCache:
         # 任何写入(本实例 write / 外部进程改写)都会因键变化自然失效;
         # write 后再显式丢弃同路径条目,避免陈旧条目占用内存等 LRU 驱逐。
         self._read_cache_max_elements = read_cache_max_elements
+        # issue #440:近似字节总量上限(None = 不限,行为与 #287 一致)。
+        # 计量口径见 ``_READ_CACHE_BYTES_PER_*`` 常数注释。
+        self._read_cache_max_bytes = read_cache_max_bytes
         self._read_cache: OrderedDict[
             tuple[str, int, int, str], _ReadCacheEntry
         ] = OrderedDict()
         self._read_cache_elements = 0
+        self._read_cache_bytes = 0
         self._read_cache_hits = 0
 
     # ---- 进程内读缓存(LRU)------------------------------------------------
@@ -379,14 +399,31 @@ class ParquetCache:
         if entry.elements > self._read_cache_max_elements:
             # 单文件超过整个缓存预算:不缓存(避免把其它条目全部挤掉)。
             return
+        if (
+            self._read_cache_max_bytes is not None
+            and entry.approx_bytes > self._read_cache_max_bytes
+        ):
+            # 单条目超过字节总预算:同样不缓存(issue #440,与 elements 口径
+            # 同语义;近似计量见 _READ_CACHE_BYTES_PER_* 常数注释)。
+            return
         while (
             self._read_cache
-            and self._read_cache_elements + entry.elements > self._read_cache_max_elements
+            and (
+                self._read_cache_elements + entry.elements
+                > self._read_cache_max_elements
+                or (
+                    self._read_cache_max_bytes is not None
+                    and self._read_cache_bytes + entry.approx_bytes
+                    > self._read_cache_max_bytes
+                )
+            )
         ):
             _, evicted = self._read_cache.popitem(last=False)
             self._read_cache_elements -= evicted.elements
+            self._read_cache_bytes -= evicted.approx_bytes
         self._read_cache[key] = entry
         self._read_cache_elements += entry.elements
+        self._read_cache_bytes += entry.approx_bytes
 
     def _read_cache_drop_path(self, path: Path) -> None:
         """丢弃某路径的全部缓存条目(write 后调用,防陈旧条目滞留)。"""
@@ -394,12 +431,14 @@ class ParquetCache:
         for key in [item for item in self._read_cache if item[0] == prefix]:
             entry = self._read_cache.pop(key)
             self._read_cache_elements -= entry.elements
+            self._read_cache_bytes -= entry.approx_bytes
 
     def read_cache_info(self) -> dict[str, int]:
-        """进程内读缓存概况(观测 / 测试用):条目数、元素数、命中次数。"""
+        """进程内读缓存概况(观测 / 测试用):条目数、元素数、近似字节、命中次数。"""
         return {
             "entries": len(self._read_cache),
             "elements": self._read_cache_elements,
+            "bytes": self._read_cache_bytes,
             "hits": self._read_cache_hits,
         }
 
@@ -448,7 +487,13 @@ class ParquetCache:
         async with self._io_semaphore:
             bars = await asyncio.to_thread(self._read_sync, path, symbol, period)
         self._read_cache_put(
-            key, _ReadCacheEntry(bars=bars, points=None, elements=len(bars))
+            key,
+            _ReadCacheEntry(
+                bars=bars,
+                points=None,
+                elements=len(bars),
+                approx_bytes=len(bars) * _READ_CACHE_BYTES_PER_BAR,
+            ),
         )
         self._read_ops += 1
         self._read_bytes += size
@@ -529,7 +574,12 @@ class ParquetCache:
             )
         self._read_cache_put(
             key,
-            _ReadCacheEntry(bars=None, points=full_points, elements=len(full_points)),
+            _ReadCacheEntry(
+                bars=None,
+                points=full_points,
+                elements=len(full_points),
+                approx_bytes=len(full_points) * _READ_CACHE_BYTES_PER_POINT,
+            ),
         )
         points = [
             item
@@ -629,6 +679,7 @@ class ParquetCache:
                 points=None,
                 columns=full_columns,
                 elements=len(full_columns.dates),
+                approx_bytes=len(full_columns.dates) * _READ_CACHE_BYTES_PER_CLOSE_COLUMN,
             ),
         )
         columns = _slice_close_columns(full_columns, start, end)

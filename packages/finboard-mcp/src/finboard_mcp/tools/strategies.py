@@ -15,6 +15,7 @@ draft / supersede / publish / rollback / diff / preset CRUD。
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -334,7 +335,11 @@ async def strategy_list(
             rows = await ResearchStrategySpecRepository(session).list_latest(
                 limit=limit
             )
-            return [_version_to_dict(row) for row in rows]
+            # spec 校验 + canonical payload + JSON 化是逐行同步 CPU 段,
+            # 挪线程池,重调用不毒化事件循环(issue #458)。
+            return await asyncio.to_thread(
+                lambda: [_version_to_dict(row) for row in rows]
+            )
 
     return await run_tool(
         audit=app.audit,
@@ -358,7 +363,10 @@ async def strategy_history(
             )
         if not rows:
             raise McpToolError("not_found", f"策略规格不存在: {strategy_id}")
-        return [_version_to_dict(row) for row in rows]
+        # issue #458:逐行 spec 校验 + 序列化挪线程池(同 strategy_list)。
+        return await asyncio.to_thread(
+            lambda: [_version_to_dict(row) for row in rows]
+        )
 
     return await run_tool(
         audit=app.audit,
@@ -385,7 +393,8 @@ async def strategy_version_get(
                 "not_found",
                 f"策略版本不存在: {strategy_id} v{version}",
             )
-        return _version_to_dict(row)
+        # issue #458:spec 校验 + canonical payload + JSON 化挪线程池。
+        return await asyncio.to_thread(_version_to_dict, row)
 
     return await run_tool(
         audit=app.audit,
@@ -414,7 +423,10 @@ async def strategy_diff(
             after = await repo.get_version(strategy_id, to_version)
         if before is None or after is None:
             raise McpToolError("not_found", "对比版本不存在")
-        changes = structured_diff(before.payload, after.payload)
+        # issue #458:结构化 diff 是 O(payload) 的同步 CPU 段,挪线程池。
+        changes = await asyncio.to_thread(
+            structured_diff, before.payload, after.payload
+        )
         return {
             "strategy_id": strategy_id,
             "from_version": from_version,

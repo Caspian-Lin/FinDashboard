@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,24 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+_REPLACE_RETRY_DELAYS = (0.02, 0.05, 0.1, 0.2, 0.4)
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    """os.replace 带短退避重试。
+
+    Windows 上另一进程(API 预算快照端点)恰好持有目标文件读句柄时,
+    ``os.replace`` 报 WinError 5 拒绝访问;该读句柄是瞬态的,短退避后
+    重试即可收敛。重试用尽仍失败则按原样抛出(fail-visible)。
+    """
+    for delay in _REPLACE_RETRY_DELAYS:
+        try:
+            source.replace(destination)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    source.replace(destination)
 
 
 class TushareRequestLimitError(RuntimeError):
@@ -132,7 +151,7 @@ class TushareRequestBudget:
             json.dumps({"date": today, "requests": requests}, ensure_ascii=False),
             encoding="utf-8",
         )
-        temporary.replace(self._usage_file)
+        _replace_with_retry(temporary, self._usage_file)
 
 
 _BUDGETS: dict[tuple[int, int, str], TushareRequestBudget] = {}

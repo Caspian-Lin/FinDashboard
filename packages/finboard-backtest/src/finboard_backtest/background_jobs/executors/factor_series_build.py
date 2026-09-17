@@ -1,47 +1,59 @@
-"""``factor_series_build`` 执行器 —— 内容寻址因子序列构建(issue #360)。
+"""``factor_series_build`` 执行器 —— 内容寻址因子序列构建(issue #360;
+#398 放行平台预置因子 kind=predefined_factor)。
 
 worker 领取 ``kind=factor_series_build`` 任务(单并发,复用 research_code_run
 的 worker 槽位约定)后按 payload 重建构建输入::
 
     {
-      "kind": "factor",                    # v1 仅 factor
-      "name": "mom20",                     # 代码产物名
-      "commit": "<sha>",                   # 可省 = active+passed 引用
-      "artifact_id": "RC-...",             # 可选,与 name 联合定位
+      "kind": "factor" | "predefined_factor",
+        # factor = 用户沙箱因子(#359/#360,容器执行,路径零变化);
+        # predefined_factor = 平台预置因子(#398,进程内执行,免容器)
+      "name": "mom20" | "return_21d",      # 代码产物名 / 目录裸名
+      "commit": "<sha>",                   # factor 专属;predefined 由目录锚定
+      "artifact_id": "RC-...",             # factor 专属,可选
       "release_id": "DR-...",              # bars 主发布锚定
       "dataset_release_ids": ["DR-..."],   # 研究发布联合集(排序冻结)
       "window_start": "2022-01-01",
       "window_end": "2023-06-30",
-      "params": {...}                      # 可选
+      "params": {...}                      # factor 专属;predefined 恒空
     }
 
-流程(5 个进度阶段):解析 → 沙箱开关 → 代码/发布解析 → **缓存检查**
-(``series_key`` 已存在且 content_checksum 一致 → 直接 succeeded,
-``result`` 标注 ``cache_hit``,不启动容器)→ 容器构建(#359
-``research_sandbox.runner.run_factor_series_container(spec)``,窗口内逐决策日
-执行 factor.compute)→ **前缀不变性审计抽样**(2 个截断点;检出前视
-→ failed=``lookahead_detected``,失败分类与 output_contract_violation 同级,
-错误具名首个分歧日期)→ 内容寻址落库(``research_factor_series``,
-``series_key`` ON CONFLICT 幂等)。
+流程(5 个进度阶段):解析 → 沙箱开关(**仅 factor**;predefined 进程内
+执行无 Docker 前置)→ 代码/发布解析 → **缓存检查**(``series_key`` 已存在
+且 content_checksum 一致 → 直接 succeeded,``result`` 标注 ``cache_hit``,
+不启动构建)→ 构建(factor:容器 #359;predefined:进程内
+``research_sandbox.predefined_runner.run_predefined_factor_series``)→
+**前缀不变性审计抽样**(2 个截断点;检出前视 → failed=``lookahead_detected``,
+失败分类与 output_contract_violation 同级,错误具名首个分歧日期)→ 内容
+寻址落库(``research_factor_series``,``series_key`` ON CONFLICT 幂等)。
 
 窗口扩展重建后重叠前缀 checksum 必须一致 —— 前缀不变性审计免费充当一致性
 自检;换 bars 发布的托管批量重建 = 一次入队 N 个本 job(内容寻址缓存使
 未受影响的输入组合自动 unchanged,不新造编排器)。
 
+进度(issue #441):阶段档位与终态 phase 不变(5 档 + succeeded /
+cache_hit),execute / audit 长阶段内部增细粒度帧 —— 挂载逐批计数
+(phase ``factor_series_build:mount k/n``,经 ``make_stage_phase_progress``
+单飞合并)、容器边界(``container:start`` / ``container:done``)、审计逐
+截断点(``audit i/n``);k/n 只进 phase 文本,数值列停在阶段档位,
+done 单调不减、total 只增(worker ``update_progress`` 夹紧规则)。
+
 容器执行与审计本体由 #359 提供(``runner.FactorSeriesRunSpec`` /
 ``runner.run_factor_series_container`` / ``research_sandbox.audit`` 前缀不变性
-引擎);默认实现走真实容器与审计引擎,测试经构造注入 mock。
+引擎);predefined 的进程内执行与审计由 #398 的
+``predefined_runner`` 提供,同构语义(测试经构造注入 mock 断言同构性)。
 
-边界:纯离线研究域;容器无网络无凭证,不触实盘任何组件。
+边界:纯离线研究域;容器无网络无凭证,进程内执行仅限平台可信目录代码;
+不触实盘任何组件。
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
+import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -54,11 +66,16 @@ from finboard_backtest.background_jobs.contracts import (
     JobResult,
     ProgressCallback,
 )
+from finboard_backtest.background_jobs.executors._progress import (
+    make_stage_phase_progress,
+)
 from finboard_persistence import FactorSeriesRecord
 
 SettingsFactory = Callable[[], Any]
 #: 容器执行回调:(spec) -> result(dates / values / quality / run_id)。
-ContainerRunner = Callable[[Any], Awaitable[Any]]
+#: 声明可选关键字 ``mount_on_batch``(issue #441)的 runner 额外获得
+#: 挂载逐批进度;注入的旧式 ``(spec)`` runner(测试 seam)照常可用。
+ContainerRunner = Callable[..., Awaitable[Any]]
 #: 审计回调:(spec, truncate_at) -> outcome(passed / first_divergence_date)。
 PrefixAudit = Callable[..., Awaitable[Any]]
 
@@ -72,8 +89,12 @@ MISSING_RESEARCH_CODE = "missing_research_code"
 LOOKAHEAD_DETECTED = "lookahead_detected"
 #: 缓存命中(code/checksum 一致)时 result_ref 之外的幂等标记
 CACHE_HIT = "cache_hit"
+#: 未注册的平台预置因子名(#398)
+UNKNOWN_PREDEFINED_FACTOR = "unknown_predefined_factor"
 
 _USER_FACTOR_KIND = "factor"
+#: 平台预置因子(issue #398,进程内执行,免容器)
+_PREDEFINED_FACTOR_KIND = "predefined_factor"
 
 
 @dataclass(frozen=True)
@@ -112,11 +133,56 @@ class FactorSeriesBuildPayload:
         return h.hexdigest()[:16]
 
 
-async def _default_container_runner(spec: Any) -> Any:
-    """#359 钉死的容器执行入口。"""
+async def _default_container_runner(
+    spec: Any, *, mount_on_batch: Callable[[int, int], None] | None = None
+) -> Any:
+    """#359 钉死的容器执行入口(mount_on_batch 透传挂载逐批进度,#441)。"""
     from finboard_backtest.research_sandbox import runner
 
-    return await runner.run_factor_series_container(spec)
+    return await runner.run_factor_series_container(
+        spec, mount_on_batch=mount_on_batch
+    )
+
+
+async def _default_predefined_runner(
+    spec: Any, *, mount_on_batch: Callable[[int, int], None] | None = None
+) -> Any:
+    """#398 预置因子的进程内执行入口(免容器,同构结果契约)。"""
+    from finboard_backtest.research_sandbox.predefined_runner import (
+        run_predefined_factor_series,
+    )
+
+    return await run_predefined_factor_series(
+        spec, mount_on_batch=mount_on_batch
+    )
+
+
+def _accepts_mount_on_batch(runner: ContainerRunner) -> bool:
+    """runner 是否接受 ``mount_on_batch`` 关键字(可选能力探测,#441)。
+
+    与 #304 getattr 探针同精神:签名探测,注入的旧式 ``(spec)`` runner
+    (测试 seam)保持原契约,静默退化(无挂载逐批进度);默认 runner 与
+    新式 runner 声明该参后透传。``signature().bind`` 只做形参拟合,不执行
+    被探测对象。
+    """
+    try:
+        inspect.signature(runner).bind(object(), mount_on_batch=None)
+    except TypeError:
+        return False
+    return True
+
+
+async def _default_predefined_prefix_audit(
+    spec: Any, baseline: Any, *, truncate_at: date
+) -> Any:
+    """#398 预置因子的前缀不变性审计(进程内 build_fn,#371 同机制)。"""
+    from finboard_backtest.research_sandbox.predefined_runner import (
+        default_predefined_prefix_audit,
+    )
+
+    return await default_predefined_prefix_audit(
+        spec, baseline, truncate_at=truncate_at
+    )
 
 
 async def _default_prefix_audit(spec: Any, baseline: Any, *, truncate_at: date) -> Any:
@@ -166,6 +232,48 @@ async def _default_prefix_audit(spec: Any, baseline: Any, *, truncate_at: date) 
     )
 
 
+def _enrich_container_failure(
+    exc: Exception,
+    payload: FactorSeriesBuildPayload,
+    *,
+    bars_release_start: date | None,
+) -> Exception:
+    """容器失败但窗口头部零预热时,把诊断提示附到原异常后重抛。
+
+    窗口挂载的行情行来自 bars 主发布的**全发布区间**(发布起点即历史
+    上界),``window_start`` 不晚于发布起点时,窗口头部决策日的可见历史
+    只有 0-1 根 bar——带最小历史守卫的因子(如 RSI/MACD 类)会在窗口
+    头部 raise,炸掉整个构建。此时把可操作的修复路径附到错误摘要;
+    其余失败原样重抛(错误类型 / code / retryable 语义零变化)。
+    """
+    if (
+        bars_release_start is None
+        or payload.window_start > bars_release_start
+    ):
+        return exc
+    code = getattr(exc, "code", type(exc).__name__)
+    summary = getattr(exc, "summary", None) or str(exc) or type(exc).__name__
+    hint = (
+        f"{summary};诊断提示:window_start({payload.window_start.isoformat()})"
+        f"不晚于 bars 主发布起点({bars_release_start.isoformat()}),"
+        "窗口头部决策日的挂载可见历史为 0-1 根 bar,带最小历史守卫的因子"
+        "会在窗口头部 raise;修复:把 window_start 后移预留预热期,"
+        "或将因子改写为 compute_series 在头部产出缺测。"
+    )
+    return ExecutorError(code=code, summary=hint, retryable=getattr(exc, "retryable", False))
+
+
+def _jsonable(value: Any) -> Any:
+    """递归把 date/datetime 转 ISO 字符串(JSONB 归档兜底;psycopg 不收 date)。"""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
 def audit_truncation_points(dates: list[date]) -> list[date]:
     """抽样 2 个截断点(确定性,issue #360)。
 
@@ -198,11 +306,17 @@ class FactorSeriesBuildExecutor:
         settings_factory: SettingsFactory,
         container_runner: ContainerRunner | None = None,
         prefix_audit: PrefixAudit | None = None,
+        predefined_runner: ContainerRunner | None = None,
+        predefined_prefix_audit: PrefixAudit | None = None,
     ) -> None:
         self._session_maker = session_maker
         self._settings_factory = settings_factory
         self._container_runner = container_runner or _default_container_runner
         self._prefix_audit = prefix_audit or _default_prefix_audit
+        self._predefined_runner = predefined_runner or _default_predefined_runner
+        self._predefined_prefix_audit = (
+            predefined_prefix_audit or _default_predefined_prefix_audit
+        )
 
     async def execute(
         self,
@@ -219,7 +333,20 @@ class FactorSeriesBuildExecutor:
                 summary="无法加载 settings,factor_series_build 无法执行",
                 retryable=True,
             )
-        if not getattr(settings, "research_sandbox_enabled", False):
+        if payload.kind not in (_USER_FACTOR_KIND, _PREDEFINED_FACTOR_KIND):
+            raise ExecutorError(
+                code=KIND_NOT_IMPLEMENTED,
+                summary=(
+                    "factor_series_build 仅支持 kind=factor(用户沙箱因子)"
+                    f"与 kind=predefined_factor(平台预置因子,#398),"
+                    f"收到 {payload.kind!r}"
+                ),
+                retryable=False,
+            )
+        if payload.kind == _USER_FACTOR_KIND and not getattr(
+            settings, "research_sandbox_enabled", False
+        ):
+            # predefined 进程内执行无 Docker 前置(#398),沙箱门只锁用户因子。
             raise ExecutorError(
                 code=SANDBOX_DISABLED,
                 summary=(
@@ -230,23 +357,15 @@ class FactorSeriesBuildExecutor:
                 retryable=False,
                 context={"job_id": job.job_id},
             )
-        if payload.kind != _USER_FACTOR_KIND:
-            raise ExecutorError(
-                code=KIND_NOT_IMPLEMENTED,
-                summary=(
-                    "factor_series_build v1 仅支持 kind=factor,"
-                    f"收到 {payload.kind!r}"
-                ),
-                retryable=False,
-            )
+        is_predefined = payload.kind == _PREDEFINED_FACTOR_KIND
         await progress(1, _TOTAL_STAGES, "factor_series_build:resolve")
 
-        await self._require_releases(payload)
+        bars_release_start = await self._require_releases(payload)
         await progress(2, _TOTAL_STAGES, "factor_series_build:cache_check")
 
         # 缓存检查先行(内容寻址,不依赖 artifact 当前 active 指向——find_matching
         # 按该产物全部已存序列逐行试算 series_key):命中 → succeeded(cache_hit),
-        # 不启动容器。retired 产物的已存序列同样可命中(冻结工件不生命周期化)。
+        # 不启动构建。retired 产物的已存序列同样可命中(冻结工件不生命周期化)。
         cached = await self._find_cached(payload)
         if cached is not None:
             await progress(
@@ -263,11 +382,62 @@ class FactorSeriesBuildExecutor:
                 ),
             )
 
-        _artifact_id, commit = await self._resolve_code(payload)
+        if is_predefined:
+            _artifact_id, commit = await self._resolve_predefined(payload)
+        else:
+            _artifact_id, commit = await self._resolve_code(payload)
         await progress(3, _TOTAL_STAGES, "factor_series_build:execute")
 
+        # issue #396:交易日历 DB 优先(缺失回源 akshare 并回写 trade_cal),
+        # 执行期不再依赖 akshare 可用性;预热失败不阻断(_build_spec 内同步
+        # 读取回退原路径)。
+        from finboard_data.trading_calendar import ensure_calendar_loaded
+
+        await ensure_calendar_loaded()
         spec = self._build_spec(payload, commit=commit)
-        result = await self._container_runner(spec)
+        runner = (
+            self._predefined_runner if is_predefined else self._container_runner
+        )
+        # execute 长阶段内部进度(#441):挂载逐批计数经单飞合并进 phase
+        # 文本(k/n),数值列停在 execute 档位保全局单调(done 不减、total
+        # 只增);旧式 runner 探测不支持时静默退化(不透传,行为同此前)。
+        mount_on_batch: Callable[[int, int], None] | None = None
+        if _accepts_mount_on_batch(runner):
+            mount_on_batch = make_stage_phase_progress(
+                progress,
+                phase_prefix="factor_series_build:mount",
+                done=3,
+                total=_TOTAL_STAGES,
+            )
+        await progress(3, _TOTAL_STAGES, "factor_series_build:container:start")
+        try:
+            if mount_on_batch is None:
+                result = await runner(spec)
+            else:
+                result = await runner(spec, mount_on_batch=mount_on_batch)
+        except ExecutorError:
+            raise
+        except Exception as exc:
+            raise _enrich_container_failure(
+                exc, payload, bars_release_start=bars_release_start
+            ) from exc
+        await progress(3, _TOTAL_STAGES, "factor_series_build:container:done")
+        # 覆盖起点声明冻结入 series manifest(issue #403,继 #399):声明
+        # ``min_history_bars`` 的预置因子,把声明随 quality 归档(构建时刻
+        # 的目录语义);commit 锚已含声明(声明变化 → 新锚 → 新序列),
+        # 归档使其**在产物上自描述**——事后审计无需回放历史目录即可核对
+        # 该序列按哪份覆盖起点声明构建。未声明(min_history_bars=None)
+        # 省略键,既有 quality payload 逐字节稳定。
+        declaration: dict[str, Any] | None = None
+        if is_predefined and result is not None:
+            from finboard_backtest.factors.predefined import get_predefined_factor
+
+            item = get_predefined_factor(payload.name)
+            if item.min_history_bars is not None:
+                declaration = {
+                    "min_history_bars": item.min_history_bars,
+                    "window": item.window,
+                }
         record = _record_from_result(
             result,
             code_artifact=payload.name,
@@ -278,12 +448,29 @@ class FactorSeriesBuildExecutor:
             params=payload.params or {},
             window_start=payload.window_start,
             window_end=payload.window_end,
+            catalog_declaration=declaration,
         )
         await progress(4, _TOTAL_STAGES, "factor_series_build:audit")
 
         # 前缀不变性审计抽样:检出前视 → failed=lookahead_detected(不落库)。
         # 基线复用主构建产物(#371):audit 回调接收 (spec, baseline, cut)。
-        audit_failure = await self._audit_sample(spec, record, result)
+        audit = (
+            self._predefined_prefix_audit
+            if is_predefined
+            else self._prefix_audit
+        )
+
+        async def report_cut(index: int, cuts_total: int) -> None:
+            # 逐截断点一帧(#441):k/n 进 phase 文本,数值列停在 audit 档位。
+            await progress(
+                4,
+                _TOTAL_STAGES,
+                f"factor_series_build:audit {index}/{cuts_total}",
+            )
+
+        audit_failure = await self._audit_sample(
+            spec, record, result, audit=audit, report_cut=report_cut
+        )
         if audit_failure is not None:
             return JobResult(
                 status="failed",
@@ -292,6 +479,41 @@ class FactorSeriesBuildExecutor:
                 error_summary=audit_failure,
             )
 
+        # issue #463:values 落 canonical parquet 工件(sha256 锚定),
+        # DB 行只留 relpath + checksum;record 由行内模式换为工件模式
+        # (审计已完成,record 此后只读 dates/quality/source_run_id/series_key)。
+        import asyncio as _asyncio
+
+        from finboard_data.factor_series_store import (
+            resolve_artifact_root,
+            write_series_artifact,
+        )
+        from finboard_persistence import FactorSeriesRecord
+
+        artifact_root = resolve_artifact_root(
+            getattr(settings, "factor_series_artifact_root", None)
+        )
+        meta = await _asyncio.to_thread(
+            write_series_artifact,
+            artifact_root,
+            record.series_key,
+            record.values,
+        )
+        record = FactorSeriesRecord.build_artifact(
+            code_artifact=payload.name,
+            code_commit=commit,
+            kind=payload.kind,
+            release_id=payload.release_id,
+            dataset_release_ids=payload.dataset_release_ids,
+            params=payload.params or {},
+            window_start=payload.window_start,
+            window_end=payload.window_end,
+            dates=record.dates,
+            quality=record.quality,
+            source_run_id=record.source_run_id,
+            artifact_relpath=meta.relpath,
+            artifact_checksum=meta.checksum,
+        )
         async with self._session_maker() as session:
             from finboard_persistence import FactorSeriesRepository
 
@@ -304,14 +526,69 @@ class FactorSeriesBuildExecutor:
 
     # ---- 内部 -------------------------------------------------------------
 
+    async def _resolve_predefined(
+        self, payload: FactorSeriesBuildPayload
+    ) -> tuple[None, str]:
+        """解析预置因子的目录锚(#398)。
+
+        ``commit`` / ``artifact_id`` / ``params`` 是用户因子代码概念:
+        predefined 的实现版本由 ``predefined_factor_commit(name)`` 目录锚
+        内容寻址(公式 / 依赖 / 实现版本任一变化 → 新锚 → 新序列),
+        payload 携带它们一律 ``invalid_payload``;未注册因子名
+        ``unknown_predefined_factor`` 秒拒。
+        """
+        if payload.artifact_id is not None or payload.commit is not None:
+            raise ExecutorError(
+                code="invalid_payload",
+                summary=(
+                    "kind=predefined_factor 不接受 commit/artifact_id"
+                    "(实现版本由预置因子目录锚定,重建即得当前实现)"
+                ),
+                retryable=False,
+            )
+        if payload.params:
+            raise ExecutorError(
+                code="invalid_payload",
+                summary=(
+                    "kind=predefined_factor 的 params 须为空(公式由目录钉死;"
+                    "参数化因子按窗口变体展开注册,如 return_21d/63d/126d/252d)"
+                ),
+                retryable=False,
+            )
+        from finboard_backtest.factors.predefined import (
+            get_predefined_factor,
+            predefined_factor_commit,
+        )
+
+        try:
+            get_predefined_factor(payload.name)
+        except KeyError as exc:
+            raise ExecutorError(
+                code=UNKNOWN_PREDEFINED_FACTOR,
+                summary=str(exc),
+                retryable=False,
+            ) from exc
+        return None, predefined_factor_commit(payload.name)
+
     async def _resolve_code(
         self, payload: FactorSeriesBuildPayload
     ) -> tuple[str | None, str]:
-        """解析 (artifact_id, commit);规则与 research_code_run 同口径。"""
+        """解析 (artifact_id, commit);规则与 research_code_run 同口径。
+
+        issue #461(用户拍板 2026-09-13):序列构建仅接受协议 v2 入口
+        ``compute_series`` —— v1 ``compute`` 的逐日回退对每个决策日做全
+        历史面板重算(O(决策日数 x 面板行数)),全市场全历史窗口不可行。
+        门禁在 resolve 档位秒拒(先于挂载),具名 ``v1_series_deprecated``
+        附迁移路径;单日快照路径(research_code_run)不受影响。
+        """
         from finboard_backtest.research_code import (
             ResearchCodeService,
             is_promoted_artifact,
             promotion_status,
+        )
+        from finboard_backtest.research_code.factor_series import (
+            V1_SERIES_DEPRECATED_CODE,
+            factor_series_v2_entry_error,
         )
         from finboard_persistence import ResearchCodeArtifactRepository
 
@@ -388,14 +665,29 @@ class FactorSeriesBuildExecutor:
                     ),
                     retryable=False,
                 )
+            gate_error = factor_series_v2_entry_error(
+                service.repo.read(
+                    kind=payload.kind, name=payload.name, commit=commit
+                )
+            )
+            if gate_error is not None:
+                raise ExecutorError(
+                    code=V1_SERIES_DEPRECATED_CODE,
+                    summary=gate_error,
+                    retryable=False,
+                )
             return artifact.artifact_id, commit
 
-    async def _require_releases(self, payload: FactorSeriesBuildPayload) -> None:
+    async def _require_releases(
+        self, payload: FactorSeriesBuildPayload
+    ) -> date | None:
         """bars 主发布与联合集逐个存在性检查(fail-visible)。
 
         ``release_id`` 须锚定 **bars** 类发布(issue #371):挂载的全部
         行情行来自它;此前不校验 kind,错锚会在走完全量挂载物化(真实
         发布 ~20 分钟)后才以「窗口挂载不含任何行情行」失败——这里秒拒。
+        返回 bars 主发布的 ``start_date``(容器失败时的零预热诊断依据,
+        见 :func:`_enrich_container_failure`)。
         """
         from finboard_data.releases import ReleaseDatasetKind
         from finboard_persistence import ResearchDatasetReleaseRepository
@@ -426,6 +718,7 @@ class FactorSeriesBuildExecutor:
                         summary=f"研究数据发布不存在: {release_id}",
                         retryable=False,
                     )
+            return main_release.start_date
 
     async def _find_cached(
         self, payload: FactorSeriesBuildPayload
@@ -480,25 +773,35 @@ class FactorSeriesBuildExecutor:
         )
 
     async def _audit_sample(
-        self, spec: Any, record: FactorSeriesRecord, baseline: Any
+        self,
+        spec: Any,
+        record: FactorSeriesRecord,
+        baseline: Any,
+        *,
+        audit: PrefixAudit | None = None,
+        report_cut: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> str | None:
         """抽 2 个截断点跑前缀不变性审计;返回失败文案或 None(通过)。
 
         ``baseline`` 为主构建阶段产物(结果契约见 ``_record_from_result``),
         传入审计回调复用(#371,免每截断点重建基线)。两个截断点相互独立
-        (各自从基线挂载过滤出变体挂载 + 独立容器),并发执行(#375):
-        检出语义零变化(失败报告仍取最早分歧日期),成功场景审计段墙钟
-        近半;异常按截断点顺序重抛第一个(与串行一致)。审计本体 #359
-        提供,经构造注入可 mock。
+        (各自从基线挂载过滤出变体挂载 + 独立构建),**串行执行**(原 #375
+        为并发:两个审计容器并发各自逼近 4096m 限额时,Docker Desktop
+        WSL2 VM 总量(~8GB)扛不住双容器峰值,实测全市场挂载下审计容器
+        成对 OOM(exit=137)——串行后单任务任意时刻至多 1 个容器;检出
+        语义零变化(失败报告仍取最早分歧日期),代价是审计段墙钟近倍)。
+        异常在截断点顺序上原样传播(与串行一致)。审计本体由 kind 对应的
+        默认回调提供(factor=容器 #359 / predefined=进程内 #398),经构造
+        注入可 mock。``report_cut``(#441,可选):每个截断点执行前回调
+        ``(index, cuts_total)``,长审计段逐点可见。
         """
+        audit_fn = audit or self._prefix_audit
         cuts = audit_truncation_points(list(record.dates))
-        outcomes = await asyncio.gather(
-            *(
-                self._prefix_audit(spec, baseline, truncate_at=cut)
-                for cut in cuts
-            ),
-            return_exceptions=True,
-        )
+        outcomes: list[Any] = []
+        for index, cut in enumerate(cuts, start=1):
+            if report_cut is not None:
+                await report_cut(index, len(cuts))
+            outcomes.append(await audit_fn(spec, baseline, truncate_at=cut))
         divergences: list[date] = []
         for cut, outcome in zip(cuts, outcomes, strict=True):
             if isinstance(outcome, BaseException):
@@ -586,16 +889,21 @@ def _record_from_result(
     code_commit: str,
     kind: str,
     release_id: str,
-    dataset_release_ids: tuple[str, ...],
+    dataset_release_ids: Sequence[str],
     params: dict[str, Any],
     window_start: date,
     window_end: date,
+    catalog_declaration: dict[str, Any] | None = None,
 ) -> FactorSeriesRecord:
     """把容器产出(#359 结果契约)装配为内容寻址 Record。
 
     结果契约(与 #359 钉死):``dates``(升序决策日)、``values``
     (``{date|ISO: {symbol: float|null}}``,date/ISO 两态均可)、``quality``
     (可选质量门归档)、``run_id``(产出 RCR,可空)。
+
+    ``catalog_declaration``(#403,可空):预置因子声明的覆盖起点语义
+    (``min_history_bars``/``window``),非空时并入 quality 的
+    ``catalog_declaration`` 键冻结归档——产物自描述构建时刻的目录声明。
     """
     raw_dates = getattr(result, "dates", None)
     if not raw_dates:
@@ -630,8 +938,15 @@ def _record_from_result(
         }
     quality = getattr(result, "quality", None)
     if quality is not None and not isinstance(quality, dict):
-        # #359 产出 SeriesQualityReport dataclass,归档为普通 dict
-        quality = asdict(quality)
+        # #359 产出 SeriesQualityReport dataclass,归档为普通 dict:优先其
+        # 自带 ``as_dict()``(worst_day 已 ISO 化,psycopg JSONB 可序列化);
+        # 未知 dataclass 兜底 asdict + date/datetime 递归转 ISO —— JSONB
+        # 序列化不接受 date 对象(#463 预置因子首次走到落库时暴露)。
+        as_dict = getattr(quality, "as_dict", None)
+        quality = as_dict() if callable(as_dict) else _jsonable(asdict(quality))
+    if catalog_declaration:
+        frozen = {"catalog_declaration": dict(catalog_declaration)}
+        quality = {**(quality or {}), **frozen}
     source_run_id = getattr(result, "run_id", None)
     return FactorSeriesRecord.build(
         code_artifact=code_artifact,
@@ -649,8 +964,6 @@ def _record_from_result(
     )
 
 
-_: type[JobExecutor] = FactorSeriesBuildExecutor
-
 __all__ = [
     "CACHE_HIT",
     "DATASET_RELEASE_UNAVAILABLE",
@@ -658,7 +971,12 @@ __all__ = [
     "LOOKAHEAD_DETECTED",
     "MISSING_RESEARCH_CODE",
     "SANDBOX_DISABLED",
+    "UNKNOWN_PREDEFINED_FACTOR",
+    "_PREDEFINED_FACTOR_KIND",
     "FactorSeriesBuildExecutor",
     "FactorSeriesBuildPayload",
     "audit_truncation_points",
 ]
+
+
+_: type[JobExecutor] = FactorSeriesBuildExecutor

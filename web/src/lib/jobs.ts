@@ -33,9 +33,8 @@ export const JOB_KINDS: { value: string; label: LocalizedText }[] = [
   { value: "dataset_publish", label: { zh: "数据集发布", en: "Dataset publish" } },
   { value: "backtest_run", label: { zh: "回测", en: "Backtest" } },
   { value: "data_sync", label: { zh: "数据同步", en: "Data sync" } },
-  { value: "fetch_all", label: { zh: "全量拉取", en: "Fetch all" } },
   { value: "quality_repair", label: { zh: "质量修复", en: "Quality repair" } },
-  { value: "research_data_sync", label: { zh: "研究数据摄取", en: "Research data ingest" } },
+  { value: "dataset_sync", label: { zh: "数据集同步", en: "Dataset sync" } },
 ];
 
 /** 归档维度过滤(issue #221),与后端 ARCHIVE_FILTER_VALUES 对齐。 */
@@ -59,6 +58,34 @@ export interface JobPhaseInfo {
   load?: { done: number; total: number };
   /** 决策级帧:`research_run:<stage>#<序号>@<YYYY-MM-DD>`(序号 1-based)。 */
   decision?: { index: number; date: string };
+}
+
+/**
+ * 已运行时长格式化(issue #442):start → end 的墙钟差按 zh「X 小时 Y 分 Z 秒」/
+ * en「Xh Ym Zs」拼接,不足一小时省略小时段;started_at 缺失或非法返回 null
+ * (组件侧显示 —)。endMs 缺省取当前时间(running 族);终态 job 由调用方传
+ * finished_at 的毫秒值,避免终态时长随墙钟继续增长。
+ */
+export function formatJobElapsed(
+  startedAt: string | null | undefined,
+  lang: "zh" | "en" = "zh",
+  endMs: number = Date.now(),
+): string | null {
+  if (!startedAt) return null;
+  const start = new Date(startedAt).getTime();
+  if (Number.isNaN(start)) return null;
+  const sec = Math.max(0, Math.floor((endMs - start) / 1000));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (lang === "en") {
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+  if (h > 0) return `${h} 小时 ${m} 分 ${s} 秒`;
+  if (m > 0) return `${m} 分 ${s} 秒`;
+  return `${s} 秒`;
 }
 
 const DECISION_PHASE_RE = /^research_run:([a-z_]+)#(\d+)@(\d{4}-\d{2}-\d{2})$/;

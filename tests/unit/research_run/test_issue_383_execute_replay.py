@@ -10,6 +10,7 @@ execute 短路」挡住)、异常映射。coordinator 内部状态机由
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -32,9 +33,25 @@ if TYPE_CHECKING:
 _SRC = "RR-source0000000000000000000000000000"
 
 
+@dataclass(frozen=True)
+class _ReplayableManifest:
+    """可 ``dataclasses.replace`` 的最小 manifest 替身(issue #455 起)。
+
+    execute_replay 按新 run 身份预替换 manifest(#455 探针目标修正),
+    替身必须携带身份字段集才能走真实 replace 路径;冻结输入在编排契约
+    测试中不消费,省略。
+    """
+
+    run_id: str
+    idempotency_key: str = ""
+    requested_by: str = ""
+    replay_of_run_id: str | None = None
+    replay_source_status: str | None = None
+
+
 def _source_record() -> SimpleNamespace:
     return SimpleNamespace(
-        manifest=SimpleNamespace(run_id=_SRC),
+        manifest=_ReplayableManifest(run_id=_SRC),
         status=ResearchRunStatus.COMPLETED,
         result_checksum="a" * 64,
     )
@@ -61,9 +78,18 @@ class _FakeStore:
         self.checkpoint_calls += 1
 
 
+class _FakeSession:
+    """issue #450 追续:包装会话关闭前 commit,假会话需提供该方法。"""
+
+    commit_calls: int = 0
+
+    async def commit(self) -> None:
+        _FakeSession.commit_calls += 1
+
+
 class _FakeSessionCM:
     async def __aenter__(self) -> object:
-        return object()
+        return _FakeSession()
 
     async def __aexit__(self, *exc: object) -> None:
         return None
@@ -139,7 +165,9 @@ class TestExecuteReplay:
         ).hexdigest()[:24]
         assert kwargs["new_run_id"] == expected_id
         assert kwargs["idempotency_key"].startswith(f"job-flamegraph:{_SRC}:")
-        assert store.checkpoint_calls == 1
+        # issue #450 追续:store 改逐操作短会话(关闭前 commit),checkpoint
+        # 变 no-op——持久性由 _FakeSession.commit 计数承载。
+        assert _FakeSession.commit_calls >= 1
 
     async def test_idempotency_key_varies_per_invocation(self, monkeypatch) -> None:
         """带时间戳的幂等键:重复诊断重放产生新 run,不被 COMPLETED 短路。"""

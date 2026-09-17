@@ -202,6 +202,17 @@ export const RESEARCH_HINTS = {
         en: "A factor experiment answers: does this factor truly predict future returns? Evaluated via IC analysis, layered backtests and more.",
       },
     },
+    predefined: {
+      title: { zh: "平台因子", en: "Platform factors" },
+      description: {
+        zh: "平台预置的「公式即代码」因子目录（动量/风险/流动性/基本面等族），只读。",
+        en: "The read-only catalog of platform-defined formula-as-code factors (momentum / risk / liquidity / fundamental families and more).",
+      },
+      detail: {
+        zh: "预置因子由平台实现并冻结公式，不接受用户代码；经 factor_series_build 构建为序列后在策略规格中以 p_<名称> 引用。",
+        en: "Platform factors are implemented with frozen formulas and accept no user code; build them into series via factor_series_build and reference them as p_<name> in strategy specs.",
+      },
+    },
   },
   strategy: {
     studio: {

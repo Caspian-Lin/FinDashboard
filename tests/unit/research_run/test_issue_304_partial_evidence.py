@@ -34,6 +34,7 @@ from finboard_backtest.research_run import (
 )
 from finboard_backtest.research_run.contracts import (
     DecisionBundle,
+    DecisionLedgerView,
     FrozenArtifactRef,
     JsonValue,
     ResearchRunManifest,
@@ -240,7 +241,8 @@ class TestSignalEnginePartialEvidence:
         assert failure["completed_decisions"] == 0
         assert failure["failed_decision_index"] == 1
         assert failure["decision_date"] == DECISION_AT.date().isoformat()
-        # factor_screen 证据与成功路径同构(只依赖冻结输入,与组合阶段无关)
+        # factor_screen 证据与成功路径同构(只依赖前缀捕获的冻结输入投影,
+        # 与组合阶段无关;#463 前缀口径 —— 首期失败时前缀 = 该期)
         screen = report_payload["factor_screen"]
         assert isinstance(screen, dict)
         raw_factors = screen["factors"]
@@ -258,7 +260,7 @@ class TestSignalEnginePartialEvidence:
 
     async def test_partial_hook_reports_mid_run_position(self) -> None:
         """验收(中期失败定位):hook 按 completed_decisions 给出 1-based
-        失败期序号与同序号冻结输入的决策日。"""
+        失败期序号与同序号前缀捕获的决策日。"""
         spec = _spec(rank_threshold=0.5)  # 阈值放宽,决策本身可构建
         snapshots = {
             "factor-v1": _snapshot(DECISION_AT),
@@ -273,10 +275,11 @@ class TestSignalEnginePartialEvidence:
         adapter = _adapter(
             manifest, _closes_provider(n_days=60), snapshots
         )
-        # 只驱动加载(等价于决策循环已跑过 1 期),然后模拟中期失败定位
-        await adapter._load()
-        assert adapter._inputs is not None
-        assert len(adapter._inputs) == 2
+        # issue #463:输入不再由 _load 预物化,改为逐期拉取时捕获 ——
+        # 驱动决策循环产出全部期次,等价旧「全部冻结输入已就绪」。
+        decisions = [item async for item in adapter.decisions(manifest)]
+        assert len(decisions) == 2
+        assert len(adapter._business_dates) == 2
 
         marker = await adapter.compute_partial_evidence(manifest, completed_decisions=1)
 
@@ -284,10 +287,22 @@ class TestSignalEnginePartialEvidence:
         assert marker["completed_decisions"] == 1
         assert marker["failed_decision_index"] == 2
         assert marker["decision_date"] == DECISION_AT_2.date().isoformat()
-        assert "warnings" not in marker
-        # screen 已补算暂存,build_report 照常携带
+        # issue #463 前缀口径:run 引用 u_ 用户因子(screen 有真实产出),
+        # marker.warnings 具名标注 screen 只覆盖已捕获的 0..N 期 —— 这里
+        # 期次被完整驱动,前缀恰好等于全期次,但口径标注照常携带。
+        warnings = marker.get("warnings")
+        assert isinstance(warnings, list)
+        prefix_scopes = [
+            item
+            for item in warnings
+            if isinstance(item, dict) and item.get("factor_screen_prefix_scope")
+        ]
+        assert len(prefix_scopes) == 1
+        assert prefix_scopes[0]["screen_periods"] == 2
+        # screen 已按前缀捕获补算暂存,build_report 照常携带
         report = adapter.build_report(manifest, ())
         assert report.factor_screen is not None
+        # n_periods 是前缀捕获期数(本用例完整驱动,前缀 = 全部 2 期)
         assert report.factor_screen["n_periods"] == 2
 
     async def test_partial_hook_reports_screen_computation_warning(self) -> None:
@@ -295,7 +310,13 @@ class TestSignalEnginePartialEvidence:
         具名 warning,build_report 无 factor_screen。"""
         manifest = _manifest(_spec(rank_threshold=0.5))
         adapter = _adapter(manifest, _closes_provider(), {"factor-v1": _snapshot(DECISION_AT)})
+        # issue #463:输入改为逐期拉取即捕获 —— 只拉一期(不产出决策、
+        # 不触发决策循环末尾的 screen 计算),等价旧「_load 后立即补算」。
         await adapter._load()
+        assert adapter._input_iterator is not None
+        item = await adapter._input_iterator.__anext__()
+        assert item is not None
+        assert len(adapter._business_dates) == 1
 
         def broken_factory(release_id: str) -> _StubProvider:
             raise RuntimeError(f"release io exploded: {release_id}")
@@ -352,7 +373,7 @@ class _GeneratorRejectAdapter:
         )
 
     def build_report(
-        self, manifest: ResearchRunManifest, decisions: Sequence[DecisionBundle]
+        self, manifest: ResearchRunManifest, decisions: Sequence[DecisionLedgerView]
     ) -> ResearchRunReport:
         del manifest
         if not decisions:
@@ -518,7 +539,10 @@ class TestUserCodePartialEvidence:
         from types import SimpleNamespace
 
         from finboard_backtest.portfolio.contracts import AssetLotInfo
-        from finboard_backtest.research_run.factor_screen import QUANTILES
+        from finboard_backtest.research_run.factor_screen import (
+            QUANTILES,
+            _period_cross_section,
+        )
         from finboard_backtest.research_run.portfolio_pipeline import (
             PortfolioDecisionInput,
         )
@@ -570,15 +594,13 @@ class TestUserCodePartialEvidence:
                 input_artifact_ids=("release-v1",),
             )
 
-        adapter._contexts = (  # type: ignore[assignment]
-            SimpleNamespace(context=SimpleNamespace(business_date=decision_at.date())),
-            SimpleNamespace(
-                context=SimpleNamespace(business_date=DECISION_AT_2.date())
-            ),
-        )
-        adapter._screen_inputs = [
-            _input(decision_at, 6.0),
-            _input(DECISION_AT_2, 3.0),
+        # issue #463:直接注入逐期捕获产物(等价于决策循环对前两期的捕获:
+        # 失败期次(第 2 期)的投影 / 决策日 / target_weights 均在 build 前
+        # 捕获),不再驻留全量上下文 / 输入。
+        adapter._context_dates = [decision_at.date(), DECISION_AT_2.date()]
+        adapter._screen_periods = [
+            _period_cross_section(_input(decision_at, 6.0)),
+            _period_cross_section(_input(DECISION_AT_2, 3.0)),
         ]
         adapter._target_weights = [
             {symbols[0]: 0.5, symbols[1]: 0.5},

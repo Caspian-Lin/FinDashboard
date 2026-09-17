@@ -24,7 +24,11 @@ v2 单日/策略挂载(``build_data_mount``)原样不动。
 
     <root>/bars.parquet                    # 全部 bars 类发布合并的长表
     <root>/daily_metrics.parquet           # daily_metrics 类发布合并
-    <root>/financial_indicators.parquet    # financial_indicators 类发布合并
+    <root>/financial_indicators.parquet    # 公告类发布合并(#402 起含
+    <root>/income_statements.parquet       #  三表与 dividend 五个 kind,
+    <root>/balance_sheets.parquet          #  行结构同构:公告日轴 +
+    <root>/cashflow_statements.parquet     #  逐行 available_at(v3))
+    <root>/dividends.parquet
     <root>/mount_manifest.json             # 挂载清单(PIT 审计锚点)
 
 列契约与 :mod:`finboard_research_kit.context` 的 docstring 一致。
@@ -35,7 +39,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -116,6 +127,34 @@ class _MountProvider(Protocol):
     def release(self) -> Any: ...
 
 
+#: 挂载逐批进度回调(issue #441):``(done, total)`` = 累计已处理批次数 /
+#: 批次总数,同步调用,消费方自行做单飞合并等节流。
+MountBatchReporter = Callable[[int, int], None]
+
+
+def _mount_batch_total(
+    providers: Sequence[Any], wanted: frozenset[str] | None
+) -> int:
+    """挂载构建的逐标的批次总数(进度分母,#441)。
+
+    bars / daily_metrics 每标的产出一批(``_iter_instrument_batches`` 逐
+    标的 yield),公告类数据集(#402)整集采集计 1 批;与主循环的 kind
+    分支同口径,不支持的 kind 不计(主循环随即具名拒绝)。
+    """
+    total = 0
+    for provider in providers:
+        kind = provider.release.dataset_kind.value
+        if kind in ("bars", "daily_metrics"):
+            total += sum(
+                1
+                for item in provider.release.instruments
+                if wanted is None or item.code in wanted
+            )
+        elif kind in ANNOUNCED_DATASETS:
+            total += 1
+    return total
+
+
 async def build_data_mount(
     *,
     providers: Iterable[Any],
@@ -124,6 +163,7 @@ async def build_data_mount(
     symbols: Iterable[str] | None = None,
     current_weights: Mapping[str, float] | None = None,
     strategy_constraints: Mapping[str, Any] | None = None,
+    on_batch: MountBatchReporter | None = None,
 ) -> DataMount:
     """把若干冻结发布物化为一个只读挂载目录。
 
@@ -135,22 +175,34 @@ async def build_data_mount(
     上一决策成交后实际持仓市值占比)/ ``strategy_constraints``(组合约束
     只读视图)—— 落入挂载清单 v2,容器内 decide 可见;两者不影响 PIT
     防线(不是按日期门控的数据行)。
+
+    ``on_batch``(issue #441,可选):逐标的批次进度 ``(done, total)``,
+    缺省 None 零行为变化;计数跨发布累计(分母 = :func:`_mount_batch_total`)。
     """
     if decision_at.tzinfo is None:
         raise SandboxMountError("decision_at 必须带时区")
     decision_day = decision_at.date()
     wanted = frozenset(symbols) if symbols is not None else None
+    provider_list = list(providers)
+    batches_total = _mount_batch_total(provider_list, wanted)
+    batches_done = 0
+
+    def _bump_batch() -> None:
+        nonlocal batches_done
+        batches_done += 1
+        if on_batch is not None:
+            on_batch(batches_done, batches_total)
 
     await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
     # 流式写入器(#371):与窗口挂载同构,bars / daily_metrics 逐标的落盘;
-    # financial_indicators 公告量小,保留整集累积旧路径。
+    # 公告类数据集(三表/dividend/#402)公告量小,保留整集累积旧路径。
     bars_writer = _DatasetStreamWriter(out_root / "bars.parquet")
     daily_writer = _DatasetStreamWriter(out_root / "daily_metrics.parquet")
-    fin_rows: list[dict[str, Any]] = []
+    announced_rows: dict[str, list[dict[str, Any]]] = {kind: [] for kind in ANNOUNCED_DATASETS}
     contributions: list[MountDataset] = []
     universe: set[str] = set()
 
-    for provider in providers:
+    for provider in provider_list:
         release = provider.release
         kind = release.dataset_kind
         release_id = release.release_id
@@ -168,17 +220,17 @@ async def build_data_mount(
             bars_schema = _bars_schema(include_available_at=False)
             start_rows = bars_writer.rows
             provider_max: date | None = None
-            batches = await _fetch_bars_batches(
+            async for batch in _iter_bars_batches(
                 provider, instruments, decision_at, include_available_at=False
-            )
-            for rows in batches:
-                if not rows:
+            ):
+                _bump_batch()
+                table = _bars_batch_table(batch, bars_schema)
+                if table.num_rows == 0:
                     continue
-                universe.update(r["symbol"] for r in rows)
-                table = pa.Table.from_pylist(rows, schema=bars_schema)
+                universe.update(table.column("symbol").unique().to_pylist())
                 _guard_pit_table(table, "date", release_id, decision_day)
                 bars_writer.write(table)
-                provider_max = _max_date_optional(provider_max, rows, "date")
+                provider_max = _max_date_optional_table(provider_max, table, "date")
             contributions.append(
                 MountDataset(
                     release_id=release_id,
@@ -192,10 +244,10 @@ async def build_data_mount(
             daily_schema: pa.Schema | None = None
             start_rows = daily_writer.rows
             provider_max_daily: date | None = None
-            batches = await _fetch_daily_rows_batches(
+            async for rows in _iter_daily_rows_batches(
                 provider, instruments, decision_at, include_available_at=False
-            )
-            for rows in batches:
+            ):
+                _bump_batch()
                 if not rows:
                     continue
                 if daily_schema is None:
@@ -217,17 +269,22 @@ async def build_data_mount(
                     max_data_date=provider_max_daily,
                 )
             )
-        elif kind.value == "financial_indicators":
-            rows = await _collect_financial(
-                provider, instruments, decision_at, include_available_at=False
+        elif kind.value in ANNOUNCED_DATASETS:
+            rows = await _collect_announced(
+                provider,
+                instruments,
+                decision_at,
+                fetch_attr=ANNOUNCED_DATASETS[kind.value],
+                include_available_at=False,
             )
+            _bump_batch()
             _guard_pit(rows, "announcement_date", release_id, decision_day)
-            fin_rows.extend(rows)
+            announced_rows[kind.value].extend(rows)
             contributions.append(
                 MountDataset(
                     release_id=release_id,
                     dataset_kind=kind.value,
-                    file="financial_indicators.parquet",
+                    file=f"{kind.value}.parquet",
                     row_count=len(rows),
                     max_data_date=_max_date(rows, "announcement_date"),
                 )
@@ -244,9 +301,12 @@ async def build_data_mount(
         )
     bars_writer.finish()
     daily_writer.finish()
-    await asyncio.to_thread(
-        _write_parquet, out_root / "financial_indicators.parquet", fin_rows
-    )
+    for announced_kind, rows in announced_rows.items():
+        await asyncio.to_thread(
+            _write_parquet,
+            out_root / f"{announced_kind}.parquet",
+            rows,
+        )
 
     ordered = tuple(sorted(universe))
     frozen_weights: Mapping[str, float] = dict(current_weights or {})
@@ -346,6 +406,22 @@ _DATASET_DATE_FIELD: dict[str, str] = {
     "bars": "date",
     "daily_metrics": "trade_date",
     "financial_indicators": "announcement_date",
+    # issue #402:三表 + dividend 公告类数据集(行日期轴同为公告日)
+    "income_statements": "announcement_date",
+    "balance_sheets": "announcement_date",
+    "cashflow_statements": "announcement_date",
+    "dividends": "announcement_date",
+}
+
+#: 公告频率研究数据集 kind → (provider 取数方法名, 挂载文件名)(#402)。
+#: 与 financial_indicators 同构:公告量小,保留整集累积旧路径;挂载文件
+#: 名 = kind + .parquet,预置因子通道按同名读回(``predefined_runner``)。
+ANNOUNCED_DATASETS: dict[str, str] = {
+    "financial_indicators": "fetch_financial_indicators",
+    "income_statements": "fetch_income_statements",
+    "balance_sheets": "fetch_balance_sheets",
+    "cashflow_statements": "fetch_cashflow_statements",
+    "dividends": "fetch_dividends",
 }
 
 
@@ -478,6 +554,7 @@ async def build_window_data_mount(
     release_id: str,
     dataset_release_ids: Sequence[str],
     symbols: Iterable[str] | None = None,
+    on_batch: MountBatchReporter | None = None,
 ) -> WindowDataMount:
     """把冻结发布物化为**窗口**挂载(清单 v3,issue #359)。
 
@@ -493,6 +570,9 @@ async def build_window_data_mount(
 
     fail-closed:任何数据日期晚于 ``window_end`` 当日的行**具名拒绝**
     (``窗口外数据``),杜绝 provider 门控缺陷把窗口之后的未来泄进容器。
+
+    ``on_batch``(issue #441,可选):逐标的批次进度 ``(done, total)``,
+    缺省 None 零行为变化;计数跨发布累计(分母 = :func:`_mount_batch_total`)。
     """
     ordered_dates = tuple(dates)
     if not ordered_dates:
@@ -515,17 +595,27 @@ async def build_window_data_mount(
         )
     ceiling = _end_of_window(window_end)
     wanted = frozenset(symbols) if symbols is not None else None
+    provider_list = list(providers)
+    batches_total = _mount_batch_total(provider_list, wanted)
+    batches_done = 0
+
+    def _bump_batch() -> None:
+        nonlocal batches_done
+        batches_done += 1
+        if on_batch is not None:
+            on_batch(batches_done, batches_total)
 
     await asyncio.to_thread(out_root.mkdir, parents=True, exist_ok=True)
     # 流式写入器(#371):bars / daily_metrics 逐标的批次落盘,内存只持
-    # row group 缓冲;financial_indicators 公告量小,保留整集累积旧路径。
+    # row group 缓冲;公告类数据集(三表/dividend/#402)公告量小,保留
+    # 整集累积旧路径。
     bars_writer = _DatasetStreamWriter(out_root / "bars.parquet")
     daily_writer = _DatasetStreamWriter(out_root / "daily_metrics.parquet")
-    fin_rows: list[dict[str, Any]] = []
+    announced_rows: dict[str, list[dict[str, Any]]] = {kind: [] for kind in ANNOUNCED_DATASETS}
     contributions: list[MountDataset] = []
     universe: set[str] = set()
 
-    for provider in providers:
+    for provider in provider_list:
         release = provider.release
         kind = release.dataset_kind
         rel_id = release.release_id
@@ -543,17 +633,17 @@ async def build_window_data_mount(
             bars_schema = _bars_schema(include_available_at=True)
             start_rows = bars_writer.rows
             provider_max: date | None = None
-            batches = await _fetch_bars_batches(
+            async for batch in _iter_bars_batches(
                 provider, instruments, ceiling, include_available_at=True
-            )
-            for rows in batches:
-                if not rows:
+            ):
+                _bump_batch()
+                table = _bars_batch_table(batch, bars_schema)
+                if table.num_rows == 0:
                     continue
-                universe.update(r["symbol"] for r in rows)
-                table = pa.Table.from_pylist(rows, schema=bars_schema)
+                universe.update(table.column("symbol").unique().to_pylist())
                 _guard_window_pit_table(table, "date", rel_id, window_end)
                 bars_writer.write(table)
-                provider_max = _max_date_optional(provider_max, rows, "date")
+                provider_max = _max_date_optional_table(provider_max, table, "date")
             contributions.append(
                 MountDataset(
                     release_id=rel_id,
@@ -567,10 +657,10 @@ async def build_window_data_mount(
             daily_schema: pa.Schema | None = None
             start_rows = daily_writer.rows
             provider_max_daily: date | None = None
-            batches = await _fetch_daily_mixed_batches(
+            async for batch in _iter_daily_mixed_batches(
                 provider, instruments, ceiling
-            )
-            for batch in batches:
+            ):
+                _bump_batch()
                 if isinstance(batch, pa.Table):
                     # 列式快路径(#371):provider 支持列式读取时逐标的
                     # Arrow 直通,免整行对象税。
@@ -603,17 +693,22 @@ async def build_window_data_mount(
                     max_data_date=provider_max_daily,
                 )
             )
-        elif kind.value == "financial_indicators":
-            rows = await _collect_financial(
-                provider, instruments, ceiling, include_available_at=True
+        elif kind.value in ANNOUNCED_DATASETS:
+            rows = await _collect_announced(
+                provider,
+                instruments,
+                ceiling,
+                fetch_attr=ANNOUNCED_DATASETS[kind.value],
+                include_available_at=True,
             )
+            _bump_batch()
             _guard_window_pit(rows, "announcement_date", rel_id, window_end)
-            fin_rows.extend(rows)
+            announced_rows[kind.value].extend(rows)
             contributions.append(
                 MountDataset(
                     release_id=rel_id,
                     dataset_kind=kind.value,
-                    file="financial_indicators.parquet",
+                    file=f"{kind.value}.parquet",
                     row_count=len(rows),
                     max_data_date=_max_date(rows, "announcement_date"),
                 )
@@ -630,9 +725,12 @@ async def build_window_data_mount(
         )
     bars_writer.finish()
     daily_writer.finish()
-    await asyncio.to_thread(
-        _write_parquet, out_root / "financial_indicators.parquet", fin_rows
-    )
+    for announced_kind, rows in announced_rows.items():
+        await asyncio.to_thread(
+            _write_parquet,
+            out_root / f"{announced_kind}.parquet",
+            rows,
+        )
 
     mount = WindowDataMount(
         root=out_root,
@@ -670,42 +768,91 @@ async def build_window_data_mount(
 _MOUNT_FETCH_CONCURRENCY = 8
 
 
-async def _fetch_instrument_batches(
+async def _iter_instrument_batches(
     collect: Callable[[Any], Awaitable[Any]],
     instruments: Sequence[Any],
-) -> list[Any]:
-    """分块并发采集逐标的批次,结果按 ``instruments`` 原序归位。"""
-    batches: list[Any] = []
+) -> AsyncIterator[Any]:
+    """分块并发采集逐标的批次,**逐块产出**(issue #375 块内并发)。
+
+    块内 ``gather`` 保序归位、块间按 ``instruments`` 原序产出,行序与串行
+    逐值一致;消费端边收边写(#371 流式语义),内存上界 = 单块批次,
+    而非全部标的批次的全量驻留(#375 曾实现为先全采后消费,全市场挂载
+    在 worker 进程内全量物化数 GB)。块内首个异常在该块边界原样传播
+    (与串行首个失败一致)。
+    """
     for start in range(0, len(instruments), _MOUNT_FETCH_CONCURRENCY):
         chunk = instruments[start : start + _MOUNT_FETCH_CONCURRENCY]
-        batches.extend(await asyncio.gather(*(collect(item) for item in chunk)))
-    return batches
+        for batch in await asyncio.gather(*(collect(item) for item in chunk)):
+            yield batch
 
 
-async def _fetch_bars_batches(
+async def _iter_bars_batches(
     provider: Any,
     instruments: Sequence[Any],
     gate: datetime,
     *,
     include_available_at: bool,
-) -> list[Any]:
-    """单 provider 的逐标的 bars 批次(#375 分块并发)。"""
+) -> AsyncIterator[Any]:
+    """单 provider 的逐标的 bars 批次(#375 分块并发,#371 流式消费)。
 
-    async def collect(item: Any) -> list[dict[str, Any]]:
+    provider 支持 ``fetch_bars_columns`` 时列式直通(批次 = Arrow 表,
+    免整行 Bar/PointInTimeBar/dict 对象税;全市场挂载 ~1000 万行的对象
+    构造曾把挂载段钉在 GIL 单核上 ~28 分钟),否则回退对象路径
+    (测试 stub 等,逐值等值)。
+    """
+    columnar = hasattr(provider, "fetch_bars_columns")
+
+    async def collect(item: Any) -> Any:
+        if columnar:
+            return await _collect_bars_columns(provider, item, gate)
         return await _collect_bars(
             provider, [item], gate, include_available_at=include_available_at
         )
 
-    return await _fetch_instrument_batches(collect, instruments)
+    async for batch in _iter_instrument_batches(collect, instruments):
+        yield batch
 
 
-async def _fetch_daily_rows_batches(
+async def _collect_bars_columns(
+    provider: Any,
+    item: Any,
+    decision_at: datetime,
+) -> Any:
+    """单标的 bars 列式采集(:meth:`FrozenReleaseProvider.fetch_bars_columns`)。"""
+
+    from finboard_shared.models import Symbol
+
+    symbol = Symbol(code=item.code, market=item.market)
+    release = provider.release
+    return await provider.fetch_bars_columns(
+        symbol,
+        release.period,
+        release.start_date,
+        release.end_date,
+        decision_at=decision_at,
+        adjust=release.adjustment,
+    )
+
+
+def _bars_batch_table(batch: Any, schema: pa.Schema) -> pa.Table:
+    """bars 批次归一为目标 schema 的 Arrow 表。
+
+    列式批次(``pa.Table``,可能多 available_at 列)按 schema 列名选取后
+    cast;对象路径批次(dict 列表)走 ``from_pylist``。两者对同一数据的
+    产物逐值一致(#371 列式/对象等值测试同口径)。
+    """
+    if isinstance(batch, pa.Table):
+        return batch.select(schema.names).cast(schema)
+    return pa.Table.from_pylist(batch, schema=schema)
+
+
+async def _iter_daily_rows_batches(
     provider: Any,
     instruments: Sequence[Any],
     gate: datetime,
     *,
     include_available_at: bool,
-) -> list[Any]:
+) -> AsyncIterator[Any]:
     """单 provider 的逐标的 daily_metrics 行批次(对象路径)。"""
 
     async def collect(item: Any) -> list[dict[str, Any]]:
@@ -713,14 +860,15 @@ async def _fetch_daily_rows_batches(
             provider, [item], gate, include_available_at=include_available_at
         )
 
-    return await _fetch_instrument_batches(collect, instruments)
+    async for batch in _iter_instrument_batches(collect, instruments):
+        yield batch
 
 
-async def _fetch_daily_mixed_batches(
+async def _iter_daily_mixed_batches(
     provider: Any,
     instruments: Sequence[Any],
     gate: datetime,
-) -> list[Any]:
+) -> AsyncIterator[Any]:
     """单 provider 的逐标的 daily_metrics 批次(列式优先,对象回退)。"""
     columnar = hasattr(provider, "fetch_daily_metrics_columns")
 
@@ -731,7 +879,8 @@ async def _fetch_daily_mixed_batches(
             provider, [item], gate, include_available_at=True
         )
 
-    return await _fetch_instrument_batches(collect, instruments)
+    async for batch in _iter_instrument_batches(collect, instruments):
+        yield batch
 
 
 async def _collect_bars(
@@ -903,19 +1052,27 @@ def _date_from_value(value: Any) -> date | None:
     return date.fromisoformat(str(value))
 
 
-async def _collect_financial(
+async def _collect_announced(
     provider: Any,
     instruments: list[Any],
     decision_at: datetime,
     *,
+    fetch_attr: str,
     include_available_at: bool = False,
 ) -> list[dict[str, Any]]:
+    """公告类研究数据集(三表/dividend/#402)的逐标的采集。
+
+    ``fetch_attr`` 为 provider 的取数方法名(``ANNOUNCED_DATASETS`` 映射,
+    如 ``fetch_income_statements``);领域记录均为 dataclass(真实
+    ``FrozenReleaseProvider`` 与测试 stub 同构),行 = 除 symbol /
+    available_at / observed_at / source 外的全部字段 + available_at 末列
+    (v3 窗口挂载;v2 单日挂载无 available_at 列)。
+    """
     rows: list[dict[str, Any]] = []
+    fetch = getattr(provider, fetch_attr)
     for item in instruments:
         symbol = _symbol(item)
-        records = await provider.fetch_financial_indicators(
-            symbol, decision_at=decision_at
-        )
+        records = await fetch(symbol, decision_at=decision_at)
         for record in records:
             if include_available_at:
                 row = {

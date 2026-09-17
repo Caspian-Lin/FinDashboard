@@ -14,6 +14,10 @@ import {
   LineChart,
   Plus,
   Repeat,
+  Receipt,
+  Scale,
+  Banknote,
+  Coins,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -80,8 +84,9 @@ const MULTI_ASSET_CAPABILITIES = [
 
 /* ------------------------------------------------------------------ */
 /* 发布 kind 元数据:行情类(bars)与研究数据类(daily_metrics /           */
-/* financial_indicators / convertible_metrics)。dataset_name / source / */
-/* adjustment / capabilities 默认值与后端 dataset_publish 执行器口径一致。*/
+/* financial_indicators / convertible_metrics / 三表 + dividends)。      */
+/* dataset_name / source / adjustment / capabilities 默认值与后端        */
+/* dataset_publish 执行器口径一致。                                     */
 /* ------------------------------------------------------------------ */
 
 const BAR_RELEASE_KINDS = ["a_share_tushare", "multi_asset_mixed"] as const;
@@ -89,12 +94,20 @@ const BAR_RELEASE_KINDS = ["a_share_tushare", "multi_asset_mixed"] as const;
 type ResearchReleaseKind =
   | "daily_metrics"
   | "financial_indicators"
-  | "convertible_metrics";
+  | "convertible_metrics"
+  | "income_statements"
+  | "balance_sheets"
+  | "cashflow_statements"
+  | "dividends";
 
 const RESEARCH_RELEASE_KINDS: readonly ResearchReleaseKind[] = [
   "daily_metrics",
   "financial_indicators",
   "convertible_metrics",
+  "income_statements",
+  "balance_sheets",
+  "cashflow_statements",
+  "dividends",
 ];
 
 function isResearchReleaseKind(
@@ -148,6 +161,38 @@ const KIND_DEFAULTS: Record<
     releaseIdPrefix: "a-share-convertible-metrics",
     requiredCapabilities: ["convertible"],
   },
+  // #397:三表 + dividends 从 research_* 表冻结,机制同 daily_metrics。
+  // dataset_name 沿用研究数据发布的 a_share_ 前缀习惯(后端不强制校验名字,
+  // 只做 pattern 约束);source/adjustment/capabilities 与后端强制口径一致
+  // (source 必须 tushare,adjustment 固定 none,capability=stock)。
+  income_statements: {
+    datasetName: "a_share_income_statements",
+    source: "tushare",
+    adjustment: "none",
+    releaseIdPrefix: "a-share-income-statements",
+    requiredCapabilities: ["stock"],
+  },
+  balance_sheets: {
+    datasetName: "a_share_balance_sheets",
+    source: "tushare",
+    adjustment: "none",
+    releaseIdPrefix: "a-share-balance-sheets",
+    requiredCapabilities: ["stock"],
+  },
+  cashflow_statements: {
+    datasetName: "a_share_cashflow_statements",
+    source: "tushare",
+    adjustment: "none",
+    releaseIdPrefix: "a-share-cashflow-statements",
+    requiredCapabilities: ["stock"],
+  },
+  dividends: {
+    datasetName: "a_share_dividends",
+    source: "tushare",
+    adjustment: "none",
+    releaseIdPrefix: "a-share-dividends",
+    requiredCapabilities: ["stock"],
+  },
 };
 
 const RELEASE_KIND_LABELS: Record<DatasetReleaseKind, LocalizedText> = {
@@ -161,6 +206,22 @@ const RELEASE_KIND_LABELS: Record<DatasetReleaseKind, LocalizedText> = {
   convertible_metrics: {
     zh: "可转债指标（转股价值/溢价率）",
     en: "Convertible metrics (conversion value/premium)",
+  },
+  income_statements: {
+    zh: "利润表（研究数据）",
+    en: "Income statements (research data)",
+  },
+  balance_sheets: {
+    zh: "资产负债表（研究数据）",
+    en: "Balance sheets (research data)",
+  },
+  cashflow_statements: {
+    zh: "现金流量表（研究数据）",
+    en: "Cashflow statements (research data)",
+  },
+  dividends: {
+    zh: "分红送股（研究数据）",
+    en: "Dividends (research data)",
   },
 };
 
@@ -179,8 +240,8 @@ const RESEARCH_KIND_META: Record<ResearchReleaseKind, ResearchKindInfo> = {
     icon: LineChart,
     title: { zh: "每日指标", en: "Daily metrics" },
     summary: {
-      zh: "每日截面指标（估值、换手、市值等），由 research_data_sync 从 tushare 摄取进 research_daily_metrics 表；发布把字段白名单冻结为逐标的 parquet，是 pb / market_cap / turnover_rate 等基本面因子的数据上游。",
-      en: "Daily cross-sectional metrics (valuation, turnover, market cap, etc.) ingested from tushare into the research_daily_metrics table by research_data_sync; publishing freezes the field whitelist into per-symbol parquet, feeding fundamental factors like pb / market_cap / turnover_rate.",
+      zh: "每日截面指标（估值、换手、市值等），由 dataset_sync 从 tushare 摄取进 research_daily_metrics 表；发布把字段白名单冻结为逐标的 parquet，是 pb / market_cap / turnover_rate 等基本面因子的数据上游。",
+      en: "Daily cross-sectional metrics (valuation, turnover, market cap, etc.) ingested from tushare into the research_daily_metrics table by dataset_sync; publishing freezes the field whitelist into per-symbol parquet, feeding fundamental factors like pb / market_cap / turnover_rate.",
     },
     fields: [
       "pe_ttm",
@@ -200,7 +261,7 @@ const RESEARCH_KIND_META: Record<ResearchReleaseKind, ResearchKindInfo> = {
     icon: Landmark,
     title: { zh: "财务指标", en: "Financial indicators" },
     summary: {
-      zh: "财报截面指标（盈利能力、杠杆、成长），按报告期 + 公告日由 research_data_sync 从 tushare 摄取进 research_financial_indicators 表；发布冻结为逐标的 parquet，供 ROE / 毛利率 / 营收同比等因子取数。",
+      zh: "财报截面指标（盈利能力、杠杆、成长），按报告期 + 公告日由 dataset_sync 从 tushare 摄取进 research_financial_indicators 表；发布冻结为逐标的 parquet，供 ROE / 毛利率 / 营收同比等因子取数。",
       en: "Cross-sectional report metrics (profitability, leverage, growth) ingested from tushare by report period plus announcement date into the research_financial_indicators table; publishing freezes per-symbol parquet for factors like ROE / gross margin / revenue YoY.",
     },
     fields: [
@@ -221,8 +282,8 @@ const RESEARCH_KIND_META: Record<ResearchReleaseKind, ResearchKindInfo> = {
     icon: Repeat,
     title: { zh: "可转债", en: "Convertible bonds" },
     summary: {
-      zh: "可转债派生指标：转股价值 = 100 / 转股价 × 正股收盘，转股溢价率 = 转债收盘 / 转股价值 − 1。发布时从本地缓存 bars × 冻结转股价元数据（cb_basic 快照）计算；条款元数据由 research_data_sync 的 convertible_profiles 回填，缺失时先跑同步。",
-      en: "Derived convertible metrics: conversion value = 100 / conversion price × underlying close; conversion premium = bond close / conversion value − 1. Computed at publish time from local cached bars × frozen conversion-price metadata (cb_basic snapshot); terms metadata is backfilled by the convertible_profiles dataset of research_data_sync — run the sync first if missing.",
+      zh: "可转债派生指标：转股价值 = 100 / 转股价 × 正股收盘，转股溢价率 = 转债收盘 / 转股价值 − 1。发布时从本地缓存 bars × 冻结转股价元数据（cb_basic 快照）计算；条款元数据由 dataset_sync 的 convertible_profiles 回填，缺失时先跑同步。",
+      en: "Derived convertible metrics: conversion value = 100 / conversion price × underlying close; conversion premium = bond close / conversion value − 1. Computed at publish time from local cached bars × frozen conversion-price metadata (cb_basic snapshot); terms metadata is backfilled by the convertible_profiles dataset of dataset_sync — run the sync first if missing.",
     },
     fields: [
       "close",
@@ -235,6 +296,90 @@ const RESEARCH_KIND_META: Record<ResearchReleaseKind, ResearchKindInfo> = {
     pitNote: {
       zh: "带日期冻结语义：发布行 = 冻结快照转股价 × 同日正股收盘；cb_basic 不含转股价下修史，不是全历史 PIT。",
       en: "Dated frozen semantics: each published row is frozen-snapshot conversion price × same-day underlying close; cb_basic has no conversion-price adjustment history, so this is not full-history PIT.",
+    },
+  },
+  income_statements: {
+    kind: "income_statements",
+    icon: Receipt,
+    title: { zh: "利润表", en: "Income statements" },
+    summary: {
+      zh: "利润表修订（营收、费用、营业利润、净利润等），由 dataset_sync 从 tushare income 按标的 × 公告日窗摄取进 research_income_statements 表；发布把字段白名单冻结为逐标的 parquet，供盈利能力 / 费用率 / 利润增长等因子取数。",
+      en: "Income statement revisions (revenue, expenses, operating profit, net profit, etc.) ingested from tushare income by symbol × announcement window into the research_income_statements table; publishing freezes the field whitelist into per-symbol parquet for factors like profitability / expense ratio / profit growth.",
+    },
+    fields: [
+      "total_revenue",
+      "operate_profit",
+      "total_profit",
+      "n_income_attr_p",
+      "basic_eps",
+      "rd_exp",
+    ],
+    pitNote: {
+      zh: "按公告日次日起可见（available_at = ann_date+1 零点上海）：报告期数据在公告次日才对决策可见，避免财报前视；同一报告期的后续修订按其自身公告日重新可见。",
+      en: "Visible from the day after announcement (available_at = ann_date+1 midnight Shanghai): a report period only becomes visible the day after its announcement, avoiding look-ahead into unreleased reports; later revisions of the same period become visible at their own announcement.",
+    },
+  },
+  balance_sheets: {
+    kind: "balance_sheets",
+    icon: Scale,
+    title: { zh: "资产负债表", en: "Balance sheets" },
+    summary: {
+      zh: "资产负债表修订（资产、负债、股东权益结构），由 dataset_sync 从 tushare balancesheet 按标的 × 公告日窗摄取进 research_balance_sheets 表；发布冻结为逐标的 parquet，供杠杆 / 流动性 / 资产质量等因子取数。",
+      en: "Balance sheet revisions (asset, liability and equity structure) ingested from tushare balancesheet by symbol × announcement window into the research_balance_sheets table; publishing freezes per-symbol parquet for factors like leverage / liquidity / asset quality.",
+    },
+    fields: [
+      "total_assets",
+      "total_liab",
+      "total_hldr_eqy_exc_min_int",
+      "total_cur_assets",
+      "total_cur_liab",
+      "money_cap",
+    ],
+    pitNote: {
+      zh: "按公告日次日起可见（available_at = ann_date+1 零点上海）：报告期数据在公告次日才对决策可见，避免财报前视；同一报告期的后续修订按其自身公告日重新可见。",
+      en: "Visible from the day after announcement (available_at = ann_date+1 midnight Shanghai): a report period only becomes visible the day after its announcement, avoiding look-ahead into unreleased reports; later revisions of the same period become visible at their own announcement.",
+    },
+  },
+  cashflow_statements: {
+    kind: "cashflow_statements",
+    icon: Banknote,
+    title: { zh: "现金流量表", en: "Cashflow statements" },
+    summary: {
+      zh: "现金流量表修订（经营 / 投资 / 筹资现金流与自由现金流），由 dataset_sync 从 tushare cashflow 按标的 × 公告日窗摄取进 research_cashflow_statements 表；发布冻结为逐标的 parquet，供现金流质量 / 盈利含金量等因子取数。",
+      en: "Cashflow statement revisions (operating / investing / financing cash flows and free cashflow) ingested from tushare cashflow by symbol × announcement window into the research_cashflow_statements table; publishing freezes per-symbol parquet for factors like cashflow quality / earnings quality.",
+    },
+    fields: [
+      "n_cashflow_act",
+      "c_pay_acq_const_fiolta",
+      "free_cashflow",
+      "n_incr_cash_cash_equ",
+      "c_cash_equ_end_period",
+      "net_profit",
+    ],
+    pitNote: {
+      zh: "按公告日次日起可见（available_at = ann_date+1 零点上海）：报告期数据在公告次日才对决策可见，避免财报前视；同一报告期的后续修订按其自身公告日重新可见。",
+      en: "Visible from the day after announcement (available_at = ann_date+1 midnight Shanghai): a report period only becomes visible the day after its announcement, avoiding look-ahead into unreleased reports; later revisions of the same period become visible at their own announcement.",
+    },
+  },
+  dividends: {
+    kind: "dividends",
+    icon: Coins,
+    title: { zh: "分红送股", en: "Dividends" },
+    summary: {
+      zh: "分红送股进展（现金分红、送转股比例与除权除息日程），由 dataset_sync 从 tushare dividend 按标的 × 公告日窗摄取进 research_dividends 表（div_proc 进身份键，区分预案 / 实施）；发布冻结为逐标的 parquet，供股息率 / 分红持续性等因子取数。",
+      en: "Dividend progress (cash dividends, stock dividend/split ratios and ex-date schedule) ingested from tushare dividend by symbol × announcement window into the research_dividends table (div_proc is part of the identity key, separating proposals from implementations); publishing freezes per-symbol parquet for factors like dividend yield / payout sustainability.",
+    },
+    fields: [
+      "div_proc",
+      "cash_div",
+      "cash_div_tax",
+      "record_date",
+      "ex_date",
+      "pay_date",
+    ],
+    pitNote: {
+      zh: "按公告日次日起可见（PIT = ann_date+1 零点上海）：每条分红进展在其公告次日才对决策可见；上游无 update_flag，进展口径由 div_proc 判别。",
+      en: "Visible from the day after announcement (PIT = ann_date+1 midnight Shanghai): each dividend progress record becomes visible the day after its announcement; the upstream has no update_flag, so progress stages are distinguished by div_proc.",
     },
   },
 };
@@ -948,7 +1093,7 @@ function ReleasePublisher({
   };
   const toggleSymbol = (item: CachedDataStatus) => {
     // 除 multi_asset_mixed 外全部要求缓存来源为 tushare(研究数据来自
-    // research_data_sync 的 tushare 摄取,转债 bars 亦为 tushare cb_daily)。
+    // dataset_sync 的 tushare 摄取,转债 bars 亦为 tushare cb_daily)。
     if (releaseKind !== "multi_asset_mixed" && item.source !== "tushare") {
       return;
     }
@@ -1222,8 +1367,8 @@ function ReleasePublisher({
                 : releaseKind === "multi_asset_mixed"
                   ? tl({ zh: "混合来源：逐标的记录实际来源", en: "Mixed sources: actual source recorded per symbol" })
                   : tl({
-                      zh: "固定单源：tushare（研究数据来自 research_data_sync 摄取）",
-                      en: "Fixed single source: tushare (research data ingested by research_data_sync)",
+                      zh: "固定单源：tushare（研究数据来自 dataset_sync 摄取）",
+                      en: "Fixed single source: tushare (research data ingested by dataset_sync)",
                     })}
             </div>
           </div>
@@ -1312,8 +1457,8 @@ function ReleasePublisher({
             <AlertTitle>{tl({ zh: "可转债派生指标发布只接受 A 股转债", en: "Convertible metric releases accept A-share convertibles only" })}</AlertTitle>
             <AlertDescription>
               {tl({
-                zh: "发布执行时从本地缓存 bars × 冻结转股价元数据计算转股价值与转股溢价率；标的缺条款元数据（convertible_metadata_missing）时先到任务中心跑 research_data_sync 的 convertible_profiles。全市场展开只取转债标的。",
-                en: "Conversion value and premium are computed at publish time from local cached bars × frozen conversion-price metadata; when a symbol lacks terms metadata (convertible_metadata_missing), run the convertible_profiles dataset of research_data_sync in the job center first. Full-market expansion only picks convertible instruments.",
+                zh: "发布执行时从本地缓存 bars × 冻结转股价元数据计算转股价值与转股溢价率；标的缺条款元数据（convertible_metadata_missing）时先到任务中心跑 dataset_sync 的 convertible_profiles。全市场展开只取转债标的。",
+                en: "Conversion value and premium are computed at publish time from local cached bars × frozen conversion-price metadata; when a symbol lacks terms metadata (convertible_metadata_missing), run the convertible_profiles dataset of dataset_sync in the job center first. Full-market expansion only picks convertible instruments.",
               })}
             </AlertDescription>
           </Alert>
@@ -1322,8 +1467,8 @@ function ReleasePublisher({
             <AlertTitle>{tl({ zh: "研究数据发布从 research_* 表冻结，不读行情缓存", en: "Research releases freeze from research_* tables, not bar caches" })}</AlertTitle>
             <AlertDescription>
               {tl({
-                zh: "先由 research_data_sync 摄取（任务中心 kind=research_data_sync），再创建发布。只接受 A 股股票标的，source 固定 tushare，质量门阈值 0.95；建议与同区间 bars 主发布做一致性校验。",
-                en: "research_data_sync ingests the data first (job center, kind=research_data_sync), then create the release. Only A-share stocks are accepted, source is fixed to tushare, and the quality-gate threshold is 0.95; consider a consistency check against the bar release covering the same window.",
+                zh: "先由 dataset_sync 摄取（任务中心 kind=dataset_sync），再创建发布。只接受 A 股股票标的，source 固定 tushare，质量门阈值 0.95；建议与同区间 bars 主发布做一致性校验。",
+                en: "dataset_sync ingests the data first (job center, kind=dataset_sync), then create the release. Only A-share stocks are accepted, source is fixed to tushare, and the quality-gate threshold is 0.95; consider a consistency check against the bar release covering the same window.",
               })}
             </AlertDescription>
           </Alert>
@@ -1887,28 +2032,96 @@ function BarsReleasesSection({
   );
 }
 
+/**
+ * 各研究数据 kind 对应的 dataset_sync 数据集与摄取口径(#392 注册表权威:
+ * profiles / name_changes / convertible_profiles / daily_metrics / suspensions /
+ * financial_indicators / industry_memberships / income_statements /
+ * balance_sheets / cashflow_statements / dividends;任务中心入队走 MCP/REST,
+ * 本卡只做说明,不触发联网拉取)。
+ */
+const RESEARCH_KIND_SYNC_DATASET: Record<
+  ResearchReleaseKind,
+  { dataset: string; scope: LocalizedText }
+> = {
+  daily_metrics: {
+    dataset: "daily_metrics",
+    scope: {
+      zh: "按交易日全市场摄取，PIT = 当日 17:00 上海",
+      en: "Ingested per trading day for the full market; PIT = same-day 17:00 Shanghai",
+    },
+  },
+  financial_indicators: {
+    dataset: "financial_indicators",
+    scope: {
+      zh: "按标的 × 报告期窗口摄取，按公告日时点化",
+      en: "Ingested per symbol × report-period window, point-in-time by announcement date",
+    },
+  },
+  convertible_metrics: {
+    dataset: "convertible_profiles",
+    scope: {
+      zh: "转债条款快照 upsert convertible_metadata；转债日线随行情同步进缓存",
+      en: "Convertible terms snapshot upserted into convertible_metadata; convertible bars enter the cache via market data sync",
+    },
+  },
+  income_statements: {
+    dataset: "income_statements",
+    scope: {
+      zh: "按标的 × 公告日窗摄取，PIT = ann_date+1 零点上海",
+      en: "Ingested per symbol × announcement window; PIT = ann_date+1 midnight Shanghai",
+    },
+  },
+  balance_sheets: {
+    dataset: "balance_sheets",
+    scope: {
+      zh: "按标的 × 公告日窗摄取，PIT = ann_date+1 零点上海",
+      en: "Ingested per symbol × announcement window; PIT = ann_date+1 midnight Shanghai",
+    },
+  },
+  cashflow_statements: {
+    dataset: "cashflow_statements",
+    scope: {
+      zh: "按标的 × 公告日窗摄取，PIT = ann_date+1 零点上海",
+      en: "Ingested per symbol × announcement window; PIT = ann_date+1 midnight Shanghai",
+    },
+  },
+  dividends: {
+    dataset: "dividends",
+    scope: {
+      zh: "按标的 × 公告日窗摄取分红明细，div_proc 进身份键（区分预案/实施）",
+      en: "Dividend details ingested per symbol × announcement window; div_proc is part of the identity key (proposals vs implementations)",
+    },
+  },
+};
+
 /** 研究数据摄取说明卡:数据来源、质量门自动发布语义与任务中心入口。 */
 function ResearchIngestCard({ kind }: { kind: ResearchReleaseKind }) {
   const { tl } = useT();
+  const syncDataset = RESEARCH_KIND_SYNC_DATASET[kind];
   return (
     <Alert variant="info">
       <AlertTitle>
         {tl({
-          zh: "数据从哪里来？研究数据摄取（research_data_sync）",
-          en: "Where does the data come from? Research data ingest (research_data_sync)",
+          zh: "数据从哪里来？研究数据摄取（dataset_sync）",
+          en: "Where does the data come from? Research data ingest (dataset_sync)",
         })}
       </AlertTitle>
       <AlertDescription className="space-y-2">
         <p>
           {kind === "convertible_metrics"
             ? tl({
-                zh: "数据来自 research_data_sync 后台任务：转债日线随行情同步进入缓存，转股价等条款快照走 convertible_profiles 数据集；本页不直接触发联网拉取。",
-                en: "Data comes from the research_data_sync background job: convertible daily bars enter the cache via market data sync, while terms snapshots (conversion price etc.) come from the convertible_profiles dataset; this page never fetches online directly.",
+                zh: "数据来自 dataset_sync 后台任务：转债日线随行情同步进入缓存，转股价等条款快照走 convertible_profiles 数据集；本页不直接触发联网拉取。",
+                en: "Data comes from the dataset_sync background job: convertible daily bars enter the cache via market data sync, while terms snapshots (conversion price etc.) come from the convertible_profiles dataset; this page never fetches online directly.",
               })
             : tl({
-                zh: "数据来自 research_data_sync 后台任务（按数据集定时/手动摄取进 research_* 表）；本页不直接触发联网拉取。",
-                en: "Data comes from the research_data_sync background job (scheduled or manual ingestion into the research_* tables); this page never fetches online directly.",
+                zh: "数据来自 dataset_sync 后台任务（按数据集定时/手动摄取进 research_* 表）；本页不直接触发联网拉取。",
+                en: "Data comes from the dataset_sync background job (scheduled or manual ingestion into the research_* tables); this page never fetches online directly.",
               })}
+        </p>
+        <p>
+          <span className="font-mono text-xs">{syncDataset.dataset}</span>
+          {" — "}
+          {tl(syncDataset.scope)}
         </p>
         <p>
           {tl({
@@ -1917,12 +2130,12 @@ function ResearchIngestCard({ kind }: { kind: ResearchReleaseKind }) {
           })}
         </p>
         <Link
-          to="/jobs?kind=research_data_sync"
+          to="/jobs?kind=dataset_sync"
           className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
         >
           {tl({
-            zh: "前往任务中心查看 research_data_sync 任务",
-            en: "Open the job center for research_data_sync jobs",
+            zh: "前往任务中心查看 dataset_sync 任务",
+            en: "Open the job center for dataset_sync jobs",
           })}
           <ArrowUpRight className="h-3.5 w-3.5" />
         </Link>
@@ -2040,8 +2253,8 @@ function DatasetTypeTab({
             icon={<Database className="h-8 w-8" />}
             title={tl({ zh: "暂无该类型发布", en: "No releases of this kind yet" })}
             description={tl({
-              zh: "先在任务中心完成 research_data_sync 摄取，再通过上方表单创建该类型的不可变发布。",
-              en: "Finish the research_data_sync ingest in the job center first, then create an immutable release of this kind with the form above.",
+              zh: "先在任务中心完成 dataset_sync 摄取，再通过上方表单创建该类型的不可变发布。",
+              en: "Finish the dataset_sync ingest in the job center first, then create an immutable release of this kind with the form above.",
             })}
           />
         )}
@@ -2564,6 +2777,10 @@ export default function ResearchData() {
     bars: RESEARCH_HINTS.data.fetch,
     metrics: RESEARCH_HINTS.data.releases,
     financial: RESEARCH_HINTS.data.releases,
+    income: RESEARCH_HINTS.data.releases,
+    balance: RESEARCH_HINTS.data.releases,
+    cashflow: RESEARCH_HINTS.data.releases,
+    dividends: RESEARCH_HINTS.data.releases,
     convertible: RESEARCH_HINTS.data.releases,
     instruments: RESEARCH_HINTS.data.instrumentMetadata,
   }[activeTab];
@@ -2573,8 +2790,8 @@ export default function ResearchData() {
       <PageHeader
         title={tl({ zh: "数据与标的", en: "Data & Instruments" })}
         description={tl({
-          zh: "按数据类型浏览:行情、每日指标、财务指标、可转债与标的元数据;各类型均可浏览已发布版本并发起新发布",
-          en: "Browse by data type: market data, daily metrics, financial indicators, convertibles and instrument metadata; each type supports browsing published releases and creating new ones",
+          zh: "按数据类型浏览:行情、每日指标、财务指标、利润表、资产负债表、现金流量表、分红送股、可转债与标的元数据;各类型均可浏览已发布版本并发起新发布",
+          en: "Browse by data type: market data, daily metrics, financial indicators, income statements, balance sheets, cashflow statements, dividends, convertibles and instrument metadata; each type supports browsing published releases and creating new ones",
         })}
       />
 
@@ -2591,6 +2808,22 @@ export default function ResearchData() {
           <TabsTrigger value="financial">
             <Landmark className="mr-1.5 h-4 w-4" />
             {tl({ zh: "财务指标", en: "Financial indicators" })}
+          </TabsTrigger>
+          <TabsTrigger value="income">
+            <Receipt className="mr-1.5 h-4 w-4" />
+            {tl({ zh: "利润表", en: "Income" })}
+          </TabsTrigger>
+          <TabsTrigger value="balance">
+            <Scale className="mr-1.5 h-4 w-4" />
+            {tl({ zh: "资产负债表", en: "Balance sheet" })}
+          </TabsTrigger>
+          <TabsTrigger value="cashflow">
+            <Banknote className="mr-1.5 h-4 w-4" />
+            {tl({ zh: "现金流量表", en: "Cashflow" })}
+          </TabsTrigger>
+          <TabsTrigger value="dividends">
+            <Coins className="mr-1.5 h-4 w-4" />
+            {tl({ zh: "分红送股", en: "Dividends" })}
           </TabsTrigger>
           <TabsTrigger value="convertible">
             <Repeat className="mr-1.5 h-4 w-4" />
@@ -2630,6 +2863,38 @@ export default function ResearchData() {
         <TabsContent value="financial">
           <DatasetTypeTab
             info={RESEARCH_KIND_META.financial_indicators}
+            onGoToBars={() => setActiveTab("bars")}
+            onGoToInstruments={() => setActiveTab("instruments")}
+            onOpenRelease={openRelease}
+          />
+        </TabsContent>
+        <TabsContent value="income">
+          <DatasetTypeTab
+            info={RESEARCH_KIND_META.income_statements}
+            onGoToBars={() => setActiveTab("bars")}
+            onGoToInstruments={() => setActiveTab("instruments")}
+            onOpenRelease={openRelease}
+          />
+        </TabsContent>
+        <TabsContent value="balance">
+          <DatasetTypeTab
+            info={RESEARCH_KIND_META.balance_sheets}
+            onGoToBars={() => setActiveTab("bars")}
+            onGoToInstruments={() => setActiveTab("instruments")}
+            onOpenRelease={openRelease}
+          />
+        </TabsContent>
+        <TabsContent value="cashflow">
+          <DatasetTypeTab
+            info={RESEARCH_KIND_META.cashflow_statements}
+            onGoToBars={() => setActiveTab("bars")}
+            onGoToInstruments={() => setActiveTab("instruments")}
+            onOpenRelease={openRelease}
+          />
+        </TabsContent>
+        <TabsContent value="dividends">
+          <DatasetTypeTab
+            info={RESEARCH_KIND_META.dividends}
             onGoToBars={() => setActiveTab("bars")}
             onGoToInstruments={() => setActiveTab("instruments")}
             onOpenRelease={openRelease}

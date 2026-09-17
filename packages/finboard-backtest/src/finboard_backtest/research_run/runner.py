@@ -6,21 +6,25 @@ import asyncio
 import contextlib
 import time
 from collections import defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import cast
 
 import structlog
 
+from finboard_backtest.portfolio.contracts import MAX_WEIGHT_EPSILON
 from finboard_backtest.research_run.adapters import ResearchStrategyAdapter
 from finboard_backtest.research_run.checkpoint_resume import (
-    completed_decision_prefix,
+    iter_completed_decision_prefix,
 )
 from finboard_backtest.research_run.contracts import (
     REPLAYABLE_SOURCE_STATUSES,
     RESEARCH_PORTFOLIO_PIPELINE_VERSION,
+    ConstraintOutcome,
     DecisionBundle,
+    DecisionLedgerRecord,
+    DecisionLedgerView,
     JsonValue,
     ResearchArtifact,
     ResearchConstraintViolationError,
@@ -34,10 +38,15 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunStage,
     ResearchRunStatus,
     UnsupportedResearchCapabilityError,
+    canonical_json_normalized,
+    canonical_json_text,
+    decision_ledger_record,
     execution_mode_for,
     pipeline_output_checksum,
     replay_guard_error,
     stable_checksum,
+    stable_checksum_normalized,
+    stable_checksum_text,
     to_json_value,
 )
 from finboard_backtest.research_run.failure_context import (
@@ -221,7 +230,9 @@ class ResearchRunCoordinator:
         # issue #304:在 try 外初始化 —— 组合阶段硬约束分支(#304)在异常
         # 处理器里仍要读已完成决策数,适配器 validate_manifest 若抛硬约束
         # 错误时该变量必须已绑定。
-        decisions: list[DecisionBundle] = []
+        # issue #473:落库后改存账本级记录(只携带消费面字段,见
+        # DecisionLedgerView),candidates/features 不再被列表钉住。
+        decisions: list[DecisionLedgerRecord] = []
         # issue #285:分段耗时(decision_load / 逐决策 execute / report),
         # 只观测,不改变 artifact/checkpoint/进度上报语义。
         run_started = time.monotonic()
@@ -250,6 +261,10 @@ class ResearchRunCoordinator:
             resume_prefix = await self._load_resume_prefix(manifest.run_id)
             if resume_prefix:
                 self._offer_resume(manifest.run_id, adapter, resume_prefix)
+                # #470 前半场:种子引用即刻移交 —— 适配器接受后自行持有
+                # (消费期破坏性释放),拒绝时无人持有;runner 侧局部变量不再
+                # 把整个前缀钉到 run 结束。
+                resume_prefix = []
             position_quantities: dict[tuple[str, ResearchPositionSide], Decimal] = (
                 defaultdict(Decimal)
             )
@@ -261,51 +276,67 @@ class ResearchRunCoordinator:
             # 发生在首次迭代内,失败时尚无任何决策 —— 决策日期由 signal_engine
             # 的加载期标记补全。async for 等价展开为 __anext__ 手工迭代,把
             # 「产出下一条决策」的耗时计入 decision_load(issue #285)。
+            # issue #463:适配器决策迭代已生成器化(逐期拉取,任一时刻常驻
+            # O(1) 个期次的重对象)—— 主循环外层 try/finally 在任意退出路径
+            # (耗尽 / 正常 return / cancel return / 异常)上 aclose 决策迭代,
+            # 经生成器 finally 链级联关闭输入流 → 加载生成器 → 常驻特征进程池
+            # (不等 GC);计时块在 finally 之外,#285 计时语义不变。
             failure_ctx.stage = "decision_load"
             decision_iterator = adapter.decisions(manifest)
-            with collect_parquet_read_stats() as parquet_stats:
-                while True:
-                    load_started = time.monotonic()
-                    try:
-                        raw_decision = await decision_iterator.__anext__()
-                    except StopAsyncIteration:
-                        break
-                    finally:
-                        decision_load_elapsed += time.monotonic() - load_started
-                    execute_started = time.monotonic()
-                    live_record = await self._store.get(manifest.run_id)
-                    if live_record is None:
-                        raise ResearchRunConflictError("运行记录在执行中消失")
-                    if live_record.status is ResearchRunStatus.CANCELLED:
-                        return live_record
-                    if live_record.status is not ResearchRunStatus.RUNNING:
-                        raise ResearchRunInterruptedError(
-                            f"运行状态变为 {live_record.status.value}"
+            try:
+                with collect_parquet_read_stats() as parquet_stats:
+                    while True:
+                        load_started = time.monotonic()
+                        try:
+                            raw_decision = await decision_iterator.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        finally:
+                            decision_load_elapsed += time.monotonic() - load_started
+                        execute_started = time.monotonic()
+                        live_record = await self._store.get(manifest.run_id)
+                        if live_record is None:
+                            raise ResearchRunConflictError("运行记录在执行中消失")
+                        if live_record.status is ResearchRunStatus.CANCELLED:
+                            return live_record
+                        if live_record.status is not ResearchRunStatus.RUNNING:
+                            raise ResearchRunInterruptedError(
+                                f"运行状态变为 {live_record.status.value}"
+                            )
+                        decision = self._with_decision_id(
+                            manifest.run_id, len(decisions), raw_decision
                         )
-                    decision = self._with_decision_id(
-                        manifest.run_id, len(decisions), raw_decision
-                    )
-                    failure_ctx.stage = "decision_execute"
-                    failure_ctx.decision_date = decision.business_date
-                    failure_ctx.decision_index = len(decisions) + 1
-                    self._validate_decision(
-                        decision,
-                        manifest=manifest,
-                        position_quantities=position_quantities,
-                        seen_fill_ids=seen_fill_ids,
-                    )
-                    await self._persist_decision(
-                        manifest.run_id,
-                        len(decisions),
-                        decision,
-                        progress=progress,
-                        failure_ctx=failure_ctx,
-                    )
-                    await self._store.checkpoint()
-                    decisions.append(decision)
-                    decision_timing.record(
-                        decision.business_date, time.monotonic() - execute_started
-                    )
+                        failure_ctx.stage = "decision_execute"
+                        failure_ctx.decision_date = decision.business_date
+                        failure_ctx.decision_index = len(decisions) + 1
+                        self._validate_decision(
+                            decision,
+                            manifest=manifest,
+                            position_quantities=position_quantities,
+                            seen_fill_ids=seen_fill_ids,
+                        )
+                        await self._persist_decision(
+                            manifest.run_id,
+                            len(decisions),
+                            decision,
+                            progress=progress,
+                            failure_ctx=failure_ctx,
+                        )
+                        await self._store.checkpoint()
+                        # issue #473(#463 下半场续):持久化完成后决策列表改存
+                        # 账本级记录 —— 消费面(build_report / _validate_report /
+                        # 权益曲线)只读 ledger/constraints/orders/fills/
+                        # positions(消费审计见 contracts.DecisionLedgerView),
+                        # candidates/features/截面缓存不再驻留,驻留与候选池
+                        # 规模及期数解耦;yield / 持久化 / 校验拿到的仍是完整
+                        # bundle,report / checksum 逐字节不变。
+                        decisions.append(decision_ledger_record(decision))
+                        decision_timing.record(
+                            decision.business_date, time.monotonic() - execute_started
+                        )
+            finally:
+                if isinstance(decision_iterator, AsyncGenerator):
+                    await decision_iterator.aclose()
 
             failure_ctx.stage = "report"
             report_started = time.monotonic()
@@ -323,7 +354,11 @@ class ResearchRunCoordinator:
             )
             report_elapsed = time.monotonic() - report_started
             await self._store.checkpoint()
-            artifacts = await self._store.list_artifacts(manifest.run_id)
+            # #470 前半场:result_checksum 只消费 stage/decision_id/checksum,
+            # 走瘦指纹读取 —— 不再把全量 artifact payload(556 期全历史 run
+            # ≈5GB JSON)在 run 收尾物化一遍。指纹行序 = sequence 升序,与
+            # 旧 list_artifacts 一致,checksum 逐字节不变。
+            digests = await self._store.list_artifact_digests(manifest.run_id)
             result_checksum = stable_checksum(
                 [
                     {
@@ -331,7 +366,7 @@ class ResearchRunCoordinator:
                         "decision_id": _stable_decision_suffix(item.decision_id),
                         "checksum": item.checksum,
                     }
-                    for item in artifacts
+                    for item in digests
                 ]
             )
             if (
@@ -501,6 +536,10 @@ class ResearchRunCoordinator:
         # cancelled 是显式用户意图,仍拒绝;completed 重放行为不变。
         if source.status not in REPLAYABLE_SOURCE_STATUSES:
             raise ResearchRunConflictError(replay_guard_error(source.status))
+        # 调用方契约(issue #455):``adapter`` 必须以与本 replace 同身份的
+        # manifest 预构造(run_id 等身份字段一致)—— #306 加载期打断探针按
+        # 适配器构造期 manifest.run_id 轮询,源身份适配器会在加载期把重放
+        # 误判为「外部打断」。唯一调用方 execute_replay 已按同构字段集预替换。
         manifest = replace(
             source.manifest,
             run_id=new_run_id,
@@ -544,7 +583,7 @@ class ResearchRunCoordinator:
         self,
         manifest: ResearchRunManifest,
         adapter: ResearchStrategyAdapter,
-        decisions: list[DecisionBundle],
+        decisions: Sequence[DecisionLedgerRecord],
         exc: ResearchConstraintViolationError,
         *,
         progress: ProgressHook | None = None,
@@ -573,9 +612,10 @@ class ResearchRunCoordinator:
                     partial_failure=marker,
                 )
                 await self._store.checkpoint()
-                artifacts = await self._store.list_artifacts(manifest.run_id)
+                digests = await self._store.list_artifact_digests(manifest.run_id)
                 # partial run 不参与确定性重放(重放只允许 completed 源),
-                # 无 expected_result_checksum 可比,直接归档 artifact 指纹。
+                # 无 expected_result_checksum 可比,直接归档 artifact 指纹
+                # (#470 前半场:瘦指纹读取,不物化全量 payload)。
                 result_checksum = stable_checksum(
                     [
                         {
@@ -583,7 +623,7 @@ class ResearchRunCoordinator:
                             "decision_id": _stable_decision_suffix(item.decision_id),
                             "checksum": item.checksum,
                         }
-                        for item in artifacts
+                        for item in digests
                     ]
                 )
                 await self._store.save_result(
@@ -635,16 +675,31 @@ class ResearchRunCoordinator:
         return marker if isinstance(marker, dict) else None
 
     async def _load_resume_prefix(self, run_id: str) -> list[DecisionBundle]:
-        """读回已完整落库的决策前缀(issue #314);任何意外都回退空列表。
+        """读回已完整落库的决策前缀(issue #314 入口;流式,#470 前半场)。
 
-        前缀判定与重建见 ``checkpoint_resume.completed_decision_prefix``:
-        从 0 开始的最长连续决策,每决策既有全部 13 stage artifact、逐
-        artifact 复验载荷校验和、且能无损重建为 ``DecisionBundle``;任何
-        缺失 / 不一致在该决策处截断,被截断的决策由适配器照常重算。
+        前缀判定与重建见 ``checkpoint_resume.iter_completed_decision_prefix``:
+        从 0 开始的最长连续决策,artifact 按 sequence 流式读回(store 服务端
+        游标 + 分块),逐决策「凑齐 13 stage → 复验 → 重建 → 释放载荷」——
+        前缀 payload 不再全量物化(272 期前缀实测曾把 ≈8GB Python 对象钉进
+        内存并残留到 run 结束)。任何缺失 / 不一致在该决策处截断,被截断的
+        决策由适配器照常重算;读回流中途异常回退空前缀(全量重算,与旧
+        ``list_artifacts`` 失败语义一致)。
         """
 
+        prefix: list[DecisionBundle] = []
         try:
-            artifacts = await self._store.list_artifacts(run_id)
+            rows = self._store.iter_artifacts(run_id)
+            bundles = iter_completed_decision_prefix(run_id, rows)
+            try:
+                async for bundle in bundles:
+                    prefix.append(bundle)
+            finally:
+                # 提前截断(不完整前缀)或中途异常时关闭上游流,释放服务端
+                # 游标;对已耗尽 / 无 aclose 的迭代器为尽力而为。
+                for stream in (bundles, rows):
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        await close()
         except Exception:
             logger.warning(
                 "research_run.resume_artifacts_unreadable",
@@ -652,9 +707,6 @@ class ResearchRunCoordinator:
                 exc_info=True,
             )
             return []
-        if not artifacts:
-            return []
-        prefix = completed_decision_prefix(run_id, artifacts)
         if prefix:
             logger.info(
                 "research_run.resume_prefix_loaded",
@@ -718,49 +770,41 @@ class ResearchRunCoordinator:
         progress: ProgressHook | None = None,
         failure_ctx: FailureContext | None = None,
     ) -> None:
-        stage_payloads: dict[ResearchRunStage, dict[str, object]] = {
-            ResearchRunStage.UNIVERSE: {"candidates": decision.candidates},
-            ResearchRunStage.FEATURES: {"features": decision.features},
-            ResearchRunStage.SIGNALS: {"signals": decision.signals},
-            ResearchRunStage.TARGETS_BEFORE_CONSTRAINTS: {
-                "targets": decision.targets_before_constraints
-            },
-            ResearchRunStage.CONSTRAINTS: {"constraints": decision.constraints},
-            ResearchRunStage.TARGETS_AFTER_CONSTRAINTS: {
-                "targets": decision.targets_after_constraints
-            },
-            ResearchRunStage.RISK_EXITS: {
-                "outcomes": decision.risk_exits,
-                "state": decision.risk_state,
-            },
-            ResearchRunStage.TARGETS_AFTER_RISK: {
-                "targets": decision.targets_after_risk
-            },
-            ResearchRunStage.CAPITAL_FEASIBILITY: {
-                "tiers": decision.capital_feasibility
-            },
-            ResearchRunStage.REBALANCE_PLAN: {"instructions": decision.rebalance_plan},
-            ResearchRunStage.ORDERS: {"orders": decision.orders},
-            ResearchRunStage.FILLS: {"fills": decision.fills},
-            ResearchRunStage.LEDGER: {
-                "positions": decision.positions,
-                "ledger": decision.ledger,
-                "pipeline_evidence": decision.pipeline_evidence,
-            },
-        }
+        # 2026-09-14 决策段性能(py-spy 实证:序列化占决策墙钟 ~45%,其中
+        # 「checksum 二次 to_json_value 遍历」≈20 个百分点;逐 artifact 一次
+        # session+commit ≈10 个百分点)。两处收敛:每 stage 只走一遍
+        # to_json_value,checksum 走已规范化变体(输出逐字节一致);13 个
+        # artifact 经 ``append_artifacts`` 批量落库(store 侧单 session 单
+        # commit)。持久化粒度从「artifact」变为「决策」:中断时该决策要么
+        # 13 artifact 全在、要么全不在 —— #314 续算以「逐决策 13 artifact
+        # 全齐 + checksum 复验」为界,半截决策本来就会被截断,可观测语义
+        # 不变。
+        #
+        # issue #472:同一 payload 一期编码一次 ——
+        # ① features/candidates 截面走 ``decision.canonical_fragments``
+        #    (输入 checksum 组装时已编码的 canonical 文本,直接拼接);
+        # ② 其余键/其余 stage 走 ``canonical_json_text`` 流式组装(截面分块
+        #    编码,小键一次 dumps),checksum = 同一份文本的 sha256;
+        # ③ 文本经 ``payload_json`` 直写 JSON 列,驱动不再对 dict 二次
+        #    ``json.dumps``(``payload`` 置空占位,需要 dict 的存储实现按需
+        #    物化)。checksum / 落库字节逐字节与历史一致(#472 回归测试)。
+        stage_payloads = _decision_stage_payloads(decision)
+        fragments = decision.canonical_fragments or {}
         parent: tuple[str, ...] = ()
+        artifacts: list[ResearchArtifact] = []
+        stage_phases: list[tuple[int, str]] = []
         for offset, stage in enumerate(_DECISION_STAGES):
             if failure_ctx is not None:
                 failure_ctx.stage = stage.value
-            payload_value = to_json_value(
+            payload_text = canonical_json_text(
                 {
                     "business_date": decision.business_date,
                     "decision_at": decision.decision_at,
                     **stage_payloads[stage],
-                }
+                },
+                fragments=fragments,
             )
-            assert isinstance(payload_value, dict)
-            payload_checksum = stable_checksum(payload_value)
+            payload_checksum = stable_checksum_text(payload_text)
             stable_suffix = f"{decision_index:08d}:{stage.value}"
             trace_id = f"RRT-{stable_checksum(stable_suffix)[:24]}"
             artifact = ResearchArtifact(
@@ -771,23 +815,27 @@ class ResearchRunCoordinator:
                 stage=stage,
                 trace_id=trace_id,
                 parent_trace_ids=parent,
-                payload=payload_value,
+                payload={},
+                payload_json=payload_text,
                 checksum=payload_checksum,
             )
-            await self._store.append_artifact(artifact)
-            if progress is not None:
-                # 单位 = 已完成的 (decision x stage) 工件数;total 随当前已发现的
-                # 决策递增(见 DECISION_STAGE_COUNT 注释)。phase 携带决策级
-                # 上下文(issue #308):序号 1-based + business_date。
-                done = decision_index * DECISION_STAGE_COUNT + offset + 1
-                total = (decision_index + 1) * DECISION_STAGE_COUNT
-                await _report_progress(
-                    progress,
-                    done,
-                    total,
+            artifacts.append(artifact)
+            # 单位 = 已完成的 (decision x stage) 工件数;total 随当前已发现的
+            # 决策递增(见 DECISION_STAGE_COUNT 注释)。phase 携带决策级
+            # 上下文(issue #308):序号 1-based + business_date。批量落库后
+            # 逐 stage 上报序列保持不变(仅整体后移到落库之后)。
+            stage_phases.append(
+                (
+                    decision_index * DECISION_STAGE_COUNT + offset + 1,
                     _decision_phase(stage.value, decision_index, decision.business_date),
                 )
+            )
             parent = (trace_id,)
+        await self._store.append_artifacts(artifacts)
+        if progress is not None:
+            total = (decision_index + 1) * DECISION_STAGE_COUNT
+            for done, phase in stage_phases:
+                await _report_progress(progress, done, total, phase)
 
     async def _persist_report(
         self,
@@ -803,6 +851,7 @@ class ResearchRunCoordinator:
             failure_ctx.stage = ResearchRunStage.REPORT.value
         payload = to_json_value({"report": report})
         assert isinstance(payload, dict)
+        report_checksum = stable_checksum_normalized(payload)
         if partial_failure is not None:
             # issue #304:report JSON 内标注 partial 与失败决策定位。成功路径
             # 不注入任何键,report artifact 的 checksum 逐字节零漂移。
@@ -810,6 +859,10 @@ class ResearchRunCoordinator:
             assert isinstance(report_payload, dict)
             report_payload["partial"] = True
             report_payload["constraint_failure"] = partial_failure
+        # issue #472:payload_json 直写 JSON 列(driver 不再对 dict 二次
+        # json.dumps);文本取自注入 partial 之后的最终 payload,与 payload
+        # 语义一致;checksum 仍按 #304 口径取自注入之前(既有语义不变)。
+        report_text = canonical_json_normalized(payload)
         await self._store.append_artifact(
             ResearchArtifact(
                 artifact_id=f"{run_id}:A:report",
@@ -820,7 +873,8 @@ class ResearchRunCoordinator:
                 trace_id=f"RRT-{stable_checksum('report')[:24]}",
                 parent_trace_ids=(),
                 payload=payload,
-                checksum=stable_checksum(payload),
+                payload_json=report_text,
+                checksum=report_checksum,
             )
         )
         if progress is not None:
@@ -904,9 +958,22 @@ class ResearchRunCoordinator:
                 *decision.targets_after_risk,
             )
         }
-        if not target_symbols <= signal_symbols:
+        # issue #452:再平衡带保留的无信号持仓是设计意图(控制换手、维持已
+        # 成交持仓),不算「来历不明」—— 校验放宽为 targets ⊆ signals 与
+        # band_retained 的并集;既无信号又无带保留记录的目标仍 fail-closed
+        # 拒绝(防线收窄而非取消)。
+        unexplained = target_symbols - signal_symbols
+        if unexplained - _band_retained_symbols(decision.constraints):
             raise ResearchConstraintViolationError(
                 "目标仓位包含没有标准化信号的标的"
+            )
+        if unexplained:
+            logger.warning(
+                "research_run.band_retained_without_signal",
+                run_id=manifest.run_id,
+                business_date=decision.business_date.isoformat(),
+                symbols=sorted(unexplained),
+                message="目标仓位含再平衡带保留的无信号持仓,校验按 #452 豁免",
             )
 
         instruction_by_id = {
@@ -998,7 +1065,7 @@ class ResearchRunCoordinator:
     @staticmethod
     def _validate_report(
         manifest: ResearchRunManifest,
-        decisions: list[DecisionBundle],
+        decisions: Sequence[DecisionLedgerView],
         report: object,
     ) -> None:
         from finboard_backtest.research_run.contracts import ResearchRunReport
@@ -1092,6 +1159,69 @@ class ResearchRunCoordinator:
         if record is None:
             raise ResearchRunConflictError(f"研究运行不存在: {run_id}")
         return record
+
+
+def _decision_stage_payloads(
+    decision: DecisionBundle,
+) -> dict[ResearchRunStage, dict[str, object]]:
+    """单个决策按 13 stage 的 artifact 载荷映射(persist 与测试共用)。
+
+    模块级纯函数:``_persist_decision`` 逐 stage 落库与
+    ``test_issue_463_shedding`` 的「瘦身 vs 全量」逐字节对照消费同一映射,
+    避免测试镜像 runner 内部结构形成双份漂移源。
+    """
+    return {
+        ResearchRunStage.UNIVERSE: {"candidates": decision.candidates},
+        ResearchRunStage.FEATURES: {"features": decision.features},
+        ResearchRunStage.SIGNALS: {"signals": decision.signals},
+        ResearchRunStage.TARGETS_BEFORE_CONSTRAINTS: {
+            "targets": decision.targets_before_constraints
+        },
+        ResearchRunStage.CONSTRAINTS: {"constraints": decision.constraints},
+        ResearchRunStage.TARGETS_AFTER_CONSTRAINTS: {
+            "targets": decision.targets_after_constraints
+        },
+        ResearchRunStage.RISK_EXITS: {
+            "outcomes": decision.risk_exits,
+            "state": decision.risk_state,
+        },
+        ResearchRunStage.TARGETS_AFTER_RISK: {
+            "targets": decision.targets_after_risk
+        },
+        ResearchRunStage.CAPITAL_FEASIBILITY: {
+            "tiers": decision.capital_feasibility
+        },
+        ResearchRunStage.REBALANCE_PLAN: {"instructions": decision.rebalance_plan},
+        ResearchRunStage.ORDERS: {"orders": decision.orders},
+        ResearchRunStage.FILLS: {"fills": decision.fills},
+        ResearchRunStage.LEDGER: {
+            "positions": decision.positions,
+            "ledger": decision.ledger,
+            "pipeline_evidence": decision.pipeline_evidence,
+        },
+    }
+
+
+def _band_retained_symbols(
+    constraints: tuple[ConstraintOutcome, ...],
+) -> frozenset[str]:
+    """从已持久化的约束审计导出「再平衡带保留且有权重」的标的(issue #452)。
+
+    口径依据 ``build_portfolio`` 带块:真正保留的充要条件是
+    ``hold ∧ abs(current) <= max_weight_per_asset ∧ abs(current) > eps``
+    —— 对应 outcome ``passed=True ∧ after_value > MAX_WEIGHT_EPSILON``;
+    被否决(超 max_weight 或近零持仓)时 ``banded`` 不写入 current,
+    ``after_value`` 保持 desired(通常 0),不会进入豁免集。
+    不引入新的数据通道,全部读 ``decision.constraints`` 既有审计结构。
+    """
+    return frozenset(
+        outcome.symbol
+        for outcome in constraints
+        if outcome.constraint == "rebalance_band"
+        and outcome.passed
+        and outcome.symbol is not None
+        and (outcome.after_value or 0.0) > MAX_WEIGHT_EPSILON
+    )
 
 
 def _decision_phase(stage_value: str, decision_index: int, business_date: object) -> str:

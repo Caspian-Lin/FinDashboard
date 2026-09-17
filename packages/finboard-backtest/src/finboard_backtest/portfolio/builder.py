@@ -27,7 +27,10 @@ from finboard_backtest.portfolio.contracts import (
     Signal,
     TargetWeight,
 )
-from finboard_backtest.portfolio.covariance import CovarianceEstimate
+from finboard_backtest.portfolio.covariance import (
+    PSD_MIN_EIGENVALUE,
+    CovarianceEstimate,
+)
 from finboard_backtest.portfolio.neutralization import (
     NEUTRALIZATION_CONSTRAINT,
     NEUTRALIZATION_SKIPPED_CONSTRAINT,
@@ -157,10 +160,18 @@ def _covariance_problem(
         min_eigenvalue = float(np.linalg.eigvalsh(matrix).min())
     except np.linalg.LinAlgError:
         return "协方差矩阵无法进行特征值分解"
-    eigenvalue_tolerance = (
-        np.finfo(np.float64).eps
-        * max(1.0, float(np.abs(matrix).max()))
-        * len(covariance.tickers)
+    # issue #465:容差与 PD 修复下限对齐 —— 取纯数值容差与
+    # PSD_MIN_EIGENVALUE / 2 的较小者。纯数值容差在大 N(N≈5000)时约
+    # 1.1e-12,高于 ``_ensure_positive_definite`` 的 clip 下限 1e-12,会把
+    # 修复过的矩阵也拒掉;对齐后修复矩阵(min_eig >= 1e-12)恒过校验,
+    # 真坏矩阵(min_eig <= 0 或 NaN / 不对称)照旧被拦。
+    eigenvalue_tolerance = min(
+        (
+            np.finfo(np.float64).eps
+            * max(1.0, float(np.abs(matrix).max()))
+            * len(covariance.tickers)
+        ),
+        PSD_MIN_EIGENVALUE / 2.0,
     )
     if min_eigenvalue <= eigenvalue_tolerance:
         return f"协方差矩阵奇异或非正定: min_eigenvalue={min_eigenvalue:.3e}"
@@ -693,6 +704,9 @@ def to_research_constraint_outcomes(
                 limit=item.limit,
                 reason=item.reason,
                 hard=hard,
+                # issue #452:透传标的维度(逐标的约束命中哪个 symbol),供
+                # runner 从约束审计导出「再平衡带保留」标的;组合级约束恒 None。
+                symbol=item.symbol,
             )
         )
     return tuple(outcomes)

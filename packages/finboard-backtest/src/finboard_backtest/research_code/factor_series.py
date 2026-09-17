@@ -26,9 +26,11 @@ from typing import Any
 
 from finboard_backtest.research_run.contracts import FrozenArtifactRef
 from finboard_data.factor_lab import (
+    PREDEFINED_FACTOR_PREFIX,
     USER_FACTOR_PREFIX,
+    is_predefined_factor_name,
     is_user_factor_name,
-    sandbox_factor_name,
+    series_factor_name,
 )
 
 #: 入队拒绝文案的具名标记(issue #360,供测试 / agent 检索)
@@ -43,6 +45,53 @@ ESTIMATED_REBUILD_MINUTES_PER_SERIES = 2
 
 #: manifest 冻结引用的 version 标记(= series_key 的内容寻址版本前缀)
 FACTORS_SERIES_REF_VERSION = "v2"
+
+#: v1 逐日入口在序列构建路径的废弃具名标记(issue #461,用户拍板
+#: 2026-09-13;单日快照路径的 v1 不受影响)
+V1_SERIES_DEPRECATED_CODE = "v1_series_deprecated"
+
+
+def factor_series_v2_entry_error(files: dict[str, str] | None) -> str | None:
+    """序列构建的 v2 入口门禁:manifest.entry 非 ``compute_series`` 时返回
+    具名拒绝文案,None = 通过(executor 与 MCP 入队预检共用,#461)。
+
+    v1 ``compute`` 的逐日回退(#359 双轨)对每个决策日做全历史面板重算
+    (O(决策日数 x 面板行数)),全市场全历史窗口单因子数小时且窗口头部
+    零预热易炸(#460 取证);序列构建路径自本门禁起仅接受协议 v2。
+    ``files`` 为 ``ResearchCodeRepo.read(kind, name, commit)`` 的产物。
+    """
+    import tomllib
+
+    if files is None or "manifest.toml" not in files:
+        return (
+            f"{V1_SERIES_DEPRECATED_CODE}: 因子代码缺少 manifest.toml,无法确认 "
+            "序列入口;factor_series_build 仅接受协议 v2 "
+            "manifest.entry='factor.compute_series'(一次容器执行覆盖整个决策"
+            "窗口,头部历史不足产出缺测)。"
+        )
+    try:
+        doc = tomllib.loads(files["manifest.toml"])
+    except tomllib.TOMLDecodeError as exc:
+        return (
+            f"{V1_SERIES_DEPRECATED_CODE}: manifest.toml 解析失败({exc});"
+            "factor_series_build 仅接受协议 v2 "
+            "manifest.entry='factor.compute_series'。"
+        )
+    top = doc.get("manifest", doc)
+    entry = top.get("entry") if isinstance(top, dict) else None
+    func = (
+        entry.split(".", 1)[1] if isinstance(entry, str) and "." in entry else None
+    )
+    if func == "compute_series":
+        return None
+    return (
+        f"{V1_SERIES_DEPRECATED_CODE}: factor_series_build 已废弃协议 v1 逐日"
+        f"入口(收到 manifest.entry={entry!r}):逐日回退对每个决策日做全历史"
+        "面板重算(O(决策日数 x 面板行数)),全市场全历史窗口单因子数小时"
+        "且窗口头部零预热必然炸守卫(#460)。修复:实现 compute_series(ctx)"
+        "——挂载 Arrow 数据一次读入,向量化计算整段序列,头部历史不足产出"
+        "缺测;finboard_research_code_submit 重新提交并完成晋级链后重建。"
+    )
 
 
 @dataclass(frozen=True)
@@ -67,12 +116,15 @@ def series_release_mismatches(
 
     全匹配返回空列表(零噪音);失配方向为「series 锚定发布失效」——
     换 bars 主发布后既有序列不在新发布上,须托管重建后以新 series_id 引用。
+    因子名按序列 kind 派生(#398:predefined → p_,用户因子 → u_)。
     """
     requested = set(requested_release_ids)
     return [
         FactorSeriesReleaseMismatch(
             series_id=str(record.series_id),
-            factor_name=sandbox_factor_name(str(record.code_artifact)),
+            factor_name=series_factor_name(
+                str(getattr(record, "kind", "factor")), str(record.code_artifact)
+            ),
             anchored_release_id=str(record.release_id),
             window_start=str(record.window_start),
             window_end=str(record.window_end),
@@ -114,9 +166,16 @@ def factor_series_rebuild_error(
 
 
 def series_covered_factor_names(records: Sequence[Any]) -> frozenset[str]:
-    """声明序列覆盖的 u_ 因子名集合(``u_<code_artifact>``)。"""
+    """声明序列覆盖的因子名集合(#398 起按 kind 派生前缀)。
+
+    ``kind=predefined_factor`` → ``p_<code_artifact>``;用户因子(其余)
+    → ``u_<code_artifact>``(既有语义零变化)。
+    """
     return frozenset(
-        sandbox_factor_name(str(record.code_artifact)) for record in records
+        series_factor_name(
+            str(getattr(record, "kind", "factor")), str(record.code_artifact)
+        )
+        for record in records
     )
 
 
@@ -130,7 +189,7 @@ def build_factor_series_refs(
             version=FACTORS_SERIES_REF_VERSION,
             checksum=str(record.content_checksum),
             capabilities=(
-                f"factor:{sandbox_factor_name(str(record.code_artifact))}",
+                f"factor:{series_factor_name(str(getattr(record, 'kind', 'factor')), str(record.code_artifact))}",
             ),
         )
         for record in sorted(records, key=lambda item: str(item.series_id))
@@ -163,12 +222,16 @@ async def factor_series_anchor_warnings(
     required_factor_sources: Collection[str],
     dataset_release_ids: Collection[str],
 ) -> tuple[FactorSeriesAnchorWarning, ...]:
-    """validate 通道锚定预检:引用的 u_ 因子若存在锚定其它发布的既有
-    序列,逐序列给具名提示(修复路径与 :func:`factor_series_rebuild_error`
+    """validate 通道锚定预检:引用的 u_ / p_ 因子若存在锚定其它发布的
+    既有序列,逐序列给具名提示(修复路径与 :func:`factor_series_rebuild_error`
     一致)。全匹配 / 无引用返回空元组(零噪音)。纯提示层,不改变任何约束。
     """
     referenced = sorted(
-        {name for name in required_factor_sources if is_user_factor_name(name)}
+        {
+            name
+            for name in required_factor_sources
+            if is_user_factor_name(name) or is_predefined_factor_name(name)
+        }
     )
     if not referenced or not dataset_release_ids:
         return ()
@@ -177,7 +240,12 @@ async def factor_series_anchor_warnings(
     repo = FactorSeriesRepository(session)
     warnings: list[FactorSeriesAnchorWarning] = []
     for name in referenced:
-        records = await repo.list_for_artifact(name.removeprefix(USER_FACTOR_PREFIX))
+        prefix = (
+            PREDEFINED_FACTOR_PREFIX
+            if is_predefined_factor_name(name)
+            else USER_FACTOR_PREFIX
+        )
+        records = await repo.list_for_artifact(name.removeprefix(prefix))
         mismatches = series_release_mismatches(records, dataset_release_ids)
         for item in mismatches:
             warnings.append(

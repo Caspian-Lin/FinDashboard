@@ -30,12 +30,19 @@ from decimal import Decimal
 from enum import StrEnum
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from finboard_data.cache import CacheMetadata, CloseColumns, ParquetCache
 from finboard_data.quality import BarQualityChecker
-from finboard_data.research import DailySecurityMetrics, FinancialIndicator
+from finboard_data.research import (
+    BalanceSheet,
+    CashflowStatement,
+    DailySecurityMetrics,
+    DividendRecord,
+    FinancialIndicator,
+    IncomeStatement,
+)
 from finboard_data.trading_calendar import trading_days as _trading_days
 from finboard_shared.instruments import ASSET_METADATA_VERSION, DatasetManifest
 from finboard_shared.models import Bar, Symbol
@@ -79,13 +86,19 @@ class ReleaseDatasetKind(StrEnum):
     DAILY_METRICS = "daily_metrics"
     FINANCIAL_INDICATORS = "financial_indicators"
     CONVERTIBLE_METRICS = "convertible_metrics"
+    # issue #397:财务面扩展 —— income/balance/cashflow 三表与 dividend
+    # 分红明细独立 kind 独立白名单(从 research_* 表冻结,机制同 #187)。
+    INCOME_STATEMENTS = "income_statements"
+    BALANCE_SHEETS = "balance_sheets"
+    CASHFLOW_STATEMENTS = "cashflow_statements"
+    DIVIDENDS = "dividends"
 
 
 RELEASE_KINDS = frozenset(kind.value for kind in ReleaseDatasetKind)
 
 # 各数据集类型的字段白名单(fields 只能是白名单子集)。列名与
 # ``research_daily_metrics`` / ``research_financial_indicators`` 表一致,
-# 数据来源是 research_data_sync(#171)摄取的研究数据。
+# 数据来源是 dataset_sync(#171;#392 前称 research_data_sync)摄取的研究数据。
 DAILY_METRICS_FIELDS = (
     "trade_date",
     "close",
@@ -122,6 +135,41 @@ FINANCIAL_INDICATORS_FIELDS = (
     "revenue_yoy",
     "net_profit_yoy",
     "operating_cash_flow_yoy",
+    # ---- issue #401 批次 3:fina_indicator 白名单扩展(12 → 41 字段)----
+    # 增长(YoY / 单季 YoY / 单季 QoQ)
+    "operating_revenue_yoy",
+    "basic_eps_yoy",
+    "deducted_netprofit_yoy",
+    "operating_profit_yoy",
+    "revenue_yoy_q",
+    "revenue_qoq",
+    "netprofit_yoy_q",
+    "netprofit_qoq",
+    # 盈利质量(ROA / ROIC / 扣非 / 单季盈利 / 期间费用率)
+    "return_on_assets",
+    "return_on_assets_np",
+    "roe_deducted",
+    "roic",
+    "roe_q",
+    "return_on_assets_q",
+    "grossprofit_margin_q",
+    "netprofit_margin_q",
+    "expense_to_revenue",
+    # 营运效率(周转率族)
+    "inventory_turnover",
+    "receivables_turnover",
+    "current_assets_turnover",
+    "fixed_assets_turnover",
+    "total_assets_turnover",
+    # 流动性 / 偿债
+    "current_ratio",
+    "quick_ratio",
+    "debt_to_equity",
+    "interest_coverage",
+    "equity_multiplier",
+    # 现金流质量
+    "ocf_to_revenue",
+    "ocf_to_debt",
 )
 # issue #265:可转债派生指标冻结字段白名单。conversion_premium = 转债收盘 /
 # 转股价值 - 1;转股价值 = 100 / 转股价 x 正股收盘。underlying_symbol /
@@ -134,6 +182,189 @@ CONVERTIBLE_METRICS_FIELDS = (
     "conversion_premium",
     "underlying_symbol",
     "underlying_close",
+)
+
+# issue #397:三表 + dividend 的冻结字段白名单(独立 kind 独立白名单)。
+# 值列名与领域记录属性名一致(= tushare 上游列名,provider 层不改名);
+# 金额单位人民币元。修订可见性字段(announcement_date/update_flag/
+# report_type/comp_type/formal_announcement_date)进白名单,PIT 门控按
+# available_at 列(发布元数据,自动写入)。
+_ANNOUNCED_STATEMENT_IDENTITY_FIELDS = (
+    "announcement_date",
+    "report_period",
+    "formal_announcement_date",
+    "update_flag",
+    "report_type",
+    "comp_type",
+)
+INCOME_STATEMENTS_FIELDS = (
+    *_ANNOUNCED_STATEMENT_IDENTITY_FIELDS,
+    "basic_eps",
+    "diluted_eps",
+    "total_revenue",
+    "revenue",
+    "int_income",
+    "int_exp",
+    "fv_value_chg_gain",
+    "invest_income",
+    "total_cogs",
+    "oper_cost",
+    "biz_tax_surchg",
+    "sell_exp",
+    "admin_exp",
+    "fin_exp",
+    "rd_exp",
+    "assets_impair_loss",
+    "operate_profit",
+    "non_oper_income",
+    "non_oper_exp",
+    "total_profit",
+    "income_tax",
+    "n_income",
+    "n_income_attr_p",
+    "minority_gain",
+    "oth_compr_income",
+    "t_compr_income",
+    "compr_inc_attr_p",
+    "ebit",
+    "ebitda",
+    "distable_profit",
+    "continued_net_profit",
+)
+BALANCE_SHEETS_FIELDS = (
+    *_ANNOUNCED_STATEMENT_IDENTITY_FIELDS,
+    "total_share",
+    "money_cap",
+    "trading_fl",
+    "notes_receiv",
+    "accounts_receiv",
+    "oth_receiv",
+    "prepayment",
+    "inventories",
+    "total_cur_assets",
+    "lt_eqt_invest",
+    "fix_assets",
+    "cip",
+    "intan_assets",
+    "goodwill",
+    "defer_tax_assets",
+    "total_nca",
+    "total_assets",
+    "st_borr",
+    "notes_payable",
+    "acct_payable",
+    "adv_receipts",
+    "contract_liab",
+    "payroll_payable",
+    "taxes_payable",
+    "non_cur_liab_due_1y",
+    "oth_cur_liab",
+    "total_cur_liab",
+    "lt_borr",
+    "bond_payable",
+    "total_ncl",
+    "total_liab",
+    "cap_rese",
+    "surplus_rese",
+    "undistr_porfit",
+    "treasury_share",
+    "minority_int",
+    "total_hldr_eqy_exc_min_int",
+    "total_hldr_eqy_inc_min_int",
+)
+CASHFLOW_STATEMENTS_FIELDS = (
+    *_ANNOUNCED_STATEMENT_IDENTITY_FIELDS,
+    "net_profit",
+    "finan_exp",
+    "c_fr_sale_sg",
+    "recp_tax_rends",
+    "c_inf_fr_operate_a",
+    "c_paid_goods_s",
+    "c_paid_to_for_empl",
+    "c_paid_for_taxes",
+    "oth_cash_pay_oper_act",
+    "st_cash_out_act",
+    "n_cashflow_act",
+    "c_recp_return_invest",
+    "n_recp_disp_fiolta",
+    "stot_inflows_inv_act",
+    "c_pay_acq_const_fiolta",
+    "c_paid_invest",
+    "stot_out_inv_act",
+    "n_cashflow_inv_act",
+    "c_recp_borrow",
+    "proc_issue_bonds",
+    "stot_cash_in_fnc_act",
+    "c_prepay_amt_borr",
+    "c_pay_dist_dpcp_int_exp",
+    "incl_dvd_profit_paid_sc_ms",
+    "stot_cashout_fnc_act",
+    "n_cash_flows_fnc_act",
+    "eff_fx_flu_cash",
+    "n_incr_cash_cash_equ",
+    "c_cash_equ_beg_period",
+    "c_cash_equ_end_period",
+    "free_cashflow",
+    "depr_fa_coga_dpba",
+    "amort_intang_assets",
+    "credit_impa_loss",
+    "loss_fv_chg",
+    "invest_loss",
+)
+# dividend:上游无 update_flag,``div_proc``(预案/股东大会通过/实施/不分配…)
+# 是进展口径判别符;精确股息率因子消费 ex_date/cash_div/stk_div 等列。
+DIVIDENDS_FIELDS = (
+    "announcement_date",
+    "report_period",
+    "div_proc",
+    "stk_div",
+    "stk_bo_rate",
+    "stk_co_rate",
+    "cash_div",
+    "cash_div_tax",
+    "record_date",
+    "ex_date",
+    "pay_date",
+    "div_listdate",
+    "imp_ann_date",
+)
+
+#: 读取端还原领域记录时,发布行 → 构造关键字的身份/元数据键(值列之外)。
+_ANNOUNCED_IDENTITY_FIELDS = frozenset(
+    {
+        "announcement_date",
+        "report_period",
+        "formal_announcement_date",
+        "update_flag",
+        "report_type",
+        "comp_type",
+        "div_proc",
+        "stk_div",
+        "stk_bo_rate",
+        "stk_co_rate",
+        "cash_div",
+        "cash_div_tax",
+        "record_date",
+        "ex_date",
+        "pay_date",
+        "div_listdate",
+        "imp_ann_date",
+    }
+)
+_INCOME_VALUE_FIELDS = tuple(
+    name
+    for name in INCOME_STATEMENTS_FIELDS
+    if name not in _ANNOUNCED_IDENTITY_FIELDS
+)
+_BALANCE_VALUE_FIELDS = tuple(
+    name
+    for name in BALANCE_SHEETS_FIELDS
+    if name not in _ANNOUNCED_IDENTITY_FIELDS
+)
+_CASHFLOW_VALUE_FIELDS = tuple(
+    name
+    for name in CASHFLOW_STATEMENTS_FIELDS
+    if name not in _ANNOUNCED_IDENTITY_FIELDS
 )
 
 # 研究数据冻结字段白名单:symbol 单独成列,available_at/observed_at/source
@@ -705,6 +936,14 @@ def _fields_whitelist(kind: ReleaseDatasetKind) -> frozenset[str]:
         return frozenset(FINANCIAL_INDICATORS_FIELDS)
     if kind is ReleaseDatasetKind.CONVERTIBLE_METRICS:
         return frozenset(CONVERTIBLE_METRICS_FIELDS)
+    if kind is ReleaseDatasetKind.INCOME_STATEMENTS:
+        return frozenset(INCOME_STATEMENTS_FIELDS)
+    if kind is ReleaseDatasetKind.BALANCE_SHEETS:
+        return frozenset(BALANCE_SHEETS_FIELDS)
+    if kind is ReleaseDatasetKind.CASHFLOW_STATEMENTS:
+        return frozenset(CASHFLOW_STATEMENTS_FIELDS)
+    if kind is ReleaseDatasetKind.DIVIDENDS:
+        return frozenset(DIVIDENDS_FIELDS)
     return frozenset(RELEASE_FIELDS)
 
 
@@ -1317,6 +1556,46 @@ class ResearchDataReleaseSource(Protocol):
         """返回 {symbol: [PIT 时点化的财务公告修订]},按 available_at 升序。"""
         ...
 
+    async def income_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[IncomeStatement]]:
+        """返回 {symbol: [PIT 时点化的利润表修订]}(#397),按 available_at 升序。"""
+        ...
+
+    async def balance_sheets(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[BalanceSheet]]:
+        """返回 {symbol: [PIT 时点化的资产负债表修订]}(#397),按 available_at 升序。"""
+        ...
+
+    async def cashflow_statements(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[CashflowStatement]]:
+        """返回 {symbol: [PIT 时点化的现金流量表修订]}(#397),按 available_at 升序。"""
+        ...
+
+    async def dividends(
+        self,
+        *,
+        symbols: Sequence[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[DividendRecord]]:
+        """返回 {symbol: [PIT 时点化的分红送股进展]}(#397),按 available_at 升序。"""
+        ...
+
 
 class FrozenDatasetReleaseBuilder:
     """把可变 Parquet 缓存原子冻结为不可变研究发布。"""
@@ -1352,6 +1631,11 @@ class FrozenDatasetReleaseBuilder:
     ) -> ResearchDatasetRelease:
         """冻结并发布;失败不会覆盖已有发布或留下可读的半成品。"""
 
+        # issue #396:发布覆盖率审计消费交易日历,DB 优先(缺失回源 akshare
+        # 并回写 trade_cal);预热失败不阻断 —— 审计内的同步读取回退原路径。
+        from finboard_data.trading_calendar import ensure_calendar_loaded
+
+        await ensure_calendar_loaded()
         _validate_schema_compatibility(previous_release, spec)
         if not instruments:
             raise DatasetReleaseQualityError("发布标的不能为空")
@@ -1782,6 +2066,42 @@ class FrozenDatasetReleaseBuilder:
                 indicator_records[instrument.code],
                 key=_research_record_available_at,
             )
+        if spec.dataset_kind is ReleaseDatasetKind.INCOME_STATEMENTS:
+            income_records = await self._research_source.income_statements(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(
+                income_records[instrument.code], key=_research_record_available_at
+            )
+        if spec.dataset_kind is ReleaseDatasetKind.BALANCE_SHEETS:
+            balance_records = await self._research_source.balance_sheets(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(
+                balance_records[instrument.code], key=_research_record_available_at
+            )
+        if spec.dataset_kind is ReleaseDatasetKind.CASHFLOW_STATEMENTS:
+            cashflow_records = await self._research_source.cashflow_statements(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(
+                cashflow_records[instrument.code], key=_research_record_available_at
+            )
+        if spec.dataset_kind is ReleaseDatasetKind.DIVIDENDS:
+            dividend_records = await self._research_source.dividends(
+                symbols=[instrument.code],
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+            )
+            return sorted(
+                dividend_records[instrument.code], key=_research_record_available_at
+            )
         raise DatasetReleaseQualityError(f"不支持的发布数据集类型: {spec.dataset_kind}")
 
     async def _freeze_convertible_metrics_instrument(
@@ -1810,7 +2130,7 @@ class FrozenDatasetReleaseBuilder:
         meta = instrument.convertible
         if meta is None:
             raise DatasetReleaseQualityError(
-                f"{instrument.code}:convertible_metadata_missing(先执行 research_data_sync "
+                f"{instrument.code}:convertible_metadata_missing(先执行 dataset_sync "
                 "convertible_profiles 回填条款元数据)"
             )
 
@@ -2368,6 +2688,83 @@ def _read_research_records(
     return rows
 
 
+#: daily_metrics 发布行中 :func:`_daily_metrics_from_release_row` 消费的
+#: float payload 列(逐字段对应;#438 预计算矩阵按此抽取 float64)。
+_DAILY_METRICS_FLOAT_PAYLOAD_FIELDS: tuple[str, ...] = (
+    "close",
+    "turnover_rate",
+    "turnover_rate_free",
+    "volume_ratio",
+    "pe",
+    "pe_ttm",
+    "pb",
+    "ps",
+    "ps_ttm",
+    "dividend_yield",
+    "dividend_yield_ttm",
+    "total_shares",
+    "float_shares",
+    "free_shares",
+    "total_market_cap",
+    "circulating_market_cap",
+)
+
+#: daily_metrics 发布行中经 ``_coerce_int`` 消费的 int payload 列——
+#: ``int(str(value))`` 对 float 输入会变义,预计算须独立 int64 存储(#438)。
+_DAILY_METRICS_INT_PAYLOAD_FIELDS: tuple[str, ...] = ("limit_status",)
+
+#: available_at ISO 串是否携带时区偏移(尾缀 Z / ±HH:MM / ±HHMM)。
+_AVAILABLE_AT_TZ_SUFFIX = re.compile(r"(?:[Zz]|[+-]\d{2}:?\d{2})$")
+
+
+def _epoch_micros(value: datetime) -> int:
+    """aware/naive datetime → epoch 微秒(整数精确,不经 float timestamp)。"""
+    epoch = datetime(1970, 1, 1, tzinfo=UTC) if value.tzinfo else datetime(1970, 1, 1)
+    delta = value - epoch
+    return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+
+
+def _available_at_timestamp_column(column: pa.ChunkedArray) -> pa.ChunkedArray:
+    """available_at 列整列一次转换为 ``timestamp[us]``(#438 门控原生化)。
+
+    兼容 string(ISO 8601,与对象路径逐行 ``fromisoformat`` 同一解析语义)与
+    timestamp 两种物理类型:带时区偏移的值统一 cast 到 UTC——aware datetime
+    比较即瞬时比较,逐值等价;naive 列 cast 为 naive timestamp(对 aware
+    decision_at 的比较语义由调用方保持)。空值在对象路径是
+    ``fromisoformat(str(None))`` 的 ValueError,这里保持 ValueError。
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    if pa.types.is_timestamp(column.type):
+        if column.type.unit == "us":
+            return column
+        return pc.cast(column, pa.timestamp("us", tz=column.type.tz))
+    if not (pa.types.is_string(column.type) or pa.types.is_large_string(column.type)):
+        raise ValueError(f"available_at 列物理类型不可解析: {column.type}")
+    if column.null_count:
+        raise ValueError("available_at 列含空值(等价旧路径 fromisoformat(None) 失败)")
+    sample = column.drop_null()[0].as_py()
+    target = (
+        pa.timestamp("us", tz="UTC")
+        if _AVAILABLE_AT_TZ_SUFFIX.search(sample)
+        else pa.timestamp("us")
+    )
+    return pc.cast(column, target)
+
+
+def _trade_date_day_column(column: pa.ChunkedArray) -> pa.ChunkedArray:
+    """trade_date 列整列一次转换为 ``date32``(#438;兼容 date/timestamp/string)。"""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    if pa.types.is_date(column.type) or pa.types.is_timestamp(column.type):
+        return pc.cast(column, pa.date32())
+    if pa.types.is_string(column.type) or pa.types.is_large_string(column.type):
+        return pc.cast(column, pa.date32())
+    raise ValueError(f"trade_date 列物理类型不可解析: {column.type}")
+
+
 def _read_daily_metrics_columns(
     path: Path,
     *,
@@ -2377,40 +2774,185 @@ def _read_daily_metrics_columns(
     decision_at: datetime,
 ) -> pa.Table:
     """:func:`_read_research_records` + ``_fetch_research_records`` 门控的
-    列式合并版(issue #371):Arrow 读 + 门控过滤,不产生整行 Python 对象。
+    列式合并版(issue #371;门控 Arrow 原生化 #438):Arrow 读 + 门控过滤,
+    不产生整行 Python 对象。
 
-    门控语义逐值一致:``available_at`` > decision_at 的行跳过;PIT 可见行
-    缺 ``trade_date`` 具名 :class:`ReleaseIntegrityError`;其余按
-    ``start <= trade_date <= end`` 保留。仅日期/时间两小列逐行解析(与对象
-    路径同一 fromisoformat 语义),payload 列全程 Arrow。
+    门控语义逐值一致:``available_at`` > decision_at 的行跳过(available_at
+    整列一次 timestamp cast 后比较,C 内核——此前逐行 ``fromisoformat`` 持
+    GIL,每文件 ~2800 行 x 全市场 x 每期在多线程下仍串行,是加载期单核瓶颈);
+    PIT 可见行缺 ``trade_date`` 具名 :class:`ReleaseIntegrityError`(对可见
+    子集做 null 检查,不可见行照旧跳过);其余按 ``start <= trade_date <= end``
+    保留。payload 列全程 Arrow,函数体内无逐行 Python 循环。
     """
     import pyarrow as pa
+    import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
     table = pq.read_table(path, use_threads=False, pre_buffer=False)
     if table.num_rows == 0:
         return table
-    keep: list[bool] = []
-    for available_raw, trade_raw in zip(
-        table.column("available_at").to_pylist(),
-        table.column("trade_date").to_pylist(),
-        strict=True,
-    ):
-        available = (
-            available_raw
-            if isinstance(available_raw, datetime)
-            else datetime.fromisoformat(str(available_raw))
-        )
-        if available > decision_at:
-            keep.append(False)
-            continue
-        if trade_raw is None:
-            raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
-        record_date = _coerce_date(trade_raw)
-        if record_date is None:
-            raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
-        keep.append(start <= record_date <= end)
-    return table.filter(pa.array(keep))
+    available = _available_at_timestamp_column(table.column("available_at"))
+    if (available.type.tz is None) != (decision_at.tzinfo is None):
+        # naive/aware 混比:对象路径在比较处抛 TypeError,这里前置保持。
+        raise TypeError("can't compare offset-naive and offset-aware datetimes")
+    visible = pc.less_equal(available, pa.scalar(decision_at, type=available.type))
+    trade = table.column("trade_date")
+    # PIT 可见行缺 trade_date 具名拒绝(对可见子集;不可见行不检查,照旧跳过)。
+    if pc.any(pc.and_(visible, pc.is_null(trade))).as_py():
+        raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
+    trade_days = _trade_date_day_column(trade)
+    keep = pc.and_(
+        visible,
+        pc.and_(
+            pc.greater_equal(trade_days, pa.scalar(start, type=pa.date32())),
+            pc.less_equal(trade_days, pa.scalar(end, type=pa.date32())),
+        ),
+    )
+    return table.filter(keep)
+
+
+#: D1 ``available_at`` 的固定 UTC 偏移(微秒):业务日零点(UTC)+ 偏移。
+#: 沪/期货 15:30 上海 = 07:30 UTC;港股 16:30 香港 = 08:30 UTC。其余市场
+#: (美东等夏令时市场)走 :func:`_read_bars_columns` 内的唯一业务日小表
+#: 精确派生回退。
+_D1_AVAILABLE_AT_FIXED_OFFSET_US = {
+    Market.A_SHARE: (7 * 60 + 30) * 60_000_000,
+    Market.FUTURE: (7 * 60 + 30) * 60_000_000,
+    Market.HK: (8 * 60 + 30) * 60_000_000,
+}
+
+
+def _read_bars_columns(
+    path: Path,
+    *,
+    code: str,
+    market: Market,
+    period: BarPeriod,
+    start: date,
+    end: date,
+    decision_at: datetime,
+) -> pa.Table:
+    """:func:`fetch_bars_columns` 的同步读取体:Arrow 读 + 门控过滤,
+    不产生逐行 Python 对象。
+
+    门控语义与对象路径逐值一致:``date`` = timestamp 的 UTC 墙钟日期
+    (与 aware UTC datetime 的 ``.date()`` 相同);``available_at`` 按市场
+    收盘规则派生(D1 固定偏移市场整列算术;其余市场按唯一业务日小表走
+    :func:`_timestamp_available_at`;非日线 = timestamp 本体,naive 列
+    具名拒绝与对象路径同口径),``> decision_at`` 的行不可见;
+    ``start <= date <= end`` 保留。输出列序 = 挂载 bars schema。
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path, use_threads=False, pre_buffer=False)
+    timestamps = table.column("timestamp")
+    if period is not BarPeriod.D1 and timestamps.type.tz is None:
+        raise ReleaseIntegrityError("冻结 Bar timestamp 必须带时区")
+    if (timestamps.type.tz is None) != (decision_at.tzinfo is None):
+        # naive/aware 混比:对象路径在比较处抛 TypeError,这里前置保持。
+        raise TypeError("can't compare offset-naive and offset-aware datetimes")
+    days = timestamps.cast(pa.date32())
+    if period is BarPeriod.D1:
+        offset_us = _D1_AVAILABLE_AT_FIXED_OFFSET_US.get(market)
+        if offset_us is not None:
+            day_start_us = pc.cast(
+                pc.cast(days, pa.timestamp("us", tz="UTC")), pa.int64()
+            )
+            available = pc.add(
+                day_start_us, pa.scalar(offset_us, type=pa.int64())
+            ).cast(pa.timestamp("us", tz="UTC"))
+        else:
+            unique_days = pc.unique(days)
+            per_day = pa.array(
+                [
+                    _timestamp_available_at(
+                        datetime(item.year, item.month, item.day, tzinfo=UTC),
+                        period,
+                        market,
+                    )
+                    for item in unique_days.to_pylist()
+                ],
+                type=pa.timestamp("us", tz="UTC"),
+            )
+            available = per_day.take(pc.index_in(days, unique_days))
+    else:
+        available = timestamps
+    visible = pc.less_equal(available, pa.scalar(decision_at, type=available.type))
+    keep = pc.and_(
+        visible,
+        pc.and_(
+            pc.greater_equal(days, pa.scalar(start, type=pa.date32())),
+            pc.less_equal(days, pa.scalar(end, type=pa.date32())),
+        ),
+    )
+    filtered = table.filter(keep)
+    return pa.table(
+        {
+            "symbol": pa.array([code] * filtered.num_rows, type=pa.string()),
+            "date": days.filter(keep),
+            "open": filtered.column("open"),
+            "high": filtered.column("high"),
+            "low": filtered.column("low"),
+            "close": filtered.column("close"),
+            "volume": filtered.column("volume"),
+            "amount": filtered.column("amount"),
+            "available_at": available.filter(keep),
+        }
+    )
+
+
+def _daily_metrics_latest_visible_indices(
+    table: pa.Table,
+    *,
+    decision_at_micros: np.ndarray,
+    decision_day_ends: np.ndarray,
+    range_start_day: int,
+    release_id: str,
+) -> np.ndarray:
+    """对已门控(全区间可见)表一次性定位各决策期「最新可见行」(#438)。
+
+    输入 ``decision_at_micros`` 为全部冻结决策时的 epoch 微秒(int64)、
+    ``decision_day_ends`` 为对应决策日 epoch 天数(int32),``range_start_day``
+    为发布区间起点天数。输出 int64 数组(每期选中行下标,-1 = 无可见行),
+    选择语义与逐期 :func:`_read_daily_metrics_columns` + ``sorted()[-1]``
+    逐值等值:可见 = ``available_at <= decision_at`` 且
+    ``start <= trade_date <= decision_at 日``;并列取原顺序最后一条(稳定
+    排序)。全程 numpy 向量化,零逐行 Python;PIT 可见行缺 ``trade_date``
+    按最大决策期可见子集具名拒绝(可见集随决策期单调扩大,任一期可见即
+    迟早具名失败,与逐期路径同一 fail-closed 结论)。
+    """
+    import numpy as np
+    import pyarrow as pa
+
+    n_periods = int(decision_at_micros.shape[0])
+    if table.num_rows == 0 or n_periods == 0:
+        return np.full(n_periods, -1, dtype=np.int64)
+    available = _available_at_timestamp_column(table.column("available_at"))
+    if available.type.tz is None:
+        # 逐期路径对 naive available_at x aware decision_at 同样抛 TypeError。
+        raise TypeError("can't compare offset-naive and offset-aware datetimes")
+    avail_us = available.cast(pa.int64()).to_numpy(zero_copy_only=False)
+    trade_days = _trade_date_day_column(table.column("trade_date")).cast(pa.int32())
+    trade_raw = trade_days.to_numpy(zero_copy_only=False).astype(np.float64)
+    trade_null = np.isnan(trade_raw)
+    if trade_null.any() and bool((avail_us[trade_null] <= int(decision_at_micros.max())).any()):
+        raise ReleaseIntegrityError(f"{release_id} 研究记录缺少日期字段")
+    # 不可见的 null trade_date 行永不入选:哨兵天数 > 一切决策日上界。
+    day_numbers = np.where(trade_null, np.int32(np.iinfo(np.int32).max), trade_raw).astype(np.int32)
+    keep = (
+        (avail_us[None, :] <= decision_at_micros[:, None])
+        & (day_numbers[None, :] >= np.int32(range_start_day))
+        & (day_numbers[None, :] <= decision_day_ends[:, None])
+    )
+    has_any = keep.any(axis=1)
+    masked = np.where(keep, avail_us[None, :], np.iinfo(np.int64).min)
+    best = masked.max(axis=1)
+    # available_at 并列取原顺序最后一条(与旧稳定排序语义逐值一致)。
+    candidates = keep & (avail_us[None, :] == best[:, None])
+    selected = candidates.shape[1] - 1 - np.argmax(candidates[:, ::-1], axis=1)
+    return np.where(has_any, selected, -1).astype(np.int64)
 
 
 def _daily_metrics_from_release_row(
@@ -2455,7 +2997,11 @@ def _financial_indicator_from_release_row(
     *,
     symbol: str,
 ) -> FinancialIndicator:
-    """把 financial_indicators 发布行还原为领域记录(未冻结字段为 None)。"""
+    """把 financial_indicators 发布行还原为领域记录(未冻结字段为 None)。
+
+    issue #401:白名单扩展后的新字段在旧发布(冻结于扩列前)中无该键,
+    ``row.get`` 自然回退 None —— 旧发布产物只读兼容,checksum 不受影响。
+    """
     value = row.get("available_at") or row.get("observed_at")
     available_at = _coerce_datetime(value)
     announcement_date = _coerce_date(row.get("announcement_date"))
@@ -2483,10 +3029,132 @@ def _financial_indicator_from_release_row(
         revenue_yoy=_coerce_decimal(row.get("revenue_yoy")),
         net_profit_yoy=_coerce_decimal(row.get("net_profit_yoy")),
         operating_cash_flow_yoy=_coerce_decimal(row.get("operating_cash_flow_yoy")),
+        # issue #401 批次 3 扩展字段(旧发布无键 → None)
+        operating_revenue_yoy=_coerce_decimal(row.get("operating_revenue_yoy")),
+        basic_eps_yoy=_coerce_decimal(row.get("basic_eps_yoy")),
+        deducted_netprofit_yoy=_coerce_decimal(row.get("deducted_netprofit_yoy")),
+        operating_profit_yoy=_coerce_decimal(row.get("operating_profit_yoy")),
+        revenue_yoy_q=_coerce_decimal(row.get("revenue_yoy_q")),
+        revenue_qoq=_coerce_decimal(row.get("revenue_qoq")),
+        netprofit_yoy_q=_coerce_decimal(row.get("netprofit_yoy_q")),
+        netprofit_qoq=_coerce_decimal(row.get("netprofit_qoq")),
+        return_on_assets=_coerce_decimal(row.get("return_on_assets")),
+        return_on_assets_np=_coerce_decimal(row.get("return_on_assets_np")),
+        roe_deducted=_coerce_decimal(row.get("roe_deducted")),
+        roic=_coerce_decimal(row.get("roic")),
+        roe_q=_coerce_decimal(row.get("roe_q")),
+        return_on_assets_q=_coerce_decimal(row.get("return_on_assets_q")),
+        grossprofit_margin_q=_coerce_decimal(row.get("grossprofit_margin_q")),
+        netprofit_margin_q=_coerce_decimal(row.get("netprofit_margin_q")),
+        expense_to_revenue=_coerce_decimal(row.get("expense_to_revenue")),
+        inventory_turnover=_coerce_decimal(row.get("inventory_turnover")),
+        receivables_turnover=_coerce_decimal(row.get("receivables_turnover")),
+        current_assets_turnover=_coerce_decimal(row.get("current_assets_turnover")),
+        fixed_assets_turnover=_coerce_decimal(row.get("fixed_assets_turnover")),
+        total_assets_turnover=_coerce_decimal(row.get("total_assets_turnover")),
+        current_ratio=_coerce_decimal(row.get("current_ratio")),
+        quick_ratio=_coerce_decimal(row.get("quick_ratio")),
+        debt_to_equity=_coerce_decimal(row.get("debt_to_equity")),
+        interest_coverage=_coerce_decimal(row.get("interest_coverage")),
+        equity_multiplier=_coerce_decimal(row.get("equity_multiplier")),
+        ocf_to_revenue=_coerce_decimal(row.get("ocf_to_revenue")),
+        ocf_to_debt=_coerce_decimal(row.get("ocf_to_debt")),
         source=str(row.get("source") or ""),
         observed_at=available_at,
         available_at=available_at,
     )
+
+
+def _announced_statement_identity(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> dict[str, Any]:
+    """三表发布行 → 领域记录共用的身份/元数据关键字段(#397)。"""
+    value = row.get("available_at") or row.get("observed_at")
+    available_at = _coerce_datetime(value)
+    announcement_date = _coerce_date(row.get("announcement_date"))
+    report_period = _coerce_date(row.get("report_period"))
+    if announcement_date is None or report_period is None:
+        raise DatasetReleaseQualityError("研究数据记录缺少公告日或报告期")
+    return {
+        "symbol": symbol,
+        "announcement_date": announcement_date,
+        "report_period": report_period,
+        "formal_announcement_date": _coerce_date(
+            row.get("formal_announcement_date")
+        ),
+        "report_type": str(row.get("report_type") or "") or None,
+        "comp_type": str(row.get("comp_type") or "") or None,
+        "update_flag": str(row.get("update_flag") or "") or None,
+        "source": str(row.get("source") or ""),
+        "observed_at": available_at,
+        "available_at": available_at,
+    }
+
+
+def _income_statement_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> IncomeStatement:
+    """把 income_statements 发布行还原为领域记录(未冻结字段为 None,#397)。"""
+    kwargs = _announced_statement_identity(row, symbol=symbol)
+    kwargs.update(
+        {name: _coerce_decimal(row.get(name)) for name in _INCOME_VALUE_FIELDS}
+    )
+    return IncomeStatement(**kwargs)
+
+
+def _balance_sheet_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> BalanceSheet:
+    """把 balance_sheets 发布行还原为领域记录(未冻结字段为 None,#397)。"""
+    kwargs = _announced_statement_identity(row, symbol=symbol)
+    kwargs.update(
+        {name: _coerce_decimal(row.get(name)) for name in _BALANCE_VALUE_FIELDS}
+    )
+    return BalanceSheet(**kwargs)
+
+
+def _cashflow_statement_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> CashflowStatement:
+    """把 cashflow_statements 发布行还原为领域记录(未冻结字段为 None,#397)。"""
+    kwargs = _announced_statement_identity(row, symbol=symbol)
+    kwargs.update(
+        {name: _coerce_decimal(row.get(name)) for name in _CASHFLOW_VALUE_FIELDS}
+    )
+    return CashflowStatement(**kwargs)
+
+
+def _dividend_from_release_row(
+    row: dict[str, object],
+    *,
+    symbol: str,
+) -> DividendRecord:
+    """把 dividends 发布行还原为领域记录(未冻结字段为 None,#397)。"""
+    kwargs = _announced_statement_identity(row, symbol=symbol)
+    kwargs.pop("formal_announcement_date")
+    kwargs.pop("report_type")
+    kwargs.pop("comp_type")
+    kwargs.pop("update_flag")
+    kwargs["div_proc"] = str(row.get("div_proc") or "")
+    kwargs["stk_div"] = _coerce_decimal(row.get("stk_div"))
+    kwargs["stk_bo_rate"] = _coerce_decimal(row.get("stk_bo_rate"))
+    kwargs["stk_co_rate"] = _coerce_decimal(row.get("stk_co_rate"))
+    kwargs["cash_div"] = _coerce_decimal(row.get("cash_div"))
+    kwargs["cash_div_tax"] = _coerce_decimal(row.get("cash_div_tax"))
+    kwargs["record_date"] = _coerce_date(row.get("record_date"))
+    kwargs["ex_date"] = _coerce_date(row.get("ex_date"))
+    kwargs["pay_date"] = _coerce_date(row.get("pay_date"))
+    kwargs["div_listdate"] = _coerce_date(row.get("div_listdate"))
+    kwargs["imp_ann_date"] = _coerce_date(row.get("imp_ann_date"))
+    return DividendRecord(**kwargs)
 
 
 def _coerce_datetime(value: object) -> datetime:
@@ -2741,6 +3409,43 @@ class FrozenReleaseProvider:
             for point in bars
         ]
 
+    async def fetch_bars_columns(
+        self,
+        symbol: Symbol,
+        period: BarPeriod,
+        start: date,
+        end: date,
+        *,
+        decision_at: datetime,
+        adjust: str = "qfq",
+    ) -> pa.Table:
+        """:meth:`fetch_point_in_time_bars` 的列式版本(挂载 bars 直通)。
+
+        语义逐值一致(PIT 门控 ``available_at <= decision_at`` + 日期区间
+        过滤),但跳过整行 ``Bar`` / ``PointInTimeBar`` / dict 的对象税,
+        直接返回 Arrow 表——列序与挂载 bars schema 一致(symbol/date/
+        OHLCV/amount/available_at)。``available_at`` 按业务日 + 市场收盘
+        规则整列 Arrow 派生(沪/期 15:30、港 16:30 收盘 = 固定 UTC 偏移;
+        其余市场按唯一业务日小表回退 :func:`_timestamp_available_at` 精确
+        派生),与对象路径逐值相等。校验错误与对象路径同口径
+        (:meth:`_validate_fetch_request`)。
+        """
+
+        if decision_at.tzinfo is None:
+            raise ValueError("decision_at 必须带时区")
+        item = self._validate_fetch_request(symbol, period, start, end, adjust)
+        artifact = await self._verified_artifact(item)
+        return await asyncio.to_thread(
+            _read_bars_columns,
+            artifact,
+            code=item.code,
+            market=item.market,
+            period=period,
+            start=start,
+            end=end,
+            decision_at=decision_at,
+        )
+
     async def fetch_close_history(
         self,
         symbol: Symbol,
@@ -2886,6 +3591,82 @@ class FrozenReleaseProvider:
         )
         return [
             _financial_indicator_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def fetch_income_statements(
+        self,
+        symbol: Symbol,
+        *,
+        decision_at: datetime,
+    ) -> list[IncomeStatement]:
+        """读取 ``income_statements`` 发布在决策时点可见的全部公告修订(#397)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.INCOME_STATEMENTS,
+            symbol,
+            start=None,
+            end=None,
+            decision_at=decision_at,
+        )
+        return [
+            _income_statement_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def fetch_balance_sheets(
+        self,
+        symbol: Symbol,
+        *,
+        decision_at: datetime,
+    ) -> list[BalanceSheet]:
+        """读取 ``balance_sheets`` 发布在决策时点可见的全部公告修订(#397)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.BALANCE_SHEETS,
+            symbol,
+            start=None,
+            end=None,
+            decision_at=decision_at,
+        )
+        return [
+            _balance_sheet_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def fetch_cashflow_statements(
+        self,
+        symbol: Symbol,
+        *,
+        decision_at: datetime,
+    ) -> list[CashflowStatement]:
+        """读取 ``cashflow_statements`` 发布在决策时点可见的全部公告修订(#397)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.CASHFLOW_STATEMENTS,
+            symbol,
+            start=None,
+            end=None,
+            decision_at=decision_at,
+        )
+        return [
+            _cashflow_statement_from_release_row(row, symbol=symbol.code)
+            for row in rows
+        ]
+
+    async def fetch_dividends(
+        self,
+        symbol: Symbol,
+        *,
+        decision_at: datetime,
+    ) -> list[DividendRecord]:
+        """读取 ``dividends`` 发布在决策时点可见的全部分红进展(#397)。"""
+        rows = await self._fetch_research_records(
+            ReleaseDatasetKind.DIVIDENDS,
+            symbol,
+            start=None,
+            end=None,
+            decision_at=decision_at,
+        )
+        return [
+            _dividend_from_release_row(row, symbol=symbol.code)
             for row in rows
         ]
 
@@ -3426,11 +4207,27 @@ def _cache_path(
     return path
 
 
-def _safe_release_artifact(root: Path, relative_path: str) -> Path:
+@cache
+def _safe_release_artifact_cached(
+    root_str: str, relative_path: str
+) -> tuple[str, bool]:
+    """resolve + 越界 + 存在检查的缓存体(#450 追续)。
+
+    ``(root, relative)`` 的 resolve/realpath/is_file 在 Windows 上每次
+    ~1ms 且全在事件循环线程,逐标的 x 逐期访问下是几十万次系统调用风暴;
+    发布工件不可变,首查后缓存即安全。
+    """
+    root = Path(root_str)
     path = (root / relative_path).resolve()
-    if not path.is_relative_to(root.resolve()) or not path.is_file():
+    ok = path.is_relative_to(root.resolve()) and path.is_file()
+    return str(path), ok
+
+
+def _safe_release_artifact(root: Path, relative_path: str) -> Path:
+    path_str, ok = _safe_release_artifact_cached(str(root), relative_path)
+    if not ok:
         raise ReleaseIntegrityError(f"发布文件不存在或路径越界: {relative_path}")
-    return path
+    return Path(path_str)
 
 
 def _sha256_file(path: Path) -> str:

@@ -8,7 +8,7 @@
 
 实现策略(复用现有 service / repository,不裸 SQL,不连 broker):
 
-* **任务化长耗时工具(5)** —— ``fetch_all`` / ``data_sync`` / ``bulk_download`` /
+* **任务化长耗时工具(4)** —— ``data_sync`` / ``bulk_download`` /
   ``quality_repair`` / ``dataset_publish`` 复用 ``BackgroundJobRepository.create_or_get``
   登记 ``queued`` 任务并立即返回 202 + ``job_id``,与 REST 语义端点口径一致
   (idempotency_key 公式相同 → agent 与 REST 提交同一任务命中同一 job_id)。
@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
@@ -221,40 +221,15 @@ async def _store_fetched_bars(
 async def _persist_tushare_lifecycle_events(
     session: Any, events: list[Any]
 ) -> int:
-    """幂等写入 Tushare 停复牌事件,返回本次新增数量。"""
+    """幂等写入 Tushare 停复牌事件,返回本次新增数量。
 
-    if not events:
-        return 0
+    实现收敛到 finboard_persistence 单一事实源(#393):与 bulk_download
+    执行器 / REST fetch 共用同一行形状与幂等键。
+    """
 
-    from sqlalchemy.dialects.postgresql import insert
+    from finboard_persistence import persist_tushare_lifecycle_events
 
-    from finboard_persistence import InstrumentLifecycleEventModel
-
-    observed_at = datetime.now(UTC)
-    values = [
-        {
-            "symbol": event.symbol,
-            "event_type": event.event_type,
-            "effective_date": event.effective_date,
-            "available_at": observed_at,
-            "source": "tushare",
-            "dataset_version": "suspend_d-v1",
-            "details": {
-                "suspend_type": "R" if event.event_type == "resumption" else "S",
-                "suspend_timing": event.suspend_timing,
-            },
-            "observed_at": observed_at,
-        }
-        for event in events
-    ]
-    statement = (
-        insert(InstrumentLifecycleEventModel)
-        .values(values)
-        .on_conflict_do_nothing(constraint="uq_instrument_lifecycle_event")
-        .returning(InstrumentLifecycleEventModel.id)
-    )
-    result = await session.execute(statement)
-    return len(result.scalars().all())
+    return await persist_tushare_lifecycle_events(session, events)
 
 
 # --------------------------------------------------------------------------- #
@@ -433,45 +408,7 @@ async def data_fetch(
 
 
 # --------------------------------------------------------------------------- #
-# 2. data_fetch_all(任务化,kind=fetch_all)
-# --------------------------------------------------------------------------- #
-
-
-async def data_fetch_all(app: McpAppContext) -> ToolEnvelope:
-    """登记标的池批量缓存更新任务,返回 202 + job_id(不等待执行)。"""
-
-    async def _do() -> dict[str, Any]:
-        await _require_write_enabled(app)
-        from finboard_data import load_symbol_pool
-
-        config = load_symbol_pool(_SYMBOLS_FILE)
-        lookback = config.fetch_lookback_days if config.symbols else 0
-        pool_digest = hashlib.sha256(
-            ",".join(s.code for s in config.symbols).encode("utf-8")
-        ).hexdigest()[:16]
-        payload: dict[str, Any] = {
-            "lookback_days": lookback,
-            "symbol_pool_file": _SYMBOLS_FILE,
-        }
-        idempotency_key = f"fetch_all:{pool_digest}:{lookback}"
-        return await _enqueue_data_job(
-            app,
-            kind="fetch_all",
-            idempotency_key=idempotency_key,
-            payload=payload,
-            requested_by="mcp:fetch_all",
-        )
-
-    return await run_tool(
-        audit=app.audit,
-        tool_name="finboard.data.fetch_all",
-        arguments={},
-        handler=_do,
-    )
-
-
-# --------------------------------------------------------------------------- #
-# 3. data_sync_universe(任务化,kind=data_sync)
+# 2. data_sync_universe(任务化,kind=data_sync)
 # --------------------------------------------------------------------------- #
 
 
@@ -655,6 +592,7 @@ async def dataset_release_publish(
     listing_boards: list[str] | None = None,
     consistency_baseline_release_id: str | None = None,
     consistency_fail_on_mismatch: bool = False,
+    schema_version: str | None = None,
 ) -> ToolEnvelope:
     """登记数据集冻结发布任务,返回 202 + job_id(研究闭环关键节点)。
 
@@ -675,6 +613,9 @@ async def dataset_release_publish(
     ``consistency_baseline_release_id``(#252):指定基线发布(如 bars 主发布)
     做标的集一致性校验,差集具名;默认只 warning,``fail_on_mismatch`` 时秒级
     失败(code=symbol_set_mismatch),避免并集不一致拖到执行期才暴露。
+
+    ``schema_version``(#401):冻结字段集合变化(白名单扩展)时递增,缺省
+    沿用服务端默认;字段变化而版本未递增会被 builder 具名拒绝(#187)。
     """
 
     async def _do() -> dict[str, Any]:
@@ -690,6 +631,7 @@ async def dataset_release_publish(
             release_kind=release_kind,  # type: ignore[arg-type]
             source=source,  # type: ignore[arg-type]
             version=version,
+            schema_version=schema_version,
             symbols=normalized_symbols,
             symbols_from_release=symbols_from_release,
             full_market=full_market,
@@ -737,6 +679,8 @@ async def dataset_release_publish(
             "dataset_name": body.dataset_name,
             "release_kind": body.release_kind,
             "version": body.version,
+            # issue #401:schema_version 透传(缺省 None 执行器回落默认)。
+            "schema_version": body.schema_version,
             "start_date": body.start_date.isoformat(),
             "end_date": body.end_date.isoformat(),
             "adjustment": body.adjustment,
@@ -1087,27 +1031,15 @@ def register(mcp: MCPServer) -> None:
         )
 
     @mcp.tool(
-        name="finboard_data_fetch_all",
-        description=(
-            "[写] 登记标的池批量缓存更新任务(symbols.yaml),返回 202 + job_id。"
-            "实际执行由 worker 消费 kind=fetch_all 任务;进度/状态/取消用 "
-            "finboard_job_get(job_id) 轮询。无参数。"
-            "写操作,mcp_readonly_only=true 时拒绝。"
-        ),
-    )
-    async def _data_fetch_all(
-        ctx: Context = None,  # type: ignore[assignment]
-    ) -> ToolEnvelope:
-        return await data_fetch_all(app_context(ctx))
-
-    @mcp.tool(
         name="finboard_data_sync_universe",
         description=(
             "[写] 登记全市场标的同步任务(akshare 发现 → 写 instruments 表,"
             "自动包含基准指数登记 instrument_type=index,#256;#265 起同时从"
             "东财可转债一览登记 instrument_type=convertible;#267 起同时从"
             "受控登记表登记 IF/IH/IC/IM 期货主连 instrument_type=futures,"
-            "主连仅研究信号/基准、不可当作可成交合约),"
+            "主连仅研究信号/基准、不可当作可成交合约;#395 起同时从 tushare "
+            "fut_basic 登记 CFFEX 股指四品种在市合约并落库期货交易日历"
+            " fut_trade_cal → trade_cal 表 CFFEX 行集),"
             "返回 202 + job_id。实际执行由 worker 消费 kind=data_sync 任务;"
             "进度/状态/取消用 finboard_job_get(job_id) 轮询。无参数。"
             "写操作,mcp_readonly_only=true 时拒绝。"
@@ -1128,16 +1060,21 @@ def register(mcp: MCPServer) -> None:
             "convertible|futures;index=#256 登记的基准指数,akshare 源走指数接口、"
             "tushare 源走 index_daily(#341,2000 积分档实测可调);"
             "convertible=#265 转债,走 tushare cb_daily 专属接口,akshare 源"
-            "fail-visible 拒绝;futures=#267 期货主连(如 IF0.CFFEX),需配"
-            " market=future,走 akshare 新浪 futures_main_sina,tushare 源"
-            "fail-visible 拒绝;主连仅研究信号/基准,不可当作可成交合约)/ exchange / "
-            "listing_boards(列表)/ start(默认 2015-01-01)/ source(可选;"
-            "ETF 与期货仅 akshare|yfinance,tushare 源报 tushare_scope_mismatch;"
-            "股票/转债/指数 tushare 放行)/ symbols(可选,#347 子集重跑:与"
+            "fail-visible 拒绝;futures=#267/#395 期货主连与合约(如 IF0.CFFEX/"
+            "IF2601.CFFEX),需配 market=future:#391 起默认源走 tushare "
+            "fut_daily(与 #394 指数偏好同构,未显式声明 source 且筛选域全为 "
+            "futures 时覆盖;显式 source=akshare 选回新浪 futures_main_sina "
+            "主连副源)(主连 IF0.CFFEX → 主力连续 IF.CFX 连续直取、具体合约 "
+            "IF2601.CFX,2000 积分档实测可调,#395);主连仅研究信号/基准,不可当作可成交"
+            "合约;合约级登记由 sync_universe 的 tushare fut_basic 写入)/ "
+            "exchange / listing_boards(列表)/ start(默认 2015-01-01)/ "
+            "source(可选;ETF 仅 akshare|yfinance,tushare 源报 "
+            "tushare_scope_mismatch;股票/转债/指数/期货 tushare 放行)/ "
+            "symbols(可选,#347 子集重跑:与"
             " market/instrument_type 过滤叠加,交集为空按 no_instruments 拒,"
             "部分失败任务的 error_summary 清单可直接回填)。"
             "#347 起入队期 payload 契约校验(#260 风格):未知 source / 非法日期 / "
-            "tushare x etf|futures 等非法参数秒级 invalid_argument;部分标的失败"
+            "tushare x etf 等非法参数秒级 invalid_argument;部分标的失败"
             "仍 succeeded,失败标的与原因看 finboard_job_get 的 error_summary"
             "(phase 形如 bulk_download:partial N failed)。"
             "写操作,mcp_readonly_only=true 时拒绝。"
@@ -1206,19 +1143,25 @@ def register(mcp: MCPServer) -> None:
             "其他参数:release_id / version / start_date / end_date / "
             "dataset_name(默认 multi_asset_daily_bars)/ release_kind"
             "(a_share_tushare|multi_asset_mixed|daily_metrics|financial_indicators|"
-            "convertible_metrics)/ "
+            "convertible_metrics|income_statements|balance_sheets|"
+            "cashflow_statements|dividends)/ "
             "source / adjustment(qfq|hqfq|none;研究数据发布与 convertible_metrics 固定 none)/ "
             "required_capabilities(stock|bond|convertible|futures|etf:index|"
             "etf:cross_border|etf:commodity|etf:bond)/ "
             "consistency_baseline_release_id(#252:基线发布做标的集一致性校验,"
             "差集具名;默认 warning)/ consistency_fail_on_mismatch(默认 false,"
-            "true 时不一致秒级失败 code=symbol_set_mismatch)。"
+            "true 时不一致秒级失败 code=symbol_set_mismatch)/ "
+            "schema_version(#401:冻结字段集合变化时递增,如 financial_indicators "
+            "扩列后新发布 schema_version=v2;字段变化而版本未递增被 builder 具名拒绝)。"
             "release_kind=daily_metrics|financial_indicators 时从 research_* 表"
             "冻结基本面/财务指标发布(issue #187),与 bars 发布联合供因子快照取数。"
             "release_kind=convertible_metrics(#265)只接受 A 股转债标的,从缓存 "
             "bars x 冻结转股价元数据计算转股价值/转股溢价率冻结为带日期观测"
-            "(非全历史 PIT;元数据缺失先跑 research_data_sync 的 "
+            "(非全历史 PIT;元数据缺失先跑 dataset_sync 的 "
             "convertible_profiles)。"
+            "release_kind=income_statements|balance_sheets|cashflow_statements|"
+            "dividends(#397)从 research_* 表冻结利润表/资产负债表/现金流量表/"
+            "分红送股进展(先跑 dataset_sync 同名数据集摄取)。"
             "研究数据发布建议带 baseline=同区间 bars 主发布 + fail_on_mismatch=true,"
             "标的集用 symbols_from_release 复制该 bars 主发布。"
             "写操作,mcp_readonly_only=true 时拒绝。"
@@ -1241,6 +1184,7 @@ def register(mcp: MCPServer) -> None:
         required_capabilities: list[str] | None = None,
         consistency_baseline_release_id: str | None = None,
         consistency_fail_on_mismatch: bool = False,
+        schema_version: str | None = None,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> ToolEnvelope:
         return await dataset_release_publish(
@@ -1261,6 +1205,7 @@ def register(mcp: MCPServer) -> None:
             required_capabilities=required_capabilities,
             consistency_baseline_release_id=consistency_baseline_release_id,
             consistency_fail_on_mismatch=consistency_fail_on_mismatch,
+            schema_version=schema_version,
         )
 
     @mcp.tool(
@@ -1400,7 +1345,6 @@ __all__ = [
     "data_config_get",
     "data_config_update",
     "data_fetch",
-    "data_fetch_all",
     "data_quality_repair",
     "data_sync_universe",
     "dataset_release_publish",

@@ -48,6 +48,11 @@ from finboard_backtest.research_code import (
     user_factor_reference_gate_error,
     user_factor_series_coverage_gate_error,
 )
+from finboard_backtest.research_code.predefined_factors import (
+    predefined_factor_reference_gate_error,
+    predefined_factor_series_coverage_gate_error,
+    referenced_predefined_factors,
+)
 from finboard_backtest.research_run import (
     REPLAYABLE_SOURCE_STATUSES,
     FrozenArtifactRef,
@@ -62,6 +67,7 @@ from finboard_backtest.research_run import (
     validate_strategy_dataset_capabilities,
 )
 from finboard_backtest.research_run.config_overrides import (
+    research_policy_gate_error,
     research_portfolio_gate_error,
 )
 from finboard_backtest.research_run.contracts import JsonValue, stable_checksum
@@ -166,6 +172,21 @@ async def queue_research_run(
         for node in spec.feature_graph.nodes
         if node.source is not None and node.kind in {FeatureKind.FACTOR, FeatureKind.RISK_FACTOR}
     }
+    # issue #398:平台预置因子(p_ 前缀)引用门控(规格形态错误,先于
+    # #203/#217 具名拒绝)—— 目录注册存在性 + single_shot 必须以
+    # factor_series_ids 声明(p_ 因子无快照路径)。multi_period 的覆盖检查
+    # 在交易日历可读之后进行(下方)。
+    uncovered_predefined = referenced_predefined_factors(
+        required_factor_sources,
+        series_covered_factors=series_covered,
+    )
+    predefined_gate_error = predefined_factor_reference_gate_error(
+        required_factor_sources=required_factor_sources,
+        series_covered_factors=series_covered,
+        multi_period=resolve_decision_schedule(body.parameters) is not None,
+    )
+    if predefined_gate_error is not None:
+        raise HTTPException(status_code=422, detail=predefined_gate_error)
     # issue #234:screen 绑定实绑校验(REST+MCP 共用)—— 声明了
     # screen_artifact_bindings 的规格按 DB 逐条校验(存在/非 retired/name/
     # commit 一致),通过后把绑定名并入可引用名单、绑定 commit/ID 冻结进
@@ -240,6 +261,23 @@ async def queue_research_run(
         )
         if series_gate_error is not None:
             raise HTTPException(status_code=422, detail=series_gate_error)
+    if schedule is not None and uncovered_predefined:
+        if trading_days is None:
+            trading_days = await _enqueue_trading_days(primary)
+        predefined_series_error = await predefined_factor_series_coverage_gate_error(
+            referenced_predefined=uncovered_predefined,
+            series_lookup=default_series_lookup(session),
+            bars_release_id=primary.release_id,
+            dataset_release_ids=[release.release_id for release in releases],
+            decision_dates=enqueue_decision_dates(
+                parameters=body.parameters,
+                trading_days=trading_days,
+            ),
+            window_start=primary.start_date,
+            window_end=primary.end_date,
+        )
+        if predefined_series_error is not None:
+            raise HTTPException(status_code=422, detail=predefined_series_error)
     # issue #253:multi_period 特征可用性入队门控(与 MCP 共用同一函数)——
     # 规格 identity 源必须 ⊆ 多期可解析集合(标准价格特征 / close / attached
     # 研究发布派生特征 / 快照观测),否则执行期才报「identity 节点缺少数据源」。
@@ -373,6 +411,19 @@ async def queue_research_run(
     )
     if portfolio_gate_error is not None:
         raise HTTPException(status_code=422, detail=portfolio_gate_error)
+
+    # issue #482:入队政策覆盖预检(与 MCP ``_build_queued_manifest`` 共用
+    # 同一门控函数)—— fee_config.overrides 按费用键名合并进生效执行模型,
+    # 未知键 / 非法值秒级 422;execution_config / validation_config 非空
+    # 具名拒绝(此前为静默 no-op 死分区,覆盖 run 与基线逐位相同)。
+    policy_gate_error = research_policy_gate_error(
+        execution_model=spec.execution_model,
+        fee_overrides=body.fee_config,
+        execution_overrides=body.execution_config,
+        validation_overrides=body.validation_config,
+    )
+    if policy_gate_error is not None:
+        raise HTTPException(status_code=422, detail=policy_gate_error)
 
     run_id = _run_id(body.idempotency_key)
     try:
@@ -532,6 +583,7 @@ async def list_research_artifacts(
     repo = ResearchRunRepository(session)
     if await repo.get(run_id) is None:
         raise HTTPException(status_code=404, detail="研究运行不存在")
+    await _require_artifact_payload_within_limit(repo, run_id)
     rows = await repo.list_artifacts(run_id)
     return [ResearchArtifactOut.model_validate(row) for row in rows]
 
@@ -545,9 +597,12 @@ async def get_research_lineage(
     trace_id: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> ResearchLineageOut:
-    store = SqlAlchemyResearchRunStore(ResearchRunRepository(session))
+    repo = ResearchRunRepository(session)
+    store = SqlAlchemyResearchRunStore(repo)
     from finboard_backtest.research_run import ResearchRunCoordinator
 
+    # issue #480:lineage 内部全量物化 artifacts,同款加载前护栏。
+    await _require_artifact_payload_within_limit(repo, run_id)
     artifacts = await ResearchRunCoordinator(store).lineage(run_id, trace_id)
     if not artifacts:
         raise HTTPException(status_code=404, detail="血缘 trace 不存在")
@@ -754,6 +809,7 @@ async def export_research_run_report(
     row = await repo.get(run_id)
     if row is None:
         raise HTTPException(status_code=404, detail="研究运行不存在")
+    await _require_artifact_payload_within_limit(repo, run_id)
     artifacts = await repo.list_artifacts(run_id)
     report = reporting.aggregate_run_report(row, artifacts, view="detail")
     content = await asyncio.to_thread(reporting.render_report, "run", report, format)
@@ -766,6 +822,35 @@ async def export_research_run_report(
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+async def _require_artifact_payload_within_limit(
+    repo: ResearchRunRepository,
+    run_id: str,
+) -> None:
+    """全量 payload 路径加载前的数据库侧载荷护栏(issue #480)。
+
+    与 MCP 侧同口径:先 ``estimate_artifact_payload_bytes``
+    (``SUM(octet_length(payload::text))``,不取回 payload),超过
+    ``RUN_DETAIL_MAX_ESTIMATED_BYTES`` 以 413 具名拒绝 —— 旧口径直接
+    ``list_artifacts`` 全量物化,真实 run(7203 artifacts / ≈5.9GB JSON)
+    曾把 dev server 进程顶到 10GB+ 且拖到客户端超时。
+    """
+    from finboard_mcp import reporting
+
+    estimated = await repo.estimate_artifact_payload_bytes(run_id)
+    if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
+        estimated_mb = estimated / (1024 * 1024)
+        limit_mb = reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"run {run_id} 的 artifacts 载荷估计约 {estimated_mb:.1f}MB,"
+                f"超过上限 {limit_mb:.0f}MB,拒绝加载(不静默截断)。替代路径:"
+                "run 详情的聚合计数与 metrics;MCP finboard_report_run / "
+                "finboard_report_export 按 decision_id 按决策下钻。"
+            ),
+        )
 
 
 def _safe_filename(value: str) -> str:

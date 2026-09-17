@@ -1,10 +1,10 @@
-# research_data_sync 同步运营 runbook(issue #212)
+# dataset_sync 同步运营 runbook(issue #212;#392 起自 research_data_sync 改名)
 
 **主题**:tushare 研究数据(daily_metrics / financial_indicators / profiles / industry_memberships)的首次全量与日常增量同步——命令、吞吐、配额纪律、PIT 锚点、发布衔接。
 
 **结论 / 事实**(2026-08-28 本机实测):
 
-- 入队:`POST /api/jobs`,body `{"kind": "research_data_sync", "payload": {"datasets": [...], "start_date": "...", "end_date": "...", "symbols": [...]}}`;datasets 白名单 `profiles / daily_metrics / financial_indicators / industry_memberships`;**symbols 省略时逐标的接口自动以 profiles 全市场为池**。进度看 `GET /api/jobs/{id}`(phase 形如 `research_data_sync:daily:2024-04-17`)。
+- 入队:`POST /api/jobs`,body `{"kind": "dataset_sync", "payload": {"datasets": [...], "start_date": "...", "end_date": "...", "symbols": [...]}}`;datasets 白名单 `profiles / name_changes / convertible_profiles / daily_metrics / financial_indicators / industry_memberships`;逐标的同步池优先级:**symbols > exchange/listing_boards/instrument_type 宇宙过滤(#385 语义)> profiles 同步结果**(此时 datasets 须含 profiles)。进度看 `GET /api/jobs/{id}`(phase 形如 `dataset_sync:daily_metrics:2024-04-17`)。
 - 切片粒度:daily_metrics **逐交易日截面且恒为全市场**(与 symbols 参数无关,单日 ~5500 行);fina_indicator / industry_memberships 逐标的。每片 = 1 次 tushare 调用。
 - 实测吞吐 ~5 秒/片(API 延迟 + 批量写库为主,200 RPM 限速不是瓶颈)→ 首次全量(2015 起 daily ~2800 片 + 逐标的 ~5400×2)wall-clock 以**小时**计(约 6-10h),宜过夜跑;日常增量每日只差 1 片 + 当日新公告,秒级。
 - 断点续跑:切片 dataset_version 确定性(`daily:{date}` / `financial:{symbol}:{start}:{end}` / `industry:{symbol}` / `profiles:{today}`),已发布切片**写库层**跳过(upsert 幂等,数据无害)。**已知限制(2026-08-28)**:跳过判断在 provider 拉取之后——重跑仍会重新调用 tushare(费时不费数据);过夜全量任务失败重试会重复拉取已完成部分,改善方向是把「已发布版本查询」提前到 fetch 之前(暂未实施,重跑验证用窄范围做)。

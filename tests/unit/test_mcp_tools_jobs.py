@@ -419,7 +419,7 @@ class TestJobEnqueue:
         app = _make_app()
         env = await job_tools.job_enqueue(
             app,
-            kind="research_data_sync",
+            kind="dataset_sync",
             idempotency_key="idem-key-260a",
             requested_by="agent",
             payload={
@@ -438,7 +438,7 @@ class TestJobEnqueue:
         app = _make_app()
         env = await job_tools.job_enqueue(
             app,
-            kind="research_data_sync",
+            kind="dataset_sync",
             idempotency_key="idem-key-260b",
             requested_by="agent",
             payload={"datasets": ["profiles"], "end_date": "2026-01-31"},
@@ -453,7 +453,7 @@ class TestJobEnqueue:
         app = _make_app()
         env = await job_tools.job_enqueue(
             app,
-            kind="research_data_sync",
+            kind="dataset_sync",
             idempotency_key="idem-key-260c",
             requested_by="agent",
             payload={
@@ -471,7 +471,7 @@ class TestJobEnqueue:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         app = _make_app()
-        row = _job_row(kind="research_data_sync")
+        row = _job_row(kind="dataset_sync")
         monkeypatch.setattr(
             BackgroundJobRepository,
             "create_or_get",
@@ -479,7 +479,7 @@ class TestJobEnqueue:
         )
         env = await job_tools.job_enqueue(
             app,
-            kind="research_data_sync",
+            kind="dataset_sync",
             idempotency_key="idem-key-260d",
             requested_by="agent",
             payload={

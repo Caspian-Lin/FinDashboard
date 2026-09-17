@@ -146,6 +146,23 @@ export interface FactorCatalogEntry {
   source_datasets?: string[];
 }
 
+/** 平台预置因子目录条目(GET /research/factors/predefined,#427)。
+ * 「公式即代码」的平台可信因子;引用名 = p_<name>,消费路径 =
+ * MCP factor_series_build(kind=predefined_factor)。 */
+export interface PredefinedFactorEntry {
+  name: string;
+  /** 因子说明,含公式片段,原样返回。 */
+  title: string;
+  family: string;
+  /** 研究语义方向:higher = 值越大越看多 / lower 反之。 */
+  direction: string;
+  signal_eligible: boolean;
+  data_dependencies: string[];
+  window: number | null;
+  min_history_bars: number | null;
+  cross_section: boolean;
+}
+
 export interface FeatureObservation {
   symbol: string;
   feature_name: string;
@@ -241,6 +258,8 @@ export const factorLabApi = {
       `/research/factors/catalog${q.toString() ? "?" + q : ""}`,
     );
   },
+  /** 平台预置因子只读目录(GET /research/factors/predefined,#427)。 */
+  predefined: () => fetchJSON<PredefinedFactorEntry[]>(`/research/factors/predefined`),
   createFeatureSnapshot: (body: FeatureSnapshotCreate) =>
     fetchJSON<FeatureSnapshot>(`/research/factors/features`, {
       method: "POST",
@@ -560,14 +579,21 @@ export interface DatasetReleaseCapability {
  * 数据集发布类型(与后端 ResearchDatasetReleaseCreate.release_kind 一致):
  * - a_share_tushare / multi_asset_mixed → bars 主发布(dataset_kind=bars);
  * - daily_metrics / financial_indicators → 从 research_* 表冻结的研究数据发布;
- * - convertible_metrics → 转债派生指标(转股价值/转股溢价率)发布。
+ * - convertible_metrics → 转债派生指标(转股价值/转股溢价率)发布;
+ * - income_statements / balance_sheets / cashflow_statements / dividends →
+ *   财务三表与分红送股进展发布(#397,从 research_* 表冻结,先跑 dataset_sync
+ *   同名数据集摄取)。
  */
 export type DatasetReleaseKind =
   | "a_share_tushare"
   | "multi_asset_mixed"
   | "daily_metrics"
   | "financial_indicators"
-  | "convertible_metrics";
+  | "convertible_metrics"
+  | "income_statements"
+  | "balance_sheets"
+  | "cashflow_statements"
+  | "dividends";
 
 export interface DatasetReleaseCreate {
   release_id: string;

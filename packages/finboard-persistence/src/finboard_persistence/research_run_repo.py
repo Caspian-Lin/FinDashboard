@@ -2,22 +2,140 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from psycopg.types.json import Json
+from sqlalchemy import insert, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from finboard_persistence.models import (
     ResearchRunArtifactModel,
     ResearchRunModel,
 )
 
+#: artifact 流式读取的行缓冲(#470 前半场):决策级 13 行/决策,26 行 ≈ 2 决策。
+_ARTIFACT_STREAM_CHUNK = 26
+
+
+def _identity_json_dumps(obj: Any) -> Any:
+    """驱动级 Json 包装的直写 dumps(#472):入参已是 canonical JSON 文本。"""
+
+    return obj
+
 
 class ResearchRunPersistenceConflictError(RuntimeError):
     """数据库中的幂等内容或状态与请求冲突。"""
+
+
+@dataclass(frozen=True)
+class ResearchRunArtifactSummary:
+    """``ResearchRunRepository.summarize_artifacts`` 的有界聚合结果(#478)。
+
+    只含计数与分组键,不含任何 artifact payload;``summary_dict`` 输出与
+    ``finboard_mcp.reporting.summarize_run_artifacts`` 的返回逐键同构。
+    """
+
+    artifact_count: int
+    universe_total: int
+    universe_included: int
+    universe_excluded_by_reason: dict[str, int]
+    fills_total: int
+    fills_by_decision: dict[str, int]
+
+    def summary_dict(self) -> dict[str, Any]:
+        return {
+            "universe": {
+                "total": self.universe_total,
+                "included": self.universe_included,
+                "excluded_by_reason": dict(self.universe_excluded_by_reason),
+            },
+            "fills": {
+                "total": self.fills_total,
+                "by_decision": dict(self.fills_by_decision),
+            },
+        }
+
+
+#: run 全部 artifact 行数(不限 stage;主键/索引扫描,不触 payload)。
+_ARTIFACT_COUNT_SQL = text(
+    "SELECT count(*) FROM research_run_artifacts WHERE run_id = :run_id"
+)
+
+#: 候选池聚合计数:单次物化 CTE 同时算 total / included / excluded_by_reason。
+#: 语义与 summarize_run_artifacts 的 Python 聚合一致 —— ``included`` 仅认
+#: JSON 布尔 true(平台契约候选池 included 恒为 bool);未 included 标的按
+#: reasons 逐条计数,reasons 缺失 / 为空 / 非数组归 ``unknown``。
+#: 健壮性:jsonb 函数只出现在 CASE 的 THEN 分支(PG 不保证 AND 两侧短路,
+#: 嵌套 CASE 才有定义的求值顺序),非数组 candidates / reasons 静默归零,
+#: 不抛错。
+_UNIVERSE_SUMMARY_SQL = text(
+    """
+    WITH candidates AS MATERIALIZED (
+        SELECT COALESCE((c.value -> 'included') = 'true'::jsonb, false) AS included,
+               CASE
+                   WHEN jsonb_typeof(c.value -> 'reasons') = 'array'
+                   THEN CASE
+                            WHEN jsonb_array_length(c.value -> 'reasons') > 0
+                            THEN c.value -> 'reasons'
+                            ELSE '["unknown"]'::jsonb
+                        END
+                   ELSE '["unknown"]'::jsonb
+               END AS reasons
+        FROM research_run_artifacts AS artifact
+        CROSS JOIN LATERAL jsonb_array_elements(
+            CASE
+                WHEN jsonb_typeof(artifact.payload::jsonb -> 'candidates') = 'array'
+                THEN artifact.payload::jsonb -> 'candidates'
+                ELSE '[]'::jsonb
+            END
+        ) AS c(value)
+        WHERE artifact.run_id = :run_id
+          AND artifact.stage = 'universe'
+    )
+    SELECT (SELECT count(*) FROM candidates) AS total,
+           (SELECT count(*) FROM candidates WHERE included) AS included,
+           (SELECT COALESCE(jsonb_object_agg(reason_text, reason_count), '{}'::jsonb)
+              FROM (SELECT reason_text, count(*) AS reason_count
+                      FROM candidates
+                      CROSS JOIN LATERAL jsonb_array_elements_text(reasons)
+                          AS reason_text
+                     WHERE NOT included
+                  GROUP BY reason_text) AS reason_counts) AS excluded_by_reason
+    """
+)
+
+#: run 全部 artifact payload 的 JSON 文本体量(#480):``json`` 列的
+#: ``::text`` 只是 detoast + 计长,不做 JSON 解析,可在加载前给出有界估计。
+_ARTIFACT_PAYLOAD_BYTES_SQL = text(
+    """
+    SELECT COALESCE(SUM(octet_length(artifact.payload::text)), 0)
+    FROM research_run_artifacts AS artifact
+    WHERE artifact.run_id = :run_id
+    """
+)
+
+#: fills 按决策计数:``decision_id`` NULL 记空串;0 长度也保键,与 Python
+#: 聚合的无条件赋值一致;非数组 / 缺失 fills 记 0(jsonb 函数只在 CASE
+#: THEN 分支求值,非数组不抛错)。
+_FILLS_SUMMARY_SQL = text(
+    """
+    SELECT COALESCE(artifact.decision_id, '') AS decision_key,
+           COALESCE(SUM(CASE
+               WHEN jsonb_typeof(artifact.payload::jsonb -> 'fills') = 'array'
+               THEN jsonb_array_length(artifact.payload::jsonb -> 'fills')
+               ELSE 0
+           END), 0) AS fill_count
+    FROM research_run_artifacts AS artifact
+    WHERE artifact.run_id = :run_id
+      AND artifact.stage = 'fills'
+    GROUP BY decision_key
+    """
+)
 
 
 class ResearchRunRepository:
@@ -188,10 +306,20 @@ class ResearchRunRepository:
         parent_trace_ids: list[str],
         payload: dict[str, object],
         checksum: str,
-    ) -> tuple[ResearchRunArtifactModel, bool]:
-        stmt = select(ResearchRunArtifactModel).where(
-            ResearchRunArtifactModel.run_id == run_id,
-            ResearchRunArtifactModel.artifact_id == artifact_id,
+        payload_json: str | None = None,
+    ) -> tuple[ResearchRunArtifactModel | None, bool]:
+        # 幂等命中分支只比对 checksum,不消费 payload —— load_only 让既有行
+        # 的 payload 列保持 deferred(#470 前半场:断点续算种子逐决策重持久化
+        # 时,每个命中行省掉一次全量 payload JSONB → Python 物化,features
+        # 期均 ~8.5MB)。命中行除 checksum 外的字段未加载,调用方只读 created
+        # 标志;新插入行不受影响。
+        stmt = (
+            select(ResearchRunArtifactModel)
+            .where(
+                ResearchRunArtifactModel.run_id == run_id,
+                ResearchRunArtifactModel.artifact_id == artifact_id,
+            )
+            .options(load_only(ResearchRunArtifactModel.checksum))
         )
         existing = (await self._session.execute(stmt)).scalar_one_or_none()
         if existing is not None:
@@ -200,6 +328,27 @@ class ResearchRunRepository:
                     f"artifact {artifact_id} checkpoint 内容冲突"
                 )
             return existing, False
+        # issue #472:payload_json 为 canonical JSON 文本时直写 —— 驱动级
+        # ``Json(text, dumps=identity)`` 由 CanonicalPayloadJson 列放行,不再对
+        # dict 二次 ``json.dumps``(文本已由研究域编码,checksum 即该文本的
+        # sha256)。直写路径走 Core INSERT:驱动包装值不进 identity map(ORM
+        # 对象属性会把 ``Json`` 包装物回吐给同 session 的读方),也无 dict 树
+        # 物化;返回的首元素为 None(批次调用方只消费 created 标志)。
+        if payload_json is not None:
+            await self._session.execute(
+                insert(ResearchRunArtifactModel).values(
+                    run_id=run_id,
+                    artifact_id=artifact_id,
+                    decision_id=decision_id,
+                    sequence=sequence,
+                    stage=stage,
+                    trace_id=trace_id,
+                    parent_trace_ids=parent_trace_ids,
+                    payload=Json(payload_json, dumps=_identity_json_dumps),
+                    checksum=checksum,
+                )
+            )
+            return None, True
         row = ResearchRunArtifactModel(
             run_id=run_id,
             artifact_id=artifact_id,
@@ -222,6 +371,109 @@ class ResearchRunRepository:
             .order_by(ResearchRunArtifactModel.sequence)
         )
         return list((await self._session.execute(stmt)).scalars().all())
+
+    async def summarize_artifacts(self, run_id: str) -> ResearchRunArtifactSummary:
+        """数据库侧聚合 run 摘要计数(#478),任何量级 run 都不取回 payload。
+
+        ``finboard_run_get(view=summary)`` / ``finboard_report_run(view=summary)``
+        的口径来源;各字段语义与
+        ``finboard_mcp.reporting.summarize_run_artifacts`` 的 Python 逐行
+        聚合一致(见各 SQL 常量注释)。``payload`` 列在真实库 / 测试库可能
+        是 ``json`` 或 ``jsonb``(泛型 JSON 列),统一 ``::jsonb`` 归一后再用
+        jsonb 函数;cast 只作用于 universe / fills 行 —— features 等大
+        payload 行被 stage 谓词先行过滤,不进入 detoast(全历史 run 实测
+        7203 artifacts / ≈5.9GB JSON,旧全量加载曾把客户端顶到 13GB)。
+        """
+        artifact_count = int(
+            (
+                await self._session.execute(
+                    _ARTIFACT_COUNT_SQL, {"run_id": run_id}
+                )
+            ).scalar_one()
+        )
+        universe_row = (
+            await self._session.execute(_UNIVERSE_SUMMARY_SQL, {"run_id": run_id})
+        ).one()
+        fills_rows = (
+            await self._session.execute(_FILLS_SUMMARY_SQL, {"run_id": run_id})
+        ).all()
+        return ResearchRunArtifactSummary(
+            artifact_count=artifact_count,
+            universe_total=int(universe_row.total),
+            universe_included=int(universe_row.included),
+            universe_excluded_by_reason={
+                str(reason): int(count)
+                for reason, count in (universe_row.excluded_by_reason or {}).items()
+            },
+            fills_total=sum(int(row.fill_count) for row in fills_rows),
+            fills_by_decision={
+                str(row.decision_key): int(row.fill_count) for row in fills_rows
+            },
+        )
+
+    async def estimate_artifact_payload_bytes(self, run_id: str) -> int:
+        """数据库侧估计 run 全部 payload 的 JSON 文本体量(#480),不取回 payload。
+
+        ``report_run(view=detail)`` / ``report_export(kind=run)`` 加载前的
+        载荷护栏口径(#458 阈值 ``RUN_DETAIL_MAX_ESTIMATED_BYTES`` 沿用);
+        与旧加载后 ``len(str(payload))`` 估计同数量级。``json`` 列的
+        ``::text`` 只做 detoast + 计长,真实 run(7203 artifacts / ≈5.9GB
+        JSON)实测 7.8s,远低于把同量数据拉进客户端的分钟级与 13GB 峰值。
+        """
+        return int(
+            (
+                await self._session.execute(
+                    _ARTIFACT_PAYLOAD_BYTES_SQL, {"run_id": run_id}
+                )
+            ).scalar_one()
+        )
+
+    def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchRunArtifactModel]:
+        """按 sequence 流式遍历 artifact 行(#470 前半场)。
+
+        服务端游标 + ``yield_per`` 分块:全历史 run 的 payload 总量达数 GB
+        (features 期均 ~8.5MB),一次性 ``list_artifacts`` 物化会在断点续算
+        读回时把整个前缀的 payload 钉进内存(272 期前缀实测 ≈8GB)。流式
+        读取让消费方(逐决策分组 → 复验 → 重建 bundle → 释放)任意时刻只
+        持有 O(1) 个决策的载荷。行序与 ``list_artifacts`` 一致(sequence
+        升序)。
+        """
+
+        async def _stream() -> AsyncIterator[ResearchRunArtifactModel]:
+            stmt = (
+                select(ResearchRunArtifactModel)
+                .where(ResearchRunArtifactModel.run_id == run_id)
+                .order_by(ResearchRunArtifactModel.sequence)
+            )
+            result = await self._session.stream(
+                stmt, execution_options={"yield_per": _ARTIFACT_STREAM_CHUNK}
+            )
+            async for row in result:
+                yield row[0]
+
+        return _stream()
+
+    async def list_artifact_digests(
+        self, run_id: str
+    ) -> list[tuple[str, str | None, str]]:
+        """artifact 瘦指纹(stage, decision_id, checksum),不取 payload 列。
+
+        result_checksum / 拒绝路径归档只消费这三个字段(#470 前半场);列级
+        SELECT 避免 run 收尾把全量 payload 再物化一遍(556 期全历史 run
+        ≈ 5GB JSON 文本)。行序与 ``list_artifacts`` 一致。
+        """
+
+        stmt = (
+            select(
+                ResearchRunArtifactModel.stage,
+                ResearchRunArtifactModel.decision_id,
+                ResearchRunArtifactModel.checksum,
+            )
+            .where(ResearchRunArtifactModel.run_id == run_id)
+            .order_by(ResearchRunArtifactModel.sequence)
+        )
+        rows = (await self._session.execute(stmt)).all()
+        return [(stage, decision_id, checksum) for stage, decision_id, checksum in rows]
 
     async def get_artifact_by_trace(
         self, run_id: str, trace_id: str
@@ -247,6 +499,7 @@ class ResearchRunRepository:
 
 
 __all__ = [
+    "ResearchRunArtifactSummary",
     "ResearchRunPersistenceConflictError",
     "ResearchRunRepository",
 ]

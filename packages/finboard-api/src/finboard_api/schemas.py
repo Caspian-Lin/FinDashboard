@@ -753,6 +753,26 @@ class FactorDefinitionOut(BaseSchema):
     source_datasets: list[str] = Field(default_factory=list)
 
 
+class PredefinedFactorOut(BaseSchema):
+    """平台预置因子目录条目(``GET /api/research/factors/predefined``,#427)。
+
+    只读投影自 ``finboard_backtest.factors.predefined.PREDEFINED_FACTORS``
+    (公式即代码的平台可信因子);引用名 = ``p_<name>``,消费路径 =
+    MCP ``factor_series_build``(kind=predefined_factor)。
+    ``title`` 含公式片段,原样返回不做改写。
+    """
+
+    name: str
+    title: str
+    family: str
+    direction: str
+    signal_eligible: bool
+    data_dependencies: list[str]
+    window: int | None = None
+    min_history_bars: int | None = None
+    cross_section: bool = False
+
+
 class FeatureSnapshotCreate(BaseSchema):
     """从一个已发布数据版本显式生成价格特征快照。"""
 
@@ -1113,9 +1133,24 @@ class ResearchDatasetReleaseCreate(BaseSchema):
         # issue #265:可转债派生指标发布(转股价值/转股溢价率,从本地缓存
         # bars x 冻结转股价元数据计算)。
         "convertible_metrics",
+        # issue #397:财务面扩展(三表 + dividend 分红明细,从 research_*
+        # 表冻结,独立 kind 独立白名单)。
+        "income_statements",
+        "balance_sheets",
+        "cashflow_statements",
+        "dividends",
     ] = "a_share_tushare"
     source: Literal["akshare", "yfinance", "tushare", "mixed", "manual"] | None = None
     version: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+    # issue #401:冻结字段集合变化(白名单扩展)时按 #187 机制递增(如
+    # financial_indicators 扩列后新发布 schema_version=v2);缺省 None 沿用
+    # 服务端默认,既有发布身份零变化。
+    schema_version: str | None = Field(
+        default=None,
         min_length=1,
         max_length=64,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
@@ -1241,6 +1276,10 @@ _RELEASE_KIND_SOURCE: dict[str, str] = {
     "daily_metrics": "tushare",
     "financial_indicators": "tushare",
     "convertible_metrics": "tushare",
+    "income_statements": "tushare",
+    "balance_sheets": "tushare",
+    "cashflow_statements": "tushare",
+    "dividends": "tushare",
 }
 
 

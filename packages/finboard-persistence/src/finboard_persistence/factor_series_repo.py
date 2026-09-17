@@ -1,4 +1,4 @@
-"""内容寻址的因子序列工件 Repository(issue #360)。
+"""内容寻址的因子序列工件 Repository(issue #360;#463 工件存储)。
 
 因子序列是派生工件:``series_key`` 按 (代码 commit, bars 主发布, 研究
 发布联合集, params, 窗口) 内容寻址 —— 相同输入必然命中同一条记录
@@ -6,6 +6,12 @@
 做缓存命中(unchanged)/重建分流。``values`` 为 ``{date: {symbol:
 float|null}}`` 逐决策日截面,research_run 加载器按 (因子名, 决策日)
 索引消费(#360 双轨优先路径,回退既有快照路径)。
+
+两种存储模式(#463,按 ``artifact_relpath`` 判别):旧行内 JSONB
+(checksum = 逐日截面 canonical json sha256,values 即反序列化 dict);
+新 canonical parquet 工件(values 为 NULL,content_checksum = 工件文件
+sha256,record.values 为 :class:`LazySeriesValues` 惰性映射,首访才读
+文件并验 sha256)。写入路径(执行器)一律落工件。
 
 并发 upsert 沿用 #204 ``INSERT ... ON CONFLICT DO NOTHING RETURNING``
 复查先例:两个 worker 并发保存同一 series_key 时(互相看不到对方未提交
@@ -22,12 +28,17 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_data.factor_series_store import (
+    LazySeriesValues,
+    resolve_artifact_root,
+)
 from finboard_persistence.models import ResearchFactorSeriesModel
 
 #: series_key 的版本前缀(canonical 规则变更时递增,旧键永不复用)
@@ -105,6 +116,14 @@ class FactorSeriesRecord:
 
     ``dataset_release_ids`` 排序冻结(与 series_key 的 canonical 规则一致);
     ``dates`` 升序决策日;``values`` 为 ``{date(ISO): {symbol: float|null}}``。
+
+    两种存储模式(issue #463,按 ``artifact_relpath`` 判别):
+
+    * 行内(旧行,``artifact_relpath=None``)—— values 为反序列化 dict,
+      ``content_checksum`` = 逐日截面的 canonical json sha256(#360 原语义);
+    * 工件(新写入,``artifact_relpath`` 非 None)—— values 为
+      :class:`LazySeriesValues` 惰性映射(首次访问才读 parquet 并验
+      sha256),``content_checksum`` = 工件文件 sha256。
     """
 
     series_id: str
@@ -118,12 +137,22 @@ class FactorSeriesRecord:
     window_start: date = date(1970, 1, 1)
     window_end: date = date(1970, 1, 1)
     dates: tuple[date, ...] = ()
-    values: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    values: Mapping[str, Mapping[str, float | None]] = field(default_factory=dict)
     content_checksum: str = ""
     quality: dict[str, Any] | None = None
     source_run_id: str | None = None
+    artifact_relpath: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # issue #450:content_checksum 校验开关(仅 __post_init__ 行为,不属于
+    # 内容 —— compare/repr 均排除,不影响相等性与序列化)。写入路径与用户
+    # 直接构造保持默认 True(逐位不变);持久化读取行经 _record_from_row 传
+    # False —— 写入时已校验过,读取路径重算需对全量 dates+values 做
+    # canonical json dumps(75 期 x 4 序列的 run 每期重复这份数秒级开销),
+    # 信任已落库内容。series_key 校验廉价,读取路径保留。
+    verify_content_checksum: bool = field(
+        default=True, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         expected_key = compute_series_key(
@@ -145,8 +174,15 @@ class FactorSeriesRecord:
                 f"series_id 必须为 {expected_id}(FS- + series_key[:12]),"
                 f"got {self.series_id}"
             )
-        if self.content_checksum != compute_content_checksum(
-            self.dates, self.values
+        if self.artifact_relpath is not None:
+            # 工件行:content_checksum = 文件 sha256,不经 __post_init__
+            # 重验(重验须读文件,违背惰性;完整性由读取路径 _open_verified
+            # 逐次把关)。工件行缺 checksum 视为构造错误。
+            if not self.content_checksum:
+                raise ValueError("工件行(artifact_relpath 非空)缺少 content_checksum")
+            return
+        if self.verify_content_checksum and self.content_checksum != (
+            compute_content_checksum(self.dates, self.values)
         ):
             raise ValueError("content_checksum 与 dates/values 内容不一致")
 
@@ -197,6 +233,57 @@ class FactorSeriesRecord:
             source_run_id=source_run_id,
         )
 
+    @classmethod
+    def build_artifact(
+        cls,
+        *,
+        code_artifact: str,
+        code_commit: str,
+        kind: str,
+        release_id: str,
+        dataset_release_ids: Sequence[str],
+        params: Mapping[str, Any],
+        window_start: date,
+        window_end: date,
+        dates: Sequence[date],
+        artifact_relpath: str,
+        artifact_checksum: str,
+        quality: Mapping[str, Any] | None = None,
+        source_run_id: str | None = None,
+    ) -> FactorSeriesRecord:
+        """工件模式构造(issue #463):``content_checksum`` = 工件文件 sha256。
+
+        ``values`` 恒空(内容在 parquet 工件;读取路径经 LazySeriesValues
+        惰性提供)。series_key 派生规则与 :meth:`build` 完全一致 —— 同一
+        (commit, 发布联合集, params, 窗口) 在两种模式下同 key。
+        """
+        series_key = compute_series_key(
+            code_commit=code_commit,
+            release_id=release_id,
+            dataset_release_ids=dataset_release_ids,
+            params=params,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        return cls(
+            series_id=series_id_for(series_key),
+            series_key=series_key,
+            code_artifact=code_artifact,
+            code_commit=code_commit,
+            kind=kind,
+            release_id=release_id,
+            dataset_release_ids=tuple(sorted(dataset_release_ids)),
+            params=dict(params),
+            window_start=window_start,
+            window_end=window_end,
+            dates=tuple(dates),
+            values={},
+            content_checksum=artifact_checksum,
+            quality=None if quality is None else dict(quality),
+            source_run_id=source_run_id,
+            artifact_relpath=artifact_relpath,
+        )
+
 
 def series_coverage_missing(
     record: FactorSeriesRecord,
@@ -212,10 +299,19 @@ def series_coverage_missing(
 
 
 class FactorSeriesRepository:
-    """内容寻址幂等保存 / 回读 / 精确匹配查询。"""
+    """内容寻址幂等保存 / 回读 / 精确匹配查询。
 
-    def __init__(self, session: AsyncSession) -> None:
+    ``artifact_root``(#463):工件根目录;缺省经环境变量
+    ``FINBOARD_FACTOR_SERIES_ARTIFACT_ROOT`` 回退 ``data_cache/factor_series``。
+    工件行的 ``record.values`` 为惰性映射,首访才读文件 —— 不触 values 的
+    路径(入队缓存检查 / coverage 检查)零文件 IO。
+    """
+
+    def __init__(
+        self, session: AsyncSession, *, artifact_root: str | Path | None = None
+    ) -> None:
         self._session = session
+        self._artifact_root = resolve_artifact_root(artifact_root)
 
     async def upsert(self, record: FactorSeriesRecord) -> FactorSeriesRecord:
         """按 series_key 幂等保存;同 key 同 checksum 复用原记录(#204 先例)。
@@ -225,6 +321,7 @@ class FactorSeriesRepository:
         content_checksum 不一致是确定性破坏(非确定代码产出不同值),
         fail-closed 抛 :class:`FactorSeriesConflictError`,不静默覆盖。
         """
+        is_artifact = record.artifact_relpath is not None
         statement = (
             pg_insert(ResearchFactorSeriesModel)
             .values(
@@ -239,7 +336,9 @@ class FactorSeriesRepository:
                 window_start=record.window_start,
                 window_end=record.window_end,
                 dates=[item.isoformat() for item in record.dates],
-                values=record.values,
+                # 工件行:values 落 NULL(内容在 parquet + sha256 锚定)
+                values=None if is_artifact else record.values,
+                artifact_relpath=record.artifact_relpath,
                 content_checksum=record.content_checksum,
                 quality=record.quality,
                 source_run_id=record.source_run_id,
@@ -369,18 +468,30 @@ class FactorSeriesRepository:
     async def _row_by_id(self, row_id: int) -> ResearchFactorSeriesModel | None:
         return await self._session.get(ResearchFactorSeriesModel, row_id)
 
-    @staticmethod
-    def _record_from_row(row: ResearchFactorSeriesModel) -> FactorSeriesRecord:
-        raw_values = cast(
-            "dict[str, object]", dict(row.values) if row.values else {}
+    def _record_from_row(
+        self, row: ResearchFactorSeriesModel
+    ) -> FactorSeriesRecord:
+        artifact_relpath = (
+            str(row.artifact_relpath) if row.artifact_relpath else None
         )
-        values: dict[str, dict[str, float | None]] = {}
-        for day, day_values_obj in raw_values.items():
-            day_values = cast("dict[str, object]", day_values_obj)
-            values[str(day)] = {
-                str(sym): None if val is None else float(str(val))
-                for sym, val in day_values.items()
-            }
+        if artifact_relpath is not None:
+            # #463 工件行:values 惰性映射(首访才读文件并验 sha256);
+            # 行内 JSONB 为 NULL,不解析。
+            values: Mapping[str, Mapping[str, float | None]] = LazySeriesValues(
+                self._artifact_root, artifact_relpath, str(row.content_checksum)
+            )
+        else:
+            raw_values = cast(
+                "dict[str, object]", dict(row.values) if row.values else {}
+            )
+            parsed: dict[str, dict[str, float | None]] = {}
+            for day, day_values_obj in raw_values.items():
+                day_values = cast("dict[str, object]", day_values_obj)
+                parsed[str(day)] = {
+                    str(sym): None if val is None else float(str(val))
+                    for sym, val in day_values.items()
+                }
+            values = parsed
         params = dict(row.params) if row.params is not None else {}
         return FactorSeriesRecord(
             series_id=row.series_id,
@@ -398,8 +509,12 @@ class FactorSeriesRepository:
             content_checksum=row.content_checksum,
             quality=dict(row.quality) if row.quality is not None else None,
             source_run_id=row.source_run_id,
+            artifact_relpath=artifact_relpath,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            # issue #450:持久化读取信任写入时已校验的 content_checksum,
+            # 跳过全量 canonical json 重算(读取路径主导开销)。
+            verify_content_checksum=False,
         )
 
 

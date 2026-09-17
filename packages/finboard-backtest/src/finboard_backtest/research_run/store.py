@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+import json
+from collections.abc import AsyncIterator, Iterable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Protocol, cast
 
 from finboard_backtest.research_run.contracts import (
+    ArtifactDigest,
     JsonValue,
     ResearchArtifact,
     ResearchRunConflictError,
@@ -16,6 +19,26 @@ from finboard_backtest.research_run.contracts import (
     ResearchRunReport,
     ResearchRunStatus,
 )
+
+
+def _materialized_artifact(artifact: ResearchArtifact) -> ResearchArtifact:
+    """内存 store 的物化形态(#472):payload_json 不驻留,payload dict 权威。
+
+    PostgreSQL 持久化层直写 canonical 文本(不物化 dict);内存 store 没有
+    序列化层,读回方(pytest 断言 / #314 续算)直接消费 ``payload``。这里把
+    文本按需解析成 dict 并丢弃 —— 内存形态与 #472 之前逐值一致(对象相等性
+    也一致:``payload_json`` 回 None),不留文本驻留。
+    """
+
+    if artifact.payload_json is None:
+        return artifact
+    if artifact.payload:
+        # 已有 dict(如 report 载荷):文本只是落库快照,内存形态不留双份
+        return replace(artifact, payload_json=None)
+    payload = json.loads(artifact.payload_json)
+    return replace(
+        artifact, payload=cast("dict[str, JsonValue]", payload), payload_json=None
+    )
 
 
 class ResearchRunStore(Protocol):
@@ -51,7 +74,15 @@ class ResearchRunStore(Protocol):
 
     async def append_artifact(self, artifact: ResearchArtifact) -> bool: ...
 
+    async def append_artifacts(
+        self, artifacts: Sequence[ResearchArtifact]
+    ) -> list[bool]: ...
+
     async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]: ...
+
+    def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]: ...
+
+    async def list_artifact_digests(self, run_id: str) -> list[ArtifactDigest]: ...
 
     async def checkpoint(self) -> None: ...
 
@@ -157,32 +188,59 @@ class InMemoryResearchRunStore:
 
     async def append_artifact(self, artifact: ResearchArtifact) -> bool:
         async with self._lock:
-            run_artifacts = self._artifacts[artifact.run_id]
-            existing = run_artifacts.get(artifact.artifact_id)
-            if existing is not None:
-                if existing.checksum != artifact.checksum:
-                    raise ResearchRunConflictError(
-                        f"artifact {artifact.artifact_id} 断点重放内容不一致"
-                    )
-                return False
-            duplicate_sequence = next(
-                (
-                    item
-                    for item in run_artifacts.values()
-                    if item.sequence == artifact.sequence
-                ),
-                None,
-            )
-            if duplicate_sequence is not None:
+            return self._append_artifact_locked(artifact)
+
+    async def append_artifacts(
+        self, artifacts: Sequence[ResearchArtifact]
+    ) -> list[bool]:
+        """批量幂等追加(2026-09-14 决策段性能:逐 artifact session/commit
+        开销 ≈ 决策墙钟 10%)。单锁覆盖整批,保持与逐个追加完全相同的
+        去重 / 冲突 / sequence 占用语义;批内任一 artifact 冲突即整批抛错。
+        """
+
+        async with self._lock:
+            return [self._append_artifact_locked(artifact) for artifact in artifacts]
+
+    def _append_artifact_locked(self, artifact: ResearchArtifact) -> bool:
+        artifact = _materialized_artifact(artifact)
+        run_artifacts = self._artifacts[artifact.run_id]
+        existing = run_artifacts.get(artifact.artifact_id)
+        if existing is not None:
+            if existing.checksum != artifact.checksum:
                 raise ResearchRunConflictError(
-                    f"artifact sequence {artifact.sequence} 已被占用"
+                    f"artifact {artifact.artifact_id} 断点重放内容不一致"
                 )
-            run_artifacts[artifact.artifact_id] = artifact
-            return True
+            return False
+        duplicate_sequence = next(
+            (
+                item
+                for item in run_artifacts.values()
+                if item.sequence == artifact.sequence
+            ),
+            None,
+        )
+        if duplicate_sequence is not None:
+            raise ResearchRunConflictError(
+                f"artifact sequence {artifact.sequence} 已被占用"
+            )
+        run_artifacts[artifact.artifact_id] = artifact
+        return True
 
     async def list_artifacts(self, run_id: str) -> list[ResearchArtifact]:
         values = self._artifacts.get(run_id, {}).values()
         return sorted(values, key=lambda item: item.sequence)
+
+    async def iter_artifacts(self, run_id: str) -> AsyncIterator[ResearchArtifact]:
+        for item in await self.list_artifacts(run_id):
+            yield item
+
+    async def list_artifact_digests(self, run_id: str) -> list[ArtifactDigest]:
+        return [
+            ArtifactDigest(
+                stage=item.stage, decision_id=item.decision_id, checksum=item.checksum
+            )
+            for item in await self.list_artifacts(run_id)
+        ]
 
     async def checkpoint(self) -> None:
         return None
