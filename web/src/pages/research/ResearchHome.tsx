@@ -135,7 +135,7 @@ export default function ResearchHome() {
                 {runs.slice(0, 5).map((run) => (
                   <Link
                     key={run.run_id}
-                    to="/research/runs"
+                    to={`/research/runs?run=${encodeURIComponent(run.run_id)}`}
                     className="flex items-center justify-between rounded-md px-3 py-2 text-sm hover:bg-accent"
                   >
                     <div className="flex items-center gap-2">

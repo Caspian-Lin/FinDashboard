@@ -733,7 +733,7 @@ export function RunReportView({ runId }: { runId: string }) {
       metrics={metrics}
       equityCurve={equityCurve}
       extras={extras}
-      sourceHref="/research/runs"
+      sourceHref={`/research/runs?run=${encodeURIComponent(detail.run_id)}`}
       sourceLabel={tl({ zh: "研究运行", en: "research run" })}
       sourceId={detail.run_id}
       exportBasePath={`/api/research/runs/${encodeURIComponent(detail.run_id)}/report/export`}

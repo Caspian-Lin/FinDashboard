@@ -343,12 +343,12 @@ export const RESEARCH_HINTS = {
     jobProgress: {
       title: { zh: "后台任务进度", en: "Background job progress" },
       description: {
-        zh: "研究运行由离线 worker 消费统一任务队列执行；此处展示阶段(phase)、逐决策进度与心跳。",
-        en: "Runs are executed by an offline worker consuming the unified job queue; this shows phase, per-decision progress and heartbeat.",
+        zh: "研究运行由离线 worker 消费统一任务队列执行；此处展示当前阶段(含阶段内进度)、作业整体进度与心跳。",
+        en: "Runs are executed by an offline worker consuming the unified job queue; this shows the current phase (with in-phase progress), overall job progress and heartbeat.",
       },
       detail: {
-        zh: "phase 形如 research_run:<stage>#序号@日期；数据加载期显示 decision_load k/N。进度长时间不动而心跳仍在刷新可能是卡死。",
-        en: "phase looks like research_run:<stage>#n@date; loading shows decision_load k/N. Stalled progress with a live heartbeat may indicate a hang.",
+        zh: "阶段形如 research_run:<stage>#序号@日期,其后的计数是该阶段自身的进度(如 decision_load 224/554);作业整体进度是队列记账的 done/total,与阶段内进度不是同一把尺子——阶段跳变时整体进度可能长时间不动。进度长时间不动而心跳仍在刷新可能是卡死。",
+        en: "The phase looks like research_run:<stage>#n@date, and the counts after it are that phase's own progress (e.g. decision_load 224/554). Overall job progress is the queue's done/total — a different scale from in-phase progress, so overall progress may sit still while phases advance. Stalled progress with a live heartbeat may indicate a hang.",
       },
     },
     artifacts: {

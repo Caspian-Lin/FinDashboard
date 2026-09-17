@@ -113,6 +113,27 @@ function strategyVersionLabel(run: ResearchRunSummary): LocalizedText {
   return version === null ? { zh: "版本未记录", en: "Version not recorded" } : { zh: `v${version}`, en: `v${version}` };
 }
 
+// issue #484:列表项给进行中的运行补「活着的证据」——已运行时长或尚未启动的排队提示。
+function runningLabel(run: ResearchRunSummary): LocalizedText | null {
+  if (run.status !== "running") return null;
+  if (!run.started_at) return { zh: "排队中(尚未启动)", en: "Queued (not started)" };
+  const started = new Date(run.started_at).getTime();
+  if (Number.isNaN(started)) return null;
+  const totalMinutes = Math.max(0, Math.floor((Date.now() - started) / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) {
+    return { zh: `已运行 ${days} 天 ${hours % 24} 小时`, en: `Running ${days}d ${hours % 24}h` };
+  }
+  if (hours > 0) {
+    return { zh: `已运行 ${hours} 小时 ${totalMinutes % 60} 分`, en: `Running ${hours}h ${totalMinutes % 60}m` };
+  }
+  if (totalMinutes > 0) {
+    return { zh: `已运行 ${totalMinutes} 分`, en: `Running ${totalMinutes}m` };
+  }
+  return { zh: "已运行 不到 1 分", en: "Running <1m" };
+}
+
 function initialCapital(run: ResearchRunSummary): number | null {
   if (typeof run.initial_capital === "number") return run.initial_capital;
   const value = run.manifest?.initial_capital;
@@ -798,34 +819,51 @@ export default function ResearchRuns() {
               onRetry={() => listQuery.refetch()}
             />
           ) : filteredRuns.length > 0 ? (
-            filteredRuns.map((run: ResearchRunSummary) => (
-              <MasterListItem
-                key={run.run_id}
-                selected={selectedId === run.run_id}
-                onClick={() => setSelectedId(run.run_id)}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <StatusBadge status={run.status} />
-                  <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-                    {run.run_id}
-                  </span>
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-2">
-                  <span className="min-w-0 truncate font-mono text-xs text-foreground">
-                    {run.strategy_id}
-                  </span>
-                  <Badge variant="secondary" className="font-mono">
-                    {tl(strategyVersionLabel(run))}
-                  </Badge>
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <span className="tabular-nums">
-                    ¥{formatCurrency(initialCapital(run), 0)}
-                  </span>
-                  <span>{timeAgo(run.created_at, lang)}</span>
-                </div>
-              </MasterListItem>
-            ))
+            filteredRuns.map((run: ResearchRunSummary) => {
+              const live = runningLabel(run);
+              return (
+                <MasterListItem
+                  key={run.run_id}
+                  selected={selectedId === run.run_id}
+                  onClick={() => setSelectedId(run.run_id)}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <StatusBadge status={run.status} />
+                    <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+                      {run.run_id}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <span className="min-w-0 truncate font-mono text-xs text-foreground">
+                      {run.strategy_id}
+                    </span>
+                    <Badge variant="secondary" className="font-mono">
+                      {tl(strategyVersionLabel(run))}
+                    </Badge>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span className="tabular-nums">
+                      ¥{formatCurrency(initialCapital(run), 0)}
+                    </span>
+                    <span>{timeAgo(run.created_at, lang)}</span>
+                  </div>
+                  {live && (
+                    <div className="mt-2 flex items-center gap-1.5 text-xs text-info">
+                      <Activity className="h-3.5 w-3.5 shrink-0" />
+                      <span className="tabular-nums">{tl(live)}</span>
+                    </div>
+                  )}
+                  {run.status === "failed" && run.error_summary && (
+                    <p
+                      className="mt-2 truncate text-xs text-destructive"
+                      title={run.error_summary}
+                    >
+                      {run.error_summary}
+                    </p>
+                  )}
+                </MasterListItem>
+              );
+            })
           ) : (
             <EmptyState
               icon={<Activity className="h-8 w-8" />}
@@ -990,13 +1028,13 @@ export default function ResearchRuns() {
                                         </span>
                                       </span>
                                       <span>
-                                        {tl({ zh: "阶段:", en: "Phase:" })}
+                                        {tl({ zh: "当前阶段(含阶段内进度):", en: "Current phase (in-phase progress):" })}
                                         <span className="ml-1 font-mono text-foreground">
                                           {jobQuery.data.phase ?? "—"}
                                         </span>
                                       </span>
                                       <span>
-                                        {tl({ zh: "进度:", en: "Progress:" })}
+                                        {tl({ zh: "作业整体进度:", en: "Overall job progress:" })}
                                         <span className="ml-1 tabular-nums text-foreground">
                                           {jobQuery.data.progress_done}/
                                           {jobQuery.data.progress_total}
