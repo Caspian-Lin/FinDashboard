@@ -3,6 +3,8 @@ import { api } from "../lib/api";
 import { PageHeader } from "../components/ui/page-header";
 import { PageContainer } from "../components/ui/page-container";
 import { StatCard } from "../components/ui/stat-card";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
 import { useT } from "@/i18n";
 import {
   Table,
@@ -20,7 +22,13 @@ export default function Dashboard() {
     queryFn: api.health,
     refetchInterval: 5000,
   });
-  const { data: account } = useQuery({
+  const {
+    data: account,
+    isError: accountIsError,
+    error: accountError,
+    refetch: refetchAccount,
+    isFetching: accountFetching,
+  } = useQuery({
     queryKey: ["account"],
     queryFn: api.getAccount,
     refetchInterval: 5000,
@@ -39,6 +47,25 @@ export default function Dashboard() {
         title={t("dashboard.title")}
         description={t("dashboard.description")}
       />
+      {accountIsError && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("dashboard.accountErrorTitle")}</AlertTitle>
+          <AlertDescription className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
+            <span>
+              {accountError?.message ?? t("dashboard.accountErrorFallback")}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() => refetchAccount()}
+              disabled={accountFetching}
+            >
+              {t("common.retry")}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label={t("dashboard.kernelStatus")}
@@ -58,7 +85,7 @@ export default function Dashboard() {
         <StatCard label={t("dashboard.totalAsset")} value={account ? `¥${Number(account.total_asset).toLocaleString()}` : "—"} />
         <StatCard label={t("dashboard.availableCash")} value={account ? `¥${Number(account.cash).toLocaleString()}` : "—"} />
         <StatCard label={t("dashboard.frozenCash")} value={account ? `¥${Number(account.frozen_cash).toLocaleString()}` : "—"} />
-        <StatCard label={t("dashboard.broker")} value={account?.broker_kind ?? "—"} />
+        <StatCard label={t("dashboard.broker")} value={account?.broker_kind ?? health?.broker_kind ?? "—"} />
         <StatCard label={t("dashboard.account")} value={account?.account_id ?? "—"} />
       </div>
 

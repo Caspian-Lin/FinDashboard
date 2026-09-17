@@ -164,6 +164,8 @@ export const en: Dict = {
     broker: "Broker",
     account: "Account",
     orderTime: "Order time",
+    accountErrorTitle: "Failed to load account data",
+    accountErrorFallback: "The backend returned no account data; total assets, available cash, frozen cash and account ID are unavailable.",
   },
   positions: {
     title: "Positions",

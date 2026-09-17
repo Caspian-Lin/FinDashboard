@@ -21,6 +21,14 @@ import { Button } from "@/components/ui/button";
 import { MasterList, MasterListItem } from "@/components/ui/master-list";
 import { EmptyState } from "@/components/ui/states";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -59,6 +67,14 @@ const TYPES: { value: string; label: LocalizedText }[] = [
   { value: "etf", label: { zh: "ETF", en: "ETF" } },
 ];
 
+/** 历史条目创建时刻(MM-DD HH:MM):同参数多次运行靠它区分,完整时间戳放 title。 */
+function formatHistoryTime(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export default function Backtest() {
   const { tl } = useT();
   const qc = useQueryClient();
@@ -96,6 +112,8 @@ export default function Backtest() {
   // 结果视图: 当前结果或历史记录
   const [activeResult, setActiveResult] = useState<BacktestResult | null>(null);
   const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null);
+  // 历史删除的二次确认目标(null=未打开确认弹窗)
+  const [deleteTarget, setDeleteTarget] = useState<BacktestHistoryItem | null>(null);
   // 策略预设抽屉(原独立「策略预设」页并入)
   const [presetsOpen, setPresetsOpen] = useState(false);
   // 回测配置卡默认折叠:结果优先,摘要行常驻可一键运行
@@ -312,7 +330,10 @@ export default function Backtest() {
 
   const deleteHistory = useMutation({
     mutationFn: (id: number) => api.deleteBacktestHistory(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["backtest-history"] }),
+    onSuccess: () => {
+      setDeleteTarget(null);
+      qc.invalidateQueries({ queryKey: ["backtest-history"] });
+    },
   });
 
   const toggleSymbol = (code: string) => {
@@ -839,6 +860,14 @@ export default function Backtest() {
           <MasterList
             title={tl({ zh: "回测历史", en: "Backtest History" })}
             count={history?.length}
+            toolbar={
+              <p className="text-xs text-muted-foreground/70">
+                {tl({
+                  zh: "只收录成功完成的回测;失败或被拒的任务不写入历史,可在「任务中心」查看。",
+                  en: "Only successfully completed backtests are recorded; failed or rejected jobs are not listed here and can be viewed in the Task Center.",
+                })}
+              </p>
+            }
           >
             {history && history.length === 0 && (
               <p className="text-xs text-muted-foreground/70">{tl({ zh: "暂无历史记录", en: "No history yet" })}</p>
@@ -850,7 +879,7 @@ export default function Backtest() {
                 active={h.id === activeHistoryId}
                 loading={loadHistory.isPending && loadHistory.variables === h.id}
                 onClick={() => loadHistory.mutate(h.id)}
-                onDelete={() => deleteHistory.mutate(h.id)}
+                onDelete={() => setDeleteTarget(h)}
               />
             ))}
           </MasterList>
@@ -882,6 +911,61 @@ export default function Backtest() {
           )}
         </div>
       </div>
+
+      {/* 删除二次确认:取消不发请求 */}
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{tl({ zh: "确认删除回测记录", en: "Delete backtest record" })}</DialogTitle>
+            <DialogDescription>
+              {tl({
+                zh: "删除后该记录不再出现在回测历史中,行情缓存与数据发布不受影响。",
+                en: "The record will no longer appear in backtest history; bar caches and data releases are unaffected.",
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          {deleteTarget && (
+            <div className="space-y-2 rounded-lg bg-muted/50 p-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">{tl({ zh: "策略", en: "Strategy" })}</span>
+                <span className="font-mono">{deleteTarget.strategy}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">{tl({ zh: "标的数", en: "Symbols" })}</span>
+                <span className="tabular-nums">{deleteTarget.symbols.length}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">{tl({ zh: "区间", en: "Window" })}</span>
+                <span className="tabular-nums">
+                  {deleteTarget.start.slice(0, 10)} ~ {deleteTarget.end.slice(0, 10)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">{tl({ zh: "创建时间", en: "Created" })}</span>
+                <span className="tabular-nums">{new Date(deleteTarget.created_at).toLocaleString()}</span>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleteHistory.isPending}
+            >
+              {tl({ zh: "取消", en: "Cancel" })}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => deleteTarget && deleteHistory.mutate(deleteTarget.id)}
+              disabled={deleteHistory.isPending}
+            >
+              {deleteHistory.isPending
+                ? tl({ zh: "删除中…", en: "Deleting…" })
+                : tl({ zh: "确认删除", en: "Delete" })}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Sheet open={presetsOpen} onOpenChange={setPresetsOpen}>
         <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-2xl">
@@ -1148,6 +1232,15 @@ function HistoryCard({
 }) {
   const { tl } = useT();
   const ret = item.metrics?.total_return;
+  const tradeCount = item.metrics?.trade_count;
+  const sharpe = item.metrics?.sharpe_ratio;
+  const summaryParts: string[] = [];
+  if (tradeCount !== undefined) {
+    summaryParts.push(tl({ zh: `成交 ${tradeCount} 笔`, en: `${tradeCount} trades` }));
+  }
+  if (sharpe !== undefined) {
+    summaryParts.push(tl({ zh: `夏普 ${sharpe.toFixed(2)}`, en: `Sharpe ${sharpe.toFixed(2)}` }));
+  }
   return (
     <MasterListItem
       selected={active}
@@ -1161,6 +1254,11 @@ function HistoryCard({
           <div className="text-xs text-muted-foreground/70 mt-0.5">
             {tl({ zh: `${item.symbols.length} 标的 · ${item.start.slice(0, 10)} ~ ${item.end.slice(0, 10)}`, en: `${item.symbols.length} symbols · ${item.start.slice(0, 10)} ~ ${item.end.slice(0, 10)}` })}
           </div>
+          {summaryParts.length > 0 && (
+            <div className="mt-0.5 text-xs tabular-nums text-muted-foreground/70">
+              {summaryParts.join(" · ")}
+            </div>
+          )}
           {ret !== undefined && (
             <div className={`text-sm font-bold mt-1 ${ret >= 0 ? "text-success" : "text-destructive"}`}>
               {(ret * 100).toFixed(2)}%
@@ -1168,8 +1266,11 @@ function HistoryCard({
           )}
         </div>
         <div className="flex flex-col items-end gap-1 shrink-0">
-          <span className="text-xs text-muted-foreground">
-            {new Date(item.created_at).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}
+          <span
+            className="text-xs tabular-nums text-muted-foreground"
+            title={new Date(item.created_at).toLocaleString()}
+          >
+            {formatHistoryTime(item.created_at)}
           </span>
           <span
             role="button"

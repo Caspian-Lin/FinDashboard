@@ -173,6 +173,31 @@ describe("Kill Switch 确认门", () => {
   });
 });
 
+describe("审计日志时间列", () => {
+  it("跨天条目带日期显示,完整时间戳进 title", async () => {
+    vi.mocked(api.getAuditLogs).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          actor: "manual",
+          action: "kill_switch.activate",
+          target: "no_new_orders",
+          payload: null,
+          created_at: "2026-09-17T03:41:07",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    renderWithProviders(<Control />);
+
+    const cell = await screen.findByText(/^\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(cell).toHaveTextContent("09-17 03:41:07");
+    expect(cell.getAttribute("title")).toContain("2026");
+  });
+});
+
 describe("Kill Switch 重复提交保护", () => {
   it("pending 期间禁用全部档位与确认按钮,只发送一次请求,Escape 不关闭", async () => {
     let resolveActivate: (v: KillSwitch) => void = () => {};

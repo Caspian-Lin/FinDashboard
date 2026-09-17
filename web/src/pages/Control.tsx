@@ -87,6 +87,14 @@ function levelValue(level: string | undefined) {
   return KS_LEVELS.find((l) => l.value === level)?.label ?? undefined;
 }
 
+/** 审计条目跨天混排,时间列带日期(MM-DD HH:MM:SS),完整时间戳放 title。 */
+function formatAuditTime(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 export default function Control() {
   const { t, tl } = useT();
   const qc = useQueryClient();
@@ -284,8 +292,11 @@ export default function Control() {
             <TableBody>
               {(logs?.items ?? []).map((log) => (
                 <TableRow key={log.id}>
-                  <TableCell className="text-muted-foreground">
-                    {new Date(log.created_at).toLocaleTimeString()}
+                  <TableCell
+                    className="whitespace-nowrap tabular-nums text-muted-foreground"
+                    title={new Date(log.created_at).toLocaleString()}
+                  >
+                    {formatAuditTime(log.created_at)}
                   </TableCell>
                   <TableCell>{log.actor}</TableCell>
                   <TableCell className="font-mono">{log.action}</TableCell>
