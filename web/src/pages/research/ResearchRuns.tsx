@@ -62,6 +62,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import {
   factorLabApi,
   researchRunApi,
+  runningRunLabel,
   strategySpecApi,
   featureSnapshotNames,
   featureSnapshotSymbolCount,
@@ -111,27 +112,6 @@ function strategyVersion(run: ResearchRunSummary): number | null {
 function strategyVersionLabel(run: ResearchRunSummary): LocalizedText {
   const version = strategyVersion(run);
   return version === null ? { zh: "版本未记录", en: "Version not recorded" } : { zh: `v${version}`, en: `v${version}` };
-}
-
-// issue #484:列表项给进行中的运行补「活着的证据」——已运行时长或尚未启动的排队提示。
-function runningLabel(run: ResearchRunSummary): LocalizedText | null {
-  if (run.status !== "running") return null;
-  if (!run.started_at) return { zh: "排队中(尚未启动)", en: "Queued (not started)" };
-  const started = new Date(run.started_at).getTime();
-  if (Number.isNaN(started)) return null;
-  const totalMinutes = Math.max(0, Math.floor((Date.now() - started) / 60_000));
-  const hours = Math.floor(totalMinutes / 60);
-  const days = Math.floor(hours / 24);
-  if (days > 0) {
-    return { zh: `已运行 ${days} 天 ${hours % 24} 小时`, en: `Running ${days}d ${hours % 24}h` };
-  }
-  if (hours > 0) {
-    return { zh: `已运行 ${hours} 小时 ${totalMinutes % 60} 分`, en: `Running ${hours}h ${totalMinutes % 60}m` };
-  }
-  if (totalMinutes > 0) {
-    return { zh: `已运行 ${totalMinutes} 分`, en: `Running ${totalMinutes}m` };
-  }
-  return { zh: "已运行 不到 1 分", en: "Running <1m" };
 }
 
 function initialCapital(run: ResearchRunSummary): number | null {
@@ -820,7 +800,7 @@ export default function ResearchRuns() {
             />
           ) : filteredRuns.length > 0 ? (
             filteredRuns.map((run: ResearchRunSummary) => {
-              const live = runningLabel(run);
+              const live = runningRunLabel(run);
               return (
                 <MasterListItem
                   key={run.run_id}

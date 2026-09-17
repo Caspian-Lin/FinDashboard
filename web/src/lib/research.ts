@@ -1,4 +1,5 @@
 import { fetchJSON, type ApiError, type DataPreview, type JobOut } from "./api";
+import type { LocalizedText } from "@/i18n";
 
 /* ============================================================ */
 /* Research Runs                                                */
@@ -119,6 +120,34 @@ export const researchRunApi = {
       body: JSON.stringify(body),
     }),
 };
+
+/**
+ * 进行中运行的「活着的证据」文案(issue #484):已运行时长或尚未启动的排队提示。
+ * 非 running 与非法 started_at 返回 null(调用方不渲染该行);`now` 可注入以便
+ * 固定时间测试,缺省取当前墙钟。
+ */
+export function runningRunLabel(
+  run: Pick<ResearchRunSummary, "status" | "started_at">,
+  now: number = Date.now(),
+): LocalizedText | null {
+  if (run.status !== "running") return null;
+  if (!run.started_at) return { zh: "排队中(尚未启动)", en: "Queued (not started)" };
+  const started = new Date(run.started_at).getTime();
+  if (Number.isNaN(started)) return null;
+  const totalMinutes = Math.max(0, Math.floor((now - started) / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) {
+    return { zh: `已运行 ${days} 天 ${hours % 24} 小时`, en: `Running ${days}d ${hours % 24}h` };
+  }
+  if (hours > 0) {
+    return { zh: `已运行 ${hours} 小时 ${totalMinutes % 60} 分`, en: `Running ${hours}h ${totalMinutes % 60}m` };
+  }
+  if (totalMinutes > 0) {
+    return { zh: `已运行 ${totalMinutes} 分`, en: `Running ${totalMinutes}m` };
+  }
+  return { zh: "已运行 不到 1 分", en: "Running <1m" };
+}
 
 /* ============================================================ */
 /* Factor Lab                                                   */
