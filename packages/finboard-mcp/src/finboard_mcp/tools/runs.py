@@ -69,6 +69,8 @@ def _execution_mode_from_manifest(manifest: object) -> str:
 
 
 def _run_detail(row: ResearchRunModel) -> dict[str, Any]:
+    from finboard_backtest.research_run.config_overrides import fee_policy_summary
+
     detail = _run_summary(row)
     detail.update(
         {
@@ -81,6 +83,13 @@ def _run_detail(row: ResearchRunModel) -> dict[str, Any]:
             "error_summary": row.error_summary,
             # issue #183:agent 用 execution_mode 区分单时点决策与全区间回放。
             "execution_mode": _execution_mode_from_manifest(row.manifest),
+            # issue #482:生效费用参数与来源(规格 vs 队列覆盖)读侧派生回显,
+            # 纯视图不参与 checksum;overrides 非空时 effective ≠ spec。
+            "fee_policy": (
+                fee_policy_summary(row.manifest)
+                if isinstance(row.manifest, dict)
+                else None
+            ),
             # issue #143:关联 background_jobs.job_id,agent 可用 finboard_job_* 轮询。
             "job_id": getattr(row, "job_id", None),
         }
@@ -350,6 +359,7 @@ async def _build_queued_manifest(
         validate_strategy_dataset_capabilities,
     )
     from finboard_backtest.research_run.config_overrides import (
+        research_policy_gate_error,
         research_portfolio_gate_error,
     )
     from finboard_backtest.research_run.contracts import JsonValue
@@ -707,6 +717,19 @@ async def _build_queued_manifest(
     )
     if portfolio_gate_error is not None:
         raise McpToolError("invalid_argument", portfolio_gate_error)
+
+    # issue #482:入队政策覆盖预检(与 REST 路由共用同一门控函数)——
+    # fee_config.overrides 未知键 / 非法值秒级拒绝;execution_config /
+    # validation_config 非空具名拒绝(此前为静默 no-op 死分区,覆盖 run
+    # 与基线逐位相同)。
+    policy_gate_error = research_policy_gate_error(
+        execution_model=spec.execution_model,
+        fee_overrides=body.fee_config,
+        execution_overrides=body.execution_config,
+        validation_overrides=body.validation_config,
+    )
+    if policy_gate_error is not None:
+        raise McpToolError("invalid_argument", policy_gate_error)
 
     run_id = "RR-" + hashlib.sha256(
         body.idempotency_key.encode("utf-8")
@@ -1172,8 +1195,17 @@ def register(mcp: MCPServer) -> None:
             " 覆盖 —— 无 series / 覆盖不足 / series 锚定发布与 bars 主发布"
             "不一致 → invalid_argument(附缺失决策日期预览与"
             " finboard_factor_series_build 重建命令)\n"
-            '- "validation_config"/"execution_config"/"fee_config"/'
-            '"benchmark_config": {} —— 政策覆盖,一般留空\n'
+            '- "validation_config"/"execution_config": {} —— 留空;非空入队即拒'
+            "(#482,死分区不接覆盖):验证门控 / timing 等执行语义须发布新规格"
+            "版本调整\n"
+            '- "fee_config": {} —— 成交费用覆盖(#482 接线),overrides 按键名'
+            "与规格 execution_model 同名合并:{\"overrides\": {\"commission_rate\":"
+            " 0.0006, \"minimum_commission\": 10, \"sell_tax_rate\": 0.001, "
+            "\"slippage_bps\": 10}}(合法域 佣金/印花 0<=值<=0.1、最低佣金 >=0、"
+            "滑点 0<=值<=10000;未声明键继承规格值;未知键/非法值入队即拒;"
+            "timing 不支持队列覆盖);run 详情 fee_policy 字段回显生效值与来源\n"
+            '- "benchmark_config": {} —— 基准标的覆盖(如 {"symbol": '
+            '"000300.SH"})\n'
             '- "portfolio_config"/"risk_config": {} —— 组合约束 / 风险退出'
             "分区覆盖(#303,键位不可混):\n"
             "  · portfolio_config 管组合约束(overrides 直接就是键值),如 "

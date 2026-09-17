@@ -38,7 +38,7 @@
 - **multi_period 必须显式 `decision_schedule`**（legacy `rebalance_frequency` 兼容，两键互斥）；single_shot 决策时点只能来自冻结因子快照（入队 fail-closed）。
 - **用户因子（`u_` 前缀）**：仅 active+passed 可引用；multi_period 引用须有 factor_series 覆盖；factor_series 仅接受 `compute_series` 入口（v1 逐日入口已废弃），PIT = 窗口物理隔离 + 前缀不变性审计（截断不变 + 扰动不变）。
 - **晋级链不放松**：研究 → 回测 → OOS(#57) → 模拟 → 影子 → 小资金；screen 门 rank_ic 取绝对值（只证信号存在性，方向责任在因子 preference 与权益复测）；读验证结论先看 `oos_outcome` 再看 `status`（OOS 流程完成 ≠ 假设获支持）。
-- **组合硬约束 fail-closed**：`max_risk_contribution` 默认 0.35，不可行必须在研究订单前失败关闭；入队预检与运行期双重防线；`portfolio_config`（组合约束）与 `risk_config`（风险退出）两分区键位不可混。
+- **组合硬约束 fail-closed**：`max_risk_contribution` 默认 0.35，不可行必须在研究订单前失败关闭；入队预检与运行期双重防线；`portfolio_config`（组合约束）/ `risk_config`（风险退出）/ `fee_config`（成交费用，#482）三分区键位不可混，overrides 合并只发生在消费端、manifest 原样冻结；`execution_config` / `validation_config` 是死分区不接覆盖，非空入队即拒。
 - **幂等键部分唯一索引**：failed/cancelled 放行同键重建，succeeded 幂等命中，interrupted 保持单行（lease 重排与 run replay 依赖此语义）。
 - **checksum / manifest 漂移防护**：新增可选字段 None 省略键，保持旧 payload 字节稳定；语义变更走 `schema_version`；禁止直接改既有 `as_dict` 已有字段的输出。
 - **数据单位口径（对账锁定，改动 = 口径事故）**：股票 daily `amount` 千元；期货 `fut_daily` amount 万元→元 ×10000、vol 手→张；可转债 vol 手→张 ×10；指数 amount 千元↔元按源对齐。

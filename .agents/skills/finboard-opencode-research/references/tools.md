@@ -106,8 +106,15 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
     触发多期回放(#361;custom 须给 `dates`,⊆ 发布交易日且升序去重);
     legacy `rebalance_frequency=daily|weekly|monthly|quarterly` 仍接受
     (等价同名 kind),非法值入队即拒
-  - `validation_config` / `execution_config` /
-    `fee_config` / `benchmark_config`: `{}` —— 政策覆盖,一般留空
+  - `validation_config` / `execution_config`: `{}` —— 留空;非空入队即拒
+    (#482,死分区不接覆盖):验证门控 / timing 等执行语义须发布新规格版本调整
+  - `fee_config`: `{}` —— 成交费用覆盖(#482 接线),overrides 按键名与规格
+    execution_model 同名合并,如 `{"overrides": {"commission_rate": 0.0006,
+    "minimum_commission": 10, "sell_tax_rate": 0.001, "slippage_bps": 10}}`
+    (合法域 佣金/印花 0<=值<=0.1、最低佣金 >=0、滑点 0<=值<=10000;未声明键
+    继承规格值;未知键/非法值入队即拒;timing 不支持队列覆盖);run 详情
+    `fee_policy` 字段回显生效值与来源(规格 vs 覆盖)
+  - `benchmark_config`: `{}` —— 基准标的覆盖,如 `{"symbol": "000300.SH"}`
   - `portfolio_config` / `risk_config`: `{}` —— 组合约束 / 风险退出分区覆盖
     (#303,键位不可混):
     `portfolio_config` 管组合约束(overrides 直接就是键值),如

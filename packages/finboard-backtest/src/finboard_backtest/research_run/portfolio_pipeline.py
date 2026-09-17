@@ -62,6 +62,7 @@ from finboard_backtest.research_run.adapters import (
 )
 from finboard_backtest.research_run.config_overrides import (
     effective_max_risk_contribution,
+    merge_fee_overrides,
     merge_risk_exit_policy,
     section_overrides,
 )
@@ -94,6 +95,7 @@ from finboard_backtest.research_run.contracts import (
 )
 from finboard_backtest.strategy_spec.contracts import (
     AllocationMethod,
+    ExecutionModel,
     RiskExitPolicy,
 )
 from finboard_backtest.strategy_spec.contracts import (
@@ -522,6 +524,13 @@ class PortfolioPipelineAdapter:
             risk_exit_policy = _risk_exit_policy_from_manifest(manifest)
         except ValueError as exc:
             raise ResearchConstraintViolationError(str(exc)) from exc
+        # issue #482:fee_config.overrides 在此解析为生效执行模型(此前该
+        # manifest 分区无任何业务消费者)。非法覆盖 fail-closed 转换为
+        # ResearchConstraintViolationError,与风险退出覆盖同走 REJECTED 语义。
+        try:
+            execution_model = _execution_model_from_manifest(manifest)
+        except ValueError as exc:
+            raise ResearchConstraintViolationError(str(exc)) from exc
         allocation_method = _allocation_method(manifest)
         conflict_policy = (
             SignalConflictPolicy.NEUTRALIZE
@@ -570,6 +579,7 @@ class PortfolioPipelineAdapter:
                         state=state,
                         constraints=constraints,
                         risk_exit_policy=risk_exit_policy,
+                        execution_model=execution_model,
                         allocation_method=allocation_method,
                         conflict_policy=conflict_policy,
                         target_gross=target_gross,
@@ -687,6 +697,7 @@ class PortfolioPipelineAdapter:
         state: _PipelineState,
         constraints: PortfolioConstraints,
         risk_exit_policy: RiskExitPolicy,
+        execution_model: ExecutionModel,
         allocation_method: str,
         conflict_policy: SignalConflictPolicy,
         target_gross: float,
@@ -827,9 +838,11 @@ class PortfolioPipelineAdapter:
                 lot_info=item.lot_info,
                 prices=item.prices,
                 current_positions=current_positions,
-                commission_rate=manifest.strategy_spec.execution_model.commission_rate,
-                commission_min=manifest.strategy_spec.execution_model.minimum_commission,
-                stamp_tax_rate=manifest.strategy_spec.execution_model.sell_tax_rate,
+                # issue #482:费用参数读生效执行模型(fee_config.overrides
+                # 已并入),不再直读规格原值。
+                commission_rate=execution_model.commission_rate,
+                commission_min=execution_model.minimum_commission,
+                stamp_tax_rate=execution_model.sell_tax_rate,
             ),
             constraints=constraints,
         )
@@ -848,6 +861,7 @@ class PortfolioPipelineAdapter:
             plan=plan,
             instructions=instructions,
             state=state,
+            execution_model=execution_model,
         )
         positions, ledger = _mark_after_execution(state, item)
         risk_state = _risk_state(state, ledger)
@@ -965,6 +979,24 @@ def _risk_exit_policy_from_manifest(
     return merge_risk_exit_policy(
         manifest.strategy_spec.risk_exit_policy,
         overrides,
+    )
+
+
+def _execution_model_from_manifest(
+    manifest: ResearchRunManifest,
+) -> ExecutionModel:
+    """manifest → 生效执行模型,费用四键(issue #482)。
+
+    ``fee_config.overrides`` 按键名覆盖 ``strategy_spec.execution_model``
+    (佣金率 / 最低佣金 / 卖出印花税 / 滑点 bps 的 run 级覆盖从此真实生效;
+    此前该 manifest 分区自 #127 起只存不用,覆盖被静默丢弃)。timing 等
+    非费用字段不参与覆盖,仍读规格原值。未声明 overrides 时原样返回规格
+    模型,零行为变化。非法覆盖抛 ``ValueError``,由 ``decisions()`` 转换为
+    ``ResearchConstraintViolationError`` 使 run REJECTED。
+    """
+    return merge_fee_overrides(
+        manifest.strategy_spec.execution_model,
+        section_overrides(manifest.fee_config),
     )
 
 
@@ -1261,6 +1293,7 @@ def _execute_research_plan(
     plan: object,
     instructions: tuple[object, ...],
     state: _PipelineState,
+    execution_model: ExecutionModel,
 ) -> tuple[tuple[ResearchOrder, ...], tuple[ResearchFill, ...]]:
     from finboard_backtest.portfolio.contracts import RebalancePlan
     from finboard_backtest.research_run.contracts import RebalanceInstruction
@@ -1321,20 +1354,21 @@ def _execute_research_plan(
             continue
 
         fill_price = Decimal(str(item.execution_prices[instruction.symbol]))
+        # issue #482:费用回退值读生效执行模型(fee_config.overrides 已并入)。
         commission_rate = (
             info.commission_rate
             if info.commission_rate is not None
-            else manifest.strategy_spec.execution_model.commission_rate
+            else execution_model.commission_rate
         )
         commission_min = (
             info.commission_min
             if info.commission_min is not None
-            else manifest.strategy_spec.execution_model.minimum_commission
+            else execution_model.minimum_commission
         )
         slippage_bps = (
             info.slippage_bps
             if info.slippage_bps > 0
-            else manifest.strategy_spec.execution_model.slippage_bps
+            else execution_model.slippage_bps
         )
         # issue #337:末端买入按可用现金裁剪 —— sizing 按决策价预算、成交按
         # 执行价结算,价差漂移逐笔累积会把现金缓冲吃穿;削减不足一手的末端
@@ -1419,7 +1453,7 @@ def _execute_research_plan(
             tax_rate = (
                 info.stamp_tax_rate
                 if info.stamp_tax_rate is not None
-                else manifest.strategy_spec.execution_model.sell_tax_rate
+                else execution_model.sell_tax_rate
             )
             tax = notional * Decimal(str(tax_rate))
         fill = ResearchFill(

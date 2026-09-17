@@ -67,6 +67,7 @@ from finboard_backtest.research_run import (
     validate_strategy_dataset_capabilities,
 )
 from finboard_backtest.research_run.config_overrides import (
+    research_policy_gate_error,
     research_portfolio_gate_error,
 )
 from finboard_backtest.research_run.contracts import JsonValue, stable_checksum
@@ -410,6 +411,19 @@ async def queue_research_run(
     )
     if portfolio_gate_error is not None:
         raise HTTPException(status_code=422, detail=portfolio_gate_error)
+
+    # issue #482:入队政策覆盖预检(与 MCP ``_build_queued_manifest`` 共用
+    # 同一门控函数)—— fee_config.overrides 按费用键名合并进生效执行模型,
+    # 未知键 / 非法值秒级 422;execution_config / validation_config 非空
+    # 具名拒绝(此前为静默 no-op 死分区,覆盖 run 与基线逐位相同)。
+    policy_gate_error = research_policy_gate_error(
+        execution_model=spec.execution_model,
+        fee_overrides=body.fee_config,
+        execution_overrides=body.execution_config,
+        validation_overrides=body.validation_config,
+    )
+    if policy_gate_error is not None:
+        raise HTTPException(status_code=422, detail=policy_gate_error)
 
     run_id = _run_id(body.idempotency_key)
     try:
