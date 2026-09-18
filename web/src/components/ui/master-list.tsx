@@ -29,14 +29,18 @@ export function MasterList({
   return (
     <Card className={className}>
       <CardHeader className="pb-3">
-        <div className="flex items-center justify-between gap-2">
-          <CardTitle className="flex items-center gap-1.5 text-base">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="flex min-w-0 flex-wrap items-center gap-1.5 text-base">
             {title}
             {typeof count === "number" && (
               <span className="text-xs font-normal text-muted-foreground">{count}</span>
             )}
           </CardTitle>
-          {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
+          {actions && (
+            <div className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-1.5">
+              {actions}
+            </div>
+          )}
         </div>
         {toolbar && <div className="mt-2">{toolbar}</div>}
       </CardHeader>
