@@ -9,6 +9,7 @@ AGENTS.md git 历史承载，仅留档备查；活跃记忆只保留「不读代
 
 ## 活跃记忆
 
+- [FinDashboard Demo 截图与媒体规格](demo-capture-spec.md) — 英文深色 UI、1440×960 源图、无悬浮层与加载态、固定文件名和 GIF / 页面 QA 基线
 - [跨 issue 持久坑位速查](durable-gotchas.md) — 迁移号撞号/测试库 schema 漂移/kit 五处联动/ruff 坑/as_dict checksum 契约/job phase 隐性契约等一次性速查
 - [dataset_sync 同步运营 runbook](dataset-sync-runbook.md) — 首次全量过夜跑（~5s/片×小时计）/增量每日一片；配额是进程内锁须 worker 单进程；daily 截面恒全市场；PIT 锚点有回归测试锁边界
 - [WSL PostgreSQL 空闲自动关机](wsl-postgres-keepalive.md) — 本机集成测试卡住的根因；跑 DB 测试前须唤醒并保活 WSL VM
