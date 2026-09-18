@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="FinDashboard turns quantitative research into an auditable path from frozen data to out-of-sample evidence, portfolio controls, and isolated simulation.">
+    <meta name="theme-color" content="#141414">
+    <meta property="og:title" content="FinDashboard: evidence before capital">
+    <meta property="og:description" content="Follow one research hypothesis from frozen inputs to an auditable decision.">
+    <meta property="og:image" content="assets/research-home.png">
+    <title>FinDashboard Demo: Evidence Before Capital</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="FinDashboard demo home">
+        <span class="brand-mark" aria-hidden="true">FD</span>
+        <span class="brand-copy"><strong>FinDashboard</strong><small>Research evidence demo</small></span>
+      </a>
+      <button class="menu-button" type="button" aria-expanded="false" aria-controls="site-nav">Menu</button>
+      <nav id="site-nav" aria-label="Page navigation">
+        <a href="#scenario">Scenario</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#boundaries">Boundaries</a>
+        <a href="#plan">Demo plan</a>
+        <a href="zh/" lang="zh-CN">中文</a>
+        <a class="nav-source" href="https://github.com/Caspian-Lin/FinDashboard">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero shell" id="top" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="release-line"><span>0.1.0dev preview</span> Local research data · Mock broker · Worker disabled</p>
+          <h1 id="hero-title">Quant research that can explain itself.</h1>
+          <p class="hero-lede">
+            FinDashboard gives research agents room to investigate while keeping every input, decision, and result traceable. Evidence must pass frozen-data, out-of-sample, and portfolio gates before it can move closer to capital.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#workflow">Walk through the evidence</a>
+            <a class="button button-secondary" href="https://github.com/Caspian-Lin/FinDashboard">View source</a>
+          </div>
+          <dl class="hero-proof" aria-label="Demo facts">
+            <div><dt>Captured</dt><dd>2026-09-18</dd></div>
+            <div><dt>Source</dt><dd>Real local research DB</dd></div>
+            <div><dt>Live trading</dt><dd>Still gated</dd></div>
+          </dl>
+        </div>
+        <figure class="product-frame hero-frame">
+          <div class="frame-bar"><span></span><span></span><span></span><strong>Research / Overview</strong></div>
+          <img src="assets/research-home.png" alt="FinDashboard research home in English">
+          <figcaption><span class="live-dot" aria-hidden="true"></span>Real product UI, captured from the local development environment.</figcaption>
+        </figure>
+      </section>
+
+      <section class="section shell" id="scenario" aria-labelledby="scenario-title">
+        <div class="section-heading">
+          <p>Typical scenario</p>
+          <h2 id="scenario-title">Should an A-share cross-sectional signal be allowed to advance?</h2>
+          <span>The system must preserve a negative answer as carefully as a positive one.</span>
+        </div>
+        <div class="scenario-grid">
+          <article class="scenario-brief">
+            <span class="card-label">Research brief</span>
+            <blockquote>
+              Test whether cross-sectional momentum produces stable, cost-aware out-of-sample excess returns. If evidence is weak, stop promotion, retain the failure, and prevent blind retesting.
+            </blockquote>
+          </article>
+          <article class="scenario-answer">
+            <h3>The product must answer three questions.</h3>
+            <ol>
+              <li><span>01</span><strong>What was knowable?</strong><p>Point-in-time data and immutable releases.</p></li>
+              <li><span>02</span><strong>What exactly ran?</strong><p>Versioned strategy, manifest, fees, constraints, and checksums.</p></li>
+              <li><span>03</span><strong>Why trust the outcome?</strong><p>Pre-registered OOS gates, explicit failures, and durable audit trails.</p></li>
+            </ol>
+          </article>
+        </div>
+      </section>
+
+      <section class="workflow-section" id="workflow" aria-labelledby="workflow-title">
+        <div class="section-heading shell workflow-heading">
+          <p>Scroll-driven walkthrough</p>
+          <h2 id="workflow-title">One hypothesis, seven auditable operations.</h2>
+          <span>Scroll through the steps. The product window stays pinned while the evidence advances.</span>
+        </div>
+
+        <div class="scrolly shell" data-scrolly>
+          <div class="stage-wrap">
+            <div class="product-frame workflow-stage" aria-live="polite">
+              <div class="frame-bar"><span></span><span></span><span></span><strong data-stage-path>Research / Data &amp; Instruments</strong></div>
+              <div class="scene-stack">
+                <figure class="scene is-active" data-scene="0"><img src="assets/data-release.png" alt="Data and instruments page showing source coverage and release controls"></figure>
+                <figure class="scene" data-scene="1"><img src="assets/factor-lab.png" alt="Factor catalog with definitions, data sources, and expected direction"></figure>
+                <figure class="scene" data-scene="2"><img src="assets/oos-detail.png" alt="Out-of-sample experiment detail with registered windows and outcome"></figure>
+                <figure class="scene" data-scene="3"><img src="assets/run-lineage.png" alt="ResearchRun detail with frozen input lineage and checksums"></figure>
+                <figure class="scene" data-scene="4"><img src="assets/portfolio-risk.png" alt="Portfolio and risk page with allocation constraints"></figure>
+                <figure class="scene" data-scene="5"><img src="assets/simulation-empty.png" alt="Isolated simulation page in its truthful empty state"></figure>
+                <figure class="scene" data-scene="6"><img src="assets/job-audit.png" alt="Job center showing research task status and progress"></figure>
+              </div>
+              <div class="stage-footer">
+                <div><span data-stage-count>01 / 07</span><strong data-stage-title>Freeze the knowable input</strong></div>
+                <div class="stage-progress" aria-hidden="true"><span data-stage-progress></span></div>
+              </div>
+            </div>
+          </div>
+
+          <ol class="scroll-steps">
+            <li class="scroll-step is-active" data-step="0" data-path="Research / Data &amp; Instruments" data-title="Freeze the knowable input">
+              <article><span class="step-number">01</span><p class="step-action">Select a frozen data release</p><h3>Fix what could be known at decision time.</h3><p>Choose the instrument scope, date range, quality report, and release ID. Research refers to an immutable release, while financial observations remain bounded by <code>available_at ≤ decision_at</code>.</p><dl><div><dt>Evidence</dt><dd>Release ID, checksum, coverage, quality warnings</dd></div><div><dt>Fail closed</dt><dd>A missing primary bars instrument blocks the run</dd></div></dl></article>
+            </li>
+            <li class="scroll-step" data-step="1" data-path="Research / Factor Lab" data-title="Define a reviewable signal">
+              <article><span class="step-number">02</span><p class="step-action">Define the factor and direction</p><h3>Turn an economic idea into a reviewable signal.</h3><p>The catalog records rationale, calculation, source fields, frequency, expected direction, and known failure modes. User code stays isolated until sandbox and promotion gates pass.</p><dl><div><dt>Evidence</dt><dd>Definition, version, provenance, expected direction</dd></div><div><dt>Fail closed</dt><dd>Inactive or failed user factors cannot enter a strategy</dd></div></dl></article>
+            </li>
+            <li class="scroll-step" data-step="2" data-path="Research / Experiments &amp; OOS" data-title="Reveal the OOS answer once">
+              <article><span class="step-number">03</span><p class="step-action">Pre-register and run OOS validation</p><h3>Write the test before revealing the answer.</h3><p>Freeze the train, validation, and final test windows with thresholds and experiment budget. Completion means the process ran; support must be read from <code>oos_outcome</code>.</p><dl><div><dt>Evidence</dt><dd>Hypothesis, windows, trial count, reveal state, outcome</dd></div><div><dt>Fail closed</dt><dd>The final test reveal is one-way and cannot be rerun</dd></div></dl></article>
+            </li>
+            <li class="scroll-step" data-step="3" data-path="Research / Research Runs" data-title="Trace result to frozen inputs">
+              <article><span class="step-number">04</span><p class="step-action">Inspect ResearchRun lineage</p><h3>Trace every result back to its inputs.</h3><p>Each run binds the strategy version, data release, fees, portfolio constraints, artifacts, and result checksum. Rejected, failed, and interrupted runs remain visible beside completed ones.</p><dl><div><dt>Evidence</dt><dd>RR-*, manifest, strategy commit, checksums, artifacts</dd></div><div><dt>Fail closed</dt><dd>Manifest drift or missing frozen inputs stops execution</dd></div></dl></article>
+            </li>
+            <li class="scroll-step" data-step="4" data-path="Research / Portfolio &amp; Risk" data-title="Prove the portfolio is feasible">
+              <article><span class="step-number">05</span><p class="step-action">Apply portfolio constraints</p><h3>Prove the signal can survive portfolio reality.</h3><p>Convert approved signals into target weights under concentration, risk-contribution, cash, leverage, discrete-lot, and capital-feasibility constraints.</p><dl><div><dt>Evidence</dt><dd>Constraint set, solver outcome, three capital tiers</dd></div><div><dt>Fail closed</dt><dd>Infeasible risk contribution blocks research orders</dd></div></dl></article>
+            </li>
+            <li class="scroll-step" data-step="5" data-path="Research / Simulation" data-title="Keep simulation isolated">
+              <article><span class="step-number">06</span><p class="step-action">Promote to isolated simulation</p><h3>Move only qualified targets into a separate ledger.</h3><p>Simulation accepts published strategies and structured targets from completed ResearchRuns. It does not connect to a broker, alter live positions, or auto-promote itself.</p><dl><div><dt>Evidence</dt><dd>SIM-* session, simulation orders, fills, positions, cash</dd></div><div><dt>Truthful state</dt><dd>This capture has no simulation account, so the UI stays empty</dd></div></dl></article>
+            </li>
+            <li class="scroll-step" data-step="6" data-path="Tools / Jobs" data-title="Retain the execution trail">
+              <article><span class="step-number">07</span><p class="step-action">Review the durable audit trail</p><h3>Keep success, failure, interruption, and retry inspectable.</h3><p>The job center exposes status, phase, progress, timestamps, submitter, and stable job IDs. Refreshing the browser does not erase the execution trail.</p><dl><div><dt>Evidence</dt><dd>BJ-* ID, status, stage, timestamps, audit events</dd></div><div><dt>Recovery</dt><dd>Interrupted research retains retry semantics and identity</dd></div></dl></article>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section shell" id="boundaries" aria-labelledby="boundaries-title">
+        <div class="section-heading"><p>Safety boundaries</p><h2 id="boundaries-title">Research, simulation, and live trading are different state spaces.</h2><span>Agents can research autonomously. No agent tool reaches the live trading kernel.</span></div>
+        <div class="boundary-grid">
+          <article><span>Research</span><h3>Autonomous investigation</h3><p>Frozen data, factors, backtests, OOS validation, ResearchRuns, and reports.</p><code>research_* · factor_* · BJ-*</code></article>
+          <article><span>Simulation</span><h3>Independent paper ledger</h3><p>Consumes structured targets only. No broker connection and no automatic promotion.</p><code>simulation_* · SIM-*</code></article>
+          <article class="locked"><span>Live trading</span><h3>Human controlled</h3><p>Order entry, position mutation, credentials, and Kill Switch controls are never registered as agent tools.</p><code>orders · fills · positions</code></article>
+        </div>
+      </section>
+
+      <section class="section shell" id="plan" aria-labelledby="plan-title">
+        <div class="section-heading"><p>Complete demo plan</p><h2 id="plan-title">What this release shows, and what it deliberately does not fake.</h2><span>Every visual comes from the real local UI. Missing qualified downstream data remains an explicit empty state.</span></div>
+        <div class="plan-grid">
+          <article><span class="status ready">Ready</span><h3>Core research loop</h3><p>Frozen input, factor definition, OOS gate, ResearchRun lineage, portfolio constraints, simulation boundary, and job audit.</p><strong>Primary format: scroll-driven product walkthrough</strong></article>
+          <article><span class="status ready">Ready</span><h3>Interaction details</h3><p>English UI captures and short OOS / ResearchRun GIFs preserve list-to-detail transitions for README use.</p><strong>Secondary format: two short GIFs</strong></article>
+          <article><span class="status waiting">Waiting for evidence</span><h3>Simulation performance</h3><p>No account or equity curve is fabricated. Record this only after a qualified strategy creates a real isolated ledger.</p><strong>Future format: 20–30 second clip</strong></article>
+          <article><span class="status waiting">Runtime disabled</span><h3>Agent session</h3><p>Record OpenCode task intake, controlled MCP calls, job tracking, and cited report output in a dedicated follow-up.</p><strong>Future format: 30–45 second clip</strong></article>
+        </div>
+      </section>
+
+      <section class="release-note shell" aria-labelledby="release-title">
+        <div><p>0.1.0dev release position</p><h2 id="release-title">A runnable development release, not a return claim.</h2></div>
+        <ul><li>Research and simulation capabilities run locally; all media is captured from the product.</li><li>QMT machine validation remains gated by #22, #24, and #26.</li><li>FinDashboard is not investment advice or a hosted public trading service.</li></ul>
+        <a class="button button-primary" href="https://github.com/Caspian-Lin/FinDashboard">Read the source and setup guide</a>
+      </section>
+    </main>
+
+    <footer class="shell"><span>FinDashboard · evidence before capital</span><a href="https://github.com/Caspian-Lin/FinDashboard/blob/main/docs/demo/README.md">Demo script and verification notes</a></footer>
+  </body>
+</html>
