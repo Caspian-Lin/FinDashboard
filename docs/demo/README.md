@@ -48,6 +48,7 @@ Agent 和平台需要给出可复核的回答，而不是只给一张收益图�
 
 ## 录制与复核约束
 
+- 截图尺寸、语言、主题、悬浮层清理、固定文件名与 GIF 编码统一遵循 [`docs/memory/demo-capture-spec.md`](../memory/demo-capture-spec.md)；
 - 使用无头 Chrome / DevTools Protocol 和 ffmpeg 录制英文产品画面，不使用 Computer Use；
 - 不在媒体中展示凭证、token、数据库连接串或未脱敏 prompt；
 - 不用直接写数据库、手工改状态或营销 mock 图补齐缺失结果；
