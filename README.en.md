@@ -4,14 +4,17 @@
 
 [简体中文](./README.md) | English
 
-**A production-grade quantitative research platform where LLM agents do real research —
-safely, auditably, and reproducibly.**
+**A quantitative research platform where conclusions stay traceable and trading
+permissions stay bounded.**
 
-FinDashboard is a modular-monolith trading and research system for the Chinese A-share
-market. Human engineers own the trading core; LLM research agents get a controlled,
-least-privilege tool surface (126 MCP tools) to run the full research loop on their own —
-data ingestion → point-in-time factor computation → backtesting → out-of-sample
-validation → paper trading — with every action sandboxed and audited.
+FinDashboard is a Python + PostgreSQL modular monolith for Chinese A-share research.
+Its purpose is not to let an LLM trade directly. Research agents work through a
+least-privilege tool surface to ingest data, compute point-in-time factors, backtest,
+validate out of sample, and run paper portfolios. Every step freezes its inputs and
+retains lineage; order placement, position mutation, and the kill switch are never
+exposed to agents. Human engineers remain in control of the trading core.
+
+> [**Explore the interactive demo: how a study is validated, rejected, or promoted**](https://caspian-lin.github.io/FinDashboard/) · [Storyboard and verification notes](./docs/demo/README.md)
 
 > ⚠️ **Disclaimer** — This is a research and engineering project, not a product.
 > It is not investment advice, it makes no live trades, and its live-trading path
@@ -19,7 +22,7 @@ validation → paper trading — with every action sandboxed and audited.
 > Nothing here is deployed as a public service. Provided as-is, with no warranty.
 > Licensed under **AGPL-3.0** (see below).
 
-## Why this project exists
+## Project description
 
 Most "AI + quant" projects let an LLM generate a strategy and hope for the best.
 FinDashboard starts from the opposite premise: **an agent is only as trustworthy as
@@ -31,8 +34,8 @@ the system it operates in.** So the system enforces, at the infrastructure level
   gated by `available_at`, financial data uses `ann_date + 1`, and the code sandbox
   gets *physically isolated* data mounts (a container literally cannot read data
   dated after its decision time).
-- **Least privilege for agents** — agents see exactly 126 MCP tools, all in the
-  research/data domain. Order placement, position mutation, and kill-switch are
+- **Least privilege for agents** — agents can use research/data MCP tools only.
+  Order placement, position mutation, and kill-switch are
   *never registered as tools*. Permission model is deny-all by default with an
   explicit allowlist.
 - **Negative results are institutionalized** — the agent maintains a findings registry
@@ -50,7 +53,7 @@ made it trustworthy, is the project's flagship demo.
 flowchart TB
     subgraph AGENT["Agent layer (OpenCode runtime)"]
         A1["Research agent — permission allowlist, deny-all default"]
-        A2["126 MCP tools — research/data domain only"]
+        A2["MCP tool surface — research/data domain only"]
         A3["Docker sandbox — no network · read-only root · PIT-isolated mounts"]
     end
     subgraph RESEARCH["Research layer"]
@@ -105,31 +108,24 @@ long-term memory — all PR-reviewed documents, shared between human, coding age
 research agent. Sessions start by reading prior conclusions; re-testing a refuted
 hypothesis requires new evidence and an explicit citation of the old result.
 
-**4. Production-grade engineering.** ~106k lines of Python across 17 packages,
-285 test files (unit + integration + failure-injection), strict mypy, ruff, CI on
-every push. A persistent PostgreSQL-backed job queue (9 task kinds) with lease-based
-recovery, advisory-lock-serialized claiming, and multi-process workers. Performance
-work is measured and equivalence-locked: research loading went from 871s → 52.8s
-(16.5×) through close-matrix prebuilding and read deduplication, with byte-for-byte
-identical outputs asserted by tests.
-
-## The numbers
-
-| | |
-|---|---|
-| Python | ~106,000 lines, 314 files, 17 packages |
-| Tests | 285 files (unit / integration / failure-injection) |
-| Agent tool surface | 126 MCP tools, research domain only |
-| Task queue | 9 persistent task kinds, lease recovery, N-process workers |
-| Frontend | React 19 + TypeScript, 93 files (trading console + research workbench) |
-| History | 550+ commits, issues → PRs with full decision records |
-| Research loading perf | 871s → 52.8s (16.5×), equivalence-locked |
+**4. Production-grade engineering.** Unit, integration, and failure-injection tests
+cover the critical paths; strict mypy, ruff, and CI defend type and regression
+boundaries. The PostgreSQL-backed job queue supports lease recovery,
+advisory-lock-serialized claiming, and multi-process workers. Performance changes are
+equivalence-locked so throughput never silently changes research semantics.
 
 ## Demo
 
-> Coming with the public release: a screen-recorded end-to-end session (agent receives
-> a research brief → runs the pipeline → report with audit trail) and an interactive
-> read-only archive of the flagship research run, reconstructed from real system data.
+The [interactive demo](https://caspian-lin.github.io/FinDashboard/) uses real local
+research data to show a hypothesis moving through frozen releases, factor definition,
+OOS validation, ResearchRun lineage, portfolio gates, and isolated simulation — or
+ending in the negative-results registry when evidence is insufficient. It includes an
+overview video, focused interaction GIFs, the full storyboard, and an honest statement
+of the current data state. OpenCode and simulation footage that is not yet available is
+marked as pending rather than staged.
+
+The [storyboard, operator script, and verification record](./docs/demo/README.md) are
+also readable directly in the repository.
 
 ## Quick start
 
@@ -163,7 +159,7 @@ packages/
   finboard-data/         market data sync, PIT frozen releases, quality gates
   finboard-backtest/     replay engine, factor lab, OOS validation
   finboard-research-kit/  sandbox-side SDK for agent-submitted code
-  finboard-mcp/          the 126-tool agent surface (least privilege, audited)
+  finboard-mcp/          the agent research surface (least privilege, audited)
   finboard-opencode/     agent runtime integration (Docker-isolated web UI)
   finboard-api/          FastAPI REST + WebSocket
   finboard-app/          composition root, CLI, settings

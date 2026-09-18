@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta
+      name="description"
+      content="FinDashboard Demo：从冻结数据、因子与样本外验证，到研究运行、组合风控与隔离模拟盘的可审计量化研究闭环。"
+    >
+    <meta name="theme-color" content="#102a43">
+    <meta property="og:title" content="FinDashboard — 可审计的量化研究闭环">
+    <meta
+      property="og:description"
+      content="看一个研究假设如何被验证、拒绝或晋级，并沿证据链追溯每一步。"
+    >
+    <meta property="og:image" content="assets/research-home.png">
+    <title>FinDashboard Demo — 可审计的量化研究闭环</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="FinDashboard Demo 首页">
+        <span class="brand-mark" aria-hidden="true">FD</span>
+        <span>
+          <strong>FinDashboard</strong>
+          <small>Research evidence demo</small>
+        </span>
+      </a>
+      <button class="menu-button" type="button" aria-expanded="false" aria-controls="site-nav">
+        导航
+      </button>
+      <nav id="site-nav" aria-label="页面导航">
+        <a href="#scenario">场景</a>
+        <a href="#walkthrough">操作闭环</a>
+        <a href="#boundary">安全边界</a>
+        <a href="#recording">录制方案</a>
+        <a class="nav-source" href="https://github.com/Caspian-Lin/FinDashboard">GitHub 源码</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="release-line"><span>Demo 0.1.0dev</span> 真实研究数据 · Mock Broker · Worker 关闭</p>
+          <h1 id="hero-title">让每个研究结论，都能沿证据链走回去。</h1>
+          <p class="hero-lede">
+            FinDashboard 把 agent 的量化研究放进一个受控系统：输入在决策时点冻结，
+            计算与代码在沙箱中运行，样本外门控决定“晋级”还是“登记为负结果”，
+            实盘交易内核始终由人类掌控。
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#walkthrough">查看完整闭环</a>
+            <button class="button button-secondary" type="button" data-video-toggle aria-pressed="false">
+              播放总览
+            </button>
+          </div>
+          <dl class="hero-proof">
+            <div>
+              <dt>数据来源</dt>
+              <dd>本地真实研究库</dd>
+            </div>
+            <div>
+              <dt>录制日期</dt>
+              <dd>2026-09-18</dd>
+            </div>
+            <div>
+              <dt>实盘状态</dt>
+              <dd>QMT 真机门控中</dd>
+            </div>
+          </dl>
+        </div>
+
+        <figure class="hero-media">
+          <video
+            data-overview-video
+            muted
+            loop
+            playsinline
+            preload="metadata"
+            poster="assets/research-home.png"
+          >
+            <source src="assets/workflow-overview.mp4" type="video/mp4">
+          </video>
+          <figcaption>
+            <span class="recording-dot" aria-hidden="true"></span>
+            17 秒真实界面总览：数据发布 → 因子 → OOS → ResearchRun → 组合 → 模拟盘 → 审计
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="scenario section" id="scenario" aria-labelledby="scenario-title">
+        <div class="section-heading">
+          <p>典型应用场景</p>
+          <h2 id="scenario-title">在投入资金前，先证明一个因子值得继续。</h2>
+        </div>
+        <div class="brief">
+          <div class="brief-prompt">
+            <p class="quote-mark" aria-hidden="true">“</p>
+            <blockquote>
+              A 股截面动量是否存在稳定、成本后的样本外超额？如果证据不足，停止晋级，
+              保存失败证据，并阻止后续 agent 无条件重复试验。
+            </blockquote>
+            <p class="brief-author">研究负责人给 agent 的任务</p>
+          </div>
+          <div class="brief-resolution">
+            <p>
+              这不是“生成一个策略然后看收益曲线”的演示。系统要回答三个更重要的问题：
+              <strong>当时能知道什么、运行到底用了什么、结论为什么可以或不可以被相信。</strong>
+            </p>
+            <ul class="check-list">
+              <li>冻结发布和 checksum 锁定数据输入</li>
+              <li>IS / OOS 预注册，揭盲结果不可重做</li>
+              <li>通过门控才进入组合与模拟；失败结果进入 FINDINGS</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="walkthrough section" id="walkthrough" aria-labelledby="walkthrough-title">
+        <div class="section-heading section-heading-wide">
+          <p>操作闭环</p>
+          <h2 id="walkthrough-title">一次研究，从输入到结论的六个可审计动作。</h2>
+          <span>蓝色标记是用户操作，灰色字段是系统自动留下的证据。</span>
+        </div>
+
+        <ol class="evidence-chain">
+          <li class="evidence-step">
+            <div class="step-index" aria-hidden="true">01</div>
+            <div class="step-copy">
+              <p class="step-action">操作：选择冻结数据发布</p>
+              <h3>先固定“当时能看到的数据”。</h3>
+              <p>
+                在「数据与标的」中查看发布时间、覆盖率、质量门和发布 ID。研究运行只引用已发布版本，
+                不读取持续变化的上游表；财务观测继续受 <code>available_at ≤ decision_at</code> 约束。
+              </p>
+              <dl class="evidence-list">
+                <div><dt>页面</dt><dd>数据与标的 / 每日指标</dd></div>
+                <div><dt>证据</dt><dd>release ID · 时间范围 · 复权 · 覆盖率 · 质量状态</dd></div>
+                <div><dt>媒体</dt><dd>总览视频 + 真实状态截图</dd></div>
+              </dl>
+            </div>
+            <figure class="step-media">
+              <img src="assets/data-release.png" alt="每日指标冻结发布列表，显示发布 ID、覆盖率和质量状态" loading="lazy">
+              <figcaption>真实页面：发布带有具名 warning，而不是把缺失静默隐藏。</figcaption>
+            </figure>
+          </li>
+
+          <li class="evidence-step">
+            <div class="step-index" aria-hidden="true">02</div>
+            <div class="step-copy">
+              <p class="step-action">操作：定义因子与方向</p>
+              <h3>把经济假设变成可检查的信号。</h3>
+              <p>
+                在「因子实验室」查看经济含义、计算口径、数据来源与预期方向；用户因子只有在沙箱执行、
+                质量门与晋级门全部通过后，才能成为正式策略规格的输入。
+              </p>
+              <dl class="evidence-list">
+                <div><dt>页面</dt><dd>因子实验室 / 因子目录</dd></div>
+                <div><dt>证据</dt><dd>定义 · 数据来源 · 频率 · 预期方向 · 版本</dd></div>
+                <div><dt>媒体</dt><dd>总览视频 + 真实目录截图</dd></div>
+              </dl>
+            </div>
+            <figure class="step-media">
+              <img src="assets/factor-lab.png" alt="因子实验室目录，列出因子经济含义、计算口径、数据来源和方向" loading="lazy">
+              <figcaption>真实页面：因子不只是一个列名，它带着口径与使用边界。</figcaption>
+            </figure>
+          </li>
+
+          <li class="evidence-step evidence-step-featured">
+            <div class="step-index" aria-hidden="true">03</div>
+            <div class="step-copy">
+              <p class="step-action">操作：预注册并运行样本外验证</p>
+              <h3>先写规则，再揭盲答案。</h3>
+              <p>
+                「实验与 OOS」冻结训练、验证和最终测试窗口，以及阈值与试验预算。
+                流程完成只说明实验执行完毕；结论必须读取 <code>oos_outcome</code>，不能把状态标签当作支持证据。
+              </p>
+              <dl class="evidence-list">
+                <div><dt>页面</dt><dd>实验与 OOS / 实验详情</dd></div>
+                <div><dt>证据</dt><dd>假设 · 时间窗口 · 试验数 · 揭盲状态 · OOS 结论</dd></div>
+                <div><dt>媒体</dt><dd>GIF：实验列表 → 选中真实验证详情</dd></div>
+              </dl>
+            </div>
+            <figure class="step-media">
+              <img src="assets/oos-validation.gif" alt="从 OOS 实验列表选中一个实验，并展示预注册时间窗口和验证详情的动画" loading="lazy">
+              <figcaption>真实交互：列表中的实验被选中后，右侧展开假设、窗口与揭盲证据。</figcaption>
+            </figure>
+          </li>
+
+          <li class="evidence-step evidence-step-featured">
+            <div class="step-index" aria-hidden="true">04</div>
+            <div class="step-copy">
+              <p class="step-action">操作：检查 ResearchRun 血缘</p>
+              <h3>从结果一路追溯到输入。</h3>
+              <p>
+                每次运行绑定策略版本、数据发布、费用、组合约束与输出 checksum。
+                列表保留 completed、rejected、failed、interrupted 等状态，让失败与中断同样可查，而不是只展示“最好的一次”。
+              </p>
+              <dl class="evidence-list">
+                <div><dt>页面</dt><dd>研究运行 / 概览与绩效报告</dd></div>
+                <div><dt>证据</dt><dd>RR-* · strategy version · manifest · result checksum · artifacts</dd></div>
+                <div><dt>媒体</dt><dd>GIF：运行列表 → 选中真实 lineage 详情</dd></div>
+              </dl>
+            </div>
+            <figure class="step-media">
+              <img src="assets/research-run.gif" alt="从研究运行列表选中一次已完成运行，并展示输入清单和 checksum 的动画" loading="lazy">
+              <figcaption>真实交互：选中 RR-* 后展开冻结输入、运行状态与结果校验和。</figcaption>
+            </figure>
+          </li>
+
+          <li class="evidence-step gate-step">
+            <div class="step-index" aria-hidden="true">05</div>
+            <div class="step-copy">
+              <p class="step-action">操作：执行验证门</p>
+              <h3>系统允许两种正确结局。</h3>
+              <p>
+                “没有通过”不是 Demo 失败，而是阻止一个不稳健假设继续接近资金。
+                当前结论注册表已经把 A 股截面价格动量登记为多轮独立证伪；新会话若要重开，必须提出新证据并引用旧结论。
+              </p>
+            </div>
+            <div class="decision-map" role="img" aria-label="验证门通过后进入组合风控与模拟盘，未通过则写入结论注册表并触发重测禁令">
+              <div class="decision-source">OOS outcome</div>
+              <div class="decision-branch decision-pass">
+                <span>证据支持</span>
+                <strong>组合约束 → 三档资金可行性 → 隔离模拟盘</strong>
+              </div>
+              <div class="decision-branch decision-stop">
+                <span>证据不足 / 被证伪</span>
+                <strong>FINDINGS 结论注册 → 保留 run → 重测禁令</strong>
+              </div>
+            </div>
+          </li>
+
+          <li class="evidence-step">
+            <div class="step-index" aria-hidden="true">06</div>
+            <div class="step-copy">
+              <p class="step-action">操作：晋级到组合与隔离模拟</p>
+              <h3>只有通过门控的结果，才有下一步。</h3>
+              <p>
+                组合层执行风险贡献、离散交易与资金可行性；模拟盘只接受已发布策略和 completed ResearchRun 的结构化目标仓位。
+                本次录制库尚无模拟账户，因此页面如实展示空状态，不伪造权益曲线。
+              </p>
+              <dl class="evidence-list">
+                <div><dt>页面</dt><dd>组合与风险 / 模拟盘 / 任务中心</dd></div>
+                <div><dt>证据</dt><dd>硬约束结果 · simulation_* 账本 · job 状态与阶段</dd></div>
+                <div><dt>媒体</dt><dd>总览视频 + 当前空状态与审计截图</dd></div>
+              </dl>
+            </div>
+            <figure class="step-media split-media">
+              <img src="assets/portfolio-risk.png" alt="组合与风险页面的信号与约束配置" loading="lazy">
+              <img src="assets/simulation-empty.png" alt="模拟盘页面当前没有账户和会话的真实空状态" loading="lazy">
+              <figcaption>真实状态：能力入口已存在，当前录制库没有模拟账户或业绩。</figcaption>
+            </figure>
+          </li>
+        </ol>
+      </section>
+
+      <section class="boundary section" id="boundary" aria-labelledby="boundary-title">
+        <div class="section-heading section-heading-wide">
+          <p>安全边界</p>
+          <h2 id="boundary-title">研究、模拟、实盘是三套不同的状态空间。</h2>
+          <span>Agent 可以自主研究，但没有通往实盘交易内核的工具通道。</span>
+        </div>
+        <div class="boundary-grid">
+          <article>
+            <span class="boundary-tag">研究域</span>
+            <h3>可自主执行</h3>
+            <p>冻结数据、因子、回测、OOS、ResearchRun 和报告。</p>
+            <code>research_* / factor_* / BJ-*</code>
+          </article>
+          <article>
+            <span class="boundary-tag">模拟域</span>
+            <h3>独立纸面账本</h3>
+            <p>只消费结构化目标，不连接 Broker，也不会自动晋级。</p>
+            <code>simulation_* / SIM-*</code>
+          </article>
+          <article class="boundary-locked">
+            <span class="boundary-tag">实盘域</span>
+            <h3>人类掌控</h3>
+            <p>下单、改持仓、Kill Switch 和凭证能力永不注册为 agent 工具。</p>
+            <code>orders / fills / positions</code>
+          </article>
+        </div>
+        <figure class="audit-figure">
+          <img src="assets/job-audit.png" alt="任务中心显示研究任务状态、进度、阶段、提交人和时间" loading="lazy">
+          <figcaption>
+            任务中心保留运行、失败、中断与重试状态；刷新页面后仍可凭 job ID 找回执行轨迹。
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="recording section" id="recording" aria-labelledby="recording-title">
+        <div class="section-heading section-heading-wide">
+          <p>展示内容规划</p>
+          <h2 id="recording-title">发布版演示的完整录制清单。</h2>
+          <span>每段媒体只承担一个解释任务；主视频给全貌，短 GIF 给可验证的操作细节。</span>
+        </div>
+        <div class="recording-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">段落</th>
+                <th scope="col">操作</th>
+                <th scope="col">画面与证据</th>
+                <th scope="col">载体</th>
+                <th scope="col">当前状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>总览</td>
+                <td>沿左侧研究导航走完整链路</td>
+                <td>真实数据页面、运行状态、空状态与任务审计</td>
+                <td>17 秒 MP4</td>
+                <td><span class="status status-ready">已录制</span></td>
+              </tr>
+              <tr>
+                <td>输入</td>
+                <td>打开冻结发布并核对版本</td>
+                <td>release ID、PIT 口径、覆盖率、warning</td>
+                <td>总览片段 + PNG</td>
+                <td><span class="status status-ready">已核验</span></td>
+              </tr>
+              <tr>
+                <td>验证</td>
+                <td>从实验列表选择已揭盲实验</td>
+                <td>假设、IS/validation/OOS 窗口、outcome</td>
+                <td>5.5 秒 GIF</td>
+                <td><span class="status status-ready">已录制</span></td>
+              </tr>
+              <tr>
+                <td>血缘</td>
+                <td>从运行列表选择一次 ResearchRun</td>
+                <td>策略版本、冻结 manifest、checksum、产物</td>
+                <td>5.5 秒 GIF</td>
+                <td><span class="status status-ready">已录制</span></td>
+              </tr>
+              <tr>
+                <td>晋级</td>
+                <td>通过门控后计算组合并创建模拟会话</td>
+                <td>风险贡献、离散订单、simulation_* 账本</td>
+                <td>后续 20–30 秒视频</td>
+                <td><span class="status status-hold">等待合格模拟数据</span></td>
+              </tr>
+              <tr>
+                <td>Agent</td>
+                <td>OpenCode 接收研究任务并调用受控工具</td>
+                <td>MCP 审计、job ID、报告引用</td>
+                <td>后续 30–45 秒视频</td>
+                <td><span class="status status-hold">运行时本次未启用</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="recording-note">
+          后两段不会用摆拍或手工写入数据库补齐；只有真实通过验证门并产生模拟账本后才录制。
+          当前版本先发布可核验的研究主链，后续媒体可独立替换，不改变页面结构。
+        </p>
+      </section>
+
+      <section class="release-note section" aria-labelledby="release-title">
+        <div>
+          <p>0.1.0dev 发布口径</p>
+          <h2 id="release-title">这是一个可运行的开发版本，不是收益承诺。</h2>
+        </div>
+        <ul>
+          <li>研究与模拟能力可本地运行；页面媒体来自真实本地数据。</li>
+          <li>QMT 真机验证仍被 #22 / #24 / #26 阻塞，不把 mock 结果表述为实盘验证。</li>
+          <li>本项目不构成投资建议，不提供公开托管交易服务。</li>
+        </ul>
+        <a class="button button-primary" href="https://github.com/Caspian-Lin/FinDashboard">阅读源码与运行说明</a>
+      </section>
+    </main>
+
+    <footer>
+      <span>FinDashboard · evidence before capital</span>
+      <a href="https://github.com/Caspian-Lin/FinDashboard/blob/main/docs/demo/README.md">演示脚本与核验记录</a>
+    </footer>
+  </body>
+</html>
