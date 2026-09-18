@@ -8,7 +8,7 @@
 
 FinDashboard 面向中国 A 股量化研究,采用 Python + PostgreSQL 模块化单体架构。它的核心不是让 LLM 直接交易,而是让研究 agent 在最小权限工具面内完成数据接入、point-in-time 因子计算、回测、样本外验证和模拟交易;每一步都冻结输入、保留血缘并接受审计。真实下单、持仓修改与 Kill Switch 永远不暴露给 agent,交易内核继续由人类掌控。
 
-> [**查看交互式 Demo:一次研究如何被验证、拒绝或晋级**](https://caspian-lin.github.io/FinDashboard/) · [展示脚本与核验记录](./docs/demo/README.md)
+> [**查看交互式 Demo：一次研究如何被验证、拒绝或晋级**](https://caspian-lin.github.io/FinDashboard/zh/) · [English](https://caspian-lin.github.io/FinDashboard/) · [展示脚本与核验记录](./docs/demo/README.md)
 
 > ⚠️ **免责声明** — 本项目是研究与工程实践项目,不是产品。不构成任何投资建议;不进行任何实盘交易,实盘链路(QMT 券商对接)刻意保持在人工验证门之后;不提供任何公开部署。本项目按「现状」发布,不含任何形式的保证。许可证为 **AGPL-3.0**(见文末)。
 
@@ -72,7 +72,7 @@ flowchart TB
 
 ## Demo
 
-[交互式 Demo 页面](https://caspian-lin.github.io/FinDashboard/)用真实本地研究数据展示一个假设如何经过冻结发布、因子定义、OOS、ResearchRun、组合门控与隔离模拟,并在证据不足时进入负结果注册表。页面包含总览视频、关键操作 GIF、完整分镜和当前数据状态;未启用的 OpenCode / 模拟盘片段会明确标为待录制,不用摆拍结果填空。
+[交互式 Demo 中文页面](https://caspian-lin.github.io/FinDashboard/zh/)用真实本地研究数据展示一个假设如何经过冻结发布、因子定义、OOS、ResearchRun、组合门控与隔离模拟，并在证据不足时进入负结果注册表。页面采用滚动驱动的定格产品演示，操作推进时同步切换英文真实界面；未启用的 OpenCode / 模拟盘片段会明确标为待录制，不用摆拍结果填空。英文主页面位于 [Demo 根路径](https://caspian-lin.github.io/FinDashboard/)。
 
 仓库内可直接阅读[展示方案、操作脚本与核验记录](./docs/demo/README.md)。
 

@@ -118,11 +118,12 @@ equivalence-locked so throughput never silently changes research semantics.
 
 The [interactive demo](https://caspian-lin.github.io/FinDashboard/) uses real local
 research data to show a hypothesis moving through frozen releases, factor definition,
-OOS validation, ResearchRun lineage, portfolio gates, and isolated simulation — or
-ending in the negative-results registry when evidence is insufficient. It includes an
-overview video, focused interaction GIFs, the full storyboard, and an honest statement
-of the current data state. OpenCode and simulation footage that is not yet available is
-marked as pending rather than staged.
+OOS validation, ResearchRun lineage, portfolio gates, and isolated simulation, or
+ending in the negative-results registry when evidence is insufficient. A pinned,
+scroll-driven product window advances through the real English UI; focused GIFs remain
+available for README use. OpenCode and simulation footage that is not yet available is
+marked as pending rather than staged. A [Chinese translation](https://caspian-lin.github.io/FinDashboard/zh/)
+is published alongside the English primary page.
 
 The [storyboard, operator script, and verification record](./docs/demo/README.md) are
 also readable directly in the repository.

@@ -1,10 +1,11 @@
 # FinDashboard Demo 展示方案与核验记录
 
-线上页面：<https://caspian-lin.github.io/FinDashboard/>
+- 英文主页面：<https://caspian-lin.github.io/FinDashboard/>
+- 中文翻译：<https://caspian-lin.github.io/FinDashboard/zh/>
 
 ![FinDashboard Demo 桌面首屏](./assets/demo-page-preview.png)
 
-本 Demo 的主角不是某条“高收益曲线”，而是一个研究结论如何被系统约束、验证、追溯，并在证据不足时被安全地阻止晋级。页面和媒体均基于 2026-09-18 本地开发环境中的真实研究数据录制；录制时使用 mock broker、关闭后台 Worker，不连接真实券商，不创建订单，也不修改研究或模拟数据。
+本 Demo 的主角不是某条“高收益曲线”，而是一个研究结论如何被系统约束、验证、追溯，并在证据不足时被安全地阻止晋级。英文主页面使用滚动驱动的定格产品窗口展示完整闭环，中文页面提供对应翻译；产品画面统一使用英文 UI。页面和媒体均基于 2026-09-18 本地开发环境中的真实研究数据录制；录制时使用 mock broker、关闭后台 Worker，不连接真实券商，不创建订单，也不修改研究或模拟数据。
 
 ## 典型场景
 
@@ -25,11 +26,11 @@ Agent 和平台需要给出可复核的回答，而不是只给一张收益图�
 
 | 阶段 | 操作 | 页面展示 | 系统证据 | 媒体 |
 |---|---|---|---|---|
-| 总览 | 沿研究导航依次打开核心页面 | 数据、因子、OOS、运行、组合、模拟、任务 | 当前真实页面状态 | `assets/workflow-overview.mp4`，已录制 |
+| 总览 | 向下滚动推进七个操作 | 数据、因子、OOS、运行、组合、模拟、任务 | 当前真实页面状态 | 定格滚动窗口，已实现 |
 | 数据冻结 | 打开「数据与标的 → 每日指标」 | 已发布版本、覆盖率、质量 warning | release ID、日期范围、复权口径 | 总览片段 + `data-release.png`，已核验 |
 | 因子定义 | 打开「因子实验室」 | 经济含义、公式口径、来源、方向 | 因子目录与版本 | 总览片段 + `factor-lab.png`，已核验 |
-| 样本外验证 | 从实验列表选中已揭盲实验 | 假设、时间窗口、试验数、结论 | experiment ID、`oos_outcome` | `assets/oos-validation.gif`，已录制 |
-| 运行血缘 | 从运行列表选中 completed run | 冻结输入、策略版本、运行状态 | RR-*、manifest、result checksum | `assets/research-run.gif`，已录制 |
+| 样本外验证 | 从实验列表选中已揭盲实验 | 假设、时间窗口、试验数、结论 | experiment ID、`oos_outcome` | 英文截图 + `assets/oos-validation.gif` |
+| 运行血缘 | 从运行列表选中 completed run | 冻结输入、策略版本、运行状态 | RR-*、manifest、result checksum | 英文截图 + `assets/research-run.gif` |
 | 组合与模拟 | 选择合格 run，计算组合并创建模拟会话 | 风险贡献、离散订单、账本、权益 | 硬约束结果、SIM-*、simulation_* | 当前只有入口与空状态；等待真实合格数据后补录 |
 | Agent 操作 | 在 OpenCode 中提交研究任务 | 工具调用、job、报告引用 | MCP 审计事件、job ID | 本次隔离 worktree 未启用运行时；后续单独补录 |
 
@@ -47,9 +48,12 @@ Agent 和平台需要给出可复核的回答，而不是只给一张收益图�
 
 ## 录制与复核约束
 
-- 使用无头 Chrome / DevTools Protocol 和 ffmpeg 录制，不使用 Computer Use；
+- 使用无头 Chrome / DevTools Protocol 和 ffmpeg 录制英文产品画面，不使用 Computer Use；
 - 不在媒体中展示凭证、token、数据库连接串或未脱敏 prompt；
 - 不用直接写数据库、手工改状态或营销 mock 图补齐缺失结果；
+- 页面使用原产品深色 token、8px 面板圆角、6px 控件圆角、弱边框和无阴影；未引入 Tailwind CSS 或额外构建步骤；
+- 定格滚动使用原生 `position: sticky`、passive scroll + `requestAnimationFrame` 和 CSS opacity/transform 过渡，GitHub Pages 静态托管即可运行；
+- 文本选择色使用产品蓝的半透明变体，不使用浏览器默认选择色；
 - 每段媒体只展示一个动作，截图与 GIF 保留页面中的 run ID、状态和 warning，方便回查；
 - 模拟盘与 Agent 两段只有在真实数据和运行时可用后补录，替换媒体不改变页面叙事；
 - 发布前在桌面和移动宽度检查布局、键盘焦点、替代文本与 `prefers-reduced-motion`。
