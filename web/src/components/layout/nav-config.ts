@@ -40,17 +40,47 @@ export const navGroups: NavGroup[] = [
     label: { zh: "研究", en: "Research" },
     items: [
       { to: "/research", label: { zh: "研究首页", en: "Research Home" }, icon: Home, end: true },
-      { to: "/research/data", label: { zh: "数据与标的", en: "Data & Instruments" }, icon: Database },
-      { to: "/research/factors", label: { zh: "因子实验室", en: "Factor Lab" }, icon: Atom },
-      { to: "/research/strategy", label: { zh: "策略 Studio", en: "Strategy Studio" }, icon: SlidersHorizontal },
-      { to: "/backtest", label: { zh: "回测", en: "Backtest" }, icon: TrendingUp },
-      { to: "/research/experiments", label: { zh: "实验与 OOS", en: "Experiments & OOS" }, icon: TestTube },
-      { to: "/research/runs", label: { zh: "研究运行", en: "Research Runs" }, icon: GitBranch },
-      { to: "/research/portfolio", label: { zh: "组合与风险", en: "Portfolio & Risk" }, icon: Scale },
+      { to: "/research/topics", label: { zh: "研究课题", en: "Research Topics" }, icon: BookOpen },
+      {
+        to: "/research/strategy",
+        label: { zh: "策略 Studio", en: "Strategy Studio" },
+        icon: SlidersHorizontal,
+      },
+      {
+        to: "/research/experiments",
+        label: { zh: "实验与 OOS", en: "Experiments & OOS" },
+        icon: TestTube,
+      },
+      { to: "/research/runs", label: { zh: "研究回测", en: "Research Runs" }, icon: GitBranch },
       { to: "/research/simulation", label: { zh: "模拟盘", en: "Simulation" }, icon: PlayCircle },
-      { to: "/research/workbench", label: { zh: "研究工作台", en: "Research Workbench" }, icon: MonitorSmartphone },
-      { to: "/research/docs", label: { zh: "研究记录", en: "Research Notes" }, icon: BookOpen },
-      { to: "/research/reports", label: { zh: "研究报告", en: "Research Reports" }, icon: FileText },
+      { to: "/research/docs", label: { zh: "研究资料", en: "Research Notes" }, icon: BookOpen },
+    ],
+  },
+  {
+    label: { zh: "高级研究工具", en: "Advanced Research Tools" },
+    items: [
+      {
+        to: "/research/data",
+        label: { zh: "数据与标的", en: "Data & Instruments" },
+        icon: Database,
+      },
+      { to: "/research/factors", label: { zh: "因子实验室", en: "Factor Lab" }, icon: Atom },
+      { to: "/backtest", label: { zh: "回测", en: "Backtest" }, icon: TrendingUp },
+      {
+        to: "/research/portfolio",
+        label: { zh: "组合与风险", en: "Portfolio & Risk" },
+        icon: Scale,
+      },
+      {
+        to: "/research/workbench",
+        label: { zh: "研究工作台", en: "Research Workbench" },
+        icon: MonitorSmartphone,
+      },
+      {
+        to: "/research/reports",
+        label: { zh: "研究报告", en: "Research Reports" },
+        icon: FileText,
+      },
     ],
   },
   {

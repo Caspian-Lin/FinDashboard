@@ -1,6 +1,6 @@
 import * as React from "react";
 import { Link, useLocation } from "react-router-dom";
-import { ArrowRight, CheckCircle2, CircleHelp } from "lucide-react";
+import { ArrowRight, CircleHelp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
@@ -106,8 +106,8 @@ export const WORKFLOW_NEXT: Record<string, WorkflowNextStep> = {
     path: "/research/runs",
     label: { zh: "研究运行", en: "Research runs" },
     description: {
-      zh: "将通过验证的策略冻结为可复现的研究运行",
-      en: "Freeze the validated strategy into a reproducible research run",
+      zh: "对指定策略版本进行可复现回测，核对验证结果",
+      en: "Backtest a specified strategy version reproducibly and inspect validation evidence",
     },
   },
   runs: {
@@ -170,17 +170,18 @@ export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm" className="gap-1.5">
           <CircleHelp className="h-4 w-4" />
-          {tl({ zh: "研究流程", en: "Workflow" })}
+          {tl({ zh: "研究入口", en: "Research tools" })}
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80">
         <p className="text-sm font-medium text-foreground">
-          {tl({ zh: "研究流程", en: "Research workflow" })}
+          {tl({ zh: "研究入口", en: "Research tools" })}
         </p>
+        <p className="mt-2 text-xs text-muted-foreground">研究可暂停、分支与反复验证；页面位置不表示阶段已通过。</p>
+        <Link to="/research/topics" className="mt-2 block text-sm text-primary underline">研究课题与证据时间线</Link>
         <div className="mt-2 space-y-0.5">
           {WORKFLOW_STEPS.map((step) => {
             const isCurrent = currentStep?.step === step.step;
-            const isPast = currentStep ? step.step < currentStep.step : false;
             return (
               <Link
                 key={step.path}
@@ -188,15 +189,9 @@ export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
                 className={cn(
                   "flex items-center gap-2 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
                   isCurrent && "bg-primary/10 text-primary",
-                  isPast && "text-success",
-                  !isCurrent && !isPast && "text-muted-foreground hover:text-foreground",
+                  !isCurrent && "text-muted-foreground hover:text-foreground",
                 )}
               >
-                {isPast ? (
-                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <span className="w-3.5 shrink-0 text-center tabular-nums opacity-60">{step.step}</span>
-                )}
                 {tl(step.label)}
               </Link>
             );
@@ -208,8 +203,8 @@ export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
           </p>
           <p className="mt-0.5 px-2 text-xs text-muted-foreground">
             {tl({
-              zh: "不参与上述晋级链:回测用于快速探索,工作台与研究记录是辅助入口。",
-              en: "Not part of the promotion chain above: backtests are for quick exploration, while the workbench and research notes are auxiliary entries.",
+              zh: "按问题选择工具：回测用于快速探索，工作台用于交互，正式资料用于查结论。",
+              en: "Choose tools for the question: explore with backtests, interact in the workbench, and consult accepted findings in research docs.",
             })}
           </p>
           <div className="mt-1 space-y-0.5">
@@ -237,7 +232,7 @@ export function WorkflowHelpPopover({ next }: { next?: WorkflowNextStep }) {
             >
               <span>
                 <span className="block text-xs font-medium text-foreground">
-                  {tl({ zh: "下一步：", en: "Next: " })}
+                  {tl({ zh: "相关工具：", en: "Related tool: " })}
                   {typeof next.label === "string" ? next.label : tl(next.label)}
                 </span>
                 {next.description && (

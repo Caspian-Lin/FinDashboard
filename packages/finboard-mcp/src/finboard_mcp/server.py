@@ -94,6 +94,7 @@ from finboard_mcp.tools import (
     register_validation_experiment_tools,
     register_watchlist_tools,
 )
+from finboard_mcp.tools.workspace import register as register_workspace_tools
 
 _INSTRUCTIONS = """\
 FinBoard 研究 MCP —— 量化研究工具集
@@ -107,7 +108,9 @@ FinBoard 研究 MCP —— 量化研究工具集
 回测(行情回放 + 纸面撮合)→ 模拟盘(持久化隔离)→ 评估(绩效分析)。
 完整流程详解见 Skill `references/research-workflow.md`。
 
-== 当前可用工具(128 个,已实现;#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)==
+课题与记忆引用用 finboard_source_check 核对精确版本/checksum与自动产物事实;断链与旧目标保留,文档优先于工作解释。研究工具按问题使用,可暂停、分支、复核与续接,并非必须线性执行。
+
+== 当前可用工具(134 个,已实现;#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)==
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -479,6 +482,13 @@ FinBoard 研究 MCP —— 量化研究工具集
   上线,LLM 产出仍须走
   研究→回测→OOS→模拟→影子→小资金完整晋级链。
 
+== 研究课题与冻结解释 (#499/#500) ==
+- finboard_topic_read/write 管理版本化目标与追加式轮次,写入不运行回测。工作摘要/agent解释不是正式结论;docs/research经PR维护,文档冲突时以文档为准。
+- finboard_memory_page 分页摘录,保留状态、来源与纠正链;历史故障已修复不能作为当前故障。
+- finboard_strategy_explain 必须指定运行或精确策略版本;只有commit匹配的因子定义可解释为历史机制。
+- finboard_decision_explain 用日期或decision_id+symbol有界下钻,禁止拉全量artifact替代;目标不等于成交,缺阶段不猜原因。
+- OOS先看oos_outcome再看status;published/completed不是晋级通过。
+
 == 输出规范 ==
 - 工具返回统一信封 ToolEnvelope(operation_id / status / data / error /
   provenance / idempotency_key;序列化时省略恒为 null 的可选字段,#206)。
@@ -494,6 +504,7 @@ def build_mcp_server() -> MCPServer:
         instructions=_INSTRUCTIONS,
         lifespan=app_lifespan,
     )
+    register_workspace_tools(mcp)
     register_run_tools(mcp)
     register_memory_tools(mcp)
     register_data_tools(mcp)

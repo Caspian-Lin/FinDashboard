@@ -28,7 +28,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-当前已实现 128 个工具(#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+当前已实现 134 个工具(#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
@@ -118,3 +118,5 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | `references/research-workflow.md` | 完整研究流程详解(数据→因子→策略→回测→模拟→评估) |
 | `references/memory.md` | 研究记忆使用规则与生命周期 |
 | `references/system-overview.md` | FinBoard 系统架构概览(包结构 / 模块职责 / 研究 vs 实盘隔离) |
+
+研究上下文入口：`finboard_topic_read/write` 保存课题、目标版本与追加轮次；`finboard_memory_page` 查看旧笔记与纠正链；`finboard_source_check` 核查引用；`finboard_strategy_explain` 与 `finboard_decision_explain` 有界解释冻结规则和实际决策。完整契约见 `references/tools.md`，不得用完成/发布状态代替 OOS 结论。

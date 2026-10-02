@@ -61,6 +61,11 @@
   ```
   OOS 执行走 `validation_experiment` 后台任务，揭盲一次性不可重做；screen 用 draft 产物须显式绑定（`screen_artifact_bindings`）；晋级与沙箱运行归档 code commit × 数据 release × 参数 × output checksum 四向引用。
 
+### 研究读侧与课题归档（#498–#500）
+- 研究课题/轮次只保存独立元数据与精确引用；目标更新保留版本，轮次追加与幂等纠正，不改冻结run/checksum、不自动启动研究。
+- 策略说明书只用指定版本/冻结manifest；因子实现锚不匹配标记缺证据。日期/标的决策解释必须先SQL投影分页，不拉全量artifact。
+- 工作摘要、agent解释与自动事实分开；canonical结论仍在docs/research经PR维护。
+
 ### LLM / Agent 边界
 LLM（包括本 agent 自身）**不允许**：直接连接实盘账户、直接发送订单、修改账户持仓、绕过风控、在实盘运行时动态生成代码并立即执行。LLM 的产出必须经过完整流程才可上实盘：`研究 → 回测 → 样本外 → 行情回放 → 模拟交易 → 影子交易 → 小资金实盘 → 扩大资金`。
 

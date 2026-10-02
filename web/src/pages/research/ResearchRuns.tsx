@@ -1,3 +1,5 @@
+import StrategyExplanation from "@/components/research/StrategyExplanation";
+import { runSchedule } from "@/lib/research-semantics";
 import { ResearchHint } from "@/components/research/ResearchHint";
 import { RESEARCH_HINTS } from "@/lib/research-hints";
 import { RunReportView } from "@/components/research/report/RunReportView";
@@ -196,21 +198,18 @@ function frozenRefs(value: unknown): FrozenRef[] {
  * 冻结输入结构化视图:把 manifest 里埋着的数据发布 / 因子快照 / 执行模式
  * 提升为可读卡片,dataset_release_ids 可跳数据页详情、快照可跳因子实验室。
  */
-function FrozenInputsCard({ manifest }: { manifest: Record<string, unknown> }) {
+function FrozenInputsCard({ manifest, result }: { manifest: Record<string, unknown>; result?: Record<string, unknown> | null }) {
   const { tl } = useT();
   const releases = frozenRefs(manifest.dataset_releases);
   const snapshots = frozenRefs(manifest.factor_snapshots);
-  const parameters = manifestRecord(manifest, "parameters");
   const benchmarkConfig = manifestRecord(manifest, "benchmark_config");
   const benchmarkSymbol =
     typeof benchmarkConfig?.symbol === "string" && benchmarkConfig.symbol !== ""
       ? benchmarkConfig.symbol
       : null;
-  const rebalanceFrequency =
-    typeof parameters?.rebalance_frequency === "string" && parameters.rebalance_frequency !== ""
-      ? parameters.rebalance_frequency
-      : null;
-  const executionMode = rebalanceFrequency !== null ? "multi_period" : "single_shot";
+  const schedule = runSchedule({ manifest, result });
+  const executionMode = schedule.mode;
+  const rebalanceFrequency = schedule.frequency;
   const specChecksum =
     typeof manifest.strategy_spec_checksum === "string" ? manifest.strategy_spec_checksum : null;
   const codeVersion =
@@ -218,7 +217,6 @@ function FrozenInputsCard({ manifest }: { manifest: Record<string, unknown> }) {
       ? manifest.code_version
       : null;
 
-  if (releases.length === 0 && snapshots.length === 0) return null;
 
   return (
     <Card>
@@ -239,7 +237,7 @@ function FrozenInputsCard({ manifest }: { manifest: Record<string, unknown> }) {
           <span>
             {tl({ zh: "执行模式:", en: "Execution mode:" })}
             <Badge variant="info" className="ml-1.5 font-mono">
-              {executionMode}
+              {executionMode === "unknown" ? tl({ zh: "执行模式未知", en: "Unknown execution mode" }) : executionMode}
             </Badge>
             {rebalanceFrequency && (
               <span className="ml-2 text-muted-foreground">
@@ -248,6 +246,8 @@ function FrozenInputsCard({ manifest }: { manifest: Record<string, unknown> }) {
               </span>
             )}
           </span>
+          {schedule.count !== null && <span>决策日历：{schedule.first} 至 {schedule.last}，{schedule.count} 次</span>}
+          {schedule.conflict && <span className="text-warning">决策日历与旧频率同时存在，请核对冻结输入</span>}
           {benchmarkSymbol && (
             <span>
               {tl({ zh: "基准:", en: "Benchmark:" })}
@@ -635,12 +635,12 @@ export default function ResearchRuns() {
   // 与 ?run= 参数并存(setSearchParams replace,不产生历史记录)。
   const reportAvailable = detail?.status === "completed";
   const requestedTab = searchParams.get("tab");
-  const activeTab: "overview" | "report" =
-    requestedTab === "report" && reportAvailable ? "report" : "overview";
+  const activeTab: "overview" | "report" | "explanation" =
+    requestedTab === "explanation" ? "explanation" : requestedTab === "report" && reportAvailable ? "report" : "overview";
   const handleTabChange = (value: string) => {
     const next = new URLSearchParams(searchParams);
-    if (value === "report") {
-      next.set("tab", "report");
+    if (value === "report" || value === "explanation") {
+      next.set("tab", value);
     } else {
       next.delete("tab");
     }
@@ -898,6 +898,7 @@ export default function ResearchRuns() {
                   <Tabs value={activeTab} onValueChange={handleTabChange}>
                     <div className="mb-3 flex flex-wrap items-center gap-3">
                       <TabsList>
+                        <TabsTrigger value="explanation">策略说明书</TabsTrigger>
                         <TabsTrigger value="overview">
                           {tl({ zh: "概览", en: "Overview" })}
                         </TabsTrigger>
@@ -914,6 +915,7 @@ export default function ResearchRuns() {
                         </p>
                       )}
                     </div>
+                    <TabsContent value="explanation"><StrategyExplanation key={detail.run_id} runId={detail.run_id} /></TabsContent>
                     <TabsContent value="overview">
                       <ScrollArea className="max-h-[720px] pr-3">
                         <div className="space-y-5">
@@ -1111,7 +1113,7 @@ export default function ResearchRuns() {
                             </Alert>
                           )}
 
-                          {detail.manifest && <FrozenInputsCard manifest={detail.manifest} />}
+                          {detail.manifest && <FrozenInputsCard manifest={detail.manifest} result={detail.result} />}
 
                           <Separator />
 

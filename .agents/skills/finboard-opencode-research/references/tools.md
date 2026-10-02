@@ -1824,3 +1824,33 @@ def decide(ctx):
   → 消费门(普通入队/编译)放行。
 - v1 边界:逐日决策函数(decide),**不做**事件驱动 on_bar(日内止损 /
   执行形态研究如需,另行开 issue);纯离线研究域,不连 broker 不下单。
+
+
+## 研究课题与冻结解释（#499/#500）
+
+本节描述当前真实注册工具，工具数量以 server 注册表为准。没有新执行或晋级能力。
+
+| 工具 | 参数 / 返回 | 边界 |
+|---|---|---|
+| `finboard_topic_read` | topic_id?、entries=false、limit=20(1–50)、offset=0(≤100000)；无ID返回课题分页，有ID返回详情，entries=true返回轮次分页 | 先读工作目标/开放问题，再核对 canonical 文档 |
+| `finboard_topic_write` | operation=create/update/append、payload；update需topic_id+expected_revision，append需topic_id+idempotency_key | 研究写，readonly_only拒绝；创建者服务端固定；不运行回测 |
+| `finboard_memory_page` | limit=20、offset；1200字SQL摘录、status/created_by/confirmed_by/supersedes_id/refs | 历史状态不隐藏，unknown/空refs不可验证 |
+| `finboard_source_check` | kind/ref_id、version?、checksum?；status=matched/missing/version_required/version_mismatch/checksum_mismatch，facts自动事实 | matched只证引用，不证盈利/晋级；document根目录内md |
+| `finboard_strategy_explain` | run_id，或strategy_id+version；provenance/spec/factors/effective_policies/overrides/gaps/warnings | 指定冻结运行优先；不读最新版本替代历史；因子commit不匹配就缺证据 |
+| `finboard_decision_explain` | run_id、symbol?、decision_id?、business_date?、limit=100(≤200)、offset；items/has_more | 无symbol列决策目录；下钻须symbol+ID或日期；字段白名单/SQL先分页，每条16KiB；不拉全量artifacts |
+
+合法课题创建：
+```json
+{"operation":"create","payload":{"title":"小盘反转复核","question":"净收益是否依赖执行近似？","goal":{"version":"2026-09-01","criteria":"年化>=15%；最大回撤<=20%；后续OOS必须另验","source":{"kind":"document","ref_id":"ROADMAP.md"}},"status":"active","conclusion":"unknown","open_questions":["同策略OOS与成本压力仍缺证据"],"next_step":"核对冻结运行"}}
+```
+更新传完整同形payload及expected_revision（并发冲突后重新读取，不覆盖）；goal换版本追加目标快照，不改历史验收。
+
+合法轮次追加：
+```json
+{"operation":"append","topic_id":"RT-<已有ID>","idempotency_key":"round-20261003-input-audit","payload":{"entry_type":"round","goal_version":"2026-09-01","objective":"核对冻结输入","action":"读取指定运行说明书并核验来源","rationale":"避免混源或使用最新目录解释旧策略","outcome":"completed","conclusion":"尚缺同策略OOS，当前不能认定可信","confidence":"low","next_step":"记录压力证据缺口","source_refs":[{"kind":"research_run","ref_id":"RR-e909662f7b2c9f7ad30e89c4"}],"branch":"baseline-audit"}}
+```
+同键重试保持payload完全一致；改内容换新键。纠正用supersedes_id链接同课题旧轮次。来源种类research_run/strategy/dataset/experiment/memory/document/factor_series/simulation/backtest；策略关联补version，checksum有则传。禁止created_by字段。摘要与解释不是正式接受结论，docs/research仍经PR维护。
+
+先读 `oos_outcome` 再读实验 `status`。validated_oos+not_supported不能称验证通过；published/completed不能称晋级。决策目录→选ID/日期+symbol→翻has_more，目标与成交分开解释，空阶段说明缺记录。成本/滑点/延迟配置不等于已执行，真实能力缺口仍见#502/#503。
+
+课题列表为excerpted摘要（问题/摘要/下一步最多1200字、开放问题最多5项各300字），查精确ID详情才取完整工作目标。目标同版本不可换门槛，轮次goal_version须已归档。记忆refs超过16KiB标refs_truncated且不可验证；说明书冻结manifest限1MiB、因子params限16KiB，超限不退回全量run_get。
