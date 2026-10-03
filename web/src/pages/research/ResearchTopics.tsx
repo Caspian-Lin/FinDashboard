@@ -7,12 +7,15 @@ import { Input, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LoadingState, ErrorState, EmptyState } from "@/components/ui/states";
 import { EvidenceFields } from "@/components/research/StrategyExplanation";
+import { ResearchMemoryArticle } from "@/components/research/ResearchMemoryArticle";
+import { ResearchTimestamp } from "@/components/research/ResearchTimestamp";
 import {
   workspaceApi,
   evidenceUrl,
   type EvidenceRef,
   type TopicInput,
   type RoundInput,
+  type MemoryDetail,
 } from "@/lib/research-workspace";
 import { fetchJSON } from "@/lib/api";
 
@@ -76,6 +79,19 @@ export function EvidenceLinks({ refs }: { refs: EvidenceRef[] }) {
         );
       })}
     </ul>
+  );
+}
+function MemoryEvidence({ refs }: { refs: EvidenceRef[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="min-w-0 text-sm" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="cursor-pointer text-muted-foreground">关联证据（{refs.length}）</summary>
+      {open && (
+        <div className="mt-3">
+          <EvidenceLinks refs={refs} />
+        </div>
+      )}
+    </details>
   );
 }
 function SourceFact({ reference }: { reference: EvidenceRef }) {
@@ -213,12 +229,11 @@ export default function ResearchTopics() {
   const memories = useQuery({
     queryKey: ["memory-page", memoryOffset],
     queryFn: () => workspaceApi.memories(memoryOffset),
-    enabled: tab === "memories",
+    enabled: tab === "memories" && !memoryId,
   });
   const memory = useQuery({
     queryKey: ["memory-selected", memoryId],
-    queryFn: () =>
-      fetchJSON<Record<string, unknown>>(`/research/memories/${encodeURIComponent(memoryId!)}`),
+    queryFn: () => fetchJSON<MemoryDetail>(`/research/memories/${encodeURIComponent(memoryId!)}`),
     enabled: tab === "memories" && !!memoryId,
   });
   const save = useMutation({
@@ -683,7 +698,7 @@ export default function ResearchTopics() {
                   {entries.data?.items.map((e) => (
                     <article key={e.entry_id} className="space-y-3 border-t border-border py-4">
                       <p className="text-xs text-muted-foreground">
-                        {e.created_at} · {e.created_by} · {e.entry_id}
+                        <ResearchTimestamp value={e.created_at} /> · {e.created_by} · {e.entry_id}
                       </p>
                       {e.topic ? (
                         <>
@@ -736,59 +751,104 @@ export default function ResearchTopics() {
         </div>
       )}
       {tab === "memories" && (
-        <section className="space-y-4">
+        <section aria-label="研究记忆阅读区" className="w-full min-w-0 max-w-5xl space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
+            <p>这里是跨课题的记忆库。课题通过引用组织相关记忆，原记录保留。</p>
+            <Link className="shrink-0 text-primary underline underline-offset-4" to="/research/docs?doc=topic-organization.md">课题组织说明</Link>
+          </div>
           {memoryId && (
-            <div className="rounded-md border border-border p-4">
+            <section aria-label="选定记忆详情" className="min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-base font-semibold">完整记忆</h2>
+                <Button variant="outline" onClick={() => setParams({ tab: "memories" })}>
+                  返回记忆列表
+                </Button>
+              </div>
               {memory.isLoading && <LoadingState />}
               {memory.isError && (
                 <ErrorState message={String(memory.error)} onRetry={() => memory.refetch()} />
               )}
-              {memory.data && <EvidenceFields value={memory.data} />}
-            </div>
+              {memory.data && (
+                <ResearchMemoryArticle
+                  memory={memory.data}
+                  content={memory.data.content}
+                  detail
+                  evidence={
+                    <>
+                      <EvidenceLinks refs={memory.data.source_refs} />
+                      {(!memory.data.source_refs.length ||
+                        memory.data.source_refs.some(
+                          (ref) => !ref.ref_id || ref.kind === "unknown",
+                        )) && (
+                        <p className="text-sm text-warning">
+                          旧引用为空或含unknown，不能验证此处解释。
+                        </p>
+                      )}
+                    </>
+                  }
+                  actions={
+                    memory.data.supersedes_id && (
+                      <Link
+                        className="break-all text-sm text-primary underline"
+                        to={`/research/topics?memory=${encodeURIComponent(memory.data.supersedes_id)}`}
+                      >
+                        查看被纠正的记忆：{memory.data.supersedes_id}
+                      </Link>
+                    )
+                  }
+                />
+              )}
+            </section>
           )}
-          {memories.isLoading && <LoadingState />}
-          {memories.isError && (
+          {!memoryId && memories.isLoading && <LoadingState />}
+          {!memoryId && memories.isError && (
             <ErrorState message={String(memories.error)} onRetry={() => memories.refetch()} />
           )}
-          {memories.data?.items.length === 0 && (
+          {!memoryId && memories.data?.items.length === 0 && (
             <EmptyState
               title="暂无研究记忆"
               description="agent 通过研究记忆工具保存跨会话笔记，在此核查来源。"
             />
           )}
-          {memories.data?.items.map((m) => (
-            <article className="space-y-3 border-t border-border py-4" key={m.memory_id}>
-              <h2 className="font-medium">
-                {m.memory_id} · {STATES[m.status] ?? m.status}
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                {m.created_at} · 来源 {m.created_by} ·{" "}
-                {m.confirmed_by ? `已由 ${m.confirmed_by} 确认，仍不替代文档` : "未确认解释"}
-              </p>
-              <p className="max-w-prose whitespace-pre-wrap text-sm">
-                {m.excerpt}
-                {m.content_length > 1200 ? "…（正文有截取）" : ""}
-              </p>
-              <EvidenceLinks refs={m.source_refs} />
-              {m.unverifiable_refs && (
-                <p className="text-sm text-warning">
-                  旧引用为空、含unknown或超过摘要上限，不能验证此处解释。
-                </p>
-              )}
-              {m.supersedes_id && (
-                <Link
-                  className="text-sm text-primary underline"
-                  to={`/research/topics?memory=${encodeURIComponent(m.supersedes_id)}`}
-                >
-                  查看被纠正的记忆：{m.supersedes_id}
-                </Link>
-              )}
-              <Button variant="outline" onClick={() => setParams({ memory: m.memory_id })}>
-                查看完整记忆与来源
-              </Button>
-            </article>
-          ))}
-          <Pager offset={memoryOffset} more={memories.data?.has_more} onChange={setMemoryOffset} />
+          {!memoryId &&
+            memories.data?.items.map((m) => (
+              <ResearchMemoryArticle
+                key={m.memory_id}
+                memory={m}
+                content={m.excerpt}
+                excerpted={m.content_length > 1200}
+                evidence={
+                  <>
+                    <MemoryEvidence refs={m.source_refs} />
+                    {m.unverifiable_refs && (
+                      <p className="text-sm text-warning">
+                        旧引用为空、含unknown或超过摘要上限，不能验证此处解释。
+                      </p>
+                    )}
+                    {m.supersedes_id && (
+                      <Link
+                        className="break-all text-sm text-primary underline"
+                        to={`/research/topics?memory=${encodeURIComponent(m.supersedes_id)}`}
+                      >
+                        查看被纠正的记忆：{m.supersedes_id}
+                      </Link>
+                    )}
+                  </>
+                }
+                actions={
+                  <Button variant="outline" onClick={() => setParams({ memory: m.memory_id })}>
+                    查看完整记忆与来源
+                  </Button>
+                }
+              />
+            ))}
+          {!memoryId && (
+            <Pager
+              offset={memoryOffset}
+              more={memories.data?.has_more}
+              onChange={setMemoryOffset}
+            />
+          )}
         </section>
       )}
     </div>

@@ -81,6 +81,8 @@ remember → active
 
 ## 课题续接与收尾（#500）
 
+把旧记忆关联到新课题时，topic_write append entry_type=evidence的source_refs写kind=memory+精确RM-ID，并同时引用相关运行/实验；不为归类改写旧记忆或纠正链，旧故障保留历史状态。误关联用同课题supersedes_id追加纠正；真正的记忆内容纠错才走memory_correct。完整例子见只读docs/research/topic-organization.md，课题目录当前用entries分页读取。
+
 启动仍先读ROADMAP/FINDINGS与记忆索引；再finboard_topic_read选稳定课题ID，加载当前目标版本、开放问题及最近轮次。文档与工作摘要冲突保留双方来源并以文档为canonical，不自行松门。finboard_memory_page分页核对来源/纠正链，历史故障不得直接当当前故障；finboard_source_check核验精确引用。
 
 轮次收尾用topic_write append记录目标/动作/理由/精确证据/解释置信度/下一步与失败或暂停原因。工作结论仅研究记录，不自动接受；文档仍由用户或主coding agent经PR落库，研究容器只读。继续同时按原协议保存research-round记忆指针并附轮次摘要。非线性研究无需按工具页面顺序执行，不重复已证伪假设；需重开时先引用旧结论和新证据。

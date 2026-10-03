@@ -484,6 +484,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 
 == 研究课题与冻结解释 (#499/#500) ==
 - finboard_topic_read/write 管理版本化目标与追加式轮次,写入不运行回测。工作摘要/agent解释不是正式结论;docs/research经PR维护,文档冲突时以文档为准。
+- 课题是持续更新的锚点与逻辑目录;已有运行/记忆/实验用topic_write append entry_type=evidence的精确source_refs关联,原产物不改写,可被多课题引用。先source_check核查,按entries分页续接;误关联追加supersedes_id纠正。没有单独聚合/反向归属API。完整例子见docs/research/topic-organization.md与Skill tools.md。
 - finboard_memory_page 分页摘录,保留状态、来源与纠正链;历史故障已修复不能作为当前故障。
 - finboard_strategy_explain 必须指定运行或精确策略版本;只有commit匹配的因子定义可解释为历史机制。
 - finboard_decision_explain 用日期或decision_id+symbol有界下钻,禁止拉全量artifact替代;目标不等于成交,缺阶段不猜原因。

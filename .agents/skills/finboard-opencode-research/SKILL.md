@@ -113,10 +113,12 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 | 文档 | 内容 |
 |------|------|
-| `references/tools.md` | 125 个 MCP 工具完整契约(参数 / 返回 / 场景) |
+| `references/tools.md` | MCP 工具完整契约(参数 / 返回 / 场景，以运行时注册表为准) |
 | `references/workflow.md` | 研究工作流决策树 + 标准研究循环 |
 | `references/research-workflow.md` | 完整研究流程详解(数据→因子→策略→回测→模拟→评估) |
 | `references/memory.md` | 研究记忆使用规则与生命周期 |
 | `references/system-overview.md` | FinBoard 系统架构概览(包结构 / 模块职责 / 研究 vs 实盘隔离) |
 
 研究上下文入口：`finboard_topic_read/write` 保存课题、目标版本与追加轮次；`finboard_memory_page` 查看旧笔记与纠正链；`finboard_source_check` 核查引用；`finboard_strategy_explain` 与 `finboard_decision_explain` 有界解释冻结规则和实际决策。完整契约见 `references/tools.md`，不得用完成/发布状态代替 OOS 结论。
+
+课题是持续更新的研究锚点，不等于一次run。组织已有运行/记忆/实验用topic_write append的entry_type=evidence及精确source_refs，原产物不搬动、不改写、可被多个课题引用。完整“核查→创建→归档→分页续接→版本更新”例子见只读挂载 `/workspace/docs/research/topic-organization.md`；缺挂载时见references/tools.md的已有证据归档示例。

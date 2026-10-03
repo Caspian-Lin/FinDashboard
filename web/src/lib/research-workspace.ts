@@ -64,6 +64,14 @@ export interface Memory {
   unverifiable_refs: boolean;
   refs_truncated?: boolean;
 }
+export interface MemoryDetail
+  extends Omit<Memory, "excerpt" | "content_length" | "unverifiable_refs"> {
+  content: string;
+  tags: string[];
+  updated_at: string;
+  confirmed_at: string | null;
+  conversation_id: string | null;
+}
 export interface Page<T> {
   items: T[];
   has_more: boolean;

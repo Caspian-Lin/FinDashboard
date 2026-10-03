@@ -1851,6 +1851,16 @@ def decide(ctx):
 ```
 同键重试保持payload完全一致；改内容换新键。纠正用supersedes_id链接同课题旧轮次。来源种类research_run/strategy/dataset/experiment/memory/document/factor_series/simulation/backtest；策略关联补version，checksum有则传。禁止created_by字段。摘要与解释不是正式接受结论，docs/research仍经PR维护。
 
+### 已有证据归入课题
+
+课题是持续更新的锚点，目录当前由轮次source_refs构成，无独立聚合/反向归属API。先topic_read检查已有课题，memory_page/原run及实验查询选精确ID，source_check核验，再topic_write create（完整输入见上）和append evidence。不是改原run或记忆的topic_id，原产物可被多课题引用，不能为了归类调用memory_correct。完整流程见 `/workspace/docs/research/topic-organization.md`。
+
+```json
+{"operation":"append","topic_id":"RT-<已有ID>","idempotency_key":"historical-evidence-v1-001","payload":{"entry_type":"evidence","goal_version":"<该课题已有目标版本>","objective":"组织历史研究证据","action":"核查选定运行、记忆与实验的精确ID后追加引用","rationale":"保留历史并跨会话续接","outcome":"completed","conclusion":"归档动作完成，策略可信度仍待复核","confidence":"unknown","next_step":"核对冻结版本与OOS结论","source_refs":[{"kind":"research_run","ref_id":"RR-<完整ID>"},{"kind":"memory","ref_id":"RM-<完整ID>"},{"kind":"experiment","ref_id":"<完整实验ID>"}],"branch":"historical-evidence"}}
+```
+
+占位ID替换为已核查ID；未找到的实验不添加，写入缺口。每条最多30个refs，分批用稳定幂等键，同键同payload重试。topic_read entries=true默认20条，has_more时按offset续页；先读当前目标再挑相关轮次，不加载全量长文。update必须expected_revision+完整输入payload，去掉读取响应的ID/revision/作者/时间/evidence_level字段；内容改动换goal.version，冲突重新读取。supersedes_id纠正误关联，不删除旧条目。
+
 先读 `oos_outcome` 再读实验 `status`。validated_oos+not_supported不能称验证通过；published/completed不能称晋级。决策目录→选ID/日期+symbol→翻has_more，目标与成交分开解释，空阶段说明缺记录。成本/滑点/延迟配置不等于已执行，真实能力缺口仍见#502/#503。
 
 课题列表为excerpted摘要（问题/摘要/下一步最多1200字、开放问题最多5项各300字），查精确ID详情才取完整工作目标。目标同版本不可换门槛，轮次goal_version须已归档。记忆refs超过16KiB标refs_truncated且不可验证；说明书冻结manifest限1MiB、因子params限16KiB，超限不退回全量run_get。

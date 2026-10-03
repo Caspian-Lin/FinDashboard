@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import StrategyExplanation from "@/components/research/StrategyExplanation";
 import ResearchTopics from "./ResearchTopics";
 import { workspaceApi } from "@/lib/research-workspace";
+import { fetchJSON } from "@/lib/api";
 
 vi.mock("@/lib/research-workspace", async () => {
   const actual = await vi.importActual<typeof import("@/lib/research-workspace")>(
@@ -36,7 +37,13 @@ function show(ui: ReactElement, route = "/research/topics") {
     </QueryClientProvider>,
   );
 }
-beforeEach(() => vi.resetAllMocks());
+beforeEach(() => {
+  vi.resetAllMocks();
+  const empty = { items: [], has_more: false, offset: 0, limit: 20 };
+  vi.mocked(workspaceApi.topics).mockResolvedValue(empty);
+  vi.mocked(workspaceApi.memories).mockResolvedValue(empty);
+  vi.mocked(fetchJSON).mockResolvedValue({ status: "missing" });
+});
 describe("研究解释与课题的可核验界面", () => {
   it("按精确运行解释并有界请求决策，不把目标当成交", async () => {
     vi.mocked(workspaceApi.explain).mockResolvedValue({
@@ -119,10 +126,45 @@ describe("研究解释与课题的可核验界面", () => {
       limit: 20,
     });
     show(<ResearchTopics />, "/research/topics?tab=memories");
-    expect(await screen.findByText(/RM-old · 已纠正/)).toBeInTheDocument();
+    expect(await screen.findByText("RM-old")).toBeInTheDocument();
+    expect(screen.getByText("已纠正/移除")).toBeInTheDocument();
+    expect(screen.getByText("2026-09-01（时区未记录）")).toHaveAttribute("datetime", "2026-09-01");
     expect(screen.getByText(/历史故障，当前已修复/)).toBeInTheDocument();
-    expect(screen.getByText(/无法验证的来源/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("关联证据（1）"));
+    expect(await screen.findByText(/无法验证的来源/)).toBeInTheDocument();
     expect(screen.getByText(/未确认解释/)).toBeInTheDocument();
+    await waitFor(() => expect(workspaceApi.memories).toHaveBeenCalledWith(0));
+  });
+  it("完整记忆按 Markdown 阅读，显示北京时间与原始时间，不重复加载列表", async () => {
+    const iso = "2026-10-02T16:35:07.174174Z";
+    vi.mocked(fetchJSON).mockResolvedValue({
+      memory_id: "RM-readable",
+      memory_type: "insight",
+      content:
+        "【可信度复核记录】\n## 仍缺的证据\n- **同源 OOS**\n- 执行压力\n\n| 证据 | 状态 |\n| --- | --- |\n| 压力 | 待核查 |\n\n![外部图片](https://example.com/private-tracking.png)\n\n<script>bad()</script>",
+      status: "active",
+      source_refs: [],
+      tags: ["research-round"],
+      created_by: "agent:mcp",
+      created_at: iso,
+      updated_at: iso,
+      confirmed_by: null,
+      confirmed_at: null,
+      supersedes_id: "RM-old",
+      conversation_id: null,
+    });
+    show(<ResearchTopics />, "/research/topics?memory=RM-readable");
+    expect(await screen.findByRole("heading", { name: "可信度复核记录" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "仍缺的证据" })).toBeInTheDocument();
+    expect(screen.getByText("同源 OOS").tagName).toBe("STRONG");
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    const time = screen.getByText("2026/10/03 00:35:07（北京时间）");
+    expect(time).toHaveAttribute("datetime", iso);
+    expect(time).toHaveAttribute("title", iso);
+    expect(screen.getByRole("link", { name: "查看被纠正的记忆：RM-old" })).toBeInTheDocument();
+    expect(workspaceApi.memories).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "返回记忆列表" }));
     await waitFor(() => expect(workspaceApi.memories).toHaveBeenCalledWith(0));
   });
 });

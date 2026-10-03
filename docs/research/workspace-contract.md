@@ -22,6 +22,8 @@ ResearchRun 是冻结输入后执行的离线研究回放，不等同所有研�
 
 ## 课题与轮次
 
+课题是跨会话持续更新的研究锚点与逻辑证据目录；当前目录由追加轮次的source_refs组成，尚无单独聚合/反向归属API。已有运行、记忆和实验用 `entry_type=evidence` 引用关联，保留原产物和历史状态，一个产物可被多个课题引用。完整操作见 [课题组织与已有证据归档](topic-organization.md)。
+
 课题稳定ID `RT-`，含 title/question、goal（version/criteria/source）、status（active/paused/closed）、conclusion（工作结论）、summary/open_questions/next_step。更新需 expected_revision，旧版本冲突返回409；每次更新追加目标快照，历史15%/20%与当次15%/10%门可分别记录，系统不自行决定新门。
 
 轮次稳定ID `RE-`，只追加，记录 goal_version/objective/action/rationale/outcome/conclusion/confidence/next_step、source_refs、branch、supersedes_id。同课题幂等键相同且内容相同返回原记录，内容不同拒绝；纠正链仅能引用同课题已有记录。可记录 completed/failed/interrupted/rejected/paused，不抹掉失败与断续过程。引用精确ID，策略版本需补 version；checksum可选，缺失会限制核验强度。用户创建者由REST固定为user:api，agent由MCP固定为agent:mcp，payload不能伪造创建者。
@@ -31,6 +33,8 @@ ResearchRun 是冻结输入后执行的离线研究回放，不等同所有研�
 `GET /api/research/topics` 和 `/{topic_id}/entries` 默认20最多50、offset分页；详情 `/{topic_id}`。POST创建、PUT更新、POST `/{topic_id}/entries` 追加。`/memories` SQL截取每条1200字摘录，显示来源、确认、状态与 supersedes_id；选定记忆详情复用既有记忆API。旧故障描述不自动成为当前事实，空/unknown引用提示无法验证。
 
 FinDashboard 保存研究结构，OpenCode 保存原对话；不恢复对话流量代理、不读取凭证、不自动推送文档PR。
+
+记忆列表和完整详情共用有界阅读区及 Markdown 排版；列表只读1200字摘录，关联证据展开时才核查，详情按选定ID读取正文。创建/更新/确认及轮次时间显示人类可读的北京时间，原ISO保留于time.dateTime/title；历史时间缺偏移时明确“时区未记录”，不猜绝对时刻。
 
 ## 工具同步、验证与回滚
 

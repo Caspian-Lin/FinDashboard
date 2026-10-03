@@ -77,7 +77,7 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_topic_read",
-        description="分页课题/轮次,默认20最多50;无topic_id列课题,有ID读取详情,entries=true列轮次。工作摘要不是canonical结论。",
+        description="分页课题/轮次,默认20最多50;无topic_id列课题,有ID读取详情,entries=true读轮次和引用目录,has_more按offset续页。课题是持续锚点,工作摘要不是canonical结论。",
     )
     async def read(
         topic_id: str | None = None,
@@ -94,7 +94,7 @@ def register(mcp: MCPServer) -> None:
 
     @mcp.tool(
         name="finboard_topic_write",
-        description="结构化课题create/update/append;更新需expected_revision,追加轮次需幂等键。目标包含version/criteria/source,轮次包含goal_version/objective/action/rationale/source_refs/conclusion/confidence/next_step。只保存研究记录,不运行研究、不接受正式结论。契约见tools.md。",
+        description="结构化课题create/update/append;更新需expected_revision,追加需幂等键。entry_type=round记录尝试,evidence组织已有运行/记忆/实验的精确source_refs,不改写原产物。目标含version/criteria/source,轮次含goal_version/objective/action/rationale/conclusion/confidence/next_step。只保存记录,不运行研究、不接受正式结论。例子见tools.md与topic-organization.md。",
     )
     async def write(
         operation: str,
