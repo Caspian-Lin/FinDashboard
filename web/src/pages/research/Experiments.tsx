@@ -1,3 +1,5 @@
+import { useSearchParams } from "react-router-dom";
+import { oosLabel } from "@/lib/research-semantics";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical, Plus, RefreshCw, Trash2, X } from "lucide-react";
@@ -60,11 +62,10 @@ import { useT, useLanguage, type LocalizedText } from "@/i18n";
 
 const STATUS_OPTIONS: { value: string; label: LocalizedText }[] = [
   { value: "all", label: { zh: "全部", en: "All" } },
-  { value: "draft", label: { zh: "草稿", en: "Draft" } },
-  { value: "registered", label: { zh: "已注册", en: "Registered" } },
-  { value: "running", label: { zh: "运行中", en: "Running" } },
-  { value: "completed", label: { zh: "已完成", en: "Completed" } },
-  { value: "failed", label: { zh: "失败", en: "Failed" } },
+  { value: "hypothesis", label: { zh: "假设已登记", en: "Hypothesis" } },
+  { value: "in_sample", label: { zh: "样本内搜索", en: "In sample" } },
+  { value: "validated_oos", label: { zh: "OOS 流程完成", en: "OOS completed" } },
+  { value: "superseded", label: { zh: "已被取代", en: "Superseded" } },
   { value: "rejected", label: { zh: "已拒绝", en: "Rejected" } },
 ];
 
@@ -250,7 +251,8 @@ function versionStampText(
 
 function experimentStatusLabel(status: string, lang: "zh" | "en"): string {
   const labels: Record<string, LocalizedText> = {
-    hypothesis: { zh: "假设已冻结", en: "Hypothesis frozen" },
+    hypothesis: { zh: "假设已登记", en: "Hypothesis" },
+    superseded: { zh: "已被取代", en: "Superseded" },
     draft: { zh: "草稿", en: "Draft" },
     registered: { zh: "已注册", en: "Registered" },
     running: { zh: "运行中", en: "Running" },
@@ -258,6 +260,8 @@ function experimentStatusLabel(status: string, lang: "zh" | "en"): string {
     failed: { zh: "失败", en: "Failed" },
     rejected: { zh: "已拒绝", en: "Rejected" },
   };
+  if (status === "validated_oos") return lang === "zh" ? "OOS 流程完成" : "OOS completed";
+  if (status === "in_sample") return lang === "zh" ? "样本内搜索" : "In sample";
   return labels[status]?.[lang] ?? status;
 }
 
@@ -551,8 +555,8 @@ function CreateExperimentDialog({
           <DialogTitle>{tl({ zh: "创建验证实验", en: "Create validation experiment" })}</DialogTitle>
           <DialogDescription>
             {tl({
-              zh: "定义策略假设、验证计划和 OOS 测试区间。提交后进入 draft 状态，可在实验详情中拒绝或删除。",
-              en: "Define the strategy hypothesis, validation plan and OOS test window. After submission the experiment enters draft status and can be rejected or deleted from the experiment detail view.",
+              zh: "定义策略假设、验证计划和 OOS 测试区间。提交后登记为 hypothesis 状态，可在实验详情中拒绝或删除。",
+              en: "Define the strategy hypothesis, validation plan and OOS test window. After submission the experiment enters hypothesis status and can be rejected or deleted from the experiment detail view.",
             })}
           </DialogDescription>
         </DialogHeader>
@@ -798,8 +802,11 @@ export default function Experiments() {
   const { tl } = useT();
   const { lang } = useLanguage();
   const queryClient = useQueryClient();
+  const [params, setParams] = useSearchParams();
+  const [outcomeFilter, setOutcomeFilter] = React.useState("all");
   const [statusFilter, setStatusFilter] = React.useState<string>("all");
-  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const selectedId = params.get("experiment");
+  const setSelectedId = (id: string | null) => setParams(id ? { experiment: id } : {});
   const [createOpen, setCreateOpen] = React.useState(false);
   const [rejectOpen, setRejectOpen] = React.useState(false);
   const [rejectReason, setRejectReason] = React.useState("");
@@ -881,22 +888,22 @@ export default function Experiments() {
               <p className="rounded bg-card/50 px-2 py-1">
                 <span className="font-medium text-foreground">{tl({ zh: "回测", en: "Backtest" })}</span>{" "}
                 {tl({
-                  zh: '= 单次运行看结果（回答"赚不赚钱"）',
-                  en: '= one run to see the result (answers “is it profitable”)',
+                  zh: "= 在冻结数据与成交假设下回放，观察净收益与风险",
+                  en: "= replay frozen data under execution assumptions to observe net returns and risk",
                 })}
               </p>
               <p className="rounded bg-card/50 px-2 py-1">
                 <span className="font-medium text-foreground">{tl({ zh: "验证实验", en: "Validation experiment" })}</span>{" "}
                 {tl({
-                  zh: '= 多维度检验防过拟合（回答"是不是运气好"）',
-                  en: '= multi-dimensional checks against overfitting (answers “was it luck”)',
+                  zh: "= 检验预注册假设；流程完成后仍需读取 OOS 结论",
+                  en: "= test a preregistered hypothesis; read the OOS outcome after completion",
                 })}
               </p>
               <p className="rounded bg-card/50 px-2 py-1">
                 <span className="font-medium text-foreground">{tl({ zh: "模拟盘", en: "Simulation" })}</span>{" "}
                 {tl({
-                  zh: '= 用纸面资金持续跟踪（回答"真实环境下还行不行"）',
-                  en: '= continuous tracking with paper money (answers “does it hold up in a real environment”)',
+                  zh: "= 用纸面资金持续跟踪，成交仍依赖模拟假设",
+                  en: "= continuous tracking with paper money; fills still depend on simulation assumptions",
                 })}
               </p>
             </div>
@@ -945,7 +952,7 @@ export default function Experiments() {
             </>
           }
           toolbar={
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <div className="space-y-2"><Label>流程状态</Label><Select value={statusFilter} onValueChange={setStatusFilter}>
               <SelectTrigger className="h-8 w-full text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -957,6 +964,8 @@ export default function Experiments() {
                 ))}
               </SelectContent>
             </Select>
+            <Label>OOS 结论（当前列表）</Label><Select value={outcomeFilter} onValueChange={setOutcomeFilter}><SelectTrigger aria-label="OOS 结论筛选"><SelectValue /></SelectTrigger><SelectContent>{["all", "supported", "not_supported", "inconclusive", "unknown"].map(v => <SelectItem key={v} value={v}>{v === "all" ? "全部结论" : oosLabel(v, lang)}</SelectItem>)}</SelectContent></Select>
+            </div>
           }
         >
           {listQuery.isLoading ? (
@@ -969,8 +978,8 @@ export default function Experiments() {
               )}
               onRetry={() => listQuery.refetch()}
             />
-          ) : listQuery.data && listQuery.data.length > 0 ? (
-            listQuery.data.map((exp: ValidationExperiment) => (
+          ) : listQuery.data && listQuery.data.some(exp => outcomeFilter === "all" || (exp.oos_outcome ?? "unknown") === outcomeFilter) ? (
+            listQuery.data.filter(exp => outcomeFilter === "all" || (exp.oos_outcome ?? "unknown") === outcomeFilter).map((exp: ValidationExperiment) => (
               <MasterListItem
                 key={exp.experiment_id}
                 selected={selectedId === exp.experiment_id}
@@ -984,6 +993,7 @@ export default function Experiments() {
                     {exp.experiment_id}
                   </span>
                 </div>
+                <p className="mt-2 text-xs">{oosLabel(exp.oos_outcome, lang)}</p>
                 <p className="mt-2 line-clamp-2 text-sm text-foreground">
                   {exp.hypothesis}
                 </p>
@@ -1002,7 +1012,7 @@ export default function Experiments() {
           ) : (
             <EmptyState
               icon={<FlaskConical className="h-8 w-8" />}
-              title={tl({ zh: "暂无实验", en: "No experiments yet" })}
+              title={outcomeFilter !== "all" ? tl({ zh: "当前筛选没有实验", en: "No experiments match this filter" }) : tl({ zh: "暂无实验", en: "No experiments yet" })}
               description={tl({
                 zh: "点击右上角「创建验证实验」开始检验你的策略假设。",
                 en: 'Click “Create validation experiment” in the top right to start testing your strategy hypothesis.',
@@ -1028,9 +1038,10 @@ export default function Experiments() {
                         {selectedId}
                       </span>
                       {detail && (
-                        <StatusBadge status={detail.status}>
+                        <> <StatusBadge status={detail.status}>
                           {experimentStatusLabel(detail.status, lang)}
                         </StatusBadge>
+                        <Badge variant="outline">{oosLabel(detail.oos_outcome, lang)}</Badge> </>
                       )}
                     </CardTitle>
                     {detail && (

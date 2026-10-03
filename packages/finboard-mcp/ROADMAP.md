@@ -668,3 +668,9 @@ L3 沙箱路线第四环:agent 编写的**策略**代码进入回测。用户决
   三处同步)。回滚 = kit 0.1.0 + 移除 registry/dispatch/gate;无新工具名。
 
 `_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` / AGENTS.md / README 已同步。
+
+## 研究收束与解释（#499/#500）
+
+已实现topic_read/write、memory_page、source_check、strategy_explain、decision_explain：稳定课题ID与版本目标，追加轮次与纠正，分页摘录，冻结规则与有界单标的决策证据。只研究元数据和读侧，不新增执行阶段、晋级或实盘能力。年度诊断/可比性、同策略OOS、实际压力矩阵仍见#501/#502/#503。
+
+课题组织与旧证据归档：entry_type=evidence+精确source_refs关联原run/记忆/实验，不改写原产物，可跨课题引用；entries分页作为当前逻辑目录，尚无聚合/反向归属API。完整MCP操作示例见docs/research/topic-organization.md与Skill；记忆UI共用Markdown阅读区、北京时间和按需证据核查。

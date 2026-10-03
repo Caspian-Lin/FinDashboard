@@ -46,6 +46,8 @@ from finboard_api.routes import (
     strategy_specs_router,
     watchlist_router,
 )
+from finboard_api.routes.research_topics import explanation_router
+from finboard_api.routes.research_topics import router as research_topics_router
 from finboard_api.simulation_ws import SimulationConnectionManager
 from finboard_api.ws import ConnectionManager, setup_event_bridge, teardown_event_bridge
 from finboard_app.bootstrap import build_kernel_components
@@ -471,6 +473,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(strategy_specs_router)
     app.include_router(research_router)
     app.include_router(research_docs_router)
+    app.include_router(research_topics_router)
+    app.include_router(explanation_router)
     app.include_router(research_memories_router)
     app.include_router(research_runs_router)
     app.include_router(jobs_router)

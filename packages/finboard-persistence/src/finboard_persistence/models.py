@@ -2309,6 +2309,29 @@ class McpAuditEventModel(Base, IdMixin):
     )
 
 
+class ResearchTopicModel(Base, IdMixin):
+    """Research metadata only; never owns or deletes evidence (#500)."""
+
+    __tablename__ = "research_topics"
+    topic_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ResearchTopicEntryModel(Base, IdMixin):
+    __tablename__ = "research_topic_entries"
+    entry_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    topic_id: Mapped[str] = mapped_column(String(32), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    checksum: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (UniqueConstraint("topic_id", "idempotency_key", name="uq_research_topic_entry_key"),)
+
+
 class ResearchMemoryModel(Base, IdMixin):
     """研究长期记忆 / 研究笔记持久化(issue #110)。
 

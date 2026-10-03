@@ -344,6 +344,10 @@ export const factorLabApi = {
 /* ============================================================ */
 
 export type ExperimentStatus =
+  | "hypothesis"
+  | "in_sample"
+  | "validated_oos"
+  | "superseded"
   | "draft"
   | "registered"
   | "running"
@@ -365,7 +369,8 @@ export interface ValidationExperiment {
   experiment_id: string;
   hypothesis: string;
   version_stamp: string | Record<string, unknown>;
-  status: ExperimentStatus | "hypothesis";
+  status: ExperimentStatus;
+  oos_outcome?: "supported" | "not_supported" | "inconclusive" | null;
   plan: Record<string, unknown>;
   thresholds: Record<string, unknown>;
   robustness: Record<string, unknown>;

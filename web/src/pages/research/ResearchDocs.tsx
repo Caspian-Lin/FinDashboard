@@ -157,8 +157,8 @@ export default function ResearchDocs() {
       <PageHeader
         title={tl({ zh: "研究记录", en: "Research Notes" })}
         description={tl({
-          zh: "外置研究 agent 维护的仓库文档(三件套 + 轮次日志),只读展示;canonical 仍是仓库文件,经 PR 维护。",
-          en: "Repository docs maintained by the external research agent (three-piece set + round logs), read-only; canonical source stays in the repo via PRs.",
+          zh: "仓库研究文档与正式轮次，经 PR 维护。agent 的工作记录和研究记忆在「研究课题」查看。",
+          en: "Canonical research documents maintained via PRs. Agent rounds and memories are available in Research Topics.",
         })}
         actions={
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">

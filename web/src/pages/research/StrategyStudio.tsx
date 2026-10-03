@@ -689,6 +689,7 @@ export default function StrategyStudio() {
               )}
 
               {/* 数据与信号链路只读视图 */}
+              {selectedKind && history?.map(h => <Button key={h.version} variant="outline" size="sm" asChild><Link to={`/research/strategy-explanation?strategy=${encodeURIComponent(selectedKind)}&version=${h.version}`}>阅读 v{h.version} 策略说明书</Link></Button>)}
               <SpecChainPanel spec={spec} releases={releasesQuery.data ?? []} />
 
               {/* Editor body */}

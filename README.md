@@ -189,3 +189,5 @@ The current phase prioritizes research data releases, factor experiments, Resear
 ## License
 
 Released under the [GNU Affero General Public License v3.0](./LICENSE). If you offer a modified version as a network service, you must make the corresponding source available under the same license.
+
+研究复核入口：研究课题页保存非线性轮次、精确证据与下一步；策略说明书展示冻结规则及实际方向。契约见[研究课题与冻结说明书](docs/research/workspace-contract.md)，执行模型局限见[执行误差与数据粒度](docs/research/execution-uncertainty.md)。

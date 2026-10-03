@@ -36,3 +36,11 @@ agent、OpenCode 研究 agent(容器内只读挂载在 `/workspace/docs/research
 `research-plan` / `research-round` / `finding-confirmed` / `finding-refuted`
 ——`finboard_memory_list(tag=...)` 的检索入口,语义见 Skill
 `references/memory.md`。
+
+## 执行与研究界面契约（#497–#500）
+
+- [执行误差与数据粒度](execution-uncertainty.md)：成交近似、压力能力和分钟/tick范围。
+- [研究课题与冻结说明书](workspace-contract.md)：版本目标、轮次、来源核验与状态语义。
+- [课题组织与已有证据归档](topic-organization.md)：持续更新的研究锚点、非排他引用与 agent 完整调用示例。
+
+课题及追加轮次存在 FinDashboard 的独立研究元数据表，不依赖抓取 OpenCode 对话。工作摘要与 agent 解释不自动成为正式结论；经复核接受的结论仍经PR进入本目录。文档与记忆冲突保留双方来源，以文档为canonical。

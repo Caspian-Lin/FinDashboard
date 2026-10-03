@@ -4,6 +4,9 @@ import { AppShell } from "@/components/layout/AppShell";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { Skeleton } from "@/components/ui/skeleton";
 
+const ResearchTopics = React.lazy(() => import("@/pages/research/ResearchTopics"));
+const StrategyExplanationPage = React.lazy(() => import("@/pages/research/StrategyExplanationPage"));
+
 /* Research domain (lazy) */
 const ResearchHome = React.lazy(() => import("@/pages/research/ResearchHome"));
 const ResearchData = React.lazy(() => import("@/pages/research/ResearchData"));
@@ -51,6 +54,8 @@ export default function App() {
         <React.Suspense fallback={<PageLoader />}>
           <Routes>
             {/* Research */}
+            <Route path="/research/topics" element={<ResearchTopics />} />
+            <Route path="/research/strategy-explanation" element={<StrategyExplanationPage />} />
             <Route path="/research" element={<ResearchHome />} />
             <Route path="/research/data" element={<ResearchData />} />
             <Route path="/research/factors" element={<FactorLab />} />

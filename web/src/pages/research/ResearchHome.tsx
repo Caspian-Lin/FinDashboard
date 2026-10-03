@@ -1,3 +1,4 @@
+import TopicOverview from "@/components/research/TopicOverview";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
@@ -63,7 +64,7 @@ export default function ResearchHome() {
 
   const completedRuns = runsError ? null : runs?.filter((r) => r.status === "completed").length ?? 0;
   const runningRuns = runsError ? null : runs?.filter((r) => r.status === "running" || r.status === "queued").length ?? 0;
-  const completedExps = experimentsError ? null : experiments?.filter((e) => e.status === "completed").length ?? 0;
+  const completedExps = experimentsError ? null : experiments?.filter((e) => e.status === "validated_oos").length ?? 0;
   const activeSims = simSessionsError ? null : simSessions?.filter((s) => s.status === "running").length ?? 0;
   const hasQueryError = runsError || experimentsError || releasesError || simSessionsError;
 
@@ -71,9 +72,10 @@ export default function ResearchHome() {
     <div>
       <PageHeader
         title={tl({ zh: "研究首页", en: "Research Home" })}
-        description={tl({ zh: "从数据到模拟盘的完整研究工作流", en: "The full research workflow, from data to simulation" })}
+        description={tl({ zh: "按研究课题继续：查看当前问题、证据缺口和下一步", en: "Continue from the research question, evidence gaps and next step" })}
       />
 
+      <TopicOverview />
       {hasQueryError && (
         <Alert variant="warning" className="mb-4">
           <AlertTitle>{tl({ zh: "研究首页有数据未加载", en: "Some Research Home data failed to load" })}</AlertTitle>
@@ -86,13 +88,13 @@ export default function ResearchHome() {
       {/* Stats */}
       <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label={tl({ zh: "已完成研究运行", en: "Completed Research Runs" })} value={completedRuns ?? "—"} icon={CheckCircle2} hint={runningRuns === null ? tl({ zh: "加载失败", en: "Load failed" }) : runningRuns > 0 ? tl({ zh: `${runningRuns} 个进行中`, en: `${runningRuns} in progress` }) : tl({ zh: "全部完成", en: "All completed" })} />
-        <StatCard label={tl({ zh: "已完成实验", en: "Completed Experiments" })} value={completedExps ?? "—"} icon={TestTube} hint={experimentsError ? tl({ zh: "加载失败", en: "Load failed" }) : undefined} />
+        <StatCard label={tl({ zh: "近期OOS流程完成", en: "Recent OOS completions" })} value={completedExps ?? "—"} icon={TestTube} hint={experimentsError ? tl({ zh: "加载失败", en: "Load failed" }) : undefined} />
         <StatCard label={tl({ zh: "最近数据发布", en: "Recent Data Releases" })} value={releasesError ? "—" : releases?.length ?? 0} icon={Database} hint={releasesError ? tl({ zh: "加载失败", en: "Load failed" }) : undefined} />
         <StatCard label={tl({ zh: "活动模拟会话", en: "Active Simulation Sessions" })} value={activeSims ?? "—"} icon={PlayCircle} hint={simSessionsError ? tl({ zh: "加载失败", en: "Load failed" }) : undefined} />
       </div>
 
       {/* Workflow quick access */}
-      <h2 className="mb-3 text-sm font-semibold text-foreground">{tl({ zh: "研究工作流", en: "Research Workflow" })}</h2>
+      <h2 className="mb-3 text-sm font-semibold text-foreground">{tl({ zh: "研究工具入口", en: "Research Workflow" })}</h2>
       <div className="mb-8 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {workflowSteps.map((step) => (
           <Link
