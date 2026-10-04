@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -63,6 +64,8 @@ from finboard_backtest.validation.runner import (
 TrialRunnerFactory = Callable[
     [AsyncSession, ResearchExperiment], Awaitable[TrialRunner]
 ]
+validation_progress: ContextVar[ProgressCallback | None] = ContextVar("validation_progress", default=None)
+validation_job_id: ContextVar[str | None] = ContextVar("validation_job_id", default=None)
 
 _RUNNABLE_STATUSES = frozenset(
     {ExperimentStatus.HYPOTHESIS, ExperimentStatus.IN_SAMPLE}
@@ -91,6 +94,8 @@ class ValidationExperimentExecutor:
         experiment_id = _extract_experiment_id(job)
         await progress(0, None, "validation_experiment:start")
         async with self._session_maker() as session:
+            token = validation_progress.set(progress)
+            job_token = validation_job_id.set(job.job_id)
             try:
                 return await self._execute_locked(
                     session, progress, experiment_id
@@ -101,6 +106,9 @@ class ValidationExperimentExecutor:
                 raise await _execution_failed_error(
                     session, experiment_id, exc
                 ) from exc
+            finally:
+                validation_progress.reset(token)
+                validation_job_id.reset(job_token)
 
     async def _execute_locked(
         self,
@@ -138,7 +146,8 @@ class ValidationExperimentExecutor:
         done = 0
         if pending:
             await progress(done, total_stages, "validation_experiment:in_sample")
-            for trial in await runner.run_in_sample(pending):
+            for candidate in pending:
+                trial = (await runner.run_in_sample([candidate]))[0]
                 await trial_repo.save(trial)
                 await exp_repo.save(runner.experiment)
                 await session.commit()
@@ -172,7 +181,11 @@ class ValidationExperimentExecutor:
         # 揭盲是一次性门:重入时已持久化 unsealed/终态的实验在上面
         # _precheck_runnable 已拒绝;走到这里说明本次会话内完成 IS+OOS。
         await progress(done, total_stages, "validation_experiment:final_test")
-        verdict = await runner.unseal_final_test()
+        async def persist_unseal(experiment: ResearchExperiment) -> None:
+            await exp_repo.save(experiment)
+            await session.commit()
+
+        verdict = await runner.unseal_final_test(before_execute=persist_unseal)
         await exp_repo.save(runner.experiment)
         if runner.best_trial_id is not None:
             final_best = next(
@@ -364,11 +377,16 @@ async def default_trial_runner_factory(
     试验预算(issue #244)。回测直接走 ``BacktestEngine``,不落
     backtest_runs(试验属于实验,不属于回测历史)。
     """
-    del session  # 预留:快照/数据面扩展时复用请求级 session
     raw_config = experiment.version_stamp.selection_config.get(
         "validation_trial_runner"
     )
     config: dict[str, Any] = dict(raw_config) if isinstance(raw_config, Mapping) else {}
+    if config.get("kind") == "research_spec":
+        from finboard_app.spec_validation import spec_trial_runner_factory
+
+        return await spec_trial_runner_factory(session, experiment)
+    if config.get("kind", "registry") != "registry":
+        raise ExecutorError(code="unsupported_trial_runner_kind", summary="未知验证runner类型", retryable=False)
     strategy_name = config.get("strategy")
     symbols = config.get("symbols")
     if not isinstance(strategy_name, str) or not strategy_name:
@@ -454,7 +472,9 @@ async def default_trial_runner_factory(
         params: dict[str, object],
         config_overrides: dict[str, object] | None = None,
     ) -> Any:
-        del config_overrides  # 预留:窗口级成本/滑点压力覆盖
+        from finboard_backtest.validation.execution import registry_stress_overrides
+
+        fee_overrides = registry_stress_overrides(config_overrides or {})
         merged: dict[str, Any] = {**base_params, **params}
         strategy = create_strategy(strategy_name, "backtest", **merged)
         backtest_config = BacktestConfig(
@@ -463,6 +483,7 @@ async def default_trial_runner_factory(
             end=end,
             initial_capital=capital,
             strategy_params=merged,
+            fee_overrides=fee_overrides,
             benchmark=(
                 BenchmarkConfig(symbol=str(benchmark))
                 if benchmark
@@ -474,7 +495,18 @@ async def default_trial_runner_factory(
             data_provider=provider,
             config=backtest_config,
         )
-        return await engine.run()
+        result = await engine.run()
+        if config.get("stress_schema") == "executed_v1":
+            from finboard_backtest.research_run.contracts import stable_checksum
+            binding = {"experiment_id": experiment.experiment_id, "runner_kind": "registry",
+                "version_checksum": experiment.version_stamp.checksum(), "strategy": strategy_name,
+                "symbols": symbol_codes, "start": start.isoformat(), "end": end.isoformat(),
+                "params": merged, "capital": str(capital), "overrides": config_overrides or {},
+                "fee_assumptions": result.fee_assumptions}
+            result.matching_model["validation_evidence"] = {**binding,
+                "trial_execution_id": f"VT-{stable_checksum(binding)[:24]}", "fill_count": len(result.fills),
+                "limitations": ["registry provider reads; declared dataset versions do not freeze provider data", "not a formal ResearchStrategySpec run"]}
+        return result
 
     return _run
 

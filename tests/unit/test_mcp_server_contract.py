@@ -15,6 +15,8 @@ from mcp import Client
 from finboard_mcp import build_mcp_server
 
 _EXPECTED_TOOLS = {
+    "finboard_run_diagnostics", "finboard_run_compare",
+    "finboard_decision_projection", "finboard_research_stress",
     "finboard_source_check",
     "finboard_topic_read", "finboard_topic_write", "finboard_memory_page",
     "finboard_strategy_explain", "finboard_decision_explain",

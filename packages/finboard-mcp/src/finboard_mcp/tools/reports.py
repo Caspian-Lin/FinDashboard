@@ -50,9 +50,7 @@ def _payload_too_large_error(run_id: str, estimated_bytes: int) -> McpToolError:
         "payload_too_large",
         f"run {run_id} 的 detail 载荷估计约 {estimated_mb:.1f}MB,超过上限 "
         f"{limit_mb:.0f}MB,拒绝加载与序列化(不静默截断)。替代路径:view=summary "
-        '看聚合计数;view="detail" + decision_id=... 按决策下钻(单决策 '
-        'artifacts 有界);report_export(kind="run", decision_id=...) 导出'
-        "单决策。",
+        '看聚合计数;decision_id过滤仍须护栏;finboard_decision_projection 按白名单字段分页。',
     )
 
 
@@ -61,17 +59,15 @@ async def _require_detail_payload_within_limit(
     run_id: str,
     decision_id: str | None,
 ) -> None:
-    """detail 未下钻时,加载前用数据库侧估计做载荷护栏(#480)。
+    """detail/单决策均在加载前用数据库侧估计做载荷护栏(#480/#501)。
 
     旧口径(#458)在 ``list_artifacts`` 全量物化之后才估计,只能拒绝序列化、
     挡不住加载本身 —— 真实 run 实测加载阶段就把进程顶到 10GB+。现在先
     ``estimate_artifact_payload_bytes``(SQL 侧 SUM(octet_length),不取回
-    payload),超限直接具名 ``payload_too_large``,根本不加载;下钻单决策
-    artifacts 有界,维持豁免。
+    payload),超限直接具名 ``payload_too_large``,根本不加载。
+    #501 单决策过滤也估计所选范围,不能假定阶段数少就载荷小。
     """
-    if decision_id is not None:
-        return
-    estimated = await repo.estimate_artifact_payload_bytes(run_id)
+    estimated = await repo.estimate_artifact_payload_bytes(run_id, decision_id) if decision_id else await repo.estimate_artifact_payload_bytes(run_id)
     if estimated > reporting.RUN_DETAIL_MAX_ESTIMATED_BYTES:
         raise _payload_too_large_error(run_id, estimated)
 
@@ -145,7 +141,7 @@ async def report_run(
     """聚合 ResearchRun 报告:view=summary 默认(聚合计数)/ detail(全量)。
 
     issue #458:``decision_id`` 仅 detail 可用 —— 只返回该决策的 artifacts
-    (大 run 的诊断下钻通道,护栏豁免);summary 传 ``decision_id`` 拒绝
+    (大 run 的诊断下钻通道,同样执行SQL护栏);summary 传 ``decision_id`` 拒绝
     (invalid_argument)。detail 未下钻且载荷估计超限时抛 ``payload_too_large``。
     """
 

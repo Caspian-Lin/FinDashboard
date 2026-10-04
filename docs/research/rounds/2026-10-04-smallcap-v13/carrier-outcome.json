@@ -1,0 +1,68 @@
+{
+  "experiment_id": "bc9fc5af85e84173",
+  "version_checksum": "7219e221abaa8eee",
+  "version_stamp": {
+    "matching_model_version": "macd-hist-r1",
+    "asset_rules_version": "e2e-r2",
+    "factor_version": null,
+    "dataset_versions": {
+      "a_share_daily_bars": "2026-08-04-v1"
+    },
+    "selection_config": {
+      "validation_trial_runner": {
+        "capital": 100000,
+        "params": {
+          "long_window": 20,
+          "max_position_pct": 0.95,
+          "short_window": 5
+        },
+        "strategy": "ma_cross",
+        "symbols": [
+          "600519.SH",
+          "000858.SZ",
+          "601318.SH",
+          "600036.SH",
+          "000333.SZ",
+          "600900.SH",
+          "601012.SH",
+          "000651.SZ",
+          "600276.SH",
+          "300750.SZ",
+          "601899.SH",
+          "600030.SH",
+          "601166.SH",
+          "002594.SZ",
+          "600887.SH",
+          "000002.SZ",
+          "601888.SH",
+          "600309.SH",
+          "002415.SZ",
+          "600809.SH",
+          "000568.SZ",
+          "601633.SH",
+          "600028.SH",
+          "601857.SH",
+          "601398.SH",
+          "601988.SH",
+          "600016.SH",
+          "002304.SZ",
+          "000725.SZ",
+          "603288.SH"
+        ]
+      }
+    },
+    "strategy_kind": "ma_cross",
+    "code_artifact_id": "RC-d29d015dc1e24e5fba8299e7",
+    "code_artifact_name": "macd_hist",
+    "code_kind": "factor",
+    "code_commit": "22fde7c6c694bb7769a739e2b491e16c09842ddf"
+  },
+  "status": "validated_oos",
+  "final_test_unsealed": true,
+  "final_test_state": "已揭盲;最终测试已使用,禁止重做",
+  "oos_outcome": "not_supported",
+  "trial_ids": [
+    "bc9fc5af85e84173-t0"
+  ],
+  "formal_spec_equivalence": false
+}

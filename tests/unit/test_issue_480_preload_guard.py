@@ -4,13 +4,13 @@
 挡不住加载本身 —— 真实 run(7203 artifacts / ≈5.9GB JSON)实测加载阶段
 113s 就把进程顶到 10GB+。修复:先 ``estimate_artifact_payload_bytes``
 (SQL 侧 SUM(octet_length),不取回 payload),超限具名 ``payload_too_large``
-且绝不触发全量加载;下钻单决策有界,维持豁免。
+且绝不触发全量加载;#501 后单决策也在加载前估计,不豁免。
 
 本文件(mock 仓储层)锁定接线:
 
 * detail / export 超限 → ``estimate`` 恰一次、``list_artifacts`` 零调用;
 * 未超限 → 估计后照旧加载聚合;
-* ``decision_id`` 下钻 → 豁免估计(有界),直接加载;
+* ``decision_id`` 下钻 → 只估目标决策,超限不加载;
 * run 不存在 → not_found 短路,不触发估计。
 """
 
@@ -148,9 +148,9 @@ def _patch_repos(
             fills_by_decision=dict(aggregate["fills"]["by_decision"]),
         )
 
-    async def _estimate(self: Any, rid: Any) -> int:
+    async def _estimate(self: Any, rid: Any, decision_id: str | None = None) -> int:
         calls["estimate"] += 1
-        return sum(len(str(a.payload)) for a in artifacts if a.payload)
+        return sum(len(str(a.payload)) for a in artifacts if a.payload and (decision_id is None or a.decision_id == decision_id))
 
     async def _list(self: Any, rid: Any) -> list[ResearchRunArtifactModel]:
         calls["list"] += 1
@@ -186,7 +186,7 @@ class TestReportRunPreloadGuard:
         assert calls == {"get": 1, "summarize": 0, "estimate": 1, "list": 1}
         assert "artifacts" in env.data
 
-    async def test_detail_drilldown_bypasses_estimate(
+    async def test_detail_drilldown_guard_before_load(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(reporting, "RUN_DETAIL_MAX_ESTIMATED_BYTES", 8)
@@ -194,10 +194,11 @@ class TestReportRunPreloadGuard:
         env = await rp_tools.report_run(
             _make_app(), _RUN_ID, view="detail", decision_id="2026-01-05"
         )
-        assert env.status == "ok", env.error
-        # 下钻单决策有界,豁免估计(#458 契约保持)。
-        assert calls["estimate"] == 0
-        assert calls["list"] == 1
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "payload_too_large"
+        assert calls["estimate"] == 1
+        assert calls["list"] == 0
 
     async def test_not_found_short_circuits_before_estimate(
         self, monkeypatch: pytest.MonkeyPatch
@@ -224,7 +225,7 @@ class TestReportExportPreloadGuard:
         assert list(tmp_path.iterdir()) == []  # 不写半成品文件
         assert calls == {"get": 1, "summarize": 0, "estimate": 1, "list": 0}
 
-    async def test_export_drilldown_bypasses_estimate(
+    async def test_export_drilldown_guard_before_load(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
     ) -> None:
         monkeypatch.setenv("FINBOARD_EXPORT_DIR", str(tmp_path))
@@ -233,10 +234,12 @@ class TestReportExportPreloadGuard:
         env = await rp_tools.report_export(
             _make_app(), "run", _RUN_ID, "csv", decision_id="2026-01-05"
         )
-        assert env.status == "ok", env.error
-        # 豁免估计,但仍需加载做下钻过滤。
-        assert calls["estimate"] == 0
-        assert calls["list"] == 1
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "payload_too_large"
+        assert calls["estimate"] == 1
+        assert calls["list"] == 0
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestRunArtifactsPreloadGuard:

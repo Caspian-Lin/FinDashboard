@@ -168,6 +168,10 @@ async def api(_api_engine: Any) -> AsyncIterator[ApiTestApp]:
         account_id="test-account-api",
         db_url=TEST_DB_URL,
         risk_allow_market_order=True,
+        # 集成测试不得继承本机.env的外置研究容器/MCP开关。
+        opencode_enabled=False,
+        opencode_web_enabled=False,
+        mcp_enabled=False,
     )
     app = create_app(settings)
     async with app.router.lifespan_context(app):

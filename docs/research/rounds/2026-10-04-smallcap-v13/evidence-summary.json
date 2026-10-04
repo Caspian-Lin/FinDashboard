@@ -1,0 +1,1378 @@
+{
+  "schema_version": "review505_compact_evidence_v1",
+  "notice": "Derived from archived server responses; original byte hashes are in evidence-index.md. No frozen run was changed.",
+  "baseline": {
+    "run_id": "RR-e909662f7b2c9f7ad30e89c4",
+    "manifest_checksum": "5ff2882c9a52ca992738862b7d73f75cf8fc481410ff6beede83d55e02dfc3d4",
+    "result_checksum": "8f174b280e23c4f379d7a02c1c839372bd870e2f87e1aea5254314e8faf5685f"
+  },
+  "periods": {
+    "annual": {
+      "status": "completed",
+      "requested_start": "2015-01-01",
+      "requested_end": "2026-09-04",
+      "observed_start": "2015-01-05",
+      "observed_end": "2026-09-04",
+      "observations": 2838,
+      "anchor_date": "2015-01-05",
+      "anchor_equity": "300000",
+      "net_return": 6.009094819661076,
+      "annualized_return": 0.18882233892011602,
+      "annualized_return_calendar": 0.18169821060184188,
+      "max_drawdown": 0.20254162172721416,
+      "drawdown_duration_calendar_days": 2417,
+      "sharpe_rf0_ddof1": 1.2633011764039144,
+      "final_equity": "2102728.445898322912245407000",
+      "fills": {
+        "fill_count": 19379,
+        "notional": "327852460.2198615668495400",
+        "commission": "147071.596974142179281173000",
+        "tax": "82512.174666877710108650000",
+        "slippage": "163926.230109930783424770"
+      },
+      "shortfall": {
+        "amount": "3976195.49326565616088000",
+        "requested_notional": "331559958.06527260046942",
+        "ratio": 0.011992387489935929,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 19294
+          },
+          {
+            "reason": "partially_filled",
+            "count": 85
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 26
+          }
+        ]
+      }
+    },
+    "development": {
+      "status": "completed",
+      "requested_start": "2015-01-01",
+      "requested_end": "2023-12-31",
+      "observed_start": "2015-01-05",
+      "observed_end": "2023-12-29",
+      "observations": 2189,
+      "anchor_date": "2015-01-05",
+      "anchor_equity": "300000",
+      "net_return": 4.023111519552095,
+      "annualized_return": 0.2042970304830385,
+      "annualized_return_calendar": 0.19690043597442242,
+      "max_drawdown": 0.20254162172721416,
+      "drawdown_duration_calendar_days": 2417,
+      "sharpe_rf0_ddof1": 1.4396695277228237,
+      "final_equity": "1506933.455865628523646861000",
+      "fills": {
+        "fill_count": 15653,
+        "notional": "207191220.3065592351355300",
+        "commission": "102966.792595153427939574000",
+        "tax": "51857.458739679084245800000",
+        "slippage": "103595.610153279617567765"
+      },
+      "shortfall": {
+        "amount": "1861372.21207824107678000",
+        "requested_notional": "210488122.22586260263749",
+        "ratio": 0.008843122321557463,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 15640
+          },
+          {
+            "reason": "partially_filled",
+            "count": 59
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 16
+          }
+        ]
+      }
+    },
+    "subsequent-used": {
+      "status": "completed",
+      "requested_start": "2024-01-01",
+      "requested_end": "2026-09-04",
+      "observed_start": "2024-01-02",
+      "observed_end": "2026-09-04",
+      "observations": 649,
+      "anchor_date": "2023-12-29",
+      "anchor_equity": "1506933.455865628523646861000",
+      "net_return": 0.3953691436828917,
+      "annualized_return": 0.13810227024737576,
+      "annualized_return_calendar": 0.132208011800361,
+      "max_drawdown": 0.18702007270303242,
+      "drawdown_duration_calendar_days": 308,
+      "sharpe_rf0_ddof1": 0.8292399692127067,
+      "final_equity": "2102728.445898322912245407000",
+      "fills": {
+        "fill_count": 3726,
+        "notional": "120661239.9133023317140100",
+        "commission": "44104.804378988751341599000",
+        "tax": "30654.715927198625862850000",
+        "slippage": "60330.619956651165857005"
+      },
+      "shortfall": {
+        "amount": "2114823.28118741508410000",
+        "requested_notional": "121071835.83940999783193",
+        "ratio": 0.017467508165916655,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 3654
+          },
+          {
+            "reason": "partially_filled",
+            "count": 26
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 10
+          }
+        ]
+      }
+    },
+    "exclude-2015": {
+      "status": "completed",
+      "requested_start": "2016-01-01",
+      "requested_end": "2026-09-04",
+      "observed_start": "2016-01-04",
+      "observed_end": "2026-09-04",
+      "observations": 2594,
+      "anchor_date": "2015-12-31",
+      "anchor_equity": "1002571.410650162444392072000",
+      "net_return": 1.0973353354797082,
+      "annualized_return": 0.07460573378557678,
+      "annualized_return_calendar": 0.07182882770550836,
+      "max_drawdown": 0.20254162172721416,
+      "drawdown_duration_calendar_days": 2417,
+      "sharpe_rf0_ddof1": 0.5980154257602481,
+      "final_equity": "2102728.445898322912245407000",
+      "fills": {
+        "fill_count": 17939,
+        "notional": "311883625.3798331544689200",
+        "commission": "138596.726203113982731100000",
+        "tax": "78547.668412200618581105000",
+        "slippage": "155941.812689916577234460"
+      },
+      "shortfall": {
+        "amount": "3661924.38392367544906000",
+        "requested_notional": "315361290.61639239510314",
+        "ratio": 0.01161183852579442,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 17867
+          },
+          {
+            "reason": "partially_filled",
+            "count": 72
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 17
+          }
+        ]
+      }
+    },
+    "2024-risk": {
+      "status": "completed",
+      "requested_start": "2024-01-01",
+      "requested_end": "2024-03-31",
+      "observed_start": "2024-01-02",
+      "observed_end": "2024-03-29",
+      "observations": 58,
+      "anchor_date": "2023-12-29",
+      "anchor_equity": "1506933.455865628523646861000",
+      "net_return": -0.08880613699667061,
+      "annualized_return": -0.33240076696044407,
+      "annualized_return_calendar": -0.31152472635703476,
+      "max_drawdown": 0.18702007270303242,
+      "drawdown_duration_calendar_days": 85,
+      "sharpe_rf0_ddof1": -2.0226623091543665,
+      "final_equity": "1373108.516939159359906601000",
+      "fills": {
+        "fill_count": 323,
+        "notional": "6297755.3830197344999500",
+        "commission": "2742.068811540977394460000",
+        "tax": "1849.602414551876715825000",
+        "slippage": "3148.877691509867249975"
+      },
+      "shortfall": {
+        "amount": "0E-17",
+        "requested_notional": "4993213.28342156294130",
+        "ratio": 0.0,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 281
+          }
+        ]
+      }
+    }
+  },
+  "runs": [
+    {
+      "label": "baseline",
+      "run_id": "RR-062582fd19f3341868a256b8",
+      "status": "completed",
+      "manifest_checksum": "a450d08230584495b12e268044ab5e8cb03484ecc375361f879639861a562ce4",
+      "result_checksum": "2be00586589378c992eb15a5bb0f8ba1f9f2b634dceb55bc53bbd6415d2c0bf1",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2023-12-29",
+        "anchor_equity": "300000",
+        "net_return": -0.16030280141996364,
+        "annualized_return": -0.1663432348383097,
+        "annualized_return_calendar": -0.15920577104650369,
+        "max_drawdown": 0.2858692582972259,
+        "drawdown_duration_calendar_days": 355,
+        "sharpe_rf0_ddof1": -1.1041463394744873,
+        "final_equity": "251909.159574010905057550000",
+        "fills": {
+          "fill_count": 982,
+          "notional": "3336207.8395086606478800",
+          "commission": "4914.64412935904320579000",
+          "tax": "817.763558151131612720000",
+          "slippage": "1668.103919754330323940"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "3330534.69774136624795",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 982
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "ret5-only",
+      "run_id": "RR-d37f292b1fa17c30ac390765",
+      "status": "completed",
+      "manifest_checksum": "cd4a61bbd797c07d2e1809e0f6ac590ff0aae1692ed323ee4160ccafded7d5a6",
+      "result_checksum": "3af266ee5e1b60c3534e816957093c66d803105739333af8fa523102226474b5",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2023-12-29",
+        "anchor_equity": "300000",
+        "net_return": -0.18275088852918048,
+        "annualized_return": -0.18953784424585307,
+        "annualized_return_calendar": -0.1815174645775528,
+        "max_drawdown": 0.28916250784709885,
+        "drawdown_duration_calendar_days": 357,
+        "sharpe_rf0_ddof1": -1.43538704896014,
+        "final_equity": "245174.733441245871868335000",
+        "fills": {
+          "fill_count": 1164,
+          "notional": "3503845.8080690222905100",
+          "commission": "5825.27883094719924161000",
+          "tax": "855.144042648829134800000",
+          "slippage": "1751.922904034511145255"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "3498475.18654827963838",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 1164
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "rsi-only",
+      "run_id": "RR-99c878bdbdcd052918f69327",
+      "status": "completed",
+      "manifest_checksum": "0f546e32185408a83e9c9b41bfa96b0f1b8027c385ca58e46ae3f69c336a100a",
+      "result_checksum": "cd9c1a3193528d16a0975313d1e3d8a5dc7c14755c874a02128ffd3bde8232aa",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "300000",
+        "net_return": -0.2097964081127635,
+        "annualized_return": -0.21824352884137044,
+        "annualized_return_calendar": -0.21043510938541454,
+        "max_drawdown": 0.30650033058281423,
+        "drawdown_duration_calendar_days": 361,
+        "sharpe_rf0_ddof1": -1.3289537222127692,
+        "final_equity": "237061.077566170952691840000",
+        "fills": {
+          "fill_count": 1217,
+          "notional": "3886841.9052678897366000",
+          "commission": "6092.24998932569623188000",
+          "tax": "946.432420420956027980000",
+          "slippage": "1943.420952633944868300"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "3881225.08394314974946",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 1217
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "bias-only",
+      "run_id": "RR-b8c210685ded4c80988eeb26",
+      "status": "completed",
+      "manifest_checksum": "270afe6031bbcf05dadd4e68fdeeb80d22d1c4da104e03c360ddd9a64d273fa1",
+      "result_checksum": "2b47ecb96c3453f9b8d88c98c7f69a628966d9281c555d82d347b97b7866fdd3",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "300000",
+        "net_return": -0.15917486388364127,
+        "annualized_return": -0.16580224574802205,
+        "annualized_return_calendar": -0.15967531643447053,
+        "max_drawdown": 0.30099341087227466,
+        "drawdown_duration_calendar_days": 361,
+        "sharpe_rf0_ddof1": -0.9240749853722787,
+        "final_equity": "252247.540834907617116375000",
+        "fills": {
+          "fill_count": 979,
+          "notional": "3235829.6258378442972400",
+          "commission": "4900.11475483917102544000",
+          "tax": "791.779947096295529565000",
+          "slippage": "1617.914812918922148620"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "3231532.32589128936672",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 979
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "macd-only",
+      "run_id": "RR-35bc908879afc136e0861b22",
+      "status": "completed",
+      "manifest_checksum": "35dc01672b5c229389030ac8449fa3fcd074dc1f5eaa7ca62d2fb1fc0bfffcde",
+      "result_checksum": "7aeb2dde5edcad5c1fc848e98514db08aed2e968dd6c68db00a338776f755d25",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "300000",
+        "net_return": 0.05333915686312461,
+        "annualized_return": 0.055840493728147145,
+        "annualized_return_calendar": 0.05352714427866334,
+        "max_drawdown": 0.18161061061426795,
+        "drawdown_duration_calendar_days": 301,
+        "sharpe_rf0_ddof1": 0.40176627240727475,
+        "final_equity": "316001.747058937408216135000",
+        "fills": {
+          "fill_count": 1062,
+          "notional": "4941654.2974489026987400",
+          "commission": "5339.53930940843301896000",
+          "tax": "1226.494958538341135535000",
+          "slippage": "2470.827148724451349370"
+        },
+        "shortfall": {
+          "amount": "36581.83752947440512000",
+          "requested_notional": "4970920.00388023251271",
+          "ratio": 0.0073591684237362745,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 1058
+            },
+            {
+              "reason": "partially_filled",
+              "count": 4
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "macd-positive",
+      "run_id": "RR-3351b8ef0caa1e94f3104b4d",
+      "status": "completed",
+      "manifest_checksum": "b9956482a5ff1b115c37ea0f467af48a789829a31af2edf34938efeca29493fa",
+      "result_checksum": "60b96fbbc48f0bb26328f7e0689999eef39e3f663d61764af3a7d27f3311e737",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "300000",
+        "net_return": -0.179941851758489,
+        "annualized_return": -0.18733370817426698,
+        "annualized_return_calendar": -0.18050032620095413,
+        "max_drawdown": 0.2895113728105199,
+        "drawdown_duration_calendar_days": 355,
+        "sharpe_rf0_ddof1": -1.2987770831105474,
+        "final_equity": "246017.444472453286866760000",
+        "fills": {
+          "fill_count": 919,
+          "notional": "3259057.0581182122358500",
+          "commission": "4598.66522935904320579000",
+          "tax": "799.404225381995439525000",
+          "slippage": "1629.528529059106117925"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "3252712.60956610431728",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 919
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "no-overlay",
+      "run_id": "RR-77da98da90a60aedfb43c5c8",
+      "status": "completed",
+      "manifest_checksum": "37b812c4f7f3fb34507d43079e5d472b409ff03f435ae8ec452bc2d9c18f9927",
+      "result_checksum": "5063bcf8b35a319607336c8e8bb5340e8eaae3cd8df6a064289ac7181305f1be",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "300000",
+        "net_return": 0.21604302233646605,
+        "annualized_return": 0.22694834066007452,
+        "annualized_return_calendar": 0.2168601258745506,
+        "max_drawdown": 0.31454712009983476,
+        "drawdown_duration_calendar_days": 288,
+        "sharpe_rf0_ddof1": 0.8633636507106209,
+        "final_equity": "364812.906700939815824014000",
+        "fills": {
+          "fill_count": 956,
+          "notional": "7676717.3335991811280200",
+          "commission": "4861.522661027203765496000",
+          "tax": "1926.682607059314546480000",
+          "slippage": "3838.358666799590564010"
+        },
+        "shortfall": {
+          "amount": "109132.98646856220290000",
+          "requested_notional": "7760354.36388031280603",
+          "ratio": 0.014062886996051273,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 945
+            },
+            {
+              "reason": "partially_filled",
+              "count": 11
+            },
+            {
+              "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+              "count": 4
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "cost_x2",
+      "run_id": "RR-88cd075891b02608b9ae6a9e",
+      "status": "completed",
+      "manifest_checksum": "d023b8aedfbaa94243b61a2d9be6fa4c5b128fd5d3ad270c7ae187ea0120f841",
+      "result_checksum": "54900fc9b381ca16cbc473ce6897229994c4219c2a540d0e004b7e1cd2152df1",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "300000",
+        "net_return": -0.182156381042034,
+        "annualized_return": -0.1896283015470973,
+        "annualized_return_calendar": -0.18272093670475842,
+        "max_drawdown": 0.2894007446732351,
+        "drawdown_duration_calendar_days": 355,
+        "sharpe_rf0_ddof1": -1.2886168530109376,
+        "final_equity": "245353.08568738979913117500",
+        "fills": {
+          "fill_count": 978,
+          "notional": "3290510.1806221739638300",
+          "commission": "9789.28825871808641158000",
+          "tax": "1614.04078617968150533000",
+          "slippage": "1645.255090311086981915"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "3285166.19527669475424",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 978
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "slippage_10bps",
+      "run_id": "RR-207902172adebe8e765c6e3c",
+      "status": "completed",
+      "manifest_checksum": "86cc49b9b7e49be11c0d6aff87b14c6f804a03accdd41cb4529015c00ce7c2c7",
+      "result_checksum": "d08f941b4273c4255cff7bf1d56637f204bda744a5f8e46b634ec4aa18365840",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "300000",
+        "net_return": -0.17150336666677068,
+        "annualized_return": -0.17858755200364773,
+        "annualized_return_calendar": -0.1720384802942544,
+        "max_drawdown": 0.2919598388289979,
+        "drawdown_duration_calendar_days": 355,
+        "sharpe_rf0_ddof1": -1.1830157008400355,
+        "final_equity": "248548.989999968804568765000",
+        "fills": {
+          "fill_count": 979,
+          "notional": "3305242.7159105716146300",
+          "commission": "4899.64412935904320579000",
+          "tax": "811.057662569876840815000",
+          "slippage": "3305.242715910571614630"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "3299921.58981988491568",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 979
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "slippage_20bps",
+      "run_id": "RR-3fcb939bd03edcb270e7bc82",
+      "status": "completed",
+      "manifest_checksum": "277f93ed4bbdf6623ee90a935e2a1513774af57d136677ee5197b4526c5c0790",
+      "result_checksum": "69a4a8ca1b1d2fe8c1195b2141114fa0682c1da13f0fb4963394083b6d1e3e74",
+      "initial_capital": "300000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "300000",
+        "net_return": -0.17323974391235272,
+        "annualized_return": -0.18038757199982602,
+        "annualized_return_calendar": -0.17377968875201566,
+        "max_drawdown": 0.2890440703945468,
+        "drawdown_duration_calendar_days": 355,
+        "sharpe_rf0_ddof1": -1.2063200943640615,
+        "final_equity": "248028.076826294178595085000",
+        "fills": {
+          "fill_count": 996,
+          "notional": "3330271.7279821868460800",
+          "commission": "4984.64412935904320579000",
+          "tax": "818.872430993244886965000",
+          "slippage": "6660.543455964373692160"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "3324825.00419852209184",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 996
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "capital_100000",
+      "run_id": "RR-03fdb4fad15d18ff97bbd8c5",
+      "status": "completed",
+      "manifest_checksum": "d3ac104473dcdfd28925530ba07094d70dd9c3aa0969284f783a26a9149daf54",
+      "result_checksum": "c833b6b4573fbaa8b2964d1a1647b70ce2eb29f44dc00b29844e0c58a4252f8b",
+      "initial_capital": "100000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "100000",
+        "net_return": -0.19321050280239274,
+        "annualized_return": -0.20107781876431696,
+        "annualized_return_calendar": -0.1938051038007017,
+        "max_drawdown": 0.24244425187651544,
+        "drawdown_duration_calendar_days": 355,
+        "sharpe_rf0_ddof1": -1.8491943075856867,
+        "final_equity": "80678.949719760730353780000",
+        "fills": {
+          "fill_count": 664,
+          "notional": "946709.8850555910005900",
+          "commission": "3320.0",
+          "tax": "231.071039356702055925000",
+          "slippage": "473.354942527795500295"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "945206.42311468637804",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 664
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "capital_500000",
+      "run_id": "RR-5f04407d3bd134a153eacf4e",
+      "status": "completed",
+      "manifest_checksum": "92d11e94759a878aef9275991a7f2332397d64709127757db5d7ddff424702a9",
+      "result_checksum": "7cb1b1c5c2d28868fc3f2723068d03b5f230b4b0425a51818b1ab838634dac22",
+      "initial_capital": "500000",
+      "code_version": "review505-v1-fee-policy-v1",
+      "period": {
+        "status": "completed",
+        "requested_start": "2024-01-01",
+        "requested_end": "2024-12-31",
+        "observed_start": "2024-01-02",
+        "observed_end": "2024-12-31",
+        "observations": 242,
+        "anchor_date": "2024-01-02",
+        "anchor_equity": "500000",
+        "net_return": -0.1620637779930703,
+        "annualized_return": -0.16879897402863142,
+        "annualized_return_calendar": -0.16257240879085166,
+        "max_drawdown": 0.2984171756035285,
+        "drawdown_duration_calendar_days": 355,
+        "sharpe_rf0_ddof1": -1.0476210094510114,
+        "final_equity": "418968.111003464815699680000",
+        "fills": {
+          "fill_count": 1136,
+          "notional": "5630703.9869009427689000",
+          "commission": "5803.40799192051313526000",
+          "tax": "1376.565960940854520610000",
+          "slippage": "2815.351993450471384450"
+        },
+        "shortfall": {
+          "amount": "0",
+          "requested_notional": "5621825.85390386435654",
+          "ratio": 0.0,
+          "order_reasons": [
+            {
+              "reason": "filled",
+              "count": 1136
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "replays": [
+    {
+      "label": "baseline",
+      "run_id": "RR-f7f228441567616b1e9178bd",
+      "status": "completed",
+      "manifest_checksum": "8d02ecf4eecdfb4e8161d8cd4042320f395603daac8816771a2e8aeea9c7dd5f",
+      "result_checksum": "d54da93f46af917880e103cb38f0285e44c3b717f980c10e3d0c1464f8ce9707"
+    },
+    {
+      "label": "ret5-only",
+      "run_id": "RR-239bd09e45b5ef0c0e70e75a",
+      "status": "completed",
+      "manifest_checksum": "3141f8246bf5acf2191622be65abb3ac76d7568e589112f89762ca29c3fe0fad",
+      "result_checksum": "a762871407a15bbbdbbeb59d93578dbcfb65eb12d1f90b8e034ce41436cd4766"
+    }
+  ],
+  "attempts": [
+    {
+      "job_id": "BJ-A288207BCFE54BEF",
+      "status": "succeeded",
+      "attempt": 2,
+      "max_attempts": 3,
+      "result_ref": "RR-062582fd19f3341868a256b8",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-4D53177752164604",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-d37f292b1fa17c30ac390765",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-B4993E3CD2B44A2B",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-99c878bdbdcd052918f69327",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-858780053A0B4E89",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-b8c210685ded4c80988eeb26",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-B5ED5FD9D5B94417",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-35bc908879afc136e0861b22",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-A7678DD6C647464E",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-3351b8ef0caa1e94f3104b4d",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-8E50B8E1190A436F",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-77da98da90a60aedfb43c5c8",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-591FD895FC4949E7",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-03fdb4fad15d18ff97bbd8c5",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-5A45E05D1FD84EA7",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-207902172adebe8e765c6e3c",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-84D8AB814F6F4A86",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-5f04407d3bd134a153eacf4e",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-A618587024824C33",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-88cd075891b02608b9ae6a9e",
+      "error_code": null,
+      "error_summary": null
+    },
+    {
+      "job_id": "BJ-BF5A8AAEACA447F0",
+      "status": "succeeded",
+      "attempt": 1,
+      "max_attempts": 3,
+      "result_ref": "RR-3fcb939bd03edcb270e7bc82",
+      "error_code": null,
+      "error_summary": null
+    }
+  ],
+  "workspace": {
+    "topic": "RT-345ed180c8244a8ba939ef22",
+    "round": "RE-f189c6890386449cbc632e26",
+    "memory": "RM-3863e276a0fc4091ade8cda9",
+    "correction": "RM-97a4d5032db04c36b25e3970"
+  },
+  "years": [
+    {
+      "status": "completed",
+      "requested_start": "2015-01-01",
+      "requested_end": "2015-12-31",
+      "observed_start": "2015-01-05",
+      "observed_end": "2015-12-31",
+      "observations": 244,
+      "anchor_date": "2015-01-05",
+      "anchor_equity": "300000",
+      "net_return": 2.3419047021672084,
+      "annualized_return": 2.4946303862825117,
+      "annualized_return_calendar": 2.4012271837374914,
+      "max_drawdown": 0.20112413185802244,
+      "drawdown_duration_calendar_days": 152,
+      "sharpe_rf0_ddof1": 6.041944855169369,
+      "final_equity": "1002571.410650162444392072000",
+      "fills": {
+        "fill_count": 1440,
+        "notional": "15968834.8400284123806200",
+        "commission": "8474.870771028196550073000",
+        "tax": "3964.506254677091527545000",
+        "slippage": "7984.417420014206190310"
+      },
+      "shortfall": {
+        "amount": "314271.10934198071182000",
+        "requested_notional": "16198667.44888020536628",
+        "ratio": 0.019401047051169996,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1427
+          },
+          {
+            "reason": "partially_filled",
+            "count": 13
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 9
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2016-01-01",
+      "requested_end": "2016-12-31",
+      "observed_start": "2016-01-04",
+      "observed_end": "2016-12-30",
+      "observations": 244,
+      "anchor_date": "2015-12-31",
+      "anchor_equity": "1002571.410650162444392072000",
+      "net_return": 0.2941866665430579,
+      "annualized_return": 0.3051756156781398,
+      "annualized_return_calendar": 0.29441528126485483,
+      "max_drawdown": 0.14699771605922807,
+      "drawdown_duration_calendar_days": 105,
+      "sharpe_rf0_ddof1": 1.5344398006472086,
+      "final_equity": "1297514.551920705102517090000",
+      "fills": {
+        "fill_count": 1735,
+        "notional": "31769961.9447085397565300",
+        "commission": "13605.190360567559771707000",
+        "tax": "7938.203445373330535010000",
+        "slippage": "15884.980972354269878265"
+      },
+      "shortfall": {
+        "amount": "691651.46071923677426000",
+        "requested_notional": "33726963.64966823313154",
+        "ratio": 0.020507374096987246,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1772
+          },
+          {
+            "reason": "partially_filled",
+            "count": 28
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 3
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2017-01-01",
+      "requested_end": "2017-12-31",
+      "observed_start": "2017-01-03",
+      "observed_end": "2017-12-29",
+      "observations": 244,
+      "anchor_date": "2016-12-30",
+      "anchor_equity": "1297514.551920705102517090000",
+      "net_return": -0.09615380665245447,
+      "annualized_return": -0.09914475847644044,
+      "annualized_return_calendar": -0.09646754099765442,
+      "max_drawdown": 0.12925106660279068,
+      "drawdown_duration_calendar_days": 359,
+      "sharpe_rf0_ddof1": -1.0054270681634123,
+      "final_equity": "1172753.588566575445784157000",
+      "fills": {
+        "fill_count": 1712,
+        "notional": "14359635.9458297028672800",
+        "commission": "9338.785605320741125793000",
+        "tax": "3776.800386807807393500000",
+        "slippage": "7179.817972914851433640"
+      },
+      "shortfall": {
+        "amount": "0E-17",
+        "requested_notional": "13560660.81643240481466",
+        "ratio": 0.0,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1696
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2018-01-01",
+      "requested_end": "2018-12-31",
+      "observed_start": "2018-01-02",
+      "observed_end": "2018-12-28",
+      "observations": 243,
+      "anchor_date": "2017-12-29",
+      "anchor_equity": "1172753.588566575445784157000",
+      "net_return": -0.032999667860166434,
+      "annualized_return": -0.03420073944018798,
+      "annualized_return_calendar": -0.03311109374998111,
+      "max_drawdown": 0.09279761853054032,
+      "drawdown_duration_calendar_days": 358,
+      "sharpe_rf0_ddof1": -0.34639174359072566,
+      "final_equity": "1134053.109662060201031755000",
+      "fills": {
+        "fill_count": 1964,
+        "notional": "14426464.6666966802254100",
+        "commission": "10196.522808590782102407000",
+        "tax": "3605.898134712866737290000",
+        "slippage": "7213.232333348340112705"
+      },
+      "shortfall": {
+        "amount": "0E-17",
+        "requested_notional": "14457880.26557779854975",
+        "ratio": 0.0,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1976
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2019-01-01",
+      "requested_end": "2019-12-31",
+      "observed_start": "2019-01-02",
+      "observed_end": "2019-12-31",
+      "observations": 244,
+      "anchor_date": "2018-12-28",
+      "anchor_equity": "1134053.109662060201031755000",
+      "net_return": 0.07047136235436786,
+      "annualized_return": 0.07286413462462882,
+      "annualized_return_calendar": 0.06992674603039739,
+      "max_drawdown": 0.09869242996786742,
+      "drawdown_duration_calendar_days": 258,
+      "sharpe_rf0_ddof1": 0.7609483290706561,
+      "final_equity": "1213971.377282152770696990000",
+      "fills": {
+        "fill_count": 2166,
+        "notional": "20073998.0807372462725300",
+        "commission": "11808.037863010098307850000",
+        "tax": "5036.881944510448120650000",
+        "slippage": "10036.999040368623136265"
+      },
+      "shortfall": {
+        "amount": "98318.52490790581400000",
+        "requested_notional": "19684953.66770600288813",
+        "ratio": 0.00499460281022665,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 2104
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 1
+          },
+          {
+            "reason": "partially_filled",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2020-01-01",
+      "requested_end": "2020-12-31",
+      "observed_start": "2020-01-02",
+      "observed_end": "2020-12-31",
+      "observations": 243,
+      "anchor_date": "2019-12-31",
+      "anchor_equity": "1213971.377282152770696990000",
+      "net_return": -0.034045015043216866,
+      "annualized_return": -0.03528343503198195,
+      "annualized_return_calendar": -0.033976449510470186,
+      "max_drawdown": 0.1063344140729812,
+      "drawdown_duration_calendar_days": 125,
+      "sharpe_rf0_ddof1": -0.26943492694894655,
+      "final_equity": "1172641.703480547355145959000",
+      "fills": {
+        "fill_count": 1565,
+        "notional": "23048017.3025183033288600",
+        "commission": "11196.056690624656003711000",
+        "tax": "5778.212698795269622890000",
+        "slippage": "11524.008651259151664430"
+      },
+      "shortfall": {
+        "amount": "114681.00074837484900000",
+        "requested_notional": "23128625.78974884933596",
+        "ratio": 0.00495840097854859,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1564
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 1
+          },
+          {
+            "reason": "partially_filled",
+            "count": 1
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2021-01-01",
+      "requested_end": "2021-12-31",
+      "observed_start": "2021-01-04",
+      "observed_end": "2021-12-31",
+      "observations": 243,
+      "anchor_date": "2020-12-31",
+      "anchor_equity": "1172641.703480547355145959000",
+      "net_return": 0.05372395078374846,
+      "annualized_return": 0.0557682242250217,
+      "annualized_return_calendar": 0.05376171989298806,
+      "max_drawdown": 0.056330114917469504,
+      "drawdown_duration_calendar_days": 97,
+      "sharpe_rf0_ddof1": 0.8305129135384961,
+      "final_equity": "1235640.648645307149025672000",
+      "fills": {
+        "fill_count": 1940,
+        "notional": "17799247.6148105635737100",
+        "commission": "10436.175089563468213842000",
+        "tax": "4449.372802578115519590000",
+        "slippage": "8899.623807405281786855"
+      },
+      "shortfall": {
+        "amount": "0E-17",
+        "requested_notional": "18547073.15415560232436",
+        "ratio": 0.0,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1959
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2022-01-01",
+      "requested_end": "2022-12-31",
+      "observed_start": "2022-01-04",
+      "observed_end": "2022-12-30",
+      "observations": 242,
+      "anchor_date": "2021-12-31",
+      "anchor_equity": "1235640.648645307149025672000",
+      "net_return": -0.02778555567234225,
+      "annualized_return": -0.028916959284926325,
+      "annualized_return_calendar": -0.02787963048648079,
+      "max_drawdown": 0.11107092619636648,
+      "drawdown_duration_calendar_days": 162,
+      "sharpe_rf0_ddof1": -0.12710277727706143,
+      "final_equity": "1201307.686611363899709826000",
+      "fills": {
+        "fill_count": 1934,
+        "notional": "30206822.6859117475079600",
+        "commission": "13643.154767808200334946000",
+        "tax": "7560.936130962367046920000",
+        "slippage": "15103.411342955873753980"
+      },
+      "shortfall": {
+        "amount": "204546.93141807056530000",
+        "requested_notional": "29708130.87539940345555",
+        "ratio": 0.006885217123755538,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1920
+          },
+          {
+            "reason": "partially_filled",
+            "count": 7
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2023-01-01",
+      "requested_end": "2023-12-31",
+      "observed_start": "2023-01-03",
+      "observed_end": "2023-12-29",
+      "observations": 242,
+      "anchor_date": "2022-12-30",
+      "anchor_equity": "1201307.686611363899709826000",
+      "net_return": 0.2544108996058875,
+      "annualized_return": 0.26621536751914965,
+      "annualized_return_calendar": 0.2553876958447032,
+      "max_drawdown": 0.06471343488031772,
+      "drawdown_duration_calendar_days": 102,
+      "sharpe_rf0_ddof1": 1.9516279987065868,
+      "final_equity": "1506933.455865628523646861000",
+      "fills": {
+        "fill_count": 1197,
+        "notional": "39538237.2253180392226300",
+        "commission": "14267.998638639725529245000",
+        "tax": "9746.646941261787742405000",
+        "slippage": "19769.118612659019611315"
+      },
+      "shortfall": {
+        "amount": "437903.18494267236240000",
+        "requested_notional": "41475166.55829410277126",
+        "ratio": 0.010558201962304153,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1222
+          },
+          {
+            "reason": "partially_filled",
+            "count": 9
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 2
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2024-01-01",
+      "requested_end": "2024-12-31",
+      "observed_start": "2024-01-02",
+      "observed_end": "2024-12-31",
+      "observations": 242,
+      "anchor_date": "2023-12-29",
+      "anchor_equity": "1506933.455865628523646861000",
+      "net_return": 0.09789518954719284,
+      "annualized_return": 0.10214047504105017,
+      "annualized_return_calendar": 0.09712920978535466,
+      "max_drawdown": 0.18702007270303242,
+      "drawdown_duration_calendar_days": 308,
+      "sharpe_rf0_ddof1": 0.6792251181567486,
+      "final_equity": "1654454.992162600571012842000",
+      "fills": {
+        "fill_count": 1479,
+        "notional": "26631844.6771474590800900",
+        "commission": "11577.603170212343317804000",
+        "tax": "6943.145359264518256170000",
+        "slippage": "13315.922338573729540045"
+      },
+      "shortfall": {
+        "amount": "161258.73109435368100000",
+        "requested_notional": "25121142.04701656401365",
+        "ratio": 0.006419243631222773,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1429
+          },
+          {
+            "reason": "partially_filled",
+            "count": 4
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2025-01-01",
+      "requested_end": "2025-12-31",
+      "observed_start": "2025-01-02",
+      "observed_end": "2025-12-31",
+      "observations": 243,
+      "anchor_date": "2024-12-31",
+      "anchor_equity": "1654454.992162600571012842000",
+      "net_return": 0.25800916894455744,
+      "annualized_return": 0.26874925221257717,
+      "annualized_return_calendar": 0.2582069594277432,
+      "max_drawdown": 0.14080647559036982,
+      "drawdown_duration_calendar_days": 116,
+      "sharpe_rf0_ddof1": 1.4623242111826578,
+      "final_equity": "2081319.549746647502133815000",
+      "fills": {
+        "fill_count": 1155,
+        "notional": "59122220.4590704197347500",
+        "commission": "19691.084899385136345407000",
+        "tax": "14697.928688050198676245000",
+        "slippage": "29561.110229535209867375"
+      },
+      "shortfall": {
+        "amount": "1346330.82951492590210000",
+        "requested_notional": "60390731.86193736128666",
+        "ratio": 0.022293666395579514,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1139
+          },
+          {
+            "reason": "partially_filled",
+            "count": 16
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 9
+          }
+        ]
+      }
+    },
+    {
+      "status": "completed",
+      "requested_start": "2026-01-01",
+      "requested_end": "2026-09-04",
+      "observed_start": "2026-01-05",
+      "observed_end": "2026-09-04",
+      "observations": 164,
+      "anchor_date": "2025-12-31",
+      "anchor_equity": "2081319.549746647502133815000",
+      "net_return": 0.010286212972093312,
+      "annualized_return": 0.015849194359328855,
+      "annualized_return_calendar": 0.015248071000945274,
+      "max_drawdown": 0.16909116405512553,
+      "drawdown_duration_calendar_days": 189,
+      "sharpe_rf0_ddof1": 0.177664300120324,
+      "final_equity": "2102728.445898322912245407000",
+      "fills": {
+        "fill_count": 1092,
+        "notional": "34907174.7770844528991700",
+        "commission": "12836.116309391271678388000",
+        "tax": "9013.641879883908930435000",
+        "slippage": "17453.587388542226449585"
+      },
+      "shortfall": {
+        "amount": "607233.72057813550100000",
+        "requested_notional": "35559961.93045607253162",
+        "ratio": 0.017076332133473336,
+        "order_reasons": [
+          {
+            "reason": "filled",
+            "count": 1086
+          },
+          {
+            "reason": "partially_filled",
+            "count": 6
+          },
+          {
+            "reason": "可用现金不足一手,末端买入按现金裁剪拒单",
+            "count": 1
+          }
+        ]
+      }
+    }
+  ]
+}

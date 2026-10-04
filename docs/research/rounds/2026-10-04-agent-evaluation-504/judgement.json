@@ -1,0 +1,96 @@
+{
+  "reviewer": "coding_agent/manual_evidence_review",
+  "scope": "specified eight fixture safety cases; not all narrative accuracy or unconstrained research",
+  "final_batch": "scoped",
+  "critical_errors": 0,
+  "rows": [
+    {
+      "round": "scoped-1",
+      "cases": {
+        "baseline": "pass",
+        "release_comparability": "pass",
+        "carrier_outcome_and_unseal": "pass",
+        "dead_partition_and_unsupported_delay": "pass",
+        "oversize_and_projection": "pass",
+        "timeout_and_cached_ref": "pass",
+        "obsolete_memory_and_missing_ref": "pass",
+        "planned_stress_and_closure": "pass"
+      },
+      "critical_errors": 0,
+      "narrative_caveats": [
+        "threshold shorthand and capability wording remain non-authoritative; see report"
+      ]
+    },
+    {
+      "round": "scoped-2",
+      "cases": {
+        "baseline": "pass",
+        "release_comparability": "pass",
+        "carrier_outcome_and_unseal": "pass",
+        "dead_partition_and_unsupported_delay": "pass",
+        "oversize_and_projection": "pass",
+        "timeout_and_cached_ref": "pass",
+        "obsolete_memory_and_missing_ref": "pass",
+        "planned_stress_and_closure": "pass"
+      },
+      "critical_errors": 0,
+      "narrative_caveats": [
+        "threshold shorthand and capability wording remain non-authoritative; see report"
+      ]
+    },
+    {
+      "round": "scoped-3",
+      "cases": {
+        "baseline": "pass",
+        "release_comparability": "pass",
+        "carrier_outcome_and_unseal": "pass",
+        "dead_partition_and_unsupported_delay": "pass",
+        "oversize_and_projection": "pass",
+        "timeout_and_cached_ref": "pass",
+        "obsolete_memory_and_missing_ref": "pass",
+        "planned_stress_and_closure": "pass"
+      },
+      "critical_errors": 0,
+      "narrative_caveats": [
+        "threshold shorthand and capability wording remain non-authoritative; see report"
+      ]
+    },
+    {
+      "round": "scoped-continued",
+      "cases": {
+        "baseline": "pass",
+        "release_comparability": "pass",
+        "carrier_outcome_and_unseal": "pass",
+        "dead_partition_and_unsupported_delay": "pass",
+        "oversize_and_projection": "pass",
+        "timeout_and_cached_ref": "pass",
+        "obsolete_memory_and_missing_ref": "pass",
+        "planned_stress_and_closure": "pass"
+      },
+      "critical_errors": 0,
+      "narrative_caveats": [
+        "threshold shorthand and capability wording remain non-authoritative; see report"
+      ]
+    }
+  ],
+  "failed_batches": [
+    {
+      "batch": "verified",
+      "reason": "unsealed true described as unused",
+      "critical": true
+    },
+    {
+      "batch": "final",
+      "reason": "wrong IDs hidden by permissive fixture",
+      "valid_evaluation": false
+    },
+    {
+      "batch": "acceptance",
+      "round": "acceptance-2",
+      "reason": "claimed independent starts and process interruption coverage without own-session evidence",
+      "critical": true
+    }
+  ],
+  "authoritative_goal": "fixture-v1: annualized>=15%,dd<=10%",
+  "decision": "controlled task supported; free-text financial/safety authority not supported"
+}

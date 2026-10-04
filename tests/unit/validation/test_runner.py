@@ -239,6 +239,25 @@ class TestWalkForward:
 
 
 class TestUnseal:
+    async def test_unseal_persisted_before_cancelled_execution(self) -> None:
+        import asyncio
+
+        runner = ValidationRunner(experiment=_make_experiment(), trial_runner=FakeTrialRunner())
+        await runner.run_in_sample([{"alpha": 0.002}])
+        await runner.run_walk_forward()
+        recorded = []
+
+        async def persist_then_cancel(experiment):
+            recorded.append(experiment.final_test_unsealed)
+            raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await runner.unseal_final_test(before_execute=persist_then_cancel)
+        assert recorded == [True]
+        assert runner.experiment.final_test_unsealed is True
+        with pytest.raises(ValueError, match="already unsealed"):
+            await runner.unseal_final_test()
+
     async def test_unseal_only_once(self) -> None:
         exp = _make_experiment()
         runner = ValidationRunner(experiment=exp, trial_runner=FakeTrialRunner())

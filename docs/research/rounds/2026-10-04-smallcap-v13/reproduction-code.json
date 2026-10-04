@@ -1,0 +1,9 @@
+{
+  "code_version_label": "review505-v1-fee-policy-v1",
+  "files_sha256": {
+    "packages/finboard-backtest/src/finboard_backtest/research_run/portfolio_pipeline.py": "19b6ba5b04caa9fe6cce7108008c8193359505d979d5fdf6e1e12af85d08af90",
+    "packages/finboard-backtest/src/finboard_backtest/research_run/signal_engine.py": "4466d76bdb98c8d7b0ff0716980e2d51d90a158c49bf206eb1bf015a67739c64",
+    "packages/finboard-backtest/src/finboard_backtest/research_run/window.py": "675ea66b560fdf401501e28e7dc2269b8f1efa7146b0f501350883df2e6103d2"
+  },
+  "notice": "development branch evidence; hashes captured for reproduction, not a claim of an immutable deployed commit"
+}

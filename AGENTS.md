@@ -66,6 +66,13 @@
 - 策略说明书只用指定版本/冻结manifest；因子实现锚不匹配标记缺证据。日期/标的决策解释必须先SQL投影分页，不拉全量artifact。
 - 工作摘要、agent解释与自动事实分开；canonical结论仍在docs/research经PR维护。
 
+### 确定性复核与正式验证（#501–#505）
+- 区间/逐年数值用 `research_diagnostics` 同源计算（252交易日年化、rf0/ddof1，另列日历年化）；单决策 detail/export 也必须在 SQL 加载前估字节，超限走白名单字段投影分页。
+- 正式规格验证显式 `runner.kind=research_spec`，冻结 completed 发布版本并复用正式组合管线；参数网格、缺覆盖、已使用的最终窗口必须拒绝，不用 registry 策略代验。最终揭盲执行前持久化；中断后已揭盲不可重开。
+- 新费用语义由 `parameters.fee_policy_version=explicit_overrides_v1` 显式选择，覆盖须贯穿可行性/手数/成交且保留免税资产；旧 manifest 保持原资产规则优先。旧口径压力须先重跑同语义 cost_x1 控制，不更改历史 checksum。
+- 压力计划与 executed/failed/unsupported 分开；成本倍率只缩放佣金率/最低佣金/卖出税，滑点独立。2 Bar 延迟、订单簿冲击、参数邻域当前 unsupported；最差 WF 只叫窗口敏感性，不能假称邻域或完整通过。
+- 复核是有限预注册证据工作，已看窗口不是 fresh OOS；负结果/证据不足有效，不调优、不放松目标、不启动模拟/影子/实盘。操作手册与精确契约见 `docs/research/verification-playbook.md`、`formal-validation-contract.md`。
+
 ### LLM / Agent 边界
 LLM（包括本 agent 自身）**不允许**：直接连接实盘账户、直接发送订单、修改账户持仓、绕过风控、在实盘运行时动态生成代码并立即执行。LLM 的产出必须经过完整流程才可上实盘：`研究 → 回测 → 样本外 → 行情回放 → 模拟交易 → 影子交易 → 小资金实盘 → 扩大资金`。
 

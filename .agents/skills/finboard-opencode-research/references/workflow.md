@@ -9,7 +9,7 @@
   │    → 拒绝。这些能力永久不在工具集中。
   │
   ├─ 要生成 Python / 可执行代码?
-  │    → 拒绝。策略是无代码版本化规格。
+  │    → 网页/无代码规格拒绝;受控MCP research_code_submit可提交白名单代码,执行仅经Docker沙箱;禁止宿主文件编辑。
   │
   ├─ 查询现有 ResearchRun / artifact?          ✅ 已实现
   │    → finboard.run.list / .get / .artifacts (只读,直接调用)
@@ -146,3 +146,7 @@ finboard_memory_remember(
 启动仍先读ROADMAP/FINDINGS与记忆索引；再finboard_topic_read选稳定课题ID，加载当前目标版本、开放问题及最近轮次。文档与工作摘要冲突保留双方来源并以文档为canonical，不自行松门。finboard_memory_page分页核对来源/纠正链，历史故障不得直接当当前故障；finboard_source_check核验精确引用。
 
 轮次收尾用topic_write append记录目标/动作/理由/精确证据/解释置信度/下一步与失败或暂停原因。工作结论仅研究记录，不自动接受；文档仍由用户或主coding agent经PR落库，研究容器只读。继续同时按原协议保存research-round记忆指针并附轮次摘要。非线性研究无需按工具页面顺序执行，不重复已证伪假设；需重开时先引用旧结论和新证据。
+
+## 确定性复核分支（#504）
+
+按verification-playbook.md执行。压力仅有配置→planned；未支持的正式OOS/延迟/容量量测→blocked或insufficient_evidence，不猜替代runner。数值交服务端diagnostics；先compare再归因；先oos_outcome再status；payload_too_large改projection/分页，job_wait超时继续同job，缓存命中不重提交。历史故障先核查当前产物，记忆不能代替原始证据。

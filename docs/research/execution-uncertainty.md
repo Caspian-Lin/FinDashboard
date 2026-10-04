@@ -1,6 +1,6 @@
 # FinDashboard 研究执行误差与数据粒度
 
-核查日期：2026-10-03。本文说明当前近似与证据边界，不授权 P6 复杂回测、订单簿重放或实盘开发。相关：#497、#502、#503、#505；分钟/tick 讨论 #220 不排期。
+核查日期：2026-10-04。本文说明当前近似与证据边界，不授权 P6 复杂回测、订单簿重放或实盘开发。相关：#497、#502、#503、#505；分钟/tick 讨论 #220 不排期。
 
 ## 哪些误差需要分别验证
 
@@ -31,14 +31,14 @@
 | 能力 | 现有配置 | 当前默认执行器 | 实际证据 / 缺口 |
 |---|---|---|---|
 | 基线研究成交与费用 | ExecutionModel 与合法 fee overrides | 正式 PortfolioPipelineAdapter 已消费 | 每个运行的成交、费用、账本及会计校验；需逐运行核对 |
-| 成本倍率 | ValidationPlanSpec 默认 1、2；RobustnessPlan 默认 1、2、3 | robustness runner 不自动执行成本重跑；默认 trial runner 丢弃 config_overrides | 人工2倍运行见下；自动压力能力由 #503 补齐 |
-| 滑点梯度 | RobustnessPlan 默认 0、5、10、20 bps | 未自动按梯度重跑 | 不把配置数组或实验完成状态当成压力通过，#503 |
-| 成交延迟 | RobustnessPlan 默认 1、2 Bar | 默认 robustness 未执行真实成交延迟 | unsupported；移动决策日不能代替成交延迟，#503 |
-| 市场阶段 / 邻域 | 已有阶段和邻域规则 | runner 可执行阶段检验与最差WF邻域近似 | 近似结果不等于成本/延迟探针 |
-| 正式多期规格 OOS | ResearchRun 与验证实验分别存在 | 默认 validation runner 用注册策略 BacktestEngine，未直接复用冻结多期规格 | 同名或替代策略不能代验正式规格，#502 |
+| 成本倍率 | ValidationPlanSpec 与 research_stress | 新 executed_v1 / research_spec 执行真实重跑；旧 registry 保留兼容语义 | 纯倍率只缩放佣金率/最低佣金/卖出税，滑点独立；每项记录状态与证据引用 |
+| 滑点梯度 | RobustnessPlan 默认 0、5、10、20 bps | 新执行语义逐档重跑 | 不把配置数组或实验完成状态当成压力通过 |
+| 成交延迟 | 默认1、2 Bar | 1 Bar 复用 next_open；2 Bar 拒绝 | unsupported；移动决策日不能代替成交延迟 |
+| 市场阶段 / 邻域 | 已有阶段和邻域规则 | 阶段检验只用验证窗；最差WF是窗口敏感性 | 新语义参数邻域 unsupported，neighbourhood_steps>0 阻断完整支持门 |
+| 正式多期规格 OOS | 显式 runner.kind=research_spec | 复用冻结正式 PortfolioPipelineAdapter，IS/WF/final 均有子运行 | 缺覆盖、已用最终窗、非空参数网格拒绝；registry 不能代验正式规格 |
 | 精确订单簿队列 / 自身冲击 | 无 | unsupported | P6 边界与 #220，不提前开发 |
 
-核查点：`validation/contracts.py`、`validation/runner.py::_run_robustness_probes`、`background_jobs/executors/validation_experiment.py::default_trial_runner_factory`（内部 `del config_overrides`）。实验 `status=validated_oos` 表示流程状态，先读 `oos_outcome` 判断 supported / not_supported / inconclusive。
+核查点：`validation/runner.py`、`validation/execution.py`、`finboard_app/spec_validation.py`、`finboard_app/research_stress.py`。新研究费用采用 `parameters.fee_policy_version=explicit_overrides_v1`，显式覆盖进入可行性、手数与撮合，并保留免税资产；旧 manifest 保持资产规则优先级，须重跑 cost_x1 控制再归因。详细接口与边界见[正式验证契约](formal-validation-contract.md)。实验 `status=validated_oos` 表示流程状态，先读 `oos_outcome` 判断 supported / not_supported / inconclusive。
 
 2026-10-02 API 审查记录：v12 基线 RR-e1976d09cb26576d4cd9fb9f，年化24.39%、最大回撤31.95%；同 v4 bars（a-share-cs-20260908-v4）与 daily_metrics 发布的 RR-a2f0ad6f035d7eada1538227，规格佣金率/最低佣金/卖出税/滑点同时加倍，年化17.79%、回撤32.17%。这是一个人工组合压力对照，不是仅佣金变化的单变量实验，更不是默认执行器自动完成的证明。v13 RR-e909662f7b2c9f7ad30e89c4 使用 v5 bars，不能直接移用此对照为其压力证据。本文没有启动新运行或认定策略可信。
 
@@ -64,4 +64,4 @@
 
 [短期反转与流动性研究](https://www.nber.org/papers/w30917)可支持提出机制假设，但其研究样本不验证本项目A股策略，也不识别某笔交易对手身份。替代解释包括微盘风险、样本偏差、过拟合及执行近似。核心问题是净收益是否在合理执行假设及资金规模内存活，结论可为未获支持或证据不足。
 
-后续 #502/#503/#505 收集同策略 OOS 与压力证据，按研究→回测→OOS→模拟→影子→小资金晋级。纸面模拟不是实盘残差量测。本文对应 phase1_doc.md §3.4 的3–10及14项在研究域的决策/成交/费用/账本解释，不替代券商验收，不改变晋级门或实盘红线。
+同策略 OOS 与压力证据按研究→回测→OOS→模拟→影子→小资金晋级。#505 的已用窗口复核属于回顾敏感性，不构成 fresh OOS；纸面模拟不是实盘残差量测。本文对应 phase1_doc.md §3.4 的3–10及14项在研究域的决策/成交/费用/账本解释，不替代券商验收，不改变晋级门或实盘红线。

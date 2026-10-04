@@ -40,6 +40,7 @@ from finboard_backtest.metrics import (
     max_drawdown_duration,
     monthly_win_rate,
     sharpe_ratio,
+    sharpe_ratio_rf0,
     sortino_ratio,
     total_return,
     turnover_ratio,
@@ -80,6 +81,24 @@ from finboard_backtest.validation.statistics import (
 logger = structlog.get_logger(__name__)
 
 
+def _result_evidence(result: BacktestResult, label: str) -> list[RobustnessProbe]:
+    evidence = result.matching_model.get("validation_evidence")
+    if not isinstance(evidence, dict):
+        return []
+    return [
+        RobustnessProbe("evidence", label, 0.0, 0.0, 0.0, True, {"status": "completed", **evidence})
+    ]
+
+
+def _result_trade_count(result: BacktestResult) -> int:
+    evidence = result.matching_model.get("validation_evidence")
+    return (
+        int(evidence.get("fill_count", len(result.fills)))
+        if isinstance(evidence, dict)
+        else len(result.fills)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Trial 执行接口
 # ---------------------------------------------------------------------------
@@ -98,9 +117,8 @@ class TrialRunner(Protocol):
         start: date,
         end: date,
         params: dict[str, object],
-        config_overrides: dict[str, object] | None = ...
-    ) -> Awaitable[BacktestResult]:
-        ...
+        config_overrides: dict[str, object] | None = ...,
+    ) -> Awaitable[BacktestResult]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +140,12 @@ def compute_window_metrics(
     """从 ``BacktestResult`` 提取单窗口 ``WindowMetrics``。"""
     eq = result.equity_curve
     bench = result.benchmark_curve
+    evidence = result.matching_model.get("validation_evidence", {})
+    research = isinstance(evidence, dict) and evidence.get("metric_convention") == "research_rf0_ddof1_252"
+    saved_raw = evidence.get("research_metrics", {}) if isinstance(evidence, dict) and research else {}
+    saved = saved_raw if isinstance(saved_raw, dict) else {}
+    annualized = float(saved["annualized_return"]) if research else annualized_return(eq)
+    sharpe = sharpe_ratio_rf0(eq) if research else sharpe_ratio(eq)
 
     return WindowResult(
         metrics=WindowMetrics(
@@ -129,18 +153,18 @@ def compute_window_metrics(
             start=start,
             end=end,
             total_return=total_return(eq),
-            annualized_return=annualized_return(eq),
-            sharpe_ratio=sharpe_ratio(eq),
-            sortino_ratio=sortino_ratio(eq),
-            calmar_ratio=calmar_ratio(eq),
+            annualized_return=annualized,
+            sharpe_ratio=sharpe,
+            sortino_ratio=sortino_ratio(eq, risk_free_annual=result.risk_free_annual),
+            calmar_ratio=annualized / abs(max_drawdown(eq)) if research and max_drawdown(eq) else calmar_ratio(eq),
             information_ratio=information_ratio(eq, bench) if bench else 0.0,
             max_drawdown=max_drawdown(eq),
             max_drawdown_duration=max_drawdown_duration(eq),
             monthly_win_rate=monthly_win_rate(eq),
             var_95=value_at_risk(eq),
             cvar_95=conditional_value_at_risk(eq),
-            trade_count=len(result.fills),
-            turnover=turnover_ratio(result.fills, eq),
+            trade_count=_result_trade_count(result),
+            turnover=float(saved["turnover"]) if research else turnover_ratio(result.fills, eq),
             benchmark_return=total_return(bench) if bench else 0.0,
             excess_return=total_return(eq) - (total_return(bench) if bench else 0.0),
         ),
@@ -208,9 +232,7 @@ class ValidationRunner:
         """
         async with self._state_lock:
             if self.experiment.status == ExperimentStatus.HYPOTHESIS:
-                self.experiment = transition_status(
-                    self.experiment, ExperimentStatus.IN_SAMPLE
-                )
+                self.experiment = transition_status(self.experiment, ExperimentStatus.IN_SAMPLE)
 
         new_trials: list[TrialRecord] = []
         for params in candidates:
@@ -232,11 +254,15 @@ class ValidationRunner:
                 self.experiment = increment_trials_used(self.experiment)
 
         # 选 IS 最优 trial(按 IS Sharpe,失败 trial 不参与)
-        successful = [t for t in self.trials if t.status == TrialStatus.SELECTED and t.in_sample_metrics]
+        successful = [
+            t for t in self.trials if t.status == TrialStatus.SELECTED and t.in_sample_metrics
+        ]
         if successful:
             best = max(
                 successful,
-                key=lambda t: t.in_sample_metrics.sharpe_ratio if t.in_sample_metrics else float("-inf"),
+                key=lambda t: (
+                    t.in_sample_metrics.sharpe_ratio if t.in_sample_metrics else float("-inf")
+                ),
             )
             self.best_trial_id = best.trial_id
 
@@ -287,9 +313,7 @@ class ValidationRunner:
 
         # IS 门判定
         thr = self.experiment.thresholds
-        is_pass = (
-            window_result.metrics.sharpe_ratio >= thr.min_in_sample_sharpe
-        )
+        is_pass = window_result.metrics.sharpe_ratio >= thr.min_in_sample_sharpe
         status = TrialStatus.SELECTED if is_pass else TrialStatus.REJECTED
         return TrialRecord(
             trial_id=trial_id,
@@ -298,7 +322,10 @@ class ValidationRunner:
             parameters=dict(params),
             status=status,
             in_sample_metrics=window_result.metrics,
-            failure_reason=None if is_pass else (
+            robustness_probes=tuple(_result_evidence(result, "in_sample")),
+            failure_reason=None
+            if is_pass
+            else (
                 f"is_sharpe={window_result.metrics.sharpe_ratio:.3f} "
                 f"< min_in_sample_sharpe={thr.min_in_sample_sharpe:.3f}"
             ),
@@ -347,6 +374,8 @@ class ValidationRunner:
             )
 
         oos_window_results: list[WindowResult] = []
+        evidence: list[RobustnessProbe] = list(best.robustness_probes)
+        window_errors: list[str] = []
         all_window_returns: list[list[float]] = []
         for window in windows:
             try:
@@ -362,6 +391,7 @@ class ValidationRunner:
                     window_index=window.window_index,
                     error=str(exc),
                 )
+                window_errors.append(f"window_{window.window_index}: {exc}")
                 continue
             wr = compute_window_metrics(
                 role=WindowRole.TEST,
@@ -371,6 +401,7 @@ class ValidationRunner:
             )
             oos_window_results.append(wr)
             all_window_returns.append(list(wr.daily_returns))
+            evidence.extend(_result_evidence(result, f"walk_forward_{window.window_index}"))
 
         if not oos_window_results:
             return replace(
@@ -383,7 +414,10 @@ class ValidationRunner:
         agg_oos = _aggregate_oos_metrics(oos_window_results)
 
         # 跑稳健性 probe
-        probes = await self._run_robustness_probes(best=best)
+        probes = await self._run_robustness_probes(
+            best=replace(best, walk_forward_windows=tuple(w.metrics for w in oos_window_results))
+        )
+        probes = evidence + probes
 
         # 跑统计修正。PBO 矩阵取 IS 阶段各竞争 trial 的日收益(同窗同轴),
         # 不再用顺序 walk-forward 窗口序列:窗口按近似交易日切分、真实权益
@@ -397,10 +431,22 @@ class ValidationRunner:
 
         # OOS 门判定
         thr = self.experiment.thresholds
-        oos_pass = self._evaluate_oos_gate(agg_oos, stat_report, thr)
+        runner_config = self.experiment.version_stamp.selection_config.get(
+            "validation_trial_runner", {}
+        )
+        strict = isinstance(runner_config, dict) and (
+            runner_config.get("kind") == "research_spec"
+            or runner_config.get("stress_schema") == "executed_v1"
+        )
+        incomplete = bool(window_errors) or (strict and any(not p.passed for p in probes))
+        oos_pass = self._evaluate_oos_gate(agg_oos, stat_report, thr) and not incomplete
 
         new_status = TrialStatus.SELECTED if oos_pass else TrialStatus.REJECTED
         new_failure = None if oos_pass else self._format_oos_failure(agg_oos, stat_report, thr)
+        if incomplete:
+            new_failure = "incomplete_or_failed_validation_evidence: " + "; ".join(
+                window_errors or [p.label for p in probes if not p.passed]
+            )
 
         updated = replace(
             best,
@@ -430,6 +476,88 @@ class ValidationRunner:
         """
         probes: list[RobustnessProbe] = []
         plan = self.experiment.plan
+        config = self.experiment.version_stamp.selection_config.get("validation_trial_runner", {})
+        execute_stress = isinstance(config, dict) and (
+            config.get("kind") == "research_spec" or config.get("stress_schema") == "executed_v1"
+        )
+        if execute_stress:
+            stress = self.experiment.robustness
+            matrix: list[tuple[str, str, dict[str, object]]] = [
+                ("cost", f"cost_x{m}", {"cost_multiplier": m}) for m in stress.cost_multipliers
+            ]
+            matrix += [
+                ("slippage", f"slippage_{s}bps", {"slippage_bps": s})
+                for s in stress.slippage_stress_bps
+            ]
+            matrix += [
+                ("delay", f"delay_{d}bar", {"execution_delay_bars": d})
+                for d in stress.execution_delay_bars
+            ]
+            if len(matrix) > 24:
+                raise ValueError("stress_budget_exceeded: at most 24 probes")
+            for kind, label, override in matrix:
+                if kind == "delay" and override["execution_delay_bars"] != 1:
+                    probes.append(
+                        RobustnessProbe(
+                            kind,
+                            label,
+                            0,
+                            0,
+                            0,
+                            False,
+                            {
+                                "status": "unsupported",
+                                "reason": "execution_delay_bars>1",
+                                "overrides": override,
+                            },
+                        )
+                    )
+                    continue
+                try:
+                    result = await self.trial_runner(
+                        start=plan.validation_start,
+                        end=plan.validation_end,
+                        params=best.parameters,
+                        config_overrides=override,
+                    )
+                    wr = compute_window_metrics(
+                        role=WindowRole.TEST,
+                        start=plan.validation_start,
+                        end=plan.validation_end,
+                        result=result,
+                    )
+                    probes.append(
+                        RobustnessProbe(
+                            kind,
+                            label,
+                            wr.metrics.sharpe_ratio,
+                            wr.metrics.max_drawdown,
+                            wr.metrics.total_return,
+                            wr.metrics.sharpe_ratio >= self.experiment.thresholds.min_oos_sharpe
+                            and abs(wr.metrics.max_drawdown)
+                            <= self.experiment.thresholds.max_oos_drawdown,
+                            {
+                                "status": "completed",
+                                "overrides": override,
+                                "evidence": result.matching_model.get("validation_evidence", {}),
+                                "fee_assumptions": result.fee_assumptions,
+                                "commission": str(result.commission_paid),
+                                "tax": str(result.stamp_tax_paid),
+                            },
+                        )
+                    )
+                except Exception as exc:
+                    probes.append(
+                        RobustnessProbe(
+                            kind,
+                            label,
+                            0,
+                            0,
+                            0,
+                            False,
+                            {"status": "failed", "reason": str(exc), "overrides": override},
+                        )
+                    )
 
         # 邻域:围绕最优参数 ±10%
         # 注意:这里我们用最优参数本身在多个子区间上跑,作为邻域近似。
@@ -451,10 +579,18 @@ class ValidationRunner:
                     detail={"drop_from_is": drop},
                 )
             )
+            if execute_stress:
+                probes[-1] = replace(probes[-1], probe_kind="window_sensitivity", detail={"status": "completed", "drop_from_is": drop,
+                    "limitation": "walk-forward windows; not a parameter neighbourhood"})
+        if execute_stress and self.experiment.robustness.neighbourhood_steps > 0:
+            probes.append(RobustnessProbe("neighbourhood", "parameter_neighbourhood", 0, 0, 0, False,
+                {"status": "unsupported", "reason": "no parameter grid execution; walk-forward is not a neighbourhood probe"}))
 
         # 市场阶段:同参数,在 2018-Q4 / 2020-Q1 / 2022-Q1 / 2024-Q1 上跑
         relevant_phases = stress_phases_for_range(
-            plan.validation_start, plan.test_end, DEFAULT_STRESS_PHASES
+            plan.validation_start,
+            plan.validation_end if execute_stress else plan.test_end,
+            DEFAULT_STRESS_PHASES,
         )
         for phase in relevant_phases:
             try:
@@ -480,6 +616,10 @@ class ValidationRunner:
                         detail={"error": str(exc)},
                     )
                 )
+                if execute_stress:
+                    probes[-1] = replace(
+                        probes[-1], passed=False, detail={"status": "failed", "error": str(exc)}
+                    )
                 continue
             wr = compute_window_metrics(
                 role=WindowRole.TEST,
@@ -498,6 +638,9 @@ class ValidationRunner:
                     detail={"start": phase.start.isoformat(), "end": phase.end.isoformat()},
                 )
             )
+            if execute_stress:
+                probes[-1] = replace(probes[-1], detail={**probes[-1].detail, "status": "completed",
+                    "evidence": result.matching_model.get("validation_evidence", {})})
 
         return probes
 
@@ -509,11 +652,7 @@ class ValidationRunner:
         ``[train_start, train_end]`` 上回测,天然满足;<2 个可比 trial
         或行不等长(理论上仅数据面异常)即跳过,原因具名上报。
         """
-        rows = [
-            list(returns)
-            for returns in self._in_sample_returns.values()
-            if returns
-        ]
+        rows = [list(returns) for returns in self._in_sample_returns.values() if returns]
         if len(rows) < 2:
             reason = (
                 "fewer than 2 comparable in-sample trials "
@@ -546,6 +685,8 @@ class ValidationRunner:
         if pbo_skip_reason is not None:
             notes += f" PBO skipped: {pbo_skip_reason}"
         n_trials = max(1, len(self.trials))
+        config = self.experiment.version_stamp.selection_config.get("validation_trial_runner", {})
+        formal_spec = isinstance(config, dict) and config.get("kind") == "research_spec"
         (
             dsr,
             psr,
@@ -559,7 +700,7 @@ class ValidationRunner:
             all_trial_returns_matrix=matrix,
             n_trials=n_trials,
             benchmark_sharpe=0.0,
-            risk_free_annual=0.03,
+            risk_free_annual=0.0 if formal_spec else 0.03,
             bootstrap_seed=self.experiment.plan.random_seed,
         )
         return StatisticalReport(
@@ -571,7 +712,7 @@ class ValidationRunner:
             bootstrap_mdd_ci_low=mdd_low,
             bootstrap_mdd_ci_high=mdd_high,
             n_trials=n_trials,
-            methodology_notes=notes,
+            methodology_notes=notes + (" Formal research_spec risk_free_annual=0." if formal_spec else ""),
         )
 
     def _evaluate_oos_gate(
@@ -599,29 +740,21 @@ class ValidationRunner:
     ) -> str:
         reasons: list[str] = []
         if agg_oos.sharpe_ratio < thr.min_oos_sharpe:
-            reasons.append(
-                f"oos_sharpe={agg_oos.sharpe_ratio:.3f} < {thr.min_oos_sharpe:.3f}"
-            )
+            reasons.append(f"oos_sharpe={agg_oos.sharpe_ratio:.3f} < {thr.min_oos_sharpe:.3f}")
         if abs(agg_oos.max_drawdown) > thr.max_oos_drawdown:
             reasons.append(
                 f"|oos_mdd|={abs(agg_oos.max_drawdown):.3f} > {thr.max_oos_drawdown:.3f}"
             )
         if agg_oos.calmar_ratio < thr.min_oos_calmar:
-            reasons.append(
-                f"oos_calmar={agg_oos.calmar_ratio:.3f} < {thr.min_oos_calmar:.3f}"
-            )
+            reasons.append(f"oos_calmar={agg_oos.calmar_ratio:.3f} < {thr.min_oos_calmar:.3f}")
         if agg_oos.information_ratio < thr.min_oos_information_ratio:
             reasons.append(
                 f"oos_ir={agg_oos.information_ratio:.3f} < {thr.min_oos_information_ratio:.3f}"
             )
         if thr.min_pbo_pass and stat.pbo > thr.max_pbo:
-            reasons.append(
-                f"pbo={stat.pbo:.3f} > {thr.max_pbo:.3f}"
-            )
+            reasons.append(f"pbo={stat.pbo:.3f} > {thr.max_pbo:.3f}")
         if stat.deflated_sharpe_ratio < thr.min_deflated_sharpe:
-            reasons.append(
-                f"dsr={stat.deflated_sharpe_ratio:.3f} < {thr.min_deflated_sharpe:.3f}"
-            )
+            reasons.append(f"dsr={stat.deflated_sharpe_ratio:.3f} < {thr.min_deflated_sharpe:.3f}")
         if stat.probabilistic_sharpe_ratio < thr.min_probabilistic_sharpe:
             reasons.append(
                 f"psr={stat.probabilistic_sharpe_ratio:.3f} < {thr.min_probabilistic_sharpe:.3f}"
@@ -632,6 +765,7 @@ class ValidationRunner:
         self,
         *,
         config_overrides: dict[str, object] | None = None,
+        before_execute: Callable[[ResearchExperiment], Awaitable[None]] | None = None,
     ) -> ExperimentVerdict:
         """一次性揭盲最终冻结测试集。
 
@@ -666,6 +800,8 @@ class ValidationRunner:
                     oos_failure_reason=best.failure_reason,
                 )
             self.experiment = experiment
+        if before_execute is not None:
+            await before_execute(self.experiment)
         plan = self.experiment.plan
 
         try:
@@ -699,6 +835,10 @@ class ValidationRunner:
             end=plan.test_end,
             result=result,
         )
+        final_evidence = _result_evidence(result, "final_test")
+        if final_evidence:
+            best = replace(best, robustness_probes=best.robustness_probes + tuple(final_evidence))
+            self.trials = [best if t.trial_id == best.trial_id else t for t in self.trials]
 
         # 揭盲门:用 OOS 同样的门,但更严格(已经"消耗"了揭盲机会)
         thr = self.experiment.thresholds
@@ -715,9 +855,7 @@ class ValidationRunner:
         )
 
         if passes:
-            self.experiment = transition_status(
-                self.experiment, ExperimentStatus.VALIDATED_OOS
-            )
+            self.experiment = transition_status(self.experiment, ExperimentStatus.VALIDATED_OOS)
             return ExperimentVerdict(
                 experiment_id=self.experiment.experiment_id,
                 status=ExperimentStatus.VALIDATED_OOS,
@@ -806,19 +944,17 @@ def _aggregate_oos_metrics(windows: Sequence[WindowResult]) -> WindowMetrics:
     # 复合收益
     compounded = 1.0
     for w in windows:
-        compounded *= (1.0 + w.metrics.total_return)
+        compounded *= 1.0 + w.metrics.total_return
     total_ret = compounded - 1.0
 
     # 加权平均(按窗口长度)
-    total_days = sum(
-        max(1, (w.metrics.end - w.metrics.start).days) for w in windows
-    )
+    total_days = sum(max(1, (w.metrics.end - w.metrics.start).days) for w in windows)
 
     def weighted(getter: Callable[[WindowMetrics], float]) -> float:
-        return sum(
-            getter(w.metrics) * max(1, (w.metrics.end - w.metrics.start).days)
-            for w in windows
-        ) / total_days
+        return (
+            sum(getter(w.metrics) * max(1, (w.metrics.end - w.metrics.start).days) for w in windows)
+            / total_days
+        )
 
     start = min(w.metrics.start for w in windows)
     end = max(w.metrics.end for w in windows)

@@ -304,6 +304,12 @@ async def create_experiment(
         supersedes_id=body.supersedes_id,
         notes=body.notes,
     )
+    from finboard_app.spec_validation import freeze_spec_runner
+
+    try:
+        experiment = await freeze_spec_runner(session, experiment)
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(422, str(exc)) from exc
     repo = ExpRepo(session)
     await repo.save(experiment)
     await session.commit()

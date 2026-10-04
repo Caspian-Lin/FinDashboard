@@ -20,6 +20,9 @@
 | F-4 | 通用 `BacktestEngine` 默认把一切代码按 A 股股票撮合:`_DefaultInstrumentResolver`(engine.py:116-125),转债 / ETF 会被套错涨跌停与 T+1 规则;双低独立模拟器不受影响 | 高 | 代码核实(engine.py;2026-09-01) | 引擎注入 instrument_resolver 后 | **有效**(工程事实) | 2026-09-01 种子 |
 | F-5 | tushare 2000 积分档边界:`cb_daily`/`cb_basic`/`cb_issue`/`cb_share`/`top_list`/`margin`/`margin_detail`/`forecast` 可用;`cb_call`/`stk_mins`/`top_inst` 需 5000 档;2026-09-06 实测修正:`index_daily`/`fund_daily` 2000 档可调(fund_daily 文档标 5000 与实测不符,cb_call 被拒佐证账户 <5000) | 高 | 官方文档核对(2026-09-01)+ token 实测(2026-09-06,#341) | 积分档位 / 权限变更 | **有效**(环境事实) | 2026-09-01 种子,2026-09-06 实测修正(#341) |
 | F-6 | 研究数据 PIT 口径:财务数据 `available_at = ann_date + 1`,无前视 | 高 | 数据基座核实(2026-08-28,#212 同步链路) | 上游披露口径变更 | **有效** | 2026-08-28 核实,2026-09-01 登记 |
+| F-7 | 小盘复合 v13 当前可信度门未通过:原曲线年化18.88%/DD20.25%，剔2015年化7.46%；2024–2026是已使用窗口，不能重新称新OOS | 高（固定样本事实） | `RR-e909662f7b2c9f7ad30e89c4`；[固定复核报告](rounds/2026-10-04-smallcap-v13/report.md)、annual/exclude-2015/subsequent-used JSON；#505 | 合格未用窗口和同管线证据；不得仅扩大事后样本或放宽目标重开 | **有效**（not_supported 当前目标） | 2026-10-04 |
+| F-8 | v4→v5不是仅增加基准:5215共同股票有4832个manifest文件checksum改变；旧v12/成本对照不可归因于v13策略改善 | 高（发布元数据） | `a-share-cs-20260908-v4` / `a-share-cs-20260917-v5`；[发布差异](rounds/2026-10-04-smallcap-v13/evidence-index.md#release-diff-json)；旧run `RR-e1976d09cb26576d4cd9fb9f`、`RR-a2f0ad6f035d7eada1538227` | 固定数据/因子/代码/日历的控制实验；本条未声称已逐文件独立重哈希 | **有效** | 2026-10-04 |
+| F-9 | 小盘正式规格独立alpha、完整执行稳健性和新OOS仍缺证据；ma_cross载体已揭盲且not_supported；2024 reset消融不能代替完整历史验证 | 高（证据边界） | 实验 `bc9fc5af85e84173`；reset基线 `RR-062582fd19f3341868a256b8` 与[12项归档](rounds/2026-10-04-smallcap-v13/evidence-index.md#executed-sources-json)；[分项证据门](rounds/2026-10-04-smallcap-v13/report.md) | 未用窗口、冻结微盘PIT基准/元数据、中性化、延迟/冲击真实证据齐备 | **有效**（insufficient_evidence，不晋级） | 2026-10-04 |
 
 ## 维护约定
 

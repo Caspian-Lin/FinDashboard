@@ -10,7 +10,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from finboard_app.selection_schema import FactorSelectionParams
 
@@ -672,6 +672,11 @@ class ExperimentCreate(BaseSchema):
 
 
 class ExperimentOut(BaseSchema):
+    @computed_field
+    def final_test_state(self) -> str:
+        from finboard_backtest.validation.contracts import describe_final_test_state
+        return describe_final_test_state(self.final_test_unsealed)
+
     experiment_id: str
     hypothesis: str
     version_stamp: dict[str, Any]

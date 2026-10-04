@@ -3,9 +3,9 @@
 本文件记录 `finboard-mcp` 包的 MCP 工具分阶段扩展计划。每个阶段对应一个 issue,
 按研究流程顺序(数据 → 因子 → 策略 → 回测 → 模拟 → portfolio)推进。
 
-## 当前状态(2026-08)
+## 历史阶段索引(2026-08;当前能力见末尾新增阶段及注册schema)
 
-**已实现 125 个工具**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 / #203 / #214 / #215 / #216 / #217 / #218 / #219 / #221 为既有工具的执行语义与契约增强 / 新增网格工具):
+**该阶段已实现以下工具族(当前数量以实际注册schema为准)**(issue #108 / #110 / #124 / #125 / #126 / #127 / #128 / #136 / #137 / #138 / #139 / #140 / #141;#170 / #171 / #172 / #173 / #174 / #175 / #183 / #184 / #186 / #189 / #190 / #203 / #214 / #215 / #216 / #217 / #218 / #219 / #221 为既有工具的执行语义与契约增强 / 新增网格工具):
 
 | 命名空间 | 工具数 | 工具 | 能力 |
 |----------|--------|------|------|
@@ -671,6 +671,12 @@ L3 沙箱路线第四环:agent 编写的**策略**代码进入回测。用户决
 
 ## 研究收束与解释（#499/#500）
 
-已实现topic_read/write、memory_page、source_check、strategy_explain、decision_explain：稳定课题ID与版本目标，追加轮次与纠正，分页摘录，冻结规则与有界单标的决策证据。只研究元数据和读侧，不新增执行阶段、晋级或实盘能力。年度诊断/可比性、同策略OOS、实际压力矩阵仍见#501/#502/#503。
+已实现topic_read/write、memory_page、source_check、strategy_explain、decision_explain：稳定课题ID与版本目标，追加轮次与纠正，分页摘录，冻结规则与有界单标的决策证据。只研究元数据和读侧，不新增晋级或实盘能力。
 
 课题组织与旧证据归档：entry_type=evidence+精确source_refs关联原run/记忆/实验，不改写原产物，可跨课题引用；entries分页作为当前逻辑目录，尚无聚合/反向归属API。完整MCP操作示例见docs/research/topic-organization.md与Skill；记忆UI共用Markdown阅读区、北京时间和按需证据核查。
+
+## 研究验证与复核（#501–#505）
+
+新增run_diagnostics/run_compare/decision_projection/research_stress，REST与MCP同源；SQL加载前护栏覆盖单决策detail和导出。正式验证kind=research_spec冻结已发布multi_factor基线，复用候选/排名/组合/风险/撮合/账本与逐操作store；预热不计绩效，覆盖/成交尾段预检，已用最终窗口拒绝，揭盲执行前持久化，子run逐阶段传递worker进度/取消。
+压力plan/get/queue分离，成本/滑点/资金真实子运行；explicit_overrides_v1启用研究费率覆盖优先，保留免税资产和旧manifest回放。registry支持真实覆盖，新自动压力显式stress_schema=executed_v1；UI区分执行/失败/不支持/历史未知。2Bar延迟、订单簿冲击、参数邻域和正式规格非空参数网格仍unsupported，不为兼容放松门。
+操作规程与外置模型fixture评测见docs/research/verification-playbook.md；同规格窗口契约见docs/research/formal-validation-contract.md。#505只产出有限研究证据与负/不足结论，不开启模拟/影子/实盘。

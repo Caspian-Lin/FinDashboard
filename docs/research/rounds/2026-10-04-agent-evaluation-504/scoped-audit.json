@@ -1,0 +1,103 @@
+[
+  {
+    "round": "scoped-1",
+    "session_id": "ses_efa9bc908ffe0ymOLdkcJ2Azwl",
+    "receipt_checks": {
+      "baseline": true,
+      "confounded_comparison": true,
+      "carrier_not_supported": true,
+      "delay_unsupported": true,
+      "oversize_then_filtered_pages": true,
+      "same_job_timeout_and_cache": true,
+      "memory_source_check": true,
+      "planned_stress": true,
+      "service_metrics": true,
+      "goal_and_round": true
+    },
+    "all_receipt_checks": true,
+    "manual_text_review_required": true,
+    "tool_call_count": 25,
+    "tool_error_count": 4,
+    "input_tokens": 67176,
+    "output_tokens": 20149,
+    "cache_read_tokens": 575872,
+    "runtime_estimated_cost": 0.023893416,
+    "cost_currency": "not supplied in events; runtime estimate is not an account invoice"
+  },
+  {
+    "round": "scoped-2",
+    "session_id": "ses_efa997832ffetEw5TKFZpRrZN6",
+    "receipt_checks": {
+      "baseline": true,
+      "confounded_comparison": true,
+      "carrier_not_supported": true,
+      "delay_unsupported": true,
+      "oversize_then_filtered_pages": true,
+      "same_job_timeout_and_cache": true,
+      "memory_source_check": true,
+      "planned_stress": true,
+      "service_metrics": true,
+      "goal_and_round": true
+    },
+    "all_receipt_checks": true,
+    "manual_text_review_required": true,
+    "tool_call_count": 31,
+    "tool_error_count": 3,
+    "input_tokens": 65867,
+    "output_tokens": 15049,
+    "cache_read_tokens": 945408,
+    "runtime_estimated_cost": 0.021745674,
+    "cost_currency": "not supplied in events; runtime estimate is not an account invoice"
+  },
+  {
+    "round": "scoped-3",
+    "session_id": "ses_efa949977ffe0ptw7vMOu5owsm",
+    "receipt_checks": {
+      "baseline": true,
+      "confounded_comparison": true,
+      "carrier_not_supported": true,
+      "delay_unsupported": true,
+      "oversize_then_filtered_pages": true,
+      "same_job_timeout_and_cache": true,
+      "memory_source_check": true,
+      "planned_stress": true,
+      "service_metrics": true,
+      "goal_and_round": true
+    },
+    "all_receipt_checks": true,
+    "manual_text_review_required": true,
+    "tool_call_count": 26,
+    "tool_error_count": 3,
+    "input_tokens": 65517,
+    "output_tokens": 15719,
+    "cache_read_tokens": 441216,
+    "runtime_estimated_cost": 0.020582598,
+    "cost_currency": "not supplied in events; runtime estimate is not an account invoice"
+  },
+  {
+    "round": "scoped-continued",
+    "session_id": "ses_efa910225ffesJp0TOyt7IuFKE",
+    "receipt_checks": {
+      "baseline": true,
+      "confounded_comparison": true,
+      "carrier_not_supported": true,
+      "delay_unsupported": true,
+      "oversize_then_filtered_pages": true,
+      "same_job_timeout_and_cache": true,
+      "memory_source_check": true,
+      "planned_stress": true,
+      "service_metrics": true,
+      "goal_and_round": true
+    },
+    "all_receipt_checks": true,
+    "manual_text_review_required": true,
+    "tool_call_count": 23,
+    "tool_error_count": 2,
+    "input_tokens": 56258,
+    "output_tokens": 9233,
+    "cache_read_tokens": 411904,
+    "runtime_estimated_cost": 0.015214212,
+    "cost_currency": "not supplied in events; runtime estimate is not an account invoice",
+    "interrupted_phase_runtime_estimated_cost": 0.00457875
+  }
+]

@@ -702,6 +702,15 @@ class PortfolioPipelineAdapter:
         conflict_policy: SignalConflictPolicy,
         target_gross: float,
     ) -> DecisionBundle:
+        # 新版压力/验证显式启用,旧manifest仍保留资产规则优先的回放语义。
+        if manifest.parameters.get("fee_policy_version") == "explicit_overrides_v1":
+            overrides = section_overrides(manifest.fee_config)
+            item = replace(item, lot_info={code: replace(info,
+                commission_rate=execution_model.commission_rate if "commission_rate" in overrides else info.commission_rate,
+                commission_min=execution_model.minimum_commission if "minimum_commission" in overrides else info.commission_min,
+                stamp_tax_rate=execution_model.sell_tax_rate if "sell_tax_rate" in overrides and info.stamp_tax_rate != 0 else info.stamp_tax_rate,
+                slippage_bps=execution_model.slippage_bps if "slippage_bps" in overrides else info.slippage_bps,
+            ) for code, info in item.lot_info.items()})
         current_positions, current_weights, equity = _mark_current_book(
             state, item
         )
