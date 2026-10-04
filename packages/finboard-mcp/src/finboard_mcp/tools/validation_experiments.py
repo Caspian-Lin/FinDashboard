@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
+from finboard_backtest.validation.contracts import describe_final_test_state
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
@@ -201,6 +202,7 @@ async def validation_experiment_list(
                     to_jsonable(
                         {
                             **e.as_dict(),
+                            "final_test_state": describe_final_test_state(e.final_test_unsealed),
                             # issue #310:派生结论语义(OOS 流程完成 ≠ 假设获支持)
                             "oos_outcome": derive_oos_outcome(
                                 e, trials_map.get(e.experiment_id, [])
@@ -238,6 +240,7 @@ async def validation_experiment_get(app: McpAppContext, experiment_id: str) -> T
             # issue #310:派生结论语义(不落库,序列化时由 trial OOS 状态 +
             # 揭盲指标推导)——validated_oos 只代表 OOS 流程完成。
             data["oos_outcome"] = derive_oos_outcome(experiment, trials).value
+            data["final_test_state"] = describe_final_test_state(experiment.final_test_unsealed)
             data["trials"] = [cast(dict[str, Any], to_jsonable(t.as_dict())) for t in trials]
             return cast(dict[str, Any], to_jsonable(data))
 
@@ -286,6 +289,9 @@ async def validation_experiment_create(
             notes=notes or "",
         )
         async with app.session_maker() as session:
+            from finboard_app.spec_validation import freeze_spec_runner
+
+            experiment = await freeze_spec_runner(session, experiment)
             await ResearchExperimentRepository(session).save(experiment)
             await session.commit()
         return cast(dict[str, Any], to_jsonable(experiment.as_dict()))

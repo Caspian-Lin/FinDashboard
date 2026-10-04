@@ -1,0 +1,37 @@
+{
+  "scope": "this retrospective execution and implementation replay, not an assertion about original v13 stdout",
+  "records": [
+    {
+      "source_log": ".review505-execution.log",
+      "log_sha256": "c4ea3dab80a527895113c1c7c9de843a32a6d397156eefa4911d5043de883c42",
+      "warnings": {
+        "universe_delist_metadata_unavailable": {
+          "count": 470,
+          "first_observation": "2026-10-04 02:18:28 [warning  ] research_run.universe_filter_degraded code=universe_delist_metadata_unavailable condition=exclude_delisted decision_date=2024-01-05 field=delist_date message='exclude_delisted 依赖 delist_date;发布 instruments 的 delist_date 全部为空,退市过滤不生效'",
+          "last_observation": "2026-10-04 03:55:27 [warning  ] research_run.universe_filter_degraded code=universe_delist_metadata_unavailable condition=exclude_delisted decision_date=2024-12-27 field=delist_date message='exclude_delisted 依赖 delist_date;发布 instruments 的 delist_date 全部为空,退市过滤不生效'"
+        },
+        "universe_st_pit_approximate": {
+          "count": 470,
+          "first_observation": "2026-10-04 02:18:28 [warning  ] research_run.universe_filter_degraded code=universe_st_pit_approximate condition=exclude_st decision_date=2024-01-05 field=name_history message='exclude_st 按名称历史 PIT 判定;325/5215 个标的决策日名称无 name_history覆盖、回退当前名称近似判定'",
+          "last_observation": "2026-10-04 03:55:27 [warning  ] research_run.universe_filter_degraded code=universe_st_pit_approximate condition=exclude_st decision_date=2024-12-27 field=name_history message='exclude_st 按名称历史 PIT 判定;246/5215 个标的决策日名称无 name_history覆盖、回退当前名称近似判定'"
+        }
+      }
+    },
+    {
+      "source_log": ".review505-window-replay.log",
+      "log_sha256": "5ca8e86c0a77a865a6a5ef52619426f3024a4189f78053b2e8cd0d366cad0305",
+      "warnings": {
+        "universe_delist_metadata_unavailable": {
+          "count": 94,
+          "first_observation": "2026-10-04 13:17:17 [warning  ] research_run.universe_filter_degraded code=universe_delist_metadata_unavailable condition=exclude_delisted decision_date=2024-01-05 field=delist_date message='exclude_delisted 依赖 delist_date;发布 instruments 的 delist_date 全部为空,退市过滤不生效'",
+          "last_observation": "2026-10-04 13:35:23 [warning  ] research_run.universe_filter_degraded code=universe_delist_metadata_unavailable condition=exclude_delisted decision_date=2024-12-20 field=delist_date message='exclude_delisted 依赖 delist_date;发布 instruments 的 delist_date 全部为空,退市过滤不生效'"
+        },
+        "universe_st_pit_approximate": {
+          "count": 94,
+          "first_observation": "2026-10-04 13:17:17 [warning  ] research_run.universe_filter_degraded code=universe_st_pit_approximate condition=exclude_st decision_date=2024-01-05 field=name_history message='exclude_st 按名称历史 PIT 判定;325/5215 个标的决策日名称无 name_history覆盖、回退当前名称近似判定'",
+          "last_observation": "2026-10-04 13:35:23 [warning  ] research_run.universe_filter_degraded code=universe_st_pit_approximate condition=exclude_st decision_date=2024-12-20 field=name_history message='exclude_st 按名称历史 PIT 判定;247/5215 个标的决策日名称无 name_history覆盖、回退当前名称近似判定'"
+        }
+      }
+    }
+  ]
+}

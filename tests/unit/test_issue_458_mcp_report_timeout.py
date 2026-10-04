@@ -247,10 +247,10 @@ def _patch_run_repos(
         calls["list"] += 1
         return artifacts or []
 
-    async def _estimate(self: Any, rid: Any) -> int:
+    async def _estimate(self: Any, rid: Any, decision_id: str | None = None) -> int:
         calls["estimate"] += 1
         # 与数据库侧 octet_length(payload::text) 同数量级的廉价口径。
-        return sum(len(str(a.payload)) for a in (artifacts or []) if a.payload)
+        return sum(len(str(a.payload)) for a in (artifacts or []) if a.payload and (decision_id is None or a.decision_id == decision_id))
 
     monkeypatch.setattr(ResearchRunRepository, "get", _get)
     monkeypatch.setattr(ResearchRunRepository, "list_artifacts", _list)
@@ -380,16 +380,19 @@ class TestDecisionIdDrilldown:
             data["artifacts"][0]["payload"]["candidates"][0]["included"] is True
         )
 
-    async def test_drilldown_bypasses_guard(self, monkeypatch: Any) -> None:
-        """下钻路径豁免护栏(单决策 artifacts 有界),超限 run 也能下钻。"""
+    async def test_drilldown_guard_before_loading(self, monkeypatch: Any) -> None:
+        """#501 单决策同样有护栏;拒绝发生在加载前。"""
         monkeypatch.setattr(reporting, "RUN_DETAIL_MAX_ESTIMATED_BYTES", 8)
         app = _make_app()
-        _patch_run_repos(monkeypatch, _run_row(), _drilldown_artifacts())
+        calls = _patch_run_repos(monkeypatch, _run_row(), _drilldown_artifacts())
         env = await rp_tools.report_run(
             app, _RUN_ID, view="detail", decision_id="2026-02-02"
         )
-        assert env.status == "ok", env.error
-        assert env.data["filtered_artifact_count"] == 1
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "payload_too_large"
+        assert calls["list"] == 0
+        assert calls["estimate"] == 1
 
     async def test_drilldown_no_match_not_found(self, monkeypatch: Any) -> None:
         app = _make_app()
@@ -512,7 +515,7 @@ class TestReportExportGuard:
         assert calls["estimate"] == 1
         assert calls["list"] == 0
 
-    async def test_export_run_decision_id_filters_and_bypasses_guard(
+    async def test_export_run_decision_id_still_obeys_guard(
         self, monkeypatch: Any, tmp_path: Any
     ) -> None:
         monkeypatch.setenv("FINBOARD_EXPORT_DIR", str(tmp_path))
@@ -522,11 +525,10 @@ class TestReportExportGuard:
         env = await rp_tools.report_export(
             app, "run", _RUN_ID, "csv", decision_id="2026-01-05"
         )
-        assert env.status == "ok", env.error
-        text = Path(env.data["path"]).read_text(encoding="utf-8-sig")  # noqa: ASYNC240
-        assert "# artifacts" in text
-        assert "2026-01-05" in text
-        assert "2026-02-02" not in text  # 只导出目标决策
+        assert env.status == "error"
+        assert env.error is not None
+        assert env.error.kind == "payload_too_large"
+        assert list(tmp_path.iterdir()) == []
 
     async def test_export_backtest_decision_id_rejected(
         self, monkeypatch: Any, tmp_path: Any

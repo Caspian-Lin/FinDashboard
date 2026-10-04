@@ -1,0 +1,3 @@
+# 研究证据按原始字节留档；换行转换会破坏文件 checksum 与源码快照锚。
+docs/research/rounds/2026-10-04-agent-evaluation-504/** -text whitespace=cr-at-eol
+docs/research/rounds/2026-10-04-smallcap-v13/** -text whitespace=cr-at-eol

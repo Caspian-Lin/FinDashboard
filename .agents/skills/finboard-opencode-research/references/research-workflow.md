@@ -32,7 +32,7 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 | MCP 工具 | 状态 |
 |----------|------|
-| `finboard.factor.catalog`(因子目录,26 个 alpha/risk/market_input) | ✅ #125 |
+| `finboard.factor.catalog`(因子目录,数量由注册表返回;含p_预置/u_受控用户因子) | ✅ #125 |
 | `finboard.feature_snapshot.list` / `.get`(查询特征快照) | ✅ #125 |
 | `finboard.feature_snapshot.create` / `.job_start` / `.job_status`(构建快照,含异步轮询) | ✅ #125 |
 | `finboard.factor.signal.list` / `.get`(查询因子信号) | ✅ #125 |
@@ -44,7 +44,7 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 - **策略规格**(`finboard_backtest.strategy_spec`):JSON schema + 白名单约束
 - **版本化**:每次发布不可变(immutable),带 checksum
-- **禁止**:网页 / MCP 提交 Python / 模块路径 / 可执行表达式
+- **禁止**:网页 / 无代码规格提交 Python / 模块路径 / 可执行表达式；MCP research_code_submit是独立受控通道
 
 | MCP 工具 | 状态 |
 |----------|------|
@@ -106,7 +106,7 @@ FinBoard 的研究流程是一条从原始数据到模拟盘评估的闭环。�
 
 ## 当前 agent 能做什么
 
-agent 的闭环能力(截至 #128):
+agent 的闭环能力(以当前注册schema为准):
 
 1. **数据查询**:标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额
    (✅ `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`)
@@ -131,3 +131,5 @@ agent 的闭环能力(截至 #128):
 - 下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测
 
 
+
+多期运行必须显式decision_schedule(legacy rebalance_frequency兼容且互斥)，u_与p_系列以冻结factor_series绑定，用户compute_series入口经PIT隔离及前缀不变审计。研究诊断/正式规格验证/压力范围见verification-playbook.md。

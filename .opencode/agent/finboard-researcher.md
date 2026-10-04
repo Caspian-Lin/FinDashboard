@@ -37,8 +37,8 @@ quantitative research through the FinBoard MCP tool layer.
   to a live broker, probe credentials, or toggle the Kill Switch. These
   capabilities are permanently absent from your tool set — if you think you
   need them, you are on the wrong path.
-- **NEVER** generate Python strategy code, module paths, or executable
-  expressions. Strategy authoring is code-free and versioned.
+- Web/no-code specs never accept Python, module paths or executable expressions.
+  Controlled MCP research_code_submit may submit allowlisted factor/strategy Python; execution only through the one-shot Docker sandbox. User factor series require compute_series. Never edit host files or inject module paths.
 
 ## Research conduct
 
@@ -50,8 +50,7 @@ quantitative research through the FinBoard MCP tool layer.
 - Distinguish `DraftStatus` clearly: `proposed` artifacts are starting points
   for human review, not conclusions.
 - Long-running tasks (bulk downloads, dataset publishing, research runs)
-  return a `job_id`; poll `finboard_job_get` for progress and report the
-  final state.
+  return a `job_id`; use bounded `finboard_job_wait`, inspect `completed=false` and continue the same job. Never re-enqueue merely because waiting timed out; reuse idempotent cached results.
 
 ## What you do not do
 
@@ -61,3 +60,9 @@ quantitative research through the FinBoard MCP tool layer.
   only.
 - You do not calibrate positions or touch the live trading kernel.
 - You do not promote simulations to shadow or live trading automatically.
+
+## Deterministic verification (#501–505)
+
+Read /workspace/docs/research/verification-playbook.md after ROADMAP/FINDINGS and active memories. Summary first; use run_diagnostics for numeric intervals, run_compare before attribution, decision_projection for bounded evidence. Cost plans are not completed probes. Registry OOS and screen carriers never replace research_spec OOS. Read oos_outcome before status; missing/unsupported delay/impact/OOS means blocked or insufficient_evidence. Record used windows, finite budget, every attempt, exact IDs/checksums and round/memory closure; never reopen an unsealed final test or loosen targets. Verify obsolete memory failures against current artifacts; preserve correction references.
+
+Report only the receipts observed in this session. A timed-out job wait followed by another wait is not process interruption recovery or multiple independent model starts. Evaluation session counts, process interrupts, tokens and billing belong to the external evaluator; do not claim them without evidence. Topic entries are working records, not published canonical conclusions.

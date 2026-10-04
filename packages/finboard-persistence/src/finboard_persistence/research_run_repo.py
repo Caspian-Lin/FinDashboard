@@ -116,6 +116,7 @@ _ARTIFACT_PAYLOAD_BYTES_SQL = text(
     SELECT COALESCE(SUM(octet_length(artifact.payload::text)), 0)
     FROM research_run_artifacts AS artifact
     WHERE artifact.run_id = :run_id
+      AND (CAST(:decision_id AS text) IS NULL OR artifact.decision_id = :decision_id)
     """
 )
 
@@ -411,7 +412,7 @@ class ResearchRunRepository:
             },
         )
 
-    async def estimate_artifact_payload_bytes(self, run_id: str) -> int:
+    async def estimate_artifact_payload_bytes(self, run_id: str, decision_id: str | None = None) -> int:
         """数据库侧估计 run 全部 payload 的 JSON 文本体量(#480),不取回 payload。
 
         ``report_run(view=detail)`` / ``report_export(kind=run)`` 加载前的
@@ -423,7 +424,7 @@ class ResearchRunRepository:
         return int(
             (
                 await self._session.execute(
-                    _ARTIFACT_PAYLOAD_BYTES_SQL, {"run_id": run_id}
+                    _ARTIFACT_PAYLOAD_BYTES_SQL, {"run_id": run_id, "decision_id": decision_id}
                 )
             ).scalar_one()
         )

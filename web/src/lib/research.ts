@@ -363,6 +363,14 @@ export interface ValidationTrial {
   status: TrialStatus;
   failure_reason?: string;
   created_at: string;
+  robustness_probes?: {
+    probe_kind: string;
+    label: string;
+    passed: boolean;
+    total_return: number;
+    max_drawdown: number;
+    detail: Record<string, unknown>;
+  }[];
 }
 
 export interface ValidationExperiment {

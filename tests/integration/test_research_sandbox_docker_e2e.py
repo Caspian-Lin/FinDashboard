@@ -491,6 +491,24 @@ class _Provider4Strategy:
             if d <= end and d in self.closes[symbol.code]
         ]
 
+    async def fetch_close_history(
+        self, symbol, period, start, end, *, decision_at, adjust="qfq", include_open=False
+    ):
+        # #300列式历史接口;旧可选Docker fixture未随生产读取契约更新。
+        import numpy as np
+
+        from finboard_data.releases import CloseHistoryColumns
+
+        visible = [d for d in self.days if start <= d <= end and d <= decision_at.date() and d in self.closes[symbol.code]]
+        values = np.array([self.closes[symbol.code][d] for d in visible], dtype=np.float64)
+        return CloseHistoryColumns(
+            dates=tuple(visible),
+            available_at=tuple(datetime(d.year, d.month, d.day, tzinfo=UTC) for d in visible),
+            closes=values,
+            opens=values * .995 if include_open else None,
+            last_timestamp=datetime(visible[-1].year, visible[-1].month, visible[-1].day, tzinfo=UTC) if visible else None,
+        )
+
     async def fetch_bars(self, symbol, period, start, end, *, adjust="qfq"):
         # 交易日历推断消费 worker 模块的轻量 Bar 形状(close + timestamp)。
         from tests.integration.test_research_run_signal_engine_worker import (

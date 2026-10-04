@@ -1,0 +1,49 @@
+{
+  "schema_version": "review505_v1",
+  "registered_at": "2026-10-04",
+  "baseline_run_id": "RR-e909662f7b2c9f7ad30e89c4",
+  "baseline_checksum": "5ff2882c9a52ca992738862b7d73f75cf8fc481410ff6beede83d55e02dfc3d4",
+  "window": {
+    "start": "2024-01-01",
+    "end": "2024-12-31",
+    "initial_capital_reset": "300000"
+  },
+  "classification": "previously used retrospective sensitivity; not fresh OOS",
+  "variants": [
+    "baseline",
+    "ret5-only",
+    "rsi-only",
+    "bias-only",
+    "macd-only",
+    "macd-positive",
+    "no-overlay"
+  ],
+  "cost_multipliers": [
+    2
+  ],
+  "slippage_bps": [
+    10,
+    20
+  ],
+  "capitals": [
+    "100000",
+    "500000"
+  ],
+  "delay_2bar": "unsupported; no run",
+  "run_budget": 12,
+  "automatic_retry_budget": 3,
+  "fee_policy_version": "explicit_overrides_v1",
+  "cost_1_overrides": {
+    "commission_rate": 0.0003,
+    "minimum_commission": 5,
+    "sell_tax_rate": 0.0005
+  },
+  "stop_rule": "record every terminal outcome; no tuning or replacement candidates",
+  "historical_reuse": "only v13 completed on v5 in source strategy history; v4 ablations confounded",
+  "limits": [
+    "full-history robustness cannot be inferred from one-year reset window",
+    "no fresh future data/factor coverage",
+    "no impact/delay/live validation"
+  ],
+  "metadata_correction": "2026-10-04: checksum field was null due to reading a computed property from serialized manifest; filled from original frozen source; no experiment parameters changed"
+}

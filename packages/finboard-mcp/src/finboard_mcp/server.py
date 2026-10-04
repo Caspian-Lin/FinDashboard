@@ -94,6 +94,7 @@ from finboard_mcp.tools import (
     register_validation_experiment_tools,
     register_watchlist_tools,
 )
+from finboard_mcp.tools.diagnostics import register as register_diagnostics_tools
 from finboard_mcp.tools.workspace import register as register_workspace_tools
 
 _INSTRUCTIONS = """\
@@ -110,7 +111,25 @@ FinBoard 研究 MCP —— 量化研究工具集
 
 课题与记忆引用用 finboard_source_check 核对精确版本/checksum与自动产物事实;断链与旧目标保留,文档优先于工作解释。研究工具按问题使用,可暂停、分支、复核与续接,并非必须线性执行。
 
-== 当前可用工具(134 个,已实现;#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)==
+== 当前可用工具(138 个,能力与参数以当前注册schema为准)==
+- #501-#504复核入口:finboard_run_diagnostics 显式窗口/逐年指标(研究252交易日年化、rf0/ddof1;
+  另列日历年化),SQL聚合成交费用/缺口分母;finboard_run_compare 按冻结输入核查可比性;
+  finboard_decision_projection SQL白名单字段分页(200行/256KiB,单决策也有护栏)。
+  detail超限缩字段/分页,禁止全量绕行;报告detail/导出单决策也在加载前SQL估计。
+  final_test_unsealed=true表示已揭盲/最终窗已使用/禁止重做,不是未揭盲;读final_test_state同源解释。
+  finboard_research_stress 的plan/get只读、queue才运行,最多24档;成本同时缩放佣金率、
+  最低佣金和卖出税,滑点独立,资金10-50万元;2Bar延迟unsupported,不能移动决策日代替。
+  新研究费用优先级parameters.fee_policy_version=explicit_overrides_v1,显式fee覆盖进入
+  可行性/手数/成交,保留免税资产;旧manifest保持资产规则优先,先跑cost_x1控制再归因。
+  压力配置≠执行证据,completed≠达到门槛;失败/不支持/未知不能称全通过。
+  validation_trial_runner.kind=research_spec 服务端从completed发布multi_factor基线冻结
+  完整manifest,同一PortfolioPipelineAdapter跑IS/WF/最终窗口;kind=registry显式传统入口。
+  正式入口只支持冻结参数单点,非空参数网格具名拒绝;需要used_windows,服务端加入基线已用
+  区间,重叠最终窗口拒绝;因子覆盖/成交尾段前置检查,预热不计绩效,揭盲执行前持久化。
+  默认2Bar延迟和未实现参数邻域阻断全通过,不能改名替代注册表载体OOS。操作手册:
+  docs/research/verification-playbook.md。job_wait的completed=false续同job,缓存复用;残缺refs具名留缺口。
+  只报告本会话工具回执;等待超时续等不是进程中断恢复,独立模型会话/中断/token/费用由外层评测器记录。
+  轮次追加是工作记录,不等于canonical结论发布。
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -506,6 +525,7 @@ def build_mcp_server() -> MCPServer:
         lifespan=app_lifespan,
     )
     register_workspace_tools(mcp)
+    register_diagnostics_tools(mcp)
     register_run_tools(mcp)
     register_memory_tools(mcp)
     register_data_tools(mcp)

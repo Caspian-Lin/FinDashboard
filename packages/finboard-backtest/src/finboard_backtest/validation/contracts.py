@@ -556,6 +556,11 @@ def best_oos_trial(trials: Sequence[TrialRecord]) -> TrialRecord | None:
     )
 
 
+def describe_final_test_state(unsealed: bool) -> str:
+    """只读解释,不改变冻结实验、状态机或checksum。"""
+    return "已揭盲;最终测试已使用,禁止重做" if unsealed else "尚未揭盲;仍须通过执行入口与一次性门"
+
+
 def derive_oos_outcome(
     experiment: ResearchExperiment,
     trials: Sequence[TrialRecord],

@@ -1,5 +1,6 @@
 import { useSearchParams } from "react-router-dom";
 import { oosLabel } from "@/lib/research-semantics";
+import { ValidationEvidence } from "@/components/research/ValidationEvidence";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FlaskConical, Plus, RefreshCw, Trash2, X } from "lucide-react";
@@ -1144,7 +1145,7 @@ export default function Experiments() {
                           <Separator />
                           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                             <JsonBlock
-                              label={tl({ zh: "稳健性配置", en: "Robustness config" })}
+                              label={tl({ zh: "稳健性计划（配置）", en: "Robustness plan (configuration)" })}
                               value={detail.robustness}
                             />
                             <JsonBlock
@@ -1154,6 +1155,10 @@ export default function Experiments() {
                           </div>
                         </>
                       )}
+
+                      <Separator />
+
+                      <ValidationEvidence trials={detail.trials} />
 
                       <Separator />
 

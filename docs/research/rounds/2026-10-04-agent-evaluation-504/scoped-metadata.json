@@ -1,0 +1,37 @@
+{
+  "model": "opencode-go/deepseek-v4.1-flash",
+  "opencode_version": "1.18.15",
+  "fixture": true,
+  "budget": "user authorized existing OpenCode Go 5h window; no monetary ceiling",
+  "schema_sha256": "ba64d8f0198c9317b55ab3e4d9361345b1550268fc3775374799c0a831e3cebf",
+  "context_sha256": "8f6e69851d4f06285bdfdb7587ce5ad517d879457d41e78cffb611142dbfbef9",
+  "fixture_code_sha256": "120979b1772bf4617218c80055d2ff0e1ef05bf5b6b502d53f6a5ea51a2d82ca",
+  "prompt_sha256": "ea71cddce209ac82876f08cf0e0f3de80b1041e309f190f89203eb029e2bd086",
+  "authority_sha256": "99a5990b0cd996d230dd05c3116cb56059b033818ef4de6731f1ebf73b97a126",
+  "agent": "finboard-fixture-researcher",
+  "batch": "scoped",
+  "real_database": false,
+  "paid_model_in_ci": false,
+  "results": [
+    {
+      "round": "scoped-1",
+      "exit_code": 0
+    },
+    {
+      "round": "scoped-2",
+      "exit_code": 0
+    },
+    {
+      "round": "scoped-3",
+      "exit_code": 0
+    },
+    {
+      "round": "interrupted-continued",
+      "session_id": "ses_efa910225ffesJp0TOyt7IuFKE",
+      "interrupt_exit_code": 130,
+      "exit_code": 0,
+      "interrupted_after": "first job_wait",
+      "fixture_state_reset": false
+    }
+  ]
+}

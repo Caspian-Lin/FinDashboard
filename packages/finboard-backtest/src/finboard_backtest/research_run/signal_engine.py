@@ -678,14 +678,18 @@ async def _load_benchmark_curve(
     if not isinstance(configured, str) or not configured:
         return ()
     symbol = Symbol(code=configured, market=_market_from_value(configured))
-    for release_ref in manifest.dataset_releases:
+    from finboard_backtest.research_run.window import research_window
+
+    window = research_window(manifest.parameters)
+    refs = (_bars_release_ref(manifest, release_provider_factory),) if window else manifest.dataset_releases
+    for release_ref in refs:
         try:
             provider = release_provider_factory(release_ref.artifact_id)
             bars = await provider.fetch_point_in_time_bars(
                 symbol,
                 provider.release.period,
-                provider.release.start_date,
-                provider.release.end_date,
+                window["decision_start"] if window else provider.release.start_date,
+                window["valuation_end"] if window else provider.release.end_date,
                 decision_at=datetime.combine(
                     provider.release.end_date,
                     time(hour=17, tzinfo=ZoneInfo("Asia/Shanghai")),
@@ -899,6 +903,18 @@ async def _resolve_decision_days(
                 "(多期仅价格因子按发布每日重算,基本面因子仍 PIT 取自冻结快照/"
                 "研究数据发布)。"
             )
+    from finboard_backtest.research_run.window import research_window
+
+    window = research_window(manifest.parameters)
+    if window is not None:
+        decision_days = [(d, s) for d, s in decision_days
+                         if window["decision_start"] <= d.date() <= window["decision_end"]]
+        if not decision_days:
+            raise ValueError("research_window_no_decisions")
+        execution = await _next_execution_at(provider, decision_days[-1][0],
+                                            trading_days_loader=trading_days_loader)
+        if execution.date() > window["valuation_end"]:
+            raise ValueError("research_window_execution_tail_missing")
     return decision_days
 
 
@@ -1678,6 +1694,11 @@ async def build_daily_equity_curve(
     from bisect import bisect_right
 
     calendar = await _release_trading_days(provider)
+    from finboard_backtest.research_run.window import research_window
+
+    window = research_window(manifest.parameters)
+    if window is not None:
+        calendar = [d for d in calendar if window["decision_start"] <= d <= window["valuation_end"]]
     if not calendar:
         return ()
     segments: list[tuple[date, Decimal, dict[str, tuple[Decimal, Decimal]]]] = []

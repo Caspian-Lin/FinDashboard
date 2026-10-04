@@ -5,8 +5,25 @@
 `operation_id` / `status`(ok|denied|error) / `data` /
 `error` / `provenance` / `idempotency_key`。
 
-当前已实现 128 个工具(✅;#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)。所有工具遵守权限边界:研究写操作 agent 自主执行,
+工具数量与参数以当前注册schema为准。所有工具遵守权限边界:研究写操作 agent 自主执行,
 不触及实盘 broker / 账户 / 订单 / 持仓 / Kill Switch。
+
+## 确定性复核工具（#501–#504）
+
+| 工具 | 参数 | 返回/限制 |
+|---|---|---|
+| finboard_run_diagnostics | run_id,start,end,yearly=true | period/years/markdown同源；净收益、252交易日年化与calendar次口径、rf0/ddof1、费用、实际成交边界、shortfall/requested_notional；最多100年/10000权益点，SQL先检查字节 |
+| finboard_run_compare | run_ids（2–6个）,allowed_differences | controlled_difference/confounded/incomparable；冻结发布、因子、日历、资金、规则、生效覆盖、基准与代码；换数据始终confounded；长值用checksum/摘要不返全量 |
+| finboard_decision_projection | run_id,stage,decision_id?,symbol?,fields?,limit=100,offset=0 | SQL先白名单投影分页，最多200条/256KiB，total/next_offset/原trace与checksum；单决策不豁免，未知阶段/字段具名拒绝 |
+| finboard_research_stress | baseline_run_id,plan_key,operation=plan/get/queue,cost_multipliers?,slippage_bps?,capitals?,execution_delay_bars? | plan/get只读，queue才入队；最多24档，资金10–50万元；子run/job、spec/override/effective、执行状态；delay2 unsupported，all_completed不是验收通过 |
+
+投影阶段：universe/features/signals/targets_before_constraints/constraints/targets_after_constraints/risk_exits/targets_after_risk/rebalance_plan/orders/fills/ledger。没有decisions/ranking通用阶段。字段取当前schema描述与服务端白名单，超限缩字段/limit或分页，不下载全量绕行。
+新版费用优先级explicit_overrides_v1冻结四项合并费率并进入可行性/手数/成交；免税资产保留零税。旧manifest维持资产规则优先，旧基线须先cost_x1控制，再做费用归因。
+validation_experiment_create 的 selection_config.validation_trial_runner 显式kind=registry或research_spec。正式入口提供completed baseline_run_id+used_windows；服务端冻结manifest并加基线已用区间，最终窗重叠拒绝；覆盖/成交尾段前置检查。当前multi_factor仅支持冻结参数单点，非空网格unsupported。warmup从冻结发布起点，不计入绩效；最终揭盲执行前落库，取消/恢复不重开。请求参数邻域而无真实扫描则unsupported，WF最差窗不能冒充邻域。
+异步任务返回job_id后统一优先finboard_job_wait；超时继续同job，终态看error_summary/result_ref，缓存命中复用。job_get仅用于按需状态检查，旧轮询表述不授权重复入队或全量载荷。
+
+`final_test_unsealed=true` 明确表示**已揭盲、最终窗口已使用，禁止重做**，不是“未揭盲”。验证实验读侧 `final_test_state` 给出同源中文解释，不改变历史状态/checksum；结论仍先看 `oos_outcome`。
+完整复核payload/收尾结构见docs/research/verification-playbook.md；验证契约见docs/research/formal-validation-contract.md。
 
 ## 权限矩阵(#122:研究写操作自主执行)
 
@@ -361,7 +378,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 (market=future,主连仅研究信号/基准、不可当作可成交合约)。
 - 参数:无
 - 返回:`JobOut`(`kind=data_sync`)
-- 进度:用 `finboard_job_get(job_id)` 轮询
+- 进度:用 `finboard_job_wait(job_id, timeout_seconds=30)` 有界等待,超时续等同job
 
 ### finboard_data_bulk_download_start **[写,任务化]**
 登记批量历史数据拉取任务(按市场/类型/交易所筛选),返回 202 + `job_id`。
@@ -382,7 +399,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 返回:`JobOut`(`kind=bulk_download`)
 - 校验(#347):入队期 payload 契约(#260 风格)—— 未知 source / 非法日期 /
   tushare×etf|futures 等非法参数秒级 `invalid_argument`
-- 进度:用 `finboard_job_get(job_id)` 轮询(阶段如 `bulk_download:fetching`;
+- 进度:用 `finboard_job_wait(job_id, timeout_seconds=30)` 有界等待,超时续等同job(阶段如 `bulk_download:fetching`;
   部分标的失败仍 succeeded,phase 形如 `bulk_download:partial N failed`,
   失败标的与原因看 `error_summary`)
 
@@ -391,7 +408,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 - 参数:`symbols`(标的代码列表,必填)/ `source?`(默认 akshare)/ `adjust?`(默认 qfq)
 - 返回:`JobOut`(`kind=quality_repair`)
 - 错误:`invalid_argument`(symbols 为空)
-- 进度:用 `finboard_job_get(job_id)` 轮询
+- 进度:用 `finboard_job_wait(job_id, timeout_seconds=30)` 有界等待,超时续等同job
 
 ### finboard_dataset_release_publish **[写,任务化 ⭐ 研究闭环关键节点]**
 登记数据集冻结发布任务(原子 rename + DB 登记 + 标的资产类型校验),返回 202 + `job_id`。
@@ -487,7 +504,7 @@ dataset_release_publish)登记 `queued` 任务返回 `job_id`,实际执行由 wo
 
 ### finboard_factor_catalog
 查询因子目录(三源,`source` 参数选择,#427):`source` 缺省或 `"lab"` =
-实验室混合目录——builtin(26 个 alpha/risk/market_input 因子)+
+实验室混合目录——builtin(当前注册的 alpha/risk/market_input 因子)+
 user_defined(沙箱执行的自定义因子,#217)。
 **builtin 目录(#214 起)是因子定义的唯一事实来源**——v1 选股规则目录
 (`finboard_data.factors.FACTOR_CATALOG`,8 因子)逐字段从这里投影生成,
@@ -682,7 +699,7 @@ supported=best trial OOS 门过且揭盲达标;not_supported=best trial OOS 被
   `validation_experiment:<experiment_id>`)、`requested_by?: str`(默认
   `agent:mcp`)
 - 返回:`{job_id, kind, experiment_id, status, created, idempotency_key,
-  detail_hint}`;`finboard_job_get` 轮询
+  detail_hint}`;`finboard_job_wait` 有界等待,超时续等同job
 - 前置:实验的 `version_stamp.selection_config` 须声明
   `validation_trial_runner: {strategy, symbols, provider?, params?, capital?}`
   (注册表策略回测;capital 必须为数值 int/float/数字字符串,params 必须为对象,
@@ -848,7 +865,7 @@ research_run 管线轻路由(#174)。
   `run_async: bool | None = None`——`true` 强制入队 `kind=backtest_run` 后台
   任务返回 job_id、`false` 强制同步、省略时按估算工作量「标的不数 x 交易日」
   自动切换(≥ `backtest_auto_async_symbol_days`(settings,默认 15000,0=关闭
-  自动切换)即异步)。异步任务用 `finboard_job_get(job_id)` 轮询:成功后
+  自动切换)即异步)。异步任务用 `finboard_job_wait(job_id, timeout_seconds=30)` 有界等待,超时续等同job:成功后
   `result_ref=str(run_id)`,再用 `finboard_backtest_history_get(run_id)` 查完整
   结果。`async_mode` 返回 explicit / auto_threshold 便于核对决策。
   - 参数:`strategy: str`、`symbols: list[str]`、`start: str`、`end: str`、
@@ -922,7 +939,7 @@ research_run 管线轻路由(#174)。
     空池秒级 `invalid_argument` 并附排除统计与缺失字段
   - 返回:`{run_id, job_id, status, strategy_id, strategy_kind,
     execution_mode, manifest_checksum, execution_path}` —— 已入队异步执行,用
-    `finboard_run_get` 或 `finboard_job_get` 轮询进度;`execution_mode` 为
+    `finboard_job_wait` 有界等待或按需 `finboard_run_get` 查进度;`execution_mode` 为
     single_shot(默认)或 multi_period(#183,报告含 annualized_return 与
     全区间每日 equity_curve)
   - 基准收益(#184):research_run 管线按 `benchmark_config.symbol` 从冻结
@@ -1458,12 +1475,12 @@ REST PUT 是全量语义,这里更安全)。
   decision_id, trace_id, checksum, payload}]}`(含 report / equity / decisions
   各阶段 payload,可达 MB 级,诊断用)
 - 返回(view=detail + decision_id,#458):artifacts 只含该决策的产物
-  (单决策 13 stage 有界,大 run 诊断下钻通道,豁免护栏);`artifact_count`
+  (单决策仍先SQL估计载荷,不豁免护栏);`artifact_count`
   保持 run 全量,另附 `decision_id` 与 `filtered_artifact_count`;run 级
   artifact(report 等)decision_id 为 null 不参与匹配
-- 载荷护栏(#458):detail 未下钻时先做廉价规模估计(逐 artifact
-  `len(str(payload))` 累计),估计超 64MB → `payload_too_large`(附估计
-  规模与替代路径,**不静默截断**;替代路径 = summary / decision_id 下钻)
+- 载荷护栏(#480/#501):detail/单决策/导出均在加载前SQL
+  `SUM(octet_length(payload::text))` 估计所选范围,超64MB → `payload_too_large`。
+  替代路径 = summary / decision_projection 缩字段与分页,不加载全量后再估计,不绕行下载。
 - 错误:`not_found`(研究运行不存在;detail 下钻 decision_id 无匹配)、
   `invalid_argument`(view 非法;summary 传 decision_id)
 

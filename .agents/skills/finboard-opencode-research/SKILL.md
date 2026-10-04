@@ -9,7 +9,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 > **权限由 OpenCode 配置 + FinBoard 服务端策略共同控制,本 Skill 不授予任何
 > 工具权限。** Skill 只描述「应该做什么」,工具是否可调用由
-> `.opencode/opencode.json`(agent permission)与 FinBoard MCP 服务端策略决定。
+> `.opencode/agent/finboard-researcher.md`(唯一权威agent permission)与 FinBoard MCP 服务端策略决定。
 
 ## 核心原则(HARD RULES)
 
@@ -19,8 +19,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
    不触及交易安全红线(不连 broker / 账户 / 订单 / 持仓)。
 3. **实盘能力永久不可用** —— 下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker /
    凭证探测不在工具集中。需要它们 = 走错了路。
-4. **不生成代码** —— 策略是无代码版本化规格,禁止生成 Python / 模块路径 /
-   可执行表达式。
+4. **代码通道受控** —— 网页/无代码规格禁Python与可执行表达式;MCP research_code_submit可提交白名单策略/因子Python,仅经Docker沙箱执行。用户因子序列只用compute_series;禁止宿主文件编辑、模块路径注入、任意表达式。
 5. **禁止未查索引重测已证伪假设**(#268) —— 会话启动先查结论索引
    (`/workspace/docs/research/FINDINGS.md` + `finboard_memory_list`,见下节),
    未查之前不得重跑任何「已证伪」假设;确要重开必须有新证据(新数据域 /
@@ -28,7 +27,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-当前已实现 134 个工具(#392 删 finboard_data_fetch_all,#443 增 finboard_job_wait)。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+已实现 138 个工具(注册表一致性由测试校验);schema与实际能力以当前运行时为准,数量不证明研究可靠性。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
@@ -122,3 +121,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 研究上下文入口：`finboard_topic_read/write` 保存课题、目标版本与追加轮次；`finboard_memory_page` 查看旧笔记与纠正链；`finboard_source_check` 核查引用；`finboard_strategy_explain` 与 `finboard_decision_explain` 有界解释冻结规则和实际决策。完整契约见 `references/tools.md`，不得用完成/发布状态代替 OOS 结论。
 
 课题是持续更新的研究锚点，不等于一次run。组织已有运行/记忆/实验用topic_write append的entry_type=evidence及精确source_refs，原产物不搬动、不改写、可被多个课题引用。完整“核查→创建→归档→分页续接→版本更新”例子见只读挂载 `/workspace/docs/research/topic-organization.md`；缺挂载时见references/tools.md的已有证据归档示例。
+
+## 复核规程（#501–#505）
+
+可执行手册见只读 `/workspace/docs/research/verification-playbook.md`；新增诊断/对照/投影/压力工具契约见references/tools.md。压力配置≠执行证据，registry OOS≠正式spec OOS；不支持项明确blocked/insufficient_evidence。job_wait有界等待、summary优先、投影分页、重试幂等、已用窗口和一次性揭盲规则均按手册执行。
