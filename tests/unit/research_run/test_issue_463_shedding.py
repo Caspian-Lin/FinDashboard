@@ -281,10 +281,10 @@ class TestSlimmingEquivalence:
         captured: list[list[Any]] = []
 
         async def spy_curve(
-            curve_provider: Any, curve_manifest: Any, decisions: Any
+            curve_provider: Any, curve_manifest: Any, decisions: Any, **kwargs: Any,
         ) -> Any:
             captured.append(list(decisions))
-            return await real_curve(curve_provider, curve_manifest, decisions)
+            return await real_curve(curve_provider, curve_manifest, decisions, **kwargs)
 
         monkeypatch.setattr(signal_engine_module, "build_daily_equity_curve", spy_curve)
 

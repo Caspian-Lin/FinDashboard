@@ -50,6 +50,7 @@ class _Bar:
 class _Instrument:
     code: str
     ready: bool = True
+    market: str = "a_share"
 
 
 @dataclass

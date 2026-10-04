@@ -132,6 +132,7 @@ if TYPE_CHECKING:
     from finboard_backtest.portfolio import CovarianceEstimate
     from finboard_data.factor_lab import FeatureSnapshot
     from finboard_data.releases import FrozenReleaseProvider, ReleasedInstrument
+    from finboard_shared.models import Symbol
 
 logger = structlog.get_logger(__name__)
 
@@ -603,6 +604,16 @@ def build_normalized_signals(
 # ---------------------------------------------------------------------------
 
 
+def _symbol_from_release(provider: FrozenReleaseProvider, code: str) -> Symbol:
+    """市场以冻结发布为权威;发布无该标的时才用代码后缀兜底(#496)。"""
+    from finboard_backtest.research_run.frozen_loader import _market_from_value
+    from finboard_shared.models import Symbol
+
+    instrument = next((item for item in provider.release.instruments if item.code == code), None)
+    market = instrument.market if instrument is not None else code
+    return Symbol(code=code, market=_market_from_value(market))
+
+
 async def _load_price_series(
     provider: FrozenReleaseProvider,
     symbols: Sequence[str],
@@ -616,9 +627,6 @@ async def _load_price_series(
     读取,并以 ``asyncio.gather`` + 信号量并发化(结果与异常都按输入顺序
     组装/抛出,与串行实现一致)。
     """
-    from finboard_backtest.research_run.frozen_loader import _market_from_value
-    from finboard_shared.models import Symbol
-
     series: dict[str, list[float]] = {}
     pending: list[str] = []
     for code in symbols:
@@ -636,7 +644,7 @@ async def _load_price_series(
     async def _fetch(code: str) -> list[float]:
         async with semaphore:
             bars = await provider.fetch_point_in_time_bars(
-                Symbol(code=code, market=_market_from_value(code)),
+                _symbol_from_release(provider, code),
                 provider.release.period,
                 provider.release.start_date,
                 as_of.date(),
@@ -671,16 +679,13 @@ async def _load_benchmark_curve(
     ``build_report`` 落 null + 具名 warning。纯离线研究域,只读冻结发布。
     """
     from finboard_backtest.metrics import buy_and_hold_return
-    from finboard_backtest.research_run.frozen_loader import _market_from_value
-    from finboard_shared.models import Symbol
-
     configured = manifest.benchmark_config.get("symbol")
     if not isinstance(configured, str) or not configured:
         return ()
-    symbol = Symbol(code=configured, market=_market_from_value(configured))
     for release_ref in manifest.dataset_releases:
         try:
             provider = release_provider_factory(release_ref.artifact_id)
+            symbol = _symbol_from_release(provider, configured)
             bars = await provider.fetch_point_in_time_bars(
                 symbol,
                 provider.release.period,
@@ -827,7 +832,7 @@ async def _release_trading_days(
             bars = await provider.fetch_bars(
                 Symbol(
                     code=instrument.code,
-                    market=_market_from_value(instrument.code),
+                    market=_market_from_value(instrument.market),
                 ),
                 provider.release.period,
                 provider.release.start_date,
@@ -1388,6 +1393,8 @@ def enqueue_decision_dates(
 
 async def _earliest_feasible_decision_start(
     provider: FrozenReleaseProvider,
+    *,
+    trading_days_loader: TradingDaysLoader | None = None,
 ) -> date | None:
     """动量类价格特征可用的最早决策日(#368 方案 A,best effort)。
 
@@ -1399,7 +1406,7 @@ async def _earliest_feasible_decision_start(
     from finboard_backtest.factor_lab import DEFAULT_MOMENTUM_LOOKBACK
 
     try:
-        days = await _release_trading_days(provider)
+        days = await _release_trading_days(provider, trading_days_loader=trading_days_loader)
     except Exception:
         return None
     if len(days) > DEFAULT_MOMENTUM_LOOKBACK:
@@ -1465,6 +1472,7 @@ async def _compute_period_features(
     process_pool: PriceFeatureProcessPool | None = None,
     close_histories: Mapping[str, SymbolCloseHistory | None] | None = None,
     price_precompute: PriceFeaturePrecompute | None = None,
+    trading_days_loader: TradingDaysLoader | None = None,
 ) -> tuple[FeatureValue, ...]:
     """按单个决策时点从冻结发布重算价格特征(issue #183)。
 
@@ -1499,7 +1507,9 @@ async def _compute_period_features(
     async def _data_error(exc: FactorAnalysisError) -> ValueError:
         # issue #368 方案 A:保持 fail-closed,报错具名最早可行决策起点
         # (best effort,日历读不出时降级为原文),拒绝语义零变化。
-        earliest = await _earliest_feasible_decision_start(provider)
+        earliest = await _earliest_feasible_decision_start(
+            provider, trading_days_loader=trading_days_loader
+        )
         hint = ""
         if earliest is not None:
             hint = (
@@ -1634,15 +1644,12 @@ async def _market_close_map(
     issue #287:逐 symbol 串行改 ``asyncio.gather`` + 信号量;异常按输入
     顺序抛出,与串行实现逐值一致。
     """
-    from finboard_backtest.research_run.frozen_loader import _market_from_value
-    from finboard_shared.models import Symbol
-
     semaphore = asyncio.Semaphore(8)
 
     async def _fetch(code: str) -> dict[date, Decimal]:
         async with semaphore:
             bars = await provider.fetch_bars(
-                Symbol(code=code, market=_market_from_value(code)),
+                _symbol_from_release(provider, code),
                 provider.release.period,
                 provider.release.start_date,
                 provider.release.end_date,
@@ -1663,6 +1670,8 @@ async def build_daily_equity_curve(
     provider: FrozenReleaseProvider,
     manifest: ResearchRunManifest,
     decisions: Sequence[DecisionLedgerView],
+    *,
+    trading_days_loader: TradingDaysLoader | None = None,
 ) -> tuple[EquityPoint, ...]:
     """决策间每日 mark-to-market 权益曲线(issue #183)。
 
@@ -1677,7 +1686,7 @@ async def build_daily_equity_curve(
     """
     from bisect import bisect_right
 
-    calendar = await _release_trading_days(provider)
+    calendar = await _release_trading_days(provider, trading_days_loader=trading_days_loader)
     if not calendar:
         return ()
     segments: list[tuple[date, Decimal, dict[str, tuple[Decimal, Decimal]]]] = []
@@ -2366,6 +2375,7 @@ async def iter_decision_load_contexts(
                 process_pool=pool,
                 close_histories=loader.close_histories or None,
                 price_precompute=loader.price_feature_precompute,
+                trading_days_loader=trading_days_loader,
             )
             features = (*period_features, *context.features)
         else:
@@ -3320,7 +3330,8 @@ class SignalEnginePipelineAdapter:
                 release_ref = _bars_release_ref(manifest, self._release_provider_factory)
                 provider = self._release_provider_factory(release_ref.artifact_id)
                 self._equity_curve = await build_daily_equity_curve(
-                    provider, manifest, collected
+                    provider, manifest, collected,
+                    trading_days_loader=self._trading_days_loader,
                 )
             # 基准曲线(issue #184):两种执行模式都按 benchmark_config.symbol
             # 从冻结发布取行情;缺失落空曲线,由 build_report 记 warning。
@@ -3687,6 +3698,7 @@ def build_signal_engine_adapter_factory(
                 series_provider=_series_provider,  # type: ignore[arg-type]
                 precompute_phase_reporter=precompute_phase_reporter,
                 precompute_cancel_probe=precompute_cancel_probe,
+                trading_days_loader=_trading_days_loader,
             )
 
         if manifest.strategy_kind not in SIGNAL_ENGINE_STRATEGY_KINDS:
