@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -28,6 +29,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 import pytest_asyncio
+import structlog.testing
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -90,6 +92,7 @@ pytestmark = pytest.mark.asyncio
 _RELEASE_ID = "mixed-index-r256"
 _STOCKS = ("600001.SH", "600002.SH", "600003.SH")
 _BENCHMARK = "000300.SH"
+_FUTURE_BENCHMARK = "IM0.CFFEX"
 _START = date(2024, 1, 1)
 _END = date(2024, 4, 30)
 
@@ -131,7 +134,7 @@ async def _clean(engine: AsyncEngine) -> None:
         )
         await conn.execute(
             delete(InstrumentModel).where(
-                InstrumentModel.code.in_([*_STOCKS, _BENCHMARK])
+                InstrumentModel.code.in_([*_STOCKS, _BENCHMARK, _FUTURE_BENCHMARK])
             )
         )
 
@@ -392,7 +395,9 @@ async def _register_instruments(engine: AsyncEngine) -> None:
         await session.commit()
 
 
-async def _publish_mixed_release(engine: AsyncEngine, tmp_path: Path) -> None:
+async def _publish_mixed_release(
+    engine: AsyncEngine, tmp_path: Path, *, include_future: bool = False,
+) -> None:
     """股票 + 指数 bars 进缓存,发布 multi_asset_mixed(单一 bars 主发布)。"""
     from finboard_data import DatasetReleaseSpec
     from finboard_persistence import ResearchDatasetReleaseService
@@ -420,6 +425,18 @@ async def _publish_mixed_release(engine: AsyncEngine, tmp_path: Path) -> None:
             )
         )
     await cache.write(index_symbol, BarPeriod.D1, "qfq", index_bars)
+    if include_future:
+        from finboard_persistence import InstrumentRepository
+
+        async with session_factory(engine)() as session:
+            await InstrumentRepository(session).sync_with_diff([
+                {"code": _FUTURE_BENCHMARK, "name": "中金所主连样本",
+                 "market": "future", "instrument_type": "futures", "exchange": "CFFEX"},
+            ], as_of=_START)
+            await session.commit()
+        future_symbol = Symbol(_FUTURE_BENCHMARK, Market.FUTURE)
+        future_bars = [replace(bar, symbol=future_symbol) for bar in index_bars]
+        await cache.write(future_symbol, BarPeriod.D1, "qfq", future_bars)
 
     # 股票:固定 seed 独立随机游走(协方差满秩,组合优化可用)。
     import numpy as np
@@ -465,7 +482,7 @@ async def _publish_mixed_release(engine: AsyncEngine, tmp_path: Path) -> None:
                 code_version="integration-test",
                 required_capabilities=("stock", "index"),
             ),
-            [*_STOCKS, _BENCHMARK],
+            [*_STOCKS, _BENCHMARK, *([_FUTURE_BENCHMARK] if include_future else [])],
         )
         await session.commit()
 
@@ -523,14 +540,16 @@ def _build_worker(engine: AsyncEngine, tmp_path: Path) -> BackgroundWorker:
     )
 
 
-async def _queue_and_run(engine: AsyncEngine, tmp_path: Path) -> str:
-    manifest = _manifest()
+async def _queue_and_run(
+    engine: AsyncEngine, tmp_path: Path, manifest: ResearchRunManifest | None = None,
+) -> str:
+    manifest = manifest or _manifest()
     async with session_factory(engine)() as session:
         repo = ResearchRunRepository(session)
         row, _ = await repo.create_or_get(
             run_id=manifest.run_id,
             idempotency_key=manifest.idempotency_key,
-            replay_of_run_id=None,
+            replay_of_run_id=manifest.replay_of_run_id,
             strategy_id=manifest.strategy_spec.strategy_id,
             strategy_kind=manifest.strategy_kind,
             status=ResearchRunStatus.QUEUED.value,
@@ -572,6 +591,48 @@ async def _queue_and_run(engine: AsyncEngine, tmp_path: Path) -> str:
 
 
 class TestIndexBenchmarkChain:
+    async def test_future_benchmark_mixed_release_replay(
+        self, engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """真实混合发布经 worker 原跑/重放,期货基准不丢且不可撮合(#496)。"""
+        await _register_instruments(engine)
+        await _publish_mixed_release(engine, tmp_path, include_future=True)
+        manifest = replace(_manifest(), benchmark_config={"symbol": _FUTURE_BENCHMARK})
+        replay = replace(
+            manifest, run_id=_run_id("future-bench-replay-496"),
+            idempotency_key="future-bench-replay-496", replay_of_run_id=manifest.run_id,
+            replay_source_status="completed",
+        )
+        logger = structlog.testing.CapturingLogger()
+        monkeypatch.setattr("finboard_backtest.research_run.signal_engine.logger", logger)
+        run_ids = [await _queue_and_run(engine, tmp_path, item) for item in (manifest, replay)]
+        assert not any(log.args[0] in {
+            "research_run.trading_calendar_instrument_unreadable",
+            "research_run.benchmark_release_unavailable",
+        } for log in logger.calls)
+        results = []
+        async with session_factory(engine)() as session:
+            for run_id in run_ids:
+                row = await ResearchRunRepository(session).get(run_id)
+                assert row is not None
+                assert row.status == "completed", row.error_summary
+                assert row.result is not None
+                assert row.result["benchmark_symbol"] == _FUTURE_BENCHMARK
+                assert float(str(row.result["benchmark_return"])) == pytest.approx(0.5)
+                assert row.result["decision_count"] == 3
+                assert len(cast(list[object], row.result["equity_curve"])) == len(_trading_days())
+                results.append(row.result)
+                artifacts = (await session.execute(select(ResearchRunArtifactModel).where(
+                    ResearchRunArtifactModel.run_id == run_id,
+                    ResearchRunArtifactModel.stage == "universe",
+                ))).scalars().all()
+                assert artifacts
+                assert all(_FUTURE_BENCHMARK not in {
+                    str(candidate["symbol"]) for candidate in
+                    cast(list[dict[str, object]], artifact.payload["candidates"])
+                } for artifact in artifacts)
+        assert results[0]["equity_curve"] == results[1]["equity_curve"]
+
     async def test_mixed_release_run_benchmark_return_non_null(
         self, engine: AsyncEngine, tmp_path: Path
     ) -> None:

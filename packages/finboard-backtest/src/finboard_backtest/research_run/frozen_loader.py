@@ -3055,7 +3055,7 @@ async def _load_execution_prices_from_bars(
 
 
 def _market_from_value(value: str) -> Market:
-    """容忍 ReleasedInstrument.market.value 与 Market 枚举值的差异。"""
+    """接受发布 market 值或标的代码;代码后缀仅供缺少 manifest 时兜底。"""
     from finboard_shared.types import Market
 
     try:
@@ -3065,7 +3065,9 @@ def _market_from_value(value: str) -> Market:
         lowered = value.lower()
         if "a_share" in lowered or lowered.endswith((".sh", ".sz", ".bj")):
             return Market.A_SHARE
-        if "future" in lowered:
+        if "future" in lowered or lowered.endswith(
+            (".cffex", ".shfe", ".dce", ".czce", ".ine", ".gfex")
+        ):
             return Market.FUTURE
         return Market.A_SHARE
 
