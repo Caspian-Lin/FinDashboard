@@ -17,6 +17,7 @@ from finboard_persistence.catalog_repo import (
     ReleaseInstrumentRow,
     ReleaseReferenceRow,
 )
+from finboard_shared.types import AssetClass
 
 STATUS_USABLE = "usable"
 STATUS_INGESTED_NOT_PUBLISHED = "ingested_not_published"
@@ -40,6 +41,10 @@ class CatalogQuery:
     dataset: CatalogDataset | None = None
     status: str | None = None
     q: str | None = None
+    source: str | None = None
+    asset_class: AssetClass | None = None
+    start: date | None = None
+    end: date | None = None
     limit: int = 50
     offset: int = 0
 

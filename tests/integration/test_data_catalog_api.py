@@ -121,6 +121,28 @@ async def test_catalog_list_and_detail(client: AsyncClient) -> None:
     assert detail["releases"][0]["release_id"] == _RELEASE_ID
 
 
+async def test_catalog_filters_source_asset_and_window(client: AsyncClient) -> None:
+    resp = await client.get("/api/data/catalog?source=tushare")
+    assert resp.status_code == 200
+    keys = {item["key"] for item in resp.json()["items"]}
+    assert "daily_metrics" in keys
+    assert "bars" not in keys
+
+    resp = await client.get("/api/data/catalog?asset_class=convertible")
+    assert resp.status_code == 200
+    keys = {item["key"] for item in resp.json()["items"]}
+    assert "convertible_metrics" in keys
+    assert "daily_metrics" not in keys
+
+    resp = await client.get(
+        "/api/data/catalog?start=2024-01-01&end=2024-01-31"
+    )
+    assert resp.status_code == 200
+    keys = {item["key"] for item in resp.json()["items"]}
+    assert "daily_metrics" in keys
+    assert "convertible_metrics" not in keys
+
+
 async def test_catalog_instruments_and_presence(client: AsyncClient) -> None:
     resp = await client.get(
         f"/api/data/catalog/releases/{_RELEASE_ID}/instruments?missing_only=true"

@@ -89,6 +89,30 @@ class DataCatalogService:
             entries.append(entry)
         if query.status is not None:
             entries = [entry for entry in entries if entry.status == query.status]
+        if query.source is not None:
+            entries = [
+                entry
+                for entry in entries
+                if _entry_source(entry) == query.source
+            ]
+        if query.asset_class is not None:
+            entries = [
+                entry
+                for entry in entries
+                if query.asset_class in catalog_spec(entry.key).asset_classes
+            ]
+        if query.start is not None:
+            entries = [
+                entry
+                for entry in entries
+                if entry.local_end is not None and entry.local_end >= query.start
+            ]
+        if query.end is not None:
+            entries = [
+                entry
+                for entry in entries
+                if entry.local_start is not None and entry.local_start <= query.end
+            ]
         if query.q:
             needle = query.q.strip().lower()
             entries = [
@@ -386,6 +410,14 @@ class DataCatalogService:
             cache_bytes=cache_bytes,
             warnings=tuple(warnings),
         )
+
+
+def _entry_source(entry: CatalogEntry) -> str:
+    if entry.release is not None:
+        return entry.release.source
+    if entry.batch is not None:
+        return entry.batch.source
+    return entry.source or ""
 
 
 def _status_for(

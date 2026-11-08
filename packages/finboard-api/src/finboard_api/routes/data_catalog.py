@@ -30,6 +30,7 @@ from finboard_persistence.catalog_repo import (
     ReleaseInstrumentRow,
     ReleaseReferenceRow,
 )
+from finboard_shared.types import AssetClass
 
 router = APIRouter(prefix="/api/data/catalog", tags=["data-catalog"])
 
@@ -333,13 +334,27 @@ async def list_catalog(
     dataset: CatalogDataset | None = Query(default=None),
     status: str | None = Query(default=None),
     q: str | None = Query(default=None, max_length=128),
+    source: str | None = Query(default=None, max_length=32),
+    asset_class: AssetClass | None = Query(default=None),
+    start: date | None = Query(default=None),
+    end: date | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_db_session),
 ) -> CatalogPageOut:
     service = _service(session)
     items, total = await service.list_entries(
-        CatalogQuery(dataset=dataset, status=status, q=q, limit=limit, offset=offset)
+        CatalogQuery(
+            dataset=dataset,
+            status=status,
+            q=q,
+            source=source,
+            asset_class=asset_class,
+            start=start,
+            end=end,
+            limit=limit,
+            offset=offset,
+        )
     )
     return CatalogPageOut(
         items=[_entry_out(item) for item in items],
