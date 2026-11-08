@@ -16,7 +16,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from finboard_data.datasets import CatalogDataset
 from finboard_shared.types import AssetClass, InstrumentType, Market
@@ -50,8 +50,9 @@ class ScopeUniverse(_Frozen):
     filters: ScopeFilters = Field(default_factory=ScopeFilters)
     selection_limit: int | None = Field(default=None, ge=1, le=5000)
 
-    @model_validator(mode="after")
-    def _normalize(self) -> ScopeUniverse:
+    @field_validator("explicit_symbols")
+    @classmethod
+    def _normalize_symbols(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         """标的代码归一(去空白/大写/去重排序)。
 
         checksum 与解析同源:``000001.sz`` 与 ``000001.SZ`` 是同一只标的,
@@ -59,12 +60,7 @@ class ScopeUniverse(_Frozen):
         ``resolution_id``,提交期误报漂移。
         """
 
-        normalized = tuple(
-            sorted({item.strip().upper() for item in self.explicit_symbols if item.strip()})
-        )
-        if normalized != self.explicit_symbols:
-            return self.model_copy(update={"explicit_symbols": normalized})
-        return self
+        return tuple(sorted({item.strip().upper() for item in value if item.strip()}))
 
 
 class ScopeDecisionWindow(_Frozen):
@@ -103,11 +99,12 @@ class DataScopeSpec(_Frozen):
     universe: ScopeUniverse
     decision: ScopeDecisionWindow
     warmup_sessions: int = Field(default=0, ge=0, le=5000)
-    #: 尾部估值交易日数。默认 1:multi_period 的最后一个决策日要按「下一
-    #: 交易日」撮合(dev #502 ``research_window_execution_tail_missing``),
-    #: tail=0 会让 ``valuation_end == decision_end`` 在月度/季末配置上排队
-    #: 成功、执行期才失败;需要零尾部时显式传 0(解析给 warning)。
-    tail_sessions: int = Field(default=1, ge=0, le=250)
+    #: 尾部估值交易日数。multi_period 的最后一个决策日要按「下一交易日」
+    #: 撮合(dev #502 ``research_window_execution_tail_missing``);提交期由
+    #: ``apply_scope_to_parameters`` 按运行是否 multi_period 校验(尾部不足
+    #: 直接 422),零尾部只在预览给具名 warning —— 默认值保持 0,避免改变
+    #: 非 multi_period 消费者(如 #511 补数)的窗口语义。
+    tail_sessions: int = Field(default=0, ge=0, le=250)
     benchmarks: tuple[str, ...] = ()
     datasets: ScopeDatasets
     #: 保留位(#513 决定「按字段裁剪发布」时消费);当前只进 checksum 不进解析。

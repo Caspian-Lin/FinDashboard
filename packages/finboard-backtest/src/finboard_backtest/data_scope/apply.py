@@ -85,6 +85,7 @@ async def apply_scope_to_parameters(
         resolution_id=resolution_id,
         release_ids=release_ids,
     )
+    _check_execution_tail(parameters, resolution)
     merged = _merge_window(parameters, resolution)
     return merged, resolution.manifest_payload(scope)
 
@@ -123,6 +124,34 @@ def _check_resolution(
             f"scope={actual}, 提交={expected}",
             status_code=409,
             detail=drift,
+        )
+
+
+def _check_execution_tail(
+    parameters: dict[str, Any], resolution: ScopeResolution
+) -> None:
+    """multi_period 的最后一个决策日必须还有下一交易日可撮合。
+
+    dev #502 的 ``research_window`` 在执行期对最后决策日取
+    ``_next_execution_at``(恒为下一交易日);``valuation_end == decision_end``
+    时执行期抛 ``research_window_execution_tail_missing``。入队期按运行参数
+    是否声明 multi_period 判定并提前拒绝,不把失败推迟到 worker。
+    """
+
+    multi_period = (
+        parameters.get("decision_schedule") is not None
+        or parameters.get("rebalance_frequency") is not None
+    )
+    if not multi_period:
+        return
+    window = resolution.window
+    if window.valuation_end <= window.decision_end:
+        raise ScopeGateError(
+            "scope_window_tail_too_short",
+            "multi_period 运行的 valuation_end 必须晚于 decision_end"
+            f"(当前 decision_end={window.decision_end},"
+            f" valuation_end={window.valuation_end});"
+            " 请增大 scope.tail_sessions 后重新预览",
         )
 
 

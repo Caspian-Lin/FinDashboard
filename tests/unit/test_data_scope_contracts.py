@@ -100,8 +100,9 @@ class TestSpecValidation:
             _spec(universe={"explicit_symbols": ["000001.SZ"]})
         )
 
-    def test_tail_defaults_to_one_session(self) -> None:
-        # multi_period 最后决策日要按下一交易日撮合;默认 0 会在执行期失败。
+    def test_tail_defaults_to_zero(self) -> None:
+        # 默认保持 0(不影响非 multi_period 消费者);multi_period 的尾部不足
+        # 由提交期 apply 校验拒绝(428),预览给具名 warning。
         spec = DataScopeSpec.model_validate(
             {
                 "universe": {},
@@ -109,7 +110,7 @@ class TestSpecValidation:
                 "datasets": {"required": ["bars"]},
             }
         )
-        assert spec.tail_sessions == 1
+        assert spec.tail_sessions == 0
 
 
 class TestChecksum:
