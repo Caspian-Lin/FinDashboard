@@ -11,6 +11,9 @@
 * 数据查询(``finboard.instrument.*`` / ``finboard.dataset.*`` /
   ``finboard.data.*`` / ``finboard.tushare.*``,#124)—— 标的元数据 /
   数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(只读);
+* 全局数据目录(#509,只读)—— ``finboard.data_catalog.*`` 列表 / 详情 /
+  覆盖报告 + ``finboard.dataset.release.*`` 逐标的 / 引用反查;
+  只做 DB 列投影与有界预览,不触发 dataset_sync、不发布数据集;
 * ``finboard.factor.*`` / ``finboard.feature_snapshot.*``(#125)——
   因子目录 / 特征快照 / 因子信号 / 因子实验(含异步快照任务);
 * ``finboard.strategy.*`` / ``finboard.preset.*``(#126)——
@@ -77,6 +80,7 @@ from mcp.server import MCPServer
 from finboard_mcp.context import app_lifespan
 from finboard_mcp.tools import (
     register_backtest_tools,
+    register_data_catalog_tools,
     register_data_tools,
     register_data_write_tools,
     register_factor_series_tools,
@@ -111,7 +115,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 
 课题与记忆引用用 finboard_source_check 核对精确版本/checksum与自动产物事实;断链与旧目标保留,文档优先于工作解释。研究工具按问题使用,可暂停、分支、复核与续接,并非必须线性执行。
 
-== 当前可用工具(138 个,能力与参数以当前注册schema为准)==
+== 当前可用工具(143 个,能力与参数以当前注册schema为准)==
 - #501-#504复核入口:finboard_run_diagnostics 显式窗口/逐年指标(研究252交易日年化、rf0/ddof1;
   另列日历年化),SQL聚合成交费用/缺口分母;finboard_run_compare 按冻结输入核查可比性;
   finboard_decision_projection SQL白名单字段分页(200行/256KiB,单决策也有护栏)。
@@ -203,6 +207,15 @@ FinBoard 研究 MCP —— 量化研究工具集
   {requested, matched, missing} 成员核对(#238,免拉全量 detail)。
   dataset_release_diff(#252):两份发布标的集 diff,计数精确 + 差集具名清单
   (有界预览),发布后自检并集一致性(如 financial_indicators vs bars 主发布)。
+- 全局数据目录(5,✅ #509,只读):finboard_data_catalog_list(数据集列表,
+  可按 dataset/status/q 过滤)、finboard_data_catalog_get(单数据集详情:
+  fields/unit_notes/pit_rule/calendar_market + 最近 releases/batches/
+  failures)、finboard_data_coverage_get(覆盖报告:denominator/覆盖统计/
+  symbols_with_gaps + 有界 missing_preview)、
+  finboard_dataset_release_instruments(发布逐标的覆盖分页)、
+  finboard_dataset_release_references(引用该发布的课题/运行/策略反查)。
+  目录只做 DB 列投影 + 有界扫描,**不触发 dataset_sync、不发布数据集**;
+  分页 limit 1..500、offset>=0,missing_preview 只是预览不是全量缺口清单。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。
@@ -529,6 +542,7 @@ def build_mcp_server() -> MCPServer:
     register_run_tools(mcp)
     register_memory_tools(mcp)
     register_data_tools(mcp)
+    register_data_catalog_tools(mcp)
     register_data_write_tools(mcp)
     register_factor_tools(mcp)
     register_factor_series_tools(mcp)
