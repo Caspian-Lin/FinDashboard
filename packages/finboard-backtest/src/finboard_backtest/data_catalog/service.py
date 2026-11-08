@@ -654,17 +654,20 @@ class DataCatalogService:
 
 
 def _explicit_data_scope_release_ids(payload: dict[str, Any]) -> list[str]:
-    """课题 payload 里显式 ``data_scope.dataset_release_ids``(#514 契约位)。
+    """课题 payload 里显式数据范围的发布 ID(#514 契约位)。
 
-    #514 会把课题级显式数据范围写进 topic payload;本接口先按该键读取,
-    命中即优先于 ``source_refs`` 推导。**当前 schema 尚无该键**(TopicInput
-    ``extra=forbid``),因此正常返回空列表走引用回退 —— #514 落地后无需改
-    本接口契约,只需按此键写值。
+    #514 会把课题级显式数据范围写进 topic payload。字段名优先对齐 #510
+    ``DataScopeSpec.locked_release_ids``(显式锁定的发布集),同时兼容计划
+    文档里的 ``dataset_release_ids``。**当前 topic schema 尚无该键**
+    (TopicInput ``extra=forbid``),因此正常返回空列表走 ``source_refs``
+    回退 —— #514 落地后无需改本接口契约。
     """
     scope = payload.get("data_scope")
     if not isinstance(scope, dict):
         return []
-    values = scope.get("dataset_release_ids")
+    values = scope.get("locked_release_ids")
+    if not isinstance(values, (list, tuple)):
+        values = scope.get("dataset_release_ids")
     if not isinstance(values, (list, tuple)):
         return []
     return [str(item) for item in values if isinstance(item, str) and item]

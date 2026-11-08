@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -15,7 +16,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.deps import get_db_session
@@ -28,7 +29,11 @@ from finboard_data.releases import (
     default_execution_metadata,
 )
 from finboard_persistence.dataset_release_repo import ResearchDatasetReleaseRepository
-from finboard_persistence.models import ResearchRunModel, ResearchTopicModel
+from finboard_persistence.models import (
+    ResearchRunModel,
+    ResearchSyncBatchModel,
+    ResearchTopicModel,
+)
 from finboard_shared.types import (
     AssetClass,
     BarPeriod,
@@ -49,6 +54,8 @@ def _release(
     *,
     kind: ReleaseDatasetKind = ReleaseDatasetKind.DAILY_METRICS,
     quality_status: DatasetQualityStatus = DatasetQualityStatus.PASSED,
+    published_at: datetime | None = None,
+    version: str = "v1",
 ) -> ResearchDatasetRelease:
     instrument = ReleasedInstrument(
         code="TOP512.SH",
@@ -80,7 +87,7 @@ def _release(
         release_id=release_id,
         dataset_name="test-topic-coverage",
         source="tushare",
-        version="v1",
+        version=version,
         schema_version="v1",
         start_date=date(2024, 1, 2),
         end_date=date(2024, 1, 5),
@@ -89,13 +96,14 @@ def _release(
         fields=("trade_date", "close"),
         availability_rules=(),
         code_version="test",
-        published_at=datetime(2024, 1, 6, tzinfo=UTC),
+        published_at=published_at or datetime(2024, 1, 6, tzinfo=UTC),
         instruments=(instrument,),
         capabilities=(),
         quality_status=quality_status,
         quality_report={},
         dataset_kind=kind,
-        release_checksum="d" * 64,
+        # release_checksum 全局唯一:按 release_id 派生,允许同一用例内多份发布并存。
+        release_checksum=hashlib.sha256(release_id.encode()).hexdigest(),
     )
 
 
@@ -220,8 +228,17 @@ async def test_topic_coverage_resolves_dataset_and_run_refs(
 async def test_topic_coverage_dataset_key_resolves_latest_release(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
+    # 竞争数据:同 kind 两份可用发布,dataset key 必须取 published_at 最新的一份。
     await ResearchDatasetReleaseRepository(db_session).publish(
-        _release(quality_status=DatasetQualityStatus.WARNINGS)
+        _release("TEST-TOPIC-OLD", version="v1", published_at=datetime(2024, 1, 6, tzinfo=UTC))
+    )
+    await ResearchDatasetReleaseRepository(db_session).publish(
+        _release(
+            "TEST-TOPIC-NEW",
+            version="v2",
+            quality_status=DatasetQualityStatus.WARNINGS,
+            published_at=datetime(2024, 2, 6, tzinfo=UTC),
+        )
     )
     topic_id = await _topic_with_refs(
         db_session, [{"kind": "dataset", "ref_id": "daily_metrics"}]
@@ -229,35 +246,92 @@ async def test_topic_coverage_dataset_key_resolves_latest_release(
     payload = (
         await client.get(f"/api/data/catalog/topics/{topic_id}/coverage")
     ).json()
-    assert [item["release_id"] for item in payload["releases"]] == [_RELEASE_ID]
+    assert [item["release_id"] for item in payload["releases"]] == ["TEST-TOPIC-NEW"]
     assert [gap["reason"] for gap in payload["gaps"]] == ["coverage_gap"]
 
 
 async def test_topic_coverage_prefers_explicit_data_scope(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    await ResearchDatasetReleaseRepository(db_session).publish(_release())
-    topic = await workspace_write(
-        db_session, actor="user:api", operation="create", payload=_topic_payload()
+    # 竞争数据:轮次引用指向 B,显式 data_scope 指定 A,结果只能是 A。
+    repo = ResearchDatasetReleaseRepository(db_session)
+    await repo.publish(_release("TEST-SCOPE-A", version="v1"))
+    await repo.publish(_release("TEST-SCOPE-B", version="v2"))
+    topic_id = await _topic_with_refs(
+        db_session, [{"kind": "dataset", "ref_id": "TEST-SCOPE-B"}]
     )
     # #514 之前的 topic schema 不含 data_scope;这里直接写 payload 模拟其落地,
-    # 验证接口的「显式优先、refs 回退」契约不需要再改。
+    # 验证接口的「显式优先、refs 回退」契约不需要再改(字段名对齐 #510
+    # DataScopeSpec.locked_release_ids)。
     model = (
         await db_session.execute(
-            select(ResearchTopicModel).where(
-                ResearchTopicModel.topic_id == topic["topic_id"]
-            )
+            select(ResearchTopicModel).where(ResearchTopicModel.topic_id == topic_id)
         )
     ).scalar_one()
     model.payload = {
         **dict(model.payload),
-        "data_scope": {"dataset_release_ids": [_RELEASE_ID]},
+        "data_scope": {"locked_release_ids": ["TEST-SCOPE-A"]},
     }
     await db_session.commit()
     payload = (
-        await client.get(f"/api/data/catalog/topics/{topic['topic_id']}/coverage")
+        await client.get(f"/api/data/catalog/topics/{topic_id}/coverage")
     ).json()
     assert payload["coverage"]["resolved_by"] == "data_scope"
+    assert [item["release_id"] for item in payload["releases"]] == ["TEST-SCOPE-A"]
+
+
+async def test_topic_coverage_quality_blocked_gap(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    # 质量门失败的历史发布:登记入口只放行 passed/warnings,这里直接改库模拟
+    # legacy 行(目录读路径按列投影,不依赖 manifest 重算质量)。
+    await ResearchDatasetReleaseRepository(db_session).publish(_release())
+    await db_session.execute(
+        text(
+            "UPDATE research_dataset_releases SET quality_status = 'failed' "
+            "WHERE release_id = :release_id"
+        ),
+        {"release_id": _RELEASE_ID},
+    )
+    await db_session.commit()
+    topic_id = await _topic_with_refs(
+        db_session, [{"kind": "dataset", "ref_id": _RELEASE_ID}]
+    )
+    payload = (
+        await client.get(f"/api/data/catalog/topics/{topic_id}/coverage")
+    ).json()
+    assert [item["release_id"] for item in payload["releases"]] == [_RELEASE_ID]
+    assert [gap["reason"] for gap in payload["gaps"]] == ["quality_blocked"]
+    assert "failed" in payload["gaps"][0]["message"]
+    assert payload["next_step"] == "blocked"
+
+
+async def test_topic_coverage_last_sync_includes_latest_batch(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await ResearchDatasetReleaseRepository(db_session).publish(_release())
+    # 已同步(2024-03-01)晚于最新发布(2024-01-06):last_sync 必须取批次收口时刻,
+    # 才能让「已同步未发布」的下一步指向发布而不是继续补数。
+    db_session.add(
+        ResearchSyncBatchModel(
+            dataset="daily_metrics",
+            source="tushare",
+            dataset_version="daily_metrics:topic-coverage",
+            code_version="test",
+            status="published",
+            received_rows=10,
+            accepted_rows=10,
+            completed_at=datetime(2024, 3, 1, tzinfo=UTC),
+        )
+    )
+    await db_session.commit()
+    topic_id = await _topic_with_refs(
+        db_session, [{"kind": "dataset", "ref_id": _RELEASE_ID}]
+    )
+    payload = (
+        await client.get(f"/api/data/catalog/topics/{topic_id}/coverage")
+    ).json()
+    assert str(payload["last_sync"]).startswith("2024-03-01")
     assert [item["release_id"] for item in payload["releases"]] == [_RELEASE_ID]
 
 
