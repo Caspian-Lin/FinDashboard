@@ -52,6 +52,11 @@ _EXPECTED_TOOLS = {
     "finboard_data_coverage_get",
     "finboard_dataset_release_instruments",
     "finboard_dataset_release_references",
+    # #511 补数请求工具(2 只读 + 2 写;预检/提交/查询/取消)
+    "finboard_data_backfill_preview",
+    "finboard_data_backfill_submit",
+    "finboard_data_backfill_list",
+    "finboard_data_backfill_cancel",
     # #125 因子实验室工具
     "finboard_factor_catalog",
     "finboard_feature_snapshot_list",
@@ -212,14 +217,16 @@ class TestToolExposure:
             for keyword in _FORBIDDEN_KEYWORDS:
                 assert keyword not in lowered, f"工具 {name} 暴露了禁止能力 {keyword}"
             # 实盘交易动词(order/fill/cancel/buy/sell/trade/position)——模拟盘
-            # (``finboard_sim_*``,操作 simulation_* 表与 SIM-* ID)与 ResearchRun
-            # (``finboard_run_*``,操作 research_runs 表与 RR- ID)豁免,因为它们的
-            # cancel/order/position 语义属于研究 / 模拟域,不触及实盘订单;其他工具
-            # 不得暴露这些动词。
+            # (``finboard_sim_*``,操作 simulation_* 表与 SIM-* ID)、ResearchRun
+            # (``finboard_run_*``,操作 research_runs 表与 RR- ID)与补数请求
+            # (``finboard_data_backfill_*``,操作 data_backfill_* 表与 BF- ID;
+            # "backfill" 是数据补数,与实盘 fills 无关)豁免;其他工具不得暴露
+            # 这些动词。
             if (
                 lowered.startswith("finboard_sim_")
                 or lowered.startswith("finboard_run_")
                 or lowered.startswith("finboard_job_")
+                or lowered.startswith("finboard_data_backfill_")
             ):
                 continue
             for verb in _LIVE_TRADING_VERBS:

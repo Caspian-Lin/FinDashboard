@@ -1056,6 +1056,9 @@ _KIND_CONCURRENCY: dict[str, int] = {
     "data_sync": 1,
     "quality_repair": 1,
     "dataset_sync": 1,
+    # 补数编排(#511):内部已串行组合 dataset_sync / bulk_download / 发布,
+    # 并发只会让同一上游配额被多条请求同时吃满。
+    "data_backfill": 1,
     "research_code_run": 1,
     "factor_series_build": 2,
     "validation_experiment": 1,
@@ -1198,6 +1201,7 @@ def build_executor_registry(
     from finboard_backtest.background_jobs.executors import (
         BacktestRunExecutor,
         BulkDownloadExecutor,
+        DataBackfillExecutor,
         DatasetPublishExecutor,
         DataSyncExecutor,
         EchoExecutor,
@@ -1221,6 +1225,15 @@ def build_executor_registry(
     settings_factory = default_settings_factory
     registry = JobExecutorRegistry()
     registry.register("echo", EchoExecutor())
+    # issue #511:课题缺口 → 全局补数 → 复用发布(kind=data_backfill)。
+    # 内部组合既有四个数据域执行器,单并发(#144 数据源压力约束)。
+    registry.register(
+        "data_backfill",
+        DataBackfillExecutor(
+            session_maker=session_maker,
+            settings_factory=settings_factory,
+        ),
+    )
     # issue #143:research_run 执行器接入统一队列;#170:multi_factor 规格接入
     # 真实信号引擎适配器工厂;#218:user_code 规格经同一工厂分发到沙箱
     # decide 适配器(需要 settings 解析镜像/资源限制/代码仓库路径)。

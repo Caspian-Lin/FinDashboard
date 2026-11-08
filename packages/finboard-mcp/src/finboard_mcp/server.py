@@ -14,6 +14,9 @@
 * 全局数据目录(#509,只读)—— ``finboard.data_catalog.*`` 列表 / 详情 /
   覆盖报告 + ``finboard.dataset.release.*`` 逐标的 / 引用反查;
   只做 DB 列投影与有界预览,不触发 dataset_sync、不发布数据集;
+* 补数请求(#511,2 只读 + 2 写)—— ``finboard.data_backfill.*`` 预检 /
+  提交 / 查询 / 取消;补数只产生新发布,执行由 ``data_backfill`` 队列任务
+  编排既有同步与发布内核;
 * ``finboard.factor.*`` / ``finboard.feature_snapshot.*``(#125)——
   因子目录 / 特征快照 / 因子信号 / 因子实验(含异步快照任务);
 * ``finboard.strategy.*`` / ``finboard.preset.*``(#126)——
@@ -80,6 +83,7 @@ from mcp.server import MCPServer
 from finboard_mcp.context import app_lifespan
 from finboard_mcp.tools import (
     register_backtest_tools,
+    register_data_backfill_tools,
     register_data_catalog_tools,
     register_data_tools,
     register_data_write_tools,
@@ -115,7 +119,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 
 课题与记忆引用用 finboard_source_check 核对精确版本/checksum与自动产物事实;断链与旧目标保留,文档优先于工作解释。研究工具按问题使用,可暂停、分支、复核与续接,并非必须线性执行。
 
-== 当前可用工具(143 个,能力与参数以当前注册schema为准)==
+== 当前可用工具(147 个,能力与参数以当前注册schema为准)==
 - #501-#504复核入口:finboard_run_diagnostics 显式窗口/逐年指标(研究252交易日年化、rf0/ddof1;
   另列日历年化),SQL聚合成交费用/缺口分母;finboard_run_compare 按冻结输入核查可比性;
   finboard_decision_projection SQL白名单字段分页(200行/256KiB,单决策也有护栏)。
@@ -216,6 +220,12 @@ FinBoard 研究 MCP —— 量化研究工具集
   finboard_dataset_release_references(引用该发布的课题/运行/策略反查)。
   目录只做 DB 列投影 + 有界扫描,**不触发 dataset_sync、不发布数据集**;
   分页 limit 1..500、offset>=0,missing_preview 只是预览不是全量缺口清单。
+- 补数请求(4,✅ #511,2 只读 + 2 写):finboard_data_backfill_preview(预检:
+  缺口范围/支持来源/配额/步骤/发布影响)、finboard_data_backfill_submit
+  (显式提交,幂等;expected_plan_checksum 不一致即 conflict
+  backfill_plan_drift,必须重新预览)、finboard_data_backfill_list(列表/详情)、
+  finboard_data_backfill_cancel(协作式取消,已发布不回滚)。补数只产生新发布,
+  异源/不同复权不混接;POST /api/jobs 与 job_enqueue 不开放 data_backfill kind。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。
@@ -543,6 +553,7 @@ def build_mcp_server() -> MCPServer:
     register_memory_tools(mcp)
     register_data_tools(mcp)
     register_data_catalog_tools(mcp)
+    register_data_backfill_tools(mcp)
     register_data_write_tools(mcp)
     register_factor_tools(mcp)
     register_factor_series_tools(mcp)

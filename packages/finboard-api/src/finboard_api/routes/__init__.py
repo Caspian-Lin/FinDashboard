@@ -4,6 +4,7 @@ from finboard_api.routes.account import router as account_router
 from finboard_api.routes.audit import router as audit_router
 from finboard_api.routes.backtest import router as backtest_router
 from finboard_api.routes.data import router as data_router
+from finboard_api.routes.data_backfill import router as data_backfill_router
 from finboard_api.routes.data_catalog import router as data_catalog_router
 from finboard_api.routes.fills import router as fills_router
 from finboard_api.routes.health import router as health_router
@@ -30,6 +31,7 @@ __all__ = [
     "account_router",
     "audit_router",
     "backtest_router",
+    "data_backfill_router",
     "data_catalog_router",
     "data_router",
     "fills_router",
