@@ -305,6 +305,7 @@ class TestActionDecision:
         assert (
             _decide_action(
                 support=support_for(CatalogDataset.DAILY_METRICS),
+                publish=True,
                 missing_ranges=(),
                 missing_symbols=(),
                 has_completed_gap=False,
@@ -318,6 +319,7 @@ class TestActionDecision:
         assert (
             _decide_action(
                 support=support_for(CatalogDataset.DAILY_METRICS),
+                publish=True,
                 missing_ranges=(),
                 missing_symbols=(),
                 has_completed_gap=True,
@@ -331,6 +333,7 @@ class TestActionDecision:
         assert (
             _decide_action(
                 support=support_for(CatalogDataset.DAILY_METRICS),
+                publish=True,
                 missing_ranges=((date(2024, 1, 1), date(2024, 1, 5)),),
                 missing_symbols=(),
                 has_completed_gap=True,
@@ -344,6 +347,7 @@ class TestActionDecision:
         assert (
             _decide_action(
                 support=support_for(CatalogDataset.SUSPENSIONS),
+                publish=True,
                 missing_ranges=((date(2024, 1, 1), date(2024, 1, 5)),),
                 missing_symbols=(),
                 has_completed_gap=True,
@@ -357,6 +361,7 @@ class TestActionDecision:
         assert (
             _decide_action(
                 support=support_for(CatalogDataset.BARS),
+                publish=True,
                 missing_ranges=((date(2024, 1, 1), date(2024, 1, 5)),),
                 missing_symbols=(),
                 has_completed_gap=True,
@@ -512,6 +517,7 @@ class TestAuditFixes:
     def test_missing_symbols_trigger_sync_for_window_unit(self) -> None:
         action = _decide_action(
             support=support_for(CatalogDataset.DAILY_METRICS),
+            publish=True,
             missing_ranges=(),
             missing_symbols=("000001.SZ",),
             has_completed_gap=True,
@@ -524,6 +530,7 @@ class TestAuditFixes:
         # 调用方只在「标的缺口应当补」时传入 missing_symbols;空传即 noop 语义。
         action = _decide_action(
             support=support_for(CatalogDataset.SUSPENSIONS),
+            publish=True,
             missing_ranges=(),
             missing_symbols=(),
             has_completed_gap=False,
@@ -547,6 +554,19 @@ class TestAuditFixes:
         )
         assert version_for("BF-1", "qfq") == "v-qfq-BF-1"
         assert version_for("BF-1", "none") == "v-BF-1"
+        # 同 dataset 同复权不同 source 必须是不同发布身份(审核 B3)。
+        assert release_id_for("bars", "BF-1", "qfq", "akshare") == (
+            "DR-bars-qfq-akshare-BF-1"
+        )
+        assert release_id_for("bars", "BF-1", "qfq", "tushare") == (
+            "DR-bars-qfq-BF-1"
+        )
+        assert release_id_for("bars", "BF-1", "qfq", "akshare") != (
+            release_id_for("bars", "BF-1", "qfq", "tushare")
+        )
+        assert version_for("BF-1", "qfq", "akshare") != version_for(
+            "BF-1", "qfq", "tushare"
+        )
 
     def test_freeze_symbols_respects_cap(self) -> None:
         from finboard_backtest.data_backfill.planner import (
@@ -555,11 +575,10 @@ class TestAuditFixes:
         )
 
         small = tuple(f"S{index}" for index in range(3))
-        assert _freeze_symbols(small, symbol_unit=True) == small
-        # 窗口级单元不冻结标的(bulk 由过滤器解析)。
-        assert _freeze_symbols(small, symbol_unit=False) == ()
+        # 所有数据集都冻结可枚举标的(发布面 = 请求面)。
+        assert _freeze_symbols(small) == small
         huge = tuple(f"S{index}" for index in range(_MAX_SYMBOL_FILTER + 1))
-        assert _freeze_symbols(huge, symbol_unit=True) == ()
+        assert _freeze_symbols(huge) == ()
 
 
 def _caps_for_unit() -> Any:
@@ -578,3 +597,226 @@ def _caps_for_unit() -> Any:
             daily_limit=100_000,
         ),
     )
+
+
+class TestPublishAndScopeGuards:
+    """复审二轮:发布开关、过滤器可下推性、修复跳过原因。"""
+
+    def test_publish_false_forces_sync_action(self) -> None:
+        action = _decide_action(
+            support=support_for(CatalogDataset.DAILY_METRICS),
+            publish=False,
+            missing_ranges=((date(2024, 1, 1), date(2024, 1, 5)),),
+            missing_symbols=(),
+            has_completed_gap=True,
+            reuse_only=False,
+            repair=False,
+        )
+        assert action is BackfillAction.SYNC
+
+    def test_publish_false_with_repair_stays_sync(self) -> None:
+        action = _decide_action(
+            support=support_for(CatalogDataset.BARS),
+            publish=False,
+            missing_ranges=(),
+            missing_symbols=(),
+            has_completed_gap=True,
+            reuse_only=False,
+            repair=True,
+        )
+        assert action is BackfillAction.SYNC
+
+    def test_market_only_filter_is_unresolvable_for_per_symbol(self) -> None:
+        from finboard_backtest.data_backfill.planner import _item_blockers
+
+        blockers = _item_blockers(
+            support=support_for(CatalogDataset.FINANCIAL_INDICATORS),
+            capabilities=_caps_for_unit(),
+            dataset=CatalogDataset.FINANCIAL_INDICATORS,
+            publish=True,
+            has_gap=True,
+            adjustment="none",
+            frozen_symbols=(),
+            universe_filters={"market": "a_share"},  # dataset_sync 无 market 键
+            symbol_unit=True,
+        )
+        assert any(
+            blocker.code == "backfill_symbol_scope_unresolved" for blocker in blockers
+        )
+
+    def test_instrument_type_filter_is_resolvable(self) -> None:
+        from finboard_backtest.data_backfill.planner import _item_blockers
+
+        blockers = _item_blockers(
+            support=support_for(CatalogDataset.FINANCIAL_INDICATORS),
+            capabilities=_caps_for_unit(),
+            dataset=CatalogDataset.FINANCIAL_INDICATORS,
+            publish=True,
+            has_gap=True,
+            adjustment="none",
+            frozen_symbols=(),
+            universe_filters={"market": "a_share", "instrument_type": "stock"},
+            symbol_unit=True,
+        )
+        assert blockers == []
+
+    def test_repair_skips_when_anomalies_outside_request_scope(self) -> None:
+        from finboard_backtest.data_backfill.planner import (
+            _DatasetCoverage,
+            _repair_plan,
+        )
+
+        completed = _DatasetCoverage(
+            release_ids=["DR-x"],
+            anomalies=2,
+            anomaly_symbols={"600000.SH"},
+        )
+        repair, symbols, reason = _repair_plan(
+            support=support_for(CatalogDataset.BARS),
+            completed=completed,
+            symbols=("000001.SZ",),
+            quality_profile="standard",
+        )
+        assert repair is False
+        assert symbols == ()
+        assert reason is not None
+        assert "跳过缓存修复" in reason
+
+    def test_strict_repair_over_cap_has_reason(self) -> None:
+        from finboard_backtest.data_backfill.planner import (
+            _MAX_SYMBOL_FILTER,
+            _DatasetCoverage,
+            _repair_plan,
+        )
+
+        completed = _DatasetCoverage(release_ids=["DR-x"])
+        huge = tuple(f"S{index}" for index in range(_MAX_SYMBOL_FILTER + 1))
+        repair, symbols, reason = _repair_plan(
+            support=support_for(CatalogDataset.BARS),
+            completed=completed,
+            symbols=huge,
+            quality_profile="strict",
+        )
+        assert repair is False
+        assert symbols == ()
+        assert reason is not None
+        assert "strict 质量复检跳过" in reason
+
+    def test_repair_targets_anomaly_symbols_in_scope(self) -> None:
+        from finboard_backtest.data_backfill.planner import (
+            _DatasetCoverage,
+            _repair_plan,
+        )
+
+        completed = _DatasetCoverage(
+            release_ids=["DR-x"], anomalies=1, anomaly_symbols={"000001.SZ"}
+        )
+        repair, symbols, reason = _repair_plan(
+            support=support_for(CatalogDataset.BARS),
+            completed=completed,
+            symbols=("000001.SZ", "600000.SH"),
+            quality_profile="standard",
+        )
+        assert repair is True
+        assert symbols == ("000001.SZ",)
+        assert reason is None
+
+
+class TestBarsDefaults:
+    def test_bars_dataset_spec_defaults_to_qfq(self) -> None:
+        from finboard_backtest.data_backfill.contracts import BackfillDatasetSpec
+
+        spec = BackfillDatasetSpec(dataset=CatalogDataset.BARS)
+        assert spec.adjustment == "qfq"
+
+
+class TestInflightDomainComparability:
+    """复审 P1:过滤器模式的在途覆盖必须同域才复用(否则掩盖缺口)。"""
+
+    def _row(self, **overrides) -> Any:
+        from types import SimpleNamespace
+
+        base = {
+            "dataset": "daily_metrics",
+            "source": "tushare",
+            "adjustment": "none",
+            "request_id": "BF-A",
+            "start_date": date(2024, 1, 1),
+            "end_date": date(2024, 3, 31),
+            "symbols": [],
+            "universe_filters": {"market": "a_share"},
+        }
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_same_filter_domain_is_reused(self) -> None:
+        from finboard_backtest.data_backfill.planner import _inflight_coverage
+
+        ranges, ids = _inflight_coverage(
+            [self._row()],
+            dataset=CatalogDataset.DAILY_METRICS,
+            source="tushare",
+            adjustment="none",
+            start=date(2024, 1, 1),
+            end=date(2024, 3, 31),
+            symbols=(),
+            universe_filters={"market": "a_share"},
+        )
+        assert ids == {"BF-A"}
+        assert ranges == ((date(2024, 1, 1), date(2024, 3, 31)),)
+
+    def test_different_filter_domain_is_not_reused(self) -> None:
+        from finboard_backtest.data_backfill.planner import _inflight_coverage
+
+        ranges, ids = _inflight_coverage(
+            [self._row()],
+            dataset=CatalogDataset.DAILY_METRICS,
+            source="tushare",
+            adjustment="none",
+            start=date(2024, 1, 1),
+            end=date(2024, 3, 31),
+            symbols=(),
+            universe_filters={"market": "a_share", "instrument_type": "stock"},
+        )
+        assert ids == set()
+        assert ranges == ()
+
+    def test_filter_inflight_cannot_cover_explicit_symbols(self) -> None:
+        from finboard_backtest.data_backfill.planner import _inflight_coverage
+
+        ranges, ids = _inflight_coverage(
+            [self._row()],
+            dataset=CatalogDataset.DAILY_METRICS,
+            source="tushare",
+            adjustment="none",
+            start=date(2024, 1, 1),
+            end=date(2024, 3, 31),
+            symbols=("000001.SZ",),
+            universe_filters={},
+        )
+        assert ids == set()
+        assert ranges == ()
+
+    def test_derived_dataset_never_syncs(self) -> None:
+        from finboard_backtest.data_backfill.support import support_for
+
+        assert support_for(CatalogDataset.CONVERTIBLE_METRICS).syncable is False
+
+
+def test_bars_market_only_filter_is_resolvable() -> None:
+    """bars(bulk_download)原生支持 market:大宇宙只需 market 即可执行。"""
+
+    from finboard_backtest.data_backfill.planner import _item_blockers
+
+    blockers = _item_blockers(
+        support=support_for(CatalogDataset.BARS),
+        capabilities=_caps_for_unit(),
+        dataset=CatalogDataset.BARS,
+        publish=True,
+        has_gap=True,
+        adjustment="qfq",
+        frozen_symbols=(),
+        universe_filters={"market": "a_share"},
+        symbol_unit=True,
+    )
+    assert blockers == []

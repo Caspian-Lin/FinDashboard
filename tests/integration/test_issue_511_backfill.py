@@ -283,12 +283,14 @@ class _StrictHarness:
         batch_status: str = "published",
         budget_exhausted: bool = False,
         fail_datasets: frozenset[str] = frozenset(),
+        publish_error: Exception | None = None,
     ) -> None:
         self._maker = maker
         self.quality_status = quality_status
         self.batch_status = batch_status
         self.budget_exhausted = budget_exhausted
         self.fail_datasets = fail_datasets
+        self.publish_error = publish_error
         self.calls: dict[str, list[dict[str, Any]]] = {
             "dataset_sync": [],
             "bulk_download": [],
@@ -312,6 +314,8 @@ class _StrictHarness:
             assert symbols, "quality_repair 必须收到非空 symbols(审核 B1)"
             return JobResult(status="succeeded")
         if job.kind == "dataset_publish":
+            if self.publish_error is not None:
+                raise self.publish_error
             for key in (
                 "release_id",
                 "dataset_name",
@@ -740,6 +744,101 @@ class TestSourceIsolation:
 # ---------------------------------------------------------------------------
 
 
+class TestPublishSwitchAndIdentity:
+    async def test_publish_false_does_not_publish(
+        self, db_session: AsyncSession, maker: async_sessionmaker[AsyncSession], calendar: None
+    ) -> None:
+        """publish=False 只能是 sync:执行器不得进入发布阶段。"""
+
+        result = await _submit(
+            db_session, _spec(publish=False), key="no-publish"
+        )
+        item = result.plan.items[0]
+        assert item.publish is False
+        assert item.action.value == "sync"
+        assert result.plan.publish_impact.new_releases == 0
+
+        harness = _StrictHarness(maker)
+        job_result, error = await _execute(maker, result.request_id, harness=harness)
+        assert error is None, error
+        assert job_result is not None
+        assert harness.calls["dataset_publish"] == []
+        releases = (
+            await db_session.execute(select(ResearchDatasetReleaseModel))
+        ).scalars().all()
+        assert releases == []
+
+    async def test_same_adjustment_different_sources_publish_separately(
+        self, db_session: AsyncSession, maker: async_sessionmaker[AsyncSession], calendar: None
+    ) -> None:
+        """同 dataset 同复权不同 source:两次发布、两个 release 身份(审核 B3)。"""
+
+        spec = _spec(
+            datasets=(
+                BackfillDatasetSpec(
+                    dataset=CatalogDataset.BARS, source="tushare", adjustment="qfq"
+                ),
+                BackfillDatasetSpec(
+                    dataset=CatalogDataset.BARS, source="akshare", adjustment="qfq"
+                ),
+            )
+        )
+        result = await _submit(db_session, spec, key="two-sources")
+        assert len(result.plan.items) == 2
+
+        harness = _StrictHarness(maker)
+        job_result, error = await _execute(maker, result.request_id, harness=harness)
+        assert error is None, error
+        assert job_result is not None
+        assert len(harness.calls["dataset_publish"]) == 2
+        release_ids = {
+            payload["release_id"] for payload in harness.calls["dataset_publish"]
+        }
+        assert len(release_ids) == 2
+        assert release_id_for(
+            "bars", result.request_id, "qfq", "akshare"
+        ) in release_ids
+        assert release_id_for(
+            "bars", result.request_id, "qfq", "tushare"
+        ) in release_ids
+        releases = (
+            await db_session.execute(select(ResearchDatasetReleaseModel))
+        ).scalars().all()
+        assert len(releases) == 2
+
+    async def test_daily_metrics_publish_surface_is_frozen_symbols(
+        self, db_session: AsyncSession, maker: async_sessionmaker[AsyncSession], calendar: None
+    ) -> None:
+        """窗口级数据集的发布面也只能是请求标的(审核 B2 回归)。"""
+
+        result = await _submit(db_session, _spec(), key="frozen-window-unit")
+        item = result.plan.items[0]
+        assert item.symbols == _SYMBOLS
+        harness = _StrictHarness(maker)
+        _job_result, error = await _execute(
+            maker, result.request_id, harness=harness
+        )
+        assert error is None, error
+        assert harness.calls["dataset_publish"][0]["symbols"] == list(_SYMBOLS)
+
+    async def test_bars_defaults_to_qfq_without_blocker(
+        self, db_session: AsyncSession, calendar: None
+    ) -> None:
+        from finboard_backtest.data_backfill.contracts import (
+            BackfillDatasetSpec as DatasetSpec,
+        )
+
+        spec = BackfillRequestSpec(
+            scope=_scope(),
+            datasets=(DatasetSpec(dataset=CatalogDataset.BARS),),
+        )
+        result = await _submit(db_session, spec, key="bars-default")
+        item = result.plan.items[0]
+        assert item.adjustment == "qfq"
+        assert item.blockers == ()
+        assert result.plan.blocked is False
+
+
 class TestBarsExecution:
     async def test_bars_sync_uses_contract_payload_and_publishes(
         self, db_session: AsyncSession, maker: async_sessionmaker[AsyncSession], calendar: None
@@ -855,7 +954,11 @@ class TestPerSymbolDatasets:
     async def test_missing_symbol_triggers_sync_even_without_window_gap(
         self, db_session: AsyncSession, calendar: None
     ) -> None:
-        """窗口级覆盖齐全但缺一个标的时,action 不能是 noop(审核 B5)。"""
+        """窗口级覆盖齐全但缺一个标的时,必须真的执行同步(B5 复审)。
+
+        归零的 ``missing_ranges`` 会让执行器零循环、estimate 归零 —— 所以标的
+        缺口必须落成「该标的未覆盖的区间」并被执行器消费(不能只改 action)。
+        """
 
         await _seed_release(
             db_session,
@@ -870,10 +973,11 @@ class TestPerSymbolDatasets:
         )
         result = await _submit(db_session, _spec(), key="one-symbol")
         item = result.plan.items[0]
-        assert item.missing_ranges == ()
         assert item.missing_symbols.count == 1
-        assert item.action.value != "noop"
         assert item.action.value == "sync_publish"
+        # 缺口区间 = 缺失标的未覆盖的窗口(不是空)。
+        assert item.missing_ranges == ((date(2024, 1, 1), item.end),)
+        assert item.estimated_requests > 0
 
 
 # ---------------------------------------------------------------------------
@@ -1100,6 +1204,137 @@ class TestExecutor:
         assert items[0].release_id == expected_release
 
 
+class TestUnexpectedFailure:
+    async def test_publish_non_executor_error_converges_item(
+        self, db_session: AsyncSession, maker: async_sessionmaker[AsyncSession], calendar: None
+    ) -> None:
+        """发布抛非 ExecutorError:item 不得停在 running,retry 也要带上它。"""
+
+        result = await _submit(db_session, _spec(), key="publish-boom")
+        request_pk = result.request.id
+        harness = _StrictHarness(
+            maker, publish_error=RuntimeError("boom in publish")
+        )
+        _job_result, error = await _execute(
+            maker, result.request_id, harness=harness
+        )
+        assert isinstance(error, ExecutorError)
+        db_session.expire_all()
+        row = await db_session.get(DataBackfillRequestModel, request_pk)
+        assert row is not None
+        assert row.status == BackfillRequestStatus.FAILED.value
+        statuses = [
+            str(record[0])
+            for record in (
+                await db_session.execute(
+                    select(DataBackfillRequestItemModel.status).where(
+                        DataBackfillRequestItemModel.request_id
+                        == result.request_id
+                    )
+                )
+            ).all()
+        ]
+        assert statuses == ["failed"]
+
+
+class TestRetryEdgeCases:
+    async def test_blocked_second_retry_recomputes(
+        self, db_session: AsyncSession, calendar: None
+    ) -> None:
+        """blocked 二次 retry 必须重算(固定键会命中上次 blocked 行)。"""
+
+        caps = BackfillCapabilities(
+            tushare_token=False,
+            cache_dir_writable=True,
+            release_root_writable=True,
+        )
+        blocked = await _submit(db_session, _spec(), key="blocked-twice", caps=caps)
+        first_retry = await retry_backfill(
+            db_session,
+            blocked.request_id,
+            requested_by="topic-1",
+            actor_type=ResearchActorType.HUMAN,
+            capabilities=caps,
+        )
+        await db_session.commit()
+        assert first_retry.created is True
+        assert first_retry.request.status == BackfillRequestStatus.BLOCKED.value
+        assert first_retry.request.request_id != blocked.request_id
+
+        second_retry = await retry_backfill(
+            db_session,
+            blocked.request_id,
+            requested_by="topic-1",
+            actor_type=ResearchActorType.HUMAN,
+            capabilities=_caps(),
+        )
+        await db_session.commit()
+        assert second_retry.created is True
+        assert second_retry.request.request_id != first_retry.request.request_id
+        assert second_retry.request.status == BackfillRequestStatus.QUEUED.value
+
+    async def test_retry_keeps_both_sources(
+        self, db_session: AsyncSession, calendar: None
+    ) -> None:
+        """多来源明细 retry 不丢项(落库 spec 已冻结解析后的 source)。"""
+
+        spec = _spec(
+            datasets=(
+                BackfillDatasetSpec(
+                    dataset=CatalogDataset.BARS, source="tushare", adjustment="qfq"
+                ),
+                BackfillDatasetSpec(
+                    dataset=CatalogDataset.BARS, source="akshare", adjustment="qfq"
+                ),
+            )
+        )
+        result = await _submit(db_session, spec, key="retry-two-sources")
+        await cancel_backfill(db_session, result.request_id)
+        await db_session.commit()
+        retried = await retry_backfill(
+            db_session,
+            result.request_id,
+            requested_by="topic-1",
+            actor_type=ResearchActorType.HUMAN,
+            capabilities=_caps(),
+        )
+        await db_session.commit()
+        items = await _items(db_session, retried.request_id)
+        assert {item.source for item in items} == {"tushare", "akshare"}
+
+    async def test_publish_false_still_repairs_cache(
+        self, db_session: AsyncSession, maker: async_sessionmaker[AsyncSession], calendar: None
+    ) -> None:
+        """publish=False 只是不发布;缓存质量修复仍应执行。"""
+
+        await _seed_release(
+            db_session,
+            release_id="DR-bars-anomaly-nopub",
+            dataset="bars",
+            kind="bars",
+            source="tushare",
+            adjustment="qfq",
+            start=_SEED_START,
+            end=date(2024, 3, 29),
+            symbols=_SYMBOLS,
+            anomalies=2,
+            anomaly_symbols=("000001.SZ",),
+        )
+        result = await _submit(
+            db_session,
+            _spec(dataset=CatalogDataset.BARS, adjustment="qfq", publish=False),
+            key="repair-nopub",
+        )
+        assert result.plan.items[0].action.value == "sync"
+        harness = _StrictHarness(maker)
+        _job_result, error = await _execute(
+            maker, result.request_id, harness=harness
+        )
+        assert error is None, error
+        assert harness.calls["quality_repair"][0]["symbols"] == ["000001.SZ"]
+        assert harness.calls["dataset_publish"] == []
+
+
 class TestCancel:
     async def test_cancel_queued_then_retry_only_remaining(
         self, db_session: AsyncSession, calendar: None
@@ -1159,6 +1394,18 @@ class TestCancel:
         new_items = await _items(db_session, retried.request_id)
         assert [item.dataset for item in new_items] == ["financial_indicators"]
 
+    async def test_cancel_twice_is_idempotent(
+        self, db_session: AsyncSession, calendar: None
+    ) -> None:
+        result = await _submit(db_session, _spec(), key="cancel-twice")
+        first = await cancel_backfill(db_session, result.request_id)
+        await db_session.commit()
+        assert first.status == BackfillRequestStatus.CANCELLED.value
+        second = await cancel_backfill(db_session, result.request_id)
+        await db_session.commit()
+        assert second.request_id == first.request_id
+        assert second.status == BackfillRequestStatus.CANCELLED.value
+
     async def test_running_cancel_is_left_to_executor(
         self, db_session: AsyncSession, calendar: None
     ) -> None:
@@ -1194,13 +1441,29 @@ class TestCancel:
         )
         await db_session.commit()
 
+        running_id = running_item.id
+        other_id = next(item.id for item in items if item.id != running_id)
         row = await cancel_backfill(db_session, result.request_id)
         await db_session.commit()
         assert row.status == BackfillRequestStatus.RUNNING.value
-        items = await _items(db_session, result.request_id)
-        statuses = {item.id: item.status for item in items}
-        assert statuses[running_item.id] == "running"
-        assert statuses[items[1].id] == "cancelled"
+        # mark_cancelled_items 走批量 UPDATE,identity map 可能过期 —— 直接按
+        # SQL 读状态,避免拿到旧的 running 快照。
+        statuses = {
+            int(record[0]): str(record[1])
+            for record in (
+                await db_session.execute(
+                    select(
+                        DataBackfillRequestItemModel.id,
+                        DataBackfillRequestItemModel.status,
+                    ).where(
+                        DataBackfillRequestItemModel.request_id
+                        == result.request_id
+                    )
+                )
+            ).all()
+        }
+        assert statuses[running_id] == "running"
+        assert statuses[other_id] == "cancelled"
 
 
 # ---------------------------------------------------------------------------
