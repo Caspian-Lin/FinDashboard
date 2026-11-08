@@ -2726,7 +2726,10 @@ class DataBackfillRequestModel(Base, IdMixin):
 
     __tablename__ = "data_backfill_requests"
 
-    request_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    # 唯一性由 __table_args__ 的 UniqueConstraint 承载(与迁移同名同列),
+    # 另建普通索引服务按 ID 查询 —— 与迁移文件逐项一致,避免 create_all 与
+    # alembic 产出的索引形态不同。
+    request_id: Mapped[str] = mapped_column(String(32))
     # 幂等键唯一性由部分唯一索引承载(只约束活跃行,与 background_jobs #371
     # 同语义):failed/cancelled 死行放行同键重建,等价重试不被失败尸体挡死。
     idempotency_key: Mapped[str] = mapped_column(String(128), index=True)
@@ -2758,6 +2761,12 @@ class DataBackfillRequestModel(Base, IdMixin):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "request_id", name="uq_data_backfill_request_id"
+        ),
+        Index(
+            "ix_data_backfill_requests_request_id", "request_id"
+        ),
         Index("ix_backfill_fingerprint", "fingerprint", "status"),
         Index("ix_backfill_status_created", "status", "created_at"),
         Index(

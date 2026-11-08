@@ -197,6 +197,10 @@ def estimate_requests(
     if not missing_ranges:
         return 0
     if support.sync_mode == "bulk_download":
+        # 口径说明:``bulk_download`` 的 payload 只有 ``start``(结束日取
+        # today),provider 用缓存 sidecar 的 ``covered_ranges`` 跳过已覆盖区间,
+        # 实际请求数≈缺口区间;这里按缺口天数估算(不回退成 start→today 的
+        # 虚高计数)。单次 provider 分页上限见 ``_BARS_CHUNK_DAYS``。
         days = sum((end - start).days + 1 for start, end in missing_ranges)
         chunks = max(1, math.ceil(days / _BARS_CHUNK_DAYS))
         return max(1, symbol_count) * chunks
@@ -323,7 +327,9 @@ async def plan_backfill(
         source = dataset_spec.source or support.source
         adjustment = _resolve_adjustment(support, dataset_spec.adjustment)
         symbol_unit = shape is EnumShape.PER_SYMBOL_RANGE or support.sync_mode == "bulk_download"
-        frozen_symbols = _freeze_symbols(item_symbols, symbol_unit=symbol_unit)
+        # 所有数据集都冻结可枚举的标的域(不只逐标的单元):发布面必须等于
+        # 请求面,窗口级数据集也不能回退到「整市场」发布。
+        frozen_symbols = _freeze_symbols(item_symbols)
         item_filters = dict(universe_filters)
 
         completed = await _completed_coverage(
@@ -342,7 +348,8 @@ async def plan_backfill(
             adjustment=adjustment,
             start=start,
             end=end,
-            symbols=_inflight_symbols(item_symbols, frozen_symbols, item_filters),
+            symbols=frozen_symbols,
+            universe_filters=item_filters,
         )
         for request_id in inflight_ids:
             request_row = inflight_requests.get(request_id)
@@ -356,23 +363,33 @@ async def plan_backfill(
                 ),
             )
 
-        missing_after_completed = _gap_ranges(
-            support=support,
-            shape=shape,
-            symbols=item_symbols,
-            completed=completed,
-            start=start,
-            end=end,
-        )
         missing_symbols = _missing_symbols(item_symbols, completed, start, end)
-        missing_ranges = subtract_ranges(missing_after_completed, inflight_ranges)
-        reuse_only = bool(missing_after_completed) and not missing_ranges
         # 标的级缺口同样必须补:发布面 = 请求标的,缺一个就冻结不出完整发布。
         symbol_gap = bool(missing_symbols) and (
             support.publishable or symbol_unit
         )
+        gap_ranges = list(
+            _gap_ranges(
+                support=support,
+                shape=shape,
+                symbols=item_symbols,
+                completed=completed,
+                start=start,
+                end=end,
+            )
+        )
+        if symbol_gap:
+            # 关键:标的缺口必须转成**可执行区间**。窗口级数据集若只有标的
+            # 缺失(窗口级覆盖齐全),这里按「该标的未覆盖的区间」补,否则
+            # missing_ranges 为空、执行器零同步、发布却缺标的(B5 复审)。
+            gap_ranges.extend(
+                _symbol_gap_ranges(missing_symbols, completed, start, end)
+            )
+        missing_after_completed = merge_ranges(gap_ranges)
+        missing_ranges = subtract_ranges(missing_after_completed, inflight_ranges)
+        reuse_only = bool(missing_after_completed) and not missing_ranges
 
-        repair, repair_symbols = _repair_plan(
+        repair, repair_symbols, repair_skip_reason = _repair_plan(
             support=support,
             completed=completed,
             symbols=item_symbols,
@@ -380,6 +397,7 @@ async def plan_backfill(
         )
         action = _decide_action(
             support=support,
+            publish=dataset_spec.publish,
             missing_ranges=missing_ranges,
             missing_symbols=missing_symbols if symbol_gap else (),
             has_completed_gap=bool(missing_after_completed),
@@ -456,9 +474,12 @@ async def plan_backfill(
         if dataset_spec.publish and support.publishable and support.release_kind:
             publish_preview = BackfillPublishPreview(
                 release_id=_preview_release_id(
-                    dataset_spec.dataset.value, adjustment
+                    dataset_spec.dataset.value,
+                    adjustment,
+                    source,
+                    support.source,
                 ),
-                version=_preview_version(adjustment),
+                version=_preview_version(adjustment, source, support.source),
                 release_kind=support.release_kind,
                 dataset_name=dataset_spec.dataset.value,
             )
@@ -480,7 +501,8 @@ async def plan_backfill(
                 ]
                 if conflict_count
                 else []
-            )
+            ),
+            *([repair_skip_reason] if repair_skip_reason else []),
         ]
         if frozen_symbols and len(item_symbols) > _MAX_SYMBOL_FILTER:
             item_warnings.append(
@@ -644,14 +666,16 @@ def _universe_filters(scope: DataScopeSpec) -> dict[str, object]:
     return filters
 
 
-def _freeze_symbols(symbols: Sequence[str], *, symbol_unit: bool) -> tuple[str, ...]:
-    """逐标的单元且规模可控时冻结完整标的列表(执行器/发布按此下传).
+def _freeze_symbols(symbols: Sequence[str]) -> tuple[str, ...]:
+    """规模可控时冻结完整标的列表(执行器/发布按此下传).
 
+    所有数据集一视同仁:窗口级数据集(如 daily_metrics)的发布也只允许请求
+    标的,不能因为同步单元是「按日」就回退到整市场发布。
     超过 :data:`_MAX_SYMBOL_FILTER` 时不冻结(交给 ``universe_filters`` 解析),
     避免把几千个代码写进 payload / plan JSON;缺口 diff 不受此影响。
     """
 
-    if not symbol_unit or not symbols or len(symbols) > _MAX_SYMBOL_FILTER:
+    if not symbols or len(symbols) > _MAX_SYMBOL_FILTER:
         return ()
     return tuple(symbols)
 
@@ -666,13 +690,18 @@ def _filter_symbol_count(filters: dict[str, object]) -> int:
 def _decide_action(
     *,
     support: BackfillSupport,
+    publish: bool,
     missing_ranges: Sequence[DateRange],
     missing_symbols: Sequence[str],
     has_completed_gap: bool,
     reuse_only: bool,
     repair: bool,
 ) -> BackfillAction:
-    """动作判定(无缺口 → noop/reuse;有缺口/缺标的 → sync / sync_publish / repair)。"""
+    """动作判定(无缺口 → noop/reuse;有缺口/缺标的 → sync / sync_publish / repair)。
+
+    ``publish=False`` 的请求只能是 ``SYNC``(含修复):执行器据此不进入发布阶段,
+    不能出现「plan 显示不发布、执行器照样冻结新发布」的不一致。
+    """
 
     has_gap = bool(missing_ranges) or bool(missing_symbols)
     if not has_gap and not repair:
@@ -681,11 +710,12 @@ def _decide_action(
             if (reuse_only or has_completed_gap)
             else BackfillAction.NOOP
         )
+    wants_publish = (
+        publish and support.publishable and support.release_kind is not None
+    )
     if repair:
-        return BackfillAction.REPAIR
-    if support.publishable and support.release_kind is not None:
-        return BackfillAction.SYNC_PUBLISH
-    return BackfillAction.SYNC
+        return BackfillAction.REPAIR if wants_publish else BackfillAction.SYNC
+    return BackfillAction.SYNC_PUBLISH if wants_publish else BackfillAction.SYNC
 
 
 def _item_blockers(
@@ -745,16 +775,26 @@ def _item_blockers(
                 dataset=dataset,
             )
         )
-    if symbol_unit and not frozen_symbols and not universe_filters:
-        # 多市场/多类型的大宇宙无法用单一过滤器表达 —— 冻结不了就具名阻塞,
-        # 不允许执行器自行放宽到「整市场」。
+    if (
+        support.sync_mode == "dataset_sync"
+        and symbol_unit
+        and not frozen_symbols
+        and not universe_filters.get("instrument_type")
+    ):
+        # ``dataset_sync`` 能表达的过滤器只有 exchange / listing_boards /
+        # instrument_type / symbols(没有 market);逐标的研究数据集冻结不了
+        # 标的时至少要能下推 instrument_type,否则执行期必然 empty_symbol_pool
+        # —— 预检即具名阻塞,不允许执行器自行放宽到「整市场」。
+        # bars(bulk_download)例外:它的契约原生支持 market,按 market + 领域
+        # 类型解析与请求面一致,不需要再下推 instrument_type。
         outcome.append(
             BackfillBlocker(
                 code="backfill_symbol_scope_unresolved",
                 message=(
                     f"{dataset.value} 是逐标的补数,但标的域超过 "
-                    f"{_MAX_SYMBOL_FILTER} 只且 scope 市场/类型多值,"
-                    "无法冻结成单一过滤器;请显式声明 symbols 或收窄 scope.universe"
+                    f"{_MAX_SYMBOL_FILTER} 只且 scope 无法下推单一 "
+                    "instrument_type(或未声明);请显式声明 symbols / "
+                    "instrument_type,或收窄 scope.universe"
                 ),
                 dataset=dataset,
             )
@@ -776,27 +816,42 @@ def _repair_plan(
     completed: _DatasetCoverage,
     symbols: Sequence[str],
     quality_profile: str,
-) -> tuple[bool, tuple[str, ...]]:
-    """缓存修复计划:是否修、修哪些标的。
+) -> tuple[bool, tuple[str, ...], str | None]:
+    """缓存修复计划:(是否修, 修复标的, 跳过原因).
 
     修复对象是**已发布读模型里带异常/重复计数的标的**(不是全市场),因此
-    ``quality_repair`` 的 ``symbols`` 恒非空;``strict`` 档在无异常时对可枚举
-    标的做一次复检(仍受 :data:`_MAX_SYMBOL_FILTER` 约束),超限则跳过修复
-    并留 warning(发布质量门仍然生效)。
+    进入修复时 ``repair_symbols`` 恒非空;``strict`` 档在无异常时对可枚举标的
+    做一次复检,超过 :data:`_MAX_SYMBOL_FILTER` 则跳过并给出具名 warning
+    (发布质量门仍然生效,不会变成「静默跳过」)。
     """
 
     if support.sync_mode != "bulk_download" or not completed.release_ids:
-        return False, ()
-    anomaly = tuple(
-        code for code in sorted(completed.anomaly_symbols) if code in set(symbols)
-    ) if symbols else tuple(sorted(completed.anomaly_symbols))
+        return False, (), None
     if completed.anomalies or completed.duplicates:
-        return True, anomaly
+        crossed = tuple(
+            code
+            for code in sorted(completed.anomaly_symbols)
+            if not symbols or code in set(symbols)
+        )
+        if crossed:
+            return True, crossed, None
+        return (
+            False,
+            (),
+            "既有异常标的不在本次请求标的域内,跳过缓存修复(质量门仍生效)",
+        )
     if quality_profile == "strict":
         if symbols and len(symbols) <= _MAX_SYMBOL_FILTER:
-            return True, tuple(symbols)
-        return False, ()
-    return False, ()
+            return True, tuple(symbols), None
+        return (
+            False,
+            (),
+            (
+                f"strict 质量复检跳过:请求标的超过 {_MAX_SYMBOL_FILTER} 只"
+                "(发布质量门仍生效)"
+            ),
+        )
+    return False, (), None
 
 
 def _quota(capabilities: BackfillCapabilities, estimated_total: int) -> BackfillQuota:
@@ -925,6 +980,17 @@ def _missing_symbols(
     return tuple(missing)
 
 
+def _symbol_gap_ranges(
+    missing: Sequence[str], completed: _DatasetCoverage, start: date, end: date
+) -> tuple[DateRange, ...]:
+    """缺失标的在窗口内未覆盖的区间(把「只缺标的」变成可执行同步区间)."""
+
+    gaps: list[DateRange] = []
+    for code in missing:
+        gaps.extend(subtract_ranges(((start, end),), completed.by_symbol.get(code, [])))
+    return merge_ranges(gaps)
+
+
 def _gap_ranges(
     *,
     support: BackfillSupport,
@@ -964,22 +1030,6 @@ def _completed_warnings(
     return outcome
 
 
-def _inflight_symbols(
-    item_symbols: Sequence[str],
-    frozen_symbols: Sequence[str],
-    filters: dict[str, object],
-) -> tuple[str, ...]:
-    """判在途复用时用「已知标的集合」;过滤器模式没有逐标的列表时给空(按区间)."""
-
-    if frozen_symbols:
-        return tuple(frozen_symbols)
-    if item_symbols and len(item_symbols) <= _MAX_SYMBOL_FILTER:
-        return tuple(item_symbols)
-    # 过滤器模式无法逐只比对:只要在途项也是过滤器模式(空 symbols)就按区间
-    # 复用;在途项是显式标的且与过滤器域不重合的风险由区间 + 数据集维度兜底。
-    return ()
-
-
 def _inflight_coverage(
     rows: Sequence[Any],
     *,
@@ -989,14 +1039,23 @@ def _inflight_coverage(
     start: date,
     end: date,
     symbols: Sequence[str],
+    universe_filters: dict[str, object],
 ) -> tuple[tuple[DateRange, ...], set[str]]:
-    """在途明细里 dataset/source/adjustment 一致且标的超集匹配的部分。
+    """在途明细里 dataset/source/adjustment 一致且标的域**可证明覆盖**的部分。
 
-    **异源 / 不同复权 / 更窄的标的集合不参与复用** —— 只返回匹配项,调用方
-    据此保留独立缺口,不做「看起来像就复用」的近似。
+    **异源 / 不同复权 / 更窄或不可比的标的域不参与复用**:
+
+    * 双方都是显式标的 → 在途标的必须是请求标的的超集;
+    * 一方显式、一方过滤器 → 无法证明超集,不复用(宁可保留缺口);
+    * 双方都是过滤器 → 过滤器必须完全一致(否则覆盖域可能更窄)。
+
+    不复用只是多跑一次同步,复用错才会掩盖缺口 —— 这里一律保守。
     """
 
     wanted = {item.strip().upper() for item in symbols if item.strip()}
+    requested_filters = {
+        key: value for key, value in universe_filters.items() if value is not None
+    }
     ranges: list[DateRange] = []
     request_ids: set[str] = set()
     for row in rows:
@@ -1007,7 +1066,13 @@ def _inflight_coverage(
         if row.end_date < start or row.start_date > end:
             continue
         row_symbols = {str(item).strip().upper() for item in (row.symbols or ())}
-        if row_symbols and wanted and not row_symbols >= wanted:
+        if row_symbols and wanted:
+            if not row_symbols >= wanted:
+                continue
+        elif row_symbols or wanted:
+            # 一边显式标的、一边过滤器:域不可比。
+            continue
+        elif dict(row.universe_filters or {}) != requested_filters:
             continue
         ranges.append((max(row.start_date, start), min(row.end_date, end)))
         request_ids.add(str(row.request_id))
@@ -1245,16 +1310,37 @@ def _batch_ranges(
     return ((start, end),)
 
 
-def _preview_release_id(dataset: str, adjustment: str) -> str:
+def _identity_suffix(
+    adjustment: str, source: str, default_source: str
+) -> str:
+    """发布身份后缀:非默认复权 / 非默认来源才显式带上(同请求内逐 item 唯一)."""
+
+    parts: list[str] = []
+    if adjustment != "none":
+        parts.append(adjustment)
+    if source and source != default_source:
+        parts.append(source)
+    return "".join(f"-{part}" for part in parts)
+
+
+def _preview_release_id(
+    dataset: str, adjustment: str, source: str, default_source: str
+) -> str:
     """发布身份预告(执行器按同一规则生成真实 ID)."""
 
-    suffix = "" if adjustment == "none" else f"-{adjustment}"
-    return f"DR-{dataset}{suffix}-{_REQUEST_ID_PLACEHOLDER}"
+    return (
+        f"DR-{dataset}{_identity_suffix(adjustment, source, default_source)}"
+        f"-{_REQUEST_ID_PLACEHOLDER}"
+    )
 
 
-def _preview_version(adjustment: str) -> str:
-    suffix = "" if adjustment == "none" else f"-{adjustment}"
-    return f"v{suffix}-{_REQUEST_ID_PLACEHOLDER}"
+def _preview_version(
+    adjustment: str, source: str, default_source: str
+) -> str:
+    return (
+        f"v{_identity_suffix(adjustment, source, default_source)}"
+        f"-{_REQUEST_ID_PLACEHOLDER}"
+    )
 
 
 __all__ = [

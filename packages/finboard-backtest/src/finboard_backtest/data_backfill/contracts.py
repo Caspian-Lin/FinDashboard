@@ -139,7 +139,9 @@ class BackfillDatasetSpec(_Frozen):
     dataset: CatalogDataset
     #: None = 使用数据集默认来源(tushare / bars 由 provider 解析)。
     source: str | None = None
-    adjustment: Adjustment = "none"
+    #: 缺省 ``qfq``:bars 缓存只写前复权(``bulk_download`` 无 adjust 维度);
+    #: 非价格数据集由 planner 覆盖为 ``none``(请求值不参与)。
+    adjustment: Adjustment = "qfq"
     start: date | None = None
     end: date | None = None
     #: 标的子集(空 = 沿用 scope 解析出的标的域)。

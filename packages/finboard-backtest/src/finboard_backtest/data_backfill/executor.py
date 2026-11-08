@@ -244,6 +244,8 @@ class DataBackfillExecutor:
                 batch_ids=batch_ids,
                 expected_statuses=(BackfillItemStatus.RUNNING.value,),
             )
+            # action 已编码发布开关(planner: publish=False → SYNC),这里不再
+            # 依赖请求级 publish 字段,避免 plan 与执行口径分叉。
             release_id = None
             if item.action in (
                 BackfillAction.SYNC_PUBLISH.value,
@@ -293,7 +295,9 @@ class DataBackfillExecutor:
         gap_ranges = _frozen_ranges(item)
         if support.sync_mode == "bulk_download":
             await self._run_bars_sync(item, job=job, progress=progress)
-            if item.action == BackfillAction.REPAIR.value:
+            # 修复由落库的 repair_symbols 驱动(action 只决定是否发布;
+            # publish=False 时 action=SYNC,但缓存修复仍要执行)。
+            if item.repair_symbols:
                 await self._run_repair(item, job=job, progress=progress)
             return []
         max_batch_id = await self._max_batch_id(support.sync_dataset)
@@ -333,6 +337,7 @@ class DataBackfillExecutor:
 
         # ``bulk_download`` 契约只有 ``start``(结束日由 provider 取 today,并按
         # 缓存 sidecar 的 covered_ranges 只补未覆盖区间),故区间终点不单独下传。
+        market = await self._resolve_market(item)
         for start, _end in _frozen_ranges(item):
             await self._run_child(
                 "bulk_download",
@@ -341,7 +346,7 @@ class DataBackfillExecutor:
                     kind="bulk_download",
                     queue=job.queue,
                     payload={
-                        "market": _market_for(item),
+                        "market": market,
                         "source": item.source,
                         "start": start.isoformat(),
                         **_scope_payload(item, include_market=False),
@@ -393,7 +398,7 @@ class DataBackfillExecutor:
     async def _publish_phase(
         self, item: DataBackfillRequestItemModel, support: BackfillSupport
     ) -> str:
-        """冻结新发布(身份由 request_id + adjustment 确定性决定,重跑幂等)."""
+        """冻结新发布(身份由 request_id + adjustment + source 确定性决定,重跑幂等)."""
 
         if not support.publishable or support.release_kind is None:
             raise ExecutorError(
@@ -401,8 +406,16 @@ class DataBackfillExecutor:
                 summary=f"{item.dataset} 不支持发布",
                 retryable=False,
             )
-        release_id = release_id_for(item.dataset, item.request_id, item.adjustment)
-        version = version_for(item.request_id, item.adjustment)
+        release_id = release_id_for(
+            item.dataset,
+            item.request_id,
+            item.adjustment,
+            item.source,
+            support.source,
+        )
+        version = version_for(
+            item.request_id, item.adjustment, item.source, support.source
+        )
         # 按**计算出的身份**查重:发布成功但落库前崩溃时,重跑直接复用。
         if await self._release_exists(release_id):
             return release_id
@@ -651,10 +664,19 @@ class DataBackfillExecutor:
                 return
             for item in await repo.list_items(request_id):
                 if item.status == BackfillItemStatus.PENDING.value:
+                    # fail-fast 未领取的项标 cancelled(保留可 retry 的剩余项)。
                     await repo.update_item(
                         item.id,
                         status=BackfillItemStatus.CANCELLED.value,
                         expected_statuses=(BackfillItemStatus.PENDING.value,),
+                    )
+                elif item.status == BackfillItemStatus.RUNNING.value:
+                    # 执行中的项随本次失败一起收敛,不能留在 running:否则
+                    # retry 的「剩余项」会丢掉它、finalize 也会判 incomplete。
+                    await repo.update_item(
+                        item.id,
+                        status=BackfillItemStatus.FAILED.value,
+                        expected_statuses=(BackfillItemStatus.RUNNING.value,),
                     )
             await session.commit()
         _status, _code, _summary = await self._finalize(request_id)
@@ -784,6 +806,30 @@ class DataBackfillExecutor:
                 retryable=False,
             )
 
+    async def _resolve_market(self, item: DataBackfillRequestItemModel) -> str:
+        """bars 批量任务的 market:过滤器优先,否则按冻结标的回查 instruments.
+
+        不能默认 ``a_share``:期货主连 / 跨市场标的会被 bulk_download 的
+        market 过滤静默丢掉(旧路径 ``_resolve_market`` 就是查表的)。
+        """
+
+        filters = dict(item.universe_filters or {})
+        market = filters.get("market")
+        if isinstance(market, str) and market:
+            return market
+        symbols = [str(code) for code in (item.symbols or ())]
+        if not symbols:
+            return "a_share"
+        async with self._session_maker() as session:
+            stmt = (
+                select(InstrumentModel.market)
+                .where(InstrumentModel.code.in_(tuple(symbols)))
+                .distinct()
+            )
+            markets = [str(row[0]) for row in (await session.execute(stmt)).all()]
+            await session.commit()
+        return markets[0] if len(markets) == 1 else "a_share"
+
     async def _publish_symbols(
         self, item: DataBackfillRequestItemModel
     ) -> list[str]:
@@ -881,18 +927,46 @@ class DataBackfillExecutor:
 # ---------------------------------------------------------------------------
 
 
-def release_id_for(dataset: str, request_id: str, adjustment: str = "none") -> str:
-    """发布身份:``DR-<dataset>[-<adjustment>]-<request_id>``(同请求重跑幂等)."""
+def _identity_suffix(
+    adjustment: str, source: str | None, default_source: str | None
+) -> str:
+    """发布身份后缀:非默认复权 / 非默认来源才显式带上。
 
-    suffix = "" if adjustment == "none" else f"-{adjustment}"
+    为什么要带 source:同一 dataset 可以在同一请求里按不同来源各补一项
+    (``(dataset, source, adjustment)`` 是 item 唯一键),若发布身份不含
+    source,两项会算出同一个 ``DR-...`` 并互相复用/撞 ``release_identity_conflict``。
+    """
+
+    parts: list[str] = []
+    if adjustment != "none":
+        parts.append(adjustment)
+    if source and source != default_source:
+        parts.append(source)
+    return "".join(f"-{part}" for part in parts)
+
+
+def release_id_for(
+    dataset: str,
+    request_id: str,
+    adjustment: str = "none",
+    source: str | None = None,
+    default_source: str = "tushare",
+) -> str:
+    """发布身份:``DR-<dataset>[-<adjustment>][-<source>]-<request_id>``(同请求重跑幂等)."""
+
+    suffix = _identity_suffix(adjustment, source, default_source)
     return f"{_RELEASE_ID_PREFIX}{dataset}{suffix}-{request_id}"
 
 
-def version_for(request_id: str, adjustment: str = "none") -> str:
-    """发布版本:``v[-<adjustment>]-<request_id>``(与 release_id 一同确定性)."""
+def version_for(
+    request_id: str,
+    adjustment: str = "none",
+    source: str | None = None,
+    default_source: str = "tushare",
+) -> str:
+    """发布版本:``v[-<adjustment>][-<source>]-<request_id>``(与 release_id 一同确定性)."""
 
-    suffix = "" if adjustment == "none" else f"-{adjustment}"
-    return f"v{suffix}-{request_id}"
+    return f"v{_identity_suffix(adjustment, source, default_source)}-{request_id}"
 
 
 def _frozen_ranges(
@@ -938,11 +1012,6 @@ def _scope_payload(
         if isinstance(market, str) and market:
             payload["market"] = market
     return payload
-
-
-def _market_for(item: DataBackfillRequestItemModel) -> str:
-    market = dict(item.universe_filters or {}).get("market")
-    return str(market) if isinstance(market, str) and market else "a_share"
 
 
 def _require_request_id(job: JobRecord) -> str:

@@ -90,6 +90,9 @@ class BackfillItemOut(BaseModel):
     start_date: date
     end_date: date
     symbols: list[str]
+    universe_filters: dict[str, Any]
+    missing_ranges: list[list[str]]
+    repair_symbols: list[str]
     estimated_requests: int
     batch_ids: list[int]
     release_id: str | None
@@ -175,6 +178,11 @@ def _item_out(row: DataBackfillRequestItemModel) -> BackfillItemOut:
         start_date=row.start_date,
         end_date=row.end_date,
         symbols=[str(item) for item in (row.symbols or [])],
+        universe_filters=dict(row.universe_filters or {}),
+        missing_ranges=[
+            [str(start), str(end)] for start, end in (row.missing_ranges or [])
+        ],
+        repair_symbols=[str(item) for item in (row.repair_symbols or [])],
         estimated_requests=int(row.estimated_requests or 0),
         batch_ids=[int(item) for item in (row.batch_ids or [])],
         release_id=row.release_id,

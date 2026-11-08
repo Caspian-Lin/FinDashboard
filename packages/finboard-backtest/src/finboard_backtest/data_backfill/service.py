@@ -29,8 +29,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -165,7 +166,9 @@ async def submit_backfill(
         )
 
     request_id = generate_backfill_request_id()
-    frozen_spec = spec.model_dump(mode="json")
+    # 落库的 spec 用**解析后**值(source/adjustment 已落定):retry 时按
+    # (dataset, source, adjustment) 精确匹配明细行,不会因 None 回退到错误来源。
+    frozen_spec = _freeze_spec(spec, plan).model_dump(mode="json")
     frozen_plan = plan.model_dump(mode="json")
     reused_request_ids = sorted(
         {
@@ -302,7 +305,12 @@ async def retry_backfill(
     return await submit_backfill(
         session,
         remaining,
-        idempotency_key=idempotency_key or f"retry:{request_id}",
+        # 默认键每次唯一:blocked/failed 请求重试要**重新算 plan**,固定键会
+        # 命中上一次重试生成的行(仍是 blocked)而直接返回旧快照。
+        idempotency_key=(
+            idempotency_key
+            or f"retry:{request_id}:{uuid.uuid4().hex[:12].upper()}"
+        ),
         requested_by=requested_by,
         actor_type=actor_type,
         capabilities=capabilities,
@@ -326,6 +334,9 @@ async def cancel_backfill(
     row = await repo.get(request_id)
     if row is None:
         raise BackfillRequestError("backfill_not_found", f"补数请求不存在: {request_id}")
+    if row.status == BackfillRequestStatus.CANCELLED.value:
+        # 幂等:重复取消返回当前行(不报错),执行器可能还在收敛。
+        return row
     if row.status in _TERMINAL_REQUEST_STATUSES:
         raise BackfillRequestError(
             "backfill_not_cancellable",
@@ -368,6 +379,43 @@ async def cancel_backfill(
 # ---------------------------------------------------------------------------
 # 内部实现
 # ---------------------------------------------------------------------------
+
+
+def _freeze_spec(
+    spec: BackfillRequestSpec, plan: BackfillPlan
+) -> BackfillRequestSpec:
+    """把预检解析出的 source/adjustment/窗口/标的写回冻结 spec。
+
+    提交后的 spec 是执行与重试的唯一依据:来源不能留 ``None``(否则重试时
+    无法与明细行的解析来源对齐),窗口/标的也用预检落位后的值。
+    """
+
+    datasets: list[BackfillDatasetSpec] = []
+    for item in plan.items:
+        # 冻结 spec 的 adjustment 是 Literal 三值之一(planner 已收敛)。
+        adjustment: Literal["qfq", "hqfq", "none"] = (
+            "qfq"
+            if item.adjustment == "qfq"
+            else "hqfq"
+            if item.adjustment == "hqfq"
+            else "none"
+        )
+        datasets.append(
+            BackfillDatasetSpec(
+                dataset=item.dataset,
+                source=item.source,
+                adjustment=adjustment,
+                start=item.start,
+                end=item.end,
+                symbols=item.symbols,
+                publish=item.publish,
+            )
+        )
+    return BackfillRequestSpec(
+        scope=spec.scope,
+        datasets=tuple(datasets),
+        quality_profile=spec.quality_profile,
+    )
 
 
 async def _serialize_submit(
@@ -489,33 +537,25 @@ async def _remaining_spec(
     """把原请求收窄成「失败/取消项」的 spec(重试用)。"""
 
     # 同一 dataset 可有多项(不同 source / adjustment),必须按完整身份取行,
-    # 否则后一项会覆盖前一项,重试丢项或重跑已成功项。
+    # 否则后一项会覆盖前一项,重试丢项或重跑已成功项。落库 spec 已冻结解析后
+    # 的 source/adjustment,这里做**精确匹配**(不再按 dataset 猜来源)。
     rows = {
         (row.dataset, row.source, row.adjustment): row
         for row in await repo.list_items(source.request_id)
     }
     kept: list[BackfillDatasetSpec] = []
     for item in frozen.ordered_datasets():
-        key = (item.dataset.value, item.source or "", item.adjustment)
-        row = rows.get(key)
+        row = rows.get((item.dataset.value, item.source or "", item.adjustment))
         if row is None:
-            # 冻结 spec 未显式声明 source 时按预检解析值兜底匹配。
-            row = next(
-                (
-                    candidate
-                    for (dataset, _source, _adjustment), candidate in rows.items()
-                    if dataset == item.dataset.value
-                    and _adjustment == item.adjustment
-                ),
-                None,
-            )
-        if row is None:
+            # 身份对不上(理论上只出现在旧 plan):整项保留,宁可重跑也不丢项。
             kept.append(item)
             continue
         if row.status in (
             BackfillItemStatus.FAILED.value,
             BackfillItemStatus.CANCELLED.value,
             BackfillItemStatus.PENDING.value,
+            # 运行中(进程崩溃/外部领取)也属于「未完成」,重试必须带上。
+            BackfillItemStatus.RUNNING.value,
         ):
             kept.append(item)
     if not kept:
