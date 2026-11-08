@@ -539,7 +539,7 @@ class TestSubmitGate:
     ) -> None:
         await _publish_spec(seeded)
         async with session_factory(seeded)() as session:
-            scope = DataScopeSpec.model_validate(_scope())
+            scope = DataScopeSpec.model_validate(_scope(tail_sessions=1))
             resolution = await resolve_data_scope(
                 session,
                 scope,
@@ -561,7 +561,7 @@ class TestSubmitGate:
             "warmup_start": WINDOW_START.isoformat(),
             "decision_start": WINDOW_START.isoformat(),
             "decision_end": WINDOW_END.isoformat(),
-            "valuation_end": WINDOW_END.isoformat(),
+            "valuation_end": "2024-02-01",
         }
         assert payload["resolution_id"] == resolution.resolution_id
         assert payload["releases"][0]["artifact_id"] == BARS_V1
@@ -658,6 +658,30 @@ class TestSubmitGate:
         assert excinfo.value.code == "scope_release_drift"
         assert excinfo.value.detail["actual_resolution_id"] != preview.resolution_id
 
+    async def test_multi_period_without_tail_rejected(
+        self, seeded: AsyncEngine
+    ) -> None:
+        """multi_period + tail=0 在入队期就拒绝,不把失败推迟到执行期。"""
+
+        await _publish_spec(seeded)
+        async with session_factory(seeded)() as session:
+            scope = DataScopeSpec.model_validate(_scope())
+            preview = await resolve_data_scope(
+                session, scope, strategy_id=STRATEGY_ID, strategy_version=1
+            )
+            assert preview.window.valuation_end == preview.window.decision_end
+            with pytest.raises(ScopeGateError) as excinfo:
+                await apply_scope_to_parameters(
+                    session,
+                    scope,
+                    resolution_id=preview.resolution_id,
+                    release_ids=[BARS_V1],
+                    strategy_id=STRATEGY_ID,
+                    strategy_version=1,
+                    parameters={"rebalance_frequency": "monthly"},
+                )
+        assert excinfo.value.code == "scope_window_tail_too_short"
+
     async def test_spec_release_mismatch_is_blocking(self, seeded: AsyncEngine) -> None:
         # 策略冻结的发布集合与 scope 解析出的不同 → 复用 resolver 既有守卫。
         await _publish_spec(seeded, release_ids=("DR-other-release",))
@@ -673,7 +697,11 @@ class TestSubmitGate:
 
 class TestQueueRun:
     def _scope_payload(self) -> dict[str, Any]:
-        return _scope(datasets={"required": ["bars", "daily_metrics"]})
+        return _scope(
+            datasets={"required": ["bars", "daily_metrics"]},
+            # multi_period 需要下一交易日撮合,尾部至少 1 天。
+            tail_sessions=1,
+        )
 
     def _queue_payload(self, resolution_id: str, key: str) -> dict[str, Any]:
         return {
@@ -715,7 +743,7 @@ class TestQueueRun:
             "warmup_start": WINDOW_START.isoformat(),
             "decision_start": WINDOW_START.isoformat(),
             "decision_end": WINDOW_END.isoformat(),
-            "valuation_end": WINDOW_END.isoformat(),
+            "valuation_end": "2024-02-01",
         }
         # 旧入口(不带 scope)仍然可用,manifest 不含 data_scope 键。
         legacy = self._queue_payload(resolution_id, "scope-510-queue-2")
