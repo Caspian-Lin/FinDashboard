@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from typing import Any
 
 import pytest
 
@@ -305,6 +306,7 @@ class TestActionDecision:
             _decide_action(
                 support=support_for(CatalogDataset.DAILY_METRICS),
                 missing_ranges=(),
+                missing_symbols=(),
                 has_completed_gap=False,
                 reuse_only=False,
                 repair=False,
@@ -317,6 +319,7 @@ class TestActionDecision:
             _decide_action(
                 support=support_for(CatalogDataset.DAILY_METRICS),
                 missing_ranges=(),
+                missing_symbols=(),
                 has_completed_gap=True,
                 reuse_only=True,
                 repair=False,
@@ -329,6 +332,7 @@ class TestActionDecision:
             _decide_action(
                 support=support_for(CatalogDataset.DAILY_METRICS),
                 missing_ranges=((date(2024, 1, 1), date(2024, 1, 5)),),
+                missing_symbols=(),
                 has_completed_gap=True,
                 reuse_only=False,
                 repair=False,
@@ -341,6 +345,7 @@ class TestActionDecision:
             _decide_action(
                 support=support_for(CatalogDataset.SUSPENSIONS),
                 missing_ranges=((date(2024, 1, 1), date(2024, 1, 5)),),
+                missing_symbols=(),
                 has_completed_gap=True,
                 reuse_only=False,
                 repair=False,
@@ -353,6 +358,7 @@ class TestActionDecision:
             _decide_action(
                 support=support_for(CatalogDataset.BARS),
                 missing_ranges=((date(2024, 1, 1), date(2024, 1, 5)),),
+                missing_symbols=(),
                 has_completed_gap=True,
                 reuse_only=False,
                 repair=True,
@@ -461,3 +467,114 @@ class TestRestContract:
         from finboard_api import routes
 
         assert "data_backfill_router" in routes.__all__
+
+
+class TestAuditFixes:
+    """审核期修复的纯函数口径(B1/B3/B5)。"""
+
+    def test_bars_adjustment_not_supported_is_blocked(self) -> None:
+        from finboard_backtest.data_backfill.planner import _item_blockers
+
+        blockers = _item_blockers(
+            support=support_for(CatalogDataset.BARS),
+            capabilities=_caps_for_unit(),
+            dataset=CatalogDataset.BARS,
+            publish=True,
+            has_gap=True,
+            adjustment="hqfq",
+            frozen_symbols=("000001.SZ",),
+            universe_filters={"market": "a_share", "instrument_type": "stock"},
+            symbol_unit=True,
+        )
+        assert any(
+            blocker.code == "backfill_adjustment_unsupported" for blocker in blockers
+        )
+
+    def test_unfreezable_large_universe_is_blocked(self) -> None:
+        from finboard_backtest.data_backfill.planner import _item_blockers
+
+        blockers = _item_blockers(
+            support=support_for(CatalogDataset.FINANCIAL_INDICATORS),
+            capabilities=_caps_for_unit(),
+            dataset=CatalogDataset.FINANCIAL_INDICATORS,
+            publish=True,
+            has_gap=True,
+            adjustment="none",
+            frozen_symbols=(),
+            universe_filters={},  # 多市场/多类型无法表达
+            symbol_unit=True,
+        )
+        assert any(
+            blocker.code == "backfill_symbol_scope_unresolved"
+            for blocker in blockers
+        )
+
+    def test_missing_symbols_trigger_sync_for_window_unit(self) -> None:
+        action = _decide_action(
+            support=support_for(CatalogDataset.DAILY_METRICS),
+            missing_ranges=(),
+            missing_symbols=("000001.SZ",),
+            has_completed_gap=True,
+            reuse_only=False,
+            repair=False,
+        )
+        assert action is BackfillAction.SYNC_PUBLISH
+
+    def test_missing_symbols_ignored_when_not_symbol_gap(self) -> None:
+        # 调用方只在「标的缺口应当补」时传入 missing_symbols;空传即 noop 语义。
+        action = _decide_action(
+            support=support_for(CatalogDataset.SUSPENSIONS),
+            missing_ranges=(),
+            missing_symbols=(),
+            has_completed_gap=False,
+            reuse_only=False,
+            repair=False,
+        )
+        assert action is BackfillAction.NOOP
+
+    def test_release_identity_includes_adjustment(self) -> None:
+        from finboard_backtest.data_backfill.executor import (
+            release_id_for,
+            version_for,
+        )
+
+        assert release_id_for("bars", "BF-1", "qfq") == "DR-bars-qfq-BF-1"
+        assert release_id_for("daily_metrics", "BF-1", "none") == (
+            "DR-daily_metrics-BF-1"
+        )
+        assert release_id_for("bars", "BF-1", "qfq") != release_id_for(
+            "bars", "BF-1", "hqfq"
+        )
+        assert version_for("BF-1", "qfq") == "v-qfq-BF-1"
+        assert version_for("BF-1", "none") == "v-BF-1"
+
+    def test_freeze_symbols_respects_cap(self) -> None:
+        from finboard_backtest.data_backfill.planner import (
+            _MAX_SYMBOL_FILTER,
+            _freeze_symbols,
+        )
+
+        small = tuple(f"S{index}" for index in range(3))
+        assert _freeze_symbols(small, symbol_unit=True) == small
+        # 窗口级单元不冻结标的(bulk 由过滤器解析)。
+        assert _freeze_symbols(small, symbol_unit=False) == ()
+        huge = tuple(f"S{index}" for index in range(_MAX_SYMBOL_FILTER + 1))
+        assert _freeze_symbols(huge, symbol_unit=True) == ()
+
+
+def _caps_for_unit() -> Any:
+    from finboard_backtest.data_backfill.support import (
+        BackfillCapabilities,
+        BudgetSnapshot,
+    )
+
+    return BackfillCapabilities(
+        tushare_token=True,
+        cache_dir_writable=True,
+        release_root_writable=True,
+        budget=BudgetSnapshot(
+            remaining_today=100_000,
+            requests_per_minute=200,
+            daily_limit=100_000,
+        ),
+    )
