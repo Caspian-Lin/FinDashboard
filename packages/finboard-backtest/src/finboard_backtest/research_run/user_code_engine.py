@@ -73,6 +73,7 @@ from finboard_backtest.research_run.signal_engine import (
     DecisionLoadContext,
     LoadChunkProbe,
     LoadPhaseReporter,
+    TradingDaysLoader,
     _bars_release_ref,
     _load_benchmark_curve,
     build_daily_equity_curve,
@@ -158,6 +159,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         series_provider: FactorSeriesProvider | None = None,
         precompute_phase_reporter: LoadPhaseReporter | None = None,
         precompute_cancel_probe: Callable[[], Awaitable[None]] | None = None,
+        trading_days_loader: TradingDaysLoader | None = None,
     ) -> None:
         super().__init__(strategy_kind="user_code", decision_inputs=())
         self._manifest = manifest
@@ -173,6 +175,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         self._precompute_phase_reporter = precompute_phase_reporter
         # issue #450 追续:预计算段取消探针(只查不报)。
         self._precompute_cancel_probe = precompute_cancel_probe
+        self._trading_days_loader = trading_days_loader
         # issue #463:流式决策上下文(惰性创建于 _ensure_loaded,逐期拉取,
         # 不再全量物化);决策日与 screen 投影在逐期消费时捕获(#304 partial
         # 证据失败期也在内)。
@@ -219,6 +222,7 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
                 series_provider=self._series_provider,
                 precompute_phase_reporter=self._precompute_phase_reporter,
                 precompute_cancel_probe=self._precompute_cancel_probe,
+                trading_days_loader=self._trading_days_loader,
             )
             self._sandbox = await StrategySandboxCaller.create(
                 settings=settings,
@@ -354,7 +358,10 @@ class UserCodeStrategyAdapter(PortfolioPipelineAdapter):
         if self.execution_mode is ResearchExecutionMode.MULTI_PERIOD and collected:
             release_ref = _bars_release_ref(manifest, self._release_provider_factory)
             provider = self._release_provider_factory(release_ref.artifact_id)
-            self._equity_curve = await build_daily_equity_curve(provider, manifest, collected)
+            self._equity_curve = await build_daily_equity_curve(
+                provider, manifest, collected,
+                trading_days_loader=self._trading_days_loader,
+            )
         self._benchmark_curve = await _load_benchmark_curve(
             manifest, self._release_provider_factory
         )

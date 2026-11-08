@@ -34,6 +34,7 @@
 - **域隔离**：研究运行（`research_runs`，`RR-`）与模拟盘（`simulation_*`，`SIM-`）永不写实盘 `orders`/`fills`/`positions`/`audit_logs`；`background_jobs` 队列只服务研究/数据/回测，实盘交易内核走 `finboard-scheduler` 专用调度、不进队列不暴露为 MCP 工具。
 - **benchmark-only**：指数与期货主连不可撮合、只做基准/研究数据；`is_benchmark_only_instrument` 必须在候选池、特征装配、排名截面三处消费口径一致（漏一处 = 指数被交易或信号截面漂移）。
 - **bars 主发布唯一**：基准行情必须与候选池同处一份 `multi_asset_mixed` 发布；研究数据发布（daily_metrics / financial_indicators / convertible_metrics）只提供因子观测——缺研究标的容忍（具名 warning），bars 主发布缺标的 fail-closed。
+- **研究 Symbol 市场**：以冻结发布 manifest 的 `ReleasedInstrument.market` 为权威，代码后缀仅在发布无该标的时兜底；基准、日历与价格读取采用同一口径。
 - **PIT fail-closed 上界**：一切决策输入 `available_at <= decision_at`；财务数据 `available_at = ann_date + 1`；窗口外/前视数据具名拒绝、不静默截断。
 - **multi_period 必须显式 `decision_schedule`**（legacy `rebalance_frequency` 兼容，两键互斥）；single_shot 决策时点只能来自冻结因子快照（入队 fail-closed）。
 - **用户因子（`u_` 前缀）**：仅 active+passed 可引用；multi_period 引用须有 factor_series 覆盖；factor_series 仅接受 `compute_series` 入口（v1 逐日入口已废弃），PIT = 窗口物理隔离 + 前缀不变性审计（截断不变 + 扰动不变）。

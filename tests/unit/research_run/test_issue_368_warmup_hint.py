@@ -130,7 +130,7 @@ async def test_warmup_error_names_earliest_feasible_start(
 ) -> None:
     """历史不足拒绝照旧;日历足够长时文案具名最早可行起点,过短时降级原文。"""
 
-    async def _stub_trading_days(provider: Any) -> list[date]:
+    async def _stub_trading_days(provider: Any, **kwargs: Any) -> list[date]:
         del provider
         return list(calendar)
 
@@ -156,7 +156,7 @@ async def test_warmup_error_degrades_without_calendar(
 ) -> None:
     """日历读取失败:提示缺席,原始错误照常抛出(不掩盖、不二次炸)。"""
 
-    async def _broken_trading_days(provider: Any) -> list[date]:
+    async def _broken_trading_days(provider: Any, **kwargs: Any) -> list[date]:
         del provider
         raise RuntimeError("calendar unavailable")
 
@@ -169,3 +169,23 @@ async def test_warmup_error_degrades_without_calendar(
             "DR-warmup",
         )
     assert "最早可行决策起点" not in str(exc_info.value)
+
+
+async def test_warmup_hint_receives_db_calendar() -> None:
+    """真实错误提示调用链传入 DB loader,无 fetch_bars 的 provider 也可命中。"""
+    calls = 0
+
+    async def loader() -> list[date]:
+        nonlocal calls
+        calls += 1
+        return _CALENDAR
+
+    with pytest.raises(ValueError, match=f"最早可行决策起点 {_EXPECTED_EARLIEST}"):
+        await _compute_period_features(
+            _provider(),  # type: ignore[arg-type]
+            _manifest(),  # type: ignore[arg-type]
+            _DECISION_AT,
+            "DR-warmup",
+            trading_days_loader=loader,
+        )
+    assert calls == 1

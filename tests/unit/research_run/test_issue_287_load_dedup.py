@@ -401,6 +401,7 @@ class TestTradingCalendarCache:
         class _StubInstrument:
             code = "600519.SH"
             ready = True
+            market = Market.A_SHARE
 
         class _StubRelease:
             release_id = "stub"
