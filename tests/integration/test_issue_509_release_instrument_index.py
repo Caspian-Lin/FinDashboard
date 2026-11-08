@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -104,7 +105,9 @@ def _release() -> ResearchDatasetRelease:
 
 
 @pytest_asyncio.fixture
-async def published(db_session: AsyncSession) -> ResearchDatasetRelease:
+async def published(
+    db_session: AsyncSession,
+) -> AsyncIterator[ResearchDatasetRelease]:
     release = _release()
     await ResearchDatasetReleaseRepository(db_session).publish(release)
     await db_session.commit()

@@ -57,7 +57,7 @@ def test_unknown_key_rejected() -> None:
 
 
 def test_sync_dataset_names_match_registry() -> None:
-    from finboard_backtest.background_jobs.dataset_sync.specs import SYNC_SPECS
+    from finboard_backtest.background_jobs.dataset_sync.spec import SYNC_SPECS
 
     registered = {
         spec.sync_dataset for spec in catalog_specs() if spec.sync_dataset
