@@ -446,7 +446,7 @@ API、迁移和三个示例见 [无代码研究策略规格](research_strategy_s
 
 ### 版本化研究数据发布
 
-回测可用 `finboard data release`，也可在研究工作台“数据与标的 → 数据发布”
+回测可用 `finboard data release`，也可在数据基座「数据集 → 分类操作 → 行情」
 中选择本地缓存的标的和日期范围，把可变 Parquet 缓存冻结为指定
 `release_id`;`finboard data release-verify` 可复核 manifest 与全部文件
 SHA-256。发布清单会登记到 PostgreSQL `research_dataset_releases`,API

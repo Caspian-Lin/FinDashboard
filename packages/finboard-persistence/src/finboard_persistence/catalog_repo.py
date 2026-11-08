@@ -727,6 +727,73 @@ class CatalogRepository:
         )
         return rows[:limit]
 
+    # ------------------------------------------------------------------ 课题数据范围
+    async def topic_payload(self, topic_id: str) -> dict[str, Any] | None:
+        """课题当前 payload;课题不存在返回 ``None``(目录侧映射 404)。"""
+        row = (
+            await self._session.execute(
+                text("SELECT payload FROM research_topics WHERE topic_id = :topic_id"),
+                {"topic_id": topic_id},
+            )
+        ).first()
+        return dict(row[0]) if row is not None else None
+
+    async def topic_source_refs(
+        self, topic_id: str, *, limit: int = 500
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """课题全部轮次的 ``source_refs``(按轮次倒序,未去重)。
+
+        返回 ``(refs, truncated)``;条目数达到 ``limit`` 即视为截断,调用方
+        需要把截断暴露在警告里,不能静默当全量。
+        """
+        rows = (
+            await self._session.execute(
+                text(
+                    """
+                    SELECT payload::jsonb -> 'source_refs' AS refs
+                    FROM research_topic_entries
+                    WHERE topic_id = :topic_id
+                      AND jsonb_typeof(payload::jsonb -> 'source_refs') = 'array'
+                    ORDER BY id DESC
+                    LIMIT CAST(:limit AS integer)
+                    """
+                ),
+                {"topic_id": topic_id, "limit": limit},
+            )
+        ).all()
+        refs: list[dict[str, Any]] = []
+        for row in rows:
+            for item in row[0] or ():
+                if isinstance(item, dict):
+                    refs.append(dict(item))
+        return refs, len(rows) >= limit
+
+    async def run_dataset_releases(self, run_id: str) -> list[str] | None:
+        """研究运行 manifest 冻结的数据发布 ID;运行不存在返回 ``None``。
+
+        只取 ``manifest.dataset_releases[*].artifact_id``,不加载整份 manifest
+        (单份可达 ~90MB,课题视图只做有限行投影)。
+        """
+        row = (
+            await self._session.execute(
+                text(
+                    "SELECT manifest::jsonb -> 'dataset_releases' AS refs "
+                    "FROM research_runs WHERE run_id = :run_id"
+                ),
+                {"run_id": run_id},
+            )
+        ).first()
+        if row is None:
+            return None
+        ids: list[str] = []
+        for item in row[0] or ():
+            if not isinstance(item, dict):
+                continue
+            value = item.get("artifact_id") or item.get("release_id")
+            if value:
+                ids.append(str(value))
+        return ids
+
 
 def _release_header(row: Any) -> ReleaseHeader:
     values = tuple(row)

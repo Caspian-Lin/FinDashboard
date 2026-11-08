@@ -9,6 +9,7 @@ import { LoadingState, ErrorState, EmptyState } from "@/components/ui/states";
 import { EvidenceFields } from "@/components/research/StrategyExplanation";
 import { ResearchMemoryArticle } from "@/components/research/ResearchMemoryArticle";
 import { ResearchTimestamp } from "@/components/research/ResearchTimestamp";
+import { TopicDataCard } from "@/components/data/TopicDataCard";
 import {
   workspaceApi,
   evidenceUrl,
@@ -523,13 +524,15 @@ export default function ResearchTopics() {
                     <Link className="text-primary underline" to="/research/experiments">
                       OOS 验证
                     </Link>
-                    <Link className="text-primary underline" to="/research/data">
+                    <Link className="text-primary underline" to={`/data?tab=overview&topic=${encodeURIComponent(topic.data.topic_id)}`}>
                       数据工具
                     </Link>
                     <Link className="text-primary underline" to="/research/factors">
                       因子工具
                     </Link>
                   </div>
+                  {/* 课题数据视图(#512):只读消费 /api/data/catalog/topics/{id}/coverage */}
+                  <TopicDataCard topicId={topic.data.topic_id} bare />
                 </section>
                 {round && (
                   <form

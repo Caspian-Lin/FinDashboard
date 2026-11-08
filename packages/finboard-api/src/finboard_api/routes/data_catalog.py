@@ -20,6 +20,8 @@ from finboard_backtest.data_catalog import (
     CatalogError,
     CatalogQuery,
     DataCatalogService,
+    TopicGap,
+    TopicReleaseCoverage,
 )
 from finboard_backtest.data_catalog import contracts as catalog_contracts
 from finboard_data.datasets import CatalogDataset
@@ -196,6 +198,58 @@ class ReferencePageOut(BaseSchema):
     items: list[ReferenceOut]
 
 
+class TopicReleaseOut(BaseSchema):
+    """课题引用的一份发布 + 该发布的目录覆盖口径(#512)。"""
+
+    release_id: str
+    dataset: str
+    dataset_name: str
+    source: str
+    version: str
+    start_date: date
+    end_date: date
+    published_at: datetime
+    quality_status: str
+    coverage_pct: float | None
+    expected_sessions: int
+    missing_sessions: int
+    symbols_with_gaps: int
+    denominator: str
+    warnings: list[str]
+
+
+class TopicCoverageSummaryOut(BaseSchema):
+    release_count: int
+    dataset_count: int
+    min_coverage_pct: float | None
+    missing_sessions: int
+    symbols_with_gaps: int
+    denominators: list[str]
+    resolved_by: str
+    warnings: list[str]
+
+
+class TopicGapOut(BaseSchema):
+    release_id: str
+    dataset: str
+    reason: str
+    message: str
+    coverage_pct: float | None
+    missing_sessions: int
+    symbols_with_gaps: int
+
+
+class TopicCoverageOut(BaseSchema):
+    """课题数据视图:显式 data_scope 优先、refs 推导回退(#512/#514)。"""
+
+    topic_id: str
+    releases: list[TopicReleaseOut]
+    coverage: TopicCoverageSummaryOut
+    gaps: list[TopicGapOut]
+    last_sync: datetime | None
+    next_step: str
+
+
 class CalendarOut(BaseSchema):
     market: str
     start: date
@@ -324,7 +378,7 @@ def _presence_out(row: PresenceRow) -> PresenceItemOut:
 
 
 def _raise_catalog(exc: CatalogError) -> None:
-    status_code = 404 if exc.code == "release_not_found" else 409
+    status_code = 404 if exc.code in ("release_not_found", "topic_not_found") else 409
     raise HTTPException(status_code=status_code, detail=f"{exc.code}: {exc.message}")
 
 
@@ -516,6 +570,43 @@ async def find_instrument(
     )
 
 
+@router.get("/topics/{topic_id}/coverage", response_model=TopicCoverageOut)
+async def get_topic_coverage(
+    topic_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> TopicCoverageOut:
+    """课题数据视图(issue #512):引用解析 → 复用 #509 覆盖口径。
+
+    只读;显式 ``data_scope`` 优先,轮次 ``source_refs`` 推导回退
+    (#514 落地前后端契约不变)。课题不存在 → 404。
+    """
+    try:
+        report = await _service(session).topic_coverage(topic_id)
+    except CatalogError as exc:
+        _raise_catalog(exc)
+    return TopicCoverageOut(
+        topic_id=report.topic_id,
+        releases=[_topic_release_out(item) for item in report.releases],
+        coverage=TopicCoverageSummaryOut(
+            release_count=report.coverage.release_count,
+            dataset_count=report.coverage.dataset_count,
+            min_coverage_pct=(
+                float(report.coverage.min_coverage_pct)
+                if report.coverage.min_coverage_pct is not None
+                else None
+            ),
+            missing_sessions=report.coverage.missing_sessions,
+            symbols_with_gaps=report.coverage.symbols_with_gaps,
+            denominators=list(report.coverage.denominators),
+            resolved_by=report.coverage.resolved_by,
+            warnings=list(report.coverage.warnings),
+        ),
+        gaps=[_topic_gap_out(item) for item in report.gaps],
+        last_sync=report.last_sync,
+        next_step=report.next_step,
+    )
+
+
 @router.get("/calendar", response_model=CalendarOut)
 async def get_calendar(
     market: str = Query(default="SSE"),
@@ -542,6 +633,44 @@ def _reference_out(
         status=item.status,
         created_at=item.created_at,
         deep_link=deep_link,
+    )
+
+
+def _topic_release_out(item: TopicReleaseCoverage) -> TopicReleaseOut:
+    return TopicReleaseOut(
+        release_id=item.release.release_id,
+        dataset=item.dataset.value,
+        dataset_name=item.release.dataset_name,
+        source=item.release.source,
+        version=item.release.version,
+        start_date=item.release.start_date,
+        end_date=item.release.end_date,
+        published_at=item.release.published_at,
+        quality_status=item.release.quality_status,
+        coverage_pct=(
+            float(item.coverage.coverage_pct)
+            if item.coverage.coverage_pct is not None
+            else None
+        ),
+        expected_sessions=item.coverage.expected_sessions,
+        missing_sessions=item.coverage.missing_sessions,
+        symbols_with_gaps=item.coverage.symbols_with_gaps,
+        denominator=item.coverage.denominator,
+        warnings=list(item.coverage.warnings),
+    )
+
+
+def _topic_gap_out(item: TopicGap) -> TopicGapOut:
+    return TopicGapOut(
+        release_id=item.release_id,
+        dataset=item.dataset,
+        reason=item.reason,
+        message=item.message,
+        coverage_pct=(
+            float(item.coverage_pct) if item.coverage_pct is not None else None
+        ),
+        missing_sessions=item.missing_sessions,
+        symbols_with_gaps=item.symbols_with_gaps,
     )
 
 
