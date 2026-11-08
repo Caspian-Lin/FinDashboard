@@ -433,8 +433,9 @@ async def _build_queued_manifest(
         raise McpToolError("invalid_argument", str(exc)) from exc
 
     # issue #510:统一数据范围提交复验(与 REST 路由同一门控函数)—— 重算
-    # resolution_id 比对预览,数据变了拒绝并要求重新预览;通过后把窗口合并
-    # 进 parameters 再进入后续参数门控(否则门控看到的是旧参数)。
+    # resolution_id 比对预览,数据变了拒绝并要求重新预览;合并了
+    # ``research_window`` 的参数副本只用于构造 manifest,后续门控仍读原始
+    # parameters(避免 #361 因子序列反查把窗口键算进 series_key)。
     scope_parameters: dict[str, Any] | None = None
     scope_manifest: dict[str, Any] | None = None
     if getattr(body, "data_scope", None) is not None:

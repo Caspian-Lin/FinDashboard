@@ -508,6 +508,47 @@ class TestResolvePreview:
             item.code == "scope_locked_bars_ambiguous" for item in resolution.blockers
         )
 
+    async def test_explicit_symbols_do_not_bypass_class_mapping(
+        self, seeded: AsyncEngine
+    ) -> None:
+        # explicit_symbols 早退也不能跳过未映射大类校验(声明无效即拒绝)。
+        async with session_factory(seeded)() as session:
+            resolution = await resolve_data_scope(
+                session,
+                DataScopeSpec.model_validate(
+                    _scope(
+                        universe={
+                            "explicit_symbols": list(SYMBOLS),
+                            "asset_classes": ["cash"],
+                        }
+                    )
+                ),
+            )
+        assert resolution.universe.resolved_count == 0
+        assert any(
+            item.code == "scope_asset_class_unmapped" for item in resolution.blockers
+        )
+
+    async def test_locked_without_bars_does_not_report_ambiguity(
+        self, seeded: AsyncEngine
+    ) -> None:
+        async with session_factory(seeded)() as session:
+            await _publish_daily(session, "DR-daily-510-only")
+        async with session_factory(seeded)() as session:
+            resolution = await resolve_data_scope(
+                session,
+                DataScopeSpec.model_validate(
+                    _scope(
+                        datasets={"required": ["bars"]},
+                        release_selection="locked",
+                        locked_release_ids=["DR-daily-510-only"],
+                    )
+                ),
+            )
+        codes = {item.code for item in resolution.blockers}
+        assert "scope_locked_bars_ambiguous" not in codes
+        assert "scope_locked_release_missing" in codes
+
     async def test_benchmark_outside_bars_is_blocking(
         self, seeded: AsyncEngine
     ) -> None:
