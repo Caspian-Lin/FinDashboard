@@ -544,6 +544,61 @@ class CatalogRepository:
             for row in rows
         ], total
 
+    async def missing_symbols(
+        self, release_id: str, symbols: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """返回该发布逐标的索引中缺失的 symbols(升序)。"""
+
+        normalized = tuple(
+            sorted({item.strip().upper() for item in symbols if item.strip()})
+        )
+        if not normalized:
+            return ()
+        rows = (
+            await self._session.execute(
+                select(ResearchDatasetReleaseInstrumentModel.code).where(
+                    ResearchDatasetReleaseInstrumentModel.release_id == release_id,
+                    ResearchDatasetReleaseInstrumentModel.code.in_(normalized),
+                )
+            )
+        ).all()
+        found = {str(row[0]) for row in rows}
+        return tuple(item for item in normalized if item not in found)
+
+    async def strategy_refs_for_releases(
+        self, release_ids: tuple[str, ...], *, limit: int = 20
+    ) -> list[tuple[str, int, str, str]]:
+        """返回 ``validation_plan.dataset_release_ids`` 命中任一发布的策略。
+
+        结果形如 ``(strategy_id, version, name, status)``;策略表很小,
+        逐发布查询即可,避免 JSONB 数组操作符的可移植性问题。
+        """
+
+        if not release_ids:
+            return []
+        results: dict[tuple[str, int], tuple[str, int, str, str]] = {}
+        for release_id in release_ids:
+            stmt = text(
+                """
+                SELECT strategy_id, version, name, status
+                FROM research_strategy_specs
+                WHERE (payload::jsonb) -> 'validation_plan'
+                      -> 'dataset_release_ids'
+                      @> jsonb_build_array(CAST(:release_id AS text))
+                ORDER BY published_at DESC NULLS LAST, version DESC
+                LIMIT :limit
+                """
+            )
+            for row in (
+                await self._session.execute(
+                    stmt,
+                    {"release_id": release_id, "limit": limit},
+                )
+            ).all():
+                key = (str(row[0]), int(row[1]))
+                results.setdefault(key, (str(row[0]), int(row[1]), str(row[2]), str(row[3])))
+        return list(results.values())[:limit]
+
     async def release_ids_covering(
         self,
         symbols: tuple[str, ...],
