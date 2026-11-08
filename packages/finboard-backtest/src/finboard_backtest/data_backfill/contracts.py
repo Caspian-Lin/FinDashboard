@@ -354,13 +354,14 @@ class BackfillPlan(_Frozen):
 
     @property
     def blocked(self) -> bool:
-        """请求级不可执行:有全局 blocker 或全部 item 都带 blocker。"""
+        """请求级不可执行:任一 item 带 blocker 即整体 fail-closed。
 
-        return bool(self.blockers) or (
-            bool(self.items) and not self.executable_items and any(
-                item.blockers for item in self.items
-            )
-        )
+        为什么整体阻塞而不是只跳过受阻 item:补数请求是**用户显式提交的一份
+        计划**,静默少补一个数据集会让「补完了」变成假象。受阻时落 ``blocked``
+        请求(需求登记,不建 job、可审计),按数据集拆请求即可先补可补的部分。
+        """
+
+        return bool(self.blockers)
 
     @property
     def is_empty(self) -> bool:

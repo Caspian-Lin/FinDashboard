@@ -54,6 +54,7 @@ from finboard_backtest.research_run.contracts import ResearchActorType
 from finboard_data.datasets import CatalogDataset
 from finboard_persistence import session_factory
 from finboard_persistence.models import (
+    BackgroundJobModel,
     DataBackfillRequestItemModel,
     DataBackfillRequestModel,
     InstrumentModel,
@@ -582,6 +583,30 @@ class TestQuota:
         assert result.plan.quota.status == "defer"
         assert result.plan.quota.days_needed >= 1
         assert result.request.status == BackfillRequestStatus.QUEUED.value
+
+    async def test_missing_source_registers_blocked_demand_without_job(
+        self, db_session: AsyncSession, calendar: None
+    ) -> None:
+        """缺来源/额度时登记需求(blocked 行),不建 job —— 不静默跳过。"""
+
+        caps = BackfillCapabilities(
+            tushare_token=False,
+            cache_dir_writable=True,
+            release_root_writable=True,
+        )
+        result = await _submit(
+            db_session, _spec(), key="blocked-demand", caps=caps
+        )
+        assert result.plan.blocked is True
+        assert any(
+            blocker.code == "backfill_source_not_configured"
+            for blocker in result.plan.blockers
+        )
+        assert result.request.status == BackfillRequestStatus.BLOCKED.value
+        assert result.request.job_id is None
+        assert result.request.blockers
+        jobs = (await db_session.execute(select(BackgroundJobModel))).scalars().all()
+        assert jobs == []
 
 
 class TestExecutor:
