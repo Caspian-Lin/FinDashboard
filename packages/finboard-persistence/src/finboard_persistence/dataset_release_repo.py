@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from finboard_data.akshare_provider import (
@@ -51,6 +51,7 @@ from finboard_persistence.models import (
     ResearchBalanceSheetModel,
     ResearchCashflowStatementModel,
     ResearchDailyMetricModel,
+    ResearchDatasetReleaseInstrumentModel,
     ResearchDatasetReleaseModel,
     ResearchDividendModel,
     ResearchFinancialIndicatorModel,
@@ -131,7 +132,48 @@ class ResearchDatasetReleaseRepository:
         )
         self._session.add(row)
         await self._session.flush()
+        await self._insert_instruments(release)
         return row
+
+    async def _insert_instruments(self, release: ResearchDatasetRelease) -> None:
+        """把逐标的覆盖写进派生读模型(issue #509,与 release 行同事务)。
+
+        数据来自发布构建时已在内存里的 ``release.instruments``,不重新解析
+        manifest;历史发布由目录查询侧的 ``ensure_instruments`` 服务端 SQL 自愈。
+        """
+
+        if not release.instruments:
+            return
+        await self._session.execute(
+            insert(ResearchDatasetReleaseInstrumentModel),
+            [
+                {
+                    "release_id": release.release_id,
+                    "code": item.code,
+                    "name": item.name,
+                    "market": item.market.value,
+                    "instrument_type": item.instrument_type.value,
+                    "asset_class": item.asset_class.value,
+                    "exchange": item.exchange,
+                    "listing_board": item.listing_board,
+                    "start_date": item.start_date,
+                    "end_date": item.end_date,
+                    "row_count": item.row_count,
+                    "expected_sessions": item.expected_sessions,
+                    "missing_sessions": item.missing_sessions,
+                    "suspended_sessions": item.suspended_sessions,
+                    "anomaly_count": item.anomaly_count,
+                    "duplicate_count": item.duplicate_count,
+                    "coverage_pct": item.coverage_pct,
+                    "ready": item.ready,
+                    "issues": list(item.issues),
+                    "list_date": item.list_date,
+                    "delist_date": item.delist_date,
+                    "status": item.status.value,
+                }
+                for item in release.instruments
+            ],
+        )
 
     async def get(self, release_id: str) -> ResearchDatasetRelease | None:
         stmt = select(ResearchDatasetReleaseModel).where(

@@ -2164,6 +2164,63 @@ class ResearchDatasetReleaseModel(Base, IdMixin):
     )
 
 
+class ResearchDatasetReleaseInstrumentModel(Base, IdMixin):
+    """冻结发布的逐标的覆盖派生索引(issue #509)。
+
+    ``research_dataset_releases.manifest`` 是唯一事实源;本表只是可在
+    发布事务内写入、也可从 manifest 用服务端 SQL 重建的读模型,供目录
+    分页、按标的反查与标的集合包含判断使用。发布行不可变,缓存无需失效。
+    """
+
+    __tablename__ = "research_dataset_release_instruments"
+
+    release_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("research_dataset_releases.release_id", ondelete="CASCADE"),
+        index=True,
+    )
+    code: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(100), default="")
+    market: Mapped[str] = mapped_column(String(32))
+    instrument_type: Mapped[str] = mapped_column(String(32))
+    asset_class: Mapped[str] = mapped_column(String(32))
+    exchange: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    listing_board: Mapped[str] = mapped_column(String(32), default="unknown")
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    row_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    expected_sessions: Mapped[int] = mapped_column(Integer, default=0)
+    missing_sessions: Mapped[int] = mapped_column(Integer, default=0)
+    suspended_sessions: Mapped[int] = mapped_column(Integer, default=0)
+    anomaly_count: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
+    coverage_pct: Mapped[Decimal] = mapped_column(_research_numeric())
+    ready: Mapped[bool] = mapped_column(Boolean, default=True)
+    issues: Mapped[list[str]] = mapped_column(JSON, default=list)
+    list_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    delist_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="unknown")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("release_id", "code", name="uq_release_instrument_code"),
+        Index("ix_release_instrument_code", "code", "release_id"),
+        Index(
+            "ix_release_instrument_type",
+            "release_id",
+            "instrument_type",
+            "ready",
+        ),
+        Index(
+            "ix_release_instrument_missing",
+            "release_id",
+            "missing_sessions",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 因子实验室(issue #78)
 # ---------------------------------------------------------------------------
