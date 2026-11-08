@@ -46,6 +46,12 @@ _EXPECTED_TOOLS = {
     "finboard_data_cache_status",
     "finboard_data_quality_check",
     "finboard_tushare_quota",
+    # #509 全局数据目录工具(5 只读;不触发 sync/publish)
+    "finboard_data_catalog_list",
+    "finboard_data_catalog_get",
+    "finboard_data_coverage_get",
+    "finboard_dataset_release_instruments",
+    "finboard_dataset_release_references",
     # #125 因子实验室工具
     "finboard_factor_catalog",
     "finboard_feature_snapshot_list",

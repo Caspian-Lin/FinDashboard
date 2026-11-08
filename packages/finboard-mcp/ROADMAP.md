@@ -680,3 +680,27 @@ L3 沙箱路线第四环:agent 编写的**策略**代码进入回测。用户决
 新增run_diagnostics/run_compare/decision_projection/research_stress，REST与MCP同源；SQL加载前护栏覆盖单决策detail和导出。正式验证kind=research_spec冻结已发布multi_factor基线，复用候选/排名/组合/风险/撮合/账本与逐操作store；预热不计绩效，覆盖/成交尾段预检，已用最终窗口拒绝，揭盲执行前持久化，子run逐阶段传递worker进度/取消。
 压力plan/get/queue分离，成本/滑点/资金真实子运行；explicit_overrides_v1启用研究费率覆盖优先，保留免税资产和旧manifest回放。registry支持真实覆盖，新自动压力显式stress_schema=executed_v1；UI区分执行/失败/不支持/历史未知。2Bar延迟、订单簿冲击、参数邻域和正式规格非空参数网格仍unsupported，不为兼容放松门。
 操作规程与外置模型fixture评测见docs/research/verification-playbook.md；同规格窗口契约见docs/research/formal-validation-contract.md。#505只产出有限研究证据与负/不足结论，不开启模拟/影子/实盘。
+
+### ✅ #509 全局数据目录
+
+5 个只读工具,把数据目录服务(REST `/api/data/catalog` 同源)暴露给外置
+agent,补上「数据在哪、覆盖如何、谁在引用」的入口:
+
+- `finboard_data_catalog_list` —— 数据集目录列表(可按 dataset/status/q 过滤,
+  `{items, total, limit, offset, generated_at}`;limit 1..500)
+- `finboard_data_catalog_get` —— 单数据集详情(entry + fields/unit_notes/
+  pit_rule/calendar_market/adjustment/publishable + releases/batches/failures)
+- `finboard_data_coverage_get` —— 覆盖报告(denominator/coverage_pct/
+  expected_sessions/missing_sessions/symbols_with_gaps + 有界
+  missing_preview/warnings;limit 1..500)
+- `finboard_dataset_release_instruments` —— 发布逐标的覆盖分页
+  (ready/missing_only/market/instrument_type/q;limit 1..500)
+- `finboard_dataset_release_references` —— 引用该发布的课题/运行/策略反查
+  (`{kind, ref_id, status, created_at, deep_link}`;limit 1..500)
+
+复用 `DataCatalogService` / `CatalogRepository`(目录只做 DB 列投影 + 有界
+缓存扫描,不加载发布 manifest)。**只读**:不触发 dataset_sync、不发布数据集、
+不改任何表;`release_not_found` → `not_found`,其余 `CatalogError` → `conflict`。
+回滚:移除 `register_data_catalog_tools(mcp)` 调用 + `data_catalog.py` 即可。
+
+`_INSTRUCTIONS` / Skill `SKILL.md` + `tools.md` 已同步(工具总数 138 → 143)。
