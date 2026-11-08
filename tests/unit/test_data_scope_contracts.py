@@ -85,6 +85,32 @@ class TestSpecValidation:
                 }
             )
 
+    def test_auto_mode_rejects_locked_ids(self) -> None:
+        # 静默忽略锁定声明比拒绝更危险:调用方以为锁了发布,实际按 auto 选。
+        with pytest.raises(ValidationError, match="auto 模式"):
+            _spec(locked_release_ids=["DR-1"])
+
+    def test_explicit_symbols_normalized(self) -> None:
+        # 归一在 spec 层完成:解析与 checksum 同源,避免大小写/空白造成漂移。
+        spec = _spec(
+            universe={"explicit_symbols": [" 000001.sz ", "000001.SZ", ""]}
+        )
+        assert spec.universe.explicit_symbols == ("000001.SZ",)
+        assert scope_checksum(spec) == scope_checksum(
+            _spec(universe={"explicit_symbols": ["000001.SZ"]})
+        )
+
+    def test_tail_defaults_to_one_session(self) -> None:
+        # multi_period 最后决策日要按下一交易日撮合;默认 0 会在执行期失败。
+        spec = DataScopeSpec.model_validate(
+            {
+                "universe": {},
+                "decision": {"start": "2024-01-02", "end": "2024-01-31"},
+                "datasets": {"required": ["bars"]},
+            }
+        )
+        assert spec.tail_sessions == 1
+
 
 class TestChecksum:
     def test_stable_across_key_order(self) -> None:

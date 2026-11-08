@@ -4,7 +4,8 @@
 把一份 ``DataScopeSpec`` 解析成候选发布 / 交易日窗口 / 单位与复权交集 /
 缺口 / 阻塞 / 候选替代 / 受影响策略。
 
-**只读**:不落库、不触发 ``dataset_sync``、不发布数据集。写侧不新增工具 ——
+**只读**(除 #509 逐标的读模型自愈外):不落库、不触发 ``dataset_sync``、
+不发布数据集。写侧不新增工具 ——
 提交 run 仍走 ``finboard_research_run_queue``(入队 payload 增加
 ``data_scope`` + ``data_scope_resolution_id``,提交期由同一门控函数复验)。
 """

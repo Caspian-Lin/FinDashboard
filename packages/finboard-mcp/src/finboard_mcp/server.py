@@ -224,8 +224,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   阻塞 + 候选替代;返回 resolution_id,提交 run 时连同 data_scope 一起回填
   finboard_research_run_queue,服务端重算比对(数据变了 409 要求重新预览),
   并把 research_window 冻结进 manifest。view=summary 只回计数,detail 才回
-  alternatives / affected_strategies;locked 模式必须恰好一份可发布 bars 主
-  发布且含全部 required 数据集。只读,不落库、不触发同步、不发布。
+  alternatives / affected_strategies;locked 模式必须恰好锁定一份可发布 bars
+  主发布且含全部 required 数据集;空标的池/未映射资产大类直接阻塞。
+  除 #509 逐标的读模型自愈外只读,不落库、不触发同步、不发布。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。

@@ -680,7 +680,8 @@ profiles / suspensions)。REST `/api/data/catalog` 与 MCP
 
 `DataScopeSpec` 是「这次研究用哪些数据」的唯一声明形态(数据集/标的池/
 决策区间/预热与尾部/基准/复权/发布选择模式)。它**不是新的持久化实体**:
-`POST /api/data/scopes/preview` 只读解析,返回 `resolution_id`(内容指纹)
+`POST /api/data/scopes/preview` 只解析不写库(唯一的写是 #509 逐标的读模型
+自愈 `ensure_instruments`,不改发布),返回 `resolution_id`(内容指纹)
 + 候选发布 + 窗口 + 缺口 + 阻塞;真正冻结发生在提交 run 时。
 
 ### 一条完整链路
@@ -719,8 +720,13 @@ MCP 侧只读入口是 `finboard_data_scope_preview`;写侧不新增工具,提�
   阻塞(基准与候选池同源,避免跨发布价格口径漂移)。
 - **研究数据发布只提供因子观测**:研究类发布缺个别标的是 warning +
   `gaps.missing_in_research`,不阻塞;bars 缺标的阻塞。
-- **旧发布只读**:解析只选不改;需要扩范围时走 #511 补数产生**新发布**,
-  不修改既有 release。
+- **旧发布只读**:解析只选不改(逐标的读模型自愈除外);需要扩范围时走 #511
+  补数产生**新发布**,不修改既有 release。
+- **scope.universe 是声明而不是运行池**:运行的真实候选池仍来自冻结策略规格
+  (`spec.universe` + bars 发布 instruments),scope 只声明「本次要检查哪些标的/
+  数据集」;把 scope 收窄不会缩小运行池,也不会替运行池做 bars 缺标的豁免。
+- **空池阻塞**:解析出 0 只标的(`scope_universe_empty`)、资产大类未映射
+  (`scope_asset_class_unmapped`)一律阻塞,不回退成「不过滤全市场」。
 - **漂移 fail-closed**:预览只是快照,提交必须复验;预览之后上线新发布
   (auto 模式会改选)即 409,禁止「旧预览 + 新数据」静默执行。
 - **历史运行不受影响**:旧 manifest 没有 `data_scope` 键,读取/重放不重算
