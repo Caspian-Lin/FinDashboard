@@ -236,7 +236,9 @@ FinBoard 研究 MCP —— 量化研究工具集
   (显式提交,幂等;expected_plan_checksum 不一致即 conflict
   backfill_plan_drift,必须重新预览)、finboard_data_backfill_list(列表/详情)、
   finboard_data_backfill_cancel(协作式取消,已发布不回滚)。补数只产生新发布,
-  异源/不同复权不混接;POST /api/jobs 与 job_enqueue 不开放 data_backfill kind。
+  只补冻结的缺口区间;异源/不同复权不混接(身份含 adjustment),bars 缓存只
+  支持 qfq;受阻 blocked 请求可 retry;POST /api/jobs 与 job_enqueue 不开放
+  data_backfill kind。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。

@@ -8,8 +8,11 @@ issue #511:课题缺口 → 全局补数请求。
 
 * ``data_backfill_requests`` —— 请求头:冻结的 spec/plan、幂等键、
   fingerprint、状态机、复用与重试血缘、job 与产出发布;
-* ``data_backfill_request_items`` —— 逐数据集明细:动作/窗口/冻结标的/
-  缺口估算/批次与发布产物/逐项错误。
+* ``data_backfill_request_items`` —— 逐数据集明细:动作/窗口/冻结标的
+  (或过滤器)/冻结的缺口区间/估算/批次与发布产物/逐项错误。
+
+item 唯一身份含 ``adjustment``:同一数据集可同时补 qfq 与 hqfq(或不同
+source),二者是不同的补数项,不能撞同一唯一键。
 
 幂等键唯一性用**部分唯一索引**只约束活跃行(与 ``background_jobs`` #371
 同语义):``failed`` / ``cancelled`` 是状态机永不回访的终态,放行同键重建,
@@ -118,6 +121,9 @@ def upgrade() -> None:
         sa.Column("start_date", sa.Date(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
         sa.Column("symbols", sa.JSON(), nullable=False),
+        sa.Column("universe_filters", sa.JSON(), nullable=False),
+        sa.Column("missing_ranges", sa.JSON(), nullable=False),
+        sa.Column("repair_symbols", sa.JSON(), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("estimated_requests", sa.Integer(), nullable=False),
         sa.Column("batch_ids", sa.JSON(), nullable=False),
@@ -148,6 +154,7 @@ def upgrade() -> None:
             "request_id",
             "dataset",
             "source",
+            "adjustment",
             "start_date",
             "end_date",
             name="uq_backfill_item_identity",

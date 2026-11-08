@@ -37,6 +37,9 @@ _REQUEST_RECREATABLE_STATUSES = frozenset({"failed", "cancelled"})
 #: 明细可被原子重领的状态(失败项允许在同一请求内重建)。
 _ITEM_CLAIMABLE_STATUSES = ("pending", "failed")
 
+#: 在途覆盖只认「还没落定」的明细(与请求状态 queued|running 取交集)。
+_INFLIGHT_ITEM_STATUSES = ("pending", "running")
+
 
 class DataBackfillRepository:
     """补数请求读写入口;``__init__`` 只持有 session,不自己 commit。"""
@@ -103,6 +106,9 @@ class DataBackfillRepository:
                 start_date=item["start_date"],
                 end_date=item["end_date"],
                 symbols=list(item.get("symbols") or ()),
+                universe_filters=dict(item.get("universe_filters") or {}),
+                missing_ranges=list(item.get("missing_ranges") or ()),
+                repair_symbols=list(item.get("repair_symbols") or ()),
                 status=str(item.get("status") or "pending"),
                 estimated_requests=int(item.get("estimated_requests") or 0),
                 batch_ids=list(item.get("batch_ids") or ()),
@@ -272,6 +278,9 @@ class DataBackfillRepository:
             .where(
                 DataBackfillRequestModel.status.in_(tuple(statuses)),
                 DataBackfillRequestItemModel.dataset.in_(tuple(datasets)),
+                # 已 succeeded/failed/cancelled/reused 的明细不再构成在途覆盖:
+                # 否则预检会把「已落定但请求未收口」的项当成仍在执行。
+                DataBackfillRequestItemModel.status.in_(_INFLIGHT_ITEM_STATUSES),
             )
         )
         if window_end is not None:
@@ -297,18 +306,27 @@ class DataBackfillRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def update_item(
-        self, item_id: int, *, status: str | None = None, **values: Any
+        self,
+        item_id: int,
+        *,
+        status: str | None = None,
+        expected_statuses: Sequence[str] | None = None,
+        **values: Any,
     ) -> DataBackfillRequestItemModel | None:
+        """更新明细;``expected_statuses`` 为状态机守卫(不满足则返回 None)."""
+
         payload: dict[str, Any] = dict(values)
         if status is not None:
             payload["status"] = status
         payload["updated_at"] = datetime.now(UTC)
-        stmt = (
-            update(DataBackfillRequestItemModel)
-            .where(DataBackfillRequestItemModel.id == item_id)
-            .values(**payload)
-            .returning(DataBackfillRequestItemModel)
+        stmt = update(DataBackfillRequestItemModel).where(
+            DataBackfillRequestItemModel.id == item_id
         )
+        if expected_statuses is not None:
+            stmt = stmt.where(
+                DataBackfillRequestItemModel.status.in_(tuple(expected_statuses))
+            )
+        stmt = stmt.values(**payload).returning(DataBackfillRequestItemModel)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def set_request_status(
@@ -321,9 +339,12 @@ class DataBackfillRepository:
         job_id: str | None = None,
         started: bool = False,
         finished: bool = False,
+        expected: Sequence[str] | None = None,
     ) -> DataBackfillRequestModel | None:
         row = await self.get(request_id, for_update=True)
         if row is None:
+            return None
+        if expected is not None and row.status not in expected:
             return None
         now = datetime.now(UTC)
         row.status = status
@@ -356,13 +377,17 @@ class DataBackfillRepository:
         return row
 
     async def mark_cancelled_items(self, request_id: str) -> int:
-        """把仍未完成的明细标 ``cancelled``(已成功的保留其发布)。"""
+        """把**尚未被领取**的明细标 ``cancelled``(已成功/运行中的不在此列)。
+
+        运行中的 item 由执行器在下一个检查点感知取消后自行收敛为 cancelled
+        —— 直接从 DB 改成 cancelled 会让执行器的失败/成功回写与取消语义打架。
+        """
 
         stmt = (
             update(DataBackfillRequestItemModel)
             .where(
                 DataBackfillRequestItemModel.request_id == request_id,
-                DataBackfillRequestItemModel.status.in_(("pending", "running")),
+                DataBackfillRequestItemModel.status == "pending",
             )
             .values(status="cancelled", updated_at=datetime.now(UTC))
         )

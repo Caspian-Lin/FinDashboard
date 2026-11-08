@@ -379,7 +379,7 @@ def register(mcp: MCPServer) -> None:
             "estimated_requests, publish_preview, blockers}] + quota + "
             "overlaps + publish_impact + blockers。纯读:不建请求、不触发同步"
             "或发布;显式 start/end 必须落在 scope 窗口内(否则 422 语义的 "
-            "invalid_argument)。"
+            "invalid_argument);bars 缓存只支持 adjustment=qfq,非 qfq 预检即 blocker。"
         ),
     )
     async def _preview(

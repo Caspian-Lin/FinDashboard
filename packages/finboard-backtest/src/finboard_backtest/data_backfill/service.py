@@ -61,12 +61,14 @@ from finboard_shared.background_jobs import (
     generate_background_job_id,
 )
 
-#: 请求终态里可重试的集合(失败/取消/部分成功)。
+#: 可重试的请求状态:失败/取消/部分成功 + **blocked**(来源/额度/数据集开通后
+#: 重试同一冻结 spec;blocked 行本身就是「需求登记」,不重试就只能重提)。
 _RETRYABLE_REQUEST_STATUSES: frozenset[str] = frozenset(
     {
         BackfillRequestStatus.FAILED.value,
         BackfillRequestStatus.CANCELLED.value,
         BackfillRequestStatus.PARTIAL.value,
+        BackfillRequestStatus.BLOCKED.value,
     }
 )
 
@@ -126,6 +128,7 @@ async def submit_backfill(
         )
     repo = DataBackfillRepository(session)
     fingerprint = request_fingerprint(spec)
+    await _serialize_submit(session, fingerprint, idempotency_key)
 
     existing = await repo.get_by_idempotency_key(idempotency_key)
     if existing is not None and existing.status not in (
@@ -328,28 +331,36 @@ async def cancel_backfill(
             "backfill_not_cancellable",
             f"补数请求 {request_id} 状态 {row.status} 已终态,不支持取消",
         )
-    job_cancelled = False
+    job_state = "missing"
     if row.job_id:
         job_repo = BackgroundJobRepository(session)
         job = await job_repo.get(row.job_id)
-        if job is not None and job.status in (
-            BackgroundJobStatus.QUEUED.value,
-            BackgroundJobStatus.RETRY_WAITING.value,
-        ):
-            await job_repo.request_cancel(job.job_id)
-            job_cancelled = True
-        elif job is not None and job.status == BackgroundJobStatus.RUNNING.value:
-            # 协作式取消:执行器在下一次 progress 检查点中止。
-            await job_repo.request_cancel(job.job_id)
+        if job is not None:
+            job_state = job.status
+            if job.status in (
+                BackgroundJobStatus.QUEUED.value,
+                BackgroundJobStatus.RETRY_WAITING.value,
+            ):
+                # 还没被领取:直接取消 job,请求同步收敛为 cancelled。
+                await job_repo.request_cancel(job.job_id)
+                job_state = BackgroundJobStatus.CANCELLED.value
+            elif job.status == BackgroundJobStatus.RUNNING.value:
+                # 协作式取消:执行器在下一次 progress 检查点感知并自行收敛
+                # (请求/明细由执行器标 cancelled),这里不抢跑状态机。
+                await job_repo.request_cancel(job.job_id)
     await repo.mark_cancelled_items(request_id)
-    if job_cancelled or row.job_id is None:
+    if job_state not in (BackgroundJobStatus.RUNNING.value, "running"):
         row = await repo.set_request_status(
             request_id,
             status=BackfillRequestStatus.CANCELLED.value,
             error_code="backfill_cancelled",
             error_summary=f"由 {requested_by} 取消",
             finished=True,
-        )
+            expected=(
+                BackfillRequestStatus.QUEUED.value,
+                BackfillRequestStatus.RUNNING.value,
+            ),
+        ) or row
     assert row is not None  # set_request_status 只在并发删除时返回 None
     return row
 
@@ -357,6 +368,27 @@ async def cancel_backfill(
 # ---------------------------------------------------------------------------
 # 内部实现
 # ---------------------------------------------------------------------------
+
+
+async def _serialize_submit(
+    session: AsyncSession, fingerprint: str, idempotency_key: str
+) -> None:
+    """把「查重 + 建请求」串行化(issue #511 审核 B8:并发提交)。
+
+    两个并发提交可能在同一事务快照里都看不到对方,各自通过「无幂等键命中 /
+    无在途 fingerprint」检查后双建请求。这里按 fingerprint 与幂等键取事务级
+    advisory lock(固定顺序防死锁),第二个提交等锁后重新查重即命中复用。
+    非 PostgreSQL 方言(测试 sqlite)跳过。
+    """
+
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    for key in (f"backfill:{fingerprint}", f"backfill-idem:{idempotency_key}"):
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key), 0)"), {"key": key}
+        )
 
 
 async def _create_request(
@@ -425,12 +457,28 @@ async def _add_plan_items(
                 "start_date": item.start,
                 "end_date": item.end,
                 "symbols": list(item.symbols),
+                "universe_filters": dict(item.universe_filters),
+                "missing_ranges": [
+                    [start.isoformat(), end.isoformat()]
+                    for start, end in item.missing_ranges
+                ],
+                "repair_symbols": list(item.repair_symbols),
                 "status": status,
                 "estimated_requests": item.estimated_requests,
                 "release_id": None,
             }
         )
-    await repo.add_items(request_id, items)
+    try:
+        await repo.add_items(request_id, items)
+    except IntegrityError as exc:
+        # item 唯一身份(request_id, dataset, source, adjustment, 窗口)冲突:
+        # 规范化后本不应发生(预检已按身份 diff),出现即并发/契约异常,
+        # 映射为 409 而不是裸 500。
+        raise BackfillRequestError(
+            "backfill_item_conflict",
+            "补数明细身份冲突(同一 dataset/source/adjustment/窗口重复),"
+            "请重新预览后再提交",
+        ) from exc
 
 
 async def _remaining_spec(
@@ -440,10 +488,27 @@ async def _remaining_spec(
 ) -> BackfillRequestSpec | None:
     """把原请求收窄成「失败/取消项」的 spec(重试用)。"""
 
-    rows = {row.dataset: row for row in await repo.list_items(source.request_id)}
+    # 同一 dataset 可有多项(不同 source / adjustment),必须按完整身份取行,
+    # 否则后一项会覆盖前一项,重试丢项或重跑已成功项。
+    rows = {
+        (row.dataset, row.source, row.adjustment): row
+        for row in await repo.list_items(source.request_id)
+    }
     kept: list[BackfillDatasetSpec] = []
     for item in frozen.ordered_datasets():
-        row = rows.get(item.dataset.value)
+        key = (item.dataset.value, item.source or "", item.adjustment)
+        row = rows.get(key)
+        if row is None:
+            # 冻结 spec 未显式声明 source 时按预检解析值兜底匹配。
+            row = next(
+                (
+                    candidate
+                    for (dataset, _source, _adjustment), candidate in rows.items()
+                    if dataset == item.dataset.value
+                    and _adjustment == item.adjustment
+                ),
+                None,
+            )
         if row is None:
             kept.append(item)
             continue

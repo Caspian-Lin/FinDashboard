@@ -2787,6 +2787,13 @@ class DataBackfillRequestItemModel(Base, IdMixin):
     end_date: Mapped[date] = mapped_column(Date)
     # 冻结的标的子集;空 = 全市场(按 scope 解析出的标的域整体补齐)。
     symbols: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 标的域超过冻结上限时的过滤器(market / instrument_type / selection_limit):
+    # 子执行器按同一过滤器解析,发布面与请求面一致。
+    universe_filters: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    # 冻结的缺口区间(执行器只补这些区间,不重跑整窗)。
+    missing_ranges: Mapped[list[list[str]]] = mapped_column(JSON, default=list)
+    # 缓存质量修复的标的子集(bars;来自既有发布的异常/重复计数)。
+    repair_symbols: Mapped[list[str]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(16), index=True)
     estimated_requests: Mapped[int] = mapped_column(Integer, default=0)
     batch_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
@@ -2807,6 +2814,7 @@ class DataBackfillRequestItemModel(Base, IdMixin):
             "request_id",
             "dataset",
             "source",
+            "adjustment",
             "start_date",
             "end_date",
             name="uq_backfill_item_identity",

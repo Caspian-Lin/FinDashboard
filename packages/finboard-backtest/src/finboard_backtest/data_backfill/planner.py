@@ -8,23 +8,32 @@
    * 可发布数据集以 ``research_dataset_releases`` 的**可用发布**为准(逐标的
      派生索引 + 区间,与 #509 目录同一读模型);
    * 不可发布数据集以 ``research_sync_batches`` 的已发布批次为准;
-3. **在途覆盖**:``data_backfill_requests`` 中 ``queued|running`` 且
-   dataset / source / adjustment 一致、区间重叠且标的是请求标的超集的 item;
-4. ``missing_ranges = 请求区间 - (已完成 并集 在途)``,
-   ``missing_symbols = 请求符号 - 已完成``;
-5. ``action`` 判定 / ``estimated_requests`` / 配额 / 发布影响 / blockers。
+3. **在途覆盖**:``data_backfill_requests`` 中 ``queued|running`` 且 item 仍
+   ``pending|running``、dataset / source / adjustment 一致、区间重叠且标的是
+   请求标的超集的项;
+4. 缺口按**同步单元**切(逐标的 / 窗口级,见下),``missing_ranges`` 冻结进
+   item,执行器**只补缺口区间**,不重跑整窗;
+5. ``action`` 判定(含 ``missing_symbols`` 触发的补数)/ ``estimated_requests``
+   / 配额 / 发布影响 / blockers。
+
+**缺口口径**:
+
+* ``PER_SYMBOL_RANGE``(研究表 / 主数据 / 事件)与 bars(``bulk_download``)的
+  同步单元是「标的 x 区间」:缺口 = 请求标的的逐标区间并集,某标的整段缺失
+  不会被别的标的覆盖掩盖;
+* ``DAILY_MARKET`` / ``FULL_PAGED`` 的同步单元是「交易日 / 整市场」:区间缺口
+  按窗口级发布覆盖算;但请求标的里有未覆盖标的时仍必须补(否则发布面缺标的),
+  故 ``missing_symbols`` 同样触发补数。
+
+**标的冻结**(#511 审核 B2):逐标的 / bars item 把解析后的标的域冻结进
+``symbols``(<= :data:`_MAX_SYMBOL_FILTER`)或降级为大宇宙过滤器
+``universe_filters``;执行器按冻结值下传与发布,**发布面不得宽于请求面**。
+超过上限且过滤器无法表达(多市场 / 多类型)时具名 blocker,不静默放宽。
 
 **异源与不同复权不混接**:``source`` 与 ``adjustment`` 是覆盖匹配的必要条件;
-不匹配的既有覆盖不参与复用,item 带独立 warning 单独成项。
-
-**缺口口径按同步单元切**:
-
-* 按日全市场(``DAILY_MARKET``)与全量分页(``FULL_PAGED``)的同步单元是
-  「交易日 / 整市场」,缺口按窗口级发布覆盖算;标的级缺失只在
-  ``missing_symbols`` 里具名(发布时按请求标的冻结);
-* 逐标的(``PER_SYMBOL_RANGE``)与 bars(``bulk_download``)的同步单元是
-  「标的 x 区间」,缺口按**逐标的区间并集**算 —— 某标的缺的区间不会被别的
-  标的的覆盖掩盖。
+不匹配的既有覆盖不参与复用,item 带 ``source_conflict`` 类 warning 单独成项。
+bars 缓存只写 ``qfq``(``bulk_download`` 契约无 adjust 维度),非 qfq 请求在
+预检即 fail-closed。
 
 纯读边界:本模块不改任何表(不写发布、不建批次、不登记请求);发布是提交后
 执行器的事。质量异常的判定依据是**已发布读模型里逐标的质量计数**,不重新
@@ -101,16 +110,21 @@ _USABLE_RELEASE_STATUSES = ("passed", "warnings")
 #: 已发布批次状态(``dataset_sync`` 质量门通过后置 ``published``)。
 _PUBLISHED_BATCH_STATUS = "published"
 
-#: 单符号下推上限:全市场请求(几千标的)不做 ``IN`` 下推,退回发布级区间覆盖
-#: —— 避免超长参数列表,也避免逐标的循环把预检拖成分钟级。
+#: 单符号下推上限:超过它不把符号列表塞进 SQL ``IN`` / 执行器 payload,改用
+#: 冻结的 ``universe_filters`` 让子执行器从 ``instruments`` 解析同一标的域。
+#: 注意:缺口 diff 本身**不做**规模降级(逐标的缺口始终逐标的算)。
 _MAX_SYMBOL_FILTER = 2000
 
 #: bars 单次上游请求的窗口上限(天)。与 ``TushareBarProvider._MAX_CHUNK_DAYS``
 #: (15 x 366)同量级:provider 内部按此分页,预检按同一口径估请求数。
 _BARS_CHUNK_DAYS = 15 * 366
 
+#: bars 缓存只支持前复权(``bulk_download`` 的 ``update_cache_batch`` 无 adjust
+#: 维度);其它复权口径在预检即阻塞,不在执行期静默按 qfq 下载。
+_SUPPORTED_BARS_ADJUSTMENT = "qfq"
+
 #: 发布身份模板里的占位:预检时请求 ID 尚未生成,真正的 release_id 在执行器
-#: 用 ``request_id`` 拼出(``DR-<dataset>-<BF-...>``)。
+#: 用 ``request_id`` 拼出(``DR-<dataset>[-<adjustment>]-<BF-...>``)。
 _REQUEST_ID_PLACEHOLDER = "<request_id>"
 
 #: FULL_PAGED 数据集的请求数上界(全量分页通常 1-3 次)。
@@ -211,6 +225,8 @@ class _ReleaseAggregate:
     by_symbol: dict[str, list[DateRange]] = field(default_factory=dict)
     anomalies: int = 0
     duplicates: int = 0
+    #: 有质量异常/重复的标的(缓存修复的最小必要集合)。
+    anomaly_symbols: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -223,6 +239,7 @@ class _DatasetCoverage:
     release_ids: list[str] = field(default_factory=list)
     anomalies: int = 0
     duplicates: int = 0
+    anomaly_symbols: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,7 +283,8 @@ async def plan_backfill(
 
     resolved_at = as_of or utcnow()
     window = await _resolve_window(session, spec.scope)
-    symbols = await _resolve_symbols(session, spec.scope)
+    scope_symbols = await _resolve_symbols(session, spec.scope)
+    universe_filters = _universe_filters(spec.scope)
 
     caps = capabilities
     if caps is None:
@@ -297,13 +315,16 @@ async def plan_backfill(
 
     for dataset_spec in spec.ordered_datasets():
         support = support_for(dataset_spec.dataset)
+        shape = _sync_shape(support)
         start, end = _item_window(dataset_spec, window)
         item_blockers: list[BackfillBlocker] = []
-        item_symbols = tuple(sorted(dataset_spec.symbols)) or symbols.symbols
-        item_types = await _resolve_item_types(session, item_symbols, symbols)
+        item_symbols = tuple(sorted(dataset_spec.symbols)) or scope_symbols.symbols
+        item_types = await _resolve_item_types(session, item_symbols, scope_symbols)
         source = dataset_spec.source or support.source
         adjustment = _resolve_adjustment(support, dataset_spec.adjustment)
-        shape = _sync_shape(support)
+        symbol_unit = shape is EnumShape.PER_SYMBOL_RANGE or support.sync_mode == "bulk_download"
+        frozen_symbols = _freeze_symbols(item_symbols, symbol_unit=symbol_unit)
+        item_filters = dict(universe_filters)
 
         completed = await _completed_coverage(
             session,
@@ -321,7 +342,7 @@ async def plan_backfill(
             adjustment=adjustment,
             start=start,
             end=end,
-            symbols=item_symbols,
+            symbols=_inflight_symbols(item_symbols, frozen_symbols, item_filters),
         )
         for request_id in inflight_ids:
             request_row = inflight_requests.get(request_id)
@@ -346,19 +367,21 @@ async def plan_backfill(
         missing_symbols = _missing_symbols(item_symbols, completed, start, end)
         missing_ranges = subtract_ranges(missing_after_completed, inflight_ranges)
         reuse_only = bool(missing_after_completed) and not missing_ranges
+        # 标的级缺口同样必须补:发布面 = 请求标的,缺一个就冻结不出完整发布。
+        symbol_gap = bool(missing_symbols) and (
+            support.publishable or symbol_unit
+        )
 
-        repair = (
-            support.sync_mode == "bulk_download"
-            and bool(completed.release_ids)
-            and (
-                completed.anomalies > 0
-                or completed.duplicates > 0
-                or spec.quality_profile == "strict"
-            )
+        repair, repair_symbols = _repair_plan(
+            support=support,
+            completed=completed,
+            symbols=item_symbols,
+            quality_profile=spec.quality_profile,
         )
         action = _decide_action(
             support=support,
             missing_ranges=missing_ranges,
+            missing_symbols=missing_symbols if symbol_gap else (),
             has_completed_gap=bool(missing_after_completed),
             reuse_only=reuse_only,
             repair=repair,
@@ -374,8 +397,11 @@ async def plan_backfill(
                 shape=shape,
                 missing_ranges=missing_ranges,
                 missing_symbols=len(missing_symbols),
-                symbol_count=len(item_symbols),
+                symbol_count=len(frozen_symbols) or _filter_symbol_count(item_filters),
             )
+            if action is BackfillAction.REPAIR and estimated == 0:
+                # 纯质量修复:按修复标的数计请求(每个标的至少一次回源)。
+                estimated = max(1, len(repair_symbols))
         total_estimated += estimated
 
         item_blockers.extend(
@@ -384,7 +410,11 @@ async def plan_backfill(
                 capabilities=caps,
                 dataset=dataset_spec.dataset,
                 publish=dataset_spec.publish,
-                has_gap=bool(missing_ranges) or repair,
+                has_gap=bool(missing_ranges) or symbol_gap or repair,
+                adjustment=adjustment,
+                frozen_symbols=frozen_symbols,
+                universe_filters=item_filters,
+                symbol_unit=symbol_unit,
             )
         )
         if support.requires_a_share_stock and item_types:
@@ -425,8 +455,10 @@ async def plan_backfill(
         publish_preview = None
         if dataset_spec.publish and support.publishable and support.release_kind:
             publish_preview = BackfillPublishPreview(
-                release_id=f"DR-{dataset_spec.dataset.value}-{_REQUEST_ID_PLACEHOLDER}",
-                version=f"v-{_REQUEST_ID_PLACEHOLDER}",
+                release_id=_preview_release_id(
+                    dataset_spec.dataset.value, adjustment
+                ),
+                version=_preview_version(adjustment),
                 release_kind=support.release_kind,
                 dataset_name=dataset_spec.dataset.value,
             )
@@ -450,6 +482,15 @@ async def plan_backfill(
                 else []
             )
         ]
+        if frozen_symbols and len(item_symbols) > _MAX_SYMBOL_FILTER:
+            item_warnings.append(
+                f"标的 {len(item_symbols)} 只,已冻结为 universe_filters"
+                "(执行器按同一标的域解析,不逐只序列化)"
+            )
+        if repair_symbols and set(repair_symbols) != set(frozen_symbols):
+            item_warnings.append(
+                f"缓存质量修复仅针对 {len(repair_symbols)} 个异常标的"
+            )
 
         items.append(
             BackfillItem(
@@ -460,8 +501,10 @@ async def plan_backfill(
                 start=start,
                 end=end,
                 publish=dataset_spec.publish and support.publishable,
-                symbols=item_symbols if dataset_spec.symbols else (),
+                symbols=frozen_symbols,
+                universe_filters=item_filters,
                 missing_ranges=missing_ranges,
+                repair_symbols=repair_symbols,
                 missing_symbols=BackfillGapSymbols(
                     count=len(missing_symbols),
                     preview=tuple(missing_symbols[:SYMBOL_PREVIEW_LIMIT]),
@@ -585,17 +628,54 @@ def _sync_shape(support: BackfillSupport) -> EnumShape | None:
     return SYNC_SPECS.get(support.sync_dataset).shape
 
 
+def _universe_filters(scope: DataScopeSpec) -> dict[str, object]:
+    """把 scope 标的域冻结为可下传给子执行器的过滤器(唯一值才下推)."""
+
+    universe = scope.universe
+    markets = [item.value for item in universe.markets]
+    types = [item.value for item in universe.instrument_types]
+    filters: dict[str, object] = {}
+    if len(markets) == 1:
+        filters["market"] = markets[0]
+    if len(types) == 1:
+        filters["instrument_type"] = types[0]
+    if universe.selection_limit:
+        filters["selection_limit"] = universe.selection_limit
+    return filters
+
+
+def _freeze_symbols(symbols: Sequence[str], *, symbol_unit: bool) -> tuple[str, ...]:
+    """逐标的单元且规模可控时冻结完整标的列表(执行器/发布按此下传).
+
+    超过 :data:`_MAX_SYMBOL_FILTER` 时不冻结(交给 ``universe_filters`` 解析),
+    避免把几千个代码写进 payload / plan JSON;缺口 diff 不受此影响。
+    """
+
+    if not symbol_unit or not symbols or len(symbols) > _MAX_SYMBOL_FILTER:
+        return ()
+    return tuple(symbols)
+
+
+def _filter_symbol_count(filters: dict[str, object]) -> int:
+    """过滤器模式的请求数估算上限(未知时按 1,避免 0 乘出零估算)."""
+
+    limit = filters.get("selection_limit")
+    return int(limit) if isinstance(limit, int) and limit > 0 else 1
+
+
 def _decide_action(
     *,
     support: BackfillSupport,
     missing_ranges: Sequence[DateRange],
+    missing_symbols: Sequence[str],
     has_completed_gap: bool,
     reuse_only: bool,
     repair: bool,
 ) -> BackfillAction:
-    """动作判定(无缺口 → noop/reuse;有缺口 → sync / sync_publish / repair)。"""
+    """动作判定(无缺口 → noop/reuse;有缺口/缺标的 → sync / sync_publish / repair)。"""
 
-    if not missing_ranges and not repair:
+    has_gap = bool(missing_ranges) or bool(missing_symbols)
+    if not has_gap and not repair:
         return (
             BackfillAction.REUSE
             if (reuse_only or has_completed_gap)
@@ -615,6 +695,10 @@ def _item_blockers(
     dataset: CatalogDataset,
     publish: bool,
     has_gap: bool,
+    adjustment: str,
+    frozen_symbols: Sequence[str],
+    universe_filters: dict[str, object],
+    symbol_unit: bool,
 ) -> list[BackfillBlocker]:
     """运行时能力与支持清单的阻塞项(缺一项即具名,不静默跳过)。"""
 
@@ -645,6 +729,36 @@ def _item_blockers(
                 dataset=dataset,
             )
         )
+    if (
+        support.sync_mode == "bulk_download"
+        and adjustment != _SUPPORTED_BARS_ADJUSTMENT
+    ):
+        # bulk_download 的缓存写入只有 qfq(契约无 adjust 维度):非 qfq 请求
+        # 必须 fail-closed,不能静默按 qfq 下载出一份口径不符的缓存。
+        outcome.append(
+            BackfillBlocker(
+                code="backfill_adjustment_unsupported",
+                message=(
+                    f"bars 缓存补数只支持 {_SUPPORTED_BARS_ADJUSTMENT},"
+                    f"请求 adjustment={adjustment};请改用 qfq 或换数据源链路"
+                ),
+                dataset=dataset,
+            )
+        )
+    if symbol_unit and not frozen_symbols and not universe_filters:
+        # 多市场/多类型的大宇宙无法用单一过滤器表达 —— 冻结不了就具名阻塞,
+        # 不允许执行器自行放宽到「整市场」。
+        outcome.append(
+            BackfillBlocker(
+                code="backfill_symbol_scope_unresolved",
+                message=(
+                    f"{dataset.value} 是逐标的补数,但标的域超过 "
+                    f"{_MAX_SYMBOL_FILTER} 只且 scope 市场/类型多值,"
+                    "无法冻结成单一过滤器;请显式声明 symbols 或收窄 scope.universe"
+                ),
+                dataset=dataset,
+            )
+        )
     if publish and support.publishable and not capabilities.can_publish:
         outcome.append(
             BackfillBlocker(
@@ -654,6 +768,35 @@ def _item_blockers(
             )
         )
     return outcome
+
+
+def _repair_plan(
+    *,
+    support: BackfillSupport,
+    completed: _DatasetCoverage,
+    symbols: Sequence[str],
+    quality_profile: str,
+) -> tuple[bool, tuple[str, ...]]:
+    """缓存修复计划:是否修、修哪些标的。
+
+    修复对象是**已发布读模型里带异常/重复计数的标的**(不是全市场),因此
+    ``quality_repair`` 的 ``symbols`` 恒非空;``strict`` 档在无异常时对可枚举
+    标的做一次复检(仍受 :data:`_MAX_SYMBOL_FILTER` 约束),超限则跳过修复
+    并留 warning(发布质量门仍然生效)。
+    """
+
+    if support.sync_mode != "bulk_download" or not completed.release_ids:
+        return False, ()
+    anomaly = tuple(
+        code for code in sorted(completed.anomaly_symbols) if code in set(symbols)
+    ) if symbols else tuple(sorted(completed.anomaly_symbols))
+    if completed.anomalies or completed.duplicates:
+        return True, anomaly
+    if quality_profile == "strict":
+        if symbols and len(symbols) <= _MAX_SYMBOL_FILTER:
+            return True, tuple(symbols)
+        return False, ()
+    return False, ()
 
 
 def _quota(capabilities: BackfillCapabilities, estimated_total: int) -> BackfillQuota:
@@ -794,10 +937,14 @@ def _gap_ranges(
     """按同步单元计算缺口区间(逐标的 / 窗口级两种口径)。"""
 
     per_symbol = shape is EnumShape.PER_SYMBOL_RANGE or support.sync_mode == "bulk_download"
-    if per_symbol and symbols and len(symbols) <= _MAX_SYMBOL_FILTER:
+    if per_symbol and symbols:
+        # 逐标的单元:逐只算差值再并集(不做规模降级 —— 降级会让个别标的
+        # 的缺失被其它标的的覆盖掩盖,进而判成 noop)。
         gaps: list[DateRange] = []
         for code in symbols:
-            gaps.extend(subtract_ranges(((start, end),), completed.by_symbol.get(code, [])))
+            gaps.extend(
+                subtract_ranges(((start, end),), completed.by_symbol.get(code, []))
+            )
         return merge_ranges(gaps)
     return subtract_ranges(((start, end),), completed.ranges)
 
@@ -815,6 +962,22 @@ def _completed_warnings(
     if not completed.release_ids and not completed.ranges and symbols:
         outcome.append("窗口内没有既有可用覆盖(将整段补数)")
     return outcome
+
+
+def _inflight_symbols(
+    item_symbols: Sequence[str],
+    frozen_symbols: Sequence[str],
+    filters: dict[str, object],
+) -> tuple[str, ...]:
+    """判在途复用时用「已知标的集合」;过滤器模式没有逐标的列表时给空(按区间)."""
+
+    if frozen_symbols:
+        return tuple(frozen_symbols)
+    if item_symbols and len(item_symbols) <= _MAX_SYMBOL_FILTER:
+        return tuple(item_symbols)
+    # 过滤器模式无法逐只比对:只要在途项也是过滤器模式(空 symbols)就按区间
+    # 复用;在途项是显式标的且与过滤器域不重合的风险由区间 + 数据集维度兜底。
+    return ()
 
 
 def _inflight_coverage(
@@ -942,10 +1105,15 @@ async def _release_coverage(
         if bucket is None:
             bucket = _ReleaseAggregate(release_id=release_id, status=str(row[1]))
             aggregated[release_id] = bucket
+        code = str(row[2])
+        anomalies = int(row[5] or 0)
+        duplicates = int(row[6] or 0)
         bucket.ranges.append((row[3], row[4]))
-        bucket.by_symbol.setdefault(str(row[2]), []).append((row[3], row[4]))
-        bucket.anomalies += int(row[5] or 0)
-        bucket.duplicates += int(row[6] or 0)
+        bucket.by_symbol.setdefault(code, []).append((row[3], row[4]))
+        bucket.anomalies += anomalies
+        bucket.duplicates += duplicates
+        if anomalies or duplicates:
+            bucket.anomaly_symbols.add(code)
 
     for bucket in aggregated.values():
         merged = merge_ranges(bucket.ranges)
@@ -964,6 +1132,7 @@ async def _release_coverage(
         coverage.release_ids.append(bucket.release_id)
         coverage.anomalies += bucket.anomalies
         coverage.duplicates += bucket.duplicates
+        coverage.anomaly_symbols |= bucket.anomaly_symbols
     coverage.ranges = list(merge_ranges(coverage.ranges))
     return coverage
 
@@ -1074,6 +1243,18 @@ def _batch_ranges(
         return intersect_ranges(((start, end),), ((batch_start, batch_end),))
     # 全量分页(如 profiles):一次发布即整市场快照,视为覆盖整个窗口。
     return ((start, end),)
+
+
+def _preview_release_id(dataset: str, adjustment: str) -> str:
+    """发布身份预告(执行器按同一规则生成真实 ID)."""
+
+    suffix = "" if adjustment == "none" else f"-{adjustment}"
+    return f"DR-{dataset}{suffix}-{_REQUEST_ID_PLACEHOLDER}"
+
+
+def _preview_version(adjustment: str) -> str:
+    suffix = "" if adjustment == "none" else f"-{adjustment}"
+    return f"v{suffix}-{_REQUEST_ID_PLACEHOLDER}"
 
 
 __all__ = [

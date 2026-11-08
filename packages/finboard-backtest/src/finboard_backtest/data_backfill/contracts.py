@@ -271,9 +271,16 @@ class BackfillItem(_Frozen):
     start: date
     end: date
     publish: bool
-    #: 空 = 全市场(按 scope 解析出的标的域整体补齐)。
+    #: 空 = 全市场(按 scope 解析出的标的域整体补齐);逐标的单元在规模可控时
+    #: 冻结完整标的列表,执行器与发布**只用冻结值**,不自行放宽。
     symbols: tuple[str, ...] = ()
+    #: 标的域超过冻结上限时的过滤器(market / instrument_type / selection_limit),
+    #: 子执行器按同一过滤器从 ``instruments`` 解析,发布面与请求面一致。
+    universe_filters: dict[str, object] = Field(default_factory=dict)
+    #: 执行器**只补这些区间**(冻结的缺口差集,不重跑整窗)。
     missing_ranges: tuple[DateRange, ...] = ()
+    #: 缓存质量修复的标的子集(bars;来自既有发布的异常/重复计数)。
+    repair_symbols: tuple[str, ...] = ()
     missing_symbols: BackfillGapSymbols = Field(default_factory=BackfillGapSymbols)
     covered_by: tuple[BackfillCoverage, ...] = ()
     estimated_requests: int = 0
@@ -392,6 +399,12 @@ class BackfillPlan(_Frozen):
                         "start": item.start.isoformat(),
                         "end": item.end.isoformat(),
                         "publish": item.publish,
+                        "symbols": sorted(item.symbols),
+                        "universe_filters": {
+                            key: item.universe_filters[key]
+                            for key in sorted(item.universe_filters)
+                        },
+                        "repair_symbols": sorted(item.repair_symbols),
                         "missing_ranges": [
                             [start.isoformat(), end.isoformat()]
                             for start, end in item.missing_ranges

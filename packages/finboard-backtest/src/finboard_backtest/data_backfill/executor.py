@@ -4,22 +4,25 @@
 
 * ``dataset_sync`` —— 研究表 / 主数据 / 事件数据集的摄取(批次记账、行级口径、
   预算共享全部复用 #392 框架);
-* ``bulk_download`` —— bars 缓存同步;``quality_repair`` 仅在预检标了
-  ``quality_repair`` 或 ``action=repair`` 时执行;
+* ``bulk_download`` —— bars 缓存同步(qfq 单一口径,契约无 adjust 维度);
+  ``quality_repair`` 只在预检冻结了异常标的时执行;
 * ``dataset_publish`` —— 冻结新发布(质量门、不可变身份、分段事务全部复用
   #144 执行器)。补数**只产生新发布**,既有发布只读。
 
 执行语义:
 
-* **逐 item 原子领取**:``UPDATE ... WHERE status IN ('pending','failed')
-  RETURNING``;重复执行时已 ``succeeded`` / 被同请求其他执行器领走的 item 跳过;
-* **默认 fail-fast**:第一个 item 失败即停止后续 item(已完成 item 的发布保留,
-  可被其他课题选用);请求 ``failed`` 或 ``partial``(有成功 item 时);
-* **发布幂等**:release_id = ``DR-<dataset>-<request_id>``,version =
-  ``v-<request_id>``;重跑命中同一发布身份时直接复用,不重复冻结;
+* **只补缺口**:按 item 冻结的 ``missing_ranges`` 逐区间调子执行器(不重跑
+  整窗);发布仍冻结请求窗口(既有覆盖已在库/缓存,缺口补齐后整窗可用);
+* **逐 item 原子领取**:``pending|failed -> running``;已 ``succeeded`` 或被他
+  执行器领走的跳过;
+* **默认 fail-fast**:第一个 item 失败即停止后续 item(已完成 item 的发布保留);
+  请求 ``failed`` / ``partial``(有成功项时);
+* **发布幂等**:``DR-<dataset>[-<adjustment>]-<request_id>`` /
+  ``v[-<adjustment>]-<request_id>``;发布前按**计算出的身份**查重(即使上次
+  发布后落库前崩溃,重跑也不会撞身份冲突);
 * **预算耗尽**:底层 ``TushareRequestLimitError`` → ``retry_waiting``
-  (与 ``dataset_sync`` 同语义),请求退回 ``queued``、item 退回 ``pending``,
-  不把请求标死;
+  (与 ``dataset_sync`` 同语义),请求退回 ``queued``、运行中 item 退回
+  ``pending``,不把请求标死;
 * **取消**:worker 的协作式取消经 ``progress`` 回调抛 ``CancelledError``;
   这里先把请求/未完成 item 收敛为 ``cancelled`` 再原样上抛(已发布不回滚)。
 """
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
+from datetime import date
 from typing import Any
 
 import structlog
@@ -86,6 +90,12 @@ _BARS_INSTRUMENT_TYPES: tuple[str, ...] = (
     "futures",
 )
 
+#: 明细可原子重领的源状态(失败项允许在同请求内重建)。
+_CLAIMABLE_ITEM_STATUSES = (
+    BackfillItemStatus.PENDING.value,
+    BackfillItemStatus.FAILED.value,
+)
+
 
 class DataBackfillExecutor:
     """``kind=data_backfill`` 执行器:按冻结的预检快照编排补数。"""
@@ -132,13 +142,12 @@ class DataBackfillExecutor:
                 )
             if request.status in (
                 BackfillRequestStatus.SUCCEEDED.value,
+                BackfillRequestStatus.PARTIAL.value,
                 BackfillRequestStatus.BLOCKED.value,
             ):
                 # 幂等重放:请求已收敛,不重复消耗上游配额。
                 await session.commit()
-                return JobResult(
-                    status="succeeded", result_ref=request.request_id
-                )
+                return JobResult(status="succeeded", result_ref=request.request_id)
             if request.status == BackfillRequestStatus.CANCELLED.value:
                 await session.commit()
                 return JobResult(status="cancelled")
@@ -146,6 +155,10 @@ class DataBackfillExecutor:
                 request_id,
                 status=BackfillRequestStatus.RUNNING.value,
                 started=True,
+                expected=(
+                    BackfillRequestStatus.QUEUED.value,
+                    BackfillRequestStatus.RUNNING.value,
+                ),
             )
             items = await repo.list_items(request_id)
             await session.commit()
@@ -159,11 +172,7 @@ class DataBackfillExecutor:
                 BackfillAction.SYNC_PUBLISH.value,
                 BackfillAction.REPAIR.value,
             )
-            and item.status
-            in (
-                BackfillItemStatus.PENDING.value,
-                BackfillItemStatus.FAILED.value,
-            )
+            and item.status in _CLAIMABLE_ITEM_STATUSES
         ]
         total = len(executable)
         try:
@@ -176,10 +185,15 @@ class DataBackfillExecutor:
                 await self._run_item(
                     claimed, job=job, progress=progress, index=index, total=total
                 )
-            _status, error_code, error_summary = await self._finalize(request_id)
+            status, error_code, error_summary = await self._finalize(request_id)
             await progress(total, total, "data_backfill:done")
+            job_status = "succeeded"
+            if status == BackfillRequestStatus.FAILED.value:
+                job_status = "failed"
+            elif status == BackfillRequestStatus.CANCELLED.value:
+                job_status = "cancelled"
             return JobResult(
-                status="succeeded",
+                status=job_status,
                 result_ref=request_id,
                 error_code=error_code,
                 error_summary=error_summary,
@@ -223,31 +237,43 @@ class DataBackfillExecutor:
         child = _child_progress(progress, item=item, index=index, total=total)
         try:
             batch_ids = await self._sync_phase(item, support, job=job, progress=child)
+            # 先登记批次但保持 running:发布失败时 item 不会被误标 succeeded。
             await self._update_item(
                 item.id,
-                status=BackfillItemStatus.SUCCEEDED.value,
+                status=BackfillItemStatus.RUNNING.value,
                 batch_ids=batch_ids,
+                expected_statuses=(BackfillItemStatus.RUNNING.value,),
             )
+            release_id = None
             if item.action in (
                 BackfillAction.SYNC_PUBLISH.value,
                 BackfillAction.REPAIR.value,
             ):
                 release_id = await self._publish_phase(item, support)
-                await self._update_item(
-                    item.id,
-                    status=BackfillItemStatus.SUCCEEDED.value,
-                    batch_ids=batch_ids,
-                    release_id=release_id,
-                )
+            await self._update_item(
+                item.id,
+                status=BackfillItemStatus.SUCCEEDED.value,
+                batch_ids=batch_ids,
+                release_id=release_id,
+                expected_statuses=(BackfillItemStatus.RUNNING.value,),
+            )
+            if release_id:
                 async with self._session_maker() as session:
                     await DataBackfillRepository(session).add_release_id(
                         item.request_id, release_id
                     )
                     await session.commit()
-        except ExecutorError:
+        except ExecutorError as exc:
+            # 可重试(预算耗尽等)把 item 退回 pending:请求回 queued 后重跑
+            # 会重新领取它,而不是留一条 failed 让「剩余项」语义失真。
             await self._update_item(
                 item.id,
-                status=BackfillItemStatus.FAILED.value,
+                status=(
+                    BackfillItemStatus.PENDING.value
+                    if exc.retryable
+                    else BackfillItemStatus.FAILED.value
+                ),
+                expected_statuses=(BackfillItemStatus.RUNNING.value,),
             )
             raise
 
@@ -264,23 +290,25 @@ class DataBackfillExecutor:
         if not support.syncable:
             # 派生数据集(convertible_metrics)不单独同步,直接进入发布阶段。
             return []
+        gap_ranges = _frozen_ranges(item)
         if support.sync_mode == "bulk_download":
+            await self._run_bars_sync(item, job=job, progress=progress)
+            if item.action == BackfillAction.REPAIR.value:
+                await self._run_repair(item, job=job, progress=progress)
+            return []
+        max_batch_id = await self._max_batch_id(support.sync_dataset)
+        for start, end in gap_ranges:
             await self._run_child(
-                "bulk_download",
+                "dataset_sync",
                 JobRecord(
                     job_id=job.job_id,
-                    kind="bulk_download",
+                    kind="dataset_sync",
                     queue=job.queue,
                     payload={
-                        "market": await self._resolve_market(item),
-                        "source": item.source,
-                        "start": item.start_date.isoformat(),
-                        "adjust": item.adjustment,
-                        **(
-                            {"symbols": list(item.symbols)}
-                            if item.symbols
-                            else {}
-                        ),
+                        "datasets": [support.sync_dataset],
+                        "start_date": start.isoformat(),
+                        "end_date": end.isoformat(),
+                        **_scope_payload(item),
                     },
                     attempt=job.attempt,
                     max_attempts=job.max_attempts,
@@ -288,37 +316,72 @@ class DataBackfillExecutor:
                 ),
                 progress,
             )
-            if item.action == BackfillAction.REPAIR.value:
-                await self._run_child(
-                    "quality_repair",
-                    JobRecord(
-                        job_id=job.job_id,
-                        kind="quality_repair",
-                        queue=job.queue,
-                        payload={
-                            "symbols": list(item.symbols),
-                            "source": item.source,
-                            "adjust": item.adjustment,
-                        },
-                        attempt=job.attempt,
-                        max_attempts=job.max_attempts,
-                        requested_by=job.requested_by,
-                    ),
-                    progress,
-                )
-            return []
-        max_batch_id = await self._max_batch_id(support.sync_dataset)
+        batch_ids = await self._batch_ids_after(
+            support.sync_dataset, after_id=max_batch_id
+        )
+        await self._assert_batch_quality(support.sync_dataset, batch_ids)
+        return batch_ids
+
+    async def _run_bars_sync(
+        self,
+        item: DataBackfillRequestItemModel,
+        *,
+        job: JobRecord,
+        progress: ProgressCallback,
+    ) -> None:
+        """bars 缓存同步(逐缺口区间;``bulk_download`` 契约无 ``adjust`` 键)."""
+
+        # ``bulk_download`` 契约只有 ``start``(结束日由 provider 取 today,并按
+        # 缓存 sidecar 的 covered_ranges 只补未覆盖区间),故区间终点不单独下传。
+        for start, _end in _frozen_ranges(item):
+            await self._run_child(
+                "bulk_download",
+                JobRecord(
+                    job_id=job.job_id,
+                    kind="bulk_download",
+                    queue=job.queue,
+                    payload={
+                        "market": _market_for(item),
+                        "source": item.source,
+                        "start": start.isoformat(),
+                        **_scope_payload(item, include_market=False),
+                    },
+                    attempt=job.attempt,
+                    max_attempts=job.max_attempts,
+                    requested_by=job.requested_by,
+                ),
+                progress,
+            )
+
+    async def _run_repair(
+        self,
+        item: DataBackfillRequestItemModel,
+        *,
+        job: JobRecord,
+        progress: ProgressCallback,
+    ) -> None:
+        """缓存质量修复:标的取自预检冻结的异常标的集合(恒非空)."""
+
+        repair_symbols = [str(code) for code in (item.repair_symbols or ())]
+        if not repair_symbols:
+            raise ExecutorError(
+                code="backfill_invalid_plan",
+                summary=(
+                    f"{item.dataset} 需要缓存质量修复,但预检没有冻结修复标的"
+                    "(plan 版本过旧);请重新预览并提交新请求"
+                ),
+                retryable=False,
+            )
         await self._run_child(
-            "dataset_sync",
+            "quality_repair",
             JobRecord(
                 job_id=job.job_id,
-                kind="dataset_sync",
+                kind="quality_repair",
                 queue=job.queue,
                 payload={
-                    "datasets": [support.sync_dataset],
-                    "start_date": item.start_date.isoformat(),
-                    "end_date": item.end_date.isoformat(),
-                    **({"symbols": list(item.symbols)} if item.symbols else {}),
+                    "symbols": repair_symbols,
+                    "source": item.source,
+                    "adjust": "qfq",
                 },
                 attempt=job.attempt,
                 max_attempts=job.max_attempts,
@@ -326,16 +389,11 @@ class DataBackfillExecutor:
             ),
             progress,
         )
-        batch_ids = await self._batch_ids_after(
-            support.sync_dataset, after_id=max_batch_id
-        )
-        await self._assert_batch_quality(support.sync_dataset, batch_ids)
-        return batch_ids
 
     async def _publish_phase(
         self, item: DataBackfillRequestItemModel, support: BackfillSupport
     ) -> str:
-        """冻结新发布(身份由 request_id 确定性决定,重跑幂等)."""
+        """冻结新发布(身份由 request_id + adjustment 确定性决定,重跑幂等)."""
 
         if not support.publishable or support.release_kind is None:
             raise ExecutorError(
@@ -343,13 +401,12 @@ class DataBackfillExecutor:
                 summary=f"{item.dataset} 不支持发布",
                 retryable=False,
             )
-        release_id = release_id_for(item.dataset, item.request_id)
-        version = version_for(item.request_id)
-        if item.release_id:
-            existing = await self._release_exists(item.release_id)
-            if existing:
-                return item.release_id
-        symbols = list(item.symbols) or await self._publish_symbols(item.dataset)
+        release_id = release_id_for(item.dataset, item.request_id, item.adjustment)
+        version = version_for(item.request_id, item.adjustment)
+        # 按**计算出的身份**查重:发布成功但落库前崩溃时,重跑直接复用。
+        if await self._release_exists(release_id):
+            return release_id
+        symbols = list(item.symbols or ()) or await self._publish_symbols(item)
         if not symbols:
             raise ExecutorError(
                 code="backfill_empty_symbol_pool",
@@ -446,30 +503,75 @@ class DataBackfillExecutor:
             return claimed
 
     async def _update_item(
-        self, item_id: int, *, status: str, **values: Any
+        self,
+        item_id: int,
+        *,
+        status: str,
+        expected_statuses: Sequence[str] | None = None,
+        **values: Any,
     ) -> None:
         async with self._session_maker() as session:
             repo = DataBackfillRepository(session)
-            await repo.update_item(item_id, status=status, **values)
+            await repo.update_item(
+                item_id,
+                status=status,
+                expected_statuses=expected_statuses,
+                **values,
+            )
             await session.commit()
 
     async def _finalize(self, request_id: str) -> tuple[str, str | None, str | None]:
+        """按明细汇总请求状态(不看单一 item,也不忽略 pending/cancelled)."""
+
         async with self._session_maker() as session:
             repo = DataBackfillRepository(session)
             request = await repo.get(request_id)
             if request is None:
-                return ("failed", "backfill_request_not_found", "请求行已消失")
+                return (BackfillRequestStatus.FAILED.value, "backfill_request_not_found", "请求行已消失")
             items = await repo.list_items(request_id)
             failed = [
+                item for item in items if item.status == BackfillItemStatus.FAILED.value
+            ]
+            unfinished = [
                 item
                 for item in items
-                if item.status == BackfillItemStatus.FAILED.value
+                if item.status
+                in (
+                    BackfillItemStatus.PENDING.value,
+                    BackfillItemStatus.RUNNING.value,
+                )
+            ]
+            cancelled = [
+                item
+                for item in items
+                if item.status == BackfillItemStatus.CANCELLED.value
             ]
             succeeded = [
                 item
                 for item in items
-                if item.status == BackfillItemStatus.SUCCEEDED.value
+                if item.status
+                in (
+                    BackfillItemStatus.SUCCEEDED.value,
+                    BackfillItemStatus.REUSED.value,
+                )
             ]
+            if unfinished:
+                summary = "尚有未完成明细: " + ", ".join(
+                    f"{item.dataset}={item.status}" for item in unfinished
+                )
+                await repo.set_request_status(
+                    request_id,
+                    status=BackfillRequestStatus.FAILED.value,
+                    error_code="backfill_incomplete",
+                    error_summary=truncate_summary(summary),
+                    finished=True,
+                )
+                await session.commit()
+                return (
+                    BackfillRequestStatus.FAILED.value,
+                    "backfill_incomplete",
+                    summary,
+                )
             if failed:
                 status = (
                     BackfillRequestStatus.PARTIAL.value
@@ -488,16 +590,48 @@ class DataBackfillExecutor:
                 )
                 await session.commit()
                 return (status, "backfill_item_failed", summary)
+            if cancelled and not succeeded:
+                await repo.set_request_status(
+                    request_id,
+                    status=BackfillRequestStatus.CANCELLED.value,
+                    error_code="backfill_cancelled",
+                    error_summary="未完成明细已取消",
+                    finished=True,
+                )
+                await session.commit()
+                return (BackfillRequestStatus.CANCELLED.value, "backfill_cancelled", None)
+            if cancelled:
+                summary = "部分明细已取消,已完成项保留: " + ", ".join(
+                    item.dataset for item in cancelled
+                )
+                await repo.set_request_status(
+                    request_id,
+                    status=BackfillRequestStatus.PARTIAL.value,
+                    error_code="backfill_item_cancelled",
+                    error_summary=truncate_summary(summary),
+                    finished=True,
+                )
+                await session.commit()
+                return (
+                    BackfillRequestStatus.PARTIAL.value,
+                    "backfill_item_cancelled",
+                    summary,
+                )
             await repo.set_request_status(
                 request_id,
                 status=BackfillRequestStatus.SUCCEEDED.value,
                 finished=True,
             )
             await session.commit()
-            return ("succeeded", None, None)
+            return (BackfillRequestStatus.SUCCEEDED.value, None, None)
 
     async def _fail(self, request_id: str, error: ExecutorError) -> None:
-        """失败收口:可重试错误退回 queued(不把请求标死),其余终态失败。"""
+        """失败收口:可重试错误退回 queued(不把请求标死),其余按明细汇总。
+
+        非重试失败时把**未领取**的 pending 项标 cancelled(fail-fast 不再执行,
+        但保留可 retry 的剩余项),再由 :meth:`_finalize` 汇总出
+        ``failed`` / ``partial`` —— 已有成功项时请求是 partial,不是全失败。
+        """
 
         async with self._session_maker() as session:
             repo = DataBackfillRepository(session)
@@ -507,9 +641,30 @@ class DataBackfillExecutor:
                     status=BackfillRequestStatus.QUEUED.value,
                     error_code=error.code,
                     error_summary=truncate_summary(error.summary),
+                    expected=(
+                        BackfillRequestStatus.RUNNING.value,
+                        BackfillRequestStatus.QUEUED.value,
+                    ),
                 )
                 await self._reset_running_items(repo, request_id)
-            else:
+                await session.commit()
+                return
+            for item in await repo.list_items(request_id):
+                if item.status == BackfillItemStatus.PENDING.value:
+                    await repo.update_item(
+                        item.id,
+                        status=BackfillItemStatus.CANCELLED.value,
+                        expected_statuses=(BackfillItemStatus.PENDING.value,),
+                    )
+            await session.commit()
+        _status, _code, _summary = await self._finalize(request_id)
+        async with self._session_maker() as session:
+            repo = DataBackfillRepository(session)
+            request = await repo.get(request_id)
+            if request is not None and request.status not in (
+                BackfillRequestStatus.FAILED.value,
+                BackfillRequestStatus.PARTIAL.value,
+            ):
                 await repo.set_request_status(
                     request_id,
                     status=BackfillRequestStatus.FAILED.value,
@@ -517,18 +672,37 @@ class DataBackfillExecutor:
                     error_summary=truncate_summary(error.summary),
                     finished=True,
                 )
+            else:
+                # _finalize 已收口为 failed/partial:补上本次失败的具名原因。
+                await repo.set_request_status(
+                    request_id,
+                    status=request.status if request is not None else "failed",
+                    error_code=error.code,
+                    error_summary=truncate_summary(error.summary),
+                )
             await session.commit()
 
     async def _mark_cancelled(self, request_id: str) -> None:
         async with self._session_maker() as session:
             repo = DataBackfillRepository(session)
             await repo.mark_cancelled_items(request_id)
+            for item in await repo.list_items(request_id):
+                if item.status == BackfillItemStatus.RUNNING.value:
+                    await repo.update_item(
+                        item.id,
+                        status=BackfillItemStatus.CANCELLED.value,
+                        expected_statuses=(BackfillItemStatus.RUNNING.value,),
+                    )
             await repo.set_request_status(
                 request_id,
                 status=BackfillRequestStatus.CANCELLED.value,
                 error_code="backfill_cancelled",
                 error_summary="执行期协作式取消",
                 finished=True,
+                expected=(
+                    BackfillRequestStatus.RUNNING.value,
+                    BackfillRequestStatus.QUEUED.value,
+                ),
             )
             await session.commit()
 
@@ -539,7 +713,9 @@ class DataBackfillExecutor:
         for item in await repo.list_items(request_id):
             if item.status == BackfillItemStatus.RUNNING.value:
                 await repo.update_item(
-                    item.id, status=BackfillItemStatus.PENDING.value
+                    item.id,
+                    status=BackfillItemStatus.PENDING.value,
+                    expected_statuses=(BackfillItemStatus.RUNNING.value,),
                 )
 
     async def _release_exists(self, release_id: str) -> bool:
@@ -608,34 +784,26 @@ class DataBackfillExecutor:
                 retryable=False,
             )
 
-    async def _resolve_market(self, item: DataBackfillRequestItemModel) -> str:
-        """bars 批量任务的 market:请求标的的市场唯一时取之,否则按 A 股。"""
+    async def _publish_symbols(
+        self, item: DataBackfillRequestItemModel
+    ) -> list[str]:
+        """冻结标的缺失时按 item 冻结的标的域解析发布标的(不得放宽到整市场)."""
 
-        if not item.symbols:
-            return "a_share"
-        async with self._session_maker() as session:
-            stmt = (
-                select(InstrumentModel.market)
-                .where(InstrumentModel.code.in_(tuple(item.symbols)))
-                .distinct()
-            )
-            markets = [str(row[0]) for row in (await session.execute(stmt)).all()]
-            await session.commit()
-        return markets[0] if len(markets) == 1 else "a_share"
-
-    async def _publish_symbols(self, dataset: str) -> list[str]:
-        """全市场请求的发布标的(按数据集域解析,与发布执行器 scope 门对齐)."""
-
-        support = support_for(dataset)
+        support = support_for(item.dataset)
+        filters = dict(item.universe_filters or {})
+        market = str(filters.get("market") or "")
         conditions: list[Any] = []
-        if support.requires_a_share_stock:
+        instrument_type = filters.get("instrument_type")
+        if isinstance(instrument_type, str) and instrument_type:
+            conditions.append(InstrumentModel.instrument_type == instrument_type)
+        elif support.requires_a_share_stock:
             conditions.extend(
                 [
                     InstrumentModel.market == "a_share",
                     InstrumentModel.instrument_type == "stock",
                 ]
             )
-        elif dataset == "convertible_metrics":
+        elif item.dataset == "convertible_metrics":
             conditions.extend(
                 [
                     InstrumentModel.market == "a_share",
@@ -646,15 +814,21 @@ class DataBackfillExecutor:
             conditions.extend(
                 [
                     InstrumentModel.instrument_type.in_(_BARS_INSTRUMENT_TYPES),
-                    InstrumentModel.market.in_(("a_share", "future")),
                 ]
             )
+        if market:
+            conditions.append(InstrumentModel.market == market)
+        elif not conditions:
+            conditions.append(InstrumentModel.market.in_(("a_share", "future")))
         async with self._session_maker() as session:
             stmt = (
                 select(InstrumentModel.code)
                 .where(*conditions)
                 .order_by(InstrumentModel.code)
             )
+            limit = filters.get("selection_limit")
+            if isinstance(limit, int) and limit > 0:
+                stmt = stmt.limit(limit)
             codes = [str(row[0]) for row in (await session.execute(stmt)).all()]
             await session.commit()
         return codes
@@ -707,16 +881,68 @@ class DataBackfillExecutor:
 # ---------------------------------------------------------------------------
 
 
-def release_id_for(dataset: str, request_id: str) -> str:
-    """发布身份:``DR-<dataset>-<request_id>``(同一请求重跑命中同一身份)."""
+def release_id_for(dataset: str, request_id: str, adjustment: str = "none") -> str:
+    """发布身份:``DR-<dataset>[-<adjustment>]-<request_id>``(同请求重跑幂等)."""
 
-    return f"{_RELEASE_ID_PREFIX}{dataset}-{request_id}"
+    suffix = "" if adjustment == "none" else f"-{adjustment}"
+    return f"{_RELEASE_ID_PREFIX}{dataset}{suffix}-{request_id}"
 
 
-def version_for(request_id: str) -> str:
-    """发布版本:``v-<request_id>``(与 release_id 一同确定性)."""
+def version_for(request_id: str, adjustment: str = "none") -> str:
+    """发布版本:``v[-<adjustment>]-<request_id>``(与 release_id 一同确定性)."""
 
-    return f"v-{request_id}"
+    suffix = "" if adjustment == "none" else f"-{adjustment}"
+    return f"v{suffix}-{request_id}"
+
+
+def _frozen_ranges(
+    item: DataBackfillRequestItemModel,
+) -> tuple[tuple[date, date], ...]:
+    """item 冻结的缺口区间(执行器只补这些区间)。
+
+    空列表是合法值:纯质量修复(``action=repair`` 且覆盖不缺)没有区间要同步。
+    不在这里「兜底整窗」—— 兜底会把「只补缺口」退化成重跑整窗。
+    """
+
+    parsed: list[tuple[date, date]] = []
+    for entry in list(item.missing_ranges or ()):
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            try:
+                parsed.append(
+                    (
+                        date.fromisoformat(str(entry[0])),
+                        date.fromisoformat(str(entry[1])),
+                    )
+                )
+            except ValueError:
+                continue
+    return tuple(parsed)
+
+
+def _scope_payload(
+    item: DataBackfillRequestItemModel, *, include_market: bool = False
+) -> dict[str, Any]:
+    """把冻结的标的域转成子执行器 payload(标的全集 > 上限时用过滤器)."""
+
+    payload: dict[str, Any] = {}
+    symbols = [str(code) for code in (item.symbols or ())]
+    if symbols:
+        payload["symbols"] = symbols
+        return payload
+    filters = dict(item.universe_filters or {})
+    instrument_type = filters.get("instrument_type")
+    if isinstance(instrument_type, str) and instrument_type:
+        payload["instrument_type"] = instrument_type
+    if include_market:
+        market = filters.get("market")
+        if isinstance(market, str) and market:
+            payload["market"] = market
+    return payload
+
+
+def _market_for(item: DataBackfillRequestItemModel) -> str:
+    market = dict(item.universe_filters or {}).get("market")
+    return str(market) if isinstance(market, str) and market else "a_share"
 
 
 def _require_request_id(job: JobRecord) -> str:

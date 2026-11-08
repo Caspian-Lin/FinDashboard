@@ -382,6 +382,10 @@ async def retry_backfill_request(
             idempotency_key=body.idempotency_key,
         )
         await session.commit()
+    except BackfillPlanError as exc:
+        # 冻结 spec 重算 plan 时日历缺失 / 窗口越界:422,不是 500。
+        await session.rollback()
+        raise _plan_error(exc) from exc
     except BackfillRequestError as exc:
         await session.rollback()
         raise _request_error(exc) from exc
