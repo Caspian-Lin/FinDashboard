@@ -170,7 +170,7 @@ export default function ResearchHome() {
                 {releases.slice(0, 5).map((rel) => (
                   <Link
                     key={rel.release_id}
-                    to="/data"
+                    to="/data?tab=datasets"
                     className="flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent"
                   >
                     <div className="flex min-w-0 items-center gap-2">
