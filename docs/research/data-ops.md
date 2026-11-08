@@ -610,3 +610,67 @@ missing_strategy 入 `_PREDEFINED_FAMILY_SCORING`,缺省 = 1%/99% + zscore
 13 因子目录、p_ 走投影,未知各自具名拒绝);新家族未登记投影规则 =
 导入期 RuntimeError(fail-loud 防漂移)。`MultiFactorScorer` 可直接引用
 治理后 p_ 目录组合评分。
+
+---
+
+## 全局数据目录与覆盖口径(#509)
+
+`finboard_data.datasets` 是数据集名单的唯一事实源(10 个 key:bars /
+daily_metrics / financial_indicators / convertible_metrics /
+income_statements / balance_sheets / cashflow_statements / dividends /
+profiles / suspensions)。REST `/api/data/catalog` 与 MCP
+`finboard_data_catalog_*` 从同一 registry 读取标题、字段、单位、PIT 与
+日历口径,禁止再在页面/工具里硬编码数据集清单。
+
+### 状态判定(目录唯一入口)
+
+| 状态 | 含义 |
+|---|---|
+| `usable` | 有可用发布且最近更新在 30 天内 |
+| `ingested_not_published` | 已同步/已有 bars 缓存,但没有可用发布 |
+| `blocked` | 最近一次同步失败/质量拒绝,且晚于最近发布 |
+| `not_ingested` | 无批次、无发布、无缓存 |
+| `stale` | 有可用发布,但超过 30 天未更新 |
+| `unknown` | 元数据缺失(如日历读不到),不用于"看起来没数据" |
+
+### 覆盖分母
+
+- 发布类数据集:分母 = `Σ expected_sessions`(发布 manifest 逐标的
+  期望交易日,按市场交易日历;停牌不计缺口,单列 `suspended_sessions`);
+  响应同时返回 `symbols_with_gaps` / `missing_sessions` / 预览,前端不得
+  自算百分比。
+- 同步批次类(profiles / suspensions):分母 = `received_rows`,显示
+  `accepted_rows`;拒绝明细看 `quality_report` 与批次 `error_summary`。
+- 发布级 `coverage_pct` 是 manifest 冻结值(逐标的简单平均),与
+  `weighted_coverage_pct`(Σrow/Σexpected)分开命名,禁止混用。
+
+### 逐标的索引(#509)
+
+`research_dataset_release_instruments` 是 manifest 的**派生读模型**,不是
+第二事实源:
+
+- 新发布在 `ResearchDatasetReleaseRepository.publish()` 事务内写入;
+- 历史发布由目录读路径 `ensure_instruments()` 用服务端 SQL
+  (`jsonb_array_elements(manifest->'instruments')`)自愈,PG 侧解析,
+  不占 API 进程内存,也没有 `pending` 状态或 manifest 回退读路径;
+- 发布行不可变,缓存无失效问题;manifest 损坏时具名报错,不静默改读。
+
+目录列表/详情只做列投影,**禁止走 `ResearchDatasetReleaseRepository.list()`**
+(它会对每行 `from_dict(manifest)`;本地全市场单份 manifest 已约 90MB)。
+需要暖机时可在低峰期调用 `GET /api/data/catalog/releases/{id}/instruments`
+触发单发布自愈,不需要停服或额外迁移。
+
+### 入口
+
+| 用途 | REST | MCP |
+|---|---|---|
+| 数据集列表/过滤 | `GET /api/data/catalog` | `finboard_data_catalog_list` |
+| 数据集详情(字段/单位/PIT/批次/发布/失败) | `GET /api/data/catalog/datasets/{dataset}` | `finboard_data_catalog_get` |
+| 覆盖/缺口 | `GET .../coverage` | `finboard_data_coverage_get` |
+| 发布逐标的分页 | `GET .../releases/{id}/instruments` | `finboard_dataset_release_instruments` |
+| 发布引用(课题/运行/策略) | `GET .../releases/{id}/references` | `finboard_dataset_release_references` |
+| 标的反查 | `GET .../instruments/{code}` | — |
+| 交易日历 | `GET .../calendar` | — |
+
+目录只读:不触发同步/发布;写入口仍是 `dataset_sync` / `bulk_download` /
+`dataset_publish`。不同 source 或复权口径的发布不得在目录里合并成一行。
