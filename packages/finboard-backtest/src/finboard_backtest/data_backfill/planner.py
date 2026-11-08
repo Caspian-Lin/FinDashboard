@@ -430,7 +430,7 @@ async def plan_backfill(
         # 为数据集全集(发布面 > 请求面)。按 item 实际标的判断,避免 dataset
         # spec 已收窄标的却被全局显式清单误伤。
         explicit_over_cap = (
-            bool(spec.scope.universe.explicit_symbols)
+            bool(spec.scope.universe.explicit_symbols or dataset_spec.symbols)
             and len(item_symbols) > _MAX_SYMBOL_FILTER
         )
         item_blockers.extend(

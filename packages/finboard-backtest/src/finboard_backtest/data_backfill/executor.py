@@ -818,17 +818,30 @@ class DataBackfillExecutor:
         if isinstance(market, str) and market:
             return market
         symbols = [str(code) for code in (item.symbols or ())]
-        if not symbols:
+        instrument_type = filters.get("instrument_type")
+        if not symbols and not (
+            isinstance(instrument_type, str) and instrument_type
+        ):
+            # 没有任何能定位市场的线索:保持历史默认(全部 A 股)。
             return "a_share"
         async with self._session_maker() as session:
-            stmt = (
-                select(InstrumentModel.market)
-                .where(InstrumentModel.code.in_(tuple(symbols)))
-                .distinct()
-            )
+            stmt = select(InstrumentModel.market).distinct()
+            if symbols:
+                stmt = stmt.where(InstrumentModel.code.in_(tuple(symbols)))
+            else:
+                # 大宇宙过滤器模式(symbols 未逐只下发):按 instrument_type
+                # 聚合市场。期货过滤器必须得到 ``future``,否则 bulk_download
+                # 按 a_share 过滤会 ``no_instruments``。
+                stmt = stmt.where(
+                    InstrumentModel.instrument_type == str(instrument_type)
+                )
             markets = [str(row[0]) for row in (await session.execute(stmt)).all()]
             await session.commit()
-        return markets[0] if len(markets) == 1 else "a_share"
+        if len(markets) == 1:
+            return markets[0]
+        if instrument_type == "futures":
+            return "future"
+        return "a_share"
 
     async def _publish_symbols(
         self, item: DataBackfillRequestItemModel
