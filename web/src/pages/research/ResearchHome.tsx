@@ -31,7 +31,7 @@ import { formatDateTime, timeAgo } from "@/lib/utils";
 import { useLanguage, useT, type LocalizedText } from "@/i18n";
 
 const workflowSteps: { to: string; label: LocalizedText; icon: LucideIcon; desc: LocalizedText }[] = [
-  { to: "/research/data", label: { zh: "数据与标的", en: "Data & Instruments" }, icon: Database, desc: { zh: "发布研究数据、查看资产覆盖与质量告警", en: "Publish research data, view asset coverage and quality alerts" } },
+  { to: "/data", label: { zh: "数据基座", en: "Data Base" }, icon: Database, desc: { zh: "共享数据目录:覆盖、缺口、同步与发布入口", en: "Shared data catalog: coverage, gaps, sync and publish entries" } },
   { to: "/research/factors", label: { zh: "因子实验室", en: "Factor Lab" }, icon: Atom, desc: { zh: "因子目录、特征快照、信号预览与因子实验", en: "Factor catalog, feature snapshots, signal preview, and factor experiments" } },
   { to: "/research/strategy", label: { zh: "策略 Studio", en: "Strategy Studio" }, icon: SlidersHorizontal, desc: { zh: "无代码结构化策略配置、版本 diff 与发布", en: "No-code structured strategy configuration, version diffs, and publishing" } },
   { to: "/research/experiments", label: { zh: "实验与 OOS", en: "Experiments & OOS" }, icon: TestTube, desc: { zh: "机器验证实验、阈值与稳健性检验", en: "Machine-verified experiments, thresholds, and robustness checks" } },
@@ -164,13 +164,13 @@ export default function ResearchHome() {
           </CardHeader>
           <CardContent>
             {releasesError ? (
-              <p className="py-4 text-center text-sm text-destructive">{tl({ zh: "数据发布加载失败，请进入「数据与标的」重试。", en: "Failed to load data releases. Go to “Data & Instruments” to retry." })}</p>
+              <p className="py-4 text-center text-sm text-destructive">{tl({ zh: "数据发布加载失败，请进入「数据基座」重试。", en: "Failed to load data releases. Go to “Data Base” to retry." })}</p>
             ) : releases && releases.length > 0 ? (
               <div className="space-y-2">
                 {releases.slice(0, 5).map((rel) => (
                   <Link
                     key={rel.release_id}
-                    to="/research/data"
+                    to="/data"
                     className="flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent"
                   >
                     <div className="flex min-w-0 items-center gap-2">

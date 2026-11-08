@@ -549,7 +549,7 @@ function GenerateFeatureSnapshotDialog({
             <AlertTitle>{tl({ zh: "还没有可用数据发布", en: "No dataset releases yet" })}</AlertTitle>
             <AlertDescription>
               {tl({ zh: "请先到 ", en: "Go to " })}
-              <Link className="underline" to="/research/data">{tl({ zh: "数据与标的", en: "Data & Instruments" })}</Link>
+              <Link className="underline" to="/data">{tl({ zh: "数据基座", en: "Data Base" })}</Link>
               {tl({ zh: " 冻结并发布数据，再生成特征快照。", en: " to freeze and publish data before generating a feature snapshot." })}
             </AlertDescription>
           </Alert>
@@ -840,7 +840,7 @@ function FeaturesTab() {
                         <TableCell>
                           {snap.dataset_release_id ? (
                             <Link
-                              to={`/research/data?release=${encodeURIComponent(snap.dataset_release_id)}`}
+                              to={`/data?release=${encodeURIComponent(snap.dataset_release_id)}`}
                               className="block underline-offset-2 hover:underline"
                             >
                               <span className="font-mono text-xs text-muted-foreground">
@@ -943,7 +943,7 @@ function FeaturesTab() {
                                 <p className="text-xs text-muted-foreground">
                                   {tl({ zh: "数据来源:", en: "Data source: " })}
                                   <Link
-                                    to={`/research/data?release=${encodeURIComponent(snap.dataset_release_id)}`}
+                                    to={`/data?release=${encodeURIComponent(snap.dataset_release_id)}`}
                                     className="ml-1 underline underline-offset-2 hover:text-foreground"
                                   >
                                     {releaseById.get(snap.dataset_release_id)
@@ -1257,7 +1257,7 @@ function CreateExperimentDialog({
             <AlertTitle>{tl({ zh: "缺少数据发布", en: "Missing dataset release" })}</AlertTitle>
             <AlertDescription>
               {tl({ zh: "先到 ", en: "Go to " })}
-              <Link className="underline" to="/research/data">{tl({ zh: "数据与标的", en: "Data & Instruments" })}</Link>
+              <Link className="underline" to="/data">{tl({ zh: "数据基座", en: "Data Base" })}</Link>
               {tl({ zh: " 创建不可变数据发布，再回来绑定因子实验。", en: " to create an immutable dataset release, then come back to bind the factor experiment." })}
             </AlertDescription>
           </Alert>
@@ -1674,7 +1674,7 @@ function ExperimentRow({ experiment: exp }: { experiment: FactorExperiment }) {
                   <span>
                     {tl({ zh: "数据发布:", en: "Data release: " })}
                     <Link
-                      to={`/research/data?release=${encodeURIComponent(detail.dataset_release_id)}`}
+                      to={`/data?release=${encodeURIComponent(detail.dataset_release_id)}`}
                       className="ml-1 font-mono text-foreground underline underline-offset-2"
                     >
                       {detail.dataset_release_id}

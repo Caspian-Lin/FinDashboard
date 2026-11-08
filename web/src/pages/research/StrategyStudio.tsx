@@ -208,7 +208,7 @@ function SpecChainPanel({
               return (
                 <Link
                   key={id}
-                  to={`/research/data?release=${encodeURIComponent(id)}`}
+                  to={`/data?release=${encodeURIComponent(id)}`}
                   className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 transition-colors hover:bg-accent"
                 >
                   <span className="font-mono text-[11px] text-foreground">{id}</span>
@@ -1264,8 +1264,8 @@ function SetupDialog({
             {releases.length === 0 ? (
               <p className="rounded bg-warning/10 p-2 text-xs text-warning">
                 {tl({
-                  zh: "暂无数据发布。请先在「数据与标的」页面拉取行情数据并发布研究数据集。",
-                  en: 'No dataset releases yet. Fetch market data and publish a research dataset on the "Data & Instruments" page first.',
+                  zh: "暂无数据发布。请先在「数据基座」拉取行情数据并发布研究数据集。",
+                  en: 'No dataset releases yet. Fetch market data and publish a research dataset on the "Data Base" page first.',
                 })}
               </p>
             ) : (
