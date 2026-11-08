@@ -744,6 +744,102 @@ scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:
 `data_scope` / `data_scope_resolution_id`,run 行为与 #510 之前完全一致;
 已冻结的 run 不回改(manifest 不可变),需要新范围时新建 run。
 
+## 课题缺口 → 全局补数(#511)
+
+课题发现缺口时不再各自触发同步:`finboard-backtest` 的 `data_backfill` 包把
+「缺什么」变成一条**可追踪的共享补数请求**(`BF-` 前缀),由平台统一补数并
+产生可被其他课题选用的新发布。入口:REST `/api/data/backfills`、MCP
+`finboard_data_backfill_*`;执行器 `kind=data_backfill` 只**编排**既有
+`dataset_sync` / `bulk_download` / `quality_repair` / `dataset_publish`,
+不复制同步或发布逻辑。
+
+### 支持清单(预检与阻塞的唯一依据)
+
+| 数据集 | 同步内核 | 可发布 | release_kind | 备注 |
+|---|---|---|---|---|
+| bars | `bulk_download`(+ 可选 `quality_repair`) | 是 | `multi_asset_mixed`(落库 dataset_kind=`bars`) | 需先有标的元数据;**只支持 qfq**(缓存写入无 adjust 维度,非 qfq 预检即 `backfill_adjustment_unsupported`) |
+| daily_metrics / financial_indicators / income_statements / balance_sheets / cashflow_statements / dividends | `dataset_sync` | 是 | 同名 | 发布只接受 A 股股票;PIT 规则见目录 |
+| convertible_metrics | 无(派生) | 是 | `convertible_metrics` | 依赖 bars + 转债条款,缺口时 `backfill_dataset_derived` 阻塞 |
+| profiles / suspensions | `dataset_sync` | 否 | — | 只补同步,不产生发布 |
+
+静态清单从 #509 目录注册表(`finboard_data.datasets`)推导,只补两条目录不
+表达的执行事实(内核与标的域)。运行时能力(缺 tushare token / 缓存或发布
+目录不可写)在预检中逐数据集具名 `blocked` + `reason`,不静默跳过;
+**需要新来源、新数据集或付费额度时仍落一行 `blocked` 请求**(不建 job),
+作为需求登记,来源开通后可对同一请求 `retry`。
+
+### 共享去重
+
+- **身份维度** = `(dataset, source, adjustment)` + 窗口 + 标的 + 发布开关;
+  异源或不同复权口径永远不参与复用,fingerprint 也不同;item 唯一键与发布身份
+  都含 `adjustment` 与非默认 `source`(同 dataset 的多来源/多复权项互不覆盖;
+  bars 的 hqfq 会被预检阻塞,唯一键仍保留该维度以便未来放开);
+- **已完成覆盖**:可发布数据集以 `research_dataset_releases` 的可用发布
+  (逐标派生索引)为准;不可发布数据集以 `research_sync_batches` 的已发布
+  批次为准;
+- **在途覆盖**:`data_backfill_requests` 中 `queued|running` 且身份一致、
+  区间重叠、标的是请求标的**超集**的 item;
+- `missing_ranges = 请求区间 − (已完成 ∪ 在途)`;部分重叠只补剩余缺口,
+  **缺口区间冻结进 item**,执行器按区间取数(不重跑整窗),发布仍冻结请求窗口;
+  `reused_request_ids` 记录复用来源,剩余为空时不建 job 直接返回 `succeeded`
+  复用结果;
+- **标的缺口同样触发补数**:窗口级覆盖齐全但请求标的有缺失时,缺口按
+  「该标的未覆盖的区间」冻结成 `missing_ranges` 并真正执行同步(不只是
+  action 变成 sync);逐标的单元按标的冻结标的列表(≤2000)或
+  `universe_filters`,发布面不得宽于请求面(含窗口级数据集);过滤器必须能
+  转成 `dataset_sync` 支持的键(至少 `instrument_type`),否则具名
+  `backfill_symbol_scope_unresolved`,不静默放宽;
+- 同一 `fingerprint` 的在途请求直接复用;等价重试(同 `Idempotency-Key`)
+  回同一请求;失败/取消后重提或 `POST /{id}/retry` 生成新请求并保留
+  `retry_of_request_id` 血缘;
+- **提交前复算 plan**:与预览返回的 `plan_checksum` 不一致(新发布 / 新在途
+  / 配额变化)→ 409 `backfill_plan_drift`,必须重新预览,禁止按旧计划执行。
+
+### 失败补偿
+
+- 请求状态 `queued → running → succeeded | partial | failed | cancelled`
+  (受阻另落 `blocked`);明细 `pending → running → succeeded | failed |
+  cancelled | reused`,**逐 item 独立**成功/失败,默认 fail-fast:第一个失败
+  即停止后续 item;
+- 已成功 item 的发布**保留**且可被其他课题的 #510 scope 解析直接选用;
+  请求 `partial` 时失败项可 `retry` 续补,不需要重跑已成功部分;
+- 质量门失败(批次 `quality_rejected` / `quality_status=failed`)→ 不发布,
+  请求 `failed` 且 `error_code=backfill_quality_failed`,批次与 item 明细可查;
+- 上游预算耗尽(`TushareRequestLimitError`)→ 任务 `retry_waiting`(与
+  `dataset_sync` 一致),请求退回 `queued`、item 退回 `pending`,不把请求标死;
+- 取消:job 协作式取消;**排队中**直接 `cancelled`(未领取 item 标 cancelled),
+  **运行中**交给执行器在检查点收敛(不抢跑状态机);已发布 release 不回滚;
+- 受阻(`blocked`)请求是需求登记,来源/额度开通后可直接 `retry`(重算 plan),
+  不需要换幂等键重提;
+- 发布幂等按**计算出的身份**查重:发布成功但 item 落库前崩溃,重跑直接复用
+  该发布,不会撞 `release_identity_conflict`。
+
+### 发布身份与历史冻结
+
+补数发布的 `release_id = DR-<dataset>[-<adjustment>][-<source>]-<request_id>`、
+`version = v[-<adjustment>][-<source>]-<request_id>`(非 `none` 复权、非默认
+来源才带对应后缀,避免同 dataset 多复权/多来源项撞同一发布身份);同一请求重跑
+命中同一身份即幂等返回;`plan` 里只给预告模板。既有发布只读:补数只追加新版本,
+任何补数都不会修改历史 release 的 checksum / 区间 / 逐标覆盖。
+
+### 入口
+
+| 用途 | REST | MCP |
+|---|---|---|
+| 预检(纯读) | `POST /api/data/backfills/preview` | `finboard_data_backfill_preview` |
+| 提交(幂等) | `POST /api/data/backfills`(`Idempotency-Key`) | `finboard_data_backfill_submit` |
+| 列表/详情 | `GET /api/data/backfills[/{id}]` | `finboard_data_backfill_list` |
+| 取消 | `POST /api/data/backfills/{id}/cancel` | `finboard_data_backfill_cancel` |
+| 重试剩余项 | `POST /api/data/backfills/{id}/retry` | — |
+
+迁移拆成 `c4a1b2d3e5f6`(请求/明细两表)与 `d3e4f5a6b7c8`(明细的冻结
+字段与含 `adjustment` 的唯一键):已应用前者的库直接 `alembic upgrade head`
+即可补齐,无需手动 downgrade;`create_all` 与迁移的索引/约束形态一致。
+
+`POST /api/jobs` 与 `finboard_job_enqueue` **不开放** `data_backfill` kind:
+补数只经语义端点提交,避免绕过预检;MCP 审计只记录 scope_checksum /
+fingerprint / 数据集清单,不记录完整 symbols。
+
 ---
 
 ## 共享数据基座面板与课题数据视图(#512)

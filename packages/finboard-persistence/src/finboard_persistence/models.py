@@ -2706,3 +2706,133 @@ class ResearchFactorSeriesModel(Base, IdMixin):
             "window_end",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# 补数请求(issue #511)
+# ---------------------------------------------------------------------------
+
+
+class DataBackfillRequestModel(Base, IdMixin):
+    """课题缺口 → 全局补数请求(frozen 语义:只追加状态迁移,不改历史语义)。
+
+    ``spec`` 冻结提交时的规范化请求(含解析后的窗口/标的),``plan`` 冻结
+    预检结果(缺口/步骤/估算/发布预告)—— 请求与执行器都按冻结快照工作,
+    运行期不重算范围(重算只发生在提交前的 drift 检测)。
+
+    独立调度域表:不建任何外键指向实盘表,``job_id`` / ``release_ids`` 只以
+    字符串引用产物。
+    """
+
+    __tablename__ = "data_backfill_requests"
+
+    # 唯一性由 __table_args__ 的 UniqueConstraint 承载(与迁移同名同列),
+    # 另建普通索引服务按 ID 查询 —— 与迁移文件逐项一致,避免 create_all 与
+    # alembic 产出的索引形态不同。
+    request_id: Mapped[str] = mapped_column(String(32))
+    # 幂等键唯一性由部分唯一索引承载(只约束活跃行,与 background_jobs #371
+    # 同语义):failed/cancelled 死行放行同键重建,等价重试不被失败尸体挡死。
+    idempotency_key: Mapped[str] = mapped_column(String(128), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    scope_checksum: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    spec: Mapped[dict[str, object]] = mapped_column(JSON)
+    plan: Mapped[dict[str, object]] = mapped_column(JSON)
+    reused_request_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    retry_of_request_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    release_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    blockers: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    requested_by: Mapped[str] = mapped_column(String(128))
+    actor_type: Mapped[str] = mapped_column(String(16), default="human")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "request_id", name="uq_data_backfill_request_id"
+        ),
+        Index(
+            "ix_data_backfill_requests_request_id", "request_id"
+        ),
+        Index("ix_backfill_fingerprint", "fingerprint", "status"),
+        Index("ix_backfill_status_created", "status", "created_at"),
+        Index(
+            "uq_backfill_idempotency_active",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=sql_text("status NOT IN ('failed', 'cancelled')"),
+        ),
+    )
+
+
+class DataBackfillRequestItemModel(Base, IdMixin):
+    """补数请求的逐数据集明细(独立成功/失败,发布保留可被其他课题选用)。"""
+
+    __tablename__ = "data_backfill_request_items"
+
+    request_id: Mapped[str] = mapped_column(
+        String(32),
+        ForeignKey("data_backfill_requests.request_id", ondelete="CASCADE"),
+        index=True,
+    )
+    dataset: Mapped[str] = mapped_column(String(32))
+    source: Mapped[str] = mapped_column(String(32))
+    adjustment: Mapped[str] = mapped_column(String(8), default="none")
+    action: Mapped[str] = mapped_column(String(24))
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    # 冻结的标的子集;空 = 全市场(按 scope 解析出的标的域整体补齐)。
+    symbols: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 标的域超过冻结上限时的过滤器(market / instrument_type / selection_limit):
+    # 子执行器按同一过滤器解析,发布面与请求面一致。
+    universe_filters: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    # 冻结的缺口区间(执行器只补这些区间,不重跑整窗)。
+    missing_ranges: Mapped[list[list[str]]] = mapped_column(JSON, default=list)
+    # 缓存质量修复的标的子集(bars;来自既有发布的异常/重复计数)。
+    repair_symbols: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    estimated_requests: Mapped[int] = mapped_column(Integer, default=0)
+    batch_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    release_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    accepted_rows: Mapped[int] = mapped_column(BigInteger, default=0)
+    rejected_rows: Mapped[int] = mapped_column(BigInteger, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "request_id",
+            "dataset",
+            "source",
+            "adjustment",
+            "start_date",
+            "end_date",
+            name="uq_backfill_item_identity",
+        ),
+        Index(
+            "ix_backfill_item_dataset",
+            "dataset",
+            "source",
+            "status",
+            "end_date",
+        ),
+    )

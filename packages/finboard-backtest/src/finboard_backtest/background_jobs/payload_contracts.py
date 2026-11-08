@@ -275,11 +275,44 @@ def validate_bulk_download_payload(payload: Mapping[str, Any]) -> None:
         )
 
 
+def validate_data_backfill_payload(payload: Mapping[str, Any]) -> None:
+    """校验 ``kind=data_backfill`` 的 payload(issue #511)。
+
+    补数任务只由语义端点创建(``POST /api/data/backfills`` / MCP 写完工具),
+    payload **只允许** ``request_id`` —— 通用入队口(``POST /api/jobs`` /
+    ``finboard_job_enqueue``)不放开本 kind,避免绕过预检直接补数。
+    """
+
+    unknown = sorted(set(payload) - _DATA_BACKFILL_ALLOWED_KEYS)
+    if unknown:
+        raise PayloadContractError(
+            "unknown_payload_key",
+            f"未知 payload 键: {unknown};已知键: "
+            f"{sorted(_DATA_BACKFILL_ALLOWED_KEYS)}",
+        )
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise PayloadContractError(
+            "missing_required_field", "request_id 必填(BF-<16hex>)"
+        )
+    normalized = request_id.strip()
+    if not normalized.startswith("BF-") or len(normalized) < 5:
+        raise PayloadContractError(
+            "invalid_field_value",
+            f"request_id 必须是补数请求 ID(BF-...),收到: {request_id!r}",
+        )
+
+
+#: ``data_backfill`` 合法 payload 键(只允许请求引用,范围在请求行里冻结)。
+_DATA_BACKFILL_ALLOWED_KEYS: frozenset[str] = frozenset({"request_id"})
+
+
 #: kind → 入队期 payload 校验器。新 kind 在此注册即可被 REST + MCP + 执行器
 #: 重放三方共用。
 PAYLOAD_CONTRACTS: dict[str, Callable[[Mapping[str, Any]], None]] = {
     "dataset_sync": validate_dataset_sync_payload,
     "bulk_download": validate_bulk_download_payload,
+    "data_backfill": validate_data_backfill_payload,
 }
 
 
@@ -298,6 +331,7 @@ __all__ = [
     "PAYLOAD_CONTRACTS",
     "PayloadContractError",
     "validate_bulk_download_payload",
+    "validate_data_backfill_payload",
     "validate_dataset_sync_payload",
     "validate_job_payload",
 ]
