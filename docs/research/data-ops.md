@@ -712,7 +712,13 @@ MCP 侧只读入口是 `finboard_data_scope_preview`;写侧不新增工具,提�
 ### 语义边界
 
 - **窗口来自交易日历**,不是自然日:解析落位到 `trade_cal` 并集,预热不足/
-  尾部不足只发 warning,决策日不在日历内则具名拒绝(不用自然日兜底)。
+  尾部不足给 warning;决策日不在日历内则具名拒绝(不用自然日兜底)。
+- **尾部与执行期一次性闭合**:`tail_sessions=0` 时预览给具名 warning;提交期若
+  运行声明了 multi_period(`decision_schedule` / legacy `rebalance_frequency`)
+  且 `valuation_end <= decision_end` → 422 `scope_window_tail_too_short`(dev
+  #502 的最后一个决策日要按下一交易日撮合)。single_shot 一般不需要尾部,但若
+  最后一个快照决策日恰为 `decision_end`,执行期同样会报
+  `research_window_execution_tail_missing`——这类运行显式给 `tail_sessions>=1`。
 - **bars 主发布唯一**:`datasets.required` 必须含 bars;`locked` 模式必须
   恰好一份可发布的 bars 且覆盖全部 required 数据集。
 - **benchmark 必须在 bars 主发布内**,否则 `scope_benchmark_not_in_bars`

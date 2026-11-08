@@ -113,6 +113,13 @@ class DataScopeSpec(_Frozen):
     release_selection: Literal["auto", "locked"] = "auto"
     locked_release_ids: tuple[str, ...] = ()
 
+    @field_validator("benchmarks")
+    @classmethod
+    def _normalize_benchmarks(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """基准代码归一,理由同 ``ScopeUniverse.explicit_symbols``。"""
+
+        return tuple(sorted({item.strip().upper() for item in value if item.strip()}))
+
     @model_validator(mode="after")
     def _validate(self) -> DataScopeSpec:
         if self.release_selection == "locked" and not self.locked_release_ids:

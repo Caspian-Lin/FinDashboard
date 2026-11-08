@@ -102,7 +102,7 @@ class TestSpecValidation:
 
     def test_tail_defaults_to_zero(self) -> None:
         # 默认保持 0(不影响非 multi_period 消费者);multi_period 的尾部不足
-        # 由提交期 apply 校验拒绝(428),预览给具名 warning。
+        # 由提交期 apply 校验拒绝(422),预览给具名 warning。
         spec = DataScopeSpec.model_validate(
             {
                 "universe": {},
@@ -220,6 +220,37 @@ class TestManifestPayload:
             "decision_end": "2024-03-28",
             "valuation_end": "2024-04-08",
         }
+
+
+class TestResolutionId:
+    def test_market_declaration_order_does_not_change_id(self) -> None:
+        """``calendar_markets`` 顺序不参与指纹:多市场声明顺序互换不得误报漂移。"""
+
+        from finboard_backtest.data_scope.resolver import _resolution_id
+
+        resolution = _resolution()
+        swapped = resolution.window.model_copy(
+            update={"calendar_markets": ("SSE", "CFFEX")}
+        )
+        original = resolution.window.model_copy(
+            update={"calendar_markets": ("CFFEX", "SSE")}
+        )
+        ids = {
+            _resolution_id("f" * 64, ("DR-bars-1",), "v2", window)
+            for window in (swapped, original)
+        }
+        assert len(ids) == 1
+
+    def test_window_change_changes_id(self) -> None:
+        from finboard_backtest.data_scope.resolver import _resolution_id
+
+        resolution = _resolution()
+        shifted = resolution.window.model_copy(
+            update={"valuation_end": date(2024, 4, 9)}
+        )
+        assert _resolution_id(
+            "f" * 64, ("DR-bars-1",), "v2", resolution.window
+        ) != _resolution_id("f" * 64, ("DR-bars-1",), "v2", shifted)
 
 
 # ---------------------------------------------------------------------------
