@@ -7,14 +7,17 @@
 * 缺口、blockers、候选替代与受影响策略;
 * 稳定 ``resolution_id``(scope + release 集合 + resolver 版本)。
 
-纯读:不落库、不触发同步/发布。提交 run 时由入队路由重算并比对,
-冻结精确 release/version/checksum 与 ``research_window``。
+纯读:除 #509 逐标的读模型自愈(``ensure_instruments`` 只补
+``research_dataset_release_instruments``,不改任何发布)外不写库、不触发
+同步/发布。提交 run 时由入队路由重算并比对,冻结精确 release/version/checksum
+与 ``research_window``。
 """
 
 from __future__ import annotations
 
 import hashlib
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,19 +120,18 @@ async def resolve_data_scope(
             f"尾部不足:请求 {spec.tail_sessions} 个交易日,日历仅能提供 "
             f"{window.tail_sessions} 个"
         )
+    if spec.tail_sessions == 0:
+        # multi_period 的最后一个决策日要按下一交易日撮合(dev #502);
+        # 零尾部会在执行期才报 research_window_execution_tail_missing。
+        warnings.append(
+            "tail_sessions=0:若运行按 multi_period 执行,最后一个决策日"
+            "没有可撮合的下一交易日,执行期会 fail-closed"
+        )
 
-    universe_result, universe_blockers = await _resolve_universe(
+    universe, universe_blockers, resolved_symbols = await _resolve_universe(
         session, spec, window.decision_start, warnings
     )
     blockers.extend(universe_blockers)
-    resolved_symbols = await _selected_symbols(session, spec, window.decision_start)
-    universe = ScopeUniverseResult(
-        requested_count=universe_result.requested_count,
-        resolved_count=len(resolved_symbols),
-        truncated=universe_result.truncated,
-        symbols_preview=tuple(resolved_symbols[:_PREVIEW_LIMIT]),
-        excluded=universe_result.excluded,
-    )
 
     chosen, missing_by_dataset, release_blockers, release_alts = (
         await _select_releases(
@@ -177,6 +179,7 @@ async def resolve_data_scope(
                 )
 
     if spec.release_selection == "locked":
+        await _validate_locked_bars(session, spec, blockers)
         _validate_locked(spec, chosen, blockers)
     if strategy_id is not None and strategy_version is not None:
         await _validate_existing_spec(
@@ -188,7 +191,9 @@ async def resolve_data_scope(
     )
 
     release_ids = tuple(sorted(item.artifact_id for item in chosen.values()))
-    resolution_id = _resolution_id(checksum, release_ids, resolver_version)
+    resolution_id = _resolution_id(
+        checksum, release_ids, resolver_version, window
+    )
     return ScopeResolution(
         resolution_id=resolution_id,
         scope_checksum=checksum,
@@ -218,11 +223,19 @@ async def _resolve_universe(
     spec: DataScopeSpec,
     decision_start: date,
     warnings: list[str],
-) -> tuple[ScopeUniverseResult, list[ScopeBlocker]]:
+) -> tuple[ScopeUniverseResult, list[ScopeBlocker], list[str]]:
+    """解析候选池:返回 ``(预览结果, blockers, 标的列表)``。
+
+    一次查询同时产出「预览统计」与「用于发布缺口检查的标的清单」——
+    两段各自查一遍(旧实现)会在排除统计与真实集合之间留下漂移口子。
+    空池一律 ``scope_universe_empty`` 阻塞:解析出 0 只标的的范围通过门控
+    只会把失败推迟到执行期。
+    """
+
     blockers: list[ScopeBlocker] = []
-    explicit = tuple(
-        sorted({item.strip().upper() for item in spec.universe.explicit_symbols if item.strip()})
-    )
+    filters = spec.universe.filters
+    min_listing = timedelta(days=filters.min_listing_days)
+    explicit = spec.universe.explicit_symbols
     if explicit:
         rows = (
             await session.execute(
@@ -245,7 +258,6 @@ async def _resolve_universe(
             )
         eligible: list[str] = []
         excluded: dict[str, int] = {}
-        min_listing = timedelta(days=spec.universe.filters.min_listing_days)
         for code, list_date, delist_date, status in found.values():
             reason = _lifecycle_exclusion(
                 list_date,
@@ -253,7 +265,7 @@ async def _resolve_universe(
                 status,
                 decision_start,
                 min_listing=min_listing,
-                filters=spec.universe.filters,
+                filters=filters,
             )
             if reason is not None:
                 excluded[reason] = excluded.get(reason, 0) + 1
@@ -264,38 +276,62 @@ async def _resolve_universe(
                 "显式标的被 PIT 生命周期过滤: "
                 + ", ".join(f"{key}={value}" for key, value in sorted(excluded.items()))
             )
-        if not eligible:
+        resolved = sorted(eligible)
+        if not resolved:
             blockers.append(
                 _make_blocker(
                     "scope_universe_empty",
-                    "显式标的在 decision_start 均不可用",
+                    f"显式标的在 decision_start={decision_start} 均不可用",
                 )
             )
         return (
             ScopeUniverseResult(
                 requested_count=len(explicit),
-                resolved_count=len(eligible),
+                resolved_count=len(resolved),
                 truncated=False,
-                symbols_preview=tuple(sorted(eligible)[:_PREVIEW_LIMIT]),
+                symbols_preview=tuple(resolved[:_PREVIEW_LIMIT]),
                 excluded=excluded,
             ),
             blockers,
+            resolved,
         )
 
-    filters = spec.universe.filters
-    conditions = [InstrumentModel.list_date <= decision_start - timedelta(
-        days=filters.min_listing_days
-    )]
+    allowed_types: set[str] = set()
+    if spec.universe.asset_classes:
+        allowed_types, unmapped = _types_for_classes(spec.universe.asset_classes)
+        if unmapped:
+            # 未映射大类不能退化成「不加 instrument_type 条件」:那会让商品/
+            # 现金范围静默混入全部 A 股,fail-open。
+            blockers.append(
+                _make_blocker(
+                    "scope_asset_class_unmapped",
+                    "资产大类没有对应的标的类型映射: "
+                    + ", ".join(sorted(unmapped))
+                    + "(显式拒绝而不是退化成全市场)",
+                )
+            )
+            return (
+                ScopeUniverseResult(
+                    requested_count=0,
+                    resolved_count=0,
+                    truncated=False,
+                    symbols_preview=(),
+                ),
+                blockers,
+                [],
+            )
+
+    conditions: list[Any] = [
+        InstrumentModel.list_date <= decision_start - min_listing,
+    ]
     if spec.universe.markets:
         conditions.append(
             InstrumentModel.market.in_([item.value for item in spec.universe.markets])
         )
-    if spec.universe.asset_classes:
-        allowed_types = _types_for_classes(spec.universe.asset_classes)
-        if allowed_types:
-            conditions.append(
-                InstrumentModel.instrument_type.in_(sorted(allowed_types))
-            )
+    if allowed_types:
+        conditions.append(
+            InstrumentModel.instrument_type.in_(sorted(allowed_types))
+        )
     if spec.universe.instrument_types:
         conditions.append(
             InstrumentModel.instrument_type.in_(
@@ -329,85 +365,6 @@ async def _resolve_universe(
         warnings.append(
             f"标的池 {total} 只超过上限 {limit},仅解析前 {limit} 只"
         )
-    return (
-        ScopeUniverseResult(
-            requested_count=total,
-            resolved_count=min(total, limit),
-            truncated=truncated,
-            symbols_preview=(),
-        ),
-        blockers,
-    )
-
-
-async def _selected_symbols(
-    session: AsyncSession, spec: DataScopeSpec, decision_start: date
-) -> list[str]:
-    explicit = tuple(
-        sorted({item.strip().upper() for item in spec.universe.explicit_symbols if item.strip()})
-    )
-    if explicit:
-        rows = (
-            await session.execute(
-                select(
-                    InstrumentModel.code,
-                    InstrumentModel.list_date,
-                    InstrumentModel.delist_date,
-                    InstrumentModel.status,
-                ).where(InstrumentModel.code.in_(explicit))
-            )
-        ).all()
-        filters = spec.universe.filters
-        min_listing = timedelta(days=filters.min_listing_days)
-        selected = [
-            str(code)
-            for code, list_date, delist_date, status in rows
-            if _lifecycle_exclusion(
-                list_date,
-                delist_date,
-                status,
-                decision_start,
-                min_listing=min_listing,
-                filters=filters,
-            )
-            is None
-        ]
-        return sorted(selected)
-
-    filters = spec.universe.filters
-    conditions = [
-        InstrumentModel.list_date
-        <= decision_start - timedelta(days=filters.min_listing_days)
-    ]
-    if spec.universe.markets:
-        conditions.append(
-            InstrumentModel.market.in_([item.value for item in spec.universe.markets])
-        )
-    if spec.universe.asset_classes:
-        allowed_types = _types_for_classes(spec.universe.asset_classes)
-        if allowed_types:
-            conditions.append(InstrumentModel.instrument_type.in_(sorted(allowed_types)))
-    if spec.universe.instrument_types:
-        conditions.append(
-            InstrumentModel.instrument_type.in_(
-                [item.value for item in spec.universe.instrument_types]
-            )
-        )
-    if filters.exclude_delisted:
-        conditions.append(
-            (InstrumentModel.delist_date.is_(None))
-            | (InstrumentModel.delist_date >= decision_start)
-        )
-        conditions.append(InstrumentModel.status != ListingStatus.DELISTED.value)
-    if filters.exclude_suspended:
-        conditions.append(InstrumentModel.status != ListingStatus.SUSPENDED.value)
-    if filters.exclude_benchmark_only:
-        conditions.append(
-            InstrumentModel.instrument_type.notin_(
-                (InstrumentType.INDEX.value, InstrumentType.FUTURES.value)
-            )
-        )
-    limit = spec.universe.selection_limit or _UNIVERSE_LIMIT
     selected_rows = (
         await session.execute(
             select(InstrumentModel.code)
@@ -416,7 +373,24 @@ async def _selected_symbols(
             .limit(limit)
         )
     ).all()
-    return [str(row[0]) for row in selected_rows]
+    resolved = [str(row[0]) for row in selected_rows]
+    if not resolved:
+        blockers.append(
+            _make_blocker(
+                "scope_universe_empty",
+                f"过滤条件在 decision_start={decision_start} 解析出 0 只标的",
+            )
+        )
+    return (
+        ScopeUniverseResult(
+            requested_count=total,
+            resolved_count=len(resolved),
+            truncated=truncated,
+            symbols_preview=tuple(resolved[:_PREVIEW_LIMIT]),
+        ),
+        blockers,
+        resolved,
+    )
 
 
 def _lifecycle_exclusion(
@@ -442,18 +416,37 @@ def _lifecycle_exclusion(
     return None
 
 
-def _types_for_classes(classes: tuple[object, ...]) -> set[str]:
+def _types_for_classes(
+    classes: tuple[object, ...],
+) -> tuple[set[str], set[str]]:
+    """资产大类 → 标的类型;返回 ``(允许类型, 未映射大类)``。
+
+    未映射绝不能回退成「不加 instrument_type 条件」——那会让商品/现金
+    范围静默混入全部 A 股(实测 ``asset_classes=["commodity"]`` 解析出
+    6 只正股),属于 fail-open。调用方据此产出 blocker。
+    """
+
     allowed = {str(item) for item in classes}
     types: set[str] = set()
+    mapped: set[str] = set()
     if AssetClass.EQUITY.value in allowed:
         types |= {InstrumentType.STOCK.value, InstrumentType.ETF.value}
+        mapped.add(AssetClass.EQUITY.value)
     if AssetClass.FIXED_INCOME.value in allowed:
         types |= {InstrumentType.BOND.value}
+        mapped.add(AssetClass.FIXED_INCOME.value)
     if AssetClass.CONVERTIBLE.value in allowed:
         types |= {InstrumentType.CONVERTIBLE.value}
+        mapped.add(AssetClass.CONVERTIBLE.value)
     if AssetClass.DERIVATIVE.value in allowed:
         types |= {InstrumentType.FUTURES.value}
-    return types
+        mapped.add(AssetClass.DERIVATIVE.value)
+    if AssetClass.COMMODITY.value in allowed:
+        # 商品期货与金融期货同属 futures 标的类型;交易所/日历由 markets
+        # 决定(FUTURE → 6 家商品+金融交易所并集)。
+        types |= {InstrumentType.FUTURES.value}
+        mapped.add(AssetClass.COMMODITY.value)
+    return types, allowed - mapped
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +543,10 @@ async def _select_releases(
                     ),
                     missing,
                 )
+            if not missing:
+                # 完美命中即停止探测:每份候选都要 ensure_instruments +
+                # missing_symbols,50 份候选逐个自愈是纯浪费。
+                break
         if best is None:
             if is_bars and best_bars_missing is not None:
                 missing_by_dataset[dataset] = best_bars_missing[1][:_MISSING_PREVIEW]
@@ -568,8 +565,36 @@ async def _select_releases(
                 )
             continue
         resolved, missing = best
+        if dataset in spec.datasets.optional:
+            # 可选数据集只做「有没有、缺多少」的观测,不进入冻结发布集合:
+            # 冻结集合必须与策略 validation_plan.dataset_release_ids 完全
+            # 一致,把 optional 放进去会让每次提交都 409。
+            alternatives.append(
+                ScopeAlternative(
+                    dataset=dataset,
+                    release_id=resolved.artifact_id,
+                    version=resolved.version,
+                    reason=(
+                        "可选数据集可用(不进入冻结集合,需要时加入 required)"
+                        if not missing
+                        else f"可选数据集可用但缺 {len(missing)} 只标的(容忍)"
+                    ),
+                )
+            )
+            if missing:
+                warnings.append(
+                    f"可选研究发布 {dataset.value} 缺 {len(missing)} 只标的(容忍)"
+                )
+            continue
         chosen[dataset] = resolved
         missing_by_dataset[dataset] = missing
+        if missing and not is_bars:
+            # 研究数据发布只提供因子观测:缺标的是容忍项,但必须具名可见,
+            # 否则「覆盖不全」会在执行期表现为因子值缺失。
+            warnings.append(
+                f"研究数据发布 {dataset.value} 缺 {len(missing)} 只标的(容忍,"
+                "相关标的该数据集观测为空)"
+            )
         for header in headers[:_ALT_LIMIT]:
             if header.release_id == resolved.artifact_id:
                 continue
@@ -594,7 +619,7 @@ async def _candidate_headers(
     if spec.release_selection == "locked":
         headers = [
             header
-            for release_id in spec.locked_release_ids
+            for release_id in sorted(spec.locked_release_ids)
             if (header := await repo.release_header(release_id)) is not None
             and header.dataset_kind is dataset_spec.release_kind
         ]
@@ -634,24 +659,45 @@ def _make_blocker(
     return ScopeBlocker(code=code, message=message, dataset=dataset)
 
 
-def _validate_locked(
+async def _validate_locked_bars(
+    session: AsyncSession,
     spec: DataScopeSpec,
-    chosen: dict[CatalogDataset, ResolvedRelease],
     blockers: list[ScopeBlocker],
 ) -> None:
+    """locked 模式必须恰好锁定一份 bars 主发布。
+
+    按 ``locked_release_ids`` 里 kind=BARS 的**发布数**判断:``chosen`` 按
+    数据集去重后最多一份 bars,数它永远看不到「锁了两份」。
+    """
+
+    repo = _repo(session)
     bars = [
-        item
-        for item in chosen.values()
-        if item.role == "bars_primary"
+        header
+        for release_id in sorted(spec.locked_release_ids)
+        if (header := await repo.release_header(release_id)) is not None
+        and header.dataset_kind is ReleaseDatasetKind.BARS
     ]
     if len(bars) != 1:
         blockers.append(
             _make_blocker(
                 "scope_locked_bars_ambiguous",
-                f"locked 模式必须恰好一份 bars 主发布,实际 {len(bars)}",
+                f"locked 模式必须恰好锁定一份 bars 主发布,实际 {len(bars)} 份",
                 CatalogDataset.BARS,
             )
         )
+
+
+def _validate_locked(
+    spec: DataScopeSpec,
+    chosen: dict[CatalogDataset, ResolvedRelease],
+    blockers: list[ScopeBlocker],
+) -> None:
+    """locked 模式的确定性校验(发布数量与 required 覆盖)。
+
+    bars 唯一性必须按 ``locked_release_ids`` 里 kind=BARS 的**发布数**判断:
+    ``chosen`` 按数据集去重,最多一份 bars,数它永远看不到「锁了两份」。
+    """
+
     for dataset in spec.datasets.required:
         if dataset not in chosen:
             blockers.append(
@@ -715,10 +761,26 @@ async def _affected_strategies(
 
 
 def _resolution_id(
-    checksum: str, release_ids: tuple[str, ...], resolver_version: str
+    checksum: str,
+    release_ids: tuple[str, ...],
+    resolver_version: str,
+    window: ScopeWindow,
 ) -> str:
+    """内容指纹:scope + 发布集合 + 解析器版本 + **解析出的窗口**。
+
+    窗口来自 ``trade_cal``,与 scope 声明无关(预热/尾部落位、非交易日
+    顺延都在解析期发生)。不把窗口纳入指纹时,日历补日/修正后同一份预览
+    仍能通过复验,静默冻结与预览不同的窗口。
+    """
+
+    window_key = (
+        f"{window.warmup_start}|{window.decision_start}|"
+        f"{window.decision_end}|{window.valuation_end}|"
+        f"{window.warmup_sessions}|{window.decision_sessions}|"
+        f"{window.tail_sessions}|{','.join(window.calendar_markets)}"
+    )
     digest = hashlib.sha256(
-        f"{checksum}|{','.join(release_ids)}|{resolver_version}".encode()
+        f"{checksum}|{','.join(release_ids)}|{resolver_version}|{window_key}".encode()
     ).hexdigest()[:16]
     return f"SC-{digest}"
 

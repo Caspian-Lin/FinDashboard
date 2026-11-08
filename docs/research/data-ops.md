@@ -675,6 +675,69 @@ profiles / suspensions)。REST `/api/data/catalog` 与 MCP
 目录只读:不触发同步/发布;写入口仍是 `dataset_sync` / `bulk_download` /
 `dataset_publish`。不同 source 或复权口径的发布不得在目录里合并成一行。
 
+## 统一数据范围:scope → release → run(#510)
+
+`DataScopeSpec` 是「这次研究用哪些数据」的唯一声明形态(数据集/标的池/
+决策区间/预热与尾部/基准/复权/发布选择模式)。它**不是新的持久化实体**:
+`POST /api/data/scopes/preview` 只解析不写库(唯一的写是 #509 逐标的读模型
+自愈 `ensure_instruments`,不改发布),返回 `resolution_id`(内容指纹)
++ 候选发布 + 窗口 + 缺口 + 阻塞;真正冻结发生在提交 run 时。
+
+### 一条完整链路
+
+```text
+1) 预览(只读)
+   POST /api/data/scopes/preview
+   {"scope": {"universe": {"explicit_symbols": ["000001.SZ"]},
+              "decision": {"start": "2024-01-02", "end": "2024-03-28"},
+              "warmup_sessions": 20, "tail_sessions": 5,
+              "benchmarks": ["000300.SH"],
+              "datasets": {"required": ["bars", "daily_metrics"]},
+              "bars_adjustment": "qfq"}}
+   → {resolution_id: "SC-…", window: {warmup_start, decision_start,
+      decision_end, valuation_end}, releases: [...], gaps, blockers}
+
+2) 提交 run(带同一份 scope + resolution_id)
+   POST /api/research/runs {"data_scope": {…同 1)…},
+                            "data_scope_resolution_id": "SC-…", …}
+   → 服务端重算:resolution_id 不一致 = 409 scope_release_drift(重新预览);
+     blockers 非空 = 422;通过后把 research_window 写进 parameters 并随
+     manifest 冻结。
+```
+
+MCP 侧只读入口是 `finboard_data_scope_preview`;写侧不新增工具,提交仍用
+`finboard_run_queue` 的 `data_scope` / `data_scope_resolution_id` 两个字段
+(成对出现,缺一即 `invalid_argument`)。
+
+### 语义边界
+
+- **窗口来自交易日历**,不是自然日:解析落位到 `trade_cal` 并集,预热不足/
+  尾部不足只发 warning,决策日不在日历内则具名拒绝(不用自然日兜底)。
+- **bars 主发布唯一**:`datasets.required` 必须含 bars;`locked` 模式必须
+  恰好一份可发布的 bars 且覆盖全部 required 数据集。
+- **benchmark 必须在 bars 主发布内**,否则 `scope_benchmark_not_in_bars`
+  阻塞(基准与候选池同源,避免跨发布价格口径漂移)。
+- **研究数据发布只提供因子观测**:研究类发布缺个别标的是 warning +
+  `gaps.missing_in_research`,不阻塞;bars 缺标的阻塞。
+- **旧发布只读**:解析只选不改(逐标的读模型自愈除外);需要扩范围时走 #511
+  补数产生**新发布**,不修改既有 release。
+- **scope.universe 是声明而不是运行池**:运行的真实候选池仍来自冻结策略规格
+  (`spec.universe` + bars 发布 instruments),scope 只声明「本次要检查哪些标的/
+  数据集」;把 scope 收窄不会缩小运行池,也不会替运行池做 bars 缺标的豁免。
+- **空池阻塞**:解析出 0 只标的(`scope_universe_empty`)、资产大类未映射
+  (`scope_asset_class_unmapped`)一律阻塞,不回退成「不过滤全市场」。
+- **漂移 fail-closed**:预览只是快照,提交必须复验;预览之后上线新发布
+  (auto 模式会改选)即 409,禁止「旧预览 + 新数据」静默执行。
+- **历史运行不受影响**:旧 manifest 没有 `data_scope` 键,读取/重放不重算
+  scope,也不因新字段改变 checksum。
+
+### 回滚路径
+
+scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:提交时省略
+`data_scope` / `data_scope_resolution_id`,run 行为与 #510 之前完全一致;
+已冻结的 run 不回改(manifest 不可变),需要新范围时新建 run。
+
+
 ## 课题缺口 → 全局补数(#511)
 
 课题发现缺口时不再各自触发同步:`finboard-backtest` 的 `data_backfill` 包把
