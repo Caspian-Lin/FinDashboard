@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_data.datasets import (
@@ -382,6 +382,44 @@ class CatalogRepository:
             _INSERT_INSTRUMENTS_SQL, {"release_id": release_id}
         )
         return await self.count_instruments(release_id) == expected
+
+    async def gap_summary(self, release_id: str) -> tuple[int, int, int]:
+        """(有缺口标的数, 缺口交易日总数, 期望交易日总数)。"""
+
+        row = (
+            await self._session.execute(
+                select(
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    ResearchDatasetReleaseInstrumentModel.missing_sessions
+                                    > 0,
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            ResearchDatasetReleaseInstrumentModel.missing_sessions
+                        ),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            ResearchDatasetReleaseInstrumentModel.expected_sessions
+                        ),
+                        0,
+                    ),
+                ).where(
+                    ResearchDatasetReleaseInstrumentModel.release_id == release_id
+                )
+            )
+        ).one()
+        return int(row[0]), int(row[1]), int(row[2])
 
     async def list_instruments(
         self,

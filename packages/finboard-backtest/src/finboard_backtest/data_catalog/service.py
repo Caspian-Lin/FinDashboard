@@ -131,6 +131,28 @@ class DataCatalogService:
             adjustment=spec.adjustment,
         )
 
+    async def list_batches(
+        self,
+        key: CatalogDataset | str,
+        *,
+        status: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[tuple[BatchHeader, ...], int]:
+        spec = catalog_spec(key)
+        if spec.sync_dataset is None:
+            return (), 0
+        rows, total = await self._repo.list_batches(
+            dataset=spec.sync_dataset,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+        return tuple(rows), total
+
+    async def release_header(self, release_id: str) -> ReleaseHeader | None:
+        return await self._repo.release_header(release_id)
+
     # ------------------------------------------------------------------ 覆盖
     async def get_coverage(
         self,
