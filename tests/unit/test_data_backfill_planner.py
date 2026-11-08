@@ -495,6 +495,50 @@ class TestAuditFixes:
             blocker.code == "backfill_adjustment_unsupported" for blocker in blockers
         )
 
+    def test_cross_market_bars_is_blocked(self) -> None:
+        """bulk_download 单 market 会静默丢掉另一市场 → 预检必须拒绝。"""
+
+        from finboard_backtest.data_backfill.planner import _item_blockers
+
+        blockers = _item_blockers(
+            support=support_for(CatalogDataset.BARS),
+            capabilities=_caps_for_unit(),
+            dataset=CatalogDataset.BARS,
+            publish=True,
+            has_gap=True,
+            adjustment="qfq",
+            frozen_symbols=("600000.SH", "IF2412.CFX"),
+            universe_filters={},
+            symbol_unit=True,
+            cross_market_bars=True,
+        )
+        assert any(
+            blocker.code == "backfill_multiple_markets_unsupported"
+            for blocker in blockers
+        )
+
+    def test_explicit_symbols_over_cap_blocks_publish_surface(self) -> None:
+        """显式标的超过冻结上限时发布面会退化为全集 → fail-closed。"""
+
+        from finboard_backtest.data_backfill.planner import _item_blockers
+
+        blockers = _item_blockers(
+            support=support_for(CatalogDataset.DAILY_METRICS),
+            capabilities=_caps_for_unit(),
+            dataset=CatalogDataset.DAILY_METRICS,
+            publish=True,
+            has_gap=True,
+            adjustment="none",
+            frozen_symbols=(),
+            universe_filters={},
+            symbol_unit=True,
+            explicit_over_cap=True,
+        )
+        assert any(
+            blocker.code == "backfill_symbol_scope_unresolved"
+            for blocker in blockers
+        )
+
     def test_unfreezable_large_universe_is_blocked(self) -> None:
         from finboard_backtest.data_backfill.planner import _item_blockers
 

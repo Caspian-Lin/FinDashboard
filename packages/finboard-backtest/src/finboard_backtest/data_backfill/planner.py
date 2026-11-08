@@ -103,6 +103,7 @@ from finboard_persistence.models import (
     ResearchDatasetReleaseModel,
     ResearchSyncBatchModel,
 )
+from finboard_shared.types import InstrumentType
 
 #: 可用发布的 quality_status 白名单(与 #509 目录 ``_USABLE_STATUSES`` 同口径)。
 _USABLE_RELEASE_STATUSES = ("passed", "warnings")
@@ -316,6 +317,9 @@ async def plan_backfill(
     blockers: list[BackfillBlocker] = []
     total_estimated = 0
     affected_release_ids: list[str] = []
+    # 显式标的清单超过冻结上限时无法表达成 universe_filters;发布面会退化为
+    # 数据集全集(发布面 > 请求面),按 fail-closed 在预检阻塞。
+    explicit_over_cap = len(spec.scope.universe.explicit_symbols) > _MAX_SYMBOL_FILTER
 
     for dataset_spec in spec.ordered_datasets():
         support = support_for(dataset_spec.dataset)
@@ -422,6 +426,16 @@ async def plan_backfill(
                 estimated = max(1, len(repair_symbols))
         total_estimated += estimated
 
+        known_types = {
+            kind for kind in item_types.values() if kind != "unknown"
+        }
+        cross_market_bars = (
+            support.sync_mode == "bulk_download"
+            and InstrumentType.FUTURES.value in known_types
+            and any(
+                kind != InstrumentType.FUTURES.value for kind in known_types
+            )
+        )
         item_blockers.extend(
             _item_blockers(
                 support=support,
@@ -433,6 +447,8 @@ async def plan_backfill(
                 frozen_symbols=frozen_symbols,
                 universe_filters=item_filters,
                 symbol_unit=symbol_unit,
+                cross_market_bars=cross_market_bars,
+                explicit_over_cap=explicit_over_cap,
             )
         )
         if support.requires_a_share_stock and item_types:
@@ -729,6 +745,8 @@ def _item_blockers(
     frozen_symbols: Sequence[str],
     universe_filters: dict[str, object],
     symbol_unit: bool,
+    cross_market_bars: bool = False,
+    explicit_over_cap: bool = False,
 ) -> list[BackfillBlocker]:
     """运行时能力与支持清单的阻塞项(缺一项即具名,不静默跳过)。"""
 
@@ -804,6 +822,34 @@ def _item_blockers(
             BackfillBlocker(
                 code="backfill_release_root_unwritable",
                 message="发布根目录不可写,无法冻结新发布",
+                dataset=dataset,
+            )
+        )
+    if cross_market_bars:
+        # bulk_download 的 payload 只有单个 ``market``;跨市场标的会在下载
+        # 阶段被静默过滤,但发布面仍按全部冻结标的写 manifest —— 发布出一份
+        # 「含期货、实际只有 A 股」的残缺缓存。预检即拒绝,要求按市场拆分。
+        outcome.append(
+            BackfillBlocker(
+                code="backfill_multiple_markets_unsupported",
+                message=(
+                    "bars 缓存补数一次只能覆盖单一市场(bulk_download 按 "
+                    "market 过滤),请求标的跨市场;请按市场拆分补数请求"
+                ),
+                dataset=dataset,
+            )
+        )
+    if explicit_over_cap and publish and support.publishable:
+        # 显式标的超过冻结上限时发布面会退化为「数据集全集」(发布面 > 请求面),
+        # 不能靠 universe_filters 表达一支显式清单 —— fail-closed。
+        outcome.append(
+            BackfillBlocker(
+                code="backfill_symbol_scope_unresolved",
+                message=(
+                    f"显式标的超过 {_MAX_SYMBOL_FILTER} 只,无法冻结为发布标的域;"
+                    "发布面会退化为全集。请收窄 explicit_symbols 或改用 "
+                    "markets / instrument_types 过滤器"
+                ),
                 dataset=dataset,
             )
         )

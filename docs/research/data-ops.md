@@ -816,11 +816,11 @@ scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:
 
 ### 发布身份与历史冻结
 
-补数发布的 `release_id = DR-<dataset>[-<adjustment>]-<request_id>`、
-`version = v[-<adjustment>]-<request_id>`(非 `none` 复权才带后缀,避免同
-dataset 多复权项撞同一发布身份);同一请求重跑命中同一身份即幂等返回;
-`plan` 里只给预告模板。既有发布只读:补数只追加新版本,任何补数都不会修改
-历史 release 的 checksum / 区间 / 逐标覆盖。
+补数发布的 `release_id = DR-<dataset>[-<adjustment>][-<source>]-<request_id>`、
+`version = v[-<adjustment>][-<source>]-<request_id>`(非 `none` 复权、非默认
+来源才带对应后缀,避免同 dataset 多复权/多来源项撞同一发布身份);同一请求重跑
+命中同一身份即幂等返回;`plan` 里只给预告模板。既有发布只读:补数只追加新版本,
+任何补数都不会修改历史 release 的 checksum / 区间 / 逐标覆盖。
 
 ### 入口
 
