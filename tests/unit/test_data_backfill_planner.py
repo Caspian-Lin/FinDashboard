@@ -495,6 +495,20 @@ class TestAuditFixes:
             blocker.code == "backfill_adjustment_unsupported" for blocker in blockers
         )
 
+    def test_cross_market_detected_from_scope_type_counts(self) -> None:
+        """大宇宙 item 类型为空时,用 scope 类型聚合计数仍能识别跨市场。"""
+
+        from finboard_backtest.data_backfill.planner import _cross_market_bars
+
+        bars = support_for(CatalogDataset.BARS)
+        assert _cross_market_bars(bars, {}, {"stock": 2, "futures": 1}) is True
+        assert _cross_market_bars(bars, {}, {"futures": 3}) is False
+        assert _cross_market_bars(bars, {}, {"stock": 3}) is False
+        assert (
+            _cross_market_bars(bars, {"600000.SH": "stock", "IF2412.CFX": "futures"}, {})
+            is True
+        )
+
     def test_cross_market_bars_is_blocked(self) -> None:
         """bulk_download 单 market 会静默丢掉另一市场 → 预检必须拒绝。"""
 

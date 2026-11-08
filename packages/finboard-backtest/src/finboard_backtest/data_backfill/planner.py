@@ -317,9 +317,6 @@ async def plan_backfill(
     blockers: list[BackfillBlocker] = []
     total_estimated = 0
     affected_release_ids: list[str] = []
-    # 显式标的清单超过冻结上限时无法表达成 universe_filters;发布面会退化为
-    # 数据集全集(发布面 > 请求面),按 fail-closed 在预检阻塞。
-    explicit_over_cap = len(spec.scope.universe.explicit_symbols) > _MAX_SYMBOL_FILTER
 
     for dataset_spec in spec.ordered_datasets():
         support = support_for(dataset_spec.dataset)
@@ -426,15 +423,15 @@ async def plan_backfill(
                 estimated = max(1, len(repair_symbols))
         total_estimated += estimated
 
-        known_types = {
-            kind for kind in item_types.values() if kind != "unknown"
-        }
-        cross_market_bars = (
-            support.sync_mode == "bulk_download"
-            and InstrumentType.FUTURES.value in known_types
-            and any(
-                kind != InstrumentType.FUTURES.value for kind in known_types
-            )
+        cross_market_bars = _cross_market_bars(
+            support, item_types, scope_symbols.type_counts
+        )
+        # 显式标的清单超过冻结上限时无法表达成 universe_filters;发布面会退化
+        # 为数据集全集(发布面 > 请求面)。按 item 实际标的判断,避免 dataset
+        # spec 已收窄标的却被全局显式清单误伤。
+        explicit_over_cap = (
+            bool(spec.scope.universe.explicit_symbols)
+            and len(item_symbols) > _MAX_SYMBOL_FILTER
         )
         item_blockers.extend(
             _item_blockers(
@@ -732,6 +729,28 @@ def _decide_action(
     if repair:
         return BackfillAction.REPAIR if wants_publish else BackfillAction.SYNC
     return BackfillAction.SYNC_PUBLISH if wants_publish else BackfillAction.SYNC
+
+
+def _cross_market_bars(
+    support: BackfillSupport,
+    item_types: dict[str, str],
+    scope_type_counts: dict[str, int],
+) -> bool:
+    """bars(bulk_download)请求的标的域是否跨市场。
+
+    item 级类型解析在标的数超过冻结上限时为空,此时退到 scope 解析阶段的
+    类型聚合计数 —— 全市场 / 多市场过滤器场景也必须 fail-closed,不能默认
+    按 a_share 下传(期货会在下载阶段被静默过滤,发布面却仍包含期货)。
+    """
+
+    known = {kind for kind in item_types.values() if kind != "unknown"}
+    if not known:
+        known = set(scope_type_counts)
+    return (
+        support.sync_mode == "bulk_download"
+        and InstrumentType.FUTURES.value in known
+        and any(kind != InstrumentType.FUTURES.value for kind in known)
+    )
 
 
 def _item_blockers(
