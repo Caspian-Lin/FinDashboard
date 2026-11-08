@@ -181,7 +181,7 @@ docs/demo/                GitHub Pages Demo、媒体与录制规划
 ## 文档
 
 - [开发指南](./docs/dev-guide.md)
-- [研究数据运维](./docs/research/data-ops.md)
+- [研究数据运维](./docs/research/data-ops.md) —— 共享数据基座 Web 入口为 `/data`(概览 / 数据集 / 同步与发布 / 技术详情)
 - [研究路线图与结论](./docs/research/)
 - [Demo 方案与核验](./docs/demo/README.md)
 - [生产级系统计划](./phase1_doc.md)
