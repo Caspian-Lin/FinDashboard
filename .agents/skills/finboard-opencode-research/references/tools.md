@@ -1934,3 +1934,54 @@ def decide(ctx):
 先读 `oos_outcome` 再读实验 `status`。validated_oos+not_supported不能称验证通过；published/completed不能称晋级。决策目录→选ID/日期+symbol→翻has_more，目标与成交分开解释，空阶段说明缺记录。成本/滑点/延迟配置不等于已执行，真实能力缺口仍见#502/#503。
 
 课题列表为excerpted摘要（问题/摘要/下一步最多1200字、开放问题最多5项各300字），查精确ID详情才取完整工作目标。目标同版本不可换门槛，轮次goal_version须已归档。记忆refs超过16KiB标refs_truncated且不可验证；说明书冻结manifest限1MiB、因子params限16KiB，超限不退回全量run_get。
+
+## finboard.data_backfill.*(✅ #511:2 只读 + 2 写)
+
+课题缺口 → 全局补数 → 复用发布。复用 `finboard_backtest.data_backfill`
+(与 REST `/api/data/backfills` 同源):预检纯读,提交写;执行器只编排既有
+`dataset_sync` / `bulk_download` / `quality_repair` / `dataset_publish`,
+不复制同步或发布逻辑。补数只产生**新的不可变发布**,旧发布只读。
+
+`spec` 结构 = `{scope(#510 DataScopeSpec), datasets:[{dataset, source?,
+adjustment?, start?, end?, symbols?, publish?}], quality_profile?}`;
+显式 `start/end` 必须落在 scope 窗口内(否则 `invalid_argument`)。
+
+### finboard_data_backfill_preview
+只读预检:缺口范围、支持来源、配额、补齐步骤与发布影响。
+- 参数:`spec: object` / `as_of?: str`(ISO 时间)
+- 返回:`request_fingerprint` / `scope_checksum` / `plan_checksum` /
+  `items[{dataset, source, action, start, end, missing_ranges,
+  missing_symbols{count,preview}, covered_by, estimated_requests,
+  publish_preview, blockers}]` + `quota` + `overlaps` + `publish_impact` +
+  `blockers` / `warnings`
+- 纯读:不建请求、不触发同步或发布;日历缺失 / 窗口越界 → `invalid_argument`
+
+### finboard_data_backfill_submit(写)
+显式提交补数请求(只读模式 `mcp_readonly_only` 拒绝)。
+- 参数:`spec: object` / `expected_plan_checksum?` / `idempotency_key?`
+  (缺省 `mcp:<fingerprint>`,等价重试回同一请求)
+- 返回:`request_id` / `job_id` / `status` / `created` / `reused` /
+  `plan_checksum` / `items`
+- 命中幂等键或同 fingerprint 在途请求 → `created=false` 复用;
+  提交前复算 plan 与 `expected_plan_checksum` 不一致 → `conflict`
+  `backfill_plan_drift`(**必须重新预览**,禁止按旧计划执行);受阻需求落
+  `blocked` 请求(不建 job)
+
+### finboard_data_backfill_list
+只读:补数请求列表 / 详情。
+- 参数:`request_id?`(给了返回详情)/ `status?`(逗号分隔)/ `dataset?` /
+  `requested_by?` / `limit?: int = 20`(1..100)/ `offset?: int = 0`
+- 返回:列表 `{items, total, limit, offset}`;详情含逐 item 的
+  action/status/batch_ids/release_id/error;请求不存在 → `not_found`
+
+### finboard_data_backfill_cancel(写)
+协作式取消补数请求(只读模式拒绝)。
+- 参数:`request_id: str`
+- 返回:`{request_id, status, job_id, cancel_requested}`
+- 未完成 item 标 `cancelled`;**已成功 item 的发布不回滚**(发布不可变);
+  终态(含 partial)拒绝取消
+- 失败/取消后重试**只补剩余项**(新建请求,`retry_of_request_id` 血缘)——
+  MCP 侧用 `finboard_data_backfill_submit` 带上剩余 spec 重新提交。
+
+审计只记录 scope_checksum / fingerprint / 数据集清单,不记录完整 symbols;
+`POST /api/jobs` 与 `finboard_job_enqueue` 不开放 `data_backfill` kind。
