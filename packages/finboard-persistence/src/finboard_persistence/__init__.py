@@ -10,6 +10,7 @@ from finboard_persistence.convertible_metadata_repo import (
     ConvertibleMetadataRepository,
     ConvertibleMetadataSyncResult,
 )
+from finboard_persistence.data_backfill_repo import DataBackfillRepository
 from finboard_persistence.dataset_release_repo import (
     ReleaseInstrumentCatalogRepository,
     ReleaseSymbolSourceError,
@@ -56,6 +57,8 @@ from finboard_persistence.models import (
     BondMetadataModel,
     ContinuousFuturesRuleModel,
     ConvertibleMetadataModel,
+    DataBackfillRequestItemModel,
+    DataBackfillRequestModel,
     DatasetManifestModel,
     EtfMetadataAuditModel,
     EtfMetadataModel,
@@ -188,6 +191,9 @@ __all__ = [
     "ConvertibleMetadataModel",
     "ConvertibleMetadataRepository",
     "ConvertibleMetadataSyncResult",
+    "DataBackfillRepository",
+    "DataBackfillRequestItemModel",
+    "DataBackfillRequestModel",
     "DatasetManifestModel",
     "EtfMetadataAuditModel",
     "EtfMetadataModel",
