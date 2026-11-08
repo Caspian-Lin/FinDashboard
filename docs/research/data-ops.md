@@ -772,7 +772,8 @@ scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:
 
 - **身份维度** = `(dataset, source, adjustment)` + 窗口 + 标的 + 发布开关;
   异源或不同复权口径永远不参与复用,fingerprint 也不同;item 唯一键与发布身份
-  都含 `adjustment`(同 dataset 可同时补 qfq/hqfq,互不覆盖);
+  都含 `adjustment` 与非默认 `source`(同 dataset 的多来源/多复权项互不覆盖;
+  bars 的 hqfq 会被预检阻塞,唯一键仍保留该维度以便未来放开);
 - **已完成覆盖**:可发布数据集以 `research_dataset_releases` 的可用发布
   (逐标派生索引)为准;不可发布数据集以 `research_sync_batches` 的已发布
   批次为准;
@@ -782,10 +783,12 @@ scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:
   **缺口区间冻结进 item**,执行器按区间取数(不重跑整窗),发布仍冻结请求窗口;
   `reused_request_ids` 记录复用来源,剩余为空时不建 job 直接返回 `succeeded`
   复用结果;
-- **标的缺口同样触发补数**:窗口级覆盖齐全但请求标的有缺失时 action 不是
-  `noop`(否则发布面缺标的);逐标的单元按标的冻结标的列表(≤2000)或
-  `universe_filters`,发布面不得宽于请求面;大宇宙无法用单一过滤器表达时
-  具名 `backfill_symbol_scope_unresolved`,不静默放宽;
+- **标的缺口同样触发补数**:窗口级覆盖齐全但请求标的有缺失时,缺口按
+  「该标的未覆盖的区间」冻结成 `missing_ranges` 并真正执行同步(不只是
+  action 变成 sync);逐标的单元按标的冻结标的列表(≤2000)或
+  `universe_filters`,发布面不得宽于请求面(含窗口级数据集);过滤器必须能
+  转成 `dataset_sync` 支持的键(至少 `instrument_type`),否则具名
+  `backfill_symbol_scope_unresolved`,不静默放宽;
 - 同一 `fingerprint` 的在途请求直接复用;等价重试(同 `Idempotency-Key`)
   回同一请求;失败/取消后重提或 `POST /{id}/retry` 生成新请求并保留
   `retry_of_request_id` 血缘;
@@ -828,6 +831,10 @@ dataset 多复权项撞同一发布身份);同一请求重跑命中同一身份�
 | 列表/详情 | `GET /api/data/backfills[/{id}]` | `finboard_data_backfill_list` |
 | 取消 | `POST /api/data/backfills/{id}/cancel` | `finboard_data_backfill_cancel` |
 | 重试剩余项 | `POST /api/data/backfills/{id}/retry` | — |
+
+迁移拆成 `c4a1b2d3e5f6`(请求/明细两表)与 `d3e4f5a6b7c8`(明细的冻结
+字段与含 `adjustment` 的唯一键):已应用前者的库直接 `alembic upgrade head`
+即可补齐,无需手动 downgrade;`create_all` 与迁移的索引/约束形态一致。
 
 `POST /api/jobs` 与 `finboard_job_enqueue` **不开放** `data_backfill` kind:
 补数只经语义端点提交,避免绕过预检;MCP 审计只记录 scope_checksum /
