@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_backtest.data_catalog import (
+    CatalogError,
+    CatalogQuery,
+    DataCatalogService,
+)
+from finboard_data.datasets import CatalogDataset
 from finboard_data.releases import (
     ReleaseDatasetKind,
     ReleasedInstrument,
@@ -167,3 +174,52 @@ async def test_release_references_empty(
 ) -> None:
     repo = CatalogRepository(db_session)
     assert await repo.list_references(_RELEASE_ID) == []
+
+
+async def test_service_catalog_coverage_and_presence(
+    db_session: AsyncSession,
+    published: ResearchDatasetRelease,
+    tmp_path: Path,
+) -> None:
+    service = DataCatalogService(
+        db_session,
+        cache_dir=tmp_path,
+        release_root=tmp_path,
+    )
+    entries, total = await service.list_entries(CatalogQuery())
+    assert total == 10
+    by_key = {entry.key: entry for entry in entries}
+    assert by_key[CatalogDataset.BARS].status == "not_ingested"
+    assert by_key[CatalogDataset.DAILY_METRICS].release is not None
+
+    detail = await service.get_dataset(CatalogDataset.DAILY_METRICS)
+    assert detail.releases[0].release_id == _RELEASE_ID
+    assert detail.spec.fields
+
+    coverage = await service.get_coverage(CatalogDataset.DAILY_METRICS)
+    assert coverage.release is not None
+    assert coverage.symbols_with_gaps == 2
+    assert coverage.expected_sessions == 12
+    assert coverage.missing_preview
+
+    page = await service.list_release_instruments(_RELEASE_ID, limit=2)
+    assert page.total == 3
+    assert len(page.items) == 2
+
+    presence = await service.find_instrument_presence("TST510.SH")
+    assert presence.total == 1
+    assert presence.items[0].release_id == _RELEASE_ID
+
+    references = await service.list_release_references(_RELEASE_ID)
+    assert references.items == ()
+
+    calendar = await service.get_calendar("SSE", _START, _END)
+    assert calendar.days == ()
+    assert calendar.source == "trade_cal_missing"
+
+
+async def test_service_rejects_unknown_release(db_session: AsyncSession) -> None:
+    service = DataCatalogService(db_session, cache_dir="does-not-exist")
+    with pytest.raises(CatalogError) as exc_info:
+        await service.list_release_instruments("NOPE")
+    assert exc_info.value.code == "release_not_found"
