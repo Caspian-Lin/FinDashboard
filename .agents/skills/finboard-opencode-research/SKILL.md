@@ -27,7 +27,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 
 ## 工具选择(快速参考)
 
-已实现 143 个工具(注册表一致性由测试校验);schema与实际能力以当前运行时为准,数量不证明研究可靠性。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
+已实现 144 个工具(注册表一致性由测试校验);schema与实际能力以当前运行时为准,数量不证明研究可靠性。标注 ✅(可用) / 🔒(planned,对应 issue 尚未实现):
 
 | 场景 | 工具 | 状态 | 权限 |
 |------|------|------|------|
@@ -35,6 +35,7 @@ description: FinBoard 研究 Skill —— 指导 OpenCode 研究 Agent 的工作
 | 记住 / 查询 / 纠正研究记忆 | `finboard.memory.*`(7 个) | ✅ | 直接执行 |
 | 标的元数据 / 数据集发布 / 缓存状态 / 数据质量 / Tushare 配额 | `finboard.instrument.*` / `.dataset.*` / `.data.*` / `.tushare.*`(9 个) | ✅ #124 | 只读 |
 | 全局数据目录(数据集列表/详情/覆盖报告/发布逐标的/引用反查;只读,不触发 sync/publish) | `finboard.data_catalog.*` / `.dataset.release.*`(5 个) | ✅ #509 | 只读 |
+| 统一数据范围预览(scope → 候选发布/执行窗口/缺口/阻塞;提交 run 时回填 resolution_id 复验) | `finboard.data_scope.*`(1 个) | ✅ #510 | 只读 |
 | 数据准备(拉取/同步/发布/修复/ETF/配置) | `finboard.data_write.*` / `.etf.*`(12 个) | ✅ #137 | 2 只读 + 10 自主执行 |
 | 因子目录 / 特征快照 / 因子信号 / 因子实验 | `finboard.factor.*` / `.feature_snapshot.*`(12 个) | ✅ #125 | 8 只读 + 4 自主执行 |
 | 策略规格 / 预设(registry/template/validate/draft/publish/rollback/diff/preset CRUD;feature_graph 可按 `u_<name>` 引用沙箱用户因子,仅 active+promotion_status=passed 可引用,#217/#219) | `finboard.strategy.*` / `.preset.*`(16 个) | ✅ #126 | 8 只读 + 8 自主执行 |

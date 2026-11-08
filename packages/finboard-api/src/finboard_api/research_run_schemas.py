@@ -6,8 +6,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from finboard_backtest.data_scope.contracts import DataScopeSpec
 from finboard_backtest.research_run.contracts import (
     DECISION_SCHEDULE_KINDS,
     REBALANCE_FREQUENCIES,
@@ -39,6 +40,18 @@ class ResearchRunQueueIn(BaseModel):
     # issue #312:REST 默认 human 不变;放开 agent(网关/自动化通道显式声明),
     # llm 仍被拒绝(契约层 fail-closed,红线不变)。
     actor_type: Literal["human", "agent"] = "human"
+    # issue #510:统一数据范围预览结论的回填。声明时必须同时给
+    # ``data_scope_resolution_id``(预览返回,SC- 前缀):提交期重算复验,
+    # 解析集合必须与 dataset_release_ids 一致,窗口合并进
+    # ``parameters.research_window``。None = 旧入口,行为不变。
+    data_scope: DataScopeSpec | None = None
+    data_scope_resolution_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_data_scope(self) -> ResearchRunQueueIn:
+        if self.data_scope is None and self.data_scope_resolution_id is not None:
+            raise ValueError("data_scope_resolution_id 必须与 data_scope 一起声明")
+        return self
 
     @field_validator("parameters")
     @classmethod

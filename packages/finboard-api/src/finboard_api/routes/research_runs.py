@@ -15,7 +15,7 @@ import re
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import ValidationError
@@ -31,6 +31,10 @@ from finboard_api.research_run_schemas import (
     ResearchRunReplayIn,
 )
 from finboard_app.research_run_store import SqlAlchemyResearchRunStore
+from finboard_backtest.data_scope import (
+    ScopeGateError,
+    apply_scope_to_parameters,
+)
 from finboard_backtest.research_code import (
     active_user_factor_names,
     active_user_strategy_commits,
@@ -129,6 +133,28 @@ async def queue_research_run(
             status_code=422,
             detail="运行数据发布必须与策略验证计划完全一致",
         )
+    # issue #510:统一数据范围提交复验。用同一份 DataScopeSpec 重算,比对
+    # 预览返回的 resolution_id —— 预览后若上线了新发布,auto 选择会变、
+    # resolution_id 也变,这里 409 要求重新预览(不静默换最新发布);通过后
+    # 把解析出的 research_window 合并进 parameters(dev #502 执行窗口),
+    # manifest 按 checksum 冻结。
+    scope_manifest: dict[str, Any] | None = None
+    if body.data_scope is not None:
+        try:
+            body.parameters, scope_manifest = await apply_scope_to_parameters(
+                session,
+                body.data_scope,
+                resolution_id=body.data_scope_resolution_id,
+                release_ids=body.dataset_release_ids,
+                strategy_id=body.strategy_id,
+                strategy_version=body.strategy_version,
+                parameters=body.parameters,
+            )
+        except ScopeGateError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": exc.message, **exc.detail},
+            ) from exc
     try:
         releases = [
             await ResearchDatasetReleaseRepository(session).require_usable(release_id)
@@ -510,6 +536,9 @@ async def queue_research_run(
             # issue #312:REST 默认 human 不变;body 可显式声明 agent
             # (schema Literal 已放开,llm 由契约层 fail-closed 拒绝)。
             actor_type=ResearchActorType(body.actor_type),
+            # issue #510:scope 解析结论只在声明时冻结;None 时 manifest
+            # checksum 与历史逐字节一致。
+            data_scope=cast(dict[str, JsonValue] | None, scope_manifest),
         )
         row, _ = await ResearchRunRepository(session).create_or_get(
             run_id=manifest.run_id,
