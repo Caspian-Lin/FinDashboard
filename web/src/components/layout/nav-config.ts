@@ -39,6 +39,7 @@ export const navGroups: NavGroup[] = [
   {
     label: { zh: "研究", en: "Research" },
     items: [
+      { to: "/data", label: { zh: "数据基座", en: "Data Base" }, icon: Database, end: true },
       { to: "/research", label: { zh: "研究首页", en: "Research Home" }, icon: Home, end: true },
       { to: "/research/topics", label: { zh: "研究课题", en: "Research Topics" }, icon: BookOpen },
       {
@@ -59,11 +60,6 @@ export const navGroups: NavGroup[] = [
   {
     label: { zh: "高级研究工具", en: "Advanced Research Tools" },
     items: [
-      {
-        to: "/research/data",
-        label: { zh: "数据与标的", en: "Data & Instruments" },
-        icon: Database,
-      },
       { to: "/research/factors", label: { zh: "因子实验室", en: "Factor Lab" }, icon: Atom },
       { to: "/backtest", label: { zh: "回测", en: "Backtest" }, icon: TrendingUp },
       {

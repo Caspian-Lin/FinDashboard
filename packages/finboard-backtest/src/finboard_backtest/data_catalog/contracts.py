@@ -120,6 +120,72 @@ class ReferencePage:
     deep_links: dict[str, str] = field(default_factory=dict)
 
 
+#: 课题数据视图的建议动作码(前端映射文案 + 跳转,服务端不返回格式化文案)。
+TOPIC_NEXT_STEP_READY = "ready"
+TOPIC_NEXT_STEP_FIX_GAPS = "fix_gaps"
+TOPIC_NEXT_STEP_BLOCKED = "blocked"
+TOPIC_NEXT_STEP_NO_REFS = "no_refs"
+
+#: 课题缺口原因码(稳定码,前端按码展示;message 仅作人类可读补充)。
+TOPIC_GAP_RELEASE_NOT_FOUND = "release_not_found"
+TOPIC_GAP_RUN_NOT_FOUND = "run_not_found"
+TOPIC_GAP_DATASET_NOT_PUBLISHED = "dataset_not_published"
+TOPIC_GAP_DATASET_KIND_UNMAPPED = "dataset_kind_unmapped"
+TOPIC_GAP_QUALITY_BLOCKED = "quality_blocked"
+TOPIC_GAP_COVERAGE_GAP = "coverage_gap"
+
+
+@dataclass(frozen=True, slots=True)
+class TopicReleaseCoverage:
+    """课题引用的一份发布 + 该发布的目录覆盖报告(复用 #509 口径)。"""
+
+    release: ReleaseHeader
+    dataset: CatalogDataset
+    coverage: CoverageReport
+
+
+@dataclass(frozen=True, slots=True)
+class TopicCoverageSummary:
+    """课题数据视图汇总;百分比与分母原样来自服务端,前端不自算。"""
+
+    release_count: int
+    dataset_count: int
+    min_coverage_pct: Decimal | None
+    missing_sessions: int
+    symbols_with_gaps: int
+    denominators: tuple[str, ...]
+    #: ``data_scope``(显式范围)或 ``refs``(轮次引用推导)。
+    resolved_by: str
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TopicGap:
+    """课题数据范围的具名缺口(不可解析引用 / 质量受阻 / 覆盖不足)。"""
+
+    release_id: str
+    dataset: str
+    reason: str
+    message: str
+    coverage_pct: Decimal | None = None
+    missing_sessions: int = 0
+    symbols_with_gaps: int = 0
+    #: 已知的目录数据集 key(仅内部使用:据此补 last_sync 的批次时刻)。
+    dataset_key: CatalogDataset | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TopicCoverageReport:
+    """课题数据视图:引用解析后的发布集合 + 覆盖 + 缺口 + 下一步。"""
+
+    topic_id: str
+    releases: tuple[TopicReleaseCoverage, ...]
+    coverage: TopicCoverageSummary
+    gaps: tuple[TopicGap, ...]
+    last_sync: datetime | None
+    next_step: str
+
+
 @dataclass(frozen=True, slots=True)
 class CalendarView:
     market: str
@@ -146,6 +212,16 @@ __all__ = [
     "STATUS_STALE",
     "STATUS_UNKNOWN",
     "STATUS_USABLE",
+    "TOPIC_GAP_COVERAGE_GAP",
+    "TOPIC_GAP_DATASET_KIND_UNMAPPED",
+    "TOPIC_GAP_DATASET_NOT_PUBLISHED",
+    "TOPIC_GAP_QUALITY_BLOCKED",
+    "TOPIC_GAP_RELEASE_NOT_FOUND",
+    "TOPIC_GAP_RUN_NOT_FOUND",
+    "TOPIC_NEXT_STEP_BLOCKED",
+    "TOPIC_NEXT_STEP_FIX_GAPS",
+    "TOPIC_NEXT_STEP_NO_REFS",
+    "TOPIC_NEXT_STEP_READY",
     "CalendarView",
     "CatalogEntry",
     "CatalogError",
@@ -155,4 +231,8 @@ __all__ = [
     "InstrumentPage",
     "PresencePage",
     "ReferencePage",
+    "TopicCoverageReport",
+    "TopicCoverageSummary",
+    "TopicGap",
+    "TopicReleaseCoverage",
 ]

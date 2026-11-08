@@ -181,7 +181,7 @@ The current phase prioritizes research data releases, factor experiments, Resear
 ## Documentation
 
 - [Development guide](./docs/dev-guide.md)
-- [Research data operations](./docs/research/data-ops.md)
+- [Research data operations](./docs/research/data-ops.md) — the shared data base Web entry point is `/data` (overview / datasets / sync & publish / tech detail).
 - [Research roadmap and findings](./docs/research/)
 - [Demo plan and verification](./docs/demo/README.md)
 - [Production-grade system plan](./phase1_doc.md)

@@ -2749,25 +2749,63 @@ function InstrumentsTab({ onGoToFetch }: { onGoToFetch: () => void }) {
   );
 }
 
-export default function ResearchData() {
+export interface ResearchDataOpsProps {
+  /**
+   * 嵌入 `/data` 的「数据集 → 分类操作」视图(issue #512):
+   * 隐藏页面标题,页签状态改用 `sub` 参数,`release` 发布抽屉交给父级页面。
+   */
+  embedded?: boolean;
+  /** 嵌入模式下的受控页签(由父级 URL 的 `sub` 驱动)。 */
+  sub?: string;
+  onSubChange?: (value: string) => void;
+  /** 打开发布详情;嵌入时由 `/data` 页面级抽屉接管。 */
+  onOpenRelease?: (releaseId: string) => void;
+}
+
+const LEGACY_TAB_ALIASES: Record<string, string> = { fetch: "bars", releases: "bars" };
+
+function normalizeLegacyTab(raw: string | null): string {
+  if (raw === null) return "bars";
+  return LEGACY_TAB_ALIASES[raw] ?? raw;
+}
+
+/**
+ * 旧「数据与标的」操作面板(行情拉取 / 每日指标 / 财务与三表 / 分红 / 转债 /
+ * 标的与生命周期 + 发布向导)。
+ *
+ * issue #512 起作为 `/data` 数据集 tab 的「分类操作」子视图挂载:内部逻辑
+ * 原样保留,只是把页签参数换成 `sub`、把发布抽屉交给父级页面,降低回归面。
+ */
+export default function ResearchDataOps({
+  embedded = false,
+  sub,
+  onSubChange,
+  onOpenRelease,
+}: ResearchDataOpsProps = {}) {
   const { tl } = useT();
   const [searchParams, setSearchParams] = useSearchParams();
   // 发布详情抽屉走 ?release= 深链(研究运行「冻结输入」卡片/因子实验室跳转目标)。
-  const drawerRelease = searchParams.get("release");
+  // 嵌入时由 `/data` 页面统一渲染抽屉,这里不再重复接管 release 参数。
+  const drawerRelease = embedded ? null : searchParams.get("release");
   const openRelease = (releaseId: string) => {
+    if (embedded) {
+      onOpenRelease?.(releaseId);
+      return;
+    }
     setSearchParams({ release: releaseId }, { replace: true });
   };
   const closeRelease = () => {
     setSearchParams({}, { replace: true });
   };
-  // 页签状态进 URL(?tab=):刷新不再跳回默认页签。
+  // 页签状态进 URL(?tab= / 嵌入时 ?sub=):刷新不再跳回默认页签。
   // 旧深链兼容:fetch(行情拉取)与 releases(数据发布)合并进「行情」页签。
-  const rawTab = searchParams.get("tab");
-  const activeTab =
-    rawTab === null || rawTab === "fetch" || rawTab === "releases"
-      ? "bars"
-      : rawTab;
+  const rawTab = searchParams.get(embedded ? "sub" : "tab");
+  const activeTab = embedded ? normalizeLegacyTab(sub ?? rawTab) : normalizeLegacyTab(rawTab);
   const setActiveTab = (value: string) => {
+    if (embedded) {
+      onSubChange?.(value);
+      return;
+    }
     const next: Record<string, string> = {};
     if (value !== "bars") next.tab = value;
     if (drawerRelease) next.release = drawerRelease;
@@ -2787,13 +2825,15 @@ export default function ResearchData() {
 
   return (
     <div>
-      <PageHeader
-        title={tl({ zh: "数据与标的", en: "Data & Instruments" })}
-        description={tl({
-          zh: "按数据类型浏览:行情、每日指标、财务指标、利润表、资产负债表、现金流量表、分红送股、可转债与标的元数据;各类型均可浏览已发布版本并发起新发布",
-          en: "Browse by data type: market data, daily metrics, financial indicators, income statements, balance sheets, cashflow statements, dividends, convertibles and instrument metadata; each type supports browsing published releases and creating new ones",
-        })}
-      />
+      {!embedded && (
+        <PageHeader
+          title={tl({ zh: "数据与标的", en: "Data & Instruments" })}
+          description={tl({
+            zh: "按数据类型浏览:行情、每日指标、财务指标、利润表、资产负债表、现金流量表、分红送股、可转债与标的元数据;各类型均可浏览已发布版本并发起新发布",
+            en: "Browse by data type: market data, daily metrics, financial indicators, income statements, balance sheets, cashflow statements, dividends, convertibles and instrument metadata; each type supports browsing published releases and creating new ones",
+          })}
+        />
+      )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="h-auto max-w-full justify-start overflow-x-auto">
@@ -2913,7 +2953,7 @@ export default function ResearchData() {
         </TabsContent>
       </Tabs>
 
-      <ReleaseDetailDrawer releaseId={drawerRelease} onClose={closeRelease} />
+      {!embedded && <ReleaseDetailDrawer releaseId={drawerRelease} onClose={closeRelease} />}
     </div>
   );
 }

@@ -159,7 +159,7 @@ export function evidenceUrl(ref: EvidenceRef): string | null {
         strategy: ref.version
           ? `/research/strategy-explanation?strategy=${id}&version=${encodeURIComponent(ref.version)}`
           : `/research/strategy`,
-        dataset: `/research/data?release=${id}`,
+        dataset: `/data?release=${id}`,
         experiment: `/research/experiments?experiment=${id}`,
         document: `/research/docs?doc=${id}`,
         memory: `/research/topics?memory=${id}`,

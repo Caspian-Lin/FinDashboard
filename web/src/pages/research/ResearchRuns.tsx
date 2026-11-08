@@ -272,7 +272,7 @@ function FrozenInputsCard({ manifest, result }: { manifest: Record<string, unkno
               <Tooltip key={ref.id}>
                 <TooltipTrigger asChild>
                   <Link
-                    to={`/research/data?release=${encodeURIComponent(ref.id)}`}
+                    to={`/data?release=${encodeURIComponent(ref.id)}`}
                     className="inline-flex items-center rounded-md border border-border bg-card px-2 py-1 font-mono text-[11px] text-foreground transition-colors hover:bg-accent"
                   >
                     {ref.id}

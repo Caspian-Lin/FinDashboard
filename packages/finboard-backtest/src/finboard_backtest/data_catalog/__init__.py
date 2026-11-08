@@ -10,6 +10,10 @@ from finboard_backtest.data_catalog.contracts import (
     InstrumentPage,
     PresencePage,
     ReferencePage,
+    TopicCoverageReport,
+    TopicCoverageSummary,
+    TopicGap,
+    TopicReleaseCoverage,
 )
 from finboard_backtest.data_catalog.service import DataCatalogService
 
@@ -24,4 +28,8 @@ __all__ = [
     "InstrumentPage",
     "PresencePage",
     "ReferencePage",
+    "TopicCoverageReport",
+    "TopicCoverageSummary",
+    "TopicGap",
+    "TopicReleaseCoverage",
 ]

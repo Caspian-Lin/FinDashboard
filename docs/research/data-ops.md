@@ -669,6 +669,7 @@ profiles / suspensions)。REST `/api/data/catalog` 与 MCP
 | 覆盖/缺口 | `GET .../coverage` | `finboard_data_coverage_get` |
 | 发布逐标的分页 | `GET .../releases/{id}/instruments` | `finboard_dataset_release_instruments` |
 | 发布引用(课题/运行/策略) | `GET .../releases/{id}/references` | `finboard_dataset_release_references` |
+| 课题数据范围(#512) | `GET /api/data/catalog/topics/{topic_id}/coverage` | — |
 | 标的反查 | `GET .../instruments/{code}` | — |
 | 交易日历 | `GET .../calendar` | — |
 
@@ -742,7 +743,6 @@ MCP 侧只读入口是 `finboard_data_scope_preview`;写侧不新增工具,提�
 scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:提交时省略
 `data_scope` / `data_scope_resolution_id`,run 行为与 #510 之前完全一致;
 已冻结的 run 不回改(manifest 不可变),需要新范围时新建 run。
-
 
 ## 课题缺口 → 全局补数(#511)
 
@@ -839,3 +839,131 @@ dataset 多复权项撞同一发布身份);同一请求重跑命中同一身份�
 `POST /api/jobs` 与 `finboard_job_enqueue` **不开放** `data_backfill` kind:
 补数只经语义端点提交,避免绕过预检;MCP 审计只记录 scope_checksum /
 fingerprint / 数据集清单,不记录完整 symbols。
+
+---
+
+## 共享数据基座面板与课题数据视图(#512)
+
+### 页面、路由与导航
+
+`/data` 是共享数据的**一级入口**(`web/src/pages/data/DataBase.tsx`),
+四个 tab 与 URL 一一对应(`?tab=overview|datasets|sync|tech`,默认概览):
+
+| tab | 内容 | 主要接口 |
+|---|---|---|
+| 概览 `overview` | 状态卡(可研究/待发布/受阻/未同步或过期)、全局缺口摘要、最近发布、快捷入口、课题数据视图 | `GET /api/data/catalog` |
+| 数据集 `datasets` | 目录列表 + 过滤(dataset/status/source/asset_class/时间窗/关键词)+ 数据集详情抽屉 + 发布详情抽屉(逐标的、引用);子视图「分类操作」原样挂载旧操作面板 | `GET /api/data/catalog`、`/datasets/{d}`、`/datasets/{d}/coverage`、`/releases/{id}`、`/releases/{id}/instruments`、`/releases/{id}/references` |
+| 同步与发布 `sync` | **第一阶段只读**:同步/发布现状与既有入口链接;#511 补数请求接入占位(按钮禁用) | `GET /api/data/catalog` |
+| 技术详情 `tech` | 质量、分区、批次、原始单位、复权、PIT、manifest(checksum/存储/能力位)、任务日志入口 | `GET /api/data/catalog/datasets/{d}`、`.../coverage` |
+
+约定:
+
+- 导航放在「研究」组**首位**(条目「数据基座」,`/data` 精确匹配 `end`);
+  原「高级研究工具 → 数据与标的」入口移除,避免重复。
+- 旧 `/research/data` **永久重定向**到 `/data` 并保全查询参数;旧页签映射:
+
+  | 旧 `?tab=` | 新地址 |
+  |---|---|
+  | `bars` / `fetch` / `releases` | `/data?tab=datasets&dataset=bars` |
+  | `metrics` | `dataset=daily_metrics` |
+  | `financial` | `dataset=financial_indicators` |
+  | `income` / `balance` / `cashflow` / `dividends` | `dataset=income_statements` / `balance_sheets` / `cashflow_statements` / `dividends` |
+  | `convertible` | `dataset=convertible_metrics` |
+  | `instruments` | `dataset=profiles&view=ops&sub=instruments`(标的生命周期在旧操作面板) |
+  | `release=<id>` | 任何情况下原样保留;缺 `tab` 时落 `tab=datasets` 并直接打开该发布抽屉 |
+
+- 旧能力(行情拉取、财务/指标、三表、分红、转债、标的与生命周期、ETF 复核、
+  发布向导)在「数据集 → 分类操作」中**原样**保留
+  (`web/src/components/data/ResearchDataOps.tsx`,逻辑未改写,只换了挂载点与
+  `sub` 页签参数)。
+- 状态口径的唯一事实源仍是后端 `status`;前端只做文案/配色映射:
+  `usable`→可研究、`ingested_not_published`→待发布(已同步)、`blocked`→受阻、
+  `not_ingested`→未同步、`stale`→过期、`unknown`→未知。概览状态卡只统计前五类,
+  `unknown`(元数据缺失,不等于没数据)单独一行说明,不计入「未同步 / 过期」。
+- 覆盖率与分母全部取服务端字段(`CoverageBar` 只做显示换算与 tooltip),
+  前端不得自算百分比。
+
+### 课题数据视图接口(#512,兼容 #514)
+
+```http
+GET /api/data/catalog/topics/{topic_id}/coverage
+```
+
+响应(只读,不写课题、不触发同步/发布):
+
+```json
+{
+  "topic_id": "RT-...",
+  "releases": [
+    {
+      "release_id": "DR-...", "dataset": "daily_metrics",
+      "dataset_name": "...", "source": "tushare", "version": "v1",
+      "start_date": "2024-01-02", "end_date": "2024-12-31",
+      "published_at": "...", "quality_status": "passed",
+      "coverage_pct": 0.98, "expected_sessions": 400,
+      "missing_sessions": 2, "symbols_with_gaps": 1,
+      "denominator": "发布 expected_sessions x 发布标的数", "warnings": []
+    }
+  ],
+  "coverage": {
+    "release_count": 1, "dataset_count": 1, "min_coverage_pct": 0.98,
+    "missing_sessions": 2, "symbols_with_gaps": 1,
+    "denominators": ["..."], "resolved_by": "refs", "warnings": []
+  },
+  "gaps": [
+    {
+      "release_id": "DR-...", "dataset": "daily_metrics",
+      "reason": "coverage_gap", "message": "1 个标的缺 2 个期望交易日",
+      "coverage_pct": 0.98, "missing_sessions": 2, "symbols_with_gaps": 1
+    }
+  ],
+  "last_sync": "2026-11-01T08:00:00Z",
+  "next_step": "fix_gaps"
+}
+```
+
+解析顺序与语义:
+
+1. **显式 `data_scope` 优先**:`topic.payload.data_scope.locked_release_ids`
+   (优先,对齐 #510 `DataScopeSpec.locked_release_ids`)或
+   `data_scope.dataset_release_ids`(兼容计划文档措辞);#514 落地后写入,
+   当前 schema 无该键,正常走回退。
+2. **轮次 `source_refs` 回退**(`resolved_by="refs"`):
+   - `kind=dataset`:先按发布 ID 精确命中;否则按目录数据集 key 取该 kind
+     最近发布;两者都不中记缺口。
+   - `kind=research_run`:读该运行 manifest 的
+     `dataset_releases[*].artifact_id`(服务端只取该子树,不加载整份 manifest),
+     同一发布去重。
+3. 每份发布复用 #509 `get_coverage` 的覆盖口径(分母/缺口/警告原样透传),
+   浏览器不聚合多份发布。
+4. `last_sync` = max(相关发布 `published_at`, 相关数据集最近批次
+   `completed_at`)。已同步未发布时它会晚于最新发布,正好指向「待发布」。
+5. `next_step` 稳定动作码:`ready`(可研究)/ `fix_gaps`(有覆盖缺口)/
+   `blocked`(引用解析失败或质量受阻)/ `no_refs`(课题没有数据引用)。
+   前端按码出文案与跳转(`/data?tab=sync&topic=RT-...` 为预检接入位)。
+6. `gaps[].reason` 稳定原因码:`release_not_found` / `run_not_found` /
+   `dataset_not_published` / `dataset_kind_unmapped` / `quality_blocked` /
+   `coverage_gap`。
+7. 课题不存在 → 404(`topic_not_found`);只读接口,无写副作用。
+
+前端消费点:`web/src/components/data/TopicDataCard.tsx`,挂在
+「研究课题」详情区(同一张卡片)与 `/data?tab=overview&topic=RT-...`
+(概览下方查询框)。
+
+### 第一阶段边界(明确不做)
+
+- 「同步与发布」只落**只读状态面板 + 入口链接 + 占位**:不接
+  `#511` 的范围预检 / 补数提交 / 发布向导交互(第二阶段),不调用任何未实现
+  接口;代码里 `TODO(#511)` 注释标出接入点。
+- `/settings` 的数据同步区块本阶段不动(`#525` 负责设置总入口与文案分工)。
+- 不触达实盘交易、下单、风控展示。
+
+### 回归入口
+
+- 前端:`web/src/pages/data/DataBase.test.tsx`(四 tab / 键盘切换 / 窄屏 class /
+  空与失败状态(概览 + 同步面板)/ 顶部刷新重取当前 tab 独立查询 / 旧深链抽屉 /
+  课题数据视图)、`web/src/lib/data-links.test.ts`(旧页签映射与参数保全)、
+  `web/src/App.test.tsx`(重定向与导航位置)。
+- 后端:`tests/integration/test_data_catalog_topic_coverage.py`(显式 scope 优先
+  且 refs 有竞争数据、dataset key 取最新发布、refs 回退、运行展开去重、
+  具名缺口含 `quality_blocked`、批次 `last_sync`、空状态、404)。
