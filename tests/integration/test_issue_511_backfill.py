@@ -1124,6 +1124,41 @@ class TestCancel:
         assert retried.request.retry_of_request_id == result.request_id
         assert retried.request.status == BackfillRequestStatus.QUEUED.value
 
+    async def test_retry_multi_item_keeps_only_remaining(
+        self, db_session: AsyncSession, calendar: None
+    ) -> None:
+        """B7:同请求多明细时,retry 只保留失败/取消项,不丢项也不重跑成功项。"""
+
+        from finboard_persistence.data_backfill_repo import DataBackfillRepository
+
+        spec = _spec(
+            datasets=(
+                BackfillDatasetSpec(dataset=CatalogDataset.DAILY_METRICS),
+                BackfillDatasetSpec(dataset=CatalogDataset.FINANCIAL_INDICATORS),
+            )
+        )
+        result = await _submit(db_session, spec, key="retry-multi")
+        repo = DataBackfillRepository(db_session)
+        items = await _items(db_session, result.request_id)
+        done = next(item for item in items if item.dataset == "daily_metrics")
+        await repo.update_item(
+            done.id, status="succeeded", expected_statuses=("pending",)
+        )
+        await db_session.commit()
+        await cancel_backfill(db_session, result.request_id)
+        await db_session.commit()
+
+        retried = await retry_backfill(
+            db_session,
+            result.request_id,
+            requested_by="topic-1",
+            actor_type=ResearchActorType.HUMAN,
+            capabilities=_caps(),
+        )
+        await db_session.commit()
+        new_items = await _items(db_session, retried.request_id)
+        assert [item.dataset for item in new_items] == ["financial_indicators"]
+
     async def test_running_cancel_is_left_to_executor(
         self, db_session: AsyncSession, calendar: None
     ) -> None:
