@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -223,3 +224,22 @@ async def test_service_rejects_unknown_release(db_session: AsyncSession) -> None
     with pytest.raises(CatalogError) as exc_info:
         await service.list_release_instruments("NOPE")
     assert exc_info.value.code == "release_not_found"
+
+
+async def test_publish_chunks_large_instrument_sets(
+    db_session: AsyncSession,
+) -> None:
+    big = replace(
+        _release(),
+        release_id="TEST-CATALOG-509-BIG",
+        release_checksum="e" * 64,
+        instruments=tuple(
+            _instrument(f"TST{5000 + index}.SH", index % 3)
+            for index in range(1200)
+        ),
+    )
+    await ResearchDatasetReleaseRepository(db_session).publish(big)
+    await db_session.commit()
+    assert await CatalogRepository(db_session).count_instruments(
+        "TEST-CATALOG-509-BIG"
+    ) == 1200

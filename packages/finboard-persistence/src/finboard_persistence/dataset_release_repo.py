@@ -144,36 +144,39 @@ class ResearchDatasetReleaseRepository:
 
         if not release.instruments:
             return
-        await self._session.execute(
-            insert(ResearchDatasetReleaseInstrumentModel),
-            [
-                {
-                    "release_id": release.release_id,
-                    "code": item.code,
-                    "name": item.name,
-                    "market": item.market.value,
-                    "instrument_type": item.instrument_type.value,
-                    "asset_class": item.asset_class.value,
-                    "exchange": item.exchange,
-                    "listing_board": item.listing_board,
-                    "start_date": item.start_date,
-                    "end_date": item.end_date,
-                    "row_count": item.row_count,
-                    "expected_sessions": item.expected_sessions,
-                    "missing_sessions": item.missing_sessions,
-                    "suspended_sessions": item.suspended_sessions,
-                    "anomaly_count": item.anomaly_count,
-                    "duplicate_count": item.duplicate_count,
-                    "coverage_pct": item.coverage_pct,
-                    "ready": item.ready,
-                    "issues": list(item.issues),
-                    "list_date": item.list_date,
-                    "delist_date": item.delist_date,
-                    "status": item.status.value,
-                }
-                for item in release.instruments
-            ],
-        )
+        rows = [
+            {
+                "release_id": release.release_id,
+                "code": item.code,
+                "name": item.name,
+                "market": item.market.value,
+                "instrument_type": item.instrument_type.value,
+                "asset_class": item.asset_class.value,
+                "exchange": item.exchange,
+                "listing_board": item.listing_board,
+                "start_date": item.start_date,
+                "end_date": item.end_date,
+                "row_count": item.row_count,
+                "expected_sessions": item.expected_sessions,
+                "missing_sessions": item.missing_sessions,
+                "suspended_sessions": item.suspended_sessions,
+                "anomaly_count": item.anomaly_count,
+                "duplicate_count": item.duplicate_count,
+                "coverage_pct": item.coverage_pct,
+                "ready": item.ready,
+                "issues": list(item.issues),
+                "list_date": item.list_date,
+                "delist_date": item.delist_date,
+                "status": item.status.value,
+            }
+            for item in release.instruments
+        ]
+        # 全市场约 5500 行 x 22 列;显式分块避免驱动单语句参数上限。
+        for start in range(0, len(rows), 1000):
+            await self._session.execute(
+                insert(ResearchDatasetReleaseInstrumentModel),
+                rows[start : start + 1000],
+            )
 
     async def get(self, release_id: str) -> ResearchDatasetRelease | None:
         stmt = select(ResearchDatasetReleaseModel).where(
