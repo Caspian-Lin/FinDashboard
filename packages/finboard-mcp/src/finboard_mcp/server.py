@@ -81,6 +81,7 @@ from finboard_mcp.context import app_lifespan
 from finboard_mcp.tools import (
     register_backtest_tools,
     register_data_catalog_tools,
+    register_data_scope_tools,
     register_data_tools,
     register_data_write_tools,
     register_factor_series_tools,
@@ -115,7 +116,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 
 课题与记忆引用用 finboard_source_check 核对精确版本/checksum与自动产物事实;断链与旧目标保留,文档优先于工作解释。研究工具按问题使用,可暂停、分支、复核与续接,并非必须线性执行。
 
-== 当前可用工具(143 个,能力与参数以当前注册schema为准)==
+== 当前可用工具(144 个,能力与参数以当前注册schema为准)==
 - #501-#504复核入口:finboard_run_diagnostics 显式窗口/逐年指标(研究252交易日年化、rf0/ddof1;
   另列日历年化),SQL聚合成交费用/缺口分母;finboard_run_compare 按冻结输入核查可比性;
   finboard_decision_projection SQL白名单字段分页(200行/256KiB,单决策也有护栏)。
@@ -216,6 +217,15 @@ FinBoard 研究 MCP —— 量化研究工具集
   finboard_dataset_release_references(引用该发布的课题/运行/策略反查)。
   目录只做 DB 列投影 + 有界扫描,**不触发 dataset_sync、不发布数据集**;
   分页 limit 1..500、offset>=0,missing_preview 只是预览不是全量缺口清单。
+- 统一数据范围(1,✅ #510,只读):finboard_data_scope_preview 把一份
+  DataScopeSpec(universe / decision / warmup+tail / benchmarks / datasets /
+  fields / bars_adjustment / release_selection)解析成候选发布 + 执行窗口
+  (warmup_start / decision_start / decision_end / valuation_end)+ 缺口 +
+  阻塞 + 候选替代;返回 resolution_id,提交 run 时连同 data_scope 一起回填
+  finboard_research_run_queue,服务端重算比对(数据变了 409 要求重新预览),
+  并把 research_window 冻结进 manifest。view=summary 只回计数,detail 才回
+  alternatives / affected_strategies;locked 模式必须恰好一份可发布 bars 主
+  发布且含全部 required 数据集。只读,不落库、不触发同步、不发布。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。
@@ -543,6 +553,7 @@ def build_mcp_server() -> MCPServer:
     register_memory_tools(mcp)
     register_data_tools(mcp)
     register_data_catalog_tools(mcp)
+    register_data_scope_tools(mcp)
     register_data_write_tools(mcp)
     register_factor_tools(mcp)
     register_factor_series_tools(mcp)

@@ -432,6 +432,32 @@ async def _build_queued_manifest(
     except UnsupportedResearchCapabilityError as exc:
         raise McpToolError("invalid_argument", str(exc)) from exc
 
+    # issue #510:统一数据范围提交复验(与 REST 路由同一门控函数)—— 重算
+    # resolution_id 比对预览,数据变了拒绝并要求重新预览;通过后把窗口合并
+    # 进 parameters 再进入后续参数门控(否则门控看到的是旧参数)。
+    scope_manifest: dict[str, Any] | None = None
+    if getattr(body, "data_scope", None) is not None:
+        from finboard_backtest.data_scope import (
+            ScopeGateError,
+            apply_scope_to_parameters,
+        )
+
+        try:
+            body.parameters, scope_manifest = await apply_scope_to_parameters(
+                session,
+                body.data_scope,
+                resolution_id=getattr(body, "data_scope_resolution_id", None),
+                release_ids=body.dataset_release_ids,
+                strategy_id=body.strategy_id,
+                strategy_version=body.strategy_version,
+                parameters=body.parameters,
+            )
+        except ScopeGateError as exc:
+            raise McpToolError(
+                "conflict" if exc.status_code == 409 else "invalid_argument",
+                f"{exc.code}: {exc.message}",
+            ) from exc
+
     feature_repo = FeatureSnapshotRepository(session)
     snapshots: list[Any] = []
     for snapshot_id in body.factor_snapshot_ids:
@@ -838,6 +864,8 @@ async def _build_queued_manifest(
         # issue #312:MCP 通道(agent 自主执行,#122)归属 agent,
         # 与 requested_by=agent:mcp 对齐;REST 默认 human 不变。
         actor_type=ResearchActorType.AGENT,
+        # issue #510:scope 解析结论仅在声明时冻结(checksum 同口径)。
+        data_scope=_cast(dict[str, JsonValue] | None, scope_manifest),
     )
     return manifest, strategy_row
 
@@ -1199,6 +1227,12 @@ def register(mcp: MCPServer) -> None:
             '- "strategy_version"*: 整数 >=1(策略规格版本)\n'
             '- "dataset_release_ids"*: 冻结数据发布 release_id 列表,必须与策略'
             "验证计划完全一致(finboard_dataset_release_list 查询)\n"
+            '- "data_scope"/"data_scope_resolution_id"(#510,可选):'
+            "统一数据范围声明 + finboard_data_scope_preview 返回的 SC- id。"
+            "声明后提交期用同一份 scope 重算比对 resolution_id —— 预览后若上线"
+            "了新发布即 conflict(要求重新预览),不静默换最新发布;解析出的"
+            " research_window 写进 parameters 并随 manifest 冻结。两个字段必须"
+            "成对出现;不声明则行为与旧入口完全一致\n"
             '- "factor_snapshot_ids": 冻结特征快照 snapshot_id 列表'
             "(finboard_feature_snapshot_list 查询);single_shot 必填(决策时点"
             "只能来自快照,缺快照入队即拒 #203);multi_period 声明决策日历后价格"

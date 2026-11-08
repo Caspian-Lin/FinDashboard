@@ -7,6 +7,7 @@ from finboard_mcp.tools.data import register as register_data_tools
 from finboard_mcp.tools.data_catalog import (
     register as register_data_catalog_tools,
 )
+from finboard_mcp.tools.data_scope import register as register_data_scope_tools
 from finboard_mcp.tools.data_write import register as register_data_write_tools
 from finboard_mcp.tools.factor_series import (
     register as register_factor_series_tools,
@@ -32,6 +33,7 @@ from finboard_mcp.tools.watchlists import register as register_watchlist_tools
 __all__ = [
     "register_backtest_tools",
     "register_data_catalog_tools",
+    "register_data_scope_tools",
     "register_data_tools",
     "register_data_write_tools",
     "register_factor_series_tools",

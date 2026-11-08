@@ -14,7 +14,7 @@ import hashlib
 import json
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -104,9 +104,37 @@ class DataScopeSpec(_Frozen):
         return self
 
     def canonical_payload(self) -> dict[str, object]:
-        """稳定 JSON 负载(checksum 用;不排除空集合,形状固定)。"""
+        """稳定 JSON 负载(checksum 用;不排除空集合,形状固定)。
 
-        return self.model_dump(mode="json", exclude_none=True)
+        语义上是「集合」的字段在这里统一排序,保证调用方声明顺序不影响
+        checksum(例如 ``datasets.required`` 写成 bars 在前还是 daily_metrics
+        在前,是同一份范围声明)。
+        """
+
+        payload = self.model_dump(mode="json", exclude_none=True)
+        unordered_top_level = ("benchmarks", "fields", "locked_release_ids")
+        for key in unordered_top_level:
+            value = payload.get(key)
+            if isinstance(value, list):
+                payload[key] = sorted(value)
+        universe = payload.get("universe")
+        if isinstance(universe, dict):
+            for key in (
+                "markets",
+                "asset_classes",
+                "instrument_types",
+                "explicit_symbols",
+            ):
+                value = universe.get(key)
+                if isinstance(value, list):
+                    universe[key] = sorted(value)
+        datasets = payload.get("datasets")
+        if isinstance(datasets, dict):
+            for key in ("required", "optional"):
+                value = datasets.get(key)
+                if isinstance(value, list):
+                    datasets[key] = sorted(value)
+        return payload
 
 
 def scope_checksum(spec: DataScopeSpec) -> str:
@@ -221,6 +249,33 @@ class ScopeResolution(_Frozen):
         """提交 run 时需要合并进 ``parameters`` 的 ``research_window``。"""
 
         return self.window.research_window()
+
+    def manifest_payload(self, scope: DataScopeSpec) -> dict[str, Any]:
+        """冻结进 run manifest 的 ``data_scope`` 区块(issue #510)。
+
+        只放解析结论与它依赖的输入(``scope`` 原样 + 窗口 + 精确 release
+        版本/checksum),不放候选替代与受影响策略——那些是预览信息,冻结后
+        只会误导读者。``resolution_id`` 可复算校验,不需要重跑解析。
+        """
+
+        return {
+            "resolution_id": self.resolution_id,
+            "scope_checksum": self.scope_checksum,
+            "resolver_version": self.resolver_version,
+            "scope": scope.canonical_payload(),
+            "window": self.window.model_dump(mode="json"),
+            "releases": [
+                {
+                    "artifact_id": item.artifact_id,
+                    "dataset": item.dataset.value,
+                    "role": item.role,
+                    "version": item.version,
+                    "checksum": item.checksum,
+                }
+                for item in self.releases
+            ],
+            "warnings": list(self.warnings),
+        }
 
 
 class ScopePreviewRequest(_Frozen):
