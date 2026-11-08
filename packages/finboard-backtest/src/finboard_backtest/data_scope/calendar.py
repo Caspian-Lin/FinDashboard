@@ -54,12 +54,18 @@ def markets_for(spec: DataScopeSpec) -> tuple[Market, ...]:
 
 
 def exchanges_for(markets: tuple[Market, ...]) -> tuple[str, ...]:
-    exchanges: list[str] = []
+    """市场 → 交易所代码元组(**排序去重**)。
+
+    顺序必须稳定:``calendar_markets`` 会进 ``resolution_id`` 指纹与 manifest,
+    按调用方声明顺序拼指纹会让 ``markets=["future","a_share"]`` 与
+    ``["a_share","future"]``(checksum 相同)得到两个 ``resolution_id``,
+    提交期误报漂移。
+    """
+
+    exchanges: set[str] = set()
     for market in markets:
-        for exchange in MARKET_EXCHANGES.get(market, ()):
-            if exchange not in exchanges:
-                exchanges.append(exchange)
-    return tuple(exchanges)
+        exchanges.update(MARKET_EXCHANGES.get(market, ()))
+    return tuple(sorted(exchanges))
 
 
 async def load_union_calendar(

@@ -235,6 +235,40 @@ async def _resolve_universe(
     blockers: list[ScopeBlocker] = []
     filters = spec.universe.filters
     min_listing = timedelta(days=filters.min_listing_days)
+    # 未映射资产大类在**任何**路径都阻塞(explicit_symbols 早退也一样):
+    # 声明了无法映射的范围等于声明无效,不能因为标的另行显式声明就静默放行。
+    allowed_types: set[str] = set()
+    if spec.universe.asset_classes:
+        allowed_types, unmapped = _types_for_classes(spec.universe.asset_classes)
+        if unmapped:
+            blockers.append(
+                _make_blocker(
+                    "scope_asset_class_unmapped",
+                    "资产大类没有对应的标的类型映射: "
+                    + ", ".join(sorted(unmapped))
+                    + "(显式拒绝而不是退化成全市场)",
+                )
+            )
+            return (
+                ScopeUniverseResult(
+                    requested_count=0,
+                    resolved_count=0,
+                    truncated=False,
+                    symbols_preview=(),
+                ),
+                blockers,
+                [],
+            )
+    if (
+        filters.exclude_benchmark_only
+        and allowed_types == {InstrumentType.FUTURES.value}
+    ):
+        # 商品/衍生品 scope 与「排除 benchmark-only」默认值冲突:期货/商品
+        # 恒被视为 benchmark-only,不提示会表现为「莫名 0 只标的」。
+        warnings.append(
+            "asset_classes 只映射到期货/商品,但 exclude_benchmark_only=True "
+            "会把期货全部排除;如确需期货标的请显式关闭该过滤"
+        )
     explicit = spec.universe.explicit_symbols
     if explicit:
         rows = (
@@ -295,31 +329,6 @@ async def _resolve_universe(
             blockers,
             resolved,
         )
-
-    allowed_types: set[str] = set()
-    if spec.universe.asset_classes:
-        allowed_types, unmapped = _types_for_classes(spec.universe.asset_classes)
-        if unmapped:
-            # 未映射大类不能退化成「不加 instrument_type 条件」:那会让商品/
-            # 现金范围静默混入全部 A 股,fail-open。
-            blockers.append(
-                _make_blocker(
-                    "scope_asset_class_unmapped",
-                    "资产大类没有对应的标的类型映射: "
-                    + ", ".join(sorted(unmapped))
-                    + "(显式拒绝而不是退化成全市场)",
-                )
-            )
-            return (
-                ScopeUniverseResult(
-                    requested_count=0,
-                    resolved_count=0,
-                    truncated=False,
-                    symbols_preview=(),
-                ),
-                blockers,
-                [],
-            )
 
     conditions: list[Any] = [
         InstrumentModel.list_date <= decision_start - min_listing,
@@ -677,7 +686,9 @@ async def _validate_locked_bars(
         if (header := await repo.release_header(release_id)) is not None
         and header.dataset_kind is ReleaseDatasetKind.BARS
     ]
-    if len(bars) != 1:
+    # 0 份由 ``scope_release_unavailable`` / ``scope_locked_release_missing``
+    # 表达;这里只报「多于一份」的歧义,避免一次失败叠三个同义 blocker。
+    if len(bars) > 1:
         blockers.append(
             _make_blocker(
                 "scope_locked_bars_ambiguous",
@@ -777,7 +788,7 @@ def _resolution_id(
         f"{window.warmup_start}|{window.decision_start}|"
         f"{window.decision_end}|{window.valuation_end}|"
         f"{window.warmup_sessions}|{window.decision_sessions}|"
-        f"{window.tail_sessions}|{','.join(window.calendar_markets)}"
+        f"{window.tail_sessions}|{','.join(sorted(window.calendar_markets))}"
     )
     digest = hashlib.sha256(
         f"{checksum}|{','.join(release_ids)}|{resolver_version}|{window_key}".encode()
