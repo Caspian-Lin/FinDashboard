@@ -430,7 +430,7 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 - 提交 run 时把 `resolution_id` 与同一份 `scope` 一起回填;服务端重算比对,
   数据变了 → `conflict`(重新预览,不静默换最新发布)
 
-
+## finboard.data_write.* / finboard.etf.*(✅ #137,数据准备闭环)
 
 数据写操作工具(2 只读 + 10 写)。补全 #124 只读数据查询之外的数据准备能力,
 打通「数据→因子→策略」闭环第一步:agent 能拉 K 线、发布数据集、修复质量缺陷、

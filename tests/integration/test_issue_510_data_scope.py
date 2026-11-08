@@ -72,6 +72,8 @@ CAL_DAYS = [
     for offset in range(0, 45)
     if (date(2024, 1, 1) + timedelta(days=offset)).weekday() < 5
 ]
+#: 日历漂移用例专用:不放进 fixture 的基准日历(否则会改变其他用例的预热基数)。
+EXTRA_CAL_DAY = date(2023, 12, 29)
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -102,7 +104,7 @@ async def _clean(engine: AsyncEngine) -> AsyncIterator[None]:
         await conn.execute(
             delete(TradeCalModel).where(
                 TradeCalModel.exchange.in_(("SSE", "SZSE")),
-                TradeCalModel.cal_date.in_(CAL_DAYS),
+                TradeCalModel.cal_date.in_([*CAL_DAYS, EXTRA_CAL_DAY]),
             )
         )
         await conn.execute(
@@ -142,7 +144,12 @@ async def seeded(engine: AsyncEngine) -> AsyncEngine:
     return engine
 
 
-async def _publish_daily(session: AsyncSession, release_id: str) -> None:
+async def _publish_daily(
+    session: AsyncSession,
+    release_id: str,
+    *,
+    symbols: tuple[str, ...] = SYMBOLS,
+) -> None:
     """研究数据发布(daily_metrics):只提供因子观测,不参与候选池口径。"""
 
     release = ResearchDatasetRelease(
@@ -159,7 +166,7 @@ async def _publish_daily(session: AsyncSession, release_id: str) -> None:
         availability_rules=(("daily_metrics", "available_at <= decision_at"),),
         code_version="abcdef0123456789",
         published_at=datetime(2024, 1, 1, tzinfo=UTC),
-        instruments=tuple(_instrument(code) for code in SYMBOLS),
+        instruments=tuple(_instrument(code) for code in symbols),
         capabilities=(),
         quality_status=DatasetQualityStatus.PASSED,
         quality_report={"release_coverage": "1.0"},
@@ -349,6 +356,158 @@ class TestResolvePreview:
         assert (STRATEGY_ID, 1) in names
         assert ("ma_cross_scope_510_peer", 1) in names
 
+    async def test_filter_mode_empty_pool_is_blocking(
+        self, seeded: AsyncEngine
+    ) -> None:
+        # 过滤条件解析出 0 只标的必须阻塞(旧实现 requested=0/resolved=0 却
+        # blockers 为空,门控会放行 0 标的提交)。
+        async with session_factory(seeded)() as session:
+            resolution = await resolve_data_scope(
+                session,
+                DataScopeSpec.model_validate(
+                    _scope(universe={"instrument_types": ["etf"]})
+                ),
+            )
+        codes = {item.code for item in resolution.blockers}
+        assert "scope_universe_empty" in codes
+        assert resolution.universe.resolved_count == 0
+
+    async def test_commodity_does_not_leak_a_share_pool(
+        self, seeded: AsyncEngine
+    ) -> None:
+        # 商品范围映射到 futures 类型;库里只有 A 股 stock → 0 只而不是
+        # 「不加过滤把 6 只正股全放进来」。
+        async with session_factory(seeded)() as session:
+            resolution = await resolve_data_scope(
+                session,
+                DataScopeSpec.model_validate(
+                    _scope(
+                        universe={
+                            "asset_classes": ["commodity"],
+                            "markets": ["a_share"],
+                        }
+                    )
+                ),
+            )
+        assert resolution.universe.resolved_count == 0
+        assert any(
+            item.code == "scope_universe_empty" for item in resolution.blockers
+        )
+
+    async def test_unmapped_asset_class_is_blocking(
+        self, seeded: AsyncEngine
+    ) -> None:
+        async with session_factory(seeded)() as session:
+            resolution = await resolve_data_scope(
+                session,
+                DataScopeSpec.model_validate(
+                    _scope(universe={"asset_classes": ["cash"]})
+                ),
+            )
+        assert any(
+            item.code == "scope_asset_class_unmapped" for item in resolution.blockers
+        )
+
+    async def test_bars_missing_symbol_is_blocking(
+        self, seeded: AsyncEngine
+    ) -> None:
+        # 多一只不在 bars 发布里的标的:G.H 有元数据但发布没覆盖 → bars 缺
+        # 标的必须阻塞(研究发布才容忍缺标的)。
+        async with session_factory(seeded)() as session:
+            session.add(
+                InstrumentModel(
+                    code="G.SH",
+                    name="G.SH",
+                    market=Market.A_SHARE.value,
+                    instrument_type=InstrumentType.STOCK.value,
+                    exchange="SSE",
+                    listing_board="main",
+                    status="active",
+                    list_date=date(2020, 1, 1),
+                )
+            )
+            await session.commit()
+        try:
+            async with session_factory(seeded)() as session:
+                resolution = await resolve_data_scope(
+                    session,
+                    DataScopeSpec.model_validate(
+                        _scope(universe={"explicit_symbols": [*SYMBOLS, "G.SH"]})
+                    ),
+                )
+        finally:
+            async with session_factory(seeded)() as session:
+                await session.execute(
+                    delete(InstrumentModel).where(InstrumentModel.code == "G.SH")
+                )
+                await session.commit()
+        codes = {item.code for item in resolution.blockers}
+        assert "scope_release_no_match" in codes
+        assert resolution.releases == ()
+
+    async def test_research_release_missing_symbols_is_tolerated(
+        self, seeded: AsyncEngine
+    ) -> None:
+        async with session_factory(seeded)() as session:
+            await _publish_daily(session, "DR-daily-510-partial", symbols=SYMBOLS[:5])
+        async with session_factory(seeded)() as session:
+            resolution = await resolve_data_scope(
+                session,
+                DataScopeSpec.model_validate(
+                    _scope(
+                        datasets={"required": ["bars", "daily_metrics"]},
+                        release_selection="locked",
+                        locked_release_ids=[BARS_V1, "DR-daily-510-partial"],
+                    )
+                ),
+            )
+        daily = next(
+            item for item in resolution.releases if item.dataset.value == "daily_metrics"
+        )
+        assert "缺 1 只标的" in daily.reason
+        assert resolution.gaps.missing_in_research["daily_metrics"] == (SYMBOLS[-1],)
+        assert any("研究数据发布 daily_metrics 缺 1 只标的" in item for item in resolution.warnings)
+        assert not any(
+            item.code == "scope_release_no_match" for item in resolution.blockers
+        )
+
+    async def test_optional_dataset_not_in_frozen_set(
+        self, seeded: AsyncEngine
+    ) -> None:
+        # optional 只观测、不进入冻结发布集合(否则每次提交都因集合不等 409)。
+        async with session_factory(seeded)() as session:
+            resolution = await resolve_data_scope(
+                session,
+                DataScopeSpec.model_validate(
+                    _scope(datasets={"required": ["bars"], "optional": ["daily_metrics"]})
+                ),
+            )
+        assert [item.dataset.value for item in resolution.releases] == ["bars"]
+        assert any(
+            item.dataset.value == "daily_metrics" for item in resolution.alternatives
+        )
+
+    async def test_two_locked_bars_is_ambiguous(
+        self, seeded: AsyncEngine
+    ) -> None:
+        async with session_factory(seeded)() as session:
+            await _publish_bars(
+                session, BARS_V2, published_at=datetime(2024, 2, 1, tzinfo=UTC)
+            )
+        async with session_factory(seeded)() as session:
+            resolution = await resolve_data_scope(
+                session,
+                DataScopeSpec.model_validate(
+                    _scope(
+                        release_selection="locked",
+                        locked_release_ids=[BARS_V2, BARS_V1],
+                    )
+                ),
+            )
+        assert any(
+            item.code == "scope_locked_bars_ambiguous" for item in resolution.blockers
+        )
+
     async def test_benchmark_outside_bars_is_blocking(
         self, seeded: AsyncEngine
     ) -> None:
@@ -463,6 +622,42 @@ class TestSubmitGate:
                 )
         assert excinfo.value.code == "scope_window_conflict"
 
+    async def test_calendar_change_after_preview_is_drift(
+        self, seeded: AsyncEngine
+    ) -> None:
+        """预览后补齐更早的交易日 → 预热窗口变化 → 旧 resolution_id 必须 409。"""
+
+        await _publish_spec(seeded)
+        async with session_factory(seeded)() as session:
+            scope = DataScopeSpec.model_validate(
+                _scope(
+                    decision={"start": WINDOW_START.isoformat(), "end": WINDOW_END.isoformat()},
+                    warmup_sessions=2,
+                )
+            )
+            preview = await resolve_data_scope(
+                session, scope, strategy_id=STRATEGY_ID, strategy_version=1
+            )
+            assert preview.blockers == ()
+        async with session_factory(seeded)() as session:
+            await TradeCalRepository(session).upsert_trading_days(
+                {EXTRA_CAL_DAY}, source="issue510"
+            )
+            await session.commit()
+        async with session_factory(seeded)() as session:
+            with pytest.raises(ScopeGateError) as excinfo:
+                await apply_scope_to_parameters(
+                    session,
+                    scope,
+                    resolution_id=preview.resolution_id,
+                    release_ids=[BARS_V1],
+                    strategy_id=STRATEGY_ID,
+                    strategy_version=1,
+                    parameters={},
+                )
+        assert excinfo.value.code == "scope_release_drift"
+        assert excinfo.value.detail["actual_resolution_id"] != preview.resolution_id
+
     async def test_spec_release_mismatch_is_blocking(self, seeded: AsyncEngine) -> None:
         # 策略冻结的发布集合与 scope 解析出的不同 → 复用 resolver 既有守卫。
         await _publish_spec(seeded, release_ids=("DR-other-release",))
@@ -534,6 +729,41 @@ class TestQueueRun:
             )
         assert legacy_row is not None
         assert manifest_from_json(legacy_row.manifest).data_scope is None
+
+    async def test_mcp_queue_uses_same_gate(
+        self, seeded: AsyncEngine, client: httpx.AsyncClient
+    ) -> None:
+        """MCP ``_build_queued_manifest`` 与 REST 共用同一 scope 门控函数。"""
+
+        from finboard_api.research_run_schemas import ResearchRunQueueIn
+        from finboard_mcp.execution import McpToolError
+        from finboard_mcp.tools import runs as run_tools
+
+        await _publish_spec(seeded, release_ids=(BARS_V1, DAILY_V1))
+        preview = await client.post(
+            "/api/data/scopes/preview", json={"scope": self._scope_payload()}
+        )
+        resolution_id = preview.json()["resolution_id"]
+        body = ResearchRunQueueIn.model_validate(
+            self._queue_payload(resolution_id, "scope-510-mcp-1")
+        )
+        async with session_factory(seeded)() as session:
+            manifest, _ = await run_tools._build_queued_manifest(body, session)
+        assert manifest.data_scope is not None
+        assert manifest.data_scope["resolution_id"] == resolution_id
+        assert manifest.parameters["research_window"]["decision_start"] == (
+            WINDOW_START.isoformat()
+        )
+        # 漂移:旧 resolution_id + 新发布 → 同一门控的 conflict 语义。
+        async with session_factory(seeded)() as session:
+            await _publish_bars(
+                session, BARS_V2, published_at=datetime(2024, 2, 1, tzinfo=UTC)
+            )
+        async with session_factory(seeded)() as session:
+            with pytest.raises(McpToolError) as excinfo:
+                await run_tools._build_queued_manifest(body, session)
+        assert excinfo.value.kind == "conflict"
+        assert "scope_release_drift" in str(excinfo.value)
 
     async def test_stale_resolution_id_is_409(
         self, seeded: AsyncEngine, client: httpx.AsyncClient

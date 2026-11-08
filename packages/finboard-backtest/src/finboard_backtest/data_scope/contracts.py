@@ -22,7 +22,9 @@ from finboard_data.datasets import CatalogDataset
 from finboard_shared.types import AssetClass, InstrumentType, Market
 
 SCOPE_VERSION: Literal["v1"] = "v1"
-RESOLVER_VERSION = "v1"
+#: 解析器版本:进入 ``resolution_id``。窗口/选择语义变化必须 bump(改版后
+#: 旧预览 id 全部失效 → 强制重新预览,不静默按旧口径执行)。
+RESOLVER_VERSION = "v2"
 
 ReleaseRole = Literal["bars_primary", "research"]
 
@@ -47,6 +49,22 @@ class ScopeUniverse(_Frozen):
     explicit_symbols: tuple[str, ...] = ()
     filters: ScopeFilters = Field(default_factory=ScopeFilters)
     selection_limit: int | None = Field(default=None, ge=1, le=5000)
+
+    @model_validator(mode="after")
+    def _normalize(self) -> ScopeUniverse:
+        """标的代码归一(去空白/大写/去重排序)。
+
+        checksum 与解析同源:``000001.sz`` 与 ``000001.SZ`` 是同一只标的,
+        若只在解析时归一而 checksum 用原值,同一份范围会得到两个
+        ``resolution_id``,提交期误报漂移。
+        """
+
+        normalized = tuple(
+            sorted({item.strip().upper() for item in self.explicit_symbols if item.strip()})
+        )
+        if normalized != self.explicit_symbols:
+            return self.model_copy(update={"explicit_symbols": normalized})
+        return self
 
 
 class ScopeDecisionWindow(_Frozen):
@@ -85,9 +103,14 @@ class DataScopeSpec(_Frozen):
     universe: ScopeUniverse
     decision: ScopeDecisionWindow
     warmup_sessions: int = Field(default=0, ge=0, le=5000)
-    tail_sessions: int = Field(default=0, ge=0, le=250)
+    #: 尾部估值交易日数。默认 1:multi_period 的最后一个决策日要按「下一
+    #: 交易日」撮合(dev #502 ``research_window_execution_tail_missing``),
+    #: tail=0 会让 ``valuation_end == decision_end`` 在月度/季末配置上排队
+    #: 成功、执行期才失败;需要零尾部时显式传 0(解析给 warning)。
+    tail_sessions: int = Field(default=1, ge=0, le=250)
     benchmarks: tuple[str, ...] = ()
     datasets: ScopeDatasets
+    #: 保留位(#513 决定「按字段裁剪发布」时消费);当前只进 checksum 不进解析。
     fields: tuple[str, ...] = ()
     bars_adjustment: Literal["qfq", "hqfq", "none"] = "qfq"
     release_selection: Literal["auto", "locked"] = "auto"
@@ -97,10 +120,15 @@ class DataScopeSpec(_Frozen):
     def _validate(self) -> DataScopeSpec:
         if self.release_selection == "locked" and not self.locked_release_ids:
             raise ValueError("locked 模式必须声明 locked_release_ids")
+        if self.release_selection == "auto" and self.locked_release_ids:
+            # 静默忽略比拒绝更危险:调用方以为锁定了发布,实际按 auto 选。
+            raise ValueError("auto 模式不能声明 locked_release_ids(改 locked 或清空)")
         if len(set(self.locked_release_ids)) != len(self.locked_release_ids):
             raise ValueError("locked_release_ids 不能重复")
         if len(set(self.benchmarks)) != len(self.benchmarks):
             raise ValueError("benchmarks 不能重复")
+        if len(self.universe.explicit_symbols) > 5000:
+            raise ValueError("explicit_symbols 上限 5000")
         return self
 
     def canonical_payload(self) -> dict[str, object]:

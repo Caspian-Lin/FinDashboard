@@ -435,6 +435,7 @@ async def _build_queued_manifest(
     # issue #510:统一数据范围提交复验(与 REST 路由同一门控函数)—— 重算
     # resolution_id 比对预览,数据变了拒绝并要求重新预览;通过后把窗口合并
     # 进 parameters 再进入后续参数门控(否则门控看到的是旧参数)。
+    scope_parameters: dict[str, Any] | None = None
     scope_manifest: dict[str, Any] | None = None
     if getattr(body, "data_scope", None) is not None:
         from finboard_backtest.data_scope import (
@@ -443,7 +444,7 @@ async def _build_queued_manifest(
         )
 
         try:
-            body.parameters, scope_manifest = await apply_scope_to_parameters(
+            scope_parameters, scope_manifest = await apply_scope_to_parameters(
                 session,
                 body.data_scope,
                 resolution_id=getattr(body, "data_scope_resolution_id", None),
@@ -812,7 +813,10 @@ async def _build_queued_manifest(
         factor_series=(
             build_factor_series_refs(series_records) if series_records else ()
         ),
-        parameters=_cast(dict[str, JsonValue], body.parameters),
+        parameters=_cast(
+            dict[str, JsonValue],
+            scope_parameters if scope_parameters is not None else body.parameters,
+        ),
         validation_config=_cast(
             dict[str, JsonValue],
             {
