@@ -777,12 +777,13 @@ scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:
   | `release=<id>` | 任何情况下原样保留;缺 `tab` 时落 `tab=datasets` 并直接打开该发布抽屉 |
 
 - 旧能力(行情拉取、财务/指标、三表、分红、转债、标的与生命周期、ETF 复核、
-  自选/标的范围、发布向导)在「数据集 → 分类操作」中**原样**保留
+  发布向导)在「数据集 → 分类操作」中**原样**保留
   (`web/src/components/data/ResearchDataOps.tsx`,逻辑未改写,只换了挂载点与
   `sub` 页签参数)。
 - 状态口径的唯一事实源仍是后端 `status`;前端只做文案/配色映射:
   `usable`→可研究、`ingested_not_published`→待发布(已同步)、`blocked`→受阻、
-  `not_ingested`→未同步、`stale`→过期、`unknown`→未知。
+  `not_ingested`→未同步、`stale`→过期、`unknown`→未知。概览状态卡只统计前五类,
+  `unknown`(元数据缺失,不等于没数据)单独一行说明,不计入「未同步 / 过期」。
 - 覆盖率与分母全部取服务端字段(`CoverageBar` 只做显示换算与 tooltip),
   前端不得自算百分比。
 
@@ -827,8 +828,10 @@ GET /api/data/catalog/topics/{topic_id}/coverage
 
 解析顺序与语义:
 
-1. **显式 `data_scope` 优先**:`topic.payload.data_scope.dataset_release_ids`
-   (#514 落地后写入);当前 schema 无该键,正常走回退。
+1. **显式 `data_scope` 优先**:`topic.payload.data_scope.locked_release_ids`
+   (优先,对齐 #510 `DataScopeSpec.locked_release_ids`)或
+   `data_scope.dataset_release_ids`(兼容计划文档措辞);#514 落地后写入,
+   当前 schema 无该键,正常走回退。
 2. **轮次 `source_refs` 回退**(`resolved_by="refs"`):
    - `kind=dataset`:先按发布 ID 精确命中;否则按目录数据集 key 取该 kind
      最近发布;两者都不中记缺口。
@@ -862,7 +865,9 @@ GET /api/data/catalog/topics/{topic_id}/coverage
 ### 回归入口
 
 - 前端:`web/src/pages/data/DataBase.test.tsx`(四 tab / 键盘切换 / 窄屏 class /
-  空与失败状态 / 旧深链抽屉 / 课题数据视图)、`web/src/lib/data-links.test.ts`
-  (旧页签映射与参数保全)、`web/src/App.test.tsx`(重定向与导航位置)。
-- 后端:`tests/integration/test_data_catalog_topic_coverage.py`(显式 scope 优先、
-  refs 回退、运行展开、具名缺口、空状态、404)。
+  空与失败状态(概览 + 同步面板)/ 顶部刷新重取当前 tab 独立查询 / 旧深链抽屉 /
+  课题数据视图)、`web/src/lib/data-links.test.ts`(旧页签映射与参数保全)、
+  `web/src/App.test.tsx`(重定向与导航位置)。
+- 后端:`tests/integration/test_data_catalog_topic_coverage.py`(显式 scope 优先
+  且 refs 有竞争数据、dataset key 取最新发布、refs 回退、运行展开去重、
+  具名缺口含 `quality_blocked`、批次 `last_sync`、空状态、404)。
