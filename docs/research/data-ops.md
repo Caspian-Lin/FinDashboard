@@ -757,7 +757,7 @@ scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:
 
 | 数据集 | 同步内核 | 可发布 | release_kind | 备注 |
 |---|---|---|---|---|
-| bars | `bulk_download`(+ 可选 `quality_repair`) | 是 | `multi_asset_mixed`(落库 dataset_kind=`bars`) | 需先有标的元数据 |
+| bars | `bulk_download`(+ 可选 `quality_repair`) | 是 | `multi_asset_mixed`(落库 dataset_kind=`bars`) | 需先有标的元数据;**只支持 qfq**(缓存写入无 adjust 维度,非 qfq 预检即 `backfill_adjustment_unsupported`) |
 | daily_metrics / financial_indicators / income_statements / balance_sheets / cashflow_statements / dividends | `dataset_sync` | 是 | 同名 | 发布只接受 A 股股票;PIT 规则见目录 |
 | convertible_metrics | 无(派生) | 是 | `convertible_metrics` | 依赖 bars + 转债条款,缺口时 `backfill_dataset_derived` 阻塞 |
 | profiles / suspensions | `dataset_sync` | 否 | — | 只补同步,不产生发布 |
@@ -771,15 +771,21 @@ scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:
 ### 共享去重
 
 - **身份维度** = `(dataset, source, adjustment)` + 窗口 + 标的 + 发布开关;
-  异源或不同复权口径永远不参与复用,fingerprint 也不同;
+  异源或不同复权口径永远不参与复用,fingerprint 也不同;item 唯一键与发布身份
+  都含 `adjustment`(同 dataset 可同时补 qfq/hqfq,互不覆盖);
 - **已完成覆盖**:可发布数据集以 `research_dataset_releases` 的可用发布
   (逐标派生索引)为准;不可发布数据集以 `research_sync_batches` 的已发布
   批次为准;
 - **在途覆盖**:`data_backfill_requests` 中 `queued|running` 且身份一致、
   区间重叠、标的是请求标的**超集**的 item;
 - `missing_ranges = 请求区间 − (已完成 ∪ 在途)`;部分重叠只补剩余缺口,
-  `reused_request_ids` 记录复用来源,剩余为空时不建 job 直接返回
-  `succeeded` 复用结果;
+  **缺口区间冻结进 item**,执行器按区间取数(不重跑整窗),发布仍冻结请求窗口;
+  `reused_request_ids` 记录复用来源,剩余为空时不建 job 直接返回 `succeeded`
+  复用结果;
+- **标的缺口同样触发补数**:窗口级覆盖齐全但请求标的有缺失时 action 不是
+  `noop`(否则发布面缺标的);逐标的单元按标的冻结标的列表(≤2000)或
+  `universe_filters`,发布面不得宽于请求面;大宇宙无法用单一过滤器表达时
+  具名 `backfill_symbol_scope_unresolved`,不静默放宽;
 - 同一 `fingerprint` 的在途请求直接复用;等价重试(同 `Idempotency-Key`)
   回同一请求;失败/取消后重提或 `POST /{id}/retry` 生成新请求并保留
   `retry_of_request_id` 血缘;
@@ -798,15 +804,20 @@ scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:
   请求 `failed` 且 `error_code=backfill_quality_failed`,批次与 item 明细可查;
 - 上游预算耗尽(`TushareRequestLimitError`)→ 任务 `retry_waiting`(与
   `dataset_sync` 一致),请求退回 `queued`、item 退回 `pending`,不把请求标死;
-- 取消:job 协作式取消,未完成 item 标 `cancelled`;**已发布 release 不回滚**
-  (发布不可变)。
+- 取消:job 协作式取消;**排队中**直接 `cancelled`(未领取 item 标 cancelled),
+  **运行中**交给执行器在检查点收敛(不抢跑状态机);已发布 release 不回滚;
+- 受阻(`blocked`)请求是需求登记,来源/额度开通后可直接 `retry`(重算 plan),
+  不需要换幂等键重提;
+- 发布幂等按**计算出的身份**查重:发布成功但 item 落库前崩溃,重跑直接复用
+  该发布,不会撞 `release_identity_conflict`。
 
 ### 发布身份与历史冻结
 
-补数发布的 `release_id = DR-<dataset>-<request_id>`、`version = v-<request_id>`,
-同一请求重跑命中同一身份即幂等返回;`plan` 里只给预告
-(`DR-<dataset>-<request_id>` 模板)。既有发布只读:补数只追加新版本,
-任何补数都不会修改历史 release 的 checksum / 区间 / 逐标覆盖。
+补数发布的 `release_id = DR-<dataset>[-<adjustment>]-<request_id>`、
+`version = v[-<adjustment>]-<request_id>`(非 `none` 复权才带后缀,避免同
+dataset 多复权项撞同一发布身份);同一请求重跑命中同一身份即幂等返回;
+`plan` 里只给预告模板。既有发布只读:补数只追加新版本,任何补数都不会修改
+历史 release 的 checksum / 区间 / 逐标覆盖。
 
 ### 入口
 

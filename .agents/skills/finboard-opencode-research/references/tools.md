@@ -1986,7 +1986,9 @@ adjustment?, start?, end?, symbols?, publish?}], quality_profile?}`;
   missing_symbols{count,preview}, covered_by, estimated_requests,
   publish_preview, blockers}]` + `quota` + `overlaps` + `publish_impact` +
   `blockers` / `warnings`
-- 纯读:不建请求、不触发同步或发布;日历缺失 / 窗口越界 → `invalid_argument`
+- 纯读:不建请求、不触发同步或发布;日历缺失 / 窗口越界 → `invalid_argument`;
+  `item.symbols` 是冻结的补数标的(逐标的数据集),`universe_filters` 是
+  大宇宙过滤器;`missing_ranges` 是冻结的缺口区间(执行器只补这些区间)
 
 ### finboard_data_backfill_submit(写)
 显式提交补数请求(只读模式 `mcp_readonly_only` 拒绝)。
@@ -1997,7 +1999,9 @@ adjustment?, start?, end?, symbols?, publish?}], quality_profile?}`;
 - 命中幂等键或同 fingerprint 在途请求 → `created=false` 复用;
   提交前复算 plan 与 `expected_plan_checksum` 不一致 → `conflict`
   `backfill_plan_drift`(**必须重新预览**,禁止按旧计划执行);受阻需求落
-  `blocked` 请求(不建 job)
+  `blocked` 请求(不建 job),来源/额度开通后可直接 retry;
+  bars 缓存只支持 `adjustment=qfq`,非 qfq 预检即 blocker
+  `backfill_adjustment_unsupported`
 
 ### finboard_data_backfill_list
 只读:补数请求列表 / 详情。
