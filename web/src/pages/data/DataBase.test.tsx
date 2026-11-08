@@ -289,6 +289,18 @@ describe("数据基座页面(#512)", () => {
     expect(screen.getByText(/限权分页/)).toBeInTheDocument();
   });
 
+  it("发布详情「技术详情」按钮跳到技术详情 tab 并关闭抽屉", async () => {
+    renderPage("/data?tab=datasets&dataset=daily_metrics&release=DR-512");
+    await screen.findByText("DR-512");
+    const dialog = await screen.findByRole("dialog");
+    const user = userEvent.setup();
+    await user.click(within(dialog).getByText("技术详情"));
+    const selected = document.querySelector('[role="tab"][aria-selected="true"]');
+    expect(selected?.textContent).toContain("技术详情");
+    // 抽屉依赖 ?release= 打开;跳转不再带 release,应已关闭。
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("旧 /data?tab= 别名深链在页面内映射到新数据集 tab", async () => {
     renderPage("/data?tab=metrics&release=DR-512");
     await waitFor(() =>

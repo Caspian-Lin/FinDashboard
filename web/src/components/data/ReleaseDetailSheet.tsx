@@ -140,9 +140,10 @@ export function ReleaseDetailSheet({ releaseId, onClose }: ReleaseDetailSheetPro
                   size="sm"
                   onClick={() => {
                     if (!datasetKey) return;
-                    // 跳到技术详情后关闭抽屉:否则抽屉长期盖住新 tab,看起来像死按钮。
-                    navigate(dataHref({ tab: "tech", dataset: datasetKey, release: release.data?.release_id }));
-                    onClose();
+                    // 跳到技术详情:URL 里去掉 release 后抽屉自然关闭。
+                    // 不要在这里再调 onClose():它用当前(旧)render 的 params
+                    // 重建 URL,会把刚写进去的 tab=tech 覆盖掉。
+                    navigate(dataHref({ tab: "tech", dataset: datasetKey }));
                   }}
                   disabled={!datasetKey}
                 >
