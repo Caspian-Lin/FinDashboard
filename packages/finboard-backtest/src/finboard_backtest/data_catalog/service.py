@@ -14,6 +14,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,16 @@ from finboard_backtest.data_catalog.contracts import (
     STATUS_NOT_INGESTED,
     STATUS_STALE,
     STATUS_USABLE,
+    TOPIC_GAP_COVERAGE_GAP,
+    TOPIC_GAP_DATASET_KIND_UNMAPPED,
+    TOPIC_GAP_DATASET_NOT_PUBLISHED,
+    TOPIC_GAP_QUALITY_BLOCKED,
+    TOPIC_GAP_RELEASE_NOT_FOUND,
+    TOPIC_GAP_RUN_NOT_FOUND,
+    TOPIC_NEXT_STEP_BLOCKED,
+    TOPIC_NEXT_STEP_FIX_GAPS,
+    TOPIC_NEXT_STEP_NO_REFS,
+    TOPIC_NEXT_STEP_READY,
     CalendarView,
     CatalogEntry,
     CatalogError,
@@ -32,12 +43,17 @@ from finboard_backtest.data_catalog.contracts import (
     InstrumentPage,
     PresencePage,
     ReferencePage,
+    TopicCoverageReport,
+    TopicCoverageSummary,
+    TopicGap,
+    TopicReleaseCoverage,
 )
 from finboard_data.datasets import (
     CatalogDataset,
     CatalogDatasetSpec,
     CatalogStorage,
     catalog_spec,
+    catalog_spec_by_release_kind,
     catalog_specs,
 )
 from finboard_persistence.catalog_repo import (
@@ -49,6 +65,12 @@ from finboard_persistence.trade_calendar_repo import TradeCalRepository
 
 #: 超过该天数未更新即视为 stale(目录只提示,不阻断运行)。
 FRESHNESS_DAYS = 30
+
+#: 课题数据视图最多回溯的轮次条目数;超出即截断并在 warnings 里具名。
+TOPIC_REF_LIMIT = 500
+
+#: 可用于研究的发布质量状态(#509 目录口径:passed 与 warnings 都算可用)。
+_USABLE_QUALITY_STATUSES = ("passed", "warnings")
 
 _DEEP_LINKS = {
     "research_run": "/research/runs?run={ref}",
@@ -331,6 +353,225 @@ class DataCatalogService:
             release_id=release_id, items=tuple(items), deep_links=links
         )
 
+    # ------------------------------------------------------------------ 课题数据视图
+    async def topic_coverage(
+        self, topic_id: str, *, ref_limit: int = TOPIC_REF_LIMIT
+    ) -> TopicCoverageReport:
+        """课题数据视图(issue #512,#514 前向兼容)。
+
+        解析顺序:**显式 ``data_scope`` 优先,轮次 ``source_refs`` 推导回退**
+        (见 :func:`_explicit_data_scope_release_ids`)。引用解析成发布集合后
+        逐发布复用 :meth:`get_coverage` 的 #509 覆盖口径(分母/缺口/警告原样
+        返回,前端不得自算百分比)。
+
+        只读:不写课题、不触发同步或发布,也不加载发布 manifest 全量。
+        """
+        payload = await self._repo.topic_payload(topic_id)
+        if payload is None:
+            raise CatalogError("topic_not_found", f"研究课题不存在: {topic_id}")
+        release_ids, resolved_by, unresolved, warnings = (
+            await self._resolve_topic_releases(
+                topic_id, payload, ref_limit=ref_limit
+            )
+        )
+        gaps: list[TopicGap] = list(unresolved)
+        releases: list[TopicReleaseCoverage] = []
+        dataset_keys: set[CatalogDataset] = {
+            gap.dataset_key for gap in unresolved if gap.dataset_key is not None
+        }
+        seen: set[str] = set()
+        last_sync: datetime | None = None
+        for release_id in release_ids:
+            if release_id in seen:
+                continue
+            seen.add(release_id)
+            header = await self._repo.release_header(release_id)
+            if header is None:
+                gaps.append(
+                    TopicGap(
+                        release_id,
+                        "",
+                        TOPIC_GAP_RELEASE_NOT_FOUND,
+                        f"课题引用的发布不存在: {release_id}",
+                    )
+                )
+                continue
+            try:
+                spec = catalog_spec_by_release_kind(header.dataset_kind)
+            except KeyError:
+                gaps.append(
+                    TopicGap(
+                        release_id,
+                        "",
+                        TOPIC_GAP_DATASET_KIND_UNMAPPED,
+                        f"发布 {release_id} 的 dataset_kind="
+                        f"{header.dataset_kind.value} 未注册到数据目录",
+                    )
+                )
+                continue
+            dataset_keys.add(spec.key)
+            report = await self.get_coverage(
+                spec.key, release_id=release_id, limit=20
+            )
+            releases.append(
+                TopicReleaseCoverage(
+                    release=header, dataset=spec.key, coverage=report
+                )
+            )
+            warnings.extend(report.warnings)
+            last_sync = _max_datetime(last_sync, header.published_at)
+            if header.quality_status not in _USABLE_QUALITY_STATUSES:
+                gaps.append(
+                    TopicGap(
+                        release_id,
+                        spec.key.value,
+                        TOPIC_GAP_QUALITY_BLOCKED,
+                        f"发布质量状态为 {header.quality_status},不可用于研究",
+                        coverage_pct=header.coverage_pct,
+                        missing_sessions=report.missing_sessions,
+                        symbols_with_gaps=report.symbols_with_gaps,
+                    )
+                )
+            elif report.missing_sessions > 0 or report.symbols_with_gaps > 0:
+                gaps.append(
+                    TopicGap(
+                        release_id,
+                        spec.key.value,
+                        TOPIC_GAP_COVERAGE_GAP,
+                        f"{report.symbols_with_gaps} 个标的缺 "
+                        f"{report.missing_sessions} 个期望交易日",
+                        coverage_pct=report.coverage_pct,
+                        missing_sessions=report.missing_sessions,
+                        symbols_with_gaps=report.symbols_with_gaps,
+                    )
+                )
+        # last_sync 取「发布时刻」与「相关数据集最近一次批次收口时刻」的较大值:
+        # 已同步未发布时 last_sync 会晚于最新发布,正好指向待发布的下一步。
+        for key in sorted(dataset_keys, key=lambda item: item.value):
+            spec = catalog_spec(key)
+            if spec.sync_dataset is None:
+                continue
+            batch = await self._repo.latest_batch(dataset=spec.sync_dataset)
+            if batch is not None:
+                last_sync = _max_datetime(last_sync, batch.completed_at)
+        return TopicCoverageReport(
+            topic_id=topic_id,
+            releases=tuple(releases),
+            coverage=TopicCoverageSummary(
+                release_count=len(releases),
+                dataset_count=len({item.dataset for item in releases}),
+                min_coverage_pct=min(
+                    (item.release.coverage_pct for item in releases),
+                    default=None,
+                ),
+                missing_sessions=sum(
+                    item.coverage.missing_sessions for item in releases
+                ),
+                symbols_with_gaps=sum(
+                    item.coverage.symbols_with_gaps for item in releases
+                ),
+                denominators=tuple(
+                    dict.fromkeys(
+                        item.coverage.denominator for item in releases
+                    )
+                ),
+                resolved_by=resolved_by,
+                warnings=tuple(dict.fromkeys(warnings)),
+            ),
+            gaps=tuple(gaps),
+            last_sync=last_sync,
+            next_step=_topic_next_step(releases=releases, gaps=gaps),
+        )
+
+    async def _resolve_topic_releases(
+        self,
+        topic_id: str,
+        payload: dict[str, Any],
+        *,
+        ref_limit: int,
+    ) -> tuple[list[str], str, list[TopicGap], list[str]]:
+        """把课题范围解析成发布 ID 列表。
+
+        返回 ``(release_ids, resolved_by, 无法解析的缺口, 警告)``;发布 ID
+        保持首次出现顺序并去重。``kind=dataset`` 允许直接写发布 ID,也允许
+        写目录数据集 key(取该 kind 最近发布);``kind=research_run`` 展开
+        manifest 里冻结的 ``dataset_releases[*].artifact_id``。
+        """
+        explicit = _explicit_data_scope_release_ids(payload)
+        if explicit:
+            return explicit, "data_scope", [], []
+        refs, truncated = await self._repo.topic_source_refs(
+            topic_id, limit=ref_limit
+        )
+        warnings: list[str] = []
+        if truncated:
+            warnings.append(
+                f"课题轮次引用超过 {ref_limit} 条上限,数据范围仅统计最近轮次"
+            )
+        release_ids: list[str] = []
+        unresolved: list[TopicGap] = []
+        for ref in refs:
+            kind = str(ref.get("kind") or "")
+            ref_id = str(ref.get("ref_id") or "").strip()
+            if not ref_id:
+                continue
+            if kind == "dataset":
+                header = await self._repo.release_header(ref_id)
+                if header is not None:
+                    release_ids.append(header.release_id)
+                    continue
+                try:
+                    spec = catalog_spec(ref_id)
+                except (KeyError, ValueError):
+                    unresolved.append(
+                        TopicGap(
+                            ref_id,
+                            "",
+                            TOPIC_GAP_RELEASE_NOT_FOUND,
+                            f"课题引用的发布不存在: {ref_id}",
+                        )
+                    )
+                    continue
+                if spec.release_kind is None or not spec.publishable:
+                    unresolved.append(
+                        TopicGap(
+                            ref_id,
+                            spec.key.value,
+                            TOPIC_GAP_DATASET_NOT_PUBLISHED,
+                            f"数据集 {spec.key.value} 没有发布形态,"
+                            "请引用具体发布或补充同步批次",
+                            dataset_key=spec.key,
+                        )
+                    )
+                    continue
+                latest = await self._repo.latest_release(kind=spec.release_kind)
+                if latest is None:
+                    unresolved.append(
+                        TopicGap(
+                            ref_id,
+                            spec.key.value,
+                            TOPIC_GAP_DATASET_NOT_PUBLISHED,
+                            f"数据集 {spec.key.value} 尚无可用发布",
+                            dataset_key=spec.key,
+                        )
+                    )
+                    continue
+                release_ids.append(latest.release_id)
+            elif kind == "research_run":
+                run_release_ids = await self._repo.run_dataset_releases(ref_id)
+                if run_release_ids is None:
+                    unresolved.append(
+                        TopicGap(
+                            ref_id,
+                            "",
+                            TOPIC_GAP_RUN_NOT_FOUND,
+                            f"课题引用的研究运行不存在: {ref_id}",
+                        )
+                    )
+                    continue
+                release_ids.extend(run_release_ids)
+        return release_ids, "refs", unresolved, warnings
+
     # ------------------------------------------------------------------ 日历
     async def get_calendar(
         self, market: str, start: date, end: date
@@ -410,6 +651,44 @@ class DataCatalogService:
             cache_bytes=cache_bytes,
             warnings=tuple(warnings),
         )
+
+
+def _explicit_data_scope_release_ids(payload: dict[str, Any]) -> list[str]:
+    """课题 payload 里显式 ``data_scope.dataset_release_ids``(#514 契约位)。
+
+    #514 会把课题级显式数据范围写进 topic payload;本接口先按该键读取,
+    命中即优先于 ``source_refs`` 推导。**当前 schema 尚无该键**(TopicInput
+    ``extra=forbid``),因此正常返回空列表走引用回退 —— #514 落地后无需改
+    本接口契约,只需按此键写值。
+    """
+    scope = payload.get("data_scope")
+    if not isinstance(scope, dict):
+        return []
+    values = scope.get("dataset_release_ids")
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [str(item) for item in values if isinstance(item, str) and item]
+
+
+def _topic_next_step(
+    *,
+    releases: list[TopicReleaseCoverage],
+    gaps: list[TopicGap],
+) -> str:
+    """课题数据视图的下一步动作码(阻塞优先于补缺口,无引用单独一档)。"""
+    blocking = {
+        TOPIC_GAP_RELEASE_NOT_FOUND,
+        TOPIC_GAP_RUN_NOT_FOUND,
+        TOPIC_GAP_DATASET_KIND_UNMAPPED,
+        TOPIC_GAP_QUALITY_BLOCKED,
+    }
+    if not releases and not gaps:
+        return TOPIC_NEXT_STEP_NO_REFS
+    if any(gap.reason in blocking for gap in gaps):
+        return TOPIC_NEXT_STEP_BLOCKED
+    if gaps:
+        return TOPIC_NEXT_STEP_FIX_GAPS
+    return TOPIC_NEXT_STEP_READY
 
 
 def _entry_source(entry: CatalogEntry) -> str:
