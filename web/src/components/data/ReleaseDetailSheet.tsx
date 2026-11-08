@@ -138,10 +138,12 @@ export function ReleaseDetailSheet({ releaseId, onClose }: ReleaseDetailSheetPro
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() =>
-                    datasetKey &&
-                    navigate(dataHref({ tab: "tech", dataset: datasetKey, release: release.data?.release_id }))
-                  }
+                  onClick={() => {
+                    if (!datasetKey) return;
+                    // 跳到技术详情后关闭抽屉:否则抽屉长期盖住新 tab,看起来像死按钮。
+                    navigate(dataHref({ tab: "tech", dataset: datasetKey, release: release.data?.release_id }));
+                    onClose();
+                  }}
                   disabled={!datasetKey}
                 >
                   {tl({ zh: "技术详情", en: "Tech detail" })}
@@ -265,7 +267,7 @@ export function ReleaseDetailSheet({ releaseId, onClose }: ReleaseDetailSheetPro
               <h3 className="text-sm font-semibold">{tl({ zh: "引用它的课题 / 运行 / 策略", en: "Referenced by" })}</h3>
               <ReleaseReferencesPanel releaseId={releaseId as string} />
             </section>
-            <p className="pb-4 text-xs text-muted-foreground">
+            <div className="pb-4 text-xs text-muted-foreground">
               <Badge variant="outline" className="mr-2">
                 {lang === "zh" ? "只读" : "read-only"}
               </Badge>
@@ -273,7 +275,7 @@ export function ReleaseDetailSheet({ releaseId, onClose }: ReleaseDetailSheetPro
                 zh: "目录不触发同步或发布;写入口仍在「同步与发布」与旧操作面板。",
                 en: "The catalog never triggers sync or publish; write entry points remain in Sync & Publish.",
               })}
-            </p>
+            </div>
           </div>
         ) : null}
       </SheetContent>

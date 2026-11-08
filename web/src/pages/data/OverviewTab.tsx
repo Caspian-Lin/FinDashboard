@@ -9,11 +9,12 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState, ErrorState } from "@/components/ui/states";
 import { CoverageBar } from "@/components/data/CoverageBar";
-import { StatusPill, statusHint } from "@/components/data/StatusPill";
+import { StatusPill } from "@/components/data/StatusPill";
 import { TopicDataCard } from "@/components/data/TopicDataCard";
 import { useT } from "@/i18n";
 import type { LocalizedText } from "@/i18n";
 import type { CatalogEntry } from "@/lib/data-catalog";
+import { statusHint } from "@/lib/data-labels";
 import { dataHref } from "@/lib/data-links";
 import { formatDateTime, timeAgo } from "@/lib/utils";
 import type { DataTabProps } from "./DataBase";
@@ -46,7 +47,10 @@ export function OverviewTab({ entries, entriesLoading, entriesError, entriesErro
       usable: map.usable ?? 0,
       ingested_not_published: map.ingested_not_published ?? 0,
       blocked: map.blocked ?? 0,
-      other: (map.not_ingested ?? 0) + (map.stale ?? 0) + (map.unknown ?? 0),
+      // unknown 只是元数据缺失(日历/目录读不到),不等于"没数据":单独计数,
+      // 不塞进「未同步 / 过期」,避免状态卡失真。
+      other: (map.not_ingested ?? 0) + (map.stale ?? 0),
+      unknown: map.unknown ?? 0,
     };
   }, [entries]);
 
@@ -183,6 +187,20 @@ export function OverviewTab({ entries, entriesLoading, entriesError, entriesErro
             );
           })}
         </div>
+        {counts.unknown > 0 && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            {tl({
+              zh: `另有 ${counts.unknown} 个数据集状态未知(元数据缺失,不代表没有数据),不计入上方四类。`,
+              en: `${counts.unknown} more dataset(s) report "unknown" (missing metadata, not the same as no data) and are excluded above.`,
+            })}{" "}
+            <Link
+              className="text-primary underline underline-offset-2"
+              to={dataHref({ tab: "datasets", status: "unknown" })}
+            >
+              {tl({ zh: "查看", en: "View" })}
+            </Link>
+          </p>
+        )}
       </section>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

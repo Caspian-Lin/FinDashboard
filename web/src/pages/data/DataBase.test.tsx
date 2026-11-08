@@ -351,6 +351,50 @@ describe("数据基座页面(#512)", () => {
     );
   });
 
+  it("同步与发布:首加载显示加载态,不渲染「全部可研究」健康文案", async () => {
+    let resolveList: (value: unknown) => void = () => {};
+    catalogMock.list.mockReturnValue(new Promise((resolve) => { resolveList = resolve; }));
+    renderPage("/data?tab=sync");
+    await waitFor(() => expect(document.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0));
+    expect(screen.queryByText("全部数据集均处于可研究状态。")).toBeNull();
+    // 收尾:让挂起请求落地,避免测试环境卸载时等待未决 query。
+    resolveList({ items: entries, total: entries.length, limit: 200, offset: 0, generated_at: "2026-11-09T00:00:00Z" });
+    await waitFor(() => expect(document.querySelectorAll(".animate-pulse").length).toBe(0));
+  });
+
+  it("同步与发布:目录失败显示错误与重试,不渲染健康文案", async () => {
+    const user = userEvent.setup();
+    catalogMock.list.mockRejectedValue(new Error("sync status down"));
+    renderPage("/data?tab=sync");
+    expect(await screen.findByText("sync status down")).toBeInTheDocument();
+    expect(screen.queryByText("全部数据集均处于可研究状态。")).toBeNull();
+    const calls = catalogMock.list.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(catalogMock.list.mock.calls.length).toBeGreaterThan(calls));
+  });
+
+  it("顶部刷新重取数据集列表(不只刷概览)", async () => {
+    const user = userEvent.setup();
+    renderPage("/data?tab=datasets");
+    await waitFor(() =>
+      expect(catalogMock.list).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 })),
+    );
+    const pageCalls = () =>
+      catalogMock.list.mock.calls.filter(([args]) => (args as { limit?: number })?.limit === 20).length;
+    const before = pageCalls();
+    await user.click(screen.getByRole("button", { name: "刷新目录" }));
+    await waitFor(() => expect(pageCalls()).toBeGreaterThan(before));
+  });
+
+  it("顶部刷新重取技术详情的独立查询", async () => {
+    const user = userEvent.setup();
+    renderPage("/data?tab=tech");
+    await waitFor(() => expect(catalogMock.dataset).toHaveBeenCalled());
+    const before = catalogMock.dataset.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "刷新目录" }));
+    await waitFor(() => expect(catalogMock.dataset.mock.calls.length).toBeGreaterThan(before));
+  });
+
   it("数据集 tab 可切到旧操作面板子视图并保持 sub 参数", async () => {
     const user = userEvent.setup();
     renderPage("/data?tab=datasets&view=ops&sub=metrics");

@@ -5,10 +5,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { LoadingState, ErrorState } from "@/components/ui/states";
 import { CoverageBar } from "@/components/data/CoverageBar";
-import { StatusPill, statusHint } from "@/components/data/StatusPill";
+import { StatusPill } from "@/components/data/StatusPill";
 import { useT } from "@/i18n";
 import type { LocalizedText } from "@/i18n";
+import { statusHint } from "@/lib/data-labels";
 import { dataHref } from "@/lib/data-links";
 import { formatDateTime } from "@/lib/utils";
 import type { DataTabProps } from "./DataBase";
@@ -21,9 +23,21 @@ interface EntryLink {
 }
 
 /** 同步与发布(第一阶段):只读状态面板 + 既有入口链接 + #511 接入占位。 */
-export function SyncPublishTab({ entries, params }: DataTabProps) {
+export function SyncPublishTab({
+  entries,
+  params,
+  entriesLoading,
+  entriesError,
+  entriesErrorMessage,
+  reload,
+}: DataTabProps) {
   const { tl, lang } = useT();
   const topicId = params.get("topic");
+
+  // 目录未就绪时不能渲染「全部数据集均处于可研究状态」这类健康文案:
+  // 首加载(entries=[]+loading)与 500(entries=[])都会走到 pending.length===0。
+  if (entriesLoading) return <LoadingState rows={4} />;
+  if (entriesError) return <ErrorState message={entriesErrorMessage} onRetry={reload} />;
 
   const entryLinks: EntryLink[] = [
     {

@@ -8,32 +8,14 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import { CoverageBar } from "@/components/data/CoverageBar";
 import { useT } from "@/i18n";
-import type { LocalizedText } from "@/i18n";
 import { catalogApi } from "@/lib/data-catalog";
+import {
+  TOPIC_GAP_LABELS,
+  TOPIC_NEXT_STEP_LABELS,
+  TOPIC_RESOLVED_BY_LABELS,
+} from "@/lib/data-labels";
 import { dataHref } from "@/lib/data-links";
 import { formatDateTime } from "@/lib/utils";
-
-/** 课题缺口原因码 → 文案(#512 稳定码;服务端只回码,不在 API 里拼文案)。 */
-export const TOPIC_GAP_LABELS: Record<string, LocalizedText> = {
-  release_not_found: { zh: "引用的发布不存在", en: "Referenced release missing" },
-  run_not_found: { zh: "引用的研究运行不存在", en: "Referenced run missing" },
-  dataset_not_published: { zh: "数据集尚无可用发布", en: "Dataset has no usable release" },
-  dataset_kind_unmapped: { zh: "发布类型未注册到目录", en: "Release kind not in catalog" },
-  quality_blocked: { zh: "发布质量受阻", en: "Release quality blocked" },
-  coverage_gap: { zh: "覆盖缺口", en: "Coverage gap" },
-};
-
-const NEXT_STEP_LABELS: Record<string, LocalizedText> = {
-  ready: { zh: "数据可研究", en: "Data is usable" },
-  fix_gaps: { zh: "有覆盖缺口,建议补数", en: "Coverage gaps; backfill suggested" },
-  blocked: { zh: "引用或质量受阻,先修复", en: "Blocked references or quality; fix first" },
-  no_refs: { zh: "课题尚未引用数据发布", en: "No data releases referenced" },
-};
-
-const RESOLVED_BY_LABELS: Record<string, LocalizedText> = {
-  refs: { zh: "按轮次引用推导", en: "Derived from round refs" },
-  data_scope: { zh: "按课题显式数据范围", en: "Explicit topic data scope" },
-};
 
 interface TopicDataCardProps {
   topicId: string | null | undefined;
@@ -87,7 +69,7 @@ export function TopicDataCard({ topicId, className, bare }: TopicDataCardProps) 
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <Badge variant="outline">
-              {tl(RESOLVED_BY_LABELS[data.coverage.resolved_by] ?? {
+              {tl(TOPIC_RESOLVED_BY_LABELS[data.coverage.resolved_by] ?? {
                 zh: data.coverage.resolved_by,
                 en: data.coverage.resolved_by,
               })}
@@ -177,7 +159,7 @@ export function TopicDataCard({ topicId, className, bare }: TopicDataCardProps) 
 
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant={data.next_step === "ready" ? "success" : "warning"}>
-                  {tl(NEXT_STEP_LABELS[data.next_step] ?? { zh: data.next_step, en: data.next_step })}
+                  {tl(TOPIC_NEXT_STEP_LABELS[data.next_step] ?? { zh: data.next_step, en: data.next_step })}
                 </Badge>
                 <Button asChild variant="outline" size="sm">
                   <Link

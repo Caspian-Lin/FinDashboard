@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate, useSearchParams } from "react-router-dom";
 import { LayoutGrid, ListTree, SlidersHorizontal, Wrench } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
@@ -44,6 +44,7 @@ export interface DataTabProps {
  */
 export default function DataBase() {
   const { tl } = useT();
+  const queryClient = useQueryClient();
   const [params, setSearchParams] = useSearchParams();
   const rawTab = params.get("tab");
   const releaseId = params.get("release");
@@ -100,9 +101,11 @@ export default function DataBase() {
     setSearchParams(search, { replace: true });
   }, [params, setSearchParams]);
 
+  // 刷新必须覆盖当前 tab 的独立查询(数据集列表/技术详情/发布头),不能只刷概览的
+  // `["data-catalog","all"]`;统一按前缀失效,active 查询立即重取。
   const reload = React.useCallback(() => {
-    void all.refetch();
-  }, [all]);
+    void queryClient.invalidateQueries({ queryKey: ["data-catalog"] });
+  }, [queryClient]);
 
   // release 深链:补齐 tab=datasets 与 dataset 过滤,保证分享/刷新后仍落在对应发布。
   // 每个 release 只自动补一次,避免用户切到其他 tab 后被反复拉回。

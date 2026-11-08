@@ -13,9 +13,10 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import { CoverageBar } from "@/components/data/CoverageBar";
-import { StatusPill, statusHint } from "@/components/data/StatusPill";
+import { StatusPill } from "@/components/data/StatusPill";
 import { useT } from "@/i18n";
 import { catalogApi } from "@/lib/data-catalog";
+import { statusHint } from "@/lib/data-labels";
 import { dataHref } from "@/lib/data-links";
 import { formatDateTime, timeAgo } from "@/lib/utils";
 
@@ -158,13 +159,13 @@ export function DatasetDetailSheet({ datasetKey, onClose, onOpenRelease }: Datas
               <h3 className="text-sm font-semibold">
                 {tl({ zh: `字段 (${detail.data.fields.length})`, en: `Fields (${detail.data.fields.length})` })}
               </h3>
-              <p className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap gap-1.5">
                 {detail.data.fields.map((field) => (
                   <Badge key={field} variant="outline" className="font-mono text-[11px]">
                     {field}
                   </Badge>
                 ))}
-              </p>
+              </div>
             </section>
 
             <section className="space-y-2" aria-label={tl({ zh: "发布", en: "Releases" })}>

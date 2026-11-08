@@ -18,10 +18,11 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/states";
 import { CoverageBar } from "@/components/data/CoverageBar";
 import { DatasetDetailSheet } from "@/components/data/DatasetDetailSheet";
 import { Pager } from "@/components/data/Pager";
-import { CATALOG_STATUS_META, StatusPill } from "@/components/data/StatusPill";
+import { StatusPill } from "@/components/data/StatusPill";
 import { useT } from "@/i18n";
 import type { LocalizedText } from "@/i18n";
 import { CATALOG_DATASET_LABELS, CATALOG_STATUSES, catalogApi } from "@/lib/data-catalog";
+import { CATALOG_STATUS_META } from "@/lib/data-labels";
 import { formatDateTime, timeAgo } from "@/lib/utils";
 import type { DataTabProps } from "./DataBase";
 
@@ -49,6 +50,8 @@ export function DatasetsTab({ params, setParams, entries, onOpenRelease }: DataT
   const { tl } = useT();
   const [detailKey, setDetailKey] = React.useState<string | null>(null);
   const [keyword, setKeyword] = React.useState(() => params.get("q") ?? "");
+  // 来源是非枚举输入:必须受控,否则 reset() 后保留旧显示值,失焦时又把旧值写回 URL。
+  const [sourceInput, setSourceInput] = React.useState(() => params.get("source") ?? "");
 
   const view = params.get("view") === "ops" ? "ops" : "catalog";
   const dataset = params.get("dataset");
@@ -63,6 +66,10 @@ export function DatasetsTab({ params, setParams, entries, onOpenRelease }: DataT
   React.useEffect(() => {
     setKeyword(q ?? "");
   }, [q]);
+
+  React.useEffect(() => {
+    setSourceInput(source ?? "");
+  }, [source]);
 
   const query = useQuery({
     queryKey: ["data-catalog", "entries", { dataset, status, source, assetClass, start, end, q, offset }],
@@ -92,6 +99,7 @@ export function DatasetsTab({ params, setParams, entries, onOpenRelease }: DataT
 
   const reset = () => {
     setKeyword("");
+    setSourceInput("");
     setParams({ dataset: null, status: null, source: null, asset_class: null, start: null, end: null, q: null, offset: null });
   };
 
@@ -199,15 +207,16 @@ export function DatasetsTab({ params, setParams, entries, onOpenRelease }: DataT
                 <Label htmlFor="data-source-filter">{tl({ zh: "来源", en: "Source" })}</Label>
                 <Input
                   id="data-source-filter"
-                  defaultValue={source ?? ""}
+                  value={sourceInput}
                   placeholder="tushare / akshare"
-                  onBlur={(event) => {
-                    const value = event.target.value.trim();
+                  onChange={(event) => setSourceInput(event.target.value)}
+                  onBlur={() => {
+                    const value = sourceInput.trim();
                     if (value !== (source ?? "")) setFilter({ source: value || null });
                   }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
-                      const value = event.currentTarget.value.trim();
+                      const value = sourceInput.trim();
                       setFilter({ source: value || null });
                     }
                   }}
