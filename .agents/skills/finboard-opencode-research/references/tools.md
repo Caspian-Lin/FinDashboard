@@ -345,6 +345,59 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 - 参数:无
 - 返回:`{date, requests_per_minute, daily_limit, used, remaining}`
 
+## finboard.data_catalog.* / finboard.dataset.release.*(✅ #509 只读)
+
+全局数据目录查询,复用 `finboard_backtest.data_catalog.DataCatalogService`
+(与 REST `/api/data/catalog` 同源)。**只读**:不触发 dataset_sync、不发布
+数据集、不修改任何表;目录只做 DB 列投影 + 有界扫描,不加载发布 manifest。
+所有分页 `limit` 服务端收敛到 1..500(默认值见各工具),`offset >= 0`。
+
+### finboard_data_catalog_list
+列出全局数据目录(数据集维度)。
+- 参数:`dataset?`(bars | daily_metrics | financial_indicators |
+  convertible_metrics | income_statements | balance_sheets |
+  cashflow_statements | dividends | profiles | suspensions)/
+  `status?`(usable | ingested_not_published | blocked | not_ingested |
+  stale | unknown)/ `q?`(标题模糊,截断 128)/
+  `limit?: int = 50`(1..500)/ `offset?: int = 0`
+- 返回:`{items, total, limit, offset, generated_at}`;item 含 key/title/
+  title_en/storage/publishable/status/coverage_pct/symbol_count/release/
+  batch/warnings 等
+- 未知 dataset / status → `invalid_argument`
+
+### finboard_data_catalog_get
+查询单个数据集的目录详情(按 dataset key,无分页)。
+- 参数:`dataset: str`
+- 返回:`entry` + `fields` / `unit_notes` / `pit_rule` / `calendar_market` /
+  `adjustment` / `publishable` + 最近 `releases` / `batches` / `failures`
+- 未知 dataset → `invalid_argument`
+
+### finboard_data_coverage_get
+数据集覆盖报告(默认最新可用发布,可用 release_id 指定)。
+- 参数:`dataset: str` / `release_id?` / `limit?: int = 200`(1..500)
+- 返回:`{dataset, denominator, release, batch, coverage_pct,
+  expected_sessions, missing_sessions, symbols_with_gaps, missing_preview,
+  warnings}`
+- `missing_preview` 只给有缺口标的的前 `limit` 条预览(**不是全量缺口清单**)
+- 发布不存在 → `not_found`;其余目录错误 → `conflict`
+
+### finboard_dataset_release_instruments
+分页查询某份研究数据发布的逐标的覆盖读模型。
+- 参数:`release_id: str` / `ready?: bool` / `missing_only?: bool = false` /
+  `market?` / `instrument_type?` / `q?`(代码或名称,截断 64)/
+  `limit?: int = 100`(1..500)/ `offset?: int = 0`
+- 返回:`{release_id, items, total, limit, offset}`;item 含 code/name/market/
+  instrument_type/asset_class/coverage_pct/expected_sessions/missing_sessions/
+  suspended_sessions/ready/issues 等
+- 发布不存在 → `not_found`;逐标的索引不可重建 → `conflict`
+
+### finboard_dataset_release_references
+反查引用某份研究数据发布的课题 / 研究运行 / 策略规格。
+- 参数:`release_id: str` / `limit?: int = 20`(1..500)
+- 返回:`{release_id, items:[{kind, ref_id, status, created_at, deep_link}]}`;
+  `deep_link` 为 Web 深链(无对应页面时为 null)
+- 发布不存在 → `not_found`
+
 ## finboard.data_write.* / finboard.etf.*(✅ #137,数据准备闭环)
 
 数据写操作工具(2 只读 + 10 写)。补全 #124 只读数据查询之外的数据准备能力,
