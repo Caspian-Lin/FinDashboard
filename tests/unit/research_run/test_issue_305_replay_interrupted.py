@@ -304,6 +304,8 @@ def test_plain_manifest_checksum_stable_without_lineage(manifest_factory) -> Non
     payload.pop("strategy_version", None)
     payload.pop("replay_source_status", None)
     payload.pop("factor_series", None)
+    # issue #510:data_scope 同为「仅在声明时入键」的条件字段(None 时弹出)。
+    payload.pop("data_scope", None)
     assert stable_checksum(payload) == manifest.checksum
 
     # 血缘标注出现时则纳入 checksum(replay run 身份可区分)。
@@ -315,5 +317,6 @@ def test_plain_manifest_checksum_stable_without_lineage(manifest_factory) -> Non
     replayed_payload = asdict(replayed)
     replayed_payload.pop("strategy_version", None)
     replayed_payload.pop("factor_series", None)
+    replayed_payload.pop("data_scope", None)
     assert stable_checksum(replayed_payload) == replayed.checksum
     assert replayed.checksum != manifest.checksum

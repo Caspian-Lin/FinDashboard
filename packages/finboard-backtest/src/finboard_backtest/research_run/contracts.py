@@ -208,6 +208,10 @@ class ResearchRunManifest:
     # interrupted=事故恢复)。仅随 replay_of_run_id 一起出现;不入 input_checksum,
     # None 时也不入 manifest checksum(保持历史 manifest checksum 不漂移)。
     replay_source_status: str | None = None
+    # issue #510:统一数据范围(scope → release → run)的解析结论。None 兼容
+    # 旧入口(只传 dataset_release_ids)与历史 manifest;None 时既不入
+    # checksum 也不入 input_checksum,历史 manifest 逐字节不变。
+    data_scope: dict[str, JsonValue] | None = None
     schema_version: str = RESEARCH_RUN_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -274,6 +278,9 @@ class ResearchRunManifest:
         # manifest checksum 零漂移(同 replay_source_status 先例)。
         if not self.factor_series:
             payload.pop("factor_series", None)
+        # issue #510:scope 只在显式声明时入 checksum(同 factor_series 先例)。
+        if self.data_scope is None:
+            payload.pop("data_scope", None)
         return stable_checksum(payload)
 
     @property
@@ -302,6 +309,10 @@ class ResearchRunManifest:
         # 输入身份变化;未声明的 run 保持历史 input_checksum 零漂移。
         if self.factor_series:
             payload["factor_series"] = self.factor_series
+        # issue #510:scope 解析结论属于冻结输入(它决定 release 选择与执行
+        # 窗口),声明时覆盖进 input_checksum;未声明的 run 保持历史值。
+        if self.data_scope is not None:
+            payload["data_scope"] = self.data_scope
         return stable_checksum(payload)
 
     @property
@@ -1349,6 +1360,11 @@ def manifest_from_json(payload: Mapping[str, object]) -> ResearchRunManifest:
             str(payload["replay_source_status"])
             if payload.get("replay_source_status") is not None
             else None
+        ),
+        # issue #510:历史 manifest 无此键 → None,读取路径不重算 scope。
+        data_scope=cast(
+            dict[str, JsonValue] | None,
+            payload.get("data_scope"),
         ),
         schema_version=str(payload.get("schema_version", RESEARCH_RUN_SCHEMA_VERSION)),
     )

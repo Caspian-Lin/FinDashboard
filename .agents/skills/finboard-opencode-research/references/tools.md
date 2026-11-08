@@ -398,6 +398,38 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
   `deep_link` 为 Web 深链(无对应页面时为 null)
 - 发布不存在 → `not_found`
 
+## finboard.data_scope.*(✅ #510 只读)
+
+统一数据范围预览:把一份 `DataScopeSpec` 解析成候选冻结发布 + 执行窗口 +
+缺口 / 阻塞。**只读**:不落库、不触发同步、不发布数据集;写侧不新增工具,
+提交 run 仍走 `finboard_run_queue` 的 `data_scope` + `data_scope_resolution_id`。
+
+### finboard_data_scope_preview
+预览统一数据范围(scope → release → 窗口)。
+- 参数:`scope: object`(必填)/ `mode?: str = "new_spec"`
+  (`new_spec` | `existing_spec`;后者必须给 `strategy_id` + `strategy_version`)/
+  `strategy_id?` / `strategy_version?` / `view?: str = "summary"`
+  (`summary` | `detail`)
+- `scope` 形状:`{universe:{markets, asset_classes, instrument_types,
+  explicit_symbols, filters:{min_listing_days, exclude_suspended,
+  exclude_delisted, exclude_benchmark_only}, selection_limit},
+  decision:{start, end, schedule?}, warmup_sessions, tail_sessions,
+  benchmarks, datasets:{required, optional}, fields, bars_adjustment
+  (qfq|hqfq|none), release_selection(auto|locked), locked_release_ids}`
+- 返回:`{resolution_id(SC- 前缀), scope_checksum, selection_mode,
+  resolver_version, as_of, window:{warmup_start, decision_start,
+  decision_end, valuation_end, warmup_sessions, decision_sessions,
+  tail_sessions, calendar_markets, calendar_source}, releases:[{artifact_id,
+  dataset, role, version, checksum, reason}], universe, gaps, warnings,
+  blockers}`;`view=summary` 只附 `alternative_count` /
+  `affected_strategy_count`,`detail` 才回 `alternatives` /
+  `affected_strategies`
+- `blockers` 非空即范围不可用(如 bars 主发布缺标的 / benchmark 不在发布 /
+  locked 发布不满足窗口),不要自行绕过;`warnings` 是容错项(非交易日顺延、
+  预热不足、研究发布缺标的)
+- 提交 run 时把 `resolution_id` 与同一份 `scope` 一起回填;服务端重算比对,
+  数据变了 → `conflict`(重新预览,不静默换最新发布)
+
 ## finboard.data_write.* / finboard.etf.*(✅ #137,数据准备闭环)
 
 数据写操作工具(2 只读 + 10 写)。补全 #124 只读数据查询之外的数据准备能力,

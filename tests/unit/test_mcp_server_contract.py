@@ -52,6 +52,8 @@ _EXPECTED_TOOLS = {
     "finboard_data_coverage_get",
     "finboard_dataset_release_instruments",
     "finboard_dataset_release_references",
+    # #510 统一数据范围预览(1 只读;提交仍走 finboard_run_queue)
+    "finboard_data_scope_preview",
     # #125 因子实验室工具
     "finboard_factor_catalog",
     "finboard_feature_snapshot_list",
