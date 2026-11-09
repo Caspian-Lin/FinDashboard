@@ -1018,7 +1018,8 @@ async def _record_failure(
     params: dict[str, Any],
     correlation: dict[str, str] | None = None,
 ) -> None:
-    rejected = isinstance(
+    denied = isinstance(exc, ResearchPermissionDeniedError)
+    rejected = denied or isinstance(
         exc, (ResearchOperationError, ResearchTopicLinkConflictError, ValidationError)
     )
     code = (
@@ -1034,7 +1035,7 @@ async def _record_failure(
     await research_audit_recorder().record_detached(
         ResearchAuditEvent(
             operation=_action_audit_operation(action),
-            outcome="rejected" if rejected else "failed",
+            outcome="denied" if denied else "rejected" if rejected else "failed",
             context=ctx,
             topic_id=topic_id,
             correlation=merged,
@@ -1124,8 +1125,6 @@ async def run_topic_action(
             details={"allowed": sorted(TOPIC_ACTION_ENTITY_TYPES)},
         )
     entity_type = TOPIC_ACTION_ENTITY_TYPES[action]
-    _valid_operation_id(ctx.operation_id)
-    _require_action_scope(ctx, action)
     params = _params_summary(
         action, payload, topic_id=topic_id, goal_version=goal_version, operation_id=ctx.operation_id
     )
@@ -1133,6 +1132,10 @@ async def run_topic_action(
     entity_id: str | None = None
     job_id: str | None = None
     try:
+        # Inside the try so scope denials and invalid operation ids are audited
+        # as rejected/denied instead of silently disappearing.
+        _valid_operation_id(ctx.operation_id)
+        _require_action_scope(ctx, action)
         topic = await _require_topic(session, topic_id, lock=True)
         _require_active_with_goal(topic, goal_version)
 

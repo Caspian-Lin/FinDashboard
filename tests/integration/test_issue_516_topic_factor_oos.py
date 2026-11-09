@@ -1,4 +1,4 @@
-﻿"""Topic-scoped factor / sandbox / OOS actions and evidence refs (#516).
+"""Topic-scoped factor / sandbox / OOS actions and evidence refs (#516).
 
 The fixture seeds the #513/#515 scenario once (fixed strategy/release IDs) and
 re-creates the factor snapshot / code artifact per test, so every assertion runs
@@ -31,6 +31,7 @@ from finboard_app.research_audit import (
 from finboard_app.research_operation import (
     ResearchConflictError,
     ResearchInvalidInputError,
+    ResearchNotFoundError,
     ResearchOperationContext,
     ResearchPreconditionFailedError,
 )
@@ -55,7 +56,6 @@ from finboard_data.factor_lab import (
     _feature_snapshot_checksum,
 )
 from finboard_persistence import (
-    FactorExperimentRepository,
     ResearchCodeArtifactRepository,
     ResearchCodeRunRepository,
     ResearchExperimentRepository,
@@ -165,13 +165,13 @@ async def client(
     engine: AsyncEngine, audit: ResearchAuditRecorder
 ) -> AsyncIterator[httpx.AsyncClient]:
     from finboard_api.deps import get_db_session
+    from finboard_api.routes.research_runs import router as research_runs_router
     from finboard_api.routes.research_topic_actions import topic_actions_router
     from finboard_api.routes.research_topic_runs import (
         run_links_router,
         topic_runs_router,
     )
     from finboard_api.routes.research_topics import router as research_topics_router
-    from finboard_api.routes.research_runs import router as research_runs_router
 
     smaker = session_factory(engine)
     app = FastAPI()
@@ -634,7 +634,7 @@ async def test_code_run_execute_rejects_unknown_or_retired_artifact(
 ) -> None:
     topic = await _create_topic(engine)
     async with session_factory(engine)() as session:
-        with pytest.raises(Exception) as excinfo:
+        with pytest.raises(ResearchNotFoundError) as excinfo:
             await run_topic_action(
                 session,
                 topic_id=topic["topic_id"],
@@ -644,11 +644,11 @@ async def test_code_run_execute_rejects_unknown_or_retired_artifact(
                 ctx=_ctx(),
                 sandbox_enabled=True,
             )
-    assert getattr(excinfo.value, "code", None) == "artifact_not_found"
+    assert excinfo.value.code == "artifact_not_found"
 
     artifact = await _make_artifact(engine, status="retired", name="retired_factor")
     async with session_factory(engine)() as session:
-        with pytest.raises(ResearchConflictError) as excinfo:
+        with pytest.raises(ResearchConflictError) as retired_exc:
             await run_topic_action(
                 session,
                 topic_id=topic["topic_id"],
@@ -658,7 +658,7 @@ async def test_code_run_execute_rejects_unknown_or_retired_artifact(
                 ctx=_ctx(),
                 sandbox_enabled=True,
             )
-    assert excinfo.value.code == "artifact_retired"
+    assert retired_exc.value.code == "artifact_retired"
     assert await _count(engine, BackgroundJobModel) == 0
 
 
@@ -1040,17 +1040,9 @@ async def test_rest_action_surface_has_no_code_channel(
     )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "code_channel_forbidden"
-
-    # The Web sources never call the MCP code submission tool.
-    web_sources = list(Path("web/src").rglob("*.ts")) + list(
-        Path("web/src").rglob("*.tsx")
-    )
-    assert web_sources
-    for path in web_sources:
-        text_body = path.read_text(encoding="utf-8")
-        assert "finboard_research_code_submit" not in text_body, path
-        assert "source_code" not in text_body, path
     assert set(CODE_FORBIDDEN_FIELDS) >= {"code", "module", "expression"}
+    # The Web-source grep guard (no finboard_research_code_submit / source_code)
+    # is covered by tests/unit/test_issue_516_topic_factor_oos_unit.py.
 
 
 async def test_actions_never_write_live_tables(engine: AsyncEngine) -> None:

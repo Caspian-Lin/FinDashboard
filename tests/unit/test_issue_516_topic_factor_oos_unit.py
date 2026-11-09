@@ -54,8 +54,8 @@ _OLD_KINDS = {
 
 def test_evidence_ref_literal_keeps_old_kinds_and_adds_new() -> None:
     kinds = set(get_args(EvidenceRef.model_fields["kind"].annotation))
-    assert _OLD_KINDS <= kinds
-    assert _NEW_KINDS <= kinds
+    assert kinds >= _OLD_KINDS
+    assert kinds >= _NEW_KINDS
     assert kinds == _OLD_KINDS | _NEW_KINDS
 
 
