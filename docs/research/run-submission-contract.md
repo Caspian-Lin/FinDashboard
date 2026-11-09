@@ -69,7 +69,7 @@ finboard-app  background_jobs.py         enqueue_job_core → (job_row, created)
 - `factor_series` 为空时省略（#360）；
 - `data_scope` 为 None 时省略（#510）。
 
-护栏：`tests/unit/test_research_run_manifest_golden.py` 用 6 组代表性 payload
+护栏：`tests/unit/test_research_run_manifest_golden.py` 用 7 组代表性 payload
 （最小 / 全参数 / data_scope / user_code / factor_series / replay）锁定
 `run_id` 与 `manifest_checksum`；任何字段增删、顺序变化或取值漂移都会失败。
 语义变更必须走 `schema_version`，不允许悄悄改既有 `as_dict` 输出。
@@ -123,7 +123,8 @@ finboard-app  background_jobs.py         enqueue_job_core → (job_row, created)
 ```
 
 - **这是对外契约变更**，不做字符串兼容：把 `detail` 当字符串用的客户端会拿到对象。
-  典型症状是界面显示 `[object Object]` 或断言 `"xxx" in detail` 抛 `TypeError`。
+  典型症状是界面显示 `[object Object]`，或对 `detail` 调用 `startswith` /
+  `includes`（按字符串设计的方法）时抛 `TypeError`。
 - 迁移建议：读 `detail.message` 展示；按 `detail.code`（而不是文本）分支；
   `detail` 其余键是结构化补充（`actual_release_ids` / `expected_release_ids` 等），
   可能为空，不要假定存在。

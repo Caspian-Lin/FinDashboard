@@ -5,8 +5,8 @@
 锁定重构后的字节契约:
 
 * ``RR-`` 由幂等键确定性派生(逐字节,与历史实现一致);
-* 6 组代表性 payload(最小 / 全参数 / data_scope / user_code / factor_series /
-  replay)的 ``manifest_checksum`` 黄金值 —— ``ResearchRunManifest`` 的字段顺序、
+* 7 组代表性 payload(最小 / 全参数 / data_scope / user_code / factor_series /
+  factor_snapshot / replay)的 ``manifest_checksum`` 黄金值 —— ``ResearchRunManifest`` 的字段顺序、
   取值与 None 省略规则(``contracts.py``)任何漂移都会立即失败;
 * REST 上下文(显式 ``actor_type=agent``)与 MCP 上下文对同一 payload 产出
   **完全相同**的 manifest —— 两条适配层不再有第二份编排。
@@ -390,7 +390,7 @@ def test_run_id_matches_sha256_prefix() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 2) 6 组 payload 的 checksum 黄金值 + REST/MCP 等值
+# 2) 7 组 payload 的 checksum 黄金值 + REST/MCP 等值
 # --------------------------------------------------------------------------- #
 GOLDEN_RUN_IDS = {
     "minimal": "RR-26883230ba131bf446fdbb94",

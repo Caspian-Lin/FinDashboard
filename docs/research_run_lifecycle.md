@@ -168,7 +168,7 @@ API 刻意没有同步执行端点。受控离线 worker/CLI 通过
 - **服务不 commit**：调用方（REST 路由 / MCP handler / #515 的课题动作）持有唯一
   一次 `commit()`，失败 `rollback()`。这样课题链接 + run + job + 审计才能进同一事务。
 - **冻结字节不变**：`ResearchRunManifest` 字段顺序、取值与 None 省略规则原样保留；
-  `tests/unit/test_research_run_manifest_golden.py` 锁定 6 组代表性 payload 的
+  `tests/unit/test_research_run_manifest_golden.py` 锁定 7 组代表性 payload 的
   `run_id` + `manifest_checksum`。
 - **错误分类统一**：业务层只抛 `ResearchOperationError`（`invalid_input` /
   `not_found` / `conflict` / `precondition_failed` / `permission_denied` /
