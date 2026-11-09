@@ -1,4 +1,4 @@
-# 02 Codex(已实测)
+﻿# 02 Codex(已实测)
 
 `codex-cli 0.163.0`,Windows。凭据从环境变量注入,**token 不落配置文件、不进命令行**。
 
@@ -49,7 +49,7 @@ Codex 自己的总结(原样):
 > 追加回执 status=ok;两次调用均未出现 denied。
 > 追加轮次 entry_id:RE-391bab58c76648a581ed0c6b。
 
-完整事件流:`logs/codex-writer.jsonl`(`item.completed` 里的 `mcp_tool_call`
+完整事件流:`streams/codex-writer.jsonl`(`item.completed` 里的 `mcp_tool_call`
 带完整 `structured_content`)。
 
 ### B. readonly:读成功、写被拒
@@ -69,7 +69,7 @@ Codex 总结(原样):
 > 写回执:status=denied,error.kind=permission_denied。
 > 服务端已拒绝写入:凭据仅有 research.read,缺少 research.write。
 
-完整事件流:`logs/codex-readonly.jsonl`。
+完整事件流:`streams/codex-readonly.jsonl`。
 
 ## 踩坑(Know-how)
 
@@ -102,3 +102,4 @@ Codex 总结(原样):
   回答单独存文件。
 - **stderr 噪音**:全局 `config.toml` 里其它 MCP server(如 exa / consensus)的连接
   错误会混进 stderr;`--ignore-user-config` 下仍可能看到。裁剪证据时已剔除。
+

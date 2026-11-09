@@ -1,4 +1,4 @@
-# 03 外部 OpenCode(已实测)
+﻿# 03 外部 OpenCode(已实测)
 
 `opencode v2.0.32`,Windows,独立于 FinBoard 内置托管容器(那是 #520 要退役的
 `finboard-opencode`)。
@@ -97,3 +97,4 @@ OpenCode 总结(原样):
 - **服务端日志**:`%LOCALAPPDATA%\opencode\log` 或 `~/.local/share/opencode/log`;
   会话与消息落在 `~/.local/share/opencode/opencode.db`(sqlite)。
 - `--print-logs` 可把 server 日志打到 stderr(需配合 `--standalone`)。
+

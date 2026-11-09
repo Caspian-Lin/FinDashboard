@@ -59,12 +59,14 @@
 | `02-codex.md` | Codex 命令、参数、回执、踩坑(审批策略 / stdin 传 prompt) |
 | `03-opencode.md` | 外部 OpenCode 配置、非交互命令、回执、踩坑(服务端口 / 配置发现 / 模型抖动) |
 | `04-server-log.md` | 服务端启动与越权拒绝日志摘录 |
-| `logs/codex-writer.jsonl` | Codex 写入场景 `--json` 事件流(裁掉无关事件,保留工具调用与回执) |
-| `logs/codex-readonly.jsonl` | Codex 只读越权场景事件流 |
-| `logs/opencode-writer.jsonl` | OpenCode 写入场景 `--format json` 事件流(输出截断到 2000 字符) |
-| `logs/opencode-readonly.jsonl` | OpenCode 只读越权场景事件流 |
+| `streams/codex-writer.jsonl` | Codex 写入场景 `--json` 事件流(裁掉无关事件,保留工具调用与回执) |
+| `streams/codex-readonly.jsonl` | Codex 只读越权场景事件流 |
+| `streams/opencode-writer.jsonl` | OpenCode 写入场景 `--format json` 事件流(输出截断到 2000 字符) |
+| `streams/opencode-readonly.jsonl` | OpenCode 只读越权场景事件流 |
 
 原始未裁剪日志留在 worktree 的 `.tmp/skill519/`(`.tmp/` 已 gitignore),不进仓库。
+> 目录名用 `streams/` 而不是 `logs/`:仓库 `.gitignore` 全局忽略 `logs/`,放在那里
+> 会被静默排除(本轮第一版提交就踩过)。
 
 ## 未覆盖 / 待验(不夸大)
 
@@ -79,3 +81,4 @@
   **没有**真实 `BJ-`/`RR-` 的等待与引用回执。协议字段(documentation 契约)在
   `references/tools.md` 与 `_INSTRUCTIONS` 中已同步,但未做端到端运行证据。
 - 客户端**日志可用性**单独记录,见 `02-codex.md` / `03-opencode.md` 的「日志」小节。
+

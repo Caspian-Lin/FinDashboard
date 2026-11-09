@@ -1,4 +1,4 @@
-﻿# 01 环境与服务端
+# 01 环境与服务端
 
 ## 版本
 
@@ -83,4 +83,14 @@ MC-e82515fe8725      opencode-readonly    <prefix>  research.read               
   `goal`(建题)+ `round`(Codex,`RE-391bab58c76648a581ed0c6b`)+
   `round`(OpenCode,`RE-dacddc0cc903469faac1c34d`),`has_more=false`。
   readonly 的两次越权 append **没有**产生任何 entry。
+
+## 收尾(产物留在哪里)
+
+- 4 个客户端凭据**保留**在 wt4 开发库 `mcp_clients` 里(topic-writer ×2 / readonly ×2),
+  便于复跑同一场景;明文 token 只在 gitignore 的 `.tmp/skill519/` 与进程环境里,
+  未进仓库。要清理:`uv run finboard mcp client revoke <CLIENT_ID>`。
+- 课题 `RT-9dac7584b738450bb1ac42f1` 与 2 条轮次留在 `research_topics` /
+  `research_topic_entries`(dev 库),是**工作记录**,不是 canonical 结论。
+- 本轮未产生 `RR-` / `BJ-`(wt4 开发库 `research_runs` 为空),所以 `BJ-`/`RR-`
+  续接只验证了协议字段与文档契约,没有真实回执 —— 见 `README.md` §未覆盖。
 
