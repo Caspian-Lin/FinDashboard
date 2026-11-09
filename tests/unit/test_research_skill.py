@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from finboard_mcp.scopes import SCOPE_PRESETS, TOOL_SCOPES
@@ -161,3 +162,79 @@ class TestLegacyShim:
         assert not (_LEGACY_DIR / "references").exists(), (
             "旧 references/ 必须删除,避免两份文档漂移"
         )
+
+
+#: 工具调用表达式:``finboard_xxx(...)``;参数名 ``key=``。
+_CALL = re.compile(r"(finboard_[a-z0-9_]+)\s*\(")
+_ARG = re.compile(r"(?:^|[,{(\s])([a-z_][a-z0-9_]*)\s*=")
+
+#: schema 之外、由工具语义要求的参数(``operation`` 维度)。
+#: ``finboard_topic_write(operation="append")`` 必须带幂等键,否则重试会重复建轮次
+#: (tools.md:「追加需幂等键」;schema 里它是可选的)。
+_EXTRA_REQUIRED: dict[tuple[str, str], set[str]] = {
+    ("finboard_topic_write", "append"): {"idempotency_key"},
+}
+
+
+def _iter_calls(text: str) -> Iterator[tuple[str, str]]:
+    """抽取文本里的工具调用表达式(带括号配平),产出 ``(tool, 实参文本)``。"""
+    for match in _CALL.finditer(text):
+        tool = match.group(1)
+        depth = 0
+        index = match.end() - 1
+        start = index
+        while index < len(text):
+            char = text[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            index += 1
+        yield tool, text[start : index + 1]
+
+
+class TestDocumentedCallExamples:
+    """Skill / 预设里的示例调用必须带齐真实必填参数(#519 评审阻断项回归)。
+
+    背景:收尾协议曾把 ``entry_type`` / ``source_refs`` 写成 ``finboard_topic_write``
+    的顶层参数、并漏掉必填的 ``payload`` 与 ``idempotency_key`` —— 照抄会直接
+    报 ``invalid_argument``。这里用运行时注册表的 ``input_schema.required`` 反查,
+    新增必填参数时文档不同步就会被这条测试抓住。
+
+    只约束**带具名参数的调用表达式**:``finboard_source_check(…)`` 这类纯占位不算
+    示例;函数名本身也必须是已注册工具。
+    """
+
+    async def test_examples_carry_required_arguments(self) -> None:
+        from finboard_mcp.server import build_mcp_server
+
+        tools = {tool.name: tool for tool in await build_mcp_server().list_tools()}
+        files = [
+            _SKILL_DIR / "SKILL.md",
+            *sorted((_SKILL_DIR / "presets").glob("*.md")),
+        ]
+        checked = 0
+        for path in files:
+            text = path.read_text(encoding="utf-8")
+            for tool, body in _iter_calls(text):
+                assert tool in tools, (
+                    f"{path.relative_to(_SKILLS_ROOT)} 引用了未注册工具 {tool}"
+                )
+                present = set(_ARG.findall(body))
+                if not present:
+                    continue  # 纯占位调用,不是可抄的示例
+                schema = tools[tool].input_schema or {}
+                required = set(schema.get("required") or [])
+                for (extra_tool, operation), extra in _EXTRA_REQUIRED.items():
+                    if extra_tool == tool and f'operation="{operation}"' in body:
+                        required |= extra
+                missing = sorted(required - present)
+                assert not missing, (
+                    f"{path.relative_to(_SKILLS_ROOT)} 的 {tool} 示例缺少必填参数 "
+                    f"{missing}(真实 required={sorted(required)});"
+                    f" 调用片段: {body[:160]}"
+                )
+                checked += 1
+        assert checked >= 5, f"只抽取到 {checked} 个示例调用,正则可能失配"
