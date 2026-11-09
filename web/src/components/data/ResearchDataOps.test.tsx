@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import ResearchData from "./ResearchData";
+import ResearchDataOps from "./ResearchDataOps";
 
 const datasetApiMock = vi.hoisted(() => ({
   releases: vi.fn(),
@@ -212,10 +212,10 @@ const publishedSummary = {
   release_checksum: "a".repeat(64),
 };
 
-describe("ResearchData 数据发布闭环", () => {
+describe("ResearchDataOps 数据发布闭环", () => {
   it("从缓存选择范围并创建不可变发布", async () => {
     const user = userEvent.setup();
-    const { container } = renderWithProviders(<ResearchData />);
+    const { container } = renderWithProviders(<ResearchDataOps />);
 
     await user.click(screen.getByRole("tab", { name: "行情" }));
     await user.click(
@@ -269,7 +269,7 @@ describe("ResearchData 数据发布闭环", () => {
       offset: 0,
     });
 
-    renderWithProviders(<ResearchData />);
+    renderWithProviders(<ResearchDataOps />);
     await user.click(screen.getByRole("tab", { name: "标的与档案" }));
 
     expect(
@@ -322,7 +322,7 @@ describe("ResearchData 数据发布闭环", () => {
       last_date: "2024-12-31",
     });
 
-    renderWithProviders(<ResearchData />);
+    renderWithProviders(<ResearchDataOps />);
     await user.click(screen.getByRole("tab", { name: "行情" }));
     await user.click(screen.getByRole("button", { name: "创建数据发布" }));
     await user.click(
@@ -401,7 +401,7 @@ describe("ResearchData 数据发布闭环", () => {
         updated_at: "2026-07-31T00:00:00+00:00",
       });
 
-    renderWithProviders(<ResearchData />);
+    renderWithProviders(<ResearchDataOps />);
     await user.click(screen.getByRole("tab", { name: "行情" }));
     await user.click(screen.getByRole("button", { name: "创建数据发布" }));
     await user.click(screen.getByLabelText("发布类型"));
@@ -436,7 +436,7 @@ describe("ResearchData 数据发布闭环", () => {
 
   it("新发布 kind（利润表 #397）默认 full_market 且固定 tushare/none/stock", async () => {
     const user = userEvent.setup();
-    renderWithProviders(<ResearchData />);
+    renderWithProviders(<ResearchDataOps />);
 
     await user.click(screen.getByRole("tab", { name: "利润表" }));
     await user.click(screen.getByRole("button", { name: "创建数据发布" }));
@@ -467,7 +467,7 @@ describe("ResearchData 数据发布闭环", () => {
 
   it("新页签展示对应 dataset_sync 数据集名与字段示例（#392/#397 清单）", async () => {
     const user = userEvent.setup();
-    renderWithProviders(<ResearchData />);
+    renderWithProviders(<ResearchDataOps />);
 
     await user.click(screen.getByRole("tab", { name: "分红送股" }));
     expect(await screen.findByText("a_share_dividends")).toBeInTheDocument();

@@ -24,7 +24,10 @@ from finboard_api.routes import (
     account_router,
     audit_router,
     backtest_router,
+    data_backfill_router,
+    data_catalog_router,
     data_router,
+    data_scopes_router,
     fills_router,
     health_router,
     instruments_router,
@@ -468,6 +471,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(reconcile_router)
     app.include_router(audit_router)
     app.include_router(data_router)
+    app.include_router(data_catalog_router)
+    app.include_router(data_scopes_router)
+    app.include_router(data_backfill_router)
     app.include_router(backtest_router)
     app.include_router(watchlist_router)
     app.include_router(strategy_presets_router)

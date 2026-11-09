@@ -24,7 +24,7 @@ FinDashboard 对外 Demo、README 与发布页所用产品截图 / GIF 的统一
 | 文件 | 页面 / 状态 |
 |---|---|
 | `research-home.png` | `/research`，研究入口与最近记录已加载 |
-| `data-release.png` | `/research/data`，数据覆盖与发布入口可见 |
+| `data-release.png` | `/data?tab=datasets&view=ops&sub=bars`，数据覆盖与发布入口可见 |
 | `factor-lab.png` | `/research/factors`，因子目录首屏 |
 | `oos-detail.png` | `/research/experiments`，选中真实 `VALIDATED_OOS` 实验，详情已加载且无悬浮层 |
 | `run-lineage.png` | `/research/runs`，选中 completed ResearchRun，冻结输入与 checksum 可见 |

@@ -610,3 +610,360 @@ missing_strategy 入 `_PREDEFINED_FAMILY_SCORING`,缺省 = 1%/99% + zscore
 13 因子目录、p_ 走投影,未知各自具名拒绝);新家族未登记投影规则 =
 导入期 RuntimeError(fail-loud 防漂移)。`MultiFactorScorer` 可直接引用
 治理后 p_ 目录组合评分。
+
+---
+
+## 全局数据目录与覆盖口径(#509)
+
+`finboard_data.datasets` 是数据集名单的唯一事实源(10 个 key:bars /
+daily_metrics / financial_indicators / convertible_metrics /
+income_statements / balance_sheets / cashflow_statements / dividends /
+profiles / suspensions)。REST `/api/data/catalog` 与 MCP
+`finboard_data_catalog_*` 从同一 registry 读取标题、字段、单位、PIT 与
+日历口径,禁止再在页面/工具里硬编码数据集清单。
+
+### 状态判定(目录唯一入口)
+
+| 状态 | 含义 |
+|---|---|
+| `usable` | 有可用发布且最近更新在 30 天内 |
+| `ingested_not_published` | 已同步/已有 bars 缓存,但没有可用发布 |
+| `blocked` | 最近一次同步失败/质量拒绝,且晚于最近发布 |
+| `not_ingested` | 无批次、无发布、无缓存 |
+| `stale` | 有可用发布,但超过 30 天未更新 |
+| `unknown` | 元数据缺失(如日历读不到),不用于"看起来没数据" |
+
+### 覆盖分母
+
+- 发布类数据集:分母 = `Σ expected_sessions`(发布 manifest 逐标的
+  期望交易日,按市场交易日历;停牌不计缺口,单列 `suspended_sessions`);
+  响应同时返回 `symbols_with_gaps` / `missing_sessions` / 预览,前端不得
+  自算百分比。
+- 同步批次类(profiles / suspensions):分母 = `received_rows`,显示
+  `accepted_rows`;拒绝明细看 `quality_report` 与批次 `error_summary`。
+- 发布级 `coverage_pct` 是 manifest 冻结值(逐标的简单平均),与
+  `weighted_coverage_pct`(Σrow/Σexpected)分开命名,禁止混用。
+
+### 逐标的索引(#509)
+
+`research_dataset_release_instruments` 是 manifest 的**派生读模型**,不是
+第二事实源:
+
+- 新发布在 `ResearchDatasetReleaseRepository.publish()` 事务内写入;
+- 历史发布由目录读路径 `ensure_instruments()` 用服务端 SQL
+  (`jsonb_array_elements(manifest->'instruments')`)自愈,PG 侧解析,
+  不占 API 进程内存,也没有 `pending` 状态或 manifest 回退读路径;
+- 发布行不可变,缓存无失效问题;manifest 损坏时具名报错,不静默改读。
+
+目录列表/详情只做列投影,**禁止走 `ResearchDatasetReleaseRepository.list()`**
+(它会对每行 `from_dict(manifest)`;本地全市场单份 manifest 已约 90MB)。
+需要暖机时可在低峰期调用 `GET /api/data/catalog/releases/{id}/instruments`
+触发单发布自愈,不需要停服或额外迁移。
+
+### 入口
+
+| 用途 | REST | MCP |
+|---|---|---|
+| 数据集列表/过滤 | `GET /api/data/catalog` | `finboard_data_catalog_list` |
+| 数据集详情(字段/单位/PIT/批次/发布/失败) | `GET /api/data/catalog/datasets/{dataset}` | `finboard_data_catalog_get` |
+| 覆盖/缺口 | `GET .../coverage` | `finboard_data_coverage_get` |
+| 发布逐标的分页 | `GET .../releases/{id}/instruments` | `finboard_dataset_release_instruments` |
+| 发布引用(课题/运行/策略) | `GET .../releases/{id}/references` | `finboard_dataset_release_references` |
+| 课题数据范围(#512) | `GET /api/data/catalog/topics/{topic_id}/coverage` | — |
+| 标的反查 | `GET .../instruments/{code}` | — |
+| 交易日历 | `GET .../calendar` | — |
+
+目录只读:不触发同步/发布;写入口仍是 `dataset_sync` / `bulk_download` /
+`dataset_publish`。不同 source 或复权口径的发布不得在目录里合并成一行。
+
+## 统一数据范围:scope → release → run(#510)
+
+`DataScopeSpec` 是「这次研究用哪些数据」的唯一声明形态(数据集/标的池/
+决策区间/预热与尾部/基准/复权/发布选择模式)。它**不是新的持久化实体**:
+`POST /api/data/scopes/preview` 只解析不写库(唯一的写是 #509 逐标的读模型
+自愈 `ensure_instruments`,不改发布),返回 `resolution_id`(内容指纹)
++ 候选发布 + 窗口 + 缺口 + 阻塞;真正冻结发生在提交 run 时。
+
+### 一条完整链路
+
+```text
+1) 预览(只读)
+   POST /api/data/scopes/preview
+   {"scope": {"universe": {"explicit_symbols": ["000001.SZ"]},
+              "decision": {"start": "2024-01-02", "end": "2024-03-28"},
+              "warmup_sessions": 20, "tail_sessions": 5,
+              "benchmarks": ["000300.SH"],
+              "datasets": {"required": ["bars", "daily_metrics"]},
+              "bars_adjustment": "qfq"}}
+   → {resolution_id: "SC-…", window: {warmup_start, decision_start,
+      decision_end, valuation_end}, releases: [...], gaps, blockers}
+
+2) 提交 run(带同一份 scope + resolution_id)
+   POST /api/research/runs {"data_scope": {…同 1)…},
+                            "data_scope_resolution_id": "SC-…", …}
+   → 服务端重算:resolution_id 不一致 = 409 scope_release_drift(重新预览);
+     blockers 非空 = 422;通过后把 research_window 写进 parameters 并随
+     manifest 冻结。
+```
+
+MCP 侧只读入口是 `finboard_data_scope_preview`;写侧不新增工具,提交仍用
+`finboard_run_queue` 的 `data_scope` / `data_scope_resolution_id` 两个字段
+(成对出现,缺一即 `invalid_argument`)。
+
+### 语义边界
+
+- **窗口来自交易日历**,不是自然日:解析落位到 `trade_cal` 并集,预热不足/
+  尾部不足给 warning;决策日不在日历内则具名拒绝(不用自然日兜底)。
+- **尾部与执行期一次性闭合**:`tail_sessions=0` 时预览给具名 warning;提交期若
+  运行声明了 multi_period(`decision_schedule` / legacy `rebalance_frequency`)
+  且 `valuation_end <= decision_end` → 422 `scope_window_tail_too_short`(dev
+  #502 的最后一个决策日要按下一交易日撮合)。single_shot 一般不需要尾部,但若
+  最后一个快照决策日恰为 `decision_end`,执行期同样会报
+  `research_window_execution_tail_missing`——这类运行显式给 `tail_sessions>=1`。
+- **bars 主发布唯一**:`datasets.required` 必须含 bars;`locked` 模式必须
+  恰好一份可发布的 bars 且覆盖全部 required 数据集。
+- **benchmark 必须在 bars 主发布内**,否则 `scope_benchmark_not_in_bars`
+  阻塞(基准与候选池同源,避免跨发布价格口径漂移)。
+- **研究数据发布只提供因子观测**:研究类发布缺个别标的是 warning +
+  `gaps.missing_in_research`,不阻塞;bars 缺标的阻塞。
+- **旧发布只读**:解析只选不改(逐标的读模型自愈除外);需要扩范围时走 #511
+  补数产生**新发布**,不修改既有 release。
+- **scope.universe 是声明而不是运行池**:运行的真实候选池仍来自冻结策略规格
+  (`spec.universe` + bars 发布 instruments),scope 只声明「本次要检查哪些标的/
+  数据集」;把 scope 收窄不会缩小运行池,也不会替运行池做 bars 缺标的豁免。
+- **空池阻塞**:解析出 0 只标的(`scope_universe_empty`)、资产大类未映射
+  (`scope_asset_class_unmapped`)一律阻塞,不回退成「不过滤全市场」。
+- **漂移 fail-closed**:预览只是快照,提交必须复验;预览之后上线新发布
+  (auto 模式会改选)即 409,禁止「旧预览 + 新数据」静默执行。
+- **历史运行不受影响**:旧 manifest 没有 `data_scope` 键,读取/重放不重算
+  scope,也不因新字段改变 checksum。
+
+### 回滚路径
+
+scope 是输入声明而不是持久状态,回滚即改回旧的两字段入口:提交时省略
+`data_scope` / `data_scope_resolution_id`,run 行为与 #510 之前完全一致;
+已冻结的 run 不回改(manifest 不可变),需要新范围时新建 run。
+
+## 课题缺口 → 全局补数(#511)
+
+课题发现缺口时不再各自触发同步:`finboard-backtest` 的 `data_backfill` 包把
+「缺什么」变成一条**可追踪的共享补数请求**(`BF-` 前缀),由平台统一补数并
+产生可被其他课题选用的新发布。入口:REST `/api/data/backfills`、MCP
+`finboard_data_backfill_*`;执行器 `kind=data_backfill` 只**编排**既有
+`dataset_sync` / `bulk_download` / `quality_repair` / `dataset_publish`,
+不复制同步或发布逻辑。
+
+### 支持清单(预检与阻塞的唯一依据)
+
+| 数据集 | 同步内核 | 可发布 | release_kind | 备注 |
+|---|---|---|---|---|
+| bars | `bulk_download`(+ 可选 `quality_repair`) | 是 | `multi_asset_mixed`(落库 dataset_kind=`bars`) | 需先有标的元数据;**只支持 qfq**(缓存写入无 adjust 维度,非 qfq 预检即 `backfill_adjustment_unsupported`) |
+| daily_metrics / financial_indicators / income_statements / balance_sheets / cashflow_statements / dividends | `dataset_sync` | 是 | 同名 | 发布只接受 A 股股票;PIT 规则见目录 |
+| convertible_metrics | 无(派生) | 是 | `convertible_metrics` | 依赖 bars + 转债条款,缺口时 `backfill_dataset_derived` 阻塞 |
+| profiles / suspensions | `dataset_sync` | 否 | — | 只补同步,不产生发布 |
+
+静态清单从 #509 目录注册表(`finboard_data.datasets`)推导,只补两条目录不
+表达的执行事实(内核与标的域)。运行时能力(缺 tushare token / 缓存或发布
+目录不可写)在预检中逐数据集具名 `blocked` + `reason`,不静默跳过;
+**需要新来源、新数据集或付费额度时仍落一行 `blocked` 请求**(不建 job),
+作为需求登记,来源开通后可对同一请求 `retry`。
+
+### 共享去重
+
+- **身份维度** = `(dataset, source, adjustment)` + 窗口 + 标的 + 发布开关;
+  异源或不同复权口径永远不参与复用,fingerprint 也不同;item 唯一键与发布身份
+  都含 `adjustment` 与非默认 `source`(同 dataset 的多来源/多复权项互不覆盖;
+  bars 的 hqfq 会被预检阻塞,唯一键仍保留该维度以便未来放开);
+- **已完成覆盖**:可发布数据集以 `research_dataset_releases` 的可用发布
+  (逐标派生索引)为准;不可发布数据集以 `research_sync_batches` 的已发布
+  批次为准;
+- **在途覆盖**:`data_backfill_requests` 中 `queued|running` 且身份一致、
+  区间重叠、标的是请求标的**超集**的 item;
+- `missing_ranges = 请求区间 − (已完成 ∪ 在途)`;部分重叠只补剩余缺口,
+  **缺口区间冻结进 item**,执行器按区间取数(不重跑整窗),发布仍冻结请求窗口;
+  `reused_request_ids` 记录复用来源,剩余为空时不建 job 直接返回 `succeeded`
+  复用结果;
+- **标的缺口同样触发补数**:窗口级覆盖齐全但请求标的有缺失时,缺口按
+  「该标的未覆盖的区间」冻结成 `missing_ranges` 并真正执行同步(不只是
+  action 变成 sync);逐标的单元按标的冻结标的列表(≤2000)或
+  `universe_filters`,发布面不得宽于请求面(含窗口级数据集);过滤器必须能
+  转成 `dataset_sync` 支持的键(至少 `instrument_type`),否则具名
+  `backfill_symbol_scope_unresolved`,不静默放宽;
+- 同一 `fingerprint` 的在途请求直接复用;等价重试(同 `Idempotency-Key`)
+  回同一请求;失败/取消后重提或 `POST /{id}/retry` 生成新请求并保留
+  `retry_of_request_id` 血缘;
+- **提交前复算 plan**:与预览返回的 `plan_checksum` 不一致(新发布 / 新在途
+  / 配额变化)→ 409 `backfill_plan_drift`,必须重新预览,禁止按旧计划执行。
+
+### 失败补偿
+
+- 请求状态 `queued → running → succeeded | partial | failed | cancelled`
+  (受阻另落 `blocked`);明细 `pending → running → succeeded | failed |
+  cancelled | reused`,**逐 item 独立**成功/失败,默认 fail-fast:第一个失败
+  即停止后续 item;
+- 已成功 item 的发布**保留**且可被其他课题的 #510 scope 解析直接选用;
+  请求 `partial` 时失败项可 `retry` 续补,不需要重跑已成功部分;
+- 质量门失败(批次 `quality_rejected` / `quality_status=failed`)→ 不发布,
+  请求 `failed` 且 `error_code=backfill_quality_failed`,批次与 item 明细可查;
+- 上游预算耗尽(`TushareRequestLimitError`)→ 任务 `retry_waiting`(与
+  `dataset_sync` 一致),请求退回 `queued`、item 退回 `pending`,不把请求标死;
+- 取消:job 协作式取消;**排队中**直接 `cancelled`(未领取 item 标 cancelled),
+  **运行中**交给执行器在检查点收敛(不抢跑状态机);已发布 release 不回滚;
+- 受阻(`blocked`)请求是需求登记,来源/额度开通后可直接 `retry`(重算 plan),
+  不需要换幂等键重提;
+- 发布幂等按**计算出的身份**查重:发布成功但 item 落库前崩溃,重跑直接复用
+  该发布,不会撞 `release_identity_conflict`。
+
+### 发布身份与历史冻结
+
+补数发布的 `release_id = DR-<dataset>[-<adjustment>][-<source>]-<request_id>`、
+`version = v[-<adjustment>][-<source>]-<request_id>`(非 `none` 复权、非默认
+来源才带对应后缀,避免同 dataset 多复权/多来源项撞同一发布身份);同一请求重跑
+命中同一身份即幂等返回;`plan` 里只给预告模板。既有发布只读:补数只追加新版本,
+任何补数都不会修改历史 release 的 checksum / 区间 / 逐标覆盖。
+
+### 入口
+
+| 用途 | REST | MCP |
+|---|---|---|
+| 预检(纯读) | `POST /api/data/backfills/preview` | `finboard_data_backfill_preview` |
+| 提交(幂等) | `POST /api/data/backfills`(`Idempotency-Key`) | `finboard_data_backfill_submit` |
+| 列表/详情 | `GET /api/data/backfills[/{id}]` | `finboard_data_backfill_list` |
+| 取消 | `POST /api/data/backfills/{id}/cancel` | `finboard_data_backfill_cancel` |
+| 重试剩余项 | `POST /api/data/backfills/{id}/retry` | — |
+
+迁移拆成 `c4a1b2d3e5f6`(请求/明细两表)与 `d3e4f5a6b7c8`(明细的冻结
+字段与含 `adjustment` 的唯一键):已应用前者的库直接 `alembic upgrade head`
+即可补齐,无需手动 downgrade;`create_all` 与迁移的索引/约束形态一致。
+
+`POST /api/jobs` 与 `finboard_job_enqueue` **不开放** `data_backfill` kind:
+补数只经语义端点提交,避免绕过预检;MCP 审计只记录 scope_checksum /
+fingerprint / 数据集清单,不记录完整 symbols。
+
+---
+
+## 共享数据基座面板与课题数据视图(#512)
+
+### 页面、路由与导航
+
+`/data` 是共享数据的**一级入口**(`web/src/pages/data/DataBase.tsx`),
+四个 tab 与 URL 一一对应(`?tab=overview|datasets|sync|tech`,默认概览):
+
+| tab | 内容 | 主要接口 |
+|---|---|---|
+| 概览 `overview` | 状态卡(可研究/待发布/受阻/未同步或过期)、全局缺口摘要、最近发布、快捷入口、课题数据视图 | `GET /api/data/catalog` |
+| 数据集 `datasets` | 目录列表 + 过滤(dataset/status/source/asset_class/时间窗/关键词)+ 数据集详情抽屉 + 发布详情抽屉(逐标的、引用);子视图「分类操作」原样挂载旧操作面板 | `GET /api/data/catalog`、`/datasets/{d}`、`/datasets/{d}/coverage`、`/releases/{id}`、`/releases/{id}/instruments`、`/releases/{id}/references` |
+| 同步与发布 `sync` | **第一阶段只读**:同步/发布现状与既有入口链接;#511 补数请求接入占位(按钮禁用) | `GET /api/data/catalog` |
+| 技术详情 `tech` | 质量、分区、批次、原始单位、复权、PIT、manifest(checksum/存储/能力位)、任务日志入口 | `GET /api/data/catalog/datasets/{d}`、`.../coverage` |
+
+约定:
+
+- 导航放在「研究」组**首位**(条目「数据基座」,`/data` 精确匹配 `end`);
+  原「高级研究工具 → 数据与标的」入口移除,避免重复。
+- 旧 `/research/data` **永久重定向**到 `/data` 并保全查询参数;旧页签映射:
+
+  | 旧 `?tab=` | 新地址 |
+  |---|---|
+  | `bars` / `fetch` / `releases` | `/data?tab=datasets&dataset=bars` |
+  | `metrics` | `dataset=daily_metrics` |
+  | `financial` | `dataset=financial_indicators` |
+  | `income` / `balance` / `cashflow` / `dividends` | `dataset=income_statements` / `balance_sheets` / `cashflow_statements` / `dividends` |
+  | `convertible` | `dataset=convertible_metrics` |
+  | `instruments` | `dataset=profiles&view=ops&sub=instruments`(标的生命周期在旧操作面板) |
+  | `release=<id>` | 任何情况下原样保留;缺 `tab` 时落 `tab=datasets` 并直接打开该发布抽屉 |
+
+- 旧能力(行情拉取、财务/指标、三表、分红、转债、标的与生命周期、ETF 复核、
+  发布向导)在「数据集 → 分类操作」中**原样**保留
+  (`web/src/components/data/ResearchDataOps.tsx`,逻辑未改写,只换了挂载点与
+  `sub` 页签参数)。
+- 状态口径的唯一事实源仍是后端 `status`;前端只做文案/配色映射:
+  `usable`→可研究、`ingested_not_published`→待发布(已同步)、`blocked`→受阻、
+  `not_ingested`→未同步、`stale`→过期、`unknown`→未知。概览状态卡只统计前五类,
+  `unknown`(元数据缺失,不等于没数据)单独一行说明,不计入「未同步 / 过期」。
+- 覆盖率与分母全部取服务端字段(`CoverageBar` 只做显示换算与 tooltip),
+  前端不得自算百分比。
+
+### 课题数据视图接口(#512,兼容 #514)
+
+```http
+GET /api/data/catalog/topics/{topic_id}/coverage
+```
+
+响应(只读,不写课题、不触发同步/发布):
+
+```json
+{
+  "topic_id": "RT-...",
+  "releases": [
+    {
+      "release_id": "DR-...", "dataset": "daily_metrics",
+      "dataset_name": "...", "source": "tushare", "version": "v1",
+      "start_date": "2024-01-02", "end_date": "2024-12-31",
+      "published_at": "...", "quality_status": "passed",
+      "coverage_pct": 0.98, "expected_sessions": 400,
+      "missing_sessions": 2, "symbols_with_gaps": 1,
+      "denominator": "发布 expected_sessions x 发布标的数", "warnings": []
+    }
+  ],
+  "coverage": {
+    "release_count": 1, "dataset_count": 1, "min_coverage_pct": 0.98,
+    "missing_sessions": 2, "symbols_with_gaps": 1,
+    "denominators": ["..."], "resolved_by": "refs", "warnings": []
+  },
+  "gaps": [
+    {
+      "release_id": "DR-...", "dataset": "daily_metrics",
+      "reason": "coverage_gap", "message": "1 个标的缺 2 个期望交易日",
+      "coverage_pct": 0.98, "missing_sessions": 2, "symbols_with_gaps": 1
+    }
+  ],
+  "last_sync": "2026-11-01T08:00:00Z",
+  "next_step": "fix_gaps"
+}
+```
+
+解析顺序与语义:
+
+1. **显式 `data_scope` 优先**:`topic.payload.data_scope.locked_release_ids`
+   (优先,对齐 #510 `DataScopeSpec.locked_release_ids`)或
+   `data_scope.dataset_release_ids`(兼容计划文档措辞);#514 落地后写入,
+   当前 schema 无该键,正常走回退。
+2. **轮次 `source_refs` 回退**(`resolved_by="refs"`):
+   - `kind=dataset`:先按发布 ID 精确命中;否则按目录数据集 key 取该 kind
+     最近发布;两者都不中记缺口。
+   - `kind=research_run`:读该运行 manifest 的
+     `dataset_releases[*].artifact_id`(服务端只取该子树,不加载整份 manifest),
+     同一发布去重。
+3. 每份发布复用 #509 `get_coverage` 的覆盖口径(分母/缺口/警告原样透传),
+   浏览器不聚合多份发布。
+4. `last_sync` = max(相关发布 `published_at`, 相关数据集最近批次
+   `completed_at`)。已同步未发布时它会晚于最新发布,正好指向「待发布」。
+5. `next_step` 稳定动作码:`ready`(可研究)/ `fix_gaps`(有覆盖缺口)/
+   `blocked`(引用解析失败或质量受阻)/ `no_refs`(课题没有数据引用)。
+   前端按码出文案与跳转(`/data?tab=sync&topic=RT-...` 为预检接入位)。
+6. `gaps[].reason` 稳定原因码:`release_not_found` / `run_not_found` /
+   `dataset_not_published` / `dataset_kind_unmapped` / `quality_blocked` /
+   `coverage_gap`。
+7. 课题不存在 → 404(`topic_not_found`);只读接口,无写副作用。
+
+前端消费点:`web/src/components/data/TopicDataCard.tsx`,挂在
+「研究课题」详情区(同一张卡片)与 `/data?tab=overview&topic=RT-...`
+(概览下方查询框)。
+
+### 第一阶段边界(明确不做)
+
+- 「同步与发布」只落**只读状态面板 + 入口链接 + 占位**:不接
+  `#511` 的范围预检 / 补数提交 / 发布向导交互(第二阶段),不调用任何未实现
+  接口;代码里 `TODO(#511)` 注释标出接入点。
+- `/settings` 的数据同步区块本阶段不动(`#525` 负责设置总入口与文案分工)。
+- 不触达实盘交易、下单、风控展示。
+
+### 回归入口
+
+- 前端:`web/src/pages/data/DataBase.test.tsx`(四 tab / 键盘切换 / 窄屏 class /
+  空与失败状态(概览 + 同步面板)/ 顶部刷新重取当前 tab 独立查询 / 旧深链抽屉 /
+  课题数据视图)、`web/src/lib/data-links.test.ts`(旧页签映射与参数保全)、
+  `web/src/App.test.tsx`(重定向与导航位置)。
+- 后端:`tests/integration/test_data_catalog_topic_coverage.py`(显式 scope 优先
+  且 refs 有竞争数据、dataset key 取最新发布、refs 回退、运行展开去重、
+  具名缺口含 `quality_blocked`、批次 `last_sync`、空状态、404)。

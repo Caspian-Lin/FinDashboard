@@ -45,6 +45,7 @@ _ALL_WORKER_KINDS = frozenset(
         "research_code_run",
         "factor_series_build",
         "validation_experiment",
+        "data_backfill",
     }
 )
 

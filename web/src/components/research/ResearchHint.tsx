@@ -37,7 +37,7 @@ export function HintLabel({
 /* Research workflow steps (rendered inside the page-header help popover) */
 
 const WORKFLOW_STEPS: { path: string; label: LocalizedText; step: number }[] = [
-  { path: "/research/data", label: { zh: "数据", en: "Data" }, step: 1 },
+  { path: "/data", label: { zh: "数据", en: "Data" }, step: 1 },
   { path: "/research/factors", label: { zh: "因子", en: "Factors" }, step: 2 },
   { path: "/research/strategy", label: { zh: "策略", en: "Strategy" }, step: 3 },
   { path: "/research/experiments", label: { zh: "实验", en: "Experiments" }, step: 4 },
@@ -137,6 +137,8 @@ export const WORKFLOW_NEXT: Record<string, WorkflowNextStep> = {
 };
 
 const WORKFLOW_NEXT_BY_PATH: [prefix: string, next: WorkflowNextStep][] = [
+  // 数据基座(#512)沿用旧数据页在流程中的位置;旧 /research/data 已重定向到 /data。
+  ["/data", WORKFLOW_NEXT.data],
   ["/research/data", WORKFLOW_NEXT.data],
   ["/research/factors", WORKFLOW_NEXT.factors],
   ["/research/strategy", WORKFLOW_NEXT.strategy],
@@ -151,9 +153,13 @@ export function workflowNextForPath(pathname: string): WorkflowNextStep | undefi
   return WORKFLOW_NEXT_BY_PATH.find(([prefix]) => pathname.startsWith(prefix))?.[1];
 }
 
-/** 顶栏 workflow help 可见性:研究分组页面 + 回测页。 */
+/** 顶栏 workflow help 可见性:研究分组页面 + 数据基座 + 回测页。 */
 export function isResearchWorkflowPath(pathname: string): boolean {
-  return pathname.startsWith("/research/") || pathname.startsWith("/backtest");
+  return (
+    pathname === "/data" ||
+    pathname.startsWith("/research/") ||
+    pathname.startsWith("/backtest")
+  );
 }
 
 /**

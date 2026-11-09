@@ -17,6 +17,9 @@
   审计抽样 / ``research_factor_series`` 幂等落库)。
 * ``validation_experiment`` —— #57 验证实验执行(walk-forward + 一次性揭盲,
   #233;补齐 #219 晋级门 OOS 半边的运营入口,单并发)。
+* ``data_backfill`` —— 课题缺口 → 全局补数 → 复用发布的编排执行器(#511;
+  按 item 组合上面的 ``dataset_sync`` / ``bulk_download`` / ``quality_repair`` /
+  ``dataset_publish``,不复制同步或发布逻辑,单并发)。
 """
 
 from finboard_backtest.background_jobs.dataset_sync import DatasetSyncExecutor
@@ -49,10 +52,12 @@ from finboard_backtest.background_jobs.executors.research_run import (
 from finboard_backtest.background_jobs.executors.validation_experiment import (
     ValidationExperimentExecutor,
 )
+from finboard_backtest.data_backfill.executor import DataBackfillExecutor
 
 __all__ = [
     "BacktestRunExecutor",
     "BulkDownloadExecutor",
+    "DataBackfillExecutor",
     "DataSyncExecutor",
     "DatasetPublishExecutor",
     "DatasetSyncExecutor",

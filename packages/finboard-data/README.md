@@ -296,7 +296,7 @@ PostgreSQL 的 `research_dataset_releases` 保存完整 manifest 和常用查询
 | `GET` | `/api/instruments/datasets/releases` | 版本、质量、能力与覆盖列表 |
 | `GET` | `/api/instruments/datasets/releases/{release_id}` | 完整逐标的审计和资产规则 |
 
-研究工作台的“数据与标的 → 数据发布”提供同一入口。发布请求只能提交结构化
+数据基座的「数据集 → 分类操作 → 行情」提供同一入口。发布请求只能提交结构化
 标识、来源、日期、复权方式、标的和质量门;不能提交文件路径或代码。服务端固定
 读取 `FINBOARD_DATA_CACHE_DIR`(默认 `data_cache`)并写入
 `FINBOARD_DATA_RELEASE_ROOT`(默认 `data_releases`)。发布不会联网补数据,

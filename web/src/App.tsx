@@ -1,15 +1,18 @@
 import * as React from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { Skeleton } from "@/components/ui/skeleton";
+import { legacyResearchDataTarget } from "@/lib/data-links";
 
 const ResearchTopics = React.lazy(() => import("@/pages/research/ResearchTopics"));
 const StrategyExplanationPage = React.lazy(() => import("@/pages/research/StrategyExplanationPage"));
 
+/* Shared data domain (lazy) */
+const DataBase = React.lazy(() => import("@/pages/data/DataBase"));
+
 /* Research domain (lazy) */
 const ResearchHome = React.lazy(() => import("@/pages/research/ResearchHome"));
-const ResearchData = React.lazy(() => import("@/pages/research/ResearchData"));
 const FactorLab = React.lazy(() => import("@/pages/research/FactorLab"));
 const StrategyStudio = React.lazy(() => import("@/pages/research/StrategyStudio"));
 const Experiments = React.lazy(() => import("@/pages/research/Experiments"));
@@ -47,17 +50,32 @@ function PageLoader() {
   );
 }
 
+/**
+ * 旧 `/research/data` → `/data` 参数保全跳转(issue #512)。
+ *
+ * `tab` 按 `legacyResearchDataTarget` 映射到新数据集 tab,`release` 等参数原样
+ * 保留;不 404、不丢深链。
+ */
+export function LegacyResearchDataRedirect() {
+  const { search } = useLocation();
+  return <Navigate to={legacyResearchDataTarget(search)} replace />;
+}
+
 export default function App() {
   return (
     <AppShell>
       <ErrorBoundary>
         <React.Suspense fallback={<PageLoader />}>
           <Routes>
+            {/* Shared data base(issue #512;一级入口,导航在「研究」组首位) */}
+            <Route path="/data" element={<DataBase />} />
+            {/* 旧路由永久跳转,保全 tab/release 等查询参数 */}
+            <Route path="/research/data" element={<LegacyResearchDataRedirect />} />
+
             {/* Research */}
             <Route path="/research/topics" element={<ResearchTopics />} />
             <Route path="/research/strategy-explanation" element={<StrategyExplanationPage />} />
             <Route path="/research" element={<ResearchHome />} />
-            <Route path="/research/data" element={<ResearchData />} />
             <Route path="/research/factors" element={<FactorLab />} />
             <Route path="/research/strategy" element={<StrategyStudio />} />
             <Route path="/research/experiments" element={<Experiments />} />
@@ -76,8 +94,6 @@ export default function App() {
             <Route path="/control" element={<Control />} />
 
             {/* Tools */}
-            {/* 旧 /data 独立页已并入研究数据页的「行情拉取」页签 */}
-            <Route path="/data" element={<Navigate to="/research/data" replace />} />
             <Route path="/backtest" element={<Backtest />} />
             {/* 策略预设已并入回测页的预设库面板 */}
             <Route path="/strategies" element={<Navigate to="/backtest" replace />} />

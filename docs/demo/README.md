@@ -27,7 +27,7 @@ Agent 和平台需要给出可复核的回答，而不是只给一张收益图�
 | 阶段 | 操作 | 页面展示 | 系统证据 | 媒体 |
 |---|---|---|---|---|
 | 总览 | 向下滚动推进七个操作 | 数据、因子、OOS、运行、组合、模拟、任务 | 当前真实页面状态 | 定格滚动窗口，已实现 |
-| 数据冻结 | 打开「数据与标的 → 每日指标」 | 已发布版本、覆盖率、质量 warning | release ID、日期范围、复权口径 | 总览片段 + `data-release.png`，已核验 |
+| 数据冻结 | 打开「数据基座 → 数据集 → 分类操作 → 每日指标」 | 已发布版本、覆盖率、质量 warning | release ID、日期范围、复权口径 | 总览片段 + `data-release.png`，已核验 |
 | 因子定义 | 打开「因子实验室」 | 经济含义、公式口径、来源、方向 | 因子目录与版本 | 总览片段 + `factor-lab.png`，已核验 |
 | 样本外验证 | 从实验列表选中已揭盲实验 | 假设、时间窗口、试验数、结论 | experiment ID、`oos_outcome` | 英文截图 + `assets/oos-validation.gif` |
 | 运行血缘 | 从运行列表选中 completed run | 冻结输入、策略版本、运行状态 | RR-*、manifest、result checksum | 英文截图 + `assets/research-run.gif` |

@@ -11,6 +11,12 @@
 * 数据查询(``finboard.instrument.*`` / ``finboard.dataset.*`` /
   ``finboard.data.*`` / ``finboard.tushare.*``,#124)—— 标的元数据 /
   数据集发布 / 缓存状态 / 数据质量 / Tushare 配额(只读);
+* 全局数据目录(#509,只读)—— ``finboard.data_catalog.*`` 列表 / 详情 /
+  覆盖报告 + ``finboard.dataset.release.*`` 逐标的 / 引用反查;
+  只做 DB 列投影与有界预览,不触发 dataset_sync、不发布数据集;
+* 补数请求(#511,2 只读 + 2 写)—— ``finboard.data_backfill.*`` 预检 /
+  提交 / 查询 / 取消;补数只产生新发布,执行由 ``data_backfill`` 队列任务
+  编排既有同步与发布内核;
 * ``finboard.factor.*`` / ``finboard.feature_snapshot.*``(#125)——
   因子目录 / 特征快照 / 因子信号 / 因子实验(含异步快照任务);
 * ``finboard.strategy.*`` / ``finboard.preset.*``(#126)——
@@ -77,6 +83,9 @@ from mcp.server import MCPServer
 from finboard_mcp.context import app_lifespan
 from finboard_mcp.tools import (
     register_backtest_tools,
+    register_data_backfill_tools,
+    register_data_catalog_tools,
+    register_data_scope_tools,
     register_data_tools,
     register_data_write_tools,
     register_factor_series_tools,
@@ -111,7 +120,7 @@ FinBoard 研究 MCP —— 量化研究工具集
 
 课题与记忆引用用 finboard_source_check 核对精确版本/checksum与自动产物事实;断链与旧目标保留,文档优先于工作解释。研究工具按问题使用,可暂停、分支、复核与续接,并非必须线性执行。
 
-== 当前可用工具(138 个,能力与参数以当前注册schema为准)==
+== 当前可用工具(148 个,能力与参数以当前注册schema为准)==
 - #501-#504复核入口:finboard_run_diagnostics 显式窗口/逐年指标(研究252交易日年化、rf0/ddof1;
   另列日历年化),SQL聚合成交费用/缺口分母;finboard_run_compare 按冻结输入核查可比性;
   finboard_decision_projection SQL白名单字段分页(200行/256KiB,单决策也有护栏)。
@@ -203,6 +212,33 @@ FinBoard 研究 MCP —— 量化研究工具集
   {requested, matched, missing} 成员核对(#238,免拉全量 detail)。
   dataset_release_diff(#252):两份发布标的集 diff,计数精确 + 差集具名清单
   (有界预览),发布后自检并集一致性(如 financial_indicators vs bars 主发布)。
+- 全局数据目录(5,✅ #509,只读):finboard_data_catalog_list(数据集列表,
+  可按 dataset/status/q 过滤)、finboard_data_catalog_get(单数据集详情:
+  fields/unit_notes/pit_rule/calendar_market + 最近 releases/batches/
+  failures)、finboard_data_coverage_get(覆盖报告:denominator/覆盖统计/
+  symbols_with_gaps + 有界 missing_preview)、
+  finboard_dataset_release_instruments(发布逐标的覆盖分页)、
+  finboard_dataset_release_references(引用该发布的课题/运行/策略反查)。
+  目录只做 DB 列投影 + 有界扫描,**不触发 dataset_sync、不发布数据集**;
+  分页 limit 1..500、offset>=0,missing_preview 只是预览不是全量缺口清单。
+- 统一数据范围(1,✅ #510,只读):finboard_data_scope_preview 把一份
+  DataScopeSpec(universe / decision / warmup+tail / benchmarks / datasets /
+  fields / bars_adjustment / release_selection)解析成候选发布 + 执行窗口
+  (warmup_start / decision_start / decision_end / valuation_end)+ 缺口 +
+  阻塞 + 候选替代;返回 resolution_id,提交 run 时连同 data_scope 一起回填
+  finboard_research_run_queue,服务端重算比对(数据变了 409 要求重新预览),
+  并把 research_window 冻结进 manifest。view=summary 只回计数,detail 才回
+  alternatives / affected_strategies;locked 模式必须恰好锁定一份可发布 bars
+  主发布且含全部 required 数据集;空标的池/未映射资产大类直接阻塞。
+  除 #509 逐标的读模型自愈外只读,不落库、不触发同步、不发布。
+- 补数请求(4,✅ #511,2 只读 + 2 写):finboard_data_backfill_preview(预检:
+  缺口范围/支持来源/配额/步骤/发布影响)、finboard_data_backfill_submit
+  (显式提交,幂等;expected_plan_checksum 不一致即 conflict
+  backfill_plan_drift,必须重新预览)、finboard_data_backfill_list(列表/详情)、
+  finboard_data_backfill_cancel(协作式取消,已发布不回滚)。补数只产生新发布,
+  只补冻结的缺口区间;异源/不同复权不混接(身份含 adjustment),bars 缓存只
+  支持 qfq;受阻 blocked 请求可 retry;POST /api/jobs 与 job_enqueue 不开放
+  data_backfill kind。
 - 因子实验室(12,✅ #125):factor_catalog、feature_snapshot list/get/create/
   job_start/job_status、factor_signal list/get、factor_experiment list/get/create/
   sync_validation(因子目录 / 特征快照 / 因子信号 / 因子实验,含写操作)。
@@ -529,6 +565,9 @@ def build_mcp_server() -> MCPServer:
     register_run_tools(mcp)
     register_memory_tools(mcp)
     register_data_tools(mcp)
+    register_data_catalog_tools(mcp)
+    register_data_scope_tools(mcp)
+    register_data_backfill_tools(mcp)
     register_data_write_tools(mcp)
     register_factor_tools(mcp)
     register_factor_series_tools(mcp)

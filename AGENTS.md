@@ -34,6 +34,8 @@
 - **域隔离**：研究运行（`research_runs`，`RR-`）与模拟盘（`simulation_*`，`SIM-`）永不写实盘 `orders`/`fills`/`positions`/`audit_logs`；`background_jobs` 队列只服务研究/数据/回测，实盘交易内核走 `finboard-scheduler` 专用调度、不进队列不暴露为 MCP 工具。
 - **benchmark-only**：指数与期货主连不可撮合、只做基准/研究数据；`is_benchmark_only_instrument` 必须在候选池、特征装配、排名截面三处消费口径一致（漏一处 = 指数被交易或信号截面漂移）。
 - **bars 主发布唯一**：基准行情必须与候选池同处一份 `multi_asset_mixed` 发布；研究数据发布（daily_metrics / financial_indicators / convertible_metrics）只提供因子观测——缺研究标的容忍（具名 warning），bars 主发布缺标的 fail-closed。
+- **DataScope fail-closed（#510）**：`DataScopeSpec` 解析除 #509 逐标的读模型自愈外只读、不落库；**声明 `data_scope` 时**提交 run 必须带预览返回的 `data_scope_resolution_id`，服务端重算比对，数据或日历变化即 409 要求重新预览（禁止「旧预览 + 新数据」静默执行）；窗口按 `trade_cal` 交易日落位并写进 `parameters.research_window`，benchmark 必须在 bars 主发布内，空标的池/未映射资产大类一律阻塞，旧发布只读（扩范围走 #511 新发布）。
+- **研究 Symbol 市场**：以冻结发布 manifest 的 `ReleasedInstrument.market` 为权威，代码后缀仅在发布无该标的时兜底；基准、日历与价格读取采用同一口径。
 - **PIT fail-closed 上界**：一切决策输入 `available_at <= decision_at`；财务数据 `available_at = ann_date + 1`；窗口外/前视数据具名拒绝、不静默截断。
 - **multi_period 必须显式 `decision_schedule`**（legacy `rebalance_frequency` 兼容，两键互斥）；single_shot 决策时点只能来自冻结因子快照（入队 fail-closed）。
 - **用户因子（`u_` 前缀）**：仅 active+passed 可引用；multi_period 引用须有 factor_series 覆盖；factor_series 仅接受 `compute_series` 入口（v1 逐日入口已废弃），PIT = 窗口物理隔离 + 前缀不变性审计（截断不变 + 扰动不变）。
@@ -42,8 +44,10 @@
 - **幂等键部分唯一索引**：failed/cancelled 放行同键重建，succeeded 幂等命中，interrupted 保持单行（lease 重排与 run replay 依赖此语义）。
 - **checksum / manifest 漂移防护**：新增可选字段 None 省略键，保持旧 payload 字节稳定；语义变更走 `schema_version`；禁止直接改既有 `as_dict` 已有字段的输出。
 - **数据单位口径（对账锁定，改动 = 口径事故）**：股票 daily `amount` 千元；期货 `fut_daily` amount 万元→元 ×10000、vol 手→张；可转债 vol 手→张 ×10；指数 amount 千元↔元按源对齐。
+- **数据目录与逐标的索引（#509）**：`finboard_data.datasets` 是数据集名单唯一事实源；`research_dataset_release_instruments` 是 manifest 的派生读模型（发布同事务写入、缺失时服务端 SQL 自愈），不是第二事实源，目录列表禁止回退解析整份 manifest；目录不得合并不同 source / 复权口径。
 - **研究运行活性防线（#450/#471，三层不可缺一）**：①连接级 —— postgres 引擎统一经 `finboard_persistence.create_async_engine` 创建，工厂默认注入 TCP keepalive（调用方同名键可覆盖，勿再裸建引擎）；②操作级 —— 研究运行 store 每操作 `SET statement_timeout=120s` + 客户端 `asyncio.timeout`（×1.25）兜底，超时抛 `ResearchRunStoreOperationTimeoutError`（走 interrupted 重试语义），`iter_artifacts` 流只设服务端界；③执行段 —— worker 心跳线程侧 stall watchdog（`worker_stall_timeout_seconds` 默认 900s，无 progress 回调即取消执行任务 → `retry_waiting` 具名收敛）；BLAS 原生调用卡死面由 `finboard_shared.runtime.enforce_single_thread_blas` 同时覆盖环境变量与已加载原生库（`threadpoolctl`），`finboard-app` / `finboard-backtest` 包导入即强制执行，调用方不得恢复多线程 BLAS（并行度由 chunk/进程池提供）。
 - **迁移 revision id 全局唯一不复用**（撞号先例：c1d2e3f4a5b6 已被 #215 占用）。
+- **补数只产生新发布（#511）**：课题缺口经 `POST /api/data/backfills/preview` 预检、显式提交后由 `kind=data_backfill` 编排既有 `dataset_sync` / `bulk_download` / `quality_repair` / `dataset_publish`；`source` + `adjustment` 是请求身份维度（异源/不同复权不得合并复用，item 唯一键与发布身份均含 adjustment），缺口区间冻结进 item **只补差集**、发布仍冻结请求窗口；相同 fingerprint 的在途请求复用、等价重试回同一请求，提交前复算 plan 不一致即 409 `backfill_plan_drift`；bars 缓存补数只支持 `qfq`（非 qfq 预检 fail-closed），已发布 release 不可变、补数只追加新版本，质量失败保留批次与 item 状态可复核。
 
 ### 研究治理边界
 - **正式组合入口（#91）**：long-only `ResearchRun` 必须由 `PortfolioPipelineAdapter` 从冻结输入生成目标 / 硬约束 / 风险退出 / 三档资金可行性 / 研究订单与账本；风险贡献上限启用后缺少协方差、数学不可行或不收敛必须在生成研究订单前失败关闭。

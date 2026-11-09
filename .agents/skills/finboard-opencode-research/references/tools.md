@@ -345,6 +345,91 @@ daily/weekly,旧值零变化,与 `decision_schedule` 不可同时声明):按冻�
 - 参数:无
 - 返回:`{date, requests_per_minute, daily_limit, used, remaining}`
 
+## finboard.data_catalog.* / finboard.dataset.release.*(✅ #509 只读)
+
+全局数据目录查询,复用 `finboard_backtest.data_catalog.DataCatalogService`
+(与 REST `/api/data/catalog` 同源)。**只读**:不触发 dataset_sync、不发布
+数据集、不修改任何表;目录只做 DB 列投影 + 有界扫描,不加载发布 manifest。
+所有分页 `limit` 服务端收敛到 1..500(默认值见各工具),`offset >= 0`。
+
+### finboard_data_catalog_list
+列出全局数据目录(数据集维度)。
+- 参数:`dataset?`(bars | daily_metrics | financial_indicators |
+  convertible_metrics | income_statements | balance_sheets |
+  cashflow_statements | dividends | profiles | suspensions)/
+  `status?`(usable | ingested_not_published | blocked | not_ingested |
+  stale | unknown)/ `q?`(标题模糊,截断 128)/
+  `limit?: int = 50`(1..500)/ `offset?: int = 0`
+- 返回:`{items, total, limit, offset, generated_at}`;item 含 key/title/
+  title_en/storage/publishable/status/coverage_pct/symbol_count/release/
+  batch/warnings 等
+- 未知 dataset / status → `invalid_argument`
+
+### finboard_data_catalog_get
+查询单个数据集的目录详情(按 dataset key,无分页)。
+- 参数:`dataset: str`
+- 返回:`entry` + `fields` / `unit_notes` / `pit_rule` / `calendar_market` /
+  `adjustment` / `publishable` + 最近 `releases` / `batches` / `failures`
+- 未知 dataset → `invalid_argument`
+
+### finboard_data_coverage_get
+数据集覆盖报告(默认最新可用发布,可用 release_id 指定)。
+- 参数:`dataset: str` / `release_id?` / `limit?: int = 200`(1..500)
+- 返回:`{dataset, denominator, release, batch, coverage_pct,
+  expected_sessions, missing_sessions, symbols_with_gaps, missing_preview,
+  warnings}`
+- `missing_preview` 只给有缺口标的的前 `limit` 条预览(**不是全量缺口清单**)
+- 发布不存在 → `not_found`;其余目录错误 → `conflict`
+
+### finboard_dataset_release_instruments
+分页查询某份研究数据发布的逐标的覆盖读模型。
+- 参数:`release_id: str` / `ready?: bool` / `missing_only?: bool = false` /
+  `market?` / `instrument_type?` / `q?`(代码或名称,截断 64)/
+  `limit?: int = 100`(1..500)/ `offset?: int = 0`
+- 返回:`{release_id, items, total, limit, offset}`;item 含 code/name/market/
+  instrument_type/asset_class/coverage_pct/expected_sessions/missing_sessions/
+  suspended_sessions/ready/issues 等
+- 发布不存在 → `not_found`;逐标的索引不可重建 → `conflict`
+
+### finboard_dataset_release_references
+反查引用某份研究数据发布的课题 / 研究运行 / 策略规格。
+- 参数:`release_id: str` / `limit?: int = 20`(1..500)
+- 返回:`{release_id, items:[{kind, ref_id, status, created_at, deep_link}]}`;
+  `deep_link` 为 Web 深链(无对应页面时为 null)
+- 发布不存在 → `not_found`
+
+## finboard.data_scope.*(✅ #510 只读)
+
+统一数据范围预览:把一份 `DataScopeSpec` 解析成候选冻结发布 + 执行窗口 +
+缺口 / 阻塞。**只读**:不落库、不触发同步、不发布数据集;写侧不新增工具,
+提交 run 仍走 `finboard_run_queue` 的 `data_scope` + `data_scope_resolution_id`。
+
+### finboard_data_scope_preview
+预览统一数据范围(scope → release → 窗口)。
+- 参数:`scope: object`(必填)/ `mode?: str = "new_spec"`
+  (`new_spec` | `existing_spec`;后者必须给 `strategy_id` + `strategy_version`)/
+  `strategy_id?` / `strategy_version?` / `view?: str = "summary"`
+  (`summary` | `detail`)
+- `scope` 形状:`{universe:{markets, asset_classes, instrument_types,
+  explicit_symbols, filters:{min_listing_days, exclude_suspended,
+  exclude_delisted, exclude_benchmark_only}, selection_limit},
+  decision:{start, end, schedule?}, warmup_sessions, tail_sessions,
+  benchmarks, datasets:{required, optional}, fields, bars_adjustment
+  (qfq|hqfq|none), release_selection(auto|locked), locked_release_ids}`
+- 返回:`{resolution_id(SC- 前缀), scope_checksum, selection_mode,
+  resolver_version, as_of, window:{warmup_start, decision_start,
+  decision_end, valuation_end, warmup_sessions, decision_sessions,
+  tail_sessions, calendar_markets, calendar_source}, releases:[{artifact_id,
+  dataset, role, version, checksum, reason}], universe, gaps, warnings,
+  blockers}`;`view=summary` 只附 `alternative_count` /
+  `affected_strategy_count`,`detail` 才回 `alternatives` /
+  `affected_strategies`
+- `blockers` 非空即范围不可用(如 bars 主发布缺标的 / benchmark 不在发布 /
+  locked 发布不满足窗口),不要自行绕过;`warnings` 是容错项(非交易日顺延、
+  预热不足、研究发布缺标的)
+- 提交 run 时把 `resolution_id` 与同一份 `scope` 一起回填;服务端重算比对,
+  数据变了 → `conflict`(重新预览,不静默换最新发布)
+
 ## finboard.data_write.* / finboard.etf.*(✅ #137,数据准备闭环)
 
 数据写操作工具(2 只读 + 10 写)。补全 #124 只读数据查询之外的数据准备能力,
@@ -1881,3 +1966,58 @@ def decide(ctx):
 先读 `oos_outcome` 再读实验 `status`。validated_oos+not_supported不能称验证通过；published/completed不能称晋级。决策目录→选ID/日期+symbol→翻has_more，目标与成交分开解释，空阶段说明缺记录。成本/滑点/延迟配置不等于已执行，真实能力缺口仍见#502/#503。
 
 课题列表为excerpted摘要（问题/摘要/下一步最多1200字、开放问题最多5项各300字），查精确ID详情才取完整工作目标。目标同版本不可换门槛，轮次goal_version须已归档。记忆refs超过16KiB标refs_truncated且不可验证；说明书冻结manifest限1MiB、因子params限16KiB，超限不退回全量run_get。
+
+## finboard.data_backfill.*(✅ #511:2 只读 + 2 写)
+
+课题缺口 → 全局补数 → 复用发布。复用 `finboard_backtest.data_backfill`
+(与 REST `/api/data/backfills` 同源):预检纯读,提交写;执行器只编排既有
+`dataset_sync` / `bulk_download` / `quality_repair` / `dataset_publish`,
+不复制同步或发布逻辑。补数只产生**新的不可变发布**,旧发布只读。
+
+`spec` 结构 = `{scope(#510 DataScopeSpec), datasets:[{dataset, source?,
+adjustment?, start?, end?, symbols?, publish?}], quality_profile?}`;
+显式 `start/end` 必须落在 scope 窗口内(否则 `invalid_argument`)。
+
+### finboard_data_backfill_preview
+只读预检:缺口范围、支持来源、配额、补齐步骤与发布影响。
+- 参数:`spec: object` / `as_of?: str`(ISO 时间)
+- 返回:`request_fingerprint` / `scope_checksum` / `plan_checksum` /
+  `items[{dataset, source, action, start, end, missing_ranges,
+  missing_symbols{count,preview}, covered_by, estimated_requests,
+  publish_preview, blockers}]` + `quota` + `overlaps` + `publish_impact` +
+  `blockers` / `warnings`
+- 纯读:不建请求、不触发同步或发布;日历缺失 / 窗口越界 → `invalid_argument`;
+  `item.symbols` 是冻结的补数标的(逐标的数据集),`universe_filters` 是
+  大宇宙过滤器;`missing_ranges` 是冻结的缺口区间(执行器只补这些区间)
+
+### finboard_data_backfill_submit(写)
+显式提交补数请求(只读模式 `mcp_readonly_only` 拒绝)。
+- 参数:`spec: object` / `expected_plan_checksum?` / `idempotency_key?`
+  (缺省 `mcp:<fingerprint>`,等价重试回同一请求)
+- 返回:`request_id` / `job_id` / `status` / `created` / `reused` /
+  `plan_checksum` / `items`
+- 命中幂等键或同 fingerprint 在途请求 → `created=false` 复用;
+  提交前复算 plan 与 `expected_plan_checksum` 不一致 → `conflict`
+  `backfill_plan_drift`(**必须重新预览**,禁止按旧计划执行);受阻需求落
+  `blocked` 请求(不建 job),来源/额度开通后可直接 retry;
+  bars 缓存只支持 `adjustment=qfq`,非 qfq 预检即 blocker
+  `backfill_adjustment_unsupported`
+
+### finboard_data_backfill_list
+只读:补数请求列表 / 详情。
+- 参数:`request_id?`(给了返回详情)/ `status?`(逗号分隔)/ `dataset?` /
+  `requested_by?` / `limit?: int = 20`(1..100)/ `offset?: int = 0`
+- 返回:列表 `{items, total, limit, offset}`;详情含逐 item 的
+  action/status/batch_ids/release_id/error;请求不存在 → `not_found`
+
+### finboard_data_backfill_cancel(写)
+协作式取消补数请求(只读模式拒绝)。
+- 参数:`request_id: str`
+- 返回:`{request_id, status, job_id, cancel_requested}`
+- 未完成 item 标 `cancelled`;**已成功 item 的发布不回滚**(发布不可变);
+  终态(含 partial)拒绝取消
+- 失败/取消后重试**只补剩余项**(新建请求,`retry_of_request_id` 血缘)——
+  MCP 侧用 `finboard_data_backfill_submit` 带上剩余 spec 重新提交。
+
+审计只记录 scope_checksum / fingerprint / 数据集清单,不记录完整 symbols;
+`POST /api/jobs` 与 `finboard_job_enqueue` 不开放 `data_backfill` kind。

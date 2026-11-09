@@ -33,6 +33,17 @@ from finboard_data.assets import (
     resolve_market_by_code,
 )
 from finboard_data.base import HistoricalDataProvider
+from finboard_data.datasets import (
+    CATALOG_DATASETS,
+    CatalogDataset,
+    CatalogDatasetSpec,
+    CatalogStorage,
+    catalog_spec,
+    catalog_spec_by_release_kind,
+    catalog_spec_by_sync_dataset,
+    catalog_specs,
+    validate_catalog_registry,
+)
 from finboard_data.factor_lab import (
     FACTOR_LAB_CATALOG,
     FACTOR_LAB_SCHEMA_VERSION,
@@ -176,6 +187,7 @@ from finboard_data.yfinance_provider import YFinanceProvider
 __all__ = [
     "BALANCE_SHEETS_FIELDS",
     "CASHFLOW_STATEMENTS_FIELDS",
+    "CATALOG_DATASETS",
     "CONVERTIBLE_METRICS_FIELDS",
     "DAILY_METRICS_FIELDS",
     "DIVIDENDS_FIELDS",
@@ -198,6 +210,9 @@ __all__ = [
     "BalanceSheet",
     "CapabilityStatus",
     "CashflowStatement",
+    "CatalogDataset",
+    "CatalogDatasetSpec",
+    "CatalogStorage",
     "CloseHistoryColumns",
     "ContinuousFuturesBuildError",
     "ConvertibleDailyMetric",
@@ -301,6 +316,10 @@ __all__ = [
     "build_continuous_series",
     "build_factor_signal",
     "build_feature_snapshot",
+    "catalog_spec",
+    "catalog_spec_by_release_kind",
+    "catalog_spec_by_sync_dataset",
+    "catalog_specs",
     "compute_has_new",
     "conversion_premium_rate",
     "conversion_value",
@@ -324,5 +343,6 @@ __all__ = [
     "resolve_market_by_code",
     "save_symbol_pool",
     "update_factor_experiment",
+    "validate_catalog_registry",
     "verify_dataset_release",
 ]
