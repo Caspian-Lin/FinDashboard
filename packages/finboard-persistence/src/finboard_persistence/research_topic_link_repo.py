@@ -10,6 +10,7 @@ unified research conflict family by the application service.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
@@ -111,6 +112,7 @@ class ResearchTopicLinkRepository:
             job_id=job_id,
             operation_id=operation_id,
             created_by=created_by,
+            created_at=datetime.now(UTC),
         )
         self.session.add(row)
         try:
@@ -156,6 +158,7 @@ class ResearchTopicLinkRepository:
         )
         if cursor is not None:
             stmt = stmt.where(ResearchTopicLinkModel.id < cursor)
+        stmt = stmt.execution_options(populate_existing=True)
         rows = (await self.session.execute(stmt)).all()
         return [
             TopicRunJoin(link=link, run=run, job=job) for link, run, job in rows
@@ -179,6 +182,7 @@ class ResearchTopicLinkRepository:
                 ResearchTopicLinkModel.entity_type == "research_run",
                 ResearchTopicLinkModel.entity_id == run_id,
             )
+            .execution_options(populate_existing=True)
         )
         row = (await self.session.execute(stmt)).first()
         if row is None:

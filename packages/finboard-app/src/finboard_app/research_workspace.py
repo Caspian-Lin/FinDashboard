@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from finboard_app.research_audit import ResearchAuditEvent, research_audit_recorder
 from finboard_app.research_operation import ResearchOperationContext
 from finboard_persistence.models import ResearchMemoryModel
+from finboard_persistence.research_topic_link_repo import ResearchTopicLinkRepository
 from finboard_persistence.research_topic_repo import (
     TOPIC_STATUSES,
     ResearchTopicRepository,
@@ -351,6 +352,31 @@ async def topic_context(
         }
 
     goal = payload.get("goal") if isinstance(payload.get("goal"), dict) else None
+    # #515: derive in-progress links by joining run/job facts; the link row is
+    # never rewritten, so worker retries and duplicate events cannot duplicate
+    # this list. Terminal links stay available from the dedicated runs endpoint.
+    from finboard_app.research_topic_actions import derive_link_state
+
+    link_rows = await ResearchTopicLinkRepository(session).list_runs_for_topic(
+        topic_id, limit=10
+    )
+    active_links: list[dict[str, Any]] = []
+    for link_row in link_rows:
+        state = derive_link_state(
+            link_row.run.status if link_row.run is not None else None,
+            link_row.job.status if link_row.job is not None else None,
+        )
+        if state not in {"queued", "running", "interrupted"}:
+            continue
+        active_links.append(
+            {
+                "entity_type": link_row.link.entity_type,
+                "entity_id": link_row.link.entity_id,
+                "job_id": link_row.link.job_id,
+                "state": state,
+                "goal_version": link_row.link.goal_version,
+            }
+        )
     context: dict[str, Any] = {
         "topic": {
             "topic_id": topic.topic_id,
@@ -367,7 +393,7 @@ async def topic_context(
         "open_questions": questions,
         "next_step": payload.get("next_step") or "",
         "recent_rounds": recent_rounds,
-        "active_links": [],  # Populated by #515 once topic <-> run links exist.
+        "active_links": active_links,
         "dangling_refs": dangling_refs,
         "dangling_refs_has_more": dangling_has_more,
         "refs_checked": refs_checked,
