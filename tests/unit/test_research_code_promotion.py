@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from finboard_app.config import Settings
 from finboard_backtest.research_code import (
@@ -189,7 +189,10 @@ class _SessionContext:
 
 
 def _promotion_app(tmp_path: Path) -> tuple[McpAppContext, SimpleNamespace]:
-    session = SimpleNamespace(commit=AsyncMock())
+    # #518:研究审计与业务写同事务,伪 session 需具备 add/flush(真实 AsyncSession 语义)。
+    session = SimpleNamespace(
+        add=MagicMock(), flush=AsyncMock(), commit=AsyncMock()
+    )
     app = SimpleNamespace(
         settings=Settings(research_code_repo_path=str(tmp_path / "code.git")),
         write_tools_enabled=True,
@@ -363,6 +366,8 @@ async def test_promote_binds_evidence_and_enters_formal_whitelist(tmp_path, monk
     )
 
     assert env.status == "ok"
+    # #518:晋级成功与审计同事务(伪 session 收到一次审计 insert)。
+    assert session.add.called
     data = cast(dict[str, Any], env.data)
     assert data["status"] == "active"
     assert data["promotion_status"] == PROMOTION_PASSED

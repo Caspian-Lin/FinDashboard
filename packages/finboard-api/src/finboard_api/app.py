@@ -12,12 +12,16 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 from finboard_api.errors import finboard_error_handler
 from finboard_api.routes import (
@@ -49,6 +53,7 @@ from finboard_api.routes import (
     strategy_specs_router,
     watchlist_router,
 )
+from finboard_api.routes.research_audit import router as research_audit_router
 from finboard_api.routes.research_diagnostics import router as research_diagnostics_router
 from finboard_api.routes.research_topics import explanation_router
 from finboard_api.routes.research_topics import router as research_topics_router
@@ -309,12 +314,41 @@ async def _check_opencode_mcp_status(
     return status
 
 
+async def _commit_kernel_session_on_shutdown(
+    session: AsyncSession, logger: Any
+) -> None:
+    """关闭期提交 kernel session;失败只回滚并告警,**不再让 shutdown 抛错**。
+
+    可观测性取舍:原始异常栈仍以 ``exc_info=True`` 写入日志(不掩盖根因),但
+    不向 lifespan 的 ``finally`` 传播 —— 此时业务请求已结束,伪失败(如关闭
+    期间被取消的 flush)把正常关闭变成 teardown 异常(CI 里表现为
+    ``PendingRollbackError``),只会噪声化 CI 且妨碍进程回收。
+    """
+
+    try:
+        await session.commit()
+    except Exception:  # 关闭期 session 可能已被并发 flush 失败污染
+        with suppress(Exception):
+            await session.rollback()
+        logger.warning("api.kernel_session_shutdown_rollback", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
     setup_logging(settings)
 
     components = build_kernel_components(settings)
+    # issue #518:研究审计的拒绝/失败补记走独立会话;成功写随业务事务。
+    from finboard_app.research_audit import (
+        ResearchAuditRecorder,
+        configure_research_audit_recorder,
+        reset_research_audit_recorder,
+    )
+
+    configure_research_audit_recorder(
+        ResearchAuditRecorder(session_maker=components.session_maker)
+    )
     async with components.session_maker() as session:
         kernel = components.new_kernel(session)
 
@@ -490,7 +524,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         finally:
             teardown_event_bridge(kernel.event_bus, handlers)
             await kernel.stop()
-            await session.commit()
+            # 关闭期提交失败只回滚 + 告警(见 helper);保持 kernel.stop() 之后、
+            # engine.dispose() 之前的顺序。
+            await _commit_kernel_session_on_shutdown(session, logger)
             await components.engine.dispose()
             opencode_runtime = getattr(app.state, "opencode_runtime", None)
             if opencode_runtime is not None:
@@ -513,6 +549,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     with suppress(asyncio.CancelledError):
                         await mcp_task
                 logger.info("api.opencode_mcp_stopped")
+            # 进程级 recorder 复位:引擎已 dispose,若测试/长驻进程继续持有该
+            # 指针,后续 detached 写只会打到已关闭的 engine。运行期写路径此时
+            # 已全部结束,复位不影响任何业务语义。
+            reset_research_audit_recorder()
             logger.info("api.kernel_stopped")
 
 
@@ -562,6 +602,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(research_router)
     app.include_router(research_docs_router)
     app.include_router(research_topics_router)
+    app.include_router(research_audit_router)
     app.include_router(explanation_router)
     app.include_router(research_diagnostics_router)
     app.include_router(research_memories_router)

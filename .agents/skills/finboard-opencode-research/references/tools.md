@@ -2080,5 +2080,24 @@ adjustment?, start?, end?, symbols?, publish?}], quality_profile?}`;
 - 失败/取消后重试**只补剩余项**(新建请求,`retry_of_request_id` 血缘)——
   MCP 侧用 `finboard_data_backfill_submit` 带上剩余 spec 重新提交。
 
+### finboard_audit_query(只读,scope `audit.read`)
+研究操作审计查询(#518)。常规研究客户端预设**不含** `audit.read`;需要时由
+运维签发审计客户端 `finboard mcp client create --scopes audit.read`。
+
+- 参数:`audit_id?`(给了返回单条)/ `actor?` / `client_id?` / `source?`
+  (web|mcp|worker|system)/ `topic_id?` / `entity_id?` / `operation?` /
+  `outcome?`(succeeded|failed|rejected|denied)/ `from?` / `to?`
+  (ISO 时间)/ `limit?: int = 100`(1..200)
+- 返回:`{event}` 或 `{items, count, has_more, limit, filters, coverage_note}`;
+  每条含 `audit_id / occurred_at / actor / actor_type / source / client_id /
+  topic_id / entry_id / operation / entity_type / entity_id / outcome /
+  result_code / correlation / params_summary / params_digest / error_summary /
+  trust`
+- `trust=server_observed`(服务端事实)与 `trust=client_declared`(Harness
+  上报)并列展示,后者永不覆盖前者;`params_summary` 已脱敏且截断,原文不入库
+- 迁移/接入前的写操作没有审计行:空结果 = 「此前无审计记录」,不等于没有操作
+- REST 同源:`GET /api/research/audit`、`/api/research/audit/{audit_id}`、
+  `/api/research/audit/coverage`
+
 审计只记录 scope_checksum / fingerprint / 数据集清单,不记录完整 symbols;
 `POST /api/jobs` 与 `finboard_job_enqueue` 不开放 `data_backfill` kind。

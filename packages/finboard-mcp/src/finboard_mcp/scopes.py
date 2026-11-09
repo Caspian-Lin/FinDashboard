@@ -7,7 +7,8 @@
   实验元数据 / 自选股等),不启动运行;
 * ``research.run`` —— 启动 / 取消 / 重放研究运行、回测、模拟盘会话与沙箱执行;
 * ``data.write`` —— 全局数据操作(拉取 / 批量下载 / 发布 / 修复 / ETF / 补数);
-* ``audit.read`` —— 审计读取,保留给运维 / 审计客户端(#518 落地读工具后使用)。
+* ``audit.read`` —— 审计读取(``finboard_audit_query``,#518),只发给运维 /
+  审计客户端。
 
 **默认拒绝**:``TOOL_SCOPES`` 必须覆盖全部已注册工具;``run_tool`` 查不到
 条目时直接 ``denied`` 并记录契约错误,不允许「未声明 = 放行」。``"*"`` 只由
@@ -59,8 +60,10 @@ _DATA_WRITE: frozenset[Scope] = frozenset({"data.write"})
 _READ_RUN: frozenset[Scope] = frozenset({"research.read", "research.run"})
 #: 通用后台任务队列同时服务研究 / 数据两类 kind;入队/取消需要两域权限。
 _RUN_DATA_WRITE: frozenset[Scope] = frozenset({"research.run", "data.write"})
+#: #518 研究操作审计读取:只发给运维 / 审计客户端,不进常规研究预设。
+_AUDIT_READ: frozenset[Scope] = frozenset({"audit.read"})
 
-#: 工具名 → 所需作用域。键是 ``@mcp.tool(name=...)`` 的注册名(148 个)。
+#: 工具名 → 所需作用域。键是 ``@mcp.tool(name=...)`` 的注册名(149 个)。
 #: 混合工具(如 ``finboard_research_stress`` 的 plan/get 与 queue)按最高权限
 #: 取并集,只读客户端不能调用其只读 operation —— 工具级强制点不接受参数级
 #: 绕过。新增工具必须同时登记本表,否则 ``run_tool`` fail-closed。
@@ -113,6 +116,9 @@ TOOL_SCOPES: dict[str, frozenset[Scope]] = {
     "finboard_run_diagnostics": _READ,
     "finboard_run_compare": _READ,
     "finboard_decision_projection": _READ,
+    # ---- 研究操作审计(#518) ----
+    # 只读查询;只有显式授予 audit.read 的审计/运维客户端可用。
+    "finboard_audit_query": _AUDIT_READ,
     # ---- 因子序列(#360) ----
     # build 会入队沙箱因子构建任务(启动运行),不是纯研究元数据写入。
     "finboard_factor_series_build": _RUN,

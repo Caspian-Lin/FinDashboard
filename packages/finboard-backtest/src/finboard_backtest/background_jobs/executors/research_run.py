@@ -37,6 +37,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from finboard_backtest.background_jobs.audit import WorkerAuditEvent, WorkerAuditSink
 from finboard_backtest.background_jobs.contracts import (
     ExecutorError,
     JobExecutor,
@@ -308,10 +309,41 @@ class ResearchRunExecutor:
         session_maker: async_sessionmaker[AsyncSession],
         store_factory: StoreFactory,
         adapter_factory: AdapterFactory,
+        audit: WorkerAuditSink | None = None,
     ) -> None:
         self._session_maker = session_maker
         self._store_factory = store_factory
         self._adapter_factory = adapter_factory
+        # issue #518:worker 终态审计收口(由装配根注入 app 侧实现)。
+        self._audit = audit
+
+    async def _record_terminal(
+        self,
+        *,
+        run_id: str,
+        job_id: str,
+        status: str,
+        result_code: str | None,
+        error_summary: str | None = None,
+        result_checksum: str | None = None,
+    ) -> None:
+        if self._audit is None:
+            return
+        correlation = {"run_id": run_id, "job_id": job_id}
+        if result_checksum:
+            correlation["result_checksum"] = result_checksum
+        await self._audit.record(
+            WorkerAuditEvent(
+                operation="run.worker.finished",
+                outcome="succeeded" if status == "succeeded" else "failed",
+                worker_id="research_run",
+                correlation=correlation,
+                entity_type="research_run",
+                entity_id=run_id,
+                result_code=result_code or status,
+                error_summary=error_summary,
+            )
+        )
 
     async def execute(
         self,
@@ -330,21 +362,56 @@ class ResearchRunExecutor:
             # background_jobs 行 —— research_runs 必须同步 FAILED,
             # 否则 finboard_run_get 查不到失败原因。
             await _mark_run_failed(store, run_id, exc)
+            await self._record_terminal(
+                run_id=run_id,
+                job_id=job.job_id,
+                status="failed",
+                result_code=getattr(exc, "code", type(exc).__name__),
+                error_summary=truncate_summary(str(exc)) or type(exc).__name__,
+            )
             raise ExecutorError(
                 code=getattr(exc, "code", type(exc).__name__),
                 summary=truncate_summary(str(exc)) or type(exc).__name__,
                 retryable=False,
             ) from exc
         coordinator = ResearchRunCoordinator(store)
-        record = await coordinator.execute(
-            manifest,
-            adapter,
-            # issue #188:worker 的进度回调原样透传,Coordinator 在其
-            # stage x decision 持久化路径上逐阶段回调。
-            progress=progress,
-        )
+        try:
+            record = await coordinator.execute(
+                manifest,
+                adapter,
+                # issue #188:worker 的进度回调原样透传,Coordinator 在其
+                # stage x decision 持久化路径上逐阶段回调。
+                progress=progress,
+            )
+        except ExecutorError as exc:
+            await self._record_terminal(
+                run_id=run_id,
+                job_id=job.job_id,
+                status="failed",
+                result_code=exc.code,
+                error_summary=exc.summary,
+            )
+            raise
+        except Exception as exc:
+            await self._record_terminal(
+                run_id=run_id,
+                job_id=job.job_id,
+                status="failed",
+                result_code=type(exc).__name__,
+                error_summary=str(exc),
+            )
+            raise
         await progress(1, 1, f"research_run:{record.status.value}")
-        return _record_to_result(record)
+        result = _record_to_result(record)
+        await self._record_terminal(
+            run_id=run_id,
+            job_id=job.job_id,
+            status=result.status,
+            result_code=result.error_code or result.status,
+            error_summary=result.error_summary,
+            result_checksum=getattr(record, "result_checksum", None),
+        )
+        return result
 
     async def execute_replay(self, source_run_id: str) -> JobResult:
         """诊断重放(issue #383):按 #305 replay 语义新建 run,在调用进程内

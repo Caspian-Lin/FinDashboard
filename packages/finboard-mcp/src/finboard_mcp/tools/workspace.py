@@ -8,6 +8,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
 from finboard_app.research_explanation import decision_evidence, explain
+from finboard_app.research_operation import ResearchOperationContext
 from finboard_app.research_topic_lifecycle import TopicWriteConflictError
 from finboard_app.research_workspace import (
     memory_page,
@@ -39,8 +40,15 @@ async def call(app: McpAppContext, operation: str, arguments: dict[str, Any]) ->
             raise McpToolError("permission_denied", "MCP 只读模式不允许写课题")
         async with app.session_maker() as session:
             if operation == "write":
+                identity = getattr(app, "identity", None)
+                # issue #518:服务端身份上下文(actor/source/client_id 不可由载荷覆盖)。
+                context = ResearchOperationContext.for_mcp(
+                    client_id=identity.client_id if identity is not None else None
+                )
                 try:
-                    return await workspace_write(session, actor="agent:mcp", **args)
+                    return await workspace_write(
+                        session, actor="agent:mcp", context=context, **args
+                    )
                 except TopicWriteConflictError as exc:
                     # Structured 409 equivalent: state/revision conflicts are not
                     # invalid arguments. ToolError has no details field, so the

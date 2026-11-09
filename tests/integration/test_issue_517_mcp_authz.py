@@ -6,7 +6,7 @@
 * 吊销 / 错误密钥 / 过期 token → 401,且不泄露客户端存在性;
 * 旧 ``FINBOARD_MCP_AUTH_TOKEN`` 兼容为 ``MC-legacy`` / 通配作用域;
 * 重复客户端名被拒绝;数据库不存明文 token;
-* ``TOOL_SCOPES`` 覆盖全部 148 个注册工具;
+* ``TOOL_SCOPES`` 覆盖全部注册工具;
 * stdio 默认作用域拒绝写操作;
 * 启动门禁:``FINBOARD_MCP_ENABLED=false`` 退出码 2;非 loopback 绑定无
   ``FINBOARD_MCP_ALLOW_REMOTE=true`` 具名拒绝;无 OpenCode 环境也能独立启动。
@@ -359,10 +359,17 @@ class TestClientCredentials:
         assert row is not None
         assert row.token_hash == hashlib.sha256(token.encode()).hexdigest()
         assert row.token_hash != token
-        # 明文 token / secret 不得出现在任何持久化字段。
+        # token_hash 是 sha256 摘要(64 位小写 hex),不含任何凭据原文。
+        assert len(row.token_hash) == 64
+        assert set(row.token_hash) <= set("0123456789abcdef")
+        # 修复既有假阳性:旧断言用 token.rsplit("_", 1)[-1] 只取 secret 的
+        # 1-2 字符尾巴,会随机命中 64 位 hex 摘要(如 '0c' in 'e938…')。
+        # 这里用完整 secret 断言不改被测行为;urlsafe secret 本身可能含 "_",
+        # split("_", 2) 只切前两段(fbmc / client_id),第三段才是完整 secret。
+        secret = token.split("_", 2)[2]
         for value in (row.token_hash, row.token_prefix, row.name, row.client_id):
             assert token not in value
-            assert token.rsplit("_", 1)[-1] not in value
+            assert secret not in value
 
 
 class TestCli:
@@ -395,7 +402,8 @@ class TestCli:
 class TestScopeModel:
     async def test_tool_scopes_cover_all_registered_tools(self) -> None:
         names = {tool.name for tool in await build_mcp_server().list_tools()}
-        assert len(names) == 148
+        # 不写死数量:``TOOL_SCOPES`` 与注册表的双向集合相等才是契约本体;
+        # 新增/删除工具必须同步改 scopes 表,而不是改这个数字。
         assert set(TOOL_SCOPES) == names
         for tool_name, scopes in TOOL_SCOPES.items():
             assert scopes, tool_name

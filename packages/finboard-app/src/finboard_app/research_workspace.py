@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, literal_column, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from finboard_app.research_audit import ResearchAuditEvent, research_audit_recorder
+from finboard_app.research_operation import ResearchOperationContext
 from finboard_persistence.models import ResearchMemoryModel
 from finboard_persistence.research_topic_repo import (
     TOPIC_STATUSES,
@@ -507,6 +509,38 @@ async def workspace_read(
     }
 
 
+_TOPIC_AUDIT_OPERATIONS: dict[str, str] = {
+    "create": "topic.create",
+    "draft_create": "topic.create",
+    "update": "topic.update",
+    "activate": "topic.activate",
+    "transition": "topic.transition",
+    "append": "topic.append",
+}
+
+
+def _topic_audit_params(
+    operation: str,
+    payload: Mapping[str, Any],
+    expected_revision: int | None,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    """课题写操作的审计参数摘要(只放定位字段,不放正文)。"""
+
+    summary: dict[str, Any] = {"operation": operation}
+    if expected_revision is not None:
+        summary["expected_revision"] = expected_revision
+    if idempotency_key is not None:
+        summary["idempotency_key"] = idempotency_key
+    for key in ("title", "question", "action", "entry_type", "outcome", "branch"):
+        value = payload.get(key)
+        if value is not None:
+            summary[key] = value
+    if "goal" in payload:
+        summary["goal_version"] = (payload.get("goal") or {}).get("version")
+    return summary
+
+
 async def workspace_write(
     session: AsyncSession,
     *,
@@ -517,73 +551,152 @@ async def workspace_write(
     expected_revision: int | None = None,
     idempotency_key: str | None = None,
     status_declared: bool | None = None,
+    context: ResearchOperationContext | None = None,
 ) -> dict[str, Any]:
+    """执行一次课题写操作,并在同一事务内写研究审计(issue #518)。
+
+    成功路径的审计与业务写入共用 ``session``(唯一一次 commit 前插入);
+    任何拒绝/失败改用独立会话补记,不掩盖原始错误。
+    """
+
     from finboard_app.research_topic_lifecycle import (
+        TopicInvalidInputError,
+        TopicWriteConflictError,
         activate_topic,
         create_topic,
         transition_topic,
         update_topic,
     )
 
+    ctx = context or ResearchOperationContext.for_web(actor=actor)
+    audit_operation = _TOPIC_AUDIT_OPERATIONS.get(operation, "topic.write")
+    audit_params = _topic_audit_params(
+        operation, payload, expected_revision, idempotency_key
+    )
     repo = ResearchTopicRepository(session)
     record: dict[str, Any]
-    if operation in {"create", "draft_create"}:
-        created_record, created = await create_topic(
+    resolved_topic_id = topic_id
+    resolved_entry_id: str | None = None
+    result_code: str | None = None
+    try:
+        if operation in {"create", "draft_create"}:
+            created_record, created = await create_topic(
+                session,
+                actor=actor,
+                payload=payload,
+                draft=operation == "draft_create",
+                idempotency_key=idempotency_key,
+            )
+            record = {**created_record, "created": created}
+            resolved_topic_id = record.get("topic_id") or topic_id
+            if created:
+                result_code = "draft_created" if operation == "draft_create" else "created"
+            else:
+                result_code = "idempotent_hit"
+        elif operation == "update" and topic_id and expected_revision is not None:
+            declared = status_declared if status_declared is not None else ("status" in payload)
+            record = await update_topic(
+                session,
+                actor=actor,
+                topic_id=topic_id,
+                payload=payload,
+                expected_revision=expected_revision,
+                status_declared=declared,
+            )
+            result_code = "updated"
+        elif operation == "activate" and topic_id:
+            record = await activate_topic(
+                session,
+                actor=actor,
+                topic_id=topic_id,
+                payload=payload,
+                expected_revision=expected_revision,
+            )
+            result_code = "activated"
+        elif operation == "transition" and topic_id:
+            record = await transition_topic(
+                session,
+                actor=actor,
+                topic_id=topic_id,
+                payload=payload,
+                expected_revision=expected_revision,
+            )
+            result_code = str(payload.get("action") or "transitioned")
+        elif operation == "append" and topic_id and idempotency_key and len(idempotency_key) <= 128:
+            data = RoundInput.model_validate(payload).model_dump(mode="json")
+            if data["supersedes_id"]:
+                from finboard_persistence.models import ResearchTopicEntryModel
+
+                old = await session.scalar(
+                    select(ResearchTopicEntryModel).where(
+                        ResearchTopicEntryModel.entry_id == data["supersedes_id"],
+                        ResearchTopicEntryModel.topic_id == topic_id,
+                    )
+                )
+                if old is None:
+                    raise ValueError("纠正链只能引用同课题已有轮次")
+            record = record_out(await repo.append(topic_id, idempotency_key, data, actor))
+            resolved_entry_id = record.get("entry_id")
+            result_code = "appended"
+        else:
+            raise ValueError(
+                "operation 必须 create/draft_create/update/activate/transition/append;"
+                "更新/激活/转移需 expected_revision,追加需幂等键"
+            )
+        resolved_topic_id = resolved_topic_id or record.get("topic_id")
+        correlation: dict[str, str] = {}
+        if resolved_topic_id:
+            correlation["topic_id"] = str(resolved_topic_id)
+        if resolved_entry_id:
+            correlation["entry_id"] = str(resolved_entry_id)
+        revision = record.get("revision")
+        if isinstance(revision, int):
+            correlation["revision"] = str(revision)
+        await research_audit_recorder().record(
             session,
-            actor=actor,
-            payload=payload,
-            draft=operation == "draft_create",
-            idempotency_key=idempotency_key,
+            ResearchAuditEvent(
+                operation=audit_operation,
+                outcome="succeeded",
+                context=ctx,
+                topic_id=resolved_topic_id,
+                entry_id=resolved_entry_id,
+                entity_type="research_topic" if resolved_topic_id else None,
+                entity_id=resolved_topic_id,
+                correlation=correlation,
+                result_code=result_code,
+                params_summary=audit_params,
+                idempotency_key=idempotency_key,
+            ),
         )
         await session.commit()
-        return {**created_record, "created": created}
-    if operation == "update" and topic_id and expected_revision is not None:
-        declared = status_declared if status_declared is not None else ("status" in payload)
-        record = await update_topic(
-            session,
-            actor=actor,
-            topic_id=topic_id,
-            payload=payload,
-            expected_revision=expected_revision,
-            status_declared=declared,
+        return record
+    except Exception as exc:
+        rejected = isinstance(
+            exc, (TopicWriteConflictError, TopicInvalidInputError, ValueError, LookupError)
         )
-    elif operation == "activate" and topic_id:
-        record = await activate_topic(
-            session,
-            actor=actor,
-            topic_id=topic_id,
-            payload=payload,
-            expected_revision=expected_revision,
+        code = (
+            getattr(exc, "detail", {}).get("code")
+            if isinstance(exc, TopicWriteConflictError)
+            else None
+        ) or type(exc).__name__
+        await research_audit_recorder().record_detached(
+            ResearchAuditEvent(
+                operation=audit_operation,
+                outcome="rejected" if rejected else "failed",
+                context=ctx,
+                topic_id=resolved_topic_id,
+                entity_type="research_topic" if resolved_topic_id else None,
+                entity_id=resolved_topic_id,
+                correlation=(
+                    {"topic_id": str(resolved_topic_id)} if resolved_topic_id else {}
+                ),
+                result_code=code,
+                params_summary=audit_params,
+                error_summary=str(exc),
+                idempotency_key=idempotency_key,
+            ),
         )
-    elif operation == "transition" and topic_id:
-        record = await transition_topic(
-            session,
-            actor=actor,
-            topic_id=topic_id,
-            payload=payload,
-            expected_revision=expected_revision,
-        )
-    elif operation == "append" and topic_id and idempotency_key and len(idempotency_key) <= 128:
-        data = RoundInput.model_validate(payload).model_dump(mode="json")
-        if data["supersedes_id"]:
-            from finboard_persistence.models import ResearchTopicEntryModel
-
-            old = await session.scalar(
-                select(ResearchTopicEntryModel).where(
-                    ResearchTopicEntryModel.entry_id == data["supersedes_id"],
-                    ResearchTopicEntryModel.topic_id == topic_id,
-                )
-            )
-            if old is None:
-                raise ValueError("纠正链只能引用同课题已有轮次")
-        record = record_out(await repo.append(topic_id, idempotency_key, data, actor))
-    else:
-        raise ValueError(
-            "operation 必须 create/draft_create/update/activate/transition/append;"
-            "更新/激活/转移需 expected_revision,追加需幂等键"
-        )
-    await session.commit()
-    return record
+        raise
 
 
 async def memory_page(session: AsyncSession, limit: int = 20, offset: int = 0) -> dict[str, Any]:

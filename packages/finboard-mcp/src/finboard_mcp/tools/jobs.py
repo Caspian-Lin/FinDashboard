@@ -35,6 +35,7 @@ from typing import Any, cast
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 
+from finboard_app.research_audit import is_research_job_kind
 from finboard_backtest.background_jobs.payload_contracts import (
     PayloadContractError,
     validate_job_payload,
@@ -42,6 +43,7 @@ from finboard_backtest.background_jobs.payload_contracts import (
 from finboard_mcp.context import McpAppContext, app_context
 from finboard_mcp.envelope import ToolEnvelope
 from finboard_mcp.execution import McpToolError, run_tool
+from finboard_mcp.tools._audit import record_success
 from finboard_mcp.tools._serde import to_jsonable
 from finboard_persistence.background_job_repo import (
     BackgroundJobPersistenceConflictError,
@@ -456,12 +458,35 @@ async def job_cancel(
             row = await repo.get(job_id)
             if row is None:
                 raise McpToolError("not_found", f"后台任务不存在: {job_id}")
+            # issue #518:rollback 会使 ORM 对象过期(async 下再读即
+            # MissingGreenlet);先取出纯量再尝试取消。
+            job_kind = row.kind
+            job_payload = dict(row.payload) if isinstance(row.payload, dict) else {}
+            research_job = is_research_job_kind(job_kind)
+            requested = False
             try:
                 await repo.request_cancel(job_id)
-                await session.commit()
+                requested = True
             except BackgroundJobPersistenceConflictError:
                 await session.rollback()
                 # 不在 running(可能已排队 / 已终态)——返回当前状态给调用方判断。
+            if research_job:
+                correlation = {"job_id": job_id}
+                for key in ("run_id", "experiment_id"):
+                    if job_payload.get(key):
+                        correlation[key] = str(job_payload[key])
+                await record_success(
+                    session,
+                    app=app,
+                    operation="job.cancel",
+                    entity_type="background_job",
+                    entity_id=job_id,
+                    correlation=correlation,
+                    result_code="cancel_requested" if requested else "not_running",
+                    params_summary={"job_id": job_id, "kind": job_kind},
+                    outcome="succeeded" if requested else "rejected",
+                )
+            await session.commit()
             refreshed = await repo.get(job_id)
             assert refreshed is not None
             return _job_out(refreshed)

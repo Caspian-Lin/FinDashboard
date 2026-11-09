@@ -103,6 +103,7 @@ from finboard_mcp.tools import (
     register_validation_experiment_tools,
     register_watchlist_tools,
 )
+from finboard_mcp.tools.audit import register as register_audit_tools
 from finboard_mcp.tools.diagnostics import register as register_diagnostics_tools
 from finboard_mcp.tools.workspace import register as register_workspace_tools
 
@@ -130,7 +131,7 @@ data.write(全局数据拉取、发布、修复、补数)/ audit.read(审计读�
 
 课题与记忆引用用 finboard_source_check 核对精确版本/checksum与自动产物事实;断链与旧目标保留,文档优先于工作解释。研究工具按问题使用,可暂停、分支、复核与续接,并非必须线性执行。
 
-== 当前可用工具(148 个,能力与参数以当前注册schema为准)==
+== 当前可用工具(149 个,能力与参数以当前注册schema为准)==
 - #501-#504复核入口:finboard_run_diagnostics 显式窗口/逐年指标(研究252交易日年化、rf0/ddof1;
   另列日历年化),SQL聚合成交费用/缺口分母;finboard_run_compare 按冻结输入核查可比性;
   finboard_decision_projection SQL白名单字段分页(200行/256KiB,单决策也有护栏)。
@@ -149,6 +150,12 @@ data.write(全局数据拉取、发布、修复、补数)/ audit.read(审计读�
   docs/research/verification-playbook.md。job_wait的completed=false续同job,缓存复用;残缺refs具名留缺口。
   只报告本会话工具回执;等待超时续等不是进程中断恢复,独立模型会话/中断/token/费用由外层评测器记录。
   轮次追加是工作记录,不等于canonical结论发布。
+- finboard_audit_query(1) —— 研究操作审计只读(scope audit.read,常规研究客户端
+  无此权限):按 actor/client_id/source/topic_id/entity_id/operation/outcome/
+  from/to 过滤,limit≤200,只返回脱敏摘要与 sha256 digest;给 audit_id 读单条。
+  服务端观察到的事实(server_observed)与 Harness 上报(client_declared)并列,
+  后者永不覆盖前者。迁移/接入前的写操作没有审计行,空结果表示「此前无审计记录」,
+  不代表没有发生操作;实盘审计仍走独立账本,不在此工具范围。
 - finboard.run.*(7) —— ResearchRun 只读:list / get / artifacts;
   写:queue / cancel / replay / lineage(✅ #127;list/get 返回 execution_mode
   single_shot|multi_period,#183)。run_get 默认 view=summary(#206):头部
@@ -591,6 +598,7 @@ def build_mcp_server() -> MCPServer:
         lifespan=app_lifespan,
     )
     register_workspace_tools(mcp)
+    register_audit_tools(mcp)
     register_diagnostics_tools(mcp)
     register_run_tools(mcp)
     register_memory_tools(mcp)
