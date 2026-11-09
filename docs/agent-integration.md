@@ -88,6 +88,9 @@ provider 模型同步)已于 #520 删除;Web 入口改为 `/research/agent-conne
     sh -c 'cp -a /d /out/opencode-config-backup'
   ```
 
+  外部 OpenCode 可自行把数据目录指向解压后的备份(或直接挂载同一命名卷)继续
+  使用原会话 / auth;FinDashboard 不再代管该运行时。
+
 - **回退**:回退到 #520 之前的版本会按旧配置重新创建容器,卷内会话仍在;本版本
   不会自动启动或删除容器/卷。
 - **仓库级 OpenCode 配置**:`.opencode/opencode.json` 的 `finboard` URL 已从

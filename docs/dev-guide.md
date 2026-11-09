@@ -696,6 +696,9 @@ Makefile 等价入口:`make mcp-serve-http`(loopback)、
     sh -c 'cp -a /d /out/opencode-config-backup'
   ```
 
+  外部 OpenCode 可自行把数据目录指向解压后的备份(或直接挂载同一命名卷)继续
+  使用原会话 / auth;FinDashboard 不再代管该运行时。
+
 - **旧配置键**:`FINBOARD_OPENCODE_*` 已全部退役。升级时 API 启动打印一行
   `api.opencode_settings_retired` 警告并列出仍存在的键名(不阻断启动),随后从
   `.env` / 环境变量删除即可。`FINBOARD_OPENCODE_IMAGE` 等键不再影响任何行为。

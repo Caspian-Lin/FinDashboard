@@ -305,8 +305,8 @@ docker run --rm -v opencode-config:/d:ro -v "$PWD:/out" alpine \\
   sh -c 'cp -a /d /out/opencode-config-backup'`}</CodeBlock>
             <p className="text-xs">
               {tl({
-                zh: "备份后可自行决定是否删除卷；删除前确认外部 Harness 已可独立工作。旧 FINBOARD_OPENCODE_* 配置键请从 .env / 环境变量清理——API 启动会打一行警告列出仍存在的键，但不会因旧键失败。",
-                en: "Deleting the volumes afterwards is your decision; confirm the external Harness works independently first. Remove leftover FINBOARD_OPENCODE_* keys from .env / the environment — API startup logs one warning listing remaining keys but never fails because of them.",
+                zh: "如需在外部 OpenCode 继续使用原会话 / auth,可让它自行把数据目录指向解压后的备份(或直接挂载同一命名卷);FinDashboard 不再代管该运行时。删除卷前确认外部 Harness 已可独立工作。旧 FINBOARD_OPENCODE_* 配置键请从 .env / 环境变量清理——API 启动会打一行警告列出仍存在的键，但不会因旧键失败。",
+                en: "To keep using the old sessions / auth in an external OpenCode, point its data directory at the extracted backup (or mount the same named volume); FinDashboard no longer manages that runtime. Confirm the external Harness works independently before deleting a volume. Remove leftover FINBOARD_OPENCODE_* keys from .env / the environment — API startup logs one warning listing remaining keys but never fails because of them.",
               })}
             </p>
           </CardContent>
