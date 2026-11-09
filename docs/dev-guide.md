@@ -627,7 +627,7 @@ FinBoard 把 [OpenCode](https://opencode.ai) 作为受控研究 Agent 运行时,
 opencode web Docker 容器(宿主机侧锁 loopback)
   ↓ finboard-researcher agent(内置 bash/edit/write/webfetch 等默认拒绝,
     只放行 read/glob/grep/skill + finboard_* MCP 工具)
-finboard-mcp(受控 MCP 工具,148 个;研究写操作自主执行 #122;#160 后零内置 LLM)
+finboard-mcp(受控 MCP 工具,155 个;研究写操作自主执行 #122;#160 后零内置 LLM)
   ↓ Bearer token(streamable-http;按客户端凭据 / 作用域,#517)
 FinDashboard service / repository(唯一事实来源)
 ```
@@ -719,7 +719,7 @@ IndexedDB(iframe 与新窗口各自独立),服务端无法预置 —— 首次�
   拒绝同样进审计,`caller` 记录客户端 ID;
 - 工具清单与边界同步规范见 #123:`_INSTRUCTIONS` / Skill `SKILL.md` /
   `references/tools.md` / `ROADMAP.md` 必须与注册表同步,契约测试锁定工具总数
-  与 `TOOL_SCOPES` 覆盖(148 个);
+  与 `TOOL_SCOPES` 覆盖(155 个);
 - 按客户端授权(#517):`mcp_clients` 可撤销凭据 + 五个作用域 + 唯一漏斗
   `run_tool` 强制;详见 `docs/mcp-client-auth.md`。
 

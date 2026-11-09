@@ -13,7 +13,7 @@ Agent 运行时。FinDashboard 仍是业务工具 / 权限 / 任务 / 数据 / �
 - **实盘能力**(下单 / 撤单 / 改持仓 / Kill Switch / 连接 broker / 凭证探测)永久不注册;
 - 每次工具调用统一记录审计事件,不记录 API Key / 原始凭证 / 未脱敏思考内容。
 
-## 工具集(149 个;#160 移除 finboard.ai.* 后 FinBoard 零内置 LLM)
+## 工具集(155 个;#160 移除 finboard.ai.* 后 FinBoard 零内置 LLM)
 
 完整清单与契约见 server `_INSTRUCTIONS` 与 Skill
 `.agents/skills/finboard-opencode-research/references/tools.md`;扩展路线图见
