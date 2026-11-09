@@ -87,6 +87,11 @@
   同一时刻多行也稳定分页（`id DESC` 兜底）。
 - **客户端声明事件**：`record_client_declared` 先按 `(client_id, client_event_id)`
   查重，再由部分唯一索引兜底并发；重复上报返回原 `audit_id`（`created=false`）。
+- **关闭期**：API lifespan 在 `kernel.stop()` 之后提交 kernel session；提交失败
+  只 `rollback()` 并记 `api.kernel_session_shutdown_rollback` 告警
+  （`exc_info=True` 保留根因），不再让 shutdown 抛错 —— 可观测性取舍：日志不
+  丢根因，但不把正常关闭变成 teardown 失败（`PendingRollbackError`）。关闭完成
+  后进程级 audit recorder 复位，避免指针悬空到已 dispose 的 engine。
 
 ## 4. 读取契约
 
