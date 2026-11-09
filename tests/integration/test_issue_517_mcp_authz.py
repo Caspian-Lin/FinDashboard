@@ -359,10 +359,17 @@ class TestClientCredentials:
         assert row is not None
         assert row.token_hash == hashlib.sha256(token.encode()).hexdigest()
         assert row.token_hash != token
-        # 明文 token / secret 不得出现在任何持久化字段。
+        # token_hash 是 sha256 摘要(64 位小写 hex),不含任何凭据原文。
+        assert len(row.token_hash) == 64
+        assert set(row.token_hash) <= set("0123456789abcdef")
+        # 修复既有假阳性:旧断言用 token.rsplit("_", 1)[-1] 只取 secret 的
+        # 1-2 字符尾巴,会随机命中 64 位 hex 摘要(如 '0c' in 'e938…')。
+        # 这里用完整 secret 断言不改被测行为;urlsafe secret 本身可能含 "_",
+        # split("_", 2) 只切前两段(fbmc / client_id),第三段才是完整 secret。
+        secret = token.split("_", 2)[2]
         for value in (row.token_hash, row.token_prefix, row.name, row.client_id):
             assert token not in value
-            assert token.rsplit("_", 1)[-1] not in value
+            assert secret not in value
 
 
 class TestCli:

@@ -165,8 +165,14 @@ dry-run 不写库。清理不可撤销，执行前请先备份或导出。
   archive；`validation experiment` create / add_trial / reject / delete
   （只有 `experiment.unseal` 已接入）；`strategy draft / publish / rollback`；
   `factor experiment create`；`simulation session start`；
-  `data backfill submit`。这些路径的业务表仍有自己的状态记录，但没有统一
-  研究审计行；新增时按 §2 登记操作名并复用同一 recorder。
+  `data backfill submit`。
+- **兜底规则**：其余研究写工具**默认视为未接入审计**——在 §2 逐个登记前
+  一律按缺口处理，例如 `finboard_research_code_rollback`、
+  `feature_snapshot_create` / `feature_snapshot_job_start`、
+  `factor_series_build`、`backtest_run` / `backtest_grid_submit` /
+  `backtest_history_delete`、`sim_session_*`、`preset_*` 等。这些路径的业务表
+  仍有自己的状态记录，但没有统一研究审计行；新增时按 §2 登记操作名并复用
+  同一 recorder。
 - 审计记录不随业务对象删除而清理（无外键）：课题/运行清理后审计仍保留，
   用于事故取证。
 

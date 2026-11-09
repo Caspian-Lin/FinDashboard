@@ -1007,19 +1007,40 @@ async def test_client_event_dedupe_survives_race(
 
 
 async def test_cli_retention_flags_and_defaults() -> None:
-    """CLI flags smoke:purge 帮助含 --before/--dry-run;保留默认 365、开关默认关。"""
+    """CLI flags smoke:用 Click 参数对象断言选项/默认值(不依赖 rich 文本渲染)。"""
 
+    from click import Group
+    from typer.main import get_command
     from typer.testing import CliRunner
 
     from finboard_app.cli import app as cli_app
     from finboard_app.config import Settings
 
+    # CI 的 rich 渲染会按终端宽度换行/加 ANSI,不能从 --help 文本里找字面量;
+    # 直接从 Click 命令对象读取参数。
+    cli_group = cast(Group, get_command(cli_app))
+    research_group = cast(Group, cli_group.commands["research"])
+    audit_group = cast(Group, research_group.commands["audit"])
+    purge = audit_group.commands["purge"]
+    opts = {
+        opt
+        for param in purge.params
+        for opt in (*getattr(param, "opts", ()), *getattr(param, "secondary_opts", ()))
+    }
+    assert "--before" in opts
+    assert "--dry-run" in opts
+    assert "--no-dry-run" in opts
+    dry_run = next(param for param in purge.params if param.name == "dry_run")
+    assert dry_run.default is True
+
+    # 帮助入口只做可执行 smoke(不解析渲染文本)。
     result = CliRunner().invoke(
-        cli_app, ["research", "audit", "purge", "--help"]
+        cli_app,
+        ["research", "audit", "purge", "--help"],
+        env={"COLUMNS": "200", "TERM": "dumb"},
     )
     assert result.exit_code == 0, result.output
-    assert "--before" in result.output
-    assert "--no-dry-run" in result.output
+
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.research_audit_retention_days == 365
     assert settings.research_audit_client_events is False
